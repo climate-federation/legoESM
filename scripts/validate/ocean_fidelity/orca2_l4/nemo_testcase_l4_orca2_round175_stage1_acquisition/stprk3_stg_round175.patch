@@ -1,0 +1,79 @@
+--- stprk3_stg.F90
++++ stprk3_stg.F90
+@@ -18,3 +18,5 @@
+    !!----------------------------------------------------------------------
+    !!    stp_RK3_stg  : NEMO 3rd order Runge-Kutta stage with qco or linssh
++   USE l4_r175_stage1_writer, ONLY : r175_start, r175_put2, r175_put3, &
++      & r175_finish
+    !!----------------------------------------------------------------------
+@@ -245,5 +247,11 @@
+          !
+       END SELECT
+ 
++      CALL r175_start(kstp, kstg, Kbb, Kmm, Krhs, Kaa)
++      CALL r175_put2(kstp, kstg, 'ext_ssh', ssh(:,:,Kaa))
++      CALL r175_put2(kstp, kstg, 'ext_r3t', r3t(:,:,Kaa))
++      CALL r175_put2(kstp, kstg, 'ext_ub', uu_b(:,:,Kaa))
++      CALL r175_put2(kstp, kstg, 'ext_vb', vv_b(:,:,Kaa))
++
+       !>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+       !>>>            Dynamic : RHS computation + time-stepping            <<<
+@@ -437,5 +445,7 @@
+       IF(  lk_asminc .AND. ln_asmiau ) THEN               ! apply assimilation increment
+          IF( ln_dyninc )   CALL dyn_asm_inc( kstp, Kbb, Kmm, uu, vv, Krhs )   ! dynamics   ==> RHS
+       ENDIF
++      CALL r175_put3(kstp, kstg, 'rhs_u', uu(:,:,:,Krhs))
++      CALL r175_put3(kstp, kstg, 'rhs_v', vv(:,:,:,Krhs))
+ 
+       ! Round-11 L2 WRITE-only composition boundary.  Krhs aliases Kaa at
+@@ -510,3 +520,5 @@
+          END SELECT
++         CALL r175_put3(kstp, kstg, 'pre_u', uu(:,:,:,Kaa))
++         CALL r175_put3(kstp, kstg, 'pre_v', vv(:,:,:,Kaa))
+ 
+ # if defined key_agrif
+@@ -570,3 +582,5 @@
+          ENDIF
++         CALL r175_put3(kstp, kstg, 'cor_u', uu(:,:,:,Kaa))
++         CALL r175_put3(kstp, kstg, 'cor_v', vv(:,:,:,Kaa))
+          !
+ #if ! defined key_PSYCLONE_2p5p0
+@@ -624,4 +638,7 @@
+       ENDIF
++      CALL r175_put3(kstp, kstg, 'trp_u', zFu)
++      CALL r175_put3(kstp, kstg, 'trp_v', zFv)
++      CALL r175_put3(kstp, kstg, 'trp_w', zFw)
+       ! Phase-3 L2 WRITE-only transport record at the actual active-tracer
+       ! consumer boundary.  Unlike the earlier momentum-side record, this is
+       ! after tra_adv_trp has populated vector-invariant zFw.
+@@ -686,5 +703,7 @@
+          IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 .AND. kstg <= 2 ) &
+             & WRITE(l1_unit) l4_canon_3d(ts(:,:,:,jp_tem,Krhs),'T'), &
+             & l4_canon_3d(ts(:,:,:,jp_sal,Krhs),'T')
++         CALL r175_put3(kstp, kstg, 'adv_t', ts(:,:,:,jp_tem,Krhs))
++         CALL r175_put3(kstp, kstg, 'adv_s', ts(:,:,:,jp_sal,Krhs))
+          !
+          CALL tra_sbc_RK3( kstp, Kbb, Kmm,      ts, Krhs,                kstg )   ! surface boundary condition
+@@ -694,5 +713,7 @@
+          IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 .AND. kstg <= 2 ) &
+             & WRITE(l1_unit) l4_canon_3d(ts(:,:,:,jp_tem,Krhs),'T'), &
+             & l4_canon_3d(ts(:,:,:,jp_sal,Krhs),'T')
++         CALL r175_put3(kstp, kstg, 'sbc_t', ts(:,:,:,jp_tem,Krhs))
++         CALL r175_put3(kstp, kstg, 'sbc_s', ts(:,:,:,jp_sal,Krhs))
+ 
+ !!gm ===>>> Question: I'm surprised not to see kstg in argument of tra_isf : potential BUG.to be checked..
+@@ -752,3 +773,5 @@
+          ENDIF
++         CALL r175_put3(kstp, kstg, 'qco_t', ts(:,:,:,jp_tem,Kaa))
++         CALL r175_put3(kstp, kstg, 'qco_s', ts(:,:,:,jp_sal,Kaa))
+          !
+          !              !---------------!
+@@ -870,3 +893,8 @@
+       ENDIF
++      CALL r175_put3(kstp, kstg, 'final_u', uu(:,:,:,Kaa))
++      CALL r175_put3(kstp, kstg, 'final_v', vv(:,:,:,Kaa))
++      CALL r175_put3(kstp, kstg, 'final_t', ts(:,:,:,jp_tem,Kaa))
++      CALL r175_put3(kstp, kstg, 'final_s', ts(:,:,:,jp_sal,Kaa))
++      CALL r175_finish(kstp, kstg)
+       !
+ #if ! defined key_PSYCLONE_2p5p0
