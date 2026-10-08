@@ -286,6 +286,136 @@ def _sum_to_shape(g: jax.Array, shape: tuple[int, ...]) -> jax.Array:
 thomas_solve.defvjp(_thomas_solve_fwd, _thomas_solve_bwd)
 
 
+def _sweep_levels_first(b0, c0, rhs, xs, bands):
+    """Normalised Thomas sweep over a LEADING level axis, with the bands of
+    level k (k >= 1) computed inside the scan by ``bands(xs_k)``.  Same
+    operations and clamps as ``_thomas_solve_impl``."""
+    c_s0 = c0 / (b0 + _TINY)
+    d_s0 = rhs[0] / (b0 + _TINY)
+
+    def forward_body(carry, xk):
+        c_prev, d_prev = carry
+        ak, bk, ck = bands(xk[:-1])
+        denom = bk - ak * c_prev
+        denom = jnp.where(jnp.abs(denom) < _TINY, _TINY, denom)
+        c_s = ck / denom
+        d_s = (xk[-1] - ak * d_prev) / denom
+        return (c_s, d_s), (c_s, d_s)
+
+    _, (c_s, d_s) = jax.lax.scan(forward_body, (c_s0, d_s0), (*xs, rhs[1:]))
+    c_s = jnp.concatenate([c_s0[None], c_s])
+    d_s = jnp.concatenate([d_s0[None], d_s])
+
+    def backward_body(x_next, xk):
+        c_k, d_k = xk
+        x_k = d_k - c_k * x_next
+        return x_k, x_k
+
+    _, x = jax.lax.scan(backward_body, d_s[-1], (c_s[:-1], d_s[:-1]),
+                        reverse=True)
+    return jnp.concatenate([x, d_s[-1:]])
+
+
+def _diffusion_xs(dtf, inv, extra):
+    """Scan inputs for levels 1..n-1: flux above, flux below (zero below the
+    bottom level), inverse thickness and, if per-level, the extra diagonal."""
+    dtf_bot = jnp.concatenate([dtf[1:], jnp.zeros_like(dtf[:1])])
+    xs = (dtf, dtf_bot, inv[1:])
+    return xs + ((extra[1:],) if extra.ndim else ()), dtf_bot
+
+
+@jax.custom_vjp
+def diffusion_thomas_solve(dtf, inv, extra, rhs):
+    """Backward-Euler diffusion solve ``(1 - dt d/dz K d/dz + extra) x = rhs``
+    with the LEVEL axis FIRST and the matrix built inside the sweep.
+
+    ``dtf`` (n-1, ...) is ``dt * K / dz_half`` at the interior interfaces,
+    ``inv`` (n, ...) is ``1 / dz``, ``extra`` is a scalar or an (n, ...) array
+    added to the diagonal, ``rhs`` is (n, ...).  Zero flux through the top and
+    bottom.  The bands are those of ``implicit_solver._build_implicit_tridiag``
+    (``alpha_k = dtf[k-1]*inv[k]``, ``beta_k = dtf[k]*inv[k]``,
+    ``a=-alpha, b=1+alpha+beta+extra, c=-beta``); results agree with
+    ``thomas_solve`` on those bands to rounding.
+
+    Building the bands per level inside the scan avoids materialising and
+    transposing four (columns, n) band arrays.  The VJP solves A^T lambda = x_bar
+    with the bands rebuilt the same way and only plain JAX ops, so
+    forward-over-reverse works (as for ``thomas_solve``).
+    """
+    if rhs.shape[0] < 2:
+        raise ValueError(f"need at least 2 levels, got {rhs.shape[0]}")
+    if jnp.ndim(extra) and jnp.shape(extra) != rhs.shape:
+        raise ValueError(f"extra must be a scalar or shaped like rhs {rhs.shape}, "
+                         f"got {jnp.shape(extra)}")
+    return _diffusion_solve_impl(dtf, inv, extra, rhs)
+
+
+def _diffusion_solve_impl(dtf, inv, extra, rhs):
+    # Bands are rounded in the coefficients' own dtype, then promoted to the
+    # RHS (work) dtype -- as thomas_solve promotes prebuilt bands.
+    extra = jnp.asarray(extra)
+    w = rhs.dtype
+    xs, _ = _diffusion_xs(dtf, inv, extra)
+
+    def bands(xk):
+        dtf_top, dtf_bot, inv_k = xk[:3]
+        e = xk[3] if extra.ndim else extra
+        alpha = dtf_top * inv_k
+        beta = dtf_bot * inv_k
+        return ((-alpha).astype(w), (1.0 + alpha + beta + e).astype(w),
+                (-beta).astype(w))
+
+    beta0 = dtf[0] * inv[0]
+    b0 = (1.0 + beta0 + (extra[0] if extra.ndim else extra)).astype(w)
+    return _sweep_levels_first(b0, (-beta0).astype(w), rhs, xs, bands)
+
+
+def _diffusion_solve_fwd(dtf, inv, extra, rhs):
+    x = _diffusion_solve_impl(dtf, inv, extra, rhs)
+    return x, (dtf, inv, extra, x)
+
+
+def _diffusion_solve_bwd(res, x_bar):
+    dtf, inv, extra, x = res
+    extra = jnp.asarray(extra)
+    w = x.dtype
+    xs, dtf_bot = _diffusion_xs(dtf, inv, extra)
+    inv_next = jnp.concatenate([inv[2:], inv[-1:]])   # multiplied by dtf_bot = 0 at the bottom
+
+    # A^T at level k: sub = c[k-1] = -beta[k-1], diag = b[k], super = a[k+1] = -alpha[k+1].
+    def bands_t(xk):
+        dtf_top, dtf_b, inv_k, inv_prev, inv_nxt = xk[:5]
+        e = xk[5] if extra.ndim else extra
+        alpha = dtf_top * inv_k
+        beta = dtf_b * inv_k
+        return ((-(dtf_top * inv_prev)).astype(w),
+                (1.0 + alpha + beta + e).astype(w),
+                (-(dtf_b * inv_nxt)).astype(w))
+
+    xs_t = (dtf, dtf_bot, inv[1:], inv[:-1], inv_next) + xs[3:]
+    b0 = (1.0 + dtf[0] * inv[0] + (extra[0] if extra.ndim else extra)).astype(w)
+    lam = _sweep_levels_first(b0, (-(dtf[0] * inv[1])).astype(w),
+                              x_bar.astype(w), xs_t, bands_t)
+
+    zero = jnp.zeros_like(x[:1])
+    x_km1 = jnp.concatenate([zero, x[:-1]])
+    x_kp1 = jnp.concatenate([x[1:], zero])
+    # a_bar = -lam x[k-1], b_bar = -lam x[k], c_bar = -lam x[k+1];
+    # alpha enters a (-1) and b (+1), beta enters b (+1) and c (-1).
+    b_bar = -lam * x
+    alpha_bar = lam * x_km1 + b_bar
+    beta_bar = b_bar + lam * x_kp1
+    dtf_bar = alpha_bar[1:] * inv[1:] + beta_bar[:-1] * inv[:-1]
+    inv_bar = (jnp.concatenate([zero, alpha_bar[1:] * dtf])
+               + jnp.concatenate([beta_bar[:-1] * dtf, zero]))
+    extra_bar = b_bar if extra.ndim else jnp.sum(b_bar)
+    return (dtf_bar.astype(dtf.dtype), inv_bar.astype(inv.dtype),
+            jnp.asarray(extra_bar, extra.dtype), lam.astype(x.dtype))
+
+
+diffusion_thomas_solve.defvjp(_diffusion_solve_fwd, _diffusion_solve_bwd)
+
+
 def pcr_solve_batched(
     a: jax.Array,
     b: jax.Array,
