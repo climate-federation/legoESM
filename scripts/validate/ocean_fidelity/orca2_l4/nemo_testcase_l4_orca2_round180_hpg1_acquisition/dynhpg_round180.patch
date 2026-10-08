@@ -1,0 +1,112 @@
+--- dynhpg.F90
++++ dynhpg.F90
+@@ -327,9 +327,13 @@
+       INTEGER  ::   ji, jj, jk, jii, jjj           ! dummy loop indices
+       INTEGER  ::   l2_unit, l2_ios
++      INTEGER  ::   r180_unit, r180_ios
+       CHARACTER(LEN=16) :: l2_magic
++      CHARACTER(LEN=16) :: r180_magic, r180_name
++      CHARACTER(LEN=256) :: r180_filename
+       REAL(wp) ::   zcoef0, zuap, zvap, ztmp       ! local scalars
+       REAL(wp), DIMENSION(T2D(0))           ::   zhpi, zhpj
+       REAL(wp), DIMENSION(jpi,jpj,jpk) :: l2_zhpi_u, l2_zhpi_v, l2_zuap_u, l2_zuap_v, l2_sum_u, l2_sum_v
++      REAL(wp), DIMENSION(jpi,jpj,jpk) :: r180_e3w, r180_gdept, r180_zhpi_u, r180_zhpi_v, r180_zuap_u, r180_zuap_v, r180_sum_u, r180_sum_v
+       !!----------------------------------------------------------------------
+       !
+       IF( kt == nit000 ) THEN
+@@ -346,6 +350,18 @@
+          l2_zuap_u = 0._wp ; l2_zuap_v = 0._wp
+          l2_sum_u  = 0._wp ; l2_sum_v  = 0._wp
+       ENDIF
++      IF( kt == nit000 .AND. Kmm == 1 .AND. Krhs == 3 ) THEN
++         r180_e3w = 0._wp ; r180_gdept = 0._wp
++         r180_zhpi_u = 0._wp ; r180_zhpi_v = 0._wp
++         r180_zuap_u = 0._wp ; r180_zuap_v = 0._wp
++         r180_sum_u  = 0._wp ; r180_sum_v  = 0._wp
++         DO jk = 1, jpk
++            DO_2D( 0, 0, 0, 0 )
++               r180_e3w(ji,jj,jk) = e3w(ji,jj,jk,Kmm)
++               r180_gdept(ji,jj,jk) = gdept_z0(ji,jj,jk,Kmm)
++            END_2D
++         END DO
++      ENDIF
+       !
+       !
+       DO_2D( 0, 0, 0, 0 )              ! Surface value
+@@ -376,6 +391,12 @@
+             l2_sum_u (ji,jj,1) = zhpi(ji,jj) + zuap
+             l2_sum_v (ji,jj,1) = zhpj(ji,jj) + zvap
+          ENDIF
++         IF( kt == nit000 .AND. Kmm == 1 .AND. Krhs == 3 ) THEN
++            r180_zhpi_u(ji,jj,1) = zhpi(ji,jj) ; r180_zhpi_v(ji,jj,1) = zhpj(ji,jj)
++            r180_zuap_u(ji,jj,1) = zuap         ; r180_zuap_v(ji,jj,1) = zvap
++            r180_sum_u (ji,jj,1) = zhpi(ji,jj) + zuap
++            r180_sum_v (ji,jj,1) = zhpj(ji,jj) + zvap
++         ENDIF
+       END_2D
+       !
+       DO jk= 2, jpkm1
+@@ -406,6 +427,12 @@
+                l2_sum_u (ji,jj,jk) = zhpi(ji,jj) + zuap
+                l2_sum_v (ji,jj,jk) = zhpj(ji,jj) + zvap
+             ENDIF
++            IF( kt == nit000 .AND. Kmm == 1 .AND. Krhs == 3 ) THEN
++               r180_zhpi_u(ji,jj,jk) = zhpi(ji,jj) ; r180_zhpi_v(ji,jj,jk) = zhpj(ji,jj)
++               r180_zuap_u(ji,jj,jk) = zuap         ; r180_zuap_v(ji,jj,jk) = zvap
++               r180_sum_u (ji,jj,jk) = zhpi(ji,jj) + zuap
++               r180_sum_v (ji,jj,jk) = zhpj(ji,jj) + zvap
++            ENDIF
+          END_2D
+       END DO
+       IF( lwp .AND. kt == nit000 .AND. Kmm == 3 .AND. Krhs == 2 ) THEN
+@@ -421,6 +448,50 @@
+          CLOSE(l2_unit)
+          WRITE(numout,*) 'L2_RK_STAGE2_HPG_LITERAL_DUMP ', kt, Kmm, Krhs
+       ENDIF
++      IF( kt == nit000 .AND. Kmm == 1 .AND. Krhs == 3 ) THEN
++         WRITE(r180_filename,'("oracle_r180_hpg1_rank",I4.4,"_kt",I8.8,".bin")') narea - 1, kt
++         OPEN( NEWUNIT=r180_unit, FILE=TRIM(r180_filename), ACCESS='STREAM', FORM='UNFORMATTED', &
++            &  STATUS='REPLACE', ACTION='WRITE', IOSTAT=r180_ios )
++         IF( r180_ios /= 0 ) CALL ctl_stop( 'hpg_sco: cannot open round-180 HPG1 record' )
++         r180_magic = 'NEMO_L4_R180HP1'
++         WRITE(r180_unit) r180_magic, 1, kt, Kmm, Krhs, narea - 1, jpi, jpj, jpk, &
++            & nimpp, njmpp, ntsi, ntsj, ntei, ntej, STORAGE_SIZE(1._wp), 11
++         r180_name = 'rhd'
++         WRITE(r180_unit) r180_name, 3, jpi, jpj, jpk
++         WRITE(r180_unit) rhd
++         r180_name = 'e3w'
++         WRITE(r180_unit) r180_name, 3, jpi, jpj, jpk
++         WRITE(r180_unit) r180_e3w
++         r180_name = 'gdept_z0'
++         WRITE(r180_unit) r180_name, 3, jpi, jpj, jpk
++         WRITE(r180_unit) r180_gdept
++         r180_name = 'zhpi_u'
++         WRITE(r180_unit) r180_name, 3, jpi, jpj, jpk
++         WRITE(r180_unit) r180_zhpi_u
++         r180_name = 'zhpi_v'
++         WRITE(r180_unit) r180_name, 3, jpi, jpj, jpk
++         WRITE(r180_unit) r180_zhpi_v
++         r180_name = 'zuap_u'
++         WRITE(r180_unit) r180_name, 3, jpi, jpj, jpk
++         WRITE(r180_unit) r180_zuap_u
++         r180_name = 'zuap_v'
++         WRITE(r180_unit) r180_name, 3, jpi, jpj, jpk
++         WRITE(r180_unit) r180_zuap_v
++         r180_name = 'sum_u'
++         WRITE(r180_unit) r180_name, 3, jpi, jpj, jpk
++         WRITE(r180_unit) r180_sum_u
++         r180_name = 'sum_v'
++         WRITE(r180_unit) r180_name, 3, jpi, jpj,jpk
++         WRITE(r180_unit) r180_sum_v
++         r180_name = 'r1_e1u'
++         WRITE(r180_unit) r180_name, 2, jpi, jpj, 1
++         WRITE(r180_unit) r1_e1u
++         r180_name = 'r1_e2v'
++         WRITE(r180_unit) r180_name, 2, jpi, jpj, 1
++         WRITE(r180_unit) r1_e2v
++         CLOSE(r180_unit)
++         WRITE(numout,*) 'ORCA2_R180_HPG1_DUMP ', kt, Kmm, Krhs, narea - 1, TRIM(r180_filename)
++      ENDIF
+       !
+       !
+    END SUBROUTINE hpg_sco
