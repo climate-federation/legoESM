@@ -102,6 +102,20 @@ fails with `failed to initialize in-process app-server client: Read-only file
 system`. Verdict: **independent review unavailable in-sandbox**. The full log
 is `round176/codex_review.log`.
 
+Focused verification is 27/27 passing. The required
+`tests/ocean/fidelity -n 12` battery was launched once and reached 99%:
+2,768 tests passed and four failed before the final worker stopped emitting
+progress. Three failures are the campaign's registered worktree-stamp pair
+and SI3 scalar-math provenance red. The fourth was isolated and refuses with
+`the certified year harness moved after the registered members ran`
+(`test_nemo_testcase_l2_gyre_round129_spread_floor_gate.py::test_record_backed_gate_passes`);
+it predates this measurement-only diff but is not in the current known-red
+list, so it remains explicitly OPEN. The unfinished final ID was
+`test_nemo_testcase_phase3_stage_sweep_gate.py::test_prediction_plant_is_fail_closed`;
+its isolated two-run LOCK oracle check also remained nonterminal and was
+interrupted. The full battery is therefore **not claimed clean**. Logs are in
+`round176/pytest_ocean_fidelity.log` and the two isolated logs.
+
 ## OPEN
 
 Round 177 must make the rung-0 private card obey the compiled
@@ -111,6 +125,9 @@ this offline stage-1 table. Because this changes the rung-0 initial condition,
 rerun the independent ten-step ladder and month; loudly supersede the previous
 "independent" rung-0 trajectory numbers. Do not modify the shipped rung-10
 ORCA2 card: its damping-enabled path continues to execute the alterations.
+
+The round-129 GYRE harness-pin red and the nonterminal stage-sweep plant test
+also remain verification debt; neither is widened into ORCA2 physics work.
 
 No acquisition is needed. No configuration choice is open: the compiled
 guard and resolved rung-0 namelist pin the branch.
