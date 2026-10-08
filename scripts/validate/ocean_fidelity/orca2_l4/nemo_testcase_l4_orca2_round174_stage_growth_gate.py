@@ -107,7 +107,14 @@ def _growth_rows(boundaries: list[dict[str, object]]) -> list[dict[str, object]]
     result = []
     for boundary in boundaries:
         current = _boundary_max(boundary)
-        ratio = current / max(previous, float(FLOOR))
+        if math.isinf(current) and math.isinf(previous):
+            ratio = 1.0
+        elif math.isinf(current):
+            ratio = math.inf
+        elif math.isinf(previous):
+            ratio = 0.0
+        else:
+            ratio = current / max(previous, float(FLOOR))
         result.append({
             "kt": boundary["kt"], "stage": boundary["stage"],
             "max_abs": current, "previous_max_abs": previous,

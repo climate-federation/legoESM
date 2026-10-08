@@ -76,9 +76,10 @@ def test_one_ulp_control_is_mandatory():
 
 def test_nonfinite_completed_stage_is_reported_as_infinite_growth():
     report = _report()
-    boundary = report["boundaries"][-1]
-    boundary["rows"]["T"]["candidate_nonfinite"] = 1
+    for boundary in report["boundaries"][-2:]:
+        boundary["rows"]["T"]["candidate_nonfinite"] = 1
     report["growth"] = gate._growth_rows(report["boundaries"])
     report["first_growth"] = gate._first_growth(report["growth"])
     result = gate.classify(report)
     assert result["growth"][-1]["max_abs"] == float("inf")
+    assert result["growth"][-1]["ratio"] == 1.0

@@ -83,3 +83,11 @@ non-finite count, retains the maximum over finite pairs, and assigns the
 boundary maximum/incoming growth ratio `Infinity`. It still refuses any
 non-finite oracle value. The first-growth selector is upstream at kt=1 stage 1,
 so this correction cannot change the owning boundary.
+
+The third committed run reached the same kt=8 stage-1/2 non-finite rows but
+the classifier refused before writing them because IEEE `Infinity / Infinity`
+produced `NaN`, which is not equal to itself during the derived-table check.
+The corrected selector defines consecutive non-finite maxima as ratio 1.0;
+finite-to-non-finite remains `Infinity` and non-finite-to-finite is 0.0. This
+only makes the frozen selector total over its registered domain and cannot
+move the already-selected kt=1 stage-1 boundary.
