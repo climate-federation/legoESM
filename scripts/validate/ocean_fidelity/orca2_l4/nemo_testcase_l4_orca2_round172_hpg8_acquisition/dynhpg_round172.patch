@@ -1,0 +1,111 @@
+--- dynhpg.F90
++++ dynhpg.F90
+@@ -327,9 +327,13 @@
+       INTEGER  ::   ji, jj, jk, jii, jjj           ! dummy loop indices
+       INTEGER  ::   l2_unit, l2_ios
++      INTEGER  ::   r172_unit, r172_ios
+       CHARACTER(LEN=16) :: l2_magic
++      CHARACTER(LEN=16) :: r172_magic, r172_name
++      CHARACTER(LEN=256) :: r172_filename
+       REAL(wp) ::   zcoef0, zuap, zvap, ztmp       ! local scalars
+       REAL(wp), DIMENSION(T2D(0))           ::   zhpi, zhpj
+       REAL(wp), DIMENSION(jpi,jpj,jpk) :: l2_zhpi_u, l2_zhpi_v, l2_zuap_u, l2_zuap_v, l2_sum_u, l2_sum_v
++      REAL(wp), DIMENSION(jpi,jpj,jpk) :: r172_e3w, r172_gdept, r172_zhpi_u, r172_zhpi_v, r172_zuap_u, r172_zuap_v, r172_sum_u, r172_sum_v
+       !!----------------------------------------------------------------------
+       !
+       IF( kt == nit000 ) THEN
+@@ -346,6 +350,17 @@
+          l2_zuap_u = 0._wp ; l2_zuap_v = 0._wp
+          l2_sum_u  = 0._wp ; l2_sum_v  = 0._wp
+       ENDIF
++      IF( kt == 8 .AND. Kmm == 3 .AND. Krhs == 1 ) THEN
++         r172_zhpi_u = 0._wp ; r172_zhpi_v = 0._wp
++         r172_zuap_u = 0._wp ; r172_zuap_v = 0._wp
++         r172_sum_u  = 0._wp ; r172_sum_v  = 0._wp
++         DO jk = 1, jpk
++            DO_2D( 0, 0, 0, 0 )
++               r172_e3w(ji,jj,jk) = e3w(ji,jj,jk,Kmm)
++               r172_gdept(ji,jj,jk) = gdept_z0(ji,jj,jk,Kmm)
++            END_2D
++         END DO
++      ENDIF
+       !
+       !
+       DO_2D( 0, 0, 0, 0 )              ! Surface value
+@@ -376,6 +391,12 @@
+             l2_sum_u (ji,jj,1) = zhpi(ji,jj) + zuap
+             l2_sum_v (ji,jj,1) = zhpj(ji,jj) + zvap
+          ENDIF
++         IF( kt == 8 .AND. Kmm == 3 .AND. Krhs == 1 ) THEN
++            r172_zhpi_u(ji,jj,1) = zhpi(ji,jj) ; r172_zhpi_v(ji,jj,1) = zhpj(ji,jj)
++            r172_zuap_u(ji,jj,1) = zuap         ; r172_zuap_v(ji,jj,1) = zvap
++            r172_sum_u (ji,jj,1) = zhpi(ji,jj) + zuap
++            r172_sum_v (ji,jj,1) = zhpj(ji,jj) + zvap
++         ENDIF
+       END_2D
+       !
+       DO jk= 2, jpkm1
+@@ -406,6 +427,12 @@
+                l2_sum_u (ji,jj,jk) = zhpi(ji,jj) + zuap
+                l2_sum_v (ji,jj,jk) = zhpj(ji,jj) + zvap
+             ENDIF
++            IF( kt == 8 .AND. Kmm == 3 .AND. Krhs == 1 ) THEN
++               r172_zhpi_u(ji,jj,jk) = zhpi(ji,jj) ; r172_zhpi_v(ji,jj,jk) = zhpj(ji,jj)
++               r172_zuap_u(ji,jj,jk) = zuap         ; r172_zuap_v(ji,jj,jk) = zvap
++               r172_sum_u (ji,jj,jk) = zhpi(ji,jj) + zuap
++               r172_sum_v (ji,jj,jk) = zhpj(ji,jj) + zvap
++            ENDIF
+          END_2D
+       END DO
+       IF( lwp .AND. kt == nit000 .AND. Kmm == 3 .AND. Krhs == 2 ) THEN
+@@ -421,6 +448,50 @@
+          CLOSE(l2_unit)
+          WRITE(numout,*) 'L2_RK_STAGE2_HPG_LITERAL_DUMP ', kt, Kmm, Krhs
+       ENDIF
++      IF( kt == 8 .AND. Kmm == 3 .AND. Krhs == 1 ) THEN
++         WRITE(r172_filename,'("oracle_r172_hpg8_rank",I4.4,"_kt",I8.8,".bin")') narea - 1, kt
++         OPEN( NEWUNIT=r172_unit, FILE=TRIM(r172_filename), ACCESS='STREAM', FORM='UNFORMATTED', &
++            &  STATUS='REPLACE', ACTION='WRITE', IOSTAT=r172_ios )
++         IF( r172_ios /= 0 ) CALL ctl_stop( 'hpg_sco: cannot open round-172 HPG8 record' )
++         r172_magic = 'NEMO_L4_R172HP8'
++         WRITE(r172_unit) r172_magic, 1, kt, Kmm, Krhs, narea - 1, jpi, jpj, jpk, &
++            & nimpp, njmpp, ntsi, ntsj, ntei, ntej, STORAGE_SIZE(1._wp), 11
++         r172_name = 'rhd'
++         WRITE(r172_unit) r172_name, 3, jpi, jpj, jpk
++         WRITE(r172_unit) rhd
++         r172_name = 'e3w'
++         WRITE(r172_unit) r172_name, 3, jpi, jpj, jpk
++         WRITE(r172_unit) r172_e3w
++         r172_name = 'gdept_z0'
++         WRITE(r172_unit) r172_name, 3, jpi, jpj, jpk
++         WRITE(r172_unit) r172_gdept
++         r172_name = 'zhpi_u'
++         WRITE(r172_unit) r172_name, 3, jpi, jpj, jpk
++         WRITE(r172_unit) r172_zhpi_u
++         r172_name = 'zhpi_v'
++         WRITE(r172_unit) r172_name, 3, jpi, jpj, jpk
++         WRITE(r172_unit) r172_zhpi_v
++         r172_name = 'zuap_u'
++         WRITE(r172_unit) r172_name, 3, jpi, jpj, jpk
++         WRITE(r172_unit) r172_zuap_u
++         r172_name = 'zuap_v'
++         WRITE(r172_unit) r172_name, 3, jpi, jpj, jpk
++         WRITE(r172_unit) r172_zuap_v
++         r172_name = 'sum_u'
++         WRITE(r172_unit) r172_name, 3, jpi, jpj, jpk
++         WRITE(r172_unit) r172_sum_u
++         r172_name = 'sum_v'
++         WRITE(r172_unit) r172_name, 3, jpi, jpj, jpk
++         WRITE(r172_unit) r172_sum_v
++         r172_name = 'r1_e1u'
++         WRITE(r172_unit) r172_name, 2, jpi, jpj, 1
++         WRITE(r172_unit) r1_e1u
++         r172_name = 'r1_e2v'
++         WRITE(r172_unit) r172_name, 2, jpi, jpj, 1
++         WRITE(r172_unit) r1_e2v
++         CLOSE(r172_unit)
++         WRITE(numout,*) 'ORCA2_R172_HPG8_DUMP ', kt, Kmm, Krhs, narea - 1, TRIM(r172_filename)
++      ENDIF
+       !
+       !
+    END SUBROUTINE hpg_sco
