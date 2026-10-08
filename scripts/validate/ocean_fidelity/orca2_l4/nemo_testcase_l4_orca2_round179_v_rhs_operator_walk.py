@@ -21,6 +21,9 @@ for package in (REPO_ROOT, REPO_ROOT / "packages/core", REPO_ROOT / "packages/oc
 from legoesm.ocean.fidelity.provenance import worktree_stamp
 
 from scripts.validate.ocean_fidelity.orca2_l4 import (
+    nemo_testcase_l4_orca2_round42_stage1_hpg_walk_gate as r42,
+)
+from scripts.validate.ocean_fidelity.orca2_l4 import (
     nemo_testcase_l4_orca2_round92_rung0_card_gate as rung0,
 )
 from scripts.validate.ocean_fidelity.orca2_l4 import (
@@ -204,21 +207,11 @@ def measure(deck_root: Path, rhs_root: Path, slow_root: Path,
             static_root: Path, spg_root: Path,
             expect_commit: str) -> dict[str, object]:
     import jax
-    import jax.numpy as jnp
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
-    from legoesm.ocean.dynamics.latlon_cgrid_operators import (
-        nemo_hpg_sco_literal_cgrid,
-    )
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         LatLonCGridOceanModel,
         _NEMOWSRK3TestHooks,
     )
-    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
-        _nemo_qco_gdept_z0,
-        compute_frozen_geom_density,
-    )
-    from legoesm.ocean.eos import nemo_r3t_stretch
-    from legoesm.ocean.physics.vertical_mixing import nemo_e3w0_reference
 
     stamp = worktree_stamp()
     require(stamp["clean"] and stamp["commit"].lower() == expect_commit.lower(),
@@ -328,18 +321,10 @@ def measure(deck_root: Path, rhs_root: Path, slow_root: Path,
     }
     first = _first(operator_rows)
 
-    geom = compute_frozen_geom_density(
-        state, card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
-    stretch = nemo_r3t_stretch(
-        card.recipe.z_coord, state.eta.data, state.H_bathy.data,
-        evaluation="nemo_reciprocal")[..., None]
-    e3w_live = jnp.asarray(nemo_e3w0_reference(card.recipe.z_coord)) * stretch
-    t_depth = jnp.asarray(card.recipe.z_coord.t_depth_ref)[None, None, :]
-    gdept_z0 = _nemo_qco_gdept_z0(t_depth, stretch, state.eta.data)
-    _raw_u, raw_v = jax.device_get(nemo_hpg_sco_literal_cgrid(
-        geom[4], e3w_live, gdept_z0, card.recipe.grid,
-        jnp.asarray(card.recipe.model_config.g, dtype=state.eta.data.dtype)))
-    raw_v = r83.native_v(raw_v)
+    hpg_inputs = r42._candidate_inputs(offline, state)
+    hpg_components = r42._literal_from_inputs(
+        hpg_inputs, card.recipe.model_config.g, grid=card.recipe.grid)
+    raw_v = r83.native_v(hpg_components["sum_v"])
     oracle_hpg = _with_jpk_zero(oracle_rhs["after_hpg_v"])
     raw_hpg = _with_jpk_zero(raw_v)
     contributing = np.broadcast_to(target[..., None], oracle_hpg.shape) & (
