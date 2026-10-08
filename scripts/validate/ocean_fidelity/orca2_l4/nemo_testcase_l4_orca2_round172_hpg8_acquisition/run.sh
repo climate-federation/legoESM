@@ -94,7 +94,7 @@ pin "$INPUT_MANIFEST_SHA" "$SOURCE_RUN/input_files.sha256" 'input manifest'
 grep -Eq 'Vector form: 2nd order centered scheme.*ln_dynadv_vec *= *T' "$SOURCE_RUN/ocean.output" || {
   printf 'REFUSE: source deck does not resolve vector-invariant C2\n' >&2; exit 65;
 }
-grep -Eq 's-coordinate.*ln_hpg_sco *= *T' "$SOURCE_RUN/ocean.output" || {
+grep -Eq 's-coord.*ln_hpg_sco *= *T' "$SOURCE_RUN/ocean.output" || {
   printf 'REFUSE: source deck does not resolve hpg_sco\n' >&2; exit 65;
 }
 
