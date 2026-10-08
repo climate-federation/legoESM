@@ -106,6 +106,18 @@ def test_source_replay_accumulates_top_down():
         result["accumulator"], np.array([[[-1.0, -4.0, -9.0]]]))
 
 
+def test_source_replay_refuses_a_structural_level_mismatch():
+    with pytest.raises(gate.GateError):
+        gate._replay_zhpj(
+            np.ones((1, 1, 31)),
+            np.ones((1, 1, 30)),
+            np.ones((1, 1, 30)),
+            np.ones((1, 1, 30)),
+            np.ones((1, 1)),
+            2.0,
+        )
+
+
 def test_north_arm_plant_is_nonvacuous():
     report = _report()
     report["north_only_arm_vacuous"] = True

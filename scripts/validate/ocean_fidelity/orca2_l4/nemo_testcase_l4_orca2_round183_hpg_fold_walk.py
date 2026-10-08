@@ -315,7 +315,7 @@ def measure(
         "current_rhd": np.asarray(candidate_inputs["rhd"], dtype=np.float64),
     }
     oracle_operands = {
-        name: fold[name]
+        name: fold[name][..., :30]
         for name in ("north_e3w", "north_rhd", "current_e3w", "current_rhd")
     }
 
@@ -347,7 +347,8 @@ def measure(
         "fold_to_component_zhpj": r181._score(
             fold["zhpj"], oracle_component_zhpj, full_contributing),
         "oracle_to_recorded_zhpj": r181._score(
-            oracle_replay["accumulator"], fold["zhpj"], full_contributing),
+            oracle_replay["accumulator"], fold["zhpj"][..., :30],
+            contributing),
         "candidate_to_literal_zhpj": r181._score(
             candidate_replay["accumulator"], candidate_zhpj,
             contributing),
@@ -356,7 +357,7 @@ def measure(
     input_rows = {
         name: r181._score(
             candidate_operands[name], oracle_operands[name],
-            full_contributing)
+            contributing)
         for name in INPUT_ORDER[:-1]
     }
     input_rows["r1_e2v"] = r181._score(
