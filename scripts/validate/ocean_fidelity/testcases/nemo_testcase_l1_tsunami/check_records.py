@@ -35,7 +35,28 @@ AFTER = ["a_ssh_aa", "a_uu_b_aa", "a_vv_b_aa"]
 FULL = ENTRY + ["r_r3t_aa", "r_r3u_aa", "r_r3v_aa"] + AFTER + [
     "a_un_adv", "a_vn_adv", "a_uu_rhs_k1", "a_vv_rhs_k1",
     "a_uu_nn_k1", "a_vv_nn_k1"]
+# every group dynspg_ts_substep_record_kt10.patch writes; all unconditional
+SPGTS_ICYCLE_AT = 9
+SPGTS_ENTRY = ["ssh_frc", "zu_frc", "zv_frc", "un_e", "vn_e", "ub_e", "vb_e",
+               "ubb_e", "vbb_e", "sshn_e", "sshb_e", "sshbb_e", "hu_e", "hv_e",
+               "hur_e", "hvr_e", "zCdU_u", "zCdU_v", "wgtbtp1", "wgtbtp2",
+               "entry_sc"]
+SPGTS_SUB = ["ua_ext", "va_ext", "sshp2_mid", "htp2_e", "hup2_e", "hvp2_e",
+             "ext_coef", "zhU", "zhV", "ssha_e", "un_adv", "vn_adv", "sshu_a",
+             "sshv_a", "sshp2_bck", "zu_spg", "zv_spg", "bck_coef", "cor_u",
+             "cor_v", "trd_u", "trd_v", "ua_new", "va_new", "hu_e", "hv_e",
+             "hur_e", "hvr_e", "uub_sum", "vvb_sum", "ssh_sum", "sum_coef"]
+SPGTS_EXIT = ["un_adv", "vn_adv", "uu_b_aa", "vv_b_aa", "ssh_aa"]
 OUTPUT_FIELDS = ("sossheig", "souubaro", "somebaro")
+
+
+def spgts_groups(icycle: int) -> set[str]:
+    """The exact group-name set of one substep record (frame_name prefixes)."""
+    names = {f"i000_{g}" for g in SPGTS_ENTRY}
+    names |= {f"o000_{g}" for g in SPGTS_EXIT}
+    for jn in range(1, icycle + 1):
+        names |= {f"j{jn:03d}_{g}" for g in SPGTS_SUB}
+    return names
 
 
 class Refusal(Exception):
@@ -106,8 +127,13 @@ def check(evidence: Path, reference: Path, steps: int) -> dict:
         raise Refusal(f"substep records are {[step_of(p) for p in spgts]}")
     for p in spgts:
         head, groups = parse(p, SPGTS_MAGIC, SPGTS_NINT, SPGTS_BOUNDS_AT)
-        if head[1] != step_of(p) or "o000_ssh_aa" not in groups:
-            raise Refusal(f"{p.name}: header step {head[1]} or no exit frame")
+        if head[1] != step_of(p) or head[SPGTS_ICYCLE_AT] < 1:
+            raise Refusal(f"{p.name}: header step {head[1]} / icycle "
+                          f"{head[SPGTS_ICYCLE_AT]}")
+        want = spgts_groups(head[SPGTS_ICYCLE_AT])
+        if set(groups) != want:
+            raise Refusal(f"{p.name}: missing {sorted(want - set(groups))[:5]} "
+                          f"extra {sorted(set(groups) - want)[:5]}")
         out["records"][p.name] = hashlib.sha256(p.read_bytes()).hexdigest()
     if not list(evidence.glob("mesh_mask*.nc")):
         raise Refusal("no mesh_mask*.nc in the evidence directory")

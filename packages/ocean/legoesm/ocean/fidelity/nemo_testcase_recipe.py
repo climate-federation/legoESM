@@ -2958,9 +2958,29 @@ class TsunamiResolvedNamelist(NamedTuple):
     # &nammpp nn_hls from namelist_ref (enters no formula: dom_hgr's lbc_lnk
     # wraps glamt/gphit periodically before usr_def_istate_ssh reads them)
     nn_hls: int = 2
+    # selectors dyn_spg_ts reads on the executed path (dynspg_ts.F90:373-446,
+    # 512-525, 601-692, 781-849); namelist_ref, not overridden by the deck
+    ln_dynvor_msk: bool = False
+    ln_apr_dyn: bool = False
+    ln_rnf: bool = False
+    ln_isf: bool = False
+    ln_sdw: bool = False
+    ln_bdy: bool = False
+    ln_tide: bool = False
+    ln_tide_pot: bool = False
+    ln_wd_dl: bool = False
+    ln_wd_dl_bc: bool = False
+    ln_sshinc: bool = False
+    ln_asmiau: bool = False
 
 
 TSUNAMI_NAMELIST = TsunamiResolvedNamelist()
+# the card carries none of these forcings/limiters/increments
+_TSUNAMI_ABSENT_SPG_TERMS = (
+    "ln_dynvor_msk", "ln_apr_dyn", "ln_rnf", "ln_isf", "ln_sdw", "ln_bdy",
+    "ln_tide", "ln_tide_pot", "ln_wd_dl", "ln_wd_dl_bc", "ln_sshinc",
+    "ln_asmiau",
+)
 
 _TSUNAMI_NLEV = 1                    # jpkm1 (usrdef_nam.F90:98 kpk = 2)
 _TSUNAMI_H_M = TSUNAMI_NAMELIST.rn_domszz_m
@@ -3183,6 +3203,9 @@ def _validate_tsunami_card(card: NEMOTestcaseCard) -> None:
     cfg = card.recipe.model_config
     if card.unmeasured_features != TSUNAMI_UNMEASURED:
         raise ValueError("TSUNAMI-zco must declare exactly TSUNAMI_UNMEASURED")
+    on = [k for k in _TSUNAMI_ABSENT_SPG_TERMS if getattr(nl, k)]
+    if on:
+        raise ValueError(f"TSUNAMI-zco carries no term for {on}")
     if (card.dt_s, card.n_steps) != (nl.rn_Dt_s, nl.nn_itend):
         raise ValueError("TSUNAMI-zco rn_Dt/nn_itend disagree with the deck")
     if (card.recipe.initial_state.uu_b is None
