@@ -169,7 +169,8 @@ def test_initial_ssh_against_formula_at_three_cells(card):
 
 
 def test_execution_gate_refuses_with_named_blockers(card):
-    assert [b.split(":")[0] for b in TSUNAMI_UNMEASURED] == ["B4", "B6", "B7"]
+    assert [b.split(":")[0] for b in TSUNAMI_UNMEASURED] == [
+        "B4", "B4j", "B6", "B7"]
     with pytest.raises(ValueError, match="B4:periodic_seam"):
         validate_nemo_testcase_card_for_execution(card)
 
@@ -247,3 +248,46 @@ def test_single_level_is_opt_in_only():
         create_z_star_from_thicknesses(np.array([100.0]))
     z = create_z_star_from_thicknesses(np.array([100.0]), allow_single_level=True)
     assert z.n_levels == 1
+
+
+def _roll_state(fields, sj, si):
+    out = {}
+    for name, f in fields.items():
+        if name in ("uu_b", "u"):      # ni+1 faces: roll the distinct ni, re-close
+            g = np.roll(f[:, :-1], (sj, si), axis=(0, 1))
+            out[name] = np.concatenate([g, g[:, :1]], axis=1)
+        elif name in ("vv_b", "v"):
+            g = np.roll(f[:-1], (sj, si), axis=(0, 1))
+            out[name] = np.concatenate([g, g[:1]], axis=0)
+        else:
+            out[name] = np.roll(f, (sj, si), axis=(0, 1))
+    return out
+
+
+def _seam_equivariance_unequal(card, seam_shift):
+    """Cells where step(roll(bump on seam)) != roll(step(bump on seam))."""
+    eta0 = np.asarray(card.recipe.initial_state.eta.data)  # centre (79, 39)
+    sj, si = seam_shift
+    on_seam = {k: b for k, (_, b) in _step_fields(
+        card, np.roll(eta0, (sj, si), axis=(0, 1))).items()}
+    moved = {k: b for k, (_, b) in _step_fields(
+        card, np.roll(eta0, (sj + 37, si + 61), axis=(0, 1))).items()}
+    want = _roll_state(on_seam, 37, 61)
+    return {k: int(np.count_nonzero(moved[k] != want[k]))
+            for k in ("eta", "uu_b", "vv_b")}
+
+
+def test_i_seam_is_translation_equivariant_bit_for_bit(card):
+    """B4, i-seam: the bump straddling the periodic i-seam steps exactly as
+    the same bump moved 61 cells into the interior."""
+    assert _seam_equivariance_unequal(card, (0, -39)) == {
+        "eta": 0, "uu_b": 0, "vv_b": 0}
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "B4j: the card's step walls the j-seam; the existing y-wrap scope does "
+    "not reach its barotropic path (round-2 probe: 402 ssh cells unequal, "
+    "same count with the scope off)"))
+def test_j_seam_is_translation_equivariant_bit_for_bit(card):
+    assert _seam_equivariance_unequal(card, (-79, 0)) == {
+        "eta": 0, "uu_b": 0, "vv_b": 0}
