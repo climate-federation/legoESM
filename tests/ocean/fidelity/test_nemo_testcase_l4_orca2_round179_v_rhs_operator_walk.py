@@ -31,8 +31,8 @@ def _report() -> dict[str, object]:
         "operand_order": list(gate.OPERANDS),
         "arm_order": list(gate.ARMS),
         "cross_record_closure": {
-            "after_zad_to_depth_v": {"bit_exact": True},
-            "depth_v_to_completed_v": {"bit_exact": True},
+            "after_zad_to_depth_v": {"bit_exact": True, "at_floor": True},
+            "depth_v_to_completed_v": {"bit_exact": True, "at_floor": True},
         },
         "candidate_calibration": {
             "same_over_floor_set": True, "all_faces_at_floor": True},
@@ -80,3 +80,10 @@ def test_first_operator_follows_compiled_order():
         "boundary": "after_ldf", **report["operator_rows"]["after_ldf"]}
     result = gate.classify(report)
     assert result["prediction_ledger"]["R179-P3"] == "REFUTED"
+
+
+def test_signed_zero_cross_record_difference_refutes_prediction_but_closes():
+    report = _report()
+    report["cross_record_closure"]["after_zad_to_depth_v"]["bit_exact"] = False
+    result = gate.classify(report)
+    assert result["prediction_ledger"]["R179-P1"] == "REFUTED"

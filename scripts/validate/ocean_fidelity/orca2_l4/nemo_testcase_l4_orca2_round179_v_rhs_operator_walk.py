@@ -131,7 +131,7 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
         report["source_order"][0], report["source_order"][1] = (
             report["source_order"][1], report["source_order"][0])
     elif plant == "cross-record":
-        report["cross_record_closure"]["after_zad_to_depth_v"]["bit_exact"] = False
+        report["cross_record_closure"]["after_zad_to_depth_v"]["at_floor"] = False
     elif plant == "target-mask":
         report["target"]["cells"] -= 1
     elif plant == "mask-arm":
@@ -151,9 +151,9 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
     require(tuple(report["operand_order"]) == OPERANDS,
             "operand source order moved")
     require(tuple(report["arm_order"]) == ARMS, "operand arm order moved")
-    require(all(row["bit_exact"] for row in
+    require(all(row["at_floor"] for row in
                 report["cross_record_closure"].values()),
-            "admitted records no longer close")
+            "admitted records no longer close within the registered floor")
     require(report["candidate_calibration"]["same_over_floor_set"],
             "offline candidate replay does not reproduce production debt set")
     require(report["candidate_calibration"]["all_faces_at_floor"],
@@ -181,7 +181,10 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
     require(report["mask_only_reproduces_candidate_hpg"],
             "candidate-mask one-variable arm does not reproduce HPG boundary")
     report["prediction_ledger"] = {
-        "R179-P1": "CONFIRMED",
+        "R179-P1": (
+            "CONFIRMED" if all(row["bit_exact"] for row in
+                               report["cross_record_closure"].values())
+            else "REFUTED"),
         "R179-P2": "CONFIRMED",
         "R179-P3": (
             "CONFIRMED" if first is not None
