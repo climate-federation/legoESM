@@ -62,3 +62,14 @@ non-bit input is attributed by inference.
 ASKED choices: continue the independent rung-0 walk using passive completed
 stage states, per B57 addendum 3.  
 UNASKED choices: empty.
+
+## Instrument correction after the first refused run
+
+The first committed run refused at kt=1 before emitting a scientific row. Its
+local digest helper serialized the dtype as `dtype.str` and the shape with
+`repr`, while the pinned round-166 producer serialized them with `str`. The
+arrays were never compared because those different prefixes necessarily give
+different hashes. This is an instrument-format defect, not trajectory drift.
+The corrected gate reuses round 166's exact digest helper rather than
+restating it. Predictions, thresholds, boundary order and terminal rule are
+unchanged.

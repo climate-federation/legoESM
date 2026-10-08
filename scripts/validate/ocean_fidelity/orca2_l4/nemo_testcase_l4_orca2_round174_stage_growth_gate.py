@@ -55,22 +55,6 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _array_digest(value: np.ndarray) -> str:
-    array = np.ascontiguousarray(np.asarray(value))
-    digest = hashlib.sha256()
-    digest.update(array.dtype.str.encode("ascii"))
-    digest.update(repr(array.shape).encode("ascii"))
-    digest.update(array.tobytes())
-    return digest.hexdigest()
-
-
-def _state_digests(state) -> dict[str, str]:
-    return {
-        name: _array_digest(value)
-        for name, value in r103.rung0.candidate_fields(state).items()
-    }
-
-
 def _score(actual: np.ndarray, expected: np.ndarray) -> dict[str, object]:
     actual = np.asarray(actual, dtype=np.float64)
     expected = np.asarray(expected, dtype=np.float64)
@@ -265,7 +249,10 @@ def measure(deck_root: Path, record_root: Path, control_path: Path,
             state_after = None
         if state_after is not None:
             candidates[3] = state_after
-            actual_digests = _state_digests(state_after)
+            # Reuse the producer's exact digest serialization.  A locally
+            # restated dtype/shape prefix caused the first instrument run to
+            # refuse identical arrays before any science was emitted.
+            actual_digests = r166._state_digests(state_after)
             passivity[str(kt)] = {
                 field: actual_digests[field] == expected_digests[kt][field]
                 for field in ("T", "S", "u", "v", "ssh")
