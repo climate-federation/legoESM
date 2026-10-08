@@ -21,7 +21,7 @@ is `hpg_sco`: its surface statements form `zhpi/zhpj`, `zuap/zvap`, then
 overwrite the RK3 accumulator
 (`ORCA2_OMIP_L4_R170RHS8/BLD/ppsrc/nemo/dynhpg.f90:386-402`); its interior
 recurrence and overwrite are
-`ORCA2_OMIP_L4_R170RHS8/BLD/ppsrc/nemo/dynhpg.f90:411-435`. These citations are from the record-producing
+`ORCA2_OMIP_L4_R170RHS8/BLD/ppsrc/nemo/dynhpg.f90:411-434`. These citations are from the record-producing
 `ORCA2_OMIP_L4_R170RHS8/BLD/ppsrc/nemo` tree, not an uncompiled source arm.
 
 ## Instrument admission
