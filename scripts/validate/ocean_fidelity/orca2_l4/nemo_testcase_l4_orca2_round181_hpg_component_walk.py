@@ -158,6 +158,9 @@ def _local_self_replay(record: dict[str, object], g: float) -> dict[str, dict]:
     shape = (ntej - ntsj + 1, ntei - ntsi + 1, 31)
     full = np.ones(shape, dtype=bool)
     interior = np.ones(shape, dtype=bool)
+    # NEMO's jpk slot is structural and hpg_sco loops only through jpkm1.
+    full[..., -1] = False
+    interior[..., -1] = False
     interior[-1, ...] = False
     rows = {"interior": {}, "full": {}}
     for public, stored in (("zhpj", "zhpi_v"), ("zvap", "zuap_v"),
