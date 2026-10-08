@@ -160,6 +160,32 @@ def classify(report: dict, plant: str = "none") -> dict:
     return report
 
 
+def _trace_without_failing_companion(
+    model, state, dt, freshwater, surface,
+):
+    """Return the early barotropic trace without evaluating the full kt=8 step.
+
+    ``step`` normally pairs a boundary-association trace with a separately
+    compiled ordinary state.  That companion is the known round-165 terminal
+    and must fail after the already-materialised barotropic trace at kt=8.  This
+    helper performs the eager cache setup from ``step`` and calls its documented
+    jitted body directly, stopping at the trace return boundary.
+    """
+
+    import jax
+
+    seeded = model._seed_tke_preclosure_carry(state)
+    model.prime_step_caches(seeded)
+    with jax.disable_jit(False):
+        return model._step_jitted(
+            seeded, dt, freshwater, surface, None,
+            grid=None, vertex_mask=None, t_seconds=None,
+            external_tracer_rate=None,
+            _shortwave_tendency_test_delta=None,
+            _vertical_K_test_override=None,
+            _nemo_stage1_zad_eta_after_override=None)
+
+
 def measure(
     deck_root: Path, frame_root: Path, spg_root: Path, baseline_root: Path,
     expect_commit: str,
@@ -207,8 +233,8 @@ def measure(
     traced = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
         _nemo_ws_test_hooks=trace_hooks)
-    observed = jax.device_get(traced.step(
-        state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
+    observed = jax.device_get(_trace_without_failing_companion(
+        traced, state, card.dt_s, freshwater, surface))
     trace = observed.substeps
     require(trace["eta_entry"].shape[0] == EXPECTED_SUBSTEPS,
             "production trace substep count moved")
