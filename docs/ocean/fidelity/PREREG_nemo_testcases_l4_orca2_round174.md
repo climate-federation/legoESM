@@ -73,3 +73,13 @@ different hashes. This is an instrument-format defect, not trajectory drift.
 The corrected gate reuses round 166's exact digest helper rather than
 restating it. Predictions, thresholds, boundary order and terminal rule are
 unchanged.
+
+The second committed run passed kt=1..7 passivity and reached kt=8, then the
+classifier refused because completed stages 1 and 2 contain non-finite T. That
+is the boundary the requested table must expose, not an instrument failure:
+the oracle remains finite and the detached stage calls did not feed the
+ordinary trajectory. The corrected classifier reports each candidate
+non-finite count, retains the maximum over finite pairs, and assigns the
+boundary maximum/incoming growth ratio `Infinity`. It still refuses any
+non-finite oracle value. The first-growth selector is upstream at kt=1 stage 1,
+so this correction cannot change the owning boundary.

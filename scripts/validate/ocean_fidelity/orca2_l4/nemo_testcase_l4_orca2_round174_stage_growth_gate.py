@@ -166,8 +166,8 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
             row = boundary["rows"][field]
             require(row["oracle_nonfinite"] == 0,
                     f"oracle is non-finite at kt={boundary['kt']} stage={boundary['stage']} {field}")
-            require(row["candidate_nonfinite"] == 0,
-                    f"candidate completed stage is non-finite at kt={boundary['kt']} stage={boundary['stage']} {field}")
+            require(row["candidate_nonfinite"] >= 0,
+                    "candidate non-finite count is invalid")
     growth = _growth_rows(report["boundaries"])
     require(growth == report["growth"], "growth table is not derived from rows")
     first = _first_growth(growth)
