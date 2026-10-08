@@ -3021,6 +3021,11 @@ TSUNAMI_UNMEASURED: tuple[str, ...] = (
     # arms (dynspg_ts.F90:787-789, :854, :895; stprk3_stg.F90:158, :636)
     # have never run against NEMO across an open periodic seam.
     "B4:periodic_seam_nemo_literal_barotropic",
+    # Measured in legoESM alone (round 2, test_nemo_tsunami_card): one card
+    # step is bitwise translation-equivariant across the i-seam but NOT the
+    # j-seam, with or without the y-wrap scope -- the existing y-wrap reaches
+    # only the v-face wall helpers, not the card's barotropic path.
+    "B4j:card_step_walls_the_j_seam",
     # namelist_cfg ln_dynadv_OFF: dynadv.F90:129 n_dynadv = np_LIN_dyn, so
     # stp2d.F90:159-174 and stprk3_stg.F90:315/331-334 add NO momentum
     # advection.  The carrier identity runs flux-form UP3; legoESM has no
