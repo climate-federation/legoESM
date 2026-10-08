@@ -39,8 +39,8 @@ field count; every field then carries its own name, rank and dimensions before
 its payload. Admission requires both ranks to cover the 148x180 domain exactly
 once, the inherited round-92 RHS streams to remain byte-identical, and all 20
 ocean restarts to remain byte-identical. Plants cover the header, field name,
-field dimensions, truncation, swapped rank, inherited RHS byte, restart byte,
-and source-layout census.
+per-field rank, field dimensions, truncation, swapped rank, inherited RHS byte,
+restart byte, and source-layout census.
 
 The launcher pins the content hashes of its committed run script, patch,
 checker and preregistration. It does not pin a producer commit that the round
@@ -71,7 +71,7 @@ audit failures. Shifting the compiled HPG citation by two lines makes the gate
 exit 1 with `STATUS FAIL`.
 
 The focused acquisition, predecessor-parser and citation-gate battery passes
-33/33. The single required `tests/ocean/fidelity -n 12` invocation collected
+34/34. The single required `tests/ocean/fidelity -n 12` invocation collected
 2,836 tests and reached 99%, with 2,805 passes, 7 skips and 5 failures, then
 reproduced the known nonterminal tail and was interrupted after three silent
 30-second polls; 19 tests had no terminal result. Four failures are the listed

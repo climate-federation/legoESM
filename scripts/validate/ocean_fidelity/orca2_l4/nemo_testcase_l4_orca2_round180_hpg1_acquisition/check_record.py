@@ -20,7 +20,7 @@ NAMES = (
 )
 THREE_D = frozenset(NAMES[:9])
 PLANTS = (
-    "none", "header", "field-name", "field-dims", "truncation",
+    "none", "header", "field-name", "field-rank", "field-dims", "truncation",
     "swapped-rank", "rhs-byte", "restart-byte",
 )
 
@@ -66,16 +66,19 @@ def read_record(path: Path, plant: str = "none") -> dict[str, object]:
     fields: dict[str, np.ndarray] = {}
     payload_rows: dict[str, dict[str, object]] = {}
     for index, expected in enumerate(NAMES):
-        require(offset + 32 <= len(raw), f"{path.name}: truncated field header")
+        require(offset + 36 <= len(raw), f"{path.name}: truncated field header")
         name = raw[offset:offset + 16].decode("ascii").rstrip(" \x00")
         offset += 16
-        ndim, n1, n2, n3 = struct.unpack_from("=4i", raw, offset)
-        offset += 16
+        field_rank, ndim, n1, n2, n3 = struct.unpack_from("=5i", raw, offset)
+        offset += 20
         if plant == "field-name" and index == 0:
             name = NAMES[1]
+        if plant == "field-rank" and index == 0:
+            field_rank = 1 - rank
         if plant == "field-dims" and index == 0:
             n1 += 1
         require(name == expected, f"{path.name}: bad field {index} {name!r}")
+        require(field_rank == rank, f"{path.name}: {name} rank moved")
         expected_dims = (3, nx, ny, nz) if name in THREE_D else (2, nx, ny, 1)
         require((ndim, n1, n2, n3) == expected_dims,
                 f"{path.name}: {name} dimensions moved")
@@ -90,6 +93,7 @@ def read_record(path: Path, plant: str = "none") -> dict[str, object]:
                 f"{path.name}: non-finite owned payload in {name}")
         fields[name] = values
         payload_rows[name] = {
+            "rank": field_rank,
             "dims": [ndim, n1, n2, n3],
             "owned_max_abs": float(np.max(np.abs(owned), initial=0.0)),
             "sha256": _digest(raw[offset:end]),

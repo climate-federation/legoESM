@@ -36,7 +36,7 @@ def _write_record(path: Path) -> None:
     for index, name in enumerate(gate.NAMES):
         ndim, n3 = (3, nz) if name in gate.THREE_D else (2, 1)
         chunks.append(name.encode("ascii").ljust(16, b" "))
-        chunks.append(struct.pack("=4i", ndim, nx, ny, n3))
+        chunks.append(struct.pack("=5i", 0, ndim, nx, ny, n3))
         values = np.full((nx, ny, n3), index + 0.25, dtype="=f8", order="F")
         chunks.append(values.tobytes(order="F"))
     path.write_bytes(b"".join(chunks))
@@ -50,20 +50,21 @@ def test_self_describing_record_round_trips(tmp_path: Path) -> None:
     assert parsed["levels"] == [1, 3]
     assert parsed["shape"] == [2, 3, 2]
     assert tuple(parsed["fields"]) == gate.NAMES
+    assert {row["rank"] for row in parsed["field_rows"].values()} == {0}
 
 
 @pytest.mark.parametrize(
-    "plant", ["header", "field-name", "field-dims", "truncation", "swapped-rank"],
+    "plant", [
+        "header", "field-name", "field-rank", "field-dims", "truncation",
+        "swapped-rank",
+    ],
 )
 def test_record_plants_fire(tmp_path: Path, plant: str) -> None:
     gate = _module()
     record = tmp_path / "record.bin"
     _write_record(record)
-    if plant == "swapped-rank":
-        assert gate.read_record(record, plant)["rank"] == 1
-    else:
-        with pytest.raises(gate.Refusal):
-            gate.read_record(record, plant)
+    with pytest.raises(gate.Refusal):
+        gate.read_record(record, plant)
 
 
 def test_writer_patch_is_additions_only_ranked_and_stage_one() -> None:
@@ -75,6 +76,7 @@ def test_writer_patch_is_additions_only_ranked_and_stage_one() -> None:
     assert removed == []
     assert "oracle_r180_hpg1_rank" in text
     assert "narea - 1" in text
+    assert text.count("r180_name, narea - 1") == len(_module().NAMES)
     assert "Kmm == 1 .AND. Krhs == 3" in text
     assert "STORAGE_SIZE(1._wp), 11" in text
 

@@ -72,37 +72,37 @@
 +         WRITE(r180_unit) r180_magic, 1, kt, Kmm, Krhs, narea - 1, jpi, jpj, jpk, &
 +            & nimpp, njmpp, ntsi, ntsj, ntei, ntej, STORAGE_SIZE(1._wp), 11
 +         r180_name = 'rhd'
-+         WRITE(r180_unit) r180_name, 3, jpi, jpj, jpk
++         WRITE(r180_unit) r180_name, narea - 1, 3, jpi, jpj, jpk
 +         WRITE(r180_unit) rhd
 +         r180_name = 'e3w'
-+         WRITE(r180_unit) r180_name, 3, jpi, jpj, jpk
++         WRITE(r180_unit) r180_name, narea - 1, 3, jpi, jpj, jpk
 +         WRITE(r180_unit) r180_e3w
 +         r180_name = 'gdept_z0'
-+         WRITE(r180_unit) r180_name, 3, jpi, jpj, jpk
++         WRITE(r180_unit) r180_name, narea - 1, 3, jpi, jpj, jpk
 +         WRITE(r180_unit) r180_gdept
 +         r180_name = 'zhpi_u'
-+         WRITE(r180_unit) r180_name, 3, jpi, jpj, jpk
++         WRITE(r180_unit) r180_name, narea - 1, 3, jpi, jpj, jpk
 +         WRITE(r180_unit) r180_zhpi_u
 +         r180_name = 'zhpi_v'
-+         WRITE(r180_unit) r180_name, 3, jpi, jpj, jpk
++         WRITE(r180_unit) r180_name, narea - 1, 3, jpi, jpj, jpk
 +         WRITE(r180_unit) r180_zhpi_v
 +         r180_name = 'zuap_u'
-+         WRITE(r180_unit) r180_name, 3, jpi, jpj, jpk
++         WRITE(r180_unit) r180_name, narea - 1, 3, jpi, jpj, jpk
 +         WRITE(r180_unit) r180_zuap_u
 +         r180_name = 'zuap_v'
-+         WRITE(r180_unit) r180_name, 3, jpi, jpj, jpk
++         WRITE(r180_unit) r180_name, narea - 1, 3, jpi, jpj, jpk
 +         WRITE(r180_unit) r180_zuap_v
 +         r180_name = 'sum_u'
-+         WRITE(r180_unit) r180_name, 3, jpi, jpj, jpk
++         WRITE(r180_unit) r180_name, narea - 1, 3, jpi, jpj, jpk
 +         WRITE(r180_unit) r180_sum_u
 +         r180_name = 'sum_v'
-+         WRITE(r180_unit) r180_name, 3, jpi, jpj,jpk
++         WRITE(r180_unit) r180_name, narea - 1, 3, jpi, jpj, jpk
 +         WRITE(r180_unit) r180_sum_v
 +         r180_name = 'r1_e1u'
-+         WRITE(r180_unit) r180_name, 2, jpi, jpj, 1
++         WRITE(r180_unit) r180_name, narea - 1, 2, jpi, jpj, 1
 +         WRITE(r180_unit) r1_e1u
 +         r180_name = 'r1_e2v'
-+         WRITE(r180_unit) r180_name, 2, jpi, jpj, 1
++         WRITE(r180_unit) r180_name, narea - 1, 2, jpi, jpj, 1
 +         WRITE(r180_unit) r1_e2v
 +         CLOSE(r180_unit)
 +         WRITE(numout,*) 'ORCA2_R180_HPG1_DUMP ', kt, Kmm, Krhs, narea - 1, TRIM(r180_filename)

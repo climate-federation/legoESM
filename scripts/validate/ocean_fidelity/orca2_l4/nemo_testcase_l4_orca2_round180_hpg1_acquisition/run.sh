@@ -150,7 +150,7 @@ admit() {
     printf '%s %s\n' "$(sha256sum "$record" | awk '{print $1}')" \
       "$(basename "$record")" >"$record.stamp"
   done
-  for plant in header field-name field-dims truncation swapped-rank rhs-byte restart-byte; do
+  for plant in header field-name field-rank field-dims truncation swapped-rank rhs-byte restart-byte; do
     if "$PY" "$GATE" --root "$TARGET_RUN" --baseline "$SOURCE_RUN" --plant "$plant" \
       >"$TARGET_RUN/round180_${plant}_plant.log" 2>&1; then
       printf 'REFUSE: %s plant stayed green\n' "$plant" >&2; exit 71
