@@ -165,6 +165,7 @@ def measure(
     expect_commit: str,
 ) -> dict:
     import jax
+    import jax.numpy as jnp
 
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
@@ -222,12 +223,14 @@ def measure(
     prefix = "j002"
     association_post = jax.device_get(
         _nemo_external_mode_boundary_association(
-            trace["u_exit"][index], trace["v_exit"][index],
-            trace["face_depth_u_exit"][index],
-            trace["face_depth_v_exit"][index],
-            trace["r1_face_depth_u_exit"][index],
-            trace["r1_face_depth_v_exit"][index],
-            trace["eta_continuity"][index], card.recipe.grid))
+            *(jnp.asarray(value) for value in (
+                trace["u_exit"][index], trace["v_exit"][index],
+                trace["face_depth_u_exit"][index],
+                trace["face_depth_v_exit"][index],
+                trace["r1_face_depth_u_exit"][index],
+                trace["r1_face_depth_v_exit"][index],
+                trace["eta_continuity"][index])),
+            card.recipe.grid))
     candidate = {
         "exit_depth_u_pre_association": r97._native_u(
             trace["face_depth_u_exit"][index]),

@@ -77,3 +77,4 @@ def test_kt8_trace_keeps_round166_graph_and_applies_association_afterward():
     assert "expose_barotropic_substeps=True" in measure
     assert "expose_barotropic_boundary_association=True" not in measure
     assert "_nemo_external_mode_boundary_association(" in measure
+    assert "jnp.asarray(value)" in measure
