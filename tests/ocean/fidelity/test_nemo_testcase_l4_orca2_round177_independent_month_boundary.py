@@ -71,3 +71,10 @@ def test_live_thickness_runtime_refusal_is_measured() -> None:
 def test_each_control_plant_refuses(plant: str) -> None:
     with pytest.raises(gate.GateError):
         gate.classify(copy.deepcopy(_report()), plant)
+
+
+def test_entry_exact_flag_and_census_must_agree() -> None:
+    report = _report()
+    report["initial_entry"]["T"]["unequal"] = 1
+    with pytest.raises(gate.GateError, match="entry is not bit-exact"):
+        gate.classify(report)

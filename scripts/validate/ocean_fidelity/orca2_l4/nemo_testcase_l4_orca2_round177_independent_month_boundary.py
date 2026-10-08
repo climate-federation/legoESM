@@ -64,7 +64,9 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
             "rung-0 unmeasured-feature registry moved")
     initial = report.get("initial_entry", {})
     require(tuple(initial) == month.FIELDS
-            and all(initial[name]["bit_exact"] for name in month.FIELDS),
+            and all(initial[name]["bit_exact"]
+                    and int(initial[name]["unequal"]) == 0
+                    for name in month.FIELDS),
             "corrected independent entry is not bit-exact")
 
     boundary = report.get("first_nonfinite")
@@ -140,9 +142,9 @@ def measure(deck_root: Path, frame_root: Path, expect_commit: str) -> dict[str, 
         right = np.asarray(oracle_entry[name], dtype=np.float64)
         initial[name] = {
             "bit_exact": bool(np.array_equal(left, right)),
-            "unequal": int(np.count_nonzero(
-                np.ascontiguousarray(left).view(np.uint64)
-                != np.ascontiguousarray(right).view(np.uint64))),
+            # The campaign's frozen exact predicate is np.array_equal; keep
+            # its signed-zero convention in the companion census too.
+            "unequal": int(np.count_nonzero(left != right)),
         }
 
     zero = jnp.zeros_like(state.eta.data, dtype=jnp.float64)
@@ -160,9 +162,13 @@ def measure(deck_root: Path, frame_root: Path, expect_commit: str) -> dict[str, 
     completed = 0
     for step in range(1, STEPS + 1):
         try:
-            state = jax.device_get(model.step(
+            pending = model.step(
                 state, card.dt_s,
-                freshwater=freshwater, surface_forcing=surface))
+                freshwater=freshwater, surface_forcing=surface)
+            # JAX dispatch is asynchronous.  Synchronise every state leaf so a
+            # pure-callback guard is attributed to the step that executed it,
+            # not a later dispatch that happened to observe the error token.
+            state = jax.device_get(jax.block_until_ready(pending))
         except ValueError as error:
             refusal = {"step": step, "message": str(error)}
             break
