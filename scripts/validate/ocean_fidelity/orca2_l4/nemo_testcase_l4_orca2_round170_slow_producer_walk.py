@@ -60,6 +60,15 @@ def _score(candidate, oracle, active) -> dict:
     return r167._score(candidate, oracle, active)
 
 
+def _with_jpk_zero(value) -> np.ndarray:
+    """Append NEMO's structural, non-contributing jpk record slot."""
+
+    value = np.asarray(value, dtype=np.float64)
+    require(value.ndim == 3 and value.shape[-1] == 30,
+            "candidate physical-level count moved")
+    return np.concatenate([value, np.zeros_like(value[..., :1])], axis=-1)
+
+
 def _payload_values(path: Path) -> tuple[dict, dict[str, np.ndarray]]:
     """Parse values from the record's own field headers after admission."""
 
@@ -169,10 +178,10 @@ def _candidate_reference_operands(card, state):
     wet_u = (ops.hu_0 > 0.0).astype(state.u.data.dtype)
     wet_v = (ops.hv_0 > 0.0).astype(state.v.data.dtype)
     return {
-        "e3_u": r97._native_u(ops.e3u_0),
-        "e3_v": r97._native_v(ops.e3v_0),
-        "mask_u": r97._native_u(ops.umask3),
-        "mask_v": r97._native_v(ops.vmask3),
+        "e3_u": _with_jpk_zero(r97._native_u(ops.e3u_0)),
+        "e3_v": _with_jpk_zero(r97._native_v(ops.e3v_0)),
+        "mask_u": _with_jpk_zero(r97._native_u(ops.umask3)),
+        "mask_v": _with_jpk_zero(r97._native_v(ops.vmask3)),
         "r1_h0_u": r97._native_u(wet_u / (ops.hu_0 + one - wet_u)),
         "r1_h0_v": r97._native_v(wet_v / (ops.hv_0 + one - wet_v)),
     }
@@ -278,8 +287,8 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
     operands = trace.slow_forcing_operands
     candidate = _candidate_reference_operands(card, state)
     candidate.update({
-        "rhs_u": r97._native_u(operands["du_dt"]),
-        "rhs_v": r97._native_v(operands["dv_dt"]),
+        "rhs_u": _with_jpk_zero(r97._native_u(operands["du_dt"])),
+        "rhs_v": _with_jpk_zero(r97._native_v(operands["dv_dt"])),
         "depth_u": r97._native_u(operands["depth_u"]),
         "depth_v": r97._native_v(operands["depth_v"]),
         "drag_u": r97._native_u(operands["post_drag_u"]),
@@ -321,8 +330,8 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
         recorded_replay[face] = _score(replay, oracle[f"depth_{face}"], active2[face])
 
     rhs_override = (
-        r97._to_model_u(oracle["rhs_u"]),
-        r97._to_model_v(oracle["rhs_v"]),
+        r97._to_model_u(oracle["rhs_u"][..., :-1]),
+        r97._to_model_v(oracle["rhs_v"][..., :-1]),
     )
     arm_trace = _trace_at_kt8(
         card, state, freshwater, surface,
