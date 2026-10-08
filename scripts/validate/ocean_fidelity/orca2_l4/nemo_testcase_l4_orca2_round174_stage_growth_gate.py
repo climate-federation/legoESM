@@ -167,7 +167,7 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
         "error": EXPECTED_TERMINAL,
     }, "kt=8 stage-3 terminal boundary moved")
     for boundary in report["boundaries"]:
-        require(tuple(boundary["rows"]) == FIELDS,
+        require(set(boundary["rows"]) == set(FIELDS),
                 f"kt={boundary['kt']} stage={boundary['stage']} field order moved")
         for field in FIELDS:
             row = boundary["rows"][field]

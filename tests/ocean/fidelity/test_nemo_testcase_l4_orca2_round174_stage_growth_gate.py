@@ -57,8 +57,14 @@ def test_clean_report_selects_kt1_stage1():
 
 @pytest.mark.parametrize("plant", gate.PLANTS[1:])
 def test_all_plants_fire(plant):
+    report = json.loads(json.dumps(_report(), sort_keys=True))
     with pytest.raises(gate.GateError):
-        gate.classify(_report(), plant)
+        gate.classify(report, plant)
+
+
+def test_sorted_json_report_reclassifies_cleanly():
+    report = json.loads(json.dumps(_report(), sort_keys=True))
+    assert gate.classify(report)["status"] == "PASS_ROUND174_STAGE_GROWTH_BOUNDARY"
 
 
 def test_later_larger_growth_cannot_displace_first():

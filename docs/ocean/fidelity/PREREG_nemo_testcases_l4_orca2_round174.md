@@ -97,3 +97,9 @@ only while rendering JSON because NumPy's `unravel_index` left the argmax
 indices as `int64` objects. No scientific selector or row failed. The corrected
 serializer converts those indices to Python integers and a direct measured-row
 JSON test now pins that boundary. No prediction or measurement rule changes.
+The fifth check found that sorted JSON changes mapping iteration order even
+though the explicit `field_order` registry stays T/S/u/v. Runtime measurement
+classified before serialization, but reclassification and plants then refused
+on alphabetical mapping order. The corrected gate requires exactly the four
+registered field keys and always iterates the explicit registry. A sorted-JSON
+round-trip test now pins this. No scientific row or selector changes.
