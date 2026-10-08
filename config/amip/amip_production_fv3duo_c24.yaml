@@ -239,6 +239,7 @@ sic_scale: 0.01
 solar_source: spectral_file
 solar_tsi_var: TSI
 solar_spectral_var: SSI_frac
+solar_spectral_band_order: rrtmg_sw   # explicit: SSI_frac is in RRTMG-SW band order (adapt_cmip6_solar.py); 'auto' only inferred it
 ozone_forcing: external
 ghg_forcing: external
 aerosol_forcing: external

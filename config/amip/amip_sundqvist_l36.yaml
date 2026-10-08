@@ -437,6 +437,7 @@ solar_source: spectral_file  # transient TSI + 14-band spectral SSI (2026-07-23
                             # Weights reach rrtmg/rrtmgp only (gray: TSI only).
 solar_tsi_var: TSI
 solar_spectral_var: SSI_frac
+solar_spectral_band_order: rrtmg_sw   # explicit (adapt_cmip6_solar.py writes RRTMG-SW order)
 ozone_forcing: external
 ghg_forcing: external
 aerosol_forcing: external

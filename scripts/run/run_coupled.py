@@ -545,6 +545,28 @@ def build_parser():
              "~1e-6 phase-shift vs the fused path). Pass --no-unfused-radiation "
              "for the byte-identical legacy fused path.",
     )
+    # External CMIP6 radiative forcing (ozone + solar), the SAME flags/dests as
+    # run_amip.py so one forcing set serves every lane (tests/unit/
+    # test_run_coupled_forcing_cli.py pins the two parsers against each other).
+    # Without these the coupled lane silently ran the built-in ozone profile
+    # and a constant sun (ExperimentConfig defaults) whatever the AMIP deck did.
+    parser.add_argument("--ozone-source", type=str, default="standard",
+                        choices=["standard", "analytical", "mls", "none"])
+    parser.add_argument("--ozone-forcing", type=str, default="inline",
+                        choices=["inline", "external", "off"])
+    parser.add_argument("--ozone-file", type=str, default="",
+                        help="Ozone NetCDF (CMIP6 input4MIPs vmro3 compatible); "
+                             "see run_amip.py --ozone-file.")
+    parser.add_argument("--solar-source", type=str, default="constant",
+                        choices=["constant", "file", "spectral_file"])
+    parser.add_argument("--solar-file", type=str, default="")
+    parser.add_argument("--solar-tsi-var", type=str, default="tsi")
+    parser.add_argument("--solar-spectral-var", type=str,
+                        default="solar_fraction_by_gpt")
+    parser.add_argument("--solar-spectral-band-order", type=str, default="auto",
+                        choices=["auto", "as_is", "rrtmg_sw"],
+                        help="Band order of a 14-band spectral file "
+                             "(issue #322); see run_amip.py.")
     parser.add_argument(
         "--orbital-insolation", action="store_true", default=False,
         dest="orbital_insolation",
@@ -1176,6 +1198,20 @@ def resolve_coupled_microphysics(grid: str, microphysics: str | None):
     return microphysics, "kept"
 
 
+def require_forcing_files(args) -> None:
+    """Refuse an external forcing channel with no file, loudly.
+
+    Mirrors run_amip._postprocess_args: the ozone loader substitutes its
+    reference profile when the path is empty (``use_reference_if_missing``),
+    so an omitted ``--ozone-file`` would run DIFFERENT ozone silently.
+    """
+    if args.ozone_forcing == "external" and not args.ozone_file:
+        raise SystemExit("--ozone-file is required with --ozone-forcing external")
+    if args.solar_source != "constant" and not args.solar_file:
+        raise SystemExit("--solar-file is required with --solar-source "
+                         f"{args.solar_source}")
+
+
 def main():
     parser = build_parser()
 
@@ -1306,6 +1342,7 @@ def main():
     from legoesm.driver.coupled_config import PRESETS
     from legoesm.ocean.simple_ocean import SimpleOceanConfig
 
+    require_forcing_files(args)
     atm_config = ExperimentConfig(
         grid=GridConfig(
             grid_type=args.grid,
@@ -1349,6 +1386,14 @@ def main():
         rrtmgp_gpoint_batch_size=args.rrtmgp_gpoint_batch_size,
         rrtmgp_gpoint_checkpoint=args.rrtmgp_gpoint_checkpoint,
         rrtmgp_column_chunk_size=args.radiation_column_chunk,
+        ozone_source=args.ozone_source,
+        ozone_forcing=args.ozone_forcing,
+        ozone_file=args.ozone_file,
+        solar_source=args.solar_source,
+        solar_file=args.solar_file,
+        solar_tsi_var=args.solar_tsi_var,
+        solar_spectral_var=args.solar_spectral_var,
+        solar_spectral_band_order=args.solar_spectral_band_order,
         ic=args.ic,
         ic_path=args.ic_path,
         convection=args.convection,

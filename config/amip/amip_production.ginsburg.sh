@@ -51,8 +51,24 @@ DATA="${AMIP_DATA:-${REPO}/data/amip}"
 : "${SST_OFFSET:=273.15}"
 
 # --- external CMIP6 forcing (synthetic deck by default; drop real input4MIPs in) -
-: "${SOLAR:=${FORCING_DIR}/solar_amip_1979-2014.nc}"
-: "${OZONE:=${FORCING_DIR}/ozone_amip_clim.nc}"
+# REAL input4MIPs ozone + solar (2026-10-06).  The synthetic deck's
+# ozone_amip_clim.nc has no ozone above 5 hPa and solar_amip_1979-2014.nc
+# carries 9.7x the reference flux in the Hartley UV band: together they heated
+# the 7.6 hPa layer by +3.5 K/day on every lane and NaN'd the duo CAM6 60-day
+# run at day 12.  Staged by scripts/data/download_cmip6_forcing.py +
+# adapt_cmip6_solar.py (SOLARIS-HEPPA-3-2 monthly -> TSI + 14-band SSI_frac) +
+# a zonal-mean concatenation of UReading-CCMI-1-0 vmro3 1850-2014 (the loader
+# zonal-averages anyway; it takes ONE ozone path).  Same set for every grid.
+: "${CMIP6_FORCING_DIR:=/burg-archive/glab/users/pg2328/legoESM/data/cmip6_forcing}"
+: "${SOLAR:=${CMIP6_FORCING_DIR}/solar_cmip6_SOLARIS-HEPPA-3-2_mon.nc}"
+: "${OZONE:=${CMIP6_FORCING_DIR}/vmro3_input4MIPs_ozone_CMIP_UReading-CCMI-1-0_zonalmean_185001-201412.nc}"
+# The coupled CMIP lane (run_coupled.py) has no YAML for these: pass the whole
+# set so it consumes the SAME real forcing as every AMIP grid.
+CMIP6_FORCING_FLAGS=(
+  --ozone-source standard --ozone-forcing external --ozone-file "${OZONE}"
+  --solar-source spectral_file --solar-file "${SOLAR}"
+  --solar-tsi-var TSI --solar-spectral-var SSI_frac --solar-spectral-band-order rrtmg_sw
+)
 : "${GHG:=${FORCING_DIR}/ghg_amip_1979-2014.nc}"
 : "${AEROSOL:=${FORCING_DIR}/aerosol_amip_clim.nc}"
 : "${VOLCANIC:=${FORCING_DIR}/volcanic_amip_1979-2014.nc}"

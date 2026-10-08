@@ -13438,6 +13438,14 @@ class ModelDriver:
                 self._aerosol_lw_active, self._ghg_active,
                 bool(self._experiment),
             )
+            # Transient solar (TSI + 14-band spectrum), sampled daily like
+            # ozone; same gates as the MPAS loop.  Until 2026-10-06 the
+            # spectral loop never threaded it (a real solar file was inert).
+            _solar_ext = (cfg.radiation != "none"
+                          and cfg.solar_source in ("file", "spectral_file"))
+            _solar_spectral = (_solar_ext
+                               and cfg.solar_source == "spectral_file"
+                               and cfg.radiation in ("rrtmg", "rrtmgp"))
             logger.info(
                 "  Spectral full-physics AMIP pipeline: "
                 f"radiation={_rad_scheme} clouds={_cloud_scheme} "
@@ -13580,26 +13588,40 @@ class ModelDriver:
                 _T_sfc_step = blend_surface_temperature(
                     sst_step, sic_step, T_ice).reshape(-1)
                 _fd_int = daily_forcing_bucket(self._current_day)
-                if _ext_forcing and _fd_int != _last_ext_day:
-                    _f_now = spectral_pe_to_grid(
-                        self.state, self.grid, self.sigma)
-                    # Sample at the CANONICAL day boundary, not the first
-                    # step entering the day — a restart link's first step
-                    # lands mid-day (same bug class as the MPAS loop; see
-                    # daily_forcing_bucket / FIX_RESTART_TIME).
-                    _o3, _aer, _ghg = self._precompute_external_forcing(
-                        float(_fd_int), _f_now['p_s'], _lat_2d_loop,
-                    )
-                    _ext_daily = {"o3_vmr": _o3, "aerosol_od": _aer}
-                    # Volcanic LONGWAVE aerosol (gap #9): only when active
-                    # (omitted ⇒ None ⇒ RRTMGP no-op ⇒ byte-identical).
-                    _aer_lw = getattr(self, "_aerosol_lw_od", None)
-                    if self._aerosol_lw_active and _aer_lw is not None:
-                        _ext_daily["aerosol_lw_od"] = _aer_lw
-                    if _ghg is not None:
-                        _ext_daily["ghg_vmr"] = {
-                            k: jnp.asarray(v) for k, v in _ghg.items()
-                        }
+                if (_ext_forcing or _solar_ext) and _fd_int != _last_ext_day:
+                    _ext_daily = {}
+                    if _ext_forcing:
+                        _f_now = spectral_pe_to_grid(
+                            self.state, self.grid, self.sigma)
+                        # Sample at the CANONICAL day boundary, not the first
+                        # step entering the day — a restart link's first step
+                        # lands mid-day (same bug class as the MPAS loop; see
+                        # daily_forcing_bucket / FIX_RESTART_TIME).
+                        _o3, _aer, _ghg = self._precompute_external_forcing(
+                            float(_fd_int), _f_now['p_s'], _lat_2d_loop,
+                        )
+                        _ext_daily = {"o3_vmr": _o3, "aerosol_od": _aer}
+                        # Volcanic LONGWAVE aerosol (gap #9): only when active
+                        # (omitted ⇒ None ⇒ RRTMGP no-op ⇒ byte-identical).
+                        _aer_lw = getattr(self, "_aerosol_lw_od", None)
+                        if self._aerosol_lw_active and _aer_lw is not None:
+                            _ext_daily["aerosol_lw_od"] = _aer_lw
+                        if _ghg is not None:
+                            _ext_daily["ghg_vmr"] = {
+                                k: jnp.asarray(v) for k, v in _ghg.items()
+                            }
+                    if _solar_ext:
+                        from legoesm.forcing.external import (
+                            get_solar_forcing_at_time,
+                        )
+                        _sol = get_solar_forcing_at_time(
+                            self._solar_config, float(_fd_int))
+                        _ext_daily["tsi"] = jnp.asarray(float(_sol["tsi"]))
+                        if (_solar_spectral
+                                and _sol.get("solar_fraction_by_gpt")
+                                is not None):
+                            _ext_daily["solar_spectral_fraction"] = (
+                                jnp.asarray(_sol["solar_fraction_by_gpt"]))
                     _last_ext_day = _fd_int
                 _doy, _sod = self._calendar_for_radiation(self._current_day)
                 forcing_data = {

@@ -14,6 +14,8 @@ set +e
 cd /burg-archive/glab/users/pg2328/legoESM
 export PYTHONPATH=$(ls -d packages/*/ | tr '\n' ':')$PYTHONPATH
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
+# real input4MIPs ozone + solar, the same set every AMIP grid runs (2026-10-06)
+source config/amip/amip_production.ginsburg.sh
 echo "=== HOST ==="; hostname; nvidia-smi -L 2>/dev/null; date
 OUT=results/cmip6_coupled/coarse5deg_rrtmgp_L10
 JAX_ENABLE_X64=1 $PY -u scripts/run/run_coupled.py \
@@ -22,6 +24,7 @@ JAX_ENABLE_X64=1 $PY -u scripts/run/run_coupled.py \
   --convection sbm --turbulence holtslag_boville \
   --gravity-wave-drag hines --clouds sundqvist --microphysics kessler \
   --experiment historical --start-year 1850 \
+  "${CMIP6_FORCING_FLAGS[@]}" \
   --cmip-output --cmip-resolution-deg 5.0 --output "$OUT"
 echo "run_rc=$?"; date
 echo "=== CMOR ==="; find "$OUT" -name "*.nc" 2>/dev/null | sed 's#.*/cmor/##' | sort | head -25

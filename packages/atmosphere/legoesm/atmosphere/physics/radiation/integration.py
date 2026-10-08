@@ -778,6 +778,7 @@ def _call_radiation_backend(
     aerosol_lw_od: jnp.ndarray | None = None,
     solar_spectral_fraction: jnp.ndarray | None = None,
     eccf: float | jnp.ndarray = 1.0,
+    tsi: jnp.ndarray | None = None,
     cloud_fraction_override: jnp.ndarray | None = None,
     conv_precip: jnp.ndarray | None = None,
     conv_mass_flux_up: jnp.ndarray | None = None,
@@ -857,8 +858,12 @@ def _call_radiation_backend(
     # orbit flag so the circular-orbit path is bit-for-bit unchanged.
     _orbit_on = getattr(radiation_config, "orbit", None) is not None
     _sw_scale = None
+    # Transient TSI: the caller's ``insolation`` is already scaled by
+    # tsi/S_0, but the solver runs at its configured S_0.  So derive the
+    # optical-path cosine with ``tsi`` (stays geometric) and put tsi/S_0 on
+    # the SW flux below.  ``None`` -> byte-identical to the static-S_0 path.
     if cos_sza is None:
-        S_0 = radiation_config.rrtmgp.S_0
+        S_0 = radiation_config.rrtmgp.S_0 if tsi is None else tsi
         if f_day is not None:
             # Use daytime-effective cos(SZA): insol = (a/r)^2·S_0·f_day·<cos>_day
             # so <cos>_day = insol / (eccf·S_0·f_day).  The solver sees the
@@ -882,6 +887,11 @@ def _call_radiation_backend(
         # Diurnal path: cos_sza is already geometric; apply the distance factor
         # to the SW flux (the solver runs with S_0, not S_0·eccf).
         _sw_scale = jnp.full((cos_sza.shape[0],), eccf, dtype=cos_sza.dtype)
+    if tsi is not None:
+        _tsi_ratio = jnp.broadcast_to(
+            tsi / radiation_config.rrtmgp.S_0, (cos_sza.shape[0],)
+        ).astype(cos_sza.dtype)
+        _sw_scale = _tsi_ratio if _sw_scale is None else _sw_scale * _tsi_ratio
     q_v_safe = q_v if q_v is not None else jnp.zeros_like(T)
 
     # Compute ozone VMR based on config — unless the caller supplied a
@@ -1631,6 +1641,7 @@ def _make_hydrostatic_radiation(
             conv_mass_flux_up=_conv_mf_col,
             conv_icwmr=_conv_icwmr_col,
             solar_spectral_fraction=_ssf_ext,
+            tsi=_tsi_ext,
         )
 
         # #843 lean-lane clear-sky second pass: SAME column state and
@@ -1674,6 +1685,7 @@ def _make_hydrostatic_radiation(
                 cloud_fraction_override=None,
                 conv_precip=None,
                 solar_spectral_fraction=_ssf_ext,
+                tsi=_tsi_ext,
             )
             sw_up_toa_clr = rad_out_clr.sw_flux_up[:, 0]
             lw_up_toa_clr = rad_out_clr.lw_flux_up[:, 0]
@@ -2613,6 +2625,20 @@ def _make_spectral_pe_radiation(
             insol = jnp.broadcast_to(insol_1d[:, None], (n_lat, n_lon))
             cos_sza = None
             f_day = jnp.broadcast_to(f_day_1d[:, None], (n_lat, n_lon)) if f_day_1d is not None else None
+        # Transient solar from the traced forcing dict, exactly as the
+        # hydrostatic/MPAS wrapper: ``tsi`` rescales the insolation (linear in
+        # S_0 in both branches above) and ``solar_spectral_fraction`` reaches
+        # the rrtmgp solver.  Absent keys -> the configured S_0 and the
+        # solver's default spectrum (byte-identical).  Before 2026-10-06 the
+        # spectral lane never read either, so a real solar file was inert here.
+        _tsi_ext = forcing.get("tsi") if forcing is not None else None
+        _ssf_ext = (forcing.get("solar_spectral_fraction")
+                    if forcing is not None else None)
+        if _tsi_ext is not None:
+            _s0_cfg = (radiation_config.rrtmgp.S_0
+                       if radiation_config.scheme == "rrtmgp"
+                       else radiation_config.gray.S_0)
+            insol = insol * (_tsi_ext / _s0_cfg)
 
         # Reshape to columns: (n_lat, n_lon, ...) -> (ncol, ...)
         ncol = n_lat * n_lon
@@ -2670,6 +2696,8 @@ def _make_spectral_pe_radiation(
             lon=lon_col,
             ml_ozone_coefs=ml_ozone_coefs,
             o3_vmr_override=_o3_ext,
+            solar_spectral_fraction=_ssf_ext,
+            tsi=_tsi_ext,
             aerosol_od=_aer_ext,
             aerosol_lw_od=_aer_lw_ext,
             ghg_vmr_override=_ghg_ext,
