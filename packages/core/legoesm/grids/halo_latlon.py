@@ -27,6 +27,8 @@ no separate operator entry points per backend.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 import jax.numpy as jnp
 
 # --- Meridionally-periodic (y-re-entrant channel) mode -----------------------
@@ -57,6 +59,17 @@ def set_meridionally_periodic(enabled: bool) -> None:
 def get_meridionally_periodic() -> bool:
     """Return whether the meridionally-periodic boundary mode is active."""
     return _MERIDIONALLY_PERIODIC
+
+
+@contextmanager
+def meridional_periodicity(enabled: bool):
+    """Scope the y-wrap mode to a block (trace inside it); restores on exit."""
+    previous = _MERIDIONALLY_PERIODIC
+    set_meridionally_periodic(enabled)
+    try:
+        yield
+    finally:
+        set_meridionally_periodic(previous)
 
 
 # --- Meridionally-FLAT (Oceananigans `Flat`-y topology) mode ------------------
