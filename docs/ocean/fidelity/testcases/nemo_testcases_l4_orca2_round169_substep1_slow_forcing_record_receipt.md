@@ -116,8 +116,22 @@ decremented a 15,721-cell census and was therefore vacuous; commit
 `entry-U one-variable replay coverage is empty`. Failed predictions remain
 in the report.
 
-Validation and independent-review results are recorded below after the
-frozen receipt is gated.
+Focused coverage passes 25/25. The round receipt's eight citations pass with
+zero failures or unmapped spans; shifting the vertical-reduction span by two
+lines makes the citation plant fail. The cumulative receipt gate also passes
+274 citations with zero failures and zero unmapped spans.
+
+The one required `tests/ocean/fidelity -n 12` invocation collected 2,726
+tests and reached 97%, with four failure markers and seven skips, but emitted
+no terminal summary and no pytest process remained to poll. It was not run a
+second time. The four-marker count equals the registered pre-existing count
+from round 168, while the unavailable terminal node IDs mean this round does
+not claim an exact ID match. The focused round-169 and citation tests had
+already passed independently.
+
+The separate `codex exec --sandbox read-only` review attempt returned
+**independent review unavailable in-sandbox** before reading the diff:
+`failed to initialize in-process app-server client: Read-only file system`.
 
 ASKED choices: continue the compiled-source independent rung-0 walk. UNASKED
 choices: empty. No configuration decision is requested.
