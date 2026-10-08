@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 
+import numpy as np
 import pytest
 
 from scripts.validate.ocean_fidelity.orca2_l4 import (
@@ -57,3 +58,19 @@ def test_forcing_prediction_is_refuted_by_a_later_first_debt() -> None:
     report["first_over_floor"] = later
     classified = gate.classify(report)
     assert classified["prediction_ledger"]["R178-P4"] == "REFUTED"
+
+
+def test_source_score_includes_masked_values_that_feed_active_stencils() -> None:
+    candidate = np.zeros((2, 2), dtype=np.float64)
+    oracle = candidate.copy()
+    oracle[0, 1] = 1.0e-3
+    active = np.array([[True, False], [True, True]])
+
+    active_row = gate._score(candidate, oracle, active)
+    source_row = gate._score(
+        candidate, oracle, active, complete_domain=True)
+
+    assert active_row["at_floor"]
+    assert not source_row["at_floor"]
+    assert source_row["full_domain_argmax_jik"] == [0, 1]
+    assert source_row["comparison_domain"] == "complete-recorded"

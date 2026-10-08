@@ -66,13 +66,27 @@ def require(condition: bool, message: str) -> None:
         raise GateError(message)
 
 
-def _score(candidate, oracle, active) -> dict[str, object]:
+def _score(candidate, oracle, active, *, complete_domain: bool = False) -> dict[str, object]:
+    candidate = np.asarray(candidate, dtype=np.float64)
+    oracle = np.asarray(oracle, dtype=np.float64)
     row = rhs_walk.score(
-        np.asarray(candidate, dtype=np.float64),
-        np.asarray(oracle, dtype=np.float64),
+        candidate,
+        oracle,
         np.asarray(active, dtype=bool),
     )
-    row["at_floor"] = bool(row["absolute_max"] <= FLOOR)
+    full_delta = np.abs(candidate - oracle)
+    full_flat = int(np.argmax(full_delta))
+    row["full_domain_absolute_max"] = float(full_delta.flat[full_flat])
+    row["full_domain_argmax_jik"] = [
+        int(index) for index in np.unravel_index(full_flat, full_delta.shape)
+    ]
+    row["full_domain_rms"] = float(np.sqrt(np.mean(full_delta * full_delta)))
+    comparison_max = (
+        row["full_domain_absolute_max"] if complete_domain
+        else row["absolute_max"]
+    )
+    row["comparison_domain"] = "complete-recorded" if complete_domain else "active"
+    row["at_floor"] = bool(comparison_max <= FLOOR)
     row["verdict"] = (
         "AT_BAR_BIT_EXACT" if row["bit_exact"] else
         ("AT_BAR_NOT_EXACT" if row["at_floor"] else "DEBT")
@@ -117,7 +131,12 @@ def _source_rows(observed, oracle, active) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
 
     def add(name, candidate, target, mask, *, substep=None):
-        row = {"name": name, **_score(candidate, target, mask)}
+        # Fold and cyclic halo values can be masked as prognostic faces yet
+        # remain operands of a neighbouring active-cell stencil.  Source-order
+        # attribution therefore scores the complete rank-assembled record;
+        # active-mask counts remain in the same row as diagnostics.
+        row = {"name": name, **_score(
+            candidate, target, mask, complete_domain=True)}
         if substep is not None:
             row["substep"] = substep
         rows.append(row)
