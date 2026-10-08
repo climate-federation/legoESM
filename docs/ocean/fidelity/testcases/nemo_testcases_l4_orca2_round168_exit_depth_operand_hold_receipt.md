@@ -91,10 +91,23 @@ itself raw-depth row was also removed before citation; only its range and the
 independent sum replay remain.
 
 All four plants fire by corrupting the native-face census, source order,
-depth-replay coverage and face-SSH-replay coverage. Focused tests pass. The
-cumulative and round-receipt citation gates, the required ocean-fidelity
-battery and the independent read-only review are recorded in the final
-evidence manifest.
+depth-replay coverage and face-SSH-replay coverage. Focused coverage passes
+44/44. The cumulative citation gate passes 274 citations with zero failures
+or unmapped spans; the round receipt passes all four citations, and shifting
+the U-face-average span by two lines makes the plant fail.
+
+The one required `tests/ocean/fidelity -n 12` invocation reached 99%, then
+stopped emitting for more than ten minutes and was interrupted without a
+second full battery. Its retained log has 2,707 terminal outcomes: 2,696
+passed, 7 skipped and 4 failed. The four failures are the registered
+pre-existing reds from rounds 166-167: the moved GYRE spread record, unscoped
+allow-dirty drivers, unstamped report emitters and SI3 scalar-math provenance.
+No round-168 test failed; the log contains no symbol-materialisation error,
+`MemoryError`, worker crash or pytest error.
+
+The separate `codex exec --sandbox read-only` review attempt returned
+**independent review unavailable in-sandbox** before reading the diff:
+`failed to initialize in-process app-server client: Read-only file system`.
 
 ASKED choices: continue the compiled-source independent rung-0 walk. UNASKED
 choices: empty. No selector, stabiliser, forcing, carried-state policy,
