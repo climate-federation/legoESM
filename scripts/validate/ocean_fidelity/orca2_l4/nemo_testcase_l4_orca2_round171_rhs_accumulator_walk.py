@@ -58,6 +58,10 @@ def require(condition: bool, message: str) -> None:
         raise GateError(message)
 
 
+def _discard_terms(_values) -> None:
+    """Stable host sink: one observed executable is reused for kt=1..7."""
+
+
 def _owned_values(path: Path) -> tuple[dict, dict[str, np.ndarray]]:
     """Parse payloads from the record's own self-describing headers."""
 
@@ -225,14 +229,15 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
         _nemo_ws_test_hooks=hooks)
     observed = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
-        _nemo_ws_test_hooks=hooks)
+        _nemo_ws_test_hooks=hooks._replace(
+            slow_forcing_rhs_term_observer=_discard_terms))
 
     passivity = {}
     for kt in range(1, 8):
         next_state = jax.device_get(ordinary.step(
             state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
-        observed_state, _ = r93._capture_stage1_parts(
-            observed, state, card.dt_s, freshwater, surface)
+        observed_state = jax.device_get(observed.step(
+            state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
         passivity[str(kt)] = r166._state_rows(observed_state, next_state)
         state = next_state
         print(f"PROGRESS round171 complete kt={kt}", file=sys.stderr, flush=True)
