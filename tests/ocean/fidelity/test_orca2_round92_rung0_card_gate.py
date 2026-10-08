@@ -9,6 +9,7 @@ import pytest
 
 from legoesm.core.precision import PrecisionPolicy, set_policy
 from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+    build_orca2_initial_ts,
     build_orca2_zps_card,
 )
 from scripts.validate.ocean_fidelity.orca2_l4 import (
@@ -45,7 +46,35 @@ def test_rung0_card_states_every_hierarchy_exclusion(cards) -> None:
     assert cfg.physics.convection.scheme == "enhanced_diffusion"
     assert (cfg.bbl_adv_option, cfg.bbl_diffusive_option) == (0, 0)
     assert rung0.unmeasured_features == ("linear_implicit_bottom_drag",)
+    assert rung0.surface_input_operator == "nemo_fld_read_no_tsd_dmp"
     assert shipped.unmeasured_features[-1] == "si3_jpl5_layered_prather_state"
+
+
+def test_rung0_initial_ts_obeys_disabled_damping_guard(cards) -> None:
+    shipped, rung0 = cards
+    tmask = np.asarray(rung0.recipe.z_coord.is_active, dtype=bool)
+    expected_t, expected_s = build_orca2_initial_ts(
+        DECK / "data_1m_potential_temperature_nomask.nc",
+        DECK / "data_1m_salinity_nomask.nc",
+        tmask,
+        apply_hand_alterations=False,
+    )
+    assert np.array_equal(np.asarray(rung0.recipe.initial_state.T.data), expected_t)
+    assert np.array_equal(np.asarray(rung0.recipe.initial_state.S.data), expected_s)
+
+    shipped_t = np.asarray(shipped.recipe.initial_state.T.data)
+    shipped_s = np.asarray(shipped.recipe.initial_state.S.data)
+    rung0_t = np.asarray(rung0.recipe.initial_state.T.data)
+    rung0_s = np.asarray(rung0.recipe.initial_state.S.data)
+    assert np.count_nonzero((shipped_t != rung0_t) & tmask) == 1283
+    assert np.count_nonzero((shipped_s != rung0_s) & tmask) == 720
+
+
+def test_rung0_validator_rejects_live_tsd_damping_metadata(cards) -> None:
+    _, rung0 = cards
+    changed = rung0._replace(surface_input_operator="nemo_fld_read")
+    with pytest.raises(gate.GateError, match="module exclusion"):
+        gate.validate_rung0_card(changed)
 
 
 def test_rung0_execution_refuses_only_declared_drag(cards) -> None:

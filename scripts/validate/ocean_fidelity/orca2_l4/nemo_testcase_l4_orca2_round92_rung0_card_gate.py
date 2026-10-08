@@ -16,6 +16,7 @@ for package in (REPO_ROOT, REPO_ROOT / "packages/core", REPO_ROOT / "packages/oc
         sys.path.insert(0, str(package))
 
 from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+    build_orca2_initial_ts,
     build_orca2_zps_card,
 )
 from scripts.validate.ocean_fidelity.orca2_l4 import (
@@ -81,7 +82,20 @@ def build_rung0_card(deck_root: Path):
         zdf_drag_in_matrix=False,
         barotropic_drag_substep=False,
     )
+    root = Path(deck_root)
+    temperature, salinity = build_orca2_initial_ts(
+        root / "data_1m_potential_temperature_nomask.nc",
+        root / "data_1m_salinity_nomask.nc",
+        np.asarray(shipped.recipe.z_coord.is_active, dtype=bool),
+        # The hierarchy rung-0 deck resolves ln_tsd_dmp=.false.; compiled
+        # dtatsd.f90:218-254 therefore skips the ORCA_R2 alteration block.
+        apply_hand_alterations=False,
+    )
     state = shipped.recipe.initial_state._replace(
+        T=shipped.recipe.initial_state.T.replace(
+            data=jnp.asarray(temperature, dtype=jnp.float64)),
+        S=shipped.recipe.initial_state.S.replace(
+            data=jnp.asarray(salinity, dtype=jnp.float64)),
         eta=shipped.recipe.initial_state.eta.replace(
             data=jnp.zeros_like(shipped.recipe.initial_state.eta.data)),
         tke=None,
@@ -108,7 +122,10 @@ def build_rung0_card(deck_root: Path):
         bbl_aht_m2_s=0.0,
         bbl_gamma_s=0.0,
         surface_boundary_condition="nemo_flx_zero",
-        surface_input_operator="nemo_fld_read",
+        # This explicit value distinguishes rung 0's resolved
+        # ln_tsd_dmp=.false. input path from the shipped card's live damping
+        # arm; it is card metadata, not a production model selector.
+        surface_input_operator="nemo_fld_read_no_tsd_dmp",
         unmeasured_features=("linear_implicit_bottom_drag",),
         icebergs_enabled=False,
         iceberg_inputs=(),
@@ -137,7 +154,7 @@ def validate_rung0_card(card, *, execution: bool = False) -> None:
         cfg.runoff_depth_spread_m == 0.0,
         cfg.runoff_depth_spread_map is None,
         card.surface_boundary_condition == "nemo_flx_zero",
-        card.surface_input_operator == "nemo_fld_read",
+        card.surface_input_operator == "nemo_fld_read_no_tsd_dmp",
         card.unmeasured_features == ("linear_implicit_bottom_drag",),
         cfg.bottom_drag.bottom_drag_scheme == "legacy",
         cfg.bottom_drag.bottom_drag_r == 4.0e-4,
