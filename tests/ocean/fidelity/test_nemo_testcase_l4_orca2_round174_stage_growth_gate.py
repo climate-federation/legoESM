@@ -1,4 +1,7 @@
 import copy
+import json
+
+import numpy as np
 
 import pytest
 
@@ -72,6 +75,11 @@ def test_one_ulp_control_is_mandatory():
     report["one_ulp_control"]["differing_cells"] = 0
     with pytest.raises(gate.GateError, match="one-ULP"):
         gate.classify(report)
+
+
+def test_measured_score_is_json_serializable():
+    score = gate._score(np.array([[1.0]]), np.array([[0.0]]))
+    assert json.loads(json.dumps(score))["argmax"] == [0, 0]
 
 
 def test_nonfinite_completed_stage_is_reported_as_infinite_growth():

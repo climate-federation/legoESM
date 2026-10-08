@@ -68,7 +68,7 @@ def _score(actual: np.ndarray, expected: np.ndarray) -> dict[str, object]:
         delta = np.abs(actual[finite] - expected[finite])
         max_abs = float(np.max(delta))
         argmax_flat = int(np.flatnonzero(finite)[int(np.argmax(delta))])
-        argmax = list(np.unravel_index(argmax_flat, actual.shape))
+        argmax = [int(index) for index in np.unravel_index(argmax_flat, actual.shape)]
     else:
         max_abs = None
         argmax = None

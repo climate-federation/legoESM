@@ -91,3 +91,9 @@ The corrected selector defines consecutive non-finite maxima as ratio 1.0;
 finite-to-non-finite remains `Infinity` and non-finite-to-finite is 0.0. This
 only makes the frozen selector total over its registered domain and cannot
 move the already-selected kt=1 stage-1 boundary.
+
+The fourth committed run completed and classified the full table, then failed
+only while rendering JSON because NumPy's `unravel_index` left the argmax
+indices as `int64` objects. No scientific selector or row failed. The corrected
+serializer converts those indices to Python integers and a direct measured-row
+JSON test now pins that boundary. No prediction or measurement rule changes.
