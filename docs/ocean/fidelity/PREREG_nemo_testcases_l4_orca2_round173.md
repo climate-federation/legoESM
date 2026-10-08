@@ -70,3 +70,20 @@ partial halo-unit landing is permitted.
 
 ASKED choices: continue round 172's independent rung-0 HPG walk.  
 UNASKED choices: empty.
+
+## Instrument correction after the first refused run
+
+The first committed measurement reached kt=8 and refused before writing a
+scientific report: the separately compiled candidate-input reconstruction did
+not reproduce the existing offline HPG component boundary bit-for-bit. Thus
+the intended operand walk is not yet an admitted instrument and no value from
+that run is citable. R173-P2's record-side replay remains unclassified because
+the candidate-side identity prerequisite stops first.
+
+The next run first prints the exact U/V identity rows while retaining the same
+hard refusal. If the residual is a layout error, correct the association and
+repeat. If the separately compiled graph itself changes arithmetic, replace it
+with an operand exposure from the already-admitted standalone component graph
+and require the exposed and unexposed HPG U/V outputs to be array-identical
+before reading any operand. The frozen walk order, predictions, thresholds and
+terminal rule above do not change.

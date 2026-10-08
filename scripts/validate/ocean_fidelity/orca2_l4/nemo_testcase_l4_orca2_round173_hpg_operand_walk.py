@@ -161,7 +161,8 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
             "recorded operands do not reproduce the recorded HPG statements")
     require(report["candidate_literal_matches_live_hpg"]["u"]["bit_exact"]
             and report["candidate_literal_matches_live_hpg"]["v"]["bit_exact"],
-            "candidate operand graph does not reproduce the live HPG boundary")
+            "candidate operand graph does not reproduce the live HPG boundary: "
+            f"{report['candidate_literal_matches_live_hpg']}")
     require(report["one_ulp_control"]["differing_cells"] == 1
             and not report["one_ulp_control"]["bit_exact"],
             "one-ULP known-answer control did not fire")
