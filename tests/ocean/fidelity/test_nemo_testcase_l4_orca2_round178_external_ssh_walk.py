@@ -13,10 +13,10 @@ from scripts.validate.ocean_fidelity.orca2_l4 import (
 
 
 def synthetic_report() -> dict:
-    source_order = list(gate.ENTRY_ORDER)
+    source_order = list(gate.ENTRY_ORDER[:2])
     rows = [
         {"name": name, "at_floor": True, "bit_exact": True}
-        for name in gate.ENTRY_ORDER
+        for name in gate.ENTRY_ORDER[:2]
     ]
     rows[1] = {"name": "u_forcing", "at_floor": False, "bit_exact": False}
     return {
@@ -49,8 +49,11 @@ def test_every_round178_plant_refuses(plant: str) -> None:
 
 def test_forcing_prediction_is_refuted_by_a_later_first_debt() -> None:
     report = synthetic_report()
-    report["baseline_source_rows"][1]["at_floor"] = True
-    report["baseline_source_rows"][1]["bit_exact"] = True
+    report["baseline_source_rows"] = [
+        {"name": name, "at_floor": True, "bit_exact": True}
+        for name in gate.ENTRY_ORDER
+    ]
+    report["source_order"] = list(gate.ENTRY_ORDER)
     later = {"name": gate.SUBSTEP_ORDER[0], "substep": 1,
              "at_floor": False, "bit_exact": False}
     report["baseline_source_rows"].append(later)
@@ -76,3 +79,13 @@ def test_source_score_includes_masked_values_that_feed_active_stencils() -> None
     assert not source_row["comparison_bit_exact"]
     assert source_row["full_domain_argmax_jik"] == [0, 1]
     assert source_row["comparison_domain"] == "complete-recorded"
+
+
+def test_classifier_refuses_rows_after_first_debt() -> None:
+    report = synthetic_report()
+    report["baseline_source_rows"].append({
+        "name": gate.ENTRY_ORDER[2], "at_floor": True, "bit_exact": True,
+    })
+    report["source_order"].append(gate.ENTRY_ORDER[2])
+    with pytest.raises(gate.GateError):
+        gate.classify(report)

@@ -257,6 +257,8 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
     first = next((row for row in report["baseline_source_rows"]
                   if row.get("measured", True) and not row["at_floor"]), None)
     require(first == report["first_over_floor"], "first-debt selector moved")
+    require(first is None or first == report["baseline_source_rows"][-1],
+            "walk continued beyond its first debt")
     report["prediction_ledger"] = {
         "R178-P1": "CONFIRMED",
         "R178-P2": "CONFIRMED" if report["entry_and_histories_exact"] else "REFUTED",
@@ -386,7 +388,12 @@ def measure(deck_root: Path, frame_root: Path, spg_root: Path,
         "transport_v": bool(np.array_equal(live_transport[1], traced_transport[1])),
     }
     require(all(passive.values()), "barotropic trace changes the observed solver")
-    rows = _source_rows(observed["baseline"], oracle, active)
+    all_rows = _source_rows(observed["baseline"], oracle, active)
+    first_index = next(
+        (index for index, row in enumerate(all_rows) if not row["at_floor"]),
+        None,
+    )
+    rows = all_rows if first_index is None else all_rows[:first_index + 1]
     source_order = [row["name"] if "substep" not in row else
                     f"{row['substep']:03d}:{row['name']}" for row in rows]
     first = next((row for row in rows if not row["at_floor"]), None)
@@ -428,7 +435,8 @@ def measure(deck_root: Path, frame_root: Path, spg_root: Path,
         "first_over_floor": first,
         "entry_and_histories_exact": bool(
             independent_entry_exact
-            and all(row["bit_exact"] for row in rows[3:len(ENTRY_ORDER)])),
+            and all(row["comparison_bit_exact"]
+                    for row in all_rows[3:len(ENTRY_ORDER)])),
         "endpoint_scores": endpoint,
         "history_arm_null": bool(history_null and slow_history_null),
         "slow_arm_improves_endpoint": bool(improves),
