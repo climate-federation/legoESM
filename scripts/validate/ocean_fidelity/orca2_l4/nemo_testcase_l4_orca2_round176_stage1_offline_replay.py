@@ -358,7 +358,12 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
 
     zfu_owned = jnp.asarray(oracle["trp_u"][..., :-1])
     zfv_owned = jnp.asarray(oracle["trp_v"][..., :-1])
-    zfw = jnp.asarray(oracle["trp_w"][..., :-1])
+    # zFw is a W-interface transport with jpk=31 levels for 30 T cells.
+    # _nemo_cen2_tracer_rhs consumes its 29 interior interfaces via 1:-1;
+    # dropping the terminal level here makes that slice one level too short.
+    zfw = jnp.asarray(oracle["trp_w"])
+    require(zfw.shape[-1] == state.T.data.shape[-1] + 1,
+            "recorded W transport does not carry all T-cell interfaces")
     zfu = jnp.concatenate((zfu_owned[:, -1:, :], zfu_owned), axis=1)
     zfv = jnp.concatenate((zfv_owned[-1:, :, :], zfv_owned), axis=0)
     geom = (zfu / jnp.asarray(grid.dy_u)[..., None],
