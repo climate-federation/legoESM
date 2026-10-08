@@ -81,6 +81,17 @@ def test_source_score_includes_masked_values_that_feed_active_stencils() -> None
     assert source_row["comparison_domain"] == "complete-recorded"
 
 
+def test_complete_domain_bit_score_distinguishes_signed_zero() -> None:
+    candidate = np.array([0.0], dtype=np.float64)
+    oracle = np.array([-0.0], dtype=np.float64)
+    source_row = gate._score(
+        candidate, oracle, np.ones(1, dtype=bool), complete_domain=True)
+
+    assert source_row["at_floor"]
+    assert not source_row["comparison_bit_exact"]
+    assert source_row["verdict"] == "AT_BAR_NOT_EXACT"
+
+
 def test_classifier_refuses_rows_after_first_debt() -> None:
     report = synthetic_report()
     report["baseline_source_rows"].append({

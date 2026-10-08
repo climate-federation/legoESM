@@ -86,7 +86,10 @@ def _score(candidate, oracle, active, *, complete_domain: bool = False) -> dict[
         else row["absolute_max"]
     )
     comparison_bit_exact = (
-        bool(np.array_equal(candidate, oracle)) if complete_domain
+        not bool(np.any(
+            np.ascontiguousarray(candidate).view(np.uint64)
+            != np.ascontiguousarray(oracle).view(np.uint64)
+        )) if complete_domain
         else bool(row["bit_exact"])
     )
     row["comparison_domain"] = "complete-recorded" if complete_domain else "active"
@@ -319,17 +322,17 @@ def measure(deck_root: Path, frame_root: Path, spg_root: Path,
         name: _score(candidate[name], frame[name], entry_active_masks[name])
         for name in ("T", "S", "u", "v", "ssh")
     }
-    independent_entry_storage = {
-        name: {
-            "bit_exact": bool(np.array_equal(candidate[name], frame[name])),
-            "differing_cells": int(np.count_nonzero(
-                np.asarray(candidate[name]).view(np.uint64)
-                != np.asarray(frame[name]).view(np.uint64))),
+    independent_entry_storage = {}
+    for name in ("T", "S", "u", "v", "ssh"):
+        candidate_bits = np.ascontiguousarray(candidate[name]).view(np.uint64)
+        frame_bits = np.ascontiguousarray(frame[name]).view(np.uint64)
+        differing_cells = int(np.count_nonzero(candidate_bits != frame_bits))
+        independent_entry_storage[name] = {
+            "bit_exact": differing_cells == 0,
+            "differing_cells": differing_cells,
             "max_abs": float(np.max(np.abs(
                 np.asarray(candidate[name]) - np.asarray(frame[name])))),
         }
-        for name in ("T", "S", "u", "v", "ssh")
-    }
     independent_entry_exact = bool(
         all(row["bit_exact"] for row in independent_entry.values()))
     slow = (_to_model_u(oracle["i000_zu_frc"]),
