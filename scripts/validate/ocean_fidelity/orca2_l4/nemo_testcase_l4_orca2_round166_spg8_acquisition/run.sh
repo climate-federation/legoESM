@@ -78,7 +78,7 @@ check_layout() {
   local source=$1
   [[ "$(grep -Fc 'CALL r95_spg_open' "$source")" -eq 1 ]] &&
   [[ "$(grep -Fc "CALL r95_spg_w2('ssha_e'" "$source")" -eq 1 ]] &&
-  [[ "$(grep -Fc "CALL r95_spg_w2('hur_e'" "$source")" -eq 1 ]] &&
+  [[ "$(grep -Fc "CALL r95_spg_w2('ua_new'" "$source")" -eq 1 ]] &&
   [[ "$(grep -Fc 'CALL r95_spg_close' "$source")" -eq 1 ]]
 }
 check_layout "$SOURCE_ROOT/MY_SRC/dynspg_ts.F90" || {
@@ -93,7 +93,7 @@ grep -Fq 'oracle_r166_spg_rank' "$WRITER" || {
 if [[ "$MODE" == --plant-layout ]]; then
   plant_source=$(mktemp /tmp/orca2-r166-layout.XXXXXX)
   cp "$SOURCE_ROOT/MY_SRC/dynspg_ts.F90" "$plant_source"
-  sed -i "/CALL r95_spg_w2('hur_e'/d" "$plant_source"
+  sed -i "/CALL r95_spg_w2('ua_new'/d" "$plant_source"
   if check_layout "$plant_source"; then
     printf 'REFUSE: layout plant stayed green\n' >&2; exit 69
   fi
