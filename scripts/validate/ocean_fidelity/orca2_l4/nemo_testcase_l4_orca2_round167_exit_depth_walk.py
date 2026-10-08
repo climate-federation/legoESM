@@ -160,32 +160,6 @@ def classify(report: dict, plant: str = "none") -> dict:
     return report
 
 
-def _trace_without_failing_companion(
-    model, state, dt, freshwater, surface,
-):
-    """Return the early barotropic trace without evaluating the full kt=8 step.
-
-    ``step`` normally pairs a boundary-association trace with a separately
-    compiled ordinary state.  That companion is the known round-165 terminal
-    and must fail after the already-materialised barotropic trace at kt=8.  This
-    helper performs the eager cache setup from ``step`` and calls its documented
-    jitted body directly, stopping at the trace return boundary.
-    """
-
-    import jax
-
-    seeded = model._seed_tke_preclosure_carry(state)
-    model.prime_step_caches(seeded)
-    with jax.disable_jit(False):
-        return model._step_jitted(
-            seeded, dt, freshwater, surface, None,
-            grid=None, vertex_mask=None, t_seconds=None,
-            external_tracer_rate=None,
-            _shortwave_tendency_test_delta=None,
-            _vertical_K_test_override=None,
-            _nemo_stage1_zad_eta_after_override=None)
-
-
 def measure(
     deck_root: Path, frame_root: Path, spg_root: Path, baseline_root: Path,
     expect_commit: str,
@@ -195,6 +169,9 @@ def measure(
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         LatLonCGridOceanModel,
+    )
+    from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
+        _nemo_external_mode_boundary_association,
     )
 
     stamp = worktree_stamp()
@@ -227,29 +204,39 @@ def measure(
             state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
         print(f"PROGRESS round167 complete kt={kt}", file=sys.stderr, flush=True)
 
-    trace_hooks = ordinary_hooks._replace(
-        expose_barotropic_substeps=True,
-        expose_barotropic_boundary_association=True)
+    # Keep the exact round-166 trace graph whose passivity and 42-cell boundary
+    # are already admitted.  Returning seven additional association arrays
+    # changes JIT fusion; apply the production association helper afterward to
+    # the frozen substep-2 arrays instead of changing the observed graph.
+    trace_hooks = ordinary_hooks._replace(expose_barotropic_substeps=True)
     traced = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
         _nemo_ws_test_hooks=trace_hooks)
-    observed = jax.device_get(_trace_without_failing_companion(
-        traced, state, card.dt_s, freshwater, surface))
+    observed = jax.device_get(traced.step(
+        state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
     trace = observed.substeps
     require(trace["eta_entry"].shape[0] == EXPECTED_SUBSTEPS,
             "production trace substep count moved")
 
     index = 1
     prefix = "j002"
+    association_post = jax.device_get(
+        _nemo_external_mode_boundary_association(
+            trace["u_exit"][index], trace["v_exit"][index],
+            trace["face_depth_u_exit"][index],
+            trace["face_depth_v_exit"][index],
+            trace["r1_face_depth_u_exit"][index],
+            trace["r1_face_depth_v_exit"][index],
+            trace["eta_continuity"][index], card.recipe.grid))
     candidate = {
         "exit_depth_u_pre_association": r97._native_u(
             trace["face_depth_u_exit"][index]),
         "exit_inverse_u_pre_association": r97._native_u(
             trace["r1_face_depth_u_exit"][index]),
         "exit_depth_u_post_association": r97._native_u(
-            trace["boundary_post_depth_u"][index]),
+            association_post[2]),
         "exit_inverse_u_post_association": r97._native_u(
-            trace["boundary_post_inverse_u"][index]),
+            association_post[4]),
     }
     reference = {
         "exit_depth_u_pre_association": oracle[f"{prefix}_hu_e"],

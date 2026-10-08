@@ -71,11 +71,9 @@ def test_registered_depth_replay_is_nonvacuous():
     assert summary["depth_replay_differing_cells"] == 0
 
 
-def test_kt8_trace_stops_before_known_failing_companion():
+def test_kt8_trace_keeps_round166_graph_and_applies_association_afterward():
     source = gate.Path(gate.__file__).read_text()
-    helper = source.split(
-        "def _trace_without_failing_companion", 1)[1].split(
-            "\ndef measure", 1)[0]
-    assert "prime_step_caches" in helper
-    assert "_step_jitted" in helper
-    assert ".step(" not in helper
+    measure = source.split("def measure", 1)[1].split("\ndef main", 1)[0]
+    assert "expose_barotropic_substeps=True" in measure
+    assert "expose_barotropic_boundary_association=True" not in measure
+    assert "_nemo_external_mode_boundary_association(" in measure
