@@ -7,6 +7,19 @@ Every trajectory number below is **independent**: both models start from the
 rung-0 deck's own climatological T/S, zero velocity and zero sea surface. No
 given-NEMO-entry number appears in these tables.
 
+## CORRECTION FROM ROUND 178 — active entry, not full-storage bit identity
+
+The statements below that call the independent T entry bit-exact over all
+799,200 stored cells are retracted. The round-177 ladder calls `bridge_entry`,
+so its 0/799,200 entry row measures the installed NEMO frame, not the private
+card's unbridged storage. Round 178's unbridged census proves the private card
+is bit-exact on all 430,552 active T cells, while 151,917 inactive T cells
+differ only in the sign bit of zero (numerical maximum 0.0). S/u/v/ssh are
+full-storage bit-exact. The corrected initial state and every executed active
+value remain exact; only the broader stored-bit wording and table label were
+wrong. The round-178 gate now separates active-domain and full-storage bit
+censuses mechanically.
+
 ## Verdict
 
 The hierarchy rung-0 private card now obeys the resolved deck. Its independent
@@ -69,7 +82,7 @@ The fresh ladder completed all 200 rows and printed
 
 | checkpoint | field | unequal / stored | RMS | max absolute | verdict |
 |---|---:|---:|---:|---:|---|
-| kt1 entry | T | 0 / 799,200 | 0 | 0 | bit-exact |
+| kt1 bridged entry | T | 0 / 799,200 | 0 | 0 | bit-exact after NEMO frame installation; not the independent-card storage census |
 | kt1 entry | S | 0 / 799,200 | 0 | 0 | bit-exact |
 | kt1 entry | u | 0 / 799,200 | 0 | 0 | bit-exact |
 | kt1 entry | v | 0 / 799,200 | 0 | 0 | bit-exact |
