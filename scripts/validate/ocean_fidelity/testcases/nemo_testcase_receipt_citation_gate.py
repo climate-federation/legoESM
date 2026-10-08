@@ -1467,9 +1467,9 @@ CITATION_MAP = {
     'nemo_testcase_recipe.py:1650-1651': [
         'temperature, salinity = build_orca2_initial_ts(',
         'temperature_path, salinity_path, tmask)', 2],
-    'ORCA2_OMIP_L4_R175STAGE1/BLD/ppsrc/nemo/dtatsd.f90:218-255': [
+    'ORCA2_OMIP_L4_R175STAGE1/BLD/ppsrc/nemo/dtatsd.f90:218-254': [
         'IF( cn_cfg == "orca" .OR. cn_cfg == "ORCA" ) THEN',
-        ('ENDIF', 9), 38],
+        ('ENDIF', 9), 37],
     'round175/orca2_rung0_stage1_ranked_10step_np2/namelist_cfg:51':
         'ln_tsd_dmp  = .false.',
     'nemo_testcase_l4_orca2_round174_stage_growth_gate.py:224':

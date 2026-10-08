@@ -13,7 +13,7 @@ unconditionally through `build_orca2_initial_ts`'s default
 `nemo_testcase_recipe.py:1650-1651`). NEMO applies that block only
 inside `nn_cfg == 2 .AND. ln_tsd_dmp`; rung 0 resolves
 `ln_tsd_dmp=.false.`
-(`ORCA2_OMIP_L4_R175STAGE1/BLD/ppsrc/nemo/dtatsd.f90:218-255`, with the
+(`ORCA2_OMIP_L4_R175STAGE1/BLD/ppsrc/nemo/dtatsd.f90:218-254`, with the
 resolved switch in
 `round175/orca2_rung0_stage1_ranked_10step_np2/namelist_cfg:51`). This is the first non-bit
 statement and owns the next walk.
