@@ -75,6 +75,8 @@ _ORCA2_R143EARLY_COMPILED = (
     NEMO / "cfgs/ORCA2_OMIP_L4_R143EARLY/BLD/ppsrc/nemo")
 _ORCA2_R144INITIAL_COMPILED = (
     NEMO / "cfgs/ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo")
+_ORCA2_R166SPG8_COMPILED = (
+    NEMO / "cfgs/ORCA2_OMIP_L4_R166SPG8/BLD/ppsrc/nemo")
 _ORCA2_R104EENACC_COMPILED = (
     NEMO / "cfgs/ORCA2_OMIP_L4_R104EENACC/BLD/ppsrc/nemo")
 _ORCA2_R105EENACC_COMPILED = (
@@ -222,6 +224,8 @@ FILES = {
         _ORCA2_R144INITIAL_COMPILED / "lbclnk.f90"),
     "ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/mppini.f90": (
         _ORCA2_R144INITIAL_COMPILED / "mppini.f90"),
+    "ORCA2_OMIP_L4_R166SPG8/BLD/ppsrc/nemo/dynspg_ts.f90": (
+        _ORCA2_R166SPG8_COMPILED / "dynspg_ts.f90"),
     "ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/lbcnfd.f90": (
         _ORCA2_R96SPG_COMPILED / "lbcnfd.f90"),
     "ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynvor.f90": (
@@ -1425,6 +1429,17 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 round 167: admitted kt=8 exit-depth walk ------------
+    'ORCA2_OMIP_L4_R166SPG8/BLD/ppsrc/nemo/dynspg_ts.f90:763-766': [
+        ('hu_e (ji,jj) =    hu_0(ji,jj) + zsshu_a(ji,jj)', 1),
+        ('hvr_e(ji,jj) = ssvmask(ji,jj) / (  hv_e(ji,jj) + 1._wp - ssvmask(ji,jj)  )', 1),
+        4,
+    ],
+    'ORCA2_OMIP_L4_R166SPG8/BLD/ppsrc/nemo/dynspg_ts.f90:770-779': [
+        ('IF( .NOT.lk_linssh ) THEN   !* Update ocean depth', 1),
+        ("&                   , hur_e, 'U',  1._wp, hvr_e, 'V',  1._wp  , ssha_e, 'T', 1._wp, ldfull=.TRUE. )", 1),
+        10,
+    ],
     # --- ORCA2 round 165: kt=8 vertical-coordinate boundary ------------
     'ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/stprk3_stg.f90:132-179': [
         'ALLOCATE( ssha(jpi,jpj) , ua_b(jpi,jpj) , va_b(jpi,jpj) )',
