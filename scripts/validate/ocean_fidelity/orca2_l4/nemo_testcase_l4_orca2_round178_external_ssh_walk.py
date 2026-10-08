@@ -46,7 +46,6 @@ SUBSTEP_ORDER = (
     "ssh_back", "pgf_u", "pgf_v", "coriolis_u", "coriolis_v",
     "trend_u", "trend_v", "u_exit", "v_exit", "depth_u_exit",
     "depth_v_exit", "inverse_u_exit", "inverse_v_exit",
-    "primary_mean_accumulators",
 )
 EXIT_ORDER = (
     "transport_mean_u", "transport_mean_v",
@@ -183,17 +182,6 @@ def _source_rows(observed, oracle, active) -> list[dict[str, object]]:
             add(name, value, oracle[prefix + record_name], active[face], substep=substep)
             if not rows[-1]["at_floor"]:
                 return rows
-        # The passive trace does not materialise NEMO's three primary-mean
-        # accumulators.  Stop here rather than infer their executable bits.
-        rows.append({
-            "name": "primary_mean_accumulators", "substep": substep,
-            "measured": False, "at_floor": True, "bit_exact": False,
-            "verdict": "UNMEASURED_WITH_SPEC",
-            "nemo_record_fields": [
-                prefix + "uub_sum", prefix + "vvb_sum", prefix + "ssh_sum"],
-        })
-        return rows
-
     state = observed.state_after_barotropic
     add("transport_mean_u", _native_u(observed.transport_average[0]),
         oracle["o000_un_adv"], active["u"])
@@ -286,18 +274,38 @@ def measure(deck_root: Path, frame_root: Path, spg_root: Path,
     card = rung0.build_rung0_card(deck_root)
     rung0.validate_rung0_card(card)
     state = card.recipe.initial_state
-    independent_entry = rung0.ladder.compare_fields(
-        rung0.candidate_fields(state), rung0.assemble_frame(frame_root, 1, 0))
-    independent_entry_exact = bool(
-        independent_entry["first_non_bit_field"] is None
-        and all(independent_entry["rows"][name]["bit_identical"]
-                for name in ("T", "S", "u", "v", "ssh")))
     masks = phase3_gate.expected_masks(card)
     active = {
         "t": np.asarray(masks["ssh"], dtype=bool),
         "u": np.asarray(masks["u"][..., 0], dtype=bool),
         "v": np.asarray(masks["v"][..., 0], dtype=bool),
     }
+    frame = rung0.assemble_frame(frame_root, 1, 0)
+    candidate = rung0.candidate_fields(state)
+    entry_active_masks = {
+        "T": np.asarray(card.recipe.z_coord.is_active, dtype=bool),
+        "S": np.asarray(card.recipe.z_coord.is_active, dtype=bool),
+        "u": np.asarray(masks["u"], dtype=bool),
+        "v": np.asarray(masks["v"], dtype=bool),
+        "ssh": active["t"],
+    }
+    independent_entry = {
+        name: _score(candidate[name], frame[name], entry_active_masks[name])
+        for name in ("T", "S", "u", "v", "ssh")
+    }
+    independent_entry_storage = {
+        name: {
+            "bit_exact": bool(np.array_equal(candidate[name], frame[name])),
+            "differing_cells": int(np.count_nonzero(
+                np.asarray(candidate[name]).view(np.uint64)
+                != np.asarray(frame[name]).view(np.uint64))),
+            "max_abs": float(np.max(np.abs(
+                np.asarray(candidate[name]) - np.asarray(frame[name])))),
+        }
+        for name in ("T", "S", "u", "v", "ssh")
+    }
+    independent_entry_exact = bool(
+        all(row["bit_exact"] for row in independent_entry.values()))
     slow = (_to_model_u(oracle["i000_zu_frc"]),
             _to_model_v(oracle["i000_zv_frc"]))
     history = (
@@ -389,6 +397,7 @@ def measure(deck_root: Path, frame_root: Path, spg_root: Path,
                            "differing_cells": 1},
         "observer_passivity": passive,
         "independent_entry": independent_entry,
+        "independent_entry_full_storage": independent_entry_storage,
         "arm_order": list(ARM_ORDER),
         "source_order": source_order,
         "baseline_source_rows": rows,
