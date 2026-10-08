@@ -124,11 +124,12 @@ Single review (codex), verdict **DO NOT SHIP** on `5b9bde8a1..153a11c80`
 | card + checker + inertial oscillation + private-import ratchet + carried-pair ratchet | `67 passed, 1 xfailed` (log sha256 `de33656e53d5a66e`; its 3 citation failures were the shifted recipe spans, fixed by re-anchor) |
 | citation-gate tests after re-anchor | `17 passed` (sha256 `cf3445754f64a26b`) |
 | recipe module + VORTEX card tests | `99 passed, 3 deselected` (sha256 `0e520a98074b1f75`) |
-| card tests after the review fixes | `15 passed` (fast subset; seam and rest tests unchanged by the fix) |
+| card + checker + citation-gate tests, final tree | `53 passed, 1 xfailed` (the xfail is the strict B4j pin; log sha256 `0db67918961a3c3a`) |
 | pre-existing red, not this round's | the VORTEX test's certified-card digests (GYRE, LOCK_EXCHANGE, OVERFLOW) fail identically at `5b9bde8a1` |
 | plants (each reverted, tree clean) | output field `somebaro` RED; an RK3 stage group dropped RED; j_periodic default True RED; scope not restoring RED; deviation unrecorded RED; i-seam wrong shift RED |
 | preflight on the committed tree | `PREFLIGHT_OK`, exit 0; shipped keys planted with key_RK3: `REFUSE`, exit 68 |
-| citation gate, this receipt | see section 9 |
+| citation gate, this receipt (from `## Citations`) | `PASS`, 30 citations, 0 failures, clean tree at `a501e96837e6`, json sha256 `7b4b122a1ea7da2f` |
+| citation gate, planted shift of `stprk3_stg.F90:552-554` | `FAIL` (`SYMBOL-NOT-AT-LINE`), exit 1, json sha256 `e866adb2c088eea4` |
 
 ## 7. Choices made this round
 
