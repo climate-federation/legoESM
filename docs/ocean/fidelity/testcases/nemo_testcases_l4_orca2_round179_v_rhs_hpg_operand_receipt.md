@@ -72,7 +72,22 @@ Rank-placement, record-bit, source-order, cross-record, target-mask,
 first-arm-non-vacuity and endpoint-ULP plants all exit 2 with
 `STATUS PLANT-FIRED`.
 
-TEST_RESULTS_PENDING
+The clean focused battery passes 45/45 (round-179 gate, citation gate, RHS,
+slow-forcing and static-operand parsers). The default and round-179 citation
+gates pass with zero unmapped spans or audit failures; shifting the HPG
+citation by two lines makes the citation gate exit 1.
+
+The required single `tests/ocean/fidelity -n 12` invocation collected 2,828
+tests and reached 99%, with 2,794 passes, 7 skips and 4 pre-existing failures,
+then reproduced the known nonterminal tail and was interrupted without a
+terminal pytest summary. Twenty-three tests were unfinished. The failures are
+the round-35 stamp-scope ratchet, round-129 GYRE record-backed gate pin, the
+worktree-stamp ratchet and the SI3 scalar-math provenance gate. No round-179
+focused test failed.
+
+The required separate read-only Codex review was attempted and returned
+**independent review unavailable in-sandbox**: `failed to initialize
+in-process app-server client: Read-only file system`.
 
 Artifact:
 `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round179/v_rhs_operator_walk.json`.
