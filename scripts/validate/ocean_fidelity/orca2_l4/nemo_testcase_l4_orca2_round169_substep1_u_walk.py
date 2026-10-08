@@ -114,7 +114,7 @@ def _recorded_exchange_replay(card, oracle, update_pre):
 
 
 def _face_average_localisation(
-    card, oracle_face_replay, oracle, u_mask, v_mask, prep,
+    card, oracle_face_replay, oracle, u_mask, v_mask, prep, registered,
 ):
     """Name the round-168 residual face and score pre/post eta timing."""
     import jax
@@ -129,9 +129,15 @@ def _face_average_localisation(
     require(raw is not None, "rung-0 card has no raw NEMO face operands")
     before_eta = np.asarray(oracle["j002_ssha_e"])
     target = np.asarray(oracle["j002_sshu_a"])
-    residual = _bits(oracle_face_replay) != _bits(target)
-    require(int(np.count_nonzero(residual)) == 1,
-            "round-168 face-average residual census moved")
+    registered = np.asarray(registered, dtype=bool)
+    require(registered.shape == target.shape
+            and int(np.count_nonzero(registered)) == 41,
+            "round-168 registered face census moved")
+    residual = (_bits(oracle_face_replay) != _bits(target)) & registered
+    residual_count = int(np.count_nonzero(residual))
+    require(residual_count == 1,
+            f"round-168 registered face-average residual census moved: "
+            f"{residual_count}/41")
     location = tuple(map(int, np.argwhere(residual)[0]))
 
     zero_u = np.zeros((148, 181), dtype=np.float64)
@@ -339,8 +345,10 @@ def measure(deck_root: Path, frame_root: Path, spg_root: Path,
         card.recipe.grid, jnp.asarray(card.recipe.grid.area), prep,
         return_literal_inverse=True, return_ssh_average=True))
     face_replay = r97._native_u(replay[4])
+    registered_faces = ~np.isfinite(
+        r97._native_u(trace["r1_face_depth_u_exit"][1]))
     face_average = _face_average_localisation(
-        card, face_replay, oracle, u_mask, v_mask, prep)
+        card, face_replay, oracle, u_mask, v_mask, prep, registered_faces)
 
     first = _first_nonbit(rows)
     raw_report = {
