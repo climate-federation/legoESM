@@ -1,0 +1,77 @@
+--- stp2d.F90
++++ stp2d.F90
+@@ -30,7 +30,9 @@
+    USE l4_r92_rhs_frames, ONLY : r92_rhs_start, r92_rhs_put_pair, &
+       & r92_rhs_finish ! round-92 write-only accumulator frames
+    USE l4_r93_slow_frames, ONLY : r93_slow_start, r93_slow_put2, &
+       & r93_slow_put_pair, r93_slow_finish ! round-93 write-only slow frames
++   USE l4_r169_slow8, ONLY : r169_start, r169_put1, r169_put2, &
++      & r169_put3, r169_finish ! round-169 write-only kt8 slow operands
+ #if defined key_agrif
+    USE agrif_oce_interp
+    USE agrif_oce_sponge
+@@ -187,6 +189,13 @@
+             !
+          END SELECT
+          CALL r93_slow_start( kt, Kbb, Kaa, Krhs )
++         CALL r169_start( kt, Kbb, Kaa, Krhs )
++         CALL r169_put3( kt, 'e3u', e3u_0 )
++         CALL r169_put3( kt, 'rhs_u', uu(:,:,:,Krhs) )
++         CALL r169_put3( kt, 'umask', umask )
++         CALL r169_put3( kt, 'e3v', e3v_0 )
++         CALL r169_put3( kt, 'rhs_v', vv(:,:,:,Krhs) )
++         CALL r169_put3( kt, 'vmask', vmask )
+          !
+          ! Lane-2 round-16 slow-forcing operand instrument.  WRITE-only:
+          ! no model operand is assigned or reordered by this block.
+@@ -219,6 +228,10 @@
+             END_2D
+          END SELECT
+          CALL r93_slow_put_pair( kt, 'depth', Ue_rhs, Ve_rhs )
++         CALL r169_put2( kt, 'r1_hu0', r1_hu_0 )
++         CALL r169_put2( kt, 'r1_hv0', r1_hv_0 )
++         CALL r169_put2( kt, 'depth_u', Ue_rhs )
++         CALL r169_put2( kt, 'depth_v', Ve_rhs )
+ 
+          IF( lwp .AND. kt == nit000 ) THEN
+             WRITE(l2_slow_unit) l4_canon_2d(Ue_rhs,'U'), l4_canon_2d(Ve_rhs,'V'), &
+@@ -234,6 +247,10 @@
+          CALL dyn_drg_init( Kbb, Kbb, uu, vv, uu_b, vv_b, Ue_rhs, Ve_rhs, CdU_u, CdU_v )
+          CALL r93_slow_put_pair( kt, 'drag', Ue_rhs, Ve_rhs )
+          CALL r93_slow_put_pair( kt, 'cd', CdU_u, CdU_v )
++         CALL r169_put2( kt, 'drag_u', Ue_rhs )
++         CALL r169_put2( kt, 'drag_v', Ve_rhs )
++         CALL r169_put2( kt, 'cd_u', CdU_u )
++         CALL r169_put2( kt, 'cd_v', CdU_v )
+          IF( lwp .AND. kt == nit000 )   WRITE(l2_slow_unit) l4_canon_2d(Ue_rhs,'U'), &
+             & l4_canon_2d(Ve_rhs,'V'), l4_canon_2d(CdU_u,'U'), l4_canon_2d(CdU_v,'V')
+          !
+@@ -242,11 +259,18 @@
+             WRITE(l2_slow_unit) r1_rho0, l4_canon_2d(utauU,'U'), l4_canon_2d(vtauV,'V'), &
+                & l4_canon_2d(r1_hu(:,:,Kbb),'U'), l4_canon_2d(r1_hv(:,:,Kbb),'V')
+          ENDIF
++         CALL r169_put1( kt, 'r1_rho0', r1_rho0 )
++         CALL r169_put2( kt, 'tau_u', utauU )
++         CALL r169_put2( kt, 'tau_v', vtauV )
++         CALL r169_put2( kt, 'r1_hu', r1_hu(:,:,Kbb) )
++         CALL r169_put2( kt, 'r1_hv', r1_hv(:,:,Kbb) )
+          DO_2D( 0, 0, 0, 0 )
+             Ue_rhs(ji,jj) =  Ue_rhs(ji,jj) + r1_rho0 * utauU(ji,jj) * r1_hu(ji,jj,Kbb)
+             Ve_rhs(ji,jj) =  Ve_rhs(ji,jj) + r1_rho0 * vtauV(ji,jj) * r1_hv(ji,jj,Kbb)
+          END_2D
+          CALL r93_slow_put_pair( kt, 'wind', Ue_rhs, Ve_rhs )
++         CALL r169_put2( kt, 'wind_u', Ue_rhs )
++         CALL r169_put2( kt, 'wind_v', Ve_rhs )
+          IF( lwp .AND. kt == nit000 ) THEN
+             WRITE(l2_slow_unit) l4_canon_2d(Ue_rhs,'U'), l4_canon_2d(Ve_rhs,'V')
+             CLOSE(l2_slow_unit)
+@@ -289,6 +313,9 @@
+             END_2D
+          ENDIF
+          CALL r93_slow_put_pair( kt, 'final', Ue_rhs, Ve_rhs )
++         CALL r169_put2( kt, 'final_u', Ue_rhs )
++         CALL r169_put2( kt, 'final_v', Ve_rhs )
++         CALL r169_finish( kt )
+       END DO
+ 
+       IF( ln_tile ) CALL dom_tile_stop
