@@ -1,25 +1,25 @@
 #!/usr/bin/env bash
 # Operator-run acquisition of the actual fold-side operands evaluated by HPG.
 set -Eeuo pipefail
-trap 's=$?; printf "REFUSE: round-181 acquisition failed at line %s (exit %s)\n" "${BASH_LINENO[0]:-?}" "$s" >&2; exit "$s"' ERR
+trap 's=$?; printf "REFUSE: round-182 acquisition failed at line %s (exit %s)\n" "${BASH_LINENO[0]:-?}" "$s" >&2; exit "$s"' ERR
 
 mode=${1:---run}
-case "$mode" in --run|--preflight-only|--admit-existing|--plant-layout) ;; *)
-  printf 'REFUSE: usage: %s [--run|--preflight-only|--admit-existing|--plant-layout]\n' "$0" >&2; exit 63;; esac
+case "$mode" in --run|--preflight-only|--admit-existing|--plant-layout|--plant-stage-identity) ;; *)
+  printf 'REFUSE: usage: %s [--run|--preflight-only|--admit-existing|--plant-layout|--plant-stage-identity]\n' "$0" >&2; exit 63;; esac
 export PATH=/home/dbalwada/miniconda3/envs/nemo-build/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
 
 readonly nemo=/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2
-readonly source_cfg=ORCA2_OMIP_L4_R180HPG1 target_cfg=ORCA2_OMIP_L4_R181HPGFOLD
+readonly source_cfg=ORCA2_OMIP_L4_R180HPG1 target_cfg=ORCA2_OMIP_L4_R182HPGFOLD
 readonly source_root=$nemo/cfgs/$source_cfg target_root=$nemo/cfgs/$target_cfg
 readonly source_run=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round180/acquisition/orca2_rung0_hpg1_ranked_10step_np2
-readonly evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round181/acquisition
+readonly evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round182/acquisition
 readonly target_run=$evidence/orca2_rung0_hpg_fold_ranked_10step_np2
 readonly work=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/work
 readonly py=/home/dbalwada/legoESM/.venv/bin/python fc=/home/dbalwada/miniconda3/envs/nemo-build/bin/gfortran
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 repo=$(CDPATH= cd -- "$here/../../../../.." && pwd -P)
-readonly patch_file=$here/dynhpg_round181.patch checker=$here/check_record.py prereg=$repo/docs/ocean/fidelity/PREREG_nemo_testcases_l4_orca2_round181.md
+readonly patch_file=$here/dynhpg_round181.patch checker=$here/check_record.py prereg=$repo/docs/ocean/fidelity/PREREG_nemo_testcases_l4_orca2_round182.md
 
 refuse() { printf 'REFUSE: %s\n' "$1" >&2; exit "${2:-64}"; }
 pin() { [[ -f "$2" ]] || refuse "missing $3: $2"; [[ "$(sha256sum "$2" | awk '{print $1}')" == "$1" ]] || refuse "$3 hash moved" 65; }
@@ -50,10 +50,16 @@ if [[ "$mode" == --plant-layout ]]; then
   layout "$scratch/dynhpg.F90" && refuse 'layout plant stayed green' 69
   printf 'STATUS PLANT-FIRED layout\n'; exit 69
 fi
+if [[ "$mode" == --plant-stage-identity ]]; then
+  cp "$scratch/dynhpg.F90" "$scratch/staged_dynhpg.F90"
+  printf '! planted staged-source delta\n' >>"$scratch/staged_dynhpg.F90"
+  cmp -s "$scratch/dynhpg.F90" "$scratch/staged_dynhpg.F90" && refuse 'stage-identity plant stayed green' 69
+  printf 'STATUS PLANT-FIRED stage-identity\n'; exit 69
+fi
 cpp -Dkey_nosignedzero -Dkey_qco -Dkey_vco_1d3d -Dkey_RK3 -P -traditional -I "$source_root/WORK" -I "$source_root/BLD/inc" "$scratch/dynhpg.F90" -o "$scratch/dynhpg.f90"
 "$fc" -fsyntax-only -ffree-line-length-none -I "$source_root/BLD/inc" -J "$scratch" "$scratch/dynhpg.f90"
 printf 'SYNTAX_PROOF_PASS dynhpg.f90\n'
-[[ "$mode" != --preflight-only ]] || { printf 'ORCA2_ROUND181_HPG_FOLD_PREFLIGHT_READY %s\n' "$target_run"; exit 0; }
+[[ "$mode" != --preflight-only ]] || { printf 'ORCA2_ROUND182_HPG_FOLD_PREFLIGHT_READY %s\n' "$target_run"; exit 0; }
 
 admit() {
   [[ -f "$target_run/producer_content.sha256" ]] || refuse 'target content stamp missing' 70
@@ -64,7 +70,7 @@ admit() {
     grep -Fq 'STATUS PLANT-FIRED' "$target_run/round181_${p}_plant.log" || refuse "$p plant lacks marker" 71
   done
   "$py" "$checker" --root "$target_run" --baseline "$source_run" --output "$target_run/round181_hpg_fold_admission.json"
-  printf 'ORCA2_ROUND181_HPG_FOLD_ACQUISITION_PASS %s\n' "$target_run"
+  printf 'ORCA2_ROUND182_HPG_FOLD_ACQUISITION_PASS %s\n' "$target_run"
 }
 if [[ "$mode" == --admit-existing ]]; then admit; exit 0; fi
 [[ ! -e "$target_root" && ! -e "$target_run" ]] || refuse 'target config or run directory already exists' 68
@@ -75,7 +81,8 @@ cd "$nemo"
 find "$source_root/EXP00" -maxdepth 1 \( -type f -o -type l \) -print0 | while IFS= read -r -d '' f; do cp -a "$f" "$target_root/EXP00/$(basename "$f")"; done
 find "$source_root/MY_SRC" -maxdepth 1 \( -type f -o -type l \) -print0 | while IFS= read -r -d '' f; do cp -a "$f" "$target_root/MY_SRC/$(basename "$f")"; done
 cp "$source_root/cpp_$source_cfg.fcm" "$target_root/cpp_$target_cfg.fcm"
-git apply --unsafe-paths -p0 --directory="$target_root/MY_SRC" "$patch_file"
+patch -s --fuzz=0 -p0 -d "$target_root/MY_SRC" <"$patch_file"
+cmp -s "$scratch/dynhpg.F90" "$target_root/MY_SRC/dynhpg.F90" || refuse 'staged writer differs from syntax-proved source' 68
 touch "$target_root/MY_SRC/"*.F90
 ./makenemo -n "$target_cfg" -m conda-scalarmath del_key key_xios
 layout "$target_root/BLD/ppsrc/nemo/dynhpg.f90" || refuse 'compiled writer incomplete' 69
