@@ -1075,6 +1075,7 @@ def create_z_star_from_thicknesses(
     dz_ref_m, t_depth_ref_m=None, *, nemo_gdept_0_m=None,
     nemo_gdepw_0_m=None, nemo_e3t_0_m=None, nemo_e3w_0_m=None,
     nemo_e3w_source="mesh_reference",
+    allow_single_level: bool = False,
     nemo_hu_0_m=None, nemo_hv_0_m=None, nemo_e1e2t_m=None,
     nemo_e1e2u_m=None, nemo_e1e2v_m=None,
     nemo_e2u_m=None, nemo_e1v_m=None,
@@ -1118,10 +1119,13 @@ def create_z_star_from_thicknesses(
     # Check ndim on the ORIGINAL array BEFORE any ravel -- a 2-D array would
     # otherwise be silently flattened and accepted as 1-D (codex HIGH).
     dz_np = np.asarray(dz_ref_m, dtype=np.float64)
-    if dz_np.ndim != 1 or dz_np.size < 2:
+    # NEMO's TSUNAMI runs ONE wet level (jpk = 2); only a card that states
+    # it may build a one-level column, every other caller keeps the guard.
+    min_levels = 1 if allow_single_level else 2
+    if dz_np.ndim != 1 or dz_np.size < min_levels:
         raise ValueError(
-            f"dz_ref_m must be a 1-D array of >= 2 thicknesses, got shape "
-            f"{dz_np.shape}")
+            f"dz_ref_m must be a 1-D array of >= {min_levels} thicknesses, "
+            f"got shape {dz_np.shape}")
     if not np.all(dz_np > 0.0):
         raise ValueError("dz_ref_m thicknesses must all be > 0")
     n_levels = int(dz_np.size)
