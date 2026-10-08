@@ -178,7 +178,7 @@ def classify(report: dict, plant: str = "none") -> dict:
     elif plant == "recorded-replay":
         report["replays"]["all_recorded_pre"]["differing_cells"] += 1
     elif plant == "entry-replay":
-        report["replays"]["recorded_entry_candidate_terms"]["count"] -= 1
+        report["replays"]["recorded_entry_candidate_terms"]["count"] = 0
     elif plant == "exchange-replay":
         report["replays"]["recorded_exchange"]["differing_cells"] += 1
     elif plant == "face-registry":
