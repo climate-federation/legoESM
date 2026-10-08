@@ -1709,6 +1709,36 @@ def test_budget_states_give_the_diffusion_residual(alpha):
         assert np.abs(R[inner]).max() > 1e-10
 
 
+@pytest.mark.parametrize("coupling", ["nemo_pre_solve", "separate"])
+def test_budget_langmuir_increment_is_recorded_or_nan(coupling):
+    """With Langmuir on, the recorded increment is dt*source and closes the
+    no-diffusion step (pre-solve coupling), or NaN when the source is merged
+    elsewhere -- never a silent 0.  Weak stratification so the Langmuir
+    layer reaches the interior interfaces (the shared fixture's is too
+    stable: the cell depth ends above the first interior interface)."""
+    u, v, T, S, rho, dz_half, z_int, tx, ty = _orchestrator_inputs()
+    nlev = T.shape[-1]
+    T = jnp.asarray(20.0 - 1.0e-4 * np.arange(nlev))[None, None, :] * jnp.ones(T.shape)
+    rho = jnp.asarray(1026.0 + 1.0e-5 * np.arange(nlev))[None, None, :] * jnp.ones(T.shape)
+    cfg = TKEConfig(alpha_tke=0.0, dissipation_discretization="nemo_1p5_split",
+                    tke_background=1.0e-10, lc=True, prognostic=True,
+                    tke_langmuir_rhs_coupling=coupling)
+    e_old = jnp.full(dz_half.shape, 1.0e-4)
+    out = tke_vertical_mixing(u, v, T, S, rho, dz_half, e_old, tx, ty,
+                              dt=150.0, cfg=cfg, rho_0=_RHO0, n_iterations=1,
+                              z_interface=z_int)
+    eshear, _, ediss, bapplied, e_in, e_lc, e_sol = (np.asarray(x) for x in out.budget)
+    if coupling == "separate":
+        assert np.all(np.isnan(e_lc))
+        return
+    inner = (slice(None), slice(None), slice(1, -1))
+    assert np.abs(e_lc[inner]).max() > 0.0
+    cd = 2.0 * ediss / e_sol
+    R = e_sol - e_in - e_lc - 150.0 * (eshear + bapplied
+                                       - cd * (1.5 * e_sol - 0.5 * (e_in + e_lc)))
+    np.testing.assert_allclose(R[inner], 0.0, atol=1e-14)
+
+
 def _veros_budget(e_mod=None):
     import importlib.util
     _spec = importlib.util.spec_from_file_location(

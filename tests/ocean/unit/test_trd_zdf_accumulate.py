@@ -190,6 +190,9 @@ def test_accumulator_columns_keep_selected_cells_every_step():
     np.testing.assert_array_equal(out["col_T"][2, 1], (T[2, 3, :30] + 2).astype(np.float32))
     np.testing.assert_array_equal(out["col_K"][1, 0], (K[0, 1, :29] + 1).astype(np.float32))
     assert out["col_e_in"].dtype == np.float64 and out["col_e_sol"].shape == (3, 2, 29)
+    for k in ("col_e", "col_eshear", "col_ediss", "col_bapplied", "col_e_lc"):
+        assert out[k].dtype == np.float64
+    assert out["col_estrat"].dtype == np.float32
     np.testing.assert_array_equal(out["col_e_in"][2, 1], K[2, 3, :29] + 2e-9)
     np.testing.assert_array_equal(out["col_e_sol"][1, 0], K[0, 1, :29] + 5)
     np.testing.assert_array_equal(out["col_j"], [0, 2]); np.testing.assert_array_equal(out["col_i"], [1, 3])

@@ -6810,16 +6810,18 @@ class _ZdfTrendAccumulator:
         eshear/estrat/ediss: TKE budget terms as NEMO's eshear_k/estrat_k/
         ediss_k; bapplied: the buoyancy work the solve applied (NaN where the
         lane does not return them); e_in / e_lc / e_sol: e entering the
-        solve, the Langmuir increment and e after the solve (before etau),
-        kept in float64 because a per-step residual differences them."""
+        solve, the Langmuir increment and e after the solve (before etau).
+        Every residual operand (e, eshear, ediss, bapplied, the three states)
+        is kept in float64 because the residual differences them."""
         n = self._NSER   # float32: storage; profiles only need ~1e-7 relative
         for key, x, m in (("col_T", T, n), ("col_S", S, n), ("col_u", u, n),
                           ("col_v", v, n), ("col_K", K, n - 1), ("col_A", A, n - 1),
-                          ("col_e", e, n - 1), ("col_eshear", eshear, n - 1),
-                          ("col_estrat", estrat, n - 1), ("col_ediss", ediss, n - 1),
-                          ("col_bapplied", bapplied, n - 1)):
+                          ("col_estrat", estrat, n - 1)):
             self._col[key].append(np.asarray(x)[self._cj, self._ci, :m].astype(np.float32))
-        for key, x in (("col_e_in", e_in), ("col_e_lc", e_lc), ("col_e_sol", e_sol)):
+        # every operand of the per-stage TKE residual in float64
+        for key, x in (("col_e", e), ("col_eshear", eshear), ("col_ediss", ediss),
+                       ("col_bapplied", bapplied), ("col_e_in", e_in),
+                       ("col_e_lc", e_lc), ("col_e_sol", e_sol)):
             self._col[key].append(np.asarray(x)[self._cj, self._ci, :n - 1].astype(np.float64))
 
     def drain(self, dt=None):

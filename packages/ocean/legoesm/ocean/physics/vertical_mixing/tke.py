@@ -423,9 +423,10 @@ class TKEOutput(NamedTuple):
     # post-avn K_H (estrat_k), ediss = 0.5*c_eps*dissl_old*e_post_solve
     # (ediss_k, before etau); bapplied = the buoyancy work the solve applied.
     # Then three STATES for a per-stage residual: e entering the solve
-    # (after the boundary rows), the Langmuir increment dt*source (zeros
-    # unless tke_langmuir_coupling='nemo_pre_solve'), e after the solve and
-    # floor (before etau).
+    # (BEFORE the surface/bottom boundary rows are assembled, so compare
+    # interior rows only), the Langmuir increment dt*source (0 when Langmuir
+    # is off, NaN when it is on but not coupled 'nemo_pre_solve'), e after
+    # the solve and emin floor (before etau).
     budget: "tuple | None" = None
 
 
@@ -3649,6 +3650,9 @@ def tke_vertical_mixing(
                _b_applied,
                _e_pre_solve,
                (dt * _lc_pre_solve if _lc_pre_solve is not None
+                # Langmuir merged elsewhere (external source / literal
+                # path): the increment is not separable here -> NaN, never 0
+                else jnp.full_like(_e_pre_solve, jnp.nan) if _lc_on
                 else jnp.zeros_like(_e_pre_solve)),
                _e_post_solve)
     return TKEOutput(K_M=K_M, K_H=K_H, tke_new=tke_curr,
