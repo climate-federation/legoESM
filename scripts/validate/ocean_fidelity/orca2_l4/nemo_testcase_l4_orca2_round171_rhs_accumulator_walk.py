@@ -58,10 +58,6 @@ def require(condition: bool, message: str) -> None:
         raise GateError(message)
 
 
-def _discard_terms(_values) -> None:
-    """Stable host sink: one observed executable is reused for kt=1..7."""
-
-
 def _owned_values(path: Path) -> tuple[dict, dict[str, np.ndarray]]:
     """Parse payloads from the record's own self-describing headers."""
 
@@ -232,8 +228,7 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
     observed_baro = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
         _nemo_ws_test_hooks=hooks._replace(
-            expose_barotropic_substeps=True,
-            slow_forcing_rhs_term_observer=_discard_terms))
+            expose_barotropic_rhs_components=True))
 
     passivity = {}
     for kt in range(1, 8):
@@ -258,15 +253,11 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
         state = next_state
         print(f"PROGRESS round171 complete kt={kt}", file=sys.stderr, flush=True)
 
-    plain_trace = jax.device_get(LatLonCGridOceanModel(
-        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
-        _nemo_ws_test_hooks=hooks._replace(expose_barotropic_substeps=True),
-    ).step(state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
-    observed_trace, parts = r93._capture_stage1_parts(
-        LatLonCGridOceanModel(
-            card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
-            _nemo_ws_test_hooks=hooks._replace(expose_barotropic_substeps=True)),
-        state, card.dt_s, freshwater, surface)
+    plain_trace = jax.device_get(plain_baro.step(
+        state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
+    observed_trace = jax.device_get(observed_baro.step(
+        state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
+    parts = observed_trace.operator_components
 
     accumulated = jax.device_get(jax.jit(r84.source_order_accumulators)(
         parts["hpg_u"], parts["hpg_v"], parts["ldf_u"], parts["ldf_v"],

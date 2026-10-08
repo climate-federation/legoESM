@@ -2,9 +2,20 @@ import copy
 
 import pytest
 
+from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+    _NEMOWSBarotropicRHSTrace,
+    _NEMOWSRK3TestHooks,
+)
 from scripts.validate.ocean_fidelity.orca2_l4 import (
     nemo_testcase_l4_orca2_round171_rhs_accumulator_walk as gate,
 )
+
+
+def test_return_only_rhs_trace_is_private_and_default_off():
+    hooks = _NEMOWSRK3TestHooks()
+    assert hooks.expose_barotropic_rhs_components is False
+    assert hooks._replace(expose_barotropic_rhs_components=True).expose_barotropic_rhs_components
+    assert _NEMOWSBarotropicRHSTrace._fields[-1] == "operator_components"
 
 
 def _score(candidate, reference, *, exact=False):
