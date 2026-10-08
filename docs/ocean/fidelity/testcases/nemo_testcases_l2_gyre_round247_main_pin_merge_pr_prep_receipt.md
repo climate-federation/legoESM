@@ -108,20 +108,47 @@ LOCK_EXCHANGE, and OVERFLOW each compare 50 rows against the round-237
 references. All ten comparisons pass with zero improved cells, zero worsened
 cells, `max_worsening_ulps=0`, no status change, and unchanged first-over-bar.
 
-PLACEHOLDER_DINO_RESULT
+The private DINO month gate stamps clean commit `07d64d045` and reports day-30
+wet 3-D T RMS `2.056821682e-03 K`, exactly the preregistered current value and
+below the unchanged `2.244317642e-03 K` bar. The gate's printed parenthetical
+`certified 2.040288765e-03 K` is its older informational comparison value;
+the acceptance bar is unchanged and the measured current-card value is the
+frozen round-247 quantity. No DINO value moved relative to the lane tip.
 
 The merge therefore either satisfies or refutes the preregistered zero-move
 claim mechanically; no certified pin is silently re-baselined.
 
 ## 3. Tests, citations, and independent review
 
-PLACEHOLDER_TEST_RESULTS
+The merge-focused suite covers the shared tridiagonal scan, the deleted OMIP
+applicator, parked GM BVP, MPAS PCG backend defaults, recipes, and the common
+surface-reference path:
+
+> `105 passed, 16 skipped, 1 warning in 55.65s`
+
+The prescribed push-gate battery
+(`test_nemo_testcase_receipt_citation_gate.py`, `test_tke_nemo_terms.py`,
+`test_nemo_recipe.py`, and `test_real_freshwater_closure.py`) includes the
+generic NEMO-GYRE recipe and reports:
+
+> `126 passed in 359.01s (0:05:59)`
+
+`git diff --check` is clean. The PR-summary citation gate finds three mapped
+compiled-source citations, zero failures, zero unmapped citations, and zero
+map-audit failures. Its shifted first-endpoint plant exits 1 with
+`SYMBOL-NOT-AT-LINE`. The final default/receipt citation passes are recorded
+after the completed receipt is committed.
 
 PLACEHOLDER_REVIEW_RESULTS
 
 ## 4. Verdict and OPEN
 
-PLACEHOLDER_VERDICT
+**LANDED, subject only to the required independent review and final citation
+rerun below.** R247-P1 through R247-P7 are CONFIRMED: the pinned-main
+composition is conflict-free and explained, every certified trajectory is
+unchanged, DINO remains exact to the frozen value and below its bar, and the
+test surface is green. R247-P8 is satisfied by the PR summary. No model or
+configuration file is changed by this round beyond the pinned main merge.
 
 OPEN: the operator may open the PR from the merged lane using
 `docs/ocean/fidelity/testcases/nemo_testcases_l1_vortex_smt_pr_summary.md`.

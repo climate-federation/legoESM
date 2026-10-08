@@ -63,5 +63,24 @@ coefficient, not a VORTEX-derived replacement.
 
 ## PR gate result
 
-PLACEHOLDER_PR_GATES
+Pinned main is merged at `cd1dcf7225423e3d60720de7c3b50966edcd65a5` with
+zero conflicts and no lane/main overlap under `packages/ocean` or
+`src/legoesm`. The merge audit also tested main's reachable shared
+tridiagonal-scan change through the long trajectories.
 
+- GYRE: 954/954 ladder rows and all 40 year score values unchanged; pinned
+  day-30/day-240/day-360 snapshot digests unchanged.
+- SMT-1..4: all four 50-row registries reproduced; 3,200/3,200 daily score
+  scalars unchanged; the four day-100 endpoints above reproduced exactly.
+- Controls: the six flat VORTEX cards, two base seamount cards, LOCK_EXCHANGE,
+  and OVERFLOW each reproduce all 50 rows with zero cell movement.
+- DINO: day-30 T RMS `2.056821682e-03 K`, exact to the lane reference and
+  below the fixed bar.
+- Tests: focused merge suite `105 passed, 16 skipped`; push-gate battery
+  `126 passed`.
+- Citations: PR-summary gate passes with zero unmapped claims; its shifted
+  citation plant exits nonzero.
+
+The detailed command provenance and decisive lines are in
+`nemo_testcases_l2_gyre_round247_main_pin_merge_pr_prep_receipt.md` and
+`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round247/`.
