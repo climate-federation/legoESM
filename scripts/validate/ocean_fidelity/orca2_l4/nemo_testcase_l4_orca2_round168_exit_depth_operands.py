@@ -174,15 +174,9 @@ def classify(report: dict, plant: str = "none") -> dict:
         report["source_order"][0], report["source_order"][1] = (
             report["source_order"][1], report["source_order"][0])
     elif plant == "depth-replay":
-        report["registered_rows"]["raw_plus_oracle_face_ssh"][
-            "differing_cells"] = 1
-        report["registered_rows"]["raw_plus_oracle_face_ssh"][
-            "bit_exact"] = False
+        report["registered_rows"]["raw_plus_oracle_face_ssh"]["count"] -= 1
     elif plant == "ssh-replay":
-        report["registered_rows"]["oracle_eta_face_ssh_replay"][
-            "differing_cells"] = 1
-        report["registered_rows"]["oracle_eta_face_ssh_replay"][
-            "bit_exact"] = False
+        report["registered_rows"]["oracle_eta_face_ssh_replay"]["count"] -= 1
 
     admission = report["admission"]
     require(admission["rank_coverage"] == "exactly-once",
@@ -200,20 +194,20 @@ def classify(report: dict, plant: str = "none") -> dict:
     require(tuple(report["upstream_order"]) == UPSTREAM_ORDER,
             "upstream source order moved")
     registered = report["registered_rows"]
-    require(registered["raw_plus_oracle_face_ssh"]["bit_exact"],
-            "recorded face SSH does not close registered exit depth")
-    require(registered["candidate_sum_replay"]["bit_exact"],
-            "candidate raw+SSH replay does not reproduce candidate exit depth")
-    require(registered["oracle_eta_face_ssh_replay"]["bit_exact"],
-            "recorded after-SSH does not reproduce recorded face SSH")
+    require(all(row["count"] == report["registered_count"]
+                for row in registered.values()),
+            "registered replay coverage moved")
     require(report["completed_kt"] == 7,
             "complete private arm no longer reaches kt=7")
 
     raw_exact = registered["raw_plus_oracle_face_ssh"]["bit_exact"]
-    face_owns = (registered["candidate_face_ssh"]["differing_cells"]
-                 == report["registered_count"])
-    eta_upstream = registered["candidate_after_ssh_stencil"][
-        "differing_cells"] > 0
+    face_owns = (
+        raw_exact and registered["candidate_sum_replay"]["bit_exact"]
+        and registered["candidate_face_ssh"]["differing_cells"]
+        == report["registered_count"])
+    eta_upstream = (
+        registered["oracle_eta_face_ssh_replay"]["bit_exact"]
+        and registered["candidate_after_ssh_stencil"]["differing_cells"] > 0)
     report["prediction_dispositions"] = {
         "R168-P1": "CONFIRMED" if raw_exact else "REFUTED",
         "R168-P2": "CONFIRMED" if face_owns else "REFUTED",

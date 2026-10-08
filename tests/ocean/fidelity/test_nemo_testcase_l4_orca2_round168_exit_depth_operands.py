@@ -11,7 +11,7 @@ from scripts.validate.ocean_fidelity.orca2_l4 import (
 
 
 def _row(*, exact: bool = True, differing: int = 0) -> dict:
-    return {"bit_exact": exact, "differing_cells": differing}
+    return {"bit_exact": exact, "differing_cells": differing, "count": 41}
 
 
 def _report() -> dict:
@@ -46,6 +46,15 @@ def test_clean_report_passes_and_disposes_every_prediction():
         "R168-P1", "R168-P2", "R168-P3", "R168-P4", "R168-P5",
     }
     assert set(result["prediction_dispositions"].values()) == {"CONFIRMED"}
+
+
+def test_failed_prediction_is_retained_not_refused():
+    report = _report()
+    report["registered_rows"]["oracle_eta_face_ssh_replay"]["bit_exact"] = False
+    report["registered_rows"]["oracle_eta_face_ssh_replay"]["differing_cells"] = 7
+    result = gate.classify(report)
+    assert result["prediction_dispositions"]["R168-P3"] == "REFUTED"
+    assert result["status"] == "PASS_ROUND168_EXIT_DEPTH_OPERAND_WALK"
 
 
 @pytest.mark.parametrize("plant", gate.PLANTS[1:])
