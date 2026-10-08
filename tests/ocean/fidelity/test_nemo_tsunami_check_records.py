@@ -41,7 +41,7 @@ def _write_set(d: Path, steps: int):
     for kt in range(1, cr.FULL_STEPS + 1):
         _record(d / f"oracle_spgts_kt{kt:08d}.bin", cr.SPGTS_MAGIC,
                 [1, kt, 1, 2, 3, 3, NI, NJ, 2, 8, *BOUNDS, 64],
-                {"i000_wgtbtp1": np.ones(18), "o000_ssh_aa": field})
+                {n: field for n in sorted(cr.spgts_groups(8))})
     (d / "mesh_mask.nc").write_bytes(b"")
 
 
@@ -58,6 +58,26 @@ def test_admits_complete_set(evidence):
     run, ref = evidence
     out = cr.check(run, ref, 12)
     assert len(out["records"]) == 22 and out["shape"] == [NJ, NI]
+
+
+@pytest.mark.parametrize("missing", ["i000_entry_sc", "j008_cor_v", "o000_ssh_aa"])
+def test_refuses_a_substep_record_missing_one_group(evidence, missing):
+    run, ref = evidence
+    names = sorted(cr.spgts_groups(8) - {missing})
+    _record(run / "oracle_spgts_kt00000002.bin", cr.SPGTS_MAGIC,
+            [1, 2, 1, 2, 3, 3, NI, NJ, 2, 8, *BOUNDS, 64],
+            {n: np.zeros((NJ, NI)) for n in names})
+    with pytest.raises(cr.Refusal, match="missing"):
+        cr.check(run, ref, 12)
+
+
+def test_refuses_a_substep_record_with_fewer_substeps_than_declared(evidence):
+    run, ref = evidence
+    _record(run / "oracle_spgts_kt00000002.bin", cr.SPGTS_MAGIC,
+            [1, 2, 1, 2, 3, 3, NI, NJ, 2, 9, *BOUNDS, 64],
+            {n: np.zeros((NJ, NI)) for n in sorted(cr.spgts_groups(8))})
+    with pytest.raises(cr.Refusal, match="j009"):
+        cr.check(run, ref, 12)
 
 
 @pytest.mark.parametrize("plant", ["nan_owned", "missing_step", "bad_magic",

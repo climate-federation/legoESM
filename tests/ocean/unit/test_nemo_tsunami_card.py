@@ -5,15 +5,19 @@ File-free only.  The oracle comparison waits for the acquisition record
 """
 from __future__ import annotations
 
+import importlib.util
 import math
+from pathlib import Path
 
 import numpy as np
 import pytest
 
 from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
 from legoesm.ocean.constants_config import NEMO_CONSTANTS_CONFIG as CONSTANTS
+from legoesm.ocean.fidelity import nemo_testcase_recipe as recipe
 from legoesm.ocean.fidelity.nemo_testcase_recipe import (
     TSUNAMI_NAMELIST,
+    TsunamiResolvedNamelist,
     TSUNAMI_UNMEASURED,
     build_tsunami_zco_card,
     tsunami_horizontal_coordinates,
@@ -52,20 +56,71 @@ def test_construction_and_shapes(card):
     assert np.all(np.asarray(card.recipe.land_mask) == 1.0)
 
 
+_NEMO = Path("/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2")
+_CASE = _NEMO / "tests/TSUNAMI"
+_STATS = (Path(__file__).resolve().parents[3] / "scripts/validate/ocean_fidelity/"
+          "testcases/nemo_testcase_full_statistics.py")
+_UNIT_SUFFIXES = ("_m2_s", "_deg", "_km", "_m", "_s")
+_ALIASES = {"ln_usr_sbc": "namsbc.ln_usr"}   # card label -> NEMO key
+_NOT_IN_NAMELIST = {"key_RK3", "key_qco", "key_vco_1d", "nn_e_resolved"}
+
+
+def _nemo_value(text):
+    t = text.strip().lower()
+    if t in (".true.", ".false."):
+        return t == ".true."
+    return float(t.replace("d", "e"))
+
+
+def _resolved_nemo_namelist():
+    spec = importlib.util.spec_from_file_location("tsunami_stats", _STATS)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    resolved = mod.parse_namelist_values(_CASE / "EXPREF/namelist_ref")
+    resolved.update(mod.parse_namelist_values(_CASE / "EXPREF/namelist_cfg"))
+    return resolved
+
+
+def _lookup(resolved, field):
+    if field in _ALIASES:
+        return _nemo_value(resolved[_ALIASES[field]])
+    names = [field.lower()] + [field[: -len(x)].lower()
+                               for x in _UNIT_SUFFIXES if field.endswith(x)]
+    for name in names:
+        vals = {v for k, v in resolved.items() if k.split(".", 1)[1] == name}
+        if vals:
+            assert len(vals) == 1, (field, vals)
+            return _nemo_value(vals.pop())
+    raise AssertionError(f"{field} not in NEMO's TSUNAMI namelists")
+
+
+@pytest.mark.skipif(not _CASE.is_dir(), reason="NEMO 5.0.2 tree not present")
+def test_explicit_switch_values_match_nemo_namelists():
+    resolved = _resolved_nemo_namelist()
+    for field in TsunamiResolvedNamelist._fields:
+        if field in _NOT_IN_NAMELIST:
+            continue
+        assert getattr(TSUNAMI_NAMELIST, field) == _lookup(resolved, field), field
+    keys = (_CASE / "cpp_TSUNAMI.fcm").read_text().split()
+    for k in ("key_RK3", "key_qco", "key_vco_1d"):
+        assert getattr(TSUNAMI_NAMELIST, k) == (k in keys), k
+
+
+def test_switch_lookup_refuses_a_planted_drift():
+    resolved = {"namdyn_spg.nn_e": "6", "namdom.rn_dt": "1000."}
+    assert _lookup(resolved, "rn_Dt_s") == 1000.0
+    with pytest.raises(AssertionError):
+        _lookup(resolved, "rn_atfp")
+
+
+def test_validator_refuses_an_spg_term_switched_on(card, monkeypatch):
+    monkeypatch.setattr(recipe, "TSUNAMI_NAMELIST",
+                        TSUNAMI_NAMELIST._replace(ln_tide=True))
+    with pytest.raises(ValueError, match="ln_tide"):
+        validate_nemo_testcase_card(card)
+
+
 def test_explicit_switch_values(card):
-    nl = TSUNAMI_NAMELIST
-    want = dict(
-        rn_domszx_km=2000.0, rn_domszy_km=2000.0, rn_domszz_m=100.0,
-        rn_dx_km=10.0, rn_dy_km=10.0, rn_0xratio=0.2, rn_0yratio=0.4,
-        nn_fcase=0, rn_ppgphi0_deg=38.5, ln_Iperio=True, ln_Jperio=True,
-        nn_itend=100, rn_Dt_s=1000.0, key_RK3=False, key_qco=True,
-        key_vco_1d=True, ln_bt_fw=True, nn_bt_flt=1, rn_bt_alpha=0.0,
-        ln_bt_auto=True, rn_bt_cmax=0.8, nn_e_resolved=6, ln_dynvor_een=True,
-        nn_e3f_typ=0, rn_avm0_m2_s=1.2e-4, rn_avt0_m2_s=1.2e-5,
-        ln_zad_Aimp=False, rn_shlat=0.0, ln_drg_OFF=True, ln_seos=True,
-    )
-    for k, v in want.items():
-        assert getattr(nl, k) == v, k
     cfg = card.recipe.model_config
     assert cfg.barotropic.barotropic_time_filter == "nemo_boxcar1_ab3"
     assert cfg.barotropic.n_barotropic_substeps == 6
