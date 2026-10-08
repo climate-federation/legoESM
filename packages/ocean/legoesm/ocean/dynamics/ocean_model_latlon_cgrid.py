@@ -12906,7 +12906,7 @@ class LatLonCGridOceanModel:
                     _e_col = jnp.full_like(A_v_cell, jnp.nan)
                 _bud = _tke_budget_box[0] if _tke_budget_box else None
                 if _bud is None:
-                    _bud = (jnp.full_like(A_v_cell, jnp.nan),) * 4
+                    _bud = (jnp.full_like(A_v_cell, jnp.nan),) * 7
                 io_callback(col_callback, None, T_new, S_new, u_new, v_new,
                             _K_trd, A_v_cell, _e_col, *_bud, ordered=True)
             if self._tke_realized_kdiss_active() and (

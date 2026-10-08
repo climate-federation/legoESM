@@ -6800,14 +6800,18 @@ class _ZdfTrendAccumulator:
         self._cj, self._ci = np.nonzero(mask)
         self._col = {k: [] for k in ("col_T", "col_S", "col_u", "col_v", "col_K", "col_A",
                                      "col_e", "col_eshear", "col_estrat", "col_ediss",
-                                     "col_bapplied")}
+                                     "col_bapplied", "col_e_in", "col_e_lc",
+                                     "col_e_sol")}
 
-    def col(self, T, S, u, v, K, A, e, eshear, estrat, ediss, bapplied):
+    def col(self, T, S, u, v, K, A, e, eshear, estrat, ediss, bapplied,
+            e_in, e_lc, e_sol):
         """K/A: assembled solve coefficients (closure + IWM + backgrounds);
         e: the updated TKE at the same interior interfaces (NEMO en(k+1));
         eshear/estrat/ediss: TKE budget terms as NEMO's eshear_k/estrat_k/
         ediss_k; bapplied: the buoyancy work the solve applied (NaN where the
-        lane does not return them)."""
+        lane does not return them); e_in / e_lc / e_sol: e entering the
+        solve, the Langmuir increment and e after the solve (before etau),
+        kept in float64 because a per-step residual differences them."""
         n = self._NSER   # float32: storage; profiles only need ~1e-7 relative
         for key, x, m in (("col_T", T, n), ("col_S", S, n), ("col_u", u, n),
                           ("col_v", v, n), ("col_K", K, n - 1), ("col_A", A, n - 1),
@@ -6815,6 +6819,8 @@ class _ZdfTrendAccumulator:
                           ("col_estrat", estrat, n - 1), ("col_ediss", ediss, n - 1),
                           ("col_bapplied", bapplied, n - 1)):
             self._col[key].append(np.asarray(x)[self._cj, self._ci, :m].astype(np.float32))
+        for key, x in (("col_e_in", e_in), ("col_e_lc", e_lc), ("col_e_sol", e_sol)):
+            self._col[key].append(np.asarray(x)[self._cj, self._ci, :n - 1].astype(np.float64))
 
     def drain(self, dt=None):
         jax.effects_barrier()   # ordered callbacks are async: land them first

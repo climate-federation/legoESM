@@ -1668,7 +1668,7 @@ def test_budget_terms_close_the_step_without_tke_diffusion(sink):
     out = tke_vertical_mixing(u, v, T, S, rho, dz_half, e_old, tx, ty,
                               dt=150.0, cfg=cfg, rho_0=_RHO0, n_iterations=1,
                               z_interface=z_int)
-    eshear, estrat, ediss, bapplied = (np.asarray(x) for x in out.budget)
+    eshear, estrat, ediss, bapplied = (np.asarray(x) for x in out.budget[:4])
     e_new = np.asarray(out.tke_new)
     eo = np.asarray(e_old)
     lhs = (e_new - eo) / 150.0
@@ -1678,6 +1678,35 @@ def test_budget_terms_close_the_step_without_tke_diffusion(sink):
     np.testing.assert_allclose(lhs[inner], rhs[inner], rtol=1e-9, atol=1e-14)
     assert np.all(estrat <= 0.0)   # stable test column: -K_H*N2 is a sink
 
+
+
+@pytest.mark.parametrize("alpha", [0.0, None])
+def test_budget_states_give_the_diffusion_residual(alpha):
+    """The three budget STATES (e entering the solve, Langmuir increment, e
+    after the solve) let a caller recover the e-diffusion increment as
+    R = e_sol - e_in - e_lc - dt*(eshear + bapplied
+        - c_eps*dissl*(1.5 e_sol - 0.5 (e_in + e_lc))).
+    R == 0 with the diffusion off, and R != 0 with it on (non-vacuous)."""
+    u, v, T, S, rho, dz_half, z_int, tx, ty = _orchestrator_inputs()
+    kw = {} if alpha is None else {"alpha_tke": alpha}
+    cfg = TKEConfig(dissipation_discretization="nemo_1p5_split",
+                    tke_background=1.0e-10, **kw)
+    e_old = jnp.full(dz_half.shape, 1.0e-4)
+    out = tke_vertical_mixing(u, v, T, S, rho, dz_half, e_old, tx, ty,
+                              dt=150.0, cfg=cfg, rho_0=_RHO0, n_iterations=1,
+                              z_interface=z_int)
+    eshear, _, ediss, bapplied, e_in, e_lc, e_sol = (np.asarray(x) for x in out.budget)
+    np.testing.assert_array_equal(e_sol, np.asarray(out.tke_new))   # no etau here
+    assert np.all(e_lc == 0.0)
+    inner = (slice(None), slice(None), slice(1, -1))
+    np.testing.assert_array_equal(e_in[inner], np.asarray(e_old)[inner])
+    cd = 2.0 * ediss / e_sol
+    R = e_sol - e_in - e_lc - 150.0 * (eshear + bapplied
+                                       - cd * (1.5 * e_sol - 0.5 * (e_in + e_lc)))
+    if alpha == 0.0:
+        np.testing.assert_allclose(R[inner], 0.0, atol=1e-14)
+    else:
+        assert np.abs(R[inner]).max() > 1e-10
 
 
 def _veros_budget(e_mod=None):
@@ -1699,7 +1728,7 @@ def test_budget_terms_close_the_step_on_the_veros_branch():
     buoyancy, sqrt(max(e,0)) linearisation), including a carried debt row."""
     cfg, kw = _veros_budget(lambda e: e.at[..., 1].set(-3.0e-4))
     out = tke_vertical_mixing(cfg=cfg, **kw)
-    eshear, estrat, ediss, bapplied = (np.asarray(x) for x in out.budget)
+    eshear, estrat, ediss, bapplied = (np.asarray(x) for x in out.budget[:4])
     e_new, eo = np.asarray(out.tke_new), np.asarray(kw["tke_old"])
     lhs = (e_new - eo) / kw["dt"]
     rhs = eshear + bapplied - ediss * (3.0 - eo / e_new)

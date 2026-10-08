@@ -422,6 +422,10 @@ class TKEOutput(NamedTuple):
     # the shear production on the RHS (p_sh2), estrat = -K_H*N2 with the
     # post-avn K_H (estrat_k), ediss = 0.5*c_eps*dissl_old*e_post_solve
     # (ediss_k, before etau); bapplied = the buoyancy work the solve applied.
+    # Then three STATES for a per-stage residual: e entering the solve
+    # (after the boundary rows), the Langmuir increment dt*source (zeros
+    # unless tke_langmuir_coupling='nemo_pre_solve'), e after the solve and
+    # floor (before etau).
     budget: "tuple | None" = None
 
 
@@ -3642,7 +3646,11 @@ def tke_vertical_mixing(
                       - _K_H_used * jnp.minimum(N2, 0.0))
     _budget = (P_s_curr, -K_H * N2,
                0.5 * cfg.c_eps * _dissl_used * _e_post_solve,  # coeff-ok: NEMO zfact3 = 0.5*rn_ediss (zdftke.F90:242)
-               _b_applied)
+               _b_applied,
+               _e_pre_solve,
+               (dt * _lc_pre_solve if _lc_pre_solve is not None
+                else jnp.zeros_like(_e_pre_solve)),
+               _e_post_solve)
     return TKEOutput(K_M=K_M, K_H=K_H, tke_new=tke_curr,
                      l_eps=l_eps_final, K_M_surface=_K_M_surface,
                      dissl=dissl_new, statement_trace=_statement_trace,
