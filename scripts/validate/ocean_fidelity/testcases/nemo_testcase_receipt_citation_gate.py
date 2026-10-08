@@ -1025,6 +1025,17 @@ FILES = {
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM/cpp_GYRE_OMIP_L2_P3_SM.fcm",
     "nemo_testcase_recipe.py":
         REPO / "packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py",
+    "nemo_testcase_l4_orca2_round174_stage_growth_gate.py":
+        REPO / "scripts/validate/ocean_fidelity/orca2_l4"
+             / "nemo_testcase_l4_orca2_round174_stage_growth_gate.py",
+    "nemo_testcase_l4_orca2_round166_external_substep_gate.py":
+        REPO / "scripts/validate/ocean_fidelity/orca2_l4"
+             / "nemo_testcase_l4_orca2_round166_external_substep_gate.py",
+    "ORCA2_OMIP_L4_R175STAGE1/BLD/ppsrc/nemo/dtatsd.f90": (
+        NEMO / "cfgs/ORCA2_OMIP_L4_R175STAGE1/BLD/ppsrc/nemo/dtatsd.f90"),
+    "round175/orca2_rung0_stage1_ranked_10step_np2/namelist_cfg": Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round175"
+        "/acquisition/orca2_rung0_stage1_ranked_10step_np2/namelist_cfg"),
     "packages/ocean/legoesm/ocean/physics/vertical_mixing/_shared.py":
         REPO / "packages/ocean/legoesm/ocean/physics/vertical_mixing/_shared.py",
     "tests/ocean/fidelity/test_nemo_testcase_l2_gyre_card_reconciliation.py":
@@ -1449,6 +1460,23 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 round 176: the independent rung-0 entry guard ---
+    'nemo_testcase_recipe.py:1413-1453': [
+        'def apply_orca2_hand_alterations(temperature, salinity):',
+        'is what NEMO executes.', 41],
+    'nemo_testcase_recipe.py:1650-1651': [
+        'temperature, salinity = build_orca2_initial_ts(',
+        'temperature_path, salinity_path, tmask)', 2],
+    'ORCA2_OMIP_L4_R175STAGE1/BLD/ppsrc/nemo/dtatsd.f90:218-255': [
+        'IF( cn_cfg == "orca" .OR. cn_cfg == "ORCA" ) THEN',
+        ('ENDIF', 9), 38],
+    'round175/orca2_rung0_stage1_ranked_10step_np2/namelist_cfg:51':
+        'ln_tsd_dmp  = .false.',
+    'nemo_testcase_l4_orca2_round174_stage_growth_gate.py:224':
+        'card, state, freshwater, surface = r166._setup(deck_root, record_root)',
+    'nemo_testcase_l4_orca2_round166_external_substep_gate.py:223-230': [
+        'admission = rung0.frames.admit(record_root, ladder.EXPECTED_PRODUCER, None)',
+        'return card, initial, freshwater, surface', 8],
     # --- ORCA2 round 175: independent kt=1 stage-1 record boundary ---
     'ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo/stprk3_stg.f90:137-179': [
         'ssha(:,:) = ssh (:,:,Kaa)',
