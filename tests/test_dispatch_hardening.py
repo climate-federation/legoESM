@@ -135,6 +135,9 @@ def discover_hardened_dispatchers() -> tuple[set[tuple[str, str]], list[str]]:
 # justification) only when a dispatcher is intentionally renamed/removed.
 BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
     {
+        # Richards post-solve psi update: retention curve -> shift (PDI/Lu) or
+        # exact reset; an unknown curve must raise, never pick one silently.
+        ("packages/land/legoesm/land/richards.py", "solve_richards"),
         # Distributed PCG preconditioner selection ("jacobi" | "poly"):
         # an unknown name must raise, never fall back to Jacobi.
         ("packages/ocean/legoesm/ocean/dynamics/barotropic_implicit_mpas.py", "barotropic_implicit_mpas"),

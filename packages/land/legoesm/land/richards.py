@@ -237,6 +237,17 @@ def solve_richards(
     -------
     RichardsOutput
     """
+    # Static dispatch on the retention curve for the post-solve psi update: PDI /
+    # Lu invert theta -> psi only approximately, so their adjusted psi is SHIFTED
+    # by the inverse's difference; exact-inverse curves keep the exact reset.
+    _curve = hydro_config.retention_curve
+    if _curve in ("pdi", "lu"):
+        _shift_psi = True
+    elif _curve in ("van_genuchten", "clapp_hornberger", "campbell", "brooks_corey"):
+        _shift_psi = False
+    else:
+        raise ValueError(f"solve_richards: unknown retention curve scheme {_curve!r}")
+
     ncol = psi.shape[0]
     dz = grid.dz                  # (nlayers,)
     dz_if = grid.dz_interface     # (nlayers-1,)
@@ -704,14 +715,24 @@ def solve_richards(
     # Signed per-layer change [m], + = water added to the layer (z down, so
     # this is storage, not a flux): returned deficit minus taken-back excess.
     adjust = unsat_room * give_frac[:, None] - unsat_avail * take_frac[:, None]
+    theta_old = theta_final
     theta_final = theta_final + adjust / dz[None, :]
     # Masked-out layers get a mid-curve theta so the unused psi_from_theta branch
     # stays finite (no NaN cotangent from saturated layers under reverse mode).
     touched = adjust != 0.0
-    theta_safe = jnp.where(touched, theta_final,
-                           0.5 * (theta_floor + hydro_config.theta_sat))
-    psi_final = jnp.where(touched, psi_from_theta(theta_safe, hydro_config),
-                          psi_final)
+    theta_mid = 0.5 * (theta_floor + hydro_config.theta_sat)
+    theta_safe = jnp.where(touched, theta_final, theta_mid)
+    if _shift_psi:
+        # PDI / Lu: a reset through the approximate inverse would move psi off
+        # the solved (psi, theta) pair by the full inverse error even for a
+        # round-off adjustment; the difference vanishes with the adjustment.
+        theta_old_safe = jnp.where(touched, theta_old, theta_mid)
+        # Difference first: added to psi_final it would round psi in float32.
+        psi_new_c = psi_final + (psi_from_theta(theta_safe, hydro_config)
+                                 - psi_from_theta(theta_old_safe, hydro_config))
+    else:
+        psi_new_c = psi_from_theta(theta_safe, hydro_config)
+    psi_final = jnp.where(touched, psi_new_c, psi_final)
     # theta keeps the exact adjustment (water conserved on every curve).  PDI / Lu
     # invert only approximately (round trip off by up to ~0.08 m3/m3), so there
     # the debited layer's psi carries that pre-existing inverse error; resetting

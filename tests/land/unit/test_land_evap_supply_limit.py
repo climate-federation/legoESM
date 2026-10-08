@@ -88,8 +88,11 @@ def test_returned_psi_theta_consistent_on_wet_columns(theta0, flux, pond, curve)
     if theta0 is None and curve != "lu":
         assert abs(float(out.water_created[0])) < 1e-15, float(out.water_created[0])
     if theta0 is not None or curve == "van_genuchten":
+        # Lu: the unconverged wetting front gets a real give-back, whose psi
+        # shift goes through Lu's approximate inverse, so it is not exact.
         np.testing.assert_allclose(np.asarray(theta_from_psi(out.psi_new, hyd)),
-                                   np.asarray(out.theta_new), rtol=0, atol=1e-10)
+                                   np.asarray(out.theta_new), rtol=0,
+                                   atol=1e-8 if curve == "lu" else 1e-10)
 
     def total_psi(f):
         o = solve_richards(psi, theta, grid, hyd, RichardsConfig(), jnp.array([f]),
@@ -97,6 +100,15 @@ def test_returned_psi_theta_consistent_on_wet_columns(theta0, flux, pond, curve)
         return jnp.sum(o.psi_new) + jnp.sum(o.theta_new)
 
     assert np.isfinite(float(jax.grad(total_psi)(flux)))
+
+
+def test_solve_richards_raises_on_unknown_retention_curve():
+    hyd = SoilHydraulicsConfig(retention_curve="no_such_curve")
+    grid = make_soil_grid(SoilGridConfig(n_layers=8, total_depth=3.0))
+    z = jnp.full((1, 8), -1.0)
+    with pytest.raises(ValueError, match="solve_richards: unknown retention curve scheme"):
+        solve_richards(z, z, grid, hyd, RichardsConfig(), jnp.zeros(1),
+                       jnp.zeros((1, 8)), 1800.0, surface_water=jnp.zeros(1))
 
 
 def _forcing(n, T=310.0, q=0.002, P=0.0, sw=600.0):
