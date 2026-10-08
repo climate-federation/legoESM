@@ -133,9 +133,11 @@ def classify(
             rung0_candidate if name == "rung0_independent" else rung7_candidate,
             ssh_target,
         )
-        strict_majority = rms["toward"] * 2 > comparison["moved_row_count"]
+        unchanged = comparison["moved_row_count"] == 0
+        strict_majority = (
+            rms["toward"] * 2 > comparison["moved_row_count"])
         ladder_eligible = (
-            strict_majority
+            (unchanged or strict_majority)
             and first_direction in ("toward", "equal")
             and not comparison["bit_identical_losses"]
             and float(after_ssh["max_abs"]) <= float(before_ssh["max_abs"])
@@ -151,6 +153,7 @@ def classify(
                 "after": after_ssh["max_abs"],
                 "direction": _metric_direction(before_ssh, after_ssh, "max_abs"),
             },
+            "byte_unchanged": unchanged,
             "strict_majority_toward": strict_majority,
             "decision96_eligible": ladder_eligible,
         }
