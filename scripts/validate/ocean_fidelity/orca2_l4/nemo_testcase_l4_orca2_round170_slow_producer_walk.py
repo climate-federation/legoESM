@@ -335,8 +335,8 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
         recorded_replay[face] = _score(replay, oracle[f"depth_{face}"], active2[face])
 
     rhs_override = (
-        np.pad(oracle["rhs_u"][..., :-1], ((0, 0), (1, 0), (0, 0))),
-        np.pad(oracle["rhs_v"][..., :-1], ((1, 0), (0, 0), (0, 0))),
+        oracle["rhs_u"][..., :-1],
+        oracle["rhs_v"][..., :-1],
     )
     arm_trace = _trace_at_kt8(
         card, state, freshwater, surface,
