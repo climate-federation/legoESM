@@ -1033,6 +1033,8 @@ FILES = {
              / "nemo_testcase_l4_orca2_round166_external_substep_gate.py",
     "ORCA2_OMIP_L4_R175STAGE1/BLD/ppsrc/nemo/dtatsd.f90": (
         NEMO / "cfgs/ORCA2_OMIP_L4_R175STAGE1/BLD/ppsrc/nemo/dtatsd.f90"),
+    "ORCA2_OMIP_L4_R175STAGE1/BLD/ppsrc/nemo/stprk3_stg.f90": (
+        NEMO / "cfgs/ORCA2_OMIP_L4_R175STAGE1/BLD/ppsrc/nemo/stprk3_stg.f90"),
     "round175/orca2_rung0_stage1_ranked_10step_np2/namelist_cfg": Path(
         "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round175"
         "/acquisition/orca2_rung0_stage1_ranked_10step_np2/namelist_cfg"),
@@ -1470,6 +1472,9 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4_R175STAGE1/BLD/ppsrc/nemo/dtatsd.f90:218-254': [
         'IF( cn_cfg == "orca" .OR. cn_cfg == "ORCA" ) THEN',
         ('ENDIF', 9), 37],
+    'ORCA2_OMIP_L4_R175STAGE1/BLD/ppsrc/nemo/stprk3_stg.f90:139-181': [
+        'ssha(:,:) = ssh (:,:,Kaa)',
+        'r3v(:,:,Kaa) = r2_3 * r3v(:,:,Kbb) + r1_3 * r3va(:,:)', 43],
     'round175/orca2_rung0_stage1_ranked_10step_np2/namelist_cfg:51':
         'ln_tsd_dmp  = .false.',
     'nemo_testcase_l4_orca2_round174_stage_growth_gate.py:224':
