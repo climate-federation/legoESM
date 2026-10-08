@@ -84,10 +84,20 @@ test now plants that mismatch. The successful run is pinned to clean commit
 All eleven classifier plants fire: admission, rank placement, record bit,
 source order, target mask, self-replay, first input, first statement,
 north-arm non-vacuity, atomic endpoint, and endpoint ULP. The focused
-round-181/183 record/replay battery passes. The default citation gate and this
-receipt's gate pass with no unmapped citation or audit failure; shifting the
-new compiled citation makes the plant fail. The required
-`tests/ocean/fidelity -n 12` result is recorded in the evidence directory.
+round-181/183 record/replay battery passes 49/49. The default citation gate
+and this receipt's gate pass with no unmapped citation or audit failure;
+shifting the new compiled citation makes the plant fail.
+
+The one required `tests/ocean/fidelity -n 12` battery reported 2,851/2,869
+selected cases before its xdist controller stopped emitting at 99% without a
+terminal summary: 2,840 passed, seven skipped, and four failed. All four are
+the registered pre-existing reds (SI3 scalar-math provenance, round-35 stamp
+scope, worktree-stamp ratchet, and GYRE round-129 spread-floor record). Of the
+18 unreported cases, 14 pass in isolated file groups. The remaining four are
+the phase-3 stage-sweep end-to-end controls; the first remained silent for
+eight minutes and was interrupted rather than launching another wide
+battery. The incomplete wide log, selected-node census, and isolated-tail
+evidence are retained under the evidence root. No round-183 test failed.
 
 The separate read-only Codex review was attempted and returned
 **independent review unavailable in-sandbox**:
