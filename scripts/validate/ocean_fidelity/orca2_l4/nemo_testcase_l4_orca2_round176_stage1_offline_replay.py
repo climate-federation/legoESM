@@ -40,7 +40,8 @@ FLOOR = np.float64(2.0e-10)
 CELLS = ((147, 49, 0), (86, 159, 3))
 SOURCE_ORDER = (
     "entry_T", "entry_S", "entry_u", "entry_v", "entry_ssh",
-    "r3t_stage1", "momentum_update_u", "momentum_update_v",
+    "external_stage_ssh", "r3t_stage1",
+    "momentum_update_u", "momentum_update_v",
     "barotropic_correction_u", "barotropic_correction_v",
     "metric_transport_u", "metric_transport_v",
     "centered_advection_T", "centered_advection_S",
@@ -237,11 +238,14 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
     from legoesm.ocean.dynamics.barotropic_common import rk3_stage_barotropic_correction
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel, _NEMOWSRK3TestHooks,
         _nemo_metric_stage_transport, _nemo_ws_qco_stage_faces,
         _nemo_ws_rk3_tracer_pair_step, rk3_stage_velocity_update,
     )
     from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import compute_face_masks_3d
     from legoesm.ocean.eos import nemo_r3t_rk3_stage1_stretch
+    from legoesm.ocean.freshwater import FreshwaterForcing
+    from legoesm.ocean.state import OceanSurfaceForcing
     from legoesm.ocean.vertical import compute_layer_thickness
 
     stamp = worktree_stamp()
@@ -328,7 +332,27 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
             "worktree": stamp,
         })
 
-    q_after = nemo_r3t_rk3_stage1_stretch(zc, state.eta.data, oracle["ext_ssh"], state.H_bathy.data)
+    zero = jnp.zeros_like(state.eta.data, dtype=jnp.float64)
+    freshwater = FreshwaterForcing(zero, zero, zero, zero, zero)
+    surface = OceanSurfaceForcing(
+        sw_down=zero, q_net=zero, tau_x=zero, tau_y=zero,
+        freshwater=zero, salt_flux=zero, taum=zero,
+        tau_i_native=zero, tau_j_native=zero,
+    )
+    stage_model = LatLonCGridOceanModel(
+        grid, zc, cfg,
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+            expose_tracer_stage=1),
+    )
+    final_model = LatLonCGridOceanModel(grid, zc, cfg)
+    stage_state = jax.device_get(stage_model.step(
+        state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
+    final_state = jax.device_get(final_model.step(
+        state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
+    add("external_stage_ssh", stage_state.eta.data, oracle["ext_ssh"],
+        np.asarray(state.H_bathy.data) > 0)
+    q_after = nemo_r3t_rk3_stage1_stretch(
+        zc, state.eta.data, final_state.eta.data, state.H_bathy.data)
     add("r3t_stage1", np.asarray(q_after) - 1.0, oracle["ext_r3t"], np.asarray(state.H_bathy.data) > 0)
 
     u0, v0 = state.u.data[:, 1:, :], state.v.data[1:, :, :]
