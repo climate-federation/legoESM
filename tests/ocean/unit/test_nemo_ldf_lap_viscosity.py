@@ -235,3 +235,139 @@ def test_dino_recipe_wires_nemo_div_curl_and_propagates():
     assert mc.lateral_viscosity.A_h_eq_boost == 1.0
     assert mc.lateral_viscosity.A_h_floor == 0.0
     assert mc.lateral_viscosity.B_h == 0.0
+
+
+# --- nn_ahm_ijk_t = -30: the coefficient is READ, not computed (ORCA2 round 9) --
+
+def _ahm_source_config(source, operator="nemo_div_curl"):
+    return LatLonCGridOceanConfig.from_flat(
+        lateral_viscosity_operator=operator,
+        lateral_viscosity_coefficient_source=source,
+        A_h=1.5e4, A_h_lat_scaling=True)
+
+
+def _carried(geo, ahmt, ahmf):
+    import types
+    return types.SimpleNamespace(nemo_ldf_ahmt=ahmt, nemo_ldf_ahmf=ahmf)
+
+
+def _call_visc_z(geo, config, z_coord, *, vertex_mask=None):
+    n_lat, n_lon = geo.lat.shape[0], geo.lon.shape[0]
+    rng = np.random.default_rng(4)
+    u3 = jnp.asarray(rng.standard_normal((n_lat, n_lon + 1)))[..., None]
+    v3 = jnp.asarray(rng.standard_normal((n_lat + 1, n_lon)))[..., None]
+    out = _bc_horizontal_viscosity(
+        jnp.zeros_like(u3), jnp.zeros_like(v3), u3, v3, geo,
+        jnp.ones((n_lat, n_lon)), jnp.ones((n_lat, n_lon + 1)),
+        jnp.ones((n_lat + 1, n_lon)), config, z_coord, None, 1.0,
+        h_k=jnp.ones((n_lat, n_lon, 1)),
+        vertex_mask=vertex_mask)
+    return np.asarray(out[0])
+
+
+def test_file_source_uses_the_carried_coefficient_not_the_formula():
+    """The -30 arm reads z_coord's field; the formula arm never sees it."""
+    geo = _geo()
+    n_lat, n_lon = geo.lat.shape[0], geo.lon.shape[0]
+    half_UM = 1.5e4 / (geo.radius * geo.dlon)
+    ahmt_1d, ahmf_1d = nemo_lateral_viscosity_coefficients(geo, half_UM)
+    # The same coefficient, broadcast to the full (lat, lon, lev) field NEMO
+    # reads: the two arms must then agree exactly.
+    ahmt_3d = jnp.broadcast_to(ahmt_1d[:, None, None], (n_lat, n_lon, 1))
+    ahmf_3d = jnp.broadcast_to(ahmf_1d[:, None, None], (n_lat + 1, n_lon + 1, 1))
+    formula = _call_visc_z(geo, _ahm_source_config("nemo_ldf_c2d"), None)
+    read = _call_visc_z(
+        geo, _ahm_source_config("nemo_ahm_3d_file"),
+        _carried(geo, ahmt_3d, ahmf_3d))
+    assert np.max(np.abs(formula)) > 0.0
+    np.testing.assert_array_equal(read, formula)
+
+    # NON-VACUITY: the branch really reads that array -- perturb one cell of
+    # the carried coefficient and the tendency moves.
+    bumped = np.asarray(ahmt_3d).copy()
+    bumped[n_lat // 2, n_lon // 2, 0] *= 1.5
+    moved = _call_visc_z(
+        geo, _ahm_source_config("nemo_ahm_3d_file"),
+        _carried(geo, jnp.asarray(bumped), ahmf_3d))
+    assert not np.array_equal(moved, read)
+
+
+def test_file_source_does_not_apply_a_second_vertex_mask():
+    """NEMO's read ahmf already contains fmask; computed ahmf is still masked."""
+    geo = _geo(n_lat=8, n_lon=12)
+    n_lat, n_lon = geo.lat.shape[0], geo.lon.shape[0]
+    ahmt = jnp.full((n_lat, n_lon, 1), 2.0)
+    ahmf = jnp.full((n_lat + 1, n_lon + 1, 1), 3.0)
+    ones = jnp.ones((n_lat + 1, n_lon + 1))
+    zeros = jnp.zeros_like(ones)
+
+    file_cfg = _ahm_source_config("nemo_ahm_3d_file")._replace(
+        lateral_viscosity_e3_weighting="nemo_e3")
+    carried = _carried(geo, ahmt, ahmf)
+    file_unmasked = _call_visc_z(
+        geo, file_cfg, carried, vertex_mask=ones)
+    file_zero_mask = _call_visc_z(
+        geo, file_cfg, carried, vertex_mask=zeros)
+    np.testing.assert_array_equal(file_zero_mask, file_unmasked)
+
+    formula_cfg = _ahm_source_config("nemo_ldf_c2d")._replace(
+        lateral_viscosity_e3_weighting="nemo_e3")
+    formula_unmasked = _call_visc_z(
+        geo, formula_cfg, None, vertex_mask=ones)
+    formula_zero_mask = _call_visc_z(
+        geo, formula_cfg, None, vertex_mask=zeros)
+    assert not np.array_equal(formula_zero_mask, formula_unmasked)
+
+
+def test_file_source_refuses_without_the_carried_coefficient():
+    geo = _geo()
+    with pytest.raises(ValueError, match="nemo_ldf_ahmt"):
+        _call_visc_z(geo, _ahm_source_config("nemo_ahm_3d_file"), None)
+
+
+def test_unknown_coefficient_source_raises():
+    geo = _geo()
+    with pytest.raises(ValueError, match="lateral_viscosity_coefficient_source"):
+        _call_visc_z(geo, _ahm_source_config("nn_ahm_ijk_t_minus_thirty"), None)
+
+
+def test_file_source_requires_the_nemo_div_curl_operator():
+    geo = _geo()
+    with pytest.raises(ValueError, match="requires"):
+        _call_visc_z(
+            geo,
+            _ahm_source_config("nemo_ahm_3d_file", operator="vector_laplacian"),
+            None)
+
+
+def test_default_coefficient_source_is_the_formula():
+    """No default moves: a config that never mentions the selector runs
+    ldf_c2d, exactly as before."""
+    assert (LatLonCGridOceanConfig.from_flat(A_h=1.0e4)
+            .lateral_viscosity_coefficient_source == "nemo_ldf_c2d")
+
+
+def test_file_source_refuses_a_no_slip_side_drag():
+    """The side drag reads the SCALAR A_h, which this source does not define."""
+    geo = _geo()
+    cfg = LatLonCGridOceanConfig.from_flat(
+        lateral_viscosity_operator="nemo_div_curl",
+        lateral_viscosity_coefficient_source="nemo_ahm_3d_file",
+        lateral_side_bc="no_slip", A_h=1.5e4, A_h_lat_scaling=True)
+    with pytest.raises(ValueError, match="no_slip"):
+        _call_visc_z(geo, cfg, None)
+
+
+def test_file_source_refuses_the_flux_form_kdiss_diagnostic():
+    """That diagnostic consumes a LATITUDE profile and would silently
+    broadcast a full three-dimensional coefficient."""
+    import types
+    geo = _geo()
+    cfg = LatLonCGridOceanConfig.from_flat(
+        lateral_viscosity_operator="nemo_div_curl",
+        lateral_viscosity_coefficient_source="nemo_ahm_3d_file",
+        A_h=1.5e4, A_h_lat_scaling=True)
+    eke = types.SimpleNamespace(source_kdiss_h=True, kdiss_h_flux_form=True)
+    cfg = cfg._replace(gm_redi=types.SimpleNamespace(eke=eke))
+    with pytest.raises(ValueError, match="K_diss_h"):
+        _call_visc_z(geo, cfg, None)

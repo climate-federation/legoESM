@@ -70,5 +70,13 @@ class PhysicsOutput(NamedTuple):
     # value above the configured cap means the fall was clamped.  ``None``
     # (sub-stepping off, or a scheme that does not sediment) keeps the pytree
     # byte-identical.  Carried so the finite-volume lanes can report the
-    # clamp the way the MPAS loop does.  Appended LAST (positional ABI).
+    # clamp the way the MPAS loop does.  Appended after ``budget_ledger``
+    # (positional ABI); ``evap_sfc`` below is now the last field.
     sed_substeps_required: jax.Array | None = None
+    # Surface water flux actually applied to the column [kg/m2/s, positive up]:
+    # the kernel's moisture BC (tiled / prescribed water when folded, else the
+    # bulk L_v(T_sfc) inverse).  None when no surface scheme ran, and None
+    # when a kernel replaced lhflx without publishing its water (the pipeline
+    # reports absence rather than a stale pair).  Appended LAST (positional
+    # ABI).
+    evap_sfc: jax.Array | None = None

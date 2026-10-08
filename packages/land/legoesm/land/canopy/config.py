@@ -223,10 +223,6 @@ class CanopyConfig(NamedTuple):
     # value 0.01 — see DifferBESS aa6e8b9.  Paired with kB^-1 = 0 in MOST.
     cv: float = 0.0135
 
-    # Soil moisture stress thresholds (when no Richards state available)
-    wilting_point: float = 0.15   # theta_wp [m3/m3]
-    field_capacity: float = 0.30  # theta_fc [m3/m3]
-
     # Optional solar-induced fluorescence (SIF) diagnostic.  ``None`` (default)
     # disables it; a ``SIFConfig`` enables the passive top-of-canopy SIF output
     # (sunlit+shaded sum) on ``SurfaceFluxOutput.sif``.  Static config leaf —
@@ -341,20 +337,6 @@ __param_spec__ = {
                 "transform": "sigmoid", "category": "aerodynamics",
                 "reference": "leaf boundary-layer forced-convection coefficient "
                              "(Campbell & Norman 1998 / CLM5)",
-                "shape": None,
-            },
-            "wilting_point": {
-                "units": "m^3/m^3", "bounds": (0.05, 0.25), "tunable_tier": 2,
-                "transform": "sigmoid", "category": "hydrology",
-                "reference": "soil-moisture-stress wilting point theta_wp "
-                             "(CLM5 / DifferBESS fallback)",
-                "shape": None,
-            },
-            "field_capacity": {
-                "units": "m^3/m^3", "bounds": (0.20, 0.50), "tunable_tier": 2,
-                "transform": "sigmoid", "category": "hydrology",
-                "reference": "soil-moisture-stress field capacity theta_fc "
-                             "(CLM5 / DifferBESS fallback)",
                 "shape": None,
             },
         },
@@ -563,6 +545,17 @@ class CanopyLandParams(NamedTuple):
     ALB_VIS_SAT: jax.Array | None = None
     ALB_NIR_DRY: jax.Array | None = None
     ALB_NIR_SAT: jax.Array | None = None
+
+    # ---- Canopy structure for the canopy-over-snow albedo (optional) ----
+    # Dominant-PFT stem area index [m2/m2], canopy-bottom height [m] and CLM5
+    # PFT index (0..16, stored as float so float pytree maps stay valid), same
+    # dominant-PFT convention as ``LAI``.  Read ONLY by the canopy snow masking
+    # (``MultiLayerLandConfig.canopy_snow_masking``); deliberately NOT named
+    # ``SAI``, which the interception store and the CLM-ML adapters already
+    # read, so building them changes nothing with the switch off.
+    SAI_dom: jax.Array | None = None
+    hbot_dom: jax.Array | None = None
+    pft_dom: jax.Array | None = None
 
 
 # NOTE: ``CanopyLandConfig`` has been removed.  Canopy is now a surface

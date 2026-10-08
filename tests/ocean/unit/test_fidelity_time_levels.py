@@ -105,6 +105,13 @@ def test_unregistered_dump_raises_and_never_defaults():
         time_level_for_dump("dump_something_new.bin")
 
 
+def test_round95_stage_closure_transport_is_registered_at_now_level():
+    name = "oracle_tracer_transport_kt00000002_s3.bin"
+    assert time_level_for_dump(name) == "now"
+    assert "R94STGCLS/BLD/ppsrc/nemo/stprk3_stg.f90" in (
+        _DUMP_TIME_LEVEL[name][1])
+
+
 def test_row18_direct_operand_dumps_are_registered_at_now_level():
     """The write-only operands are read in zdftke's live-Kmm etau block."""
     for name in ("tke_dump_etau_gdepw.bin", "tke_dump_etau_htau.bin"):
@@ -161,6 +168,33 @@ def test_register_dump_rejects_a_bogus_level():
 def test_register_dump_round_trips():
     register_dump("dump_unit_test.bin", "now", "unit_test.F90:1")
     assert time_level_for_dump("dump_unit_test.bin") == "now"
+
+
+def test_gyre_whole_step_rk3_dump_registry_is_complete_and_fail_closed():
+    for kt in range(1, 11):
+        step = f"{kt:08d}"
+        assert time_level_for_dump(
+            f"oracle_step_entry_kt{step}.bin") == "before"
+        assert time_level_for_dump(
+            f"oracle_bt_frames_kt{step}.bin") == "after"
+    for stage in range(1, 4):
+        assert time_level_for_dump(
+            f"oracle_stage_kt00000001_s{stage}.bin") == "after"
+        assert time_level_for_dump(
+            f"oracle_transport_kt00000001_s{stage}.bin") == "now"
+    assert time_level_for_dump("oracle_rhs_kt00000001.bin") == "now"
+    assert time_level_for_dump(
+        "oracle_bt_ordered_operands_kt00000001.bin") == "now"
+    with pytest.raises(ValueError, match="no registered NEMO time level"):
+        time_level_for_dump("oracle_stage_kt00000002_s1.bin")
+
+
+def test_round139_developed_slow_forcing_split_is_before_level():
+    name = "oracle_slow_forcing_split_kt00001081.bin"
+    assert time_level_for_dump(name) == "before"
+    source = _DUMP_TIME_LEVEL[name][1]
+    assert "dynspg_ts.f90:289-325" in source
+    assert "Kmm=Nbb" in source
 
 
 def test_cor2d_substep1_dumps_are_before_level():
@@ -271,3 +305,15 @@ def test_post_tendency_stage_state_dumps_are_registered_at_the_after_level():
     # at a kt outside the two instrumented windows must still raise.
     with pytest.raises(ValueError):
         time_level_for_dump("stp_dump_08_dynzdf_kt00009999_u.bin")
+
+
+def test_gyre_stage2_eos_operand_dump_is_registered_at_live_kmm_level():
+    assert time_level_for_dump(
+        "oracle_rkstage2_eos_operands_kt00000001.bin") == "now"
+
+
+def test_orca2_stage1_wzv_operand_dump_is_registered_at_live_kmm_level():
+    name = "oracle_stage1_wzv_operands_kt00000001.bin"
+    assert time_level_for_dump(name) == "now"
+    source = _DUMP_TIME_LEVEL[name][1]
+    assert "Kbb=1,Kmm=1,Kaa=3" in source

@@ -27,7 +27,11 @@ Known remaining gaps (honest report):
 - Prognostic CCN activation (Abdul-Razzak & Ghan) not implemented —
   needs aerosol size/composition the AOD forcing does not carry.
 
-## Production defaults (deck)
+## Deck defaults
+
+These are the CMIP6 deck wrapper's defaults, not the legoESM 1.0 production
+AMIP configuration — that is the CAM6 suite on MPAS in
+`config/amip/amip_production.yaml` (see [amip.md](amip.md)).
 
 `run_amip_cmip6_deck.py`: radiation rrtmg, clouds sundqvist,
 microphysics **morrison** (M2005/MG, number-aware r_eff), convection
@@ -35,9 +39,9 @@ sbm, turbulence louis, `--aerosol-ccn` + `--dynamic-albedo` default-on
 (pipeline grids). Rationale: scheme-validation survey (2026-06-10) —
 Morrison is SAM-oracle validated (`docs/dev-notes/CRM_faithful_SAM.md`)
 + RCEMIP-viable; SBM/Louis are the only AMIP-multi-day-proven
-convection/PBL. Mass-flux schemes (ZM/Tiedtke/Bechtold/KF) carry a
-documented CAPE bias and zero AMIP validation — candidates, not
-defaults.
+convection/PBL at the time this survey was made. Since then the
+Zhang–McFarlane port has become the production convection scheme
+(CAM6 suite, via `--config`); the deck defaults were not changed.
 
 ## 2.5° resolution map
 

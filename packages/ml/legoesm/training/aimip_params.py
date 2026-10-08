@@ -912,43 +912,10 @@ def aimip_scheme_keys_for(
     return keys
 
 
-def aimip_legacy_owned_scheme_keys() -> set[str]:
-    """Registry ``scheme_key``s the LEGACY hand-written params already train.
-
-    OWNERSHIP RULE (design call, 2026-08-06): a config field has exactly ONE
-    trainer.  ``AIMIPClassicalParams.to_<x>_config`` writes these classes'
-    fields from legacy leaves and ``_splice_scheme_overrides`` runs AFTER it,
-    so letting the spec-driven collector also cover such a class would
-    overwrite the legacy value and silently zero those gradients — trading the
-    46 leaves that train today for new ones, with no error.  The spec route
-    therefore covers only the schemes the legacy route CANNOT reach (Bechtold,
-    CLUBB, Thompson, ...), which is why the opt-in exists.
-
-    Legacy wins the overlap rather than the spec because the alternative —
-    dropping the colliding legacy ``ParamConstraint``s — changes the
-    ``AIMIPClassicalParams`` pytree layout and invalidates every existing
-    classical checkpoint, for no additional trained parameter.
-
-    The owned set is derived by CALLING every ``to_*_config`` method and
-    reading the returned TYPE, so a method added later is owned automatically
-    (a hardcoded class list would rot into a silent gradient loss).
-    """
-    from legoesm.training.param_collector import build_registry
-
-    probe = AIMIPClassicalParams.from_defaults()
-    owned_classes = {
-        type(getattr(probe, name)()).__name__
-        for name in dir(type(probe))
-        if name.startswith("to_") and name.endswith("_config")
-    }
-    return {m.scheme_key for m in build_registry()
-            if m.config_class in owned_classes}
-
-
 def aimip_legacy_owned_fields(*, cloud_scheme: str = "xu_randall") -> set[str]:
     """Qualified ``scheme_key.field`` names the legacy leaves actually WRITE.
 
-    Field-level refinement of :func:`aimip_legacy_owned_scheme_keys`: the
+    Field-level refinement of the former class-level ownership rule: the
     class-level subtraction excluded EVERY spec parameter of a class the
     legacy route touches, which suppressed spec-only fields the legacy never
     writes (Sundqvist ``qc_crit``, McFarlane ``fcrit2``, most of
@@ -1022,6 +989,29 @@ def aimip_legacy_owned_fields(*, cloud_scheme: str = "xu_randall") -> set[str]:
                     if q in known:
                         owned.add(q)
     return owned
+
+
+# Spec parameters of an ACTIVE class that the selected scheme never reads.
+# The cloud-fraction family routes the whole CloudConfig spec, but cam6_clubb
+# takes its liquid fraction from CLUBB and requires explicit condensate, so the
+# RH threshold and the diagnostic in-cloud condensate floor (both Sundqvist /
+# Xu-Randall only) have no gradient path there.
+_INACTIVE_FIELDS_BY_CLOUD_SCHEME = {
+    "cam6_clubb": frozenset({
+        "atm.clouds.CloudConfig.rh_crit",
+        "atm.clouds.CloudConfig.q_c_diagnostic",
+    }),
+}
+
+
+def aimip_inactive_fields(*, cloud_scheme: str) -> frozenset:
+    """Qualified ``scheme_key.field`` names with no gradient path under this
+    cloud scheme, frozen OUT of the trainable set by name (no-inert-parameters
+    rule, the ``_inactive_keys`` pattern) rather than left to a measured
+    freeze.  Pass to ``build_trainable_params(exclude=...)`` together with
+    :func:`aimip_legacy_owned_fields` at every bundle build, so a trained
+    checkpoint and its evaluation skeleton share one tree."""
+    return _INACTIVE_FIELDS_BY_CLOUD_SCHEME.get(cloud_scheme, frozenset())
 
 
 class AIMIPTrainableBundle(eqx.Module):

@@ -237,7 +237,17 @@ def test_prescribed_flux_enters_the_column_exactly_once(grid, turbulence):
     dp = inp["p_s"][..., None] * (pipe.sigma_half[1:] - pipe.sigma_half[:-1])
     water = jnp.sum(out.dq_v_dt * dp, axis=-1) / constants.g   # kg m-2 s-1
     momentum = jnp.sum(out.du_dt * dp, axis=-1) / constants.g   # Pa
-    np.testing.assert_allclose(np.asarray(water), lhf / constants.L_v, rtol=1e-3)
+    # Heat-only override: the water is lhf / L_v(T_sfc) -- the inverse of the
+    # bulk law's own temperature-dependent latent heat (sst = 295 K here), not
+    # the constant (2 % apart).
+    from legoesm.thermo import latent_heat_vaporization
+    np.testing.assert_allclose(np.asarray(water),
+                               lhf / float(latent_heat_vaporization(jnp.asarray(295.0))), rtol=1e-3)
+    # With the coupler's water channel the column gains exactly that water.
+    out_w = _step(pipe, sfc_shflx_override=jnp.zeros(s2), sfc_lhflx_override=jnp.full(s2, lhf),
+                  sfc_evap_override=jnp.full(s2, 2.5e-5))
+    water_w = jnp.sum(out_w.dq_v_dt * dp, axis=-1) / constants.g
+    np.testing.assert_allclose(np.asarray(water_w), 2.5e-5, rtol=1e-3)
     np.testing.assert_allclose(np.asarray(momentum), tau, rtol=1e-3)
 
 
@@ -361,3 +371,85 @@ def test_prescribed_heat_is_a_convection_surface_source_without_a_turbulence_sch
     # bulk path has no surface config to draw the flux from)
     with pytest.raises(ValueError):
         _step(pipe)
+
+
+@pytest.mark.parametrize("turbulence", ["louis", "clubb_lite"])
+def test_tiled_water_is_folded_even_without_any_override(monkeypatch, turbulence):
+    """The mosaic's per-tile-inverted water is the kernel's moisture BC
+    whenever the surface is tiled -- not only when the coupler prescribes
+    something.  A fold gated on the override branch discarded it on the plain
+    tiled path (the ordinary AMIP step), and a stress-only override tripped
+    the pair rule because the tiled heat was never passed alongside."""
+    from legoesm.atmosphere.physics.turbulence import integration as integ
+    seen = []
+    real = integ.fold_prescribed_surface_fluxes
+
+    def spy(cfg, **kw):
+        seen.append(kw)
+        return real(cfg, **kw)
+
+    monkeypatch.setattr(integ, "fold_prescribed_surface_fluxes", spy)
+    pipe = _pipeline(create_cubed_sphere(4), turbulence=turbulence)
+    _, s2 = _inputs(pipe)
+    pipe.f_land = jnp.full(s2, 0.5)
+    pipe.albedo_land = jnp.full(s2, 0.2)
+    pipe.surface_tiled = True
+    # clubb_lite carries prognostic TKE; seed it so the kernel runs.
+    extra = ({"tke": jnp.full((pipe.adapter.ncol, NLEV), 0.1)}
+             if turbulence == "clubb_lite" else {})
+    _step(pipe, T_land=jnp.full(s2, 285.0), **extra)
+    assert len(seen) == 1, "no fold happened on the plain tiled path"
+    kw = seen[-1]
+    assert kw["evap_kg_m2_s"] is not None and kw["lhflx_w_m2"] is not None
+    assert kw["shflx_w_m2"] is None and kw["tau_x_pa"] is None
+    water = np.asarray(kw["evap_kg_m2_s"])
+    lh = np.asarray(kw["lhflx_w_m2"])
+    assert np.isfinite(water).all() and (np.abs(water) > 0).any()
+    # It is the per-tile water, not the blended heat over one L at the
+    # blended temperature (ocean 295 K / land 285 K, half each).
+    from legoesm.thermo import latent_heat_vaporization as L
+    assert np.max(np.abs(water / (lh / float(L(290.0))) - 1.0)) > 1e-5
+    # A stress-only override on the tiled path must not trip the pair rule.
+    seen.clear()
+    out = _step(pipe, T_land=jnp.full(s2, 285.0),
+                sfc_taux_override=jnp.full(s2, 0.05),
+                sfc_tauy_override=jnp.zeros(s2), **extra)
+    assert np.isfinite(np.asarray(out.dT_dt)).all()
+    assert seen[-1]["evap_kg_m2_s"] is not None and seen[-1]["lhflx_w_m2"] is not None
+
+
+def test_physics_output_carries_the_surface_water_flux():
+    """``PhysicsOutput.evap_sfc`` is the water the surface actually lost, on
+    the same basis as the reported ``lhflx``: over open ocean at one skin
+    temperature it is lhflx / L_v(SST) (the kernel's own inverse), never the
+    constant-L inverse."""
+    from legoesm.thermo import latent_heat_vaporization
+    for turbulence in ("louis", "none"):
+        pipe = _pipeline(create_cubed_sphere(4), turbulence=turbulence)
+        _, s2 = _inputs(pipe)
+        out = _step(pipe)
+        assert out.evap_sfc is not None and np.isfinite(np.asarray(out.evap_sfc)).all()
+        expected = np.asarray(out.lhflx) / float(latent_heat_vaporization(295.0))
+        np.testing.assert_allclose(np.asarray(out.evap_sfc), expected, rtol=1e-10)
+        assert np.max(np.abs(np.asarray(out.evap_sfc) / (np.asarray(out.lhflx) / constants.L_v) - 1.0)) > 1e-3
+
+    # Tiled surface: evap_sfc is the folded per-tile water (the kernel's own
+    # moisture BC), which no single-temperature inverse of lhflx reproduces.
+    from legoesm.atmosphere.physics.turbulence import integration as integ
+    seen = []
+    real = integ.fold_prescribed_surface_fluxes
+    integ.fold_prescribed_surface_fluxes = lambda cfg, **kw: (seen.append(kw), real(cfg, **kw))[1]
+    try:
+        pipe = _pipeline(create_cubed_sphere(4), turbulence="louis")
+        _, s2 = _inputs(pipe)
+        pipe.f_land = jnp.full(s2, 0.5)
+        pipe.albedo_land = jnp.full(s2, 0.2)
+        pipe.surface_tiled = True
+        out = _step(pipe, T_land=jnp.full(s2, 285.0))
+    finally:
+        integ.fold_prescribed_surface_fluxes = real
+    folded = np.asarray(pipe.adapter.unflatten_2d(seen[-1]["evap_kg_m2_s"]))
+    np.testing.assert_allclose(np.asarray(out.evap_sfc), folded, rtol=1e-12)
+    lh = np.asarray(out.lhflx)
+    for T in (295.0, 285.0, 290.0):
+        assert np.max(np.abs(np.asarray(out.evap_sfc) / (lh / float(latent_heat_vaporization(T))) - 1.0)) > 1e-5

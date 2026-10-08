@@ -546,6 +546,13 @@ def column_surface_kinematic_fluxes(
     * **Constant flux.**  Computed ONCE from the time-mean column (the ``prescribe="fluxes"``
       design, iter 151) — appropriate for the short worst-column spin-off; an over-warming
       run is caught by the realism gate (``theta_drift``).
+
+    ``w_th_s`` is the LES heat LOWER BOUNDARY CONDITION, not a reported
+    surface flux: it carries the moist-enthalpy correction ``lhflx - L_v*E``
+    (the bulk law charged Kirchhoff L_v(SST) per kg, the LES credits the
+    constant L_v), exactly like the GCM turbulence kernels' ``sflx_T``.  The
+    physical sensible heat flux is ``compute_surface_fluxes``' ``shflx``; do
+    not read the θ flux back as one.
     """
     from legoesm.atmosphere.physics._shared import exner_function, virtual_temperature
     from legoesm.atmosphere.physics.turbulence.surface_layer import (
@@ -580,8 +587,13 @@ def column_surface_kinematic_fluxes(
     # θ-flux = (sensible heat flux)/(ρ·c_p) · 1/Π, with the canonical Exner helper
     # (1/Π = (p_ref/p)^κ) — no re-derived Poisson power (CLAUDE.md "never re-derive").
     exner_inv = 1.0 / exner_function(p_s)
-    w_th_s = shflx[0] / (rho_1 * constants.c_pd) * exner_inv
-    w_qv_s = lhflx[0] / (rho_1 * constants.L_v)
+    from legoesm.atmosphere.physics.turbulence.surface_layer import (
+        latent_enthalpy_correction, surface_moisture_flux)
+    # Water: the inverse of the latent heat cfg's bulk law charged.
+    w_qv_s = surface_moisture_flux(cfg, lhflx[0], sst_K) / rho_1
+    # Heat BC carries the latent enthalpy correction (water at L(T) vs L_v).
+    w_th_s = ((shflx[0] + latent_enthalpy_correction(lhflx[0], w_qv_s * rho_1))
+              / (rho_1 * constants.c_pd) * exner_inv)
     return w_th_s, w_qv_s
 
 

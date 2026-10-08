@@ -77,7 +77,8 @@ from legoesm.land.output_tapes import (
     init_tape_accumulator, load_output_config,
 )
 from legoesm.land.restart import (
-    load_land_restart, merge_land_restart_into_template, save_land_restart,
+    HYDRAULICS_SOURCE_SURFDATA_COSBY, convert_ic_soil_water, load_land_restart,
+    merge_land_restart_into_template, save_land_restart, soil_hydraulics_stamp,
 )
 
 U_MIN = 1.0
@@ -149,6 +150,7 @@ def _args_from_config(cfg, cli_args) -> argparse.Namespace:
         gs_max=cfg.physics.get("gs_max", None),
         snow_albedo=bool(cfg.physics.get("snow_albedo_feedback", True)),
         enable_freeze_thaw=bool(cfg.physics.get("enable_freeze_thaw", False)),
+        soil_ice_impedance_exponent=cfg.physics.get("soil_ice_impedance_exponent"),
         albedo=cfg.physics.get("albedo") or {},
         glacier_albedo_vis=cfg.physics.get("glacier_albedo_vis", None),
         glacier_albedo_nir=cfg.physics.get("glacier_albedo_nir", None),
@@ -507,6 +509,10 @@ def run(args) -> int:
         if getattr(args, "carbon_prognostic", False):
             base_cfg = base_cfg._replace(
                 carbon=base_cfg.carbon._replace(scheme="differland"))
+        _e_ice = getattr(args, "soil_ice_impedance_exponent", None)
+        if _e_ice is not None:
+            base_cfg = base_cfg._replace(richards=base_cfg.richards._replace(
+                ice_impedance_exponent=float(_e_ice)))
         # Diagnostics variant so the scan can tape GPP (the canopy's surface_out.gpp
         # is dropped from the TileResponse when carbon is off).  Same _impl as
         # step_multilayer_land — the 4th return (SurfaceFluxOutput) is already
@@ -621,6 +627,27 @@ def run(args) -> int:
     # an UnboundLocalError.  None = no resumed pools.
     _restart_carbon = None
     _restart_phi = None
+    # Hashes the surfdata once; every restart this run reads or writes uses it.
+    _hyd_stamp = (soil_hydraulics_stamp(
+        config.hydraulics.retention_curve, HYDRAULICS_SOURCE_SURFDATA_COSBY,
+        args.surfdata) if args.land_mode == "multilayer" else None)
+    def _cover1d(a):
+        a = np.asarray(a)
+        return a[0] if a.ndim == 2 else a
+    if args.land_mask_file:
+        from legoesm.grids.topography import load_land_fraction
+        land_fraction = np.asarray(load_land_fraction(grid, args.land_mask_file)).ravel()
+    else:
+        land_fraction = (_cover1d(gsd.f_land) + _cover1d(gsd.f_lake)
+                         + _cover1d(gsd.f_glacier))
+    # A cell is "land" if the surfdata assigns it ANY land cover (land_frac_min
+    # default 0.0).  This is the surfdata's own land definition, not an arbitrary
+    # majority-land cutoff; the actual ``land_fraction`` is emitted in every output
+    # so analysis can area-weight or threshold as it sees fit.  (Forcing is now
+    # finite on every land column -- CRU-JRA regrids from land-only source -- so no
+    # threshold is needed to dodge unforced coastal cells.)
+    land = land_fraction > args.land_frac_min
+
     if args.land_mode == "slab":
         from legoesm.core.field import Field
         from legoesm.land.state import LandState
@@ -661,6 +688,17 @@ def run(args) -> int:
             # cold-start template, as model_driver and run_land_spinup do.
             state = merge_land_restart_into_template(
                 loaded, init_multilayer_land_state(ncol, config, T_init=288.0))
+            # A restart evolved on other soil hydraulics keeps its water, not
+            # its matric potential.
+            state, _conv = convert_ic_soil_water(
+                state, restart_meta, config.hydraulics, _hyd_stamp,
+                _make_soil_grid(config.soil_grid).dz, land_mask=land,
+                file_column_sig=restart_meta.get("soil_hydraulics_column_sig"),
+                path=args.restart_from)
+            if _conv is not None:
+                print(f"restart: soil water converted to this run's hydraulics "
+                      f"({_conv['stamp']['retention_curve']} -> "
+                      f"{_conv['run_stamp']['retention_curve']}); psi re-derived")
             print(f"restart: loaded state from {args.restart_from} "
                   f"(t_end_s={restart_meta['t_end_s']:.1f}, "
                   f"steps_completed={restart_meta['n_steps_completed']})")
@@ -816,7 +854,7 @@ def run(args) -> int:
             gpp_day = surf_out.gpp * _SEC_PER_DAY
         else:
             gpp_day = _ZEROS
-        et_mmday = resp.lhflx / constants.L_v * _SEC_PER_DAY
+        et_mmday = resp.surface_mass_flux * _SEC_PER_DAY   # the land's own water flux
         # Transpiration + soil-evaporation split [mm/day]: the canopy's per-component
         # latent (LE_canopy = sunlit+shaded leaf transpiration, LE_soil = ground
         # evaporation), converted to a water flux.  None for simple_seb (single skin,
@@ -825,8 +863,13 @@ def run(args) -> int:
         # SW + net LW = sw_down*(1-albedo) + lw_down - lw_up (scheme-agnostic; the
         # reported albedo/lw_up already reflect the canopy RT).
         if surf_out is not None and surf_out.LE_canopy is not None:
-            transp = surf_out.LE_canopy / constants.L_v * _SEC_PER_DAY
-            soil_evap = surf_out.LE_soil / constants.L_v * _SEC_PER_DAY
+            # Inverse of the L_v(T) the canopy charged: two_leaf_canopy's lam is
+            # L_v(T_soil_top), the PRE-step top-soil temperature (resp.T_sfc is
+            # the canopy-air temperature, a different number).
+            from legoesm.thermo import latent_heat_vaporization as _lv_T
+            _L_charge = _lv_T(state.T_soil[:, 0])
+            transp = surf_out.LE_canopy / _L_charge * _SEC_PER_DAY
+            soil_evap = surf_out.LE_soil / _L_charge * _SEC_PER_DAY
         else:
             transp = _ZEROS
             soil_evap = _ZEROS
@@ -960,22 +1003,6 @@ def run(args) -> int:
         lat_1d = lat_deg.reshape(nlat, nlon)[:, 0]
         lon_1d = lon_deg.reshape(nlat, nlon)[0, :]
 
-    def _cover1d(a):
-        a = np.asarray(a)
-        return a[0] if a.ndim == 2 else a
-    if args.land_mask_file:
-        from legoesm.grids.topography import load_land_fraction
-        land_fraction = np.asarray(load_land_fraction(grid, args.land_mask_file)).ravel()
-    else:
-        land_fraction = (_cover1d(gsd.f_land) + _cover1d(gsd.f_lake)
-                         + _cover1d(gsd.f_glacier))
-    # A cell is "land" if the surfdata assigns it ANY land cover (land_frac_min
-    # default 0.0).  This is the surfdata's own land definition, not an arbitrary
-    # majority-land cutoff; the actual ``land_fraction`` is emitted in every output
-    # so analysis can area-weight or threshold as it sees fit.  (Forcing is now
-    # finite on every land column -- CRU-JRA regrids from land-only source -- so no
-    # threshold is needed to dodge unforced coastal cells.)
-    land = land_fraction > args.land_frac_min
 
     def _flush_tapes(accums, slot_ids_by_tape, label):
         """Write each tape's selected slots to ``lmip_biophys.<tape>[.<label>].nc``.
@@ -1049,6 +1076,8 @@ def run(args) -> int:
                 # Sourced from the CONSTRUCTED config (not args) so provenance
                 # reflects the physics actually run.
                 "enable_freeze_thaw": bool(config.thermal.enable_freeze_thaw),
+                "soil_ice_impedance_exponent": float(
+                    config.richards.ice_impedance_exponent),
                 "year": year_start, "year_end": year_end, "dt": dt,
                 "n_steps": args.n_steps, "start_doy": args.start_doy,
                 "forcing": ("synthetic" if synthetic else "CRU-JRA"),
@@ -1062,6 +1091,8 @@ def run(args) -> int:
                 land_mode="multilayer", t_end_s=t_end_s,
                 n_steps_completed=n_completed, metadata=restart_meta,
                 soil_grid=config.soil_grid,
+                soil_hydraulics=_hyd_stamp,
+                hydraulics=config.hydraulics,
                 carbon_state=cur_carbon,
                 soil_frozen_fraction=(_carbon_phi if cur_carbon is not None else None))
             print(f"wrote {rp}")

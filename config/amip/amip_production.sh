@@ -88,7 +88,10 @@
 # ADOPTING THIS CHANGES THE MODEL CLIMATE (validated 90-d + 274-d restart
 # arms, issue #1514): any comparison spanning it is confounded. Opt OUT with
 # AMIP_SSO="" (pre-fix reproduction runs only).
-: "${AMIP_SSO:=/work/bd1083/b309178/diffESM/legoesm_ap/data/orography/sso_stdh_2deg_from1deg.nc}"
+# _seamfix (2026-10-07, #1712): same recipe rebuilt after the regridder seam
+# fix; differs from sso_stdh_2deg_from1deg.nc only in the 358-360E column,
+# where the old file was built with a fake 0-m strip. sha256 of both in #1884.
+: "${AMIP_SSO:=/work/bd1083/b309178/diffESM/legoesm_ap/data/orography/sso_stdh_2deg_from1deg_seamfix.nc}"
 # Land-sea mask (sftlf, fraction) built from the SAME CLM surfdata by
 # scripts/data/build_sftlf_from_surfdata.py (2026-07-22). Without it f_land is
 # derived from ETOPO elevation>0, and ETOPO's inland-sea BATHYMETRY (Caspian

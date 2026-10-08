@@ -208,3 +208,6 @@ tests/debug/
 !tests/debug/spectral_hs100_eqinit.png
 # Reviewer stderr captures.
 .physics-validator/**/*.err
+# SI3 l3thd year-gate runtime dumps (8-26 MB each) -- evidence lives on disk
+# at LEGOESM_NEMO_EVIDENCE_ROOT/si3thd/, not in git.
+docs/ocean/fidelity/testcases/nemo_testcases_l3thd_*.json

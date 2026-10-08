@@ -195,6 +195,6 @@ honestly green: the FULL EKE/GM-Redi closure is now apples-to-apples with Veros 
 `eke_len`, `K_gm` AND `K_iso` all oracle machine-exact). The measure-first free-run, with every eddy
 knob matched, leaves the ACC-transport/KE gap unchanged at +70%/+233% — so the dominant remaining ACC
 free-run gap is **the time integrator** (legoESM SSP-RK3 vs Veros leapfrog+AB2+Robert-Asselin; audit
-gap #7). NEXT: wire `outer_integrator="leapfrog_ab2"` (the standalone `timestepping/leapfrog_ab2.py`
-exists; needs the τ-1 carry threaded through the ocean step/scan) — the I-gates. Also open: a
+gap #7). NEXT: wire `outer_integrator="leapfrog_ab2"` (a standalone `timestepping/leapfrog_ab2.py` existed but was deleted 2026-10 as unwired; recover it from git e86e0b86d;
+it needs the τ-1 carry threaded through the ocean step/scan) — the I-gates. Also open: a
 developed-flow eke-bridge for a tier-2 prognostic-GM-tendency comparison.

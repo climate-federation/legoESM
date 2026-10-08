@@ -98,47 +98,50 @@ def test_synthetic_observed_sif_positive_and_ordered():
     assert np.all(sif < 100.0)
 
 
-def test_load_gridded_sif_reshape_and_mismatch(tmp_path):
+def test_load_gridded_obs_sif_reshape_and_mismatch(tmp_path):
     xr = pytest.importorskip("xarray")
     try:
-        from legoesm.land.carbon.sif_observations import load_gridded_sif
+        from legoesm.land.carbon.sif_observations import SIF_VAR_CANDIDATES
+        from legoesm.land.carbon.soc_observations import load_gridded_obs
         ds = xr.Dataset({"sif": (("lat", "lon"), np.arange(6.0).reshape(2, 3))})
         path = tmp_path / "sif.nc"
         ds.to_netcdf(path)
     except Exception as exc:                       # no netcdf backend in this env
         pytest.skip(f"netcdf write unavailable: {exc}")
     # 2x3 = 6 cells: correct ncell -> row-major (i_lat, i_lon) flatten.
-    out = load_gridded_sif(str(path), ncell=6)
+    out = load_gridded_obs(str(path), SIF_VAR_CANDIDATES, "sif", ncell=6)
     npt.assert_allclose(out, np.arange(6.0), rtol=1e-12)
     # A wrong ncell is a hard error (never a silent misalignment).
     with pytest.raises(SystemExit, match="ncell"):
-        load_gridded_sif(str(path), ncell=5)
+        load_gridded_obs(str(path), SIF_VAR_CANDIDATES, "sif", ncell=5)
 
 
-def test_load_gridded_sif_preserves_nan_gaps(tmp_path):
+def test_load_gridded_obs_sif_preserves_nan_gaps(tmp_path):
     xr = pytest.importorskip("xarray")
     try:
-        from legoesm.land.carbon.sif_observations import load_gridded_sif
+        from legoesm.land.carbon.sif_observations import SIF_VAR_CANDIDATES
+        from legoesm.land.carbon.soc_observations import load_gridded_obs
         arr = np.array([[1.0, np.nan], [3.0, 4.0]])   # a satellite gap at (0,1)
         ds = xr.Dataset({"sif": (("lat", "lon"), arr)})
         path = tmp_path / "sif_gap.nc"
         ds.to_netcdf(path)
     except Exception as exc:
         pytest.skip(f"netcdf write unavailable: {exc}")
-    out = load_gridded_sif(str(path), ncell=4)
+    out = load_gridded_obs(str(path), SIF_VAR_CANDIDATES, "sif", ncell=4)
     assert np.isnan(out[1])                            # gap PRESERVED, not fabricated 0
     npt.assert_allclose(out[[0, 2, 3]], [1.0, 3.0, 4.0], rtol=1e-12)
 
 
-def test_load_gridded_sif_time_averaged(tmp_path):
+def test_load_gridded_obs_sif_time_averaged(tmp_path):
     xr = pytest.importorskip("xarray")
     try:
-        from legoesm.land.carbon.sif_observations import load_gridded_sif
+        from legoesm.land.carbon.sif_observations import SIF_VAR_CANDIDATES
+        from legoesm.land.carbon.soc_observations import load_gridded_obs
         arr = np.stack([np.full((2, 2), 1.0), np.full((2, 2), 3.0)])   # (time=2, 2, 2)
         ds = xr.Dataset({"sif": (("time", "lat", "lon"), arr)})
         path = tmp_path / "sif_t.nc"
         ds.to_netcdf(path)
     except Exception as exc:
         pytest.skip(f"netcdf write unavailable: {exc}")
-    out = load_gridded_sif(str(path), ncell=4)
+    out = load_gridded_obs(str(path), SIF_VAR_CANDIDATES, "sif", ncell=4)
     npt.assert_allclose(out, np.full(4, 2.0), rtol=1e-12)              # mean over time

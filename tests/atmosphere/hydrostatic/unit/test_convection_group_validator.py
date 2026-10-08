@@ -203,7 +203,8 @@ def _run_zm(T, q, pf, ph, u, v, **kw):
     ncol, nlev = T.shape
     cpp = jnp.zeros((ncol, nlev))
     out, _ = zhang_mcfarlane_convection(
-        T, q, pf, ph, u, v, cpp, DT, ZhangMcFarlaneConfig(**kw),
+        T, q, pf, ph, u, v, cpp, DT,
+        ZhangMcFarlaneConfig(**{"land_fraction": "none", **kw}),  # ocean columns
     )
     return out
 

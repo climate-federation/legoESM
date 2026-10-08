@@ -132,6 +132,10 @@ class MPASOceanConfig(NamedTuple):
     bottom_drag_cdmax: float = 0.1      # NEMO rn_Cdmax [-]
     bottom_drag_z0: float = 3.0e-3      # NEMO rn_z0 [m]
     bottom_drag_ke0: float = 2.5e-3     # NEMO rn_ke0 [m²/s²]
+    # NEMO rn_Uc0 [m/s], the reference velocity of the LINEAR law
+    # (zdfdrg np_lin: rCdU_bot = -rn_Cd0*rn_Uc0, constant in time).
+    # Read by 'nemo_linear' only; namelist_ref &namdrg_bot:835.
+    bottom_drag_uc0: float = 0.4
     K_h: float = 0.0
     K_bih: float = 0.0
     A_v: float = 1.0e-3
@@ -303,10 +307,12 @@ class MPASOceanConfig(NamedTuple):
     # area-weighted dots (docs/ocean_experiments/distributed_barotropic_pcg
     # .md).  ``fixed_iters`` targets 1e-10 residual on the diagonally-
     # dominant Voronoi Helmholtz.  ``pcg_variant`` selects the reduction
-    # strategy ("standard" 2-dot PCG, or "single_reduce" Chronopoulos–Gear
-    # with one batched allreduce per iteration — validated at solver entry,
-    # ValueError on unknown).
+    # strategy ("standard" 2-dot PCG, "single_reduce" Chronopoulos–Gear
+    # with one batched allreduce per iteration, or "single_reduce_deep", the
+    # same with the halo exchanged every few iterations — validated at solver
+    # entry, ValueError on unknown).
     #
+    # History (superseded 2026-10-05 by gpoly@20, see the end of this block):
     # 20 with the "poly" preconditioner below (owner decision 2026-09-20,
     # A/B at 32 and 128 GPUs: step -8%/-14.5% f32, -6%/-11% f64 against
     # Jacobi at 30, same residual).  The Jacobi history that set 30:
@@ -346,11 +352,60 @@ class MPASOceanConfig(NamedTuple):
     # 1e-10 residual has to set the count back up explicitly.
     # The lat-lon C-grid default (state.py) is a different operator on a
     # different mesh and stays at 60 until measured.
-    barotropic_implicit_pcg_fixed_iters: int = 20
+    #
+    # 20 with the GLOBAL polynomial ("gpoly", below) since 2026-10-05 (owner
+    # decision). gpoly@15 was faster (-9/-12/-11% at 8/32/128 GPUs,
+    # single_reduce) and beat poly@20 on L9 at dt=300 s, but FAILED the
+    # finer-mesh check (job 27848794): on L10 @512 emulated devices and on
+    # L9 at dt=600 s it is slightly worse than poly@20 (f64 rel_res 4.3e-4
+    # vs 3.9e-4; 1.3e-3 vs 1.0e-3), while gpoly@20 is 4-6x better than
+    # poly@20 there at about the same step cost (gpoly vs poly at 20:
+    # +0.5..+1.5% at 8/32 GPUs, -1% at 128). NOTE: at L10 or dt=600 s every
+    # option is far from converged at 20 (rel_res ~1e-4..1e-3); the count is
+    # mesh/dt-specific. Single-device runs are unaffected (stock CG).
+    # The opt-in deep-halo Jacobi solver (pcg_variant below) needs 30: Jacobi
+    # reaches the 1e-10 relative residual in 27-30 iterations on real s7
+    # systems (spin-up 30/150/400 steps, 128 emulated ranks; identical at 16).
+    #
+    # None (the default since 2026-10-04, owner decision): the iteration count,
+    # recurrence (pcg_variant) and preconditioner are resolved TOGETHER per
+    # JAX backend by resolve_barotropic_pcg_defaults (table
+    # MPAS_BAROTROPIC_PCG_DEFAULTS below the class) when the model is built,
+    # and written back into model.config, so every run records the solver it
+    # used.  Set all three to pin a solver.
+    barotropic_implicit_pcg_fixed_iters: int | None = None
     barotropic_implicit_pcg_residual_tol: float = 1.0e-10
-    barotropic_implicit_pcg_variant: str = "standard"
-    # Distributed-only preconditioner for the fixed-iteration PCG.
-    # "jacobi" (default) or "poly": a communication-free Neumann-series
+    # Unset (None) = per-backend bundle (MPAS_BAROTROPIC_PCG_DEFAULTS):
+    # "standard" on GPU, "single_reduce_deep" on CPU.
+    # "standard" (two allreduces per iteration) was the default 2026-10-02..
+    # 2026-10-04 (owner decision): it is the recurrence gpoly x 15 was
+    # measured with (GPU weak ladder -6 / -8.5 / -10.4 % at 8 / 32 / 128
+    # GPUs); gpoly x 15 with "single_reduce" has not been measured.
+    # History: "single_reduce" (Chronopoulos-Gear, one batched allreduce per
+    # iteration instead of two) was the default 2026-09-26..2026-10-02. It
+    # had been owner-approved after two checks: convergence on the REAL captured systems is identical (s7 L40,
+    # poly:4, 16-device local preconditioner: rel. residual 4.5e-16 at 20
+    # iterations for both, |eta_single - eta_standard| 7e-18 m); and on
+    # Derecho CPU with the butterfly global sum, s7 16 ranks/node, 313 vs 315
+    # ms/step at 1 node, 167 vs 171 at 2, 110 vs 118 at 4, 86.9 vs 97.2 at 8.
+    # float32 checked too (same systems): both recurrences reach the f32
+    # residual floor 1.56e-7 by 15 iterations, eta differs by 3.7e-9 m.
+    # GPU (NCCL) was not re-measured with it.
+    # "single_reduce_deep" (opt-in): the same recurrence with the cell halo
+    # of (r, s) exchanged once every `complete_cell_rings` iterations instead
+    # of every iteration; the halo is recomputed redundantly.  Owned results
+    # equal the per-iteration exchange bit for bit (x64 test).  Needs precond
+    # "jacobi" and fixed_iters=30.  Cadence = rings the layout certifies: 3 on
+    # the SPMD layout, 1 on the MPI-per-rank layout (its halo has no closure
+    # passes, so there it is the per-iteration exchange of two vectors).
+    # Derecho CPU s7 L40 f64, 3 repeats, ms/step: 8 nodes 82.8 (poly4 x 20)
+    # -> 75.8 with deep Jacobi x 30; 2 nodes 164.2 -> 152.8; Jacobi x 30
+    # with per-iteration exchange 92.7 / 165.3.  The CPU default since
+    # 2026-10-04 (owner decision, per-backend bundle); never measured on GPU.
+    barotropic_implicit_pcg_variant: str | None = None  # per backend, see fixed_iters
+    # Distributed-only preconditioner for the fixed-iteration PCG
+    # (unset = per-backend bundle: "gpoly" on GPU, "jacobi" on CPU; the MPI Voronoi lane
+    # must select "poly"). "jacobi" or "poly": a communication-free Neumann-series
     # polynomial in the device-local block of A (K local mat-vecs, no
     # halo exchange, so it costs nothing in ppermute rounds and buys
     # iterations back).  Measured on the real subdivision-9 systems,
@@ -362,10 +417,18 @@ class MPASOceanConfig(NamedTuple):
     # Each PCG iteration still costs one cell-halo exchange plus two
     # allreduces; the win is reaching the target residual at a smaller
     # ``fixed_iters`` (30 -> 20 at poly4).
-    # Default "poly" since 2026-09-20 (owner decision, A/B above); "jacobi"
-    # is the pre-2026-09-20 solver and needs fixed_iters=30 for the same
-    # residual.
-    barotropic_implicit_pcg_precond: str = "poly"
+    # Default "poly" 2026-09-20..2026-10-02 (owner decision, A/B above);
+    # "jacobi" is the pre-2026-09-20 solver and needs fixed_iters=30 for the
+    # same residual (and is what "single_reduce_deep" requires).
+    # Default "gpoly" 2026-10-02..2026-10-04, now the GPU bundle (owner decision; see fixed_iters for
+    # the A/B): the same polynomial on the GLOBAL operator, evaluated
+    # redundantly on the SPMD halo (layout halo_depth >= sweeps-2, which the
+    # historical 2 satisfies at 4 sweeps); one exchange per iteration as
+    # before, and the answer no longer depends on the device count. Same
+    # systems, 128 emulated devices: f64 rel_res 2.3e-6 / 6.4e-8 / 1.8e-9 at
+    # iters 10 / 15 / 20. SPMD lane only: the MPI Voronoi lane refuses it
+    # (select "poly" there) and a single device keeps the stock CG solve.
+    barotropic_implicit_pcg_precond: str | None = None  # per backend, see fixed_iters
     barotropic_implicit_pcg_poly_sweeps: int = 4
     freshwater_closure: str = "virtual_salt_flux"
     normalize_freshwater: bool = False  # When True, subtract the global
@@ -515,7 +578,7 @@ class MPASOceanConfig(NamedTuple):
     # The same mesh at Lloyd 0 measures 120324.32 m, which the cubed law turns
     # into 0.3 % on the coefficient.
     K_zeta_bih_ref: float = 1.0e14                 # [m⁴/s] at the reference spacing
-    K_zeta_bih_ref_dx_m: float = 120194.609375     # [m] ico6 mean dcEdge, Lloyd 50
+    K_zeta_bih_ref_dx_m: float = 120194.60581296285  # [m] ico6 mean dcEdge, Lloyd 50
     # Provenance of a DERIVED coefficient, stamped by the model constructor:
     # the mesh spacing it was derived from (0.0 = pinned, not derived), so a
     # saved configuration records WHICH mesh its coefficient belongs to and a
@@ -593,6 +656,56 @@ class MPASSimpleOceanConfig(NamedTuple):
     # as LatLonCGridOceanConfig field additions).
     freezing: FreezingPointConfig = FreezingPointConfig()
 
+
+
+#: Distributed barotropic PCG bundle per JAX backend (owner decisions
+#: 2026-10-04/05).  CPU, Derecho s7 L40 f64, 3 repeats, ms/step on main 87144e259
+#: with only these flags changed: 8 nodes gpoly x15 standard 67.7 vs deep-halo
+#: jacobi x30 61.0; 2 nodes 152.3 vs 144.4; 1 node 290.7 vs 280.5.  GPU:
+#: gpoly standard at 20 iterations (owner decision 2026-10-05; x15 failed the
+#: L10 / dt=600 s check, see barotropic_implicit_pcg_fixed_iters); deep-halo
+#: was never measured on GPU.
+MPAS_BAROTROPIC_PCG_DEFAULTS = {
+    "cpu": dict(barotropic_implicit_pcg_variant="single_reduce_deep",
+                barotropic_implicit_pcg_precond="jacobi",
+                barotropic_implicit_pcg_fixed_iters=30),
+    "gpu": dict(barotropic_implicit_pcg_variant="standard",
+                barotropic_implicit_pcg_precond="gpoly",
+                barotropic_implicit_pcg_fixed_iters=20),
+}
+
+
+def resolve_barotropic_pcg_defaults(config: "MPASOceanConfig",
+                                    backend: str | None = None) -> "MPASOceanConfig":
+    """Fill the unset (None) barotropic PCG fields from the bundle for
+    ``backend`` (default: ``jax.default_backend()``).  Idempotent.
+
+    Mixing bundles is refused: a preconditioner other than the backend's
+    needs its own iteration count and recurrence, so when the caller pins the
+    preconditioner to something else, the other two fields must be pinned too
+    (Jacobi at gpoly's 20 iterations would be silently under-converged).
+    """
+    keys = ("barotropic_implicit_pcg_variant", "barotropic_implicit_pcg_precond",
+            "barotropic_implicit_pcg_fixed_iters")
+    unset = [k for k in keys if getattr(config, k) is None]
+    if not unset:
+        return config
+    if backend is None:
+        import jax
+        backend = jax.default_backend()
+    if backend not in MPAS_BAROTROPIC_PCG_DEFAULTS:
+        raise ValueError(
+            f"no MPAS barotropic PCG default for JAX backend {backend!r}; pin "
+            f"{', '.join(keys)} explicitly")
+    bundle = MPAS_BAROTROPIC_PCG_DEFAULTS[backend]
+    precond = config.barotropic_implicit_pcg_precond
+    if precond is not None and precond != bundle["barotropic_implicit_pcg_precond"]:
+        raise ValueError(
+            f"barotropic_implicit_pcg_precond={precond!r} differs from the "
+            f"{backend} default ({bundle['barotropic_implicit_pcg_precond']!r}); "
+            f"also pin {', '.join(k for k in unset)} (a bundle's count and "
+            "recurrence belong to its preconditioner)")
+    return config._replace(**{k: bundle[k] for k in unset})
 
 
 def resolution_scaled_k_zeta_bih(dx_mean_m: float, config: "MPASOceanConfig") -> float:

@@ -1,0 +1,171 @@
+{
+  "format": "nemo-testcase-l2-gyre-round33-v1",
+  "date": "2026-09-06",
+  "starting_tip": "bb6fece7e21a",
+  "regime": "CPU production JIT, fp64/x64, oracle V2, transcendentals=libm",
+  "preregistration": "nemo_testcase_l2_gyre_round33_preregister.json at 956dffbefa9e",
+  "addendum": "nemo_testcase_l2_gyre_round33_preregister_addendum1.json at 33e3fd02db7b",
+  "artifact_root": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round33",
+  "probe_worktrees_flagged": [
+    "/tmp/codex-gyre-r33-before at 33e3fd02db7b, detached, clean -- the OVERFLOW BEFORE arm only"
+  ],
+  "no_nemo_executable_was_run": true,
+  "no_nemo_source_was_edited": true,
+  "commits": {
+    "1fb6b57f3f47": "item 1 -- eight corrections the round-31/32 review found",
+    "956dffbefa9e": "the round-33 preregistration",
+    "33e3fd02db7b": "addendum 1 -- the claim review's findings, before the AFTER arm",
+    "e5babcb88fd1": "the stage-3 vector arm, all three stages through one helper",
+    "cbc056d2a38b": "the tanks' Rule-12 acquisition and its reader",
+    "382221dcbf65": "the diff review's two blockers",
+    "fa7e9ec32ac4": "receipt part 1",
+    "394cb0b3d016": "receipt part 2 and the citations re-anchored"
+  },
+  "item2_measured": {
+    "arms_are_one_variable": "BEFORE at 956dffbefa9e (OVERFLOW BEFORE at 33e3fd02db7b), AFTER at e5babcb88fd1 or later; the only model-code commit between them is e5babcb88fd1",
+    "zdf_entry_A_explicit_update": {
+      "u_before": 4.597497412612249e-11,
+      "u_after": 2.9684798833066247e-12,
+      "u_predicted": 2.9684798832354875e-12,
+      "u_relative_miss": 2.396e-11,
+      "v_before": 1.2570099171618776e-10,
+      "v_after": 3.5751281340072215e-12,
+      "v_predicted": 3.5751281334017252e-12,
+      "v_relative_miss": 1.694e-10,
+      "n_u": 17400,
+      "n_v": 17100,
+      "predictor": "rDt = 14400 times the stage-3 RHS residual, re-measured on the SAME tree and bit-identical before and after: 2.0614443633579772e-16 (u), 2.4827278704178648e-16 (v)"
+    },
+    "kt1_stage3_velocity": {
+      "u_peak_before": 2.7922718390943624e-12,
+      "u_peak_after": 2.7478405293344943e-12,
+      "v_peak_before": 3.387700601813204e-12,
+      "v_peak_after": 3.3055602526033123e-12,
+      "u_level_1_before": 1.764547e-12,
+      "u_level_1_after": 1.709431e-12,
+      "u_level_15_before": 1.866456e-13,
+      "u_level_15_after": 1.682309e-13,
+      "u_level_29_before": 2.266544e-13,
+      "u_level_29_after": 2.199583e-13,
+      "u_level_30_before": 2.249741e-13,
+      "u_level_30_after": 2.19977e-13,
+      "verdict_before": "IMPLICIT-SOLVE CANDIDATE",
+      "verdict_after": "IMPLICIT-SOLVE CANDIDATE"
+    },
+    "model_field_move_P2e": {
+      "kt2_before_u": 1.013143e-13,
+      "kt2_before_v": 3.00122e-13,
+      "kt2_before_T": 0.0,
+      "kt2_before_S": 0.0,
+      "kt2_before_ssh": 0.0,
+      "registered_upper_bound": 4.6e-11
+    },
+    "kt2_rows": {
+      "T_absolute": 3.1956659540810506e-11,
+      "T_normalized": 1.361474e-12,
+      "T_moved": false,
+      "S_absolute": 8.171241461241152e-13,
+      "S_normalized": 2.21811e-14,
+      "S_moved": false,
+      "u_absolute_before": 2.7922718390943624e-12,
+      "u_absolute_after": 2.7478405293344943e-12,
+      "v_absolute_before": 3.387700601813204e-12,
+      "v_absolute_after": 3.3055602526033123e-12,
+      "ssh_absolute": 4.336808689942018e-19,
+      "ssh_moved": false
+    },
+    "first_over_bar": {
+      "before": {
+        "kt": 2,
+        "fields": [
+          "T",
+          "S",
+          "u",
+          "v"
+        ]
+      },
+      "after": {
+        "kt": 2,
+        "fields": [
+          "T",
+          "S",
+          "u",
+          "v"
+        ]
+      }
+    },
+    "trajectory_rows": {
+      "compared": 50,
+      "worsened": 24,
+      "worsened_above_1e-6_relative": 5,
+      "improved": 17,
+      "unchanged": 9
+    },
+    "round32_worsened_rows_revisited": {
+      "of": 22,
+      "worsened_further": 14,
+      "improved": 8,
+      "unchanged": 0
+    },
+    "move_gate": {
+      "status": "FAIL",
+      "rows": 70,
+      "largest_cell_worsening_abs": 6.66764e-08,
+      "largest_cell_worsening_row_scale_ulps": 300283792.40625,
+      "bar_ulps": 2,
+      "round32_for_comparison_ulps": 10631921040.0,
+      "row_status_changes": [],
+      "first_over_bar_moved": false
+    }
+  },
+  "rule12_per_card": {
+    "GYRE-zco": {
+      "executes_the_changed_arm": true,
+      "status": "AT-BAR, BIT FOR BIT",
+      "row": "GYRE-zco.kt1.stage3.rule12_stage_update_composed",
+      "exact": true,
+      "n_unequal_u": 0,
+      "n_u": 17400,
+      "n_unequal_v": 0,
+      "n_v": 17100,
+      "oracle_array": "uu_Kaa_pre / vv_Kaa_pre from oracle_zdf_matrix_kt00000001.bin",
+      "composition": "legoESM's rk3_stage_velocity_update, then NEMO's dynzdf.F90:149-150 and :156-159 as transcribed by the gate",
+      "calibration": "AT-BAR; the gate RAISES rather than reporting if it fails",
+      "retracted": "the first version compared the helper against the gate's own transcription of dynzdf.F90:121-122 -- a==a, refuted by the DIFF review",
+      "remaining_hole": "the composition can be defeated only by compensating errors ACROSS the three transcribed statements; and uu_Kbb_in is identically zero so both rows drive only (0 + rDt*rhs)*mask"
+    },
+    "LOCK_EXCHANGE-zco": {
+      "executes_the_changed_arm": false,
+      "why": "ln_dynadv_vec = F (lock_kt1_10/ocean.output:705), lk_linssh .FALSE. in its own BLD/ppsrc/nemo/dom_oce.f90, legoESM momentum_advection = flux_form",
+      "status": "NOT REACHED, measured: kt=1..10 bit-identical, 20 rows, every cell's field move exactly 0.0, move gate PASS"
+    },
+    "OVERFLOW-zps": {
+      "executes_the_changed_arm": false,
+      "why": "ln_dynadv_vec = F (overflow_kt1_10/ocean.output:822), lk_linssh .FALSE., legoESM momentum_advection = flux_form",
+      "status": "NOT REACHED, measured: kt=1..10 bit-identical, 10 rows, every cell's field move exactly 0.0, move gate PASS with max_worsening_ulps 0"
+    },
+    "ORCA2-zps": {
+      "status": "UNMEASURED",
+      "why": "no ORCA2 card on this branch"
+    },
+    "DINO": {
+      "status": "OPEN, not claimed",
+      "why": "not a campaign card and no DINO gate ran"
+    }
+  },
+  "round32_operator_rule12_still_open": {
+    "GYRE-zco": "AT-BAR at 1e-15, NOT bit for bit: 2.168404344971009e-19 (u) and 6.938893903907228e-18 (v), exact false, 1730/17400 and 3586/17100 cells unequal",
+    "LOCK_EXCHANGE-zco": "UNDISCHARGED; acquisition written, not run",
+    "OVERFLOW-zps": "UNDISCHARGED; acquisition written, not run",
+    "commands": [
+      "scripts/validate/ocean_fidelity/testcases/nemo_testcase_l1_tanks_round33_zdf/run.sh LOCK_EXCHANGE",
+      "scripts/validate/ocean_fidelity/testcases/nemo_testcase_l1_tanks_round33_zdf/run.sh OVERFLOW"
+    ]
+  },
+  "reviews": {
+    "codex": "unavailable on this account",
+    "claim_review": "ran on the preregistration before a line of model code moved; refuted P2a's mechanism, showed P2a and P3b could not fail, showed P4a half vacuous, withdrew P1's window",
+    "diff_review": "ran on the diff; found the Rule-12 discharge circular and defeated the structural checker with five mutations, all now tests"
+  },
+  "unasked_choices": []
+}

@@ -253,7 +253,8 @@ class TestSpectralPECMT:
         surface route), so it needs BOTH tracers; without q_c the detrained
         condensate would vanish unrecorded, and that is refused loudly."""
         physics_fn = make_convection_physics(
-            ConvectionConfig(scheme="zhang_mcfarlane"),
+            ConvectionConfig(scheme="zhang_mcfarlane",  # grid has no land: aquaplanet
+                             zhang_mcfarlane=ZhangMcFarlaneConfig(land_fraction="none")),
             model_type="spectral_pe", dt=300.0,
         )
         zeros = jnp.zeros((grid.n_lat, grid.n_lon, sigma_coord.n_levels))

@@ -113,6 +113,43 @@ def test_require_planted_is_fail_closed():
         GATE.require_planted(rows, "z")
 
 
+def test_round49_pair_sidecar_is_hashed_and_finds_first_moved_boundary(tmp_path):
+    fields = {
+        "stage1_T": np.zeros((2,), dtype=np.float64),
+        "stage1_S": np.zeros((2,), dtype=np.float64),
+        "stage1_ssh": np.zeros((2,), dtype=np.float64),
+        "stage2_hpg_u": np.zeros((2,), dtype=np.float64),
+        "stage2_hpg_v": np.zeros((2,), dtype=np.float64),
+    }
+    base = {
+        "format": "nemo-testcase-overflow-round49-pair-boundary-v1",
+        "legoesm_git_sha": "base",
+        "source_order": ["stage1_T", "stage1_S", "stage1_ssh", "stage2_hpg_u"],
+    }
+    base_path = tmp_path / "base.json"
+    GATE.persist_round49_pair_arrays(base_path, base, fields)
+    base_path.write_text(json.dumps(base))
+
+    candidate = {
+        "format": base["format"],
+        "legoesm_git_sha": "candidate",
+        "source_order": base["source_order"],
+    }
+    moved = {name: values.copy() for name, values in fields.items()}
+    moved["stage1_S"][1] = np.nextafter(0.0, 1.0)
+    candidate_path = tmp_path / "candidate.json"
+    GATE.persist_round49_pair_arrays(candidate_path, candidate, moved)
+    comparison = GATE.compare_round49_pair_arrays(base_path, candidate)
+    assert comparison["first_moved_boundary"] == "stage1_S"
+    row = next(row for row in comparison["rows"] if row["name"] == "stage1_S")
+    assert not row["exact"] and row["n_unequal"] == 1
+
+    # The hash is the fail-closed admission, not advisory metadata.
+    candidate["pair_arrays"]["sha256"] = "0" * 64
+    with pytest.raises(GATE.GateError, match="hash drift"):
+        GATE.compare_round49_pair_arrays(base_path, candidate)
+
+
 LOCK_ROOT = GATE.ROOTS["LOCK_EXCHANGE-zco"]
 needs_oracle = pytest.mark.skipif(
     not (LOCK_ROOT / "oracle_stage_kt00000001_s1.bin").is_file(),
@@ -133,7 +170,8 @@ def test_planted_stage_control_exits_nonzero_end_to_end(tmp_path):
     assert row["status"] == "DEBT" and row["absolute_max"] >= 0.5
     assert name in report["failed_rows"]
     assert report["controls"] == {
-        "plant_stage": True, "plant_operand": False, "plant_prediction": False}
+        "plant_stage": True, "plant_operand": False,
+        "plant_prediction": False, "faithful_only": False}
     assert report["status"] == ("DEBT" if report["failed_rows"] else "AT-BAR")
 
 

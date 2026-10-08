@@ -39,11 +39,22 @@ def _fake_surface_map(path, lat_deg, lon_deg):
     )
 
 
+def _run_hydraulics_stamp(drv):
+    """The soil-hydraulics stamp a driver built under ``_patch_land_loaders`` checks."""
+    from legoesm.land.restart import (
+        HYDRAULICS_SOURCE_CLM_MAP, soil_hydraulics_stamp)
+    return soil_hydraulics_stamp(
+        drv.physics.land_ml_cfg.hydraulics.retention_curve,
+        HYDRAULICS_SOURCE_CLM_MAP, __file__)
+
+
 def _patch_land_loaders(monkeypatch):
     """Replace the CLM-surfdata + land-mask loaders with synthetic data."""
     import legoesm.land.clm_surface_map as clm
     import legoesm.grids.topography as topo
-    monkeypatch.setattr(clm, "download_clm_surfdata", lambda *a, **k: "synthetic")
+    # Any real file: the driver stamps its soil hydraulics with the parameter
+    # file's md5, so the stand-in path must be readable.
+    monkeypatch.setattr(clm, "download_clm_surfdata", lambda *a, **k: __file__)
     monkeypatch.setattr(clm, "load_clm_surface", _fake_surface_map)
     # Half-land everywhere so every column exercises the land tile blend.
     # Half-land everywhere so every column exercises the land tile blend.  The
@@ -553,7 +564,9 @@ def test_land_ic_path_overrides_cold_start(monkeypatch, tmp_path):
     save_land_restart(ic, spun, land_mode="multilayer",
                       t_end_s=20 * 365 * 86400.0,
                       n_steps_completed=1, metadata={},
-                      soil_grid=src.physics.land_ml_cfg.soil_grid)
+                      soil_grid=src.physics.land_ml_cfg.soil_grid,
+                      soil_hydraulics=_run_hydraulics_stamp(src),
+                      hydraulics=src.physics.land_ml_cfg.hydraulics)
 
     # 2) A fresh driver with land_ic_path set must load THAT column, not the
     #    cold start.
@@ -581,6 +594,44 @@ def test_land_ic_path_overrides_cold_start(monkeypatch, tmp_path):
     T_land = np.asarray(ctx["T_land"])
     expected_skin = np.asarray(spun.T_soil[:, 0]).reshape(T_land.shape)
     np.testing.assert_allclose(T_land, expected_skin, rtol=1e-6, atol=1e-4)
+
+
+def test_land_ic_soil_potential_is_rederived_on_the_runs_hydraulics(
+        monkeypatch, tmp_path):
+    """A regridded land IC keeps its WATER; its matric potential is recomputed
+    on this run's soil.  The regridded flag lives in the file's metadata dict;
+    reading it from the top of the loader's meta skipped the recompute, and the
+    Richards step then dried the deep root zone to residual in a day."""
+    from legoesm.land.restart import save_land_restart
+    from legoesm.land.richards import psi_dry_floor
+    from legoesm.land.soil_hydraulics import psi_from_theta
+
+    _patch_land_loaders(monkeypatch)
+    src = ModelDriver(_small_cfg(), output_dir=tmp_path / "src")
+    src.setup()
+    seed = src._land_ml_state
+    stale = seed._replace(psi_soil=jnp.asarray(np.asarray(seed.psi_soil) * 7.0))
+    common = dict(land_mode="multilayer", t_end_s=0.0, n_steps_completed=1,
+                  soil_grid=src.physics.land_ml_cfg.soil_grid)
+
+    ic = tmp_path / "regridded.npz"
+    save_land_restart(ic, stale, metadata={"regridded_from": "other_grid.npz"},
+                      soil_hydraulics=_run_hydraulics_stamp(src), **common)
+    dst = ModelDriver(_small_cfg()._replace(land_ic_path=str(ic)),
+                      output_dir=tmp_path / "dst")
+    dst.setup()
+    h = dst.physics.land_ml_cfg.hydraulics
+    got = dst._land_ml_state
+    want = jnp.maximum(psi_from_theta(got.theta_soil, h), psi_dry_floor(h))
+    np.testing.assert_allclose(np.asarray(got.psi_soil), np.asarray(want),
+                               rtol=1e-6)
+    assert not np.allclose(np.asarray(got.psi_soil), np.asarray(stale.psi_soil))
+
+    bare = tmp_path / "unstamped.npz"
+    save_land_restart(bare, stale, metadata={}, **common)
+    with pytest.raises(ValueError, match="soil-hydraulics stamp"):
+        ModelDriver(_small_cfg()._replace(land_ic_path=str(bare)),
+                    output_dir=tmp_path / "dst2").setup()
 
 
 def test_land_ic_path_wrong_grid_raises(monkeypatch, tmp_path):
@@ -987,7 +1038,9 @@ def test_driver_refuses_a_land_ic_from_a_different_soil_column(monkeypatch, tmp_
     ok = tmp_path / "right_column.npz"
     save_land_restart(ok, src._land_ml_state, land_mode="multilayer",
                       t_end_s=0.0, n_steps_completed=1, metadata={},
-                      soil_dz=make_soil_grid(src.physics.land_ml_cfg.soil_grid).dz)
+                      soil_dz=make_soil_grid(src.physics.land_ml_cfg.soil_grid).dz,
+                      soil_hydraulics=_run_hydraulics_stamp(src),
+                      hydraulics=src.physics.land_ml_cfg.hydraulics)
     dst = ModelDriver(_small_cfg()._replace(land_ic_path=str(ok)),
                       output_dir=tmp_path / "dst_ok")
     dst.setup()
@@ -1082,6 +1135,72 @@ def test_soil_freeze_thaw_reaches_the_land_the_mpas_run_builds(monkeypatch, tmp_
         # the per-column baked thermal inertia survives the override
         assert np.ndim(th.C_soil) == 2
     assert got == {False: False, True: True}
+
+
+def test_canopy_b0_stress_and_interception_reach_the_mpas_land(monkeypatch, tmp_path):
+    """``land_canopy_stress_b0`` / ``land_canopy_interception`` must survive
+    the calibration bake, which rebuilds the surface scheme at its library
+    default, and interception must allocate the canopy water store."""
+    from legoesm.driver.config import DycoreConfig, GridConfig
+    from legoesm.land.canopy.interception import InterceptionConfig
+    from legoesm.land.config import biophysics_lmip_two_leaf_setup
+    _patch_land_loaders(monkeypatch)
+    cal = biophysics_lmip_two_leaf_setup()
+    base = _small_cfg()._replace(
+        grid=GridConfig(grid_type="mpas", resolution=2, nlev=8),
+        dycore=DycoreConfig(dt=600.0, discretization="mpas"),
+        mpas_land_beta_soil=True,
+        turbulence="louis",
+        land_calibrated_physics=True,
+        land_stomatal_beta=False,
+        land_surface_scheme="two_leaf",
+        snow_albedo_feedback=True,
+        multilayer_n_layers=cal["soil_grid"].n_layers,
+        multilayer_soil_depth=cal["soil_grid"].total_depth,
+    )
+    got = {}
+    for arm, (sb0, icp) in {"default": (True, False),
+                            "flipped": (False, True)}.items():
+        cfg = base._replace(land_canopy_stress_b0=sb0,
+                            land_canopy_interception=icp)
+        cfg.validate_strict()
+        drv = ModelDriver(cfg, output_dir=tmp_path / arm)
+        drv.setup()
+        lc = drv.physics.land_ml_cfg
+        got[arm] = (lc.surface_scheme.stress_b0,
+                    isinstance(lc.interception, InterceptionConfig),
+                    drv._land_ml_state.W_canopy is not None)
+    assert got == {"default": (True, False, False),
+                   "flipped": (False, True, True)}
+
+
+def test_two_leaf_land_stress_reaches_clubb_winds(monkeypatch, tmp_path):
+    """mpas_land_stress_from_land on the production pairing: the TWO-LEAF
+    canopy's solved stress handed to CLUBB on the mesh lane.  The run must
+    complete finite and its winds must differ from the same run with the bulk
+    stress (the canopy's tau reaches the boundary layer).  Unset (AUTO) on
+    this eligible pairing must be bit-identical to explicit on."""
+    from legoesm.driver.config import DycoreConfig, GridConfig
+    _patch_land_loaders(monkeypatch)
+    base = _small_cfg()._replace(
+        grid=GridConfig(grid_type="mpas", resolution=2, nlev=8),
+        dycore=DycoreConfig(dt=600.0, discretization="mpas"),
+        days=2401.0 / 86400.0,               # 4 steps
+        mpas_land_beta_soil=True, turbulence="clubb",
+        land_surface_scheme="two_leaf", snow_albedo_feedback=True,
+        mpas_land_params_refresh=False)   # the fixture has no LAI climatology
+    runs = {}
+    for name, on in (("off", False), ("on", True), ("auto", None)):
+        cfg = base._replace(mpas_land_stress_from_land=on)
+        cfg.validate_strict()
+        d = ModelDriver(cfg, output_dir=tmp_path / name)
+        d.setup()
+        assert d.run() == "COMPLETED"
+        runs[name] = np.asarray(d.state.u.data)
+    assert np.isfinite(runs["on"]).all()
+    assert np.max(np.abs(runs["on"] - runs["off"])) > 0.0, (
+        "two-leaf land stress did not reach the CLUBB winds")
+    np.testing.assert_array_equal(runs["auto"], runs["on"])
 
 
 def test_canopy_smoothing_widths_survive_the_calibration(monkeypatch, tmp_path):

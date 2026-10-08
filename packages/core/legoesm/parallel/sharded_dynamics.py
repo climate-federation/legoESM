@@ -77,13 +77,13 @@ from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
+import functools
 import hashlib
 
 import numpy as np
 from jax.sharding import NamedSharding
 from jax.sharding import PartitionSpec as P
 from legoesm.core.field import Field
-from legoesm.grids.halo import pad_halo, pad_halo_4d
 from legoesm.parallel.mesh import N_FACES, DeviceConfig
 
 logger = logging.getLogger(__name__)
@@ -890,70 +890,6 @@ def sharded_step_with_halo(
 # Halo exchange utilities for cubed-sphere face boundaries
 # ======================================================================
 
-def make_face_halo_exchange(grid, config: DeviceConfig):
-    """Create a halo exchange function for cubed-sphere face boundaries.
-
-    The returned function operates on a full model state pytree and
-    applies halo exchange to all face-dimensioned arrays.
-
-    For face-only sharding (<=6 devices), this function is typically
-    not needed because the built-in ``pad_halo`` already handles
-    cross-face communication within the JIT'd step function.  It is
-    provided for explicit control when needed (e.g., in custom
-    time-stepping loops).
-
-    For sub-face tiling (>6 devices), this additionally exchanges
-    tile boundary data within each face.
-
-    Parameters
-    ----------
-    grid : CubedSphereGrid
-        The cubed-sphere grid (provides connectivity and metric info).
-    config : DeviceConfig
-        Device configuration.
-
-    Returns
-    -------
-    callable
-        ``exchange(state) -> state`` that applies halo exchange to
-        all face-dimensioned fields in the state pytree.
-    """
-    def _exchange(state):
-        """Apply halo exchange to face-dimensioned arrays.
-
-        This function pads each 2D face field ``(6, n, n)`` with halo
-        data from neighbors, then strips the halos back to ``(6, n, n)``.
-        This ensures boundary values are fresh after a dynamics step.
-
-        For 3D fields ``(6, n, n, nlev)`` the exchange uses the native
-        4D halo path (``pad_halo_4d``) which fetches halos for every
-        level in one MPI message — see CLAUDE.md ``Parallel and HPC
-        Rules``.  The previous ``vmap(pad_halo)`` per level pattern is
-        forbidden because it issues ``nlev`` separate messages.
-        """
-        def _exchange_leaf(leaf):
-            if not isinstance(leaf, (jax.Array, jnp.ndarray)):
-                return leaf
-            if leaf.ndim < 3 or leaf.shape[0] != N_FACES:
-                return leaf
-
-            if leaf.ndim == 3:
-                # 2D field: (6, n, n)
-                padded = pad_halo(leaf)
-                return padded[:, 1:-1, 1:-1]
-
-            elif leaf.ndim == 4:
-                # 3D field: (6, n, n, nlev) — single 4D halo exchange.
-                padded = pad_halo_4d(leaf)
-                return padded[:, 1:-1, 1:-1, :]
-
-            return leaf
-
-        return jax.tree.map(_exchange_leaf, state)
-
-    return _exchange
-
-
 # ======================================================================
 # Multi-step integration with sharding
 # ======================================================================
@@ -1501,6 +1437,28 @@ def _round_profile(sched, device, n_dev):
     return out
 
 
+def _on_host_cpu(fn):
+    """Run ``fn`` with jnp arrays created on the host CPU device.
+
+    The partition infra builds one padded mesh per device and stacks them,
+    so its arrays grow with the device count. Built on the default GPU they
+    exhaust it before the per-shard placement runs (ico10 float64 at 64 and
+    128 GPUs). Values are identical; only the device holding them changes.
+    Without a CPU backend (JAX_PLATFORMS excludes cpu) the default device
+    is used, as before.
+    """
+    @functools.wraps(fn)
+    def wrapped(*args, **kwargs):
+        try:
+            cpu = jax.local_devices(backend="cpu")[0]
+        except RuntimeError:
+            return fn(*args, **kwargs)
+        with jax.default_device(cpu):
+            return fn(*args, **kwargs)
+    return wrapped
+
+
+@_on_host_cpu
 def _build_voronoi_partition_infra(global_mesh, n_dev, halo_depth=2):
     """Pre-compute per-device local meshes and gather/scatter indices.
 
@@ -4210,6 +4168,7 @@ def make_voronoi_sharded_step(
             )
             tend = mpas_hydrostatic_tendencies(
                 local_state, my_mesh, sigma, cfg, dt=dt_val,
+                fence_pv_flux=True,
             )
 
             # Owned shards only.  Tracer ADVECTION tendencies ride back
@@ -4396,6 +4355,7 @@ def make_voronoi_sharded_step(
                 keep_e = (_owned_e | (edge_ring <= thr))[:, None]
                 tend = mpas_hydrostatic_tendencies(
                     s, my_mesh, sigma, cfg, dt=dt_val,
+                    fence_pv_flux=True,
                 )
                 tr_tend = None
                 if tkeys:
@@ -4465,7 +4425,7 @@ def make_voronoi_sharded_step(
     # ------------------------------------------------------------------
     # Pre-compute mass conservation constants (avoid per-step allreduce)
     # ------------------------------------------------------------------
-    if cfg.fix_mass:
+    if cfg.fix_mass or getattr(cfg, "conservative_tracer_clamp", False):
         # areaCell rides as a P("device")-sharded jit ARGUMENT aligned
         # with the p_s cell shards (elementwise product stays local;
         # GSPMD emits one allreduce for the sum) — local-only, and
@@ -4637,27 +4597,28 @@ def make_voronoi_sharded_step(
                     _pt, phys_state_out = _pr[0], _pr[1]
                 else:
                     _pt = _pr
+                _ps_phys = state_new.p_s.data + dt * _pt.dp_s_dt.data
+                _tr_phys = state_new.tracers
+                if (state_new.tracers is not None
+                        and _pt.tracer_tendencies is not None):
+                    # water tendencies carry their mass (mirrors the
+                    # serial _step_jit; shared helper)
+                    from legoesm.core.conservation import (
+                        apply_physics_water_mass,
+                    )
+                    _tr_phys, _ps_phys = apply_physics_water_mass(
+                        state_new.tracers, _pt.tracer_tendencies,
+                        _ps_phys, sigma, dt)
                 state_new = MPASHydrostaticState(
                     u=state_new.u.replace(
                         data=state_new.u.data + dt * _pt.du_dt.data),
                     T=state_new.T.replace(
                         data=state_new.T.data + dt * _pt.dT_dt.data),
-                    p_s=state_new.p_s.replace(
-                        data=state_new.p_s.data + dt * _pt.dp_s_dt.data),
+                    p_s=state_new.p_s.replace(data=_ps_phys),
                     phis=state_new.phis,
                     v=state_new.v,
-                    tracers=state_new.tracers,
+                    tracers=_tr_phys,
                 )
-                if (state_new.tracers is not None
-                        and _pt.tracer_tendencies is not None):
-                    state_new = state_new._replace(tracers={
-                        k: (state_new.tracers[k].replace(
-                                data=state_new.tracers[k].data
-                                + dt * _pt.tracer_tendencies[k].data)
-                            if k in _pt.tracer_tendencies
-                            else state_new.tracers[k])
-                        for k in state_new.tracers
-                    })
 
             # --- 3. Floors (mirrors _step_jit): temperature and tracer
             #        non-negativity (advection is not positive-definite;
@@ -4677,9 +4638,12 @@ def make_voronoi_sharded_step(
                 # sequentially-dependent ones.
                 acc = jnp.float64
                 area_acc = area_arg.astype(acc)
+                # DRY mass (p_s - g*column water), the serial fixer's
+                # convention (user decision 2026-09-28)
+                from legoesm.core.conservation import dry_surface_pressure
                 ps_pair = jnp.stack([
-                    state.p_s.data.astype(acc),
-                    state_new.p_s.data.astype(acc),
+                    dry_surface_pressure(state.p_s.data, state.tracers, sigma).astype(acc),
+                    dry_surface_pressure(state_new.p_s.data, state_new.tracers, sigma).astype(acc),
                 ], axis=0) * area_acc[None]
                 masses = jnp.sum(ps_pair, axis=1)  # shape (2,)
                 correction = (masses[0] - masses[1]) / _total_area
@@ -4694,9 +4658,12 @@ def make_voronoi_sharded_step(
                 # the promoted add (iter-11); parity in that corner mode
                 # differs only by the rounding of the correction add.
                 _ps = state_new.p_s.data
+                from legoesm.core.conservation import shift_ps_keep_tracer_mass
+                _ps_new, _tr_new = shift_ps_keep_tracer_mass(
+                    _ps, state_new.tracers, sigma, correction)
                 state_new = state_new._replace(
-                    p_s=state_new.p_s.replace(
-                        data=(_ps + correction).astype(_ps.dtype)))
+                    p_s=state_new.p_s.replace(data=_ps_new.astype(_ps.dtype)),
+                    tracers=_tr_new)
 
             # --- 5. Tracer positivity AFTER the mass fixer (#1354/#1515) ---
             # dp must be the FINAL layer mass, so this runs post-fix (the serial
@@ -4717,7 +4684,8 @@ def make_voronoi_sharded_step(
                     conservative=getattr(
                         cfg, "conservative_tracer_clamp", False),
                     energy_consistent=getattr(
-                        cfg, "energy_consistent_moisture_clip", False))
+                        cfg, "energy_consistent_moisture_clip", False),
+                    area=area_arg)
                 state_new = state_new._replace(
                     tracers=_tr_out, T=state_new.T.replace(data=_T_out))
 

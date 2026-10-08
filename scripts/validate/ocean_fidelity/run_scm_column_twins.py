@@ -574,7 +574,7 @@ def _virtual_salt_ref_constants() -> tuple[float, float]:
     from legoesm.ocean.state import LatLonCGridOceanConfig
 
     d = LatLonCGridOceanConfig._field_defaults
-    return float(d["S_ref"]), float(d["rho_0"])
+    return float(d["S_ref"]), float(d["constants"].rho_0)
 
 
 class _PointGrid(NamedTuple):

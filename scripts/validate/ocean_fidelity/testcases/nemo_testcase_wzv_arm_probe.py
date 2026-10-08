@@ -25,8 +25,8 @@ import numpy as np
 
 from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
 
-set_policy(PrecisionPolicy.fp64())
-assert get_policy() == PrecisionPolicy.fp64()
+set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+assert get_policy() == PrecisionPolicy.fp64(transcendentals="libm")
 
 from legoesm.ocean.dynamics import ocean_model_latlon_cgrid as omlc  # noqa: E402
 from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (  # noqa: E402

@@ -1,0 +1,553 @@
+"""FV3 duo as a column model behind the MPAS lane's step contract (route A,
+M2): certification ladder rungs 1-3 (plumbing identity, Held-Suarez,
+Kessler) at C12 km=5, plus the refusals and one real MPAS-physics package
+(Louis turbulence) driven through it.
+
+Every identity is against the CLOSED duo lane's own operators on the same
+post-dynamics bundle (the certified twins), bitwise unless stated.
+"""
+
+from __future__ import annotations
+
+import jax
+
+jax.config.update("jax_enable_x64", True)
+
+import jax.numpy as jnp  # noqa: E402
+import numpy as np  # noqa: E402
+import pytest  # noqa: E402
+
+from legoesm import constants  # noqa: E402
+from legoesm.core.state import HydrostaticTendencies  # noqa: E402
+from legoesm.grids.factory import create_fv3_duo_grid  # noqa: E402
+
+N, NG, KM = 12, 3, 5
+DT = 120.0
+CI = slice(NG, NG + N)
+CE = slice(NG, NG + N + 1)
+
+
+@pytest.fixture(autouse=True)
+def _drop_compiled_graphs():
+    yield
+    jax.clear_caches()
+
+
+@pytest.fixture(scope="module")
+def grid():
+    return create_fv3_duo_grid(N, NG)
+
+
+def _model(grid, **cfg):
+    from legoesm.atmosphere.dynamics.gcm.fv3_duo_column import (
+        FV3DuoColumnModel)
+    from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
+        FV3DuoConfig, FV3DuoDynamicsModel)
+    dyn = FV3DuoDynamicsModel(grid, FV3DuoConfig(km=KM, n_split=2, **cfg))
+    return dyn, FV3DuoColumnModel(dyn)
+
+
+@pytest.fixture(scope="module")
+def dry(grid):
+    dyn, col = _model(grid)
+    return dyn, col, dyn.dcmip16_initial_state(n_tracers=3)
+
+
+def _fld(like, data, name):
+    return like.replace(data=data, name=name)
+
+
+def _tend(state, du, dv, dT, tracers=None):
+    z = jnp.zeros_like(state.p_s.data)
+    return HydrostaticTendencies(
+        du_dt=_fld(state.u, du, "du_dt"), dv_dt=_fld(state.v, dv, "dv_dt"),
+        dT_dt=_fld(state.T, dT, "dT_dt"), dp_s_dt=_fld(state.p_s, z, "dp_s"),
+        dphis_dt=_fld(state.phis, z, "dphis"), tracer_tendencies=tracers)
+
+
+def _zero_physics(state, mesh, coord, phys_state=None, forcing=None):
+    return _tend(state, jnp.zeros_like(state.u.data),
+                 jnp.zeros_like(state.v.data), jnp.zeros_like(state.T.data))
+
+
+def _assert_bundle_equal(a, b, *, rel=0.0):
+    """Compute-window equality of two six-face bundles (D-grid winds on
+    their (n, n+1)/(n+1, n) windows, everything else on (n, n)) to
+    ``rel`` of each field's peak; ``rel=0`` is bitwise.  Two DIFFERENT
+    jit programs of the same math fuse differently and differ at
+    ~1e-15 of peak (the closed lane's known 2e-12 hook-vs-eager class),
+    so cross-program identities use ``rel=1e-12``, the twin gate's."""
+    win = {"u": (slice(None), CI, CE), "v": (slice(None), CE, CI)}
+
+    def chk(x, y, nm):
+        x, y = np.asarray(x), np.asarray(y)
+        np.testing.assert_allclose(x, y, rtol=0, atol=rel * np.abs(y).max(),
+                                   err_msg=nm)
+    for k in ("u", "v", "pt", "delp"):
+        w = win.get(k, (slice(None), CI, CI))
+        chk(a["state"][k][w], b["state"][k][w], k)
+    for k in a["press"]:
+        chk(a["press"][k], b["press"][k], k)
+    for i, (qa, qb) in enumerate(zip(a["q"], b["q"])):
+        chk(qa[:, CI, CI], qb[:, CI, CI], f"q{i}")
+
+
+# ---------------------------------------------------------------------
+# the view
+# ---------------------------------------------------------------------
+
+def test_mesh_and_coordinate_are_the_duo_grid(dry):
+    dyn, col, ic = dry
+    m = col.mesh
+    assert m.nCells == 6 * N * N
+    assert float(jnp.abs(m.latCell).max()) <= np.pi / 2
+    area = float(m.areaCell.sum())
+    # the gridstruct's cell areas sum to the sphere to 3.5e-6 relative at
+    # C12 (MEASURED 2026-09-26; the closed lane's own metric, not exact
+    # spherical excess) -- a finding for the metric, not this view
+    assert np.isclose(area, 4 * np.pi * constants.R_earth ** 2, rtol=1e-5)
+    st = col.from_bundle(ic)
+    assert st.u.data.shape == st.v.data.shape == st.T.data.shape == (
+        m.nCells, KM)
+    assert st.p_s.data.shape == (m.nCells,)
+    assert set(st.tracers) == {"q_v", "q_c", "q_r"}
+    # the hybrid coordinate reproduces the bundle's OWN interface
+    # pressures from p_s (the ak/bk -> A/B mapping is exact)
+    for b in (ic, dyn.step(ic, DT)):     # at the IC and post-remap
+        s_ = col.from_bundle(b)
+        pe = np.transpose(np.asarray(b["press"]["pe"])[:, 1:N + 1, :, 1:N + 1],
+                          (0, 1, 3, 2)).reshape(m.nCells, KM + 1)
+        ph = np.asarray(col.sigma_coord.pressure_at_half(s_.p_s.data))
+        np.testing.assert_allclose(ph, pe, rtol=1e-12, atol=0)
+    # the column winds ARE the closed lane's order-4 c2l view
+    from legoesm.core.fv3_native_physics_coupling import (
+        column_view_sixface_jax)
+    _, _, ua6, va6 = column_view_sixface_jax(
+        ic["state"], col._tab, col._amat6, n=N, ng=NG, km=KM)
+    ua = np.asarray(ua6)[:, CI, CI].reshape(-1, KM)
+    np.testing.assert_allclose(np.asarray(st.u.data), ua, rtol=0,
+                               atol=1e-12 * np.abs(ua).max())
+    assert float(jnp.abs(st.v.data).max()) > 0.0
+
+
+# ---------------------------------------------------------------------
+# rung 1: plumbing identity
+# ---------------------------------------------------------------------
+
+def test_zero_tendency_physics_is_the_closed_lane_bitwise(dry):
+    dyn, col, ic = dry
+    closed = dyn.step(ic, DT)
+    out = col.step(col.from_bundle(ic), DT, physics_fn=_zero_physics)
+    _assert_bundle_equal(out.native, closed)
+    # the exchanged halos the column path leaves behind do not change the
+    # next dynamics step either
+    _assert_bundle_equal(dyn.step(out.native, DT), dyn.step(closed, DT))
+    assert col._phys_state is None
+
+
+# ---------------------------------------------------------------------
+# rung 2: Held-Suarez through the contract == the closed lane's twin
+# ---------------------------------------------------------------------
+
+def _held_suarez_physics(col):
+    from legoesm.core.fv3_native_physics_coupling import (
+        column_view_sixface_jax, held_suarez_tend_jax,
+        stack_held_suarez_metrics)
+    _, lat6, _ = stack_held_suarez_metrics(col.grid.ctx_np)
+    lat6 = jnp.asarray(lat6)[:, CI, CI]
+
+    def physics(state, mesh, coord, phys_state=None, forcing=None):
+        b = state.native
+        # the tendency reads the bundle's own pe/peln/pkz (the twin's
+        # inputs); the winds are the state's columns (the SAME view)
+        peln6 = jnp.transpose(jnp.asarray(b["press"]["peln"]), (0, 1, 3, 2))
+        pe6 = jnp.transpose(
+            jnp.asarray(b["press"]["pe"])[:, 1:N + 1, :, 1:N + 1],
+            (0, 1, 3, 2))
+        ua = col._faces(state.u.data)
+        va = col._faces(state.v.data)
+        t_dt, u_dt, v_dt = jax.vmap(
+            lambda pt, ua_, va_, delp, peln, pkz, pe, lat:
+            held_suarez_tend_jax(pt, ua_, va_, delp, peln, pkz, pe, lat, DT,
+                                 strat=True))(
+            jnp.asarray(b["state"]["pt"])[:, CI, CI], ua, va,
+            jnp.asarray(b["state"]["delp"])[:, CI, CI], peln6,
+            jnp.asarray(b["press"]["pkz"]), pe6, lat6)
+        flat = lambda a: a.reshape(mesh.nCells, KM)  # noqa: E731
+        return _tend(state, flat(u_dt), flat(v_dt), flat(t_dt))
+    return physics
+
+
+def test_held_suarez_through_the_contract_is_the_twin_bitwise(dry):
+    from legoesm.core.fv3_native_physics_coupling import (
+        apply_held_suarez_step, apply_held_suarez_step_sixface_jax,
+        stack_held_suarez_metrics)
+    dyn, col, ic = dry
+    post = dyn.step(ic, DT)
+    amat6, lat6, wv6 = stack_held_suarez_metrics(col.grid.ctx_np)
+    twin = apply_held_suarez_step_sixface_jax(
+        post["state"], post["press"], col._tab, amat6, lat6, wv6, dt=DT,
+        n=N, ng=NG, km=KM, strat=True)
+    out = col.step(col.from_bundle(ic), DT,
+                   physics_fn=_held_suarez_physics(col))
+    for k in ("u", "v", "pt"):
+        np.testing.assert_array_equal(np.asarray(out.native["state"][k]),
+                                      np.asarray(twin[k]), err_msg=k)
+        assert np.abs(np.asarray(twin[k]) - np.asarray(post["state"][k])
+                      ).max() > 0.0, f"vacuous: HS did not move {k}"
+    np.testing.assert_array_equal(np.asarray(out.native["state"]["delp"]),
+                                  np.asarray(post["state"]["delp"]))
+    # and the closed lane's NumPy authority, at the twin gate's tolerance
+    st = [{k: np.array(np.asarray(post["state"][k])[t])
+           for k in ("u", "v", "pt", "delp")} for t in range(6)]
+    pr = [{k: np.asarray(post["press"][k][t]) for k in ("pe", "peln", "pkz")}
+          for t in range(6)]
+    apply_held_suarez_step(col.grid.ctx_np, st, pr, dt=DT, n=N, ng=NG,
+                           km=KM, strat=True, backend="numpy")
+    for k in ("u", "v", "pt"):
+        ref = np.stack([f[k] for f in st])
+        np.testing.assert_allclose(np.asarray(out.native["state"][k]), ref,
+                                   rtol=1e-12, atol=1e-11, err_msg=k)
+
+
+# ---------------------------------------------------------------------
+# rung 3: Kessler through the contract == the closed lane's bridge
+# ---------------------------------------------------------------------
+
+def _saturated_rainy(ic, q_c=2e-3, q_r=2e-2):
+    from legoesm.thermo import saturation_mixing_ratio
+    peln = jnp.transpose(jnp.asarray(ic["press"]["peln"]), (0, 1, 3, 2))
+    p_full = (jnp.asarray(ic["state"]["delp"])[:, CI, CI]
+              / (peln[..., 1:] - peln[..., :-1]))
+    q = [jnp.asarray(a) for a in ic["q"]]
+    q[0] = q[0].at[:, CI, CI].set(saturation_mixing_ratio(
+        jnp.asarray(ic["state"]["pt"])[:, CI, CI], p_full))
+    q[1] = jnp.full_like(q[1], q_c)
+    q[2] = jnp.full_like(q[2], q_r)
+    return {**ic, "q": q + [q[0] * 0.5]}     # + a passenger
+
+
+@pytest.fixture(scope="module")
+def moist(grid):
+    from legoesm.atmosphere.dynamics.gcm.fv3_duo_column import (
+        FV3DuoColumnModel)
+    dyn, _ = _model(grid, moist=True)
+    col = FV3DuoColumnModel(dyn, tracer_names=("q_v", "q_c", "q_r", "q_p"))
+    return dyn, col, _saturated_rainy(dyn.dcmip16_initial_state(n_tracers=3))
+
+
+def _kessler_physics(col):
+    from legoesm.atmosphere.forcing.idealized.kessler_forcing import (
+        kessler_tendencies_sixface_jax)
+
+    def physics(state, mesh, coord, phys_state=None, forcing=None):
+        b = state.native
+        t_dt, q_dt = kessler_tendencies_sixface_jax(
+            b["state"], b["press"], b["q"], dt=DT, n=N, ng=NG, km=KM)
+        flat = lambda a: a.reshape(mesh.nCells, KM)  # noqa: E731
+        z = jnp.zeros_like(state.u.data)
+        return _tend(state, z, z, flat(t_dt), tracers={
+            nm: _fld(state.tracers[nm], flat(d), nm)
+            for nm, d in zip(("q_v", "q_c", "q_r"), q_dt)})
+    return physics
+
+
+def test_kessler_through_the_contract_is_the_bridge(moist):
+    from legoesm.atmosphere.forcing.idealized.kessler_forcing import (
+        apply_kessler_step_sixface_jax)
+    from legoesm.grids.fv3_native_gridstruct import FV3_KAPPA
+    dyn, col, ic = moist
+    post = dyn.step(ic, DT)
+    st, pr, q = jax.jit(lambda s, p, q_: apply_kessler_step_sixface_jax(
+        s, p, q_, dt=DT, n=N, ng=NG, km=KM, ptop=dyn.ptop, akap=FV3_KAPPA))(
+        post["state"], post["press"], list(post["q"]))
+    bridge = {**post, "state": st, "press": pr, "q": q}
+    out = col.step(col.from_bundle(ic), DT, physics_fn=_kessler_physics(col))
+    _assert_bundle_equal(out.native, bridge, rel=1e-12)
+    # non-vacuous: rain reached the surface and took layer mass with it
+    dps = np.asarray(bridge["press"]["ps"]) - np.asarray(post["press"]["ps"])
+    assert dps[:, CI, CI].min() < 0.0
+    # winds: exactly the dynamics winds on the compute window (Kessler
+    # has no momentum tendency; the halo strips were exchanged for the view)
+    np.testing.assert_array_equal(
+        np.asarray(out.native["state"]["u"])[:, CI, CE],
+        np.asarray(post["state"]["u"])[:, CI, CE])
+    np.testing.assert_array_equal(
+        np.asarray(out.native["state"]["v"])[:, CE, CI],
+        np.asarray(post["state"]["v"])[:, CE, CI])
+
+
+# ---------------------------------------------------------------------
+# refusals
+# ---------------------------------------------------------------------
+
+def test_refuses_physics_without_the_meridional_tendency(dry):
+    dyn, col, ic = dry
+
+    def no_v(state, mesh, coord, phys_state=None, forcing=None):
+        t = _zero_physics(state, mesh, coord)
+        return t._replace(dv_dt=None)
+    with pytest.raises(ValueError, match="dv_dt=None"):
+        col.step(col.from_bundle(ic), DT, physics_fn=no_v)
+
+
+def test_uncarried_tracer_tendency_dropped_and_passenger_refused(moist):
+    dyn, col, ic = moist
+
+    def ice(state, mesh, coord, phys_state=None, forcing=None):
+        t = _zero_physics(state, mesh, coord)
+        return t._replace(tracer_tendencies={
+            "q_i": _fld(state.T, jnp.ones_like(state.T.data), "q_i")})
+    # a tendency for a tracer the state does not carry is DROPPED, the
+    # MPAS model's contract (the integrations emit the full set)
+    out = col.step(col.from_bundle(ic), DT, physics_fn=ice)
+    _assert_bundle_equal(out.native, dyn.step(ic, DT))
+
+    def passenger(state, mesh, coord, phys_state=None, forcing=None):
+        t = _zero_physics(state, mesh, coord)
+        return t._replace(tracer_tendencies={
+            "q_p": _fld(state.T, jnp.zeros_like(state.T.data), "q_p")})
+    with pytest.raises(ValueError, match="nwat"):
+        col.step(col.from_bundle(ic), DT, physics_fn=passenger)
+
+
+def test_refuses_water_tendencies_on_the_dry_deck(dry):
+    dyn, col, ic = dry
+
+    def wet(state, mesh, coord, phys_state=None, forcing=None):
+        t = _zero_physics(state, mesh, coord)
+        return t._replace(tracer_tendencies={
+            "q_v": _fld(state.T, jnp.zeros_like(state.T.data), "q_v")})
+    with pytest.raises(ValueError, match="DRY deck"):
+        col.step(col.from_bundle(ic), DT, physics_fn=wet)
+
+
+def test_refuses_tracer_names_that_do_not_name_the_warm_rain_slots(dry):
+    from legoesm.atmosphere.dynamics.gcm.fv3_duo_column import (
+        FV3DuoColumnModel)
+    dyn = dry[0]
+    for names in ((), ("q_c", "q_v", "q_r"), ("q_v", "q_c", "q_r", "q_v")):
+        with pytest.raises(ValueError, match="tracer_names"):
+            FV3DuoColumnModel(dyn, tracer_names=names)
+
+
+def test_surface_diagnostics_merge_slot_wise(dry):
+    """A held-radiation step (sw/lw None, precip set) keeps the last
+    radiation fluxes, as the MPAS model's stash does."""
+    dyn, col, ic = dry
+    ncell = col.mesh.nCells
+
+    from types import SimpleNamespace
+
+    def _physics(rad, precip):
+        def physics(state, mesh, coord, phys_state=None, forcing=None):
+            d = _zero_physics(state, mesh, coord)._asdict()
+            d.update(sw_net_sfc=jnp.full((ncell,), 100.0) if rad else None,
+                     lw_net_sfc=jnp.full((ncell,), -50.0) if rad else None,
+                     precip=jnp.full((ncell,), precip))
+            return SimpleNamespace(**d)
+        return physics
+    st = col.step(col.from_bundle(ic), DT, physics_fn=_physics(True, 1.0))
+    assert float(col._sfc_diag[0][0]) == 100.0
+    col.step(st, DT, physics_fn=_physics(False, 2.0))
+    assert col._sfc_diag[0] is not None and float(col._sfc_diag[0][0]) == 100.0
+    assert float(col._sfc_diag[2][0]) == 2.0
+
+
+def test_refuses_the_window_layout_and_nh(grid, dry):
+    from legoesm.atmosphere.dynamics.gcm.fv3_duo_column import (
+        FV3DuoColumnModel)
+    from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
+        FV3DuoConfig, FV3DuoDynamicsModel)
+    dyn = dry[0]
+    saved = dyn.window_layout
+    dyn.window_layout = object()          # stand-in for a window layout
+    try:
+        with pytest.raises(NotImplementedError, match="rung 7"):
+            FV3DuoColumnModel(dyn)
+    finally:
+        dyn.window_layout = saved
+    with pytest.raises(NotImplementedError, match="NH"):
+        FV3DuoColumnModel(FV3DuoDynamicsModel(
+            grid, FV3DuoConfig(km=KM, n_split=2, hydrostatic=False)))
+
+
+# ---------------------------------------------------------------------
+# a real MPAS-lane physics package through the contract
+# ---------------------------------------------------------------------
+
+def test_louis_turbulence_runs_and_moves_both_wind_components(moist):
+    from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
+    from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
+    dyn, col, ic = moist
+    fn = make_physics(PhysicsConfig(turbulence=TurbulenceConfig(scheme="louis")),
+                      model_type="mpas", dt=DT)
+    st0 = col.from_bundle(ic)
+    forcing = {"T_sfc": st0.T.data[:, -1] + 2.0}
+    closed = dyn.step(ic, DT)
+    out = col.step(st0, DT, physics_fn=fn, forcing=forcing)
+    for k in ("u", "v", "pt"):
+        got = np.asarray(out.native["state"][k])
+        assert np.isfinite(got).all(), k
+        assert np.abs(got - np.asarray(closed["state"][k])).max() > 0.0, k
+    # the applied D-wind increment is the dry twin of the returned
+    # cell tendencies (both components carried, none dropped)
+    post_cols, view = col.column_view(closed)
+    t = fn(post_cols, col.mesh, col.sigma_coord, forcing=forcing)
+    t = t[0] if isinstance(t, tuple) else t
+    _d = lambda x: getattr(x, "data", x)  # noqa: E731
+    assert float(jnp.abs(_d(t.dv_dt)).max()) > 0.0
+    from legoesm.core.fv3_native_physics_coupling import (
+        apply_column_increments_sixface_jax)
+    from legoesm.grids.fv3_native_gridstruct import FV3_KAPPA
+    q_dt = {col._tracer_index(nm): col._faces(_d(v))
+            for nm, v in (t.tracer_tendencies or {}).items()}
+    st, pr, q = jax.jit(lambda: apply_column_increments_sixface_jax(
+        closed["state"], closed["press"], list(closed["q"]), view, col._tab,
+        col._wv6, col._faces(_d(t.du_dt)), col._faces(_d(t.dv_dt)),
+        col._faces(_d(t.dT_dt)), q_dt, dt=DT, n=N, ng=NG, km=KM,
+        ptop=dyn.ptop, akap=FV3_KAPPA, moist_cp=True))()
+    _assert_bundle_equal(out.native, {**closed, "state": st, "press": pr,
+                                      "q": q}, rel=1e-12)
+    # budgets (GLM 2026-09-26): the physics' water increment in MPAS's
+    # fixed-mass convention, dt*sum_k delp*dq (NOT zero: Louis evaporates
+    # from the T_sfc forcing at the bottom level), is exactly the water
+    # mass the moist block adds, the surface pressure rises by that
+    # mass, and the DRY mass delp*(1 - q) of every column is unchanged
+    # (Louis diffuses cloud and rain too: every warm-rain tendency counts)
+    dq = sum(np.asarray(_d(v)).reshape(-1, KM)
+             for nm, v in t.tracer_tendencies.items()
+             if nm in ("q_v", "q_c", "q_r"))
+    delp0 = np.asarray(closed["state"]["delp"])[:, CI, CI].reshape(-1, KM)
+    delp1 = np.asarray(out.native["state"]["delp"])[:, CI, CI].reshape(-1, KM)
+    qw0 = sum(np.asarray(closed["q"][i])[:, CI, CI].reshape(-1, KM)
+              for i in range(3))
+    qw1 = sum(np.asarray(out.native["q"][i])[:, CI, CI].reshape(-1, KM)
+              for i in range(3))
+    src = DT * (delp0 * dq).sum(axis=1)
+    assert np.abs(src).max() > 0.0
+    # differences of O(1e5 Pa) fields resolve to ~1e-11: tolerance on
+    # the differenced field's scale, not on the (small) difference
+    w0, w1 = (delp0 * qw0).sum(axis=1), (delp1 * qw1).sum(axis=1)
+    np.testing.assert_allclose(w1 - w0, src, rtol=0,
+                               atol=1e-12 * np.abs(w0).max())
+    ps0 = np.asarray(closed["press"]["ps"])[:, CI, CI].reshape(-1)
+    ps1 = np.asarray(out.native["press"]["ps"])[:, CI, CI].reshape(-1)
+    np.testing.assert_allclose(ps1 - ps0, src, rtol=0,
+                               atol=1e-12 * np.abs(ps0).max())
+    np.testing.assert_allclose((delp1 * (1.0 - qw1)).sum(axis=1),
+                               (delp0 * (1.0 - qw0)).sum(axis=1), rtol=1e-12)
+
+
+# ---------------------------------------------------------------------
+# M3: the driver's MPAS lane with the duo as its dynamics operator
+# ---------------------------------------------------------------------
+
+def _driver_cfg(tmp_path, **over):
+    from legoesm.driver.config import (
+        DycoreConfig, ExperimentConfig, GridConfig, OutputConfig)
+    grid = GridConfig(grid_type="cubed_sphere", resolution=N, nlev=KM)
+    dycore = DycoreConfig(
+        model_type="hydrostatic", discretization="fv3_duo",
+        dt=over.pop("dt", 1920.0),
+        fv3_duo_column_lane=over.pop("column", True))
+    base = dict(
+        grid=grid, dycore=dycore, days=over.pop("days", 0.25),
+        radiation="none", convection="none", microphysics="none",
+        turbulence="none", gravity_wave_drag="none", precision="fp64",
+        output=OutputConfig(diag_days=over.pop("diag_days", 0),
+                            checkpoint_days=0, output_dir=str(tmp_path)))
+    base.update(over)
+    return ExperimentConfig(**base)
+
+
+def _run_driver(tmp_path, **over):
+    from legoesm.driver.model_driver import ModelDriver
+    cfg = _driver_cfg(tmp_path, **over)
+    drv = ModelDriver(cfg, output_dir=tmp_path)
+    drv.setup()
+    status = drv.run()
+    assert status == "COMPLETED", status
+    return drv
+
+
+def test_driver_column_lane_is_the_closed_lane_bitwise(tmp_path):
+    """Rung 1 at the driver level: ``run()`` through the MPAS lane with the
+    duo column model and no physics reproduces the closed duo lane's
+    bundle bitwise after the same number of steps (same IC builder, same
+    dt), and the state the driver ends on is the column view."""
+    from legoesm.atmosphere.dynamics.gcm.fv3_duo_column import (
+        FV3DuoColumnModel, FV3DuoColumnState)
+    col = _run_driver(tmp_path / "col")
+    assert isinstance(col.model, FV3DuoColumnModel)
+    assert isinstance(col.state, FV3DuoColumnState)
+    assert col.grid is col.model.mesh and col.sigma is col.model.sigma_coord
+    closed = _run_driver(tmp_path / "closed", column=False)
+    assert isinstance(closed.state, dict)
+    n_steps = int(0.25 * 86400.0 / 1920.0)
+    assert n_steps == 11
+    _assert_bundle_equal(col.state.native, closed.state)
+    assert np.abs(np.asarray(col.state.native["state"]["pt"])
+                  - np.asarray(closed.model.dcmip16_initial_state(
+                      do_pert=True)["state"]["pt"])).max() > 0.0
+
+
+def test_driver_column_lane_kessler_equals_the_closed_lane(tmp_path):
+    """Kessler through the MPAS lane's own physics package on the column
+    model vs the closed lane's bridge, same IC, same dt: the two runs
+    agree to 1e-12 of peak.  On the (unsaturated) DCMIP16 columns
+    Kessler's tendency is exactly zero on both lanes (MEASURED
+    2026-09-26), so this is the PLUMBING identity of the moist deck
+    (moist dycore arm, three tracers, the physics package called every
+    step, no fixer); the physics identity is the M2 rung.  The dry-mass
+    drift is the dycore's own on both lanes (the moist arm creates ~7e-7
+    of global water per step under pure advection -- a closed-lane
+    finding), so it is asserted EQUAL between the lanes, not zero."""
+    col = _run_driver(tmp_path / "col", microphysics="kessler")
+    closed = _run_driver(tmp_path / "closed", column=False,
+                         microphysics="kessler")
+    _assert_bundle_equal(col.state.native, closed.state, rel=1e-12)
+    area = np.asarray(col.model.mesh.areaCell).reshape(6, N, N)
+
+    def dry_mass(bb):
+        delp = np.asarray(bb["state"]["delp"])[:, CI, CI]
+        qw = sum(np.asarray(bb["q"][i])[:, CI, CI] for i in range(3))
+        return float(((delp * (1.0 - qw)).sum(axis=-1) * area).sum())
+    assert np.isclose(dry_mass(col.state.native), dry_mass(closed.state),
+                      rtol=1e-12)
+    for k in ("u", "v", "pt", "delp"):
+        assert np.isfinite(np.asarray(col.state.native["state"][k])).all(), k
+
+
+def test_driver_column_lane_refusals(tmp_path):
+    from legoesm.driver.model_driver import ModelDriver
+    for over, frag in ((dict(sponge_enabled=True), "sponge_enabled"),
+                       (dict(mpas_qv_smooth_del4_m4s=1e14),
+                        "MPAS-lane knob|smoothing"),
+                       (dict(held_suarez_forcing=True), "hswf"),
+                       (dict(topography="gaussian"), "column mesh"),
+                       (dict(microphysics="morrison"), "nwat=6"),
+                       (dict(convection="zhang_mcfarlane"), "nwat=6")):
+        drv = ModelDriver(_driver_cfg(tmp_path, **over), output_dir=tmp_path)
+        with pytest.raises(ValueError, match=frag):
+            drv.setup()
+
+
+def test_column_model_refuses_wind_edits_and_writes_back_T(dry):
+    dyn, col, ic = dry
+    st = col.from_bundle(ic)
+    edited = st._replace(u=st.u.replace(data=st.u.data * 0.5))
+    with pytest.raises(ValueError, match="state.u was edited"):
+        col.step(edited, DT, physics_fn=_zero_physics)
+    # a T + tracer edit (the hard-saturation drain's shape: T and a
+    # COPIED tracer dict, whose keys a jitted output leaves sorted)
+    # reaches the bundle
+    trc = {k: st.tracers[k] for k in sorted(st.tracers)}
+    trc["q_v"] = trc["q_v"].replace(data=trc["q_v"].data * 0.5)
+    warmed = st._replace(T=st.T.replace(data=st.T.data + 1.0), tracers=trc)
+    out = col.step(warmed, DT, physics_fn=_zero_physics)
+    ref = dyn.step({**ic, "state": {**ic["state"], "pt": jnp.asarray(
+        ic["state"]["pt"]).at[:, CI, CI].add(1.0)},
+        "q": [jnp.asarray(ic["q"][0]).at[:, CI, CI].multiply(0.5)]
+        + list(ic["q"][1:])}, DT)
+    _assert_bundle_equal(out.native, ref)

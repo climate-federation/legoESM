@@ -29,9 +29,6 @@ Integration modes
 1. **Pure neural**: ``make_neural_step_unified`` returns a function
    matching the ``step_unified`` signature from ``PhysicsPipeline``,
    suitable as a drop-in replacement in ``build_segment_fn``.
-
-2. **Hybrid**: ``make_hybrid_step_unified`` blends traditional physics
-   with a learned neural correction weighted by ``alpha``.
 """
 
 from __future__ import annotations
@@ -702,118 +699,6 @@ def make_neural_step_unified(
             held_sw_down_toa,
         )
         return phys_out, held_new
-
-    return step_unified
-
-
-# ======================================================================
-# Hybrid step_unified builder
-# ======================================================================
-
-def make_hybrid_step_unified(
-    traditional_step_unified,
-    neural_physics: NeuralPhysics,
-    adapter: ColumnAdapter,
-    alpha: float = 1.0,
-):
-    """Build a hybrid ``step_unified`` that blends traditional + neural physics.
-
-    The output is::
-
-        phys_out = traditional_out + alpha * neural_correction
-
-    for all tendency fields.  Held radiation arrays are taken from the
-    traditional branch (which handles radiation sub-cycling properly).
-
-    Parameters
-    ----------
-    traditional_step_unified : callable
-        The original ``step_unified`` from ``PhysicsPipeline.build_step_unified()``.
-    neural_physics : NeuralPhysics
-        Equinox column MLP providing learned corrections.
-    adapter : ColumnAdapter
-        Grid adapter for flatten/unflatten operations.
-    alpha : float
-        Blending weight for the neural correction. Use 0.0 to disable
-        the neural component, 1.0 for full neural correction.
-
-    Returns
-    -------
-    callable
-        Same signature as ``step_unified``.
-    """
-    neural_step = make_neural_step_unified(neural_physics, adapter)
-
-    def step_unified(need_rad, T, p_s, q_v, q_c, q_r, *args, **kwargs):
-        conv_prog, tail = parse_step_unified_tail(args)
-        (
-            u,
-            v,
-            sst,
-            sic,
-            lat,
-            lon,
-            day_of_year,
-            seconds_of_day,
-            dt,
-            solar_weights,
-            s_0,
-            o3_vmr,
-            aerosol_od,
-            held_dT_rad,
-            held_sw_net_sfc,
-            held_lw_net_sfc,
-            held_sw_up_toa,
-            held_lw_up_toa,
-            held_sw_down_toa,
-        ) = tail
-        # Traditional physics (with full radiation sub-cycling)
-        trad_args = [need_rad, T, p_s, q_v, q_c, q_r]
-        if conv_prog is not None:
-            trad_args.append(conv_prog)
-        trad_args.extend([
-            u, v, sst, sic, lat, lon,
-            day_of_year, seconds_of_day, dt,
-            solar_weights, s_0,
-            o3_vmr, aerosol_od,
-            held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
-            held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
-        ])
-        _trad = traditional_step_unified(*trad_args, **kwargs)
-        trad_out, held_new = _trad[0], _trad[1]
-        # The traditional PhysicsPipeline step returns a 3rd value (the
-        # slab-land skin temperature, #325); propagate it so a neural-
-        # correction run with an active land tile still evolves T_land.
-        # Older 2-tuple traditional steps leave it None (land inert).
-        _trad_T_land = _trad[2] if len(_trad) > 2 else None
-
-        # Neural correction (the step keywords carry the prescribed planes a
-        # flag-on network needs; a flag-off network ignores them).
-        neural_out, _ = neural_step(*trad_args, **kwargs)
-
-        # Blend: traditional + alpha * neural correction
-        _alpha = jnp.asarray(alpha)
-        blended = PhysicsOutput(
-            **build_physics_output_kwargs(
-                dT_dt=trad_out.dT_dt + _alpha * neural_out.dT_dt,
-                dq_v_dt=trad_out.dq_v_dt + _alpha * neural_out.dq_v_dt,
-                dq_c_dt=trad_out.dq_c_dt + _alpha * neural_out.dq_c_dt,
-                dq_r_dt=trad_out.dq_r_dt + _alpha * neural_out.dq_r_dt,
-                precip=trad_out.precip + _alpha * neural_out.precip,
-                sw_net_sfc=trad_out.sw_net_sfc + _alpha * neural_out.sw_net_sfc,
-                lw_net_sfc=trad_out.lw_net_sfc + _alpha * neural_out.lw_net_sfc,
-                sw_up_toa=trad_out.sw_up_toa + _alpha * neural_out.sw_up_toa,
-                lw_up_toa=trad_out.lw_up_toa + _alpha * neural_out.lw_up_toa,
-                sw_down_toa=trad_out.sw_down_toa + _alpha * neural_out.sw_down_toa,
-                reference_3d=trad_out.dT_dt,
-                template=trad_out,
-                conv_prog=conv_prog,
-            )
-        )
-
-        # Held radiation comes from the traditional branch; pass the
-        # slab-land skin temperature through unchanged (#325).
-        return blended, held_new, _trad_T_land
 
     return step_unified
 

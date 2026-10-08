@@ -84,7 +84,9 @@ def iterate_eos_and_pressure_anomaly(
     trapezoid_t_depth_1d: jnp.ndarray | None = None,
     eos_depth: str = "insitu",
     eos_geometric_depth_1d: jnp.ndarray | None = None,
-) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    density_anomaly_ratio_fn: Callable | None = None,
+    return_density_anomaly_ratio: bool = False,
+) -> Tuple[jnp.ndarray, ...]:
     """Run the standard 2-pass EOS iteration and form ``p_prime``.
 
     Replicates the identical iteration that previously lived inline in
@@ -167,6 +169,15 @@ def iterate_eos_and_pressure_anomaly(
     eos_geometric_depth_1d : array or None
         Geometric T-depth ladder (positive down, shape ``(nlev,)``; NEMO
         ``gdept_1d``).  Required when ``eos_depth="geometric"``.
+    density_anomaly_ratio_fn : callable or None
+        Optional source-associated ``(T,S,p,**kwargs) -> (rho/rho0-1)`` used
+        to form ``rho_prime`` without the cancellation in ``rho-rho0``.
+        NEMO's polynomial EOS stores this ratio directly in ``rhd``
+        (``eosbn2.F90:288``). ``None`` preserves every legacy caller.
+    return_density_anomaly_ratio : bool, default False
+        Return the source-associated dimensionless ratio as a fourth value.
+        This is only valid with ``density_anomaly_ratio_fn`` and avoids a
+        later ``ratio * rho0 / rho0`` round trip at a literal NEMO consumer.
 
     Returns
     -------
@@ -231,6 +242,7 @@ def iterate_eos_and_pressure_anomaly(
             )
             rho = eos_fn(T_filled, S_filled, p_hydro, **eos_kw)
 
+    ratio = None
     if rho_ref_z_static is not None:
         # STATIC reference profile (preferred): a frozen-at-init
         # ρ_ref(z) computed from the initial T, S over wet cells.
@@ -263,6 +275,12 @@ def iterate_eos_and_pressure_anomaly(
         rho_ref_z = jnp.sum(rho * wet, axis=horiz_axes) / wet_count
         # Broadcast back across horizontal axes.
         rho_prime = rho - rho_ref_z
+    elif density_anomaly_ratio_fn is not None:
+        if eos_depth != "geometric":
+            raise ValueError(
+                "density_anomaly_ratio_fn currently requires geometric EOS depth")
+        ratio = density_anomaly_ratio_fn(T_filled, S_filled, p_eos, **eos_kw)
+        rho_prime = ratio * rho_0
     else:
         rho_prime = rho - rho_0
 
@@ -310,6 +328,12 @@ def iterate_eos_and_pressure_anomaly(
             inc = jnp.concatenate(
                 [h_b[..., :1] * rho_q[..., :1], e3w_int * pair], axis=-1)
         p_prime = (0.5 * g) * jnp.cumsum(inc, axis=-1)
+        if return_density_anomaly_ratio:
+            if ratio is None:
+                raise ValueError(
+                    "return_density_anomaly_ratio requires "
+                    "density_anomaly_ratio_fn")
+            return rho, rho_prime, p_prime, ratio
         return rho, rho_prime, p_prime
 
     if hi_precision_pressure:
@@ -322,6 +346,11 @@ def iterate_eos_and_pressure_anomaly(
     p_prime = jnp.cumsum(dp_layer, axis=-1) - dp_layer
     p_prime = p_prime + 0.5 * dp_layer
 
+    if return_density_anomaly_ratio:
+        if ratio is None:
+            raise ValueError(
+                "return_density_anomaly_ratio requires density_anomaly_ratio_fn")
+        return rho, rho_prime, p_prime, ratio
     return rho, rho_prime, p_prime
 
 
@@ -921,7 +950,9 @@ def bbl_distributed_drag_face_column(
 # coefficient back to the velocity faces (NEMO's dynzdf 2-point average
 # of ``rCdU_bot``).
 
-BOTTOM_DRAG_SCHEMES = ("legacy", "nemo_quadratic", "nemo_loglayer")
+BOTTOM_DRAG_SCHEMES = (
+    "legacy", "nemo_quadratic", "nemo_loglayer", "nemo_linear",
+)
 
 
 def validate_bottom_drag_scheme(scheme: str) -> str:
@@ -1001,6 +1032,7 @@ def nemo_effective_bottom_drag_r(
     z0: float,
     ke0: float,
     von_karman: float,
+    uc0: float | None = None,
 ) -> jnp.ndarray:
     """NEMO non-linear bottom-drag coefficient ``r = Cd·|U|`` at tracer points.
 
@@ -1043,8 +1075,9 @@ def nemo_effective_bottom_drag_r(
         Bottom-cell thickness at the tracer point [m] (used by
         ``nemo_loglayer`` only).
     scheme : str
-        ``"nemo_quadratic"`` (zdfdrg np_non_lin) or ``"nemo_loglayer"``
-        (np_loglayer).  ``"legacy"`` is rejected — callers keep the
+        ``"nemo_quadratic"`` (zdfdrg np_non_lin), ``"nemo_loglayer"``
+        (np_loglayer) or ``"nemo_linear"`` (np_lin, the velocity-independent
+        ``Cd0*Uc0``).  ``"legacy"`` is rejected — callers keep the
         historical MOM6-style path for it and must not route here.
     cd0, cd_max, z0, ke0 : float
         NEMO ``rn_Cd0``, ``rn_Cdmax``, ``rn_z0``, ``rn_ke0`` (ORCA1:
@@ -1060,7 +1093,7 @@ def nemo_effective_bottom_drag_r(
     return nemo_drag_r_from_speed_sq(
         u_bot * u_bot + v_bot * v_bot, h_bot,
         scheme=scheme, cd0=cd0, cd_max=cd_max, z0=z0, ke0=ke0,
-        von_karman=von_karman,
+        von_karman=von_karman, uc0=uc0,
     )
 
 
@@ -1074,6 +1107,7 @@ def nemo_drag_r_from_speed_sq(
     z0: float,
     ke0: float,
     von_karman: float,
+    uc0: float | None = None,
 ) -> jnp.ndarray:
     """Speed-squared form of :func:`nemo_effective_bottom_drag_r`.
 
@@ -1084,6 +1118,24 @@ def nemo_drag_r_from_speed_sq(
     sign convention as the component form (which delegates here).
     """
     validate_bottom_drag_scheme(scheme)
+    if scheme == "nemo_linear":
+        # zdfdrg.F90 np_lin.  drg_init stores the masked coefficient
+        #     pCd0(ji,jj) = rn_Cd0 * zmsk_boost(ji,jj)
+        # and zdf_drg_lin then writes, ONCE and for the whole run,
+        #     pCdU(ji,jj) = - pCd0(ji,jj) * rn_Uc0
+        # (zdfdrg.F90 zdf_drg_lin, CASE( np_lin )).  The rate does not read
+        # the velocity at all, so there is no square root here and
+        # ``l_zdfdrg`` is .FALSE.: NEMO never updates it after init.  The
+        # land masking NEMO carries in ``zmsk_boost`` is applied by the
+        # callers' bottom-level face indicator, which is empty on a face
+        # whose adjacent column is dry.
+        if uc0 is None:
+            raise ValueError(
+                "bottom_drag_scheme='nemo_linear' needs NEMO's rn_Uc0 "
+                "(bottom_drag_uc0); it has no default here because the "
+                "reference velocity is a property of the run's namelist."
+            )
+        return jnp.full_like(jnp.asarray(speed_sq), cd0 * uc0)
     if scheme == "nemo_loglayer":
         cd = nemo_loglayer_cd(
             h_bot, z0=z0, cd_min=cd0, cd_max=cd_max, von_karman=von_karman,

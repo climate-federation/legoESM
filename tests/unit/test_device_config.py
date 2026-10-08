@@ -1,7 +1,7 @@
 """Unit tests for the device configuration and hardware-aware optimization module.
 
-Tests auto-detection, XLA flag configuration, mixed-precision policies,
-dtype selection, and optimal mesh construction.  All tests run on CPU
+Tests auto-detection, XLA flag configuration, mixed-precision policies and
+dtype selection.  All tests run on CPU
 without requiring GPU/TPU hardware.
 """
 
@@ -15,11 +15,8 @@ from legoesm.parallel.device_config import (
     HardwareConfig,
     MixedPrecisionPolicy,
     detect_devices,
-    configure_jax_for_device,
     get_optimal_dtype,
     mixed_precision_policy,
-    cast_for_device,
-    get_optimal_mesh,
     _estimate_device_memory,
     _recommended_batch_size,
 )
@@ -252,7 +249,7 @@ class TestBatchSize:
 # ============================================================================
 
 class TestXLAFlags:
-    """Tests for set_xla_flags and configure_jax_for_device."""
+    """Tests for set_xla_flags and the backend bootstrap."""
 
     def test_set_xla_flags_adds_to_env(self):
         """set_xla_flags appends flags to XLA_FLAGS."""
@@ -296,10 +293,6 @@ class TestXLAFlags:
             else:
                 os.environ.pop("XLA_FLAGS", None)
 
-    def test_configure_cpu_does_not_crash(self):
-        """configure_jax_for_device on CPU completes without error."""
-        config = detect_devices()
-        configure_jax_for_device(config)
 
     def test_cpu_backend_does_not_set_invalid_intra_op_flag(self):
         """Iter-154 regression: the legacy
@@ -354,14 +347,11 @@ class TestXLAFlags:
           1. `parallel.device_config._configure_tpu` (iter-149)
           2. `runtime.backend.configure_backend('tpu')` (iter-150)
 
-        Both bootstrap paths must work without the update.  This test
-        exercises both by mocking `jax.process_count() → 2` (simulating
-        a 2-host TPU pod) and asserting neither entry point raises
+        The device_config path was deleted (ponytail #12); this test
+        mocks `jax.process_count() → 2` (simulating a 2-host TPU pod)
+        and asserts the runtime entry point does not raise
         AttributeError on the removed config option.
         """
-        from legoesm.parallel.device_config import (
-            HardwareConfig, configure_jax_for_device,
-        )
         from legoesm.runtime.backend import configure_backend
 
         # Path 1: configure_backend('tpu') — canonical runtime entry
@@ -372,23 +362,6 @@ class TestXLAFlags:
             # Must NOT raise AttributeError("jax_spmd_mode") on JAX 0.9+
             resolved = configure_backend("tpu")
             assert resolved == "tpu"
-
-        # Path 2: configure_jax_for_device with multi-host HardwareConfig.
-        # It reads num_hosts from the config directly (no jax.process_count
-        # mock needed), but mock anyway to keep the two cases symmetric.
-        cfg = HardwareConfig(
-            backend="tpu",
-            device_count=16,
-            devices_per_host=8,
-            num_hosts=2,
-            supports_float64=False,
-            supports_complex128=False,
-            memory_per_device_gb=16.0,
-            recommended_batch_size=6,
-        )
-        with patch.object(jax, "process_count", return_value=2):
-            # Must NOT raise AttributeError on JAX 0.9+
-            configure_jax_for_device(cfg)
 
         # Additional invariant: NEITHER source file may reference
         # `jax_spmd_mode` in an EXECUTABLE `jax.config.update(...)`
@@ -499,7 +472,7 @@ class TestGetOptimalDtype:
 # ============================================================================
 
 class TestMixedPrecisionPolicy:
-    """Tests for mixed_precision_policy and cast_for_device."""
+    """Tests for mixed_precision_policy."""
 
     def test_tpu_policy(self):
         """TPU policy uses bfloat16 for compute."""
@@ -534,92 +507,6 @@ class TestMixedPrecisionPolicy:
             assert policy.compute_dtype == jnp.float32
             assert policy.param_dtype == jnp.float32
 
-    def test_cast_for_device_compute(self):
-        """cast_for_device with role='compute' applies compute dtype."""
-        config = detect_devices()
-        x = jnp.ones(5, dtype=jnp.float32)
-        y = cast_for_device(x, config, role="compute")
-        assert y.shape == x.shape
-        assert jnp.allclose(y, x)
-
-    def test_cast_for_device_param(self):
-        """cast_for_device with role='param' keeps float32."""
-        config = detect_devices()
-        x = jnp.ones(5, dtype=jnp.float64)
-        y = cast_for_device(x, config, role="param")
-        assert y.dtype == jnp.float32
-
-    def test_cast_for_device_output(self):
-        """cast_for_device with role='output' returns float32."""
-        config = detect_devices()
-        x = jnp.ones(5, dtype=jnp.float64)
-        y = cast_for_device(x, config, role="output")
-        assert y.dtype == jnp.float32
-
-    def test_cast_noop_when_already_correct(self):
-        """cast_for_device is a no-op when dtype already matches."""
-        config = detect_devices()
-        x = jnp.ones(5, dtype=jnp.float32)
-        y = cast_for_device(x, config, role="param")
-        # Should be the exact same object (no copy).
-        assert y is x
-
-    def test_cast_invalid_role_raises(self):
-        """cast_for_device with unknown role raises ValueError."""
-        config = detect_devices()
-        x = jnp.ones(5)
-        with pytest.raises(ValueError, match="Unknown role"):
-            cast_for_device(x, config, role="unknown")
-
-    def test_tpu_cast_to_bfloat16(self):
-        """On TPU, compute cast should produce bfloat16."""
-        config = HardwareConfig(
-            backend="tpu", device_count=4, devices_per_host=4, num_hosts=1,
-            supports_float64=True, supports_complex128=True,
-            memory_per_device_gb=32.0, recommended_batch_size=4,
-        )
-        x = jnp.ones(5, dtype=jnp.float32)
-        y = cast_for_device(x, config, role="compute")
-        assert y.dtype == jnp.bfloat16
-
-
-# ============================================================================
-# Optimal mesh construction
-# ============================================================================
-
-class TestGetOptimalMesh:
-    """Tests for get_optimal_mesh."""
-
-    def test_cubed_sphere_single_device(self):
-        """Single-device cubed-sphere returns valid DeviceConfig."""
-        from legoesm.parallel.mesh import DeviceConfig as MeshDeviceConfig
-        config = detect_devices()
-        mesh_cfg = get_optimal_mesh(config, grid_type="cubed_sphere")
-        assert isinstance(mesh_cfg, MeshDeviceConfig)
-        assert mesh_cfg.grid_type == "cubed_sphere"
-
-    def test_spectral_single_device(self):
-        """Single-device spectral returns valid DeviceConfig."""
-        from legoesm.parallel.mesh import DeviceConfig as MeshDeviceConfig
-        config = detect_devices()
-        mesh_cfg = get_optimal_mesh(config, grid_type="spectral", nlev=40)
-        assert isinstance(mesh_cfg, MeshDeviceConfig)
-        assert mesh_cfg.grid_type == "spectral"
-
-    def test_latlon_single_device(self):
-        """Single-device lat-lon returns valid DeviceConfig."""
-        from legoesm.parallel.mesh import DeviceConfig as MeshDeviceConfig
-        config = detect_devices()
-        mesh_cfg = get_optimal_mesh(config, grid_type="latlon")
-        assert isinstance(mesh_cfg, MeshDeviceConfig)
-        assert mesh_cfg.grid_type == "latlon"
-
-    def test_unknown_grid_type_raises(self):
-        """Unknown grid type raises ValueError."""
-        config = detect_devices()
-        with pytest.raises(ValueError, match="Unknown grid_type"):
-            get_optimal_mesh(config, grid_type="hexagonal")
-
 
 # ============================================================================
 # Re-export from parallel package
@@ -637,10 +524,6 @@ class TestReExports:
         config = detect_hardware()
         assert isinstance(config, HardwareConfig)
 
-    def test_configure_jax_for_device_importable(self):
-        from legoesm.parallel import configure_jax_for_device
-        assert callable(configure_jax_for_device)
-
     def test_get_optimal_dtype_importable(self):
         from legoesm.parallel import get_optimal_dtype
         assert callable(get_optimal_dtype)
@@ -648,14 +531,6 @@ class TestReExports:
     def test_mixed_precision_policy_importable(self):
         from legoesm.parallel import MixedPrecisionPolicy, mixed_precision_policy
         assert callable(mixed_precision_policy)
-
-    def test_cast_for_device_importable(self):
-        from legoesm.parallel import cast_for_device
-        assert callable(cast_for_device)
-
-    def test_get_optimal_mesh_importable(self):
-        from legoesm.parallel import get_optimal_mesh
-        assert callable(get_optimal_mesh)
 
 
 # ============================================================================

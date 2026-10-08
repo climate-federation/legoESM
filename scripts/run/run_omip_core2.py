@@ -9,9 +9,10 @@ Both models use the SAME CORE-II forcing: NEMO reads the raw COREv2 files; here
 bulk fluxes match). The eORCA1 grid + land mask + bathymetry come from NEMO's
 own ``eORCA1.2_mesh_mask.nc`` (tmaskutil / e3t_0), so the geometry matches too.
 
-Loop: ``load_core2_nyf`` -> per step pick the 6-hourly record -> apply CORE-II
-bulk fluxes via ``apply_omip2_surface_fluxes`` (ocean-reaction sign, tripole
-rotation) -> ``model.step``. Annual snapshots + scalar diagnostics are written
+Loop: ``load_core2_nyf`` -> per step pick the 6-hourly record -> build CORE-II
+bulk forcing via ``compute_omip2_surface_forcing`` -> ``model.step(...,
+surface_forcing=...)`` (the core applies the ocean-reaction sign and tripole
+rotation). Annual snapshots + scalar diagnostics are written
 for scoring against the NEMO climatology.
 
 NOTE the applicator is host-side NumPy, so each step round-trips the state
@@ -767,6 +768,43 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
         c_eps=rn_ediss,
         tke_background=rn_emin,         # rn_emin (1e-10 under ln_zdfiwm, else 1e-6)
         mxl_min=rmxl_min,               # rmxl_min (1e-3 under ln_zdfiwm, else model default)
+        # Both arms above already carry NEMO's OWN rmxl_min, so the card must
+        # NOT re-derive it: zdf_tke_init evaluates 1e-6/(rn_ediff*SQRT(rn_emin))
+        # only on the ln_zdfiwm=.FALSE. arm (zdftke.F90:846), and ORCA1 runs
+        # ln_zdfiwm=.TRUE., where :841-843 FORCES rmxl_min=1e-3.
+        nemo_derived_mxl_min=False,
+        # DECISION 72 (user, 2026-09-28): this ORCA1 card keeps MAIN's
+        # calm-column ln_mxl0 surface floor, the namelist rn_mxl0 = 0.04 m,
+        # stated here by value rather than left to a default.  NEMO itself
+        # OVERWRITES rn_mxl0 with the active mixing-length floor whenever
+        # ln_mxl0 is true -- 1.0e-3 m on this ORCA1 arm, because ln_zdfiwm
+        # forces rmxl_min = 1.0e-3 (shipped zdftke.F90:859-862 and :841-843;
+        # GYRE ppsrc:828-831 and :810-812) -- and that transcription stays
+        # available, but only to the NEMO-literal cards, which select it with
+        # nemo_mxl0_rmxl_min_overwrite=True.  The two arms differ ONLY where
+        # the wind anchor does not already exceed the floor, i.e. on calm and
+        # land columns; every windy column is identical.  Same principle as
+        # decisions 66 and 68: this card is not ours to switch, and the PR body
+        # states NEMO's own value so Pierre can decide.  False is also the
+        # library default, so both lines are a record of the choice, not a
+        # behaviour change.  Pinned by tests/ocean/unit/
+        # test_nemo_card_opt_in_defaults.py::
+        # test_orca1_card_keeps_mains_rn_mxl0_surface_floor.
+        mxl0_min_m=0.04,
+        nemo_mxl0_rmxl_min_overwrite=False,
+        # DECISION 66 (user, 2026-09-28): this ORCA1 card keeps its PREVIOUS,
+        # UNMASKED ln_mxl0 surface anchor.  NEMO's compiled statement does
+        # multiply the stress by tmask(:,:,1) (zdftke.F90:602), and that
+        # transcription stays available -- but only to the NEMO-literal cards,
+        # which select it with nemo_mxl0_surface_tmask=True.  tmask(:,:,1) is 1
+        # on every WET column, so the two arms differ on LAND columns only, and
+        # the user's instruction is to leave this card alone: "only switch it in
+        # the stuff that impacts our work, no need to touch his."  False is also
+        # the library default, so this line is a record of the choice, not a
+        # behaviour change.  Pinned by
+        # tests/ocean/unit/test_nemo_card_opt_in_defaults.py::
+        # test_orca1_card_keeps_the_unmasked_ln_mxl0_anchor.
+        nemo_mxl0_surface_tmask=False,
         tke_surface_min=1.0e-4,         # rn_emin0
         # nn_mxl: choice=3 IS the NEMO nn_mxl construction (lup/ldown |dl/dz|<=e3t
         # sweeps) WITH the ln_mxl0 wind-stress surface anchor that NEMO ORCA1 runs
@@ -1101,13 +1139,15 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
     # tripole under --partial-cell.
     if shear_production is not None:
         if shear_production not in ("squared_centered", "nemo_face_native",
-                                    "nemo_face_native_now2", "nemo_burchard"):
+                                    "nemo_face_native_now2",
+                                    "nemo_face_native_nbb2", "nemo_burchard"):
             raise ValueError(
                 f"orca1_zdftke_config shear_production {shear_production!r} "
                 "invalid; expected 'squared_centered', 'nemo_face_native' "
-                "(NEMO zdf_sh2, leap-frog family), 'nemo_face_native_now2' "
-                "(same face geometry at NOW^2 -- the key_RK3 oracle variant) "
-                "or 'nemo_burchard'.")
+                "(NEMO zdf_sh2, leap-frog family), 'nemo_face_native_nbb2' "
+                "(same face geometry at Nbb^2 -- the key_RK3 step-entry arm) "
+                "or its legacy alias 'nemo_face_native_now2', or "
+                "'nemo_burchard'.")
         _cfg = _cfg._replace(tke_shear_production=shear_production)
     # Coefficient lifetime (``--tke-preclosure-coeff-source``).  DEFAULT keeps
     # the card value ("current_subiteration").  NEMO's zdf_tke consumes the
@@ -1273,7 +1313,7 @@ def ah_profile_from_file(grid, path, A_h_base: float):
 
 _EVD_TRIGGER_DESTS = ("convection_n2_mode", "convection_n2_eos",
                       "convection_trigger", "convection_n2_threshold",
-                      "convection_two_level")
+                      "convection_two_level", "convection_evd_composition")
 # NEMO rn_evd / 2: the occupancy threshold when no convection scheme runs
 # (the control measurement "can the closure alone reach the EVD range?").
 _EVD_OCC_K_THRESHOLD_CONTROL = 50.0
@@ -1322,6 +1362,8 @@ def build_enhanced_diffusion_config(args):
         fields["smooth_transition"] = args.convection_trigger == "smooth"
     if args.convection_n2_threshold is not None:
         fields["n2_threshold"] = args.convection_n2_threshold
+    if args.convection_evd_composition is not None:
+        fields["evd_composition"] = args.convection_evd_composition
     if args.convection_two_level:
         # NEMO's MIN(rn2, rn2b) needs the BEFORE tracers, which only the
         # leap-frog-family outer integrators carry; this driver builds the
@@ -1453,7 +1495,7 @@ def build_tripole_vmix_config(tripole_vmix: str, iwm=None, tke_eice=None,
     composes; it is NOT an error.
 
     ``tke_eice`` (``--tke-eice``): None keeps the ORCA1 card default
-    (nn_eice=3); 0/1/3 override the under-ice lc/etau attenuation mode for
+    (nn_eice=3); 0/1/2/3 override the under-ice lc/etau attenuation mode for
     A/B runs (0 reproduces the pre-2026-07-18 no-attenuation behaviour).
 
     ``tke_surface_bc`` (``--tke-surface-bc``): None keeps the TKEConfig default
@@ -1498,9 +1540,9 @@ def build_tripole_vmix_config(tripole_vmix: str, iwm=None, tke_eice=None,
                                    preclosure_coeff_source=(
                                        tke_preclosure_coeff_source))
         if tke_eice is not None:
-            if int(tke_eice) not in (0, 1, 3):
+            if int(tke_eice) not in (0, 1, 2, 3):
                 raise ValueError(
-                    f"--tke-eice {tke_eice!r} invalid; expected 0, 1 or 3 "
+                    f"--tke-eice {tke_eice!r} invalid; expected 0, 1, 2 or 3 "
                     "(NEMO nn_eice modes).")
             _tke = _tke._replace(eice=int(tke_eice))
         if tke_kappah_min is not None:
@@ -3715,10 +3757,10 @@ def _kpp_vmix_override(kpp_ri_crit=None, kpp_cv=None, kpp_eice=None):
         _check("kpp-cv", kpp_cv, _KPP_CV_RANGE)
         kpp = kpp._replace(Cv=float(kpp_cv))
     if kpp_eice is not None:
-        if int(kpp_eice) not in (0, 1, 3):
+        if int(kpp_eice) not in (0, 1, 2, 3):
             raise ValueError(
-                f"--kpp-eice must be 0 (off), 1 (legoESM linear 1-fi) or 3 "
-                f"(max(0,1-4*fi), matches NEMO nn_eice=3); got {kpp_eice!r}.")
+                f"--kpp-eice must use NEMO nn_eice numbering 0, 1, 2 or 3; "
+                f"got {kpp_eice!r}.")
         kpp = kpp._replace(eice=int(kpp_eice))
     return VerticalMixingConfig(scheme="kpp", kpp=kpp)
 
@@ -4454,6 +4496,14 @@ def _restart_env_items(environ=None) -> list[tuple[str, str]]:
         and k not in _RESTART_ENV_EXCLUDE_EXACT
         and not k.endswith(_RESTART_ENV_EXCLUDE_SUFFIX)
     )
+
+
+def _restart_reads_rk3_after_ssh(model_config) -> bool:
+    """Use the model's own predicate for the restart slot requirement."""
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+        nemo_rk3_after_ssh_is_carried,
+    )
+    return nemo_rk3_after_ssh_is_carried(model_config)
 
 
 def _source_revision(start_dir=None) -> str:
@@ -7120,6 +7170,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--convection-n2-threshold", type=float, default=None,
                    help="N^2 threshold [1/s^2] for the hard trigger "
                         "(NEMO zdfevd: -1e-12).")
+    p.add_argument("--convection-evd-composition", type=str, default=None,
+                   choices=["additive", "nemo_replace"],
+                   help="How the convective coefficient composes with the "
+                        "background and the closure. 'nemo_replace' is "
+                        "NEMO's zdfevd (it OVERWRITES avt with rn_evd where "
+                        "the trigger fires); 'additive' sums them. Selecting "
+                        "--convection-n2-mode nemo_bn2 REQUIRES one of the "
+                        "two: there is no default (decision 94).")
     p.add_argument("--convection-two-level", action="store_true",
                    help="NEMO MIN(rn2, rn2b): also fire on the BEFORE "
                         "tracers. Refused here: this driver has no "
@@ -7153,14 +7211,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "(default 1.6). RAISING it increases V_t^2 -> deeper "
                         "boundary layer, LOWERING it shoals it (same MLD lever "
                         "as --kpp-ri-crit). --grid mpas/latlon_bathy only.")
-    p.add_argument("--kpp-eice", type=int, default=None, choices=[0, 1, 3],
+    p.add_argument("--kpp-eice", type=int, default=None, choices=[0, 1, 2, 3],
                    help="Under-ice attenuation of the KPP turbulent velocity "
                         "scales (KPP w-scale analogue of ice suppression; "
                         "mirror of --tke-eice). Compact ice scales w_m/w_s by "
                         "(1-eff) so BOTH the boundary-layer depth and mixing "
-                        "shrink under ice. None/0 (default) = off; 1 = legoESM "
-                        "linear (1-fi) [NOT NEMO nn_eice=1]; 3 = max(0,1-4*fi) "
-                        "(matches NEMO nn_eice=3, killed at fi>=0.25). The KPP grids' "
+                        "shrink under ice. None/0 (default) = off; 1 = "
+                        "1-tanh(10*fi); 2 = 1-fi; 3 = max(0,1-4*fi) "
+                        "(matches NEMO nn_eice=3, killed at fi>=0.25). The "
+                        "KPP grids' "
                         "Arctic halocline-erosion lever (over-deep MLD + "
                         "Siberian salty) that --tke-eice fixed only on the TKE "
                         "grid. Needs --prognostic-sea-ice or a prescribed SIC. "
@@ -7191,12 +7250,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "top). Default 'none' is byte-identical. "
                         "STABILITY: TKE x superbee tracer advection blew up "
                         "on DINO in ~15 days — smoke-gate before long runs.")
-    p.add_argument("--tke-eice", type=int, default=None, choices=[0, 1, 3],
+    p.add_argument("--tke-eice", type=int, default=None, choices=[0, 1, 2, 3],
                    help="Under-ice attenuation of the TKE lc/etau wave "
                         "sources (NEMO nn_eice) for --tripole-vmix tke. "
                         "None (default) keeps the ORCA1 card value (3 = "
                         "max(0,1-4*fi), wave TKE killed at fi>=0.25); 1 = "
-                        "(1-fi); 0 = no attenuation (reproduces the "
+                        "1-tanh(10*fi); 2 = 1-fi; 0 = no attenuation (the "
                         "pre-2026-07-18 behaviour for A/B). The ice "
                         "concentration reaches the closure via "
                         "surface_forcing.ice_concentration under "
@@ -7234,6 +7293,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--tke-shear-production", type=str, default=None,
                    choices=["squared_centered", "nemo_face_native",
                             "nemo_face_native_now2",
+                            "nemo_face_native_nbb2",
                             "nemo_burchard"],
                    help="TKE shear-production discretisation for "
                         "--tripole-vmix tke. None (default) keeps the card "
@@ -9285,6 +9345,7 @@ def main() -> int:
             _rs_path, state, ice_template=ice_state,
             grid_type=app_grid_type, dt_seconds=dt,
             n_forcing_records=n_rec,
+            carries_rk3_after_ssh=_restart_reads_rk3_after_ssh(model.config),
             config_fingerprint=(None if args.restart_branch_from_different_config
                                 else _restart_cfg_fp))
         if args.restart_branch_from_different_config:

@@ -161,6 +161,27 @@ class EnhancedDiffusionConfig(NamedTuple):
     #   k_profiles.compute_vertical_K_profiles raises if any is missing rather
     #   than silently falling back to the solver state.
     evd_n2_time_level: str = "solver_state"
+    # ----- How the EVD coefficient COMPOSES with everything else -----
+    # NEMO's zdf_evd REPLACES the already-assembled coefficient where the
+    # trigger fires -- ``p_avt(ji,jj,jk) = rn_evd * wmask(ji,jj,jk)`` inside
+    # the IF, zdfevd.f90:107-110 of the SMT-1 build's ppsrc -- and it runs
+    # AFTER the background/closure assembly (zdfphy.f90:348-351 copies
+    # avt_k into avt, :359 then calls zdf_evd).  The momentum arm is guarded
+    # by ``IF( nn_evdm == 1 )`` (:121) and likewise REPLACES avm (:133-135).
+    # legoESM's own (Oceananigans) composition ADDS the scheme's K on top of
+    # every other contribution, which on a NEMO card leaves the background
+    # and the closure riding on top of rn_evd.
+    #   ""              unset.  A card whose trigger is NEMO's (n2_mode=
+    #                   "nemo_bn2") must STATE this -- unset raises; every
+    #                   other card keeps the additive composition.
+    #   "additive"      legoESM/Oceananigans: K_total = K_other + K_evd.
+    #   "nemo_replace"  NEMO zdfevd: K_total = rn_evd where the trigger
+    #                   fires, K_other elsewhere.  Requires the hard
+    #                   threshold (smooth_transition=False), K_bg < K_conv,
+    #                   and -- the nn_evdm statement -- nu_conv either 0.0
+    #                   (nn_evdm=0, avm untouched) or exactly K_conv
+    #                   (nn_evdm=1, avm replaced by rn_evd too).
+    evd_composition: str = ""
 
 
 class PlumeConfig(NamedTuple):

@@ -528,8 +528,20 @@ def train_variant(variant, model, grid, sigma, physics_pipeline, config,
 
     t0 = time.time()
     if variant == "classical":
+        from legoesm.training.trainable_params import (
+            trainable_constraints_for_scheme,
+        )
+        # Freeze OUT the parameters the configured schemes never read (no
+        # inert parameters): e.g. bulk C_H/C_E when a turbulence scheme owns
+        # the surface fluxes.  Radiation-as-forcing stops the gradient through
+        # radiation, so the albedos are unreachable exactly as under "none".
+        constraints = trainable_constraints_for_scheme(
+            config.convection,
+            "none" if args.radiation_as_forcing else config.radiation,
+            config.turbulence)
         trained, hist = train_physics_params(
             model, grid, sigma, physics_pipeline, ics, targets, forcings,
+            constraints=constraints,
             n_epochs=args.epochs, lr=args.lr, dt=args.dt,
             rollout_hours=_ROLLOUT_HOURS, microphysics=args.microphysics,
             rad_update_steps=args.rad_update_steps,

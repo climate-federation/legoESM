@@ -46,10 +46,10 @@ def test_passthrough_flags_survive():
 
 
 def test_closure_gets_the_host_liquid_only_when_the_partition_is_on():
-    from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig
+    from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
     f = _load().closure_liquid
     q_c = object()
-    assert f(CLUBBConfig(liquid_partition=True), q_c) is q_c
-    assert f(CLUBBConfig(), q_c) is None
+    assert f(TurbulenceConfig(liquid_partition=True), q_c) is q_c
+    assert f(TurbulenceConfig(), q_c) is None
     with pytest.raises(SystemExit, match="q_c"):
-        f(CLUBBConfig(liquid_partition=True), None)
+        f(TurbulenceConfig(liquid_partition=True), None)

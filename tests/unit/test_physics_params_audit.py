@@ -171,7 +171,7 @@ class TestConvectionAudit:
         A = _aux()
 
         def loss(x):
-            cfg = ZhangMcFarlaneConfig()._replace(tau=x)
+            cfg = ZhangMcFarlaneConfig(land_fraction="none")._replace(tau=x)
             out = zhang_mcfarlane_convection(T, q_v, p_full, p_half, A["u"],
                 A["v"], A["prog"], 600.0, config=cfg)[0]
             return jnp.sum(out.dT_dt ** 2)

@@ -4,7 +4,7 @@ Scope: top-level ML modules: `learned_column.py`, `ml_parameterization.py`, `neu
 
 ## Files
 
-* `neural_physics.py` (457 LOC): `NeuralPhysics` Equinox module — column MLP. `make_neural_step_unified`, `make_hybrid_step_unified` (blends learned with deterministic).
+* `neural_physics.py` (457 LOC): `NeuralPhysics` Equinox module — column MLP. `make_neural_step_unified` (`make_hybrid_step_unified` removed 2026-10-02, unused).
 * `learned_column.py` (~180 LOC): `build_column_physics`, `make_column_physics_fn` for spectral PE.
 * `ml_parameterization.py` (435 LOC): joint training of physics + dycore.
 

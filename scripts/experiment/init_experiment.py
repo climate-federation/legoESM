@@ -75,6 +75,10 @@ def _template_path(template: str) -> Path:
     rel = template[:-5] if template.endswith(".yaml") else template
     path = _TEMPLATES_DIR / f"{rel}.yaml"
     if not path.is_file():
+        from legoesm.experiment_registry import retired_template_message
+        retired = retired_template_message(template)
+        if retired is not None:
+            raise SystemExit(f"ERROR: {retired}")
         avail = sorted(
             str(p.relative_to(_TEMPLATES_DIR))[:-5]
             for p in _TEMPLATES_DIR.rglob("*.yaml") if not p.name.startswith("_")

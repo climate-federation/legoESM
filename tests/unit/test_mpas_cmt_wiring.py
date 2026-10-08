@@ -22,7 +22,11 @@ jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 
-from legoesm.atmosphere.physics.convection.config import BechtoldConfig, ConvectionConfig  # noqa: E402
+from legoesm.atmosphere.physics.convection.config import (  # noqa: E402
+    BechtoldConfig, ConvectionConfig, ZhangMcFarlaneConfig)
+
+# The Voronoi test mesh carries no land fraction: an aquaplanet, chosen explicitly.
+_ZM_AQUA = ZhangMcFarlaneConfig(land_fraction="none")
 from legoesm.atmosphere.physics.convection.integration import make_convection_physics  # noqa: E402
 from legoesm.core.field import Field  # noqa: E402
 from legoesm.core.state import MPASHydrostaticState  # noqa: E402
@@ -206,7 +210,7 @@ def test_other_cmt_schemes_keep_zero_edge_winds_on_mpas_with_switches_off():
     mesh = create_voronoi_mesh(3, lloyd_iterations=3)
     state, sigma = _state(mesh)
     for scheme in ("tiedtke", "zhang_mcfarlane"):
-        fn = make_convection_physics(ConvectionConfig(scheme=scheme), model_type="mpas", dt=600.0)
+        fn = make_convection_physics(ConvectionConfig(scheme=scheme, zhang_mcfarlane=_ZM_AQUA), model_type="mpas", dt=600.0)
         tend, _ = fn(state, mesh, sigma)
         du = np.asarray(tend.du_dt.data)
         assert du.shape == (mesh.nEdges, NLEV)
@@ -219,7 +223,8 @@ def test_zm_cmt_reaches_mpas_edge_winds():
     mesh = create_voronoi_mesh(3, lloyd_iterations=3)
     state, sigma = _state(mesh)
     fn = make_convection_physics(
-        ConvectionConfig(scheme="zhang_mcfarlane", mpas_cmt=True), model_type="mpas", dt=600.0)
+        ConvectionConfig(scheme="zhang_mcfarlane", mpas_cmt=True, zhang_mcfarlane=_ZM_AQUA),
+        model_type="mpas", dt=600.0)
     tend, out = fn(state, mesh, sigma)
     du = np.asarray(tend.du_dt.data)
     assert du.shape == (mesh.nEdges, NLEV) and np.all(np.isfinite(du))

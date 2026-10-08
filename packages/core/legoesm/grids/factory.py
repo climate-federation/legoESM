@@ -172,7 +172,8 @@ class FV3DuoGridBundle(NamedTuple):
     ng: int
 
 
-def create_fv3_duo_grid(resolution: int, ng: int = 3) -> FV3DuoGridBundle:
+def create_fv3_duo_grid(resolution: int, ng: int = 3, *, phis_fn=None,
+                        phis_filter_iter: int = 0) -> FV3DuoGridBundle:
     """Build the certified six-face duo-cube context pair for C``resolution``.
 
     Wraps ``build_six_face_duo_context`` (ext-bundle + oracle
@@ -196,8 +197,21 @@ def create_fv3_duo_grid(resolution: int, ng: int = 3) -> FV3DuoGridBundle:
 
     ctx_np = build_six_face_duo_context(resolution, ng,
                                         use_ext_bundle=True,
-                                        oracle_conventions=True)
+                                        oracle_conventions=True,
+                                        topo_fn=phis_fn)
     ctx_jax = build_jax_duo_stepper_context(ctx_np)
+    if phis_fn is not None and phis_filter_iter > 0:
+        # orography (route A, M4): phis_fn(lon, lat) evaluated on the
+        # padded A-grid by the builder (halos by its ext exchange), then
+        # FV3's del-2 terrain filter ON THIS grid, then the jax context
+        # rebuilt so its hs6 is the smoothed field the step consumes
+        import numpy as np
+        from legoesm.grids.terrain_filter import terrain_filter_duo
+        hs6 = terrain_filter_duo(np.stack([np.asarray(h) for h in ctx_np["hs6"]]),
+                                 ctx_np["gs6"], ctx_np["ectx"],
+                                 n_iter=phis_filter_iter)
+        ctx_np = {**ctx_np, "hs6": [np.asarray(hs6[t]) for t in range(6)]}
+        ctx_jax = build_jax_duo_stepper_context(ctx_np)
     return FV3DuoGridBundle(ctx_np=ctx_np, ctx_jax=ctx_jax,
                             n=int(ctx_np["n"]), ng=int(ctx_np["ng"]))
 

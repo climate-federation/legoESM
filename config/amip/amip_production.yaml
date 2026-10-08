@@ -57,6 +57,8 @@ vertical_coord: cam_l32     # CAM6: hyai/hybi verbatim, p_top 2.255 hPa
 discretization: mpas
 dt: 112.5
 precision: fp64
+corner_fill: avg                     # cube-vertex halo fill; inert on MPAS,
+                                     # pinned so the run records it
 a_h_scale: 0.375
 mpas_sponge_del2_top_layers: 2       # index-based sponge: 2 layers on L32 span
                                      # 2.3-10.2 hPa (the Sundqvist/L36 deck: 3 layers on
@@ -119,6 +121,10 @@ clouds: cam6_clubb          # CAM6: liquid = CLUBB PDF fraction, ice = CAM aist,
                             # scheme's updraft mass flux + in-cloud condensate
 use_clubb_cloud_fraction: true   # routes the CLUBB cloud-fraction carry to
                                  # radiation (required by cam6_clubb)
+cloud_cam6_rhmini: 0.80     # CAM6 aist ramp (cldfrc2m.F90:846-856), namelist
+cloud_cam6_rhmaxi: 1.0      # cldfrc2m_rhmini/rhmaxi/rhminis/rhmaxis under
+cloud_cam6_rhminis: 1.0     # clubb_sgs (namelist_defaults_cam.xml:1521-1533);
+cloud_cam6_rhmaxis: 1.0     # = the code defaults, now recorded (user 2026-09-30)
 microphysics: morrison      # mg flavour (MG2 port = run 2)
 morrison_do_graupel: true   # NAMED, equals the code default: this deck's
                             # measured behaviour.  CAM6's MG2 has NO graupel
@@ -128,6 +134,21 @@ morrison_do_graupel: true   # NAMED, equals the code default: this deck's
                             # The graupel-off arm is this deck plus
                             # --no-morrison-do-graupel; this value stays
                             # until the user decides (2026-09-24).
+morrison_warm_rain_scheme: kk2000  # NAMED, equals the code default (was an
+                                   # unrecorded default).  NOTE: CAM6 MG2's
+                                   # kk2000 is 0.01*1350*qc^2.47*Nc^-1.1
+                                   # (micro_mg_utils.F90); this port is
+                                   # 1350*qc^2.47*Nc^-1.79 (SAM/E3SM form).
+morrison_autocon_fact: 1.0         # kk2000 autoconversion multiplier (1 = unscaled)
+morrison_accre_enhan_fact: 1.0     # kk2000 accretion multiplier (MG2 accre_enhan)
+morrison_warm_rain_incloud: true   # CAM6 MG2 in-cloud warm rain (user decision
+                                   # 2026-09-30): rates on qc/lcldm, qr/lcldm,
+                                   # lcldm = max(ast, 1e-4), ast = max(CLUBB
+                                   # liquid, aist ice-stratus) as CAM6
+                                   # (clubb_intr.F90:2575, micro_mg_cam.F90:
+                                   # 1810), times lcldm (micro_mg2_0.F90:878,
+                                   # :1224-1322).  Grid-mean arm:
+                                   # --no-morrison-warm-rain-incloud.
 morrison_sed_cfl_substeps: true  # MG2 micro_mg2_0.F90 sedimentation loop:
                                  # nstep = 1 + int(max V dt/dz) per column,
                                  # so precipitation crosses >1 layer per 600 s.
@@ -192,6 +213,7 @@ aerosol_ccn: true
 energy_consistent_moisture_clip: true
 
 # ---- convection ---------------------------------------------------------------
+zm_land_fraction: required  # ZM reads the land mask (c0_lnd vs c0_ocn); "none" = aquaplanet only
 convection: zhang_mcfarlane # CAM6: faithful zm_conv port (f09 mg2+clubb namelist:
                             # c0_lnd 0.0075, c0_ocn 0.03, ke 5e-6 (dyn=fv),
                             # tau 3600,
@@ -204,6 +226,14 @@ convection: zhang_mcfarlane # CAM6: faithful zm_conv port (f09 mg2+clubb namelis
 convective_precip_efficiency: 0.8
 convective_rain_to_surface: true
 convective_cloud: false     # refused by cam6_clubb (deepcu is CAM6's version)
+# ZM tunables written explicitly (values = the scheme defaults = the CAM6 f09
+# namelist above), so a campaign arm's change is one visible row.
+zm_c0_lnd: 0.0075           # rain conversion over land [1/m]
+zm_c0_ocn: 0.03             # rain conversion over ocean [1/m]
+zm_ke: 5.0e-6               # rain evaporation efficiency
+zm_dmpdz: -1.0e-3           # dilute-plume entrainment [1/m]
+zm_tau: 3600.0              # CAPE consumption timescale [s]
+zm_capelmt: 70.0            # deep-convection CAPE threshold [J/kg]
 
 # ---- turbulence ---------------------------------------------------------------
 turbulence: clubb
@@ -222,6 +252,16 @@ clubb_liquid_partition: true       # CAM6 clubb_intr: the closure's diagnosed
 cloud_q_c_diagnostic: 0.0
 conv_cloud_condensate: 0.0
 clubb_trop_cloud_top_press: 15000.0
+# CLUBB tunables written explicitly (values = the port's CLUBBParams defaults,
+# the CAM6 clubb namelist).  clubb_c_K10h has no consumer in this port.
+clubb_c14: 2.2
+clubb_c8: 4.2
+clubb_c11: 0.7
+clubb_c11b: 0.35
+clubb_gamma_coef: 0.308
+clubb_gamma_coefb: 0.32
+clubb_beta: 2.4
+clubb_c_k10: 0.5
 
 # ---- gravity-wave drag ---------------------------------------------------------
 # CAM6 f09 L32 (non-WACCM, nlev < 60) runs OROGRAPHIC drag ONLY: build-namelist
@@ -268,10 +308,20 @@ multilayer_soil_depth: 3.0
 # Soil freeze/thaw ON (user 2026-09-26), as in CLM5 and as the land IC spin-up
 # ran; the land calibration's tables were fitted with it off.
 land_soil_freeze_thaw: true
+# Snowpack: explicit bulk (one SWE reservoir), as every prior production run.
+# Moving production to the layered pack (bulk -> layered) is an OPEN user decision.
+land_snow_scheme: bulk
+# Frozen soil impedes water flow, CLM5 form 10**(-e * ice fraction), e = 6
+# (user 2026-09-28).  Active because freeze/thaw is on.
+land_soil_ice_impedance_exponent: 6.0
 land_soil_moisture_init_frac: 0.25
 land_stomatal_beta: false
 land_calibrated_physics: true
 land_surface_scheme: two_leaf
+# Pinned at the current values (b0 stressed, no interception) so the deck
+# records them; changing either is a labelled land baseline, not a default flip.
+land_canopy_stress_b0: true
+land_canopy_interception: false
 # Two-leaf canopy solver smoothing widths, named so every run records them
 # (user 2026-09-30): canopy-air RH <= 1 cap and stable zeta <= 0.5 cap.
 land_canopy_rh_cap_smoothing_width: 0.01
@@ -280,7 +330,21 @@ land_canopy_zeta_cap_smoothing_width: 0.05
 # 5 left unstable columns up to 11% off in aerodynamic resistance).
 land_canopy_most_n_iters: 10
 mpas_land_beta_soil: true
+# Surface drag over land from the land model's own roughness / canopy drag, not
+# the ocean bulk law (user 2026-10-03: "a major default"; Dec 2001 45-70N land:
+# the boundary layer received 0.04 Pa vs land model 0.23 vs ERA5 0.26).
+mpas_land_stress_from_land: true
+mpas_land_params_refresh: true  # seasonal LAI / canopy height / wet-soil
+                                # albedo rebuilt every land step, as the
+                                # offline calibration runs the tables (user
+                                # 2026-09-29; before, January LAI all year)
 land_soil_init: aridity
+# Land starting state: the res-6 spun-up soil water/snow (soil_ic_mpas6.npz) with
+# soil TEMPERATURE replaced by ERA5 1979-01-01 00 UTC stl1-4 on non-glacier land
+# (glaciers keep the spin-up). Built by scripts/data/regrid_land_ic.py
+# --era5-soil-t; provenance is in the file's metadata. data/ is gitignored:
+# stage the file in the launch directory.
+land_ic: data/lmip_soil_ic/soil_ic_mpas6_era5T_19790101.npz
 
 # ---- moisture smoothing / clamps (unchanged) -----------------------------------
 mpas_qv_smooth_del2_m2s: 0.0

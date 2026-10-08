@@ -108,6 +108,7 @@ from legoesm.atmosphere.physics._shared import (
     broadcast_column_param,
     buoyancy_coefficient,
     exner_function,
+    half_to_full,
     mixing_length,
     virtual_temperature,
 )
@@ -115,6 +116,8 @@ from legoesm.atmosphere.physics.turbulence.config import CLUBBLiteConfig
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
 from legoesm.atmosphere.physics.turbulence.pbl_height import diagnose_pbl_height
 from legoesm.atmosphere.physics.turbulence.surface_layer import (
+    latent_enthalpy_correction,
+    surface_moisture_flux,
     compute_surface_fluxes,
     surface_fluxes_at_lowest_level,
 )
@@ -362,15 +365,8 @@ def clubb_lite_turbulence(
     # the eddy-diffusivity section).
 
     # Interpolate to full levels
-    def _half_to_full(field_half):
-        """Interpolate (ncol, nlev-1) half-level field to (ncol, nlev)."""
-        mid = 0.5 * (field_half[:, :-1] + field_half[:, 1:])
-        return jnp.concatenate([
-            field_half[:, :1], mid, field_half[:, -1:]
-        ], axis=1)
-
-    S2 = _half_to_full(S2_half)
-    N2 = _half_to_full(N2_half)
+    S2 = half_to_full(S2_half)
+    N2 = half_to_full(N2_half)
     # iter-172 F841: removed unused ``dtheta_dz_full`` /
     # ``drt_dz_full`` (consumed only by the removed dead
     # higher-moment + cloud-fraction block).
@@ -447,8 +443,9 @@ def clubb_lite_turbulence(
 
     sflx_u = tau_x
     sflx_v = tau_y
-    sflx_T = shflx / constants.c_pd
-    sflx_q = lhflx / constants.L_v
+    sflx_q = surface_moisture_flux(config.surface, lhflx, T_sfc)
+    # Heat BC carries the latent enthalpy correction (water at L(T) vs L_v).
+    sflx_T = (shflx + latent_enthalpy_correction(lhflx, sflx_q)) / constants.c_pd
 
     # ===== Apply implicit vertical diffusion =====
     # Heat in θ-space (dry-adiabat neutral); momentum and moisture raw.
@@ -470,7 +467,7 @@ def clubb_lite_turbulence(
         Km=Km_full,
         Kh=Kh_full,
         shflx=shflx,
-        lhflx=lhflx,
+        lhflx=lhflx, evap_sfc=sflx_q,
         ustar=ustar,
         h_pbl=h_pbl,
     )

@@ -149,7 +149,7 @@ class TestBandStep(unittest.TestCase):
         )
         out = step_snow_bands(
             swe0, age0, ice0, T_sfc, snowfall, dt,
-            Q_net=jnp.full(ncol, 50.0), cfg=cfg,
+            Q_net=jnp.full(ncol, 50.0), cfg=cfg, snow_age_activation_K=0.0
         )
         d_store = (out.swe_total + out.ice_total) - (swe0.mean(-1) + ice0.mean(-1))
         source = (snowfall.mean(-1) * dt - out.snow_melt - out.ice_melt
@@ -170,7 +170,7 @@ class TestBandStep(unittest.TestCase):
         dt = 3600.0
         out = step_snow_bands(
             swe0, jnp.zeros((1, 5)), ice0, jnp.array([constants.T_freeze - 20.0]),
-            snowfall, dt, Q_net=jnp.zeros(1), cfg=cfg,
+            snowfall, dt, Q_net=jnp.zeros(1), cfg=cfg, snow_age_activation_K=0.0
         )
         # Seasonal snow stays capped; the excess went to ICE, not runoff (a decadal
         # ice/tau fraction ~3.6e-6 discharges this step, hence the loose rtol).
@@ -189,7 +189,7 @@ class TestBandStep(unittest.TestCase):
         dt = 3600.0
         out = step_snow_bands(
             swe0, jnp.zeros((1, 5)), ice0, jnp.array([constants.T_freeze - 20.0]),
-            jnp.zeros((1, 5)), dt, Q_net=jnp.zeros(1), cfg=cfg,
+            jnp.zeros((1, 5)), dt, Q_net=jnp.zeros(1), cfg=cfg, snow_age_activation_K=0.0
         )
         # Ice pinned at (just below) the ceiling; the firnified snow + discharge leaves
         self.assertLessEqual(float(out.ice_bands.max()), cfg.swe_cap + 1e-6)
@@ -204,7 +204,7 @@ class TestBandStep(unittest.TestCase):
         dt = 3600.0
         out = step_snow_bands(
             swe0, jnp.zeros((1, 5)), ice0, jnp.array([constants.T_freeze + 5.0]),
-            jnp.zeros((1, 5)), dt, Q_net=jnp.full(1, 150.0), cfg=cfg,
+            jnp.zeros((1, 5)), dt, Q_net=jnp.full(1, 150.0), cfg=cfg, snow_age_activation_K=0.0
         )
         self.assertEqual(float(out.snow_melt[0]), 0.0)          # no snow to melt
         self.assertGreater(float(out.ice_melt[0]), 0.0)         # ice ablates
@@ -227,7 +227,7 @@ class TestBandStep(unittest.TestCase):
         snowfall = jnp.full((1, 5), 5e-3)                      # 18 kg/m2 fresh over the step
         out = step_snow_bands(
             swe0, age0, ice0, jnp.array([constants.T_freeze - 20.0]), snowfall, 3600.0,
-            Q_net=jnp.zeros(1), cfg=cfg,
+            Q_net=jnp.zeros(1), cfg=cfg, snow_age_activation_K=0.0
         )
         # Heavy fresh (18 kg/m2) >> old (2 kg/m2) -> age drops to ~0.1*(age+dt).
         self.assertLess(float(out.snow_age_bands.max()), 0.2 * age0_val)  # snowed -> bright
@@ -242,7 +242,7 @@ class TestBandStep(unittest.TestCase):
         # sigma) sit 3.8/10 K colder -> below freezing -> no melt there.
         out = step_snow_bands(
             swe0, jnp.zeros((1, 5)), jnp.zeros((1, 5)), jnp.array([constants.T_freeze + 3.0]),
-            jnp.zeros((1, 5)), 1800.0, Q_net=jnp.full(1, 200.0), cfg=cfg,
+            jnp.zeros((1, 5)), 1800.0, Q_net=jnp.full(1, 200.0), cfg=cfg, snow_age_activation_K=0.0
         )
         self.assertLess(float(out.swe_bands[0, 0]), 20.0)      # lowest band melted
         npt.assert_allclose(out.swe_bands[0, 3:], 20.0)        # cold bands intact
@@ -261,10 +261,10 @@ class TestBandStep(unittest.TestCase):
         out = step_snow_bands(
             swe0, jnp.broadcast_to(age0[:, None], (ncol, 5)), jnp.zeros((ncol, 5)),
             T_sfc, jnp.broadcast_to(precip_snow[:, None], (ncol, 5)),
-            dt, Q_net=Q_net, cfg=cfg,
+            dt, Q_net=Q_net, cfg=cfg, snow_age_activation_K=0.0
         )
         ref_snow, ref_age, ref_melt = update_snow(
-            swe0_cell, age0, T_sfc, precip_snow, dt, Q_net=Q_net,
+            swe0_cell, age0, T_sfc, precip_snow, dt, Q_net=Q_net, snow_age_activation_K=0.0
         )
         npt.assert_allclose(out.swe_total, ref_snow, rtol=1e-12)
         npt.assert_allclose(out.ice_total, 0.0, atol=1e-12)    # no firnification
@@ -284,7 +284,7 @@ class TestBandStep(unittest.TestCase):
         out = step_snow_bands(
             jnp.zeros((1, 5), f32), jnp.zeros((1, 5), f32), jnp.zeros((1, 5), f32),
             jnp.array([270.0], f32), jnp.full((1, 5), 1e-4, f32), f32(600.0),
-            Q_net=jnp.full((1, 5), 20.0, f32), cfg=cfg,
+            Q_net=jnp.full((1, 5), 20.0, f32), cfg=cfg, snow_age_activation_K=0.0
         )
         self.assertEqual(out.swe_bands.dtype, f32)
         self.assertEqual(out.ice_bands.dtype, f32)
@@ -299,13 +299,13 @@ class TestBandStep(unittest.TestCase):
         out = step_snow_bands(
             swe0, jnp.zeros((1, 5)), jnp.zeros((1, 5)),
             jnp.array([constants.T_freeze - 5.0]), jnp.zeros((1, 5)), 3600.0,
-            Q_net=jnp.zeros(1), cfg=cfg, precip_rain_bands=rain)
+            Q_net=jnp.zeros(1), cfg=cfg, precip_rain_bands=rain, snow_age_activation_K=0.0)
         npt.assert_allclose(out.refreeze, 1e-4 * 3600.0, rtol=1e-6)   # all rain refroze
         self.assertGreater(float(out.swe_total[0]), 20.0)            # SWE grew by the rain
         out_warm = step_snow_bands(
             jnp.zeros((1, 5)), jnp.zeros((1, 5)), jnp.zeros((1, 5)),
             jnp.array([constants.T_freeze + 5.0]), jnp.zeros((1, 5)), 3600.0,
-            Q_net=jnp.zeros(1), cfg=cfg, precip_rain_bands=rain)
+            Q_net=jnp.zeros(1), cfg=cfg, precip_rain_bands=rain, snow_age_activation_K=0.0)
         self.assertEqual(float(out_warm.refreeze[0]), 0.0)          # no snow -> no refreeze
 
     def test_refreeze_bounded_by_cold_content(self):
@@ -319,7 +319,7 @@ class TestBandStep(unittest.TestCase):
         out = step_snow_bands(
             swe0, jnp.zeros((1, 5)), jnp.zeros((1, 5)),
             jnp.array([constants.T_freeze - dT]), jnp.zeros((1, 5)), 3600.0,
-            Q_net=jnp.zeros(1), cfg=cfg, precip_rain_bands=heavy_rain)
+            Q_net=jnp.zeros(1), cfg=cfg, precip_rain_bands=heavy_rain, snow_age_activation_K=0.0)
         # Cold-content cap [kg/m2] = c_pi*swe*dT/L_f -- far below the 36 kg/m2 rain.
         cap = float(constants.c_pi * 0.5 * dT / constants.L_f)
         rain_mass = float(heavy_rain[0, 0]) * 3600.0
@@ -337,13 +337,13 @@ class TestBandStep(unittest.TestCase):
         out = step_snow_bands(
             swe0, jnp.zeros((1, 5)), jnp.zeros((1, 5)),
             jnp.array([constants.T_freeze - 10.0]), jnp.zeros((1, 5)), 3600.0,
-            Q_net=jnp.zeros(1), cfg=cfg, wind=jnp.array([15.0]))      # 10 m/s over thresh
+            Q_net=jnp.zeros(1), cfg=cfg, wind=jnp.array([15.0]), snow_age_activation_K=0.0)      # 10 m/s over thresh
         self.assertGreater(float(out.blow_subl[0]), 0.0)
         self.assertLess(float(out.swe_total[0]), 100.0)             # SWE reduced
         out_calm = step_snow_bands(
             swe0, jnp.zeros((1, 5)), jnp.zeros((1, 5)),
             jnp.array([constants.T_freeze - 10.0]), jnp.zeros((1, 5)), 3600.0,
-            Q_net=jnp.zeros(1), cfg=cfg, wind=jnp.array([3.0]))       # below threshold
+            Q_net=jnp.zeros(1), cfg=cfg, wind=jnp.array([3.0]), snow_age_activation_K=0.0)       # below threshold
         self.assertEqual(float(out_calm.blow_subl[0]), 0.0)
 
     def test_per_band_age_fresh_and_perennial_coexist(self):
@@ -364,7 +364,7 @@ class TestBandStep(unittest.TestCase):
         )
         out = step_snow_bands(
             swe0, age0, jnp.zeros((1, 5)), jnp.array([constants.T_freeze - 5.0]),
-            snowfall, 3600.0, Q_net=jnp.zeros(1), cfg=cfg,
+            snowfall, 3600.0, Q_net=jnp.zeros(1), cfg=cfg, snow_age_activation_K=0.0
         )
         got_snow = snowfall[0] > 1e-10
         self.assertTrue(bool(jnp.any(got_snow)) and bool(jnp.any(~got_snow)))

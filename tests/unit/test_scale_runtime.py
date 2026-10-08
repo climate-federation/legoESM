@@ -17,7 +17,6 @@ from legoesm.parallel.runtime import (
 )
 from legoesm.parallel.device_config import (
     detect_devices,
-    configure_jax_for_device,
     HardwareConfig,
     mixed_precision_policy,
     get_optimal_dtype,
@@ -70,19 +69,6 @@ class TestHardwareDetection:
     def test_memory_positive(self):
         config = detect_devices()
         assert config.memory_per_device_gb > 0
-
-
-# =========================================================================
-# 14e) XLA flag configuration
-# =========================================================================
-
-class TestConfigureDevice:
-    """configure_jax_for_device should not crash."""
-
-    def test_configure_does_not_crash(self):
-        config = detect_devices()
-        # Should not raise
-        configure_jax_for_device(config)
 
 
 # =========================================================================

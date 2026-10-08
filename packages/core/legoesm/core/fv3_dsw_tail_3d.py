@@ -721,45 +721,6 @@ def _dgrid_pressure_phase_3d_batched(ctx, dsw_outs, tail_outs, km, *,
         tail_outs["u"], tail_outs["v"], bview["gs"])
 
 
-def make_dgrid_pressure_phase_3d_jit(ctx, km, *, ptop, akap, cp_air,
-                                     a2b_ord=4, d_ext=0.0, remap_step=False,
-                                     remap_follows=False, batched=False):
-    """Build the jit-compiled :func:`dgrid_pressure_phase_3d`.
-
-    Every STATIC operand is baked in here, so an invalid static value
-    raises at MAKE time (rule 5), not at first trace; the entry gates
-    run again inside the trace on the same static values.  The
-    returned function takes the DYNAMIC operands only::
-
-        f(dsw_outs, tail_outs, dt) -> face-stacked dict
-
-    ``dt`` is an ARGUMENT, not a closure constant, so a new time step
-    reuses the compiled phase (C3).  No ``donate_argnums`` (rule 3).
-    """
-    fname = "dgrid_pressure_phase_3d"
-    km = require_km(fname, km)
-    require_bool(fname, "remap_step", remap_step)
-    require_bool(fname, "remap_follows", remap_follows)
-    require_bool(fname, "batched", batched)
-    a2b_ord = require_nord(fname, "a2b_ord", a2b_ord)
-    if a2b_ord not in (2, 4):
-        raise ValueError(f"{fname}: a2b_ord must be 2 or 4, got {a2b_ord!r}")
-    for _nm, _v in (("ptop", ptop), ("akap", akap),
-                    ("cp_air", cp_air), ("d_ext", d_ext)):
-        if isinstance(_v, jax.Array):
-            raise TypeError(f"{fname}: {_nm} is STATIC; got a traced array")
-    require_no_remap_needed(km, remap_follows=remap_follows)
-
-    def _phase(dsw_outs, tail_outs, dt):
-        return dgrid_pressure_phase_3d(
-            ctx, dsw_outs, tail_outs, km, dt=dt, ptop=ptop, akap=akap,
-            cp_air=cp_air, a2b_ord=a2b_ord, d_ext=d_ext,
-            remap_step=remap_step, remap_follows=remap_follows,
-            batched=batched)
-
-    return jax.jit(_phase)
-
-
 # ---------------------------------------------------------------------------
 # PART C -- the non-hydrostatic D-grid tail.  Spec:
 # fv3_native_dsw_tail_3d.dgrid_nh_pressure_phase_3d (dyn_core.F90:1403-1543):

@@ -3,7 +3,7 @@
 Defect (measured on the compiled lat-lon AMIP lane): ``_step_slab_land``
 advanced the land skin with its OWN constant-C_H/C_E no-stability bulk fluxes
 while the atmosphere debited sensible/latent through the turbulence scheme's
-surface layer (``holtslag_boville_turbulence`` -> ``compute_surface_fluxes``
+surface layer (``holtslag_boville_turbulence`` -> ``surface_fluxes_at_lowest_level``
 with ``config.surface``, coare3 + stability) — two different flux laws at one
 interface, same-state mismatch +75..+152 W/m^2 (a spurious skin heat source).
 
@@ -13,7 +13,7 @@ lane-level test below runs the RUNNING SYMBOLS of the compiled AMIP lane:
 ``compiled_segments`` executes), whose ``_rad_branch`` calls
 ``compute_radiation_core`` -> ``_step_slab_land`` (the slab-side energy
 credit) and then ``physics_step_no_rad`` -> ``holtslag_boville_turbulence``
--> ``compute_surface_fluxes`` (the atmosphere-side debit) — both evaluated at
+-> ``surface_fluxes_at_lowest_level`` (the atmosphere-side debit) — both evaluated at
 the SAME pre-step state (the slab is advanced from the old ``T_land`` and the
 atmosphere fluxes are computed with ``T_land=T_land`` old, physics_pipeline
 ``_rad_branch``).
@@ -31,8 +31,9 @@ from legoesm.driver.config import ExperimentConfig
 from legoesm.driver.physics_pipeline import build_physics_pipeline
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.thermo import saturation_specific_humidity
+from legoesm.atmosphere.physics._shared import compute_heights_from_sigma
 from legoesm.atmosphere.physics.turbulence.surface_layer import (
-    compute_surface_fluxes,
+    surface_fluxes_at_lowest_level,
 )
 
 NLEV = 6
@@ -98,7 +99,10 @@ def _law_fluxes(pipe, T, p_s, q_v, u, v, T_land, sst, sic):
     pipeline's own SurfaceLayerConfig — the reference both sides must match.
 
     Mirrors physics_step_no_rad's non-tiled HB inputs at ANY f_land: the
-    BLENDED T_sfc, q_sfc = q_sat(T_sfc), rho = p_full_low/(R_d*T_low).
+    BLENDED T_sfc, q_sfc = q_sat(T_sfc), rho = p_full_low/(R_d*T_low), and
+    the lowest-level height the pipeline hands the surface layer (dry
+    hydrostatic heights from the same T and p_half), so the reference applies
+    the same reference-height correction production does (#1783).
     """
     from legoesm.forcing.surface_utils import blend_surface_temperature
     T_air = T[..., -1]
@@ -107,11 +111,22 @@ def _law_fluxes(pipe, T, p_s, q_v, u, v, T_land, sst, sic):
     T_sfc = pipe._blend_land(
         blend_surface_temperature(sst, sic, pipe.T_ice), T_land)
     q_sfc = saturation_specific_humidity(T_sfc, p_s)
-    _, _, sh, lh, _ = compute_surface_fluxes(
+    _, _, sh, lh, _ = surface_fluxes_at_lowest_level(
         u[..., -1], v[..., -1], T_air, q_air, T_sfc, q_sfc, rho_low,
-        pipe.turbulence_config.surface,
+        pipe.turbulence_config.surface, _z_low(pipe, T, p_s),
     )
     return sh, lh
+
+
+def _z_low(pipe, T, p_s):
+    """Lowest full level's height above the surface [m], built as the
+    pipeline builds it (dry hydrostatic heights from T and p_half)."""
+    ad = pipe.adapter
+    z_full, z_half = compute_heights_from_sigma(
+        ad.flatten_3d(T), ad.flatten_3d(pipe.sigma_coord.pressure_at_half(p_s)))
+    z_low = ad.unflatten_2d(z_full[:, -1] - z_half[:, -1])
+    assert bool(jnp.all(jnp.isfinite(z_low) & (z_low > 0.0)))
+    return z_low
 
 
 # ---------------------------------------------------------------------------
@@ -332,14 +347,22 @@ class TestUnifiedLaneOneFluxLaw:
         q_air = q_v[..., -1]
         rho_low = (p_s * pipe.sigma_full[-1]) / (constants.R_d * T_air)
         f2 = ad.flatten_2d
+        z_low = _z_low(pipe, T, p_s)
         _, _, sh_tile, lh_tile, _ = pipe._tiled_surface_flux(
+            f2(u[..., -1]), f2(v[..., -1]), f2(T_air), f2(q_air), f2(rho_low),
+            sst, sic, T_land, p_s, z_low=f2(z_low),
+        )
+        sh_uni, lh_uni, _d = pipe._unified_land_fluxes(
+            T_land, T_air, q_air, u[..., -1], v[..., -1], p_s, z_low=z_low)
+        assert jnp.allclose(f2(sh_uni), sh_tile, rtol=1e-6, atol=1e-8)
+        assert jnp.allclose(f2(lh_uni), lh_tile, rtol=1e-6, atol=1e-8)
+        # Teeth: the height correction is live on this state, so a call site
+        # that dropped z_low would not match the tile law above.
+        _, _, sh_bare, _, _ = pipe._tiled_surface_flux(
             f2(u[..., -1]), f2(v[..., -1]), f2(T_air), f2(q_air), f2(rho_low),
             sst, sic, T_land, p_s,
         )
-        sh_uni, lh_uni, _d = pipe._unified_land_fluxes(
-            T_land, T_air, q_air, u[..., -1], v[..., -1], p_s)
-        assert jnp.allclose(f2(sh_uni), sh_tile, rtol=1e-6, atol=1e-8)
-        assert jnp.allclose(f2(lh_uni), lh_tile, rtol=1e-6, atol=1e-8)
+        assert float(jnp.max(jnp.abs(sh_bare - sh_tile))) > 1.0
 
 
     def test_window_integrated_residual_beats_legacy(self):
@@ -356,8 +379,11 @@ class TestUnifiedLaneOneFluxLaw:
         substeps — both time-discretization terms).  The claim under test is
         the CONTROLLED one: unified beats legacy_dual by a large factor on
         the SAME state, same window, same everything else.  Measured on this
-        C4 stable column: 114.2 -> 3.3 W/m^2 at N=1, 244.3 -> 36.1 W/m^2 at
-        N=24 (4 h)."""
+        C4 stable column with the lowest-level height correction on (#1783):
+        legacy 116.8 -> unified 1.02 W/m^2 at N=1 (115x), 251.3 -> 3.75 W/m^2
+        at N=24 (4 h, 67x).  The bounds below are about half the measured
+        ratios; with the correction pinned off on the unified lane the N=24
+        ratio is 7x, so restoring that pin fails here."""
         if not jax.config.read("jax_enable_x64"):
             pytest.skip("x64 required for the flux integration")
         dt = 600.0
@@ -406,7 +432,7 @@ class TestUnifiedLaneOneFluxLaw:
             return float(
                 jnp.max(jnp.abs(debit - credit))) / (dt * n_rad)
 
-        for n_rad, min_factor in ((1, 10.0), (24, 3.0)):
+        for n_rad, min_factor in ((1, 50.0), (24, 30.0)):
             leg = _residual("legacy_dual", n_rad)
             uni = _residual("unified", n_rad)
             assert uni < leg / min_factor, (
@@ -489,14 +515,15 @@ class TestUnifiedLaneOneFluxLaw:
         eps = pipe.emissivity_land
         sb = constants.sigma_sb
         land_cfg = pipe._land_tile_surface_cfg()
+        z_low = _z_low(pipe, T, p_s)
 
         def _residual(beta):
             def _turb(T_l):
                 q_sfc = q_air + beta * (
                     saturation_specific_humidity(T_l, p_s) - q_air)
-                _, _, sh, lh, _ = compute_surface_fluxes(
+                _, _, sh, lh, _ = surface_fluxes_at_lowest_level(
                     u[..., -1], v[..., -1], T_air, q_air, T_l, q_sfc,
-                    rho_low, land_cfg)
+                    rho_low, land_cfg, z_low)
                 return sh + lh
             turb, d_turb = jax.jvp(
                 _turb, (T_land,), (jnp.ones_like(T_land),))

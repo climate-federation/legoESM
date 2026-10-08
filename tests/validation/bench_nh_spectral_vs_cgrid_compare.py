@@ -57,7 +57,7 @@ from legoesm.grids.latlon import create_latlon_grid
 from legoesm.atmosphere.dynamics.gcm.compressible_euler import (
     CompressibleEulerConfig,
 )
-from legoesm.atmosphere.dynamics.gcm.compressible_euler_latlon_cgrid import (
+from legoesm.atmosphere._future.compressible_euler_latlon_cgrid import (
     CGridLatLonCompressibleEulerConfig,
     CGridLatLonNonHydrostaticState,
     cgrid_latlon_nh_step,

@@ -78,8 +78,8 @@ def wet_masks(card) -> dict[str, np.ndarray]:
 def _card(case: str):
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
 
-    set_policy(PrecisionPolicy.fp64())
-    if get_policy() != PrecisionPolicy.fp64():
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    if get_policy() != PrecisionPolicy.fp64(transcendentals="libm"):
         raise SystemExit("precision policy is not fp64")
     from legoesm.ocean.fidelity.nemo_testcase_recipe import (
         build_nemo_testcase_card,

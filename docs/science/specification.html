@@ -1,10 +1,10 @@
-<!DOCTYPE html><html><head><meta charset="utf-8"><title>legoESM Technical Specification (v3.9)</title><style>@page{size:A4;margin:2cm}body{font-family:Helvetica,Arial,sans-serif;font-size:10pt;line-height:1.5;color:#333}h1{font-size:20pt;color:#1a1a2e;border-bottom:2px solid #16213e;padding-bottom:4pt}h2{font-size:15pt;color:#16213e;border-bottom:1px solid #0f3460}h3{font-size:12pt;color:#0f3460}table{border-collapse:collapse;width:100%;margin:8pt 0;font-size:8.5pt}th{background:#16213e;color:white;padding:5pt 6pt;text-align:left}td{border:1px solid #ddd;padding:4pt 6pt}tr:nth-child(even){background:#f8f8f8}code{background:#f0f0f0;padding:1pt 3pt;border-radius:2pt;font-size:8.5pt;font-family:Menlo,monospace}pre{background:#f5f5f5;padding:8pt;border-radius:4pt;font-size:8pt;line-height:1.3;white-space:pre-wrap}pre code{background:transparent;padding:0}strong{color:#16213e}hr{border:none;border-top:1px solid #ccc;margin:15pt 0}</style></head><body>
+<!DOCTYPE html><html><head><meta charset="utf-8"><title>legoESM 1.0 Technical Specification</title><style>@page{size:A4;margin:2cm}body{font-family:Helvetica,Arial,sans-serif;font-size:10pt;line-height:1.5;color:#333}h1{font-size:20pt;color:#1a1a2e;border-bottom:2px solid #16213e;padding-bottom:4pt}h2{font-size:15pt;color:#16213e;border-bottom:1px solid #0f3460}h3{font-size:12pt;color:#0f3460}table{border-collapse:collapse;width:100%;margin:8pt 0;font-size:8.5pt}th{background:#16213e;color:white;padding:5pt 6pt;text-align:left}td{border:1px solid #ddd;padding:4pt 6pt}tr:nth-child(even){background:#f8f8f8}code{background:#f0f0f0;padding:1pt 3pt;border-radius:2pt;font-size:8.5pt;font-family:Menlo,monospace}pre{background:#f5f5f5;padding:8pt;border-radius:4pt;font-size:8pt;line-height:1.3;white-space:pre-wrap}pre code{background:transparent;padding:0}strong{color:#16213e}hr{border:none;border-top:1px solid #ccc;margin:15pt 0}</style></head><body>
 <h1 id="legoesm-a-differentiable-earth-system-model">legoESM: A Differentiable Earth System Model</h1>
-<h2 id="technical-specification-v39">Technical Specification v3.9</h2>
+<h2 id="legoesm-10-technical-specification">legoESM 1.0 Technical Specification</h2>
 <p><strong>Project</strong>: legoESM
 <strong>License</strong>: MIT
 <strong>Authors</strong>: Pierre Gentine + Claude
-<strong>Date</strong>: 2026-03-25 (updated from v3.8, 2026-03-23)</p>
+<strong>Version</strong>: legoESM 1.0 (2026-10-01); body last revised 2026-03-25 (spec v3.9, updated from v3.8, 2026-03-23)</p>
 <hr />
 <h3 id="changelog-v39-2026-03-25">Changelog (v3.9, 2026-03-25)</h3>
 <p><strong>FV3 cubed-sphere rewrite, MPAS/spectral fixes, and comprehensive validation:</strong></p>
@@ -647,8 +647,6 @@ gradient_y(field, grid)           # d/dy via centered differences
 divergence(u_field, v_field, grid) # div(u,v) with vector halo exchange
 curl_z(u_field, v_field, grid)    # vorticity: dv/dx − du/dy
 laplacian(field, grid)            # 2nd-order ∇²
-advect_upwind(q, u, v, grid)     # 1st-order upwind advection
-advect_centered(q, u, v, grid)   # 2nd-order centered advection
 hyperdiffusion(field, grid, coeff) # 4th-order ∇⁴ damping (two Laplacians)
 global_integral(field, grid)      # Area-weighted integral (MPI-aware via allreduce)
 global_mean(field, grid)          # Area-weighted mean
@@ -2663,8 +2661,8 @@ ml_dtype = jnp.bfloat16
 # Conservation fixer: float64 for global sums
 conservation_dtype = jnp.float64
 </code></pre>
-<h3 id="64-apple-silicon-support-parallelmetalpy-corehardwarepy">6.4 Apple Silicon Support (<code>parallel/metal.py</code>, <code>core/hardware.py</code>)</h3>
-<p><strong>Backend detection</strong>: <code>detect_devices()</code> returns backend, n_devices, supports_f64, distributed status.
+<h3 id="64-apple-silicon-support-parallelmetalpy-runtimebackendpy">6.4 Apple Silicon Support (<code>parallel/metal.py</code>, <code>runtime/backend.py</code>)</h3>
+<p><strong>Backend detection</strong>: <code>legoesm.runtime.detect_hardware()</code> returns a <code>HardwareConfig</code> (backend, device count, float64 support, hosts).
 Backend priority: METAL → GPU → TPU → CPU.</p>
 <p><strong>Metal limitations</strong>:
 - No float64 or complex128 support
@@ -2863,7 +2861,7 @@ build-backend = &quot;hatchling.build&quot;
 
 [project]
 name = &quot;legoesm&quot;
-version = &quot;0.1.0&quot;
+version = &quot;1.0.0&quot;
 requires-python = &quot;&gt;=3.11&quot;
 
 [project.optional-dependencies]
@@ -3237,8 +3235,7 @@ legoesm benchmark --grid C384 --n-steps 100 --devices 4
 │   │   ├── operators_voronoi.py            # MPAS/Voronoi mesh operators
 │   │   ├── fc_gram.py                      # FC-Gram basis and differentiation
 │   │   ├── conservation.py                 # Conservation fixers
-│   │   ├── smooth.py                       # Smooth approximations
-│   │   └── hardware.py                     # Device detection, backend info
+│   │   └── smooth.py                       # Smooth approximations
 │   │
 │   ├── grids/                              # Grid implementations
 │   │   ├── cubed_sphere.py                 # CubedSphereGrid (6-face gnomonic)

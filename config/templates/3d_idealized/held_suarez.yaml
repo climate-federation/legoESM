@@ -22,7 +22,7 @@ atmosphere:
   dynamics: hydrostatic        # canonical key -> ExperimentConfig.dycore.model_type
   time_integrator: ssp_rk3
   dt_seconds: 600
-  hyperdiffusion_coeff: 0.0
+  hyperdiff_scale: 0.0
 physics:
   forcing: held_suarez
   # Held-Suarez is a DRY benchmark, and HS forcing is ADDITIVE to the physics
@@ -48,12 +48,10 @@ surface:
   rh_init: 0.0
 conservation:
   fix_mass: true
-  fix_energy: false
 time:
   duration_hours: 2400          # 100 days (spin-up)
   output_interval_hours: 24
 output:
-  format: zarr
   path: output/held_suarez/
 hardware:
   precision:

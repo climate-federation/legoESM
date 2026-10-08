@@ -76,6 +76,8 @@ class CanopyUpdaterInputs(NamedTuple):
     offline calibrator batching over cells) instead of closing over it."""
     lai_monthly: jnp.ndarray     # (12, ncol, npft)
     htop_monthly: jnp.ndarray    # (12, ncol, npft)
+    sai_monthly: jnp.ndarray     # (12, ncol, npft)
+    hbot_monthly: jnp.ndarray    # (12, ncol, npft)
     soil_color: jnp.ndarray      # (ncol,)
     glacier_col: jnp.ndarray     # (ncol,) 1.0 on glacier-dominant columns
     covered: jnp.ndarray         # (ncol,) surfdata-covered mask
@@ -110,6 +112,8 @@ def precompute_canopy_updater(gsd, *, glacier_alb=None,
     return CanopyUpdaterInputs(
         lai_monthly=jnp.asarray(gsd.lai_monthly),
         htop_monthly=jnp.asarray(gsd.htop_monthly),
+        sai_monthly=jnp.asarray(gsd.sai_monthly),
+        hbot_monthly=jnp.asarray(gsd.hbot_monthly),
         soil_color=jnp.asarray(np.asarray(gsd.soil_color)),
         glacier_col=jnp.asarray(glacier_mask(gsd).astype(np.float64)),
         covered=jnp.asarray(surfdata_covered(gsd)),
@@ -121,7 +125,7 @@ def precompute_canopy_updater(gsd, *, glacier_alb=None,
         lut_isveg=jnp.asarray(lut["is_veg"]),
         glac_vis=jnp.asarray(_glac_vis), glac_nir=jnp.asarray(_glac_nir),
         bare_fb=bare_canopy_params(ncol, pft_root_params=pft_root_params,
-                                   soil_bounds=True),
+                                   soil_bounds=True, canopy_structure=True),
         lut_root_depth=None if _rta is None else _rta["root_depth"],
         lut_theta_wp=None if _rta is None else _rta["theta_wp"],
         lut_theta_fc=None if _rta is None else _rta["theta_fc"],
@@ -147,15 +151,23 @@ def apply_canopy_updater(pre: CanopyUpdaterInputs, theta_top: jnp.ndarray,
     lai_m = interp_monthly(pre.lai_monthly, doy)                      # (ncol, npft)
     htop_m = interp_monthly(pre.htop_monthly, doy)
     LAI = jnp.take_along_axis(lai_m, dom_idx[:, None], axis=1)[:, 0]
+    SAI = jnp.take_along_axis(interp_monthly(pre.sai_monthly, doy),
+                              dom_idx[:, None], axis=1)[:, 0]
+    hbot_surf = jnp.take_along_axis(interp_monthly(pre.hbot_monthly, doy),
+                                    dom_idx[:, None], axis=1)[:, 0]
     hc_surf = jnp.take_along_axis(htop_m, dom_idx[:, None], axis=1)[:, 0]
     LAI = jnp.where(is_veg_col > 0.0,
                     jnp.where(jnp.isfinite(LAI), LAI, 0.0), 0.0)
+    SAI = jnp.where(is_veg_col > 0.0,
+                    jnp.where(jnp.isfinite(SAI), SAI, 0.0), 0.0)
     hc = jnp.where(jnp.isfinite(hc_surf) & (hc_surf > 0.0),
                    hc_surf, hc_default)
     hc = jnp.maximum(hc, HC_MIN_M)
     ice = pre.glacier_col > 0.0
     is_veg = jnp.where(ice, 0.0, is_veg_col)
     LAI = jnp.where(ice, 0.0, LAI)
+    SAI = jnp.where(ice, 0.0, SAI)
+    hbot = jnp.clip(jnp.where(jnp.isfinite(hbot_surf), hbot_surf, 0.0), 0.0, hc)
     # Same bounds as build_canopy_params (glacier: dry == sat == ice albedo).
     dry_vis, dry_nir, sat_vis, sat_nir = (
         jnp.where(ice, g, b) for g, b in zip(
@@ -174,6 +186,7 @@ def apply_canopy_updater(pre: CanopyUpdaterInputs, theta_top: jnp.ndarray,
         emissivity=full(EMISS_VEG), rz0m=rz0m, rd=rd,
         ALB_VIS_DRY=dry_vis, ALB_VIS_SAT=sat_vis,
         ALB_NIR_DRY=dry_nir, ALB_NIR_SAT=sat_nir,
+        SAI_dom=SAI, hbot_dom=hbot, pft_dom=dom_idx.astype(LAI.dtype),
         # None when not selected -> multilayer_land._get falls back to the
         # scalar MultiLayerLandConfig values (behaviour-preserving).
         root_depth=(None if pre.lut_root_depth is None

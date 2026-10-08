@@ -31,12 +31,16 @@ def test_nemo_trigger_flags_reach_the_config():
               "--convection-n2-mode", "nemo_bn2",
               "--convection-n2-eos", "teos10",
               "--convection-trigger", "hard",
-              "--convection-n2-threshold=-1e-12")
+              "--convection-n2-threshold=-1e-12",
+              "--convection-evd-composition", "nemo_replace")
     cfg = core2.build_enhanced_diffusion_config(a)
     assert cfg.K_conv == 100.0 and cfg.K_bg == 0.0
     assert cfg.n2_mode == "nemo_bn2" and cfg.n2_eos_form == "teos10"
     assert cfg.smooth_transition is False
     assert cfg.n2_threshold == -1e-12
+    # decision 94: NEMO's zdfevd REPLACES avt, and selecting NEMO's trigger
+    # from the command line must be able to say so.
+    assert cfg.evd_composition == "nemo_replace"
     assert cfg.two_level_trigger is False
     # the two-level (before-state) arm cannot run on this driver's outer
     # integrators; it must refuse rather than silently fire now-only

@@ -25,7 +25,6 @@ import sys
 import time
 from pathlib import Path
 
-import jax.numpy as jnp
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -37,6 +36,7 @@ from bench_ocean_mpas_scaling import (  # noqa: E402
 from metadata import (  # noqa: E402
     annotate_incomplete,
     scaling_metadata,
+    state_all_finite,
     tidy_throughput_fields,
     timed_scan_blocks,
 )
@@ -74,14 +74,22 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--probe-steps", type=int, default=3)
     p.add_argument("--multicontroller", action="store_true")
     # No bench-side default for either: unset means MPASOceanConfig's own
-    # default (poly, 4), so a ladder arm measures the production solver.
+    # default (gpoly, 4 sweeps), so a ladder arm measures the production solver.
     # A "jacobi" default here silently ran the whole 2026-09-21 CPU ladder
     # on the retired preconditioner (RULE 3: a flag default that keeps the
     # old behaviour is a bug with a knob).
     p.add_argument("--pcg-precond", default=None,
-                   choices=["jacobi", "poly"],
-                   help="distributed PCG preconditioner (config default poly); "
-                        "'poly' is the communication-free local Neumann polynomial")
+                   choices=["jacobi", "poly", "gpoly"],
+                   help="distributed PCG preconditioner (unset = the backend bundle: gpoly on GPU, jacobi on CPU); "
+                        "'poly' is the communication-free local Neumann polynomial, "
+                        "'gpoly' the same polynomial on the GLOBAL operator "
+                        "(evaluated on a max(2, K-2)-ring halo, one exchange per "
+                        "iteration)")
+    p.add_argument("--halo-depth", type=int, default=None,
+                   help="cell-halo rings of the SPMD layout (default: what the "
+                        "config needs -- 2, or max(2, K-2) for gpoly); set it to "
+                        "price a "
+                        "deeper halo on its own")
     p.add_argument("--pcg-poly-sweeps", type=int, default=None,
                    help="sweeps K of the local polynomial preconditioner "
                         "(config default 4)")
@@ -92,10 +100,15 @@ def build_parser() -> argparse.ArgumentParser:
     # these two numbers alone. They are exposed so a ladder arm can measure
     # how much of the plateau the barotropic solve owns, instead of inferring
     # it from a reduction count.
-    p.add_argument("--pcg-variant", choices=["standard", "single_reduce"],
-                   default="standard")
+    p.add_argument("--pcg-variant",
+                   choices=["standard", "single_reduce", "single_reduce_deep"],
+                   default=None,
+                   help="unset = the backend's bundle (standard on GPU, single_reduce_deep on CPU); "
+                        "single_reduce_deep runs with the jacobi preconditioner "
+                        "(30 iterations for the 1e-10 residual; the CPU bundle's "
+                        "values); poly/gpoly need standard or single_reduce")
     p.add_argument("--pcg-fixed-iters", type=int, default=None,
-                   help="distributed PCG iteration count (config default 20); "
+                   help="distributed PCG iteration count (unset = the backend bundle: 20 on GPU, 30 on CPU); "
                         "a PROBE knob -- lowering it changes the solve")
     p.add_argument("--eta-clamp-iters", type=int, default=3)
     p.add_argument("--profile-dir", type=str, default=None,
@@ -114,19 +127,20 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def apply_pcg_overrides(config, args):
-    """Config with the PCG flags applied; a flag left unset (None) keeps the
-    MPASOceanConfig default, so a ladder arm without flags measures the
-    production solver (tests/bench/test_bench_ocean_mpas_spmd_cli.py)."""
+    """Config with the PCG flags applied, then the backend's PCG bundle
+    resolved for every field still unset — so an arm without flags measures
+    the production solver (tests/bench/test_bench_ocean_mpas_spmd_cli.py), and
+    a preconditioner flag that leaves the bundle's count or recurrence to the
+    backend default fails HERE, before launch, not inside the solver."""
+    from legoesm.ocean.mpas_config import resolve_barotropic_pcg_defaults
+    over = {}
     if args.pcg_fixed_iters is not None:
-        config = config._replace(
-            barotropic_implicit_pcg_fixed_iters=int(args.pcg_fixed_iters))
+        over["barotropic_implicit_pcg_fixed_iters"] = int(args.pcg_fixed_iters)
     if args.pcg_precond is not None:
-        config = config._replace(
-            barotropic_implicit_pcg_precond=str(args.pcg_precond))
+        over["barotropic_implicit_pcg_precond"] = str(args.pcg_precond)
     if args.pcg_poly_sweeps is not None:
-        config = config._replace(
-            barotropic_implicit_pcg_poly_sweeps=int(args.pcg_poly_sweeps))
-    return config
+        over["barotropic_implicit_pcg_poly_sweeps"] = int(args.pcg_poly_sweeps)
+    return resolve_barotropic_pcg_defaults(config._replace(**over))
 
 
 def main() -> int:
@@ -159,6 +173,7 @@ def main() -> int:
     from legoesm.parallel.voronoi_spmd_ocean import (
         build_mpas_ocean_spmd_layout,
         disarm_mpas_ocean_spmd,
+        halo_depth_for_config,
         make_sharded_mpas_ocean_step,
         n_real_cells,
         shard_state_mpas_ocean_spmd,
@@ -178,7 +193,7 @@ def main() -> int:
     n_cells_orig = int(mesh.nCells)
     if nd > 1:
         mesh = reorder_voronoi_for_sharding(mesh, nd, method=args.partition_method,
-                                            edge_order="owner")
+                                            edge_order="block")
     n_real = n_real_cells(mesh)
     state = perturbed_rest_state(mesh, z_coord, n_cells_real=n_real)
     model = MPASOceanModel(mesh, z_coord, config)
@@ -187,7 +202,9 @@ def main() -> int:
     if nd > 1:
         layout = build_mpas_ocean_spmd_layout(
             mesh, nd, n_cells_real=n_real,
-            tracer_advection=str(config.tracer_advection), nlev=args.nlev)
+            tracer_advection=str(config.tracer_advection), nlev=args.nlev,
+            halo_depth=(halo_depth_for_config(config) if args.halo_depth is None
+                        else int(args.halo_depth)))
         spmd_step = make_sharded_mpas_ocean_step(model, layout)
         state = shard_state_mpas_ocean_spmd(state, layout)
         rounds = len(layout.ppermute_perms)
@@ -204,11 +221,6 @@ def main() -> int:
 
         def advance(st, aux=None):   # timed_scan_blocks calls 1-arg when aux is None
             return model.step(st, args.dt)
-
-    @jax.jit
-    def _all_finite(st):
-        return jnp.all(jnp.array([jnp.isfinite(l).all()
-                                  for l in jax.tree.leaves(st)]))
 
     try:
         t0 = time.perf_counter()
@@ -249,7 +261,7 @@ def main() -> int:
             trace_dir=trace_dir, aux=aux)
         # jitted global reduction -> replicated scalar (fully addressable) over
         # EVERY prognostic leaf, not a host fetch of one sharded field.
-        finite = bool(_all_finite(state))
+        finite = state_all_finite(state)
     finally:
         if nd > 1:
             disarm_mpas_ocean_spmd()
@@ -301,14 +313,15 @@ def main() -> int:
                    for k in ("NCCL_MIN_NCHANNELS", "NCCL_MAX_NCHANNELS",
                                 "NCCL_P2P_NET_CHUNKSIZE")
                },
-               "pcg_variant": args.pcg_variant,
+               "pcg_variant": str(config.barotropic_implicit_pcg_variant),
                "pcg_fixed_iters": int(config.barotropic_implicit_pcg_fixed_iters),
                "pcg_precond": str(config.barotropic_implicit_pcg_precond),
                "pcg_poly_sweeps": int(config.barotropic_implicit_pcg_poly_sweeps),
+               "halo_depth": (int(layout.halo_depth) if nd > 1 else None),
                "pcg_solver_path": ("fixed_iter_pcg" if nd > 1 else "stock_cg_to_tol"),
                "eta_floor_clamp_iters": args.eta_clamp_iters,
                "barotropic_allreduces_per_step": (
-                   1 + (1 if args.pcg_variant == "single_reduce" else 2)
+                   1 + (1 if config.barotropic_implicit_pcg_variant != "standard" else 2)
                    * int(config.barotropic_implicit_pcg_fixed_iters)
                    if nd > 1 else None)},
     ))

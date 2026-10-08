@@ -109,13 +109,13 @@ class TestSoilHydraulicsGrad(unittest.TestCase):
 class TestRadiativeTransferUV(unittest.TestCase):
     """F6: absorbed-UV beam/diffuse partition + energy conservation."""
 
-    def _rt(self, PAR_dir, PAR_diff):
+    def _rt(self, PAR_dir, PAR_diff, UV=20.0):
         from legoesm.land.canopy.radiative_transfer import canopy_shortwave_rt
         a = jnp.array
         return canopy_shortwave_rt(
             PAR_dir=a(PAR_dir), PAR_diff=a(PAR_diff), NIR_dir=a(PAR_dir), NIR_diff=a(PAR_diff),
-            UV=a(20.0), SZA=a(30.0), LAI=a(3.0), CI=a(0.8), ALB_VIS=a(0.1), ALB_NIR=a(0.3),
-            Vcmax25_C3_leaf=a(60.0), Vcmax25_C4_leaf=a(0.0), kn=a(0.3), FNonVeg=a(0.1),
+            UV=a(UV), SZA=a(30.0), LAI=a(3.0), CI=a(0.8), ALB_VIS=a(0.1), ALB_NIR=a(0.3),
+            Vcmax25_C3_leaf=a(60.0), Vcmax25_C4_leaf=a(0.0), kn=a(0.3),
         )
 
     def test_leaves_absorb_uv_under_pure_beam(self):
@@ -127,6 +127,10 @@ class TestRadiativeTransferUV(unittest.TestCase):
         total_abs = float(out_beam.ASW_Sun + out_beam.ASW_Sh + out_beam.ASW_Soil)
         self.assertGreater(total_abs, 0.0)
         self.assertTrue(np.isfinite(total_abs))
+        no_uv = self._rt(200.0, 0.0, UV=0.0)
+        leaf_uv = float(out_beam.ASW_Sun + out_beam.ASW_Sh
+                        - no_uv.ASW_Sun - no_uv.ASW_Sh)
+        self.assertGreater(leaf_uv, 1.0)
 
     def test_uv_partition_responds_to_beam_fraction(self):
         # All-beam vs all-diffuse (same total): leaf+soil UV split must differ,
@@ -265,12 +269,14 @@ class TestCanopyLatentHeatOverSnow(unittest.TestCase):
 
     * SimpleSEB: the whole lhflx is the bare-ground flux -> snowpack (L_s) over
       snow, else soil (L_v); vapor mass over snow = lhflx / L_s.
-    * Two-leaf canopy: lhflx = LE_canopy (transpiration, L_v soil) + LE_soil
+    * Two-leaf canopy: lhflx = LE_canopy (transpiration, soil water) + LE_soil
       (below-canopy GROUND latent).  Over snow the ground IS the snowpack, so
-      LE_soil sublimates from the pack at L_s while LE_canopy still draws soil
-      water at L_v.  Vapor mass over snow = LE_soil/L_s + LE_canopy/L_v (neither
-      the old all-L_s reading NOR the first-pass all-L_v reading).
-    * Negative canopy latent over snow (dew/frost) accretes on the pack at L_s.
+      LE_soil sublimates from the pack while LE_canopy still draws soil water.
+      Each stream's mass is its energy over the latent heat the scheme CHARGED
+      (two-leaf: L_v(T_surface) for both); the pack's ice costs L_s, the
+      difference returned to the ground heat flux (user decision 2026-10-04).
+    * Negative canopy latent over snow (dew/frost) accretes on the pack (mass at
+      the charged L, its deposition reported at L_s).
     """
 
     def _snow_forcing(self, ncol=1):
@@ -298,9 +304,11 @@ class TestCanopyLatentHeatOverSnow(unittest.TestCase):
         return ns, resp, s0, out
 
     def test_canopy_over_snow_splits_ground_L_s_and_transp_L_v(self):
-        """Two-leaf over snow: the reported vapor mass is the phase-split sum
-        LE_soil/L_s + LE_canopy/L_v — NOT the all-L_v (first audit pass) NOR the
-        all-L_s (pre-audit) aggregate reading."""
+        """Two-leaf over snow: the solve charges its ground LE_soil at
+        L_s(T_surface) and its canopy LE_canopy at L_v (#1875), so the vapor mass
+        is LE_soil / L_s + LE_canopy / L_v and the latent heat reported is the
+        solve's own: LE_soil's mass sublimates at L_s, LE_canopy's evaporates at
+        L_v."""
         from legoesm.land.config import MultiLayerLandConfig
         from legoesm.land.surface_scheme import TwoLeafCanopyConfig
         cfg = MultiLayerLandConfig(surface_scheme=TwoLeafCanopyConfig(max_iters=40))
@@ -311,15 +319,17 @@ class TestCanopyLatentHeatOverSnow(unittest.TestCase):
         le_canopy = le_tot - le_soil
         # Deep pack + moist soil -> no reservoir cap, so both components pass at
         # their demanded rate and phase.
-        expected = le_soil / constants.L_s + le_canopy / constants.L_v
-        npt.assert_allclose(mass, expected, rtol=1e-5)
+        # Phase-split at the temperature-dependent latent heats the land
+        # charged (surface temperature of the step = the initial top-soil T).
+        from legoesm.thermo import latent_heat_sublimation, latent_heat_vaporization
+        _T = jnp.asarray(283.0)
+        L_v, L_s = float(latent_heat_vaporization(_T)), float(latent_heat_sublimation(_T))
+        npt.assert_allclose(mass, le_soil / L_s + le_canopy / L_v, rtol=1e-5)
+        npt.assert_allclose(float(resp.lhflx[0]), le_soil + le_canopy, rtol=1e-5)
         # Non-vacuous: the below-canopy ground component is a real positive
         # fraction routed to L_s (sublimation), not folded into L_v soil evap.
         self.assertGreater(le_soil, 1e-3)
         self.assertGreater(le_canopy, 1e-3)
-        # The split lies strictly between the all-L_v and all-L_s readings.
-        self.assertGreater(abs(expected - le_tot / constants.L_v), 1e-9)
-        self.assertGreater(abs(expected - le_tot / constants.L_s), 1e-9)
 
     def test_canopy_over_snow_ground_drains_pack_soil_spared(self):
         """Codex F13 regression: with LE_soil > 0 and snow present, the ground
@@ -347,9 +357,12 @@ class TestCanopyLatentHeatOverSnow(unittest.TestCase):
         le_canopy = le_tot - le_soil
         dt = 1800.0
         self.assertGreater(le_soil, 1e-3, "forcing must drive positive ground evap")
-        # Pack loses the ground sublimation (no melt at night): dSWE ~ -LE_soil/L_s*dt.
+        # Pack loses the ground sublimation (no melt at night): the mass the scheme
+        # charged, dSWE ~ -LE_soil/L_s(T_surface)*dt (charged L_s in the solve, #1875).
+        from legoesm.thermo import latent_heat_sublimation
         d_snow = float(ns.snow_depth[0]) - float(s0.snow_depth[0])
-        npt.assert_allclose(d_snow, -le_soil / constants.L_s * dt, rtol=0.0, atol=0.05)
+        npt.assert_allclose(d_snow, -le_soil / float(latent_heat_sublimation(s0.T_soil[0, 0])) * dt,
+                            rtol=0.0, atol=0.05)
         # Soil column loses only the transpiration (L_v), NOT the ground component:
         # |dSoil| ~ LE_canopy/L_v*dt << LE_soil/L_s*dt would have been if mis-routed.
         d_soil = float(jnp.sum(dz * ns.theta_soil[0]) - jnp.sum(dz * s0.theta_soil[0]))
@@ -365,7 +378,8 @@ class TestCanopyLatentHeatOverSnow(unittest.TestCase):
         mass = float(resp.surface_mass_flux[0])
         lhflx = float(resp.lhflx[0])
         if abs(lhflx) > 1e-6:
-            npt.assert_allclose(mass, lhflx / constants.L_s, rtol=1e-6)
+            from legoesm.thermo import latent_heat_sublimation
+            npt.assert_allclose(mass, lhflx / float(latent_heat_sublimation(jnp.asarray(283.0))), rtol=1e-6)
 
     def test_canopy_dew_over_snow_frosts_snow_not_soil(self):
         """A NEGATIVE canopy latent flux over snow (dew/frost) must accrete on the
@@ -396,7 +410,12 @@ class TestCanopyLatentHeatOverSnow(unittest.TestCase):
         self.assertLess(lhflx, 0.0, "expected condensation (lhflx<0) for this forcing")
         # Deposition accretes on the snowpack (frost, charged at L_s)...
         self.assertGreater(float(ns.snow_depth[0]), float(s0.snow_depth[0]))
-        npt.assert_allclose(float(resp.surface_mass_flux[0]), lhflx / constants.L_s, rtol=1e-6)
+        # ...charged at the Kirchhoff L_s of the PRE-step top-soil temperature (the
+        # land's T_surface), so the water is that inverse, not lhflx / constant L_s.
+        from legoesm.thermo import latent_heat_sublimation
+        npt.assert_allclose(float(resp.surface_mass_flux[0]),
+                            lhflx / float(latent_heat_sublimation(s0.T_soil[0, 0])), rtol=1e-6)
+        self.assertGreater(abs(lhflx / constants.L_s / float(resp.surface_mass_flux[0]) - 1.0), 1e-5)
         # ...and does NOT inject liquid water into the soil top.
         self.assertLessEqual(float(jnp.sum(dz * ns.theta_soil[0])), W0 + 1e-9)
 
@@ -502,6 +521,10 @@ class TestClmMlGroundLatentWiring(unittest.TestCase):
             swveg_canopy=band, swsoi_soil=band,
             tg_soil=jnp.array([0.0, 285.0]),
             z0m_canopy=jnp.array([0.0, 0.1]),
+            # ground latent charge (#1875): snow weight 0 -> LatVap(tref)
+            tref_forcing=jnp.array([0.0, 288.0]),
+            snowfrac_soil=jnp.array([0.0, 0.0]),
+            lsub_soil=jnp.array([0.0, 0.0]),
         )
         o = jnp.ones(ncol)
         f = AtmToSurface(
@@ -514,6 +537,7 @@ class TestClmMlGroundLatentWiring(unittest.TestCase):
         self.assertIsNotNone(out.LE_canopy)
         npt.assert_allclose(float(out.LE_soil[0]), lhsoi_val, rtol=1e-6)
         npt.assert_allclose(float(out.LE_canopy[0]), lhflx_val - lhsoi_val, rtol=1e-6)
+        npt.assert_allclose(float(out.L_soil[0]), constants.L_v, rtol=1e-12)
 
     def test_real_mlcanopy_type_carries_lhsoi_soil(self):
         """Live compatibility guard: the installed clm-ml-jax ``mlcanopy_type``

@@ -53,6 +53,7 @@ __all__ = [
     "checked_replicated_put",
     "content_hash48",
     "name_digest48",
+    "mesh_axis_terms",
     "schema_fingerprint",
     "assert_schema_agrees",
     "assert_flags_agree",
@@ -355,6 +356,29 @@ def content_hash48(arr) -> float:
     a = np.ascontiguousarray(arr)
     h = hashlib.blake2b(a.tobytes(), digest_size=6)
     return float(int.from_bytes(h.digest(), "big"))
+
+
+def mesh_axis_terms(mesh):
+    """``(axis_names, axis_sizes)`` term lists for the mesh digests.
+
+    The SIZES are carried per axis (not just the axis count) because a mesh
+    reshaped ``(2, 4)`` on one rank and ``(4, 2)`` on another has the same
+    names, the same count, and the same total device count (codex round-4,
+    blocker 5 tail).  Never raises: an unreadable mesh degrades to a marker
+    term that still participates in the comparison.
+    """
+    if mesh is None:
+        return (), ()
+    try:
+        names = tuple(str(a) for a in mesh.axis_names)
+    except Exception:                       # pragma: no cover - defensive
+        return ("<unreadable>",), ("<unreadable>",)
+    try:
+        shape = dict(mesh.shape)
+        sizes = tuple(f"{n}={shape.get(n, '?')}" for n in names)
+    except Exception:                       # pragma: no cover - defensive
+        sizes = ("<unreadable>",)
+    return names, sizes
 
 
 def name_digest48(names) -> float:

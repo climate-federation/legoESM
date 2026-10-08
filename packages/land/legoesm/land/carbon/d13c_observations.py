@@ -118,58 +118,11 @@ def per_archetype_observed_d13c(
         d13c_cell, cell_archetype_id, cell_archetype_weight, n_arch=n_arch)
 
 
-def load_gridded_d13c(d13c_path, *, ncell, d13c_var=None):
-    """Per-cell observed leaf delta13C ``(ncell,)`` [permil] from a gridded delta13C NetCDF.
-
-    ``delta13C(..., nlat, nlon)`` is time-averaged (any leading axes collapsed via
-    ``nanmean``) then reshaped to the SAME row-major ``(ncell = nlat*nlon)`` order the CLM5
-    cover loader uses, so cell indices align with the archetype membership.  Missing cells are
-    PRESERVED as ``NaN`` (never fabricated to 0), so the per-archetype cover-weighted mean
-    averages only the observed cells and an unobserved archetype gets ``NaN`` (a leaf-delta13C
-    product is SPARSE -- it is a compiled/interpolated field, gap-heavy off the sampled
-    biomes).  The product MUST already be on the surfdata grid (same shape AND lat/lon
-    orientation) and be a LEAF delta13C [permil] on the model convention -- regridding + the
-    ecosystem/soil->leaf delta13C reconciliation is the data-prep FETCHER FOLLOW-UP (see the
-    module docstring); a shape mismatch is a hard error, never a silent misalignment.
-
-    Parameters
-    ----------
-    d13c_path : str
-        Gridded leaf-delta13C NetCDF path (``--d13c-obs``).
-    ncell : int
-        Expected number of cells (= the cover ``ncell``); a mismatch raises.
-    d13c_var : str, optional
-        delta13C variable name; auto-detected from a small candidate list if omitted.
-    """
-    import xarray as xr
-
-    ds = xr.open_dataset(d13c_path, decode_times=False)
-    try:
-        candidates = ("d13c", "D13C", "delta13C", "leaf_d13c", "d13C_leaf", "delta13c", "dc13")
-        var = d13c_var or next((v for v in candidates if v in ds), None)
-        if var is None:
-            raise SystemExit(
-                f"gridded delta13C {d13c_path} has no recognised delta13C variable "
-                f"(looked for {candidates}); pass --d13c-var. Available: "
-                f"{sorted(ds.data_vars)[:40]}")
-        arr = np.asarray(ds[var].values, dtype=float)
-    finally:
-        ds.close()
-    while arr.ndim > 2:
-        with np.errstate(invalid="ignore"):
-            arr = np.nanmean(arr, axis=0)
-    if arr.ndim != 2:
-        raise SystemExit(
-            f"gridded delta13C variable expected 2-D (nlat, nlon) after time-averaging; "
-            f"got shape {arr.shape}.")
-    d13c_cell = np.asarray(arr, dtype=float).reshape(-1)   # row-major (i_lat, i_lon)
-    if d13c_cell.shape[0] != int(ncell):
-        raise SystemExit(
-            f"gridded delta13C ncell {d13c_cell.shape[0]} (= {arr.shape[0]}x{arr.shape[1]}) "
-            f"!= cover ncell {int(ncell)}; the delta13C product must be pre-regridded onto "
-            f"the surfdata grid (same shape AND lat/lon orientation) -- a data-prep "
-            f"follow-up. Use --dry-run-synthetic for a self-contained test.")
-    return d13c_cell
+# Variable names :func:`soc_observations.load_gridded_obs` auto-detects in a gridded leaf
+# delta13C NetCDF (``--d13c-obs``).  The product must be on the surfdata grid and be a LEAF
+# delta13C [permil] on the model convention; regridding + the ecosystem/soil->leaf
+# reconciliation is the data-prep FETCHER FOLLOW-UP (see the module docstring).
+D13C_VAR_CANDIDATES = ("d13c", "D13C", "delta13C", "leaf_d13c", "d13C_leaf", "delta13c", "dc13")
 
 
 def synthetic_observed_d13c(table):
@@ -184,7 +137,7 @@ def synthetic_observed_d13c(table):
     weakly climate-dependent, so the C4 leakiness lever (``D13CConfig.phi_c4_leakiness``) has a
     small residual to fit against the FAITHFUL C4 forward.  A C3-band target on a C4 archetype
     (the old masked behaviour) would drive a spurious O(15 permil) residual, so the synthetic
-    target IS pathway-aware.  NOT a real product -- see :func:`load_gridded_d13c` for the
+    target IS pathway-aware.  NOT a real product -- see ``D13C_VAR_CANDIDATES`` for the
     sparse leaf-delta13C source + the ecosystem->leaf reconciliation follow-up.
     """
     mat_c = np.asarray(table.mat_k, dtype=float) - constants.T_freeze

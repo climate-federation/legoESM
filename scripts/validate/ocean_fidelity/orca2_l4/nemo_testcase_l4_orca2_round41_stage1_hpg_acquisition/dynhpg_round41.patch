@@ -1,0 +1,83 @@
+--- dynhpg.F90
++++ dynhpg.F90
+@@ -327,9 +327,13 @@
+       INTEGER  ::   ji, jj, jk, jii, jjj           ! dummy loop indices
+       INTEGER  ::   l2_unit, l2_ios
++      INTEGER  ::   r41_unit, r41_ios
+       CHARACTER(LEN=16) :: l2_magic
++      CHARACTER(LEN=16) :: r41_magic
++      CHARACTER(LEN=256) :: r41_filename
+       REAL(wp) ::   zcoef0, zuap, zvap, ztmp       ! local scalars
+       REAL(wp), DIMENSION(T2D(0))           ::   zhpi, zhpj
+       REAL(wp), DIMENSION(jpi,jpj,jpk) :: l2_zhpi_u, l2_zhpi_v, l2_zuap_u, l2_zuap_v, l2_sum_u, l2_sum_v
++      REAL(wp), DIMENSION(jpi,jpj,jpk) :: r41_e3w, r41_gdept, r41_zhpi_u, r41_zhpi_v, r41_zuap_u, r41_zuap_v, r41_sum_u, r41_sum_v
+       !!----------------------------------------------------------------------
+       !
+       IF( kt == nit000 ) THEN
+@@ -346,6 +350,17 @@
+          l2_zuap_u = 0._wp ; l2_zuap_v = 0._wp
+          l2_sum_u  = 0._wp ; l2_sum_v  = 0._wp
+       ENDIF
++      IF( kt == nit000 .AND. Kmm == 1 .AND. Krhs == 3 ) THEN
++         r41_zhpi_u = 0._wp ; r41_zhpi_v = 0._wp
++         r41_zuap_u = 0._wp ; r41_zuap_v = 0._wp
++         r41_sum_u  = 0._wp ; r41_sum_v  = 0._wp
++         DO jk = 1, jpk
++            DO_2D( 0, 0, 0, 0 )
++               r41_e3w(ji,jj,jk) = e3w(ji,jj,jk,Kmm)
++               r41_gdept(ji,jj,jk) = gdept_z0(ji,jj,jk,Kmm)
++            END_2D
++         END DO
++      ENDIF
+       !
+       !
+       DO_2D( 0, 0, 0, 0 )              ! Surface value
+@@ -376,6 +391,12 @@
+             l2_sum_u (ji,jj,1) = zhpi(ji,jj) + zuap
+             l2_sum_v (ji,jj,1) = zhpj(ji,jj) + zvap
+          ENDIF
++         IF( kt == nit000 .AND. Kmm == 1 .AND. Krhs == 3 ) THEN
++            r41_zhpi_u(ji,jj,1) = zhpi(ji,jj) ; r41_zhpi_v(ji,jj,1) = zhpj(ji,jj)
++            r41_zuap_u(ji,jj,1) = zuap         ; r41_zuap_v(ji,jj,1) = zvap
++            r41_sum_u (ji,jj,1) = zhpi(ji,jj) + zuap
++            r41_sum_v (ji,jj,1) = zhpj(ji,jj) + zvap
++         ENDIF
+       END_2D
+       !
+       DO jk= 2, jpkm1
+@@ -406,6 +427,12 @@
+                l2_sum_u (ji,jj,jk) = zhpi(ji,jj) + zuap
+                l2_sum_v (ji,jj,jk) = zhpj(ji,jj) + zvap
+             ENDIF
++            IF( kt == nit000 .AND. Kmm == 1 .AND. Krhs == 3 ) THEN
++               r41_zhpi_u(ji,jj,jk) = zhpi(ji,jj) ; r41_zhpi_v(ji,jj,jk) = zhpj(ji,jj)
++               r41_zuap_u(ji,jj,jk) = zuap         ; r41_zuap_v(ji,jj,jk) = zvap
++               r41_sum_u (ji,jj,jk) = zhpi(ji,jj) + zuap
++               r41_sum_v (ji,jj,jk) = zhpj(ji,jj) + zvap
++            ENDIF
+          END_2D
+       END DO
+       IF( lwp .AND. kt == nit000 .AND. Kmm == 3 .AND. Krhs == 2 ) THEN
+@@ -421,6 +448,22 @@
+          CLOSE(l2_unit)
+          WRITE(numout,*) 'L2_RK_STAGE2_HPG_LITERAL_DUMP ', kt, Kmm, Krhs
+       ENDIF
++      IF( kt == nit000 .AND. Kmm == 1 .AND. Krhs == 3 ) THEN
++         WRITE(r41_filename,'("oracle_stage1_hpg_ranked_kt",I8.8,"_r",I4.4,".bin")') kt, narea - 1
++         OPEN( NEWUNIT=r41_unit, FILE=TRIM(r41_filename), ACCESS='STREAM', FORM='UNFORMATTED', &
++            &  STATUS='REPLACE', ACTION='WRITE', IOSTAT=r41_ios )
++         IF( r41_ios /= 0 ) CALL ctl_stop( 'hpg_sco: cannot open round-41 stage-1 HPG dump' )
++         r41_magic = 'NEMO_L4_R41HPG1'
++         WRITE(r41_unit) r41_magic, 1, kt, Kmm, Krhs, narea - 1, jpi, jpj, jpk, STORAGE_SIZE(1._wp)
++         WRITE(r41_unit) l4_canon_3d(rhd,'T'), l4_canon_3d(r41_e3w,'T'), &
++            & l4_canon_3d(r41_gdept,'T'), &
++            & l4_canon_3d(r41_zhpi_u,'U'), l4_canon_3d(r41_zhpi_v,'V'), &
++            & l4_canon_3d(r41_zuap_u,'U'), l4_canon_3d(r41_zuap_v,'V'), &
++            & l4_canon_3d(r41_sum_u,'U'), l4_canon_3d(r41_sum_v,'V'), &
++            & l4_canon_2d(r1_e1u,'U'), l4_canon_2d(r1_e2v,'V')
++         CLOSE(r41_unit)
++         WRITE(numout,*) 'ORCA2_R41_STAGE1_HPG_DUMP ', kt, Kmm, Krhs, TRIM(r41_filename)
++      ENDIF
+       !
+       !
+    END SUBROUTINE hpg_sco

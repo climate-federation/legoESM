@@ -22,7 +22,8 @@ from legoesm.land.canopy.clm_ml_backend.multilayer_canopy.MLclm_varctl import dt
 from legoesm.land.canopy.clm_ml_backend.multilayer_canopy.MLclm_varpar import isha, isun, nleaf, nlevmlcan  # noqa: F401
 from legoesm.land.canopy.clm_ml_backend.multilayer_canopy.MLLeafFluxesMod import LeafFluxes  # noqa: F401
 from legoesm.land.canopy.clm_ml_backend.multilayer_canopy.MLMathToolsMod import tridiag_2eq  # noqa: F401
-from legoesm.land.canopy.clm_ml_backend.multilayer_canopy.MLSoilFluxesMod import SoilFluxes  # noqa: F401
+from legoesm.land.canopy.clm_ml_backend.multilayer_canopy.MLSoilFluxesMod import (  # noqa: F401
+    SoilFluxes, soil_latent_heat)
 from legoesm.land.canopy.clm_ml_backend.multilayer_canopy.MLWaterVaporMod import LatVap, SatVap  # noqa: F401
 
 # ---------------------------------------------------------------------------
@@ -174,6 +175,9 @@ def _implicit_fps_jit(
     # ------------------------------------------------------------------
     dtime = dtime_ml
     lambda_ = LatVap(_tref_p)
+    # Ground charge: LatVap(tref) as CLM-ML, except the snow-covered weight at
+    # sublimation (legoESM deviation, #1875; MLSoilFluxesMod.soil_latent_heat).
+    lam_soil = soil_latent_heat(mlcanopy_inst, p)
 
     # ------------------------------------------------------------------
     # Ground temperature coefficients alpha0, beta0, delta0
@@ -189,10 +193,10 @@ def _implicit_fps_jit(
     c02 = _soil_tk_p / _soil_dz_p
     c01 = -c02 * _soil_t_p
 
-    den = _cpair_p * _gac0_p + lambda_ * _rhg_p * gs0 * dqsat0 + c02
+    den = _cpair_p * _gac0_p + lam_soil * _rhg_p * gs0 * dqsat0 + c02
     alpha0 = _cpair_p * _gac0_p / den
-    beta0 = lambda_ * gs0 / den
-    delta0 = (_rnsoi_p - lambda_ * _rhg_p * gs0 * (qsat0 - dqsat0 * _tg_bef_p) - c01) / den
+    beta0 = lam_soil * gs0 / den
+    delta0 = (_rnsoi_p - lam_soil * _rhg_p * gs0 * (qsat0 - dqsat0 * _tg_bef_p) - c01) / den
 
     # ------------------------------------------------------------------
     # Leaf temperature coefficients — JAX arrays
@@ -873,7 +877,8 @@ def ErrorCheck02(
         endrun(msg=" ERROR: ImplicitFluxProfileSolution: Latent heat canopy conservation error")
 
     # Ground energy balance — Fortran lines 478-481
-    err = float(mlcanopy_inst.rnsoi_soil[p]) - sh0 - lambda_ * et0 - g0
+    err = (float(mlcanopy_inst.rnsoi_soil[p]) - sh0
+           - float(soil_latent_heat(mlcanopy_inst, p)) * et0 - g0)
     if abs(err) > 0.001:
         endrun(msg=" ERROR: ImplicitFluxProfileSolution: Ground temperature energy balance error")
 

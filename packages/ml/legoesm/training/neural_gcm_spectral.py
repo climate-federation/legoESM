@@ -995,6 +995,13 @@ def make_turbulence_only_spectral_physics(dt,
 # Physics-based parameterizations with trainable parameters
 # =============================================================================
 
+# The TrainablePhysicsParams names make_physics_params_spectral_physics reads
+# (on its rrtmgp path).  Any other DEFAULT_TRAINABLE leaf (C_H, C_E, albedo_ice)
+# is never consumed here and is frozen OUT of the spectral trainer (no inert
+# parameters).
+SPECTRAL_PHYSICS_TRAINABLE = ("sbm_tau_c", "sbm_RH_ref", "albedo_ocean")
+
+
 def make_physics_params_spectral_physics(params, grid, dt, *,
                                          radiation: str = "rrtmgp"):
     """Create a spectral PE physics_fn from trainable physics parameters.
@@ -3336,9 +3343,15 @@ def _train_spectral_loop(
     n_samples_total: int | None = None,
     resume_from_dir=None,
     host_staged: bool = False,
+    assert_no_inert_params: bool = False,
 ):
     """Shared training loop for any learned-physics model coupled to the
     spectral PE dycore.
+
+    ``assert_no_inert_params=True`` (physics-parameter models with
+    ``raw_values``) runs the no-inert gate before the first update of a fresh
+    run: the gradient of THIS loop's rollout loss on every sample, and any
+    leaf zero on all of them aborts (``assert_no_inert_over``).
 
     ``host_staged=True`` declares that the PROVIDED ``ic_states`` /
     ``target_carries`` / ``sample_forcings`` were built host-resident
@@ -3932,6 +3945,26 @@ def _train_spectral_loop(
     # the prefetch consumer.
     _host_staged = bool(getattr(chunk_loader, "host_staged", False)) or bool(host_staged)
     _compute_dev = jax.devices()[0] if _host_staged else None
+
+    if (assert_no_inert_params and n_epochs_total > 0
+            and start_epoch == 0 and resume_chunk == 0):
+        # Judged on the training objective itself (the rollout loss the first
+        # epoch differentiates), so a parameter that only acts later in the
+        # rollout counts as live, and no proxy can cancel a real dependence.
+        from legoesm.training.inert_params import assert_no_inert_over
+        _gate_step = _dp_grad_step_for(epoch_plan[0])
+
+        def _gate_grads():
+            for c_ics, c_tgts, c_forc in _iter_epoch_data():
+                for i, (ic, tgt) in enumerate(zip(c_ics, c_tgts)):
+                    fb = c_forc[i] if c_forc is not None else None
+                    if _host_staged:
+                        ic = _stage_tree(ic, _compute_dev)
+                        tgt = _stage_tree(tgt, _compute_dev)
+                        fb = None if fb is None else _stage_tree(fb, _compute_dev)
+                    yield _gate_step(model, ic, tgt, fb)[2].raw_values
+
+        assert_no_inert_over(_gate_grads())
 
     best_loss = float("inf")
     patience_counter = 0
@@ -5869,21 +5902,26 @@ def train_physics_params_spectral(
     physics computations and the spectral dynamical core. Gray radiation runs
     at its documented defaults — it is not trained.
 
-    Trainable parameters (via ``TrainablePhysicsParams``):
+    Trainable parameters (via ``TrainablePhysicsParams``,
+    :data:`SPECTRAL_PHYSICS_TRAINABLE`):
     - ``sbm_tau_c``: SBM convection relaxation timescale
     - ``sbm_RH_ref``: SBM convection reference relative humidity
+    - ``albedo_ocean``: surface albedo override on the rrtmgp path
 
     Returns (trained_params, loss_history).
     """
     # The IDEALIZED 2-family parameter set (convection + radiation), not the
     # campaign "classical" model — the registry's classical is the six-family
     # AIMIPClassicalParams since 2026-08-12.
-    from legoesm.training.trainable_params import TrainablePhysicsParams
+    from legoesm.training.trainable_params import (
+        DEFAULT_TRAINABLE, TrainablePhysicsParams,
+    )
 
     grid = create_gaussian_grid(config.n_max, dealiasing="quadratic")
     sigma = create_sigma_coordinate(config.n_levels, sigma_top=config.sigma_top)
 
-    params = TrainablePhysicsParams.from_defaults()
+    params = TrainablePhysicsParams.from_defaults(
+        [c for c in DEFAULT_TRAINABLE if c.name in SPECTRAL_PHYSICS_TRAINABLE])
     n_p = len(params.raw_values)
     logger.info(f"Physics params: {n_p} trainable ({', '.join(params.raw_values)})")
     for k, v in params.as_dict().items():
@@ -5903,4 +5941,5 @@ def train_physics_params_spectral(
         params, _make_physics_fn,
         grid, sigma, ic_states, target_carries, config,
         host_staged=True,   # dataset loaded host-resident above (#1155)
+        assert_no_inert_params=True,
     )
