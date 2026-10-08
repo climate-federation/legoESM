@@ -77,8 +77,19 @@ its signed-zero unit control proves the distinction.
 ## Mechanical controls, tests, and review
 
 Rank-placement, record-bit, source-order, arm-identity and endpoint-ULP plants
-all exit 2 with `STATUS PLANT-FIRED`. Focused round-178 and record-parser tests
-pass. The required separate read-only Codex review was attempted and returned
+all exit 2 with `STATUS PLANT-FIRED`. Focused round-178, record-parser and
+citation tests pass 54/54. The default and round-178 citation gates pass with
+zero unmapped spans, and the two-line citation plant exits 2.
+
+The required single `tests/ocean/fidelity -n 12` invocation collected 2,817
+tests and reached 99%, with 2,791 passes, 7 skips and 7 pre-existing failures,
+then reproduced the known nonterminal tail and was interrupted without a
+terminal pytest summary. The failures are the four round-35 stamp-scope
+ratchets, the round-129 GYRE record-backed harness pin, the worktree-stamp
+ratchet, and the SI3 scalar-math provenance gate. Twelve tests were unfinished;
+no round-178 focused test failed.
+
+The required separate read-only Codex review was attempted and returned
 **independent review unavailable in-sandbox**: `failed to initialize
 in-process app-server client: Read-only file system`.
 
