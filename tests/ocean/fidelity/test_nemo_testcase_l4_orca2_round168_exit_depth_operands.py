@@ -59,11 +59,13 @@ def test_failed_prediction_is_retained_not_refused():
 
 def test_candidate_self_comparison_is_not_retained_as_evidence():
     report = _report()
+    report["full_rows"] = {"raw_depth_u": _row()}
     report["registered_rows"]["candidate_raw_depth"] = {
         **_row(), "candidate_min": 36.0, "candidate_max": 5392.0,
     }
     result = gate.classify(report)
     assert "candidate_raw_depth" not in result["registered_rows"]
+    assert "raw_depth_u" not in result["full_rows"]
     assert result["raw_depth_observation"] == {
         "count": 41, "minimum": 36.0, "maximum": 5392.0,
     }

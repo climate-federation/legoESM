@@ -1429,6 +1429,22 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 round 168: exit-depth operand split -----------------
+    'ORCA2_OMIP_L4_R166SPG8/BLD/ppsrc/nemo/dynspg_ts.f90:585-595': [
+        ('zhdiv = (   ( zhU(ji,jj) - zhU(ji-1,jj) ) + ( zhV(ji,jj) - zhV(ji,jj-1) )  ) * r1_e1e2t(ji,jj)', 1),
+        ("CALL r95_spg_w2('ssha_e', ssha_e)", 1),
+        11,
+    ],
+    'ORCA2_OMIP_L4_R166SPG8/BLD/ppsrc/nemo/dynspg_ts.f90:633-636': [
+        ('zsshu_a(ji,jj) = r1_2 * r1_e1e2u(ji,jj)', 1),
+        ('zsshv_a(ji,jj) = r1_2 * r1_e1e2v(ji,jj)', 1),
+        4,
+    ],
+    'ORCA2_OMIP_L4_R166SPG8/BLD/ppsrc/nemo/dynspg_ts.f90:837-845': [
+        ('!* Swap', 1),
+        ('vn_e   (:,:) = va_e  (:,:)', 1),
+        9,
+    ],
     # --- ORCA2 round 167: admitted kt=8 exit-depth walk ------------
     'ORCA2_OMIP_L4_R166SPG8/BLD/ppsrc/nemo/dynspg_ts.f90:763-766': [
         ('hu_e (ji,jj) =    hu_0(ji,jj) + zsshu_a(ji,jj)', 1),

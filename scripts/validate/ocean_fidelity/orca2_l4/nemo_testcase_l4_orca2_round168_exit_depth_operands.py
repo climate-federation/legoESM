@@ -202,6 +202,7 @@ def classify(report: dict, plant: str = "none") -> dict:
             "minimum": raw_observation["candidate_min"],
             "maximum": raw_observation["candidate_max"],
         }
+    report.get("full_rows", {}).pop("raw_depth_u", None)
     require(all(row["count"] == report["registered_count"]
                 for row in registered.values()),
             "registered replay coverage moved")
@@ -333,8 +334,6 @@ def measure(deck_root: Path, frame_root: Path, spg_root: Path,
     eta_stencil = eta_unequal | np.roll(eta_unequal, -1, axis=1)
 
     registered_rows = {
-        "candidate_raw_depth": _registered_row(
-            candidate_raw, candidate_raw, registered),
         "candidate_face_ssh": _registered_row(
             candidate_face_ssh, oracle_face_ssh, registered),
         "candidate_exit_depth": _registered_row(
@@ -352,7 +351,6 @@ def measure(deck_root: Path, frame_root: Path, spg_root: Path,
         },
     }
     full_rows = {
-        "raw_depth_u": _score(candidate_raw, candidate_raw, active["u"]),
         "face_ssh_u": _score(candidate_face_ssh, oracle_face_ssh, active["u"]),
         "exit_depth_u": _score(candidate_depth, oracle_depth, active["u"]),
         "exit_inverse_u": _score(
@@ -378,6 +376,11 @@ def measure(deck_root: Path, frame_root: Path, spg_root: Path,
         "source_order": list(SOURCE_ORDER),
         "upstream_order": list(UPSTREAM_ORDER),
         "registered_rows": registered_rows,
+        "raw_depth_observation": {
+            "count": int(np.count_nonzero(registered)),
+            "minimum": float(np.min(candidate_raw[registered])),
+            "maximum": float(np.max(candidate_raw[registered])),
+        },
         "full_rows": full_rows,
         "upstream_rows": upstream_rows,
         "first_upstream_nonbit": first_upstream,
