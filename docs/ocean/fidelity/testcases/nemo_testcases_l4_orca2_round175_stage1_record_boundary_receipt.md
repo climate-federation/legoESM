@@ -76,7 +76,7 @@ advection and the surface source follow at
 the QCO tracer update
 `ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo/stprk3_stg.f90:678-680` and the
 U/V/T/S boundary association
-`ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo/stprk3_stg.f90:791-797`.
+`ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo/stprk3_stg.f90:791-796`.
 
 | Registered row | Result |
 |---|---|
