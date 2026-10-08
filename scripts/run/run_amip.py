@@ -285,14 +285,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     # #1029 ω-side: SB81 α-weighted κT·ω/p conversion (hybrid latlon lane).
     parser.add_argument(
-        "--sb81-omega-conversion", action="store_true",
+        "--sb81-omega-conversion", action=argparse.BooleanOptionalAction,
         default=_DYCORE_DEFAULTS.sb81_omega_conversion,
-        help="Use the SB81 α-weighted energy conversion (ω/p dynamic part) "
-             "on the hybrid lat-lon C-grid — discretization-consistent with "
-             "the geopotential and ln p^SB gradients (#1029). Default OFF: "
-             "the consistent form unmasks the #1029(b) lid-wave instability "
-             "sooner (held_suarez_topo blowup day ~49 -> ~12); opt-in until "
-             "the lid treatment lands.",
+        help="SB81 α-weighted energy conversion (ω/p dynamic part) on the "
+             "hybrid lat-lon C-grid — discretization-consistent with the "
+             "geopotential and ln p^SB gradients (#1029). Default ON; "
+             "--no-sb81-omega-conversion selects the legacy arithmetic form.",
     )
     # Task #25: JIT compile bloat at production scale.  The inline
     # SSP-RK3 calls tendency_fn 3× sequentially → XLA inlines three
@@ -965,6 +963,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Soil-water freeze/thaw (latent zero-curtain) in "
                              "the multilayer land, as in CLM5. Default off "
                              "(sensible-only). Requires --use-multilayer-land.")
+    parser.add_argument("--land-snow-scheme", dest="land_snow_scheme",
+                        choices=("bulk", "layered"),
+                        default=_EXPERIMENT_DEFAULTS.land_snow_scheme,
+                        help="Multilayer-land snowpack: bulk (one SWE reservoir) "
+                             "or layered (5-layer pack solved with the soil "
+                             "column). Requires --use-multilayer-land.")
+    parser.add_argument("--land-snow-emissivity", dest="land_snow_emissivity",
+                        type=float,
+                        default=_EXPERIMENT_DEFAULTS.land_snow_emissivity,
+                        help="Snow thermal-IR emissivity for the layered pack "
+                             "(bounds 0.96-0.995 from Warren 1982 / Hori et al. "
+                             "2006; default 0.97, CLM5).")
     parser.add_argument("--land-soil-ice-impedance-exponent",
                         dest="land_soil_ice_impedance_exponent", type=float,
                         default=_EXPERIMENT_DEFAULTS.land_soil_ice_impedance_exponent,
@@ -988,6 +998,32 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "store, throughfall, wet-leaf evaporation). "
                              "Default off. Requires --use-multilayer-land "
                              "--land-surface-scheme two_leaf.")
+    parser.add_argument("--land-canopy-snow-masking",
+                        dest="land_canopy_snow_masking",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.land_canopy_snow_masking,
+                        help="Trees hide ground snow in the land albedo (CLM5 "
+                             "two-stream over buried leaf + stem area, snow "
+                             "increment only, no canopy snow). Default off. "
+                             "Requires the two-leaf multilayer land with snow "
+                             "albedo feedback.")
+    parser.add_argument("--land-canopy-rh-cap-smoothing-width",
+                        dest="land_canopy_rh_cap_smoothing_width", type=float,
+                        default=_EXPERIMENT_DEFAULTS.land_canopy_rh_cap_smoothing_width,
+                        help="Two-leaf canopy: smoothing width of the canopy-air "
+                             "RH <= 1 cap. Default: the land CanopyConfig value.")
+    parser.add_argument("--land-canopy-zeta-cap-smoothing-width",
+                        dest="land_canopy_zeta_cap_smoothing_width", type=float,
+                        default=_EXPERIMENT_DEFAULTS.land_canopy_zeta_cap_smoothing_width,
+                        help="Two-leaf canopy: smoothing width of the stable "
+                             "Monin-Obukhov zeta <= 0.5 cap. Default: the land "
+                             "CanopyConfig value.")
+    parser.add_argument("--land-canopy-most-n-iters",
+                        dest="land_canopy_most_n_iters", type=int,
+                        default=_EXPERIMENT_DEFAULTS.land_canopy_most_n_iters,
+                        help="Two-leaf canopy: fixed-point iterations of the "
+                             "above-canopy Monin-Obukhov solve. Default: the "
+                             "land CanopyConfig value.")
     parser.add_argument("--land-snow-tau-days", dest="land_snow_tau_days",
                         type=float, default=_EXPERIMENT_DEFAULTS.land_snow_tau_days,
                         help="Snow-albedo age e-folding time [days]. Default: "
@@ -1719,6 +1755,28 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "throttled by the soil's own moisture state, "
                              "REPLACING the static --mpas-land-beta over "
                              "land. Requires --use-multilayer-land.")
+    parser.add_argument("--mpas-land-stress-from-land",
+                        action=argparse.BooleanOptionalAction, default=None,
+                        dest="mpas_land_stress_from_land",
+                        help="MPAS lane: surface stress over the land fraction "
+                             "from the land model (its roughness / canopy drag, "
+                             "rho u*^2) instead of the atmosphere's bulk "
+                             "(ocean-roughness) call; heat fluxes unchanged. "
+                             "Unset = AUTO (on wherever it applies: MPAS, "
+                             "multilayer land with --mpas-land-beta-soil, a "
+                             "turbulence scheme taking injected fluxes, "
+                             "two_leaf/simple_seb); --no-... = old bulk stress.")
+    parser.add_argument("--mpas-ocean-flux-on-ocean-surface",
+                        action=argparse.BooleanOptionalAction, default=False,
+                        dest="mpas_ocean_flux_on_ocean_surface",
+                        help="MPAS lane, land-flux handoff on: evaluate the "
+                             "non-land fraction's bulk surface fluxes on the "
+                             "ocean/ice surface (SST/SIC blend) instead of on "
+                             "the land-blended surface temperature/humidity "
+                             "(#1320). Requires --mpas-land-beta-soil, the "
+                             "land model's stress over land (--mpas-land-"
+                             "stress-from-land, default auto) and radiation "
+                             "!= none.")
     parser.add_argument("--mpas-land-params-refresh",
                         action=argparse.BooleanOptionalAction, default=True,
                         dest="mpas_land_params_refresh",
@@ -2375,7 +2433,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         sponge_width_m=args.sponge_width_m,
         sponge_shape=args.sponge_shape,
         sponge_scale_height_m=args.sponge_scale_height_m,
-        # #1029 ω-side SB81 conversion (default OFF -> bit-identical).
+        # #1029 ω-side SB81 conversion (default ON; --no-sb81-omega-conversion = legacy).
         sb81_omega_conversion=args.sb81_omega_conversion,
         # Task #25: time integrator selection.
         time_integrator=args.time_integrator,
@@ -2534,9 +2592,12 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         snow_age_activation_K=args.snow_age_activation_K,
         land_snow_tau_days=args.land_snow_tau_days,
         land_soil_freeze_thaw=args.land_soil_freeze_thaw,
+        land_snow_scheme=args.land_snow_scheme,
+        land_snow_emissivity=args.land_snow_emissivity,
         land_soil_ice_impedance_exponent=args.land_soil_ice_impedance_exponent,
         land_canopy_stress_b0=args.land_canopy_stress_b0,
         land_canopy_interception=args.land_canopy_interception,
+        land_canopy_snow_masking=args.land_canopy_snow_masking,
         cloud_diagnostic_condensate_scheme=args.cloud_diagnostic_condensate_scheme,
         cloud_adiabatic_lwc_rate=args.cloud_adiabatic_lwc_rate,
         convective_cloud=args.convective_cloud,
@@ -2592,6 +2653,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
                         if args.mpas_land_beta is not None
                         else _EXPERIMENT_DEFAULTS.mpas_land_beta),
         mpas_land_beta_soil=args.mpas_land_beta_soil,
+        mpas_land_stress_from_land=args.mpas_land_stress_from_land,
+        mpas_ocean_flux_on_ocean_surface=args.mpas_ocean_flux_on_ocean_surface,
         mpas_land_params_refresh=args.mpas_land_params_refresh,
         mpas_qv_smooth_del2_m2s=(
             args.mpas_qv_smooth_del2_m2s
@@ -2612,6 +2675,9 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         morrison_sed_cfl_substeps_strict=args.morrison_sed_cfl_substeps_strict,
         morrison_do_graupel=args.morrison_do_graupel,
         morrison_warm_rain_incloud=args.morrison_warm_rain_incloud,
+        land_canopy_rh_cap_smoothing_width=args.land_canopy_rh_cap_smoothing_width,
+        land_canopy_zeta_cap_smoothing_width=args.land_canopy_zeta_cap_smoothing_width,
+        land_canopy_most_n_iters=args.land_canopy_most_n_iters,
         hines_total_rms_wind=(
             args.hines_total_rms_wind
             if args.hines_total_rms_wind is not None

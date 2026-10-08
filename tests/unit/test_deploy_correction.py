@@ -390,6 +390,18 @@ def test_columns_gather_matches_explicit_indices():
         np.asarray(local.clubb_lite.C_K), np.asarray(ov.clubb_lite.C_K)[[0, 5, 10, 15]])
 
 
+def test_columns_gather_preserves_every_other_override_field():
+    """Slicing must not reset selectors carried on the override (#1782 codex)."""
+    ov = _global_override(16)._replace(liquid_partition=True,
+                                       update_interval_steps=3)
+    local = slice_override_columns(ov, jnp.array([0, 5]))
+    assert local.clubb_lite.C_K.shape == (2,)
+    # Every field but the sliced one, so a future selector is covered too.
+    for f in ov._fields:
+        if f != "clubb_lite":
+            assert getattr(local, f) == getattr(ov, f), f
+
+
 def test_columns_gather_empty_rank_is_clean_zero_column_slice():
     """codex-review iter 404: a ZERO-column rank (more MPI ranks than cells, or a
     custom/unstructured decomposition) must slice to an empty per-column override —

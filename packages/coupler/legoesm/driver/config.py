@@ -19,6 +19,13 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from legoesm import constants
+from legoesm.land import snow_column as _snow_column
+
+# Snow emissivity: ONE default and ONE legal range, both owned by the snow
+# column's parameter spec.
+_SNOW_EMISSIVITY_DEFAULT = _snow_column.SnowColumnConfig._field_defaults["emissivity_snow"]
+_SNOW_EMISSIVITY_BOUNDS = (
+    _snow_column.__param_spec__["SnowColumnConfig"]["params"]["emissivity_snow"]["bounds"])
 
 # Canonical AIMIP variant set.  Single source of truth — imported by
 # ``scripts/run/run_aimip.py`` and the ``validate_strict`` rule below.
@@ -288,14 +295,11 @@ class DycoreConfig(NamedTuple):
     mpas_conservative_tracer_clamp: bool = True
     # #1029 ω-side: SB81 α-weighted κT·ω/p energy conversion on the hybrid
     # lat-lon C-grid lane (discretization-consistent with the geopotential
-    # and the momentum/thermo ln p^SB gradients).  Default OFF — the
-    # consistent form removes the arithmetic form's accidental damping of
-    # the #1029(b) lid-amplified orographic-wave mode (held_suarez_topo
-    # latlon blowup day ~49 -> ~12, A/B job 9130802); opt-in until the lid
-    # treatment lands.  Threaded by ``component_factory`` (mirrors the
-    # sponge/polar-filter passthrough).  Appended last to preserve
-    # positional ABI (codex #1029 r3 #2).
-    sb81_omega_conversion: bool = False
+    # and the momentum/thermo ln p^SB gradients).  Default ON; False keeps
+    # the legacy arithmetic ω/p form for A/B only.  Threaded by
+    # ``component_factory`` (mirrors the sponge/polar-filter passthrough).
+    # Appended last to preserve positional ABI (codex #1029 r3 #2).
+    sb81_omega_conversion: bool = True
     # Separate scale for the horizontal THERMAL diffusivity K_h (None = follow
     # a_h_scale exactly as before, byte-identical).  Decouples the circulation
     # lever (momentum nu_del2) from the thermal smoothing that damps vertical
@@ -1209,6 +1213,16 @@ class ExperimentConfig(NamedTuple):
     # with it OFF. Library default False = sensible-only (legacy): whether the
     # default should move is an open user decision, so decks set it explicitly.
     land_soil_freeze_thaw: bool = False
+    # Multilayer-land snowpack: "bulk" (one SWE reservoir, energy-limited melt at
+    # the soil skin — the library default) or "layered" (legoesm.land.snow_column:
+    # five equal-mass layers solved implicitly with the soil column, enthalpy
+    # phase change, percolation, rain-on-snow).  Whether the library default
+    # should move is an open user decision, so decks set it explicitly.
+    land_snow_scheme: str = "bulk"
+    # Thermal-IR emissivity of snow for the layered pack's surface blend.  The
+    # default and legal range are the snow_column parameter spec's (observations:
+    # Warren 1982; Hori et al. 2006), so the two doors cannot disagree.
+    land_snow_emissivity: float = _SNOW_EMISSIVITY_DEFAULT
     # Frozen-soil ice impedance exponent e (CLM5 e_ice): soil conductivity is
     # multiplied by 10**(-e * ice fraction).  Active only with
     # land_soil_freeze_thaw; 6 = CLM5 (user 2026-09-28), 0 = no impedance.
@@ -1223,6 +1237,12 @@ class ExperimentConfig(NamedTuple):
     # InterceptionConfig()): a prognostic canopy water store, throughfall and
     # wet-leaf evaporation. Default off; decks set it explicitly.
     land_canopy_interception: bool = False
+    # Trees hide ground snow in the land column albedo: CLM5 two-stream over the
+    # snow-buried leaf + stem area of the dominant plant type, applied to the
+    # snow increment only (snow-free albedo unchanged), no canopy snow (a
+    # bare-branch bound). Two-leaf canopy on the multilayer land only. Off by
+    # default pending the A/B (user 2026-10-03).
+    land_canopy_snow_masking: bool = False
     # Run the multilayer land tile in EXACTLY the configuration its baked
     # per-PFT tables were calibrated under (the single definition lives in
     # ``legoesm.land.config.calibrated_multilayer_setup``): MOST surface
@@ -1544,6 +1564,21 @@ class ExperimentConfig(NamedTuple):
     # measured to deliver about a tenth of the solved flux.  With it off the mesh
     # lane discards all three and keeps the static ``mpas_land_beta``.
     mpas_land_beta_soil: bool = False
+    # MPAS lane: the surface STRESS over the land fraction comes from the land
+    # model (its own roughness / canopy drag and stability, rho u*^2) instead of
+    # the atmosphere's bulk call, which on the non-tiled surface uses the bulk
+    # scheme's OCEAN roughness over land too.  Heat and moisture fluxes are the
+    # land's already.  Tri-state (user decision 2026-10-03, "a major default"):
+    # None = AUTO, on exactly where it applies (see
+    # ``resolve_mpas_land_stress_from_land``); True = required (refused where it
+    # cannot apply); False = explicit off, the old bulk stress (comparison runs).
+    mpas_land_stress_from_land: bool | None = None
+    # MPAS lane, land-flux handoff on (#1320 stage 1): the NON-LAND fraction's
+    # bulk surface fluxes (heat, water, stress) are evaluated on the ocean/ice
+    # surface -- the SST/SIC blend, without the land skin and without the land
+    # lapse correction -- instead of on the land-blended surface temperature
+    # and humidity.  The land fraction keeps the land model's own fluxes.
+    mpas_ocean_flux_on_ocean_surface: bool = False
     # MPAS lane, interactive multilayer land: rebuild the two-leaf canopy's
     # surface parameters (LAI, canopy height, soil-colour albedo from the top
     # soil layer's wetness) from the surfdata climatology at every land step,
@@ -1772,7 +1807,7 @@ class ExperimentConfig(NamedTuple):
     #   "legacy_dual" (default, byte-identical): the slab debits its OWN
     #       constant-C_H/C_E no-stability bulk fluxes while the atmosphere's
     #       turbulence scheme debits stability-dependent surface-layer fluxes
-    #       (compute_surface_fluxes, config.surface) from the SAME interface —
+    #       (surface_fluxes_at_lowest_level, config.surface) from the SAME interface —
     #       two different flux laws, measured same-state mismatch
     #       +75..+152 W/m^2 (a spurious skin heat source; energy is NOT
     #       conserved at the interface).  Kept as the default only for
@@ -1871,6 +1906,18 @@ class ExperimentConfig(NamedTuple):
     clubb_gamma_coefb: float | None = None
     clubb_beta: float | None = None
     clubb_c_k10: float | None = None
+    # Two-leaf canopy solver smoothing widths (CanopyConfig.rh_cap_smoothing_
+    # width / zeta_cap_smoothing_width): the canopy-air RH <= 1 cap and the
+    # stable Monin-Obukhov zeta <= 0.5 cap are smooth mins of these widths so
+    # the canopy Newton solve has no kink.  Applied AFTER the land calibration
+    # (which rebuilds the canopy config), so a deck value always reaches the
+    # solve.  None keeps CanopyConfig's value; the production deck names both.
+    # Range: CanopyConfig.validate (one range, owned by the land package).
+    land_canopy_rh_cap_smoothing_width: float | None = None
+    land_canopy_zeta_cap_smoothing_width: float | None = None
+    # CanopyConfig.most_n_iters: fixed-point iterations of the above-canopy
+    # Monin-Obukhov solve (same placement and None semantics as the widths).
+    land_canopy_most_n_iters: int | None = None
 
     def _liquid_partition_resolved(self) -> bool:
         """Is CLUBB's cloud-liquid exchange selected, by ANY route?
@@ -2200,6 +2247,20 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 f"land_update_seconds must be a finite value >= 0 "
                 f"(0 = every step), got {self.land_update_seconds}")
+        if self.land_snow_scheme not in ("bulk", "layered"):
+            errors.append(
+                f"land_snow_scheme must be 'bulk' or 'layered', got "
+                f"{self.land_snow_scheme!r}")
+        if self.land_snow_scheme == "layered" and not self.use_multilayer_land:
+            errors.append(
+                "land_snow_scheme='layered' requires use_multilayer_land: only "
+                "the multilayer land has the layered snowpack — the knob would be "
+                "silently inert.")
+        _eps_lo, _eps_hi = _SNOW_EMISSIVITY_BOUNDS
+        if not (_eps_lo <= self.land_snow_emissivity <= _eps_hi):
+            errors.append(
+                f"land_snow_emissivity must be in [{_eps_lo}, {_eps_hi}] (the "
+                f"snow_column parameter spec), got {self.land_snow_emissivity!r}")
         if self.convective_buoyancy_death_memory and self.convection != "tiedtke":
             errors.append(
                 "convective_buoyancy_death_memory=True requires "
@@ -2229,6 +2290,17 @@ class ExperimentConfig(NamedTuple):
                 "require use_multilayer_land with land_surface_scheme="
                 "'two_leaf': only the two-leaf canopy reads them — the knob "
                 "would be silently inert.")
+        if self.land_canopy_snow_masking and not (
+                self.use_multilayer_land and self.snow_albedo_feedback
+                and self.land_surface_scheme == "two_leaf"):
+            errors.append(
+                "land_canopy_snow_masking requires use_multilayer_land, "
+                "snow_albedo_feedback and land_surface_scheme='two_leaf': it is "
+                "implemented only there and would be silently inert elsewhere.")
+        if self.land_canopy_snow_masking and self.land_snow_scheme == "layered":
+            errors.append(
+                "land_canopy_snow_masking is not supported with land_snow_scheme="
+                "'layered' yet (the masking would not read the pack's snow).")
         if self.land_update_seconds > 0 and not self.use_multilayer_land:
             errors.append(
                 "land_update_seconds > 0 requires use_multilayer_land: the "
@@ -3670,6 +3742,28 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 f"morrison_sed_cfl_substeps_max={_nmm_max} requires "
                 f"microphysics='morrison' (got {self.microphysics!r})")
+        _rhw = self.land_canopy_rh_cap_smoothing_width
+        _zw = self.land_canopy_zeta_cap_smoothing_width
+        _mi = self.land_canopy_most_n_iters
+        if _rhw is not None or _zw is not None or _mi is not None:
+            if self.land_surface_scheme != "two_leaf" or not self.use_multilayer_land:
+                errors.append(
+                    "land_canopy_* (smoothing widths / most_n_iters) set but "
+                    f"land_surface_scheme={self.land_surface_scheme!r}, use_multilayer_land="
+                    f"{self.use_multilayer_land!r}: only the two-leaf canopy of the "
+                    "multilayer land reads them, so the value would be inert")
+            else:
+                from legoesm.land.canopy.config import CanopyConfig
+                _cc = CanopyConfig()
+                try:
+                    _cc._replace(**({} if _rhw is None else
+                                    {"rh_cap_smoothing_width": float(_rhw)}),
+                                 **({} if _zw is None else
+                                    {"zeta_cap_smoothing_width": float(_zw)}),
+                                 **({} if _mi is None else {"most_n_iters": _mi})
+                                 ).validate()
+                except ValueError as exc:
+                    errors.append(f"land_canopy_*: {exc}")
         for _nm in ("morrison_sed_cfl_substeps", "morrison_sed_cfl_substeps_strict",
                     "morrison_do_graupel", "morrison_warm_rain_incloud"):
             _v = getattr(self, _nm)
@@ -4122,6 +4216,34 @@ class ExperimentConfig(NamedTuple):
                     "LEGOESM_CLIMATEEVAL_DATA_ROOT environment variable. "
                     "See docs/user-guide/climateeval_evaluation.md."
                 )
+
+        if self.mpas_ocean_flux_on_ocean_surface:
+            _ok, _why = mpas_land_flux_handoff_eligibility(self)
+            if _ok and self.radiation == "none":
+                _ok, _why = False, ("radiation='none' builds no SST anchor "
+                                    "(the ocean surface it needs)")
+            if not _ok:
+                errors.append(
+                    "mpas_ocean_flux_on_ocean_surface=True separates the "
+                    "non-land fraction's surface fluxes from the land's, but "
+                    f"{_why}; it would be silently inert.")
+            elif not resolve_mpas_land_stress_from_land(self):
+                # The bulk stress covers the whole cell unless the land's own
+                # stress replaces it over land; evaluated on the OCEAN surface
+                # it would then misstate the land share's stability.
+                errors.append(
+                    "mpas_ocean_flux_on_ocean_surface=True needs the land "
+                    "model's stress over the land fraction "
+                    "(mpas_land_stress_from_land unset or true, eligible); "
+                    "otherwise the ocean-surface stress covers the land too.")
+
+        if self.mpas_land_stress_from_land is True:
+            _ok, _why = mpas_land_stress_eligibility(self)
+            if not _ok:
+                errors.append(
+                    "mpas_land_stress_from_land=True hands the land model's "
+                    f"surface stress to the boundary layer, but {_why}; it "
+                    "would be silently inert. Leave it unset (auto) or false.")
 
         # Seasonal insolation alignment (radiation-only; see the field doc).
         if self.insolation_start_doy is not None:
@@ -4785,3 +4907,59 @@ def load_experiment_config(path: Path | str, *,
     """
     with open(path) as f:
         return experiment_config_from_dict(json.load(f), strict=strict)
+
+
+# Land schemes whose exported stress is the land's own roughness-controlled drag
+# on the MPAS lane (both run the coupled land with a fixed-roughness MOST law;
+# clm_ml is refused on this lane by run_amip).
+_LAND_STRESS_SCHEMES = ("two_leaf", "simple_seb")
+
+
+def mpas_land_flux_handoff_eligibility(cfg) -> tuple[bool, str]:
+    """Does ``cfg`` hand the land model's own surface fluxes to the MPAS
+    boundary layer?  ``(eligible, reason_if_not)``; every predicate is static:
+    the MPAS lane, the interactive multilayer land, its flux handoff
+    (``mpas_land_beta_soil`` publishes the land's fluxes) and a turbulence
+    kernel that accepts an injected surface flux.
+    """
+    # The lane predicate mirrors ModelDriver.run's dispatch (fv3_duo first,
+    # then grid_type == "mpas" -> _run_mpas), the only lane that consumes it.
+    if (cfg.dycore.discretization == "fv3_duo"
+            or cfg.grid.grid_type != "mpas"):
+        return False, "this is not the MPAS lane"
+    if not cfg.use_multilayer_land:
+        return False, "use_multilayer_land is off (no land model)"
+    if not cfg.mpas_land_beta_soil:
+        return False, ("mpas_land_beta_soil is off (the land's fluxes are not "
+                       "handed to the atmosphere)")
+    from legoesm.atmosphere.physics.turbulence.integration import (
+        schemes_accepting_surface_flux,
+    )
+    if cfg.turbulence not in schemes_accepting_surface_flux():
+        return False, (f"turbulence={cfg.turbulence!r} takes no injected "
+                       "surface flux")
+    return True, ""
+
+
+def mpas_land_stress_eligibility(cfg) -> tuple[bool, str]:
+    """Can the land model's surface stress reach the boundary layer in ``cfg``?
+
+    Returns ``(eligible, reason_if_not)``: the land-flux handoff
+    (:func:`mpas_land_flux_handoff_eligibility`) plus a land scheme whose
+    stress is roughness-controlled.
+    """
+    _ok, _why = mpas_land_flux_handoff_eligibility(cfg)
+    if not _ok:
+        return _ok, _why
+    if cfg.land_surface_scheme not in _LAND_STRESS_SCHEMES:
+        return False, (f"land_surface_scheme={cfg.land_surface_scheme!r} is not "
+                       f"one of {_LAND_STRESS_SCHEMES} on this lane")
+    return True, ""
+
+
+def resolve_mpas_land_stress_from_land(cfg) -> bool:
+    """The resolved value of the tri-state ``mpas_land_stress_from_land``:
+    None (auto) -> on exactly where eligible; True/False as given."""
+    if cfg.mpas_land_stress_from_land is None:
+        return mpas_land_stress_eligibility(cfg)[0]
+    return bool(cfg.mpas_land_stress_from_land)

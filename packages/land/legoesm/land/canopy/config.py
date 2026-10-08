@@ -157,6 +157,12 @@ CLM_ML_STOMATAL_GS_TYPE = {"medlyn": 0, "ball_berry": 1, "wue": 2}
 VALID_CLM_ML_STOMATAL_MODELS = tuple(CLM_ML_STOMATAL_GS_TYPE)
 
 
+# Largest accepted smooth-RH-cap width: at 0.1, RH_c at saturation is 7% low.
+RH_CAP_WIDTH_MAX = 0.1
+# Same guard for the stable-stability cap width (zeta <= 0.5).
+ZETA_CAP_WIDTH_MAX = 0.1
+
+
 class CanopyConfig(NamedTuple):
     """Physics settings for the canopy energy balance solver."""
 
@@ -235,6 +241,33 @@ class CanopyConfig(NamedTuple):
     # positional / tuple reconstruction of a pre-field CanopyConfig stays aligned
     # and defaults this to the legacy True.
     stress_b0: bool = True
+    # Width [-] of the smooth cap on canopy-air relative humidity used by the
+    # stomatal model, RH_c = r - w*softplus((r-1)/w) with r = e/e_sat(Tc),
+    # instead of the hard clip(r, 0, 1).  The hard cap's kink stalled the canopy
+    # Newton solve wherever the canopy air saturates (warm wet ground under a
+    # canopy): 857 captured stalled production columns converged 105 -> 697.
+    # Intended physics change, not bit-identical: RH_c is lowered by w*ln2 at
+    # saturation and by <5e-4 below r = 0.97, so Ball-Berry (gs - b0) is at most
+    # 0.7% lower.  The 857-column replay still leaves 160 stalled (night: An
+    # floored at 0, Ci at its 0.9*Ca clamp) -- a separate kink.  Must be > 0.
+    # Static under jit (excluded from __param_spec__ tuning).  Appended at the
+    # end of the tuple (positional ABI).
+    rh_cap_smoothing_width: float = 0.01
+    # Smoothing width [-] of the stable Monin-Obukhov cap zeta <= 0.5 (CLM5
+    # clips hard).  The hard clip is a derivative kink in zeta, ustar, rah and
+    # Rb that stalls the canopy Newton solve in stable low-wind air; 857
+    # captured slow production columns converged 697 -> 746 at 0.05.  zeta at
+    # the cap reads 0.5 - w*ln2.  Must be > 0.  Static under jit (excluded
+    # from __param_spec__ tuning).  Appended at the end of the tuple.
+    zeta_cap_smoothing_width: float = 0.05
+    # Fixed-point iterations of the above-canopy Monin-Obukhov solve (CLM5
+    # FrictionVelocity form, Zeng 1998 bulk-Ri start).  The loop always
+    # converges (no oscillation measured), but 5 iterations left unstable
+    # columns short: on 5760 captured production columns aerodynamic
+    # resistance was off by up to 11% (p99 2.3%), sensible heat by up to
+    # 13.5 W/m2; at 10 the worst error is 0.25%.  Default 5 -> 10 (user
+    # 2026-09-30).  Appended at the end of the tuple.
+    most_n_iters: int = 10
 
     def validate(self) -> "CanopyConfig":
         """Fail-early check of the static string-dispatch fields.
@@ -255,6 +288,19 @@ class CanopyConfig(NamedTuple):
                 f"must be one of {VALID_LE_MODULES} ('BT'=bulk transfer, "
                 f"'PM'=Penman-Monteith). The internal dispatch is a bare "
                 f"'else: # PM', so a typo would silently run PM.")
+        if not 0.0 < self.rh_cap_smoothing_width <= RH_CAP_WIDTH_MAX:
+            raise ValueError(
+                f"rh_cap_smoothing_width must be in (0, {RH_CAP_WIDTH_MAX}] (the smooth "
+                "relative-humidity cap divides by it), got "
+                f"{self.rh_cap_smoothing_width!r}")
+        if not 0.0 < self.zeta_cap_smoothing_width <= ZETA_CAP_WIDTH_MAX:
+            raise ValueError(
+                f"zeta_cap_smoothing_width must be in (0, {ZETA_CAP_WIDTH_MAX}] "
+                "(the smooth stability cap divides by it), got "
+                f"{self.zeta_cap_smoothing_width!r}")
+        if not (isinstance(self.most_n_iters, int) and self.most_n_iters >= 1):
+            raise ValueError("most_n_iters must be a positive int, got "
+                             f"{self.most_n_iters!r}")
         return self
 
 
@@ -266,6 +312,12 @@ __param_spec__ = {
         "scheme_key": "land.two_leaf_canopy",
         "excluded": {
             "tol": "numerics: Newton-Raphson convergence tolerance",
+            "rh_cap_smoothing_width": "numerics: smoothing width of the "
+                                      "RH_c <= 1 cap (keeps the canopy "
+                                      "Newton residual differentiable)",
+            "zeta_cap_smoothing_width": "numerics: smoothing width of the "
+                                        "stable zeta <= 0.5 cap (keeps the "
+                                        "canopy Newton residual differentiable)",
         },
         "params": {
             "epsf": {
@@ -493,6 +545,17 @@ class CanopyLandParams(NamedTuple):
     ALB_VIS_SAT: jax.Array | None = None
     ALB_NIR_DRY: jax.Array | None = None
     ALB_NIR_SAT: jax.Array | None = None
+
+    # ---- Canopy structure for the canopy-over-snow albedo (optional) ----
+    # Dominant-PFT stem area index [m2/m2], canopy-bottom height [m] and CLM5
+    # PFT index (0..16, stored as float so float pytree maps stay valid), same
+    # dominant-PFT convention as ``LAI``.  Read ONLY by the canopy snow masking
+    # (``MultiLayerLandConfig.canopy_snow_masking``); deliberately NOT named
+    # ``SAI``, which the interception store and the CLM-ML adapters already
+    # read, so building them changes nothing with the switch off.
+    SAI_dom: jax.Array | None = None
+    hbot_dom: jax.Array | None = None
+    pft_dom: jax.Array | None = None
 
 
 # NOTE: ``CanopyLandConfig`` has been removed.  Canopy is now a surface

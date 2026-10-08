@@ -303,6 +303,9 @@ multilayer_soil_depth: 3.0
 # Soil freeze/thaw ON (user 2026-09-26), as in CLM5 and as the land IC spin-up
 # ran; the land calibration's tables were fitted with it off.
 land_soil_freeze_thaw: true
+# Snowpack: explicit bulk (one SWE reservoir), as every prior production run.
+# Moving production to the layered pack (bulk -> layered) is an OPEN user decision.
+land_snow_scheme: bulk
 # Frozen soil impedes water flow, CLM5 form 10**(-e * ice fraction), e = 6
 # (user 2026-09-28).  Active because freeze/thaw is on.
 land_soil_ice_impedance_exponent: 6.0
@@ -314,7 +317,18 @@ land_surface_scheme: two_leaf
 # records them; changing either is a labelled land baseline, not a default flip.
 land_canopy_stress_b0: true
 land_canopy_interception: false
+# Two-leaf canopy solver smoothing widths, named so every run records them
+# (user 2026-09-30): canopy-air RH <= 1 cap and stable zeta <= 0.5 cap.
+land_canopy_rh_cap_smoothing_width: 0.01
+land_canopy_zeta_cap_smoothing_width: 0.05
+# Above-canopy Monin-Obukhov fixed-point iterations: 5 -> 10 (user 2026-09-30;
+# 5 left unstable columns up to 11% off in aerodynamic resistance).
+land_canopy_most_n_iters: 10
 mpas_land_beta_soil: true
+# Surface drag over land from the land model's own roughness / canopy drag, not
+# the ocean bulk law (user 2026-10-03: "a major default"; Dec 2001 45-70N land:
+# the boundary layer received 0.04 Pa vs land model 0.23 vs ERA5 0.26).
+mpas_land_stress_from_land: true
 mpas_land_params_refresh: true  # seasonal LAI / canopy height / wet-soil
                                 # albedo rebuilt every land step, as the
                                 # offline calibration runs the tables (user

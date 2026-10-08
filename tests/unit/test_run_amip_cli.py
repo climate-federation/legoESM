@@ -939,6 +939,33 @@ def test_mpas_land_beta_soil_flag_flows_to_config():
     assert cfg_off.mpas_land_beta_soil is False
     # validate_strict inert-corner guards live in
     # test_mpas_multilayer_land_port (refusal without multilayer land).
+def test_mpas_land_stress_from_land_flag_flows_to_config():
+    """--mpas-land-stress-from-land round-trip; unset = AUTO (None), resolved
+    from the run's eligibility; --no-... is an explicit off."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.mpas_land_stress_from_land is None
+    for flag, want in (("--mpas-land-stress-from-land", True),
+                       ("--no-mpas-land-stress-from-land", False)):
+        cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+            "--dataset", "analytical", flag]), parser))
+        assert cfg.mpas_land_stress_from_land is want
+
+
+def test_mpas_ocean_flux_on_ocean_surface_flag_flows_to_config():
+    """--mpas-ocean-flux-on-ocean-surface round-trip; default off."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.mpas_ocean_flux_on_ocean_surface is False
+    for flag, want in (("--mpas-ocean-flux-on-ocean-surface", True),
+                       ("--no-mpas-ocean-flux-on-ocean-surface", False)):
+        cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+            "--dataset", "analytical", flag]), parser))
+        assert cfg.mpas_ocean_flux_on_ocean_surface is want
+
+
 def test_land_surface_scheme_validate_strict_rejects_unknown():
     """validate_strict() rejects an unknown surface scheme (dispatch hardening —
     a typo must fail early, not silently fall through in model_driver)."""
@@ -2815,17 +2842,17 @@ def test_top_sponge_flags_flow_to_dycore_config():
 
 def test_sb81_omega_conversion_flag_flows_to_dycore_config():
     """#1029 ω-side: --sb81-omega-conversion round-trips into DycoreConfig;
-    default OFF (the SB81 conversion is opt-in until the #1029(b) lid
-    treatment lands)."""
+    default ON (energy-consistent SB81 conversion); --no-... selects the
+    legacy arithmetic form."""
     parser = build_arg_parser()
-    cfg_off = build_config_from_args(_postprocess_args(
+    cfg_default = build_config_from_args(_postprocess_args(
         parser.parse_args(["--dataset", "analytical"]), parser))
-    assert cfg_off.dycore.sb81_omega_conversion is False   # default OFF
+    assert cfg_default.dycore.sb81_omega_conversion is True   # default ON
 
-    cfg_on = build_config_from_args(_postprocess_args(parser.parse_args([
-        "--dataset", "analytical", "--sb81-omega-conversion",
+    cfg_off = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--no-sb81-omega-conversion",
     ]), parser))
-    assert cfg_on.dycore.sb81_omega_conversion is True
+    assert cfg_off.dycore.sb81_omega_conversion is False
 
 
 def test_budget_ledger_flag_flows_to_output_config():
@@ -4634,6 +4661,43 @@ def test_fv3_duo_kessler_reaches_the_config_and_the_wall():
                                  create_sigma_coordinate(5))
 
 
+def test_land_snow_scheme_and_emissivity_round_trip_and_decks():
+    """--land-snow-scheme / --land-snow-emissivity reach ExperimentConfig, and each
+    deck states its snowpack explicitly: both bulk (moving production to the
+    layered pack is an open user decision)."""
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    parser = build_arg_parser()
+    base = ["--dataset", "analytical", "--use-multilayer-land"]
+    cfg0 = build_config_from_args(_postprocess_args(parser.parse_args(base), parser))
+    assert cfg0.land_snow_scheme == "bulk"
+    cfg1 = build_config_from_args(_postprocess_args(parser.parse_args(
+        base + ["--land-snow-scheme", "layered", "--land-snow-emissivity", "0.975"]),
+        parser))
+    assert cfg1.land_snow_scheme == "layered"
+    assert cfg1.land_snow_emissivity == 0.975
+    for deck, want in (("amip_production.yaml", "bulk"),
+                       ("amip_sundqvist_l36.yaml", "bulk")):
+        p = build_arg_parser()
+        rows = load_yaml_config(str(_repo_root() / "config" / "amip" / deck), p)
+        assert rows.get("land_snow_scheme") == want, deck
+        p.set_defaults(**rows)
+        cfg = build_config_from_args(_postprocess_args(
+            p.parse_args(_AMIP_DUMMY_PATHS), p))
+        assert cfg.land_snow_scheme == want, deck
+
+
+@pytest.mark.parametrize("argv, match", [
+    (["--land-snow-scheme", "layered"], "use_multilayer_land"),
+    (["--use-multilayer-land", "--land-snow-emissivity", "0.9"], "land_snow_emissivity"),
+])
+def test_land_snow_options_refused_when_invalid(argv, match):
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args(
+        ["--dataset", "analytical"] + argv), parser))
+    with pytest.raises(ValueError, match=match):
+        cfg.validate_strict()
+
+
 def test_convective_buoyancy_death_memory_reaches_tiedtke_config():
     """--convective-buoyancy-death-memory must reach the Tiedtke scheme config
     the kernel is built from, not stop at ExperimentConfig."""
@@ -4747,3 +4811,88 @@ def test_mpas_land_params_refresh_flag_flows_to_config():
     cfg_pin = build_config_from_args(_postprocess_args(parser2.parse_args([
         "--dataset", "analytical"]), parser2))
     assert cfg_pin.mpas_land_params_refresh is False
+
+
+def test_land_canopy_snow_masking_round_trip_and_refusal():
+    """Off by default; the flag reaches ExperimentConfig both ways; the
+    production deck does not set it (A/B arm only, user 2026-10-03); on a lane
+    where it would be inert, validation refuses it."""
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    parser = build_arg_parser()
+    base = ["--dataset", "analytical", "--use-multilayer-land",
+            "--snow-albedo-feedback"]
+    cfg0 = build_config_from_args(_postprocess_args(parser.parse_args(base), parser))
+    assert cfg0.land_canopy_snow_masking is False
+    cfg1 = build_config_from_args(_postprocess_args(parser.parse_args(
+        base + ["--land-canopy-snow-masking"]), parser))
+    assert cfg1.land_canopy_snow_masking is True
+    # the production deck does not set it, and with the switch on it validates
+    p = build_arg_parser()
+    rows = load_yaml_config(
+        str(_repo_root() / "config" / "amip" / "amip_production.yaml"), p)
+    assert "land_canopy_snow_masking" not in rows
+    p.set_defaults(**rows)
+    prod_on = build_config_from_args(_postprocess_args(
+        p.parse_args(_AMIP_DUMMY_PATHS + ["--land-canopy-snow-masking"]), p))
+    assert prod_on.land_canopy_snow_masking is True
+    prod_on.validate_strict()
+    bad = build_config_from_args(_postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--land-canopy-snow-masking"]), parser))
+    with pytest.raises(ValueError, match="land_canopy_snow_masking"):
+        bad.validate_strict()
+
+
+def test_land_canopy_smoothing_widths_round_trip_and_validate():
+    parser = build_arg_parser()
+    cfg0 = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg0.land_canopy_rh_cap_smoothing_width is None
+    assert cfg0.land_canopy_zeta_cap_smoothing_width is None
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--use-multilayer-land",
+        "--land-surface-scheme", "two_leaf",
+        "--land-canopy-rh-cap-smoothing-width", "0.02",
+        "--land-canopy-zeta-cap-smoothing-width", "0.03"]), parser))
+    assert cfg.land_canopy_rh_cap_smoothing_width == 0.02
+    assert cfg.land_canopy_zeta_cap_smoothing_width == 0.03
+    try:
+        cfg.validate_strict()
+    except ValueError as exc:            # unrelated deck errors are not ours
+        assert "smoothing_width" not in str(exc), exc
+    for bad, match in (
+            (cfg._replace(land_canopy_zeta_cap_smoothing_width=0.0),
+             "zeta_cap_smoothing_width"),
+            (cfg._replace(land_canopy_rh_cap_smoothing_width=1.0),
+             "rh_cap_smoothing_width"),
+            (cfg._replace(land_surface_scheme="simple_seb"), "inert"),
+            (cfg._replace(use_multilayer_land=False), "inert")):
+        with pytest.raises(ValueError, match=match):
+            bad.validate_strict()
+
+
+def test_production_deck_names_both_canopy_smoothing_widths():
+    """The resolved production config records both widths (not defaults)."""
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    from legoesm.land.canopy.config import CanopyConfig
+    p = build_arg_parser()
+    rows = load_yaml_config(
+        str(_repo_root() / "config" / "amip" / "amip_production.yaml"), p)
+    p.set_defaults(**rows)
+    cfg = build_config_from_args(_postprocess_args(
+        p.parse_args(_AMIP_DUMMY_PATHS), p))
+    d = CanopyConfig()
+    assert cfg.land_canopy_rh_cap_smoothing_width == d.rh_cap_smoothing_width
+    assert cfg.land_canopy_zeta_cap_smoothing_width == d.zeta_cap_smoothing_width
+    assert cfg.land_canopy_most_n_iters == d.most_n_iters == 10
+
+
+def test_land_canopy_most_n_iters_round_trip_and_validate():
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--use-multilayer-land",
+        "--land-surface-scheme", "two_leaf", "--land-canopy-most-n-iters", "7"]), parser))
+    assert cfg.land_canopy_most_n_iters == 7
+    for bad, match in ((cfg._replace(land_canopy_most_n_iters=0), "most_n_iters"),
+                       (cfg._replace(land_surface_scheme="simple_seb"), "inert")):
+        with pytest.raises(ValueError, match=match):
+            bad.validate_strict()

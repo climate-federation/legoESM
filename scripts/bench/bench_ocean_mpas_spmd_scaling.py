@@ -80,7 +80,7 @@ def build_parser() -> argparse.ArgumentParser:
     # old behaviour is a bug with a knob).
     p.add_argument("--pcg-precond", default=None,
                    choices=["jacobi", "poly", "gpoly"],
-                   help="distributed PCG preconditioner (config default gpoly); "
+                   help="distributed PCG preconditioner (unset = the backend bundle: gpoly on GPU, jacobi on CPU); "
                         "'poly' is the communication-free local Neumann polynomial, "
                         "'gpoly' the same polynomial on the GLOBAL operator "
                         "(evaluated on a max(2, K-2)-ring halo, one exchange per "
@@ -103,12 +103,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--pcg-variant",
                    choices=["standard", "single_reduce", "single_reduce_deep"],
                    default=None,
-                   help="unset = MPASOceanConfig default (standard); "
-                        "single_reduce_deep needs --pcg-precond jacobi and, for the "
-                        "1e-10 residual, --pcg-fixed-iters 30 (poly/gpoly need "
-                        "--pcg-variant single_reduce or standard)")
+                   help="unset = the backend's bundle (standard on GPU, single_reduce_deep on CPU); "
+                        "single_reduce_deep runs with the jacobi preconditioner "
+                        "(30 iterations for the 1e-10 residual; the CPU bundle's "
+                        "values); poly/gpoly need standard or single_reduce")
     p.add_argument("--pcg-fixed-iters", type=int, default=None,
-                   help="distributed PCG iteration count (config default 15); "
+                   help="distributed PCG iteration count (unset = the backend bundle: 20 on GPU, 30 on CPU); "
                         "a PROBE knob -- lowering it changes the solve")
     p.add_argument("--eta-clamp-iters", type=int, default=3)
     p.add_argument("--profile-dir", type=str, default=None,
@@ -127,19 +127,20 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def apply_pcg_overrides(config, args):
-    """Config with the PCG flags applied; a flag left unset (None) keeps the
-    MPASOceanConfig default, so a ladder arm without flags measures the
-    production solver (tests/bench/test_bench_ocean_mpas_spmd_cli.py)."""
+    """Config with the PCG flags applied, then the backend's PCG bundle
+    resolved for every field still unset — so an arm without flags measures
+    the production solver (tests/bench/test_bench_ocean_mpas_spmd_cli.py), and
+    a preconditioner flag that leaves the bundle's count or recurrence to the
+    backend default fails HERE, before launch, not inside the solver."""
+    from legoesm.ocean.mpas_config import resolve_barotropic_pcg_defaults
+    over = {}
     if args.pcg_fixed_iters is not None:
-        config = config._replace(
-            barotropic_implicit_pcg_fixed_iters=int(args.pcg_fixed_iters))
+        over["barotropic_implicit_pcg_fixed_iters"] = int(args.pcg_fixed_iters)
     if args.pcg_precond is not None:
-        config = config._replace(
-            barotropic_implicit_pcg_precond=str(args.pcg_precond))
+        over["barotropic_implicit_pcg_precond"] = str(args.pcg_precond)
     if args.pcg_poly_sweeps is not None:
-        config = config._replace(
-            barotropic_implicit_pcg_poly_sweeps=int(args.pcg_poly_sweeps))
-    return config
+        over["barotropic_implicit_pcg_poly_sweeps"] = int(args.pcg_poly_sweeps)
+    return resolve_barotropic_pcg_defaults(config._replace(**over))
 
 
 def main() -> int:

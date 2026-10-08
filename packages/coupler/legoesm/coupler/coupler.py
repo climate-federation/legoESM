@@ -17,6 +17,7 @@ from legoesm import constants
 from legoesm.core.precision import get_policy
 from legoesm.core.bulk_flux import (
     simple_bulk_fluxes, compute_most_fluxes, compute_sam_oceflx_fluxes,
+    surface_reference_state,
     apply_gustiness,
     ocean_surface_q_sat,
 )
@@ -329,13 +330,19 @@ def ocean_tile_response(
         thermo_convention=_thermo_conv, bulk_scheme=config.bulk_scheme,
         saline_factor=_Q_SAT_SALINE_FACTOR)
 
+    # Model-level forcing: surface-referenced air T paired with its own height
+    # (same convention as land and the atmosphere surface layer, #1818).
+    # Observed forcing (z_lowest None) keeps the configured heights.
+    T_air, z_air = surface_reference_state(
+        forcing.T_lowest, config.z_ref, forcing.z_lowest)
+    model_level = forcing.z_lowest is not None
     if config.bulk_scheme == "large_yeager_cesm":
         # CESM/CIME shr_flux_atmOcn: wind relative to the surface current,
-        # lowest-level height ``z_ref`` as CESM's ``zbot``.
+        # lowest-level height as CESM's ``zbot``.
         tau_x, tau_y, shflx, lhflx, _ = compute_sam_oceflx_fluxes(
             forcing.u_lowest - ocean_u, forcing.v_lowest - ocean_v,
-            forcing.T_lowest, forcing.q_lowest, ocean_sst, q_sfc, rho,
-            z_bot=config.z_ref, variant="cesm",
+            T_air, forcing.q_lowest, ocean_sst, q_sfc, rho,
+            z_bot=z_air, variant="cesm",
         )
     elif _is_most:
         # Use wind relative to ocean surface current
@@ -343,12 +350,12 @@ def ocean_tile_response(
         v_rel = forcing.v_lowest - ocean_v
         tau_x, tau_y, shflx, lhflx, _ = compute_most_fluxes(
             u_rel, v_rel,
-            forcing.T_lowest, forcing.q_lowest,
+            T_air, forcing.q_lowest,
             ocean_sst, q_sfc,
             rho,
-            z_ref=config.z_ref,
-            z_t=config.z_t_atm,
-            z_q=config.z_q_atm,
+            z_ref=z_air,
+            z_t=z_air if model_level else config.z_t_atm,
+            z_q=z_air if model_level else config.z_q_atm,
             z0_init=config.ocean_z0,
             scheme=config.bulk_scheme,
             n_iter=config.bulk_n_iter,
@@ -407,13 +414,11 @@ def ocean_tile_response(
     # with the SAME latent heat the flux used (ocean is liquid, never
     # sublimes): Kirchhoff L_v(SST) for the MOST and constant laws
     # (core.bulk_flux), the constant L_v for the CESM shr_flux_atmOcn port,
-    # which charges its oracle's constant.  Positive = freshwater INTO ocean.
-    if config.bulk_scheme == "large_yeager_cesm":
-        _L_evap = constants.L_v   # latent-ok: CESM shr_flux_atmOcn oracle constant (compute_sam_oceflx_fluxes charges it)
-    else:
-        from legoesm.thermo import latent_heat_vaporization
-        _L_evap = latent_heat_vaporization(ocean_sst)
-    evap_rate = lhflx / _L_evap   # kg/m²/s, positive = up (ocean → atm)
+    # which charges its oracle's constant (thermo.charged_latent_heat).
+    # Positive = freshwater INTO ocean.
+    from legoesm.thermo import charged_latent_heat
+    # kg/m²/s, positive = up (ocean → atm)
+    evap_rate = lhflx / charged_latent_heat(config.bulk_scheme, ocean_sst)
     freshwater_flux = forcing.precip_total - evap_rate
     return TileResponse(
         T_sfc=ocean_sst,

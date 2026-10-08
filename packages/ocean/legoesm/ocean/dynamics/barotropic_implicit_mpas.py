@@ -460,6 +460,9 @@ def barotropic_implicit_mpas(
         )
     # Preconditioner selection: validated on the static config string here,
     # after the multi-rank refusal above so that guard keeps firing first.
+    # Direct callers (tests, probes) may pass an unresolved config.
+    from legoesm.ocean.mpas_config import resolve_barotropic_pcg_defaults
+    config = resolve_barotropic_pcg_defaults(config)
     _pcg_precond = str(config.barotropic_implicit_pcg_precond)
     if _pcg_precond not in ("jacobi", "poly", "gpoly"):
         raise ValueError(

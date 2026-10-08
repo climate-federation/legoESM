@@ -111,7 +111,7 @@ class TestSlabCarbon1Year:
         assert float(jnp.min(driver._co2_field)) > 0, "CO2 went negative"
         # Convert to ppmv and check wide bounds (uncalibrated model)
         M_CO2, M_air = constants.M_CO2, constants.M_air
-        co2_ppmv = float(jnp.mean(driver._co2_field)) / (M_CO2 / M_air) * 1e6
+        co2_ppmv = float(driver._co2_global_mean_kgkg()) / (M_CO2 / M_air) * 1e6
         assert 100.0 < co2_ppmv < 2000.0, f"CO2 = {co2_ppmv:.1f} ppmv"
 
     def test_nee_varies(self, driver):

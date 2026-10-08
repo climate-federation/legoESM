@@ -281,7 +281,9 @@ class TestOMIPNemoMatchFactories:
             forcing_mode="restoring",
         )
         assert kind == "mpas"
-        factory_mc = nemo_match_mpas_model_config()
+        from legoesm.ocean.mpas_config import resolve_barotropic_pcg_defaults
+        # The model resolves the backend's barotropic PCG bundle at build.
+        factory_mc = resolve_barotropic_pcg_defaults(nemo_match_mpas_model_config())
         # Every field EXCEPT physics (SETUP) and the mesh-DERIVED vorticity
         # damping must match the factory exactly.
         for f in MPASOceanConfig._fields:

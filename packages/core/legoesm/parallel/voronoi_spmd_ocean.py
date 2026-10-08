@@ -225,7 +225,7 @@ def build_mpas_ocean_spmd_layout(
     sharding = dev.face_sharding
 
     def _put(x):
-        return multiprocess_safe_device_put(jnp.asarray(x), sharding)
+        return multiprocess_safe_device_put(x, sharding)
 
     stacked_dev = jax.tree.map(_put, stacked)
 
@@ -299,6 +299,8 @@ def halo_depth_for_config(config) -> int:
     holds depth+2 rings and the sweeps need depth >= K-2 (measured exact at
     K=4/6/8 with depth 2/4/6, wrong one ring shallower). K=4 fits the
     historical 2."""
+    from legoesm.ocean.mpas_config import resolve_barotropic_pcg_defaults
+    config = resolve_barotropic_pcg_defaults(config)
     if str(getattr(config, "barotropic_implicit_pcg_precond", "")) == "gpoly":
         return max(_DEFAULT_HALO_DEPTH,
                    int(config.barotropic_implicit_pcg_poly_sweeps) - 2)
@@ -536,7 +538,7 @@ def make_sharded_mpas_ocean_step(model, layout: MPASOceanSPMDLayout) -> Callable
 
     def _localize_by_index(x, idx):
         loc = np.asarray(x)[idx]                              # (n_dev, max_l*, ...)
-        return multiprocess_safe_device_put(jnp.asarray(loc), layout.cell_sharding)
+        return multiprocess_safe_device_put(loc, layout.cell_sharding)
 
     # The vertical coordinate may carry PER-CELL statics (partial cells:
     # h_partial, bottom_level, is_active, t_depth_ref; NEMO EEN operands).
@@ -639,7 +641,7 @@ def make_sharded_mpas_ocean_step(model, layout: MPASOceanSPMDLayout) -> Callable
         # Concrete even when called from inside a jit trace (the block scan):
         # the localised static is a per-device CONSTANT, not a traced operand.
         with jax.ensure_compile_time_eval():
-            loc = multiprocess_safe_device_put(jnp.asarray(loc), layout.cell_sharding)
+            loc = multiprocess_safe_device_put(loc, layout.cell_sharding)
         _local_cache[key] = (x, loc)
         return loc
 

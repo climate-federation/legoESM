@@ -1043,6 +1043,27 @@ def _make_mpas_turbulence(
                 surface_fluxes_at_lowest_level,
             )
             _fl = jnp.asarray(f_land, dtype=q_sfc.dtype).reshape(nCells)
+            # ``forcing["T_sfc_ocean"]`` (mpas_ocean_flux_on_ocean_surface,
+            # #1320): the non-land fraction's bulk call sees the ocean/ice
+            # surface instead of the land-blended T_sfc/q_sfc, whose land skin
+            # and land humidity belong to the fraction the land model already
+            # supplies.  Same humidity law as the blended path's ocean share.
+            # T_sfc/q_sfc handed to the kernel itself stay the blended values:
+            # with the flux injected the kernels do not recompute it.
+            _T_oc = forcing.get("T_sfc_ocean")
+            if _T_oc is None:
+                _T_bulk, _q_bulk = T_sfc, q_sfc
+            else:
+                _T_bulk = jnp.asarray(_T_oc, dtype=T_sfc.dtype).reshape(nCells)
+                if getattr(_surf, "ocean_q_sfc_saline", False):
+                    from legoesm.core.bulk_flux import ocean_surface_q_sat
+                    _q_bulk = ocean_surface_q_sat(
+                        _T_bulk, p_s.reshape(nCells),
+                        thermo_convention=_surf.thermo_convention,
+                        bulk_scheme=_surf.bulk_scheme,
+                        saline_factor=_Q_SAT_SALINE_FACTOR)
+                else:
+                    _q_bulk = saturation_mixing_ratio(_T_bulk, p_full_col[:, -1])
             # Through the shared helper rather than an inline copy: this
             # branch had its own adjustment, which kept the warmed air while
             # the bulk law dropped the height on a constant-coefficient
@@ -1051,7 +1072,7 @@ def _make_mpas_turbulence(
             # (codex).  Height measured from the LOCAL surface.
             _tx, _ty, _sh, _lh, _us = surface_fluxes_at_lowest_level(
                 u_col[:, -1], v_col[:, -1], T_col[:, -1], q_v_col[:, -1],
-                T_sfc, q_sfc, rho[:, -1], step_config.surface,
+                _T_bulk, _q_bulk, rho[:, -1], step_config.surface,
                 z_full[:, -1] - z_half[:, -1],
             )
             _lh_land = jnp.asarray(
@@ -1067,13 +1088,13 @@ def _make_mpas_turbulence(
             # of the bulk charge,
             # taken BEFORE the heat blend), handed to the kernel as mass.  Land
             # values over pure-ocean cells may be NaN/undefined: masked out.
-            from legoesm.atmosphere.physics.turbulence.surface_layer import (
-                charged_latent_heat)
+            from legoesm.thermo import charged_latent_heat
             _ev_land = jnp.asarray(
                 forcing["evap_land"], dtype=q_sfc.dtype).reshape(nCells)
             _ev_land = jnp.where(_fl > 0.0, _ev_land, 0.0)
             _lh_land = jnp.where(_fl > 0.0, _lh_land, 0.0)   # 0 * NaN would poison the blend
-            _ev_blend = ((1.0 - _fl) * _lh / charged_latent_heat(step_config.surface, T_sfc)
+            _ev_blend = ((1.0 - _fl) * _lh / charged_latent_heat(
+                             step_config.surface.bulk_scheme, _T_bulk)
                          + _fl * _ev_land)
             step_config = step_config._replace(surface=step_config.surface._replace(
                 prescribed_evap_kg_m2_s=_ev_blend))
@@ -1085,6 +1106,42 @@ def _make_mpas_turbulence(
                 (1.0 - _fl) * _lh + _fl * _lh_land,
                 _us,
             )
+            # ``forcing["taumag_land"]`` (mpas_land_stress_from_land): the land
+            # model's stress replaces the bulk (ocean-roughness) stress over the
+            # land fraction, with ``taumag_land_valid`` (a land step has
+            # succeeded for the column; the driver carries the last valid value
+            # over held solves) and the static land roughness ``z0m_land`` /
+            # ``d_land`` for the neutral land drag used before that.  Absent
+            # key = the bulk stress above, unchanged.
+            _taum_land = forcing.get("taumag_land")
+            if _taum_land is not None:
+                from legoesm.atmosphere.physics.turbulence.surface_layer import (
+                    land_stress_into_surface_flux,
+                )
+                _missing = [k for k in ("taumag_land_valid", "z0m_land",
+                                        "d_land") if forcing.get(k) is None]
+                if _missing:
+                    raise ValueError(
+                        "forcing['taumag_land'] needs taumag_land_valid, "
+                        f"z0m_land and d_land too; missing {_missing}.")
+                _cells = lambda k: jnp.asarray(  # noqa: E731
+                    forcing[k], dtype=q_sfc.dtype).reshape(nCells)
+                _surface_flux = land_stress_into_surface_flux(
+                    _surface_flux, _cells("taumag_land"),
+                    jnp.asarray(forcing["taumag_land_valid"]).reshape(nCells),
+                    _cells("z0m_land"), _cells("d_land"),
+                    u_col[:, -1], v_col[:, -1],
+                    z_full[:, -1] - z_half[:, -1], _fl, rho[:, -1])
+        elif forcing is not None and forcing.get("T_sfc_ocean") is not None:
+            raise ValueError(
+                "forcing['T_sfc_ocean'] (non-land surface anchor) is only "
+                "consumed together with the land's own heat fluxes "
+                "(forcing['shflx_land']); without them it would be ignored.")
+        elif forcing is not None and forcing.get("taumag_land") is not None:
+            raise ValueError(
+                "forcing['taumag_land'] (land-model surface stress) is only "
+                "consumed together with the land's own heat fluxes "
+                "(forcing['shflx_land']); without them it would be ignored.")
 
         # Forwarded on BOTH branches: clubb and clubb_lite carry a prognostic
         # energy field and still accept the flux, so gating this on the carry

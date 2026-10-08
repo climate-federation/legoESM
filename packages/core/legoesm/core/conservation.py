@@ -505,15 +505,9 @@ def global_area_sum(
         summation; ``global_sum_mpi`` then combines owned portions.
         If ``None``, all faces are summed (single-rank or SPMD).
     differentiable_broadcast : bool, optional
-        VJP semantics of the MPI reduction.  ``False`` (default) uses
-        ``global_sum_mpi`` (IDENTITY VJP) — kept byte-identical for the
-        established callers.  ``True`` uses :func:`legoesm.parallel.reductions.broadcast_allreduce_sum`
-        (allreduce forward AND backward), REQUIRED when the reduced value is
-        broadcast back and reused on every rank — e.g. a mass-fixer additive
-        ``correction = (target - global_area_sum(p_s)) / area`` added to EVERY
-        cell: the identity VJP silently drops the cross-rank cotangent of the
-        shared correction (a ~1e-6 gradient leak the flux-form moisture path
-        exposes via q→p_s coupling; #811).  Forward is identical either way.
+        No longer changes anything: since #1814 both ``global_sum_mpi`` and
+        :func:`legoesm.parallel.reductions.broadcast_allreduce_sum` allreduce
+        the cotangent on the backward pass.  Kept for existing callers.
 
     Execution modes:
 
@@ -658,12 +652,8 @@ def batch_global_area_sums(
 
     Falls back to individual ``jnp.sum`` when not distributed.
 
-    ``differentiable_broadcast`` (default ``False``): see :func:`global_area_sum`
-    — ``True`` routes the batched reduction through :func:`legoesm.parallel.reductions.broadcast_allreduce_sum`
-    (one stacked allreduce, allreduce VJP) instead of ``batch_allreduce_mpi``
-    (identity VJP), for reduced values that scale every rank (the non-anchor p_s
-    mass fixer's shared ``correction``; #811).  ``batch_allreduce_mpi`` is left
-    untouched for its other callers.
+    ``differentiable_broadcast``: no longer changes anything (see
+    :func:`global_area_sum`; #1814).
     """
     acc = conservation_accumulator()
     area_acc = grid.area.astype(acc)
@@ -745,14 +735,8 @@ def global_face_sum_if_scattered(
     Shared gate behind :func:`_total_area` (the mass-fixer denominator) and the
     cube flux-form moisture substep's mass reductions (#811 / #771 follow-up).
 
-    ``differentiable_broadcast`` (default ``False``) selects the VJP semantics of
-    the scattered reduction.  ``False`` uses ``global_sum_mpi`` (mpi4jax
-    ``allreduce``, IDENTITY VJP) — correct for a top-level loss reduction and the
-    established mass-fixer callers (kept byte-identical).  ``True`` uses
-    :func:`legoesm.parallel.reductions.broadcast_allreduce_sum` (allreduce forward AND backward) — REQUIRED
-    when the reduced value is broadcast back and reused multiplicatively on every
-    rank, so the cross-rank cotangents are not silently dropped (the flux-form
-    ``scale`` — #811).  Forward is identical either way; only the gradient differs.
+    ``differentiable_broadcast``: no longer changes anything (see
+    :func:`global_area_sum`; #1814).
     """
     from legoesm.grids.halo import get_halo_backend, get_mpi_topology
 
@@ -999,6 +983,25 @@ def zero_mean_tendency(
     orig_dtype = tendency.dtype
     area_ndim = area.ndim  # 3 for cubed-sphere, 2 for lat-lon
 
+    if tendency.ndim in (area_ndim, area_ndim + 1):
+        # Rank/band-partial grids (lat-band MPI, lat-band SPMD, replicated
+        # cube MPI): reduce the area exactly like the numerator, in one
+        # collective, or the global integral is divided by this rank's own
+        # area.  ``None`` = this process holds the whole domain.
+        tend_acc = tendency.astype(acc)
+        if tendency.ndim == area_ndim:
+            local_num = jnp.sum(tend_acc * area_acc)[None]
+        else:
+            local_num = jnp.sum(tend_acc * area_acc[..., None],
+                                axis=tuple(range(area_ndim)))
+        reduced = _reduce_rank_partials(
+            jnp.concatenate([local_num, total_area_acc[None]]))
+        if reduced is not None:
+            corrections = reduced[:-1] / reduced[-1]
+            if tendency.ndim == area_ndim:
+                corrections = corrections[0]
+            return (tend_acc - corrections).astype(orig_dtype)
+
     if tendency.ndim == area_ndim:
         # 2D tendency (lat-lon) or 3D tendency (cubed-sphere) — no level axis
         global_sum = global_area_sum(tendency, grid)
@@ -1011,9 +1014,6 @@ def zero_mean_tendency(
         # Sum over all spatial axes (all except the last)
         spatial_axes = tuple(range(area_ndim))
         level_sums = jnp.sum(prod, axis=spatial_axes)  # (nlev,)
-        if is_distributed():
-            from legoesm.parallel.reductions import global_sum_mpi
-            level_sums = global_sum_mpi(level_sums)
         corrections = level_sums / total_area_acc  # (nlev,)
         # Broadcast corrections to match tendency shape
         for _ in range(area_ndim):
@@ -1021,6 +1021,22 @@ def zero_mean_tendency(
         return (tend_acc - corrections).astype(orig_dtype)
     else:
         return tendency
+
+
+def _reduce_rank_partials(local: jax.Array) -> jax.Array | None:
+    """Sum rank/band partials with the same dispatch as :func:`global_area_sum`;
+    ``None`` when this process already holds the whole domain (serial, GSPMD).
+
+    ``broadcast_allreduce_sum`` (allreduce VJP): the reduced value is a shared
+    correction reused on every rank, so its cotangent must be summed too.
+    """
+    spmd = _spmd_lat_psum_or_none([local])
+    if spmd is not None:
+        return spmd[0]
+    if is_distributed():
+        from legoesm.parallel.reductions import broadcast_allreduce_sum
+        return broadcast_allreduce_sum(local)
+    return None
 
 
 # ==============================================================================

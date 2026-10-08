@@ -6,7 +6,6 @@ entry when its file reaches zero."""
 
 LATENT_BUDGET: dict[str, int] = {
     'packages/atmosphere/legoesm/atmosphere/dynamics/crm/rce_diagnostics.py': 3,
-    'packages/atmosphere/legoesm/atmosphere/dynamics/crm/rce_surface_flux.py': 1,
     'packages/atmosphere/legoesm/atmosphere/dynamics/crm/sam_case_setup.py': 1,
     'packages/atmosphere/legoesm/atmosphere/dynamics/les/compressible_euler_plane.py': 2,
     'packages/atmosphere/legoesm/atmosphere/forcing/scm/dephy_scm.py': 1,
@@ -42,7 +41,7 @@ LATENT_BUDGET: dict[str, int] = {
     'packages/atmosphere/legoesm/atmosphere/physics/microphysics/ml_emulator.py': 1,
     'packages/atmosphere/legoesm/atmosphere/physics/microphysics/morrison.py': 6,
     'packages/atmosphere/legoesm/atmosphere/physics/microphysics/p3.py': 3,
-    'packages/atmosphere/legoesm/atmosphere/physics/microphysics/pdf_condensation.py': 1,
+    'packages/atmosphere/legoesm/atmosphere/_future/pdf_condensation.py': 1,
     'packages/atmosphere/legoesm/atmosphere/physics/microphysics/sdm/box_model.py': 2,
     'packages/atmosphere/legoesm/atmosphere/physics/microphysics/sdm/column.py': 2,
     'packages/atmosphere/legoesm/atmosphere/physics/microphysics/sdm/condensation.py': 2,
@@ -61,7 +60,6 @@ LATENT_BUDGET: dict[str, int] = {
     'packages/coupler/legoesm/driver/physics_pipeline.py': 3,
     'packages/ice/legoesm/ice/config.py': 1,
     'packages/ice/legoesm/ice/constants_config.py': 2,
-    'packages/land/legoesm/land/_future/snow_column.py': 1,
     'packages/land/legoesm/land/boundary_data/ec_site.py': 1,
     'packages/land/legoesm/land/slab_land.py': 1,
     'packages/land/legoesm/land/snow_bands.py': 3,

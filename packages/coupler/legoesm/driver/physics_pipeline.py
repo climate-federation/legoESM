@@ -665,7 +665,7 @@ class PhysicsPipeline:
 
         - non-tiled (``surface_tiled=False``, e.g. the compiled lat-lon AMIP
           lane with holtslag_boville): the turbulence kernel runs
-          ``compute_surface_fluxes(..., config.surface)`` on the BLENDED
+          ``surface_fluxes_at_lowest_level(..., config.surface, z_low)`` on the BLENDED
           surface temperature ``T_sfc = blend(T_sfc_ocean, T_land)`` with a
           saturated ``q_sfc = q_sat(T_sfc)`` and NO beta limiting
           (physics_step_no_rad).  The law is evaluated HERE on the same
@@ -796,8 +796,8 @@ class PhysicsPipeline:
         equilibrium), window-mean residual:
 
             window            legacy_dual        unified
-            1 x 600 s          114.2 W/m^2        3.3 W/m^2   (35x smaller)
-            24 x 600 s (4 h)   244.3 W/m^2       36.1 W/m^2   (6.8x smaller)
+            1 x 600 s          116.8 W/m^2        1.02 W/m^2  (115x smaller)
+            24 x 600 s (4 h)   251.3 W/m^2        3.75 W/m^2  (67x smaller)
 
         Going fully explicit would close the implicitness exactly but is
         UNSTABLE at a 4 h cadence in convective conditions (measured
@@ -1004,7 +1004,7 @@ class PhysicsPipeline:
         ad = self.adapter
         _lmp = land_ml_params if land_ml_params is not None else self.land_ml_params
         beta_col = land_tile_beta_soil(
-            land_ml.theta_soil, self.land_ml_cfg, _lmp)
+            land_ml.theta_soil, land_ml.T_soil, self.land_ml_cfg, _lmp)
         q_sat_land_col = ad.flatten_2d(
             saturation_specific_humidity(T_land, p_s))
         return ad.unflatten_2d(beta_col * q_sat_land_col)
@@ -1839,8 +1839,10 @@ class PhysicsPipeline:
 
         shflx = rho_low * constants.c_pd * _C_H * wind_speed * (T_sfc - T[..., -1])
         q_sat_sfc = saturation_specific_humidity(T_sfc, p_s)
-        from legoesm.thermo import latent_heat_vaporization as _lv_T
-        lhflx = rho_low * _lv_T(T_sfc) * _C_E * wind_speed * (q_sat_sfc - q_v[..., -1])
+        from legoesm.thermo import charged_latent_heat
+        # The constant-coefficient law: charged (and inverted below) through the
+        # one lookup.
+        lhflx = rho_low * charged_latent_heat("constant", T_sfc) * _C_E * wind_speed * (q_sat_sfc - q_v[..., -1])
         evap_sfc = None   # the water flux actually applied to the column (set below)
 
         turb_owns_surface = (
@@ -1941,8 +1943,8 @@ class PhysicsPipeline:
             if sfc_evap_override is not None:
                 evap_rate = sfc_evap_override
             else:
-                from legoesm.thermo import latent_heat_vaporization
-                evap_rate = lhflx / latent_heat_vaporization(T_sfc)
+                from legoesm.thermo import charged_latent_heat
+                evap_rate = lhflx / charged_latent_heat("constant", T_sfc)
             evap_sfc = evap_rate
             # Heat kick carries the latent enthalpy correction (surface_layer
             # .latent_enthalpy_correction): water credited at L_v by the column
@@ -4314,35 +4316,6 @@ def apply_surface_flux_config(tc, config):
     sss = getattr(config, "surface_stability_scheme", "dyer1974")
     zml = getattr(config, "surface_z_ref_model_level", None)
 
-    # #1783: the unified land-flux law pins the reference height OFF.
-    #
-    # The height correction tells the MOST solver the real height of the lowest
-    # full level (~135 m instead of a nominal 10 m) and brings the air down
-    # dry-adiabatically, ~1.5 K.  Against the unified land interface that
-    # manufactures an air-surface contrast that is not there: with it on, five
-    # tests of TestUnifiedLaneOneFluxLaw fail with sensible heat at
-    # -1.13 .. -7.94 W/m^2 where the blended law wants +43.6 .. -16.9, i.e. a
-    # downward flux out of nothing.  Forcing it off takes that class to 7
-    # passed and the whole module to 29 passed -- measured, one constructor
-    # field, job 9946756.
-    #
-    # Only when the run does not state it.  An explicit request is never
-    # silently inverted; the two settings genuinely disagree, so asking for
-    # both is refused rather than resolved behind the caller's back.
-    if getattr(config, "land_interface_flux", None) == "unified":
-        if zml is None:
-            zml = False
-        elif bool(zml):
-            raise ValueError(
-                "land_interface_flux='unified' with "
-                "surface_z_ref_model_level=True is not a supported "
-                "combination (#1783): the lowest-level height correction "
-                "invents an air-surface contrast that the unified flux law "
-                "then debits, producing a downward sensible heat flux out of "
-                "nothing. Set surface_z_ref_model_level=False or leave it "
-                "unset (the unified lane pins it off), or select a different "
-                "land_interface_flux."
-            )
     _qsal_req = getattr(config, "surface_ocean_q_sfc_saline", None)
     # None = "on wherever the lane can honour it".  CAPABILITY, not grid: the
     # sea-water surface humidity needs a path that separates the ocean from
