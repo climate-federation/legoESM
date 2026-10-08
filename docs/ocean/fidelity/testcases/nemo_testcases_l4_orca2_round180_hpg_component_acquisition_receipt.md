@@ -79,7 +79,7 @@ pre-existing round-35 stamp-scope ratchet, round-129 GYRE record-backed pin,
 worktree-stamp ratchet and SI3 scalar-math provenance gate. The fifth is the
 GYRE round-179 acquisition's layout-plant test refusing the then-untracked
 round-180 receipt as a dirty tree; its final-clean-tip isolation is reported
-after this receipt commit.
+after this receipt commit and passes 1/1.
 
 The required separate read-only Codex review was attempted and returned
 **independent review unavailable in-sandbox**:
