@@ -71,9 +71,10 @@ class NEMOTestcaseCard(NamedTuple):
     # must spell this out so no caller can inherit an implicit iceberg choice.
     icebergs_enabled: bool | None = None
     iceberg_inputs: tuple[str, ...] | None = None
-    # NEMO ln_Jperio as card data.  Execution scopes legoESM's y-wrap with
-    # ``halo_latlon.meridional_periodicity(card.j_periodic)``; False is the
-    # walled N/S boundary every other card runs.
+    # NEMO ln_Jperio as card data; False is the walled N/S boundary every
+    # other card runs.  Whatever executes a card must build and trace inside
+    # ``halo_latlon.meridional_periodicity(card.j_periodic)``; no shared
+    # executor exists yet, and the TSUNAMI card refuses execution (B4j).
     j_periodic: bool = False
 
 
@@ -2900,8 +2901,9 @@ def build_vortex_smt_zps_card(
 # nemogcm.F90:166 then calls the case's own MY_SRC/stprk3.F90:
 #   sbc (:98) -> stp_2D (:107) -> stp_RK3_stg 1, 2, 3 (:113, :118, :123)
 #   -> swap (:125) -> ssh(Naa) = 2 ssh(Nbb) - ssh(Naa) (:129) -> dia_wri
-# with NO zdf_phy, eos_rab/bn2 or ldf calls (they are cut from the case's
-# copy).  The stages are src/OCE/stprk3_stg.F90, not overridden, under
+# with NO zdf_phy, eos_rab/bn2, ldf_slp or ldf coefficient updates (cut from
+# the case's copy).  eos IS called (stp2d.F90:127, stprk3_stg.F90:322), and
+# dyn_ldf/tra_ldf are called with their OFF operators (:400, :586).  The stages are src/OCE/stprk3_stg.F90, not overridden, under
 # n_baro_upd = np_HYB (:44) and ln_dynadv_vec = .false.: flux-form stage
 # stepping weighted by (1 + r3u/r3v) (:373-378), dyn_hpg + EEN dyn_vor at
 # stages 2-3 (:324, :327), dyn_zdf at stage 3 (:430), the barotropic
@@ -2985,6 +2987,16 @@ class TsunamiResolvedNamelist(NamedTuple):
     ln_wd_dl_bc: bool = False
     ln_sshinc: bool = False
     ln_asmiau: bool = False
+    # selectors the RK3 stages read (stprk3_stg.F90:246, :585-599);
+    # namelist_ref, not overridden by the deck
+    ln_tile: bool = False
+    ln_traqsr: bool = False
+    ln_trabbc: bool = False
+    ln_trabbl: bool = False
+    ln_tradmp: bool = False
+    ln_zdfosm: bool = False
+    ln_zdfnpc: bool = False
+    ln_zdfmfc: bool = False
 
 
 TSUNAMI_NAMELIST = TsunamiResolvedNamelist()
@@ -2997,15 +3009,16 @@ TSUNAMI_DEVIATIONS: tuple[tuple[str, bool, bool, str], ...] = (
 _TSUNAMI_ABSENT_SPG_TERMS = (
     "ln_dynvor_msk", "ln_apr_dyn", "ln_rnf", "ln_isf", "ln_sdw", "ln_bdy",
     "ln_tide", "ln_tide_pot", "ln_wd_dl", "ln_wd_dl_bc", "ln_sshinc",
-    "ln_asmiau",
+    "ln_asmiau", "ln_tile", "ln_traqsr", "ln_trabbc", "ln_trabbl",
+    "ln_tradmp", "ln_zdfosm", "ln_zdfnpc", "ln_zdfmfc",
 )
 
 _TSUNAMI_NLEV = 1                    # jpkm1 (usrdef_nam.F90:98 kpk = 2)
 _TSUNAMI_H_M = TSUNAMI_NAMELIST.rn_domszz_m
 
 # nameos: namelist_cfg:121 selects ln_seos and sets NO coefficient, so every
-# one is namelist_ref's.  T and S are uniform (usrdef_istate.F90:65-66) and
-# NEMO's TSUNAMI program never evaluates density; stated anyway.
+# one is namelist_ref's.  The RK3 program evaluates density for dyn_hpg in
+# stp_2D and at stages 2-3 (stp2d.F90:127, stprk3_stg.F90:322).
 _TSUNAMI_SEOS = NemoSEOSConfig(
     rho0=float(NEMO_CONSTANTS_CONFIG.rho_0),
     a0=1.6550e-1, b0=7.6554e-1, lambda1=5.9520e-2, lambda2=7.4914e-4,

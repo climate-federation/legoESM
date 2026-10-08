@@ -180,6 +180,8 @@ build_one() {          # $1 = config name, $2 = 1 to apply the writers
     || { printf 'REFUSE: %s stprk3 is not the case override\n' "$name" >&2; exit 70; }
   grep -q 'TSUNAMI' "$pp/usrdef_hgr.f90" \
     || { printf 'REFUSE: %s did not compile the TSUNAMI usrdef_hgr\n' "$name" >&2; exit 70; }
+  [[ -f "$pp/stprk3.f90" && -f "$pp/dynspg_ts.f90" ]] \
+    || { printf 'REFUSE: %s ppsrc lacks stprk3.f90 or dynspg_ts.f90\n' "$name" >&2; exit 70; }
   local hits=0   # both writers, or neither (debt D-TSU-1: grep BOTH ppsrc)
   grep -q 'tsu_open' "$pp/stprk3.f90" && hits=$((hits + 1))
   grep -q 'spgts_r12_open' "$pp/dynspg_ts.f90" && hits=$((hits + 1))
