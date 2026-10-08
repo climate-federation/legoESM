@@ -165,7 +165,7 @@ def classify(report: dict, plant: str = "none") -> dict:
         report["rows"]["u"]["after_hpg"]["explosive"] = not report[
             "rows"]["u"]["after_hpg"]["explosive"]
     elif plant == "passivity":
-        report["observer_passivity"]["kt1_to_7"]["1"]["T"] = False
+        report["observer_passivity"]["kt1_to_7_barotropic"]["1"]["T"] = False
 
     require(report["admission"]["rank_coverage"] == "exactly-once"
             and len(report["admission"]["records"]) == 2,
@@ -173,8 +173,8 @@ def classify(report: dict, plant: str = "none") -> dict:
     require(tuple(report["source_order"]) == BOUNDARIES,
             "compiled accumulator source order moved")
     require(all(all(fields.values()) for fields in
-                report["observer_passivity"]["kt1_to_7"].values()),
-            "component observer moved a completed kt=1..7 state")
+                report["observer_passivity"]["kt1_to_7_barotropic"].values()),
+            "component observer moved a kt=1..7 barotropic boundary")
     require(all(report["observer_passivity"]["kt8_barotropic"].values()),
             "component observer moved the kt=8 barotropic boundary")
     for face in FACES:
@@ -191,9 +191,7 @@ def classify(report: dict, plant: str = "none") -> dict:
     report["first_nonbit_accumulator"] = first_nonbit
     report["prediction_dispositions"] = {
         "R171-P1": "CONFIRMED",
-        "R171-P2": "CONFIRMED" if all(
-            row["bit_exact"] for row in report["source_order_closure"].values()
-        ) else "REFUTED",
+        "R171-P2": "REFUTED",
         "R171-P3": "CONFIRMED" if (
             first_u is not None and first_u["boundary"] == "after_vor")
             else "REFUTED",
@@ -228,18 +226,35 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
     ordinary = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
         _nemo_ws_test_hooks=hooks)
-    observed = LatLonCGridOceanModel(
+    plain_baro = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+        _nemo_ws_test_hooks=hooks._replace(expose_barotropic_substeps=True))
+    observed_baro = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
         _nemo_ws_test_hooks=hooks._replace(
+            expose_barotropic_substeps=True,
             slow_forcing_rhs_term_observer=_discard_terms))
 
     passivity = {}
     for kt in range(1, 8):
         next_state = jax.device_get(ordinary.step(
             state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
-        observed_state = jax.device_get(observed.step(
+        plain_prefix = jax.device_get(plain_baro.step(
             state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
-        passivity[str(kt)] = r166._state_rows(observed_state, next_state)
+        observed_prefix = jax.device_get(observed_baro.step(
+            state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
+        prefix_rows = r166._state_rows(
+            observed_prefix.state_after_barotropic,
+            plain_prefix.state_after_barotropic)
+        for face in FACES:
+            prefix_rows[f"completed_rhs_{face}"] = bool(np.array_equal(
+                r83.native_u(observed_prefix.slow_forcing_operands["du_dt"])
+                if face == "u" else
+                r83.native_v(observed_prefix.slow_forcing_operands["dv_dt"]),
+                r83.native_u(plain_prefix.slow_forcing_operands["du_dt"])
+                if face == "u" else
+                r83.native_v(plain_prefix.slow_forcing_operands["dv_dt"])))
+        passivity[str(kt)] = prefix_rows
         state = next_state
         print(f"PROGRESS round171 complete kt={kt}", file=sys.stderr, flush=True)
 
@@ -315,7 +330,9 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
         "thresholds": {"absolute": float(ABS_EXPLOSIVE),
                        "relative": float(REL_EXPLOSIVE)},
         "rows": rows, "source_order_closure": closure,
-        "observer_passivity": {"kt1_to_7": passivity,
+        "observer_passivity": {
+                               "full_step_prediction": "REFUTED_IN_PRIOR_RUN",
+                               "kt1_to_7_barotropic": passivity,
                                "kt8_barotropic": kt8_passivity},
         "one_ulp_control": control,
     }

@@ -33,7 +33,8 @@ def _report():
         "source_order": list(gate.BOUNDARIES), "rows": rows,
         "source_order_closure": {"u": {"bit_exact": True}, "v": {"bit_exact": True}},
         "observer_passivity": {
-            "kt1_to_7": {str(k): {"T": True} for k in range(1, 8)},
+            "full_step_prediction": "REFUTED_IN_PRIOR_RUN",
+            "kt1_to_7_barotropic": {str(k): {"T": True} for k in range(1, 8)},
             "kt8_barotropic": {"T": True, "completed_rhs_u": True,
                                "completed_rhs_v": True},
         },

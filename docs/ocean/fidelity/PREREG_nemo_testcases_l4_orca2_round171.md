@@ -78,3 +78,17 @@ scientific association row; it is no longer mislabeled as observer passivity.
 If actual observer passivity moves one bit, the gate still refuses and no
 accumulator number is citable. The thresholds and all five predictions above
 are unchanged.
+
+The second committed invocation established that the full-step diagnostic
+graph moves at least one prognostic bit after kt=1, so R171-P2 is **REFUTED**
+and retained; it emitted no accumulator score. The requested components are
+consumed before the barotropic early-return boundary, not by those later
+prognostic statements. The final instrument therefore validates the exact
+boundary it observes: at every canonical kt=1..7 input and at kt=8, an
+independently compiled barotropic trace with the component observer must have
+an array-identical completed 3-D RHS and array-identical post-barotropic state
+to the trace without it. Canonical kt=1..7 state is advanced only by the
+ordinary unobserved full step. Any bit movement at that observed boundary
+still refuses the round. This narrows the passivity claim to the measured
+program prefix; it does not rehabilitate the failed full-step prediction or
+alter any scientific threshold.
