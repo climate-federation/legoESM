@@ -173,7 +173,7 @@ build_one() {          # $1 = config name, $2 = 1 to apply the writers
     printf 'REFUSE: %s compiled the leapfrog step program\n' "$name" >&2; exit 70
   fi
   local fkeys
-  fkeys=$(sed -E 's/.*fppkeys *//' "$cfg/cpp_$name.fcm" | xargs -n1 | sort | xargs)
+  fkeys=$(sed -E 's/.*fppkeys *//' "$cfg/cpp_$name.fcm" | xargs -n1 | LC_ALL=C sort | xargs)
   [[ "$fkeys" == "key_RK3 key_qco key_vco_1d" ]] \
     || { printf 'REFUSE: %s compiled keys "%s"\n' "$name" "$fkeys" >&2; exit 70; }
   grep -q 'CALL stp_2D' "$pp/stprk3.f90" \
