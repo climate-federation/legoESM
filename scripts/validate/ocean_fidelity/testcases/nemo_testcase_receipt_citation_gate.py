@@ -83,6 +83,8 @@ _ORCA2_R170RHS8_COMPILED = (
     NEMO / "cfgs/ORCA2_OMIP_L4_R170RHS8/BLD/ppsrc/nemo")
 _ORCA2_R172HPG8_COMPILED = (
     NEMO / "cfgs/ORCA2_OMIP_L4_R172HPG8/BLD/ppsrc/nemo")
+_ORCA2_R182HPGFOLD_COMPILED = (
+    NEMO / "cfgs/ORCA2_OMIP_L4_R182HPGFOLD/BLD/ppsrc/nemo")
 _ORCA2_R104EENACC_COMPILED = (
     NEMO / "cfgs/ORCA2_OMIP_L4_R104EENACC/BLD/ppsrc/nemo")
 _ORCA2_R105EENACC_COMPILED = (
@@ -248,6 +250,8 @@ FILES = {
         _ORCA2_R172HPG8_COMPILED / "stp2d.f90"),
     "ORCA2_OMIP_L4_R172HPG8/BLD/ppsrc/nemo/dynhpg.f90": (
         _ORCA2_R172HPG8_COMPILED / "dynhpg.f90"),
+    "ORCA2_OMIP_L4_R182HPGFOLD/BLD/ppsrc/nemo/dynhpg.f90": (
+        _ORCA2_R182HPGFOLD_COMPILED / "dynhpg.f90"),
     "ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/lbcnfd.f90": (
         _ORCA2_R96SPG_COMPILED / "lbcnfd.f90"),
     "ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynvor.f90": (
@@ -1521,6 +1525,12 @@ CITATION_MAP = {
         ('DO jk= 2, jpkm1', 1),
         ('r172_sum_v (ji,jj,jk) = zhpj(ji,jj) + zvap', 1),
         28,
+    ],
+    # --- ORCA2 round 183: independent HPG fold-operand walk -------
+    'ORCA2_OMIP_L4_R182HPGFOLD/BLD/ppsrc/nemo/dynhpg.f90:409-416': [
+        ('DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  0)              ! Surface value', 2),
+        '&           - (e3w_1d(1) *(1._wp+r3t(ji  ,jj  ,Kmm))) * rhd(ji  ,jj  ,1)  )',
+        8,
     ],
     # --- ORCA2 round 172: kt=8 passive HPG owner ------------------
     'ORCA2_OMIP_L4_R170RHS8/BLD/ppsrc/nemo/dynhpg.f90:386-402': [
