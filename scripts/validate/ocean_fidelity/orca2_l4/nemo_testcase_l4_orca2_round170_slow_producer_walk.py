@@ -245,7 +245,8 @@ def classify(report: dict, plant: str = "none") -> dict:
     return report
 
 
-def measure(record_root: Path, baseline_root: Path, expect_commit: str) -> dict:
+def measure(deck_root: Path, frame_root: Path, record_root: Path,
+            baseline_root: Path, expect_commit: str) -> dict:
     import jax
 
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
@@ -263,7 +264,7 @@ def measure(record_root: Path, baseline_root: Path, expect_commit: str) -> dict:
 
     admission = check_record.run(record_root, baseline_root)
     oracle, census = assemble_record(record_root)
-    card, state, freshwater, surface = r166._setup(record_root, record_root)
+    card, state, freshwater, surface = r166._setup(deck_root, frame_root)
     hooks = r166._hooks(card)
     ordinary = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
@@ -383,6 +384,8 @@ def measure(record_root: Path, baseline_root: Path, expect_commit: str) -> dict:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--deck-root", type=Path)
+    parser.add_argument("--frame-root", type=Path)
     parser.add_argument("--record-root", type=Path)
     parser.add_argument("--baseline-root", type=Path)
     parser.add_argument("--expect-commit")
@@ -393,9 +396,13 @@ def main() -> int:
     args = parser.parse_args()
     try:
         if args.mode == "measure":
-            require(all((args.record_root, args.baseline_root, args.expect_commit)),
-                    "measurement requires record/baseline roots and commit")
-            result = measure(args.record_root, args.baseline_root, args.expect_commit)
+            require(all((args.deck_root, args.frame_root, args.record_root,
+                         args.baseline_root, args.expect_commit)),
+                    "measurement requires deck/frame/record/baseline roots "
+                    "and commit")
+            result = measure(
+                args.deck_root, args.frame_root, args.record_root,
+                args.baseline_root, args.expect_commit)
         else:
             require(args.report_in is not None, "classification requires --report-in")
             result = classify(json.loads(args.report_in.read_text()), args.plant)
