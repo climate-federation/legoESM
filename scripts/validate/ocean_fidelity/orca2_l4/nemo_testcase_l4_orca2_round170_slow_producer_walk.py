@@ -178,12 +178,14 @@ def _candidate_reference_operands(card, state):
     wet_u = (ops.hu_0 > 0.0).astype(state.u.data.dtype)
     wet_v = (ops.hv_0 > 0.0).astype(state.v.data.dtype)
     return {
-        "e3_u": _with_jpk_zero(r97._native_u(ops.e3u_0)),
-        "e3_v": _with_jpk_zero(r97._native_v(ops.e3v_0)),
-        "mask_u": _with_jpk_zero(r97._native_u(ops.umask3)),
-        "mask_v": _with_jpk_zero(r97._native_v(ops.vmask3)),
-        "r1_h0_u": r97._native_u(wet_u / (ops.hu_0 + one - wet_u)),
-        "r1_h0_v": r97._native_v(wet_v / (ops.hv_0 + one - wet_v)),
+        # ``nemo_qco_card_mesh_operands`` is already native-face shaped;
+        # unlike model velocity arrays it has no compact halo to remove.
+        "e3_u": _with_jpk_zero(ops.e3u_0),
+        "e3_v": _with_jpk_zero(ops.e3v_0),
+        "mask_u": _with_jpk_zero(ops.umask3),
+        "mask_v": _with_jpk_zero(ops.vmask3),
+        "r1_h0_u": np.asarray(wet_u / (ops.hu_0 + one - wet_u)),
+        "r1_h0_v": np.asarray(wet_v / (ops.hv_0 + one - wet_v)),
     }
 
 
