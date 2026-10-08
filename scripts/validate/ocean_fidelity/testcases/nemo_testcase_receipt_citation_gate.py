@@ -206,6 +206,10 @@ FILES = {
         _ORCA2_R92RHS_COMPILED / "stp2d.f90"),
     "ORCA2_OMIP_L4_R92RHS/BLD/ppsrc/nemo/dynhpg.f90": (
         _ORCA2_R92RHS_COMPILED / "dynhpg.f90"),
+    "ORCA2_OMIP_L4_R92RHS/BLD/ppsrc/nemo/domain.f90": (
+        _ORCA2_R92RHS_COMPILED / "domain.f90"),
+    "ORCA2_OMIP_L4_R92RHS/BLD/ppsrc/nemo/dommsk.f90": (
+        _ORCA2_R92RHS_COMPILED / "dommsk.f90"),
     "ORCA2_OMIP_L4_R93SLOW/BLD/ppsrc/nemo/stp2d.f90": (
         _ORCA2_R93SLOW_COMPILED / "stp2d.f90"),
     "ORCA2_OMIP_L4_R93SLOW/BLD/ppsrc/nemo/dynspg_ts.f90": (
@@ -1531,6 +1535,26 @@ CITATION_MAP = {
         ('DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  0)              ! Surface value', 2),
         ('&           - (e3w_1d(1) *(1._wp+r3t(ji  ,jj  ,Kmm))) * rhd(ji  ,jj  ,1)  )', 2),
         8,
+    ],
+    'ORCA2_OMIP_L4_R182HPGFOLD/BLD/ppsrc/nemo/dynhpg.f90:445-453': [
+        'DO jk= 2, jpkm1',
+        ('&           - (e3w_1d(jk) *(1._wp+r3t(ji,jj  ,Kmm))) * ( rhd(ji,jj,  jk) + rhd(ji,jj  ,jk-1) )  )', 2),
+        9,
+    ],
+    'ORCA2_OMIP_L4_R92RHS/BLD/ppsrc/nemo/domain.f90:193-200': [
+        'ht_0(:,:) = 0._wp  ! Reference ocean thickness',
+        'hv_0(:,:) = hv_0(:,:) + e3v_3d(:,:,jk) * vmask(:,:,jk)',
+        8,
+    ],
+    'ORCA2_OMIP_L4_R92RHS/BLD/ppsrc/nemo/domain.f90:212-215': [
+        'r1_ht_0(:,:) = ssmask (:,:) / ( ht_0(:,:) + 1._wp -  ssmask (:,:) )',
+        'r1_hf_0(:,:) = ssfmask(:,:) / ( hf_0(:,:) + 1._wp -  ssfmask(:,:) )',
+        4,
+    ],
+    'ORCA2_OMIP_L4_R92RHS/BLD/ppsrc/nemo/dommsk.f90:206-232': [
+        '!  Ocean/land mask at u-, v-, and f-points   (computed from tmask)',
+        "CALL lbc_lnk( 'dommsk', umask, 'U', 1.0_wp, vmask, 'V', 1.0_wp, fmask, 'F', 1.0_wp )",
+        27,
     ],
     # --- ORCA2 round 172: kt=8 passive HPG owner ------------------
     'ORCA2_OMIP_L4_R170RHS8/BLD/ppsrc/nemo/dynhpg.f90:386-402': [
