@@ -17,7 +17,7 @@ the admitted rank-complete round-96 record remains usable. In compiled source
 order, completed SSH and U slow forcing are at the floor. The first non-bit
 statement is NEMO's direct assignment of the completed V momentum RHS,
 `zv_frc(:,:) = Ve_rhs(:,:)`
-(`ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:287-293`).
+(`ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:289-291`).
 
 The discrepancy is confined to 68 northern-fold cells on row 147: complete-
 recorded-domain RMS `5.430611438169775e-08`, maximum

@@ -6211,6 +6211,12 @@ CITATION_MAP = {
         ('hvr_e (:,:) = (r1_hv_0(:,:) /(1._wp+r3v(:,:,Kbb)))', 1),
         17,
     ],
+    # ORCA2 round 178: direct association of the completed slow RHS.
+    'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:289-291': [
+        ('ssh_frc(:,:) = sshe_rhs(:,:)', 1),
+        ('zv_frc(:,:) =   Ve_rhs(:,:)', 1),
+        3,
+    ],
     'ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/dynspg_ts.f90:357-375': [
         ('IF( ln_bt_fw ) THEN', 2),
         ('hvr_e (:,:) = (r1_hv_0(:,:) /(1._wp+r3v(:,:,Kbb)))', 1),
