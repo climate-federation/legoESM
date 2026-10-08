@@ -91,6 +91,12 @@ grep -Fq 'oracle_r166_spg_rank' "$WRITER" || {
   printf 'REFUSE: writer lacks per-rank target name\n' >&2; exit 66;
 }
 if [[ "$MODE" == --plant-layout ]]; then
+  plant_source=$(mktemp /tmp/orca2-r166-layout.XXXXXX)
+  cp "$SOURCE_ROOT/MY_SRC/dynspg_ts.F90" "$plant_source"
+  sed -i "/CALL r95_spg_w2('hur_e'/d" "$plant_source"
+  if check_layout "$plant_source"; then
+    printf 'REFUSE: layout plant stayed green\n' >&2; exit 69
+  fi
   printf 'STATUS PLANT-FIRED layout\n'; exit 69
 fi
 
