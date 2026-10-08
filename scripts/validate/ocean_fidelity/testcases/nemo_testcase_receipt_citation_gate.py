@@ -1538,7 +1538,7 @@ CITATION_MAP = {
     ],
     'ORCA2_OMIP_L4_R182HPGFOLD/BLD/ppsrc/nemo/dynhpg.f90:445-453': [
         'DO jk= 2, jpkm1',
-        ('&           - (e3w_1d(jk) *(1._wp+r3t(ji,jj  ,Kmm))) * ( rhd(ji,jj,  jk) + rhd(ji,jj  ,jk-1) )  )', 2),
+        '&           - (e3w_1d(jk) *(1._wp+r3t(ji,jj  ,Kmm))) * ( rhd(ji,jj,  jk) + rhd(ji,jj  ,jk-1) )  )',
         9,
     ],
     'ORCA2_OMIP_L4_R92RHS/BLD/ppsrc/nemo/domain.f90:193-200': [
