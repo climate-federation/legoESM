@@ -71,6 +71,10 @@ class NEMOTestcaseCard(NamedTuple):
     # must spell this out so no caller can inherit an implicit iceberg choice.
     icebergs_enabled: bool | None = None
     iceberg_inputs: tuple[str, ...] | None = None
+    # NEMO ln_Jperio as card data.  Execution scopes legoESM's y-wrap with
+    # ``halo_latlon.meridional_periodicity(card.j_periodic)``; False is the
+    # walled N/S boundary every other card runs.
+    j_periodic: bool = False
 
 
 class GYRESurfaceBoundaryCondition(NamedTuple):
@@ -2885,22 +2889,27 @@ def build_vortex_smt_zps_card(
     return card
 
 
-# --- TSUNAMI (NEMO 5.0.2 tests/TSUNAMI), lane round 1: TRANSCRIPTION ONLY ---
+# --- TSUNAMI (NEMO 5.0.2 tests/TSUNAMI): the RK3 build, lane round 2 ---
 # Every value below is the RESOLVED namelist (EXPREF/namelist_cfg over
 # cfgs/SHARED/namelist_ref) or a usrdef formula, cited where it is read.
 # The card is selected only by calling build_tsunami_zco_card; it is NOT in
 # build_nemo_testcase_card's dispatch, so no existing gate or card can reach it.
 #
-# THE STEP PROGRAM IS NOT ANY CARD'S.  cpp_TSUNAMI.fcm compiles key_qco
-# key_xios key_vco_1d and NOT key_RK3, so nemogcm.F90:186 calls stp_MLF, and
-# tests/TSUNAMI/MY_SRC/stpmlf.F90 replaces NEMO's leapfrog step with
-#   sbc -> dom_qco_r3c(ssh(Naa)) -> uu/vv(Nrhs)=0 -> dyn_spg -> dia_wri -> swap
-# (stpmlf.F90:111-134): the split-explicit external mode ALONE.  No ssh_nxt,
-# no 3-D momentum update (dyn_zdf/dyn_atf never run), no ssh_atf, no tracer,
-# no zdf_phy.  Every whole_step_identity legoESM has is an RK3 program; the
-# card therefore carries the closest existing barotropic arm and DECLARES the
-# program gap in TSUNAMI_UNMEASURED, so validate_nemo_testcase_card_for_execution
-# refuses it (the VORTEX round-1 pattern).
+# THE STEP PROGRAM (DECISION 100).  The card reproduces TSUNAMI built WITH
+# key_RK3, a documented deviation from cpp_TSUNAMI.fcm (TSUNAMI_DEVIATIONS).
+# nemogcm.F90:166 then calls the case's own MY_SRC/stprk3.F90:
+#   sbc (:98) -> stp_2D (:107) -> stp_RK3_stg 1, 2, 3 (:113, :118, :123)
+#   -> swap (:125) -> ssh(Naa) = 2 ssh(Nbb) - ssh(Naa) (:129) -> dia_wri
+# with NO zdf_phy, eos_rab/bn2 or ldf calls (they are cut from the case's
+# copy).  The stages are src/OCE/stprk3_stg.F90, not overridden, under
+# n_baro_upd = np_HYB (:44) and ln_dynadv_vec = .false.: flux-form stage
+# stepping weighted by (1 + r3u/r3v) (:373-378), dyn_hpg + EEN dyn_vor at
+# stages 2-3 (:324, :327), dyn_zdf at stage 3 (:430), the barotropic
+# correction every stage (:439-446), and T/S stepped every stage with NO
+# advection trend (:546-554; traadv.F90 np_NO_adv has no CASE).  The card's
+# carrier is the shared VORTEX flux-form EEN RK3 identity; what it lacks is
+# declared in TSUNAMI_UNMEASURED, so validate_nemo_testcase_card_for_execution
+# refuses it.
 
 
 class TsunamiResolvedNamelist(NamedTuple):
@@ -2918,16 +2927,21 @@ class TsunamiResolvedNamelist(NamedTuple):
     rn_ppgphi0_deg: float = 38.5
     ln_Iperio: bool = True
     ln_Jperio: bool = True
-    # &namrun namelist_cfg:40-43, &namdom :48 (rn_atfp from namelist_ref)
+    # &namrun namelist_cfg:40-43, &namdom :48
     nn_it000: int = 1
     nn_itend: int = 100
     rn_Dt_s: float = 1000.0
-    rn_atfp: float = 0.1
     ln_rstart: bool = False
-    # cpp_TSUNAMI.fcm: key_qco key_xios key_vco_1d, no key_RK3 -> stp_MLF
-    key_RK3: bool = False
+    # the BUILT keys: cpp_TSUNAMI.fcm's key_qco key_vco_1d plus key_RK3
+    # (TSUNAMI_DEVIATIONS); key_xios is dropped by the acquisition toolchain
+    key_RK3: bool = True
     key_qco: bool = True
     key_vco_1d: bool = True
+    # RK3 stage program selectors: n_baro_upd is a module constant
+    # (stprk3_stg.F90:44), the two flags are namelist_ref's
+    n_baro_upd: str = "np_HYB"
+    ln_dynadv_vec: bool = False
+    ln_shuman: bool = False
     # &namdyn_spg namelist_cfg:163 + namelist_ref
     ln_dynspg_ts: bool = True
     ln_bt_fw: bool = True
@@ -2939,8 +2953,7 @@ class TsunamiResolvedNamelist(NamedTuple):
     # &namdyn_vor namelist_cfg:153 + namelist_ref nn_e3f_typ
     ln_dynvor_een: bool = True
     nn_e3f_typ: int = 0
-    # switches NEMO's TSUNAMI program never reaches (stpmlf.F90:111-134) but
-    # which the deck selects; stated so nothing is inherited
+    # the deck's remaining selections; the RK3 stages read each of them
     ln_dynadv_OFF: bool = True
     ln_traadv_OFF: bool = True
     ln_traldf_OFF: bool = True
@@ -2975,6 +2988,11 @@ class TsunamiResolvedNamelist(NamedTuple):
 
 
 TSUNAMI_NAMELIST = TsunamiResolvedNamelist()
+# (field, shipped value, built value, authority).  DECISION 100, user,
+# 2026-10-08: build and score TSUNAMI on NEMO's RK3 program.
+TSUNAMI_DEVIATIONS: tuple[tuple[str, bool, bool, str], ...] = (
+    ("key_RK3", False, True, "DECISION 100"),
+)
 # the card carries none of these forcings/limiters/increments
 _TSUNAMI_ABSENT_SPG_TERMS = (
     "ln_dynvor_msk", "ln_apr_dyn", "ln_rnf", "ln_isf", "ln_sdw", "ln_bdy",
@@ -2994,24 +3012,25 @@ _TSUNAMI_SEOS = NemoSEOSConfig(
     mu1=1.4970e-4, mu2=1.1090e-5, nu=2.4341e-3, T0=10.0, S0=35.0,
 )
 
+# B1/B2 (the leapfrog program and its lagged metric) are void under
+# DECISION 100.  B3 is card data (j_periodic).  B5 is proven at rest
+# (test_nemo_tsunami_card); its NEMO comparison waits for the record.
 TSUNAMI_UNMEASURED: tuple[str, ...] = (
-    # stpmlf.F90:111-134 under no key_RK3 (nemogcm.F90:186): the external mode
-    # alone, MLF branch of dynspg_ts (dynspg_ts.F90:303-482, 914-999).
-    "B1:stp_mlf_external_mode_only_program",
-    # stpmlf.F90:118 builds r3(Naa) from the slot ssh dyn_spg later
-    # overwrites, and finalize_lbc is never called, so the Kmm metric dyn_spg
-    # reads lags the Kmm ssh (dynspg_ts.F90:484-491; dyn_cor_2D_init).
-    "B2:mlf_lagged_qco_metric",
-    # namelist_cfg:29 ln_Jperio: legoESM's y-wrap is a process-global halo
-    # mode (halo_latlon.set_meridionally_periodic), not card data.
-    "B3:j_periodic_card_topology",
-    # namelist_cfg:28 ln_Iperio on a fully wet box: every certified NEMO card
-    # has a closed ring, so the NEMO-literal barotropic arms have never run
-    # across an open periodic seam.
-    "B4:i_periodic_nemo_literal_barotropic",
-    # usrdef_nam.F90:98 kpk = 2: ONE wet level.  The coordinate builds only
-    # under allow_single_level=True; no model step has run on one level.
-    "B5:single_wet_level_column",
+    # namelist_cfg:28-29 ln_Iperio/ln_Jperio on a fully wet box: every
+    # certified NEMO card has a closed ring, so the NEMO-literal barotropic
+    # arms (dynspg_ts.F90:787-789, :854, :895; stprk3_stg.F90:158, :636)
+    # have never run against NEMO across an open periodic seam.
+    "B4:periodic_seam_nemo_literal_barotropic",
+    # namelist_cfg ln_dynadv_OFF: dynadv.F90:129 n_dynadv = np_LIN_dyn, so
+    # stp2d.F90:159-174 and stprk3_stg.F90:315/331-334 add NO momentum
+    # advection.  The carrier identity runs flux-form UP3; legoESM has no
+    # "no momentum advection" arm.
+    "B6:no_momentum_advection_np_LIN_dyn",
+    # namelist_cfg ln_traadv_OFF: traadv.F90:461 nadv = np_NO_adv, yet T/S
+    # are stepped every stage by the thickness ratio alone
+    # (stprk3_stg.F90:552-554), so T/S stop being uniform where ssh moves and
+    # feed dyn_hpg (:324).  The carrier runs FCT2 tracer advection.
+    "B7:tracer_stage_step_without_advection",
 )
 
 
@@ -3165,9 +3184,8 @@ def build_tsunami_zco_card() -> NEMOTestcaseCard:
         raise ValueError(
             f"TSUNAMI ln_bt_auto resolves nn_e = {n_e}, card states "
             f"{nl.nn_e_resolved}")
-    # Carrier: the VORTEX flux-form identity, whose barotropic arm is the
-    # closest existing one (EEN dyn_cor_2D, transport-averaged flux-form
-    # window).  Its 3-D program is NOT TSUNAMI's -- that is B1.
+    # Carrier: the shared VORTEX flux-form EEN RK3 identity (the same stage
+    # program, EEN dyn_vor/dyn_cor_2D, hpg_sco, zdfcst); B6/B7 are what differs.
     base = _model_config(
         barotropic_time_filter="nemo_boxcar1_ab3",   # nn_bt_flt = 1, ln_bt_fw = T
         n_barotropic_substeps=nl.nn_e_resolved,
@@ -3192,6 +3210,7 @@ def build_tsunami_zco_card() -> NEMOTestcaseCard:
     card = NEMOTestcaseCard(
         "TSUNAMI-zco", recipe, nl.rn_Dt_s, nl.nn_itend, 1, 0, 0, 0.0, 0.0,
         unmeasured_features=TSUNAMI_UNMEASURED,
+        j_periodic=nl.ln_Jperio,
     )
     validate_nemo_testcase_card(card)
     return card
@@ -3203,6 +3222,11 @@ def _validate_tsunami_card(card: NEMOTestcaseCard) -> None:
     cfg = card.recipe.model_config
     if card.unmeasured_features != TSUNAMI_UNMEASURED:
         raise ValueError("TSUNAMI-zco must declare exactly TSUNAMI_UNMEASURED")
+    if card.j_periodic is not nl.ln_Jperio:
+        raise ValueError("TSUNAMI-zco j_periodic must be the deck's ln_Jperio")
+    if not (nl.key_RK3 and nl.n_baro_upd == "np_HYB" and not nl.ln_dynadv_vec
+            and not nl.ln_shuman):
+        raise ValueError("TSUNAMI-zco transcribes the RK3 HYB flux-form stages")
     on = [k for k in _TSUNAMI_ABSENT_SPG_TERMS if getattr(nl, k)]
     if on:
         raise ValueError(f"TSUNAMI-zco carries no term for {on}")
@@ -3786,6 +3810,7 @@ __all__ = (
     "tsunami_horizontal_coordinates",
     "tsunami_initial_ssh",
     "TSUNAMI_NAMELIST",
+    "TSUNAMI_DEVIATIONS",
     "TSUNAMI_UNMEASURED",
     "vortex_smt_bathymetry",
     "vortex_smt_partial_cell_geometry",
