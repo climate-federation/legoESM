@@ -138,11 +138,30 @@ because its in-process app-server client could not initialize on the read-only
 filesystem. This is recorded in `independent_review.log`, not represented as a
 passing review.
 
-The citation gate passes this receipt and its shift plant fires. The focused
-round-175 tests and the full ocean-fidelity battery are reported in the final
-committed verification section below. No model file changed, so the ORCA2
-ladders, GYRE year, DINO and tanks cannot move by construction and were not
-rerun as trajectory claims.
+The default cumulative citation gate passes with 274 citations, no unmapped
+citations, no failures and no map-audit failures. This receipt's gate passes
+all seven citations; its shifted-line plant returns the required red result.
+The focused battery passes 24/24 tests.
+
+The one permitted full `tests/ocean/fidelity -n 12` battery selected 2,786
+tests. Before its controller disappeared at 99% without a summary it emitted
+2,761 passes, seven skips and four failures, leaving 14 tests without a
+terminal result. The four failures reproduce in isolation and are all
+pre-existing/unrelated to this round's file set:
+
+* the registered dirty-escape scope ratchet lists 13 old VORTEX drivers;
+* the round-129 GYRE spread-floor record says its certified year harness moved;
+* the registered SI3 scalar-math provenance gate says lane A `MY_SRC` is not
+  verbatim;
+* the registered worktree-stamp ratchet lists 13 old emitters.
+
+The 14 missing outcomes belonged to the old stage-sweep and round-34 admission
+files. Retrying both files together was killed after seven tests; retrying the
+first missing node alone was also killed before an outcome, matching the
+campaign's recorded per-process compiler/memory limit. These incomplete
+pre-existing tests are kept in the evidence logs; they are not called green.
+No model file changed, so the ORCA2 ladders, GYRE year, DINO and tanks cannot
+move by construction and were not rerun as trajectory claims.
 
 ## OPEN
 
