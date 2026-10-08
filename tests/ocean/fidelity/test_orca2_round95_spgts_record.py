@@ -118,6 +118,15 @@ def test_round97_walk_extracts_validated_self_describing_payload(tmp_path: Path)
     assert values["i000_wgtbtp1"].shape == (4,)
 
 
+def test_round97_walk_extracts_explicit_kt8_identity(tmp_path: Path) -> None:
+    path = tmp_path / "oracle_r166_spg_rank0000_kt00000008.bin"
+    synthetic_record(path, kt=8, magic="NEMO_L4_R166SPG")
+    metadata, values = walk._payload(
+        path, expected_kt=8, expected_magic="NEMO_L4_R166SPG")
+    assert metadata["kt"] == 8
+    assert set(values) == record.required_names(2)
+
+
 def test_round97_walk_first_nonbit_uses_compiled_order() -> None:
     rows = {name: {"bit_exact": True} for name in walk.SOURCE_ORDER}
     rows["transport_u"] = {"bit_exact": False, "differing_cells": 1}

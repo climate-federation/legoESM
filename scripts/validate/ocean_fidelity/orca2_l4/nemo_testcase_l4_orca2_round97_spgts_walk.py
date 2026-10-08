@@ -53,10 +53,14 @@ def require(condition: bool, message: str) -> None:
         raise GateError(message)
 
 
-def _payload(path: Path) -> tuple[dict, dict[str, np.ndarray]]:
+def _payload(
+    path: Path, *, expected_kt: int = 1,
+    expected_magic: str = check_record.MAGIC,
+) -> tuple[dict, dict[str, np.ndarray]]:
     """Extract values only after the acquisition checker validates the record."""
 
-    metadata = check_record.read_record(path)
+    metadata = check_record.read_record(
+        path, expected_kt=expected_kt, expected_magic=expected_magic)
     raw = path.read_bytes()
     offset = 88
     values: dict[str, np.ndarray] = {}
@@ -93,7 +97,10 @@ def _owned_block(
     return value[ntsi - 1:ntei, ntsj - 1:ntej].T
 
 
-def assemble_record(root: Path, *, plant: str = "none") -> tuple[dict, dict]:
+def assemble_record(
+    root: Path, *, plant: str = "none", prefix: str = "oracle_r95_spg",
+    expected_kt: int = 1, expected_magic: str = check_record.MAGIC,
+) -> tuple[dict, dict]:
     """Assemble every two-dimensional group over the exact owned domain."""
 
     records = []
@@ -101,8 +108,10 @@ def assemble_record(root: Path, *, plant: str = "none") -> tuple[dict, dict]:
     vectors: dict[str, np.ndarray] = {}
     coverage = np.zeros((148, 180), dtype=np.int8)
     for expected_rank in (0, 1):
-        path = root / f"oracle_r95_spg_rank{expected_rank:04d}_kt00000001.bin"
-        metadata, values = _payload(path)
+        path = root / (
+            f"{prefix}_rank{expected_rank:04d}_kt{expected_kt:08d}.bin")
+        metadata, values = _payload(
+            path, expected_kt=expected_kt, expected_magic=expected_magic)
         require(metadata["rank"] == expected_rank, f"{path.name}: rank moved")
         nimpp, njmpp = metadata["origin"]
         ntsi, ntsj, ntei, ntej = metadata["owned"]
