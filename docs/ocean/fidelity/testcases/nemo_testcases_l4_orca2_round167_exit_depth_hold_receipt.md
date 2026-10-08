@@ -90,6 +90,23 @@ ASKED choices: continue the compiled-source independent rung-0 walk. UNASKED
 choices: empty. No configuration, forcing, carried-state policy, stabiliser,
 sea-ice selector or production model statement changed.
 
+## Mechanical validation
+
+Focused coverage passes 59/59, including the new record-layout, compact/native
+index, nonzero perturbation and report-plant controls. The cumulative citation
+gate and this receipt's gate both pass with zero unmapped spans; shifting the
+compiled `dynspg_ts.f90:763-766` citation makes the planted gate refuse.
+
+The one required `tests/ocean/fidelity -n 12` invocation collected 2,708
+tests and reached 99% before its 900-second controller cap during
+`test_prediction_plant_is_fail_closed`. Its retained log contains 2,688 passed,
+7 skipped and 4 failed terminal outcomes, leaving 9 without a terminal outcome;
+no second full battery was started. The four failures are the registered
+pre-existing reds also present in the round-166 battery: the moved GYRE
+certified-year spread record, unscoped allow-dirty drivers, unstamped report
+emitters and SI3 scalar-math provenance. No round-167 test failed, and the log
+contains neither a symbol-materialisation failure nor a `MemoryError`.
+
 ## OPEN
 
 1. At kt=8 external substep 2, split the zero exit-depth sum into the carried
