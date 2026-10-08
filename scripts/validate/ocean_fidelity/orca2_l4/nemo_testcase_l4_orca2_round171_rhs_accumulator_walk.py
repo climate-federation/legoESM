@@ -259,10 +259,16 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
         state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
     parts = observed_trace.operator_components
 
+    component = {
+        name: value.data if hasattr(value, "data") else value
+        for name, value in parts.items()
+    }
     accumulated = jax.device_get(jax.jit(r84.source_order_accumulators)(
-        parts["hpg_u"], parts["hpg_v"], parts["ldf_u"], parts["ldf_v"],
-        parts["vorticity_u"], parts["vorticity_v"],
-        parts["keg_u"], parts["keg_v"], parts["zad_u"], parts["zad_v"],
+        component["hpg_u"], component["hpg_v"],
+        component["ldf_u"], component["ldf_v"],
+        component["vorticity_u"], component["vorticity_v"],
+        component["keg_u"], component["keg_v"],
+        component["zad_u"], component["zad_v"],
     ))
     masks = phase3_gate.expected_masks(card)
     active = {face: np.asarray(masks[face], dtype=bool) for face in FACES}
@@ -354,7 +360,7 @@ def main() -> int:
                     "classification requires --report-in")
             result = classify(json.loads(args.report_in.read_text()), args.plant)
         require(args.plant == "none", f"{args.plant} plant stayed green")
-    except (OSError, UnicodeDecodeError, ValueError, KeyError, GateError,
+    except (OSError, UnicodeDecodeError, ValueError, TypeError, KeyError, GateError,
             check_record.Refusal, r166.GateError, r167.GateError) as error:
         marker = "PLANT-FIRED" if args.plant != "none" else "REFUSE"
         print(f"STATUS {marker} {args.plant}: {error}")
