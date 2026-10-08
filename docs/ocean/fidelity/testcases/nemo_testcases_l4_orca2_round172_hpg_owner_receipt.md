@@ -99,6 +99,29 @@ Consequently there is no GYRE, DINO, tank, rung-0, or rung-7 trajectory to
 re-certify. The successful result is a measurement and a fail-closed
 acquisition request, not a physics landing.
 
+Verification:
+
+- focused round-172 replay tests: 9 passed;
+- focused HPG acquisition tests: 8 passed;
+- receipt citation gate: PASS, four citations, zero unmapped/failing entries;
+- cumulative default citation gate: PASS, 274 citations, zero unmapped/failing
+  entries;
+- citation-shift plant: fired, exit 1;
+- `tests/ocean/fidelity -n 12`: 2,750 passed, 7 skipped, 4 failed in 2,392.52
+  seconds. The failures are the two standing worktree-stamp ratchets,
+  `test_nemo_si3_scalarmath_v2_gate.py::test_full_v2_gate_and_plants`, and the
+  stale certified-harness pin in
+  `test_nemo_testcase_l2_gyre_round129_spread_floor_gate.py::test_record_backed_gate_passes`.
+  None of their test or gate paths differs from the incoming `aa7c7a03b` tree.
+  Full log SHA-256:
+  `f5609a97bbbca842bba62e03f0d25394a54beaa28d42339a3a407acebd01bf58`.
+
+The requested separate review verdict is: **independent review unavailable
+in-sandbox**. `codex exec --sandbox read-only` failed before reading the diff:
+`failed to initialize in-process app-server client: Read-only file system`.
+The retained review log SHA-256 is
+`eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5`.
+
 ## OPEN
 
 1. Operator: run the committed HPG8 launcher with `--run`.
