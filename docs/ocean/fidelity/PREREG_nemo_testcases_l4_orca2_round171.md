@@ -92,3 +92,14 @@ ordinary unobserved full step. Any bit movement at that observed boundary
 still refuses the round. This narrows the passivity claim to the measured
 program prefix; it does not rehabilitate the failed full-step prediction or
 alter any scientific threshold.
+
+The narrowed callback observer also moved at least one post-barotropic bit at
+kt=1..7 and is therefore inadmissible; its values are discarded.  The final
+instrument contains no callback.  A private static hook returns the ten
+already-materialised component arrays together with the existing barotropic
+trace.  At every canonical input the enriched return must reproduce the plain
+barotropic trace's completed U/V RHS and post-barotropic state bit-for-bit.
+This is an instrument change only: the default hook remains false and no
+constructible configuration can select it.  If the enriched return changes
+one bit, the round stops without a scientific score.  Predictions, thresholds
+and terminal rules remain frozen.
