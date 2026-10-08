@@ -155,14 +155,18 @@ def _local_self_replay(record: dict[str, object], g: float) -> dict[str, dict]:
             record["fields"][name][..., 0], dtype=np.float64).T
     replay = r42._literal_from_inputs(inputs, g)
     ntsi, ntsj, ntei, ntej = record["owned"]
-    active = np.ones((ntej - ntsj + 1, ntei - ntsi + 1, 31), dtype=bool)
-    rows = {}
+    shape = (ntej - ntsj + 1, ntei - ntsi + 1, 31)
+    full = np.ones(shape, dtype=bool)
+    interior = np.ones(shape, dtype=bool)
+    interior[-1, ...] = False
+    rows = {"interior": {}, "full": {}}
     for public, stored in (("zhpj", "zhpi_v"), ("zvap", "zuap_v"),
                            ("sum_v", "sum_v")):
         candidate = r83.native_v(replay[stored])[
             ntsj - 1:ntej, ntsi - 1:ntei, :]
         oracle = _owned(record, stored)
-        rows[public] = _score(candidate, oracle, active)
+        rows["interior"][public] = _score(candidate, oracle, interior)
+        rows["full"][public] = _score(candidate, oracle, full)
     return rows
 
 
@@ -179,7 +183,8 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
     elif plant == "target-mask":
         report["target"]["cells"] -= 1
     elif plant == "self-replay":
-        report["recorded_input_self_replay"]["rank0"]["zhpj"]["at_floor"] = False
+        report["recorded_input_self_replay"]["rank0"]["interior"]["zhpj"][
+            "at_floor"] = False
     elif plant == "first-boundary":
         first = report["first_component"]["boundary"]
         report["component_rows"][first]["at_floor"] = True
@@ -203,32 +208,31 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
     require(all(
         row["at_floor"]
         for rank in report["recorded_input_self_replay"].values()
-        for row in rank.values()
-    ), "recorded-input literal self-replay does not calibrate")
+        for row in rank["interior"].values()
+    ), "recorded-input literal self-replay does not calibrate off the fold")
+    require(report["record_component_identity"]["at_floor"],
+            "recorded sum_v is not recorded zhpj + zvap")
     require(report["candidate_calibration"]["reproduces_round179"],
             "candidate replay does not reproduce round 179")
     first_component = _first(report["component_rows"], COMPONENT_ORDER)
     require(first_component == report["first_component"],
             "first component selector moved")
     require(first_component is not None, "all HPG V components are at the floor")
-    first_input = _first(report["input_rows"], INPUT_ORDER)
-    require(first_input == report["first_input"], "first input selector moved")
-    require(report["north_only_replay"]["at_floor"],
-            "recorded north halo alone does not close zhpj")
+    require(report["operand_record_status"] ==
+            "MISSING_EXECUTED_NORTH_E3W_EXPRESSION",
+            "missing-operand disposition moved")
     require(report["endpoint_ulp_control"] == {
         "bit_exact": False, "differing_cells": 1},
         "endpoint one-ULP control did not fire")
     report["prediction_ledger"] = {
         "R181-P1": "CONFIRMED",
-        "R181-P2": "CONFIRMED",
+        "R181-P2": "REFUTED",
         "R181-P3": (
             "CONFIRMED" if first_component["boundary"] == "zhpj" else "REFUTED"),
-        "R181-P4": (
-            "CONFIRMED" if first_input["boundary"].startswith("north_")
-            and report["north_only_replay"]["at_floor"] else "REFUTED"),
+        "R181-P4": "UNMEASURED-with-spec",
         "R181-P5": "CONFIRMED",
     }
-    report["status"] = "HELD_FIRST_HPG_V_COMPONENT"
+    report["status"] = "STOPPED_FOR_RECORD_FIRST_HPG_V_COMPONENT"
     return report
 
 
@@ -298,6 +302,10 @@ def measure(deck_root: Path, component_root: Path, baseline_root: Path,
         for name in COMPONENT_ORDER
     }
     first_component = _first(component_rows, COMPONENT_ORDER)
+    record_component_identity = _score(
+        oracle_components["zhpj"][..., :30]
+        + oracle_components["zvap"][..., :30],
+        oracle_components["sum_v"][..., :30], contributing)
 
     oracle_inputs = {
         name: _assemble(records, name)
@@ -378,9 +386,11 @@ def measure(deck_root: Path, component_root: Path, baseline_root: Path,
         "candidate_calibration": candidate_calibration,
         "component_rows": component_rows,
         "first_component": first_component,
+        "record_component_identity": record_component_identity,
         "input_rows": input_rows,
         "first_input": first_input,
         "north_only_replay": north_only_replay,
+        "operand_record_status": "MISSING_EXECUTED_NORTH_E3W_EXPRESSION",
         "endpoint_ulp_control": {
             "bit_exact": _bits_equal(one, next_one), "differing_cells": 1},
         "compiled_source": {

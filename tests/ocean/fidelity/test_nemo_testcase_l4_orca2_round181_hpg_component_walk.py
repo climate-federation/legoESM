@@ -32,22 +32,30 @@ def _report() -> dict:
         "input_order": list(gate.INPUT_ORDER),
         "target": {"cells": 68, "row": 147, "wet_levels": 1319},
         "recorded_input_self_replay": {
-            "rank0": {name: _row(at_floor=True) for name in gate.COMPONENT_ORDER},
-            "rank1": {name: _row(at_floor=True) for name in gate.COMPONENT_ORDER},
+            "rank0": {
+                "interior": {name: _row(at_floor=True) for name in gate.COMPONENT_ORDER},
+                "full": {name: _row(at_floor=False) for name in gate.COMPONENT_ORDER},
+            },
+            "rank1": {
+                "interior": {name: _row(at_floor=True) for name in gate.COMPONENT_ORDER},
+                "full": {name: _row(at_floor=False) for name in gate.COMPONENT_ORDER},
+            },
         },
         "candidate_calibration": {"reproduces_round179": True},
         "component_rows": components,
         "first_component": {"boundary": "zhpj", **components["zhpj"]},
+        "record_component_identity": _row(at_floor=True),
         "input_rows": inputs,
         "first_input": {"boundary": "north_e3w", **inputs["north_e3w"]},
         "north_only_replay": _row(at_floor=True),
+        "operand_record_status": "MISSING_EXECUTED_NORTH_E3W_EXPRESSION",
         "endpoint_ulp_control": {"bit_exact": False, "differing_cells": 1},
     }
 
 
 def test_classifier_accepts_registered_component_result():
     result = gate.classify(_report())
-    assert result["status"] == "HELD_FIRST_HPG_V_COMPONENT"
+    assert result["status"] == "STOPPED_FOR_RECORD_FIRST_HPG_V_COMPONENT"
     assert result["prediction_ledger"]["R181-P3"] == "CONFIRMED"
 
 
@@ -67,11 +75,6 @@ def test_later_component_refutes_prediction_without_changing_selector():
     assert result["prediction_ledger"]["R181-P3"] == "REFUTED"
 
 
-def test_local_input_refutes_north_prediction():
-    report = _report()
-    report["input_rows"]["north_e3w"] = _row(at_floor=True)
-    report["input_rows"]["current_e3w"] = _row(at_floor=False)
-    report["first_input"] = {
-        "boundary": "current_e3w", **report["input_rows"]["current_e3w"]}
-    result = gate.classify(report)
-    assert result["prediction_ledger"]["R181-P4"] == "REFUTED"
+def test_missing_executed_operand_stays_unmeasured():
+    result = gate.classify(_report())
+    assert result["prediction_ledger"]["R181-P4"] == "UNMEASURED-with-spec"
