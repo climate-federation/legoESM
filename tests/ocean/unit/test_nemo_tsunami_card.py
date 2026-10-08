@@ -127,10 +127,11 @@ def test_switch_lookup_refuses_a_planted_drift():
         _lookup(resolved, "rn_atfp")
 
 
-def test_validator_refuses_an_spg_term_switched_on(card, monkeypatch):
+@pytest.mark.parametrize("switch", ["ln_tide", "ln_traqsr", "ln_zdfnpc"])
+def test_validator_refuses_an_spg_term_switched_on(card, monkeypatch, switch):
     monkeypatch.setattr(recipe, "TSUNAMI_NAMELIST",
-                        TSUNAMI_NAMELIST._replace(ln_tide=True))
-    with pytest.raises(ValueError, match="ln_tide"):
+                        TSUNAMI_NAMELIST._replace(**{switch: True}))
+    with pytest.raises(ValueError, match=switch):
         validate_nemo_testcase_card(card)
 
 
