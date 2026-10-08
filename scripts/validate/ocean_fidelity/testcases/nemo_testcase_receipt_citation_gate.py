@@ -77,6 +77,8 @@ _ORCA2_R144INITIAL_COMPILED = (
     NEMO / "cfgs/ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo")
 _ORCA2_R166SPG8_COMPILED = (
     NEMO / "cfgs/ORCA2_OMIP_L4_R166SPG8/BLD/ppsrc/nemo")
+_ORCA2_R169SLOW8_COMPILED = (
+    NEMO / "cfgs/ORCA2_OMIP_L4_R169SLOW8/BLD/ppsrc/nemo")
 _ORCA2_R104EENACC_COMPILED = (
     NEMO / "cfgs/ORCA2_OMIP_L4_R104EENACC/BLD/ppsrc/nemo")
 _ORCA2_R105EENACC_COMPILED = (
@@ -228,6 +230,8 @@ FILES = {
         _ORCA2_R166SPG8_COMPILED / "dynspg_ts.f90"),
     "ORCA2_OMIP_L4_R166SPG8/BLD/ppsrc/nemo/stp2d.f90": (
         _ORCA2_R166SPG8_COMPILED / "stp2d.f90"),
+    "ORCA2_OMIP_L4_R169SLOW8/BLD/ppsrc/nemo/stp2d.f90": (
+        _ORCA2_R169SLOW8_COMPILED / "stp2d.f90"),
     "ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/lbcnfd.f90": (
         _ORCA2_R96SPG_COMPILED / "lbcnfd.f90"),
     "ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynvor.f90": (
@@ -1431,6 +1435,32 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 round 170: kt=8 slow-forcing producer walk ---------
+    'ORCA2_OMIP_L4_R169SLOW8/BLD/ppsrc/nemo/stp2d.f90:145-179': [
+        ('!*  hydrostatic pressure gradient (HPG))  *!', 1),
+        ('CALL r92_rhs_finish( kt )', 1),
+        35,
+    ],
+    'ORCA2_OMIP_L4_R169SLOW8/BLD/ppsrc/nemo/stp2d.f90:190-196': [
+        ('CALL r169_start( kt, Kbb, Kaa, Krhs )', 1),
+        ("CALL r169_put3( kt, 'vmask', vmask )", 1),
+        7,
+    ],
+    'ORCA2_OMIP_L4_R169SLOW8/BLD/ppsrc/nemo/stp2d.f90:215-227': [
+        ('!*  vertical averaging  *!', 1),
+        ('END SELECT', 2),
+        13,
+    ],
+    'ORCA2_OMIP_L4_R169SLOW8/BLD/ppsrc/nemo/stp2d.f90:244-274': [
+        ('!* baroclinic drag forcing *!', 1),
+        ('CLOSE(l2_slow_unit)', 1),
+        31,
+    ],
+    'ORCA2_OMIP_L4_R169SLOW8/BLD/ppsrc/nemo/stp2d.f90:278-306': [
+        ('!* atmospheric pressure forcing *!', 1),
+        ('Ve_rhs(ji,jj) = Ve_rhs(ji,jj) + ( bhd_wave(ji,jj+1) - bhd_wave(ji,jj) ) * r1_e1u(ji,jj)', 1),
+        29,
+    ],
     # --- ORCA2 round 169: kt=8 substep-one and slow forcing -------
     'ORCA2_OMIP_L4_R166SPG8/BLD/ppsrc/nemo/dynspg_ts.f90:680-702': [
         ('! Add bottom stresses:', 1),
