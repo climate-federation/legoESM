@@ -1370,7 +1370,7 @@ CITATION_MAP = {
     'tests/TSUNAMI/MY_SRC/diawri.F90:626': ('-99 , 32, clop, zsto, zout', 1),
     'tests/TSUNAMI/MY_SRC/diawri.F90:655': 'CALL histwrite( nid_V, "sovvbaro", kt, vv_b(:,:,Kmm)',
     'nemogcm.F90:166': ('CALL stp_RK3', 1),
-    'stprk3_stg.F90:143-145': [('ssh (:,:,Kaa) = r2_3 * ssh (:,:,Kbb) + r1_3 * ssha(:,:)', 2), ('uu_b(:,:,Kaa) = ua_b(:,:)', 2), 3],
+    'stprk3_stg.F90:143-145': [('ssh (:,:,Kaa) = r2_3 * ssh (:,:,Kbb) + r1_3 * ssha(:,:)', 2), ('vv_b(:,:,Kaa) = va_b(:,:)', 2), 3],
     'stprk3_stg.F90:158': "CALL lbc_lnk( 'stp_RK3_stg', r3ua, 'U', 1._wp, r3va, 'V', 1._wp, r3fa, 'F', 1._wp )",
     'stprk3_stg.F90:224-226': [('ssh (:,:,Kaa) = ssha(:,:)', 3), ('vv_b(:,:,Kaa) = va_b(:,:)', 5), 3],
     'stprk3_stg.F90:552-554': ['( 1._wp + r3t(ji,jj,Kbb) )*ts(ji,jj,jk,jn,Kbb )', '/          ( 1._wp + r3t(ji,jj,Kaa) )', 3],
