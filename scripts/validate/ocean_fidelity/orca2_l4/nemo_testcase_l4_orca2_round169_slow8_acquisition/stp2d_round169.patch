@@ -15,10 +15,10 @@
           END SELECT
           CALL r93_slow_start( kt, Kbb, Kaa, Krhs )
 +         CALL r169_start( kt, Kbb, Kaa, Krhs )
-+         CALL r169_put3( kt, 'e3u', e3u_0 )
++         CALL r169_put3( kt, 'e3u', e3u_3d )
 +         CALL r169_put3( kt, 'rhs_u', uu(:,:,:,Krhs) )
 +         CALL r169_put3( kt, 'umask', umask )
-+         CALL r169_put3( kt, 'e3v', e3v_0 )
++         CALL r169_put3( kt, 'e3v', e3v_3d )
 +         CALL r169_put3( kt, 'rhs_v', vv(:,:,:,Krhs) )
 +         CALL r169_put3( kt, 'vmask', vmask )
           !
