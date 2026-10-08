@@ -71,8 +71,18 @@ The separate read-only Codex review was attempted and returned
 `failed to initialize in-process app-server client: Read-only file system`.
 
 No model file changed, so ORCA2/GYRE/DINO/tank trajectory gates are ineligible
-in this acquisition-repair round. Citation and wide-battery results are added
-at the clean final tip.
+in this acquisition-repair round. The default citation gate passes with 274
+citations and no unmapped citation or audit failure. This receipt's one
+compiled citation also passes; shifting it by two lines exits 1 with
+`STATUS FAIL` and `SYMBOL-NOT-AT-LINE`.
+
+The required single `tests/ocean/fidelity -n 12` invocation collected 2,853
+tests. Before the known nonterminal tail it recorded 2,828 passes, 7 skips and
+the four listed pre-existing failures: SI3 scalar-math provenance, round-35
+stamp scope, the worktree-stamp ratchet, and the round-129 GYRE record-backed
+pin. All six round-181/182 parser and launcher tests passed. Fourteen tests had
+no terminal result; after three silent 30-second polls with no further output,
+the dead tail was interrupted without claiming a suite summary.
 
 ## OPEN
 
