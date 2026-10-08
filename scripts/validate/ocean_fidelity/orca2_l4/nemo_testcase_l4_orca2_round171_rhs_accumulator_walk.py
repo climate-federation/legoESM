@@ -201,6 +201,11 @@ def classify(report: dict, plant: str = "none") -> dict:
 
 def measure(deck_root: Path, frame_root: Path, record_root: Path,
             baseline_root: Path, expect_commit: str) -> dict:
+    raise GateError(
+        "round-171 component measurement is retired: callback, bundled "
+        "return and single-component return observers all moved the "
+        "program they observed; see the retained round171 refusal log")
+
     import jax
 
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy

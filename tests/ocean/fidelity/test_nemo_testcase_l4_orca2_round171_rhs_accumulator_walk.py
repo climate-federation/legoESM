@@ -2,22 +2,9 @@ import copy
 
 import pytest
 
-from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
-    _NEMOWSBarotropicRHSComponentTrace,
-    _NEMOWSRK3TestHooks,
-)
 from scripts.validate.ocean_fidelity.orca2_l4 import (
     nemo_testcase_l4_orca2_round171_rhs_accumulator_walk as gate,
 )
-
-
-def test_return_only_rhs_trace_is_private_and_default_off():
-    hooks = _NEMOWSRK3TestHooks()
-    assert hooks.expose_barotropic_rhs_component == ""
-    selected = hooks._replace(expose_barotropic_rhs_component="vorticity")
-    assert selected.expose_barotropic_rhs_component == "vorticity"
-    assert _NEMOWSBarotropicRHSComponentTrace._fields[-2:] == (
-        "operator_component_u", "operator_component_v")
 
 
 def _score(candidate, reference, *, exact=False):
@@ -84,3 +71,8 @@ def test_source_order_closure_failure_is_retained_not_called_observer_movement()
     result = gate.classify(report)
     assert result["prediction_dispositions"]["R171-P2"] == "REFUTED"
     assert all(result["observer_passivity"]["kt8_barotropic"].values())
+
+
+def test_failed_measurement_instruments_are_retired():
+    with pytest.raises(gate.GateError, match="measurement is retired"):
+        gate.measure(None, None, None, None, "unused")

@@ -1120,11 +1120,6 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # ``_step_impl`` eagerly to obtain internals, because eager execution does
     # not certify the compiled production arithmetic.
     expose_barotropic_substeps: bool = False
-    # Return one already-materialised stage-1 momentum component pair beside
-    # the standard barotropic trace.  Private WRITE-only round-171 instrument;
-    # the empty production value introduces no traced consumer.  No
-    # constructible model configuration can select it.
-    expose_barotropic_rhs_component: str = ""
     # Return every already-materialized operand from the one compiled WS-RK3
     # stage program.  Private WRITE-only round-51 instrument; no constructible
     # model configuration can select it.
@@ -2171,18 +2166,6 @@ class _NEMOWSBarotropicTrace(NamedTuple):
     transport_average: object
 
 
-class _NEMOWSBarotropicRHSComponentTrace(NamedTuple):
-    """Round-171 barotropic trace plus one materialised stage-1 RHS pair."""
-
-    state_after_barotropic: object
-    substeps: object
-    slow_forcing: object
-    slow_forcing_operands: object
-    transport_average: object
-    operator_component_u: object
-    operator_component_v: object
-
-
 class _NEMOWSBoundaryAssociationTrace(NamedTuple):
     """Round-146 substep trace paired with an ordinary production state."""
 
@@ -3100,13 +3083,6 @@ class LatLonCGridOceanModel:
                 # the exposure silently and the walk would score one stage-1
                 # boundary under the other's name.
                 raise ValueError(f"{_name} must be a bool")
-        _barotropic_rhs_component = (
-            self._nemo_ws_test_hooks.expose_barotropic_rhs_component)
-        if _barotropic_rhs_component not in (
-                "", "hpg", "ldf", "vorticity", "keg", "zad"):
-            raise ValueError(
-                "expose_barotropic_rhs_component must name one stage-1 "
-                "operator component")
         _stage1_split = (
             self._nemo_ws_test_hooks.expose_stage1_momentum_rhs_split)
         _stage1_rhs_transform = (
@@ -6037,7 +6013,6 @@ class LatLonCGridOceanModel:
             self._nemo_ws_test_hooks.slow_forcing_rhs_term_observer)
         _want_rhs_components = (
             _return_live_stage_operands or callable(_rhs_term_observer)
-            or bool(self._nemo_ws_test_hooks.expose_barotropic_rhs_component)
             or bool(self._nemo_ws_test_hooks
                     .expose_stage1_momentum_rhs_split))
         _tend_result = self.tendencies(
@@ -6062,10 +6037,7 @@ class LatLonCGridOceanModel:
         if _want_rhs_components:
             tend, _mom_term_diagnostics, _live_operands = _tend_result
             _nemo_ws_stage1_operator_operands = (
-                _live_operands if (
-                    _return_live_stage_operands
-                    or self._nemo_ws_test_hooks
-                    .expose_barotropic_rhs_component) else None)
+                _live_operands if _return_live_stage_operands else None)
             # dyn_adv's content as THIS evaluation accumulated it: the half
             # of the step-level right-hand side that NEMO's three-dimensional
             # pre-stage array does not carry.  ``advection_u`` is
@@ -7454,18 +7426,6 @@ class LatLonCGridOceanModel:
                         .expose_barotropic_boundary_association):
                     return _NEMOWSBoundaryAssociationTrace(
                         *_trace_args, None)
-                _rhs_component = (self._nemo_ws_test_hooks
-                                  .expose_barotropic_rhs_component)
-                if _rhs_component:
-                    if _nemo_ws_stage1_operator_operands is None:
-                        raise RuntimeError(
-                            "barotropic RHS component trace was not built")
-                    return _NEMOWSBarotropicRHSComponentTrace(
-                        *_trace_args,
-                        _nemo_ws_stage1_operator_operands[
-                            f"{_rhs_component}_u"].data,
-                        _nemo_ws_stage1_operator_operands[
-                            f"{_rhs_component}_v"].data)
                 return _NEMOWSBarotropicTrace(*_trace_args)
             state_new, (Hu_avg, Hv_avg) = _baro_result
             _stage_baro_override = (
@@ -13683,13 +13643,11 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 f"config.outer_integrator must be one of {_valid_oi_jitted}, "
                 f"got {_oi!r}")
-        if (self._nemo_ws_test_hooks.expose_barotropic_substeps
-                or self._nemo_ws_test_hooks
-                .expose_barotropic_rhs_component):
+        if self._nemo_ws_test_hooks.expose_barotropic_substeps:
             if _oi != "forward_euler":
                 raise ValueError(
-                    "barotropic trace hooks are private forward_euler "
-                    "WS-RK3 fidelity hooks")
+                    "expose_barotropic_substeps is a private forward_euler "
+                    "WS-RK3 fidelity hook")
             return self._step_impl(
                 state, dt, freshwater=freshwater,
                 surface_forcing=surface_forcing, sponge=sponge,
