@@ -29,10 +29,10 @@ def _score(candidate, reference, *, exact=False):
 def _report():
     rows = {face: {} for face in gate.FACES}
     for face in gate.FACES:
-        for boundary in gate.BOUNDARIES:
+        for boundary in gate.SCORABLE_BOUNDARIES:
             value = 1.0
             if face == "u" and boundary in (
-                    "after_vor", "after_keg", "after_zad"):
+                    "after_vor", "after_keg"):
                 value = 1.0e30
             rows[face][boundary] = _score(value, 0.5)
     return {
@@ -41,15 +41,9 @@ def _report():
         "trace_passivity": {
             str(kt): {
                 "state": {name: True for name in ("T", "S", "u", "v", "ssh")},
-                "same_graph_closure_u": True,
-                "same_graph_closure_v": True,
-                "offline_bridge": {"all": True},
+                "offline_bridge": {"hpg_u": True},
             }
             for kt in range(1, 8)
-        },
-        "offline_closure": {
-            "after_ldf_to_total_u": True,
-            "after_ldf_to_total_v": True,
         },
         "rows": rows,
         "first_nonbit_accumulator": gate._first_nonbit(rows),
@@ -64,7 +58,8 @@ def test_clean_report_keeps_finite_first_nonbit_and_explosive_vor_apart():
     assert result["first_explosive_u"]["boundary"] == "after_vor"
     assert result["prediction_dispositions"]["R172-P4"] == "CONFIRMED"
     assert result["prediction_dispositions"]["R172-P2"] == "REFUTED"
-    assert result["prediction_dispositions"]["R172-P2a"] == "CONFIRMED"
+    assert result["prediction_dispositions"]["R172-P2a"] == "REFUTED"
+    assert result["prediction_dispositions"]["R172-P2b"] == "CONFIRMED"
 
 
 @pytest.mark.parametrize("plant", gate.PLANTS[1:])

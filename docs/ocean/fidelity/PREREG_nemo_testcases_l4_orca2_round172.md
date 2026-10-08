@@ -96,3 +96,30 @@ The corrected predictions are additive; the failed originals remain above:
 
 R172-P4, both explosive thresholds, source order, first-non-bit selection and
 all terminal rules are unchanged.
+
+## Prefix correction after the second refused run
+
+The corrected all-component bridge also refused at kt=2, again before any
+accumulator score. The prognostic state stayed bit-exact. The standalone
+component call matched the existing live trace bit-for-bit for HPG, LDF, VOR,
+KEG, `after_ldf` and its completed U/V total; only the isolated ZAD U/V term
+moved. The trace's own `after_ldf` also differs from its completed total,
+because the latter includes terms outside NEMO's five-call stp2d accumulator.
+Thus R172-P2a and R172-P3a are **REFUTED** as written and retained.
+
+The source-ordered replay is separable at routine boundaries. The corrected
+instrument admits only the exact prefix HPG -> LDF -> VOR -> KEG, provided all
+four raw U/V terms match the passive trace at every kt=1..7 and every traced
+state remains array-identical to the ordinary arm. It must not score or cite
+ZAD. If the first non-bit boundary occurs in the admitted prefix, the walk may
+name it; if the prefix stays bit-exact, the round stops at an unmeasured ZAD
+boundary.
+
+| ID | Prediction | CONFIRM | REFUTE |
+|---|---|---|---|
+| R172-P2b | The live-operand trace satisfies B57's exact stated passivity predicate. | Every kt=1..7 prognostic field is array-identical to the ordinary complete arm. | Any state bit moves. |
+| R172-P3b | The standalone evaluator is a bit-exact bridge for the four-operator prefix. | HPG, LDF, VOR and KEG U/V match the existing trace at every kt=1..7. | Any prefix term moves; no scientific score is emitted. |
+| R172-P6 | The first non-bit accumulator occurs before ZAD. | HPG, post-LDF, post-VOR or post-KEG is non-bit. | The admitted four-boundary prefix is bit-exact; stop at ZAD without attribution. |
+
+R172-P4's expected first explosive transition remains VOR and is evaluated
+only if that transition occurs within the admitted prefix.
