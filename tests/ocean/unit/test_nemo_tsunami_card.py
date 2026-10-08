@@ -1,7 +1,8 @@
-"""The TSUNAMI card (round 1): transcription, explicit switches, refusals.
+"""The TSUNAMI card (round 2, RK3 build): transcription, explicit switches,
+the key_RK3 deviation, j-periodicity as card data, the one-level rest step.
 
-File-free only.  The oracle comparison waits for the acquisition record
-(scripts/validate/ocean_fidelity/testcases/nemo_testcase_l1_tsunami/run.sh).
+The oracle comparison waits for the acquisition record
+(scripts/validate/ocean_fidelity/testcases/nemo_testcase_l1_tsunami/run_rk3.sh).
 """
 from __future__ import annotations
 
@@ -16,6 +17,7 @@ from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
 from legoesm.ocean.constants_config import NEMO_CONSTANTS_CONFIG as CONSTANTS
 from legoesm.ocean.fidelity import nemo_testcase_recipe as recipe
 from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+    TSUNAMI_DEVIATIONS,
     TSUNAMI_NAMELIST,
     TsunamiResolvedNamelist,
     TSUNAMI_UNMEASURED,
@@ -62,7 +64,8 @@ _STATS = (Path(__file__).resolve().parents[3] / "scripts/validate/ocean_fidelity
           "testcases/nemo_testcase_full_statistics.py")
 _UNIT_SUFFIXES = ("_m2_s", "_deg", "_km", "_m", "_s")
 _ALIASES = {"ln_usr_sbc": "namsbc.ln_usr"}   # card label -> NEMO key
-_NOT_IN_NAMELIST = {"key_RK3", "key_qco", "key_vco_1d", "nn_e_resolved"}
+_NOT_IN_NAMELIST = {"key_RK3", "key_qco", "key_vco_1d", "nn_e_resolved",
+                    "n_baro_upd"}
 
 
 def _nemo_value(text):
@@ -102,8 +105,19 @@ def test_explicit_switch_values_match_nemo_namelists():
             continue
         assert getattr(TSUNAMI_NAMELIST, field) == _lookup(resolved, field), field
     keys = (_CASE / "cpp_TSUNAMI.fcm").read_text().split()
-    for k in ("key_RK3", "key_qco", "key_vco_1d"):
-        assert getattr(TSUNAMI_NAMELIST, k) == (k in keys), k
+    # every built key equals the shipped one EXCEPT the recorded deviations
+    differ = {k for k in ("key_RK3", "key_qco", "key_vco_1d")
+              if getattr(TSUNAMI_NAMELIST, k) != (k in keys)}
+    assert differ == {d[0] for d in TSUNAMI_DEVIATIONS}
+    for field, shipped, built, _ in TSUNAMI_DEVIATIONS:
+        assert (field in keys, getattr(TSUNAMI_NAMELIST, field)) == (shipped, built)
+
+
+@pytest.mark.skipif(not _CASE.is_dir(), reason="NEMO 5.0.2 tree not present")
+def test_rk3_stage_selector_is_the_module_constant():
+    src = (_NEMO / "src/OCE/stprk3_stg.F90").read_text().splitlines()
+    assert "n_baro_upd =  np_HYB" in src[43]
+    assert TSUNAMI_NAMELIST.n_baro_upd == "np_HYB"
 
 
 def test_switch_lookup_refuses_a_planted_drift():
@@ -155,9 +169,66 @@ def test_initial_ssh_against_formula_at_three_cells(card):
 
 
 def test_execution_gate_refuses_with_named_blockers(card):
-    assert len(TSUNAMI_UNMEASURED) == 5
-    with pytest.raises(ValueError, match="B1:stp_mlf_external_mode_only"):
+    assert [b.split(":")[0] for b in TSUNAMI_UNMEASURED] == ["B4", "B6", "B7"]
+    with pytest.raises(ValueError, match="B4:periodic_seam"):
         validate_nemo_testcase_card_for_execution(card)
+
+
+def test_j_periodicity_is_card_data(card):
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        NEMOTestcaseCard, build_nemo_testcase_card)
+    assert card.j_periodic is True and TSUNAMI_NAMELIST.ln_Jperio is True
+    assert NEMOTestcaseCard._field_defaults["j_periodic"] is False
+    assert build_nemo_testcase_card("VORTEX-zco").j_periodic is False
+    with pytest.raises(ValueError, match="ln_Jperio"):
+        validate_nemo_testcase_card(card._replace(j_periodic=False))
+
+
+def test_meridional_periodicity_scope_feeds_the_existing_y_wrap(card):
+    from legoesm.grids import halo_latlon as hl
+    import jax.numpy as jnp
+    v = jnp.ones((5, 4))
+    assert hl.get_meridionally_periodic() is False
+    assert np.asarray(hl.zero_polar_lat_ends(v))[[0, -1]].sum() == 0.0
+    with hl.meridional_periodicity(card.j_periodic):
+        assert hl.get_meridionally_periodic() is True
+        assert np.all(np.asarray(hl.zero_polar_lat_ends(v)) == 1.0)
+    assert hl.get_meridionally_periodic() is False
+    with pytest.raises(RuntimeError):
+        with hl.meridional_periodicity(True):
+            raise RuntimeError("restore on error")
+    assert hl.get_meridionally_periodic() is False
+
+
+def _step_fields(card, eta):
+    """One model step of the card from (eta, the card's rest u/v/T/S)."""
+    import jax.numpy as jnp
+    from legoesm.grids.halo_latlon import meridional_periodicity
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel)
+    r = card.recipe
+    s0 = r.initial_state._replace(
+        eta=r.initial_state.eta.replace(data=jnp.asarray(eta)))
+    with meridional_periodicity(card.j_periodic):
+        s1 = LatLonCGridOceanModel(r.grid, r.z_coord, r.model_config).step(
+            s0, card.dt_s)
+    return {f: (np.asarray(getattr(s0, f).data), np.asarray(getattr(s1, f).data))
+            for f in ("u", "v", "T", "S", "eta", "w", "uu_b", "vv_b")}
+
+
+def test_one_wet_level_rest_state_does_not_move_bit_for_bit(card):
+    """B5: one wet level, zero forcing, flat ssh -> nothing moves, bitwise.
+
+    Non-vacuity: the SAME step from the card's own ssh bump moves eta, so the
+    comparison can fail.
+    """
+    assert card.recipe.z_coord.n_levels == 1
+    eta0 = np.asarray(card.recipe.initial_state.eta.data)
+    rest = _step_fields(card, np.zeros_like(eta0))
+    for name, (a, b) in rest.items():
+        assert a.shape == b.shape and a.tobytes() == b.tobytes(), name
+    moved = _step_fields(card, eta0)
+    assert moved["eta"][0].tobytes() != moved["eta"][1].tobytes()
 
 
 def test_validator_refuses_planted_drift(card):
