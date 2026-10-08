@@ -139,12 +139,23 @@ map-audit failures. Its shifted first-endpoint plant exits 1 with
 `SYMBOL-NOT-AT-LINE`. The final default/receipt citation passes are recorded
 after the completed receipt is committed.
 
-PLACEHOLDER_REVIEW_RESULTS
+The required separate read-only Codex review was attempted on clean committed
+tree `a2afb805a`. Independent review is unavailable in-sandbox; the complete
+verdict is quoted verbatim:
+
+> WARNING: proceeding, even though we could not create PATH aliases: Read-only file system (os error 30)
+> Reading additional input from stdin...
+> Error: failed to initialize in-process app-server client: Read-only file system (os error 30)
+
+There is no `SHIP` or `DO NOT SHIP` verdict to suppress. Per the standing
+operator instruction, the round continues with the mechanically gated
+evidence above. The complete attempt is `round247/codex_review.log`.
 
 ## 4. Verdict and OPEN
 
-**LANDED, subject only to the required independent review and final citation
-rerun below.** R247-P1 through R247-P7 are CONFIRMED: the pinned-main
+**LANDED.** The independent review was unavailable for the quoted sandbox
+reason, and the final citation rerun below passes. R247-P1 through R247-P7 are
+CONFIRMED: the pinned-main
 composition is conflict-free and explained, every certified trajectory is
 unchanged, DINO remains exact to the frozen value and below its bar, and the
 test surface is green. R247-P8 is satisfied by the PR summary. No model or
