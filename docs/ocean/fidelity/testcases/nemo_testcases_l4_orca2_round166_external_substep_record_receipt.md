@@ -93,6 +93,20 @@ passivity, trace source order and record support; each exits nonzero with
 and generalized round-95 record checker. Evidence artifacts and control logs
 are frozen in `SHA256SUMS`.
 
+The cumulative and round-receipt citation gates pass with zero unmapped spans;
+shifting the compiled exit-depth citation by two lines makes the planted gate
+fail. The one required `tests/ocean/fidelity -n 12` invocation reached 99%.
+After all real pytest processes had exited, its controller pipe supplied no
+summary; the retained log contains 2,671 passed, 7 skipped and 4 failed
+outcomes. The four failures are the registered pre-existing reds from rounds
+164-165: the moved GYRE certified-year spread record, unscoped allow-dirty
+drivers, unstamped report emitters and SI3 scalar-math provenance. No
+round-166 test failed, and no second full battery was started.
+
+The separate `codex exec --sandbox read-only` review attempt returned
+**independent review unavailable in-sandbox** before reading the diff:
+`failed to initialize in-process app-server client: Read-only file system`.
+
 Two instrument findings are retained rather than silently discarded. A
 combined observed/unobserved process exhausted memory after retaining both JIT
 executables, so the unchanged control was isolated in its own process and its
