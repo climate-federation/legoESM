@@ -3182,7 +3182,10 @@ def build_tsunami_zco_card() -> NEMOTestcaseCard:
         tke_langmuir_evaluation=None,
     )
     model_config = base._replace(
-        eos="nemo_seos", eos_nemo_seos=_TSUNAMI_SEOS, eos_depth="insitu",
+        # DECISION 101: stp_2D's eos takes the live depth
+        # gdept_1d*(1+r3t) (eosbn2.f90:361; stp2d.f90:137), and rn_mu1/mu2
+        # are nonzero here, unlike VORTEX.
+        eos="nemo_seos", eos_nemo_seos=_TSUNAMI_SEOS, eos_depth="geometric",
         adaptive_implicit_vertadv=nl.ln_zad_Aimp,
         K_h=0.0,                                  # ln_traldf_OFF
         A_v=nl.rn_avm0_m2_s, K_v=nl.rn_avt0_m2_s,  # ln_zdfcst, namelist_ref
