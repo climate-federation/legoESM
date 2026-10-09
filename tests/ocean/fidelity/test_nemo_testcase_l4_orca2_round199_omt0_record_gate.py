@@ -81,7 +81,32 @@ def test_restart_capacity_plant_is_nonvacuous() -> None:
 
 def test_preflight_census_is_frozen() -> None:
     report = gate.preflight()
-    assert report["status"] == "PASS_R199_OMT0_PREFLIGHT"
+    assert report["status"] == "PASS_R200_OMT0_RECOVERY_PREFLIGHT"
     assert report["twin_steps"] == list(range(1, 11))
+    assert report["twin_itend"] == 10
     assert report["month_steps"] == [10, 20, 30, 40, 50, 60, 70, 80, 90, 95]
+    assert report["month_steps_expected_available"] == [10]
+    assert report["expected_oracle_stop_step"] == 11
     assert report["restart_list_capacity"] == 10
+
+
+ORACLE_STOP = """
+ stp_ctl: |ssh| > 20 m  or  |U| > 10 m/s  or  S <= 0
+ kt 11 |ssh| max   3.853     at i j     9  90    MPI rank 0
+ kt 11 |U|   max   3.041     at i j k  21  84 27 MPI rank 0
+ kt 11 |V|   max   10.24     at i j k  22  84 27 MPI rank 0
+ kt 11 Sal   min   21.58     at i j k  37 133  1 MPI rank 0
+ kt 11 Sal   max   37.25     at i j k  35  19  5 MPI rank 0
+"""
+
+
+def test_oracle_stop_boundary_is_exact_and_plant_fires() -> None:
+    report = gate._oracle_stop_report(ORACLE_STOP)
+
+    assert report["step"] == 11
+    assert report["fields"]["v"] == {
+        "value": 10.24,
+        "location": [22, 84, 27],
+    }
+    with pytest.raises(gate.GateError, match="boundary moved"):
+        gate._oracle_stop_report(ORACLE_STOP, "wrong-oracle-stop")

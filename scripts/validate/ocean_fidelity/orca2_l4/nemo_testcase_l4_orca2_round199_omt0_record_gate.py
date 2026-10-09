@@ -29,9 +29,10 @@ BINARY_SHA256 = rung0_record.BINARY_SHA256
 CPP_SHA256 = rung0_deck.CPP_SHA256
 FIELDS = ("sshn", "un", "vn", "tn", "sn")
 TWIN_STEPS = tuple(range(1, 11))
-TWIN_ITEND = 12
+TWIN_ITEND = 10
 MONTH_STEPS = (10, 20, 30, 40, 50, 60, 70, 80, 90, 95)
 MONTH_ITEND = 96
+AVAILABLE_MONTH_STEPS = (10,)
 RESTART_LIST_CAPACITY = 10
 
 CHANGED = {
@@ -59,7 +60,8 @@ RETAINED = {
 PLANTS = (
     "none", "extra-delta", "live-module", "oversized-list",
     "missing-smoke", "missing-rank", "wrong-step", "nonfinite",
-    "twin-ulp", "calibration-ulp", "missing-month", "changed-binary",
+    "twin-ulp", "calibration-ulp", "missing-month", "wrong-oracle-stop",
+    "changed-binary",
 )
 
 
@@ -257,16 +259,59 @@ def _payload(path: Path, wanted_step: int, *, nonfinite: bool = False) -> tuple[
     return arrays, header
 
 
+def _oracle_stop_report(ocean: str, plant: str = "none") -> dict:
+    """Admit only the measured OMT-0 kt=11 stp_ctl boundary."""
+    require("stp_ctl: |ssh| > 20 m  or  |U| > 10 m/s" in ocean,
+            "month did not stop through compiled stp_ctl")
+    patterns = {
+        "ssh": r"kt\s+11\s+\|ssh\| max\s+([0-9.]+)\s+at i j\s+(\d+)\s+(\d+)",
+        "u": r"kt\s+11\s+\|U\|\s+max\s+([0-9.]+)\s+at i j k\s+(\d+)\s+(\d+)\s+(\d+)",
+        "v": r"kt\s+11\s+\|V\|\s+max\s+([0-9.]+)\s+at i j k\s+(\d+)\s+(\d+)\s+(\d+)",
+        "sal_min": r"kt\s+11\s+Sal\s+min\s+([0-9.]+)\s+at i j k\s+(\d+)\s+(\d+)\s+(\d+)",
+        "sal_max": r"kt\s+11\s+Sal\s+max\s+([0-9.]+)\s+at i j k\s+(\d+)\s+(\d+)\s+(\d+)",
+    }
+    expected = {
+        "ssh": (3.853, (9, 90)),
+        "u": (3.041, (21, 84, 27)),
+        "v": (10.24, (22, 84, 27)),
+        "sal_min": (21.58, (37, 133, 1)),
+        "sal_max": (37.25, (35, 19, 5)),
+    }
+    report = {}
+    for name, pattern in patterns.items():
+        match = re.search(pattern, ocean)
+        require(match is not None, f"month lacks kt=11 {name} boundary")
+        value = float(match.group(1))
+        location = tuple(int(item) for item in match.groups()[1:])
+        if plant == "wrong-oracle-stop" and name == "v":
+            value = np.nextafter(value, np.inf)
+        require((value, location) == expected[name],
+                f"kt=11 {name} boundary moved: {(value, location)}")
+        report[name] = {"value": value, "location": list(location)}
+    require(report["v"]["value"] > 10.0,
+            "kt=11 stop is not caused by the compiled V threshold")
+    return {"step": 11, "owner": "stp_ctl velocity bound", "fields": report}
+
+
 def _run_provenance(root: Path, *, itend: int, restart_steps: tuple[int, ...],
-                    plant: str = "none") -> None:
+                    plant: str = "none", expected_oracle_stop: bool = False,
+                    opened_steps: tuple[int, ...] | None = None) -> dict | None:
     expected_binary = "0" * 64 if plant == "changed-binary" else BINARY_SHA256
     require(sha256(root / "nemo") == expected_binary, f"{root}: binary changed")
     stdout = (root / "run.user.stdout.log").read_text()
     timing = (root / "run.user.time.log").read_text()
     ocean = (root / "ocean.output").read_text()
-    if plant == "missing-smoke" and itend == 2:
-        timing = timing.replace("RUN_DONE", "")
-    require("STOP 0" in stdout and "RUN_DONE" in timing, f"{root}: incomplete run")
+    if expected_oracle_stop:
+        require("STOP 0" not in stdout and "RUN_EXPECTED_ORACLE_STOP" in timing,
+                f"{root}: expected oracle stop was not recorded")
+        boundary = _oracle_stop_report(ocean, plant)
+        require((root / "output.abort_0000.nc").is_file(),
+                f"{root}: oracle-stop state is absent")
+    else:
+        if plant == "missing-smoke" and itend == 2:
+            timing = timing.replace("RUN_DONE", "")
+        require("STOP 0" in stdout and "RUN_DONE" in timing, f"{root}: incomplete run")
+        boundary = None
     require(re.search(rf"number of the last time step\s+nn_itend\s+=\s+{itend}\b", ocean),
             f"{root}: resolved nn_itend moved")
     resolved = {
@@ -278,9 +323,10 @@ def _run_provenance(root: Path, *, itend: int, restart_steps: tuple[int, ...],
     }
     for label, pattern in resolved.items():
         require(re.search(pattern, ocean), f"{root}: resolved {label} is not true")
-    for step in restart_steps:
+    for step in opened_steps if opened_steps is not None else restart_steps:
         require(f"open ocean restart NetCDF file: ./ORCA2_{step:08d}_restart" in ocean,
                 f"{root}: resolved log omitted restart step {step}")
+    return boundary
 
 
 def _compare(left: dict[str, np.ndarray], right: dict[str, np.ndarray], label: str,
@@ -303,14 +349,20 @@ def validate_record(canonical: Path, smoke: Path, twin_a: Path, twin_b: Path,
                     month: Path, plant: str = "none") -> dict:
     require(plant in PLANTS, f"unknown plant {plant}")
     runs = (
-        (smoke, 2, 2, (1,)),
-        (twin_a, TWIN_ITEND, TWIN_ITEND, TWIN_STEPS),
-        (twin_b, TWIN_ITEND, TWIN_ITEND, TWIN_STEPS),
-        (month, MONTH_ITEND, MONTH_ITEND, MONTH_STEPS),
+        (smoke, 2, 2, (1,), False, (1,)),
+        (twin_a, TWIN_ITEND, TWIN_ITEND, TWIN_STEPS, False, TWIN_STEPS),
+        (twin_b, TWIN_ITEND, TWIN_ITEND, TWIN_STEPS, False, TWIN_STEPS),
+        (month, MONTH_ITEND, MONTH_ITEND, MONTH_STEPS, True, AVAILABLE_MONTH_STEPS),
     )
     deck_rows = []
-    for root, itend, stock, steps in runs:
-        _run_provenance(root, itend=itend, restart_steps=steps, plant=plant)
+    oracle_boundary = None
+    for root, itend, stock, steps, expected_stop, opened_steps in runs:
+        observed = _run_provenance(
+            root, itend=itend, restart_steps=steps, plant=plant,
+            expected_oracle_stop=expected_stop, opened_steps=opened_steps,
+        )
+        if observed is not None:
+            oracle_boundary = observed
         deck_rows.append(validate_run_deck(
             canonical, root, itend=itend, stock=stock,
             restart_steps=steps, plant=plant,
@@ -336,35 +388,17 @@ def validate_record(canonical: Path, smoke: Path, twin_a: Path, twin_b: Path,
                 ulp_field=(FIELDS[0] if plant == "twin-ulp" and step == 1 and rank == 0 else None),
             )
 
-    for rank in (0, 1):
-        smoke_payload, smoke_header = _payload(
-            smoke / f"ORCA2_{2:08d}_restart_{rank:04d}.nc", 2,
-        )
-        headers.append(smoke_header)
-        require(smoke_payload, "smoke sentinel payload disappeared")
-        for root in (twin_a, twin_b):
-            sentinel, sentinel_header = _payload(
-                root / f"ORCA2_{TWIN_ITEND:08d}_restart_{rank:04d}.nc", TWIN_ITEND,
-            )
-            headers.append(sentinel_header)
-            require(sentinel, "twin terminal sentinel payload disappeared")
-
     month_payloads: dict[tuple[int, int], dict[str, np.ndarray]] = {}
-    for step in MONTH_STEPS:
+    for step in AVAILABLE_MONTH_STEPS:
         for rank in (0, 1):
             name = f"ORCA2_{step:08d}_restart_{rank:04d}.nc"
             path = month / name
-            if plant == "missing-month" and step == 95 and rank == 1:
+            if plant == "missing-month" and step == 10 and rank == 1:
                 path = month / "PLANTED_MISSING_MONTH.nc"
             arrays, header = _payload(path, step)
             month_payloads[(step, rank)] = arrays
             headers.append(header)
     for rank in (0, 1):
-        sentinel, header = _payload(
-            month / f"ORCA2_{MONTH_ITEND:08d}_restart_{rank:04d}.nc", MONTH_ITEND,
-        )
-        headers.append(header)
-        require(sentinel, "month terminal sentinel payload disappeared")
         for label, root in (("twin-a", twin_a), ("twin-b", twin_b)):
             twin, twin_header = _payload(
                 root / f"ORCA2_{10:08d}_restart_{rank:04d}.nc", 10,
@@ -375,12 +409,16 @@ def validate_record(canonical: Path, smoke: Path, twin_a: Path, twin_b: Path,
                 ulp_field=(FIELDS[0] if plant == "calibration-ulp" and label == "twin-a" and rank == 0 else None),
             )
     return {
-        "format": "nemo-testcase-l4-orca2-round199-omt0-record-v1",
-        "status": "PASS_R199_OMT0_RECORD",
+        "format": "nemo-testcase-l4-orca2-round200-omt0-record-v2",
+        "status": "PASS_R200_OMT0_TEN_STEP_RECORD__STOP_MONTH_AT_KT11",
         "claim_label": "independent OMT-0",
         "binary_sha256": BINARY_SHA256,
         "twin_steps": list(TWIN_STEPS),
-        "month_steps": list(MONTH_STEPS),
+        "month_steps_requested": list(MONTH_STEPS),
+        "month_steps_available": list(AVAILABLE_MONTH_STEPS),
+        "month_steps_unavailable": sorted(set(MONTH_STEPS) - set(AVAILABLE_MONTH_STEPS)),
+        "month_disposition": "UNMEASURED_WITH_SPEC_AFTER_KT10",
+        "oracle_boundary": oracle_boundary,
         "rank_count": 2,
         "field_order": list(FIELDS),
         "field_comparisons": comparisons,
@@ -391,11 +429,13 @@ def validate_record(canonical: Path, smoke: Path, twin_a: Path, twin_b: Path,
 
 def preflight() -> dict:
     return {
-        "format": "nemo-testcase-l4-orca2-round199-omt0-preflight-v1",
-        "status": "PASS_R199_OMT0_PREFLIGHT",
+        "format": "nemo-testcase-l4-orca2-round200-omt0-preflight-v2",
+        "status": "PASS_R200_OMT0_RECOVERY_PREFLIGHT",
         "twin_steps": list(TWIN_STEPS),
         "twin_itend": TWIN_ITEND,
         "month_steps": list(MONTH_STEPS),
+        "month_steps_expected_available": list(AVAILABLE_MONTH_STEPS),
+        "expected_oracle_stop_step": 11,
         "month_itend": MONTH_ITEND,
         "restart_list_capacity": RESTART_LIST_CAPACITY,
         "fields": list(FIELDS),
@@ -414,6 +454,7 @@ def main() -> int:
     parser.add_argument("--stock", type=int)
     parser.add_argument("--restart-steps")
     parser.add_argument("--preflight-only", action="store_true")
+    parser.add_argument("--smoke-only", action="store_true")
     parser.add_argument("--smoke", type=Path)
     parser.add_argument("--twin-a", type=Path)
     parser.add_argument("--twin-b", type=Path)
@@ -444,6 +485,18 @@ def main() -> int:
         if args.preflight_only:
             require(args.plant == "none", "preflight does not accept a plant")
             report = preflight()
+        elif args.smoke_only:
+            require(args.candidate is not None and args.smoke is not None,
+                    "smoke validation requires canonical deck and smoke root")
+            _run_provenance(args.smoke, itend=2, restart_steps=(1,), plant=args.plant)
+            report = {
+                "format": "nemo-testcase-l4-orca2-round200-omt0-smoke-v1",
+                "status": "PASS_R200_OMT0_SMOKE_REUSE",
+                "deck": validate_run_deck(
+                    args.candidate, args.smoke, itend=2, stock=2,
+                    restart_steps=(1,), plant=args.plant,
+                ),
+            }
         elif args.smoke:
             require(all((args.candidate, args.smoke, args.twin_a, args.twin_b, args.month)),
                     "record admission requires canonical deck and all four roots")

@@ -178,6 +178,8 @@ FILES = {
         _ORCA2_COMPILED / "stprk3.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/stp2d.f90": (
         _ORCA2_COMPILED / "stp2d.f90"),
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/stpctl.f90": (
+        _ORCA2_COMPILED / "stpctl.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynadv.f90": (
         _ORCA2_COMPILED / "dynadv.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/ldfdyn.f90": (
@@ -2288,6 +2290,16 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/restart.f90:188-202': [
         ('IF( kt == nitrst ) THEN', 1),
         ('ENDIF', 14), 15],
+    # --- ORCA2 round 200: OMT-0's own first safety boundary ---
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stpctl.f90:176-184': [
+        'zmax(1) = MAXVAL(  ABS(ssh(:,:,         Kmm)), mask = llmsk(:,:,1) )',
+        'zmax(5) = MAXVAL(  ts(:,:,:,jp_sal,Kmm), mask = llmsk )', 9],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stpctl.f90:243-250': [
+        'IF(  zmax(1) >   20._wp .OR.',
+        '& ABS(   SUM(zmax(1:jptst)) ) > HUGE(1._wp) ) THEN', 8],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stpctl.f90:293-316': [
+        "WRITE(ctmp1,*) ' stp_ctl: |ssh| > 20 m  or  |U| > 10 m/s  or  S <= 0  or  S >= 100  or  NaN encounter in the tests'",
+        "CALL ctl_stop( 'STOP', ctmp1, ' ', ctmp2, ctmp3, ctmp4, ctmp5, ctmp6, ' ', ctmp7 )", 24],
     # --- ORCA2 round 189: bounded replacement restart list ---
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/in_out_manager.f90:51-51':
         'INTEGER, DIMENSION(10) :: nn_stocklist',
