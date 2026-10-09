@@ -210,7 +210,7 @@ and `bbl_aht_m2_s=1000` on the seamount card; (4) an acquisition `run.sh`
 ## Review and gates
 
 - Citation gate (from heading "## Round 4 —"): PASS, 54 citations, 0 unmapped,
-  0 failures; a planted shift of the gate-sign citation (`trabbl.f90:430`)
+  0 failures; a planted shift of the gate-sign citation (trabbl line 430)
   exits 1. `round4/citation_gate.json`.
 - New tests: `tests/ocean/fidelity/test_nemo_testcase_l1_vortex_smtrungs_round4_smt6_survey.py`,
   5 passed (run with the repo `packages/*` and `src` on `PYTHONPATH`; the venv's
