@@ -37,6 +37,7 @@ FIELDS = frame_gate.FIELDS
 PLANTS = (
     "none", "cadence", "header", "field-name", "truncation", "nonfinite",
     "missing-frame", "twin-ulp", "terminal-byte", "changed-binary",
+    "legacy-stop",
 )
 
 
@@ -225,6 +226,8 @@ def admit(canonical: Path, calibration: Path, twin_a: Path, twin_b: Path,
         restart_steps=omt0_gate.MONTH_STEPS,
         opened_steps=omt0_gate.AVAILABLE_MONTH_STEPS,
         expected_oracle_stop=True,
+        allow_unmarked_expected_stop=True,
+        plant="legacy-stop" if plant == "legacy-stop" else "none",
     )
     omt0_gate.validate_run_deck(
         canonical, month, itend=omt0_gate.MONTH_ITEND,

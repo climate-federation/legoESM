@@ -38,7 +38,7 @@ deck_gate=$here/../nemo_testcase_l4_orca2_round199_omt0_record_gate.py
 record_gate=$here/../nemo_testcase_l4_orca2_round203_omt0_frame_record_gate.py
 prereg=$repo/docs/ocean/fidelity/PREREG_nemo_testcases_l4_orca2_round203.md
 
-gate_sha=a0cbe8bba2f3adfac8e7fbf2d201227de84abda487a3d2c85026a4b59aaca4bc
+gate_sha=bb739bd38fa9153beb948cc0d8acc7b29faa8ac52bc386e7dc653ae0c214339d
 prereg_sha=13ac40b178346cb3d27b81281393892fec2d57d34f3c229e11ad6c06f29a5ad9
 base_binary_sha=c4907e476cf3969052b44c5c7fa966f3dac493e8cfb563f6554c8f3a27186343
 instrument_binary_sha=b54b37788058697e6f649d16bf9f3843bc9bb672c05bdf06404c946c659ac6a9
@@ -120,7 +120,7 @@ fi
 admit() {
   local plant
   for plant in cadence header field-name truncation nonfinite missing-frame \
-    twin-ulp terminal-byte changed-binary; do
+    twin-ulp terminal-byte changed-binary legacy-stop; do
     if "$py" "$record_gate" --candidate "$canonical" --calibration "$calibration" \
       --twin-a "$twin_a" --twin-b "$twin_b" --month "$month" --plant "$plant" \
       >"$evidence/record_${plant}_plant.log" 2>&1; then

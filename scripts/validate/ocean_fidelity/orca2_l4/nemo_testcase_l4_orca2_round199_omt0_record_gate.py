@@ -320,15 +320,29 @@ def _oracle_stop_report(ocean: str, plant: str = "none") -> dict:
 def _run_provenance(root: Path, *, itend: int, restart_steps: tuple[int, ...],
                     plant: str = "none", expected_oracle_stop: bool = False,
                     opened_steps: tuple[int, ...] | None = None,
-                    binary_sha256: str = BINARY_SHA256) -> dict | None:
+                    binary_sha256: str = BINARY_SHA256,
+                    allow_unmarked_expected_stop: bool = False) -> dict | None:
     expected_binary = "0" * 64 if plant == "changed-binary" else binary_sha256
     require(sha256(root / "nemo") == expected_binary, f"{root}: binary changed")
     stdout = (root / "run.user.stdout.log").read_text()
     timing = (root / "run.user.time.log").read_text()
     ocean = (root / "ocean.output").read_text()
     if expected_oracle_stop:
-        require("STOP 0" not in stdout and "RUN_EXPECTED_ORACLE_STOP" in timing,
-                f"{root}: expected oracle stop was not recorded")
+        marked = "RUN_EXPECTED_ORACLE_STOP" in timing
+        if not marked and allow_unmarked_expected_stop:
+            if plant == "legacy-stop":
+                stdout = stdout.replace("Errorcode: 123", "Errorcode: 122")
+            require(
+                "RUN_STARTED_UTC=" in timing
+                and "RUN_DONE" not in timing
+                and "STOP 0" not in stdout
+                and "MPI_ABORT was invoked" in stdout
+                and "Errorcode: 123" in stdout,
+                f"{root}: unmarked expected oracle stop lacks exact MPI evidence",
+            )
+        else:
+            require("STOP 0" not in stdout and marked,
+                    f"{root}: expected oracle stop was not recorded")
         boundary = _oracle_stop_report(ocean, plant)
         require((root / "output.abort_0000.nc").is_file(),
                 f"{root}: oracle-stop state is absent")

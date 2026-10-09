@@ -122,3 +122,44 @@ def test_oracle_stop_boundary_is_exact_and_plant_fires() -> None:
     }
     with pytest.raises(gate.GateError, match="boundary moved"):
         gate._oracle_stop_report(ORACLE_STOP, "wrong-oracle-stop")
+
+
+def test_legacy_unmarked_oracle_stop_requires_exact_mpi_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "nemo").touch()
+    (tmp_path / "output.abort_0000.nc").touch()
+    (tmp_path / "run.user.time.log").write_text(
+        "RUN_STARTED_UTC=2026-10-09T12:27:14Z\n"
+    )
+    (tmp_path / "run.user.stdout.log").write_text(
+        "MPI_ABORT was invoked on rank 0\nErrorcode: 123\n"
+    )
+    (tmp_path / "ocean.output").write_text(
+        "number of the last time step  nn_itend = 96\n"
+        "linear dynamics : no momentum advection  ln_dynadv_OFF = T\n"
+        "no explicit diffusion  ln_dynldf_OFF = T\n"
+        "No advection on T & S  ln_traadv_OFF = T\n"
+        "no explicit diffusion  ln_traldf_OFF = T\n"
+        "free-slip : Cd = 0  ln_drg_OFF = T\n"
+        "open ocean restart NetCDF file: ./ORCA2_00000010_restart\n"
+        + ORACLE_STOP
+    )
+    monkeypatch.setattr(gate, "sha256", lambda path: gate.BINARY_SHA256)
+
+    with pytest.raises(gate.GateError, match="was not recorded"):
+        gate._run_provenance(
+            tmp_path, itend=96, restart_steps=(10,),
+            expected_oracle_stop=True, opened_steps=(10,),
+        )
+    report = gate._run_provenance(
+        tmp_path, itend=96, restart_steps=(10,), expected_oracle_stop=True,
+        opened_steps=(10,), allow_unmarked_expected_stop=True,
+    )
+    assert report is not None and report["step"] == 11
+    with pytest.raises(gate.GateError, match="lacks exact MPI evidence"):
+        gate._run_provenance(
+            tmp_path, itend=96, restart_steps=(10,),
+            expected_oracle_stop=True, opened_steps=(10,),
+            allow_unmarked_expected_stop=True, plant="legacy-stop",
+        )
