@@ -1361,6 +1361,17 @@ FILES = {
         NEMO / "tests/VORTEX_SMT3_VEC_R16_OMIP_L1_P3/BLD/ppsrc/nemo/domhgr.f90"),
     "VORTEX_SMT3_VEC_R16_OMIP_L1_P3/BLD/ppsrc/nemo/vortex_r23_ldf_terms.f90": (
         NEMO / "tests/VORTEX_SMT3_VEC_R16_OMIP_L1_P3/BLD/ppsrc/nemo/vortex_r23_ldf_terms.f90"),
+    # TSUNAMI lane round 3: the compiled RK3 build the record was taken from.
+    "TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/stp2d.f90": (
+        NEMO / "tests/TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/stp2d.f90"),
+    "TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/eosbn2.f90": (
+        NEMO / "tests/TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/eosbn2.f90"),
+    "TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/dynhpg.f90": (
+        NEMO / "tests/TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/dynhpg.f90"),
+    "TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/dynadv.f90": (
+        NEMO / "tests/TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/dynadv.f90"),
+    "TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/traadv.f90": (
+        NEMO / "tests/TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/traadv.f90"),
 }
 
 # citation -> the anchors that IDENTIFY its first and last line, plus the
@@ -1432,6 +1443,13 @@ CITATION_MAP = {
     'tests/TSUNAMI/MY_SRC/stpmlf.F90:37': '#if ! defined key_RK3',
     'tests/TSUNAMI/MY_SRC/diawri.F90:626': ('-99 , 32, clop, zsto, zout', 1),
     'tests/TSUNAMI/MY_SRC/diawri.F90:655': 'CALL histwrite( nid_V, "sovvbaro", kt, vv_b(:,:,Kmm)',
+    # --- TSUNAMI lane round 3 (measure the RK3 record) ---
+    'TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/stp2d.f90:137-138': [('CALL eos    ( ts, Kbb, rhd )', 1), ('CALL dyn_hpg( kt, Kbb     , uu, vv, Krhs )', 1), 2],
+    'TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/eosbn2.f90:361': ('zh  = ((gdept_1d(jk) ) *(1._wp+r3t(ji,jj,Knn)))', 1),
+    'TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/dynhpg.f90:387': ('zuap = -zcoef0 * ( rhd     (ji+1,jj,1)     + rhd     (ji,jj,1) )   &', 1),
+    'TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/stp2d.f90:176': 'CASE( np_VEC_c2, np_LIN_dyn )',
+    'TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/dynadv.f90:185': 'n_dynadv = np_LIN_dyn',
+    'TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/traadv.f90:444': 'nadv = np_NO_adv',
     'nemogcm.F90:166': ('CALL stp_RK3', 1),
     'stprk3_stg.F90:143-145': [('ssh (:,:,Kaa) = r2_3 * ssh (:,:,Kbb) + r1_3 * ssha(:,:)', 2), ('vv_b(:,:,Kaa) = va_b(:,:)', 2), 3],
     'stprk3_stg.F90:158': "CALL lbc_lnk( 'stp_RK3_stg', r3ua, 'U', 1._wp, r3va, 'V', 1._wp, r3fa, 'F', 1._wp )",
