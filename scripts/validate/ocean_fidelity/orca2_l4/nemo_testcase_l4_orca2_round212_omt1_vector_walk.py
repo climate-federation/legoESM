@@ -254,7 +254,8 @@ def measure(deck_root: Path, twin_a: Path, twin_b: Path,
         "zv_spg": np.asarray(substeps["pgf_v"][index]),
         "zv_trd": np.asarray(substeps["trd_v"][index]),
         "zv_frc": np.asarray(substeps["slow_v"][index]),
-        "ssvmask": np.max(np.asarray(raw_mask.vmask, dtype=np.float64), axis=-1),
+        "ssvmask": np.max(
+            np.asarray(raw_mask.vmask, dtype=np.float64), axis=-1)[:, :90],
     }
     target_v = np.asarray(substeps["v_exit"][index])
     candidate_terms = r197._literal_terms(candidate_inputs)
