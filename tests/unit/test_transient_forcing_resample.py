@@ -60,9 +60,9 @@ class TestTransientForcingResample(unittest.TestCase):
         sampled_days = []
         orig = driver._precompute_external_forcing
 
-        def _spy(day, p_s, lat):
+        def _spy(day, p_s, lat, **kw):
             sampled_days.append(float(day))
-            return orig(day, p_s, lat)
+            return orig(day, p_s, lat, **kw)
 
         driver._precompute_external_forcing = _spy
         status = driver.run()

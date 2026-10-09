@@ -4445,7 +4445,17 @@ class ModelDriver:
             p_s = self._gather_spmd_tree_to_host(p_s)
         return p_s, lat
 
-    def _precompute_external_forcing(self, day, p_s, lat):
+    def _owned_temp(self):
+        """Grid-point air temperature in the ``_owned_p_s_and_lat`` layout;
+        None when the state carries no grid-point ``T`` (e.g. spectral)."""
+        temp = getattr(getattr(self.state, "T", None), "data", None)
+        if temp is None:
+            return None
+        if self._owned_face_ids is not None:
+            return temp[self._owned_face_ids]
+        return self._gather_spmd_tree_to_host(temp)
+
+    def _precompute_external_forcing(self, day, p_s, lat, temp=None):
         """Pre-compute ozone/aerosol/GHG fields outside JIT boundary."""
         from legoesm.forcing.external import (
             get_ozone_at_time, get_aerosol_at_time, get_aerosol_lw_at_time,
@@ -4467,6 +4477,22 @@ class ModelDriver:
         p_full_col = p_full.reshape(ncol, nlev)
         p_half_col = p_half.reshape(ncol, nlev + 1)
         lat_col = lat.reshape(ncol)
+
+        # Volcanic aerosol is cut at each column's WMO lapse-rate tropopause
+        # diagnosed from T at this precompute (the same state snapshot as
+        # ``p_s``; callers refresh daily).  ``temp`` defaults to the state's
+        # grid-point T; absent or off the ``p_s`` grid -> climatological
+        # tropopause.  Only when volcanic aerosol can be on (config-uniform,
+        # so the SPMD gather in ``_owned_temp`` stays collective).
+        w_strat = None
+        if self._aerosol_active or self._aerosol_lw_active:
+            if temp is None:
+                temp = self._owned_temp()
+            temp_col = None
+            if temp is not None and tuple(temp.shape) == tuple(p_full.shape):
+                temp_col = jnp.asarray(temp).reshape(ncol, nlev)
+            w_strat = stratospheric_layer_weight(
+                p_half_col, lat_col, p_full_col, temp_col)
 
         if self._ozone_ext_active:
             o3_vmr = jnp.asarray(get_ozone_at_time(
@@ -4527,7 +4553,7 @@ class ModelDriver:
             if volc_sw is not None:
                 aerosol_od = aerosol_od + (place_stratospheric_aod_profile_to_layers(
                     jnp.asarray(volc_sw[0]), jnp.asarray(volc_sw[1]), p_half_col,
-                ) * stratospheric_layer_weight(p_half_col, lat_col)
+                ) * w_strat
                 ).astype(aerosol_od.dtype)
             # AOD->CCN input: TROPOSPHERIC column in the visible (550 nm)
             # band, volcanic excluded, from ``ccn_path`` (fine mode) if set.
@@ -4557,7 +4583,7 @@ class ModelDriver:
                 prof_col, p_edges = aerosol_lw_prof
                 aerosol_lw_od = (place_stratospheric_aod_profile_to_layers(
                     jnp.asarray(prof_col), jnp.asarray(p_edges), p_half_col,
-                ) * stratospheric_layer_weight(p_half_col, lat_col)
+                ) * w_strat
                 ).astype(p_s.dtype)
         self._aerosol_lw_od = aerosol_lw_od
 
@@ -14524,6 +14550,7 @@ class ModelDriver:
                         # daily_forcing_bucket / FIX_RESTART_TIME).
                         _o3, _aer, _ghg = self._precompute_external_forcing(
                             float(_fd_int), _f_now['p_s'], _lat_2d_loop,
+                            temp=_f_now['T'],
                         )
                         _ext_daily = {"o3_vmr": _o3, "aerosol_od": _aer}
                         # Volcanic LONGWAVE aerosol (gap #9): only when active

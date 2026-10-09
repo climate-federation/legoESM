@@ -8,6 +8,7 @@ Provides common surface-property computations shared across scripts:
 
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
 
 from legoesm import constants
@@ -552,9 +553,58 @@ def prognostic_ice_skin_temperature(
     T_new = jnp.clip(T_new, _ICE_SKIN_FLOOR_K, T_melt_surface_K)
     return jnp.where(sic > 0.0, T_new, T_freeze_K)
 
+# NOTE: the model has a SECOND tropopause: the CAM6 aist cloud switch
+# (rhminis/rhmaxis) uses the analytic 25000 - 15000 cos^2(lat) Pa surface
+# (clouds/cloud_fraction.py cam6_tropopause_analytic, CAM's last fallback).
+# This WMO locator places volcanic aerosol only; unifying the two (CAM tries
+# twmo first) is an open follow-up.
+def wmo_tropopause_pressure(p_full_col: jnp.ndarray, temp_col: jnp.ndarray,
+                            p_bot: float = 5.0e4,
+                            p_top: float = 5.0e3) -> jnp.ndarray:
+    """WMO (1957) lapse-rate tropopause pressure [Pa] per column: the lowest
+    full level in [p_top, p_bot] [Pa] whose lapse rate to the next level up
+    is <= 2 K/km and whose mean lapse rate to every higher level within 2 km
+    (and to 2 km itself) stays <= 2 K/km.
+    NaN where no level qualifies -- incl. any NaN T in the column (it
+    poisons z above and every within-2-km test below).
+    ``p_full_col``/``temp_col`` (ncol, nlev) in either vertical order;
+    heights by hypsometric integration of T.
+
+    ponytail: the tropopause snaps to a full level (no sub-layer interpolation
+    of the 2 K/km crossing as in CAM's twmo), i.e. it is located to within one
+    layer -- all that the 1/0.5/0 layer weighting below resolves; dry T (not
+    virtual) in the hypsometric dz (<0.1% at these heights); the within-2-km
+    test loops over all nlev level offsets, O(nlev^2) per column (daily).
+    """
+    order = jnp.argsort(-p_full_col, axis=1)  # surface first
+    p = jnp.take_along_axis(p_full_col, order, axis=1)
+    temp = jnp.take_along_axis(temp_col, order, axis=1)
+    dz = (constants.R_d / constants.g) * 0.5 * (temp[:, :-1] + temp[:, 1:]) \
+        * jnp.log(p[:, :-1] / p[:, 1:])
+    z = jnp.concatenate([jnp.zeros_like(dz[:, :1]),
+                         jnp.cumsum(dz, axis=1)], axis=1)
+    z2 = z[:, :-1] + 2000.0
+    temp_2km = jax.vmap(jnp.interp)(z2, z, temp)  # T 2 km above each base level
+    # Mean lapse rate j->m <= 2 K/km  <=>  s_m >= s_j with s = T + 2 K/km * z.
+    s = temp + 2e-3 * z
+    ok = (((temp[:, :-1] - temp[:, 1:]) / dz <= 2e-3)
+          & (temp_2km + 2e-3 * z2 >= s[:, :-1])
+          & (z2 <= z[:, -1:])  # the 2 km test must fit in the column
+          & (p[:, :-1] <= p_bot) & (p[:, :-1] >= p_top))
+    n = s.shape[1]
+    for m in range(2, n):  # level offsets (static nlev), not columns
+        hit = (s[:, m:] >= s[:, :-m]) | (z[:, m:] - z[:, :-m] > 2000.0)
+        ok = ok & jnp.pad(hit, ((0, 0), (0, m - 1)), constant_values=True)
+    k = jnp.argmax(ok, axis=1)  # first True = lowest qualifying level
+    p_tp = jnp.take_along_axis(p[:, :-1], k[:, None], axis=1)[:, 0]
+    return jnp.where(ok.any(axis=1), p_tp, jnp.nan)
+
 
 def stratospheric_layer_weight(p_half_col: jnp.ndarray,
-                               lat_rad: jnp.ndarray) -> jnp.ndarray:
+                               lat_rad: jnp.ndarray,
+                               p_full_col: jnp.ndarray | None = None,
+                               temp_col: jnp.ndarray | None = None,
+                               ) -> jnp.ndarray:
     """Per-layer weight for CMIP6 stratospheric (volcanic) aerosol at the
     tropopause, as the ETH/SAGE-3lambda data notes prescribe: 1 above the
     tropopause, 0.5 in the layer holding it, 0 below (the file's values below
@@ -562,11 +612,27 @@ def stratospheric_layer_weight(p_half_col: jnp.ndarray,
     aerosol).  ``p_half_col`` (ncol, nlev+1) [Pa] in either vertical order,
     ``lat_rad`` (ncol,).
 
-    ponytail: climatological tropopause p_tp = 300 - 200 cos^2(lat) hPa
-    (100 hPa tropics, 300 hPa poles), not the instantaneous local one the
-    notes ask for; upgrade = WMO lapse-rate tropopause from the column T.
+    The tropopause is the column's WMO lapse-rate tropopause
+    (``wmo_tropopause_pressure``) when ``p_full_col``/``temp_col`` (ncol, nlev)
+    are given, falling back per column to the climatological
+    p_tp = 300 - 200 cos^2(lat) hPa (100 hPa tropics, 300 hPa poles) where
+    none is found or no T is given.
+
+    ponytail: no temporal smoothing -- the ETH notes ask for the
+    instantaneous tropopause.  Measured (scripts/validate/
+    check_wmo_tropopause_fv3duo.py, code e4d7a50ff, x64) on FV3-duo C24 L32
+    daily checkpoints duo_5d days 1-5: 0% of 3456 columns fall back (also 0%
+    at duo_60d days 5-30); the tropopause layer moves >=1 level day-to-day in
+    30% of columns, >=2 in 4% (30-60 deg 43%/7%, tropics 20%/2%), 24% of
+    moves flip back next day -- consistent with synoptic motion at L32 layer
+    spacing; threshold chatter is not separately quantified.  Smooth (e.g. a
+    running mean of p_tp) only if that proves material.
     """
-    p_tp = ((300.0 - 200.0 * jnp.cos(lat_rad) ** 2) * 100.0)[:, None]
+    p_tp = (300.0 - 200.0 * jnp.cos(lat_rad) ** 2) * 100.0
+    if temp_col is not None:
+        p_wmo = wmo_tropopause_pressure(p_full_col, temp_col)
+        p_tp = jnp.where(jnp.isnan(p_wmo), p_tp, p_wmo)
+    p_tp = p_tp[:, None]
     top = jnp.minimum(p_half_col[:, :-1], p_half_col[:, 1:])
     bot = jnp.maximum(p_half_col[:, :-1], p_half_col[:, 1:])
     return jnp.where(bot <= p_tp, 1.0, jnp.where(top >= p_tp, 0.0, 0.5))
