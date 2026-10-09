@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Operator-executed Decision-109 OMT-1 acquisition, copied from round 203.
+# Operator-executed Decision-109 OMT-1 acquisition, repaired in round 210.
 set -Eeuo pipefail
-refuse_unexpected() { status=$?; printf 'REFUSE: round-209 OMT-1 acquisition failed at line %s (exit %s)\n' "${BASH_LINENO[0]:-unknown}" "$status" >&2; exit "$status"; }
+refuse_unexpected() { status=$?; printf 'REFUSE: round-210 OMT-1 acquisition failed at line %s (exit %s)\n' "${BASH_LINENO[0]:-unknown}" "$status" >&2; exit "$status"; }
 trap refuse_unexpected ERR
 mode=${1:---run}
 case "$mode" in --run|--preflight-only|--admit-existing) ;; *) printf 'REFUSE: usage: %s [--run|--preflight-only|--admit-existing]\n' "$0" >&2; exit 64 ;; esac
@@ -12,13 +12,15 @@ here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 repo=$(CDPATH= cd -- "$here/../../../../../" && pwd -P)
 py=/home/dbalwada/legoESM/.venv/bin/python
 nemo_root=/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2
+reference_cfg=ORCA2_OMIP_L4
 source_cfg=ORCA2_OMIP_L4_R90FRAMES
-target_cfg=ORCA2_OMIP_L4_R209OMT1_P3
+target_cfg=ORCA2_OMIP_L4_R210OMT1_P3
 target_root=$nemo_root/cfgs/$target_cfg
 source_root=$nemo_root/cfgs/$source_cfg
+reference_root=$nemo_root/cfgs/$reference_cfg
 source_deck=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round203/acquisition/omt0_namelist_cfg
 base=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round203/acquisition/orca2_omt0_uninstrumented_10step_np2
-evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round209/acquisition
+evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round210/acquisition
 canonical=$evidence/omt1_namelist_cfg
 smoke=$evidence/orca2_omt1_smoke_2step_np2
 calibration=$evidence/orca2_omt1_uninstrumented_10step_np2
@@ -27,7 +29,7 @@ twin_b=$evidence/orca2_omt1_frames_10step_b_np2
 month=$evidence/orca2_omt1_month_boundary_96step_np2
 deck_gate=$here/../nemo_testcase_l4_orca2_round209_omt1_deck_gate.py
 record_gate=$here/../nemo_testcase_l4_orca2_round209_omt1_frame_record_gate.py
-prereg=$repo/docs/ocean/fidelity/PREREG_nemo_testcases_l4_orca2_round209.md
+prereg=$repo/docs/ocean/fidelity/PREREG_nemo_testcases_l4_orca2_round210.md
 source_manifest=$here/source_files.sha256
 
 cd "$repo"
@@ -44,11 +46,27 @@ done
   printf 'REFUSE: admitted record CPP card changed\n' >&2; exit 66;
 }
 (cd "$source_root/MY_SRC" && sha256sum -c "$source_manifest" >/dev/null)
-actual_sources=$(find "$source_root/MY_SRC" -maxdepth 1 -type f -printf '%f\n' | sort)
-expected_sources=$(awk '{print $2}' "$source_manifest" | sort)
-[[ "$actual_sources" == "$expected_sources" ]] || {
-  printf 'REFUSE: admitted record source inventory changed\n' >&2; exit 66;
+validate_bootstrap() {
+  local candidate=$1
+  grep -q "^${candidate} " "$nemo_root/cfgs/ref_cfgs.txt" || {
+    printf 'REFUSE: makenemo reference is not registered in ref_cfgs.txt: %s\n' "$candidate" >&2
+    return 1
+  }
 }
+validate_source_inventory() {
+  local expected=$1 actual
+  actual=$(find "$source_root/MY_SRC" -maxdepth 1 -type f -printf '%f\n' | sort)
+  [[ "$actual" == "$expected" ]] || {
+    printf 'REFUSE: admitted record source inventory changed\n' >&2
+    return 1
+  }
+}
+expected_sources=$(awk '{print $2}' "$source_manifest" | sort)
+validate_bootstrap "$reference_cfg"
+grep -q "^${source_cfg} " "$nemo_root/cfgs/work_cfgs.txt" || {
+  printf 'REFUSE: admitted record source is not registered in work_cfgs.txt\n' >&2; exit 66;
+}
+validate_source_inventory "$expected_sources"
 mkdir -p "$evidence"
 [[ -d "$evidence" && ! -L "$evidence" ]] || { printf 'REFUSE: evidence root is not a real directory\n' >&2; exit 65; }
 export PYTHONPATH=$repo:$repo/packages/core:$repo/packages/ocean:$repo/packages/atmosphere:$repo/packages/coupler:$repo/packages/ice:$repo/packages/land:$repo/packages/ml:$repo/packages/tools:$repo/src
@@ -65,7 +83,17 @@ for plant in extra-delta wrong-selector; do
   fi
   grep -q 'STATUS PLANT-FIRED' "$evidence/deck_${plant}_plant.log"
 done
-if [[ "$mode" == --preflight-only ]]; then printf 'ORCA2_ROUND209_OMT1_PREFLIGHT_READY %s\n' "$twin_a"; exit 0; fi
+if validate_bootstrap "$source_cfg" >"$evidence/bootstrap_work_cfg_plant.log" 2>&1; then
+  printf 'REFUSE: work-configuration bootstrap plant stayed green\n' >&2; exit 72
+fi
+grep -q 'REFUSE: makenemo reference is not registered' "$evidence/bootstrap_work_cfg_plant.log"
+printf 'STATUS PLANT-FIRED: work configuration cannot be a makenemo reference\n' >>"$evidence/bootstrap_work_cfg_plant.log"
+if validate_source_inventory "${expected_sources}"$'\n__missing_source_plant__.F90' >"$evidence/source_inventory_plant.log" 2>&1; then
+  printf 'REFUSE: source-inventory plant stayed green\n' >&2; exit 72
+fi
+grep -q 'REFUSE: admitted record source inventory changed' "$evidence/source_inventory_plant.log"
+printf 'STATUS PLANT-FIRED: source inventory is closed\n' >>"$evidence/source_inventory_plant.log"
+if [[ "$mode" == --preflight-only ]]; then printf 'ORCA2_ROUND210_OMT1_PREFLIGHT_READY %s\n' "$twin_a"; exit 0; fi
 
 admit() {
   local plant
@@ -78,7 +106,7 @@ admit() {
   "$py" "$record_gate" --candidate "$canonical" --calibration "$calibration" --twin-a "$twin_a" --twin-b "$twin_b" --month "$month" --output "$evidence/omt1_frame_record_admission.json"
   grep -q 'PASS_R209_OMT1_ENTRY_STAGE_AND_MONTH_RECORD' "$evidence/omt1_frame_record_admission.json" || { printf 'REFUSE: OMT-1 record is incomplete\n' >&2; exit 73; }
   (cd "$evidence" && sha256sum omt1_*json *_plant.log "$calibration"/ORCA2_00000010_restart_*.nc "$twin_a"/ORCA2_00000010_restart_*.nc "$twin_b"/ORCA2_00000010_restart_*.nc "$twin_a"/oracle_r84_frame_*.bin "$twin_b"/oracle_r84_frame_*.bin >ROUND209_SHA256SUMS)
-  printf 'ORCA2_ROUND209_OMT1_RECORD_PASS %s\n' "$twin_a"
+  printf 'ORCA2_ROUND210_OMT1_RECORD_PASS %s\n' "$twin_a"
 }
 if [[ "$mode" == --admit-existing ]]; then
   [[ -d "$calibration" && -d "$twin_a" && -d "$twin_b" && -d "$month" ]] || { printf 'REFUSE: one or more round-209 targets are absent\n' >&2; exit 68; }
@@ -117,7 +145,15 @@ run_month() {
 stage_run "$smoke" "$base/nemo" 2 2 2
 run_clean "$smoke"
 cd "$nemo_root"
-./makenemo -r "$source_cfg" -n "$target_cfg" -m conda-scalarmath del_key 'key_xios'
+./makenemo -r "$reference_cfg" -n "$target_cfg" -m conda-scalarmath del_key 'key_xios'
+while IFS= read -r -d '' source; do
+  cp -a "$source" "$target_root/EXP00/$(basename "$source")"
+done < <(find "$source_root/EXP00" -maxdepth 1 \( -type f -o -type l \) -print0 | sort -z)
+while IFS= read -r -d '' source; do
+  cp -a "$source" "$target_root/MY_SRC/$(basename "$source")"
+done < <(find "$source_root/MY_SRC" -maxdepth 1 \( -type f -o -type l \) -print0 | sort -z)
+cp "$source_root/cpp_$source_cfg.fcm" "$target_root/cpp_$target_cfg.fcm"
+(cd "$target_root/MY_SRC" && sha256sum -c "$source_manifest" >/dev/null)
 touch "$target_root/MY_SRC/"*.F90
 ./makenemo -n "$target_cfg" -m conda-scalarmath del_key 'key_xios'
 instrument_binary=$target_root/BLD/bin/nemo.exe
