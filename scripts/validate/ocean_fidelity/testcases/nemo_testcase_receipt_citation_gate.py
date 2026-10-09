@@ -4443,7 +4443,7 @@ CITATION_MAP = {
         '&      + ( ahtv(ji,jj-1,jk-1) + ahtv(ji,jj  ,jk) )  ) * zmskv', 4],
     'domqco.F90:160': (
         'pr3t(ji,jj) = pssh(ji,jj) * r1_ht_0(ji,jj)   !==  ratio at t-point  ==!', 1),
-    'fidelity/nemo_recipe.py:988': ('def build_nemo_gyre_recipe(', 1),
+    'fidelity/nemo_recipe.py:992': ('def build_nemo_gyre_recipe(', 1),
     'ocean_model_latlon_cgrid.py:5937': (
         'T_new = state.T.data + dt * tend.dT_dt.data', 1),
     'round38_oracle_trazdf_kt2/ocean.output:798': (
@@ -4477,8 +4477,8 @@ CITATION_MAP = {
         'k33_implicit = compute_isoneutral_K33_latlon(', 1),
     # tracer_combine is READ by two step functions and SELECTED by a DINO
     # recipe -- the retraction of round 37's "a lever nothing selects".
-    'dino.py:1764': ('"tracer_combine": "thickness_weighted",', 1),
-    'dino.py:3983': ('tracer_combine=cfg.tracer_combine,', 1),
+    'dino.py:1769': ('"tracer_combine": "thickness_weighted",', 1),
+    'dino.py:4000': ('tracer_combine=cfg.tracer_combine,', 1),
     # A bare '}' is the eighth-most-common line in that file, so the endpoint
     # is the last SUBSTANTIVE line of the reconstruction rather than its brace.
     'nemo_testcase_l2_gyre_stage3_completion_gate.py:147-156': [
@@ -4981,7 +4981,7 @@ CITATION_MAP = {
     # inserted the initial-state helper above the THIRD anchor only, moving it
     # 1411 -> 1493; later card additions moved all three to their current
     # merged locations without changing the anchor text.
-    'nemo_testcase_recipe.py:370,625,2974': [('pgf_scheme="nemo_sco",', 1), ('pgf_scheme="nemo_sco",', 2), 'if cfg.pgf_scheme != "nemo_sco":', 3],
+    'nemo_testcase_recipe.py:370,625,2975': [('pgf_scheme="nemo_sco",', 1), ('pgf_scheme="nemo_sco",', 2), 'if cfg.pgf_scheme != "nemo_sco":', 3],
     'BLD/ppsrc/nemo/dynspg_ts.f90:1224': 'REAL(wp), DIMENSION(jpi,jpj,jpk,jpt), INTENT(in   ) ::  puu, pvv',
     'BLD/ppsrc/nemo/dynhpg.f90:378,397': [('DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  '
           '0)              ! Surface value',
