@@ -112,6 +112,19 @@ CERTIFIED_LADDER["smt5"] = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/smtrungs_rounds/"
     "round3/smt5_ladder.json")
 
+# SMT-6 / SMT-6b (Decision 110, round 6).  Ladder references are this round's
+# own just-produced ladders (pass --ladder-reference).
+for _tag, _case, _dir in (
+        ("smt6", "VORTEX_SMT6_VEC-zps", "oracle_vortex_smt6"),
+        ("smt6b", "VORTEX_SMT6B_VEC-zps", "oracle_vortex_smt6b")):
+    CARDS[_tag] = (
+        _case,
+        Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
+             "smtrungs_rounds/round5") / _dir / "day100")
+    CERTIFIED_LADDER[_tag] = Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
+        f"smtrungs_rounds/round6/{_tag}_ladder.json")
+
 CARDS["smt4"] = (
     "VORTEX_SMT4_VEC-zps",
     Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round237/"
@@ -189,7 +202,9 @@ def build_card(case: str, nemo_dir: Path):
         build_nemo_testcase_card,
     )
     return build_nemo_testcase_card(
-        case, deck_root=nemo_dir if case == "VORTEX_SMT5_VEC-zps" else None)
+        case, deck_root=nemo_dir if case in (
+            "VORTEX_SMT5_VEC-zps", "VORTEX_SMT6_VEC-zps",
+            "VORTEX_SMT6B_VEC-zps") else None)
 
 
 def run_lego_card(card, lego_dir: Path, *, model_hooks=None,
@@ -298,7 +313,7 @@ def main() -> int:
         "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round210"))
     ap.add_argument("--cards", default="flux,vec",
                      help=("comma-separated tags: flux, vec, smtflux, smtvec, "
-                           "smt1, smt2, smt3, smt4, smt5"))
+                           "smt1, smt2, smt3, smt4, smt5, smt6, smt6b"))
     ap.add_argument("--skip-run", action="store_true",
                      help="scoring only; legoESM snapshots already written")
     ap.add_argument(

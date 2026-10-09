@@ -88,6 +88,14 @@ DEFAULT_ORACLE_ROOTS = {
     "VORTEX_SMT5_VEC-zps": Path(
         "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/smtrungs_rounds/"
         "round2/oracle_vortex_smt5/kt1_10"),
+    # SMT-6 / SMT-6b (Decision 110): SMT-5 + ORCA2 rung 2's BBL and geothermal
+    # heating; SMT-6b adds the cold-flank anomaly.  Same dumped-input reading.
+    "VORTEX_SMT6_VEC-zps": Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/smtrungs_rounds/"
+        "round5/oracle_vortex_smt6/kt1_10"),
+    "VORTEX_SMT6B_VEC-zps": Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/smtrungs_rounds/"
+        "round5/oracle_vortex_smt6b/kt1_10"),
 }
 
 # NEMO writes its records with a halo of this width on every side; the gate
@@ -322,7 +330,9 @@ def run(
     require(get_policy() == PrecisionPolicy.fp64(transcendentals="libm"), "precision policy is not fp64")
     require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
     card = build_nemo_testcase_card(
-        case, deck_root=oracle_root if case == "VORTEX_SMT5_VEC-zps" else None)
+        case, deck_root=(oracle_root if case in (
+            "VORTEX_SMT5_VEC-zps", "VORTEX_SMT6_VEC-zps",
+            "VORTEX_SMT6B_VEC-zps") else None))
     # fld_read interpolates the damping target at the step's elapsed time.
     damped = card.recipe.model_config.nemo_tracer_damping is not None
     # Measurement arm only -- the card still STATES its own form; this scores

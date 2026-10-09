@@ -48,6 +48,9 @@ CASES = {
     # SMT-5 (Decision 107): records root holds oracle_vortex_smt5/kt1_10, and
     # the card reads NEMO's dumped damping inputs from that same directory.
     "VORTEX_SMT5_VEC-zps": "oracle_vortex_smt5",
+    # SMT-6 / SMT-6b live under the round-5 root (pass --records-root there).
+    "VORTEX_SMT6_VEC-zps": "oracle_vortex_smt6",
+    "VORTEX_SMT6B_VEC-zps": "oracle_vortex_smt6b",
 }
 
 
@@ -65,7 +68,9 @@ def compare(case: str, run_dir: Path) -> dict:
         vortex_horizontal_coordinates, _VORTEX_RESOLUTIONS,
     )
     card = (build_nemo_testcase_card(case, deck_root=run_dir)
-            if case == "VORTEX_SMT5_VEC-zps" else build_nemo_testcase_card(case))
+            if case in ("VORTEX_SMT5_VEC-zps", "VORTEX_SMT6_VEC-zps",
+                        "VORTEX_SMT6B_VEC-zps")
+            else build_nemo_testcase_card(case))
     res = _VORTEX_RESOLUTIONS["30km"]
     source = vortex_horizontal_coordinates(res)
     _, k_bot, e3t, e3u, e3v, e3f = vortex_smt_partial_cell_geometry(source)
