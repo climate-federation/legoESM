@@ -256,6 +256,18 @@ class TestSolar:
         np.testing.assert_allclose(np.sum(weights), 1.0, atol=1.0e-12)
         np.testing.assert_allclose(weights, np.array([0.45, 0.55]), atol=1.0e-6)
 
+    def test_spectral_file_missing_tsi_raises(self, tmp_path):
+        """A spectral file without the TSI variable used to fall back to
+        config.S_0 silently (a constant sun posing as a transient one)."""
+        nc_path = str(tmp_path / "solar_spectral.nc")
+        _make_solar_spectral_nc(nc_path, np.array([0.0, 365.0]),
+                                np.array([1360.0, 1362.0]),
+                                np.array([[0.7, 0.3], [0.2, 0.8]]))
+        cfg = SolarConfig(source="spectral_file", path=nc_path,
+                          tsi_var="no_such_tsi")
+        with pytest.raises(ValueError, match="no_such_tsi"):
+            get_solar_forcing_at_time(cfg, day=182.5)
+
 
 # ==============================================================================
 # Ozone tests

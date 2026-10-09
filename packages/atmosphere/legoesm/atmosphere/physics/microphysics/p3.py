@@ -78,7 +78,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio_ice as _saturation_mixing_ratio_ice
+from legoesm.thermo import saturation_specific_humidity_ice as _saturation_specific_humidity_ice
 from legoesm.thermo import homogeneous_freezing_rh_factor as _homogeneous_freezing_rh_factor
 from legoesm.atmosphere.physics.microphysics._warm_rain import (
     saturation_adjustment,
@@ -266,7 +266,7 @@ def p3_microphysics(
     # q_sat_i) is what decides whether crystals appear at all, and raising its
     # denominator by rh_homo suppressed nucleation outright (the gSAM Cooper-cap
     # test collapsed from 6667 to 9e-24 /kg/s).
-    q_sat_i = _saturation_mixing_ratio_ice(T, p_full)
+    q_sat_i = _saturation_specific_humidity_ice(T, p_full)
     S_i = q_v / jnp.clip(q_sat_i, 1e-10) - 1.0
 
     # DEPOSITION target only: IFS/SAM homogeneous-freezing allowance lets

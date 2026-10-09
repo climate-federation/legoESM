@@ -21,7 +21,7 @@ import numpy as np
 import pytest
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio
+from legoesm.thermo import saturation_specific_humidity
 from legoesm.atmosphere.physics.microphysics.config import SundqvistConfig
 from legoesm.atmosphere.physics.microphysics.output import HydrometeorState
 from legoesm.atmosphere.physics.microphysics.sundqvist import (
@@ -58,7 +58,7 @@ def _column(T_K, q_c, rh, p_pa=8.0e4, rho_val=1.0, dz_val=500.0, dt=100.0):
     T = jnp.asarray(T_K, dtype=jnp.float64)[None, :]
     q_c = jnp.asarray(q_c, dtype=jnp.float64)[None, :]
     p_full = jnp.full_like(T, p_pa)
-    q_sat = saturation_mixing_ratio(T, p_full)
+    q_sat = saturation_specific_humidity(T, p_full)
     q_v = jnp.asarray(rh, dtype=jnp.float64)[None, :] * q_sat
     rho = jnp.full_like(T, rho_val)
     dz = jnp.full_like(T, dz_val)
@@ -159,7 +159,7 @@ def test_departure_condensation_removes_supersaturation_toward_qsat():
 
     This pins the scheme's SIMPLIFIED condensation form (a departure from SBK89's
     full condensation closure), NOT the saturation curve: q_sat is taken from the
-    model's own ``saturation_mixing_ratio`` in both the fixture and the expected
+    model's own ``saturation_specific_humidity`` in both the fixture and the expected
     value, so this deliberately does not certify the saturation routine (that is
     ``thermo``'s oracle, tested separately) — only that the scheme applies the
     sigmoid RH gate to the supersaturation ``q_v-q_sat``.
@@ -172,7 +172,7 @@ def test_departure_condensation_removes_supersaturation_toward_qsat():
     dt = 100.0
     T = np.array([290.0])
     p = 8.0e4
-    q_sat = float(saturation_mixing_ratio(jnp.array([[290.0]]), jnp.full((1, 1), p))[0, 0])
+    q_sat = float(saturation_specific_humidity(jnp.array([[290.0]]), jnp.full((1, 1), p))[0, 0])
 
     # Supersaturated RH=1.2 -> remove q_v - q_sat with a near-1 sigmoid gate.
     r_sup = _rates(cfg, T, np.array([1e-4]), rh=np.array([1.2]), p_pa=p, dt=dt)

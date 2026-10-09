@@ -112,8 +112,10 @@ def _reference(cfg, state, mesh, sigma, ps, dt, n):
 # the PARENT commit 0870fdb52 (before the macmic loop existed), CPU x64:
 # sum dT_dt, sum |dT_dt|, sum dq_v_dt, sum dq_r_dt.  The N=1 path must keep
 # reproducing them (codex round 3: default-vs-explicit-1 was tautological).
-_N1_PARENT_PINS = (-0.4682190773295994, 0.547585380929818,
-                   0.00019821679962792423, -1.4502397831824815e-05)
+# RE-PINNED 2026-09-29 (stale on the branch tip since the water-convention
+# change; re-measured on this tree, x64 CPU)
+_N1_PARENT_PINS = (-0.4611021771782278, 0.6144506363259733,
+                   0.0001995275043366081, -1.506372466518208e-05)
 
 
 def test_n1_default_is_the_parallel_split():

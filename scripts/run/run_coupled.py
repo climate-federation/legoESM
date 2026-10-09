@@ -545,6 +545,47 @@ def build_parser():
              "~1e-6 phase-shift vs the fused path). Pass --no-unfused-radiation "
              "for the byte-identical legacy fused path.",
     )
+    # External CMIP6 radiative forcing (ozone + solar), the SAME flags/dests as
+    # run_amip.py so one forcing set serves every lane (tests/unit/
+    # test_run_coupled_forcing_cli.py pins the two parsers against each other).
+    # Without these the coupled lane silently ran the built-in ozone profile
+    # and a constant sun (ExperimentConfig defaults) whatever the AMIP deck did.
+    parser.add_argument("--ozone-source", type=str, default="standard",
+                        choices=["standard", "analytical", "mls", "none"])
+    parser.add_argument("--ozone-forcing", type=str, default="inline",
+                        choices=["inline", "external", "off"])
+    parser.add_argument("--ozone-file", type=str, default="",
+                        help="Ozone NetCDF (CMIP6 input4MIPs vmro3 compatible); "
+                             "see run_amip.py --ozone-file.")
+    parser.add_argument("--solar-source", type=str, default="constant",
+                        choices=["constant", "file", "spectral_file"])
+    parser.add_argument("--solar-file", type=str, default="")
+    parser.add_argument("--solar-tsi-var", type=str, default="tsi")
+    parser.add_argument("--solar-spectral-var", type=str,
+                        default="solar_fraction_by_gpt")
+    parser.add_argument("--solar-spectral-band-order", type=str, default="auto",
+                        choices=["auto", "as_is", "rrtmg_sw"],
+                        help="Band order of a 14-band spectral file "
+                             "(issue #322); see run_amip.py.")
+    # GHG / tropospheric aerosol / volcanic: same flags as run_amip.py
+    # (2026-10-08); without them the coupled lane ran constant GHG and no
+    # external aerosol whatever the AMIP decks prescribed.
+    parser.add_argument("--ghg-forcing", type=str, default="constant",
+                        choices=["constant", "external"])
+    parser.add_argument("--ghg-file", type=str, default="")
+    parser.add_argument("--aerosol-forcing", type=str, default="off",
+                        choices=["off", "external"])
+    parser.add_argument("--aerosol-file", type=str, default="")
+    parser.add_argument("--aerosol-ccn-file", type=str, default="")
+    parser.add_argument("--aerosol-reference-aod", type=float, default=0.03)
+    parser.add_argument("--volcanic-aerosol-file", type=str, default="")
+    parser.add_argument("--volcanic-aerosol-scale", type=float, default=1.0)
+    parser.add_argument("--volcanic-aerosol-lw", action="store_true",
+                        default=False)
+    # Diurnal (instantaneous-zenith) radiation, as run_amip.py; every AMIP deck
+    # sets diurnal_cycle: true (gridaudit 2026-10-09).
+    parser.add_argument("--diurnal-cycle", action=argparse.BooleanOptionalAction,
+                        default=False)
     parser.add_argument(
         "--orbital-insolation", action="store_true", default=False,
         dest="orbital_insolation",
@@ -581,6 +622,10 @@ def build_parser():
                              "higher horizontal resolution. Numerically exact "
                              "(columns are independent); must divide the column "
                              "count.")
+    parser.add_argument("--rrtmgp-overhead-layer", action="store_true",
+                        default=False,
+                        help="CAM RRTMG-style transported layer above the "
+                             "model top (see run_amip.py). Off = byte-identical.")
     # Atmosphere physics suite.  DEFAULT = full realistic CMIP6 atmosphere:
     # convection=sbm, turbulence=holtslag_boville, gravity-wave-drag=hines,
     # clouds=sundqvist, microphysics=kessler (+ rrtmgp radiation above).  This
@@ -1183,6 +1228,24 @@ def resolve_coupled_microphysics(grid: str, microphysics: str | None):
     return microphysics, "kept"
 
 
+def require_forcing_files(args) -> None:
+    """Refuse an external forcing channel with no file, loudly.
+
+    Mirrors run_amip._postprocess_args: the ozone loader substitutes its
+    reference profile when the path is empty (``use_reference_if_missing``),
+    so an omitted ``--ozone-file`` would run DIFFERENT ozone silently.
+    """
+    if args.ozone_forcing == "external" and not args.ozone_file:
+        raise SystemExit("--ozone-file is required with --ozone-forcing external")
+    if args.solar_source != "constant" and not args.solar_file:
+        raise SystemExit("--solar-file is required with --solar-source "
+                         f"{args.solar_source}")
+    if args.ghg_forcing == "external" and not args.ghg_file:
+        raise SystemExit("--ghg-file is required with --ghg-forcing external")
+    if args.aerosol_forcing == "external" and not args.aerosol_file:
+        raise SystemExit("--aerosol-file is required with --aerosol-forcing external")
+
+
 def main():
     parser = build_parser()
 
@@ -1313,6 +1376,7 @@ def main():
     from legoesm.driver.coupled_config import PRESETS
     from legoesm.ocean.simple_ocean import SimpleOceanConfig
 
+    require_forcing_files(args)
     atm_config = ExperimentConfig(
         grid=GridConfig(
             grid_type=args.grid,
@@ -1353,9 +1417,28 @@ def main():
         rad_update_steps=args.rad_update_steps,
         unfused_radiation=args.unfused_radiation,
         orbital_insolation=args.orbital_insolation,
+        diurnal_cycle=args.diurnal_cycle,
         rrtmgp_gpoint_batch_size=args.rrtmgp_gpoint_batch_size,
         rrtmgp_gpoint_checkpoint=args.rrtmgp_gpoint_checkpoint,
         rrtmgp_column_chunk_size=args.radiation_column_chunk,
+        rrtmgp_overhead_layer=args.rrtmgp_overhead_layer,
+        ozone_source=args.ozone_source,
+        ozone_forcing=args.ozone_forcing,
+        ozone_file=args.ozone_file,
+        solar_source=args.solar_source,
+        solar_file=args.solar_file,
+        solar_tsi_var=args.solar_tsi_var,
+        solar_spectral_var=args.solar_spectral_var,
+        solar_spectral_band_order=args.solar_spectral_band_order,
+        ghg_forcing=args.ghg_forcing,
+        ghg_file=args.ghg_file,
+        aerosol_forcing=args.aerosol_forcing,
+        aerosol_file=args.aerosol_file,
+        aerosol_ccn_file=args.aerosol_ccn_file,
+        aerosol_reference_aod=args.aerosol_reference_aod,
+        volcanic_aerosol_file=args.volcanic_aerosol_file,
+        volcanic_aerosol_scale=args.volcanic_aerosol_scale,
+        volcanic_aerosol_lw=args.volcanic_aerosol_lw,
         ic=args.ic,
         ic_path=args.ic_path,
         convection=args.convection,

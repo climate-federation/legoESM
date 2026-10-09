@@ -1152,7 +1152,8 @@ def _load_era5_samples_spectral(cfg, yml, grid, sigma, *,
         era5_to_spectral_carry,
         load_era5_slice,
         open_era5_zarr,
-    )
+    era5_terrain_product,
+)
 
     # ic/target slices need the state only; the sample-start slice (2-D
     # fields only: asking it for condensate would re-read the cloud store per
@@ -1207,12 +1208,12 @@ def _load_era5_samples_spectral(cfg, yml, grid, sigma, *,
     samples = []
     for year, i_ic, i_tg in _sharded_indices(
             cfg, yml, times, snaps_per_day, stride, rank, nproc):
-        ic = era5_to_spectral_carry(
-            load_era5_slice(era5_cfg, i_ic, ds=ds, cloud_ds=cloud_ds),
-            grid, sigma, microphysics=_micro)
-        target = era5_to_spectral_carry(
-            load_era5_slice(era5_cfg, i_tg, ds=ds, cloud_ds=cloud_ds),
-            grid, sigma, microphysics=_micro)
+        s_ic = load_era5_slice(era5_cfg, i_ic, ds=ds, cloud_ds=cloud_ds)
+        s_tg = load_era5_slice(era5_cfg, i_tg, ds=ds, cloud_ds=cloud_ds)
+        # ERA5-derived terrain (no elevation file on the training lane)
+        tp = era5_terrain_product(s_ic, grid)
+        ic = era5_to_spectral_carry(s_ic, grid, sigma, target_phis=tp, microphysics=_micro)
+        target = era5_to_spectral_carry(s_tg, grid, sigma, target_phis=tp, microphysics=_micro)
         if not samples:
             validate_carry_holds_scheme(
                 ic, _micro, context=f"WB {cfg.mode} arm initial condition")
@@ -1239,7 +1240,8 @@ def load_era5_samples(cfg, yml, grid, sigma, *,
         load_era5_slice,
         open_era5_zarr,
         regrid_2d_to_gaussian,
-    )
+    era5_terrain_product,
+)
     from legoesm.driver.compiled_segments import pack_forcing
 
     if getattr(cfg, "training_core", "latlon") == "spectral":
@@ -1288,12 +1290,11 @@ def load_era5_samples(cfg, yml, grid, sigma, *,
     samples = []
     for year, i_ic, i_tg in _sharded_indices(
             cfg, yml, times, snaps_per_day, stride, rank, nproc):
-        ic = era5_to_latlon_carry(
-            load_era5_slice(era5_cfg, i_ic, ds=ds, cloud_ds=cloud_ds),
-            grid, sigma, microphysics=_micro)
-        target = era5_to_latlon_carry(
-            load_era5_slice(era5_cfg, i_tg, ds=ds, cloud_ds=cloud_ds),
-            grid, sigma, microphysics=_micro)
+        s_ic = load_era5_slice(era5_cfg, i_ic, ds=ds, cloud_ds=cloud_ds)
+        s_tg = load_era5_slice(era5_cfg, i_tg, ds=ds, cloud_ds=cloud_ds)
+        tp = era5_terrain_product(s_ic, grid)
+        ic = era5_to_latlon_carry(s_ic, grid, sigma, target_phis=tp, microphysics=_micro)
+        target = era5_to_latlon_carry(s_tg, grid, sigma, target_phis=tp, microphysics=_micro)
         sst_src = load_era5_slice(sst_cfg, i_ic, ds=ds, flux_ds=flux_ds)
         sst = regrid_2d_to_gaussian(sst_src.sst, sst_src.lat, sst_src.lon, grid)
         # Prescribed surface planes the slice carries (spectral names),
@@ -1317,6 +1318,7 @@ def load_era5_samples(cfg, yml, grid, sigma, *,
             day_of_year=jnp.asarray(doy), seconds_of_day=jnp.asarray(0.0),
             solar_weights=ctx["solar_weights"], s_0=ctx["current_s_0"],
             o3_vmr=ctx["o3_vmr"], aerosol_od=ctx["aerosol_od"],
+            o3_top_vmr=getattr(driver, "_o3_top_vmr", None),
             **plane_kwargs)
         sample = (ic, target, forcing)
         samples.append(_sample_to_host(sample) if host_resident else sample)

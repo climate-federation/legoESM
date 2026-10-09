@@ -68,8 +68,8 @@ import jax.numpy as jnp
 from legoesm import constants
 from legoesm.thermo import (
     saturation_vapor_pressure,
-    saturation_mixing_ratio,
-    saturation_mixing_ratio_dT,
+    saturation_specific_humidity,
+    saturation_specific_humidity_dT,
     latent_heat_vaporization,
 )
 from legoesm.atmosphere.physics.thermodynamics import (
@@ -162,7 +162,7 @@ def _latent_heat(T: jax.Array) -> jax.Array:
 def _dqsat_dT(T: jax.Array, p: jax.Array) -> jax.Array:
     """d(q_sat)/dT [1/K] for the legoesm Tetens saturation used here.
 
-    Thin wrapper over :func:`legoesm.thermo.saturation_mixing_ratio_dT`,
+    Thin wrapper over :func:`legoesm.thermo.saturation_specific_humidity_dT`,
     which is the exact analytic ``d/dT`` of the mandated
     :func:`legoesm.thermo.saturation_vapor_pressure` Tetens curve with the
     hard ``max(p − e_sat, 1)`` floor the Newton solve wants (no smooth
@@ -170,7 +170,7 @@ def _dqsat_dT(T: jax.Array, p: jax.Array) -> jax.Array:
     physically; the saturation prefactors live solely in ``thermo`` so the
     slope cannot drift from the model's own ``e_sat`` curve.
     """
-    return saturation_mixing_ratio_dT(T, p)
+    return saturation_specific_humidity_dT(T, p)
 
 
 # ----------------------------------------------------------------------------
@@ -267,7 +267,7 @@ def _parcel_ascent(
 
         # Newton iterations for the saturated parcel temperature.
         def newton_body(_, t2v):
-            qs = saturation_mixing_ratio(t2v, p2)
+            qs = saturation_specific_humidity(t2v, p2)
             dqs = _dqsat_dT(t2v, p2)
             Lh = _latent_heat(t2v)
             f = (Cps * t2v + Lh * qs) * (1.0 - eps_entr * dz) - zlam
@@ -279,7 +279,7 @@ def _parcel_ascent(
 
         t2 = jax.lax.fori_loop(0, config.newton_iters, newton_body, t2)
 
-        qsat_k = saturation_mixing_ratio(t2, p2)
+        qsat_k = saturation_specific_humidity(t2, p2)
         # Condensation gate (oracle: qv2 > qsat(p2,t2) AND qv2 > qv_min).
         # Arguments normalised to O(1) so a single dimensionless sharpness
         # gives a crisp Heaviside.
@@ -466,7 +466,7 @@ def kuo_convection(
     # --- Environmental thermodynamic factors ---
     Cps_env = constants.c_pd * (1.0 - q_v) + q_v * constants.c_pv
     alpha_env = _latent_heat(T) / Cps_env       # = Lh/Cps_env (oracle alpha)
-    q_sat_env = saturation_mixing_ratio(T, p_full)
+    q_sat_env = saturation_specific_humidity(T, p_full)
     rh = q_v / jnp.maximum(q_sat_env, 1e-12)
 
     # --- Activation mask: icond==2 AND ptenq>0 (smooth) ---

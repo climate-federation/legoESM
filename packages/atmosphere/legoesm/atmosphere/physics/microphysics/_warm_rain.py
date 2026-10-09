@@ -13,8 +13,10 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.thermo import (
+    mixing_ratio_to_specific_humidity,
     saturation_mixing_ratio,
     saturation_mixing_ratio_ice,
+    saturation_specific_humidity,
 )
 
 # Default condensation/autoconversion sigmoid sharpness (used in signatures).
@@ -191,8 +193,8 @@ def mixed_phase_liquid_fraction(T):
         / (constants.T_freeze - constants.T_hom_freeze), 0.0, 1.0)
 
 
-def mixed_phase_saturation_mixing_ratio(T, p_full):
-    """w(T)-blended liquid/ice saturation mixing ratio [kg/kg].
+def mixed_phase_saturation_specific_humidity(T, p_full):
+    """w(T)-blended liquid/ice saturation SPECIFIC humidity [kg/kg].
 
     Below the mixed-phase ramp this is the ICE curve — at TTL temperatures
     (~195 K) the liquid curve sits ~60% above it, so gating/draining on the
@@ -200,8 +202,9 @@ def mixed_phase_saturation_mixing_ratio(T, p_full):
     vapour bias of the first ClimateEval scorecard).
     """
     w = mixed_phase_liquid_fraction(T)
-    return (w * saturation_mixing_ratio(T, p_full)
-            + (1.0 - w) * saturation_mixing_ratio_ice(T, p_full))
+    r_blend = (w * saturation_mixing_ratio(T, p_full)
+               + (1.0 - w) * saturation_mixing_ratio_ice(T, p_full))
+    return mixing_ratio_to_specific_humidity(r_blend)
 
 
 def mixed_phase_l_over_cp(T):
@@ -219,7 +222,7 @@ def mixed_phase_l_over_cp(T):
 
 
 def _hard_saturation_condensation(T, q_v, p_full, dt, q_sat,
-                                  sat_fn=saturation_mixing_ratio,
+                                  sat_fn=saturation_specific_humidity,
                                   l_over_cp=None):
     """Hard-saturation-adjustment condensation rate [kg/kg/s].
 
@@ -449,8 +452,8 @@ def hard_saturation_drain(T, q_v, p_full, dt,
     array
         Drain rate [kg/kg/s], >= 0.
     """
-    sat_fn = (mixed_phase_saturation_mixing_ratio if ice_curve
-              else saturation_mixing_ratio)
+    sat_fn = (mixed_phase_saturation_specific_humidity if ice_curve
+              else saturation_specific_humidity)
     if jax.config.jax_enable_x64:
         T64 = T.astype(jnp.float64)
         l_over_cp = mixed_phase_l_over_cp(T64) if ice_curve else None
@@ -564,12 +567,12 @@ def saturation_adjustment(T, q_v, p_full, dt, sharpness=_DEFAULT_SAT_SHARPNESS, 
     # spurious "float64 truncated to float32" astype warning JAX emits otherwise.
     if jax.config.jax_enable_x64:
         _state_dtype = q_v.dtype
-        q_sat64 = saturation_mixing_ratio(T.astype(jnp.float64),
+        q_sat64 = saturation_specific_humidity(T.astype(jnp.float64),
                                           p_full.astype(jnp.float64))
         excess = (q_v.astype(jnp.float64) - q_sat64).astype(_state_dtype)
         q_sat = q_sat64.astype(_state_dtype)
     else:
-        q_sat = saturation_mixing_ratio(T, p_full)
+        q_sat = saturation_specific_humidity(T, p_full)
         excess = q_v - q_sat
     dqsdt = constants.L_v * q_sat / (constants.R_v * T ** 2)
     psychrometric = 1.0 + dqsdt * constants.L_v / constants.c_pd

@@ -1276,6 +1276,8 @@ def make_voronoi_mpi_step(
                 energy_consistent=getattr(
                     config, "energy_consistent_moisture_clip", False),
                 area=_owned_area,
+                # GLOBAL mean cell area as the (partition-independent) scale
+                area_ref=_total_area_global / layout.partition.nCells_global,
                 sum_fn=_mpi_owned_sum)
             state_new = state_new._replace(
                 tracers=_tr_out, T=state_new.T.replace(data=_T_out))

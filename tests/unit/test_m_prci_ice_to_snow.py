@@ -28,7 +28,7 @@ from legoesm.atmosphere.physics.microphysics.morrison import (
     morrison_microphysics,
 )
 from legoesm.atmosphere.physics.microphysics.output import HydrometeorState
-from legoesm.thermo import saturation_mixing_ratio_ice
+from legoesm.thermo import saturation_specific_humidity_ice
 
 
 jax.config.update("jax_enable_x64", True)
@@ -39,7 +39,7 @@ def _run(T=250.0, p=4.0e4, q_i=1.0e-4, N_i=1.0e5, ssat=0.1,
     """Return (dq_s_dt, dq_i_dt) for a single ice cell at ice supersat ``ssat``
     (q_v = (1+ssat)·q_sat_i). No q_c/q_r/q_s, so the only ice→snow path is
     autoconversion."""
-    qsi = float(saturation_mixing_ratio_ice(jnp.asarray(T), jnp.asarray(p)))
+    qsi = float(saturation_specific_humidity_ice(jnp.asarray(T), jnp.asarray(p)))
     q_v = (1.0 + ssat) * qsi
     rho = p / (constants.R_d * T)
     z = jnp.zeros((1, 1))
@@ -62,7 +62,7 @@ def _run(T=250.0, p=4.0e4, q_i=1.0e-4, N_i=1.0e5, ssat=0.1,
 
 
 def _prci_formula(T=250.0, p=4.0e4, q_i=1.0e-4, N_i=1.0e5, ssat=0.1):
-    qsi = float(saturation_mixing_ratio_ice(jnp.asarray(T), jnp.asarray(p)))
+    qsi = float(saturation_specific_humidity_ice(jnp.asarray(T), jnp.asarray(p)))
     rho = p / (constants.R_d * T)
     cons12 = (500.0 * math.pi) ** (1.0 / 3.0)   # ρ_ci=500 (cloud-ice density)
     lami = cons12 * (N_i / max(q_i, 1.0e-9)) ** (1.0 / 3.0)
@@ -123,7 +123,7 @@ def test_heuristic_scheme_differs_and_available():
 def test_prci_ad_safe():
     """jax.grad through PRCI wrt q_i is finite (safe_pow on N_i/q_i; exp
     smooth)."""
-    qsi = float(saturation_mixing_ratio_ice(jnp.asarray(250.0), jnp.asarray(4.0e4)))
+    qsi = float(saturation_specific_humidity_ice(jnp.asarray(250.0), jnp.asarray(4.0e4)))
 
     def loss(qi):
         z = jnp.zeros((1, 1))

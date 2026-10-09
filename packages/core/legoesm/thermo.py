@@ -10,16 +10,28 @@ All operations are pure JAX and compatible with jit, grad, vmap, scan.
 
 Conventions — water-vapor mass variables
 ----------------------------------------
-This module returns the **mixing ratio** ``r_sat = ε e_sat / (p - e_sat)``
-(mass of water vapor per unit mass of *dry* air).  Throughout the
-``atmosphere/physics`` source tree the prognostic field is named
-``q_v`` and many docstrings call it "specific humidity".  In the
-typical atmospheric regime where ``e_sat ≪ p``, mixing ratio and
-specific humidity differ by ``q ≈ r / (1 + r)`` — about 1% for
-``r = 0.01``.  The codebase uses these interchangeably; physics that
-needs the distinction (vertical-flux conservation in saturated tropical
-columns, q_c bookkeeping) should read this caveat carefully and
-convert explicitly when the 1% drift matters.
+**The model state's water tracers are SPECIFIC quantities on total air
+mass** (``q_x = m_x / m_total`` with ``m_total`` = dry air + vapour +
+carried condensate, ERA5's own basis for ``q``/``clwc``/``ciwc``; the IFS
+and FV3-sphum convention; user decision 2026-09-28): every ERA5/reanalysis loader keeps ``q`` as is,
+column water is ``sum(q dp)/g``, physics water increments move the
+column mass through ``core.conservation.apply_physics_water_mass`` and
+the FV3 lane's ``fv_update_phys`` nwat block, virtual temperature is
+``T (1 + (1/ε - 1) q)``.
+
+``saturation_mixing_ratio`` and its ice/blend siblings return the
+**mixing ratio** ``r_sat = ε e_sat / (p - e_sat)`` (per unit DRY air);
+``saturation_specific_humidity`` returns ``q_sat = r_sat / (1 + r_sat)``
+(per unit total air).  A scheme working in mixing ratio internally
+converts ONCE at entry (``specific_humidity_to_mixing_ratio``) and ONCE
+at exit (``mixing_ratio_tendency_to_specific_humidity_tendency`` or the
+finite-increment map), never mid-scheme; a scheme working in specific
+humidity compares against ``q_sat``.  Ratios, Clausius-Clapeyron slopes,
+kg/kg thresholds and mass normalisations are O(q) (1-2 %) convention
+dependent; additive ``L q`` and ``T_v`` terms are O(q^2).  Schemes that
+still compare the (specific) tracer against ``r_sat`` are being migrated
+scheme by scheme (the per-scheme audit PR); until then their saturation
+reference is high by ``r_sat`` relative (RH read low by that much).
 """
 
 from __future__ import annotations
@@ -563,6 +575,39 @@ def saturation_specific_humidity(
     return w_sat / (1.0 + w_sat)
 
 
+def saturation_specific_humidity_ice(
+    T: jax.Array,
+    p: jax.Array,
+) -> jax.Array:
+    """Saturation specific humidity over ICE: ``r_i / (1 + r_i)`` with
+    ``r_i`` from :func:`saturation_mixing_ratio_ice` (the reference a
+    specific-humidity tracer is compared with in mixed-phase schemes)."""
+    w_sat = saturation_mixing_ratio_ice(T, p)
+    return w_sat / (1.0 + w_sat)
+
+
+def saturation_specific_humidity_dT(
+    T: jax.Array,
+    p: jax.Array,
+) -> jax.Array:
+    """``d(q_sat)/dT`` for the SPECIFIC-humidity saturation: the exact
+    (forward-mode) derivative of :func:`saturation_specific_humidity`, so
+    value and slope share ONE floor convention (the softplus floor of
+    ``saturation_mixing_ratio``) and a Newton saturation adjustment lands on
+    the curve it is measured against even where ``e_sat`` approaches ``p``
+    (the mixing-ratio slope helper uses a hard ``max(p - e_sat, 1)`` clip
+    and disagrees with its own value function there: MEASURED 2026-09-29,
+    0.9 % off-curve at q_v = 0.6, p = 100 Pa).  Equals
+    ``saturation_mixing_ratio_dT / (1 + r)^2`` away from that regime.
+    Differentiable (a JVP of a smooth function); T and p broadcast.
+    """
+    T = jnp.asarray(T)
+    p = jnp.asarray(p)
+    T_b, p_b = jnp.broadcast_arrays(T, p)
+    return jax.jvp(lambda t: saturation_specific_humidity(t, p_b),
+                   (T_b,), (jnp.ones_like(T_b),))[1]
+
+
 def vapor_pressure_from_specific_humidity(
     q: jax.Array,
     p: jax.Array,
@@ -707,6 +752,40 @@ def specific_humidity_tendency_to_mixing_ratio_tendency(
     q = jnp.clip(jnp.asarray(specific_humidity), 0.0, 1.0 - denominator_floor)
     denom = jnp.maximum(1.0 - q, denominator_floor)
     return jnp.asarray(specific_humidity_tendency) / (denom * denom)
+
+
+def mixing_ratio_tendency_to_specific_humidity_tendency(
+    mixing_ratio: jax.Array,
+    mixing_ratio_tendency: jax.Array,
+) -> jax.Array:
+    """Convert ``dr/dt`` to ``dq/dt`` for ``q = r / (1 + r)``: the EXIT map of
+    a scheme that works in mixing ratio internally (the inverse of
+    :func:`specific_humidity_tendency_to_mixing_ratio_tendency`).  The
+    derivative is ``dq/dt = dr/dt / (1 + r)^2``.  For a FINITE increment
+    over a step use :func:`mixing_ratio_increment_to_specific_humidity`:
+    the derivative form is first-order in ``dr``.
+    """
+    r = jnp.maximum(jnp.asarray(mixing_ratio), 0.0)
+    return jnp.asarray(mixing_ratio_tendency) / ((1.0 + r) * (1.0 + r))
+
+
+def mixing_ratio_increment_to_specific_humidity(
+    mixing_ratio: jax.Array,
+    mixing_ratio_increment: jax.Array,
+) -> jax.Array:
+    """EXACT specific-humidity change for a finite mixing-ratio increment:
+    ``q(r + dr) - q(r)`` with ``q = r / (1 + r)``, i.e.
+    ``dr / ((1 + r) (1 + r + dr))``.  Use this at a scheme's exit when its
+    internal update is a finite step, so water mass is exact rather than
+    first-order (codex 2026-09-28: converting a state does not convert its
+    tendency).
+    """
+    r = jnp.maximum(jnp.asarray(mixing_ratio), 0.0)
+    r_new = jnp.maximum(r + jnp.asarray(mixing_ratio_increment), 0.0)
+    # the increment is applied to the FLOORED end state, so a depletion past
+    # zero returns exactly -q(r) and never a negative specific humidity
+    # (codex 2026-09-28); with r_new >= 0 both denominators are >= 1
+    return (r_new - r) / ((1.0 + r) * (1.0 + r_new))
 
 
 def relative_humidity(

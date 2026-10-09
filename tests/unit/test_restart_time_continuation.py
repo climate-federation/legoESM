@@ -23,7 +23,7 @@ Bitwise-equality preconditions (by design, documented):
 * MPAS: none — its forcing is daily-cadence + per-step traced scalars.
 * cube (compiled loop): the restart must land on a segment boundary and
   all runs must share the same checkpoint/diag cadence — the compiled
-  loop samples per-SEGMENT forcing at the segment-end day, so mismatched
+  loop samples per-SEGMENT forcing at the segment-start day, so mismatched
   segmentation samples different forcing BY CONSTRUCTION (see the
   ``compute_segment_length`` pins below).
 """
@@ -240,9 +240,9 @@ def _spy_forcing_days(driver: ModelDriver) -> list:
     days: list = []
     orig = driver._precompute_external_forcing
 
-    def spy(day, p_s, lat):
+    def spy(day, p_s, lat, **kw):
         days.append(float(day))
-        return orig(day, p_s, lat)
+        return orig(day, p_s, lat, **kw)
 
     driver._precompute_external_forcing = spy
     return days
@@ -286,9 +286,11 @@ def test_resumed_segment_zero_refreshes_external_forcing(tmp_path):
     # Straight run: prepare at epoch 0.0, then segment-boundary
     # refreshes.  The resumed run must hit every refresh day the
     # straight run hit AFTER the restart point — in particular its
-    # seg_idx == 0 segment-end day, which only a start_step-aware gate
+    # seg_idx == 0 segment day, which only a start_step-aware gate
     # samples.
-    refreshes_after_restart = [d for d in days_straight if d > day]
+    # ``>=``: segments sample their START day (gridaudit 2026-10-09), so the
+    # straight run refreshes the restart day itself.
+    refreshes_after_restart = [d for d in days_straight if d >= day]
     assert refreshes_after_restart, (
         "test setup: the straight run should refresh external forcing "
         f"after day {day}; got calls at {days_straight}"

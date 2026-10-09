@@ -1113,7 +1113,7 @@ class PhysicsPipeline:
                             C_H=None, C_E=None,
                             q_i=None, q_s=None, q_g=None,
                             N_c=None, N_r=None, N_i=None,
-                            T_land=None, aerosol_od=None,
+                            T_land=None, aerosol_od=None, aerosol_ccn_aod=None,
                             sfc_shflx_override=None, sfc_lhflx_override=None,
                             sfc_taux_override=None, sfc_tauy_override=None,
                             sfc_evap_override=None,
@@ -1661,7 +1661,10 @@ class PhysicsPipeline:
                 # 500-vs-550 nm difference (~5-10 % for Angstrom
                 # exponents 0.7-1.7) is well inside the fit's factor-2
                 # scatter, so no spectral correction is applied.
-                _aod_col = jnp.sum(aerosol_od, axis=-1)        # (ncol,)
+                # ``aerosol_ccn_aod`` (tropospheric visible column, volcanic
+                # excluded) replaces the sum when the driver supplies it.
+                _aod_col = (jnp.sum(aerosol_od, axis=-1)       # (ncol,)
+                            if aerosol_ccn_aod is None else aerosol_ccn_aod)
                 _n_ccn = ccn_from_aod(_aod_col)                # (ncol,)
                 _n_c_col = jnp.broadcast_to(
                     _n_ccn[:, None], q_c_col.shape,
@@ -2475,6 +2478,8 @@ class PhysicsPipeline:
                                solar_weights, s_0,
                                o3_vmr_precomputed, aerosol_od_precomputed,
                                aerosol_lw_od_precomputed=None,
+                               aerosol_ccn_aod=None,
+                               o3_top_vmr=None,
                                tau_equator=None, tau_pole=None,
                                albedo_ice=None, albedo_ocean=None,
                                ghg_vmr_override=None,
@@ -2811,7 +2816,8 @@ class PhysicsPipeline:
                 from legoesm.atmosphere.physics.microphysics.aerosol_activation import (  # noqa: E501
                     ccn_from_aod,
                 )
-                _aod_col = jnp.sum(aerosol_od_precomputed, axis=-1)
+                _aod_col = (jnp.sum(aerosol_od_precomputed, axis=-1)
+                            if aerosol_ccn_aod is None else aerosol_ccn_aod)
                 n_cloud_col = jnp.broadcast_to(
                     ccn_from_aod(_aod_col)[:, None], T_col.shape,
                 )
@@ -2881,6 +2887,7 @@ class PhysicsPipeline:
             o3_vmr_precomputed = _shard(o3_vmr_precomputed)
             aerosol_od_precomputed = _shard(aerosol_od_precomputed)
             aerosol_lw_od_precomputed = _shard(aerosol_lw_od_precomputed)
+            o3_top_vmr = _shard(o3_top_vmr)
             if cloud_kwargs:
                 cloud_kwargs = {k: _shard(v) for k, v in cloud_kwargs.items()}
 
@@ -2894,6 +2901,7 @@ class PhysicsPipeline:
             tau_equator=tau_equator, tau_pole=tau_pole,
             ghg_vmr_override=ghg_vmr_override,
             aerosol_lw_od_col=aerosol_lw_od_precomputed,
+            o3_top_vmr_col=o3_top_vmr,
             **cloud_kwargs,
         )
 
@@ -3079,6 +3087,8 @@ class PhysicsPipeline:
                          albedo_ocean=pipeline.albedo_ocean,
                          ghg_vmr_override=None,
                          aerosol_lw_od=None,
+                         aerosol_ccn_aod=None,
+                         o3_top_vmr=None,
                          T_land=None,
                          q_i=None, q_s=None, q_g=None,
                          N_c=None, N_r=None, N_i=None,
@@ -3125,6 +3135,8 @@ class PhysicsPipeline:
                         day_of_year, seconds_of_day,
                         solar_weights, s_0, o3_vmr, aerosol_od,
                         aerosol_lw_od_precomputed=aerosol_lw_od,
+                        aerosol_ccn_aod=aerosol_ccn_aod,
+                        o3_top_vmr=o3_top_vmr,
                         tau_equator=tau_equator, tau_pole=tau_pole,
                         albedo_ice=albedo_ice, albedo_ocean=albedo_ocean,
                         ghg_vmr_override=ghg_vmr_override,
@@ -3162,6 +3174,7 @@ class PhysicsPipeline:
                     C_H=C_H, C_E=C_E, T_land=T_land,
                     q_i=q_i, q_s=q_s, q_g=q_g, N_c=N_c, N_r=N_r, N_i=N_i,
                     aerosol_od=aerosol_od,
+                    aerosol_ccn_aod=aerosol_ccn_aod,
                     sfc_shflx_override=sfc_shflx_override,
                     sfc_lhflx_override=sfc_lhflx_override,
                     sfc_evap_override=sfc_evap_override,
@@ -3227,6 +3240,7 @@ class PhysicsPipeline:
                     C_H=C_H, C_E=C_E, T_land=T_land,
                     q_i=q_i, q_s=q_s, q_g=q_g, N_c=N_c, N_r=N_r, N_i=N_i,
                     aerosol_od=aerosol_od,
+                    aerosol_ccn_aod=aerosol_ccn_aod,
                     sfc_shflx_override=sfc_shflx_override,
                     sfc_lhflx_override=sfc_lhflx_override,
                     sfc_evap_override=sfc_evap_override,
@@ -3316,11 +3330,12 @@ def _build_none_radiation_fn(config):
                      tau_equator=None, tau_pole=None,
                      ghg_vmr_override=None,
                      aerosol_lw_od_col=None,
+                     o3_top_vmr_col=None,
                      cloud_path_liq=None, cloud_path_ice=None,
                      cloud_path_liq_lw=None, cloud_path_ice_lw=None,
                      cloud_r_eff_liq=None, cloud_r_eff_ice=None,
                      cloud_fraction=None):
-        del aerosol_lw_od_col  # zero-radiation: LW aerosol is a no-op
+        del aerosol_lw_od_col, o3_top_vmr_col  # zero-radiation: no-ops
         ncol, nlev = T_col.shape
         z_full = jnp.zeros((ncol, nlev), dtype=T_col.dtype)
         z_half = jnp.zeros((ncol, nlev + 1), dtype=T_col.dtype)
@@ -3368,12 +3383,13 @@ def _build_gray_radiation_fn(config):
                      tau_equator=None, tau_pole=None,
                      ghg_vmr_override=None,
                      aerosol_lw_od_col=None,
+                     o3_top_vmr_col=None,
                      cloud_path_liq=None, cloud_path_ice=None,
                      cloud_path_liq_lw=None, cloud_path_ice_lw=None,
                      cloud_r_eff_liq=None, cloud_r_eff_ice=None,
                      cloud_fraction=None):
         del ghg_vmr_override  # gray radiation does not use GHG concentrations
-        del aerosol_lw_od_col  # gray radiation does not use aerosol LW od
+        del aerosol_lw_od_col, o3_top_vmr_col  # gray: no aerosol LW od / ozone
         del cloud_path_liq, cloud_path_ice, cloud_r_eff_liq, cloud_r_eff_ice, cloud_fraction
         del cloud_path_liq_lw, cloud_path_ice_lw  # gray: no cloud optics
         # Rebuild config with traced tau values when provided
@@ -3456,6 +3472,7 @@ def _build_rrtmgp_radiation_fn(config):
         gpoint_batch_size=getattr(config, 'rrtmgp_gpoint_batch_size', 0),
         gpoint_checkpoint=getattr(config, 'rrtmgp_gpoint_checkpoint', True),
         column_chunk_size=getattr(config, 'rrtmgp_column_chunk_size', 0),
+        overhead_layer=bool(getattr(config, 'rrtmgp_overhead_layer', False)),
         include_clouds=(getattr(config, 'cloud_scheme', 'none') != 'none'),
     )
 
@@ -3469,6 +3486,7 @@ def _build_rrtmgp_radiation_fn(config):
                      tau_equator=None, tau_pole=None,
                      ghg_vmr_override=None,
                      aerosol_lw_od_col=None,
+                     o3_top_vmr_col=None,
                      cloud_path_liq=None, cloud_path_ice=None,
                      cloud_path_liq_lw=None, cloud_path_ice_lw=None,
                      cloud_r_eff_liq=None, cloud_r_eff_ice=None,
@@ -3548,6 +3566,8 @@ def _build_rrtmgp_radiation_fn(config):
             cloud_r_eff_ice=cloud_r_eff_ice,
             cloud_fraction=cloud_fraction,
         )
+        if o3_top_vmr_col is not None:  # overhead-layer ozone
+            _rad_kwargs["o3_top_vmr"] = o3_top_vmr_col
         # Column-chunk the rrtmgp solve when configured: the per-block body
         # compiles ONCE at column_chunk_size, capping the super-linear rrtmgp
         # XLA compile time at higher horizontal resolution.  Columns are
@@ -4023,6 +4043,21 @@ def required_microphysics_tracer_slots(
         ) from exc
 
 
+def moisture_registry_for(scheme_name: str, scheme_config=None):
+    """The driver's tracer registry for a microphysics scheme: the
+    warm-rain trio unless the scheme needs the ice/number slots, then the
+    full nine.  ONE selector for the MPAS lane's driver and the fv3_duo
+    column model's slot list, so both carry the same names in the same
+    order (the duo's q_<i> is a slot index)."""
+    from legoesm.core.tracers import (
+        make_full_moisture_registry, make_moisture_registry)
+    warm = make_moisture_registry()
+    if required_microphysics_tracer_slots(scheme_name, scheme_config) \
+            > warm.n_tracers:
+        return make_full_moisture_registry()
+    return warm
+
+
 def validate_microphysics_tracer_slots(
     scheme_name: str,
     have_slots: int,
@@ -4324,8 +4359,11 @@ def apply_surface_flux_config(tc, config):
     # Keying this off the grid alone was wrong and left the tiled lane
     # evaporating fresh water while the code to fix it sat unreachable two
     # files away (GLM).
-    _can_saline = _is_mpas_grid(config) or bool(
-        getattr(config, "surface_tiled", False))
+    # the FV3 duo column lane runs the MPAS loop (its bridge carries the
+    # ocean fraction), so it resolves this the way the MPAS deck does
+    _can_saline = (_is_mpas_grid(config)
+                   or bool(getattr(config, "mpas_loop_lane", False))
+                   or bool(getattr(config, "surface_tiled", False)))
     qsal = _can_saline if _qsal_req is None else bool(_qsal_req)
     if _qsal_req and not _can_saline:
         # The sea-water surface humidity needs an ocean FRACTION to apply to,

@@ -60,7 +60,10 @@ def main(argv=None):
     jax.config.update("jax_enable_x64", True)
     from jax.sharding import Mesh
     from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
-        FV3DuoConfig, FV3DuoDynamicsModel)
+    FV3DuoConfig,
+    FV3DuoDynamicsModel,
+    ORACLE_DAMPING,
+)
     from legoesm.grids.factory import create_fv3_duo_grid
     ndev = 6 * args.kt * args.kt
     if jax.device_count() < ndev:
@@ -90,7 +93,7 @@ def main(argv=None):
         fdyn.tracer_2d_1l_sixface = _wrapped
         print(f"[probe] DISCRIMINATOR: tracer pad refresh forced {args.refresh}")
     grid = create_fv3_duo_grid(args.n)
-    cfg = FV3DuoConfig(km=args.km, hydrostatic=True, n_split=args.n_split)
+    cfg = FV3DuoConfig(**ORACLE_DAMPING, km=args.km, hydrostatic=True, n_split=args.n_split)
     mesh = Mesh(np.array(jax.devices()[:ndev]).reshape(6, args.kt, args.kt),
                 ("face", "tile_i", "tile_j"))
     model = FV3DuoDynamicsModel(grid, cfg, step_spmd_mesh=mesh,

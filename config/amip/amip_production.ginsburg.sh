@@ -27,7 +27,11 @@ DATA="${AMIP_DATA:-${REPO}/data/amip}"
 # IC pre-regridded onto the 720x1440 Gaussian proxy grid the cubed-sphere IC path assumes from
 # n_lon (raw WB2 IC is pole-inclusive 721 lat -> size mismatch with the proxy's 720; main uses the
 # Gaussian proxy, the actual-nodes fix is on the compare-reanalysis branch).
-: "${ERA5_IC:=${DATA}/era5_ic_1979-01-01_gproxy.zarr}"   # prep_era5_ic_from_zarr.py + gproxy regrid
+# + the same analysis's 1..30 hPa levels (scripts/data/add_era5_upper_levels.py, public
+# ARCO-ERA5 37-level): the 13-level file stops at 50 hPa and the vertical interpolation holds
+# 50 hPa above it, so the L32 top layers (3.6/7.6 hPa) started ~40/20 K cold.  The old
+# 13-level IC: ERA5_IC=${DATA}/era5_ic_1979-01-01_gproxy.zarr.
+: "${ERA5_IC:=/burg-archive/glab/users/pg2328/legoESM/data/amip_ic_upper/era5_ic_1979-01-01_gproxy_L21.zarr}"
 : "${ETOPO:=${DATA}/etopo_0p25deg.nc}"              # prep_etopo_topography.py output (PRODUCE THIS)
 : "${FORCING_DIR:=${DATA}/forcing_amip}"            # generate_amip_forcing.py deck
 
@@ -51,11 +55,45 @@ DATA="${AMIP_DATA:-${REPO}/data/amip}"
 : "${SST_OFFSET:=273.15}"
 
 # --- external CMIP6 forcing (synthetic deck by default; drop real input4MIPs in) -
-: "${SOLAR:=${FORCING_DIR}/solar_amip_1979-2014.nc}"
-: "${OZONE:=${FORCING_DIR}/ozone_amip_clim.nc}"
-: "${GHG:=${FORCING_DIR}/ghg_amip_1979-2014.nc}"
-: "${AEROSOL:=${FORCING_DIR}/aerosol_amip_clim.nc}"
-: "${VOLCANIC:=${FORCING_DIR}/volcanic_amip_1979-2014.nc}"
+# REAL input4MIPs ozone + solar (2026-10-06).  The synthetic deck's
+# ozone_amip_clim.nc has no ozone above 5 hPa and solar_amip_1979-2014.nc
+# carries 9.7x the reference flux in the Hartley UV band: together they heated
+# the 7.6 hPa layer by +3.5 K/day on every lane and NaN'd the duo CAM6 60-day
+# run at day 12.  Staged by scripts/data/download_cmip6_forcing.py +
+# adapt_cmip6_solar.py (SOLARIS-HEPPA-3-2 monthly -> TSI + 14-band SSI_frac) +
+# a zonal-mean concatenation of UReading-CCMI-1-0 vmro3 1850-2014 (the loader
+# zonal-averages anyway; it takes ONE ozone path).  Same set for every grid.
+: "${CMIP6_FORCING_DIR:=/burg-archive/glab/users/pg2328/legoESM/data/cmip6_forcing}"
+: "${SOLAR:=${CMIP6_FORCING_DIR}/solar_cmip6_SOLARIS-HEPPA-3-2_mon.nc}"
+: "${OZONE:=${CMIP6_FORCING_DIR}/vmro3_input4MIPs_ozone_CMIP_UReading-CCMI-1-0_zonalmean_185001-201412.nc}"
+# The coupled CMIP lane (run_coupled.py) has no YAML for these: pass the whole
+# set so it consumes the SAME real forcing as every AMIP grid.
+CMIP6_FORCING_FLAGS=(
+  --ozone-source standard --ozone-forcing external --ozone-file "${OZONE}"
+  --solar-source spectral_file --solar-file "${SOLAR}"
+  --solar-tsi-var TSI --solar-spectral-var SSI_frac --solar-spectral-band-order rrtmg_sw
+  --orbital-insolation --diurnal-cycle   # as every AMIP deck (gridaudit 2026-10-09)
+)
+# REAL GHG / aerosol / volcanic (2026-10-08), same set as Levante's ICON pool
+# files.  The synthetic aerosol_amip_clim.nc (four hand-picked constants, no
+# longitude) set cloud droplets at ~768 cm-3 through aerosol_ccn.  Staging +
+# provenance: fv3_duo_gaps/forcing_stage/ (deck_ledgers.md 2026-10-08).
+#   GHG: input4MIPs UoM-CMIP-1-2-0 global means incl. CFC-22/CCl4/CF4.
+#   AEROSOL: Kinne MACv1 fine+coarse (radiation); AEROSOL_CCN: fine mode (CCN).
+#   VOLCANIC: ETH CMIP6 stratospheric aerosol v4.0.0, ECHAM6 bands (SW + LW).
+: "${GHG:=${CMIP6_FORCING_DIR}/ghg_cmip6_UoM-CMIP-1-2-0_halogens_0000-2014.nc}"
+: "${AEROSOL:=${CMIP6_FORCING_DIR}/aeropt_kinne_sw_b14_tot_1979-2014_MACv1.nc}"
+: "${AEROSOL_CCN:=${CMIP6_FORCING_DIR}/aeropt_kinne_sw_b14_fin_1979-2014_MACv1.nc}"
+: "${VOLCANIC:=${CMIP6_FORCING_DIR}/bc_aeropt_cmip6_volc_lw_b16_sw_b14_1979-2014_IACETH-v4.nc}"
+CMIP6_FORCING_FLAGS+=(
+  --ghg-forcing external --ghg-file "${GHG}"
+  --aerosol-forcing external --aerosol-file "${AEROSOL}" --aerosol-ccn-file "${AEROSOL_CCN}"
+  --volcanic-aerosol-file "${VOLCANIC}"
+)
+# CAM RRTMG-style transported layer above the model top (ozone above p_top
+# absorbs; ~2 W/m2 leaves the column budget). The CAM6 AMIP decks set it in
+# YAML; the coupled lane has no YAML, so it rides here.
+CMIP6_FORCING_FLAGS+=( --rrtmgp-overhead-layer )
 
 # --- CLM surfdata (multilayer Richards land; use_multilayer_land: true) -------
 # The production YAML's land needs the CLM surfdata NetCDF staged locally —
@@ -111,8 +149,15 @@ AMIP_PATH_FLAGS=(
   --ozone-file "${OZONE}"
   --ghg-file "${GHG}"
   --aerosol-file "${AEROSOL}"
+  --aerosol-ccn-file "${AEROSOL_CCN}"
   --volcanic-aerosol-file "${VOLCANIC}"
 )
+# Volcanic LW (ext_earth) on, as the Levante twin; AMIP_VOLCANIC_LW=0 opts out
+# for EVERY lane (AMIP and the coupled CMIP6_FORCING_FLAGS) -- one policy.
+if [[ "${AMIP_VOLCANIC_LW:-1}" == "1" ]]; then
+  AMIP_PATH_FLAGS+=( --volcanic-aerosol-lw )
+  CMIP6_FORCING_FLAGS+=( --volcanic-aerosol-lw )
+fi
 # Subgrid orography (see AMIP_SSO above, #1514).  Appended like the Levante
 # twin so an empty AMIP_SSO is an explicit opt-out rather than a silent drop.
 if [[ -n "${AMIP_SSO}" ]]; then

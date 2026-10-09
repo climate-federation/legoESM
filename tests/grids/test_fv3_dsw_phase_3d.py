@@ -93,6 +93,8 @@ import pytest  # noqa: E402
 
 from tests.grids.fv3_gate_helpers import (  # noqa: E402
     assert_batched_matches_loop,
+    assert_program_size_independent_of_km,
+    hlo_instruction_count,
     gated_check_grads,
 )
 from legoesm.core import fv3_dsw_phase_3d as jdsw  # noqa: E402
@@ -1645,3 +1647,33 @@ def test_dsw_transport_batched_jit_matches_eager(jctx, jstate, jcsw):
     assert_batched_matches_loop(jitted, eager,
                                 "dsw_transport_phase_3d[jit,batched]",
                                 rtol=5e-12, atol=1e-12)
+
+
+# ---------------------------------------------------------------------
+# Level batching (2026-09-29, the km=32 compile): the batched arm's
+# traced program must be O(1) in km.
+# ---------------------------------------------------------------------
+
+def _inputs_at(ctx, km, seed):
+    st = _seeded_state(km, seed=seed)
+    csw = npcg.csw_phase_3d(ctx, _deepcopy_faces(st), dt2=DT2, km=km,
+                            nord=2, duogrid=True)
+    return state_3d_to_jax(st), _stack_np(csw)
+
+
+def test_batched_arm_program_size_is_independent_of_km(ctx, jctx):
+    """The level loop is a batch axis: the lowered program of the
+    batched transport phase has the SAME instruction count at km=2 and
+    km=4 (up to shape constants; km <= 4 is the no-remap range this
+    phase accepts), while the loop arm -- faces and levels unrolled in
+    Python -- roughly doubles.  A level loop creeping back into the
+    batched arm trips the first assertion; the second is the
+    non-vacuity control (the counter sees the unrolling)."""
+    s2, c2 = _inputs_at(ctx, 2, seed=5)
+    s4, c4 = _inputs_at(ctx, 4, seed=6)
+    fn = jdsw.dsw_transport_phase_3d
+    n2b = hlo_instruction_count(fn, (0, 4), jctx, s2, c2, DT, 2, batched=True)
+    n4b = hlo_instruction_count(fn, (0, 4), jctx, s4, c4, DT, 4, batched=True)
+    n2l = hlo_instruction_count(fn, (0, 4), jctx, s2, c2, DT, 2)
+    n4l = hlo_instruction_count(fn, (0, 4), jctx, s4, c4, DT, 4)
+    assert_program_size_independent_of_km(n2b, n4b, n2l, n4l)

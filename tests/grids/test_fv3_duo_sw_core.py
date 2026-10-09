@@ -2998,3 +2998,58 @@ def test_sel_div_still_propagates_a_zero_in_the_live_denominator(
         f"non-finite (jax {int((~np.isfinite(a)).sum())} vs numpy "
         f"{int((~np.isfinite(b)).sum())}) -- that is a real lane "
         f"divergence, not a shared division by zero")
+
+
+# ---------------------------------------------------------------------
+# Decision B1 (2026-10-02): ADDITIVE del-2 top sponge on the relative
+# vorticity -- a second nord=0 del6_vt_flux chain in d_sw6 on both lanes.
+# ---------------------------------------------------------------------
+
+def test_sponge_d2_profile_shape_and_exact_zeros():
+    from legoesm.core.fv3_duo_stepper import sponge_d2_profile
+    prof = sponge_d2_profile(5, 2, 8.0, 0.05)
+    assert len(prof) == 5 and all(isinstance(x, float) for x in prof)
+    assert prof[0] == 0.05 and abs(prof[1] - 0.05 / 8.0 ** 0.5) < 1e-15
+    assert prof[2:] == (0.0, 0.0, 0.0)                # EXACT zeros below
+    assert sponge_d2_profile(5, 0, 8.0, 0.05) == (0.0,) * 5   # layers=0 = off
+    assert sponge_d2_profile(3, 3, 8.0, 0.0) == (0.0,) * 3
+    for bad in (dict(layers=6), dict(layers=1.5), dict(factor=0.5),
+                dict(d2_top=-1.0), dict(d2_top=float("inf")),
+                dict(factor=float("nan"))):
+        kw = {"km": 5, "layers": 2, "factor": 8.0, "d2_top": 0.05, **bad}
+        with pytest.raises(ValueError):
+            sponge_d2_profile(**kw)
+
+
+def test_d_sw6_duo_sponge_parity_and_zero_is_bitwise(chain, geo_dsw):
+    """The second del-2 chain: NumPy and JAX agree with the sponge on
+    (same gate class as the del-6 twin), a ZERO coefficient under the
+    static gate is bitwise the gate-off result on both lanes, and the
+    sponge actually moves the wind."""
+    geo, f = geo_dsw, geo_dsw.f
+    n5, j5 = chain["np"][4], chain["jx"][4]
+    bd, npx, npy = geo.bd, geo.npx, geo.npy
+    base = dict(nord_v=1, damp_v=0.2, d_con=0.0)
+    n_off = npduo.d_sw6_duo(f["u"], f["v"], n5["ut"], n5["vt"], n5["ke"],
+                            n5["wk"], n5["vortfluxx"], n5["vortfluxy"],
+                            geo.gs_np, bd, npx, npy, **base)
+    n_zero = npduo.d_sw6_duo(f["u"], f["v"], n5["ut"], n5["vt"], n5["ke"],
+                             n5["wk"], n5["vortfluxx"], n5["vortfluxy"],
+                             geo.gs_np, bd, npx, npy, d2_sponge=0.0, **base)
+    n_on = npduo.d_sw6_duo(f["u"], f["v"], n5["ut"], n5["vt"], n5["ke"],
+                           n5["wk"], n5["vortfluxx"], n5["vortfluxy"],
+                           geo.gs_np, bd, npx, npy, d2_sponge=0.05, **base)
+    jargs = (jnp.asarray(f["u"]), jnp.asarray(f["v"]), j5["ut"], j5["vt"],
+             j5["ke"], j5["wk"], j5["vortfluxx"], j5["vortfluxy"],
+             geo.gs_j, geo.flags, bd, npx, npy)
+    j_off = duo.d_sw6_duo(*jargs, **base)
+    j_zero = duo.d_sw6_duo(*jargs, sponge_on=True, d2_sponge=0.0, **base)
+    j_on = duo.d_sw6_duo(*jargs, sponge_on=True, d2_sponge=0.05, **base)
+    for k in ("u", "v"):
+        # BYTES (signed zeros included), not array_equal
+        assert np.asarray(n_zero[k]).tobytes() == np.asarray(n_off[k]).tobytes(), k
+        assert np.asarray(j_zero[k]).tobytes() == np.asarray(j_off[k]).tobytes(), k
+        # twin gate: the del-6 chain's own class (test_d_sw6_duo_parity)
+        _cmp(j_on[k], np.asarray(n_on[k]), f"d_sw6 sponge {k}", 1e-13)
+        d = np.abs(np.asarray(n_on[k]) - np.asarray(n_off[k]))
+        assert np.nanmax(d) > 0.0, f"sponge did not move {k}"

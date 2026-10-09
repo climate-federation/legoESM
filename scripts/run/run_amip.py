@@ -32,8 +32,73 @@ logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
 # hard-crash on a node without a loadable MPI library (verified).
 from legoesm.parallel.early_init import maybe_init_jax_distributed
 
+# Read before argparse: this hook runs before the driver config can be
+# imported.  Mirrors ExperimentConfig.distributed_mode's default ("mpi";
+# pinned by tests/unit/test_run_amip_cli.py).
+_ARGV_DISTRIBUTED_MODE_DEFAULT = "mpi"
+
+
+def _argv_option(argv: list[str], name: str, min_len: int) -> str | None:
+    """Value of option ``name`` as argparse will read it, or None.
+
+    argparse semantics mirrored (pinned against the real parser by the CLI
+    test): the LAST occurrence wins, ``--opt=value`` and ``--opt value``
+    both count, an unambiguous abbreviation of at least ``min_len``
+    characters counts, and nothing after a bare ``--`` is an option.
+    """
+    value = None
+    for i, a in enumerate(argv):
+        if a == "--":
+            break
+        flag, eq, v = a.partition("=")
+        if len(flag) < min_len or not name.startswith(flag):
+            continue
+        value = v if eq else (argv[i + 1] if i + 1 < len(argv) else None)
+    return value
+
+
+def _read_run_yaml_prejax(path: str) -> dict:
+    """The ``--config`` YAML (include-aware) through the driver's own reader,
+    loaded by file path: importing ``legoesm.driver`` here would pull in JAX
+    before the federation decision below is made."""
+    import importlib.util
+    loc = importlib.util.find_spec("legoesm.driver").submodule_search_locations[0]
+    spec = importlib.util.spec_from_file_location(
+        "_run_config_yaml_prejax", Path(loc) / "run_config_yaml.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.read_yaml_with_includes(path)
+
+
+def _argv_distributed_mode(argv: list[str]) -> str:
+    """``distributed_mode`` as the run will resolve it: the ``--config``
+    YAML's key (a YAML-selected spmd deck must federate too -- codex), then
+    an explicit ``--distributed-mode`` flag on top, else the default."""
+    mode = _ARGV_DISTRIBUTED_MODE_DEFAULT
+    opts = argv[:argv.index("--")] if "--" in argv else argv
+    # `--conf` is the shortest prefix unique to --config in this parser
+    cfg = _argv_option(argv, "--config", len("--conf"))
+    if cfg and not ({"-h", "--help"} & set(opts)):
+        try:
+            mode = str(_read_run_yaml_prejax(cfg).get("distributed_mode", mode))
+        except (SystemExit, Exception):  # noqa: BLE001 - re-raised by main()
+            # a missing / cyclic / malformed deck: main() reports it with
+            # the reader's own message; the hook must not pre-empt that
+            # (codex). A rank-local failure cannot split the decision:
+            # maybe_init_jax_distributed votes on `federate` collectively.
+            pass
+    # longer than the exact `--distributed` flag: unique to --distributed-mode
+    v = _argv_option(argv, "--distributed-mode", len("--distributed") + 1)
+    if v in ("mpi", "spmd"):   # anything else argparse rejects anyway
+        mode = v
+    return mode
+
+
 if "--multicontroller" not in sys.argv:
-    maybe_init_jax_distributed()
+    # Only the multi-controller SPMD lane federates jax.distributed across
+    # hosts; the mpi4jax lane must not (the mixed stack deadlocks).
+    maybe_init_jax_distributed(
+        federate=_argv_distributed_mode(sys.argv) == "spmd")
 
 from legoesm.driver.config import (
     CLUBB_SCALAR_FIELDS,
@@ -493,6 +558,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "'era5' loads reanalysis from --ic-path")
     parser.add_argument("--ic-path", type=str, default="",
                         help="Path to ERA5 Zarr store for --ic era5")
+    parser.add_argument("--era5-allow-flat-phis", action="store_true",
+                        default=_EXPERIMENT_DEFAULTS.era5_allow_flat_phis,
+                        help="Accept an ERA5 store WITHOUT surface geopotential "
+                             "(zero-filled, flat terrain; idealized stores only). "
+                             "Default: such a store is refused -- real surface "
+                             "pressure on flat terrain is grossly non-hydrostatic.")
 
     # Radiation
     # Derived from the canonical tuple so this list cannot drift from
@@ -552,6 +623,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "resolutions (C24/C48 L20) compile instead of stalling. "
                              "Numerically exact (columns are independent); must "
                              "divide the column count.")
+    parser.add_argument("--rrtmgp-overhead-layer", action="store_true",
+                        default=_EXPERIMENT_DEFAULTS.rrtmgp_overhead_layer,
+                        help="CAM RRTMG-style transported layer from the model "
+                             "top to a 1 Pa lid (top-layer T/q_v, no cloud or "
+                             "aerosol, overhead column-mean ozone). Its heating "
+                             "is discarded and TOA fluxes are reported at the "
+                             "lid, so the ~2 W/m2 absorbed above the model top "
+                             "leaves the column budget. Off = byte-identical.")
     # Issue #273 GPU tuning: RRTMGP column-recurrence kernel choice.
     # ``--rrtmgp-use-scan`` forces ``jax.lax.scan`` (smaller graph,
     # ~5-10× cheaper to JIT — material against the 2600s cold compile
@@ -668,6 +747,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--aerosol-forcing", type=str, default="off",
                         choices=["off", "external"])
     parser.add_argument("--aerosol-file", type=str, default="")
+    parser.add_argument(
+        "--aerosol-ccn-file", type=str, default="",
+        help="Optional AOD file for the AOD->CCN proxy only (e.g. fine-mode "
+             "Kinne while --aerosol-file is fine+coarse); default = --aerosol-file.")
     parser.add_argument("--aerosol-reference-aod", type=float, default=0.03)
     parser.add_argument(
         "--volcanic-aerosol-file", type=str, default="",
@@ -677,9 +760,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "convention is read directly, while the CMIP6 / MPI-M files "
             "'bc_aeropt_cmip6_volc_lw_b16_sw_b14_<year>.nc' storing "
             "per-band 'ext_sun(solar_bands, lat, altitude, month)' in "
-            "[1/km] are integrated over altitude (∫ ext·dz) and averaged "
-            "over SW bands to produce a representative single-band AOD "
-            "(matching the Kinne multi-band aerosol convention)."
+            "[1/km] are solar-weighted over SW bands and placed in the "
+            "stratosphere on their native altitude profile."
         ))
     parser.add_argument("--volcanic-aerosol-scale", type=float, default=1.0)
     parser.add_argument("--volcanic-aerosol-lw", action="store_true",
@@ -1110,6 +1192,39 @@ def build_arg_parser() -> argparse.ArgumentParser:
               "FV3DuoColumnModel; physics runs on (nCells, nlev) columns "
               "unchanged. Six faces, fp64, hydrostatic; checkpoints/ERA5 IC "
               "not yet (M4/M5)."))
+    parser.add_argument(
+        "--fv3-duo-fill", action="store_true", default=False,
+        help=("fv3_duo: FV3's own tracer positivity in the vertical remap "
+              "(fv_mapz fill -> fillz column borrow). Default off = the "
+              "certified oracle deck; the CAM6 deck sets it."))
+    parser.add_argument(
+        "--fv3-duo-nord", type=int, default=1, choices=(0, 1, 2, 3),
+        help=("fv3_duo: d_sw5 divergence-damping order (1 = del-4, the CAM6 "
+              "ldiv4 class and FV3's default; 2 = del-6, the certified "
+              "oracle deck). Default 1 = production (decision B2); oracle-"
+              "parity runs pass 2 with --fv3-duo-d4-bg 0.12."))
+    parser.add_argument(
+        "--fv3-duo-d4-bg", type=float, default=0.05,
+        help=("fv3_duo: d_sw5 divergence-damping coefficient d4_bg "
+              "(sw_core dd8 = (da_min_c*d4_bg)**(nord+1)). Default 0.05 = "
+              "MATCHED to MPAS ldiv4 by measurement (decision B2); the "
+              "oracle deck is 0.12."))
+    parser.add_argument(
+        "--fv3-duo-sponge-layers", type=int, default=2,
+        help=("fv3_duo: top-of-model del-2 momentum sponge depth in levels "
+              "(decision B1: the MPAS/CAM top sponge, additive del-2 on "
+              "divergence + vorticity). Default 2 = production; 0 = off "
+              "(the oracle deck)."))
+    parser.add_argument(
+        "--fv3-duo-sponge-factor", type=float, default=8.0,
+        help=("fv3_duo: sponge coefficient decay per layer, "
+              "coef_k = d2_top * factor**(-k/layers). Default 8 (MPAS: x8, "
+              "xsqrt8 on its two layers)."))
+    parser.add_argument(
+        "--fv3-duo-sponge-d2-top", type=float, default=0.0016,
+        help=("fv3_duo: top-layer sponge del-2 coefficient (dimensionless, "
+              "times da_min_c as d2_bg). Default MATCHED to MPAS's total "
+              "top-layer del-2 at 8dx by measurement (decision B1)."))
     parser.add_argument("--allow-disabled-physics", action="store_true",
                         default=False,
                         help="Permit a parameterization slot set to 'none' (an "
@@ -1442,7 +1557,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # Topography
     parser.add_argument("--topography", type=str, default="flat")
     parser.add_argument("--topo-smoothing", type=int, default=4)
-    parser.add_argument("--topo-edge-blend", type=float, default=0.3)
     parser.add_argument("--land-mask-file", type=str, default="",
                         help="Land-sea-mask NetCDF (CMIP6 sftlf / ERA5 lsm). "
                              "When set, activates the slab-land surface tile "
@@ -1682,6 +1796,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "can break the over-evaporation wet loop and tip the "
                              "land into the slab-like dry attractor. Default "
                              f"{_EXPERIMENT_DEFAULTS.land_soil_moisture_init_frac} "
+                             "(byte-identical when unchanged).")
+    parser.add_argument("--land-canopy-max-iters", type=int,
+                        default=_EXPERIMENT_DEFAULTS.land_canopy_max_iters,
+                        dest="land_canopy_max_iters",
+                        help="Iteration cap of the two-leaf canopy energy-balance "
+                             "solver (two_leaf scheme only). The cap binds every "
+                             "step in production (LAI->0 columns never converge) "
+                             "and the vmapped solve runs to the slowest column, so "
+                             "this IS the land step's cost. Default "
+                             f"{_EXPERIMENT_DEFAULTS.land_canopy_max_iters} "
                              "(byte-identical when unchanged).")
     parser.add_argument("--land-surface-scheme",
                         choices=["simple_seb", "two_leaf", "clm_ml"],
@@ -2403,6 +2527,12 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         fv3_duo_windows=args.fv3_duo_windows,
         fv3_duo_window_pad=args.fv3_duo_window_pad,
         fv3_duo_column_lane=args.fv3_duo_column_lane,
+        fv3_duo_fill=args.fv3_duo_fill,
+        fv3_duo_nord=args.fv3_duo_nord,
+        fv3_duo_d4_bg=args.fv3_duo_d4_bg,
+        fv3_duo_sponge_layers=args.fv3_duo_sponge_layers,
+        fv3_duo_sponge_factor=args.fv3_duo_sponge_factor,
+        fv3_duo_sponge_d2_top=args.fv3_duo_sponge_d2_top,
         hyperdiff_scale=args.hyperdiff_scale,
         corner_fill=args.corner_fill,
         a_h_scale=args.a_h_scale,
@@ -2507,6 +2637,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         rrtmgp_gpoint_batch_size=args.rrtmgp_gpoint_batch_size,
         rrtmgp_gpoint_checkpoint=args.rrtmgp_gpoint_checkpoint,
         rrtmgp_column_chunk_size=args.radiation_column_chunk,
+        rrtmgp_overhead_layer=args.rrtmgp_overhead_layer,
         diurnal_cycle=args.diurnal_cycle,
         orbital_insolation=args.orbital_insolation,
         co2_ppmv=args.co2_ppmv,
@@ -2527,6 +2658,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         solar_spectral_band_order=args.solar_spectral_band_order,
         aerosol_forcing=args.aerosol_forcing,
         aerosol_file=args.aerosol_file,
+        aerosol_ccn_file=args.aerosol_ccn_file,
         aerosol_reference_aod=args.aerosol_reference_aod,
         volcanic_aerosol_file=args.volcanic_aerosol_file,
         volcanic_aerosol_scale=args.volcanic_aerosol_scale,
@@ -2606,7 +2738,6 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         moisture_advection=args.moisture_advection,
         topography=args.topography,
         topo_smoothing=args.topo_smoothing,
-        topo_edge_blend=args.topo_edge_blend,
         land_mask_path=args.land_mask_file,
         use_multilayer_land=args.use_multilayer_land,
         land_update_seconds=args.land_update_seconds,
@@ -2636,6 +2767,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         land_soil_moisture_init_frac=args.land_soil_moisture_init_frac,
         land_soil_init=args.land_soil_init,
         land_surface_scheme=args.land_surface_scheme,
+        land_canopy_max_iters=args.land_canopy_max_iters,
         clm_ml_use_surfdata_pft=args.clm_ml_use_surfdata_pft,
         land_ic_path=args.land_ic,
         sponge_enabled=args.sponge_enabled,
@@ -2802,6 +2934,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         ensemble_size=args.ensemble_size,
         ic=args.ic,
         ic_path=args.ic_path,
+        era5_allow_flat_phis=args.era5_allow_flat_phis,
         **({"T_init": args.t_init} if args.t_init is not None else {}),
         **({"rh_init": args.rh_init} if args.rh_init is not None else {}),
     )

@@ -59,7 +59,7 @@ from legoesm.atmosphere.physics.microphysics._warm_rain import (
 from legoesm.atmosphere.physics.microphysics.config import P3Config
 from legoesm.atmosphere.physics.microphysics.output import HydrometeorState
 from legoesm.atmosphere.physics.microphysics.p3 import p3_microphysics
-from legoesm.thermo import saturation_mixing_ratio
+from legoesm.thermo import saturation_specific_humidity
 
 jax.config.update("jax_enable_x64", True)
 
@@ -205,7 +205,7 @@ def _assert_isolation_preconditions(cfg, q_c, q_r_max, rho, dt):
     ice phase does not touch dq_c (riming/deposition ∝ input q_i=N_i=0)."""
     assert cfg.k_au == 0.0                                    # no autoconversion
     # Supersaturated at T=290 K, p=7e4 Pa -> condensation source, cond_evap_sink=0.
-    q_sat = float(saturation_mixing_ratio(jnp.array(290.0), jnp.array(7.0e4)))
+    q_sat = float(saturation_specific_humidity(jnp.array(290.0), jnp.array(7.0e4)))
     assert 2.0e-2 > q_sat                                     # q_v (=2e-2) > q_sat
     # Largest accretion sink far below the donor-limiter threshold q_c/dt -> qc_scale=1.
     assert cfg.k_ac * q_c * q_r_max * rho * dt < 0.05 * q_c

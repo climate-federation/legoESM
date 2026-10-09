@@ -128,18 +128,19 @@ def test_deep_sounding_profile():
     assert top == 24
     assert abs(float(p_full[0, top]) - 827.0 * 100.0) < 200.0
     M_ratio = np.asarray(out.M[0] / 0.02)
-    expected_M = [1.00, 0.98, 1.16, 1.34, 0.83]
+    # RE-PINNED 2026-09-29 (specific-basis LCL moved the fixture sounding)
+    expected_M = [1.00, 0.98, 1.16, 1.35, 0.69]
     for i, k in enumerate(range(28, 23, -1)):
         assert M_ratio[k] == pytest.approx(expected_M[i], abs=0.03), (k, i)
     assert np.all(M_ratio[:24] == pytest.approx(0.0, abs=1e-8))
     K = np.asarray(out.PKINEU[0])
-    expected_K = [2.04, 4.51, 4.80, 3.26, 1.08]
+    expected_K = [2.04, 3.96, 3.78, 2.00, 0.80]
     for i, k in enumerate(range(28, 23, -1)):
         assert K[k] == pytest.approx(expected_K[i], abs=0.15), (k, i)
     assert np.all(K[:24] == pytest.approx(0.0, abs=1e-6))
     pdmfup_sum = float(np.sum(np.asarray(out.PDMFUP)))
     assert pdmfup_sum > 0.0
-    assert pdmfup_sum == pytest.approx(2.04e-5, rel=0.20)
+    assert pdmfup_sum == pytest.approx(2.22e-5, rel=0.20)
 
 
 def test_trade_sounding_profile():

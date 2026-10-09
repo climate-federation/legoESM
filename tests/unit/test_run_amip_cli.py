@@ -9,8 +9,10 @@ import pytest
 
 from legoesm import constants
 from scripts.run.run_amip import (
+    _ARGV_DISTRIBUTED_MODE_DEFAULT,
     _apply_aimip_classical_overrides,
     _apply_spectral_scheme_fallback,
+    _argv_distributed_mode,
     _postprocess_args,
     _print_forcing_activity,
     _require_full_physics_for_amip,
@@ -408,6 +410,18 @@ def test_transient_land_cover_validate_strict_requires_multilayer_and_surfdata()
         cfg._replace(use_multilayer_land=False).validate_strict()
 
 
+def test_era5_allow_flat_phis_flows_to_config():
+    """--era5-allow-flat-phis round-trips; the default REFUSES a store
+    without surface geopotential (decision C, 2026-10-02)."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.era5_allow_flat_phis is False
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--era5-allow-flat-phis"]), parser))
+    assert cfg.era5_allow_flat_phis is True
+
+
 def test_land_ic_path_flows_to_config():
     """--land-ic round-trips into ExperimentConfig.land_ic_path (#746): a
     spun-up MultiLayerLandState restart from run_land_spinup replaces the
@@ -580,6 +594,42 @@ def test_land_soil_moisture_init_frac_flag_flows_to_config():
     for bad in (0.0, -0.1, 1.5, float("nan")):
         with pytest.raises(ValueError, match="land_soil_moisture_init_frac"):
             cfg._replace(land_soil_moisture_init_frac=bad).validate_strict()
+
+
+def test_land_canopy_max_iters_flag_flows_to_config():
+    """--land-canopy-max-iters round-trips; default 60 equals the canopy
+    solver's own cap (byte-identical when unchanged); the driver hands it to
+    the two-leaf scheme config."""
+    import inspect
+
+    from legoesm.driver.model_driver import ModelDriver
+    from legoesm.land.canopy.config import CanopyConfig
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.land_canopy_max_iters == 60 == CanopyConfig().max_iters
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--land-canopy-max-iters", "10",
+    ]), parser))
+    assert cfg.land_canopy_max_iters == 10
+    for bad in (0, -1, 2.5, True):
+        with pytest.raises(ValueError, match="land_canopy_max_iters"):
+            cfg._replace(land_canopy_max_iters=bad).validate_strict()
+    # the calibrated decks (land_calibrated_physics) accept any cap: the cap
+    # is a solver setting, not one of the values the tables were fitted under
+    cfg._replace(land_canopy_max_iters=10).validate_strict()
+    src = inspect.getsource(ModelDriver._setup_multilayer_land)
+    assert "max_iters=int(self.config.land_canopy_max_iters)" in src
+    # ... and the calibration applied right after it must not put 60 back
+    from legoesm.land.config import (
+        MultiLayerLandConfig, apply_biophysics_lmip_two_leaf,
+    )
+    from legoesm.land.surface_scheme import TwoLeafCanopyConfig
+    base = MultiLayerLandConfig(surface_scheme=TwoLeafCanopyConfig(max_iters=10))
+    cal = apply_biophysics_lmip_two_leaf(base)
+    assert isinstance(cal.surface_scheme, TwoLeafCanopyConfig)
+    assert cal.surface_scheme.max_iters == 10
+    assert cal.surface_scheme.LE_module == TwoLeafCanopyConfig().LE_module
 
 
 def test_land_surface_scheme_flag_flows_to_config():
@@ -4263,9 +4313,23 @@ def test_fv3_duo_windows_flags_round_trip_and_validate():
     cfg.validate_strict()
 
 
+def test_fv3_duo_fill_flag_round_trips_and_validates():
+    """--fv3-duo-fill reaches DycoreConfig (default False = the oracle
+    deck) and validate_strict refuses it off the fv3_duo discretization."""
+    cfg = _fv3_duo_cfg([])
+    assert cfg.dycore.fv3_duo_fill is False
+    cfg = _fv3_duo_cfg(["--fv3-duo-fill"])
+    assert cfg.dycore.fv3_duo_fill is True
+    cfg.validate_strict()
+    cfg = cfg._replace(dycore=cfg.dycore._replace(discretization="cdgrid"))
+    with pytest.raises(ValueError, match="fv3_duo_fill"):
+        cfg.validate_strict()
+
+
 def test_fv3_duo_column_lane_flag_round_trips_and_validates():
     """--fv3-duo-column-lane reaches DycoreConfig (default False) and
-    validate_strict refuses it with the window layout."""
+    validate_strict accepts it with the window layout (M7: the column
+    lane runs on the closed lane's layouts)."""
     cfg = _fv3_duo_cfg([])
     assert cfg.dycore.fv3_duo_column_lane is False
     cfg = _fv3_duo_cfg(["--fv3-duo-column-lane"])
@@ -4273,8 +4337,8 @@ def test_fv3_duo_column_lane_flag_round_trips_and_validates():
     cfg.validate_strict()
     cfg = _fv3_duo_cfg(["--fv3-duo-column-lane", "--fv3-duo-windows", "2",
                         "--fv3-duo-window-pad", "5"])
-    with pytest.raises(ValueError, match="rung 7"):
-        cfg.validate_strict()
+    cfg.validate_strict()
+    assert cfg.dycore.fv3_duo_windows == 2
     cfg = _fv3_duo_cfg(["--fv3-duo-column-lane"])
     cfg = cfg._replace(dycore=cfg.dycore._replace(discretization="cdgrid"))
     with pytest.raises(ValueError, match="fv3_duo_column_lane needs"):
@@ -4659,6 +4723,142 @@ def test_fv3_duo_kessler_reaches_the_config_and_the_wall():
     with pytest.raises(ValueError, match="silently inert"):   # ...the guard does not
         create_atmosphere_dycore(cfg, create_cubed_sphere(12),
                                  create_sigma_coordinate(5))
+
+
+def test_fv3_duo_div_damp_flags_round_trip_and_validate():
+    """--fv3-duo-nord / --fv3-duo-d4-bg reach DycoreConfig (defaults = the
+    PRODUCTION values nord=1, d4_bg=0.05, user decision 1b 2026-10-02);
+    validate_strict refuses an order outside 0..3, a negative coefficient,
+    and a non-default value off the fv3_duo discretization (decision B2)."""
+    cfg = _fv3_duo_cfg([])
+    assert (cfg.dycore.fv3_duo_nord, cfg.dycore.fv3_duo_d4_bg) == (1, 0.05)
+    assert (_fv3_duo_cfg(["--fv3-duo-nord", "2", "--fv3-duo-d4-bg", "0.12"])
+            .dycore.fv3_duo_nord) == 2
+    cfg = _fv3_duo_cfg(["--fv3-duo-nord", "1", "--fv3-duo-d4-bg", "0.07"])
+    assert (cfg.dycore.fv3_duo_nord, cfg.dycore.fv3_duo_d4_bg) == (1, 0.07)
+    cfg.validate_strict()
+    with pytest.raises(ValueError, match="fv3_duo_nord"):
+        cfg._replace(dycore=cfg.dycore._replace(fv3_duo_nord=4)).validate_strict()
+    with pytest.raises(ValueError, match="fv3_duo_d4_bg"):
+        cfg._replace(dycore=cfg.dycore._replace(fv3_duo_d4_bg=-0.1)).validate_strict()
+    with pytest.raises(ValueError, match="fv3_duo_nord/fv3_duo_d4_bg"):
+        cfg._replace(dycore=cfg.dycore._replace(discretization="cdgrid")).validate_strict()
+    _fv3_duo_cfg([]).validate_strict()
+
+
+def test_fv3_duo_sponge_flags_round_trip_and_validate():
+    """--fv3-duo-sponge-{layers,factor,d2-top} reach DycoreConfig (defaults
+    = production: 2 layers, factor 8, the measured coefficient; decision
+    B1); validate_strict refuses a negative depth, a factor < 1, a
+    negative/non-finite coefficient, and a non-default sponge off the
+    fv3_duo discretization."""
+    from legoesm.driver.config import DycoreConfig
+    cfg = _fv3_duo_cfg([])
+    d = cfg.dycore
+    assert (d.fv3_duo_sponge_layers, d.fv3_duo_sponge_factor) == (2, 8.0)
+    assert d.fv3_duo_sponge_d2_top == DycoreConfig().fv3_duo_sponge_d2_top > 0.0
+    cfg = _fv3_duo_cfg(["--fv3-duo-sponge-layers", "0", "--fv3-duo-sponge-factor",
+                        "4", "--fv3-duo-sponge-d2-top", "0.01"])
+    d = cfg.dycore
+    assert (d.fv3_duo_sponge_layers, d.fv3_duo_sponge_factor,
+            d.fv3_duo_sponge_d2_top) == (0, 4.0, 0.01)
+    cfg.validate_strict()
+    for field, bad in (("fv3_duo_sponge_layers", -1), ("fv3_duo_sponge_factor", 0.5),
+                       ("fv3_duo_sponge_d2_top", -0.1),
+                       ("fv3_duo_sponge_d2_top", float("nan"))):
+        with pytest.raises(ValueError, match=field):
+            cfg._replace(dycore=cfg.dycore._replace(**{field: bad})).validate_strict()
+    with pytest.raises(ValueError, match="fv3_duo_sponge_"):
+        cfg._replace(dycore=cfg.dycore._replace(discretization="cdgrid")).validate_strict()
+
+
+def test_cam6_duo_deck_passes_the_lane_guards_on_the_column_lane_only():
+    """The CAM6 duo deck (config/amip/amip_production_fv3duo_c24.yaml) sets the
+    eight physics-loop knobs validate_strict keys on the lane (cadence, CLUBB
+    cloud scheme, land cadence / calibrated land, mpas_land_* / ice skin).
+    The COLUMN lane runs the MPAS loop itself (model_driver._run_fv3_duo_column
+    -> _run_mpas), so the deck must pass; the same deck on the CLOSED duo lane
+    (fv3_duo_column_lane=False) must be refused with those messages -- the
+    guards are not vacuous."""
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    parser = build_arg_parser()
+    deck = _repo_root() / "config" / "amip" / "amip_production_fv3duo_c24.yaml"
+    parser.set_defaults(**load_yaml_config(str(deck), parser))
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args(
+        _AMIP_DUMMY_PATHS + ["--clm-surfdata-path", "/dummy/surfdata.nc"]), parser))
+    assert cfg.dycore.discretization == "fv3_duo" and cfg.dycore.fv3_duo_column_lane
+    assert cfg.mpas_loop_lane
+    cfg.validate_strict()
+    closed = cfg._replace(dycore=cfg.dycore._replace(fv3_duo_column_lane=False))
+    assert not closed.mpas_loop_lane
+    with pytest.raises(ValueError) as ei:
+        closed.validate_strict()
+    msg = str(ei.value)
+    for needle in ("physics_update_steps", "cld_macmic_num_steps", "cam6_clubb",
+                   "land_update_seconds", "land_calibrated_physics",
+                   "mpas_land_beta", "mpas_land_beta_soil", "mpas_ice_skin_prognostic"):
+        assert needle in msg, needle
+
+
+def test_argv_distributed_mode_matches_the_parser_and_config_default():
+    """The import-time federation decision reads argv by hand (before the
+    driver config can be imported); it must agree with argparse on every
+    spelling and with ExperimentConfig's default when the flag is absent.
+    """
+    from legoesm.driver.config import ExperimentConfig
+    assert _ARGV_DISTRIBUTED_MODE_DEFAULT == ExperimentConfig().distributed_mode
+    p = build_arg_parser()
+    # the hook's accepted set IS the parser's choices (GLM)
+    _mode_action = next(a for a in p._actions if a.dest == "distributed_mode")
+    assert set(_mode_action.choices) == {"mpi", "spmd"}
+    for argv in (["--distributed-mode", "spmd"], ["--distributed-mode=spmd"],
+                 ["--days", "1", "--distributed-mode", "spmd", "--distributed"],
+                 ["--distributed"], [],
+                 # argparse: the LAST occurrence wins (codex)
+                 ["--distributed-mode", "spmd", "--distributed-mode", "mpi"],
+                 ["--distributed-mode=mpi", "--distributed-mode", "spmd"],
+                 # argparse: unambiguous abbreviations are accepted (GLM)
+                 ["--distributed-m", "spmd"], ["--distributed-mo=spmd"],
+                 ["--distributed-", "spmd"]):
+        assert _argv_distributed_mode(argv) == p.parse_args(argv).distributed_mode, argv
+    # `--distributed` is the exact OTHER flag, never this option
+    assert _argv_distributed_mode(["--distributed", "spmd"]) == "mpi"
+    # nothing after a bare `--` is an option (argparse treats it as positional)
+    assert _argv_distributed_mode(["--", "--distributed-mode", "spmd"]) == "mpi"
+    # a trailing bare flag has no value: the default, same as argparse would
+    # refuse -- we never federate on a half-typed flag
+    assert _argv_distributed_mode(["--distributed-mode"]) == "mpi"
+    # a value argparse will reject never federates (GLM)
+    assert _argv_distributed_mode(["--distributed-mode", "--verbose"]) == "mpi"
+    assert _argv_distributed_mode(["--distributed-mode=SPMD"]) == "mpi"
+
+
+def test_argv_distributed_mode_reads_the_config_yaml(tmp_path):
+    """A YAML-selected spmd deck (no flag on the command line) must federate
+    too (codex): the hook reads --config through the driver's include-aware
+    reader, and an explicit flag still overrides the YAML, as argparse's
+    set_defaults does.
+    """
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    base = tmp_path / "base.yaml"
+    base.write_text("distributed_mode: spmd\ndays: 3\n")
+    deck = tmp_path / "deck.yaml"
+    deck.write_text(f"include: {base.name}\ndistributed: true\n")
+    p = build_arg_parser()
+    assert load_yaml_config(str(deck), p)["distributed_mode"] == "spmd"
+    for argv in (["--config", str(deck)], [f"--config={deck}"],
+                 ["--conf", str(deck), "--days", "1"]):
+        assert _argv_distributed_mode(argv) == "spmd", argv
+    assert _argv_distributed_mode(["--config", str(deck),
+                                   "--distributed-mode", "mpi"]) == "mpi"
+    # a missing deck is main()'s error (after --help had its chance), not
+    # the hook's: the default, no raise
+    assert _argv_distributed_mode(["--help", "--config", str(tmp_path / "nope.yaml")]) == "mpi"
+    assert _argv_distributed_mode(["--config", str(tmp_path / "nope.yaml")]) == "mpi"
+    bad = tmp_path / "bad.yaml"
+    bad.write_text("distributed_mode: [unclosed\n")
+    assert _argv_distributed_mode(["-h", "--config", str(bad)]) == "mpi"
+    assert _argv_distributed_mode(["--config", str(bad)]) == "mpi"
 
 
 def test_land_snow_scheme_and_emissivity_round_trip_and_decks():

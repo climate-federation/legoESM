@@ -303,12 +303,20 @@ def test_uncarried_tracer_tendency_dropped_and_passenger_refused(moist):
     out = col.step(col.from_bundle(ic), DT, physics_fn=ice)
     _assert_bundle_equal(out.native, dyn.step(ic, DT))
 
+    # a tendency on a PASSENGER slot (nwat = 3 here, q_p is slot 3) is
+    # applied and renormalised like FV3's other mass tracers (:324/:352)
+    # and moves no layer mass
     def passenger(state, mesh, coord, phys_state=None, forcing=None):
         t = _zero_physics(state, mesh, coord)
         return t._replace(tracer_tendencies={
-            "q_p": _fld(state.T, jnp.zeros_like(state.T.data), "q_p")})
-    with pytest.raises(ValueError, match="nwat"):
-        col.step(col.from_bundle(ic), DT, physics_fn=passenger)
+            "q_p": _fld(state.T, jnp.full_like(state.T.data, 1e-6), "q_p")})
+    out = col.step(col.from_bundle(ic), DT, physics_fn=passenger)
+    ref = dyn.step(ic, DT)
+    np.testing.assert_array_equal(np.asarray(out.native["state"]["delp"]),
+                                  np.asarray(ref["state"]["delp"]))
+    np.testing.assert_allclose(
+        np.asarray(out.native["q"][3])[:, CI, CI],
+        (np.asarray(ref["q"][3]) + DT * 1e-6)[:, CI, CI], rtol=1e-13, atol=0)
 
 
 def test_refuses_water_tendencies_on_the_dry_deck(dry):
@@ -354,16 +362,19 @@ def test_surface_diagnostics_merge_slot_wise(dry):
     assert float(col._sfc_diag[2][0]) == 2.0
 
 
-def test_refuses_the_window_layout_and_nh(grid, dry):
+def test_refuses_kt1_windows_and_nh(grid, dry):
+    """M7: the window layout is accepted (test_fv3_duo_column_spmd.py);
+    kt=1 windows (shaped like six faces) and NH are refused."""
+    from types import SimpleNamespace
     from legoesm.atmosphere.dynamics.gcm.fv3_duo_column import (
         FV3DuoColumnModel)
     from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
         FV3DuoConfig, FV3DuoDynamicsModel)
     dyn = dry[0]
     saved = dyn.window_layout
-    dyn.window_layout = object()          # stand-in for a window layout
+    dyn.window_layout = SimpleNamespace(nb=6)     # kt=1 stand-in
     try:
-        with pytest.raises(NotImplementedError, match="rung 7"):
+        with pytest.raises(NotImplementedError, match="kt=1"):
             FV3DuoColumnModel(dyn)
     finally:
         dyn.window_layout = saved
@@ -525,9 +536,9 @@ def test_driver_column_lane_refusals(tmp_path):
                        (dict(mpas_qv_smooth_del4_m4s=1e14),
                         "MPAS-lane knob|smoothing"),
                        (dict(held_suarez_forcing=True), "hswf"),
-                       (dict(topography="gaussian"), "column mesh"),
-                       (dict(microphysics="morrison"), "nwat=6"),
-                       (dict(convection="zhang_mcfarlane"), "nwat=6")):
+                       (dict(topography="gaussian"), "only ic='era5'"),
+                       (dict(convection="kuo"), "grid operator"),
+                       (dict(convection="kain_fritsch"), "grid operator")):
         drv = ModelDriver(_driver_cfg(tmp_path, **over), output_dir=tmp_path)
         with pytest.raises(ValueError, match=frag):
             drv.setup()
@@ -551,3 +562,724 @@ def test_column_model_refuses_wind_edits_and_writes_back_T(dry):
         "q": [jnp.asarray(ic["q"][0]).at[:, CI, CI].multiply(0.5)]
         + list(ic["q"][1:])}, DT)
     _assert_bundle_equal(out.native, ref)
+
+
+# ---------------------------------------------------------------------
+# M5: checkpoint / restart on the column lane
+# ---------------------------------------------------------------------
+
+def _same_bytes(x, y):
+    """Bitwise: same shape, same dtype, finite, identical bytes (no
+    equal_nan, no signed-zero leniency -- codex 2026-09-30)."""
+    x, y = np.asarray(x), np.asarray(y)
+    return (x.shape == y.shape and x.dtype == y.dtype
+            and np.isfinite(x).all() and np.isfinite(y).all()
+            and x.tobytes() == y.tobytes())
+
+
+def _walk_bundle(b):
+    """Every array of a duo bundle, enumerated from the STRUCTURE (not
+    the writer's own flattener, which would make the claim circular)."""
+    out = {}
+    for k, v in b["state"].items():
+        out[f"state.{k}"] = np.asarray(v)
+    for k, v in b["press"].items():
+        out[f"press.{k}"] = np.asarray(v)
+    for i, v in enumerate(b["q"]):
+        out[f"q.{i}"] = np.asarray(v)
+    out["omga"] = np.asarray(b["omga"])
+    return out
+
+
+@pytest.mark.parametrize("phys", [
+    dict(),
+    dict(microphysics="kessler"),
+    dict(microphysics="kessler", turbulence="mynn25"),
+])
+def test_driver_column_lane_restart_is_bitwise(tmp_path, phys):
+    """PRE-REGISTERED acceptance (M5): run A = 2 days straight with a
+    checkpoint each day; run B = a fresh driver loading A's day-1
+    checkpoint and advancing the remaining day (the MPAS lane's
+    days-this-job convention).  The final native bundles must be
+    BITWISE identical on EVERY array: the checkpoint carries the full
+    duo bundle (not the column view), the same jitted programs run, and
+    the fp64 npz round-trip is exact.  With Kessler the MPAS physics
+    package runs every step; with TKE turbulence the package carries
+    PROGNOSTIC memory (PhysicsState.tke), so the physics carry restore
+    is exercised: every PhysicsState field is compared bitwise too, and
+    the carry is first shown to EVOLVE between the checkpoint and the
+    end of run A (GLM 2026-09-30: a bundle-only gate is blind to a
+    silently re-seeded carry when the physics is stateless).  A
+    tolerance here would hide state loss."""
+    from legoesm.driver.model_driver import ModelDriver
+    dt = 1920.0
+    dir_a, dir_b = tmp_path / "a", tmp_path / "b"
+    dir_a.mkdir(), dir_b.mkdir()
+    mk = dict(dt=dt, **phys)
+    cfg_a = _driver_cfg(dir_a, days=2, **mk)
+    cfg_a = cfg_a._replace(output=cfg_a.output._replace(checkpoint_days=1))
+    drv_a = ModelDriver(cfg_a, output_dir=dir_a)
+    drv_a.setup()
+    assert drv_a.run() == "COMPLETED"
+    dt = drv_a.config.dycore.dt          # post-CFL-clamp effective dt
+    mid = dir_a / "checkpoint_day_0001.npz"
+    assert mid.is_file(), sorted(p.name for p in dir_a.iterdir())
+    with np.load(mid) as d:
+        assert str(d["_schema"]) == "fv3duo_ckpt_v1"
+        assert int(d["step"]) == int(d["_step"]) == int(86400.0 / dt)
+        # the view rides along for the plotters; the bundle for the restart
+        for k in ("u", "T", "p_s", "phis", "state_delp", "state_u",
+                  "press_ps", "q_0", "q_2", "omga", "fv3duo_hs6",
+                  "fv3duo_tracer_names") + (
+                      ("physstate_prng_key",) if phys else ()):
+            assert k in d.files, k
+        assert [str(n) for n in d["fv3duo_tracer_names"]] == \
+            list(drv_a.model.tracer_names)
+        ps_mid = {k[len("physstate_"):]: np.asarray(d[k]) for k in d.files
+                  if k.startswith("physstate_")
+                  and k != "physstate_meta_conv_scheme"}
+
+    cfg_b = _driver_cfg(dir_b, days=1, **mk)
+    drv_b = ModelDriver(cfg_b, output_dir=dir_b)
+    drv_b.setup()
+    step, day = drv_b.load_checkpoint(mid)
+    assert step == int(86400.0 / dt) and day == pytest.approx(1.0)
+    assert drv_b.run(start_step=step, start_day=day) == "COMPLETED"
+
+    got, ref = _walk_bundle(drv_b.state.native), _walk_bundle(drv_a.state.native)
+    assert set(got) == set(ref)
+    diffs = [k for k in ref if not _same_bytes(got[k], ref[k])]
+    assert not diffs, f"column-lane restart is NOT bitwise: {diffs}"
+    # and the chain actually moved past the checkpoint (finite both sides)
+    with np.load(mid) as d:
+        pt_mid = np.asarray(d["state_pt"])
+        assert np.isfinite(pt_mid).all() and np.isfinite(ref["state.pt"]).all()
+        assert pt_mid.tobytes() != ref["state.pt"].tobytes()
+    # the physics carry: bitwise A == B on every persisted field (the
+    # carry exists only when a physics package runs) ...
+    ps_a, ps_b = drv_a._mpas_phys_state, drv_b._mpas_phys_state
+    if not phys:
+        assert ps_a is None and ps_b is None and not ps_mid
+    else:
+        assert ps_a is not None and ps_b is not None and ps_mid
+        ps_diffs = [k for k in ps_mid
+                    if not _same_bytes(getattr(ps_a, k), getattr(ps_b, k))]
+        assert not ps_diffs, \
+            f"physics carry restart is NOT bitwise: {ps_diffs}"
+    # ... and the CONTROL: with prognostic turbulence the carry must have
+    # moved between the checkpoint and the end of run A, or the
+    # comparison above has no power
+    if phys.get("turbulence") == "mynn25":
+        qke_a = np.asarray(ps_a.qke)
+        assert np.isfinite(qke_a).all()
+        assert ps_mid["qke"].tobytes() != qke_a.tobytes(), \
+            "PhysicsState.qke did not evolve; the carry gate is vacuous"
+        # MUTATION (codex 2026-09-30): the same restart with the carry
+        # STRIPPED from the file (the documented opt-in to a fresh seed)
+        # must NOT reproduce run A -- otherwise the carry comparison
+        # above could pass on a silently re-seeded restart.
+        dir_c = tmp_path / "c"
+        dir_c.mkdir()
+        with np.load(mid) as d:
+            kept = {k: d[k] for k in d.files if not k.startswith("physstate_")}
+        stripped = dir_c / mid.name
+        np.savez(stripped, **kept)
+        drv_c = ModelDriver(_driver_cfg(dir_c, days=1, **mk), output_dir=dir_c)
+        drv_c.setup()
+        step_c, day_c = drv_c.load_checkpoint(stripped)
+        assert drv_c.run(start_step=step_c, start_day=day_c) == "COMPLETED"
+        assert not _same_bytes(drv_c._mpas_phys_state.qke, qke_a), \
+            "a carry-stripped restart reproduced run A: the carry gate has no power"
+        assert not _same_bytes(drv_c.state.native["state"]["pt"],
+                               ref["state.pt"])
+
+
+def test_driver_column_lane_refuses_a_plain_mpas_checkpoint(tmp_path):
+    """A checkpoint without the duo bundle (an MPAS-lane file, or a
+    column-lane file with the bundle stripped) cannot restart the column
+    lane: the view cannot rebuild the D-grid state.  Refused by name."""
+    from legoesm.driver.model_driver import ModelDriver
+    cfg = _driver_cfg(tmp_path, days=0.25)
+    drv = ModelDriver(cfg, output_dir=tmp_path)
+    drv.setup()
+    bad = tmp_path / "checkpoint_day_0000.npz"
+    np.savez(bad, u=np.zeros(1), T=np.zeros(1), p_s=np.zeros(1),
+             phis=np.zeros(1), step=np.asarray(3), day=np.asarray(0.1))
+    with pytest.raises(ValueError, match="carries no fv3_duo bundle"):
+        drv.load_checkpoint(bad)
+
+
+def test_driver_column_lane_restart_refuses_another_terrain(tmp_path):
+    """Decision C: the terrain lives in the GRID; a run on a non-flat terrain
+    checkpoints its padded ``hs6`` stack and a restart on the SAME terrain
+    continues bitwise, while a fresh driver whose grid carries ANOTHER
+    terrain (flat here) is REFUSED at load -- never rebuilt from the file.
+    Synthetic bump through the factory path (phis_fn + the del-2 filter),
+    so no data file is needed."""
+    from legoesm.driver.model_driver import ModelDriver
+    from legoesm.grids.factory import create_fv3_duo_grid
+
+    def bump(lon, lat):
+        return 500.0 * constants.g * np.exp(
+            -((np.asarray(lat) - 0.6) ** 2 + (np.asarray(lon) - 1.0) ** 2)
+            / 0.15)
+
+    dir_a, dir_b, dir_c = tmp_path / "a", tmp_path / "b", tmp_path / "c"
+    for d in (dir_a, dir_b, dir_c):
+        d.mkdir()
+    cfg_a = _driver_cfg(dir_a, days=1, microphysics="kessler")
+    cfg_a = cfg_a._replace(output=cfg_a.output._replace(checkpoint_days=0.5))
+    drv_a = ModelDriver(cfg_a, output_dir=dir_a)
+    drv_a.setup()
+    drv_a._fv3_duo_column_rewrap(create_fv3_duo_grid(
+        N, NG, phis_fn=bump, phis_filter_iter=2))
+    hs6_a = drv_a._fv3_duo_column_hs6(drv_a.model)
+    assert float(np.abs(hs6_a).max()) > 1.0e3        # not flat (>100 m)
+    assert drv_a.run() == "COMPLETED"
+    mid = dir_a / "checkpoint_day_0000.npz"        # day 0.5 rounds to 0
+    assert mid.is_file()
+    with np.load(mid) as d:
+        assert _same_bytes(d["fv3duo_hs6"], hs6_a)
+
+    # the same terrain: bitwise continuation
+    drv_b = ModelDriver(_driver_cfg(dir_b, days=0.5, microphysics="kessler"),
+                        output_dir=dir_b)
+    drv_b.setup()
+    drv_b._fv3_duo_column_rewrap(create_fv3_duo_grid(
+        N, NG, phis_fn=bump, phis_filter_iter=2))
+    step, day = drv_b.load_checkpoint(mid)
+    assert _same_bytes(drv_b._fv3_duo_column_hs6(drv_b.model), hs6_a)
+    assert drv_b.run(start_step=step, start_day=day) == "COMPLETED"
+    got, ref = _walk_bundle(drv_b.state.native), _walk_bundle(drv_a.state.native)
+    diffs = [k for k in ref if not _same_bytes(got[k], ref[k])]
+    assert not diffs, f"terrain restart is NOT bitwise: {diffs}"
+
+    # another terrain (the factory's flat grid): refused
+    drv_c = ModelDriver(_driver_cfg(dir_c, days=0.5, microphysics="kessler"),
+                        output_dir=dir_c)
+    drv_c.setup()
+    assert float(np.abs(drv_c._fv3_duo_column_hs6(drv_c.model)).max()) == 0.0
+    with pytest.raises(RuntimeError, match="terrain differs"):
+        drv_c.load_checkpoint(mid)
+
+
+# ---------------------------------------------------------------------
+# nwat = 6: ice / snow / graupel + number passengers through the contract
+# ---------------------------------------------------------------------
+
+FULL_NAMES = ("q_v", "q_c", "q_r", "q_i", "q_s", "q_g", "N_c", "N_r", "N_i")
+
+
+@pytest.mark.parametrize("names,ok", [
+    (FULL_NAMES, True),
+    (("q_v", "q_c", "q_r"), True),
+    (("q_v", "q_c", "q_r", "q_p"), True),              # passenger after 3
+    (("q_v", "q_c", "q_r", "q_i"), False),             # nwat = 4
+    (("q_v", "q_c", "q_r", "N_c", "q_i"), False),      # water after passenger
+    (("q_v", "q_r", "q_c"), False),                    # out of FV3 order
+    (("q_v", "q_c", "q_r", "q_i", "q_s", "q_g", "q_i"), False),   # dup
+])
+def test_column_model_tracer_slot_contract(grid, names, ok):
+    """The nwat block reads the leading slots by POSITION: the names must
+    be the FV3 water species in FV3 order (3 or 6 of them), passengers
+    after; anything else would enter the mass sum as the wrong species
+    or fall out of it silently."""
+    from legoesm.atmosphere.dynamics.gcm.fv3_duo_column import (
+        FV3DuoColumnModel)
+    dyn, _ = _model(grid, moist=True)
+    if ok:
+        col = FV3DuoColumnModel(dyn, tracer_names=names)
+        assert col.nwat == (6 if "q_g" in names else 3)
+    else:
+        with pytest.raises(ValueError, match="water species"):
+            FV3DuoColumnModel(dyn, tracer_names=names)
+
+
+def _ice_ic(dyn):
+    """Nine slots: the moist IC's vapour, cloud and rain, seeded ice /
+    snow / graupel and number concentrations (positive so the sinks
+    below keep every species non-negative)."""
+    ic = _saturated_rainy(dyn.dcmip16_initial_state(n_tracers=3))
+    q = list(ic["q"][:3])
+    q += [jnp.full_like(q[0], v) for v in (1e-3, 2e-3, 5e-4)]
+    q += [jnp.full_like(q[0], v) for v in (1e8, 1e5, 1e4)]
+    return {**ic, "q": q}
+
+
+def test_ice_tendencies_move_the_layer_mass_through_the_nwat6_block(grid):
+    """A synthetic scheme that sublimates snow into vapour (mass-neutral),
+    sediments graupel out of every layer (a mass SINK) and nucleates ice
+    while adjusting N_i: the column's dry air is invariant, its total
+    water changes by exactly the six-species tendency integral, the
+    passengers take their tendency and the renormalisation, and a
+    warm-rain accounting (the three leading species only) would NOT
+    close -- the defect the nwat=6 block removes."""
+    from legoesm.atmosphere.dynamics.gcm.fv3_duo_column import (
+        FV3DuoColumnModel)
+    dyn, _ = _model(grid, moist=True)
+    col = FV3DuoColumnModel(dyn, tracer_names=FULL_NAMES)
+    ic = _ice_ic(dyn)
+    dq = {"q_v": 2e-7, "q_s": -2e-7, "q_g": -3e-7, "q_i": 1e-7, "N_i": 5.0}
+
+    def physics(state, mesh, coord, phys_state=None, forcing=None):
+        z = jnp.zeros_like(state.u.data)
+        return _tend(state, z, z, jnp.zeros_like(state.T.data), tracers={
+            nm: _fld(state.tracers[nm], jnp.full_like(state.T.data, v), nm)
+            for nm, v in dq.items()})
+
+    st0 = col.from_bundle(ic)
+    out = col.step(st0, DT, physics_fn=physics)
+    # the dynamics-only step is the reference the physics increment sits on
+    post = dyn.step(ic, DT)
+    delp0 = np.asarray(post["state"]["delp"])[:, CI, CI]
+    q0 = [np.asarray(a)[:, CI, CI] for a in post["q"]]
+    delp1 = np.asarray(out.native["state"]["delp"])[:, CI, CI]
+    q1 = [np.asarray(a)[:, CI, CI] for a in out.native["q"]]
+    w0, w1 = sum(q0[:6]), sum(q1[:6])
+    np.testing.assert_allclose(delp1 * (1.0 - w1), delp0 * (1.0 - w0),
+                               rtol=1e-12, atol=0)
+    dsum = sum(v for k, v in dq.items() if k in FULL_NAMES[:6])
+    np.testing.assert_allclose(delp1 * w1 - delp0 * w0, delp0 * DT * dsum,
+                               rtol=1e-10, atol=0)
+    assert dsum < 0.0                                   # a net sink
+    assert np.abs(delp1 - delp0).max() > 0.0
+    # warm-rain accounting would see only +2e-7 (vapour): NOT closed
+    d3 = sum(v for k, v in dq.items() if k in FULL_NAMES[:3])
+    assert not np.allclose(delp1 * w1 - delp0 * w0, delp0 * DT * d3,
+                           rtol=1e-6, atol=0)
+    # passengers: updated and renormalised on the new layer mass
+    ps_dt = delp1 / delp0
+    np.testing.assert_allclose(q1[8], (q0[8] + DT * dq["N_i"]) / ps_dt,
+                               rtol=1e-13, atol=0)
+    np.testing.assert_allclose(q1[6], q0[6] / ps_dt, rtol=1e-13, atol=0)
+    # the view carries the nine names, each on its native slot (a jitted
+    # dict comes back with sorted keys, so compare by NAME, not order)
+    assert set(out.tracers) == set(FULL_NAMES)
+    for i, nm in enumerate(FULL_NAMES):
+        np.testing.assert_array_equal(
+            np.asarray(out.tracers[nm].data).reshape(6, N, N, KM),
+            np.asarray(out.native["q"][i])[:, CI, CI], err_msg=nm)
+    assert out.tracers["N_i"].units == "1/kg"
+    assert out.tracers["q_g"].units == "kg/kg"
+    assert all(np.isfinite(np.asarray(a)).all() for a in out.native["q"])
+
+
+def test_driver_column_lane_accepts_ice_microphysics_with_nine_slots(tmp_path):
+    """The factory builds the column model on the driver's own tracer
+    registry: an ice scheme gets the six water species + numbers, and
+    the run starts with one slot per name (no silent 3-slot bundle)."""
+    from legoesm.driver.model_driver import ModelDriver
+    cfg = _driver_cfg(tmp_path, days=2 * 600.0 / 86400.0, dt=600.0,
+                      microphysics="morrison")
+    drv = ModelDriver(cfg, output_dir=tmp_path)
+    drv.setup()
+    assert drv.model.tracer_names == FULL_NAMES and drv.model.nwat == 6
+    assert drv.run() == "COMPLETED"
+    assert len(drv.state.native["q"]) == 9
+    assert all(np.isfinite(np.asarray(a)).all() for a in drv.state.native["q"])
+    assert set(drv.state.tracers) == set(FULL_NAMES)
+
+
+# ---------------------------------------------------------------------
+# M6: the forcings are regridded onto the duo's OWN columns at setup
+# ---------------------------------------------------------------------
+
+def _write_sst_file(path):
+    """A small monthly SST/SIC file whose SST varies in lat AND lon, so a
+    field sampled at the wrong cell centres is measurably wrong."""
+    import xarray as xr
+    nlat, nlon, nt = 36, 72, 12
+    lat = np.linspace(-89, 89, nlat)
+    lon = np.linspace(0, 357.5, nlon)
+    la, lo = np.deg2rad(lat)[:, None], np.deg2rad(lon)[None, :]
+    tos = (285.0 + 15.0 * np.cos(la) * np.cos(lo)
+           + 5.0 * np.sin(2 * la) * np.sin(lo)) * np.ones((nt, 1, 1))
+    sic = np.zeros((nt, nlat, nlon))
+    ds = xr.Dataset({"tosbcs": (("time", "lat", "lon"), tos),
+                     "siconcbcs": (("time", "lat", "lon"), sic)},
+                    coords={"time": np.arange(nt, dtype=float),
+                            "lat": lat, "lon": lon})
+    ds["tosbcs"].attrs["units"] = "K"
+    ds["siconcbcs"].attrs["units"] = "%"
+    ds.to_netcdf(path)
+
+
+def _sst_analytic(lat, lon):
+    return (285.0 + 15.0 * np.cos(lat) * np.cos(lon)
+            + 5.0 * np.sin(2 * lat) * np.sin(lon))
+
+
+def _elev_analytic(lat, lon):
+    """Elevation [m]: a continent (positive) around (30N, 100E), ocean
+    (negative) elsewhere -- lat AND lon dependent."""
+    return 2000.0 * np.exp(-((lat - 0.52) ** 2 + (lon - 1.75) ** 2) / 0.3) - 300.0
+
+
+def _write_elevation_file(path):
+    import xarray as xr
+    lat = np.arange(-89.0, 90.0, 2.0)
+    lon = np.arange(0.0, 360.0, 2.0)
+    la, lo = np.deg2rad(lat)[:, None], np.deg2rad(lon)[None, :]
+    z = _elev_analytic(la, lo) * np.ones((lat.size, lon.size))
+    xr.Dataset({"z": (("lat", "lon"), z)},
+               coords={"lat": lat, "lon": lon}).to_netcdf(path)
+
+
+def test_m6_setup_forcings_land_on_the_duo_columns(tmp_path, monkeypatch):
+    """The driver's grid IS the column mesh from grid creation on
+    (per-cell, like the Voronoi mesh), so the setup-time regrids -- an
+    elevation file, its derived land fraction, a custom SST file -- are
+    sampled at the duo's A-grid centres.  The gate: each field matches
+    its analytic value at the DUO's cell positions, and the same regrid
+    on the standard cubed sphere's centres (the pre-M6 placement,
+    MEASURED 1.6 deg off) does NOT.  Decision C: the dynamics terrain IS
+    the elevation file's product (cell-mean, masked del-2), the same
+    field as the land fraction's source and the CMOR orog.  The run
+    then completes through gray radiation, and the driver's grid /
+    vertical coordinate / state are the model's own objects."""
+    from legoesm.atmosphere.dynamics.gcm.fv3_duo_column import FV3DuoColumnState
+    from legoesm.driver.model_driver import ModelDriver
+    from legoesm.grids.factory import create_grid
+    from tests.atmosphere.hydrostatic.unit.test_fv3_duo_era5_orography import (
+        _synthetic_era5)
+    import legoesm.training.era5_to_state as e2s
+    era5 = _synthetic_era5(1500.0)
+    monkeypatch.setattr(e2s, "load_era5_ic", lambda path, year, **kw: era5)
+    sst_path, elev_path = tmp_path / "sst.nc", tmp_path / "elev.nc"
+    _write_sst_file(sst_path)
+    _write_elevation_file(elev_path)
+    cfg = _driver_cfg(
+        tmp_path, days=2 * 600.0 / 86400.0, dt=600.0,
+        ic="era5", ic_path="synthetic", topo_smoothing=2,
+        topography=str(elev_path), dataset="custom",
+        forcing_path=str(sst_path), sst_var="tosbcs", sic_var="siconcbcs",
+        sst_offset=0.0, sic_scale=0.01, radiation="gray")
+    drv = ModelDriver(cfg, output_dir=tmp_path)
+    drv.setup()
+    mesh = drv.model.mesh
+    assert drv.grid is mesh and drv.sigma is drv.model.sigma_coord
+    assert mesh.grid_shape_2d == (mesh.nCells,) == (6 * N * N,)
+    lat, lon = np.asarray(mesh.latCell), np.asarray(mesh.lonCell)
+    cube = create_grid("cubed_sphere", N)
+    clat, clon = np.asarray(cube.lat).reshape(-1), np.asarray(cube.lon).reshape(-1)
+
+    # elevation file -> _phis_data at the duo columns (bilinear from a
+    # 2 deg file of a smooth field, ocean clipped to zero by the loader
+    # default, no smoothing on a cell list; the cube placement is much
+    # worse)
+    phis = np.asarray(drv._phis_data).reshape(-1)
+    assert phis.shape == (mesh.nCells,)
+    # decision C: _phis_data IS the dynamics terrain -- the grid's filtered
+    # padded stack on the compute window, bitwise
+    ng, n = drv.model.ng, drv.model.n
+    hs6 = drv._fv3_duo_column_hs6(drv.model)
+    assert np.array_equal(phis, hs6[:, ng:ng + n, ng:ng + n].reshape(-1))
+    assert float(np.abs(hs6).max()) > 0.0
+    # cell-mean of the clipped analytic elevation, 4 masked del-2 passes:
+    # within 10 % of the point value at the duo columns (a smooth field),
+    # the cube-centre placement is worse
+    want = constants.g * np.maximum(_elev_analytic(lat, lon), 0.0)
+    err_duo = np.abs(phis - want).max() / (constants.g * 2000.0)
+    err_cube = np.abs(phis - constants.g * np.maximum(
+        _elev_analytic(clat, clon), 0.0)).max() / (constants.g * 2000.0)
+    assert err_duo < 0.1, err_duo
+    assert err_cube > err_duo, (err_duo, err_cube)
+    assert np.all(phis[np.asarray(drv._f_land).reshape(-1) == 0.0] == 0.0)
+    # ... and the land fraction it derives: the continent sits where the
+    # analytic elevation is positive AT THE DUO COLUMNS
+    f_land = np.asarray(drv._f_land).reshape(-1)
+    assert f_land.shape == (mesh.nCells,) and 0.0 < f_land.mean() < 1.0
+    land_duo = (f_land > 0.5) == (_elev_analytic(lat, lon) > 0.0)
+    land_cube = (f_land > 0.5) == (_elev_analytic(clat, clon) > 0.0)
+    assert land_duo.mean() > 0.97, land_duo.mean()
+    assert land_cube.mean() < land_duo.mean()
+
+    # SST: the file's analytic field sampled at the duo columns.  Bilinear
+    # from a 5x5 deg file of a smooth field: ~0.03 K; a 1.6 deg placement
+    # offset is ~0.4 K (15 K/rad * 0.028 rad), so 0.1 K catches the pre-M6
+    # placement (GLM: 0.5 K would have let it pass)
+    sst = np.asarray(drv._forcing.sst[0]).reshape(-1)
+    assert sst.shape == (mesh.nCells,)
+    err_duo = np.abs(sst - _sst_analytic(lat, lon)).max()
+    err_cube = np.abs(sst - _sst_analytic(clat, clon)).max()
+    assert err_duo < 0.1, err_duo
+    assert err_cube > 4.0 * err_duo, (err_duo, err_cube)
+
+    # dynamics terrain = the file's product (NOT the ERA5 IC's 1500 m
+    # mountain): the state's phis is _phis_data bitwise
+    dyn_phis = np.asarray(drv.state.phis.data).reshape(-1)
+    assert np.array_equal(dyn_phis, phis)
+    assert np.abs(dyn_phis - constants.g * np.maximum(
+        _elev_analytic(lat, lon), 0.0)).max() < 0.1 * constants.g * 2000.0
+    assert np.abs(hs6).max() == dyn_phis.max()
+
+    assert drv.run() == "COMPLETED"
+    assert isinstance(drv.state, FV3DuoColumnState)
+    assert np.isfinite(np.asarray(drv.state.native["state"]["pt"])).all()
+
+
+def _fake_surface_map_by_latitude(path, lat_deg, lon_deg):
+    """A CLM map whose plant type is boreal needleleaf (PFT 2) exactly on
+    the columns north of 60N and bare soil elsewhere -- at the latitudes
+    the LOADER was handed, so the PFT-weighted land parameters (root
+    depth) come back in the duo's column order or not at all."""
+    n = int(np.asarray(lat_deg).size)
+    north = np.asarray(lat_deg) > 60.0
+    pft = np.zeros((n, 17)); pft[~north, 0] = 1.0; pft[north, 2] = 1.0
+    o = np.ones(n)
+    return dict(
+        pft_fractions=jnp.asarray(pft),
+        theta_wp=jnp.asarray(0.12 * o), theta_fc=jnp.asarray(0.30 * o),
+        glacier_frac=jnp.asarray(np.zeros(n)),
+        pct_sand=jnp.asarray(40.0 * o), pct_clay=jnp.asarray(20.0 * o),
+        theta_r=jnp.asarray(0.05 * o), theta_sat=jnp.asarray(0.45 * o),
+        alpha_vg=jnp.asarray(2.0 * o), n_vg=jnp.asarray(1.4 * o),
+        K_sat=jnp.asarray(1.0e-5 * o),
+    )
+
+
+def test_m6_multilayer_land_and_rrtmgp_run_on_the_duo_columns(tmp_path, monkeypatch):
+    """The two lifted refusals the placement test does not cover: the
+    multilayer land model builds its columns on the duo mesh (the
+    boreal-forest cells the synthetic map puts north of 60N are exactly
+    the columns with latCell > 60N -- loader latitudes in duo column
+    order, read back through the PFT-weighted root depth; soil state
+    (nCells, n_layers), advancing) and RRTMGP radiation runs
+    on it (daily-mean surface SW at the columns finite, latitude-
+    structured)."""
+    import legoesm.grids.topography as topo
+    import legoesm.land.clm_surface_map as clm
+    from legoesm.driver.model_driver import ModelDriver
+    monkeypatch.setattr(clm, "download_clm_surfdata", lambda *a, **k: "synthetic")
+    monkeypatch.setattr(clm, "load_clm_surface", _fake_surface_map_by_latitude)
+    monkeypatch.setattr(topo, "load_land_fraction",
+                        lambda grid, path, *a, **k: jnp.full(grid.lat.shape, 0.5))
+    cfg = _driver_cfg(
+        tmp_path, days=3 * 600.0 / 86400.0, dt=600.0,
+        radiation="rrtmgp", rad_update_steps=1,
+        land_mask_path="synthetic.nc", use_multilayer_land=True,
+        multilayer_n_layers=6, multilayer_soil_depth=2.5,
+        # the canopy schemes refuse to start without the per-PFT surfdata
+        # file; the soil column + placement is what this test is about
+        land_surface_scheme="simple_seb",
+        # main b602fc9d9: the per-step two-leaf parameter refresh is on by
+        # default and refuses simple_seb (it has no rebuild for it)
+        mpas_land_params_refresh=False)
+    drv = ModelDriver(cfg, output_dir=tmp_path)
+    drv.setup()
+    mesh = drv.model.mesh
+    lat_deg = np.degrees(np.asarray(mesh.latCell))
+    st0 = drv._land_ml_state
+    assert st0 is not None and st0.theta_soil.shape == (mesh.nCells, 6)
+    rd = np.asarray(drv.physics.land_ml_params.root_depth).reshape(-1)
+    north = lat_deg > 60.0
+    assert north.any() and (~north).any()
+    assert np.unique(rd[north]).size == 1 and np.unique(rd[~north]).size == 1
+    assert rd[north][0] != rd[~north][0], (rd[north][0], rd[~north][0])
+    assert drv.run() == "COMPLETED"
+    st1 = drv._land_ml_state
+    assert np.isfinite(np.asarray(st1.T_soil)).all()
+    assert not np.array_equal(np.asarray(st1.T_soil), np.asarray(st0.T_soil))
+    sfc = drv.model._sfc_diag
+    assert sfc is not None
+    from legoesm.core.state import MPAS_SFC_DIAG_BASE_KEYS, MPAS_SFC_DIAG_EXTRA_KEYS
+    keys = MPAS_SFC_DIAG_BASE_KEYS + MPAS_SFC_DIAG_EXTRA_KEYS
+    f = sfc[keys.index("sw_down_sfc")]
+    sw = np.asarray(getattr(f, "data", f)).reshape(-1)
+    assert sw.shape == (mesh.nCells,) and np.isfinite(sw).all()
+    assert sw.min() >= 0.0 and sw.max() > 100.0
+    # daily-mean insolation (no diurnal cycle on this deck): a strong
+    # latitude structure on the duo columns, not a uniform value
+    corr = np.corrcoef(sw, np.cos(np.asarray(mesh.latCell)))[0, 1]
+    assert corr > 0.5, corr
+
+
+def test_m6_the_model_is_built_on_the_grid_the_forcings_saw(tmp_path):
+    """The factory refuses to build its own grid: without the bundle the
+    driver built at grid creation, the model's mesh could differ from
+    the one the forcings were regridded onto."""
+    from legoesm.driver.component_factory import create_atmosphere_dycore
+    cfg = _driver_cfg(tmp_path)
+    with pytest.raises(ValueError, match="did not build the duo grid"):
+        create_atmosphere_dycore(cfg, None, None)
+
+
+# ---------------------------------------------------------------------
+# B3 (2026-10-01): the MPAS lane's post-physics positivity stage
+# ---------------------------------------------------------------------
+
+def _plant(ic, where, value):
+    qc = jnp.asarray(ic["q"][1]).at[where].set(value)
+    return {**ic, "q": [ic["q"][0], qc] + list(ic["q"][2:])}
+
+
+def _window_mass(col, bundle, i):
+    area = np.asarray(col.mesh.areaCell).reshape(6, N, N)[..., None]
+    return float((np.asarray(bundle["q"][i])[:, CI, CI]
+                  * np.asarray(bundle["state"]["delp"])[:, CI, CI] * area).sum())
+
+
+def test_column_positivity_stage_is_the_mpas_borrow(moist):
+    """A negative planted in q_c survives the dynamics step (the raw
+    dycore step is the no-stage control: zero physics tendencies leave
+    the increment block an identity); the column model then applies the
+    MPAS lane's own end-of-step stage (apply_water_positivity,
+    conservative borrow weighted by delp*area): the window comes out
+    non-negative and the global tracer MASS is the raw step's to
+    roundoff; non-tracer fields are untouched."""
+    dyn, col, ic = moist
+    ic2 = _plant(ic, (2, NG + 4, NG + 5, 2), -2.0e-3)
+    raw = dyn.step(ic2, DT)
+    out = col.step(col.from_bundle(ic2), DT, physics_fn=_zero_physics).native
+    qc_raw = np.asarray(raw["q"][1])[:, CI, CI]
+    qc_on = np.asarray(out["q"][1])[:, CI, CI]
+    assert qc_raw.min() < 0.0                     # the dycore left it
+    assert qc_on.min() >= 0.0
+    for i in range(len(col.tracer_names)):
+        assert np.isclose(_window_mass(col, out, i), _window_mass(col, raw, i),
+                          rtol=1e-12), i
+    # state and pressure windows bitwise the raw step's (the stage touches
+    # tracers only); halos are not part of the contract
+    _assert_bundle_equal({**out, "q": raw["q"]}, raw)
+
+
+def test_column_positivity_global_residual_is_area_weighted(moist):
+    """A column made WHOLLY negative in q_c (nothing to borrow locally):
+    the shared stage floors it and takes the invented mass back from
+    every positive cell in proportion to its MASS (delp*area).  The duo
+    cells differ 1.4x corner to centre, so the delp-only weight MPAS
+    passes on its quasi-uniform mesh would mis-conserve here: the
+    area-weighted global q_c mass is kept to 1e-12 by the model, and the
+    same routine fed delp alone (the control) does NOT keep it."""
+    from legoesm.core.conservation import apply_water_positivity
+    dyn, col, ic = moist
+    ic2 = _plant(ic, (0, NG + 1, NG + 1, slice(None)), -4.0e-3)   # corner column
+    raw = dyn.step(ic2, DT)
+    out = col.step(col.from_bundle(ic2), DT, physics_fn=_zero_physics).native
+    delp = np.asarray(raw["state"]["delp"])[:, CI, CI]
+    area = np.asarray(col.mesh.areaCell).reshape(6, N, N)[..., None]
+    q_raw = np.asarray(raw["q"][1])[:, CI, CI]
+    q_on = np.asarray(out["q"][1])[:, CI, CI]
+    assert (q_raw[0, 1, 1, :] < 0.0).all()         # wholly negative column
+    assert q_on.min() >= 0.0
+    m = lambda q: float((q * delp * area).sum())   # noqa: E731
+    assert np.isclose(m(q_on), m(q_raw), rtol=1e-12)
+    fixed_dp, _ = apply_water_positivity(
+        {"q_c": jnp.asarray(q_raw)}, None, jnp.asarray(delp),
+        conservative=True, energy_consistent=False, area=None)
+    assert not np.isclose(m(np.asarray(fixed_dp["q_c"])), m(q_raw), rtol=1e-12)
+    # second control (merge of cf/main 2026-10-09): area applied TWICE (the
+    # auto-merge state: delp pre-weighted by area AND area= inside the
+    # stage) mis-conserves too, so the lane must apply it exactly once
+    fixed_a2, _ = apply_water_positivity(
+        {"q_c": jnp.asarray(q_raw)}, None, jnp.asarray(delp * area),
+        conservative=True, energy_consistent=False, area=jnp.asarray(area[..., 0]))
+    assert not np.isclose(m(np.asarray(fixed_a2["q_c"])), m(q_raw), rtol=1e-12)
+    # and the routine with area once, outside the lane, reproduces the lane
+    fixed_a1, _ = apply_water_positivity(
+        {"q_c": jnp.asarray(q_raw)}, None, jnp.asarray(delp),
+        conservative=True, energy_consistent=False, area=jnp.asarray(area[..., 0]))
+    np.testing.assert_allclose(np.asarray(fixed_a1["q_c"]), q_on, rtol=1e-10,
+                               atol=1e-18)
+
+
+def test_column_positivity_knobs_follow_the_mpas_semantics(moist):
+    """conservative_tracer_clamp=False is the MPAS hard floor (max(q, 0):
+    negatives deleted, mass CREATED), not 'no stage'; the floor's
+    latent-heat T correction (energy_consistent_moisture_clip) is refused
+    on this lane rather than silently dropped."""
+    from legoesm.atmosphere.dynamics.gcm.fv3_duo_column import (
+        FV3DuoColumnModel)
+    dyn, col_on, ic = moist
+    col_floor = FV3DuoColumnModel(dyn, tracer_names=col_on.tracer_names,
+                                  conservative_tracer_clamp=False)
+    ic2 = _plant(ic, (2, NG + 4, NG + 5, 2), -2.0e-3)
+    out = col_floor.step(col_floor.from_bundle(ic2), DT, physics_fn=_zero_physics).native
+    assert np.asarray(out["q"][1])[:, CI, CI].min() >= 0.0       # floored ...
+    raw = dyn.step(ic2, DT)
+    assert _window_mass(col_on, out, 1) > _window_mass(col_on, raw, 1)  # ... creating mass
+    with pytest.raises(NotImplementedError, match="latent-heat T correction"):
+        FV3DuoColumnModel(dyn, tracer_names=col_on.tracer_names,
+                          conservative_tracer_clamp=False,
+                          energy_consistent_moisture_clip=True)
+
+
+def test_column_positivity_runs_on_the_dynamics_only_path_too(moist):
+    """As on MPAS the stage runs EVERY step: a planted negative is
+    repaired by a step with no physics function."""
+    dyn, col, ic = moist
+    ic2 = _plant(ic, (2, NG + 4, NG + 5, 2), -2.0e-3)
+    out = col.step(col.from_bundle(ic2), DT)
+    assert np.asarray(out.native["q"][1])[:, CI, CI].min() >= 0.0
+    raw = dyn.step(ic2, DT)
+    assert np.asarray(raw["q"][1])[:, CI, CI].min() < 0.0   # the dycore alone did not
+
+
+def test_restart_terrain_check_covers_spectral_phis_hat():
+    """Decision C: a spectral checkpoint carries ``phis_hat``; the restart
+    check synthesises it and refuses a planted mismatch, accepts the
+    product's own coefficients."""
+    from types import SimpleNamespace
+    from legoesm.driver.model_driver import ModelDriver
+    from legoesm.grids.gaussian import create_gaussian_grid, sh_analysis, sh_synthesis
+    grid = create_gaussian_grid(10)
+    lat = np.asarray(grid.grid_lat)
+    phis = jnp.asarray(2000.0 * np.exp(-((lat - 0.5) ** 2) / 0.1))
+    product = sh_synthesis(grid, sh_analysis(grid, phis))
+    good = SimpleNamespace(_phis_data=np.asarray(product), grid=grid,
+                           state=SimpleNamespace(phis=None, phis_hat=SimpleNamespace(
+                               data=sh_analysis(grid, phis))))
+    ModelDriver._check_restart_terrain(good)
+    bad = SimpleNamespace(_phis_data=np.asarray(product), grid=grid,
+                          state=SimpleNamespace(phis=None, phis_hat=SimpleNamespace(
+                              data=sh_analysis(grid, 0.5 * phis))))
+    with pytest.raises(RuntimeError, match="terrain differs"):
+        ModelDriver._check_restart_terrain(bad)
+
+
+def test_column_lane_carries_the_subgrid_orography_through_the_grid_rebuild(tmp_path):
+    """The driver attaches the per-column SSO stddev to the grid at
+    _create_topography; the column lane then REBUILDS its mesh (terrain in
+    the grid) in _init_state, BEFORE _create_physics reads the field.  The
+    rebuilt mesh must carry it: the orographic GWD gets the 800 m box, not
+    its scalar fallback (the test fails if the rebuild drops the field)."""
+    import xarray as xr
+    from legoesm.driver.model_driver import ModelDriver
+    lat = np.arange(-89.0, 90.0, 2.0)
+    lon = np.arange(1.0, 360.0, 2.0)
+    box = ((lat[:, None] >= 25) & (lat[:, None] <= 45)
+           & (lon[None, :] >= 70) & (lon[None, :] <= 100))
+    path = tmp_path / "sso_stdh_2deg.nc"
+    xr.Dataset({"SSO_STDH": (("lat", "lon"), np.where(box, 800.0, 0.0))},
+               coords={"lat": lat, "lon": lon}).to_netcdf(path)
+    cfg = _driver_cfg(tmp_path, gravity_wave_drag="mcfarlane",
+                      subgrid_orography_path=str(path))
+    drv = ModelDriver(cfg, output_dir=tmp_path)
+    drv.setup()
+    assert drv.grid is drv.model.mesh          # the lane's identity contract
+    sso_grid = drv.grid.subgrid_topo_stddev
+    sso_phys = drv.physics.subgrid_topo_stddev
+    assert sso_grid is not None and sso_phys is not None
+    assert np.asarray(sso_phys).shape == (drv.grid.nCells,)
+    assert np.array_equal(np.asarray(sso_grid), np.asarray(sso_phys))
+    assert 700.0 < float(np.asarray(sso_phys).max()) <= 800.0
+    assert float(np.asarray(sso_phys).min()) == 0.0
+
+
+def test_column_lane_cmor_feed_survives_without_wap(tmp_path, caplog):
+    """The CMOR feed derived wap from the edge-wind divergence, which the
+    column mesh has no edges for; the AttributeError dropped EVERY CMOR
+    interval of the dt ladder.  The lane now publishes no wap (one
+    warning) and the feed's other fields reach the collector."""
+    import logging
+    from legoesm.driver.config import OutputConfig
+    from legoesm.driver.model_driver import ModelDriver
+    cfg = _driver_cfg(tmp_path, days=0.25, output=OutputConfig(
+        diag_days=0, checkpoint_days=0, output_dir=str(tmp_path), cmip_output=True))
+    drv = ModelDriver(cfg, output_dir=tmp_path)
+    drv.setup()
+    with caplog.at_level(logging.WARNING):
+        assert drv.run() == "COMPLETED"
+    msgs = [r.getMessage() for r in caplog.records]
+    assert not any("CMOR accumulator feed FAILED" in m for m in msgs), msgs
+    assert sum("publishing no wap" in m for m in msgs) == 1

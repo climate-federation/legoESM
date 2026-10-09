@@ -140,7 +140,8 @@ def main():
     from legoesm.training.aimip_spatial import era5_land_fraction, grid_with_zm_land_fraction
     from legoesm.training.era5_to_state import (
         TrainingERA5Config, era5_to_spectral_carry, load_era5_ic,
-    )
+    era5_terrain_product,
+)
     from legoesm.training.neural_gcm_spectral import (
         carry_to_spectral_state, spectral_amip_rollout, spectral_rollout,
         spectral_state_vs_carry_loss,
@@ -216,8 +217,11 @@ def main():
         for k, yr in enumerate(years):
             d0 = _dt.date(int(yr), 1 + (k % 12), 15)  # spread across seasons
             d1 = d0 + _dt.timedelta(days=rollout_days)
-            ic_carry = era5_to_spectral_carry(load_era5_ic(wb2, d0.year, d0.month, d0.day), grid, sigma)
-            tgt_carry = era5_to_spectral_carry(load_era5_ic(wb2, d1.year, d1.month, d1.day), grid, sigma)
+            s0 = load_era5_ic(wb2, d0.year, d0.month, d0.day)
+            s1 = load_era5_ic(wb2, d1.year, d1.month, d1.day)
+            tp = era5_terrain_product(s0, grid)
+            ic_carry = era5_to_spectral_carry(s0, grid, sigma, target_phis=tp)
+            tgt_carry = era5_to_spectral_carry(s1, grid, sigma, target_phis=tp)
             mid = d0 + _dt.timedelta(days=rollout_days // 2)
             t_sfc_col, sic_col = _override_at(mid)
             doy = jnp.asarray(float(d0.timetuple().tm_yday))

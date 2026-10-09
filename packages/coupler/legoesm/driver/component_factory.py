@@ -341,6 +341,14 @@ _FV3_DUO_ALLOWED_NONDEFAULT: frozenset[str] = frozenset({
     # it selects are dual-reviewed and parity-gated (PR #1656).
     "distributed", "distributed_mode",
     "dycore.fv3_duo_windows", "dycore.fv3_duo_window_pad",
+    # The damping deck (user decision 1a, 2026-10-02): the d_sw5
+    # divergence damping and the B1 top del-2 sponge are CONSUMED by this
+    # lane (FV3DuoConfig nord/d4_bg/sponge_*), so an oracle-deck
+    # Held-Suarez run (--fv3-duo-nord 2 --fv3-duo-d4-bg 0.12
+    # --fv3-duo-sponge-layers 0) stays launchable for parity debugging.
+    "dycore.fv3_duo_nord", "dycore.fv3_duo_d4_bg",
+    "dycore.fv3_duo_sponge_layers", "dycore.fv3_duo_sponge_factor",
+    "dycore.fv3_duo_sponge_d2_top",
     # Output cadence + destination -- the OutputConfig fields the lane's
     # snapshot + checkpoint writers read (checkpoint_days: slice-2
     # restart, the shared cube/MPAS cadence field -> fv3duo_ckpt_v1).
@@ -459,15 +467,17 @@ def _refuse_fv3_duo_non_default(config: ExperimentConfig) -> None:
         listing = ", ".join(f"{p}={v!r}" for p, v in offending)
         raise ValueError(
             f"fv3_duo (slice 1) runs ONLY the certified dry-dynamics deck; "
-            f"the driver lane consumes no other configuration, so each field "
-            f"below would be SILENTLY inert -- a successful wrong experiment. "
+            f"the driver lane holds every other field at its default (most are "
+            f"inert here; the d_sw5 damping knobs are consumed but pinned to the "
+            f"production deck) -- a successful wrong experiment otherwise. "
             f"Non-default unsupported fields ({len(offending)}): {listing}. "
             f"Allowed non-default fields: "
             f"{sorted(_FV3_DUO_ALLOWED_NONDEFAULT)}. Reset the offenders or "
             f"choose a lane that supports them.")
 
 
-def _create_fv3_duo_column_model(config: ExperimentConfig, gc, model_type):
+def _create_fv3_duo_column_model(config: ExperimentConfig, gc, model_type,
+                                 *, bundle=None):
     """The FV3 duo as a COLUMN model for the MPAS lane (route A).
 
     The MPAS lane consumes the whole ExperimentConfig surface, so the
@@ -480,16 +490,15 @@ def _create_fv3_duo_column_model(config: ExperimentConfig, gc, model_type):
         is OFF on the duo by decision (user 2026-09-26);
       * held_suarez_forcing: the closed lane's FV3 hswf is the certified
         HS on this dycore; the MPAS lane's HS drops the meridional drag;
-      * distributed / windows / NH / km outside {5, 10} (rung 7 / M4).
+      * NH / km outside {5, 10} (M4); distributed and windows run through
+        the closed lane's layout policy (M7, fv3_duo_dynamics_for_layout).
     """
     from legoesm.atmosphere.dynamics.gcm.fv3_duo_column import (
         FV3DuoColumnModel,
     )
     from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
         FV3DuoConfig,
-        FV3DuoDynamicsModel,
     )
-    from legoesm.grids.factory import create_fv3_duo_grid
 
     refused = []
     if getattr(config, "sponge_enabled", False):
@@ -501,8 +510,6 @@ def _create_fv3_duo_column_model(config: ExperimentConfig, gc, model_type):
     if config.held_suarez_forcing:
         refused.append("held_suarez_forcing=True (use the closed duo lane's "
                        "certified FV3 hswf)")
-    if config.distributed:
-        refused.append("distributed=True (single-process; windows are rung 7)")
     if model_type != "hydrostatic":
         refused.append(f"model_type={model_type!r} (hydrostatic only: the "
                        "column increments rebuild the hydrostatic pressures)")
@@ -514,40 +521,57 @@ def _create_fv3_duo_column_model(config: ExperimentConfig, gc, model_type):
     if eta is None:
         refused.append(f"grid.nlev={gc.nlev} (analytic set_eta km in {{5, 10}} "
                        "or the CAM6 L32 table at 32)")
-    # Anything the driver regrids onto self.grid in setup() lands on the
-    # STANDARD cubed-sphere cell centres, which are NOT the duo's A-grid
-    # (MEASURED 2026-09-26, C12: 1.6 deg offsets on matching faces, faces
-    # 2-4 permuted) -- until M6 builds the forcings on the column mesh,
-    # every such input is refused rather than misplaced.
-    if config.dataset != "analytical":
-        refused.append(f"dataset={config.dataset!r} (SST/SIC regrid on the "
-                       "driver grid is M6)")
-    if config.topography != "flat":
-        refused.append(f"topography={config.topography!r} (an elevation "
-                       "file is M6; with ic='era5' the terrain is ERA5's own "
-                       "phis, del-2 filtered topo_smoothing passes, as on "
-                       "the MPAS lane)")
-    if config.use_multilayer_land:
-        refused.append("use_multilayer_land=True (land data regrid is M6)")
-    if config.radiation != "none":
-        refused.append(f"radiation={config.radiation!r} (ozone/aerosol/solar "
-                       "boundary regrids are M6)")
-    # The column model's mass block is FV3's nwat=3 warm-rain block; a
-    # scheme that moves water into ice / snow / graupel would have that
-    # water DROPPED (codex 2026-09-26: Morrison nucleation takes vapour
-    # and hands ice, which no slot receives).  Until the nwat=6 block is
-    # ported, only warm-rain microphysics and no convection.
-    if config.microphysics not in ("none", "kessler"):
-        refused.append(f"microphysics={config.microphysics!r} (ice species; "
-                       "the nwat=6 mass block is not ported)")
+    # Setup-time regrids (topography, SST/SIC, land, ozone) land on
+    # ``self.grid``, which the driver sets to the duo's own column mesh
+    # at grid-creation time (M6, ``ModelDriver._create_grid``) -- the
+    # standard cubed-sphere centres are NOT the duo's A-grid (MEASURED
+    # 2026-09-26, C12: 1.6 deg offsets).  The factory is handed that same
+    # grid bundle so the model's mesh is the driver's mesh.
+    if bundle is None:
+        refused.append("the driver did not build the duo grid at grid "
+                       "creation (ModelDriver._create_grid, M6); setup-time "
+                       "regrids would land on the standard cubed sphere")
+    # The column lane's DYNAMICS terrain is the ERA5 IC's own phis (the
+    # grid is rebuilt with it, del-2 filtered -- the MPAS lane's choice);
+    # a topography file / analytic mountain feeds land fraction and CMOR
+    # orog only.  Under the analytic baroclinic-wave IC (flat-terrain
+    # balanced) a mountain would be placed in the diagnostics and never
+    # reach dynamics -- refused rather than silently flat (codex M6 r1).
+    if config.topography != "flat" and config.ic != "era5":
+        refused.append(f"topography={config.topography!r} with ic="
+                       f"{config.ic!r} (only ic='era5' carries a dynamics "
+                       "terrain on this lane; the file/mountain would be "
+                       "diagnostic-only while dynamics stayed flat)")
+    # The column model's mass block is FV3's nwat block on the slot list
+    # the driver's tracer registry names (3 warm-rain species, or the six
+    # water species + numbers for an ice scheme): every registered tracer
+    # takes its tendency and moves the layer mass (fv_update_phys
+    # :324/:335/:352, moist_cp case(6)).  A scheme whose tendencies
+    # target a tracer the registry does not carry is refused by the
+    # registry's own slot validation below.
+    # Convection schemes that READ A GRID OPERATOR are refused by trait:
+    # the column mesh carries no edge topology, so the moisture-
+    # convergence operator and the resolved-w diagnostic return None,
+    # which Kuo turns into a zero source (an inert scheme that runs,
+    # codex 2026-09-30) and Kain-Fritsch needs concretely.  Tiedtke /
+    # Bechtold engage their internal saturation-deficit proxy on None
+    # (the unified pipeline's own degrade path) and are admitted.
     if config.convection != "none":
-        refused.append(f"convection={config.convection!r} (detrained ice; "
-                       "the nwat=6 mass block is not ported)")
+        from legoesm.atmosphere.physics.convection.integration import (
+            convection_scheme_traits)
+        _tr = convection_scheme_traits(config.convection)
+        if _tr.is_simple_mc_consumer or _tr.is_w_grid_consumer:
+            refused.append(
+                f"convection={config.convection!r} (reads a grid operator "
+                f"-- moisture convergence / resolved w -- the column mesh "
+                f"has no edge topology for; it would run inert)")
     # MPAS-dycore numerics knobs (dycore.mpas_*) are the MPAS model's; the
-    # duo reads none of them, so a non-default value would be inert
+    # duo reads none of them except the grid-general positivity knob, so a
+    # non-default value would be inert
     d_def = type(config.dycore)()
     inert = [f for f in config.dycore._fields
              if f.startswith("mpas_")
+             and f != "mpas_conservative_tracer_clamp"
              and getattr(config.dycore, f) != getattr(d_def, f)]
     if inert:
         refused.append("dycore." + ", dycore.".join(inert)
@@ -560,14 +584,138 @@ def _create_fv3_duo_column_model(config: ExperimentConfig, gc, model_type):
             "fv3_duo column lane cannot honour: " + "; ".join(refused))
     moist = any(getattr(config, k) != "none"
                 for k in ("microphysics", "convection", "turbulence"))
-    bundle = create_fv3_duo_grid(gc.resolution)
+    from legoesm.driver.physics_pipeline import (
+        moisture_registry_for, validate_microphysics_tracer_slots)
+    registry = moisture_registry_for(config.microphysics)
+    validate_microphysics_tracer_slots(
+        config.microphysics, registry.n_tracers,
+        context="fv3_duo column lane tracer slots")
     if bundle.ctx_np.get("ectx") is None:
         raise ValueError("fv3_duo column lane needs the duo ext bundle "
                          "(ctx['ectx'] with amat6) for the c2l column winds")
-    dyn = FV3DuoDynamicsModel(
-        bundle, FV3DuoConfig(km=gc.nlev, hydrostatic=True,
-                             storage_dtype="float64", moist=moist, eta=eta))
-    return FV3DuoColumnModel(dyn)
+    # M7: the SAME layout policy as the closed lane (single device,
+    # face-shard over 2/3/6 devices, explicit windows over 6*kt*kt), one
+    # function for both, so the column lane decomposes exactly as the
+    # closed lane does and no second layout policy can drift
+    dyn = fv3_duo_dynamics_for_layout(
+        config, bundle,
+        FV3DuoConfig(km=gc.nlev, hydrostatic=True,
+                     storage_dtype="float64", moist=moist, eta=eta,
+                     fill=config.dycore.fv3_duo_fill,
+                     nord=config.dycore.fv3_duo_nord,
+                     d4_bg=config.dycore.fv3_duo_d4_bg,
+                     sponge_del2_top_layers=config.dycore.fv3_duo_sponge_layers,
+                     sponge_del2_top_factor=config.dycore.fv3_duo_sponge_factor,
+                     sponge_d2_top=config.dycore.fv3_duo_sponge_d2_top))
+    return FV3DuoColumnModel(
+        dyn, tracer_names=registry.names,
+        conservative_tracer_clamp=config.dycore.mpas_conservative_tracer_clamp,
+        energy_consistent_moisture_clip=config.energy_consistent_moisture_clip)
+
+
+def fv3_duo_dynamics_for_layout(config: ExperimentConfig, bundle, cfg):
+    """The ``FV3DuoDynamicsModel`` for *bundle* / *cfg* on the execution
+    layout the deck and the visible devices resolve to -- ONE policy for
+    the closed lane and the column lane (M7).
+
+    AUTO-ADAPT the execution layout to the VISIBLE devices (user
+    2026-08-28: "adjust automatically to the number of devices").  The
+    face sharding + face-batched step is near-bitwise the single-device
+    loop (tolerance-gated: spmd_multiprocess_parity asserts rtol/atol
+    1e-12 at 2/3/6 devices; step_face_batched batched==loop asserts
+    rtol 1e-13/atol 1e-12) -- it changes PERFORMANCE and the last bits
+    only, NOT the physics, which is why auto-selecting it on device count
+    is not a hidden SCIENTIFIC choice.  The resolved layout is LOGGED so
+    it appears in the run record, never sits silently in a default.
+
+    SCOPE: multi-PROCESS stays EXPLICIT behind --distributed -- it
+    changes the driver's checkpoint/snapshot I/O (gather/broadcast/
+    reshard) and the refusal gates key off config.distributed;
+    auto-enabling it would run the single-process I/O path across ranks
+    (each np.asarray sees only its own shards -> corrupt).  Single-
+    process auto-sharding is safe (every shard is host-local, so the
+    single-process I/O path is correct as-is).
+
+    A multi-process launch WITHOUT --distributed never initialised
+    jax.distributed, so jax.process_count() returns 1 even though N
+    copies of this program are running -- each would then auto-shard over
+    its LOCAL devices and clobber the others' output (GLM mechanism
+    review 2026-08-28).  Take the max of jax.process_count() and the
+    launcher's declared world size (SLURM step / MPI / PMI /
+    SLURM_NTASKS) -- REFUSE-SAFE, a false positive only costs the user a
+    --distributed flag while a false negative corrupts.  The decision is
+    a PURE function of the counts (resolve_fv3_duo_layout), unit-tested
+    in test_fv3_duo_layout_policy.
+    """
+    import jax
+    import numpy as np
+    from jax.sharding import Mesh, NamedSharding, PartitionSpec
+
+    from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
+        FV3DuoDynamicsModel,
+    )
+    from legoesm.parallel.early_init import launcher_world_size
+
+    multiprocess = config.distributed
+    devs = jax.devices() if multiprocess else jax.local_devices()
+    kt = config.dycore.fv3_duo_windows
+    if kt is not None:
+        # EXPLICIT window SPMD (M6 in the driver): 6*kt*kt devices, one
+        # window each, on a (face, tile_i, tile_j) mesh.  No auto-
+        # selection and no tolerance on the count: a mismatch is a
+        # mis-built launch, refused (user call 2026-09-21).
+        pad = config.dycore.fv3_duo_window_pad
+        need = 6 * kt * kt
+        if len(devs) != need:
+            raise ValueError(
+                f"fv3_duo_windows={kt} needs exactly {need} "
+                f"{'global' if multiprocess else 'local'} devices "
+                f"(6*kt*kt, one window each); found {len(devs)}. Launch "
+                f"{need} ranks with --distributed --distributed-mode "
+                f"spmd, or drop --fv3-duo-windows for the face layout.")
+        mesh = Mesh(np.array(devs).reshape(6, kt, kt),
+                    ("face", "tile_i", "tile_j"))
+        logger.info(
+            "  fv3_duo layout: WINDOW-sharded, kt=%d pad=%d over %d %s "
+            "device(s) (one window each) + face-batched%s", kt, pad,
+            len(devs), "global" if multiprocess else "local",
+            " [multi-process SPMD]" if multiprocess else "")
+        return FV3DuoDynamicsModel(
+            bundle, cfg, step_spmd_mesh=mesh, step_windows=(kt, pad),
+            step_face_batched=True)
+    layout = resolve_fv3_duo_layout(
+        world=max(jax.process_count(), launcher_world_size()),
+        n_local=jax.local_device_count(),
+        n_global=jax.device_count(),
+        distributed=config.distributed)
+
+    if layout == "shard":
+        mesh = Mesh(np.array(devs), ("face",))
+        logger.info(
+            "  fv3_duo layout: face-sharded over %d %s device(s) "
+            "(1/2/3 faces each) + face-batched%s", len(devs),
+            "global" if multiprocess else "local",
+            " [multi-process SPMD]" if multiprocess else "")
+        return FV3DuoDynamicsModel(
+            bundle, cfg,
+            step_out_shardings=NamedSharding(mesh, PartitionSpec("face")),
+            step_spmd_mesh=mesh,
+            step_face_batched=True)
+
+    # 'single': 1 device, or an auto-path count that does not divide 6
+    # (4/5/7...). The latter is a LOUD fall-back (never a silent
+    # behaviour substitution) so the wasted devices are visible; the
+    # explicit-distributed unshardable case already raised inside
+    # resolve_fv3_duo_layout.
+    if len(devs) >= 2:
+        logger.warning(
+            "  fv3_duo layout: %d local devices do not divide the 6 "
+            "cube faces (need 2/3/6); running SINGLE-DEVICE on %s. "
+            "Set CUDA_VISIBLE_DEVICES to 2/3/6 devices to face-shard.",
+            len(devs), devs[0])
+    else:
+        logger.info("  fv3_duo layout: single-device (%s)", devs[0])
+    return FV3DuoDynamicsModel(bundle, cfg)
 
 
 def create_atmosphere_dycore(
@@ -575,8 +723,13 @@ def create_atmosphere_dycore(
     grid,
     sigma,
     coeff_grid=None,
+    fv3_duo_bundle=None,
 ) -> Any:
     """Resolve and instantiate the configured atmosphere dynamical core.
+
+    ``fv3_duo_bundle``: the duo grid the driver built at grid creation
+    (column lane only); the column model is built ON it so its mesh is
+    the grid every forcing was regridded onto.
 
     Parameters
     ----------
@@ -940,7 +1093,8 @@ def create_atmosphere_dycore(
     # ----- FV3 six-face duo cube (certified fv_dynamics JAX lane) -----
     if (solver_name == "fv3_duo_primitive_equations"
             and getattr(config.dycore, "fv3_duo_column_lane", False)):
-        return _create_fv3_duo_column_model(config, gc, model_type)
+        return _create_fv3_duo_column_model(config, gc, model_type,
+                                            bundle=fv3_duo_bundle)
     if solver_name == "fv3_duo_primitive_equations":
         # Slice 1 contract, enforced LOUDLY. The core SUPPORTS moist
         # coupling (zvir != 0) on both arms now, but this lane never
@@ -1048,7 +1202,6 @@ def create_atmosphere_dycore(
         _refuse_fv3_duo_non_default(config)
         from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
             FV3DuoConfig,
-            FV3DuoDynamicsModel,
         )
         from legoesm.grids.factory import create_fv3_duo_grid
 
@@ -1082,6 +1235,11 @@ def create_atmosphere_dycore(
             # on the adiabatic core is the misleading configuration GLM
             # flagged, so the coupling follows the scheme, never a knob.
             moist=(config.microphysics == "kessler"),
+            nord=config.dycore.fv3_duo_nord,
+            d4_bg=config.dycore.fv3_duo_d4_bg,
+            sponge_del2_top_layers=config.dycore.fv3_duo_sponge_layers,
+            sponge_del2_top_factor=config.dycore.fv3_duo_sponge_factor,
+            sponge_d2_top=config.dycore.fv3_duo_sponge_d2_top,
         )
         # AUTO-ADAPT the execution layout to the VISIBLE devices (user
         # 2026-08-28: "adjust automatically to the number of devices").
@@ -1101,83 +1259,7 @@ def create_atmosphere_dycore(
         # ranks (each np.asarray sees only its own shards -> corrupt).
         # Single-process auto-sharding is safe (every shard is host-local,
         # so the single-process I/O path is correct as-is).
-        import jax
-        import numpy as np
-        from jax.sharding import Mesh, NamedSharding, PartitionSpec
-
-        from legoesm.parallel.early_init import launcher_world_size
-
-        # A multi-process launch WITHOUT --distributed never initialised
-        # jax.distributed, so jax.process_count() returns 1 even though N
-        # copies of this program are running -- each would then auto-shard
-        # over its LOCAL devices and clobber the others' output (GLM
-        # mechanism review 2026-08-28). Take the max of jax.process_count()
-        # and the launcher's declared world size (SLURM step / MPI / PMI /
-        # SLURM_NTASKS) -- REFUSE-SAFE, a false positive only costs the
-        # user a --distributed flag while a false negative corrupts. The
-        # decision is a PURE function of the counts (resolve_fv3_duo_layout),
-        # unit-tested in test_fv3_duo_layout_policy.
-        multiprocess = config.distributed
-        devs = jax.devices() if multiprocess else jax.local_devices()
-        kt = config.dycore.fv3_duo_windows
-        if kt is not None:
-            # EXPLICIT window SPMD (M6 in the driver): 6*kt*kt devices, one
-            # window each, on a (face, tile_i, tile_j) mesh.  No auto-
-            # selection and no tolerance on the count: a mismatch is a
-            # mis-built launch, refused (user call 2026-09-21).
-            pad = config.dycore.fv3_duo_window_pad
-            need = 6 * kt * kt
-            if len(devs) != need:
-                raise ValueError(
-                    f"fv3_duo_windows={kt} needs exactly {need} "
-                    f"{'global' if multiprocess else 'local'} devices "
-                    f"(6*kt*kt, one window each); found {len(devs)}. Launch "
-                    f"{need} ranks with --distributed --distributed-mode "
-                    f"spmd, or drop --fv3-duo-windows for the face layout.")
-            mesh = Mesh(np.array(devs).reshape(6, kt, kt),
-                        ("face", "tile_i", "tile_j"))
-            logger.info(
-                "  fv3_duo layout: WINDOW-sharded, kt=%d pad=%d over %d %s "
-                "device(s) (one window each) + face-batched%s", kt, pad,
-                len(devs), "global" if multiprocess else "local",
-                " [multi-process SPMD]" if multiprocess else "")
-            return FV3DuoDynamicsModel(
-                bundle, cfg, step_spmd_mesh=mesh, step_windows=(kt, pad),
-                step_face_batched=True)
-        layout = resolve_fv3_duo_layout(
-            world=max(jax.process_count(), launcher_world_size()),
-            n_local=jax.local_device_count(),
-            n_global=jax.device_count(),
-            distributed=config.distributed)
-
-        if layout == "shard":
-            mesh = Mesh(np.array(devs), ("face",))
-            logger.info(
-                "  fv3_duo layout: face-sharded over %d %s device(s) "
-                "(1/2/3 faces each) + face-batched%s", len(devs),
-                "global" if multiprocess else "local",
-                " [multi-process SPMD]" if multiprocess else "")
-            return FV3DuoDynamicsModel(
-                bundle, cfg,
-                step_out_shardings=NamedSharding(mesh,
-                                                 PartitionSpec("face")),
-                step_spmd_mesh=mesh,
-                step_face_batched=True)
-
-        # 'single': 1 device, or an auto-path count that does not divide 6
-        # (4/5/7...). The latter is a LOUD fall-back (never a silent
-        # behaviour substitution) so the wasted devices are visible; the
-        # explicit-distributed unshardable case already raised inside
-        # resolve_fv3_duo_layout.
-        if len(devs) >= 2:
-            logger.warning(
-                "  fv3_duo layout: %d local devices do not divide the 6 "
-                "cube faces (need 2/3/6); running SINGLE-DEVICE on %s. "
-                "Set CUDA_VISIBLE_DEVICES to 2/3/6 devices to face-shard.",
-                len(devs), devs[0])
-        else:
-            logger.info("  fv3_duo layout: single-device (%s)", devs[0])
-        return FV3DuoDynamicsModel(bundle, cfg)
+        return fv3_duo_dynamics_for_layout(config, bundle, cfg)
 
     # ----- Doubly-periodic plane -----
     if solver_name == "plane_compressible_euler":

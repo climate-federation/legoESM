@@ -25,12 +25,12 @@ from legoesm.atmosphere.physics.microphysics._warm_rain import (
     hard_saturation_drain,
     mixed_phase_l_over_cp,
     mixed_phase_liquid_fraction,
-    mixed_phase_saturation_mixing_ratio,
+    mixed_phase_saturation_specific_humidity,
 )
 from legoesm.driver.model_driver import _mpas_hard_saturation_poststep
 from legoesm.thermo import (
-    saturation_mixing_ratio,
-    saturation_mixing_ratio_ice,
+    saturation_specific_humidity,
+    saturation_specific_humidity_ice,
 )
 
 DT = 75.0
@@ -50,17 +50,17 @@ class TestBlend:
         T_cold = jnp.full(2, 200.0)
         T_warm = jnp.full(2, 285.0)
         np.testing.assert_allclose(
-            np.asarray(mixed_phase_saturation_mixing_ratio(T_cold, p)),
-            np.asarray(saturation_mixing_ratio_ice(T_cold, p)))
+            np.asarray(mixed_phase_saturation_specific_humidity(T_cold, p)),
+            np.asarray(saturation_specific_humidity_ice(T_cold, p)))
         np.testing.assert_allclose(
-            np.asarray(mixed_phase_saturation_mixing_ratio(T_warm, p)),
-            np.asarray(saturation_mixing_ratio(T_warm, p)))
+            np.asarray(mixed_phase_saturation_specific_humidity(T_warm, p)),
+            np.asarray(saturation_specific_humidity(T_warm, p)))
 
     def test_ice_curve_below_liquid_when_cold(self):
         p = jnp.full(1, P_TTL)
         T = jnp.full(1, T_TTL)
-        q_ice = float(saturation_mixing_ratio_ice(T, p)[0])
-        q_liq = float(saturation_mixing_ratio(T, p)[0])
+        q_ice = float(saturation_specific_humidity_ice(T, p)[0])
+        q_liq = float(saturation_specific_humidity(T, p)[0])
         assert q_ice < q_liq
         assert q_liq / q_ice > 1.3  # the supersaturation head-room being fixed
 
@@ -76,8 +76,8 @@ class TestDrain:
         """TTL cell: ice-supersaturated but liquid-SUBsaturated."""
         T = jnp.full((1, 1), T_TTL)
         p = jnp.full((1, 1), P_TTL)
-        q_ice = saturation_mixing_ratio_ice(T, p)
-        q_liq = saturation_mixing_ratio(T, p)
+        q_ice = saturation_specific_humidity_ice(T, p)
+        q_liq = saturation_specific_humidity(T, p)
         q_v = 1.25 * q_ice  # 25% ice-supersat, below the liquid curve
         assert float(q_v[0, 0]) < float(q_liq[0, 0])
         return T, q_v, p, q_ice
@@ -96,7 +96,7 @@ class TestDrain:
         # Lands at/above the blended curve of the WARMED cell (deposition
         # heating raises q_sat), never below (pure drain).
         T_after = T + mixed_phase_l_over_cp(T) * dq
-        q_target = mixed_phase_saturation_mixing_ratio(T_after, p)
+        q_target = mixed_phase_saturation_specific_humidity(T_after, p)
         assert float(q_after[0, 0]) >= float(q_target[0, 0]) * (1 - 1e-9)
         # And it substantially removed the excess (>= half in one step here).
         assert float(dq[0, 0]) > 0.5 * float(q_v[0, 0] - q_ice[0, 0])
@@ -105,7 +105,7 @@ class TestDrain:
         """Above the ramp both modes see the pure liquid curve: identical."""
         T = jnp.full((2, 3), 290.0)
         p = jnp.full((2, 3), 90000.0)
-        q_v = 1.3 * saturation_mixing_ratio(T, p)
+        q_v = 1.3 * saturation_specific_humidity(T, p)
         r_liq = hard_saturation_drain(T, q_v, p, DT)
         r_ice = hard_saturation_drain(T, q_v, p, DT, ice_curve=True)
         np.testing.assert_array_equal(np.asarray(r_liq), np.asarray(r_ice))
@@ -118,7 +118,7 @@ class TestDrain:
             return jnp.sum(
                 hard_saturation_drain(T, q, p, DT, ice_curve=True) ** 2)
 
-        q_v = 1.4 * saturation_mixing_ratio_ice(T, p)
+        q_v = 1.4 * saturation_specific_humidity_ice(T, p)
         g = jax.grad(loss)(q_v)
         assert bool(jnp.all(jnp.isfinite(g)))
 
@@ -130,7 +130,7 @@ class TestDrain:
                 T.reshape(1), qv.reshape(1), p.reshape(1), DT,
                 ice_curve=True)[0]
         for Te, pe, mult in [(195.0, 10000.0, 1.4), (250.0, 40000.0, 1.5)]:
-            qsat_i = float(saturation_mixing_ratio_ice(
+            qsat_i = float(saturation_specific_humidity_ice(
                 jnp.array([Te]), jnp.array([pe]))[0])
             args = [jnp.array(mult * qsat_i), jnp.array(Te), jnp.array(pe)]
             ad = [float(jax.grad(drain, i)(*args)) for i in range(3)]
@@ -187,7 +187,7 @@ class TestPoststep:
         p_s = jnp.full(ncol, 1.0e5)
         sigma = jnp.linspace(0.08, 0.12, nlev)  # ~TTL pressures
         p_full = p_s[:, None] * sigma[None, :]
-        q_v = 1.3 * saturation_mixing_ratio_ice(T, p_full)
+        q_v = 1.3 * saturation_specific_humidity_ice(T, p_full)
         q_c = jnp.zeros((ncol, nlev))
         q_i = jnp.zeros((ncol, nlev)) if with_qi else None
         return T, q_v, q_c, q_i, p_s, sigma
@@ -229,7 +229,7 @@ class TestPoststep:
         p_s = jnp.full(ncol, 1.0e5)
         sigma = jnp.linspace(0.8, 0.9, nlev)
         p_full = p_s[:, None] * sigma[None, :]
-        q_v = 1.3 * saturation_mixing_ratio(T, p_full)
+        q_v = 1.3 * saturation_specific_humidity(T, p_full)
         q_c = jnp.zeros((ncol, nlev))
         ice = _mpas_hard_saturation_poststep(
             T, q_v, q_c, p_s[:, None] * sigma[None, :], DT, 1.1, 5.0, ice_curve=True, q_i=None)
@@ -255,7 +255,7 @@ class TestPoststep:
         T, q_v, q_c, _, p_s, sigma = self._cold_inputs(with_qi=False)
         # Warm liquid supersaturation so the legacy path actually fires.
         T = jnp.full_like(T, 285.0)
-        q_v = 1.3 * saturation_mixing_ratio(
+        q_v = 1.3 * saturation_specific_humidity(
             T, p_s[:, None] * jnp.asarray(sigma)[None, :])
         T2, qv2, qc2, qi2, dq = _mpas_hard_saturation_poststep(
             T, q_v, q_c, p_s[:, None] * sigma[None, :], DT, 1.1, 5.0)
@@ -405,20 +405,20 @@ def test_fp32_ice_curve_branch_subprocess():
     script = textwrap.dedent('''
         import jax, jax.numpy as jnp
         assert not jax.config.jax_enable_x64
-        from legoesm.thermo import saturation_mixing_ratio_ice
+        from legoesm.thermo import saturation_specific_humidity_ice
         from legoesm.atmosphere.physics.microphysics._warm_rain import (
-            hard_saturation_drain, mixed_phase_saturation_mixing_ratio,
+            hard_saturation_drain, mixed_phase_saturation_specific_humidity,
             mixed_phase_l_over_cp)
         T = jnp.full((1, 4), 205.0, jnp.float32)
         p = jnp.full((1, 4), 15000.0, jnp.float32)
-        qv = (1.5 * saturation_mixing_ratio_ice(T, p)).astype(jnp.float32)
+        qv = (1.5 * saturation_specific_humidity_ice(T, p)).astype(jnp.float32)
         r = hard_saturation_drain(T, qv, p, 75.0, ice_curve=True)
         assert r.dtype == jnp.float32, r.dtype
         assert bool(jnp.all(jnp.isfinite(r)))
         assert float(jnp.min(r)) > 0.0
         dq = r * 75.0
         Ta = T + mixed_phase_l_over_cp(T) * dq
-        resid = float(((qv - dq) - mixed_phase_saturation_mixing_ratio(Ta, p))[0, 0])
+        resid = float(((qv - dq) - mixed_phase_saturation_specific_humidity(Ta, p))[0, 0])
         assert resid >= -1e-4, resid           # on/above the ice curve (fp32 tol)
         print("FP32_OK")
     ''')

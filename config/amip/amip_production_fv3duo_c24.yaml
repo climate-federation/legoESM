@@ -1,0 +1,254 @@
+# =============================================================================
+# legoESM AMIP -- the CAM6 production deck on the FV3 DUO column lane, C24 L32
+# =============================================================================
+# DERIVED FROM config/amip/amip_production.yaml (the MPAS res6 deck): every
+# physics row is byte-identical; only the grid / dycore rows differ, each one
+# per the user-approved deck ledger (2026-10-01, fv3_duo_gaps/q_review/
+# deck_ledgers.md): A dt by MPAS's CFL rule, B1 top sponge, B2 del-4 divergence
+# damping, B3 fillz + positivity, B4/B5 no-ops, C one terrain product per grid.
+# `diff config/amip/amip_production.yaml config/amip/amip_production_fv3duo_c24.yaml`
+# IS the cross-grid configuration table.
+#
+# =============================================================================
+# legoESM AMIP — AUTHORITATIVE production configuration (single source of truth)
+# =============================================================================
+# Run with:
+#   run_amip.py --config config/amip/amip_production.yaml \
+#       <machine path flags> --days N --output DIR
+#
+# Keys are run_amip argument DESTS (set as defaults via --config); any explicit
+# CLI flag still overrides a key here.  Machine-specific PATHS (ERA5 IC,
+# SST/SIC, solar/ozone/GHG/aerosol/volcanic, topography) are deliberately NOT
+# pinned here — they live in config/amip/amip_production.sh (env-overridable)
+# so this physics config stays machine-independent and reproducible across
+# deployments.
+#
+# THE ATMOSPHERIC PHYSICS SUITE IS CAM6 (user decision 2026-09-23).  The lane
+# (MPAS res6 Voronoi, prescribed SST, two-leaf multilayer land, external
+# forcings) is unchanged from the previous production deck; the atmospheric
+# parameterizations, the vertical grid and the physics cadence are CAM6
+# (CESM2.1, cam_cesm2_1_rel_60, f09 namelist) wherever a faithful port exists.
+# The outgoing configuration is kept RUNNABLE and unchanged at
+# config/amip/amip_sundqvist_l36.yaml, so every earlier result reproduces; the
+# decks that used to `include: amip_production.yaml` now include that file,
+# because they document results measured against it.
+#
+# THIS DEFAULT IS ADOPTED ON FAITHFULNESS TO CAM6, NOT ON DEMONSTRATED SKILL.
+# The 60-day CAM6 arm is NOT finished and has NOT yet been scored against
+# observations.  Over its first twenty-five days it sits about 25 W/m2 out of
+# top-of-atmosphere energy balance, against about 2 W/m2 for the Sundqvist/L36
+# arm, because its clouds reflect far too little sunlight.  The cause is known
+# and is NOT yet fixed: cloud water is being rimed onto falling ice.  The
+# supporting measurement, on the two arms' day-5 states: 71% of the liquid
+# deficit lies below freezing, 70% of that cold deficit is accounted for by
+# the snow + graupel increase, and graupel more than doubles column-wide.
+#
+# EVIDENCE AND PAIR RECORD live in the RUN TREE, which is deliberately NOT in
+# this repository (runtime outputs are gitignored):
+#   /work/bd1083/b309178/diffESM/legoesm_pg/amip_runs/_cam6/PREREGISTRATION.md
+# on the Levante deployment.  It records the pair (cam6_base60 = the
+# Sundqvist/L36 deck, cam6_suite60 = this one; 60-day cold starts, scored
+# days 31-60 vs ERA5), the resolved-config diff, and every measurement cited
+# above.  A reader without that tree should treat the numbers here as
+# unverifiable rather than as repository facts.
+#
+# NOT YET CAM6 (run 2+): MG2 microphysics (Morrison mg flavour stands in),
+# ridge-based orographic drag (needs the ridge-statistics dataset), MAM4
+# aerosols (licence decision), CLUBB tuning table.
+#
+# EVERY scientific choice is spelled out below even where it equals a code
+# default: a default is not a record.  In particular the two numerical levers
+# (mpas_div_damp4_scale, mpas_vert_advection_scheme: sb) keep their OFF code
+# defaults and are selected HERE.
+# ---- grid / dycore ----------------------------------------------------------
+grid_type: cubed_sphere
+resolution: 24              # C24 L32: 462 km centre / 327 km corner cells (deck ledger A)
+nlev: 32                    # CAM6: the L32 hybrid table (cam_vcoords_L32_c180105)
+vertical_coord: cam_l32     # CAM6: hyai/hybi verbatim, p_top 2.255 hPa
+discretization: fv3_duo
+fv3_duo_column_lane: true    # route A: the duo is the dynamics operator of the CAM6 loop
+dt: 300.0                   # decision A: MPAS's rule (0.82 of the printed CFL clamp, a divisor of 1800) -> C24 300 s; ladder 225/300/360 s
+precision: fp64
+a_h_scale: 0.375
+# ---- duo dynamics knobs (deck ledger B; MPAS-only rows replaced) ---------------
+# B1 top sponge: MPAS's 2-layer momentum del-2 (x8) is replaced by the duo's
+#    additive del-2 on divergence AND vorticity, equal coefficients, MATCHED to
+#    MPAS's total top del-2 at 8dx by measurement (only value inside the 10 %
+#    gate: div -9.8 %, rot +7.9 %).
+fv3_duo_sponge_layers: 2
+fv3_duo_sponge_factor: 8.0
+fv3_duo_sponge_d2_top: 0.0016
+# B2 divergence damping: FV3's 4th-order arm with d4_bg MATCHED to MPAS ldiv4
+#    (2-cell divergence-mode e-folding, 3.0 %/step on 4dx).
+fv3_duo_nord: 1
+fv3_duo_d4_bg: 0.05
+# B3 positivity: FV3 fillz in the remap + the MPAS borrow positivity stage every
+#    step on the column lane (mpas_conservative_tracer_clamp below, the one
+#    MPAS knob the duo reads; kept at the MPAS deck's value).
+fv3_duo_fill: true
+# B4 vertical advection: no FV3 counterpart (vertically Lagrangian + kord remap);
+#    mpas_vert_advection_scheme not set.  B5 qv del-4 smoothing: OFF (below).
+physics_update_steps: 6     # CAM6: physics every 1800 s (6 x 300 s); ladder arms pass 1800/dt
+                            # held-physics steps re-apply the last tendencies
+rad_update_steps: 12        # CAM6 f09: radiation hourly (12 x 300 s); ladder arms pass 3600/dt
+cld_macmic_num_steps: 3     # CAM6 namelist_defaults_cam.xml:1254 (mg2 + clubb_sgs,
+                            # dtime 1800): CLUBB + microphysics sub-cycled 3 x
+                            # at 600 s inside each physics step (tphysbc macmic)
+
+# ---- radiation / clouds / microphysics --------------------------------------
+radiation: rrtmg            # rrtmgp builder (CAM6 uses RRTMG; same k-lineage)
+rrtmgp_overhead_layer: true # CAM RRTMG extra layer above the model top (ozone
+                            # column above p_top absorbs; ~2 W/m2 leaves budget)
+# Saturation curve the cloud-cover diagnosis measures RH against.  NAMED, not
+# inherited: the code default is "mixed_phase" and that is the value this deck
+# wants, but the default moved on 2026-09-17 and a default is not a record.
+# The preserved pre-CAM6 deck pins "liquid" for the same reason.
+cloud_saturation_scheme: mixed_phase
+clouds: cam6_clubb          # CAM6: liquid = CLUBB PDF fraction, ice = CAM aist,
+                            # deep-convective = clubb_intr deepcu from the
+                            # scheme's updraft mass flux + in-cloud condensate
+use_clubb_cloud_fraction: true   # routes the CLUBB cloud-fraction carry to
+                                 # radiation (required by cam6_clubb)
+microphysics: morrison      # mg flavour (MG2 port = run 2)
+morrison_sed_cfl_substeps: true  # MG2 micro_mg2_0.F90 sedimentation loop:
+                                 # nstep = 1 + int(max V dt/dz) per column,
+                                 # so precipitation crosses >1 layer per 600 s.
+                                 # DEPARTURE: Morrison sediments the PRE-source
+                                 # pools (MG2 sediments post-source, :2204).
+morrison_sed_cfl_substeps_strict: false # the abort path is an equinox error_if,
+                                        # i.e. a host callback, and the GPU lane
+                                        # runs JAX_PLATFORMS=cuda with no CPU
+                                        # device to place it on (this killed the
+                                        # first 60-day arm at day 2).  The
+                                        # required sub-step count is still
+                                        # reported as a diagnostic.
+                                 # (L32 at 600 s needs ~90 for graupel; a clamp
+                                 # would silently slow the fall)
+hard_saturation_adjustment: false  # CAM6 clubb_do_liqsupersat = .false.
+                                   # (namelist_defaults_cam.xml:1225): no
+                                   # supersaturation removal after the physics
+                                   # step.  On this lane the flag is the
+                                   # POST-STEP drain (model_driver
+                                   # _mpas_hard_saturation_poststep), which is
+                                   # our counterpart of CAM's post-CLUBB
+                                   # "iceadj" block (clubb_intr.F90:2258).
+                                   # Was true; user table 2026-09-24, row 2.
+cloud_partial_coverage_optics: none
+cloud_optics_inhomogeneity: two_region
+cloud_fsd: 1.0
+cloud_vertical_overlap_optics: max_random
+cloud_n_subcolumns: 8
+hard_sat_ice_curve: false          # the ice-curve blend of that same
+                                   # post-step drain; inert once the drain
+                                   # is off, set explicitly so no row rests
+                                   # on a default.  User table row 3.
+homogeneous_ice_nucleation: true
+aerosol_ccn: true
+energy_consistent_moisture_clip: true
+
+# ---- convection ---------------------------------------------------------------
+convection: zhang_mcfarlane # CAM6: faithful zm_conv port (f09 mg2+clubb namelist:
+                            # c0_lnd 0.0075, c0_ocn 0.03, ke 5e-6 (dyn=fv),
+                            # tau 3600,
+                            # capelmt 70, tiedke_add 0.5, momcu = momcd = 0.7,
+                            # num_cin 1); scheme defaults carry those values.
+                            # ZM convective momentum transport (momtran) is ON
+                            # and reaches the MPAS winds (mpas_cmt resolves True;
+                            # the Sundqvist/L36 deck's Bechtold runs CMT
+                            # off, lane default)
+convective_precip_efficiency: 0.8
+convective_rain_to_surface: true
+convective_cloud: false     # refused by cam6_clubb (deepcu is CAM6's version)
+
+# ---- turbulence ---------------------------------------------------------------
+turbulence: clubb
+clubb_prognostic: true
+clubb_liquid_partition: true       # CAM6 clubb_intr: the closure's diagnosed
+                                   # cloud liquid is handed to the host as a
+                                   # tendency, and the Morrison saturation
+                                   # adjustment stops condensing (MG2
+                                   # allow_sed_supersat = .false. under CLUBB,
+                                   # micro_mg_cam.F90:668-672).  One flag,
+                                   # both halves.  User table row 1.
+# The partition REFUSES an active radiative condensate floor (it would be
+# imposed on top of the liquid the closure now supplies, making clouds opaque
+# twice).  Both floors default to a non-zero scheme value when unset, so they
+# are pinned to 0 here.  Not in the user's three-row table: REQUIRED BY ROW 1.
+cloud_q_c_diagnostic: 0.0
+conv_cloud_condensate: 0.0
+clubb_trop_cloud_top_press: 15000.0
+
+# ---- gravity-wave drag ---------------------------------------------------------
+# CAM6 f09 L32 (non-WACCM, nlev < 60) runs OROGRAPHIC drag ONLY: build-namelist
+# sets use_gw_front=false and use_gw_convect_dp=false (bld/build-namelist ~3230;
+# the f09 frontal/Beres coefficient rows apply to WACCM / >=60-level builds).
+# So no non-orographic member here (the Sundqvist/L36 deck carries the
+# e3sm_cam
+# background source; that row is dropped on purpose).
+gravity_wave_drag: mcfarlane            # orographic member: McFarlane (decision
+                                        # pending: CAM6 gw_oro port via e3sm_cam
+                                        # 'orographic', effgw_oro 0.125,
+                                        # gw_polar_taper true on fv, lndscl_sgh)
+hines_launch_p: 70000.0                 # inert (hines not selected); kept equal
+                                        # to the Sundqvist/L36 deck.  The e3sm_cam_*
+                                        # rows
+                                        # also resolve (to run_amip defaults) but
+                                        # are dead while e3sm_cam is not in the
+                                        # selector; re-pin them from the CAM6
+                                        # namelist before any run that adds it.
+
+# ---- surface ------------------------------------------------------------------
+surface_bulk_scheme: large_yeager_cesm  # CAM6/CESM shr_flux_atmOcn (LY04)
+surface_gustiness_zi: 300.0
+surface_tiled: false
+surface_z0_land: 0.1
+mpas_land_lapse_K_per_km: 6.5
+mpas_land_beta: 0.6
+mpas_ice_skin_prognostic: true
+albedo_ice: 0.80
+dynamic_albedo: true
+snow_albedo_feedback: true
+land_snow_tau_days: 150.0
+snow_age_activation_K: 5000.0
+
+# ---- land (unchanged) -----------------------------------------------------------
+use_multilayer_land: true
+land_update_seconds: 300.0
+multilayer_n_layers: 10
+multilayer_soil_depth: 3.0
+land_soil_moisture_init_frac: 0.25
+land_stomatal_beta: false
+land_calibrated_physics: true
+land_surface_scheme: two_leaf
+land_canopy_max_iters: 10   # NEW BASELINE 2026-10-05 (user): A/B vs 60 = 4.2x/2.7x faster, land LH -1.5/-3.4 %; see fv3_duo_gaps/q_review/deck_ledgers.md
+mpas_land_beta_soil: true
+land_soil_init: aridity
+
+# ---- moisture smoothing / clamps (unchanged) -----------------------------------
+mpas_qv_smooth_del2_m2s: 0.0
+mpas_qv_smooth_del4_m4s: 0.0        # B5: OFF on the duo (no FV3 counterpart; refused on the column lane)
+mpas_conservative_tracer_clamp: true   # B3: the borrow positivity stage every step (the column lane reads this grid-general knob; the MPAS deck value) + FV3 fillz in the remap
+
+# ---- forcing / IC / output (unchanged) ------------------------------------------
+diurnal_cycle: true
+orbital_insolation: true
+ic: era5
+dataset: custom
+sst_var: tosbcs
+sst_offset: 0.0
+sic_var: siconcbcs
+sic_scale: 0.01
+solar_source: spectral_file
+solar_tsi_var: TSI
+solar_spectral_var: SSI_frac
+solar_spectral_band_order: rrtmg_sw   # explicit: SSI_frac is in RRTMG-SW band order (adapt_cmip6_solar.py); 'auto' only inferred it
+ozone_forcing: external
+ghg_forcing: external
+aerosol_forcing: external
+start_year: 1979
+diag_days: 1
+checkpoint_days: 30         # run control, carried from the outgoing production
+                            # deck (not a CAM6 choice)
+monthly_means: true
+cmip_output: true
+clear_sky_diag: true

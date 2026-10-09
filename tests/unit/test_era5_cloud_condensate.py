@@ -5,7 +5,7 @@ The WeatherBench2 store the training campaign reads carries NO condensate at
 all — only ``total_cloud_cover`` — so every sample started bone dry and the
 thirteen Morrison rate coefficients could not influence a six-hour forecast.
 ARCO-ERA5 carries both fields, and these lock the second-store read, the
-specific-content to mixing-ratio conversion, and the hand-off into the carry.
+the (still available) specific-content to mixing-ratio helper, and the hand-off into the carry.
 """
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 from legoesm.thermo import specific_condensate_to_mixing_ratio
 from legoesm.training.era5_to_state import TrainingERA5Config, load_era5_slice
+from legoesm.training.era5_to_state import era5_terrain_product
 
 _LEVELS = (1000.0, 500.0, 100.0)          # hPa, descending
 _NLAT, _NLON, _NLEV = 5, 6, 3
@@ -202,8 +203,9 @@ def _carry(with_cloud, microphysics):
     grid = create_gaussian_grid(n_max=10)
     nlev = 6
     sigma = create_sigma_coordinate(nlev)
-    return era5_to_spectral_carry(_mini_slice(grid, nlev, with_cloud=with_cloud),
-                                  grid, sigma, microphysics=microphysics)
+    era5 = _mini_slice(grid, nlev, with_cloud=with_cloud)
+    return era5_to_spectral_carry(era5, grid, sigma, microphysics=microphysics,
+                                  target_phis=era5_terrain_product(era5, grid))
 
 
 def test_the_carry_is_cloud_free_without_the_option():
@@ -220,9 +222,10 @@ def test_the_carry_holds_the_ERA5_cloud_water():
     q_i = np.asarray(c.q_i)
     assert float(np.min(q_c)) > 0.0, "cloud liquid never reached the carry"
     assert float(np.min(q_i)) > 0.0, "cloud ice never reached the carry"
-    # Mixing ratio, so slightly ABOVE the specific content it came from.
-    assert float(np.mean(q_c)) == pytest.approx(4.0e-4 / (1.0 - 5.0e-3), rel=1e-3)
-    assert float(np.mean(q_i)) == pytest.approx(6.0e-5 / (1.0 - 5.0e-3), rel=1e-3)
+    # Specific content, loaded AS IS (the tracer convention, 2026-09-28);
+    # the former mixing ratio c/(1-q_v) is 0.5 % above and fails at 1e-3.
+    assert float(np.mean(q_c)) == pytest.approx(4.0e-4, rel=1e-3)
+    assert float(np.mean(q_i)) == pytest.approx(6.0e-5, rel=1e-3)
 
 
 def test_the_droplet_number_stays_at_the_scheme_s_own_default():
