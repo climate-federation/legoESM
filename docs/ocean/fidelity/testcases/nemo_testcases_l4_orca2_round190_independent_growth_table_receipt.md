@@ -101,8 +101,26 @@ the round base. The tested arm remains visible in commits `071670e58` and
 The complete-table gate passes with `HELD_FIRST_STATEMENT_SHARED_GATE`; its six
 real-input plants each exit 2 at `STATUS PLANT-FIRED`, and its focused tests
 pass 7/7. The source-statement unit test passed before the held arm was
-restored. The required wide fidelity battery, citation gate and separate
-read-only review are recorded below after their final-tree runs.
+restored.
+
+The final-tree citation gate passes both its default receipt (zero failures,
+zero unmapped citations, zero audit failures) and this receipt from `##
+Outcome`.  Its real two-line shift of the rendered
+`ORCA2_OMIP_L4_R93SLOW/BLD/ppsrc/nemo/stp2d.f90:206-219` citation exits 1 and
+reports `FAIL`, so the control fires.
+
+The one required wide battery completed in 2,357.90 s: **2,885 passed, 7
+skipped, 4 failed**.  All four failures are registered pre-existing reds, not
+round-190 regressions: the SI3 scalar-math provenance gate (`A MY_SRC is not
+verbatim`), the allow-dirty scope ratchet (13 inherited VORTEX drivers), the
+worktree-stamp ratchet (13 inherited report emitters), and the stale GYRE
+spread-floor record (`certified year harness moved`).  The durable transcript
+is `orca2_rounds/round190/fidelity_battery.log`.
+
+A separate `codex exec --sandbox read-only` review was attempted and returned
+`failed to initialize in-process app-server client: Read-only file system`.
+Verdict: **independent review unavailable in-sandbox**.  The transcript is
+`orca2_rounds/round190/independent_review.log`.
 
 No configuration choice was made. The floor, fields, cadence and statistics
 are exactly preregistered. No stabiliser was added. The final tree changes only
