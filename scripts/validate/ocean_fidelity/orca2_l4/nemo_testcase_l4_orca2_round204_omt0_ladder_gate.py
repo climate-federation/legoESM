@@ -115,7 +115,14 @@ def _checkpoint(kt: int, boundary: str, actual, expected) -> dict[str, object]:
     return {"kt": kt, "checkpoint": boundary, **result}
 
 
-def _run_ladder(card, record_root: Path, state, label: str) -> dict[str, object]:
+def _run_ladder(
+    card,
+    record_root: Path,
+    state,
+    label: str,
+    *,
+    atomic_fold_unit: bool = False,
+) -> dict[str, object]:
     import jax
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         LatLonCGridOceanModel,
@@ -123,13 +130,28 @@ def _run_ladder(card, record_root: Path, state, label: str) -> dict[str, object]
     )
 
     freshwater, surface = rung0_ladder._zero_forcing((148, 180))
+    reference_depth = (
+        rung0.ladder.build_reference_depth_override(card)
+        if atomic_fold_unit else None
+    )
+
+    def hooks(stage: int | None = None):
+        return _NEMOWSRK3TestHooks(
+            expose_momentum_stage=stage,
+            expose_tracer_stage=stage,
+            barotropic_external_mode_association=atomic_fold_unit,
+            barotropic_reference_face_depth_override=reference_depth,
+            barotropic_unmasked_v_transport=atomic_fold_unit,
+            barotropic_materialize_v_transport=atomic_fold_unit,
+        )
+
     stage_models = tuple(LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
-        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
-            expose_momentum_stage=stage, expose_tracer_stage=stage),
+        _nemo_ws_test_hooks=hooks(stage),
     ) for stage in (1, 2))
     final_model = LatLonCGridOceanModel(
-        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+        _nemo_ws_test_hooks=hooks())
 
     checkpoints: list[dict[str, object]] = []
     first_non_bit = None
@@ -166,6 +188,12 @@ def _run_ladder(card, record_root: Path, state, label: str) -> dict[str, object]
     require(len(rows) == 200, f"{label}: incomplete row ladder")
     return {
         "label": label,
+        "private_arm": {
+            "external_mode_association": atomic_fold_unit,
+            "raw_reference_depth": atomic_fold_unit,
+            "unmasked_v_transport": atomic_fold_unit,
+            "materialize_v_transport": atomic_fold_unit,
+        },
         "checkpoint_count": len(checkpoints),
         "row_count": len(rows),
         "first_non_bit_checkpoint": first_non_bit,
@@ -174,7 +202,8 @@ def _run_ladder(card, record_root: Path, state, label: str) -> dict[str, object]
 
 
 def run(deck_root: Path, canonical: Path, calibration: Path, twin_a: Path,
-        twin_b: Path, month: Path, *, plant: str = "none") -> dict[str, object]:
+        twin_b: Path, month: Path, *, plant: str = "none",
+        atomic_fold_unit: bool = False) -> dict[str, object]:
     import jax
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
 
@@ -204,8 +233,11 @@ def run(deck_root: Path, canonical: Path, calibration: Path, twin_a: Path,
     given_state = rung0.bridge_entry(card, rung0.assemble_frame(twin_a, 1, 0))
 
     independent = _run_ladder(
-        card, twin_a, independent_state, "independent")
-    given = _run_ladder(card, twin_a, given_state, "given_nemo_entry")
+        card, twin_a, independent_state, "independent",
+        atomic_fold_unit=atomic_fold_unit)
+    given = _run_ladder(
+        card, twin_a, given_state, "given_nemo_entry",
+        atomic_fold_unit=atomic_fold_unit)
     return {
         "status": "PASS_R204_OMT0_CARD_AND_LADDERS",
         "execution": "production-jit-cpu-fp64-x64-libm",
@@ -227,6 +259,7 @@ def main() -> int:
     parser.add_argument("--twin-a", type=Path, required=True)
     parser.add_argument("--twin-b", type=Path, required=True)
     parser.add_argument("--month", type=Path, required=True)
+    parser.add_argument("--atomic-fold-unit", action="store_true")
     parser.add_argument("--plant", choices=PLANTS, default="none")
     parser.add_argument("--json-out", type=Path)
     args = parser.parse_args()
@@ -234,6 +267,7 @@ def main() -> int:
         result = run(
             args.deck_root, args.candidate, args.calibration, args.twin_a,
             args.twin_b, args.month, plant=args.plant,
+            atomic_fold_unit=args.atomic_fold_unit,
         )
         require(args.plant == "none", f"{args.plant} plant stayed green")
     except (GateError, rung0.GateError, record_gate.GateError,
