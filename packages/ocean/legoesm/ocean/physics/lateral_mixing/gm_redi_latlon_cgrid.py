@@ -4622,8 +4622,13 @@ def gm_redi_tracer_tendency_latlon(
                 _ht0 = nemo_source_round(
                     _ht0 + nemo_source_round(
                         _e3t0[..., _jk] * _active_3d[..., _jk]))
+            # Preserve the pre-split operand precedence: cards that do not
+            # name a distinct divisor SSH inherit the independently routed
+            # Kmm face SSH, and only then the dispatcher's primary SSH.
             _divisor_eta = (
-                eta if redi_divisor_eta is None else redi_divisor_eta)
+                redi_divisor_eta
+                if redi_divisor_eta is not None
+                else redi_flux_eta if redi_flux_eta is not None else eta)
             _divisor_e3t = nemo_qco_live_t_thickness(
                 _divisor_eta, _ht0, z_coord, T.dtype, e3t_0=_e3t0)
         _closed_bottom_wmask = (

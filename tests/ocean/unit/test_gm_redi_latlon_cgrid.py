@@ -175,11 +175,18 @@ def test_live_redi_divisor_is_independent_of_face_thickness_selector(
         redi_divisor_eta=eta)
     reference = seen[0]
     seen.clear()
+    routed_eta = eta + 0.03125
     gm_redi_tracer_tendency_latlon(
         T, S, eta, H_bathy, grid, z_coord, live_cfg,
         mask=mask, u_mask=u_mask, v_mask=v_mask,
-        redi_divisor_eta=eta)
+        redi_flux_eta=routed_eta)
     live = seen[0]
+    seen.clear()
+    gm_redi_tracer_tendency_latlon(
+        T, S, eta, H_bathy, grid, z_coord, live_cfg,
+        mask=mask, u_mask=u_mask, v_mask=v_mask,
+        redi_flux_eta=eta, redi_divisor_eta=routed_eta)
+    explicit = seen[0]
 
     # Only the divisor changes: both arms deliberately keep the pre-round-237
     # T-point/Jacobian face construction.
@@ -187,6 +194,7 @@ def test_live_redi_divisor_is_independent_of_face_thickness_selector(
     assert live[0] is None and live[1] is None
     assert reference[2] is None
     assert live[2] is not None
+    np.testing.assert_array_equal(live[2], explicit[2])
     with pytest.raises(ValueError, match="redi_divisor_thickness_evaluation"):
         gm_redi_tracer_tendency_latlon(
             T, S, eta, H_bathy, grid, z_coord,
