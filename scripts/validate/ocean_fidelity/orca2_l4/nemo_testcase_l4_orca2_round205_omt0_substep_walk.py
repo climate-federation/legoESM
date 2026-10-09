@@ -81,13 +81,7 @@ def _score(candidate, oracle, mask) -> dict[str, object]:
     # Fold and cyclic halo points are inputs to neighbouring active-cell
     # stencils.  They therefore belong to the statement domain even when the
     # prognostic active mask excludes them (round 178's established rule).
-    row = r178._score(candidate, oracle, mask, complete_domain=True)
-    row["at_floor"] = bool(row["absolute_max"] <= FLOOR)
-    row["verdict"] = (
-        "AT_BAR_BIT_EXACT" if row["bit_exact"] else
-        ("AT_BAR_NOT_EXACT" if row["at_floor"] else "DEBT")
-    )
-    return row
+    return r178._score(candidate, oracle, mask, complete_domain=True)
 
 
 def _first(rows: list[dict[str, object]], key: str) -> dict[str, object] | None:
