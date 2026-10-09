@@ -157,7 +157,6 @@ def run(root: Path, *, arm: str, kt_max: int = 10, plant: str | None = None,
     import jax
     import jax.numpy as jnp
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
-    from legoesm.grids.halo_latlon import meridional_periodicity
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         LatLonCGridOceanModel, _NEMOWSRK3TestHooks)
     from legoesm.ocean.fidelity.nemo_testcase_recipe import (
@@ -232,201 +231,200 @@ def run(root: Path, *, arm: str, kt_max: int = 10, plant: str | None = None,
                str(k): v for k, v in seam.items()},
            "per_kt": []}
 
-    with meridional_periodicity(card.j_periodic):
-        if arm in ("independent", "given_entry", "record100"):
-            m = model()
-            out["label"] = {
-                "independent": "INDEPENDENT",
-                "record100": "INDEPENDENT (the f_ record, kt = 1..100)",
-                "given_entry": "GIVEN-NEMO-ENTRY (whole step)"}[arm]
-            state = s0
-            for kt in kts:
-                g = records.get(kt) or read_step(cr, root, kt)
-                ref = after_step_reference(cr, root, kt, g)
-                state = m.step(state if arm != "given_entry" else seed(g),
-                               dt=card.dt_s)
-                cand = state_fields(state)
-                rows = []
-                for f in ("ssh", "uu_b", "vv_b", "u", "v", "T", "S"):
-                    if f not in ref:
-                        continue
-                    c = cand[f].copy()
-                    if plant == "score" and kt == 1 and f == "ssh":
-                        c = bump(c)
-                    rows.append(row(f"{arm}.kt{kt}.{f}", ref[f], c))
-                out["per_kt"].append({"kt": kt, "rows": rows,
-                                      "first_unequal": first_unequal(rows)})
-            out["first_kt_over_bar"] = {
-                f: next((p["kt"] for p in out["per_kt"] for r in p["rows"]
-                         if r["name"].endswith("." + f)
-                         and r["status"] != "AT-BAR"), None)
-                for f in ("ssh", "uu_b", "vv_b", "u", "v")}
-        elif arm == "rhs":
-            out["label"] = "GIVEN-NEMO-ENTRY (stp_2D right-hand side)"
-            for kt in kts:
-                g = records[kt]
-                seen = {}
-                for face in ("u", "v"):
-                    h = _NEMOWSRK3TestHooks(
-                        slow_forcing_rhs_observer=(
-                            lambda v, face=face: seen.__setitem__(
-                                face, np.asarray(v))),
-                        slow_forcing_rhs_observer_face=face)
-                    jax.block_until_ready(model(h).step(seed(g), dt=card.dt_s))
-                    jax.effects_barrier()   # the observer is an async callback
-                rows = [row(f"rhs.kt{kt}.u", g["b_uu_rhs_k1"],
-                            seen["u"][:, 1:, 0]),
-                        row(f"rhs.kt{kt}.v", g["b_vv_rhs_k1"],
-                            seen["v"][1:, :, 0])]
-                out["per_kt"].append({"kt": kt, "rows": rows,
-                                      "first_unequal": first_unequal(rows)})
-        elif arm == "b6_scaling":
-            out["label"] = ("GIVEN-NEMO-ENTRY (stp_2D right-hand side, entry "
-                            "velocity scaled by lambda; T, S, ssh unscaled)")
-            require(eos_depth == "geometric",
-                    "b6_scaling needs --eos-depth geometric: the pressure "
-                    "term must already agree with the replay")
-            import nemo_testcase_l1_tsunami_hpg_replay as rep
-            c = rep.parse_constants(root.parent / "ref" / "ocean.output")
-            mesh = rep.mesh_from_mask(root / "mesh_mask.nc")
+    if arm in ("independent", "given_entry", "record100"):
+        m = model()
+        out["label"] = {
+            "independent": "INDEPENDENT",
+            "record100": "INDEPENDENT (the f_ record, kt = 1..100)",
+            "given_entry": "GIVEN-NEMO-ENTRY (whole step)"}[arm]
+        state = s0
+        for kt in kts:
+            g = records.get(kt) or read_step(cr, root, kt)
+            ref = after_step_reference(cr, root, kt, g)
+            state = m.step(state if arm != "given_entry" else seed(g),
+                           dt=card.dt_s)
+            cand = state_fields(state)
+            rows = []
+            for f in ("ssh", "uu_b", "vv_b", "u", "v", "T", "S"):
+                if f not in ref:
+                    continue
+                c = cand[f].copy()
+                if plant == "score" and kt == 1 and f == "ssh":
+                    c = bump(c)
+                rows.append(row(f"{arm}.kt{kt}.{f}", ref[f], c))
+            out["per_kt"].append({"kt": kt, "rows": rows,
+                                  "first_unequal": first_unequal(rows)})
+        out["first_kt_over_bar"] = {
+            f: next((p["kt"] for p in out["per_kt"] for r in p["rows"]
+                     if r["name"].endswith("." + f)
+                     and r["status"] != "AT-BAR"), None)
+            for f in ("ssh", "uu_b", "vv_b", "u", "v")}
+    elif arm == "rhs":
+        out["label"] = "GIVEN-NEMO-ENTRY (stp_2D right-hand side)"
+        for kt in kts:
+            g = records[kt]
             seen = {}
-            h = _NEMOWSRK3TestHooks(
-                slow_forcing_rhs_observer=lambda v: seen.__setitem__(
-                    "u", np.asarray(v)),
-                slow_forcing_rhs_observer_face="u")
-            m = model(h)
-            for kt in B6_KTS:
-                g = records[kt]
-                hpg, _ = rep.replay_from_record(g, c, mesh)
-                vor = g["b_uu_rhs_k1"] - hpg
-                res = []
-                for lam in B6_LAMBDAS:
-                    seen.clear()
-                    jax.block_until_ready(m.step(seed(g, lam), dt=card.dt_s))
-                    jax.effects_barrier()   # the observer is an async callback
-                    require("u" in seen, "the right-hand-side observer never fired")
-                    pred = hpg + lam * vor
-                    res.append({"lambda": lam, "max_abs_card_minus_prediction":
-                                float(np.max(np.abs(seen["u"][:, 1:, 0] - pred)))})
-                e = {r["lambda"]: r["max_abs_card_minus_prediction"] for r in res}
-                out["per_kt"].append({
-                    "kt": kt, "rows": [], "lambdas": res,
-                    "ratio_E1_over_E0.5": e[1.0] / e[0.5] if e[0.5] else None,
-                    "ratio_E0.5_over_E0.25": e[0.5] / e[0.25] if e[0.25] else None,
-                    "reading": "ratio 4 = quadratic in velocity (momentum "
-                               "advection); ratio 2 = linear (Coriolis/vorticity)"})
-        elif arm == "spgts":
-            out["label"] = ("GIVEN-NEMO-ENTRY (dyn_spg_ts substeps; 'own' = "
-                            "the card's entry forcing, 'nemo' = NEMO's)")
-            for kt in kts:
-                g = records[kt]
-                meta, gr = walk.read_spgts(root, kt)
+            for face in ("u", "v"):
+                h = _NEMOWSRK3TestHooks(
+                    slow_forcing_rhs_observer=(
+                        lambda v, face=face: seen.__setitem__(
+                            face, np.asarray(v))),
+                    slow_forcing_rhs_observer_face=face)
+                jax.block_until_ready(model(h).step(seed(g), dt=card.dt_s))
+                jax.effects_barrier()   # the observer is an async callback
+            rows = [row(f"rhs.kt{kt}.u", g["b_uu_rhs_k1"],
+                        seen["u"][:, 1:, 0]),
+                    row(f"rhs.kt{kt}.v", g["b_vv_rhs_k1"],
+                        seen["v"][1:, :, 0])]
+            out["per_kt"].append({"kt": kt, "rows": rows,
+                                  "first_unequal": first_unequal(rows)})
+    elif arm == "b6_scaling":
+        out["label"] = ("GIVEN-NEMO-ENTRY (stp_2D right-hand side, entry "
+                        "velocity scaled by lambda; T, S, ssh unscaled)")
+        require(eos_depth == "geometric",
+                "b6_scaling needs --eos-depth geometric: the pressure "
+                "term must already agree with the replay")
+        import nemo_testcase_l1_tsunami_hpg_replay as rep
+        c = rep.parse_constants(root.parent / "ref" / "ocean.output")
+        mesh = rep.mesh_from_mask(root / "mesh_mask.nc")
+        seen = {}
+        h = _NEMOWSRK3TestHooks(
+            slow_forcing_rhs_observer=lambda v: seen.__setitem__(
+                "u", np.asarray(v)),
+            slow_forcing_rhs_observer_face="u")
+        m = model(h)
+        for kt in B6_KTS:
+            g = records[kt]
+            hpg, _ = rep.replay_from_record(g, c, mesh)
+            vor = g["b_uu_rhs_k1"] - hpg
+            res = []
+            for lam in B6_LAMBDAS:
+                seen.clear()
+                jax.block_until_ready(m.step(seed(g, lam), dt=card.dt_s))
+                jax.effects_barrier()   # the observer is an async callback
+                require("u" in seen, "the right-hand-side observer never fired")
+                pred = hpg + lam * vor
+                res.append({"lambda": lam, "max_abs_card_minus_prediction":
+                            float(np.max(np.abs(seen["u"][:, 1:, 0] - pred)))})
+            e = {r["lambda"]: r["max_abs_card_minus_prediction"] for r in res}
+            out["per_kt"].append({
+                "kt": kt, "rows": [], "lambdas": res,
+                "ratio_E1_over_E0.5": e[1.0] / e[0.5] if e[0.5] else None,
+                "ratio_E0.5_over_E0.25": e[0.5] / e[0.25] if e[0.25] else None,
+                "reading": "ratio 4 = quadratic in velocity (momentum "
+                           "advection); ratio 2 = linear (Coriolis/vorticity)"})
+    elif arm == "spgts":
+        out["label"] = ("GIVEN-NEMO-ENTRY (dyn_spg_ts substeps; 'own' = "
+                        "the card's entry forcing, 'nemo' = NEMO's)")
+        for kt in kts:
+            g = records[kt]
+            meta, gr = walk.read_spgts(root, kt)
+            for jn in range(1, meta["icycle"] + 1):
+                pre = f"j{jn:03d}_"
+                prev = f"j{jn - 1:03d}_"
+                gr[pre + "sshn_e_eff"] = (gr["i000_sshn_e"] if jn == 1
+                                          else gr[prev + "ssha_e"])
+                gr[pre + "un_e_eff"] = (gr["i000_un_e"] if jn == 1
+                                        else gr[prev + "ua_new"])
+                gr[pre + "vn_e_eff"] = (gr["i000_vn_e"] if jn == 1
+                                        else gr[prev + "va_new"])
+            entry = {"kt": kt, "icycle": meta["icycle"]}
+            for label in ("own", "nemo"):
+                override = None
+                if label == "nemo":
+                    zu = gr["i000_zu_frc"]
+                    if plant == "forcing":
+                        zu = bump(zu, 1.0e-6)
+                    override = (jnp.asarray(pad_u(zu)),
+                                jnp.asarray(pad_v(gr["i000_zv_frc"])))
+                h = _NEMOWSRK3TestHooks(
+                    expose_barotropic_substeps=True,
+                    barotropic_slow_forcing_override=override)
+                res = jax.device_get(model(h).step(seed(g), dt=card.dt_s))
+                tr = {k: np.asarray(v) for k, v in res.substeps.items()}
+                require(int(next(iter(tr.values())).shape[0])
+                        == meta["icycle"],
+                        f"kt {kt}: card ran a different substep count")
+                rows, first = [], None
+                for name, grp, key, stg in walk.ENTRY_ORDER:
+                    rows.append(row(f"spgts.{label}.kt{kt}.{name}",
+                                    gr["i000_" + grp],
+                                    walk._lego_plane(tr[key][0], stg)))
                 for jn in range(1, meta["icycle"] + 1):
-                    pre = f"j{jn:03d}_"
-                    prev = f"j{jn - 1:03d}_"
-                    gr[pre + "sshn_e_eff"] = (gr["i000_sshn_e"] if jn == 1
-                                              else gr[prev + "ssha_e"])
-                    gr[pre + "un_e_eff"] = (gr["i000_un_e"] if jn == 1
-                                            else gr[prev + "ua_new"])
-                    gr[pre + "vn_e_eff"] = (gr["i000_vn_e"] if jn == 1
-                                            else gr[prev + "va_new"])
-                entry = {"kt": kt, "icycle": meta["icycle"]}
-                for label in ("own", "nemo"):
-                    override = None
-                    if label == "nemo":
-                        zu = gr["i000_zu_frc"]
-                        if plant == "forcing":
-                            zu = bump(zu, 1.0e-6)
-                        override = (jnp.asarray(pad_u(zu)),
-                                    jnp.asarray(pad_v(gr["i000_zv_frc"])))
-                    h = _NEMOWSRK3TestHooks(
-                        expose_barotropic_substeps=True,
-                        barotropic_slow_forcing_override=override)
-                    res = jax.device_get(model(h).step(seed(g), dt=card.dt_s))
-                    tr = {k: np.asarray(v) for k, v in res.substeps.items()}
-                    require(int(next(iter(tr.values())).shape[0])
-                            == meta["icycle"],
-                            f"kt {kt}: card ran a different substep count")
-                    rows, first = [], None
-                    for name, grp, key, stg in walk.ENTRY_ORDER:
-                        rows.append(row(f"spgts.{label}.kt{kt}.{name}",
-                                        gr["i000_" + grp],
-                                        walk._lego_plane(tr[key][0], stg)))
-                    for jn in range(1, meta["icycle"] + 1):
-                        for name, grp, key, stg in walk.SUBSTEP_ORDER:
-                            r = row(f"spgts.{label}.kt{kt}.j{jn:03d}.{name}",
-                                    gr[f"j{jn:03d}_" + grp],
-                                    walk._lego_plane(tr[key][jn - 1], stg))
-                            rows.append(r)
-                    unequal = [r for r in rows if not r["bit_identical"]]
-                    entry[label] = {
-                        "first_unequal": first_unequal(rows),
-                        "n_unequal_boundaries": len(unequal),
-                        "n_boundaries": len(rows),
-                        "n_over_bar": sum(r["status"] == "DEBT" for r in rows),
-                        "max_normalized_over_all_boundaries": max(
-                            r["normalized_max_abs"] for r in rows),
-                        "rows_unequal": [
-                            {k: r[k] for k in ("name", "n_unequal", "max_abs",
-                                               "normalized_max_abs", "status")}
-                            for r in unequal[:12]],
-                    }
-                out["per_kt"].append(entry)
-        elif arm == "handoff":
-            out["label"] = ("GIVEN-NEMO-ENTRY (external handoff read at "
-                            "stage 1: uu_b/vv_b(Kaa) = the N+1 values, "
-                            "ssh(Kaa) = 2/3 ssh(Kbb) + 1/3 N+1)")
-            for kt in kts:
-                g = records[kt]
-                h = _NEMOWSRK3TestHooks(expose_momentum_stage=1,
-                                        expose_tracer_stage=1)
+                    for name, grp, key, stg in walk.SUBSTEP_ORDER:
+                        r = row(f"spgts.{label}.kt{kt}.j{jn:03d}.{name}",
+                                gr[f"j{jn:03d}_" + grp],
+                                walk._lego_plane(tr[key][jn - 1], stg))
+                        rows.append(r)
+                unequal = [r for r in rows if not r["bit_identical"]]
+                entry[label] = {
+                    "first_unequal": first_unequal(rows),
+                    "n_unequal_boundaries": len(unequal),
+                    "n_boundaries": len(rows),
+                    "n_over_bar": sum(r["status"] == "DEBT" for r in rows),
+                    "max_normalized_over_all_boundaries": max(
+                        r["normalized_max_abs"] for r in rows),
+                    "rows_unequal": [
+                        {k: r[k] for k in ("name", "n_unequal", "max_abs",
+                                           "normalized_max_abs", "status")}
+                        for r in unequal[:12]],
+                }
+            out["per_kt"].append(entry)
+    elif arm == "handoff":
+        out["label"] = ("GIVEN-NEMO-ENTRY (external handoff read at "
+                        "stage 1: uu_b/vv_b(Kaa) = the N+1 values, "
+                        "ssh(Kaa) = 2/3 ssh(Kbb) + 1/3 N+1)")
+        for kt in kts:
+            g = records[kt]
+            h = _NEMOWSRK3TestHooks(expose_momentum_stage=1,
+                                    expose_tracer_stage=1)
+            cand = state_fields(model(h).step(seed(g), dt=card.dt_s))
+            rows = [row(f"handoff.kt{kt}.{f}", g[nm], cand[f])
+                    for f, nm in (("uu_b", "1_uu_b_aa"),
+                                  ("vv_b", "1_vv_b_aa"),
+                                  ("ssh", "1_ssh_aa"))]
+            out["per_kt"].append({"kt": kt, "rows": rows,
+                                  "first_unequal": first_unequal(rows)})
+    else:   # stages
+        out["label"] = ("GIVEN-NEMO-ENTRY (stage-local: NEMO's external "
+                        "handoff and NEMO's stage entry)")
+        for kt in kts:
+            g = records[kt]
+            ssh_ext = bump(g["b_ssh_aa"]) if plant == "external" \
+                else g["b_ssh_aa"]
+            ext = (jnp.asarray(ssh_ext), jnp.asarray(pad_u(g["b_uu_b_aa"])),
+                   jnp.asarray(pad_v(g["b_vv_b_aa"])),
+                   jnp.asarray(pad_u(g["b_un_adv"])),
+                   jnp.asarray(pad_v(g["b_vn_adv"])))
+            stages = []
+            for stage in (1, 2, 3):
+                ent = None
+                if stage > 1:
+                    p = f"{stage - 1}_"
+                    u_in = g[p + "uu_k1_aa"]
+                    if plant == "stage_entry" and stage == 2:
+                        u_in = bump(u_in)
+                    ent = (stage, jnp.asarray(pad_u(u_in)[..., None]),
+                           jnp.asarray(pad_v(g[p + "vv_k1_aa"])[..., None]),
+                           jnp.asarray(g[p + "tn_k1_aa"][..., None]),
+                           jnp.asarray(g[p + "sn_k1_aa"][..., None]),
+                           jnp.asarray(g[p + "ssh_aa"]))
+                last = stage == 3
+                h = _NEMOWSRK3TestHooks(
+                    stage_barotropic_output_override=ext,
+                    stage_entry_override=ent,
+                    expose_momentum_stage=0 if last else stage,
+                    expose_tracer_stage=0 if last else stage)
                 cand = state_fields(model(h).step(seed(g), dt=card.dt_s))
-                rows = [row(f"handoff.kt{kt}.{f}", g[nm], cand[f])
-                        for f, nm in (("uu_b", "1_uu_b_aa"),
-                                      ("vv_b", "1_vv_b_aa"),
-                                      ("ssh", "1_ssh_aa"))]
-                out["per_kt"].append({"kt": kt, "rows": rows,
-                                      "first_unequal": first_unequal(rows)})
-        else:   # stages
-            out["label"] = ("GIVEN-NEMO-ENTRY (stage-local: NEMO's external "
-                            "handoff and NEMO's stage entry)")
-            for kt in kts:
-                g = records[kt]
-                ssh_ext = bump(g["b_ssh_aa"]) if plant == "external" \
-                    else g["b_ssh_aa"]
-                ext = (jnp.asarray(ssh_ext), jnp.asarray(pad_u(g["b_uu_b_aa"])),
-                       jnp.asarray(pad_v(g["b_vv_b_aa"])),
-                       jnp.asarray(pad_u(g["b_un_adv"])),
-                       jnp.asarray(pad_v(g["b_vn_adv"])))
-                stages = []
-                for stage in (1, 2, 3):
-                    ent = None
-                    if stage > 1:
-                        p = f"{stage - 1}_"
-                        u_in = g[p + "uu_k1_aa"]
-                        if plant == "stage_entry" and stage == 2:
-                            u_in = bump(u_in)
-                        ent = (stage, jnp.asarray(pad_u(u_in)[..., None]),
-                               jnp.asarray(pad_v(g[p + "vv_k1_aa"])[..., None]),
-                               jnp.asarray(g[p + "tn_k1_aa"][..., None]),
-                               jnp.asarray(g[p + "sn_k1_aa"][..., None]),
-                               jnp.asarray(g[p + "ssh_aa"]))
-                    last = stage == 3
-                    h = _NEMOWSRK3TestHooks(
-                        stage_barotropic_output_override=ext,
-                        stage_entry_override=ent,
-                        expose_momentum_stage=0 if last else stage,
-                        expose_tracer_stage=0 if last else stage)
-                    cand = state_fields(model(h).step(seed(g), dt=card.dt_s))
-                    p = f"{stage}_"
-                    rows = [row(f"stage{stage}.kt{kt}.{f}", g[p + nm], cand[f])
-                            for f, nm in (("ssh", "ssh_aa"), ("u", "uu_k1_aa"),
-                                          ("v", "vv_k1_aa"), ("T", "tn_k1_aa"),
-                                          ("S", "sn_k1_aa"))]
-                    stages.append({"stage": stage, "rows": rows,
-                                   "first_unequal": first_unequal(rows),
-                                   "passthrough_not_scored": ["uu_b", "vv_b"]})
-                out["per_kt"].append({"kt": kt, "stages": stages})
+                p = f"{stage}_"
+                rows = [row(f"stage{stage}.kt{kt}.{f}", g[p + nm], cand[f])
+                        for f, nm in (("ssh", "ssh_aa"), ("u", "uu_k1_aa"),
+                                      ("v", "vv_k1_aa"), ("T", "tn_k1_aa"),
+                                      ("S", "sn_k1_aa"))]
+                stages.append({"stage": stage, "rows": rows,
+                               "first_unequal": first_unequal(rows),
+                               "passthrough_not_scored": ["uu_b", "vv_b"]})
+            out["per_kt"].append({"kt": kt, "stages": stages})
     return out
 
 
