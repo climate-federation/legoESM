@@ -72,6 +72,7 @@ CMIP6_FORCING_FLAGS=(
   --ozone-source standard --ozone-forcing external --ozone-file "${OZONE}"
   --solar-source spectral_file --solar-file "${SOLAR}"
   --solar-tsi-var TSI --solar-spectral-var SSI_frac --solar-spectral-band-order rrtmg_sw
+  --orbital-insolation --diurnal-cycle   # as every AMIP deck (gridaudit 2026-10-09)
 )
 # REAL GHG / aerosol / volcanic (2026-10-08), same set as Levante's ICON pool
 # files.  The synthetic aerosol_amip_clim.nc (four hand-picked constants, no

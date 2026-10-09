@@ -582,6 +582,10 @@ def build_parser():
     parser.add_argument("--volcanic-aerosol-scale", type=float, default=1.0)
     parser.add_argument("--volcanic-aerosol-lw", action="store_true",
                         default=False)
+    # Diurnal (instantaneous-zenith) radiation, as run_amip.py; every AMIP deck
+    # sets diurnal_cycle: true (gridaudit 2026-10-09).
+    parser.add_argument("--diurnal-cycle", action=argparse.BooleanOptionalAction,
+                        default=False)
     parser.add_argument(
         "--orbital-insolation", action="store_true", default=False,
         dest="orbital_insolation",
@@ -1409,6 +1413,7 @@ def main():
         rad_update_steps=args.rad_update_steps,
         unfused_radiation=args.unfused_radiation,
         orbital_insolation=args.orbital_insolation,
+        diurnal_cycle=args.diurnal_cycle,
         rrtmgp_gpoint_batch_size=args.rrtmgp_gpoint_batch_size,
         rrtmgp_gpoint_checkpoint=args.rrtmgp_gpoint_checkpoint,
         rrtmgp_column_chunk_size=args.radiation_column_chunk,
