@@ -157,11 +157,20 @@ stage 3).
 ## Validation and review
 
 - Round-205 measurement: `PASS_R205_OMT0_SUBSTEP_WALK` on CPU fp64/libm.
-- Focused test: 7 passed.
+- Focused gate plus citation-map tests: 24 passed.
 - Plants: all five fire, with their exact refusal strings retained in
   `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round205/plants.log`.
 - The measurement is repository-read-only with respect to model code; the
   only committed implementation is the fail-closed gate and its tests.
+- The single `tests/ocean/fidelity -n 12` battery reached 99% and then made no
+  output progress for more than six minutes, so it was interrupted once; no
+  second full battery was launched. Before interruption it recorded 2,947
+  passes, seven skips, and four failures. All four reproduce in isolation and
+  are pre-existing registry/provenance reds: the GYRE round-129 certified-year
+  harness stamp moved; 13 historical drivers use an unscoped allow-dirty
+  escape; 13 historical report emitters lack a worktree stamp; and the SI3
+  scalar-math `MY_SRC` provenance is not verbatim. None names the round-205
+  gate, receipt, or citation-map additions.
 - Independent review unavailable in-sandbox. `codex exec --sandbox
   read-only` exited 1 before reading the diff with `failed to initialize
   in-process app-server client: Read-only file system (os error 30)`; this is
