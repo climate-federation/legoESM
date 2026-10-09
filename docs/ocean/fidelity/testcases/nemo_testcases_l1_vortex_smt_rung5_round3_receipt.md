@@ -240,7 +240,10 @@ case, and the 100-day score also reports S.
 - Focused existing suites on the edited harnesses: 25 passed (SMT-5 damping
   10, round-239 source order, round-240 process ranking, round-241/245
   100-day).
-- Citation gate (from heading "## Round 3 —"): see the status line below.
+- Citation gate (from heading "## Round 3 —"): PASS, 8 citations, 0 unmapped,
+  0 failures, 0 map entries failing audit; planting a 2-line shift on the
+  `tradmp` damping-statement citation makes it FAIL (exit 1, unmapped). The
+  default cumulative run is PASS (274 citations).
 
 UNVERIFIED: the NEMO-side damping increment is inferred from two NEMO runs'
 rounded entries (no per-term record); NEMO's `zts_dta` is not observed; the
