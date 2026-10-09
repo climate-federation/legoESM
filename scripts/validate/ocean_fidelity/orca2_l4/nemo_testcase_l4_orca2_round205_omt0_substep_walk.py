@@ -27,6 +27,9 @@ from scripts.validate.ocean_fidelity.orca2_l4 import (
     nemo_testcase_l4_orca2_round15_barotropic_solver_gate as r15,
 )
 from scripts.validate.ocean_fidelity.orca2_l4 import (
+    nemo_testcase_l4_orca2_round1_ladder_gate as legacy_ladder,
+)
+from scripts.validate.ocean_fidelity.orca2_l4 import (
     nemo_testcase_l4_orca2_round172_passive_rhs_replay as r172,
 )
 from scripts.validate.ocean_fidelity.orca2_l4 import (
@@ -378,7 +381,7 @@ def measure(deck_root: Path, twin_a: Path, twin_b: Path,
 
     def solve(trace: bool, association: bool = False, slow_v_override=None,
               unmasked_v_transport: bool = False,
-              reference_face_depth: bool = False,
+              reference_face_depth=None,
               materialize_v_transport: bool = False):
         selected_v = f_v if slow_v_override is None else slow_v_override
         return jax.device_get(jax.jit(lambda seed, f_eta, f_u, f_v: (
@@ -451,9 +454,10 @@ def measure(deck_root: Path, twin_a: Path, twin_b: Path,
         unmasked_v_transport=True)
     complete_unit_rows, complete_unit_table = _summary_table(
         complete_unit[2], substeps, masks)
+    reference_depth = legacy_ladder.build_reference_depth_override(card)
     fold_unit = solve(
         True, association=True, slow_v_override=recorded_slow_v,
-        unmasked_v_transport=True, reference_face_depth=True,
+        unmasked_v_transport=True, reference_face_depth=reference_depth,
         materialize_v_transport=True)
     fold_unit_rows, fold_unit_table = _summary_table(
         fold_unit[2], substeps, masks)
