@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]
                        / "scripts/validate/ocean_fidelity/testcases"))
@@ -45,3 +46,12 @@ def test_equal_temperature_is_closed_like_fortran_sign_positive_zero():
 
 def test_land_columns_get_bottom_index_one():
     assert S.bottom_index(np.array([0, 3])).tolist() == [1, 3]
+
+
+@pytest.mark.skipif(not S.SMT5_100D.is_dir(), reason="SMT-5 NEMO record not present")
+def test_planted_record_opens_faces_that_the_real_record_does_not():
+    base = S.bbl_gate_history(plant=False)
+    planted = S.bbl_gate_history(plant=True)
+    assert base["max_open_u"] + base["max_open_v"] == 0
+    assert planted["max_open_u"] + planted["max_open_v"] >= 1
+    assert base["n_restarts"] == 100 and base["sloped_u_faces"] == 24

@@ -12,7 +12,8 @@ Two numbers the SMT-6 deck proposal rests on, both read from files NEMO wrote:
                 mesh_mask: min/max/mean/median and the area-weighted mean, to
                 set against rn_geoflx_cst = 86.4e-3.
 
-``--plant`` makes the shelf-side bottom T of one sloped face colder than the
+Exit 0 only if the unplanted record has no open face (the receipt's claim);
+3 if any opens.  ``--plant`` makes the shelf-side bottom T of one sloped face colder than the
 deep side in the FIRST restart; the open-face count must become nonzero and the
 run exits nonzero.
 """
@@ -69,6 +70,9 @@ def bbl_gate_history(plant: bool = False) -> dict:
     files = sorted(glob.glob(str(SMT5_100D / "*_restart.nc")))
     if not files:
         raise SystemExit("no restart files: refuse to report zero open faces")
+    steps = [int(re.search(r"_(\d{8})_restart", p).group(1)) for p in files]
+    if steps != list(range(30, 3001, 30)):
+        raise SystemExit(f"record is not the 100 restarts at 30..3000: {steps[:3]}...")
     rows = []
     for n, p in enumerate(files):
         step = int(re.search(r"_(\d{8})_restart", p).group(1))
@@ -119,6 +123,10 @@ def main(argv=None) -> int:
     ap.add_argument("--plant", action="store_true")
     a = ap.parse_args(argv)
     rep = {"bbl": bbl_gate_history(plant=a.plant), "geothermal": geothermal_stats()}
+    if a.plant:
+        base = bbl_gate_history(plant=False)
+        if base["max_open_u"] + base["max_open_v"] > 0:
+            raise SystemExit("unplanted record already has open faces: plant is not a control")
     txt = json.dumps(rep, indent=2, sort_keys=True) + "\n"
     if a.output:
         a.output.write_text(txt)
@@ -126,7 +134,7 @@ def main(argv=None) -> int:
     opened = rep["bbl"]["max_open_u"] + rep["bbl"]["max_open_v"]
     if a.plant:
         return 1 if opened > 0 else 2
-    return 0
+    return 3 if opened > 0 else 0
 
 
 if __name__ == "__main__":

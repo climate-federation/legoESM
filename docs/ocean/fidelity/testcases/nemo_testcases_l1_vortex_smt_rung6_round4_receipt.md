@@ -209,8 +209,9 @@ and `bbl_aht_m2_s=1000` on the seamount card; (4) an acquisition `run.sh`
 
 ## Review and gates
 
-- Citation gate (from heading "## Round 4 —"): see the commit message and
-  `round4/citation_gate.json`.
+- Citation gate (from heading "## Round 4 —"): PASS, 54 citations, 0 unmapped,
+  0 failures; a planted shift of the gate-sign citation (`trabbl.f90:430`)
+  exits 1. `round4/citation_gate.json`.
 - New tests: `tests/ocean/fidelity/test_nemo_testcase_l1_vortex_smtrungs_round4_smt6_survey.py`,
   5 passed (run with the repo `packages/*` and `src` on `PYTHONPATH`; the venv's
   default `legoesm` resolves to a different checkout and fails collection).
@@ -219,7 +220,13 @@ and `bbl_aht_m2_s=1000` on the seamount card; (4) an acquisition `run.sh`
   this environment with a card-build `ValueError` (transcribed e3t vs
   h_partial); no code was changed this round, so this is not caused by it
   (UNVERIFIED which environment difference triggers it).
-- Review: pending (single review (codex) of the diff; result in the commit).
+- Review: single review (codex): 3 findings, all on the probe, all CONFIRMED
+  and fixed: the unplanted run exited 0 even with open faces (now exits 3);
+  the plant control did not check that the unplanted record is closed (now
+  refuses); the 100-restart / 30-step record set was assumed (now enforced);
+  a full-path planted test was added. Codex contradicted no NEMO or legoESM
+  claim in the receipt (hence not an independent confirmation of them: the
+  second reviewer, GLM, was not run this round).
 
 UNVERIFIED: legoESM-side placement/time-level rows are read from source, not
 replayed; the stage-3 thickness equality; that no transient gate opening exists
