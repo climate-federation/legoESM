@@ -35,7 +35,7 @@ These helpers are pure and pytree-friendly: they accept and return
 from __future__ import annotations
 
 import os
-from typing import Callable, Optional, Tuple
+from typing import Callable, NamedTuple, Optional, Tuple
 
 import jax.numpy as jnp
 
@@ -1203,3 +1203,57 @@ def masked_background_vmix_coefficient(
     active_half = k_half[None, :] < bottom_level[:, None].astype(jnp.int32)
     coeff = jnp.where(active_half, background, 0.0)
     return coeff, active_half
+
+
+class NEMOTracerDamping(NamedTuple):
+    """NEMO ``tra_dmp`` inputs for ``nn_zdmp = 0`` (whole-column damping).
+
+    ``resto`` [s-1] and the target records are on the model's ``(j, i, k)``
+    tracer layout; ``target_T``/``target_S`` are ``(n_records, j, i, k)``.
+    ``record_centres_s``/``record_index`` come from
+    :func:`legoesm.ocean.forcing.nemo_fld_read.nemo_clim_monthly_record_centres`.
+    ``isecsbc_at_t0_s`` is ``isecsbc`` at kt = nit000: the midpoint of the
+    first step in seconds since Jan 1st 00h of the nit000 year (daymod.f90:
+    136-140 sets ``nsec_year`` half a step before nit000, daymod.f90:240 adds
+    ``ndt`` each step; fldread.f90:205 adds nothing for ``kn_fsbc = 1``).  The
+    step's ``isecsbc`` is this plus the elapsed seconds at the step's start.
+    """
+
+    resto: object
+    target_T: object
+    target_S: object
+    record_centres_s: object
+    record_index: object
+    isecsbc_at_t0_s: float
+
+
+def nemo_tra_dmp_rates(damping: "NEMOTracerDamping", T_bb, S_bb, tmask,
+                       t_seconds):
+    """The two Krhs increments NEMO's ``tra_dmp`` adds, ``nn_zdmp = 0``.
+
+    tradmp.f90:181 ``dta_tsd(kt)`` -> dtatsd.f90:212 ``fld_read`` (time
+    interpolation, fldread.f90:244-246) -> :261 raw copy -> :308-309 times
+    ``tmask`` (z/zps branch) ; tradmp.f90:190-195::
+
+        pts(Krhs) = pts(Krhs) + resto * ( zts_dta - pts(Kbb) )
+
+    ``T_bb``/``S_bb`` are the step-entry tracers (Kbb).  Returns the two
+    increments; the caller adds each to its Krhs accumulator in place.
+    """
+    from legoesm.core.source_rounding import nemo_source_round as _sr
+    from legoesm.ocean.forcing.nemo_fld_read import nemo_fld_time_interpolate
+
+    if t_seconds is None:
+        raise ValueError(
+            "nemo_tracer_damping needs t_seconds (elapsed model seconds at the "
+            "start of the step): fld_read interpolates the target in time")
+    isecsbc = jnp.asarray(damping.isecsbc_at_t0_s, jnp.float64) + t_seconds
+    resto = _sr(jnp.asarray(damping.resto, jnp.float64))
+    mask = jnp.asarray(tmask, jnp.float64)
+    out = []
+    for records, tracer in ((damping.target_T, T_bb), (damping.target_S, S_bb)):
+        target = nemo_fld_time_interpolate(
+            records, damping.record_index, damping.record_centres_s, isecsbc)
+        target = _sr(target * mask)
+        out.append(_sr(resto * _sr(target - tracer)))
+    return out[0], out[1]

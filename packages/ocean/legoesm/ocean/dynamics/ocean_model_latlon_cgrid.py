@@ -99,6 +99,7 @@ from legoesm.ocean.dynamics.ocean_tendency_common import (
     ab2_blend,
     depth_average_to_faces,
     depth_mean,
+    nemo_tra_dmp_rates,
 )
 from legoesm.ocean.freshwater import (
     freshwater_eta_tendency,
@@ -1490,6 +1491,13 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # internal transport representation happens once at the construction
     # boundary.  Private diagnostic only.
     stage3_transport_override: object = None
+    # PLANT: move the card's tra_dmp increment from the stage-3 RHS to the
+    # stage-1 RHS.  A gate that binds on the stage-3 placement must fire.
+    tracer_damping_stage1_plant: bool = False
+    # WRITE-only: return ``(state_after, (dT_dmp, dS_dmp, rate3_T, rate3_S,
+    # consumed3_T, consumed3_S))`` -- the tra_dmp increments, the stage-3
+    # tracer RHS before them and the stage-3 RHS the tracer program consumed.
+    expose_stage3_tracer_damping: bool = False
     # WRITE-only source-order exposure for one WS-RK3 momentum stage.  Empty
     # leaves the returned state untouched; ``hpg``, ``vorticity``, or
     # ``advection`` writes that already-computed production component into the
@@ -3472,6 +3480,21 @@ class LatLonCGridOceanModel:
         config: LatLonCGridOceanConfig,
     ) -> LatLonCGridOceanConfig:
         """Resolve conditional defaults, then validate configuration ranges."""
+        _dmp = config.nemo_tracer_damping
+        if _dmp is not None:
+            from legoesm.ocean.dynamics.ocean_tendency_common import (
+                NEMOTracerDamping,
+            )
+            if not isinstance(_dmp, NEMOTracerDamping):
+                raise ValueError(
+                    "nemo_tracer_damping must be a NEMOTracerDamping or None")
+            if (config.tracer_time_integrator != "rk3_ws"
+                    or getattr(config, "momentum_time_integrator", "euler")
+                    != "rk3_ws"):
+                raise ValueError(
+                    "nemo_tracer_damping is transcribed only on the NEMO "
+                    "WS-RK3 stage-3 tracer RHS (momentum and tracer "
+                    "integrators 'rk3_ws')")
         nonnegative = {
             "A_h": config.lateral_viscosity.A_h,
             "B_h": config.lateral_viscosity.B_h,
@@ -5555,6 +5578,7 @@ class LatLonCGridOceanModel:
                    _nemo_stage1_zad_eta_after_override=None,
                    _return_barotropic_substeps: bool = False,
                    _return_live_stage_operands: bool = False,
+                   _return_stage3_tracer_damping: bool = False,
                    _return_tracer_process_trace: bool = False,
                    _return_ldf_diagnostic_trace: bool = False,
                    _ldf_state=None, _tke_n2_bundle_override=None,
@@ -6334,6 +6358,8 @@ class LatLonCGridOceanModel:
         _nemo_ws_exposed_stage_face_r3 = None
         _nemo_ws_exposed_stage1_wzv = None
         _nemo_ws_exposed_stage1_transport_operand = None
+        _nemo_ws_tracer_damping_rates = None
+        _nemo_ws_live_damping = None
         _nemo_ws_exposed_momentum_operator = None
         _nemo_ws_exposed_stage1_rhs = None
         _nemo_ws_exposed_stage1_raw = None
@@ -7737,6 +7763,20 @@ class LatLonCGridOceanModel:
                         _h_live_one_half),
                 ),
             )
+            if _cfg_b.nemo_tracer_damping is not None:
+                # tradmp.f90:190-195 on ts(Kbb), the step-entry tracers; the
+                # increment joins stage 3's Krhs below (stprk3_stg.f90:529).
+                _nemo_ws_tracer_damping_rates = nemo_tra_dmp_rates(
+                    _cfg_b.nemo_tracer_damping, state.T.data, state.S.data,
+                    _active_live, t_seconds)
+                if self._nemo_ws_test_hooks.tracer_damping_stage1_plant:
+                    _stage_source_rates = (
+                        (_stage_source_rates[0][0]
+                         + _nemo_ws_tracer_damping_rates[0],
+                         _stage_source_rates[0][1]
+                         + _nemo_ws_tracer_damping_rates[1]),
+                        *_stage_source_rates[1:],
+                    )
             if _return_tracer_process_trace:
                 # Round-124 WRITE-only process budget.  Materialize the two
                 # source components inside the full production step; the
@@ -9357,6 +9397,21 @@ class LatLonCGridOceanModel:
                             _stage_source_rates[2][1] + dS_gm * active_3d,
                         ),
                     )
+                if _nemo_ws_tracer_damping_rates is not None:
+                    # Stage 3 only: after tra_ldf (the Redi term above), before
+                    # tra_zdf (stprk3_stg.f90:526, :529, :538).
+                    _ws_rate3 = _ws_stage_source_rates[2]
+                    if self._nemo_ws_test_hooks.tracer_damping_stage1_plant:
+                        _ws_rate3_dmp = _ws_rate3
+                    else:
+                        _ws_rate3_dmp = (
+                            _ws_rate3[0] + _nemo_ws_tracer_damping_rates[0],
+                            _ws_rate3[1] + _nemo_ws_tracer_damping_rates[1])
+                    _ws_stage_source_rates = (
+                        *_ws_stage_source_rates[:2], _ws_rate3_dmp)
+                    _nemo_ws_live_damping = (
+                        *_nemo_ws_tracer_damping_rates, *_ws_rate3,
+                        *_ws_rate3_dmp)
                 _bbl_context = None
                 if ((_cfg_b.bbl_adv_option == 2
                      or _cfg_b.bbl_diffusive_option == 1)
@@ -10271,6 +10326,12 @@ class LatLonCGridOceanModel:
                 vertical_solve=_nemo_ws_vertical_solve_trace,
                 fct_activity=_nemo_ws_fct_activity, ldf_diagnostics=_nemo_ws_ldf_diagnostics,
             )
+        if _return_stage3_tracer_damping:
+            if _nemo_ws_live_damping is None:
+                raise ValueError(
+                    "expose_stage3_tracer_damping needs a card that selects "
+                    "nemo_tracer_damping on the rk3_ws tracer program")
+            return state_new, _nemo_ws_live_damping
         if _return_live_stage_operands:
             if (getattr(_cfg_b, "momentum_time_integrator", "euler")
                     != "rk3_ws"):
@@ -13254,6 +13315,12 @@ class LatLonCGridOceanModel:
                 _return_live_stage_operands=True,
                 _nemo_stage1_zad_eta_after_override=(
                     _nemo_stage1_zad_eta_after_override))
+        if self._nemo_ws_test_hooks.expose_stage3_tracer_damping:
+            return self._step_impl(
+                state, dt, freshwater=freshwater,
+                surface_forcing=surface_forcing, sponge=sponge,
+                grid=grid, vertex_mask=vertex_mask, t_seconds=t_seconds,
+                _return_stage3_tracer_damping=True)
         if self._nemo_ws_test_hooks.tracer_process_trace is not None:
             if _oi != "forward_euler":
                 raise ValueError(

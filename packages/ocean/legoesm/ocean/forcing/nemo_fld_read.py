@@ -185,8 +185,82 @@ def rotate_en_to_ij(u_east, v_north, cosine, sine):
     return ui, vj
 
 
+# --- fld_read time records: monthly climatology, 'yearly' file -------------
+_NSECD = 86400                                                  # daymod nsecd
+_NOLEAP_MONTH_DAYS = (31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31)  # daymod.f90:182
+
+
+def _fortran_half(value: int) -> int:
+    """Fortran ``INTEGER / 2``: truncation toward zero."""
+    return -((-value) // 2) if value < 0 else value // 2
+
+
+def nemo_clim_monthly_record_centres(n_years: int, *, nleapy: int = 0):
+    """Record centres of a 12-record climatological monthly file.
+
+    ``sn_* = '<file>', -1., '<var>', .true., .true., 'yearly'`` with no
+    ``+``/``-`` record shift.  Times are integer seconds since Jan 1st 00h of
+    the nit000 year, from the PREVIOUS year's records (``fld_init`` reads them
+    when the first step precedes the January centre, fldread.f90:281) through
+    year ``n_years - 1``.  Month boundaries are ``nmonth_beg``
+    (daymod.f90:203-209), the yearly-file slice is fldread.f90:916, and each
+    centre is NEMO's integer rounded average, fldread.f90:934-936.  Returns
+    ``(centres_s, record_index)``: int64 arrays, ``record_index`` zero-based
+    into the file's 12 records (a climatology reuses them every year).
+    """
+    if nleapy != 0:
+        raise ValueError(
+            f"nleapy={nleapy}: only the 365-day calendar (nn_leapy=0) is "
+            "transcribed")
+    if n_years < 1:
+        raise ValueError("n_years must be >= 1")
+    bounds = [-365 * _NSECD]
+    for _ in range(n_years + 1):
+        for days in _NOLEAP_MONTH_DAYS:
+            bounds.append(bounds[-1] + days * _NSECD)
+    centres = [
+        _fortran_half(b0) + _fortran_half(b1)
+        + max(int(math.fmod(b0, 2)), int(math.fmod(b1, 2)))
+        for b0, b1 in zip(bounds[:-1], bounds[1:])
+    ]
+    index = [k % 12 for k in range(len(centres))]
+    return np.asarray(centres, dtype=np.int64), np.asarray(index, dtype=np.int64)
+
+
+def nemo_fld_time_interpolate(records, record_index, centres_s, isecsbc):
+    """``fld_read``'s two-record time interpolation at model time ``isecsbc``.
+
+    fldread.f90:244-246::
+
+        ztinta = REAL(isecsbc - nrec(2,ibb),wp) / REAL(nrec(2,iaa) - nrec(2,ibb),wp)
+        ztintb = 1. - ztinta
+        fnow   = ztintb * fdta(:,:,:,ibb) + ztinta * fdta(:,:,:,iaa)
+
+    The after record is the first centre >= ``isecsbc`` (fld_update,
+    fldread.f90:309-361: no update while ``isecsbc <= nrec(2,iaa)``; an update
+    selects the first centre > ``isecsbc``) and the before record the one
+    preceding it.  ``isecsbc`` is integer seconds held in float64.  A time
+    outside ``centres_s`` returns NaN, never a clamped record.
+    """
+    centres = jnp.asarray(centres_s, dtype=jnp.float64)
+    t = jnp.asarray(isecsbc, dtype=jnp.float64)
+    ia = jnp.searchsorted(centres, t, side="left")
+    inside = (ia > 0) & (ia < centres.shape[0])
+    ia = jnp.clip(ia, 1, centres.shape[0] - 1)
+    ib = ia - 1
+    ztinta = (t - centres[ib]) / (centres[ia] - centres[ib])
+    ztinta = jnp.where(inside, ztinta, jnp.nan)
+    ztintb = 1.0 - ztinta
+    index = jnp.asarray(record_index)
+    rec = jnp.asarray(records, dtype=jnp.float64)
+    return _sr(_sr(_sr(ztintb) * rec[index[ib]])
+               + _sr(_sr(ztinta) * rec[index[ia]]))
+
+
 __all__ = (
     "decode_source_indices",
+    "nemo_clim_monthly_record_centres",
+    "nemo_fld_time_interpolate",
     "nemo_fld_interp",
     "nemo_t_rotation_from_domain",
     "rotate_en_to_ij",

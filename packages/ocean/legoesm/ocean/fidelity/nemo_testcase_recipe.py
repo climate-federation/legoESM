@@ -2493,8 +2493,59 @@ def vortex_smt_partial_cell_geometry(source: dict[str, np.ndarray]):
     return zht, k_bot, e3t, e3u, e3v, e3f
 
 
+# --- rung SMT-5 (Decision 107): ORCA2 rung 1's namtra_dmp / namtsd ---------
+# Both files hold 12 identical monthly records (sn_tem/sn_sal = -1., ln_tint
+# and clim .true., 'yearly'); nn_date0 = 010101 and nn_time0 = 0 (VORTEX
+# namelist_ref:39-40), so the first step's midpoint is ndt05 = NINT(0.5*rn_Dt)
+# seconds into year 1 (daymod.f90:92, :136-140).
+_SMT5_FILES = ("data_1m_potential_temperature_nomask.nc",
+               "data_1m_salinity_nomask.nc", "resto.nc")
+
+
+def vortex_smt5_tracer_damping(deck_root, nlev: int, dt_s: float,
+                               n_steps: int):
+    """Read NEMO's own dumped SMT-5 inputs into a ``NEMOTracerDamping``.
+
+    The NetCDF layout is NEMO's ``(time, z, y, x)`` / ``(z, y, x)``; the model
+    executes the first ``nlev`` (= jpkm1) of the jpk levels on ``(j, i, k)``.
+    """
+    import netCDF4  # noqa: N813
+
+    from legoesm.ocean.dynamics.ocean_tendency_common import NEMOTracerDamping
+    from legoesm.ocean.forcing.nemo_fld_read import (
+        nemo_clim_monthly_record_centres,
+    )
+
+    root = Path(deck_root)
+    paths = [root / name for name in _SMT5_FILES]
+    for path in paths:
+        if not path.is_file():
+            raise FileNotFoundError(f"SMT-5 input {path} is missing")
+    records = []
+    for path, var in zip(paths[:2], ("votemper", "vosaline")):
+        with netCDF4.Dataset(path, "r") as ds:
+            raw = np.asarray(ds.variables[var][:], dtype=np.float64)
+        if raw.ndim != 4 or raw.shape[0] != 12:
+            raise ValueError(f"{path}: expected 12 records of (z,y,x), got {raw.shape}")
+        records.append(np.moveaxis(raw[:, :nlev], 1, -1))
+    with netCDF4.Dataset(paths[2], "r") as ds:
+        resto = np.asarray(ds.variables["resto"][:], dtype=np.float64)
+    resto = np.moveaxis(resto[:nlev], 0, -1)
+    ndt05 = int(round(0.5 * dt_s))
+    n_years = 1 + (ndt05 + int(n_steps) * int(round(dt_s))) // (365 * 86400)
+    centres, index = nemo_clim_monthly_record_centres(n_years)
+    if ndt05 in set(int(c) for c in centres):
+        raise ValueError("first step falls on a record centre: fld_update's "
+                         "initial selection differs there and is not transcribed")
+    return NEMOTracerDamping(
+        resto=resto, target_T=records[0], target_S=records[1],
+        record_centres_s=centres, record_index=index,
+        isecsbc_at_t0_s=float(ndt05))
+
+
 def build_vortex_smt_zps_card(
-    momentum: str = "flux", rung: str = "smt0"
+    momentum: str = "flux", rung: str = "smt0", *,
+    deck_root: str | Path | None = None,
 ) -> NEMOTestcaseCard:
     """VORTEX with a Gaussian seamount and z partial bottom cells.
 
@@ -2510,22 +2561,29 @@ def build_vortex_smt_zps_card(
     nothing else; ``"smt2"`` is SMT-1 with ONE further module, namdrg, at
     rung 0's linear bottom drag; ``"smt3"`` adds ORCA2 rung 0's namtra_ldf
     block; and ``"smt4"`` adds ORCA2 rung 0's namdyn_ldf block with Decision
-    93's mode-20 stand-in. Only the vector deck is carried up the ladder,
-    because ORCA2 is vector-invariant.
+    93's mode-20 stand-in; ``"smt5"`` adds ORCA2 rung 1's T/S damping
+    (Decision 107), read from the three files NEMO dumped into ``deck_root``.
+    Only the vector deck is carried up the ladder, because ORCA2 is
+    vector-invariant.
     """
     if momentum not in ("flux", "vector"):
         raise ValueError(
             f"unknown VORTEX_SMT momentum deck {momentum!r}; expected 'flux' "
             "(ln_dynadv_up3) or 'vector' (ln_dynadv_vec)")
-    if rung not in ("smt0", "smt1", "smt2", "smt3", "smt4"):
+    if rung not in ("smt0", "smt1", "smt2", "smt3", "smt4", "smt5"):
         raise ValueError(
             f"unknown VORTEX_SMT mini-ladder rung {rung!r}; expected 'smt0' "
             "(the shipped namzdf block), 'smt1' (ORCA2 rung 0's background "
             "mixing and enhanced vertical diffusion), 'smt2' (SMT-1 plus "
             "rung 0's linear bottom drag), or 'smt3' (SMT-2 plus rung 0's "
             "lateral tracer diffusion), or 'smt4' (SMT-3 plus rung 0's "
-            "lateral momentum diffusion)")
-    if rung in ("smt1", "smt2", "smt3", "smt4") and momentum != "vector":
+            "lateral momentum diffusion), or 'smt5' (SMT-4 plus rung 1's "
+            "T/S damping)")
+    if (rung == "smt5") != (deck_root is not None):
+        raise ValueError(
+            "deck_root (the directory holding NEMO's dumped damping inputs) "
+            "is required by rung 'smt5' and refused by every other rung")
+    if rung in ("smt1", "smt2", "smt3", "smt4", "smt5") and momentum != "vector":
         raise ValueError(
             "the seamount mini-ladder (decision 93) is carried on the VECTOR "
             "deck only; there is no flux-form SMT-1 card")
@@ -2664,7 +2722,7 @@ def build_vortex_smt_zps_card(
             # Stated on the seamount card too, where it was first measured,
             # rather than inherited silently from the shared block above.
             barotropic_slow_forcing_depth_evaluation="nemo_literal"))
-    if rung in ("smt1", "smt2", "smt3", "smt4"):
+    if rung in ("smt1", "smt2", "smt3", "smt4", "smt5"):
         # DECISION 93 (user), rung SMT-1.  ONE namelist module moves to ORCA2
         # rung 0's values; every line is cited to that deck
         # (phase3/orca2_rounds/round83/acquisition/
@@ -2744,7 +2802,7 @@ def build_vortex_smt_zps_card(
                 ),
             ),
         )
-    if rung in ("smt2", "smt3", "smt4"):
+    if rung in ("smt2", "smt3", "smt4", "smt5"):
         # DECISION 93 (user), rung SMT-2: ORCA2 rung 0's LINEAR BOTTOM DRAG,
         # the second module of the mini-ladder.  The deck writes one line,
         # &namdrg ln_lin = .true. (rung-0 namelist_cfg:270), and takes every
@@ -2793,7 +2851,7 @@ def build_vortex_smt_zps_card(
             zdf_baroclinic_only=True,
             barotropic_drag_substep=True,
         )
-    if rung in ("smt3", "smt4"):
+    if rung in ("smt3", "smt4", "smt5"):
         # DECISION 93 (user), rung SMT-3: ORCA2 rung 0's namtra_ldf block.
         # The deck selects laplacian standard isoneutral diffusion with MSC,
         # coefficient mode 20, rn_Ud=0.018 m/s and rn_Ld=200 km.  On this
@@ -2836,7 +2894,7 @@ def build_vortex_smt_zps_card(
                 implicit_K33=True,
             ),
         )
-    if rung == "smt4":
+    if rung in ("smt4", "smt5"):
         # DECISION 93: div-rot, level Laplacian momentum diffusion with
         # nn_ahm_ijk_t=20, rn_Uv=0.1 m/s, rn_Lv=10 km and rn_ahm_b=0.
         # Mode 20 consumes rn_Uv and the live metric; rn_Lv remains explicit
@@ -2857,6 +2915,20 @@ def build_vortex_smt_zps_card(
             lateral_viscosity_coefficient_source="nemo_ldf_c2d",
             lateral_side_bc="free_slip",
         )
+    if rung == "smt5":
+        damping = vortex_smt5_tracer_damping(
+            deck_root, nlev, res.dt_s, res.n_steps)
+        # Decision 107 (b) uniform 1/86400 s-1 on every wet cell, 0 on land;
+        # (d) 12 identical records.  Refuse a file that says otherwise.
+        active = np.asarray(z_coord.is_active, dtype=bool)
+        if not np.array_equal(damping.resto,
+                              np.where(active, 1.0 / 86400.0, 0.0)):
+            raise ValueError("SMT-5 resto.nc is not tmask/86400 (Decision 107b)")
+        for records in (damping.target_T, damping.target_S):
+            if not all(np.array_equal(records[0], records[m])
+                       for m in range(1, 12)):
+                raise ValueError("SMT-5 target records differ (Decision 107d)")
+        model_config = model_config._replace(nemo_tracer_damping=damping)
     recipe = NEMORecipe(
         model_config=model_config,
         physics_config=model_config.physics,
@@ -2865,7 +2937,9 @@ def build_vortex_smt_zps_card(
         land_mask=wet,
         initial_state=state,
     )
-    if rung == "smt4":
+    if rung == "smt5":
+        case_name = "VORTEX_SMT5_VEC-zps"
+    elif rung == "smt4":
         case_name = "VORTEX_SMT4_VEC-zps"
     elif rung == "smt3":
         case_name = "VORTEX_SMT3_VEC-zps"
@@ -2893,6 +2967,11 @@ def validate_nemo_testcase_card(card: NEMOTestcaseCard) -> None:
             f"{card.case} requires scalar-libm certification transcendentals, "
             f"got {card.transcendentals!r}"
         )
+    _dmp = getattr(card.recipe.model_config, "nemo_tracer_damping", None)
+    if (_dmp is not None) != (card.case == "VORTEX_SMT5_VEC-zps"):
+        raise ValueError(
+            f"{card.case}: NEMO tracer damping (ln_tradmp) is selected by the "
+            "VORTEX_SMT5_VEC-zps card alone (Decision 107)")
     expected = {
         "LOCK_EXCHANGE-zco": ("nemo_ab3am4", 1, 0, 0.0, 0, 0.0),
         "OVERFLOW-zps": ("nemo_boxcar1_ab3", 3, 2, 20.0, 0, 1000.0),
@@ -2919,6 +2998,7 @@ def validate_nemo_testcase_card(card: NEMOTestcaseCard) -> None:
         "VORTEX_SMT2_VEC-zps": ("nemo_ab3am4", 48, 0, 0.0, 0, 0.0),
         "VORTEX_SMT3_VEC-zps": ("nemo_ab3am4", 48, 0, 0.0, 0, 0.0),
         "VORTEX_SMT4_VEC-zps": ("nemo_ab3am4", 48, 0, 0.0, 0, 0.0),
+        "VORTEX_SMT5_VEC-zps": ("nemo_ab3am4", 48, 0, 0.0, 0, 0.0),
         "VORTEX_VEC-10km-zco": ("nemo_ab3am4", 48, 0, 0.0, 0, 0.0),
     }
     if card.case not in expected:
@@ -3067,13 +3147,14 @@ def validate_nemo_testcase_card(card: NEMOTestcaseCard) -> None:
     if card.case.startswith(
             ("VORTEX-", "VORTEX_VEC-", "VORTEX_SMT-", "VORTEX_SMT_VEC-",
              "VORTEX_SMT1_VEC-", "VORTEX_SMT2_VEC-", "VORTEX_SMT3_VEC-",
-             "VORTEX_SMT4_VEC-")):
+             "VORTEX_SMT4_VEC-", "VORTEX_SMT5_VEC-")):
         # Decision 88's seamount cards run the SAME two momentum decks; every
         # switch this branch checks is the same switch, so they are checked
         # by it rather than by a second copy of it.
         vector = card.case.startswith(
             ("VORTEX_VEC-", "VORTEX_SMT_VEC-", "VORTEX_SMT1_VEC-",
-             "VORTEX_SMT2_VEC-", "VORTEX_SMT3_VEC-", "VORTEX_SMT4_VEC-"))
+             "VORTEX_SMT2_VEC-", "VORTEX_SMT3_VEC-", "VORTEX_SMT4_VEC-",
+             "VORTEX_SMT5_VEC-"))
         # VORTEX is the first card on this identity with a LIVE rotation
         # operator, so the structural-elimination escape below must not be
         # reachable for it.  Round 1 declared the operator as a gap; round 2
@@ -3175,7 +3256,7 @@ def validate_nemo_testcase_card(card: NEMOTestcaseCard) -> None:
         if card.surface_boundary_condition != "none":
             raise ValueError(
                 "VORTEX-zco has no surface forcing (usrdef_sbc writes zeros)")
-        if card.case == "VORTEX_SMT4_VEC-zps":
+        if card.case in ("VORTEX_SMT4_VEC-zps", "VORTEX_SMT5_VEC-zps"):
             lv = cfg.lateral_viscosity
             resolved_dynldf = (
                 lv.A_h, lv.A_h_lat_scaling, lv.A_h_floor, lv.B_h,
@@ -3205,7 +3286,8 @@ def validate_nemo_testcase_card(card: NEMOTestcaseCard) -> None:
         # here, outside the rung block, because the older bottom_drag_r test
         # above passes any NEMO scheme whose legacy rate happens to be zero.
         if card.case not in ("VORTEX_SMT2_VEC-zps", "VORTEX_SMT3_VEC-zps",
-                             "VORTEX_SMT4_VEC-zps") and (
+                             "VORTEX_SMT4_VEC-zps",
+                             "VORTEX_SMT5_VEC-zps") and (
                 cfg.bottom_drag.bottom_drag_scheme != "legacy"
                 or cfg.zdf_drag_in_matrix
                 or cfg.barotropic_drag_substep):
@@ -3216,7 +3298,8 @@ def validate_nemo_testcase_card(card: NEMOTestcaseCard) -> None:
         # vertical diffusion that rung 0 runs beside it; every other card on
         # this identity keeps the shipped VORTEX namzdf block.
         if card.case in ("VORTEX_SMT1_VEC-zps", "VORTEX_SMT2_VEC-zps",
-                          "VORTEX_SMT3_VEC-zps", "VORTEX_SMT4_VEC-zps"):
+                          "VORTEX_SMT3_VEC-zps", "VORTEX_SMT4_VEC-zps",
+                             "VORTEX_SMT5_VEC-zps"):
             if (cfg.A_v, cfg.K_v) != (_SMT1_RN_AVM0, _SMT1_RN_AVT0):
                 raise ValueError(
                     f"{card.case} requires ORCA2 rung 0's rn_avm0="
@@ -3244,7 +3327,8 @@ def validate_nemo_testcase_card(card: NEMOTestcaseCard) -> None:
             _bd = cfg.bottom_drag
             _want_lin = card.case in ("VORTEX_SMT2_VEC-zps",
                                       "VORTEX_SMT3_VEC-zps",
-                                      "VORTEX_SMT4_VEC-zps")
+                                      "VORTEX_SMT4_VEC-zps",
+                             "VORTEX_SMT5_VEC-zps")
             if _want_lin:
                 if _bd.bottom_drag_scheme != "nemo_linear":
                     raise ValueError(
@@ -3273,7 +3357,8 @@ def validate_nemo_testcase_card(card: NEMOTestcaseCard) -> None:
                         "diagonal, the baroclinic-only solve and the frozen "
                         "rCdU_bot in the external-mode substeps")
             if card.case in ("VORTEX_SMT3_VEC-zps",
-                             "VORTEX_SMT4_VEC-zps"):
+                             "VORTEX_SMT4_VEC-zps",
+                             "VORTEX_SMT5_VEC-zps"):
                 gm = cfg.gm_redi
                 if gm is None:
                     raise ValueError(
@@ -3379,6 +3464,12 @@ def build_nemo_testcase_card(
         "VORTEX_SMT4_VEC-zps": lambda: build_vortex_smt_zps_card(
             "vector", "smt4"),
     }
+    if case == "VORTEX_SMT5_VEC-zps":
+        if deck_root is None:
+            raise ValueError(
+                "VORTEX_SMT5_VEC-zps requires deck_root: the directory with "
+                "NEMO's dumped damping inputs (Decision 107e)")
+        return build_vortex_smt_zps_card("vector", "smt5", deck_root=deck_root)
     if case == "ORCA2-zps":
         if deck_root is None:
             raise ValueError("ORCA2-zps requires an explicit deck_root")
