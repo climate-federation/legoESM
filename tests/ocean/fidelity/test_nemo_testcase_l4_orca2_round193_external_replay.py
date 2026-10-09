@@ -15,7 +15,17 @@ def _row(name, at_floor, *, substep=None):
 
 
 def _report():
-    rows = [_row("ssh_forcing", True), _row("u_forcing", False)]
+    rows = []
+    for name in gate.r178.ENTRY_ORDER:
+        rows.append(_row(name, True))
+    for name in gate.r178.SUBSTEP_ORDER:
+        rows.append(_row(name, True, substep=1))
+    for name in gate.r178.SUBSTEP_ORDER:
+        rows.append(_row(
+            name, name != "transport_sum_v", substep=2))
+        if name == "transport_sum_v":
+            break
+    exact = {"comparison_bit_exact": True}
     return {
         "claim_label": "independent hierarchy rung 0",
         "growth_report": {"sha256": gate.GROWTH_SHA256,
@@ -34,12 +44,19 @@ def _report():
                               for field in ("T", "S", "u", "v", "ssh")},
         "source_rows": rows,
         "first_over_floor": copy.deepcopy(rows[-1]),
+        "accumulation_split": {
+            "previous_sum": exact,
+            "completed_transport": exact,
+            "weight": exact,
+            "candidate": {"full_domain_differing_cells": 68},
+            "unmasked_reciprocal_replay": exact,
+        },
     }
 
 
 def test_clean_report_names_first_statement():
     result = gate.classify(_report())
-    assert result["first_statement"]["name"] == "u_forcing"
+    assert result["first_statement"]["name"] == "transport_sum_v"
 
 
 @pytest.mark.parametrize("plant", gate.PLANTS[1:])

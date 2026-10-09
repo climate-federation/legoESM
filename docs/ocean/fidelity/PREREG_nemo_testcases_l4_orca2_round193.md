@@ -79,3 +79,11 @@ association arm is active; a synthetic raw/post pair proves the selector fires.
 All frozen predictions, thresholds, field order and the growth report remain
 unchanged. The refused first replay is retained in the evidence directory and
 is not a statement attribution.
+
+The corrected replay freezes one additional falsifier before rerun. If its
+first debt is the substep-2 V transport accumulator, the preceding accumulator,
+completed `zhV` and `wgtbtp2` must each be bit-exact. Replaying only NEMO's
+unmasked `r1_e1v` factor in the compiled statement
+`dynspg_ts.f90:606-608` must then close the completed accumulator bit-exact.
+Any non-exact prerequisite or replay residual refutes reciprocal-metric
+ownership; the receipt names no statement below it.

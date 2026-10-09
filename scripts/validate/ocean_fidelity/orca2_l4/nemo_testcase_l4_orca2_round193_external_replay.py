@@ -175,6 +175,19 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
             "replay did not stop at a first debt")
     source = COMPILED_SOURCE.get(str(first["name"]))
     require(source is not None, "first debt has no compiled-source citation")
+    split = report["accumulation_split"]
+    require(first["name"] == "transport_sum_v" and first["substep"] == 2,
+            "frozen accumulator split reached a different boundary")
+    require(split["previous_sum"]["comparison_bit_exact"],
+            "substep-2 incoming V accumulator moved")
+    require(split["completed_transport"]["comparison_bit_exact"],
+            "substep-2 completed V transport moved")
+    require(split["weight"]["comparison_bit_exact"],
+            "substep-2 transport weight moved")
+    require(split["candidate"]["full_domain_differing_cells"] == 68,
+            "candidate V accumulator census moved")
+    require(split["unmasked_reciprocal_replay"]["comparison_bit_exact"],
+            "unmasked reciprocal replay did not close the V accumulator")
     report["first_statement"] = {
         "name": first["name"], "substep": first.get("substep"),
         "compiled_source": (
@@ -187,6 +200,7 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
         "R193-P4": "REFUTED_EXTERNAL_MODE_OWNS_FIRST_DEBT",
         "R193-P5": "CONFIRMED_ROUND96_RECORD_SUFFICIENT",
         "R193-P6": "CONFIRMED_MEASUREMENT_ONLY",
+        "R193-P7": "CONFIRMED_UNMASKED_RECIPROCAL_CLOSES",
     }
     report["status"] = "HELD_R193_FIRST_EXTERNAL_DEBT"
     return report
@@ -197,6 +211,7 @@ def measure(deck_root: Path, frame_root: Path, spg_root: Path,
     import jax
 
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+    from legoesm.core.source_rounding import nemo_source_round
     from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
         barotropic_substeps_latlon_cgrid,
     )
@@ -289,6 +304,37 @@ def measure(deck_root: Path, frame_root: Path, spg_root: Path,
     )
     rows = r178._source_rows(observed, oracle, active)
     first = _first_over_floor(rows)
+    b = nemo_source_round
+    previous_sum = r178._native_v(trace["transport_sum_v_exit"][0])
+    completed_transport = r178._native_v(trace["transport_metric_v"][1])
+    weight = np.asarray(trace["transport_weight"][1], dtype=np.float64)
+    e1v = r178._native_v(np.asarray(card.recipe.grid.dx_v, dtype=np.float64))
+    reciprocal = np.divide(
+        np.float64(1.0), e1v,
+        out=np.zeros_like(e1v), where=e1v != np.float64(0.0))
+    unmasked_replay = jax.device_get(b(
+        b(previous_sum) + b(
+            b(weight * b(completed_transport)) * b(reciprocal))))
+    weight_oracle = np.asarray(
+        oracle["j002_sum_coef"], dtype=np.float64).reshape(-1)[1:2]
+    weight_candidate = np.asarray(weight, dtype=np.float64).reshape(1)
+    accumulation_split = {
+        "previous_sum": r178._score(
+            previous_sum, oracle["j001_vn_adv"], active["v"],
+            complete_domain=True),
+        "completed_transport": r178._score(
+            completed_transport, oracle["j002_zhV"], active["v"],
+            complete_domain=True),
+        "weight": r178._score(
+            weight_candidate, weight_oracle, np.ones((1,), dtype=bool),
+            complete_domain=True),
+        "candidate": r178._score(
+            r178._native_v(trace["transport_sum_v_exit"][1]),
+            oracle["j002_vn_adv"], active["v"], complete_domain=True),
+        "unmasked_reciprocal_replay": r178._score(
+            unmasked_replay, oracle["j002_vn_adv"], active["v"],
+            complete_domain=True),
+    }
     one = np.array([1.0], dtype=np.float64)
     next_one = np.nextafter(one, np.inf)
     record_control = rhs_walk.score(next_one, one, np.ones_like(one, dtype=bool))
@@ -315,6 +361,7 @@ def measure(deck_root: Path, frame_root: Path, spg_root: Path,
         "source_rows": rows,
         "source_order": [_row_id(row) for row in rows],
         "first_over_floor": first,
+        "accumulation_split": accumulation_split,
         "worktree": stamp,
     })
 
