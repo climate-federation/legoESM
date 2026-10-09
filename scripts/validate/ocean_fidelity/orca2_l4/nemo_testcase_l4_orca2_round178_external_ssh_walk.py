@@ -391,7 +391,11 @@ def measure(deck_root: Path, frame_root: Path, spg_root: Path,
         "transport_v": bool(np.array_equal(live_transport[1], traced_transport[1])),
     }
     require(all(passive.values()), "barotropic trace changes the observed solver")
-    all_rows = _source_rows(observed["baseline"], oracle, active)
+    source_rows_by_arm = {
+        name: _source_rows(arm, oracle, active)
+        for name, arm in observed.items()
+    }
+    all_rows = source_rows_by_arm["baseline"]
     first_index = next(
         (index for index, row in enumerate(all_rows) if not row["at_floor"]),
         None,
@@ -435,6 +439,11 @@ def measure(deck_root: Path, frame_root: Path, spg_root: Path,
         "arm_order": list(ARM_ORDER),
         "source_order": source_order,
         "baseline_source_rows": rows,
+        # Round 191 continues this already-computed offline replay downstream
+        # of exact completed forcing.  Publishing the other arms here adds no
+        # executable observer and leaves the historical round-178 classifier
+        # unchanged.
+        "source_rows_by_arm": source_rows_by_arm,
         "first_over_floor": first,
         "entry_and_histories_exact": bool(
             independent_entry_exact
