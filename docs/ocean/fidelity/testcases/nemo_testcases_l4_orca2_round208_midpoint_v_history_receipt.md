@@ -121,7 +121,7 @@ represented as a PASS verdict.
    If the source-written update closes, compare its pre-association output to
    the already-admitted post-association value and continue in source order.
 2. OMT-1 remains blocked on OMT-0 reaching the bar or a complete cancelling
-   unit. The pending ladder-order question from round 207 remains unanswered:
-   whether vector-form momentum advection should enter before bottom drag.
+   unit. Decision 109 was taken during this round: OMT-1 adds vector-form
+   momentum advection before OMT-2 adds linear implicit bottom drag.
 
 No model or card change landed. No sea-ice choice was made.
