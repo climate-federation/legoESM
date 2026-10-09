@@ -89,7 +89,7 @@ unmapped citations and zero failing map entries (SHA256
 `9ff746d51fd73c25c85c097d071d48ba564e6e9416b572dc31bcd249c4b81556`).
 This receipt passes four citations with the same zero counts (SHA256
 `6541a2198e30323c4fe7edbf68c246724f771c393737f5754138d80f633a879b`).
-Shifting the `domhgr.f90:152` owner citation by two lines fails as required
+Shifting the reciprocal-owner citation by two lines fails as required
 (exit 1; transcript SHA256
 `58c597584b4212c9cbff54b04b1662bfa6e6391d74058b7f85ebdbab16d64e02`).
 
