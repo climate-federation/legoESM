@@ -21,8 +21,11 @@ CLOSED_CARDS = (
     "GYRE-zco", "VORTEX-zco", "VORTEX_VEC-zco",
     "VORTEX_SMT-zps", "VORTEX_SMT_VEC-zps",
     "VORTEX_SMT1_VEC-zps", "VORTEX_SMT2_VEC-zps",
-    "VORTEX_SMT3_VEC-zps", "VORTEX_SMT4_VEC-zps",
+    "VORTEX_SMT3_VEC-zps", "VORTEX_SMT4_VEC-zps", "VORTEX_SMT5_VEC-zps",
 )
+# SMT-5 reads the three inputs NEMO dumped in the admitted SMT-5 record.
+SMT5_DECK_ROOT = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
+                      "smtrungs_rounds/round2/oracle_vortex_smt5/kt1_10")
 STATE_FIELDS = ("u", "v", "T", "S", "eta")
 
 
@@ -52,12 +55,15 @@ def run_case(case: str, steps: int) -> str:
     if not jax.config.jax_enable_x64:
         raise SystemExit("JAX x64 is disabled")
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
-    card = build_nemo_testcase_card(case)
+    smt5 = case == "VORTEX_SMT5_VEC-zps"
+    card = build_nemo_testcase_card(
+        case, **({"deck_root": SMT5_DECK_ROOT} if smt5 else {}))
     model = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
     state = card.recipe.initial_state
-    for _ in range(steps):
-        state = model.step(state, dt=card.dt_s)
+    for n in range(steps):
+        state = model.step(state, dt=card.dt_s,
+                           **({"t_seconds": n * card.dt_s} if smt5 else {}))
     return state_digest(state)
 
 
