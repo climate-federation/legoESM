@@ -295,6 +295,8 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
             "slow-V plus association unit is incomplete")
     require(len(report["slow_v_association_transport_unit"]["substep_table"]) == 65,
             "slow-V, association and transport unit is incomplete")
+    require(len(report["complete_fold_unit"]["substep_table"]) == 65,
+            "complete fold unit is incomplete")
     require(len(report["substep_table"]) == 65, "substep table is incomplete")
     require(report["first_nonbit"] == _first(
         report["source_rows"], "comparison_bit_exact"),
@@ -375,7 +377,9 @@ def measure(deck_root: Path, twin_a: Path, twin_b: Path,
             f"external substep dt moved: {dt} != {ordered['dt']}")
 
     def solve(trace: bool, association: bool = False, slow_v_override=None,
-              unmasked_v_transport: bool = False):
+              unmasked_v_transport: bool = False,
+              reference_face_depth: bool = False,
+              materialize_v_transport: bool = False):
         selected_v = f_v if slow_v_override is None else slow_v_override
         return jax.device_get(jax.jit(lambda seed, f_eta, f_u, f_v: (
             barotropic_substeps_latlon_cgrid(
@@ -386,6 +390,9 @@ def measure(deck_root: Path, twin_a: Path, twin_b: Path,
                 _nemo_substep_trace_test_hook=trace,
                 _nemo_external_mode_association_test_override=association,
                 _nemo_unmasked_v_transport_test_override=unmasked_v_transport,
+                _nemo_reference_face_depth_test_override=reference_face_depth,
+                _nemo_materialize_v_transport_test_override=(
+                    materialize_v_transport),
             )
         ))(state, jnp.asarray(f_eta), jnp.asarray(f_u), jnp.asarray(selected_v)))
 
@@ -444,6 +451,12 @@ def measure(deck_root: Path, twin_a: Path, twin_b: Path,
         unmasked_v_transport=True)
     complete_unit_rows, complete_unit_table = _summary_table(
         complete_unit[2], substeps, masks)
+    fold_unit = solve(
+        True, association=True, slow_v_override=recorded_slow_v,
+        unmasked_v_transport=True, reference_face_depth=True,
+        materialize_v_transport=True)
+    fold_unit_rows, fold_unit_table = _summary_table(
+        fold_unit[2], substeps, masks)
     one = np.asarray([1.0], dtype=np.float64)
     next_one = np.nextafter(one, np.inf)
     raw = {
@@ -495,6 +508,17 @@ def measure(deck_root: Path, twin_a: Path, twin_b: Path,
                 complete_unit_rows, "comparison_bit_exact"),
             "first_over_floor": _first(complete_unit_rows, "at_floor"),
             "substep_table": complete_unit_table,
+        },
+        "complete_fold_unit": {
+            "source_statements": [
+                "dynspg_ts.f90:289,320-324", "dynspg_ts.f90:509-520",
+                "dynspg_ts.f90:530-536", "dynspg_ts.f90:712-741",
+            ],
+            "terminal": _terminal_rows(live, fold_unit),
+            "first_nonbit": _first(
+                fold_unit_rows, "comparison_bit_exact"),
+            "first_over_floor": _first(fold_unit_rows, "at_floor"),
+            "substep_table": fold_unit_table,
         },
         "terminal_ulp_control": {
             "bit_exact": bool(np.array_equal(one, next_one)),
