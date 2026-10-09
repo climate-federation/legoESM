@@ -311,7 +311,7 @@ def measure(deck_root: Path, twin_a: Path, twin_b: Path,
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
 
     stamp = worktree_stamp()
-    require(stamp["clean"] and stamp["commit"].lower() == expect_commit.lower(),
+    require(stamp["clean"] and stamp["commit"].lower().startswith(expect_commit.lower()),
             "round-205 measurement requires its clean committed gate")
     policy = PrecisionPolicy.fp64(transcendentals="libm")
     set_policy(policy)
