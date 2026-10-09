@@ -150,6 +150,15 @@ After the fixes: 100-step record 100/100 rows equal to round 6 (worst
 7.693e-16 at kt 90); six closed cards' state sha256 unchanged; push battery
 136 passed; TSUNAMI tests 80 passed.
 
+**Operator second codex re-review of the PR diff (round 7 head `e1940fd76`):
+BLOCK** on ONE CONFIRMED site class: the AB2 / leapfrog / NEMO-MLF / unsplit
+outer integrators built partial-cell face masks outside the config's y-wrap
+scope. FIXED in round 8: the four integrators join the wrapped entry points
+(`nemo_testcases_l1_tsunami_round8_receipt.md`, with the full caller list); a
+periodic partial-cell AB2 plant fails without the scoping. Record 100/100 rows
+and six closed-card hashes equal to round 7. Review history: round 6 BLOCK ->
+round 7 fixes -> re-review BLOCK on this one site class -> fixed here.
+
 **Single review (codex) of the round-7 fix: BLOCK** on two new CONFIRMED
 findings (the runtime mask check outside the scope; `replace_land_mask`
 reading the ambient flag), both fixed and planted in round 7; that last fix
