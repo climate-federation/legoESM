@@ -12,7 +12,7 @@ here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 repo=$(CDPATH= cd -- "$here/../../../../../" && pwd -P)
 py=/home/dbalwada/legoESM/.venv/bin/python
 nemo_root=/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2
-reference_cfg=ORCA2_OMIP_L4
+reference_cfg=ORCA2_ICE_PISCES
 source_cfg=ORCA2_OMIP_L4_R90FRAMES
 target_cfg=ORCA2_OMIP_L4_R210OMT1_P3
 target_root=$nemo_root/cfgs/$target_cfg

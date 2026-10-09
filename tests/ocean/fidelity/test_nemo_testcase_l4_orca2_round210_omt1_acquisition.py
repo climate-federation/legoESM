@@ -12,7 +12,7 @@ RUNNER = Path(
 def test_record_build_bootstraps_from_registered_reference() -> None:
     text = RUNNER.read_text()
 
-    assert "reference_cfg=ORCA2_OMIP_L4\n" in text
+    assert "reference_cfg=ORCA2_ICE_PISCES\n" in text
     assert './makenemo -r "$reference_cfg" -n "$target_cfg"' in text
     assert './makenemo -r "$source_cfg" -n "$target_cfg"' not in text
     assert 'grep -q "^${candidate} " "$nemo_root/cfgs/ref_cfgs.txt"' in text
@@ -37,4 +37,3 @@ def test_repair_uses_fresh_round210_targets_and_two_plants() -> None:
     assert "/orca2_rounds/round210/acquisition" in text
     assert "bootstrap_work_cfg_plant.log" in text
     assert "source_inventory_plant.log" in text
-
