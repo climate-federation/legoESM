@@ -908,7 +908,9 @@ def _dissipation_coeffs(config, grid, area, dt_s, dtype, mask):
 
 def _nemo_een_south_ff_copy(ff):
     """NEMO ``jpfillcopy`` association for the southern F-grid halo."""
-    return lat_faces_from_north(ff, south=ff[:1])[:-1]
+    if get_meridionally_periodic():
+        return lat_south(ff)          # jpfillperio (lbclnk.f90:2028)
+    return jnp.concatenate([ff[:1], ff[:-1]], axis=0)
 
 
 def _nemo_literal_een_coefficients(eta, z_coord, dtype, scheme="een",
