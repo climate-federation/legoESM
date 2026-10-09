@@ -56,7 +56,7 @@ scripts`):
 |---|---|---|---|
 | momentum advection OFF: `momentum_flux_scheme="none"` + `vertical_momentum_scheme="none"` (ln_dynadv_OFF; the validator makes them one selection) | `"upwind"` / `"upwind_perturbation"` | TSUNAMI card only (recipe line 3209) | none; only comments in `ocean_pe_latlon_cgrid.py` |
 | tracer advection OFF: `tracer_advection="none"` (ln_traadv_OFF) | `"tvd"` | TSUNAMI card only (line 3212) | none |
-| j-periodic exchange: `meridionally_periodic` (model config, carried to every entry point) and the card's `j_periodic` | `False` | TSUNAMI card only (line 3218; validator requires both equal the deck's ln_Jperio) | none; all other callers read the context flag, which is `False` |
+| j-periodic exchange: `meridionally_periodic` (model config; the model scopes it, True or False, at every entry point; round 7) and the card's `j_periodic` | `False` | TSUNAMI card only (line 3218; validator requires both equal the deck's ln_Jperio) | none; library helpers called outside the model read the context flag, default `False` |
 | one wet level: `allow_single_level` | `False` (min 2 levels) | TSUNAMI card only (line 3159) | none |
 | density depth: `eos_depth="geometric"` (DECISION 101) | `"insitu"` | TSUNAMI card (line 3205) | existing certified arm, also set by other testcase cards (recipe lines 491, 610; unchanged) |
 
@@ -137,12 +137,24 @@ EEN, slow forcing) rather than in the loop.
 
 ## 8. Review
 
-Not run this round: the brief assigns the codex read-only review of the
-package diff to the operator. NO GATE for dual review; per-round single codex
-reviews are in the five receipts. Honour-system items stated: controlled
-comparison (the only difference from round 5 is the main merge; ladder
-`per_kt` equal row by row); non-vacuity (geometry and citation plants fire).
+**Operator codex review of the package diff (round 6 head `7c5cf10f2`): BLOCK**,
+three findings, dispositions in `nemo_testcases_l1_tsunami_round7_receipt.md`:
 
-UNVERIFIED: the probe proves the card does not call the changed functions in
-3 steps, not that no path ever could; the TSUNAMI battery was run with 8 xdist
-workers.
+| finding | disposition (round 7) |
+|---|---|
+| 1 HIGH: `meridionally_periodic=False` did not override the process-global y-wrap; public tendency entry points bypassed the wrapper; cross-thread contamination | FIXED: the model scopes its config value (True and False) around the step body, both tendency entry points, the vertical-K diagnostic, the cache primer and the runtime mask check; the flag is a `ContextVar`; both face-mask constructors take the value explicitly |
+| 2 HIGH: `implicit_solver.py` swapped to a custom-VJP solver, tests relaxed | UPSTREAM: main's `5e368e87ba` (PR #1911, Pierre Gentine), arrived with the main merge; untouched here; TSUNAMI does not execute it; recorded for the operator to raise |
+| 3 MEDIUM: the ladder forced the global scope | FIXED: no scope in the ladder or tests; removing the model wiring fails the record test (planted) |
+
+After the fixes: 100-step record 100/100 rows equal to round 6 (worst
+7.693e-16 at kt 90); six closed cards' state sha256 unchanged; push battery
+136 passed; TSUNAMI tests 80 passed.
+
+**Single review (codex) of the round-7 fix: BLOCK** on two new CONFIRMED
+findings (the runtime mask check outside the scope; `replace_land_mask`
+reading the ambient flag), both fixed and planted in round 7; that last fix
+was not re-reviewed. NO GATE for dual review: GLM not run.
+
+UNVERIFIED: the round-6 call-count probe proves the card does not call main's
+changed solver in 3 steps, not that no path ever could; batteries ran with 8
+xdist workers.
