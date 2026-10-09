@@ -38,6 +38,8 @@ from legoesm.land.boundary_data.ec_site import read_ec_site_driver, ECSiteDriver
 from legoesm.land.config import MultiLayerLandConfig
 from legoesm.land.multilayer_land import (
     init_multilayer_land_state,
+    resolve_plant_wilting_point,
+    root_zone_moisture_stress,
     step_multilayer_land_with_diagnostics,
 )
 from legoesm.land.richards import RichardsConfig
@@ -513,11 +515,72 @@ def _scale_two_leaf_params(d: ECSiteDriver, vcmax_c3_scale: float,
     return d._replace(canopy_params=cp)
 
 
+def _capacity_diag(state, params, land_config) -> dict:
+    """Per-step two-leaf capacity / stomatal / water-potential diagnostics.
+
+    Recomputed from a land state with the same functions the step calls, for
+    C3 leaves (all ``(ncol,)``):
+
+    ``diag_wfrac``           root-zone soil-moisture factor in [0, 1]
+    ``diag_psi_soil``        conductance-weighted soil water potential [MPa]
+    ``diag_vcmax25``         leaf-top Vcmax25 fed to the kernel, after stress
+    ``diag_vcmax25_nostress``  the same before the empirical stress factor
+    ``diag_slope``           stomatal slope fed to the kernel, after stress
+    ``diag_chi``             optimum ci/ca (NaN for prescribed capacities)
+    ``diag_psi_leaf``        P-hydro leaf water potential [MPa] (NaN otherwise)
+    """
+    from legoesm.land.p_model import acclimated_capacities, optimal_chi
+    from legoesm.land.phydro import (
+        phydro_optimum, slope_for_model, soil_root_supply)
+    cc = land_config.surface_scheme
+    theta = state.theta_soil
+    ncol = theta.shape[0]
+    grid = make_soil_grid(land_config.soil_grid)
+    pick = lambda name, default: (default if getattr(params, name, None) is None
+                                  else getattr(params, name))
+    _, root_frac, _, wfrac = root_zone_moisture_stress(
+        theta, land_config.beta_min, pick("root_depth", land_config.root_depth),
+        resolve_plant_wilting_point(params, land_config),
+        pick("theta_fc", land_config.theta_fc), grid.z_node, ncol)
+    supply = soil_root_supply(
+        state.psi_soil, theta, grid.dz, root_frac, params.LAI,
+        land_config.hydraulics, land_config.phydro)
+    nan = jnp.full((ncol,), jnp.nan)
+    phydro = land_config.transpiration_stress == "phydro"
+    vc, slope, chi, psi_leaf = params.Vcmax25_C3_leaf, params.m_C3, nan, nan
+    acc = state.pmodel_acclim
+    if acc is not None:
+        gstar = optimal_chi(acc.t_mean_K, acc.vpd_mean_pa, acc.co2_mean_ppm,
+                            acc.ps_ema, land_config.p_model)[3]
+        if phydro:
+            caps = phydro_optimum(acc, supply, land_config.phydro, land_config.p_model)
+            psi_leaf = caps.psi_leaf_mpa
+        else:
+            caps = acclimated_capacities(acc, land_config.p_model)
+        chi = caps.chi
+        if cc.capacity_scheme == "p_model":
+            vc = caps.vcmax25_leaf
+        if cc.g1_source == "p_model":
+            slope = slope_for_model(cc.stomatal_model, chi, acc, gstar,
+                                    d0_leuning_kpa=cc.d0_leuning_kpa)
+    stress = jnp.ones_like(wfrac) if phydro else wfrac
+    return {
+        "diag_wfrac": wfrac, "diag_psi_soil": supply.psi_s_mpa,
+        "diag_vcmax25": vc * stress, "diag_vcmax25_nostress": vc,
+        "diag_slope": slope * (1.0 if cc.g1_source == "p_model" else stress),
+        "diag_chi": chi, "diag_psi_leaf": psi_leaf,
+    }
+
+
 def _prognostic_fluxes(d: ECSiteDriver,
                        canopy_config: TwoLeafCanopyConfig | CLMMLCanopyConfig,
                        land_config: MultiLayerLandConfig, U_min: float,
-                       nudge_tau_days: float = 0.0, clmml_sai: float = _CLMML_SAI):
+                       nudge_tau_days: float = 0.0, clmml_sai: float = _CLMML_SAI,
+                       diag: dict | None = None):
     """Integrate the FULL multilayer land forward in time (``lax.scan``).
+
+    ``diag`` (two-leaf only): when a dict is passed it is filled with per-step
+    capacity / stomatal / water-potential diagnostics (:func:`_capacity_diag`).
 
     Unlike diagnostic mode (per-step ``vmap`` with the soil PRESCRIBED), the soil
     moisture (Richards) and soil temperature evolve prognostically and the
@@ -582,6 +645,8 @@ def _prognostic_fluxes(d: ECSiteDriver,
     # geometry); the two-leaf canopy takes its radiation straight from the driver.
     lat_arg = jnp.asarray([np.rad2deg(d.lat_rad)]) if is_clmml else None
 
+    _want_diag = diag is not None and not is_clmml
+
     def _scan_step(state, xs):
         forcing_t, params_t, doy_t, theta_obs_t = xs
         new_state, _resp, _carbon, out = step_multilayer_land_with_diagnostics(
@@ -641,11 +706,21 @@ def _prognostic_fluxes(d: ECSiteDriver,
                 masked(out.T_surface), reverted.astype(jnp.float64),
                 safe_state.T_soil[:, _i5], safe_state.theta_soil[:, _i5],
                 masked(u_star))
+        if _want_diag:
+            # From the PRE-step state: the values this step's fluxes used.
+            emit = emit + (_capacity_diag(state, params_t, land_config),)
         return safe_state, emit
 
     params = (_clmml_land_params(d.canopy_params, clmml_sai) if is_clmml
               else d.canopy_params)
     xs = (d.forcing, params, d.doy, jnp.asarray(d.theta_soil))
+    if _want_diag:
+        run = jax.jit(lambda s0, x: jax.lax.scan(_scan_step, s0, x))
+        _final, (gpp, le, h, ts, reverted, ts_soil, swc_soil, ustar, dg) = run(state0, xs)
+        diag.update({k: np.asarray(v).ravel() for k, v in dg.items()})
+        rav = lambda a: np.asarray(a).ravel()
+        return (rav(gpp), rav(le), rav(h), rav(ts), rav(reverted),
+                rav(ts_soil), rav(swc_soil), rav(ustar))
     if is_clmml:
         # CLM-ML runs EAGERLY, one Python step at a time.  Its interface reads
         # per-step canopy structure on the host (``float(land_params.LAI[i])``,
@@ -715,6 +790,9 @@ def _write_output(out_dir: str, d: ECSiteDriver, model: dict,
         data["swc_obs"] = ("time", np.asarray(d.theta_soil).ravel())
         data["ustar_mod"] = ("time", model["ustar"])
         data["ustar_obs"] = ("time", np.asarray(d.obs["ustar"]).ravel())
+    for k in sorted(model):
+        if k.startswith("diag_"):
+            data[k] = ("time", np.asarray(model[k]))
     if reverted is not None:
         # prognostic: per-step flag, 1 where the soil update was NaN-reverted.
         data["reverted"] = ("time", np.asarray(reverted).astype("i1"))
@@ -1025,6 +1103,7 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
 
     reverted = None
     ts_soil = swc_soil = ustar = None
+    _diag: dict = {}   # per-step diag_* series (two-leaf prognostic lane only)
     if mode == "diagnostic":
         # P-model diagnostic PRE-PASS (user decision): the state-free
         # diagnostic driver gets the causal acclimation running means from a
@@ -1093,7 +1172,7 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
     else:
         gpp_gC, le, h, _ts, reverted, ts_soil, swc_soil, ustar = _prognostic_fluxes(
             d, canopy_config, land_config, u_min, nudge_tau_days=nudge_tau_days,
-            clmml_sai=clmml_sai)
+            clmml_sai=clmml_sai, diag=_diag)
     # Trim the spin-up window from BOTH the model arrays and the driver ``d``
     # (obs/valid/provenance) so scoring, output and provenance all cover the
     # evaluation window only, while the carried soil state that reaches it was
@@ -1103,12 +1182,14 @@ def run_site(driver_nc: str, mode: str, out_dir: str, chunk: int,
         gpp_gC, le, h = _tr(gpp_gC), _tr(le), _tr(h)
         reverted, ts_soil = _tr(reverted), _tr(ts_soil)
         swc_soil, ustar = _tr(swc_soil), _tr(ustar)
+        _diag = {k: _tr(v) for k, v in _diag.items()}
         d = _slice_driver(d, n_spinup, int(d.forcing.T_lowest.shape[0]) - n_spinup)
 
     model = {
         "gpp_umol": gpp_gC / _GC_PER_UMOL_CO2,   # gC/m2/s -> umolCO2/m2/s (obs units)
         "le_wm2": le, "h_wm2": h,
     }
+    model.update(_diag)                  # diag_* capacity / water-potential series
     if ts_soil is not None:
         model["ts_soil"] = ts_soil       # top (~5 cm) model soil T [K]
         model["swc_soil"] = swc_soil     # top (~5 cm) model soil moisture [m3/m3]

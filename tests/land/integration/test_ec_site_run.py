@@ -653,6 +653,18 @@ def test_run_site_phydro_and_profile_wiring(tmp_path):
                         g1_source="p_model", canopy_stomatal_model="medlyn",
                         transpiration_stress="phydro")
     assert np.isfinite(m_ph["GPP"]["rmse"])
+    # The prognostic two-leaf run tapes the capacity / water-potential
+    # diagnostics the step used; under phydro all of them are defined.
+    import glob
+    import xarray as xr
+    ds = xr.open_dataset(glob.glob(str(tmp_path / "o2" / "*.nc"))[0])
+    for v in ("diag_chi", "diag_vcmax25", "diag_vcmax25_nostress", "diag_slope",
+              "diag_psi_leaf", "diag_psi_soil", "diag_wfrac"):
+        assert np.all(np.isfinite(ds[v].values)), v
+    assert np.all(ds.diag_psi_leaf.values <= ds.diag_psi_soil.values + 1e-9)
+    assert np.all((ds.diag_chi.values > 0.0) & (ds.diag_chi.values <= 1.0))
+    # no post-hoc stress on the P-hydro capacity
+    np.testing.assert_allclose(ds.diag_vcmax25.values, ds.diag_vcmax25_nostress.values)
 
     m_kn = mod.run_site(driver_nc, "diagnostic", str(tmp_path / "o3"),
                         chunk=96)
