@@ -3749,7 +3749,7 @@ CITATION_MAP = {
     # private operand diagnostics and the landed live-divisor routing add
     # lines inside this span. The endpoints still identify the same program
     # boundary.
-    'ocean_model_latlon_cgrid.py:8805-9257': [
+    'ocean_model_latlon_cgrid.py:8805-9241': [
         'T_mid = state_new.T.data',
         'S_mid = S_mid + dt * dS_gm * active_3d', 453],
     'ocean_model_latlon_cgrid.py:9435-9476': [
