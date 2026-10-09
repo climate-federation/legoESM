@@ -125,9 +125,9 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
     return report
 
 
-def measure(deck_root: Path, frame_root: Path, spg_root: Path,
-            expect_commit: str) -> dict[str, object]:
-    """Run the admitted passive trace and split only substep 3 offline."""
+def measurement_context(deck_root: Path, frame_root: Path, spg_root: Path,
+                        expect_commit: str) -> dict[str, object]:
+    """Return the admitted passive trace shared by later offline splits."""
 
     import jax
 
@@ -205,6 +205,31 @@ def measure(deck_root: Path, frame_root: Path, spg_root: Path,
         "transport_v": bool(np.array_equal(live_transport[1], traced_transport[1])),
     }
 
+    return {
+        "stamp": stamp,
+        "oracle": oracle,
+        "census": census,
+        "record_fields": record_fields,
+        "card": card,
+        "state": state,
+        "trace": trace,
+        "passivity": passivity,
+    }
+
+
+def measure(deck_root: Path, frame_root: Path, spg_root: Path,
+            expect_commit: str) -> dict[str, object]:
+    """Run the admitted passive trace and split only substep 3 offline."""
+
+    context = measurement_context(
+        deck_root, frame_root, spg_root, expect_commit)
+    stamp = context["stamp"]
+    oracle = context["oracle"]
+    record_fields = context["record_fields"]
+    card = context["card"]
+    state = context["state"]
+    trace = context["trace"]
+    passivity = context["passivity"]
     prerequisite = [
         r146.exact_row(
             r178._native_v(trace["transport_metric_v"][index]),
