@@ -651,6 +651,9 @@ class ExperimentConfig(NamedTuple):
     # blocks; the per-block body compiles ONCE at this size (columns are
     # independent → numerically exact; must divide the column count).
     rrtmgp_column_chunk_size: int = 0
+    # CAM RRTMG-style transported layer above the model top (see
+    # ``RRTMGPConfig.overhead_layer``).  False = off (byte-identical).
+    rrtmgp_overhead_layer: bool = False
     co2_ppmv: float = 415.0
     ch4_ppbv: float = 1900.0
     n2o_ppbv: float = 332.0
@@ -2542,6 +2545,12 @@ class ExperimentConfig(NamedTuple):
                     "call, so the CAM6 cloud field would radiate nothing while "
                     f"clt/clivi report it; got radiation={self.radiation!r}."
                 )
+        if (self.rrtmgp_overhead_layer
+                and self.radiation not in ("rrtmgp", "rrtmg")):
+            errors.append(
+                "rrtmgp_overhead_layer=True needs radiation rrtmgp/rrtmg; "
+                f"radiation={self.radiation!r} would silently ignore it."
+            )
         # Cross-field: the diagnostic-condensate FLOOR exists only for the
         # sub-grid diagnostic-fraction schemes (sundqvist / xu_randall); 'none'
         # skips clouds and 'resolved' (CRM) excludes the floor.  It is radiatively
@@ -4163,6 +4172,8 @@ class ExperimentConfig(NamedTuple):
             volcanic_aerosol_file=getattr(amip_cfg, 'volcanic_aerosol_file', ''),
             volcanic_aerosol_scale=getattr(amip_cfg, 'volcanic_aerosol_scale', 1.0),
             volcanic_aerosol_lw=getattr(amip_cfg, 'volcanic_aerosol_lw', False),
+            rrtmgp_overhead_layer=getattr(
+                amip_cfg, "rrtmgp_overhead_layer", False),
             cloud_scheme=amip_cfg.cloud_scheme,
             microphysics=amip_cfg.microphysics,
             convection=getattr(amip_cfg, 'convection', 'sbm'),

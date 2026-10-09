@@ -85,6 +85,10 @@ CMIP6_FORCING_FLAGS+=(
   --aerosol-forcing external --aerosol-file "${AEROSOL}" --aerosol-ccn-file "${AEROSOL_CCN}"
   --volcanic-aerosol-file "${VOLCANIC}"
 )
+# CAM RRTMG-style transported layer above the model top (ozone above p_top
+# absorbs; ~2 W/m2 leaves the column budget). The CAM6 AMIP decks set it in
+# YAML; the coupled lane has no YAML, so it rides here.
+CMIP6_FORCING_FLAGS+=( --rrtmgp-overhead-layer )
 
 # --- CLM surfdata (multilayer Richards land; use_multilayer_land: true) -------
 # The production YAML's land needs the CLM surfdata NetCDF staged locally —
