@@ -161,7 +161,7 @@ VALID_MOMENTUM_ADVECTION = frozenset(
 # handled in step().  Keep in sync if a tracer scheme is added.
 VALID_TRACER_ADVECTION = frozenset(
     {"upwind", "centered", "tvd", "superbee", "ppm", "ppm_fct", "fct2",
-     "dst3", "dst3_multidim", "weno5", "weno7", "som"}
+     "dst3", "dst3_multidim", "weno5", "weno7", "som", "none"}
 )
 # WENO vector-invariant momentum-advection literals (Silvestri et al. 2024).
 # vorticity-flux Z and divergence-flux D use this order; vertical C is capped
@@ -203,8 +203,12 @@ VALID_WENO_SMOOTHNESS = frozenset({"split", "standard"})
 # pair and the velocity pair disagree wherever a thickness, a face length or
 # a mask flips a near-zero pair sum, so an unqualified name would be a hidden
 # choice of reference.  A caller that passes one fails validation.
+#   "none"              NEMO ln_dynadv_OFF (n_dynadv = np_LIN_dyn,
+#                       dynadv.f90:185): dyn_adv's SELECT has no case for it,
+#                       so no momentum advection is added.  Pairs only with
+#                       ``vertical_momentum_scheme="none"``.
 VALID_MOMENTUM_FLUX_SCHEME = frozenset(
-    {"upwind", "centered", "nemo_up3", "oceananigans_up3"})
+    {"upwind", "centered", "nemo_up3", "oceananigans_up3", "none"})
 # T-point (same-direction) UP3 upwind selector per reference arm; see above.
 UP3_REFERENCE_SELECTOR = {
     "nemo_up3": "velocity",
@@ -229,10 +233,13 @@ UP3_REFERENCE_SELECTOR = {
 #     -0.9992, ratio 0.998).  See nemo_advective_vertical_momentum_advection.
 #   "nemo_up3" — the live flux-form ln_dynadv_up3 vertical flux from
 #     dynadv_up3.F90:239-365; UP3 correction on full velocity.
+#   "none" — NEMO ln_dynadv_OFF (dynadv.f90:185): no vertical momentum
+#     advection; pairs only with ``momentum_flux_scheme="none"``.
 # The WENO momentum paths (momentum_advection in {weno5,weno7}) own their own
 # vertical reconstruction and ignore this field.
 VALID_VERTICAL_MOMENTUM_SCHEME = frozenset(
-    {"upwind_perturbation", "centered_full", "nemo_advective", "nemo_up3"}
+    {"upwind_perturbation", "centered_full", "nemo_advective", "nemo_up3",
+     "none"}
 )
 # Lateral (harmonic) momentum-viscosity operator form (config.lateral_viscosity_operator):
 # the default VECTOR Laplacian grad(div)−k×grad(curl), or Veros's component-wise
@@ -3159,6 +3166,9 @@ def _bc_vertical_momentum_advection(
     # explicit tendency is never built.
     diag_vertadv_u = jnp.zeros_like(du_dt)
     diag_vertadv_v = jnp.zeros_like(dv_dt)
+    if getattr(config, "vertical_momentum_scheme",
+               "upwind_perturbation") == "none":
+        return du_dt, dv_dt, diag_vertadv_u, diag_vertadv_v
     # Compute the explicit flux-form vertadv tendency when it is either
     # (a) part of the slow forcing (flag off), or (b) needed for the
     # momentum budget as the start-of-step estimate (flag on AND
@@ -4882,6 +4892,8 @@ def _bc_horizontal_momentum_advection_flux_form(
     advection contribution fills the same diagnostic slot the PV flux would
     (so the orchestrator + momentum-diagnostics closure are unchanged).
     """
+    if config.momentum_flux_scheme == "none":
+        return du_dt, dv_dt, jnp.zeros_like(du_dt), jnp.zeros_like(dv_dt)
     if is_tripolar(grid):
         raise ValueError(
             "momentum_advection='flux_form' is not yet implemented on tripolar "
