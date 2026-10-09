@@ -32,7 +32,8 @@ def main(argv=None) -> int:
     a = p.parse_args(argv)
 
     base = xr.open_zarr(a.base, chunks=None)
-    src = xr.open_zarr(a.src, storage_options={"token": "anon"}, chunks=None)
+    anon = {"storage_options": {"token": "anon"}} if a.src.startswith("gs://") else {}
+    src = xr.open_zarr(a.src, chunks=None, **anon)
     t = base["time"].values
     lev = src["level"].values
     up = src[list(LEVEL_VARS)].sel(time=t, level=lev[lev < base["level"].values.min()])
