@@ -31,11 +31,11 @@ def test_render_changes_only_run_protocol(tmp_path) -> None:
     candidate.write_text(gate.render_deck(source.read_text()))
     report = gate.validate_deck(source, candidate)
     assert report["status"] == "RUN_PROTOCOL_ONLY"
-    assert tuple(report["steps"]) == (95,)
-    assert report["restart_mode"] == "frequency-step95"
+    assert tuple(report["steps"]) == gate.REPLACEMENT_STEPS
+    assert report["restart_mode"] == "bounded-list-step95"
     assert report["terminal_sentinel"]
-    assert "ln_rst_list" not in candidate.read_text()
-    assert "nn_stocklist" not in candidate.read_text()
+    assert "ln_rst_list = .true." in candidate.read_text()
+    assert "nn_stocklist = 95, 96" in candidate.read_text()
 
 
 def test_hidden_deck_plant_fires(tmp_path) -> None:
@@ -63,16 +63,16 @@ def test_compiled_restart_list_capacity_plant_fires(tmp_path) -> None:
     source.write_text(_source())
     candidate.write_text(gate.render_deck(source.read_text()))
     with pytest.raises(gate.GateError, match="capacity 10 exceeded"):
-        gate.validate_deck(source, candidate, "explicit-list")
+        gate.validate_deck(source, candidate, "oversized-list")
 
 
-def test_wrong_frequency_plant_fires(tmp_path) -> None:
+def test_disabled_list_plant_fires(tmp_path) -> None:
     source = tmp_path / "source"
     candidate = tmp_path / "candidate"
     source.write_text(_source())
     candidate.write_text(gate.render_deck(source.read_text()))
-    with pytest.raises(gate.GateError, match="write step 95"):
-        gate.validate_deck(source, candidate, "wrong-frequency")
+    with pytest.raises(gate.GateError, match="restart-list mode is off"):
+        gate.validate_deck(source, candidate, "list-disabled")
 
 
 def test_terminal_reopen_requires_zero_length_payload(tmp_path) -> None:

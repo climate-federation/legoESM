@@ -33,12 +33,13 @@ STEPS = (10, 20, 30, 40, 50, 60, 70, 80, 90, 95)
 ITEND = 96
 TERMINAL_SENTINEL = 96
 RESTART_LIST_CAPACITY = 10
+REPLACEMENT_STEPS = (STEPS[-1], TERMINAL_SENTINEL)
 FIELDS = ("tn", "sn", "un", "vn", "sshn")
 PLANTS = (
     "none", "missing-rank", "twin-ulp", "step10-calibration",
     "hidden-deck", "terminal-payload", "missing-sentinel",
-    "sentinel-truncation", "sentinel-header", "explicit-list",
-    "wrong-frequency",
+    "sentinel-truncation", "sentinel-header", "oversized-list",
+    "list-disabled",
 )
 
 
@@ -70,14 +71,24 @@ def _integer(value: str, label: str) -> int:
 
 
 def render_deck(source: str, itend: int = ITEND) -> str:
-    """Write step 95 non-terminally, with step 96 as a distinct sentinel."""
+    """Write step 95 non-terminally with a bounded two-entry restart list."""
 
     require(itend == ITEND, f"unsupported terminal step {itend}")
-    for key, value in (("nn_itend", itend), ("nn_stock", STEPS[-1])):
+    for key, value in (("nn_itend", itend), ("nn_stock", itend)):
         source, count = re.subn(
             rf"^(\s*{key}\s*=\s*)(\S+)", rf"\g<1>{value}", source,
             count=1, flags=re.MULTILINE)
         require(count == 1, f"{key} not found exactly once")
+    lines = (
+        "   ln_rst_list = .true.\n"
+        "   nn_stocklist = "
+        + ", ".join(str(step) for step in REPLACEMENT_STEPS) + "\n"
+    )
+    source, count = re.subn(
+        r"^(\s*nn_stock\s*=\s*\S+[^\n]*\n)",
+        lambda match: match.group(1) + lines,
+        source, count=1, flags=re.MULTILINE)
+    require(count == 1, "restart-list insertion point not found exactly once")
     return source
 
 
@@ -88,12 +99,12 @@ def validate_deck(source: Path, candidate: Path, plant: str = "none") -> dict:
         key = "namtra_ldf.ln_traldf_lap"
         require(key in values, "hidden-deck plant key disappeared")
         values[key] = ".false." if _normal(values[key]) == ".true." else ".true."
-    if plant == "explicit-list":
+    if plant == "oversized-list":
         values["namrun.ln_rst_list"] = ".true."
         values["namrun.nn_stocklist"] = ", ".join(
             str(step) for step in STEPS + (TERMINAL_SENTINEL,))
-    if plant == "wrong-frequency":
-        values["namrun.nn_stock"] = str(TERMINAL_SENTINEL)
+    if plant == "list-disabled":
+        values["namrun.ln_rst_list"] = ".false."
     list_keys = {"namrun.ln_rst_list", "namrun.nn_stocklist"}
     observed_keys = set(values) - set(base)
     require(observed_keys in (set(), list_keys),
@@ -112,18 +123,16 @@ def validate_deck(source: Path, candidate: Path, plant: str = "none") -> dict:
                          for token in values["namrun.nn_stocklist"].split(","))
         require(len(observed) <= RESTART_LIST_CAPACITY,
                 "compiled nn_stocklist capacity 10 exceeded")
-        require(observed == STEPS, f"growth restart steps moved: {observed}")
+        require(observed in (STEPS, REPLACEMENT_STEPS),
+                f"growth restart steps moved: {observed}")
         require(_integer(values["namrun.nn_stock"], "nn_stock") == itend,
-                "historical growth nn_stock disagrees with nn_itend")
-        mode = "explicit-list-historical"
-        sentinel = False
+                "growth nn_stock disagrees with nn_itend")
+        mode = ("explicit-list-historical" if observed == STEPS else
+                "bounded-list-step95")
+        sentinel = observed == REPLACEMENT_STEPS
         steps = observed
     else:
-        require(_integer(values["namrun.nn_stock"], "nn_stock") == STEPS[-1],
-                "growth nn_stock must write step 95 non-terminally")
-        mode = "frequency-step95"
-        sentinel = True
-        steps = (STEPS[-1],)
+        raise GateError("growth replacement requires bounded explicit-list mode")
     return {
         "source": str(source), "candidate": str(candidate),
         "steps": list(steps), "itend": itend, "restart_mode": mode,

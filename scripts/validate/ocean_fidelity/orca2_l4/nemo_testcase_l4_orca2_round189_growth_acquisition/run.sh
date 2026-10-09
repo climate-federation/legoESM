@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ORCA2 round-189 acquisition: write step 95 through the bounded frequency path.
+# ORCA2 round-189 acquisition: write step 95 through a bounded two-entry list.
 set -Eeuo pipefail
 
 refuse_unexpected() {
@@ -28,12 +28,12 @@ base=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round83/acquis
 calibration=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round83/acquisition/orca2_rung0_restart_list_10step_a_np2
 prefix_a=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round186/acquisition/orca2_rung0_growth_96step_a_np2
 prefix_b=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round186/acquisition/orca2_rung0_growth_96step_b_np2
-target_a=$evidence/orca2_rung0_growth_frequency_96step_a_np2
-target_b=$evidence/orca2_rung0_growth_frequency_96step_b_np2
+target_a=$evidence/orca2_rung0_growth_bounded_list_96step_a_np2
+target_b=$evidence/orca2_rung0_growth_bounded_list_96step_b_np2
 gate=$here/../nemo_testcase_l4_orca2_round186_growth_record_gate.py
 prereg=$repo/docs/ocean/fidelity/PREREG_nemo_testcases_l4_orca2_round189.md
-gate_sha=bb359572ccd36e3dbbf9d41731f55ba88008897cacb049d6b1cb254d099325d2
-prereg_sha=f69121675f62740a39c7a9ce0d3b69e59f4b24c1fe75d96c25069f5425942e33
+gate_sha=1421ce5ab278131cfe3ce8436c985bec468b35049a65dd6977c6389d1f168a23
+prereg_sha=3ffa2f493aa1f1b841c9fe15cdae6d15754b0aece5660721f1ffaf2b682488e0
 
 cd "$repo"
 [[ -z "$(git status --porcelain --untracked-files=all)" ]] || {
@@ -77,22 +77,22 @@ export JAX_PLATFORMS=cpu JAX_ENABLE_X64=1
 bash -n "$0"
 "$py" -m py_compile "$gate"
 "$py" "$gate" --render-source "$source" \
-  --render-output "$evidence/namelist_growth_frequency_preflight" \
+  --render-output "$evidence/namelist_growth_bounded_list_preflight" \
   >"$evidence/deck_preflight.log"
-grep -q '"restart_mode": "frequency-step95"' "$evidence/deck_preflight.log" || {
-  printf 'REFUSE: rendered deck is not the bounded frequency protocol\n' >&2; exit 66;
+grep -q '"restart_mode": "bounded-list-step95"' "$evidence/deck_preflight.log" || {
+  printf 'REFUSE: rendered deck is not the bounded two-entry protocol\n' >&2; exit 66;
 }
 grep -q '"physical_delta": \[\]' "$evidence/deck_preflight.log" || {
   printf 'REFUSE: rendered deck carries a physical delta\n' >&2; exit 66;
 }
 
 if [[ "$mode" == --preflight-only ]]; then
-  printf 'ORCA2_ROUND189_GROWTH_FREQUENCY_PREFLIGHT_READY %s\n' "$target_a"
+  printf 'ORCA2_ROUND189_GROWTH_BOUNDED_LIST_PREFLIGHT_READY %s\n' "$target_a"
   exit 0
 fi
 
 admit() {
-  for plant in explicit-list wrong-frequency missing-rank twin-ulp \
+  for plant in oversized-list list-disabled missing-rank twin-ulp \
     step10-calibration hidden-deck missing-sentinel sentinel-truncation sentinel-header; do
     if "$py" "$gate" --source "$source" \
       --deck-a "$target_a/namelist_cfg" --deck-b "$target_b/namelist_cfg" \
@@ -114,7 +114,7 @@ admit() {
   (cd "$evidence" && sha256sum growth_record_admission.json record_*_plant.log \
     "$target_a"/ORCA2_*_restart_*.nc "$target_b"/ORCA2_*_restart_*.nc \
     >ROUND189_SHA256SUMS)
-  printf 'ORCA2_ROUND189_GROWTH_FREQUENCY_RECORD_PASS %s\n' "$target_a"
+  printf 'ORCA2_ROUND189_GROWTH_BOUNDED_LIST_RECORD_PASS %s\n' "$target_a"
 }
 
 if [[ "$mode" == --admit-existing ]]; then
