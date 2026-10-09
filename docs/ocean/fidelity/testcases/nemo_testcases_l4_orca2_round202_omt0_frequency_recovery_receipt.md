@@ -28,8 +28,8 @@ The executable gate now refuses a list whose first entry is the initial step or
 whose entries do not leave an opening step. The replacement launcher uses the
 compiled every-step frequency path: `nn_stock=1`, `ln_rst_list=.false.`, fresh
 round-202 twin target names, unchanged OMT-0 physics, binary and inputs. It
-reuses the previously measured step-11 month boundary; no longer NEMO run is
-requested. CPU preflight emits
+reuses the previously measured step-11 month boundary; no longer-duration NEMO
+run is requested. CPU preflight emits
 `PASS_R202_OMT0_FREQUENCY_RECOVERY_PREFLIGHT` and
 `ORCA2_ROUND202_OMT0_FREQUENCY_PREFLIGHT_READY`.
 
@@ -71,11 +71,19 @@ separate invocation failed before reading the diff with `failed to initialize
 in-process app-server client: Read-only file system (os error 30)`; no review
 verdict is claimed.
 
-The citation audit, focused final tests and required ocean-fidelity battery are
-recorded in the final round commit. No NEMO source, stabiliser, safety
-threshold, tolerance, carried state, physical selector or sea-ice setting was
-changed. ASKED choices: Decision 103's OMT-0 physics and ten-step record.
-UNASKED choices: empty.
+The default citation audit passes 274 citations with zero failures and zero
+unmapped citations. The round-202 audit passes all three citations; its planted
+bad `stprk3.f90` anchor refuses with `SYMBOL-NOT-AT-LINE`. The final focused
+tests pass 26/26. The required `tests/ocean/fidelity -n 12` battery was launched
+exactly once and reached 97%; its only observed failure was the registered
+pre-existing
+`test_nemo_testcase_l2_gyre_round129_spread_floor_gate.py::test_record_backed_gate_passes`.
+It then produced no output for the bounded long-tail wait and was interrupted
+once (exit 130); no terminal battery PASS is claimed.
+
+No NEMO source, stabiliser, safety threshold, tolerance, carried state,
+physical selector or sea-ice setting was changed. ASKED choices: Decision
+103's OMT-0 physics and ten-step record. UNASKED choices: empty.
 
 ## OPEN
 
