@@ -2290,6 +2290,8 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/restart.f90:188-202': [
         ('IF( kt == nitrst ) THEN', 1),
         ('ENDIF', 14), 15],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3.f90:271-271':
+        'IF( lrst_oce   )   CALL rst_write    ( kstp, Nbb, Nnn, Naa )',
     # --- ORCA2 round 200: OMT-0's own first safety boundary ---
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stpctl.f90:176-184': [
         'zmax(1) = MAXVAL( ABS( ssh(:,:,Kmm)           ), mask = llmsk(:,:,1) )',
