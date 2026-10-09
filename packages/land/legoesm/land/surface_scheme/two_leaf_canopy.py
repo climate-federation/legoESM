@@ -39,6 +39,7 @@ from legoesm.land.p_model import (
     VALID_G1_SOURCES,
     acclimated_capacities,
     acclimated_capacities_c4,
+    stressed_rjv25_factor,
 )
 from legoesm.land.canopy.radiative_transfer import (
     split_sw_components, canopy_shortwave_rt, coordination_kn,
@@ -498,6 +499,12 @@ def compute_two_leaf_canopy_fluxes(
                      else w_frac_soil_evap)   # soil evaporation stress
 
     Vc3_leaf_stressed = Vc3_leaf * fStress_vcmax
+    if rjv25 is not None and not _phydro_on:
+        # Least-cost capacities under the empirical stress: rpmodel re-derives
+        # Jmax from the STRESSED Vcmax, so Jmax25/Vcmax25 falls with the stress
+        # (p_model.stressed_rjv25_factor).  P-hydro carries its water
+        # limitation inside the optimum and is left alone.
+        rjv25 = rjv25 * stressed_rjv25_factor(_caps.jmaxlim, fStress_vcmax)
     Vc4_leaf_stressed = Vc4_leaf * fStress_vcmax
     # Stomatal-slope stress: the tabulated slopes are stressed like Vcmax;
     # P-model-predicted slopes are not (see the g1_source dispatch above).

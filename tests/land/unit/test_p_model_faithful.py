@@ -313,3 +313,25 @@ def test_c4_non_vacuity():
         T, D, ca, P, _O_BETA_C4 * 1.001, cfg.vpd_min_pa, cfg.mj_floor_eps,
         cfg.mj_floor_width)
     assert float(caps4.chi_c4[0]) != pytest.approx(o_chi_bad, rel=1e-9)
+
+
+def test_stressed_jmax_ratio_matches_rpmodel_soil_stress():
+    """rpmodel 1.2.3 with ``do_soilmstress=TRUE`` (tc=20, vpd=1000, co2=400,
+    fapar=1, ppfd=800, patm=101325, kphio=0.081785, beta=146, meanalpha=1):
+    the stress s scales Vcmax25 and Jmax25 falls further.  Reference values
+    (vcmax25, jmax25) at soilm = 1.0 / 0.30 / 0.15, from the R package."""
+    ref = {1.00: (79.7245289534, 156.4460197537),
+           0.30: (74.4029166458, 141.9819370461),
+           0.15: (67.7509012612, 125.4199489190)}
+    v0, j0 = ref[1.00]
+    caps = pm.acclimated_capacities(
+        _mk_state(293.15, 1000.0, 400.0, _O_PATM, iabs=800.0), pm.PModelConfig())
+    for soilm in (0.30, 0.15):
+        v, j = ref[soilm]
+        s = v / v0                                  # rpmodel: Vcmax25 scales by s
+        want = (j / v) / (j0 / v0)                  # its Jmax25/Vcmax25, relative
+        got = float(pm.stressed_rjv25_factor(caps.jmaxlim, jnp.asarray(s))[0])
+        assert want < 1.0
+        # 2e-3: the repo's Michaelis-Menten constants differ ~1% from rpmodel's
+        assert got == pytest.approx(want, rel=2e-3)
+    assert float(pm.stressed_rjv25_factor(caps.jmaxlim, jnp.asarray(1.0))[0]) == pytest.approx(1.0)

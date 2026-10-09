@@ -310,3 +310,18 @@ def test_solver_ci_seed_uses_the_pmodel_optimum():
     np.testing.assert_allclose(np.asarray(ci_seed(ca, fc4, chi)), [248.0, 200.0, 360.0])
     g = jax.grad(lambda c: jnp.sum(ci_seed(ca, fc4, c)))(chi)
     assert np.all(np.asarray(g) == 0.0)
+
+
+def test_least_cost_jmax_ratio_is_rederived_under_stress(monkeypatch):
+    """Two-leaf least-cost lane: under the empirical stress the Jmax25/Vcmax25
+    ratio is reduced as in rpmodel (wired, not just defined) — neutralising
+    the factor changes the stressed fluxes and leaves the unstressed ones."""
+    import legoesm.land.surface_scheme.two_leaf_canopy as tl
+    cc = CanopyConfig(stomatal_model="medlyn", capacity_scheme="p_model",
+                      g1_source="p_model").validate()
+    dry, wet = _two_leaf_fluxes(cc, 0.3), _two_leaf_fluxes(cc, 1.0)
+    monkeypatch.setattr(tl, "stressed_rjv25_factor",
+                        lambda jmaxlim, stress: jnp.ones_like(stress))
+    dry_off, wet_off = _two_leaf_fluxes(cc, 0.3), _two_leaf_fluxes(cc, 1.0)
+    np.testing.assert_allclose(wet_off, wet, rtol=1e-6)
+    assert dry[0] < dry_off[0] * (1.0 - 1e-4)       # lower Jmax -> lower GPP

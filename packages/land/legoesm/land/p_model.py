@@ -275,6 +275,7 @@ class PModelCapacities(NamedTuple):
     vcmax25_leaf: jax.Array  # [umol/m^2/s] leaf-top Vcmax25
     rjv25: jax.Array         # [-] Jmax25 / Vcmax25
     g1_kpa: jax.Array        # [kPa^0.5] predicted Medlyn slope (= xi)
+    jmaxlim: jax.Array       # [-] Jmax limitation factor L = sqrt(1 - (c*/mj)^(2/3))
     chi: jax.Array           # [-] ci/ca at the acclimated optimum (diagnostic)
     xi_sqrt_pa: jax.Array    # [Pa^0.5] least-cost xi (diagnostic)
 
@@ -383,7 +384,7 @@ def acclimated_capacities(
     chi, xi, ci, gamma_star, big_k = optimal_chi(
         tg_k, acclim.vpd_mean_pa, acclim.co2_mean_ppm, acclim.ps_ema, cfg
     )
-    vcmax25, rjv25 = capacities_from_chi(
+    vcmax25, rjv25, jmaxlim = capacities_from_chi(
         chi=chi, ci_pa=ci, gamma_star_pa=gamma_star, big_k_pa=big_k,
         tg_k=tg_k, iabs=acclim.iabs_mean, phi0=_phi0(tg_k, cfg), cfg=cfg)
 
@@ -392,8 +393,24 @@ def acclimated_capacities(
     # sqrt(1000) converts Pa^0.5 -> kPa^0.5 (medlyn_gs takes VPD in kPa).
     g1_kpa = xi / jnp.sqrt(1000.0)
     return PModelCapacities(
-        vcmax25_leaf=vcmax25, rjv25=rjv25, g1_kpa=g1_kpa, chi=chi, xi_sqrt_pa=xi
+        vcmax25_leaf=vcmax25, rjv25=rjv25, g1_kpa=g1_kpa, jmaxlim=jmaxlim,
+        chi=chi, xi_sqrt_pa=xi
     )
+
+
+def stressed_rjv25_factor(jmaxlim: jax.Array, stress: jax.Array) -> jax.Array:
+    """Factor on Jmax25/Vcmax25 when an empirical stress scales Vcmax.
+
+    rpmodel's structure (``rpmodel.R``): the soil-moisture stress ``s``
+    multiplies Vcmax, and Jmax is then re-derived from the stressed Vcmax
+    through the Jmax limitation ``L = s * L0`` on the Smith light response,
+    ``Jmax = 4 phi0 Iabs / sqrt(1/L^2 - 1)``.  Jmax therefore falls MORE than
+    Vcmax: ``Jmax_s / Jmax_0 = s * sqrt((1 - L0^2) / (1 - s^2 L0^2))``, and the
+    ratio Jmax/Vcmax is multiplied by the square root returned here (1 at
+    s = 1, ``sqrt(1 - L0^2)`` as s -> 0).
+    """
+    l0_sq = jmaxlim * jmaxlim
+    return jnp.sqrt((1.0 - l0_sq) / (1.0 - stress * stress * l0_sq))
 
 
 def capacities_from_chi(
@@ -406,8 +423,8 @@ def capacities_from_chi(
     iabs: jax.Array,
     phi0: jax.Array,
     cfg: PModelConfig,
-) -> tuple[jax.Array, jax.Array]:
-    """Coordination capacities (Vcmax25, rjv25) at a GIVEN optimal chi.
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """Coordination capacities (Vcmax25, rjv25, L) at a GIVEN optimal chi.
 
     The chi -> capacity algebra shared by the least-cost optimum
     (:func:`acclimated_capacities`) and the P-hydro profit optimum
@@ -437,7 +454,7 @@ def capacities_from_chi(
     # Jmax_growth / Vcmax_growth = 4*sqrt((1-k)/k) / (sqrt(1-k)*mj/mc)
     #                            = 4 / (sqrt(k) * mj/mc)   (phi0, Iabs cancel)
     rjv25 = (4.0 / (jnp.sqrt(k) * mj_over_mc)) * (f_v / f_j)
-    return vcmax25, rjv25
+    return vcmax25, rjv25, sqrt_1mk
 
 
 def init_pmodel_acclim(
