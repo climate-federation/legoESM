@@ -24,6 +24,10 @@ def _report() -> dict:
         },
         "source_rows": [copy.deepcopy(row)],
         "substep_table": [{} for _ in range(65)],
+        "slow_v_arm": {
+            "input": {"comparison_bit_exact": True},
+            "substep_table": [{} for _ in range(65)],
+        },
         "first_nonbit": None,
         "first_over_floor": None,
         "terminal_ulp_control": {"bit_exact": False, "differing_cells": 1},

@@ -39,7 +39,7 @@ from nemo_testcase_l2_gyre_round14_advmean import read_ordered
 
 PLANTS = (
     "none", "record-header", "twin-ulp", "source-order", "passivity",
-    "terminal-ulp",
+    "terminal-ulp", "slow-v-replay",
 )
 
 
@@ -70,6 +70,8 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
         report["offline_replay_passivity"]["ssh"] = False
     elif plant == "terminal-ulp":
         report["terminal_ulp_control"]["bit_exact"] = True
+    elif plant == "slow-v-replay":
+        report["slow_v_arm"]["input"]["comparison_bit_exact"] = False
 
     require(report["claim_label"] == "independent OMT-1", "claim label moved")
     require(report["record_admission"]["stream_count"] == 2,
@@ -85,6 +87,10 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
     require(all(report["offline_replay_passivity"].values()),
             "offline trace does not reproduce the untraced pure solver")
     require(len(report["substep_table"]) == 65, "substep table is incomplete")
+    require(report["slow_v_arm"]["input"]["comparison_bit_exact"],
+            "recorded slow-V substitution did not install exactly")
+    require(len(report["slow_v_arm"]["substep_table"]) == 65,
+            "recorded slow-V replay is incomplete")
     require(report["first_nonbit"] == _first(
         report["source_rows"], "comparison_bit_exact"),
         "first non-bit selector moved")
@@ -169,7 +175,8 @@ def measure(deck_root: Path, twin_a: Path, twin_b: Path,
     require(np.array_equal(np.asarray([dt]), np.asarray([ordered["dt"]])),
             f"external substep dt moved: {dt} != {ordered['dt']}")
 
-    def solve(trace: bool):
+    def solve(trace: bool, slow_v_override=None):
+        selected_v = slow_v if slow_v_override is None else slow_v_override
         return jax.device_get(jax.jit(lambda seed, f_eta, f_u, f_v: (
             barotropic_substeps_latlon_cgrid(
                 seed, dt, 65, card.recipe.grid, card.recipe.z_coord, cfg,
@@ -178,7 +185,8 @@ def measure(deck_root: Path, twin_a: Path, twin_b: Path,
                 u_now=seed.u.data, v_now=seed.v.data,
                 _nemo_substep_trace_test_hook=trace,
             )
-        ))(state, jnp.asarray(zero_eta), jnp.asarray(slow_u), jnp.asarray(slow_v)))
+        ))(state, jnp.asarray(zero_eta), jnp.asarray(slow_u),
+           jnp.asarray(selected_v)))
 
     live = solve(False)
     traced = solve(True)
@@ -212,6 +220,11 @@ def measure(deck_root: Path, twin_a: Path, twin_b: Path,
     source_rows = entry_rows + substep_rows
     first_nonbit = _first(source_rows, "comparison_bit_exact")
     first_over = _first(source_rows, "at_floor")
+    recorded_slow_v = np.asarray(slow_v).copy()
+    recorded_slow_v[1:149, :90] = ordered["slow_v"][0]
+    slow_v_arm = solve(True, slow_v_override=recorded_slow_v)
+    slow_v_rows, slow_v_table = r205._summary_table(
+        slow_v_arm[2], substeps, masks)
     one = np.asarray([1.0], dtype=np.float64)
     next_one = np.nextafter(one, np.inf)
     raw = {
@@ -227,6 +240,15 @@ def measure(deck_root: Path, twin_a: Path, twin_b: Path,
         "source_rows": source_rows,
         "substep_rows": substep_rows, "substep_table": substep_table,
         "first_nonbit": first_nonbit, "first_over_floor": first_over,
+        "slow_v_arm": {
+            "source_statement": "dynspg_ts.f90:289,320-324",
+            "input": r205._score(r205._native_v(recorded_slow_v),
+                                  ordered["slow_v"][0], masks["v"]),
+            "terminal": r205._terminal_rows(live, slow_v_arm),
+            "first_nonbit": _first(slow_v_rows, "comparison_bit_exact"),
+            "first_over_floor": _first(slow_v_rows, "at_floor"),
+            "substep_table": slow_v_table,
+        },
         "terminal_ulp_control": {
             "bit_exact": bool(np.array_equal(one, next_one)),
             "differing_cells": int(np.count_nonzero(one != next_one)),
