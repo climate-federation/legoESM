@@ -86,10 +86,18 @@ before the operator record exists and remain explicitly unmeasured.
 
 ## Validation and review
 
-The direct round-199 suite passes 8/8. Python compilation, shell syntax and
-`git diff --check` pass. The launcher first failed with `Permission denied`
-because its executable bit was absent; commit `495d257b2` fixes the packaging
-defect, and the unchanged preflight then passed. No NEMO run was attempted.
+The direct round-199 suite passes 8/8; the combined focused round-199 and
+citation-gate suites pass 25/25. Python compilation, shell syntax and
+`git diff --check` pass. The required single `tests/ocean/fidelity -n 12`
+battery collected 2,960 tests and advanced through 98%. It emitted only the
+registered pre-existing worktree-stamp ratchet
+`test_every_driver_that_arms_the_escape_scopes_it`, then stopped producing
+output for more than 15 minutes and was bounded by one interrupt; it therefore
+has no complete-suite PASS claim. The red was reproduced alone (1 failed) and
+names the same 13 VORTEX drivers, none touched by this round. The launcher
+first failed with `Permission denied` because its executable bit was absent;
+commit `495d257b2` fixes the packaging defect, and the unchanged preflight then
+passed. No NEMO run was attempted.
 
 Independent read-only Codex review is unavailable in-sandbox. The required
 separate invocation found the binary, then failed before reading the diff with
