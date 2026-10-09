@@ -1361,6 +1361,13 @@ FILES = {
     # TSUNAMI lane round 4
     "TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/dynvor.f90": (
         NEMO / "tests/TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/dynvor.f90"),
+    # TSUNAMI lane round 5 (the j-periodic exchange)
+    "TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/lbclnk.f90": (
+        NEMO / "tests/TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/lbclnk.f90"),
+    "TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/lbcnfd.f90": (
+        NEMO / "tests/TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/lbcnfd.f90"),
+    "TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/mppini.f90": (
+        NEMO / "tests/TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/mppini.f90"),
 }
 
 # citation -> the anchors that IDENTIFY its first and last line, plus the
@@ -1446,6 +1453,17 @@ CITATION_MAP = {
     'TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/stprk3_stg.f90:467': 'ts(:,:,:,jn,Krhs) = 0._wp',
     'TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/dynvor.f90:857-860': [('CASE( np_LIN_dyn )', 1), ('ntot = np_COR', 1), 4],
     'TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/stprk3_stg.f90:503-505': [('ts(ji,jj,jk,jn,Kaa) = (        ( 1._wp + r3t(ji,jj,Kbb) )*ts(ji,jj,jk,jn,Kbb )', 1), ('/          ( 1._wp + r3t(ji,jj,Kaa) )', 1), 3],
+    # --- TSUNAMI lane round 5 (the j-periodic exchange) ---
+    'TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/lbclnk.f90:1868': ('ELSEIF(    l_SelfPerio(jn) ) THEN   ;   ifill(jn,jf) = jpfillperio', 3),
+    'TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/lbclnk.f90:2026-2033': [("IF(     jn == jpso .OR. jn == jpsw .OR. jn == jpse ) THEN   ! southern side", 4), ("IF( ifill(jn,jf) == jpfillperio ) THEN   ;   ishtj2 = ishtSj(jpso,jf)       ;   isgnj2 =  1", 4), 8],
+    'TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/lbclnk.f90:2041-2046': [("DO jl = 1, ipl(jf)  ;  DO jk = 1, ipk(jf)  ;  DO jj = 1,isizej(jn,jf)  ;  DO ji = 1,isizei(jn,jf)", 13), ("ptab(jf)%pt4d(ii1,ij1,jk,jl) = ptab(jf)%pt4d(ii2,ij2,jk,jl)", 4), 6],
+    'TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/lbclnk.f90:2111-2112': [("IF( l_IdoNFold ) THEN", 3), ("CALL lbc_nfd(         ptab, cd_nat, psgn", 3), 2],
+    'TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/mppini.f90:432': 'l_SelfPerio(3:4) = l_Jperio .AND. jpnj == 1',
+    'TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/mppini.f90:582': 'l_IdoNFold = ijn(narea) == jpnj .AND. l_NFold',
+    'TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/lbcnfd.f90:561': 'SUBROUTINE lbc_nfd_dp( ptab, cd_nat, psgn, kfld )',
+    'TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/lbcnfd.f90:584': ("CASE ( 'T' , 'W' )", 5),
+    'TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/lbcnfd.f90:639': ("CASE ( 'U' )", 5),
+    'TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/lbcnfd.f90:684': ("CASE ( 'V' )", 5),
     'nemogcm.F90:166': ('CALL stp_RK3', 1),
     'stprk3_stg.F90:143-145': [('ssh (:,:,Kaa) = r2_3 * ssh (:,:,Kbb) + r1_3 * ssha(:,:)', 2), ('vv_b(:,:,Kaa) = va_b(:,:)', 2), 3],
     'stprk3_stg.F90:158': "CALL lbc_lnk( 'stp_RK3_stg', r3ua, 'U', 1._wp, r3va, 'V', 1._wp, r3fa, 'F', 1._wp )",
