@@ -140,6 +140,14 @@ FILES = {
         _ORCA2_COMPILED / "restart.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcflx.f90": (
         _ORCA2_COMPILED / "sbcflx.f90"),
+    "VORTEX_SMT4_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/stprk3_stg.f90": (
+        NEMO / "tests/VORTEX_SMT4_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/stprk3_stg.f90"),
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/diawri.f90": (
+        _ORCA2_COMPILED / "diawri.f90"),
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/tradmp.f90": (
+        _ORCA2_COMPILED / "tradmp.f90"),
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/dtatsd.f90": (
+        _ORCA2_COMPILED / "dtatsd.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90": (
         _ORCA2_COMPILED / "stprk3_stg.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3.f90": (
@@ -1366,6 +1374,27 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- SMT-RUNGS round 1: NEMO tra_dmp / dta_tsd survey ---
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/diawri.f90:134': 'IF( ninist == 1 ) THEN     !==  Output the initial state and forcings  ==!',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/diawri.f90:601': "CALL iom_rstput( 0, 0, inum, 'votemper', ts(:,:,:,jp_tem,Kmm) )",
+    'VORTEX_SMT4_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/stprk3_stg.f90:513': 'CASE ( 3 )        !==  Stage 3  ==!   add all left over RHS terms',
+    'VORTEX_SMT4_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/stprk3_stg.f90:526': 'CALL tra_ldf( kstp, Kbb, Kmm, ts, Krhs )',
+    'VORTEX_SMT4_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/stprk3_stg.f90:529': 'IF( ln_tradmp  )   CALL tra_dmp( kstp, Kbb, Kmm, ts, Krhs )',
+    'VORTEX_SMT4_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/stprk3_stg.f90:538': 'CALL tra_zdf( kstp, Kbb, Kmm, Krhs, ts    , Kaa  )',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/tradmp.f90:181': 'CALL dta_tsd( kt, zts_dta )',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/tradmp.f90:184': 'tclim(ji,jj,jk) = zts_dta(ji,jj,jk,jp_tem)',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/tradmp.f90:190': 'CASE( 0 )',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/tradmp.f90:194': '&                  + resto(ji,jj,jk) * ( zts_dta(ji,jj,jk,jn) - pts(ji,jj,jk,jn,Kbb) )',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/tradmp.f90:200': 'IF( avt(ji,jj,jk) <= avt_c ) THEN',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/tradmp.f90:210': 'IF( ((gdept_1d(jk) ) *(1._wp+r3t(ji,jj,Kmm))) >= hmlp (ji,jj) ) THEN',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/tradmp.f90:302': 'CALL dta_tsd_init( ld_tradmp=ln_tradmp )',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/tradmp.f90:306': "CALL iom_get  ( imask, jpdom_auto, 'resto', resto )",
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dtatsd.f90:139': 'IF( PRESENT( ld_tradmp ) )   ln_tsd_dmp = .TRUE.',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dtatsd.f90:212': 'CALL fld_read( kt, 1, sf_tsd )',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dtatsd.f90:261': 'ptsd(ji,jj,jk,jp_tem) = sf_tsd(jp_tem)%fnow(ji,jj,jk)    ! NO mask',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dtatsd.f90:308': 'ptsd(ji,jj,jk,jp_tem) = ptsd(ji,jj,jk,jp_tem) * tmask(ji,jj,jk)    ! Mask',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:700': 'CASE ( 3 )        !==  Stage 3  ==!   add all left over RHS terms',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:740': 'IF( ln_tradmp  )   CALL tra_dmp( kstp, Kbb, Kmm, ts, Krhs )',
     # --- ORCA2 round 112: executed ff_f read/fill and literal EEN consumer ---
     'ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo/domhgr.f90:101-108': [
         ('IF( ln_read_cfg ) THEN', 1),
