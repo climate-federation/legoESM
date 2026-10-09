@@ -77,6 +77,7 @@ from legoesm.land.canopy.clm_ml_backend.multilayer_canopy.MLPlantHydraulicsMod i
 from legoesm.land.canopy.clm_ml_backend.multilayer_canopy.MLRungeKuttaMod import RungeKuttaIni, RungeKuttaUpdate  # noqa: F401
 from legoesm.land.canopy.clm_ml_backend.multilayer_canopy.MLSolarRadiationMod import SolarRadiation  # noqa: F401
 from legoesm.land.canopy.clm_ml_backend.multilayer_canopy.MLWaterVaporMod import LatVap  # noqa: F401
+from legoesm.land.canopy.clm_ml_backend.multilayer_canopy.MLSoilFluxesMod import soil_latent_heat  # noqa: F401
 
 # ---------------------------------------------------------------------------
 # Module-level cache for Runge-Kutta coefficients (computed once on first
@@ -1970,7 +1971,12 @@ def _CanopyFluxesDiagnostics(
             etflx_val = mlcanopy_inst.etair_profile[p, _ncan]
             # LatVap accepts a traced jnp scalar (jnp.where internally); the
             # former float() cast broke the tape and is unnecessary in both modes.
-            lhflx_val = etflx_val * LatVap(mlcanopy_inst.tref_forcing[p])
+            # legoESM deviation (#1875): the ground's vapour (etsoi) is charged
+            # soil_latent_heat, not LatVap(tref) (sublimation over snow); leaf
+            # and canopy-air vapour keep LatVap(tref).  Exact for 0 snow weight.
+            _lam_air = LatVap(mlcanopy_inst.tref_forcing[p])
+            lhflx_val = etflx_val * _lam_air + mlcanopy_inst.etsoi_soil[p] * (
+                soil_latent_heat(mlcanopy_inst, p) - _lam_air)
         else:
             endrun(msg=" ERROR: CanopyFluxesDiagnostics: turbulence type not valid")
             shflx_val = etflx_val = lhflx_val = 0.0  # Unreachable

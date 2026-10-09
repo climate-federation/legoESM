@@ -204,15 +204,6 @@ def horizontal_axes(lay: WindowLayout, shape, lead):
     return None
 
 
-def _wshape(lay: WindowLayout, shape, axes):
-    """Flat stacked shape -> window stacked shape (leading axis nb)."""
-    out = list(shape)
-    out[0] = lay.nb
-    for a in axes:
-        out[a] = window_axis_extent(lay, shape[a])
-    return tuple(out)
-
-
 def _fshape(lay: WindowLayout, shape, axes):
     out = list(shape)
     out[0] = 6

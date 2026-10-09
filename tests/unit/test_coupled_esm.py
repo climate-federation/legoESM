@@ -424,6 +424,60 @@ class TestCarbonRadiationCoupling(unittest.TestCase):
         self.assertGreater(ov, 1e-4)
         self.assertLess(ov, 1e-3)
 
+    def test_co2_override_is_air_mass_weighted(self):
+        """#1817: radiative CO2 = total CO2 mass / total air mass, not jnp.mean."""
+        import numpy as np
+        from legoesm import constants
+        driver = _make_driver("slab_carbon", days=1)
+        # Lowest layer twice as rich: plain and mass-weighted means differ.
+        driver._co2_field = driver._co2_field.at[..., -1].multiply(2.0)
+        q = np.asarray(driver._co2_field)
+        dp = np.asarray(driver._atm.sigma.layer_thickness_dp(
+            driver._atm.state.p_s.data))
+        area = np.asarray(driver._atm.grid.grid_area)[..., None]
+        ratio = constants.M_CO2 / constants.M_air
+        expected = float((q * dp * area).sum() / (dp * area).sum()) / ratio
+        unweighted = float(q.mean()) / ratio
+        self.assertGreater(abs(unweighted - expected), 1e-3 * expected)
+        driver._update_co2_radiation()
+        ov = driver._atm._co2_vmr_override
+        self.assertAlmostEqual(ov, expected, delta=1e-6 * expected)  # float32 field
+        # d(mean)/dq = each cell-layer's share of the air mass (dp*area).
+        field0 = driver._co2_field
+
+        def mean_of(field):
+            driver._co2_field = field
+            return driver._co2_global_mean_kgkg()
+
+        g = np.asarray(jax.grad(mean_of)(field0))
+        driver._co2_field = field0
+        share = (dp * area) / (dp * area).sum()
+        np.testing.assert_allclose(g, share, rtol=1e-5, atol=0.0)
+        # MPAS-style halo: non-owned cells hold NaN; they must not reach the
+        # value or the gradient.
+        from types import SimpleNamespace
+        own = np.ones(dp.shape[:-1], bool)
+        own.reshape(-1)[::3] = False
+        driver._atm._voronoi_layout = SimpleNamespace(
+            owned_mask_cells=jnp.asarray(own))
+        nan_halo = jnp.where(jnp.asarray(own)[..., None], field0, jnp.nan)
+        state0 = driver._atm.state
+        driver._atm.state = state0._replace(p_s=state0.p_s.replace(
+            data=jnp.where(jnp.asarray(own), state0.p_s.data, jnp.nan)))
+        m = own[..., None]
+        expected_owned = float((q * dp * area * m).sum() / (dp * area * m).sum())
+        self.assertAlmostEqual(float(mean_of(nan_halo)), expected_owned,
+                               delta=1e-6 * expected_owned)
+        self.assertTrue(np.all(np.isfinite(np.asarray(
+            jax.grad(mean_of)(nan_halo)))))
+        driver._atm._voronoi_layout = None
+        driver._atm.state = state0
+        driver._co2_field = field0
+        # The logged global mean is the value that forces the radiation.
+        driver._log_coupled_diag(0.0)
+        self.assertAlmostEqual(driver._coupled_diag[-1]["co2_ppmv_mean"],
+                               ov * 1e6, delta=1e-6 * ov * 1e6)
+
 
 class TestSlabSimple(unittest.TestCase):
     """Slab ocean + slab bucket land."""

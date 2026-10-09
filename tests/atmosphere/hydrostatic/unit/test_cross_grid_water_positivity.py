@@ -137,7 +137,8 @@ def test_spectral_positivity_global_residual_is_area_weighted():
     m = lambda q: float(jnp.sum(q * dp * area))             # noqa: E731
     assert abs(m(qv_out) - m(qv)) <= 1e-9 * abs(m(qv))
     ctrl, _ = apply_water_positivity({"q_v": qv}, None, dp,
-                                     conservative=True, energy_consistent=False)
+                                     conservative=True, energy_consistent=False,
+                                     area=None)
     assert abs(m(ctrl["q_v"]) - m(qv)) > 1e-6 * abs(m(qv))   # dp-only mis-conserves
 
 
@@ -176,7 +177,8 @@ def test_latlon_positivity_global_residual_is_area_weighted():
     m = lambda q: float(jnp.sum(q.astype(jnp.float64) * dp * area))  # noqa: E731
     assert abs(m(qv_out) - m(qv)) <= 1e-9 * abs(m(qv))
     ctrl, _ = apply_water_positivity({"q_v": qv}, None, dp,
-                                     conservative=True, energy_consistent=False)
+                                     conservative=True, energy_consistent=False,
+                                     area=None)
     assert abs(m(ctrl["q_v"]) - m(qv)) > 1e-5 * abs(m(qv))
 
 
@@ -190,7 +192,8 @@ def _area_budget_check(q_in, q_out, dp, area, ctrl_dp_only):
     assert float(jnp.min(q_out)) >= -1e-30
     assert abs(m(q_out) - m(q_in)) <= 1e-9 * abs(m(q_in))
     ctrl, _ = apply_water_positivity({"q_v": q_in}, None, ctrl_dp_only,
-                                     conservative=True, energy_consistent=False)
+                                     conservative=True, energy_consistent=False,
+                                     area=None)
     assert abs(m(ctrl["q_v"]) - m(q_in)) > 1e-6 * abs(m(q_in))
 
 

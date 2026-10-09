@@ -170,7 +170,7 @@ def stage_halo_note_for(n_ranks: int, halo_refresh: str):
 
 def build_global_problem(subdivision: int, nlev: int, seed: int = 0,
                          barotropic_solver: str = "explicit_substep",
-                         pcg_variant: str = "standard",
+                         pcg_variant: str | None = None,
                          n_barotropic_substeps: int = 10,
                          conservation_fixer: bool = True,
                          eta_floor_clamp_iters: int = 3):
@@ -192,7 +192,7 @@ def build_global_problem(subdivision: int, nlev: int, seed: int = 0,
 
 
 def build_problem_config(nlev: int, *, barotropic_solver: str = "explicit_substep",
-                         pcg_variant: str = "standard",
+                         pcg_variant: str | None = None,
                          n_barotropic_substeps: int = 10,
                          conservation_fixer: bool = True,
                          eta_floor_clamp_iters: int = 3):
@@ -213,14 +213,17 @@ def build_problem_config(nlev: int, *, barotropic_solver: str = "explicit_subste
         # armed — the OMIP production barotropic path.  The model ctor
         # validates the literal (raises on unknown).
         barotropic_solver=barotropic_solver,
-        # Reduction strategy inside the distributed fixed-M PCG.  At M=60
-        # (the config default) "standard" costs 1 + 2*M batched allreduces
+        # Reduction strategy inside the distributed fixed-M PCG.  At M=20
+        # (this bench's poly pin) "standard" costs 1 + 2*M batched allreduces
         # per implicit solve and "single_reduce" (Chronopoulos-Gear) costs
-        # 1 + M -- 121 vs 61 latency-serialized global reductions, which is
+        # 1 + M -- 41 vs 21 latency-serialized global reductions, which is
         # what actually binds as the communicator reaches 256-512 ranks.
         # Not the default: it is a different (equivalent-in-exact-arithmetic)
         # recurrence, so it is opt-in and parity-gated, per the audit.
-        barotropic_implicit_pcg_variant=pcg_variant,
+        # None keeps MPASOceanConfig's own default, so a bench row measures
+        # the production recurrence unless a variant is asked for.
+        **({} if pcg_variant is None
+           else {"barotropic_implicit_pcg_variant": pcg_variant}),
         # Production-like conservation fixers: without them the explicit
         # subcycle's raw volume drift (~1e-4 over a smoke window) would
         # trip the gate — and their global reductions are exactly the
@@ -361,12 +364,12 @@ def main() -> int:
                    default="auto")
     p.add_argument("--pcg-variant",
                    choices=["standard", "single_reduce"],
-                   default="standard",
+                   default=None,
                    help="reduction strategy inside the distributed fixed-M "
                         "PCG (implicit_cn only). 'standard' costs 1+2M "
                         "batched allreduces per solve, 'single_reduce' "
-                        "(Chronopoulos-Gear) costs 1+M -- at the M=60 "
-                        "default that is 121 vs 61 latency-serialized "
+                        "(Chronopoulos-Gear) costs 1+M -- at this bench's "
+                        "M=20 that is 41 vs 21 latency-serialized "
                         "global reductions, the term that binds at "
                         "256-512 ranks. NOT a 2x step speedup: it also adds "
                         "one extra A_op (hence one extra halo exchange) in "
@@ -547,7 +550,7 @@ def main() -> int:
     # single-rank takes the stock-CG branch instead).  Refuse the two
     # combinations where the flag would be silently inert rather than emit a
     # row whose solver label is not what ran (codex review).
-    if args.pcg_variant != "standard":
+    if args.pcg_variant not in (None, "standard"):
         if args.barotropic_solver != "implicit_cn":
             raise SystemExit(
                 f"--pcg-variant {args.pcg_variant} only affects the implicit "
@@ -583,6 +586,16 @@ def main() -> int:
         n_barotropic_substeps=args.n_substeps,
         conservation_fixer=(args.conservation_fixer == "on"),
         eta_floor_clamp_iters=args.eta_floor_iters)
+    # The MPI Voronoi lane cannot run the global "gpoly" preconditioner (no
+    # deep SPMD halo; the solver refuses it), so this bench keeps the solve
+    # that preceded the 2026-10-02 default move: block-local poly at 20
+    # iterations. The recurrence follows --pcg-variant, else "standard" (its
+    # default before the per-backend bundle); it is stamped in the receipt.
+    # Rows are therefore NOT the production solver.
+    config = config._replace(barotropic_implicit_pcg_precond="poly",
+                             barotropic_implicit_pcg_fixed_iters=20,
+                             barotropic_implicit_pcg_variant=(
+                                 config.barotropic_implicit_pcg_variant or "standard"))
     is_rank0 = rank == 0
 
     # Serial reference for the parity gate: EVERY rank, BEFORE arming MPI
@@ -921,10 +934,10 @@ def main() -> int:
         # pre-existing row, so historic receipts stay comparable.
         solver_variant=(
             f"mpas_ocean_{args.barotropic_solver}"
-            + (f"_{args.pcg_variant}"
+            + (f"_{config.barotropic_implicit_pcg_variant}"
                if (args.barotropic_solver == "implicit_cn"
                    and n_ranks > 1
-                   and args.pcg_variant != "standard")
+                   and config.barotropic_implicit_pcg_variant != "standard")
                else "")),
         cells_per_rank=int(mesh.nCells) * args.nlev // n_ranks,
         scaling_kind=args.mode,
@@ -938,6 +951,14 @@ def main() -> int:
             "halo_refresh": halo_refresh,
             "barotropic_solver": args.barotropic_solver,
             "pcg_variant": args.pcg_variant,
+            # The fixed-M PCG only runs on the distributed implicit solve;
+            # None elsewhere (explicit substeps, or single-rank stock CG).
+            **({"pcg_precond": config.barotropic_implicit_pcg_precond,
+                "pcg_variant_effective": config.barotropic_implicit_pcg_variant,
+                "pcg_fixed_iters": int(config.barotropic_implicit_pcg_fixed_iters)}
+               if args.barotropic_solver == "implicit_cn" and n_ranks > 1 else
+               {"pcg_precond": None, "pcg_variant_effective": None,
+                "pcg_fixed_iters": None}),
             "n_barotropic_substeps": args.n_substeps,
             "conservation_fixer": args.conservation_fixer,
             "eta_floor_clamp_iters": args.eta_floor_iters,

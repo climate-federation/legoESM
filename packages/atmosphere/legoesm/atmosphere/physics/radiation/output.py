@@ -50,3 +50,7 @@ class RadiationOutput(NamedTuple):
     lw_heating_rate: jax.Array
     sw_heating_rate: jax.Array
     toa_insolation: jax.Array | None = None   # (ncol,) prescribed TOA incident SW [W/m^2] (#620)
+    # (ncol,) clear-sky (clouds removed) TOA upward fluxes [W/m^2] from the
+    # same solve, when ``solve_columns(clear_sky=True)``; else None.
+    lw_flux_up_toa_clr: jax.Array | None = None
+    sw_flux_up_toa_clr: jax.Array | None = None

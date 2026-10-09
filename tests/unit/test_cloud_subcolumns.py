@@ -318,3 +318,51 @@ def test_validate_strict_bounds_the_subcolumn_count():
     for bad in (0, 65):
         with pytest.raises((ValueError, SystemExit), match="n_subcolumns"):
             ExperimentConfig(cloud_n_subcolumns=bad).validate_strict()
+
+
+# ------------------------------------------------------------ McICA shift
+
+def test_shift_keeps_the_per_layer_marginal():
+    cf = _cf()
+    shift = jnp.linspace(0.0, 0.97, cf.shape[0])
+    m = np.asarray(generate_subcolumns(cf, 32, shift=shift))
+    err = np.abs(m.mean(axis=0) - np.asarray(cf))
+    assert err.mean() < 0.02, f"mean marginal error {err.mean():.4f}"
+
+
+def test_each_g_point_sees_random_overlap_across_columns():
+    """Two cloud layers separated by a clear one overlap RANDOMLY (cover 0.75).
+    Averaged over columns, every subcolumn (g-point) must see that, not only
+    the mean over g-points: a shift shared by all layers kept each subcolumn's
+    layer pairing fixed, so single g-points sat at cover 0.5 or 1.0 (codex)."""
+    ncol = 2000
+    cf = jnp.broadcast_to(jnp.asarray([0.5, 0.0, 0.5]), (ncol, 3))
+    shift = (jnp.arange(ncol) + 0.5) / ncol
+    cover = np.asarray(generate_subcolumns(cf, 112, shift=shift)).any(-1).mean(1)
+    assert np.abs(cover - 0.75).max() < 0.06, np.abs(cover - 0.75).max()
+
+
+def test_shift_changes_which_subcolumn_is_cloudy():
+    """Identical columns with different shifts get different subcolumn masks,
+    so a g-point is not paired with the same cloud sample in every column."""
+    cf = jnp.broadcast_to(_cf()[5], (2, NLEV))
+    m = np.asarray(generate_subcolumns(cf, 16, shift=jnp.asarray([0.0, 0.37])))
+    assert not np.array_equal(m[:, 0], m[:, 1])
+
+
+def test_in_cloud_paths_match_the_subcolumn_paths():
+    from legoesm.atmosphere.physics.clouds.subcolumns import in_cloud_paths
+    cf = _cf()
+    lwp = cf * 0.05
+    iwp = cf * 0.01
+    mask = jnp.ones((1,) + cf.shape, dtype=bool)
+    l1, i1 = subcolumn_paths(mask, cf, lwp, iwp)
+    l2, i2 = in_cloud_paths(cf, lwp, iwp)
+    assert np.array_equal(np.asarray(l1), np.asarray(l2))
+    assert np.array_equal(np.asarray(i1), np.asarray(i2))
+
+
+def test_validate_strict_accepts_mcica():
+    from legoesm.driver.config import ExperimentConfig
+
+    ExperimentConfig(cloud_vertical_overlap_optics="mcica").validate_strict()

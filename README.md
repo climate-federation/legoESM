@@ -2,7 +2,7 @@
   <img src="docs/assets/legoESM.png" alt="legoESM" width="400">
 </p>
 
-# legoESM v0.1
+# legoESM 1.0
 
 **A Differentiable Earth System Model in JAX**
 
@@ -83,36 +83,39 @@ component plugs into the matrix framework.
   - **MPAS / Voronoi icosahedral**: hydrostatic, non-hydrostatic
   - **SFNO data-driven cores**: shallow water and hydrostatic learned solvers
   - **Tracer transport** modules on cubed-sphere, lat-lon, and Voronoi, with RK3 time stepping for full 3rd-order convergence
-- **Single-column model (SCM)** (`legoesm.atmosphere.scm.SingleColumnModel`, `scripts/matrix/run_scm_test_matrix.py`): dycore-free driver that reuses the full physics factory for RCE, GABLS-style boundary-layer cases, parameterization integration tests, and any-scheme × any-integrator swap-matrix sweeps
-- **Vertical coordinates**: pure sigma and hybrid sigma–pressure (L20–L60, sinh stretching)
+- **Single-column model (SCM)** (`legoesm.atmosphere.forcing.scm.scm.SingleColumnModel`, `scripts/matrix/run_scm_test_matrix.py`): dycore-free driver that reuses the full physics factory for RCE, GABLS-style boundary-layer cases, parameterization integration tests, and any-scheme × any-integrator swap-matrix sweeps
+- **Vertical coordinates**: pure sigma, hybrid sigma–pressure (L20–L60, sinh stretching), and the CAM 32-level hybrid table (`cam_l32`)
 - **Physics packages** (each with a config NamedTuple, factory dispatch in `integration.py`, and direct unit tests):
-  - **Radiation**: gray (Frierson-style) and RRTMGP correlated-k (LW + SW) with diurnal cycle, prescribed/transient ozone, aerosols, solar TSI, and cloud–radiation coupling
+  - **Radiation**: gray (Frierson-style) and RRTMGP correlated-k (LW + SW) with diurnal cycle, prescribed/transient ozone, aerosols (per-band SSA/asymmetry), solar TSI, and cloud–radiation coupling with McICA or maximum-random cloud overlap
   - **Convection**: Bechtold, Tiedtke, Kain–Fritsch, Zhang–McFarlane, Emanuel, Kuo, SBM, plus a deep convection adjustment (DCA) — sharing a unified mass-flux core with a stratospheric mass-flux gate
-  - **Microphysics**: Kessler, Sundqvist large-scale condensation, Morrison double-moment, Seifert–Beheng, Thompson, plus an ML emulator path
-  - **Cloud fraction**: Sundqvist and Xu–Randall
-  - **Boundary layer / turbulence**: Louis, Holtslag–Boville, YSU, EDMF, TKE 1.5-order, CLUBB-lite, Smagorinsky, surface-layer Monin–Obukhov, vertical diffusion, with PBL-height diagnosis
-  - **Gravity-wave drag**: Lindzen, Hines, McFarlane, Rayleigh, prognostic spectral, ML emulator
+  - **Microphysics**: Kessler, Sundqvist large-scale condensation, Morrison double-moment (CAM6 MG2 or SAM flavour), Seifert–Beheng, Thompson, P3, SDM, fast SBM, plus an ML emulator path
+  - **Cloud fraction**: Sundqvist, Xu–Randall, and CAM6 CLUBB (PDF liquid fraction + CAM ice fraction)
+  - **Boundary layer / turbulence**: Louis, Holtslag–Boville, YSU, EDMF, TKE 1.5-order, MYNN-2.5, CLUBB-lite, prognostic CLUBB, Smagorinsky, surface-layer Monin–Obukhov, vertical diffusion, with PBL-height diagnosis
+  - **Gravity-wave drag**: Lindzen, Hines, McFarlane, Rayleigh, E3SM/CAM (incl. frontogenesis source), prognostic spectral, ML emulator; `+`-joined compositions (e.g. `hines+mcfarlane`)
   - **Held–Suarez** dry forcing for benchmark runs
+- **Production AMIP configuration**: the CAM6 physics suite (Zhang–McFarlane, prognostic CLUBB, MG2-style Morrison, RRTMG + McICA, McFarlane orographic GWD, CESM Large–Yeager fluxes, interactive multilayer land) on the MPAS grid at level 6 / L32 — `config/amip/amip_production.yaml`; see [docs/user-guide/amip.md](docs/user-guide/amip.md)
 
 ### Ocean
 
 - **3D ocean dynamics**: split-explicit baroclinic / barotropic (cubed-sphere C-D, lat-lon C-grid, MPAS Voronoi, FC-Gram) with implicit-barotropic, BEBT-blended free-surface, MAXVEL clip, sponge relaxation, mass-conservation projection, and shared baroclinic helpers (EOS-pressure iteration, virtual-salt freshwater flux, implicit bottom-drag factor)
 - **Grids**: lat-lon (regular + Mercator), tripolar (NEMO eORCA1 mesh_mask loader + tensor pole-fold halo), cubed-sphere C-D, MPAS Voronoi (LSQ edge-to-cell + Thuburn kite-area TRiSK); cross-grid metric-consistency test matrix at 57/57 PASS
 - **Spectral ocean** (research path) and **SFNO learned ocean**
-- **Ocean physics**: KPP / Richardson / constant vertical mixing; Jayne–St-Laurent (2001) abyssal tidal mixing with tracer-mixing integration; harmonic, biharmonic, GM-Redi (cubed-sphere, lat-lon, MPAS variants), Visbeck adaptive-GM, Leith viscosity, and backscatter lateral mixing; convective adjustment (enhanced diffusion + plume); linear / quadratic bottom drag with implicit factor; bulk-formula / restoring / prescribed surface forcing; shortwave penetration (Jerlov)
+- **Ocean physics**: KPP / NEMO-style TKE (zdftke) / CATKE / Richardson / constant vertical mixing; Jayne–St-Laurent (2001) abyssal tidal mixing with tracer-mixing integration; harmonic, biharmonic, GM-Redi (cubed-sphere, lat-lon, MPAS variants), Visbeck adaptive-GM, Leith viscosity, and backscatter lateral mixing; convective adjustment (enhanced diffusion + plume); linear / quadratic bottom drag with implicit factor; bulk-formula / restoring / prescribed surface forcing; shortwave penetration (Jerlov)
 - **Ice-shelf cavity coupling**: Holland & Jenkins (1999) three-equation basal-melt at the ice base, lat-lon C-grid and MPAS apply paths
 - **External forcing**: Dai–Trenberth global river runoff (point→grid projection), OMIP-2 sea-surface salinity restoring + WOA SSS climatology loader, JRA55-do RYF preload (float32-safe for 32 GB GPUs), and an external `tau` / `q_net` / `sw_down` pathway for C-grid PE
 - **Biogeochemistry**: abiotic carbon (DIC + ALK with carbonate equilibria and air-sea CO₂ flux) and an NPZD ecosystem
 - **Idealized experiments suite** (`ocean/experiments/`): rest state, Eady / Phillips / baroclinic gyres, ACC channel, Drake/Stommel, lock exchange, overflow, baroclinic & barotropic wave, geostrophic adjustment, inertia–gravity wave, global overturning, Silvestri baroclinic jet, Munk, Held–Larichev, NeverWorld2-lite, ISOMIP+
 - **Realistic geometry**: NetCDF bathymetry (ETOPO/GEBCO/ERDDAP) with bilinear regridding, Laplacian smoothing, MEO r-cap steepness limiter, polar-cap masking, flood-fill isolated-basin removal, and strait enforcement
 - **Centennial spin-up library** (`ocean.spinup`): AMOC@26.5°N tracker, RPE / volume / heat / salt drift diagnostics, declarative `ConvergenceCriteria`, Bryan–Lewis (1984) distorted-physics accelerated protocol, and auto-restart discovery (`scripts/run/run_omip.py`)
-- **Peer-comparison fidelity harness** (`ocean/fidelity/`): Veros DINO / Eady adapters, regridder, and `docs/ocean/fidelity/legoesm_vs_veros_v2.md`
+- **Peer-comparison fidelity harness** (`ocean/fidelity/`): Veros DINO / Eady adapters, regridder, and `docs/ocean/fidelity/legoesm_vs_veros_v2.md`; NEMO term-by-term twins (`scripts/run/run_dino.py`) and a FESOM2 (fesom-jax) CORE2 arm (`scripts/run/run_fesom_core2.py`) for cross-model comparison
 - **Simple ocean**: slab mixed-layer and two-layer (cubed-sphere and MPAS variants)
 
 ### Land Surface
 
 - **Slab land**: energy balance + bucket hydrology + snow with stomatal conductance (Farquhar + Ball–Berry / Medlyn / Jarvis)
-- **Multi-layer land**: Richards equation (mixed-form Picard) with 6 retention curves (Van Genuchten, Clapp–Hornberger, Brooks–Corey, Campbell, PDI, Lu) and Johansen thermal diffusion
+- **Multi-layer land**: Richards equation (mixed-form Picard) with 6 retention curves (Van Genuchten, Clapp–Hornberger, Brooks–Corey, Campbell, PDI, Lu) and Johansen thermal diffusion; the interactive land in production AMIP
+- **Canopy schemes** (`--land-surface-scheme`): simple surface energy balance, two-leaf sun/shade canopy, and the CLM-ML multilayer canopy (vendored, differentiable), with per-column PFT and canopy interception
+- **LMIP biophysics driver** (`scripts/run/run_lmip.py`): offline single-point or global land runs with calibrated PFT parameters
 - **Carbon cycle**: DALEC-990 6-pool (labile / foliage / root / wood / litter / SOM) with LUE GPP and a seasonal scheme
 - **Snow**: accumulation/melt budget with age-dependent albedo and latitude-varying vegetation albedo
 - **PFT-weighted parameter providers**: surface roughness, albedo, capacity, conductance
@@ -145,7 +148,7 @@ component plugs into the matrix framework.
 
 - **GHG**: constant or time-varying (NetCDF), with CMIP6 experiment templates (piControl, historical, AMIP, 1pctCO2, SSP2-4.5, SSP5-8.5)
 - **Ozone / aerosol / solar**: climatological or transient from files; CMIP6-shape loaders for `vmro3`, Kinne aerosol, MPI-M 14-band TSI, and CMIP6 volcanic AOD
-- **AMIP CMIP6 deck** (`scripts/run/run_amip_cmip6_deck.py`): RRTMG + Sundqvist clouds + Sundqvist large-scale + SBM + Louis with the full transient stack on cubed-sphere and lat-lon production grids; Gaussian spectral and Voronoi/MPAS exercised by the dispatch smoke test
+- **AMIP CMIP6 deck** (`scripts/run/run_amip_cmip6_deck.py`): RRTMG + Sundqvist clouds + Morrison microphysics + SBM + Louis with the full transient stack on cubed-sphere and lat-lon production grids; Gaussian spectral and Voronoi/MPAS exercised by the dispatch smoke test
 - **OMIP forcing** (`scripts/run/run_omip.py`)
 - **Real topography / bathymetry** as above
 
@@ -184,12 +187,11 @@ component plugs into the matrix framework.
 ### Validation Infrastructure
 
 - **Test matrices**:
-  - Atmosphere: `scripts/matrix/run_atmosphere_test_matrix.py` (Williamson 2/5/6, Jablonowski–Williamson + rotated DCMIP-2008 §4-1/§4-2, Held–Suarez ± topography, DCMIP 2012 §2-0-0 rest-with-topography, DCMIP transport, RCE, …) — selectable via `--family {sw,hydro,nh,climate,tracer,dcmip2008,dcmip2012,dcmip2016,hughes,all}`. Williamson CLI emits both PlateCarree u/v and native D-grid winds for plotting (issue #274)
-  - Ocean: `scripts/matrix/run_ocean_test_matrix.py` (57/57 PASS across lat-lon, tripolar, cubed-sphere, MPAS Voronoi)
+  - Atmosphere: `scripts/matrix/run_atmosphere_test_matrix.py` (Williamson 2/5/6, Jablonowski–Williamson + rotated DCMIP-2008 §4-1/§4-2, Held–Suarez ± topography, DCMIP 2012 §2-0-0 rest-with-topography, DCMIP transport, RCE, …) — selectable via `--family {sw,hydro,nh,climate,tracer,moist,dcmip2008,dcmip2012,dcmip2016,hughes,all}` or `--only {sw,hydro,nh,all}`. Williamson CLI emits both PlateCarree u/v and native D-grid winds for plotting (issue #274)
+  - Ocean: `scripts/matrix/run_ocean_test_matrix.py` (lat-lon, tripolar, cubed-sphere, MPAS Voronoi)
   - Sea ice: `scripts/matrix/run_sea_ice_test_matrix.py` (15 benchmark tests)
 - **CFL-aware numerical-convergence tests + plotters**: term-by-term analytic shallow-water and ocean tests
 - **Dycore validation catalog**: [`docs/validation/dycore_validation_catalog.md`](docs/validation/dycore_validation_catalog.md) — complete have/missing inventory against Hughes (2026) *"How to validate a 3D spherical dynamical core"* tutorial
-- **Dycore progression suite** (`tests/validation/run_dycore_progression_suite.py`)
 - **Ocean fidelity assessment harness** (`ocean/fidelity/`): Veros DINO / Eady adapters and cross-model comparison reports under `docs/ocean/fidelity/`
 - **Distributed tests** including MPI differentiability (`tests/distributed/test_mpi_differentiability.py`)
 - **Scaling benchmarks** (`scripts/bench/run_levante_gpu_scaling.py`, `scripts/bench/run_cpu_mpi_scaling.py`)
@@ -216,8 +218,9 @@ JAX_ENABLE_X64=1 JAX_PLATFORMS=cpu python scripts/matrix/run_scm_test_matrix.py
 JAX_ENABLE_X64=1 python scripts/matrix/run_sea_ice_test_matrix.py
 JAX_ENABLE_X64=1 python scripts/matrix/check_conservation_all.py
 
-# Dycore progression (Williamson / Galewsky / Jablonowski–Williamson / Held–Suarez)
-python tests/validation/run_dycore_progression_suite.py
+# Dycore progression (shallow water -> hydrostatic -> non-hydrostatic ladder;
+# --only sw|hydro|nh runs one rung, the default runs all three)
+JAX_ENABLE_X64=1 python scripts/matrix/run_atmosphere_test_matrix.py --only sw
 
 # Federation packaging (per-member wheels build + root-absent import)
 python scripts/validate/validate_federation_packaging.py
@@ -244,8 +247,14 @@ python scripts/experiment/install_federation.py --all --extras dev
 # Run Williamson Test Case 2 (cubed-sphere shallow water)
 legoesm test williamson --case 2 --resolution 48 --days 5
 
-# Run an atmosphere AMIP simulation
+# Run an atmosphere AMIP smoke test (bare-CLI default physics)
 JAX_ENABLE_X64=1 python scripts/run/run_amip.py --grid-type cubed_sphere --resolution 16 --days 365
+
+# Production AMIP (CAM6 suite on MPAS; needs the machine paths in amip_production.sh)
+PY=.venv/bin/python DAYS=60 OUTDIR=results/amip_prod
+source config/amip/amip_production.sh
+"${PY}" -u scripts/run/run_amip.py --config config/amip/amip_production.yaml \
+    "${AMIP_PATH_FLAGS[@]}" --days "${DAYS}" --output "${OUTDIR}"
 
 # Single-column radiative-convective equilibrium (issue #277)
 JAX_ENABLE_X64=1 JAX_PLATFORMS=cpu python scripts/matrix/run_scm_test_matrix.py rce --days 50
@@ -272,12 +281,12 @@ legoESM is a [uv workspace](https://docs.astral.sh/uv/concepts/workspaces/) of
 independently-installable members (`legoesm-core`, `legoesm-atmosphere`,
 `legoesm-ocean`, `legoesm-land`, `legoesm-ice`, `legoesm-coupler`, `legoesm-ml`,
 `legoesm-tools`, and the root `legoesm` meta-package). Each member depends on the
-others as ordinary distributions (`legoesm-core~=0.1.0`, …) that resolve to the
+others as ordinary distributions (`legoesm-core~=1.0.0`, …) that resolve to the
 in-tree source **only via** `[tool.uv.sources]` (`workspace = true`).
 
 **This is why a bare `pip install legoesm` (or `pip install ./packages/atmosphere`)
 fails** with `Could not find a version that satisfies the requirement
-legoesm-core~=0.1.0 … (from versions: none)`: plain pip ignores `[tool.uv.sources]`
+legoesm-core~=1.0.0 … (from versions: none)`: plain pip ignores `[tool.uv.sources]`
 and looks for the members on PyPI, where they are not published. You need either
 `uv` (which understands the workspace) or the bundled helper (which resolves the
 inter-member dependency DAG against the in-tree source instead of PyPI):
@@ -391,7 +400,7 @@ gates the matrix runners use.
 
 ### Compatibility Matrix
 
-**Install minimum** (from `pyproject.toml`): Python ≥3.11, JAX ≥0.4.35, mpi4jax ≥0.8,<0.9 (optional), mpi4py ≥4.1,<5 (optional).
+**Install minimum** (from `pyproject.toml`): Python ≥3.11, JAX ≥0.5.3, mpi4jax ≥0.8,<0.10 (optional), mpi4py ≥4.1,<5 (optional).
 
 **Tested range** — the versions CI and benchmarks run against:
 
@@ -400,14 +409,14 @@ gates the matrix runners use.
 | Finite-volume dycores + ocean (single-process) | CPU (`jax` CPU backend) | N/A | `>=0.8,<0.10` | N/A | Regular unit/regression path |
 | Finite-volume dycores + ocean (single-process) | Apple Silicon Metal (`jax-mps` / MLX, `JAX_PLATFORMS=mps`) | N/A | `>=0.8,<0.10` | N/A | FV solvers only (`float32`); no `float64` |
 | Spectral solvers (atmosphere/ocean) | CPU (`JAX_PLATFORMS=cpu`) | N/A | `>=0.8,<0.10` | N/A | Requires `float64`/`complex128`; not mps-compatible |
-| Distributed MPI halo/reductions | CPU + OpenMPI (`mpirun`) | OpenMPI 4.x/5.x | `>=0.8,<0.10` | `>=0.8,<0.9` | Validated with `mpirun -np 2/3/6` |
+| Distributed MPI halo/reductions | CPU + OpenMPI (`mpirun`) | OpenMPI 4.x/5.x | `>=0.8,<0.10` / `>=0.10,<0.11` | `>=0.8,<0.9` / `>=0.9,<0.10` | Two generations, paired: legacy (jax 0.8–0.9 + mpi4jax 0.8) or FFI (jax 0.10 + mpi4jax 0.9); validated with `mpirun -np 2/3/6` |
 | Multi-device scaling suite | CPU/GPU (if available) | Optional | `>=0.8,<0.10` | `>=0.8,<0.9` (MPI mode) | `scripts/bench/run_levante_gpu_scaling.py` |
 
 JAX versions outside the tested range may work but are not guaranteed. Versions below the install minimum will fail at `pip install`.
 
 `legoesm.parallel.reductions` enforces MPI compatibility guardrails at runtime:
 - **Hard error** for `mpi4jax<0.8` (incompatible token semantics).
-- **Warning** for JAX or mpi4jax outside the tested range. Set `LEGOESM_MPI_STRICT_COMPAT=1` to promote the warning to a hard error.
+- **Warning** for JAX or mpi4jax outside the tested generations, including a cross pairing (e.g. mpi4jax 0.8 with jax 0.10). Set `LEGOESM_MPI_STRICT_COMPAT=1` to promote the warning to a hard error.
 
 Detailed runbook for real-hardware MPI / multi-GPU scaling:
 - [docs/performance/REAL_HARDWARE_SCALING.md](docs/performance/REAL_HARDWARE_SCALING.md)
@@ -442,8 +451,10 @@ Unsupported counts (4, 5, 7, 8, 12, 36, 48, …) raise `ValueError` with the nea
 
 - **Persistent JAX JIT cache** (issue #273) is enabled by default; the
   first segment compile is cached to disk and reused across runs.
-  Override with `LEGOESM_JAX_CACHE_DIR=/path/to/cache`, or disable with
-  `LEGOESM_JAX_CACHE_DISABLE=1`.
+  Default location `$XDG_CACHE_HOME/legoesm/jit_cache` (else
+  `~/.cache/legoesm/jit_cache`); override with
+  `LEGOESM_JIT_CACHE_DIR=/path/to/cache`, or disable with
+  `LEGOESM_JIT_CACHE_DIR=""`.
 - **SPMD halo backend** (issue #275) is activated in the AMIP
   production profile for multi-device runs; single-process runs are
   unchanged.
@@ -472,7 +483,7 @@ python -c "import jax; print(jax.default_backend())"
 ## Versioning
 
 legoESM follows [Semantic Versioning](https://semver.org/) (`MAJOR.MINOR.PATCH`).
-**Current release: `0.1.0` (legoESM v0.1).**
+**Current release: `1.0.0` (legoESM 1.0).**
 
 The version is **single-sourced and lockstep across the whole federation**:
 
@@ -480,15 +491,16 @@ The version is **single-sourced and lockstep across the whole federation**:
   `pyproject.toml` `[project].version`. There is no second copy to drift.
 - **Lockstep members** — all eight workspace packages
   (`legoesm-core`, `-atmosphere`, `-ocean`, `-land`, `-ice`, `-coupler`, `-ml`,
-  `-tools`) share the same version and depend on each other with `~=0.1.0`, so a
+  `-tools`) share the same version and depend on each other with `~=1.0.0`, so a
   non-workspace `pip install legoesm` can never resolve a mismatched core. Bump
   them together.
-- **Runtime resolution** — `legoesm.__version__` (and `legoesm._version`) reports
-  the version of *the code actually executing*: it reads the source-tree
-  `pyproject.toml` first (so an un-reinstalled checkout is honest), then falls
-  back to installed package metadata. `legoesm --version` prints it.
+- **Runtime resolution** — `legoesm._version.__version__` reports the version
+  of *the code actually executing*: it reads the source-tree `pyproject.toml`
+  first (so an un-reinstalled checkout is honest), then falls back to installed
+  package metadata. `python -c "from legoesm._version import __version__; print(__version__)"`
+  prints it.
 - **Docs track MINOR** — the README banner, the Scientific Guide, and the
-  Technical Documentation carry the `MAJOR.MINOR` (e.g. *v0.1*) via a single
+  Technical Documentation carry the `MAJOR.MINOR` (e.g. *1.0*) via a single
   `\legoesmversion` macro per LaTeX document, kept in step with the package
   version on each release.
 
@@ -496,8 +508,12 @@ To cut a release: bump `version` in the root and all `packages/*/pyproject.toml`
 (keep them identical), update the `\legoesmversion` macro in the two `docs/*.tex`
 + this banner, tag, and rebuild the PDFs.
 
-`v0.1` is the initial public release: the differentiable core, all components,
-the coupler, the federation packaging, and the tiered test/experiment harness.
+`1.0` is the first stable release: the differentiable core and every component,
+each on the grid families it supports, the coupler, the CAM6-suite production
+AMIP configuration on MPAS, the multilayer land with two-leaf (production) and
+CLM-ML canopies, the NEMO/FESOM2
+fidelity-matched ocean, multi-GPU/MPI execution, and the tiered
+test/experiment harness. See [CHANGELOG.md](CHANGELOG.md).
 
 ## Documentation
 
@@ -532,6 +548,4 @@ charitable, educational, public-research, and government organizations.
 
 **Commercial use — including by revenue-generating organizations of any legal
 form, for-profit or nonprofit — requires a separate paid commercial license.**
-See [COMMERCIAL-LICENSE.md](./COMMERCIAL-LICENSE.md). Royalties are payable to
-Pierre Gentine and Columbia University (IP jointly held by Celest.Science and
-Columbia University).
+See [COMMERCIAL-LICENSE.md](./COMMERCIAL-LICENSE.md). 

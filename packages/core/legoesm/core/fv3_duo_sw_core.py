@@ -215,6 +215,7 @@ from legoesm.core.fv3_native_sw_core import (
     C3,
 )
 from legoesm.core.fv3_pgrad import a2b_ord4
+from legoesm.core.fv3_phase3d_common import require_uniform_float_jax
 from legoesm.core.fv3_tp_core import copy_corners, fv_tp_2d, xtp_u, ytp_v
 
 __all__ = [
@@ -236,7 +237,6 @@ __all__ = [
     "d_sw6_duo",
     "make_edge_interpolate4_jit",
     "make_fill_4corners_jit",
-    "make_fill2_4corners_jit",
     "make_d2a2c_vect_jit",
     "make_d2a2c_vect_duo_jit",
     "make_divergence_corner_jit",
@@ -340,52 +340,6 @@ class GridFlags(NamedTuple):
 # entry gates
 # ---------------------------------------------------------------------
 
-def _require_f64_jax(fname: str, arrays: dict) -> None:
-    """dtype-UNIFORMITY gate (2026-08-28): was strict float64. The JAX duo runtime now runs ONE uniform float dtype (FV3DuoConfig.storage_dtype), so this accepts f32 OR f64 provided every operand matches; the anti-silent-downcast guard moved to FV3DuoDynamicsModel.step's boundary check. The rationale below is the ORIGINAL strict-f64 history.
-
-    Reads only ``.dtype`` (static under jit): a float32 operand would
-    otherwise be silently upcast -- or worse, with ``jax_enable_x64``
-    disabled the whole core would silently run in float32 -- and the
-    oracle build is ``-fdefault-real-8``.
-
-    (Byte-identical in intent to ``fv3_tp_core._require_f64_jax`` and
-    ``fv3_nh_core._require_f64_jax``.  It is re-stated rather than
-    imported because CLAUDE.md forbids importing a private symbol across
-    modules; promoting one shared public helper is an edit to another
-    lane's file and is flagged as follow-up debt, not done here.)
-    """
-    # dtype-UNIFORMITY gate (2026-08-28): was strict float64; relaxed for
-    # the coarse fv3_duo precision policy (FV3DuoConfig.storage_dtype). The
-    # "no silent fp64->fp32 downcast" guarantee now lives at the model
-    # boundary; THIS gate catches an f64 metric/workspace leaking into an
-    # f32 phase (silent promotion / lax.scan carry mismatch).
-    seen = None
-    for name, a in arrays.items():
-        if a is None:
-            continue
-        _arr = jnp.asarray(a)
-        if _arr.ndim == 0 and getattr(_arr, "weak_type", False):
-            # Skip ONLY a WEAK-typed 0-dim scalar (a python-float
-            # timestep/coeff like dt/kgb): it is weak-promoting and not a
-            # field, so it is not part of the field uniformity invariant.
-            # A STRONG-f64 0-dim (an f64 constant / damping coeff that
-            # "went strong") is NOT skipped -> it still trips this gate
-            # against f32 fields, closing the silent-promotion blind spot
-            # a wholesale 0-dim skip left (codex+GLM+Claude, increment 2).
-            continue
-        dt = _arr.dtype
-        if dt not in (jnp.float32, jnp.float64):
-            raise TypeError(
-                f"{fname}: {name} must be float32 or float64 (got {dt})")
-        if seen is None:
-            seen = dt
-        elif dt != seen:
-            raise TypeError(
-                f"{fname}: MIXED float dtypes ({seen} vs {dt} on {name}); "
-                f"a phase must be single-precision-uniform "
-                f"(FV3DuoConfig.storage_dtype).")
-
-
 def _validate_ord(fname: str, argname: str, value, allowed) -> None:
     """Dispatch-hardening guard on a STATIC scheme selector."""
     if value not in allowed:
@@ -444,7 +398,7 @@ def _geom(fname: str, gs: dict, keys) -> dict:
             f"{fname}: gridstruct is missing {missing}; this routine "
             f"associates all of {list(keys)}")
     out = {k: jnp.asarray(gs[k]) for k in keys}
-    _require_f64_jax(fname, out)
+    require_uniform_float_jax(fname, out)
     return out
 
 
@@ -604,7 +558,7 @@ def edge_interpolate4(ua4, dxa4):
     for i in range(4):
         ops[f"ua4[{i}]"] = ua4[i]
         ops[f"dxa4[{i}]"] = dxa4[i]
-    _require_f64_jax("edge_interpolate4", ops)
+    require_uniform_float_jax("edge_interpolate4", ops)
     t1 = dxa4[0] + dxa4[1]
     t2 = dxa4[2] + dxa4[3]
     return 0.5 * (((t1 + dxa4[1]) * ua4[1] - dxa4[1] * ua4[0]) / t1
@@ -672,7 +626,7 @@ def fill_4corners(q, direction: int, npx: int, npy: int, bd, *,
     this twin RETURNS the new ``q``.  ``q`` carries Fortran bounds
     ``(bd.isd:bd.ied, bd.jsd:bd.jed)``.
     """
-    _require_f64_jax("fill_4corners", {"q": q})
+    require_uniform_float_jax("fill_4corners", {"q": q})
     q = jnp.asarray(q)
     pairs = _corner_pairs(direction, npx, npy, "fill_4corners")
     return _apply_corner_fill(
@@ -691,7 +645,7 @@ def fill2_4corners(q1, q2, direction: int, npx: int, npy: int, bd, *,
     unobservable, and applying the same ordered chain to each separately
     is exact.
     """
-    _require_f64_jax("fill2_4corners", {"q1": q1, "q2": q2})
+    require_uniform_float_jax("fill2_4corners", {"q1": q1, "q2": q2})
     q1 = jnp.asarray(q1)
     q2 = jnp.asarray(q2)
     pairs = _corner_pairs(direction, npx, npy, "fill2_4corners")
@@ -735,7 +689,7 @@ def divergence_corner(u, v, ua, va, gs: dict, bd, npx: int, npy: int, *,
     on the panel-edge rows where the oracle drops it.
     """
     _validate_grid_type("divergence_corner", grid_type)
-    _require_f64_jax("divergence_corner",
+    require_uniform_float_jax("divergence_corner",
                      {"u": u, "v": v, "ua": ua, "va": va})
     g = _geom("divergence_corner", gs, _DIVG_KEYS)
     u, v, ua, va = (jnp.asarray(x) for x in (u, v, ua, va))
@@ -855,7 +809,7 @@ def divergence_corner_duo(u, v, ua, va, gs: dict, bd, npx: int, npy: int,
     applied as ordered whole-row/column writes in source order.
     """
     _validate_grid_type("divergence_corner_duo", grid_type)
-    _require_f64_jax("divergence_corner_duo",
+    require_uniform_float_jax("divergence_corner_duo",
                      {"u": u, "v": v, "ua": ua, "va": va})
     g = _geom("divergence_corner_duo", gs, _DIVG_KEYS)
     u, v, ua, va = (jnp.asarray(x) for x in (u, v, ua, va))
@@ -1015,7 +969,7 @@ def del6_vt_flux(nord: int, npx: int, npy: int, damp, q, bd, del6_u,
                   ("nw_corner", nw_corner), ("ne_corner", ne_corner),
                   ("duogrid", duogrid)):
         _require_bool("del6_vt_flux", nm, v)
-    _require_f64_jax("del6_vt_flux", {
+    require_uniform_float_jax("del6_vt_flux", {
         "q": q, "del6_u": del6_u, "del6_v": del6_v, "rarea": rarea,
         "damp_km": damp_km, "fx2": fx2, "fy2": fy2})
     q = jnp.asarray(q)
@@ -1153,7 +1107,7 @@ def d2a2c_vect_duo(u, v, gs: dict, bd, npx: int, npy: int, *,
     """
     _validate_grid_type("d2a2c_vect_duo", grid_type)
     _require_bool("d2a2c_vect_duo", "dord4", dord4)
-    _require_f64_jax("d2a2c_vect_duo", {"u": u, "v": v})
+    require_uniform_float_jax("d2a2c_vect_duo", {"u": u, "v": v})
     g = _geom("d2a2c_vect_duo", gs, _D2A2C_DUO_KEYS)
     u, v = jnp.asarray(u), jnp.asarray(v)
 
@@ -1292,7 +1246,7 @@ def d2a2c_vect(u, v, gs: dict, bd, npx: int, npy: int, *,
     _validate_grid_type("d2a2c_vect", grid_type)
     _require_bool("d2a2c_vect", "dord4", dord4)
     _require_bool("d2a2c_vect", "bounded_domain", bounded_domain)
-    _require_f64_jax("d2a2c_vect", {"u": u, "v": v})
+    require_uniform_float_jax("d2a2c_vect", {"u": u, "v": v})
     g = _geom("d2a2c_vect", gs, _D2A2C_KEYS)
     u, v = jnp.asarray(u), jnp.asarray(v)
 
@@ -1644,7 +1598,7 @@ def c_sw(delp, pt, w, u, v, gs: dict, bd, npx: int, npy: int, dt2, *,
                    ("duogrid", duogrid),
                    ("bounded_domain", bounded_domain)):
         _require_bool("c_sw", nm, vv)
-    _require_f64_jax("c_sw", {"delp": delp, "pt": pt, "w": w, "u": u,
+    require_uniform_float_jax("c_sw", {"delp": delp, "pt": pt, "w": w, "u": u,
                               "v": v, "dt2": jnp.asarray(dt2)})
     g = _geom("c_sw", gs, _CSW_KEYS)
 
@@ -2051,7 +2005,7 @@ def d_sw1_duo(delp, pt, w, uc, vc, xflux, yflux, cx, cy, gs: dict,
         raise NotImplementedError(
             "d_sw1_duo: inline_q=False lane only (matches the oracle "
             "driver; q_con/tracer transports not exercised)")
-    _require_f64_jax("d_sw1_duo", {
+    require_uniform_float_jax("d_sw1_duo", {
         "delp": delp, "pt": pt, "w": w, "uc": uc, "vc": vc,
         "xflux": xflux, "yflux": yflux, "cx": cx, "cy": cy,
         "dt": jnp.asarray(dt)})
@@ -2475,7 +2429,7 @@ def d_sw2_duo(delp, pt, allflux_x, allflux_y, gs: dict,
         raise ValueError(
             "d_sw2_duo: the NH arm needs w, npx and npy "
             "(sw_core.F90:1077-1109)")
-    _require_f64_jax("d_sw2_duo", {
+    require_uniform_float_jax("d_sw2_duo", {
         "delp": delp, "pt": pt, "allflux_x": allflux_x,
         "allflux_y": allflux_y, "w": w, "dt": jnp.asarray(dt),
         "kgb": jnp.asarray(kgb)})
@@ -2605,7 +2559,7 @@ def d_sw3_duo(u, v, uc, vc, gs: dict, flags: GridFlags, bd, npx: int,
         raise NotImplementedError(
             "d_sw3_duo is the DUO-stage port; the plain path is the "
             "certified monolithic d_sw (phase-4b)")
-    _require_f64_jax("d_sw3_duo", {"u": u, "v": v, "uc": uc, "vc": vc,
+    require_uniform_float_jax("d_sw3_duo", {"u": u, "v": v, "uc": uc, "vc": vc,
                                    "dt": jnp.asarray(dt)})
     g = _geom("d_sw3_duo", gs, _DSW3_KEYS)
     del flags   # d_sw3 reads no static gridstruct flag on this lane
@@ -2701,7 +2655,7 @@ def d_sw4_duo(u, v, ut, vt, ke, flags: GridFlags, bd, npx: int,
     so it takes ``flags`` and no ``gs``.  That is the dict->NamedTuple
     adaptation, not a dropped operand.
     """
-    _require_f64_jax("d_sw4_duo", {"u": u, "v": v, "ut": ut, "vt": vt,
+    require_uniform_float_jax("d_sw4_duo", {"u": u, "v": v, "ut": ut, "vt": vt,
                                    "ke": ke, "dt": jnp.asarray(dt)})
     isd, ied, jsd, jed = bd.isd, bd.ied, bd.jsd, bd.jed
     nid, njd = ied - isd + 1, jed - jsd + 1
@@ -2841,7 +2795,7 @@ def d_sw5_duo(delp, u, v, uc, vc, ua, va, divg_d, crx_adv, cry_adv,
     if not hydrostatic and damp_w > _DAMP_W_ON and dw is None:
         raise ValueError(
             "d_sw5_duo: damp_w > 1e-5 needs the d_sw2 dw increment")
-    _require_f64_jax("d_sw5_duo", {
+    require_uniform_float_jax("d_sw5_duo", {
         "delp": delp, "u": u, "v": v, "uc": uc, "vc": vc, "ua": ua,
         "va": va, "divg_d": divg_d, "crx_adv": crx_adv,
         "cry_adv": cry_adv, "xfx_adv": xfx_adv, "yfx_adv": yfx_adv,
@@ -3056,7 +3010,7 @@ def d_sw6_duo(u, v, ut, vt, ke, wk, vortfluxx, vortfluxy, gs: dict,
         raise NotImplementedError(
             "d_sw6_duo is the DUO-stage port; the plain path is the "
             "certified monolithic d_sw (phase-4b)")
-    _require_f64_jax("d_sw6_duo", {
+    require_uniform_float_jax("d_sw6_duo", {
         "u": u, "v": v, "ut": ut, "vt": vt, "ke": ke, "wk": wk,
         "vortfluxx": vortfluxx, "vortfluxy": vortfluxy})
     g = _geom("d_sw6_duo", gs, _DSW6_KEYS)
@@ -3160,12 +3114,6 @@ def make_edge_interpolate4_jit(fn=edge_interpolate4):
 def make_fill_4corners_jit(fn=fill_4corners):
     """Static: direction/npx/npy/bd and the four corner flags."""
     return jax.jit(fn, static_argnums=(1, 2, 3, 4),
-                   static_argnames=("sw", "se", "ne", "nw"))
-
-
-def make_fill2_4corners_jit(fn=fill2_4corners):
-    """Same policy as :func:`make_fill_4corners_jit`."""
-    return jax.jit(fn, static_argnums=(2, 3, 4, 5),
                    static_argnames=("sw", "se", "ne", "nw"))
 
 

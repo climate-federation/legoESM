@@ -556,6 +556,9 @@ class RRTMGP:
       ghg_vmr_override: dict | None = None,
       sw_optical_field_only: bool = False,
       lw_optical_field_only: bool = False,
+      *,
+      mcica_cloud_fraction: jnp.ndarray | None = None,
+      clear_sky: bool = False,
   ):
       """Compute radiation for legoESM column arrays.
 
@@ -619,6 +622,10 @@ class RRTMGP:
           Per-g-point solar source weights (ngpt_sw,).
       ghg_vmr_override : dict | None
           Runtime GHG VMR overrides (e.g. ``{"co2": 4.15e-4}``).
+      mcica_cloud_fraction : jnp.ndarray | None
+          ``(ncol, nlev)`` layer cloud fraction, index 0 = model top.  Given,
+          ``cloud_path_liq/ice`` are IN-CLOUD paths and each g-point solves
+          its own maximum-random subcolumn (McICA).
 
       Returns
       -------
@@ -636,6 +643,14 @@ class RRTMGP:
       # all inputs to match so that table lookups, lax.cond branches, and
       # lax.scan carries have consistent dtypes throughout the solver.
       _table_dtype = self.optics_lib.gas_optics_lw.kmajor.dtype
+      # McICA per-column table shift, seeded like CAM's mcica_subcol_gen:
+      # the fractional part of the lowest-layer pressure [Pa], taken before
+      # the cast to the table dtype.  State-derived, so it is independent of
+      # the domain decomposition and needs no PRNG.  Columns with IDENTICAL
+      # bottom pressure (idealized uniform states) share a shift, as they
+      # share a seed in CAM.
+      _mcica_shift = (None if mcica_cloud_fraction is None
+                      else jax.lax.stop_gradient(jnp.mod(p_full[:, -1], 1.0)))
       T = T.astype(_table_dtype)
       p_full = p_full.astype(_table_dtype)
       p_half = p_half.astype(_table_dtype)
@@ -672,6 +687,9 @@ class RRTMGP:
           cloud_r_eff_ice = jnp.asarray(cloud_r_eff_ice).astype(_table_dtype)
       if cloud_fraction is not None:
           cloud_fraction = jnp.asarray(cloud_fraction).astype(_table_dtype)
+      if mcica_cloud_fraction is not None:
+          mcica_cloud_fraction = jnp.asarray(
+              mcica_cloud_fraction).astype(_table_dtype)
       if ghg_vmr_override is not None:
           # Cast every numeric override (array, Python float/int, list)
           # to the working dtype; only floating leaves are retyped so
@@ -848,6 +866,41 @@ class RRTMGP:
           cpl_3d = cpi_3d = crl_3d = cri_3d = cf_3d = None
           cpl_lw_3d = cpi_lw_3d = None
 
+      # McICA (CAM6 mcica_subcol_gen): each g-point sees its own
+      # maximum-random cloud subcolumn.  The paths passed in are IN-CLOUD;
+      # the g-point's mask zeroes its clear cells, then the paths get the
+      # same halo + floor treatment as above.
+      lw_path_fn = sw_path_fn = None
+      if has_clouds and mcica_cloud_fraction is not None:
+          if (cloud_fraction is not None or cloud_path_liq_lw is not None
+                  or cloud_path_ice_lw is not None):
+              raise ValueError(
+                  "mcica_cloud_fraction takes in-cloud paths and its own "
+                  "sampling; it cannot be combined with cloud_fraction "
+                  "optical-depth scaling or separate longwave paths")
+          if sw_optical_field_only or lw_optical_field_only:
+              raise ValueError(
+                  "mcica_cloud_fraction samples clouds per g-point inside the "
+                  "flux solve; the optical-field-only outputs would return "
+                  "unsampled in-cloud optics")
+          from legoesm.atmosphere.physics.clouds.subcolumns import (
+              generate_subcolumns)
+
+          def _mcica_paths(n_gpt):
+              mask = generate_subcolumns(mcica_cloud_fraction, n_gpt,
+                                         shift=_mcica_shift)
+
+              def paths(igpt):
+                  m = mask[igpt]
+                  return tuple(
+                      jnp.clip(_add_halos(
+                          jnp.where(m, x, 0.0)[:, None, ::-1]), 0.0, None)
+                      for x in (_cpl, _cpi))
+              return paths
+
+          lw_path_fn = _mcica_paths(optics_lib.n_gpt_lw)
+          sw_path_fn = _mcica_paths(optics_lib.n_gpt_sw)
+
       # Optional aerosol optical depth (shortwave).  Clip AFTER ``_add_halos``
       # (same fix class as q_v / o3 / cf / cloud paths): linear halo
       # extrapolation can drive a boundary aerosol OD negative, which is an
@@ -891,6 +944,11 @@ class RRTMGP:
       # Reuses the EXACT state above (no duplicated numerics); returns the
       # per-g-point shortwave optical field instead of solving transport. The
       # default path (sw_optical_field_only=False) is byte-identical.
+      if clear_sky and (sw_optical_field_only or lw_optical_field_only):
+          raise ValueError(
+              "clear_sky adds clear-sky TOA fluxes to the RadiationOutput "
+              "path; the optical-field-only outputs have no fluxes.")
+
       if sw_optical_field_only:
           sw_props = two_stream.compute_sw_optical_field(
               p_3d, T_3d, molecules, optics_lib, vmr_fields,
@@ -977,6 +1035,8 @@ class RRTMGP:
           use_optimal_angle=getattr(config, "use_optimal_angle", False),
           gpoint_batch_size=getattr(config, "gpoint_batch_size", 0),
           gpoint_checkpoint=getattr(config, "gpoint_checkpoint", True),
+          cloud_path_fn=lw_path_fn,
+          clear_sky=clear_sky,
       )
 
       # --- 5. Solve SW ---
@@ -999,6 +1059,8 @@ class RRTMGP:
           use_scan=config.use_scan,
           gpoint_batch_size=getattr(config, "gpoint_batch_size", 0),
           gpoint_checkpoint=getattr(config, "gpoint_checkpoint", True),
+          cloud_path_fn=sw_path_fn,
+          clear_sky=clear_sky,
       )
 
       # --- 6. Compute heating rates using exact layer thickness ---
@@ -1027,6 +1089,11 @@ class RRTMGP:
           heating_rate=lw_hr + sw_hr,
           lw_heating_rate=lw_hr,
           sw_heating_rate=sw_hr,
+          # internal index -1 is the TOA face (== *_flux_up[:, 0] above)
+          lw_flux_up_toa_clr=(lw_fluxes['flux_up_clr'][:, 0, -1]
+                              if clear_sky else None),
+          sw_flux_up_toa_clr=(sw_fluxes['flux_up_clr'][:, 0, -1]
+                              if clear_sky else None),
       )
 
   def solve_columns_chunked(

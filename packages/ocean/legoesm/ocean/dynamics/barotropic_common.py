@@ -575,6 +575,166 @@ def nemo_literal_after_level_reconcile(
     return b(corrected * face_mask3)
 
 
+def nemo_reference_depth_reciprocal(
+    depth_ref: jnp.ndarray,
+    face_mask: jnp.ndarray,
+) -> jnp.ndarray:
+    """NEMO's ``r1_hu_0``/``r1_hv_0``, built the one way NEMO builds them::
+
+        r1_hu_0(:,:) = ssumask(:,:) / ( hu_0(:,:) + 1._wp - ssumask(:,:) )
+
+    (``domain.f90:213-214`` of the round-35 GYRE build's compiled ppsrc.)
+
+    This is NOT ``1/hu_0``: NEMO adds one and subtracts the mask before
+    dividing, so on a wet column it computes ``1 / ((hu_0 + 1) - 1)`` and the
+    two roundings of that round trip do not cancel.  Every consumer must use
+    the SAME reciprocal NEMO stored, because ``x * r1_hu_0`` and ``x / hu_0``
+    differ even when ``r1_hu_0`` is the correctly rounded reciprocal.
+
+    On a dry column ``ssumask`` is zero, so the reciprocal is EXACTLY zero
+    and carries the dry-column zero that NEMO's ``SUM`` has no mask for.
+
+    ``face_mask`` is NEMO's surface mask ``ssumask``/``ssvmask``: 2-D, 0 or 1,
+    and the SAME shape as ``depth_ref``.  That equality is checked, because it
+    used to be checked one level up: ``rk3_stage_barotropic_correction``
+    refused a ``face_mask`` whose shape was not the column shape, and round 36
+    removed that argument.  Without the check here a shorter mask BROADCASTS,
+    the operator accepts the result, and the correction leaks onto land --
+    measured at 15 of 15 dry cells wrong by 0.227 on a deliberately mis-shaped
+    mask.
+
+    Two other sites materialise this same expression with their own rounding
+    barriers -- ``vertical.py:243-244`` (live QCO face geometry) and
+    ``vertical.py:308`` (the f-point form, which brackets the denominator
+    separately).  They are NOT routed here: their associations differ from
+    this one and from each other, and this campaign's bar is the last ULP.
+    """
+    depth_ref = jnp.asarray(depth_ref)
+    face_mask = jnp.asarray(face_mask)
+    if face_mask.shape != depth_ref.shape:
+        raise ValueError(
+            f"face_mask {face_mask.shape} must match depth_ref "
+            f"{depth_ref.shape}; a broadcastable but shorter mask silently "
+            "lets the column correction reach dry columns")
+    one = jnp.asarray(1.0, dtype=depth_ref.dtype)
+    return face_mask / (depth_ref + one - face_mask)
+
+
+def _ascending_level_sum(values: jnp.ndarray) -> jnp.ndarray:
+    """Fortran's ``SUM`` over the level axis, accumulated in ascending ``k``.
+
+    ``jnp.sum`` lets XLA choose the reduction shape, and on CPU it picks a
+    tree; gfortran emits an ascending-``k`` accumulation for ``SUM`` over a
+    rank-1 section.  The two agree for short columns and diverge for long
+    ones: measured in round 36, they differ on 5 of OVERFLOW's 606 columns
+    (101 levels) by 4.441e-16, on none of LOCK_EXCHANGE's 390 (21 levels),
+    and on none of GYRE's.
+
+    The scan makes the order explicit rather than left to the backend.  Cost
+    is one add per level, the same arithmetic a tree does, in a fixed order.
+    """
+    total, _ = jax.lax.scan(
+        lambda running, level: (running + level, None),
+        jnp.zeros(values.shape[:-1], dtype=values.dtype),
+        jnp.moveaxis(values, -1, 0))
+    return total
+
+
+def rk3_stage_barotropic_correction(
+    field: jnp.ndarray,
+    target_mean: jnp.ndarray,
+    h_face_ref: jnp.ndarray,
+    r1_depth_ref: jnp.ndarray,
+    stage_mask: jnp.ndarray,
+) -> jnp.ndarray:
+    """NEMO ``stprk3_stg.f90:522-523,541-542``, the RK3 stage correction::
+
+        zub(ji,jj) = uu_b(ji,jj,Kaa)
+           &       - SUM( e3u_3d(ji,jj,:)*uu(ji,jj,:,Kaa) ) * r1_hu_0(ji,jj)
+        uu(ji,jj,jk,Kaa) = uu(ji,jj,jk,Kaa) + zub(ji,jj)*umask(ji,jj,jk)
+
+    ROUND 36: this MULTIPLIES by NEMO's stored ``r1_hu_0``.  It used to
+    DIVIDE by ``hu_0`` and then multiply by a separate wet-column mask, which
+    is algebraically the same and is NOT the same rounding.  MEASURED, per
+    card, rather than claimed for all of them: GYRE's u and v faces and
+    LOCK_EXCHANGE's u face go from ``exact=False`` to bit-identical
+    (0 cells, 0.0); OVERFLOW does NOT -- its row is byte-identical before and
+    after, because its residual is owned by the reduction of a 101-level
+    column sum and not by this divisor.  That row is registered OPEN in the
+    tanks gate with its boundary.  The dry-column zero now lives where NEMO
+    keeps it, inside the reciprocal (``domain.f90:213``), which is why there
+    is no longer a separate ``face_mask`` argument: NEMO has no mask inside
+    the ``SUM``.
+    Build the reciprocal with :func:`nemo_reference_depth_reciprocal`, or
+    pass NEMO's own array when a record carries it.
+
+    WHY THIS IS A THIRD SIBLING and not a call to
+    :func:`after_level_column_mean_reconcile`.  The three functions compute the
+    same weighted-mean replacement and differ ONLY in floating-point
+    association, which is the whole point of having more than one: NEMO forms
+    the DIFFERENCE ``zub`` first and adds it, where ``mlf_baro_corr`` subtracts
+    and adds in two separate statements.  Those are not the same rounding, and
+    this campaign's bar is 1e-15.  The file already carries that distinction
+    once (``nemo_literal_after_level_reconcile`` beside the generic kernel) and
+    this is the RK3 member of the same family.
+
+    It is module-level rather than a closure so the fidelity gates can drive it
+    with NEMO's OWN operands and score the result against NEMO's own output --
+    a closure cannot be handed a record.
+
+    Parameters
+    ----------
+    field
+        3-D face velocity at the after level, ``(..., nlev)``.
+    target_mean
+        2-D depth-uniform mean to install: NEMO ``uu_b(:,:,Kaa)``.
+    h_face_ref
+        REFERENCE face thicknesses, NEMO ``e3u_0``, already face-masked.
+    r1_depth_ref
+        2-D reciprocal reference depth, NEMO ``r1_hu_0``/``r1_hv_0``, EXACTLY
+        zero on a dry column.  NEMO has no ``umask`` inside the ``SUM`` at
+        ``stprk3_stg.f90:522`` -- read the statement -- so the dry-column zero
+        has to be here and nowhere else.
+    stage_mask
+        Mask applied to the corrected field, NEMO's ``umask(ji,jj,jk)``.
+
+    Sign/geometry convention: ``h_face_ref > 0``, thicknesses sum downward, and
+    no term changes sign with the z-axis direction -- a weighted-mean
+    replacement, not a flux.
+    """
+    # Both siblings above refuse a shape mismatch and so does this one: it is
+    # exported for gates to drive with oracle arrays, and a ``(..., 1)``
+    # target would broadcast into a spurious extra axis instead of failing.
+    if target_mean.shape != field.shape[:-1]:
+        raise ValueError(
+            f"target_mean {target_mean.shape} must be the column shape "
+            f"{field.shape[:-1]} of field {field.shape}")
+    if h_face_ref.shape != field.shape:
+        raise ValueError(
+            f"h_face_ref {h_face_ref.shape} must match field {field.shape}")
+    if r1_depth_ref.shape != field.shape[:-1]:
+        raise ValueError(
+            f"r1_depth_ref {r1_depth_ref.shape} must be the column shape "
+            f"{field.shape[:-1]}")
+    # The stage mask was exempt from this check until round 33.  Measured,
+    # not assumed, before the check was written: a level axis on ``face_mask``
+    # already raised, and a short ``stage_mask`` raised a TypeError from
+    # inside ``lax.mul`` naming neither operand.  So what this buys is a
+    # NAMED refusal at the boundary of a function that gates drive with oracle
+    # arrays, not the closing of a silent hole.  BLIND SPOT, stated because a
+    # shape check cannot see it: on a square tile a TRANSPOSED mask has the
+    # right shape, passes here, and silently changes the answer -- that
+    # mutation is caught by the tests' transposed-layout arm, not by this.
+    # The level-BROADCAST stage mask is ALLOWED and named, because the model's
+    # own ``legacy_2d_stage_face_mask`` arm passes exactly that.
+    if stage_mask.shape not in (field.shape, field.shape[:-1] + (1,)):
+        raise ValueError(
+            f"stage_mask {stage_mask.shape} must match field {field.shape} "
+            f"or be its level-broadcast form {field.shape[:-1] + (1,)}")
+    own_mean = _ascending_level_sum(field * h_face_ref) * r1_depth_ref
+    return (field + (target_mean - own_mean)[..., jnp.newaxis]) * stage_mask
+
+
 def bebt_blend(
     eta_new: jnp.ndarray,
     eta_old: jnp.ndarray,
@@ -924,6 +1084,7 @@ def _fixed_iteration_pcg_single_reduce(
     *,
     max_iter: int,
     dot_weight: jnp.ndarray,
+    deep_halo: tuple | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Single-reduction fixed-M PCG (Chronopoulos & Gear 1989 recurrences).
 
@@ -975,9 +1136,32 @@ def _fixed_iteration_pcg_single_reduce(
 
     Returns ``(x, rr)`` with ``rr`` = final global ``r·r``, same
     contract as :func:`_fixed_iteration_pcg`.
+
+    DEEP HALO (``deep_halo=(exchange, owned, rings)``): ``A_op`` is then
+    the LOCAL operator (no exchange inside) and ``M_inv`` must be
+    pointwise.  ``rings`` = number of halo rings around the owned block
+    whose cells have their full stencil locally (all incident edges local,
+    so ring ``rings + 1`` is local too); ``exchange(*fields)`` overwrites
+    every local halo row with its owner value.  Only ``r`` and ``s`` feed
+    ``A`` (through ``z``); after exchanging both, each body leaves ``s``
+    owner-exact one ring shallower (z exact to ``rings``, w and s to
+    ``rings - 1``, ...), so one packed ``(r, s)`` exchange every ``rings``
+    bodies keeps owned values exact; the init matvec counts as one body.
+    ``p`` feeds only ``x`` and is kept owned-only (zero halo), so halo
+    ``x`` stays ``x0`` and nothing unused accumulates.
     """
     W = dot_weight
-    r0 = b - A_op(x0)
+    if deep_halo is not None:
+        exchange, owned, rings = deep_halo
+        rings = int(rings)
+        if rings < 1:
+            raise ValueError(
+                f"deep-halo PCG needs >= 1 complete halo ring, got {rings}")
+        owned = owned.astype(b.dtype)
+        (xf,) = exchange(x0)
+        (r0,) = exchange(b - A_op(xf))
+    else:
+        r0 = b - A_op(x0)
     z0 = M_inv(r0)
     w0 = A_op(z0)
     # ONE batched init reduction: ρ0, μ0 in the W-inner product, plus
@@ -1024,6 +1208,8 @@ def _fixed_iteration_pcg_single_reduce(
         t_new = mu_new - beta * beta * st.t
         alpha_new = _safe_div(rho_new, t_new)
         p_new = z_new + beta * st.p
+        if deep_halo is not None:
+            p_new = p_new * owned
         s_new = w_new + beta * st.s
         return _CGSRState(
             x=x_new, r=r_new, p=p_new, s=s_new,
@@ -1033,16 +1219,48 @@ def _fixed_iteration_pcg_single_reduce(
     t0 = mu0
     alpha0 = _safe_div(rho0, t0)
     init = _CGSRState(
-        x=x0, r=r0, p=z0, s=w0, rho=rho0, t=t0, alpha=alpha0, rr=rr0,
+        x=x0, r=r0, p=z0 if deep_halo is None else z0 * owned, s=w0,
+        rho=rho0, t=t0, alpha=alpha0, rr=rr0,
     )
-    # Each body call applies one α-update then prepares the next α —
-    # ``max_iter`` calls ⇒ exactly ``max_iter`` x/r updates and
-    # ``max_iter + 1`` reductions total (incl. init), vs ``2·max_iter
-    # + 1`` for the standard body.  The final iteration's prepared
-    # (p, s, α) are discarded — its reduction still ran, keeping the
-    # collective schedule static.
-    final = jax.lax.fori_loop(0, int(max_iter), body, init)
-    return final.x, final.rr
+    # Each body call applies one α-update then prepares the next α.  The
+    # last update needs no next α, so it runs outside the loop without the
+    # preconditioner, the operator (a halo exchange on distributed paths)
+    # and the rho/mu dots it would discard: ``max_iter`` x/r updates and
+    # ``max_iter + 1`` reductions total (incl. init), vs ``2·max_iter + 1``
+    # for the standard body.
+    n_iter = int(max_iter)
+    if n_iter <= 0:
+        return init.x, init.rr
+    if deep_halo is None:
+        st = jax.lax.fori_loop(0, n_iter - 1, body, init)
+    else:
+        # Body k (1-based; the init matvec used the first ring) needs a
+        # fresh (r, s) when k % rings == 0.
+        def _refresh(st_):
+            r_, s_ = exchange(st_.r, st_.s)
+            return st_._replace(r=r_, s=s_)
+
+        def _block(_i, st_):
+            st_ = _refresh(st_)
+            for _ in range(rings):
+                st_ = body(0, st_)
+            return st_
+
+        n_body = n_iter - 1
+        n_pre = min(rings - 1, n_body)
+        n_blocks, n_rem = divmod(n_body - n_pre, rings)
+        st = init
+        for _ in range(n_pre):
+            st = body(0, st)
+        st = jax.lax.fori_loop(0, n_blocks, _block, st)
+        if n_rem:
+            st = _refresh(st)
+            for _ in range(n_rem):
+                st = body(0, st)
+    x_last = st.x + st.alpha * st.p
+    r_last = st.r - st.alpha * st.s
+    (rr_last,) = _global_dot_batch([(r_last * W, r_last)])
+    return x_last, rr_last
 
 
 def global_rel_residual(
@@ -1128,6 +1346,7 @@ def solve_helmholtz_implicit(
     stock_cg_maxiter: int,
     pcg_variant: str = "standard",
     dot_weight: jnp.ndarray | None = None,
+    deep_halo: tuple | None = None,
 ) -> tuple[jnp.ndarray, HelmholtzSolveDiagnostics]:
     """Solve ``A eta = rhs`` for the implicit free-surface step.
 
@@ -1177,6 +1396,13 @@ def solve_helmholtz_implicit(
         ``diagnostics`` is a :class:`HelmholtzSolveDiagnostics`; the
         caller logs / raises on ``rel_residual`` OUTSIDE the JIT.
     """
+    # Before ANY dispatch (incl. the single-rank stock CG): a LOCAL operator handed to a variant that never
+    # exchanges would silently drop the communication.
+    if (pcg_variant == "single_reduce_deep") != (deep_halo is not None):
+        raise ValueError(
+            "solve_helmholtz_implicit: pcg_variant='single_reduce_deep' "
+            "requires deep_halo=(exchange, owned, rings), and deep_halo "
+            f"is only valid with it (got variant {pcg_variant!r}).")
     if not distributed:
         eta_new, _info = jax.scipy.sparse.linalg.cg(
             A_op, rhs, x0=x0, tol=stock_cg_tol,
@@ -1205,7 +1431,9 @@ def solve_helmholtz_implicit(
             A_op, rhs, M_inv, x0, max_iter=fixed_iters,
             dot_weight=dot_weight,
         )
-    elif pcg_variant == "single_reduce":
+    elif pcg_variant in ("single_reduce", "single_reduce_deep"):
+        # "single_reduce_deep": same recurrence, A_op LOCAL, (r, s) halo
+        # refreshed every ``rings`` iterations (see the solver docstring).
         if dot_weight is None:
             # LOUD refusal — a Euclidean fallback would silently bias
             # the reconstructed p·Ap on any varying-area grid (the
@@ -1217,12 +1445,13 @@ def solve_helmholtz_implicit(
             )
         eta_new, rr = _fixed_iteration_pcg_single_reduce(
             A_op, rhs, M_inv, x0, max_iter=fixed_iters,
-            dot_weight=dot_weight,
+            dot_weight=dot_weight, deep_halo=deep_halo,
         )
     else:
         raise ValueError(
             "solve_helmholtz_implicit: unknown pcg_variant "
-            f"{pcg_variant!r}; expected 'standard' or 'single_reduce'."
+            f"{pcg_variant!r}; expected 'standard', 'single_reduce' or "
+            "'single_reduce_deep'."
         )
     # rhs norm for the relative-residual diagnostic — same weighting as
     # the solver's rr (owned-masked on partitioned meshes; halo entries

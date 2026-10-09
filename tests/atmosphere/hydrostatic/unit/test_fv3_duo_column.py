@@ -1061,7 +1061,10 @@ def test_m6_multilayer_land_and_rrtmgp_run_on_the_duo_columns(tmp_path, monkeypa
         multilayer_n_layers=6, multilayer_soil_depth=2.5,
         # the canopy schemes refuse to start without the per-PFT surfdata
         # file; the soil column + placement is what this test is about
-        land_surface_scheme="simple_seb")
+        land_surface_scheme="simple_seb",
+        # main b602fc9d9: the per-step two-leaf parameter refresh is on by
+        # default and refuses simple_seb (it has no rebuild for it)
+        mpas_land_params_refresh=False)
     drv = ModelDriver(cfg, output_dir=tmp_path)
     drv.setup()
     mesh = drv.model.mesh
@@ -1163,8 +1166,21 @@ def test_column_positivity_global_residual_is_area_weighted(moist):
     assert np.isclose(m(q_on), m(q_raw), rtol=1e-12)
     fixed_dp, _ = apply_water_positivity(
         {"q_c": jnp.asarray(q_raw)}, None, jnp.asarray(delp),
-        conservative=True, energy_consistent=False)
+        conservative=True, energy_consistent=False, area=None)
     assert not np.isclose(m(np.asarray(fixed_dp["q_c"])), m(q_raw), rtol=1e-12)
+    # second control (merge of cf/main 2026-10-09): area applied TWICE (the
+    # auto-merge state: delp pre-weighted by area AND area= inside the
+    # stage) mis-conserves too, so the lane must apply it exactly once
+    fixed_a2, _ = apply_water_positivity(
+        {"q_c": jnp.asarray(q_raw)}, None, jnp.asarray(delp * area),
+        conservative=True, energy_consistent=False, area=jnp.asarray(area[..., 0]))
+    assert not np.isclose(m(np.asarray(fixed_a2["q_c"])), m(q_raw), rtol=1e-12)
+    # and the routine with area once, outside the lane, reproduces the lane
+    fixed_a1, _ = apply_water_positivity(
+        {"q_c": jnp.asarray(q_raw)}, None, jnp.asarray(delp),
+        conservative=True, energy_consistent=False, area=jnp.asarray(area[..., 0]))
+    np.testing.assert_allclose(np.asarray(fixed_a1["q_c"]), q_on, rtol=1e-10,
+                               atol=1e-18)
 
 
 def test_column_positivity_knobs_follow_the_mpas_semantics(moist):

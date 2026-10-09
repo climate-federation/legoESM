@@ -345,6 +345,25 @@ class TestEnergyBudgetTracker:
         # Warming → positive tendency
         assert budget.dE_dt > 0.0
 
+    def test_record_from_reduced_means_equals_update(self):
+        """record() fed update()'s own global means reproduces every series
+        exactly (the multi-rank MPAS lane reduces the means itself)."""
+        T1, q_v, u, v, phis, p_s, dsigma, sigma_full = self._make_state(T_val=280.0)
+        fluxes = self._make_fluxes()
+        a = EnergyBudgetTracker()
+        a.update(T1, q_v, u, v, phis, p_s, dsigma, sigma_full,
+                 *fluxes, elapsed_seconds=0.0)
+        a.update(T1 + 1.0, q_v, u, v, phis, p_s, dsigma, sigma_full,
+                 *fluxes, elapsed_seconds=3600.0)
+        b = EnergyBudgetTracker()
+        for i in range(2):
+            b.record(a.column_energy[i], a.toa_sw_down[i], a.toa_sw_up[i],
+                     a.toa_lw_up[i], a.sfc_sw_net[i], a.sfc_lw_net[i],
+                     elapsed_seconds=a.times[i])
+        assert b.dE_dt[-1] > 0.0
+        for name in ("toa_net", "sfc_net", "dE_dt", "residual", "column_energy"):
+            assert getattr(b, name) == getattr(a, name), name
+
     def test_steady_state_small_residual(self):
         """If state doesn't change, dE/dt=0 and residual = R_TOA."""
         tracker = EnergyBudgetTracker()
@@ -556,7 +575,7 @@ class TestTrackerAreaWeighting:
         area = jnp.cos(lat)[:, None] * jnp.ones((1, nlon))
         from legoesm.diagnostics.energy_budget import MoistureBudgetTracker
         b = MoistureBudgetTracker().update(
-            q_v, p_s, dsigma, precip, jnp.zeros((nlat, nlon)),
+            q_v, p_s, dsigma, precip, evap=jnp.zeros((nlat, nlon)),
             elapsed_seconds=0.0, area_weights=area,
         )
         # Uniform fields: weighting leaves the means physically sensible.

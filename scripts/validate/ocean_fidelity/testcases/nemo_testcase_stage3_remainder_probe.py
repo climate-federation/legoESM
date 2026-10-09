@@ -44,6 +44,11 @@ import sys
 from pathlib import Path
 
 import numpy as np
+from legoesm.ocean.fidelity.provenance import (
+    allow_dirty_stamps,
+    scoped_allow_dirty,
+    worktree_stamp,
+)
 
 CASE = "OVERFLOW-zps"
 ROOT = Path("/data/abyssal/dbalwada/nemo-testcases-l1/phase3/overflow_kt1_10")
@@ -322,8 +327,8 @@ def set_fp64():
     import jax
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
 
-    set_policy(PrecisionPolicy.fp64())
-    require(get_policy() == PrecisionPolicy.fp64(), "precision policy is not fp64")
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    require(get_policy() == PrecisionPolicy.fp64(transcendentals="libm"), "precision policy is not fp64")
     require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
 
 
@@ -332,7 +337,7 @@ def fp64_model(card, hooks=None):
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         LatLonCGridOceanModel, _NEMOWSRK3TestHooks)
 
-    require(get_policy() == PrecisionPolicy.fp64(), "precision policy is not fp64")
+    require(get_policy() == PrecisionPolicy.fp64(transcendentals="libm"), "precision policy is not fp64")
     return LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
         _nemo_ws_test_hooks=hooks if hooks is not None else _NEMOWSRK3TestHooks())
@@ -369,6 +374,8 @@ def growth(*, max_kt: int, out_dir: Path, allow_dirty: bool, frames: bool) -> di
     SWEEP, TRAJ, BARO = gates()
     from legoesm.ocean.fidelity.nemo_testcase_recipe import build_nemo_testcase_card
     import jax
+
+    allow_dirty_stamps(allow_dirty)
 
     legoesm_git_sha = git_sha(allow_dirty)
     set_fp64()
@@ -415,7 +422,7 @@ def growth(*, max_kt: int, out_dir: Path, allow_dirty: bool, frames: bool) -> di
     def step(state):
         return model.step(state, dt=card.dt_s)
 
-    report = {"format": "nemo-testcase-l1-stage3-remainder-growth-v1", "case": CASE,
+    report = {"worktree": worktree_stamp(), "format": "nemo-testcase-l1-stage3-remainder-growth-v1", "case": CASE,
               "legoesm_git_sha": legoesm_git_sha, "backend": jax.default_backend(),
               "dtypes": dtypes, "dt_s": card.dt_s, "nlev": nlev, "max_kt": max_kt,
               "oracle_root": str(ROOT), "artifacts": artifacts, "arms": {}}
@@ -567,6 +574,8 @@ def candidates(*, out_dir: Path, allow_dirty: bool) -> dict:
         compute_layer_thickness, nemo_up3_vertical_momentum_advection)
     from legoesm.ocean.physics.vertical_mixing.implicit_solver import (
         implicit_vertical_diffusion_nemo_momentum)
+
+    allow_dirty_stamps(allow_dirty)
 
     legoesm_git_sha = git_sha(allow_dirty)
     set_fp64()
@@ -867,7 +876,8 @@ def candidates(*, out_dir: Path, allow_dirty: bool) -> dict:
     geom2 = _nemo_ws_stage_transport(
         (u2n_lego, v_zero), h_k_stage, 2, eta_stage=eta2_lego, h_ref=h_ref,
         Hu_avg=jnp.asarray(np.pad(un_adv[None], ((1, lat - 2), (1, 0)))), Hv_avg=jnp.zeros_like(init.v.data[..., 0]),
-        u_mask_3d=u_mask3, v_mask_3d=v_mask3, grid=grid, z_coord=z, config=cfg, dt=dt,
+        u_mask_3d=u_mask3, v_mask_3d=v_mask3, grid=grid, z_coord=z,
+        H_bathy=init.H_bathy.data, config=cfg, dt=dt,
         eta_before=init.eta.data, eta_after=etaa_lego)
     mf_u = pad(np.asarray(geom2[0])[1, 1:, :])
     w_stage = np.asarray(geom2[2])[1]
@@ -918,7 +928,7 @@ def candidates(*, out_dir: Path, allow_dirty: bool) -> dict:
                           "faces": {int(i): float(np.abs(resid_after_X1[i]).max()) for i in (18, 19, 20, 21, 22)}}
     print(f"[R - E(X1)] max {rows['R_minus_X1']['max_abs']:.3e}  faces {rows['R_minus_X1']['faces']}")
 
-    report = {"format": "nemo-testcase-l1-stage3-remainder-candidates-v1", "case": CASE,
+    report = {"worktree": worktree_stamp(), "format": "nemo-testcase-l1-stage3-remainder-candidates-v1", "case": CASE,
               "legoesm_git_sha": legoesm_git_sha, "backend": jax.default_backend(), "dtypes": dtypes,
               "dt_s": dt, "nlev": nlev, "oracle_root": str(ROOT), "artifacts": artifacts,
               "target_R": target, "controls": controls, "remainder_D_l": remainder, "candidates": rows,
@@ -949,6 +959,8 @@ def slow(*, out_dir: Path, allow_dirty: bool, kts=(2, 3, 4)) -> dict:
     from legoesm.ocean.dynamics.latlon_cgrid_operators import (
         compute_face_masks_3d, min_cell_to_uface, min_cell_to_vface)
     from legoesm.ocean.vertical import compute_layer_thickness
+
+    allow_dirty_stamps(allow_dirty)
 
     legoesm_git_sha = git_sha(allow_dirty)
     set_fp64()
@@ -1009,7 +1021,7 @@ def slow(*, out_dir: Path, allow_dirty: bool, kts=(2, 3, 4)) -> dict:
               f"faces {E[19]:+.2e}/{E[20]:+.2e}/{E[21]:+.2e}; corr {fit['corr']:+.5f} slope {fit['slope']:+.4f} "
               f"max|res-E| {rows[kt]['max_abs_residual_minus_E']:.3e}", flush=True)
         jax.clear_caches()
-    report = {"format": "nemo-testcase-l1-stage3-remainder-slow-v1", "case": CASE,
+    report = {"worktree": worktree_stamp(), "format": "nemo-testcase-l1-stage3-remainder-slow-v1", "case": CASE,
               "legoesm_git_sha": legoesm_git_sha, "backend": jax.default_backend(), "dtypes": dtypes,
               "artifacts": artifacts, "rows": rows,
               "prediction_convention": "E = h_u_pre-weighted depth mean of adv_lego(h_min(Kbb)) - adv_lego(e3u(Kbb)) on the exact NEMO entry"}
@@ -1020,6 +1032,7 @@ def slow(*, out_dir: Path, allow_dirty: bool, kts=(2, 3, 4)) -> dict:
     return report
 
 
+@scoped_allow_dirty
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("mode", choices=("growth", "candidates", "slow"))

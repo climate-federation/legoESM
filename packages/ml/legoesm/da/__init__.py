@@ -26,7 +26,6 @@ from legoesm.da.control_vector import (
 from legoesm.da.background_error import (
     DiagonalB,
     DiffusionB,
-    SpectralB,
     HybridB,
 )
 from legoesm.da.observation import (
@@ -41,6 +40,7 @@ from legoesm.da.observation import (
 from legoesm.da.cost_function import (
     build_cost_fn,
     build_cost_and_grad_fn,
+    build_vspace_cost_fn,
 )
 from legoesm.da.minimizer import (
     MinimizationResult,
@@ -68,7 +68,6 @@ __all__ = [
     # background_error
     "DiagonalB",
     "DiffusionB",
-    "SpectralB",
     "HybridB",
     # observation
     "Observation",
@@ -81,6 +80,7 @@ __all__ = [
     # cost_function
     "build_cost_fn",
     "build_cost_and_grad_fn",
+    "build_vspace_cost_fn",
     # minimizer
     "MinimizationResult",
     "minimize_lbfgs",

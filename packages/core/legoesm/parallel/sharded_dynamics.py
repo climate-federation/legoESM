@@ -77,13 +77,13 @@ from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
+import functools
 import hashlib
 
 import numpy as np
 from jax.sharding import NamedSharding
 from jax.sharding import PartitionSpec as P
 from legoesm.core.field import Field
-from legoesm.grids.halo import pad_halo, pad_halo_4d
 from legoesm.parallel.mesh import N_FACES, DeviceConfig
 
 logger = logging.getLogger(__name__)
@@ -890,70 +890,6 @@ def sharded_step_with_halo(
 # Halo exchange utilities for cubed-sphere face boundaries
 # ======================================================================
 
-def make_face_halo_exchange(grid, config: DeviceConfig):
-    """Create a halo exchange function for cubed-sphere face boundaries.
-
-    The returned function operates on a full model state pytree and
-    applies halo exchange to all face-dimensioned arrays.
-
-    For face-only sharding (<=6 devices), this function is typically
-    not needed because the built-in ``pad_halo`` already handles
-    cross-face communication within the JIT'd step function.  It is
-    provided for explicit control when needed (e.g., in custom
-    time-stepping loops).
-
-    For sub-face tiling (>6 devices), this additionally exchanges
-    tile boundary data within each face.
-
-    Parameters
-    ----------
-    grid : CubedSphereGrid
-        The cubed-sphere grid (provides connectivity and metric info).
-    config : DeviceConfig
-        Device configuration.
-
-    Returns
-    -------
-    callable
-        ``exchange(state) -> state`` that applies halo exchange to
-        all face-dimensioned fields in the state pytree.
-    """
-    def _exchange(state):
-        """Apply halo exchange to face-dimensioned arrays.
-
-        This function pads each 2D face field ``(6, n, n)`` with halo
-        data from neighbors, then strips the halos back to ``(6, n, n)``.
-        This ensures boundary values are fresh after a dynamics step.
-
-        For 3D fields ``(6, n, n, nlev)`` the exchange uses the native
-        4D halo path (``pad_halo_4d``) which fetches halos for every
-        level in one MPI message — see CLAUDE.md ``Parallel and HPC
-        Rules``.  The previous ``vmap(pad_halo)`` per level pattern is
-        forbidden because it issues ``nlev`` separate messages.
-        """
-        def _exchange_leaf(leaf):
-            if not isinstance(leaf, (jax.Array, jnp.ndarray)):
-                return leaf
-            if leaf.ndim < 3 or leaf.shape[0] != N_FACES:
-                return leaf
-
-            if leaf.ndim == 3:
-                # 2D field: (6, n, n)
-                padded = pad_halo(leaf)
-                return padded[:, 1:-1, 1:-1]
-
-            elif leaf.ndim == 4:
-                # 3D field: (6, n, n, nlev) — single 4D halo exchange.
-                padded = pad_halo_4d(leaf)
-                return padded[:, 1:-1, 1:-1, :]
-
-            return leaf
-
-        return jax.tree.map(_exchange_leaf, state)
-
-    return _exchange
-
-
 # ======================================================================
 # Multi-step integration with sharding
 # ======================================================================
@@ -1501,6 +1437,28 @@ def _round_profile(sched, device, n_dev):
     return out
 
 
+def _on_host_cpu(fn):
+    """Run ``fn`` with jnp arrays created on the host CPU device.
+
+    The partition infra builds one padded mesh per device and stacks them,
+    so its arrays grow with the device count. Built on the default GPU they
+    exhaust it before the per-shard placement runs (ico10 float64 at 64 and
+    128 GPUs). Values are identical; only the device holding them changes.
+    Without a CPU backend (JAX_PLATFORMS excludes cpu) the default device
+    is used, as before.
+    """
+    @functools.wraps(fn)
+    def wrapped(*args, **kwargs):
+        try:
+            cpu = jax.local_devices(backend="cpu")[0]
+        except RuntimeError:
+            return fn(*args, **kwargs)
+        with jax.default_device(cpu):
+            return fn(*args, **kwargs)
+    return wrapped
+
+
+@_on_host_cpu
 def _build_voronoi_partition_infra(global_mesh, n_dev, halo_depth=2):
     """Pre-compute per-device local meshes and gather/scatter indices.
 
@@ -4210,6 +4168,7 @@ def make_voronoi_sharded_step(
             )
             tend = mpas_hydrostatic_tendencies(
                 local_state, my_mesh, sigma, cfg, dt=dt_val,
+                fence_pv_flux=True,
             )
 
             # Owned shards only.  Tracer ADVECTION tendencies ride back
@@ -4396,6 +4355,7 @@ def make_voronoi_sharded_step(
                 keep_e = (_owned_e | (edge_ring <= thr))[:, None]
                 tend = mpas_hydrostatic_tendencies(
                     s, my_mesh, sigma, cfg, dt=dt_val,
+                    fence_pv_flux=True,
                 )
                 tr_tend = None
                 if tkeys:
@@ -4479,7 +4439,7 @@ def make_voronoi_sharded_step(
         # fp64 area sum to match the fp64 mass-budget accumulator below
         # (mirrors make_voronoi_mpi_step; identical under x64).
     # The global cell areas ride for BOTH the dry-mass fixer and the
-    # positivity stage's mass weight (cell_mass_weight), so they are built
+    # positivity stage's area-weighted global residual (area=), so they are built
     # whether or not the fixer is on.
     _area_for_mass = multiprocess_safe_device_put(
         np.asarray(global_mesh.areaCell), dev_sharding)
@@ -4718,14 +4678,13 @@ def make_voronoi_sharded_step(
                 from legoesm.core.conservation import apply_water_positivity
                 _ph = sigma.pressure_at_half(state_new.p_s.data)
                 _dp = jnp.maximum(_ph[..., 1:] - _ph[..., :-1], 0.0)
-                from legoesm.core.conservation import cell_mass_weight
-                _dp = cell_mass_weight(_dp, area_arg)     # local cell areas
                 _tr_out, _T_out = apply_water_positivity(
                     state_new.tracers, state_new.T.data, _dp,
                     conservative=getattr(
                         cfg, "conservative_tracer_clamp", False),
                     energy_consistent=getattr(
-                        cfg, "energy_consistent_moisture_clip", False))
+                        cfg, "energy_consistent_moisture_clip", False),
+                    area=area_arg)
                 state_new = state_new._replace(
                     tracers=_tr_out, T=state_new.T.replace(data=_T_out))
 

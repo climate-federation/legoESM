@@ -82,7 +82,7 @@ def energy_consistent_moisture_floor(q_v_raw, T):
     """
     deficit = jnp.maximum(-q_v_raw, 0.0)
     q_v_out = q_v_raw + deficit
-    T_out = T - (constants.L_v / constants.c_pd) * deficit
+    T_out = T - (constants.L_v / constants.c_pd) * deficit  # latent-ok: atmosphere moist-enthalpy reference L (constant by convention; surface gap booked by surface_layer.latent_enthalpy_correction)
     return q_v_out, T_out
 
 
@@ -120,9 +120,9 @@ def is_borrow_eligible_tracer(name: str) -> bool:
 #: HARD-floor certificate only; the BORROW is h-neutral for every species with
 #: no T change (it conserves each column integral), so it needs none of this.
 _FLOOR_LATENT_COEF = {
-    "q_v": constants.L_v,
+    "q_v": constants.L_v,  # latent-ok: atmosphere moist-enthalpy reference L (constant by convention; surface gap booked by surface_layer.latent_enthalpy_correction)
     "q_c": 0.0, "q_r": 0.0,
-    "q_i": -constants.L_f, "q_s": -constants.L_f, "q_g": -constants.L_f,
+    "q_i": -constants.L_f, "q_s": -constants.L_f, "q_g": -constants.L_f,  # latent-ok: atmosphere moist-enthalpy reference L (constant by convention; surface gap booked by surface_layer.latent_enthalpy_correction)
 }
 
 
@@ -162,34 +162,8 @@ def energy_consistent_water_floor(tracers, T):
     return out, T_out
 
 
-def cell_mass_weight(dp, area, area_ref=None):
-    """The weight of the positivity stage: layer MASS per cell, ``dp`` times
-    the cell area RELATIVE to ``area_ref`` (default: the mean of ``area``),
-    broadcast over the trailing level axis.  The per-column borrow is
-    unchanged by a per-column factor (it cancels in the rescale), but the
-    GLOBAL residual redistribution of :func:`conservative_positive_clip_global`
-    sums over cells, so with ``dp`` alone a net-negative column's invented
-    mass is handed back per unit of layer pressure, not per unit of mass --
-    mis-conserving on any grid whose cells differ in area (lat-lon cos(lat):
-    1 -> 0 at the pole; Voronoi res6: 1.6x; duo cube: 1.4x corner to centre).
-    User directive 2026-10-02: every lane weights by mass.
-
-    The area enters as a dimensionless RATIO so the weights keep ``dp``'s
-    magnitude: the clip's fixed degeneracy threshold and its fp32 quotient
-    VJP (``after**2``) then see the same scale as the dp-only weight they
-    replace (codex 2026-10-02: Earth-scale ``dp*area`` on fp32 number
-    tracers overflowed the squared denominator and silently zeroed a
-    gradient term).  ``area_ref`` must be partition-independent: under MPI
-    pass the GLOBAL mean cell area (a per-rank local mean would give each
-    rank a different scale inside one allreduced residual).
-    """
-    a = jnp.asarray(area, dtype=dp.dtype)
-    ref = jnp.mean(a) if area_ref is None else jnp.asarray(area_ref, dtype=dp.dtype)
-    return dp * (a / ref)[..., None]
-
-
 def apply_water_positivity(tracers, T, dp, *, conservative, energy_consistent,
-                           sum_fn=None):
+                           area, area_ref=None, sum_fn=None):
     """Single positivity stage for every atmospheric dycore (MPAS/cube/spectral/
     lat-lon), so the three grids stay bit-equivalent by construction.
 
@@ -197,7 +171,11 @@ def apply_water_positivity(tracers, T, dp, *, conservative, energy_consistent,
       per-mass species (:func:`conservative_positive_clip_global` with the
       ``dp`` layer-mass weight), plain floor for anything not borrow-eligible.
       ``T`` is returned untouched — the borrow is frozen-MSE-neutral for every
-      species (it preserves each column integral).  ``sum_fn`` defaults to
+      species (it preserves each column integral).  ``area`` is the
+      horizontal cell area (``dp`` minus its trailing level axis); the global
+      net-negative-column residual is conserved in ``sum(area*dp*q)``, the
+      physical mass (``area_ref``: see
+      :func:`conservative_positive_clip_global`).  ``sum_fn`` defaults to
       serial ``jnp.sum``; the MPI lane passes an allreduce-SUM reduction so the
       redistribution factor is decomposition-independent.  Iterates SORTED so
       every rank issues the per-tracer collectives in the same order.
@@ -214,7 +192,8 @@ def apply_water_positivity(tracers, T, dp, *, conservative, energy_consistent,
             data = f.data if hasattr(f, "data") else f
             if is_borrow_eligible_tracer(name):
                 clipped = conservative_positive_clip_global(
-                    data, dp, axis=-1, sum_fn=sum_fn)[0]
+                    data, dp, axis=-1, sum_fn=sum_fn, area=area,
+                    area_ref=area_ref)[0]
             else:
                 clipped = jnp.maximum(data, 0.0)
             out[name] = (f.replace(data=clipped) if hasattr(f, "replace")
@@ -337,7 +316,7 @@ def conservative_positive_clip(q, weight, axis=-1, eps=1e-30):
 
 
 def conservative_positive_clip_global(q, weight, axis=-1, eps=1e-30,
-                                      sum_fn=None):
+                                      sum_fn=None, area=None, area_ref=None):
     """Column-local borrow PLUS global residual redistribution.
 
     :func:`conservative_positive_clip` zeroes a net-negative column (nothing
@@ -358,9 +337,28 @@ def conservative_positive_clip_global(q, weight, axis=-1, eps=1e-30,
     factor is identical on every rank (decomposition-independent, and
     allreduce-SUM is the one AD-safe collective).  AD: one extra guarded
     quotient, same double-``where`` pattern as the column fixer.
+
+    ``area`` (horizontal cell area, ``q``'s shape minus the trailing axis)
+    weights the global sums so the conserved total is the physical mass on a
+    non-equal-area grid; ``None`` means equal-area columns.  It enters as a
+    dimensionless RATIO to ``area_ref`` (default: the mean of ``area``): a
+    uniform scale cancels exactly in the redistribution factor, so this is
+    the same physics as the raw area, but the global sums keep ``weight``'s
+    magnitude.  With x64 off (the driver default) the accumulator is fp32,
+    and an Earth-scale raw ``dp*area`` total on a per-mass number tracer
+    (~1e6 * 1e5 Pa * 5e14 m^2 ~ 5e25) overflows ``total**2`` inside the
+    quotient VJP, silently zeroing a gradient term (codex 2026-10-02).
+    ``area_ref`` must be partition-independent: under MPI pass the GLOBAL
+    mean cell area (a per-rank mean would scale each rank's share of one
+    allreduced residual differently).
     """
     q_col, created = conservative_positive_clip(q, weight, axis=axis, eps=eps)
     w = jnp.asarray(weight, dtype=q.dtype)
+    if area is not None:
+        a = jnp.asarray(area, dtype=q.dtype)
+        ref = (jnp.mean(a) if area_ref is None
+               else jnp.asarray(area_ref, dtype=q.dtype))
+        w = w * (a / ref)[..., None]
     s = sum_fn if sum_fn is not None else jnp.sum
     eps_eff = max(float(eps), float(jnp.finfo(q.dtype).tiny) ** 0.5)
     # ONE reduction per quantity (two total): pos_total reused for the
@@ -530,15 +528,9 @@ def global_area_sum(
         summation; ``global_sum_mpi`` then combines owned portions.
         If ``None``, all faces are summed (single-rank or SPMD).
     differentiable_broadcast : bool, optional
-        VJP semantics of the MPI reduction.  ``False`` (default) uses
-        ``global_sum_mpi`` (IDENTITY VJP) — kept byte-identical for the
-        established callers.  ``True`` uses :func:`_broadcast_allreduce_sum`
-        (allreduce forward AND backward), REQUIRED when the reduced value is
-        broadcast back and reused on every rank — e.g. a mass-fixer additive
-        ``correction = (target - global_area_sum(p_s)) / area`` added to EVERY
-        cell: the identity VJP silently drops the cross-rank cotangent of the
-        shared correction (a ~1e-6 gradient leak the flux-form moisture path
-        exposes via q→p_s coupling; #811).  Forward is identical either way.
+        No longer changes anything: since #1814 both ``global_sum_mpi`` and
+        :func:`legoesm.parallel.reductions.broadcast_allreduce_sum` allreduce
+        the cotangent on the backward pass.  Kept for existing callers.
 
     Execution modes:
 
@@ -571,9 +563,11 @@ def global_area_sum(
     if spmd_sums is not None:
         return spmd_sums[0]
     if is_distributed():
+        from legoesm.parallel.reductions import (
+            broadcast_allreduce_sum, global_sum_mpi,
+        )
         if differentiable_broadcast:
-            return _broadcast_allreduce_sum(local_sum)
-        from legoesm.parallel.reductions import global_sum_mpi
+            return broadcast_allreduce_sum(local_sum)
         return global_sum_mpi(local_sum)
     # Cube GSPMD / single-device: use the shard-count-invariant per-face
     # fixed-order reduction (issue #852) so a face-sharded mass integral is
@@ -681,12 +675,8 @@ def batch_global_area_sums(
 
     Falls back to individual ``jnp.sum`` when not distributed.
 
-    ``differentiable_broadcast`` (default ``False``): see :func:`global_area_sum`
-    — ``True`` routes the batched reduction through :func:`_broadcast_allreduce_sum`
-    (one stacked allreduce, allreduce VJP) instead of ``batch_allreduce_mpi``
-    (identity VJP), for reduced values that scale every rank (the non-anchor p_s
-    mass fixer's shared ``correction``; #811).  ``batch_allreduce_mpi`` is left
-    untouched for its other callers.
+    ``differentiable_broadcast``: no longer changes anything (see
+    :func:`global_area_sum`; #1814).
     """
     acc = conservation_accumulator()
     area_acc = grid.area.astype(acc)
@@ -715,13 +705,15 @@ def batch_global_area_sums(
         return spmd_sums
 
     if is_distributed():
+        from legoesm.parallel.reductions import (
+            batch_allreduce_mpi, broadcast_allreduce_sum,
+        )
         if differentiable_broadcast:
             # One stacked broadcast-allreduce (allreduce fwd AND bwd) — same
             # single-message batching as batch_allreduce_mpi, but the correct
             # transpose for a reused/broadcast reduced value.
-            reduced = _broadcast_allreduce_sum(jnp.stack(local_sums, axis=0))
+            reduced = broadcast_allreduce_sum(jnp.stack(local_sums, axis=0))
             return [reduced[i] for i in range(len(local_sums))]
-        from legoesm.parallel.reductions import batch_allreduce_mpi
         return batch_allreduce_mpi(local_sums, op="sum")
     # Cube whole-face GSPMD / single-device: shard-count-invariant per-array
     # reduction (issue #852), matching the single-array global_area_sum fix so
@@ -734,53 +726,6 @@ def batch_global_area_sums(
             stacked * weight[..., None], reduce_axes=(1, 2))
         return [inv[i] for i in range(len(arrays))]
     return local_sums
-
-
-@jax.custom_vjp
-def _broadcast_allreduce_sum(local_sum: jax.Array) -> jax.Array:
-    """``allreduce(SUM)`` whose VJP ALSO allreduces the cotangent — the correct
-    transpose for a reduced value that is BROADCAST and reused on every rank.
-
-    ``global_sum_mpi`` (mpi4jax ``allreduce``) has an IDENTITY VJP: each rank
-    keeps its LOCAL cotangent (``test_grad_nonzero``: "gradient 2*x, no
-    scaling").  That is right for a TOP-LEVEL loss reduction ``L =
-    global_sum_mpi(local)`` (each rank contributes 1:1 to ``L``), but WRONG for
-    an INTERMEDIATE global that is broadcast back and reused multiplicatively on
-    every face/rank — e.g. the flux-form ``scale = mass_in / mass_pos`` that
-    rescales EVERY owned face (#811).  There, ``field_in`` on rank ``r`` affects
-    the output on EVERY rank ``r'`` through the shared ``scale``, so the true
-    ``dL/d(mass)`` is the GLOBAL sum of every rank's local cotangent — i.e. the
-    reduction's transpose is ``allreduce(SUM)``, not identity.  Dropping it left
-    a UNIFORM ~1e-3 absolute cotangent error on every owned face (rel 1.1 on
-    faces far from the transported blob) in the scattered-vs-replicated gradient
-    gate.  Forward is byte-identical to ``global_sum_mpi`` (both are the same
-    ``allreduce(SUM)``); only the backward differs.
-    """
-    from legoesm.parallel.reductions import global_sum_mpi
-    return global_sum_mpi(local_sum)
-
-
-def _broadcast_allreduce_sum_fwd(local_sum):
-    from legoesm.parallel.reductions import global_sum_mpi
-    return global_sum_mpi(local_sum), None
-
-
-def _broadcast_allreduce_sum_bwd(_res, g):
-    # Transpose of ``y_r = Σ_r' x_r'`` (every rank gets the sum) is
-    # ``x̄_r = Σ_r' ȳ_r' = allreduce(SUM)(ȳ)``.
-    from legoesm.parallel.reductions import global_sum_mpi
-    return (global_sum_mpi(g),)
-
-
-_broadcast_allreduce_sum.defvjp(
-    _broadcast_allreduce_sum_fwd, _broadcast_allreduce_sum_bwd)
-
-#: Public name for the broadcast-correct allreduce(SUM) (VJP also allreduces
-#: the cotangent) — the ``sum_fn`` to pass to
-#: :func:`conservative_positive_clip_global` under MPI, where the summed
-#: scalar is broadcast into every rank's rescale factor.  Cross-module
-#: imports must use this name (no-private-cross-imports ratchet).
-broadcast_allreduce_sum = _broadcast_allreduce_sum
 
 
 def global_face_sum_if_scattered(
@@ -813,14 +758,8 @@ def global_face_sum_if_scattered(
     Shared gate behind :func:`_total_area` (the mass-fixer denominator) and the
     cube flux-form moisture substep's mass reductions (#811 / #771 follow-up).
 
-    ``differentiable_broadcast`` (default ``False``) selects the VJP semantics of
-    the scattered reduction.  ``False`` uses ``global_sum_mpi`` (mpi4jax
-    ``allreduce``, IDENTITY VJP) — correct for a top-level loss reduction and the
-    established mass-fixer callers (kept byte-identical).  ``True`` uses
-    :func:`_broadcast_allreduce_sum` (allreduce forward AND backward) — REQUIRED
-    when the reduced value is broadcast back and reused multiplicatively on every
-    rank, so the cross-rank cotangents are not silently dropped (the flux-form
-    ``scale`` — #811).  Forward is identical either way; only the gradient differs.
+    ``differentiable_broadcast``: no longer changes anything (see
+    :func:`global_area_sum`; #1814).
     """
     from legoesm.grids.halo import get_halo_backend, get_mpi_topology
 
@@ -834,10 +773,11 @@ def global_face_sum_if_scattered(
         if (topo is not None and area is not None
                 and hasattr(topo, "local_face_ids")
                 and area.shape[0] == len(topo.local_face_ids) < 6):
+            from legoesm.parallel.reductions import (
+                broadcast_allreduce_sum, global_sum_mpi,
+            )
             if differentiable_broadcast:
-                return _broadcast_allreduce_sum(local_sum)
-            from legoesm.parallel.reductions import global_sum_mpi
-
+                return broadcast_allreduce_sum(local_sum)
             return global_sum_mpi(local_sum)
     return local_sum
 
@@ -1066,6 +1006,25 @@ def zero_mean_tendency(
     orig_dtype = tendency.dtype
     area_ndim = area.ndim  # 3 for cubed-sphere, 2 for lat-lon
 
+    if tendency.ndim in (area_ndim, area_ndim + 1):
+        # Rank/band-partial grids (lat-band MPI, lat-band SPMD, replicated
+        # cube MPI): reduce the area exactly like the numerator, in one
+        # collective, or the global integral is divided by this rank's own
+        # area.  ``None`` = this process holds the whole domain.
+        tend_acc = tendency.astype(acc)
+        if tendency.ndim == area_ndim:
+            local_num = jnp.sum(tend_acc * area_acc)[None]
+        else:
+            local_num = jnp.sum(tend_acc * area_acc[..., None],
+                                axis=tuple(range(area_ndim)))
+        reduced = _reduce_rank_partials(
+            jnp.concatenate([local_num, total_area_acc[None]]))
+        if reduced is not None:
+            corrections = reduced[:-1] / reduced[-1]
+            if tendency.ndim == area_ndim:
+                corrections = corrections[0]
+            return (tend_acc - corrections).astype(orig_dtype)
+
     if tendency.ndim == area_ndim:
         # 2D tendency (lat-lon) or 3D tendency (cubed-sphere) — no level axis
         global_sum = global_area_sum(tendency, grid)
@@ -1078,9 +1037,6 @@ def zero_mean_tendency(
         # Sum over all spatial axes (all except the last)
         spatial_axes = tuple(range(area_ndim))
         level_sums = jnp.sum(prod, axis=spatial_axes)  # (nlev,)
-        if is_distributed():
-            from legoesm.parallel.reductions import global_sum_mpi
-            level_sums = global_sum_mpi(level_sums)
         corrections = level_sums / total_area_acc  # (nlev,)
         # Broadcast corrections to match tendency shape
         for _ in range(area_ndim):
@@ -1088,6 +1044,22 @@ def zero_mean_tendency(
         return (tend_acc - corrections).astype(orig_dtype)
     else:
         return tendency
+
+
+def _reduce_rank_partials(local: jax.Array) -> jax.Array | None:
+    """Sum rank/band partials with the same dispatch as :func:`global_area_sum`;
+    ``None`` when this process already holds the whole domain (serial, GSPMD).
+
+    ``broadcast_allreduce_sum`` (allreduce VJP): the reduced value is a shared
+    correction reused on every rank, so its cotangent must be summed too.
+    """
+    spmd = _spmd_lat_psum_or_none([local])
+    if spmd is not None:
+        return spmd[0]
+    if is_distributed():
+        from legoesm.parallel.reductions import broadcast_allreduce_sum
+        return broadcast_allreduce_sum(local)
+    return None
 
 
 # ==============================================================================

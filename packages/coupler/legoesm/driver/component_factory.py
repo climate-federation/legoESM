@@ -936,11 +936,9 @@ def create_atmosphere_dycore(
         from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
             SpectralPrimitiveEquationModel, SpectralPEConfig,
         )
-        # Compute hyperdiffusion from truncation: 0.5-hour e-folding at max wavenumber
-        n_max = grid.n_max
-        a = grid.radius
-        eig_max = n_max * (n_max + 1) / (a * a)
-        hyperdiff = 1.0 / (0.5 * 3600.0 * eig_max ** 2)
+        # Hyperdiffusion from truncation: 0.5-hour e-folding at max wavenumber
+        from legoesm.grids.gaussian import hyperdiff_coeff_for_efold
+        hyperdiff = hyperdiff_coeff_for_efold(grid, 0.5 * 3600.0)
         # Spectral hydrostatic PE runs the 5-stage SSP-RK54 by default (spectral
         # stability).  It ALSO supports the semi-implicit LEAPFROG path, which
         # evaluates physics ONCE per step and is the integrator #405 requires to
@@ -1445,8 +1443,8 @@ def create_atmosphere_dycore(
             sponge_width_m=dc.sponge_width_m,
             sponge_shape=dc.sponge_shape,
             sponge_scale_height_m=dc.sponge_scale_height_m,
-            # #1029 ω-side SB81 conversion (opt-in, default OFF —
-            # bit-identical legacy arithmetic form when False).
+            # #1029 ω-side SB81 conversion (default ON; False = the
+            # bit-identical legacy arithmetic form).
             sb81_omega_conversion=dc.sb81_omega_conversion,
             # Task #25: time integrator (default ssp_rk3, opt into
             # ssp_rk3_scan for ~1.5× JIT compile speedup at scale).

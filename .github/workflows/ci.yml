@@ -32,7 +32,7 @@ jobs:
         run: |
           python -c "import legoesm; print(f'legoESM {legoesm.__version__}')"
           python -c "from legoesm.config import Config"
-          python -c "from legoesm.core.hardware import detect_devices"
+          python -c "from legoesm.runtime import detect_hardware"
           python -c "from legoesm.driver.config import ExperimentConfig"
           python -c "from legoesm.io.restart import save_restart, load_restart"
           python -c "import legoesm.coupler"

@@ -995,6 +995,13 @@ def make_turbulence_only_spectral_physics(dt,
 # Physics-based parameterizations with trainable parameters
 # =============================================================================
 
+# The TrainablePhysicsParams names make_physics_params_spectral_physics reads
+# (on its rrtmgp path).  Any other DEFAULT_TRAINABLE leaf (C_H, C_E, albedo_ice)
+# is never consumed here and is frozen OUT of the spectral trainer (no inert
+# parameters).
+SPECTRAL_PHYSICS_TRAINABLE = ("sbm_tau_c", "sbm_RH_ref", "albedo_ocean")
+
+
 def make_physics_params_spectral_physics(params, grid, dt, *,
                                          radiation: str = "rrtmgp"):
     """Create a spectral PE physics_fn from trainable physics parameters.
@@ -1695,7 +1702,7 @@ def spectral_rollout(
         else:
             _rad_accepts = set(_sig.parameters)
 
-    def _call_rad(s, t_seconds, step_idx=None):
+    def _call_rad(s, t_seconds, step_idx=None, phys_state=None):
         # ``forcing_base`` (when the caller supplies one) carries the
         # prescribed surface temperature and the scene's real calendar; the
         # per-step dict advances that calendar by the elapsed rollout time,
@@ -1708,9 +1715,21 @@ def spectral_rollout(
                 _rad_accepts is None or "forcing" in _rad_accepts):
             _kw["forcing"] = _forcing_at(
                 jnp.asarray(0.0 if step_idx is None else step_idx))
+        # The LAGGED physics carry (CLUBB cloud fraction, CAM6 deepcu
+        # inputs) for a radiation fn that reads it; a stateless caller
+        # passes None and the kwarg is omitted so older signatures still
+        # bind.
+        if phys_state is not None and (
+                _rad_accepts is None or "phys_state" in _rad_accepts):
+            _kw["phys_state"] = phys_state
         return rad_physics_fn(s, grid, sigma_coord, **_kw)
 
-    init_rad_tendency = _call_rad(initial_state, sim_time_offset_seconds, 0.0)
+    # Deferred: the stateful branch below must seed the physics carry
+    # FIRST and hand it to this call, because a radiation fn that reads
+    # the carry (cam6_clubb) refuses to run without it.
+    def _init_rad(phys_state=None):
+        return _call_rad(initial_state, sim_time_offset_seconds, 0.0,
+                         phys_state)
 
     # Cast the (Python-float) offset into the same dtype the gated
     # branch uses, so the radiation diurnal cycle sees a single
@@ -1764,7 +1783,7 @@ def spectral_rollout(
             new_state = anchor_lnps_to_mass(grid, new_state, _target_mass)
         return new_state
 
-    def _rad_refresh(state, cached_rad_tendency, step_idx):
+    def _rad_refresh(state, cached_rad_tendency, step_idx, phys_state=None):
         # Refresh rad tendency at the start of every gating window.
         # ``lax.cond`` retains backward-mode differentiability through
         # the rad branch; on skipped steps the cached tensor flows
@@ -1779,7 +1798,7 @@ def spectral_rollout(
         sim_time_seconds = step_idx.astype(jnp.float64) * dt + _offset
         return jax.lax.cond(
             should_refresh,
-            lambda _: _call_rad(state, sim_time_seconds, step_idx),
+            lambda _: _call_rad(state, sim_time_seconds, step_idx, phys_state),
             lambda _: cached_rad_tendency,
             operand=None,
         )
@@ -1800,7 +1819,11 @@ def spectral_rollout(
 
     def step_fn_gated_stateful(carry, step_idx):
         state, cached_rad_tendency, phys_state = carry
-        new_rad_tendency = _rad_refresh(state, cached_rad_tendency, step_idx)
+        # Radiation reads the carry ENTERING the step (lagged, as the
+        # hydrostatic chain does): the previous step's published cloud
+        # fraction and deep-convection carries.
+        new_rad_tendency = _rad_refresh(state, cached_rad_tendency, step_idx,
+                                        phys_state)
 
         # Harvest the updated prognostic physics state ONCE per step, on
         # the PRE-STEP state (operator-split convention: all RK stages of
@@ -1891,6 +1914,34 @@ def spectral_rollout(
                 _nlev = int(jnp.shape(sigma_coord.sigma_full)[0])
                 phys0 = _ps_init(_ncol, _nlev)
         phys0 = _with_prescribed_sfc(phys0)
+        # FILL THE CARRY FIRST (owner decision 2026-09-24).  A radiation fn
+        # that reads the carry (cam6_clubb: CLUBB's PDF cloud fraction, ZM's
+        # mass flux / in-cloud water) would otherwise see the ZERO seed for
+        # its whole first gating window -- at cadence 6 that is 3 h of a 6 h
+        # training sample with no liquid or deep cloud in radiation.  One
+        # non-radiative physics pass on the initial state publishes real
+        # values before the first radiation call.  Only for a FRESH seed (a
+        # chained caller's carry already holds the previous segment's values)
+        # and only when radiation actually reads the carry, so every other
+        # stateful arm is byte-identical.  Production AMIP cold-starts from the
+        # zero seed too; this is a deliberate departure for the training lane,
+        # where the transient would be half of every sample.
+        # The WHOLE carry from that pass is kept (owner decision 2026-09-24,
+        # after the reviewers split): the alternative -- taking only the
+        # three fields radiation reads -- would hand step 0 a carry whose
+        # cloud fraction was diagnosed from moments the carry then does not
+        # hold.  The cost of the whole pass is one extra relaxation step of
+        # every prognostic carry (CLUBB moments, convection profile, GWD
+        # spectrum) and one extra draw of the stochastic key, on an
+        # atmosphere that has not moved.
+        if phys_state_in is None and getattr(
+                rad_physics_fn, "_wants_phys_state_ro", False):
+            _warm = jax.checkpoint(
+                lambda ps: _ps_entry(initial_state, grid, sigma_coord, ps)[1],
+                prevent_cse=True,
+                policy=jax.checkpoint_policies.nothing_saveable,
+            )
+            phys0 = _warm(phys0)
         step_fn_ckpt = jax.checkpoint(
             step_fn_gated_stateful,
             prevent_cse=True,
@@ -1898,7 +1949,7 @@ def spectral_rollout(
         )
         (final_state, _, final_ps), _ = jax.lax.scan(
             step_fn_ckpt,
-            (initial_state, init_rad_tendency, phys0),
+            (initial_state, _init_rad(phys0), phys0),
             jnp.arange(n_steps),
         )
         if return_phys_state:
@@ -1920,7 +1971,7 @@ def spectral_rollout(
 
     (final_state, _), _ = jax.lax.scan(
         step_fn_ckpt,
-        (initial_state, init_rad_tendency),
+        (initial_state, _init_rad()),
         jnp.arange(n_steps),
     )
     return final_state
@@ -3294,9 +3345,15 @@ def _train_spectral_loop(
     n_samples_total: int | None = None,
     resume_from_dir=None,
     host_staged: bool = False,
+    assert_no_inert_params: bool = False,
 ):
     """Shared training loop for any learned-physics model coupled to the
     spectral PE dycore.
+
+    ``assert_no_inert_params=True`` (physics-parameter models with
+    ``raw_values``) runs the no-inert gate before the first update of a fresh
+    run: the gradient of THIS loop's rollout loss on every sample, and any
+    leaf zero on all of them aborts (``assert_no_inert_over``).
 
     ``host_staged=True`` declares that the PROVIDED ``ic_states`` /
     ``target_carries`` / ``sample_forcings`` were built host-resident
@@ -3890,6 +3947,26 @@ def _train_spectral_loop(
     # the prefetch consumer.
     _host_staged = bool(getattr(chunk_loader, "host_staged", False)) or bool(host_staged)
     _compute_dev = jax.devices()[0] if _host_staged else None
+
+    if (assert_no_inert_params and n_epochs_total > 0
+            and start_epoch == 0 and resume_chunk == 0):
+        # Judged on the training objective itself (the rollout loss the first
+        # epoch differentiates), so a parameter that only acts later in the
+        # rollout counts as live, and no proxy can cancel a real dependence.
+        from legoesm.training.inert_params import assert_no_inert_over
+        _gate_step = _dp_grad_step_for(epoch_plan[0])
+
+        def _gate_grads():
+            for c_ics, c_tgts, c_forc in _iter_epoch_data():
+                for i, (ic, tgt) in enumerate(zip(c_ics, c_tgts)):
+                    fb = c_forc[i] if c_forc is not None else None
+                    if _host_staged:
+                        ic = _stage_tree(ic, _compute_dev)
+                        tgt = _stage_tree(tgt, _compute_dev)
+                        fb = None if fb is None else _stage_tree(fb, _compute_dev)
+                    yield _gate_step(model, ic, tgt, fb)[2].raw_values
+
+        assert_no_inert_over(_gate_grads())
 
     best_loss = float("inf")
     patience_counter = 0
@@ -5827,21 +5904,26 @@ def train_physics_params_spectral(
     physics computations and the spectral dynamical core. Gray radiation runs
     at its documented defaults — it is not trained.
 
-    Trainable parameters (via ``TrainablePhysicsParams``):
+    Trainable parameters (via ``TrainablePhysicsParams``,
+    :data:`SPECTRAL_PHYSICS_TRAINABLE`):
     - ``sbm_tau_c``: SBM convection relaxation timescale
     - ``sbm_RH_ref``: SBM convection reference relative humidity
+    - ``albedo_ocean``: surface albedo override on the rrtmgp path
 
     Returns (trained_params, loss_history).
     """
     # The IDEALIZED 2-family parameter set (convection + radiation), not the
     # campaign "classical" model — the registry's classical is the six-family
     # AIMIPClassicalParams since 2026-08-12.
-    from legoesm.training.trainable_params import TrainablePhysicsParams
+    from legoesm.training.trainable_params import (
+        DEFAULT_TRAINABLE, TrainablePhysicsParams,
+    )
 
     grid = create_gaussian_grid(config.n_max, dealiasing="quadratic")
     sigma = create_sigma_coordinate(config.n_levels, sigma_top=config.sigma_top)
 
-    params = TrainablePhysicsParams.from_defaults()
+    params = TrainablePhysicsParams.from_defaults(
+        [c for c in DEFAULT_TRAINABLE if c.name in SPECTRAL_PHYSICS_TRAINABLE])
     n_p = len(params.raw_values)
     logger.info(f"Physics params: {n_p} trainable ({', '.join(params.raw_values)})")
     for k, v in params.as_dict().items():
@@ -5861,4 +5943,5 @@ def train_physics_params_spectral(
         params, _make_physics_fn,
         grid, sigma, ic_states, target_carries, config,
         host_staged=True,   # dataset loaded host-resident above (#1155)
+        assert_no_inert_params=True,
     )

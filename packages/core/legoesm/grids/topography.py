@@ -313,6 +313,25 @@ def _detect_variables(ds) -> tuple[str, str, str]:
     return elev_var, lat_var, lon_var
 
 
+def _drop_duplicate_periodic_lon(lon_src, data):
+    """A file carrying both periodic ends (-180 and 180, or 0 and 360) maps
+    them to one longitude after the callers' ``% 360``: scipy refuses the
+    repeated point, and the elevation binning would count that meridian
+    twice (two source columns averaged into one cell, and a ``2 pi / n_lon``
+    source width that includes the duplicate).  Keep the first occurrence:
+    the callers' STABLE sort puts the file's first column ahead of its end
+    column.  ``lon_src`` must already be sorted ascending."""
+    lon_src = np.asarray(lon_src)
+    keep = np.concatenate([[True], np.diff(lon_src) != 0.0])
+    if not keep.all():
+        logger.info("Dropping %d duplicated periodic longitude column(s) at "
+                    "%s deg (file's end column)", int((~keep).sum()),
+                    lon_src[~keep])
+        lon_src = lon_src[keep]
+        data = np.asarray(data)[:, keep]
+    return lon_src, data
+
+
 def _build_latlon_interpolator(
     lat_src: np.ndarray,
     lon_src: np.ndarray,
@@ -337,6 +356,7 @@ def _build_latlon_interpolator(
     from scipy.interpolate import RegularGridInterpolator
 
     lat_src = np.asarray(lat_src)
+    lon_src, data = _drop_duplicate_periodic_lon(lon_src, data)
     # Longitudinal wrap (unchanged behavior).
     lon_wrapped = np.concatenate([
         lon_src[-1:] - 360.0, lon_src, lon_src[:1] + 360.0
@@ -476,7 +496,7 @@ def _load_land_fraction_file(
 
     # Longitude in [0, 360), ascending
     lon_src = lon_src % 360.0
-    lon_order = np.argsort(lon_src)
+    lon_order = np.argsort(lon_src, kind="stable")
     lon_src = lon_src[lon_order]
     mask_data = mask_data[:, lon_order]
 
@@ -787,6 +807,14 @@ def grid_terrain_product(grid, lat_src_deg, lon_src_deg, elev_m, *,
 
 
 
+def voronoi_cell_spacing_deg(ncells: int) -> float:
+    """Mean angular cell size [deg] of a quasi-uniform Voronoi/MPAS mesh: the
+    sphere (4π sr) split over ``ncells`` cells, ~sqrt(4π/ncells) rad per cell.
+    The one definition of "cell" for the loader and the subgrid-orography
+    builder, so a file built for a mesh and the loader's scale check agree."""
+    return float(np.sqrt(4.0 * np.pi / max(int(ncells), 1)) * 180.0 / np.pi)
+
+
 def _target_grid_degrees(grid):
     """Return target grid centers in degrees and grid metadata.
 
@@ -830,10 +858,7 @@ def _target_grid_degrees(grid):
             # (4π sr) split over nCells cells gives a linear angular extent
             # ~sqrt(4π/nCells) rad per cell (used only as the sub-grid
             # land-fraction sampling box width).
-            ncols = int(np.asarray(grid_lat).size)
-            grid_spacing = float(
-                np.sqrt(4.0 * np.pi / max(ncols, 1)) * 180.0 / np.pi
-            )
+            grid_spacing = voronoi_cell_spacing_deg(np.asarray(grid_lat).size)
 
     return target_lat_2d, target_lon_2d, is_gaussian, grid_spacing
 
@@ -972,7 +997,7 @@ def load_land_albedo(
 
     # Longitude in [0, 360), ascending
     lon_src = lon_src % 360.0
-    lon_order = np.argsort(lon_src)
+    lon_order = np.argsort(lon_src, kind="stable")
     lon_src = lon_src[lon_order]
     alb_data = alb_data[:, lon_order]
 
@@ -1001,7 +1026,7 @@ def load_land_albedo(
 # core).  Orographic variance ABOVE this scale is in the model's own
 # topography, so launching gravity-wave drag from it a second time
 # double-counts.
-_EFFECTIVE_RESOLUTION_DX = 3.5
+EFFECTIVE_RESOLUTION_DX = 3.5
 
 
 def _sso_file_construction(ds) -> dict:
@@ -1082,7 +1107,7 @@ def _check_sso_scale_decomposition(built: dict, grid_spacing_deg: float,
     if mode == "off" or not np.isfinite(grid_spacing_deg) or grid_spacing_deg <= 0:
         return None
     cell = float(grid_spacing_deg)
-    effective = _EFFECTIVE_RESOLUTION_DX * cell
+    effective = EFFECTIVE_RESOLUTION_DX * cell
 
     if not built:
         msg = (
@@ -1104,7 +1129,7 @@ def _check_sso_scale_decomposition(built: dict, grid_spacing_deg: float,
         # one #1712 measured; the message carries the second so nobody has to
         # rediscover the ambiguity.
         band = (f"this grid: cells {cell:.3f} deg, effective resolution "
-                f"~{effective:.3f} deg ({_EFFECTIVE_RESOLUTION_DX:g} cells)")
+                f"~{effective:.3f} deg ({EFFECTIVE_RESOLUTION_DX:g} cells)")
         cutoff = built.get("resolved_cutoff_deg")
         if cutoff is not None:
             # A file built with an EXPLICIT cutoff has already made the
@@ -1246,7 +1271,7 @@ def load_subgrid_orography(
         sso_data = sso_data[0]
 
     lon_src = lon_src % 360.0
-    lon_order = np.argsort(lon_src)
+    lon_order = np.argsort(lon_src, kind="stable")
     lon_src = lon_src[lon_order]
     sso_data = sso_data[:, lon_order]
 
@@ -1330,9 +1355,10 @@ def load_real_topography(
 
     # Ensure longitude in [0, 360)
     lon_src = lon_src % 360.0
-    lon_order = np.argsort(lon_src)
+    lon_order = np.argsort(lon_src, kind="stable")
     lon_src = lon_src[lon_order]
     elev_data = elev_data[:, lon_order]
+    lon_src, elev_data = _drop_duplicate_periodic_lon(lon_src, elev_data)
 
     # Ensure latitude is sorted ascending
     if lat_src[0] > lat_src[-1]:

@@ -603,16 +603,16 @@ class FV3DuoColumnModel:
         weighted by the layer mass for every borrow-eligible species and a
         plain floor for the rest, or the hard floor when the borrow is
         off; T untouched on both arms this lane admits), on the compute
-        window, EVERY step as on MPAS.  Weight = delp * area: the column
-        borrow is per column (a per-column factor cancels) but the global
-        residual redistribution sums over cells, and duo cells differ 1.4x
-        corner to centre -- delp alone would mis-conserve mass.  Applied
+        window, EVERY step as on MPAS.  Weight = delp, with the face area
+        as ``area=`` (the shared routine applies it to the global residual
+        only): the column borrow is per column (a per-column factor
+        cancels) but the global residual redistribution sums over cells,
+        and duo cells differ 1.4x corner to centre -- delp alone would mis-conserve mass.  Applied
         per tracer only where a negative exists: identity in exact
         arithmetic otherwise, but the global rescale is 1 ulp off under
         jit, and the certified bitwise identities with the closed lane
         (rung 1) must hold on non-negative fields."""
-        from legoesm.core.conservation import (
-            apply_water_positivity, cell_mass_weight)
+        from legoesm.core.conservation import apply_water_positivity
         ci = slice(self.ng, self.ng + self.n)
         # the global residual redistribution and its any() gate reduce
         # over every cell: pinned REPLICATED so every device reduces the
@@ -622,14 +622,13 @@ class FV3DuoColumnModel:
         # guarantee, not a reduction-order one; parity with one device is
         # measured (test_fv3_duo_column_spmd: 1e-11 of peak).
         rep = self._rep_sharding
-        dp_w = self._pin(cell_mass_weight(st["delp"][:, ci, ci, :],
-                                          self._faces(self.mesh.areaCell)),
-                         rep)
+        dp_w = self._pin(st["delp"][:, ci, ci, :], rep)
+        area_w = self._pin(self._faces(self.mesh.areaCell), rep)
         tr_w = {nm: self._pin(q[i][:, ci, ci, :], rep)
                 for i, nm in enumerate(self.tracer_names)}
         fixed, _ = apply_water_positivity(
             tr_w, None, dp_w, conservative=self.conservative_tracer_clamp,
-            energy_consistent=False)
+            energy_consistent=False, area=area_w)
         return [q[i].at[:, ci, ci, :].set(jnp.where(
                     jnp.any(tr_w[nm] < 0.0), fixed[nm], tr_w[nm]))
                 for i, nm in enumerate(self.tracer_names)]

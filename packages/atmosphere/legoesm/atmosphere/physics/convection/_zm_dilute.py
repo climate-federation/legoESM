@@ -74,7 +74,7 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.thermo import saturation_specific_humidity
-from legoesm.atmosphere.physics.thermodynamics import latent_heat_vaporization
+from legoesm.thermo import latent_heat_vaporization
 from legoesm.atmosphere.physics.convection._triggers import (
     smooth_lowest_crossing_index,
 )
@@ -120,14 +120,12 @@ __physics_contract__ = {
 }
 
 
-# Both the oracle ``qsat_hPa`` and our shared ``saturation_specific_humidity``
-# return a vapor/dry-air mass mixing ratio (``ε·e/(p − ω·e)`` vs
-# ``ε·e/(p − e)`` — the same convention, differing only in the ``ω = 1−ε``
-# vs ``1`` factor in the small ``e`` correction).  Both feed the same
-# Raymond-Blyth entropy formula; the validated CAPE difference is < 0.5 %.
-# Convention note: the ZM oracle treats the model ``q`` field as a
-# vapor/dry mixing ratio throughout (entropy, virtual T with the 1.608
-# coefficient), so we do the same here for faithfulness.
+# Saturation humidity: the oracle ``qsat_hPa`` wraps CAM/E3SM ``qsat_water``,
+# which returns the saturation SPECIFIC humidity ``ε·e/(p − (1−ε)·e)``
+# (``wv_sat_methods.F90`` ``wv_sat_svp_to_qsat``), so every qsat here is the
+# shared ``saturation_specific_humidity`` (algebraically the same expression).
+# The oracle then uses ``e = qv·p/(ε + qv)`` and the 1.608 virtual-T
+# coefficient on that same ``q``; those formulas are kept verbatim.
 
 # Maximum condensate retained before rainout [kg/kg] (oracle ``lwmax``).
 LWMAX = 1.0e-3

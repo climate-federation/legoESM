@@ -101,7 +101,9 @@ if "--multicontroller" not in sys.argv:
         federate=_argv_distributed_mode(sys.argv) == "spmd")
 
 from legoesm.driver.config import (
+    CLUBB_SCALAR_FIELDS,
     VALID_RADIATION,
+    ZM_SCALAR_FIELDS,
     VALID_TURBULENCE,
     DycoreConfig,
     EvaluationConfig,
@@ -113,6 +115,7 @@ from legoesm.driver.config import (
 from legoesm.driver.run_status import status_to_exit_code
 
 from legoesm import constants
+from legoesm.grids.halo import CORNER_FILL_MODES
 
 _DYCORE_DEFAULTS = DycoreConfig()
 _OUTPUT_DEFAULTS = OutputConfig()
@@ -347,14 +350,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     # #1029 ω-side: SB81 α-weighted κT·ω/p conversion (hybrid latlon lane).
     parser.add_argument(
-        "--sb81-omega-conversion", action="store_true",
+        "--sb81-omega-conversion", action=argparse.BooleanOptionalAction,
         default=_DYCORE_DEFAULTS.sb81_omega_conversion,
-        help="Use the SB81 α-weighted energy conversion (ω/p dynamic part) "
-             "on the hybrid lat-lon C-grid — discretization-consistent with "
-             "the geopotential and ln p^SB gradients (#1029). Default OFF: "
-             "the consistent form unmasks the #1029(b) lid-wave instability "
-             "sooner (held_suarez_topo blowup day ~49 -> ~12); opt-in until "
-             "the lid treatment lands.",
+        help="SB81 α-weighted energy conversion (ω/p dynamic part) on the "
+             "hybrid lat-lon C-grid — discretization-consistent with the "
+             "geopotential and ln p^SB gradients (#1029). Default ON; "
+             "--no-sb81-omega-conversion selects the legacy arithmetic form.",
     )
     # Task #25: JIT compile bloat at production scale.  The inline
     # SSP-RK3 calls tendency_fn 3× sequentially → XLA inlines three
@@ -411,6 +412,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "below 1 are honoured and are how a blow-up gets "
                              "localised in time: the reported failure day is the "
                              "first SAMPLE, not the first bad step.")
+    parser.add_argument("--corner-fill", dest="corner_fill",
+                        choices=CORNER_FILL_MODES,
+                        default=_DYCORE_DEFAULTS.corner_fill,
+                        help="Cubed-sphere cube-vertex halo corner fill "
+                             "(inert on other grids). avg = 2-point average.")
     parser.add_argument("--hyperdiff-scale", type=float,
                         default=_DYCORE_DEFAULTS.hyperdiff_scale,
                         help="Dycore hyperdiffusion multiplier")
@@ -895,7 +901,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "a thin one).")
     parser.add_argument("--cloud-vertical-overlap-optics",
                         dest="cloud_vertical_overlap_optics",
-                        choices=["none", "max_random"], default="none",
+                        choices=["none", "max_random", "mcica"], default="none",
                         help="VERTICAL cloud-overlap optics. The solver has "
                              "no McICA/overlap, so cloud spread thinly over "
                              "many partly cloudy layers is solved as ONE "
@@ -904,7 +910,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "deterministic maximum-random-overlap "
                              "subcolumns and averages: measured -30%% cloud "
                              "albedo and +18 W/m2 OLR. Costs n_sub x the "
-                             "radiation time. Mutually exclusive with "
+                             "radiation time. 'mcica' (CAM6) gives each "
+                             "g-point its own maximum-random subcolumn: "
+                             "one solve, sampling noise per g-point. "
+                             "Mutually exclusive with "
                              "--cloud-partial-coverage-optics=two_column.")
     parser.add_argument("--cloud-n-subcolumns", dest="cloud_n_subcolumns",
                         type=int, default=8,
@@ -960,6 +969,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="CLUBB upper domain limit [Pa] (CAM "
                              "trop_cloud_top_press): mixing tapered to zero "
                              "above it. Default: the scheme's own 0 = no limit.")
+    for _f, _leaf in {**ZM_SCALAR_FIELDS, **CLUBB_SCALAR_FIELDS}.items():
+        _cls = ("ZhangMcFarlaneConfig" if _f.startswith("zm_")
+                else "CLUBBParams")
+        parser.add_argument("--" + _f.replace("_", "-"), type=float,
+                            default=None, dest=_f,
+                            help=f"{_cls}.{_leaf} (legal range: the scheme's "
+                                 "__param_spec__). Default: the scheme's own "
+                                 "value.")
     parser.add_argument("--clubb-q-flux-scale", type=float, default=None,
                         dest="clubb_q_flux_scale",
                         help="Moisture-only multiplier on CLUBB's q_v eddy "
@@ -1012,7 +1029,75 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "then accumulates dt*exp(A*(1/T_freeze - 1/T_snow)), "
                              "so cold dry polar snow keeps its fresh albedo "
                              "while melting snow darkens as before. "
-                             "None = 0.0 = off (calendar clock, byte-identical).")
+                             "None = the LandAlbedoConfig default (5000 K); 0 = "
+                             "calendar clock.")
+    parser.add_argument("--land-soil-freeze-thaw", dest="land_soil_freeze_thaw",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.land_soil_freeze_thaw,
+                        help="Soil-water freeze/thaw (latent zero-curtain) in "
+                             "the multilayer land, as in CLM5. Default off "
+                             "(sensible-only). Requires --use-multilayer-land.")
+    parser.add_argument("--land-snow-scheme", dest="land_snow_scheme",
+                        choices=("bulk", "layered"),
+                        default=_EXPERIMENT_DEFAULTS.land_snow_scheme,
+                        help="Multilayer-land snowpack: bulk (one SWE reservoir) "
+                             "or layered (5-layer pack solved with the soil "
+                             "column). Requires --use-multilayer-land.")
+    parser.add_argument("--land-snow-emissivity", dest="land_snow_emissivity",
+                        type=float,
+                        default=_EXPERIMENT_DEFAULTS.land_snow_emissivity,
+                        help="Snow thermal-IR emissivity for the layered pack "
+                             "(bounds 0.96-0.995 from Warren 1982 / Hori et al. "
+                             "2006; default 0.97, CLM5).")
+    parser.add_argument("--land-soil-ice-impedance-exponent",
+                        dest="land_soil_ice_impedance_exponent", type=float,
+                        default=_EXPERIMENT_DEFAULTS.land_soil_ice_impedance_exponent,
+                        help="Frozen-soil ice impedance exponent e (CLM5 e_ice): "
+                             "soil conductivity x 10**(-e * ice fraction). Active "
+                             "only with --land-soil-freeze-thaw. Default 6 (CLM5); "
+                             "0 = no impedance; range 0..10.")
+    parser.add_argument("--land-canopy-stress-b0", dest="land_canopy_stress_b0",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.land_canopy_stress_b0,
+                        help="Two-leaf canopy: soil-moisture stress also "
+                             "down-regulates the Ball-Berry intercept b0. "
+                             "Default on (library value); the FLUXNET EC-site "
+                             "setup uses --no-land-canopy-stress-b0. Requires "
+                             "--use-multilayer-land --land-surface-scheme two_leaf.")
+    parser.add_argument("--land-canopy-interception",
+                        dest="land_canopy_interception",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.land_canopy_interception,
+                        help="Two-leaf canopy rain interception (canopy water "
+                             "store, throughfall, wet-leaf evaporation). "
+                             "Default off. Requires --use-multilayer-land "
+                             "--land-surface-scheme two_leaf.")
+    parser.add_argument("--land-canopy-snow-masking",
+                        dest="land_canopy_snow_masking",
+                        action=argparse.BooleanOptionalAction,
+                        default=_EXPERIMENT_DEFAULTS.land_canopy_snow_masking,
+                        help="Trees hide ground snow in the land albedo (CLM5 "
+                             "two-stream over buried leaf + stem area, snow "
+                             "increment only, no canopy snow). Default off. "
+                             "Requires the two-leaf multilayer land with snow "
+                             "albedo feedback.")
+    parser.add_argument("--land-canopy-rh-cap-smoothing-width",
+                        dest="land_canopy_rh_cap_smoothing_width", type=float,
+                        default=_EXPERIMENT_DEFAULTS.land_canopy_rh_cap_smoothing_width,
+                        help="Two-leaf canopy: smoothing width of the canopy-air "
+                             "RH <= 1 cap. Default: the land CanopyConfig value.")
+    parser.add_argument("--land-canopy-zeta-cap-smoothing-width",
+                        dest="land_canopy_zeta_cap_smoothing_width", type=float,
+                        default=_EXPERIMENT_DEFAULTS.land_canopy_zeta_cap_smoothing_width,
+                        help="Two-leaf canopy: smoothing width of the stable "
+                             "Monin-Obukhov zeta <= 0.5 cap. Default: the land "
+                             "CanopyConfig value.")
+    parser.add_argument("--land-canopy-most-n-iters",
+                        dest="land_canopy_most_n_iters", type=int,
+                        default=_EXPERIMENT_DEFAULTS.land_canopy_most_n_iters,
+                        help="Two-leaf canopy: fixed-point iterations of the "
+                             "above-canopy Monin-Obukhov solve. Default: the "
+                             "land CanopyConfig value.")
     parser.add_argument("--land-snow-tau-days", dest="land_snow_tau_days",
                         type=float, default=_EXPERIMENT_DEFAULTS.land_snow_tau_days,
                         help="Snow-albedo age e-folding time [days]. Default: "
@@ -1040,6 +1125,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         type=float, default=None, help="imposed cloud fraction; None = 0.8")
     parser.add_argument("--cloud-cap-floor-q-c", dest="cloud_cap_floor_q_c",
                         type=float, default=None, help="[kg/kg] imposed in-cloud liquid; None = 5e-5")
+    for _nm, _lo, _hi, _dv in (("rhmini", 0.5, 0.99, 0.80), ("rhmaxi", 1.0, 1.1, 1.0),
+                               ("rhminis", 0.85, 1.0, 1.0), ("rhmaxis", 1.0, 1.1, 1.0)):
+        parser.add_argument(f"--cloud-cam6-{_nm}", dest=f"cloud_cam6_{_nm}",
+                            type=float, default=None,
+                            help=f"CAM6 ice-stratus ramp cldfrc2m {_nm} "
+                                 f"(cloud scheme cam6_clubb; bounds {_lo}..{_hi}); "
+                                 f"None = {_dv} (CAM6 CLUBB default)")
     parser.add_argument("--cloud-cover-condensate-q-ref",
                         dest="cloud_cover_condensate_q_ref", type=float,
                         default=None,
@@ -1161,6 +1253,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "vapour_mass (legacy whole-column spread by vapour "
                              "mass; the A/B control). "
                              f"Default {_EXPERIMENT_DEFAULTS.bechtold_rain_vapor_sink}.")
+    parser.add_argument("--zm-land-fraction", type=str,
+                        choices=["required", "none"],
+                        default=_EXPERIMENT_DEFAULTS.zm_land_fraction,
+                        dest="zm_land_fraction",
+                        help="Zhang-McFarlane column land fraction: required "
+                             "(the run must supply one; it picks the land/"
+                             "ocean autoconversion coefficient) or none "
+                             "(explicit aquaplanet, ocean coefficients "
+                             "everywhere). "
+                             f"Default {_EXPERIMENT_DEFAULTS.zm_land_fraction}.")
     parser.add_argument("--bechtold-conv-top-pa", type=float,
                         default=_EXPERIMENT_DEFAULTS.bechtold_conv_top_pa,
                         dest="bechtold_conv_top_pa",
@@ -1769,6 +1871,38 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "throttled by the soil's own moisture state, "
                              "REPLACING the static --mpas-land-beta over "
                              "land. Requires --use-multilayer-land.")
+    parser.add_argument("--mpas-land-stress-from-land",
+                        action=argparse.BooleanOptionalAction, default=None,
+                        dest="mpas_land_stress_from_land",
+                        help="MPAS lane: surface stress over the land fraction "
+                             "from the land model (its roughness / canopy drag, "
+                             "rho u*^2) instead of the atmosphere's bulk "
+                             "(ocean-roughness) call; heat fluxes unchanged. "
+                             "Unset = AUTO (on wherever it applies: MPAS, "
+                             "multilayer land with --mpas-land-beta-soil, a "
+                             "turbulence scheme taking injected fluxes, "
+                             "two_leaf/simple_seb); --no-... = old bulk stress.")
+    parser.add_argument("--mpas-ocean-flux-on-ocean-surface",
+                        action=argparse.BooleanOptionalAction, default=False,
+                        dest="mpas_ocean_flux_on_ocean_surface",
+                        help="MPAS lane, land-flux handoff on: evaluate the "
+                             "non-land fraction's bulk surface fluxes on the "
+                             "ocean/ice surface (SST/SIC blend) instead of on "
+                             "the land-blended surface temperature/humidity "
+                             "(#1320). Requires --mpas-land-beta-soil, the "
+                             "land model's stress over land (--mpas-land-"
+                             "stress-from-land, default auto) and radiation "
+                             "!= none.")
+    parser.add_argument("--mpas-land-params-refresh",
+                        action=argparse.BooleanOptionalAction, default=True,
+                        dest="mpas_land_params_refresh",
+                        help="MPAS lane, multilayer two-leaf land: rebuild "
+                             "LAI, canopy height and soil albedo from the "
+                             "surfdata climatology every land step, as the "
+                             "offline calibration does (default on). "
+                             "--no-mpas-land-params-refresh keeps the start "
+                             "day's parameters for the whole run. Acts only "
+                             "with --use-multilayer-land.")
     parser.add_argument("--mpas-qv-smooth-del2-m2s", type=float, default=None,
                         dest="mpas_qv_smooth_del2_m2s",
                         help="MPAS lane only: horizontal q_v del2 (unweighted "
@@ -1802,13 +1936,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--hines-launch-p", type=float, default=None,
                         dest="hines_launch_p",
                         help="Hines non-orographic GWD LAUNCH PRESSURE [Pa] "
-                             "(e.g. 70000 = 700 hPa). Unset/0 keeps the legacy "
-                             "SURFACE launch, where the wave is born "
-                             "supersaturated in the weakly stratified boundary "
-                             "layer (sigma_sat = N/m_star is smallest there) "
-                             "and breaks at its own launch level instead of "
-                             "aloft. No drag is deposited at or below the "
-                             "launch level.")
+                             "(default 70000 = 700 hPa; legal 30000-90000). "
+                             "No drag is deposited at or below the launch "
+                             "level.")
     parser.add_argument("--hines-fmax", type=float, default=None,
                         dest="hines_Fmax",
                         help="Hines saturation momentum-flux cap [Pa] "
@@ -1896,6 +2026,40 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "(the model reached 288%% at 228 K). Treats the "
                              "cause of the supersaturation pile-up rather "
                              "than draining it after the fact.")
+    parser.add_argument("--morrison-warm-rain-scheme",
+                        choices=["kk2000", "kk2000_cam6", "seifert_beheng",
+                                 "seifert_beheng_sb2001"],
+                        default=ExperimentConfig._field_defaults[
+                            "morrison_warm_rain_scheme"],
+                        dest="morrison_warm_rain_scheme",
+                        help="Morrison warm-rain autoconversion/accretion "
+                             "law (kk2000 = Khairoutdinov-Kogan 2000).")
+    parser.add_argument("--morrison-autocon-fact", type=float,
+                        default=ExperimentConfig._field_defaults[
+                            "morrison_autocon_fact"],
+                        dest="morrison_autocon_fact",
+                        help="Multiplier on the kk2000 autoconversion rate "
+                             "(CAM6 MG2-style; 1.0 = unscaled, <1 keeps "
+                             "more cloud liquid). kk2000 only.")
+    parser.add_argument("--morrison-accre-enhan-fact", type=float,
+                        default=ExperimentConfig._field_defaults[
+                            "morrison_accre_enhan_fact"],
+                        dest="morrison_accre_enhan_fact",
+                        help="Multiplier on kk2000 accretion of cloud by "
+                             "rain (MG2 accre_enhan; 1.0 = unscaled). "
+                             "kk2000 only.")
+    parser.add_argument("--morrison-warm-rain-incloud",
+                        action=argparse.BooleanOptionalAction,
+                        default=ExperimentConfig._field_defaults[
+                            "morrison_warm_rain_incloud"],
+                        dest="morrison_warm_rain_incloud",
+                        help="CAM6 MG2 in-cloud warm rain: autoconversion "
+                             "and accretion on cloud water divided by CAM6's "
+                             "ast = max(CLUBB liquid, aist ice) cloud "
+                             "fraction, tendencies scaled back by it. "
+                             "Needs --turbulence clubb, cloud scheme "
+                             "cam6_clubb and "
+                             "cld_macmic_num_steps>=2.")
     parser.add_argument("--morrison-flavor", choices=["mg", "sam"],
                         default="mg", dest="morrison_flavor",
                         help="Morrison parameter flavor: 'mg' (E3SM/CESM "
@@ -1928,6 +2092,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="With --morrison-sed-cfl-substeps: abort the run "
                              "when any column needs more sub-steps than the "
                              "static cap (otherwise the count is only reported).")
+    parser.add_argument("--morrison-do-graupel",
+                        action=argparse.BooleanOptionalAction,
+                        default=ExperimentConfig._field_defaults[
+                            "morrison_do_graupel"],
+                        dest="morrison_do_graupel",
+                        help="Morrison prognostic graupel category (riming "
+                             "onto graupel, frozen rain -> graupel). CAM6's "
+                             "MG2 has no graupel; --no-morrison-do-graupel "
+                             "routes frozen rain to snow and removes the "
+                             "graupel riming sink of cloud water.")
     parser.add_argument("--tropopause-refine", type=float, default=None,
                         dest="tropopause_refine",
                         help="Sigma-coordinate layer redistribution toward "
@@ -2352,6 +2526,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         fv3_duo_sponge_factor=args.fv3_duo_sponge_factor,
         fv3_duo_sponge_d2_top=args.fv3_duo_sponge_d2_top,
         hyperdiff_scale=args.hyperdiff_scale,
+        corner_fill=args.corner_fill,
         a_h_scale=args.a_h_scale,
         k_h_scale=args.k_h_scale,
         div_damp_scale=args.div_damp_scale,
@@ -2380,7 +2555,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         sponge_width_m=args.sponge_width_m,
         sponge_shape=args.sponge_shape,
         sponge_scale_height_m=args.sponge_scale_height_m,
-        # #1029 ω-side SB81 conversion (default OFF -> bit-identical).
+        # #1029 ω-side SB81 conversion (default ON; --no-sb81-omega-conversion = legacy).
         sb81_omega_conversion=args.sb81_omega_conversion,
         # Task #25: time integrator selection.
         time_integrator=args.time_integrator,
@@ -2484,6 +2659,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         clubb_prognostic=args.clubb_prognostic,
         clubb_liquid_partition=args.clubb_liquid_partition,
         clubb_trop_cloud_top_press=args.clubb_trop_cloud_top_press,
+        **{_f: getattr(args, _f)
+           for _f in {**ZM_SCALAR_FIELDS, **CLUBB_SCALAR_FIELDS}},
         clubb_q_flux_scale=args.clubb_q_flux_scale,
         clubb_q_flux_scale_sigma_band=(tuple(args.clubb_q_flux_scale_sigma_band)
                                        if args.clubb_q_flux_scale_sigma_band
@@ -2526,6 +2703,10 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         cloud_p_xr=args.cloud_p_xr,
         cloud_alpha_xr=args.cloud_alpha_xr,
         cloud_cover_condensate_q_ref=args.cloud_cover_condensate_q_ref,
+        cloud_cam6_rhmini=args.cloud_cam6_rhmini,
+        cloud_cam6_rhmaxi=args.cloud_cam6_rhmaxi,
+        cloud_cam6_rhminis=args.cloud_cam6_rhminis,
+        cloud_cam6_rhmaxis=args.cloud_cam6_rhmaxis,
         cloud_cap_floor_on=args.cloud_cap_floor_on,
         cloud_cap_floor_lat_deg=args.cloud_cap_floor_lat_deg,
         cloud_cap_floor_p_max_pa=args.cloud_cap_floor_p_max_pa,
@@ -2533,6 +2714,13 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         cloud_cap_floor_q_c=args.cloud_cap_floor_q_c,
         snow_age_activation_K=args.snow_age_activation_K,
         land_snow_tau_days=args.land_snow_tau_days,
+        land_soil_freeze_thaw=args.land_soil_freeze_thaw,
+        land_snow_scheme=args.land_snow_scheme,
+        land_snow_emissivity=args.land_snow_emissivity,
+        land_soil_ice_impedance_exponent=args.land_soil_ice_impedance_exponent,
+        land_canopy_stress_b0=args.land_canopy_stress_b0,
+        land_canopy_interception=args.land_canopy_interception,
+        land_canopy_snow_masking=args.land_canopy_snow_masking,
         cloud_diagnostic_condensate_scheme=args.cloud_diagnostic_condensate_scheme,
         cloud_adiabatic_lwc_rate=args.cloud_adiabatic_lwc_rate,
         convective_cloud=args.convective_cloud,
@@ -2588,6 +2776,9 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
                         if args.mpas_land_beta is not None
                         else _EXPERIMENT_DEFAULTS.mpas_land_beta),
         mpas_land_beta_soil=args.mpas_land_beta_soil,
+        mpas_land_stress_from_land=args.mpas_land_stress_from_land,
+        mpas_ocean_flux_on_ocean_surface=args.mpas_ocean_flux_on_ocean_surface,
+        mpas_land_params_refresh=args.mpas_land_params_refresh,
         mpas_qv_smooth_del2_m2s=(
             args.mpas_qv_smooth_del2_m2s
             if args.mpas_qv_smooth_del2_m2s is not None
@@ -2599,16 +2790,25 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         hard_sat_ice_curve=args.hard_sat_ice_curve,
         homogeneous_ice_nucleation=args.homogeneous_ice_nucleation,
         morrison_flavor=args.morrison_flavor,
+        morrison_warm_rain_scheme=args.morrison_warm_rain_scheme,
+        morrison_autocon_fact=args.morrison_autocon_fact,
+        morrison_accre_enhan_fact=args.morrison_accre_enhan_fact,
         morrison_sed_cfl_substeps=args.morrison_sed_cfl_substeps,
         morrison_sed_cfl_substeps_max=args.morrison_sed_cfl_substeps_max,
         morrison_sed_cfl_substeps_strict=args.morrison_sed_cfl_substeps_strict,
+        morrison_do_graupel=args.morrison_do_graupel,
+        morrison_warm_rain_incloud=args.morrison_warm_rain_incloud,
+        land_canopy_rh_cap_smoothing_width=args.land_canopy_rh_cap_smoothing_width,
+        land_canopy_zeta_cap_smoothing_width=args.land_canopy_zeta_cap_smoothing_width,
+        land_canopy_most_n_iters=args.land_canopy_most_n_iters,
         hines_total_rms_wind=(
             args.hines_total_rms_wind
             if args.hines_total_rms_wind is not None
             else _EXPERIMENT_DEFAULTS.hines_total_rms_wind),
         hines_launch_p=(
             args.hines_launch_p
-            if args.hines_launch_p is not None else 0.0),
+            if args.hines_launch_p is not None
+            else _EXPERIMENT_DEFAULTS.hines_launch_p),
         hines_Fmax=(args.hines_Fmax if args.hines_Fmax is not None
                     else _EXPERIMENT_DEFAULTS.hines_Fmax),
         e3sm_cam_source=(args.e3sm_cam_source
@@ -2687,6 +2887,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         bechtold_cape_threshold=args.bechtold_cape_threshold,
         bechtold_subsidence_solve=args.bechtold_subsidence_solve,
         bechtold_rain_vapor_sink=args.bechtold_rain_vapor_sink,
+        zm_land_fraction=args.zm_land_fraction,
         bechtold_conv_top_pa=args.bechtold_conv_top_pa,
         bechtold_downdraft_evap=args.bechtold_downdraft_evap,
         bechtold_downdraft_alpha=args.bechtold_downdraft_alpha,

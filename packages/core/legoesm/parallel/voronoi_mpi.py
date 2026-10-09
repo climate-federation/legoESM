@@ -56,6 +56,7 @@ from legoesm.core.state import (
 from legoesm.grids.voronoi import VoronoiMesh
 from legoesm.parallel.voronoi_partition import (
     BatchedHaloSchedule,
+    complete_cell_rings,
     VoronoiPartition,
     build_batched_halo_schedule,
     build_local_mesh,
@@ -73,6 +74,7 @@ from legoesm.parallel.halo_exchange_voronoi import (
 from legoesm.parallel.reductions import (
     require_mpi_stack,
     batch_allreduce_mpi,
+    broadcast_allreduce_sum,
     global_min_mpi,
     global_max_mpi,
     global_sum_mpi,
@@ -135,6 +137,9 @@ class VoronoiPartitionLayout(NamedTuple):
     # layout time; ``None`` only for layouts constructed by hand —
     # ``make_voronoi_mpi_step`` rebuilds it on demand then.
     batched_comm: BatchedHaloSchedule | None = None
+    # Halo rings with complete local stencils, MIN over ranks (set by
+    # initialize_voronoi_mpi; 0 = uncertified).
+    complete_cell_rings: int = 0
 
 
 def voronoi_partition_metrics(
@@ -479,6 +484,13 @@ class MPASOceanHaloRefresh(NamedTuple):
     owned_mask_cells: jnp.ndarray | None = None
     owned_mask_edges: jnp.ndarray | None = None
     global_sum: Callable | None = None
+    # Cell rings each refresh fills (SPMD lane); ``None`` = not declared.
+    # The global-polynomial PCG preconditioner needs >= sweeps - 2.
+    halo_depth: int | None = None
+    # Halo rings (around the owned block, on EVERY rank) whose cells carry
+    # their full stencil locally — the redundant-compute budget of one
+    # ``cells`` exchange.  0 = not certified (the deep-halo PCG refuses).
+    complete_cell_rings: int = 0
 
 
 def make_mpas_ocean_halo_refresh(layout) -> MPASOceanHaloRefresh:
@@ -521,6 +533,7 @@ def make_mpas_ocean_halo_refresh(layout) -> MPASOceanHaloRefresh:
     return MPASOceanHaloRefresh(edges=_edges, cells=_cells, both=_both,
                                 vertices=_vertices,
                                 owned_mask_cells=layout.owned_mask_cells,
+                                complete_cell_rings=layout.complete_cell_rings,
                                 owned_mask_edges=layout.owned_mask_edges,
                                 global_sum=_global_sum)
 
@@ -744,6 +757,9 @@ def initialize_voronoi_mpi(
         method=method, halo_depth=halo_depth,
         cell_owner=cell_owner,
     )
+    # One certificate for all ranks: the deep-halo PCG cadence must agree.
+    layout = layout._replace(complete_cell_rings=int(comm.allreduce(
+        complete_cell_rings(global_mesh, [layout.partition]), op=MPI.MIN)))
 
     logger.info(
         "Voronoi MPI init: rank=%d/%d, owned_cells=%d, halo_cells=%d, "
@@ -1240,22 +1256,14 @@ def make_voronoi_mpi_step(
             # decomposition-independent; owned-mask weighting keeps halo cells
             # out of the budget exactly like the mass fixer.  dp = TRUE layer
             # mass (post-mass-fix p_s; non-positive dp zero-weighted).
-            from legoesm.core.conservation import (
-                apply_water_positivity, broadcast_allreduce_sum,
-                cell_mass_weight,
-            )
+            from legoesm.core.conservation import apply_water_positivity
             _ph = sigma_coord.pressure_at_half(state_new.p_s.data)
             _dp = jnp.maximum(_ph[..., 1:] - _ph[..., :-1], 0.0)
-            _dp = cell_mass_weight(      # local areas, GLOBAL mean as the scale
-                _dp, local_mesh.areaCell,
-                area_ref=_total_area_global / layout.partition.nCells_global)
             _owned = layout.owned_mask_cells[:, None]
 
             def _mpi_owned_sum(x, _o=_owned):
-                # BROADCAST-allreduce, NOT identity-VJP global_sum_mpi: the
-                # summed scalar broadcasts into every rank's rescale factor, so
-                # the correct transpose is allreduce(SUM) of the cotangent (the
-                # #811 flux-form scale lesson; codex 2026-07-28 round 2).
+                # The summed scalar feeds every rank's rescale factor, so the
+                # backward pass must allreduce the cotangent (#811, #1814).
                 return broadcast_allreduce_sum(
                     jnp.sum(jnp.where(_o, x, 0.0)))
 
@@ -1267,6 +1275,9 @@ def make_voronoi_mpi_step(
                     config, "conservative_tracer_clamp", False),
                 energy_consistent=getattr(
                     config, "energy_consistent_moisture_clip", False),
+                area=_owned_area,
+                # GLOBAL mean cell area as the (partition-independent) scale
+                area_ref=_total_area_global / layout.partition.nCells_global,
                 sum_fn=_mpi_owned_sum)
             state_new = state_new._replace(
                 tracers=_tr_out, T=state_new.T.replace(data=_T_out))

@@ -1274,7 +1274,21 @@ def test_wall_default_surface_is_frozen():
 # 'liquid' -> 'mixed_phase'.  Both are cloud diagnostics the duo execution
 # loop never evaluates (the cloud_scheme allow-list entry's own argument);
 # non-default values stay refused, so the allow-list is unchanged.
-_WALL_SURFACE_SHA256 = "3653ded4c18599f3b5ededa5350f1d3d8e75648c12468b7efe6ef92875c9e043"
+#
+# 2026-10-09, merging cf/main (merge-base 0e63f36cb) into this branch: the
+# surface was dumped on both trees (job 10302943, fv3_duo_gaps/fu/
+# wall_diff_head_vs_merged.txt): 38 paths ADDED by main (zm_*, clubb_*,
+# morrison_* names, land canopy/snow/soil knobs, mpas_land_params_refresh,
+# mpas_land_stress_from_land, mpas_ocean_flux_on_ocean_surface,
+# dycore.corner_fill, cloud_cam6_rh*), 17 REMOVED (none allow-listed; the
+# liveness test passes), and two defaults MOVED:
+#   dycore.sb81_omega_conversion False -> True: read only by the lat-lon
+#     C-grid dycore (component_factory -> primitive_eq_latlon_cgrid), inert
+#     on the duo lanes;
+#   hines_launch_p 0.0 -> 70000.0: read only when gravity_wave_drag selects
+#     Hines; both duo decks run mcfarlane and already pin 70000.0.
+# The allow-list is unchanged.
+_WALL_SURFACE_SHA256 = "079cecd3d8ff8ece17c4d675b28493e1754b416137cc2f1da03bd3fc3bfacf15"
 
 
 def test_wall_leaf_types_are_scalar():

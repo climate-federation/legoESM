@@ -140,13 +140,17 @@ def _clubb_liquid_partition_on(turbulence_config) -> bool:
     substitutes a fresh ``CLUBBConfig()``, and an authoritative
     ``turbulence_override`` can carry the lever without the flag ever being set.
     """
-    if getattr(turbulence_config, "scheme", None) != "clubb":
-        return False
-    from legoesm.atmosphere.physics.turbulence.integration import (
-        materialize_sub_config,
-    )
-    sub = getattr(materialize_sub_config(turbulence_config), "clubb", None)
-    return bool(getattr(sub, "liquid_partition", False))
+    on = bool(getattr(turbulence_config, "liquid_partition", False))
+    scheme = getattr(turbulence_config, "scheme", None)
+    if on and scheme != "clubb":
+        # Refuse, not False: make_physics skips the turbulence factory (and its
+        # own guard) for scheme="none", so False here would build a model that
+        # silently runs without the exchange that was selected (codex).
+        raise ValueError(
+            "TurbulenceConfig.liquid_partition is CLUBB's cloud-liquid "
+            f"exchange; scheme={scheme!r} has no closure liquid to exchange. "
+            "Use scheme='clubb' or leave it off.")
+    return on
 
 
 def make_physics(
@@ -262,7 +266,7 @@ def make_physics(
     # nearly an order of magnitude -- and water is still conserved, so nothing
     # fails.  Checked HERE, against the RESOLVED turbulence config, because the
     # experiment-level flag is not the only way in: an authoritative
-    # turbulence_override carrying CLUBBConfig(liquid_partition=True), or a
+    # turbulence_override carrying TurbulenceConfig(liquid_partition=True), or a
     # direct make_physics call, both reach this factory without it (codex).
     # The MICROPHYSICS half alone deletes the model's only liquid source, so it
     # is the more dangerous half to reach by itself -- the mirror of the
@@ -280,7 +284,7 @@ def make_physics(
             "neither.")
     if _clubb_liquid_partition_on(config.turbulence) and cld_macmic_num_steps < 2:
         raise ValueError(
-            "CLUBBConfig.liquid_partition needs cld_macmic_num_steps>=2: the "
+            "TurbulenceConfig.liquid_partition needs cld_macmic_num_steps>=2: the "
             "closure REPLACES the host cloud water, so the microphysics must "
             "run on the replaced value, and only the macro/micro sub-cycle "
             f"applies the modules in sequence. At cld_macmic_num_steps="
@@ -701,6 +705,18 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
             f"turbulence.scheme={config.turbulence.scheme!r}."
         )
     _use_clubb_cf = config.radiation.use_clubb_cloud_fraction
+    # MG2 in-cloud warm rain reads the cloud fraction CLUBB wrote in the SAME
+    # macmic sub-step (CAM order); at N=1 the modules run in parallel and it
+    # would read the previous step's value.
+    if (getattr(getattr(config.microphysics, config.microphysics.scheme, None),
+                "warm_rain_incloud", False)
+            and (not _turb_produces_cf or _n_macmic < 2)):
+        raise ValueError(
+            "MorrisonConfig.warm_rain_incloud=True needs CLUBB turbulence and "
+            "cld_macmic_num_steps>=2 (the microphysics reads the cloud "
+            "fraction CLUBB diagnosed in the same sub-step); got "
+            f"turbulence.scheme={config.turbulence.scheme!r}, "
+            f"cld_macmic_num_steps={_n_macmic}.")
     if config.radiation.scheme != "none":
         tagged_fns.append((
             make_radiation_physics(
@@ -731,8 +747,12 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
             _turb_field,
         ))
     if config.microphysics.scheme != "none":
+        # The run's BUILT cloud config (MPAS lane: _standalone_cloud_config),
+        # never a default one: the aist rh ramps are run parameters.
         tagged_fns.append((
-            make_microphysics_physics(config.microphysics, model_type, _dt_sub),
+            make_microphysics_physics(
+                config.microphysics, model_type, _dt_sub,
+                cloud_config=config.radiation.cloud_config),
             False, None))
     if config.gravity_wave_drag.scheme != "none":
         tagged_fns.append((make_gwd_physics(config.gravity_wave_drag, model_type, dt), True, "gwd_spectrum"))
@@ -903,7 +923,7 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
         _DIAG_FIELDS = ("sw_up_toa", "lw_up_toa", "sw_down_toa",
                         "shflx_sfc", "lhflx_sfc",
                         "sw_up_toa_clr", "lw_up_toa_clr",
-                        "sed_substeps_required")
+                        "sed_substeps_required", "evap_sfc")
         sfc_diag_extras = {k: getattr(first, k, None) for k in _DIAG_FIELDS}
 
         # Per-process ledger: capture each module's row from its OWN complete
@@ -1036,7 +1056,8 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
     _COUNT_DIAG_FIELDS = frozenset({"sed_substeps_required"})
     assert _COUNT_DIAG_FIELDS <= {"sw_up_toa", "lw_up_toa", "sw_down_toa",
                                   "shflx_sfc", "lhflx_sfc", "sw_up_toa_clr",
-                                  "lw_up_toa_clr", "sed_substeps_required"}
+                                  "lw_up_toa_clr", "sed_substeps_required",
+                                  "evap_sfc"}
 
     def _advance_state(state, du_dt, dv_dt, dT_dt, dp_s_dt, tracer_tends, dt_x):
         """``state + dt_x * tendency`` (CAM ``physics_update``); ``phis`` fixed."""
@@ -1387,10 +1408,22 @@ def _make_spectral_pe_combined(
     sfc_albedo_override=None, sfc_emissivity_override=None,
 ) -> Callable:
     tagged_fns = []
+    # Same producer gate as the hydrostatic combined: routing the CLUBB
+    # cloud fraction to radiation needs a closure that writes it, else the
+    # override would read the zero-initialised carry and clear every cloud.
+    if (config.radiation.use_clubb_cloud_fraction
+            and config.turbulence.scheme != "clubb"):
+        raise ValueError(
+            "RadiationConfig.use_clubb_cloud_fraction=True requires a "
+            "cloud-fraction-producing turbulence closure "
+            "(turbulence.scheme='clubb', diagnostic or prognostic); got "
+            f"turbulence.scheme={config.turbulence.scheme!r}."
+        )
     if config.radiation.scheme != "none":
-        # CLUBB-cf routing is hydrostatic-only today; pass the flag so a
-        # use_clubb_cloud_fraction request on spectral_pe raises loudly in
-        # make_radiation_physics rather than being silently ignored.
+        # The spectral radiation builder has a READ side for the CLUBB
+        # cloud-fraction carry (and the CAM6 deepcu carries); the flag
+        # selects it, and the dispatcher below forwards ``phys_state`` to
+        # the fn that advertises ``_wants_phys_state_ro``.
         tagged_fns.append((make_radiation_physics(
             config.radiation, "spectral_pe",
             sfc_albedo_override=sfc_albedo_override,
@@ -1452,6 +1485,11 @@ def _make_spectral_pe_combined(
                 else:
                     phys_updates[field_name] = field_val
         else:
+            if getattr(fn0, "_wants_phys_state_ro", False):
+                # Read-only phys_state consumer (radiation reading the CLUBB
+                # cloud-fraction / CAM6 deepcu carries): forward it but keep
+                # the single-return contract -- no carry is written back.
+                _fwd0 = {**_fwd0, "phys_state": phys_state}
             first = fn0(state, grid, sigma_coord, grid_fields=shared_fields, **_fwd0)
         vor_hat = first.vor_hat.data
         div_hat = first.div_hat.data
@@ -1489,6 +1527,8 @@ def _make_spectral_pe_combined(
                     else:
                         phys_updates[field_name] = field_val
             else:
+                if getattr(fn, "_wants_phys_state_ro", False):
+                    _fwd = {**_fwd, "phys_state": phys_state}
                 t = fn(state, grid, sigma_coord, grid_fields=shared_fields, **_fwd)
             vor_hat = vor_hat + t.vor_hat.data
             div_hat = div_hat + t.div_hat.data

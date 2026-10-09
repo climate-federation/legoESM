@@ -167,7 +167,7 @@ def column_moist_static_energy(
 
     g = jnp.asarray(constants.g, dtype=_acc_e)
     c_p = jnp.asarray(constants.c_pd, dtype=_acc_e)
-    L_v = jnp.asarray(constants.L_v, dtype=_acc_e)
+    L_v = jnp.asarray(constants.L_v, dtype=_acc_e)  # latent-ok: atmosphere moist-enthalpy reference L (constant by convention; surface gap booked by surface_layer.latent_enthalpy_correction)
     R_d = jnp.asarray(constants.R_d, dtype=_acc_e)
 
     # Compute geopotential at full levels (hydrostatic, bottom-up)
@@ -246,7 +246,7 @@ def column_moist_static_energy(
     KE = 0.5 * (u ** 2 + v ** 2)
     latent = L_v * q_v
     if q_frozen is not None:
-        L_f = jnp.asarray(constants.L_f, dtype=_acc_e)
+        L_f = jnp.asarray(constants.L_f, dtype=_acc_e)  # latent-ok: atmosphere moist-enthalpy reference L (constant by convention; surface gap booked by surface_layer.latent_enthalpy_correction)
         latent = latent - L_f * q_frozen.astype(_acc_e)
     integrand = (c_p * T + latent + Phi + KE) * dp / g
 
@@ -499,12 +499,27 @@ class EnergyBudgetTracker:
             area_weighted_mean(sw_net_sfc, area_weights),
             area_weighted_mean(lw_net_sfc, area_weights),
         ]))
-        mean_E = float(_h[0])
-        mean_sw_down_toa = float(_h[1])
-        mean_sw_up_toa = float(_h[2])
-        mean_lw_up_toa = float(_h[3])
-        mean_sw_sfc = float(_h[4])
-        mean_lw_sfc = float(_h[5])
+        return self.record(float(_h[0]), float(_h[1]), float(_h[2]),
+                           float(_h[3]), float(_h[4]), float(_h[5]),
+                           elapsed_seconds)
+
+    def record(
+        self,
+        mean_E: float,
+        mean_sw_down_toa: float,
+        mean_sw_up_toa: float,
+        mean_lw_up_toa: float,
+        mean_sw_sfc: float,
+        mean_lw_sfc: float,
+        elapsed_seconds: float,
+    ) -> EnergyBudget:
+        """Record one sample from already-reduced GLOBAL means.
+
+        :meth:`update` reduces its own arrays and calls this; a caller whose
+        fields are partitioned across ranks reduces them globally itself
+        (owned cells, allreduce) and records the result here, so the
+        ``dE/dt`` bookkeeping is shared rather than duplicated.
+        """
         mean_toa_net = mean_sw_down_toa - mean_sw_up_toa - mean_lw_up_toa
         mean_sfc_net = mean_sw_sfc + mean_lw_sfc
 
@@ -641,7 +656,7 @@ class MoistureBudgetTracker:
     Usage
     -----
     tracker = MoistureBudgetTracker()
-    tracker.update(q_v, p_s, dsigma, precip, lhflx, elapsed_seconds)
+    tracker.update(q_v, p_s, dsigma, precip, evap=evap, elapsed_seconds=t)
     print(tracker.summary())
     """
 
@@ -661,7 +676,8 @@ class MoistureBudgetTracker:
         p_s: jax.Array,
         dsigma: jax.Array,
         precip: jax.Array,
-        lhflx: jax.Array,
+        *,
+        evap: jax.Array,
         elapsed_seconds: float,
         area_weights: jax.Array | None = None,
         dp: jax.Array | None = None,
@@ -680,11 +696,12 @@ class MoistureBudgetTracker:
             column.
         precip : array, shape (...)
             Precipitation rate [kg/m²/s], positive = column sink.
-        lhflx : array, shape (...)
-            Surface latent heat flux [W/m²], positive upward — converted
-            to the evaporation vapor source E = lhflx / L_v.  Pass the
-            SAME field reported as CMOR ``hfls`` so the closure check and
-            the output diagnostics share one flux definition.
+        evap : array, shape (...)  (keyword-only)
+            Surface water flux [kg/m²/s], positive upward = the evaporation
+            vapor source E -- the water the column actually received
+            (``PhysicsOutput.evap_sfc``), the SAME field reported as CMOR
+            ``evspsbl``.  Never a latent heat divided by a constant: the
+            keyword-only signature makes a W/m² caller fail loudly.
         elapsed_seconds : float
             Time since simulation start [s].
         dp : array, shape (..., nlev), optional
@@ -707,11 +724,11 @@ class MoistureBudgetTracker:
         _h = np.asarray(jnp.stack([
             area_weighted_mean(W, area_weights),
             area_weighted_mean(precip, area_weights),
-            area_weighted_mean(lhflx, area_weights),
+            area_weighted_mean(evap, area_weights),
         ]))
         mean_W = float(_h[0])
         mean_P = float(_h[1]) * 86400.0                  # kg/m²/s → mm/day
-        mean_E = float(_h[2]) / constants.L_v * 86400.0  # W/m² → mm/day
+        mean_E = float(_h[2]) * 86400.0                  # kg/m²/s → mm/day
 
         # Tendency
         if self._prev_water is not None and self._prev_time is not None:

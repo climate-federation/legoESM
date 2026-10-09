@@ -95,8 +95,8 @@ class SurfaceFluxOutput(NamedTuple):
     # means the accompanying fluxes come from a stopped iterate (iteration cap
     # hit, or a singular Jacobian whose step had to be discarded) and are NOT a
     # solution of the surface energy balance.  ``None`` for schemes that do not
-    # iterate.  Consumers must treat a False column as "no solution this step"
-    # rather than spending its fluxes — see ``multilayer_land`` containment.
+    # iterate.  Consumers must not spend a False column's fluxes as they are:
+    # ``multilayer_land`` closes their energy and accepts or reverts the column.
     f_veg: jax.Array | None = None         # vegetation cover fraction [0-1]
     fSun: jax.Array | None = None          # sunlit canopy fraction [0-1]
     # Ts_solve: converged soil skin T from the canopy Picard loop (for
@@ -111,6 +111,14 @@ class SurfaceFluxOutput(NamedTuple):
     # ``None`` when interception is off.
     LE_wet_canopy: jax.Array | None = None
     LE_soil: jax.Array | None = None
+    # SimpleSEB over a layered pack (fractional cover f): the pack's share of
+    # ``lhflx`` [W/m^2 per cell area], f times the snow surface's own latent
+    # flux.  ``None`` on the binary snow path and for the canopy schemes.
+    LE_snow: jax.Array | None = None
+    # SimpleSEB over a layered pack: cell vapour conductance [kg m-2 s-1 per
+    # kg/kg] (> 0), so the caller can export the humidity q_air + E / g that
+    # implies the REALISED vapour flux E.  ``None`` elsewhere.
+    vapour_conductance: jax.Array | None = None
     H_canopy: jax.Array | None = None
     H_soil: jax.Array | None = None
     Rn_canopy: jax.Array | None = None
@@ -175,4 +183,40 @@ class SurfaceFluxOutput(NamedTuple):
     # ignore.
     held: jax.Array | None = None
     n_held: jax.Array | None = None
+    # Unsolved-but-finite columns ACCEPTED with energy-closed fallback fluxes
+    # (``fallback`` mask, ``n_fallback`` count), and unsolved finite columns the
+    # fallback guards rejected and reverted instead (``fallback_rejected`` mask,
+    # ``n_fallback_rejected`` count; already included in ``held``/``n_held``).
+    # Filled in by the land step.
+    fallback: jax.Array | None = None
+    n_fallback: jax.Array | None = None
+    fallback_rejected: jax.Array | None = None
+    n_fallback_rejected: jax.Array | None = None
 
+    # Layered snowpack only (``snow_scheme == "layered"``): excess of the pack-top
+    # temperature over T_freeze after the implicit solve and BEFORE the enthalpy
+    # re-equilibration [K], (ncol,).  The solve carries sensible heat only, so this
+    # measures how far one step overshoots the melting point (an accuracy, not a
+    # conservation, diagnostic).  None for the bulk snowpack.
+    snow_T_top_excess: jax.Array | None = None
+    # Layered snowpack only, for the column energy budget: enthalpy carried into
+    # the pack by mass (snowfall, frost, rain) minus that leaving it (sublimated
+    # ice, drainage incl. any liquid above T_freeze) [J/m^2, relative to ice at
+    # T_freeze]; and the ground heat flux the pack+soil column received, Robin
+    # term included [W/m^2, positive into the ground].  Pack enthalpy + soil
+    # sensible energy change by dt*(snow_ground_heat_applied + geothermal) +
+    # snow_advected_heat.  Melt water enters the soil carrying no heat (same
+    # convention as rain infiltration), so the drainage enthalpy leaves the column.
+    snow_advected_heat: jax.Array | None = None
+    snow_ground_heat_applied: jax.Array | None = None
+    # The scheme's solved surface stress MAGNITUDE rho*u*^2 [Pa] (appended
+    # last, same positional reason).  ``tau_x``/``tau_y`` lay it along a
+    # wind-speed-floored direction, so their length is smaller in light wind;
+    # a consumer handing the land's stress to the atmosphere reads this.
+    # ``None`` for schemes that solve no friction velocity.
+    tau_mag: jax.Array | None = None
+    # Latent heat [J/kg] the canopy scheme charged its GROUND latent flux
+    # ``LE_soil`` at, so ground vapour mass = LE_soil / L_soil exactly (appended
+    # last, same positional reason).  Over snow it carries the sublimation share
+    # (#1875).  ``None`` for SimpleSEB.
+    L_soil: jax.Array | None = None

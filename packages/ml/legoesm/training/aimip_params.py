@@ -912,43 +912,10 @@ def aimip_scheme_keys_for(
     return keys
 
 
-def aimip_legacy_owned_scheme_keys() -> set[str]:
-    """Registry ``scheme_key``s the LEGACY hand-written params already train.
-
-    OWNERSHIP RULE (design call, 2026-08-06): a config field has exactly ONE
-    trainer.  ``AIMIPClassicalParams.to_<x>_config`` writes these classes'
-    fields from legacy leaves and ``_splice_scheme_overrides`` runs AFTER it,
-    so letting the spec-driven collector also cover such a class would
-    overwrite the legacy value and silently zero those gradients — trading the
-    46 leaves that train today for new ones, with no error.  The spec route
-    therefore covers only the schemes the legacy route CANNOT reach (Bechtold,
-    CLUBB, Thompson, ...), which is why the opt-in exists.
-
-    Legacy wins the overlap rather than the spec because the alternative —
-    dropping the colliding legacy ``ParamConstraint``s — changes the
-    ``AIMIPClassicalParams`` pytree layout and invalidates every existing
-    classical checkpoint, for no additional trained parameter.
-
-    The owned set is derived by CALLING every ``to_*_config`` method and
-    reading the returned TYPE, so a method added later is owned automatically
-    (a hardcoded class list would rot into a silent gradient loss).
-    """
-    from legoesm.training.param_collector import build_registry
-
-    probe = AIMIPClassicalParams.from_defaults()
-    owned_classes = {
-        type(getattr(probe, name)()).__name__
-        for name in dir(type(probe))
-        if name.startswith("to_") and name.endswith("_config")
-    }
-    return {m.scheme_key for m in build_registry()
-            if m.config_class in owned_classes}
-
-
 def aimip_legacy_owned_fields(*, cloud_scheme: str = "xu_randall") -> set[str]:
     """Qualified ``scheme_key.field`` names the legacy leaves actually WRITE.
 
-    Field-level refinement of :func:`aimip_legacy_owned_scheme_keys`: the
+    Field-level refinement of the former class-level ownership rule: the
     class-level subtraction excluded EVERY spec parameter of a class the
     legacy route touches, which suppressed spec-only fields the legacy never
     writes (Sundqvist ``qc_crit``, McFarlane ``fcrit2``, most of
@@ -1022,6 +989,29 @@ def aimip_legacy_owned_fields(*, cloud_scheme: str = "xu_randall") -> set[str]:
                     if q in known:
                         owned.add(q)
     return owned
+
+
+# Spec parameters of an ACTIVE class that the selected scheme never reads.
+# The cloud-fraction family routes the whole CloudConfig spec, but cam6_clubb
+# takes its liquid fraction from CLUBB and requires explicit condensate, so the
+# RH threshold and the diagnostic in-cloud condensate floor (both Sundqvist /
+# Xu-Randall only) have no gradient path there.
+_INACTIVE_FIELDS_BY_CLOUD_SCHEME = {
+    "cam6_clubb": frozenset({
+        "atm.clouds.CloudConfig.rh_crit",
+        "atm.clouds.CloudConfig.q_c_diagnostic",
+    }),
+}
+
+
+def aimip_inactive_fields(*, cloud_scheme: str) -> frozenset:
+    """Qualified ``scheme_key.field`` names with no gradient path under this
+    cloud scheme, frozen OUT of the trainable set by name (no-inert-parameters
+    rule, the ``_inactive_keys`` pattern) rather than left to a measured
+    freeze.  Pass to ``build_trainable_params(exclude=...)`` together with
+    :func:`aimip_legacy_owned_fields` at every bundle build, so a trained
+    checkpoint and its evaluation skeleton share one tree."""
+    return _INACTIVE_FIELDS_BY_CLOUD_SCHEME.get(cloud_scheme, frozenset())
 
 
 class AIMIPTrainableBundle(eqx.Module):
@@ -1345,6 +1335,10 @@ def make_aimip_classical_spectral_physics(
             rrtmgp=rrtmgp_cfg,
             cloud_scheme=cloud_scheme,
             cloud_config=cloud_cfg_trained,
+            # cam6_clubb has exactly one legal value here (the radiation
+            # builder refuses the scheme without it), so this is derived,
+            # not a knob.  Every other cloud scheme keeps the RH path.
+            use_clubb_cloud_fraction=(cloud_scheme == "cam6_clubb"),
             update_interval_steps=rad_update_interval_steps,
             diurnal_cycle=True,
             orbit=_orbit,
@@ -1628,11 +1622,24 @@ def make_aimip_classical_spectral_physics(
         microphysics=micro_cfg,
         gravity_wave_drag=gwd_cfg,
     )
+    # The split builds radiation and the non-radiative physics SEPARATELY, so
+    # neither sees the other and the combined wrapper's producer gate never
+    # runs: cam6_clubb + a non-CLUBB closure would build with the routing on
+    # and read a cloud fraction nobody writes (zero => clouds cleared).  Same
+    # gate as combined.py, applied to the RESOLVED pair before splitting.
+    if rad_cfg.use_clubb_cloud_fraction and turb_cfg.scheme != "clubb":
+        raise ValueError(
+            "RadiationConfig.use_clubb_cloud_fraction=True requires a "
+            "cloud-fraction-producing turbulence closure "
+            "(turbulence.scheme='clubb', diagnostic or prognostic); got "
+            f"turbulence.scheme={turb_cfg.scheme!r} (cloud_scheme={cloud_scheme!r})."
+        )
     non_rad_raw = make_physics(non_rad_cfg, model_type="spectral_pe", dt=dt)
     rad_only_raw = make_radiation_physics(
         rad_cfg, "spectral_pe",
         sfc_albedo_override=_sfc_albedo_override,
         sfc_emissivity_override=_sfc_emissivity_override,
+        use_clubb_cloud_fraction=rad_cfg.use_clubb_cloud_fraction,
     )
 
     def non_rad_fn(state, grid_, sigma_coord, phys_state=None, forcing=None):
@@ -1706,7 +1713,8 @@ def make_aimip_classical_spectral_physics(
     # test pass on a config this lane never evaluates.
     non_rad_fn.physics_config = non_rad_cfg
 
-    def rad_fn(state, grid_, sigma_coord, *, sim_time_seconds=0.0, forcing=None):
+    def rad_fn(state, grid_, sigma_coord, *, sim_time_seconds=0.0, forcing=None,
+               phys_state=None):
         # ``make_radiation_physics`` returns the per-module physics_fn
         # with signature
         # ``(state, grid, sigma_coord, grid_fields=None, sim_time_seconds=0.0)``
@@ -1726,9 +1734,14 @@ def make_aimip_classical_spectral_physics(
         # pin) keeps the diurnal/seasonal sim_time cycle intact.  The old
         # either/or branch dropped sim_time_seconds whenever any forcing
         # arrived, freezing radiation time at the closure default.
+        # ``phys_state`` is the LAGGED carry the rollout threads (CLUBB's
+        # PDF cloud fraction, ZM's mass flux / in-cloud water); the
+        # spectral radiation builder reads it only when the CLUBB
+        # cloud-fraction routing is on, else it is ignored.
         rad_out = rad_only_raw(
             state, grid_, sigma_coord,
             sim_time_seconds=sim_time_seconds, forcing=forcing,
+            phys_state=phys_state,
         )
         if rad_out.tracers is None and state.tracers is not None:
             zero_tracers = {}
@@ -1741,4 +1754,9 @@ def make_aimip_classical_spectral_physics(
         return rad_out
 
     rad_fn.radiation_config = rad_cfg
+    # The rollout decides whether to fill the carry before the first radiation
+    # call by this marker; it lives on the raw builder output, so re-export it
+    # on the wrapper the rollout actually receives.
+    if getattr(rad_only_raw, "_wants_phys_state_ro", False):
+        rad_fn._wants_phys_state_ro = True
     return non_rad_fn, rad_fn

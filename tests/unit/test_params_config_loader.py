@@ -175,8 +175,11 @@ def test_atm_scalar_map_is_pipeline_threaded():
         # scheme leaf, and get_gwd_fn hands the pipeline that LEAF as gwd_config.
         "HinesConfig": {"gravity_wave_drag": "hines"},
         "McFarlaneConfig": {"gravity_wave_drag": "mcfarlane"},
+        "ZhangMcFarlaneConfig": {"convection": "zhang_mcfarlane"},
+        "CLUBBParams": {"turbulence": "clubb", "clubb_prognostic": True},
     }
     resolved_attr = {
+        "ZhangMcFarlaneConfig": "convection_config",
         "HinesConfig": "gwd_config",
         "McFarlaneConfig": "gwd_config",
         "SBMConfig": "convection_config",
@@ -222,6 +225,8 @@ def test_atm_scalar_map_is_pipeline_threaded():
                 adiabatic_lwc_rate=getattr(
                     pipe, "_cloud_adiabatic_lwc_rate", None))
             got = getattr(cc, m.field)
+        elif m.config_class == "CLUBBParams":
+            got = getattr(pipe.turbulence_config.params, m.field)
         else:
             got = getattr(getattr(pipe, resolved_attr[m.config_class]), m.field)
         assert got == sentinel, (
@@ -290,6 +295,11 @@ def test_atm_scalar_map_has_no_under_claim():
          lambda pipe, field: getattr(pipe.gwd_config, field, None)),
         ("McFarlaneConfig", "mcfarlane_", {"gravity_wave_drag": "mcfarlane"},
          lambda pipe, field: getattr(pipe.gwd_config, field, None)),
+        ("ZhangMcFarlaneConfig", "zm_", {"convection": "zhang_mcfarlane"},
+         lambda pipe, field: getattr(pipe.convection_config, field, None)),
+        ("CLUBBParams", "clubb_", {"turbulence": "clubb",
+                                   "clubb_prognostic": True},
+         lambda pipe, field: getattr(pipe.turbulence_config.params, field)),
     ]
     # Companion drift-guard: the family list scanned below must exactly match
     # the config classes present in the verified allowlist map.  The selector /

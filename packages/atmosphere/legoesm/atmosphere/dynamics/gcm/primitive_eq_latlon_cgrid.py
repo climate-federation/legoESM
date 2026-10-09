@@ -56,6 +56,7 @@ from legoesm.grids.operators_latlon_cgrid import (
 )
 from legoesm.atmosphere.dynamics.gcm.shallow_water_latlon_cgrid import (
     absolute_vorticity_coriolis,
+    nu_del4_row_profiles,
 )
 from legoesm.core.operators_fv_latlon_3d import (
     cgrid_fv_scalar_advection_latlon_3d,
@@ -201,14 +202,20 @@ class CGridLatLonPrimitiveEquationConfig(NamedTuple):
     # α-weighted form (sb81_omega_over_p_dyn) built from the SAME half-level
     # construction as the geopotential and the momentum/thermo ln p^SB
     # gradients — the discretization-consistent closure of the #1029 PGF
-    # chain.  False (default): the legacy arithmetic ω_full/p_full form.
-    # Default OFF: the consistent form removes the arithmetic form's
-    # accidental damping of the lid-amplified orographic-wave mode
-    # (#1029(b)) — measured held_suarez_topo latlon blowup day ~49 -> ~12
-    # (A/B job 9130802, byte-fixed protocol) — so it stays opt-in until the
-    # lid treatment lands.  Static Python bool (feature-gating exception):
-    # each value compiles its own branch, no jnp.where double-trace.
-    sb81_omega_conversion: bool = False
+    # chain (default).  False: the legacy arithmetic ω_full/p_full form,
+    # kept only for A/B against older runs.  History: it was opt-in because
+    # the arithmetic form accidentally damped the #1029(b) lid-amplified
+    # orographic-wave mode (held_suarez_topo blowup day ~49 -> ~12, A/B job
+    # 9130802, old mountain, before the #836 top sponge and del-4).  Static Python
+    # bool (feature-gating exception): each value compiles its own branch.
+    sb81_omega_conversion: bool = True
+    # Biharmonic (del-4) hyperdiffusion [m^4/s] on u, v and T, the same
+    # scheme as the lat-lon shallow-water lane: scale-selective (k^4), with
+    # the per-latitude-row pole stability cap ``nu_del4_row_profiles``.
+    # 0.0 (default) is OFF and byte-identical; needs ``dt`` in the tendency.
+    nu_del4: float = 0.0
+    # Numerics safety fraction of the del-4 diffusive CFL; not a tunable.
+    nu_del4_cfl_frac: float = 0.25
 
 
 def _zero_v_at_pole(v, *, south: bool, north: bool, offset: int = 0):
@@ -339,6 +346,7 @@ def cgrid_latlon_hydrostatic_tendencies(
     config: CGridLatLonPrimitiveEquationConfig = CGridLatLonPrimitiveEquationConfig(),
     *,
     geom_pads: tuple | None = None,
+    dt=None,
 ):
     """Compute hydrostatic PE tendencies on the lat-lon C-grid.
 
@@ -360,6 +368,9 @@ def cgrid_latlon_hydrostatic_tendencies(
         so the per-stage scalar-row collective-permutes are skipped;
         ``None`` (every other lane) keeps the in-operator pads
         byte-identical.
+    dt : float, optional
+        Step length [s]; required only when ``config.nu_del4 > 0`` (sizes the
+        per-row pole stability cap of the hyperdiffusion).
 
     Returns
     -------
@@ -683,7 +694,7 @@ def cgrid_latlon_hydrostatic_tendencies(
     # The v·∇_η(ln p) term is the horizontal pressure-gradient correction
     # to the thermodynamic equation (Simmons & Burridge 1981).
     if _hybrid and config.sb81_omega_conversion:
-        # #1029 ω-side (opt-in): SB81 α-weighted dynamic conversion
+        # #1029 ω-side (default ON): SB81 α-weighted dynamic conversion
         #   (ω/p)_k^dyn = -(1/Δp_k)[L_k Σ_{j<k}C_j + α_k C_k],
         # built from the SAME flux-form cumsum as continuity (iter-54
         # reuse) and the SAME sb81_halflevel_construction as Phi and the
@@ -820,6 +831,27 @@ def cgrid_latlon_hydrostatic_tendencies(
         dv_dt = dv_dt + config.A_h * lap_v
         lap_T = laplacian_cgrid(T, grid)
         dT_dt = dT_dt + config.A_h * lap_T
+
+    # --- 13a. Biharmonic hyperdiffusion (optional) ---
+    # SIGN: lap(lap) of a Fourier mode is +k^4, so -nu*lap(lap(f)) decays it.
+    # T uses the layer-mass-weighted form -(1/dp) lap(dp * nu * lap(T)):
+    # sum(dp * dT * area) telescopes to zero (global heat conserved) and
+    # sum(dp * T * dT * area) = -sum(dp * nu * lap(T)^2 * area) <= 0.
+    if config.nu_del4 > 0.0:
+        if dt is None:
+            raise ValueError(
+                "cgrid_latlon_hydrostatic_tendencies: nu_del4 > 0 requires "
+                "the dt argument (the per-row pole stability cap needs it).")
+        nu_u, nu_v = nu_del4_row_profiles(
+            grid, config.nu_del4, config.nu_del4_cfl_frac, dt)
+        lap_u, lap_v = vector_laplacian_cgrid(u, v, grid)
+        lap2_u, lap2_v = vector_laplacian_cgrid(lap_u, lap_v, grid)
+        du_dt = du_dt - nu_u[..., None] * lap2_u
+        dv_dt = dv_dt - nu_v[..., None] * lap2_v
+        dp_T = dp_from_hybrid(sigma_coord, p_s) if _hybrid else (
+            p_s[..., None] * sigma_coord.dsigma.astype(p_s.dtype))
+        flux_T = dp_T * nu_u[..., None] * laplacian_cgrid(T, grid)
+        dT_dt = dT_dt - laplacian_cgrid(flux_T, grid) / dp_T
 
     # --- 13b. Top sponge (Rayleigh damping increasing toward the lid, #836) ---
     # Absorb upward-propagating gravity-wave / convective energy that would else
@@ -991,7 +1023,7 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
 
     def tendencies(self, state: CGridLatLonHydrostaticState):
         return cgrid_latlon_hydrostatic_tendencies(
-            state, self.grid, self.sigma_coord, self.config,
+            state, self.grid, self.sigma_coord, self.config, dt=self.dt,
         )
 
     # ------------------------------------------------------------------
@@ -1117,6 +1149,7 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         def tendency_fn(s):
             du, dv, dT, dps, dq = cgrid_latlon_hydrostatic_tendencies(
                 s, grid, sigma_coord, self.config, geom_pads=geom_pads,
+                dt=dt,
             )
 
             # Polar filter: damp high-frequency modes near poles for
@@ -1441,18 +1474,17 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         # tiny correction that only fires on fully net-negative columns (rare on
         # smooth water fields).  A band-aware psum sum_fn is the SPMD upgrade.
         if state.tracers:
-            from legoesm.core.conservation import (
-                apply_water_positivity, cell_mass_weight)
+            from legoesm.core.conservation import apply_water_positivity
             _hybrid = isinstance(sigma_coord, HybridSigmaPressureCoordinate)
             if _hybrid:
                 _dp = jnp.maximum(dp_from_hybrid(sigma_coord, state.p_s), 0.0)  # +weight
             else:
                 _dp = state.p_s[..., jnp.newaxis] * sigma_coord.dsigma
-            _dp = cell_mass_weight(_dp, grid.grid_area)   # cos(lat) areas
             _tr_out, _T_out = apply_water_positivity(
                 state.tracers, state.T, _dp,
                 conservative=self.config.conservative_tracer_clamp,
-                energy_consistent=self.config.energy_consistent_moisture_clip)
+                energy_consistent=self.config.energy_consistent_moisture_clip,
+                area=grid.area)
             state = state._replace(tracers=_tr_out, T=_T_out)
 
         # #1675: the mass fixer's accumulate-dtype correction promotes ``p_s``

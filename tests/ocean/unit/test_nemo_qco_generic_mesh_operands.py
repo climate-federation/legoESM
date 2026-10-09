@@ -24,6 +24,7 @@ import pytest
 from legoesm.grids.latlon import create_beta_plane_cgrid_geometry
 from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import nemo_qco_wzv_operands
 from legoesm.ocean.vertical import (
+    NemoEENBarotropicOperands,
     OceanPartialCellCoordinate,
     create_partial_cell_coordinate,
     create_z_star_from_thicknesses,
@@ -84,12 +85,30 @@ def test_card_operands_reproduce_nemos_domain_definitions():
     assert not np.array_equal(expected_e3u_0, np.asarray(h_ref)[:, 1:, :])
 
 
-def _attach_raw(z_coord, ops):
-    """A z-coordinate carrying NEMO-style raw operands equal to ``ops``."""
+def _attach_raw(z_coord, ops, *, e3u_0=None, e3v_0=None):
+    """A z-coordinate carrying NEMO-style raw operands equal to ``ops``.
+
+    NEMO carries the reference FACE thicknesses separately from ``e3t_0``
+    (``usrdef_zgr.F90:225,228``: the shallower neighbour's), and every card
+    that carries the raw qco set carries them on the EEN barotropic bundle,
+    so a fixture without them is not a NEMO mesh.  ``e3u_0``/``e3v_0``
+    override them, which is how the alias this module used to apply is
+    reproduced in the non-vacuity check below.
+    """
+    z = jnp.zeros_like(ops.e3t_0)
+    z2 = jnp.zeros_like(ops.hu_0)
+    bundle = NemoEENBarotropicOperands(
+        ff_f=z2, e3u_0=ops.e3u_0 if e3u_0 is None else e3u_0,
+        e3v_0=ops.e3v_0 if e3v_0 is None else e3v_0, e3f_0=z,
+        umask=ops.umask3, vmask=ops.vmask3, fmask=z, fe3mask=z,
+        hu_0=ops.hu_0, hv_0=ops.hv_0, hf_0=z2,
+        e1t=z2, e2t=z2, e1u=z2, e2u=ops.e2u, e1v=ops.e1v, e2v=z2,
+        e1f=z2, e2f=z2)
     return z_coord._replace(
         nemo_e3t_0=ops.e3t_0, nemo_hu_0=ops.hu_0, nemo_hv_0=ops.hv_0,
         nemo_e1e2t=ops.area_t, nemo_e1e2u=ops.area_u,
-        nemo_e1e2v=ops.area_v, nemo_e2u=ops.e2u, nemo_e1v=ops.e1v)
+        nemo_e1e2v=ops.area_v, nemo_e2u=ops.e2u, nemo_e1v=ops.e1v,
+        nemo_een_barotropic=bundle)
 
 
 def _wzv(grid, z_coord, u_mask, v_mask):
@@ -99,9 +118,17 @@ def _wzv(grid, z_coord, u_mask, v_mask):
     eta_before = jnp.asarray(rng.normal(scale=0.02, size=(NLAT, NLON)))
     u = jnp.asarray(rng.normal(scale=0.1, size=(NLAT, NLON + 1, NLEV)))
     v = jnp.asarray(rng.normal(scale=0.1, size=(NLAT + 1, NLON, NLEV)))
+    # STALE-FIXTURE FIX (round 214; this was a pre-existing red on the clean
+    # tree, not a regression of this round): the call grew a required
+    # `after_ssh_form` -- a card resolving this branch must STATE the NEMO
+    # time-stepping scheme whose after-SSH slot the call reads rather than
+    # have it inferred.  These fixtures model the RK3 program the certified
+    # cards run (stprk3.f90:239-241), so they say so.  The arm under test
+    # (the reference face thickness) is upstream of the after-SSH slot and
+    # identical for every form.
     ww, live_u, live_v = nemo_qco_wzv_operands(
         eta_now, eta_before, u, v, grid, z_coord, u_mask, v_mask, tmask,
-        120.0)
+        120.0, after_ssh_form="rk3_extrapolated")
     return np.asarray(ww), np.asarray(live_u), np.asarray(live_v)
 
 
@@ -122,22 +149,28 @@ def test_raw_and_card_operand_sources_agree_and_the_arm_is_constructible():
         np.asarray(resolved.hu_0), np.asarray(ops.hu_0))
     np.testing.assert_array_equal(
         np.asarray(resolved.e2u), np.asarray(ops.e2u))
+    # ROUND 214.  The raw branch used to alias e3u_0 = e3v_0 = e3t_0, so on
+    # this sloping fixture the two sources were different physics at every
+    # step face.  They are now the SAME statement -- both take the shallower
+    # neighbour's reference thickness (usrdef_zgr.F90:225,228) -- the card by
+    # rebuilding it and the raw branch by reading the arrays NEMO built.
+    np.testing.assert_array_equal(
+        np.asarray(resolved.e3u_0), np.asarray(ops.e3u_0))
+    np.testing.assert_array_equal(
+        np.asarray(resolved.e3v_0), np.asarray(ops.e3v_0))
     ww_raw, hu_raw, _ = _wzv(grid, raw_coord, u_mask, v_mask)
-    # On THIS fixture the seafloor slopes, so the two operand sources are
-    # genuinely different physics at a step face: the raw branch keeps NEMO's
-    # full-step statement e3u_0 = e3t_0, while the card branch takes the
-    # shallower neighbour's reference thickness (usrdef_zgr.F90:179-186).
-    # The face thickness and the vertical velocity MUST therefore differ --
-    # asserting equality here would be asserting the fix does nothing.
-    assert not np.array_equal(hu_raw, hu_card)
-    assert not np.array_equal(ww_raw, ww_card)
-    # ...and the difference must live exactly where the min-rule bites, i.e.
-    # nowhere on the columns whose neighbours share a seafloor.
+    np.testing.assert_array_equal(hu_raw, hu_card)
+    np.testing.assert_array_equal(ww_raw, ww_card)
+    # NON-VACUITY: the fixture must have step faces, and the OLD alias must
+    # be visibly wrong on them -- otherwise the two rows above pass on a mesh
+    # where every rule agrees and prove nothing.
     step_face = np.any(
         np.asarray(ops.e3u_0) != np.asarray(ops.e3t_0), axis=-1)
-    assert step_face.any(), "fixture has no step face; the row above is vacuous"
-    # Bit-identity of the two sources is pinned separately, on a mesh where
-    # they provably coincide (test_raw_branch_is_bit_identical_...).
+    assert step_face.any(), "fixture has no step face; the rows above are vacuous"
+    aliased = _attach_raw(z_coord, ops, e3u_0=ops.e3t_0, e3v_0=ops.e3t_0)
+    ww_alias, hu_alias, _ = _wzv(grid, aliased, u_mask, v_mask)
+    assert not np.array_equal(hu_alias, hu_card)
+    assert not np.array_equal(ww_alias, ww_card)
 
 
 def test_raw_branch_is_bit_identical_when_the_mesh_is_full_step():
@@ -185,11 +218,19 @@ def test_arm_is_constructible_on_the_certified_l1_cards():
         card = build_nemo_testcase_card(case)
         z_coord = card.recipe.z_coord
         assert isinstance(z_coord, OceanPartialCellCoordinate)
-        # The precondition this change removes: these cards carry no NEMO mesh.
         assert getattr(z_coord, "nemo_hu_0", None) is None
         u_mask, v_mask = compute_face_masks_3d(z_coord.is_active,
                                                card.recipe.grid)
         dtype = card.recipe.initial_state.eta.data.dtype
+        # OVERFLOW now carries a lone raw e3t operand; since 03f0a1a07 that
+        # partial provenance must fail closed.  LOCK_EXCHANGE carries none.
+        if getattr(z_coord, "nemo_e3t_0", None) is not None:
+            with pytest.raises(ValueError, match="some but not all"):
+                nemo_qco_resolved_mesh_operands(
+                    z_coord, card.recipe.grid, u_mask.astype(dtype),
+                    v_mask.astype(dtype), dtype, z_coord.n_levels)
+            # Removing the lone qco operand selects the all-card source.
+            z_coord = z_coord._replace(nemo_e3t_0=None)
         ops = nemo_qco_resolved_mesh_operands(
             z_coord, card.recipe.grid, u_mask.astype(dtype),
             v_mask.astype(dtype), dtype, z_coord.n_levels)
@@ -216,3 +257,11 @@ def test_missing_operands_and_no_ladder_still_fail_closed():
     with pytest.raises(ValueError, match="some but not all"):
         nemo_qco_resolved_mesh_operands(
             partial, grid, u_mask, v_mask, jnp.float64, NLEV)
+
+    # ROUND 214: a card carrying the raw qco set but NOT NEMO's reference
+    # face thicknesses must fail closed, not fall back to the e3t_0 alias --
+    # on a partial-cell mesh that alias is wrong on every stepped face.
+    no_faces = _attach_raw(z_coord, ops)._replace(nemo_een_barotropic=None)
+    with pytest.raises(ValueError, match="reference face thicknesses"):
+        nemo_qco_resolved_mesh_operands(
+            no_faces, grid, u_mask, v_mask, jnp.float64, NLEV)

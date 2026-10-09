@@ -1,0 +1,17 @@
+{
+  "decision": 33,
+  "status": "PENDING_USER_DECISION",
+  "candidate": "carry NEMO raw Ub/Ubb/Vb/Vbb/sshb/sshbb histories",
+  "applied": false,
+  "patch": "nemo_testcase_l2_gyre_round51_decision33_raw_bt_history_NOT_APPLIED.patch",
+  "evidence": "round51/live_operands.json",
+  "measured_disposition": "REFUTED",
+  "reason": "Raw NEMO history substitution changed the live result but improved no final kt=2 U/V/SSH oracle maximum; SSH worsened by 3.2526e-19 m.",
+  "rule12": {
+    "GYRE-zco": "TESTED_REFUTED",
+    "LOCK_EXCHANGE-zco": "VALUE_INERT_WHILE_PATCH_UNAPPLIED",
+    "OVERFLOW-zps": "VALUE_INERT_WHILE_PATCH_UNAPPLIED",
+    "ORCA2": "UNMEASURED_WITH_SPEC",
+    "DINO": "SHARED_STATEMENT_RISK"
+  }
+}

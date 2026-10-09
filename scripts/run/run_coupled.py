@@ -870,6 +870,14 @@ def build_parser():
                              "woa). Default on; the slab-land skin feedback is "
                              "stiff — turn off (--no-couple-surface-radiation) "
                              "to trade land-radiation realism for stability.")
+    parser.add_argument("--couple-surface-fluxes",
+                        action=argparse.BooleanOptionalAction, default=False,
+                        help="Feed the coupler's tile-blended sensible/latent "
+                             "heat flux to the atmosphere surface tendency "
+                             "(CoupledConfig.couple_surface_fluxes). Default "
+                             "off. Closes the air-sea budget only with the "
+                             "prognostic 3D ocean; the slab/two-layer ocean "
+                             "computes its own fluxes.")
     # SLAB-only (LandConfig.runoff_scheme). topmodel = SIMTOP sub-grid saturated
     # fraction + topographic baseflow (Niu 2005 / CLM4.5); it is implemented and
     # param-spec'd but was unreachable -- land_scheme_overrides built
@@ -1024,13 +1032,12 @@ def build_parser():
                              "EQUATORIAL CFL (~60x larger dt at 2deg) instead of "
                              "being clamped to ~5s. Without it a 2deg lat-lon "
                              "run is ~80x more steps and infeasible.")
-    parser.add_argument("--sb81-omega-conversion", action="store_true",
-                        default=False,
+    parser.add_argument("--sb81-omega-conversion",
+                        action=argparse.BooleanOptionalAction, default=True,
                         help="SB81 α-weighted κT·ω/p energy conversion on the "
                              "hybrid lat-lon C-grid lane (#1029; no effect on "
-                             "other grids/coordinates). Default OFF — unmasks "
-                             "the #1029(b) lid-wave instability sooner; opt-in "
-                             "until the lid treatment lands.")
+                             "other grids/coordinates). Default ON; "
+                             "--no-sb81-omega-conversion = legacy form.")
     parser.add_argument("--ocean-nlev", type=int, default=20,
                         help="3D ocean vertical levels (--ocean dynamic)")
     parser.add_argument("--ocean-dt", type=float, default=300.0,
@@ -1465,7 +1472,7 @@ def main():
     # so make_grid_remapper hits the regular-lat-lon overlap branch.  A
     # co-located spectral 3-D ocean stays idealized; cubed_sphere / latlon /
     # voronoi(MPAS) support the dynamic ocean too.
-    overrides = {}
+    overrides = {"couple_surface_fluxes": args.couple_surface_fluxes}
     ocean_grid_obj = None   # None => ocean co-located on the atm grid (no remap)
     # A cubed-sphere OR gaussian(spectral) atmosphere drives a 3-D ocean ONLY on
     # a DISTINCT lat-lon ocean grid (--ocean-grid latlon:<res>), coupled via the

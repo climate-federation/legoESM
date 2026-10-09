@@ -49,6 +49,8 @@ from legoesm.atmosphere.physics.turbulence.pbl_height import (
     diagnose_pbl_height,
 )
 from legoesm.atmosphere.physics.turbulence.surface_layer import (
+    latent_enthalpy_correction,
+    surface_moisture_flux,
     compute_surface_fluxes,
     surface_fluxes_at_lowest_level,
 )
@@ -351,8 +353,9 @@ def louis_turbulence(
 
     sflx_u = tau_x
     sflx_v = tau_y
-    sflx_T = shflx / constants.c_pd
-    sflx_q = lhflx / constants.L_v
+    sflx_q = surface_moisture_flux(config.surface, lhflx, T_sfc)
+    # Heat BC carries the latent enthalpy correction (water at L(T) vs L_v).
+    sflx_T = (shflx + latent_enthalpy_correction(lhflx, sflx_q)) / constants.c_pd
 
     # Implicit vertical diffusion.  Heat in θ-space so a dry adiabat
     # stays neutral; moisture and momentum stay in physical space.
@@ -376,7 +379,7 @@ def louis_turbulence(
         Km=Km_full,
         Kh=Kh_full,
         shflx=shflx,
-        lhflx=lhflx,
+        lhflx=lhflx, evap_sfc=sflx_q,
         ustar=ustar,
         h_pbl=h_pbl,
         wtheta_flux=wtheta_flux,

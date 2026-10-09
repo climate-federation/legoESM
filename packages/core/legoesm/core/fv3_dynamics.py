@@ -1043,39 +1043,6 @@ def fv_dynamics_step(ctx: dict, state: dict, press: dict, *,
             "stages": stages}
 
 
-def make_require_uniform_damping_lane_jit():
-    """Static deck guard (C5): the check runs on Python values at trace
-    time and cannot exist under jit, so the factory hands back the plain
-    function -- it raises before any tracer exists."""
-    return require_uniform_damping_lane
-
-
-def make_p_var_hydrostatic_jit(*, n: int, ng: int, km: int,
-                               check_args: bool = False):
-    """Static: n, ng, km, check_args.  Dynamic: delp, ptop, akap."""
-    def run(delp, ptop, akap):
-        return p_var_hydrostatic(delp, ptop=ptop, akap=akap, n=n, ng=ng,
-                                 km=km, check_args=check_args)
-    return jax.jit(run)
-
-
-def make_pt_to_theta_v_jit(*, n: int, ng: int):
-    """Static: n, ng (dp1's None-ness is fixed per compiled closure)."""
-    def run(pt, pkz, dp1=None):
-        return pt_to_theta_v(pt, pkz, n=n, ng=ng, dp1=dp1)
-    return jax.jit(run)
-
-
-def make_p_var_nonhydrostatic_jit(*, n: int, ng: int, km: int,
-                                  check_args: bool = False):
-    """Static: n, ng, km, check_args.  Dynamic: delp, delz, pt, ptop, akap."""
-    def run(delp, delz, pt, ptop, akap):
-        return p_var_nonhydrostatic(delp, delz, pt, ptop=ptop, akap=akap,
-                                    n=n, ng=ng, km=km,
-                                    check_args=check_args)
-    return jax.jit(run)
-
-
 def make_fv_dynamics_step_jit(ctx: dict, km: int, *, k_split: int,
                               n_split: int, ptop, ak, bk, akap, cp_air,
                               kord_mt: int, kord_tm: int,

@@ -49,6 +49,7 @@ from legoesm.ocean.vertical import (
     flux_form_vertical_tracer_advection_centered,
     nemo_qco_live_face_geometry_cgrid,
     nemo_qco_live_face_geometry_from_operands,
+    nemo_qco_live_t_thickness,
     nemo_qco_card_mesh_operands,
     nemo_qco_mesh_operands,
     nemo_up3_vertical_momentum_advection,
@@ -64,6 +65,7 @@ from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
     compute_frozen_geom_density,
     nemo_qco_kmm_velocity_cycle,
     nemo_qco_wzv_operands,
+    nemo_rk3_after_ssh_is_carried,
     interp_to_v_points,
     interp_to_v_points_multi,
     centered_cell_to_uface,
@@ -83,6 +85,8 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
 )
 from legoesm.ocean.dynamics.barotropic_common import (
     nemo_literal_after_level_reconcile,
+    nemo_reference_depth_reciprocal,
+    rk3_stage_barotropic_correction,
     validate_after_reconcile,
 )
 from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
@@ -96,7 +100,12 @@ from legoesm.ocean.dynamics.ocean_tendency_common import (
     depth_average_to_faces,
     depth_mean,
 )
-from legoesm.ocean.freshwater import freshwater_eta_tendency, virtual_salt_flux
+from legoesm.ocean.freshwater import (
+    freshwater_eta_tendency,
+    net_freshwater_flux,
+    virtual_salt_flux,
+)
+from legoesm.core.source_rounding import nemo_source_round
 from legoesm.ocean.physics.combined import make_ocean_physics
 from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
     compute_eke_step_kappa,
@@ -478,6 +487,7 @@ def _compute_advection_flux_div(
     fct_base_thickness=None,
     fct_after_thickness=None,
     fct_implicit_w=None,
+    return_fct_activity: bool = False,
 ):
     """Compute advection flux divergence for a single tracer field.
 
@@ -550,7 +560,7 @@ def _compute_advection_flux_div(
             "centered/ppm/dst3/weno5/weno7).")
     if tracer_advection in ("ppm_fct", "fct2"):
         from legoesm.ocean.advection import fct_tracer_advection
-        div_hut, vert_flux_div = fct_tracer_advection(
+        fct_result = fct_tracer_advection(
             tr, mass_flux_u, mass_flux_v, w_baro, h_k_old, grid, dt,
             high_order="ppm" if tracer_advection == "ppm_fct" else "centred2",
             tracer_before=tr_before,
@@ -568,7 +578,12 @@ def _compute_advection_flux_div(
             base_thickness=fct_base_thickness,
             after_thickness=fct_after_thickness,
             implicit_w=fct_implicit_w,
+            return_limiter_activity=return_fct_activity,
         )
+        if return_fct_activity:
+            div_hut, vert_flux_div, fct_activity = fct_result
+        else:
+            div_hut, vert_flux_div = fct_result
     elif tracer_advection == "ppm":
         from legoesm.ocean.advection import (
             ppm_to_u_points, ppm_to_v_points,
@@ -696,6 +711,11 @@ def _compute_advection_flux_div(
         vert_flux_div = vert_flux_div.at[..., 0].add(
             w_baro[..., 0] * tr[..., 0])
 
+    if return_fct_activity:
+        if tracer_advection not in ("ppm_fct", "fct2"):
+            raise ValueError(
+                "return_fct_activity requires an FCT tracer scheme")
+        return div_hut, vert_flux_div, fct_activity
     if return_h_fluxes:
         return div_hut, vert_flux_div, _h_flux_pair[0], _h_flux_pair[1]
     return div_hut, vert_flux_div
@@ -730,6 +750,7 @@ def compute_advection_flux_div_pair(
     fct_base_thickness=None,
     fct_after_thickness=None,
     fct_implicit_w=None,
+    return_a_fct_activity: bool = False,
 ):
     """Advection flux divergence for TWO tracers (T, S) in one pass.
 
@@ -778,7 +799,7 @@ def compute_advection_flux_div_pair(
         or tracer_advection not in _LEVEL_SEPARABLE_H_SCHEMES
         or os.environ.get("LEGOESM_TRACER_PAIR", "0") != "1"
     ):
-        pair_a = _compute_advection_flux_div(
+        pair_a_result = _compute_advection_flux_div(
             tr_a, tracer_advection, mass_flux_u, mass_flux_v,
             w_baro, h_k_old, h_u_old, h_v_old, grid, dt,
             recon_fill_mask=recon_fill_mask,
@@ -788,7 +809,13 @@ def compute_advection_flux_div_pair(
             fct_base_thickness=fct_base_thickness,
             fct_after_thickness=fct_after_thickness,
             fct_implicit_w=fct_implicit_w,
+            return_fct_activity=return_a_fct_activity,
         )
+        if return_a_fct_activity:
+            pair_a = pair_a_result[:2]
+            activity_a = pair_a_result[2]
+        else:
+            pair_a = pair_a_result
         out_b = _compute_advection_flux_div(
             tr_b, tracer_advection, mass_flux_u, mass_flux_v,
             w_baro, h_k_old, h_u_old, h_v_old, grid, dt,
@@ -804,6 +831,8 @@ def compute_advection_flux_div_pair(
         if return_b_h_fluxes:
             div_b, vert_b, sf_u, sf_v = out_b
             return pair_a, (div_b, vert_b), (sf_u, sf_v)
+        if return_a_fct_activity:
+            return pair_a, out_b, activity_a
         return pair_a, out_b
 
     nlev = tr_a.shape[-1]
@@ -1004,8 +1033,119 @@ def _ssp_rk3_tracer_pair_step(
     return a_new, b_new
 
 
+class _NEMOVerticalSolveTestInput(NamedTuple):
+    """Fixed-shape private input for production-compiled solve probes.
+
+    ``replace`` is a dynamic six-element boolean array.  Disabled, identity,
+    directed, and planted probes therefore share one JIT input structure and
+    one traced graph; only leaf values differ.  No model configuration can
+    construct or select this diagnostic input.
+    """
+
+    heat_K: object
+    viscosity_K: object
+    formed_K: object
+    tracer_e3w: object
+    tracer_e3t: object
+    temperature_content: object
+    replace: object
+
+
+# Legal values of the private ``expose_stage1_momentum_rhs_split`` hook: the
+# empty default, the two frames round 204 added, and the two halves round 205
+# splits the removed advection content into.  A closed set so an unknown
+# string cannot select an exposure silently.
+_STAGE1_SPLIT_ARMS = ("", "pre_advection", "completed",
+                      "advection_horizontal", "advection_vertical",
+                      "advection_zub_increment")
+# Legal values of ``momentum_transport_stage1_operand``: the production path
+# and the two one-variable swaps of stprk3_stg.f90:270's operands.  Round 206
+# landed NEMO's depth, so the depth arm is now the LEGACY one.
+_STAGE1_TRANSPORT_OPERAND_ARMS = ("", "prognostic_mean",
+                                  "legacy_min_rule_depth")
+
+
 class _NEMOWSRK3TestHooks(NamedTuple):
     """Private causal controls; never part of a constructible model config."""
+
+    # Return the 50-substep dynspg_ts trace from the production-jitted step.
+    # This is deliberately a static private hook: fidelity gates must not call
+    # ``_step_impl`` eagerly to obtain internals, because eager execution does
+    # not certify the compiled production arithmetic.
+    expose_barotropic_substeps: bool = False
+    # Return every already-materialized operand from the one compiled WS-RK3
+    # stage program.  Private WRITE-only round-51 instrument; no constructible
+    # model configuration can select it.
+    expose_live_stage_operands: bool = False
+    # Private controls for the frozen barotropic forcing walk.  Incoming arrays
+    # land before dyn_cor_2D's equivalent; final arrays land after it.  A
+    # callable final value is a WRITE-only operand observer instead.  None is
+    # constructible as a model configuration selector.
+    slow_forcing_incoming_override: object = None
+    barotropic_slow_forcing_override: object = None
+    # Substitute the two frozen positive face drag-rate arrays at the external
+    # solver boundary.  Private fidelity measurement only: NEMO has no
+    # selector for these coefficients and no public config can reach this.
+    barotropic_drag_rate_override: object = None
+    # Private round-197 per-substep discriminator for the compiled barotropic
+    # sub-time-step loop: a pair of (n_substeps, ...) stacks that replace the
+    # 2-D Coriolis trend (NEMO dyn_cor_2D, dynspg_ts.f90:503) at the substep
+    # the scan is on, keyed by the scan's own substep index.  ``None`` is the
+    # production value and is resolved at trace time, so the unset hook leaves
+    # the jaxpr unchanged; no constructible model configuration can select it.
+    barotropic_substep_coriolis_override: object = None
+    # Same instrument for the substep surface-pressure gradient
+    # (dynspg_ts.f90:498), so the two operands of the velocity update at
+    # dynspg_ts.f90:535 can be substituted one at a time.
+    barotropic_substep_pgf_override: object = None
+    # WRITE-only developed-state observer for the completed three-dimensional
+    # momentum RHS before its depth reduction.  Kept separate from the final
+    # slow-forcing callback so the round-141 gate can prove this minimum
+    # materialization passive against the ordinary production step.
+    slow_forcing_rhs_observer: object = None
+    slow_forcing_rhs_observer_face: str = ""
+    # WRITE-only round-5 (VORTEX) observer for the PER-TERM decomposition of
+    # that same completed right-hand side.  It is handed the
+    # ``MomentumTendencyDiagnostics`` the very same ``tendencies`` call
+    # already builds -- with the stage face thicknesses, the lateral-diffusion
+    # thickness operands and the continuity clock this step supplies -- so the
+    # rows are a decomposition of the array the observer above reports and not
+    # a second opinion obtained from a different call.  None is the production
+    # value and no model configuration can select it.
+    slow_forcing_rhs_term_observer: object = None
+    # Private round-142 directed discriminator: replace only the owned native
+    # faces of the completed 3-D momentum RHS before its depth reduction.
+    # None leaves the production program unchanged; this is not configurable.
+    slow_forcing_rhs_override: object = None
+    # Private round-143 downstream discriminators.  The depth override lands
+    # before the live wind/drag arithmetic.  The drag override replaces that
+    # completed boundary and then applies the already-computed wind once.
+    # Both preserve unowned faces and are absent from the public config.
+    slow_forcing_depth_override: object = None
+    slow_forcing_drag_override: object = None
+    # Private round-144 discriminator for the compiled wind statement.  Each
+    # tuple member independently replaces density reciprocal, face stresses,
+    # or live inverse depths; None retains the production operand.
+    slow_forcing_wind_operand_override: object = None
+    # Substitute NEMO's six raw b/bb arrays at the barotropic loop entry while
+    # leaving legoESM's carried state untouched.  This covers both a cold-start
+    # ll_init frame and a continuation frame; private fidelity measurement only.
+    barotropic_raw_history_override: object = None
+    # Stage-twin driver only: replace the completed external solve handoff
+    # (eta, uu_b, vv_b, Hu_avg, Hv_avg) with a recorded NEMO handoff before
+    # any RK3 stage consumes it.  This is private instrumentation, never a
+    # constructible configuration choice.
+    stage_barotropic_output_override: object = None
+    # Stage-twin driver only: replace one stage's Kmm entry bundle
+    # (stage number, u, v, T, S, eta) at the pointer-swap boundary.  Stage 1
+    # is supplied by the prognostic input state; valid override stages are 2
+    # and 3.  The ordinary stage still runs through the shared implementation.
+    stage_entry_override: object = None
+    # Private companion for the 19-frame OVERFLOW causal gate. ``None``
+    # preserves the production predicate; ``False`` restores the legacy
+    # velocity-form update while the trace still crosses the compiled return
+    # pytree. No public configuration can select this test-only arm.
+    barotropic_flux_form_update_override: object = None
 
     # Ablates the per-stage external-mode REPLACEMENT inside the one WS stage
     # ladder (stprk3_stg.F90:433-446): each stage then keeps its own depth
@@ -1042,6 +1182,11 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # slots after the full step has run.  Private fidelity instrumentation only;
     # zero leaves the returned state untouched.
     expose_momentum_stage: int = 0
+    # WRITE-only companion for the round-11 composition walk: expose stage-2
+    # Kaa immediately after the selected stprk3_stg update and before the
+    # reference-depth barotropic-mean replacement.  The ordinary step still
+    # completes before the diagnostic substitutes the returned u/v slots.
+    expose_stage2_raw_momentum: bool = False
     # Restores the pre-fix LIVE-weighted stage depth mean.  NEMO removes a
     # REFERENCE-weighted one -- ``zub = uu_b(Kaa) - SUM(e3u_0*uu(:,Kaa))
     # * r1_hu_0`` (stprk3_stg.F90:440) with ``hu_0 = SUM(e3u_0*umask)``
@@ -1063,6 +1208,11 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # Private operand diagnostic: return the stage-advanced tracer carried by
     # Kmm after stage 1 or 2. Zero leaves the returned tracer untouched.
     expose_tracer_stage: int = 0
+    # WRITE-only source-order diagnostic for the stage-1 tracer accumulator.
+    # ``after_advection`` returns ts(Krhs) after tra_adv; ``after_sbc`` returns
+    # it after tra_sbc_RK3.  The ordinary compiled step still completes before
+    # T/S are substituted in the returned state.  No card can select this.
+    expose_tracer_stage1_boundary: str = ""
     # Harness-only ablation of NEMO's qco stage face thickness: restore the
     # pre-fix min-of-stretched-T-thicknesses rule in the stage transport.
     # NEMO has no such switch (e3u(Kmm) is a macro), so public WS-RK3 cards
@@ -1073,6 +1223,52 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # unweighted ``u_raw = u_Kbb + stage_dt*RHS``.  Public WS-RK3 always
     # carries the (1+r3u(Kbb)) / (1+r3u(Kmm)) / (1+r3u(Kaa)) factors.
     omit_stage_qco_factor: bool = False
+    # One-variable ablation for the vector-invariant half of the collapsed
+    # WS-RK3 identity. NEMO's live ``ln_dynadv_vec`` branch advances stages
+    # 1/2 directly on velocity (stprk3_stg.F90:365-369); this restores the
+    # former, dead flux-form QCO weighting at :370-386 for the causal gate.
+    legacy_vector_stage_qco_weights: bool = False
+    # One-variable ablation of the Kmm face thickness in the vector ENE
+    # transport products. Public NEMO WS-RK3 uses the same canonical QCO
+    # e3u/e3v(Kmm) pair as its stage transport; this restores the former
+    # min-of-stretched-T pair for the causal gate only.
+    legacy_vector_ene_min_face_thickness: bool = False
+    # One-variable ablation of the NEMO-native F-point Coriolis mapping.
+    # Public GYRE consumes bridge-carried ff_f at vertex [j+1,i+1]; this
+    # restores the generic one-column-west vertex field for the causal gate.
+    legacy_ene_vertex_coriolis: bool = False
+    # One-variable ablation of the source-associated key_qco tracer stage
+    # update. Public NEMO forms ``(qbb*Tbb + dt*qmm*Krhs)/qaa`` directly
+    # (stprk3_stg.F90:674-677); this restores the formerly algebraic
+    # e3t-weighted content form for the causal gate only.
+    legacy_tracer_stage_thickness_association: bool = False
+    # One-variable HPG causal arm. Public ``nemo_sco`` uses the literal
+    # dynhpg recurrence; this restores the former collapsed p'-gradient
+    # association without exposing a constructible scheme selector.
+    legacy_hpg_algebraic_association: bool = False
+    # Private one-variable ablations for the Round-18 wind walk.  Production
+    # preserves a supplied native T-point stress through sbcmod.F90:543-546
+    # and materializes stp2d.F90:200-201's written product/add association.
+    # These restore the lossy geographic round trip and collapsed division;
+    # no constructible model configuration can select either arm.
+    legacy_geographic_surface_stress_arm: bool = False
+    legacy_barotropic_wind_association: bool = False
+    # One-variable ablation of sbcmod.F90:543-546's coastal stress factors.
+    # Public NEMO identities always apply them; this private hook restores the
+    # former bare face interpolation for movement/scaling evidence only.
+    legacy_coastal_surface_stress_factors: bool = False
+    # Private ablation of dynspg_ts.F90:629's written continuity association.
+    # Production NEMO identities materialize ssh_frc + zhdiv before the
+    # rDt_e product; this restores the formerly collapsed algebra only for a
+    # one-variable causal measurement.
+    legacy_barotropic_continuity_association: bool = False
+    # Private one-variable ablation of stprk3_stg.F90:265-278.  Production
+    # hands the separately carried uu_b/vv_b value to zub/zvb; this restores
+    # the former reduction of the 3-D Kmm field.  No public card selects it.
+    legacy_reduced_stage_transport_mean_arm: bool = False
+    # Private ablation of traadv.F90:220-226: rederive pFu/pFv from velocity
+    # inside WZV instead of consuming the stage transport just materialized.
+    legacy_wzv_rederived_transport: bool = False
     # One-variable arm for the S-19 wzv branch: route the WS-RK3 stage
     # cross-level velocity through the SAME nemo_qco_wzv_operands the MLF
     # lane calls (sshwzv.F90:331-336, entered from stprk3_stg.F90:297 with
@@ -1080,6 +1276,14 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # has no such switch -- it is one routine -- so this exists only to
     # measure the two arms against each other on the certified cards.
     literal_stage_wzv: bool = False
+    # Private one-variable discriminator for the WS-RK3 stage clock consumed
+    # only by sshwzv.F90:334-335.  Production currently passes rn_Dt to all
+    # three stages; this arm passes (rn_Dt/3,rn_Dt/2,rn_Dt), matching
+    # stprk3_stg.F90:123-124,177-178,221-222.  It is not a public selector.
+    source_stage_wzv_clock_arm: bool = False
+    # WRITE-only diagnostic companion to expose_tracer_transport_stage: place
+    # the raw stage ww in the returned T slot instead of area*ww (pFw).
+    expose_tracer_transport_as_ww: bool = False
     # One-variable ablation of the UP3 upwind-selector fix: restore the
     # transport-sign branch choice in the stage horizontal momentum
     # advection.  NEMO dynadv_up3.F90:166-170 has no switch -- the T-point
@@ -1092,6 +1296,222 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # ``puu_b(Kmm)``, imposed by ``stprk3_stg.F90:439-446``).  NEMO has no
     # such switch; public cards never select this.
     legacy_seed_min_rule_faces: bool = False
+    # One-variable ablation of the resolved GYRE/DINO bottom-drag composition:
+    # omit ONLY dynspg_ts's explicit in-substep drag while retaining the
+    # production card's implicit dynzdf diagonal and baroclinic split.  NEMO
+    # has no switch for this partial program; it is private boundary evidence,
+    # never a constructible scheme.
+    omit_barotropic_substep_drag: bool = False
+    # Private stage-2 EOS/HPG discriminator.  Replace only the (T, S, eta)
+    # bundle consumed by the stage-2 call; no production configuration can
+    # construct this hook.  NEMO's source order is stprk3_stg.F90:317-336,
+    # after the stage-1 tracer update at :452-565.
+    stage2_thermodynamic_override: object = None
+    # WRITE-only/one-variable pair for the raw stage-2 Krhs gauge.  The
+    # override supplies the complete unprojected NEMO RHS immediately before
+    # the literal stage update; the exposure publishes the production RHS
+    # only after the ordinary step has completed.
+    stage2_momentum_rhs_override: object = None
+    expose_stage2_momentum_rhs: bool = False
+    # WRITE-only stage-1 companions of the pair above.  ``dyn_adv`` is the
+    # ONLY momentum statement NEMO runs in stage 1 of the flux-form program
+    # (``stprk3_stg.F90:316``, ``IF( .NOT.ln_dynadv_vec ) CALL dyn_adv( ...,
+    # zFu, zFv, zFw )``; the vector-invariant arm has already completed its
+    # 3-D RHS in ``stp_2D``), and the thickness-weighted explicit update that
+    # consumes it is ``stprk3_stg.F90:372-379``.  Scoring either against
+    # NEMO's own record needs a stage-1 seam, and the stage-1 arm of
+    # ``expose_momentum_operator`` is refused by construction.
+    # ``expose_stage1_momentum_rhs`` publishes the completed stage-1 Krhs --
+    # NEMO's ``uu(:,:,:,Krhs)`` immediately after that call -- and
+    # ``expose_stage1_raw_momentum`` publishes Kaa immediately after the
+    # update and BEFORE the barotropic replacement (``:409-421``), the same
+    # boundary ``expose_stage2_raw_momentum`` reads one stage later.  Both
+    # substitute the returned u/v slots only after the ordinary step has
+    # completed, so neither can perturb a later stage; no card constructs
+    # them.
+    expose_stage1_momentum_rhs: bool = False
+    expose_stage1_raw_momentum: bool = False
+    # WRITE-only stage-1 SPLIT gauge.  ``stp_2D`` leaves the THREE-dimensional
+    # ``Krhs`` with HPG + LDF + COR/MET only: in flux form ``dyn_adv_up3`` is
+    # called with ``pUe``/``pVe`` and writes the two-dimensional RHS alone
+    # (``stp2d.f90:169-170``; ``dynadv_up3.f90:201,288,349,362-364``), while
+    # legoESM's step-level tendency already carries its advection -- so the
+    # two codes' pre-stage arrays are NOT like-for-like and round 201 could
+    # not attribute the stage-1 error to a statement.  ``"pre_advection"``
+    # publishes legoESM's stage-1 right-hand side MINUS the advection content
+    # it carries, which IS like-for-like with NEMO's pre-``dyn_adv`` array;
+    # ``"completed"`` publishes the completed right-hand side from the SAME
+    # evaluation, so a caller can prove that asking ``tendencies()`` for its
+    # per-term decomposition perturbed nothing.  Both substitute the returned
+    # u/v slots only after the ordinary step has completed, and no card
+    # constructs either.
+    # Round 205 splits the removed half in two, so the operator NEMO calls
+    # at ``stprk3_stg.f90:316`` can be scored part by part against the
+    # recorded total: ``"advection_horizontal"`` publishes the flux-form
+    # ``-div(transport (x) velocity)`` trend plus the ``zub`` transport
+    # increment (``dynadv_up3.f90:174-215``), ``"advection_vertical"`` the
+    # vertical UP3 term plus the stage ZAD increment
+    # (``dynadv_up3.f90:245-360``).  The two sum to what ``"completed"``
+    # minus ``"pre_advection"`` gives.
+    expose_stage1_momentum_rhs_split: str = ""
+    # Round 205 ONE-VARIABLE CAUSAL PROBE, default off.  NEMO's advective
+    # transport subtracts the SEPARATELY PROGNOSTIC depth-mean velocity
+    # ``uu_b(:,:,Kmm)`` (``stprk3_stg.f90:270``, the ``n_baro_upd = np_HYB``
+    # branch the compiled module's :48 default selects), while legoESM's
+    # momentum path RE-REDUCES the three-dimensional velocity to get that
+    # mean.  The two are algebraically equal and numerically are not.  With
+    # this arm set, the STAGE-1 momentum transport subtracts the prognostic
+    # pair instead, so the difference can be scored causally.  Stage 1 only:
+    # Kmm = Kbb there, so ``state.uu_b`` IS the Kmm value; stages 2 and 3
+    # read a stage-updated pair (``stprk3_stg.f90:433-446``) this probe does
+    # not carry, and it refuses to touch them.  ``"legacy_min_rule_depth"``
+    # restores the pre-round-206 divisor of the SAME statement: the sum of
+    # legoESM's MIN-RULE face thicknesses in place of NEMO's
+    # ``hu_0*(1+r3u(Kmm))``.  ``""`` is the production path, which since
+    # round 206 (Decision 86) uses NEMO's.
+    momentum_transport_stage1_operand: str = ""
+    # One-variable companion of ``stage2_momentum_rhs_override``: supply
+    # NEMO's own completed stage-1 Krhs (the recorded ``adv_u``/``adv_v``)
+    # immediately before the literal stage update, so the update statement
+    # (``stprk3_stg.F90:372-379``) and the barotropic replacement
+    # (``:409-421``) can be scored as carriers with every other stage input
+    # left as legoESM's.  Private diagnostic only; ``None`` keeps the live
+    # right-hand side.
+    stage1_momentum_rhs_override: object = None
+    # WRITE-only stage-3 momentum-RHS gauge.  ``"post_ldf"`` publishes the
+    # complete stage-3 Krhs that enters the implicit vertical solve, the
+    # operand NEMO hands ``dyn_zdf`` (``stprk3_stg.F90:430``); ``"pre_ldf"``
+    # publishes the same RHS with the lateral-mixing term withheld, the
+    # operand NEMO hands ``dyn_ldf`` (``stprk3_stg.F90:400``, the ONLY
+    # stage-3-only momentum call inside ``CASE ( 3 )`` on this deck).  Those
+    # two frames are what separate ``dyn_ldf`` from ``dyn_zdf`` as the owner
+    # of the stage-3 divergence.  The ordinary step still completes before
+    # either array is substituted into the returned diagnostic state.
+    expose_stage3_momentum_rhs: str = ""
+    # WRITE-only stage-3 raw-Kaa gauge.  Publish the completed implicit
+    # vertical-mixing result immediately before the deferred barotropic
+    # replacement (stprk3_stg.F90:430-448).  The ordinary step and replacement
+    # still complete before the captured U/V are placed in the returned state.
+    expose_stage3_raw_momentum: bool = False
+    # WRITE-only observer for the four source-ordered stage-3 dyn_zdf
+    # boundaries: explicit update, barotropic subtraction, explicit drag,
+    # and implicit solve.  The callback receives eight arrays after the
+    # production-jitted step has materialized them; no public card constructs
+    # this private fidelity hook.
+    zdf_momentum_observer: object = None
+    # Private diagnostic controls for WS-RK3 stage-1 source boundaries.
+    # Round 119's tuple drives compiled HPG -> LDF -> VOR -> KEG -> ZAD;
+    # optional KEG fields are Round-120 arms.  Round 121 may replace only W at
+    # the ZAD call boundary.  No card constructs either private control.
+    # ``True`` retains the stage-2/3 association discriminator.
+    stage1_zad_w_override: object = None
+    # WRITE-only callbacks report the W/thickness operands handed to dyn_zad.
+    # None is the production value; no card constructs these diagnostics.
+    stage1_zad_operand_observer: object = None
+    stage2_zad_operand_observer: object = None
+    stage3_zad_operand_observer: object = None
+    # Rounds 158/194: per-slot substitution at the STAGE-2/3 dyn_zad calls.
+    # Each ``(w, h_u, h_v)`` triple uses ``None`` to keep the live operand,
+    # so one slot can be replaced by NEMO's recorded stage value while every
+    # other input stays legoESM's.  Both feed the existing tendency seam; no
+    # card constructs either diagnostic control.
+    stage2_zad_operand_override: object = None
+    stage3_zad_operand_override: object = None
+    # Round 159: private ONE-VARIABLE arm for the stage-2 continuity
+    # solve.  NEMO's vector-invariant deck solves it on the RAW stage
+    # velocity (``stprk3_stg.f90:360``, velocity indicator) while the
+    # production path hands it the barotropically corrected volume
+    # transports (transport indicator).  ``True`` selects the velocity
+    # indicator at stage 2 only, so the two call forms can be compared
+    # with every other operand held.  No card constructs it.
+    stage2_wzv_velocity_form: bool = False
+    # Round 160 built, round 163 LANDED: NEMO's SECOND per-stage continuity
+    # solve (stprk3_stg.f90:360) for the momentum vertical advection, while
+    # the tracer transport keeps its own field.  Under Decision 55 (note AT)
+    # a NEMO statement that is one-variable and takes a certified row from
+    # DEBT to AT-BAR lands even though day 240/360 move outside the noise
+    # floor, provided the move is under 1e-3 relative -- see the round-163
+    # receipt.  THIS is the TEST-ONLY hook, unchanged in spirit from rounds
+    # 159-162: explicit ``True``/``False`` always wins, subject only to
+    # ``nemo_stage_momentum_wzv_resolved``, the one-variable way a test
+    # reaches either arm on any card.  ``None`` (the default) defers to the
+    # CARD's own explicit choice on ``LatLonCGridOceanConfig`` (same field
+    # name, a different object) -- GYRE-zco sets it ``True``, ORCA2-zps sets
+    # it ``False``, both explicitly, neither inferred from EOS or any other
+    # field (round-163 review BLOCKER: an EOS-keyed inference was a hidden
+    # coupling between unrelated choices).  A card that resolves the
+    # two-solve program without setting the config field raises rather than
+    # guessing.
+    nemo_stage_momentum_wzv_split: bool | None = None
+    # Round 160 WRITE-only exposure: make ``expose_tracer_transport_stage``
+    # return the MOMENTUM vertical velocity (slot 11, stprk3_stg.f90:360)
+    # instead of the tracer transport's own field, so the two solves can be
+    # scored separately against the oracle's recorded array.
+    expose_stage_momentum_w: bool = False
+    # Round 160 WRITE-only exposure: the stage's own U/V free-surface ratios
+    # r3u(Kmm)/r3v(Kmm), the operand divhor.f90:126-130 rebuilds each face
+    # transport from.  Stage 1, 2 or 3; 0 is off.
+    expose_stage_face_r3: int = 0
+    # Round 160 private ONE-VARIABLE arm for the stage-2 momentum solve's
+    # quasi-Eulerian stretching term: NEMO's stage clock rDt = rn_Dt/2
+    # (stprk3_stg.f90:221-222) with the matching HALF after-level
+    # (stprk3_stg.f90:254).  The pair is inseparable -- moving one without the
+    # other is a factor of two, not a control -- so one flag selects both.
+    stage2_momentum_wzv_clock_pair: bool = False
+    nemo_stage_rhs_accumulation_order_arm: object = False
+    # WRITE-only transport exposure for the ordered tracer boundary walk.
+    # A nonzero stage stores NEMO's metric zFu/zFv/zFw triplet in u/v/T after
+    # the ordinary step; it cannot affect a later stage or public execution.
+    expose_tracer_transport_stage: int = 0
+    # WRITE-only adjudication seam for ORCA2 Phase 2l.  The optional external
+    # endpoint tuple is ``(eta_after, Hu_avg, Hv_avg)`` and replaces only the
+    # already-registered ORACLE_SUPPLIED external-mode result after the normal
+    # compiled solve.  ``expose_stage1_wzv`` then returns the actual ``ww``
+    # produced by the one production _g0 transport path, after the ordinary
+    # step completes.  Neither field is constructible from a public card.
+    external_mode_result_override: object = None
+    expose_stage1_wzv: bool = False
+    # WRITE-only stage-1 horizontal-transport operand exposure. ``thickness``
+    # returns e3u/e3v(Kmm); ``corrected_velocity`` returns uu+zub*umask and
+    # vv+zvb*vmask; ``transport_average`` broadcasts un_adv/vn_adv.  The
+    # arrays replace returned u/v only after the full step.
+    expose_stage1_transport_operand: str = ""
+    # One-variable stage-1 tracer-transport operand arm.  The gate supplies
+    # NEMO's native metric zFu/zFv/zFw triplet; momentum and later stages keep
+    # the production transport.  Private diagnostic only.
+    stage1_tracer_transport_override: object = None
+    # One-variable stage-2 tracer-transport operand arm.  The gate supplies
+    # NEMO's native metric zFu/zFv/zFw triplet only to the tracer helper;
+    # momentum and stages 1/3 keep the production transport.  Private
+    # diagnostic only.
+    stage2_tracer_transport_override: object = None
+    # One-variable stage-3 transport operand injection.  The gate supplies the
+    # oracle's native metric zFu/zFv/zFw triplet; conversion back to the shared
+    # internal transport representation happens once at the construction
+    # boundary.  Private diagnostic only.
+    stage3_transport_override: object = None
+    # WRITE-only source-order exposure for one WS-RK3 momentum stage.  Empty
+    # leaves the returned state untouched; ``hpg``, ``vorticity``, or
+    # ``advection`` writes that already-computed production component into the
+    # returned u/v slots after the full step.  ``keg`` and ``zad`` name the two
+    # compiled halves of the vector-invariant ``advection`` bucket -- NEMO's
+    # ``dyn_keg`` and ``dyn_zad``, which ``dyn_adv`` calls in that order under
+    # ``ln_dynadv_vec`` (``dynadv.f90:171,176``) -- and are the same already
+    # computed production components, published under their own names.  This
+    # is a diagnostic seam, not a constructible scheme selector.
+    expose_momentum_operator: str = ""
+    # Which WS-RK3 stage the exposure above reads.  Stage 2 is where the
+    # source-order walk started and stays the default; stage 3 reads the
+    # PRODUCTION stage-3 call.  The construction guard above already refuses
+    # this hook together with ``expose_stage3_momentum_rhs`` -- they share the
+    # returned u/v slots -- so the stage-3 buckets and the stage-3 total are
+    # necessarily two runs, and a gate that adds them must say so.
+    expose_momentum_operator_stage: int = 2
+    # One-variable ablation of NEMO's stage update association.  Public
+    # WS-RK3 integrates the full Krhs and only then applies the reference-depth
+    # barotropic replacement (stprk3_stg.F90:396-446).  This hook restores the
+    # older algebraically equivalent but bit-different pre-projection of Krhs.
+    legacy_preproject_stage_rhs: bool = False
     # One-variable ablation of the stage momentum-advection face thickness:
     # restore ``tendencies()``'s own min-of-stretched-T-thicknesses ``h_u``
     # in the flux-form momentum advection at every WS-RK3 site (the
@@ -1112,9 +1532,139 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # NEMO reads an exact zero.  NEMO has no such switch -- ``umask`` is the
     # 3-D array -- so public cards never select this.
     legacy_2d_stage_face_mask: bool = False
+    # WRITE-only stage-3 boundary seam: return the ordinary state immediately
+    # before dyn_zdf/tra_zdf in the prognostic slots after the full step has
+    # completed.  No public card can construct this diagnostic.
+    expose_pre_implicit_state: bool = False
+    # WRITE-only companion exposing the actual thickness-form T/S content RHS
+    # passed to ``tra_zdf``.  The ordinary solve still completes before these
+    # arrays are substituted into the returned diagnostic state.
+    expose_pre_implicit_content: bool = False
+    # WRITE-only stage-3 tracer boundary before SBC/QSR/LDF content is added.
+    # The ordinary step completes before this diagnostic substitutes T/S.
+    expose_stage3_advection_content: bool = False
+    # One-variable causal arm paired with the seam above.  Replace only the
+    # T/S arrays entering the ordinary implicit ZDF solve; production leaves
+    # this None.  The gate supplies a source-reconstructed NEMO pre-ZDF seed.
+    pre_implicit_tracer_override: object = None
+    # The thickness-form path carries the real ``tra_zdf`` content RHS
+    # separately from that diagnostic concentration.  This private companion
+    # replaces the actual operand for a one-variable oracle arm; no public
+    # card can construct it.
+    pre_implicit_tracer_content_override: object = None
+    # Two-variable FCT/LDF pair discriminator. Replace the helper's
+    # already-materialized stage-3 complete-advection content before its
+    # ordinary source association; no public card can construct this hook.
+    stage3_advection_content_override: object = None
+    # Route the already-computed GM/Redi rate into the same stage-3 source
+    # in production: NEMO calls tra_ldf before tra_zdf (lines 950-965).
+    # Round 110 removed the private selector and introduced no public config;
+    # route_gm_redi_stage3_source: bool = False is explicitly retired.
+    # One-variable ablation of the stage-3 ZDF thickness time level; restores
+    # whole-step-entry rather than faithful N+1/2/Kmm for the discriminator.
+    legacy_zdf_entry_kmm_eta: bool = False
+    tke_rhs_materialization: str = ""  # Private compiled-RHS boundary walk.
+    tke_rhs_intermediate: str = ""  # Private one-output compiled-RHS walk.
+    bn2_intermediate: str = ""  # Private one-output compiled-bn2 walk.
+    bn2_alpha_beta_override: object = None  # Recorded-entry operator input.
+    bn2_tracer_override: object = None  # Recorded-entry T/S operator input.
+    tracer_process_trace: object = None; tracer_ldf_diagnostics: object = None
+    # Round 189 one-variable production-JIT discriminator.  Replace only the
+    # live stage-3 stretch handed to qsr_2BD; the stage geometry, QCO weights,
+    # preceding accumulator and returned trajectory retain their own values.
+    # This requires the WRITE-only process trace and is not configurable.
+    stage3_qsr_stretch_override: object = None
+    # Return the stage-3 FCT active-cell map alongside the unchanged process
+    # boundaries. Kept separate so Round 136 can prove this larger return
+    # graph does not move the already-admitted Round-124 observer's rows.
+    tracer_process_branch_activity: bool = False
+    # Add the exact tracer-ZDF operands to the process return.  Kept separate
+    # so Round 124's smaller return graph remains an unchanged fusion control;
+    # Round 126 runs both observers from the same ordinary entry state.
+    vertical_solve_trace: bool = False
 
 
-def _nemo_ws_qco_stage_faces(eta, h_ref, u_mask_3d, v_mask_3d, grid):
+def rk3_stage_velocity_update(
+    velocity_before,
+    rhs,
+    dt_stage,
+    face_mask,
+    *,
+    vector_form: bool,
+    qco_before=None,
+    qco_now=None,
+    qco_after=None,
+):
+    """NEMO's RK3 momentum stage time step, both arms, one implementation.
+
+    NEMO selects the arm with the SAME predicate at every stage::
+
+        IF( ln_dynadv_vec .OR. lk_linssh ) THEN   ! applied on velocity
+           uu(ji,jj,jk,Kaa) = ( uu(ji,jj,jk,Kbb) + rDt * uu(ji,jj,jk,Krhs) ) * umask(ji,jj,jk)
+        ELSE                                      ! thickness weighted
+           uu(ji,jj,jk,Kaa) = ( ( 1 + r3u(ji,jj,Kbb) ) * uu(ji,jj,jk,Kbb )
+              &               + rDt * ( 1 + r3u(ji,jj,Kmm) ) * uu(ji,jj,jk,Krhs) )
+              &             / ( 1 + r3u(ji,jj,Kaa) ) * umask(ji,jj,jk)
+
+    at ``stprk3_stg.F90:365-388`` for stages 1 and 2, and -- this is the part
+    legoESM used to miss -- at ``dynzdf.F90:119-142`` for stage 3, because the
+    stage-3 time step lives inside ``dyn_zdf``: ``stprk3_stg.F90:395`` CASE(3)
+    only adds the leftover RHS terms and does no time stepping at all.
+
+    Module-level rather than a closure so a fidelity gate can drive it with
+    NEMO's OWN record arrays and score the result against NEMO's own output; a
+    closure cannot be handed a record.  Same reason as
+    ``rk3_stage_barotropic_correction``.
+
+    Parameters
+    ----------
+    velocity_before
+        NEMO ``uu(:,:,:,Kbb)``, the BEFORE level, unchanged across the stages.
+    rhs
+        NEMO ``uu(:,:,:,Krhs)`` for this stage.
+    dt_stage
+        NEMO ``rDt`` for this stage: ``dt/3``, ``dt/2``, ``dt``.
+    face_mask
+        NEMO ``umask(ji,jj,jk)``, used by the VECTOR arm only.  The qco arm
+        takes no mask here on purpose -- legoESM masks after the barotropic
+        correction instead, which is bit-identical because that correction's
+        own ``stage_mask`` zeroes a dry face and its ``e3u_0``-weighted column
+        mean gives a dry level no weight either way.
+    qco_before, qco_now, qco_after
+        ``1 + r3u`` at Kbb, Kmm and Kaa.  Required by the qco arm; a missing
+        one raises rather than silently degrading to the vector arm.
+
+    Sign/geometry convention: a time step on a horizontal velocity component.
+    No vertical axis direction and no flux sign enters it; the thickness
+    ratios are positive and dimensionless.
+    """
+    if not vector_form and (qco_before is None or qco_now is None
+                            or qco_after is None):
+        raise ValueError(
+            "the thickness-weighted arm needs all three (1 + r3u) ratios; got "
+            f"before={qco_before is None}, now={qco_now is None}, "
+            f"after={qco_after is None} missing")
+    if rhs.shape != velocity_before.shape:
+        raise ValueError(
+            f"rhs {rhs.shape} must match velocity_before "
+            f"{velocity_before.shape}")
+    if vector_form:
+        # dynzdf.F90:121-122 and stprk3_stg.F90:367-368, in NEMO's own
+        # association order: add, then mask.
+        if face_mask.shape not in (velocity_before.shape,
+                                   velocity_before.shape[:-1] + (1,)):
+            raise ValueError(
+                f"face_mask {face_mask.shape} must match velocity_before "
+                f"{velocity_before.shape} or be its level-broadcast form")
+        return (velocity_before + dt_stage * rhs) * face_mask
+    # dynzdf.F90:127-132 and stprk3_stg.F90:373-378, key_qco form.
+    return (qco_before * velocity_before
+            + dt_stage * qco_now * rhs) / qco_after
+
+
+def _nemo_ws_qco_stage_faces(
+    eta, h_ref, u_mask_3d, v_mask_3d, grid, *, include_reciprocals=False,
+):
     """NEMO ``e3u/e3v(Kmm)`` and ``1 + r3u/r3v`` for one WS-RK3 stage ssh.
 
     ``dom_qco_r3c_RK3`` (domqco.F90:219-222) builds the U-face free-surface
@@ -1157,14 +1707,190 @@ def _nemo_ws_qco_stage_faces(eta, h_ref, u_mask_3d, v_mask_3d, grid):
     return nemo_qco_live_face_geometry_cgrid(
         jnp.asarray(eta, dtype=dtype), ops.e3u_0, ops.e3v_0, ops.umask3,
         ops.vmask3, ops.hu_0, ops.hv_0, ops.area_t, ops.area_u, ops.area_v,
+        include_reciprocals=include_reciprocals,
     )
+
+
+
+def _nemo_dynzdf_drag_face_thickness(
+    eta_after, h_bathy, z_coord, config, grid, dtype,
+):
+    """``e3u_3d(iku)*(1+r3u(Kaa)*umask)`` -- dyn_zdf's bottom-drag divisor.
+
+    The scale factor NEMO's semi-implicit bottom friction divides by
+    (``dynzdf.f90:306``, the V twin ``:473``, and the ``ln_dynspg_ts``
+    bottom-stress re-add ``:166``/``:168``).  ``e3u_3d`` is the REFERENCE
+    three-dimensional face thickness, read from the mesh variable ``e3u_0``
+    (``domzgr.f90:186``, ``:201``): over z partial steps the MINIMUM of the
+    two neighbouring reference T thicknesses, never their average.
+
+    A named seam, not a second rule: the arithmetic is the one shared
+    ``_nemo_ws_qco_stage_faces`` assembler, which the WS-RK3 stage geometry
+    and the PE lane's wzv arm also call.  Having it under its own name is
+    what lets a test plant the superseded two-cell-average rule into the
+    drag path ALONE and show the seamount's velocity move.
+    """
+    # No non-partial-cell branch: the drag rate this divisor pairs with,
+    # ``nemo_bottom_drag_rate_faces``, raises on anything but an
+    # ``OceanPartialCellCoordinate`` (ocean_pe_latlon_cgrid.py:4094-4097) and
+    # is evaluated FIRST, so a card that got here has one.  GYRE's flat box is
+    # a ``masked_zco`` partial-cell coordinate whose cells are all full, which
+    # is why the min rule and the average coincide there by construction.
+    h_ref = compute_layer_thickness(
+        jnp.zeros_like(eta_after), h_bathy, z_coord,
+        min_water_column_m=config.min_water_column_m,
+    ).astype(dtype)
+    um3, vm3 = compute_face_masks_3d(z_coord.is_active, grid)
+    e3u, e3v, _, _ = _nemo_ws_qco_stage_faces(
+        eta_after, h_ref, um3.astype(dtype), vm3.astype(dtype), grid)
+    return e3u.astype(dtype), e3v.astype(dtype)
+
+def _nemo_metric_stage_transport(metric, face_thickness, corrected_velocity):
+    """NEMO ``metric*e3*(velocity+barotropic correction)`` association."""
+    return nemo_source_round(
+        nemo_source_round(metric[..., None] * face_thickness)
+        * corrected_velocity)
+
+
+def _nemo_cen2_tracer_rhs(
+    tracer, p_u, p_v, p_w, e3t_kmm, tmask_kmm, grid,
+):
+    """Literal RK3 stage-1/2 CEN2 tracer accumulator.
+
+    The FCT card dispatches stages 1-2 to ``traadv_cen.F90:137-149,191-216``
+    (``traadv.F90:280-283,355-365``).  Preserve its written face products,
+    parenthesised U/V differences, precomputed ``r1_e1e2t``, live
+    ``e3t(Kmm)`` division, and the explicit ``wmask(k+1)`` factor on the
+    vertical flux (``traadv_cen.F90:201-210``;
+    ``dommsk.F90:176,180``).  Stage 3 continues through the single FCT
+    implementation and does not call this helper.
+    """
+    sr = nemo_source_round
+    tracer = jnp.asarray(tracer)
+    tr_u_sum = centered_cell_to_uface(tracer, nemo_source_sum=True)
+    tr_v_sum = interp_to_v_points(tracer, grid, nemo_source_sum=True)
+    flux_u = sr(sr(0.5 * p_u) * tr_u_sum)
+    flux_v = sr(sr(0.5 * p_v) * tr_v_sum)
+    delta_u = sr(flux_u[:, 1:, :] - flux_u[:, :-1, :])
+    delta_v = sr(flux_v[1:, :, :] - flux_v[:-1, :, :])
+    horizontal_sum = sr(delta_u + delta_v)
+    r1_e1e2t = sr(1.0 / jnp.asarray(grid.area_T)[..., None])
+    horizontal_scaled = sr(horizontal_sum * r1_e1e2t)
+    rhs = sr(-sr(horizontal_scaled / e3t_kmm))
+
+    tracer_w_sum = sr(tracer[..., :-1] + tracer[..., 1:])
+    tmask_kmm = jnp.broadcast_to(jnp.asarray(tmask_kmm), tracer.shape)
+    wmask_inner = sr(tmask_kmm[..., 1:] * tmask_kmm[..., :-1])
+    flux_w_inner = sr(
+        sr(sr(0.5 * p_w[..., 1:-1]) * tracer_w_sum) * wmask_inner)
+    flux_w = jnp.pad(
+        flux_w_inner,
+        ((0, 0),) * (flux_w_inner.ndim - 1) + ((1, 1),),
+    )
+    vertical_difference = sr(flux_w[..., :-1] - flux_w[..., 1:])
+    vertical_scaled = sr(vertical_difference * r1_e1e2t)
+    return sr(rhs - sr(vertical_scaled / e3t_kmm))
+
+
+def _nemo_stage_corrected_velocity(
+    velocity, transport_average, inverse_depth, barotropic_velocity, face_mask,
+    *, return_correction=False,
+):
+    """Literal ``stprk3_stg.F90:265-278`` zub/zvb composition.
+
+    NEMO uses its separately stored ``uu_b/vv_b(Kmm)`` operand here; reducing
+    the 3-D velocity again is algebraically equivalent but not bitwise so.
+
+    ``return_correction`` additionally hands back the written ``zub``/``zvb``
+    correction itself.  It is WRITE-ONLY provenance for the fidelity walks,
+    which otherwise have to recompute the correction outside this function and
+    would then be measuring their own transcription; the returned corrected
+    velocity is the same object either way and no production caller sets it.
+    """
+    correction = nemo_source_round(
+        nemo_source_round(transport_average * inverse_depth)
+        - barotropic_velocity)
+    corrected = nemo_source_round(
+        velocity + nemo_source_round(correction[..., None] * face_mask))
+    if return_correction:
+        return corrected, correction
+    return corrected
+
+
+def nemo_stage_momentum_wzv_resolved(config) -> bool:
+    """Does this card's configuration SELECT NEMO's two-solve stage program?
+
+    ``stprk3_stg.f90:356`` takes the vector-invariant arm, ``:358`` skips the
+    solve at stage 1, and ``:360`` solves continuity on the RAW stage velocity
+    for the momentum vertical advection, while ``traadv.f90:274`` re-solves it
+    on the barotropically corrected transports for the tracers.  A card is in
+    that program only when it takes the RK3-WS stage program, the
+    vector-invariant momentum advection and the literal continuity solve
+    together.
+
+    This is the BLAST RADIUS of the second solve, not its execution: a card
+    this returns True for MUST set its own explicit
+    ``nemo_stage_momentum_wzv_split`` choice (round 163, Decision 55/note
+    AT) -- GYRE-zco's is ``True``; Decision 58 makes ORCA2-zps's ``True`` as
+    well.  Both are explicit, neither inferred.  The execution predicate reads
+    that card choice (or a test hook).
+    """
+    return (
+        getattr(config, "momentum_time_integrator", "euler") == "rk3_ws"
+        and getattr(config, "momentum_advection", "flux_form")
+        == "vector_invariant"
+        and getattr(config, "wzv_call2_evaluation", "generic")
+        == "nemo_literal")
+
+
+def nemo_stage_momentum_wzv_executes(config, hooks=None) -> bool:
+    """Does this run ACTUALLY take the second per-stage continuity solve?
+
+    The card has to select the two-solve program.  An EXPLICIT
+    ``nemo_stage_momentum_wzv_split`` HOOK (``True`` or ``False``) always
+    wins, subject only to ``nemo_stage_momentum_wzv_resolved`` -- that is
+    the private one-variable arm rounds 159-162 used to test the candidate
+    regardless of any card's production choice, unchanged.
+
+    With no hook, the choice is the CARD's own, read off
+    ``config.nemo_stage_momentum_wzv_split`` (round 163, Decision 55/note
+    AT) -- an EXPLICIT per-card config field, never inferred from EOS or any
+    other unrelated selector (round-163 review BLOCKER: keying it on
+    ``eos`` would have been a hidden coupling between unrelated choices).
+    GYRE-zco's own resolved config sets it ``True`` (measured, landed), and
+    Decision 58 sets ORCA2-zps's own resolved choice to ``True`` after its
+    ten-step ladder measurement.  Both choices remain explicit and separate.
+    A card that resolves the two-solve program
+    WITHOUT setting this field explicitly (``None``, the field's own
+    construction default) is a configuration gap, not a silent choice: this
+    raises rather than guessing, so the next such card either sets the
+    field or is caught before it ships.  This predicate IS the model's
+    condition: the Decision-43 card census imports it rather than restating
+    it (operator note AR, finding 2).
+    """
+    if not nemo_stage_momentum_wzv_resolved(config):
+        return False
+    split = getattr(hooks, "nemo_stage_momentum_wzv_split", None)
+    if split is not None:
+        return bool(split)
+    config_split = getattr(config, "nemo_stage_momentum_wzv_split", None)
+    if config_split is None:
+        raise ValueError(
+            "card resolves NEMO's second per-stage continuity solve "
+            "(rk3_ws + vector_invariant + wzv_call2_evaluation=nemo_literal) "
+            "but its config does not set nemo_stage_momentum_wzv_split "
+            "explicitly -- True or False, never inferred")
+    return bool(config_split)
 
 
 def _nemo_ws_stage_transport(
     stage_velocity, h_stage, stage_index, *, eta_stage, h_ref, Hu_avg, Hv_avg,
-    u_mask_3d, v_mask_3d, grid, z_coord, config, dt,
+    u_mask_3d, v_mask_3d, grid, z_coord, H_bathy, config, dt,
     legacy_min_face_thickness=False, eta_before=None, eta_after=None,
-    literal_wzv=False, legacy_aimp_midpoint_w_metric=False,
+    literal_wzv=False, barotropic_velocity=None, velocity_form_wzv=False,
+    momentum_velocity_form_w=False, momentum_wzv_clock=None,
+    legacy_wzv_rederived_transport=False,
+    legacy_aimp_midpoint_w_metric=False, runoff_mass_flux=None,
 ):
     """NEMO ``stprk3_stg.F90:257-304`` Kmm stage transport triplet.
 
@@ -1180,30 +1906,64 @@ def _nemo_ws_stage_transport(
     share and the implicit ``wi`` (``wAimp``, :298-302); stages 1-2 carry
     ``wi = 0`` (:287).  ONE triplet per stage feeds both ``dyn_adv``
     (:315,331-334) and ``tra_adv`` (:456-519).  Returns
-    ``(mf_u, mf_v, w_explicit, h_stage, hu_stage, hv_stage, wi_stage)``.
+    ``(mf_u, mf_v, w_explicit, h_stage, hu_stage, hv_stage, wi_stage, zFu,
+    zFv, corrected_u, corrected_v, w_momentum)``.  ``w_explicit`` is the
+    TRACER transport's field (``traadv.f90:274``, the transport indicator) and
+    ``w_momentum`` is the momentum vertical advection's own solve on the raw
+    stage velocity (``stprk3_stg.f90:360``, the velocity indicator), or
+    ``None`` on cards that do not run that second solve.  The native pair retains NEMO's product association;
+    dividing it back to a metric-free flux and multiplying again is not
+    bitwise equivalent on the rotated GYRE grid.
     """
     u_stage, v_stage = stage_velocity
+    h_stage = nemo_qco_live_t_thickness(
+        eta_stage, H_bathy, z_coord, jnp.asarray(h_stage).dtype,
+        e3t_0=h_ref)
     if legacy_min_face_thickness:
         # Private ablation control ONLY (_NEMOWSRK3TestHooks); NEMO has no
         # such switch and the WS-RK3 identity never selects this arm.
         hu_stage = min_cell_to_uface(h_stage)
         hv_stage = min_cell_to_vface(h_stage, grid)
+        r1_hu_stage = r1_hv_stage = None
     else:
-        hu_stage, hv_stage, _, _ = _nemo_ws_qco_stage_faces(
-            eta_stage, h_ref, u_mask_3d, v_mask_3d, grid)
+        (hu_stage, hv_stage, _, _, r1_hu_stage,
+         r1_hv_stage) = _nemo_ws_qco_stage_faces(
+            eta_stage, h_ref, u_mask_3d, v_mask_3d, grid,
+            include_reciprocals=True)
     Hu_stage_depth = jnp.sum(hu_stage, axis=-1)
     Hv_stage_depth = jnp.sum(hv_stage, axis=-1)
-    Hu_stage_raw = jnp.sum(hu_stage * u_stage, axis=-1)
-    Hv_stage_raw = jnp.sum(hv_stage * v_stage, axis=-1)
-    u_stage_corr = u_stage + (
-        (Hu_avg - Hu_stage_raw)
-        / jnp.maximum(Hu_stage_depth, 1.0e-10))[..., jnp.newaxis]
-    v_stage_corr = v_stage + (
-        (Hv_avg - Hv_stage_raw)
-        / jnp.maximum(Hv_stage_depth, 1.0e-10))[..., jnp.newaxis]
+    if barotropic_velocity is None:
+        Hu_stage_raw = jnp.sum(hu_stage * u_stage, axis=-1)
+        Hv_stage_raw = jnp.sum(hv_stage * v_stage, axis=-1)
+        u_stage_corr = u_stage + (
+            (Hu_avg - Hu_stage_raw)
+            / jnp.maximum(Hu_stage_depth, 1.0e-10))[..., jnp.newaxis]
+        v_stage_corr = v_stage + (
+            (Hv_avg - Hv_stage_raw)
+            / jnp.maximum(Hv_stage_depth, 1.0e-10))[..., jnp.newaxis]
+    else:
+        # stprk3_stg.F90:265-278 keeps uu_b/vv_b(Kmm) as separate
+        # prognostics.  Preserve both the reciprocal and subtract boundaries;
+        # re-reducing the 3-D field is algebraically equal after :433-446 but
+        # changes the last bits on GYRE's stage-3 transport.
+        r1_hu = (r1_hu_stage if r1_hu_stage is not None else
+                 nemo_source_round(
+                     1.0 / jnp.maximum(Hu_stage_depth, 1.0e-10)))
+        r1_hv = (r1_hv_stage if r1_hv_stage is not None else
+                 nemo_source_round(
+                     1.0 / jnp.maximum(Hv_stage_depth, 1.0e-10)))
+        u_stage_corr = _nemo_stage_corrected_velocity(
+            u_stage, Hu_avg, r1_hu, barotropic_velocity[0], u_mask_3d)
+        v_stage_corr = _nemo_stage_corrected_velocity(
+            v_stage, Hv_avg, r1_hv, barotropic_velocity[1], v_mask_3d)
     mf_u = hu_stage * u_stage_corr * u_mask_3d
     mf_v = hv_stage * v_stage_corr * v_mask_3d
+    zfu_stage = _nemo_metric_stage_transport(
+        jnp.asarray(grid.dy_u), hu_stage, u_stage_corr)
+    zfv_stage = _nemo_metric_stage_transport(
+        jnp.asarray(grid.dx_v), hv_stage, v_stage_corr)
     stage_div = divergence_cgrid(mf_u, mf_v, grid)
+    w_momentum = None
     if literal_wzv:
         # sshwzv.F90:331-336 (qco arm), entered from stprk3_stg.F90:297 as
         # ``wzv(kstp, Kbb, Kmm, Kaa, zFu, zFv, ww, np_transport)``: the SAME
@@ -1219,13 +1979,54 @@ def _nemo_ws_stage_transport(
             eta_stage, eta_before, u_stage, v_stage, grid, z_coord,
             u_mask_3d, v_mask_3d, _tmask3, dt,
             eta_after_override=eta_after,
-            transport_after_override=(Hu_avg, Hv_avg))
+            transport_after_override=(
+                (Hu_avg, Hv_avg) if legacy_wzv_rederived_transport else None),
+            barotropic_velocity_override=(
+                barotropic_velocity if legacy_wzv_rederived_transport else None),
+            volume_transport_override=(
+                # divhor.f90:123-130 (velocity indicator) rebuilds each face
+                # transport from the raw stage velocity; :132-138 (transport
+                # indicator) differences the already corrected zFu/zFv.
+                None if (legacy_wzv_rederived_transport or velocity_form_wzv)
+                else (zfu_stage, zfv_stage)),
+            runoff_mass_flux=runoff_mass_flux)
+        if momentum_velocity_form_w:
+            # THE SECOND SOLVE.  stprk3_stg.f90:360 hands wzv the raw stage
+            # velocity under the velocity indicator and the momentum vertical
+            # advection reads the result; traadv.f90:274 then re-solves
+            # continuity on the corrected transports and overwrites the same
+            # array before the tracer's vertical transport is formed at :280.
+            # ``w_stage`` above is that second, tracer-owned field and is left
+            # byte for byte as it was; this is the first one.
+            # The private clock arm replaces NEMO's (rDt, r3t(Kaa)) PAIR at
+            # once; production passes the step clock with the barotropic
+            # after level, which is the same product algebraically.
+            _w_dt, _w_eta_after = (
+                (dt, eta_after) if momentum_wzv_clock is None
+                else momentum_wzv_clock)
+            w_momentum, _, _ = nemo_qco_wzv_operands(
+                eta_stage, eta_before, u_stage, v_stage, grid, z_coord,
+                u_mask_3d, v_mask_3d, _tmask3, _w_dt,
+                eta_after_override=_w_eta_after,
+                volume_transport_override=None,
+                runoff_mass_flux=runoff_mass_flux)
     else:
         w_stage = diagnose_w_from_flux_div(
             stage_div, z_coord, thickness_weighted=True)
     wi_stage = jnp.zeros_like(w_stage)
     if (stage_index == 2
             and getattr(config, "adaptive_implicit_vertadv", False)):
+        if w_momentum is not None:
+            # stprk3_stg.f90:362 partitions the MOMENTUM pair under the
+            # velocity indicator and traadv.f90:277 partitions the TRACER pair
+            # under the transport indicator: two partitions, not one.  Only
+            # one is transcribed, so refuse loudly rather than hand one
+            # partition to two consumers.
+            raise ValueError(
+                "NEMO's second continuity solve and adaptive-implicit "
+                "vertical advection need TWO stage-3 partitions "
+                "(stprk3_stg.f90:362 and traadv.f90:277); only the transport "
+                "one is transcribed, so this pair is refused")
         if not legacy_aimp_midpoint_w_metric:
             from legoesm.ocean.physics.vertical_mixing import nemo_e3w_kmm
 
@@ -1246,7 +2047,73 @@ def _nemo_ws_stage_transport(
             mf_u, mf_v, w_stage, h_stage, e3w,
             grid.area_T, grid.dy_u, grid.dx_v, dt)
         w_stage, wi_stage = split.w_explicit, split.w_implicit
-    return (mf_u, mf_v, w_stage, h_stage, hu_stage, hv_stage, wi_stage)
+    return (
+        mf_u, mf_v, w_stage, h_stage, hu_stage, hv_stage, wi_stage,
+        zfu_stage, zfv_stage, u_stage_corr, v_stage_corr, w_momentum)
+
+
+class _NEMOWSBarotropicTrace(NamedTuple):
+    """Private WRITE-only equivalent returned by the GYRE boundary gate."""
+
+    state_after_barotropic: object
+    substeps: object
+    slow_forcing: object
+    slow_forcing_operands: object
+    transport_average: object
+
+
+class _NEMOWSLiveOperandTrace(NamedTuple):
+    """Private WRITE-only operands returned by the round-51 live-path gate."""
+
+    state_after: object
+    stage_states: object
+    operator_operands: object
+    stage_geometry: object
+    stage_qco: object
+    stage_coefficients: object
+    tke_entry: object
+    tke_statement_trace: object
+    barotropic_targets: object
+    slow_forcing_producer: object
+    stage_rhs: object
+    stage1_full_rhs: object
+    stage1_rhs_walk: object
+    stage_raw_velocities: object
+    barotropic_correction_geometry: object
+    stage_outputs: object
+    stage_tracer_sources: object
+
+
+def _nemo_qsr_stage3_rate(
+    tendency_kbb, qsr_kbb, qsr_kmm, thickness_kbb, thickness_kmm,
+):
+    """Replace the Kbb qsr component with NEMO's live Kmm stage-3 qsr."""
+    return (
+        (tendency_kbb - qsr_kbb) * thickness_kbb
+        / jnp.maximum(thickness_kmm, 1.0e-10)
+        + qsr_kmm
+    )
+
+
+def _nemo_ws_stage_barotropic_velocity(
+    stage: int,
+    kbb_velocity: tuple,
+    nnn_velocity: tuple,
+) -> tuple:
+    """Select NEMO's separately carried Kmm pair for one RK3 stage.
+
+    ``stprk3.F90:186`` computes ``uu_b/vv_b(Naa)`` once before all stages.
+    Stage 1 is called with ``Kmm=Nbb`` at :195, then :197 swaps that freshly
+    solved slot into ``Nnn``; stages 2 and 3 therefore read this-step ``Nnn``
+    at :200-207.  Only stage 1 reads the last-step ``Kbb`` pair.  Keeping this
+    choice in a tiny fail-closed helper makes the time-level contract directly
+    testable and prevents a same-step external target from leaking into S-21.
+    """
+    if stage == 1:
+        return kbb_velocity
+    if stage in (2, 3):
+        return nnn_velocity
+    raise ValueError(f"NEMO WS-RK3 stage must be 1, 2, or 3; got {stage}")
 
 
 def _nemo_ws_rk3_tracer_pair_step(
@@ -1268,8 +2135,15 @@ def _nemo_ws_rk3_tracer_pair_step(
     stage_transport_geometry=None,
     fct_low_order_predictor: str = "nemo_rk3_two_step",
     bbl_context=None,
+    stage_source_rates=None,
+    stage_source_terms=None,
+    stage_qco_weights=None,
     stop_after_stage: int = 3,
     resume=None,
+    stage3_advection_content_override=None,
+    return_final_content: bool = False,
+    return_stage1_trace: bool = False,
+    return_fct_activity: bool = False,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """NEMO key_RK3 tracer stage program (Wicker--Skamarock form).
 
@@ -1295,6 +2169,16 @@ def _nemo_ws_rk3_tracer_pair_step(
         raise ValueError("stage_transport_geometry must contain exactly 3 stages")
     if stop_after_stage not in (1, 2, 3):
         raise ValueError("stop_after_stage must be 1, 2, or 3")
+    if stage_source_rates is None:
+        zero_a = jnp.zeros_like(tr_a)
+        zero_b = jnp.zeros_like(tr_b)
+        stage_source_rates = ((zero_a, zero_b),) * 3
+    if len(stage_source_rates) != 3:
+        raise ValueError("stage_source_rates must contain exactly 3 stages")
+    if stage_source_terms is not None and len(stage_source_terms) != 3:
+        raise ValueError("stage_source_terms must contain exactly 3 stages")
+    if stage_qco_weights is not None and len(stage_qco_weights) != 3:
+        raise ValueError("stage_qco_weights must contain exactly 3 stages")
     resume_stage = 0
     if resume is not None:
         resume_stage, a_resume, b_resume = resume
@@ -1303,15 +2187,33 @@ def _nemo_ws_rk3_tracer_pair_step(
                 "resume must hand in stage 1 or 2, below stop_after_stage")
 
     def _flux_pair(a_val, b_val, stage_dt, stage_index, h_after):
+        fct_activity = None
         stage_geom = stage_transport_geometry[stage_index]
         if len(stage_geom) == 6:
             mf_u, mf_v, w_stage, h_stage, hu_stage, hv_stage = stage_geom
             wi_stage = None
+            zfu_stage = zfv_stage = None
         elif len(stage_geom) == 7:
             (mf_u, mf_v, w_stage, h_stage, hu_stage, hv_stage,
              wi_stage) = stage_geom
+            zfu_stage = zfv_stage = None
+        elif len(stage_geom) == 9:
+            (mf_u, mf_v, w_stage, h_stage, hu_stage, hv_stage,
+             wi_stage, zfu_stage, zfv_stage) = stage_geom
+        elif len(stage_geom) == 11:
+            (mf_u, mf_v, w_stage, h_stage, hu_stage, hv_stage,
+             wi_stage, zfu_stage, zfv_stage, _, _) = stage_geom
+        elif len(stage_geom) == 12:
+            # Slot 11 is the MOMENTUM vertical velocity of NEMO's first
+            # per-stage continuity solve (stprk3_stg.f90:360).  The tracer
+            # transport re-solves continuity for itself (traadv.f90:274), so
+            # this path keeps reading slot 2 and never slot 11.
+            (mf_u, mf_v, w_stage, h_stage, hu_stage, hv_stage,
+             wi_stage, zfu_stage, zfv_stage, _, _, _) = stage_geom
         else:
-            raise ValueError("each stage transport geometry needs 6 or 7 arrays")
+            raise ValueError(
+                "each stage transport geometry needs 6, 7, 9, 11, or 12 "
+                "arrays")
         # NEMO key_RK3 runs the FCT limiter at stage 3 ONLY: traadv.F90:281-282
         # forces ``ll_dofct = .FALSE.`` for ``kstg /= 3`` and :361-364 then
         # dispatches ``np_FCT`` to ``tra_adv_cen(nn_fct_h, nn_fct_v)``, the
@@ -1323,14 +2225,32 @@ def _nemo_ws_rk3_tracer_pair_step(
         # stage-1 increment at 0x / 2x NEMO's (the upwind low-order
         # signature), which is what fed the stage-2 EOS/HPG operands.
         if tracer_advection == "fct2" and stage_index < 2:
-            (dh_a, dv_a), (dh_b, dv_b) = compute_advection_flux_div_pair(
-                a_val, b_val, "centered", mf_u, mf_v,
-                w_stage, h_stage, hu_stage, hv_stage, grid, stage_dt,
-                recon_fill_mask=recon_fill_mask,
-                linssh_top_flux=linssh_top_flux,
-            )
+            # Literal CEN2 accumulator used by key_RK3 at stages 1/2.
+            # traadv.F90:280-283 disables FCT before stage 3, then
+            # traadv_cen.F90:137-149,203-216 forms metric-bearing face
+            # fluxes, differences their already-rounded products, multiplies
+            # by r1_e1e2t, and finally divides by e3t(Kmm).  The shared generic
+            # content-divergence helper algebraically cancels that last
+            # divide/multiply and moves GYRE's tracer Kaa by O(1e-11), so keep
+            # this source association inside the single NEMO WS identity.
+            p_u = (
+                zfu_stage if zfu_stage is not None
+                else mf_u * jnp.asarray(grid.dy_u)[..., None])
+            p_v = (
+                zfv_stage if zfv_stage is not None
+                else mf_v * jnp.asarray(grid.dx_v)[..., None])
+            p_w = w_stage * jnp.asarray(grid.area_T)[..., None]
+
+            def _cen2_content_div(tracer):
+                rhs = _nemo_cen2_tracer_rhs(
+                    tracer, p_u, p_v, p_w, h_stage, active_3d, grid)
+                return nemo_source_round(
+                    -nemo_source_round(h_stage * rhs)), rhs
+
+            (fd_a, rhs_a), (fd_b, rhs_b) = (
+                _cen2_content_div(a_val), _cen2_content_div(b_val))
         else:
-            (dh_a, dv_a), (dh_b, dv_b) = compute_advection_flux_div_pair(
+            pair_result = compute_advection_flux_div_pair(
                 a_val, b_val, tracer_advection, mf_u, mf_v,
                 w_stage, h_stage, hu_stage, hv_stage, grid, stage_dt,
                 recon_fill_mask=recon_fill_mask,
@@ -1341,19 +2261,36 @@ def _nemo_ws_rk3_tracer_pair_step(
                 fct_base_thickness=h_k_old,
                 fct_after_thickness=h_after,
                 fct_implicit_w=wi_stage,
+                return_a_fct_activity=(
+                    return_fct_activity and stage_index == 2),
             )
-        fd_a, fd_b = dh_a + dv_a, dh_b + dv_b
+            if return_fct_activity and stage_index == 2:
+                (dh_a, dv_a), (dh_b, dv_b), fct_activity = pair_result
+            else:
+                (dh_a, dv_a), (dh_b, dv_b) = pair_result
+                fct_activity = None
+            fd_a, fd_b = dh_a + dv_a, dh_b + dv_b
+            rhs_a = rhs_b = None
         if stage_index == 2 and bbl_context is not None:
             from legoesm.ocean.physics.bbl_adv import (
+                apply_bbl_diffusive_tendency,
                 apply_bbl_adv_tendency,
                 bbl_transports,
+                nemo_bbl_diffusive_coefficients,
             )
-            (geom, area, dy_u, dx_v, gamma_s, rho0,
-             nemo_reference_geometry) = bbl_context
-            if nemo_reference_geometry:
+            (adv_option, diffusive_option, geom, diffusive_geom,
+             area, dy_u, dx_v, gamma_s, aht_m2_s, rho0,
+             nemo_reference_geometry, bbl_grid, bbl_eos_form) = bbl_context
+            if diffusive_option == 1:
                 # trabbl.F90:348 reads gdept(bottom,Kmm).  Under key_qco that
                 # is gdept_0(bottom)*(1+r3t(Kmm)); the stage thickness sum is
                 # H*(1+r3t), so this ratio is the identical stage stretch.
+                reference_depth = jnp.sum(h_k_old, axis=-1)
+                stage_stretch = jnp.sum(h_stage, axis=-1) / jnp.maximum(
+                    reference_depth, jnp.asarray(1.0e-10, h_stage.dtype))
+                live_bottom_depth = (
+                    diffusive_geom.dep_bot_ref * stage_stretch)
+            elif nemo_reference_geometry:
                 reference_depth = jnp.sum(geom.h_ref, axis=-1)
                 stage_stretch = jnp.sum(h_stage, axis=-1) / jnp.maximum(
                     reference_depth, jnp.asarray(1.0e-10, h_stage.dtype))
@@ -1362,27 +2299,61 @@ def _nemo_ws_rk3_tracer_pair_step(
                 live_depth = jnp.cumsum(h_stage, axis=-1) - 0.5 * h_stage
                 live_bottom_depth = jnp.take_along_axis(
                     live_depth, geom.bot_k[..., None], axis=-1)[..., 0]
-            utr, vtr = bbl_transports(
-                tr_a, tr_b, geom, dy_u, dx_v,
-                gamma_s=gamma_s, rho_0=rho0,
-                bottom_depth_m=live_bottom_depth,
-            )
             zero_a, zero_b = jnp.zeros_like(tr_a), jnp.zeros_like(tr_b)
-            bbl_a, bbl_b = apply_bbl_adv_tendency(
-                zero_a, zero_b, tr_a, tr_b, h_stage, area, geom, utr, vtr,
-                nlev=tr_a.shape[-1],
-            )
+            bbl_a, bbl_b = zero_a, zero_b
+            if adv_option == 2:
+                utr, vtr = bbl_transports(
+                    tr_a, tr_b, geom, dy_u, dx_v,
+                    gamma_s=gamma_s, rho_0=rho0,
+                    bottom_depth_m=live_bottom_depth,
+                )
+                bbl_a, bbl_b = apply_bbl_adv_tendency(
+                    bbl_a, bbl_b, tr_a, tr_b, h_stage, area, geom, utr, vtr,
+                    nlev=tr_a.shape[-1],
+                )
+            if diffusive_option == 1:
+                ahu_bbl, ahv_bbl = nemo_bbl_diffusive_coefficients(
+                    tr_a, tr_b, diffusive_geom,
+                    bottom_depth_m=live_bottom_depth, rho_0=rho0,
+                    grid=bbl_grid, eos_form=bbl_eos_form,
+                )
+                bbl_a, bbl_b = apply_bbl_diffusive_tendency(
+                    bbl_a, bbl_b, tr_a, tr_b, h_stage, area,
+                    diffusive_geom, ahu_bbl, ahv_bbl, grid=bbl_grid,
+                )
             # tra_bbl adds a concentration tendency to Krhs using Kbb tracers
             # and Kmm volume (stprk3_stg.F90:588; trabbl.F90:129-136,243-284).
             # This helper evolves content, so convert h*Krhs to a negative
             # flux divergence before the final dt update.
             fd_a = fd_a - h_stage * bbl_a
             fd_b = fd_b - h_stage * bbl_b
-        return fd_a, fd_b
+        return fd_a, fd_b, rhs_a, rhs_b, fct_activity
 
-    def _stage(base, flux_div, stage_dt, h_stage):
-        out = (h_k_old * base - stage_dt * flux_div) / jnp.maximum(
-            h_stage, 1.0e-10)
+    def _source_order_sum(base, fallback, terms):
+        if terms is None:
+            return base + fallback
+        out = base
+        for term in terms:
+            out = nemo_source_round(out + term)
+        return out
+
+    def _stage(
+        base, flux_div, concentration_rhs, source_rate, stage_dt,
+        h_after, h_rhs, stage_index, source_terms=None,
+    ):
+        if stage_qco_weights is not None and concentration_rhs is not None:
+            q_before, q_rhs, q_after = stage_qco_weights[stage_index]
+            rhs = _source_order_sum(
+                concentration_rhs, source_rate, source_terms)
+            out = (
+                q_before[..., None] * base
+                + stage_dt * q_rhs[..., None] * rhs
+            ) / q_after[..., None]
+            return jnp.where(active_3d > 0.5, out, base)
+        out = (
+            h_k_old * base - stage_dt * flux_div
+            + stage_dt * h_rhs * source_rate
+        ) / jnp.maximum(h_after, 1.0e-10)
         return jnp.where(active_3d > 0.5, out, base)
 
     h_one_third = h_k_old + (h_k_new - h_k_old) / 3.0
@@ -1390,26 +2361,82 @@ def _nemo_ws_rk3_tracer_pair_step(
     if resume_stage >= 1:
         a1, b1 = a_resume, b_resume
     else:
-        fd0_a, fd0_b = _flux_pair(
+        fd0_a, fd0_b, rhs0_a, rhs0_b, _ = _flux_pair(
             tr_a, tr_b, dt / 3.0, 0, h_one_third)
-        a1 = _stage(tr_a, fd0_a, dt / 3.0, h_one_third)
-        b1 = _stage(tr_b, fd0_b, dt / 3.0, h_one_third)
+        # WRITE-only source-order values.  The CEN2 RK stage already returns
+        # its concentration RHS directly; for another private diagnostic
+        # configuration, undo the helper's content convention exactly once.
+        trace_adv_a = (
+            rhs0_a if rhs0_a is not None
+            else -fd0_a / jnp.maximum(h_k_old, 1.0e-10))
+        trace_adv_b = (
+            rhs0_b if rhs0_b is not None
+            else -fd0_b / jnp.maximum(h_k_old, 1.0e-10))
+        _terms0 = None if stage_source_terms is None else stage_source_terms[0]
+        trace_sbc_a = _source_order_sum(
+            trace_adv_a, stage_source_rates[0][0],
+            None if _terms0 is None else _terms0[0])
+        trace_sbc_b = _source_order_sum(
+            trace_adv_b, stage_source_rates[0][1],
+            None if _terms0 is None else _terms0[1])
+        a1 = _stage(
+            tr_a, fd0_a, rhs0_a, stage_source_rates[0][0], dt / 3.0,
+            h_one_third, h_k_old, 0,
+            None if _terms0 is None else _terms0[0])
+        b1 = _stage(
+            tr_b, fd0_b, rhs0_b, stage_source_rates[0][1], dt / 3.0,
+            h_one_third, h_k_old, 0,
+            None if _terms0 is None else _terms0[1])
     if stop_after_stage == 1:
+        if return_stage1_trace:
+            return (
+                a1, b1, trace_adv_a, trace_adv_b,
+                trace_sbc_a, trace_sbc_b,
+            )
         return a1, b1
     if resume_stage >= 2:
         a2, b2 = a_resume, b_resume
     else:
-        fd1_a, fd1_b = _flux_pair(
+        fd1_a, fd1_b, rhs1_a, rhs1_b, _ = _flux_pair(
             a1, b1, dt / 2.0, 1, h_one_half)
-        a2 = _stage(tr_a, fd1_a, dt / 2.0, h_one_half)
-        b2 = _stage(tr_b, fd1_b, dt / 2.0, h_one_half)
+        _terms1 = None if stage_source_terms is None else stage_source_terms[1]
+        a2 = _stage(
+            tr_a, fd1_a, rhs1_a, stage_source_rates[1][0], dt / 2.0,
+            h_one_half, h_one_third, 1,
+            None if _terms1 is None else _terms1[0])
+        b2 = _stage(
+            tr_b, fd1_b, rhs1_b, stage_source_rates[1][1], dt / 2.0,
+            h_one_half, h_one_third, 1,
+            None if _terms1 is None else _terms1[1])
     if stop_after_stage == 2:
         return a2, b2
-    fd2_a, fd2_b = _flux_pair(a2, b2, dt, 2, h_k_new)
-    return (
-        _stage(tr_a, fd2_a, dt, h_k_new),
-        _stage(tr_b, fd2_b, dt, h_k_new),
-    )
+    fd2_a, fd2_b, _, _, fct_activity = _flux_pair(a2, b2, dt, 2, h_k_new)
+    advection_content_a = h_k_old * tr_a - dt * fd2_a
+    advection_content_b = h_k_old * tr_b - dt * fd2_b
+    if stage3_advection_content_override is not None:
+        advection_content_a, advection_content_b = (
+            stage3_advection_content_override)
+    content_a = (advection_content_a
+                 + dt * h_one_half * stage_source_rates[2][0])
+    content_b = (advection_content_b
+                 + dt * h_one_half * stage_source_rates[2][1])
+    out_a = jnp.where(
+        active_3d > 0.5,
+        content_a / jnp.maximum(h_k_new, 1.0e-10), tr_a)
+    out_b = jnp.where(
+        active_3d > 0.5,
+        content_b / jnp.maximum(h_k_new, 1.0e-10), tr_b)
+    if return_final_content and return_fct_activity:
+        return (
+            out_a, out_b, content_a, content_b,
+            advection_content_a, advection_content_b, fct_activity,
+        )
+    if return_final_content:
+        return (
+            out_a, out_b, content_a, content_b,
+            advection_content_a, advection_content_b,
+        )
+    return out_a, out_b
 
 
 def _forward_backward_coriolis_3d(
@@ -1831,8 +2858,219 @@ class LatLonCGridOceanModel:
         if self._nemo_ws_test_hooks.expose_momentum_stage not in (0, 1, 2, 3):
             raise ValueError(
                 "expose_momentum_stage must be one of 0, 1, 2, or 3")
-        self.config = self._validate_config(
-            config or LatLonCGridOceanConfig.from_flat())
+        _rhs_observer = self._nemo_ws_test_hooks.slow_forcing_rhs_observer
+        _rhs_observer_face = (
+            self._nemo_ws_test_hooks.slow_forcing_rhs_observer_face)
+        if _rhs_observer_face not in ("", "u", "v"):
+            raise ValueError(
+                "slow_forcing_rhs_observer_face must be '', 'u', or 'v'")
+        if callable(_rhs_observer) != bool(_rhs_observer_face):
+            raise ValueError(
+                "slow_forcing_rhs_observer and its face must be selected "
+                "together")
+        if self._nemo_ws_test_hooks.expose_momentum_operator_stage not in (
+                2, 3):
+            raise ValueError(
+                "expose_momentum_operator_stage must be 2 or 3; stages 1 and "
+                "3-with-lateral-mixing are served by other hooks")
+        # At CONSTRUCTION: otherwise a missing stage bucket can compile and
+        # score whatever the returned slots happened to hold.
+        for _zad_stage, _zad_override in enumerate((
+                self._nemo_ws_test_hooks.stage2_zad_operand_override,
+                self._nemo_ws_test_hooks.stage3_zad_operand_override), 2):
+            if _zad_override is not None and (
+                    not isinstance(_zad_override, tuple)
+                    or len(_zad_override) != 3):
+                # A pair or bare array would score under another field's name.
+                raise ValueError(
+                    f"stage{_zad_stage}_zad_operand_override must be a "
+                    "(w, h_u, h_v) tuple; a None slot keeps the live operand")
+        _face_r3_stage = self._nemo_ws_test_hooks.expose_stage_face_r3
+        if (not isinstance(_face_r3_stage, int)
+                or isinstance(_face_r3_stage, bool)
+                or _face_r3_stage not in (0, 1, 2, 3)):
+            # A float or a bool here would index the wrong stage's ratios and
+            # score them against the oracle's stage 2 under its name.
+            raise ValueError(
+                "expose_stage_face_r3 must be the int 0, 1, 2, or 3")
+        if not isinstance(
+                self._nemo_ws_test_hooks.stage2_momentum_wzv_clock_pair, bool):
+            raise ValueError(
+                "stage2_momentum_wzv_clock_pair must be a bool")
+        _wzv_split = self._nemo_ws_test_hooks.nemo_stage_momentum_wzv_split
+        if _wzv_split is not None and not isinstance(_wzv_split, bool):
+            # At CONSTRUCTION: anything truthy-but-not-bool would silently
+            # select the two-solve program and the walk would score one
+            # compiled program under the other's name.  ``None`` is the
+            # legal sentinel for "defer to the default policy" (round 163).
+            raise ValueError(
+                "nemo_stage_momentum_wzv_split must be a bool or None")
+        if not isinstance(
+                self._nemo_ws_test_hooks.stage2_wzv_velocity_form, bool):
+            # At CONSTRUCTION: anything truthy would silently select NEMO's
+            # other continuity call form and the walk would score one program
+            # under another program's name.
+            raise ValueError(
+                "stage2_wzv_velocity_form must be a bool")
+        if self._nemo_ws_test_hooks.expose_momentum_operator not in (
+                "", "hpg", "vorticity", "advection", "keg", "zad", "after_hpg", "after_vor", "after_keg", "after_zad"):
+            raise ValueError(
+                "expose_momentum_operator must name a component or after_* "
+                "accumulator boundary; got "
+                f"{self._nemo_ws_test_hooks.expose_momentum_operator!r}")
+        if self._nemo_ws_test_hooks.expose_tracer_stage1_boundary not in (
+                "", "after_advection", "after_sbc"):
+            raise ValueError(
+                "expose_tracer_stage1_boundary must be '', "
+                "'after_advection', or 'after_sbc'")
+        # Dispatch hardening at CONSTRUCTION, not at the substitution site:
+        # the returned u/v carry ONE exposed frame, and the substitutions run
+        # in a fixed order, so two momentum-RHS exposures at once would hand
+        # the caller the later one under the earlier one's name.  A gate that
+        # silently scores the wrong frame is worse than one that refuses.
+        _stage3_rhs_hook = self._nemo_ws_test_hooks.expose_stage3_momentum_rhs
+        if _stage3_rhs_hook not in ("", "pre_ldf", "post_ldf"):
+            raise ValueError(
+                "expose_stage3_momentum_rhs must be '', 'pre_ldf', or "
+                f"'post_ldf'; got {_stage3_rhs_hook!r}")
+        _stage1_slots = tuple(
+            (_name, getattr(self._nemo_ws_test_hooks, _name))
+            for _name in ("expose_stage1_momentum_rhs",
+                          "expose_stage1_raw_momentum"))
+        for _name, _flag in _stage1_slots:
+            if not isinstance(_flag, bool):
+                # At CONSTRUCTION: anything truthy-but-not-bool would select
+                # the exposure silently and the walk would score one stage-1
+                # boundary under the other's name.
+                raise ValueError(f"{_name} must be a bool")
+        _stage1_split = (
+            self._nemo_ws_test_hooks.expose_stage1_momentum_rhs_split)
+        _tr_operand = (
+            self._nemo_ws_test_hooks.momentum_transport_stage1_operand)
+        if _tr_operand not in _STAGE1_TRANSPORT_OPERAND_ARMS:
+            # At CONSTRUCTION, like its sibling below: validating this inside
+            # the stage branch would silently accept a typo on any card whose
+            # transport reconcile is off or whose integrator is not WS-RK3,
+            # and the walk would score the production path under the arm's
+            # name (review finding).
+            raise ValueError(
+                "momentum_transport_stage1_operand must be one of "
+                f"{_STAGE1_TRANSPORT_OPERAND_ARMS!r}; got {_tr_operand!r}")
+        if _stage1_split not in _STAGE1_SPLIT_ARMS:
+            raise ValueError(
+                "expose_stage1_momentum_rhs_split must be one of "
+                f"{_STAGE1_SPLIT_ARMS!r}; got {_stage1_split!r}")
+        _stage1_selected = [_name for _name, _flag in _stage1_slots if _flag]
+        if _stage1_split:
+            # It writes the SAME returned u/v slots as the two bools above.
+            _stage1_selected.append("expose_stage1_momentum_rhs_split")
+        if _stage1_selected and (
+                len(_stage1_selected) > 1
+                or bool(self._nemo_ws_test_hooks.expose_momentum_stage)
+                or self._nemo_ws_test_hooks.expose_stage2_raw_momentum
+                or self._nemo_ws_test_hooks.expose_stage2_momentum_rhs
+                or bool(self._nemo_ws_test_hooks.expose_momentum_operator)
+                or bool(_stage3_rhs_hook)
+                # These two also write the returned u/v slots, and they are
+                # substituted EARLIER, so a stage-1 exposure would silently
+                # win and the walk would score the stage-1 frame under the
+                # transport's name.
+                or bool(self._nemo_ws_test_hooks
+                        .expose_tracer_transport_stage)
+                or bool(self._nemo_ws_test_hooks
+                        .expose_stage1_transport_operand)
+                # The exposure publishes the PRODUCTION right-hand side, so
+                # selecting it together with the override would publish the
+                # array the step did NOT use.
+                or (self._nemo_ws_test_hooks.stage1_momentum_rhs_override
+                    is not None)):
+            raise ValueError(
+                "expose_stage1_momentum_rhs / expose_stage1_raw_momentum "
+                "cannot be combined with another momentum exposure or with "
+                "stage1_momentum_rhs_override: they share the returned u/v "
+                "slots")
+        if _stage3_rhs_hook and (
+                self._nemo_ws_test_hooks.expose_stage2_momentum_rhs
+                or self._nemo_ws_test_hooks.expose_stage2_raw_momentum
+                or self._nemo_ws_test_hooks.expose_momentum_stage
+                or self._nemo_ws_test_hooks.expose_momentum_operator):
+            raise ValueError(
+                "expose_stage3_momentum_rhs cannot be combined with another "
+                "momentum exposure: they share the returned u/v slots")
+        _stage3_raw_hook = (
+            self._nemo_ws_test_hooks.expose_stage3_raw_momentum)
+        if not isinstance(_stage3_raw_hook, bool):
+            raise ValueError("expose_stage3_raw_momentum must be a bool")
+        if _stage3_raw_hook and (
+                _stage3_rhs_hook
+                or self._nemo_ws_test_hooks.expose_stage2_momentum_rhs
+                or self._nemo_ws_test_hooks.expose_stage2_raw_momentum
+                or self._nemo_ws_test_hooks.expose_momentum_stage
+                or self._nemo_ws_test_hooks.expose_momentum_operator):
+            raise ValueError(
+                "expose_stage3_raw_momentum cannot be combined with another "
+                "momentum exposure: they share the returned u/v slots")
+        _zdf_momentum_observer = (
+            self._nemo_ws_test_hooks.zdf_momentum_observer)
+        if (_zdf_momentum_observer is not None
+                and not callable(_zdf_momentum_observer)):
+            raise ValueError("zdf_momentum_observer must be callable or None")
+        _config_input = config or LatLonCGridOceanConfig.from_flat()
+        _oracle_endpoint_diagnostic_eos_bypass = bool(
+            (self._nemo_ws_test_hooks.expose_stage1_wzv
+             or self._nemo_ws_test_hooks.expose_tracer_stage1_boundary)
+            and self._nemo_ws_test_hooks.external_mode_result_override is not None
+            and _config_input.eos == "nemo_eos80"
+            and _config_input.eos_depth == "geometric"
+        )
+        _config_for_validation = (
+            _config_input._replace(eos_depth="insitu")
+            if _oracle_endpoint_diagnostic_eos_bypass else _config_input
+        )
+        self.config = self._validate_config(_config_for_validation)
+        if _oracle_endpoint_diagnostic_eos_bypass:
+            self.config = self.config._replace(eos_depth="geometric")
+        if (self._nemo_ws_test_hooks
+                .stage3_advection_content_override is not None):
+            if self.config.tracer_time_integrator != "rk3_ws":
+                raise ValueError(
+                    "stage-3 FCT pair hook requires "
+                    "tracer_time_integrator='rk3_ws'")
+        _process_trace = self._nemo_ws_test_hooks.tracer_process_trace
+        if (self._nemo_ws_test_hooks.stage3_qsr_stretch_override is not None
+                and _process_trace is None):
+            raise ValueError(
+                "stage3_qsr_stretch_override requires tracer_process_trace")
+        if (self._nemo_ws_test_hooks.vertical_solve_trace
+                and _process_trace is None):
+            raise ValueError(
+                "vertical_solve_trace requires tracer_process_trace")
+        if ((self._nemo_ws_test_hooks.tracer_process_branch_activity or self._nemo_ws_test_hooks.tracer_ldf_diagnostics is not None)
+                and _process_trace is None):
+            raise ValueError(
+                "tracer diagnostic hook requires "
+                "tracer_process_trace")
+        if _process_trace is not None:
+            if not isinstance(_process_trace, tuple) or len(
+                    _process_trace) not in (0, 4):
+                raise ValueError(
+                    "tracer_process_trace must be () or (j, i, k, delta)")
+            if (self.config.outer_integrator != "forward_euler"
+                    or self.config.tracer_time_integrator != "rk3_ws"
+                    or self.config.gm_redi is None
+                    or self.config.physics.shortwave_penetration.scheme
+                    != "nemo_qsr_2bd"
+                    or self.config.physics.lateral_mixing.scheme != "none"
+                    or self.config.use_conservation_fixer):
+                raise ValueError(
+                    "tracer_process_trace is defined only for the resolved "
+                    "GYRE WS-RK3/QSR/GM-Redi process program")
+        # The LDF route is production behavior for WS with a configured
+        # GM/Redi operator; it has no private selector and therefore needs no
+        # construction-time check beyond the card's ordinary validation.
+        # The compiled program accumulates this rate into tracer Krhs before
+        # tra_zdf consumes it (stprk3_stg.F90:950-965).
+
         # Convert LatLonGrid -> LatLonCGridGeometry once at construction.
         # All downstream operators see the enriched geometry with per-cell
         # metric arrays.  For a plain LatLonGrid this is a no-op on field
@@ -2040,6 +3278,11 @@ class LatLonCGridOceanModel:
             self._physics_fn = make_ocean_physics(
                 physics_for_combined,
                 apply_vertical_diffusion=not self.config.implicit_vertical_mixing,
+                # The CARD's NEMO &nameos coefficients reach the zdfevd
+                # trigger's bn2 (decision 94): without this the trigger built
+                # alpha/beta from NemoSEOSConfig()'s DINO defaults whatever
+                # fluid the card actually runs.
+                seos_cfg=self.config.eos_nemo_seos,
             )
         else:
             self._physics_fn = None
@@ -2271,6 +3514,16 @@ class LatLonCGridOceanModel:
                 "and propagates them to physics) instead of the raw "
                 "constructor, or pass matching ConstantsConfig values."
             )
+        if _phys is not None and _phys.shortwave_penetration is not None:
+            from legoesm.ocean.physics.shortwave_penetration import (
+                SHORTWAVE_PENETRATION_SCHEMES,
+            )
+            _shortwave_scheme = _phys.shortwave_penetration.scheme
+            if _shortwave_scheme not in SHORTWAVE_PENETRATION_SCHEMES:
+                raise ValueError(
+                    "physics.shortwave_penetration.scheme must be one of "
+                    f"{SHORTWAVE_PENETRATION_SCHEMES}, got "
+                    f"{_shortwave_scheme!r}")
 
         # #1226: T/u-face metric convention dispatch -- raise on an unknown
         # value rather than silently falling through to create_latlon_geometry's
@@ -2465,8 +3718,21 @@ class LatLonCGridOceanModel:
         # Under the OLD virtual-salt closure that volume defect was masked
         # chemically by the salt forcing; real mode removes the mask, so the
         # combination must be refused rather than run non-conserving.
+        #
+        # NEMO-IDENTITY EXEMPTION (decision 35, ASKED 2026-09-11).  Under
+        # nemo_literal barotropic continuity the freshwater source enters eta
+        # by NEMO's own substep statement (dynspg_ts.f90:553) and the
+        # baroclinic step receives NEMO's filter average of it -- exactly what
+        # NEMO does, and NEMO has no global projection (sshwzv.f90:137 is
+        # local).  Refusing the unprojected pair there would force a
+        # stabiliser the oracle lacks (Rule 9); the general lane keeps the
+        # guard because its budget claim was measured on that lane.
+        _nemo_literal_continuity = (
+            config.barotropic.barotropic_continuity_evaluation
+            == "nemo_literal")
         if (config.freshwater_closure == "real_freshwater"
-                and not getattr(config, "fix_eta_drift", True)):
+                and not getattr(config, "fix_eta_drift", True)
+                and not _nemo_literal_continuity):
             raise ValueError(
                 'freshwater_closure="real_freshwater" requires '
                 "fix_eta_drift=True: the filtered barotropic substep delivers "
@@ -2475,7 +3741,9 @@ class LatLonCGridOceanModel:
                 "fix_eta_drift is what projects eta onto the source-inclusive "
                 "target. With it off the freshwater volume budget does not "
                 "close (in - out - dV/dt != 0) and, unlike the virtual-salt "
-                "closure, nothing compensates chemically (#1484).")
+                "closure, nothing compensates chemically (#1484). Only "
+                "barotropic_continuity_evaluation='nemo_literal' is exempt: "
+                "it reproduces NEMO's own unprojected budget by design.")
         if config.freshwater_closure not in _valid_fw:
             raise ValueError(
                 f"freshwater_closure must be one of {_valid_fw}, "
@@ -2519,6 +3787,18 @@ class LatLonCGridOceanModel:
                 f"eos must be one of {sorted(VALID_EOS_SCHEMES)}, "
                 f"got {config.eos!r}",
             )
+        # NEMO S-EOS (``ln_seos``) coefficients are a per-run &nameos block, not
+        # a library constant.  ``eos_nemo_seos=None`` keeps NemoSEOSConfig()'s
+        # DINO values (every pre-existing caller).  When a card supplies its own
+        # set, refuse a different EOS selection rather than silently ignoring
+        # the coefficients.  GM/Redi receives the same explicit coefficient
+        # object through every density, bn2 and native-slope call below.
+        if getattr(config, "eos_nemo_seos", None) is not None:
+            if config.eos != "nemo_seos":
+                raise ValueError(
+                    "eos_nemo_seos carries NEMO &nameos coefficients and is "
+                    'only read when eos="nemo_seos"; got eos='
+                    f"{config.eos!r}. Drop the coefficients or select the EOS.")
 
         # Fail-fast EKE-config validation (dispatch discipline: the EKE literals +
         # the source-augmentation flags are validated at construction). The EKE
@@ -2588,6 +3868,7 @@ class LatLonCGridOceanModel:
             VALID_VERTICAL_MOMENTUM_SCHEME,
             VALID_LATERAL_VISCOSITY_OPERATOR,
             VALID_LATERAL_VISCOSITY_E3_WEIGHTING,
+            VALID_LATERAL_VISCOSITY_COEFFICIENT_SOURCE,
             VALID_CORIOLIS_SCHEME,
             VALID_AB2_SCOPE,
             VALID_WENO_SMOOTHNESS,
@@ -2659,6 +3940,24 @@ class LatLonCGridOceanModel:
                 "lateral_viscosity_e3_weighting != 'off' requires "
                 "lateral_viscosity_operator='nemo_div_curl' (it selects the "
                 f"e3-weighting of THAT operator's div/curl); got "
+                f"lateral_viscosity_operator={config.lateral_viscosity_operator!r}",
+            )
+        # Mirrors NEMO's namdyn_ldf nn_ahm_ijk_t (ldfdyn.f90:348-353 is the
+        # -30 arm); same guard as the e3-weighting selector above.
+        _ahm_src = getattr(
+            config, "lateral_viscosity_coefficient_source", "nemo_ldf_c2d")
+        if _ahm_src not in VALID_LATERAL_VISCOSITY_COEFFICIENT_SOURCE:
+            raise ValueError(
+                f"lateral_viscosity_coefficient_source must be one of "
+                f"{sorted(VALID_LATERAL_VISCOSITY_COEFFICIENT_SOURCE)}, "
+                f"got {_ahm_src!r}",
+            )
+        if (_ahm_src != "nemo_ldf_c2d"
+                and config.lateral_viscosity_operator != "nemo_div_curl"):
+            raise ValueError(
+                "lateral_viscosity_coefficient_source != 'nemo_ldf_c2d' "
+                "requires lateral_viscosity_operator='nemo_div_curl' (it "
+                "selects where THAT operator's ahmt/ahmf come from); got "
                 f"lateral_viscosity_operator={config.lateral_viscosity_operator!r}",
             )
         _vert_mom_scheme = getattr(
@@ -2902,11 +4201,14 @@ class LatLonCGridOceanModel:
                     "matrix; there is no matrix without the implicit solve).")
             _bd_scheme = getattr(config.bottom_drag, "bottom_drag_scheme",
                                   "legacy")
-            if _bd_scheme not in ("nemo_quadratic", "nemo_loglayer"):
+            if _bd_scheme not in ("nemo_quadratic", "nemo_loglayer",
+                                  "nemo_linear"):
                 raise ValueError(
                     "zdf_drag_in_matrix=True requires bottom_drag_scheme in "
-                    '{"nemo_quadratic", "nemo_loglayer"} (NEMO\'s zdfdrg '
-                    f"rCdU_bot rate); got {_bd_scheme!r}.")
+                    '{"nemo_quadratic", "nemo_loglayer", "nemo_linear"} '
+                    "(NEMO's zdfdrg rCdU_bot rate, whichever of ln_non_lin / "
+                    "ln_loglayer / ln_lin the run selects); got "
+                    f"{_bd_scheme!r}.")
             # zdf_drag_in_matrix skips the explicit _bc_bottom_drag RHS kick
             # (single-owner guard, ocean_pe_latlon_cgrid.py) to avoid double-
             # counting drag in the 3-D momentum tendency. But under
@@ -3171,20 +4473,24 @@ class LatLonCGridOceanModel:
         if _vmix_cfg_ctor is not None and _vmix_cfg_ctor.scheme == "tke":
             _tke_cfg_ctor = _vmix_cfg_ctor.tke
             if (getattr(_tke_cfg_ctor, "tke_n2_time_level", "step_entry")
-                    == "nemo_before" and _outer_int not in _leapfrog_family):
+                    == "nemo_before" and _outer_int not in _leapfrog_family
+                    and getattr(config, "momentum_time_integrator", "euler")
+                    != "rk3_ws"):
                 raise ValueError(
                     'vertical_mixing.tke.tke_n2_time_level="nemo_before" '
-                    'requires outer_integrator in ("leapfrog", "nemo_mlf"): '
+                    'requires outer_integrator in ("leapfrog", "nemo_mlf") '
+                    'or momentum_time_integrator="rk3_ws": '
                     "the true rn2b (Nbb) tracers only exist as "
                     "state.T_before/S_before under the leap-frog-family "
-                    f"(NEMO Modified-Leap-Frog) time integrator. Got "
+                    "integrator, while NEMO RK3 defines Nbb as the whole-step "
+                    f"entry state. Got "
                     f"outer_integrator={_outer_int!r}.")
             _tke_shear_ctor = getattr(_tke_cfg_ctor, "tke_shear_production",
                                      "squared_centered")
-            # "nemo_face_native_now2" = the face-native SPATIAL geometry at
-            # NOW^2 time levels — the RK3-oracle-compatible variant (ORCA1 is
-            # compiled key_RK3, so no Nbb velocity exists to be faithful TO);
-            # it needs no before-state and runs under any integrator.
+            # "nemo_face_native_nbb2" = face-native SPATIAL geometry with both
+            # operands at the Nbb whole-step-entry slot.  key_RK3's live call
+            # is zdf_phy(kstp,Nbb,Nbb,Nrhs), stprk3.F90:164-165; the commented
+            # Nbb,Nnn form is MLF semantics, not this arm.
             if (_tke_shear_ctor in ("nemo_burchard", "nemo_face_native")
                     and _outer_int not in _leapfrog_family):
                 raise ValueError(
@@ -3257,11 +4563,34 @@ class LatLonCGridOceanModel:
                 'pgf_scheme="nemo_sco" requires pgf_quadrature='
                 '"nemo_trapezoid" (NEMO dynhpg pairs the hpg_sco stencil '
                 "with its trapezoid vertical quadrature).")
+        # NEMO's e3w(Kmm)-weighted trapezoid is NOT exclusive to hpg_sco: the
+        # SAME -g/2 * e3w(Kmm) * (rhd(jk)+rhd(jk-1)) accumulation is the
+        # z-coordinate recurrence too.
+        #   hpg_zco  dynhpg.F90:270-271 (surface zcoef1 = zcoef0*e3w(..,1,Kmm))
+        #            dynhpg.F90:284-291 (interior, e3w factored OUT of the
+        #            horizontal difference because e3w is horizontally uniform
+        #            in z-coordinates, and NO gdept_z0 stretching correction)
+        #   hpg_sco  dynhpg.F90:343-350,366-374 (e3w carried INSIDE the
+        #            horizontal difference + the zuap/zvap gdept_z0 term)
+        # So the allow-list is widened -- not the guard removed -- to the two
+        # schemes whose vertical recurrence NEMO actually pairs the trapezoid
+        # with: "nemo_sco" (hpg_sco) and "adcroft" (this model's z-coordinate
+        # / partial-cell PGF, the hpg_zco class).  Receipt for the adcroft
+        # pairing: packages/ocean/legoesm/ocean/fidelity/nemo_recipe.py's GYRE
+        # card, where selecting the trapezoid moved the single-step HPG ratio
+        # against NEMO's utrd_hpg from 0.9656 to 0.9702.  Adding a scheme here
+        # requires the same: the oracle line showing it takes the e3w
+        # trapezoid, and a receipt measuring it.
+        _trapezoid_certified_pgf = {"nemo_sco", "adcroft"}
         if (getattr(config, "pgf_quadrature", "cell_integral")
-                == "nemo_trapezoid" and pgf_scheme != "nemo_sco"):
+                == "nemo_trapezoid"
+                and pgf_scheme not in _trapezoid_certified_pgf):
             raise ValueError(
-                'pgf_quadrature="nemo_trapezoid" is the hpg_sco recurrence '
-                'and requires pgf_scheme="nemo_sco"')
+                'pgf_quadrature="nemo_trapezoid" is NEMO\'s dynhpg vertical '
+                "recurrence and is certified only with pgf_scheme in "
+                f"{sorted(_trapezoid_certified_pgf)} "
+                "(hpg_sco dynhpg.F90:343-374, hpg_zco dynhpg.F90:270-296); "
+                f"got pgf_scheme={pgf_scheme!r}")
         _eos_name = getattr(config, "eos", "linear")
         _eos_depth = getattr(config, "eos_depth", "insitu")
         if _eos_name == "nemo_teos10" and _eos_depth != "geometric":
@@ -3281,7 +4610,9 @@ class LatLonCGridOceanModel:
         # nemo_paper/nemo_dino_kamm/_mlf; "required for the S-EOS thermobaric
         # depth term", max|drho'| 1.5e-5).  Adding an EOS here requires the same:
         # the oracle line showing it takes gdept, and a receipt measuring it.
-        _geometric_certified_eos = {"nemo_teos10", "nemo_seos"}
+        _geometric_certified_eos = {
+            "nemo_eos80", "nemo_teos10", "nemo_seos",
+        }
         if (_eos_depth == "geometric"
                 and _eos_name not in _geometric_certified_eos):
             raise ValueError(
@@ -3306,6 +4637,62 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 f"pgf_quadrature must be one of {_valid_pgf_quad}, "
                 f"got {_pgf_quad!r}")
+        if getattr(config, "vorticity_scheme", "al81") == "een_planetary":
+            # NEMO ln_dynvor_een under ln_dynadv_vec=.false. (dynvor.F90:874
+            # routes np_EEN; dyn_vor_init:891-893 gives the flux-form arm
+            # ntot = np_CME).  vor_een's np_CME branch (dynvor.F90:780-783) is
+            # ff_f plus a metric term whose two coefficients are
+            #   di_e2v_2e1e2f = (e2v(i+1,j) - e2v(i,j)) * 0.5 * r1_e1e2f
+            #   dj_e1u_2e1e2f = (e1u(i,j+1) - e1u(i,j)) * 0.5 * r1_e1e2f
+            # (dynvor.F90:905-908).  On a Cartesian mesh whose scale factors
+            # are one repeated constant those differences are bitwise zero and
+            # the branch IS np_COR.  On any other mesh they are not, and the
+            # transcription would be silently incomplete -- so this scheme is
+            # admitted only on a constant-scale-factor grid, and only with the
+            # flux-form momentum it was read off.
+            _cor_s = getattr(config, "coriolis_scheme", "matsuno_split")
+            if _cor_s != "explicit_ab2":
+                raise ValueError(
+                    'vorticity_scheme="een_planetary" carries the planetary '
+                    "Coriolis inside NEMO's vor_een triad, so the Matsuno "
+                    'rotation must be off: requires coriolis_scheme='
+                    f'"explicit_ab2", got {_cor_s!r}.')
+            _ma = getattr(config, "momentum_advection", "vector_invariant")
+            if _ma != "flux_form":
+                raise ValueError(
+                    'vorticity_scheme="een_planetary" transcribes NEMO\'s '
+                    "FLUX-FORM vorticity arm only (dyn_vor_init:891-893). "
+                    "Vector-invariant momentum routes NEMO to np_CRV, where "
+                    "the triad also carries the RELATIVE vorticity — use "
+                    '"een_total" for that. Got momentum_advection='
+                    f"{_ma!r}.")
+            if config.een_e3f_scheme != "nemo_avg4":
+                raise ValueError(
+                    'vorticity_scheme="een_planetary" needs NEMO\'s own '
+                    'e3f_vor thickness: requires een_e3f_scheme="nemo_avg4", '
+                    f"got {config.een_e3f_scheme!r}.")
+            _emw = getattr(config, "een_metric_weighting", "off")
+            if _emw != "nemo":
+                raise ValueError(
+                    'vorticity_scheme="een_planetary" needs vor_een\'s own '
+                    "e1v/e2u transport weighting (dynvor.F90:791-792,804-806):"
+                    f' requires een_metric_weighting="nemo", got {_emw!r}.')
+            _bt_cor = getattr(config.barotropic, "barotropic_coriolis", "avg")
+            _bt_spl = getattr(config, "barotropic_coriolis_split", "frozen")
+            if _bt_cor != "een_metric" or _bt_spl != "live":
+                raise ValueError(
+                    'vorticity_scheme="een_planetary" requires the MATCHING '
+                    "barotropic arm: NEMO's dyn_cor_2D_init runs the same "
+                    "triad on ff_f/e3f_vor under np_EEN "
+                    "(dynspg_ts.F90:1326-1345), and the depth-mean of the "
+                    "baroclinic Coriolis must be subtracted with that same "
+                    'stencil. Requires barotropic_coriolis="een_metric" and '
+                    'barotropic_coriolis_split="live"; got '
+                    f"{_bt_cor!r} / {_bt_spl!r}.")
+            # The constant-scale-factor requirement is a property of the MESH,
+            # which this config-only validator cannot see; it is enforced by
+            # ``assert_een_planetary_metric_term_vanishes`` at the point the
+            # card is built (nemo_testcase_recipe.py), where the grid is.
         if getattr(config, "vorticity_scheme", "al81") in (
                 "ene_total", "een_total"):
             _vs = getattr(config, "vorticity_scheme", "al81")
@@ -3323,20 +4710,28 @@ class LatLonCGridOceanModel:
             if getattr(config, "barotropic_coriolis_split", "frozen") == "live":
                 # The live pre-step subtraction (NEMO dynspg_ts:296-300) must use
                 # the SAME barotropic-Coriolis stencil as the in-substep dyn_cor_2D
-                # so they cancel at the pre-step state. Under vorticity_scheme=
-                # "{ene,een}_total" the planetary term is the vertex-f TRANSPORT-
-                # form EEN flux, so the subtraction must ALSO be EEN
-                # (barotropic.barotropic_coriolis="een"); the legacy 4-pt-avg
-                # face-f "avg" stencil would leave an O(1) residual Coriolis.
+                # so they cancel at the pre-step state. dyn_cor_2D_init switches
+                # its coefficient build on the SAME nvor_scheme the 3-D vorticity
+                # operator uses (dynspg_ts.F90:1326, fed by ln_dynvor_ene/een in
+                # dynvor.F90:871-875): np_EEN builds 3-point triads
+                # (dynspg_ts.F90:1327-1381), np_ENE builds 2-point Sadourny
+                # coefficients (:1383-1410), and dyn_cor_2D (:1483-1506) applies
+                # whichever set was built. So vorticity_scheme="ene_total"
+                # requires barotropic_coriolis="ene"/"ene_metric" and
+                # "een_total" requires "een"/"een_metric" -- the legacy 4-pt-avg
+                # face-f "avg" stencil matches neither and would leave an O(1)
+                # residual Coriolis.
+                _required_bt = (("ene", "ene_metric") if _vs == "ene_total"
+                                else ("een", "een_metric"))
                 if getattr(config.barotropic, "barotropic_coriolis",
-                           "avg") not in ("een", "een_metric"):
+                           "avg") not in _required_bt:
                     raise ValueError(
                         f'vorticity_scheme="{_vs}" with '
                         'barotropic_coriolis_split="live" requires '
-                        'barotropic.barotropic_coriolis="een"/"een_metric" (NEMO '
-                        "dyn_spg_ts::dyn_cor_2D EEN): the _total planetary "
-                        "term is the vertex-f EEN transport-form flux, so the "
-                        "live pre-step subtraction must use the SAME EEN "
+                        f"barotropic.barotropic_coriolis in {_required_bt!r}: "
+                        "the _total planetary term and dyn_spg_ts::dyn_cor_2D "
+                        "must use the SAME ENE/EEN transport-form flux, so the "
+                        "live pre-step subtraction must use the SAME "
                         "stencil to cancel — the 4-pt-avg \"avg\" stencil "
                         "would not. Got barotropic_coriolis="
                         f'{getattr(config.barotropic, "barotropic_coriolis", "avg")!r}.')
@@ -3374,22 +4769,58 @@ class LatLonCGridOceanModel:
                     "Coriolis (1.5*cor^n - 0.5*cor^(n-1)) would not cancel the "
                     "single-time pre-step subtraction, leaving a transient "
                     "residual planetary Coriolis in the forcing.")
-            if getattr(config.barotropic, "barotropic_time_filter",
-                       "cosine") == "nemo_ab3am4":
-                raise ValueError(
-                    'barotropic_coriolis_split="live" is incompatible with '
-                    'barotropic_time_filter="nemo_ab3am4": the AB3 substep '
-                    "applies the live Coriolis to the EXTRAPOLATED mid-step "
-                    "velocity U_mid while the pre-step subtraction uses the "
-                    "plain pre-step U_bar, so substep-0 would not cancel "
-                    "bit-exactly. Use the boxcar filter (nn_bt_flt=2, NEMO's "
-                    "DINO selection) with the live split.")
+            # nn_bt_flt=3 deliberately applies live Coriolis to the AB3
+            # mid-step velocity after subtracting the plain Kmm value from the
+            # frozen forcing (GYRE's key_RK3 branch: dynspg_ts.F90:296,689 —
+            # NOT the MLF branch's :359, which this build never compiles;
+            # see provenance/cpp_GYRE_OMIP_L2_P3.fcm: key_RK3).  Their
+            # non-cancellation is the intended AB3 evolution, not an
+            # incompatibility; at a cold start (LN_RSTART=F) ll_init=.TRUE.
+            # at kt==nit000, so jn=1's extrapolation coefficients are za1=1,
+            # za2=za3=0 (dynspg_ts.F90:535-538) and un_e is seeded from
+            # puu_b(:,:,Kmm) under LN_BT_FW=T (:487) — substep 1 DOES cancel
+            # bit-exactly; substep>=2 and every later kt do not, which is the
+            # AB3 evolution NEMO always runs (the za1/za2/za3 block is not
+            # gated on nn_bt_flt).
         _valid_time_int = {"euler", "ab2", "rk3", "rk3_ws"}
         if config.tracer_time_integrator not in _valid_time_int:
             raise ValueError(
                 f"tracer_time_integrator must be one of {_valid_time_int}, "
                 f"got {config.tracer_time_integrator!r}")
         _mom_ti_for_ws = getattr(config, "momentum_time_integrator", "euler")
+        # NEMO's carried after-SSH slot belongs to the RK3 stage program: it is
+        # written by that program's end-of-step time-level rotation
+        # (stprk3.F90:217, raw source) and the leapfrog fills the same slot from
+        # continuity instead.  This is NOT an inference about which form a card
+        # should take -- the card STATES that -- it is a CONSISTENCY CHECK
+        # between two fields the card states, in the same shape as the rk3_ws
+        # pairing check immediately below, and it raises rather than quietly
+        # running a program that would read the slot without ever writing it.
+        if (getattr(config, "nemo_first_wzv_after_ssh", "")
+                == "rk3_extrapolated_carried"):
+            if _mom_ti_for_ws != "rk3_ws":
+                raise ValueError(
+                    "nemo_first_wzv_after_ssh='rk3_extrapolated_carried' is "
+                    "NEMO's RK3 end-of-step extrapolation and only the RK3 "
+                    "stage program writes that slot; this card states "
+                    f"momentum_time_integrator={_mom_ti_for_ws!r}. Select "
+                    "rk3_ws, or state the after-SSH form that card's own "
+                    "time-stepping program leaves behind")
+            _post = [name for name, on in (
+                ("polar_filter.use_polar_filter",
+                 config.polar_filter.use_polar_filter),
+                ("freeze_floor", config.freeze_floor),
+                ("ew_cyclic_overlap",
+                 getattr(config, "ew_cyclic_overlap", False)),
+            ) if on]
+            if _post:
+                raise ValueError(
+                    "nemo_first_wzv_after_ssh='rk3_extrapolated_carried' "
+                    "carries NEMO's own after-SSH slot, built from the sea "
+                    "surface the step produced; "
+                    f"{_post} rewrite that sea surface AFTER the step, so the "
+                    "slot the next step reads would not match the height it "
+                    "enters with. NEMO applies none of these")
         if ((config.tracer_time_integrator == "rk3_ws")
                 != (_mom_ti_for_ws == "rk3_ws")):
             raise ValueError(
@@ -3400,21 +4831,54 @@ class LatLonCGridOceanModel:
                 raise ValueError(
                     "the certified NEMO rk3_ws scheme identity requires "
                     "tracer_advection='fct2'; FCT4/PPM is not certified")
-            if (config.momentum_advection != "flux_form"
-                    or config.momentum_flux_scheme != "nemo_up3"
-                    or getattr(config, "vertical_momentum_scheme",
-                               "upwind_perturbation") != "nemo_up3"):
+            # UNION: the L2 GYRE card runs the vector-invariant/ENE arm of
+            # the same WS-RK3 identity, so rk3_ws admits TWO complete momentum
+            # programs.  The flux-form arm carries the iso branch's UP3
+            # selector split (bare "upwind3" is refused; the NEMO sign
+            # convention is "nemo_up3", Oceananigans' is "oceananigans_up3").
+            _ws_flux_up3 = (
+                config.momentum_advection == "flux_form"
+                and config.momentum_flux_scheme == "nemo_up3"
+                and getattr(config, "vertical_momentum_scheme",
+                            "upwind_perturbation") == "nemo_up3"
+            )
+            _ws_vector_ene_c2 = (
+                config.momentum_advection == "vector_invariant"
+                and getattr(config, "vorticity_scheme", "al81") == "ene_total"
+                and getattr(config, "ke_gradient_scheme", "centered") == "c2"
+                and getattr(config, "vertical_momentum_scheme",
+                            "upwind_perturbation") == "nemo_advective"
+                and not getattr(config, "adaptive_implicit_vertadv", False)
+            )
+            # Same shared WS-RK3 vector program, with dynvor's EEN selector.
+            # ORCA2 resolves ln_dynvor_een=T, nn_dynkeg=0 and ln_zad_Aimp=F
+            # (dynvor.F90:1326-1332; stprk3_stg.F90:283-299).  All EEN
+            # arithmetic already lives in the canonical vector-invariant
+            # operator; this arm only admits the source-valid composition.
+            _ws_vector_een_c2 = (
+                config.momentum_advection == "vector_invariant"
+                and getattr(config, "vorticity_scheme", "al81") == "een_total"
+                and getattr(config, "ke_gradient_scheme", "centered") == "c2"
+                and getattr(config, "vertical_momentum_scheme",
+                            "upwind_perturbation") == "nemo_advective"
+                and not getattr(config, "adaptive_implicit_vertadv", False)
+            )
+            if not (_ws_flux_up3 or _ws_vector_ene_c2 or _ws_vector_een_c2):
                 raise ValueError(
-                    "NEMO rk3_ws requires the coupled flux_form/nemo_up3 "
-                    "horizontal + nemo_up3 vertical momentum program")
+                    "NEMO rk3_ws requires one complete momentum program: "
+                    "flux_form/nemo_up3/nemo_up3 or "
+                    "vector_invariant/(ene_total|een_total)/c2/"
+                    "nemo_advective")
             if getattr(config, "outer_integrator", "forward_euler") != "forward_euler":
                 raise ValueError(
                     "NEMO rk3_ws does not compose with a second outer "
                     "integrator")
-            if getattr(config, "gm_redi", None) is not None:
+            _ws_gm_redi = getattr(config, "gm_redi", None)
+            if (_ws_gm_redi is not None
+                    and getattr(_ws_gm_redi, "kappa_GM", 0.0) != 0.0):
                 raise ValueError(
                     "NEMO rk3_ws does not yet support staged GM bolus "
-                    "transports")
+                    "transports; pure Redi (kappa_GM=0) is supported")
         if (config.momentum_flux_scheme == "nemo_up3"
                 and _mom_ti_for_ws != "rk3_ws"):
             # S-47 (docs/ocean/fidelity/nemo_branch_isomorphism_map.md):
@@ -3446,8 +4910,21 @@ class LatLonCGridOceanModel:
                 "transport-selector arm) on this integrator.")
         if config.bbl_adv_option not in (0, 2):
             raise ValueError("bbl_adv_option must be 0 or 2")
+        if config.bbl_diffusive_option not in (0, 1):
+            raise ValueError("bbl_diffusive_option must be 0 or 1")
         if config.bbl_adv_option == 2 and config.bbl_gamma_s <= 0.0:
             raise ValueError("bbl_adv_option=2 requires bbl_gamma_s > 0")
+        if (config.bbl_diffusive_option == 1
+                and config.bbl_aht_m2_s <= 0.0):
+            raise ValueError(
+                "bbl_diffusive_option=1 requires bbl_aht_m2_s > 0")
+        if (config.bbl_diffusive_option == 1
+                and config.tracer_time_integrator != "rk3_ws"):
+            raise ValueError(
+                f"bbl_diffusive_option=1 is not honoured by "
+                f"tracer_time_integrator={config.tracer_time_integrator!r}: "
+                "NEMO tra_bbl_dif is wired at RK stage 3 only on the shared "
+                "tracer_time_integrator='rk3_ws' identity")
         if (config.bbl_adv_option == 2
                 and config.tracer_time_integrator != "rk3_ws"):
             # S-42 (docs/ocean/fidelity/nemo_branch_isomorphism_map.md): the
@@ -3907,7 +5384,17 @@ class LatLonCGridOceanModel:
                    zad_freshwater_eta_tendency=None,
                    momentum_flux_transport_velocity=None,
                    up3_upwind_selector=None,
-                   momentum_flux_face_thickness=None):
+                   momentum_flux_face_thickness=None,
+                   ldf_thickness_operands=None,
+                   ldf_metric_reciprocal_operands=None,
+                   ene_metric_reciprocals=None,
+                   ene_generic_f_vtx=False,
+                   legacy_hpg_algebraic=False,
+                   nemo_operator_association=False,
+                   return_nemo_operator_components=False,
+                   nemo_stage_zad_operands=None,
+                   nemo_stage_zad_operand_observer=None,
+                   nemo_stage_zad_eta_after_override=None):
         """Compute baroclinic tendencies.
 
         ``momentum_only=True`` skips the (T/S-frozen) tracer-diffusion
@@ -3916,7 +5403,8 @@ class LatLonCGridOceanModel:
         ``latlon_cgrid_ocean_baroclinic_tendencies``).
 
         ``precomputed_geom_density`` (a ``(J, h_k, rho_prime,
-        p_prime_filled)`` tuple from :func:`compute_frozen_geom_density`)
+        p_prime_filled, nemo_hpg_rhd)`` tuple from
+        :func:`compute_frozen_geom_density`)
         skips the EOS + baroclinic-pressure recompute (stages 1-3, frozen
         across RK3 momentum sub-stages) — bit-identical, ~the dominant
         per-substage cost (#25).
@@ -3959,6 +5447,18 @@ class LatLonCGridOceanModel:
             momentum_flux_transport_velocity=momentum_flux_transport_velocity,
             up3_upwind_selector=up3_upwind_selector,
             momentum_flux_face_thickness=momentum_flux_face_thickness,
+            ldf_thickness_operands=ldf_thickness_operands,
+            ldf_metric_reciprocal_operands=ldf_metric_reciprocal_operands,
+            ene_metric_reciprocals=ene_metric_reciprocals,
+            ene_generic_f_vtx=ene_generic_f_vtx,
+            legacy_hpg_algebraic=legacy_hpg_algebraic,
+            nemo_operator_association=nemo_operator_association,
+            nemo_stage_zad_operands=nemo_stage_zad_operands,
+            nemo_stage_zad_operand_observer=nemo_stage_zad_operand_observer,
+            nemo_stage_zad_eta_after_override=(
+                nemo_stage_zad_eta_after_override),
+            diagnose_momentum=return_nemo_operator_components,
+            return_nemo_operator_components=return_nemo_operator_components,
         )
 
     def tendencies_with_diagnostics(
@@ -3966,6 +5466,7 @@ class LatLonCGridOceanModel:
         sponge=None, dt=300.0, *, grid=None, vertex_mask=None,
         ldf_state=None,
         z_coord=None, config=None,
+        return_nemo_operator_components=False,
     ):
         """Compute baroclinic tendencies + per-term momentum-tendency
         breakdown.
@@ -4030,6 +5531,7 @@ class LatLonCGridOceanModel:
             vertex_mask=_vmask,
             ldf_state=ldf_state,
             zad_continuity_dt=_qco_dt,
+            return_nemo_operator_components=return_nemo_operator_components,
         )
 
     def _step_impl(self, state: LatLonCGridOceanState, dt: float,
@@ -4041,6 +5543,12 @@ class LatLonCGridOceanModel:
                    _barotropic_before_state=None,
                    _fct_tracer_before=None,
                    _external_tracer_rate=None,
+                   _shortwave_tendency_test_delta=None,
+                   _vertical_K_test_override=None,
+                   _nemo_stage1_zad_eta_after_override=None,
+                   _return_barotropic_substeps: bool = False,
+                   _return_live_stage_operands: bool = False,
+                   _return_tracer_process_trace: bool = False,
                    _ldf_state=None, _tke_n2_bundle_override=None,
                    _return_raw_kaa_qco: bool = False,
                    z_coord=None, config=None, iwm_fields=None):
@@ -4115,6 +5623,8 @@ class LatLonCGridOceanModel:
         """
         _zc = self.z_coord if z_coord is None else z_coord  # SPMD band override
         _cfg_b = self.config if config is None else config  # SPMD band override
+        if self._nemo_ws_test_hooks.omit_barotropic_substep_drag:
+            _cfg_b = _cfg_b._replace(barotropic_drag_substep=False)
         state = cast_pytree(state, None, "compute")
         # ``_ab2_scope_override`` (private): the leap-frog step (``_leapfrog_step``)
         # drives this method in "advective" scope to WITHHOLD the dissipative
@@ -4135,7 +5645,13 @@ class LatLonCGridOceanModel:
         _grid = grid if grid is not None else self.grid
         _vmask = vertex_mask if vertex_mask is not None else self._vertex_mask
         _tke_n2_bundle = _tke_n2_bundle_override
-        if _tke_n2_bundle is None and _apply_implicit_vmix:
+        _carried_slope_n2 = (
+            _cfg_b.gm_redi is not None
+            and getattr(
+                _cfg_b.gm_redi, "slope_n2_evaluation", "recompute")
+            == "carried_step_entry")
+        if (_tke_n2_bundle is None
+                and (_apply_implicit_vmix or _carried_slope_n2)):
             _tke_n2_bundle = self._tke_step_entry_n2_bundle(
                 state, z_coord=_zc, config=_cfg_b)
         # Prescribed-flow lever (config.prescribed_flow, validated at
@@ -4216,6 +5732,11 @@ class LatLonCGridOceanModel:
         # rebuilt its own min-of-stretched-T pair.  ``None`` (every other
         # integrator) keeps that historical min rule.
         _ws_face_thickness_kbb = None
+        _ws_ldf_face_thickness_kbb = None
+        _ws_ldf_thickness_kbb = None
+        _ws_uses_nemo_ldf_e3 = (
+            _cfg_b.lateral_viscosity_operator == "nemo_div_curl"
+            and _cfg_b.lateral_viscosity_e3_weighting == "nemo_e3")
         if getattr(_cfg_b, "momentum_time_integrator", "euler") == "rk3_ws":
             # NEMO's e3u/e3v(Kbb) = e3u_0*(1+r3u(Kbb)) for the step-entry
             # dyn_adv (stp2d.F90:172 -> dynadv_up3.F90:160; the same pair
@@ -4266,14 +5787,103 @@ class LatLonCGridOceanModel:
                 _ws_face_thickness_kbb = _nemo_ws_qco_stage_faces(
                     state.eta.data, _ws_h_ref, _ws_u_live_mask,
                     _ws_v_live_mask, _grid)[:2]
-        tend = self.tendencies(state, surface_forcing, sponge=sponge, dt=dt,
+            if _ws_uses_nemo_ldf_e3:
+                _ws_ldf_face_thickness_kbb = (
+                    _ws_face_thickness_kbb
+                    if _ws_face_thickness_kbb is not None
+                    else _nemo_ws_qco_stage_faces(
+                        state.eta.data, _ws_h_ref, _ws_u_live_mask,
+                        _ws_v_live_mask, _grid)[:2])
+                from legoesm.ocean.vertical import (
+                    nemo_ldf_reference_e3f,
+                    nemo_qco_live_vorticity_e3f_cgrid,
+                )
+                _ws_t_live_mask = getattr(_zc, "is_active", None)
+                if _ws_t_live_mask is None:
+                    _ws_t_live_mask = jnp.broadcast_to(
+                        state.land_mask.data[..., None], _ws_h_ref.shape)
+                # dynldf_lev.f90:123 stretches e3f_3d, the MESH reference F
+                # thickness; only dynvor.f90:734-738 stretches its own frozen
+                # e3f_0vor.  The two consumers share r3f and fe3mask, not the
+                # reference, so lateral diffusion asks for its own.
+                _ws_e3f_kbb = nemo_qco_live_vorticity_e3f_cgrid(
+                    state.eta.data, _zc, state.eta.data.dtype, grid=_grid,
+                    e3t_0=_ws_h_ref, tmask=_ws_t_live_mask,
+                    reference_e3f=nemo_ldf_reference_e3f(_zc))
+                _ws_ldf_thickness_kbb = (
+                    _geom_density[1], _ws_ldf_face_thickness_kbb[0],
+                    _ws_ldf_face_thickness_kbb[1], _ws_e3f_kbb,
+                    _ws_ldf_face_thickness_kbb[0],
+                    _ws_ldf_face_thickness_kbb[1])
+        # The per-term observer needs the diagnostics this same call can
+        # already return; asking for them adds the decomposition and changes
+        # no tendency (the diagnostics are built from the terms as they are
+        # accumulated).  The live-stage operand bundle stays gated on its own
+        # flag so a per-term measurement cannot switch a production arm on.
+        _rhs_term_observer = (
+            self._nemo_ws_test_hooks.slow_forcing_rhs_term_observer)
+        _want_rhs_components = (
+            _return_live_stage_operands or callable(_rhs_term_observer)
+            or bool(self._nemo_ws_test_hooks
+                    .expose_stage1_momentum_rhs_split))
+        _tend_result = self.tendencies(
+                               state, surface_forcing, sponge=sponge, dt=dt,
                                precomputed_geom_density=_geom_density,
                                grid=_grid, vertex_mask=_vmask,
                                ab2_scope_override=_ab2_scope_override,
                                ldf_state=_ldf_state, z_coord=z_coord, config=config,
                                zad_continuity_dt=dt,
                                up3_upwind_selector=_up3_selector_override,
-                               momentum_flux_face_thickness=_ws_face_thickness_kbb)
+                               momentum_flux_face_thickness=_ws_face_thickness_kbb,
+                               ldf_thickness_operands=_ws_ldf_thickness_kbb,
+                               nemo_operator_association=self._nemo_ws_test_hooks.nemo_stage_rhs_accumulation_order_arm,
+                               nemo_stage_zad_operands=(
+                                   (self._nemo_ws_test_hooks.stage1_zad_w_override, None, None)
+                                   if self._nemo_ws_test_hooks.stage1_zad_w_override is not None else None),
+                               nemo_stage_zad_operand_observer=(
+                                   self._nemo_ws_test_hooks.stage1_zad_operand_observer),
+                               nemo_stage_zad_eta_after_override=(
+                                   _nemo_stage1_zad_eta_after_override),
+                               return_nemo_operator_components=_want_rhs_components)
+        if _want_rhs_components:
+            tend, _mom_term_diagnostics, _live_operands = _tend_result
+            _nemo_ws_stage1_operator_operands = (
+                _live_operands if _return_live_stage_operands else None)
+            # dyn_adv's content as THIS evaluation accumulated it: the half
+            # of the step-level right-hand side that NEMO's three-dimensional
+            # pre-stage array does not carry.  ``advection_u`` is
+            # -dKE_dx + Dterm + vertadv and ``flux_form_hadv_u`` the
+            # flux-form horizontal trend, which shares its diagnostic slot
+            # with the rotation terms and is therefore published apart
+            # (zero on every vector-invariant card, where the KE gradient
+            # inside ``advection_u`` carries the horizontal half instead).
+            # Carried APART as well as summed: on a flux-form card
+            # ``advection_u`` is the vertical UP3 term alone (the kinetic
+            # energy gradient is zeroed there and the WENO D-term is
+            # inactive) and ``flux_form_hadv_u`` is the horizontal flux
+            # divergence, which are the two halves ``dyn_adv_up3`` writes
+            # (dynadv_up3.f90:174-215 and :245-360).
+            _nemo_ws_stage1_advection_halves = (
+                (_live_operands["flux_form_hadv_u"].data,
+                 _live_operands["flux_form_hadv_v"].data),
+                (_live_operands["advection_u"].data,
+                 _live_operands["advection_v"].data))
+            _nemo_ws_stage1_main_advection = (
+                _live_operands["advection_u"].data
+                + _live_operands["flux_form_hadv_u"].data,
+                _live_operands["advection_v"].data
+                + _live_operands["flux_form_hadv_v"].data)
+            if callable(_rhs_term_observer):
+                jax.debug.callback(
+                    _rhs_term_observer,
+                    {name: getattr(_mom_term_diagnostics, name).data
+                     for name in type(_mom_term_diagnostics)._fields},
+                    ordered=False)
+        else:
+            tend = _tend_result
+            _nemo_ws_stage1_operator_operands = None
+            _nemo_ws_stage1_main_advection = None
+            _nemo_ws_stage1_advection_halves = None
         # #1492 DINO surface_tendency_placement="leapfrog_rhs": fold the
         # externally-supplied surface tracer RATE into the SAME explicit RHS
         # every other tendency uses -- BEFORE the diss-withholding split and
@@ -4287,7 +5897,12 @@ class LatLonCGridOceanModel:
                 dT_dt=tend.dT_dt.replace(data=tend.dT_dt.data + _dT_ext),
                 dS_dt=tend.dS_dt.replace(data=tend.dS_dt.data + _dS_ext),
             )
-
+        # GYRE causal-arm controls.  Each changes exactly one diagnosed
+        # operand and is reachable only through this private implementation
+        # method; production ``step`` never supplies either argument.
+        if _shortwave_tendency_test_delta is not None:
+            tend = tend._replace(dT_dt=tend.dT_dt.replace(
+                data=tend.dT_dt.data + _shortwave_tendency_test_delta))
         # AB2 "advective" scope (Veros-faithful): the DISSIPATIVE tendencies are
         # WITHHELD from tend.{du,dv,dT,dS}_dt and exposed on tend.{...}_diss so
         # they can be applied at WEIGHT 1.0 (forward-Euler) rather than being
@@ -4330,6 +5945,17 @@ class LatLonCGridOceanModel:
         # couples the slow forcing to the evolving barotropic state.
         du_dt = tend.du_dt.data
         dv_dt = tend.dv_dt.data
+        _slow_rhs_override = self._nemo_ws_test_hooks.slow_forcing_rhs_override
+        if _slow_rhs_override is not None:
+            _slow_rhs_u, _slow_rhs_v = _slow_rhs_override
+            du_dt = du_dt.at[:, 1:, :].set(_slow_rhs_u)
+            dv_dt = dv_dt.at[1:, :, :].set(_slow_rhs_v)
+        _slow_rhs_observer = self._nemo_ws_test_hooks.slow_forcing_rhs_observer
+        if callable(_slow_rhs_observer):
+            if self._nemo_ws_test_hooks.slow_forcing_rhs_observer_face == "u":
+                jax.debug.callback(_slow_rhs_observer, du_dt, ordered=False)
+            else:
+                jax.debug.callback(_slow_rhs_observer, dv_dt, ordered=False)
 
         # Compute layer thickness at u/v faces for depth-averaging.
         # Min-rule: the face's effective wet thickness is the shallower
@@ -4361,6 +5987,97 @@ class LatLonCGridOceanModel:
         _v_pair = jnp.sum(jnp.stack([h_v_pre, dv_dt * h_v_pre], axis=-1), axis=-2)
         H_v_pre = jnp.maximum(_v_pair[..., 0], 1e-10)
         F_slow_v = _v_pair[..., 1] / H_v_pre * state.v_mask.data
+        # NEMO's own depth average of the slow forcing (stp2d.F90:177-186 of
+        # the VORTEX_SMT builds): the REFERENCE face thickness and the STORED
+        # reciprocal, with no ssh stretching anywhere in the statement --
+        #   Ue_rhs = SUM( e3u_0(1:jpkm1)*uu(Krhs)*umask ) * r1_hu_0
+        # where e3u_0 is the min of the two neighbouring REFERENCE
+        # thicknesses and r1_hu_0 = ssumask/(hu_0 + 1 - ssumask) with
+        # hu_0 = SUM_k e3u_0*umask (domain.F90).  The min-rule-live form
+        # above equals this on a FULL-STEP mesh (one per-face scalar that
+        # cancels) and does NOT over partial cells, where the per-level
+        # minimum of the two STRETCHED thicknesses can follow a different
+        # column than the reference minimum does.  Static Python branch on a
+        # config string, so the default path is bit-identical.
+        # DECISION 90 (user): no default.  An unset field is a card that
+        # never stated which depth average it runs, which is the hidden
+        # choice this field exists to remove -- so it raises rather than
+        # silently selecting one.
+        #
+        # SCOPE OF THE RAISE, stated rather than left implicit.  The choice
+        # is between NEMO's stp2d.F90:177-186 statement and legoESM's own
+        # live min-rule, so it only EXISTS on a card running NEMO's RK3
+        # momentum program; a card on legoESM's own time stepping executes
+        # no NEMO statement here and has nothing to choose between.  This
+        # is the same shape as the nemo_first_wzv_after_ssh guard above,
+        # which refuses a NEMO value on a non-RK3 program instead of
+        # demanding one from every card.
+        _slow_depth_eval = getattr(
+            _cfg_b.barotropic, "barotropic_slow_forcing_depth_evaluation", "")
+        _nemo_rk3_family = getattr(
+            _cfg_b, "momentum_time_integrator", "euler") in ("rk3", "rk3_ws")
+        if not _slow_depth_eval:
+            if _nemo_rk3_family:
+                raise ValueError(
+                    "barotropic_slow_forcing_depth_evaluation is unset: this "
+                    "card runs NEMO's RK3 momentum program and must STATE "
+                    "how the slow forcing is depth-averaged onto the "
+                    "barotropic faces -- 'nemo_literal' for NEMO's own "
+                    "statement (stp2d.F90:177-186) or 'min_rule_live' for "
+                    "the per-level minimum of the two live thicknesses. "
+                    "There is no default (decision 90).")
+            _slow_depth_eval = "min_rule_live"
+        if _slow_depth_eval not in ("min_rule_live", "nemo_literal"):
+            raise ValueError(
+                "unknown barotropic_slow_forcing_depth_evaluation scheme "
+                f"{_slow_depth_eval!r}: must be one of "
+                "('min_rule_live', 'nemo_literal').")
+        if _slow_depth_eval == "nemo_literal":
+            from legoesm.ocean.vertical import nemo_qco_card_mesh_operands
+            _h_ref0 = compute_layer_thickness(
+                jnp.zeros_like(state.eta.data), state.H_bathy.data, _zc,
+                min_water_column_m=_cfg_b.min_water_column_m,
+            ).astype(du_dt.dtype)
+            if isinstance(_zc, OceanPartialCellCoordinate):
+                _um3, _vm3 = compute_face_masks_3d(_zc.is_active, _grid)
+                _um3 = _um3.astype(du_dt.dtype)
+                _vm3 = _vm3.astype(du_dt.dtype)
+            else:
+                _um3 = jnp.asarray(u_mask_3d, dtype=du_dt.dtype)
+                _vm3 = jnp.asarray(v_mask_3d, dtype=du_dt.dtype)
+            _ops0 = nemo_qco_card_mesh_operands(
+                _h_ref0, _um3, _vm3, _grid, du_dt.dtype)
+            _one = jnp.asarray(1.0, dtype=du_dt.dtype)
+            _wet_u0 = (_ops0.hu_0 > 0.0).astype(du_dt.dtype)
+            _wet_v0 = (_ops0.hv_0 > 0.0).astype(du_dt.dtype)
+            _r1_hu_0 = _wet_u0 / (_ops0.hu_0 + _one - _wet_u0)
+            _r1_hv_0 = _wet_v0 / (_ops0.hv_0 + _one - _wet_v0)
+            _slow_u_native = jnp.sum(
+                _ops0.e3u_0 * du_dt[:, 1:, :] * _ops0.umask3,
+                axis=-1) * _r1_hu_0
+            _slow_v_native = jnp.sum(
+                _ops0.e3v_0 * dv_dt[1:, :, :] * _ops0.vmask3,
+                axis=-1) * _r1_hv_0
+            F_slow_u = (F_slow_u.at[:, 1:].set(_slow_u_native)
+                        * state.u_mask.data)
+            F_slow_v = (F_slow_v.at[1:, :].set(_slow_v_native)
+                        * state.v_mask.data)
+        _slow_depth_override = (
+            self._nemo_ws_test_hooks.slow_forcing_depth_override)
+        if _slow_depth_override is not None:
+            _slow_depth_u, _slow_depth_v = _slow_depth_override
+            F_slow_u = F_slow_u.at[:, 1:].set(_slow_depth_u)
+            F_slow_v = F_slow_v.at[1:, :].set(_slow_depth_v)
+        _F_slow_depth_u = F_slow_u
+        _F_slow_depth_v = F_slow_v
+
+        _wind_tau_i_u = jnp.zeros_like(F_slow_u)
+        _wind_tau_j_v = jnp.zeros_like(F_slow_v)
+        _wind_r1_rho0 = jnp.asarray(0.0, dtype=du_dt.dtype)
+        _wind_r1_hu = jnp.zeros_like(F_slow_u)
+        _wind_r1_hv = jnp.zeros_like(F_slow_v)
+        _wind_increment_u = jnp.zeros_like(F_slow_u)
+        _wind_increment_v = jnp.zeros_like(F_slow_v)
 
         if getattr(_cfg_b, "surface_stress_implicit", False):
             # NEMO stp2d explicit barotropic wind term: with the stress
@@ -4377,16 +6094,68 @@ class LatLonCGridOceanModel:
                 state.eta.data, state.H_bathy.data, _zc)
             _sfx = (surface_stress_faces(
                         surface_forcing, du_dt.dtype, _zc, _J_fs,
-                        _grid)
+                        _grid,
+                        use_native=not (
+                            self._nemo_ws_test_hooks
+                            .legacy_geographic_surface_stress_arm),
+                        **({} if self._nemo_ws_test_hooks
+                            .legacy_coastal_surface_stress_factors else {
+                                "cell_mask": state.land_mask.data,
+                                "u_mask": state.u_mask.data,
+                                "v_mask": state.v_mask.data,
+                            }))
                     if surface_forcing is not None else None)
             if _sfx is not None:
                 _tau_i_u, _tau_j_v, _, _ = _sfx
                 _r0 = jnp.asarray(_cfg_b.constants.rho_0,
                                   dtype=du_dt.dtype)
-                F_slow_u = F_slow_u + _tau_i_u / (_r0 * H_u_pre) \
-                    * state.u_mask.data
-                F_slow_v = F_slow_v + _tau_j_v / (_r0 * H_v_pre) \
-                    * state.v_mask.data
+                _wind_tau_i_u = _tau_i_u
+                _wind_tau_j_v = _tau_j_v
+                _wind_r1_rho0 = nemo_source_round(1.0 / _r0)
+                _wind_r1_hu = nemo_source_round(1.0 / H_u_pre)
+                _wind_r1_hv = nemo_source_round(1.0 / H_v_pre)
+                _wind_operand_override = (
+                    self._nemo_ws_test_hooks
+                    .slow_forcing_wind_operand_override)
+                if _wind_operand_override is not None:
+                    (_rho_override, _stress_override,
+                     _inverse_depth_override) = _wind_operand_override
+                    if _rho_override is not None:
+                        _wind_r1_rho0 = jnp.asarray(
+                            _rho_override, dtype=du_dt.dtype)
+                    if _stress_override is not None:
+                        _stress_u, _stress_v = _stress_override
+                        _wind_tau_i_u = _wind_tau_i_u.at[:, 1:].set(_stress_u)
+                        _wind_tau_j_v = _wind_tau_j_v.at[1:, :].set(_stress_v)
+                    if _inverse_depth_override is not None:
+                        _r1_hu_override, _r1_hv_override = (
+                            _inverse_depth_override)
+                        _wind_r1_hu = _wind_r1_hu.at[:, 1:].set(
+                            _r1_hu_override)
+                        _wind_r1_hv = _wind_r1_hv.at[1:, :].set(
+                            _r1_hv_override)
+                if not self._nemo_ws_test_hooks.legacy_barotropic_wind_association:
+                    # stp2d.F90:200-201, preserving Fortran's written
+                    # ``(r1_rho0*tau)*r1_h`` product before the addition.
+                    _wind_increment_u = nemo_source_round(
+                        nemo_source_round(_wind_r1_rho0 * _wind_tau_i_u)
+                        * _wind_r1_hu)
+                    _wind_increment_v = nemo_source_round(
+                        nemo_source_round(_wind_r1_rho0 * _wind_tau_j_v)
+                        * _wind_r1_hv)
+                    F_slow_u = nemo_source_round(
+                        F_slow_u + _wind_increment_u) * state.u_mask.data
+                    F_slow_v = nemo_source_round(
+                        F_slow_v + _wind_increment_v) * state.v_mask.data
+                else:
+                    _wind_increment_u = _tau_i_u / (_r0 * H_u_pre) \
+                        * state.u_mask.data
+                    _wind_increment_v = _tau_j_v / (_r0 * H_v_pre) \
+                        * state.v_mask.data
+                    F_slow_u = F_slow_u + _wind_increment_u
+                    F_slow_v = F_slow_v + _wind_increment_v
+        _F_slow_wind_u = F_slow_u
+        _F_slow_wind_v = F_slow_v
 
         # Perturbation tendency (depth-mean removed) → applied to 3D.
         # MUST be computed from the *baroclinic-only* F_slow (before A2 is
@@ -4440,6 +6209,23 @@ class LatLonCGridOceanModel:
             F_slow_v = (F_slow_v
                         - _r_v_bt.astype(F_slow_v.dtype) / H_v_pre
                         * (_v_bot - _V_bar_now)) * state.v_mask.data
+        _slow_drag_override = (
+            self._nemo_ws_test_hooks.slow_forcing_drag_override)
+        if _slow_drag_override is not None:
+            _slow_drag_u, _slow_drag_v = _slow_drag_override
+            F_slow_u = F_slow_u.at[:, 1:].set(_slow_drag_u)
+            F_slow_v = F_slow_v.at[1:, :].set(_slow_drag_v)
+            _F_slow_drag_u = F_slow_u
+            _F_slow_drag_v = F_slow_v
+            F_slow_u = nemo_source_round(
+                F_slow_u + _wind_increment_u) * state.u_mask.data
+            F_slow_v = nemo_source_round(
+                F_slow_v + _wind_increment_v) * state.v_mask.data
+            _F_slow_wind_u = F_slow_u
+            _F_slow_wind_v = F_slow_v
+        else:
+            _F_slow_drag_u = F_slow_u
+            _F_slow_drag_v = F_slow_v
 
         # A2 — depth-mean biharmonic hyperviscosity on (U_bar, V_bar).
         # Damps the barotropic standing mode at deep cells next to steep
@@ -4533,8 +6319,38 @@ class LatLonCGridOceanModel:
         _nemo_ws_velocity_stages = None
         _nemo_ws_live_stage_geometry = None
         _nemo_ws_exposed_momentum_stage = None
+        _nemo_ws_exposed_stage2_raw = None
         _nemo_ws_exposed_tracer_stage = None
+        _nemo_ws_exposed_tracer_boundary = None
+        _nemo_ws_exposed_tracer_transport = None
+        _nemo_ws_exposed_stage_face_r3 = None
+        _nemo_ws_exposed_stage1_wzv = None
+        _nemo_ws_exposed_stage1_transport_operand = None
+        _nemo_ws_exposed_momentum_operator = None
+        _nemo_ws_exposed_stage1_rhs = None
+        _nemo_ws_exposed_stage1_raw = None
+        _nemo_ws_exposed_stage2_rhs = None
+        _nemo_ws_exposed_stage3_rhs = None
+        _nemo_ws_exposed_stage3_raw = None
         _nemo_ws_stage_tracers = None
+        _nemo_ws_live_stage_states = None; _nemo_ws_live_stage_raw = None; _nemo_ws_live_stage_rhs = None; _nemo_ws_live_baro_geometry = None  # noqa: E501,E702
+        _nemo_ws_live_slow_forcing_producer = None
+        _nemo_ws_live_stage1_full_rhs = None; _nemo_ws_live_stage1_rhs_walk = None  # noqa: E702
+        _nemo_ws_live_stage_qco = None
+        _nemo_ws_live_tke_entry = None
+        _nemo_ws_live_tke_statement_trace = None
+        _nemo_ws_live_operator_operands = [
+            _nemo_ws_stage1_operator_operands, None, None]
+        _nemo_ws_tracer_content_rhs = None
+        _nemo_ws_advection_content_rhs = None
+        _nemo_ws_zdf_eta_kmm = None
+        _nemo_ws_process_qco = None
+        _nemo_ws_process_surface_rate = None
+        _nemo_ws_process_qsr_rate = None
+        _nemo_ws_qsr_association = None
+        _nemo_ws_process_boundaries = None
+        _nemo_ws_process_Taa = None; _nemo_ws_ldf_diagnostics = None
+        _nemo_ws_vertical_solve_trace, _return_vertical_solve_trace = None, (_return_tracer_process_trace and self._nemo_ws_test_hooks.vertical_solve_trace)
         if getattr(_cfg_b, "momentum_time_integrator", "euler") == "rk3":
             u0 = state.u.data
             v0 = state.v.data
@@ -4573,24 +6389,20 @@ class LatLonCGridOceanModel:
             v_star = (1.0 / 3.0) * v0 + (2.0 / 3.0) * (v2 + dt_mom * p2v)
         elif getattr(_cfg_b, "momentum_time_integrator",
                      "euler") == "rk3_ws":
-            # NEMO stprk3_stg Wicker-Skamarock RK3: every stage restarts from
-            # u0 with the PREVIOUS stage's RHS and the stage dt (dt/3, dt/2,
-            # dt) — NOT Shu-Osher convex combinations. Per-stage RHS content
-            # mirrors NEMO exactly: stage 1 = the precomputed full tendency
-            # (stp2d's Ue_rhs INCLUDES dyn_ldf); stage 2 = hpg+vor+adv ONLY
-            # (NO lateral viscosity, stprk3_stg:318-334); stage 3 = full again
-            # (dyn_ldf re-applied). ZDF (the implicit vertical solve) runs once
-            # after the momentum stages == NEMO's stage-3-only dyn_zdf. The
-            # linear stability polynomial R(z)=1+z+z^2/2+z^3/6 is identical to
-            # SSP-RK3, so the explicit_ab2 Coriolis coupling bound (f*dt<=
-            # sqrt(3)) carries over.
+            # NEMO WS-RK3 restarts each stage from u0 with the prior stage RHS
+            # and dt/3, dt/2, dt (not Shu-Osher combinations). Stage 1 carries
+            # the full stp2d RHS, stage 2 hpg+vor+adv, and stage 3 the full RHS
+            # plus its only implicit ZDF solve. Its stability polynomial is
+            # unchanged from the equivalent three-stage polynomial used here:
+            # SSP-RK3's, so the explicit Coriolis bound still applies.
             u0 = state.u.data
             v0 = state.v.data
 
             def _mom_pert_ws(
                 u_in, v_in, skip_ldf, transport_mean=None,
                 stage_tracers_eta=None, extra_rhs=None,
-                stage_face_thickness=None,
+                stage_face_thickness=None, stage_index=0,
+                stage_zad_operands=None,
             ):
                 st = state._replace(
                     u=state.u.replace(data=u_in * u_mask_3d),
@@ -4615,6 +6427,42 @@ class LatLonCGridOceanModel:
                     current_v_mean = (
                         jnp.sum(v_in * h_v_pre, axis=-1) / H_v_pre
                         * state.v_mask.data)
+                    # Validated at construction (see
+                    # ``_STAGE1_TRANSPORT_OPERAND_ARMS``), so only the legal
+                    # strings reach here.
+                    _tr_arm = (self._nemo_ws_test_hooks
+                               .momentum_transport_stage1_operand)
+                    if _tr_arm and stage_index == 1:
+                        if _tr_arm == "prognostic_mean":
+                            # stprk3_stg.f90:270 subtracts uu_b(:,:,Kmm),
+                            # the external mode's own prognostic, NOT a
+                            # depth mean re-reduced from the 3-D velocity.
+                            if state.uu_b is None or state.vv_b is None:
+                                raise ValueError(
+                                    "momentum_transport_stage1_operand="
+                                    "'prognostic_mean' needs the NEMO "
+                                    "prognostic uu_b/vv_b pair; this state "
+                                    "has none, and falling through would "
+                                    "report the production path under the "
+                                    "arm's name")
+                            current_u_mean = (state.uu_b.data
+                                              * state.u_mask.data)
+                            current_v_mean = (state.vv_b.data
+                                              * state.v_mask.data)
+                        else:
+                            # The pre-round-206 behaviour, kept as the
+                            # EXACT one-variable control of what round 206
+                            # landed: the target built on the sum of the
+                            # MIN-RULE face thicknesses instead of NEMO's
+                            # ``hu_0*(1+r3u(Kmm))`` (stprk3_stg.f90:270).
+                            # Taken as the whole array rather than undone by
+                            # a second multiply, so the arm is a BITWISE
+                            # revert of the landed statement and goes
+                            # exactly inert if that statement is reverted --
+                            # which is what makes the test that asserts it
+                            # moves the step a pin and not a smoke test.
+                            transport_u_mean, transport_v_mean = (
+                                _transport_target_legacy())
                     # stprk3_stg.F90:273-274: the SAME barotropic correction
                     # enters the advective transport masked by the 3-D
                     # umask/vmask -- ``zFu = e2u*e3u(Kmm)*( uu(Kmm) +
@@ -4626,11 +6474,57 @@ class LatLonCGridOceanModel:
                         (v_in + (transport_v_mean - current_v_mean)[..., None])
                         * _ws_stage_v_mask,
                     )
-                td = self.tendencies(st, surface_forcing, sponge=sponge, dt=dt,
+                _operator_stage = (
+                    self._nemo_ws_test_hooks.expose_momentum_operator_stage)
+                _expose_operator = (
+                    stage_index == _operator_stage
+                    and bool(self._nemo_ws_test_hooks.expose_momentum_operator))
+                _return_components = (
+                    _expose_operator or _return_live_stage_operands)
+                _zad_observers = (None,
+                    self._nemo_ws_test_hooks.stage2_zad_operand_observer,
+                    self._nemo_ws_test_hooks.stage3_zad_operand_observer)
+                _stage_ldf_thickness = None
+                if (not skip_ldf and _ws_uses_nemo_ldf_e3
+                        and stage_face_thickness is not None):
+                    from legoesm.ocean.vertical import (
+                        nemo_ldf_reference_e3f,
+                        nemo_qco_live_vorticity_e3f_cgrid,
+                    )
+                    # Same consumer-local reference as the stage-1 call above
+                    # (dynldf_lev.f90:123); the stage only moves r3f.
+                    _stage_ldf_thickness = (
+                        _geom_density[1], _ws_ldf_face_thickness_kbb[0],
+                        _ws_ldf_face_thickness_kbb[1],
+                        nemo_qco_live_vorticity_e3f_cgrid(
+                            st.eta.data, _zc, st.eta.data.dtype, grid=_grid,
+                            e3t_0=_ws_h_ref, tmask=_ws_t_live_mask,
+                            reference_e3f=nemo_ldf_reference_e3f(_zc)),
+                        stage_face_thickness[0], stage_face_thickness[1])
+                td_result = self.tendencies(
+                                     st, surface_forcing, sponge=sponge, dt=dt,
                                      momentum_only=True,
                                      precomputed_geom_density=stage_geom_density,
                                      grid=_grid, vertex_mask=_vmask,
                                      skip_lateral_viscosity=skip_ldf,
+                                     # dynldf_lev_rot_scheme.h90:24-25 and
+                                     # :28-29 read pu_in(ji,jj,jk,Kbb) /
+                                     # pv_in(ji,jj,jk,Kbb): the lateral
+                                     # Laplacian is evaluated on the BEFORE
+                                     # velocity, not on the stage velocity the
+                                     # rest of the RHS uses.  Kbb is the
+                                     # step-entry level at every WS-RK3 stage
+                                     # (stprk3_stg.F90:118,174,218), and
+                                     # dynldf.F90:70 hands the operator the
+                                     # whole array with that index.  Stage 1
+                                     # passes u_in = u0 already, so only the
+                                     # stage-3 call moves.  The tracer pair is
+                                     # the stage's own, because this call is
+                                     # momentum_only and tra_ldf is a separate
+                                     # NEMO routine (stprk3_stg.F90:586).
+                                     ldf_state=(
+                                         st.T.data, st.S.data,
+                                         u0 * u_mask_3d, v0 * v_mask_3d),
                                      z_coord=z_coord, config=config,
                                      momentum_flux_transport_velocity=(
                                          transport_velocity),
@@ -4648,12 +6542,75 @@ class LatLonCGridOceanModel:
                                      # the stage ssh (None under the legacy
                                      # thickness hook).
                                      momentum_flux_face_thickness=(
-                                         stage_face_thickness))
+                                         None if (
+                                             self._nemo_ws_test_hooks
+                                             .legacy_vector_ene_min_face_thickness
+                                         ) else stage_face_thickness),
+                                     ldf_thickness_operands=(
+                                         _stage_ldf_thickness),
+                                     ene_generic_f_vtx=(
+                                         self._nemo_ws_test_hooks
+                                         .legacy_ene_vertex_coriolis),
+                                     legacy_hpg_algebraic=(
+                                         self._nemo_ws_test_hooks
+                                         .legacy_hpg_algebraic_association),
+                                     nemo_operator_association=(
+                                         self._nemo_ws_test_hooks
+                                         .nemo_stage_rhs_accumulation_order_arm is True),
+                                     nemo_stage_zad_operands=stage_zad_operands,
+                                     nemo_stage_zad_operand_observer=(
+                                         _zad_observers[stage_index - 1]),
+                                     return_nemo_operator_components=(
+                                         _return_components))
+                if _return_components:
+                    td, _, _operator_components = td_result
+                    if (_return_live_stage_operands
+                            and stage_index in (2, 3)):
+                        _nemo_ws_live_operator_operands[stage_index - 1] = (
+                            _operator_components)
+                else:
+                    td = td_result
+                if _expose_operator:
+                    _operator_name = (
+                        self._nemo_ws_test_hooks.expose_momentum_operator)
+                    if _operator_name not in (
+                            "hpg", "vorticity", "advection", "keg", "zad", "after_hpg", "after_vor", "after_keg", "after_zad"):
+                        raise ValueError(
+                            "expose_momentum_operator must name a component "
+                            "or after_* accumulator boundary")
+                    _op_u = _operator_components[f"{'after_adv' if _operator_name == 'after_zad' else _operator_name}_u"].data
+                    _op_v = _operator_components[f"{'after_adv' if _operator_name == 'after_zad' else _operator_name}_v"].data
+                    if (_operator_name in ("keg", "zad")
+                            and extra_rhs is not None):
+                        # The two halves are the VECTOR form's routines.  A
+                        # flux-form card adds its own vertical term to the
+                        # same dyn_adv bucket through ``extra_rhs``, and that
+                        # term belongs to neither half, so publishing a half
+                        # there would silently omit it.  Refuse instead.
+                        raise ValueError(
+                            "expose_momentum_operator='keg'/'zad' is the "
+                            "vector-invariant split; this stage carries a "
+                            "separate flux-form vertical term")
+                    if _operator_name == "advection" and extra_rhs is not None:
+                        # dynadv_up3's stage-3-style vertical term is evaluated
+                        # by the shared literal helper and added to the same
+                        # dyn_adv source bucket as the kernel's KEG+ZAD terms.
+                        _op_u = _op_u + extra_rhs[0]
+                        _op_v = _op_v + extra_rhs[1]
+                    nonlocal _nemo_ws_exposed_momentum_operator
+                    _nemo_ws_exposed_momentum_operator = (_op_u, _op_v)
                 _du = td.du_dt.data
                 _dv = td.dv_dt.data
                 if extra_rhs is not None:
                     _du = _du + extra_rhs[0]
                     _dv = _dv + extra_rhs[1]
+                if not self._nemo_ws_test_hooks.legacy_preproject_stage_rhs:
+                    # NEMO first forms Kaa from the FULL Krhs (:396-419), then
+                    # removes its reference-thickness column mean and replaces
+                    # it with uu_b/vv_b (:433-446).  Pre-projecting Krhs is
+                    # algebraically equivalent, but changes rounding at the
+                    # stage-2 boundary on GYRE's live ENE depth-mean gauge.
+                    return _du, _dv
                 _Fu = jnp.sum(_du * h_u_pre, axis=-1) / H_u_pre * state.u_mask.data
                 _Fv = jnp.sum(_dv * h_v_pre, axis=-1) / H_v_pre * state.v_mask.data
                 return _du - _Fu[..., jnp.newaxis], _dv - _Fv[..., jnp.newaxis]
@@ -4880,7 +6837,7 @@ class LatLonCGridOceanModel:
                 # remains; the EEN path cancels exactly (same helper both sides).
                 _bt_cor_split = getattr(
                     _cfg_b.barotropic, "barotropic_coriolis", "avg")
-                if _bt_cor_split in ("een", "een_metric"):
+                if _bt_cor_split in ("ene", "ene_metric", "een", "een_metric"):
                     # NEMO ln_dynvor_een DINO (nemo_dino_kamm_mlf): the _total
                     # planetary term rides the vertex-f EEN transport-form flux,
                     # so the pre-step subtraction must use the SAME EEN stencil
@@ -4915,12 +6872,32 @@ class LatLonCGridOceanModel:
                     _een_eval = getattr(
                         _cfg_b.barotropic,
                         "barotropic_een_coefficient_evaluation", "generic")
+                    _bt_pv_scheme = (
+                        "ene" if _bt_cor_split in ("ene", "ene_metric")
+                        else "een")
+                    from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
+                        nemo_carried_barotropic_depth_mean,
+                    )
+                    # The SAME selector the window seed uses: a card that
+                    # selects NEMO's carried external mode and carries no
+                    # pair (or half a pair) RAISES rather than falling back
+                    # to a reduction, which is the silent fallback this
+                    # round is removing in the first place.
+                    _nemo_carried_baro = nemo_carried_barotropic_depth_mean(
+                        state, F_slow_u.dtype, _cfg_b)
+                    _slow_incoming_override = (
+                        self._nemo_ws_test_hooks
+                        .slow_forcing_incoming_override)
+                    if _slow_incoming_override is not None:
+                        F_slow_u, F_slow_v = _slow_incoming_override
+                    _slow_incoming_u = F_slow_u
+                    _slow_incoming_v = F_slow_v
                     (_cor_u_sub, _cor_v_sub,
                      _een_pre_built) = barotropic_coriolis_een_pre_step(
                         state_mid.u.data, state_mid.v.data, h_k_pre, _grid,
                         state.land_mask.data, state.u_mask.data,
                         state.v_mask.data, _min_wc, F_slow_u.dtype,
-                        metric_complete=(_bt_cor_split == "een_metric"),
+                        metric_complete=_bt_cor_split.endswith("_metric"),
                         # Same EEN q-boundary / e3f rules as the 3-D EEN and
                         # as the substep loop's own _build_een_barotropic_inputs
                         # — otherwise this subtraction uses a DIFFERENT operator
@@ -4935,11 +6912,47 @@ class LatLonCGridOceanModel:
                         coefficient_evaluation=_een_eval,
                         eta=state.eta.data,
                         z_coord=_zc,
-                        return_pre=True)
+                        return_pre=True,
+                        scheme=_bt_pv_scheme,
+                        # dyn_cor_2D, CALLED at dynspg_ts.f90:289 and
+                        # subtracted at :292, is handed puu_b(:,:,Kmm) --
+                        # the carried external mode, the SAME array the
+                        # substep loop seeds from (dynspg_ts.F90:484-500).
+                        # stprk3.f90:189 calls stp_2D(kstp, Nbb, Nbb, ...),
+                        # so Kmm IS Nbb here.  Not a fresh reduction of the
+                        # 3-D velocity.  Cards that do not run the carried
+                        # external mode keep the reduction.
+                        entry_barotropic_velocity=_nemo_carried_baro)
                     if _een_eval == "nemo_literal":
                         _een_pre_shared = _een_pre_built
                     F_slow_u = (F_slow_u - _cor_u_sub) * state.u_mask.data
                     F_slow_v = (F_slow_v - _cor_v_sub) * state.v_mask.data
+                    _slow_final_override = self._nemo_ws_test_hooks.barotropic_slow_forcing_override
+                    if callable(_slow_final_override):
+                        jax.debug.callback(
+                            _slow_final_override, _slow_incoming_u, _slow_incoming_v,
+                            _cor_u_sub, _cor_v_sub, state.u_mask.data, state.v_mask.data,
+                            F_slow_u, F_slow_v, ordered=True)
+                    elif _slow_final_override is not None:
+                        F_slow_u, F_slow_v = _slow_final_override
+                    _nemo_ws_live_slow_forcing_producer = {
+                        "rhs_u": du_dt, "rhs_v": dv_dt,
+                        "thickness_u": h_u_pre, "thickness_v": h_v_pre,
+                        "depth_u": H_u_pre, "depth_v": H_v_pre,
+                        "post_wind_u": _F_slow_wind_u,
+                        "post_wind_v": _F_slow_wind_v,
+                        "post_drag_u": _F_slow_drag_u,
+                        "post_drag_v": _F_slow_drag_v,
+                        "wind_tau_u": _wind_tau_i_u,
+                        "wind_tau_v": _wind_tau_j_v,
+                        "wind_r1_rho0": _wind_r1_rho0,
+                        "incoming_u": _slow_incoming_u,
+                        "incoming_v": _slow_incoming_v,
+                        "coriolis_u": _cor_u_sub,
+                        "coriolis_v": _cor_v_sub,
+                        "final_u": F_slow_u,
+                        "final_v": F_slow_v,
+                    }
                     _add_bt_cor = True
                 else:
                     from legoesm.ocean.dynamics.latlon_cgrid_operators import (
@@ -5024,17 +7037,68 @@ class LatLonCGridOceanModel:
                     _baro_seed = dict(
                         _baro_seed,
                         _nemo_primary_transport_average_test_override=False)
+                if _return_barotropic_substeps:
+                    _baro_seed = dict(
+                        _baro_seed, _nemo_substep_trace_test_hook=True)
+                    _flux_update_override = (
+                        self._nemo_ws_test_hooks
+                        .barotropic_flux_form_update_override)
+                    if _flux_update_override is not None:
+                        _baro_seed = dict(
+                            _baro_seed,
+                            _nemo_flux_form_update_test_override=(
+                                _flux_update_override))
+                _cor_sub_override = (
+                    self._nemo_ws_test_hooks
+                    .barotropic_substep_coriolis_override)
+                if _cor_sub_override is not None:
+                    _baro_seed = dict(
+                        _baro_seed,
+                        _nemo_substep_coriolis_test_override=(
+                            _cor_sub_override))
+                _pgf_sub_override = (
+                    self._nemo_ws_test_hooks.barotropic_substep_pgf_override)
+                if _pgf_sub_override is not None:
+                    _baro_seed = dict(
+                        _baro_seed,
+                        _nemo_substep_pgf_test_override=_pgf_sub_override)
                 if self._nemo_ws_test_hooks.legacy_seed_min_rule_faces:
                     _baro_seed = dict(
                         _baro_seed,
                         _nemo_legacy_seed_faces_test_override=True)
+                if (
+                    self._nemo_ws_test_hooks
+                    .barotropic_drag_rate_override is not None
+                ):
+                    _baro_seed = dict(
+                        _baro_seed,
+                        _nemo_drag_rate_test_override=(
+                            self._nemo_ws_test_hooks
+                            .barotropic_drag_rate_override))
+                if (self._nemo_ws_test_hooks
+                        .barotropic_raw_history_override is not None):
+                    _baro_seed = dict(
+                        _baro_seed,
+                        _nemo_raw_history_test_override=(
+                            self._nemo_ws_test_hooks
+                            .barotropic_raw_history_override))
+                if (
+                    self._nemo_ws_test_hooks
+                    .legacy_barotropic_continuity_association
+                ):
+                    _baro_seed = dict(
+                        _baro_seed,
+                        _nemo_continuity_update_test_override=False)
+            elif _return_barotropic_substeps:
+                raise NotImplementedError(
+                    "GYRE substep trace requires the standard-halo barotropic path")
             elif self._nemo_ws_test_hooks.legacy_seed_min_rule_faces:
                 raise ValueError(
                     "legacy_seed_min_rule_faces is a one-variable control of "
                     "the standard-halo explicit substep solver's loop-entry "
                     "seed; this configuration routes the external solve "
                     "elsewhere, so the control would silently not land.")
-            state_new, (Hu_avg, Hv_avg) = _baro_fn(
+            _baro_result = _baro_fn(
                 state_mid, dt_s, _nbaro,
                 _grid, _zc, _cfg_b,
                 F_slow_eta=F_slow_eta,
@@ -5044,6 +7108,54 @@ class LatLonCGridOceanModel:
                 t_seconds=t_seconds,  # traced model time for the equilibrium tide
                 **_baro_seed,
             )
+            if _return_barotropic_substeps:
+                state_new, (Hu_avg, Hv_avg), _substep_trace = _baro_result
+                return _NEMOWSBarotropicTrace(
+                    state_new, _substep_trace,
+                    (F_slow_eta, F_slow_u, F_slow_v),
+                    {
+                        "du_dt": du_dt,
+                        "dv_dt": dv_dt,
+                        "h_u": h_u_pre,
+                        "h_v": h_v_pre,
+                        "H_u": H_u_pre,
+                        "H_v": H_v_pre,
+                        "depth_u": _F_slow_depth_u,
+                        "depth_v": _F_slow_depth_v,
+                        "post_wind_u": _F_slow_wind_u,
+                        "post_wind_v": _F_slow_wind_v,
+                        "wind_tau_u": _wind_tau_i_u,
+                        "wind_tau_v": _wind_tau_j_v,
+                        "wind_r1_rho0": _wind_r1_rho0,
+                        "wind_r1_hu": _wind_r1_hu,
+                        "wind_r1_hv": _wind_r1_hv,
+                        "wind_increment_u": _wind_increment_u,
+                        "wind_increment_v": _wind_increment_v,
+                        "post_drag_u": _F_slow_drag_u,
+                        "post_drag_v": _F_slow_drag_v,
+                        "pre_external_u": F_slow_u,
+                        "pre_external_v": F_slow_v,
+                    },
+                    (Hu_avg, Hv_avg),
+                )
+            state_new, (Hu_avg, Hv_avg) = _baro_result
+            _stage_baro_override = (
+                self._nemo_ws_test_hooks.stage_barotropic_output_override)
+            if _stage_baro_override is not None:
+                (_baro_eta, _baro_u, _baro_v,
+                 Hu_avg, Hv_avg) = _stage_baro_override
+                state_new = state_new._replace(
+                    eta=state_new.eta.replace(data=_baro_eta),
+                    uu_b=state_new.uu_b.replace(data=_baro_u),
+                    vv_b=state_new.vv_b.replace(data=_baro_v),
+                )
+
+        _external_result_override = (
+            self._nemo_ws_test_hooks.external_mode_result_override)
+        if _external_result_override is not None:
+            _eta_external, Hu_avg, Hv_avg = _external_result_override
+            state_new = state_new._replace(
+                eta=state_new.eta.replace(data=_eta_external))
 
         # NEMO-RK3 scheme identity: HYB is the live stprk3_stg barotropic
         # update (module default at :44; stages at :143-144,206-207,225), so
@@ -5054,6 +7166,10 @@ class LatLonCGridOceanModel:
         # ``stage_barotropic_correction`` hook ablates that external-mode
         # REPLACEMENT (below) for causal tests; it no longer selects between two
         # recurrences, because there is only one.  Public rk3_ws has no arm.
+        # The stage-3 barotropic correction, deferred to its post-solve site
+        # (stprk3_stg.F90:437-446 is BELOW the CALL dyn_zdf at :430).  None on
+        # every path that does not run the WS stage ladder.
+        _ws_stage3_correction = None
         if getattr(_cfg_b, "momentum_time_integrator", "euler") == "rk3_ws":
             # WEIGHTS of the stage depth-mean operator.  NEMO's is REFERENCE
             # weighted and fixed for the whole run:
@@ -5082,34 +7198,114 @@ class LatLonCGridOceanModel:
             else:
                 _mean_h_u, _mean_H_u = _ws_h_u_ref, _ws_H_u_ref
                 _mean_h_v, _mean_H_v = _ws_h_v_ref, _ws_H_v_ref
-
+            if _return_live_stage_operands: _nemo_ws_live_baro_geometry = (_mean_h_u, _mean_h_v, nemo_reference_depth_reciprocal(_mean_H_u, state.u_mask.data), nemo_reference_depth_reciprocal(_mean_H_v, state.v_mask.data))  # noqa: E501,E701
             def _replace_stage_mean(u_in, v_in, target_u, target_v):
                 if not self._nemo_ws_test_hooks.stage_barotropic_correction:
                     # Private causal arm: keep the stage's own depth mean.
                     return u_in * _ws_stage_u_mask, v_in * _ws_stage_v_mask
-                mean_u = (jnp.sum(u_in * _mean_h_u, axis=-1) / _mean_H_u
-                          * state.u_mask.data)
-                mean_v = (jnp.sum(v_in * _mean_h_v, axis=-1) / _mean_H_v
-                          * state.v_mask.data)
+                # stprk3_stg.F90:440,444-445, in the shared barotropic home so
+                # a fidelity gate can drive the SAME expression with NEMO's own
+                # operands (a closure cannot be handed a record).
+                # ROUND 36: NEMO MULTIPLIES by the reciprocal it stored once
+                # (domain.f90:213), it does not divide by the depth, and its
+                # SUM carries no mask -- the dry-column zero is inside the
+                # reciprocal.  Built here from the same operands rather than
+                # inside the operator so a fidelity gate can hand the operator
+                # NEMO's OWN r1_hu_0 read from a record.
                 return (
-                    (u_in + (target_u - mean_u)[..., jnp.newaxis])
-                    * _ws_stage_u_mask,
-                    (v_in + (target_v - mean_v)[..., jnp.newaxis])
-                    * _ws_stage_v_mask,
+                    rk3_stage_barotropic_correction(
+                        u_in, target_u, _mean_h_u,
+                        nemo_reference_depth_reciprocal(
+                            _mean_H_u, state.u_mask.data),
+                        _ws_stage_u_mask),
+                    rk3_stage_barotropic_correction(
+                        v_in, target_v, _mean_h_v,
+                        nemo_reference_depth_reciprocal(
+                            _mean_H_v, state.v_mask.data),
+                        _ws_stage_v_mask),
                 )
 
-            # The TARGET is the same operator M applied to the post-solve
-            # velocity -- legoESM's stand-in for NEMO's ``uu_b(Kaa)`` -- so it
-            # carries the same weights.  Mixing the two weightings would leave
-            # the installed mean satisfying neither.
-            target_u = (jnp.sum(state_new.u.data * _mean_h_u, axis=-1)
-                        / _mean_H_u * state.u_mask.data)
-            target_v = (jnp.sum(state_new.v.data * _mean_h_v, axis=-1)
-                        / _mean_H_v * state.v_mask.data)
+            # NEMO's TARGET is not reconstructed from the 3-D velocity.  The
+            # external mode writes its separately prognostic uu_b/vv_b(Kaa)
+            # at dynspg_ts.F90:857-897 and every HYB stage reads that value
+            # (stprk3_stg.F90:115-228,433-446).  Keep the old reduction only
+            # for isolated non-card unit paths whose state has no NEMO pair;
+            # all validated NEMO-identity cards carry it.
+            if state_new.uu_b is not None and state_new.vv_b is not None:
+                target_u = state_new.uu_b.data
+                target_v = state_new.vv_b.data
+            elif state_new.uu_b is None and state_new.vv_b is None:
+                target_u = (jnp.sum(state_new.u.data * _mean_h_u, axis=-1)
+                            / _mean_H_u * state.u_mask.data)
+                target_v = (jnp.sum(state_new.v.data * _mean_h_v, axis=-1)
+                            / _mean_H_v * state.v_mask.data)
+            else:
+                raise ValueError(
+                    "NEMO prognostic depth mean requires both uu_b and vv_b")
+            # stprk3_stg.f90:270 (the ``n_baro_upd = np_HYB`` branch the
+            # compiled module's :48 default selects) divides the barotropic
+            # transport by ``hu_0*(1+r3u(Kmm))`` -- the surface-height-ratio
+            # column depth -- NOT by the sum of legoESM's min-rule face
+            # thicknesses, which is first order wrong in the sea-surface
+            # height difference ACROSS the face.  The same kernel already
+            # supplies the advection's own divisor
+            # (``momentum_flux_face_thickness``); it can supply this one
+            # too.  LANDED round 206 (Decision 86).
+            # SCOPE, stated because the code does not carry it: this target
+            # is built ONCE per step from the step-entry (Kbb) sea surface,
+            # while NEMO re-evaluates :270 inside every stage with that
+            # stage's own ``r3u(Kmm)`` and legoESM's own stage transport
+            # (``_nemo_ws_stage_transport``) does use the per-stage ssh.  So
+            # stages 2 and 3 divide by the step-entry column depth here.
+            # That placement is inherited from the structure this target
+            # already had (``H_u_pre`` and ``Hu_avg`` are both step-entry
+            # quantities); round 206 changed the depth RULE, not the time
+            # level, and the time level is an open item.
+            # FORM, also stated rather than implied: NEMO MULTIPLIES by a
+            # stored reciprocal, ``un_adv*(r1_hu_0/(1+r3u))``, while this
+            # DIVIDES by the summed depth.  Equal algebraically, not
+            # bitwise.  The literal operand already exists -- the same
+            # kernel returns ``r1_hu = r1_hu0/(1+r3u)`` under
+            # ``include_reciprocals=True`` (vertical.py), which
+            # ``_nemo_stage_corrected_velocity`` consumes through
+            # ``nemo_source_round``.  Round 206 landed the measured
+            # candidate the user approved, which is the divide; the
+            # association is the next walk item, not an oversight.
+            # Measured on VORTEX-zco: the two depths differ
+            # by up to 0.129 m in 5000.86 m (2.58e-05 relative, 698 of 3660
+            # u columns), and the stage-1 flux-form advection trend's
+            # disagreement with NEMO falls from 6.285649e-11 to
+            # 2.032879e-20 (u) with that divisor.  The private
+            # ``"legacy_min_rule_depth"`` arm restores the old divisor as
+            # the one-variable control.  This is the SHARED RK3 statement,
+            # not a card option: NEMO's :48 ``n_baro_upd = np_HYB`` default
+            # is compiled into every card's stprk3_stg, so every card that
+            # runs the WS-RK3 transport reconcile takes it.
+            _qco_tr_faces = _nemo_ws_qco_stage_faces(
+                state.eta.data, _ws_h_ref, _ws_u_live_mask,
+                _ws_v_live_mask, _grid)
+            _H_u_transport = jnp.sum(_qco_tr_faces[0], axis=-1)
+            _H_v_transport = jnp.sum(_qco_tr_faces[1], axis=-1)
+            # Dry columns have a zero qco depth and carry no transport.
+            _H_u_transport = jnp.where(_H_u_transport > 0.0,
+                                       _H_u_transport, H_u_pre)
+            _H_v_transport = jnp.where(_H_v_transport > 0.0,
+                                       _H_v_transport, H_v_pre)
             transport_target_u = (
-                Hu_avg / H_u_pre * state.u_mask.data)
+                Hu_avg / _H_u_transport * state.u_mask.data)
             transport_target_v = (
-                Hv_avg / H_v_pre * state.v_mask.data)
+                Hv_avg / _H_v_transport * state.v_mask.data)
+            def _transport_target_legacy():
+                """The pre-round-206 target, for the private control arm.
+
+                A function, not a value, so production traces NOTHING extra
+                and the landed graph is the one the registry was measured
+                on.  Identical to the two lines above when the landed
+                statement is reverted -- which is the non-vacuity of the
+                test that pins it.
+                """
+                return (Hu_avg / H_u_pre * state.u_mask.data,
+                        Hv_avg / H_v_pre * state.v_mask.data)
             _use_transport_reconcile = (
                 self._nemo_ws_test_hooks.momentum_transport_reconcile)
             _transport_target = (
@@ -5146,6 +7342,30 @@ class LatLonCGridOceanModel:
                 + (state_new.eta.data - state.eta.data) / 3.0)
             _eta_live_one_half = 0.5 * (
                 state.eta.data + state_new.eta.data)
+            _stage_entry_override = self._nemo_ws_test_hooks.stage_entry_override
+            if _stage_entry_override is not None:
+                _override_stage = _stage_entry_override[0]
+                if _override_stage not in (2, 3):
+                    raise ValueError(
+                        "stage_entry_override stage must be 2 or 3")
+                if _override_stage == 2:
+                    _eta_live_one_third = _stage_entry_override[5]
+                    _h_live_one_third = compute_layer_thickness(
+                        _eta_live_one_third, state.H_bathy.data, _zc,
+                        min_water_column_m=_cfg_b.min_water_column_m)
+                else:
+                    _eta_live_one_half = _stage_entry_override[5]
+                    _h_live_one_half = compute_layer_thickness(
+                        _eta_live_one_half, state.H_bathy.data, _zc,
+                        min_water_column_m=_cfg_b.min_water_column_m)
+            # Stage 3 has Kmm=N+1/2 (stprk3_stg.F90:218-235), and tra_zdf
+            # consumes e3w(Kmm) in both off-diagonals (trazdf.F90:207-221).
+            # The old whole-step entry eta is retained only as a private
+            # one-variable ablation.
+            _nemo_ws_zdf_eta_kmm = (
+                state.eta.data
+                if self._nemo_ws_test_hooks.legacy_zdf_entry_kmm_eta
+                else _eta_live_one_half)
             if isinstance(_zc, OceanPartialCellCoordinate):
                 _u_live_mask, _v_live_mask = compute_face_masks_3d(
                     _zc.is_active, _grid)
@@ -5163,25 +7383,48 @@ class LatLonCGridOceanModel:
                 min_water_column_m=_cfg_b.min_water_column_m)
             _legacy_min_faces = (
                 self._nemo_ws_test_hooks.legacy_stage_min_face_thickness)
+            _legacy_reduced_transport_mean_arm = (
+                self._nemo_ws_test_hooks
+                .legacy_reduced_stage_transport_mean_arm)
             _stage_transport_kw = dict(
                 h_ref=_h_ref_ws, Hu_avg=Hu_avg, Hv_avg=Hv_avg,
                 u_mask_3d=_u_live_mask,
                 v_mask_3d=_v_live_mask, grid=_grid, z_coord=_zc,
-                config=_cfg_b, dt=dt,
+                H_bathy=state.H_bathy.data, config=_cfg_b,
+                # RK3 div_hor applies the instantaneous river mass flux to
+                # hdiv independently of the same runoff's external-mode SSH
+                # forcing (sbcrnf.F90:253-260).  Preserve that distinct input.
+                runoff_mass_flux=(
+                    None if freshwater is None else freshwater.runoff),
                 legacy_min_face_thickness=_legacy_min_faces,
                 # wzv's Kbb/Kaa ssh operands (sshwzv.F90:334): the step-entry
                 # level and the barotropic after-level, the same pair NEMO
                 # passes at stprk3_stg.F90:297.
                 eta_before=state.eta.data,
                 eta_after=state_new.eta.data,
-                literal_wzv=self._nemo_ws_test_hooks.literal_stage_wzv,
+                # S-19 canonical option: GYRE/DINO resolve the NEMO literal
+                # sshwzv recurrence.  The private hook remains the lane-1 arm
+                # for cards whose resolved selector is generic.
+                literal_wzv=(
+                    getattr(_cfg_b, "wzv_call2_evaluation", "generic")
+                    == "nemo_literal"
+                    or self._nemo_ws_test_hooks.literal_stage_wzv),
+                legacy_wzv_rederived_transport=(
+                    self._nemo_ws_test_hooks
+                    .legacy_wzv_rederived_transport),
                 legacy_aimp_midpoint_w_metric=(
                     self._nemo_ws_test_hooks.legacy_aimp_midpoint_w_metric))
-            # stprk3_stg.F90:373-378 (and dynzdf.F90's key_qco branch at
-            # stage 3) weight EVERY stage velocity update by
-            # (1+r3u(Kbb)) / (1+r3u(Kmm)) / (1+r3u(Kaa)).  legoESM's tracer
-            # stage already carries the analogue (``_stage`` divides by
-            # h_stage, NEMO :552-554); the momentum stage did not.
+            # stprk3_stg.F90:365-388 has two live scheme arms.  The resolved
+            # vector-invariant GYRE program advances stages 1/2 directly on
+            # velocity (:366-369); only the flux-form arm uses the key_qco
+            # (1+r3u) factors (:373-378).  STAGE 3 SELECTS THE SAME WAY: its
+            # time step is inside dyn_zdf, and dynzdf.F90:119 carries the
+            # identical IF( ln_dynadv_vec .OR. lk_linssh ), vector arm at
+            # :121-122 and key_qco arm at :127-132.  (The sentence that used
+            # to stand here said stage 3 enters the key_qco solve "in either
+            # momentum program"; that was the transcription defect round 33
+            # fixed, and all three stages now route through
+            # rk3_stage_velocity_update.)
             def _qco_ratios(eta_stage):
                 if self._nemo_ws_test_hooks.omit_stage_qco_factor:
                     return (
@@ -5196,10 +7439,354 @@ class LatLonCGridOceanModel:
             _qu_13, _qv_13 = _qco_ratios(_eta_live_one_third)
             _qu_12, _qv_12 = _qco_ratios(_eta_live_one_half)
             _qu_aa, _qv_aa = _qco_ratios(state_new.eta.data)
+            from legoesm.ocean.eos import (
+                nemo_r3t_rk3_stage1_stretch,
+                nemo_r3t_stretch,
+            )
+
+            def _qco_t_ratio(eta_stage):
+                return nemo_r3t_stretch(
+                    _zc, eta_stage, state.H_bathy.data,
+                    evaluation="nemo_reciprocal")
+
+            _qt_b = _qco_t_ratio(state.eta.data)
+            _qt_13 = nemo_r3t_rk3_stage1_stretch(
+                _zc, state.eta.data, state_new.eta.data,
+                state.H_bathy.data)
+            _qt_12 = _qco_t_ratio(_eta_live_one_half)
+            _qt_aa = _qco_t_ratio(state_new.eta.data)
+            _tracer_qco_weights = (
+                None
+                if self._nemo_ws_test_hooks.legacy_tracer_stage_thickness_association
+                else (
+                    (_qt_b, _qt_b, _qt_13),
+                    (_qt_b, _qt_13, _qt_12),
+                    (_qt_b, _qt_12, _qt_aa),
+                )
+            )
+            _vector_velocity_stage_update = (
+                getattr(_cfg_b, "momentum_advection", "flux_form")
+                == "vector_invariant"
+                and not self._nemo_ws_test_hooks.legacy_vector_stage_qco_weights)
+            # stprk3_stg.f90:356-360: the vector-invariant deck solves
+            # continuity a SECOND time, on the raw stage velocity, for the
+            # momentum vertical advection at every stage after the first.
+            _momentum_wzv_split = nemo_stage_momentum_wzv_executes(
+                _cfg_b, self._nemo_ws_test_hooks)
             _wall_live = (
                 _active_live
                 if getattr(_cfg_b, "tracer_wall_neumann_fill", True)
                 else None)
+
+            # tra_sbc_RK3 stages 1/2 (trasbc.F90:282-292): under nonlinear
+            # free surface, add only the tracer carried by EMP, using the Kbb
+            # surface concentration and Kmm top thickness.  In legoESM's sign
+            # convention net_freshwater_flux = -NEMO emp, hence the positive
+            # content source below.  Heat flux, salt flux, QSR, LDF and ZDF are
+            # stage-3-only and remain in the later physics completion.
+            _zero_stage_source = jnp.zeros_like(state.T.data)
+            if freshwater is None:
+                _emp_stage_mass_flux = jnp.zeros_like(state.eta.data)
+            else:
+                # The dilution operand is NEMO's ``emp`` ALONE
+                # (trasbc.F90:282-288): the river runoff is NOT in it.  NEMO
+                # carries the same runoff's WATER in two other places -- the
+                # sea-surface forcing ``r1_rho0*(emp - rnf)``
+                # (stp2d.F90:278-281) and the horizontal divergence
+                # (sbcrnf.F90:279-283, called at divhor.F90:142) -- and the
+                # TRACER it carries in a third, ``rnf_tsc`` (the river-runoff
+                # block below).  legoESM's net freshwater is
+                # ``precip - evap + runoff + ice_fw (+ restoring)``, which is
+                # the right operand for the sea surface and the WRONG one
+                # here: leaving the runoff in deposits a second, nearly
+                # identical copy of the runoff's heat
+                # (``rnf*T_top/rho0/h`` against ``MAX(sst,0)*rnf/rho0/h``).
+                # The runoff is left OUT OF THE SUM rather than subtracted
+                # from it: ``(x + r) - r`` is not bitwise ``x`` and on this
+                # record the two spellings differ on 328 cells.  For a card
+                # that resolves no runoff the two sums are bitwise equal,
+                # because ``x + 0.0`` is ``x`` for every value this sum can
+                # hold.
+                _emp_stage_mass_flux = net_freshwater_flux(
+                    freshwater, include_runoff=False)
+            _stage_r1_rho0 = nemo_source_round(
+                jnp.asarray(1.0, dtype=state.T.data.dtype)
+                / jnp.asarray(_cfg_b.rho_0, dtype=state.T.data.dtype))
+
+            def _emp_stage_rate(tracer, h_stage):
+                # trasbc.f90:284-286 first stores r1_rho0/e3t(Kmm), then
+                # multiplies EMP by the Kbb tracer and by that reciprocal.
+                # ``_emp_stage_mass_flux`` is -EMP in legoESM's convention.
+                z1_rho0_e3t = nemo_source_round(
+                    _stage_r1_rho0
+                    / jnp.maximum(h_stage[..., 0], 1.0e-10))
+                top = nemo_source_round(
+                    nemo_source_round(
+                        _emp_stage_mass_flux * tracer[..., 0])
+                    * z1_rho0_e3t) * _active_live[..., 0]
+                return _zero_stage_source.at[..., 0].set(top)
+
+            # River-runoff tracer source (trasbc.F90's river-runoff block).
+            # It sits OUTSIDE the stage switch, so unlike the EMP/QNS block it
+            # runs at ALL THREE stages, and NEMO forms the reciprocal of the
+            # runoff depth FIRST (``zdep = 1/h_rnf``) and multiplies -- which
+            # is not the same fp64 value as dividing.  With neither
+            # ``ln_rnf_depth`` nor ``ln_rnf_depth_ini`` selected the runoff
+            # depth is the LIVE top-cell thickness at the stage's Kmm and
+            # ``nk_rnf = 1``, so the deposit is the top cell alone.
+            _rnf_content = (
+                None if surface_forcing is None
+                else getattr(surface_forcing, "runoff_tracer_content", None))
+            if _rnf_content is not None and len(_rnf_content) != 2:
+                raise ValueError(
+                    "surface_forcing.runoff_tracer_content must be the pair "
+                    "(temperature content, salinity content) in NEMO rnf_tsc "
+                    f"units; got {len(_rnf_content)} entries.")
+
+            def _add_rnf_stage_rate(rate, content, h_stage):
+                """``rate`` unchanged when the card carries no runoff.
+
+                Returned unchanged rather than summed with a zero array: on a
+                cell holding negative zero, ``-0.0 + 0.0`` is ``+0.0``, so a
+                "harmless" addition is not bit-identical and GYRE's byte
+                identity would turn on a signed zero.
+                """
+                if _rnf_content is None:
+                    return rate
+                zdep = 1.0 / jnp.maximum(h_stage[..., 0], 1.0e-10)
+                top = jnp.asarray(content) * zdep * _active_live[..., 0]
+                return rate.at[..., 0].add(top)
+
+            def _stage_tracer_sources(h_stage):
+                """EMP dilution then runoff, in the order NEMO accumulates."""
+                rate_t = _emp_stage_rate(state.T.data, h_stage)
+                rate_s = _emp_stage_rate(state.S.data, h_stage)
+                if _rnf_content is None:
+                    return rate_t, rate_s
+                return (
+                    _add_rnf_stage_rate(rate_t, _rnf_content[0], h_stage),
+                    _add_rnf_stage_rate(rate_s, _rnf_content[1], h_stage),
+                )
+
+            def _stage_tracer_source_terms(h_stage):
+                """Keep the two compiled statements separate until Krhs."""
+                emp_t = _emp_stage_rate(state.T.data, h_stage)
+                emp_s = _emp_stage_rate(state.S.data, h_stage)
+                if _rnf_content is None:
+                    return ((emp_t,), (emp_s,))
+                zero_t = jnp.zeros_like(emp_t)
+                zero_s = jnp.zeros_like(emp_s)
+                return (
+                    (emp_t,
+                     _add_rnf_stage_rate(
+                         zero_t, _rnf_content[0], h_stage)),
+                    (emp_s,
+                     _add_rnf_stage_rate(
+                         zero_s, _rnf_content[1], h_stage)),
+                )
+
+            _stage3_T_rate = (
+                tend.dT_dt.data * h_k_old
+                / jnp.maximum(_h_live_one_half, 1.0e-10))
+            _sw_pen_scheme_ws = getattr(
+                getattr(
+                    getattr(_cfg_b, "physics", None),
+                    "shortwave_penetration", None),
+                "scheme", None)
+            if (
+                _sw_pen_scheme_ws == "nemo_qsr_rgb"
+                and surface_forcing is not None
+                and getattr(surface_forcing, "sw_down", None) is not None
+            ):
+                # Same seam as the two-band arm below, for NEMO's three-band
+                # chlorophyll penetration.  ``tra_qsr`` runs ONCE per step, at
+                # stage 3, with Kmm (stprk3_stg.F90:581; traqsr.f90:213 ->
+                # qsr_RGBc, whose live operands are ``e3t_0*(1+r3t(Kmm))`` and
+                # ``gdepw_1d*(1+r3t(Kmm))``, traqsr.f90:388, :349).  The shared
+                # pipeline already deposited the SAME kernel on the step-entry
+                # (Kbb) ladder; rebuild that field with the pipeline's own two
+                # operands so the subtraction below removes it exactly, then
+                # add the Kmm evaluation.  No second RGB implementation.
+                from legoesm.ocean.physics.shortwave_penetration import (
+                    apply_shortwave_penetration,
+                )
+                _rgb_cfg = _cfg_b.physics.shortwave_penetration
+                _rgb_chl = getattr(surface_forcing, "chl", None)
+                if _rgb_chl is None:
+                    raise ValueError(
+                        "physics.shortwave_penetration.scheme='nemo_qsr_rgb' "
+                        "needs a chlorophyll field; "
+                        "OceanSurfaceForcing.chl is None")
+                _rgb_dtype = h_k_old.dtype
+                _rgb_sw = jnp.asarray(surface_forcing.sw_down, dtype=_rgb_dtype)
+                _rgb_chl = jnp.asarray(_rgb_chl, dtype=_rgb_dtype)
+                _rgb_gdepw_ref = -jnp.asarray(_zc.z_half_ref, dtype=_rgb_dtype)
+                _rgb_e3t_ref = jnp.asarray(_zc.dz_ref, dtype=_rgb_dtype)
+                # The pipeline's Kbb stretch is ``compute_ocean_jacobian`` on
+                # the step-entry sea surface (physics/combined.py); use the
+                # identical expression here so the two cancel bit for bit.
+                _rgb_stretch_b = jnp.asarray(
+                    compute_ocean_jacobian(
+                        state.eta.data, state.H_bathy.data, _zc),
+                    dtype=_rgb_dtype)
+                _rgb_stretch_m = _h_live_one_half[..., 0] / jnp.maximum(
+                    _h_ref_ws[..., 0], 1.0e-10)
+
+                def _rgb_qsr(h_live, stretch):
+                    return apply_shortwave_penetration(
+                        _rgb_cfg, _rgb_sw,
+                        chl=_rgb_chl,
+                        dz_live=h_live,
+                        wet_cell=jnp.asarray(h_live > 0.0, dtype=_rgb_dtype),
+                        gdepw_bottom_live=(
+                            _rgb_gdepw_ref[1:] * stretch[..., jnp.newaxis]),
+                        gdepw_ref=_rgb_gdepw_ref,
+                        e3t_ref=_rgb_e3t_ref,
+                        rho_0=_cfg_b.rho_0,
+                        c_sw=_cfg_b.physics.constants.c_sw,
+                    )
+
+                _stage3_T_rate = _nemo_qsr_stage3_rate(
+                    tend.dT_dt.data,
+                    _rgb_qsr(h_k_old, _rgb_stretch_b),
+                    _rgb_qsr(_h_live_one_half, _rgb_stretch_m),
+                    h_k_old, _h_live_one_half)
+            elif (
+                _sw_pen_scheme_ws == "nemo_qsr_2bd"
+                and surface_forcing is not None
+                and getattr(surface_forcing, "sw_down", None) is not None
+            ):
+                # The shared physics pipeline evaluates its two-band kernel on
+                # Kbb.  qsr_2BD is called at stage 3 with gdepw/e3t(Kmm)
+                # (stprk3_stg.F90:581; traqsr.F90:665-712).  Replace only that
+                # already-present component with the same shared kernel on the
+                # live half-stage ladder; no second shortwave implementation.
+                from legoesm.ocean.physics.shortwave_penetration import (
+                    shortwave_penetration_tendency,
+                )
+                _r3t_b = h_k_old[..., 0] / jnp.maximum(
+                    _h_ref_ws[..., 0], 1.0e-10)
+                _r3t_m = _h_live_one_half[..., 0] / jnp.maximum(
+                    _h_ref_ws[..., 0], 1.0e-10)
+                _qsr_stretch_override = (
+                    self._nemo_ws_test_hooks.stage3_qsr_stretch_override)
+                if _qsr_stretch_override is not None:
+                    _r3t_m = _qsr_stretch_override
+                _qsr_b = shortwave_penetration_tendency(
+                    surface_forcing.sw_down,
+                    _zc.dz_ref, _zc.z_half_ref, _r3t_b,
+                    _cfg_b.physics.shortwave_penetration,
+                    rho_0=_cfg_b.rho_0,
+                    c_sw=_cfg_b.physics.constants.c_sw,
+                    z_half_stretch=_r3t_b,
+                )
+                _qsr_m = shortwave_penetration_tendency(
+                    surface_forcing.sw_down,
+                    _zc.dz_ref, _zc.z_half_ref, _r3t_m,
+                    _cfg_b.physics.shortwave_penetration,
+                    rho_0=_cfg_b.rho_0,
+                    c_sw=_cfg_b.physics.constants.c_sw,
+                    z_half_stretch=_r3t_m,
+                )
+                _stage3_T_rate = _nemo_qsr_stage3_rate(
+                    tend.dT_dt.data, _qsr_b, _qsr_m,
+                    h_k_old, _h_live_one_half)
+
+            _stage12_source_terms = (
+                None
+                if _rnf_content is None
+                else (
+                    _stage_tracer_source_terms(h_k_old),
+                    _stage_tracer_source_terms(_h_live_one_third),
+                    None,
+                )
+            )
+            _stage_source_rates = (
+                _stage_tracer_sources(h_k_old),
+                _stage_tracer_sources(_h_live_one_third),
+                # stprk3_stg.F90:565-600 clears Krhs, accumulates advection,
+                # nonlinear-SBC, QSR and LDF, then tra_zdf.F90 combines that
+                # stage-3 rate with Kbb using the Kmm QCO weight.  These rates
+                # must therefore enter the stage-3 RHS -- pre-applying them to
+                # the Kbb tracer base changes their coefficient whenever
+                # r3t(Kbb) != r3t(Kmm), which is live in GYRE.
+                # ``tendencies`` expressed the physical fluxes as a
+                # concentration rate using the step-entry thickness.  NEMO
+                # tra_sbc_RK3/tra_qsr divide the same flux by e3t(Kmm)
+                # (trasbc.F90:299-315; traqsr.F90:665-712).  Convert through
+                # content here so the stage helper's h_rhs multiplication
+                # cancels the Kmm divisor, rather than spuriously weighting
+                # surface heat by h(Kmm)/h(Kbb).
+                (
+                    _add_rnf_stage_rate(
+                        _stage3_T_rate,
+                        None if _rnf_content is None else _rnf_content[0],
+                        _h_live_one_half),
+                    _add_rnf_stage_rate(
+                        tend.dS_dt.data * h_k_old
+                        / jnp.maximum(_h_live_one_half, 1.0e-10),
+                        None if _rnf_content is None else _rnf_content[1],
+                        _h_live_one_half),
+                ),
+            )
+            if _return_tracer_process_trace:
+                # Round-124 WRITE-only process budget.  Materialize the two
+                # source components inside the full production step; the
+                # carried trajectory comes from a separate ordinary compiled
+                # call in ``step`` below.  ``tend.dT_dt`` contains the shared
+                # pipeline's Kbb qsr_2BD field plus the external qns surface
+                # deposit.  `_qsr_b` is the NEMO-live Kbb reconstruction used
+                # by the stage-3 replacement and need not be bit-identical to
+                # the pipeline field.  Re-read the SAME physics callable with
+                # production's cell-centred proxy so the surface row removes
+                # the component actually accumulated into `tend`; the entire
+                # remainder stays with QSR.
+                _process_cc_state = state._replace(
+                    u=state.u.replace(data=0.5 * (
+                        state.u.data[:, :-1, :] + state.u.data[:, 1:, :])),
+                    v=state.v.replace(data=0.5 * (
+                        state.v.data[:-1, :, :] + state.v.data[1:, :, :])),
+                )
+                _process_physics = self._physics_fn(
+                    _process_cc_state, _grid, _zc, surface_forcing)
+                _process_qsr_kbb = _process_physics.dT_dt.data
+                _nemo_ws_process_surface_rate = (
+                    (tend.dT_dt.data - _process_qsr_kbb) * h_k_old
+                    / jnp.maximum(_h_live_one_half, 1.0e-10))
+                _nemo_ws_process_qsr_rate = (
+                    _stage3_T_rate - _nemo_ws_process_surface_rate)
+                _process_plant = self._nemo_ws_test_hooks.tracer_process_trace
+                if _process_plant:
+                    _pj, _pi, _pk, _pdelta = _process_plant
+                    _nemo_ws_process_surface_rate = (
+                        _nemo_ws_process_surface_rate.at[
+                            _pj, _pi, _pk].add(_pdelta))
+                    _stage3_T_rate = _stage3_T_rate.at[
+                        _pj, _pi, _pk].add(_pdelta)
+                    _stage_source_rates = (
+                        *_stage_source_rates[:2],
+                        (_stage3_T_rate, _stage_source_rates[2][1]))
+                _nemo_ws_process_qco = (
+                    _qt_b, _qt_12, _qt_aa,
+                    h_k_old, _h_live_one_half, _h_live_new)
+                _nemo_ws_qsr_association = _NEMOWSQsrAssociationTrace(
+                    tendency_kbb=tend.dT_dt.data,
+                    qsr_kbb=_qsr_b,
+                    qsr_kmm=_qsr_m,
+                    thickness_kbb=h_k_old,
+                    thickness_kmm=_h_live_one_half,
+                    process_qsr_kbb=_process_qsr_kbb,
+                    process_surface_rate=_nemo_ws_process_surface_rate,
+                    process_qsr_rate=_nemo_ws_process_qsr_rate,
+                )
+
+            def _momentum_stage_w(geom):
+                # NEMO's momentum consumers read the field its OWN continuity
+                # solve produced (stprk3_stg.f90:360); the tracer transport
+                # re-solves and overwrites it (traadv.f90:274).  Slot 11 is
+                # None on cards that do not run the first solve, and then both
+                # consumers read the one field legoESM builds, as before.
+                return geom[2] if geom[11] is None else geom[11]
 
             def _stage_vertical_up3(u_stage, v_stage, geom):
                 # dynadv_up3.F90:239-358: vertical flux of the stage Kmm
@@ -5207,13 +7794,14 @@ class LatLonCGridOceanModel:
                 # e3u(Kmm).  Identically zero from rest (kt=1 stage 1).
                 if _omit_vert or not _aimp_vertadv_ws:
                     return None
+                w_mom = _momentum_stage_w(geom)
                 return (
                     nemo_up3_vertical_momentum_advection(
-                        u_stage * u_mask_3d, interp_cell_to_uface(geom[2]),
+                        u_stage * u_mask_3d, interp_cell_to_uface(w_mom),
                         geom[4], face_active=_u_live_mask),
                     nemo_up3_vertical_momentum_advection(
                         v_stage * v_mask_3d,
-                        interp_cell_to_vface(geom[2], _grid),
+                        interp_cell_to_vface(w_mom, _grid),
                         geom[5], face_active=_v_live_mask),
                 )
 
@@ -5226,15 +7814,38 @@ class LatLonCGridOceanModel:
                 # ordering predates this round and is inert on the certified
                 # cards (K_h = K_v = 0, no forcing).
                 return _nemo_ws_rk3_tracer_pair_step(
-                    state_new.T.data, state_new.S.data,
+                    state.T.data, state.S.data,
                     _cfg_b.tracer_advection,
                     _g0[0], _g0[1], _g0[2], h_k_old, _h_live_new,
                     _g0[4], _g0[5], _grid, dt, _active_live,
                     recon_fill_mask=_wall_live,
                     linssh_top_flux=getattr(_zc, "linear_free_surface", False),
                     stage_transport_geometry=stage_geometry,
+                    stage_source_rates=_stage_source_rates,
+                    stage_source_terms=_stage12_source_terms,
+                    stage_qco_weights=_tracer_qco_weights,
                     stop_after_stage=stop_after_stage,
                     resume=resume,
+                    return_stage1_trace=(
+                        stop_after_stage == 1
+                        and bool(self._nemo_ws_test_hooks
+                                 .expose_tracer_stage1_boundary)),
+                )
+
+            def _tracer_transport_geometry_override(geometry, override):
+                """Map a private owned zF triplet into the shared geometry."""
+                if override is None:
+                    return geometry
+                zfu_owned, zfv_owned, zfw = override
+                zfu = jnp.concatenate([zfu_owned[:, -1:, :], zfu_owned], axis=1)
+                zfv = jnp.concatenate([zfv_owned[-1:, :, :], zfv_owned], axis=0)
+                return (
+                    zfu / jnp.asarray(_grid.dy_u)[..., None],
+                    zfv / jnp.asarray(_grid.dx_v)[..., None],
+                    zfw / jnp.asarray(_grid.area_T)[..., None],
+                    geometry[3], geometry[4], geometry[5], geometry[6],
+                    zfu, zfv, geometry[9], geometry[10],
+                    *geometry[11:],
                 )
 
             def _stage_hpg_operands(T_stage, S_stage, eta_stage):
@@ -5249,24 +7860,57 @@ class LatLonCGridOceanModel:
                     eta_stage = state.eta.data
                 return (T_stage, S_stage, eta_stage)
 
+            def _stage2_hpg_operands(T_stage, S_stage, eta_stage):
+                override = (
+                    self._nemo_ws_test_hooks.stage2_thermodynamic_override)
+                if override is not None:
+                    return override
+                return _stage_hpg_operands(T_stage, S_stage, eta_stage)
+
             # stage 1 (dt/3): Kmm = Kbb transport, full RHS incl. vertical UP3
             _g0 = _nemo_ws_stage_transport(
                 (u0, v0), h_k_old, 0, eta_stage=state.eta.data,
+                dt=(dt / 3.0 if self._nemo_ws_test_hooks.source_stage_wzv_clock_arm
+                    else dt),
+                barotropic_velocity=(
+                    None if _legacy_reduced_transport_mean_arm else
+                    _nemo_ws_stage_barotropic_velocity(
+                        1,
+                        ((state.uu_b.data, state.vv_b.data)
+                         if state.uu_b is not None and state.vv_b is not None
+                         else (jnp.zeros_like(target_u),
+                               jnp.zeros_like(target_v))),
+                        (target_u, target_v))),
                 **_stage_transport_kw)
-            _vert0 = _stage_vertical_up3(u0, v0, _g0)
-            # NEMO hands stage 1 the SAME Kmm transport it hands stages 2-3:
-            # ``zFu = e2u*e3u(Kmm)*(uu(Kmm) + zub)`` with ``zub = un_adv/
-            # hu(Kmm) - uu_b(Kmm)`` (stprk3_stg.F90:265-275), consumed by
-            # stage 1's dyn_adv at :315 exactly as by :333.  The step-entry
-            # ``tendencies()`` above ran BEFORE the external solve produced
-            # ``un_adv``, so its horizontal UP3 flux advected with zub = 0.
-            # Add the transport's contribution as the difference of the
-            # stage helper evaluated with and without it on the SAME entry
-            # state: every term the helper carries cancels exactly, only
-            # the zub advection survives (isomorphism row S-21; measured
-            # 3.136e-07 m/s^2 at the OVERFLOW kt=2 entry, exactly zero from
-            # rest).
-            _du1_rhs, _dv1_rhs = du_dt_pert, dv_dt_pert
+            if self._nemo_ws_test_hooks.expose_stage1_wzv:
+                _nemo_ws_exposed_stage1_wzv = _g0[2]
+            _operand_name = (
+                self._nemo_ws_test_hooks.expose_stage1_transport_operand)
+            if _operand_name == "thickness":
+                _nemo_ws_exposed_stage1_transport_operand = (_g0[4], _g0[5])
+            elif _operand_name == "corrected_velocity":
+                _nemo_ws_exposed_stage1_transport_operand = (_g0[9], _g0[10])
+            elif _operand_name == "transport_average":
+                _nemo_ws_exposed_stage1_transport_operand = (
+                    jnp.broadcast_to(Hu_avg[..., None], _g0[9].shape),
+                    jnp.broadcast_to(Hv_avg[..., None], _g0[10].shape))
+            elif _operand_name:
+                raise ValueError(
+                    "expose_stage1_transport_operand must be empty, "
+                    "'thickness', 'corrected_velocity', or "
+                    "'transport_average'")
+            # The compiled vector program completes Krhs in stp_2D and stage
+            # 1 consumes it directly: the transport/W built above feeds the
+            # tracer path, while only the non-vector branch calls dyn_adv
+            # here (stprk3_stg.F90:326-374,661-675).  Keep the projected,
+            # post-external recomputation solely for that non-vector arm.
+            _vert0 = (None if _vector_velocity_stage_update else
+                      _stage_vertical_up3(u0, v0, _g0))
+            _du1_rhs, _dv1_rhs = (
+                (du_dt, dv_dt) if _vector_velocity_stage_update
+                else (du_dt_pert, dv_dt_pert))
+            _nemo_ws_live_stage1_full_rhs = (du_dt, dv_dt)
+            _stage1_rhs_base = (_du1_rhs, _dv1_rhs)
             # The stage's NEMO e3u/e3v(Kmm) pair for the flux-form momentum
             # advection, from the ONE kernel (_nemo_ws_qco_stage_faces) keyed
             # on the stage ssh -- NOT read off the stage transport's geom[4],
@@ -5282,44 +7926,228 @@ class LatLonCGridOceanModel:
                 return _nemo_ws_qco_stage_faces(
                     eta_stage, _h_ref_ws, _u_live_mask, _v_live_mask, _grid)[:2]
 
-            _face_thickness_kbb = _stage_face_thickness(state.eta.data)
-            if _transport_target is not None:
+            def _stage_zad_operands(stage, live):
+                # Rounds 158/194.  Replace only the slots the private hook
+                # names, so one dyn_zad operand at a time can come from NEMO's
+                # recorded stage while all other stage inputs stay legoESM's.
+                overrides = (
+                    self._nemo_ws_test_hooks.stage2_zad_operand_override,
+                    self._nemo_ws_test_hooks.stage3_zad_operand_override)
+                override = overrides[stage - 2]
+                if override is None:
+                    return live
+                return tuple(
+                    live[index] if override[index] is None
+                    else override[index] for index in range(3))
+
+            _face_thickness_kbb = (
+                None if _vector_velocity_stage_update
+                else _stage_face_thickness(state.eta.data))
+            if (_transport_target is not None
+                    and not _vector_velocity_stage_update):
                 _p0_with_zub = _mom_pert_ws(
                     u0, v0, False, _transport_target,
-                    stage_face_thickness=_face_thickness_kbb)
+                    stage_face_thickness=_face_thickness_kbb, stage_index=1)
                 _p0_no_zub = _mom_pert_ws(
                     u0, v0, False, None,
-                    stage_face_thickness=_face_thickness_kbb)
+                    stage_face_thickness=_face_thickness_kbb, stage_index=1)
                 _du1_rhs = _du1_rhs + (_p0_with_zub[0] - _p0_no_zub[0])
                 _dv1_rhs = _dv1_rhs + (_p0_with_zub[1] - _p0_no_zub[1])
+            _stage1_rhs_post_transport = (_du1_rhs, _dv1_rhs)
+            if not _vector_velocity_stage_update:
+                # In the non-vector program, replace the pre-external ZAD
+                # association with the stage transport's W operand.
+                _p0_with_zad = _mom_pert_ws(
+                    u0, v0, False, None,
+                    stage_face_thickness=_face_thickness_kbb,
+                    stage_zad_operands=(_g0[2], _g0[4], _g0[5]),
+                    stage_index=1)
+                _p0_without_zad = _mom_pert_ws(
+                    u0, v0, False, None,
+                    stage_face_thickness=_face_thickness_kbb, stage_index=1)
+                _du1_rhs = _du1_rhs + (_p0_with_zad[0] - _p0_without_zad[0])
+                _dv1_rhs = _dv1_rhs + (_p0_with_zad[1] - _p0_without_zad[1])
+            _stage1_rhs_post_zad = (_du1_rhs, _dv1_rhs)
             # Stage 1: Kmm = Kbb, so the RHS carries (1 + r3u(Kbb)).
-            u1_raw = (_qu_b * u0 + (dt_mom / 3.0) * _qu_b * (
-                _du1_rhs if _vert0 is None else _du1_rhs + _vert0[0])
-            ) / _qu_13
-            v1_raw = (_qv_b * v0 + (dt_mom / 3.0) * _qv_b * (
-                _dv1_rhs if _vert0 is None else _dv1_rhs + _vert0[1])
-            ) / _qv_13
+            _u1_rhs = _du1_rhs if _vert0 is None else _du1_rhs + _vert0[0]
+            _v1_rhs = _dv1_rhs if _vert0 is None else _dv1_rhs + _vert0[1]
+            _nemo_ws_live_stage1_rhs_walk = (
+                _stage1_rhs_base,
+                _stage1_rhs_post_transport,
+                _stage1_rhs_post_zad,
+                (_u1_rhs, _v1_rhs),
+            )
+            if self._nemo_ws_test_hooks.expose_stage1_momentum_rhs:
+                _nemo_ws_exposed_stage1_rhs = (_u1_rhs, _v1_rhs)
+            _stage1_split_arm = (
+                self._nemo_ws_test_hooks.expose_stage1_momentum_rhs_split)
+            if _stage1_split_arm:
+                if _nemo_ws_stage1_main_advection is None:
+                    raise ValueError(
+                        "expose_stage1_momentum_rhs_split needs the "
+                        "step-level per-term decomposition")
+                if _aimp_vertadv_ws:
+                    # With ln_zad_Aimp=.true. the step-level tendency does
+                    # NOT carry the vertical advection that ``advection_u``
+                    # reports (it is applied as its own operator-split
+                    # stage), so subtracting the reported half would remove a
+                    # term the array never held.  Fail closed.
+                    raise ValueError(
+                        "expose_stage1_momentum_rhs_split is defined only "
+                        "with adaptive_implicit_vertadv disabled")
+                if _stage1_split_arm == "completed":
+                    _nemo_ws_exposed_stage1_rhs = (_u1_rhs, _v1_rhs)
+                elif _stage1_split_arm in ("advection_horizontal",
+                                           "advection_vertical",
+                                           "advection_zub_increment"):
+                    # The two halves of the SAME removed content, published
+                    # apart so ``dyn_adv_up3``'s horizontal flux divergence
+                    # (dynadv_up3.f90:174-215) and its vertical block
+                    # (:245-360) can be scored part by part.  Each stage
+                    # increment belongs to exactly one half: the ``zub``
+                    # transport increment reaches the flux-form horizontal
+                    # term alone, the stage ZAD increment reaches dyn_zad's
+                    # operands alone.
+                    _hpart, _vpart = _nemo_ws_stage1_advection_halves
+                    _dt_u = (_stage1_rhs_post_transport[0]
+                             - _stage1_rhs_base[0])
+                    _dt_v = (_stage1_rhs_post_transport[1]
+                             - _stage1_rhs_base[1])
+                    _dz_u = (_stage1_rhs_post_zad[0]
+                             - _stage1_rhs_post_transport[0])
+                    _dz_v = (_stage1_rhs_post_zad[1]
+                             - _stage1_rhs_post_transport[1])
+                    if _stage1_split_arm == "advection_zub_increment":
+                        # The horizontal half's barotropic cross-term on its
+                        # own: what replacing the raw Kmm velocity by the
+                        # zub-corrected transport velocity
+                        # (stprk3_stg.f90:264-277) does to the trend.
+                        _nemo_ws_exposed_stage1_rhs = (_dt_u, _dt_v)
+                    elif _stage1_split_arm == "advection_horizontal":
+                        _nemo_ws_exposed_stage1_rhs = (
+                            _hpart[0] + _dt_u, _hpart[1] + _dt_v)
+                    else:
+                        _nemo_ws_exposed_stage1_rhs = (
+                            _vpart[0] + _dz_u, _vpart[1] + _dz_v)
+                else:
+                    # ``_stage1_rhs_base`` is the stage-1 right-hand side
+                    # before the three addends that follow it, and ALL THREE
+                    # are pure advection: the zub transport operand, the
+                    # stage ZAD operand, and the explicit vertical UP3 term
+                    # ``_vert0`` -- which is None here because the guard
+                    # above refuses this hook whenever the adaptive implicit
+                    # vertical advection that would make it non-None is on.
+                    # So removing the step-level advection component leaves
+                    # exactly the non-advective right-hand side: NEMO's
+                    # ``Krhs`` as ``stp_2D`` hands it to stage 1.
+                    _nemo_ws_exposed_stage1_rhs = (
+                        _stage1_rhs_base[0]
+                        - _nemo_ws_stage1_main_advection[0],
+                        _stage1_rhs_base[1]
+                        - _nemo_ws_stage1_main_advection[1])
+            if self._nemo_ws_test_hooks.stage1_momentum_rhs_override is not None:
+                _u1_rhs, _v1_rhs = (
+                    self._nemo_ws_test_hooks.stage1_momentum_rhs_override)
+            u1_raw = rk3_stage_velocity_update(
+                u0, _u1_rhs, dt_mom / 3.0, _ws_stage_u_mask,
+                vector_form=_vector_velocity_stage_update,
+                qco_before=_qu_b, qco_now=_qu_b, qco_after=_qu_13)
+            v1_raw = rk3_stage_velocity_update(
+                v0, _v1_rhs, dt_mom / 3.0, _ws_stage_v_mask,
+                vector_form=_vector_velocity_stage_update,
+                qco_before=_qv_b, qco_now=_qv_b, qco_after=_qv_13)
+            if self._nemo_ws_test_hooks.expose_stage1_raw_momentum:
+                _nemo_ws_exposed_stage1_raw = (u1_raw, v1_raw)
             u1_corr, v1_corr = _replace_stage_mean(
                 u1_raw, v1_raw, target_u, target_v)
-            _T_stage1, _S_stage1 = _stage_tracers(1, (_g0, _g0, _g0))
+            _g0_tracer = _tracer_transport_geometry_override(
+                _g0,
+                self._nemo_ws_test_hooks.stage1_tracer_transport_override)
+            _stage1_tracer_result = _stage_tracers(
+                1, (_g0_tracer, _g0, _g0))
+            if self._nemo_ws_test_hooks.expose_tracer_stage1_boundary:
+                (
+                    _T_stage1, _S_stage1,
+                    _T_stage1_after_adv, _S_stage1_after_adv,
+                    _T_stage1_after_sbc, _S_stage1_after_sbc,
+                ) = _stage1_tracer_result
+                if (self._nemo_ws_test_hooks.expose_tracer_stage1_boundary
+                        == "after_advection"):
+                    _nemo_ws_exposed_tracer_boundary = (
+                        _T_stage1_after_adv, _S_stage1_after_adv)
+                else:
+                    _nemo_ws_exposed_tracer_boundary = (
+                        _T_stage1_after_sbc, _S_stage1_after_sbc)
+            else:
+                _T_stage1, _S_stage1 = _stage1_tracer_result
+            if (_stage_entry_override is not None
+                    and _stage_entry_override[0] == 2):
+                (_, u1_corr, v1_corr, _T_stage1, _S_stage1,
+                 _eta_live_one_third) = _stage_entry_override
             if self._nemo_ws_test_hooks.expose_tracer_stage == 1:
                 _nemo_ws_exposed_tracer_stage = (
                     _T_stage1, _S_stage1, _eta_live_one_third)
             # stage 2 (dt/2): Kmm = stage-1 Kaa
             _g1 = _nemo_ws_stage_transport(
                 (u1_corr, v1_corr), _h_live_one_third, 1,
-                eta_stage=_eta_live_one_third, **_stage_transport_kw)
+                eta_stage=_eta_live_one_third,
+                dt=(dt / 2.0 if self._nemo_ws_test_hooks.source_stage_wzv_clock_arm
+                    else dt),
+                barotropic_velocity=(
+                    None if _legacy_reduced_transport_mean_arm else
+                    _nemo_ws_stage_barotropic_velocity(
+                        2,
+                        ((state.uu_b.data, state.vv_b.data)
+                         if state.uu_b is not None and state.vv_b is not None
+                         else (jnp.zeros_like(target_u),
+                               jnp.zeros_like(target_v))),
+                        (target_u, target_v))),
+                velocity_form_wzv=(
+                    self._nemo_ws_test_hooks.stage2_wzv_velocity_form),
+                momentum_velocity_form_w=_momentum_wzv_split,
+                momentum_wzv_clock=(
+                    (dt / 2.0,
+                     0.5 * (state.eta.data + state_new.eta.data))
+                    if self._nemo_ws_test_hooks
+                    .stage2_momentum_wzv_clock_pair else None),
+                **_stage_transport_kw)
             p1u_corr, p1v_corr = _mom_pert_ws(
                 u1_corr, v1_corr, True, _transport_target,
-                _stage_hpg_operands(_T_stage1, _S_stage1, _eta_live_one_third),
+                _stage2_hpg_operands(
+                    _T_stage1, _S_stage1, _eta_live_one_third),
                 _stage_vertical_up3(u1_corr, v1_corr, _g1),
-                stage_face_thickness=_stage_face_thickness(_eta_live_one_third))
-            u2_raw = (_qu_b * u0 + (dt_mom / 2.0) * _qu_13 * p1u_corr) / _qu_12
-            v2_raw = (_qv_b * v0 + (dt_mom / 2.0) * _qv_13 * p1v_corr) / _qv_12
+                stage_face_thickness=_stage_face_thickness(_eta_live_one_third),
+                stage_zad_operands=_stage_zad_operands(2,
+                    (_momentum_stage_w(_g1), _g1[4], _g1[5])),
+                stage_index=2)
+            _stage2_rhs_production = (p1u_corr, p1v_corr)
+            if self._nemo_ws_test_hooks.stage2_momentum_rhs_override is not None:
+                p1u_corr, p1v_corr = (
+                    self._nemo_ws_test_hooks.stage2_momentum_rhs_override)
+            if self._nemo_ws_test_hooks.expose_stage2_momentum_rhs:
+                _nemo_ws_exposed_stage2_rhs = _stage2_rhs_production
+            u2_raw = rk3_stage_velocity_update(
+                u0, p1u_corr, dt_mom / 2.0, _ws_stage_u_mask,
+                vector_form=_vector_velocity_stage_update,
+                qco_before=_qu_b, qco_now=_qu_13, qco_after=_qu_12)
+            v2_raw = rk3_stage_velocity_update(
+                v0, p1v_corr, dt_mom / 2.0, _ws_stage_v_mask,
+                vector_form=_vector_velocity_stage_update,
+                qco_before=_qv_b, qco_now=_qv_13, qco_after=_qv_12)
+            if self._nemo_ws_test_hooks.expose_stage2_raw_momentum:
+                _nemo_ws_exposed_stage2_raw = (u2_raw, v2_raw)
             u2_corr, v2_corr = _replace_stage_mean(
                 u2_raw, v2_raw, target_u, target_v)
+            _g1_tracer = _tracer_transport_geometry_override(
+                _g1,
+                self._nemo_ws_test_hooks.stage2_tracer_transport_override)
             _T_stage2, _S_stage2 = _stage_tracers(
-                2, (_g0, _g1, _g1), resume=(1, _T_stage1, _S_stage1))
+                2, (_g0, _g1_tracer, _g1),
+                resume=(1, _T_stage1, _S_stage1))
+            if (_stage_entry_override is not None
+                    and _stage_entry_override[0] == 3):
+                (_, u2_corr, v2_corr, _T_stage2, _S_stage2,
+                 _eta_live_one_half) = _stage_entry_override
             if self._nemo_ws_test_hooks.expose_tracer_stage == 2:
                 _nemo_ws_exposed_tracer_stage = (
                     _T_stage2, _S_stage2, _eta_live_one_half)
@@ -5327,17 +8155,119 @@ class LatLonCGridOceanModel:
             # stage 3 (dt): Kmm = stage-2 Kaa; ww split into explicit/implicit
             _g2 = _nemo_ws_stage_transport(
                 (u2_corr, v2_corr), _h_live_one_half, 2,
-                eta_stage=_eta_live_one_half, **_stage_transport_kw)
+                eta_stage=_eta_live_one_half,
+                dt=dt,
+                barotropic_velocity=(
+                    None if _legacy_reduced_transport_mean_arm else
+                    _nemo_ws_stage_barotropic_velocity(
+                        3,
+                        ((state.uu_b.data, state.vv_b.data)
+                         if state.uu_b is not None and state.vv_b is not None
+                         else (jnp.zeros_like(target_u),
+                               jnp.zeros_like(target_v))),
+                        (target_u, target_v))),
+                momentum_velocity_form_w=_momentum_wzv_split,
+                **_stage_transport_kw)
+            _g2_override = self._nemo_ws_test_hooks.stage3_transport_override
+            _g2 = _tracer_transport_geometry_override(_g2, _g2_override)
+            if _g2_override is not None:
+                _g2 = (*_g2[:6], jnp.zeros_like(_g2[6]), *_g2[7:])
+            _stage3_hpg_operands = _stage_hpg_operands(
+                _T_stage2, _S_stage2, _eta_live_one_half)
+            _stage3_vertical_up3 = _stage_vertical_up3(u2_corr, v2_corr, _g2)
+            _stage3_face_thickness = _stage_face_thickness(_eta_live_one_half)
             p2u_corr, p2v_corr = _mom_pert_ws(
                 u2_corr, v2_corr, False, _transport_target,
-                _stage_hpg_operands(_T_stage2, _S_stage2, _eta_live_one_half),
-                _stage_vertical_up3(u2_corr, v2_corr, _g2),
-                stage_face_thickness=_stage_face_thickness(_eta_live_one_half))
-            u3_raw = (_qu_b * u0 + dt_mom * _qu_12 * p2u_corr) / _qu_aa
-            v3_raw = (_qv_b * v0 + dt_mom * _qv_12 * p2v_corr) / _qv_aa
-            u3_corr, v3_corr = _replace_stage_mean(
-                u3_raw, v3_raw, target_u, target_v)
+                _stage3_hpg_operands,
+                _stage3_vertical_up3,
+                stage_face_thickness=_stage3_face_thickness,
+                stage_zad_operands=_stage_zad_operands(3, (
+                    _momentum_stage_w(_g2), _g2[4], _g2[5])),
+                stage_index=3)
+            _expose_stage3_rhs = (
+                self._nemo_ws_test_hooks.expose_stage3_momentum_rhs)
+            if _expose_stage3_rhs == "post_ldf":
+                # stprk3_stg.F90:430 -- the operand dyn_zdf receives.
+                _nemo_ws_exposed_stage3_rhs = (p2u_corr, p2v_corr)
+            elif _expose_stage3_rhs == "pre_ldf":
+                # stprk3_stg.F90:400 -- the operand dyn_ldf receives.  A second
+                # WRITE-only evaluation of the SAME stage with the lateral
+                # term withheld; the production RHS above is untouched.
+                _nemo_ws_exposed_stage3_rhs = _mom_pert_ws(
+                    u2_corr, v2_corr, True, _transport_target,
+                    _stage3_hpg_operands,
+                    _stage3_vertical_up3,
+                    stage_face_thickness=_stage3_face_thickness,
+                    stage_zad_operands=_stage_zad_operands(3, (
+                    _momentum_stage_w(_g2), _g2[4], _g2[5])),
+                    stage_index=3)
+            elif _expose_stage3_rhs:
+                raise ValueError(
+                    "expose_stage3_momentum_rhs must be empty, 'pre_ldf', or "
+                    f"'post_ldf'; got {_expose_stage3_rhs!r}")
+            # ARM.  The stage-3 time step is dyn_zdf's, and dynzdf.F90:119
+            # selects on the SAME ln_dynadv_vec .OR. lk_linssh predicate that
+            # stprk3_stg.F90:365 uses at stages 1 and 2 -- vector arm at
+            # dynzdf.F90:121-122, key_qco arm at :127-132.  Same helper, same
+            # selector, so stage 3 cannot drift from stages 1 and 2 again.
+            u3_raw = rk3_stage_velocity_update(
+                u0, p2u_corr, dt_mom, _ws_stage_u_mask,
+                vector_form=_vector_velocity_stage_update,
+                qco_before=_qu_b, qco_now=_qu_12, qco_after=_qu_aa)
+            v3_raw = rk3_stage_velocity_update(
+                v0, p2v_corr, dt_mom, _ws_stage_v_mask,
+                vector_form=_vector_velocity_stage_update,
+                qco_before=_qv_b, qco_now=_qv_12, qco_after=_qv_aa)
+            # ORDER.  The barotropic correction (stprk3_stg.F90:437-446) sits
+            # BELOW the CALL dyn_zdf at stprk3_stg.F90:430, so at stage 3 it
+            # runs AFTER the implicit vertical solve, never before it.  Stage
+            # 3 therefore hands the solve the masked explicit update -- the
+            # vector dyn_zdf builds for itself at dynzdf.F90:121-122 -- and
+            # ``_ws_stage3_correction`` below applies the correction ONCE, at
+            # the post-solve site.  Stages 1 and 2 keep their inline call:
+            # NEMO's banner at stprk3_stg.F90:433 says "All stages", and no
+            # solve runs between a stage update and its correction there.
+            u3_corr = u3_raw * _ws_stage_u_mask
+            v3_corr = v3_raw * _ws_stage_v_mask
+            _ws_stage3_correction = (
+                _replace_stage_mean, target_u, target_v)
             _nemo_ws_live_stage_geometry = (_g0, _g1, _g2)
+            _nemo_ws_live_stage_states = (
+                (u0, v0, state.T.data, state.S.data, state.eta.data),
+                (u1_corr, v1_corr, _T_stage1, _S_stage1,
+                 _eta_live_one_third),
+                (u2_corr, v2_corr, _T_stage2, _S_stage2,
+                 _eta_live_one_half),
+            ); _nemo_ws_live_stage_raw = ((u1_raw, v1_raw), (u2_raw, v2_raw), (u3_raw, v3_raw)); _nemo_ws_live_stage_rhs = ((_u1_rhs, _v1_rhs), (p1u_corr, p1v_corr), (p2u_corr, p2v_corr))  # noqa: E501,E702
+            _nemo_ws_live_stage_qco = (
+                (_qt_b - 1.0, _qu_b - 1.0, _qv_b - 1.0),
+                (_qt_13 - 1.0, _qu_13 - 1.0, _qv_13 - 1.0),
+                (_qt_12 - 1.0, _qu_12 - 1.0, _qv_12 - 1.0),
+            )
+            if self._nemo_ws_test_hooks.expose_tracer_transport_stage:
+                _stage_index = (
+                    self._nemo_ws_test_hooks.expose_tracer_transport_stage - 1)
+                if _stage_index not in (0, 1, 2):
+                    raise ValueError(
+                        "expose_tracer_transport_stage must be 0, 1, 2, or 3")
+                _exposed_geom = _nemo_ws_live_stage_geometry[_stage_index]
+                _exposed_w = (
+                    _momentum_stage_w(_exposed_geom)
+                    if self._nemo_ws_test_hooks.expose_stage_momentum_w
+                    else _exposed_geom[2])
+                _nemo_ws_exposed_tracer_transport = (
+                    _exposed_geom[7],
+                    _exposed_geom[8],
+                    (_exposed_w
+                     if self._nemo_ws_test_hooks.expose_tracer_transport_as_ww
+                     else _exposed_w
+                     * jnp.asarray(_grid.area_T)[..., None]),
+                )
+            if self._nemo_ws_test_hooks.expose_stage_face_r3:
+                _r3_stage = _nemo_ws_live_stage_qco[
+                    self._nemo_ws_test_hooks.expose_stage_face_r3 - 1]
+                _nemo_ws_exposed_stage_face_r3 = (
+                    _r3_stage[1][..., 0], _r3_stage[2][..., 0])
             u3_corr = u3_corr.at[:, -1].set(u3_corr[:, 0])
             state_new = state_new._replace(
                 u=state_new.u.replace(data=u3_corr),
@@ -5730,7 +8660,8 @@ class LatLonCGridOceanModel:
                         Hu_avg=Hu_avg, Hv_avg=Hv_avg,
                         u_mask_3d=u_mask_3d_tracer,
                         v_mask_3d=v_mask_3d_tracer, grid=_grid,
-                        z_coord=_zc, config=_cfg_b, dt=dt,
+                        z_coord=_zc, H_bathy=state.H_bathy.data,
+                        config=_cfg_b, dt=dt,
                         legacy_min_face_thickness=(
                             self._nemo_ws_test_hooks
                             .legacy_stage_min_face_thickness),
@@ -5863,6 +8794,55 @@ class LatLonCGridOceanModel:
         # (every other caller) ⇒ bit-identical.
         _T_gm_in = T_mid if _ldf_state is None else _ldf_state[0]
         _S_gm_in = S_mid if _ldf_state is None else _ldf_state[1]
+        # The positional ``eta`` these three GM/Redi calls receive.  Naa (the
+        # step's own after-ssh) on every historical lane.
+        _eta_gm_in = state_new.eta.data
+
+        # NEMO's WS-RK3 STAGE PROGRAM COMPUTES THE NEUTRAL SLOPES ONCE PER
+        # STEP, ON THE BEFORE STATE, OUTSIDE THE STAGE LOOP:
+        #
+        #     CALL eos ( ts, Nbb, rhd )                   stprk3.F90:173
+        #     CALL ldf_slp( kstp, rhd, rn2b, Nbb, Nbb )   stprk3.F90:174
+        #     ...
+        #     CALL stp_RK3_stg( 1, kstp, Nbb, Nbb, Nrhs, Naa )   :195
+        #     CALL stp_RK3_stg( 2, ... )  :200      CALL stp_RK3_stg( 3, ... )  :207
+        #
+        # ``rhd`` is the density of the BEFORE tracers, ``rn2b`` the BEFORE
+        # Brunt-Vaisala frequency, and ``Kbb = Kmm = Nbb`` inside ``ldf_slp``
+        # so every geometry it reads -- gdept, gdepw, e3u, e3v, e3w and the ssh
+        # behind them -- is at the before level too (ldfslp.F90:143,161,
+        # 212-215,226-231,290).  ``traldf_iso_a33`` then squares those
+        # once-per-step slopes into ``ah_wslp2`` at each stage
+        # (traldf_iso.F90:135,296-297) and ``trazdf.F90:173`` adds it to
+        # ``avt``.  NOTHING in ``ah_wslp2`` carries a stage time level at all:
+        # ``ahtu``/``ahtv`` have no time index (traldf_iso.F90:291-294) and the
+        # only ``Kmm`` in that routine is ``akz``'s ``e3w`` (:325,:330), which
+        # this card does not reach (``ln_traldf_msc = F``).  An earlier draft
+        # of this comment said the ahtu average carried the stage's Kmm; an
+        # independent claim review corrected it.
+        #
+        # legoESM built them from ``T_mid``/``S_mid`` -- the forward-Euler
+        # PREDICTOR of the whole baroclinic tendency, built above -- and from
+        # the after-ssh.  MEASURED on GYRE's kt=1 step: that predictor is
+        # 0.3372313792464041 K away from step entry on 10199 of 21120 cells,
+        # where NEMO's own stage-minus-before tracer anomaly is 7.25e-6 K, and
+        # the resulting K33 reaches 9.6620886711883531e-13 m2/s where NEMO's
+        # ah_wslp2 on the same step is IDENTICALLY 0.0.  Substituting one
+        # component at a time into the model's own call: tracers := step entry
+        # gives 1.3071545538245700e-14, eta := step entry gives
+        # 9.6625031189531020e-13, BOTH give EXACTLY 0.0 on all 20416 faces.
+        #
+        # So on the WS-RK3 tracer lane the slope operand set IS the step-entry
+        # (Kbb) state.  ``_ldf_state`` is the same statement for the
+        # modified-leapfrog lane and takes precedence where it is supplied;
+        # every other integrator has no stage loop for this statement to be
+        # about and is untouched, bit for bit.
+        if (_ldf_state is None
+                and getattr(_cfg_b, "tracer_time_integrator", "euler")
+                == "rk3_ws"):
+            _T_gm_in = state.T.data
+            _S_gm_in = state.S.data
+            _eta_gm_in = state.eta.data
 
         # GM/Redi isopycnal mixing (if configured)
         k33_implicit = None  # vertical isoneutral diffusivity K_33 for the
@@ -6088,10 +9068,11 @@ class LatLonCGridOceanModel:
                 # K33 and the isoneutral flux it augments would disagree on
                 # which time level they came from.
                 _gm_dens_jac = gm_redi_density_and_jacobian(
-                    _T_gm_in, _S_gm_in, state_new.eta.data,
+                    _T_gm_in, _S_gm_in, _eta_gm_in,
                     state_new.H_bathy.data,
                     _grid, _zc,
                     eos=_cfg_b.eos, eos_linear=_cfg_b.eos_linear,
+                    eos_nemo_seos=_cfg_b.eos_nemo_seos,
                     mask=state.land_mask.data,
                     rho_0=_cfg_b.constants.rho_0,
                     g=_cfg_b.constants.g,
@@ -6106,9 +9087,10 @@ class LatLonCGridOceanModel:
                 and getattr(gm_cfg, "slope_scheme", "") == "nemo_iso_lap"
             )
             _gm_out = gm_redi_tracer_tendency_latlon(
-                _T_gm_in, _S_gm_in, state_new.eta.data, state_new.H_bathy.data,
+                _T_gm_in, _S_gm_in, _eta_gm_in, state_new.H_bathy.data,
                 _grid, _zc, gm_cfg,
                 eos=_cfg_b.eos, eos_linear=_cfg_b.eos_linear,
+                eos_nemo_seos=_cfg_b.eos_nemo_seos,
                 mask=state.land_mask.data,
                 u_mask=state.u_mask.data,
                 v_mask=state.v_mask.data,
@@ -6132,14 +9114,22 @@ class LatLonCGridOceanModel:
                 native_slope_eta=state.eta.data,
                 # ldf_eiv_trp precedes dynamics and consumes the same-stage
                 # ldf_slp slopes, while the later tra_ldf tensor consumes Kmm
-                # geometry. Keep the through-FCT bolus on the historical Naa
-                # slope geometry as the Redi tensor alone receives Kmm eta.
-                native_bolus_slope_eta=state_new.eta.data,
-                # tra_ldf runs after dynamics but e3u/e3v are indexed Kmm:
-                # carry the step-entry Nnn SSH rather than recomputing from
-                # state_new.eta (Naa). stpmlf.F90:528,548 + scheme.h90:73-74.
+                # geometry -- that is the stpMLF reading, and on the leapfrog
+                # lanes ``_eta_gm_in`` is ``state_new.eta.data``, so it is
+                # unchanged there.  On the WS-RK3 lane there is exactly ONE
+                # ldf_slp call per step and it is on Nbb (stprk3.F90:174), so
+                # the bolus and the Redi tensor read the SAME before-state
+                # slope field; an independent diff review found this operand
+                # left on Naa while the comment above claimed the whole slope
+                # operand set had moved.  MEASURED inert on GYRE: the card
+                # resolves kappa_GM = 0.0 and gm_bolus_advection = "centred",
+                # so the bolus is not even requested there.
+                native_bolus_slope_eta=_eta_gm_in,
+                # tra_ldf e3u/e3v use the step-entry Nnn SSH (Kmm).
                 redi_flux_eta=state.eta.data,
                 return_bolus_transport=_want_bolus,
+                return_redi_diagnostics=(_return_tracer_process_trace and self._nemo_ws_test_hooks.tracer_ldf_diagnostics is not None), return_redi_slope_diagnostics=(_return_tracer_process_trace and (self._nemo_ws_test_hooks.tracer_ldf_diagnostics == "slope" or isinstance(self._nemo_ws_test_hooks.tracer_ldf_diagnostics, dict))), native_slope_nmln_override=(self._nemo_ws_test_hooks.tracer_ldf_diagnostics.get("nmln") if isinstance(self._nemo_ws_test_hooks.tracer_ldf_diagnostics, dict) else None),
+                redi_face_thickness_override=(self._nemo_ws_test_hooks.tracer_ldf_diagnostics if isinstance(self._nemo_ws_test_hooks.tracer_ldf_diagnostics, tuple) else None),
                 dt=dt,
                 eos_depth=getattr(_cfg_b, "eos_depth", "insitu"),
             )
@@ -6154,7 +9144,7 @@ class LatLonCGridOceanModel:
                         )
                     )
             else:
-                dT_gm, dS_gm = _gm_out
+                dT_gm, dS_gm, *_ldf_diag = _gm_out; _nemo_ws_ldf_diagnostics = _ldf_diag[0] if _ldf_diag else None
             if gm_cfg.implicit_K33:
                 # Veros-faithful: K_33 (the vertical isoneutral diagonal ∝ S²) was
                 # dropped from the explicit F_z above (implicit_K33=True); recompute
@@ -6170,10 +9160,11 @@ class LatLonCGridOceanModel:
                 # isoneutral flux they augment (adversarial-review CONFIRMED
                 # finding, P1).
                 k33_implicit = compute_isoneutral_K33_latlon(
-                    _T_gm_in, _S_gm_in, state_new.eta.data,
+                    _T_gm_in, _S_gm_in, _eta_gm_in,
                     state_new.H_bathy.data,
                     _grid, _zc, gm_cfg,
                     eos=_cfg_b.eos, eos_linear=_cfg_b.eos_linear,
+                    eos_nemo_seos=_cfg_b.eos_nemo_seos,
                     mask=state.land_mask.data,
                     rho_0=_cfg_b.constants.rho_0, g=_cfg_b.constants.g,
                     omega=_cfg_b.omega,
@@ -6332,11 +9323,23 @@ class LatLonCGridOceanModel:
                 )
                 _pair_divs = (None, None)
             elif _tti == "rk3_ws":
+                _ws_stage_source_rates = _stage_source_rates
+                if _cfg_b.gm_redi is not None:
+                    _ws_stage_source_rates = (
+                        _stage_source_rates[0],
+                        _stage_source_rates[1],
+                        (
+                            _stage_source_rates[2][0] + dT_gm * active_3d,
+                            _stage_source_rates[2][1] + dS_gm * active_3d,
+                        ),
+                    )
                 _bbl_context = None
-                if (_cfg_b.bbl_adv_option == 2
+                if ((_cfg_b.bbl_adv_option == 2
+                     or _cfg_b.bbl_diffusive_option == 1)
                         and not self._nemo_ws_test_hooks.disable_bbl):
                     from legoesm.ocean.physics.bbl_adv import (
                         bbl_static_geometry,
+                        nemo_bbl_diffusive_geometry,
                         nemo_bbl_static_geometry,
                     )
                     _h_ref = jnp.asarray(_zc.h_partial)
@@ -6344,7 +9347,8 @@ class LatLonCGridOceanModel:
                         _h_ref = jnp.broadcast_to(_h_ref, h_k_old.shape)
                     _nemo_bbl_geometry = not (
                         self._nemo_ws_test_hooks.legacy_bbl_partial_geometry)
-                    if _nemo_bbl_geometry:
+                    _bbl_geom = None
+                    if _cfg_b.bbl_adv_option == 2 and _nemo_bbl_geometry:
                         _gdept0 = getattr(_zc, "nemo_gdept_0", None)
                         _e3u0 = getattr(_zc, "nemo_bbl_e3u_0", None)
                         _e3v0 = getattr(_zc, "nemo_bbl_e3v_0", None)
@@ -6356,20 +9360,49 @@ class LatLonCGridOceanModel:
                         _bbl_geom = nemo_bbl_static_geometry(
                             _h_ref, state.land_mask.data,
                             _gdept0, _e3u0, _e3v0)
-                    else:
+                    elif _cfg_b.bbl_adv_option == 2:
                         _bbl_geom = bbl_static_geometry(
                             _h_ref, state.land_mask.data)
+                    _diffusive_geom = None
+                    if _cfg_b.bbl_diffusive_option == 1:
+                        _gdept0 = getattr(_zc, "nemo_gdept_0", None)
+                        _e3u0 = getattr(_zc, "nemo_bbl_e3u_0", None)
+                        _e3v0 = getattr(_zc, "nemo_bbl_e3v_0", None)
+                        _raw_bbl = getattr(_zc, "nemo_een_barotropic", None)
+                        if (any(value is None
+                                for value in (_gdept0, _e3u0, _e3v0))
+                                or _raw_bbl is None):
+                            raise ValueError(
+                                "NEMO diffusive BBL requires exact gdept_0, "
+                                "e3u_0/e3v_0, metrics, and U/V masks")
+                        _diffusive_geom = nemo_bbl_diffusive_geometry(
+                            _h_ref, state.land_mask.data,
+                            _gdept0, _e3u0, _e3v0,
+                            _raw_bbl.e1u, _raw_bbl.e2u,
+                            _raw_bbl.e1v, _raw_bbl.e2v,
+                            _raw_bbl.umask, _raw_bbl.vmask,
+                            aht_m2_s=_cfg_b.bbl_aht_m2_s, grid=_grid,
+                        )
                     _bbl_context = (
+                        _cfg_b.bbl_adv_option,
+                        _cfg_b.bbl_diffusive_option,
                         _bbl_geom,
+                        _diffusive_geom,
                         jnp.asarray(_grid.area_T),
                         jnp.asarray(_grid.dy_u)[:, 1:-1],
                         jnp.asarray(_grid.dx_v)[1:-1, :],
                         _cfg_b.bbl_gamma_s,
+                        _cfg_b.bbl_aht_m2_s,
                         _cfg_b.rho_0,
                         _nemo_bbl_geometry,
+                        _grid,
+                        _cfg_b.eos,
                     )
-                T_corrected, S_corrected = _nemo_ws_rk3_tracer_pair_step(
-                    T_mid, S_mid, _adv,
+                _ws_tracer_result = _nemo_ws_rk3_tracer_pair_step(
+                    # NEMO's stage ladder always restarts from ts(Kbb).
+                    # The explicit non-advective tendency is supplied below
+                    # as the stage-3 Krhs source, not pre-applied to this base.
+                    state.T.data, state.S.data, _adv,
                     mass_flux_u_tr, mass_flux_v_tr, w_baro_tr,
                     h_k_old, h_k_new, h_u_old, h_v_old,
                     _grid, dt, active_3d, recon_fill_mask=_wall_fill_mask,
@@ -6377,9 +9410,11 @@ class LatLonCGridOceanModel:
                     stage_transport_geometry=(
                         tuple(
                             (mf_u, mf_v, jnp.zeros_like(w_stage), h_stage,
-                             hu_stage, hv_stage, jnp.zeros_like(wi_stage))
+                             hu_stage, hv_stage, jnp.zeros_like(wi_stage),
+                             zfu_stage, zfv_stage, corrected_u, corrected_v)
                             for (mf_u, mf_v, w_stage, h_stage, hu_stage,
-                                 hv_stage, wi_stage)
+                                 hv_stage, wi_stage, zfu_stage, zfv_stage,
+                                 corrected_u, corrected_v)
                             in _nemo_ws_stage_transport_geometry
                         )
                         if self._nemo_ws_test_hooks.disable_tracer_vertical_transport
@@ -6389,6 +9424,7 @@ class LatLonCGridOceanModel:
                         "nemo_rk3_two_step"
                         if self._nemo_ws_test_hooks.two_step_fct_predictor
                         else "one_step"),
+                    stage_source_rates=_ws_stage_source_rates,
                     bbl_context=_bbl_context,
                     # One stage ladder: stages 1-2 were advanced by the
                     # momentum program on the same Kmm transports as the
@@ -6400,7 +9436,63 @@ class LatLonCGridOceanModel:
                             or self._nemo_ws_test_hooks
                             .disable_tracer_vertical_transport)
                         else (2, *_nemo_ws_stage_tracers)),
+                    stage3_advection_content_override=(
+                        self._nemo_ws_test_hooks
+                        .stage3_advection_content_override),
+                    return_final_content=True,
+                    return_fct_activity=(
+                        _return_tracer_process_trace
+                        and self._nemo_ws_test_hooks
+                        .tracer_process_branch_activity),
                 )
+                if (_return_tracer_process_trace
+                        and self._nemo_ws_test_hooks
+                        .tracer_process_branch_activity):
+                    (T_corrected, S_corrected,
+                     _nemo_ws_content_T, _nemo_ws_content_S,
+                     _nemo_ws_advection_content_T,
+                     _nemo_ws_advection_content_S,
+                     _nemo_ws_fct_activity) = _ws_tracer_result
+                else:
+                    (T_corrected, S_corrected,
+                     _nemo_ws_content_T, _nemo_ws_content_S,
+                     _nemo_ws_advection_content_T,
+                     _nemo_ws_advection_content_S) = _ws_tracer_result
+                    _nemo_ws_fct_activity = None
+                _nemo_ws_tracer_content_rhs = (
+                    _nemo_ws_content_T, _nemo_ws_content_S)
+                _nemo_ws_advection_content_rhs = (
+                    _nemo_ws_advection_content_T,
+                    _nemo_ws_advection_content_S)
+                if _return_tracer_process_trace:
+                    if (_nemo_ws_process_qco is None
+                            or _nemo_ws_process_surface_rate is None
+                            or _nemo_ws_process_qsr_rate is None
+                            or _cfg_b.gm_redi is None):
+                        raise ValueError(
+                            "tracer process trace requires the resolved "
+                            "NEMO GYRE QSR and GM/Redi stage-3 program")
+                    _qbb, _qmm, _qaa, _hbb, _hmm, _haa = (
+                        _nemo_ws_process_qco)
+                    _process_adv = _nemo_ws_advection_content_T
+                    _process_sbc = (
+                        _process_adv + dt * _hmm
+                        * _nemo_ws_process_surface_rate)
+                    _process_qsr = (
+                        _process_sbc + dt * _hmm
+                        * _nemo_ws_process_qsr_rate)
+                    _process_ldf = (
+                        _process_qsr + dt * _hmm
+                        * (dT_gm * active_3d))
+                    _h_safe_process = jnp.maximum(_haa, 1.0e-10)
+                    _nemo_ws_process_boundaries = (
+                        _hbb * state.T.data / _h_safe_process,
+                        _process_adv / _h_safe_process,
+                        _process_sbc / _h_safe_process,
+                        _process_qsr / _h_safe_process,
+                        _process_ldf / _h_safe_process,
+                        _nemo_ws_content_T / _h_safe_process,
+                    )
                 _pair_divs = (None, None)
             else:
                 # store_salt_flux capture (static config bool): ask the pair
@@ -6777,6 +9869,42 @@ class LatLonCGridOceanModel:
                     data=(state_new.v.data + _dv_bc) * v_mask_3d),
             )
 
+        _nemo_ws_pre_implicit_state = (
+            state_new
+            if self._nemo_ws_test_hooks.expose_pre_implicit_state else None)
+        if self._nemo_ws_test_hooks.expose_pre_implicit_content:
+            if _nemo_ws_tracer_content_rhs is None:
+                raise ValueError(
+                    "expose_pre_implicit_content requires a thickness-form "
+                    "NEMO tracer content RHS")
+            _content_diag_T, _content_diag_S = _nemo_ws_tracer_content_rhs
+            _nemo_ws_pre_implicit_state = state_new._replace(
+                T=state_new.T.replace(data=_content_diag_T),
+                S=state_new.S.replace(data=_content_diag_S),
+            )
+        if self._nemo_ws_test_hooks.expose_stage3_advection_content:
+            if _nemo_ws_advection_content_rhs is None:
+                raise ValueError(
+                    "expose_stage3_advection_content requires the NEMO "
+                    "WS-RK3 tracer program")
+            _adv_content_T, _adv_content_S = _nemo_ws_advection_content_rhs
+            _nemo_ws_pre_implicit_state = state_new._replace(
+                T=state_new.T.replace(data=_adv_content_T),
+                S=state_new.S.replace(data=_adv_content_S),
+            )
+        _pre_zdf_override = (
+            self._nemo_ws_test_hooks.pre_implicit_tracer_override)
+        if _pre_zdf_override is not None:
+            _pre_zdf_T, _pre_zdf_S = _pre_zdf_override
+            state_new = state_new._replace(
+                T=state_new.T.replace(data=_pre_zdf_T),
+                S=state_new.S.replace(data=_pre_zdf_S),
+            )
+        _pre_zdf_content_override = (
+            self._nemo_ws_test_hooks.pre_implicit_tracer_content_override)
+        if _pre_zdf_content_override is not None:
+            _nemo_ws_tracer_content_rhs = _pre_zdf_content_override
+
         # 8b. Implicit (backward-Euler) vertical mixing for u, v, T, S.
         #
         # When this branch is active, the PE tendency function has
@@ -6793,13 +9921,16 @@ class LatLonCGridOceanModel:
         # and bottom and is split-stepped (Lie splitting, 1st-order)
         # after tracer advection, GM/Redi, and the freshwater virtual
         # salt flux — matching MOM6's diabatic-process ordering.
-        # NEMO stprk3_stg:440 zub correction (nemo_stage_mean_imposition):
-        # capture the post-barotropic-solve depth mean so it can be re-imposed
-        # after the implicit vertical solve (which otherwise shifts it).
+        # NEMO stprk3_stg:440 zub correction (nemo_stage_mean_imposition).
+        # The WS stage ladder hands its own correction closure down here
+        # (``_ws_stage3_correction``) and it needs no capture: its target is
+        # the prognostic uu_b(Kaa) NEMO reads, not a mean measured before the
+        # solve.  Every other path still captures the pre-solve depth mean so
+        # it can be re-imposed after a solve that would otherwise shift it.
         _impose_mean = (
             getattr(_cfg_b.barotropic, "nemo_stage_mean_imposition", False)
             and _apply_implicit_vmix)
-        if _impose_mean:
+        if _impose_mean and _ws_stage3_correction is None:
             _u_mean_baro, _v_mean_baro = self._fixed_depth_means(state_new, z_coord=z_coord, config=config, grid=grid)
 
         tke_new = None
@@ -6823,29 +9954,41 @@ class LatLonCGridOceanModel:
                 # ``state_new`` is the working copy). None ⇒ BIT-IDENTICAL.
                 _n2_tracers = self._n2_before_advection_tracers(state, z_coord=z_coord, config=config)
                 _n2_tracers_before = self._n2_nemo_before_tracers(state, z_coord=z_coord, config=config)
-                state_new, tke_new = self._apply_implicit_vertical_mixing(
+                _tke_result = self._apply_implicit_vertical_mixing(
                     state_new, dt, surface_forcing,
                     K_v_phys=tend.K_v, A_v_phys=tend.A_v,
                     K33_iso=k33_implicit, dt_mom=dt_mom,
                     surface_tracer_forcing=tend.surface_tracer_forcing,
                     tracer_source=tend.tracer_source,
                     tke_old=_tke_old, tke_source=_tke_source, return_tke=True,
+                    return_tke_entry=_return_live_stage_operands, return_tracer_solve_trace=_return_vertical_solve_trace,
                     grid=_grid, n2_tracers=_n2_tracers,
                     n2_tracers_before=_n2_tracers_before,
                     tke_n2_bundle=_tke_n2_bundle,
                     # NEMO e3w(Kmm) divisor: state_new is the post-update
                     # AFTER state; state.eta is NOW. Read only under the NEMO
                     # identity (zdf_implicit_solver_evaluation="nemo_literal").
-                    eta_now=state.eta.data,
+                    eta_now=(
+                        _nemo_ws_zdf_eta_kmm
+                        if _nemo_ws_zdf_eta_kmm is not None
+                        else state.eta.data),
                     u_now=state.u.data, v_now=state.v.data,
+                    effective_K_test_override=_vertical_K_test_override,
                     nemo_aimp_tracer_w=_nemo_ws_aimp_tracer_w,
+                    nemo_tracer_content_rhs=_nemo_ws_tracer_content_rhs,
                     nemo_aimp_momentum_w_u=_nemo_ws_aimp_momentum_w_u,
                     nemo_aimp_momentum_w_v=_nemo_ws_aimp_momentum_w_v,
-                z_coord=z_coord, config=config, iwm_fields=iwm_fields)
+                    z_coord=z_coord, config=config, iwm_fields=iwm_fields)
+                if _return_live_stage_operands:
+                    (state_new, tke_new,
+                     _nemo_ws_live_tke_entry,
+                     _nemo_ws_live_tke_statement_trace) = _tke_result
+                else:
+                    state_new, tke_new, _nemo_ws_vertical_solve_trace = (_tke_result if _return_vertical_solve_trace else (*_tke_result, None))
             else:
                 _n2_tracers = self._n2_before_advection_tracers(state, z_coord=z_coord, config=config)
                 _n2_tracers_before = self._n2_nemo_before_tracers(state, z_coord=z_coord, config=config)
-                state_new = self._apply_implicit_vertical_mixing(
+                _zdf_result = self._apply_implicit_vertical_mixing(
                     state_new, dt, surface_forcing,
                     K_v_phys=tend.K_v, A_v_phys=tend.A_v,
                     K33_iso=k33_implicit, dt_mom=dt_mom,
@@ -6855,12 +9998,20 @@ class LatLonCGridOceanModel:
                     n2_tracers_before=_n2_tracers_before,
                     tke_n2_bundle=_tke_n2_bundle,
                     # NEMO e3w(Kmm) divisor (#1226 W1): see the sibling call.
-                    eta_now=state.eta.data,
+                    eta_now=(
+                        _nemo_ws_zdf_eta_kmm
+                        if _nemo_ws_zdf_eta_kmm is not None
+                        else state.eta.data),
                     u_now=state.u.data, v_now=state.v.data,
+                    effective_K_test_override=_vertical_K_test_override,
                     nemo_aimp_tracer_w=_nemo_ws_aimp_tracer_w,
+                    nemo_tracer_content_rhs=_nemo_ws_tracer_content_rhs,
                     nemo_aimp_momentum_w_u=_nemo_ws_aimp_momentum_w_u,
-                    nemo_aimp_momentum_w_v=_nemo_ws_aimp_momentum_w_v,
-                z_coord=z_coord, config=config, iwm_fields=iwm_fields)
+                    nemo_aimp_momentum_w_v=_nemo_ws_aimp_momentum_w_v, return_tracer_solve_trace=_return_vertical_solve_trace,
+                    z_coord=z_coord, config=config, iwm_fields=iwm_fields)
+                state_new, _nemo_ws_vertical_solve_trace = (_zdf_result if _return_vertical_solve_trace else (_zdf_result, None))
+        if _return_tracer_process_trace:
+            _nemo_ws_process_Taa = state_new.T.data
         if tke_new is not None:
             # Veros order (integrate_tke): the implicit solve writes
             # tke[taup1] FIRST, then the superbee-advection AB2 increment is
@@ -6876,7 +10027,42 @@ class LatLonCGridOceanModel:
                           dims=("lat", "lon", "level"), units="m^2/s^2"),
             )
 
-        if _impose_mean:
+        if self._nemo_ws_test_hooks.expose_stage3_raw_momentum:
+            # WRITE-only capture at NEMO's raw-Kaa boundary: the implicit
+            # dyn_zdf result is complete, while the depth-mean replacement
+            # immediately below has not yet run (stprk3_stg.F90:430-448).
+            _nemo_ws_exposed_stage3_raw = (
+                state_new.u.data, state_new.v.data)
+
+        if _ws_stage3_correction is not None:
+            # NEMO stprk3_stg.F90:440,444-445, applied HERE because :437-446
+            # runs after the CALL dyn_zdf at :430.  Same closure stages 1 and
+            # 2 call, same target uu_b(Kaa), same e3u_0/hu_0 weights — one
+            # correction per stage, exactly as NEMO writes it.  Sign
+            # convention: an ADDITIVE column-uniform shift, so the baroclinic
+            # deviation u′ is untouched and the depth integral becomes exactly
+            # the barotropic transport.
+            #
+            # UNCONDITIONAL, and deliberately so: NEMO's banner at
+            # stprk3_stg.F90:433 corrects every stage on every card, and this
+            # is the stage-3 correction the ladder deferred, not the separate
+            # ``nemo_stage_mean_imposition`` re-imposition below.  Gating it on
+            # that flag would DELETE the correction on the two tank cards,
+            # which resolve it False — measured at 8.4e-03 on OVERFLOW's u,
+            # 8.7 per cent of the field.
+            _stage3_corr, _stage3_tu, _stage3_tv = _ws_stage3_correction
+            _u_after, _v_after = _stage3_corr(
+                state_new.u.data, state_new.v.data, _stage3_tu, _stage3_tv)
+            # The cyclic wrap column travelled WITH the correction before it
+            # was deferred; re-apply it here so a periodic card keeps the
+            # invariant the stage used to leave behind.  Inert on all four
+            # closed-basin cards, where both columns are masked to zero.
+            _u_after = _u_after.at[:, -1].set(_u_after[:, 0])
+            state_new = state_new._replace(
+                u=state_new.u.replace(data=_u_after),
+                v=state_new.v.replace(data=_v_after),
+            )
+        elif _impose_mean:
             # NEMO stprk3_stg.F90:440: uu += (uu_b(Kaa) − Σ e3u_0·uu·r1_hu_0)
             # ·umask — the 3D velocity's depth mean is REPLACED by the
             # barotropic solution after the implicit solve, uniformly over
@@ -6925,6 +10111,12 @@ class LatLonCGridOceanModel:
                 u=state_new.u.replace(data=_stage_u),
                 v=state_new.v.replace(data=_stage_v),
             )
+        if _nemo_ws_exposed_stage2_raw is not None:
+            _raw_u, _raw_v = _nemo_ws_exposed_stage2_raw
+            state_new = state_new._replace(
+                u=state_new.u.replace(data=_raw_u),
+                v=state_new.v.replace(data=_raw_v),
+            )
         if _nemo_ws_exposed_tracer_stage is not None:
             # The stage T/S/eta exactly as handed to the stage eos+dyn_hpg.
             _stage_T, _stage_S, _stage_eta = _nemo_ws_exposed_tracer_stage
@@ -6933,8 +10125,181 @@ class LatLonCGridOceanModel:
                 S=state_new.S.replace(data=_stage_S),
                 eta=state_new.eta.replace(data=_stage_eta),
             )
+        if _nemo_ws_exposed_tracer_boundary is not None:
+            # Substitute only after the production-JIT step has completed.
+            # The exposed arrays are source-order ts(Krhs), not prognostics.
+            _rhs_T, _rhs_S = _nemo_ws_exposed_tracer_boundary
+            state_new = state_new._replace(
+                T=state_new.T.replace(data=_rhs_T),
+                S=state_new.S.replace(data=_rhs_S),
+            )
+        if _nemo_ws_exposed_tracer_transport is not None:
+            _zfu, _zfv, _zfw = _nemo_ws_exposed_tracer_transport
+            state_new = state_new._replace(
+                u=state_new.u.replace(data=_zfu),
+                v=state_new.v.replace(data=_zfv),
+                T=state_new.T.replace(data=_zfw[..., :state_new.T.data.shape[-1]]),
+            )
+        if _nemo_ws_exposed_stage1_wzv is not None:
+            # Diagnostic substitution happens only after the compiled step and
+            # all of its ordinary consumers have completed.
+            state_new = state_new._replace(
+                T=state_new.T.replace(
+                    data=_nemo_ws_exposed_stage1_wzv[
+                        ..., :state_new.T.data.shape[-1]
+                    ]
+                )
+            )
+        if _nemo_ws_exposed_stage_face_r3 is not None:
+            # WRITE-only: the ordinary step has already completed and nothing
+            # downstream reads these slots.
+            _r3u, _r3v = _nemo_ws_exposed_stage_face_r3
+            state_new = state_new._replace(
+                u=state_new.u.replace(
+                    data=jnp.broadcast_to(
+                        _r3u[..., None], state_new.u.data.shape)),
+                v=state_new.v.replace(
+                    data=jnp.broadcast_to(
+                        _r3v[..., None], state_new.v.data.shape)),
+            )
+        if _nemo_ws_exposed_stage1_transport_operand is not None:
+            _operand_u, _operand_v = _nemo_ws_exposed_stage1_transport_operand
+            state_new = state_new._replace(
+                u=state_new.u.replace(data=_operand_u),
+                v=state_new.v.replace(data=_operand_v),
+            )
+        if _nemo_ws_exposed_momentum_operator is not None:
+            _op_u, _op_v = _nemo_ws_exposed_momentum_operator
+            state_new = state_new._replace(
+                u=state_new.u.replace(data=_op_u),
+                v=state_new.v.replace(data=_op_v),
+            )
+        if _nemo_ws_exposed_stage1_rhs is not None:
+            _rhs_u, _rhs_v = _nemo_ws_exposed_stage1_rhs
+            state_new = state_new._replace(
+                u=state_new.u.replace(data=_rhs_u),
+                v=state_new.v.replace(data=_rhs_v),
+            )
+        if _nemo_ws_exposed_stage1_raw is not None:
+            _raw_u, _raw_v = _nemo_ws_exposed_stage1_raw
+            state_new = state_new._replace(
+                u=state_new.u.replace(data=_raw_u),
+                v=state_new.v.replace(data=_raw_v),
+            )
+        if _nemo_ws_exposed_stage2_rhs is not None:
+            _rhs_u, _rhs_v = _nemo_ws_exposed_stage2_rhs
+            state_new = state_new._replace(
+                u=state_new.u.replace(data=_rhs_u),
+                v=state_new.v.replace(data=_rhs_v),
+            )
+        if _nemo_ws_exposed_stage3_rhs is not None:
+            _rhs_u, _rhs_v = _nemo_ws_exposed_stage3_rhs
+            state_new = state_new._replace(
+                u=state_new.u.replace(data=_rhs_u),
+                v=state_new.v.replace(data=_rhs_v),
+            )
+        if _nemo_ws_exposed_stage3_raw is not None:
+            _raw_u, _raw_v = _nemo_ws_exposed_stage3_raw
+            state_new = state_new._replace(
+                u=state_new.u.replace(data=_raw_u),
+                v=state_new.v.replace(data=_raw_v),
+            )
+        if _nemo_ws_pre_implicit_state is not None:
+            # Substitute only after the production step and its conservation
+            # checks have completed, preserving a WRITE-only diagnostic.
+            state_new = _nemo_ws_pre_implicit_state
 
+        # NEMO's after-SSH slot is written HERE, not in the compiled step
+        # wrapper, because the wrapper is not the only way in: the OMIP scan
+        # driver, the SPMD lane and the OMIP2 applicator all call _step_impl
+        # directly, and the READ (in the wzv call below the tendency) fires on
+        # every one of them.  A write that reached fewer callers than the read
+        # would hand those drivers a frozen slot with no error.  Before the
+        # storage cast, so the slot is cast with every other leaf and a scan
+        # carry's dtypes stay stable.
+        state_new = self._carry_nemo_rk3_after_ssh(state, state_new)
         state_new = cast_pytree(state_new, None, "storage", allow_downcast=True)
+        if _return_tracer_process_trace:
+            if (_nemo_ws_process_qco is None
+                    or _nemo_ws_process_boundaries is None
+                    or _nemo_ws_process_Taa is None
+                    or _nemo_ws_qsr_association is None):
+                raise ValueError("WS-RK3 tracer process trace is incomplete")
+            if (_return_vertical_solve_trace
+                    and _nemo_ws_vertical_solve_trace is None):
+                raise ValueError("WS-RK3 vertical solve trace is incomplete")
+            _qbb, _qmm, _qaa, _, _, _ = _nemo_ws_process_qco
+            return _NEMOWSTracerProcessTrace(
+                state_after=state_new,
+                Tbb=state.T.data,
+                q_Kbb=_qbb,
+                q_Kmm=_qmm,
+                q_Kaa=_qaa,
+                boundaries=_nemo_ws_process_boundaries,
+                Taa=_nemo_ws_process_Taa,
+                qsr_association=_nemo_ws_qsr_association,
+                vertical_solve=_nemo_ws_vertical_solve_trace,
+                fct_activity=_nemo_ws_fct_activity, ldf_diagnostics=_nemo_ws_ldf_diagnostics,
+            )
+        if _return_live_stage_operands:
+            if (getattr(_cfg_b, "momentum_time_integrator", "euler")
+                    != "rk3_ws"):
+                raise ValueError(
+                    "live stage operands require momentum_time_integrator="
+                    "'rk3_ws'")
+            if (any(value is None for value in _nemo_ws_live_operator_operands)
+                    or _nemo_ws_live_stage_states is None
+                    or _nemo_ws_live_stage_geometry is None or _nemo_ws_live_stage_raw is None or _nemo_ws_live_stage_rhs is None or _nemo_ws_live_baro_geometry is None  # noqa: E501
+                    or _nemo_ws_live_stage_qco is None
+                    or _nemo_ws_live_stage1_full_rhs is None
+                    or _nemo_ws_live_stage1_rhs_walk is None
+                    or _nemo_ws_live_tke_entry is None
+                    or _nemo_ws_live_tke_statement_trace is None
+                    or _nemo_ws_live_slow_forcing_producer is None):
+                raise ValueError("live WS-RK3 operand trace is incomplete")
+            return _NEMOWSLiveOperandTrace(
+                state_after=state_new,
+                stage_states=_nemo_ws_live_stage_states,
+                operator_operands=tuple(_nemo_ws_live_operator_operands),
+                stage_geometry=_nemo_ws_live_stage_geometry,
+                stage_qco=_nemo_ws_live_stage_qco,
+                stage_coefficients=(
+                    (dt / 3.0, 1.0 / (dt / 3.0)),
+                    (dt / 2.0, 1.0 / (dt / 2.0)),
+                    (dt, 1.0 / dt),
+                ),
+                tke_entry=_nemo_ws_live_tke_entry,
+                tke_statement_trace=_nemo_ws_live_tke_statement_trace,
+                barotropic_targets=(target_u, target_v, Hu_avg, Hv_avg,
+                                    state_new.eta.data,
+                                    (_eta_live_one_third,
+                                     _eta_live_one_half,
+                                     state_new.eta.data)),
+                slow_forcing_producer=(
+                    _nemo_ws_live_slow_forcing_producer),
+                stage_rhs=_nemo_ws_live_stage_rhs,
+                stage1_full_rhs=_nemo_ws_live_stage1_full_rhs,
+                stage1_rhs_walk=_nemo_ws_live_stage1_rhs_walk,
+                stage_raw_velocities=_nemo_ws_live_stage_raw,
+                barotropic_correction_geometry=_nemo_ws_live_baro_geometry,
+                stage_outputs=(
+                    (u1_corr, v1_corr, _T_stage1, _S_stage1,
+                     _eta_live_one_third),
+                    (u2_corr, v2_corr, _T_stage2, _S_stage2,
+                     _eta_live_one_half),
+                    (state_new.u.data, state_new.v.data,
+                     state_new.T.data, state_new.S.data,
+                     state_new.eta.data),
+                ),
+                # WRITE-only: the per-stage tracer source rates the stage
+                # helper consumes, each with the live top-cell thickness that
+                # stage divided by, so a gate can bind on the PRODUCTION
+                # statement instead of re-implementing it.
+                stage_tracer_sources=(
+                    _stage_source_rates,
+                    (h_k_old, _h_live_one_third, _h_live_one_half),
+                ),
+            )
         if not _apply_implicit_vmix:
             # Faithful AB2 path: return the explicit-only state plus the
             # implicit-mixing diffusivity profiles (evaluated from u^n, like
@@ -7109,6 +10474,26 @@ class LatLonCGridOceanModel:
                        "vertical_mixing", None)
         if vmix is None or vmix.scheme != "tke":
             return None
+        _conv = getattr(getattr(_cfg_b, "physics", None), "convection", None)
+        _evd = (getattr(_conv, "enhanced_diffusion", None)
+                if getattr(_conv, "scheme", "none") == "enhanced_diffusion"
+                else None)
+        if getattr(_cfg_b, "momentum_time_integrator", "euler") == "rk3_ws":
+            # NEMO RK3 has no carried leap-frog BEFORE array.  Its whole-step
+            # entry is Nbb for BOTH independent consumers: TKE when
+            # tke_n2_time_level=nemo_before, and EVD when its two-level trigger
+            # asks for rn2b (stprk3.F90:154-165).  Do not tie this mapping to
+            # EVD's selector: the one-variable EVD ablation must not make the
+            # still-live TKE consumer invent state.T_before/S_before.
+            _tke_uses_entry_as_nbb = (
+                getattr(vmix.tke, "tke_n2_time_level", "step_entry")
+                == "nemo_before")
+            _evd_uses_entry_as_nbb = (
+                _evd is not None
+                and getattr(_evd, "evd_n2_time_level", "solver_state")
+                == "nemo_now_before")
+            if _tke_uses_entry_as_nbb or _evd_uses_entry_as_nbb:
+                return (entry_state.T.data, entry_state.S.data)
         if getattr(vmix.tke, "tke_n2_time_level", "step_entry") != "nemo_before":
             return None
         if entry_state.T_before is None or entry_state.S_before is None:
@@ -7202,6 +10587,7 @@ class LatLonCGridOceanModel:
             cd_max=float(_cfg_b.bottom_drag.bottom_drag_cdmax),
             z0=float(_cfg_b.bottom_drag.bottom_drag_z0),
             ke0=float(_cfg_b.bottom_drag.bottom_drag_ke0),
+            uc0=float(_cfg_b.bottom_drag.bottom_drag_uc0),
             von_karman=constants.kappa_von_karman,
         )
         from legoesm.ocean.physics.vertical_mixing.tke import (
@@ -7252,15 +10638,12 @@ class LatLonCGridOceanModel:
         return ssmask * nemo_bottom_tke_dirichlet(r_t, u_sum, v_sum, vmix.tke)
 
     def _tke_bottom_level(self, z_coord=None, config=None):
-        """Per-column T-point bottom-cell index for the T15-exact bottom TKE
-        Dirichlet placement, or None.
+        """Per-column T-point bottom-cell index for TKE consumers, or None.
 
-        Static Python predicate mirroring ``_tke_bottom_dirichlet``'s gate:
-        only meaningful together with a held bottom value, and only when a
-        partial-cell coordinate actually carries a per-column
-        ``bottom_level`` (the flat-bottom / pure z-star case has none —
-        ``bottom_dirichlet``'s unconditional last-row pin is already exact
-        there, so ``None`` here keeps that path BIT-IDENTICAL).
+        The bottom Dirichlet placement and NEMO's literal Langmuir crossing
+        fallback independently consume ``mbkt``. Route the coordinate-owned
+        value when either is active. Other configurations retain ``None`` so
+        the silent-unused-operand guard remains effective.
         """
         _zc = self.z_coord if z_coord is None else z_coord  # SPMD band override
         _cfg_b = self.config if config is None else config  # SPMD band override
@@ -7268,7 +10651,12 @@ class LatLonCGridOceanModel:
                        "vertical_mixing", None)
         if vmix is None or vmix.scheme != "tke":
             return None
-        if not getattr(vmix.tke, "bottom_tke_bc", False):
+        needs_bottom = bool(getattr(vmix.tke, "bottom_tke_bc", False))
+        needs_langmuir = (
+            bool(getattr(vmix.tke, "lc", False))
+            and getattr(vmix.tke, "tke_langmuir_evaluation", "vectorized")
+            == "nemo_literal")
+        if not (needs_bottom or needs_langmuir):
             return None
         if not isinstance(_zc, OceanPartialCellCoordinate):
             return None
@@ -7375,23 +10763,35 @@ class LatLonCGridOceanModel:
         _cfg_b = self.config if config is None else config
         vmix = getattr(getattr(_cfg_b, "physics", None),
                        "vertical_mixing", None)
-        if vmix is None or vmix.scheme != "tke":
+        _tke_active = vmix is not None and vmix.scheme == "tke"
+        _gm = getattr(_cfg_b, "gm_redi", None)
+        _gm_carried = (_gm is not None and getattr(
+            _gm, "slope_n2_evaluation", "recompute") == "carried_step_entry")
+        if _tke_active:
+            tke_cfg = vmix.tke
+            stage = getattr(
+                tke_cfg, "tke_n2_evaluation_stage", "implicit_solve_state")
+            if stage == "implicit_solve_state" and not _gm_carried:
+                return None
+            if stage not in ("implicit_solve_state", "step_entry"):
+                raise ValueError(
+                    "Unknown TKEConfig.tke_n2_evaluation_stage: expected "
+                    "'implicit_solve_state' or 'step_entry', got "
+                    f"{stage!r}.")
+            _n2_mode = getattr(tke_cfg, "n2_mode", "insitu")
+            _n2_eos_form = getattr(tke_cfg, "n2_eos_form", "seos")
+        elif _gm_carried:
+            # stprk3.f90:141-159 builds rn2b at whole-step entry before
+            # ldf_slp even when the vertical closure is constant.  The bundle
+            # is therefore a stage-program operand, not TKE-owned state.
+            _n2_mode = getattr(_gm, "slope_n2", "adiabatic")
+            _n2_eos_form = "seos" if _cfg_b.eos == "nemo_seos" else _cfg_b.eos
+        else:
             return None
-        tke_cfg = vmix.tke
-        stage = getattr(
-            tke_cfg, "tke_n2_evaluation_stage", "implicit_solve_state")
-        if stage == "implicit_solve_state":
-            return None
-        if stage != "step_entry":
+        if _n2_mode != "nemo_bn2":
             raise ValueError(
-                "Unknown TKEConfig.tke_n2_evaluation_stage: expected "
-                "'implicit_solve_state' or 'step_entry', got "
-                f"{stage!r}.")
-        if getattr(tke_cfg, "n2_mode", "insitu") != "nemo_bn2":
-            raise ValueError(
-                "tke_n2_evaluation_stage='step_entry' currently requires "
-                "n2_mode='nemo_bn2', the NEMO eosbn2 construction; got "
-                f"{tke_cfg.n2_mode!r}.")
+                "a carried step-entry N2 bundle requires slope/TKE "
+                f"n2_mode='nemo_bn2', got {_n2_mode!r}")
 
         from legoesm.ocean.eos import (
             compute_buoyancy_frequency_nemo_bn2,
@@ -7403,11 +10803,21 @@ class LatLonCGridOceanModel:
         from legoesm.ocean.physics.vertical_mixing.tke import TKEEntryN2Bundle
         from legoesm.ocean.vertical import extrapolate_below_seafloor
 
-        T_now = state.T.data
-        S_now = state.S.data
-        if getattr(_zc, "is_active", None) is not None:
-            T_now = extrapolate_below_seafloor(T_now, _zc)
-            S_now = extrapolate_below_seafloor(S_now, _zc)
+        _bn2_tracers = self._nemo_ws_test_hooks.bn2_tracer_override
+        if _bn2_tracers is None:
+            T_now = state.T.data
+            S_now = state.S.data
+            if getattr(_zc, "is_active", None) is not None:
+                T_now = extrapolate_below_seafloor(T_now, _zc)
+                S_now = extrapolate_below_seafloor(S_now, _zc)
+        else:
+            T_now, S_now = (jnp.asarray(value) for value in _bn2_tracers)
+            if (T_now.shape != state.T.data.shape
+                    or S_now.shape != state.S.data.shape):
+                raise ValueError(
+                    "the private bn2 tracer override must match state T/S; "
+                    f"got T={T_now.shape}, S={S_now.shape}, "
+                    f"state={state.T.data.shape}")
         gdept, gdepw, e3w = nemo_bn2_live_geometry(
             _zc, state.eta.data, state.H_bathy.data,
             r3t_evaluation="nemo_reciprocal")
@@ -7429,8 +10839,9 @@ class LatLonCGridOceanModel:
         e3w_surface = nemo_e3w_from_live_gdept(
             _zc, gdept, stretch=zrw_stretch, interior=False)[..., :1]
         _n2_kwargs = dict(
+            cfg=_cfg_b.eos_nemo_seos,
             g=_cfg_b.constants.g,
-            eos_form=getattr(tke_cfg, "n2_eos_form", "seos"),
+            eos_form=_n2_eos_form,
             e3w_int=e3w,
             e3w_source="mesh_reference",
             zrw_evaluation="nemo_literal",
@@ -7438,11 +10849,19 @@ class LatLonCGridOceanModel:
             zrw_gdepw_0=gdepw_0,
             zrw_stretch=zrw_stretch,
         )
-        rn2 = compute_buoyancy_frequency_nemo_bn2(
-            T_now, S_now, gdept, gdepw, **_n2_kwargs)
+        _bn2_selector = self._nemo_ws_test_hooks.bn2_intermediate
+        _bn2_override = self._nemo_ws_test_hooks.bn2_alpha_beta_override
+        _rn2_result = compute_buoyancy_frequency_nemo_bn2(
+            T_now, S_now, gdept, gdepw, **_n2_kwargs,
+            _alpha_beta_override=_bn2_override,
+            _return_intermediate=_bn2_selector)
+        if _bn2_selector:
+            rn2, _bn2_intermediate = _rn2_result
+        else:
+            rn2, _bn2_intermediate = _rn2_result, None
 
-        before = self._n2_nemo_before_tracers(
-            state, z_coord=_zc, config=_cfg_b)
+        before = (self._n2_nemo_before_tracers(
+            state, z_coord=_zc, config=_cfg_b) if _tke_active else None)
         if before is None:
             rn2b = rn2
         else:
@@ -7467,13 +10886,14 @@ class LatLonCGridOceanModel:
                 e3t_0_array)
         return TKEEntryN2Bundle(
             rn2=rn2, rn2b=rn2b, gdepw_Kmm=gdepw, e3w_Kmm=e3w,
-            e3t_Kmm=e3t, e3w_surface_Kmm=e3w_surface)
+            e3t_Kmm=e3t, e3w_surface_Kmm=e3w_surface,
+            bn2_intermediate=_bn2_intermediate)
 
     def _tke_step_entry_p_sh2(
         self, state, *, eta_now=None, u_now=None, v_now=None,
-        z_coord=None, config=None, grid=None,
+        z_coord=None, config=None, grid=None, return_face_metrics=False,
     ):
-        """Freeze NEMO ``p_sh2`` from the step-entry NOW/BEFORE faces."""
+        """Freeze NEMO ``p_sh2`` from the selected step-entry face levels."""
         _zc = self.z_coord if z_coord is None else z_coord
         _cfg_b = self.config if config is None else config
         vmix = getattr(getattr(_cfg_b, "physics", None),
@@ -7505,6 +10925,12 @@ class LatLonCGridOceanModel:
             state.T.data.shape[:-1] + (_zc.n_levels - 1,))
         shear_disc = getattr(
             tke_cfg, "tke_shear_production", "squared_centered")
+        # ``nemo_face_native_nbb2`` is the source-level name adopted by the
+        # ORCA2 card for the pre-existing GYRE ``now2`` selector.  Both mean
+        # the compiled RK3 call zdf_phy(Nbb,Nbb); keep both card spellings
+        # while routing one shared statement below.
+        if shear_disc == "nemo_face_native_nbb2":
+            shear_disc = "nemo_face_native_now2"
         avm_weighting = getattr(
             tke_cfg, "tke_shear_avm_weighting", "tpoint")
         if shear_disc == "squared_centered":
@@ -7517,8 +10943,9 @@ class LatLonCGridOceanModel:
             )
             u_cell = 0.5 * (_u_now[:, :-1, :] + _u_now[:, 1:, :])
             v_cell = 0.5 * (_v_now[:-1, :, :] + _v_now[1:, :, :])
-            return state.tke_avm.data * vertical_shear_squared(
+            p_sh2 = state.tke_avm.data * vertical_shear_squared(
                 u_cell, v_cell, dz_half)
+            return (p_sh2, None) if return_face_metrics else p_sh2
 
         if shear_disc not in ("nemo_face_native", "nemo_face_native_now2"):
             raise ValueError(
@@ -7559,10 +10986,19 @@ class LatLonCGridOceanModel:
                 f"{metric_source!r}.")
         face_metrics = None
         if metric_source == "nemo_qco_live_face":
-            if state.eta_before is None:
-                raise ValueError(
-                    "tke_shear_metric_source='nemo_qco_live_face' requires "
-                    "state.eta_before for the Kbb face metric.")
+            if shear_disc == "nemo_face_native_now2":
+                # NEMO RK3 calls zdf_phy(kstp, Nbb, Nbb, Nrhs)
+                # (stprk3.f90:168): both factors of zdfsh2.f90:83-114 use
+                # the step-entry level, so r3u(Kbb) IS r3u(Kmm) and the
+                # Kbb face metric is the step-entry one.  Static branch on
+                # the variant, not on the presence of a before-state.
+                _eta_bef = _eta_now
+            else:
+                if state.eta_before is None:
+                    raise ValueError(
+                        "tke_shear_metric_source='nemo_qco_live_face' "
+                        "requires state.eta_before for the Kbb face metric.")
+                _eta_bef = state.eta_before.data
             e3w0 = getattr(_zc, "nemo_e3w_0", None)
             if e3w0 is None or not bool(getattr(
                     _zc, "nemo_e3w_mesh_reference", False)):
@@ -7611,7 +11047,7 @@ class LatLonCGridOceanModel:
                 )
 
             r3un, r3vn = _qco_r3(_eta_now)
-            r3ub, r3vb = _qco_r3(state.eta_before.data)
+            r3ub, r3vb = _qco_r3(_eta_bef)
             # DINO full-step z has e3uw_0 == e3vw_0 == raw mesh e3w_0
             # bit-for-bit; map NEMO east/north-face indexing to legoESM's
             # west/south raw-face arrays before applying each live factor.
@@ -7624,10 +11060,11 @@ class LatLonCGridOceanModel:
                 ref_v * (1.0 + r3vn[..., None]),
                 ref_v * (1.0 + r3vb[..., None]),
             )
-        return avm_weighted_shear_production(
+        p_sh2 = avm_weighted_shear_production(
             _u_now, _v_now, _u_before, _v_before,
             dz_half, u_mask, v_mask, state.tke_avm.data,
             face_metrics=face_metrics)
+        return (p_sh2, face_metrics) if return_face_metrics else p_sh2
 
     def _tke_realized_kdiss_active(self) -> bool:
         """True iff the post-mixing TKE charges the REALIZED implicit-friction
@@ -8135,9 +11572,12 @@ class LatLonCGridOceanModel:
         tke_old=None,
         tke_source=None,
         return_tke: bool = False,
+        return_tke_entry: bool = False,
         K_diss_v_w=None,
         return_K_diss_v: bool = False,
         return_K_profiles: bool = False,
+        return_tracer_solve_trace: bool = False,
+        effective_K_test_override=None,
         grid=None,
         n2_tracers=None,
         n2_tracers_before=None,
@@ -8236,6 +11676,7 @@ class LatLonCGridOceanModel:
         _zc = self.z_coord if z_coord is None else z_coord  # SPMD band override
         _cfg_b = self.config if config is None else config  # SPMD band override
         _iwm = (self._iwm_forcing if iwm_fields is None else iwm_fields)  # SPMD band override
+        _zdf_momentum_observer = self._nemo_ws_test_hooks.zdf_momentum_observer
         # Argument validation at ENTRY, not inside the drag branch below: one
         # component of the now-level velocity without the other would build the
         # rate's |U| from two time levels, and a caller that gets it wrong with
@@ -8258,6 +11699,12 @@ class LatLonCGridOceanModel:
                 "momentum-only call (return_tke must be False).")
         tke_new = None
         _tke_coeff_new = None
+        _tke_entry_used = None
+        _tke_statement_trace_used = None
+        _tke_shear_face_metrics_used = None
+        _tracer_solve_trace = None
+        _trace_heat_K = None
+        _trace_isoneutral_K = None
         _post_mixing = self._tke_post_mixing_active()
         _tke_ctx = None
         from legoesm.ocean.physics.vertical_mixing import (
@@ -8296,8 +11743,53 @@ class LatLonCGridOceanModel:
                     "compute_vertical_K_profiles.")
             state.T.data.shape[-1]
             dtype = state.T.data.dtype
-            K_v_cell = K_v_phys + jnp.asarray(_cfg_b.K_v, dtype=dtype)
-            A_v_cell = A_v_phys + jnp.asarray(_cfg_b.A_v, dtype=dtype)
+            # NEMO zdfevd REPLACES the assembled coefficient where its trigger
+            # fires (zdfevd.f90:107-110, run at zdfphy.f90:359 AFTER the
+            # background copy at :348-351), so on a card that states
+            # ``evd_composition="nemo_replace"`` the fired interfaces carry
+            # rn_evd ALONE -- not rn_evd plus the namelist background.  Every
+            # other card keeps the historical sum.  The fallback path does the
+            # same composition in k_profiles.compute_vertical_K_profiles.
+            _conv_fast = getattr(
+                getattr(_cfg_b, "physics", None), "convection", None)
+            _evd_fast = None
+            if getattr(_conv_fast, "scheme", "none") == "enhanced_diffusion":
+                from legoesm.ocean.physics.convection.enhanced_diffusion import (
+                    compose_evd_coefficient, resolve_evd_composition,
+                )
+                _ed_fast = _conv_fast.enhanced_diffusion
+                if resolve_evd_composition(_ed_fast) == "nemo_replace":
+                    _evd_fast = _ed_fast
+            if _evd_fast is None:
+                K_v_cell = K_v_phys + jnp.asarray(_cfg_b.K_v, dtype=dtype)
+                A_v_cell = A_v_phys + jnp.asarray(_cfg_b.A_v, dtype=dtype)
+            else:
+                # Fail closed: on THIS path the surfaced K/A are the
+                # enhanced-diffusion scheme's own, which is only true when no
+                # closure also surfaces one.  tke/catke take the fallback
+                # path (combined.make_ocean_physics withholds EVD for them);
+                # anything else would have the replace overwrite a closure's
+                # coefficient it never saw.
+                _vmix_fast = getattr(
+                    getattr(_cfg_b, "physics", None), "vertical_mixing", None)
+                if getattr(_vmix_fast, "scheme", "none") != "none":
+                    raise ValueError(
+                        'EnhancedDiffusionConfig.evd_composition='
+                        '"nemo_replace" on the physics-provided-K path is '
+                        "only defined when the card selects no vertical-"
+                        "mixing closure (vertical_mixing.scheme='none'); got "
+                        f"{getattr(_vmix_fast, 'scheme', None)!r}. tke/catke "
+                        "compose EVD inside compute_vertical_K_profiles.")
+                _K_bg_field = jnp.full_like(
+                    K_v_phys, jnp.asarray(_cfg_b.K_v, dtype=dtype))
+                _A_bg_field = jnp.full_like(
+                    A_v_phys, jnp.asarray(_cfg_b.A_v, dtype=dtype))
+                K_v_cell = compose_evd_coefficient(
+                    _K_bg_field, K_v_phys, "nemo_replace",
+                    convective=_evd_fast.K_conv)
+                A_v_cell = compose_evd_coefficient(
+                    _A_bg_field, A_v_phys, "nemo_replace",
+                    convective=_evd_fast.nu_conv)
             _phys_cfg = _cfg_b.physics
             if (_phys_cfg is not None
                     and getattr(_phys_cfg.vertical_mixing, "iwm", None)
@@ -8354,7 +11846,8 @@ class LatLonCGridOceanModel:
                 and _vmix_cfg_here.scheme == "tke"
                 and getattr(_vmix_cfg_here.tke, "tke_shear_production",
                            "squared_centered") in ("nemo_face_native",
-                                                   "nemo_face_native_now2")
+                                                   "nemo_face_native_now2",
+                                                   "nemo_face_native_nbb2")
             )
             if _keep_raw_faces:
                 cc_state = state
@@ -8372,6 +11865,7 @@ class LatLonCGridOceanModel:
             from legoesm.ocean.eos import make_eos_fn as _make_eos_fn
             _vmix_eos_fn = _make_eos_fn(
                 eos=_cfg_b.eos, eos_linear=_cfg_b.eos_linear,
+                eos_nemo_seos=getattr(_cfg_b, "eos_nemo_seos", None),
             )
             # PROGNOSTIC TKE carry: thread the carried TKE + the energy-recycling
             # source into the fallback K-profile solve, and capture the updated
@@ -8398,9 +11892,15 @@ class LatLonCGridOceanModel:
             else:
                 _tke_lat_deg = jnp.degrees(_grid.lat_T)
             if _tke_prognostic:
-                _tke_p_sh2 = self._tke_step_entry_p_sh2(
+                _tke_p_sh2_result = self._tke_step_entry_p_sh2(
                     state, eta_now=eta_now, u_now=u_now, v_now=v_now,
-                    z_coord=_zc, config=_cfg_b, grid=_grid)
+                    z_coord=_zc, config=_cfg_b, grid=_grid,
+                    return_face_metrics=return_tke_entry)
+                if return_tke_entry:
+                    _tke_p_sh2, _tke_shear_face_metrics_used = (
+                        _tke_p_sh2_result)
+                else:
+                    _tke_p_sh2 = _tke_p_sh2_result
                 K_v_cell, A_v_cell, tke_new = compute_vertical_K_profiles(
                     cc_state, _zc, surface_forcing, physics_config,
                     A_v_background=float(_cfg_b.A_v),
@@ -8431,11 +11931,31 @@ class LatLonCGridOceanModel:
                     # "nemo_now_before"); ignored by every other selection.
                     eta_now=eta_now,
                     tke_p_sh2=_tke_p_sh2,
+                    return_tke_statement_trace=return_tke_entry,
+                    tke_rhs_materialization=(
+                        self._nemo_ws_test_hooks.tke_rhs_materialization),
+                    tke_rhs_intermediate=(
+                        self._nemo_ws_test_hooks.tke_rhs_intermediate),
+                    seos_cfg=_cfg_b.eos_nemo_seos,
                 )
                 if (tke_new is not None
                         and hasattr(tke_new, "K_M")
                         and hasattr(tke_new, "tke_new")):
                     _tke_coeff_new = tke_new
+                    _tke_entry_used = _tke_coeff_new.tke_entry
+                    _tke_statement_trace_used = (
+                        _tke_coeff_new.statement_trace)
+                    if _tke_statement_trace_used is not None:
+                        _tke_statement_trace_used = (
+                            _tke_statement_trace_used._replace(
+                                shear_face_metrics=(
+                                    _tke_shear_face_metrics_used),
+                                bn2_intermediate=(
+                                    None if tke_n2_bundle is None else
+                                    tke_n2_bundle.bn2_intermediate),
+                                bn2_output=(
+                                    None if tke_n2_bundle is None else
+                                    tke_n2_bundle.rn2)))
                     tke_new = _tke_coeff_new.tke_new
                 if _post_mixing:
                     # Phase 1 only (Veros set_tke_diffusivities from the
@@ -8454,7 +11974,46 @@ class LatLonCGridOceanModel:
                     n2_tracers=n2_tracers,
                     n2_tracers_before=n2_tracers_before,
                     eta_now=eta_now,
+                    seos_cfg=_cfg_b.eos_nemo_seos,
                 )
+
+        # Private causal seam: two arrays replace the post-closure heat and
+        # viscosity profiles; later arrays optionally replace formed tracer
+        # K, the tracer e3w(Kmm) divisor, the tracer e3t(Kaa) matrix weight,
+        # and the already-formed temperature content, in that order.
+        _formed_effective_K_override = None
+        _tracer_e3w_test_override = None
+        _tracer_e3t_test_override = None
+        _tracer_content_t_test_override = None
+        _fixed_solve_test_input = None
+        _fixed_solve_replace = None
+        if isinstance(effective_K_test_override,
+                      _NEMOVerticalSolveTestInput):
+            _fixed_solve_test_input = effective_K_test_override
+            _fixed_solve_replace = jnp.asarray(
+                effective_K_test_override.replace, dtype=bool)
+            if _fixed_solve_replace.shape != (6,):
+                raise ValueError(
+                    "fixed vertical-solve test input requires six selectors")
+            K_v_cell = jnp.where(
+                _fixed_solve_replace[0],
+                effective_K_test_override.heat_K, K_v_cell)
+            A_v_cell = jnp.where(
+                _fixed_solve_replace[1],
+                effective_K_test_override.viscosity_K, A_v_cell)
+        elif effective_K_test_override is not None:
+            if len(effective_K_test_override) not in (2, 3, 4, 5, 6):
+                raise ValueError(
+                    "vertical K test override requires 2 through 6 arrays")
+            K_v_cell, A_v_cell = effective_K_test_override[:2]
+            if len(effective_K_test_override) >= 3:
+                _formed_effective_K_override = effective_K_test_override[2]
+            if len(effective_K_test_override) >= 4:
+                _tracer_e3w_test_override = effective_K_test_override[3]
+            if len(effective_K_test_override) >= 5:
+                _tracer_e3t_test_override = effective_K_test_override[4]
+            if len(effective_K_test_override) == 6:
+                _tracer_content_t_test_override = effective_K_test_override[5]
 
         # DIAGNOSTIC CAPTURE (return_K_profiles): the interface diffusivity
         # K_v_cell (heat, NEMO avt) and viscosity A_v_cell (momentum, avm) at
@@ -8578,6 +12137,11 @@ class LatLonCGridOceanModel:
         # codex r2 UnboundLocalError fix).  None ⇒ salt uses K_v (no ddm).
         dK_ddm_salt = None
         if do_tracers:
+            if return_tracer_solve_trace:
+                _trace_heat_K = K_v_cell.astype(state.T.data.dtype)
+                _trace_isoneutral_K = (
+                    jnp.zeros_like(_trace_heat_K) if K33_iso is None
+                    else K33_iso.astype(state.T.data.dtype))
             K_v_cell = K_v_cell.astype(state.T.data.dtype)
             if K33_iso is not None:
                 # Fold the vertical isoneutral diffusivity K_33 into the implicit
@@ -8615,11 +12179,14 @@ class LatLonCGridOceanModel:
                 K_v_cell = K_v_cell * _wet_if_vmix
                 if dK_ddm_salt is not None:
                     dK_ddm_salt = dK_ddm_salt * _wet_if_vmix
-            # IMPLICIT surface TRACER forcing (Veros placement): add dt·S_surf
-            # (masked) to the solve INPUT so the backward-Euler tridiagonal solve
-            # realises ``(I − dt·L)·X_new = X_old + dt·S_surf`` at weight 1.0.  dt
-            # here is dt_tracer (the tracer timestep), matching Veros's
-            # ``dt_tracer·forc/dz[surface]`` RHS source.  No-op when None.
+            if _fixed_solve_test_input is not None:
+                K_v_cell = jnp.where(
+                    _fixed_solve_replace[2],
+                    _fixed_solve_test_input.formed_K, K_v_cell)
+            elif _formed_effective_K_override is not None:
+                K_v_cell = _formed_effective_K_override
+            # IMPLICIT surface tracer forcing: add masked dt·S_surf to the
+            # solve input, matching Veros's dt_tracer·forc/dz[surface] RHS.
             T_solve_in = state.T.data
             S_solve_in = state.S.data
             if surface_tracer_forcing is not None:
@@ -8648,6 +12215,7 @@ class LatLonCGridOceanModel:
         # with at least two wet levels.
         u_new, v_new = state.u.data, state.v.data
         u_solve_in, v_solve_in = state.u.data, state.v.data
+        _zdf_explicit_u, _zdf_explicit_v = u_solve_in, v_solve_in
         if do_momentum and getattr(_cfg_b, "surface_stress_implicit",
                                    False) and surface_forcing is not None:
             # NEMO dynzdf surface BC: deposit the wind stress in the TOP cell
@@ -8661,7 +12229,12 @@ class LatLonCGridOceanModel:
             )
             _sfx = surface_stress_faces(
                 surface_forcing, state.u.data.dtype, _zc, J_cell,
-                _grid)
+                _grid, **({} if self._nemo_ws_test_hooks
+                           .legacy_coastal_surface_stress_factors else {
+                               "cell_mask": state.land_mask.data,
+                               "u_mask": state.u_mask.data,
+                               "v_mask": state.v_mask.data,
+                           }))
             if _sfx is not None:
                 _tau_i_u, _tau_j_v, _dz0u, _dz0v = _sfx
                 _r0 = jnp.asarray(_cfg_b.constants.rho_0,
@@ -8684,9 +12257,10 @@ class LatLonCGridOceanModel:
             # control volume built below: the centre-to-centre gradient slot
             # ``dz_half_{u,v}`` (whose value at a closed interface is
             # irrelevant -- the viscosity there is already zero -- but which
-            # must not become 1/eps), and the ``zdf_drag_in_matrix`` diagonal,
-            # whose NEMO counterpart divides by ``e3u(ji,jj,iku,Kaa)``
-            # (dynzdf.F90:296), a scale factor NEMO never masks.
+            # must not become 1/eps).  It is NO LONGER the
+            # ``zdf_drag_in_matrix`` divisor: that one is NEMO's own
+            # ``e3u_3d(iku)*(1+r3u(Kaa)*umask(iku))``, built by
+            # ``_nemo_dynzdf_drag_face_thickness`` at the drag block below.
             dz_u_open, dz_v_open = dz_u, dz_v
             if _wet_if_vmix is not None:
                 # FACE seafloor guard (partial cells): the cell→face AVERAGE
@@ -8803,14 +12377,37 @@ class LatLonCGridOceanModel:
         _zdf_baroclinic_only = (
             do_momentum and getattr(_cfg_b, "zdf_baroclinic_only", False))
         if _zdf_baroclinic_only:
-            _u_bt_mean = depth_mean(
-                u_solve_in, dz_u, _cfg_b.min_water_column_m,
-                keepdims=True)
-            _v_bt_mean = depth_mean(
-                v_solve_in, dz_v, _cfg_b.min_water_column_m,
-                keepdims=True)
+            # OPERAND.  dynzdf.F90:150-151 subtracts the PROGNOSTIC
+            # ``uu_b(ji,jj,Kaa)`` / ``vv_b(ji,jj,Kaa)`` -- the same array
+            # stprk3_stg.F90:440 reads back to build zub -- not a depth mean
+            # rebuilt from the solve input.  dynzdf.F90:156-159 writes the
+            # bottom stress on that same uu_b(Kaa).  So take the prognostic
+            # pair whenever the state carries one; a state with no barotropic
+            # pair at all keeps the reconstruction, which is the only thing it
+            # can do.  Same "prognostic when the state has one" rule the stage
+            # correction already follows for its target.
+            _uu_b_zdf = getattr(state, "uu_b", None)
+            _vv_b_zdf = getattr(state, "vv_b", None)
+            if _uu_b_zdf is not None and _vv_b_zdf is not None:
+                _u_bt_mean = _uu_b_zdf.data[..., jnp.newaxis].astype(
+                    u_solve_in.dtype)
+                _v_bt_mean = _vv_b_zdf.data[..., jnp.newaxis].astype(
+                    v_solve_in.dtype)
+            elif _uu_b_zdf is None and _vv_b_zdf is None:
+                _u_bt_mean = depth_mean(
+                    u_solve_in, dz_u, _cfg_b.min_water_column_m,
+                    keepdims=True)
+                _v_bt_mean = depth_mean(
+                    v_solve_in, dz_v, _cfg_b.min_water_column_m,
+                    keepdims=True)
+            else:
+                raise ValueError(
+                    "NEMO barotropic removal (dynzdf.F90:150-151) requires "
+                    "both uu_b and vv_b, or neither")
             u_solve_in = u_solve_in - _u_bt_mean
             v_solve_in = v_solve_in - _v_bt_mean
+        _zdf_baro_subtract_u, _zdf_baro_subtract_v = (
+            u_solve_in, v_solve_in)
 
         # zdf_drag_in_matrix: NEMO's semi-implicit bottom friction goes INTO
         # the tridiagonal diagonal at each face-column's deepest wet cell
@@ -8909,12 +12506,59 @@ class LatLonCGridOceanModel:
             # The zdf_baroclinic_only RHS correction below uses the identical
             # prefactor for the identical reason (dynzdf.F90:156-159).
             # Sign unchanged: raising r_eff raises the diagonal, which damps.
+            #
+            # THE DIVISOR (VORTEX_SMT round 11, lane round 223).  NEMO divides
+            # the implicit drag term by ITS OWN U/V scale factor at the bottom
+            # level, never by a two-cell average:
+            #   zwd(ji,iku) = zwd(ji,iku) - zDt_2*( rCdU_bot(ji+1,jj)
+            #      + rCdU_bot(ji,jj) )
+            #      / (e3u_3d(ji,jj,iku)*(1._wp+r3u(ji,jj,Kaa)*umask(ji,jj,iku)))
+            # (``dynzdf.f90:306``; the V twin with e3v_3d/r3v/vmask/mbkv at
+            # ``:473-474``; the ln_dynspg_ts barotropic bottom-stress re-add at
+            # ``:166-167`` and ``:168-169`` -- all from the compiled ppsrc of
+            # the SMT-2 build VORTEX_SMT2_VEC_R8_OMIP_L1_P3).  This is the
+            # IMPLICIT form: ``dynzdf.f90:120`` calls ``zdf_drg_exp`` only
+            # under ``.NOT.ln_drgimp``, while these statements sit inside the
+            # ``IF( ln_drgimp )`` arms opened at ``:303`` and ``:470`` and the
+            # ``IF( ln_drgimp .AND. ln_dynspg_ts )`` arm opened at ``:158``,
+            # which is what every card reaching this block selects.
+            #
+            # ``e3u_3d`` is the REFERENCE 3-D face thickness: ``domzgr.f90:186``
+            # and ``:201`` read it from the mesh variable ``e3u_0``, and over z
+            # partial steps that is the MIN of the two neighbouring reference T
+            # thicknesses, not their average.  ``interp_cell_to_uface(dz_cell)``
+            # (its own docstring: "simple average of the two cells sharing each
+            # lon face") therefore overstated the seamount's bottom-cell
+            # thickness by up to 134 % on 2484 of 3660 bottom U faces and
+            # under-damped the deepest cell by 2.3x (round-10 receipt S5b).
+            #
+            # TIME LEVEL: NEMO takes the stretch factor at Kaa, the AFTER
+            # level.  This divisor reads ``state.eta``, which is the SAME
+            # operand ``dz_cell`` above is already built from
+            # (``J_cell = compute_ocean_jacobian(state.eta.data, ...)``), so
+            # THE ONE VARIABLE THIS CHANGES IS THE FACE RULE -- NEMO's
+            # min-rule ``e3u_0`` with the e1e2t-weighted ``r3u`` of
+            # ``domqco.F90:219-222`` -- and neither the time level nor the ssh
+            # operand moves.  DISCLOSED, not claimed away: ``state.eta`` is the
+            # AFTER ssh on the certified cards' stepping path, but the
+            # momentum-only additive-friction call below passes the step-entry
+            # state with no ``eta_now``, so on THAT lane this divisor is a Kmm
+            # stretch, exactly as it was before this change (see the
+            # ``eta_now`` note above).  That lane is an open row, not a
+            # regression.
+            #
+            # No new rule is written here: ``_nemo_ws_qco_stage_faces`` is the
+            # single shared assembler of ``e3u_0*(1+r3u*umask)`` that the WS-RK3
+            # stage geometry and the PE lane's wzv arm already call.
+            _drg_e3u, _drg_e3v = _nemo_dynzdf_drag_face_thickness(
+                state.eta.data, state.H_bathy.data, _zc, _cfg_b, _grid,
+                dz_u_open.dtype)
             extra_diag_u = (
                 dt_mom * _r_eff_u[..., jnp.newaxis]
-                / jnp.maximum(dz_u_open, 1e-10) * _is_bot_u)
+                / jnp.maximum(_drg_e3u, 1e-10) * _is_bot_u)
             extra_diag_v = (
                 dt_mom * _r_eff_v[..., jnp.newaxis]
-                / jnp.maximum(dz_v_open, 1e-10) * _is_bot_v)
+                / jnp.maximum(_drg_e3v, 1e-10) * _is_bot_v)
             if _zdf_baroclinic_only:
                 # NEMO dynzdf.F90:156-159: puu(Krhs) += zDt_2*(rCdU_bot sum)
                 # * uu_b(Kaa)/e3u(iku), with rCdU_bot <= 0 in NEMO's
@@ -8925,13 +12569,16 @@ class LatLonCGridOceanModel:
                 # the barotropic-mode bottom cell loses ``dt_mom*r_eff
                 # /e3u * u_bt_mean`` before the solve, matching NEMO's
                 # damping direction.  Same prefactor as the diagonal above and
-                # for the same reason (zDt_2*sum == rDt*average, #1455).
+                # for the same reason (zDt_2*sum == rDt*average, #1455), and
+                # the SAME divisor: ``dynzdf.f90:166``/``:168`` write the same
+                # ``e3u_3d(iku)*(1+r3u(Kaa)*umask(iku))`` the diagonal uses.
                 u_solve_in = u_solve_in - (
                     dt_mom * _r_eff_u[..., jnp.newaxis]
-                    / jnp.maximum(dz_u_open, 1e-10) * _is_bot_u * _u_bt_mean)
+                    / jnp.maximum(_drg_e3u, 1e-10) * _is_bot_u * _u_bt_mean)
                 v_solve_in = v_solve_in - (
                     dt_mom * _r_eff_v[..., jnp.newaxis]
-                    / jnp.maximum(dz_v_open, 1e-10) * _is_bot_v * _v_bt_mean)
+                    / jnp.maximum(_drg_e3v, 1e-10) * _is_bot_v * _v_bt_mean)
+        _zdf_baro_drag_u, _zdf_baro_drag_v = u_solve_in, v_solve_in
 
         # ---- Solve dispatch: batched (opt-in diag) / T+S pair / singles ---
         # Trace-time env switches (feature-gating exception: static
@@ -8966,6 +12613,20 @@ class LatLonCGridOceanModel:
         # ``dK_ddm_salt is None`` (ddm off) ⇒ K_s_cell IS K_v_cell (same
         # object) ⇒ the shared-K pair fast path stays BYTE-IDENTICAL.
         K_s_cell = K_v_cell if dK_ddm_salt is None else (K_v_cell + dK_ddm_salt)
+        if _fixed_solve_test_input is not None:
+            _tracer_e3w = jnp.where(
+                _fixed_solve_replace[3],
+                _fixed_solve_test_input.tracer_e3w, dz_half_cell)
+            _tracer_e3t = jnp.where(
+                _fixed_solve_replace[4],
+                _fixed_solve_test_input.tracer_e3t, dz_cell)
+        else:
+            _tracer_e3w = (dz_half_cell
+                           if _tracer_e3w_test_override is None
+                           else _tracer_e3w_test_override)
+            _tracer_e3t = (dz_cell
+                           if _tracer_e3t_test_override is None
+                           else _tracer_e3t_test_override)
         if _vmix_batched:
             T_new, S_new, u_new, v_new = (
                 implicit_vertical_diffusion_ocean_batched([
@@ -8991,13 +12652,45 @@ class LatLonCGridOceanModel:
                         _content_s = S_solve_in * dz_cell
                     else:
                         _content_t, _content_s = nemo_tracer_content_rhs
+                    if _fixed_solve_test_input is not None:
+                        _content_t = jnp.where(
+                            _fixed_solve_replace[5],
+                            _fixed_solve_test_input.temperature_content,
+                            _content_t)
+                    elif _tracer_content_t_test_override is not None:
+                        _content_t = _tracer_content_t_test_override
                     _tracer_wet = _literal_t_wet
-                    T_new, S_new = (
+                    _tracer_result = (
                         implicit_vertical_diffusion_ocean_tracer_pair_dispatch(
                             T_solve_in, S_solve_in, _content_t, _content_s,
-                            K_v_cell, dz_cell, dz_half_cell, dt, _tracer_wet,
+                            K_v_cell, _tracer_e3t, _tracer_e3w, dt,
+                            _tracer_wet,
                             evaluation="nemo_literal",
-                            implicit_w=nemo_aimp_tracer_w))
+                            implicit_w=nemo_aimp_tracer_w, return_matrix_trace=return_tracer_solve_trace))
+                    if return_tracer_solve_trace:
+                        T_new, S_new, _trace_matrix = _tracer_result
+                        if (_trace_heat_K is None
+                                or _trace_isoneutral_K is None):
+                            raise ValueError(
+                                "tracer solve trace missed its K components")
+                        _trace_lower, _trace_diagonal, _trace_upper = (
+                            _trace_matrix)
+                        _tracer_solve_trace = _NEMOWSTracerSolveTrace(
+                            heat_K=_trace_heat_K,
+                            isoneutral_K=_trace_isoneutral_K,
+                            effective_K=K_v_cell,
+                            e3t_after=_tracer_e3t,
+                            e3w_now=_tracer_e3w,
+                            wet=_tracer_wet,
+                            content_T=_content_t,
+                            lower=_trace_lower,
+                            diagonal=_trace_diagonal,
+                            upper=_trace_upper,
+                            solved_T=T_new,
+                            viscosity_K=A_v_cell,
+                        )
+                    else:
+                        T_new, S_new = _tracer_result
                 # T and S share the IDENTICAL tridiagonal matrix (same
                 # K_v_cell incl. any K33_iso fold + partial-cell wet
                 # mask, same dz/dz_half/dt), so the pair solve factors
@@ -9067,6 +12760,15 @@ class LatLonCGridOceanModel:
             T_new = jnp.where(_tracer_apply_mask, T_new, state.T.data)
             S_new = jnp.where(_tracer_apply_mask, S_new, state.S.data)
         if do_momentum:
+            if _zdf_momentum_observer is not None:
+                jax.debug.callback(
+                    _zdf_momentum_observer,
+                    _zdf_explicit_u, _zdf_explicit_v,
+                    _zdf_baro_subtract_u, _zdf_baro_subtract_v,
+                    _zdf_baro_drag_u, _zdf_baro_drag_v,
+                    u_new, v_new,
+                    ordered=True,
+                )
             if _zdf_baroclinic_only:
                 # Re-add the SAME depth mean that was subtracted before the
                 # solve (dynzdf.F90's barotropic component re-enters via
@@ -9215,7 +12917,30 @@ class LatLonCGridOceanModel:
         if return_K_diss_v:
             return state_out, K_diss_v_w
         if return_tke:
+            if return_tke_entry:
+                if _tke_entry_used is None:
+                    raise ValueError(
+                        "WRITE-only TKE entry trace requested, but the "
+                        "closure did not expose its consumed energy operand")
+                if _tke_statement_trace_used is None:
+                    raise ValueError(
+                        "WRITE-only TKE statement trace requested, but the "
+                        "closure did not expose its production boundaries")
+                return (state_out, tke_new, _tke_entry_used,
+                        _tke_statement_trace_used)
+            if return_tracer_solve_trace:
+                if _tracer_solve_trace is None:
+                    raise ValueError(
+                        "WRITE-only tracer solve trace was requested but the "
+                        "NEMO-literal tracer solve did not expose it")
+                return state_out, tke_new, _tracer_solve_trace
             return state_out, tke_new
+        if return_tracer_solve_trace:
+            if _tracer_solve_trace is None:
+                raise ValueError(
+                    "WRITE-only tracer solve trace was requested but the "
+                    "NEMO-literal tracer solve did not expose it")
+            return state_out, _tracer_solve_trace
         return state_out
 
     def diagnose_vertical_K(self, state: LatLonCGridOceanState, dt: float,
@@ -9223,27 +12948,27 @@ class LatLonCGridOceanModel:
         """The vertical diffusivity and viscosity the step consumes, avt/avm.
 
         NEMO publishes ``avm`` and ``avt`` in its five-day output; ours are
-        built inside the implicit vertical solve and are not visible on the
-        tendency (for the TKE closure ``physics_fn`` deliberately returns
-        ``K_v=None`` so the solve computes the profile itself). This runs the
+        built inside the implicit vertical solve. This runs the
         SAME setup the step runs — ``_step_impl`` with the implicit mixing
         turned off to obtain the surfaced ``K_v_phys``/``tke_source`` inputs,
-        then ``_apply_implicit_vertical_mixing`` with ``return_K_profiles`` —
+        then ``_apply_implicit_vertical_mixing`` on that explicit state with
+        ``return_K_profiles`` —
         and returns the coefficients at the point the solve reads them, AFTER
         the closure, the config background and the additive internal-wave
         mixing. It is the model's own code, not a re-derivation, so the number
         is directly comparable against NEMO's published field.
 
-        Returns ``(K_H, K_M)`` at interior interfaces, shape
-        ``(n_lat, n_lon, nlev-1)`` — heat diffusivity first, viscosity second.
-        No prognostic field is advanced.
+        Returns ``(K_H, K_M)`` at interior interfaces.  The private compiled-
+        bn2 hook also returns the exact ``rn2/rn2b`` bundle consumed here.
         """
         _grid = grid if grid is not None else self.grid
+        _tke_n2_bundle = self._tke_step_entry_n2_bundle(state)
         state_expl, (K_v_phys, A_v_phys, k33_implicit,
                      surface_tracer_forcing, tke_source,
                      diss_incr, tracer_source) = self._step_impl(
             state, dt, surface_forcing=surface_forcing,
-            _apply_implicit_vmix=False, grid=_grid)
+            _apply_implicit_vmix=False, grid=_grid,
+            _tke_n2_bundle_override=_tke_n2_bundle)
         _tke_prog = self._tke_prognostic_active()
         _tke_old = (state.tke.data if (_tke_prog and state.tke is not None)
                     else None)
@@ -9251,20 +12976,30 @@ class LatLonCGridOceanModel:
         # Mirror the step's tracer solve exactly, but stop at the profile: same
         # N² (step-entry, before-advection), same carried TKE, same NOW eta,
         # same surfaced physics K.
-        return self._apply_implicit_vertical_mixing(
-            state, dt, surface_forcing,
+        profiles = self._apply_implicit_vertical_mixing(
+            state_expl, dt, surface_forcing,
             K_v_phys=K_v_phys, A_v_phys=A_v_phys,
             dt_mom=dt_mom, tke_old=_tke_old, tke_source=tke_source,
             n2_tracers=self._n2_before_advection_tracers(state),
+            n2_tracers_before=self._n2_nemo_before_tracers(state),
+            tke_n2_bundle=_tke_n2_bundle,
             eta_now=state.eta.data,
+            u_now=state.u.data, v_now=state.v.data,
             return_K_profiles=True, grid=_grid,
         )
+        if self._nemo_ws_test_hooks.bn2_intermediate:
+            return (*profiles, _tke_n2_bundle.rn2, _tke_n2_bundle.rn2b)
+        return profiles
 
     def step(self, state: LatLonCGridOceanState, dt: float,
              freshwater=None, surface_forcing=None,
              sponge=None, *, grid=None,
              vertex_mask=None, t_seconds=None,
-             external_tracer_rate=None) -> LatLonCGridOceanState:
+             external_tracer_rate=None,
+             _shortwave_tendency_test_delta=None,
+             _vertical_K_test_override=None,
+             _nemo_stage1_zad_eta_after_override=None,
+             ) -> LatLonCGridOceanState:
         """Advance one time step using split-explicit stepping.
 
         ``external_tracer_rate`` (optional ``(dT_dt, dS_dt)`` array pair,
@@ -9360,17 +13095,96 @@ class LatLonCGridOceanModel:
                 f"got outer_integrator={self.config.outer_integrator!r}. "
                 "Passing it under another integrator would be a silent "
                 "no-op.")
-        return self._step_jitted(
-            state, dt, freshwater, surface_forcing, sponge,
+        if ((_shortwave_tendency_test_delta is not None
+             or _vertical_K_test_override is not None
+             or _nemo_stage1_zad_eta_after_override is not None)
+                and self.config.outer_integrator != "forward_euler"):
+            raise ValueError(
+                "private GYRE causal-arm overrides are implemented only for "
+                "outer_integrator='forward_euler'.")
+        # ``step`` is the production-compiled entry point even when a caller
+        # has enabled JAX's process-wide diagnostic ``disable_jit`` context.
+        # Inheriting that context used to bypass this boundary and execute a
+        # different eager arithmetic graph (most visibly at the Roquet/HPG
+        # boundary), so an eager-vs-production comparison was not comparing
+        # the same program.  Re-enable only this explicitly jitted kernel;
+        # private hooks remain inside the identical compiled step.
+        with jax.disable_jit(False):
+            result = self._step_jitted(
+                state, dt, freshwater, surface_forcing, sponge,
+                grid=grid, vertex_mask=vertex_mask, t_seconds=t_seconds,
+                external_tracer_rate=external_tracer_rate,
+                _shortwave_tendency_test_delta=_shortwave_tendency_test_delta,
+                _vertical_K_test_override=_vertical_K_test_override,
+                _nemo_stage1_zad_eta_after_override=(
+                    _nemo_stage1_zad_eta_after_override))
+            if self._nemo_ws_test_hooks.expose_live_stage_operands:
+                # Returning the diagnostic tuple changes XLA's optimization
+                # boundary and can move a last-bit rounding in the prognostic
+                # result.  Keep the trace compiled, but source ``state_after``
+                # from an independently compiled ordinary forward-Euler call.
+                # The round-51 observer control requires that returned state to
+                # equal the production call bit for bit.
+                state_after = self._step_live_operand_reference_jitted(
+                    state, dt, freshwater, surface_forcing, sponge,
+                    grid=grid, vertex_mask=vertex_mask, t_seconds=t_seconds,
+                    _shortwave_tendency_test_delta=(
+                        _shortwave_tendency_test_delta),
+                    _vertical_K_test_override=_vertical_K_test_override,
+                    _nemo_stage1_zad_eta_after_override=(
+                        _nemo_stage1_zad_eta_after_override))
+                return result._replace(state_after=state_after)
+            if self._nemo_ws_test_hooks.tracer_process_trace is not None:
+                # As with the live stage operands, returning extra arrays can
+                # change XLA fusion.  The next-step state therefore comes only
+                # from an independently compiled ordinary production call.
+                state_after = self._step_live_operand_reference_jitted(
+                    state, dt, freshwater, surface_forcing, sponge,
+                    grid=grid, vertex_mask=vertex_mask, t_seconds=t_seconds,
+                    _shortwave_tendency_test_delta=(
+                        _shortwave_tendency_test_delta),
+                    _vertical_K_test_override=_vertical_K_test_override,
+                    _nemo_stage1_zad_eta_after_override=(
+                        _nemo_stage1_zad_eta_after_override))
+                return result._replace(state_after=state_after)
+            return result
+
+    @partial(jax.jit, static_argnums=(0,))
+    def _step_live_operand_reference_jitted(
+            self, state: LatLonCGridOceanState, dt: float,
+            freshwater=None, surface_forcing=None, sponge=None, *, grid=None,
+            vertex_mask=None, t_seconds=None,
+            _shortwave_tendency_test_delta=None,
+            _vertical_K_test_override=None,
+            _nemo_stage1_zad_eta_after_override=None,
+            ) -> LatLonCGridOceanState:
+        """Ordinary compiled result paired with the private operand trace."""
+        new_state = self._step_impl(
+            state, dt, freshwater=freshwater,
+            surface_forcing=surface_forcing, sponge=sponge,
             grid=grid, vertex_mask=vertex_mask, t_seconds=t_seconds,
-            external_tracer_rate=external_tracer_rate)
+            _shortwave_tendency_test_delta=_shortwave_tendency_test_delta,
+            _vertical_K_test_override=_vertical_K_test_override,
+            _nemo_stage1_zad_eta_after_override=(
+                _nemo_stage1_zad_eta_after_override))
+        if self.config.polar_filter.use_polar_filter:
+            new_state = self._apply_polar_filter(new_state, dt, grid=grid)
+        if self.config.freeze_floor:
+            new_state = self._apply_freeze_floor(new_state)
+        if getattr(self.config, "ew_cyclic_overlap", False):
+            new_state = self._apply_ew_cyclic_overlap(new_state)
+        return new_state
 
     @partial(jax.jit, static_argnums=(0,))
     def _step_jitted(self, state: LatLonCGridOceanState, dt: float,
                      freshwater=None, surface_forcing=None,
                      sponge=None, *, grid=None,
                      vertex_mask=None, t_seconds=None,
-                     external_tracer_rate=None) -> LatLonCGridOceanState:
+                     external_tracer_rate=None,
+                     _shortwave_tendency_test_delta=None,
+                     _vertical_K_test_override=None,
+                     _nemo_stage1_zad_eta_after_override=None,
+                     ) -> LatLonCGridOceanState:
         """JIT body of :meth:`step` (split out so the vertex-mask cache
         fill runs eagerly — see the ``step`` docstring).
 
@@ -9385,6 +13199,43 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 f"config.outer_integrator must be one of {_valid_oi_jitted}, "
                 f"got {_oi!r}")
+        if self._nemo_ws_test_hooks.expose_barotropic_substeps:
+            if _oi != "forward_euler":
+                raise ValueError(
+                    "expose_barotropic_substeps is a private forward_euler "
+                    "WS-RK3 fidelity hook")
+            return self._step_impl(
+                state, dt, freshwater=freshwater,
+                surface_forcing=surface_forcing, sponge=sponge,
+                grid=grid, vertex_mask=vertex_mask, t_seconds=t_seconds,
+                _return_barotropic_substeps=True,
+                _nemo_stage1_zad_eta_after_override=(
+                    _nemo_stage1_zad_eta_after_override))
+        if self._nemo_ws_test_hooks.expose_live_stage_operands:
+            if _oi != "forward_euler":
+                raise ValueError(
+                    "expose_live_stage_operands is a private forward_euler "
+                    "WS-RK3 fidelity hook")
+            return self._step_impl(
+                state, dt, freshwater=freshwater,
+                surface_forcing=surface_forcing, sponge=sponge,
+                grid=grid, vertex_mask=vertex_mask, t_seconds=t_seconds,
+                _return_live_stage_operands=True,
+                _nemo_stage1_zad_eta_after_override=(
+                    _nemo_stage1_zad_eta_after_override))
+        if self._nemo_ws_test_hooks.tracer_process_trace is not None:
+            if _oi != "forward_euler":
+                raise ValueError(
+                    "tracer_process_trace is a private forward_euler "
+                    "WS-RK3 fidelity hook")
+            return self._step_impl(
+                state, dt, freshwater=freshwater,
+                surface_forcing=surface_forcing, sponge=sponge,
+                grid=grid, vertex_mask=vertex_mask, t_seconds=t_seconds,
+                _return_tracer_process_trace=True,
+                _vertical_K_test_override=_vertical_K_test_override,
+                _nemo_stage1_zad_eta_after_override=(
+                    _nemo_stage1_zad_eta_after_override))
         if self.config.barotropic.barotropic_solver == "implicit_unsplit":
             # MITgcm-faithful UNSPLIT implicit free surface (no barotropic/baroclinic
             # mode split). One AB2 predictor on the FULL 3D velocity + one implicit
@@ -9439,7 +13290,13 @@ class LatLonCGridOceanModel:
                                         surface_forcing=surface_forcing,
                                         sponge=sponge,
                                         grid=grid, vertex_mask=vertex_mask,
-                                        t_seconds=t_seconds)
+                                        t_seconds=t_seconds,
+                                        _shortwave_tendency_test_delta=(
+                                            _shortwave_tendency_test_delta),
+                                        _vertical_K_test_override=(
+                                            _vertical_K_test_override),
+                                        _nemo_stage1_zad_eta_after_override=(
+                                            _nemo_stage1_zad_eta_after_override))
         # Feature-gated on a STATIC config bool (CLAUDE.md feature-gating
         # exception): a Python ``if`` selects the branch at trace time, so
         # the freeze-floor clamp is only traced when enabled — no jnp.where
@@ -9459,6 +13316,29 @@ class LatLonCGridOceanModel:
         if getattr(self.config, "ew_cyclic_overlap", False):
             new_state = self._apply_ew_cyclic_overlap(new_state)
         return new_state
+
+    def _carry_nemo_rk3_after_ssh(self, entry_state, new_state):
+        """Leave NEMO's next-step after-SSH guess in the state it hands on.
+
+        At the end of every RK3 step, after the Nbb<==>Naa rotation
+        (stprk3.F90:221), NEMO assigns
+        ``ssh(:,:,Naa) = 2*ssh(:,:,Nbb) - ssh(:,:,Naa)`` (stprk3.F90:225),
+        where Nbb now holds the height this step PRODUCED and Naa still holds
+        the height it ENTERED with (Nbb is untouched across the three stages).
+        The next step reads that slot as ``r3t(:,:,Kaa)`` (stp2d.F90:149)
+        immediately before its first ``CALL wzv`` (stp2d.F90:153), and NEMO
+        carries it across a restart as ``ssha`` (restart.F90:184).
+
+        ``2*a`` is exact in binary floating point, so the subtraction is the
+        only rounding here and it is the one NEMO performs.  Inert unless the
+        card STATES the carried form -- the same predicate the ``wzv`` call
+        reads the slot with, so the writer and the reader cannot disagree.
+        """
+        if not nemo_rk3_after_ssh_is_carried(self.config):
+            return new_state
+        return new_state._replace(
+            eta_rk3_after=new_state.eta.replace(
+                data=2.0 * new_state.eta.data - entry_state.eta.data))
 
     def _apply_polar_filter(self, state: LatLonCGridOceanState, dt: float,
                             *, grid=None) -> LatLonCGridOceanState:
@@ -11293,13 +15173,15 @@ class LatLonCGridOceanModel:
                 _gm_dj = gm_redi_density_and_jacobian(
                     state.T.data, state.S.data, state.eta.data, state.H_bathy.data,
                     _grid, _zc, eos=_cfg_b.eos,
-                    eos_linear=_cfg_b.eos_linear, mask=cmask,
+                    eos_linear=_cfg_b.eos_linear,
+                    eos_nemo_seos=_cfg_b.eos_nemo_seos, mask=cmask,
                     rho_0=_cfg_b.constants.rho_0, g=_cfg_b.constants.g,
                     eos_depth=_eos_depth)
             dT_gm, dS_gm = gm_redi_tracer_tendency_latlon(  # noqa: N806
                 state.T.data, state.S.data, state.eta.data, state.H_bathy.data,
                 _grid, _zc, gm_cfg, eos=_cfg_b.eos,
-                eos_linear=_cfg_b.eos_linear, mask=cmask,
+                eos_linear=_cfg_b.eos_linear,
+                eos_nemo_seos=_cfg_b.eos_nemo_seos, mask=cmask,
                 u_mask=u_mask, v_mask=v_mask,
                 rho_0=_cfg_b.constants.rho_0, g=_cfg_b.constants.g,
                 omega=_cfg_b.omega,  # see the sibling call's comment above
@@ -11315,7 +15197,8 @@ class LatLonCGridOceanModel:
                 k33_iso = compute_isoneutral_K33_latlon(
                     state.T.data, state.S.data, state.eta.data, state.H_bathy.data,
                     _grid, _zc, gm_cfg, eos=_cfg_b.eos,
-                    eos_linear=_cfg_b.eos_linear, mask=cmask,
+                    eos_linear=_cfg_b.eos_linear,
+                    eos_nemo_seos=_cfg_b.eos_nemo_seos, mask=cmask,
                     rho_0=_cfg_b.constants.rho_0, g=_cfg_b.constants.g,
                     omega=_cfg_b.omega,
                     kappa_redi_override=_kri_static,
@@ -11602,6 +15485,14 @@ class LatLonCGridOceanModel:
         # Prime build-once caches from the CONCRETE input state before
         # the scan traces step() with tracers (codex round-2 MINOR).
         self.prime_step_caches(state)
+        # NEMO's carried after-SSH slot: the step writes it every iteration,
+        # so an unseeded None->Field transition would crash the scan on the
+        # first one.  The seed is NEMO's OWN value before any step has run --
+        # ssh(:,:,Kaa) = ssh(:,:,Kbb) (restart.F90:370) -- so seeding changes
+        # no number: the wzv branch reads the step-entry height either way.
+        if (nemo_rk3_after_ssh_is_carried(self.config)
+                and state.eta_rk3_after is None):
+            state = state._replace(eta_rk3_after=state.eta)
         # Pre-initialize AB2 carry fields so the pytree structure
         # is stable across scan iterations (None → Field transition
         # would crash jax.lax.scan).
@@ -11929,3 +15820,49 @@ class LatLonCGridOceanModel:
             scan_fn, state, xs=None, length=n_steps,
         )
         return final_state, trajectory
+
+
+class _NEMOWSTracerSolveTrace(NamedTuple):
+    """Consumed production-JIT tracer ZDF operands for Round 126."""
+
+    heat_K: object
+    isoneutral_K: object
+    effective_K: object
+    e3t_after: object
+    e3w_now: object
+    wet: object
+    content_T: object
+    lower: object
+    diagonal: object
+    upper: object
+    solved_T: object
+    viscosity_K: object
+
+
+class _NEMOWSQsrAssociationTrace(NamedTuple):
+    """Consumed production-JIT QSR source-association arrays for Round 190."""
+
+    tendency_kbb: object
+    qsr_kbb: object
+    qsr_kmm: object
+    thickness_kbb: object
+    thickness_kmm: object
+    process_qsr_kbb: object
+    process_surface_rate: object
+    process_qsr_rate: object
+
+
+class _NEMOWSTracerProcessTrace(NamedTuple):
+    """Private production-JIT stage-3 temperature boundaries for Round 124."""
+
+    state_after: object
+    Tbb: object
+    q_Kbb: object  # noqa: N815 - NEMO time-level spelling is the record API.
+    q_Kmm: object  # noqa: N815 - NEMO time-level spelling is the record API.
+    q_Kaa: object  # noqa: N815 - NEMO time-level spelling is the record API.
+    boundaries: object
+    Taa: object
+    qsr_association: object
+    vertical_solve: object
+    fct_activity: object
+    ldf_diagnostics: object

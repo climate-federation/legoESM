@@ -65,7 +65,8 @@ def _bundle(**kw) -> CanopyForcingBundle:
 def _resid_norm(x, bundle) -> float:
     return float(jnp.linalg.norm(_canopy_residual(
         x, bundle, _CFG.LE_module, _CFG.stomatal_model,
-        _CFG.le_cap_mode, _CFG.use_ta_for_photosynthesis)))
+        _CFG.le_cap_mode, _CFG.use_ta_for_photosynthesis,
+        _CFG.rh_cap_smoothing_width, _CFG.zeta_cap_smoothing_width, _CFG.most_n_iters)))
 
 
 # ---------------------------------------------------------------------------
@@ -101,7 +102,8 @@ def test_warm_start_reaches_the_same_fixed_point(seed):
         x_seed[jnp.array([0, 1, 4])] - x_cold[jnp.array([0, 1, 4])]))) < 0.5  # K
     assert float(jnp.abs(x_seed[5] - x_cold[5])) < 1e-3                       # kg/kg
     fl = lambda x: canopy_forward(x, b, _CFG.LE_module, _CFG.stomatal_model,
-                                  _CFG.le_cap_mode, _CFG.use_ta_for_photosynthesis)
+                                  _CFG.le_cap_mode, _CFG.use_ta_for_photosynthesis,
+                                  _CFG.rh_cap_smoothing_width, _CFG.zeta_cap_smoothing_width, _CFG.most_n_iters)
     f_cold, f_seed = fl(x_cold), fl(x_seed)
     for k in ("LE_Sun", "H_Sun", "G"):
         assert float(jnp.abs(f_seed[k] - f_cold[k])) < 1.0                    # W/m2
@@ -198,7 +200,8 @@ def test_degenerate_regimes_stay_inside_the_feasible_set(name, kw):
 # entry point instead.
 # ---------------------------------------------------------------------------
 
-def _canopy_call(ncol: int = 8, seed_arr=None, cap: int = 60):
+def _canopy_call(ncol: int = 8, seed_arr=None, cap: int = 60, soil_record=None,
+                 lw_scale=1.0, soil_offset=0.0):
     """One two-leaf canopy call over a small realistic column batch."""
     import numpy as np
     from legoesm.core.coupling_fields import AtmToSurface
@@ -212,7 +215,7 @@ def _canopy_call(ncol: int = 8, seed_arr=None, cap: int = 60):
     Ta = 290.0 + 8.0 * r.random(ncol)
     forcing = AtmToSurface(
         sw_down=f(200.0 + 400.0 * r.random(ncol)),
-        lw_down=f(300.0 + 60.0 * r.random(ncol)),
+        lw_down=f(300.0 + 60.0 * r.random(ncol)) * lw_scale,
         precip_total=f(np.zeros(ncol)), precip_snow=f(np.zeros(ncol)),
         T_lowest=f(Ta), q_lowest=f(0.006 + 0.006 * r.random(ncol)),
         u_lowest=f(1.0 + 3.0 * r.random(ncol)), v_lowest=f(np.zeros(ncol)),
@@ -228,7 +231,9 @@ def _canopy_call(ncol: int = 8, seed_arr=None, cap: int = 60):
         land_config=MultiLayerLandConfig(), canopy_params=None,
         w_frac_rz=w_frac, wind_speed=jnp.abs(forcing.u_lowest),
         wind_dir_x=jnp.ones_like(w_frac), wind_dir_y=jnp.zeros_like(w_frac),
-        soil_thermal_fn=lambda G, dt_: T_soil, dt=1800.0,
+        soil_thermal_fn=(lambda G, dt_: T_soil + soil_offset) if soil_record is None
+        else (lambda G, dt_: (soil_record.append(G), T_soil + soil_offset)[1]),
+        dt=1800.0,
         canopy_seed=seed_arr)
 
 

@@ -272,6 +272,73 @@ def merge_ghg(per_gas: dict) -> object:
     )
 
 
+# CESM ``atm/cam/ggas/GHG_CMIP-*.nc``: one file, short CAM names, annual means.
+CESM_GAS_VARS: dict[str, str] = {
+    "CO2": "CO2", "CH4": "CH4", "N2O": "N2O", "CFC_11": "f11", "CFC_12": "f12",
+}
+
+
+def _annual_midyear_from_yyyymmdd(date) -> np.ndarray:
+    """``YYYYMMDD`` labels of ANNUAL means -> ``year + 0.5``.
+
+    The CESM GHG records are calendar-year means whose ``time`` sits exactly
+    halfway through their year-long ``time_bnds`` (1979: 722999.5 in
+    [722817, 723182]); the ``date`` label says July 1/2, which is up to 1.5
+    days early.  Only the year is taken from ``date`` (CESM's ``days since
+    0-1-1`` axis has a year 0 no Python datetime can decode, and the file's
+    two extrapolated trailing years carry copied bounds)."""
+    d = np.asarray(date).astype(np.int64).reshape(-1)
+    mmdd = d % 10000
+    if not np.all((mmdd == 701) | (mmdd == 702)):
+        raise ValueError("expected annual-mean records labelled July 1/2")
+    return (d // 10000) + 0.5
+
+
+def adapt_cesm_ghg(ds) -> object:
+    """CESM single-file GHG (``CO2/CH4/N2O/f11/f12`` + ``date``) -> the deck
+    GHG Dataset, same schema as :func:`merge_ghg`.  The file's ``f11`` is the
+    input4MIPs ``mole_fraction_of_cfc11eq_in_air`` (CFC-11-EQUIVALENT: other
+    halocarbons except CFC-12 folded in by radiative efficiency, as CAM6 uses
+    it), so ``CFC_11`` here is CFC-11-eq, ~2.3x raw CFC-11 in 1979.  The
+    file's ``adj`` factor (f11 * (1 + adj)) is refused unless it is zero,
+    which it is in GHG_CMIP-1-2-0 for every year."""
+    import xarray as xr
+
+    missing = [v for v in (*CESM_GAS_VARS.values(), "date") if v not in ds]
+    if missing:
+        raise ValueError(f"not a CESM GHG file: missing {missing}")
+    if "adj" in ds and np.any(np.asarray(ds["adj"].values) != 0.0):
+        raise ValueError("CESM GHG 'adj' (f11 scaling) is non-zero; applying "
+                         "it is not implemented")
+    years = _annual_midyear_from_yyyymmdd(ds["date"].values)
+    if np.any(np.diff(years) <= 0):
+        raise ValueError("CESM GHG date axis is not strictly increasing")
+    data_vars = {}
+    for gas, var in CESM_GAS_VARS.items():
+        values = np.asarray(ds[var].values, dtype=np.float64).reshape(-1)
+        if "units" not in ds[var].attrs:
+            raise ValueError(f"CESM GHG {var!r} has no units attribute; "
+                             "refusing to guess its scale")
+        units = _canonical_units(str(ds[var].attrs["units"]))
+        long_name = (f"{gas} mole fraction (CESM {var})" if var != "f11" else
+                     "CFC-11-EQUIVALENT mole fraction (CESM f11: other "
+                     "halocarbons except CFC-12 folded in, as CAM6 uses it)")
+        data_vars[gas] = (("time", "lat", "lon"), values.reshape(-1, 1, 1),
+                          {"units": units, "long_name": long_name})
+    return xr.Dataset(
+        data_vars=data_vars,
+        coords={
+            "time": ("time", years, {"units": "year as %Y.%f"}),
+            "lat": ("lat", np.array([0.0], dtype=np.float64)),
+            "lon": ("lon", np.array([0.0], dtype=np.float64)),
+        },
+        attrs={"source": "scripts/data/adapt_cmip6_ghg.py --cesm-file",
+               "comment": "CESM GHG_CMIP annual global means for the legoESM "
+                          "AMIP GHG loader; CFC_11 = cfc11eq (CAM6), adj not "
+                          "applied"},
+    )
+
+
 def _match_in_dir(in_dir: Path) -> dict:
     """Map each gas to a file in ``in_dir`` by its CF variable name in the
     filename (input4MIPs names encode the variable), else by a substring."""
@@ -306,14 +373,29 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     for flag in FLAG_TO_GAS:
         p.add_argument(f"--{flag}", type=Path, default=None,
                        help=f"Explicit {FLAG_TO_GAS[flag]} input4MIPs file.")
+    p.add_argument("--cesm-file", type=Path, default=None,
+                   help="CESM single-file GHG (atm/cam/ggas/GHG_CMIP-*.nc).")
     p.add_argument("--out", type=Path, required=True,
                    help="Output merged GHG NetCDF (deck --ghg-file).")
     return p.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
+    import xarray as xr
 
     args = parse_args(argv)
+    if args.cesm_file is not None:
+        _others = [f for f in ("in_dir", *FLAG_TO_GAS)
+                   if getattr(args, f.replace("-", "_"), None) is not None]
+        if _others:
+            raise SystemExit(f"--cesm-file cannot be combined with {_others}")
+        with xr.open_dataset(args.cesm_file, decode_times=False) as ds:
+            merged = adapt_cesm_ghg(ds)
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        merged.to_netcdf(args.out)
+        yrs = np.asarray(merged["time"].values)
+        print(f"Wrote {args.out} ({yrs.size} years, {yrs[0]:.1f}->{yrs[-1]:.1f})")
+        return 0
     if args.in_dir is not None:
         per_gas = _match_in_dir(args.in_dir)
     else:

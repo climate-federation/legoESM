@@ -19,6 +19,9 @@ import jax.numpy as jnp
 # is cast to int32, and a non-finite or absurd fall speed must report a
 # saturated integer rather than overflow or a quiet 1.
 _CFL_COUNT_CEILING = 2.0 ** 30
+# Sub-steps run per early-exit check; loop-structure only (answers do not
+# depend on it).
+_SED_CHUNK = 8
 
 
 class HydrometeorState(NamedTuple):
@@ -336,8 +339,21 @@ def _sedimentation_substepped(q_pos, rho, V_t, dz, dt, return_surface_flux,
         return (q_dum, (tend_acc + tend / nstep).astype(_dtype),
                 (sfc_acc + flux[:, -1] / nstep[:, 0]).astype(_dtype))
 
+    # Passes past every column's nstep add exact zeros, so stop after the
+    # chunk holding max(nstep): bit-identical to running all n_max, and the
+    # cond + static-length loops keep reverse-mode AD.
+    n_run = jnp.max(nstep, initial=0)  # empty column batch: no passes
+
+    def chunk(c, carry):
+        return jax.lax.cond(
+            c * _SED_CHUNK < n_run,
+            lambda cr: jax.lax.fori_loop(
+                0, _SED_CHUNK, lambda j, x: body(c * _SED_CHUNK + j, x), cr),
+            lambda cr: cr,
+            carry)
+
     _, tendency, sfc = jax.lax.fori_loop(
-        0, n_max, body,
+        0, -(-n_max // _SED_CHUNK), chunk,
         (q_pos, jnp.zeros_like(q_pos), jnp.zeros_like(q_pos[:, -1])))
     out = (tendency, sfc) if return_surface_flux else (tendency,)
     if return_substeps:

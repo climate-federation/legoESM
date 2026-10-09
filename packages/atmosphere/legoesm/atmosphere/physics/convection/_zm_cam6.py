@@ -21,10 +21,12 @@ Departures from the oracle (all documented, measured where numeric):
 * ``ientropy`` Brent inversion (data-dependent iteration count) is replaced
   by the fixed-iteration Newton solve of ``_zm_dilute.invert_entropy``
   (converges to the same root; AD-safe).
-* Saturation: CAM ``qsat_water`` (Goff-Gratch) / ``qsat`` (mixed phase) are
-  replaced by the shared ``legoesm.thermo.saturation_specific_humidity``
-  (Tetens, smooth cap) per CLAUDE.md; the curve difference is measured in
-  ``tests/atmosphere/hydrostatic/unit/test_zm_cam6_oracle.py``.
+* Saturation: CAM ``qsat_water`` (Goff-Gratch) / ``qsat`` (mixed phase)
+  return the saturation SPECIFIC humidity ``ε·e/(p − (1−ε)·e)``
+  (``wv_sat_methods.F90`` ``wv_sat_svp_to_qsat``); the port uses the shared
+  ``legoesm.thermo.saturation_specific_humidity`` (same expression over the
+  shared Tetens curve, smooth cap) per CLAUDE.md.  The curve difference is
+  measured in ``tests/atmosphere/hydrostatic/unit/test_zm_cam6_oracle.py``.
 * Constants come from ``legoesm.constants`` (CAM's liquid/vapour heat
   capacities, dry gas constant, epsilon and vapour gas constant differ in
   the third or fourth significant figure).
@@ -208,7 +210,7 @@ def _scan_levels(body, init, xs, *, descending):
 
 
 def _qsat_hpa(t, p_hpa):
-    """Oracle ``qsat_hPa``: saturation SPECIFIC humidity (CAM's qsat form eps*es/(p-(1-eps)es)) at ``p`` in hPa."""
+    """Oracle ``qsat_hPa``: saturation specific humidity at ``p`` in hPa."""
     return saturation_specific_humidity(t, p_hpa * 100.0)
 
 

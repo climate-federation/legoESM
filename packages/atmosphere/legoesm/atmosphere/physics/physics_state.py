@@ -235,6 +235,7 @@ class PhysicsState(NamedTuple):
     # overrides above).
     surface_shflx_override_w_m2: jnp.ndarray = None   # [W/m^2] sensible, positive up
     surface_lhflx_override_w_m2: jnp.ndarray = None   # [W/m^2] latent, positive up
+    surface_evap_override_kg_m2_s: jnp.ndarray = None  # [kg/m^2/s] water, positive up (tile mass flux)
     surface_tau_x_override_pa: jnp.ndarray = None     # [Pa] eastward stress on the atmosphere
     surface_tau_y_override_pa: jnp.ndarray = None     # [Pa] northward stress on the atmosphere
     # Physics-cadence cache (physics_update_steps > 1): the FULL tendency
@@ -278,6 +279,7 @@ PHYSSTATE_INPUT_FIELDS = frozenset({
     "held_physics",
     "surface_wth_override", "surface_wqv_override",
     "surface_shflx_override_w_m2", "surface_lhflx_override_w_m2",
+    "surface_evap_override_kg_m2_s",
     "surface_tau_x_override_pa", "surface_tau_y_override_pa",
 })
 
@@ -523,6 +525,9 @@ def update_physics_state(phys_state, updates):
         surface_lhflx_override_w_m2=updates.get(
             "surface_lhflx_override_w_m2",
             phys_state.surface_lhflx_override_w_m2),
+        surface_evap_override_kg_m2_s=updates.get(
+            "surface_evap_override_kg_m2_s",
+            phys_state.surface_evap_override_kg_m2_s),
         surface_tau_x_override_pa=updates.get(
             "surface_tau_x_override_pa",
             phys_state.surface_tau_x_override_pa),

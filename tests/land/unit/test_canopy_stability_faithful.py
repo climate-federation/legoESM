@@ -61,6 +61,9 @@ from legoesm.land.canopy.stability import (                           # noqa: E4
     _Z0MG_BARE, _NU_AIR, _CS_DENSE, _CS_BARE_COEF, _CS_BARE_EXP,
     _ZETA_MAX_STABLE,
 )
+from legoesm.land.canopy.config import CanopyConfig                  # noqa: E402
+
+_ZW = CanopyConfig().zeta_cap_smoothing_width
 
 # --- independent CLM5 FrictionVelocityMod oracle literals ----------------------
 # (canaried in test_most_constants_match_clm5).
@@ -73,6 +76,22 @@ _O_MOM_CONV = 1.14    # momentum free-convection coefficient
 _O_HEAT_CONV = 0.8    # heat free-convection coefficient
 _O_RIB_MAX = 0.19  # Zeng-1998 bulk-Ri init cap
 _O_ZETA_MAX_STABLE = 0.5  # stable-branch zeta clamp upper bound
+# Beljaars & Holtslag (1991) stable-side coefficients (the DEPARTURE from CLM5's
+# linear -5 zeta; b as rounded in the shared core implementation).
+_O_BH_A, _O_BH_B, _O_BH_C, _O_BH_D = 1.0, 0.667, 5.0, 0.35
+
+
+def _bh_psim(z):
+    """Beljaars & Holtslag (1991) stable momentum psi (z >= 0)."""
+    return -(_O_BH_A*z + _O_BH_B*(z - _O_BH_C/_O_BH_D)*math.exp(-_O_BH_D*z)
+             + _O_BH_B*_O_BH_C/_O_BH_D)
+
+
+def _bh_psih(z):
+    """Beljaars & Holtslag (1991) stable heat psi (z >= 0)."""
+    return -((1.0 + 2.0*_O_BH_A*z/3.0)**1.5
+             + _O_BH_B*(z - _O_BH_C/_O_BH_D)*math.exp(-_O_BH_D*z)
+             + _O_BH_B*_O_BH_C/_O_BH_D - 1.0)
 
 
 def _psim(z):
@@ -91,32 +110,28 @@ def _psih(z):
 
 
 def _ustar_oracle(zldis, z0m, obu, um):
-    """CLM5 FrictionVelocityMod 4-regime friction velocity."""
+    """CLM5 FrictionVelocityMod friction velocity (unstable); BH91 stable side."""
     zeta = zldis/obu
     if zeta < -_O_ZETAM:                                    # very unstable
         d = (math.log(-_O_ZETAM*obu/z0m) - _psim(-_O_ZETAM) + _psim(z0m/obu)
              + _O_MOM_CONV*((-zeta)**(1.0/3.0) - _O_ZETAM**(1.0/3.0)))
     elif zeta < 0.0:                                        # unstable
         d = math.log(zldis/z0m) - _psim(zeta) + _psim(z0m/obu)
-    elif zeta <= 1.0:                                       # stable
-        d = math.log(zldis/z0m) + _O_BETA*zeta - _O_BETA*z0m/obu
-    else:                                                   # very stable
-        d = math.log(obu/z0m) + _O_BETA - _O_BETA*z0m/obu + (_O_BETA*math.log(zeta) + zeta - 1.0)
+    else:                                                   # stable: BH91 (departure)
+        d = math.log(zldis/z0m) - _bh_psim(zeta) + _bh_psim(z0m/obu)
     return _O_KAPPA*um/d
 
 
 def _ch_oracle(zldis, z0h, obu):
-    """CLM5 FrictionVelocityMod 4-regime heat/scalar transfer (theta*/dtheta)."""
+    """CLM5 heat/scalar transfer (unstable); BH91 stable side (theta*/dtheta)."""
     zeta = zldis/obu
     if zeta < -_O_ZETAT:                                    # very unstable (INVERSE cbrt)
         d = (math.log(-_O_ZETAT*obu/z0h) - _psih(-_O_ZETAT) + _psih(z0h/obu)
              + _O_HEAT_CONV*(_O_ZETAT**(-1.0/3.0) - (-zeta)**(-1.0/3.0)))
     elif zeta < 0.0:                                        # unstable
         d = math.log(zldis/z0h) - _psih(zeta) + _psih(z0h/obu)
-    elif zeta <= 1.0:                                       # stable
-        d = math.log(zldis/z0h) + _O_BETA*zeta - _O_BETA*z0h/obu
-    else:                                                   # very stable
-        d = math.log(obu/z0h) + _O_BETA - _O_BETA*z0h/obu + (_O_BETA*math.log(zeta) + zeta - 1.0)
+    else:                                                   # stable: BH91 (departure)
+        d = math.log(zldis/z0h) - _bh_psih(zeta) + _bh_psih(z0h/obu)
     return _O_KAPPA/d
 
 
@@ -138,7 +153,7 @@ _REGIMES = [
 
 @pytest.mark.parametrize("name,obu", _REGIMES)
 def test_friction_velocity_matches_clm5_oracle(name, obu):
-    """ustar matches the CLM5 FrictionVelocityMod form in every regime."""
+    """ustar matches the oracle form in every regime (CLM5 unstable, BH91 stable)."""
     z0m, um = 0.1, 4.0
     got = float(_friction_velocity(_a(_ZLDIS), _a(z0m), _a(obu), _a(um)))
     exp = _ustar_oracle(_ZLDIS, z0m, obu, um)
@@ -147,7 +162,7 @@ def test_friction_velocity_matches_clm5_oracle(name, obu):
 
 @pytest.mark.parametrize("name,obu", _REGIMES)
 def test_heat_transfer_matches_clm5_oracle(name, obu):
-    """ch (theta*/dtheta) matches the CLM5 heat form in every regime."""
+    """ch matches the oracle heat form in every regime (CLM5 unstable, BH91 stable)."""
     z0h = 0.1
     got = float(_temperature_humidity_relation(_a(_ZLDIS), _a(obu), _a(z0h)))
     exp = _ch_oracle(_ZLDIS, z0h, obu)
@@ -203,21 +218,19 @@ def test_forms_continuous_across_free_convection_matches():
     assert c_lo == pytest.approx(c_hi, rel=1e-5)
 
 
-def test_stable_branch_resistance_is_linear_in_zeta():
-    """In the stable regime the resistance denom fm = kappa u / ustar is affine in
-    zeta (slope set by beta=5); the second difference vanishes (non-vacuous — a
-    non-linear branch would fail)."""
+def test_stable_branch_has_the_beljaars_holtslag_long_tail():
+    """Stable side is BH91, not CLM5's linear -5 zeta: the resistance denom
+    fm = kappa u / ustar grows with zeta but SLOWER than linear (the long tail),
+    and starts with the Businger-Dyer slope ~5 near neutral."""
     z0m, um = 0.05, 4.0
-    fm = []
-    for zeta in (0.3, 0.6, 0.9):
-        obu = _ZLDIS/zeta
-        u = float(_friction_velocity(_a(_ZLDIS), _a(z0m), _a(obu), _a(um)))
-        fm.append(_O_KAPPA*um/u)
-    second_diff = (fm[2] - fm[1]) - (fm[1] - fm[0])
-    assert abs(second_diff) < 1e-9
-    # slope = 5*(1 - z0m/zldis) (roughness term), and clearly nonzero
-    slope = (fm[2] - fm[0]) / (0.9 - 0.3)
-    assert slope == pytest.approx(_O_BETA*(1.0 - z0m/_ZLDIS), rel=1e-9)
+
+    def fm(zeta):
+        u = float(_friction_velocity(_a(_ZLDIS), _a(z0m), _a(_ZLDIS/zeta), _a(um)))
+        return _O_KAPPA*um/u
+    near = (fm(0.02) - fm(0.01)) / 0.01
+    far = (fm(3.0) - fm(2.0)) / 1.0
+    assert near == pytest.approx(_O_BETA, rel=0.05)
+    assert 0.0 < far < 0.8*near
 
 
 def test_very_unstable_heat_uses_clm5_inverse_cbrt_not_gsam():
@@ -256,7 +269,7 @@ def test_kb_minus_one_is_zero_not_two_departure():
     ur, Ta, Tv, Tc = 4.0, 300.0, 300.5, 301.0              # unstable column
     ustar, rah, raw, uav, zeta = monin_obukhov_stability(
         _a(ur), _a(Ta), _a(Tv), _a(Tc), _a(0.01), _a(0.011), _a(_ZLDIS), _a(z0m),
-        n_iters=40)
+        n_iters=40, zeta_cap_width=_ZW)
     ch_solver = 1.0/(float(rah)*float(ustar))
     ch_at_zeta_kb0 = _ch_oracle(_ZLDIS, z0m, _ZLDIS/float(zeta))
     ch_at_zeta_kb2 = _ch_oracle(_ZLDIS, z0m/math.e**2, _ZLDIS/float(zeta))
@@ -268,15 +281,19 @@ def test_kb_minus_one_is_zero_not_two_departure():
 def test_bulk_richardson_init_matches_zeng1998():
     """_monin_obukhov_init reproduces the Zeng-1998 bulk-Ri first guess."""
     ur, Tv_atm, dthv, z0m = 3.0, 300.0, 1.2, 0.1           # stable (dthv>0)
-    um_got, obu_got = _monin_obukhov_init(_a(ur), _a(Tv_atm), _a(dthv), _a(_ZLDIS), _a(z0m))
+    um_got, obu_got = _monin_obukhov_init(_a(ur), _a(Tv_atm), _a(dthv), _a(_ZLDIS), _a(z0m), _ZW)
     g = float(constants.g)
     um = max(ur, 0.1)                                       # dthv>=0 branch
     rib = g*_ZLDIS*dthv/(Tv_atm*um**2)
     zeta_raw = rib*math.log(_ZLDIS/z0m)/(1.0 - _O_BETA*min(rib, _O_RIB_MAX))
-    zeta = min(max(zeta_raw, 0.01), _O_ZETA_MAX_STABLE)
-    # this stable column drives the upper zeta-clamp active (raw > 0.5), so the
-    # test also exercises the _ZETA_MAX_STABLE guard.
-    assert zeta_raw > _O_ZETA_MAX_STABLE and zeta == _O_ZETA_MAX_STABLE
+    # Deliberate departure from CLM5's hard min(zeta, 0.5): a smooth min of
+    # width w (a hard kink stalls the canopy Newton solve).  This stable column
+    # drives the cap active (raw > 0.5), so it pins both the formula and that
+    # the departure from CLM5 stays inside w*ln2.
+    w = _ZW
+    zeta = zeta_raw - w*math.log1p(math.exp((zeta_raw - _O_ZETA_MAX_STABLE)/w))
+    assert zeta_raw > _O_ZETA_MAX_STABLE
+    assert _O_ZETA_MAX_STABLE - w*math.log(2.0) < zeta < _O_ZETA_MAX_STABLE
     assert float(um_got) == pytest.approx(um, rel=1e-9, abs=0.0)
     assert float(obu_got) == pytest.approx(_ZLDIS/zeta, rel=1e-9, abs=0.0)
 
@@ -284,7 +301,7 @@ def test_bulk_richardson_init_matches_zeng1998():
 def test_monin_obukhov_init_unstable_gustiness():
     """Unstable init adds convective gustiness um = sqrt(ur^2 + wc^2), wc=0.5."""
     ur, Tv_atm, dthv, z0m = 2.0, 300.0, -0.8, 0.1          # unstable (dthv<0)
-    um_got, _ = _monin_obukhov_init(_a(ur), _a(Tv_atm), _a(dthv), _a(_ZLDIS), _a(z0m))
+    um_got, _ = _monin_obukhov_init(_a(ur), _a(Tv_atm), _a(dthv), _a(_ZLDIS), _a(z0m), _ZW)
     assert float(um_got) == pytest.approx(math.sqrt(ur**2 + 0.5**2), rel=1e-9, abs=0.0)
 
 
@@ -299,7 +316,7 @@ def test_solver_converges_full_state(Tc):
     args = (_a(4.0), _a(300.0), _a(300.5), _a(Tc), _a(0.01), _a(0.011), _a(_ZLDIS), _a(z0m))
 
     def _state(k):
-        return jnp.array([float(x) for x in monin_obukhov_stability(*args, n_iters=k)])
+        return jnp.array([float(x) for x in monin_obukhov_stability(*args, n_iters=k, zeta_cap_width=_ZW)])
 
     s2, s4, s8, s16, s40 = (_state(k) for k in (2, 4, 8, 16, 40))
     for got, exp in zip(s8.tolist(), s40.tolist()):        # all 5 outputs, not just ustar
@@ -370,7 +387,7 @@ def test_solver_grad_finite_x64_and_float32():
         for Tc in (301.0, 299.0):                          # unstable / stable
             args = lambda ur: monin_obukhov_stability(
                 ur, _a(300.0), _a(300.5), _a(Tc), _a(0.01), _a(0.011),
-                _a(_ZLDIS), _a(z0m), n_iters=8)[0]
+                _a(_ZLDIS), _a(z0m), n_iters=8, zeta_cap_width=_ZW)[0]
             gr = jax.grad(args)(_a(4.0))
             assert bool(jnp.isfinite(gr)) and float(gr) > 0.0
 

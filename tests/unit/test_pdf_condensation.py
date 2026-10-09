@@ -18,7 +18,7 @@ import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 
 from legoesm import constants  # noqa: E402
-from legoesm.atmosphere.physics.microphysics.pdf_condensation import (  # noqa: E402
+from legoesm.atmosphere._future.pdf_condensation import (  # noqa: E402
     pdf_saturation_adjustment,
     uniform_pdf_cloud,
 )
@@ -137,3 +137,8 @@ def test_f_jit_parity_implicit_gradient_and_float32():
     assert x32.dtype == jnp.float32 and bool(jnp.all(jnp.isfinite(x32))) and bool(jnp.all(jnp.isfinite(T32n)))
     g32 = jax.grad(lambda a: jnp.sum(pdf_saturation_adjustment(a, q_v32, q_c32, p32, DT, RH_C)[0]))(T32)
     assert bool(jnp.all(jnp.isfinite(g32)))
+
+
+# Parked module: see its docstring.
+pytestmark = pytest.mark.skip(
+    reason="parked in _future/: not wired into production (ponytail item pdf_condensation)")

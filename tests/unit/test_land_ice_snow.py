@@ -27,7 +27,7 @@ class Test5a_SnowAccumulation:
         dt = 3600.0
         # Use Q_net=0 so no melt
         snow_new, age_new, melt = update_snow(
-            snow, snow_age, T_sfc, precip_snow, dt, Q_net=jnp.array([0.0]),
+            snow, snow_age, T_sfc, precip_snow, dt, Q_net=jnp.array([0.0]), snow_age_activation_K=0.0
         )
         expected = precip_snow * dt  # 0.36 kg/m2
         assert jnp.allclose(snow_new, expected, rtol=0.01)
@@ -43,7 +43,7 @@ class Test5b_SnowMelt:
         dt = 3600.0
         Q_net = jnp.array([50.0])  # positive Q_net => energy available for melt
         snow_new, _, melt = update_snow(
-            snow, snow_age, T_sfc, precip_snow, dt, Q_net=Q_net,
+            snow, snow_age, T_sfc, precip_snow, dt, Q_net=Q_net, snow_age_activation_K=0.0
         )
         # melt = Q_net * dt / L_f = 50 * 3600 / 3.337e5 ~ 0.54 kg/m2
         expected_melt = 50.0 * 3600.0 / constants.L_f
@@ -60,7 +60,7 @@ class Test5c_CompleteMelt:
         dt = 3600.0
         Q_net = jnp.array([100.0])  # very strong energy
         snow_new, age_new, melt = update_snow(
-            snow, snow_age, T_sfc, precip_snow, dt, Q_net=Q_net,
+            snow, snow_age, T_sfc, precip_snow, dt, Q_net=Q_net, snow_age_activation_K=0.0
         )
         assert float(snow_new[0]) == 0.0
         assert float(age_new[0]) == 0.0  # no snow => age reset
@@ -75,7 +75,7 @@ class Test5d_NoMeltBelowFreezing:
         dt = 3600.0
         Q_net = jnp.array([50.0])  # positive but T < T_melt
         snow_new, _, melt = update_snow(
-            snow, snow_age, T_sfc, precip_snow, dt, Q_net=Q_net,
+            snow, snow_age, T_sfc, precip_snow, dt, Q_net=Q_net, snow_age_activation_K=0.0
         )
         assert float(melt[0]) == 0.0
         assert float(snow_new[0]) == 5.0
@@ -89,7 +89,7 @@ class Test5e_SnowAgeEvolution:
         precip_snow = jnp.array([0.0])
         dt = 3600.0
         _, age_new, _ = update_snow(
-            snow, snow_age, T_sfc, precip_snow, dt, Q_net=jnp.array([0.0]),
+            snow, snow_age, T_sfc, precip_snow, dt, Q_net=jnp.array([0.0]), snow_age_activation_K=0.0
         )
         assert float(age_new[0]) == 1000.0 + dt
 
@@ -105,7 +105,7 @@ class Test5e_SnowAgeEvolution:
         precip_snow = jnp.array([1e-4])      # 0.36 kg/m2 fresh over the step
         dt = 3600.0
         _, age_new, _ = update_snow(
-            snow, snow_age, T_sfc, precip_snow, dt, Q_net=jnp.array([0.0]),
+            snow, snow_age, T_sfc, precip_snow, dt, Q_net=jnp.array([0.0]), snow_age_activation_K=0.0
         )
         fresh = float(precip_snow[0]) * dt
         expected = (100000.0 + dt) * 5.0 / (5.0 + fresh)
@@ -122,7 +122,7 @@ class Test5e_SnowAgeEvolution:
         precip_snow = jnp.array([1e-4])
         dt = 3600.0
         _, age_new, _ = update_snow(
-            snow, snow_age, T_sfc, precip_snow, dt, Q_net=jnp.array([0.0]),
+            snow, snow_age, T_sfc, precip_snow, dt, Q_net=jnp.array([0.0]), snow_age_activation_K=0.0
         )
         assert float(age_new[0]) == 0.0
 
@@ -133,7 +133,7 @@ class Test5e_SnowAgeEvolution:
         precip_snow = jnp.array([0.0])
         dt = 3600.0
         _, age_new, _ = update_snow(
-            snow, snow_age, T_sfc, precip_snow, dt, Q_net=jnp.array([0.0]),
+            snow, snow_age, T_sfc, precip_snow, dt, Q_net=jnp.array([0.0]), snow_age_activation_K=0.0
         )
         assert float(age_new[0]) == 0.0
 

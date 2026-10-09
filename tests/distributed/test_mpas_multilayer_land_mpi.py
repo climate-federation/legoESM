@@ -48,7 +48,6 @@ Run under MPI::
 from __future__ import annotations
 
 import os
-import pathlib
 import tempfile
 
 import jax
@@ -77,9 +76,7 @@ N_SOIL = 6
 #
 # The path is resolved against THIS checkout's data directory, not one
 # developer's absolute path, with an environment override for a shared copy.
-SURFDATA = os.environ.get("LEGOESM_TEST_SURFDATA") or str(
-    pathlib.Path(__file__).resolve().parents[2]
-    / "data" / "legoesm_surfdata_c260716.nc")
+from tests._land_surfdata import SURFDATA  # noqa: E402
 # A module-level skip would turn these three tests from LOUDLY FAILING into
 # SILENTLY GREEN wherever the file is absent, which is how a gate rots (GLM
 # raised exactly this). So the absence is a FAILURE with an actionable message,
@@ -200,6 +197,10 @@ def _build(distributed, mask_path, output_dir=None, fix_mass=True,
         # at all, on any rank count, and nothing noticed because nothing runs
         # it in CI.
         land_surface_scheme=land_surface_scheme,
+        # Named for the same reason: the per-step surfdata refresh exists only
+        # for the two-leaf canopy (production keeps it on there) and the
+        # driver refuses it for any other scheme.
+        mpas_land_params_refresh=(land_surface_scheme == "two_leaf"),
         land_ic_path=land_ic,
         distributed=distributed,
     )
@@ -418,11 +419,15 @@ def test_land_advance_on_the_voronoi_partition_is_bit_exact(scheme):
 
     def advance(driver, state, forc, n=4):
         lat = jnp.asarray(driver.physics.land_ml_lat)
+        # Compiled, as on the production lane: run eagerly, the two-leaf
+        # canopy compiles one executable per op and exhausts the process's
+        # memory-mapping budget ("LLVM compilation error: Cannot allocate
+        # memory").  Both sides take the same path.
+        step = jax.jit(lambda s, f_: step_multilayer_land(
+            s, f_, driver.physics.land_ml_cfg, 1.0, 600.0,
+            lat=lat, doy=0.0, land_params=driver.physics.land_ml_params)[0])
         for _ in range(n):
-            state, _r, _c = step_multilayer_land(
-                state, forc, driver.physics.land_ml_cfg, 1.0, 600.0,
-                lat=lat, doy=0.0,
-                land_params=driver.physics.land_ml_params)
+            state = step(state, forc)
         return state
 
     ref = advance(ref_d, start_serial, forcing_global)
@@ -518,7 +523,7 @@ def test_mpas_multilayer_land_checkpoint_round_trip_under_mpi():
         f"round trip changed which land leaves exist: "
         f"lost {set(before) - set(after)}, gained {set(after) - set(before)}")
     bad = {k: float(np.max(np.abs(after[k] - before[k])))
-           for k in before if not np.array_equal(after[k], before[k])}
+           for k in before if not _bitwise_equal(after[k], before[k])}
     assert not bad, (
         f"land leaves changed across the MPI checkpoint round trip: {bad}")
     if MPI.COMM_WORLD.Get_rank() == 0:
@@ -559,13 +564,22 @@ def test_spun_up_land_ic_scatters_to_the_same_columns_the_serial_run_gets():
     seed._land_ml_state = _stamp_columns(
         seed._land_ml_state, np.asarray(seed.state.T.data).shape[0])
     if MPI.COMM_WORLD.Get_rank() == 0:
-        from legoesm.land.restart import save_land_restart
+        from legoesm.land.clm_surface_map import download_clm_surfdata
+        from legoesm.land.restart import (
+            HYDRAULICS_SOURCE_CLM_MAP, save_land_restart,
+            soil_hydraulics_stamp)
         from legoesm.land.soil_grid import make_soil_grid
+        # Stamped with the run's own hydraulics, so the file is loaded verbatim
+        # and the comparison below stays bit-exact.
         save_land_restart(
             ic_path, seed._land_ml_state, land_mode="multilayer",
             t_end_s=0.0, n_steps_completed=0,
             soil_dz=np.asarray(
-                make_soil_grid(seed.physics.land_ml_cfg.soil_grid).dz))
+                make_soil_grid(seed.physics.land_ml_cfg.soil_grid).dz),
+            soil_hydraulics=soil_hydraulics_stamp(
+                seed.physics.land_ml_cfg.hydraulics.retention_curve,
+                HYDRAULICS_SOURCE_CLM_MAP, download_clm_surfdata()),
+            hydraulics=seed.physics.land_ml_cfg.hydraulics)
     MPI.COMM_WORLD.Barrier()
     assert os.path.exists(ic_path), "the spun-up land state was never written"
 

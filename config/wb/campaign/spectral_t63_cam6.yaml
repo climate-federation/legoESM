@@ -1,0 +1,284 @@
+grid: gaussian
+n_lat: 96
+n_lon: 192
+nlev: 32
+spectral:
+  n_max: 63
+  dt: 1800.0
+  semi_implicit: true
+  si_substeps: 3
+  time_integrator: ssp_rk3
+  hyperdiff_coeff: 2.5e15
+  hyperdiff_order: 2
+  spectral_filter_order: 8
+  spectral_filter_strength: 0.01
+era5_zarr: gs://weatherbench2/datasets/era5/1959-2023_01_10-wb13-6h-1440x721_with_derived_variables.zarr
+cache_dir: .cache/wb_campaign_era5
+era5_cloud_condensate: true
+train_years:
+- 2015
+- 2016
+- 2017
+- 2018
+- 2019
+era5_surface_fluxes: true
+train_windows:
+- - 2015
+  - 0
+  - 1
+- - 2015
+  - 31
+  - 1
+- - 2015
+  - 59
+  - 1
+- - 2015
+  - 90
+  - 1
+- - 2015
+  - 120
+  - 1
+- - 2015
+  - 151
+  - 1
+- - 2015
+  - 181
+  - 1
+- - 2015
+  - 212
+  - 1
+- - 2015
+  - 243
+  - 1
+- - 2015
+  - 273
+  - 1
+- - 2015
+  - 304
+  - 1
+- - 2015
+  - 334
+  - 1
+- - 2016
+  - 0
+  - 1
+- - 2016
+  - 31
+  - 1
+- - 2016
+  - 60
+  - 1
+- - 2016
+  - 91
+  - 1
+- - 2016
+  - 121
+  - 1
+- - 2016
+  - 152
+  - 1
+- - 2016
+  - 182
+  - 1
+- - 2016
+  - 213
+  - 1
+- - 2016
+  - 244
+  - 1
+- - 2016
+  - 274
+  - 1
+- - 2016
+  - 305
+  - 1
+- - 2016
+  - 335
+  - 1
+- - 2017
+  - 0
+  - 1
+- - 2017
+  - 31
+  - 1
+- - 2017
+  - 59
+  - 1
+- - 2017
+  - 90
+  - 1
+- - 2017
+  - 120
+  - 1
+- - 2017
+  - 151
+  - 1
+- - 2017
+  - 181
+  - 1
+- - 2017
+  - 212
+  - 1
+- - 2017
+  - 243
+  - 1
+- - 2017
+  - 273
+  - 1
+- - 2017
+  - 304
+  - 1
+- - 2017
+  - 334
+  - 1
+- - 2018
+  - 0
+  - 1
+- - 2018
+  - 31
+  - 1
+- - 2018
+  - 59
+  - 1
+- - 2018
+  - 90
+  - 1
+- - 2018
+  - 120
+  - 1
+- - 2018
+  - 151
+  - 1
+- - 2018
+  - 181
+  - 1
+- - 2018
+  - 212
+  - 1
+- - 2018
+  - 243
+  - 1
+- - 2018
+  - 273
+  - 1
+- - 2018
+  - 304
+  - 1
+- - 2018
+  - 334
+  - 1
+- - 2019
+  - 0
+  - 1
+- - 2019
+  - 31
+  - 1
+- - 2019
+  - 59
+  - 1
+- - 2019
+  - 90
+  - 1
+- - 2019
+  - 120
+  - 1
+- - 2019
+  - 151
+  - 1
+- - 2019
+  - 181
+  - 1
+- - 2019
+  - 212
+  - 1
+- - 2019
+  - 243
+  - 1
+- - 2019
+  - 273
+  - 1
+- - 2019
+  - 304
+  - 1
+- - 2019
+  - 334
+  - 1
+eval_years:
+- 2020
+era5_cadence_hours: 6
+smoke_radiation: rrtmgp
+n_epochs: 12
+optimizer: adamw
+lr: 0.0015
+warmup_steps: 200
+weight_decay: 1.0e-05
+grad_clip_norm: 1.0
+grad_accum: 1
+loss:
+  w_T: 1.0
+  w_u: 0.5
+  w_v: 0.5
+  w_q: 0.3
+  w_ps: 0.3
+  w_bias_T: 100.0
+  w_bias_u: 1.0
+  w_bias_v: 1.0
+  w_bias_ps: 1.0
+  w_crps_T: 0.5
+  w_crps_u: 0.25
+  w_crps_v: 0.25
+  w_crps_q: 0.5
+  w_crps_ps: 0.15
+  w_spec_crps_T: 0.0
+  w_spec_crps_u: 0.0
+  w_spec_crps_v: 0.0
+  w_spec_crps_q: 0.0
+  multi_step_hours:
+  - 6
+  - 12
+  multi_step_weights:
+  - 1.0
+  - 1.0
+  level_weighting: pressure
+  normalize_by_scale: true
+  T_scale: 30.0
+  wind_scale: 20.0
+  q_scale: 0.005
+  ps_scale: 1000.0
+neural_gcm:
+  spatial_embedding: false
+  surface_drag_confounded: builder_refuses_classical_scheme
+  nn_hidden: 256
+  nn_layers: 4
+sfno:
+  spatial_embedding: false
+  sfno_embed_dim: 256
+  sfno_n_blocks: 8
+classical:
+  convection: zhang_mcfarlane
+  turbulence: clubb
+  cloud: cam6_clubb
+  microphysics: morrison
+  gwd: mcfarlane
+  surface_bulk: constant
+  rad_update_interval_steps: 6
+  orbital_insolation: true
+  convective_rain_to_surface: true
+  rrtmgp_gpoint_batch_size: 8
+  param_fixed:
+    atm.clouds.CloudConfig:
+      cloud_optics_inhomogeneity: two_region
+      cloud_partial_coverage_optics: none
+      cloud_vertical_overlap_optics: max_random
+      cloud_n_subcolumns: 8
+      cloud_fsd: 1.0
+      convective_cloud: false
+    atm.turb.CLUBBConfig:
+      prognostic: true
+    atm.micro.MorrisonConfig:
+      hard_saturation_adjustment: true
+      homogeneous_ice_nucleation: true
+      sed_cfl_substeps: true
+      sed_cfl_substeps_max: 256
+      sed_cfl_substeps_strict: false
+  clubb_top_press_hpa: 150.0

@@ -783,6 +783,7 @@ def _call_radiation_backend(
     conv_precip: jnp.ndarray | None = None,
     conv_mass_flux_up: jnp.ndarray | None = None,
     conv_icwmr: jnp.ndarray | None = None,
+    clear_sky_toa: bool = False,
 ):
     """Call configured radiation backend with a unified integration interface.
 
@@ -824,7 +825,14 @@ def _call_radiation_backend(
     solar_spectral_fraction : jnp.ndarray or None
         Per-g-point solar weights for spectral solar-cycle forcing,
         passed through to ``solve_columns``.
+    clear_sky_toa : bool
+        RRTMGP only: also return the clear-sky TOA upward fluxes from the
+        same solve (``RadiationOutput.*_flux_up_toa_clr``).
     """
+    if clear_sky_toa and radiation_config.scheme in ("simple_lw", "gray"):
+        raise ValueError(
+            f"clear_sky_toa is an RRTMGP option; scheme "
+            f"{radiation_config.scheme!r} has no clear-sky solve")
     if radiation_config.scheme == "simple_lw":
         return _simple_lw_radiation(
             T=T, p_half=p_half, q_v=q_v, q_cloud=q_cloud, q_ice=q_ice,
@@ -969,6 +977,8 @@ def _call_radiation_backend(
         solar_spectral_fraction=solar_spectral_fraction,
         **cloud_kwargs,
     )
+    if clear_sky_toa:
+        _rad_kwargs["clear_sky"] = True
     # Maximum-random-overlap SUBCOLUMNS (opt-in).  The default path hands
     # every layer's GRID-MEAN water path to ONE homogeneous column, so cloud
     # spread thinly over many partly cloudy layers is solved as one deep
@@ -995,12 +1005,21 @@ def _call_radiation_backend(
         _rad_kwargs = _sub.expand_kwargs(_rad_kwargs, _n_sub, _ncol)
         _rad_kwargs["cloud_path_liq"] = _lwp
         _rad_kwargs["cloud_path_ice"] = _iwp
+    elif _ov == "mcica":
+        # CAM6 McICA: the same maximum-random generator, but ONE subcolumn per
+        # g-point (drawn inside the solver) instead of n full solves.  The
+        # solver takes IN-CLOUD paths (same floor as subcolumn_paths).
+        from legoesm.atmosphere.physics.clouds import subcolumns as _sub
+        (_rad_kwargs["cloud_path_liq"],
+         _rad_kwargs["cloud_path_ice"]) = _sub.in_cloud_paths(
+            cloud_props.cloud_fraction, cloud_props.lwp, cloud_props.iwp)
+        _rad_kwargs["mcica_cloud_fraction"] = cloud_props.cloud_fraction
     elif _ov != "none":
         # Dispatch hardening: a typo must never silently run the legacy
         # single-column path (validated on the static config value).
         raise ValueError(
             f"unknown cloud_vertical_overlap_optics {_ov!r}; "
-            "expected 'none' or 'max_random'"
+            "expected 'none', 'max_random' or 'mcica'"
         )
 
     # Column-chunk the rrtmgp solve when configured: the per-block body
@@ -1031,6 +1050,9 @@ def _call_radiation_backend(
             heating_rate=result.lw_heating_rate + result.sw_heating_rate * s,
             lw_heating_rate=result.lw_heating_rate,
             sw_heating_rate=result.sw_heating_rate * s,
+            lw_flux_up_toa_clr=result.lw_flux_up_toa_clr,
+            sw_flux_up_toa_clr=(None if result.sw_flux_up_toa_clr is None
+                                else result.sw_flux_up_toa_clr * _sw_scale),
         )
 
     # Carry the prescribed TOA insolation (this scope's per-column
@@ -1155,10 +1177,11 @@ def make_radiation_physics(
     # dycores rather than silently ignoring the request (dispatch-hardening) —
     # the turbulence WRITE side is wired on all grids, so extend the matching
     # _make_*_radiation READ side before enabling it there.
-    if use_clubb_cloud_fraction and model_type not in ("hydrostatic", "mpas"):
+    if use_clubb_cloud_fraction and model_type not in (
+            "hydrostatic", "mpas", "spectral_pe"):
         raise NotImplementedError(
             "RadiationConfig.use_clubb_cloud_fraction is only wired for "
-            f"model_type='hydrostatic'/'mpas', got {model_type!r}.  Extend the "
+            f"model_type='hydrostatic'/'mpas'/'spectral_pe', got {model_type!r}.  Extend the "
             "corresponding _make_*_radiation builder (thread phys_state ->"
             " cloud_fraction_override) before enabling CLUBB-cf routing there."
         )
@@ -1179,18 +1202,21 @@ def make_radiation_physics(
 
     # Load heavy/static RRTMGP optics once outside model JIT traces. mc3d also
     # needs the RRTMGP optics tables (Phase 2b: 3D-MC shortwave uses RRTMGP
-    # per-g-point optics; falls back to gray optics if the tables are absent).
+    # per-g-point optics).  Missing tables are an error for both schemes:
+    # mc3d used to fall back silently to gray optics, which also hid config
+    # typos and genuine bugs behind a bare ``except Exception``.
     rrtmgp_solver = None
     if radiation_config.scheme in ("rrtmgp", "mc3d"):
         from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
         try:
             RRTMGP.preload(radiation_config.rrtmgp)
             rrtmgp_solver = RRTMGP.from_legoesm_config(radiation_config.rrtmgp)
-        except Exception:
-            if radiation_config.scheme == "rrtmgp":
-                raise
-            # mc3d: gray-optics fallback when RRTMGP data is unavailable.
-            rrtmgp_solver = None
+        except FileNotFoundError as e:
+            raise FileNotFoundError(
+                f"RadiationConfig.scheme={radiation_config.scheme!r} needs the "
+                f"RRTMGP optics tables; {e.filename!r} was not found. Point "
+                "RRTMGPConfig's lw/sw gas and cloud file fields at the tables."
+            ) from e
 
     # Load ML ozone ridge weights once (outside JIT).  Gray radiation
     # ignores ozone, so skip the (potentially large) NetCDF load when
@@ -1231,6 +1257,7 @@ def make_radiation_physics(
             ml_ozone_coefs=ml_ozone_coefs,
             sfc_albedo_override=sfc_albedo_override,
             sfc_emissivity_override=sfc_emissivity_override,
+            use_clubb_cloud_fraction=use_clubb_cloud_fraction,
         )
     elif model_type == "mpas":
         return _make_mpas_radiation(radiation_config, rrtmgp_solver,
@@ -1334,6 +1361,10 @@ def _make_hydrostatic_radiation(
     _clr_sky_cfg = (
         radiation_config._replace(cloud_scheme="none", cloud_config=None)
         if radiation_config.clear_sky_diag else None)
+    # RRTMGP computes the clear-sky fluxes inside the all-sky solve instead of
+    # a second solve; gray/simple_lw keep the second pass.
+    _clr_sky_fused = (_clr_sky_cfg is not None
+                      and radiation_config.scheme not in ("gray", "simple_lw"))
 
     def physics_fn(state, grid_or_mesh, sigma_coord,
                    forcing=None, phys_state=None) -> HydrostaticTendencies:
@@ -1644,6 +1675,7 @@ def _make_hydrostatic_radiation(
             conv_icwmr=_conv_icwmr_col,
             solar_spectral_fraction=_ssf_ext,
             tsi=_tsi_ext,
+            clear_sky_toa=_clr_sky_fused,
         )
 
         # #843 lean-lane clear-sky second pass: SAME column state and
@@ -1656,7 +1688,12 @@ def _make_hydrostatic_radiation(
         # (the held/no-rad sub-cycle variant contains no radiation at all).
         sw_up_toa_clr = None
         lw_up_toa_clr = None
-        if _clr_sky_cfg is not None:
+        if _clr_sky_fused:
+            # RRTMGP: the clear-sky fluxes came out of the all-sky solve
+            # above, sharing its gas optics (~90% of the radiation cost).
+            sw_up_toa_clr = rad_out.sw_flux_up_toa_clr
+            lw_up_toa_clr = rad_out.lw_flux_up_toa_clr
+        elif _clr_sky_cfg is not None:
             rad_out_clr = _call_radiation_backend(
                 radiation_config=_clr_sky_cfg,
                 eccf=eccf,
@@ -2500,6 +2537,7 @@ def _make_spectral_pe_radiation(
     ml_ozone_coefs=None,
     sfc_albedo_override: jnp.ndarray | float | None = None,
     sfc_emissivity_override: jnp.ndarray | float | None = None,
+    use_clubb_cloud_fraction: bool = False,
 ) -> Callable:
     """Create radiation physics_fn for SpectralPEModel.
 
@@ -2527,10 +2565,28 @@ def _make_spectral_pe_radiation(
     """
     _time, set_time = _make_time_state()
     _T_sfc_override_cell, set_T_sfc_override = _make_T_sfc_override_cell()
+    # CAM6 ``cam6_clubb`` cloud fraction takes its liquid fraction from the
+    # CLUBB carry and its deep-convective part from the lagged ZM carries;
+    # same static gate as the hydrostatic builder, so a spectral deck that
+    # selects the scheme without routing its only source is refused at
+    # build time rather than at the first radiation trace.
+    _cam6_cf_active = (
+        radiation_config.cloud_scheme != "none"
+        and (
+            getattr(radiation_config.cloud_config, "scheme", None)
+            if radiation_config.cloud_config is not None
+            else radiation_config.cloud_scheme
+        ) == "cam6_clubb"
+    )
+    if _cam6_cf_active and not use_clubb_cloud_fraction:
+        raise ValueError(
+            "cloud scheme 'cam6_clubb' takes its liquid cloud fraction from "
+            "the CLUBB carry, which is routed only with "
+            "RadiationConfig.use_clubb_cloud_fraction=True; got False.")
 
     def _physics_fn_core(
         state, grid, sigma_coord, grid_fields=None,
-        sim_time_seconds=0.0, forcing=None,
+        sim_time_seconds=0.0, forcing=None, phys_state=None,
     ):
         # 1. Transform spectral state to grid space
         fields = grid_fields
@@ -2676,6 +2732,33 @@ def _make_spectral_pe_radiation(
         T_sfc_col, _alb_col, _emis_col = resolve_prescribed_radiative_bc(
             forcing, radiation_config, ncol, T_sfc_col, _alb_col, _emis_col)
 
+        # CLUBB PDF cloud fraction and the CAM6 deepcu inputs, read from the
+        # LAGGED carry (the previous step's published values, same convention
+        # as the hydrostatic builder: radiation runs first in the chain).
+        # PhysicsState carries the column form; reshape defensively.
+        if _cam6_cf_active and phys_state is None:
+            raise ValueError(
+                "cloud scheme 'cam6_clubb' on the spectral lane was called "
+                "without the physics carry (phys_state=None), so it has no "
+                "CLUBB cloud fraction to read.  The caller must thread the "
+                "PhysicsState (spectral_rollout does, through the "
+                "with_phys_state/init_phys_state markers); spectral_amip_rollout "
+                "does not and cannot run cam6_clubb.")
+        _cf_ovr = None
+        if use_clubb_cloud_fraction and phys_state is not None:
+            _cf_ovr = getattr(phys_state, "cloud_fraction", None)
+            if _cf_ovr is not None:
+                _cf_ovr = _cf_ovr.reshape(T_col.shape)
+        _conv_mf_col = None
+        _conv_icwmr_col = None
+        if _cam6_cf_active and phys_state is not None:
+            _conv_mf_col = getattr(phys_state, "conv_mass_flux_up", None)
+            _conv_icwmr_col = getattr(phys_state, "conv_icwmr", None)
+            if _conv_mf_col is not None:
+                _conv_mf_col = _conv_mf_col.reshape(ncol, nlev + 1)
+            if _conv_icwmr_col is not None:
+                _conv_icwmr_col = _conv_icwmr_col.reshape(T_col.shape)
+
         rad_out = _call_radiation_backend(
             radiation_config=radiation_config,
             eccf=eccf,
@@ -2703,6 +2786,9 @@ def _make_spectral_pe_radiation(
             aerosol_od=_aer_ext,
             aerosol_lw_od=_aer_lw_ext,
             ghg_vmr_override=_ghg_ext,
+            cloud_fraction_override=_cf_ovr,
+            conv_mass_flux_up=_conv_mf_col,
+            conv_icwmr=_conv_icwmr_col,
         )
 
         # Reshape heating rate back to (n_lat, n_lon, nlev)
@@ -2738,11 +2824,11 @@ def _make_spectral_pe_radiation(
 
         def physics_fn(
             state, grid, sigma_coord, grid_fields=None,
-            sim_time_seconds=0.0, forcing=None,
+            sim_time_seconds=0.0, forcing=None, phys_state=None,
         ):
             return _physics_fn_ckpt(
                 state, grid, sigma_coord, grid_fields, sim_time_seconds,
-                forcing,
+                forcing, phys_state,
             )
     else:
         physics_fn = _physics_fn_core
@@ -2753,6 +2839,13 @@ def _make_spectral_pe_radiation(
     # o3_vmr / aerosol_od / ghg_vmr) — the spectral combined dispatcher
     # forwards ``forcing`` only to fns that advertise it.
     physics_fn._wants_forcing = True
+    # Marker: READS ``phys_state`` (CLUBB cloud fraction + the CAM6 deepcu
+    # carries) without writing a carry of its own, so the combined spectral
+    # dispatcher forwards ``phys_state`` while keeping the single-return
+    # contract.  Only set when the routing is active (byte-identical
+    # otherwise: unmarked => not forwarded => RH cloud path unchanged).
+    if use_clubb_cloud_fraction:
+        physics_fn._wants_phys_state_ro = True
     return physics_fn
 
 

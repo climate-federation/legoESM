@@ -348,6 +348,76 @@ def create_device_mesh(
     return config
 
 
+def _create_1d_mesh(
+    n_devices: int | str,
+    backend: str | None,
+    devices: Sequence | None,
+    *,
+    axis: str,
+    grid_type: str,
+    log_fmt: str,
+) -> DeviceConfig:
+    """Shared body of the 1-D meshes (level / lat): one named ``axis``.
+
+    ``face_sharding`` carries the ``P(axis)`` spec (field name reused so
+    call sites that read it as "the active partition" work unchanged);
+    ``grid_type`` tags the path.  Sets the module-global active config.
+    """
+    global _active_config
+
+    if devices is not None:
+        devices = list(devices)
+    elif backend is not None:
+        try:
+            devices = jax.devices(backend)
+        except RuntimeError:
+            devices = jax.devices()
+    else:
+        devices = jax.devices()
+
+    all_count = len(devices)
+    first_platform = str(getattr(devices[0], "platform", "")) if devices else ""
+    backend_name = (first_platform or jax.default_backend()).upper()
+
+    if n_devices == "auto":
+        n_dev = all_count
+    else:
+        n_dev = min(int(n_devices), all_count)
+
+    if n_dev <= 1:
+        config = DeviceConfig(
+            mesh=None,
+            face_sharding=None,
+            replicated_sharding=None,
+            n_devices=1,
+            backend=backend_name,
+            is_distributed=False,
+            tiling=(1, 1),
+            grid_type=grid_type,
+        )
+        _active_config = config
+        return config
+
+    selected = devices[:n_dev]
+    mesh = Mesh(selected, axis_names=(axis,))
+    axis_sharding = NamedSharding(mesh, P(axis))
+    replicated_sharding = NamedSharding(mesh, P())
+
+    config = DeviceConfig(
+        mesh=mesh,
+        face_sharding=axis_sharding,
+        replicated_sharding=replicated_sharding,
+        n_devices=n_dev,
+        backend=backend_name,
+        is_distributed=False,
+        tiling=(1, 1),
+        grid_type=grid_type,
+    )
+    _active_config = config
+    logger.info(log_fmt, n_dev, backend_name)
+    return config
+
+
 # ==============================================================================
 # Cubed-sphere level-parallel fallback (issue #273, 4-GPU unblock)
 # ==============================================================================
@@ -398,68 +468,15 @@ def create_cubed_sphere_level_mesh(
         ``grid_type='cubed_sphere_level'`` to distinguish from the
         face-sharded ``cubed_sphere`` path.
     """
-    global _active_config
-
-    if devices is not None:
-        devices = list(devices)
-    elif backend is not None:
-        try:
-            devices = jax.devices(backend)
-        except RuntimeError:
-            devices = jax.devices()
-    else:
-        devices = jax.devices()
-
-    all_count = len(devices)
-    first_platform = str(getattr(devices[0], "platform", "")) if devices else ""
-    backend_name = (first_platform or jax.default_backend()).upper()
-
-    if n_devices == "auto":
-        n_dev = all_count
-    else:
-        n_dev = min(int(n_devices), all_count)
-
-    if n_dev <= 1:
-        config = DeviceConfig(
-            mesh=None,
-            face_sharding=None,
-            replicated_sharding=None,
-            n_devices=1,
-            backend=backend_name,
-            is_distributed=False,
-            tiling=(1, 1),
-            grid_type="cubed_sphere_level",
-        )
-        _active_config = config
-        return config
-
-    selected = devices[:n_dev]
-    mesh = Mesh(selected, axis_names=("level",))
-    # ``face_sharding`` field reused to carry the level-sharding spec
-    # so existing call sites that read it as "the active partition"
-    # keep working without conditionals.  Tag via ``grid_type`` so
-    # operator code can detect the level path.
-    level_sharding = NamedSharding(mesh, P("level"))
-    replicated_sharding = NamedSharding(mesh, P())
-
-    config = DeviceConfig(
-        mesh=mesh,
-        face_sharding=level_sharding,
-        replicated_sharding=replicated_sharding,
-        n_devices=n_dev,
-        backend=backend_name,
-        is_distributed=False,
-        tiling=(1, 1),
+    return _create_1d_mesh(
+        n_devices, backend, devices, axis="level",
         grid_type="cubed_sphere_level",
+        log_fmt=(
+            "legoESM: %d-device level-parallel cubed-sphere mesh on %s "
+            "(face-sharding divisibility failed; dycore runs replicated, "
+            "physics columns shard over level axis)"
+        ),
     )
-    _active_config = config
-    logger.info(
-        "legoESM: %d-device level-parallel cubed-sphere mesh on %s "
-        "(face-sharding divisibility failed; dycore runs replicated, "
-        "physics columns shard over level axis)",
-        n_dev, backend_name,
-    )
-    return config
 
 
 # ==============================================================================
@@ -489,62 +506,10 @@ def create_latlon_mesh(
     -------
     DeviceConfig
     """
-    global _active_config
-
-    if devices is not None:
-        devices = list(devices)
-    elif backend is not None:
-        try:
-            devices = jax.devices(backend)
-        except RuntimeError:
-            devices = jax.devices()
-    else:
-        devices = jax.devices()
-
-    all_count = len(devices)
-    first_platform = str(getattr(devices[0], "platform", "")) if devices else ""
-    backend_name = (first_platform or jax.default_backend()).upper()
-
-    if n_devices == "auto":
-        n_dev = all_count
-    else:
-        n_dev = min(int(n_devices), all_count)
-
-    if n_dev <= 1:
-        config = DeviceConfig(
-            mesh=None,
-            face_sharding=None,
-            replicated_sharding=None,
-            n_devices=1,
-            backend=backend_name,
-            is_distributed=False,
-            tiling=(1, 1),
-            grid_type="latlon",
-        )
-        _active_config = config
-        return config
-
-    selected = devices[:n_dev]
-    mesh = Mesh(selected, axis_names=("lat",))
-    lat_sharding = NamedSharding(mesh, P("lat"))
-    replicated_sharding = NamedSharding(mesh, P())
-
-    config = DeviceConfig(
-        mesh=mesh,
-        face_sharding=lat_sharding,  # reuse field name for primary sharding
-        replicated_sharding=replicated_sharding,
-        n_devices=n_dev,
-        backend=backend_name,
-        is_distributed=False,
-        tiling=(1, 1),
-        grid_type="latlon",
+    return _create_1d_mesh(
+        n_devices, backend, devices, axis="lat", grid_type="latlon",
+        log_fmt="legoESM: %d-device lat-lon mesh on %s (lat-parallel)",
     )
-    _active_config = config
-    logger.info(
-        "legoESM: %d-device lat-lon mesh on %s (lat-parallel)",
-        n_dev, backend_name,
-    )
-    return config
 
 
 # ==============================================================================
@@ -584,62 +549,10 @@ def create_level_mesh(
     -------
     DeviceConfig
     """
-    global _active_config
-
-    if devices is not None:
-        devices = list(devices)
-    elif backend is not None:
-        try:
-            devices = jax.devices(backend)
-        except RuntimeError:
-            devices = jax.devices()
-    else:
-        devices = jax.devices()
-
-    all_count = len(devices)
-    first_platform = str(getattr(devices[0], "platform", "")) if devices else ""
-    backend_name = (first_platform or jax.default_backend()).upper()
-
-    if n_devices == "auto":
-        n_dev = all_count
-    else:
-        n_dev = min(int(n_devices), all_count)
-
-    if n_dev <= 1:
-        config = DeviceConfig(
-            mesh=None,
-            face_sharding=None,
-            replicated_sharding=None,
-            n_devices=1,
-            backend=backend_name,
-            is_distributed=False,
-            tiling=(1, 1),
-            grid_type="spectral",
-        )
-        _active_config = config
-        return config
-
-    selected = devices[:n_dev]
-    mesh = Mesh(selected, axis_names=("level",))
-    level_sharding = NamedSharding(mesh, P("level"))
-    replicated_sharding = NamedSharding(mesh, P())
-
-    config = DeviceConfig(
-        mesh=mesh,
-        face_sharding=level_sharding,  # reuse field name
-        replicated_sharding=replicated_sharding,
-        n_devices=n_dev,
-        backend=backend_name,
-        is_distributed=False,
-        tiling=(1, 1),
-        grid_type="spectral",
+    return _create_1d_mesh(
+        n_devices, backend, devices, axis="level", grid_type="spectral",
+        log_fmt="legoESM: %d-device level-parallel mesh on %s (spectral)",
     )
-    _active_config = config
-    logger.info(
-        "legoESM: %d-device level-parallel mesh on %s (spectral)",
-        n_dev, backend_name,
-    )
-    return config
 
 
 # ==============================================================================
@@ -775,6 +688,11 @@ def multiprocess_safe_device_put(leaf, sharding):
     # gathered result or a temporary of the gather, was not established.
     if not isinstance(leaf, (jax.Array, np.ndarray)):
         return jax.device_put(leaf, sharding)
+    # A NumPy leaf is placed shard by shard from host memory. Staging it
+    # through jnp.asarray first copied the WHOLE stacked array onto one device
+    # per process, and those stacked meshes grow with the device count.
+    if isinstance(leaf, np.ndarray) and not isinstance(leaf, np.ma.MaskedArray):
+        leaf = leaf.astype(jax.dtypes.canonicalize_dtype(leaf.dtype), copy=False)
     if isinstance(leaf, jax.Array) and not leaf.is_fully_addressable:
         return leaf  # already a global sharded array; nothing to place
     if jax.process_count() > 1:
@@ -1070,48 +988,6 @@ def staggered_blocks_to_face(blocks, kt: int, stag_axis: int):
                               axis=0)
         cols.append(col if tj == 0 else col[:, 1:])
     return jnp.concatenate(cols, axis=1)
-
-
-def shard_latlon(pytree, config: DeviceConfig):
-    """Shard a lat-lon pytree by latitude dimension.
-
-    Arrays with shape ``(n_lat, ...)`` are sharded along axis 0.
-    """
-    if config.face_sharding is None:
-        return pytree
-    return shard_pytree(pytree, config)
-
-
-def shard_levels(pytree, config: DeviceConfig, nlev: int):
-    """Shard a pytree by vertical level dimension.
-
-    Arrays whose first axis matches ``nlev`` are sharded across devices.
-    Other arrays are replicated.
-
-    Parameters
-    ----------
-    pytree
-        Any JAX pytree.
-    config : DeviceConfig
-        Level-parallel mesh config.
-    nlev : int
-        Number of vertical levels (to identify level-first arrays).
-
-    Returns
-    -------
-    Sharded pytree.
-    """
-    if config.face_sharding is None:
-        return pytree
-
-    def _shard_leaf(leaf):
-        if not isinstance(leaf, (jax.Array, jnp.ndarray)):
-            return leaf
-        if leaf.ndim >= 1 and leaf.shape[0] == nlev:
-            return jax.device_put(leaf, config.face_sharding)
-        return jax.device_put(leaf, config.replicated_sharding)
-
-    return jax.tree.map(_shard_leaf, pytree)
 
 
 def replicate_pytree(pytree, config: DeviceConfig):

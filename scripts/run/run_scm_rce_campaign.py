@@ -812,7 +812,7 @@ def reference_evap_from_hfls(reference_dir: Path) -> tuple[float, str] | None:
         return None
     tail = finite[-max(1, finite.size // 4):]
     hfls = float(np.mean(tail))
-    return (hfls / constants.L_v * SECONDS_PER_DAY,
+    return (hfls / constants.L_v * SECONDS_PER_DAY,  # latent-ok: mm/day readout of a reported hfls, no surface temperature in scope
             f"measured hfls_avg={hfls:.2f} W/m^2 "
             f"(last {tail.size}/{finite.size} samples)")
 
@@ -1043,7 +1043,11 @@ def make_physics_config(
         )
     return cfg._replace(
         radiation=radiation_cfg,
-        convection=cfg.convection._replace(scheme=convection),
+        # RCE is an ocean column: record the aquaplanet land choice for ZM.
+        convection=cfg.convection._replace(
+            scheme=convection,
+            zhang_mcfarlane=cfg.convection.zhang_mcfarlane._replace(
+                land_fraction="none")),
         turbulence=cfg.turbulence._replace(scheme=turbulence),
         microphysics=micro_cfg,
         gravity_wave_drag=gwd_cfg,
@@ -2131,7 +2135,7 @@ def applied_evap_mm_day(applied_tend, like) -> jax.Array:
         raise ValueError(
             f"applied_evap_mm_day expects a single-column state, got "
             f"{flat.shape[0]} columns.")
-    return flat[0] / constants.L_v * SECONDS_PER_DAY
+    return flat[0] / constants.L_v * SECONDS_PER_DAY  # latent-ok: mm/day readout of a reported hfls, no surface temperature in scope
 
 
 def physical_profile_rmse(

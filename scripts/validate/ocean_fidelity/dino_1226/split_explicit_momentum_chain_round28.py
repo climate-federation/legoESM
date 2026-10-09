@@ -232,7 +232,8 @@ def main() -> int:
 
     def coefficient_loss(scale):
         c = _nemo_literal_een_coefficients(
-            eta + scale * direction, bridge.z_coord, jnp.float64)
+            eta + scale * direction, bridge.z_coord, jnp.float64,
+            grid=bridge.geometry)
         return sum(jnp.sum(value * value) for value in c.values())
 
     gradient = float(jax.grad(coefficient_loss)(jnp.asarray(0.0)))

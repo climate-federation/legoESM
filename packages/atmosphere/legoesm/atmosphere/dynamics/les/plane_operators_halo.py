@@ -45,6 +45,8 @@ neighbor ranks rather than ``jnp.pad(mode='wrap')``.
 
 from __future__ import annotations
 
+import functools
+
 import jax
 import jax.numpy as jnp
 
@@ -313,13 +315,16 @@ def _slice_axis_shift(arr, halo, axis, shift):
     raise ValueError(f"axis must be 0 (y) or 1 (x); got {axis}.")
 
 
-def weno5_advection_x_halo(
+def weno5_advection_halo(
     field_pad_yxz: jax.Array,
     u_at_field_pad_yxz: jax.Array,
     dx: float,
     halo: int = 3,
+    *,
+    axis: int,
 ) -> jax.Array:
-    """Halo-aware 5th-order WENO-Z upwind ``-u df/dx``.
+    """Halo-aware 5th-order WENO-Z upwind ``-u df/dx`` (``axis=1``; ``axis=0``
+    gives ``-v df/dy``).
 
     Mirror of ``compressible_euler_plane._weno5_advection_x`` using
     slice arithmetic on halo-padded inputs. Requires ``halo >= 3``
@@ -333,24 +338,25 @@ def weno5_advection_x_halo(
     """
     if halo < 3:
         raise ValueError(
-            f"weno5_advection_x_halo requires halo>=3; got halo={halo}."
+            f"weno5_advection_{'x' if axis == 1 else 'y'}_halo requires halo>=3; "
+            f"got halo={halo}."
         )
     from legoesm.core.weno import weno5_z
     f_pad = field_pad_yxz
     # Stencil for face i+1/2: f[i-2..i+3]. Use the helper to slice.
     stencil_R = [
-        _slice_axis_shift(f_pad, halo, axis=1, shift=-2),  # f[i-2]
-        _slice_axis_shift(f_pad, halo, axis=1, shift=-1),  # f[i-1]
-        _slice_axis_shift(f_pad, halo, axis=1, shift=0),   # f[i]
-        _slice_axis_shift(f_pad, halo, axis=1, shift=1),   # f[i+1]
-        _slice_axis_shift(f_pad, halo, axis=1, shift=2),   # f[i+2]
-        _slice_axis_shift(f_pad, halo, axis=1, shift=3),   # f[i+3]
+        _slice_axis_shift(f_pad, halo, axis=axis, shift=-2),  # f[i-2]
+        _slice_axis_shift(f_pad, halo, axis=axis, shift=-1),  # f[i-1]
+        _slice_axis_shift(f_pad, halo, axis=axis, shift=0),   # f[i]
+        _slice_axis_shift(f_pad, halo, axis=axis, shift=1),   # f[i+1]
+        _slice_axis_shift(f_pad, halo, axis=axis, shift=2),   # f[i+2]
+        _slice_axis_shift(f_pad, halo, axis=axis, shift=3),   # f[i+3]
     ]
     fR_plus, fR_minus = weno5_z(stencil_R)
 
     # Face velocity at i+1/2 = 0.5 * (u[i] + u[i+1]).
-    u_int = _slice_axis_shift(u_at_field_pad_yxz, halo, axis=1, shift=0)
-    u_xp1 = _slice_axis_shift(u_at_field_pad_yxz, halo, axis=1, shift=1)
+    u_int = _slice_axis_shift(u_at_field_pad_yxz, halo, axis=axis, shift=0)
+    u_xp1 = _slice_axis_shift(u_at_field_pad_yxz, halo, axis=axis, shift=1)
     u_face_R = 0.5 * (u_int + u_xp1)
 
     phi_R = jnp.where(u_face_R >= 0.0, fR_plus, fR_minus)
@@ -359,77 +365,38 @@ def weno5_advection_x_halo(
     # Face i-1/2 is just the flux for i shifted left by one. Build
     # the same WENO reconstruction at the shifted positions.
     stencil_L = [
-        _slice_axis_shift(f_pad, halo, axis=1, shift=-3),  # f[i-3]
-        _slice_axis_shift(f_pad, halo, axis=1, shift=-2),  # f[i-2]
-        _slice_axis_shift(f_pad, halo, axis=1, shift=-1),  # f[i-1]
-        _slice_axis_shift(f_pad, halo, axis=1, shift=0),   # f[i]
-        _slice_axis_shift(f_pad, halo, axis=1, shift=1),   # f[i+1]
-        _slice_axis_shift(f_pad, halo, axis=1, shift=2),   # f[i+2]
+        _slice_axis_shift(f_pad, halo, axis=axis, shift=-3),  # f[i-3]
+        _slice_axis_shift(f_pad, halo, axis=axis, shift=-2),  # f[i-2]
+        _slice_axis_shift(f_pad, halo, axis=axis, shift=-1),  # f[i-1]
+        _slice_axis_shift(f_pad, halo, axis=axis, shift=0),   # f[i]
+        _slice_axis_shift(f_pad, halo, axis=axis, shift=1),   # f[i+1]
+        _slice_axis_shift(f_pad, halo, axis=axis, shift=2),   # f[i+2]
     ]
     fL_plus, fL_minus = weno5_z(stencil_L)
-    u_xm1 = _slice_axis_shift(u_at_field_pad_yxz, halo, axis=1, shift=-1)
+    u_xm1 = _slice_axis_shift(u_at_field_pad_yxz, halo, axis=axis, shift=-1)
     u_face_L = 0.5 * (u_xm1 + u_int)
     phi_L = jnp.where(u_face_L >= 0.0, fL_plus, fL_minus)
     flux_L = u_face_L * phi_L
 
     # Advective form: -d(F)/dx + f*div(u).
-    f_int = _slice_axis_shift(f_pad, halo, axis=1, shift=0)
+    f_int = _slice_axis_shift(f_pad, halo, axis=axis, shift=0)
     return -(flux_R - flux_L) / dx + f_int * (u_face_R - u_face_L) / dx
 
 
-def weno5_advection_y_halo(
-    field_pad_yxz: jax.Array,
-    v_at_field_pad_yxz: jax.Array,
-    dy: float,
-    halo: int = 3,
-) -> jax.Array:
-    """Halo-aware 5th-order WENO-Z upwind ``-v df/dy`` (axis=0)."""
-    if halo < 3:
-        raise ValueError(
-            f"weno5_advection_y_halo requires halo>=3; got halo={halo}."
-        )
-    from legoesm.core.weno import weno5_z
-    f_pad = field_pad_yxz
-    stencil_R = [
-        _slice_axis_shift(f_pad, halo, axis=0, shift=-2),
-        _slice_axis_shift(f_pad, halo, axis=0, shift=-1),
-        _slice_axis_shift(f_pad, halo, axis=0, shift=0),
-        _slice_axis_shift(f_pad, halo, axis=0, shift=1),
-        _slice_axis_shift(f_pad, halo, axis=0, shift=2),
-        _slice_axis_shift(f_pad, halo, axis=0, shift=3),
-    ]
-    fR_plus, fR_minus = weno5_z(stencil_R)
-    v_int = _slice_axis_shift(v_at_field_pad_yxz, halo, axis=0, shift=0)
-    v_yp1 = _slice_axis_shift(v_at_field_pad_yxz, halo, axis=0, shift=1)
-    v_face_R = 0.5 * (v_int + v_yp1)
-    phi_R = jnp.where(v_face_R >= 0.0, fR_plus, fR_minus)
-    flux_R = v_face_R * phi_R
-
-    stencil_L = [
-        _slice_axis_shift(f_pad, halo, axis=0, shift=-3),
-        _slice_axis_shift(f_pad, halo, axis=0, shift=-2),
-        _slice_axis_shift(f_pad, halo, axis=0, shift=-1),
-        _slice_axis_shift(f_pad, halo, axis=0, shift=0),
-        _slice_axis_shift(f_pad, halo, axis=0, shift=1),
-        _slice_axis_shift(f_pad, halo, axis=0, shift=2),
-    ]
-    fL_plus, fL_minus = weno5_z(stencil_L)
-    v_ym1 = _slice_axis_shift(v_at_field_pad_yxz, halo, axis=0, shift=-1)
-    v_face_L = 0.5 * (v_ym1 + v_int)
-    phi_L = jnp.where(v_face_L >= 0.0, fL_plus, fL_minus)
-    flux_L = v_face_L * phi_L
-
-    f_int = _slice_axis_shift(f_pad, halo, axis=0, shift=0)
-    return -(flux_R - flux_L) / dy + f_int * (v_face_R - v_face_L) / dy
+weno5_advection_x_halo = functools.partial(weno5_advection_halo, axis=1)
+weno5_advection_y_halo = functools.partial(weno5_advection_halo, axis=0)
 
 
-def van_leer_advection_x_halo(
+def van_leer_advection_halo(
     field_pad_yxz: jax.Array,
     u_at_field_pad_yxz: jax.Array,
     dx: float,
     halo: int = 2,
+    *,
+    axis: int,
 ) -> jax.Array:
-    """Halo-aware 2nd-order Van Leer TVD upwind ``-u df/dx``.
+    """Halo-aware 2nd-order Van Leer TVD upwind ``-u df/dx`` (``axis=1``;
+    ``axis=0`` gives ``-v df/dy``).
 
     Mirror of ``compressible_euler_plane._van_leer_advection_x``
     using slice arithmetic on halo-padded inputs. Requires
@@ -443,25 +410,26 @@ def van_leer_advection_x_halo(
     """
     if halo < 2:
         raise ValueError(
-            f"van_leer_advection_x_halo requires halo>=2; got halo={halo}."
+            f"van_leer_advection_{'x' if axis == 1 else 'y'}_halo requires halo>=2; "
+            f"got halo={halo}."
         )
     from legoesm.core.flux_limiters import van_leer_face_values
     f_pad = field_pad_yxz
     # Stencils for the i+1/2 (R) and i-1/2 (L) faces. HD-1-correct r sign lives
     # in the shared helper, so serial and halo stay bit-identical.
-    f_im2 = _slice_axis_shift(f_pad, halo, axis=1, shift=-2)
-    f_im1 = _slice_axis_shift(f_pad, halo, axis=1, shift=-1)
-    f_i   = _slice_axis_shift(f_pad, halo, axis=1, shift=0)
-    f_ip1 = _slice_axis_shift(f_pad, halo, axis=1, shift=1)
-    f_ip2 = _slice_axis_shift(f_pad, halo, axis=1, shift=2)
+    f_im2 = _slice_axis_shift(f_pad, halo, axis=axis, shift=-2)
+    f_im1 = _slice_axis_shift(f_pad, halo, axis=axis, shift=-1)
+    f_i   = _slice_axis_shift(f_pad, halo, axis=axis, shift=0)
+    f_ip1 = _slice_axis_shift(f_pad, halo, axis=axis, shift=1)
+    f_ip2 = _slice_axis_shift(f_pad, halo, axis=axis, shift=2)
     phi_pos, phi_neg = van_leer_face_values(f_im1, f_i, f_ip1, f_ip2)       # i+1/2
     phi_pos_L, phi_neg_L = van_leer_face_values(f_im2, f_im1, f_i, f_ip1)   # i-1/2
-    u_int = _slice_axis_shift(u_at_field_pad_yxz, halo, axis=1, shift=0)
-    u_xp1 = _slice_axis_shift(u_at_field_pad_yxz, halo, axis=1, shift=1)
+    u_int = _slice_axis_shift(u_at_field_pad_yxz, halo, axis=axis, shift=0)
+    u_xp1 = _slice_axis_shift(u_at_field_pad_yxz, halo, axis=axis, shift=1)
     u_face_R = 0.5 * (u_int + u_xp1)
     phi_R = jnp.where(u_face_R >= 0.0, phi_pos, phi_neg)
     flux_R = u_face_R * phi_R
-    u_xm1 = _slice_axis_shift(u_at_field_pad_yxz, halo, axis=1, shift=-1)
+    u_xm1 = _slice_axis_shift(u_at_field_pad_yxz, halo, axis=axis, shift=-1)
     u_face_L = 0.5 * (u_xm1 + u_int)
     phi_L = jnp.where(u_face_L >= 0.0, phi_pos_L, phi_neg_L)
     flux_L = u_face_L * phi_L
@@ -469,36 +437,8 @@ def van_leer_advection_x_halo(
     return -(flux_R - flux_L) / dx + f_i * (u_face_R - u_face_L) / dx
 
 
-def van_leer_advection_y_halo(
-    field_pad_yxz: jax.Array,
-    v_at_field_pad_yxz: jax.Array,
-    dy: float,
-    halo: int = 2,
-) -> jax.Array:
-    """Halo-aware 2nd-order Van Leer TVD upwind ``-v df/dy`` (axis=0)."""
-    if halo < 2:
-        raise ValueError(
-            f"van_leer_advection_y_halo requires halo>=2; got halo={halo}."
-        )
-    from legoesm.core.flux_limiters import van_leer_face_values
-    f_pad = field_pad_yxz
-    f_jm2 = _slice_axis_shift(f_pad, halo, axis=0, shift=-2)
-    f_jm1 = _slice_axis_shift(f_pad, halo, axis=0, shift=-1)
-    f_j   = _slice_axis_shift(f_pad, halo, axis=0, shift=0)
-    f_jp1 = _slice_axis_shift(f_pad, halo, axis=0, shift=1)
-    f_jp2 = _slice_axis_shift(f_pad, halo, axis=0, shift=2)
-    phi_pos, phi_neg = van_leer_face_values(f_jm1, f_j, f_jp1, f_jp2)       # j+1/2
-    phi_pos_L, phi_neg_L = van_leer_face_values(f_jm2, f_jm1, f_j, f_jp1)   # j-1/2
-    v_int = _slice_axis_shift(v_at_field_pad_yxz, halo, axis=0, shift=0)
-    v_yp1 = _slice_axis_shift(v_at_field_pad_yxz, halo, axis=0, shift=1)
-    v_face_R = 0.5 * (v_int + v_yp1)
-    phi_R = jnp.where(v_face_R >= 0.0, phi_pos, phi_neg)
-    flux_R = v_face_R * phi_R
-    v_ym1 = _slice_axis_shift(v_at_field_pad_yxz, halo, axis=0, shift=-1)
-    v_face_L = 0.5 * (v_ym1 + v_int)
-    phi_L = jnp.where(v_face_L >= 0.0, phi_pos_L, phi_neg_L)
-    flux_L = v_face_L * phi_L
-    return -(flux_R - flux_L) / dy + f_j * (v_face_R - v_face_L) / dy
+van_leer_advection_x_halo = functools.partial(van_leer_advection_halo, axis=1)
+van_leer_advection_y_halo = functools.partial(van_leer_advection_halo, axis=0)
 
 
 def variable_K_diffusion_vlast_halo(

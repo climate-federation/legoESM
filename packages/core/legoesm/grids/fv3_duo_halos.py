@@ -208,6 +208,7 @@ import os
 import jax
 import jax.numpy as jnp
 import numpy as np
+from legoesm.core.fv3_phase3d_common import require_uniform_float_jax
 from legoesm.grids.fv3_native_halos import (
     compute_fv3_native_k2e,
     neighbor_index,
@@ -223,51 +224,6 @@ _WEDGE = 3
 # fv_duogrid.F90:80 interporder; the Lagrange stencil is order+1 wide.
 # Only used here to state the corner-fill independence condition.
 _INTERP_ORDER = 3
-
-
-def _require_f64_jax(fname: str, arrays: dict) -> None:
-    """dtype-UNIFORMITY gate (2026-08-28): was strict float64. The JAX duo runtime now runs ONE uniform float dtype (FV3DuoConfig.storage_dtype), so this accepts f32 OR f64 provided every operand matches; the anti-silent-downcast guard moved to FV3DuoDynamicsModel.step's boundary check. The rationale below is the ORIGINAL strict-f64 history.
-
-    Reads only ``.dtype`` (static under jit): a float32 operand would
-    otherwise be silently upcast -- or, with x64 disabled, the whole
-    exchange would silently run in float32 -- and the oracle build is
-    ``-fdefault-real-8``.
-
-    DUPLICATION, deliberate and temporary: this is character-identical
-    to ``fv3_nh_core._require_f64_jax``, which is private and therefore
-    not importable across modules (the empty-allowlist ratchet
-    ``tests/test_no_private_cross_imports.py``).  It is not promoted
-    there in this change because that file is under concurrent edit;
-    FOLLOW-UP: promote the ``fv3_nh_core`` definition to a public name
-    and delete this copy.
-    """
-    # dtype-UNIFORMITY gate (2026-08-28): was strict float64; relaxed for
-    # the coarse fv3_duo precision policy (FV3DuoConfig.storage_dtype).
-    seen = None
-    for name, a in arrays.items():
-        if a is None:
-            continue
-        _arr = jnp.asarray(a)
-        if _arr.ndim == 0 and getattr(_arr, "weak_type", False):
-            # Skip ONLY a WEAK-typed 0-dim scalar (a python-float
-            # timestep/coeff like dt/kgb): it is weak-promoting and not a
-            # field, so it is not part of the field uniformity invariant.
-            # A STRONG-f64 0-dim (an f64 constant / damping coeff that
-            # "went strong") is NOT skipped -> it still trips this gate
-            # against f32 fields, closing the silent-promotion blind spot
-            # a wholesale 0-dim skip left (codex+GLM+Claude, increment 2).
-            continue
-        dt = _arr.dtype
-        if dt not in (jnp.float32, jnp.float64):
-            raise TypeError(
-                f"{fname}: {name} must be float32 or float64 (got {dt})")
-        if seen is None:
-            seen = dt
-        elif dt != seen:
-            raise TypeError(
-                f"{fname}: MIXED float dtypes ({seen} vs {dt} on {name}); "
-                f"a phase must be single-precision-uniform "
-                f"(FV3DuoConfig.storage_dtype).")
 
 
 # ---------------------------------------------------------------------------
@@ -1508,7 +1464,7 @@ def build_jax_duo_halo_tables(ectx: dict, gs6: list | None = None, *,
 # ---------------------------------------------------------------------------
 
 def _gate(fname, **arrays):
-    _require_f64_jax(fname, arrays)
+    require_uniform_float_jax(fname, arrays)
 
 
 def exchange_agrid_scalar_halos(f6, tab: DuoHaloTables, ring: str = "stepper"):

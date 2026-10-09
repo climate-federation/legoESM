@@ -125,6 +125,39 @@ def held_suarez_equilibrium_temperature(
     return T_eq
 
 
+def held_suarez_sigma_factor(sigma: jax.Array, sigma_b: float = SIGMA_B) -> jax.Array:
+    """Boundary-layer weight ``max(0, (σ − σ_b)/(1 − σ_b))`` used by k_T and k_v."""
+    return jnp.maximum(0.0, (sigma - sigma_b) / (1.0 - sigma_b))
+
+
+def held_suarez_temperature_tendency(
+    T: jax.Array,
+    lat: jax.Array,
+    p: jax.Array,
+    sigma: jax.Array,
+    *,
+    k_a: float = K_A,
+    k_s: float = K_S,
+    sigma_b: float = SIGMA_B,
+    delta_T_y: float = DELTA_T_Y,
+    delta_theta_z: float = DELTA_THETA_Z,
+    T_min: float = T_MIN,
+    p_ref: float = P_0,
+) -> jax.Array:
+    """Held-Suarez Newtonian relaxation ``−k_T(σ, φ)·(T − T_eq)`` [K/s].
+
+    ``k_T = k_a + (k_s − k_a)·max(0, (σ−σ_b)/(1−σ_b))·cos⁴φ``.  ``lat``
+    [rad], ``p`` [Pa] and ``sigma`` must broadcast against ``T``.  The single
+    implementation behind every grid's forcing (and the driver's HS lane).
+    """
+    T_eq = held_suarez_equilibrium_temperature(
+        lat, p, delta_T_y=delta_T_y, delta_theta_z=delta_theta_z,
+        T_min=T_min, p_ref=p_ref,
+    )
+    k_T = k_a + (k_s - k_a) * held_suarez_sigma_factor(sigma, sigma_b) * jnp.cos(lat) ** 4
+    return -k_T * (T - T_eq)
+
+
 # ==============================================================================
 # Cubed-sphere forcing and initialization
 # ==============================================================================
@@ -180,31 +213,15 @@ def held_suarez_forcing(
         p_full = pressure_from_sigma(sigma_full, p_s)  # (6,n,n,nlev)
         sigma_eff = jnp.broadcast_to(sigma_full[None, None, None, :], T.shape)
 
-    # --- Equilibrium temperature ---
-    # lat shape (6,n,n) -> broadcast to (6,n,n,nlev)
-    T_eq = held_suarez_equilibrium_temperature(
-        lat[..., None], p_full,
-        delta_T_y=delta_T_y, delta_theta_z=delta_theta_z,
-        T_min=T_min, p_ref=p_ref,
-    )  # (6,n,n,nlev)
-
-    # --- Temperature relaxation coefficient k_T(sigma, phi) ---
-    # k_T = k_a + (k_s - k_a) * max(0, (sigma-sigma_b)/(1-sigma_b)) * cos^4(phi)
-    sigma_factor = jnp.maximum(
-        0.0, (sigma_eff - sigma_b) / (1.0 - sigma_b)
+    # --- Newtonian relaxation (lat (6,n,n) -> (6,n,n,nlev)) ---
+    dT_dt_phys = held_suarez_temperature_tendency(
+        T, lat[..., None], p_full, sigma_eff,
+        k_a=k_a, k_s=k_s, sigma_b=sigma_b, delta_T_y=delta_T_y,
+        delta_theta_z=delta_theta_z, T_min=T_min, p_ref=p_ref,
     )
-    cos_lat_4 = jnp.cos(lat)**4  # (6,n,n)
-
-    k_T = k_a + (k_s - k_a) * sigma_factor * cos_lat_4[..., None]
-
-    # --- Newtonian relaxation: Q_T = -k_T * (T - T_eq) ---
-    dT_dt_phys = -k_T * (T - T_eq)
 
     # --- Rayleigh friction coefficient k_v(sigma) ---
-    # k_v = k_f * max(0, (sigma-sigma_b)/(1-sigma_b))
-    k_v = k_f * jnp.maximum(
-        0.0, (sigma_eff - sigma_b) / (1.0 - sigma_b)
-    )
+    k_v = k_f * held_suarez_sigma_factor(sigma_eff, sigma_b)
 
     # --- Rayleigh friction: Q_u = -k_v*u, Q_v = -k_v*v ---
     du_dt_phys = -k_v * u
@@ -310,6 +327,15 @@ def held_suarez_forcing_latlon(
     state: HydrostaticState,
     grid,
     sigma_coord: SigmaCoordinate | HybridSigmaPressureCoordinate,
+    *,
+    k_a: float = K_A,
+    k_s: float = K_S,
+    k_f: float = K_F,
+    sigma_b: float = SIGMA_B,
+    delta_T_y: float = DELTA_T_Y,
+    delta_theta_z: float = DELTA_THETA_Z,
+    T_min: float = T_MIN,
+    p_ref: float = P_0,
 ) -> HydrostaticTendencies:
     """Compute Held-Suarez physics tendencies on a lat-lon grid.
 
@@ -321,6 +347,8 @@ def held_suarez_forcing_latlon(
         Horizontal grid (provides latitude).
     sigma_coord : SigmaCoordinate or HybridSigmaPressureCoordinate
         Vertical coordinate.
+    k_a, k_s, k_f, sigma_b, delta_T_y, delta_theta_z, T_min, p_ref : float
+        Held-Suarez parameters, as in :func:`held_suarez_forcing`.
 
     Returns
     -------
@@ -343,27 +371,15 @@ def held_suarez_forcing_latlon(
         p_full = pressure_from_sigma(sigma_full, p_s)  # (n_lat, n_lon, nlev)
         sigma_eff = jnp.broadcast_to(sigma_full[None, None, :], T.shape)
 
-    # Equilibrium temperature
-    # lat (n_lat,) -> broadcast to (n_lat, 1, 1) for (n_lat, n_lon, nlev)
-    T_eq = held_suarez_equilibrium_temperature(
-        lat[:, None, None], p_full
+    # Newtonian relaxation (lat (n_lat,) -> (n_lat, 1, 1))
+    dT_dt_phys = held_suarez_temperature_tendency(
+        T, lat[:, None, None], p_full, sigma_eff,
+        k_a=k_a, k_s=k_s, sigma_b=sigma_b, delta_T_y=delta_T_y,
+        delta_theta_z=delta_theta_z, T_min=T_min, p_ref=p_ref,
     )
-
-    # Temperature relaxation coefficient k_T(sigma, phi)
-    sigma_factor = jnp.maximum(
-        0.0, (sigma_eff - SIGMA_B) / (1.0 - SIGMA_B)
-    )
-    cos_lat_4 = jnp.cos(lat)**4  # (n_lat,)
-
-    k_T = K_A + (K_S - K_A) * sigma_factor * cos_lat_4[:, None, None]
-
-    # Newtonian relaxation
-    dT_dt_phys = -k_T * (T - T_eq)
 
     # Rayleigh friction coefficient k_v(sigma)
-    k_v = K_F * jnp.maximum(
-        0.0, (sigma_eff - SIGMA_B) / (1.0 - SIGMA_B)
-    )
+    k_v = k_f * held_suarez_sigma_factor(sigma_eff, sigma_b)
 
     du_dt_phys = -k_v * u
     dv_dt_phys = -k_v * v
@@ -471,6 +487,14 @@ def held_suarez_forcing_mpas(
     *,
     phys_state=None,
     forcing=None,
+    k_a: float = K_A,
+    k_s: float = K_S,
+    k_f: float = K_F,
+    sigma_b: float = SIGMA_B,
+    delta_T_y: float = DELTA_T_Y,
+    delta_theta_z: float = DELTA_THETA_Z,
+    T_min: float = T_MIN,
+    p_ref: float = P_0,
 ):
     """Compute Held-Suarez physics tendencies on an MPAS mesh.
 
@@ -490,6 +514,8 @@ def held_suarez_forcing_mpas(
         no external forcing, so both are ignored; the bare-tendencies return
         (not a ``(tendencies, phys_state_out)`` tuple) leaves the dycore's
         ``phys_state`` carry untouched.
+    k_a, k_s, k_f, sigma_b, delta_T_y, delta_theta_z, T_min, p_ref : float
+        Held-Suarez parameters, as in :func:`held_suarez_forcing`.
 
     Returns
     -------
@@ -511,16 +537,12 @@ def held_suarez_forcing_mpas(
         p_full = pressure_from_sigma(sigma_full, p_s)    # (nCells, nlev)
         sigma_eff = jnp.broadcast_to(sigma_full[None, :], T.shape)
 
-    # Equilibrium temperature (nCells, nlev)
-    T_eq = held_suarez_equilibrium_temperature(lat_cell[:, None], p_full)
-
-    # Temperature relaxation coefficient k_T(sigma, phi) at cell centers
-    sigma_factor = jnp.maximum(0.0, (sigma_eff - SIGMA_B) / (1.0 - SIGMA_B))
-    cos_lat_4 = jnp.cos(lat_cell) ** 4  # (nCells,)
-    k_T = K_A + (K_S - K_A) * sigma_factor * cos_lat_4[:, None]
-
-    # Newtonian relaxation
-    dT_dt = -k_T * (T - T_eq)  # (nCells, nlev)
+    # Newtonian relaxation at cell centers (nCells, nlev)
+    dT_dt = held_suarez_temperature_tendency(
+        T, lat_cell[:, None], p_full, sigma_eff,
+        k_a=k_a, k_s=k_s, sigma_b=sigma_b, delta_T_y=delta_T_y,
+        delta_theta_z=delta_theta_z, T_min=T_min, p_ref=p_ref,
+    )
 
     # Rayleigh friction coefficient k_v(sigma) at edge locations
     c0 = mesh.cellsOnEdge[0]  # (nEdges,)
@@ -532,10 +554,7 @@ def held_suarez_forcing_mpas(
     else:
         sigma_edge = jnp.broadcast_to(sigma_full[None, :], u.shape)
 
-    sigma_factor_edge = jnp.maximum(
-        0.0, (sigma_edge - SIGMA_B) / (1.0 - SIGMA_B)
-    )
-    k_v = K_F * sigma_factor_edge  # (nEdges, nlev)
+    k_v = k_f * held_suarez_sigma_factor(sigma_edge, sigma_b)  # (nEdges, nlev)
 
     # Rayleigh friction on normal velocity
     du_dt = -k_v * u  # (nEdges, nlev)
@@ -649,6 +668,15 @@ def held_suarez_forcing_spectral(
     state,
     grid,
     sigma_coord,
+    *,
+    k_a: float = K_A,
+    k_s: float = K_S,
+    k_f: float = K_F,
+    sigma_b: float = SIGMA_B,
+    delta_T_y: float = DELTA_T_Y,
+    delta_theta_z: float = DELTA_THETA_Z,
+    T_min: float = T_MIN,
+    p_ref: float = P_0,
 ):
     """Compute Held-Suarez physics tendencies for the spectral PE.
 
@@ -665,6 +693,8 @@ def held_suarez_forcing_spectral(
         Gaussian grid with SH transform matrices.
     sigma_coord : SigmaCoordinate
         Vertical coordinate.
+    k_a, k_s, k_f, sigma_b, delta_T_y, delta_theta_z, T_min, p_ref : float
+        Held-Suarez parameters, as in :func:`held_suarez_forcing`.
 
     Returns
     -------
@@ -690,25 +720,15 @@ def held_suarez_forcing_spectral(
         p_full = p_s[..., None] * sigma_full  # (n_lat, n_lon, nlev)
         sigma_eff = jnp.broadcast_to(sigma_full[None, None, :], T.shape)
 
-    # --- 3. Equilibrium temperature ---
-    T_eq = held_suarez_equilibrium_temperature(
-        lat[:, None, None], p_full,
-    )  # (n_lat, n_lon, nlev)
-
-    # --- 4. Temperature relaxation coefficient k_T(sigma, phi) ---
-    sigma_factor = jnp.maximum(
-        0.0, (sigma_eff - SIGMA_B) / (1.0 - SIGMA_B),
+    # --- 3-5. Newtonian relaxation (n_lat, n_lon, nlev) ---
+    dT_dt_phys = held_suarez_temperature_tendency(
+        T, lat[:, None, None], p_full, sigma_eff,
+        k_a=k_a, k_s=k_s, sigma_b=sigma_b, delta_T_y=delta_T_y,
+        delta_theta_z=delta_theta_z, T_min=T_min, p_ref=p_ref,
     )
-    cos_lat_4 = jnp.cos(lat) ** 4  # (n_lat,)
-    k_T = K_A + (K_S - K_A) * sigma_factor * cos_lat_4[:, None, None]
-
-    # --- 5. Newtonian relaxation ---
-    dT_dt_phys = -k_T * (T - T_eq)
 
     # --- 6. Rayleigh friction coefficient k_v(sigma) ---
-    k_v = K_F * jnp.maximum(
-        0.0, (sigma_eff - SIGMA_B) / (1.0 - SIGMA_B),
-    )
+    k_v = k_f * held_suarez_sigma_factor(sigma_eff, sigma_b)
 
     # --- 7. Rayleigh friction: du/dt = -k_v*u, dv/dt = -k_v*v ---
     du_dt_phys = -k_v * u

@@ -11,6 +11,7 @@ These functions are only called when the halo backend is set to
 
 from __future__ import annotations
 
+import functools
 import importlib.util
 import os
 import re
@@ -401,31 +402,116 @@ def mpi4jax_array_result(result):
     return result
 
 
-def global_sum_mpi(local_value: jax.Array, comm=None) -> jax.Array:
+def _allreduce_sum(local_value, comm, timer: str):
+    """Raw mpi4jax ``allreduce(SUM)``.  mpi4jax transposes it to the IDENTITY
+    (each rank keeps its own cotangent), which is right only for a final loss."""
+    mpi4jax, MPI = require_mpi_stack()
+    with mpi_timer(timer):
+        return mpi4jax_array_result(mpi4jax.allreduce(
+            local_value, op=MPI.SUM,
+            comm=MPI.COMM_WORLD if comm is None else comm))
+
+
+class _CommParam:
+    """Hashable primitive parameter wrapping an (unhashable) mpi4py communicator."""
+
+    __slots__ = ("comm",)
+
+    def __init__(self, comm):
+        self.comm = comm
+
+    def __hash__(self):
+        return hash(self.comm.py2f())
+
+    def __eq__(self, other):
+        return isinstance(other, _CommParam) and self.comm == other.comm
+
+
+@functools.cache
+def _replicated_allreduce_p():
+    """Linear primitive y = allreduce(SUM, x) whose transpose is ALSO allreduce.
+
+    Every rank holds y = sum_r' x_r' and may reuse it, so the transpose is
+    x_bar_r = sum_r' y_bar_r' (#811, #1814).  Being linear, its JVP is the same
+    allreduce of the tangent, so forward mode, reverse mode and jit all work.
+    """
+    from jax.extend.core import Primitive
+    from jax.interpreters import ad, batching, mlir
+
+    mpi4jax, MPI = require_mpi_stack()
+
+    def raw(x, *, comm):
+        return mpi4jax_array_result(mpi4jax.allreduce(x, op=MPI.SUM, comm=comm.comm))
+
+    # mpi4jax's ordered effect, read off its own jaxpr (public API only); without
+    # it the lowering has no MPI token to thread.
+    effects = jax.make_jaxpr(lambda v: raw(v, comm=_CommParam(MPI.COMM_WORLD)))(0.0).effects
+
+    prim = Primitive("legoesm_replicated_allreduce_sum")
+    prim.def_impl(raw)
+    prim.def_effectful_abstract_eval(
+        lambda x, *, comm: (jax.core.ShapedArray(x.shape, x.dtype), effects))
+    mlir.register_lowering(prim, mlir.lower_fun(raw, multiple_results=False))
+    ad.primitive_jvps[prim] = lambda primals, tangents, *, comm: (
+        prim.bind(primals[0], comm=comm),
+        prim.bind(ad.instantiate_zeros(tangents[0]), comm=comm))
+    # Instantiate a zero cotangent so EVERY rank enters the backward allreduce,
+    # even one that discarded the sum (skipping it would deadlock the others).
+    ad.primitive_transposes[prim] = (
+        lambda ct, _x, *, comm: [prim.bind(ad.instantiate_zeros(ct), comm=comm)])
+    batching.primitive_batchers[prim] = (
+        lambda args, dims, *, comm: (prim.bind(args[0], comm=comm), dims[0]))
+    return prim
+
+
+def _replicated_sum(local_value, comm, timer):
+    _, MPI = require_mpi_stack()
+    with mpi_timer(timer):
+        return _replicated_allreduce_p().bind(
+            jax.numpy.asarray(local_value),
+            comm=_CommParam(MPI.COMM_WORLD if comm is None else comm))
+
+
+def global_sum_mpi(local_value: jax.Array, comm=None, *,
+                   final_loss: bool = False) -> jax.Array:
     """Compute a global sum across all MPI ranks.
 
-    **Differentiable**: uses ``allreduce(SUM)`` which has full JVP and
-    VJP support in mpi4jax.  Safe to use inside ``jax.grad``.
+    **Gradient**: the backward pass ALSO allreduces (sums) the cotangent over
+    ``comm``, the correct transpose for a sum that every rank holds and reuses
+    (fixer factors, normalisations, inner products, area integrals).  Forward
+    mode (``jax.jvp``/``jacfwd``) allreduces the tangent, on either path.
+    Every rank must differentiate through the same sums: a rank whose input
+    carries no tangent skips the tangent allreduce (as raw mpi4jax does), and
+    the other ranks then wait on it forever.
+
+    ``final_loss=True`` keeps mpi4jax's IDENTITY backward pass instead.  Use it
+    for the reduction that produces the loss every rank evaluates and
+    differentiates identically — normalised or not (a global mean too); the
+    default would scale that gradient by the rank count.  Sums used INSIDE the
+    computation keep the default under either loss convention.
 
     Parameters
     ----------
     local_value : jax.Array
         Scalar (or array) local partial sum.
     comm : mpi4py communicator, optional
-        Communicator to reduce over. Defaults to ``MPI.COMM_WORLD``. Callers on a
-        SUB-communicator (e.g. a plane-LES layout whose distributed FFT uses
-        ``layout.comm``) MUST pass that same communicator — otherwise the reduction
-        spans the wrong rank set and can deadlock or mix unrelated ranks.
+        Communicator to reduce over (forward AND backward). Defaults to
+        ``MPI.COMM_WORLD``. Callers on a SUB-communicator (e.g. a plane-LES
+        layout whose distributed FFT uses ``layout.comm``) MUST pass that same
+        communicator — otherwise the reduction spans the wrong rank set and can
+        deadlock or mix unrelated ranks.
+    final_loss : bool, optional
+        See above.  Default ``False``.
     """
-    mpi4jax, MPI = require_mpi_stack()
-    if comm is None:
-        comm = MPI.COMM_WORLD
+    if final_loss:
+        return _allreduce_sum(local_value, comm, "global_sum_mpi")
+    return _replicated_sum(local_value, comm, "global_sum_mpi")
 
-    with mpi_timer("global_sum_mpi"):
-        global_val = mpi4jax_array_result(
-            mpi4jax.allreduce(local_value, op=MPI.SUM, comm=comm),
-        )
-    return global_val
+
+def broadcast_allreduce_sum(local_sum: jax.Array) -> jax.Array:
+    """Same as :func:`global_sum_mpi` since #1814 made its backward pass
+    allreduce the cotangent; kept for existing callers."""
+    return global_sum_mpi(local_sum)
 
 
 def is_multi_process() -> bool:
@@ -519,9 +605,9 @@ def global_sum_if_distributed(local_value: jax.Array) -> jax.Array:
     MPI/sharded distribution flag (see :func:`is_multi_process`); otherwise
     returns ``local_value`` unchanged so single-rank runs pay no reduction.
 
-    **Differentiable**: built on ``global_sum_mpi`` (allreduce SUM) which carries
-    a full VJP — safe inside ``jax.grad`` (cf. the halo-exchange ``custom_vjp``
-    notes).  Single canonical MPI-aware reduction (#177) shared by
+    **Gradient**: as :func:`global_sum_mpi` (the backward pass allreduces the
+    cotangent).  Single canonical
+    MPI-aware reduction (#177) shared by
     ``ocean.conservation_mpas`` and ``ocean.dynamics.eta_floor``.
     """
     if is_multi_process():
@@ -629,6 +715,9 @@ def batch_allreduce_mpi(
     MPI latency), this function packs all values into a single flat
     buffer, performs one ``allreduce``, and unpacks the results.
 
+    Gradient (``op="sum"``): as :func:`global_sum_mpi` (the backward pass
+    allreduces the cotangent).  ``"max"``/``"min"`` are not differentiable.
+
     Parameters
     ----------
     values : list[jax.Array]
@@ -676,10 +765,13 @@ def batch_allreduce_mpi(
     packed = jnp.concatenate(flat_parts, axis=0)
 
     # Single MPI allreduce.
-    with mpi_timer("batch_allreduce_mpi"):
-        global_packed = mpi4jax_array_result(
-            mpi4jax.allreduce(packed, op=mpi_op, comm=MPI.COMM_WORLD),
-        )
+    if op == "sum":
+        global_packed = _replicated_sum(packed, None, "batch_allreduce_mpi")
+    else:
+        with mpi_timer("batch_allreduce_mpi"):
+            global_packed = mpi4jax_array_result(
+                mpi4jax.allreduce(packed, op=mpi_op, comm=MPI.COMM_WORLD),
+            )
 
     # Unpack and restore original shapes and dtypes.
     results = []
@@ -726,6 +818,59 @@ def spmd_reduce_axis() -> str | None:
         if ax in names:
             return ax
     return None
+
+
+def _resolve_tree_psum(env_value: str, backend: str) -> bool:
+    """LEGOESM_SPMD_TREE_PSUM: unset/``''`` = butterfly on CPU, psum
+    elsewhere (owner-approved default 2026-09-25); ``'1'`` butterfly on any
+    backend; ``'0'`` psum everywhere. Anything else raises."""
+    if env_value == "":
+        return backend == "cpu"
+    if env_value == "0":
+        return False
+    if env_value == "1":
+        return True
+    raise ValueError(
+        f"LEGOESM_SPMD_TREE_PSUM must be '', '0' or '1'; got {env_value!r}")
+
+
+def _spmd_sum(x: jax.Array, axis_name) -> jax.Array:
+    """Sum ``x`` over the shard_map axis ``axis_name``.
+
+    On the CPU backend (default, ``LEGOESM_SPMD_TREE_PSUM`` unset) and for a
+    single axis of power-of-two size: a recursive-doubling butterfly of
+    ``log2(n)`` ppermute rounds. XLA's gloo allreduce is a ring whose cost
+    grows with the rank count (measured on Derecho across nodes: 1.14 ms at
+    8 ranks, 4.4 ms at 32, 9.05 ms at 64; one neighbour exchange ~70 us);
+    MPAS ocean s7 at 16 ranks/node, psum -> butterfly: 335 -> 315 ms/step
+    at 1 node, 216 -> 171 at 2, 231 -> 118 at 4, 399 -> 97 at 8. Other
+    backends keep ``jax.lax.psum`` (NCCL's allreduce is not a ring of
+    latencies); ``=1`` / ``=0`` force either path. The choice keys on the
+    PROCESS default backend (``jax.default_backend()``), not the mesh
+    devices' platform.
+    Every rank adds the same two operands in each round (a + b == b + a), so
+    all ranks hold bit-identical sums; the summation ORDER differs from
+    psum's, so results differ from the psum path in the last bit. Linear in
+    ``x`` (ppermute transposes to its inverse), so it is AD-safe like psum.
+
+    Scope: meant for the small packed PCG scalars (each round ships the
+    whole buffer, so a large buffer would pay log2(n) times its bytes). The
+    flag is read at trace time, so it is fixed per compiled program; compare
+    the two paths in separate processes. Non-power-of-two axis sizes and
+    multi-axis names always take psum.
+    """
+    tree = _resolve_tree_psum(os.environ.get("LEGOESM_SPMD_TREE_PSUM", ""),
+                              jax.default_backend())
+    if not tree or isinstance(axis_name, (tuple, list)):
+        return jax.lax.psum(x, axis_name)
+    n = int(jax.lax.axis_size(axis_name))
+    if n & (n - 1):
+        return jax.lax.psum(x, axis_name)
+    k = 1
+    while k < n:
+        x = x + jax.lax.ppermute(x, axis_name, [(i, i ^ k) for i in range(n)])
+        k *= 2
+    return x
 
 
 def batch_psum_spmd(
@@ -783,7 +928,7 @@ def batch_psum_spmd(
     flat_parts = [v.reshape(-1) for v in promoted]
     packed = jnp.concatenate(flat_parts, axis=0)
 
-    global_packed = jax.lax.psum(packed, axis_name)
+    global_packed = _spmd_sum(packed, axis_name)
 
     results = []
     offset = 0

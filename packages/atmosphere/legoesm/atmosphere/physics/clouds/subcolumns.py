@@ -89,6 +89,9 @@ __physics_contract__ = {
 N_SUBCOLUMNS_DEFAULT = 8
 _PERM_SEED = 20260731          # fixed at import: a table, never per-call noise
 _CF_FLOOR = 1.0e-3             # matches clouds.cloud_fraction._INHOM_CF_FLOOR
+# Per-layer McICA shift: irrational slope and step decorrelate layer offsets.
+_SHIFT_LAYER_SLOPE = 2.0 ** 0.5
+_SHIFT_LAYER_STEP = (5.0 ** 0.5 - 1.0) / 2.0
 
 
 @functools.lru_cache(maxsize=32)
@@ -118,7 +121,8 @@ def _stratified_table(n_sub: int, nlev: int) -> np.ndarray:
     return np.array(_stratified_table_cached(int(n_sub), int(nlev)), copy=True)
 
 
-def generate_subcolumns(cloud_fraction, n_sub: int = N_SUBCOLUMNS_DEFAULT):
+def generate_subcolumns(cloud_fraction, n_sub: int = N_SUBCOLUMNS_DEFAULT,
+                        shift=None):
     """Boolean cloud mask ``(n_sub, ncol, nlev)`` under maximum-random overlap.
 
     Descending from the model top (index 0), a subcolumn already cloudy in the
@@ -132,11 +136,25 @@ def generate_subcolumns(cloud_fraction, n_sub: int = N_SUBCOLUMNS_DEFAULT):
         ``(ncol, nlev)`` layer cloud fraction in [0, 1]; index 0 = model top.
     n_sub : int
         Number of subcolumns (STATIC -- it sets the traced batch size).
+    shift : jnp.ndarray, optional
+        ``(ncol,)`` per-column seed in [0, 1).  Layer ``k`` is offset by
+        ``frac(shift*(1 + k*sqrt2) + k*golden)`` (added modulo 1 to the table),
+        so each layer keeps its stratified marginal AND the offsets of different
+        layers vary independently across columns.  A single offset shared by all
+        layers kept every subcolumn's between-layer pairing fixed, so a given
+        g-point saw the wrong overlap in every column (layers [0.5, 0, 0.5]:
+        per-g-point cover 0.50-1.00 instead of 0.75; worst error 0.25 -> 0.03).
+        Plain arithmetic, so CPU and GPU give the same masks.
     """
     cf = jnp.clip(jnp.asarray(cloud_fraction), 0.0, 1.0)
     ncol, nlev = cf.shape
     u = jnp.asarray(_stratified_table(int(n_sub), int(nlev)), dtype=cf.dtype)
     u = u[:, None, :]                                   # (n_sub, 1, nlev)
+    if shift is not None:
+        k = jnp.arange(nlev, dtype=cf.dtype)
+        off = (jnp.asarray(shift, dtype=cf.dtype)[:, None] * (1.0 + k * _SHIFT_LAYER_SLOPE)
+               + k * _SHIFT_LAYER_STEP)                  # (ncol, nlev)
+        u = jnp.mod(u + off[None, :, :], 1.0)
     clear = 1.0 - cf                                    # (ncol, nlev)
 
     # nlev is static and small, so the recursion unrolls; a lax.scan would add
@@ -169,6 +187,12 @@ def expand_to_subcolumns(mask, *fields):
     return out[0] if len(out) == 1 else tuple(out)
 
 
+def in_cloud_paths(cloud_fraction, lwp, iwp, cf_floor: float = _CF_FLOOR):
+    """In-cloud water paths ``(ncol, nlev)``: GRID-MEAN path / floored ``cf``."""
+    cf = jnp.maximum(jnp.asarray(cloud_fraction), cf_floor)
+    return jnp.asarray(lwp) / cf, jnp.asarray(iwp) / cf
+
+
 def subcolumn_paths(mask, cloud_fraction, lwp, iwp,
                     cf_floor: float = _CF_FLOOR):
     """In-cloud water paths per subcolumn, flattened to ``(n_sub*ncol, nlev)``.
@@ -179,13 +203,9 @@ def subcolumn_paths(mask, cloud_fraction, lwp, iwp,
     scheme water-conserving.
     """
     n_sub, ncol, nlev = mask.shape
-    cf = jnp.maximum(jnp.asarray(cloud_fraction), cf_floor)
-    out = []
-    for p in (lwp, iwp):
-        ic = jnp.asarray(p) / cf                        # (ncol, nlev)
-        out.append(jnp.reshape(jnp.where(mask, ic[None, :, :], 0.0),
-                               (n_sub * ncol, nlev)))
-    return tuple(out)
+    return tuple(
+        jnp.reshape(jnp.where(mask, ic[None, :, :], 0.0), (n_sub * ncol, nlev))
+        for ic in in_cloud_paths(cloud_fraction, lwp, iwp, cf_floor))
 
 
 def average_over_subcolumns(field, n_sub: int, ncol: int):

@@ -71,6 +71,7 @@ from legoesm.grids.vertical import (
     VERTICAL_ADVECTION_SCHEMES,
     vertical_advection,
     vertical_advection_hybrid,
+    vertical_advection_hybrid_van_leer,
     vertical_advection_theta,
     vertical_advection_theta_hybrid,
 )
@@ -187,9 +188,10 @@ class MPASPrimitiveEquationConfig(NamedTuple):
     # Measured global max of that pair on the target run (raw interface
     # velocities, 37 checkpoint snapshots, uniform grid): 0.0642, 15.6x inside
     # the uniform-grid bound.  Requires nlev >= 4.  Default keeps every
-    # existing MPAS result bit-identical.  NOT wired to the hybrid lane (which
-    # uses the separate ``vertical_advection_hybrid`` operator) — selecting it
-    # there RAISES rather than running silently inert.
+    # existing MPAS result bit-identical.  NOT wired to the hybrid lane's temperature
+    # (theta form, upwind or 'sb') — selecting it there RAISES rather than
+    # running silently inert.  Hybrid-lane TRACERS always take the conservative
+    # limited ``vertical_advection_hybrid_van_leer``, independent of this field.
     # Appended at the tuple END: this preserves POSITIONAL CONSTRUCTION by
     # existing callers, not full tuple ABI (exact unpacking / len() / _make
     # with a short tuple still break; no such caller exists in-repo).
@@ -360,6 +362,7 @@ def mpas_hydrostatic_tendencies(
     physics_tendency: MPASHydrostaticTendencies | None = None,
     dt: float = 0.0,
     return_thermo_terms: bool = False,
+    fence_pv_flux: bool = False,
 ) -> MPASHydrostaticTendencies | tuple[MPASHydrostaticTendencies, "ThermoTerms"]:
     """Compute tendencies for the hydrostatic PE on an MPAS mesh.
 
@@ -394,8 +397,9 @@ def mpas_hydrostatic_tendencies(
     if _hybrid and _vert_scheme not in ("upwind", "sb"):
         raise ValueError(
             f"vert_advection_scheme={_vert_scheme!r} is implemented for the "
-            "sigma vertical coordinate only; the hybrid lane advects with "
-            "vertical_advection_hybrid, where it would be silently inert. "
+            "sigma vertical coordinate only; the hybrid lane's temperature "
+            "takes 'upwind' or 'sb' (its tracers always use the conservative "
+            "limited operator), so it would be silently inert. "
             "Use vertical_coord='sigma', or 'upwind'/'sb' on the hybrid lane."
         )
     if not _hybrid and _vert_scheme == "sb":
@@ -540,6 +544,11 @@ def mpas_hydrostatic_tendencies(
         pv_flux_3d = pv_flux_energy_conserving_3d(
             u_3d, h_proxy_3d, q_v_3d, mesh, h_edge_3d=h_proxy_edge_3d,
         )
+        # Value-neutral fusion split, set only by the sharded (multi-GPU)
+        # step: there it cuts the A100 step 7-15% (s9 16/32 GPUs, s7 2 GPUs);
+        # on one device it costs 1-3.5%, so the serial path leaves it off.
+        if fence_pv_flux:
+            pv_flux_3d = jax.lax.optimization_barrier(pv_flux_3d)
     elif config.pv_scheme == "enstrophy":
         pv_flux_3d = pv_flux_enstrophy_conserving_3d(
             u_3d, h_proxy_3d, q_v_3d, mesh, h_edge_3d=h_proxy_edge_3d,
@@ -780,7 +789,8 @@ def mpas_hydrostatic_tendencies(
     # vertical mass flux (mass_flux for hybrid / sigma_dot for σ), so moisture
     # transport is MASS-CONSISTENT with the thermodynamics — same horizontal
     # operator (shared ``tracer_horizontal_advection``) and the SAME vertical
-    # operator the dycore uses for T.  Physics (microphysics/convection)
+    # operator the dycore uses for T (on the hybrid lane: the conservative
+    # limited tracer operator, T takes its theta form).  Physics (microphysics/convection)
     # tracer tendencies add on.  ``tracers=None`` ⇒ dry, no extra work.
     tracer_tends_out = None
     if state.tracers is not None and len(state.tracers) > 0:
@@ -792,7 +802,8 @@ def mpas_hydrostatic_tendencies(
         dq = tracer_horizontal_advection(q, u_3d, mesh)
         if _hybrid:
             dq = dq + jax.vmap(
-                lambda qk: vertical_advection_hybrid(qk, mass_flux, p_s, sigma_coord),
+                lambda qk: vertical_advection_hybrid_van_leer(
+                    qk, mass_flux, p_s, sigma_coord),
                 in_axes=-1, out_axes=-1)(q)
         else:
             dq = dq + jax.vmap(
@@ -1251,13 +1262,12 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
             # the hard-floor fallback carries the per-species latent-heat T
             # correction incl ice.  Serial jnp.sum here; the MPI lane passes an
             # allreduce-SUM reduction.
-            from legoesm.core.conservation import (
-                apply_water_positivity, cell_mass_weight)
-            _dp = cell_mass_weight(_dp, self.mesh.areaCell)  # res6 cells span 1.6x
+            from legoesm.core.conservation import apply_water_positivity
             _tr_out, _T_out = apply_water_positivity(
                 state_new.tracers, state_new.T.data, _dp,
                 conservative=self.config.conservative_tracer_clamp,
-                energy_consistent=self.config.energy_consistent_moisture_clip)
+                energy_consistent=self.config.energy_consistent_moisture_clip,
+                area=self.mesh.areaCell)
             state_new = state_new._replace(
                 tracers=_tr_out, T=state_new.T.replace(data=_T_out))
 

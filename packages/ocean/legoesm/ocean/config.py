@@ -296,16 +296,18 @@ class OceanExperimentConfig:
         """Load an ocean configuration from a YAML file (merged onto defaults)."""
         with open(path) as f:
             user_config = yaml.safe_load(f)
+        from legoesm.core.setup_selector import deep_merge
         config = copy.deepcopy(DEFAULT_OCEAN_CONFIG)
         if user_config:  # safe_load returns None for empty files
-            _deep_merge(config, user_config)
+            deep_merge(config, user_config)
         return cls(config)
 
     @classmethod
     def from_dict(cls, d: dict) -> OceanExperimentConfig:
         """Create an ocean configuration from a dictionary (merged onto defaults)."""
+        from legoesm.core.setup_selector import deep_merge
         config = copy.deepcopy(DEFAULT_OCEAN_CONFIG)
-        _deep_merge(config, d)
+        deep_merge(config, d)
         return cls(config)
 
     def get(self, key: str, default: Any = None) -> Any:
@@ -933,17 +935,3 @@ def _decode_config(obj):
     if isinstance(obj, list):
         return [_decode_config(v) for v in obj]
     return obj
-
-
-def _deep_merge(base: dict, override: dict) -> None:
-    """Recursively merge *override* into *base* (in-place).
-
-    Local copy (not imported from ``legoesm.config``) because that module lives
-    in the meta-package and ``legoesm-ocean`` must not depend on it (federation
-    DAG). Identical semantics to the atmosphere boundary's ``_deep_merge``.
-    """
-    for key, value in override.items():
-        if key in base and isinstance(base[key], dict) and isinstance(value, dict):
-            _deep_merge(base[key], value)
-        else:
-            base[key] = value

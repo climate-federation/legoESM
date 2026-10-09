@@ -1715,6 +1715,21 @@ def test_mapn_tracer_jax_matches_numpy_lane():
                                                  b[:, 1:]), 2.3e-15)
 
 
+def test_mapn_tracer_jax_rejects_mixed_dtype_dp2():
+    """dp2 must share the edges' and tracers' float dtype: an fp32 dp2
+    against fp64 edges would otherwise promote the remap silently (the
+    uniform gate covers all four operands, not dp2 alone)."""
+    from legoesm.core.fv3_mapz import mapn_tracer as mapn_j
+    pe1, qs, pe2, dp2 = _mapn_args(nq=6)
+    kords = [9] * len(qs)
+    with pytest.raises(TypeError, match="MIXED"):
+        mapn_j(jnp.asarray(pe1), [jnp.asarray(a) for a in qs],
+               jnp.asarray(pe2), jnp.asarray(dp2, dtype=jnp.float32), KMP,
+               kords, 0.0)
+    mapn_j(jnp.asarray(pe1), [jnp.asarray(a) for a in qs],
+           jnp.asarray(pe2), jnp.asarray(dp2), KMP, kords, 0.0)  # NON-VACUITY
+
+
 def test_mapn_tracer_agrees_with_map1_q2_per_tracer_at_rounding_level():
     """mapn_tracer is the per-tracer remap with the products associated
     as :1808-1824 write them (fac1 = 0.5*(pr+pl) first): equal to

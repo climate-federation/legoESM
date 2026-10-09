@@ -17,10 +17,9 @@ through the buoyancy threshold while still producing the
 qualitatively-correct detrainment-height spread.
 
 Optional unsaturated-downdraft branch (rain evaporation cooling) is
-toggled by ``enable_unsaturated_downdraft``.  Implementation: a
-fraction ``downdraft_efficiency`` of the column-integrated detrained
-condensate is moved as a per-level cooling + moistening tendency in
-the cloud layer below LCL.
+toggled by ``enable_unsaturated_downdraft``.  Implementation: the
+ported CONVECT v4.3c downdraft shaft (convect43c.f lines 713-830),
+driven by the buoyancy-sort mixer's own intermediates.
 
 No convective momentum transport (Emanuel CMT is a separate
 extension, deferred).
@@ -42,8 +41,8 @@ from legoesm.atmosphere.physics._shared import virtual_temperature
 from legoesm.atmosphere.physics.thermodynamics import (
     compute_cape,
     compute_moist_adiabat,
-    latent_heat_vaporization,
 )
+from legoesm.thermo import latent_heat_vaporization
 from legoesm.atmosphere.physics.convection.config import EmanuelConfig
 from legoesm.atmosphere.physics.convection.output import ConvectionOutput
 from legoesm.atmosphere.physics.convection.mass_flux import (
@@ -462,9 +461,8 @@ def emanuel_convection(
     # -- Optional unsaturated-downdraft cooling ---------------------------
     # Implemented as a static Python branch (closure-time decision) so
     # it does NOT add a JAX trace overhead when disabled.  When enabled
-    # the column-integrated condensate evaporates a fraction
-    # ``downdraft_efficiency`` below LCL, cooling and moistening the
-    # sub-cloud layer.
+    # precipitation re-evaporates in the ported downdraft shaft, cooling and
+    # moistening the sub-cloud layer.
     if config.enable_unsaturated_downdraft:
         # The PORTED shaft (convect43c.f lines 713-830), not the previous
         # column-integrated stand-in.  It needs the mixer's own intermediates

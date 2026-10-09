@@ -639,19 +639,33 @@ def test_new_config_fields_sit_at_the_tuple_end():
     # The sedimentation trio is no longer LAST: the in-run cloud-water budget
     # appended ``publish_qc_budget`` after it, which is the correct end-append,
     # so the trio is pinned where it now sits rather than at the tail.
-    assert MorrisonConfig._fields[-4:-1] == (
+    assert MorrisonConfig._fields[-9:-6] == (
         "sed_cfl_substeps", "sed_cfl_substeps_max", "sed_cfl_substeps_strict")
-    assert MorrisonConfig._fields[-1] == "publish_qc_budget"
-    for cls in (ExperimentConfig, AMIPExperimentConfig):
-        assert cls._fields[-4:] == (
+    assert MorrisonConfig._fields[-6] == "publish_qc_budget"
+    # main end-appended its four warm-rain fields after it; the branch then
+    # moved liquid_from_closure from mid-tuple to the very end.
+    assert MorrisonConfig._fields[-5:] == (
+        "autocon_fact", "accre_enhan_fact", "kk2000_cam6_relvar",
+        "warm_rain_incloud", "liquid_from_closure")
+    # ``morrison_do_graupel`` end-appended after the block (2026-09-24).
+    # ExperimentConfig then end-appended the two land canopy smoothing widths
+    # (2026-09-30); main appended Morrison warm-rain + ZM/CLUBB tunables
+    # (ExperimentConfig) and zm_land_fraction (AMIP) after the block.
+    for cls, tail in ((ExperimentConfig, 21), (AMIPExperimentConfig, 1)):
+        f = cls._fields[:len(cls._fields) - tail]
+        assert f[-5:-1] == (
             "cld_macmic_num_steps", "morrison_sed_cfl_substeps",
             "morrison_sed_cfl_substeps_max", "morrison_sed_cfl_substeps_strict")
+        assert f[-1] == "morrison_do_graupel"
+    assert ExperimentConfig._fields[-3:] == (
+        "land_canopy_rh_cap_smoothing_width", "land_canopy_zeta_cap_smoothing_width",
+        "land_canopy_most_n_iters")
     # ... AND the field before the block is pinned, so an insertion just
     # ahead of it (which re-binds every stored positional value) goes red
     # too (GLM round 4)
-    assert MorrisonConfig._fields[-5] == "homogeneous_ice_supersaturation"
-    assert ExperimentConfig._fields[-5] == "bechtold_rhebc_land_deep"
-    assert AMIPExperimentConfig._fields[-5] == "physics_parameterization_seed"
+    assert MorrisonConfig._fields[-10] == "homogeneous_ice_supersaturation"
+    assert ExperimentConfig._fields[-27] == "bechtold_rhebc_land_deep"
+    assert AMIPExperimentConfig._fields[-7] == "physics_parameterization_seed"
     # full field ORDER, hashed: an insertion anywhere (not just before the
     # tail) re-binds every stored positional value, so pin the whole tuple
     # (recompute deliberately when a field is added AT THE END)
@@ -660,15 +674,29 @@ def test_new_config_fields_sit_at_the_tuple_end():
             # 116 -> 117 when the in-run cloud-water budget appended
             # publish_qc_budget at the END, which is the convention this guard
             # protects rather than a violation of it.
-            (MorrisonConfig, 117, "22176757db31d564"),
+            # 117 -> 118: liquid_from_closure END-appended (main had inserted
+            # it mid-tuple; moved so the first 117 fields hash to the
+            # pre-insertion 22176757db31d564 again).
+            # 118 -> 122 at the 2026-10-05 merge of main: main END-appended
+            # four warm-rain fields; liquid_from_closure stays last.
+            (MorrisonConfig, 122, "90ebac6169c628f6"),
             # 283 -> 288 at the 2026-09-23 merge of main: main inserted five
             # cloud_cap_floor_* fields MID-tuple (idx ~65-69), which is exactly
             # what this guard is for.  Recomputed, not relaxed -- the audit
             # that accompanied it found no positional construction of this
             # tuple anywhere and its serialization is name-keyed (_asdict),
             # so nothing re-binds.
-            (ExperimentConfig, 288, "f4655d1685936e55"),
-            (AMIPExperimentConfig, 125, "9f3b43eb47f505b6")):
+            # 288 -> 291 / 125 -> 126 at the 2026-09-26 merge: main added the
+            # CLUBB liquid-partition fields; morrison_do_graupel end-appended.
+            # 291 -> 293: land canopy smoothing widths END-appended; the first
+            # 291 fields still hash to c023f86f71966a44.
+            # 293 -> 294: land_canopy_most_n_iters END-appended (prefix still
+            # b380eb4b2adef6b3).
+            # 294 -> 306 / AMIP re-hashed at the 2026-10-05 merge: main appended
+            # Morrison warm-rain + ZM/CLUBB tunables (ExperimentConfig) and
+            # zm_land_fraction (AMIP); the canopy trio stays last.
+            (ExperimentConfig, 306, "d8fbbb77e25837f5"),
+            (AMIPExperimentConfig, 126, "8924f13ccbc6880f")):
         assert len(cls._fields) == n, (cls.__name__, len(cls._fields))
         assert hashlib.sha256(",".join(cls._fields).encode()).hexdigest()[:16] \
             == digest, f"{cls.__name__} field ORDER changed (positional ABI)"
@@ -928,3 +956,40 @@ def test_the_dispatcher_keeps_its_warning_and_guard():
     assert "strict_sed_abort_requested(" in src \
         and "require_cpu_for_strict_sedimentation()" in src, (
         "the strict-abort CPU refusal is no longer enforced for every lane")
+
+
+@pytest.mark.parametrize("scale, counts, cap", [
+    ((0.14, 0.54, 1.1), (3, 9, 17), 64),
+    ((0.14, 0.54, 0.67), (3, 9, 11), 12),   # cap not a multiple of the chunk
+])
+def test_early_exit_columns_with_different_counts_match_their_own_sequence(scale, counts, cap):
+    """Columns needing different pass counts (either side of the early-exit
+    chunk edges) each equal their own sequence of one-pass calls, so the loop
+    still runs every pass the neediest column requires."""
+    q, rho, Vt, dz = _column(ncol=3)
+    dt = 3000.0
+    Vt = Vt * jnp.asarray(scale)[:, None]
+    sub, p_sub, n = sedimentation_tendency(q, rho, Vt, dz, dt=dt, return_surface_flux=True,
+                                           n_substeps_max=cap, return_substeps=True)
+    assert [int(x) for x in n] == list(counts)
+    for c, nstep in enumerate(counts):
+        sl = slice(c, c + 1)
+        q_run, tend, sfc = q[sl], 0.0, 0.0
+        for _ in range(nstep):
+            t_i, p_i = sedimentation_tendency(q_run, rho[sl], Vt[sl], dz[sl], dt=dt / nstep,
+                                              return_surface_flux=True)
+            q_run = q_run + (dt / nstep) * t_i
+            tend = tend + t_i / nstep
+            sfc = sfc + p_i / nstep
+        np.testing.assert_allclose(np.asarray(sub[sl]), np.asarray(tend), rtol=_RTOL,
+                                   atol=_RTOL * float(jnp.abs(tend).max()))
+        np.testing.assert_allclose(np.asarray(p_sub[sl]), np.asarray(sfc), rtol=_RTOL, atol=0)
+
+
+def test_empty_column_batch_returns_empty_outputs():
+    """The early exit takes max(nstep) over columns; an empty batch must not
+    raise (codex: jnp.max of an empty array has no identity)."""
+    q = jnp.zeros((0, 20)); rho = jnp.ones((0, 20)); Vt = jnp.ones((0, 20)); dz = jnp.ones((0, 20))
+    tend, sfc = sedimentation_tendency(q, rho, Vt, dz, dt=10.0, return_surface_flux=True,
+                                       n_substeps_max=8)
+    assert tend.shape == (0, 20) and sfc.shape == (0,)

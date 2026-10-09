@@ -349,7 +349,8 @@ class CloudConfig(NamedTuple):
     # layers is solved as ONE deep uniform cloud. "max_random" re-solves the
     # column as n_sub deterministic maximum-random-overlap subcolumns and
     # averages: measured -30% cloud albedo and +18 W/m2 OLR against a
-    # Monte-Carlo reference. Costs n_sub x the radiation time. Unknown => raise.
+    # Monte-Carlo reference. Costs n_sub x the radiation time. "mcica" (CAM6)
+    # gives each g-point its own such subcolumn in ONE solve. Unknown => raise.
     # MUTUALLY EXCLUSIVE with cloud_partial_coverage_optics="two_column":
     # both correct partial coverage (that one horizontally per layer, this one
     # with real subcolumns), so enabling both double-discounts the cloud.
@@ -425,6 +426,10 @@ def build_cloud_config(
     cap_floor_p_max_pa: float | None = None,
     cap_floor_cf: float | None = None,
     cap_floor_q_c: float | None = None,
+    cam6_rhmini: float | None = None,
+    cam6_rhmaxi: float | None = None,
+    cam6_rhminis: float | None = None,
+    cam6_rhmaxis: float | None = None,
 ) -> "CloudConfig":
     """Assemble a ``CloudConfig`` from the ``ExperimentConfig``-level cloud
     fields (``cloud_scheme`` + the optional ``cloud_rh_crit`` /
@@ -477,6 +482,10 @@ def build_cloud_config(
         overrides["saturation_scheme"] = saturation_scheme
     if cover_condensate_q_ref is not None:
         overrides["cover_condensate_q_ref"] = cover_condensate_q_ref
+    for _name, _val in (("cam6_rhmini", cam6_rhmini), ("cam6_rhmaxi", cam6_rhmaxi),
+                        ("cam6_rhminis", cam6_rhminis), ("cam6_rhmaxis", cam6_rhmaxis)):
+        if _val is not None:
+            overrides[_name] = _val
     for _name, _val in (("cap_floor_on", cap_floor_on), ("cap_floor_lat_deg", cap_floor_lat_deg),
                         ("cap_floor_p_max_pa", cap_floor_p_max_pa), ("cap_floor_cf", cap_floor_cf),
                         ("cap_floor_q_c", cap_floor_q_c)):

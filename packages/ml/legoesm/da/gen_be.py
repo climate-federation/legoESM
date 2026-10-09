@@ -55,6 +55,18 @@ logger = logging.getLogger(__name__)
 
 _MPAS_HELMHOLTZ_POISSON_ITER = 240
 _MPAS_HELMHOLTZ_RELAX = 0.70
+# Implicit (Matern) horizontal correlation U_h = (I - sL)^{-n}, n = 2 (#1819).
+_MATERN_ORDER = 2
+# Relative error of the fixed-count Chebyshev solve of (I - sL) y = b.
+_MATERN_CHEB_RTOL = 1.0e-13
+# Numerics cap on that count (~15 sqrt(1 + 2 s max_diag), i.e. ~L/dx): 197 at
+# 1000 km on 40962 cells.  Exceeding it is an error, never a truncated solve.
+_MATERN_CHEB_MAX = 2048
+# B^-1 under the implicit kernel has condition number ~kappa^4 (kappa = 1 +
+# 2 s max_diag); refuse inv_multiply when kappa^4 * eps(dtype) exceeds this
+# (measured B^-1 B x error is ~1e-2 of that bound on 40962 cells).
+_MATERN_INV_BOUND_MAX = 1.0e-6
+_HORIZONTAL_SCHEMES = ("explicit", "implicit_matern")
 
 
 # ---------------------------------------------------------------------------
@@ -717,7 +729,8 @@ class GenBETransform:
 
     Implements the interface expected by build_cost_fn:
       - sqrt_multiply(v)  →  B^{1/2} v
-      - inv_multiply(x)   →  B^{-1} x  (exact via jax.vjp)
+      - inv_multiply(x)   →  B^{-1} x  (via jax.vjp of U^{-1}; raises on MPAS
+        meshes, where U^{-1} is not implemented — see :meth:`inv_multiply`)
 
     Parameters
     ----------
@@ -729,9 +742,36 @@ class GenBETransform:
     n_diffusion_iter : int
         Number of Laplacian diffusion iterations for horizontal correlation.
         More iterations → smoother kernel, closer to Gaussian.
+    horizontal_scheme : {"explicit", "implicit_matern"}
+        MPAS meshes only.  "explicit" (default): ``n_diffusion_iter`` steps of
+        x + sLx, which has no usable inverse (#1819).  "implicit_matern":
+        U_h = (I - sL)^{-2} with s = L^2 / 4, so B_h = U_h U_h^T, which is
+        (I - sL)^{-4} (Matern, nu = 3 in 2-D) only where cell areas are equal
+        (L is symmetric in the area-weighted inner product, not the plain one;
+        the explicit kernel has the same property), and U_h^{-1} = (I - sL)^2
+        is exact (``n_diffusion_iter``
+        is unused).  ``inv_multiply`` then works with ``wind_transform=
+        "identity"``; the psi/chi transform still refuses (constant psi/chi are
+        null modes).  Measured on 40962 cells at 500 km: B^-1 B x
+        reproduces x to ~1e-11 in float64, U^-1 U v to ~1e-5 in float32.  The length scales and ``horiz_norm`` were fitted for the
+        explicit kernel; refitting them for this kernel is future work, so the
+        correlation is not the same.
     """
 
-    def __init__(self, params: GenBEParams, spec, grid, n_diffusion_iter: int = 20):
+    def __init__(
+        self,
+        params: GenBEParams,
+        spec,
+        grid,
+        n_diffusion_iter: int = 20,
+        horizontal_scheme: str = "explicit",
+    ):
+        if horizontal_scheme not in _HORIZONTAL_SCHEMES:
+            raise ValueError(
+                f"GenBETransform: unknown horizontal_scheme {horizontal_scheme!r}; "
+                f"expected one of {_HORIZONTAL_SCHEMES}"
+            )
+        self.horizontal_scheme = horizontal_scheme
         self.params = params
         self.spec = spec
         self.grid = grid
@@ -805,6 +845,52 @@ class GenBETransform:
             self._neighbor_mask = None
             self._laplacian_weights = None
             self._diffusion_step_m2 = None
+        if horizontal_scheme == "implicit_matern":
+            if self._laplacian_weights is None:
+                raise ValueError(
+                    "GenBETransform: horizontal_scheme='implicit_matern' needs an MPAS "
+                    "mesh (cell/edge geometry for the finite-volume Laplacian)"
+                )
+            # Gershgorin: spec(L) in [-2 max_diag, 0], so spec(I - sL) in
+            # [1, 1 + 2 s max_diag] (L is self-adjoint in the areaCell inner
+            # product, so the spectrum is real).
+            self._matern_step_m2 = params.len_scale**2 / (2.0 * _MATERN_ORDER)
+            lam_hi = 1.0 + 2.0 * self._matern_step_m2 * max_diag
+            self._cheb_theta = 0.5 * (lam_hi + 1.0)
+            # floor: a zero length scale gives A = I and a 0/0 in the recurrence
+            self._cheb_delta = jnp.maximum(0.5 * (lam_hi - 1.0), 1.0e-30)
+            try:
+                len_scale_np = np.asarray(params.len_scale)
+                sqrt_k = float(jnp.sqrt(jnp.max(lam_hi)))
+            except (jax.errors.ConcretizationTypeError,
+                    jax.errors.TracerArrayConversionError) as err:
+                raise ValueError(
+                    "GenBETransform: horizontal_scheme='implicit_matern' needs concrete "
+                    "len_scale values (the Chebyshev count is static), so it cannot be "
+                    "built under jax.grad/jit with respect to the length scale; the "
+                    "explicit scheme can."
+                ) from err
+            if not (np.all(np.isfinite(len_scale_np)) and np.all(len_scale_np >= 0.0)):
+                raise ValueError(
+                    "GenBETransform: implicit_matern len_scale must be finite and >= 0; "
+                    f"got min {np.min(len_scale_np)}, max {np.max(len_scale_np)}"
+                )
+            rate = (sqrt_k - 1.0) / (sqrt_k + 1.0)
+            with np.errstate(divide="ignore"):
+                n_cheb = (
+                    1.0 if rate <= 0.0
+                    else np.ceil(np.log(_MATERN_CHEB_RTOL / 2.0) / np.log(rate))
+                )
+            if not 1.0 <= n_cheb <= _MATERN_CHEB_MAX:  # also NaN, +-inf
+                raise ValueError(
+                    f"GenBETransform: implicit_matern needs {n_cheb} Chebyshev "
+                    f"iterations per solve (cap {_MATERN_CHEB_MAX}); the largest "
+                    "len_scale is too long for this mesh spacing"
+                )
+            self._n_cheb = int(n_cheb)
+            self._matern_kappa = sqrt_k**2
+            logger.info("GenBE implicit_matern: %d Chebyshev iterations per solve",
+                        self._n_cheb)
 
         self._use_mpas_helmholtz = (
             getattr(params, "wind_transform", "mpas_helmholtz") == "mpas_helmholtz"
@@ -1020,10 +1106,14 @@ class GenBETransform:
             weights = self._laplacian_weights[..., None]
             step_m2 = self._diffusion_step_m2
 
+            def fv_lap(x):
+                return jnp.sum(weights * (x[neighbors, :] - x[None, :, :]), axis=0)
+
+            if self.horizontal_scheme == "implicit_matern":
+                return self._matern_smooth(all_ch, fv_lap, inverse)
+
             def step(x, _):
-                neighbor_vals = x[neighbors, :]
-                lap = jnp.sum(weights * (neighbor_vals - x[None, :, :]), axis=0)
-                return x + sign * step_m2[None, :] * lap, None
+                return x + sign * step_m2[None, :] * fv_lap(x), None
 
             result, _ = jax.lax.scan(step, all_ch, None, length=self.n_iter)
             return result
@@ -1044,6 +1134,42 @@ class GenBETransform:
         # vmap over channels: each channel gets its own kappa
         smooth_vmapped = jax.vmap(smooth_one_channel, in_axes=(1, 0), out_axes=1)
         return smooth_vmapped(all_ch, kappa)
+
+    def _matern_smooth(self, all_ch, fv_lap, inverse: bool) -> jax.Array:
+        """(I - sL)^{-n} x, or its exact inverse (I - sL)^n x.
+
+        The solve is Chebyshev iteration with a fixed count from the Gershgorin
+        interval, so U stays linear (finite CG would not be)."""
+        s = self._matern_step_m2[None, :]
+
+        def apply_a(x):
+            return x - s * fv_lap(x)
+
+        if inverse:
+            for _ in range(_MATERN_ORDER):
+                all_ch = apply_a(all_ch)
+            return all_ch
+
+        theta = self._cheb_theta[None, :]
+        delta = self._cheb_delta[None, :]
+        sigma = theta / delta
+
+        def solve(b):
+            # Saad, Iterative Methods for Sparse Linear Systems, Alg. 12.1.
+            def body(carry, _):
+                x, r, d, rho = carry
+                x = x + d
+                r = r - apply_a(d)
+                rho_new = 1.0 / (2.0 * sigma - rho)
+                d = rho_new * rho * d + (2.0 * rho_new / delta) * r
+                return (x, r, d, rho_new), None
+
+            init = (jnp.zeros_like(b), b, b / theta, 1.0 / sigma)
+            return jax.lax.scan(body, init, None, length=self._n_cheb)[0][0]
+
+        for _ in range(_MATERN_ORDER):
+            all_ch = solve(all_ch)
+        return all_ch
 
     def _assemble_channels(
         self,
@@ -1139,6 +1265,32 @@ class GenBETransform:
         Applies the operators in reverse order:
           U_wind^{-1} → U_sigma^{-1} → U_vert^{-1} → U_bal^{-1} → U_horiz^{-1}
         """
+        if self._use_mpas_helmholtz or (
+            self._laplacian_weights is not None and self.horizontal_scheme != "implicit_matern"
+        ):
+            # Not implemented, and at production settings not implementable: the
+            # forward diffusion (I + sL)^n multiplies the most negative
+            # eigenmode of L by (1 + s lam_min)^n.  While the step is unclipped
+            # (s < 0.49 / max_i sum_j w_ij), s n = L^2 / 2 and this tends to
+            # exp(-L^2 |lam_min| / 2), set by length scale vs mesh spacing
+            # rather than n or the solver: on the 40962-cell mesh (n=400)
+            # 1e-30 at 500 km, 7e-11 at 300 km, 4e-5 at 200 km; 1e-7 at 500 km
+            # on 10242 cells (scripts/validate/genbe_mpas_inverse_conditioning_1819.py;
+            # float64 cannot recover below ~1e-8).  When the psi/chi wind
+            # transform is selected (the default), its LSQ gradients also map
+            # constant psi and chi to zero.  Refuse rather than return a wrong B^-1.
+            raise NotImplementedError(
+                "GenBETransform: B^{-1} (inv_multiply) is not implemented on MPAS "
+                "meshes. At production settings none is numerically meaningful: the "
+                "horizontal correlation attenuates grid-scale modes by up to "
+                "~exp(-L^2 |lambda_min| / 2) (about 1e-30 for 500 km on the "
+                "40962-cell mesh, 400 iterations), and the default psi/chi wind "
+                "transform has null modes. horizontal_scheme='implicit_matern' with "
+                "wind_transform='identity' has an exact inverse. "
+                "Otherwise write the cost in the "
+                "preconditioned control variable v with sqrt_multiply only "
+                "(J_b = 0.5 |v|^2), as the MPAS 3D/4D-Var drivers do."
+            )
         params = self.params
 
         # --- Unpack physical increment ---
@@ -1200,6 +1352,9 @@ class GenBETransform:
     def inv_multiply(self, x: jax.Array) -> jax.Array:
         """Apply B^{-1} x = U^{-T} U^{-1} x.
 
+        Raises NotImplementedError on MPAS meshes (see :meth:`_inverse`), except
+        with horizontal_scheme="implicit_matern" and wind_transform="identity".
+
         Uses jax.vjp to compute U^{-T} exactly (U^{-1} is linear, so its
         VJP is the matrix transpose applied to the cotangent).
 
@@ -1208,10 +1363,20 @@ class GenBETransform:
         The jax.vjp call builds a linearisation graph of _inverse.  For large
         states this is memory-proportional to the number of scalar operations in
         _inverse (dominated by the diffusion scan, O(n_iter * ncol * n_ch)).
-        For the preconditioned formulation (use_preconditioning=True in
-        IncrementalConfig) this method is never called; prefer that path for
-        production runs.
+        Note that ``preconditioned_cost_fn`` still evaluates the x-space cost,
+        whose J_b term calls this method; only a cost written directly in v
+        (J_b = 0.5 |v|^2, as the MPAS 3D/4D-Var drivers do) avoids it.
         """
+        if self.horizontal_scheme == "implicit_matern":
+            bound = self._matern_kappa**4 * float(jnp.finfo(x.dtype).eps)
+            if bound > _MATERN_INV_BOUND_MAX:
+                raise ValueError(
+                    "GenBETransform.inv_multiply: the implicit_matern B^-1 has "
+                    f"condition number ~kappa^4 = {self._matern_kappa**4:.3g}, so "
+                    f"{x.dtype} cannot invert it accurately (kappa^4 * eps = "
+                    f"{bound:.2e} > {_MATERN_INV_BOUND_MAX:g}). Shorten len_scale, "
+                    "use float64, or minimise in v (J_b = 0.5 |v|^2)."
+                )
         y = self._inverse(x)  # U^{-1} x
         _, vjp_fn = jax.vjp(self._inverse, x)
         return vjp_fn(y)[0]  # U^{-T} y  (exact for linear U^{-1})
