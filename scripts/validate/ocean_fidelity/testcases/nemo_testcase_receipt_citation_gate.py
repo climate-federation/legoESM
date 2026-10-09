@@ -6011,7 +6011,7 @@ CITATION_MAP = {
         'rho0 = constants.rho_ocean if rho_0 is None else rho_0',
         'cp = constants.c_sw if c_sw is None else c_sw', 2],
     'geothermal_apply.py:86': 'T_new = (T0 + dt * dTdt).astype(T0.dtype)',
-    'nemo_testcase_recipe.py:1708': 'bbl_diffusive_option=1,',
+    'nemo_testcase_recipe.py:1708': ('bbl_diffusive_option=1,', 1),
     'nemo_testcase_recipe.py:1071': 'bbl_adv_option=2,',
 }
 
