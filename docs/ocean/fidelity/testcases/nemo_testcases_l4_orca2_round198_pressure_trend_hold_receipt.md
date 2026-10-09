@@ -141,9 +141,14 @@ source change or executable observer was introduced. ASKED choices: round
 
 ## OPEN
 
-Round 199 builds one private atomic unit: (1) NEMO's V pressure statement with
-the T-pivot north association and no extra compact V mask, plus (2) NEMO's
-explicit substep drag coefficient `-0.0004`. Prove both statement outputs
-bit-exact side by side, preserve and register the known 68 inactive EEN fold
-cells, then re-score the complete fold/transport arm under Decision 96 and all
-trajectory gates. Do not partially land either statement.
+Decision 103 was appended to the shared campaign state during this round's
+validation and supersedes the pre-existing round-197 continuation order.
+Round 199 starts the prescribed ORCA2 mini-ladder at OMT-0: ORCA2 rung-0
+geometry and corrected climatological entry, with the five named dynamics and
+tracer modules off and only the Decision-103 core retained. Build its explicit
+NEMO deck, card, rank-complete ten-step record and 96-step month protocol before
+scoring. This round's exact no-mask/fold-aware pressure statement is the cited
+OMT-0 candidate when that source-order walk reaches it. The explicit
+`zCdU_v=-0.0004` statement belongs to OMT-1, where linear implicit bottom drag
+is introduced. Do not transplant or score the old rung-0 cancelling pair
+across those two distinct mini-ladder rungs.
