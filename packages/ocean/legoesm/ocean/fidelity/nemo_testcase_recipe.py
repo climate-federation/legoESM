@@ -3214,6 +3214,8 @@ def build_tsunami_zco_card() -> NEMOTestcaseCard:
         A_v=nl.rn_avm0_m2_s, K_v=nl.rn_avt0_m2_s,  # ln_zdfcst, namelist_ref
         lateral_viscosity=base.lateral_viscosity._replace(A_h=0.0),  # ln_dynldf_OFF
         bottom_drag=base.bottom_drag._replace(bottom_drag_r=0.0),    # ln_drg_OFF
+        # ln_Jperio (namelist_cfg:29): the step traces inside the y-wrap.
+        meridionally_periodic=nl.ln_Jperio,
     )
     recipe = NEMORecipe(
         model_config=model_config,
@@ -3285,6 +3287,10 @@ def validate_nemo_testcase_card(card: NEMOTestcaseCard) -> None:
             f"{card.case} requires scalar-libm certification transcendentals, "
             f"got {card.transcendentals!r}"
         )
+    if card.recipe.model_config.meridionally_periodic is not card.j_periodic:
+        raise ValueError(
+            f"{card.case}: model_config.meridionally_periodic must equal the "
+            f"card's j_periodic ({card.j_periodic})")
     if card.case == "TSUNAMI-zco":
         _validate_tsunami_card(card)
         return

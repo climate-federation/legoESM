@@ -183,7 +183,7 @@ def test_j_periodicity_is_card_data(card):
     assert card.j_periodic is True and TSUNAMI_NAMELIST.ln_Jperio is True
     assert NEMOTestcaseCard._field_defaults["j_periodic"] is False
     assert build_nemo_testcase_card("VORTEX-zco").j_periodic is False
-    with pytest.raises(ValueError, match="ln_Jperio"):
+    with pytest.raises(ValueError, match="j_periodic"):
         validate_nemo_testcase_card(card._replace(j_periodic=False))
 
 
@@ -203,8 +203,13 @@ def test_meridional_periodicity_scope_feeds_the_existing_y_wrap(card):
     assert hl.get_meridionally_periodic() is False
 
 
-def _step_fields(card, eta):
-    """One model step of the card from (eta, the card's rest u/v/T/S)."""
+def _step_fields(card, eta, *, caller_scope=None, model=None):
+    """One model step of the card from (eta, the card's rest u/v/T/S).
+
+    No y-wrap scope by default: the card's model config carries it.
+    ``caller_scope`` forces the process-global flag around the call.
+    """
+    import contextlib
     import jax.numpy as jnp
     from legoesm.grids.halo_latlon import meridional_periodicity
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
@@ -212,11 +217,19 @@ def _step_fields(card, eta):
     r = card.recipe
     s0 = r.initial_state._replace(
         eta=r.initial_state.eta.replace(data=jnp.asarray(eta)))
-    with meridional_periodicity(card.j_periodic):
-        s1 = LatLonCGridOceanModel(r.grid, r.z_coord, r.model_config).step(
-            s0, card.dt_s)
+    m = model or LatLonCGridOceanModel(r.grid, r.z_coord, r.model_config)
+    scope = (contextlib.nullcontext() if caller_scope is None
+             else meridional_periodicity(caller_scope))
+    with scope:
+        s1 = m.step(s0, card.dt_s)
     return {f: (np.asarray(getattr(s0, f).data), np.asarray(getattr(s1, f).data))
             for f in ("u", "v", "T", "S", "eta", "w", "uu_b", "vv_b")}
+
+
+def _walled(card):
+    """Plant: the same card with the step's y-wrap switched off."""
+    cfg = card.recipe.model_config._replace(meridionally_periodic=False)
+    return card._replace(recipe=card.recipe._replace(model_config=cfg))
 
 
 def test_one_wet_level_rest_state_does_not_move_bit_for_bit(card):
@@ -294,7 +307,7 @@ def test_j_seam_is_translation_equivariant_bit_for_bit(card):
 
 def test_j_seam_plant_walled_step_fires(card):
     """Plant: the same step with the j-wrap off walls the seam."""
-    bad = _seam_equivariance_unequal(card._replace(j_periodic=False), (-79, 0))
+    bad = _seam_equivariance_unequal(_walled(card), (-79, 0))
     assert min(bad.values()) > 0, bad
 
 
@@ -329,6 +342,46 @@ def test_symmetric_bump_on_both_seams_steps_transpose_symmetric(card):
         assert np.abs(uu).max() > 0
         assert uu.tobytes() == vv.T.copy().tobytes(), u
     # the walled step is not symmetric: the plant fires
-    walled = {k: b for k, (_, b) in _step_fields(
-        flat._replace(j_periodic=False), eta0).items()}
+    walled = {k: b for k, (_, b) in _step_fields(_walled(flat), eta0).items()}
     assert walled["eta"].tobytes() != walled["eta"].T.copy().tobytes()
+    # with f on, the reflection is not a symmetry: the f = 0 switch is real
+    rot = {k: b for k, (_, b) in _step_fields(card, eta0).items()}
+    assert rot["uu_b"][:, :-1].tobytes() != rot["vv_b"][:-1].T.copy().tobytes()
+
+
+def test_the_step_takes_its_topology_from_the_config_not_the_caller(card):
+    """One model instance, stepped under either global state, gives the
+    same bits (no stale walled trace); the validator refuses a card whose
+    config disagrees with j_periodic."""
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel)
+    r = card.recipe
+    assert r.model_config.meridionally_periodic is True
+    eta0 = np.roll(np.asarray(r.initial_state.eta.data), -79, axis=0)
+    m = LatLonCGridOceanModel(r.grid, r.z_coord, r.model_config)
+    off = _step_fields(card, eta0, caller_scope=False, model=m)
+    on = _step_fields(card, eta0, caller_scope=True, model=m)
+    for f in off:
+        assert off[f][1].tobytes() == on[f][1].tobytes(), f
+    walled = _step_fields(_walled(card), eta0)
+    assert walled["eta"][1].tobytes() != on["eta"][1].tobytes()
+    with pytest.raises(ValueError, match="meridionally_periodic"):
+        validate_nemo_testcase_card(_walled(card))
+
+
+def test_j_neighbour_helpers_index_map():
+    """Native north-face row j is legoESM face j+1; face 0 is the seam:
+    the last native row under the y-wrap, zero (or the given row) walled."""
+    import jax.numpy as jnp
+    from legoesm.grids import halo_latlon as hl
+    a = jnp.arange(1.0, 5.0)[:, None] * jnp.ones((1, 2))   # rows 1, 2, 3, 4
+    col = lambda x: np.asarray(x)[:, 0].tolist()            # noqa: E731
+    assert col(hl.lat_north(a)) == [2, 3, 4, 0]
+    assert col(hl.lat_south(a)) == [0, 1, 2, 3]
+    assert col(hl.lat_faces_from_north(a)) == [0, 1, 2, 3, 4]
+    assert col(hl.lat_faces_from_north(a, south=a[:1])) == [1, 1, 2, 3, 4]
+    with hl.meridional_periodicity(True):
+        assert col(hl.lat_north(a)) == [2, 3, 4, 1]
+        assert col(hl.lat_south(a)) == [4, 1, 2, 3]
+        assert col(hl.lat_faces_from_north(a)) == [4, 1, 2, 3, 4]
+        assert col(hl.lat_faces_from_north(a, south=a[:1])) == [4, 1, 2, 3, 4]

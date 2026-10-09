@@ -2769,6 +2769,11 @@ class LatLonCGridOceanConfig(NamedTuple):
     # tripole) -- WRONG on a genuinely period-nx regular lat-lon grid.  Default
     # False -> bit-exact for every existing grid/config; set only for tripole.
     ew_cyclic_overlap: bool = False
+    # --- Meridional (j) periodicity (NEMO ln_Jperio) ------------------------
+    # When True the step runs inside ``halo_latlon.meridional_periodicity``:
+    # every j-neighbour statement takes the periodic copy NEMO's lbc_lnk
+    # writes (lbclnk.f90:1868).  Default False = the walled N/S boundary.
+    meridionally_periodic: bool = False
     # --- River-runoff depth spreading (NEMO rn_dep_max) --------------------
     # When > 0, the RUNOFF component of the freshwater forcing dilutes the
     # top ``runoff_depth_spread_m`` metres of the column (NEMO sbcrnf spreads
