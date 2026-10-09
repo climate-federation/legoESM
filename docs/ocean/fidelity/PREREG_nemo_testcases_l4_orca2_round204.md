@@ -42,3 +42,22 @@ change, citation gate and non-vacuous tests pass. OMT-1 does not begin first.
 
 ASKED choices: Decision 103's OMT-0 deck/card and exact record protocol.
 UNASKED choices: empty.
+
+## Frozen addendum after R204-P1 refutation
+
+R204-P1 is **REFUTED and retained**: parameterising the binary pin advances
+through all frame work, then admission refuses the inherited month record
+because `run.user.time.log` lacks `RUN_EXPECTED_ORACLE_STOP`. The record itself
+contains the exact registered NEMO boundary: no `STOP 0`, MPI abort error 123,
+compiled `stp_ctl` stop at kt=11, the frozen ssh/U/V/salinity extrema, and
+`output.abort_0000.nc`. Round 200's failed launcher wrote only its start marker
+before propagating exit 123, so the later shell marker never existed.
+
+R204-P9 freezes the only permitted repair: the shared provenance helper keeps
+requiring `RUN_EXPECTED_ORACLE_STOP` by default. A caller may explicitly admit
+this legacy unmarked boundary only when all of the following hold together:
+the timing log contains `RUN_STARTED_UTC` and neither success marker; stdout
+contains MPI abort error 123 and no `STOP 0`; `ocean.output` reproduces the
+already frozen kt=11 boundary; and the abort state exists. Removing any one is
+a firing plant. Any different error, step or magnitude is **REFUTED** and the
+month boundary remains unadmitted.
