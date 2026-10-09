@@ -287,6 +287,12 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
     require(report["terminal_ulp_control"] == {
         "bit_exact": False, "differing_cells": 1},
         "terminal one-ULP control did not fire")
+    require(report["slow_v_arm"]["input"]["comparison_bit_exact"],
+            "recorded slow-V substitution did not install exactly")
+    require(len(report["slow_v_arm"]["substep_table"]) == 65,
+            "slow-V arm is incomplete")
+    require(len(report["slow_v_association_unit"]["substep_table"]) == 65,
+            "slow-V plus association unit is incomplete")
     require(len(report["substep_table"]) == 65, "substep table is incomplete")
     require(report["first_nonbit"] == _first(
         report["source_rows"], "comparison_bit_exact"),
@@ -366,7 +372,8 @@ def measure(deck_root: Path, twin_a: Path, twin_b: Path,
     require(np.array_equal(np.asarray([dt]), np.asarray([ordered["dt"]])),
             f"external substep dt moved: {dt} != {ordered['dt']}")
 
-    def solve(trace: bool, association: bool = False):
+    def solve(trace: bool, association: bool = False, slow_v_override=None):
+        selected_v = f_v if slow_v_override is None else slow_v_override
         return jax.device_get(jax.jit(lambda seed, f_eta, f_u, f_v: (
             barotropic_substeps_latlon_cgrid(
                 seed, dt, 65, card.recipe.grid, card.recipe.z_coord, cfg,
@@ -376,7 +383,7 @@ def measure(deck_root: Path, twin_a: Path, twin_b: Path,
                 _nemo_substep_trace_test_hook=trace,
                 _nemo_external_mode_association_test_override=association,
             )
-        ))(state, jnp.asarray(f_eta), jnp.asarray(f_u), jnp.asarray(f_v)))
+        ))(state, jnp.asarray(f_eta), jnp.asarray(f_u), jnp.asarray(selected_v)))
 
     f_eta, f_u, f_v = zero_eta, slow_u, slow_v
     live = solve(False)
@@ -421,6 +428,13 @@ def measure(deck_root: Path, twin_a: Path, twin_b: Path,
     association_trace = association[2]
     association_rows, association_table = _summary_table(
         association_trace, substeps, masks)
+    recorded_slow_v = np.asarray(slow_v).copy()
+    recorded_slow_v[1:149, :90] = ordered["slow_v"][0]
+    slow_v_arm = solve(True, slow_v_override=recorded_slow_v)
+    slow_v_rows, slow_v_table = _summary_table(slow_v_arm[2], substeps, masks)
+    unit_arm = solve(
+        True, association=True, slow_v_override=recorded_slow_v)
+    unit_rows, unit_table = _summary_table(unit_arm[2], substeps, masks)
     one = np.asarray([1.0], dtype=np.float64)
     next_one = np.nextafter(one, np.inf)
     raw = {
@@ -443,6 +457,24 @@ def measure(deck_root: Path, twin_a: Path, twin_b: Path,
                 association_rows, "comparison_bit_exact"),
             "first_over_floor": _first(association_rows, "at_floor"),
             "substep_table": association_table,
+        },
+        "slow_v_arm": {
+            "source_statement": "dynspg_ts.f90:289,320-324",
+            "input": _score(_native_v(recorded_slow_v),
+                            ordered["slow_v"][0], masks["v"]),
+            "terminal": _terminal_rows(live, slow_v_arm),
+            "first_nonbit": _first(
+                slow_v_rows, "comparison_bit_exact"),
+            "first_over_floor": _first(slow_v_rows, "at_floor"),
+            "substep_table": slow_v_table,
+        },
+        "slow_v_association_unit": {
+            "source_statements": [
+                "dynspg_ts.f90:289,320-324", "dynspg_ts.f90:712-741"],
+            "terminal": _terminal_rows(live, unit_arm),
+            "first_nonbit": _first(unit_rows, "comparison_bit_exact"),
+            "first_over_floor": _first(unit_rows, "at_floor"),
+            "substep_table": unit_table,
         },
         "terminal_ulp_control": {
             "bit_exact": bool(np.array_equal(one, next_one)),

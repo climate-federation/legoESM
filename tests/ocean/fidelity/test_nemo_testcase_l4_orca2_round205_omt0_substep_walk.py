@@ -37,6 +37,13 @@ def _report():
         },
         "source_order": list(gate.ENTRY_ORDER),
         "terminal_ulp_control": {"bit_exact": False, "differing_cells": 1},
+        "slow_v_arm": {
+            "input": {"comparison_bit_exact": True},
+            "substep_table": [{"substep": index + 1} for index in range(65)],
+        },
+        "slow_v_association_unit": {
+            "substep_table": [{"substep": index + 1} for index in range(65)],
+        },
         "substep_table": [{"substep": index + 1} for index in range(65)],
         "source_rows": [exact],
         "substep_rows": [exact],
