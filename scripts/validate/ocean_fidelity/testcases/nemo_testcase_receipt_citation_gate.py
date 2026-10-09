@@ -1517,6 +1517,9 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo/dynspg_ts.f90:681-702': [
         'ELSE                           !* Flux form',
         ('END DO   ;   END DO', 18), 22],
+    'ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo/dynspg_ts.f90:666-679': [
+        'IF( ln_dynadv_vec .OR. lk_linssh ) THEN      !* Vector form',
+        ('END DO   ;   END DO', 17), 14],
     'ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo/dynspg_ts.f90:698-701': [
         'va_e(ji,jj) = (               hv_e  (ji,jj) *   vn_e (ji,jj)',
         '(hv_0(ji,jj) *(1._wp+r3v(ji,jj,Kmm))) * zv_frc (ji,jj)', 4],
