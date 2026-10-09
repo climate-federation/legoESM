@@ -1509,7 +1509,7 @@ CITATION_MAP = {
         ('& ff_f(ji  ,jj-1) /', 1), 5],
     'barotropic_latlon_cgrid.py:909-911': [
         ('def _nemo_een_south_ff_copy(ff):', 1),
-        ('return jnp.concatenate([ff[:1], ff[:-1]], axis=0)', 1), 3],
+        ('return lat_faces_from_north(ff, south=ff[:1])[:-1]', 1), 3],
     'barotropic_latlon_cgrid.py:1007-1013': [
         ('# ORCA2 reads ff_f through iom_get(..., kfill=jpfillcopy)', 1),
         ('q_south_ff_copy = b(ff_south[..., None] / shift(e3f, 0, 1))', 1), 7],
