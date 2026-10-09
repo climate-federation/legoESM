@@ -99,11 +99,16 @@ committed tree`, caused by this receipt still being untracked during that
 battery rather than by its layout plant. The battery emitted no terminal XML
 and was interrupted once; it was not rerun. This is an incomplete battery,
 not a green claim. The four displayed IDs were rerun alone as required; the
-three registered reds reproduced, while round 179 is rerun again after the
-receipt commit on the clean tree.
+three registered reds reproduced. After the receipt commit made the tree
+clean, the round-179 ID passed 1/1 in 0.36 s (JUnit SHA256
+`c84108794de95fbbc2093dd8acb129c3f1a18149bf5267eed5c29b5dab8b9231`),
+confirming that the fourth red was the dirty-tree precondition rather than a
+new layout failure.
 
-The independent-review verdict and clean-tree round-179 result are recorded
-by the round-closing commit.
+Independent review unavailable in-sandbox: the required separate
+`codex exec --sandbox read-only` invocation failed before reading the diff
+with `failed to initialize in-process app-server client: Read-only file
+system (os error 30)`. No independent verdict is claimed.
 
 No configuration choice, carried-state change, stabiliser, tolerance, NEMO
 source change or executable observer was introduced. ASKED choices: round
