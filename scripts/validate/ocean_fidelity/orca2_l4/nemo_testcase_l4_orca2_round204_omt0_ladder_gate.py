@@ -121,7 +121,7 @@ def _run_ladder(
     state,
     label: str,
     *,
-    atomic_fold_unit: bool = False,
+    atomic_fold_unit=None,
 ) -> dict[str, object]:
     import jax
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
@@ -130,19 +130,20 @@ def _run_ladder(
     )
 
     freshwater, surface = rung0_ladder._zero_forcing((148, 180))
+    arm_enabled = bool(atomic_fold_unit)
     reference_depth = (
         rung0.ladder.build_reference_depth_override(card)
-        if atomic_fold_unit else None
+        if arm_enabled else None
     )
 
     def hooks(stage: int = 0):
         return _NEMOWSRK3TestHooks(
             expose_momentum_stage=stage,
             expose_tracer_stage=stage,
-            barotropic_external_mode_association=atomic_fold_unit,
+            barotropic_external_mode_association=arm_enabled,
             barotropic_reference_face_depth_override=reference_depth,
-            barotropic_unmasked_v_transport=atomic_fold_unit,
-            barotropic_materialize_v_transport=atomic_fold_unit,
+            barotropic_unmasked_v_transport=arm_enabled,
+            barotropic_materialize_v_transport=arm_enabled,
             barotropic_atomic_fold_unit=atomic_fold_unit,
         )
 
@@ -190,10 +191,10 @@ def _run_ladder(
     return {
         "label": label,
         "private_arm": {
-            "external_mode_association": atomic_fold_unit,
-            "raw_reference_depth": atomic_fold_unit,
-            "unmasked_v_transport": atomic_fold_unit,
-            "materialize_v_transport": atomic_fold_unit,
+            "external_mode_association": arm_enabled,
+            "raw_reference_depth": arm_enabled,
+            "unmasked_v_transport": arm_enabled,
+            "materialize_v_transport": arm_enabled,
         },
         "checkpoint_count": len(checkpoints),
         "row_count": len(rows),
@@ -204,7 +205,7 @@ def _run_ladder(
 
 def run(deck_root: Path, canonical: Path, calibration: Path, twin_a: Path,
         twin_b: Path, month: Path, *, plant: str = "none",
-        atomic_fold_unit: bool = False,
+        atomic_fold_unit=None,
         claim_label: str = "both") -> dict[str, object]:
     import jax
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
@@ -279,7 +280,7 @@ def main() -> int:
         result = run(
             args.deck_root, args.candidate, args.calibration, args.twin_a,
             args.twin_b, args.month, plant=args.plant,
-            atomic_fold_unit=args.atomic_fold_unit,
+            atomic_fold_unit=(True if args.atomic_fold_unit else None),
             claim_label=args.claim_label,
         )
         require(args.plant == "none", f"{args.plant} plant stayed green")

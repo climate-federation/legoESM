@@ -204,7 +204,7 @@ def measure(args) -> dict[str, object]:
         args.deck_root, args.candidate, args.calibration, args.twin_a,
         args.twin_b, args.month,
     )
-    baseline = omt0.run(*common)
+    baseline = omt0.run(*common, atomic_fold_unit=False)
     substep_report = json.loads(args.substep_report.read_text(encoding="utf-8"))
     try:
         candidate = omt0.run(*common, atomic_fold_unit=True)
