@@ -168,6 +168,25 @@ def _literal_drag(coefficient, velocity, inverse_depth) -> dict[str, np.ndarray]
     return {"product": np.asarray(product), "drag_v": np.asarray(drag)}
 
 
+def _literal_coriolis(u, v, coefficients) -> np.ndarray:
+    """Apply the production source-rounded literal EEN coefficient builder."""
+
+    import jax
+    import jax.numpy as jnp
+
+    from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
+        _nemo_literal_barotropic_coriolis,
+    )
+
+    _, cor_v = _nemo_literal_barotropic_coriolis(
+        jnp.asarray(u, dtype=jnp.float64),
+        jnp.asarray(v, dtype=jnp.float64),
+        {name: jnp.asarray(value, dtype=jnp.float64)
+         for name, value in coefficients.items()},
+    )
+    return r178._native_v(np.asarray(jax.device_get(cor_v)))
+
+
 def _literal_add(left, right) -> np.ndarray:
     import jax
     import jax.numpy as jnp
@@ -254,11 +273,10 @@ def split_unit(context: dict[str, object], coefficient_root: Path) -> dict[str, 
     }
     candidate_mid_u = np.asarray(trace["u_mid"][index])
     reference_mid_u = r178._to_model_u(np.asarray(oracle["j002_ua_ext"]))
-    candidate_cor_u, candidate_cor_v, _ = r98.strict_application(
+    candidate_cor_v = _literal_coriolis(
         candidate_mid_u, trace["v_mid"][index], candidate_coeff)
-    reference_cor_u, reference_cor_v, _ = r98.strict_application(
+    reference_cor_v = _literal_coriolis(
         reference_mid_u, trace["v_mid"][index], oracle_coeff)
-    del candidate_cor_u, reference_cor_u
     target_cor = np.asarray(oracle["j002_cor_v"])
 
     candidate_drag_inputs = {
