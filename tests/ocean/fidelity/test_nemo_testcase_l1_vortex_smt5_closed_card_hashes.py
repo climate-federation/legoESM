@@ -1,4 +1,9 @@
-"""Direct test of the closed-card state-digest instrument."""
+"""Direct test of the closed-card state-digest INSTRUMENT only.
+
+The bit-identity of the closed cards is a measurement (digests at the parent
+commit vs after the change, quoted in the SMT-RUNGS round-2 receipt), not a
+CI assertion; this file proves only that the digest can tell two states apart.
+"""
 from __future__ import annotations
 
 import importlib.util

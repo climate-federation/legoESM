@@ -1478,6 +1478,39 @@ check_smt3_output() {  # $1 = run directory
       [[ -s "$dir/$file" ]] \
         || { printf 'REFUSE: NEMO did not dump %s in %s\n' "$file" "$dir" >&2; exit 71; }
     done
+    # CONTENT, not existence: names, axes, 12 identical double records,
+    # resto = tmask/86400 exactly (Decision 107b,d), and S = 35*tmask exactly
+    # (usrdef_istate's salinity), which a T/S swap could not pass.
+    python - "$dir" <<'PYCHECK' \
+      || { printf 'REFUSE: SMT-5 dumped inputs failed the content check in %s\n' "$dir" >&2; exit 71; }
+import sys
+import numpy as np
+from netCDF4 import Dataset
+d = sys.argv[1]
+with Dataset(f"{d}/mesh_mask.nc") as m:
+    tmask = np.asarray(m.variables["tmask"][0], dtype=np.float64)
+fields = {}
+for name, var in (("data_1m_potential_temperature_nomask.nc", "votemper"),
+                  ("data_1m_salinity_nomask.nc", "vosaline")):
+    with Dataset(f"{d}/{name}") as ds:
+        v = ds.variables[var]
+        assert v.dimensions == ("time_counter", "z", "y", "x"), v.dimensions
+        assert v.dtype == np.float64 and v.shape == (12,) + tmask.shape, (v.dtype, v.shape)
+        assert np.array_equal(np.asarray(ds.variables["time_counter"][:]), np.arange(1, 13))
+        rec = np.asarray(v[:], dtype=np.float64)
+    assert all(np.array_equal(rec[0], rec[m]) for m in range(1, 12)), var
+    assert np.all(np.isfinite(rec[0])) and np.all(rec[0][tmask == 0] == 0.0), var
+    fields[var] = rec[0]
+assert np.array_equal(fields["vosaline"], 35.0 * tmask), "vosaline != 35*tmask"
+wet = tmask > 0
+assert not np.any(fields["votemper"][wet] == 35.0), "votemper looks like salinity"
+with Dataset(f"{d}/resto.nc") as ds:
+    v = ds.variables["resto"]
+    assert v.dimensions == ("z", "y", "x") and v.dtype == np.float64, (v.dimensions, v.dtype)
+    resto = np.asarray(v[:], dtype=np.float64)
+assert np.array_equal(resto, tmask * (1.0 / 86400.0)), "resto != tmask/86400"
+print("SMT5_DUMPED_INPUTS_CONTENT_OK", d)
+PYCHECK
   fi
 }
 

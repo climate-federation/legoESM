@@ -2531,8 +2531,11 @@ def vortex_smt5_tracer_damping(deck_root, nlev: int, dt_s: float,
     with netCDF4.Dataset(paths[2], "r") as ds:
         resto = np.asarray(ds.variables["resto"][:], dtype=np.float64)
     resto = np.moveaxis(resto[:nlev], 0, -1)
-    ndt05 = int(round(0.5 * dt_s))
-    n_years = 1 + (ndt05 + int(n_steps) * int(round(dt_s))) // (365 * 86400)
+    def nint(x):  # Fortran NINT: half away from zero (Python round is half-even)
+        return int(math.copysign(math.floor(abs(x) + 0.5), x))
+
+    ndt05 = nint(0.5 * dt_s)                                     # daymod.f90:92
+    n_years = 1 + (ndt05 + int(n_steps) * nint(dt_s)) // (365 * 86400)
     centres, index = nemo_clim_monthly_record_centres(n_years)
     if ndt05 in set(int(c) for c in centres):
         raise ValueError("first step falls on a record centre: fld_update's "
