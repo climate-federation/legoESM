@@ -140,8 +140,8 @@ every row is in the json; the stage u, v rows are the correction arithmetic only
 - **PLAUSIBLE** mechanism: NEMO's density uses the live stretched depth,
   `TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/eosbn2.f90:361`, and again in the
   correction term built from the stretched depth less ssh, `TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/dynhpg.f90:387`;
-  the card's `insitu` arm evaluates density at the static depth. A replay with the
-  static depth lands 8.6e-13 from the card, not at the 1e-19 floor, so the
+  the card's `insitu` arm evaluates density at the static depth. An exploratory replay (NOT committed) with the
+  static depth landed 8.6e-13 from the card, not at the 1e-19 floor, so the
   static depth is the dominant piece, not shown to be the whole of it.
 - The `geometric` arm already exists and is certified for `nemo_seos`
   (guard comment in `ocean_model_latlon_cgrid.py` at the `_geometric_certified_eos` set; DINO
@@ -149,7 +149,7 @@ every row is in the json; the stage u, v rows are the correction arithmetic only
 
 ## 4. From kt = 2: momentum advection (B6)
 
-Given NEMO's entry state at kt = 2 and 5 with `geometric`, the stp_2D
+Given NEMO's entry state at kt = 2, 5 and 10 with `geometric`, the stp_2D
 right-hand side minus NEMO's prediction `hpg_replay + lambda * (NEMO rhs - hpg_replay)`
 (entry velocity scaled by lambda, T, S, ssh unscaled):
 
@@ -157,14 +157,17 @@ right-hand side minus NEMO's prediction `hpg_replay + lambda * (NEMO rhs - hpg_r
 |---|---|---|---|---|---|---|
 | 2 | 1.09e-19 | 3.11e-10 | 1.24e-09 | 4.97e-09 | 4.000000 | 4.000000 |
 | 5 | 1.09e-19 | 9.40e-11 | 3.76e-10 | 1.50e-09 | 4.000000 | 4.000000 |
+| 10 | 1.09e-19 | 2.92e-11 | 1.17e-10 | 4.67e-10 | 4.000000 | 4.000000 |
 
-**CONFIRMED** the residual is quadratic in velocity to six digits and the
-linear part (Coriolis/EEN vorticity) matches NEMO to the 1.09e-19 floor. The
-card carries a quadratic momentum term NEMO does not run: the card's UP3
-flux-form advection against NEMO's OFF branch. NEMO's OFF branch:
+**CONFIRMED** at kt = 2, 5, 10, in the maximum norm (one scalar per lambda; cell
+maps are not stored): the residual scales quadratically in velocity to six
+digits and no linear part is visible above the 1.09e-19 floor. Other kt are not
+tested. PLAUSIBLE: the quadratic term is the card's UP3 flux-form advection, which
+NEMO does not run (the card's term decomposition lumps advection with Coriolis,
+so it was not isolated). NEMO's OFF branch:
 `TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/dynadv.f90:185` and the depth-average case
 `TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/stp2d.f90:176`. The floor is identical at
-kt = 1, 2, 5, so it is a fixed-location rounding floor, not a state-dependent term.
+kt = 1, 2, 5, 10, so it is a fixed-location rounding floor, not a state-dependent term.
 Instrument defect found and fixed on the way: the right-hand-side observer is
 an asynchronous callback; read without an effects barrier it returned stale
 values (ratios 1.5 and 2.0 in the first run). The committed arm waits, and a
@@ -173,10 +176,12 @@ test pins the 4.0.
 ## 5. One wet level (CONFIRMED)
 
 In a one-level column every stage ends with the barotropic correction,
-`stprk3_stg.F90:440,444-445`, which sets u, v to the external uu_b, vv_b.
-Measured: with NEMO's external handoff handed in, bumping the stage-2 entry u
-or v by 1.0 m/s, T by 1.0 or ssh by 1.0 leaves the stage-2 and stage-3 u, v and
-ssh bit-unchanged (only T, S respond, to the velocity). So TSUNAMI proves the
+`TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/stprk3_stg.f90:413-414`, which sets u, v to the
+external uu_b, vv_b. Measured by an exploratory probe that is NOT committed (stage 2
+and stage 3, NEMO's external handoff handed in, one cell bumped by 1.0 in u, in v,
+in T and in entry ssh, each separately): u, v and ssh are bit-unchanged; only T, S
+respond, to the velocity. The committed plant (a test) is one: u by 1e-3 at stage 2,
+read on T. So TSUNAMI proves the
 external mode, the hybrid update arithmetic, the correction and the tracer
 thickness-ratio step; it cannot test the stage 3-D momentum step (flux-form
 (1 + r3) update, dyn_zdf, stage-2/3 pressure gradient). The ladder's
@@ -193,8 +198,8 @@ card-selected arm that closes it (for round 4):
 | blocker | binds | measured | smallest arm | NEMO's OFF branch |
 |---|---|---|---|---|
 | B6 momentum advection | kt = 2, every kt after | right-hand side error quadratic in velocity, 4.97e-09 at kt = 2; whole-step ssh 1.3e-05 | a "no momentum advection" selection (NEMO `np_LIN_dyn`) for stp_2D and the stages | `TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/dynadv.f90:185` |
-| B7 tracer advection | kt = 1 on T, S (4.59e-03, 6.89e-03) | the card's T, S stay uniform (20, 30 to 1e-14, read at kt = 1) where NEMO's move by up to 4.6e-03, 6.9e-03 (thickness ratio). Independent kt = 2 ssh 2.04e-04 against given-entry 1.33e-05 | "no tracer advection, thickness-ratio step only" (NEMO `np_NO_adv`), `stprk3_stg.F90:552-554` | `TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/traadv.f90:444` |
-| B4j j-seam wall | not within kt <= 10 | NEMO's ssh support is 20 cells from the j-seam at kt = 10 and moves 4 cells per step (reaches it near kt 15, PLAUSIBLE extrapolation) | y-wrap in the barotropic path | n/a |
+| B7 tracer advection | kt = 1 on T, S (4.59e-03, 6.89e-03) | the card's T, S stay uniform (20, 30 to 1e-14, read at kt = 1) where NEMO's move by up to 4.6e-03, 6.9e-03 (thickness ratio). Independent kt = 2 ssh 2.04e-04 against given-entry 1.33e-05 | "no tracer advection, thickness-ratio step only" (NEMO `np_NO_adv`), `TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/stprk3_stg.f90:503-505` | `TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/traadv.f90:444` |
+| B4j j-seam wall | not within kt <= 10 (PLAUSIBLE: no card A/B with a corrected j path exists) | NEMO's ssh support (`ladder_front.json`, abs ssh > 1e-12) is 62, 55, 49, 45, 40, 36, 32, 28, 24, 20 cells from the j-seam at kt = 1..10, about 4 per step (reaches it near kt 15, extrapolation) | y-wrap in the barotropic path | n/a |
 | B4 i-seam | crossed from kt = 5 (entry velocity at the seam columns 3.8e-18 at kt 5, 3.1e-12 at 6, 7.4e-4 at 10) | no step in the given-entry error across kt 5..6 (geometric ssh 2.70e-06 then 1.70e-06); B6 at 1e-6 would hide anything smaller (PLAUSIBLE) | none until B6 is closed | n/a |
 
 Order of binding in the ladder: depth in the pressure gradient (kt 1), B7 (kt 1, tracers), B6 (kt 2).
@@ -209,19 +214,38 @@ Order of binding in the ladder: depth in the pressure gradient (kt 1), B7 (kt 1,
 | P4 | substep loop bit-identical given NEMO's entry forcing | **FALSIFIED** as worded: 126..149 of 179 boundaries unequal; ownership by the forcing holds (own arm 154 rows over the bar, NEMO-forcing arm 0..11, max 1.7e-15) |
 | P5 | stages within bar on ssh, velocity; T, S over by >= 1e-4 | **CONFIRMED** (ssh <= 1.4e-17, u, v <= 3.5e-18, T >= 6.0e-4); u, v are the correction of one column (section 5) |
 | P6 | offline replay reproduces NEMO's rhs bitwise | **CONFIRMED**, plants red |
-| P7 | B7 binds first; B4j not before kt 8 | **CONFIRMED** (B4j not within kt 10); B6 prediction "inert" **FALSIFIED**: it binds at kt = 2 |
+| P7 | B7 binds first; B4j not before kt 8 | B7 **CONFIRMED**; B4j not within kt 10 **PLAUSIBLE** (support argument only); B6 prediction "inert" **FALSIFIED**: it binds at kt = 2 |
 
 ## 8. Review
 
-Single review (codex): see section 10.
+Single review (codex), verdict **DO NOT SHIP** on `6b4b3ea33..a5ad18686`
+(`codex_review.txt`). Disposition:
+
+- Geometry blind spots: CONFIRMED in part, fixed. The vertical rows compared
+  column (0,0) only; they now compare every column. The `glam/gphi` rows are
+  the helper arrays the card's grid is built from (the card holds no second
+  copy): stated, not closed.
+- Unasked choices: the EOS arm is a flag on a measurement run, the card is
+  unchanged, every dependent number is labelled; REJECTED as a defect and
+  offered for revert. The seam padding was measured: inert through kt 8,
+  consequential from kt 9 (section 9).
+- B6 overclaim: CONFIRMED, fixed by weakening (maximum norm; kt 2, 5, 10; the
+  UP3 attribution PLAUSIBLE).
+- B4j "CONFIRMED": CONFIRMED, relabelled PLAUSIBLE.
+- Stage plants not run: CONFIRMED; the 1.0 bumps were an uncommitted probe and
+  are labelled so.
+- Uncitable numbers: the front-support numbers are now an arm
+  (`ladder_front.json`); the 8.6e-13 static-depth replay is labelled exploratory.
+- Citations through the generic source: CONFIRMED; the two stage-routine
+  citations now point at the compiled TSUNAMI file (`:413-414`, `:503-505`).
 
 ## 9. Choices made this round
 
 | choice | ASKED or UNASKED |
 |---|---|
-| `eos_depth = geometric` as a harness-only measurement arm, card unchanged | UNASKED (reversible: a flag) |
+| `eos_depth = geometric` as a harness-only measurement arm, card unchanged (the `with_first_wzv_after_ssh` pattern: the card states its own form, the arm scores it under the other) | UNASKED (reversible: a flag); every number that depends on it is labelled |
 | card selection of `geometric` | NOT MADE, asked below |
-| stage-entry seeding pads the redundant west/south face record with the periodic wrap (VORTEX pads zero) | UNASKED; seam-column entry velocity is 0 through kt 4 |
+| stage-entry seeding pads the redundant west/south face record with the periodic wrap (VORTEX pads zero) | UNASKED. Measured (`--seam-pad zero`, geometric, whole step): bit-identical rows through kt 8; at kt 9 ssh 8.74e-07 becomes 5.00e-05 and at kt 10 7.56e-07 becomes 6.50e-04, so the card consumes that record at the seam and the choice matters from kt 9 |
 | ladder runs `meridional_periodicity(card.j_periodic)` scope for every step | UNASKED, round-2 mechanism |
 | harness reads the observer with an effects barrier | UNASKED (instrument fix) |
 | citation gate: five TSUNAMI compiled-source files and six entries added | UNASKED |
@@ -261,4 +285,5 @@ its surface term: `TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/dynhpg.f90:387`.
 Momentum advection OFF: `TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/dynadv.f90:185` and
 `TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/stp2d.f90:176`. Tracer advection OFF:
 `TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/traadv.f90:444`, with the thickness-ratio
-step `stprk3_stg.F90:552-554`. The one-level correction: `stprk3_stg.F90:440,444-445`.
+step `TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/stprk3_stg.f90:503-505`. The one-level correction:
+`TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/stprk3_stg.f90:413-414`.
