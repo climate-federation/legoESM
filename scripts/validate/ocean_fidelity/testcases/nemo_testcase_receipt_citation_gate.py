@@ -2355,6 +2355,15 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:666-679': [
         'IF( ln_dynadv_vec .OR. lk_linssh ) THEN      !* Vector form',
         ('END DO   ;   END DO', 17), 14],
+    'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:286-289': [
+        'ssh_frc(:,:) = sshe_rhs(:,:)',
+        'zv_frc(:,:) =   Ve_rhs(:,:)', 4],
+    'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:674-678': [
+        'va_e(ji,jj) = (                                 vn_e(ji,jj)',
+        '&   ) * ssvmask(ji,jj)', 5],
+    'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:721-753': [
+        "CALL lbc_lnk( 'dynspg_ts', ua_e , 'U', -1._wp, va_e , 'V', -1._wp",
+        "& l4_canon_2d(ua_e,'U'), l4_canon_2d(va_e,'V')", 33],
     # --- ORCA2 round 189: bounded replacement restart list ---
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/in_out_manager.f90:51-51':
         'INTEGER, DIMENSION(10) :: nn_stocklist',
