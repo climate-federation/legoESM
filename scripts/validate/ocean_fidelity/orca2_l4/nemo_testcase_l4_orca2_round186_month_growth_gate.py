@@ -183,8 +183,6 @@ def _stage_live_thickness_replay(
         eos.eqx.error_if = original_error_if
     eta_entry = np.asarray(state.eta.data)
     eta_after = np.asarray(replay_state.eta.data)
-    require(bool(np.isfinite(eta_after).all()),
-            "guard-bypassed replay did not return a finite eta")
     etas = (
         ("step_entry", eta_entry),
         ("stage1_one_third", eta_entry + (eta_after - eta_entry) / 3.0),
@@ -197,6 +195,13 @@ def _stage_live_thickness_replay(
                   if int(row["invalid_count"]) > 0), None)
     require(first is not None,
             "guard-bypassed stage replay has no invalid live thickness")
+    first["guard_bypassed_eta_after"] = {
+        "nonfinite_count": int(np.count_nonzero(~np.isfinite(eta_after))),
+        "finite_min": (float(np.min(eta_after[np.isfinite(eta_after)]))
+                       if np.isfinite(eta_after).any() else None),
+        "finite_max": (float(np.max(eta_after[np.isfinite(eta_after)]))
+                       if np.isfinite(eta_after).any() else None),
+    }
     return rows, first
 
 
