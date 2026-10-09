@@ -131,8 +131,9 @@ def _production_pressure(eta, card) -> np.ndarray:
     return r178._native_v(np.asarray(jax.device_get(value)))
 
 
-def _fold_literal_pressure(eta, card) -> dict[str, np.ndarray]:
-    """Replay NEMO's north-neighbour V gradient, including the T-pivot halo."""
+def _source_pressure(eta, card, *, fold_aware: bool,
+                     source_rounded: bool) -> dict[str, np.ndarray]:
+    """Factor the V gradient across its fold operand and source association."""
 
     import jax
     import jax.numpy as jnp
@@ -145,14 +146,18 @@ def _fold_literal_pressure(eta, card) -> dict[str, np.ndarray]:
     eta = jnp.asarray(eta, dtype=jnp.float64)
     grid = card.recipe.grid
     fold = grid.fold
-    north_fold = fold_ghost_source_T(eta, fold)[:, fold.perm_T]
+    north_fold = (
+        fold_ghost_source_T(eta, fold)[:, fold.perm_T]
+        if fold_aware else jnp.zeros_like(eta[:1]))
     north = jnp.concatenate([eta[1:], north_fold], axis=0)
-    delta = b(north - eta)
+    round_value = b if source_rounded else lambda value: value
+    delta = round_value(north - eta)
     geom = ensure_geometry(grid)
-    r1_e2v = b(1.0 / jnp.asarray(geom.dy_v[1:], dtype=jnp.float64))
+    r1_e2v = round_value(
+        1.0 / jnp.asarray(geom.dy_v[1:], dtype=jnp.float64))
     zldg = jnp.asarray(card.recipe.model_config.g, dtype=jnp.float64)
-    scaled = b(-zldg * delta)
-    pressure = b(scaled * r1_e2v)
+    scaled = round_value(-zldg * delta)
+    pressure = round_value(scaled * r1_e2v)
     values = jax.device_get((north, delta, r1_e2v, scaled, pressure))
     return {
         name: np.asarray(value) for name, value in zip(
@@ -242,9 +247,15 @@ def split_unit(context: dict[str, object], coefficient_root: Path) -> dict[str, 
     candidate_pressure = _production_pressure(
         candidate_back_terms["sshp2_bck"], card)
     reference_pressure_production = _production_pressure(target_back, card)
-    candidate_pressure_fold = _fold_literal_pressure(
-        candidate_back_terms["sshp2_bck"], card)
-    reference_pressure_fold = _fold_literal_pressure(target_back, card)
+    candidate_pressure_fold = _source_pressure(
+        candidate_back_terms["sshp2_bck"], card,
+        fold_aware=True, source_rounded=True)
+    reference_pressure_wall_rounded = _source_pressure(
+        target_back, card, fold_aware=False, source_rounded=True)
+    reference_pressure_fold_plain = _source_pressure(
+        target_back, card, fold_aware=True, source_rounded=False)
+    reference_pressure_fold = _source_pressure(
+        target_back, card, fold_aware=True, source_rounded=True)
     target_pressure = np.asarray(oracle["j002_zv_spg"])
 
     pressure_rows = {
@@ -267,6 +278,10 @@ def split_unit(context: dict[str, object], coefficient_root: Path) -> dict[str, 
         "candidate_pressure_vs_target": _row(candidate_pressure, target_pressure),
         "reference_ssh_production_pressure_vs_target": _row(
             reference_pressure_production, target_pressure),
+        "reference_ssh_wall_rounded_pressure_vs_target": _row(
+            reference_pressure_wall_rounded["zv_spg"], target_pressure),
+        "reference_ssh_fold_plain_pressure_vs_target": _row(
+            reference_pressure_fold_plain["zv_spg"], target_pressure),
         "reference_ssh_fold_pressure_vs_target": _row(
             reference_pressure_fold["zv_spg"], target_pressure),
         "candidate_fold_pressure_vs_target": _row(
@@ -311,7 +326,10 @@ def split_unit(context: dict[str, object], coefficient_root: Path) -> dict[str, 
     target_trend = np.asarray(oracle["j002_trd_v"])
     derived_drag = target_trend - target_cor
     candidate_trend = _literal_add(candidate_cor_v, candidate_drag["drag_v"])
-    reference_trend = _literal_add(reference_cor_v, reference_drag["drag_v"])
+    # The explicit drag statement consumes NEMO's already-completed Coriolis
+    # accumulator.  Use that recorded input here; the separate EEN replay row
+    # above registers its known 68 inactive fold-face differences.
+    reference_trend = _literal_add(target_cor, reference_drag["drag_v"])
     masks = phase3_gate.expected_masks(card)
     active_v = np.asarray(masks["v"][..., 0], dtype=bool)
     trend_rows = {
