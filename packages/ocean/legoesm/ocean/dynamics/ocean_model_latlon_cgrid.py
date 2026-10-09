@@ -15918,11 +15918,13 @@ def _honour_meridional_periodicity(body):
     return wrapped
 
 
-# Every public path that reads a lat-axis halo helper: the step body (all
-# step/integrate entry points reach it), the tendency entry points, the
-# vertical-K diagnostic, the cache primer (vertex-mask N-S exchange) and the
-# runtime face-mask check behind step_checked.
-for _name in ("_step_impl", "tendencies", "tendencies_with_diagnostics",
+# Every public path that reads a lat-axis halo helper: the step body, the
+# four outer integrators (they build partial-cell face masks outside the
+# step body), the tendency entry points, the vertical-K diagnostic, the
+# cache primer (vertex-mask N-S exchange) and the runtime face-mask check
+# behind step_checked.
+for _name in ("_step_impl", "_ab2_step", "_leapfrog_step", "_nemo_mlf_step",
+              "_unsplit_ab2_step", "tendencies", "tendencies_with_diagnostics",
               "diagnose_vertical_K", "prime_step_caches",
               "_assert_runtime_invariants"):
     setattr(LatLonCGridOceanModel, _name, _honour_meridional_periodicity(
