@@ -5966,6 +5966,7 @@ CITATION_MAP = {
     'VORTEX_SMT5_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/trabbl.f90:430': 'zsign  = SIGN(  0.5_wp, -zgdrho * REAL( mgrhu(ji,jj) )  )',
     'VORTEX_SMT5_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/trabbl.f90:431': 'ahu_bbl(ji,jj) = ( 0.5 - zsign ) * ahu_bbl_0(ji,jj)',
     'VORTEX_SMT5_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/trabbl.f90:464': 'utr_bbl(ji,jj) = ( 0.5 + zsigna ) * ( 0.5 - zsign ) * e2u(ji,jj)',
+    'VORTEX_SMT5_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/trabbl.f90:480': 'zgbbl = grav * rn_gambbl',
     'VORTEX_SMT5_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/trabbl.f90:498': 'utr_bbl(ji,jj) = e2u(ji,jj) * e3u_bbl_0(ji,jj) * zgbbl * zgdrho',
     'VORTEX_SMT5_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/trabbl.f90:584-585': [
         'gdept_1d(mbkt(ji+1,jj)) - gdept_1d(mbkt(ji,jj)) /= 0._wp',
@@ -5995,11 +5996,12 @@ CITATION_MAP = {
     'orca2_rung2/ocean.output:685': 'Constant geothermal flux value',
     'bbl_adv.py:151': 'def nemo_bbl_diffusive_geometry(',
     'bbl_adv.py:220': 'def nemo_bbl_diffusive_coefficients(',
-    'bbl_adv.py:243': 'alpha, beta = nemo_roquet_alpha_beta(',
+    'bbl_adv.py:243': ('alpha, beta = nemo_roquet_alpha_beta(', 1),
     'bbl_adv.py:274': 'def apply_bbl_diffusive_tendency(',
     'ocean_model_latlon_cgrid.py:2282': 'if stage_index == 2 and bbl_context is not None:',
     'ocean_model_latlon_cgrid.py:2325-2326': [
-        'grid=bbl_grid, eos_form=bbl_eos_form,', 'grid=bbl_grid, eos_form=bbl_eos_form,', 1],
+        'bottom_depth_m=live_bottom_depth, rho_0=rho0,',
+        'grid=bbl_grid, eos_form=bbl_eos_form,', 2],
     'ocean_model_latlon_cgrid.py:2336': 'fd_a = fd_a - h_stage * bbl_a',
     'eos.py:1501-1507': [
         'if eos_form in ("teos10", "nemo_teos10"):',
