@@ -105,8 +105,30 @@ earlier and sufficient stream. No stage-operator claim is made.
 The two gates classify frozen artifacts and carry non-vacuous plants for entry
 identity, record admission/bit integrity, passivity, source order,
 first-boundary selection, private-arm identity and a one-ULP perturbation.
-Focused and campaign-wide test results, citation-gate outputs and independent
-review disposition are recorded in the closing commit for this receipt.
+The focused round-193 battery passed 17/17 tests in 0.60 s.
+
+The default citation audit passed with 274 citations, zero failures, zero
+unmapped citations and zero failing map entries (artifact SHA256
+`b97f58bf6481aa5f213bec03a29ae861d1999afcf5d1b5b77552b9fcecca28bb`).
+This receipt passed with four citations and the same zero counts (SHA256
+`373872e9b66d3b4615b7cf6fd46cb4a51672e76d0d8c726ae1eb79c9133a2f80`).
+Shifting the owning `dynspg_ts` citation by two lines failed on its first
+endpoint as required (exit 1; SHA256
+`298d947d738177f6b7ca8731ecc264e718e2b4f2f89cc3aca3f87114a998e3f8`).
+
+The required single `tests/ocean/fidelity -n 12` battery collected 2,917 tests
+and reached 98%. It exposed one known pre-existing red,
+`test_nemo_testcase_l2_gyre_round129_spread_floor_gate.py::test_record_backed_gate_passes`,
+then made no progress for an extended interval and was interrupted (exit 130).
+It was not rerun. Both round-193 files had already completed green inside that
+battery as well as in the focused run. This is an incomplete campaign-wide
+battery, not a green claim and not a round-193 regression.
+
+The mandated separate `codex exec --sandbox read-only` review exited before
+loading the diff because its in-process app-server client could not initialize
+on a read-only filesystem. Its recorded verdict is **independent review
+unavailable in-sandbox** (log SHA256
+`b363a58514134bb920e7f2c4aaf1d95b1d1558748489689e05722739452baffa`).
 
 The final tree has no model or production-test difference from the incoming
 tip. Consequently there is no retained shared implementation to score against
