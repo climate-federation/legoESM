@@ -64,3 +64,18 @@ is permitted, and no statement below a non-bit input is attributed.
 ASKED choices: the complete private unit and the frozen growth/replay order
 from round 192's OPEN.  
 UNASKED choices: empty.
+
+## Instrument correction after the first offline replay
+
+The first offline replay reached substep-1 exit inverse V depth, then reported
+68 northern-fold cells unequal. That row is rejected as an instrument defect:
+the candidate trace reconstructed the inverse from the pre-association compact
+mask, while NEMO executes the seven-array `lbc_lnk` at
+`ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:770-779` and only then
+records `hvr_e` at `:791-796`. The ordinary candidate already consumed the
+post-association fields, so no trajectory number moves. The corrected trace
+selects the same post-association depth/inverse tuple whenever the complete
+association arm is active; a synthetic raw/post pair proves the selector fires.
+All frozen predictions, thresholds, field order and the growth report remain
+unchanged. The refused first replay is retained in the evidence directory and
+is not a statement attribution.

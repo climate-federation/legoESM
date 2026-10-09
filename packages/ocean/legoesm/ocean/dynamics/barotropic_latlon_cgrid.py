@@ -758,6 +758,16 @@ def _nemo_external_mode_boundary_association(
     )
 
 
+def _nemo_trace_exit_depths(raw_depths, association_post, associated):
+    """Select the same post-``lbc_lnk`` depth fields the oracle records."""
+
+    if not associated:
+        return raw_depths
+    if association_post is None:
+        raise ValueError("associated exit-depth trace lacks association output")
+    return association_post[2:6]
+
+
 def nemo_ssh_avg_face_depth(eta_dyn, H_bathy, mask, u_mask, v_mask, grid,
                             area, dtype):
     """NEMO zhup2_e/zhvp2_e-style C-grid face depth (dynspg_ts.F90:568-592
@@ -2465,6 +2475,15 @@ def _run_substep_loop(
                     v_mask != 0, 1.0 / jnp.maximum(trace_depth_v_exit, min_water_col), 0.0)
                 trace_face_ssh_u_exit = jnp.zeros_like(trace_depth_u_exit)
                 trace_face_ssh_v_exit = jnp.zeros_like(trace_depth_v_exit)
+            (trace_depth_u_exit, trace_depth_v_exit,
+             trace_r1_depth_u_exit, trace_r1_depth_v_exit) = (
+                _nemo_trace_exit_depths(
+                    (trace_depth_u_exit, trace_depth_v_exit,
+                     trace_r1_depth_u_exit, trace_r1_depth_v_exit),
+                    association_post,
+                    nemo_external_mode_association_test_override,
+                )
+            )
             if ab3_za is not None:
                 trace_u_b, trace_u_bb = Ub_c, Ubb_c
                 trace_v_b, trace_v_bb = Vb_c, Vbb_c

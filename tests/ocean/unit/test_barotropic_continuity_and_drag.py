@@ -47,6 +47,7 @@ from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
     _nemo_literal_barotropic_pressure_gradient,
     _nemo_literal_seed_depth_mean,
     _nemo_literal_slow_depth_mean,
+    _nemo_trace_exit_depths,
     nemo_literal_accumulate_transport,
 )
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
@@ -615,6 +616,17 @@ class TestBarotropicSeedFaceDepth:
             _nemo_literal_seed_depth_mean(f, h_face, face_mask, r1_live)))(field)
         assert np.all(np.isfinite(np.asarray(grad)))
         assert np.any(np.asarray(grad) != 0.0)
+
+    def test_exit_depth_trace_uses_post_association_fields(self):
+        raw = tuple(jnp.asarray([float(index)]) for index in range(4))
+        associated = tuple(
+            jnp.asarray([float(index)]) for index in range(7))
+        selected = _nemo_trace_exit_depths(raw, associated, True)
+        assert all(np.array_equal(value, associated[index + 2])
+                   for index, value in enumerate(selected))
+        assert _nemo_trace_exit_depths(raw, associated, False) is raw
+        with pytest.raises(ValueError, match="lacks association"):
+            _nemo_trace_exit_depths(raw, None, True)
 
     def test_nemo_slow_depth_mean_materializes_compiled_products(self):
         """The fused reduction is a firing control for ``stp2d`` association."""
