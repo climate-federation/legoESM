@@ -130,7 +130,7 @@ exits nonzero. The final focused suite reports:
 
 The prescribed push-gate battery reports:
 
-> `PENDING`
+> `126 passed in 129.80s (0:02:09)`
 
 The separate read-only Codex review was attempted on clean committed tree
 `2fb92e4b3`. Independent review is unavailable in-sandbox; its complete output
