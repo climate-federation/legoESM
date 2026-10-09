@@ -1,0 +1,19 @@
+--- usrdef_istate.F90
++++ usrdef_istate.F90
+@@ -24,6 +24,7 @@
+    USE lbclnk         ! ocean lateral boundary conditions (or mpp link)
+    !   
+    USE usrdef_nam, ONLY : rn_ppgphi0, rn_ppumax, nn_rot 
++   USE vortex_smt5_target_dump, ONLY : vortex_smt5_dump_target   ! SMT-5 (Decision 107e): NEMO dumps its own damping inputs
+    
+    IMPLICIT NONE
+    PRIVATE
+@@ -92,6 +93,8 @@
+       ! salinity:  
+       pts(:,:,:,jp_sal) = 35._wp * ptmask(:,:,:) 
+       !
++      CALL vortex_smt5_dump_target( ptmask, pts )   ! SMT-5: write-only, reads T/S and tmask
++      !
+       ! velocities:
+       za = 2._wp * zP0 / (zf0 * rho0 * zlambda**2)
+       DO_2D( 0, 0, 0, 0 )

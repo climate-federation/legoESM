@@ -1,0 +1,14 @@
+--- namelist_cfg_smt5
++++ namelist_cfg_smt5_smoke
+@@ -29,9 +29,9 @@
+    nn_no       =       0   !  job number (no more used...)
+    cn_exp      = "VORTEX_SMT_VEC_OMIP_L1_ZPS"  !  VORTEX_SMT oracle receipt (decision 88)
+    nn_it000    =       1   !  first time step
+-   nn_itend    =      10   !  phase-3 contiguous sweep cadence
++   nn_itend    =       2   !  SMT-5 smoke: two steps
+    nn_istate   =       0   !  output the initial state (1) or not (0)
+-   nn_stock    =      10   !  final-step restart receipt
++   nn_stock    =       2   !  SMT-5 smoke: step-2 restart receipt
+    nn_write    =   99999   !  frequency of write in the output file   (modulo referenced to nn_it000)
+ /
+ !-----------------------------------------------------------------------

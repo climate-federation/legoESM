@@ -1,0 +1,25 @@
+--- namelist_cfg_smt4
++++ namelist_cfg_smt5
+@@ -167,6 +167,22 @@
+       rn_Ud        = 0.018     !  SMT-3: ORCA2 rung-0 namelist_cfg:325 [m/s]
+       rn_Ld        = 200.e+3   !  SMT-3: ORCA2 rung-0 namelist_cfg:326 [m]
+ /
++!-----------------------------------------------------------------------
++&namtsd        !    Temperature & Salinity Data  (init/dmp)             (default: OFF)
++!-----------------------------------------------------------------------
++   ln_tsd_init = .false.         !  SMT-5: initial state stays usr_def_istate (Decision 107: else = SMT-4)
++   ln_tsd_dmp  = .true.          !  SMT-5: ORCA2 rung-1 namelist_cfg:49
++   cn_dir      = './'      !  SMT-5: ORCA2 rung-1 namelist_cfg:51
++   sn_tem = 'data_1m_potential_temperature_nomask',     -1.     ,'votemper',   .true.    , .true. , 'yearly'  ,    ''    ,    ''    ,    ''
++   sn_sal = 'data_1m_salinity_nomask'             ,     -1.     ,'vosaline',   .true.    , .true. , 'yearly'  ,    ''    ,    ''    ,    ''
++/
++!-----------------------------------------------------------------------
++&namtra_dmp    !   tracer: T & S newtonian damping                      (default: OFF)
++!-----------------------------------------------------------------------
++   ln_tradmp   =  .true.   !  SMT-5: ORCA2 rung-1 namelist_cfg:345
++      nn_zdmp  =    0         !  SMT-5: ORCA2 rung-1 namelist_cfg:346 (Decision 107c)
++      cn_resto = 'resto.nc'   !  SMT-5: ORCA2 rung-1 resolves the reference default (namelist_ref:1018)
++/
+ !!======================================================================
+ !!                      ***  Dynamics namelists  ***                  !!
+ !!                                                                    !!
