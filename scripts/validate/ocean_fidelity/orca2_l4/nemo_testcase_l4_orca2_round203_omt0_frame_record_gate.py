@@ -143,6 +143,7 @@ def _validate_run(root: Path, canonical: Path, binary_sha: str,
             f"{root}: binary changed")
     omt0_gate._run_provenance(
         root, itend=10, restart_steps=(10,), opened_steps=(10,), plant="none",
+        binary_sha256=binary_sha,
     )
     deck = omt0_gate.validate_run_deck(
         canonical, root, itend=10, stock=10, restart_steps=(10,), plant="none",

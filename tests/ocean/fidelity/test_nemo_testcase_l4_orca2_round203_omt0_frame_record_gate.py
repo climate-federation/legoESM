@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import inspect
 
 import pytest
 
@@ -40,3 +41,30 @@ def test_round202_frequency_protocol_stays_retracted() -> None:
 
 def test_binary_pins_are_distinct() -> None:
     assert gate.BASE_BINARY_SHA256 != gate.INSTRUMENT_BINARY_SHA256
+
+
+def test_instrument_run_passes_its_binary_pin_to_shared_provenance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed = {}
+    monkeypatch.setattr(gate, "sha256", lambda path: gate.INSTRUMENT_BINARY_SHA256)
+    monkeypatch.setattr(
+        gate.omt0_gate, "_run_provenance",
+        lambda root, **kwargs: observed.update(kwargs),
+    )
+    monkeypatch.setattr(
+        gate.omt0_gate, "validate_run_deck", lambda *args, **kwargs: {},
+    )
+
+    gate._validate_run(
+        tmp_path, tmp_path / "canonical", gate.INSTRUMENT_BINARY_SHA256,
+    )
+
+    assert observed["binary_sha256"] == gate.INSTRUMENT_BINARY_SHA256
+
+
+def test_shared_provenance_default_remains_uninstrumented() -> None:
+    default = inspect.signature(gate.omt0_gate._run_provenance).parameters[
+        "binary_sha256"
+    ].default
+    assert default == gate.BASE_BINARY_SHA256

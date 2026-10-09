@@ -319,8 +319,9 @@ def _oracle_stop_report(ocean: str, plant: str = "none") -> dict:
 
 def _run_provenance(root: Path, *, itend: int, restart_steps: tuple[int, ...],
                     plant: str = "none", expected_oracle_stop: bool = False,
-                    opened_steps: tuple[int, ...] | None = None) -> dict | None:
-    expected_binary = "0" * 64 if plant == "changed-binary" else BINARY_SHA256
+                    opened_steps: tuple[int, ...] | None = None,
+                    binary_sha256: str = BINARY_SHA256) -> dict | None:
+    expected_binary = "0" * 64 if plant == "changed-binary" else binary_sha256
     require(sha256(root / "nemo") == expected_binary, f"{root}: binary changed")
     stdout = (root / "run.user.stdout.log").read_text()
     timing = (root / "run.user.time.log").read_text()
