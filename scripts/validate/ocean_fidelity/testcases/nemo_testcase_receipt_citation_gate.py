@@ -69,6 +69,9 @@ _ORCA2_R93SLOW_COMPILED = (
     NEMO / "cfgs/ORCA2_OMIP_L4_R93SLOW/BLD/ppsrc/nemo")
 _ORCA2_R96SPG_COMPILED = (
     NEMO / "cfgs/ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo")
+_ORCA2_R96SPG_OUTPUT = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round96/"
+    "acquisition/orca2_rung0_spgts_ranked_10step_np2/ocean.output")
 _ORCA2_R141GROWTH_COMPILED = (
     NEMO / "cfgs/ORCA2_OMIP_L4_R141GROWTH/BLD/ppsrc/nemo")
 _ORCA2_R143EARLY_COMPILED = (
@@ -110,6 +113,7 @@ _OVERFLOW_R62ZDF_COMPILED = (
 FILES = {
     "stprk3.F90": _OCE / "stprk3.F90",
     "stprk3_stg.F90": _OCE / "stprk3_stg.F90",
+    "ORCA2_R96SPG/ocean.output": _ORCA2_R96SPG_OUTPUT,
     # round 202: the PRODUCTION GYRE build, so a GYRE resolved statement
     # cannot bind to one of the _SM_ probe builds.
     "GYRE_OMIP_L2_P3/BLD/ppsrc/nemo/stprk3_stg.f90": (
@@ -2026,6 +2030,22 @@ CITATION_MAP = {
         '!* Extrapolate barotropic velocities at mid-step (jn+1/2)',
         ('END DO   ;   END DO', 3),
         10],
+    # --- ORCA2 round 196: substep-3 AB3 midpoint-V input split ---------
+    'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:486-511': [
+        '!* Set extrapolation coefficients for predictor step:',
+        'va_e(ji,jj) = za1 * vn_e(ji,jj) + za2 * vb_e(ji,jj) + za3 * vbb_e(ji,jj)',
+        26],
+    'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:715-727': [
+        'IF( ln_dynadv_vec .OR. lk_linssh ) THEN      !* Vector form',
+        '&   ) * ssvmask(ji,jj)',
+        13],
+    'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:842-844': [
+        'vbb_e  (:,:) = vb_e  (:,:)',
+        'vn_e   (:,:) = va_e  (:,:)',
+        3],
+    'ORCA2_R96SPG/ocean.output:765': (
+        'Vector form: 2nd order centered scheme           ln_dynadv_vec  =  T',
+        1),
     'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:564-570': [
         'resulting flux at mid-step (not over the full domain)',
         ('END DO   ;   END DO', 8),
