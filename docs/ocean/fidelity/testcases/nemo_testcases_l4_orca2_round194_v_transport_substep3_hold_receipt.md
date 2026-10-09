@@ -79,10 +79,38 @@ trajectory statistic was read from them.
 
 ## Validation and choices
 
-The focused candidate battery passed 9/9 before measurement. The final tree
-has no model or production-test difference from the incoming tip. Citation,
-final focused, wide-fidelity and independent-review results are recorded in
-the closing validation commit.
+The focused candidate battery passed 9/9 before measurement. On the restored
+tree, the round-194 classifier, round-193 replay and citation-gate tests pass
+32/32 (transcript SHA256
+`0e212b2f49cf3ecaf02d4c886de9a0ccd05c092616d764ce79f8d2408a09c78a`).
+
+The default citation audit passes 274 citations with zero failures, zero
+unmapped citations and zero failing map entries (SHA256
+`9ff746d51fd73c25c85c097d071d48ba564e6e9416b572dc31bcd249c4b81556`).
+This receipt passes four citations with the same zero counts (SHA256
+`6541a2198e30323c4fe7edbf68c246724f771c393737f5754138d80f633a879b`).
+Shifting the `domhgr.f90:152` owner citation by two lines fails as required
+(exit 1; transcript SHA256
+`58c597584b4212c9cbff54b04b1662bfa6e6391d74058b7f85ebdbab16d64e02`).
+
+The required single `tests/ocean/fidelity -n 12` battery collected 2,924
+tests, reached 96%, displayed four failures and then made no progress for an
+extended interval. It was interrupted once (exit 130) and not rerun. Pytest
+did not print the final failure identities, so the receipt does not infer that
+the count is the registered four-red baseline even though it is equal. The
+incomplete transcript SHA256 is
+`887a6df8defcc3eb43eabe6c45496572033af0456e488e28994d48f1f41fb9ee`.
+All round-194 tests had already completed green in the focused battery.
+
+The mandated separate `codex exec --sandbox read-only` review exited before
+loading the diff because its in-process app-server client could not initialize
+on a read-only filesystem. Verdict: **independent review unavailable
+in-sandbox** (transcript SHA256
+`eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5`).
+
+The final tree has no model or production-test difference from the incoming
+tip, so no shared implementation remains to score against GYRE, DINO or the
+tanks.
 
 No configuration choice, forcing change, carried-state change, stabiliser or
 tolerance was introduced. ASKED choices: the complete round-193 atomic unit
