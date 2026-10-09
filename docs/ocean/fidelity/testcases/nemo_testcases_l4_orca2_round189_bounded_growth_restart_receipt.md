@@ -34,7 +34,7 @@ record.
 |---:|---|---|
 | 1 | `ORCA2_OMIP_L4/BLD/ppsrc/nemo/in_out_manager.f90:51-51` | `nn_stocklist` has exactly ten elements. |
 | 2 | `ORCA2_OMIP_L4/BLD/ppsrc/nemo/domain.f90:323-325` | The round-188 config read returns `iostat=5010`; its resolved print contains only the first ten supplied values, through 95. |
-| 3 | `ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcmod.f90:341-349` | Both experiment length and frequency restart cadence must be divisible by `nn_fsbc`; this kills `nn_stock=95` even though the 96-step experiment length is valid. |
+| 3 | `ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcmod.f90:341-348` | Both experiment length and frequency restart cadence must be divisible by `nn_fsbc`; this kills `nn_stock=95` even though the 96-step experiment length is valid. |
 | 4 | `ORCA2_OMIP_L4/BLD/ppsrc/nemo/restart.f90:94-119` | List mode starts at 95, opens that file at step 94, then the terminal fallback can open 96 only after step 95 closes. |
 | 5 | `ORCA2_OMIP_L4/BLD/ppsrc/nemo/restart.f90:188-202` | Writing 95 advances the list cursor to 96, preventing the step-95 filename from being reopened at terminal step 96. |
 
