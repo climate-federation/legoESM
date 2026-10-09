@@ -74,6 +74,22 @@ stage-3 SSH maximum `0.42832517646246693 m`. The candidate arithmetic test
 passes before measurement; the entry-bit plant exits 2 with
 `STATUS PLANT-FIRED`.
 
+The focused round/gate/citation battery passes **30/30**. The one required
+wide fidelity battery completed in 2,361.93 s: **2,889 passed, 7 skipped, 4
+failed**. All four failures are the registered pre-existing reds reproduced by
+round 190: the SI3 scalar-math provenance gate (`A MY_SRC is not verbatim`),
+the allow-dirty scope ratchet (13 inherited VORTEX drivers), the
+worktree-stamp ratchet (13 inherited report emitters), and the stale GYRE
+spread-floor record (`certified year harness moved`). Its transcript is
+`orca2_rounds/round192/fidelity_battery.log`, SHA-256
+`a252114694d8b767e1ce2651f6baeda42cfdb40033be947f3cf03cdec12698f6`.
+
+A separate `codex exec --sandbox read-only` review was attempted and returned
+`failed to initialize in-process app-server client: Read-only file system`.
+Verdict: **independent review unavailable in-sandbox**. Its transcript is
+`orca2_rounds/round192/independent_review.log`, SHA-256
+`eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5`.
+
 No configuration choice was made. ASKED choices: the complete unit named by
 round 191 and Decision 96. UNASKED choices: empty. No stabiliser or tolerance
 was added. The final package tree is identical to the round base.
