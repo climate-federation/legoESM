@@ -169,12 +169,12 @@ def test_b7_off_keeps_tracers_bitwise_and_the_fct2_plant_moves_them(monkeypatch)
     assert _max(_run("given_entry"), ".T") > 1e-4
 
 
-def test_record100_leaves_the_bar_at_kt15_on_the_j_seam():
+def test_record100_stays_at_the_bar_through_kt100_with_the_j_wrap():
+    # Round 4's walled j-seam left the bar at kt = 15; round 5's j-wrap removes it.
     with pytest.raises(Exception):
         lad.run(ROOT, arm="independent", kt_max=11, allow_dirty=True)
     with pytest.raises(Exception):
         lad.run(ROOT, arm="record100", kt_max=101, allow_dirty=True)
-    out = lad.run(ROOT, arm="record100", kt_max=16, allow_dirty=True)
-    assert out["first_kt_over_bar"]["ssh"] == 15
-    last = {r["name"].split(".")[-1]: r for r in out["per_kt"][-1]["rows"]}
-    assert last["vv_b"]["max_abs_cell"][0] in (0, 200)
+    out = lad.run(ROOT, arm="record100", kt_max=100, allow_dirty=True)
+    assert len(out["per_kt"]) == 100
+    assert all(v is None for v in out["first_kt_over_bar"].values())
