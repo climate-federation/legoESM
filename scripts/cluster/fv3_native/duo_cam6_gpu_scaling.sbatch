@@ -45,5 +45,9 @@ case "$N_GPUS" in
          --kill-on-bad-exit=1 "$PY" -u "${ARGS[@]}" --distributed --distributed-mode spmd ;;
   *)   echo "N_GPUS=$N_GPUS is not a face-sharding count on 2-GPU nodes"; exit 2 ;;
 esac
-echo "rc=$?"
+rc=$?
+echo "rc=$rc"
 grep -E "fv3_duo layout|phase timers|MPAS run COMPLETED" "$OUT"/*.log 2>/dev/null | tail -8
+# The job's state is the model's rc, not the summary grep's (no *.log -> grep
+# exit 2 under pipefail marked a completed 5-day run FAILED, job 10296075).
+exit "$rc"

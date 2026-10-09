@@ -2254,7 +2254,14 @@ def get_solar_forcing_at_time(config: SolarConfig, day: float) -> dict:
             config.tsi_var,
             config.spectral_var,
         )
-        tsi_val = _interp_1d(times, tsi_series, abs_day) if tsi_series is not None else float(config.S_0)
+        if tsi_series is None:
+            # Was a silent fall-back to config.S_0: a file without its TSI
+            # variable ran a constant sun while claiming a transient one.
+            raise ValueError(
+                f"Solar TSI variable {config.tsi_var!r} not found in "
+                f"{config.path!r} (solar_source='spectral_file')",
+            )
+        tsi_val = _interp_1d(times, tsi_series, abs_day)
         spec = _interp_2d_time(times, spec_series, abs_day)
         spec = np.clip(spec, 0.0, None)
         # CMIP6 solar files store one fraction per RRTMG-SW band (14 bands).

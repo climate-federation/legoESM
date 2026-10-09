@@ -8764,6 +8764,21 @@ class ModelDriver:
         """
         return day_to_calendar(self._insolation_day(day))
 
+    def _gray_s0(self, day, S_0):
+        """TSI for host-side gray ``daily_mean_insolation``: the solar file's
+        daily value when one is configured, else ``S_0``.  Sampled once per
+        forcing day like the RRTMGP lanes.  Before 2026-10-08 the dry gray
+        spectral path always used ``S_0`` (solar file inert, codex r2 P2).
+        """
+        if self.config.solar_source not in ("file", "spectral_file"):
+            return S_0
+        d = daily_forcing_bucket(day)
+        if getattr(self, "_gray_tsi_cache", (None,))[0] != d:
+            from legoesm.forcing.external import get_solar_forcing_at_time
+            self._gray_tsi_cache = (d, float(get_solar_forcing_at_time(
+                self._solar_config, float(d))["tsi"]))
+        return self._gray_tsi_cache[1]
+
     # ------------------------------------------------------------------
     # FV3 six-face duo-cube lane (dry dynamics + optional certified
     # Held-Suarez forcing, fp64)
@@ -13204,7 +13219,10 @@ class ModelDriver:
         gray_config = GrayRadiationConfig()
         shape_2d = (self.grid.n_lat, self.grid.n_lon)
         shape_3d = (*shape_2d, cfg.grid.nlev)
-        S_0 = constants.S_0
+        # The configured TSI (default constants.S_0): constant-mode baseline
+        # for the host-side gray insolation, so a solar file returning
+        # cfg.S_0 is neutral (_gray_s0).
+        S_0 = float(cfg.S_0)
         T_ice = cfg.T_ice
 
         # Precompute spectral transform constants
@@ -13524,7 +13542,8 @@ class ModelDriver:
             _lat2d = (jnp.broadcast_to(self._grid_lat[:, None], shape_2d)
                       if self._grid_lat.ndim == 1 else self._grid_lat)
             _insol = daily_mean_insolation(
-                _lat2d.reshape(-1), self._insolation_day(day), S_0,
+                _lat2d.reshape(-1), self._insolation_day(day),
+                self._gray_s0(day, S_0),
                 orbit=_orbit_params)
             _rad = gray_radiation(
                 T=_Tc, p_full=_pf.reshape(-1, cfg.grid.nlev),
@@ -13634,7 +13653,8 @@ class ModelDriver:
                 # Legacy dry gray path: traced SST/SIC + daily-mean insol
                 sst_step, sic_step = self.get_sst_sic(self._current_day)
                 insol_step = daily_mean_insolation(
-                    _lat_col_loop, self._insolation_day(self._current_day), S_0,
+                    _lat_col_loop, self._insolation_day(self._current_day),
+                    self._gray_s0(self._current_day, S_0),
                     orbit=_orbit_params)
                 forcing_data = {
                     "day": jnp.asarray(self._current_day),
