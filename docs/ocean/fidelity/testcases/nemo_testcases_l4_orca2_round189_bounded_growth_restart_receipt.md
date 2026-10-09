@@ -8,6 +8,19 @@ Claim labels: every rung-0 scientific number referenced here is
 **independent**. No given-entry rung-7 number is mixed into the table or
 verdict. Sea ice and the shipped rung-10 card are untouched.
 
+## CLOSED BY ROUND 190: bounded record admitted
+
+The operator subsequently ran the corrected bounded-list launcher. Both NEMO
+twins reached `STOP 0` and wrote rank-complete steps 95 and 96. Round 190 ran
+the unchanged launcher with `--admit-existing`; it returned
+`PASS_R189_GROWTH_RECORD`. Step 95 is complete, finite and bit-identical
+between twins on both ranks. Step 96 is likewise twin-exact and remains only
+the terminal sentinel. The immutable round-186 steps 10..90 recalibrate and
+the combined admitted registry is exactly `10,20,...,90,95`; no step is
+missing. R189-P3, P4 and P6 are therefore **CONFIRMED**. The historical
+`STOPPED_FOR_RECORD` disposition above records this round's own end state; the
+record gap is no longer OPEN.
+
 ## Outcome
 
 Round 188's operator-run acquisition stopped before the first time step. The
