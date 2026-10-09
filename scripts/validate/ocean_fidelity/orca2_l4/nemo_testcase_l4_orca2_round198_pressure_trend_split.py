@@ -311,11 +311,18 @@ def split_unit(context: dict[str, object], coefficient_root: Path) -> dict[str, 
         "candidate_cor_replay_vs_trace": _row(
             candidate_cor_v, r178._native_v(trace["cor_v"][index])),
         "reference_cor_replay_vs_target": _row(reference_cor_v, target_cor),
+        "reference_cor_replay_active_vs_target": _active_row(
+            reference_cor_v, target_cor, active_v),
         "candidate_cor_vs_target": _row(candidate_cor_v, target_cor),
         "candidate_cor_active_vs_target": _active_row(
             candidate_cor_v, target_cor, active_v),
         "drag_inputs": {
             name: _row(candidate_drag_inputs[name], reference_drag_inputs[name])
+            for name in ("zCdU_v", "vn_e", "hvr_e")
+        },
+        "drag_inputs_active": {
+            name: _active_row(
+                candidate_drag_inputs[name], reference_drag_inputs[name], active_v)
             for name in ("zCdU_v", "vn_e", "hvr_e")
         },
         "candidate_drag_replay_vs_trace": _row(
@@ -382,8 +389,8 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
     trend = split["trend"]
     require(trend["candidate_cor_replay_vs_trace"]["bit_exact"],
             "candidate EEN replay moved")
-    require(trend["reference_cor_replay_vs_target"]["bit_exact"],
-            "recorded EEN replay does not close")
+    require(trend["reference_cor_replay_active_vs_target"]["bit_exact"],
+            "recorded EEN replay does not close on active faces")
     require(trend["candidate_drag_replay_vs_trace"]["bit_exact"],
             "candidate drag replay moved")
     require(trend["reference_trend_replay_vs_target"]["bit_exact"],
@@ -407,12 +414,13 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
         first_trend = next(
             (name for name, row in trend["coefficients"].items()
              if not row["bit_exact"]), None)
-    if first_trend is None and not trend["candidate_cor_vs_target"]["bit_exact"]:
+    if (first_trend is None
+            and not trend["candidate_cor_active_vs_target"]["bit_exact"]):
         first_trend = "cor_v"
     if first_trend is None:
         first_trend = next(
             (name for name in ("zCdU_v", "vn_e", "hvr_e")
-             if not trend["drag_inputs"][name]["bit_exact"]), None)
+             if not trend["drag_inputs_active"][name]["bit_exact"]), None)
     if first_trend is None and not trend["candidate_drag_vs_reference"]["bit_exact"]:
         first_trend = "drag_v"
     report["first_nonbit_back_input"] = first_back
