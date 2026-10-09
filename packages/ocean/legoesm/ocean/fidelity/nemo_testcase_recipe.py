@@ -3267,6 +3267,13 @@ def _validate_tsunami_card(card: NEMOTestcaseCard) -> None:
         raise ValueError("TSUNAMI-zco zdfcst coefficients disagree")
     if cfg.adaptive_implicit_vertadv:
         raise ValueError("TSUNAMI-zco resolves ln_zad_Aimp = .false.")
+    if cfg.eos_depth != "geometric":
+        raise ValueError("TSUNAMI-zco eos takes the live depth (DECISION 101)")
+    got = (cfg.momentum_advection, cfg.momentum_flux_scheme,
+           cfg.vertical_momentum_scheme, cfg.tracer_advection)
+    if got != ("flux_form", "none", "none", "none"):
+        raise ValueError(
+            f"TSUNAMI-zco runs ln_dynadv_OFF and ln_traadv_OFF; got {got!r}")
     if cfg.barotropic.barotropic_coriolis != "een_metric":
         raise ValueError("TSUNAMI-zco requires the EEN barotropic Coriolis")
     if not np.all(np.asarray(card.recipe.land_mask) == 1.0):
