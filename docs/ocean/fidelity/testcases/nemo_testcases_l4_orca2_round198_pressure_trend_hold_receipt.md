@@ -108,9 +108,32 @@ Independent review unavailable in-sandbox: the required separate
 `eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5`).
 No independent verdict is claimed.
 
-Mechanical citation and pytest results are recorded by the validation-closure
-commit after this receipt is committed, so the dirty-tree gate cannot turn an
-instrument test into a false red.
+The default citation audit passes 274 citations with zero failures, unmapped
+citations or failing map entries (SHA256
+`df25db4dadb79d12754e58bde924b18298bdf0a870d2257617772e7886da1c9c`).
+This receipt passes six citations with the same zero counts (SHA256
+`64c9a39c1a815d876bd7a64605ba921dfb44e494c54ebc85e3447d6af838ce41`).
+Shifting the `:642-660` span by two lines fails as required with
+`SYMBOL-NOT-AT-LINE` and exit 1 (SHA256
+`f75721e90cf5037e3d2515eaaf26fb7773fc1efa10da1e916f0f70f9094e787c`).
+
+The final focused set (rounds 146 and 195-198 plus the citation gate) passes
+68/68 in 4.36 s (JUnit SHA256
+`97c2c3d1176177f8a6f3eaa9f466997d7444c14763f565afb6ee68a370246d18`).
+
+The required single `tests/ocean/fidelity -n 12` battery collected 2,952
+tests and reached 97%. It displayed two registered reds before it stopped
+producing progress: the worktree-stamp ratchet and the GYRE spread-floor
+record gate. After several silent minutes it was interrupted once; it emitted
+no terminal XML and was not rerun. This is an incomplete battery, not a green
+claim (log SHA256
+`be9a0c98db2db4595e0eb70e9f12599fd1b0a31197290c001bee3ab766c2050b`).
+Both displayed IDs were rerun alone and reproduced: 13 report emitters remain
+unstamped, and the certified GYRE year harness moved after the registered
+members ran (JUnit SHA256
+`3924ae7ae58b715fe8fb1500670b804a1fabd0e748cf57b973bbd566a24f7bc2`).
+Neither failure touches the round-198 instrument; its six tests and the
+citation-map audit passed within the full battery.
 
 No configuration choice, carried-state change, stabiliser, tolerance, NEMO
 source change or executable observer was introduced. ASKED choices: round
