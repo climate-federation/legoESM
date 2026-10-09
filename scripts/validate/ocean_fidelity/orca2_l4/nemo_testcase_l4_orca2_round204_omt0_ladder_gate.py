@@ -204,11 +204,14 @@ def _run_ladder(
 
 def run(deck_root: Path, canonical: Path, calibration: Path, twin_a: Path,
         twin_b: Path, month: Path, *, plant: str = "none",
-        atomic_fold_unit: bool = False) -> dict[str, object]:
+        atomic_fold_unit: bool = False,
+        claim_label: str = "both") -> dict[str, object]:
     import jax
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
 
     require(plant in PLANTS, f"unknown plant {plant}")
+    require(claim_label in ("both", "independent", "given_nemo_entry"),
+            f"unknown claim label {claim_label}")
     policy = PrecisionPolicy.fp64(transcendentals="libm")
     set_policy(policy)
     require(get_policy() == policy and bool(jax.config.jax_enable_x64),
@@ -233,12 +236,15 @@ def run(deck_root: Path, canonical: Path, calibration: Path, twin_a: Path,
             "dry-temperature signed-zero classification")
     given_state = rung0.bridge_entry(card, rung0.assemble_frame(twin_a, 1, 0))
 
-    independent = _run_ladder(
-        card, twin_a, independent_state, "independent",
-        atomic_fold_unit=atomic_fold_unit)
-    given = _run_ladder(
-        card, twin_a, given_state, "given_nemo_entry",
-        atomic_fold_unit=atomic_fold_unit)
+    ladders = {}
+    if claim_label in ("both", "independent"):
+        ladders["independent"] = _run_ladder(
+            card, twin_a, independent_state, "independent",
+            atomic_fold_unit=atomic_fold_unit)
+    if claim_label in ("both", "given_nemo_entry"):
+        ladders["given_nemo_entry"] = _run_ladder(
+            card, twin_a, given_state, "given_nemo_entry",
+            atomic_fold_unit=atomic_fold_unit)
     return {
         "status": "PASS_R204_OMT0_CARD_AND_LADDERS",
         "execution": "production-jit-cpu-fp64-x64-libm",
@@ -246,8 +252,7 @@ def run(deck_root: Path, canonical: Path, calibration: Path, twin_a: Path,
         "card_case": card.case,
         "selectors": selectors,
         "entry_identity": entry_identity,
-        "independent": independent,
-        "given_nemo_entry": given,
+        **ladders,
         "month_boundary": admission["month_boundary"],
     }
 
@@ -261,6 +266,12 @@ def main() -> int:
     parser.add_argument("--twin-b", type=Path, required=True)
     parser.add_argument("--month", type=Path, required=True)
     parser.add_argument("--atomic-fold-unit", action="store_true")
+    parser.add_argument(
+        "--claim-label",
+        choices=("both", "independent", "given_nemo_entry"),
+        default="both",
+        help="run one claim label in a fresh process to bound JAX cache use",
+    )
     parser.add_argument("--plant", choices=PLANTS, default="none")
     parser.add_argument("--json-out", type=Path)
     args = parser.parse_args()
@@ -269,6 +280,7 @@ def main() -> int:
             args.deck_root, args.candidate, args.calibration, args.twin_a,
             args.twin_b, args.month, plant=args.plant,
             atomic_fold_unit=args.atomic_fold_unit,
+            claim_label=args.claim_label,
         )
         require(args.plant == "none", f"{args.plant} plant stayed green")
     except (GateError, rung0.GateError, record_gate.GateError,
