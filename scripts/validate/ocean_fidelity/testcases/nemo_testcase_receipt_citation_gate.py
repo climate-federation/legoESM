@@ -2171,6 +2171,10 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/restart.f90:94-119': [
         'IF( kt == nit000 ) THEN   ! default definitions',
         'IF( kt == nitrst - 1 .OR. nn_stock == 1 .OR. ( kt == nitend .AND. .NOT. lrst_oce ) ) THEN', 26],
+    # --- ORCA2 round 187: terminal list entry is reopened for write ---
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/restart.f90:120-146': [
+        'IF( nitrst <= nitend .AND. nitrst > 0 ) THEN',
+        'lrst_oce = .TRUE.', 27],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/restart.f90:188-202': [
         ('IF( kt == nitrst ) THEN', 1),
         ('ENDIF', 14), 15],
