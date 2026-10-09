@@ -3416,8 +3416,20 @@ def barotropic_substeps_latlon_cgrid(
     else:
         _literal_fold_unit = bool(_nemo_atomic_fold_unit_test_override)
     if _literal_fold_unit:
-        _nemo_reference_face_depth_test_override = (
-            _nemo_literal_reference_face_depths(z_coord, eta.dtype))
+        _raw_hu_0 = getattr(z_coord, "nemo_hu_0", None)
+        _raw_hv_0 = getattr(z_coord, "nemo_hv_0", None)
+        if (_raw_hu_0 is None) != (_raw_hv_0 is None):
+            # A half-carried pair cannot represent NEMO's one domain state.
+            _nemo_literal_reference_face_depths(z_coord, eta.dtype)
+        if _raw_hu_0 is not None:
+            _nemo_reference_face_depth_test_override = (
+                _nemo_literal_reference_face_depths(z_coord, eta.dtype))
+        # The Cartesian tank bridges carry neither raw array.  There the
+        # already-built compact min-neighbour prep is the literal NEMO
+        # e3u_0/e3v_0 construction; shared tank gates certify that equivalent
+        # representation.  ORCA2 carries both raw domain arrays and must take
+        # the branch above (its northern-fold values are not reconstructible
+        # from the compact T columns alone).
         _nemo_unmasked_v_transport_test_override = True
         _nemo_materialize_v_transport_test_override = True
         _nemo_external_mode_association_test_override = True

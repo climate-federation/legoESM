@@ -115,3 +115,12 @@ def test_literal_external_mode_predicate_is_atomic():
 def test_ladder_gate_has_explicit_before_and_after_atomic_control():
     source = gate.omt0.Path(gate.omt0.__file__).read_text(encoding="utf-8")
     assert "barotropic_atomic_fold_unit=atomic_fold_unit" in source
+
+
+def test_literal_unit_keeps_exact_cartesian_depth_representation():
+    source = gate.omt0.Path(
+        gate.omt0.__file__).parents[4] / "packages/ocean/legoesm/ocean/dynamics" \
+        / "barotropic_latlon_cgrid.py"
+    text = source.read_text(encoding="utf-8")
+    assert "if (_raw_hu_0 is None) != (_raw_hv_0 is None):" in text
+    assert "if _raw_hu_0 is not None:" in text
