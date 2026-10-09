@@ -135,8 +135,11 @@ Artifact: `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round204
   worktree/provenance/root-ratchet class. It emitted no final summary before
   interruption. No second full battery was started.
 
-Independent read-only review: **pending at this commit**; the follow-up receipt
-commit records the tool's verbatim verdict without changing implementation.
+Independent review unavailable in-sandbox. The required command was invoked as
+`codex exec --sandbox read-only`; it exited 1 before reading the diff with
+`failed to initialize in-process app-server client: Read-only file system`.
+That verbatim failure is retained in `round204/independent_review.log`; it is
+not represented as a PASS verdict.
 
 ## OPEN
 
