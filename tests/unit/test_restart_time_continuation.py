@@ -240,9 +240,9 @@ def _spy_forcing_days(driver: ModelDriver) -> list:
     days: list = []
     orig = driver._precompute_external_forcing
 
-    def spy(day, p_s, lat):
+    def spy(day, p_s, lat, **kw):
         days.append(float(day))
-        return orig(day, p_s, lat)
+        return orig(day, p_s, lat, **kw)
 
     driver._precompute_external_forcing = spy
     return days
