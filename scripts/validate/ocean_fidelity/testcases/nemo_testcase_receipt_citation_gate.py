@@ -2021,6 +2021,15 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:600-608': [
         '!                             ! Sum over sub-time-steps to compute advective velocities',
         'vn_adv(ji,jj) = vn_adv(ji,jj) + za2 * zhV(ji,jj) * r1_e1v(ji,jj)', 9],
+    # --- ORCA2 round 195: substep-3 V-transport operand split -----------
+    'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:502-511': [
+        '!* Extrapolate barotropic velocities at mid-step (jn+1/2)',
+        'va_e(ji,jj) = za1 * vn_e(ji,jj) + za2 * vb_e(ji,jj) + za3 * vbb_e(ji,jj)',
+        10],
+    'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:564-570': [
+        'resulting flux at mid-step (not over the full domain)',
+        'zhV(ji,jj) = e1v(ji,jj) * va_e(ji,jj) * zhvp2_e(ji,jj)',
+        7],
     'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/domhgr.f90:152':
         'r1_e1v(:,:) = 1._wp / e1v(:,:)   ;   r1_e2v (:,:) = 1._wp / e2v(:,:)',
     'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:382-383': [
