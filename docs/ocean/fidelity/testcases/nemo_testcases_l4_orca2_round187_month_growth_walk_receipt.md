@@ -142,6 +142,11 @@ scheduled test left without a terminal result was the pre-existing LOCK
 stage-sweep planted-control end-to-end test; its isolated rerun likewise lost
 its process without a result after collection.  Every round-187 test passed.
 
+The default citation gate passes 274 citations with zero unmapped or failing
+entries.  This receipt passes all four compiled citations; shifting the new
+restart-open range by two lines makes the gate fail on its first endpoint.
+The citation-gate unit suite passes 17/17.
+
 The separate `codex exec --sandbox read-only` review was attempted and
 returned `failed to initialize in-process app-server client: Read-only file
 system`.  Verdict: **independent review unavailable in-sandbox**.
