@@ -284,7 +284,7 @@ def _max(diff, mask) -> float:
 
 def score_day(lego_d: dict, nemo_d: dict, masks: dict) -> dict:
     out = {}
-    for field in ("T", "u", "v", "ssh"):
+    for field in ("T", "S", "u", "v", "ssh"):
         diff = lego_d[field] - nemo_d[field]
         mask = masks[field]
         out[f"{field}_rms"] = _rms(diff, mask)
