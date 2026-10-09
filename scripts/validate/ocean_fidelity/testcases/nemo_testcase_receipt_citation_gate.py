@@ -3751,7 +3751,7 @@ CITATION_MAP = {
     # boundary.
     'ocean_model_latlon_cgrid.py:8805-9241': [
         'T_mid = state_new.T.data',
-        'S_mid = S_mid + dt * dS_gm * active_3d', 453],
+        'S_mid = S_mid + dt * dS_gm * active_3d', 437],
     'ocean_model_latlon_cgrid.py:9435-9476': [
         ('_nemo_ws_rk3_tracer_pair_step(', 3),
         'return_final_content=True,', 42],
