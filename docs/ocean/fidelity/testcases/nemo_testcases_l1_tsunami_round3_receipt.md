@@ -256,7 +256,21 @@ every other card are unchanged.
 
 ## 10. Gates
 
-(filled in the final commit)
+| gate | result |
+|---|---|
+| geometry gate, tests (card, checker, geometry, citation-gate tests, private-import ratchet) | `67 passed, 1 xfailed` (the xfail is round 2's strict B4j pin); log sha256 `070267a808014`; |
+| ladder harness and replay tests (10: arms, plants, quadratic scaling, replay bitwise + planted constants) | `10 passed in 252s`; log sha256 `667514f5fe8b` |
+| plants, each shown to fail | geometry card element RED; mesh element x5 RED; score, entry, external, stage-entry (read on T), forcing plants move their rows; replay constants `mu2`, `rho0`, `a0` RED; unknown arm/plant refused |
+| citation gate, this receipt (from `## Citations`) | `PASS`, 8 citations, 0 failures, clean tree at `15a63abee6cc`, json sha256 `8446f99615ae` |
+| citation gate, planted shift of `stprk3_stg.f90:503-505` | `FAIL` (`SYMBOL-NOT-AT-LINE`), exit 1, json sha256 `0349bdaa5378` |
+| evidence stamps | the arms `independent given_entry handoff stages spgts`(both) carry commit `1c0226ab3`/`2f9c994fa` (arm code unchanged since); `rhs`, `b6_scaling` `a1229b9db` and later; `front`, geometry json the final tree |
+| NOT gated (honour system) | dual review: codex only, the GLM reviewer was not run this round (headless brief names one codex review); controlled comparison: the geometric arm differs from the shipped card in one field; instrument validation: replay bitwise at kt = 1 before use |
+
+Evidence jsons (sha256 prefixes): admission `a0f77990211a2e59`, geometry
+`ef0ce940518b08a2`, replay `8eea642ff392f4ec`, front `1469b83005e6593f`,
+b6 `e39af845befd9da6`, spgts `f4dcb9697b8c4253`, spgts geometric
+`e81e0dacb8bbe018`, stages `74a77e0065a3f307`, given-entry `4b5b2ef7017a7560`,
+given-entry zero-pad `1978da09147cd602`.
 
 ## 11. ORCA2 pointer
 
