@@ -471,3 +471,43 @@ def test_duo_column_quads_own_their_centres_and_every_source_point():
     from scipy.spatial import cKDTree
     nearest = cKDTree(centres).query(pts)[1]
     assert np.mean(nearest != owner) > 0.0
+
+
+UPPER_ZARR = os.environ.get(
+    "LEGOESM_ERA5_IC_UPPER_ZARR",
+    "/burg-archive/glab/users/pg2328/legoESM/data/amip_ic_upper/"
+    "era5_ic_1979-01-01_gproxy_L21.zarr")
+
+
+@pytest.mark.skipif(not (os.path.isdir(ERA5_ZARR) and os.path.isdir(UPPER_ZARR)),
+                    reason="ERA5 IC zarrs not on this machine")
+def test_era5_upper_levels_start_the_l32_top_on_era5(era5):
+    """The 1..30 hPa ERA5 levels (scripts/data/add_era5_upper_levels.py)
+    leave the 13 base levels untouched and put the L32 k0/k1 layers on
+    ERA5's own global mean there; the 50 hPa-capped IC holds 50 hPa."""
+    from legoesm.training.era5_to_state import era5_to_fv3_duo_bundle, load_era5_ic
+    up = load_era5_ic(UPPER_ZARR, 1979)
+    nb = len(era5.plev_Pa)
+    assert np.asarray(up.plev_Pa)[0] <= 100.0
+    np.testing.assert_array_equal(np.asarray(up.plev_Pa)[-nb:], era5.plev_Pa)
+    for f in ("T", "u", "v", "q"):
+        np.testing.assert_array_equal(np.asarray(getattr(up, f))[..., -nb:],
+                                      np.asarray(getattr(era5, f)))
+    np.testing.assert_array_equal(up.p_s, era5.p_s)
+    grid = create_fv3_duo_grid(N, NG)
+    _, col = _models(grid)
+    sig = col.sigma_coord
+    assert np.all(np.asarray(sig.B_full)[:2] == 0.0)
+    p_k = np.asarray(sig.A_full)[:2] * float(sig.p_ref)
+    w = np.cos(np.asarray(up.lat))[:, None, None] * np.ones_like(np.asarray(up.T))
+    gm = (np.asarray(up.T) * w).sum((0, 1)) / w.sum((0, 1))
+    expect = np.interp(np.log(p_k), np.log(np.asarray(up.plev_Pa)), gm)
+    area = np.stack([grid.ctx_np["gs6"][t]["area"][CI, CI] for t in range(6)])
+
+    def k01(ic):
+        pt = np.asarray(era5_to_fv3_duo_bundle(ic, col)["state"]["pt"])[:, CI, CI, :2]
+        return (pt * area[..., None]).sum((0, 1, 2)) / area.sum()
+    old, new = k01(era5), k01(up)
+    print(f"L32 k0/k1 at {p_k / 100} hPa: capped {old}, upper {new}, ERA5 {expect}")
+    np.testing.assert_allclose(new, expect, atol=2.0)
+    assert np.all(old < expect - 15.0)

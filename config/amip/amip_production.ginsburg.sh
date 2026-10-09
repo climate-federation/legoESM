@@ -27,7 +27,11 @@ DATA="${AMIP_DATA:-${REPO}/data/amip}"
 # IC pre-regridded onto the 720x1440 Gaussian proxy grid the cubed-sphere IC path assumes from
 # n_lon (raw WB2 IC is pole-inclusive 721 lat -> size mismatch with the proxy's 720; main uses the
 # Gaussian proxy, the actual-nodes fix is on the compare-reanalysis branch).
-: "${ERA5_IC:=${DATA}/era5_ic_1979-01-01_gproxy.zarr}"   # prep_era5_ic_from_zarr.py + gproxy regrid
+# + the same analysis's 1..30 hPa levels (scripts/data/add_era5_upper_levels.py, public
+# ARCO-ERA5 37-level): the 13-level file stops at 50 hPa and the vertical interpolation holds
+# 50 hPa above it, so the L32 top layers (3.6/7.6 hPa) started ~40/20 K cold.  The old
+# 13-level IC: ERA5_IC=${DATA}/era5_ic_1979-01-01_gproxy.zarr.
+: "${ERA5_IC:=/burg-archive/glab/users/pg2328/legoESM/data/amip_ic_upper/era5_ic_1979-01-01_gproxy_L21.zarr}"
 : "${ETOPO:=${DATA}/etopo_0p25deg.nc}"              # prep_etopo_topography.py output (PRODUCE THIS)
 : "${FORCING_DIR:=${DATA}/forcing_amip}"            # generate_amip_forcing.py deck
 
