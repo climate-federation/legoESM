@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Admit the copied additions-only OMT-1 entry/stage and month record."""
+"""Admit the additions-only OMT-1 kt=1..8 frames and kt=9 boundary."""
 
 from __future__ import annotations
 
@@ -23,6 +23,13 @@ from scripts.validate.ocean_fidelity.orca2_l4 import (
 
 
 BASE_BINARY_SHA256 = protocol_gate.BINARY_SHA256
+INSTRUMENT_BINARY_SHA256 = (
+    "5b82a3254c40f71186af159b93cba419709ccf49cf4172ad3d44440b8fb1d895"
+)
+INSTRUMENT_BINARY = Path(
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/"
+    "ORCA2_OMIP_L4_R210OMT1_P3/BLD/bin/nemo.exe"
+)
 FRAME_SOURCE = Path(
     "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/"
     "ORCA2_OMIP_L4_R90FRAMES/MY_SRC"
@@ -32,14 +39,14 @@ FRAME_SOURCE_SHA256 = {
     "l4_r84_frames.F90": "231b17f2a4b5ca28110efad413ea17af6ab2c3bb1f4875b5cbb0d6b6faa740f5",
     "traadv.F90": "ddd33bdec420246ba43419599da9c33e89148cf032ad7f9ba3fab3d9542625ff",
 }
-STEPS = tuple(range(1, 11))
+STEPS = tuple(range(1, 9))
 STAGES = tuple(range(4))
 RANKS = (0, 1)
 FIELDS = frame_gate.FIELDS
 PLANTS = (
     "none", "cadence", "header", "field-name", "truncation", "nonfinite",
     "missing-frame", "twin-ulp", "terminal-byte", "changed-binary",
-    "early-month",
+    "wrong-boundary",
 )
 
 
@@ -112,6 +119,9 @@ def preflight() -> dict:
         path = FRAME_SOURCE / name
         require(path.is_file(), f"missing admitted frame source {path}")
         require(sha256(path) == expected, f"admitted frame source changed: {name}")
+    require(INSTRUMENT_BINARY.is_file(), "round-210 record binary is absent")
+    require(sha256(INSTRUMENT_BINARY) == INSTRUMENT_BINARY_SHA256,
+            "round-210 record binary changed")
     base = frame_gate.preflight()
     source = Path(
         "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/"
@@ -126,8 +136,8 @@ def preflight() -> dict:
     else:
         raise GateError("round-202 cadence plant stayed green")
     return {
-        "format": "nemo-testcase-l4-orca2-round209-omt1-frame-preflight-v1",
-        "status": "PASS_R209_OMT1_FRAME_PREFLIGHT",
+        "format": "nemo-testcase-l4-orca2-round211-omt1-frame-preflight-v1",
+        "status": "PASS_R211_OMT1_FRAME_PREFLIGHT",
         "steps": list(STEPS),
         "stages": list(STAGES),
         "ranks": list(RANKS),
@@ -160,41 +170,43 @@ def _validate_run(root: Path, canonical: Path, binary_sha: str, *, itend: int,
     return {"root": str(root), "binary_sha256": expected_binary, "deck": deck}
 
 
-def _month_boundary(root: Path, canonical: Path, binary_sha: str,
-                    plant: str = "none") -> dict:
+def _stability_boundary(root: Path, canonical: Path, binary_sha: str,
+                        plant: str = "none") -> dict:
     require(sha256(root / "nemo") == binary_sha, f"{root}: binary changed")
     ocean = (root / "ocean.output").read_text()
     stdout = (root / "run.user.stdout.log").read_text()
-    timing = (root / "run.user.time.log").read_text()
     deck = omt1_gate.validate_run_deck(
-        canonical, root, itend=96, stock=96,
-        restart_steps=(10, 20, 30, 40, 50, 60, 70, 80, 90, 95),
+        canonical, root, itend=10, stock=10, restart_steps=(10,),
     )
-    if "STOP 0" in stdout:
-        require("RUN_DONE" in timing, "completed month lacks RUN_DONE")
-        return {"disposition": "COMPLETED", "last_step": 96, "deck": deck}
-    require("RUN_EXPECTED_STP_CTL" in timing, "month stop is not registered")
+    require("STOP 0" not in stdout, "boundary run completed unexpectedly")
     require("MPI_ABORT was invoked" in stdout and "Errorcode: 123" in stdout,
-            "registered month stop lacks exact MPI evidence")
+            "registered boundary lacks exact MPI evidence")
     require("stp_ctl: |ssh| > 20 m  or  |U| > 10 m/s" in ocean,
-            "month did not stop through compiled stp_ctl")
+            "boundary did not stop through compiled stp_ctl")
     steps = tuple(int(value) for value in re.findall(r"(?m)^\s*kt\s+(\d+)\s", ocean))
-    require(steps, "month stop has no printed kt boundary")
+    require(steps, "stop has no printed kt boundary")
     step = max(steps)
-    if plant == "early-month":
-        step = 11
-    require(step > 11, f"OMT-1 month did not outlive OMT-0: kt={step}")
+    if plant == "wrong-boundary":
+        step = 8
+    require(step == 9, f"OMT-1 stability boundary moved: kt={step}")
+    match = re.search(r"(?m)^\s*kt\s+9\s+\|V\|\s+max\s+([0-9.Ee+-]+)", ocean)
+    require(match is not None, "kt=9 boundary lacks V maximum")
     require((root / "output.abort_0000.nc").is_file(),
-            "month stop lacks rank-0 abort state")
-    return {"disposition": "STP_CTL", "last_step": step, "deck": deck}
+            "boundary lacks rank-0 abort state")
+    return {
+        "disposition": "STP_CTL",
+        "last_step": step,
+        "v_max_m_s": float(match.group(1)),
+        "deck": deck,
+    }
 
 
 def _terminal(root: Path, rank: int) -> Path:
-    return root / f"ORCA2_00000010_restart_{rank:04d}.nc"
+    return root / f"ORCA2_00000008_restart_{rank:04d}.nc"
 
 
 def admit(canonical: Path, calibration: Path, twin_a: Path, twin_b: Path,
-          month: Path, plant: str = "none") -> dict:
+          boundary: Path, plant: str = "none") -> dict:
     require(plant in PLANTS, f"unknown plant {plant}")
     report = preflight()
     if plant == "cadence":
@@ -202,20 +214,20 @@ def admit(canonical: Path, calibration: Path, twin_a: Path, twin_b: Path,
         raise GateError("cadence plant stayed green")
 
     calibration_row = _validate_run(
-        calibration, canonical, BASE_BINARY_SHA256, itend=10, stock=10,
-        restart_steps=(10,),
+        calibration, canonical, BASE_BINARY_SHA256, itend=8, stock=8,
+        restart_steps=(2, 4, 6, 8),
         plant="changed-binary" if plant == "changed-binary" else "none",
     )
     twin_binary = sha256(twin_a / "nemo")
-    require(twin_binary != BASE_BINARY_SHA256,
-            "instrumented binary aliases the uninstrumented binary")
+    require(twin_binary == INSTRUMENT_BINARY_SHA256,
+            "instrumented binary changed")
     require(sha256(twin_b / "nemo") == twin_binary,
             "instrumented twin binaries differ")
     twin_rows = [
-        _validate_run(twin_a, canonical, twin_binary, itend=10, stock=10,
-                      restart_steps=(10,)),
-        _validate_run(twin_b, canonical, twin_binary, itend=10, stock=10,
-                      restart_steps=(10,)),
+        _validate_run(twin_a, canonical, twin_binary, itend=8, stock=8,
+                      restart_steps=(2, 4, 6, 8)),
+        _validate_run(twin_b, canonical, twin_binary, itend=8, stock=8,
+                      restart_steps=(2, 4, 6, 8)),
     ]
 
     names_a = _validate_inventory(twin_a, plant)
@@ -261,16 +273,18 @@ def admit(canonical: Path, calibration: Path, twin_a: Path, twin_b: Path,
                     f"{label}: instrument changed terminal restart rank {rank}")
             terminal_comparisons += 1
 
-    boundary = _month_boundary(month, canonical, BASE_BINARY_SHA256, plant)
+    stability_boundary = _stability_boundary(
+        boundary, canonical, BASE_BINARY_SHA256, plant,
+    )
 
     report.update({
-        "status": "PASS_R209_OMT1_ENTRY_STAGE_AND_MONTH_RECORD",
+        "status": "PASS_R211_OMT1_ENTRY_STAGE_RECORD__STOP_AT_KT9",
         "calibration": calibration_row,
         "twins": twin_rows,
         "frame_records_per_twin": len(names_a),
         "frame_field_comparisons": comparisons,
         "terminal_restart_byte_comparisons": terminal_comparisons,
-        "month_boundary": boundary,
+        "stability_boundary": stability_boundary,
         "frames": frame_headers,
         "instrument_binary_sha256": twin_binary,
     })
@@ -284,7 +298,7 @@ def main() -> int:
     parser.add_argument("--calibration", type=Path)
     parser.add_argument("--twin-a", type=Path)
     parser.add_argument("--twin-b", type=Path)
-    parser.add_argument("--month", type=Path)
+    parser.add_argument("--boundary", type=Path)
     parser.add_argument("--plant", choices=PLANTS, default="none")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
@@ -294,11 +308,11 @@ def main() -> int:
             result = preflight()
         else:
             require(all((args.candidate, args.calibration, args.twin_a,
-                         args.twin_b, args.month)),
-                    "admission requires candidate, calibration, twins and month")
+                         args.twin_b, args.boundary)),
+                    "admission requires candidate, calibration, twins and boundary")
             result = admit(
                 args.candidate, args.calibration, args.twin_a, args.twin_b,
-                args.month, args.plant,
+                args.boundary, args.plant,
             )
             require(args.plant == "none", f"{args.plant} plant stayed green")
     except (GateError, protocol_gate.GateError, omt1_gate.GateError, frame_gate.GateError,

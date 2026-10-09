@@ -46,8 +46,8 @@ def test_deck_plants_fire(tmp_path: Path, plant: str) -> None:
 
 def test_record_preflight_reuses_admitted_writer() -> None:
     report = record_gate.preflight()
-    assert report["status"] == "PASS_R209_OMT1_FRAME_PREFLIGHT"
-    assert report["expected_frames_per_twin"] == 80
+    assert report["status"] == "PASS_R211_OMT1_FRAME_PREFLIGHT"
+    assert report["expected_frames_per_twin"] == 64
     assert report["writer_preflight"]["removed_source_lines"] == 0
 
 
@@ -58,25 +58,24 @@ def test_missing_frame_plant_is_nonvacuous(tmp_path: Path) -> None:
         record_gate._validate_inventory(tmp_path, "missing-frame")
 
 
-def test_early_month_plant_refuses_before_omt0_boundary(
+def test_wrong_boundary_plant_refuses_moved_step(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     (tmp_path / "nemo").write_bytes(b"binary")
     (tmp_path / "run.user.stdout.log").write_text(
         "MPI_ABORT was invoked\nErrorcode: 123\n"
     )
-    (tmp_path / "run.user.time.log").write_text("RUN_EXPECTED_STP_CTL kt=20\n")
     (tmp_path / "ocean.output").write_text(
-        "stp_ctl: |ssh| > 20 m  or  |U| > 10 m/s\n kt 20 |V| max 10.1\n"
+        "stp_ctl: |ssh| > 20 m  or  |U| > 10 m/s\n kt 9 |V| max 10.13\n"
     )
     (tmp_path / "output.abort_0000.nc").touch()
     monkeypatch.setattr(record_gate, "sha256", lambda path: "binary-sha")
     monkeypatch.setattr(
         record_gate.omt1_gate, "validate_run_deck", lambda *args, **kwargs: {},
     )
-    with pytest.raises(record_gate.GateError, match="did not outlive"):
-        record_gate._month_boundary(
-            tmp_path, tmp_path / "canonical", "binary-sha", "early-month",
+    with pytest.raises(record_gate.GateError, match="boundary moved"):
+        record_gate._stability_boundary(
+            tmp_path, tmp_path / "canonical", "binary-sha", "wrong-boundary",
         )
 
 

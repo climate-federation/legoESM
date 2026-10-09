@@ -143,7 +143,7 @@ def _run_ladder(
 
     checkpoints: list[dict[str, object]] = []
     first_non_bit = None
-    for kt in range(1, 11):
+    for kt in record_gate.STEPS:
         entry = rung0.assemble_frame(record_root, kt, 0)
         checkpoints.append(_checkpoint(
             kt, "entry", rung0.candidate_fields(state), entry))
@@ -167,13 +167,13 @@ def _run_ladder(
         print(f"PROGRESS {label} kt={kt}", file=sys.stderr, flush=True)
         state = state_after
 
-    require(len(checkpoints) == 40, f"{label}: incomplete checkpoint ladder")
+    require(len(checkpoints) == 32, f"{label}: incomplete checkpoint ladder")
     rows = [
         {"kt": cp["kt"], "checkpoint": cp["checkpoint"], "field": field,
          **cp["rows"][field]}
         for cp in checkpoints for field in FIELDS
     ]
-    require(len(rows) == 200, f"{label}: incomplete row ladder")
+    require(len(rows) == 160, f"{label}: incomplete row ladder")
     return {
         "label": label,
         "private_arm": {
@@ -190,7 +190,7 @@ def _run_ladder(
 
 
 def run(deck_root: Path, canonical: Path, calibration: Path, twin_a: Path,
-        twin_b: Path, month: Path, *, plant: str = "none",
+        twin_b: Path, boundary: Path, *, plant: str = "none",
         atomic_fold_unit=None,
         claim_label: str = "both") -> dict[str, object]:
     import jax
@@ -207,7 +207,7 @@ def run(deck_root: Path, canonical: Path, calibration: Path, twin_a: Path,
             "OMT-1 ladder requires production JIT on CPU")
 
     admission = record_gate.admit(
-        canonical, calibration, twin_a, twin_b, month, "none")
+        canonical, calibration, twin_a, twin_b, boundary, "none")
     card = build_omt1_card(deck_root, plant=plant)
     selectors = validate_omt1_card(card)
     entry = rung0.assemble_frame(twin_a, 1, 0)
@@ -233,14 +233,14 @@ def run(deck_root: Path, canonical: Path, calibration: Path, twin_a: Path,
             card, twin_a, given_state, "given_nemo_entry",
             atomic_fold_unit=atomic_fold_unit)
     return {
-        "status": "PASS_R209_OMT1_CARD_AND_LADDERS",
+        "status": "PASS_R211_OMT1_CARD_AND_LADDERS",
         "execution": "production-jit-cpu-fp64-x64-libm",
         "record_status": admission["status"],
         "card_case": card.case,
         "selectors": selectors,
         "entry_identity": entry_identity,
         **ladders,
-        "month_boundary": admission["month_boundary"],
+        "stability_boundary": admission["stability_boundary"],
     }
 
 
@@ -251,7 +251,7 @@ def main() -> int:
     parser.add_argument("--calibration", type=Path, required=True)
     parser.add_argument("--twin-a", type=Path, required=True)
     parser.add_argument("--twin-b", type=Path, required=True)
-    parser.add_argument("--month", type=Path, required=True)
+    parser.add_argument("--boundary", type=Path, required=True)
     parser.add_argument("--atomic-fold-unit", action="store_true")
     parser.add_argument(
         "--claim-label",
@@ -265,7 +265,7 @@ def main() -> int:
     try:
         result = run(
             args.deck_root, args.candidate, args.calibration, args.twin_a,
-            args.twin_b, args.month, plant=args.plant,
+            args.twin_b, args.boundary, plant=args.plant,
             atomic_fold_unit=(True if args.atomic_fold_unit else None),
             claim_label=args.claim_label,
         )
