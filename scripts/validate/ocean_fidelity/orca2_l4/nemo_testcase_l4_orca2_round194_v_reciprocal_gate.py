@@ -26,6 +26,9 @@ from scripts.validate.ocean_fidelity.orca2_l4 import (
 from scripts.validate.ocean_fidelity.orca2_l4 import (
     nemo_testcase_l4_orca2_round178_external_ssh_walk as r178,
 )
+from scripts.validate.ocean_fidelity.testcases import (
+    nemo_testcase_l2_gyre_phase3_gate as phase3_gate,
+)
 
 SUBSTEPS = 65
 PLANTS = (
@@ -56,6 +59,15 @@ def _bit_row(left, right) -> dict[str, object]:
         "cells": int(left.size),
         "max_abs": float(np.max(np.abs(left - right))),
     }
+
+
+def _active_bit_row(left, right, active) -> dict[str, object]:
+    left = np.asarray(left, dtype=np.float64)
+    right = np.asarray(right, dtype=np.float64)
+    active = np.asarray(active, dtype=bool)
+    require(left.shape == right.shape == active.shape,
+            "active entry row shape moved")
+    return _bit_row(left[active], right[active])
 
 
 def classify(report: dict[str, object], plant: str = "none") -> dict[str, object]:
@@ -141,8 +153,16 @@ def measure(deck_root: Path, frame_root: Path, spg_root: Path,
     state = card.recipe.initial_state
     frame = rung0.assemble_frame(frame_root, 1, 0)
     candidate = rung0.candidate_fields(state)
+    masks = phase3_gate.expected_masks(card)
+    entry_masks = {
+        "T": np.asarray(card.recipe.z_coord.is_active, dtype=bool),
+        "S": np.asarray(card.recipe.z_coord.is_active, dtype=bool),
+        "u": np.asarray(masks["u"], dtype=bool),
+        "v": np.asarray(masks["v"], dtype=bool),
+        "ssh": np.asarray(masks["ssh"], dtype=bool),
+    }
     entry = {
-        name: _bit_row(candidate[name], frame[name])
+        name: _active_bit_row(candidate[name], frame[name], entry_masks[name])
         for name in ("T", "S", "u", "v", "ssh")
     }
     require(all(row["bit_exact"] for row in entry.values()),
