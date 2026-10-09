@@ -44,3 +44,25 @@ begin. Every failed prediction remains recorded as **REFUTED**.
 
 ASKED choices: Decision 103's OMT-0 deck and ten-step record.
 UNASKED choices: empty.
+
+## Frozen addendum after R203-P1 refutation
+
+R203-P1 is **REFUTED and retained**: both cadence-refused files carry `kt=1`
+but none of the five ocean fields. They are open NetCDF headers, not state
+records. No value from them will be used.
+
+The replacement acquisition is frozen before execution. It reuses the
+round-90 additions-only frame writer already admitted on the same rung-0 deck:
+compiled `stprk3.f90:103-103,223-240` writes the `Nbb` step entry and three
+completed RK stages, while compiled `restart.f90:176-180` independently names
+the restart payload as the before fields. Two instrumented OMT-0 runs must each
+produce 80 self-describing frames (two ranks, kt=1..10, stages 0..3, five fp64
+fields). A third uninstrumented OMT-0 run uses the supported single target
+`(10,)`; both instrumented terminal restarts must be byte-identical to it.
+The two frame records must compare array-equal in 400 field comparisons.
+
+This addendum supersedes only R203-P2..P4's staggered-list mechanism, not their
+determinism, coverage or calibration predicates. The cadence, malformed-header,
+wrong-field, truncation, non-finite, missing-frame, twin-ULP, terminal-restart
+and changed-binary plants must all fire. Any writer-induced terminal bit change
+or frame twin difference stops the round.
