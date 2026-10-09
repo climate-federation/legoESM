@@ -12237,9 +12237,10 @@ class ModelDriver:
                             .astype(jnp.int32))
                     if _held_mask is not None
                     else jnp.zeros((), jnp.int32))
-                # the canopy Newton's iteration count, MAX over columns: a
-                # vmapped while_loop runs to the slowest column, so this is
-                # the number that sets the land step's cost (M7 G0)
+                # the canopy Newton's iteration count (last Picard pass), MAX
+                # over columns (M7 G0). The solve runs in column groups, each
+                # to its own slowest column, so this bounds the step's cost
+                # from below; it does not set it.
                 _n_it = getattr(_sfc, "n_iters", None)
                 _n_iter_max = (jnp.max(jnp.asarray(_n_it)).astype(jnp.int32)
                                if _n_it is not None
