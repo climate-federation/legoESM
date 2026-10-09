@@ -15903,23 +15903,26 @@ class _NEMOWSTracerProcessTrace(NamedTuple):
 
 
 
-def _honour_meridional_periodicity(step_body):
-    """Trace the step body inside the y-wrap when the config selects it, so
-    every entry point (and every jit cache on ``self``) sees the card's
-    topology, not the caller's global state."""
+def _honour_meridional_periodicity(body):
+    """Trace ``body`` inside the y-wrap the model config selects, True or
+    False, so the caller's scope never decides the topology."""
     import functools
 
     from legoesm.grids.halo_latlon import meridional_periodicity
 
-    @functools.wraps(step_body)
+    @functools.wraps(body)
     def wrapped(self, *args, **kwargs):
-        if not self.config.meridionally_periodic:
-            return step_body(self, *args, **kwargs)
-        with meridional_periodicity(True):
-            return step_body(self, *args, **kwargs)
+        config = kwargs.get("config") or self.config
+        with meridional_periodicity(config.meridionally_periodic):
+            return body(self, *args, **kwargs)
     return wrapped
 
 
-# Every entry point reaches the step body, so the config's y-wrap goes there.
-LatLonCGridOceanModel._step_impl = _honour_meridional_periodicity(
-    LatLonCGridOceanModel._step_impl)
+# Every public path that traces a lat-axis halo helper: the step body (all
+# step/integrate entry points reach it), the tendency entry points, the
+# vertical-K diagnostic and the cache primer (vertex-mask N-S exchange).
+for _name in ("_step_impl", "tendencies", "tendencies_with_diagnostics",
+              "diagnose_vertical_K", "prime_step_caches"):
+    setattr(LatLonCGridOceanModel, _name, _honour_meridional_periodicity(
+        getattr(LatLonCGridOceanModel, _name)))
+del _name
