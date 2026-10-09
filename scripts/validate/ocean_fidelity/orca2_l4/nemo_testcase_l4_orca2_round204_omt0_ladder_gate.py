@@ -144,7 +144,6 @@ def _run_ladder(
             barotropic_reference_face_depth_override=reference_depth,
             barotropic_unmasked_v_transport=arm_enabled,
             barotropic_materialize_v_transport=arm_enabled,
-            barotropic_atomic_fold_unit=atomic_fold_unit,
         )
 
     stage_models = tuple(LatLonCGridOceanModel(

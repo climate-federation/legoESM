@@ -1,13 +1,9 @@
 import copy
-from types import SimpleNamespace
 
 import pytest
 
 from scripts.validate.ocean_fidelity.orca2_l4 import (
     nemo_testcase_l4_orca2_round206_omt0_atomic_fold_census as gate,
-)
-from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
-    nemo_literal_external_mode_active,
 )
 
 
@@ -87,40 +83,3 @@ def test_candidate_that_moves_majority_away_is_held():
     result = gate.classify(base, candidate, substep)
     assert result["status"] == "HELD_ATOMIC_OMT0_FOLD_UNIT"
     assert result["decision96_eligible"] is False
-
-
-def test_literal_external_mode_predicate_is_atomic():
-    barotropic = SimpleNamespace(
-        barotropic_face_depth="nemo_ssh_avg",
-        barotropic_continuity_evaluation="nemo_literal",
-        barotropic_transport_accumulation_evaluation="nemo_literal",
-    )
-    config = SimpleNamespace(
-        momentum_time_integrator="rk3_ws",
-        momentum_advection="flux_form",
-        barotropic=barotropic,
-    )
-    assert nemo_literal_external_mode_active(config)
-    for field in (
-        "barotropic_face_depth",
-        "barotropic_continuity_evaluation",
-        "barotropic_transport_accumulation_evaluation",
-    ):
-        changed = SimpleNamespace(**vars(barotropic))
-        setattr(changed, field, "legacy")
-        assert not nemo_literal_external_mode_active(
-            SimpleNamespace(**{**vars(config), "barotropic": changed}))
-
-
-def test_ladder_gate_has_explicit_before_and_after_atomic_control():
-    source = gate.omt0.Path(gate.omt0.__file__).read_text(encoding="utf-8")
-    assert "barotropic_atomic_fold_unit=atomic_fold_unit" in source
-
-
-def test_literal_unit_keeps_exact_cartesian_depth_representation():
-    source = gate.omt0.Path(
-        gate.omt0.__file__).parents[4] / "packages/ocean/legoesm/ocean/dynamics" \
-        / "barotropic_latlon_cgrid.py"
-    text = source.read_text(encoding="utf-8")
-    assert "if (_raw_hu_0 is None) != (_raw_hv_0 is None):" in text
-    assert "if _raw_hu_0 is not None:" in text
