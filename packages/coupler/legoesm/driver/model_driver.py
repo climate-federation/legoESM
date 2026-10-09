@@ -2489,10 +2489,14 @@ class ModelDriver:
             # _create_topography attached the per-column SSO stddev to the
             # driver's grid; the model's mesh must carry it, or the
             # orographic GWD silently falls back to its scalar mountain
-            _sso = getattr(self.grid, "subgrid_topo_stddev", None)
-            if _sso is not None:
+            # (same for land_frac: without it ZM land_fraction="required"
+            # raises, and the GWD's land split goes inert)
+            _carry = {k: getattr(self.grid, k, None)
+                      for k in ("subgrid_topo_stddev", "land_frac")}
+            _carry = {k: v for k, v in _carry.items() if v is not None}
+            if _carry:
                 # on the MODEL's mesh: the lane asserts grid IS model.mesh
-                self.model.mesh = m._replace(subgrid_topo_stddev=_sso)
+                self.model.mesh = m._replace(**_carry)
             self.grid = self.model.mesh
             self.sigma = self.model.sigma_coord
             self._grid_lat = self.grid.grid_lat
@@ -10364,9 +10368,11 @@ class ModelDriver:
         # _create_topography, BEFORE this rebuild (setup: _init_state runs
         # before _create_physics reads it): carry it, or the orographic GWD
         # would silently fall back to its scalar mountain
-        _sso = getattr(old_grid, "subgrid_topo_stddev", None)
-        if _sso is not None:
-            self.model.mesh = self.model.mesh._replace(subgrid_topo_stddev=_sso)
+        _carry = {k: getattr(old_grid, k, None)
+                  for k in ("subgrid_topo_stddev", "land_frac")}
+        _carry = {k: v for k, v in _carry.items() if v is not None}
+        if _carry:
+            self.model.mesh = self.model.mesh._replace(**_carry)
             self.grid = self.model.mesh
         self.sigma = self.model.sigma_coord
         self._grid_lat = self.grid.grid_lat

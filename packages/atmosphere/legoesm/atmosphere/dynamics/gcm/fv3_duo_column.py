@@ -87,6 +87,10 @@ class DuoColumnMesh(NamedTuple):
     #: attached by the driver (``grid._replace``) like the Voronoi mesh's;
     #: None = the scheme's scalar fallback
     subgrid_topo_stddev: Any = None
+    #: per-column land fraction for convection (ZM autoconversion split)
+    #: and orographic GWD, attached by the driver like the Voronoi mesh's;
+    #: None = no land field (ZM land_fraction="required" then refuses)
+    land_frac: Any = None
 
     # the rest of GridProtocol, as the Voronoi mesh defines them.  Radius
     # and rotation rate are the DUO GRID'S (FV3's gfs_constants, which the

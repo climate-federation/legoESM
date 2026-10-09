@@ -993,6 +993,11 @@ def test_m6_setup_forcings_land_on_the_duo_columns(tmp_path, monkeypatch):
     land_cube = (f_land > 0.5) == (_elev_analytic(clat, clon) > 0.0)
     assert land_duo.mean() > 0.97, land_duo.mean()
     assert land_cube.mean() < land_duo.mean()
+    # the terrain REBUILD (_fv3_duo_column_rewrap, run here: topography is
+    # not flat) keeps the land fraction on the model's mesh, and it is the
+    # terrain product's column for column (what ZM / GWD then read)
+    assert np.array_equal(np.asarray(mesh.land_frac), f_land)
+    assert (f_land > 0.0).any()
 
     # SST: the file's analytic field sampled at the duo columns.  Bilinear
     # from a 5x5 deg file of a smooth field: ~0.03 K; a 1.6 deg placement
@@ -1264,6 +1269,39 @@ def test_column_lane_carries_the_subgrid_orography_through_the_grid_rebuild(tmp_
     assert np.array_equal(np.asarray(sso_grid), np.asarray(sso_phys))
     assert 700.0 < float(np.asarray(sso_phys).max()) <= 800.0
     assert float(np.asarray(sso_phys).min()) == 0.0
+
+
+def test_column_lane_hands_zm_the_land_fraction(tmp_path, monkeypatch):
+    """main aae8053ba made ZM (land_fraction="required") refuse a missing
+    land fraction; the duo column mesh had no land_frac field, so the
+    driver's attach skipped it and the CAM6 duo deck died at the physics
+    seed.  The mask now reaches the MODEL's mesh (the lane asserts grid IS
+    model.mesh) and ZM runs (fails without the field / the carry)."""
+    import legoesm.grids.topography as topo
+    from legoesm.driver.model_driver import ModelDriver
+    monkeypatch.setattr(
+        topo, "load_land_fraction",
+        lambda grid, path, *a, **k: jnp.where(jnp.asarray(grid.lat) > 0.0,
+                                              0.6, 0.0))
+    cfg = _driver_cfg(tmp_path, days=2 * 1920.0 / 86400.0,
+                      convection="zhang_mcfarlane",
+                      land_mask_path="synthetic.nc")
+    drv = ModelDriver(cfg, output_dir=tmp_path)
+    drv.setup()
+    assert drv.grid is drv.model.mesh
+    lf = np.asarray(drv.model.mesh.land_frac)
+    lat = np.asarray(drv.model.mesh.latCell)
+    assert lf.shape == (drv.model.mesh.nCells,)
+    np.testing.assert_array_equal(lf, np.where(lat > 0.0, 0.6, 0.0))
+    # what the convection bridge hands ZM: the driver's land fraction
+    # (_f_land), column for column, land columns included
+    from legoesm.atmosphere.physics.convection.integration import (
+        land_fraction_for_columns)
+    zm_lf = np.asarray(land_fraction_for_columns(drv.model.mesh, lf.shape[0]))
+    np.testing.assert_array_equal(zm_lf, np.asarray(drv._f_land).reshape(-1))
+    assert (zm_lf > 0.0).sum() > 0 and (zm_lf == 0.0).sum() > 0
+    assert drv.run() == "COMPLETED"
+    assert np.isfinite(np.asarray(drv.state.T.data)).all()
 
 
 def test_column_lane_cmor_feed_survives_without_wap(tmp_path, caplog):
