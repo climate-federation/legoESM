@@ -59,7 +59,10 @@ def synthetic_report() -> dict:
 
 
 def test_classifier_stops_at_exact_forcing_first_debt() -> None:
-    report = gate.classify(synthetic_report())
+    source = synthetic_report()
+    source["source_rows_by_arm"] = dict(
+        reversed(list(source["source_rows_by_arm"].items())))
+    report = gate.classify(source)
     assert report["round191"]["first_over_floor"]["name"] == "v_mid"
     assert report["round191"]["history_arm_null"]
 

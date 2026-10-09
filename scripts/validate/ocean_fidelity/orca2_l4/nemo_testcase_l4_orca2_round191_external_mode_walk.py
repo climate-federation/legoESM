@@ -53,7 +53,8 @@ def classify(report: dict[str, object], *, plant: str = "none") -> dict[str, obj
 
     arms = report.get("source_rows_by_arm")
     require(isinstance(arms, dict), "round-178 replay did not publish arm rows")
-    require(list(arms) == list(r178.ARM_ORDER), "exact replay arm order moved")
+    require(set(arms) == set(r178.ARM_ORDER),
+            "exact replay arm registry moved")
     rows = arms["slow_only"]
     history_rows = arms["slow_and_history"]
     require(isinstance(rows, list) and rows, "exact-forcing rows are empty")
