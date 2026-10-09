@@ -215,8 +215,14 @@ def measure(deck_root: Path, frame_root: Path, spg_root: Path,
     masked_differing = []
     for index in range(SUBSTEPS):
         jn = index + 1
-        previous_key = "o000_vn_adv" if jn == 1 else f"j{jn - 1:03d}_vn_adv"
         target_key = f"j{jn:03d}_vn_adv"
+        # dynspg_ts.f90:382-383 initializes the accumulator to zero.  The
+        # record's o000_vn_adv is the post-loop averaged output (:890-906),
+        # not a substep-1 entry field; later entries are the preceding exits.
+        incoming_oracle = (
+            np.zeros_like(oracle[target_key]) if jn == 1
+            else oracle[f"j{jn - 1:03d}_vn_adv"]
+        )
         weight = np.asarray(trace["transport_weight"][index]).reshape(1)
         oracle_weight = np.asarray(oracle[f"j{jn:03d}_sum_coef"])[1:2]
         exit_value = r178._native_v(trace["transport_sum_v_exit"][index])
@@ -224,7 +230,7 @@ def measure(deck_root: Path, frame_root: Path, spg_root: Path,
             "substep": jn,
             "incoming": _bit_row(
                 r178._native_v(trace["transport_sum_v_entry"][index]),
-                oracle[previous_key]),
+                incoming_oracle),
             "transport": _bit_row(
                 r178._native_v(trace["transport_metric_v"][index]),
                 oracle[f"j{jn:03d}_zhV"]),
