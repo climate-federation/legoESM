@@ -95,8 +95,23 @@ SSH, U/V external velocities and both transports are array-identical with and
 without the returned trace. No `packages/` file changed, so no GYRE, DINO,
 tank or ORCA2 trajectory moved and no shared-physics gate is invoked.
 
-Independent review and the final citation/test battery are recorded by the
-round's final validation commit.
+The cumulative citation gate passes with 274 citations, no failures and no
+unmapped citations. This receipt passes with five mapped citations; shifting
+the four-line V-update citation by two lines makes the plant fail.
+
+The single permitted `tests/ocean/fidelity -n 12` battery collected 2,998
+tests. It reached 99% before its compiler tail stopped advancing and was
+interrupted without a final summary. The preserved log contains 2,977 passes,
+seven skips, zero errors, and exactly four failures, all registered
+pre-existing reds: the GYRE round-129 spread-floor stamp, allow-dirty scope,
+worktree-stamp ratchet, and SI3 scalar-math provenance gate. Ten tests remained
+unclassified. No second full battery was started.
+
+Independent review was attempted with `codex exec --sandbox read-only` and
+exited 1 before reading the diff:
+`failed to initialize in-process app-server client: Read-only file system
+(os error 30)`. Independent review is unavailable in-sandbox; this is not
+represented as a PASS verdict.
 
 ## OPEN
 
