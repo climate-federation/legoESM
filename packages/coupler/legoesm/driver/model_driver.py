@@ -1842,8 +1842,13 @@ class ModelDriver:
         self._create_forcing()
         self._init_state()
         self._create_ensemble()
-        self._create_physics()
+        # External forcing FIRST: it applies the CMIP experiment's GHG to
+        # self.config, which the compiled pipeline bakes into its radiation
+        # (piControl / abrupt-4xCO2 ran the default 415 ppmv on cube/lat-lon
+        # while MPAS/spectral, built later from self.config, ran the
+        # experiment's value; gridaudit 2026-10-09).
         self._setup_external_forcing()
+        self._create_physics()
         self._create_diagnostics()
         self._create_friction()
         # Manifest guard runs BEFORE _save_config: an invalid or different-config
@@ -10307,7 +10312,7 @@ class ModelDriver:
             MicrophysicsConfig, apply_microphysics_experiment_flags,
         )
         from legoesm.atmosphere.physics.radiation.config import (
-            RRTMGPConfig, OzoneProfileConfig,
+            RRTMGPConfig, OzoneProfileConfig, GrayRadiationConfig,
         )
 
         # Phase D: wire the CMIP6 / experiment greenhouse-gas concentrations
@@ -10478,10 +10483,15 @@ class ModelDriver:
         phys_cfg = PhysicsConfig(
             radiation=RadiationConfig(
                 scheme=_rad_scheme if _rad_scheme != "none" else "none",
+                # cfg.S_0 (--solar-s0) is the constant-solar TSI on every lane;
+                # the compiled pipeline already builds with it, this lane used
+                # the radiation-module default (gridaudit 2026-10-09).
+                gray=GrayRadiationConfig(S_0=cfg.S_0),
                 rrtmgp=RRTMGPConfig(
                     co2_ppmv=cfg.co2_ppmv,
                     ch4_ppbv=cfg.ch4_ppbv,
                     n2o_ppbv=cfg.n2o_ppbv,
+                    S_0=cfg.S_0,
                     compute_fp32=_rrtmgp_fp32,
                     include_clouds=(_cloud_scheme != "none"),
                     gpoint_batch_size=getattr(
@@ -13409,10 +13419,13 @@ class ModelDriver:
             phys_cfg = PhysicsConfig(
                 radiation=RadiationConfig(
                     scheme=_rad_scheme,
+                    # cfg.S_0: same constant-solar TSI as the compiled lanes.
+                    gray=GrayRadiationConfig(S_0=cfg.S_0),
                     rrtmgp=RRTMGPConfig(
                         co2_ppmv=cfg.co2_ppmv,
                         ch4_ppbv=cfg.ch4_ppbv,
                         n2o_ppbv=cfg.n2o_ppbv,
+                        S_0=cfg.S_0,
                         include_clouds=(_cloud_scheme != "none"),
                         gpoint_batch_size=getattr(
                             cfg, "rrtmgp_gpoint_batch_size", 0),
@@ -13633,7 +13646,9 @@ class ModelDriver:
                     sic_step = jnp.broadcast_to(sic_step[:, None], shape_2d)
                 _T_sfc_step = blend_surface_temperature(
                     sst_step, sic_step, T_ice).reshape(-1)
-                _fd_int = daily_forcing_bucket(self._current_day)
+                # Bucket on the step START time, as _run_mpas does (_current_day
+                # is end-of-step: the day flipped one step early; gridaudit).
+                _fd_int = daily_forcing_bucket(START_DAY + step * DT / 86400.0)
                 if (_ext_forcing or _solar_ext) and _fd_int != _last_ext_day:
                     _ext_daily = {}
                     if _ext_forcing:
@@ -13684,7 +13699,7 @@ class ModelDriver:
                 sst_step, sic_step = self.get_sst_sic(self._current_day)
                 insol_step = daily_mean_insolation(
                     _lat_col_loop, self._insolation_day(self._current_day),
-                    self._gray_s0(self._current_day, S_0),
+                    self._gray_s0(START_DAY + step * DT / 86400.0, S_0),  # step start = MPAS
                     orbit=_orbit_params)
                 forcing_data = {
                     "day": jnp.asarray(self._current_day),
@@ -14347,7 +14362,7 @@ class ModelDriver:
             self.model, mesh, statics,
             fix_mass=cfg.dycore.fix_mass,
             rad_update_steps=ctx["RAD_UPDATE_STEPS"],
-            start_day=START_DAY, kt=kt, ghg_keys=ghg_keys)
+            start_day=START_DAY + self._insolation_day_offset, kt=kt, ghg_keys=ghg_keys)
 
         _dm = ({k: self.tracers.get(k)
                 for k in ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i")}
@@ -14401,11 +14416,12 @@ class ModelDriver:
             seg_steps = min(seg_len, n_steps_total - current_step)
             seg_end_step = current_step + seg_steps
             day = START_DAY + seg_end_step * DT / 86400.0
+            _fday = float(daily_forcing_bucket(START_DAY + current_step * DT / 86400.0))  # = _run_compiled
             doy, sod = self._calendar_for_radiation(day)
-            sst, sic = self.get_sst_sic(day)
+            sst, sic = self.get_sst_sic(_fday)
             if seg_idx > 0 or start_step > 0:
                 _solar_now = get_solar_forcing_at_time(
-                    self._solar_config, day)
+                    self._solar_config, _fday)
                 current_s_0 = float(_solar_now["tsi"])
                 if self._use_solar_spectral:
                     solar_weights = jnp.asarray(
@@ -14413,7 +14429,7 @@ class ModelDriver:
                 _phys_p_s, _phys_lat = self._owned_p_s_and_lat()
                 o3_vmr, aerosol_od, ghg_vmr = (
                     self._precompute_external_forcing(
-                        day, _phys_p_s, _phys_lat))
+                        _fday, _phys_p_s, _phys_lat))
             _alb, _T, _emis = (None, None, None)
             if self.get_sfc_override is not None:
                 _alb, _T, _emis = self.get_sfc_override(day)
@@ -14928,7 +14944,7 @@ class ModelDriver:
             self.model, mesh, statics,
             fix_mass=cfg.dycore.fix_mass,
             rad_update_steps=ctx["RAD_UPDATE_STEPS"],
-            start_day=START_DAY, ghg_keys=ghg_keys)
+            start_day=START_DAY + self._insolation_day_offset, ghg_keys=ghg_keys)
 
         # --- Seed the carry ONCE (cell-centered, full grid) and shard it; it
         # threads across every segment (held radiation / tke / conv_prog ride
@@ -14986,17 +15002,18 @@ class ModelDriver:
             seg_steps = min(seg_len, n_steps_total - current_step)
             seg_end_step = current_step + seg_steps
             day = START_DAY + seg_end_step * DT / 86400.0
+            _fday = float(daily_forcing_bucket(START_DAY + current_step * DT / 86400.0))  # = _run_compiled
             doy, sod = self._calendar_for_radiation(day)
-            sst, sic = self.get_sst_sic(day)
+            sst, sic = self.get_sst_sic(_fday)
             if seg_idx > 0 or start_step > 0:
-                _solar_now = get_solar_forcing_at_time(self._solar_config, day)
+                _solar_now = get_solar_forcing_at_time(self._solar_config, _fday)
                 current_s_0 = float(_solar_now["tsi"])
                 if self._use_solar_spectral:
                     solar_weights = jnp.asarray(
                         _solar_now["solar_fraction_by_gpt"])
                 _phys_p_s, _phys_lat = self._owned_p_s_and_lat()
                 o3_vmr, aerosol_od, ghg_vmr = self._precompute_external_forcing(
-                    day, _phys_p_s, _phys_lat)
+                    _fday, _phys_p_s, _phys_lat)
             _alb, _T, _emis = (None, None, None)
             if self.get_sfc_override is not None:
                 _alb, _T, _emis = self.get_sfc_override(day)
@@ -15211,7 +15228,9 @@ class ModelDriver:
         conv_ncol = int(self.physics.adapter.ncol) if self.physics is not None else int(np.prod(shape_2d))
 
         # Solar forcing
-        solar_init = get_solar_forcing_at_time(self._solar_config, START_DAY)
+        # canonical day, as every lane samples daily forcing (gridaudit)
+        solar_init = get_solar_forcing_at_time(
+            self._solar_config, float(daily_forcing_bucket(START_DAY)))
         current_s_0 = float(solar_init["tsi"])
         solar_weights = (
             jnp.asarray(solar_init["solar_fraction_by_gpt"])
@@ -15484,7 +15503,7 @@ class ModelDriver:
         # External forcing (rank-local p_s and lat for MPI)
         _phys_p_s, _phys_lat = self._owned_p_s_and_lat()
         o3_vmr, aerosol_od, ghg_vmr = self._precompute_external_forcing(
-            START_DAY, _phys_p_s, _phys_lat,
+            float(daily_forcing_bucket(START_DAY)), _phys_p_s, _phys_lat,
         )
 
         lat_deg_grid = np.degrees(np.asarray(self._grid_lat))
@@ -15669,7 +15688,7 @@ class ModelDriver:
             microphysics=cfg.microphysics,
             fix_moisture=cfg.fix_moisture, fix_mass=cfg.dycore.fix_mass,
             fric_decay=self._fric_decay, qv_smooth_coeff=self._qv_smooth_coeff,
-            lat=_seg_lat, lon=_seg_lon, start_day=ctx["START_DAY"],
+            lat=_seg_lat, lon=_seg_lon, start_day=ctx["START_DAY"] + self._insolation_day_offset,
             gradient_checkpoint=True,   # remat the scan -> bounded backward memory
             hyperdiffusion_3d_fn=self._hyperdiffusion_3d_fn,
             tau_equator=cfg.tau_equator, tau_pole=cfg.tau_pole,
@@ -15958,7 +15977,7 @@ class ModelDriver:
             qv_smooth_coeff=self._qv_smooth_coeff,
             lat=_seg_lat,
             lon=_seg_lon,
-            start_day=START_DAY,
+            start_day=START_DAY + self._insolation_day_offset,
             gradient_checkpoint=(
                 cfg.gradient_checkpoint
                 if cfg.gradient_checkpoint
@@ -16028,8 +16047,12 @@ class ModelDriver:
             seg_steps = min(segment_length, n_steps_total - current_step)
             seg_end_step = current_step + seg_steps
             day = START_DAY + seg_end_step * DT / 86400.0
+            # Forcing day = the canonical day the segment STARTS in, as MPAS
+            # samples floor(day) for the day it is in (gridaudit 2026-10-09:
+            # the segment-END day ran one day ahead of every other lane).
+            _fday = float(daily_forcing_bucket(START_DAY + current_step * DT / 86400.0))
             day_of_year, seconds_of_day = self._calendar_for_radiation(day)
-            sst, sic = self.get_sst_sic(day)
+            sst, sic = self.get_sst_sic(_fday)
 
             # Re-sample time-varying external forcing at every segment
             # boundary so transient CMIP6 runs (historical / SSP: GHG, ozone,
@@ -16060,13 +16083,13 @@ class ModelDriver:
             # and diverges from the uninterrupted run.  Fresh runs (start_step ==
             # 0) keep the START_DAY precompute for segment 0 unchanged.
             if seg_idx > 0 or start_step > 0:
-                solar_now = get_solar_forcing_at_time(self._solar_config, day)
+                solar_now = get_solar_forcing_at_time(self._solar_config, _fday)
                 current_s_0 = float(solar_now["tsi"])
                 if self._use_solar_spectral:
                     solar_weights = jnp.asarray(solar_now["solar_fraction_by_gpt"])
                 _phys_p_s, _phys_lat = self._owned_p_s_and_lat()
                 o3_vmr, aerosol_od, ghg_vmr = self._precompute_external_forcing(
-                    day, _phys_p_s, _phys_lat,
+                    _fday, _phys_p_s, _phys_lat,
                 )
 
             # Coupler-provided dynamic surface albedo / skin temperature for
@@ -16617,7 +16640,7 @@ class ModelDriver:
                         microphysics=cfg.microphysics, fix_moisture=cfg.fix_moisture,
                         fix_mass=cfg.dycore.fix_mass,
                         fric_decay=self._fric_decay, qv_smooth_coeff=self._qv_smooth_coeff,
-                        lat=_seg_lat, lon=_seg_lon, start_day=START_DAY,
+                        lat=_seg_lat, lon=_seg_lon, start_day=START_DAY + self._insolation_day_offset,
                         gradient_checkpoint=cfg.gradient_checkpoint or segment_length > 50,
                         hyperdiffusion_3d_fn=self._hyperdiffusion_3d_fn,
                         tau_equator=cfg.tau_equator, tau_pole=cfg.tau_pole,
