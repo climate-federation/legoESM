@@ -337,6 +337,32 @@ def test_stage3_rhs_carries_tra_bbc_and_a_stage1_plant_fires(cards):
     assert not np.array_equal(s1(c6_nobbl, True), s1(c5, False))
 
 
+def _final_T(card, plant=False, **cfg_changes):
+    cfg = card.recipe.model_config._replace(**cfg_changes)
+    c = card._replace(recipe=card.recipe._replace(model_config=cfg))
+    return np.asarray(_step(c, geothermal_stage1_plant=plant).T.data)
+
+
+def test_final_state_column_heat_gain_is_dt_times_qgh_trd0(cards):
+    """Consumer side: geothermal on minus off, after the full production step
+    (tra_zdf included), adds rn_Dt*qgh_trd0 of column heat content per wet
+    column (e3t(Kmm) cancels in NEMO's update); the stage-1 plant breaks it."""
+    c6 = cards["VORTEX_SMT6_VEC-zps"]
+    e3t = np.asarray(c6.recipe.z_coord.h_partial)
+    wetcol = np.asarray(c6.recipe.z_coord.is_active).any(-1)
+    want = c6.dt_s * 86.4e-3 / (RHO0 * RCP)
+    off = _final_T(c6, nemo_geothermal_qgh_wm2=None)
+
+    def gain(T):
+        return np.sum(e3t * (T - off), axis=-1)
+
+    np.testing.assert_allclose(gain(_final_T(c6))[wetcol], want, rtol=1e-3)
+    assert np.all(gain(_final_T(c6))[~wetcol] == 0.0)
+    with pytest.raises(AssertionError):
+        np.testing.assert_allclose(gain(_final_T(c6, plant=True))[wetcol],
+                                   want, rtol=1e-3)
+
+
 def test_smt6b_production_bbl_moves_only_bottom_cells_of_open_faces(cards):
     """BBL on vs off on the SMT-6b card: the step result differs, and on
     SMT-6 (gate closed) BBL on vs off is bit-identical."""
@@ -349,4 +375,32 @@ def test_smt6b_production_bbl_moves_only_bottom_cells_of_open_faces(cards):
 
     c6, c6b = cards["VORTEX_SMT6_VEC-zps"], cards["VORTEX_SMT6B_VEC-zps"]
     np.testing.assert_array_equal(T_after(c6, True), T_after(c6, False))
-    assert not np.array_equal(T_after(c6b, True), T_after(c6b, False))
+    dT = T_after(c6b, True) - T_after(c6b, False)
+    # footprint: exactly the 64 columns whose bottom cell touches an open face
+    T0 = np.asarray(c6b.recipe.initial_state.T.data)
+    from legoesm.ocean.physics.bbl_adv import nemo_bbl_diffusive_geometry
+    zc, cfg = c6b.recipe.z_coord, c6b.recipe.model_config
+    raw = zc.nemo_een_barotropic
+    geom = nemo_bbl_diffusive_geometry(
+        zc.h_partial, c6b.recipe.initial_state.land_mask.data,
+        zc.nemo_gdept_0, zc.nemo_bbl_e3u_0, zc.nemo_bbl_e3v_0,
+        raw.e1u, raw.e2u, raw.e1v, raw.e2v, raw.umask, raw.vmask,
+        aht_m2_s=cfg.bbl_aht_m2_s, grid=c6b.recipe.grid)
+    ahu, ahv = (np.asarray(a) > 0.0 for a in nemo_bbl_diffusive_coefficients(
+        T0, c6b.recipe.initial_state.S.data, geom,
+        bottom_depth_m=geom.dep_bot_ref, rho_0=cfg.rho_0,
+        grid=c6b.recipe.grid, eos_form=cfg.eos, seos_cfg=cfg.eos_nemo_seos))
+    touched = ahu | np.roll(ahu, 1, axis=1) | ahv | np.concatenate(
+        [np.zeros_like(ahv[:1]), ahv[:-1]], axis=0)
+    assert int(touched.sum()) == 64
+    moved = (dT != 0.0).any(-1)
+    np.testing.assert_array_equal(moved, touched)
+    # the diffusive BBL is a flux form: global heat content, weighted by the
+    # step's live after-thickness (BBL leaves eta untouched), is conserved
+    from legoesm.ocean.vertical import compute_layer_thickness
+    after = _step(c6b)
+    h_new = np.asarray(compute_layer_thickness(
+        after.eta.data, after.H_bathy.data, zc,
+        min_water_column_m=cfg.min_water_column_m))
+    content = np.sum(h_new * dT, axis=-1)
+    assert abs(content.sum()) <= 1e-9 * np.abs(content).sum()
