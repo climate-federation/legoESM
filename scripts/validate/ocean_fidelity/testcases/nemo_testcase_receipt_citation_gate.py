@@ -2018,6 +2018,19 @@ CITATION_MAP = {
         '!     Compute Sea Level at step jit+1',
         'ssha_e(ji,jj) = (  sshn_e(ji,jj) - rDt_e * ( ssh_frc(ji,jj) + zhdiv )  ) * ssmask(ji,jj)',
         12],
+    # --- ORCA2 round 198: pressure-gradient and explicit-drag split -----
+    'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:642-660': [
+        '! Half-step back interpolation of SSH for surface pressure computation at step jit+1/2',
+        "CALL r95_spg_w2('zv_spg', zv_spg)",
+        19],
+    'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:663-670': [
+        '! Add Coriolis trend:',
+        'ENDIF',
+        8],
+    'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:680-702': [
+        '! Add bottom stresses:',
+        "CALL r95_spg_w2('trd_v', zv_trd)",
+        23],
     # --- ORCA2 round 193: corrected-entry growth and external replay ------
     'ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo/stprk3.f90:202-233': [
         '!  RK3 : single first external mode computation',
