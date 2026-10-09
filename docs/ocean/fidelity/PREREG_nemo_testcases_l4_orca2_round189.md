@@ -60,3 +60,22 @@ configuration choice.
 The round ends `STOPPED_FOR_RECORD` if the operator-run twins are unavailable.
 If they admit, the receipt completes the growth table and resumes the already-
 named statement only under its standing shared GYRE gate.
+
+## Committed correction before replacement measurement
+
+R189-P2 as written above is **REFUTED before any NEMO run**. The first repaired
+preflight used frequency mode with `nn_stock=95`, but the compiled consistency
+check at `ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcmod.f90:341-349` also rejects a
+frequency that is not divisible by `nn_fsbc=2`. The preflight artifact is kept
+as a failed prediction; it is not an admissible acquisition deck.
+
+The corrected frozen replacement, R189-P2b, uses explicit-list mode with only
+`nn_stocklist=95,96`. Two values fit the compiled ten-element array, step 95 is
+written and closed before step 96, and steps 10..90 continue to come only from
+the admitted round-186 prefix. The reference namelist initializes unused list
+slots to zero; they are unreachable because the run ends after 96. R189-P2b is
+confirmed only if the rendered assignment inventory differs by `nn_itend=96`,
+`nn_stock=96`, `ln_rst_list=.true.`, and `nn_stocklist=95,96`, with
+`physical_delta=[]`. Any other change or any resolved list other than
+`95,96,0,0,0,0,0,0,0,0` refutes it. All other predictions retain their
+original meaning, with “frequency mode” read as this bounded two-entry list.
