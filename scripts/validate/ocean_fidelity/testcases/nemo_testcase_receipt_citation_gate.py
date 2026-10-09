@@ -142,6 +142,16 @@ FILES = {
         _ORCA2_COMPILED / "sbcflx.f90"),
     "VORTEX_SMT4_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/stprk3_stg.f90": (
         NEMO / "tests/VORTEX_SMT4_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/stprk3_stg.f90"),
+    "VORTEX_SMT4_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/tradmp.f90": (
+        NEMO / "tests/VORTEX_SMT4_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/tradmp.f90"),
+    "VORTEX_SMT4_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/dtatsd.f90": (
+        NEMO / "tests/VORTEX_SMT4_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/dtatsd.f90"),
+    "VORTEX_SMT4_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/fldread.f90": (
+        NEMO / "tests/VORTEX_SMT4_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/fldread.f90"),
+    "VORTEX_SMT4_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/daymod.f90": (
+        NEMO / "tests/VORTEX_SMT4_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/daymod.f90"),
+    "VORTEX_SMT4_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/nemogcm.f90": (
+        NEMO / "tests/VORTEX_SMT4_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/nemogcm.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/diawri.f90": (
         _ORCA2_COMPILED / "diawri.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/tradmp.f90": (
