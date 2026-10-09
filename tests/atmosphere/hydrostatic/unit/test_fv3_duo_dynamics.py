@@ -159,6 +159,44 @@ class TestGridFactoryEntry:
 
 class TestFV3DuoDynamicsModel:
 
+    def test_default_arm_is_batched(self, bundle):
+        """RULE 3 pin (user decision 2026-09-30): the DEFAULT step arm
+        is the face+level-batched one, because the loop arm cannot be
+        compiled at km=32 on CPU (75 GB abort) while the batched arm
+        compiles in 125 s / 3.1 GB (eb4ca7c06).  The loop arm stays
+        reachable for parity work.  The signature default and the
+        resolved attribute are both pinned so a silent revert in either
+        place goes red."""
+        import inspect
+
+        from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
+            FV3DuoConfig,
+            FV3DuoDynamicsModel,
+        )
+        sig = inspect.signature(FV3DuoDynamicsModel.__init__)
+        assert sig.parameters["step_face_batched"].default is True
+        m_def = FV3DuoDynamicsModel(bundle, FV3DuoConfig(km=KM, n_split=2))
+        m_loop = FV3DuoDynamicsModel(bundle, FV3DuoConfig(km=KM, n_split=2),
+                                     step_face_batched=False)
+        assert m_def.step_face_batched is True
+        assert m_loop.step_face_batched is False
+        # and the flag SELECTS the arm (not merely stored): the default
+        # model's traced step is far smaller than the loop arm's, which
+        # unrolls 6 faces x KM levels in Python (GLM 2026-09-30: a flag
+        # that is recorded but ignored in the step would pass the two
+        # asserts above).
+
+        def n_instr(m):
+            ic = m.dcmip16_initial_state()
+            text = m._step_fn.lower(
+                ic["state"], ic["press"], ic["q"], BDT, ic["omga"],
+                ic["nh"]).compiler_ir("hlo").as_hlo_text()
+            return sum(1 for ln in text.splitlines()
+                       if "=" in ln and not ln.lstrip().startswith(
+                           ("HloModule", "ENTRY", "}", "ROOT %")))
+
+        assert n_instr(m_def) < 0.5 * n_instr(m_loop)
+
     def test_bad_km_raises(self, bundle):
         from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
             FV3DuoConfig,
@@ -354,6 +392,7 @@ class TestFV3DuoDynamicsModel:
         from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
             FV3DuoConfig,
             FV3DuoDynamicsModel,
+            duo_sw_deck,
         )
         from legoesm.core.fv3_dynamics import make_fv_dynamics_step_jit
         from legoesm.grids.fv3_native_gridstruct import (
@@ -376,7 +415,13 @@ class TestFV3DuoDynamicsModel:
             wet._ctx_jax, KM, k_split=1, n_split=2, ptop=wet._ptop,
             ak=wet._ak, bk=wet._bk, akap=FV3_KAPPA, cp_air=FV3_CP_AIR,
             kord_mt=9, kord_tm=-9, kord_tr=9, hydrostatic=True,
-            w_limiter=None, out_shardings=None, batched=False,
+            w_limiter=None, out_shardings=None,
+            batched=wet.step_face_batched,   # same arm as the model
+            # the model's own deck (production damping since decision 1b;
+            # cfg=None would be the oracle deck and a different step)
+            cfg=duo_sw_deck(**{k: getattr(wet.config, k) for k in (
+                "nord", "d4_bg", "sponge_del2_top_layers",
+                "sponge_del2_top_factor", "sponge_d2_top")}),
             zvir=wet.zvir, sphum_index=0)
         ref = core(ic_w["state"], ic_w["press"], ic_w["q"], BDT,
                    ic_w["omga"], ic_w["nh"])
@@ -477,6 +522,39 @@ class TestComponentFactoryDispatch:
         with pytest.raises(ValueError, match="needs exactly 24"):
             create_atmosphere_dycore(cfg, create_cubed_sphere(N),
                                      create_sigma_coordinate(KM))
+
+    def test_wall_admits_the_oracle_damping_deck(self):
+        """User decision 1a (2026-10-02): the five damping fields the lane
+        consumes pass the wall and the built model carries them -- the
+        ORACLE deck (an oracle-deck Held-Suarez run is launchable) and a
+        non-default sponge with layers > 0 (no inert field set); an
+        unconsumed field is still refused BY THE WALL (its own message,
+        not an earlier guard)."""
+        from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
+            ORACLE_DAMPING,
+        )
+        from legoesm.driver.component_factory import create_atmosphere_dycore
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.vertical import create_sigma_coordinate
+        base = _fv3_duo_config()
+        oracle = base._replace(dycore=base.dycore._replace(
+            fv3_duo_nord=2, fv3_duo_d4_bg=0.12, fv3_duo_sponge_layers=0))
+        oracle.validate_strict()
+        model = create_atmosphere_dycore(oracle, create_cubed_sphere(N),
+                                         create_sigma_coordinate(KM))
+        assert {k: getattr(model.config, k) for k in ORACLE_DAMPING} == ORACLE_DAMPING
+        sponge = base._replace(dycore=base.dycore._replace(
+            fv3_duo_sponge_layers=1, fv3_duo_sponge_factor=4.0,
+            fv3_duo_sponge_d2_top=0.01))
+        sponge.validate_strict()
+        model = create_atmosphere_dycore(sponge, create_cubed_sphere(N),
+                                         create_sigma_coordinate(KM))
+        assert (model.config.sponge_del2_top_layers, model.config.sponge_del2_top_factor,
+                model.config.sponge_d2_top) == (1, 4.0, 0.01)
+        with pytest.raises(ValueError, match=r"Non-default unsupported fields.*hyperdiff_scale"):
+            create_atmosphere_dycore(
+                base._replace(dycore=base.dycore._replace(hyperdiff_scale=2.0)),
+                create_cubed_sphere(N), create_sigma_coordinate(KM))
 
     def test_kessler_hydrostatic_constructs(self):
         """hydro + microphysics='kessler' (alone) passes the wall and
@@ -1196,7 +1274,21 @@ def test_wall_default_surface_is_frozen():
 # 'liquid' -> 'mixed_phase'.  Both are cloud diagnostics the duo execution
 # loop never evaluates (the cloud_scheme allow-list entry's own argument);
 # non-default values stay refused, so the allow-list is unchanged.
-_WALL_SURFACE_SHA256 = "95569efd839eee0287c4980fdff33981403573022936c7ccc6e4067d808ed709"
+#
+# 2026-10-09, merging cf/main (merge-base 0e63f36cb) into this branch: the
+# surface was dumped on both trees (job 10302943, fv3_duo_gaps/fu/
+# wall_diff_head_vs_merged.txt): 38 paths ADDED by main (zm_*, clubb_*,
+# morrison_* names, land canopy/snow/soil knobs, mpas_land_params_refresh,
+# mpas_land_stress_from_land, mpas_ocean_flux_on_ocean_surface,
+# dycore.corner_fill, cloud_cam6_rh*), 17 REMOVED (none allow-listed; the
+# liveness test passes), and two defaults MOVED:
+#   dycore.sb81_omega_conversion False -> True: read only by the lat-lon
+#     C-grid dycore (component_factory -> primitive_eq_latlon_cgrid), inert
+#     on the duo lanes;
+#   hines_launch_p 0.0 -> 70000.0: read only when gravity_wave_drag selects
+#     Hines; both duo decks run mcfarlane and already pin 70000.0.
+# The allow-list is unchanged.
+_WALL_SURFACE_SHA256 = "079cecd3d8ff8ece17c4d675b28493e1754b416137cc2f1da03bd3fc3bfacf15"
 
 
 def test_wall_leaf_types_are_scalar():

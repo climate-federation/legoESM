@@ -569,10 +569,11 @@ class TestBiharmonicViscosity:
     def test_pole_cap_profile(self, grid):
         """Interior rows keep nu_del4; pole-adjacent rows are reduced."""
         from legoesm.atmosphere.dynamics.gcm.shallow_water_latlon_cgrid import (
-            _nu_del4_row_profiles)
+            nu_del4_row_profiles)
         big = 1.0e18  # deliberately above every row's stability cap
         cfg = CGridLatLonShallowWaterConfig(nu_del4=big)
-        nu_u, nu_v = _nu_del4_row_profiles(grid, cfg, dt=300.0)
+        nu_u, nu_v = nu_del4_row_profiles(
+            grid, cfg.nu_del4, cfg.nu_del4_cfl_frac, dt=300.0)
         assert nu_u.shape == (grid.n_lat, 1)
         assert nu_v.shape == (grid.n_lat + 1, 1)
         # Every row obeys the cap on BOTH staggerings:

@@ -219,7 +219,6 @@ from legoesm.core.fv3_phase3d_common import (
     require_nord,
     stack_faces,
     stack_levels,
-    stack_levels_batched,
     validate_stacked,
 )
 from legoesm.grids.fv3_duo_halos import average_allflux_shared_edges
@@ -766,11 +765,12 @@ def _dsw_transport_phase_3d_batched(ctx, states, uc6, vc6, divgd6, dt,
     Entry gates and the post-``p_grad_c`` exchanges already ran in the
     caller -- the exchanges are six-face collectives and are IDENTICAL
     on both arms.  The ``d_sw1`` and ``d_sw2`` FACE loops become one
-    ``jax.vmap`` per level over ``build_batched_gs``'s stacked view;
-    the LEVEL loops stay Python (the oracle's own ``do k=1,npz``,
-    dyn_core.F90:744 / :914); and BARRIER 1 sits exactly where the loop
-    path puts it -- between d_sw1 and d_sw2, one level at a time, on
-    the full six-face stack (dyn_core.F90:872).  The barrier is a
+    ``jax.vmap`` over ``build_batched_gs``'s stacked view, nested in an
+    outer ``jax.vmap`` over the LEVEL axis (the oracle's own ``do
+    k=1,npz``, dyn_core.F90:744 / :914, is a batch axis: independent,
+    identical bodies); and BARRIER 1 sits exactly where the loop path
+    puts it -- between d_sw1 and d_sw2, on the full six-face stack, all
+    levels in one call (dyn_core.F90:872).  The barrier is a
     CROSS-FACE collective, so it is not and cannot be face-batched.
 
     ``da_min`` / ``da_min_c`` are the two per-face ``GridFlags`` fields
@@ -814,64 +814,72 @@ def _dsw_transport_phase_3d_batched(ctx, states, uc6, vc6, divgd6, dt,
                          workspace_sentinel=0.0)
 
     vf1 = jax.vmap(one_face_sw1, in_axes=(0,) * 12)
+    # LEVELS (2026-09-29, the km=32 compile): the per-level bodies are
+    # independent and identical (R1a: nothing but data varies with k;
+    # c/kgb/nord_w/damp_w are deck statics, dt is shared), so the former
+    # Python level loop -- which traced d_sw1 and d_sw2 km times each --
+    # is an outer vmap over the trailing level axis, levels outside
+    # faces.  Level axis 3 in and out: the (6, i, j, km[, slot]) layout
+    # the loop path and the former stack_levels_batched produced.
     # dtype follows storage (fp32/fp64), from states["delp"]
     _sdt = states["delp"].dtype
     nb = batch_size(ctx)
-    zx6 = jnp.zeros((nb, npx, n), dtype=_sdt)
-    zy6 = jnp.zeros((nb, n, npx), dtype=_sdt)
-    zcx6 = jnp.zeros((nb, npx, m_a), dtype=_sdt)
-    zcy6 = jnp.zeros((nb, m_a, npx), dtype=_sdt)
-    per_level = []
-    for k in range(km):
-        if flux_cap is None:
-            xfk, yfk, cxk, cyk = zx6, zy6, zcx6, zcy6
-        else:
-            # D4, unchanged: mfx/mfy sliced to the kernel window, cx/cy
-            # passed whole -- with the face axis in front.
-            xfk = flux_cap["mfx"][:, :, :n, k]
-            yfk = flux_cap["mfy"][:, :n, :, k]
-            cxk = flux_cap["cx"][:, :, :, k]
-            cyk = flux_cap["cy"][:, :, :, k]
-        per_level.append(vf1(
-            states["delp"][:, :, :, k], states["pt"][:, :, :, k],
-            states["w"][:, :, :, k], uc6[:, :, :, k], vc6[:, :, :, k],
-            xfk, yfk, cxk, cyk, bview["gs"], da6, dac6))
+    if flux_cap is None:
+        # D4, unchanged: no capacitors -> zero flux planes, SHARED by
+        # every level (in_axes None) exactly as one zero plane per level
+        xf, yf, cxa, cya = (jnp.zeros((nb, npx, n), dtype=_sdt),
+                            jnp.zeros((nb, n, npx), dtype=_sdt),
+                            jnp.zeros((nb, npx, m_a), dtype=_sdt),
+                            jnp.zeros((nb, m_a, npx), dtype=_sdt))
+        cap_axes = (None, None, None, None)
+    else:
+        # D4, unchanged: mfx/mfy sliced to the kernel window, cx/cy
+        # passed whole -- face axis in front, level axis trailing.
+        xf = flux_cap["mfx"][:, :, :n, :]
+        yf = flux_cap["mfy"][:, :n, :, :]
+        cxa = flux_cap["cx"]
+        cya = flux_cap["cy"]
+        cap_axes = (3, 3, 3, 3)
+    vfk1 = jax.vmap(vf1, in_axes=(3, 3, 3, 3, 3) + cap_axes
+                    + (None, None, None), out_axes=3)
+    s1 = vfk1(states["delp"], states["pt"], states["w"], uc6, vc6,
+              xf, yf, cxa, cya, bview["gs"], da6, dac6)
+    for name in DSW1_OUT_2D:
+        if name not in s1:
+            raise KeyError(
+                f"{fname}: d_sw1 returned no {name!r} (keys "
+                f"{sorted(s1)}); the 3-D assembler must not silently "
+                f"drop a stage output")
+        if s1[name].shape[3] != km:
+            raise ValueError(
+                f"{fname}: d_sw1 output {name!r} has shape "
+                f"{s1[name].shape}, expected the level axis {km} at "
+                f"position 3")
 
-    # --- capacitor write-back (R4 / C4), face-stacked ----------------
+    # --- capacitor write-back (R4 / C4), face-stacked, all levels -----
     caps = None
     if flux_cap is not None:
         caps = {}
         for name in CAPACITOR_FIELDS:
-            src = _CAP_FROM_DSW1[name]
+            v = s1[_CAP_FROM_DSW1[name]]
             arr = jnp.asarray(flux_cap[name])
-            for k in range(km):
-                v = per_level[k][src]
-                if name == "mfx":
-                    arr = arr.at[:, :, :n, k].set(v)
-                elif name == "mfy":
-                    arr = arr.at[:, :n, :, k].set(v)
-                else:
-                    arr = arr.at[:, :, :, k].set(v)
+            if name == "mfx":
+                arr = arr.at[:, :, :n, :].set(v)
+            elif name == "mfy":
+                arr = arr.at[:, :n, :, :].set(v)
+            else:
+                arr = arr.at[:, :, :, :].set(v)
             caps[name] = arr
 
-    # --- BARRIER 1, verbatim: one level at a time, all six faces ------
+    # --- BARRIER 1, verbatim: all six faces, all levels in ONE call ---
     # (dyn_core.F90:872/:877; slot selection :856 owned by
-    # average_allflux_shared_edges through tab.allflux_slots.)
-    afx_pre = stack_levels_batched(
-        fname, "allflux_x",
-        [per_level[k]["allflux_x"] for k in range(km)])
-    afy_pre = stack_levels_batched(
-        fname, "allflux_y",
-        [per_level[k]["allflux_y"] for k in range(km)])
+    # average_allflux_shared_edges through tab.allflux_slots.)  The
+    # level axis (3) rides through -- the flat dispatcher vmaps the
+    # certified per-level blend over it (M8-B, 2026-09-07).
+    afx_pre = s1["allflux_x"]
+    afy_pre = s1["allflux_y"]
     _require_barrier_nq(fname, ctx, int(afx_pre.shape[-1]))
     _require_barrier_layout(fname, ctx, afx_pre, afy_pre, km)
-
-    # all levels in ONE barrier call (M8-B, 2026-09-07): the level axis
-    # (3) rides through -- the flat dispatcher vmaps the certified
-    # per-level blend over it, the window arm fires once instead of km.
-    # The 2026-09-06 change reached only the LOOP arm of this phase; the
-    # window step runs THIS arm, where the census still showed 30 of the
-    # 59 firings per step.
     afx6, afy6 = average_allflux_shared_edges(afx_pre, afy_pre, ctx.tab)
 
     # --- d_sw2 at every level, faces vmapped (:914 / :950) ------------
@@ -885,6 +893,10 @@ def _dsw_transport_phase_3d_batched(ctx, states, uc6, vc6, divgd6, dt,
                              nord_w=nord_w, damp_w=damp_w,
                              hydrostatic=True)
         vf2 = jax.vmap(one_face_sw2, in_axes=(0,) * 7)
+        vfk2 = jax.vmap(vf2, in_axes=(3, 3, 3, 3, None, None, None),
+                        out_axes=3)
+        s2 = vfk2(s1["delp"], s1["pt"], afx6, afy6, bview["gs"], da6,
+                  dac6)
     else:
         def one_face_sw2(delp2, pt2, w2, afx_k, afy_k, gs_t, da_t,
                          dac_t):
@@ -894,32 +906,26 @@ def _dsw_transport_phase_3d_batched(ctx, states, uc6, vc6, divgd6, dt,
                              nord_w=nord_w, damp_w=damp_w,
                              hydrostatic=False)
         vf2 = jax.vmap(one_face_sw2, in_axes=(0,) * 8)
-
-    s2_levels = {name: [] for name in names2}
-    for k in range(km):
-        s1 = per_level[k]
-        w_args = () if hydrostatic else (s1["w"],)
-        s2 = vf2(s1["delp"], s1["pt"], *w_args,
-                 afx6[:, :, :, k, :], afy6[:, :, :, k, :],
-                 bview["gs"], da6, dac6)
-        for name in names2:
-            if name not in s2 or s2[name] is None:
-                raise KeyError(
-                    f"d_sw2 returned no {name!r} (keys "
-                    f"{sorted(s2)}); the 3-D assembler must not "
-                    f"silently drop a stage output")
-            s2_levels[name].append(s2[name])
+        vfk2 = jax.vmap(vf2, in_axes=(3, 3, 3, 3, 3, None, None, None),
+                        out_axes=3)
+        s2 = vfk2(s1["delp"], s1["pt"], s1["w"], afx6, afy6,
+                  bview["gs"], da6, dac6)
+    for name in names2:
+        if name not in s2 or s2[name] is None:
+            raise KeyError(
+                f"d_sw2 returned no {name!r} (keys "
+                f"{sorted(s2)}); the 3-D assembler must not "
+                f"silently drop a stage output")
 
     # --- assembly: identical keys and layouts to the loop path --------
-    out = {name: stack_levels_batched(
-        fname, name, [per_level[k][name] for k in range(km)])
-        for name in DSW1_OUT_2D if not name.startswith("allflux_")}
+    out = {name: s1[name] for name in DSW1_OUT_2D
+           if not name.startswith("allflux_")}
     out["allflux_x"] = afx6
     out["allflux_y"] = afy6
     out["allflux_x_prebarrier"] = afx_pre
     out["allflux_y_prebarrier"] = afy_pre
     for name in names2:
-        out[name] = stack_levels_batched(fname, name, s2_levels[name])
+        out[name] = s2[name]
     out["uc"], out["vc"], out["divg_d"] = uc6, vc6, divgd6
     if caps is not None:
         out.update(caps)

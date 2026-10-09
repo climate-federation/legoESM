@@ -163,7 +163,7 @@ def energy_consistent_water_floor(tracers, T):
 
 
 def apply_water_positivity(tracers, T, dp, *, conservative, energy_consistent,
-                           area, sum_fn=None):
+                           area, area_ref=None, sum_fn=None):
     """Single positivity stage for every atmospheric dycore (MPAS/cube/spectral/
     lat-lon), so the three grids stay bit-equivalent by construction.
 
@@ -174,7 +174,8 @@ def apply_water_positivity(tracers, T, dp, *, conservative, energy_consistent,
       species (it preserves each column integral).  ``area`` is the
       horizontal cell area (``dp`` minus its trailing level axis); the global
       net-negative-column residual is conserved in ``sum(area*dp*q)``, the
-      physical mass.  ``sum_fn`` defaults to
+      physical mass (``area_ref``: see
+      :func:`conservative_positive_clip_global`).  ``sum_fn`` defaults to
       serial ``jnp.sum``; the MPI lane passes an allreduce-SUM reduction so the
       redistribution factor is decomposition-independent.  Iterates SORTED so
       every rank issues the per-tracer collectives in the same order.
@@ -191,7 +192,8 @@ def apply_water_positivity(tracers, T, dp, *, conservative, energy_consistent,
             data = f.data if hasattr(f, "data") else f
             if is_borrow_eligible_tracer(name):
                 clipped = conservative_positive_clip_global(
-                    data, dp, axis=-1, sum_fn=sum_fn, area=area)[0]
+                    data, dp, axis=-1, sum_fn=sum_fn, area=area,
+                    area_ref=area_ref)[0]
             else:
                 clipped = jnp.maximum(data, 0.0)
             out[name] = (f.replace(data=clipped) if hasattr(f, "replace")
@@ -314,7 +316,7 @@ def conservative_positive_clip(q, weight, axis=-1, eps=1e-30):
 
 
 def conservative_positive_clip_global(q, weight, axis=-1, eps=1e-30,
-                                      sum_fn=None, area=None):
+                                      sum_fn=None, area=None, area_ref=None):
     """Column-local borrow PLUS global residual redistribution.
 
     :func:`conservative_positive_clip` zeroes a net-negative column (nothing
@@ -338,20 +340,41 @@ def conservative_positive_clip_global(q, weight, axis=-1, eps=1e-30,
 
     ``area`` (horizontal cell area, ``q``'s shape minus the trailing axis)
     weights the global sums so the conserved total is the physical mass on a
-    non-equal-area grid; ``None`` means equal-area columns.
+    non-equal-area grid; ``None`` means equal-area columns.  It enters as a
+    dimensionless RATIO to ``area_ref`` (default: the mean of ``area``): a
+    uniform scale cancels exactly in the redistribution factor, so this is
+    the same physics as the raw area, but the global sums keep ``weight``'s
+    magnitude.  With x64 off (the driver default) the accumulator is fp32,
+    and an Earth-scale raw ``dp*area`` total on a per-mass number tracer
+    (~1e6 * 1e5 Pa * 5e14 m^2 ~ 5e25) overflows ``total**2`` inside the
+    quotient VJP, silently zeroing a gradient term (codex 2026-10-02).
+    ``area_ref`` must be partition-independent: under MPI pass the GLOBAL
+    mean cell area (a per-rank mean would scale each rank's share of one
+    allreduced residual differently).
     """
     q_col, created = conservative_positive_clip(q, weight, axis=axis, eps=eps)
     w = jnp.asarray(weight, dtype=q.dtype)
     if area is not None:
-        w = w * jnp.asarray(area, dtype=q.dtype)[..., None]
+        a = jnp.asarray(area, dtype=q.dtype)
+        ref = (jnp.mean(a) if area_ref is None
+               else jnp.asarray(area_ref, dtype=q.dtype))
+        w = w * (a / ref)[..., None]
     s = sum_fn if sum_fn is not None else jnp.sum
     eps_eff = max(float(eps), float(jnp.finfo(q.dtype).tiny) ** 0.5)
     # ONE reduction per quantity (two total): pos_total reused for the
     # residual so the two nominally-identical q_col sums cannot differ by
     # reduction roundoff, and the MPI closure issues exactly two allreduces
     # per tracer (codex 2026-07-28 global-residual review).
-    pos_total = s(q_col * w)
-    resid = jnp.maximum(pos_total - s(q * w), 0.0)
+    # Global sums in the budget accumulator (fp64 under x64): the residual
+    # is the difference of two near-equal totals over every cell, and on an
+    # fp32 lane that cancellation would otherwise carry ~1e-7 x total mass
+    # of noise into the redistribution (GLM 2026-10-02).  Column sums stay
+    # in tracer dtype (one 2-D promotion, not a 3-D one); ``keepdims`` keeps
+    # the MPI owned-mask broadcast ``(n, 1)`` valid.
+    acc = conservation_accumulator()
+    pos_total = s(jnp.sum(q_col * w, axis=axis, keepdims=True).astype(acc))
+    resid = jnp.maximum(
+        pos_total - s(jnp.sum(q * w, axis=axis, keepdims=True).astype(acc)), 0.0)
     live = pos_total > eps_eff
     safe_total = jnp.where(live, pos_total, 1.0)
     # Degenerate-but-positive global total: KEEP the column result (error
@@ -361,7 +384,7 @@ def conservative_positive_clip_global(q, weight, axis=-1, eps=1e-30,
     # global total is non-positive (nothing exists to borrow anywhere).
     factor = jnp.where(live, 1.0 - resid / safe_total,
                        jnp.where(pos_total > 0.0, 1.0, 0.0))
-    return q_col * jnp.clip(factor, 0.0, 1.0), created
+    return q_col * jnp.clip(factor, 0.0, 1.0).astype(q.dtype), created
 
 
 def _accumulation_dtype():

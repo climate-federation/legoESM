@@ -29,7 +29,7 @@ specific *differentiable* discretization of that concept, whose stated algebra
 Non-circularity
 ---------------
 The oracle here REUSES the separately-tested shared helpers
-(``moist_adiabat_lapse_rate``, ``saturation_mixing_ratio``,
+(``moist_adiabat_lapse_rate``, ``saturation_specific_humidity``,
 ``stratosphere_mass_flux_gate``, ``compute_cape``, ``cape_trigger``,
 ``safe_divide``) as GIVENs — the SBM/CENTURY shared-helper pattern — and
 independently reimplements ONLY the scheme-specific assembly (the sweep, the
@@ -60,7 +60,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio
+from legoesm.thermo import saturation_specific_humidity
 from legoesm.atmosphere.physics.convection.dca import (
     _adjust_one_iteration,
     _manabe_dca_convection,
@@ -103,7 +103,7 @@ def _make_columns(t_sfc, *, nlev=12, t_top=200.0, supersat=1.05, expo=None):
     p_full = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
     frac = jnp.linspace(0.0, 1.0, nlev)[None, :]  # 0 at top, 1 at surface
     T = t_top + (t_sfc[:, None] - t_top) * frac
-    q_v = supersat * saturation_mixing_ratio(T, p_full)
+    q_v = supersat * saturation_specific_humidity(T, p_full)
     return T, q_v, p_full, p_half
 
 
@@ -176,8 +176,8 @@ def _oracle_sweep(
         T_adj_upper = T_upper + blend * (T_new_upper - T_upper)
         T_adj_below = T_below + blend * (T_new_below - T_below)
 
-        q_sat_upper = saturation_mixing_ratio(T_adj_upper, p_upper)  # GIVEN
-        q_sat_below = saturation_mixing_ratio(T_adj_below, p_below)
+        q_sat_upper = saturation_specific_humidity(T_adj_upper, p_upper)  # GIVEN
+        q_sat_below = saturation_specific_humidity(T_adj_below, p_below)
         q_new_upper = jnp.minimum(q_upper, q_sat_upper)
         q_new_below = jnp.minimum(q_below, q_sat_below)
         q_adj_upper = q_upper + blend * (q_new_upper - q_upper)

@@ -411,6 +411,8 @@ class RRTMGP:
           _hashable(config.sfc_emissivity),
           _hashable(config.sfc_albedo),
           _hashable(config.sfc_albedo_direct),
+          # CAM-style overhead layer changes the solved column (nlev+1).
+          getattr(config, "overhead_layer", False),
       )
 
   @staticmethod
@@ -559,6 +561,7 @@ class RRTMGP:
       *,
       mcica_cloud_fraction: jnp.ndarray | None = None,
       clear_sky: bool = False,
+      o3_top_vmr: jnp.ndarray | None = None,
   ):
       """Compute radiation for legoESM column arrays.
 
@@ -626,6 +629,11 @@ class RRTMGP:
           ``(ncol, nlev)`` layer cloud fraction, index 0 = model top.  Given,
           ``cloud_path_liq/ice`` are IN-CLOUD paths and each g-point solves
           its own maximum-random subcolumn (McICA).
+      o3_top_vmr : jnp.ndarray | None
+          Column-mean ozone VMR above the model top (ncol,), over
+          ``0 < p < p_half[:, 0]``.  Used only by the transported overhead
+          layer (``config.overhead_layer``); ``None`` => that layer takes the
+          top model layer's ozone.
 
       Returns
       -------
@@ -706,6 +714,50 @@ class RRTMGP:
           solar_spectral_fraction = jnp.asarray(
               solar_spectral_fraction).astype(_table_dtype)
 
+      # --- 0b. CAM-style transported layer ABOVE the model top (opt-in) ---
+      # CAM RRTMG's "extra layer": one layer from p_top up to a 1 Pa lid with
+      # T, q_v of the top model layer, no cloud / aerosol, and the overhead
+      # column-mean ozone, so the beam reaching the model top has already
+      # been depleted by the ozone above it.  Its heating is discarded and
+      # the returned TOA face is the lid (true top).
+      # ponytail: the ~2 W/m2 SW absorbed above the model top LEAVES the
+      # column budget (TOA net - surface net != sum of model-layer heating),
+      # exactly as in CAM.  Not applied to the optics-only (3D MC) paths,
+      # whose per-layer output must stay on the model grid.
+      overhead = (bool(getattr(config, "overhead_layer", False))
+                  and not (sw_optical_field_only or lw_optical_field_only))
+      if overhead:
+          p_top = p_half[:, :1]
+          p_lid = jnp.minimum(p_top, 1.0)  # coeff-ok: 1 Pa lid (CAM-like ~0 Pa top)
+
+          def _top(a, k0):
+              return None if a is None else jnp.concatenate([k0, a], axis=1)
+
+          def _zero(a):
+              return None if a is None else _top(a, jnp.zeros_like(a[:, :1]))
+
+          if o3_vmr is None:  # resolve model ozone first: fallback = o3(k0)
+              o3_vmr = _standard_o3_profile(p_full)
+          p_half = _top(p_half, p_lid)
+          p_full = _top(p_full, 0.5 * (p_lid + p_top))
+          T = _top(T, T[:, :1])
+          q_v = _top(q_v, q_v[:, :1])
+          o3_vmr = _top(o3_vmr, o3_vmr[:, :1] if o3_top_vmr is None
+                        else jnp.asarray(o3_top_vmr).astype(
+                            _table_dtype).reshape(ncol, 1))
+          cloud_path_liq, cloud_path_ice = _zero(cloud_path_liq), _zero(cloud_path_ice)
+          cloud_path_liq_lw = _zero(cloud_path_liq_lw)
+          cloud_path_ice_lw = _zero(cloud_path_ice_lw)
+          cloud_fraction = _zero(cloud_fraction)
+          aerosol_optical_depth = _zero(aerosol_optical_depth)
+          aerosol_absorption_optical_depth_lw = _zero(
+              aerosol_absorption_optical_depth_lw)
+          if cloud_r_eff_liq is not None:
+              cloud_r_eff_liq = _top(cloud_r_eff_liq, cloud_r_eff_liq[:, :1])
+          if cloud_r_eff_ice is not None:
+              cloud_r_eff_ice = _top(cloud_r_eff_ice, cloud_r_eff_ice[:, :1])
+          nlev = nlev + 1
+
       # --- 1. Reshape (ncol, nlev) -> (ncol, 1, nlev+2) with halos ---
       T_3d = _add_halos(T[:, None, ::-1])
       p_3d = _add_halos(p_full[:, None, ::-1])
@@ -761,6 +813,11 @@ class RRTMGP:
           dp_3d[:, :, :1], dp_3d, dp_3d[:, :, -1:],
       ], axis=2)
       dp_3d = jnp.clip(dp_3d, 1.0, None)
+      if overhead:
+          # Exact overhead mass p_top - p_lid, NOT the 1 Pa floor: a top at
+          # or below 1 Pa gets a ~massless (not a phantom 1 Pa) layer.
+          dp_3d = dp_3d.at[:, 0, -2].set(
+              jnp.maximum(dp_exact[:, 0], 1.0e-6))  # coeff-ok: div-by-zero guard [Pa]
 
       mol_m_air = (constants.DRY_AIR_MOL_MASS
                    + constants.WATER_MOL_MASS * h2o_vmr)
@@ -889,6 +946,13 @@ class RRTMGP:
           def _mcica_paths(n_gpt):
               mask = generate_subcolumns(mcica_cloud_fraction, n_gpt,
                                          shift=_mcica_shift)
+              if overhead:
+                  # the overhead layer is cloud-free; sample the MODEL layers
+                  # only, so each g-point's model-layer subcolumn is the one
+                  # it draws with the layer off (merge of fu/halo with main's
+                  # McICA: mcica_cloud_fraction stays (ncol, nlev))
+                  mask = jnp.concatenate(
+                      [jnp.zeros_like(mask[:, :, :1]), mask], axis=2)
 
               def paths(igpt):
                   m = mask[igpt]
@@ -1080,6 +1144,16 @@ class RRTMGP:
 
       lw_hr = lw_hr_3d[:, 0, hw:-hw][:, ::-1]
       sw_hr = sw_hr_3d[:, 0, hw:-hw][:, ::-1]
+
+      if overhead:
+          # Drop the overhead layer's heating and the model-top face: face 0
+          # stays the TRUE top (lid), so TOA diagnostics see the full column.
+          def _faces(a):
+              return jnp.concatenate([a[:, :1], a[:, 2:]], axis=1)
+
+          lw_up, lw_down = _faces(lw_up), _faces(lw_down)
+          sw_up, sw_down = _faces(sw_up), _faces(sw_down)
+          lw_hr, sw_hr = lw_hr[:, 1:], sw_hr[:, 1:]
 
       return RadiationOutput(
           lw_flux_up=lw_up,

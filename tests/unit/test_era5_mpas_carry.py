@@ -3,7 +3,7 @@
 The real-data reference path for the MPAS column comparison (iter 75): a
 fabricated ERA5Slice is inverse-distance regridded to a level-2 MPAS mesh's cell
 centres + vertically interpolated to sigma.  Asserts shape, finiteness, physical
-bounds, the specific→mixing-ratio conversion, a constant-field exactness check,
+bounds, specific humidity loaded as is, a constant-field exactness check,
 an equator-pole value structure, and the dispatcher wiring.  (Full physical
 validation against real ERA5 is deferred to when a zarr path is provided.)
 """
@@ -11,7 +11,12 @@ validation against real ERA5 is deferred to when a zarr path is provided.)
 import ast
 import pathlib
 
+import jax.numpy as jnp
 import numpy as np
+
+
+def _flat(mesh):
+    return jnp.zeros(int(mesh.nCells))
 import pytest
 from legoesm.grids.vertical import create_sigma_coordinate
 from legoesm.grids.voronoi import create_voronoi_mesh
@@ -50,7 +55,7 @@ def test_mpas_carry_shapes_and_physical():
     # the edge-normal component on mesh EDGES (nEdges), not cell-centred.
     mesh = create_voronoi_mesh(2)
     sigma = create_sigma_coordinate(30)
-    carry = era5_to_mpas_carry(_synthetic_era5(), mesh, sigma)
+    carry = era5_to_mpas_carry(_synthetic_era5(), mesh, sigma, target_phis=_flat(mesh))
     T = _carry_field(carry, "T")
     u = _carry_field(carry, "u")
     assert T.shape == (mesh.nCells, 30)          # scalars at cell centres
@@ -70,19 +75,21 @@ def test_mpas_carry_constant_field_is_exact():
                          q=np.full_like(base.q, 0.0))
     mesh = create_voronoi_mesh(2)
     sigma = create_sigma_coordinate(20)
-    carry = era5_to_mpas_carry(era5, mesh, sigma)
+    carry = era5_to_mpas_carry(era5, mesh, sigma, target_phis=_flat(mesh))
     T = _carry_field(carry, "T")
     np.testing.assert_allclose(T, 263.0, atol=1e-2)
 
 
-def test_mpas_carry_specific_to_mixing_ratio():
+def test_mpas_carry_loads_q_as_specific_humidity():
+    """ERA5 specific humidity is loaded AS IS (the tracer convention on
+    every lane, 2026-09-28); the former r = q/(1-q) = 0.0204 must FAIL."""
     base = _synthetic_era5()
     era5 = base._replace(q=np.full_like(base.q, 0.02))
     mesh = create_voronoi_mesh(2)
     sigma = create_sigma_coordinate(20)
-    carry = era5_to_mpas_carry(era5, mesh, sigma)
+    carry = era5_to_mpas_carry(era5, mesh, sigma, target_phis=_flat(mesh))
     qv = _carry_field(carry, "q_v")
-    assert 0.0200 < float(qv[..., -1].mean()) < 0.0210   # r = q/(1-q) ≈ 0.0204
+    np.testing.assert_allclose(float(qv[..., -1].mean()), 0.02, rtol=1e-3)
 
 
 def test_mpas_carry_equator_pole_structure():
@@ -90,7 +97,7 @@ def test_mpas_carry_equator_pole_structure():
     equator-pole structure (value-based, not just bounds)."""
     mesh = create_voronoi_mesh(2)
     sigma = create_sigma_coordinate(30)
-    carry = era5_to_mpas_carry(_synthetic_era5(), mesh, sigma)
+    carry = era5_to_mpas_carry(_synthetic_era5(), mesh, sigma, target_phis=_flat(mesh))
     T = _carry_field(carry, "T")
     lat_cell = np.asarray(mesh.latCell)
     i_eq = int(np.argmin(np.abs(lat_cell)))
@@ -114,7 +121,7 @@ def test_select_era5_regrid_routes_mpas_and_aliases():
 def test_mpas_carry_dtype_is_floating():
     mesh = create_voronoi_mesh(2)
     sigma = create_sigma_coordinate(20)
-    carry = era5_to_mpas_carry(_synthetic_era5(), mesh, sigma)
+    carry = era5_to_mpas_carry(_synthetic_era5(), mesh, sigma, target_phis=_flat(mesh))
     # #948: MPASCarry fields are (u [edge-normal], T, p_s, phis, q_v) — no
     # cell-centred v (that belonged to the deleted SegmentCarry builder).
     for name in ("T", "u", "p_s", "phis", "q_v"):
@@ -137,8 +144,8 @@ def test_mpas_carry_descending_lat_matches_ascending():
     sigma = create_sigma_coordinate(20)
     asc = _synthetic_era5()
     desc = _flip_lat(asc)
-    T_asc = _carry_field(era5_to_mpas_carry(asc, mesh, sigma), "T")
-    T_desc = _carry_field(era5_to_mpas_carry(desc, mesh, sigma), "T")
+    T_asc = _carry_field(era5_to_mpas_carry(asc, mesh, sigma, target_phis=_flat(mesh)), "T")
+    T_desc = _carry_field(era5_to_mpas_carry(desc, mesh, sigma, target_phis=_flat(mesh)), "T")
     np.testing.assert_allclose(T_asc, T_desc, atol=1e-2)
 
 
@@ -153,7 +160,7 @@ def test_mpas_carry_longitude_gradient_no_dateline_scramble():
     era5 = base._replace(T=T)
     mesh = create_voronoi_mesh(2)
     sigma = create_sigma_coordinate(20)
-    T_cell = _carry_field(era5_to_mpas_carry(era5, mesh, sigma), "T")
+    T_cell = _carry_field(era5_to_mpas_carry(era5, mesh, sigma, target_phis=_flat(mesh)), "T")
     lon_cell = np.asarray(mesh.lonCell)
     expected = 280.0 + 20.0 * np.cos(lon_cell)
     # Modest tol for IDW smoothing on the coarse mesh; a wrap would be ~40 K off.

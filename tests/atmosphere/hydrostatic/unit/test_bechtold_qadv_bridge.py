@@ -47,7 +47,13 @@ def _setup():
     z = np.linspace(0, 1, _NLEV)[::-1]
     Tprof = 302.0 - 80.0 * z
     T = jnp.asarray(np.broadcast_to(Tprof, s3).copy())
-    qprof = 8e-3 * np.exp(-3.5 * z)
+    # 7.2e-3 (was 8e-3): MEASURED 2026-09-29 with the specific saturation
+    # reference, the 8e-3 column's closure target already sits above a
+    # downstream mass-flux cap with a ZERO dynamics carry (5.3e-3 -> 1.9e-2
+    # kg/m^2/s under the carry, heating identical), so the carry's effect
+    # was invisible; at 0.9x the target is 7.4e-5 -> 1.9e-3 and the heating
+    # moves by 1.4e-5 K/s.  Below 0.8x the column no longer convects.
+    qprof = 7.2e-3 * np.exp(-3.5 * z)
     q_v = jnp.asarray(np.broadcast_to(qprof, s3).copy())
     u = jnp.zeros(s3)
     v = jnp.zeros(s3)

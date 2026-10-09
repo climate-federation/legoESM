@@ -56,6 +56,7 @@ from legoesm.grids.operators_latlon_cgrid import (
 )
 from legoesm.atmosphere.dynamics.gcm.shallow_water_latlon_cgrid import (
     absolute_vorticity_coriolis,
+    nu_del4_row_profiles,
 )
 from legoesm.core.operators_fv_latlon_3d import (
     cgrid_fv_scalar_advection_latlon_3d,
@@ -201,14 +202,20 @@ class CGridLatLonPrimitiveEquationConfig(NamedTuple):
     # α-weighted form (sb81_omega_over_p_dyn) built from the SAME half-level
     # construction as the geopotential and the momentum/thermo ln p^SB
     # gradients — the discretization-consistent closure of the #1029 PGF
-    # chain.  False (default): the legacy arithmetic ω_full/p_full form.
-    # Default OFF: the consistent form removes the arithmetic form's
-    # accidental damping of the lid-amplified orographic-wave mode
-    # (#1029(b)) — measured held_suarez_topo latlon blowup day ~49 -> ~12
-    # (A/B job 9130802, byte-fixed protocol) — so it stays opt-in until the
-    # lid treatment lands.  Static Python bool (feature-gating exception):
-    # each value compiles its own branch, no jnp.where double-trace.
-    sb81_omega_conversion: bool = False
+    # chain (default).  False: the legacy arithmetic ω_full/p_full form,
+    # kept only for A/B against older runs.  History: it was opt-in because
+    # the arithmetic form accidentally damped the #1029(b) lid-amplified
+    # orographic-wave mode (held_suarez_topo blowup day ~49 -> ~12, A/B job
+    # 9130802, old mountain, before the #836 top sponge and del-4).  Static Python
+    # bool (feature-gating exception): each value compiles its own branch.
+    sb81_omega_conversion: bool = True
+    # Biharmonic (del-4) hyperdiffusion [m^4/s] on u, v and T, the same
+    # scheme as the lat-lon shallow-water lane: scale-selective (k^4), with
+    # the per-latitude-row pole stability cap ``nu_del4_row_profiles``.
+    # 0.0 (default) is OFF and byte-identical; needs ``dt`` in the tendency.
+    nu_del4: float = 0.0
+    # Numerics safety fraction of the del-4 diffusive CFL; not a tunable.
+    nu_del4_cfl_frac: float = 0.25
 
 
 def _zero_v_at_pole(v, *, south: bool, north: bool, offset: int = 0):
@@ -339,6 +346,7 @@ def cgrid_latlon_hydrostatic_tendencies(
     config: CGridLatLonPrimitiveEquationConfig = CGridLatLonPrimitiveEquationConfig(),
     *,
     geom_pads: tuple | None = None,
+    dt=None,
 ):
     """Compute hydrostatic PE tendencies on the lat-lon C-grid.
 
@@ -360,6 +368,9 @@ def cgrid_latlon_hydrostatic_tendencies(
         so the per-stage scalar-row collective-permutes are skipped;
         ``None`` (every other lane) keeps the in-operator pads
         byte-identical.
+    dt : float, optional
+        Step length [s]; required only when ``config.nu_del4 > 0`` (sizes the
+        per-row pole stability cap of the hyperdiffusion).
 
     Returns
     -------
@@ -683,7 +694,7 @@ def cgrid_latlon_hydrostatic_tendencies(
     # The v·∇_η(ln p) term is the horizontal pressure-gradient correction
     # to the thermodynamic equation (Simmons & Burridge 1981).
     if _hybrid and config.sb81_omega_conversion:
-        # #1029 ω-side (opt-in): SB81 α-weighted dynamic conversion
+        # #1029 ω-side (default ON): SB81 α-weighted dynamic conversion
         #   (ω/p)_k^dyn = -(1/Δp_k)[L_k Σ_{j<k}C_j + α_k C_k],
         # built from the SAME flux-form cumsum as continuity (iter-54
         # reuse) and the SAME sb81_halflevel_construction as Phi and the
@@ -820,6 +831,27 @@ def cgrid_latlon_hydrostatic_tendencies(
         dv_dt = dv_dt + config.A_h * lap_v
         lap_T = laplacian_cgrid(T, grid)
         dT_dt = dT_dt + config.A_h * lap_T
+
+    # --- 13a. Biharmonic hyperdiffusion (optional) ---
+    # SIGN: lap(lap) of a Fourier mode is +k^4, so -nu*lap(lap(f)) decays it.
+    # T uses the layer-mass-weighted form -(1/dp) lap(dp * nu * lap(T)):
+    # sum(dp * dT * area) telescopes to zero (global heat conserved) and
+    # sum(dp * T * dT * area) = -sum(dp * nu * lap(T)^2 * area) <= 0.
+    if config.nu_del4 > 0.0:
+        if dt is None:
+            raise ValueError(
+                "cgrid_latlon_hydrostatic_tendencies: nu_del4 > 0 requires "
+                "the dt argument (the per-row pole stability cap needs it).")
+        nu_u, nu_v = nu_del4_row_profiles(
+            grid, config.nu_del4, config.nu_del4_cfl_frac, dt)
+        lap_u, lap_v = vector_laplacian_cgrid(u, v, grid)
+        lap2_u, lap2_v = vector_laplacian_cgrid(lap_u, lap_v, grid)
+        du_dt = du_dt - nu_u[..., None] * lap2_u
+        dv_dt = dv_dt - nu_v[..., None] * lap2_v
+        dp_T = dp_from_hybrid(sigma_coord, p_s) if _hybrid else (
+            p_s[..., None] * sigma_coord.dsigma.astype(p_s.dtype))
+        flux_T = dp_T * nu_u[..., None] * laplacian_cgrid(T, grid)
+        dT_dt = dT_dt - laplacian_cgrid(flux_T, grid) / dp_T
 
     # --- 13b. Top sponge (Rayleigh damping increasing toward the lid, #836) ---
     # Absorb upward-propagating gravity-wave / convective energy that would else
@@ -975,7 +1007,7 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
 
 
     def compute_mass(self, state: CGridLatLonHydrostaticState, grid=None) -> jax.Array:
-        """Compute total mass (for conservation fixer target).
+        """Compute global DRY mass (the conservation fixer's target).
 
         Iter-12: use the fp64 budget accumulator unconditionally.
         ``_accumulation_dtype`` is fp32 under the default storage
@@ -983,13 +1015,15 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         anchored target and blocked sub-fp32 conservation even after
         iter-2's anchor wiring.
         """
+        from legoesm.core.conservation import dry_surface_pressure
         acc = conservation_accumulator()
         _grid = self.grid if grid is None else grid
-        return jnp.sum(state.p_s.astype(acc) * _grid.area.astype(acc))
+        ps_dry = dry_surface_pressure(state.p_s, state.tracers or None, self.sigma_coord)
+        return jnp.sum(ps_dry.astype(acc) * _grid.area.astype(acc))
 
     def tendencies(self, state: CGridLatLonHydrostaticState):
         return cgrid_latlon_hydrostatic_tendencies(
-            state, self.grid, self.sigma_coord, self.config,
+            state, self.grid, self.sigma_coord, self.config, dt=self.dt,
         )
 
     # ------------------------------------------------------------------
@@ -1082,11 +1116,19 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         forwarded to :func:`cgrid_latlon_hydrostatic_tendencies` (SPMD
         band step only; ``None`` everywhere else — byte-identical).
 
-        Physics is evaluated inside each RK stage (matching the CDGrid
-        PE contract), not as a post-step Euler update.  Every stage
-        receives the STEP-INPUT ``phys_state``; the carry-out comes
-        from one extra physics evaluation on the post-step state (see
-        :meth:`step`).  Returns ``(state_new, phys_state_out)``.
+        OPERATOR-SPLIT physics (user decision 2026-09-28, the MPAS-lane
+        and production-model order): a dynamics-only RK step, then ONE
+        physics evaluation on the post-dynamics state applied as an Euler
+        increment (T, p_s, face-interpolated winds; tracers WITH their
+        water mass through ``apply_physics_water_mass``, so rain leaves
+        the column through p_s), the polar filter applied to the physics
+        increments exactly as it was to the RK tendencies, v re-walled at
+        the poles, then the safety rails with the DRY-mass fixer.  That
+        one evaluation also yields the physics carry-out.  Before this
+        the physics rode inside every RK stage and its water tendency
+        was applied at fixed p_s: precipitated water stayed behind as dry
+        air, and physics ran n_stages + 1 times per step.
+        Returns ``(state_new, phys_state_out)``.
 
         ``grid`` / ``sigma_coord`` / ``polar_mask`` / ``polar_mask_v`` default
         to ``self.*`` (serial / single-rank).  The lat-band SPMD wrapper passes
@@ -1107,46 +1149,8 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         def tendency_fn(s):
             du, dv, dT, dps, dq = cgrid_latlon_hydrostatic_tendencies(
                 s, grid, sigma_coord, self.config, geom_pads=geom_pads,
+                dt=dt,
             )
-
-            # --- Physics coupling (inside RK stage) ---
-            if physics_fn is not None:
-                hs = cgrid_to_hydrostatic(s, grid)
-                phys_tend = self._call_physics(
-                    physics_fn, hs, phys_state,
-                    grid=grid, sigma_coord=sigma_coord)
-
-                dT = dT + phys_tend.dT_dt.data
-                dps = dps + phys_tend.dp_s_dt.data
-
-                du_phys = phys_tend.du_dt.data
-                dv_phys = (phys_tend.dv_dt.data
-                           if phys_tend.dv_dt is not None
-                           else jnp.zeros_like(du_phys))
-                # Cell→face coupling of physics wind tendencies.
-                # v-face: halo-aware — under latitude-band MPI the
-                # band's end rows are interior partition cuts (NOT
-                # poles), so the legacy end-row copy of
-                # ``interp_cell_to_vface`` would diverge from the
-                # serial average 0.5*(dv_phys[j-1] + dv_phys[j]) at
-                # the cut faces.  ``interp_cell_to_vface_halo`` pads
-                # one lat row through the backend-dispatched
-                # ``pad_with_pole_bc_lat`` (AD-safe ``_sendrecv_vjp``
-                # sendrecv at cuts) and is bit-identical to the legacy
-                # convention in serial / at true poles.
-                # u-face: no halo needed — lon is periodic and fully
-                # rank-local under band decomposition, so the legacy
-                # wrap interp already matches serial row-by-row.
-                du = du + interp_cell_to_uface(du_phys)
-                dv = dv + interp_cell_to_vface_halo(dv_phys)
-
-                # Physics tracer tendencies (only for tracers already in state;
-                # introducing new tracer keys here would break the RK
-                # integrator's pytree structure).
-                if phys_tend.tracer_tendencies is not None:
-                    for name, dq_field in phys_tend.tracer_tendencies.items():
-                        if name in dq:
-                            dq[name] = dq[name] + dq_field.data
 
             # Polar filter: damp high-frequency modes near poles for
             # EVERY transported quantity (dT, dps, du, dv, every dq).
@@ -1238,8 +1242,26 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
             )
         state_new = state_new._replace(v=v_new)
 
-        # Safety rails: T floor, p_s floor, mass fixer (band grid + global
-        # area denominator under SPMD).
+        # --- Operator-split physics: one evaluation on the post-dynamics
+        # state, applied as an Euler increment (see the docstring). ---
+        phys_state_out = phys_state
+        if physics_fn is not None:
+            _pr = self._call_physics_raw(
+                physics_fn, cgrid_to_hydrostatic(state_new, grid),
+                phys_state, grid=grid, sigma_coord=sigma_coord)
+            if type(_pr) is tuple:
+                phys_tend = _pr[0]
+                if len(_pr) > 1 and phys_state is not None:
+                    phys_state_out = _pr[1]
+            else:
+                phys_tend = _pr
+            state_new = self._apply_physics_increment(
+                state_new, phys_tend, dt, grid=grid, sigma_coord=sigma_coord,
+                polar_mask=polar_mask, polar_mask_v=polar_mask_v,
+                pole_v_bc_masks=pole_v_bc_masks)
+
+        # Safety rails: T floor, p_s floor, DRY-mass fixer (band grid +
+        # global area denominator under SPMD).
         state_new = self._apply_safety_rails(
             state_new, target_mass, state, grid=grid, sigma_coord=sigma_coord)
 
@@ -1251,27 +1273,89 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         state_out = finalize_to_storage(
             cast_pytree(state_new, None, "storage"))
 
-        # Operator-split physics carry (issue #413): one extra physics
-        # evaluation on the POST-STEP state yields the carry-out
-        # (tendencies discarded) — prognostic fields advance exactly
-        # once per dt, consistent with the returned state.  RK-weight
-        # combination of carries would corrupt replacement-semantics
-        # values (e.g. the implicit TKE solve).  Never traced when no
-        # carry is threaded (byte-identical legacy path).
-        phys_state_out = phys_state
-        if physics_fn is not None and phys_state is not None:
-            _pr = self._call_physics_raw(
-                physics_fn, cgrid_to_hydrostatic(state_out, grid),
-                phys_state, grid=grid, sigma_coord=sigma_coord,
-            )
-            if type(_pr) is tuple and len(_pr) > 1:
-                phys_state_out = _pr[1]
-
+        # The physics carry-out is the second return of the ONE physics
+        # evaluation above (issue #413 semantics: prognostic fields and
+        # the carry advance exactly once per dt, from the same state).
         return state_out, phys_state_out
 
     # ------------------------------------------------------------------
     # Public API — matches the driver contract
     # ------------------------------------------------------------------
+
+    def _apply_physics_increment(
+        self, state, phys_tend, dt, *, grid, sigma_coord,
+        polar_mask=None, polar_mask_v=None, pole_v_bc_masks=None,
+    ):
+        """Euler application of one physics evaluation to a C-grid state.
+
+        Sign convention: every ``d*_dt`` is a tendency OF the named field
+        (positive = the field increases), applied as ``field += dt*d``.
+        Winds: cell tendencies to the u/v faces through the same
+        interpolators the RK coupling used.  Tracers and p_s: through
+        ``apply_physics_water_mass`` (water species carry their mass;
+        every tracer re-weighted onto the new layer masses; column dry
+        mass exact).  The polar Fourier filter damps the T, p_s and wind
+        INCREMENTS with the same operators (masks) that damp the RK
+        tendencies, so the lifted equatorial-CFL dt keeps its polar
+        protection for the physics part; tracer increments pass
+        unfiltered (mass-exact against the scheme's precipitation); v is
+        re-walled at the poles afterwards.
+        """
+        from legoesm.core.conservation import apply_physics_water_mass
+        dT = dt * phys_tend.dT_dt.data
+        dps = dt * phys_tend.dp_s_dt.data
+        du_phys = dt * phys_tend.du_dt.data
+        # PhysicsTendencies.dv_dt is Optional (state.py); du_dt is not
+        dv_phys = dt * (phys_tend.dv_dt.data if phys_tend.dv_dt is not None
+                        else jnp.zeros_like(du_phys))
+        du = interp_cell_to_uface(du_phys)
+        dv = interp_cell_to_vface_halo(dv_phys)
+        tt = phys_tend.tracer_tendencies
+        dq_dt = ({k: f.data for k, f in tt.items() if k in state.tracers}
+                 if (tt is not None and state.tracers) else {})
+        if polar_mask is not None:
+            dT = fourier_filter_3d(dT, grid, polar_mask)
+            dps = fourier_filter(dps, grid, polar_mask)
+            du_int = fourier_filter_3d(du[:, :-1, :], grid, polar_mask)
+            du_closure = pad_lon_cgrid(du_int, halo=1)[:, -1:, :]
+            du = jnp.concatenate([du_int, du_closure], axis=1)
+            dv = fourier_filter_3d(dv, grid, polar_mask_v)
+            # tracer increments are NOT filtered: a physics increment has
+            # no advective CFL (the filter protects transport at the
+            # lifted equatorial dt), and filtering the water increment
+            # would remove a different mass than the scheme's diagnosed
+            # precipitation at the polar rows (codex 2026-09-28)
+        T_new = state.T + dT
+        u_new = state.u + du
+        v_new = state.v + dv
+        p_s_new = state.p_s
+        tracers_new = state.tracers
+        if dq_dt:
+            # the water mass update is evaluated on the PRE-physics layer
+            # masses (the state the scheme acted on); a direct dp_s_dt is
+            # added afterwards, not folded into the water re-weighting
+            # (GLM 2026-09-28: D on dp(p_s+dps) would be silently
+            # inconsistent with the scheme's diagnosed precipitation)
+            tracers_new, p_s_new = apply_physics_water_mass(
+                state.tracers, dq_dt, state.p_s, sigma_coord, dt)
+        p_s_new = p_s_new + dps
+        if pole_v_bc_masks is not None:
+            _south_m, _north_m = pole_v_bc_masks
+            _off = self.config.pole_v_bc_offset
+            _n = v_new.shape[0]
+            v_new = jnp.where(
+                _south_m, v_new.at[_off].set(jnp.zeros_like(v_new[_off])), v_new)
+            v_new = jnp.where(
+                _north_m,
+                v_new.at[_n - 1 - _off].set(jnp.zeros_like(v_new[_n - 1 - _off])),
+                v_new)
+        else:
+            v_new = _zero_v_at_pole(
+                v_new, south=self.config.pole_v_bc[0],
+                north=self.config.pole_v_bc[1],
+                offset=self.config.pole_v_bc_offset)
+        return state._replace(u=u_new, v=v_new, T=T_new, p_s=p_s_new,
+                              tracers=tracers_new)
 
     def _apply_safety_rails(
         self,
@@ -1314,25 +1398,32 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
             # extra reduction in serial, one extra allreduce under
             # latlon SPMD sharding).
             total_area = grid.grid_total_area.astype(acc)
+            # DRY mass (p_top + sum dp(1-Q)): water enters and leaves the
+            # column through the physics and the fixer must not refill it
+            # (user decision 2026-09-28; the MPAS-lane fixers likewise)
+            from legoesm.core.conservation import dry_surface_pressure
+            ps_dry = dry_surface_pressure(state.p_s, state.tracers or None, sigma_coord)
             if target_mass is not None:
                 # Closure-constant target → only ``mass_new`` is reduced.
                 area = grid.area.astype(acc)
                 mass_target = target_mass
-                mass_new = jnp.sum(state.p_s.astype(acc) * area)
+                mass_new = jnp.sum(ps_dry.astype(acc) * area)
             elif pre_state is not None:
                 # Iter-57: batch the two area-weighted sums into a
                 # single MPI allreduce / cross-shard reduction (the
                 # cubed-sphere ``fix_mass_hydrostatic`` already does
                 # this via ``batch_global_area_sums``).  Under lat-band SPMD
                 # this psum's across the "lat" axis (the global numerator).
+                pre_dry = dry_surface_pressure(
+                    pre_state.p_s, pre_state.tracers or None, sigma_coord)
                 mass_target, mass_new = batch_global_area_sums(
-                    [pre_state.p_s, state.p_s], grid,
+                    [pre_dry, ps_dry], grid,
                 )
             else:
                 # Degenerate case: mass_target == mass_new → correction=0.
                 # Skip the redundant second reduction.
                 area = grid.area.astype(acc)
-                mass_new = jnp.sum(state.p_s.astype(acc) * area)
+                mass_new = jnp.sum(ps_dry.astype(acc) * area)
                 mass_target = mass_new
             correction = (mass_target - mass_new) / total_area
 
@@ -1462,9 +1553,13 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
                 # HS path: cell-centred Field state.  ``compute_mass``
                 # expects a CGrid state, but the integral is the same
                 # area-weighted sum of p_s.  Iter-12: fp64 budget acc.
+                from legoesm.core.conservation import dry_surface_pressure
                 acc = conservation_accumulator()
+                _tr = ({k: f.data for k, f in state.tracers.items()}
+                       if state.tracers else None)
+                _ps_dry = dry_surface_pressure(state.p_s.data, _tr, self.sigma_coord)
                 self._target_mass = jnp.sum(
-                    state.p_s.data.astype(acc) * self.grid.area.astype(acc)
+                    _ps_dry.astype(acc) * self.grid.area.astype(acc)
                 )
         if (target_mass is None
                 and self.config.fix_mass

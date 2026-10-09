@@ -674,11 +674,6 @@ def test_driver_uses_the_declared_sphum_index_not_tracer_zero():
     # its argument requirements are asserted in
     # test_driver_nh_requires_its_arguments below.
     (dict(consv=1.0), "consv", 0),
-    # fillz sits INSIDE the `elseif (nq > 0)` arm (fv_mapz.F90:330-336), so
-    # fill=True is only refusable when there are tracers -- with none it is
-    # unreachable upstream and must NOT raise (asserted separately in
-    # test_driver_guards_do_not_over_refuse_a_non_last_step_call).
-    (dict(fill=True), "fillz", 1),
     (dict(kord_tm=9), "kord_tm", 0),
     (dict(do_sat_adj=True), "do_sat_adj", 0),
 ])
@@ -1218,3 +1213,80 @@ def test_driver_nh_w_limiter_clamps_and_conserves_momentum():
     # Non-vacuity: the limiter really fired.
     assert w2.max() > W_MAX_MAPZ
     assert not np.array_equal(wwin, w2)
+
+
+# ---------------------------------------------------------------------
+# fillz (fv_fill.F90:34-141, non-GFS branch): the column borrow
+# ---------------------------------------------------------------------
+
+def _fz(q_rows, dp_rows):
+    """1-based (im, km+1) layout from 0-based rows."""
+    from legoesm.core.fv3_native_mapz import fillz
+    q = np.array([[0.0] + list(r) for r in q_rows], dtype=np.float64)
+    dp = np.array([[0.0] + list(r) for r in dp_rows], dtype=np.float64)
+    km = len(q_rows[0])
+    return fillz(q, dp, km)[:, 1:]
+
+
+def test_fillz_top_layer_pushes_its_deficit_down():
+    """:68-73 -- the top layer is zeroed and layer 2 takes the mass."""
+    out = _fz([[-1.0, 4.0, 1.0]], [[1.0, 2.0, 1.0]])
+    np.testing.assert_array_equal(out, [[0.0, 3.5, 1.0]])
+
+
+def test_fillz_interior_borrows_from_above_then_below():
+    """:76-95 -- above first, capped by what is there; the rest from
+    below.  Layer 2 needs 3 units of mass: 1 from above (all of it),
+    2 from below."""
+    out = _fz([[1.0, -3.0, 5.0, 1.0]], [[1.0, 1.0, 1.0, 1.0]])
+    np.testing.assert_array_equal(out, [[0.0, 0.0, 3.0, 1.0]])
+
+
+def test_fillz_bottom_layer_borrows_from_above_only():
+    out = _fz([[2.0, 4.0, -1.0]], [[1.0, 1.0, 2.0]])
+    # qly = 2 (mass), qup = 4: take 2 from layer 2
+    np.testing.assert_array_equal(out, [[2.0, 2.0, 0.0]])
+
+
+def test_fillz_non_local_fix_rescales_layers_2_to_km_only():
+    """:113-131 -- a column still negative after the local borrows is
+    rescaled over layers 2..km (layer 1 EXCLUDED) so their mass sum is
+    kept; the deficit is spread over every positive layer."""
+    # layer 3 at -6 with 1 above and 2 below to borrow: still -3 after
+    # the local pass; the fix rescales layers 2..5
+    q = [[9.0, 1.0, -6.0, 2.0, 4.0]]
+    dp = [[1.0, 1.0, 1.0, 1.0, 1.0]]
+    out = _fz(q, dp)
+    assert out[0, 0] == 9.0                       # layer 1 untouched
+    assert (out[0, 1:] >= 0.0).all()
+    np.testing.assert_allclose(out[0, 1:].sum(), 1.0 - 6.0 + 2.0 + 4.0,
+                               rtol=1e-15)      # mass of layers 2..km kept
+
+
+def test_fillz_leaves_a_positive_column_bitwise():
+    q = np.random.default_rng(3).random((5, 7)) + 0.1
+    dp = np.random.default_rng(4).random((5, 7)) + 0.5
+    out = _fz(q, dp)
+    np.testing.assert_array_equal(out, q)
+
+
+def test_driver_fill_true_reaches_the_tracers():
+    """fill=True (:336): a planted negative in one tracer leaves the
+    remap non-negative with the column mass of layers 2..km kept;
+    fill=False leaves the negative in place (the limiter is monotone)."""
+    import copy
+    face, _ = _face()
+    n, ng, km = face["n"], face["ng"], face["km"]
+    ia = ng
+    m_a = n + 2 * ng
+    q = np.full((m_a, m_a, km), 1.0e-3)
+    q[ia + 1, ia + 1, 2] = -2.0e-3       # layers 2..km stay net-positive
+    outs = {}
+    for fill in (False, True):
+        f = copy.deepcopy(face)
+        f["kord_tr"] = (9,)
+        tr = [q.copy()]
+        lagrangian_to_eulerian(**f, q=tr, fill=fill)
+        outs[fill] = tr[0][ia + 1, ia + 1, :]
+    assert outs[False].min() < 0.0
+    assert outs[True].min() >= 0.0

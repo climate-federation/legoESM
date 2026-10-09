@@ -9,7 +9,7 @@ sys.path[:0] = [os.getcwd()+"/src"] + glob.glob(os.getcwd()+"/packages/*") + [os
 import jax, jax.numpy as jnp, numpy as np
 jax.config.update("jax_enable_x64", True)
 from legoesm.atmosphere.physics.clouds.cloud_fraction import (
-    compute_cloud_properties, cover_saturation_mixing_ratio)
+    compute_cloud_properties, cover_saturation_specific_humidity)
 from legoesm.atmosphere.physics.clouds.config import CloudConfig
 from legoesm.thermo import saturation_mixing_ratio, saturation_mixing_ratio_ice
 
@@ -28,7 +28,7 @@ def cover(scheme, T, p, rh, q_i, sat="mixed_phase"):
     # between T_ice_only and T_freeze the curve is a BLEND, and a hand-rolled
     # threshold silently labels liquid RH as mixed-phase RH in that range
     # (codex caught exactly that at 258 K in the first version of this probe).
-    qs = float(cover_saturation_mixing_ratio(Tj, pj, cfg)[0, 0])
+    qs = float(cover_saturation_specific_humidity(Tj, pj, cfg)[0, 0])
     q_v = jnp.array([[rh * qs]])
     kw = dict(q_ice=jnp.array([[q_i]]), q_cloud=jnp.zeros((1, 1)))
     out = compute_cloud_properties(Tj, pj, q_v, dp, cfg, **kw)

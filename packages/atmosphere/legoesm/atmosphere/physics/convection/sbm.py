@@ -33,7 +33,7 @@ the relaxation dT_dt = trigger*mask*(T_ref-T)/tau_c, the condensation rescale
 round-off (rel 1e-12)
 against an independent numpy reimplementation in ``tests/unit/test_sbm_faithful.py``,
 which REUSES the shared, separately-tested thermodynamics (``compute_moist_adiabat``,
-``compute_cape``, ``cape_trigger``, ``saturation_mixing_ratio``) as givens.  Truth-
+``compute_cape``, ``cape_trigger``, ``saturation_specific_humidity``) as givens.  Truth-
 tiers pinned there: total-water conservation ``Sum(dq_v_dt + dq_c_conv_dt)*dp/g = 0``
 EXACTLY in a net-drying column whose column condensation candidate exceeds 1e-20 (every
 physically active column; a <=1e-20 residual survives only in the degenerate near-zero-
@@ -76,7 +76,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio, saturation_mixing_ratio_dT
+from legoesm.thermo import saturation_specific_humidity, saturation_specific_humidity_dT
 from legoesm.atmosphere.physics.thermodynamics import (
     compute_moist_adiabat,
     compute_cape,
@@ -218,7 +218,7 @@ def sbm_convection(
     # 5. Approximately enthalpy-conserving correction (2-iteration Newton, ~1e-3)
     #    Only over the cloud layer (masked levels).
     def _newton_step(T_trial):
-        q_trial = RH_ref[:, None] * saturation_mixing_ratio(T_trial, p_full)
+        q_trial = RH_ref[:, None] * saturation_specific_humidity(T_trial, p_full)
         residual = jnp.sum(
             cloud_mask * (constants.c_pd * (T_trial - T)
                           + constants.L_v * (q_trial - q_v)) * dp,
@@ -226,7 +226,7 @@ def sbm_convection(
         )  # (ncol,)
         # Tetens-exact mixing-ratio derivative (matches the mixing-ratio residual
         # above + the emanuel.py convention) — not the CC-approximate inline form.
-        dqsat_dT = saturation_mixing_ratio_dT(T_trial, p_full)
+        dqsat_dT = saturation_specific_humidity_dT(T_trial, p_full)
         jacobian = jnp.sum(
             cloud_mask * (constants.c_pd
                           + constants.L_v * RH_ref[:, None] * dqsat_dT) * dp,
@@ -239,7 +239,7 @@ def sbm_convection(
     T_ref = _newton_step(T_ref)    # second iteration
 
     # Reference moisture at converged temperature
-    q_ref = RH_ref[:, None] * saturation_mixing_ratio(T_ref, p_full)
+    q_ref = RH_ref[:, None] * saturation_specific_humidity(T_ref, p_full)
 
     # 5b. Frierson (2007) SHALLOW branch — conserve column water in the
     #     net-moistening regime.  The deep references can net-MOISTEN the cloud

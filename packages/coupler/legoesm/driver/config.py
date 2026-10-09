@@ -295,14 +295,11 @@ class DycoreConfig(NamedTuple):
     mpas_conservative_tracer_clamp: bool = True
     # #1029 ω-side: SB81 α-weighted κT·ω/p energy conversion on the hybrid
     # lat-lon C-grid lane (discretization-consistent with the geopotential
-    # and the momentum/thermo ln p^SB gradients).  Default OFF — the
-    # consistent form removes the arithmetic form's accidental damping of
-    # the #1029(b) lid-amplified orographic-wave mode (held_suarez_topo
-    # latlon blowup day ~49 -> ~12, A/B job 9130802); opt-in until the lid
-    # treatment lands.  Threaded by ``component_factory`` (mirrors the
-    # sponge/polar-filter passthrough).  Appended last to preserve
-    # positional ABI (codex #1029 r3 #2).
-    sb81_omega_conversion: bool = False
+    # and the momentum/thermo ln p^SB gradients).  Default ON; False keeps
+    # the legacy arithmetic ω/p form for A/B only.  Threaded by
+    # ``component_factory`` (mirrors the sponge/polar-filter passthrough).
+    # Appended last to preserve positional ABI (codex #1029 r3 #2).
+    sb81_omega_conversion: bool = True
     # Separate scale for the horizontal THERMAL diffusivity K_h (None = follow
     # a_h_scale exactly as before, byte-identical).  Decouples the circulation
     # lever (momentum nu_del2) from the thermal smoothing that damps vertical
@@ -348,6 +345,28 @@ class DycoreConfig(NamedTuple):
     # CAM6 AMIP suite (physics on (nCells, nlev) columns) drives it
     # without any physics rewrite.  False = the closed certified duo lane.
     fv3_duo_column_lane: bool = False
+    # FV3's own tracer positivity in the vertical remap (fv_mapz.F90 fill
+    # -> fillz column borrow, fv_fill.F90).  Default False = the certified
+    # oracle deck (input.nml fill=.F.); the CAM6 deck sets it True
+    # (decision B3, 2026-10-01: every-step repair cadence as on MPAS).
+    fv3_duo_fill: bool = False
+    # fv3_duo d_sw5 divergence damping: order (1 = del-4, CAM6 ldiv4 class;
+    # 2 = del-6, the oracle deck) and coefficient d4_bg (sw_core.F90:1811).
+    # Defaults = the PRODUCTION values, matched to MPAS's ldiv4 by
+    # measurement (decision B2 2026-10-01; default moved by user decision
+    # 1b 2026-10-02).  The oracle deck (2, 0.12) is selected explicitly by
+    # oracle-parity runs.
+    fv3_duo_nord: int = 1
+    fv3_duo_d4_bg: float = 0.05
+    # fv3_duo top-of-model del-2 momentum sponge (decision B1 / 2a, user
+    # 2026-10-02): the MPAS/CAM top sponge ported as an additive del-2 on
+    # divergence and vorticity over the top `layers` levels, coefficient
+    # sponge_d2_top * factor**(-k/layers).  Defaults = production, the
+    # coefficient MATCHED to MPAS's total top-layer del-2 by measurement;
+    # layers=0 = OFF (the oracle deck, selected by oracle-parity runs).
+    fv3_duo_sponge_layers: int = 2
+    fv3_duo_sponge_factor: float = 8.0
+    fv3_duo_sponge_d2_top: float = 0.0016
 
     # Divergence-SELECTIVE biharmonic damping on the MPAS hydrostatic lane,
     # as a multiple of CAM-FV's own ldiv4 coefficient 0.01*area^2/dt
@@ -671,6 +690,9 @@ class ExperimentConfig(NamedTuple):
     # blocks; the per-block body compiles ONCE at this size (columns are
     # independent → numerically exact; must divide the column count).
     rrtmgp_column_chunk_size: int = 0
+    # CAM RRTMG-style transported layer above the model top (see
+    # ``RRTMGPConfig.overhead_layer``).  False = off (byte-identical).
+    rrtmgp_overhead_layer: bool = False
     co2_ppmv: float = 415.0
     ch4_ppbv: float = 1900.0
     n2o_ppbv: float = 332.0
@@ -691,6 +713,9 @@ class ExperimentConfig(NamedTuple):
     # Aerosol
     aerosol_forcing: str = "off"        # off, external
     aerosol_file: str = ""
+    # Optional separate AOD file for the AOD->CCN proxy only (e.g. fine-mode
+    # Kinne while ``aerosol_file`` is fine+coarse for radiation); "" = same.
+    aerosol_ccn_file: str = ""
     aerosol_reference_aod: float = 0.03
     volcanic_aerosol_file: str = ""
     volcanic_aerosol_scale: float = 1.0
@@ -1111,6 +1136,13 @@ class ExperimentConfig(NamedTuple):
     # cloud -> warmer land) instead of the cold-cloudy wet attractor. Only affects
     # use_multilayer_land runs.
     land_soil_moisture_init_frac: float = 0.5
+    # Iteration cap of the two-leaf canopy energy-balance solver
+    # (CanopyConfig.max_iters; its own default is 60).  The cap BINDS every
+    # step in production (columns at LAI->0 never converge; the vmapped
+    # while_loop runs to the slowest column), so it is the land step's cost:
+    # ~95 % of a CAM6 step on every lane (measured 2026-10-04).  Only read
+    # for land_surface_scheme='two_leaf'.
+    land_canopy_max_iters: int = 60
     # HOW the multilayer soil is seeded at a cold start.
     #
     #   "aridity" (default, unchanged) — from the initial atmosphere's
@@ -1168,7 +1200,6 @@ class ExperimentConfig(NamedTuple):
     # Topography
     topography: str = "flat"
     topo_smoothing: int = 4
-    topo_edge_blend: float = 0.3
     # Optional land-sea-mask NetCDF (CMIP6 sftlf / ERA5 lsm).  When set,
     # the land fraction is taken from this file and the slab-land tile
     # is activated; empty → ocean-only surface.
@@ -1334,6 +1365,9 @@ class ExperimentConfig(NamedTuple):
     #   "era5"     — ERA5 reanalysis snapshot (requires ic_path)
     ic: str = "default"
     ic_path: str = ""     # ERA5 Zarr path when ic="era5"
+    # an ERA5 store without surface geopotential is refused (decision C);
+    # True zero-fills it for an idealized store (loud warning)
+    era5_allow_flat_phis: bool = False
 
     # CMIP
     experiment: str = ""
@@ -1955,6 +1989,19 @@ class ExperimentConfig(NamedTuple):
             return bool(getattr(_ov, "liquid_partition", False))
         return False
 
+    @property
+    def mpas_loop_lane(self) -> bool:
+        """True when the run executes the MPAS lane's physics loop, which
+        consumes the whole ExperimentConfig surface: the MPAS dycore itself,
+        or the FV3 duo as that loop's dynamics operator (route A,
+        ``dycore.fv3_duo_column_lane``; what the column model cannot honour
+        is refused by name in its factory).  The lane-keyed guards in
+        :meth:`validate_strict` read this, not the discretization string."""
+        d = self.dycore
+        return (d.discretization == "mpas"
+                or normalize_grid_type(self.grid.grid_type) == "mpas"
+                or (d.discretization == "fv3_duo" and bool(d.fv3_duo_column_lane)))
+
     def validate_strict(self) -> None:
         """Raise ValueError for invalid parameter values.
 
@@ -2114,10 +2161,47 @@ class ExperimentConfig(NamedTuple):
                 errors.append(
                     "dycore.fv3_duo_column_lane needs "
                     f"dycore.discretization='fv3_duo', got {d.discretization!r}")
-            if d.fv3_duo_windows is not None:
-                errors.append(
-                    "dycore.fv3_duo_column_lane runs on six faces; the window "
-                    "layout is certification rung 7 (drop fv3_duo_windows)")
+        if d.fv3_duo_fill and d.discretization != "fv3_duo":
+            errors.append(
+                "dycore.fv3_duo_fill is the fv3_duo remap's fillz; got "
+                f"dycore.discretization={d.discretization!r}")
+        if d.fv3_duo_nord not in (0, 1, 2, 3):
+            errors.append(
+                f"dycore.fv3_duo_nord must be in 0..3, got {d.fv3_duo_nord}")
+        if not (isinstance(d.fv3_duo_d4_bg, (int, float))
+                and math.isfinite(d.fv3_duo_d4_bg) and d.fv3_duo_d4_bg >= 0):
+            errors.append(
+                "dycore.fv3_duo_d4_bg must be a finite number >= 0, got "
+                f"{d.fv3_duo_d4_bg!r}")
+        if ((d.fv3_duo_nord, d.fv3_duo_d4_bg) != (1, 0.05)
+                and d.discretization != "fv3_duo"):
+            errors.append(
+                "dycore.fv3_duo_nord/fv3_duo_d4_bg are the fv3_duo d_sw5 "
+                f"divergence damping; got dycore.discretization="
+                f"{d.discretization!r}")
+        if not (isinstance(d.fv3_duo_sponge_layers, int)
+                and d.fv3_duo_sponge_layers >= 0):
+            errors.append("dycore.fv3_duo_sponge_layers must be an int >= 0, "
+                          f"got {d.fv3_duo_sponge_layers!r}")
+        if not (isinstance(d.fv3_duo_sponge_factor, (int, float))
+                and math.isfinite(d.fv3_duo_sponge_factor)
+                and d.fv3_duo_sponge_factor >= 1):
+            errors.append("dycore.fv3_duo_sponge_factor must be finite and >= 1, "
+                          f"got {d.fv3_duo_sponge_factor!r}")
+        if not (isinstance(d.fv3_duo_sponge_d2_top, (int, float))
+                and math.isfinite(d.fv3_duo_sponge_d2_top)
+                and d.fv3_duo_sponge_d2_top >= 0):
+            errors.append("dycore.fv3_duo_sponge_d2_top must be finite and >= 0, "
+                          f"got {d.fv3_duo_sponge_d2_top!r}")
+        _sponge = (d.fv3_duo_sponge_layers, d.fv3_duo_sponge_factor,
+                   d.fv3_duo_sponge_d2_top)
+        _sponge_default = (DycoreConfig().fv3_duo_sponge_layers,
+                           DycoreConfig().fv3_duo_sponge_factor,
+                           DycoreConfig().fv3_duo_sponge_d2_top)
+        if _sponge != _sponge_default and d.discretization != "fv3_duo":
+            errors.append(
+                "dycore.fv3_duo_sponge_* is the fv3_duo top del-2 sponge; got "
+                f"dycore.discretization={d.discretization!r}")
         if d.hyperdiff_scale < 0:
             errors.append(f"dycore.hyperdiff_scale must be >= 0, got {d.hyperdiff_scale}")
         if d.div_damp_scale < 0:
@@ -2309,8 +2393,7 @@ class ExperimentConfig(NamedTuple):
                 "land_update_seconds > 0 requires use_multilayer_land: the "
                 "slab land has no held-flux cadence — the knob would be "
                 "silently inert.")
-        if (self.land_update_seconds > 0
-                and self.grid.grid_type not in ("mpas", "voronoi")):
+        if self.land_update_seconds > 0 and not self.mpas_loop_lane:
             errors.append(
                 "land_update_seconds > 0 is implemented only on the MPAS "
                 f"lane; grid_type={self.grid.grid_type!r} would silently "
@@ -2610,7 +2693,7 @@ class ExperimentConfig(NamedTuple):
                     "use_clubb_cloud_fraction=True (routes the CLUBB cloud-"
                     "fraction carry to radiation); got False."
                 )
-            if self.dycore.discretization != "mpas":
+            if not self.mpas_loop_lane:
                 errors.append(
                     "cloud_scheme='cam6_clubb' is wired on the MPAS lane only; "
                     f"got discretization={self.dycore.discretization!r}."
@@ -2634,6 +2717,12 @@ class ExperimentConfig(NamedTuple):
                     "call, so the CAM6 cloud field would radiate nothing while "
                     f"clt/clivi report it; got radiation={self.radiation!r}."
                 )
+        if (self.rrtmgp_overhead_layer
+                and self.radiation not in ("rrtmgp", "rrtmg")):
+            errors.append(
+                "rrtmgp_overhead_layer=True needs radiation rrtmgp/rrtmg; "
+                f"radiation={self.radiation!r} would silently ignore it."
+            )
         # Cross-field: the diagnostic-condensate FLOOR exists only for the
         # sub-grid diagnostic-fraction schemes (sundqvist / xu_randall); 'none'
         # skips clouds and 'resolved' (CRM) excludes the floor.  It is radiatively
@@ -2939,8 +3028,7 @@ class ExperimentConfig(NamedTuple):
             # handoff to the structured lanes means carrying those fluxes at the
             # radiation cadence through SegmentCarry; until then, refuse rather
             # than deploy the tables under a coupling that cannot express them.
-            _is_mesh_lane = (d.discretization == "mpas"
-                             or normalize_grid_type(g.grid_type) == "mpas")
+            _is_mesh_lane = self.mpas_loop_lane
             if not _is_mesh_lane:
                 errors.append(
                     "land_calibrated_physics=True is supported only on the MPAS "
@@ -3026,8 +3114,7 @@ class ExperimentConfig(NamedTuple):
         # fail-closed at the component factory, but the guard here must not
         # emit a wrong-lane message for grid_type-keyed configs (codex F4,
         # alias set via normalize_grid_type per codex F-B3).
-        _is_mpas = (d.discretization == "mpas"
-                    or normalize_grid_type(g.grid_type) == "mpas")
+        _is_mpas = self.mpas_loop_lane
         _pus = self.physics_update_steps
         if not isinstance(_pus, int) or isinstance(_pus, bool) or _pus < 1:
             errors.append(
@@ -3634,6 +3721,12 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 f"land_soil_init must be one of {_soil_init_modes}, got "
                 f"{self.land_soil_init!r}.")
+        if not (isinstance(self.land_canopy_max_iters, int)
+                and not isinstance(self.land_canopy_max_iters, bool)
+                and self.land_canopy_max_iters >= 1):
+            raise ValueError(
+                "land_canopy_max_iters (two-leaf canopy solver iteration cap) "
+                f"must be an int >= 1; got {self.land_canopy_max_iters!r}.")
         if not (0.0 < self.land_soil_moisture_init_frac <= 1.0):
             errors.append(
                 f"land_soil_moisture_init_frac (theta_init/theta_sat) must be "
@@ -4415,6 +4508,8 @@ class ExperimentConfig(NamedTuple):
             volcanic_aerosol_file=getattr(amip_cfg, 'volcanic_aerosol_file', ''),
             volcanic_aerosol_scale=getattr(amip_cfg, 'volcanic_aerosol_scale', 1.0),
             volcanic_aerosol_lw=getattr(amip_cfg, 'volcanic_aerosol_lw', False),
+            rrtmgp_overhead_layer=getattr(
+                amip_cfg, "rrtmgp_overhead_layer", False),
             cloud_scheme=amip_cfg.cloud_scheme,
             microphysics=amip_cfg.microphysics,
             convection=getattr(amip_cfg, 'convection', 'sbm'),
@@ -4426,7 +4521,6 @@ class ExperimentConfig(NamedTuple):
             moisture_advection=getattr(amip_cfg, 'moisture_advection', False),
             topography=amip_cfg.topography,
             topo_smoothing=amip_cfg.topo_smoothing,
-            topo_edge_blend=amip_cfg.topo_edge_blend,
             land_mask_path=getattr(amip_cfg, 'land_mask_path', ''),
             albedo_land_path=getattr(amip_cfg, 'albedo_land_path', ''),
             albedo_land_month=getattr(amip_cfg, 'albedo_land_month', 0),
@@ -4635,7 +4729,6 @@ class ExperimentConfig(NamedTuple):
             energy_consistent_moisture_clip=self.energy_consistent_moisture_clip,
             topography=self.topography,
             topo_smoothing=self.topo_smoothing,
-            topo_edge_blend=self.topo_edge_blend,
             T_init=self.T_init,
             rh_init=self.rh_init,
             dynamic_albedo=self.dynamic_albedo,
@@ -4926,9 +5019,18 @@ def mpas_land_flux_handoff_eligibility(cfg) -> tuple[bool, str]:
     kernel that accepts an injected surface flux.
     """
     # The lane predicate mirrors ModelDriver.run's dispatch (fv3_duo first,
-    # then grid_type == "mpas" -> _run_mpas), the only lane that consumes it.
-    if (cfg.dycore.discretization == "fv3_duo"
-            or cfg.grid.grid_type != "mpas"):
+    # then grid_type == "mpas" -> _run_mpas).  The fv3_duo COLUMN lane also
+    # runs _run_mpas (cfg.mpas_loop_lane) but is held out BY NAME (merge of
+    # cf/main 2026-10-09): admitting it would switch the land stress ON by
+    # default (auto) on the duo decks, a physics change no one has run or
+    # reviewed on that lane.  Extending it is an open user decision, not a
+    # merge default.
+    if cfg.dycore.discretization == "fv3_duo":
+        return False, ("this is not the MPAS lane for this purpose: the "
+                       "fv3_duo lanes do not take the land model's stress "
+                       "or ocean-surface fluxes (not yet enabled or "
+                       "validated on the duo column lane)")
+    if cfg.grid.grid_type != "mpas":
         return False, "this is not the MPAS lane"
     if not cfg.use_multilayer_land:
         return False, "use_multilayer_land is off (no land model)"

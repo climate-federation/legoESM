@@ -72,7 +72,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio
+from legoesm.thermo import saturation_specific_humidity
 from legoesm.atmosphere.physics.microphysics._warm_rain import (
     hard_saturation_blend,
     safe_pow,
@@ -110,7 +110,7 @@ def diagnose_sundqvist_process_rates(
     sharpness = config.sigmoid_sharpness
 
     # Saturation
-    q_sat = saturation_mixing_ratio(T, p_full)
+    q_sat = saturation_specific_humidity(T, p_full)
     RH = q_v / jnp.clip(q_sat, 1e-10)
 
     # 1. Smooth condensation activation — convert increment [kg/kg] to tendency [kg/kg/s]

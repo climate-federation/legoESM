@@ -257,7 +257,10 @@ def main(argv=None):
             print(f"[m6] rss {stage}: {mb:.0f} MB (rank 0 peak so far)")
 
     from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
-        FV3DuoConfig, FV3DuoDynamicsModel)
+    FV3DuoConfig,
+    FV3DuoDynamicsModel,
+    ORACLE_DAMPING,
+)
     from legoesm.grids.factory import create_fv3_duo_grid
 
     sha = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True,
@@ -284,7 +287,7 @@ def main(argv=None):
     rss("start")
     grid = create_fv3_duo_grid(args.n)
     rss("grid")
-    cfg = FV3DuoConfig(km=args.km, hydrostatic=not args.nh,
+    cfg = FV3DuoConfig(**ORACLE_DAMPING, km=args.km, hydrostatic=not args.nh,
                        n_split=args.n_split)
 
     # reference: faces, GSPMD-sharded P('face') on 6 devices (in-process

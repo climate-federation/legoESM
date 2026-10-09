@@ -56,7 +56,7 @@ from legoesm.atmosphere.physics.turbulence.holtslag_boville import (
 )
 from legoesm.atmosphere.physics.turbulence.ysu import ysu_turbulence
 from legoesm.atmosphere.physics.turbulence.edmf import edmf_turbulence
-from legoesm.thermo import saturation_mixing_ratio
+from legoesm.thermo import saturation_specific_humidity
 from legoesm.atmosphere.physics.thermodynamics import (
     pressure_from_eos,
     reconstruct_half_level_pressure_hydrostatic,
@@ -706,7 +706,7 @@ def _make_hydrostatic_turbulence(
 
         # Surface conditions
         T_sfc = _resolve_T_sfc(T_col, phys_state)
-        q_sfc = saturation_mixing_ratio(T_sfc, p_full_col[:, -1])
+        q_sfc = saturation_specific_humidity(T_sfc, p_full_col[:, -1])
         # A per-step prescribed surface flux (a diurnal cycle the run-constant
         # config scalar cannot carry) enters here; identity without one.
         step_config = _resolve_prescribed_surface_fluxes(
@@ -927,7 +927,7 @@ def _make_mpas_turbulence(
         # Static switches from the scheme's surface sub-config (the per-step
         # prescribed-flux fold below does not touch these fields).
         _surf = scheme_config.surface
-        q_sfc = saturation_mixing_ratio(T_sfc, p_full_col[:, -1])
+        q_sfc = saturation_specific_humidity(T_sfc, p_full_col[:, -1])
         # The ocean correction is added AFTER the land paths below, on the
         # ocean fraction only, so the land-beta / traced-land humidity keeps
         # today's fresh-water base (codex whole-branch review, P1).
@@ -1063,7 +1063,7 @@ def _make_mpas_turbulence(
                         bulk_scheme=_surf.bulk_scheme,
                         saline_factor=_Q_SAT_SALINE_FACTOR)
                 else:
-                    _q_bulk = saturation_mixing_ratio(_T_bulk, p_full_col[:, -1])
+                    _q_bulk = saturation_specific_humidity(_T_bulk, p_full_col[:, -1])
             # Through the shared helper rather than an inline copy: this
             # branch had its own adjustment, which kept the warmed air while
             # the bulk law dropped the height on a constant-coefficient
@@ -1380,7 +1380,7 @@ def _make_nonhydrostatic_turbulence(
             q_v_col = tracers[..., 0].reshape(ncol, nlev)
 
         T_sfc = _resolve_T_sfc(T_col, phys_state)
-        q_sfc = saturation_mixing_ratio(T_sfc, p_full_col[:, -1])
+        q_sfc = saturation_specific_humidity(T_sfc, p_full_col[:, -1])
 
         # A per-step prescribed surface flux (a diurnal cycle the run-constant
         # config scalar cannot carry) enters here; identity without one.
@@ -1540,7 +1540,7 @@ def _make_spectral_pe_turbulence(
         rho = _compute_rho(T_col, p_full_col, q_v=q_v_col)
 
         T_sfc = _resolve_T_sfc(T_col, phys_state)
-        q_sfc = saturation_mixing_ratio(T_sfc, p_full_col[:, -1])
+        q_sfc = saturation_specific_humidity(T_sfc, p_full_col[:, -1])
         # A per-step prescribed surface flux (a diurnal cycle the run-constant
         # config scalar cannot carry) enters here; identity without one.
         step_config = _resolve_prescribed_surface_fluxes(

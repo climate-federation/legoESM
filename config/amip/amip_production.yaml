@@ -111,6 +111,8 @@ cld_macmic_num_steps: 3     # CAM6 namelist_defaults_cam.xml:1254 (mg2 + clubb_s
 
 # ---- radiation / clouds / microphysics --------------------------------------
 radiation: rrtmg            # rrtmgp builder (CAM6 uses RRTMG; same k-lineage)
+rrtmgp_overhead_layer: true # CAM RRTMG extra layer above the model top (ozone
+                            # column above p_top absorbs; ~2 W/m2 leaves budget)
 # Saturation curve the cloud-cover diagnosis measures RH against.  NAMED, not
 # inherited: the code default is "mixed_phase" and that is the value this deck
 # wants, but the default moved on 2026-09-17 and a default is not a record.
@@ -318,6 +320,7 @@ land_soil_moisture_init_frac: 0.25
 land_stomatal_beta: false
 land_calibrated_physics: true
 land_surface_scheme: two_leaf
+land_canopy_max_iters: 10   # NEW BASELINE 2026-10-05 (user): A/B vs 60 = 4.2x/2.7x faster, land LH -1.5/-3.4 %; see fv3_duo_gaps/q_review/deck_ledgers.md
 # Pinned at the current values (b0 stressed, no interception) so the deck
 # records them; changing either is a labelled land baseline, not a default flip.
 land_canopy_stress_b0: true
@@ -363,6 +366,7 @@ sic_scale: 0.01
 solar_source: spectral_file
 solar_tsi_var: TSI
 solar_spectral_var: SSI_frac
+solar_spectral_band_order: rrtmg_sw   # explicit: SSI_frac is in RRTMG-SW band order (adapt_cmip6_solar.py); 'auto' only inferred it
 ozone_forcing: external
 ghg_forcing: external
 aerosol_forcing: external

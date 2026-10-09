@@ -179,7 +179,6 @@ class AMIPExperimentConfig(NamedTuple):
     # Topography
     topography: str = "flat"  # "flat", "gaussian", or path to NetCDF file
     topo_smoothing: int = 4  # Laplacian smoothing passes
-    topo_edge_blend: float = 0.3  # edge blending strength for cubed-sphere
 
     # Sea ice.  ``T_ice`` is the seawater freezing point used as the
     # SST floor / SIC ramp threshold — NOT the ice surface

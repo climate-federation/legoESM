@@ -197,7 +197,7 @@ def analyse_checkpoint(path, cloud_cfg, ncell):
     """Per-cell cover, radiation-visible vs prognostic paths, and the layer
     fields needed for profiles, from one checkpoint (in global mesh order)."""
     from legoesm.atmosphere.physics.clouds.cloud_fraction import (
-        compute_cloud_properties, cover_saturation_mixing_ratio)
+        compute_cloud_properties, cover_saturation_specific_humidity)
     from legoesm import constants
 
     z = np.load(path)
@@ -239,7 +239,7 @@ def analyse_checkpoint(path, cloud_cfg, ncell):
     lwp_rad, iwp_rad = radiation_paths(props, cloud_cfg)
     g = constants.g
     # the curve the cover scheme itself measured RH against (shared dispatch)
-    q_sat = np.asarray(cover_saturation_mixing_ratio(T, p_full, cloud_cfg))
+    q_sat = np.asarray(cover_saturation_specific_humidity(T, p_full, cloud_cfg))
     out = layer_cover(cf, p_full)
     out.update({
         "iwp_prog": (q_i * dp / g).sum(1), "lwp_prog": (q_c * dp / g).sum(1),

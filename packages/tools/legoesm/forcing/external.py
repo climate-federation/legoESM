@@ -78,6 +78,11 @@ _USSA1976_P_SEALEVEL_PA = 101325.0
 _VOLC_LW_PLANCK_TEMP_K = 220.0
 # Sub-samples per band for the Planck-weight quadrature (numerics only).
 _PLANCK_QUAD_NSUB = 16
+# Solar photosphere temperature [K] for the solar-weighted gray collapse of
+# per-band SW aerosol OD (Kinne / CMIP6 volcanic ``ext_sun``).
+_SOLAR_PLANCK_TEMP_K = 5778.0
+# Wavelength [um] picking the "visible" SW band for the AOD->CCN proxy.
+_VISIBLE_WL_UM = 0.55
 
 
 def _ussa1976_pressure(z_m: np.ndarray) -> np.ndarray:
@@ -153,6 +158,25 @@ def _planck_band_weights(
         b_nu = 2.0 * h * c**2 * nu**3 / np.expm1(x)
         weights[b] = _trapz(b_nu, nu)
     return weights
+
+
+def _collapse_sw_bands(ds, data, dims, band_dim, band="gray"):
+    """Collapse SW band axis ``band_dim`` of ``data`` using the file's OWN band
+    edges ``wl1_sun``/``wl2_sun`` [um] on that dim: ``band="gray"`` -> solar-
+    weighted (5778 K Planck) mean, ``band="vis"`` -> the band containing 550 nm.
+    Returns None when the file carries no edges for ``band_dim`` (caller keeps
+    its flat band mean)."""
+    if "wl1_sun" not in ds or ds["wl1_sun"].dims != (band_dim,):
+        return None
+    wl1 = np.asarray(ds["wl1_sun"].values, dtype=np.float64)
+    wl2 = np.asarray(ds["wl2_sun"].values, dtype=np.float64)
+    ax = dims.index(band_dim)
+    if band == "vis":
+        lo, hi = np.minimum(wl1, wl2), np.maximum(wl1, wl2)
+        i_vis = int(np.flatnonzero((lo <= _VISIBLE_WL_UM) & (hi > _VISIBLE_WL_UM))[0])
+        return np.take(data, i_vis, axis=ax)
+    w = _planck_band_weights(wl1, wl2, _SOLAR_PLANCK_TEMP_K)
+    return np.tensordot(w, np.moveaxis(data, ax, 0), axes=(0, 0)) / w.sum()
 
 
 # ==============================================================================
@@ -495,7 +519,7 @@ def _interp_2d_time(times: np.ndarray, values: np.ndarray, day: float) -> np.nda
 
 @lru_cache(maxsize=16)
 def _load_monthly_zonal_anchored(
-    path: str, varname: str,
+    path: str, varname: str, band: str = "gray",
 ) -> tuple[np.ndarray, object, np.ndarray, np.ndarray]:
     """Load a monthly zonal-mean field from a Zarr store or NetCDF file,
     also returning the first record's CF-time anchor (``first_date``) so
@@ -504,7 +528,9 @@ def _load_monthly_zonal_anchored(
 
     Handles files with full lat/lon grids (e.g. Kinne aerosol files with
     dims ``(time, band, lat, lon)``) by averaging over lon and any extra
-    non-(time, lat) dimensions to produce a ``(ntime, nlat)`` array.
+    non-(time, lat) dimensions to produce a ``(ntime, nlat)`` array.  A SW
+    band dim carrying ``wl1_sun``/``wl2_sun`` edges is instead collapsed by
+    :func:`_collapse_sw_bands` (``band`` = "gray" solar-weighted | "vis").
 
     This matches the API of :func:`_load_monthly_zonal_with_levels`
     used by the ozone loader.
@@ -536,7 +562,6 @@ def _load_monthly_zonal_anchored(
     else:
         mid_days = np.array([15.5 + 30.4375 * m for m in range(12)])
         first_date = None
-    ds.close()
 
     # Average over longitude to produce a zonal mean.
     for lname in ("lon", "longitude"):
@@ -546,8 +571,9 @@ def _load_monthly_zonal_anchored(
             dims.pop(ax)
             break
 
-    # Average over any remaining non-(time, lat) dimensions (e.g. spectral
-    # bands in Kinne aerosol files: (time, lnwl, lat) → (time, lat)).
+    # Collapse any remaining non-(time, lat) dimensions (e.g. spectral
+    # bands in Kinne aerosol files: (time, lnwl, lat) → (time, lat)):
+    # solar-weighted when the file has band edges, else a flat mean.
     lat_name = "lat" if "lat" in dims else "latitude"
     time_name = "time" if "time" in dims else None
     keep = {lat_name}
@@ -555,8 +581,10 @@ def _load_monthly_zonal_anchored(
         keep.add(time_name)
     extra_axes = [i for i, d in enumerate(dims) if d not in keep]
     for ax in sorted(extra_axes, reverse=True):
-        data = np.nanmean(data, axis=ax)
+        collapsed = _collapse_sw_bands(ds, data, dims, dims[ax], band)
+        data = np.nanmean(data, axis=ax) if collapsed is None else collapsed
         dims.pop(ax)
+    ds.close()
 
     return mid_days, first_date, lat, data
 
@@ -578,7 +606,8 @@ def _load_volcanic_cmip6(path: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]
        matches the Kinne aerosol convention (``_load_monthly_zonal_anchored``
        averages non-(time, lat) axes via ``np.nanmean``) and avoids the
        n-bands-dependent inflation that a raw sum over 14 SW bands
-       would introduce.
+       would introduce.  Solar-weighted (:func:`_collapse_sw_bands`) when
+       the file carries ``wl1_sun``/``wl2_sun`` band edges.
 
     Returns ``(mid_days, lat, aod)`` with ``aod`` shape
     ``(ntime, nlat)`` — a drop-in replacement for
@@ -605,7 +634,8 @@ def _load_volcanic_extinction_anchored(
     Reads ``ext_var`` [1/km] on an altitude grid, integrates over altitude
     (trapezoid → AOD), collapses the spectral-band axis to a representative
     single-band broadband AOD via the band-MEAN (Kinne convention; summing
-    bands would inflate it by the band count, not a broadband AOD), and
+    bands would inflate it by the band count, not a broadband AOD) -- or the
+    solar-weighted mean when the file has SW band edges -- and
     returns ``(mid_days, first_date, lat, aod)`` with ``aod`` shape
     ``(ntime, nlat)``.  ``first_date`` is the CF-time anchor so callers can
     map a simulation day onto a multi-year file's absolute axis (1982 El
@@ -666,7 +696,6 @@ def _load_volcanic_extinction_anchored(
         raise ValueError(
             f"No time/month dimension in CMIP6 volcanic file {path!r}",
         )
-    ds.close()
 
     # Trapezoidal integral over altitude: ext [1/km] * dz [km] → AOD.
     # ``np.trapz`` was removed in NumPy 2.x; use the renamed ``trapezoid``.
@@ -675,7 +704,8 @@ def _load_volcanic_extinction_anchored(
     aod_with_bands = _trapz(ext, alt, axis=alt_axis)
     dims_after = [d for i, d in enumerate(dims) if i != alt_axis]
 
-    # Collapse the spectral-band axis to a single broadband AOD via the
+    # Collapse the spectral-band axis to a single broadband AOD: solar-
+    # weighted when the file carries ``wl1_sun``/``wl2_sun``, else the
     # band-mean (see docstring for the Kinne-convention rationale).
     band_dim_name = next(
         (d for d in dims_after if d not in (time_name, "lat", "latitude")),
@@ -683,8 +713,11 @@ def _load_volcanic_extinction_anchored(
     )
     if band_dim_name is not None:
         band_axis = dims_after.index(band_dim_name)
-        aod_with_bands = np.nanmean(aod_with_bands, axis=band_axis)
+        collapsed = _collapse_sw_bands(ds, aod_with_bands, dims_after, band_dim_name)
+        aod_with_bands = (np.nanmean(aod_with_bands, axis=band_axis)
+                          if collapsed is None else collapsed)
         dims_after.pop(band_axis)
+    ds.close()
 
     lat_dim_name = "lat" if "lat" in dims_after else (
         "latitude" if "latitude" in dims_after else None
@@ -706,11 +739,24 @@ def _load_volcanic_cmip6_anchored(
     return _load_volcanic_extinction_anchored(path, "ext_sun", "SW")
 
 
-@lru_cache(maxsize=8)
 def _load_volcanic_lw_absorption_profile(
     path: str,
 ) -> tuple[np.ndarray, object, np.ndarray, np.ndarray, np.ndarray]:
+    """LW absorption profile; see :func:`_load_volcanic_profile`."""
+    return _load_volcanic_profile(path, "lw")
+
+
+@lru_cache(maxsize=8)
+def _load_volcanic_profile(
+    path: str, kind: str = "lw",
+) -> tuple[np.ndarray, object, np.ndarray, np.ndarray, np.ndarray]:
     """CMIP6 volcanic LW aerosol as a PRESSURE-RESOLVED absorption-OD profile.
+
+    ``kind="sw"`` returns the SHORTWAVE ``ext_sun`` EXTINCTION profile instead
+    (the SW slot takes extinction; SSA/g come from the radiation config), with
+    the solar bands collapsed solar-weighted via :func:`_collapse_sw_bands`
+    (flat mean if the file has no ``wl1_sun``/``wl2_sun``).  The B1/B3 notes
+    below are LW-only; B2 (stratospheric placement) applies to both.
 
     Fixes three defects in feeding ``bc_aeropt_cmip6_volc_lw_b16`` to the
     RRTMGP longwave ABSORPTION optical-depth slot:
@@ -747,21 +793,24 @@ def _load_volcanic_lw_absorption_profile(
       = top / lowest pressure), aligned so ``aod_profile[..., j]`` occupies
       ``[p_edges[j], p_edges[j+1]]``.
 
-    Raises ``ValueError`` if the file lacks ``ext_earth`` (caller treats as no
-    LW source and stays byte-identical to no volcanic LW aerosol).
+    Raises ``ValueError`` if the file lacks ``ext_earth`` (``ext_sun`` for
+    SW; caller treats as no profile source and stays byte-identical).
     """
+    ext_name = "ext_sun" if kind == "sw" else "ext_earth"
     ds = _open_forcing_dataset(path)
-    if "ext_earth" not in ds.data_vars:
+    if ext_name not in ds.data_vars:
         ds.close()
         raise ValueError(
-            f"No CMIP6 volcanic LW extinction 'ext_earth' in {path!r}.",
+            f"No CMIP6 volcanic extinction {ext_name!r} in {path!r}.",
         )
-    var = ds["ext_earth"]
+    var = ds[ext_name]
     ext = np.asarray(var.values, dtype=np.float64)  # [1/km]
     dims = list(var.dims)
 
     # B1: single-scattering albedo -> absorption fraction (1-omega) per band.
-    if "omega_earth" in ds.data_vars:
+    if kind == "sw":
+        omega = 0.0  # SW slot wants extinction, not absorption
+    elif "omega_earth" in ds.data_vars:
         omega = np.clip(
             np.asarray(ds["omega_earth"].values, dtype=np.float64), 0.0, 1.0,
         )
@@ -805,7 +854,12 @@ def _load_volcanic_lw_absorption_profile(
          if d not in (time_name, lat_name, alt_name)),
         None,
     )
-    if band_name is not None:
+    if band_name is not None and kind == "sw":
+        collapsed = _collapse_sw_bands(ds, abs_ext, dims, band_name)
+        abs_ext = (np.nanmean(abs_ext, axis=dims.index(band_name))
+                   if collapsed is None else collapsed)
+        dims = [d for d in dims if d != band_name]
+    elif band_name is not None:
         band_axis = dims.index(band_name)
         if "wl1_earth" in ds and "wl2_earth" in ds:
             weights = _planck_band_weights(
@@ -1573,7 +1627,15 @@ def _load_ghg_annual_file(path: str) -> tuple[np.ndarray, dict[str, np.ndarray]]
     years = np.asarray(ds["time"].values, dtype=np.float64)
 
     data = {}
-    for varname in ("CO2", "CH4", "N2O", "CFC_11", "CFC_12"):
+    # Optional halogens (read when present; older files carry only the five):
+    # RRTMGP holds these species at fixed global means otherwise.
+    _optional = tuple(v for v in _GHG_OPTIONAL_HALOGENS if v in ds.data_vars)
+    if len(_optional) < len(_GHG_OPTIONAL_HALOGENS):
+        logger.warning(
+            "GHG file %s lacks %s: RRTMGP keeps its FIXED present-day global "
+            "means for those species (not transient).", path,
+            sorted(set(_GHG_OPTIONAL_HALOGENS) - set(_optional)))
+    for varname in ("CO2", "CH4", "N2O", "CFC_11", "CFC_12") + _optional:
         if varname not in ds.data_vars:
             ds.close()
             raise ValueError(f"Variable {varname!r} not found in {path!r}")
@@ -1677,9 +1739,22 @@ def get_ghg_at_time(config: GHGConfig, day: float) -> dict:
             "n2o_ppbv": _interp_1d(years, data["N2O"], year) * 1.0e9,
             "cfc11_pptv": _interp_1d(years, data["CFC_11"], year) * 1.0e12,
             "cfc12_pptv": _interp_1d(years, data["CFC_12"], year) * 1.0e12,
+            **{key: _interp_1d(years, data[var], year) * 1.0e12
+               for var, (key, _) in _GHG_OPTIONAL_HALOGENS.items()
+               if var in data},
         }
     else:
         raise ValueError(f"Unknown GHG source: {config.source!r}")
+
+
+# File variable -> (get_ghg_at_time key [pptv], RRTMGP gas name).  Physical
+# species, not CFC-equivalents: RRTMGP carries each of these itself (fixed
+# global means in rrtmgp.py otherwise), so equivalents would double count.
+_GHG_OPTIONAL_HALOGENS = {
+    "CFC_22": ("cfc22_pptv", "cfc22"),
+    "CCl4": ("ccl4_pptv", "ccl4"),
+    "CF4": ("cf4_pptv", "cf4"),
+}
 
 
 def ghg_concentrations_to_vmr(ghg: dict) -> dict:
@@ -1703,6 +1778,9 @@ def ghg_concentrations_to_vmr(ghg: dict) -> dict:
         vmr["cfc11"] = ghg["cfc11_pptv"] * 1.0e-12
     if "cfc12_pptv" in ghg:
         vmr["cfc12"] = ghg["cfc12_pptv"] * 1.0e-12
+    for key, gas in _GHG_OPTIONAL_HALOGENS.values():
+        if key in ghg:
+            vmr[gas] = ghg[key] * 1.0e-12
     return vmr
 
 
@@ -1930,6 +2008,9 @@ class AerosolConfig(NamedTuple):
     volcanic_path: str = ""
     volcanic_scale: float = 1.0
     volcanic_lw_enabled: bool = False
+    # Optional separate AOD file for the AOD->CCN proxy (e.g. FINE-mode Kinne
+    # while ``path`` is fine+coarse for radiation).  "" = use ``path``.
+    ccn_path: str = ""
     # Calendar year of simulation day 0.  Required for the non-cyclic
     # dispatch in :func:`get_aerosol_at_time` so multi-year volcanic
     # files (e.g. 1850–2014 CMIP6 ``bc_aeropt_cmip6_volc_*`` with the
@@ -1948,7 +2029,8 @@ def _reference_aerosol_profile(lat_grid: jnp.ndarray, config: AerosolConfig) -> 
 
 
 def get_aerosol_at_time(config: AerosolConfig, day: float,
-                         lat_grid: jnp.ndarray | None = None):
+                         lat_grid: jnp.ndarray | None = None,
+                         band: str = "gray"):
     """Return aerosol optical depth at a given simulation day.
 
     Parameters
@@ -1958,6 +2040,9 @@ def get_aerosol_at_time(config: AerosolConfig, day: float,
         Day of year (fractional).
     lat_grid : jax array or None
         If provided, interpolates AOD to model grid latitudes.
+    band : str
+        Band collapse of a per-band ``config.path`` file with SW band edges:
+        "gray" (solar-weighted, radiation) or "vis" (550 nm band, CCN).
 
     Returns
     -------
@@ -1975,7 +2060,7 @@ def get_aerosol_at_time(config: AerosolConfig, day: float,
         # file would be sampled cyclically (mod 365.25), throwing away
         # interannual evolution.
         mid_days, first_date, lat, data = _load_monthly_zonal_anchored(
-            config.path, "aod",
+            config.path, "aod", band,
         )
         if len(mid_days) > 12:
             file_day = _simday_to_file_day(day, config.start_year, first_date)
@@ -2118,13 +2203,31 @@ def get_aerosol_lw_at_time(config: AerosolConfig, day: float,
     # returns None ⇒ the driver fills zeros ⇒ no-op in RRTMGP.
     if not config.volcanic_lw_enabled or not config.volcanic_path:
         return None
+    return _volcanic_profile_at_time(config, day, lat_grid, "lw")
 
+
+def get_aerosol_sw_volcanic_at_time(config: AerosolConfig, day: float,
+                                    lat_grid: jnp.ndarray | None = None):
+    """SHORTWAVE volcanic extinction as a pressure-resolved profile.
+
+    Same contract as :func:`get_aerosol_lw_at_time` but for ``ext_sun``
+    (solar-weighted gray band collapse), gated on ``volcanic_enabled``.  None
+    for a legacy column ``aod(time, lat)`` volcanic file (no profile) -- the
+    caller then keeps that column inside :func:`get_aerosol_at_time`.
+    """
+    if not config.volcanic_enabled or not config.volcanic_path:
+        return None
+    return _volcanic_profile_at_time(config, day, lat_grid, "sw")
+
+
+def _volcanic_profile_at_time(config, day, lat_grid, kind):
+    """Shared body of the LW / SW volcanic profile samplers."""
     try:
         mid_days_v, first_date_v, lat_v, prof_v, p_edges = (
-            _load_volcanic_lw_absorption_profile(config.volcanic_path)
+            _load_volcanic_profile(config.volcanic_path, kind)
         )
     except ValueError:
-        # File has no LW (``ext_earth``) band — treat as "no LW source".
+        # File has no ext_earth / ext_sun band — treat as "no source".
         return None
 
     # Interpolate the (ntime, nlat, nlayer) profile in time -> (nlat, nlayer).
@@ -2254,7 +2357,14 @@ def get_solar_forcing_at_time(config: SolarConfig, day: float) -> dict:
             config.tsi_var,
             config.spectral_var,
         )
-        tsi_val = _interp_1d(times, tsi_series, abs_day) if tsi_series is not None else float(config.S_0)
+        if tsi_series is None:
+            # Was a silent fall-back to config.S_0: a file without its TSI
+            # variable ran a constant sun while claiming a transient one.
+            raise ValueError(
+                f"Solar TSI variable {config.tsi_var!r} not found in "
+                f"{config.path!r} (solar_source='spectral_file')",
+            )
+        tsi_val = _interp_1d(times, tsi_series, abs_day)
         spec = _interp_2d_time(times, spec_series, abs_day)
         spec = np.clip(spec, 0.0, None)
         # CMIP6 solar files store one fraction per RRTMG-SW band (14 bands).

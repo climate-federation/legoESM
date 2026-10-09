@@ -94,7 +94,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio, saturation_mixing_ratio_dT
+from legoesm.thermo import saturation_specific_humidity, saturation_specific_humidity_dT
 from legoesm.atmosphere.physics._shared import virtual_temperature
 from legoesm.atmosphere.physics.thermodynamics import (
     compute_cape,
@@ -679,7 +679,7 @@ def _kf_downdraft_evaporation(
     """
     dtype = T_env.dtype
     dp = p_half[:, 1:] - p_half[:, :-1]
-    qsat = saturation_mixing_ratio(T_env, p_full)
+    qsat = saturation_specific_humidity(T_env, p_full)
     rh = jnp.clip(q_env / jnp.maximum(qsat, 1.0e-12), 0.0, _KF_DD_RH_CLIP_MAX)
 
     p_source_top = p_lcl[:, None] - _KF_DD_START_DEPTH_PA
@@ -786,8 +786,8 @@ def _kf_mixed_virtual_temperature(
     T0 = f * T_env + (1.0 - f) * T_u
     q0 = f * q_env + (1.0 - f) * q_u
     qc0 = (1.0 - f) * jnp.maximum(q_c_u, 0.0)
-    qsat = saturation_mixing_ratio(T0, p_full)
-    dqs_dT = saturation_mixing_ratio_dT(T0, p_full)
+    qsat = saturation_specific_humidity(T0, p_full)
+    dqs_dT = saturation_specific_humidity_dT(T0, p_full)
     L_over_cp = constants.L_v / constants.c_pd
     delta_q = jnp.clip(
         (q0 - qsat) / (1.0 + L_over_cp * dqs_dT),
@@ -974,7 +974,7 @@ def kain_fritsch_convection(
     # begins at the correct pressure origin.
     T_usl_at_sfc = T_usl * (p_base / jnp.maximum(p_usl, 1.0)) ** constants.kappa
     T_moist = compute_moist_adiabat(T_usl_at_sfc, p_full, q_v_base=q_usl)
-    q_sat_parcel = saturation_mixing_ratio(T_moist, p_full)
+    q_sat_parcel = saturation_specific_humidity(T_moist, p_full)
     q_v_parcel = jnp.minimum(q_usl[:, None], q_sat_parcel)
     cape = compute_cape(
         T, T_moist, p_full, p_half,
@@ -1038,9 +1038,9 @@ def kain_fritsch_convection(
         # (module_cu_kfeta.F lines 996-1017, U00=0.75).  Use the same
         # piecewise reference formula, with qsat/dT from thermo instead of
         # lookup-table coefficients.
-        qsat_lcl_env = saturation_mixing_ratio(T_env_at_lcl, lcl.p_lcl)
+        qsat_lcl_env = saturation_specific_humidity(T_env_at_lcl, lcl.p_lcl)
         rh_lcl = q_env_at_lcl / jnp.maximum(qsat_lcl_env, 1.0e-12)
-        dqssdt = saturation_mixing_ratio_dT(lcl.T_lcl, lcl.p_lcl)
+        dqssdt = saturation_specific_humidity_dT(lcl.T_lcl, lcl.p_lcl)
         dtrh_scale = q_usl / jnp.maximum(dqssdt, 1.0e-12)
         dtrh = jnp.where(
             (rh_lcl >= config.rh_trigger_u00) & (rh_lcl <= config.rh_trigger_rhmax),

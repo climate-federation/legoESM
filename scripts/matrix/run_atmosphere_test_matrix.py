@@ -1385,7 +1385,7 @@ def _biharmonic_visc_latlon(n_lat: int, efold_hours: float = 9.0) -> float:
     modon/Rossby-wave scales this coefficient must preserve.  At n_lat=72: nu4 ~ 2.9e15 m^4/s ->
     tau(checkerboard) = 9 h, tau(1-D 2*dy Nyquist) = 36 h,
     tau(L=3000 km) ~ 0.6 yr, tau(L=4000 km) ~ 2 yr.  Pole rows are
-    further capped inside the model (see ``_nu_del4_row_profiles``).
+    further capped inside the model (see ``nu_del4_row_profiles``).
     """
     import math
     from legoesm import constants
@@ -4634,12 +4634,18 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         config = CGridLatLonPrimitiveEquationConfig(
             A_h=ah, fix_mass=True, anchor_mass_to_initial=True,
             use_polar_filter=_latlon_polar_filter_on(tc.case),
+            sb81_omega_conversion=True,
+            # del-4 on u, v, T (lat-lon shallow-water lane's law and per-row
+            # pole cap); set explicitly for both lat-lon HS cases.
+            nu_del4=_biharmonic_visc_latlon(n_lat),
             sponge_coeff=_sponge_coeff,
             sponge_width_m=_SPONGE_WIDTH_M,
             sponge_scale_height_m=_SPONGE_SCALE_H_M,
             sponge_shape=_SPONGE_SHAPE,
         )
         model = CGridLatLonPrimitiveEquationModel(grid, sigma, config, dt=dt)
+        print(f"  latlon HS dissipation: A_h={config.A_h:.4e} m^2/s, "
+              f"nu_del4={config.nu_del4:.4e} m^4/s, dt={dt:g} s")
         if _topo:
             from legoesm.atmosphere.idealized.held_suarez_topo import (
                 held_suarez_topo_init_latlon)
@@ -5210,6 +5216,7 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         config = CGridLatLonPrimitiveEquationConfig(
             A_h=ah, fix_mass=True, anchor_mass_to_initial=True,
             use_polar_filter=_latlon_polar_filter_on(tc.case),
+            sb81_omega_conversion=True,
         )
         model = CGridLatLonPrimitiveEquationModel(grid, sigma, config, dt=dt)
         if _rotated:
@@ -5827,6 +5834,7 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
         config = CGridLatLonPrimitiveEquationConfig(
             A_h=ah, fix_mass=True, anchor_mass_to_initial=True,
             use_polar_filter=_latlon_polar_filter_on(tc.case),
+            sb81_omega_conversion=True,
         )
         model = CGridLatLonPrimitiveEquationModel(grid, sigma, config, dt=dt)
         state_cc = held_suarez_init_latlon(grid, sigma, T_init=280.0)

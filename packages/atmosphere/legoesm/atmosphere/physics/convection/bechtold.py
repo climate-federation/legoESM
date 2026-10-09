@@ -71,7 +71,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio
+from legoesm.thermo import saturation_mixing_ratio, saturation_specific_humidity
 from legoesm.atmosphere.physics._shared import (
     compute_rho,
     exner_function,
@@ -2288,7 +2288,7 @@ def bechtold_convection(
     T_moist = compute_moist_adiabat(T_parcel_at_sfc, p_full, q_v_base=q_parcel)
     # Virtual-temperature CAPE: parcel vapour (capped at saturation along the
     # ascent) and environment vapour, so buoyancy uses virtual T, not dry T.
-    q_sat_parcel = saturation_mixing_ratio(T_moist, p_full)
+    q_sat_parcel = saturation_specific_humidity(T_moist, p_full)
     q_v_parcel = jnp.minimum(q_parcel[:, None], q_sat_parcel)
     # Integrate CAPE from the parcel's DEPARTURE level upward only: the
     # theta-preserving surface relaunch makes an elevated (PBL-mean) parcel
@@ -2505,7 +2505,7 @@ def bechtold_convection(
     # over — reproducing the IFS bell-shaped M(z) that peaks in the lower
     # troposphere and detrains near cloud top instead of diluting the
     # updraught to neutral buoyancy in the lower troposphere.
-    q_sat_env = saturation_mixing_ratio(T, p_full)               # (ncol, nlev)
+    q_sat_env = saturation_specific_humidity(T, p_full)               # (ncol, nlev)
     # RH capped at 1.0 (_BECHTOLD_RH_CAP) to match IFS MIN(1,q/qsat) in the
     # (1.3-RH)/(1.6-RH) factors below (audit F5; cuascn.F90:510,673).
     RH = jnp.clip(q_v / jnp.maximum(q_sat_env, 1e-12), 0.0, _BECHTOLD_RH_CAP)
@@ -3030,7 +3030,7 @@ def bechtold_convection(
             config.lcl_membership_sharpness
             * (levels_arr[None, :] - k_lcl_smooth[:, None])
         )
-        q_sat_env = saturation_mixing_ratio(T, p_full)
+        q_sat_env = saturation_specific_humidity(T, p_full)
         rh_layer = q_v / jnp.maximum(q_sat_env, 1e-12)
         # The 4 ``* dp_full`` column reductions in this branch
         # (below-LCL mass for ``rh_below`` denom, RH-weighted below-LCL
@@ -3135,7 +3135,7 @@ def bechtold_convection(
             config.lcl_membership_sharpness
             * (levels_arr[None, :] - k_lcl_smooth[:, None])
         )
-        _q_sat_evap = saturation_mixing_ratio(T, p_full)
+        _q_sat_evap = saturation_specific_humidity(T, p_full)
         _rh_evap = jnp.clip(q_v / jnp.maximum(_q_sat_evap, 1e-12), 0.0, None)
         # Soft-gather the environment RH at the smooth cloud base / top for
         # the RCUCOV area RH-enhancement (the shared Gaussian-softmax gather;

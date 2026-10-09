@@ -162,7 +162,9 @@ def test_no_cloud_edge_dipole():
     # ZMFS = 0.96, so the retype and the closure rescale are both inert here
     # and the value is set by the half-level ZDH alone.  A band, not a floor,
     # so drift in EITHER direction trips.
-    assert 0.2 < float(np.max(np.abs(dT_day))) < 0.5
+    # RE-BANDED 2026-09-29 (specific-basis LCL moved the fixture sounding):
+    # MEASURED 0.150 K/day, ktype still 2; band kept at the same +-40 %.
+    assert 0.09 < float(np.max(np.abs(dT_day))) < 0.21
 
 
 def test_ktype_reclassified_against_ascent_top():

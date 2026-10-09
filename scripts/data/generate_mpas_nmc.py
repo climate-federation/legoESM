@@ -28,7 +28,7 @@ from legoesm.driver.config import DycoreConfig
 from legoesm.grids.factory import create_grid
 from legoesm.grids.vertical import create_sigma_coordinate, make_hybrid_levels
 from legoesm.grids.voronoi import reconstruct_cell_velocity
-from legoesm.training.era5_to_state import era5_to_mpas_carry
+from legoesm.training.era5_to_state import era5_to_mpas_carry, era5_terrain_product
 from legoesm.training.rda_era5 import load_rda_era5_slice
 
 set_policy(PrecisionPolicy.fp64())
@@ -181,7 +181,8 @@ def main() -> None:
 
     def initial_state(time: datetime) -> HydrostaticState:
         era5 = load_rda_era5_slice(era5_root, time)
-        carry = era5_to_mpas_carry(era5, mesh, sigma, smoothing_passes=smoothing)
+        carry = era5_to_mpas_carry(
+            era5, mesh, sigma, target_phis=era5_terrain_product(era5, mesh, passes=smoothing))
         return _state_from_carry(carry)
 
     print(f"backend={jax.default_backend()} devices={jax.devices()}", flush=True)

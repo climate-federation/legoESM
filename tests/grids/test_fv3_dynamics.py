@@ -217,7 +217,7 @@ def _moist(zvir, sphum_index):
 
 
 def _run_np(ctx, eta, *, hydrostatic, k_split=1, n_split=2, zvir=0.0,
-            sphum_index=None, q_scale=1.0):
+            sphum_index=None, q_scale=1.0, cfg=None):
     ak, bk, ptop = eta
     st = _state(hydrostatic)
     q = _tracers(scale=q_scale)
@@ -225,12 +225,13 @@ def _run_np(ctx, eta, *, hydrostatic, k_split=1, n_split=2, zvir=0.0,
     npdyn.fv_dynamics_step(ctx, st, press,
                            q=q, **_common(ptop, ak, bk, hydrostatic,
                                           k_split, n_split),
-                           **_moist(zvir, sphum_index))
+                           **_moist(zvir, sphum_index), cfg=cfg)
     return st, press, q
 
 
 def _run_jax(jctx, eta, *, hydrostatic, k_split=1, n_split=2, zvir=0.0,
-             sphum_index=None, q_scale=1.0, batched=False, consv_te=0.0):
+             sphum_index=None, q_scale=1.0, batched=False, consv_te=0.0,
+             cfg=None):
     ak, bk, ptop = eta
     jst = state_3d_to_jax(_state(hydrostatic))
     # Tracer-major, matching this module's contract (nq entries, each
@@ -243,7 +244,8 @@ def _run_jax(jctx, eta, *, hydrostatic, k_split=1, n_split=2, zvir=0.0,
     return jdyn.fv_dynamics_step(jctx, jst, press, q=q, batched=batched,
                                  **_common(ptop, ak, bk, hydrostatic,
                                            k_split, n_split),
-                                 **_moist(zvir, sphum_index), **_extra)
+                                 **_moist(zvir, sphum_index), **_extra,
+                                 cfg=cfg)
 
 
 def _out_state(got):
@@ -951,3 +953,62 @@ def test_batched_jit_matches_eager(jctx, eta):
         assert_batched_matches_loop(
             jitted[nm], eager[nm], f"fv_dynamics_step[jit,{nm}]",
             rtol=5e-12, atol=5e-12)
+
+
+# --------------------------------------------------------------------
+# Decision B1 (2026-10-02): additive del-2 top sponge through the deck
+# --------------------------------------------------------------------
+
+SPONGE = {"sponge_del2_top_layers": 2, "sponge_del2_top_factor": 8.0,
+          "sponge_d2_top": 0.05}
+
+
+def _sponge_deck(**over):
+    from legoesm.core.fv3_duo_stepper import SWConfig
+    from legoesm.core.fv3_native_dsw_phase_3d import DUO_DECK_CFG
+    from legoesm.core.fv3_native_dsw_tail_3d import DUO_TAIL_CFG
+    return SWConfig.from_mapping({**DUO_DECK_CFG, **DUO_TAIL_CFG, **over})
+
+
+def test_top_sponge_full_step_parity_against_the_spec(ctx, jctx, eta):
+    """Sponge ON through both lanes' decks (NumPy: the cfg dict overlay;
+    JAX: the merged SWConfig): the step agrees at the parity gate and
+    the sponge moved the top-layer wind."""
+    ref_state, _, _ = _run_np(ctx, eta, hydrostatic=True, cfg=dict(SPONGE))
+    got = _out_state(_run_jax(jctx, eta, hydrostatic=True,
+                              cfg=_sponge_deck(**SPONGE)))
+    off = _out_state(_run_jax(jctx, eta, hydrostatic=True))
+    for nm in ("delp", "pt", "u", "v"):
+        want = np.stack([np.asarray(ref_state[t][nm]) for t in range(6)])
+        assert_real(want, f"numpy {nm} (sponge)")
+        cmp_fields(np.asarray(got[nm]), want, f"{nm} (sponge)", tol=3.2e-10)
+    du = np.abs(np.asarray(got["u"]) - np.asarray(off["u"]))
+    assert np.nanmax(du[..., 0]) > 0.0           # top layer moved
+    assert np.nanmax(du[..., 0]) > np.nanmax(du[..., -1])   # sponge is a TOP effect
+
+
+def test_top_sponge_batched_matches_loop(jctx, eta):
+    loop = _run_jax(jctx, eta, hydrostatic=True, k_split=2,
+                    cfg=_sponge_deck(**SPONGE))
+    bat = _run_jax(jctx, eta, hydrostatic=True, k_split=2, batched=True,
+                   cfg=_sponge_deck(**SPONGE))
+    for nm in ("state", "press", "q", "omga"):
+        assert_batched_matches_loop(bat[nm], loop[nm],
+                                    f"fv_dynamics_step[{nm},sponge]",
+                                    rtol=5e-12, atol=5e-12)
+
+
+def test_top_sponge_off_deck_is_bitwise_the_default(jctx, eta):
+    """layers=0 (and a zero coefficient with layers=2) through the merged
+    deck reproduce the cfg=None step bit for bit, loop and batched."""
+    for batched in (False, True):
+        ref = _run_jax(jctx, eta, hydrostatic=True, batched=batched)
+        for over in ({"sponge_del2_top_layers": 0},
+                     {"sponge_del2_top_layers": 2, "sponge_d2_top": 0.0}):
+            got = _run_jax(jctx, eta, hydrostatic=True, batched=batched,
+                           cfg=_sponge_deck(**over))
+            for nm in ("state", "press", "q"):
+                la = jax.tree_util.tree_leaves(got[nm])
+                lb = jax.tree_util.tree_leaves(ref[nm])
+                assert all(np.asarray(a).tobytes() == np.asarray(b).tobytes()
+                           for a, b in zip(la, lb)), (batched, over, nm)

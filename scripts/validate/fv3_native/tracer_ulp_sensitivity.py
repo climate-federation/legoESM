@@ -117,12 +117,15 @@ def main(argv=None) -> int:
     jax.config.update("jax_enable_x64", True)
     import jax.numpy as jnp
     from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
-        FV3DuoConfig, FV3DuoDynamicsModel)
+    FV3DuoConfig,
+    FV3DuoDynamicsModel,
+    ORACLE_DAMPING,
+)
     from legoesm.core.fv3_native_dcmip16_ic import TERM_QCLY
     from legoesm.grids.factory import create_fv3_duo_grid
 
     grid = create_fv3_duo_grid(args.n)
-    model = FV3DuoDynamicsModel(grid, FV3DuoConfig(km=args.km, hydrostatic=True,
+    model = FV3DuoDynamicsModel(grid, FV3DuoConfig(**ORACLE_DAMPING, km=args.km, hydrostatic=True,
                                                    n_split=args.n_split))
     ic = model.dcmip16_initial_state(do_pert=True, terminator=True)
     # q = [sphum, cl, cl2]

@@ -15,6 +15,7 @@ from legoesm.atmosphere.physics.neural_physics import (
     build_column_physics,
     make_column_physics_fn,
 )
+from legoesm.training.era5_to_state import era5_terrain_product
 from legoesm.atmosphere.physics.neural_physics import NeuralPhysics
 
 
@@ -162,7 +163,8 @@ def _mini_spectral_state(grid, nlev, q_v_val=0.005):
         lat=np.asarray(grid.lat), lon=np.asarray(grid.lon),
         plev_Pa=plev,
     )
-    return era5_to_spectral_carry(era5, grid, sigma), sigma
+    return era5_to_spectral_carry(
+        era5, grid, sigma, target_phis=era5_terrain_product(era5, grid)), sigma
 
 
 def test_column_physics_responds_to_prescribed_sst():

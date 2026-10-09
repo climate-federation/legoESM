@@ -34,6 +34,7 @@ _OPTIONAL_3D_OUTPUT_FIELDS = (
     "dN_r_dt",
     "dN_i_dt",
 )
+from legoesm.training.era5_to_state import era5_terrain_product
 
 
 # ---------------------------------------------------------------------------
@@ -637,7 +638,8 @@ class TestERA5ToState:
             plev_Pa=plev_Pa,
         )
 
-        carry = era5_to_cubedsphere_carry(era5, _GRID, _SIGMA)
+        carry = era5_to_cubedsphere_carry(era5, _GRID, _SIGMA,
+                                          target_phis=era5_terrain_product(era5, _GRID))
 
         expected_3d = (6, N, N, NLEV)
         expected_2d = (6, N, N)
@@ -682,7 +684,8 @@ class TestERA5ToState:
             plev_Pa=plev_Pa,
         )
 
-        carry = era5_to_cubedsphere_carry(era5, _GRID, _SIGMA)
+        carry = era5_to_cubedsphere_carry(era5, _GRID, _SIGMA,
+                                          target_phis=era5_terrain_product(era5, _GRID))
 
         assert jnp.all(jnp.isfinite(carry.T)), "T non-finite with Tibet phis"
         assert jnp.all(jnp.isfinite(carry.u)), "u non-finite with Tibet phis"
@@ -691,12 +694,10 @@ class TestERA5ToState:
         assert jnp.all(carry.p_s > 0), "p_s has non-positive values after correction"
 
     def test_era5_to_cubedsphere_carry_hybrid_ps_floor(self):
-        """With L40 hybrid coordinate and Tibet-like p_s << p_ref, the p_s floor
-        must be enforced and phis adjusted so that all hybrid layer thicknesses
-        remain positive (no degenerate/inverted levels).  Without this fix, 19 of
-        40 levels are underground at p_s=56703 Pa and the arch-peak at lev 28–29
-        has dp = −1 Pa, causing catastrophic continuity-equation blow-up."""
-        import jax.numpy as jnp
+        """With L40 hybrid coordinate and Tibet-like p_s << p_ref, 19 of 40
+        levels would be underground at p_s=56703 Pa and the arch-peak at lev
+        28-29 has dp = -1 Pa (continuity blow-up).  The carry refuses the
+        column instead of lowering the terrain product (decision C)."""
         from legoesm.grids.vertical import standard_hybrid_levels
         from legoesm.training.era5_to_state import ERA5Slice, era5_to_cubedsphere_carry
 
@@ -724,36 +725,12 @@ class TestERA5ToState:
             plev_Pa=plev_Pa,
         )
 
-        carry = era5_to_cubedsphere_carry(era5, _GRID, sigma40)
-
-        # All fields must be finite
-        assert jnp.all(jnp.isfinite(carry.T)), "T non-finite after p_s floor"
-        assert jnp.all(jnp.isfinite(carry.u)), "u non-finite after p_s floor"
-        assert jnp.all(jnp.isfinite(carry.p_s)), "p_s non-finite after p_s floor"
-        assert jnp.all(jnp.isfinite(carry.phis)), "phis non-finite after p_s floor"
-
-        # p_s must be at or above the minimum level where all hybrid layers
-        # have positive thickness (dp_floor=100 Pa).  Compute floor from the
-        # hybrid coordinate definition: p = A*p_ref + B*p_s, so minimum p_s
-        # that keeps all layers positive is where A[-1] + B[-1]*p_s = A[-2] + B[-2]*p_s
-        # i.e. p_s_floor = max over k of (A[k-1]-A[k])/(B[k]-B[k-1])+dp_floor/B_mean.
-        # Simpler: p_s_floor via the constraint that the lowest full level stays
-        # above the surface. Just verify the model enforces a positive floor.
-        assert float(jnp.min(carry.p_s)) > 0.0, "p_s must be positive everywhere"
-        # And that the floor was applied: Tibet column p_s=56703 Pa should be raised
-        assert float(jnp.min(carry.p_s)) > 56703.0, (
-            f"p_s floor not applied: min p_s={float(jnp.min(carry.p_s)):.1f} Pa "
-            f"still at Tibet value 56703 Pa"
-        )
-
-        # All L40 hybrid layer thicknesses must be positive for every column
-        A_full = jnp.asarray(sigma40.A_full)
-        B_full = jnp.asarray(sigma40.B_full)
-        p_model = A_full * sigma40.p_ref + B_full * carry.p_s[..., None]  # (6,N,N,40)
-        dp = jnp.diff(p_model, axis=-1)  # (6,N,N,39)
-        assert float(jnp.min(dp)) >= -1.0, (
-            f"Negative layer thickness dp_min={float(jnp.min(dp)):.2f} Pa after p_s floor"
-        )
+        # decision C (2026-10-02): the product is fixed; a hybrid table whose
+        # positive-thickness floor the Tibet column violates is REFUSED, not
+        # lowered (the latlon/spectral carries share this helper)
+        with pytest.raises(ValueError, match="positive-thickness floor"):
+            era5_to_cubedsphere_carry(era5, _GRID, sigma40,
+                                      target_phis=era5_terrain_product(era5, _GRID))
 
     def test_era5_to_mpas_carry_phis_smoothing(self):
         """The MPAS carry smooths raw ERA5 phis on the Voronoi mesh (default
@@ -796,8 +773,10 @@ class TestERA5ToState:
             plev_Pa=plev_Pa,
         )
 
-        carry_smooth = era5_to_mpas_carry(era5, mesh, sigma, smoothing_passes=4)
-        carry_raw = era5_to_mpas_carry(era5, mesh, sigma, smoothing_passes=0)
+        carry_smooth = era5_to_mpas_carry(
+            era5, mesh, sigma, target_phis=era5_terrain_product(era5, mesh, passes=4))
+        carry_raw = era5_to_mpas_carry(
+            era5, mesh, sigma, target_phis=era5_terrain_product(era5, mesh, passes=0))
 
         # Finite + physical
         for name, arr in (("T", carry_smooth.T), ("u", carry_smooth.u),
@@ -826,21 +805,17 @@ class TestERA5ToState:
             np.asarray(carry_smooth.p_s), np.asarray(carry_raw.p_s)
         ), "barometric p_s correction had no effect"
 
-    def test_era5_to_cubedsphere_carry_converts_q_to_mixing_ratio(self):
-        """Cross-grid parity with the latlon carry's q→mixing-ratio lock
-        (``test_era5_load_regrid_to_reference_column_state_integration``): the
-        cubed-sphere carry must ALSO convert ERA5 SPECIFIC humidity to MIXING ratio
-        ``r = q/(1−q)`` (each ``era5_to_*_carry`` applies it independently, line 559;
-        a refactor dropping it from THIS carry would silently leave the reference q as
-        specific humidity — a moisture bias on every cubed-sphere run).  A CONSTANT
-        ``q`` makes the test robust to the (nonlinear) convert-vs-regrid order: both
-        give ``r`` for a uniform field."""
-        import jax.numpy as jnp
-        from legoesm.thermo import specific_humidity_to_mixing_ratio
+    def test_era5_to_cubedsphere_carry_loads_q_as_specific_humidity(self):
+        """Cross-grid parity: every ``era5_to_*_carry`` loads ERA5 SPECIFIC
+        humidity AS IS (the tracer convention on every lane, thermo.py
+        "Conventions", 2026-09-28).  The former ``r = q/(1-q)`` conversion
+        over-counted column water by q/(1-q) against the sum(q dp)/g
+        bookkeeping.  q0 = 0.02 so the test separates q from r = 0.0204
+        at the 2e-3 tolerance (a 5e-3 field could not)."""
         from legoesm.training.era5_to_state import ERA5Slice, era5_to_cubedsphere_carry
 
         n_lat, n_lon, n_plev = 18, 36, 4
-        q0 = 5e-3
+        q0 = 0.02
 
         def const(v):
             return np.full((n_lat, n_lon, n_plev), v, dtype=np.float32)
@@ -853,25 +828,20 @@ class TestERA5ToState:
             lat=np.linspace(-np.pi / 2, np.pi / 2, n_lat),
             lon=np.linspace(0, 2 * np.pi, n_lon, endpoint=False),
             plev_Pa=np.array([5000.0, 25000.0, 50000.0, 100000.0], dtype=np.float64))
-        carry = era5_to_cubedsphere_carry(era5, _GRID, _SIGMA)
-        expected_r = float(specific_humidity_to_mixing_ratio(jnp.asarray(q0)))
-        # The uniform specific humidity becomes the (larger) MIXING ratio everywhere.
-        np.testing.assert_allclose(np.asarray(carry.q_v), expected_r, rtol=2e-3)
-        assert expected_r > q0          # mixing ratio strictly exceeds specific humidity
+        carry = era5_to_cubedsphere_carry(era5, _GRID, _SIGMA,
+                                          target_phis=era5_terrain_product(era5, _GRID))
+        np.testing.assert_allclose(np.asarray(carry.q_v), q0, rtol=2e-3)
+        assert abs(q0 / (1.0 - q0) - q0) > 4e-3 * q0   # r would FAIL the check above
 
-    def test_era5_to_spectral_carry_converts_q_to_mixing_ratio(self):
-        """The LAST carry to reach q→mixing-ratio parity (after latlon/MPAS/cubed-
-        sphere): the SPECTRAL carry must ALSO convert ERA5 SPECIFIC humidity to MIXING
-        ratio ``r = q/(1−q)`` (line 462) — previously only its dispatch NAME was
-        tested.  ``carry.q_v`` is the grid-space tracer (a constant field is invariant
-        under the latlon→Gaussian regrid, so it equals ``r`` everywhere)."""
-        import jax.numpy as jnp
+    def test_era5_to_spectral_carry_loads_q_as_specific_humidity(self):
+        """The SPECTRAL carry loads ERA5 SPECIFIC humidity AS IS (see the
+        cubed-sphere twin).  ``carry.q_v`` is the grid-space tracer (a constant
+        field is invariant under the latlon→Gaussian regrid)."""
         from legoesm.grids.gaussian import create_gaussian_grid
-        from legoesm.thermo import specific_humidity_to_mixing_ratio
         from legoesm.training.era5_to_state import ERA5Slice, era5_to_spectral_carry
 
         n_lat, n_lon, n_plev = 18, 36, 4
-        q0 = 5e-3
+        q0 = 0.02
 
         def const(v):
             return np.full((n_lat, n_lon, n_plev), v, dtype=np.float32)
@@ -884,11 +854,11 @@ class TestERA5ToState:
             lat=np.linspace(np.pi / 2, -np.pi / 2, n_lat),   # descending (ERA5 convention)
             lon=np.linspace(0, 2 * np.pi, n_lon, endpoint=False),
             plev_Pa=np.array([5000.0, 25000.0, 50000.0, 100000.0], dtype=np.float64))
+        g8 = create_gaussian_grid(8)
         carry = era5_to_spectral_carry(
-            era5, create_gaussian_grid(8), create_sigma_coordinate(5))
-        expected_r = float(specific_humidity_to_mixing_ratio(jnp.asarray(q0)))
-        np.testing.assert_allclose(np.asarray(carry.q_v), expected_r, rtol=2e-3)
-        assert expected_r > q0          # mixing ratio strictly exceeds specific humidity
+            era5, g8, create_sigma_coordinate(5), target_phis=era5_terrain_product(era5, g8))
+        np.testing.assert_allclose(np.asarray(carry.q_v), q0, rtol=2e-3)
+        assert abs(q0 / (1.0 - q0) - q0) > 4e-3 * q0   # r would FAIL the check above
 
     def test_era5_to_cubedsphere_carry_regrids_phis_into_the_state(self):
         """``era5_to_*_carry`` builds a FULL reference state — used both as the compare
@@ -914,7 +884,8 @@ class TestERA5ToState:
             lat=np.linspace(np.pi / 2, -np.pi / 2, n_lat),
             lon=np.linspace(0, 2 * np.pi, n_lon, endpoint=False),
             plev_Pa=np.array([5000.0, 25000.0, 50000.0, 100000.0], dtype=np.float64))
-        carry = era5_to_cubedsphere_carry(era5, _GRID, _SIGMA)
+        carry = era5_to_cubedsphere_carry(era5, _GRID, _SIGMA,
+                                          target_phis=era5_terrain_product(era5, _GRID))
         np.testing.assert_allclose(np.asarray(carry.phis), phis0, rtol=1e-4)
 
 

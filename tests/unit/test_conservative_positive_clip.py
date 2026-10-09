@@ -793,3 +793,60 @@ class TestNonConservingFormsWarn:
             base.validate_strict()
         assert not any("NON-CONSERVING" in r.message
                        for r in caplog.records)
+
+
+def test_area_weight_is_scale_safe_for_fp32_number_tracers():
+    """codex 2026-10-02 P1, re-pinned on the merged ``area=`` API: with x64
+    OFF (the driver default) the global residual's sums are fp32, and an
+    Earth-scale raw ``dp*area`` total on a per-mass number field puts
+    ``total**2`` past fp32's range inside the quotient VJP, silently
+    zeroing the residual's gradient term.  ``area`` enters as a ratio to
+    its mean, so the fp32 gradient matches fp64; ``area_ref=1.0`` (the raw
+    dimensional area) is the control that loses it."""
+    from legoesm.core.conservation import conservative_positive_clip_global
+
+    N = np.asarray([[4e4, 3e4, 2e4, 1e4], [-1e4, -1e4, -1e4, -1e4]])
+    dp = np.full((2, 4), 1e4)
+    area = np.asarray([1e12, 2e12])
+
+    def grad(dtype, area_ref=None):
+        def total(q):
+            return jnp.sum(conservative_positive_clip_global(
+                q, jnp.asarray(dp, dtype), area=jnp.asarray(area, dtype),
+                area_ref=area_ref)[0])
+        return np.asarray(jax.grad(total)(jnp.asarray(N, dtype)),
+                          dtype=np.float64)
+
+    g64 = grad(jnp.float64)
+    with jax.enable_x64(False):
+        g32 = grad(jnp.float32)
+        g_raw = grad(jnp.float32, area_ref=1.0)
+    assert np.isfinite(g32).all()
+    np.testing.assert_allclose(g32, g64, rtol=1e-4, atol=1e-6)
+    assert np.max(np.abs(g_raw - g64)) > 0.05          # raw area loses it
+
+
+def test_area_ref_is_a_pure_scale_and_must_be_partition_independent():
+    """A uniform ``area_ref`` cancels in the redistribution factor (same
+    output for the mean, the raw area and an arbitrary scale), so the only
+    requirement is that every rank use the SAME one: emulating a per-rank
+    local mean (each half of the cells normalised by its own mean inside
+    one global residual) changes the answer."""
+    from legoesm.core.conservation import conservative_positive_clip_global
+
+    rng = np.random.default_rng(3)
+    q = rng.uniform(0.0, 1.0, (40, 8))
+    q[[2, 7, 30], :] = -0.05                     # net-negative columns
+    q, w = jnp.asarray(q), jnp.asarray(rng.uniform(0.5, 1.5, 8))
+    area = jnp.asarray(np.linspace(1.0, 4.0, 40))     # asymmetric halves
+    full = np.asarray(conservative_positive_clip_global(q, w, area=area)[0])
+    for ref in (1.0, 3.7e10, float(area.mean())):
+        np.testing.assert_allclose(
+            np.asarray(conservative_positive_clip_global(
+                q, w, area=area, area_ref=ref)[0]), full, rtol=1e-12)
+    a0, a1 = area[:20], area[20:]
+    assert float(a1.mean()) > 1.5 * float(a0.mean())  # the ranks' means differ
+    per_rank = jnp.concatenate([a0 / a0.mean(), a1 / a1.mean()])
+    wrong = np.asarray(conservative_positive_clip_global(
+        q, w, area=per_rank, area_ref=1.0)[0])
+    assert not np.allclose(wrong, full, rtol=1e-9)

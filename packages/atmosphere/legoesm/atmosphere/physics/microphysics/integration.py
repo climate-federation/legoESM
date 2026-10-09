@@ -406,6 +406,8 @@ def _make_hydrostatic_microphysics(
                     T=T_col, p=p_full_col,
                     aerosol_number=(
                         None if _aer_num is None else jnp.asarray(_aer_num)),
+                    ccn_aod=(forcing.get("aerosol_ccn_aod")
+                             if forcing is not None else None),
                 ),
             )
 

@@ -4,7 +4,6 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import jax
 import jax.numpy as jnp
 import numpy as np
 import numpy.testing as npt
@@ -15,14 +14,11 @@ from legoesm.grids.topography import (
     TopographyConfig,
     load_real_topography,
     _regrid_to_target,
-    _derive_land_fraction,
-    _laplacian_smooth_cubed_sphere,
-    _laplacian_smooth_gaussian,
-    _laplacian_smooth_voronoi,
-    smooth_phis_voronoi,
+    _neighbour_table,
+    bin_latlon_to_cells,
+    masked_diffusion,
     gaussian_mountain,
     phis_from_topography,
-    land_mask_from_topography,
 )
 
 
@@ -129,138 +125,201 @@ class TestRegridding(unittest.TestCase):
         self.assertEqual(result.shape, (6, 8, 8))
 
 
-class TestLandFraction(unittest.TestCase):
-    """Test sub-grid land fraction derivation."""
+class TestBinning(unittest.TestCase):
+    """The product's binning: nearest-centre ownership, source-area
+    weighted; land fraction and elevation from the SAME binning."""
 
-    def test_all_ocean(self):
-        """Negative elevation everywhere should give f_land=0."""
-        lat_src = np.linspace(-90, 90, 37)
-        lon_src = np.linspace(0, 355, 72)
-        elev = np.full((37, 72), -3000.0)
+    def _targets(self, dlat=10.0, dlon=10.0):
+        lat = np.arange(-85.0, 90.0, dlat)
+        lon = np.arange(5.0, 360.0, dlon)
+        lo, la = np.meshgrid(lon, lat)
+        return np.deg2rad(la).ravel(), np.deg2rad(lo).ravel(), la, lo
 
-        target_lat = np.array([0.0, 45.0])
-        target_lon = np.array([90.0, 180.0])
+    def test_all_ocean_and_all_land(self):
+        lat_src = np.linspace(-89.5, 89.5, 180)
+        lon_src = np.linspace(0.5, 359.5, 360)
+        la, lo, _, _ = self._targets()
+        for val, want in ((-3000.0, 0.0), (500.0, 1.0)):
+            elev = np.full((180, 360), val)
+            z, f = bin_latlon_to_cells(lat_src, lon_src,
+                                       [np.maximum(elev, 0.0), (elev > 0).astype(float)], la, lo)
+            npt.assert_allclose(f, want)
+            npt.assert_allclose(z, max(val, 0.0))
 
-        f_land = _derive_land_fraction(
-            lat_src, lon_src, elev, target_lat, target_lon, 5.0
-        )
-        npt.assert_allclose(f_land, 0.0)
-
-    def test_all_land(self):
-        """Positive elevation everywhere should give f_land=1."""
-        lat_src = np.linspace(-90, 90, 37)
-        lon_src = np.linspace(0, 355, 72)
-        elev = np.full((37, 72), 500.0)
-
-        target_lat = np.array([0.0, 45.0])
-        target_lon = np.array([90.0, 180.0])
-
-        f_land = _derive_land_fraction(
-            lat_src, lon_src, elev, target_lat, target_lon, 5.0
-        )
-        npt.assert_allclose(f_land, 1.0)
-
-    def test_mixed_gives_fractional(self):
-        """Coast regions should have fractional land."""
-        lat_src = np.linspace(-90, 90, 181)
-        lon_src = np.linspace(0, 359, 360)
+    def test_coast_cell_is_fractional_and_uses_the_same_samples(self):
+        lat_src = np.linspace(-89.5, 89.5, 180)
+        lon_src = np.linspace(0.5, 359.5, 360)
         lat2d, _ = np.meshgrid(lat_src, lon_src, indexing="ij")
-        # Land above 30N, ocean below
-        elev = np.where(lat2d > 30.0, 500.0, -3000.0)
+        elev = np.where(lat2d > 34.0, 500.0, -3000.0)
+        la, lo, la_deg, _ = self._targets()
+        z, f = bin_latlon_to_cells(lat_src, lon_src,
+                                   [np.maximum(elev, 0.0), (elev > 0).astype(float)], la, lo)
+        coast = np.isclose(la_deg.ravel(), 35.0)
+        # the 10-degree cell centred on 35N (30N..40N) holds the 34N coast:
+        # fractional, and its elevation is the SAME samples' mean
+        self.assertTrue(np.all((f[coast] > 0.4) & (f[coast] < 0.8)), f[coast])
+        npt.assert_allclose(z[coast], 500.0 * f[coast], rtol=1e-12)
+        npt.assert_allclose(f[la_deg.ravel() >= 45.0], 1.0)
+        npt.assert_allclose(f[la_deg.ravel() <= 25.0], 0.0)
 
-        # Target point right at boundary
-        target_lat = np.array([30.0])
-        target_lon = np.array([180.0])
+    def test_area_integral_is_conserved(self):
+        from legoesm.grids.topography import _source_cell_areas
+        lat_src = np.linspace(-89.5, 89.5, 180)
+        lon_src = np.linspace(0.5, 359.5, 360)
+        rng = np.random.default_rng(0)
+        elev = rng.uniform(0.0, 1000.0, (180, 360))
+        la, lo, _, _ = self._targets()
+        (z,) = bin_latlon_to_cells(lat_src, lon_src, [elev], la, lo)
+        a_src = _source_cell_areas(lat_src, lon_src)
+        npt.assert_allclose(a_src.sum(), 4.0 * np.pi, rtol=1e-12)
+        # ownership partitions the source: sum_cells z_c * A_c == sum_src elev * a
+        from scipy.spatial import cKDTree
+        cl = np.cos(la)
+        xyz_c = np.stack([cl * np.cos(lo), cl * np.sin(lo), np.sin(la)], -1)
+        lo2, la2 = np.meshgrid(np.deg2rad(lon_src), np.deg2rad(lat_src))
+        cs = np.cos(la2.ravel())
+        xyz_s = np.stack([cs * np.cos(lo2.ravel()), cs * np.sin(lo2.ravel()),
+                          np.sin(la2.ravel())], -1)
+        owner = cKDTree(xyz_c).query(xyz_s)[1]
+        a_c = np.bincount(owner, weights=a_src.ravel(), minlength=la.size)
+        npt.assert_allclose(np.sum(z * a_c), np.sum(elev * a_src), rtol=1e-12)
 
-        f_land = _derive_land_fraction(
-            lat_src, lon_src, elev, target_lat, target_lon, 5.0
-        )
-        # Should be around 0.5 at the boundary
-        self.assertGreater(float(f_land[0]), 0.2)
-        self.assertLess(float(f_land[0]), 0.8)
+    def test_polar_cell_is_land(self):
+        lat_src = np.linspace(-89.5, 89.5, 180)
+        lon_src = np.linspace(0.5, 359.5, 360)
+        elev = np.full((180, 360), -3000.0)
+        elev[lat_src <= -60.0, :] = 2500.0
+        la, lo, la_deg, _ = self._targets()
+        (f,) = bin_latlon_to_cells(lat_src, lon_src, [(elev > 0).astype(float)], la, lo)
+        npt.assert_allclose(f[la_deg.ravel() <= -75.0], 1.0)
+
+    def test_latlon_box_ownership_is_exact(self):
+        from legoesm.grids.factory import create_grid
+        from legoesm.grids.topography import owner_by_boxes
+        grid = create_grid("latlon", 16)
+        lat_c, lon_c = np.asarray(grid.lat), np.asarray(grid.lon)
+        n_lat, n_lon = lat_c.size, lon_c.size
+        # the centres own themselves; a point just east of a centre's box
+        # edge belongs to the next column (periodic at the dateline)
+        lo, la = np.meshgrid(lon_c, lat_c)
+        own = owner_by_boxes(la.ravel(), lo.ravel(), lat_c, lon_c)
+        npt.assert_array_equal(own, np.arange(n_lat * n_lon))
+        dlon = 2.0 * np.pi / n_lon
+        own2 = owner_by_boxes(la.ravel(), lo.ravel() + 0.51 * dlon, lat_c, lon_c)
+        npt.assert_array_equal(own2 % n_lon, (np.arange(n_lat * n_lon) + 1) % n_lon)
+
+    def test_descending_source_latitudes_bin_the_same(self):
+        """ERA5-style north-to-south sources give the same product."""
+        from legoesm.grids.factory import create_grid
+        from legoesm.grids.topography import grid_terrain_product
+        grid = create_grid("latlon", 16)
+        lat = np.arange(-89.75, 90.0, 0.5)
+        lon = np.arange(0.25, 360.0, 0.5)
+        lo, la = np.meshgrid(lon, lat)
+        elev = 1000.0 * np.exp(-((la - 30.0) ** 2 / 400.0 + (lo - 90.0) ** 2 / 900.0)) - 200.0
+        z1, f1 = grid_terrain_product(grid, lat, lon, elev)
+        z2, f2 = grid_terrain_product(grid, lat[::-1], lon, elev[::-1])
+        npt.assert_allclose(z2, z1, rtol=0, atol=1e-9)
+        npt.assert_allclose(f2, f1, rtol=0, atol=1e-12)
+        self.assertGreater(float(np.max(z1)), 100.0)
+
+    def test_gaussian_boxes_use_the_quadrature_edges(self):
+        """On a Gaussian grid the boxes are the quadrature cells, so the
+        binned source area equals ``grid_area`` (polar cells included) to
+        the source resolution -- the midpoint boxes miss by 2x at T21."""
+        from legoesm.grids.gaussian import create_gaussian_grid
+        from legoesm.grids.topography import _source_cell_areas, owner_by_boxes
+        grid = create_gaussian_grid(21)
+        lat = np.arange(-89.95, 90.0, 0.1)
+        lon = np.arange(0.05, 360.0, 0.1)
+        lo, la = np.meshgrid(np.deg2rad(lon), np.deg2rad(lat))
+        a_src = _source_cell_areas(lat, lon).ravel()
+        own = owner_by_boxes(la.ravel(), lo.ravel(), np.asarray(grid.lat), np.asarray(grid.lon),
+                             np.asarray(grid.lat_v))
+        got = np.bincount(own, weights=a_src, minlength=grid.n_lat * grid.n_lon)
+        want = np.asarray(grid.grid_area).ravel() / float(grid.radius) ** 2
+        npt.assert_allclose(got, want, rtol=0.03)
+
+    def test_coarser_source_than_target_is_refused(self):
+        lat_src = np.linspace(-80.0, 80.0, 9)
+        lon_src = np.linspace(0.0, 340.0, 18)
+        la, lo, _, _ = self._targets(dlat=2.0, dlon=2.0)
+        with self.assertRaises(ValueError):
+            bin_latlon_to_cells(lat_src, lon_src, [np.zeros((9, 18))], la, lo)
 
 
-class TestSmoothing(unittest.TestCase):
-    """Test Laplacian smoothing."""
+class TestMaskedDiffusion(unittest.TestCase):
+    """fv_surf_map's zero_ocean on every grid: flux-form diffusion with the
+    min-land-fraction edge weight."""
 
-    def test_cubed_sphere_reduces_noise(self):
-        """Smoothing should reduce field variance."""
-        rng = np.random.default_rng(42)
-        arr = rng.normal(0, 100, (6, 16, 16))
-        smoothed = _laplacian_smooth_cubed_sphere(arr, passes=4)
-        self.assertLess(np.var(smoothed), np.var(arr))
+    def test_cube_conserves_area_integral_and_damps_noise(self):
+        grid = create_cubed_sphere(8)
+        nb, area = _neighbour_table(grid)
+        self.assertEqual(nb.shape, (4, 6 * 64))
+        # symmetric neighbour relation
+        for i in range(nb.shape[1]):
+            for j in nb[:, i]:
+                self.assertIn(i, nb[:, j])
+        rng = np.random.default_rng(1)
+        q = rng.normal(size=6 * 64) * 100.0
+        f = np.ones_like(q)
+        out = masked_diffusion(q, f, nb, area, passes=4)
+        npt.assert_allclose(np.sum(out * area), np.sum(q * area), rtol=1e-12)
+        self.assertLess(np.std(out), np.std(q))
+        npt.assert_array_equal(masked_diffusion(q, f, nb, area, passes=0), q)
 
-    def test_cubed_sphere_preserves_mean(self):
-        """Smoothing should roughly preserve the global mean."""
-        rng = np.random.default_rng(42)
-        arr = rng.normal(500, 100, (6, 16, 16))
-        smoothed = _laplacian_smooth_cubed_sphere(arr, passes=4)
-        npt.assert_allclose(np.mean(smoothed), np.mean(arr), rtol=0.1)
+    def test_ocean_pinned_and_island_isolated(self):
+        grid = create_cubed_sphere(8)
+        nb, area = _neighbour_table(grid)
+        q = np.zeros(6 * 64)
+        f = np.zeros(6 * 64)
+        q[100] = 1000.0  # a one-cell island
+        f[100] = 1.0
+        f[200:230] = 1.0  # a land strip
+        q[200:230] = np.arange(30.0)
+        out = masked_diffusion(q, f, nb, area, passes=4)
+        self.assertEqual(out[100], 1000.0)               # no flux across a coast
+        npt.assert_array_equal(out[f == 0.0], 0.0)       # ocean stays exactly 0
+        # land-land fluxes still conserve the land integral
+        land = f > 0.0
+        npt.assert_allclose(np.sum(out[land] * area[land]),
+                            np.sum(q[land] * area[land]), rtol=1e-12)
+        self.assertLess(np.ptp(out[200:230]), np.ptp(q[200:230]))
 
-    def test_cubed_sphere_zero_passes(self):
-        """Zero passes should return unchanged array."""
-        arr = np.random.default_rng(42).normal(0, 100, (6, 8, 8))
-        result = _laplacian_smooth_cubed_sphere(arr, passes=0)
-        npt.assert_array_equal(result, arr)
+    def test_latlon_table_is_periodic_and_pole_clamped(self):
+        from legoesm.grids.factory import create_grid
+        grid = create_grid("latlon", 16)
+        nb, area = _neighbour_table(grid)
+        n_lat, n_lon = np.asarray(grid.grid_lat).shape
+        self.assertEqual(nb.shape, (4, n_lat * n_lon))
+        self.assertTrue(np.all(nb[0, :n_lon] == -1) and np.all(nb[1, -n_lon:] == -1))
+        self.assertEqual(nb[2, 0], n_lon - 1)            # west of column 0 wraps
+        q = np.zeros(n_lat * n_lon)
+        q[n_lon * (n_lat // 2)] = 100.0
+        out = masked_diffusion(q, np.ones_like(q), nb, area, passes=1)
+        self.assertGreater(out[n_lon * (n_lat // 2) + n_lon - 1], 0.0)   # periodic spread
 
-    def test_gaussian_reduces_noise(self):
-        """Smoothing should reduce field variance on Gaussian grid."""
-        rng = np.random.default_rng(42)
-        arr = rng.normal(0, 100, (32, 64))
-        smoothed = _laplacian_smooth_gaussian(arr, passes=4)
-        self.assertLess(np.var(smoothed), np.var(arr))
+    def test_voronoi_table(self):
+        from legoesm.grids.voronoi import create_voronoi_mesh
+        mesh = create_voronoi_mesh(2)
+        nb, area = _neighbour_table(mesh)
+        for i in range(nb.shape[1]):                 # symmetric relation
+            for j in nb[:, i]:
+                if j >= 0:
+                    self.assertIn(i, nb[:, j])
+        rng = np.random.default_rng(3)
+        q = rng.normal(size=mesh.nCells) * 100.0
+        out = masked_diffusion(q, np.ones_like(q), nb, area, passes=3)
+        npt.assert_allclose(np.sum(out * area), np.sum(q * area), rtol=1e-12)
+        self.assertLess(np.std(out), 0.8 * np.std(q))
+        npt.assert_allclose(masked_diffusion(np.full(mesh.nCells, 5.0), np.ones(mesh.nCells),
+                                             nb, area, passes=3), 5.0)
 
-    def test_gaussian_preserves_mean(self):
-        """Smoothing should roughly preserve the mean on Gaussian grid."""
-        rng = np.random.default_rng(42)
-        arr = rng.normal(500, 100, (32, 64))
-        smoothed = _laplacian_smooth_gaussian(arr, passes=4)
-        npt.assert_allclose(np.mean(smoothed), np.mean(arr), rtol=0.1)
-
-
-class TestSmoothPhisGaussian(unittest.TestCase):
-    """Public lat-lon phis smoother used by the ERA5 lat-lon IC carry."""
-
-    @staticmethod
-    def _max_abs_grad(arr):
-        # Longitude-periodic, pole-clamped finite differences.
-        di = np.abs(np.diff(arr, axis=0)).max()
-        dj = np.abs(arr - np.roll(arr, 1, axis=1)).max()
-        return max(di, dj)
-
-    def test_reduces_max_gradient_on_steep_peak(self):
-        """A steep single-peak phis must have its max gradient reduced."""
-        from legoesm.grids.topography import smooth_phis_gaussian
-        n_lat, n_lon = 24, 48
-        phis = np.zeros((n_lat, n_lon))
-        phis[12, 24] = 5.6e4  # ~5600 m ERA5-like spike (m^2/s^2)
-        smoothed = np.asarray(smooth_phis_gaussian(phis, smoothing_passes=4))
-        self.assertEqual(smoothed.shape, phis.shape)
-        self.assertLess(self._max_abs_grad(smoothed), self._max_abs_grad(phis))
-
-    def test_flat_field_is_invariant(self):
-        """Flat orography (AMIP flat-topo path) is unchanged by smoothing."""
-        from legoesm.grids.topography import smooth_phis_gaussian
-        phis = np.full((16, 32), 0.0)
-        npt.assert_array_equal(np.asarray(smooth_phis_gaussian(phis)), phis)
-        const = np.full((16, 32), 1234.0)
-        npt.assert_allclose(np.asarray(smooth_phis_gaussian(const)), const, rtol=1e-6)
-
-    def test_zero_passes_is_noop(self):
-        """passes<=0 returns the input untouched."""
-        from legoesm.grids.topography import smooth_phis_gaussian
-        arr = np.random.default_rng(0).normal(0, 100, (8, 16))
-        npt.assert_array_equal(np.asarray(smooth_phis_gaussian(arr, 0)), arr)
-
-    def test_longitude_periodic(self):
-        """A peak on the lon seam smooths into BOTH wrap neighbours."""
-        from legoesm.grids.topography import smooth_phis_gaussian
-        n_lat, n_lon = 12, 24
-        phis = np.zeros((n_lat, n_lon))
-        phis[6, 0] = 1.0e4
-        sm = np.asarray(smooth_phis_gaussian(phis, smoothing_passes=1))
-        # Mass leaked across the periodic seam to lon index n_lon-1.
-        self.assertGreater(sm[6, n_lon - 1], 0.0)
+    def test_monotone_bound(self):
+        grid = create_cubed_sphere(4)
+        nb, area = _neighbour_table(grid)
+        with self.assertRaises(ValueError):
+            masked_diffusion(np.zeros(96), np.ones(96), nb, area, k=0.3)
 
 
 class TestLoadRealTopography(unittest.TestCase):
@@ -275,10 +334,7 @@ class TestLoadRealTopography(unittest.TestCase):
         path = str(Path(self.tmpdir) / "topo.nc")
         _make_synthetic_topo_netcdf(path)
 
-        config = TopographyConfig(
-            source="file", path=path,
-            smoothing_passes=2, edge_blend_strength=0.1,
-        )
+        config = TopographyConfig(source="file", path=path, smoothing_passes=2)
         phis, f_land = load_real_topography(self.grid, config=config)
 
         self.assertEqual(phis.shape, (6, 8, 8))
@@ -297,7 +353,7 @@ class TestLoadRealTopography(unittest.TestCase):
                    coords={"lat": lat, "lon": lon}).to_netcdf(path)
 
         config = TopographyConfig(source="file", path=path,
-                                  smoothing_passes=0, edge_blend_strength=0.0)
+                                  smoothing_passes=0)
         # This lat-lon grid has cells ON 180 deg, where the kept column is read.
         from legoesm.grids.latlon import create_latlon_grid
         grid = create_latlon_grid(n_lat=24, radius=constants.R_earth,
@@ -332,7 +388,7 @@ class TestLoadRealTopography(unittest.TestCase):
 
         config = TopographyConfig(
             source="file", path=path,
-            smoothing_passes=4, edge_blend_strength=0.1,
+            smoothing_passes=4,
         )
         phis, f_land = load_real_topography(grid, config=config)
 
@@ -400,17 +456,17 @@ class TestLoadRealTopography(unittest.TestCase):
         )
         self.assertEqual(phis.shape, (6, 8, 8))
 
-    def test_no_edge_blend(self):
-        """edge_blend_strength=0 should disable blending."""
+    def test_phis_only_where_land_and_one_product(self):
+        """Decision C: phis > 0 only where f_land > 0 (zero_ocean), the
+        land fraction and the elevation come from one binning."""
         path = str(Path(self.tmpdir) / "topo.nc")
         _make_synthetic_topo_netcdf(path)
-
-        config = TopographyConfig(
-            source="file", path=path,
-            edge_blend_strength=0.0, smoothing_passes=0,
-        )
-        phis, _ = load_real_topography(self.grid, config=config)
-        self.assertEqual(phis.shape, (6, 8, 8))
+        config = TopographyConfig(source="file", path=path, smoothing_passes=4)
+        phis, f_land = load_real_topography(self.grid, config=config)
+        phis, f_land = np.asarray(phis), np.asarray(f_land)
+        self.assertTrue(np.all(phis[f_land == 0.0] == 0.0))
+        self.assertTrue(np.all((f_land >= 0.0) & (f_land <= 1.0)))
+        self.assertGreater(phis.max(), 0.0)
 
 
 class TestDoubleGGuard(unittest.TestCase):
@@ -505,19 +561,6 @@ class TestPoleRowRegrid(unittest.TestCase):
         npt.assert_allclose(f_land[:2], 1.0, atol=1e-6)   # NOT ocean
         npt.assert_allclose(f_land[2], 0.0, atol=1e-6)    # equator still ocean
 
-    def test_derive_land_fraction_pole_row(self):
-        # Sub-grid sampling near the pole: with edge replication the
-        # in-sphere sub-samples poleward of the source edge see land, so
-        # f_land at the poleward-most target well exceeds the pre-fix value
-        # (0.5 here; samples beyond ±90 remain out-of-bounds ocean).
-        lat_src = np.linspace(-89.5, 89.5, 180)
-        lon_src = np.linspace(0.5, 359.5, 360)
-        elev = np.full((180, 360), -3000.0)
-        elev[lat_src <= -60.0, :] = 2500.0
-        f_land = _derive_land_fraction(
-            lat_src, lon_src, elev,
-            np.array([-89.5]), np.array([90.0]), 2.0)
-        self.assertGreater(float(f_land[0]), 0.7)
 
 
 class TestLoadGaussianGrid(unittest.TestCase):
@@ -557,54 +600,14 @@ class TestTopographyConfig(unittest.TestCase):
         config = TopographyConfig()
         self.assertEqual(config.source, "flat")
         self.assertEqual(config.smoothing_passes, 4)
-        self.assertEqual(config.edge_blend_strength, 0.3)
-        self.assertTrue(config.clip_negative)
 
     def test_custom_config(self):
         config = TopographyConfig(
             source="file", path="/data/etopo1.nc",
-            smoothing_passes=8, edge_blend_strength=0.5,
+            smoothing_passes=8,
         )
         self.assertEqual(config.path, "/data/etopo1.nc")
         self.assertEqual(config.smoothing_passes, 8)
-
-
-class TestEdgeBlending(unittest.TestCase):
-    """Test that edge blending reduces discontinuities at face boundaries."""
-
-    def test_blending_reduces_edge_jumps(self):
-        """Edge blending should reduce jumps at face boundaries."""
-        grid = create_cubed_sphere(16)
-        tmpdir = tempfile.mkdtemp()
-        path = str(Path(tmpdir) / "topo.nc")
-        _make_synthetic_topo_netcdf(path)
-
-        # Without blending
-        config_no_blend = TopographyConfig(
-            source="file", path=path,
-            smoothing_passes=0, edge_blend_strength=0.0,
-        )
-        phis_no_blend, _ = load_real_topography(grid, config=config_no_blend)
-
-        # With blending
-        config_blend = TopographyConfig(
-            source="file", path=path,
-            smoothing_passes=0, edge_blend_strength=0.5,
-            edge_blend_width=2,
-        )
-        phis_blend, _ = load_real_topography(grid, config=config_blend)
-
-        # Compute edge differences for face 0-1 boundary
-        # Face 0 east edge vs face 1 west edge
-        edge_diff_no_blend = float(jnp.mean(jnp.abs(
-            phis_no_blend[0, -1, :] - phis_no_blend[1, 0, :]
-        )))
-        edge_diff_blend = float(jnp.mean(jnp.abs(
-            phis_blend[0, -1, :] - phis_blend[1, 0, :]
-        )))
-
-        # Blended version should have smaller edge jumps
-        self.assertLessEqual(edge_diff_blend, edge_diff_no_blend + 1e-10)
 
 
 class TestInitialization(unittest.TestCase):
@@ -636,7 +639,6 @@ class TestInitialization(unittest.TestCase):
         """isothermal_rest_state_spectral should accept phis."""
         from legoesm.atmosphere.dynamics.gcm.spectral_pe import (
             isothermal_rest_state_spectral,
-            spectral_pe_to_grid,
         )
         from legoesm.grids.gaussian import create_gaussian_grid, sh_synthesis
         from legoesm.grids.vertical import create_sigma_coordinate
@@ -767,13 +769,9 @@ class TestPhisAnchorBarometric(unittest.TestCase):
         npt.assert_allclose(np.asarray(p_s_adj), np.asarray(expected), rtol=1e-6)
 
     def test_cmor_orog_uses_phis_data_always(self):
-        """CMOR orog must come from _phis_data (the ETOPO field), not from
-        state.phis (ERA5 IC geopotential).  Dynamics run with ERA5 phis but
-        CMOR orog reports the ETOPO mountain mask.  This test confirms the
-        invariant so a future refactor cannot accidentally swap them."""
-        # _phis_data is set by _create_topography to the ETOPO field.
-        # set_fixed_fields(phis=np.asarray(_phis_data)) in _setup_diagnostics
-        # passes it directly; state.phis (ERA5) is never used for CMOR orog.
+        """CMOR orog comes from _phis_data -- since decision C the ONE
+        terrain product the dynamics also run on (set_fixed_fields in
+        _setup_diagnostics); this pins the unit conversion only."""
         etopo_phis = jnp.array([9806.16, 49030.8])  # 1000 m, 5000 m
         orog = np.asarray(etopo_phis) / constants.g
         npt.assert_allclose(orog, [1000.0, 5000.0], rtol=1e-4)
@@ -840,60 +838,49 @@ class TestPassiveLandTile(unittest.TestCase):
         self.assertFalse(_has_land)
 
 
-class TestLaplacianSmoothCrossFace(unittest.TestCase):
-    """Cube-imprint guard: the topography Laplacian smoothing must use the
-    cross-face halo, NOT per-face boundary clamping (which smooths each face in
-    isolation and leaves a cube-edge seam — the cube imprint). The authoritative
-    check is the nightly cube-SW visual-regression gate; this asserts the
-    necessary cross-face-leakage property deterministically."""
+class TestMaskedDiffusionCrossFace(unittest.TestCase):
+    """Cube-imprint guard: the product's diffusion must use the cross-face
+    halo, NOT per-face boundary clamping (which smooths each face in
+    isolation and leaves a cube-edge seam).  The authoritative check is the
+    nightly cube-SW visual-regression gate; this asserts the necessary
+    cross-face-leakage property deterministically."""
+
+    def _cube(self, n=6):
+        grid = create_cubed_sphere(n)
+        nb, area = _neighbour_table(grid)
+        return nb, area
 
     def test_smoothing_leaks_across_face_boundaries(self):
-        from legoesm.grids.topography import _laplacian_smooth_cubed_sphere
-
-        n = 6
-        arr = np.zeros((6, n, n))
+        nb, area = self._cube()
+        arr = np.zeros((6, 6, 6))
         arr[0] = 1.0  # face 0 hot, all other faces zero
-        out = _laplacian_smooth_cubed_sphere(arr, passes=1)
-
-        # With a real cross-face halo the faces bordering face 0 receive a
-        # positive contribution. One-sided boundary clamping (the cube-imprint
-        # bug) leaves every non-face-0 cell exactly 0.
+        out = masked_diffusion(arr.ravel(), np.ones(arr.size), nb, area, passes=1).reshape(6, 6, 6)
         self.assertTrue(
             np.any(out[1:] > 1e-6),
-            "smoothing did not cross cube face boundaries — per-face clamping "
+            "diffusion did not cross cube face boundaries — per-face clamping "
             "would leave a cube-edge seam (cube imprint)",
         )
-        # Face 0 mixes toward its (zero) neighbours, so its min drops below 1.
         self.assertLess(float(out[0].min()), 1.0)
 
     def test_constant_field_is_preserved(self):
-        """Smoothing a constant field must return it unchanged (no spurious
-        edge artifact from the halo stencil)."""
-        from legoesm.grids.topography import _laplacian_smooth_cubed_sphere
-
-        arr = np.full((6, 6, 6), 3.0)
-        out = _laplacian_smooth_cubed_sphere(arr, passes=3)
+        nb, area = self._cube()
+        arr = np.full(6 * 36, 3.0)
+        out = masked_diffusion(arr, np.ones_like(arr), nb, area, passes=3)
         npt.assert_allclose(out, 3.0, atol=1e-10)
 
-    def test_smoothing_independent_of_halo_backend(self):
-        """Host-side topography smoothing must NOT dispatch through the global
-        MPI/SPMD halo backend (codex PR F): it uses the local cross-face pad
-        directly, so the result is identical regardless of the active backend —
-        a full global field must never enter the distributed exchange path."""
+    def test_table_independent_of_halo_backend(self):
+        """The neighbour table is built from the LOCAL cross-face pad, never
+        the global MPI/SPMD halo backend (codex PR F)."""
         from legoesm.grids.halo import get_halo_backend, set_halo_backend
-        from legoesm.grids.topography import _laplacian_smooth_cubed_sphere
-
-        arr = np.zeros((6, 6, 6))
-        arr[0] = 1.0
-        out_local = _laplacian_smooth_cubed_sphere(arr, passes=2)
-
+        grid = create_cubed_sphere(6)
+        nb_local, _ = _neighbour_table(grid)
         prev = get_halo_backend()
         try:
-            set_halo_backend("spmd")  # non-local backend active during smoothing
-            out_other = _laplacian_smooth_cubed_sphere(arr, passes=2)
+            set_halo_backend("spmd")
+            nb_other, _ = _neighbour_table(grid)
         finally:
             set_halo_backend(prev)
-        npt.assert_allclose(out_other, out_local, atol=1e-12)
+        npt.assert_array_equal(nb_other, nb_local)
 
 
 class TestUnstructuredTopographySmoothing(unittest.TestCase):

@@ -327,14 +327,45 @@ def fv_update_phys_dry_duo_jax(u, v, pt, ua, va, u_dt, v_dt, t_dt, dt,
     return u_new, v_new, pt_new, ua_new, va_new
 
 
+#: FV3's water species in ``fv_update_phys`` / ``moist_cp`` slot order
+#: (sphum, liq_wat, rainwat, ice_wat, snowwat, graupel), by legoESM name.
+#: ``nwat`` is a PREFIX length of this tuple: 3 = the warm-rain trio
+#: (FV3's case(4) with the fake-ice slot absent), 6 = the full set.
+FV3_WATER_SPECIES = ("q_v", "q_c", "q_r", "q_i", "q_s", "q_g")
+
+
+def moist_cp_fv3(q_water, *, cp_air, cp_vapor, c_liq, c_ice):
+    """``moist_cp`` (fv_mapz.F90:3656-3733) for the water species in
+    :data:`FV3_WATER_SPECIES` order, ``len(q_water) = nwat`` in {3, 6}:
+
+        ql  = liq_wat + rainwat
+        qs  = ice_wat + snowwat + graupel          (0 for nwat = 3)
+        cpm = (1 - (qv + ql + qs))*cp_air + qv*cp_vapor + ql*c_liq + qs*c_ice
+
+    case(6) at :3717-3724; case(4) ("K_warm_rain scheme with fake ice",
+    :3704-3708) is the same expression with ``qs = 0`` -- adding the
+    zero solid terms is bitwise the warm-rain value, which is what lets
+    ONE function serve both decks."""
+    nwat = len(q_water)
+    if nwat not in (3, 6):
+        raise ValueError(
+            f"moist_cp_fv3: nwat = {nwat}; FV3 water species are a prefix "
+            f"of {FV3_WATER_SPECIES} of length 3 or 6")
+    qv = q_water[0]
+    ql = q_water[1] + q_water[2]
+    if nwat == 3:
+        return (1.0 - (qv + ql)) * cp_air + qv * cp_vapor + ql * c_liq
+    qs = q_water[3] + q_water[4] + q_water[5]
+    qd = ql + qs
+    return ((1.0 - (qv + qd)) * cp_air + qv * cp_vapor + ql * c_liq
+            + qs * c_ice)
+
+
 def moist_cp_warm_rain(q_v, q_c, q_r, *, cp_air, cp_vapor, c_liq):
-    """``moist_cp`` for ``nwat = 4`` (fv_mapz.F90:3704-3708, the
-    "K_warm_rain scheme with fake ice" case): the moist heat capacity
-    ``(1 - qv - qd)*cp_air + qv*cp_vapor + qd*c_liq`` with
-    ``qd = liq_wat + rainwat``.  Kessler carries no ice, so the fake ice
-    slot is zero and drops out."""
-    qd = q_c + q_r
-    return (1.0 - (q_v + qd)) * cp_air + q_v * cp_vapor + qd * c_liq
+    """``moist_cp`` for the warm-rain trio: :func:`moist_cp_fv3` at
+    ``nwat = 3``."""
+    return moist_cp_fv3([q_v, q_c, q_r], cp_air=cp_air, cp_vapor=cp_vapor,
+                        c_liq=c_liq, c_ice=0.0)
 
 
 def heating_to_fv3_cp_air(t_dt):
@@ -349,17 +380,19 @@ def heating_to_fv3_cp_air(t_dt):
 
 
 def fv_update_phys_moist_duo_jax(pt, delp, q, t_dt, q_dt, dt, *, n, ng,
-                                 cp_air, cp_vapor, c_liq):
+                                 cp_air, cp_vapor, c_liq, c_ice, nwat):
     """Port of FV3 ``fv_update_phys``'s ``nwat > 0`` scalar block on the
-    compute window, hydrostatic (fv_update_phys.F90:318-372), for the
-    Kessler tracer set ``q = [sphum, liq_wat, rainwat]`` (``nwat = 4``
-    with the fake-ice slot absent).  Winds are not touched here (the
-    D-grid increment is the dry twin's job and Kessler has none).
+    compute window, hydrostatic (fv_update_phys.F90:318-372).  ``q`` /
+    ``q_dt`` are the FULL tracer lists (``nq >= nwat``): the first
+    ``nwat`` slots are the water species in :data:`FV3_WATER_SPECIES`
+    order (3 = warm rain, 6 = with ice/snow/graupel), every later slot
+    a passenger (number concentrations, ...).  Winds are not touched
+    here (the D-grid increment is the dry twin's job).
 
     Per level k, compute window only:
-        q(m)   = q(m) + dt*q_dt(m)                          (:324)
-        ps_dt  = 1 + dt*sum(q_dt(1:nwat))                   (:335)
-        delp   = delp * ps_dt                               (:336)
+        q(m)   = q(m) + dt*q_dt(m)         EVERY tracer m <= nq  (:324)
+        ps_dt  = 1 + dt*sum(q_dt(1:nwat))  the water species     (:335)
+        delp   = delp * ps_dt                                    (:336)
         q(m)   = q(m) / ps_dt        (every mass-adjusted tracer, :352)
         pt     = pt + t_dt*dt*cp_air/cvm, cvm = moist_cp(q AFTER the
                  update, :367-371 -- moist_cp reads ``q``, which :324
@@ -381,31 +414,35 @@ def fv_update_phys_moist_duo_jax(pt, delp, q, t_dt, q_dt, dt, *, n, ng,
     dry-mass mixing ratio ``q/(1 - sum q)`` invariant under the
     renormalisation; the cp/cvm factor reproduced from ``moist_cp``.
 
-    Shapes: pt, delp ``(m, m, npz)``; q, q_dt lists of three
+    Shapes: pt, delp ``(m, m, npz)``; q, q_dt lists of ``nq``
     ``(m, m, npz)``; t_dt ``(m, m, npz)``.  Halos untouched.  Returns
-    ``(pt_new, delp_new, [q_new x3], ps_dt)`` -- ``ps_dt`` on the compute
-    block ``(n, n, npz)`` so the caller can renormalise every OTHER
-    mass tracer it carries (:349-357 adjusts all of them); no input is
-    mutated.
+    ``(pt_new, delp_new, [q_new x nq], ps_dt)`` -- ``ps_dt`` on the
+    compute block ``(n, n, npz)``; no input is mutated.
     """
     import jax.numpy as jnp
     pt, delp, t_dt = map(jnp.asarray, (pt, delp, t_dt))
     q = [jnp.asarray(a) for a in q]
     q_dt = [jnp.asarray(a) for a in q_dt]
-    if len(q) != 3 or len(q_dt) != 3:
+    nwat = int(nwat)
+    if nwat not in (3, 6) or len(q) < nwat or len(q_dt) != len(q):
         raise ValueError(
-            f"fv_update_phys_moist_duo_jax: nwat = 3 warm-rain tracers "
-            f"[sphum, liq_wat, rainwat] expected, got {len(q)}/{len(q_dt)}")
+            f"fv_update_phys_moist_duo_jax: nwat = {nwat} water species "
+            f"({FV3_WATER_SPECIES[:nwat]}) must lead a tracer list of "
+            f">= nwat entries with one tendency each; got {len(q)} "
+            f"tracers / {len(q_dt)} tendencies")
     ng = int(ng)
     ci = slice(ng, ng + int(n))
     qc = [a[ci, ci] for a in q]
     dqc = [a[ci, ci] for a in q_dt]
     q_upd = [a + dt * da for a, da in zip(qc, dqc)]          # :324
-    ps_dt = 1.0 + dt * (dqc[0] + dqc[1] + dqc[2])             # :335
+    dq_water = dqc[0]
+    for a in dqc[1:nwat]:
+        dq_water = dq_water + a
+    ps_dt = 1.0 + dt * dq_water                                # :335
     delp_c = delp[ci, ci] * ps_dt                             # :336
     q_adj = [a / ps_dt for a in q_upd]                        # :352
-    cvm = moist_cp_warm_rain(q_adj[0], q_adj[1], q_adj[2], cp_air=cp_air,
-                             cp_vapor=cp_vapor, c_liq=c_liq)  # :367
+    cvm = moist_cp_fv3(q_adj[:nwat], cp_air=cp_air, cp_vapor=cp_vapor,
+                       c_liq=c_liq, c_ice=c_ice)              # :367
     pt_c = pt[ci, ci] + t_dt[ci, ci] * dt * cp_air / cvm      # :371
     pt_new = pt.at[ci, ci].set(pt_c)
     delp_new = delp.at[ci, ci].set(delp_c)
@@ -774,20 +811,26 @@ def column_view_sixface_jax(state, tab, amat6, *, n, ng, km):
 def apply_column_increments_sixface_jax(state, press, q, view, tab,
                                         wind_vectors6, u_dt_c, v_dt_c,
                                         t_dt_c, q_dt_c, *, dt, n, ng, km,
-                                        ptop, akap, moist_cp=False):
+                                        ptop, akap, moist_cp=False,
+                                        nwat=3):
     """fv_update_phys on six faces for COLUMN tendencies given on the
     compute window ``(6, n, n, km)`` (passes 2-3 of the Held-Suarez twin
     plus the moist scalar block of the Kessler bridge, so both and the
     column lane apply increments through ONE function):
 
-    * ``q_dt_c`` non-empty (``{slot: (6, n, n, km)}``, slots 0..2 =
-      sphum/liq_wat/rainwat only): tracers, layer mass and ``pt`` (on
-      ``cvm``) through :func:`fv_update_phys_moist_duo_jax`, every other
-      tracer renormalised to the new layer mass, pressures rebuilt with
-      ``p_var_hydrostatic`` (``ptop``/``akap``) -- the Kessler bridge's
-      block.  A tendency on a slot beyond the three warm-rain tracers is
-      REFUSED: the ``nwat`` sum would miss its mass (an ice/snow deck
-      needs the nwat=6 block).  Empty ``{}``: pressures and tracers
+    * ``q_dt_c`` non-empty (``{slot: (6, n, n, km)}``, any slot of
+      ``q``): tracers, layer mass and ``pt`` (on ``cvm``) through
+      :func:`fv_update_phys_moist_duo_jax` -- the first ``nwat`` slots
+      (3 = warm rain, 6 = with ice/snow/graupel, :data:`FV3_WATER_SPECIES`
+      order) are the water species whose tendencies move the layer mass
+      and enter ``moist_cp``; every later slot (number concentrations)
+      takes its tendency and the renormalisation to the new layer mass
+      like FV3's other mass tracers (:324, :352) -- pressures rebuilt
+      with ``p_var_hydrostatic`` (``ptop``/``akap``).  ``nwat`` is the
+      CALLER's statement of its tracer layout (the column model reads it
+      off its names); the default 3 is the Kessler bridge's trio, and a
+      tendency on a slot the bundle does not carry is refused.  Empty
+      ``{}``: pressures and tracers
       untouched; ``pt += t_dt*dt`` on the compute window, or -- with
       ``moist_cp=True`` (a MOIST deck, ``FV3DuoConfig.moist``) -- the
       same block with zero water tendencies, i.e. ``pt += t_dt*dt*
@@ -814,9 +857,10 @@ def apply_column_increments_sixface_jax(state, press, q, view, tab,
     from legoesm.core.fv3_dynamics import p_var_hydrostatic
     from legoesm.grids.fv3_duo_halos import exchange_agrid_scalar_halos
     from legoesm.grids.fv3_native_gridstruct import (
-        FV3_C_LIQ, FV3_CP_AIR, FV3_CP_VAPOR)
+        FV3_C_ICE, FV3_C_LIQ, FV3_CP_AIR, FV3_CP_VAPOR)
 
     n, ng, km = int(n), int(ng), int(km)
+    nwat = int(nwat)
     m = n + 2 * ng
     ci = slice(ng, ng + n)
     pt6 = jnp.asarray(state["pt"])
@@ -828,42 +872,33 @@ def apply_column_increments_sixface_jax(state, press, q, view, tab,
     water = bool(q_dt_c)
     moist = water or bool(moist_cp)
     if moist:
-        bad = sorted(k for k in q_dt_c if k not in (0, 1, 2))
-        if bad or len(q) < 3:
+        nq = len(q)
+        bad = sorted(k for k in q_dt_c if not 0 <= int(k) < nq)
+        if bad or nwat not in (3, 6) or nq < nwat:
             raise ValueError(
-                f"apply_column_increments_sixface_jax: water tendencies on "
-                f"tracer slots {bad} (bundle carries {len(q)}); only the "
-                f"warm-rain slots 0..2 [sphum, liq_wat, rainwat] enter the "
-                f"nwat mass block -- an ice/snow deck needs the nwat=6 port")
-        q3 = [jnp.asarray(q[i]) for i in range(3)]
-        q_dt6 = [zeros.at[:, ci, ci].set(q_dt_c[i]) if i in q_dt_c else zeros
-                 for i in range(3)]
+                f"apply_column_increments_sixface_jax: tendencies on tracer "
+                f"slots {bad} for a bundle carrying {nq} tracers with "
+                f"nwat = {nwat} (the first nwat slots are "
+                f"{FV3_WATER_SPECIES[:nwat]}; nwat in {{3, 6}})")
+        q_all = [jnp.asarray(q[i]) for i in range(nq)]
+        q_dt_all = [zeros.at[:, ci, ci].set(q_dt_c[i]) if i in q_dt_c
+                    else zeros for i in range(nq)]
 
-        def _moist(pt, delp, qv, qc, qr, tdt, dqv, dqc, dqr):
+        def _moist(pt, delp, tdt, *qs):
             pt_n, delp_n, q_n, ps_dt = fv_update_phys_moist_duo_jax(
-                pt, delp, [qv, qc, qr], tdt, [dqv, dqc, dqr], dt, n=n, ng=ng,
-                cp_air=FV3_CP_AIR, cp_vapor=FV3_CP_VAPOR, c_liq=FV3_C_LIQ)
-            return pt_n, delp_n, q_n[0], q_n[1], q_n[2], ps_dt
-        # rescale on the compute block BEFORE padding (the bridge's op
-        # order; rescaling the padded array lets XLA fold the factor into
-        # the block's dt*cp_air chain and moves pt by ~1e-12 under jit)
+                pt, delp, list(qs[:nq]), tdt, list(qs[nq:]), dt, n=n, ng=ng,
+                cp_air=FV3_CP_AIR, cp_vapor=FV3_CP_VAPOR, c_liq=FV3_C_LIQ,
+                c_ice=FV3_C_ICE, nwat=nwat)
+            return (pt_n, delp_n, ps_dt) + tuple(q_n)
         t_dt6_m = zeros.at[:, ci, ci].set(heating_to_fv3_cp_air(t_dt_c))
-        pt6, delp_m, qv2, qc2, qr2, ps_dt6 = jax.vmap(_moist)(
-            pt6, delp6, q3[0], q3[1], q3[2], t_dt6_m, *q_dt6)
+        pt6, delp_m, _ps_dt6, *q_m = jax.vmap(_moist)(
+            pt6, delp6, t_dt6_m, *q_all, *q_dt_all)
         t_dt6 = zeros            # pt already advanced on cvm
     if water:
         delp6 = delp_m
         press_new = p_var_hydrostatic(delp6, ptop=ptop, akap=akap, n=n,
                                       ng=ng, km=km)
-        q_new = list(q)
-        q_new[0], q_new[1], q_new[2] = qv2, qc2, qr2
-        # every OTHER mass tracer rides the same layer mass and is
-        # renormalised with it (fv_update_phys.F90:349-357 adjusts all of
-        # them; codex 2026-09-24: leaving a passenger's mixing ratio while
-        # delp moves changes its mass without a source)
-        for i in range(3, len(q_new)):
-            qi = jnp.asarray(q_new[i])
-            q_new[i] = qi.at[:, ci, ci].set(qi[:, ci, ci] / ps_dt6)
+        q_new = list(q_m)
     else:
         # no water tendency: ps_dt == 1 exactly, so the layer mass, the
         # tracers and the step's own pressures pass through untouched
