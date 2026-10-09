@@ -14,6 +14,7 @@ from typing import NamedTuple
 import jax.numpy as jnp
 import numpy as np
 from legoesm.core.field import Field
+from legoesm.grids.halo_latlon import meridional_periodicity
 from legoesm.grids.latlon import create_beta_plane_cgrid_geometry
 from legoesm.grids.tripole import create_tripole_grid
 from legoesm.ocean.constants_config import NEMO_CONSTANTS_CONFIG
@@ -73,8 +74,8 @@ class NEMOTestcaseCard(NamedTuple):
     iceberg_inputs: tuple[str, ...] | None = None
     # NEMO ln_Jperio as card data; False is the walled N/S boundary every
     # other card runs.  Whatever executes a card must build and trace inside
-    # ``halo_latlon.meridional_periodicity(card.j_periodic)``; no shared
-    # executor exists yet, and the TSUNAMI card refuses execution (B4j).
+    # ``halo_latlon.meridional_periodicity(card.j_periodic)``; the step's
+    # j-neighbour statements read it there (lbclnk.f90:2028-2034).
     j_periodic: bool = False
 
 
@@ -3170,14 +3171,17 @@ def build_tsunami_zco_card() -> NEMOTestcaseCard:
     z_coord = create_full_step_coordinate(
         z_ref, jnp.full((nj, ni), _TSUNAMI_NLEV - 1))
     ssh = tsunami_initial_ssh(src["glamt"], src["gphit"])
-    state = rest_state_latlon_cgrid_ocean(
-        grid, z_coord,
-        T_water_init_C=0.0, T_deep=0.0, S_uniform=0.0,
-        H_max=_TSUNAMI_H_M,
-        land_mask_override=wet,
-        H_bathy_override=wet * _TSUNAMI_H_M,
-        nemo_prognostic_barotropic_velocity=True,
-    )
+    # ln_Jperio: the j-seam v-faces are wet faces (lbclnk.f90:1868), so the
+    # face masks are built inside the y-wrap scope the step runs in.
+    with meridional_periodicity(nl.ln_Jperio):
+        state = rest_state_latlon_cgrid_ocean(
+            grid, z_coord,
+            T_water_init_C=0.0, T_deep=0.0, S_uniform=0.0,
+            H_max=_TSUNAMI_H_M,
+            land_mask_override=wet,
+            H_bathy_override=wet * _TSUNAMI_H_M,
+            nemo_prognostic_barotropic_velocity=True,
+        )
     # usrdef_istate.F90:65-68: T = 20, S = 30, u = v = 0; istate.F90 then
     # builds uu_b/vv_b from u = v = 0, i.e. exactly zero.
     state = state._replace(

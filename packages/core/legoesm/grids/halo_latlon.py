@@ -96,6 +96,45 @@ def get_meridionally_flat() -> bool:
     return _MERIDIONALLY_FLAT
 
 
+def _ywrap_pad(value: jnp.ndarray) -> jnp.ndarray:
+    """One wrap row each side; the y-wrap is local-backend only."""
+    from legoesm.grids.halo import get_halo_backend
+    if get_halo_backend() == "mpi" or _spmd_lat_mesh() is not None:
+        raise NotImplementedError(
+            "meridional_periodicity: the j-neighbour helpers have no MPI/SPMD "
+            "band exchange; refuse rather than wall the seam")
+    return pad_with_pole_bc_lat(value, 1)
+
+
+def lat_north(value: jnp.ndarray) -> jnp.ndarray:
+    """``value[j+1]`` along axis 0: the wrapped row under the y-wrap (NEMO
+    ``jpfillperio``, lbclnk.f90:2033), else zero (the closed north wall)."""
+    if _MERIDIONALLY_PERIODIC:
+        return _ywrap_pad(value)[2:]
+    return jnp.concatenate([value[1:], jnp.zeros_like(value[:1])], axis=0)
+
+
+def lat_south(value: jnp.ndarray) -> jnp.ndarray:
+    """``value[j-1]`` along axis 0: the wrapped row under the y-wrap (NEMO
+    ``jpfillperio``, lbclnk.f90:2028), else zero (the closed south wall)."""
+    if _MERIDIONALLY_PERIODIC:
+        return _ywrap_pad(value)[:-2]
+    return jnp.concatenate([jnp.zeros_like(value[:1]), value[:-1]], axis=0)
+
+
+def lat_faces_from_north(native: jnp.ndarray, south=None) -> jnp.ndarray:
+    """NEMO native north-face rows (n) -> legoESM south-to-north faces (n+1).
+
+    Face 0 is the south seam face: under the y-wrap it is the last native
+    row (lbclnk.f90:2028, a plain copy, no sign), else ``south`` (zeros when
+    None, the closed wall).
+    """
+    if _MERIDIONALLY_PERIODIC:
+        return _ywrap_pad(native)[:-1]
+    first = jnp.zeros_like(native[:1]) if south is None else south
+    return jnp.concatenate([first, native], axis=0)
+
+
 def fold_pole_rows(
     data: jnp.ndarray,
     halo: int,
