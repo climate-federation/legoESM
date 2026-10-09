@@ -44,6 +44,9 @@ def _report():
         "slow_v_association_unit": {
             "substep_table": [{"substep": index + 1} for index in range(65)],
         },
+        "slow_v_association_transport_unit": {
+            "substep_table": [{"substep": index + 1} for index in range(65)],
+        },
         "substep_table": [{"substep": index + 1} for index in range(65)],
         "source_rows": [exact],
         "substep_rows": [exact],
