@@ -220,6 +220,8 @@ FILES = {
         _ORCA2_R93SLOW_COMPILED / "dynspg_ts.f90"),
     "ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90": (
         _ORCA2_R96SPG_COMPILED / "dynspg_ts.f90"),
+    "ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/domhgr.f90": (
+        _ORCA2_R96SPG_COMPILED / "domhgr.f90"),
     "ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/stprk3.f90": (
         _ORCA2_R96SPG_COMPILED / "stprk3.f90"),
     "ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/traadv.f90": (
@@ -2019,6 +2021,14 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:600-608': [
         '!                             ! Sum over sub-time-steps to compute advective velocities',
         'vn_adv(ji,jj) = vn_adv(ji,jj) + za2 * zhV(ji,jj) * r1_e1v(ji,jj)', 9],
+    'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/domhgr.f90:152':
+        'r1_e1v(:,:) = 1._wp / e1v(:,:)   ;   r1_e2v (:,:) = 1._wp / e2v(:,:)',
+    'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:382-383': [
+        'un_adv(:,:)     = 0._wp       ! Sum for now transport issued from ts loop',
+        'vn_adv(:,:)     = 0._wp', 2],
+    'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:890-906': [
+        'un_adv(:,:) = un_adv(:,:) / r1_wgt2s',
+        'DEALLOCATE( l2_adv_before_u, l2_adv_before_v )', 17],
     'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:770-779': [
         'IF( .NOT.lk_linssh ) THEN   !* Update ocean depth',
         "&                   , hur_e, 'U',  1._wp, hvr_e, 'V',  1._wp  , ssha_e, 'T', 1._wp, ldfull=.TRUE. )", 10],
