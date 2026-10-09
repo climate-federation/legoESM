@@ -1,0 +1,25 @@
+--- namelist_cfg_smt5
++++ namelist_cfg_smt6
+@@ -183,6 +183,22 @@
+       nn_zdmp  =    0         !  SMT-5: ORCA2 rung-1 namelist_cfg:346 (Decision 107c)
+       cn_resto = 'resto.nc'   !  SMT-5: ORCA2 rung-1 resolves the reference default (namelist_ref:1018)
+ /
++!-----------------------------------------------------------------------
++&nambbc        !   bottom temperature boundary condition                (default: OFF)
++!-----------------------------------------------------------------------
++   ln_trabbc   = .true.    !  SMT-6: ORCA2 rung-2 namelist_cfg:273
++      nn_geoflx     = 1       !  SMT-6: constant flux (Decision 110a; ORCA2 rung 2 reads a file, = 2)
++      rn_geoflx_cst = 86.4e-3 !  SMT-6: used as W/m2 by trabbc qgh_trd0 = r1_rho0_rcp*rn_geoflx_cst (Decision 110a)
++/
++!-----------------------------------------------------------------------
++&nambbl        !   bottom boundary layer scheme                         (default: OFF)
++!-----------------------------------------------------------------------
++   ln_trabbl   = .true.    !  SMT-6: ORCA2 rung-2 namelist_cfg:285
++      nn_bbl_ldf  =  1        !  SMT-6: ORCA2 rung-2 namelist_cfg:286
++      nn_bbl_adv  =  0        !  SMT-6: ORCA2 rung-2 namelist_cfg:287
++      rn_ahtbbl   =  1000.    !  SMT-6: ORCA2 rung-2 namelist_cfg:288 [m2/s]
++      rn_gambbl   =  10.      !  SMT-6: ORCA2 rung-2 namelist_cfg:289 [s] (read; inert at nn_bbl_adv = 0)
++/
+ !!======================================================================
+ !!                      ***  Dynamics namelists  ***                  !!
+ !!                                                                    !!

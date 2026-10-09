@@ -1,0 +1,23 @@
+--- usrdef_istate.F90
++++ usrdef_istate.F90
+@@ -93,6 +93,20 @@
+       ! salinity:  
+       pts(:,:,:,jp_sal) = 35._wp * ptmask(:,:,:) 
+       !
++      ! SMT-6b (Decision 110b): cold-flank anomaly that opens trabbl's diffusive
++      ! gate -- the bottom wet T-cell (tmask(jk)=1, tmask(jk+1)=0) is cooled by
++      ! 1.7 K per level its bottom sits above jpkm1; applied before the SMT-5
++      ! dump, so the damping target is this initial state.
++      DO jk = 1, jpkm1
++         DO jj = 1, jpj
++            DO ji = 1, jpi
++               IF( ptmask(ji,jj,jk) == 1._wp .AND. ptmask(ji,jj,jk+1) == 0._wp ) THEN
++                  pts(ji,jj,jk,jp_tem) = pts(ji,jj,jk,jp_tem) - 1.7_wp * REAL( jpkm1 - jk, wp )
++               ENDIF
++            END DO
++         END DO
++      END DO
++      !
+       CALL vortex_smt5_dump_target( ptmask, pts )   ! SMT-5: write-only, reads T/S and tmask
+       !
+       ! velocities:

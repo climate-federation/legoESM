@@ -85,6 +85,7 @@ extra_deck_basename=
 extra_deck2_basename=
 extra_deck3_basename=
 extra_deck4_basename=
+extra_deck5_basename=
 
 # TWO CARDS, ONE SCRIPT (decision 73, operator note BJ).  The vector-EEN card is
 # the SAME experiment -- same geometry, same simplified equation of state, same
@@ -258,7 +259,8 @@ case "$variant" in
   smtflxspgts | smtvecspgts | smtvecrhs | smtflxspgts6 | \
   smtflxtra | smtvectra | smt1vec | smt1vec100d | \
   smt2vec | smt2vec100d | smt3vec | smt3vec100d | smt3vecint | smt3vecint2 | \
-  smt4vec | smt4vec100d | smt5vecsmoke | smt5vec | smt5vec100d)
+  smt4vec | smt4vec100d | smt5vecsmoke | smt5vec | smt5vec100d | \
+  smt6vecsmoke | smt6vec | smt6vec100d | smt6bvecsmoke | smt6bvec | smt6bvec100d)
     # DECISION 88 (user, 2026-10-03), operator note CC: VORTEX WITH TOPOGRAPHY.
     # The SAME 30 km VORTEX deck -- rn_dx 30000, rn_Dt 2880, rn_dz 500, ten
     # levels, every physics switch as the certified cards pin it -- with a
@@ -550,22 +552,99 @@ case "$variant" in
         ref_name=VORTEX_SMT5_VEC_R8_OMIP_L1 ; exp_name=VORTEX_SMT_VEC_OMIP_L1
         tag=smtrungs_r2_smt5_vec_100d
         default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/smtrungs_rounds/round2/oracle_vortex_smt5/day100 ;;
+      # ---- SMT-RUNGS round 5 -- DECISION 110, rung SMT-6 = SMT-5 plus ORCA2
+      # rung 2's &nambbl (diffusive BBL) and &nambbc with nn_geoflx = 1,
+      # rn_geoflx_cst = 86.4e-3: a NAMELIST-ONLY change, so SMT-6 runs the
+      # SMT-5 executables, proved by hash against the SMT-5 smoke manifest.
+      # SMT-6b adds the cold-flank anomaly to usr_def_istate
+      # (usrdef_istate_smt6b_cold_flank.patch, before the SMT-5 dump), so it
+      # is its own build; its kt=1..10 and 100-day arms reuse its smoke pair.
+      smt6vecsmoke)
+        reuse_build=1 ; steps=2
+        deck_basename=namelist_cfg_smt2_vec_een.patch
+        extra_deck_basename=namelist_cfg_smt3_tracer_diffusion.patch
+        extra_deck2_basename=namelist_cfg_smt4_momentum_diffusion.patch
+        extra_deck3_basename=namelist_cfg_smt5_tracer_damping.patch
+        extra_deck4_basename=namelist_cfg_smt6_bbl_geothermal.patch
+        extra_deck5_basename=namelist_cfg_smt5_smoke_2step.patch
+        ref_name=VORTEX_SMT5_VEC_R8_OMIP_L1 ; exp_name=VORTEX_SMT_VEC_OMIP_L1
+        tag=smtrungs_r5_smt6_vec_smoke
+        default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/smtrungs_rounds/round5/oracle_vortex_smt6/smoke ;;
+      smt6vec)
+        reuse_build=1
+        deck_basename=namelist_cfg_smt2_vec_een.patch
+        extra_deck_basename=namelist_cfg_smt3_tracer_diffusion.patch
+        extra_deck2_basename=namelist_cfg_smt4_momentum_diffusion.patch
+        extra_deck3_basename=namelist_cfg_smt5_tracer_damping.patch
+        extra_deck4_basename=namelist_cfg_smt6_bbl_geothermal.patch
+        ref_name=VORTEX_SMT5_VEC_R8_OMIP_L1 ; exp_name=VORTEX_SMT_VEC_OMIP_L1
+        tag=smtrungs_r5_smt6_vec
+        default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/smtrungs_rounds/round5/oracle_vortex_smt6/kt1_10 ;;
+      smt6vec100d)
+        reuse_build=1 ; record_steps=60 ; steps=3000
+        deck_basename=namelist_cfg_smt2_vec_een_100d.patch
+        extra_deck_basename=namelist_cfg_smt3_tracer_diffusion.patch
+        extra_deck2_basename=namelist_cfg_smt4_momentum_diffusion.patch
+        extra_deck3_basename=namelist_cfg_smt5_tracer_damping.patch
+        extra_deck4_basename=namelist_cfg_smt6_bbl_geothermal.patch
+        ref_name=VORTEX_SMT5_VEC_R8_OMIP_L1 ; exp_name=VORTEX_SMT_VEC_OMIP_L1
+        tag=smtrungs_r5_smt6_vec_100d
+        default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/smtrungs_rounds/round5/oracle_vortex_smt6/day100 ;;
+      smt6bvecsmoke)
+        steps=2
+        deck_basename=namelist_cfg_smt2_vec_een.patch
+        extra_deck_basename=namelist_cfg_smt3_tracer_diffusion.patch
+        extra_deck2_basename=namelist_cfg_smt4_momentum_diffusion.patch
+        extra_deck3_basename=namelist_cfg_smt5_tracer_damping.patch
+        extra_deck4_basename=namelist_cfg_smt6_bbl_geothermal.patch
+        extra_deck5_basename=namelist_cfg_smt5_smoke_2step.patch
+        ref_name=VORTEX_SMT6B_VEC_R8_OMIP_L1 ; exp_name=VORTEX_SMT_VEC_OMIP_L1
+        tag=smtrungs_r5_smt6b_vec_smoke
+        default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/smtrungs_rounds/round5/oracle_vortex_smt6b/smoke ;;
+      smt6bvec)
+        reuse_build=1
+        deck_basename=namelist_cfg_smt2_vec_een.patch
+        extra_deck_basename=namelist_cfg_smt3_tracer_diffusion.patch
+        extra_deck2_basename=namelist_cfg_smt4_momentum_diffusion.patch
+        extra_deck3_basename=namelist_cfg_smt5_tracer_damping.patch
+        extra_deck4_basename=namelist_cfg_smt6_bbl_geothermal.patch
+        ref_name=VORTEX_SMT6B_VEC_R8_OMIP_L1 ; exp_name=VORTEX_SMT_VEC_OMIP_L1
+        tag=smtrungs_r5_smt6b_vec
+        default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/smtrungs_rounds/round5/oracle_vortex_smt6b/kt1_10 ;;
+      smt6bvec100d)
+        reuse_build=1 ; record_steps=60 ; steps=3000
+        deck_basename=namelist_cfg_smt2_vec_een_100d.patch
+        extra_deck_basename=namelist_cfg_smt3_tracer_diffusion.patch
+        extra_deck2_basename=namelist_cfg_smt4_momentum_diffusion.patch
+        extra_deck3_basename=namelist_cfg_smt5_tracer_damping.patch
+        extra_deck4_basename=namelist_cfg_smt6_bbl_geothermal.patch
+        ref_name=VORTEX_SMT6B_VEC_R8_OMIP_L1 ; exp_name=VORTEX_SMT_VEC_OMIP_L1
+        tag=smtrungs_r5_smt6b_vec_100d
+        default_evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/smtrungs_rounds/round5/oracle_vortex_smt6b/day100 ;;
     esac
     ;;
   *)
-    printf 'REFUSE: unknown variant %s; expected flux, vec, vecrhs, stage23, spgts, stage123flx, res15flx, res15vec, res10flx, res10vec, smtflx, smtvec, smtflx100d, smtvec100d, smtflxr3, smtvecr3, smtflx100dr3, smtvec100dr3, smtflxspgts, smtflxspgts6, smtvecspgts, smtvecrhs, smtflxtra, smtvectra, smt1vec, smt1vec100d, smt2vec, smt2vec100d, smt3vec, smt3vec100d, smt3vecint, smt3vecint2, smt4vec, smt4vec100d, smt5vecsmoke, smt5vec or smt5vec100d\n' \
+    printf 'REFUSE: unknown variant %s; expected flux, vec, vecrhs, stage23, spgts, stage123flx, res15flx, res15vec, res10flx, res10vec, smtflx, smtvec, smtflx100d, smtvec100d, smtflxr3, smtvecr3, smtflx100dr3, smtvec100dr3, smtflxspgts, smtflxspgts6, smtvecspgts, smtvecrhs, smtflxtra, smtvectra, smt1vec, smt1vec100d, smt2vec, smt2vec100d, smt3vec, smt3vec100d, smt3vecint, smt3vecint2, smt4vec, smt4vec100d, smt5vecsmoke, smt5vec, smt5vec100d, smt6vecsmoke, smt6vec, smt6vec100d, smt6bvecsmoke, smt6bvec or smt6bvec100d\n' \
       "$variant" >&2
     exit 64
     ;;
 esac
 readonly EVIDENCE=${EVIDENCE:-$default_evidence}
 # SMT-4 and SMT-5 share the SMT-4 stage writer, deck checks and admission.
-smt4_family=0 ; smt5=0
+smt4_family=0 ; smt5=0 ; smt6=0 ; smt6b=0
 case "$variant" in
   smt4vec | smt4vec100d) smt4_family=1 ;;
   smt5vecsmoke | smt5vec | smt5vec100d) smt4_family=1 ; smt5=1 ;;
+  smt6vecsmoke | smt6vec | smt6vec100d) smt4_family=1 ; smt5=1 ; smt6=1 ;;
+  smt6bvecsmoke | smt6bvec | smt6bvec100d) smt4_family=1 ; smt5=1 ; smt6=1 ; smt6b=1 ;;
 esac
-readonly smt4_family smt5
+readonly smt4_family smt5 smt6 smt6b
+if [[ "$smt6b" -eq 1 ]]; then
+  SMT6B_ISTATE_PATCH=$here/usrdef_istate_smt6b_cold_flank.patch
+else
+  SMT6B_ISTATE_PATCH=
+fi
+readonly SMT6B_ISTATE_PATCH
 if [[ "$smt5" -eq 1 ]]; then
   SMT5_DUMP=$here/vortex_smt5_target_dump.F90
   SMT5_ISTATE_PATCH=$here/usrdef_istate_smt5_target_dump.patch
@@ -703,7 +782,8 @@ if [[ -n "$extra_deck2_basename" ]]; then DECK_EXTRA2=$here/$extra_deck2_basenam
 readonly DECK_EXTRA DECK_EXTRA2
 if [[ -n "$extra_deck3_basename" ]]; then DECK_EXTRA3=$here/$extra_deck3_basename; else DECK_EXTRA3=; fi
 if [[ -n "$extra_deck4_basename" ]]; then DECK_EXTRA4=$here/$extra_deck4_basename; else DECK_EXTRA4=; fi
-readonly DECK_EXTRA3 DECK_EXTRA4
+if [[ -n "$extra_deck5_basename" ]]; then DECK_EXTRA5=$here/$extra_deck5_basename; else DECK_EXTRA5=; fi
+readonly DECK_EXTRA3 DECK_EXTRA4 DECK_EXTRA5
 readonly CHECKER=$here/check_records.py
 readonly SHIPPED_STP=$NEMO_ROOT/src/OCE/stprk3.F90
 readonly SHIPPED_CFG=$NEMO_ROOT/tests/$TEST_CASE/EXPREF/namelist_cfg
@@ -724,7 +804,7 @@ if [[ -n "$DECK_EXTRA2" && ! -f "$DECK_EXTRA2" ]]; then
   printf 'REFUSE: missing second extra deck patch %s\n' "$DECK_EXTRA2" >&2
   exit 66
 fi
-for extra in "$DECK_EXTRA3" "$DECK_EXTRA4"; do
+for extra in "$DECK_EXTRA3" "$DECK_EXTRA4" "$DECK_EXTRA5"; do
   if [[ -n "$extra" && ! -f "$extra" ]]; then
     printf 'REFUSE: missing extra deck patch %s\n' "$extra" >&2
     exit 66
@@ -732,17 +812,20 @@ for extra in "$DECK_EXTRA3" "$DECK_EXTRA4"; do
 done
 if [[ "$smt5" -eq 1 ]]; then
   # Decision 107e: NEMO dumps its own damping inputs from usr_def_istate.
-  for path in "$SMT5_DUMP" "$SMT5_ISTATE_PATCH" "$SHIPPED_ISTATE"; do
+  for path in "$SMT5_DUMP" "$SMT5_ISTATE_PATCH" "$SHIPPED_ISTATE" \
+      ${SMT6B_ISTATE_PATCH:+"$SMT6B_ISTATE_PATCH"}; do
     [[ -f "$path" ]] \
       || { printf 'REFUSE: missing SMT-5 target-dump input %s\n' "$path" >&2; exit 66; }
   done
   [[ -e "$SRC_CASE/MY_SRC/vortex_smt5_target_dump.F90" ]] \
     && { printf 'REFUSE: %s already ships vortex_smt5_target_dump.F90\n' "$TEST_CASE" >&2; exit 66; }
-  if [[ $(grep -c '^-' "$SMT5_ISTATE_PATCH") -ne $(grep -c '^---' "$SMT5_ISTATE_PATCH") ]]; then
-    printf 'REFUSE: %s deletes or changes a shipped line; it must only ADD\n' \
-      "$SMT5_ISTATE_PATCH" >&2
-    exit 67
-  fi
+  for ipatch in "$SMT5_ISTATE_PATCH" ${SMT6B_ISTATE_PATCH:+"$SMT6B_ISTATE_PATCH"}; do
+    if [[ $(grep -c '^-' "$ipatch") -ne $(grep -c '^---' "$ipatch") ]]; then
+      printf 'REFUSE: %s deletes or changes a shipped line; it must only ADD\n' \
+        "$ipatch" >&2
+      exit 67
+    fi
+  done
 fi
 if [[ -n "$RHS_INSTRUMENT" ]]; then
   [[ -f "$RHS_INSTRUMENT" ]] \
@@ -901,7 +984,7 @@ if [[ -n "$DECK_EXTRA2" ]]; then
     || { printf 'REFUSE: the second extra deck patch does not apply after the first\n' >&2
          rm -rf "$dry"; exit 67; }
 fi
-for extra in "$DECK_EXTRA3" "$DECK_EXTRA4"; do
+for extra in "$DECK_EXTRA3" "$DECK_EXTRA4" "$DECK_EXTRA5"; do
   [[ -n "$extra" ]] || continue
   patch -s --fuzz=0 "$dry/namelist_cfg" <"$extra" \
     || { printf 'REFUSE: extra deck patch %s does not apply in order\n' "$extra" >&2
@@ -941,6 +1024,27 @@ if [[ "$smt5" -eq 1 ]]; then
     || { printf 'REFUSE: the SMT-5 istate patch does not apply\n' >&2; rm -rf "$dry"; exit 67; }
   grep -q 'CALL vortex_smt5_dump_target( ptmask, pts )' "$dry/usrdef_istate.F90" \
     || { printf 'REFUSE: patched usr_def_istate does not call the dump\n' >&2; rm -rf "$dry"; exit 67; }
+  if [[ "$smt6" -eq 1 ]]; then
+    for pattern in \
+      '^ *ln_trabbc *= *\.true\.' '^ *nn_geoflx *= *1 ' '^ *rn_geoflx_cst *= *86\.4e-3 ' \
+      '^ *ln_trabbl *= *\.true\.' '^ *nn_bbl_ldf *= *1 ' '^ *nn_bbl_adv *= *0 ' \
+      '^ *rn_ahtbbl *= *1000\. ' '^ *rn_gambbl *= *10\. '; do
+      [[ $(grep -cE "$pattern" "$dry/namelist_cfg") -eq 1 ]] \
+        || { printf 'REFUSE: SMT-6 deck needs exactly one line %s\n' "$pattern" >&2
+             rm -rf "$dry"; exit 67; }
+    done
+    printf 'SMT6_DECK_OK nambbc nambbl\n'
+  fi
+  if [[ "$smt6b" -eq 1 ]]; then
+    patch -s --fuzz=0 "$dry/usrdef_istate.F90" <"$SMT6B_ISTATE_PATCH" \
+      || { printf 'REFUSE: the SMT-6b istate patch does not apply after SMT-5\n' >&2; rm -rf "$dry"; exit 67; }
+    grep -q 'pts(ji,jj,jk,jp_tem) = pts(ji,jj,jk,jp_tem) - 1.7_wp \* REAL( jpkm1 - jk, wp )' \
+      "$dry/usrdef_istate.F90" \
+      || { printf 'REFUSE: patched usr_def_istate lacks the SMT-6b anomaly\n' >&2; rm -rf "$dry"; exit 67; }
+    awk '/1.7_wp \* REAL\( jpkm1 - jk, wp \)/ {a=NR} /CALL vortex_smt5_dump_target/ {d=NR} END {exit !(a && d && a < d)}' \
+      "$dry/usrdef_istate.F90" \
+      || { printf 'REFUSE: the SMT-6b anomaly must precede the SMT-5 dump\n' >&2; rm -rf "$dry"; exit 67; }
+  fi
   smt5_base=$NEMO_ROOT/tests/VORTEX_SMT4_VEC_R8_OMIP_L1
   smt5_fc=/home/dbalwada/miniconda3/envs/nemo-build/bin/gfortran
   smt5_syntax=$dry/smt5_syntax
@@ -1172,7 +1276,9 @@ case "$variant" in
   | smtvecr3 | smtvec100dr3 | smtvecspgts | smtvecrhs | smtvectra \
   | smt1vec | smt1vec100d | smt2vec | smt2vec100d | smt3vec | smt3vec100d \
   | smt3vecint | smt3vecint2 | smt4vec | smt4vec100d \
-  | smt5vecsmoke | smt5vec | smt5vec100d)
+  | smt5vecsmoke | smt5vec | smt5vec100d \
+  | smt6vecsmoke | smt6vec | smt6vec100d \
+  | smt6bvecsmoke | smt6bvec | smt6bvec100d)
       want_vec='.true.'  ; want_up3='.false.' ;;
   *)  # Dispatch hardening: a variant added above but forgotten here used to
       # fall through to an unbound-variable abort.  Name it instead.
@@ -1215,7 +1321,7 @@ fi
 if [[ -n "$DECK_EXTRA2" ]]; then
   sed -n 's/^/    /p' "$DECK_EXTRA2" | grep -E '^\s+[-+][^-+]' || true
 fi
-for extra in "$DECK_EXTRA3" "$DECK_EXTRA4"; do
+for extra in "$DECK_EXTRA3" "$DECK_EXTRA4" "$DECK_EXTRA5"; do
   [[ -n "$extra" ]] || continue
   sed -n 's/^/    /p' "$extra" | grep -E '^\s+[-+][^-+]' || true
 done
@@ -1264,7 +1370,8 @@ sha256sum "$NEMO_ROOT/arch/arch-conda-scalarmath.fcm" \
   "$INSTRUMENT" "$DECK" ${DECK_EXTRA:+"$DECK_EXTRA"} \
   ${DECK_EXTRA2:+"$DECK_EXTRA2"} ${DECK_EXTRA3:+"$DECK_EXTRA3"} \
   ${DECK_EXTRA4:+"$DECK_EXTRA4"} ${SMT5_DUMP:+"$SMT5_DUMP"} \
-  ${SMT5_ISTATE_PATCH:+"$SMT5_ISTATE_PATCH"} "$CHECKER" \
+  ${SMT5_ISTATE_PATCH:+"$SMT5_ISTATE_PATCH"} ${DECK_EXTRA5:+"$DECK_EXTRA5"} \
+  ${SMT6B_ISTATE_PATCH:+"$SMT6B_ISTATE_PATCH"} "$CHECKER" \
   ${RHS_INSTRUMENT:+"$RHS_INSTRUMENT"} \
   ${RHS_INSTRUMENT:+"$SHIPPED_STP2D"} \
   ${SPGTS_INSTRUMENT:+"$SPGTS_INSTRUMENT"} \
@@ -1309,13 +1416,16 @@ build_one() {          # $1 = config name, $2 = 1 to apply the instrument
   if [[ -n "$DECK_EXTRA2" ]]; then
     patch "$cfg/EXP00/namelist_cfg" <"$DECK_EXTRA2"
   fi
-  for extra in "$DECK_EXTRA3" "$DECK_EXTRA4"; do
+  for extra in "$DECK_EXTRA3" "$DECK_EXTRA4" "$DECK_EXTRA5"; do
     if [[ -n "$extra" ]]; then patch --fuzz=0 "$cfg/EXP00/namelist_cfg" <"$extra"; fi
   done
   if [[ "$smt5" -eq 1 ]]; then
     # BOTH builds carry the dump: it is a deck-input writer, not a record.
     cp -f "$SMT5_DUMP" "$cfg/MY_SRC/vortex_smt5_target_dump.F90"
     patch --fuzz=0 "$cfg/MY_SRC/usrdef_istate.F90" <"$SMT5_ISTATE_PATCH"
+    if [[ -n "$SMT6B_ISTATE_PATCH" ]]; then
+      patch --fuzz=0 "$cfg/MY_SRC/usrdef_istate.F90" <"$SMT6B_ISTATE_PATCH"
+    fi
   fi
   if [[ -n "$SMT_ZGR" ]]; then
     cp -f "$SMT_ZGR" "$cfg/MY_SRC/usrdef_zgr.F90"
@@ -1381,6 +1491,10 @@ build_one() {          # $1 = config name, $2 = 1 to apply the instrument
       || { printf 'REFUSE: %s compiled a usr_def_istate without the SMT-5 dump\n' "$name" >&2; exit 69; }
     grep -q 'CALL tra_dmp( kstp, Kbb, Kmm, ts, Krhs )' "$cfg/BLD/ppsrc/nemo/stprk3_stg.f90" \
       || { printf 'REFUSE: %s has no stage-3 tra_dmp call\n' "$name" >&2; exit 69; }
+  fi
+  if [[ "$smt6b" -eq 1 ]]; then
+    grep -q '1.7_wp \* REAL( jpkm1 - jk, wp )' "$cfg/BLD/ppsrc/nemo/usrdef_istate.f90" \
+      || { printf 'REFUSE: %s compiled a usr_def_istate without the SMT-6b anomaly\n' "$name" >&2; exit 69; }
   fi
   if [[ -n "$SMT_ZGR" ]]; then
     grep -q 'pp_smt_H0' "$cfg/BLD/ppsrc/nemo/usrdef_zgr.f90" \
@@ -1474,6 +1588,17 @@ check_smt3_output() {  # $1 = run directory
         || { printf 'REFUSE: SMT-5 resolved output lost pattern %s in %s\n' \
                "$pattern" "$dir/ocean.output" >&2; exit 71; }
     done
+    if [[ "$smt6" -eq 1 ]]; then
+      for pattern in \
+        'ln_trabbc *= *T$' 'nn_geoflx *= *1$' 'rn_geoflx_cst *= *8\.640*[0-9]*E-002$' \
+        'constant heat flux' \
+        'ln_trabbl *= *T$' 'nn_bbl_ldf *= *1$' 'nn_bbl_adv *= *0$' \
+        'rn_ahtbbl *= *1000\.0* +m2/s$' 'rn_gambbl *= *10\.0* +s$'; do
+        grep -qE "$pattern" "$dir/ocean.output" \
+          || { printf 'REFUSE: SMT-6 resolved output lost pattern %s in %s\n' \
+                 "$pattern" "$dir/ocean.output" >&2; exit 71; }
+      done
+    fi
     for file in $SMT5_FILES; do
       [[ -s "$dir/$file" ]] \
         || { printf 'REFUSE: NEMO did not dump %s in %s\n' "$file" "$dir" >&2; exit 71; }
@@ -1562,7 +1687,7 @@ run_one_reuse() {       # $1 = certified config name, $2 = run directory
   if [[ -n "$DECK_EXTRA2" ]]; then
     patch "$dir/namelist_cfg" <"$DECK_EXTRA2"
   fi
-  for extra in "$DECK_EXTRA3" "$DECK_EXTRA4"; do
+  for extra in "$DECK_EXTRA3" "$DECK_EXTRA4" "$DECK_EXTRA5"; do
     if [[ -n "$extra" ]]; then patch --fuzz=0 "$dir/namelist_cfg" <"$extra"; fi
   done
   cp "$cfg/BLD/bin/nemo.exe" "$dir/nemo"
@@ -1595,7 +1720,8 @@ if [[ "$reuse_build" -eq 1 ]]; then
     smt2vec100d) certified_manifest=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/vortex_smt/round10/VORTEX_SMT2_VEC_R8_OMIP_L1_P3/kt1_10/binaries.sha256 ;;
     smt3vec100d) certified_manifest=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round224/oracle_vortex_smt3/kt1_10/binaries.sha256 ;;
     smt4vec100d) certified_manifest=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round237/oracle_vortex_smt4/kt1_10/binaries.sha256 ;;
-    smt5vec | smt5vec100d) certified_manifest=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/smtrungs_rounds/round2/oracle_vortex_smt5/smoke/binaries.sha256 ;;
+    smt5vec | smt5vec100d | smt6vecsmoke | smt6vec | smt6vec100d) certified_manifest=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/smtrungs_rounds/round2/oracle_vortex_smt5/smoke/binaries.sha256 ;;
+    smt6bvec | smt6bvec100d) certified_manifest=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/smtrungs_rounds/round5/oracle_vortex_smt6b/smoke/binaries.sha256 ;;
   esac
   [[ -f "$certified_manifest" ]] \
     || { printf 'REFUSE: certified binary manifest %s is absent\n' \
