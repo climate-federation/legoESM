@@ -34,6 +34,7 @@ def test_recovery_admits_preserved_step_nine_boundary() -> None:
     text = RUNNER.read_text()
 
     assert "round210/acquisition/orca2_omt1_uninstrumented_10step_np2" in text
+    assert "--boundary-only" in text
     assert "--boundary \"$boundary\"" in text
     assert "wrong-boundary" in text
 

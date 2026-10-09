@@ -90,6 +90,14 @@ bash -n "$0"
   --output "$evidence/omt1_deck_preflight.json"
 "$py" "$record_gate" --preflight-only \
   --output "$evidence/omt1_frame_preflight.json"
+if "$py" "$record_gate" --boundary-only --candidate "$canonical" \
+  --boundary "$boundary" --plant wrong-boundary \
+  >"$evidence/record_wrong-boundary_plant.log" 2>&1; then
+  printf 'REFUSE: wrong-boundary plant stayed green\n' >&2; exit 72
+fi
+grep -q 'STATUS PLANT-FIRED' "$evidence/record_wrong-boundary_plant.log"
+"$py" "$record_gate" --boundary-only --candidate "$canonical" \
+  --boundary "$boundary" --output "$evidence/omt1_boundary_admission.json"
 for plant in extra-delta wrong-selector; do
   if "$py" "$deck_gate" --source "$source_deck" --candidate "$canonical" \
     --plant "$plant" >"$evidence/deck_${plant}_plant.log" 2>&1; then
@@ -106,7 +114,7 @@ fi
 admit() {
   local plant
   for plant in cadence header field-name truncation nonfinite missing-frame \
-    twin-ulp terminal-byte changed-binary wrong-boundary; do
+    twin-ulp terminal-byte changed-binary; do
     if "$py" "$record_gate" --candidate "$canonical" \
       --calibration "$calibration" --twin-a "$twin_a" --twin-b "$twin_b" \
       --boundary "$boundary" --plant "$plant" \

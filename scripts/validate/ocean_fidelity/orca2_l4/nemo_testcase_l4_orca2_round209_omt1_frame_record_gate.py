@@ -294,6 +294,7 @@ def admit(canonical: Path, calibration: Path, twin_a: Path, twin_b: Path,
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--preflight-only", action="store_true")
+    parser.add_argument("--boundary-only", action="store_true")
     parser.add_argument("--candidate", type=Path)
     parser.add_argument("--calibration", type=Path)
     parser.add_argument("--twin-a", type=Path)
@@ -306,6 +307,18 @@ def main() -> int:
         if args.preflight_only:
             require(args.plant == "none", "preflight does not accept a plant")
             result = preflight()
+        elif args.boundary_only:
+            require(args.candidate is not None and args.boundary is not None,
+                    "boundary validation requires candidate and boundary")
+            result = preflight()
+            result.update({
+                "status": "PASS_R211_OMT1_STABILITY_BOUNDARY",
+                "stability_boundary": _stability_boundary(
+                    args.boundary, args.candidate, BASE_BINARY_SHA256,
+                    args.plant,
+                ),
+            })
+            require(args.plant == "none", f"{args.plant} plant stayed green")
         else:
             require(all((args.candidate, args.calibration, args.twin_a,
                          args.twin_b, args.boundary)),
