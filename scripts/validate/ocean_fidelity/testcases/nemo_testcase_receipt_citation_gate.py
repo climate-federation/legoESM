@@ -152,6 +152,14 @@ FILES = {
         NEMO / "tests/VORTEX_SMT4_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/daymod.f90"),
     "VORTEX_SMT4_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/nemogcm.f90": (
         NEMO / "tests/VORTEX_SMT4_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/nemogcm.f90"),
+    "VORTEX_SMT5_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/stprk3_stg.f90": (
+        NEMO / "tests/VORTEX_SMT5_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/stprk3_stg.f90"),
+    "VORTEX_SMT5_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/tradmp.f90": (
+        NEMO / "tests/VORTEX_SMT5_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/tradmp.f90"),
+    "VORTEX_SMT5_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/dtatsd.f90": (
+        NEMO / "tests/VORTEX_SMT5_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/dtatsd.f90"),
+    "VORTEX_SMT5_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/fldread.f90": (
+        NEMO / "tests/VORTEX_SMT5_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/fldread.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/diawri.f90": (
         _ORCA2_COMPILED / "diawri.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/tradmp.f90": (
@@ -1430,6 +1438,17 @@ CITATION_MAP = {
     'VORTEX_SMT4_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/daymod.f90:240': 'nsec_year    = nsec_year    + ndt',
     'VORTEX_SMT4_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/nemogcm.f90:399': 'CALL  istate_init( Nbb, Nnn, Naa )         !',
     'VORTEX_SMT4_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/nemogcm.f90:432': 'CALL tra_dmp_init      ! internal tracer damping',
+    # --- SMT-RUNGS round 3: the SMT-5 build's own compiled damping chain ---
+    'VORTEX_SMT5_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/tradmp.f90:181': 'CALL dta_tsd( kt, zts_dta )',
+    'VORTEX_SMT5_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/tradmp.f90:190': 'CASE( 0 )',
+    'VORTEX_SMT5_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/tradmp.f90:193-194': [
+        ('pts(ji,jj,jk,jn,Krhs) = pts(ji,jj,jk,jn,Krhs)', 1),
+        ('+ resto(ji,jj,jk) * ( zts_dta(ji,jj,jk,jn) - pts(ji,jj,jk,jn,Kbb) )', 1), 2],
+    'VORTEX_SMT5_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/dtatsd.f90:212': 'CALL fld_read( kt, 1, sf_tsd )',
+    'VORTEX_SMT5_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/fldread.f90:246': 'sd(jf)%fnow(:,:,:) = ztintb * sd(jf)%fdta(:,:,:,ibb) + ztinta * sd(jf)%fdta(:,:,:,iaa)',
+    'VORTEX_SMT5_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/stprk3_stg.f90:526': 'CALL tra_ldf( kstp, Kbb, Kmm, ts, Krhs )',
+    'VORTEX_SMT5_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/stprk3_stg.f90:529': 'IF( ln_tradmp  )   CALL tra_dmp( kstp, Kbb, Kmm, ts, Krhs )',
+    'VORTEX_SMT5_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/stprk3_stg.f90:538': 'CALL tra_zdf( kstp, Kbb, Kmm, Krhs, ts    , Kaa  )',
     # --- ORCA2 round 112: executed ff_f read/fill and literal EEN consumer ---
     'ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo/domhgr.f90:101-108': [
         ('IF( ln_read_cfg ) THEN', 1),
