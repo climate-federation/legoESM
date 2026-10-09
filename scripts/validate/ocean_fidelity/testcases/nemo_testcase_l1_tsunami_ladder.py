@@ -334,9 +334,12 @@ def run(root: Path, *, arm: str, kt_max: int = 10, plant: str | None = None,
                         "first_unequal": first_unequal(rows),
                         "n_unequal_boundaries": len(unequal),
                         "n_boundaries": len(rows),
+                        "n_over_bar": sum(r["status"] == "DEBT" for r in rows),
+                        "max_normalized_over_all_boundaries": max(
+                            r["normalized_max_abs"] for r in rows),
                         "rows_unequal": [
-                            {k: r[k] for k in ("name", "n_unequal",
-                                               "max_abs")}
+                            {k: r[k] for k in ("name", "n_unequal", "max_abs",
+                                               "normalized_max_abs", "status")}
                             for r in unequal[:12]],
                     }
                 out["per_kt"].append(entry)
