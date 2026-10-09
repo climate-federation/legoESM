@@ -59,6 +59,7 @@ RETAINED = {
 }
 PLANTS = (
     "none", "extra-delta", "live-module", "oversized-list",
+    "twin-list-mode",
     "missing-smoke", "missing-rank", "wrong-step", "nonfinite",
     "twin-ulp", "calibration-ulp", "missing-month", "wrong-oracle-stop",
     "changed-binary",
@@ -161,7 +162,7 @@ def _integer_list(value: str, label: str) -> tuple[int, ...]:
 
 def render_run_deck(text: str, *, itend: int, stock: int,
                     restart_steps: tuple[int, ...]) -> str:
-    """Render run controls without changing OMT-0 physics."""
+    """Render a sparse restart-list run without changing OMT-0 physics."""
     require(itend > 0 and itend % 2 == 0, "nn_itend must be positive and divisible by nn_fsbc=2")
     require(0 < stock <= itend, "nn_stock must be positive and no later than nn_itend")
     require(0 < len(restart_steps) <= RESTART_LIST_CAPACITY,
@@ -169,6 +170,10 @@ def render_run_deck(text: str, *, itend: int, stock: int,
     require(len(set(restart_steps)) == len(restart_steps), "restart list contains duplicates")
     require(all(0 < step <= itend for step in restart_steps),
             "restart list contains an out-of-run step")
+    require(restart_steps[0] > 1,
+            "restart-list first step must be later than nit000 so NEMO can open it")
+    require(all(right - left > 1 for left, right in zip(restart_steps, restart_steps[1:])),
+            "restart-list entries must leave one step for NEMO to open the next file")
     for key, value in (("nn_itend", itend), ("nn_stock", stock)):
         text, count = re.subn(
             rf"^(\s*{key}\s*=\s*)(\S+)", rf"\g<1>{value}",
@@ -185,6 +190,29 @@ def render_run_deck(text: str, *, itend: int, stock: int,
         text, count=1, flags=re.MULTILINE,
     )
     require(count == 1, "restart-list insertion point not found exactly once")
+    return text
+
+
+def render_frequency_run_deck(text: str, *, itend: int) -> str:
+    """Render NEMO's supported every-step restart protocol."""
+    require(itend > 0 and itend % 2 == 0,
+            "nn_itend must be positive and divisible by nn_fsbc=2")
+    require(re.search(r"(?mi)^\s*ln_rst_list\s*=", text) is None,
+            "canonical deck unexpectedly selects restart-list mode")
+    require(re.search(r"(?mi)^\s*nn_stocklist\s*=", text) is None,
+            "canonical deck unexpectedly carries a restart list")
+    for key, value in (("nn_itend", itend), ("nn_stock", 1)):
+        text, count = re.subn(
+            rf"^(\s*{key}\s*=\s*)(\S+)", rf"\g<1>{value}",
+            text, count=1, flags=re.MULTILINE,
+        )
+        require(count == 1, f"{key} not found exactly once")
+    text, count = re.subn(
+        r"^(\s*nn_stock\s*=\s*\S+[^\n]*\n)",
+        lambda match: match.group(1) + "   ln_rst_list = .false.\n",
+        text, count=1, flags=re.MULTILINE,
+    )
+    require(count == 1, "frequency-mode insertion point not found exactly once")
     return text
 
 
@@ -220,6 +248,44 @@ def validate_run_deck(canonical: Path, root: Path, *, itend: int, stock: int,
         "itend": itend,
         "stock": stock,
         "restart_steps": list(actual),
+        "physical_delta": changed,
+        "deck_files": len(deck_manifest),
+        "input_files": len(input_manifest),
+        "zero_flux": rung0_record._validate_zero_flux(root),
+    }
+
+
+def validate_frequency_run_deck(canonical: Path, root: Path, *, itend: int,
+                                plant: str = "none") -> dict:
+    """Require NEMO's every-step frequency mode for the ten-step twins."""
+    require(plant in PLANTS, f"unknown plant {plant}")
+    deck_manifest = rung0_record._manifest(root, "deck_files.sha256")
+    input_manifest = rung0_record._manifest(root, "input_files.sha256")
+    require(f"{rung0_deck.ZERO_FILE}.nc" in input_manifest,
+            "exact-zero flux file is absent from the input manifest")
+    values = namelist_values(root / "namelist_cfg")
+    base = namelist_values(canonical)
+    expected_keys = set(base) | {"namrun.ln_rst_list"}
+    require(set(values) == expected_keys, "frequency run deck assignment inventory changed")
+    ignored = {"namrun.nn_itend", "namrun.nn_stock"}
+    changed = sorted(
+        key for key in base if key not in ignored and _normal(values[key]) != _normal(base[key])
+    )
+    require(not changed, f"hidden frequency run-deck physical delta: {changed}")
+    require(_integer(values["namrun.nn_itend"], "nn_itend") == itend,
+            f"nn_itend is not {itend}")
+    require(_integer(values["namrun.nn_stock"], "nn_stock") == 1,
+            "every-step twins require nn_stock=1")
+    list_mode = _logical(values["namrun.ln_rst_list"], "ln_rst_list")
+    if plant == "twin-list-mode":
+        list_mode = True
+    require(not list_mode,
+            "every-step twins must use frequency mode, not restart-list mode")
+    return {
+        "itend": itend,
+        "stock": 1,
+        "restart_mode": "frequency-every-step",
+        "restart_steps": list(TWIN_STEPS),
         "physical_delta": changed,
         "deck_files": len(deck_manifest),
         "input_files": len(input_manifest),
@@ -349,24 +415,29 @@ def validate_record(canonical: Path, smoke: Path, twin_a: Path, twin_b: Path,
                     month: Path, plant: str = "none") -> dict:
     require(plant in PLANTS, f"unknown plant {plant}")
     runs = (
-        (smoke, 2, 2, (1,), False, (1,)),
-        (twin_a, TWIN_ITEND, TWIN_ITEND, TWIN_STEPS, False, TWIN_STEPS),
-        (twin_b, TWIN_ITEND, TWIN_ITEND, TWIN_STEPS, False, TWIN_STEPS),
-        (month, MONTH_ITEND, MONTH_ITEND, MONTH_STEPS, True, AVAILABLE_MONTH_STEPS),
+        (smoke, 2, 2, (1,), False, (1,), "list"),
+        (twin_a, TWIN_ITEND, 1, TWIN_STEPS, False, TWIN_STEPS, "frequency"),
+        (twin_b, TWIN_ITEND, 1, TWIN_STEPS, False, TWIN_STEPS, "frequency"),
+        (month, MONTH_ITEND, MONTH_ITEND, MONTH_STEPS, True, AVAILABLE_MONTH_STEPS, "list"),
     )
     deck_rows = []
     oracle_boundary = None
-    for root, itend, stock, steps, expected_stop, opened_steps in runs:
+    for root, itend, stock, steps, expected_stop, opened_steps, mode in runs:
         observed = _run_provenance(
             root, itend=itend, restart_steps=steps, plant=plant,
             expected_oracle_stop=expected_stop, opened_steps=opened_steps,
         )
         if observed is not None:
             oracle_boundary = observed
-        deck_rows.append(validate_run_deck(
-            canonical, root, itend=itend, stock=stock,
-            restart_steps=steps, plant=plant,
-        ))
+        if mode == "frequency":
+            deck_rows.append(validate_frequency_run_deck(
+                canonical, root, itend=itend, plant=plant,
+            ))
+        else:
+            deck_rows.append(validate_run_deck(
+                canonical, root, itend=itend, stock=stock,
+                restart_steps=steps, plant=plant,
+            ))
 
     headers = []
     comparisons = 0
@@ -409,8 +480,8 @@ def validate_record(canonical: Path, smoke: Path, twin_a: Path, twin_b: Path,
                 ulp_field=(FIELDS[0] if plant == "calibration-ulp" and label == "twin-a" and rank == 0 else None),
             )
     return {
-        "format": "nemo-testcase-l4-orca2-round200-omt0-record-v2",
-        "status": "PASS_R200_OMT0_TEN_STEP_RECORD__STOP_MONTH_AT_KT11",
+        "format": "nemo-testcase-l4-orca2-round202-omt0-record-v3",
+        "status": "PASS_R202_OMT0_TEN_STEP_RECORD__STOP_MONTH_AT_KT11",
         "claim_label": "independent OMT-0",
         "binary_sha256": BINARY_SHA256,
         "twin_steps": list(TWIN_STEPS),
@@ -429,10 +500,11 @@ def validate_record(canonical: Path, smoke: Path, twin_a: Path, twin_b: Path,
 
 def preflight() -> dict:
     return {
-        "format": "nemo-testcase-l4-orca2-round200-omt0-preflight-v2",
-        "status": "PASS_R200_OMT0_RECOVERY_PREFLIGHT",
+        "format": "nemo-testcase-l4-orca2-round202-omt0-preflight-v3",
+        "status": "PASS_R202_OMT0_FREQUENCY_RECOVERY_PREFLIGHT",
         "twin_steps": list(TWIN_STEPS),
         "twin_itend": TWIN_ITEND,
+        "twin_restart_mode": "frequency-every-step",
         "month_steps": list(MONTH_STEPS),
         "month_steps_expected_available": list(AVAILABLE_MONTH_STEPS),
         "expected_oracle_stop_step": 11,
@@ -450,6 +522,7 @@ def main() -> int:
     parser.add_argument("--cpp", type=Path)
     parser.add_argument("--render-deck", type=Path)
     parser.add_argument("--render-run-deck", type=Path)
+    parser.add_argument("--render-frequency-deck", type=Path)
     parser.add_argument("--itend", type=int)
     parser.add_argument("--stock", type=int)
     parser.add_argument("--restart-steps")
@@ -481,6 +554,15 @@ def main() -> int:
                 stock=args.stock, restart_steps=steps,
             ))
             print(f"STATUS RENDERED_OMT0_RUN_DECK {args.render_run_deck}")
+            return 0
+        if args.render_frequency_deck:
+            require(args.candidate is not None and args.itend
+                    and args.plant == "none",
+                    "frequency-deck rendering requires canonical deck and controls")
+            args.render_frequency_deck.write_text(render_frequency_run_deck(
+                args.candidate.read_text(), itend=args.itend,
+            ))
+            print(f"STATUS RENDERED_OMT0_FREQUENCY_DECK {args.render_frequency_deck}")
             return 0
         if args.preflight_only:
             require(args.plant == "none", "preflight does not accept a plant")

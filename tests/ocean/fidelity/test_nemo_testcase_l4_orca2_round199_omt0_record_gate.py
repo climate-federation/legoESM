@@ -42,17 +42,12 @@ def test_omt0_deck_plants_fire(tmp_path: Path, plant: str) -> None:
         gate.validate_deck(SOURCE, candidate, CPP, plant)
 
 
-@pytest.mark.parametrize(
-    ("itend", "stock", "steps"),
-    [
-        (2, 2, (1,)),
-        (gate.TWIN_ITEND, gate.TWIN_ITEND, gate.TWIN_STEPS),
-        (gate.MONTH_ITEND, gate.MONTH_ITEND, gate.MONTH_STEPS),
-    ],
-)
 def test_run_deck_protocol_is_only_run_control_delta(
-    tmp_path: Path, itend: int, stock: int, steps: tuple[int, ...],
+    tmp_path: Path,
 ) -> None:
+    itend = gate.MONTH_ITEND
+    stock = gate.MONTH_ITEND
+    steps = gate.MONTH_STEPS
     canonical = gate.render_omt0(SOURCE.read_text())
     rendered = gate.render_run_deck(
         canonical, itend=itend, stock=stock, restart_steps=steps,
@@ -69,6 +64,32 @@ def test_run_deck_protocol_is_only_run_control_delta(
     assert before["namsbc.nn_fsbc"] == after["namsbc.nn_fsbc"]
 
 
+def test_frequency_run_deck_writes_every_step_without_list_mode(tmp_path: Path) -> None:
+    canonical = gate.render_omt0(SOURCE.read_text())
+    rendered = gate.render_frequency_run_deck(canonical, itend=gate.TWIN_ITEND)
+    path = tmp_path / "namelist_cfg"
+    path.write_text(rendered)
+    before = namelist_values(SOURCE)
+    after = namelist_values(path)
+
+    assert int(after["namrun.nn_itend"].split()[0]) == gate.TWIN_ITEND
+    assert int(after["namrun.nn_stock"].split()[0]) == 1
+    assert after["namrun.ln_rst_list"].strip().lower() == ".false."
+    assert "namrun.nn_stocklist" not in after
+    assert all(key in after for key in gate.ADDED)
+    assert before["namsbc.nn_fsbc"] == after["namsbc.nn_fsbc"]
+
+
+def test_adjacent_restart_list_is_refused() -> None:
+    with pytest.raises(gate.GateError, match="first step|leave one step"):
+        gate.render_run_deck(
+            gate.render_omt0(SOURCE.read_text()),
+            itend=gate.TWIN_ITEND,
+            stock=gate.TWIN_ITEND,
+            restart_steps=gate.TWIN_STEPS,
+        )
+
+
 def test_restart_capacity_plant_is_nonvacuous() -> None:
     with pytest.raises(gate.GateError, match="capacity 10"):
         gate.render_run_deck(
@@ -81,9 +102,10 @@ def test_restart_capacity_plant_is_nonvacuous() -> None:
 
 def test_preflight_census_is_frozen() -> None:
     report = gate.preflight()
-    assert report["status"] == "PASS_R200_OMT0_RECOVERY_PREFLIGHT"
+    assert report["status"] == "PASS_R202_OMT0_FREQUENCY_RECOVERY_PREFLIGHT"
     assert report["twin_steps"] == list(range(1, 11))
     assert report["twin_itend"] == 10
+    assert report["twin_restart_mode"] == "frequency-every-step"
     assert report["month_steps"] == [10, 20, 30, 40, 50, 60, 70, 80, 90, 95]
     assert report["month_steps_expected_available"] == [10]
     assert report["expected_oracle_stop_step"] == 11
