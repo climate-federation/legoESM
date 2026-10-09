@@ -120,7 +120,9 @@ def classify(report: dict[str, object], *, plant: str = "none") -> dict[str, obj
                 and first.get("name") == "ssh_after"
                 and int(first.get("substep", -1)) == 1 else "REFUTED"),
             "R191-P3": "CONFIRMED" if history_null else "REFUTED",
-            "R191-P4": "CONFIRMED" if first is not None else "REFUTED",
+            "R191-P4": (
+                "CONFIRMED" if first is not None
+                and first.get("name") == "ssh_after" else "REFUTED"),
             "R191-P5": "CONFIRMED_MEASUREMENT_ONLY",
             "R191-P6": "CONFIRMED",
         },
