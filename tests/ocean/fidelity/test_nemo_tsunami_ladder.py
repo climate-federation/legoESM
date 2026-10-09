@@ -125,7 +125,6 @@ def test_b6_scaling_is_quadratic_in_velocity_and_the_floor_is_tiny(monkeypatch):
     # A stale (un-awaited) observer read breaks this: the first measurement
     # gave ratios 1.5 and 2.0 before the effects barrier was added.
     monkeypatch.setattr(lad, "B6_KTS", (2,))
-    monkeypatch.setattr(lad, "B6_LAMBDAS", (0.0, 0.5, 1.0))
     out = lad.run(ROOT, arm="b6_scaling", kt_max=2, allow_dirty=True,
                   eos_depth="geometric")
     k = out["per_kt"][0]
