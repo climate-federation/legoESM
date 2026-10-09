@@ -1358,6 +1358,9 @@ FILES = {
         NEMO / "tests/TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/dynadv.f90"),
     "TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/traadv.f90": (
         NEMO / "tests/TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/traadv.f90"),
+    # TSUNAMI lane round 4
+    "TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/dynvor.f90": (
+        NEMO / "tests/TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/dynvor.f90"),
 }
 
 # citation -> the anchors that IDENTIFY its first and last line, plus the
@@ -1437,6 +1440,11 @@ CITATION_MAP = {
     'TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/dynadv.f90:185': 'n_dynadv = np_LIN_dyn',
     'TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/traadv.f90:444': 'nadv = np_NO_adv',
     'TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/stprk3_stg.f90:413-414': [('zub(ji,jj) = uu_b(ji,jj,Kaa) - SUM( e3t_1d(:)*uu(ji,jj,:,Kaa) ) * r1_hu_0(ji,jj)', 1), ('zvb(ji,jj) = vv_b(ji,jj,Kaa) - SUM( e3t_1d(:)*vv(ji,jj,:,Kaa) ) * r1_hv_0(ji,jj)', 1), 2],
+    # --- TSUNAMI lane round 4 (advection OFF arms) ---
+    'TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/stprk3_stg.f90:316': 'IF( .NOT.ln_dynadv_vec )   CALL dyn_adv( kstp, Kmm, Kmm, uu, vv, Krhs, zFu, zFv, zFw )',
+    'TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/stprk3_stg.f90:334': ('CALL dyn_adv( kstp, Kmm, Kmm, uu, vv, Krhs, zFu, zFv, zFw )', 2),
+    'TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/stprk3_stg.f90:467': 'ts(:,:,:,jn,Krhs) = 0._wp',
+    'TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/dynvor.f90:857-860': [('CASE( np_LIN_dyn )', 1), ('ntot = np_COR', 1), 4],
     'TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/stprk3_stg.f90:503-505': [('ts(ji,jj,jk,jn,Kaa) = (        ( 1._wp + r3t(ji,jj,Kbb) )*ts(ji,jj,jk,jn,Kbb )', 1), ('/          ( 1._wp + r3t(ji,jj,Kaa) )', 1), 3],
     'nemogcm.F90:166': ('CALL stp_RK3', 1),
     'stprk3_stg.F90:143-145': [('ssh (:,:,Kaa) = r2_3 * ssh (:,:,Kbb) + r1_3 * ssha(:,:)', 2), ('vv_b(:,:,Kaa) = va_b(:,:)', 2), 3],
