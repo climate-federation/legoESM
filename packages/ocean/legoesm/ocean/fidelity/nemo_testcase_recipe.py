@@ -2880,8 +2880,7 @@ def build_vortex_smt_zps_card(
 # correction every stage (:439-446), and T/S stepped every stage with NO
 # advection trend (:546-554; traadv.F90 np_NO_adv has no CASE).  The card's
 # carrier is the shared VORTEX flux-form EEN RK3 identity; what it lacks is
-# declared in TSUNAMI_UNMEASURED, so validate_nemo_testcase_card_for_execution
-# refuses it.
+# declared in TSUNAMI_UNMEASURED (empty since round 5).
 
 
 class TsunamiResolvedNamelist(NamedTuple):
@@ -2999,18 +2998,9 @@ _TSUNAMI_SEOS = NemoSEOSConfig(
 # DECISION 100.  B3 is card data (j_periodic).  B5 is proven at rest
 # (test_nemo_tsunami_card); its NEMO comparison waits for the record.
 TSUNAMI_UNMEASURED: tuple[str, ...] = (
-    # namelist_cfg:28-29 ln_Iperio/ln_Jperio on a fully wet box: every
-    # certified NEMO card has a closed ring, so the NEMO-literal barotropic
-    # arms (dynspg_ts.F90:787-789, :854, :895; stprk3_stg.F90:158, :636)
-    # have never run against NEMO across an open periodic seam.
-    "B4:periodic_seam_nemo_literal_barotropic",
-    # Measured in legoESM alone (round 2, test_nemo_tsunami_card): one card
-    # step is bitwise translation-equivariant across the i-seam but NOT the
-    # j-seam, with or without the y-wrap scope -- the existing y-wrap reaches
-    # only the v-face wall helpers, not the card's barotropic path.
-    "B4j:card_step_walls_the_j_seam",
-    # B6 (ln_dynadv_OFF) and B7 (ln_traadv_OFF) are closed by card
-    # selections in build_tsunami_zco_card (round 4).
+    # B4 (the NEMO-literal barotropic arms across both open periodic seams)
+    # and B4j (the j-periodic step) are measured against NEMO's 100-step
+    # record at the floor (round 5); B6/B7 are card selections (round 4).
 )
 
 
@@ -3074,8 +3064,8 @@ def build_tsunami_zco_card() -> NEMOTestcaseCard:
     """TSUNAMI: doubly periodic 201x201 f-plane, one 100 m z level.
 
     Geometry from usrdef_nam/hgr/zgr, initial state from usrdef_istate, zero
-    forcing (usrdef_sbc.F90:60-68).  NOT execution-ready: see
-    ``TSUNAMI_UNMEASURED``.
+    forcing (usrdef_sbc.F90:60-68).  Execution-ready since round 5
+    (``TSUNAMI_UNMEASURED`` is empty).
     """
     nl = TSUNAMI_NAMELIST
     src = tsunami_horizontal_coordinates()

@@ -169,11 +169,12 @@ def test_initial_ssh_against_formula_at_three_cells(card):
     assert np.count_nonzero(eta) == 325
 
 
-def test_execution_gate_refuses_with_named_blockers(card):
-    assert [b.split(":")[0] for b in TSUNAMI_UNMEASURED] == [
-        "B4", "B4j"]
-    with pytest.raises(ValueError, match="B4:periodic_seam"):
-        validate_nemo_testcase_card_for_execution(card)
+def test_execution_gate_admits_the_measured_card(card):
+    assert TSUNAMI_UNMEASURED == ()
+    validate_nemo_testcase_card_for_execution(card)
+    with pytest.raises(ValueError, match="TSUNAMI_UNMEASURED"):
+        validate_nemo_testcase_card_for_execution(
+            card._replace(unmeasured_features=("B4j:planted",)))
 
 
 def test_j_periodicity_is_card_data(card):
@@ -241,7 +242,7 @@ def test_validator_refuses_planted_drift(card):
     with pytest.raises(ValueError, match="filter/substeps"):
         validate_nemo_testcase_card(bad)
     with pytest.raises(ValueError, match="TSUNAMI_UNMEASURED"):
-        validate_nemo_testcase_card(card._replace(unmeasured_features=()))
+        validate_nemo_testcase_card(card._replace(unmeasured_features=("x",)))
 
 
 def test_single_level_is_opt_in_only():
