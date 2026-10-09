@@ -32,12 +32,13 @@ from scripts.validate.ocean_fidelity.testcases.nemo_testcase_oracle_gate import 
 STEPS = (10, 20, 30, 40, 50, 60, 70, 80, 90, 95)
 ITEND = 96
 TERMINAL_SENTINEL = 96
-DECK_STEPS = STEPS + (TERMINAL_SENTINEL,)
+RESTART_LIST_CAPACITY = 10
 FIELDS = ("tn", "sn", "un", "vn", "sshn")
 PLANTS = (
     "none", "missing-rank", "twin-ulp", "step10-calibration",
     "hidden-deck", "terminal-payload", "missing-sentinel",
-    "sentinel-truncation", "sentinel-header",
+    "sentinel-truncation", "sentinel-header", "explicit-list",
+    "wrong-frequency",
 )
 
 
@@ -69,23 +70,14 @@ def _integer(value: str, label: str) -> int:
 
 
 def render_deck(source: str, itend: int = ITEND) -> str:
-    """Change run protocol only and protect step 95 with a step-96 sentinel."""
+    """Write step 95 non-terminally, with step 96 as a distinct sentinel."""
 
     require(itend == ITEND, f"unsupported terminal step {itend}")
-    for key, value in (("nn_itend", itend), ("nn_stock", itend)):
+    for key, value in (("nn_itend", itend), ("nn_stock", STEPS[-1])):
         source, count = re.subn(
             rf"^(\s*{key}\s*=\s*)(\S+)", rf"\g<1>{value}", source,
             count=1, flags=re.MULTILINE)
         require(count == 1, f"{key} not found exactly once")
-    lines = (
-        "   ln_rst_list = .true.\n"
-        "   nn_stocklist = " + ", ".join(str(step) for step in DECK_STEPS) + "\n"
-    )
-    source, count = re.subn(
-        r"^(\s*nn_stock\s*=\s*\S+[^\n]*\n)",
-        lambda match: match.group(1) + lines,
-        source, count=1, flags=re.MULTILINE)
-    require(count == 1, "restart-list insertion point not found exactly once")
     return source
 
 
@@ -96,8 +88,15 @@ def validate_deck(source: Path, candidate: Path, plant: str = "none") -> dict:
         key = "namtra_ldf.ln_traldf_lap"
         require(key in values, "hidden-deck plant key disappeared")
         values[key] = ".false." if _normal(values[key]) == ".true." else ".true."
+    if plant == "explicit-list":
+        values["namrun.ln_rst_list"] = ".true."
+        values["namrun.nn_stocklist"] = ", ".join(
+            str(step) for step in STEPS + (TERMINAL_SENTINEL,))
+    if plant == "wrong-frequency":
+        values["namrun.nn_stock"] = str(TERMINAL_SENTINEL)
     list_keys = {"namrun.ln_rst_list", "namrun.nn_stocklist"}
-    require(set(values) == set(base) | list_keys,
+    observed_keys = set(values) - set(base)
+    require(observed_keys in (set(), list_keys),
             "growth deck assignment inventory changed")
     ignored = {"namrun.nn_itend", "namrun.nn_stock"}
     changed = sorted(
@@ -106,18 +105,29 @@ def validate_deck(source: Path, candidate: Path, plant: str = "none") -> dict:
     require(not changed, f"hidden growth-deck delta: {changed}")
     itend = _integer(values["namrun.nn_itend"], "nn_itend")
     require(itend == ITEND, "growth nn_itend moved")
-    require(_integer(values["namrun.nn_stock"], "nn_stock") == itend,
-            "growth nn_stock disagrees with nn_itend")
-    logical = values["namrun.ln_rst_list"].strip().replace(".", "").upper()
-    require(logical in {"T", "TRUE"}, "growth restart-list mode is off")
-    observed = tuple(int(token.strip())
-                     for token in values["namrun.nn_stocklist"].split(","))
-    require(observed in (STEPS, DECK_STEPS),
-            f"growth restart steps moved: {observed}")
+    if observed_keys:
+        logical = values["namrun.ln_rst_list"].strip().replace(".", "").upper()
+        require(logical in {"T", "TRUE"}, "growth restart-list mode is off")
+        observed = tuple(int(token.strip())
+                         for token in values["namrun.nn_stocklist"].split(","))
+        require(len(observed) <= RESTART_LIST_CAPACITY,
+                "compiled nn_stocklist capacity 10 exceeded")
+        require(observed == STEPS, f"growth restart steps moved: {observed}")
+        require(_integer(values["namrun.nn_stock"], "nn_stock") == itend,
+                "historical growth nn_stock disagrees with nn_itend")
+        mode = "explicit-list-historical"
+        sentinel = False
+        steps = observed
+    else:
+        require(_integer(values["namrun.nn_stock"], "nn_stock") == STEPS[-1],
+                "growth nn_stock must write step 95 non-terminally")
+        mode = "frequency-step95"
+        sentinel = True
+        steps = (STEPS[-1],)
     return {
         "source": str(source), "candidate": str(candidate),
-        "steps": list(observed), "itend": itend,
-        "terminal_sentinel": observed == DECK_STEPS,
+        "steps": list(steps), "itend": itend, "restart_mode": mode,
+        "terminal_sentinel": sentinel,
         "physical_delta": changed, "status": "RUN_PROTOCOL_ONLY",
     }
 
@@ -173,6 +183,8 @@ def admit(
     twin_b: Path,
     calibration: Path,
     plant: str = "none",
+    prefix_a: Path | None = None,
+    prefix_b: Path | None = None,
 ) -> dict:
     require(plant in PLANTS, f"unknown plant {plant}")
     deck_a_row = validate_deck(source, deck_a, plant)
@@ -180,13 +192,20 @@ def admit(
     require(deck_a.read_bytes() == deck_b.read_bytes(), "twin decks differ")
     require(deck_a_row["itend"] == deck_b_row["itend"],
             "twin terminal steps differ")
+    require((prefix_a is None) == (prefix_b is None),
+            "growth prefix must name both twins or neither")
     comparisons = []
     headers = []
     terminal_overwrites = []
     for step in STEPS:
         for rank in (0, 1):
-            path_a = twin_a / f"ORCA2_{step:08d}_restart_{rank:04d}.nc"
-            path_b = twin_b / f"ORCA2_{step:08d}_restart_{rank:04d}.nc"
+            use_prefix = prefix_a is not None and step < STEPS[-1]
+            root_a = prefix_a if use_prefix else twin_a
+            root_b = prefix_b if use_prefix else twin_b
+            require(root_a is not None and root_b is not None,
+                    "growth record roots disappeared")
+            path_a = root_a / f"ORCA2_{step:08d}_restart_{rank:04d}.nc"
+            path_b = root_b / f"ORCA2_{step:08d}_restart_{rank:04d}.nc"
             if plant == "missing-rank" and step == STEPS[-1] and rank == 1:
                 path_b = twin_b / "PLANTED_MISSING_RANK.nc"
             overwrite_a = _terminal_overwrite(path_a) if step == 95 else None
@@ -198,7 +217,8 @@ def admit(
                 continue
             arrays_a, header_a = _read(path_a, step)
             arrays_b, header_b = _read(path_b, step)
-            if plant == "twin-ulp" and step == STEPS[0] and rank == 0:
+            ulp_step = STEPS[-1] if prefix_a is not None else STEPS[0]
+            if plant == "twin-ulp" and step == ulp_step and rank == 0:
                 arrays_b = copy.deepcopy(arrays_b)
                 arrays_b["tn"].flat[0] = np.nextafter(
                     arrays_b["tn"].flat[0], np.float64(np.inf))
@@ -260,9 +280,10 @@ def admit(
     require(len(comparisons) == expected_comparisons,
             "growth restart comparison census moved")
     complete = not terminal_overwrites and sentinel_enabled
+    status = "PASS_R189_GROWTH_RECORD" if prefix_a is not None else "PASS_R188_GROWTH_RECORD"
     return {
-        "format": "nemo-testcase-l4-orca2-round188-growth-record-v2",
-        "status": ("PASS_R188_GROWTH_RECORD" if complete else
+        "format": "nemo-testcase-l4-orca2-round189-growth-record-v3",
+        "status": (status if complete else
                    "STOP_R187_TERMINAL_RESTART_OVERWRITTEN"),
         "claim_label": "independent",
         "restart_steps": list(STEPS),
@@ -278,6 +299,8 @@ def admit(
         "header_count": len(headers),
         "terminal_overwrites": terminal_overwrites,
         "calibration": str(calibration),
+        "prefix_a": str(prefix_a) if prefix_a is not None else None,
+        "prefix_b": str(prefix_b) if prefix_b is not None else None,
     }
 
 
@@ -292,6 +315,8 @@ def main() -> int:
     parser.add_argument("--twin-a", type=Path)
     parser.add_argument("--twin-b", type=Path)
     parser.add_argument("--calibration", type=Path)
+    parser.add_argument("--prefix-a", type=Path)
+    parser.add_argument("--prefix-b", type=Path)
     parser.add_argument("--plant", choices=PLANTS, default="none")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
@@ -310,7 +335,7 @@ def main() -> int:
                 "admission mode needs every record input")
         report = admit(
             args.source, args.deck_a, args.deck_b, args.twin_a, args.twin_b,
-            args.calibration, args.plant)
+            args.calibration, args.plant, args.prefix_a, args.prefix_b)
         require(args.plant == "none", f"{args.plant} plant stayed green")
     except (GateError, deck_gate.GateError, OSError, KeyError, TypeError, ValueError) as error:
         marker = "PLANT-FIRED" if args.plant != "none" else "REFUSE"

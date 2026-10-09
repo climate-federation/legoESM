@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# ORCA2 round-188 acquisition: preserve step 95 with a step-96 sentinel.
+# ORCA2 round-189 acquisition: write step 95 through the bounded frequency path.
 set -Eeuo pipefail
 
 refuse_unexpected() {
   status=$?
-  printf 'REFUSE: round-188 growth acquisition failed at line %s (exit %s)\n' \
+  printf 'REFUSE: round-189 growth acquisition failed at line %s (exit %s)\n' \
     "${BASH_LINENO[0]:-unknown}" "$status" >&2
   exit "$status"
 }
@@ -16,26 +16,24 @@ case "$mode" in
   *) printf 'REFUSE: usage: %s [--run|--preflight-only|--admit-existing]\n' "$0" >&2; exit 64 ;;
 esac
 
-printf '%s\n' \
-  'REFUSE: round-188 used 11 values for compiled nn_stocklist(10); use the round-189 frequency-mode launcher' >&2
-exit 78
-
 export PATH=/home/dbalwada/miniconda3/envs/nemo-build/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
 
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 repo=$(CDPATH= cd -- "$here/../../../../../" && pwd -P)
 py=/home/dbalwada/legoESM/.venv/bin/python
-evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round188/acquisition
+evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round189/acquisition
 source=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round83/acquisition/rung0_namelist_cfg
 base=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round83/acquisition/orca2_rung0_restart_list_repair_240step_np2
 calibration=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round83/acquisition/orca2_rung0_restart_list_10step_a_np2
-target_a=$evidence/orca2_rung0_growth_sentinel_96step_a_np2
-target_b=$evidence/orca2_rung0_growth_sentinel_96step_b_np2
+prefix_a=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round186/acquisition/orca2_rung0_growth_96step_a_np2
+prefix_b=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round186/acquisition/orca2_rung0_growth_96step_b_np2
+target_a=$evidence/orca2_rung0_growth_frequency_96step_a_np2
+target_b=$evidence/orca2_rung0_growth_frequency_96step_b_np2
 gate=$here/../nemo_testcase_l4_orca2_round186_growth_record_gate.py
-prereg=$repo/docs/ocean/fidelity/PREREG_nemo_testcases_l4_orca2_round188.md
-gate_sha=3ed996c24d714c65677ec7a4b9d9842bb52e90e0ebdf1f444d76f3c7dc95c498
-prereg_sha=557ce16bc2c50352e374ddccf5e34530008f9441792d588a631ca336c2963976
+prereg=$repo/docs/ocean/fidelity/PREREG_nemo_testcases_l4_orca2_round189.md
+gate_sha=bb359572ccd36e3dbbf9d41731f55ba88008897cacb049d6b1cb254d099325d2
+prereg_sha=f69121675f62740a39c7a9ce0d3b69e59f4b24c1fe75d96c25069f5425942e33
 
 cd "$repo"
 [[ -z "$(git status --porcelain --untracked-files=all)" ]] || {
@@ -58,6 +56,16 @@ done
 [[ -f "$source" && -f "$base/nemo" ]] || {
   printf 'REFUSE: admitted rung-0 source record is missing\n' >&2; exit 65;
 }
+for prefix in "$prefix_a" "$prefix_b"; do
+  [[ -d "$prefix" ]] || { printf 'REFUSE: admitted growth prefix is missing: %s\n' "$prefix" >&2; exit 65; }
+  for step in 10 20 30 40 50 60 70 80 90; do
+    for rank in 0000 0001; do
+      [[ -s "$prefix/ORCA2_$(printf '%08d' "$step")_restart_${rank}.nc" ]] || {
+        printf 'REFUSE: admitted prefix payload is missing\n' >&2; exit 65;
+      }
+    done
+  done
+done
 (cd "$base" && sha256sum -c deck_files.sha256 >/dev/null && sha256sum -c input_files.sha256 >/dev/null)
 
 mkdir -p "$evidence"
@@ -69,24 +77,27 @@ export JAX_PLATFORMS=cpu JAX_ENABLE_X64=1
 bash -n "$0"
 "$py" -m py_compile "$gate"
 "$py" "$gate" --render-source "$source" \
-  --render-output "$evidence/namelist_growth_sentinel_preflight" \
+  --render-output "$evidence/namelist_growth_frequency_preflight" \
   >"$evidence/deck_preflight.log"
-
-grep -q '"terminal_sentinel": true' "$evidence/deck_preflight.log" || {
-  printf 'REFUSE: rendered deck lacks the step-96 sentinel\n' >&2; exit 66;
+grep -q '"restart_mode": "frequency-step95"' "$evidence/deck_preflight.log" || {
+  printf 'REFUSE: rendered deck is not the bounded frequency protocol\n' >&2; exit 66;
+}
+grep -q '"physical_delta": \[\]' "$evidence/deck_preflight.log" || {
+  printf 'REFUSE: rendered deck carries a physical delta\n' >&2; exit 66;
 }
 
 if [[ "$mode" == --preflight-only ]]; then
-  printf 'ORCA2_ROUND188_GROWTH_SENTINEL_PREFLIGHT_READY %s\n' "$target_a"
+  printf 'ORCA2_ROUND189_GROWTH_FREQUENCY_PREFLIGHT_READY %s\n' "$target_a"
   exit 0
 fi
 
 admit() {
-  for plant in missing-rank twin-ulp step10-calibration hidden-deck \
-    missing-sentinel sentinel-truncation sentinel-header; do
+  for plant in explicit-list wrong-frequency missing-rank twin-ulp \
+    step10-calibration hidden-deck missing-sentinel sentinel-truncation sentinel-header; do
     if "$py" "$gate" --source "$source" \
       --deck-a "$target_a/namelist_cfg" --deck-b "$target_b/namelist_cfg" \
-      --twin-a "$target_a" --twin-b "$target_b" --calibration "$calibration" \
+      --twin-a "$target_a" --twin-b "$target_b" \
+      --prefix-a "$prefix_a" --prefix-b "$prefix_b" --calibration "$calibration" \
       --plant "$plant" >"$evidence/record_${plant}_plant.log" 2>&1; then
       printf 'REFUSE: %s plant stayed green\n' "$plant" >&2; exit 72
     fi
@@ -94,15 +105,16 @@ admit() {
   done
   "$py" "$gate" --source "$source" \
     --deck-a "$target_a/namelist_cfg" --deck-b "$target_b/namelist_cfg" \
-    --twin-a "$target_a" --twin-b "$target_b" --calibration "$calibration" \
+    --twin-a "$target_a" --twin-b "$target_b" \
+    --prefix-a "$prefix_a" --prefix-b "$prefix_b" --calibration "$calibration" \
     --output "$evidence/growth_record_admission.json"
-  grep -q 'PASS_R188_GROWTH_RECORD' "$evidence/growth_record_admission.json" || {
-    printf 'REFUSE: round-188 sentinel record is not complete\n' >&2; exit 73;
+  grep -q 'PASS_R189_GROWTH_RECORD' "$evidence/growth_record_admission.json" || {
+    printf 'REFUSE: round-189 frequency record is not complete\n' >&2; exit 73;
   }
   (cd "$evidence" && sha256sum growth_record_admission.json record_*_plant.log \
     "$target_a"/ORCA2_*_restart_*.nc "$target_b"/ORCA2_*_restart_*.nc \
-    >ROUND188_SHA256SUMS)
-  printf 'ORCA2_ROUND188_GROWTH_SENTINEL_RECORD_PASS %s\n' "$target_a"
+    >ROUND189_SHA256SUMS)
+  printf 'ORCA2_ROUND189_GROWTH_FREQUENCY_RECORD_PASS %s\n' "$target_a"
 }
 
 if [[ "$mode" == --admit-existing ]]; then

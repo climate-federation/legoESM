@@ -31,8 +31,11 @@ def test_render_changes_only_run_protocol(tmp_path) -> None:
     candidate.write_text(gate.render_deck(source.read_text()))
     report = gate.validate_deck(source, candidate)
     assert report["status"] == "RUN_PROTOCOL_ONLY"
-    assert tuple(report["steps"]) == gate.DECK_STEPS
+    assert tuple(report["steps"]) == (95,)
+    assert report["restart_mode"] == "frequency-step95"
     assert report["terminal_sentinel"]
+    assert "ln_rst_list" not in candidate.read_text()
+    assert "nn_stocklist" not in candidate.read_text()
 
 
 def test_hidden_deck_plant_fires(tmp_path) -> None:
@@ -54,6 +57,24 @@ def test_render_refuses_odd_terminal_without_sbc_pair() -> None:
         gate.render_deck(_source(), 95)
 
 
+def test_compiled_restart_list_capacity_plant_fires(tmp_path) -> None:
+    source = tmp_path / "source"
+    candidate = tmp_path / "candidate"
+    source.write_text(_source())
+    candidate.write_text(gate.render_deck(source.read_text()))
+    with pytest.raises(gate.GateError, match="capacity 10 exceeded"):
+        gate.validate_deck(source, candidate, "explicit-list")
+
+
+def test_wrong_frequency_plant_fires(tmp_path) -> None:
+    source = tmp_path / "source"
+    candidate = tmp_path / "candidate"
+    source.write_text(_source())
+    candidate.write_text(gate.render_deck(source.read_text()))
+    with pytest.raises(gate.GateError, match="write step 95"):
+        gate.validate_deck(source, candidate, "wrong-frequency")
+
+
 def test_terminal_reopen_requires_zero_length_payload(tmp_path) -> None:
     path = tmp_path / "restart.nc"
     with Dataset(path, "w") as dataset:
@@ -70,7 +91,7 @@ def test_terminal_reopen_requires_zero_length_payload(tmp_path) -> None:
     assert gate._terminal_overwrite(path) is None
 
 
-def test_terminal_sentinel_and_its_three_plants(tmp_path, monkeypatch) -> None:
+def test_terminal_sentinel_prefix_and_its_plants(tmp_path, monkeypatch) -> None:
     source = tmp_path / "source"
     deck_a = tmp_path / "deck_a"
     deck_b = tmp_path / "deck_b"
@@ -91,11 +112,15 @@ def test_terminal_sentinel_and_its_three_plants(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(gate, "_terminal_overwrite", lambda path: None)
     result = gate.admit(
         source, deck_a, deck_b, tmp_path / "a", tmp_path / "b",
-        tmp_path / "calibration")
-    assert result["status"] == "PASS_R188_GROWTH_RECORD"
+        tmp_path / "calibration", prefix_a=tmp_path / "prefix_a",
+        prefix_b=tmp_path / "prefix_b")
+    assert result["status"] == "PASS_R189_GROWTH_RECORD"
     assert len(result["sentinel_comparisons"]) == 2
 
     for plant, message in (
+        ("missing-rank", "missing restart"),
+        ("twin-ulp", "step 95 rank 0: twin payload moved"),
+        ("step10-calibration", "step-10 calibration moved rank 0"),
         ("missing-sentinel", "missing restart"),
         ("sentinel-truncation", "payload shape moved"),
         ("sentinel-header", "kt is not 95"),
@@ -103,4 +128,5 @@ def test_terminal_sentinel_and_its_three_plants(tmp_path, monkeypatch) -> None:
         with pytest.raises(gate.GateError, match=message):
             gate.admit(
                 source, deck_a, deck_b, tmp_path / "a", tmp_path / "b",
-                tmp_path / "calibration", plant)
+                tmp_path / "calibration", plant,
+                tmp_path / "prefix_a", tmp_path / "prefix_b")
