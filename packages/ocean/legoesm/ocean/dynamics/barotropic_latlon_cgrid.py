@@ -184,6 +184,20 @@ def _nemo_literal_seed_depth_mean(field, h_face, face_mask, r1_live):
     return (acc * r1_live) * face_mask
 
 
+def _nemo_literal_slow_depth_mean(
+    field, h_face, level_mask, r1_reference, face_mask,
+):
+    """NEMO ``stp2d.f90:206-212`` source-associated slow depth mean."""
+
+    b = nemo_source_round
+    acc = jnp.zeros_like(field[..., 0])
+    for jk in range(field.shape[-1]):
+        product = b(b(h_face[..., jk] * field[..., jk])
+                    * level_mask[..., jk])
+        acc = b(acc + product)
+    return b(b(acc * r1_reference) * face_mask)
+
+
 def _nemo_literal_seed_from_reference_mesh(
     u_3d, v_3d, h_k, eta_dyn, u_mask, v_mask, z_coord,
 ):
