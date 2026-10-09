@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# ORCA2 round-186 acquisition: rung-0 restart checkpoints for growth scoring.
+# ORCA2 round-187 acquisition: recover the step-95 growth restart without the
+# compiled explicit-list terminal reopen that truncated round 186's file.
 set -Eeuo pipefail
 
 refuse_unexpected() {
   status=$?
-  printf 'REFUSE: round-186 growth acquisition failed at line %s (exit %s)\n' \
+  printf 'REFUSE: round-187 growth acquisition failed at line %s (exit %s)\n' \
     "${BASH_LINENO[0]:-unknown}" "$status" >&2
   exit "$status"
 }
@@ -22,12 +23,12 @@ export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 repo=$(CDPATH= cd -- "$here/../../../../../" && pwd -P)
 py=/home/dbalwada/legoESM/.venv/bin/python
-evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round186/acquisition
+evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round187/acquisition
 source=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round83/acquisition/rung0_namelist_cfg
 base=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round83/acquisition/orca2_rung0_restart_list_repair_240step_np2
 calibration=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round83/acquisition/orca2_rung0_restart_list_10step_a_np2
-target_a=$evidence/orca2_rung0_growth_96step_a_np2
-target_b=$evidence/orca2_rung0_growth_96step_b_np2
+target_a=$evidence/orca2_rung0_growth_95step_a_np2
+target_b=$evidence/orca2_rung0_growth_95step_b_np2
 gate=$here/../nemo_testcase_l4_orca2_round186_growth_record_gate.py
 prereg=$repo/docs/ocean/fidelity/PREREG_nemo_testcases_l4_orca2_round187.md
 gate_sha=7f2ee726713394471e422a02aae7cfa74ead71465580ad428b28649773b9cfb9
@@ -65,15 +66,15 @@ export JAX_PLATFORMS=cpu JAX_ENABLE_X64=1
 bash -n "$0"
 "$py" -m py_compile "$gate"
 "$py" "$gate" --render-source "$source" --render-output "$evidence/namelist_growth_preflight" \
-  >"$evidence/deck_preflight.log"
+  --itend 95 >"$evidence/deck_preflight.log"
 
 if [[ "$mode" == --preflight-only ]]; then
-  printf 'ORCA2_ROUND186_GROWTH_PREFLIGHT_READY %s\n' "$target_a"
+  printf 'ORCA2_ROUND187_GROWTH_PREFLIGHT_READY %s\n' "$target_a"
   exit 0
 fi
 
 admit() {
-  for plant in missing-rank twin-ulp step10-calibration hidden-deck terminal-payload; do
+  for plant in missing-rank twin-ulp step10-calibration hidden-deck; do
     if "$py" "$gate" --source "$source" \
       --deck-a "$target_a/namelist_cfg" --deck-b "$target_b/namelist_cfg" \
       --twin-a "$target_a" --twin-b "$target_b" --calibration "$calibration" \
@@ -86,14 +87,13 @@ admit() {
     --deck-a "$target_a/namelist_cfg" --deck-b "$target_b/namelist_cfg" \
     --twin-a "$target_a" --twin-b "$target_b" --calibration "$calibration" \
     --output "$evidence/growth_record_admission.json"
+  grep -q 'PASS_R187_GROWTH_RECORD' "$evidence/growth_record_admission.json" || {
+    printf 'REFUSE: round-187 growth record is not complete\n' >&2; exit 73;
+  }
   (cd "$evidence" && sha256sum growth_record_admission.json record_*_plant.log \
     "$target_a"/ORCA2_*_restart_*.nc "$target_b"/ORCA2_*_restart_*.nc \
-    >ROUND186_SHA256SUMS)
-  grep -q 'STOP_R187_TERMINAL_RESTART_OVERWRITTEN' \
-    "$evidence/growth_record_admission.json" || {
-      printf 'REFUSE: existing record did not reproduce the terminal overwrite\n' >&2; exit 73;
-    }
-  printf 'ORCA2_ROUND187_GROWTH_RECORD_PARTIAL %s\n' "$target_a"
+    >ROUND187_SHA256SUMS)
+  printf 'ORCA2_ROUND187_GROWTH_RECORD_PASS %s\n' "$target_a"
 }
 
 if [[ "$mode" == --admit-existing ]]; then
@@ -118,7 +118,8 @@ stage() {
   while read -r digest name; do cp -a "$base/$name" "$target/$name"; done <"$base/deck_files.sha256"
   while read -r digest name; do cp -a "$base/$name" "$target/$name"; done <"$base/input_files.sha256"
   cp "$base/nemo" "$target/nemo"
-  "$py" "$gate" --render-source "$source" --render-output "$target/namelist_cfg" >/dev/null
+  "$py" "$gate" --render-source "$source" --render-output "$target/namelist_cfg" \
+    --itend 95 >/dev/null
   printf '%s\n' "$(git rev-parse HEAD)" >"$target/producer_commit.txt"
   (cd "$target" && sha256sum nemo namelist_cfg >growth_inputs.sha256)
 }

@@ -31,8 +31,12 @@ from scripts.validate.ocean_fidelity.testcases.nemo_testcase_oracle_gate import 
 
 STEPS = (10, 20, 30, 40, 50, 60, 70, 80, 90, 95)
 ITEND = 96
+SAFE_ITEND = 95
 FIELDS = ("tn", "sn", "un", "vn", "sshn")
-PLANTS = ("none", "missing-rank", "twin-ulp", "step10-calibration", "hidden-deck")
+PLANTS = (
+    "none", "missing-rank", "twin-ulp", "step10-calibration",
+    "hidden-deck", "terminal-payload",
+)
 
 
 class GateError(RuntimeError):
@@ -62,10 +66,11 @@ def _integer(value: str, label: str) -> int:
     return int(match.group(1))
 
 
-def render_deck(source: str) -> str:
+def render_deck(source: str, itend: int = ITEND) -> str:
     """Change run protocol only and request the exact frozen restart steps."""
 
-    for key, value in (("nn_itend", ITEND), ("nn_stock", ITEND)):
+    require(itend in (SAFE_ITEND, ITEND), f"unsupported terminal step {itend}")
+    for key, value in (("nn_itend", itend), ("nn_stock", itend)):
         source, count = re.subn(
             rf"^(\s*{key}\s*=\s*)(\S+)", rf"\g<1>{value}", source,
             count=1, flags=re.MULTILINE)
@@ -97,10 +102,10 @@ def validate_deck(source: Path, candidate: Path, plant: str = "none") -> dict:
         key for key in base if key not in ignored
         and _normal(values[key]) != _normal(base[key]))
     require(not changed, f"hidden growth-deck delta: {changed}")
-    require(_integer(values["namrun.nn_itend"], "nn_itend") == ITEND,
-            "growth nn_itend moved")
-    require(_integer(values["namrun.nn_stock"], "nn_stock") == ITEND,
-            "growth nn_stock moved")
+    itend = _integer(values["namrun.nn_itend"], "nn_itend")
+    require(itend in (SAFE_ITEND, ITEND), "growth nn_itend moved")
+    require(_integer(values["namrun.nn_stock"], "nn_stock") == itend,
+            "growth nn_stock disagrees with nn_itend")
     logical = values["namrun.ln_rst_list"].strip().replace(".", "").upper()
     require(logical in {"T", "TRUE"}, "growth restart-list mode is off")
     observed = tuple(int(token.strip())
@@ -108,7 +113,7 @@ def validate_deck(source: Path, candidate: Path, plant: str = "none") -> dict:
     require(observed == STEPS, f"growth restart steps moved: {observed}")
     return {
         "source": str(source), "candidate": str(candidate),
-        "steps": list(observed), "itend": ITEND,
+        "steps": list(observed), "itend": itend,
         "physical_delta": changed, "status": "RUN_PROTOCOL_ONLY",
     }
 
@@ -139,6 +144,23 @@ def _read(path: Path, step: int) -> tuple[dict[str, np.ndarray], dict]:
     return arrays, {"path": str(path), "sha256": sha256(path), "fields": header}
 
 
+def _terminal_overwrite(path: Path) -> dict | None:
+    """Classify NEMO's terminal reopen of a completed explicit-list file."""
+
+    require(path.is_file(), f"missing restart: {path}")
+    with Dataset(path) as dataset:
+        kt = float(np.asarray(dataset["kt"][:]))
+        sizes = {name: int(dataset[name].size) for name in FIELDS}
+        shapes = {name: list(dataset[name].shape) for name in FIELDS}
+    if kt != 0.0 or any(sizes.values()):
+        return None
+    return {
+        "path": str(path), "sha256": sha256(path), "kt": kt,
+        "field_sizes": sizes, "field_shapes": shapes,
+        "classification": "TERMINAL_REOPEN_TRUNCATED_COMPLETED_RESTART",
+    }
+
+
 def admit(
     source: Path,
     deck_a: Path,
@@ -152,14 +174,24 @@ def admit(
     deck_a_row = validate_deck(source, deck_a, plant)
     deck_b_row = validate_deck(source, deck_b)
     require(deck_a.read_bytes() == deck_b.read_bytes(), "twin decks differ")
+    require(deck_a_row["itend"] == deck_b_row["itend"],
+            "twin terminal steps differ")
     comparisons = []
     headers = []
+    terminal_overwrites = []
     for step in STEPS:
         for rank in (0, 1):
             path_a = twin_a / f"ORCA2_{step:08d}_restart_{rank:04d}.nc"
             path_b = twin_b / f"ORCA2_{step:08d}_restart_{rank:04d}.nc"
             if plant == "missing-rank" and step == STEPS[-1] and rank == 1:
                 path_b = twin_b / "PLANTED_MISSING_RANK.nc"
+            overwrite_a = _terminal_overwrite(path_a) if step == 95 else None
+            overwrite_b = _terminal_overwrite(path_b) if step == 95 else None
+            if overwrite_a is not None or overwrite_b is not None:
+                require(overwrite_a is not None and overwrite_b is not None,
+                        f"step 95 rank {rank}: twin overwrite classification differs")
+                terminal_overwrites.extend((overwrite_a, overwrite_b))
+                continue
             arrays_a, header_a = _read(path_a, step)
             arrays_b, header_b = _read(path_b, step)
             if plant == "twin-ulp" and step == STEPS[0] and rank == 0:
@@ -187,19 +219,29 @@ def admit(
                         f"step-10 calibration moved rank {rank}: {control_unequal}")
             comparisons.append({"step": step, "rank": rank, "unequal": unequal})
             headers.extend((header_a, header_b))
-    require(len(comparisons) == len(STEPS) * 2,
+    if plant == "terminal-payload" and terminal_overwrites:
+        terminal_overwrites.pop()
+    require(len(terminal_overwrites) in (0, 4),
+            "terminal overwrite census moved")
+    expected_comparisons = (len(STEPS) - (1 if terminal_overwrites else 0)) * 2
+    require(len(comparisons) == expected_comparisons,
             "growth restart comparison census moved")
+    complete = not terminal_overwrites
     return {
         "format": "nemo-testcase-l4-orca2-round186-growth-record-v1",
-        "status": "PASS_R186_GROWTH_RECORD",
+        "status": ("PASS_R187_GROWTH_RECORD" if complete else
+                   "STOP_R187_TERMINAL_RESTART_OVERWRITTEN"),
         "claim_label": "independent",
         "restart_steps": list(STEPS),
+        "admitted_steps": list(STEPS if complete else STEPS[:-1]),
+        "missing_steps": [] if complete else [STEPS[-1]],
         "rank_count": 2,
         "field_order": list(FIELDS),
         "deck_a": deck_a_row,
         "deck_b": deck_b_row,
         "comparisons": comparisons,
         "header_count": len(headers),
+        "terminal_overwrites": terminal_overwrites,
         "calibration": str(calibration),
     }
 
@@ -208,6 +250,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--render-source", type=Path)
     parser.add_argument("--render-output", type=Path)
+    parser.add_argument("--itend", type=int, choices=(SAFE_ITEND, ITEND), default=ITEND)
     parser.add_argument("--source", type=Path)
     parser.add_argument("--deck-a", type=Path)
     parser.add_argument("--deck-b", type=Path)
@@ -221,7 +264,8 @@ def main() -> int:
         if args.render_source or args.render_output:
             require(args.render_source and args.render_output,
                     "render mode needs source and output")
-            args.render_output.write_text(render_deck(args.render_source.read_text()))
+            args.render_output.write_text(render_deck(
+                args.render_source.read_text(), args.itend))
             report = validate_deck(args.render_source, args.render_output)
             print(json.dumps(report, indent=2, sort_keys=True))
             print("STATUS RENDERED_R186_GROWTH_DECK")
@@ -241,7 +285,7 @@ def main() -> int:
     if args.output:
         args.output.write_text(rendered)
     print(rendered, end="")
-    print("STATUS PASS_R186_GROWTH_RECORD")
+    print(f"STATUS {report['status']}")
     return 0
 
 
