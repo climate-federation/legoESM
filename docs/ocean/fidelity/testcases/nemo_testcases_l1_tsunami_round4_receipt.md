@@ -21,7 +21,7 @@ Status: **LANDED.** Three card selections, each NEMO's own:
 
 Net: the card's own 10-step chain now ends 2.5e-16 from NEMO on ssh
 (round 3: 1.05e-03). Over NEMO's 100 steps the error stays at the floor
-through kt = 14, then grows from the j-seam (B4j): 2.7e-13 at kt = 15,
+through kt = 14, then grows from the j-seam (PLAUSIBLY B4j): 2.7e-13 at kt = 15,
 6.1e-05 at kt = 20, 5e-03 .. 8e-03 from kt = 25 (ssh peak 0.1 m).
 
 ## 1. What NEMO runs (read from the compiled source and the run's log)
@@ -55,9 +55,13 @@ tracer step. So the arms were added there, not beside them.
   admits a third complete program, `flux_form / none / none`.
 - **B7.** `"none"` in the shared tracer-advection dispatcher (zero flux
   divergence), and in the RK3 tracer stage step a zero concentration
-  right-hand side, so the stage takes NEMO's `(1 + r3t)` ratio form rather
-  than the thickness-weighted content form. The RK3 identity admits `fct2`
-  or `none`.
+  right-hand side, so stages 1-2 take NEMO's `(1 + r3t)` ratio form rather
+  than the thickness-weighted content form. Stage 3 keeps the card's
+  content update (old thickness times T over new thickness), which stands in
+  for NEMO's `tra_zdf` solve; it is measured bit-identical on T, S at every
+  kt = 1..10 (section 3, stage-local), and the unit test covers stage 1 only.
+  The RK3 identity admits `fct2` or `none`; `store_salt_flux` refuses
+  `none`.
 - **Card.** `build_tsunami_zco_card` selects `eos_depth="geometric"`,
   `momentum_flux_scheme="none"`, `vertical_momentum_scheme="none"`,
   `tracer_advection="none"`, each with its citation. B6 and B7 leave
@@ -136,10 +140,12 @@ and the cell of the max (j, i; j = 0 and 200 are the j-seam rows):
 | 50 | 8.2e-03 / 2.1e-03 | 1.7e-03 / 3.4e-04 | 1.6e-03 / 6.1e-04 |
 | 100 | 5.1e-03 / 1.7e-03 | 1.6e-03 / 4.6e-04 | 2.0e-03 / 5.4e-04 |
 
-**CONFIRMED** the error leaves the bar at kt = 15 for every field (the
-harness's `first_kt_over_bar`), and from kt = 14 its maximum sits on the
-j-seam rows at the source column. That is B4j, the card's step walling the
-j-seam. The i-seam is crossed from kt = 5 (round 3) with no departure from
+**CONFIRMED** every field leaves the bar at kt = 15 (the harness's
+`first_kt_over_bar`). The ssh and vv_b maxima sit on a j-seam row at the
+source column from kt = 14, every field's from kt = 15 (uu_b's kt = 14
+maximum is interior, (31, 43)). **PLAUSIBLE** that this is B4j, the card's
+step walling the j-seam: location only, one trajectory, no A/B against a
+j-periodic step. The i-seam is crossed from kt = 5 (round 3) with no departure from
 the floor through kt = 14: PLAUSIBLE evidence B4's i-seam statements are
 faithful to ~1e-16 (one run; no A/B).
 
@@ -147,7 +153,7 @@ faithful to ~1e-16 (one run; no A/B).
 
 The kt = 1..10 ladder's first non-bit statement is the interior
 right-hand-side floor, so per the round brief B4j is **named and measured,
-not built**: it owns the whole 100-step record from kt = 14 (section 4),
+not built**: it PLAUSIBLY owns the 100-step record from kt = 14 (section 4),
 growing by ~1e2 per step to 1e-3 by kt = 25. It is the next build.
 
 ## 6. ORCA2 pointer
@@ -177,7 +183,21 @@ loop (its forcing, its lateral boundaries), not in the loop.
 
 ## 8. Review
 
-Single review (codex): see section 10 (filled after the review ran).
+Single review (codex), verdict **DO NOT SHIP** on `c7115d9fd461..` the
+pre-fix diff (`codex_review.txt`); it found no momentum sign, index,
+staggering or fall-through defect on the executed TSUNAMI path and no
+changed library default. Disposition, every finding CONFIRMED and acted on:
+
+- HIGH, the card validator did not refuse a TSUNAMI card reverted to
+  `insitu`, UP3 or FCT2: fixed, the TSUNAMI branch now refuses each
+  (test, shown red with the check removed).
+- MEDIUM, `store_salt_flux` with `none` reached the dispatcher and raised
+  late: fixed, refused at construction (test, shown red without it).
+- MEDIUM, the tracer-dispatch test used zero transports, so any scheme
+  passed: fixed, nonzero transports plus an upwind plant that must differ.
+- MEDIUM, B4j "owns" the later record overclaimed, and uu_b's kt = 14
+  maximum is interior: relabelled PLAUSIBLE, location stated per field.
+- LOW, stage 3 does not take the ratio form: stated (section 2).
 
 ## 9. Choices made this round
 
@@ -199,7 +219,8 @@ Single review (codex): see section 10 (filled after the review ran).
 | ladder + card tests | `29 passed, 1 xfailed` (round 2's strict B4j pin), plus the rewritten stage-entry test `1 passed` |
 | ratchets: dispatch hardening, validate-strict coverage, private imports, constants, inline coefficients, config footguns | `5861 passed, 2 failed`: both reds are in files this round never touched (`tests/unit/test_jra55_do.py` literal 273.15; `packages/land/legoesm/land/restart.py`) |
 | VORTEX/WS-RK3 suites | `170 passed, 3 failed`: the three certified-card digest tests fail identically on the round's starting commit `c7115d9fd461` (checked in a throwaway worktree) — pre-existing |
-| citation gate | see the final commit |
+| citation gate, this receipt | `PASS`, 0 failures, 0 map entries failing audit (after re-anchoring 70 legoESM-line keys the arms shifted); planted shift of `dynvor.f90:857-860` `FAIL` (`SYMBOL-NOT-AT-LINE`), exit 1 |
+| unit tests after the review fixes | `11 passed` (off arms), card `28 passed, 1 xfailed` with them |
 | NOT gated (honour system) | dual review: codex only (headless brief names one review). Controlled comparison: each landing differs from its before arm in the named fields only. Non-vacuity: shown above |
 
 Evidence sha256 prefixes: rhs `3c1f7b5e136eb11e`, given_entry
@@ -212,7 +233,8 @@ stamped runs) rhs `0742d96564beb4c1`, given_entry `8766fecc7416445c`.
 
 1. **B4j** — build the j-periodic wrap in the card's barotropic path
    (the card's halo exchange honouring `NEMOTestcaseCard.j_periodic`), with
-   a test; it owns the 100-step record from kt = 14.
+   a test; it PLAUSIBLY owns the 100-step record from kt = 14 (the A/B
+   against a j-periodic step is the round-5 measurement).
 2. The 1.09e-19 right-hand-side floor (`stp2d.f90:137-138`), unattributed.
 3. B4 (i-seam) stays declared; section 4 is the first measurement of it.
 
