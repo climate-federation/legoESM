@@ -119,3 +119,16 @@ def test_row_helper_reports_first_unequal_cell_and_stats():
     assert (r["first_unequal_cell"], r["n_unequal"], r["bit_identical"]) == ([1, 2], 1, False)
     assert r["max_abs"] == 2.0e-3 and r["status"] == "DEBT"
     assert lad.row("y", a, a)["bit_identical"]
+
+
+def test_b6_scaling_is_quadratic_in_velocity_and_the_floor_is_tiny(monkeypatch):
+    # A stale (un-awaited) observer read breaks this: the first measurement
+    # gave ratios 1.5 and 2.0 before the effects barrier was added.
+    monkeypatch.setattr(lad, "B6_KTS", (2,))
+    monkeypatch.setattr(lad, "B6_LAMBDAS", (0.0, 0.5, 1.0))
+    out = lad.run(ROOT, arm="b6_scaling", kt_max=2, allow_dirty=True,
+                  eos_depth="geometric")
+    k = out["per_kt"][0]
+    e = {r["lambda"]: r["max_abs_card_minus_prediction"] for r in k["lambdas"]}
+    assert e[0.0] < 1e-15 < 1e-9 < e[1.0]
+    assert abs(e[1.0] / e[0.5] - 4.0) < 1e-6

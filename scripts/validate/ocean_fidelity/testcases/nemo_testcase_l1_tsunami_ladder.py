@@ -243,7 +243,8 @@ def run(root: Path, *, arm: str, kt_max: int = 10, plant: str | None = None,
                             lambda v, face=face: seen.__setitem__(
                                 face, np.asarray(v))),
                         slow_forcing_rhs_observer_face=face)
-                    model(h).step(seed(g), dt=card.dt_s)
+                    jax.block_until_ready(model(h).step(seed(g), dt=card.dt_s))
+                    jax.effects_barrier()   # the observer is an async callback
                 rows = [row(f"rhs.kt{kt}.u", g["b_uu_rhs_k1"],
                             seen["u"][:, 1:, 0]),
                         row(f"rhs.kt{kt}.v", g["b_vv_rhs_k1"],
@@ -271,7 +272,10 @@ def run(root: Path, *, arm: str, kt_max: int = 10, plant: str | None = None,
                 vor = g["b_uu_rhs_k1"] - hpg
                 res = []
                 for lam in B6_LAMBDAS:
-                    m.step(seed(g, lam), dt=card.dt_s)
+                    seen.clear()
+                    jax.block_until_ready(m.step(seed(g, lam), dt=card.dt_s))
+                    jax.effects_barrier()   # the observer is an async callback
+                    require("u" in seen, "the right-hand-side observer never fired")
                     pred = hpg + lam * vor
                     res.append({"lambda": lam, "max_abs_card_minus_prediction":
                                 float(np.max(np.abs(seen["u"][:, 1:, 0] - pred)))})
