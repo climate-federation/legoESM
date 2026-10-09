@@ -2431,6 +2431,11 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
         vertical gradient into the deepest wet cell.  ``None`` ⇒ assume
         every level of a wet column is water (full-depth flat bottom) —
         only correct when ``q`` has no below-bathymetry levels.
+    closed_bottom_wmask : bool
+        ``True`` by default for every lat-lon C-grid caller. NEMO's
+        ``traldf_iso`` closes the W mask below the deepest wet tracer cell
+        before forming the horizontal/vertical tensor pair; ``False`` exists
+        only as a fidelity discriminator.
 
     Returns
     -------
@@ -4577,42 +4582,50 @@ def gm_redi_tracer_tendency_latlon(
                 "unknown GMRediConfig.redi_flux_face_thickness_evaluation "
                 f"{_flux_face_mode!r}; expected 'tpoint_jacobian' or "
                 "'nemo_qco_live'")
+        _divisor_mode = cfg.redi_divisor_thickness_evaluation
+        if _divisor_mode not in ("reference_jacobian", "nemo_qco_live"):
+            raise ValueError(
+                "unknown GMRediConfig.redi_divisor_thickness_evaluation "
+                f"{_divisor_mode!r}; expected 'reference_jacobian' or "
+                "'nemo_qco_live'")
         _flux_e3u = None
         _flux_e3v = None
         _divisor_e3t = redi_divisor_thickness_override
-        if _flux_face_mode == "nemo_qco_live":
+        _needs_raw_e3t = (
+            _flux_face_mode == "nemo_qco_live"
+            or (_divisor_mode == "nemo_qco_live" and _divisor_e3t is None))
+        _e3t0 = None
+        if _needs_raw_e3t:
             if eta is None:
                 raise ValueError(
-                    "redi_flux_face_thickness_evaluation='nemo_qco_live' "
-                    "requires NOW sea-surface height")
+                    "live Redi face or divisor thickness requires NOW "
+                    "sea-surface height")
             _e3t0 = getattr(z_coord, "nemo_e3t_0", None)
             if _e3t0 is None:
                 raise ValueError(
-                    "redi_flux_face_thickness_evaluation='nemo_qco_live' "
-                    "requires raw NEMO e3t_0")
+                    "live Redi face or divisor thickness requires raw NEMO "
+                    "e3t_0")
+            _e3t0 = jnp.asarray(_e3t0, dtype=T.dtype)[..., :T.shape[-1]]
+        if _flux_face_mode == "nemo_qco_live":
             _umask3, _vmask3, _ = nemo_iso_face_masks(
                 u_mask, v_mask, _active_3d)
-            _e3t0 = jnp.asarray(_e3t0, dtype=T.dtype)[..., :T.shape[-1]]
             _flux_eta = eta if redi_flux_eta is None else redi_flux_eta
             _flux_e3u, _flux_e3v = nemo_qco_live_face_thicknesses(
                 _flux_eta, z_coord, _e3t0, _e3t0, _umask3, _vmask3)
-            if _divisor_e3t is None:
-                # traldf_iso.f90:306-310/:327-331 divides the flux
-                # divergence by e3t(Kmm).  Use the same literal QCO T-point
-                # statement as the rest of the WS-RK3 identity path instead
-                # of the reference/Jacobian thickness.  NEMO's r3t divisor
-                # is ht_0, the source-ordered sum of e3t_0*tmask
-                # (domain.f90:193-212), not the card's analytic bathymetry.
-                _ht0 = jnp.zeros_like(_flux_eta, dtype=T.dtype)
-                for _jk in range(T.shape[-1]):
-                    _ht0 = nemo_source_round(
-                        _ht0 + nemo_source_round(
-                            _e3t0[..., _jk] * _active_3d[..., _jk]))
-                _divisor_eta = (
-                    _flux_eta if redi_divisor_eta is None
-                    else redi_divisor_eta)
-                _divisor_e3t = nemo_qco_live_t_thickness(
-                    _divisor_eta, _ht0, z_coord, T.dtype, e3t_0=_e3t0)
+        if _divisor_mode == "nemo_qco_live" and _divisor_e3t is None:
+            # traldf_iso.f90:306-310/:327-331 divides the flux divergence by
+            # e3t(Kmm). NEMO's r3t divisor uses ht_0, the source-ordered sum
+            # of e3t_0*tmask (domain.f90:193-212), independently of which
+            # horizontal face-thickness construction the card selects.
+            _ht0 = jnp.zeros_like(eta, dtype=T.dtype)
+            for _jk in range(T.shape[-1]):
+                _ht0 = nemo_source_round(
+                    _ht0 + nemo_source_round(
+                        _e3t0[..., _jk] * _active_3d[..., _jk]))
+            _divisor_eta = (
+                eta if redi_divisor_eta is None else redi_divisor_eta)
+            _divisor_e3t = nemo_qco_live_t_thickness(
+                _divisor_eta, _ht0, z_coord, T.dtype, e3t_0=_e3t0)
         _closed_bottom_wmask = (
             True if redi_closed_bottom_wmask_override is None
             else redi_closed_bottom_wmask_override)

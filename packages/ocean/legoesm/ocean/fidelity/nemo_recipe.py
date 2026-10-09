@@ -411,6 +411,10 @@ def nemo_lat_lon_model_config(
             "slope_metric_evaluation": "nemo_reciprocal",
             "slope_face_thickness_evaluation": "nemo_qco_live",
             "slope_depth_evaluation": "nemo_qco_live_literal",
+            # GYRE did not select round 237's live tra_ldf divisor. State the
+            # reference/Jacobian arm explicitly so its certified path never
+            # depends on the library default.
+            "redi_divisor_thickness_evaluation": "reference_jacobian",
             "redi_a33_evaluation": "nemo_literal",
         } if _gyre_ldfslp else {})
         gm_redi_cfg = GMRediConfig(

@@ -723,6 +723,10 @@ class DINOConfig:
     # traldf_iso zA11/zA22 face thickness. The generic default retains the
     # historical T-point Jacobian; the two NEMO cards consume live QCO faces.
     gm_redi_flux_face_thickness_evaluation: str = "tpoint_jacobian"
+    # traldf_iso final T-point divisor. The generic default preserves the
+    # reference/Jacobian thickness; the two NEMO cards select live e3t(Kmm)
+    # independently of their horizontal face-thickness selection.
+    gm_redi_divisor_thickness_evaluation: str = "reference_jacobian"
     # Static Redi coefficient arithmetic. Generic cards preserve the grouped
     # equatorial-kappa*cos(lat) path; the two NEMO cards use ldf_c2d literally.
     gm_redi_horizontal_evaluation: str = "cosine_scaled"
@@ -1423,6 +1427,7 @@ DINO_RECIPES: dict[str, dict] = {
         "gm_redi_slope_metric_evaluation": "nemo_reciprocal",
         "gm_redi_slope_face_thickness_evaluation": "nemo_qco_live",
         "gm_redi_flux_face_thickness_evaluation": "nemo_qco_live",
+        "gm_redi_divisor_thickness_evaluation": "nemo_qco_live",
         "gm_redi_horizontal_evaluation": "nemo_metric_literal",
         "gm_redi_vertical_skew_evaluation": "nemo_literal",
         "gm_redi_a33_evaluation": "nemo_literal",
@@ -3668,6 +3673,12 @@ def dino_lat_lon_model_config(
             "unknown DINOConfig.gm_redi_flux_face_thickness_evaluation "
             f"{cfg.gm_redi_flux_face_thickness_evaluation!r}; expected "
             "'tpoint_jacobian' or 'nemo_qco_live'")
+    if cfg.gm_redi_divisor_thickness_evaluation not in (
+            "reference_jacobian", "nemo_qco_live"):
+        raise ValueError(
+            "unknown DINOConfig.gm_redi_divisor_thickness_evaluation "
+            f"{cfg.gm_redi_divisor_thickness_evaluation!r}; expected "
+            "'reference_jacobian' or 'nemo_qco_live'")
     if cfg.gm_redi_horizontal_evaluation not in (
             "cosine_scaled", "nemo_metric_literal"):
         raise ValueError(
@@ -3787,6 +3798,8 @@ def dino_lat_lon_model_config(
                 cfg.gm_redi_slope_face_thickness_evaluation),
             redi_flux_face_thickness_evaluation=(
                 cfg.gm_redi_flux_face_thickness_evaluation),
+            redi_divisor_thickness_evaluation=(
+                cfg.gm_redi_divisor_thickness_evaluation),
             kappa_redi_horizontal_evaluation=(
                 cfg.gm_redi_horizontal_evaluation),
             redi_vertical_skew_evaluation=(
@@ -3837,6 +3850,8 @@ def dino_lat_lon_model_config(
                 cfg.gm_redi_slope_face_thickness_evaluation),
             redi_flux_face_thickness_evaluation=(
                 cfg.gm_redi_flux_face_thickness_evaluation),
+            redi_divisor_thickness_evaluation=(
+                cfg.gm_redi_divisor_thickness_evaluation),
             redi_vertical_skew_evaluation=(
                 cfg.gm_redi_vertical_skew_evaluation),
             redi_a33_evaluation=cfg.gm_redi_a33_evaluation,
@@ -3902,6 +3917,8 @@ def dino_lat_lon_model_config(
                         cfg.gm_redi_slope_face_thickness_evaluation),
                     redi_flux_face_thickness_evaluation=(
                         cfg.gm_redi_flux_face_thickness_evaluation),
+                    redi_divisor_thickness_evaluation=(
+                        cfg.gm_redi_divisor_thickness_evaluation),
                     kappa_redi_horizontal_evaluation=(
                         cfg.gm_redi_horizontal_evaluation),
                     redi_vertical_skew_evaluation=(

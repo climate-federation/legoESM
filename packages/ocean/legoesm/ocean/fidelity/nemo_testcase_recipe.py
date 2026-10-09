@@ -2824,6 +2824,7 @@ def build_vortex_smt_zps_card(
                 slope_metric_evaluation="nemo_reciprocal",
                 slope_face_thickness_evaluation="nemo_qco_live",
                 redi_flux_face_thickness_evaluation="nemo_qco_live",
+                redi_divisor_thickness_evaluation="nemo_qco_live",
                 slope_depth_evaluation="nemo_qco_live_literal",
                 nemo_slope_shapiro=True,
                 kappa_redi_horizontal_evaluation="nemo_metric_literal",

@@ -11,6 +11,9 @@ code duplication with the cubed-sphere implementation.
 
 from __future__ import annotations
 
+import ast
+import inspect
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -20,8 +23,10 @@ from legoesm import constants
 from legoesm.grids.latlon import create_latlon_grid, ensure_geometry
 from legoesm.ocean.vertical import (
     create_ocean_z_star, compute_ocean_jacobian, create_partial_cell_coordinate,
+    create_z_star_from_thicknesses,
 )
 from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig, VisbeckConfig
+import legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid as gm_module
 from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
     compute_isopycnal_slopes_latlon_cgrid,
     gm_redi_tracer_tendency_latlon_cgrid,
@@ -93,6 +98,101 @@ def _stratified_with_meridional_tilt(n_lat=10, n_lon=20, nlev=5, slope=1e-4):
 
     return (grid, z_coord, mask, u_mask, v_mask, eta, H_bathy,
             jacobian, rho, T, S, cfg)
+
+
+def test_nemo_iso_lap_defaults_and_latlon_callers_are_fail_closed():
+    """The shared NEMO bottom closure reaches every package-level caller."""
+    assert inspect.signature(
+        nemo_iso_lap_tracer_tendency_latlon_cgrid
+    ).parameters["closed_bottom_wmask"].default is True
+    assert GMRediConfig().redi_divisor_thickness_evaluation == (
+        "reference_jacobian")
+
+    ocean_root = legoesm_source_path("ocean").resolve()
+    callers: dict[str, int] = {}
+    for path in ocean_root.rglob("*.py"):
+        tree = ast.parse(path.read_text())
+        count = 0
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = (func.id if isinstance(func, ast.Name)
+                    else func.attr if isinstance(func, ast.Attribute) else None)
+            if name == "gm_redi_tracer_tendency_latlon":
+                count += 1
+        # Exclude the function definition automatically: the AST census counts
+        # calls only. This exact map makes a new caller a review event instead
+        # of silently inheriting a fidelity-sensitive default.
+        if count:
+            callers[str(path.relative_to(ocean_root))] = count
+    assert callers == {
+        "dynamics/ocean_model_latlon_cgrid.py": 2,
+        "fidelity/box_heat_budget.py": 1,
+        "fidelity/tendency_probe.py": 1,
+        "physics/lateral_mixing/gm_redi_latlon_cgrid.py": 1,
+    }
+
+
+def test_live_redi_divisor_is_independent_of_face_thickness_selector(
+        monkeypatch):
+    """The dispatcher can select live e3t(Kmm) with reference face widths."""
+    setup = _stratified_with_meridional_tilt(n_lat=5, n_lon=7, nlev=4)
+    (grid, base_z, mask, u_mask, v_mask, _, H_bathy, _, _, T, S, _) = setup
+    raw = np.broadcast_to(
+        np.asarray(base_z.dz_ref), T.shape).copy()
+    raw[..., 0] += 0.125
+    raw[..., 1] -= 0.125
+    raw_z = create_z_star_from_thicknesses(
+        np.asarray(base_z.dz_ref), nemo_e3t_0_m=raw)
+    z_coord = create_partial_cell_coordinate(raw_z, H_bathy)
+    eta = jnp.asarray(
+        np.linspace(-0.17, 0.23, mask.size).reshape(mask.shape))
+
+    common = dict(
+        kappa_GM=0.0, kappa_Redi=1000.0,
+        slope_scheme="nemo_iso_lap",
+        redi_flux_face_thickness_evaluation="tpoint_jacobian",
+    )
+    reference_cfg = GMRediConfig(
+        **common, redi_divisor_thickness_evaluation="reference_jacobian")
+    live_cfg = GMRediConfig(
+        **common, redi_divisor_thickness_evaluation="nemo_qco_live")
+
+    seen = []
+
+    def capture(q, *_args, **kwargs):
+        seen.append((kwargs["face_thickness_u"],
+                     kwargs["face_thickness_v"],
+                     kwargs["divisor_thickness"]))
+        return jnp.zeros_like(q)
+
+    monkeypatch.setattr(
+        gm_module, "nemo_iso_lap_tracer_tendency_latlon_cgrid", capture)
+    gm_redi_tracer_tendency_latlon(
+        T, S, eta, H_bathy, grid, z_coord, reference_cfg,
+        mask=mask, u_mask=u_mask, v_mask=v_mask,
+        redi_divisor_eta=eta)
+    reference = seen[0]
+    seen.clear()
+    gm_redi_tracer_tendency_latlon(
+        T, S, eta, H_bathy, grid, z_coord, live_cfg,
+        mask=mask, u_mask=u_mask, v_mask=v_mask,
+        redi_divisor_eta=eta)
+    live = seen[0]
+
+    # Only the divisor changes: both arms deliberately keep the pre-round-237
+    # T-point/Jacobian face construction.
+    assert reference[0] is None and reference[1] is None
+    assert live[0] is None and live[1] is None
+    assert reference[2] is None
+    assert live[2] is not None
+    with pytest.raises(ValueError, match="redi_divisor_thickness_evaluation"):
+        gm_redi_tracer_tendency_latlon(
+            T, S, eta, H_bathy, grid, z_coord,
+            GMRediConfig(**common,
+                         redi_divisor_thickness_evaluation="unknown"),
+            mask=mask, u_mask=u_mask, v_mask=v_mask)
 
 
 # =====================================================================

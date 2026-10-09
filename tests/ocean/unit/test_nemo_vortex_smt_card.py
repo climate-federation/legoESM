@@ -472,6 +472,7 @@ def test_smt3_card_adds_only_rung0_lateral_tracer_diffusion():
     assert gm.slope_limit == "nemo_cap"
     assert gm.msc_stabilize is True
     assert gm.implicit_K33 is True
+    assert gm.redi_divisor_thickness_evaluation == "nemo_qco_live"
     assert gm.kappa_redi_horizontal_evaluation == "nemo_metric_literal"
     assert gm.kappa_redi_diffusive_velocity == 0.018
 
@@ -484,6 +485,21 @@ def test_smt3_card_adds_only_rung0_lateral_tracer_diffusion():
             np.asarray(getattr(base.recipe.initial_state, name).data),
             np.asarray(getattr(card.recipe.initial_state, name).data))
 
+
+def test_vortex_cards_state_the_redi_divisor_only_where_executed():
+    """Round 248: every VORTEX Redi consumer states the independent arm."""
+    for name in ("VORTEX_SMT3_VEC-zps", "VORTEX_SMT4_VEC-zps"):
+        gm = build_nemo_testcase_card(name).recipe.model_config.gm_redi
+        assert gm is not None
+        assert gm.redi_divisor_thickness_evaluation == "nemo_qco_live"
+    for name in (
+            "VORTEX-zco", "VORTEX_VEC-zco", "VORTEX-15km-zco",
+            "VORTEX_VEC-15km-zco", "VORTEX-10km-zco",
+            "VORTEX_VEC-10km-zco", "VORTEX_SMT-zps",
+            "VORTEX_SMT_VEC-zps", "VORTEX_SMT1_VEC-zps",
+            "VORTEX_SMT2_VEC-zps"):
+        assert build_nemo_testcase_card(
+            name).recipe.model_config.gm_redi is None, name
 
 def test_smt3_validator_refuses_a_dropped_rung0_ldf_value():
     from legoesm.ocean.fidelity.nemo_testcase_recipe import (

@@ -488,6 +488,29 @@ def test_nemo_ws_public_step_is_same_production_kernel_under_outer_disable_jit()
         )
 
 
+def test_nemo_ws_production_routes_stage3_eta_to_redi_divisor(monkeypatch):
+    """The production RK3 step passes Kmm SSH to the independent divisor."""
+    set_policy(PrecisionPolicy.fp64())
+    card = build_nemo_testcase_card("GYRE-zco")
+    gm_cfg = card.recipe.model_config.gm_redi._replace(
+        redi_divisor_thickness_evaluation="nemo_qco_live")
+    cfg = card.recipe.model_config._replace(gm_redi=gm_cfg)
+    model = model_module.LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, cfg)
+    seen = []
+
+    def capture(T, S, *_args, **kwargs):
+        seen.append(kwargs.get("redi_divisor_eta"))
+        return jnp.zeros_like(T), jnp.zeros_like(S)
+
+    monkeypatch.setattr(model_module, "gm_redi_tracer_tendency_latlon", capture)
+    model._step_impl(
+        card.recipe.initial_state, card.dt_s, _apply_implicit_vmix=False)
+    assert len(seen) == 1
+    assert seen[0] is not None
+    assert seen[0].shape == card.recipe.initial_state.eta.data.shape
+
+
 def test_rk3_tke_nbb_mapping_is_independent_of_evd_selector():
     """stprk3 Nbb is the entry tracer for each independent N2 consumer."""
     card = build_nemo_testcase_card("GYRE-zco")
