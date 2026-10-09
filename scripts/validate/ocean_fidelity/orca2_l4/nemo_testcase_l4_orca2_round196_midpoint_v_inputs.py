@@ -290,7 +290,7 @@ def measure(deck_root: Path, frame_root: Path, spg_root: Path,
         "split": split_inputs(context["trace"], oracle),
         "compiled_sources": [
             "ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:486-511",
-            "ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:817-819",
+            "ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:842-844",
         ],
     }
     return classify(result)

@@ -21,9 +21,9 @@ three V histories only after the completed substep update at
 `dynspg_ts.f90:817-819`. Therefore the admitted round-96 record supplies the
 substep-3 inputs without a new acquisition: `j002_va_new` is current `vn_e`,
 `j001_va_new` is prior `vb_e`, and `i000_vn_e` is prior-prior `vbb_e`; the
-recorded `j003_ext_coef` supplies `za1/za2/za3`. The mapping is accepted only
-if replaying those four recorded fields reproduces recorded `j003_va_ext`
-bit-for-bit.
+recorded `j003_ext_coef` supplies `za1/za2/za3`. The history rotation itself is
+at `dynspg_ts.f90:842-844`. The mapping is accepted only if replaying those
+four recorded fields reproduces recorded `j003_va_ext` bit-for-bit.
 
 Extend the existing round-195 offline gate rather than writing a second
 solver or product implementation. Reuse the shared literal midpoint helper.
