@@ -64,20 +64,10 @@ def test_run_deck_protocol_is_only_run_control_delta(
     assert before["namsbc.nn_fsbc"] == after["namsbc.nn_fsbc"]
 
 
-def test_frequency_run_deck_writes_every_step_without_list_mode(tmp_path: Path) -> None:
+def test_frequency_run_deck_is_retracted_by_surface_cadence() -> None:
     canonical = gate.render_omt0(SOURCE.read_text())
-    rendered = gate.render_frequency_run_deck(canonical, itend=gate.TWIN_ITEND)
-    path = tmp_path / "namelist_cfg"
-    path.write_text(rendered)
-    before = namelist_values(SOURCE)
-    after = namelist_values(path)
-
-    assert int(after["namrun.nn_itend"].split()[0]) == gate.TWIN_ITEND
-    assert int(after["namrun.nn_stock"].split()[0]) == 1
-    assert after["namrun.ln_rst_list"].strip().lower() == ".false."
-    assert "namrun.nn_stocklist" not in after
-    assert all(key in after for key in gate.ADDED)
-    assert before["namsbc.nn_fsbc"] == after["namsbc.nn_fsbc"]
+    with pytest.raises(gate.GateError, match="nn_stock=1.*nn_fsbc=2"):
+        gate.render_frequency_run_deck(canonical, itend=gate.TWIN_ITEND)
 
 
 def test_adjacent_restart_list_is_refused() -> None:
@@ -102,10 +92,10 @@ def test_restart_capacity_plant_is_nonvacuous() -> None:
 
 def test_preflight_census_is_frozen() -> None:
     report = gate.preflight()
-    assert report["status"] == "PASS_R202_OMT0_FREQUENCY_RECOVERY_PREFLIGHT"
+    assert report["status"] == "REFUTED_R202_OMT0_FREQUENCY_RECOVERY"
     assert report["twin_steps"] == list(range(1, 11))
     assert report["twin_itend"] == 10
-    assert report["twin_restart_mode"] == "frequency-every-step"
+    assert report["twin_restart_mode"].startswith("RETRACTED")
     assert report["month_steps"] == [10, 20, 30, 40, 50, 60, 70, 80, 90, 95]
     assert report["month_steps_expected_available"] == [10]
     assert report["expected_oracle_stop_step"] == 11

@@ -194,26 +194,12 @@ def render_run_deck(text: str, *, itend: int, stock: int,
 
 
 def render_frequency_run_deck(text: str, *, itend: int) -> str:
-    """Render NEMO's supported every-step restart protocol."""
-    require(itend > 0 and itend % 2 == 0,
-            "nn_itend must be positive and divisible by nn_fsbc=2")
-    require(re.search(r"(?mi)^\s*ln_rst_list\s*=", text) is None,
-            "canonical deck unexpectedly selects restart-list mode")
-    require(re.search(r"(?mi)^\s*nn_stocklist\s*=", text) is None,
-            "canonical deck unexpectedly carries a restart list")
-    for key, value in (("nn_itend", itend), ("nn_stock", 1)):
-        text, count = re.subn(
-            rf"^(\s*{key}\s*=\s*)(\S+)", rf"\g<1>{value}",
-            text, count=1, flags=re.MULTILINE,
-        )
-        require(count == 1, f"{key} not found exactly once")
-    text, count = re.subn(
-        r"^(\s*nn_stock\s*=\s*\S+[^\n]*\n)",
-        lambda match: match.group(1) + "   ln_rst_list = .false.\n",
-        text, count=1, flags=re.MULTILINE,
+    """Retain round 202's failed protocol as an executable retraction."""
+    del text, itend
+    raise GateError(
+        "nn_stock=1 is rejected by compiled sbcmod because nn_fsbc=2; "
+        "use the additions-only frame record"
     )
-    require(count == 1, "frequency-mode insertion point not found exactly once")
-    return text
 
 
 def validate_run_deck(canonical: Path, root: Path, *, itend: int, stock: int,
@@ -257,40 +243,12 @@ def validate_run_deck(canonical: Path, root: Path, *, itend: int, stock: int,
 
 def validate_frequency_run_deck(canonical: Path, root: Path, *, itend: int,
                                 plant: str = "none") -> dict:
-    """Require NEMO's every-step frequency mode for the ten-step twins."""
-    require(plant in PLANTS, f"unknown plant {plant}")
-    deck_manifest = rung0_record._manifest(root, "deck_files.sha256")
-    input_manifest = rung0_record._manifest(root, "input_files.sha256")
-    require(f"{rung0_deck.ZERO_FILE}.nc" in input_manifest,
-            "exact-zero flux file is absent from the input manifest")
-    values = namelist_values(root / "namelist_cfg")
-    base = namelist_values(canonical)
-    expected_keys = set(base) | {"namrun.ln_rst_list"}
-    require(set(values) == expected_keys, "frequency run deck assignment inventory changed")
-    ignored = {"namrun.nn_itend", "namrun.nn_stock"}
-    changed = sorted(
-        key for key in base if key not in ignored and _normal(values[key]) != _normal(base[key])
+    """Refuse round 202's cadence-incompatible record protocol."""
+    del canonical, root, itend, plant
+    raise GateError(
+        "frequency-every-step record is retracted: nn_stock=1 is not a "
+        "multiple of nn_fsbc=2"
     )
-    require(not changed, f"hidden frequency run-deck physical delta: {changed}")
-    require(_integer(values["namrun.nn_itend"], "nn_itend") == itend,
-            f"nn_itend is not {itend}")
-    require(_integer(values["namrun.nn_stock"], "nn_stock") == 1,
-            "every-step twins require nn_stock=1")
-    list_mode = _logical(values["namrun.ln_rst_list"], "ln_rst_list")
-    if plant == "twin-list-mode":
-        list_mode = True
-    require(not list_mode,
-            "every-step twins must use frequency mode, not restart-list mode")
-    return {
-        "itend": itend,
-        "stock": 1,
-        "restart_mode": "frequency-every-step",
-        "restart_steps": list(TWIN_STEPS),
-        "physical_delta": changed,
-        "deck_files": len(deck_manifest),
-        "input_files": len(input_manifest),
-        "zero_flux": rung0_record._validate_zero_flux(root),
-    }
 
 
 def _payload(path: Path, wanted_step: int, *, nonfinite: bool = False) -> tuple[dict[str, np.ndarray], dict]:
@@ -501,10 +459,10 @@ def validate_record(canonical: Path, smoke: Path, twin_a: Path, twin_b: Path,
 def preflight() -> dict:
     return {
         "format": "nemo-testcase-l4-orca2-round202-omt0-preflight-v3",
-        "status": "PASS_R202_OMT0_FREQUENCY_RECOVERY_PREFLIGHT",
+        "status": "REFUTED_R202_OMT0_FREQUENCY_RECOVERY",
         "twin_steps": list(TWIN_STEPS),
         "twin_itend": TWIN_ITEND,
-        "twin_restart_mode": "frequency-every-step",
+        "twin_restart_mode": "RETRACTED: nn_stock=1 violates nn_fsbc=2",
         "month_steps": list(MONTH_STEPS),
         "month_steps_expected_available": list(AVAILABLE_MONTH_STEPS),
         "expected_oracle_stop_step": 11,
