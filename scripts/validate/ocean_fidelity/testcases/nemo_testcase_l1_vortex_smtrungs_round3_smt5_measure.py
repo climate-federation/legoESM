@@ -322,6 +322,9 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     report = {"format": "nemo-testcase-l1-vortex-smtrungs-round3-v1",
               "inputs": inputs_section()}
+    # Time interpolation is unobservable on this deck (the 12 records are
+    # identical), so the model-time offset is checked only against NEMO's
+    # printed fld_read lines, not by these numbers.
     report.update(ladder_and_damping(args.deck_root, args.plant))
     args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
     kt1 = report["independent"]["smt5"][1]["T"]["n_unequal"]
@@ -330,7 +333,7 @@ def main(argv=None) -> int:
         print("PLANT-FIRED independent smt5 kt=1 T n_unequal", kt1)
         return 1
     print(verdict(report), "kt1 T n_unequal", kt1)
-    return 0
+    return 0 if report["inputs"]["status"] == "IDENTICAL" else 1
 
 
 if __name__ == "__main__":

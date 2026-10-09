@@ -107,7 +107,10 @@ certified-format ladder is `smt5_ladder.json` (`b2dc3019…`).
 
 ### 3b. GIVEN-NEMO-ENTRY label (one legoESM step from NEMO's entry kt, vs NEMO's entry kt+1)
 
-Never mixed with 3a (D52). Max abs (rms), SMT-4 / SMT-5, step kt -> kt+1:
+Never mixed with 3a (D52). The state is a HYBRID: T, S, u, v, ssh are NEMO's
+entry kt; the barotropic/time-filter history and other memories are legoESM's
+own carried ones (NEMO's are not in the entry record). Max abs (rms), SMT-4 /
+SMT-5, step kt -> kt+1:
 
 | kt -> kt+1 | T | u | ssh |
 |---:|---|---|---|
@@ -130,7 +133,13 @@ are, all five fields), NEMO's SMT-5 entry minus NEMO's SMT-4 entry at the next
 kt is NEMO's damping increment (the only difference between the two NEMO
 runs), and legoESM ON minus OFF from the same seed (one variable: the card's
 damping field) is legoESM's increment. Both are observed through the rounded
-after-tracer field, so equality is only visible to its ulp.
+after-tracer field, so equality is only visible to its ulp. Condition checked:
+the five recorded prognostic fields of the two NEMO entries are bit-equal; the
+unrecorded memories are not compared, but at kt=2 they cannot differ by
+damping because the kt=1 increment is exactly zero in both models
+(PLAUSIBLE for the memories, MEASURED for the five fields). The attribution is
+therefore valid for the kt=2 -> 3 step only; for kt>=3 the entries differ and
+only the ON/OFF legoESM increment and the residual shrinkage are quoted.
 
 | step | field | NEMO increment: cells nonzero / max abs | legoESM increment: cells nonzero / max abs | max abs difference (ulps of the field) | cells differing |
 |---|---|---|---|---|---:|
@@ -232,8 +241,9 @@ case, and the 100-day score also reports S.
 ## Tests, instruments, review
 
 - New `tests/ocean/fidelity/test_nemo_testcase_l1_vortex_smtrungs_round3_measure.py`:
-  5 passed (statistic, one-ULP plant found at its cell, masked-out difference
-  invisible, refusals, and the real SMT-5 input-identity gate). Non-vacuity:
+  6 passed (statistic, one-ULP plant found at its cell, masked-out difference
+  invisible, refusals, the real SMT-5 input-identity gate, and a planted resto
+  cell refused). Non-vacuity:
   reversing the first-unequal-cell order makes the C-order test FAIL; the
   script's `--plant` moves one wet T cell one ULP and exits 1 with exactly 1
   unequal cell where the unplanted row has 0.
@@ -244,6 +254,18 @@ case, and the 100-day score also reports S.
   0 failures, 0 map entries failing audit; planting a 2-line shift on the
   `tradmp` damping-statement citation makes it FAIL (exit 1, unmapped). The
   default cumulative run is PASS (274 citations).
+
+Controls that do NOT exist (honour system): no plant exercises the model-time
+offset, the u/v face slicing or the equal-entry precondition. The time offset
+is in fact unobservable in these numbers (the 12 target records are identical,
+so any weight gives the same target); it rests on NEMO's printed fld_read
+lines. The re-seed-on-carried-state choice has one measured control: the first
+draft without it gave 1e-4 K residuals at kt=2 for both cards (instrument
+defect); the face slicing is the certified ladder's `lego_fields`, unchanged.
+Review: single review (codex): 3 findings, all CONFIRMED: (1) the identity gate
+returned success on DIFFERS — fixed (nonzero exit); a planted resto cell is refused by the card the gate
+builds (ValueError, tested); (2) the given-entry state is a hybrid — stated above;
+(3) no plant on the harness logic — stated above, not built.
 
 UNVERIFIED: the NEMO-side damping increment is inferred from two NEMO runs'
 rounded entries (no per-term record); NEMO's `zts_dta` is not observed; the

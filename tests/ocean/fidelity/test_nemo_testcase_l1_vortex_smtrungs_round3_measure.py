@@ -62,3 +62,26 @@ def test_smt5_inputs_are_nemos_own_and_mesh_equals_smt4():
     rows = M.inputs_section()
     assert rows["status"] == "IDENTICAL", rows
     assert rows["mesh_mask_smt5_vs_smt4"]["n_variables"] > 30
+
+
+@pytest.mark.skipif(not (M.ROUND2 / "kt1_10" / "resto.nc").is_file()
+                    or not M.SMT4_MESH.is_file(),
+                    reason="SMT-5 acquisition evidence not present")
+def test_planted_resto_cell_is_refused_by_the_card_the_gate_builds(tmp_path, monkeypatch):
+    import netCDF4
+    import shutil
+
+    for arm in ("smoke", "kt1_10", "day100"):
+        (tmp_path / arm).mkdir()
+        for name in M.FILES + ("mesh_mask.nc",):
+            shutil.copy(M.ROUND2 / arm / name, tmp_path / arm / name)
+    with netCDF4.Dataset(tmp_path / "kt1_10" / "resto.nc", "r+") as h:
+        v = h.variables["resto"]
+        arr = np.asarray(v[:])
+        idx = tuple(np.argwhere(arr > 0)[0])
+        arr[idx] = arr[idx] * 1.5
+        v[:] = arr
+    monkeypatch.setattr(M, "ROUND2", tmp_path)
+    # the card itself refuses a resto that is not tmask/86400 (fail closed)
+    with pytest.raises(ValueError, match="tmask/86400"):
+        M.inputs_section()
