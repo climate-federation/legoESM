@@ -78,7 +78,10 @@ def require(condition: bool, message: str) -> None:
 
 
 def _score(candidate, oracle, mask) -> dict[str, object]:
-    row = r178._score(candidate, oracle, mask)
+    # Fold and cyclic halo points are inputs to neighbouring active-cell
+    # stencils.  They therefore belong to the statement domain even when the
+    # prognostic active mask excludes them (round 178's established rule).
+    row = r178._score(candidate, oracle, mask, complete_domain=True)
     row["at_floor"] = bool(row["absolute_max"] <= FLOOR)
     row["verdict"] = (
         "AT_BAR_BIT_EXACT" if row["bit_exact"] else
@@ -248,7 +251,7 @@ def _summary_table(trace, oracle, masks) -> tuple[list[dict], list[dict]]:
             rows.append(row)
             step_rows.append(row)
         by_name = {row["name"]: row for row in step_rows}
-        first_nonbit = _first(step_rows, "bit_exact")
+        first_nonbit = _first(step_rows, "comparison_bit_exact")
         first_over = _first(step_rows, "at_floor")
         table.append({
             "substep": substep + 1,
@@ -291,9 +294,11 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
         "bit_exact": False, "differing_cells": 1},
         "terminal one-ULP control did not fire")
     require(len(report["substep_table"]) == 65, "substep table is incomplete")
-    require(report["first_nonbit"] == _first(report["substep_rows"], "bit_exact"),
+    require(report["first_nonbit"] == _first(
+        report["source_rows"], "comparison_bit_exact"),
             "first non-bit selector moved")
-    require(report["first_over_floor"] == _first(report["substep_rows"], "at_floor"),
+    require(report["first_over_floor"] == _first(
+        report["source_rows"], "at_floor"),
             "first-over-floor selector moved")
     report["status"] = "PASS_R205_OMT0_SUBSTEP_WALK"
     return report
@@ -414,8 +419,9 @@ def measure(deck_root: Path, twin_a: Path, twin_b: Path,
         masks[face[name]])} for name in ENTRY_ORDER]
 
     substep_rows, substep_table = _summary_table(trace, substeps, masks)
-    first_nonbit = _first(substep_rows, "bit_exact")
-    first_over = _first(substep_rows, "at_floor")
+    source_rows = entry_rows + substep_rows
+    first_nonbit = _first(source_rows, "comparison_bit_exact")
+    first_over = _first(source_rows, "at_floor")
 
     association = solve(True, association=True)
     association_trace = association[2]
@@ -430,15 +436,17 @@ def measure(deck_root: Path, twin_a: Path, twin_b: Path,
         "floor": float(FLOOR), "worktree": stamp,
         "record_admission": admission, "resolved": resolved,
         "source_order": list(ENTRY_ORDER), "entry_rows": entry_rows,
-        "entry_first_nonbit": _first(entry_rows, "bit_exact"),
+        "entry_first_nonbit": _first(entry_rows, "comparison_bit_exact"),
         "offline_replay_passivity": passivity,
         "substep_source_order": list(SUBSTEP_ORDER),
+        "source_rows": source_rows,
         "substep_rows": substep_rows, "substep_table": substep_table,
         "first_nonbit": first_nonbit, "first_over_floor": first_over,
         "association_arm": {
             "source_statement": "dynspg_ts.f90:712-741",
             "terminal": _terminal_rows(live, association),
-            "first_nonbit": _first(association_rows, "bit_exact"),
+            "first_nonbit": _first(
+                association_rows, "comparison_bit_exact"),
             "first_over_floor": _first(association_rows, "at_floor"),
             "substep_table": association_table,
         },

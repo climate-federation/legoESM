@@ -12,6 +12,7 @@ def _row(name="eta_entry", *, exact=True):
         "substep": 1,
         "name": name,
         "bit_exact": exact,
+        "comparison_bit_exact": exact,
         "at_floor": exact,
     }
 
@@ -37,6 +38,7 @@ def _report():
         "source_order": list(gate.ENTRY_ORDER),
         "terminal_ulp_control": {"bit_exact": False, "differing_cells": 1},
         "substep_table": [{"substep": index + 1} for index in range(65)],
+        "source_rows": [exact],
         "substep_rows": [exact],
         "first_nonbit": None,
         "first_over_floor": None,
@@ -62,7 +64,8 @@ def test_first_selector_names_earliest_source_ordered_row():
         _row("u_entry", exact=False),
         _row("eta_mid", exact=False),
     ]
-    report["first_nonbit"] = report["substep_rows"][1]
-    report["first_over_floor"] = report["substep_rows"][1]
+    report["source_rows"] = report["substep_rows"]
+    report["first_nonbit"] = report["source_rows"][1]
+    report["first_over_floor"] = report["source_rows"][1]
     result = gate.classify(report)
     assert result["first_nonbit"]["name"] == "u_entry"
