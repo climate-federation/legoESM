@@ -89,7 +89,21 @@ the old launcher refuses with exit 78. The actual round-188 deck fails the new
 capacity check. No package/model file changed, so no ORCA2, GYRE, DINO, tank,
 or month trajectory could move in this record-protocol round.
 
-The required read-only `codex exec` review was attempted and returned
+The required single `tests/ocean/fidelity -n 12` invocation collected 2,889
+tests. Its durable log records 2,867 passes, 7 skips, and 4 registered
+pre-existing failures: SI3 scalar-math `MY_SRC` provenance, allow-dirty driver
+scope, the worktree-stamp ratchet, and the stale GYRE spread-floor record. The
+runner stopped producing output at 99%; no pytest process remained, so its
+stuck parent shell was interrupted. Eleven scheduled tests have no terminal
+result. Every round-189 focused test passed in the battery.
+
+The default citation gate passes 274/274 with no unmapped, failed, or unaudited
+entry. This receipt and the round-188 correction each pass 5/5. Shifting the
+new `in_out_manager.f90` endpoint by two lines makes the receipt gate fail, as
+required.
+
+The required read-only `codex exec` review was attempted again on the final
+committed diff and returned
 `failed to initialize in-process app-server client: Read-only file system`.
 Verdict: **independent review unavailable in-sandbox**.
 
