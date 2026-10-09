@@ -529,6 +529,7 @@ def activated_nc_field(
     p: jnp.ndarray | None = None,
     w: jnp.ndarray | float | None = None,
     aerosol_number: jnp.ndarray | None = None,
+    ccn_aod: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Specified cloud-droplet number field [1/m^3] — activation dispatch.
 
@@ -554,6 +555,8 @@ def activated_nc_field(
     aerosol_number : jnp.ndarray, optional
         Prognostic aerosol number [1/m^3]; when supplied it drives ARG instead
         of the config's prescribed mode-0 number.
+    ccn_aod : jnp.ndarray, optional
+        Proxy column AOD ``(ncol,)`` overriding the ``aerosol_od`` sum.
 
     Returns
     -------
@@ -571,7 +574,8 @@ def activated_nc_field(
             specified_nc_field,
         )
         proxy_cfg = config.proxy if config.proxy is not None else _default_proxy_config()
-        return specified_nc_field(jnp.asarray(aerosol_od), target_shape, proxy_cfg)
+        return specified_nc_field(jnp.asarray(aerosol_od), target_shape, proxy_cfg,
+                                  ccn_aod=ccn_aod)
     if scheme == "arg":
         if T is None or p is None:
             raise ValueError(

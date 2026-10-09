@@ -671,6 +671,9 @@ class ExperimentConfig(NamedTuple):
     # Aerosol
     aerosol_forcing: str = "off"        # off, external
     aerosol_file: str = ""
+    # Optional separate AOD file for the AOD->CCN proxy only (e.g. fine-mode
+    # Kinne while ``aerosol_file`` is fine+coarse for radiation); "" = same.
+    aerosol_ccn_file: str = ""
     aerosol_reference_aod: float = 0.03
     volcanic_aerosol_file: str = ""
     volcanic_aerosol_scale: float = 1.0

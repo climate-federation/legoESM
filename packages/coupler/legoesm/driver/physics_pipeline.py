@@ -1106,7 +1106,7 @@ class PhysicsPipeline:
                             C_H=None, C_E=None,
                             q_i=None, q_s=None, q_g=None,
                             N_c=None, N_r=None, N_i=None,
-                            T_land=None, aerosol_od=None,
+                            T_land=None, aerosol_od=None, aerosol_ccn_aod=None,
                             sfc_shflx_override=None, sfc_lhflx_override=None,
                             sfc_taux_override=None, sfc_tauy_override=None,
                             tke=None, qke=None, gwd_spectrum=None,
@@ -1654,7 +1654,10 @@ class PhysicsPipeline:
                 # 500-vs-550 nm difference (~5-10 % for Angstrom
                 # exponents 0.7-1.7) is well inside the fit's factor-2
                 # scatter, so no spectral correction is applied.
-                _aod_col = jnp.sum(aerosol_od, axis=-1)        # (ncol,)
+                # ``aerosol_ccn_aod`` (tropospheric visible column, volcanic
+                # excluded) replaces the sum when the driver supplies it.
+                _aod_col = (jnp.sum(aerosol_od, axis=-1)       # (ncol,)
+                            if aerosol_ccn_aod is None else aerosol_ccn_aod)
                 _n_ccn = ccn_from_aod(_aod_col)                # (ncol,)
                 _n_c_col = jnp.broadcast_to(
                     _n_ccn[:, None], q_c_col.shape,
@@ -2406,6 +2409,7 @@ class PhysicsPipeline:
                                solar_weights, s_0,
                                o3_vmr_precomputed, aerosol_od_precomputed,
                                aerosol_lw_od_precomputed=None,
+                               aerosol_ccn_aod=None,
                                tau_equator=None, tau_pole=None,
                                albedo_ice=None, albedo_ocean=None,
                                ghg_vmr_override=None,
@@ -2742,7 +2746,8 @@ class PhysicsPipeline:
                 from legoesm.atmosphere.physics.microphysics.aerosol_activation import (  # noqa: E501
                     ccn_from_aod,
                 )
-                _aod_col = jnp.sum(aerosol_od_precomputed, axis=-1)
+                _aod_col = (jnp.sum(aerosol_od_precomputed, axis=-1)
+                            if aerosol_ccn_aod is None else aerosol_ccn_aod)
                 n_cloud_col = jnp.broadcast_to(
                     ccn_from_aod(_aod_col)[:, None], T_col.shape,
                 )
@@ -3010,6 +3015,7 @@ class PhysicsPipeline:
                          albedo_ocean=pipeline.albedo_ocean,
                          ghg_vmr_override=None,
                          aerosol_lw_od=None,
+                         aerosol_ccn_aod=None,
                          T_land=None,
                          q_i=None, q_s=None, q_g=None,
                          N_c=None, N_r=None, N_i=None,
@@ -3055,6 +3061,7 @@ class PhysicsPipeline:
                         day_of_year, seconds_of_day,
                         solar_weights, s_0, o3_vmr, aerosol_od,
                         aerosol_lw_od_precomputed=aerosol_lw_od,
+                        aerosol_ccn_aod=aerosol_ccn_aod,
                         tau_equator=tau_equator, tau_pole=tau_pole,
                         albedo_ice=albedo_ice, albedo_ocean=albedo_ocean,
                         ghg_vmr_override=ghg_vmr_override,
@@ -3092,6 +3099,7 @@ class PhysicsPipeline:
                     C_H=C_H, C_E=C_E, T_land=T_land,
                     q_i=q_i, q_s=q_s, q_g=q_g, N_c=N_c, N_r=N_r, N_i=N_i,
                     aerosol_od=aerosol_od,
+                    aerosol_ccn_aod=aerosol_ccn_aod,
                     sfc_shflx_override=sfc_shflx_override,
                     sfc_lhflx_override=sfc_lhflx_override,
                     sfc_taux_override=sfc_taux_override,
@@ -3156,6 +3164,7 @@ class PhysicsPipeline:
                     C_H=C_H, C_E=C_E, T_land=T_land,
                     q_i=q_i, q_s=q_s, q_g=q_g, N_c=N_c, N_r=N_r, N_i=N_i,
                     aerosol_od=aerosol_od,
+                    aerosol_ccn_aod=aerosol_ccn_aod,
                     sfc_shflx_override=sfc_shflx_override,
                     sfc_lhflx_override=sfc_lhflx_override,
                     sfc_taux_override=sfc_taux_override,

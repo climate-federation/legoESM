@@ -551,3 +551,22 @@ def prognostic_ice_skin_temperature(
         / (1.0 + r * g_cond)
     T_new = jnp.clip(T_new, _ICE_SKIN_FLOOR_K, T_melt_surface_K)
     return jnp.where(sic > 0.0, T_new, T_freeze_K)
+
+
+def stratospheric_layer_weight(p_half_col: jnp.ndarray,
+                               lat_rad: jnp.ndarray) -> jnp.ndarray:
+    """Per-layer weight for CMIP6 stratospheric (volcanic) aerosol at the
+    tropopause, as the ETH/SAGE-3lambda data notes prescribe: 1 above the
+    tropopause, 0.5 in the layer holding it, 0 below (the file's values below
+    the tropopause are an extrapolated matching tail, not tropospheric
+    aerosol).  ``p_half_col`` (ncol, nlev+1) [Pa] in either vertical order,
+    ``lat_rad`` (ncol,).
+
+    ponytail: climatological tropopause p_tp = 300 - 200 cos^2(lat) hPa
+    (100 hPa tropics, 300 hPa poles), not the instantaneous local one the
+    notes ask for; upgrade = WMO lapse-rate tropopause from the column T.
+    """
+    p_tp = ((300.0 - 200.0 * jnp.cos(lat_rad) ** 2) * 100.0)[:, None]
+    top = jnp.minimum(p_half_col[:, :-1], p_half_col[:, 1:])
+    bot = jnp.maximum(p_half_col[:, :-1], p_half_col[:, 1:])
+    return jnp.where(bot <= p_tp, 1.0, jnp.where(top >= p_tp, 0.0, 0.5))

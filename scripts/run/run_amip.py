@@ -733,6 +733,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--aerosol-forcing", type=str, default="off",
                         choices=["off", "external"])
     parser.add_argument("--aerosol-file", type=str, default="")
+    parser.add_argument(
+        "--aerosol-ccn-file", type=str, default="",
+        help="Optional AOD file for the AOD->CCN proxy only (e.g. fine-mode "
+             "Kinne while --aerosol-file is fine+coarse); default = --aerosol-file.")
     parser.add_argument("--aerosol-reference-aod", type=float, default=0.03)
     parser.add_argument(
         "--volcanic-aerosol-file", type=str, default="",
@@ -742,9 +746,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "convention is read directly, while the CMIP6 / MPI-M files "
             "'bc_aeropt_cmip6_volc_lw_b16_sw_b14_<year>.nc' storing "
             "per-band 'ext_sun(solar_bands, lat, altitude, month)' in "
-            "[1/km] are integrated over altitude (∫ ext·dz) and averaged "
-            "over SW bands to produce a representative single-band AOD "
-            "(matching the Kinne multi-band aerosol convention)."
+            "[1/km] are solar-weighted over SW bands and placed in the "
+            "stratosphere on their native altitude profile."
         ))
     parser.add_argument("--volcanic-aerosol-scale", type=float, default=1.0)
     parser.add_argument("--volcanic-aerosol-lw", action="store_true",
@@ -2471,6 +2474,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         solar_spectral_band_order=args.solar_spectral_band_order,
         aerosol_forcing=args.aerosol_forcing,
         aerosol_file=args.aerosol_file,
+        aerosol_ccn_file=args.aerosol_ccn_file,
         aerosol_reference_aod=args.aerosol_reference_aod,
         volcanic_aerosol_file=args.volcanic_aerosol_file,
         volcanic_aerosol_scale=args.volcanic_aerosol_scale,

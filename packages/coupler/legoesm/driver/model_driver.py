@@ -4017,9 +4017,11 @@ class ModelDriver:
             and bool(cfg.volcanic_aerosol_file)
         )
         self._aerosol_lw_od = None
+        self._aerosol_ccn_aod = None
         self._aerosol_config = AerosolConfig(
             enabled=self._aerosol_active,
             source="climatology", path=cfg.aerosol_file,
+            ccn_path=cfg.aerosol_ccn_file,
             use_reference_if_missing=True,
             reference_aod_550=cfg.aerosol_reference_aod,
             volcanic_enabled=bool(cfg.volcanic_aerosol_file),
@@ -4114,11 +4116,13 @@ class ModelDriver:
         """Pre-compute ozone/aerosol/GHG fields outside JIT boundary."""
         from legoesm.forcing.external import (
             get_ozone_at_time, get_aerosol_at_time, get_aerosol_lw_at_time,
+            get_aerosol_sw_volcanic_at_time,
             get_ghg_at_time, ghg_concentrations_to_vmr,
         )
         from legoesm.forcing.surface_utils import (
             distribute_column_aod_to_layers,
             place_stratospheric_aod_profile_to_layers,
+            stratospheric_layer_weight,
         )
 
         nlev = self.sigma.sigma_full.shape[0]
@@ -4174,12 +4178,30 @@ class ModelDriver:
 
         aerosol_od = jnp.zeros((ncol, nlev), dtype=p_s.dtype)
         if self._aerosol_active:
+            _acfg = self._aerosol_config
+            # Volcanic SW (CMIP6 ``ext_sun``) is placed at its true
+            # stratospheric pressure like the LW profile below, NOT spread
+            # with the tropospheric column by pressure mass.  A legacy
+            # column-only volcanic file (profile None) stays in the column.
+            volc_sw = get_aerosol_sw_volcanic_at_time(_acfg, day, lat_grid=lat_col)
+            _trop_cfg = _acfg._replace(volcanic_enabled=False)
             aerosol_col = get_aerosol_at_time(
-                self._aerosol_config, day, lat_grid=lat_col,
+                _acfg if volc_sw is None else _trop_cfg, day, lat_grid=lat_col,
             )
             aerosol_od = distribute_column_aod_to_layers(
                 jnp.asarray(aerosol_col), p_half_col,
             )
+            if volc_sw is not None:
+                aerosol_od = aerosol_od + (place_stratospheric_aod_profile_to_layers(
+                    jnp.asarray(volc_sw[0]), jnp.asarray(volc_sw[1]), p_half_col,
+                ) * stratospheric_layer_weight(p_half_col, lat_col)
+                ).astype(aerosol_od.dtype)
+            # AOD->CCN input: TROPOSPHERIC column in the visible (550 nm)
+            # band, volcanic excluded, from ``ccn_path`` (fine mode) if set.
+            self._aerosol_ccn_aod = jnp.asarray(get_aerosol_at_time(
+                _trop_cfg._replace(path=_acfg.ccn_path or _acfg.path),
+                day, lat_grid=lat_col, band="vis",
+            )).reshape(ncol).astype(p_s.dtype)
 
         # Volcanic stratospheric LONGWAVE aerosol (gap #9): same (ncol,
         # nlev) shape as ``aerosol_od``, default zeros so the SegmentForcing
@@ -4200,8 +4222,9 @@ class ModelDriver:
             )
             if aerosol_lw_prof is not None:
                 prof_col, p_edges = aerosol_lw_prof
-                aerosol_lw_od = place_stratospheric_aod_profile_to_layers(
+                aerosol_lw_od = (place_stratospheric_aod_profile_to_layers(
                     jnp.asarray(prof_col), jnp.asarray(p_edges), p_half_col,
+                ) * stratospheric_layer_weight(p_half_col, lat_col)
                 ).astype(p_s.dtype)
         self._aerosol_lw_od = aerosol_lw_od
 
@@ -4749,6 +4772,7 @@ class ModelDriver:
             "ghg_file",
             "solar_file",
             "aerosol_file",
+            "aerosol_ccn_file",
             "volcanic_aerosol_file",
             "land_mask_path",
             "ic_path",
@@ -12177,6 +12201,9 @@ class ModelDriver:
                         _aer_lw = getattr(self, "_aerosol_lw_od", None)
                         if self._aerosol_lw_active and _aer_lw is not None:
                             _forcing_daily["aerosol_lw_od"] = _aer_lw
+                        # Tropospheric visible-band CCN AOD (absent => sum(aerosol_od)).
+                        if getattr(self, "_aerosol_ccn_aod", None) is not None:
+                            _forcing_daily["aerosol_ccn_aod"] = self._aerosol_ccn_aod
                         if _ghg is not None:
                             _forcing_daily["ghg_vmr"] = {
                                 k: jnp.asarray(v) for k, v in _ghg.items()
@@ -13625,6 +13652,9 @@ class ModelDriver:
                         _aer_lw = getattr(self, "_aerosol_lw_od", None)
                         if self._aerosol_lw_active and _aer_lw is not None:
                             _ext_daily["aerosol_lw_od"] = _aer_lw
+                        # Tropospheric visible-band CCN AOD (absent => sum(aerosol_od)).
+                        if getattr(self, "_aerosol_ccn_aod", None) is not None:
+                            _ext_daily["aerosol_ccn_aod"] = self._aerosol_ccn_aod
                         if _ghg is not None:
                             _ext_daily["ghg_vmr"] = {
                                 k: jnp.asarray(v) for k, v in _ghg.items()
@@ -14396,6 +14426,7 @@ class ModelDriver:
                 solar_weights=solar_weights, s_0=current_s_0,
                 o3_vmr=o3_vmr, aerosol_od=aerosol_od,
                 aerosol_lw_od=getattr(self, "_aerosol_lw_od", None),
+                aerosol_ccn_aod=getattr(self, "_aerosol_ccn_aod", None),
                 ghg_vmr=ghg_vmr,
                 sfc_albedo_override=_alb, sfc_T_override=_T,
                 sfc_emissivity_override=_emis,
@@ -14978,6 +15009,7 @@ class ModelDriver:
                 solar_weights=solar_weights, s_0=current_s_0,
                 o3_vmr=o3_vmr, aerosol_od=aerosol_od,
                 aerosol_lw_od=getattr(self, "_aerosol_lw_od", None),
+                aerosol_ccn_aod=getattr(self, "_aerosol_ccn_aod", None),
                 ghg_vmr=ghg_vmr,
                 sfc_albedo_override=_alb, sfc_T_override=_T,
                 sfc_emissivity_override=_emis,
@@ -15704,6 +15736,7 @@ class ModelDriver:
             day_of_year=day_of_year, seconds_of_day=seconds_of_day,
             solar_weights=ctx["solar_weights"], s_0=ctx["current_s_0"],
             o3_vmr=ctx["o3_vmr"], aerosol_od=ctx["aerosol_od"],
+            aerosol_ccn_aod=getattr(self, "_aerosol_ccn_aod", None),
             ghg_vmr=ctx["ghg_vmr"],
             # NOTE: transient cover is deliberately NOT injected here.  The training
             # segment returns run_segment.raw (un-jitted), so the land calibration
@@ -16058,6 +16091,7 @@ class ModelDriver:
                 solar_weights=solar_weights, s_0=current_s_0,
                 o3_vmr=o3_vmr, aerosol_od=aerosol_od,
                 aerosol_lw_od=getattr(self, "_aerosol_lw_od", None),
+                aerosol_ccn_aod=getattr(self, "_aerosol_ccn_aod", None),
                 ghg_vmr=ghg_vmr,
                 sfc_albedo_override=_sfc_albedo_ovr,
                 sfc_T_override=_sfc_T_ovr,
@@ -16832,6 +16866,7 @@ class ModelDriver:
                 held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                 ghg_vmr_override=ghg_vmr,
                 aerosol_lw_od=getattr(self, "_aerosol_lw_od", None),
+                aerosol_ccn_aod=getattr(self, "_aerosol_ccn_aod", None),
                 land_ml=(self._land_ml_state
                          if self._ensemble_size == 1 else None),
                 T_land=T_land, w_land=w_land, snow=snow, **_dm_step_in,
@@ -16986,6 +17021,7 @@ class ModelDriver:
                     held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                     ghg_vmr_override=ghg_vmr,
                     aerosol_lw_od=getattr(self, "_aerosol_lw_od", None),
+                    aerosol_ccn_aod=getattr(self, "_aerosol_ccn_aod", None),
                     land_ml=(self._land_ml_state
                              if self._ensemble_size == 1 else None),
                     T_land=T_land, w_land=w_land, snow=snow, **_dm_step_in,

@@ -773,6 +773,9 @@ class SegmentForcing(NamedTuple):
     # (transient cover is the lat-lon multilayer-land path, not SPMD cube) so it
     # is pinned replicated by the segment JIT.
     land_ml_params: object | None = None
+    # Tropospheric visible-band column AOD (ncol,) for the AOD->CCN proxy
+    # (volcanic excluded).  ``None`` => CCN uses sum(aerosol_od) (unchanged).
+    aerosol_ccn_aod: jax.Array | None = None
 
 
 # Canonical GHG species ordering for the ghg_vmr array.  The three halogens
@@ -827,6 +830,7 @@ def pack_forcing(
     sfc_sw_down=None,
     land_frac=None,
     land_ml_params=None,
+    aerosol_ccn_aod=None,
 ) -> SegmentForcing:
     """Pack per-segment forcing into a SegmentForcing pytree.
 
@@ -943,6 +947,9 @@ def pack_forcing(
         # LandSurfaceParams pytree (or None) — passed through as-is; its leaves
         # are already jax arrays from the provider rebuild, no jnp.asarray coerce.
         land_ml_params=land_ml_params,
+        aerosol_ccn_aod=(
+            None if aerosol_ccn_aod is None else jnp.asarray(aerosol_ccn_aod)
+        ),
     )
 
 
@@ -957,7 +964,7 @@ GRID_SHAPED_FORCING_FIELDS = (
     "sfc_albedo_override", "sfc_T_override", "sfc_emissivity_override",
     "sfc_shflx_override", "sfc_lhflx_override",
     "sfc_taux_override", "sfc_tauy_override",
-    "sfc_lw_up", "sfc_sw_up", "sfc_sw_down", "land_frac",
+    "sfc_lw_up", "sfc_sw_up", "sfc_sw_down", "land_frac", "aerosol_ccn_aod",
 )
 
 
@@ -1276,6 +1283,7 @@ def split_physics_single_rank(carry, T_new, u_new, v_new, p_s_new,
         albedo_ice=statics.albedo_ice, albedo_ocean=statics.albedo_ocean,
         ghg_vmr_override=statics.ghg_vmr_override,
         aerosol_lw_od=statics.forcing.aerosol_lw_od,
+        aerosol_ccn_aod=statics.forcing.aerosol_ccn_aod,
         sfc_albedo_override=statics.forcing.sfc_albedo_override,
         sfc_T_override=statics.forcing.sfc_T_override,
         sfc_emissivity_override=statics.forcing.sfc_emissivity_override,
@@ -1325,6 +1333,7 @@ def split_physics_single_rank(carry, T_new, u_new, v_new, p_s_new,
                 statics.forcing.solar_weights, statics.forcing.s_0,
                 statics.forcing.o3_vmr, statics.forcing.aerosol_od,
                 aerosol_lw_od_precomputed=statics.forcing.aerosol_lw_od,
+                aerosol_ccn_aod=statics.forcing.aerosol_ccn_aod,
                 tau_equator=statics.tau_equator, tau_pole=statics.tau_pole,
                 albedo_ice=statics.albedo_ice,
                 albedo_ocean=statics.albedo_ocean,
@@ -2168,6 +2177,7 @@ def build_segment_fn(
                     albedo_ice=_albedo_ice, albedo_ocean=_albedo_ocean,
                     ghg_vmr_override=_ghg_vmr_override,
                     aerosol_lw_od=forcing.aerosol_lw_od,
+                    aerosol_ccn_aod=forcing.aerosol_ccn_aod,
                     sfc_albedo_override=forcing.sfc_albedo_override,
                     sfc_T_override=forcing.sfc_T_override,
                     sfc_emissivity_override=forcing.sfc_emissivity_override,
@@ -2204,6 +2214,7 @@ def build_segment_fn(
                             forcing.solar_weights, forcing.s_0,
                             forcing.o3_vmr, forcing.aerosol_od,
                             aerosol_lw_od_precomputed=forcing.aerosol_lw_od,
+                            aerosol_ccn_aod=forcing.aerosol_ccn_aod,
                             tau_equator=_tau_equator, tau_pole=_tau_pole,
                             albedo_ice=_albedo_ice, albedo_ocean=_albedo_ocean,
                             ghg_vmr_override=_ghg_vmr_override,
@@ -2617,6 +2628,7 @@ def build_segment_fn(
                     forcing.solar_weights, forcing.s_0,
                     forcing.o3_vmr, forcing.aerosol_od,
                     aerosol_lw_od_precomputed=forcing.aerosol_lw_od,
+                    aerosol_ccn_aod=forcing.aerosol_ccn_aod,
                     tau_equator=_tau_equator, tau_pole=_tau_pole,
                     albedo_ice=_albedo_ice, albedo_ocean=_albedo_ocean,
                     ghg_vmr_override=_ghg_vmr_override,
@@ -2645,6 +2657,7 @@ def build_segment_fn(
                         forcing.solar_weights, forcing.s_0,
                         forcing.o3_vmr, forcing.aerosol_od,
                         aerosol_lw_od_precomputed=forcing.aerosol_lw_od,
+                        aerosol_ccn_aod=forcing.aerosol_ccn_aod,
                         tau_equator=_tau_equator, tau_pole=_tau_pole,
                         albedo_ice=_albedo_ice, albedo_ocean=_albedo_ocean,
                         ghg_vmr_override=_ghg_vmr_override,
@@ -2694,6 +2707,7 @@ def build_segment_fn(
                     forcing.solar_weights, forcing.s_0,
                     forcing.o3_vmr, forcing.aerosol_od,
                     aerosol_lw_od_precomputed=forcing.aerosol_lw_od,
+                    aerosol_ccn_aod=forcing.aerosol_ccn_aod,
                     tau_equator=_tau_equator, tau_pole=_tau_pole,
                     albedo_ice=_albedo_ice, albedo_ocean=_albedo_ocean,
                     ghg_vmr_override=_ghg_vmr_override,
@@ -2722,6 +2736,7 @@ def build_segment_fn(
                         forcing.solar_weights, forcing.s_0,
                         forcing.o3_vmr, forcing.aerosol_od,
                         aerosol_lw_od_precomputed=forcing.aerosol_lw_od,
+                        aerosol_ccn_aod=forcing.aerosol_ccn_aod,
                         tau_equator=_tau_equator, tau_pole=_tau_pole,
                         albedo_ice=_albedo_ice, albedo_ocean=_albedo_ocean,
                         ghg_vmr_override=_ghg_vmr_override,

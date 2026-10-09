@@ -1517,6 +1517,8 @@ def _make_hydrostatic_radiation(
                 T=T_col, p=p_full_col,
                 aerosol_number=(None if _aer_num is None
                                 else jnp.asarray(_aer_num)),
+                ccn_aod=(forcing.get("aerosol_ccn_aod")
+                         if forcing is not None else None),
             )
 
         f_day_col = f_day.reshape(ncol) if f_day is not None else None
