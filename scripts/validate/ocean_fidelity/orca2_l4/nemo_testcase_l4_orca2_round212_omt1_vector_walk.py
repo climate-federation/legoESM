@@ -30,6 +30,9 @@ from scripts.validate.ocean_fidelity.orca2_l4 import (
     nemo_testcase_l4_orca2_round205_omt0_substep_walk as r205,
 )
 from scripts.validate.ocean_fidelity.orca2_l4 import (
+    nemo_testcase_l4_orca2_round197_vector_v_update as r197,
+)
+from scripts.validate.ocean_fidelity.orca2_l4 import (
     nemo_testcase_l4_orca2_round209_omt1_ladder_gate as omt1,
 )
 from scripts.validate.ocean_fidelity.testcases import (
@@ -39,7 +42,7 @@ from nemo_testcase_l2_gyre_round14_advmean import read_ordered
 
 PLANTS = (
     "none", "record-header", "twin-ulp", "source-order", "passivity",
-    "terminal-ulp", "slow-v-replay",
+    "terminal-ulp", "slow-v-replay", "vector-mask-replay",
 )
 
 
@@ -72,6 +75,8 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
         report["terminal_ulp_control"]["bit_exact"] = True
     elif plant == "slow-v-replay":
         report["slow_v_arm"]["input"]["comparison_bit_exact"] = False
+    elif plant == "vector-mask-replay":
+        report["vector_v_split"]["record_replay_vs_target"]["bit_exact"] = False
 
     require(report["claim_label"] == "independent OMT-1", "claim label moved")
     require(report["record_admission"]["stream_count"] == 2,
@@ -91,6 +96,13 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
             "recorded slow-V substitution did not install exactly")
     require(len(report["slow_v_arm"]["substep_table"]) == 65,
             "recorded slow-V replay is incomplete")
+    split = report["vector_v_split"]
+    require(split["input_order"] == list(r197.INPUT_ORDER),
+            "vector-V input order moved")
+    require(split["candidate_replay_vs_passive"]["bit_exact"],
+            "candidate vector-V replay does not reproduce the passive trace")
+    require(split["record_replay_vs_target"]["bit_exact"],
+            "all-recorded vector-V replay does not reproduce NEMO")
     require(report["first_nonbit"] == _first(
         report["source_rows"], "comparison_bit_exact"),
         "first non-bit selector moved")
@@ -225,6 +237,42 @@ def measure(deck_root: Path, twin_a: Path, twin_b: Path,
     slow_v_arm = solve(True, slow_v_override=recorded_slow_v)
     slow_v_rows, slow_v_table = r205._summary_table(
         slow_v_arm[2], substeps, masks)
+    index = 0
+    raw_mask = card.recipe.z_coord.nemo_een_barotropic
+    require(raw_mask is not None, "OMT-1 card has no raw NEMO mask bundle")
+    candidate_inputs = {
+        "vn_e": r205._native_v(trace["v_entry"][index]),
+        "rDt_e": dt,
+        "zv_spg": r205._native_v(trace["pgf_v"][index]),
+        "zv_trd": r205._native_v(trace["trd_v"][index]),
+        "zv_frc": r205._native_v(trace["slow_v"][index]),
+        "ssvmask": r205._native_v(np.asarray(state.v_mask.data)),
+    }
+    reference_inputs = {
+        "vn_e": np.asarray(substeps["v_entry"][index]),
+        "rDt_e": np.float64(ordered["dt"]),
+        "zv_spg": np.asarray(substeps["pgf_v"][index]),
+        "zv_trd": np.asarray(substeps["trd_v"][index]),
+        "zv_frc": np.asarray(substeps["slow_v"][index]),
+        "ssvmask": np.max(np.asarray(raw_mask.vmask, dtype=np.float64), axis=-1),
+    }
+    target_v = np.asarray(substeps["v_exit"][index])
+    candidate_terms = r197._literal_terms(candidate_inputs)
+    reference_terms = r197._literal_terms(reference_inputs)
+    candidate_post = r197._associate_v(candidate_terms["raw_va_e"], card)
+    reference_post = r197._associate_v(reference_terms["raw_va_e"], card)
+    passive_post = r205._native_v(trace["v_exit"][index])
+    operand_rows = {
+        name: r197._row(candidate_inputs[name], reference_inputs[name])
+        for name in r197.INPUT_ORDER
+    }
+    cumulative_rows = {}
+    accumulated = dict(candidate_inputs)
+    for name in r197.INPUT_ORDER:
+        accumulated[name] = reference_inputs[name]
+        terms = r197._literal_terms(accumulated)
+        cumulative_rows[name] = r197._row(
+            r197._associate_v(terms["raw_va_e"], card), target_v)
     one = np.asarray([1.0], dtype=np.float64)
     next_one = np.nextafter(one, np.inf)
     raw = {
@@ -248,6 +296,15 @@ def measure(deck_root: Path, twin_a: Path, twin_b: Path,
             "first_nonbit": _first(slow_v_rows, "comparison_bit_exact"),
             "first_over_floor": _first(slow_v_rows, "at_floor"),
             "substep_table": slow_v_table,
+        },
+        "vector_v_split": {
+            "source_statement": "dynspg_ts.f90:674-678",
+            "input_order": list(r197.INPUT_ORDER),
+            "operand_rows": operand_rows,
+            "candidate_replay_vs_passive": r197._row(
+                candidate_post, passive_post),
+            "record_replay_vs_target": r197._row(reference_post, target_v),
+            "cumulative_substitution_post_v": cumulative_rows,
         },
         "terminal_ulp_control": {
             "bit_exact": bool(np.array_equal(one, next_one)),

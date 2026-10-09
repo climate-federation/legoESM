@@ -28,6 +28,11 @@ def _report() -> dict:
             "input": {"comparison_bit_exact": True},
             "substep_table": [{} for _ in range(65)],
         },
+        "vector_v_split": {
+            "input_order": list(gate.r197.INPUT_ORDER),
+            "candidate_replay_vs_passive": {"bit_exact": True},
+            "record_replay_vs_target": {"bit_exact": True},
+        },
         "first_nonbit": None,
         "first_over_floor": None,
         "terminal_ulp_control": {"bit_exact": False, "differing_cells": 1},
