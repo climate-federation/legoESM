@@ -187,7 +187,6 @@ def measure(deck_root: Path, frame_root: Path, spg_root: Path,
                 _nemo_reference_face_depth_test_override=reference_depth,
                 _nemo_unmasked_v_transport_test_override=True,
                 _nemo_materialize_v_transport_test_override=True,
-                _nemo_unmasked_v_reciprocal_test_override=True,
                 _nemo_external_mode_association_test_override=True,
             )
         ))(state, *forcing)

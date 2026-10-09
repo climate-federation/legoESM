@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import copy
+import inspect
 
 import pytest
 
 from scripts.validate.ocean_fidelity.orca2_l4 import (
     nemo_testcase_l4_orca2_round195_transport_operands as gate,
+)
+from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
+    barotropic_substeps_latlon_cgrid,
 )
 
 
@@ -68,6 +72,21 @@ def test_classifier_names_first_operand_and_closing_substitution():
     assert result["closing_single_substitution"] == "va_e"
     assert result["prediction_ledger"]["R195-P3"] == "CONFIRMED_VA_E_FIRST"
     assert result["status"] == "PASS_R195_SUBSTEP3_OPERAND_SPLIT"
+
+
+def test_measurement_uses_only_current_barotropic_hook_api():
+    source = inspect.getsource(gate.measure)
+    signature = inspect.signature(barotropic_substeps_latlon_cgrid)
+    requested = {
+        "_nemo_substep_trace_test_hook",
+        "_nemo_reference_face_depth_test_override",
+        "_nemo_unmasked_v_transport_test_override",
+        "_nemo_materialize_v_transport_test_override",
+        "_nemo_external_mode_association_test_override",
+    }
+
+    assert requested <= set(signature.parameters)
+    assert "_nemo_unmasked_v_reciprocal_test_override" not in source
 
 
 @pytest.mark.parametrize(
