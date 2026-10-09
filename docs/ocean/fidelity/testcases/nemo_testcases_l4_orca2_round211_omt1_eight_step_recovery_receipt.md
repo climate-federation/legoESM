@@ -49,14 +49,26 @@ selectors.
 The committed launcher reports
 `ORCA2_ROUND211_OMT1_FRAMES_PREFLIGHT_READY`. The frame preflight reports 64
 expected frames per twin, four call sites, and zero removed source lines. The
-focused round-209/210/211 tests pass 15/15; shell syntax and Python compilation
-pass. No `packages/` file changed, so GYRE, DINO, tanks, rung 0, and shipped
-rung 10 cannot move in this round.
+focused round-209/210/211 plus citation-gate tests pass 32/32; shell syntax and
+Python compilation pass. The round receipt citation gate passes with two
+citations, zero failures and zero unmapped entries; its shifted `dynspg_ts`
+plant fails. The cumulative default gate passes with 274 citations, zero
+failures and zero unmapped entries. No `packages/` file changed, so GYRE,
+DINO, tanks, rung 0, and shipped rung 10 cannot move in this round.
 
 Independent review was attempted with `codex exec --sandbox read-only` and
 failed before reading the diff:
 `failed to initialize in-process app-server client: Read-only file system`.
 Independent review is unavailable in-sandbox; this is not a PASS verdict.
+
+The single permitted `tests/ocean/fidelity -n 12` battery collected 3,013
+tests. It reached 99% and then stopped emitting results in the compiler-heavy
+tail; after an extended wait it was interrupted without a final pytest
+summary, so it is **INCOMPLETE**, not a pass. The preserved log contains 2,991
+passes, seven skips, zero errors, four registered pre-existing failures, and
+11 unclassified tests. The failures are the GYRE round-129 spread-floor gate,
+escape-scope ratchet, worktree-stamp ratchet, and SI3 scalar-math provenance
+gate. No second full battery was started.
 
 ## OPEN
 
