@@ -285,10 +285,49 @@ def test_i_seam_is_translation_equivariant_bit_for_bit(card):
         "eta": 0, "uu_b": 0, "vv_b": 0}
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "B4j: the card's step walls the j-seam; the existing y-wrap scope does "
-    "not reach its barotropic path (round-2 probe: 402 ssh cells unequal, "
-    "same count with the scope off)"))
 def test_j_seam_is_translation_equivariant_bit_for_bit(card):
+    """B4j: NEMO's j-seam is a periodic copy (lbclnk.f90:2028-2034)."""
     assert _seam_equivariance_unequal(card, (-79, 0)) == {
         "eta": 0, "uu_b": 0, "vv_b": 0}
+
+
+def test_j_seam_plant_walled_step_fires(card):
+    """Plant: the same step with the j-wrap off walls the seam."""
+    bad = _seam_equivariance_unequal(card._replace(j_periodic=False), (-79, 0))
+    assert min(bad.values()) > 0, bad
+
+
+def _f_plane_off(card):
+    """The card with f = 0 everywhere f enters (grid and EEN operands)."""
+    import jax.numpy as jnp
+    r = card.recipe
+    g = r.grid._replace(**{k: jnp.zeros_like(getattr(r.grid, k))
+                           for k in ("f_T", "f_u", "f_v", "ff_f")})
+    raw = r.z_coord.nemo_een_barotropic
+    z = r.z_coord._replace(
+        nemo_een_barotropic=raw._replace(ff_f=np.zeros_like(raw.ff_f)))
+    return card._replace(recipe=r._replace(grid=g, z_coord=z))
+
+
+def test_symmetric_bump_on_both_seams_steps_transpose_symmetric(card):
+    """A bump symmetric under i<->j, centred on the seam corner, steps to
+    eta = eta.T and u(j, i) = v(i, j) bit for bit (f = 0: the reflection
+    reverses the rotation sense, so it is a symmetry only without f)."""
+    flat = _f_plane_off(card)
+    n = card.recipe.grid.n_lat if hasattr(card.recipe.grid, "n_lat") else 201
+    d = np.minimum(np.arange(n), n - np.arange(n)).astype(float)
+    a = np.exp(-(d / 8.0) ** 2)
+    eta0 = 0.1 * np.outer(a, a)
+    assert eta0.tobytes() == eta0.T.copy().tobytes()
+    out = {k: b for k, (_, b) in _step_fields(flat, eta0).items()}
+    assert np.abs(out["eta"] - eta0).max() > 1e-6       # it moved
+    assert out["eta"].tobytes() == out["eta"].T.copy().tobytes()
+    for u, v in (("uu_b", "vv_b"), ("u", "v")):
+        uu = out[u][:, :-1].reshape(n, n, -1)[..., 0]
+        vv = out[v][:-1].reshape(n, n, -1)[..., 0]
+        assert np.abs(uu).max() > 0
+        assert uu.tobytes() == vv.T.copy().tobytes(), u
+    # the walled step is not symmetric: the plant fires
+    walled = {k: b for k, (_, b) in _step_fields(
+        flat._replace(j_periodic=False), eta0).items()}
+    assert walled["eta"].tobytes() != walled["eta"].T.copy().tobytes()
