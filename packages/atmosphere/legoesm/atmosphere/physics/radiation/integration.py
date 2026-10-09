@@ -774,6 +774,7 @@ def _call_radiation_backend(
     lon: jnp.ndarray | None = None,
     ml_ozone_coefs=None,
     o3_vmr_override: jnp.ndarray | None = None,
+    o3_top_vmr: jnp.ndarray | None = None,
     aerosol_od: jnp.ndarray | None = None,
     aerosol_lw_od: jnp.ndarray | None = None,
     solar_spectral_fraction: jnp.ndarray | None = None,
@@ -810,6 +811,11 @@ def _call_radiation_backend(
         takes precedence over the config-driven ``_compute_ozone_vmr``
         (standard / analytical / ML profiles), matching the precedence
         the coupled ``physics_pipeline`` path applies.
+    o3_top_vmr : jnp.ndarray or None
+        Column-mean ozone VMR above the model top (ncol,) for the RRTMGP
+        overhead layer (``RRTMGPConfig.overhead_layer``); used only together
+        with ``o3_vmr_override`` (same source).  ``None`` => the layer takes
+        the top model layer's ozone.
     aerosol_od : jnp.ndarray or None
         Per-layer aerosol optical depth (ncol, nlev) from the external
         forcing pipeline (Kinne climatology + volcanic), passed to the
@@ -979,6 +985,8 @@ def _call_radiation_backend(
     )
     if clear_sky_toa:
         _rad_kwargs["clear_sky"] = True
+    if o3_top_vmr is not None and o3_vmr_override is not None:
+        _rad_kwargs["o3_top_vmr"] = o3_top_vmr
     # Maximum-random-overlap SUBCOLUMNS (opt-in).  The default path hands
     # every layer's GRID-MEAN water path to ONE homogeneous column, so cloud
     # spread thinly over many partly cloudy layers is solved as one deep
@@ -1405,6 +1413,9 @@ def _make_hydrostatic_radiation(
         #   aerosol_od  : (ncol, nlev) per-layer aerosol optical depth
         #   ghg_vmr     : dict[str, scalar] transient GHG VMRs
         _o3_ext = forcing.get("o3_vmr") if forcing is not None else None
+        _o3_top_ext = (
+            forcing.get("o3_top_vmr") if forcing is not None else None
+        )
         _aer_ext = forcing.get("aerosol_od") if forcing is not None else None
         _aer_lw_ext = (
             forcing.get("aerosol_lw_od") if forcing is not None else None
@@ -1635,6 +1646,8 @@ def _make_hydrostatic_radiation(
                 f_day_col = shard_columns(f_day_col, column_mesh)
             if _o3_ext is not None:
                 _o3_ext = shard_columns(_o3_ext, column_mesh)
+            if _o3_top_ext is not None:
+                _o3_top_ext = shard_columns(_o3_top_ext, column_mesh)
             if _aer_ext is not None:
                 _aer_ext = shard_columns(_aer_ext, column_mesh)
             if _aer_lw_ext is not None:
@@ -1666,6 +1679,7 @@ def _make_hydrostatic_radiation(
             lon=lon_col,
             ml_ozone_coefs=ml_ozone_coefs,
             o3_vmr_override=_o3_ext,
+            o3_top_vmr=_o3_top_ext,
             aerosol_od=_aer_ext,
             aerosol_lw_od=_aer_lw_ext,
             ghg_vmr_override=_ghg_ext,
@@ -1718,6 +1732,7 @@ def _make_hydrostatic_radiation(
                 lon=lon_col,
                 ml_ozone_coefs=ml_ozone_coefs,
                 o3_vmr_override=_o3_ext,
+                o3_top_vmr=_o3_top_ext,
                 aerosol_od=_aer_ext,
                 aerosol_lw_od=_aer_lw_ext,
                 ghg_vmr_override=_ghg_ext,
@@ -2619,6 +2634,9 @@ def _make_spectral_pe_radiation(
         # (see _make_hydrostatic_radiation): o3_vmr / aerosol_od are
         # (ncol, nlev) columns, ghg_vmr is a dict of traced scalars.
         _o3_ext = forcing.get("o3_vmr") if forcing is not None else None
+        _o3_top_ext = (
+            forcing.get("o3_top_vmr") if forcing is not None else None
+        )
         _aer_ext = forcing.get("aerosol_od") if forcing is not None else None
         _aer_lw_ext = (
             forcing.get("aerosol_lw_od") if forcing is not None else None
@@ -2781,6 +2799,7 @@ def _make_spectral_pe_radiation(
             lon=lon_col,
             ml_ozone_coefs=ml_ozone_coefs,
             o3_vmr_override=_o3_ext,
+            o3_top_vmr=_o3_top_ext,
             solar_spectral_fraction=_ssf_ext,
             tsi=_tsi_ext,
             aerosol_od=_aer_ext,

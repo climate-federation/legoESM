@@ -111,6 +111,8 @@ cld_macmic_num_steps: 3     # CAM6 namelist_defaults_cam.xml:1254 (mg2 + clubb_s
 
 # ---- radiation / clouds / microphysics --------------------------------------
 radiation: rrtmg            # rrtmgp builder (CAM6 uses RRTMG; same k-lineage)
+rrtmgp_overhead_layer: true # CAM RRTMG extra layer above the model top (ozone
+                            # column above p_top absorbs; ~2 W/m2 leaves budget)
 # Saturation curve the cloud-cover diagnosis measures RH against.  NAMED, not
 # inherited: the code default is "mixed_phase" and that is the value this deck
 # wants, but the default moved on 2026-09-17 and a default is not a record.

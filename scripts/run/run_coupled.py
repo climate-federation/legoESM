@@ -622,6 +622,10 @@ def build_parser():
                              "higher horizontal resolution. Numerically exact "
                              "(columns are independent); must divide the column "
                              "count.")
+    parser.add_argument("--rrtmgp-overhead-layer", action="store_true",
+                        default=False,
+                        help="CAM RRTMG-style transported layer above the "
+                             "model top (see run_amip.py). Off = byte-identical.")
     # Atmosphere physics suite.  DEFAULT = full realistic CMIP6 atmosphere:
     # convection=sbm, turbulence=holtslag_boville, gravity-wave-drag=hines,
     # clouds=sundqvist, microphysics=kessler (+ rrtmgp radiation above).  This
@@ -1417,6 +1421,7 @@ def main():
         rrtmgp_gpoint_batch_size=args.rrtmgp_gpoint_batch_size,
         rrtmgp_gpoint_checkpoint=args.rrtmgp_gpoint_checkpoint,
         rrtmgp_column_chunk_size=args.radiation_column_chunk,
+        rrtmgp_overhead_layer=args.rrtmgp_overhead_layer,
         ozone_source=args.ozone_source,
         ozone_forcing=args.ozone_forcing,
         ozone_file=args.ozone_file,

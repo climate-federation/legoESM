@@ -4355,6 +4355,7 @@ class ModelDriver:
             and bool(cfg.volcanic_aerosol_file)
         )
         self._aerosol_lw_od = None
+        self._o3_top_vmr = None
         self._aerosol_ccn_aod = None
         self._aerosol_config = AerosolConfig(
             enabled=self._aerosol_active,
@@ -4482,6 +4483,15 @@ class ModelDriver:
         p_full_col = p_full.reshape(ncol, nlev)
         p_half_col = p_half.reshape(ncol, nlev + 1)
         lat_col = lat.reshape(ncol)
+        # Ozone is evaluated on the model levels PLUS 16 midpoints of equal
+        # pressure sub-layers above the model top (0 < p < p_top); their mean
+        # is the overhead column-mean VMR for the RRTMGP overhead layer
+        # (RRTMGPConfig.overhead_layer; unused when that is off).  All ozone sources are pointwise in
+        # p, so the model-level values are unchanged.
+        _p_o3 = jnp.concatenate([
+            p_full_col,
+            p_half_col[:, :1] * ((jnp.arange(16) + 0.5) / 16.0),
+        ], axis=1)
 
         # Volcanic aerosol is cut at each column's WMO lapse-rate tropopause
         # diagnosed from T at this precompute (the same state snapshot as
@@ -4502,7 +4512,7 @@ class ModelDriver:
         if self._ozone_ext_active:
             o3_vmr = jnp.asarray(get_ozone_at_time(
                 self._ozone_ext_config, day,
-                lat_grid=lat_col, p_grid=p_full_col,
+                lat_grid=lat_col, p_grid=_p_o3,
             ))
         else:
             # External ozone forcing inactive — build the inline profile
@@ -4527,7 +4537,7 @@ class ModelDriver:
                 OzoneProfileConfig,
             )
             _o3_inline = _compute_ozone_vmr(
-                p_full_col, lat_col,
+                _p_o3, lat_col,
                 OzoneProfileConfig(source=self.config.ozone_source),
             )
             if _o3_inline is None:
@@ -4537,8 +4547,10 @@ class ModelDriver:
                 from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import (
                     standard_o3_profile,
                 )
-                _o3_inline = standard_o3_profile(p_full_col)
+                _o3_inline = standard_o3_profile(_p_o3)
             o3_vmr = jnp.asarray(_o3_inline).astype(p_s.dtype)
+        self._o3_top_vmr = jnp.mean(o3_vmr[:, nlev:], axis=1)
+        o3_vmr = o3_vmr[:, :nlev]
 
         aerosol_od = jnp.zeros((ncol, nlev), dtype=p_s.dtype)
         if self._aerosol_active:
@@ -11195,6 +11207,8 @@ class ModelDriver:
                         cfg, "rrtmgp_gpoint_checkpoint", True),
                     column_chunk_size=getattr(
                         cfg, "rrtmgp_column_chunk_size", 0),
+                    overhead_layer=bool(getattr(
+                        cfg, "rrtmgp_overhead_layer", False)),
                 ),
                 cloud_scheme=_cloud_scheme,
                 # Tuned cloud scalars (rh_crit / q_c_diagnostic / Xu-Randall)
@@ -13140,6 +13154,9 @@ class ModelDriver:
                         # Tropospheric visible-band CCN AOD (absent => sum(aerosol_od)).
                         if getattr(self, "_aerosol_ccn_aod", None) is not None:
                             _forcing_daily["aerosol_ccn_aod"] = self._aerosol_ccn_aod
+                        # Overhead (above-model-top) ozone for the RRTMGP overhead layer.
+                        if getattr(self, "_o3_top_vmr", None) is not None:
+                            _forcing_daily["o3_top_vmr"] = self._o3_top_vmr
                         if _ghg is not None:
                             _forcing_daily["ghg_vmr"] = {
                                 k: jnp.asarray(v) for k, v in _ghg.items()
@@ -14338,6 +14355,8 @@ class ModelDriver:
                             cfg, "rrtmgp_gpoint_checkpoint", True),
                         column_chunk_size=getattr(
                             cfg, "rrtmgp_column_chunk_size", 0),
+                        overhead_layer=bool(getattr(
+                            cfg, "rrtmgp_overhead_layer", False)),
                     ),
                     cloud_scheme=_cloud_scheme,
                     # Tuned cloud scalars for the spectral standalone
@@ -14576,6 +14595,9 @@ class ModelDriver:
                         # Tropospheric visible-band CCN AOD (absent => sum(aerosol_od)).
                         if getattr(self, "_aerosol_ccn_aod", None) is not None:
                             _ext_daily["aerosol_ccn_aod"] = self._aerosol_ccn_aod
+                        # Overhead (above-model-top) ozone for the RRTMGP overhead layer.
+                        if getattr(self, "_o3_top_vmr", None) is not None:
+                            _ext_daily["o3_top_vmr"] = self._o3_top_vmr
                         if _ghg is not None:
                             _ext_daily["ghg_vmr"] = {
                                 k: jnp.asarray(v) for k, v in _ghg.items()
@@ -15350,6 +15372,7 @@ class ModelDriver:
                 o3_vmr=o3_vmr, aerosol_od=aerosol_od,
                 aerosol_lw_od=getattr(self, "_aerosol_lw_od", None),
                 aerosol_ccn_aod=getattr(self, "_aerosol_ccn_aod", None),
+                o3_top_vmr=getattr(self, "_o3_top_vmr", None),
                 ghg_vmr=ghg_vmr,
                 sfc_albedo_override=_alb, sfc_T_override=_T,
                 sfc_emissivity_override=_emis,
@@ -15935,6 +15958,7 @@ class ModelDriver:
                 o3_vmr=o3_vmr, aerosol_od=aerosol_od,
                 aerosol_lw_od=getattr(self, "_aerosol_lw_od", None),
                 aerosol_ccn_aod=getattr(self, "_aerosol_ccn_aod", None),
+                o3_top_vmr=getattr(self, "_o3_top_vmr", None),
                 ghg_vmr=ghg_vmr,
                 sfc_albedo_override=_alb, sfc_T_override=_T,
                 sfc_emissivity_override=_emis,
@@ -16665,6 +16689,7 @@ class ModelDriver:
             solar_weights=ctx["solar_weights"], s_0=ctx["current_s_0"],
             o3_vmr=ctx["o3_vmr"], aerosol_od=ctx["aerosol_od"],
             aerosol_ccn_aod=getattr(self, "_aerosol_ccn_aod", None),
+            o3_top_vmr=getattr(self, "_o3_top_vmr", None),
             ghg_vmr=ctx["ghg_vmr"],
             # NOTE: transient cover is deliberately NOT injected here.  The training
             # segment returns run_segment.raw (un-jitted), so the land calibration
@@ -17024,6 +17049,7 @@ class ModelDriver:
                 o3_vmr=o3_vmr, aerosol_od=aerosol_od,
                 aerosol_lw_od=getattr(self, "_aerosol_lw_od", None),
                 aerosol_ccn_aod=getattr(self, "_aerosol_ccn_aod", None),
+                o3_top_vmr=getattr(self, "_o3_top_vmr", None),
                 ghg_vmr=ghg_vmr,
                 sfc_albedo_override=_sfc_albedo_ovr,
                 sfc_T_override=_sfc_T_ovr,
@@ -17809,6 +17835,7 @@ class ModelDriver:
                 ghg_vmr_override=ghg_vmr,
                 aerosol_lw_od=getattr(self, "_aerosol_lw_od", None),
                 aerosol_ccn_aod=getattr(self, "_aerosol_ccn_aod", None),
+                o3_top_vmr=getattr(self, "_o3_top_vmr", None),
                 land_ml=(self._land_ml_state
                          if self._ensemble_size == 1 else None),
                 T_land=T_land, w_land=w_land, snow=snow, **_dm_step_in,
@@ -17964,6 +17991,7 @@ class ModelDriver:
                     ghg_vmr_override=ghg_vmr,
                     aerosol_lw_od=getattr(self, "_aerosol_lw_od", None),
                     aerosol_ccn_aod=getattr(self, "_aerosol_ccn_aod", None),
+                    o3_top_vmr=getattr(self, "_o3_top_vmr", None),
                     land_ml=(self._land_ml_state
                              if self._ensemble_size == 1 else None),
                     T_land=T_land, w_land=w_land, snow=snow, **_dm_step_in,

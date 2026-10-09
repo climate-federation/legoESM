@@ -2479,6 +2479,7 @@ class PhysicsPipeline:
                                o3_vmr_precomputed, aerosol_od_precomputed,
                                aerosol_lw_od_precomputed=None,
                                aerosol_ccn_aod=None,
+                               o3_top_vmr=None,
                                tau_equator=None, tau_pole=None,
                                albedo_ice=None, albedo_ocean=None,
                                ghg_vmr_override=None,
@@ -2886,6 +2887,7 @@ class PhysicsPipeline:
             o3_vmr_precomputed = _shard(o3_vmr_precomputed)
             aerosol_od_precomputed = _shard(aerosol_od_precomputed)
             aerosol_lw_od_precomputed = _shard(aerosol_lw_od_precomputed)
+            o3_top_vmr = _shard(o3_top_vmr)
             if cloud_kwargs:
                 cloud_kwargs = {k: _shard(v) for k, v in cloud_kwargs.items()}
 
@@ -2899,6 +2901,7 @@ class PhysicsPipeline:
             tau_equator=tau_equator, tau_pole=tau_pole,
             ghg_vmr_override=ghg_vmr_override,
             aerosol_lw_od_col=aerosol_lw_od_precomputed,
+            o3_top_vmr_col=o3_top_vmr,
             **cloud_kwargs,
         )
 
@@ -3085,6 +3088,7 @@ class PhysicsPipeline:
                          ghg_vmr_override=None,
                          aerosol_lw_od=None,
                          aerosol_ccn_aod=None,
+                         o3_top_vmr=None,
                          T_land=None,
                          q_i=None, q_s=None, q_g=None,
                          N_c=None, N_r=None, N_i=None,
@@ -3132,6 +3136,7 @@ class PhysicsPipeline:
                         solar_weights, s_0, o3_vmr, aerosol_od,
                         aerosol_lw_od_precomputed=aerosol_lw_od,
                         aerosol_ccn_aod=aerosol_ccn_aod,
+                        o3_top_vmr=o3_top_vmr,
                         tau_equator=tau_equator, tau_pole=tau_pole,
                         albedo_ice=albedo_ice, albedo_ocean=albedo_ocean,
                         ghg_vmr_override=ghg_vmr_override,
@@ -3325,11 +3330,12 @@ def _build_none_radiation_fn(config):
                      tau_equator=None, tau_pole=None,
                      ghg_vmr_override=None,
                      aerosol_lw_od_col=None,
+                     o3_top_vmr_col=None,
                      cloud_path_liq=None, cloud_path_ice=None,
                      cloud_path_liq_lw=None, cloud_path_ice_lw=None,
                      cloud_r_eff_liq=None, cloud_r_eff_ice=None,
                      cloud_fraction=None):
-        del aerosol_lw_od_col  # zero-radiation: LW aerosol is a no-op
+        del aerosol_lw_od_col, o3_top_vmr_col  # zero-radiation: no-ops
         ncol, nlev = T_col.shape
         z_full = jnp.zeros((ncol, nlev), dtype=T_col.dtype)
         z_half = jnp.zeros((ncol, nlev + 1), dtype=T_col.dtype)
@@ -3377,12 +3383,13 @@ def _build_gray_radiation_fn(config):
                      tau_equator=None, tau_pole=None,
                      ghg_vmr_override=None,
                      aerosol_lw_od_col=None,
+                     o3_top_vmr_col=None,
                      cloud_path_liq=None, cloud_path_ice=None,
                      cloud_path_liq_lw=None, cloud_path_ice_lw=None,
                      cloud_r_eff_liq=None, cloud_r_eff_ice=None,
                      cloud_fraction=None):
         del ghg_vmr_override  # gray radiation does not use GHG concentrations
-        del aerosol_lw_od_col  # gray radiation does not use aerosol LW od
+        del aerosol_lw_od_col, o3_top_vmr_col  # gray: no aerosol LW od / ozone
         del cloud_path_liq, cloud_path_ice, cloud_r_eff_liq, cloud_r_eff_ice, cloud_fraction
         del cloud_path_liq_lw, cloud_path_ice_lw  # gray: no cloud optics
         # Rebuild config with traced tau values when provided
@@ -3465,6 +3472,7 @@ def _build_rrtmgp_radiation_fn(config):
         gpoint_batch_size=getattr(config, 'rrtmgp_gpoint_batch_size', 0),
         gpoint_checkpoint=getattr(config, 'rrtmgp_gpoint_checkpoint', True),
         column_chunk_size=getattr(config, 'rrtmgp_column_chunk_size', 0),
+        overhead_layer=bool(getattr(config, 'rrtmgp_overhead_layer', False)),
         include_clouds=(getattr(config, 'cloud_scheme', 'none') != 'none'),
     )
 
@@ -3478,6 +3486,7 @@ def _build_rrtmgp_radiation_fn(config):
                      tau_equator=None, tau_pole=None,
                      ghg_vmr_override=None,
                      aerosol_lw_od_col=None,
+                     o3_top_vmr_col=None,
                      cloud_path_liq=None, cloud_path_ice=None,
                      cloud_path_liq_lw=None, cloud_path_ice_lw=None,
                      cloud_r_eff_liq=None, cloud_r_eff_ice=None,
@@ -3557,6 +3566,8 @@ def _build_rrtmgp_radiation_fn(config):
             cloud_r_eff_ice=cloud_r_eff_ice,
             cloud_fraction=cloud_fraction,
         )
+        if o3_top_vmr_col is not None:  # overhead-layer ozone
+            _rad_kwargs["o3_top_vmr"] = o3_top_vmr_col
         # Column-chunk the rrtmgp solve when configured: the per-block body
         # compiles ONCE at column_chunk_size, capping the super-linear rrtmgp
         # XLA compile time at higher horizontal resolution.  Columns are

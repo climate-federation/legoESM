@@ -1318,6 +1318,7 @@ def load_era5_samples(cfg, yml, grid, sigma, *,
             day_of_year=jnp.asarray(doy), seconds_of_day=jnp.asarray(0.0),
             solar_weights=ctx["solar_weights"], s_0=ctx["current_s_0"],
             o3_vmr=ctx["o3_vmr"], aerosol_od=ctx["aerosol_od"],
+            o3_top_vmr=getattr(driver, "_o3_top_vmr", None),
             **plane_kwargs)
         sample = (ic, target, forcing)
         samples.append(_sample_to_host(sample) if host_resident else sample)
