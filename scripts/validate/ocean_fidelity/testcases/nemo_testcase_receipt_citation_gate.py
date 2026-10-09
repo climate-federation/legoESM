@@ -2023,9 +2023,17 @@ CITATION_MAP = {
         '! Half-step back interpolation of SSH for surface pressure computation at step jit+1/2',
         "CALL r95_spg_w2('zv_spg', zv_spg)",
         19],
+    'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:642-650': [
+        '! Half-step back interpolation of SSH for surface pressure computation at step jit+1/2',
+        ('END DO   ;   END DO', 5),
+        9],
+    'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:652-660': [
+        '! Surface pressure gradient',
+        "CALL r95_spg_w2('zv_spg', zv_spg)",
+        9],
     'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:663-670': [
         '! Add Coriolis trend:',
-        'ENDIF',
+        ('ENDIF', 23),
         8],
     'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:680-702': [
         '! Add bottom stresses:',
