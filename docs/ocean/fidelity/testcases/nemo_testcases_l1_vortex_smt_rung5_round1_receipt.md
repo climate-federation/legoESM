@@ -171,7 +171,7 @@ section rewritten, T1/T2); (2) partial bottom cells are wet and damped
 (prose narrowed).
 
 Citation gate: PASS, 20 citations, 0 unmapped, 0 failures; planting a 2-line
-shift on the `tradmp.f90:194` citation makes it FAIL (exit 1).
+shift on the tradmp.f90 line 194 citation makes it FAIL (exit 1).
 
 UNVERIFIED: RK3 placement of legoESM's sponge tendency (gap 2) and the
 implicit/explicit question (gap 3) are read from comments and call sites, not
