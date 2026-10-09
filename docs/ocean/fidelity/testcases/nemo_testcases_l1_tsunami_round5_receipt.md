@@ -52,16 +52,28 @@ north/south neighbours with hard zero (or copy) rows.
   southern F-point copy, both barotropic seeds, the qco F-mask and F
   thickness north neighbours, the live V thickness/ratio/reciprocal faces, the
   hpg V faces, and the F-point vertex map.
-- **jit cache**: the hpg kernel is a module-level jit, so the y-wrap is now a
-  static argument (a cached walled trace cannot be served to a periodic card).
-- **Card**: `build_tsunami_zco_card` builds its face masks inside
+- **The wrap is model configuration** (after the review, section 7): the
+  new `LatLonCGridOceanConfig.meridionally_periodic` (default False) makes
+  the shared step body trace inside the y-wrap, whatever the caller's global
+  state, for every entry point. The wrapper is appended at the end of the
+  model module so no earlier line (or citation) moves. The card validator
+  requires the field to equal `j_periodic`. The hpg kernel, a module-level
+  jit, takes the wrap as a static argument.
+- **Off-flag graph identity**: with the flag off every rewritten statement is
+  the old expression itself (same concatenation, same operands), including
+  the southern `ff_f` copy ORCA2 relies on, which keeps its literal
+  statement in a branch.
+- **Card**: `build_tsunami_zco_card` selects `meridionally_periodic =
+  ln_Jperio`, builds its face masks inside
   `meridional_periodicity(ln_Jperio)` (the seam V faces are wet, as NEMO's
   are), and `TSUNAMI_UNMEASURED` is now empty: B4 (both seams, measured on
   the record) and B4j are closed, so the execution gate admits the card.
 - **No default changed.** The y-wrap stays off by default. Caller grep
-  (`caller_grep.txt`): the only `j_periodic=` selection is the TSUNAMI card's;
-  the only `meridional_periodicity(` callers are that card, the TSUNAMI
-  ladder, and the hpg kernel's own static.
+  (`caller_grep.txt`, before the review fixes; afterwards
+  `meridionally_periodic=` is selected only in `build_tsunami_zco_card`):
+  the only `j_periodic=` selection is the TSUNAMI card's; the only
+  `meridional_periodicity(` callers are that card, the TSUNAMI ladder, the
+  hpg kernel's static and the step wrapper.
 
 ## 3. The A/B on the 100-step record (INDEPENDENT label)
 
@@ -95,13 +107,15 @@ the interior, not on a seam row.
 
 | gate | result |
 |---|---|
-| record100, kt = 1..100 | no field over the bar; re-run after the last commit (`c0fdb9b55`, which only touches statements TSUNAMI does not execute or where f is constant) row-identical, 518 of 518 rows |
+| record100, kt = 1..100 | no field over the bar; re-run on `c0fdb9b55`, on `aed42586d` and on the final tree `212080761` (after the review fixes): row-identical each time, 518 of 518 rows (final json `84add1e8818e42df`); independent, given-entry and rhs re-run on `aed42586d`: 68/68, 68/68, 20/20 rows identical |
 | kt = 1..10 ladder, INDEPENDENT | every row AT-BAR; ssh 2.5e-16 at kt = 10 |
 | kt = 1..10 ladder, GIVEN-NEMO-ENTRY: whole step, stp_2D rhs, dyn_spg_ts substeps, handoff, stage-local | every row AT-BAR; rhs at the 1.09e-19 floor |
 | geometry identity | `GEOMETRY IDENTICAL`, 35 rows EXACT (vmask included, with the seam faces now wet); plant `--plant "grid dx_u"`: `GEOMETRY DIFFERS`, exit 1 |
 | j-seam translation equivariance (unit) | 0 unequal cells on eta, uu_b, vv_b (round 2's strict xfail now passes); plant (j-wrap off): fires |
-| i<->j transposition, symmetric bump on the seam corner, f = 0 (unit) | eta = eta.T and u(j, i) = v(i, j), bit for bit; the walled step and the f-on step both break it (non-vacuity) |
-| closed cards bit-identical | state sha256 after 3 steps equal at `4b991198b242` and `c0fdb9b55`: LOCK_EXCHANGE `b3aa27fa80dbdefd`, OVERFLOW `72ad6c2d6a9be145`, GYRE `b8cb5ecd4dc4b467`, VORTEX `b0ef8aaf1dc75f91`, VORTEX_VEC `ce76bd63f0441d3f`, VORTEX_SMT4_VEC `1cc2f09098310c7f` |
+| i<->j transposition, symmetric bump on the seam corner, f = 0 (unit) | eta = eta.T and u(j, i) = v(i, j), bit for bit; the walled step and the f-on step both break it (both asserted in the test). With f = 0 it cannot check the EEN Coriolis neighbours; those are covered by the j-seam equivariance test and the record |
+| topology from the config (unit) | one model instance stepped under global off and on: identical bits; the walled-config plant differs and the validator refuses it. Removing the step wrapper turns this and the two seam/transposition tests red (`3 failed, 2 passed`) |
+| j-neighbour helpers (unit) | explicit index map in both modes (native north row j -> face j+1; face 0 = last native row under the wrap, zero or the given row walled) |
+| closed cards bit-identical | state sha256 after 3 steps equal at `4b991198b242`, `c0fdb9b55` and `aed42586d` (all six), and `212080761` (GYRE, VORTEX): LOCK_EXCHANGE `b3aa27fa80dbdefd`, OVERFLOW `72ad6c2d6a9be145`, GYRE `b8cb5ecd4dc4b467`, VORTEX `b0ef8aaf1dc75f91`, VORTEX_VEC `ce76bd63f0441d3f`, VORTEX_SMT4_VEC `1cc2f09098310c7f` |
 
 **Every kt = 1..10 row against round 4** (`r4_vs_r5_rows.txt`; independent,
 given entry, rhs, substeps, stages; round 4 has no handoff file): 546 rows
@@ -143,10 +157,11 @@ the whole run):
   crosses the i-seam from kt = 5 and stays at the bar through kt = 100.
 - **The j-exchange ORCA2 does NOT share.** ORCA2 is closed in the south and
   folds in the north (`l_NFold`, `lbc_nfd` with the sign argument). This
-  round's j-wrap is the self-periodic copy, which ORCA2 never runs, and every
-  rewritten statement is verbatim-unchanged with the flag off, so ORCA2 is
-  unaffected by construction. Its southern `ff_f` copy (round 112's
-  landing) is untouched off-flag.
+  round's j-wrap is the self-periodic copy, which ORCA2 never runs. With the
+  flag off every rewritten statement is the old expression itself, so ORCA2
+  runs the same graph. Its southern `ff_f` copy (round 112's landing) keeps
+  its literal statement. Not measured on ORCA2 itself: its card needs the
+  deck root, so it is not in the digest set.
 
 ORCA2's held items: none is **refuted**. This **narrows** the rung-0
 external-stage ssh debt. The loop's statements, run uncoupled from the 3-D
@@ -159,7 +174,26 @@ northern-fold V. It does not certify any of those.
 
 ## 7. Review
 
-[pending: single review (codex), run after this receipt is committed]
+Single review (codex), verdict **DO NOT SHIP** on `4b991198b242..2ffe6be39`
+(`codex_review.txt`, sha256 `6372ff6b674fd6a2`). It found no index or
+staggering defect: the helpers map native north row j to face j+1, with
+face 0 copied from the last native row. It confirmed the NEMO plain-copy,
+no-sign premise. Every finding CONFIRMED and acted on:
+
+- BLOCKER, the step read the process-global flag at trace time, so a cached
+  trace could be stale: fixed. The wrap is now model configuration, applied
+  to the shared step body (test: one model under both global states).
+- BLOCKER, the card could execute walled without the caller's scope: fixed by
+  the same field, plus the validator's agreement check (tests step the card
+  with no scope at all).
+- MEDIUM, the southern `ff_f` copy was value-identical but not the same
+  statement off-flag: fixed, the literal statement is restored in a branch.
+- MEDIUM, tests reused no model across flag states and the plant disabled the
+  whole topology: added the config test and the per-helper index-map test.
+- MEDIUM, the transposition test zeroes f, and the f-on non-vacuity claim was
+  not in the test: f-on assertion added; the receipt says what covers EEN.
+- LOW, probe uncommitted and section 10 empty: the probe is kept as hashed
+  evidence (`scripts/tmp` is gitignored by policy); section 10 is filled.
 
 ## 8. Choices made this round
 
@@ -172,12 +206,14 @@ northern-fold V. It does not certify any of those.
 | helpers raise under MPI/SPMD with the flag on, rather than wall | UNASKED (a refused combination TSUNAMI never runs; offered for revert) |
 | two unexecuted siblings (reference-mesh seed, F-point vertex map) also routed | UNASKED (same statement, same function; verbatim off-flag; offered for revert) |
 | closed-card digest probe kept as evidence, not committed | UNASKED (`r5_closed_card_digest.py`, sha256 `823cb1303855da0d`) |
+| new config field `meridionally_periodic` (default False, selected only by TSUNAMI) carries the wrap, after the review | UNASKED (the mechanism that makes the asked-for card selection reach every entry point; no CLI flag: a domain topology, not a sensitivity knob; offered for revert) |
+| 16 citation keys in four other receipts re-anchored (same statements, new line numbers); one frozen preregistration left untouched | UNASKED (bookkeeping the citation gate requires) |
 
 ## 9. Other gates
 
 | gate | result |
 |---|---|
-| card tests | `20 passed`; with the prognostic-barotropic suite `28 passed` |
+| card tests, final | `22 passed`; with prognostic-barotropic, cyclic-overlap, validate-strict coverage, params reachability and dispatch hardening: `137 passed`; config footguns `25 passed` |
 | ratchets (dispatch hardening, constants, inline coefficients, private imports) + barotropic and lat-lon halo suites | `3 failed, 5841 passed, 9 skipped`. All three reds fail identically at the round-4 commit: `test_jra55_do.py` literal 273.15, `land/restart.py` inline coefficient, `test_polar_filter_accepted` (checked in the worktree) |
 | citation gate | see section 10 |
 | NOT gated (honour system) | dual review: codex only (the headless brief names one review). Controlled comparison: the A/B differs only in the B4j commits (same harness file at both). Non-vacuity: every new test shown to fail with its feature removed (sections 4, 5) |
@@ -191,7 +227,14 @@ handoff `fe29176729b98d3a`, stages `d65948b4c4d3f7a7`, record100 (certified)
 
 ## 10. Citation gate
 
-[filled after the gate run]
+`PASS` on the stamped clean tree `212080761`: 11 citations, 0 failures, 0
+unmapped, 0 map entries failing audit (json sha256 `8929df000014d948`).
+Plant: shifting `lbclnk.f90:1868` by two lines gives `FAIL`, exit 1 (json
+`a64dc0acea2be531`). The two receipts whose keys moved and that gate from
+their first heading (ORCA2 round 112, GYRE round 161) re-gate `PASS`. GYRE
+round 150 and phase-3 round 8 show the same unmapped counts (3, 151) at the
+round-4 commit with that heading: they do not gate from their first heading,
+so this is not a change.
 
 ## 11. OPEN, for the next round
 
