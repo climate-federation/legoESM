@@ -135,7 +135,7 @@ def _run_ladder(
         if atomic_fold_unit else None
     )
 
-    def hooks(stage: int | None = None):
+    def hooks(stage: int = 0):
         return _NEMOWSRK3TestHooks(
             expose_momentum_stage=stage,
             expose_tracer_stage=stage,
