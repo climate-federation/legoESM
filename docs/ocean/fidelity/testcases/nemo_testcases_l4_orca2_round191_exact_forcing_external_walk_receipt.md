@@ -65,13 +65,23 @@ Machine evidence:
 Rank-placement, record-bit, source-order, arm-identity, endpoint-ULP,
 exact-arm-order and exact-arm-selector plants each exit 2 with their named
 `STATUS PLANT-FIRED` line. The round-178/191 focused tests pass 14/14 before
-measurement and the final focused/citation suite is recorded in the external
-evidence directory.
+measurement. The final focused round-178/191 and citation suite passes 31/31
+in 4.09 s.
 
 The citation gate passes its default receipt and this receipt with no unmapped
-spans; the planted rigid line shift refuses. The required single wide ocean
-fidelity battery and separate read-only Codex review are recorded beside the
-machine evidence.
+spans; the planted rigid line shift exits 1 with one failed citation.
+
+The required single `tests/ocean/fidelity -n 12` invocation is **INCOMPLETE,
+not PASS**. It collected 2,900 tests, recorded 1,970 passes and three registered
+pre-existing failures, then ended without a terminal summary or live pytest
+process. The three visible failures are the stale GYRE round-129 spread-floor
+record, SI3 scalar-math provenance, and round-35 escape-scope ratchet. No
+round-191 test failed. The transcript is `round191/fidelity_battery.log`.
+
+The required separate `codex exec --sandbox read-only` review was attempted.
+It returned `failed to initialize in-process app-server client: Read-only file
+system`; verdict: **independent review unavailable in-sandbox**. The transcript
+is `round191/independent_review.log`.
 
 No configuration choice was made. ASKED choices: none. UNASKED choices: empty.
 
