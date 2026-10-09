@@ -2848,6 +2848,25 @@ def nemo_flux_form_update_active(config) -> bool:
     )
 
 
+def nemo_literal_external_mode_active(config) -> bool:
+    """Does this config select NEMO's indivisible literal external mode?
+
+    The raw reference face depths, unmasked V transport, materialised V
+    product, and seven-array boundary association are four operands of one
+    ``dynspg_ts`` program.  NEMO has no selectors between them.  Keep their
+    production identity on the same explicit config fields that already
+    select its literal continuity and transport-accumulation statements.
+    """
+    barotropic = config.barotropic
+    return (
+        nemo_flux_form_update_active(config)
+        and barotropic.barotropic_face_depth == "nemo_ssh_avg"
+        and barotropic.barotropic_continuity_evaluation == "nemo_literal"
+        and (barotropic.barotropic_transport_accumulation_evaluation
+             == "nemo_literal")
+    )
+
+
 def nemo_carried_barotropic_state_active(config) -> bool:
     """Does this CONFIG select NEMO's carried external mode at the window seed?
 
@@ -2911,6 +2930,7 @@ def barotropic_substeps_latlon_cgrid(
     _nemo_reference_face_depth_test_override=None,
     _nemo_unmasked_v_transport_test_override=False,
     _nemo_materialize_v_transport_test_override=False,
+    _nemo_atomic_fold_unit_test_override=None,
     _nemo_flux_form_update_test_override=None,
     _nemo_continuity_update_test_override=None,
     _nemo_legacy_seed_faces_test_override=None,
@@ -3374,6 +3394,33 @@ def barotropic_substeps_latlon_cgrid(
         _ab3_zb = _ab3_zb.astype(eta.dtype)
     else:
         _ab3_za = _ab3_zb = _ab3_hist = None
+
+    # dynspg_ts exposes no switch between these four statements.  Resolve the
+    # production identity atomically; the private per-statement controls keep
+    # the legacy path so fidelity probes can still isolate one operand at a
+    # time.  A private atomic override is the before/after control used by the
+    # qualifying ladder gate and is likewise unreachable from model config.
+    _individual_fold_arm = (
+        _nemo_reference_face_depth_test_override is not None
+        or _nemo_unmasked_v_transport_test_override
+        or _nemo_materialize_v_transport_test_override
+        or _nemo_external_mode_association_test_override
+        or bool(_nemo_external_mode_association_field_test_override)
+        or bool(_nemo_external_mode_association_component_test_override)
+    )
+    if _nemo_atomic_fold_unit_test_override is None:
+        _literal_fold_unit = (
+            nemo_literal_external_mode_active(config)
+            and not _individual_fold_arm
+        )
+    else:
+        _literal_fold_unit = bool(_nemo_atomic_fold_unit_test_override)
+    if _literal_fold_unit:
+        _nemo_reference_face_depth_test_override = (
+            _nemo_literal_reference_face_depths(z_coord, eta.dtype))
+        _nemo_unmasked_v_transport_test_override = True
+        _nemo_materialize_v_transport_test_override = True
+        _nemo_external_mode_association_test_override = True
     if _nemo_raw_history_test_override is not None:
         if not _ab3:
             raise ValueError(
