@@ -2005,12 +2005,12 @@ CITATION_MAP = {
         "CALL r95_spg_w2('cor_v', zv_trd)", 87],
     # --- ORCA2 round 191: exact-forcing midpoint V-depth boundary ---
     'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:542-545': [
-        'DO jj = ntsj-( 2), ntej+(  1 ) ; DO ji = ntsi-( 1), ntei+(  1)',
+        ('DO jj = ntsj-( 2), ntej+(  1 ) ; DO ji = ntsi-( 1), ntei+(  1)', 2),
         '&                                 + e1e2t(ji,jj+1) * zsshp2_e(ji,jj+1)  ) * ssvmask(ji,jj)',
         4],
     'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:580-591': [
         '!     Compute Sea Level at step jit+1',
-        '&                                 + ssh_frc(ji,jj)  ) * tmask(ji,jj,1)',
+        'ssha_e(ji,jj) = (  sshn_e(ji,jj) - rDt_e * ( ssh_frc(ji,jj) + zhdiv )  ) * ssmask(ji,jj)',
         12],
     'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:1213-1265': [
         'CASE( np_EEN )',
