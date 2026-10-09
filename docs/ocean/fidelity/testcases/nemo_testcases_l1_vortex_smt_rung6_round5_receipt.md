@@ -208,8 +208,9 @@ footprint and global conservation. Codex reported no sign, index, staggering,
 pattern defect. The second reviewer (GLM) was not run: NO GATE, single review
 only, as the standing note asks.
 
-Citation gate: from this receipt's "## Round 5 —" heading PASS (count quoted
-in the final commit), and the cumulative default run PASS (274 citations,
+Citation gate: from this receipt's "## Round 5 —" heading PASS, 24
+citations, 0 unmapped, 0 failures (`round5/citation_gate_round5.json`); a
+planted 2-line shift of the trabbc 158-159 citation exits 1. The the cumulative default run PASS (274 citations,
 0 unmapped, 0 failures, 0 map entries failing audit). The insertions shifted 59
 map entries citing three legoESM files; they were re-anchored by the exact
 parent-to-tip line alignment (one hand-moved: the round-4 GAP line, now inside
