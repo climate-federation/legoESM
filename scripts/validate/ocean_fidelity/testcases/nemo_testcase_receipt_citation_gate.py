@@ -2292,7 +2292,7 @@ CITATION_MAP = {
         ('ENDIF', 14), 15],
     # --- ORCA2 round 200: OMT-0's own first safety boundary ---
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stpctl.f90:176-184': [
-        'zmax(1) = MAXVAL(  ABS(ssh(:,:,         Kmm)), mask = llmsk(:,:,1) )',
+        'zmax(1) = MAXVAL( ABS( ssh(:,:,Kmm)           ), mask = llmsk(:,:,1) )',
         'zmax(5) = MAXVAL(  ts(:,:,:,jp_sal,Kmm), mask = llmsk )', 9],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stpctl.f90:243-250': [
         'IF(  zmax(1) >   20._wp .OR.',
