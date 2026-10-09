@@ -548,6 +548,4 @@ charitable, educational, public-research, and government organizations.
 
 **Commercial use — including by revenue-generating organizations of any legal
 form, for-profit or nonprofit — requires a separate paid commercial license.**
-See [COMMERCIAL-LICENSE.md](./COMMERCIAL-LICENSE.md). Royalties are payable to
-Pierre Gentine and Columbia University (IP jointly held by Celest.Science and
-Columbia University).
+See [COMMERCIAL-LICENSE.md](./COMMERCIAL-LICENSE.md). 
