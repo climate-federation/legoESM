@@ -57,10 +57,10 @@ def card_rows(card, source) -> list[tuple[str, np.ndarray, str]]:
         ("card umask", f64(ops.umask)[..., 0], "umask"),
         ("card vmask", f64(ops.vmask)[..., 0], "vmask"),
         ("card fmask", f64(ops.fmask)[..., 0], "fmask"),
-        ("card e3t_0 (column 0,0)", f64(z.nemo_e3t_0)[0, 0], "e3t_1d"),
-        ("card e3w_0 (column 0,0)", f64(z.nemo_e3w_0)[0, 0], "e3w_1d"),
-        ("card gdept_0 (column 0,0)", f64(z.nemo_gdept_0)[0, 0], "gdept_1d"),
-        ("card gdepw_0 (column 0,0)", f64(z.nemo_gdepw_0)[0, 0], "gdepw_1d"),
+        ("card e3t_0 (every column)", f64(z.nemo_e3t_0), "e3t_1d"),
+        ("card e3w_0 (every column)", f64(z.nemo_e3w_0), "e3w_1d"),
+        ("card gdept_0 (every column)", f64(z.nemo_gdept_0), "gdept_1d"),
+        ("card gdepw_0 (every column)", f64(z.nemo_gdepw_0), "gdepw_1d"),
     ]
     return rows
 
@@ -85,9 +85,10 @@ def compare(mesh_path: Path, plant: str | None = None) -> dict:
             nemo = np.asarray(h.variables[var][0], dtype=np.float64)
             if var in ("tmask", "umask", "vmask", "fmask"):
                 nemo = nemo[:nlev][0] if nlev == 1 else nemo[:nlev]
-            elif nemo.ndim == 1:
-                nemo = nemo[:nlev]
+            elif nemo.ndim == 1:      # the 1-d ladder, broadcast to every column
+                nemo = np.broadcast_to(nemo[:nlev], lego.shape)
             lego = np.array(lego, dtype=np.float64)
+            nemo = np.array(nemo)
             if plant == name:
                 lego.flat[0] += 1.0
             require(lego.shape == nemo.shape,

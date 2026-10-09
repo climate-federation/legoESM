@@ -1362,6 +1362,8 @@ FILES = {
     "VORTEX_SMT3_VEC_R16_OMIP_L1_P3/BLD/ppsrc/nemo/vortex_r23_ldf_terms.f90": (
         NEMO / "tests/VORTEX_SMT3_VEC_R16_OMIP_L1_P3/BLD/ppsrc/nemo/vortex_r23_ldf_terms.f90"),
     # TSUNAMI lane round 3: the compiled RK3 build the record was taken from.
+    "TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/stprk3_stg.f90": (
+        NEMO / "tests/TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/stprk3_stg.f90"),
     "TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/stp2d.f90": (
         NEMO / "tests/TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/stp2d.f90"),
     "TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/eosbn2.f90": (
@@ -1450,6 +1452,8 @@ CITATION_MAP = {
     'TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/stp2d.f90:176': 'CASE( np_VEC_c2, np_LIN_dyn )',
     'TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/dynadv.f90:185': 'n_dynadv = np_LIN_dyn',
     'TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/traadv.f90:444': 'nadv = np_NO_adv',
+    'TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/stprk3_stg.f90:413-414': [('zub(ji,jj) = uu_b(ji,jj,Kaa) - SUM( e3t_1d(:)*uu(ji,jj,:,Kaa) ) * r1_hu_0(ji,jj)', 1), ('zvb(ji,jj) = vv_b(ji,jj,Kaa) - SUM( e3t_1d(:)*vv(ji,jj,:,Kaa) ) * r1_hv_0(ji,jj)', 1), 2],
+    'TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/stprk3_stg.f90:503-505': [('ts(ji,jj,jk,jn,Kaa) = (        ( 1._wp + r3t(ji,jj,Kbb) )*ts(ji,jj,jk,jn,Kbb )', 1), ('/          ( 1._wp + r3t(ji,jj,Kaa) )', 1), 3],
     'nemogcm.F90:166': ('CALL stp_RK3', 1),
     'stprk3_stg.F90:143-145': [('ssh (:,:,Kaa) = r2_3 * ssh (:,:,Kbb) + r1_3 * ssha(:,:)', 2), ('vv_b(:,:,Kaa) = va_b(:,:)', 2), 3],
     'stprk3_stg.F90:158': "CALL lbc_lnk( 'stp_RK3_stg', r3ua, 'U', 1._wp, r3va, 'V', 1._wp, r3fa, 'F', 1._wp )",
