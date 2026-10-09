@@ -17,6 +17,10 @@ case "$mode" in
   *) printf 'REFUSE: usage: %s [--run|--preflight-only|--admit-existing]\n' "$0" >&2; exit 64 ;;
 esac
 
+printf '%s\n' \
+  'REFUSE: round-187 nitend=95 violates compiled nn_fsbc=2; use the round-188 terminal-sentinel launcher' >&2
+exit 78
+
 export PATH=/home/dbalwada/miniconda3/envs/nemo-build/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
 

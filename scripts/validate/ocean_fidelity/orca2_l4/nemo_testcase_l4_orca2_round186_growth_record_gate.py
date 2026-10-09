@@ -31,11 +31,13 @@ from scripts.validate.ocean_fidelity.testcases.nemo_testcase_oracle_gate import 
 
 STEPS = (10, 20, 30, 40, 50, 60, 70, 80, 90, 95)
 ITEND = 96
-SAFE_ITEND = 95
+TERMINAL_SENTINEL = 96
+DECK_STEPS = STEPS + (TERMINAL_SENTINEL,)
 FIELDS = ("tn", "sn", "un", "vn", "sshn")
 PLANTS = (
     "none", "missing-rank", "twin-ulp", "step10-calibration",
-    "hidden-deck", "terminal-payload",
+    "hidden-deck", "terminal-payload", "missing-sentinel",
+    "sentinel-truncation", "sentinel-header",
 )
 
 
@@ -67,9 +69,9 @@ def _integer(value: str, label: str) -> int:
 
 
 def render_deck(source: str, itend: int = ITEND) -> str:
-    """Change run protocol only and request the exact frozen restart steps."""
+    """Change run protocol only and protect step 95 with a step-96 sentinel."""
 
-    require(itend in (SAFE_ITEND, ITEND), f"unsupported terminal step {itend}")
+    require(itend == ITEND, f"unsupported terminal step {itend}")
     for key, value in (("nn_itend", itend), ("nn_stock", itend)):
         source, count = re.subn(
             rf"^(\s*{key}\s*=\s*)(\S+)", rf"\g<1>{value}", source,
@@ -77,7 +79,7 @@ def render_deck(source: str, itend: int = ITEND) -> str:
         require(count == 1, f"{key} not found exactly once")
     lines = (
         "   ln_rst_list = .true.\n"
-        "   nn_stocklist = " + ", ".join(str(step) for step in STEPS) + "\n"
+        "   nn_stocklist = " + ", ".join(str(step) for step in DECK_STEPS) + "\n"
     )
     source, count = re.subn(
         r"^(\s*nn_stock\s*=\s*\S+[^\n]*\n)",
@@ -103,17 +105,19 @@ def validate_deck(source: Path, candidate: Path, plant: str = "none") -> dict:
         and _normal(values[key]) != _normal(base[key]))
     require(not changed, f"hidden growth-deck delta: {changed}")
     itend = _integer(values["namrun.nn_itend"], "nn_itend")
-    require(itend in (SAFE_ITEND, ITEND), "growth nn_itend moved")
+    require(itend == ITEND, "growth nn_itend moved")
     require(_integer(values["namrun.nn_stock"], "nn_stock") == itend,
             "growth nn_stock disagrees with nn_itend")
     logical = values["namrun.ln_rst_list"].strip().replace(".", "").upper()
     require(logical in {"T", "TRUE"}, "growth restart-list mode is off")
     observed = tuple(int(token.strip())
                      for token in values["namrun.nn_stocklist"].split(","))
-    require(observed == STEPS, f"growth restart steps moved: {observed}")
+    require(observed in (STEPS, DECK_STEPS),
+            f"growth restart steps moved: {observed}")
     return {
         "source": str(source), "candidate": str(candidate),
         "steps": list(observed), "itend": itend,
+        "terminal_sentinel": observed == DECK_STEPS,
         "physical_delta": changed, "status": "RUN_PROTOCOL_ONLY",
     }
 
@@ -219,6 +223,35 @@ def admit(
                         f"step-10 calibration moved rank {rank}: {control_unequal}")
             comparisons.append({"step": step, "rank": rank, "unequal": unequal})
             headers.extend((header_a, header_b))
+    sentinel_comparisons = []
+    sentinel_enabled = deck_a_row["terminal_sentinel"]
+    require(sentinel_enabled == deck_b_row["terminal_sentinel"],
+            "twin sentinel declarations differ")
+    if sentinel_enabled:
+        for rank in (0, 1):
+            path_a = twin_a / f"ORCA2_{TERMINAL_SENTINEL:08d}_restart_{rank:04d}.nc"
+            path_b = twin_b / f"ORCA2_{TERMINAL_SENTINEL:08d}_restart_{rank:04d}.nc"
+            if plant == "missing-sentinel" and rank == 1:
+                path_b = twin_b / "PLANTED_MISSING_SENTINEL.nc"
+            expected = 95 if plant == "sentinel-header" and rank == 0 else TERMINAL_SENTINEL
+            arrays_a, header_a = _read(path_a, expected)
+            arrays_b, header_b = _read(path_b, TERMINAL_SENTINEL)
+            if plant == "sentinel-truncation" and rank == 0:
+                arrays_a = copy.deepcopy(arrays_a)
+                arrays_a["tn"] = arrays_a["tn"][0:0]
+            unequal = {}
+            for name in FIELDS:
+                require(arrays_a[name].shape == arrays_b[name].shape,
+                        f"sentinel rank {rank}: {name} payload shape moved")
+                unequal[name] = int(np.count_nonzero(
+                    np.ascontiguousarray(arrays_a[name]).view(np.uint64)
+                    != np.ascontiguousarray(arrays_b[name]).view(np.uint64)))
+            require(not any(unequal.values()),
+                    f"sentinel rank {rank}: twin payload moved: {unequal}")
+            sentinel_comparisons.append({
+                "step": TERMINAL_SENTINEL, "rank": rank, "unequal": unequal,
+            })
+            headers.extend((header_a, header_b))
     if plant == "terminal-payload" and terminal_overwrites:
         terminal_overwrites.pop()
     require(len(terminal_overwrites) in (0, 4),
@@ -226,10 +259,10 @@ def admit(
     expected_comparisons = (len(STEPS) - (1 if terminal_overwrites else 0)) * 2
     require(len(comparisons) == expected_comparisons,
             "growth restart comparison census moved")
-    complete = not terminal_overwrites
+    complete = not terminal_overwrites and sentinel_enabled
     return {
-        "format": "nemo-testcase-l4-orca2-round186-growth-record-v1",
-        "status": ("PASS_R187_GROWTH_RECORD" if complete else
+        "format": "nemo-testcase-l4-orca2-round188-growth-record-v2",
+        "status": ("PASS_R188_GROWTH_RECORD" if complete else
                    "STOP_R187_TERMINAL_RESTART_OVERWRITTEN"),
         "claim_label": "independent",
         "restart_steps": list(STEPS),
@@ -240,6 +273,8 @@ def admit(
         "deck_a": deck_a_row,
         "deck_b": deck_b_row,
         "comparisons": comparisons,
+        "terminal_sentinel": TERMINAL_SENTINEL if sentinel_enabled else None,
+        "sentinel_comparisons": sentinel_comparisons,
         "header_count": len(headers),
         "terminal_overwrites": terminal_overwrites,
         "calibration": str(calibration),
@@ -250,7 +285,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--render-source", type=Path)
     parser.add_argument("--render-output", type=Path)
-    parser.add_argument("--itend", type=int, choices=(SAFE_ITEND, ITEND), default=ITEND)
+    parser.add_argument("--itend", type=int, choices=(ITEND,), default=ITEND)
     parser.add_argument("--source", type=Path)
     parser.add_argument("--deck-a", type=Path)
     parser.add_argument("--deck-b", type=Path)
