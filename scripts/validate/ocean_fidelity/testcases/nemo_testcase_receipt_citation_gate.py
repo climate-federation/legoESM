@@ -212,6 +212,8 @@ FILES = {
         _ORCA2_R90FRAMES_COMPILED / "stprk3.f90"),
     "ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo/stp2d.f90": (
         _ORCA2_R90FRAMES_COMPILED / "stp2d.f90"),
+    "ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo/dynspg_ts.f90": (
+        _ORCA2_R90FRAMES_COMPILED / "dynspg_ts.f90"),
     "ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo/stprk3_stg.f90": (
         _ORCA2_R90FRAMES_COMPILED / "stprk3_stg.f90"),
     "ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo/zdfphy.f90": (
@@ -1492,6 +1494,29 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 round 205: OMT-0 split-explicit statement walk ---
+    'ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo/stp2d.f90:278-281': [
+        'sshe_rhs(:,:) =                 emp(:,:)',
+        'sshe_rhs(:,:) = r1_rho0 * sshe_rhs(:,:)', 4],
+    'ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo/dynspg_ts.f90:286-289': [
+        'set values computed in RK3_ssh',
+        'zv_frc(:,:) =   Ve_rhs(:,:)', 4],
+    'ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo/dynspg_ts.f90:289,320-324': [
+        'zv_frc(:,:) =   Ve_rhs(:,:)',
+        'CALL dyn_cor_2D( puu_b(:,:,Kmm), pvv_b(:,:,Kmm), zu_trd, zv_trd )',
+        'zv_frc(ji,jj) = zv_frc(ji,jj) - zv_trd(ji,jj) * ssvmask(ji,jj)', 6],
+    'ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo/dynspg_ts.f90:712-741': [
+        'IF( .NOT.lk_linssh ) THEN !* Update ocean depth',
+        'IF( ln_bdy )   CALL bdy_dyn2d', 30],
+    'ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo/dynspg_ts.f90:532,535': [
+        'zhU(ji,jj) = e2u(ji,jj) * ua_e(ji,jj) * zhup2_e(ji,jj)',
+        'zhV(ji,jj) = e1v(ji,jj) * va_e(ji,jj) * zhvp2_e(ji,jj)', 2],
+    'ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo/dynspg_ts.f90:512-519': [
+        'zhup2_e(ji,jj) = hu_0(ji,jj)',
+        ('e1e2t(ji,jj+1) * zsshp2_e(ji,jj+1)', 1), 8],
+    'ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo/dynspg_ts.f90:721-730': [
+        'IF( .NOT.lk_linssh ) THEN   !* Update ocean depth',
+        "hur_e, 'U',  1._wp, hvr_e, 'V',  1._wp  , ssha_e, 'T', 1._wp, ldfull=.TRUE. )", 10],
     # --- ORCA2 round 199: Decision-103 OMT-0 module selections ---
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynadv.f90:162-190': [
         'NAMELIST/namdyn_adv/ ln_dynadv_OFF, ln_dynadv_vec',
