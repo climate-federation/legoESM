@@ -2012,6 +2012,19 @@ CITATION_MAP = {
         '!     Compute Sea Level at step jit+1',
         'ssha_e(ji,jj) = (  sshn_e(ji,jj) - rDt_e * ( ssh_frc(ji,jj) + zhdiv )  ) * ssmask(ji,jj)',
         12],
+    # --- ORCA2 round 193: corrected-entry growth and external replay ------
+    'ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo/stprk3.f90:200-233': [
+        '!  RK3 : single first external mode computation',
+        'CALL r84_dump_frame( kstp, 3, Naa )', 34],
+    'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:600-608': [
+        '!                             ! Sum over sub-time-steps to compute advective velocities',
+        'vn_adv(ji,jj) = vn_adv(ji,jj) + za2 * zhV(ji,jj) * r1_e1v(ji,jj)', 9],
+    'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:770-779': [
+        'IF( .NOT.lk_linssh ) THEN   !* Update ocean depth',
+        "&                   , hur_e, 'U',  1._wp, hvr_e, 'V',  1._wp  , ssha_e, 'T', 1._wp, ldfull=.TRUE. )", 10],
+    'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:791-796': [
+        "CALL r95_spg_w2('ua_new', ua_e)",
+        "CALL r95_spg_w2('hvr_e', hvr_e)", 6],
     'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:1213-1265': [
         'CASE( np_EEN )',
         'ffv_se(ji,jj) = r1_12 * r1_e2v(ji,jj)', 53],
