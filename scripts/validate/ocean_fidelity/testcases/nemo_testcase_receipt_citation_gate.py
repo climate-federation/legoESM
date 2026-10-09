@@ -1491,10 +1491,10 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4_R110EENFRAC/BLD/ppsrc/nemo/dynspg_ts.f90:1244-1248': [
         ('DO jj = ntsj-( 0), ntej+(  0) ; DO ji = ntsi-( 0), ntei+(  0)', 1),
         ('& ff_f(ji  ,jj-1) /', 1), 5],
-    'barotropic_latlon_cgrid.py:904-906': [
+    'barotropic_latlon_cgrid.py:909-911': [
         ('def _nemo_een_south_ff_copy(ff):', 1),
         ('return jnp.concatenate([ff[:1], ff[:-1]], axis=0)', 1), 3],
-    'barotropic_latlon_cgrid.py:1002-1008': [
+    'barotropic_latlon_cgrid.py:1007-1013': [
         ('# ORCA2 reads ff_f through iom_get(..., kfill=jpfillcopy)', 1),
         ('q_south_ff_copy = b(ff_south[..., None] / shift(e3f, 0, 1))', 1), 7],
     # --- ORCA2 round 111: EEN frozen mask and next southern-halo owner ---
@@ -1782,12 +1782,12 @@ CITATION_MAP = {
     'OVERFLOW_OMIP_L1/EXP00/namelist_cfg:89': 'ln_dynvor_ens = .true.',
     'overflow_kt1_10/namelist_cfg:86': 'ln_dynadv_up3 = .true.',
     'overflow_kt1_10/namelist_cfg:92': 'ln_dynvor_ens = .true.',
-    'nemo_testcase_recipe.py:3392':
+    'nemo_testcase_recipe.py:3386':
         'if (cfg.momentum_advection != "vector_invariant"',
     'ocean_pe_latlon_cgrid.py:5382': ('if _mom_adv == "flux_form":', 2),
     'ocean_pe_latlon_cgrid.py:5400': (
         '_bc_horizontal_momentum_advection_flux_form(', 2),
-    'nemo_testcase_recipe.py:3395':
+    'nemo_testcase_recipe.py:3389':
         'requires ln_dynadv_vec=.true. with nn_dynkeg=0',
     # --- ORCA2 round 57: acquired OVERFLOW UP3 source-order walk ---
     'OVERFLOW_OMIP_L1_P3_R56UP3/BLD/ppsrc/nemo/dynadv_up3.f90:157-166': [
@@ -2554,12 +2554,12 @@ CITATION_MAP = {
         ('pr3u(ji,jj) = 0.5_wp * (  e1e2t(ji  ,jj) * pssh(ji  ,jj)  &', 2),
         ('&                    + e1e2t(ji+1,jj) * pssh(ji+1,jj)  ) '
          '* r1_hu_0(ji,jj) * r1_e1e2u(ji,jj)', 2), 2],
-    'vertical.py:238-239': [
+    'vertical.py:239-240': [
         ('weighted_eta = b(area_t * eta)', 1),
         ('num_u = b(half * b(weighted_eta + jnp.roll(weighted_eta, -1, '
          'axis=1)))', 1), 2],
-    'vertical.py:247': ('r3u = b(b(num_u * r1_hu0) * r1_area_u)', 1),
-    'vertical.py:251':
+    'vertical.py:248': ('r3u = b(b(num_u * r1_hu0) * r1_area_u)', 1),
+    'vertical.py:252':
         ('e3u = b(e3u_0 * b(one + r3u[..., None] * umask3))', 1),
     # --- round 160: legoESM's own two-solve statements ---
     'ocean_model_latlon_cgrid.py:1853-1890': [
@@ -2777,7 +2777,7 @@ CITATION_MAP = {
         'SELECT CASE( nn_e3f_typ )',
         'WHERE( e3f_0vor(:,:,:) == 0._wp )   e3f_0vor(:,:,:) = e3f_3d(:,:,:)',
         26],
-    'vertical.py:456-554': [
+    'vertical.py:457-555': [
         'def nemo_qco_live_vorticity_e3f_cgrid(',
         'return jnp.concatenate([with_south[:, -1:], with_south], axis=1)',
         99],
@@ -3713,7 +3713,7 @@ CITATION_MAP = {
     # Decision 90 added nine stated lines INSIDE this block (the slow-forcing
     # depth average, which this call now states rather than defaulting), so
     # the pinned extent grows with it: 88 -> 97, same two symbols.
-    'nemo_testcase_recipe.py:602-698': [
+    'nemo_testcase_recipe.py:603-699': [
         'return LatLonCGridOceanConfig.from_flat(',
         'gm_redi=None,', 97],
     # --- round 66: admitted content operands and Krhs/LDF walk ---
@@ -3965,7 +3965,7 @@ CITATION_MAP = {
     # --- decision 36: RK3 face-native shear on the GYRE identity card ---
     'GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/stprk3.f90:168': (
         'CALL zdf_phy( kstp, Nbb, Nbb, Nrhs )', 1),
-    'nemo_testcase_recipe.py:442-444': [
+    'nemo_testcase_recipe.py:443-445': [
         'tke_shear_production="nemo_face_native_now2"',
         ('tke_shear_metric_source="nemo_qco_live_face"', 2), 3],
     'ocean_model_latlon_cgrid.py:11014-11031': [
@@ -4393,7 +4393,7 @@ CITATION_MAP = {
         'vn_adv(:,:)     = 0._wp', 27],
     # --- PR #1802 final round: decisions 66 and 67 -----------------------
     # D67's own call site, and the DINO year screen's pre-existing refusal.
-    'barotropic_latlon_cgrid.py:2759-2760': [
+    'barotropic_latlon_cgrid.py:2763-2764': [
         'U_bar_corr, V_bar_corr = _depth_average_to_faces(',
         'u_corr, v_corr, _h_k_corr, min_water_col, mask, u_mask, v_mask, grid,',
         2],
@@ -4522,7 +4522,7 @@ CITATION_MAP = {
         '-7.e+3_wp/e3w(ji,jj,jk,Kmm)* ABS( zai )  )',
         'zbj = MIN( zbw , -100._wp* ABS( zaj ) , '
         '-7.e+3_wp/e3w(ji,jj,jk,Kmm)* ABS( zaj )  )', 2],
-    'vertical.py:1914': ('def compute_ocean_jacobian(', 1),
+    'vertical.py:1915': ('def compute_ocean_jacobian(', 1),
     'ocean_model_latlon_cgrid.py:6513-6517': [
         'transport_velocity = (', ('* _ws_stage_v_mask,', 1), 5],
     'ocean_model_latlon_cgrid.py:8198': ('_g2 = _nemo_ws_stage_transport(', 1),
@@ -4917,7 +4917,7 @@ CITATION_MAP = {
     'domqco.F90:219-222': [('pr3u(ji,jj) = 0.5_wp * (  e1e2t(ji  ,jj) * pssh(ji  ,jj)  &', 2), ('&                    + e1e2t(ji,jj+1) * pssh(ji,jj+1)  ) * r1_hv_0(ji,jj) * r1_e1e2v(ji,jj)', 2), 4],
     # ROUND 34: decision 17 added twelve lines above this one.
     # Round 34 inserted the ten-line carried-hf_0 selector before this site.
-    'vertical.py:772': 'def nemo_qco_live_face_geometry_cgrid(',
+    'vertical.py:773': 'def nemo_qco_live_face_geometry_cgrid(',
     # --- round 31: the walk into dyn_zdf, and the stamp ---
     'dynzdf.F90:97': 'zDt_2 = rDt * 0.5_wp',
     'dynzdf.F90:148': 'IF( ln_drgimp .AND. ln_dynspg_ts ) THEN',
@@ -5015,15 +5015,15 @@ CITATION_MAP = {
     # DECISION 17 moved the mask half of this guard below the early return,
     # so the round-31 anchors for it are re-anchored here rather than left to
     # resolve against lines that no longer say what the prose says.
-    'vertical.py:66-71': [
+    'vertical.py:67-72': [
         ('if e3t_0 is None:', 1),
         ('"literal NEMO QCO e3t requires explicit/reference nemo_e3t_0")', 1),
         6],
-    'vertical.py:76-77': [
+    'vertical.py:77-78': [
         ('if getattr(z_coord, "linear_free_surface", False):', 1),
         ('return e3t_0', 1),
         2],
-    'vertical.py:85-89': [
+    'vertical.py:86-90': [
         ('if active is None:', 1),
         ('tmask = jnp.asarray(active, dtype=dtype)', 1),
         5],
@@ -5046,7 +5046,7 @@ CITATION_MAP = {
     # added eighteen lines above this anchor, so 311 became 329; decision 35
     # added nine lines above it and round 56 removed two; decision 36 added
     # fifteen more lines above it, so it is now 351.
-    'nemo_testcase_recipe.py:679': [
+    'nemo_testcase_recipe.py:680': [
         ('zdf_baroclinic_only=True,', 2), ('zdf_baroclinic_only=True,', 2), 1],
     'provenance.py:106': 'def git_sha(*, allow_dirty: bool = False, repo: str | Path | None = None) -> str:',
     'cpp_GYRE_BARE.fcm:1': 'key_linssh key_vco_1d  key_RK3',
@@ -5093,7 +5093,7 @@ CITATION_MAP = {
     # inserted the initial-state helper above the THIRD anchor only, moving it
     # 1411 -> 1493; later card additions moved all three to their current
     # merged locations without changing the anchor text.
-    'nemo_testcase_recipe.py:375,630,3376': [('pgf_scheme="nemo_sco",', 1), ('pgf_scheme="nemo_sco",', 2), 'if cfg.pgf_scheme != "nemo_sco":', 3],
+    'nemo_testcase_recipe.py:376,631,3370': [('pgf_scheme="nemo_sco",', 1), ('pgf_scheme="nemo_sco",', 2), 'if cfg.pgf_scheme != "nemo_sco":', 3],
     'BLD/ppsrc/nemo/dynspg_ts.f90:1224': 'REAL(wp), DIMENSION(jpi,jpj,jpk,jpt), INTENT(in   ) ::  puu, pvv',
     'BLD/ppsrc/nemo/dynhpg.f90:378,397': [('DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  '
           '0)              ! Surface value',
