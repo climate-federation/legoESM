@@ -3008,16 +3008,8 @@ TSUNAMI_UNMEASURED: tuple[str, ...] = (
     # j-seam, with or without the y-wrap scope -- the existing y-wrap reaches
     # only the v-face wall helpers, not the card's barotropic path.
     "B4j:card_step_walls_the_j_seam",
-    # namelist_cfg ln_dynadv_OFF: dynadv.F90:129 n_dynadv = np_LIN_dyn, so
-    # stp2d.F90:159-174 and stprk3_stg.F90:315/331-334 add NO momentum
-    # advection.  The carrier identity runs flux-form UP3; legoESM has no
-    # "no momentum advection" arm.
-    "B6:no_momentum_advection_np_LIN_dyn",
-    # namelist_cfg ln_traadv_OFF: traadv.F90:461 nadv = np_NO_adv, yet T/S
-    # are stepped every stage by the thickness ratio alone
-    # (stprk3_stg.F90:552-554), so T/S stop being uniform where ssh moves and
-    # feed dyn_hpg (:324).  The carrier runs FCT2 tracer advection.
-    "B7:tracer_stage_step_without_advection",
+    # B6 (ln_dynadv_OFF) and B7 (ln_traadv_OFF) are closed by card
+    # selections in build_tsunami_zco_card (round 4).
 )
 
 
@@ -3172,7 +3164,7 @@ def build_tsunami_zco_card() -> NEMOTestcaseCard:
             f"TSUNAMI ln_bt_auto resolves nn_e = {n_e}, card states "
             f"{nl.nn_e_resolved}")
     # Carrier: the shared VORTEX flux-form EEN RK3 identity (the same stage
-    # program, EEN dyn_vor/dyn_cor_2D, hpg_sco, zdfcst); B6/B7 are what differs.
+    # program, EEN dyn_vor/dyn_cor_2D, hpg_sco, zdfcst) with advection OFF.
     base = _model_config(
         barotropic_time_filter="nemo_boxcar1_ab3",   # nn_bt_flt = 1, ln_bt_fw = T
         n_barotropic_substeps=nl.nn_e_resolved,
@@ -3187,6 +3179,12 @@ def build_tsunami_zco_card() -> NEMOTestcaseCard:
         # are nonzero here, unlike VORTEX.
         eos="nemo_seos", eos_nemo_seos=_TSUNAMI_SEOS, eos_depth="geometric",
         adaptive_implicit_vertadv=nl.ln_zad_Aimp,
+        # ln_dynadv_OFF -> np_LIN_dyn (dynadv.f90:185): no dyn_adv in stp_2D
+        # (stp2d.f90:176) or at any stage (stprk3_stg.f90:316, :334).
+        momentum_flux_scheme="none", vertical_momentum_scheme="none",
+        # ln_traadv_OFF -> np_NO_adv (traadv.f90:444): T/S only take the
+        # (1+r3t) ratio at stages 1-2 (stprk3_stg.f90:503-505).
+        tracer_advection="none",
         K_h=0.0,                                  # ln_traldf_OFF
         A_v=nl.rn_avm0_m2_s, K_v=nl.rn_avt0_m2_s,  # ln_zdfcst, namelist_ref
         lateral_viscosity=base.lateral_viscosity._replace(A_h=0.0),  # ln_dynldf_OFF
