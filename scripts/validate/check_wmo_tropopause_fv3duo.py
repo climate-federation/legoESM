@@ -36,7 +36,8 @@ def main():
     a = ap.parse_args()
     sha = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True,
                          text=True, cwd=Path(__file__).parent).stdout.strip()
-    print(f"code {sha}; x64={jax.config.jax_enable_x64}; inputs {a.ckpts}")
+    print(f"code {sha}; x64={jax.config.jax_enable_x64}; mesh {Path(a.mesh).resolve()};"
+          f" inputs {a.ckpts}")
     ll = np.load(a.mesh)
     lat, lon = ll["lat"], ll["lon"]
     xyz = np.stack([np.cos(lat) * np.cos(lon), np.cos(lat) * np.sin(lon), np.sin(lat)], 1)
@@ -54,9 +55,10 @@ def main():
         print(f"{Path(f).name}: fallback {fb.mean():.2%} ({fb.sum()}/{fb.size})"
               + (f" |lat| {np.round(alat[fb], 0)[:20]} nbr-jump hPa median"
                  f" {np.median(jump[fb]):.1f} max {jump[fb].max():.1f}" if fb.any() else "")
-              + f"; WMO p_tp hPa p5/50/95 {np.round(np.percentile(pw[~fb], [5, 50, 95]) / 100, 1)}"
-              f"; median WMO-clim {np.median(pw[~fb] - p_clim[~fb]) / 100:.1f} hPa"
-              f"; p_tp>400 hPa {(pw[~fb] > 4e4).sum()} cols")
+              + (f"; WMO p_tp hPa p5/50/95 {np.round(np.percentile(pw[~fb], [5, 50, 95]) / 100, 1)}"
+                 f"; median WMO-clim {np.median(pw[~fb] - p_clim[~fb]) / 100:.1f} hPa"
+                 f"; p_tp>400 hPa {(pw[~fb] > 4e4).sum()} cols" if (~fb).any()
+                 else "; no WMO tropopause in any column"))
     lev = np.array(levs)
     d = np.abs(np.diff(lev, axis=0))
     for name, m in (("all", alat >= 0), ("|lat|<30", alat < 30),
