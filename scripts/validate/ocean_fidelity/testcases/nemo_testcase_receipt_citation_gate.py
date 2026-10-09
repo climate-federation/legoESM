@@ -2190,7 +2190,7 @@ CITATION_MAP = {
         'IF(lwm) WRITE ( numond, namrun )', 3],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcmod.f90:341-349': [
         'IF( ln_rst_list .OR. nn_stock /= -1 ) THEN',
-        "CALL ctl_stop( ctmp1, 'Impossible to properly do model restart' )", 9],
+        ("CALL ctl_stop( ctmp1, 'Impossible to properly do model restart' )", 2), 9],
     # --- ORCA2 round 82: hierarchy rung-0 deck semantics ---
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcmod.f90:299-306': [
         'IF( ln_usr          ) THEN   ;   nsbc = jp_usr',
