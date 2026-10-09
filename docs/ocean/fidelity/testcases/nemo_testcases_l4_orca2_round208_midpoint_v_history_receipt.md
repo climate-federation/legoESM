@@ -13,8 +13,8 @@ row-direction maps. The shipped rung-10 card, sea ice, its selectors and its
 
 The substep-2 midpoint-V statement is exonerated. The compiled branch selects
 Forward coefficients `(1, 0, 0)` for substeps 1 and 2 at
-`ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo/dynspg_ts.f90:461-469`, and evaluates
-`va_e = za1*vn_e + za2*vb_e + za3*vbb_e` at `:480-485`. Both the instantiated
+`ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo/dynspg_ts.f90:461-484`, ending in the
+written V extrapolation. Both the instantiated
 OMT-0 card and NEMO's recorded coefficients are bit-exact `(1,0,0)`.
 
 The three recorded history inputs split as follows on the 8,554 wet V faces:
@@ -101,7 +101,8 @@ round's final validation commit.
 ## OPEN
 
 1. The operator runs the reported acquisition with `--run`; the next round
-   admits it and replays `dynspg_ts.f90:698-701` from all ten recorded arrays.
+   admits it and replays
+   `ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo/dynspg_ts.f90:698-701` from all ten recorded arrays.
    If the source-written update closes, compare its pre-association output to
    the already-admitted post-association value and continue in source order.
 2. OMT-1 remains blocked on OMT-0 reaching the bar or a complete cancelling
