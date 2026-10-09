@@ -93,7 +93,18 @@ failed before reading the diff:
 `failed to initialize in-process app-server client: Read-only file system
 (os error 30)`. Independent review is unavailable in-sandbox; this is not a
 PASS verdict. The full fidelity-battery result is recorded below after its one
-permitted invocation.
+permitted invocation. Its log reached 95% with 2,848 passed, 7 skipped, 3
+failed, and 0 errors before the worker/session tail stopped producing output;
+there is no final pytest summary, so this is **INCOMPLETE**, not a pass. The
+three observed failures are the registered pre-existing reds
+`test_nemo_testcase_l2_gyre_round129_spread_floor_gate.py::test_record_backed_gate_passes`,
+`test_nemo_testcase_round35_stamp_scope.py::test_every_driver_that_arms_the_escape_scopes_it`,
+and
+`test_nemo_testcase_worktree_stamp.py::test_every_report_emitter_stamps_the_worktree`.
+The last emitted node was
+`test_nemo_testcase_l1_vortex_round204_stage1_split.py::test_the_split_hook_at_its_default_changes_nothing`;
+the corrected process census was zero after interruption. Evidence:
+`orca2_rounds/round209/ocean_fidelity_pytest.log`.
 
 ## OPEN
 
