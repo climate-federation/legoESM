@@ -178,8 +178,16 @@ FILES = {
         _ORCA2_COMPILED / "stprk3.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/stp2d.f90": (
         _ORCA2_COMPILED / "stp2d.f90"),
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynadv.f90": (
+        _ORCA2_COMPILED / "dynadv.f90"),
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/ldfdyn.f90": (
+        _ORCA2_COMPILED / "ldfdyn.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv.f90": (
         _ORCA2_COMPILED / "traadv.f90"),
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/ldftra.f90": (
+        _ORCA2_COMPILED / "ldftra.f90"),
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfdrg.f90": (
+        _ORCA2_COMPILED / "zdfdrg.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv_fct.f90": (
         _ORCA2_COMPILED / "traadv_fct.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/trazdf.f90": (
@@ -1482,6 +1490,22 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 round 199: Decision-103 OMT-0 module selections ---
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynadv.f90:162-190': [
+        'NAMELIST/namdyn_adv/ ln_dynadv_OFF, ln_dynadv_vec',
+        "CALL ctl_stop( 'choose ONE and only ONE advection scheme' )", 29],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/ldfdyn.f90:177-228': [
+        'NAMELIST/namdyn_ldf/ ln_dynldf_OFF',
+        'IF(.NOT.ln_dynldf_OFF ) THEN', 52],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv.f90:586-633': [
+        'NAMELIST/namtra_adv/ ln_traadv_OFF',
+        "CALL ctl_stop( 'tra_adv_init: Choose ONE advection option in namelist namtra_adv' )", 48],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/ldftra.f90:214-268': [
+        'NAMELIST/namtra_ldf/ ln_traldf_OFF',
+        'IF( .NOT.ln_traldf_OFF ) THEN', 55],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfdrg.f90:371-401': [
+        'NAMELIST/namdrg/ ln_drg_OFF, ln_lin',
+        "CALL ctl_stop( 'zdf_drg_init: Choose ONE type of drag coef in namdrg' )", 31],
     # --- ORCA2 round 176: the independent rung-0 entry guard ---
     'nemo_testcase_recipe.py:1413-1453': [
         'def apply_orca2_hand_alterations(temperature, salinity):',
