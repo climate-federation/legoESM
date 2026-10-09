@@ -120,3 +120,40 @@ def test_single_year_surfdata_is_year_invariant():
     np.testing.assert_allclose(float(lai_a[0]), float(lai_b[0]))
     np.testing.assert_allclose(np.asarray(lp_a.albedo_veg), np.asarray(lp_b.albedo_veg))
     np.testing.assert_allclose(float(lai_a[0]), _LAI_FOREST, rtol=1e-6)
+
+
+def test_canopy_slopes_are_medlyn_per_pft_under_medlyn():
+    """stomatal_model="medlyn": the C3 slope is the per-PFT Medlyn g1 of the
+    dominant PFT and the C4 slope the Medlyn C4 value; any other model keeps
+    the Ball-Berry constants (9 / 4), which are not Medlyn slopes.  Both the
+    traced per-step updater and the static builder agree."""
+    from legoesm.land.boundary_data import surface_data_to_land_params
+    from legoesm.land.boundary_data._internals import CLM5_MEDLYN_G1, M_C4_MEDLYN
+    gsd = _forest_then_grass()
+    theta, doy = jnp.full(1, 0.2), jnp.asarray(196.0)
+    med = CanopyConfig(max_iters=1, stomatal_model="medlyn")
+    cp0, _ = make_step_land_params_updater(gsd, med)(theta, doy, jnp.asarray(1850.0))
+    np.testing.assert_allclose(float(cp0.m_C3[0]), CLM5_MEDLYN_G1[_BE])
+    np.testing.assert_allclose(float(cp0.m_C4[0]), M_C4_MEDLYN)
+    static = surface_data_to_land_params(gsd, med, 196.0, theta, year=1850.0)
+    np.testing.assert_allclose(float(static.m_C3[0]), CLM5_MEDLYN_G1[_BE])
+    np.testing.assert_allclose(float(static.m_C4[0]), M_C4_MEDLYN)
+    bb, _ = make_step_land_params_updater(gsd, CanopyConfig(max_iters=1))(
+        theta, doy, jnp.asarray(1850.0))
+    np.testing.assert_allclose(float(bb.m_C3[0]), 9.0)
+    np.testing.assert_allclose(float(bb.m_C4[0]), 4.0)
+
+
+def test_medlyn_g1_table_follows_clm_except_c4_crop():
+    """The C3 entries are the CLM-ML port's own g1_MED table (single source of
+    the CLM5 values); both C4 PFTs carry Lin et al. (2015)'s C4 value, the
+    crop_c4 slot departing from CLM's 5.79 (an irrigated C3 crop there)."""
+    from legoesm.land.boundary_data._internals import CLM5_MEDLYN_G1, M_C4_MEDLYN
+    from legoesm.land.canopy.clm_ml_backend.multilayer_canopy import MLpftconMod
+    clm = np.asarray(MLpftconMod.MLpftcon.g1_MED)
+    assert len(CLM5_MEDLYN_G1) == N_PFT_CLM5
+    np.testing.assert_allclose(CLM5_MEDLYN_G1[1:16], clm[1:16])
+    i_c4crop = CLM5_PFT_NAMES.index("crop_c4")
+    assert CLM5_MEDLYN_G1[i_c4crop] == M_C4_MEDLYN == 1.62
+    assert CLM5_MEDLYN_G1[CLM5_PFT_NAMES.index("c4_grass")] == 1.62
+    assert float(clm[i_c4crop]) == 5.79

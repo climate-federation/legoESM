@@ -44,13 +44,13 @@ from legoesm.land.global_surface_data import interp_monthly
 
 from legoesm.land.boundary_data._internals import (
     CI_DEFAULT, KN_DEFAULT, ALF_DEFAULT,
-    M_C3, M_C4, B0_C3, B0_C4,
+    B0_C3, B0_C4,
     TGC_DEFAULT_C, HC_MIN_M,
     EMISS_VEG, RZ0M_BARE,
     GLACIER_ALB_VIS, GLACIER_ALB_NIR, GLACIER_ALBEDO_DEFAULT,
     FALLBACK_SAND_PCT, FALLBACK_CLAY_PCT,
     THETA_TOP_DEFAULT,
-    pft_lookup_arrays,
+    pft_lookup_arrays, stomatal_slopes,
     cover1d,
 )
 
@@ -102,6 +102,7 @@ def build_canopy_params(
     glacier_alb_vis: float = GLACIER_ALB_VIS,
     glacier_alb_nir: float = GLACIER_ALB_NIR,
     pft_root_params: dict | None = None,
+    stomatal_model: str = "ball_berry",
     year=None,
 ) -> CanopyLandParams:
     """Per-column :class:`CanopyLandParams` from surface data at ``day_of_year``.
@@ -161,6 +162,9 @@ def build_canopy_params(
                     for k, v in pft_root_params.items()}
 
     full = lambda v: jnp.full(ncol, v)
+    # Stomatal slopes: per-PFT Medlyn g1 under stomatal_model="medlyn", the
+    # Ball-Berry constants otherwise (they are not interchangeable).
+    _m_c3, _m_c4 = stomatal_slopes(stomatal_model, lut["g1_med"][dom], ncol, np)
     return CanopyLandParams(
         LAI=jnp.asarray(LAI),
         hc=jnp.asarray(np.maximum(hc, HC_MIN_M)),
@@ -169,7 +173,8 @@ def build_canopy_params(
         CI=full(CI_DEFAULT), kn=full(KN_DEFAULT),
         Vcmax25_C3_leaf=jnp.asarray(lut["vc3"][dom]),
         Vcmax25_C4_leaf=jnp.asarray(lut["vc4"][dom]),
-        m_C3=full(M_C3), m_C4=full(M_C4), b0_C3=full(B0_C3), b0_C4=full(B0_C4),
+        m_C3=jnp.asarray(_m_c3), m_C4=jnp.asarray(_m_c4),
+        b0_C3=full(B0_C3), b0_C4=full(B0_C4),
         alf=full(ALF_DEFAULT), TgC=full(float(tgc_C)),
         ALB_VIS=jnp.asarray(alb_vis), ALB_NIR=jnp.asarray(alb_nir),
         emissivity=full(EMISS_VEG),
@@ -380,7 +385,9 @@ def surface_data_to_land_params(gsd, surface_scheme, day_of_year, theta_top, *,
             "glacier_alb_vis": float(glacier_alb[0]),
             "glacier_alb_nir": float(glacier_alb[1])}
         return build_canopy_params(gsd, day_of_year, theta_top, year=year,
-                                   pft_root_params=pft_root_params, **_gk)
+                                   pft_root_params=pft_root_params,
+                                   stomatal_model=surface_scheme.stomatal_model,
+                                   **_gk)
     # SEB / CLM-ML path: the provider takes a single BROADBAND ice albedo, which
     # is the 0.5/0.5 vis-NIR integral the canopy pair collapses to (see
     # GLACIER_ALBEDO_DEFAULT == 0.5*(GLACIER_ALB_VIS + GLACIER_ALB_NIR)).

@@ -31,11 +31,11 @@ from legoesm.land.global_surface_data import interp_annual, interp_monthly
 
 from legoesm.land.boundary_data._internals import (
     CI_DEFAULT, KN_DEFAULT, ALF_DEFAULT,
-    M_C3, M_C4, B0_C3, B0_C4,
+    B0_C3, B0_C4,
     TGC_DEFAULT_C, HC_MIN_M,
     EMISS_VEG, RZ0M_BARE,
     GLACIER_ALB_VIS, GLACIER_ALB_NIR, GLACIER_ALBEDO_DEFAULT,
-    pft_lookup_arrays,
+    pft_lookup_arrays, stomatal_slopes,
 )
 from legoesm.land.boundary_data.builders import dominant_pft_index, glacier_mask
 from legoesm.land.boundary_data.gap_fill import (
@@ -142,6 +142,7 @@ def make_step_land_params_updater(gsd, surface_scheme, *, glacier_alb=None,
         lut_hc = jnp.asarray(lut["hc"])
         lut_fc4 = jnp.asarray(lut["fc4"])
         lut_vc3 = jnp.asarray(lut["vc3"])
+        lut_g1_med = jnp.asarray(lut["g1_med"])
         lut_vc4 = jnp.asarray(lut["vc4"])
         lut_rz0m = jnp.asarray(lut["rz0m"])
         # Optional per-PFT root-zone params, gathered by the traced dominant PFT.
@@ -186,11 +187,15 @@ def make_step_land_params_updater(gsd, surface_scheme, *, glacier_alb=None,
             LAI = jnp.where(ice, 0.0, LAI)
             av = jnp.where(ice, _glac_vis, av)
             an = jnp.where(ice, _glac_nir, an)
+            # Per-PFT Medlyn g1 under stomatal_model="medlyn"; the Ball-Berry
+            # constants otherwise.
+            _m_c3, _m_c4 = stomatal_slopes(
+                surface_scheme.stomatal_model, lut_g1_med[dom_idx], ncol, jnp)
             lp = CanopyLandParams(
                 LAI=LAI, hc=hc, fC4=fC4, FNonVeg=1.0 - is_veg,
                 CI=full(CI_DEFAULT), kn=full(KN_DEFAULT),
                 Vcmax25_C3_leaf=Vcmax25_C3, Vcmax25_C4_leaf=Vcmax25_C4,
-                m_C3=full(M_C3), m_C4=full(M_C4),
+                m_C3=_m_c3, m_C4=_m_c4,
                 b0_C3=full(B0_C3), b0_C4=full(B0_C4),
                 alf=full(ALF_DEFAULT), TgC=full(TGC_DEFAULT_C),
                 ALB_VIS=av, ALB_NIR=an,

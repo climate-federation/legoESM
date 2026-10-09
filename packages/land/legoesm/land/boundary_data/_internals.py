@@ -32,6 +32,16 @@ M_C3 = 9.0                 # Ball-Berry slope, C3 [-]
 M_C4 = 4.0                 # Ball-Berry slope, C4 [-]
 B0_C3 = 0.01               # Ball-Berry intercept, C3 [mol m-2 s-1]
 B0_C4 = 0.04               # Ball-Berry intercept, C4 [mol m-2 s-1]
+# --- Medlyn et al. (2011) slope g1 [kPa^0.5], used when the canopy's
+#     stomatal_model is "medlyn" (the Ball-Berry slopes above are NOT Medlyn
+#     slopes).  Per CLM5 PFT, in CLM5_PFT_NAMES order: the CLM5 values (the
+#     CLM-ML port's MLpftcon g1_MED table; after Lin et al. 2015, Nature Clim.
+#     Change 5, 459-464, as adopted in CABLE/CLM).  C4 PFTs carry Lin et al.'s
+#     C4 value — CLM's slot 16 is an irrigated C3 crop (5.79); here it is the
+#     C4 crop.  Index 0 (bare soil) is inert (no canopy).
+CLM5_MEDLYN_G1 = (0.0, 2.35, 2.35, 2.35, 4.12, 4.12, 4.45, 4.45, 4.45,
+                  4.70, 4.70, 4.70, 2.22, 5.25, 1.62, 5.79, 1.62)
+M_C4_MEDLYN = 1.62         # Medlyn g1, C4 (Lin et al. 2015) [kPa^0.5]
 TGC_DEFAULT_C = 25.0       # growth-temperature default for Vcmax acclimation [°C]
 HC_MIN_M = 0.1             # minimum canopy height [m]
 EMISS_VEG = 0.97           # vegetated-surface emissivity [-]
@@ -94,7 +104,21 @@ def pft_lookup_arrays() -> dict[str, np.ndarray]:
         rd[i] = PFT_AERO_PARAMS[biome]["rd"]
         hc[i] = PFT_CANOPY_HEIGHT[biome]
     return {"vc3": vc3, "vc4": vc4, "rz0m": rz0m, "rd": rd,
-            "hc": hc, "fc4": fc4, "is_veg": is_veg}
+            "hc": hc, "fc4": fc4, "is_veg": is_veg,
+            "g1_med": np.asarray(CLM5_MEDLYN_G1, dtype=float)}
+
+
+def stomatal_slopes(stomatal_model: str, g1_med_at_dom, ncol: int, xp):
+    """``(m_C3, m_C4)`` for the two-leaf canopy's slope slots, per column.
+
+    "medlyn" -> the per-PFT Medlyn g1 at the dominant PFT and the C4 Medlyn
+    value; any other model -> the Ball-Berry constants (as before).  ``xp`` is
+    the array module of the caller (numpy for the static builder, jax.numpy
+    for the traced per-step updater).
+    """
+    if stomatal_model == "medlyn":
+        return g1_med_at_dom, xp.full(ncol, M_C4_MEDLYN)
+    return xp.full(ncol, M_C3), xp.full(ncol, M_C4)
 
 
 def cover1d(a):
