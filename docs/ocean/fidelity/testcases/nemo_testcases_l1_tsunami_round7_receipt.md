@@ -40,7 +40,7 @@ path (round 6's call-count probe; the card runs the NEMO-literal solver).
 | six closed cards, state sha256 after 3 steps, no caller scope | equal to round 6: LOCK_EXCHANGE `b3aa27fa80dbdefd`, OVERFLOW `72ad6c2d6a9be145`, GYRE `b8cb5ecd4dc4b467`, VORTEX `b0ef8aaf1dc75f91`, VORTEX_VEC `ce76bd63f0441d3f`, VORTEX_SMT4_VEC `1cc2f09098310c7f` (json `a8c2a1fc07d45b73`, identical at `36f2423a4` and `ec049bd48`) |
 | plant A: round 6's wrapper (True only, step only) | `2 failed`: the step-topology test (walled config under a True caller scope) and the new public-tendencies test |
 | plant B: no wrapper at all | `1 failed`: the ladder record test (finding 3's non-vacuity) |
-| citation gate, this receipt (`## Citations`) | `PASS`, 2 citations, 0 failures; plant `lbclnk.f90:1868` shifted: `FAIL`, exit 1; default gate `PASS`, 274 |
+| citation gate, this receipt (from its Citations heading) | `PASS`, 2 citations, 0 failures; plant `lbclnk.f90:1868` shifted: `FAIL`, exit 1; default gate `PASS`, 274 |
 | plant C: invariant check not wrapped | `1 failed` (the mask/runtime-check test) |
 | plant D: `replace_land_mask` ignores its argument | `1 failed` (same test) |
 | TSUNAMI tests + advection-off arms + #576 PoC | `80 passed` (final); main's solver tests `49 passed` (at `36f2423a4`, with the arms) |
