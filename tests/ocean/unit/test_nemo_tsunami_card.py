@@ -171,7 +171,7 @@ def test_initial_ssh_against_formula_at_three_cells(card):
 
 def test_execution_gate_refuses_with_named_blockers(card):
     assert [b.split(":")[0] for b in TSUNAMI_UNMEASURED] == [
-        "B4", "B4j", "B6", "B7"]
+        "B4", "B4j"]
     with pytest.raises(ValueError, match="B4:periodic_seam"):
         validate_nemo_testcase_card_for_execution(card)
 
