@@ -2033,7 +2033,7 @@ CITATION_MAP = {
     # --- ORCA2 round 196: substep-3 AB3 midpoint-V input split ---------
     'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:486-511': [
         '!* Set extrapolation coefficients for predictor step:',
-        'va_e(ji,jj) = za1 * vn_e(ji,jj) + za2 * vb_e(ji,jj) + za3 * vbb_e(ji,jj)',
+        ('END DO   ;   END DO', 3),
         26],
     'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:715-727': [
         'IF( ln_dynadv_vec .OR. lk_linssh ) THEN      !* Vector form',
