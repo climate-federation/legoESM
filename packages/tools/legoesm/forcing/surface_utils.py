@@ -560,8 +560,10 @@ def wmo_tropopause_pressure(p_full_col: jnp.ndarray, temp_col: jnp.ndarray,
     full level in [p_top, p_bot] [Pa] whose lapse rate to the next level up
     is <= 2 K/km and whose mean lapse rate to every higher level within 2 km
     (and to 2 km itself) stays <= 2 K/km.
-    NaN where no level qualifies.  ``p_full_col``/``temp_col`` (ncol, nlev) in
-    either vertical order; heights by hypsometric integration of T.
+    NaN where no level qualifies -- incl. any NaN T in the column (it
+    poisons z above and every within-2-km test below).
+    ``p_full_col``/``temp_col`` (ncol, nlev) in either vertical order;
+    heights by hypsometric integration of T.
 
     ponytail: the tropopause snaps to a full level (no sub-layer interpolation
     of the 2 K/km crossing as in CAM's twmo), i.e. it is located to within one
@@ -610,6 +612,16 @@ def stratospheric_layer_weight(p_half_col: jnp.ndarray,
     are given, falling back per column to the climatological
     p_tp = 300 - 200 cos^2(lat) hPa (100 hPa tropics, 300 hPa poles) where
     none is found or no T is given.
+
+    ponytail: no temporal smoothing -- the ETH notes ask for the
+    instantaneous tropopause.  Measured (scripts/validate/
+    check_wmo_tropopause_fv3duo.py, code e4d7a50ff, x64) on FV3-duo C24 L32
+    daily checkpoints duo_5d days 1-5: 0% of 3456 columns fall back (also 0%
+    at duo_60d days 5-30); the tropopause layer moves >=1 level day-to-day in
+    30% of columns, >=2 in 4% (30-60 deg 43%/7%, tropics 20%/2%), 24% of
+    moves flip back next day -- consistent with synoptic motion at L32 layer
+    spacing; threshold chatter is not separately quantified.  Smooth (e.g. a
+    running mean of p_tp) only if that proves material.
     """
     p_tp = (300.0 - 200.0 * jnp.cos(lat_rad) ** 2) * 100.0
     if temp_col is not None:

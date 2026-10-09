@@ -222,6 +222,10 @@ def test_wmo_tropopause_analytic_column_and_layer_weight():
         np.testing.assert_array_equal(wc[pf < p_wmo[0]], 1.0)
         np.testing.assert_array_equal(wc[pf > p_wmo[0]], 0.0)
         np.testing.assert_array_equal(wc[pf == p_wmo[0]], 0.5)
+    np.testing.assert_array_equal(  # vertical-order flip of the weight
+        np.asarray(stratospheric_layer_weight(
+            p_half[:, ::-1], jnp.array([0.0, np.pi / 2]), p_full[:, ::-1], temp[:, ::-1])),
+        w[:, ::-1])
 
 
 def test_wmo_tropopause_fallback_to_climatology():
@@ -274,18 +278,58 @@ def test_owned_temp_selects_owned_faces():
     assert ModelDriver._owned_temp(SimpleNamespace(state=SimpleNamespace())) is None
 
 
+def _z_column(zk, tk, z_top=25.0e3):
+    """Hypsometric column on a 250 m z grid, T piecewise-linear through
+    (zk, tk); returns (z, p [Pa], T) with p from the same dry-T formula."""
+    from legoesm import constants
+
+    z = np.arange(0.0, z_top + 1.0, 250.0)
+    temp = np.interp(z, zk, tk)
+    dlnp = constants.g * np.diff(z) / (constants.R_d * 0.5 * (temp[1:] + temp[:-1]))
+    return z, 1.0e5 * np.exp(-np.concatenate([[0.0], np.cumsum(dlnp)])), temp
+
+
+def _wmo_z(z, p, temp):
+    """Height [m] of the WMO tropopause found in one column (NaN if none)."""
+    from legoesm.forcing.surface_utils import wmo_tropopause_pressure
+
+    p_tp = float(wmo_tropopause_pressure(jnp.asarray(p[None]), jnp.asarray(temp[None]))[0])
+    return np.nan if np.isnan(p_tp) else float(z[p == p_tp][0])
+
+
 def test_wmo_tropopause_checks_every_level_within_2km():
     """WMO needs the mean lapse rate to EVERY level within 2 km <= 2 K/km, not
     just to the 2 km point: 6.5 K/km to 10 km, isothermal to 10.5, -3 K by 11,
     isothermal above.  The 10 km level passes the endpoint test (1.5 K/km to
     12 km) but not 10->11 km (3 K/km); the tropopause is the 11 km level."""
-    from legoesm.forcing.surface_utils import wmo_tropopause_pressure
+    col = _z_column([0.0, 1e4, 1.05e4, 1.1e4, 2.5e4], [288.0, 223.0, 223.0, 220.0, 220.0])
+    assert _wmo_z(*col) == 1.1e4
 
-    from legoesm import constants
 
-    z = np.arange(0.0, 20001.0, 250.0)
-    temp = np.interp(z, [0.0, 1e4, 1.05e4, 1.1e4, 2e4], [288.0, 223.0, 223.0, 220.0, 220.0])
-    dlnp = constants.g * np.diff(z) / (constants.R_d * 0.5 * (temp[1:] + temp[:-1]))
-    p = 1.0e5 * np.exp(-np.concatenate([[0.0], np.cumsum(dlnp)]))
-    p_tp = float(wmo_tropopause_pressure(jnp.asarray(p[None]), jnp.asarray(temp[None]))[0])
-    np.testing.assert_allclose(p_tp, p[z == 1.1e4][0], rtol=1e-12)
+def test_wmo_tropopause_polar_inversion_double_and_nan():
+    """Polar winter: a 1.5 km surface inversion (below the 500 hPa search
+    bound) and a 1 km isothermal layer at 6-7 km (~400 hPa, fails the 2 km
+    test) are not the tropopause; the 9 km one is.  Double tropopause: the
+    lowest qualifying (WMO first) one.  Any NaN T -> NaN -> climatology."""
+    from legoesm.forcing.surface_utils import (
+        stratospheric_layer_weight,
+        wmo_tropopause_pressure,
+    )
+
+    polar = _z_column([0.0, 1.5e3, 6e3, 7e3, 9e3, 2.5e4],
+                      [240.0, 250.0, 220.75, 220.75, 207.75, 207.75])
+    assert 3.0e4 < polar[1][polar[0] == 6e3][0] < 5.0e4  # decoy inside the window
+    assert _wmo_z(*polar) == 9e3
+    double = _z_column([0.0, 1e4, 1.3e4, 1.5e4, 2.5e4],
+                       [288.0, 223.0, 223.0, 210.0, 210.0])
+    assert _wmo_z(*double) == 1e4
+    z, p, temp = double
+    temp = temp.copy()
+    temp[60] = np.nan  # 15 km, above the 10 km tropopause
+    assert np.isnan(wmo_tropopause_pressure(jnp.asarray(p[None]), jnp.asarray(temp[None]))).all()
+    ph = np.concatenate([[p[0] * 1.01], 0.5 * (p[1:] + p[:-1]), [p[-1] * 0.99]])[None]
+    lat = jnp.array([1.0])
+    np.testing.assert_array_equal(
+        stratospheric_layer_weight(
+            jnp.asarray(ph), lat, jnp.asarray(p[None]), jnp.asarray(temp[None])),
+        stratospheric_layer_weight(jnp.asarray(ph), lat))
