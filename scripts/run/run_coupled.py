@@ -567,6 +567,21 @@ def build_parser():
                         choices=["auto", "as_is", "rrtmg_sw"],
                         help="Band order of a 14-band spectral file "
                              "(issue #322); see run_amip.py.")
+    # GHG / tropospheric aerosol / volcanic: same flags as run_amip.py
+    # (2026-10-08); without them the coupled lane ran constant GHG and no
+    # external aerosol whatever the AMIP decks prescribed.
+    parser.add_argument("--ghg-forcing", type=str, default="constant",
+                        choices=["constant", "external"])
+    parser.add_argument("--ghg-file", type=str, default="")
+    parser.add_argument("--aerosol-forcing", type=str, default="off",
+                        choices=["off", "external"])
+    parser.add_argument("--aerosol-file", type=str, default="")
+    parser.add_argument("--aerosol-ccn-file", type=str, default="")
+    parser.add_argument("--aerosol-reference-aod", type=float, default=0.03)
+    parser.add_argument("--volcanic-aerosol-file", type=str, default="")
+    parser.add_argument("--volcanic-aerosol-scale", type=float, default=1.0)
+    parser.add_argument("--volcanic-aerosol-lw", action="store_true",
+                        default=False)
     parser.add_argument(
         "--orbital-insolation", action="store_true", default=False,
         dest="orbital_insolation",
@@ -1210,6 +1225,10 @@ def require_forcing_files(args) -> None:
     if args.solar_source != "constant" and not args.solar_file:
         raise SystemExit("--solar-file is required with --solar-source "
                          f"{args.solar_source}")
+    if args.ghg_forcing == "external" and not args.ghg_file:
+        raise SystemExit("--ghg-file is required with --ghg-forcing external")
+    if args.aerosol_forcing == "external" and not args.aerosol_file:
+        raise SystemExit("--aerosol-file is required with --aerosol-forcing external")
 
 
 def main():
@@ -1394,6 +1413,15 @@ def main():
         solar_tsi_var=args.solar_tsi_var,
         solar_spectral_var=args.solar_spectral_var,
         solar_spectral_band_order=args.solar_spectral_band_order,
+        ghg_forcing=args.ghg_forcing,
+        ghg_file=args.ghg_file,
+        aerosol_forcing=args.aerosol_forcing,
+        aerosol_file=args.aerosol_file,
+        aerosol_ccn_file=args.aerosol_ccn_file,
+        aerosol_reference_aod=args.aerosol_reference_aod,
+        volcanic_aerosol_file=args.volcanic_aerosol_file,
+        volcanic_aerosol_scale=args.volcanic_aerosol_scale,
+        volcanic_aerosol_lw=args.volcanic_aerosol_lw,
         ic=args.ic,
         ic_path=args.ic_path,
         convection=args.convection,

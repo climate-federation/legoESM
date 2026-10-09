@@ -69,9 +69,22 @@ CMIP6_FORCING_FLAGS=(
   --solar-source spectral_file --solar-file "${SOLAR}"
   --solar-tsi-var TSI --solar-spectral-var SSI_frac --solar-spectral-band-order rrtmg_sw
 )
-: "${GHG:=${FORCING_DIR}/ghg_amip_1979-2014.nc}"
-: "${AEROSOL:=${FORCING_DIR}/aerosol_amip_clim.nc}"
-: "${VOLCANIC:=${FORCING_DIR}/volcanic_amip_1979-2014.nc}"
+# REAL GHG / aerosol / volcanic (2026-10-08), same set as Levante's ICON pool
+# files.  The synthetic aerosol_amip_clim.nc (four hand-picked constants, no
+# longitude) set cloud droplets at ~768 cm-3 through aerosol_ccn.  Staging +
+# provenance: fv3_duo_gaps/forcing_stage/ (deck_ledgers.md 2026-10-08).
+#   GHG: input4MIPs UoM-CMIP-1-2-0 global means incl. CFC-22/CCl4/CF4.
+#   AEROSOL: Kinne MACv1 fine+coarse (radiation); AEROSOL_CCN: fine mode (CCN).
+#   VOLCANIC: ETH CMIP6 stratospheric aerosol v4.0.0, ECHAM6 bands (SW + LW).
+: "${GHG:=${CMIP6_FORCING_DIR}/ghg_cmip6_UoM-CMIP-1-2-0_halogens_0000-2014.nc}"
+: "${AEROSOL:=${CMIP6_FORCING_DIR}/aeropt_kinne_sw_b14_tot_1979-2014_MACv1.nc}"
+: "${AEROSOL_CCN:=${CMIP6_FORCING_DIR}/aeropt_kinne_sw_b14_fin_1979-2014_MACv1.nc}"
+: "${VOLCANIC:=${CMIP6_FORCING_DIR}/bc_aeropt_cmip6_volc_lw_b16_sw_b14_1979-2014_IACETH-v4.nc}"
+CMIP6_FORCING_FLAGS+=(
+  --ghg-forcing external --ghg-file "${GHG}"
+  --aerosol-forcing external --aerosol-file "${AEROSOL}" --aerosol-ccn-file "${AEROSOL_CCN}"
+  --volcanic-aerosol-file "${VOLCANIC}"
+)
 
 # --- CLM surfdata (multilayer Richards land; use_multilayer_land: true) -------
 # The production YAML's land needs the CLM surfdata NetCDF staged locally —
@@ -127,8 +140,15 @@ AMIP_PATH_FLAGS=(
   --ozone-file "${OZONE}"
   --ghg-file "${GHG}"
   --aerosol-file "${AEROSOL}"
+  --aerosol-ccn-file "${AEROSOL_CCN}"
   --volcanic-aerosol-file "${VOLCANIC}"
 )
+# Volcanic LW (ext_earth) on, as the Levante twin; AMIP_VOLCANIC_LW=0 opts out
+# for EVERY lane (AMIP and the coupled CMIP6_FORCING_FLAGS) -- one policy.
+if [[ "${AMIP_VOLCANIC_LW:-1}" == "1" ]]; then
+  AMIP_PATH_FLAGS+=( --volcanic-aerosol-lw )
+  CMIP6_FORCING_FLAGS+=( --volcanic-aerosol-lw )
+fi
 # Subgrid orography (see AMIP_SSO above, #1514).  Appended like the Levante
 # twin so an empty AMIP_SSO is an explicit opt-out rather than a silent drop.
 if [[ -n "${AMIP_SSO}" ]]; then

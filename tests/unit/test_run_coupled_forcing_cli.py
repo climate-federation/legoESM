@@ -16,7 +16,14 @@ _FORCING_DESTS = (
     "ozone_source", "ozone_forcing", "ozone_file",
     "solar_source", "solar_file", "solar_tsi_var", "solar_spectral_var",
     "solar_spectral_band_order",
+    "ghg_forcing", "ghg_file",
+    "aerosol_forcing", "aerosol_file", "aerosol_ccn_file", "aerosol_reference_aod",
+    "volcanic_aerosol_file", "volcanic_aerosol_scale", "volcanic_aerosol_lw",
 )
+# run_amip-only: solar_s0 (gray-radiation constant), aerosol_ccn (a physics
+# switch, not a forcing input).
+_AMIP_ONLY = {"solar_s0", "aerosol_ccn"}
+_PREFIXES = ("ozone_", "solar_", "ghg_", "aerosol_", "volcanic_")
 
 
 def _actions(parser):
@@ -27,8 +34,8 @@ def test_forcing_flags_match_run_amip_defaults_and_choices():
     amip, coupled = _actions(amip_parser()), _actions(coupled_parser())
     # symmetric: a ninth ozone/solar flag added to either runner must be
     # added to the other (solar_s0 is run_amip's gray-radiation constant)
-    amip_set = {d for d in amip if d.startswith(("ozone_", "solar_"))} - {"solar_s0"}
-    coupled_set = {d for d in coupled if d.startswith(("ozone_", "solar_"))}
+    amip_set = {d for d in amip if d.startswith(_PREFIXES)} - _AMIP_ONLY
+    coupled_set = {d for d in coupled if d.startswith(_PREFIXES)}
     assert amip_set == coupled_set == set(_FORCING_DESTS)
     for dest in _FORCING_DESTS:
         assert dest in coupled, dest
@@ -67,6 +74,8 @@ def test_external_channel_without_a_file_is_refused():
     _postprocess_args does (tests/unit/test_run_amip_cli.py)."""
     from scripts.run import run_coupled
     for argv in (["--ozone-forcing", "external"],
-                 ["--solar-source", "spectral_file"]):
+                 ["--solar-source", "spectral_file"],
+                 ["--ghg-forcing", "external"],
+                 ["--aerosol-forcing", "external"]):
         with pytest.raises(SystemExit):
             run_coupled.require_forcing_files(coupled_parser().parse_args(argv))
