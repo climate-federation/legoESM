@@ -20,6 +20,40 @@ Each implementation is shared where NEMO's branch is shared and is selected
 explicitly where NEMO's program differs. No stabiliser absent from NEMO and no
 silent library-default choice is introduced.
 
+## Review disposition — Decision 104
+
+The read-only Codex review of draft PR #1910 found two routing-control gaps.
+Both are closed in round 248:
+
+- **HIGH — closed-bottom mask default.** The low-level isoneutral-Laplacian
+  operator retains `closed_bottom_wmask=True` as its documented library
+  default. The documentation ties that default to NEMO's deepest-W closure at
+  `VORTEX_SMT3_VEC_R16_OMIP_L1_P3/BLD/ppsrc/nemo/traldf_iso.f90:243-259`.
+  An AST census pins all five package-level dispatcher calls: two production
+  model calls plus the box-budget probe, tendency probe, and shared wrapper.
+- **HIGH — coupled live-divisor selector.** Live `e3t(Kmm)` division is no
+  longer implied by the pre-existing horizontal-face selector. The independent
+  `redi_divisor_thickness_evaluation` field defaults to the pre-landing
+  reference/Jacobian arm, while the NEMO programs that execute the live
+  statement select `"nemo_qco_live"` explicitly. The compiled divisions are
+  `VORTEX_SMT3_VEC_R16_OMIP_L1_P3/BLD/ppsrc/nemo/traldf_iso.f90:306-310` and
+  `VORTEX_SMT3_VEC_R16_OMIP_L1_P3/BLD/ppsrc/nemo/traldf_iso.f90:327-331`.
+  GYRE selects the reference arm; SMT-3/SMT-4 and the two NEMO DINO recipes
+  select the live arm; the other VORTEX cards do not construct GM/Redi.
+- **MEDIUM — low-level-only test.** A production RK3-stage test now observes
+  the routed stage-3 SSH, and a dispatcher test independently observes the
+  constructed live divisor while retaining reference face widths. Reverse
+  plants that remove either the production hook or the dispatcher construction
+  both fail.
+
+The first DINO replay exposed an operand-precedence regression: after the
+selector split, an unnamed divisor SSH fell back to the primary SSH rather
+than the already-routed face SSH. That prediction was **REFUTED** at
+`2.053801170e-03 K`. Restoring the pre-split precedence produced the registered
+`2.056821682e-03 K`; the dispatcher test now distinguishes the fallback from
+an independently supplied divisor SSH. The complete evidence and test lines
+are in `nemo_testcases_l2_gyre_round248_redi_routing_review_receipt.md`.
+
 ## Mini-ladder and long-run evidence
 
 The vector seamount ladder adds one ORCA2-facing module per rung:
