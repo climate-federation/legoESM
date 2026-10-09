@@ -91,9 +91,25 @@ terminal-sentinel controls. The historical round-186 partial record still
 classifies `STOP_R187_TERMINAL_RESTART_OVERWRITTEN`; compatibility was checked
 directly against its existing twin directories.
 
-The full ocean-fidelity battery, citation gate, planted citation shift, and
-separate read-only review are recorded in the final validation commit for this
-round.
+The required single `tests/ocean/fidelity -n 12` battery collected 2,887
+tests. Its durable log records 2,858 passes, 7 skips, and 4 failures before the
+final worker stopped producing output at 99%; 18 scheduled tests have no
+terminal result because that worker hung on the pre-existing
+`test_prediction_plant_is_fail_closed` end-to-end control. The four failures
+are the registered pre-existing SI3 scalar-math provenance, allow-dirty scope,
+worktree-stamp, and stale GYRE spread-floor reds. No round-188 test failed.
+The stuck parent was interrupted after the log had been unchanged for more
+than seven minutes; the full battery was not rerun.
+
+The default citation gate passes 274 citations with zero unmapped, failing, or
+unaudited map entries. This receipt passes 3/3 compiled citations, and the
+round-187 correction passes 5/5. Shifting
+`ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcmod.f90:341-346` by two lines makes the gate
+fail at the first endpoint, as required.
+
+The separate `codex exec --sandbox read-only` review was attempted and
+returned `failed to initialize in-process app-server client: Read-only file
+system`. Verdict: **independent review unavailable in-sandbox**.
 
 No package/model file changed, so no ORCA2, GYRE, DINO, tank, or month
 trajectory could move in this round. This is an instrument/run-protocol round;
