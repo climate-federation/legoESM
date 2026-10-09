@@ -91,9 +91,9 @@ this deck selects at
 blended by the same weights one block earlier
 (`GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/stprk3_stg.f90:172`).
 
-legoESM builds ONE ratio from the already-blended height: `vertical.py:238-239`
-is the surface-weighted numerator, `vertical.py:247` is the ratio, and
-`vertical.py:251` is the thickness statement the substitution re-executes with
+legoESM builds ONE ratio from the already-blended height: `vertical.py:239-240`
+is the surface-weighted numerator, `vertical.py:248` is the ratio, and
+`vertical.py:252` is the thickness statement the substitution re-executes with
 the oracle's ratio in place of legoESM's.  Because the ratio statement is
 LINEAR in the height, combining ratios and taking the ratio of the combined
 height are the same number, and can differ only in rounding — which is what

@@ -4124,7 +4124,7 @@ Round 25 landed two source associations inside NEMO's hydrostatic pressure
 gradient and showed the changed operator bit-exact given NEMO's inputs on GYRE
 only.  Rule 12 asks for that row on every card that executes it, and the
 testcase recipe pins `pgf_scheme="nemo_sco"` on all of them
-(`nemo_testcase_recipe.py:375,630,3376`).
+(`nemo_testcase_recipe.py:376,631,3370`).
 
 The lane-1 tanks have no HPG-literal dump and do not need one.  NEMO
 accumulates `dyn_hpg`, `dyn_vor` and `dyn_adv` into a zeroed `puu(Krhs)`
@@ -5191,7 +5191,7 @@ ratio is NOT zero during step 1: `r3u(:,:,Kaa)` is assigned at STAGE 1 from
 `ssha` (`stprk3_stg.F90:156`, the assignment at `:163`), so a stage-3
 thickness already carries a nonzero free-surface ratio inside the step that
 produces the kt=2 state.  And the MIN rule is not what the production stage
-builder uses: `nemo_qco_live_face_geometry_cgrid` (`vertical.py:772`)
+builder uses: `nemo_qco_live_face_geometry_cgrid` (`vertical.py:773`)
 transcribes NEMO's area-weighted MEAN (`domqco.F90:166-169` for the MLF
 entry, `:219-222` for the RK3 one) and both time-stepping lanes call it, so
 MIN survives only as an ablation arm.  What the measured `3.06e-08` actually
@@ -5779,7 +5779,7 @@ Caught by the gate.
    tests stop there.  What should that mask be on a card with no mesh file?
 3. **The slow forcing's depth average** still uses the min rule where NEMO
    uses the area-weighted mean (`domqco.F90:166-169`, `:219-222`, transcribed
-   in `vertical.py:772`).  `3.06e-08` at kt=2.  Land it, or leave it as debt?
+   in `vertical.py:773`).  `3.06e-08` at kt=2.  Land it, or leave it as debt?
 4. **Decision 16 is preregistered and NOT landed** — the unconditional
    vorticity call in the pre-stage 2-D momentum RHS.  Its predictions are in
    the round-29 manifest; landing it needs cross-card runs this round did not
@@ -6582,7 +6582,7 @@ cause.  Measured: all four —
 `test_nemo_gyre_forced_trajectory_is_finite_and_stable`,
 `test_nemo_gyre_wind_forcing_sign_chain_end_to_end` and
 `test_surface_stress_implicit_wiring` — reach the SAME raise site with the
-same stack, `vertical.py:66-71`: "literal NEMO QCO e3t requires
+same stack, `vertical.py:67-72`: "literal NEMO QCO e3t requires
 explicit/reference nemo_e3t_0 and is_active".  **One cause, CONFIRMED.**
 (ROUND-34 NOTE: the user answered this as decision 17 and the guard's mask half
 now sits BELOW the early return, so that combined message no longer exists and
@@ -6596,7 +6596,7 @@ carries no such field where `OceanPartialCellCoordinate` does.
 
 **But the cause is not the geometry choice round 29 registered.**  The guard
 sits ABOVE the function's own linear-free-surface early return
-(`vertical.py:76-77`), which returns `e3t_0` and never reads the mask.  The
+(`vertical.py:77-78`), which returns `e3t_0` and never reads the mask.  The
 demo card resolves `linear_free_surface=True`, so it is refused for an operand
 its own arm does not consume.  And that resolution is the FAITHFUL one: the
 demo card reproduces NEMO's `GYRE_BARE`, whose compile keys are
@@ -7857,8 +7857,8 @@ stays above, because the early return needs it.
 
 **The four `test_nemo_recipe` failures go green and nothing else moves**: that
 file was `4 failed, 20 passed` and is now `24 passed`.  All four failed in the same
-guard, whose surviving `e3t_0` half is now `vertical.py:66-71` and whose mask
-half is `vertical.py:85-89`.
+guard, whose surviving `e3t_0` half is now `vertical.py:67-72` and whose mask
+half is `vertical.py:86-90`.
 
 A behavioural test cannot see the ORDER -- a linear-free-surface caller that
 DOES supply a mask is served either way -- so a fourth arm reads the source and
@@ -10426,7 +10426,7 @@ macro is `e3t(i,j,k,t) = e3t_0(i,j,k)*(1 + r3t(i,j,t))`
 `stprk3_stg.F90:156` computes `r3ta` from `ssha`, and `stprk3_stg.F90:231`
 assigns it to `r3t(:,:,Kaa)`.  NEMO never forms `(ssh + ht_0)/ht_0`.
 
-legoESM's shared `compute_ocean_jacobian` (`vertical.py:1914`) formed the SUM
+legoESM's shared `compute_ocean_jacobian` (`vertical.py:1915`) formed the SUM
 first, so the low bits of the small ratio were lost to cancellation.
 
 **THE INSTRUMENT WAS VALIDATED BEFORE THE CLAIM.**  On host arrays, from
@@ -10710,7 +10710,7 @@ through the shared helper, one feeds legoESM's, and the arm's verdict sentence
 is now READ OFF those rows instead of asserted beside them.
 
 **THE CHANGE IS ONE STATEMENT IN ONE SHARED HELPER**, no knob and no default
-that preserves the old behaviour.  `compute_ocean_jacobian` (`vertical.py:1914`)
+that preserves the old behaviour.  `compute_ocean_jacobian` (`vertical.py:1915`)
 forms `1 + eta*r1_h` with the reciprocal taken in the PROMOTED dtype of ssh and
 bathymetry — an existing test caught the first version taking it in the
 bathymetry's storage dtype, at a relative `3.0e-10` that is f32 eps times the
