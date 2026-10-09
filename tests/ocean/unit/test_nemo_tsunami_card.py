@@ -207,7 +207,7 @@ def _step_fields(card, eta, *, caller_scope=None, model=None):
     """One model step of the card from (eta, the card's rest u/v/T/S).
 
     No y-wrap scope by default: the card's model config carries it.
-    ``caller_scope`` forces the process-global flag around the call.
+    ``caller_scope`` sets a contrary caller scope the model must ignore.
     """
     import contextlib
     import jax.numpy as jnp
@@ -365,8 +365,43 @@ def test_the_step_takes_its_topology_from_the_config_not_the_caller(card):
         assert off[f][1].tobytes() == on[f][1].tobytes(), f
     walled = _step_fields(_walled(card), eta0)
     assert walled["eta"][1].tobytes() != on["eta"][1].tobytes()
+    # False is honoured too: a walled config stays walled under a True scope.
+    walled_on = _step_fields(_walled(card), eta0, caller_scope=True)
+    for f in walled:
+        assert walled_on[f][1].tobytes() == walled[f][1].tobytes(), f
     with pytest.raises(ValueError, match="meridionally_periodic"):
         validate_nemo_testcase_card(_walled(card))
+
+
+def test_public_tendencies_take_their_topology_from_the_config(card):
+    """tendencies() and tendencies_with_diagnostics() honour the config's
+    y-wrap without a caller scope, and ignore a contrary one."""
+    import contextlib
+    import jax
+    import jax.numpy as jnp
+    from legoesm.grids.halo_latlon import meridional_periodicity
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel)
+    r = card.recipe
+    eta0 = np.roll(np.asarray(r.initial_state.eta.data), -79, axis=0)
+    s0 = r.initial_state._replace(
+        eta=r.initial_state.eta.replace(data=jnp.asarray(eta0)))
+
+    def bits(model_config, method, scope=None):
+        m = LatLonCGridOceanModel(r.grid, r.z_coord, model_config)
+        with (contextlib.nullcontext() if scope is None
+              else meridional_periodicity(scope)):
+            out = getattr(m, method)(s0, dt=card.dt_s)
+        return [np.asarray(x).tobytes() for x in jax.tree_util.tree_leaves(out)]
+
+    periodic = r.model_config
+    walled = _walled(card).recipe.model_config
+    for method in ("tendencies", "tendencies_with_diagnostics"):
+        on = bits(periodic, method)
+        assert on == bits(periodic, method, scope=False), method
+        off = bits(walled, method)
+        assert off == bits(walled, method, scope=True), method
+        assert on != off, method
 
 
 def test_j_neighbour_helpers_index_map():
