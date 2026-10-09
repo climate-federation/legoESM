@@ -224,9 +224,9 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
     require(report.get("initial_mode") == "card_own_state",
             "month did not use the card's own initial state")
     initial = report.get("initial_entry", {})
-    require(tuple(initial) == month.FIELDS and all(
-        row["bit_exact"] and int(row["unequal"]) == 0
-        for row in initial.values()), "independent entry is not bit-exact")
+    require(set(initial) == set(month.FIELDS) and all(
+        initial[name]["bit_exact"] and int(initial[name]["unequal"]) == 0
+        for name in month.FIELDS), "independent entry is not bit-exact")
     refusal = report.get("runtime_refusal")
     require(refusal is not None and EXPECTED_ERROR in str(refusal.get("message")),
             "terminal is not the registered live-thickness refusal")
@@ -259,13 +259,13 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
     require(all(value in expected_checkpoints for value in missing),
             "missing-oracle registry contains an unrequested step")
     for row in table:
-        require(tuple(row["candidate_max_abs"]) == month.FIELDS,
+        require(set(row["candidate_max_abs"]) == set(month.FIELDS),
                 f"step {row['step']}: candidate field registry moved")
         if int(row["step"]) in missing:
             require(row.get("error_rows") is None,
                     f"step {row['step']}: missing oracle has a score")
         else:
-            require(tuple(row.get("error_rows", {})) == month.FIELDS,
+            require(set(row.get("error_rows", {})) == set(month.FIELDS),
                     f"step {row['step']}: oracle score registry moved")
 
     boundary_step = int(refusal["step"])

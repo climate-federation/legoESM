@@ -57,7 +57,11 @@ def test_complete_production_report_confirms_frozen_boundary() -> None:
 
 
 def test_missing_streams_stop_for_record_without_inventing_scores() -> None:
-    result = gate.classify(_report(missing=True))
+    report = _report(missing=True)
+    report["initial_entry"] = dict(sorted(report["initial_entry"].items()))
+    report["growth_table"][0]["candidate_max_abs"] = dict(sorted(
+        report["growth_table"][0]["candidate_max_abs"].items()))
+    result = gate.classify(report)
     assert result["status"] == "STOPPED_FOR_RECORD"
     assert result["prediction_ledger"]["R186-P3"] == "REFUTED"
 
