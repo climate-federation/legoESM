@@ -18,7 +18,6 @@ Public API: state_new = model.step(state, dt)
 
 from __future__ import annotations
 
-import functools
 import os
 from functools import partial
 from typing import NamedTuple
@@ -29,7 +28,6 @@ import numpy as np
 
 from legoesm.core.field import Field
 from legoesm.core.precision import cast_pytree
-from legoesm.grids.halo_latlon import meridional_periodicity
 from legoesm.grids.latlon import (
     LatLonGrid,
     compute_v_face_coords,
@@ -2826,19 +2824,6 @@ def _seed_centred_forcing_carry(surface_forcing, freshwater, rho_0, land_mask):
     return out
 
 
-def _honour_meridional_periodicity(step_body):
-    """Trace the step body inside the y-wrap when the config selects it, so
-    every entry point (and every jit cache on ``self``) sees the card's
-    topology, not the caller's global state."""
-    @functools.wraps(step_body)
-    def wrapped(self, *args, **kwargs):
-        if not self.config.meridionally_periodic:
-            return step_body(self, *args, **kwargs)
-        with meridional_periodicity(True):
-            return step_body(self, *args, **kwargs)
-    return wrapped
-
-
 class LatLonCGridOceanModel:
     """Boussinesq hydrostatic ocean model on a C-grid latitude-longitude grid.
 
@@ -5590,7 +5575,6 @@ class LatLonCGridOceanModel:
             return_nemo_operator_components=return_nemo_operator_components,
         )
 
-    @_honour_meridional_periodicity
     def _step_impl(self, state: LatLonCGridOceanState, dt: float,
                    freshwater=None, surface_forcing=None,
                    sponge=None, *, _apply_implicit_vmix: bool = True,
@@ -15966,3 +15950,25 @@ class _NEMOWSLdfDiagnosticTrace(NamedTuple):
 
     state_after: object
     ldf_diagnostics: object
+
+
+def _honour_meridional_periodicity(step_body):
+    """Trace the step body inside the y-wrap when the config selects it, so
+    every entry point (and every jit cache on ``self``) sees the card's
+    topology, not the caller's global state."""
+    import functools
+
+    from legoesm.grids.halo_latlon import meridional_periodicity
+
+    @functools.wraps(step_body)
+    def wrapped(self, *args, **kwargs):
+        if not self.config.meridionally_periodic:
+            return step_body(self, *args, **kwargs)
+        with meridional_periodicity(True):
+            return step_body(self, *args, **kwargs)
+    return wrapped
+
+
+# Every entry point reaches the step body, so the config's y-wrap goes there.
+LatLonCGridOceanModel._step_impl = _honour_meridional_periodicity(
+    LatLonCGridOceanModel._step_impl)
