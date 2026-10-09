@@ -524,7 +524,10 @@ def assert_een_planetary_metric_term_vanishes(grid) -> None:
     become the whole operator rather than most of it.
 
     Raises ``ValueError`` when any scale factor varies, because the missing
-    metric term would otherwise be a silent transcription gap.
+    metric term would otherwise be a silent transcription gap.  This proof is
+    for nonlinear flux-form cards only.  NEMO ``ln_dynadv_OFF`` instead sets
+    ``n_dynadv=np_LIN_dyn`` (``dynadv.f90:185``) and ``ntot=np_COR``
+    (``dynvor.f90:873-878``), so that linear arm must not call this assertion.
     """
     import numpy as _np
     for name in ("dx_u", "dx_v", "dy_u", "dy_v", "dx_T", "dy_T",

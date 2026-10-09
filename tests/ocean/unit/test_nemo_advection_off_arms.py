@@ -19,19 +19,26 @@ from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
     _bc_horizontal_momentum_advection_flux_form,
     _bc_vertical_momentum_advection,
 )
-from legoesm.ocean.fidelity.nemo_testcase_recipe import build_tsunami_zco_card
+from legoesm.ocean.fidelity.nemo_testcase_recipe import build_vortex_smt_zps_card
 
 
 @pytest.fixture(scope="module")
 def card():
-    return build_tsunami_zco_card()
+    base = build_vortex_smt_zps_card()
+    config = base.recipe.model_config._replace(
+        momentum_flux_scheme="none",
+        vertical_momentum_scheme="none",
+        tracer_advection="none",
+        adaptive_implicit_vertadv=False,
+    )
+    return base._replace(recipe=base.recipe._replace(model_config=config))
 
 
 def _field(shape, seed):
     return jnp.asarray(np.random.default_rng(seed).standard_normal(shape))
 
 
-def test_tsunami_card_selects_every_off_arm(card):
+def test_explicit_card_config_selects_every_off_arm(card):
     m = card.recipe.model_config
     assert (m.momentum_advection, m.momentum_flux_scheme,
             m.vertical_momentum_scheme, m.tracer_advection) == (

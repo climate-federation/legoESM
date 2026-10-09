@@ -4204,11 +4204,14 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 "zad_qco_evaluation must be one of ['generic', "
                 f"'nemo_literal'], got {_zad_qco!r}")
-        if _zad_qco == "nemo_literal" and _vert_mom_scheme != "nemo_advective":
+        if (_zad_qco == "nemo_literal"
+                and _vert_mom_scheme not in ("nemo_advective", "none")):
             raise ValueError(
                 "zad_qco_evaluation='nemo_literal' requires "
-                "vertical_momentum_scheme='nemo_advective'; the QCO ww and "
-                "live Kmm thickness operands are a coupled dynzad path")
+                "vertical_momentum_scheme in ('nemo_advective', 'none'); "
+                "the QCO ww and live Kmm thickness operands are a coupled "
+                "dynzad path when advection runs, while ln_dynadv_OFF still "
+                "executes wzv for tracer transports (stprk3_stg.f90:332-339)")
         _wzv_call2 = getattr(config, "wzv_call2_evaluation", "generic")
         if _wzv_call2 not in {"generic", "nemo_literal"}:
             raise ValueError(
@@ -4849,9 +4852,10 @@ class LatLonCGridOceanModel:
                 f"pgf_quadrature must be one of {_valid_pgf_quad}, "
                 f"got {_pgf_quad!r}")
         if getattr(config, "vorticity_scheme", "al81") == "een_planetary":
-            # NEMO ln_dynvor_een under ln_dynadv_vec=.false. (dynvor.F90:874
-            # routes np_EEN; dyn_vor_init:891-893 gives the flux-form arm
-            # ntot = np_CME).  vor_een's np_CME branch (dynvor.F90:780-783) is
+            # NEMO ln_dynvor_een under ln_dynadv_vec=.false.  The nonlinear
+            # flux-form schemes route ntot=np_CME (dynvor.f90:883-886), while
+            # ln_dynadv_OFF routes np_LIN_dyn and ntot=np_COR (:873-878).
+            # vor_een's np_CME branch (dynvor.F90:773-777) is
             # ff_f plus a metric term whose two coefficients are
             #   di_e2v_2e1e2f = (e2v(i+1,j) - e2v(i,j)) * 0.5 * r1_e1e2f
             #   dj_e1u_2e1e2f = (e1u(i,j+1) - e1u(i,j)) * 0.5 * r1_e1e2f
@@ -4859,8 +4863,8 @@ class LatLonCGridOceanModel:
             # are one repeated constant those differences are bitwise zero and
             # the branch IS np_COR.  On any other mesh they are not, and the
             # transcription would be silently incomplete -- so this scheme is
-            # admitted only on a constant-scale-factor grid, and only with the
-            # flux-form momentum it was read off.
+            # admitted only on a constant-scale-factor grid.  The linear OFF
+            # arm never evaluates that term and is valid on a curvilinear mesh.
             _cor_s = getattr(config, "coriolis_scheme", "matsuno_split")
             if _cor_s != "explicit_ab2":
                 raise ValueError(
@@ -4901,9 +4905,10 @@ class LatLonCGridOceanModel:
                     'barotropic_coriolis_split="live"; got '
                     f"{_bt_cor!r} / {_bt_spl!r}.")
             # The constant-scale-factor requirement is a property of the MESH,
-            # which this config-only validator cannot see; it is enforced by
-            # ``assert_een_planetary_metric_term_vanishes`` at the point the
-            # card is built (nemo_testcase_recipe.py), where the grid is.
+            # which this config-only validator cannot see; nonlinear flux cards
+            # enforce it with ``assert_een_planetary_metric_term_vanishes`` at
+            # card construction.  The ln_dynadv_OFF arm is np_COR and therefore
+            # has no metric-term precondition.
         if getattr(config, "vorticity_scheme", "al81") in (
                 "ene_total", "een_total"):
             _vs = getattr(config, "vorticity_scheme", "al81")
