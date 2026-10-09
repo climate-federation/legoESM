@@ -7,7 +7,7 @@ name = "legoesm"
 version = "1.0.0"
 description = "legoESM: A Differentiable Earth System Model in JAX"
 readme = "README.md"
-license = "LicenseRef-PolyForm-Noncommercial-1.0.0"
+license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.11"
 authors = [
