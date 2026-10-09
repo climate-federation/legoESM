@@ -2025,7 +2025,7 @@ CITATION_MAP = {
         19],
     'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:642-650': [
         '! Half-step back interpolation of SSH for surface pressure computation at step jit+1/2',
-        ('END DO   ;   END DO', 5),
+        ('END DO   ;   END DO', 13),
         9],
     'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:652-660': [
         '! Surface pressure gradient',
