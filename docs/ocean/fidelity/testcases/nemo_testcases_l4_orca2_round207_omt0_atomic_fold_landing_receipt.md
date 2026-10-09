@@ -78,7 +78,8 @@ loud correction; its original false conclusion remains visible as history.
 The passive completed-state replay reproduces all terminal values and keeps
 the first over-floor value at substep 2's V metric transport: 1,714 wet cells,
 RMS `3.089909796130036e-11`, maximum `9.313225746154785e-10` in `zhV`.
-Its source statement is the product cited above at `dynspg_ts.f90:532,535`.
+Its source statement is the product cited above at
+`ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo/dynspg_ts.f90:532,535`.
 
 The source-ordered operand split gives:
 
