@@ -41,8 +41,8 @@ DEFAULT_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/tsunami_rounds/round2/"
     "oracle_tsunami_r2/p3")
 ARMS = ("independent", "given_entry", "rhs", "spgts", "handoff", "stages",
-        "b6_scaling")
-B6_KTS = (2, 5)
+        "b6_scaling", "front")
+B6_KTS = (2, 5, 10)
 B6_LAMBDAS = (0.0, 0.25, 0.5, 1.0)
 PLANTS = ("score", "entry", "external", "stage_entry", "forcing")
 _HALO = 2
@@ -77,15 +77,20 @@ def read_step(cr, root: Path, kt: int) -> dict:
     return {k: interior(v) for k, v in groups.items()}
 
 
+SEAM_PAD = "wrap"      # --seam-pad: the redundant west/south face record
+
+
 def pad_u(a):
     """One redundant west record: the periodic wrap of the east face."""
     a = np.asarray(a)
-    return np.concatenate([a[:, -1:], a], axis=1)
+    first = a[:, -1:] if SEAM_PAD == "wrap" else np.zeros_like(a[:, :1])
+    return np.concatenate([first, a], axis=1)
 
 
 def pad_v(a):
     a = np.asarray(a)
-    return np.concatenate([a[-1:], a], axis=0)
+    first = a[-1:] if SEAM_PAD == "wrap" else np.zeros_like(a[:1])
+    return np.concatenate([first, a], axis=0)
 
 
 def bump(a, size=1.0e-3):
@@ -164,6 +169,18 @@ def run(root: Path, *, arm: str, kt_max: int = 10, plant: str | None = None,
     require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
     require(jax.default_backend() == "cpu", "the ladder must run on CPU")
     cr, walk = _tools()
+    if arm == "front":
+        rows = []
+        for kt in range(1, kt_max + 1):
+            a = np.abs(read_step(cr, root, kt)["f_ssh_bb"]) > 1e-12
+            j, i = np.where(a.any(1))[0], np.where(a.any(0))[0]
+            rows.append({"kt": kt, "j_range": [int(j.min()), int(j.max())],
+                         "i_range": [int(i.min()), int(i.max())],
+                         "n_cells": int(a.sum()),
+                         "cells_to_j_seam": int(min(j.min(), a.shape[0] - 1 - j.max())),
+                         "cells_to_i_seam": int(min(i.min(), a.shape[1] - 1 - i.max()))})
+        return {"arm": arm, "label": "NEMO record only (|f_ssh_bb| > 1e-12)",
+                "legoesm_git_sha": sha, "root": str(root), "per_kt": rows}
     card = build_tsunami_zco_card()
     s0 = card.recipe.initial_state
     nlev = int(card.recipe.z_coord.n_levels)
@@ -204,6 +221,7 @@ def run(root: Path, *, arm: str, kt_max: int = 10, plant: str | None = None,
                             for k in ("e_vv_k1_bb", "e_vv_b_bb"))
              for kt in kts}
     out = {"arm": arm, "label": None, "legoesm_git_sha": sha, "plant": plant,
+           "seam_pad": SEAM_PAD,
            "eos_depth_arm": eos_depth or f"card's own ({card.recipe.model_config.eos_depth})",
            "bar": BAR, "root": str(root), "kts": list(kts),
            "seam_column_max_abs_velocity_in_entry": {
@@ -408,11 +426,16 @@ def main(argv=None) -> int:
     ap.add_argument("--kt-max", type=int, default=10)
     ap.add_argument("--json", type=Path)
     ap.add_argument("--plant", choices=PLANTS)
+    ap.add_argument("--seam-pad", choices=("wrap", "zero"), default="wrap",
+                    help="value of the redundant west/south face record when "
+                         "seeding (default: the periodic wrap)")
     ap.add_argument("--eos-depth", choices=("insitu", "geometric"),
                     help="measurement arm: override the card's eos_depth for "
                          "this run only (the card itself is not changed)")
     ap.add_argument("--allow-dirty", action="store_true")
     a = ap.parse_args(argv)
+    global SEAM_PAD
+    SEAM_PAD = a.seam_pad
     try:
         out = run(a.root, arm=a.arm, kt_max=a.kt_max, plant=a.plant,
                   allow_dirty=a.allow_dirty, eos_depth=a.eos_depth)
@@ -434,6 +457,9 @@ def main(argv=None) -> int:
                       f"{fu['name'] if fu else 'ALL BOUNDARIES BIT-IDENTICAL'} "
                       f"({k[lab]['n_unequal_boundaries']}/"
                       f"{k[lab]['n_boundaries']} unequal)")
+        elif "j_range" in k:
+            print(f"kt{k['kt']} j {k['j_range']} i {k['i_range']} "
+                  f"cells to j-seam {k['cells_to_j_seam']}")
         elif "lambdas" in k:
             print(f"kt{k['kt']} E(lambda): " + ", ".join(
                 f"{r['lambda']}:{r['max_abs_card_minus_prediction']:.3e}"
