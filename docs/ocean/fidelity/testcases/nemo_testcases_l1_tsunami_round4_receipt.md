@@ -220,6 +220,7 @@ changed library default. Disposition, every finding CONFIRMED and acted on:
 | ratchets: dispatch hardening, validate-strict coverage, private imports, constants, inline coefficients, config footguns | `5861 passed, 2 failed`: both reds are in files this round never touched (`tests/unit/test_jra55_do.py` literal 273.15; `packages/land/legoesm/land/restart.py`) |
 | VORTEX/WS-RK3 suites | `170 passed, 3 failed`: the three certified-card digest tests fail identically on the round's starting commit `c7115d9fd461` (checked in a throwaway worktree) — pre-existing |
 | citation gate, this receipt | `PASS`, 0 failures, 0 map entries failing audit (after re-anchoring 70 legoESM-line keys the arms shifted); planted shift of `dynvor.f90:857-860` `FAIL` (`SYMBOL-NOT-AT-LINE`), exit 1 |
+| citation gate json sha256 | gate `d97118b8b9d8309e`, plant `37e30affe1fc02d4`; the GYRE phase-3 round-8 receipt (whose keys moved) re-gated `PASS` |
 | unit tests after the review fixes | `11 passed` (off arms), card `28 passed, 1 xfailed` with them |
 | NOT gated (honour system) | dual review: codex only (headless brief names one review). Controlled comparison: each landing differs from its before arm in the named fields only. Non-vacuity: shown above |
 
@@ -251,3 +252,8 @@ Tracer advection OFF: `TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/traadv.f90:444`,
 The density depth: `TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/eosbn2.f90:361`.
 The first non-bit statement: `TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/stp2d.f90:137-138`.
 The one-level correction: `TSUNAMI_OMIP_L1_RK3/BLD/ppsrc/nemo/stprk3_stg.f90:413-414`.
+
+Commit note: the review disposition (section 8) and the stage-3 wording
+(section 2) landed inside the commit titled "Re-anchor the recipe citations
+the TSUNAMI validator lines shifted"; the review fixes themselves are the
+commit before it.
