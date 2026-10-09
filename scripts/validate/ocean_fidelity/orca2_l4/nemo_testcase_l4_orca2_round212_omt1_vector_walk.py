@@ -76,7 +76,8 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
     elif plant == "slow-v-replay":
         report["slow_v_arm"]["input"]["comparison_bit_exact"] = False
     elif plant == "vector-mask-replay":
-        report["vector_v_split"]["record_replay_vs_target"]["bit_exact"] = False
+        report["vector_v_split"]["cumulative_substitution_raw_v"][
+            "ssvmask"]["bit_exact"] = False
 
     require(report["claim_label"] == "independent OMT-1", "claim label moved")
     require(report["record_admission"]["stream_count"] == 2,
@@ -99,10 +100,10 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
     split = report["vector_v_split"]
     require(split["input_order"] == list(r197.INPUT_ORDER),
             "vector-V input order moved")
-    require(split["candidate_replay_vs_passive"]["bit_exact"],
-            "candidate vector-V replay does not reproduce the passive trace")
-    require(split["record_replay_vs_target"]["bit_exact"],
-            "all-recorded vector-V replay does not reproduce NEMO")
+    require(split["cumulative_substitution_raw_v"]["ssvmask"]["bit_exact"],
+            "all-recorded vector-V operands do not close the raw expression")
+    require(split["pre_lbc_output_record"] == "UNMEASURED_WITH_SPEC",
+            "pre-boundary vector-V output disposition moved")
     require(report["first_nonbit"] == _first(
         report["source_rows"], "comparison_bit_exact"),
         "first non-bit selector moved")
@@ -257,12 +258,8 @@ def measure(deck_root: Path, twin_a: Path, twin_b: Path,
         "ssvmask": np.max(
             np.asarray(raw_mask.vmask, dtype=np.float64), axis=-1)[:, :90],
     }
-    target_v = np.asarray(substeps["v_exit"][index])
     candidate_terms = r197._literal_terms(candidate_inputs)
     reference_terms = r197._literal_terms(reference_inputs)
-    candidate_post = r197._associate_v(candidate_terms["raw_va_e"], card)
-    reference_post = r197._associate_v(reference_terms["raw_va_e"], card)
-    passive_post = r205._native_v(trace["v_exit"][index])
     operand_rows = {
         name: r197._row(candidate_inputs[name], reference_inputs[name])
         for name in r197.INPUT_ORDER
@@ -273,7 +270,7 @@ def measure(deck_root: Path, twin_a: Path, twin_b: Path,
         accumulated[name] = reference_inputs[name]
         terms = r197._literal_terms(accumulated)
         cumulative_rows[name] = r197._row(
-            r197._associate_v(terms["raw_va_e"], card), target_v)
+            terms["raw_va_e"], reference_terms["raw_va_e"])
     one = np.asarray([1.0], dtype=np.float64)
     next_one = np.nextafter(one, np.inf)
     raw = {
@@ -302,10 +299,10 @@ def measure(deck_root: Path, twin_a: Path, twin_b: Path,
             "source_statement": "dynspg_ts.f90:674-678",
             "input_order": list(r197.INPUT_ORDER),
             "operand_rows": operand_rows,
-            "candidate_replay_vs_passive": r197._row(
-                candidate_post, passive_post),
-            "record_replay_vs_target": r197._row(reference_post, target_v),
-            "cumulative_substitution_post_v": cumulative_rows,
+            "candidate_raw_vs_all_recorded_raw": r197._row(
+                candidate_terms["raw_va_e"], reference_terms["raw_va_e"]),
+            "cumulative_substitution_raw_v": cumulative_rows,
+            "pre_lbc_output_record": "UNMEASURED_WITH_SPEC",
         },
         "terminal_ulp_control": {
             "bit_exact": bool(np.array_equal(one, next_one)),

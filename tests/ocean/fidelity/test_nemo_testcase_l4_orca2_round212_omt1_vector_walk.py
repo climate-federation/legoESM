@@ -30,8 +30,10 @@ def _report() -> dict:
         },
         "vector_v_split": {
             "input_order": list(gate.r197.INPUT_ORDER),
-            "candidate_replay_vs_passive": {"bit_exact": True},
-            "record_replay_vs_target": {"bit_exact": True},
+            "cumulative_substitution_raw_v": {
+                "ssvmask": {"bit_exact": True},
+            },
+            "pre_lbc_output_record": "UNMEASURED_WITH_SPEC",
         },
         "first_nonbit": None,
         "first_over_floor": None,
