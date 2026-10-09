@@ -109,9 +109,27 @@ and refuses.
 
 ## Validation and review
 
-Focused validation and the full ocean-fidelity battery are recorded below in
-the final validation commit. Independent read-only review is also recorded
-there; an unavailable sandbox review is not represented as a PASS.
+Focused round-205/206 validation passes 15/15. The one permitted
+`tests/ocean/fidelity -n 12` battery collected 2,984 tests and was stopped at
+99% after its final end-to-end stage-sweep prediction plant remained active
+without a verdict. Its preserved log records 2,954 passes, seven skips and
+exactly the four registered pre-existing failures: the GYRE round-129
+spread-floor stamp, allow-dirty scope, worktree-stamp ratchet and SI3
+scalar-math provenance gate. Nineteen tests remained unclassified. The exact
+last queued ID,
+`test_nemo_testcase_phase3_stage_sweep_gate.py::test_prediction_plant_is_fail_closed`,
+was then run alone as prescribed; it also remained active without a verdict
+for 15 minutes and was stopped. This is an **incomplete compiler stall**, not
+a PASS and not a round-207 failure. Both round-207 focused gate files passed.
+
+The cumulative citation gate passes with 274 citations, no failures and no
+unmapped citations; the round-207 receipt gate also passes and its rigid
+shift plant refuses. The V-product closing-predicate plant refuses.
+
+Independent review was attempted with `codex exec --sandbox read-only` and
+exited 1 before reading the diff: `failed to initialize in-process app-server
+client: Read-only file system (os error 30)`. Independent review is
+unavailable in-sandbox; this is not represented as a PASS.
 
 ## OPEN
 
