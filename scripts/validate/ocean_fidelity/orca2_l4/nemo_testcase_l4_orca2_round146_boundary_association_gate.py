@@ -317,8 +317,10 @@ def transport_v_operand_names() -> tuple[str, ...]:
     return ("e1v", "va_e", "zhvp2_e")
 
 
-def transport_v_operand_split(card, state, trace, oracle, *, plant: str):
-    """Split and replay compiled ``dynspg_ts.f90:568-591`` at substep 2."""
+def transport_v_operand_split(
+    card, state, trace, oracle, *, plant: str, substep: int = 2,
+):
+    """Split and replay compiled ``dynspg_ts.f90:568-591`` at one substep."""
 
     import jax.numpy as jnp
 
@@ -333,8 +335,10 @@ def transport_v_operand_split(card, state, trace, oracle, *, plant: str):
     raw = card.recipe.z_coord.nemo_een_barotropic
     require(raw is not None, "rung-0 card has no raw NEMO V metrics")
     grid = card.recipe.grid
-    index = 1
-    prefix = "j002"
+    require(1 <= substep <= len(trace["transport_metric_v"]),
+            "V metric-transport substep is outside the trace")
+    index = substep - 1
+    prefix = f"j{substep:03d}"
     candidate = {
         "e1v": r97._native_v(np.asarray(grid.dx_v)),
         "va_e": r97._native_v(np.asarray(
@@ -389,6 +393,30 @@ def transport_v_operand_split(card, state, trace, oracle, *, plant: str):
         "masked_replay_vs_production": exact_row(masked_replay, production),
         "model_vmask_vs_oracle": exact_row(model_vmask, oracle_vmask),
     }
+    single_substitutions = {}
+    cumulative_substitutions = {}
+    cumulative = dict(candidate)
+    for name in names:
+        single = dict(candidate)
+        single[name] = reference[name]
+        single_first = np.asarray(b(
+            b(jnp.asarray(single["e1v"]))
+            * b(jnp.asarray(single["va_e"]))))
+        single_transport = np.asarray(b(
+            b(jnp.asarray(single_first))
+            * b(jnp.asarray(single["zhvp2_e"]))))
+        single_substitutions[name] = exact_row(
+            single_transport, oracle_transport)
+
+        cumulative[name] = reference[name]
+        cumulative_first = np.asarray(b(
+            b(jnp.asarray(cumulative["e1v"]))
+            * b(jnp.asarray(cumulative["va_e"]))))
+        cumulative_transport = np.asarray(b(
+            b(jnp.asarray(cumulative_first))
+            * b(jnp.asarray(cumulative["zhvp2_e"]))))
+        cumulative_substitutions[name] = exact_row(
+            cumulative_transport, oracle_transport)
     if plant == "transport-v-bit":
         require(rows["unmasked_transport_v"]["differing_cells"] == 1,
                 "transport-v-bit plant stayed green")
@@ -434,6 +462,8 @@ def transport_v_operand_split(card, state, trace, oracle, *, plant: str):
     return {
         "operand_rows": operand_rows,
         "rows": rows,
+        "single_substitution_transport_v": single_substitutions,
+        "cumulative_substitution_transport_v": cumulative_substitutions,
         "continuity_dv": dv_row,
         "after_ssh": exact_row(
             candidate_after, np.asarray(oracle[f"{prefix}_ssha_e"])),
