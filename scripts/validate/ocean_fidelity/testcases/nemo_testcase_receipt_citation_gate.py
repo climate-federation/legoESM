@@ -2363,7 +2363,7 @@ CITATION_MAP = {
         '&   ) * ssvmask(ji,jj)', 5],
     'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:721-753': [
         'IF( .NOT.lk_linssh ) THEN   !* Update ocean depth (variable volume case only)',
-        "& l4_canon_2d(ua_e,'U'), l4_canon_2d(va_e,'V')", 33],
+        ("& l4_canon_2d(ua_e,'U'), l4_canon_2d(va_e,'V')", 1), 33],
     # --- ORCA2 round 189: bounded replacement restart list ---
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/in_out_manager.f90:51-51':
         'INTEGER, DIMENSION(10) :: nn_stocklist',
