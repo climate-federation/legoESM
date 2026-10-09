@@ -161,8 +161,13 @@ labelled an instrument test and the bit-identity is quoted as a measurement;
 (3) Python half-even round used for NINT — replaced by Fortran NINT (inert at
 rn_Dt = 2880).
 
-Citation gate: run from this receipt's "## Round 2 —" heading; result and
-shifted-citation plant quoted in the commit that adds this receipt.
+Citation gate (from this receipt's "## Round 2 —" heading): PASS, 26
+citations, 0 unmapped, 0 failures, 0 map entries failing audit; planting a
+2-line shift on the tradmp.f90 193-194 citation makes it FAIL (exit 1). The
+default cumulative run is also PASS (274 citations): the arm's insertions
+shifted 55 map entries citing the two edited model files, re-anchored by the
+exact parent-to-tip line mapping (anchor texts and extents unchanged), as the
+campaign's earlier re-anchor commits did. Round 1's receipt still PASSes (20).
 
 ## OPEN for round 3
 
