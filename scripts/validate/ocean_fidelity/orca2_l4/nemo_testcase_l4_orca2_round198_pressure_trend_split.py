@@ -132,7 +132,8 @@ def _production_pressure(eta, card) -> np.ndarray:
 
 
 def _source_pressure(eta, card, *, fold_aware: bool,
-                     source_rounded: bool) -> dict[str, np.ndarray]:
+                     source_rounded: bool,
+                     apply_candidate_mask: bool = False) -> dict[str, np.ndarray]:
     """Factor the V gradient across its fold operand and source association."""
 
     import jax
@@ -158,6 +159,10 @@ def _source_pressure(eta, card, *, fold_aware: bool,
     zldg = jnp.asarray(card.recipe.model_config.g, dtype=jnp.float64)
     scaled = round_value(-zldg * delta)
     pressure = round_value(scaled * r1_e2v)
+    if apply_candidate_mask:
+        mask = jnp.asarray(
+            card.recipe.initial_state.v_mask.data[1:], dtype=jnp.float64)
+        pressure = round_value(pressure * mask)
     values = jax.device_get((north, delta, r1_e2v, scaled, pressure))
     return {
         name: np.asarray(value) for name, value in zip(
@@ -254,6 +259,9 @@ def split_unit(context: dict[str, object], coefficient_root: Path) -> dict[str, 
         target_back, card, fold_aware=False, source_rounded=True)
     reference_pressure_fold_plain = _source_pressure(
         target_back, card, fold_aware=True, source_rounded=False)
+    reference_pressure_fold_masked = _source_pressure(
+        target_back, card, fold_aware=True, source_rounded=False,
+        apply_candidate_mask=True)
     reference_pressure_fold = _source_pressure(
         target_back, card, fold_aware=True, source_rounded=True)
     target_pressure = np.asarray(oracle["j002_zv_spg"])
@@ -282,6 +290,8 @@ def split_unit(context: dict[str, object], coefficient_root: Path) -> dict[str, 
             reference_pressure_wall_rounded["zv_spg"], target_pressure),
         "reference_ssh_fold_plain_pressure_vs_target": _row(
             reference_pressure_fold_plain["zv_spg"], target_pressure),
+        "reference_ssh_fold_masked_pressure_vs_target": _row(
+            reference_pressure_fold_masked["zv_spg"], target_pressure),
         "reference_ssh_fold_pressure_vs_target": _row(
             reference_pressure_fold["zv_spg"], target_pressure),
         "candidate_fold_pressure_vs_target": _row(
