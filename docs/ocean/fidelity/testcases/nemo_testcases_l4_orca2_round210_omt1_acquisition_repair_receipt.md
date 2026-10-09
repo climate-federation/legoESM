@@ -72,9 +72,23 @@ Focused round-209/210 tests pass 11/11. Shell syntax and Python compilation
 pass. No `packages/` file changed, so no GYRE, DINO, tank, rung-0, rung-10 or
 ORCA2 trajectory can move in this round.
 
-Independent review and the one permitted full fidelity battery are reported
-below after they complete. The citation gate is run both on this receipt and
-on its cumulative default, with a shifted-span plant required to fire.
+Independent review was attempted with `codex exec --sandbox read-only` and
+failed before reading the diff:
+`failed to initialize in-process app-server client: Read-only file system
+(os error 30)`. Independent review is unavailable in-sandbox; this is not a
+PASS verdict.
+
+The citation gate passes on this receipt (2 citations, 0 failures, 0 unmapped)
+and on the cumulative default (274 citations, 0 failures, 0 unmapped). Shifting
+the `dynspg_ts` span by two lines makes the receipt gate fail.
+
+The single permitted `tests/ocean/fidelity -n 12` battery collected 3,009
+tests. It reached 99% before the compiler-heavy tail stopped producing results
+and was interrupted without a final pytest summary. The preserved log contains
+2,989 passes, seven skips, zero errors, and four failures, all registered
+pre-existing reds: the GYRE round-129 spread-floor stamp, escape-scope ratchet,
+worktree-stamp ratchet, and SI3 scalar-math provenance gate. Nine tests remained
+unclassified. No second full battery was started.
 
 ## OPEN
 
