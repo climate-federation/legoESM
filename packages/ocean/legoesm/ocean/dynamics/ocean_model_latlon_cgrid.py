@@ -5009,7 +5009,7 @@ class LatLonCGridOceanModel:
                     "time levels, so a single-step captured flux would not "
                     "be the applied one.")
             if config.tracer_advection in ("ppm_fct", "fct2",
-                                           "dst3_multidim", "som"):
+                                           "dst3_multidim", "som", "none"):
                 raise ValueError(
                     "store_salt_flux is not supported with tracer_advection="
                     f"{config.tracer_advection!r}: the scheme does not expose "
