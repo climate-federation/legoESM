@@ -37,6 +37,12 @@ def _report():
         },
         "source_order": list(gate.ENTRY_ORDER),
         "terminal_ulp_control": {"bit_exact": False, "differing_cells": 1},
+        "post_landing_transport_v_split": {
+            "operand_order": ["e1v", "va_e", "zhvp2_e"],
+            "cumulative_substitution_transport_v": {
+                "zhvp2_e": {"comparison_bit_exact": True},
+            },
+        },
         "slow_v_arm": {
             "input": {"comparison_bit_exact": True},
             "substep_table": [{"substep": index + 1} for index in range(65)],
@@ -62,6 +68,11 @@ def test_clean_report_passes_and_preserves_source_order():
     result = gate.classify(_report())
     assert result["status"] == "PASS_R205_OMT0_SUBSTEP_WALK"
     assert tuple(result["source_order"]) == gate.ENTRY_ORDER
+
+
+def test_transport_v_replay_plant_fires():
+    with pytest.raises(gate.GateError, match="does not close"):
+        gate.classify(_report(), "transport-v-replay")
 
 
 @pytest.mark.parametrize("plant", gate.PLANTS[1:])

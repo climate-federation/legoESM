@@ -52,7 +52,7 @@ from nemo_testcase_l2_gyre_round14_advmean import read_ordered
 FLOOR = np.float64(2.0e-10)
 PLANTS = (
     "none", "record-header", "twin-ulp", "source-order", "passivity",
-    "terminal-ulp",
+    "terminal-ulp", "transport-v-replay",
 )
 STREAMS = (
     ("substeps", "oracle_bt_substeps_kt00000001.bin"),
@@ -261,6 +261,59 @@ def _summary_table(trace, oracle, masks) -> tuple[list[dict], list[dict]]:
     return rows, table
 
 
+def _ordered_transport_v_split(card, trace, ordered, masks, substep: int = 2):
+    """Replay NEMO's source-ordered ``zhV=e1v*va_e*zhvp2_e`` offline."""
+
+    import jax.numpy as jnp
+
+    from legoesm.core.source_rounding import nemo_source_round
+
+    require(1 <= substep <= 2, "ordered OMT-0 record covers substeps 1-2")
+    index = substep - 1
+    names = ("e1v", "va_e", "zhvp2_e")
+    candidate = {
+        "e1v": _native_v(card.recipe.grid.dx_v),
+        "va_e": _native_v(trace["transport_velocity_v"][index]),
+        "zhvp2_e": _native_v(trace["transport_face_depth_v"][index]),
+    }
+    reference = {
+        "e1v": np.asarray(ordered["metric_e1v"][index]),
+        "va_e": np.asarray(ordered["v_mid"][index]),
+        "zhvp2_e": np.asarray(ordered["face_depth_v_mid"][index]),
+    }
+    oracle = np.asarray(ordered["metric_transport_v"][index])
+    operand_rows = {
+        name: _score(candidate[name], reference[name], masks["v"])
+        for name in names
+    }
+
+    def product(values):
+        first = nemo_source_round(
+            nemo_source_round(jnp.asarray(values["e1v"]))
+            * nemo_source_round(jnp.asarray(values["va_e"])))
+        return np.asarray(nemo_source_round(
+            nemo_source_round(first)
+            * nemo_source_round(jnp.asarray(values["zhvp2_e"]))))
+
+    cumulative = dict(candidate)
+    cumulative_rows = {}
+    for name in names:
+        cumulative[name] = reference[name]
+        cumulative_rows[name] = _score(
+            product(cumulative), oracle, masks["v"])
+    return {
+        "substep": substep,
+        "source_statement": "dynspg_ts.f90:532,535",
+        "operand_order": list(names),
+        "operand_rows": operand_rows,
+        "candidate_product": _score(product(candidate), oracle, masks["v"]),
+        "cumulative_substitution_transport_v": cumulative_rows,
+        "first_nonbit_operand": _first([
+            {"name": name, **operand_rows[name]} for name in names
+        ], "comparison_bit_exact"),
+    }
+
+
 def classify(report: dict[str, object], plant: str = "none") -> dict[str, object]:
     require(plant in PLANTS, f"unknown plant {plant}")
     report = copy.deepcopy(report)
@@ -275,6 +328,10 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
         report["offline_replay_passivity"]["ssh"] = False
     elif plant == "terminal-ulp":
         report["terminal_ulp_control"]["bit_exact"] = True
+    elif plant == "transport-v-replay":
+        report["post_landing_transport_v_split"][
+            "cumulative_substitution_transport_v"]["zhvp2_e"][
+                "comparison_bit_exact"] = False
 
     require(report["claim_label"] == "independent OMT-0", "claim label moved")
     require(report["record_admission"]["stream_count"] == 2, "stream census moved")
@@ -290,6 +347,12 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
     require(report["terminal_ulp_control"] == {
         "bit_exact": False, "differing_cells": 1},
         "terminal one-ULP control did not fire")
+    split = report["post_landing_transport_v_split"]
+    require(tuple(split["operand_order"]) == ("e1v", "va_e", "zhvp2_e"),
+            "V transport operand order moved")
+    require(split["cumulative_substitution_transport_v"]["zhvp2_e"][
+        "comparison_bit_exact"],
+        "all-recorded V transport replay does not close bit-exactly")
     require(report["slow_v_arm"]["input"]["comparison_bit_exact"],
             "recorded slow-V substitution did not install exactly")
     require(len(report["slow_v_arm"]["substep_table"]) == 65,
@@ -461,6 +524,8 @@ def measure(deck_root: Path, twin_a: Path, twin_b: Path,
         materialize_v_transport=True)
     fold_unit_rows, fold_unit_table = _summary_table(
         fold_unit[2], substeps, masks)
+    transport_v_split = _ordered_transport_v_split(
+        card, fold_unit[2], ordered, masks, substep=2)
     one = np.asarray([1.0], dtype=np.float64)
     next_one = np.nextafter(one, np.inf)
     raw = {
@@ -524,6 +589,7 @@ def measure(deck_root: Path, twin_a: Path, twin_b: Path,
             "first_over_floor": _first(fold_unit_rows, "at_floor"),
             "substep_table": fold_unit_table,
         },
+        "post_landing_transport_v_split": transport_v_split,
         "terminal_ulp_control": {
             "bit_exact": bool(np.array_equal(one, next_one)),
             "differing_cells": int(np.count_nonzero(one != next_one)),
