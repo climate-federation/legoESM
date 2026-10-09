@@ -6,6 +6,23 @@ Status: **STOPPED_FOR_RECORD**
 Claim labels: every rung-0 number below is **independent**.  No given-entry
 rung-7 number is mixed into the tables.
 
+## LOUD CORRECTION FROM ROUND 188: the 95-step replacement is invalid
+
+The round-187 claim that ending the experiment at step 95 was a safe way to
+preserve the step-95 restart is **RETRACTED**.  The operator ran that launcher;
+NEMO stopped during initialisation with exit 123 because experiment length 95
+is not divisible by the resolved `nn_fsbc=2`.  No replacement restart was
+written.  The compiled check is
+`ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcmod.f90:341-346`.
+
+Round 188 replaces that protocol with an even 96-step run whose explicit
+restart list ends `...,95,96`.  The step-96 file is a terminal sentinel: after
+step 95 is written, NEMO advances `nitrst` to 96 at
+`ORCA2_OMIP_L4/BLD/ppsrc/nemo/restart.f90:188-202`, so the terminal open cannot
+truncate the step-95 file.  The round-187 launcher now refuses immediately and
+points to the round-188 launcher; it can no longer print the invalid READY
+claim.
+
 ## Frozen question
 
 Round 187 was preregistered before inspecting or scoring the round-186
@@ -103,14 +120,14 @@ Artifacts:
 - `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round187/rung0_ladder.json`
 - `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round187/growth_walk_final.json`
 
-## Safe replacement acquisition
+## Retracted replacement acquisition
 
-The committed replacement launcher uses new twin target names and terminates
-at step 95.  It retains the exact admitted rung-0 binary and physical deck,
-requests the same rank-complete checkpoint list, and changes only run
-protocol.  Ending at 95 prevents a later terminal step from reopening the
-final listed filename.  Its preflight passes; no NEMO run was attempted in
-the sandbox.
+**RETRACTED by the operator-run result described above.**  The committed
+round-187 replacement launcher used new twin target names and terminated at
+step 95, but NEMO's compiled surface-boundary consistency check rejects that
+odd experiment length before stepping.  Its syntactic preflight did not cover
+this compiled runtime invariant.  The launcher now refuses and directs the
+operator to round 188's terminal-sentinel acquisition.
 
 Launcher:
 `scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round187_growth_acquisition/run.sh`.
@@ -153,7 +170,7 @@ system`.  Verdict: **independent review unavailable in-sandbox**.
 
 ## OPEN
 
-1. The operator must run the round-187 replacement launcher.  Admission
+1. The operator must run the round-188 terminal-sentinel launcher.  Admission
    requires both ranks in two array-identical twins, the complete step
    10..95 list, and step-10 calibration to round 83.
 2. Admit step 95, complete the frozen table, and confirm the already-first
