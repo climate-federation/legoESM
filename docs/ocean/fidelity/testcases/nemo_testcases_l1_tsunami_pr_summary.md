@@ -146,7 +146,14 @@ ORCA2 itself.
 
 ## 8. Round-9 review and choices
 
-Single review (codex): see the round-9 commit that records it.
+Single review (codex), read-only, of `git diff origin/main-pin...HEAD -- packages tests`
+at `127054c33`: **BLOCK**, one finding (log `codex_review.log`, sha256
+`eeb7ea57db6cab43`). No dangling seamount-only
+reference. No j-wrap sign or index error against NEMO's periodic copy.
+
+| finding | disposition |
+|---|---|
+| BLOCKER (codex: CONFIRMED): the model scopes its config's `meridionally_periodic` (default `False`) around the step and around `replace_land_mask`, so a caller that sets the process-global `set_meridionally_periodic(True)` now gets a walled step. The rewritten inertial-oscillation test no longer covers that path | **CONFIRMED as a behaviour change, NOT FIXED: it needs a decision.** On `origin/main-pin` the setter's only caller is `tests/ocean/unit/test_barotropic_inertial_oscillation.py:243,254`, which this PR moves to the config. There is no production caller (grep over `packages src scripts tests`). The behaviour is exactly what the operator's round-6 HIGH finding 1 demanded ("config = single source of truth"), and the round-8 review shipped it. The two reviews disagree on design, not on code |
 
 | choice | ASKED or UNASKED |
 |---|---|
