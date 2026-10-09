@@ -420,3 +420,26 @@ def test_j_neighbour_helpers_index_map():
         assert col(hl.lat_south(a)) == [4, 1, 2, 3]
         assert col(hl.lat_faces_from_north(a)) == [4, 1, 2, 3, 4]
         assert col(hl.lat_faces_from_north(a, south=a[:1])) == [4, 1, 2, 3, 4]
+
+
+def test_mask_rebuilds_and_runtime_check_follow_the_config(card):
+    """step_checked's face-mask check and replace_land_mask see the y-wrap
+    the config selects, not the caller's scope."""
+    from legoesm.grids.halo_latlon import meridional_periodicity
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel)
+    from legoesm.ocean.init_latlon_cgrid import replace_land_mask
+    r = card.recipe
+    s0 = r.initial_state
+    m = LatLonCGridOceanModel(r.grid, r.z_coord, r.model_config)
+    with meridional_periodicity(False):
+        m._assert_runtime_invariants(s0)
+    walled = LatLonCGridOceanModel(r.grid, r.z_coord,
+                                   _walled(card).recipe.model_config)
+    with pytest.raises(ValueError, match="u_mask/v_mask"):
+        walled._assert_runtime_invariants(s0)
+    v0 = np.asarray(s0.v_mask.data).tobytes()
+    mask = s0.land_mask.data
+    assert np.asarray(replace_land_mask(
+        s0, mask, meridionally_periodic=True).v_mask.data).tobytes() == v0
+    assert np.asarray(replace_land_mask(s0, mask).v_mask.data).tobytes() != v0

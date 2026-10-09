@@ -362,6 +362,7 @@ def replace_land_mask(
     state: LatLonCGridOceanState,
     new_land_mask: jnp.ndarray,
     seam_wall_rows: jnp.ndarray | None = None,
+    meridionally_periodic: bool = False,
 ) -> LatLonCGridOceanState:
     """Replace land_mask and recompute u_mask/v_mask atomically.
 
@@ -369,10 +370,15 @@ def replace_land_mask(
     face masks stay consistent with the cell mask.  ``seam_wall_rows``
     (optional, ``(n_lat,)``, 1 = walled) closes the periodic-seam u-face
     on those rows for a partial-periodic geometry; ``None`` (default) =
-    fully periodic (byte-identical).
+    fully periodic (byte-identical).  ``meridionally_periodic`` must match
+    the model's config (True: the j-seam v-faces stay wet); default = the
+    closed N/S walls.
     """
+    from legoesm.grids.halo_latlon import meridional_periodicity
     new_land_mask = jnp.asarray(new_land_mask)
-    u_mask, v_mask = compute_face_masks(new_land_mask, seam_wall_rows=seam_wall_rows)
+    with meridional_periodicity(meridionally_periodic):
+        u_mask, v_mask = compute_face_masks(new_land_mask,
+                                            seam_wall_rows=seam_wall_rows)
     return state._replace(
         land_mask=Field(data=new_land_mask, name="land_mask",
                         dims=state.land_mask.dims, units=""),
