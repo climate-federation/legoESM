@@ -2028,7 +2028,7 @@ CITATION_MAP = {
         'vn_adv(:,:)     = 0._wp', 2],
     'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:890-906': [
         'un_adv(:,:) = un_adv(:,:) / r1_wgt2s',
-        'DEALLOCATE( l2_adv_before_u, l2_adv_before_v )', 17],
+        "WRITE(l2_adv_unit) l4_canon_2d(un_adv,'U'), l4_canon_2d(vn_adv,'V')", 17],
     'ORCA2_OMIP_L4_R96SPG/BLD/ppsrc/nemo/dynspg_ts.f90:770-779': [
         'IF( .NOT.lk_linssh ) THEN   !* Update ocean depth',
         "&                   , hur_e, 'U',  1._wp, hvr_e, 'V',  1._wp  , ssha_e, 'T', 1._wp, ldfull=.TRUE. )", 10],
