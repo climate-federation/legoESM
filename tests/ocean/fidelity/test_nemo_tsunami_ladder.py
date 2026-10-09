@@ -70,27 +70,33 @@ def test_given_entry_label_and_entry_plant():
     assert _max(planted, ".ssh") > 1e-4 > _max(clean, ".ssh")
 
 
-def test_geometric_arm_moves_the_pressure_gradient_row_and_is_recorded():
-    insitu = _run("rhs")
-    geo = _run("rhs", eos_depth="geometric")
-    assert geo["eos_depth_arm"] == "geometric"
-    assert "insitu" in insitu["eos_depth_arm"]
-    assert _max(insitu, ".u") > 1e-11 > 1e-15 > _max(geo, ".u")
+def test_card_selects_geometric_and_the_insitu_arm_moves_the_rhs_row():
+    card = _run("rhs")
+    insitu = _run("rhs", eos_depth="insitu")
+    assert "geometric" in card["eos_depth_arm"]
+    assert insitu["eos_depth_arm"] == "insitu"
+    assert _max(insitu, ".u") > 1e-11 > 1e-15 > _max(card, ".u")
 
 
-def test_stage_entry_and_external_plants_move_their_stage_rows():
+def _stage_val(o, n, f, k="max_abs"):
+    return next(r[k] for r in o["per_kt"][0]["stages"][n - 1]["rows"]
+                if r["name"].endswith("." + f))
+
+
+def test_stage_entry_has_no_consumer_with_advection_off(monkeypatch):
+    # One wet level: the correction (stprk3_stg.f90:413-414) overwrites u, v
+    # with uu_b, vv_b, and with ln_traadv_OFF a stage restarts T, S from Kbb
+    # (:503-505), so a stage-entry velocity reaches no output.  The FCT2
+    # card plant shows the seeding itself still delivers the bump.
     clean = _run("stages")
     ent = _run("stages", plant="stage_entry")
     ext = _run("stages", plant="external")
-    s = lambda o, n, f, k="max_abs": next(  # noqa: E731
-        r[k] for r in o["per_kt"][0]["stages"][n - 1]["rows"]
-        if r["name"].endswith("." + f))
-    # one wet level: the barotropic correction (stprk3_stg.F90:440-445) makes
-    # every stage's u, v the external uu_b, vv_b, so a stage-entry velocity is
-    # consumed ONLY by the tracer transport -- the plant must be read on T.
-    assert s(ent, 2, "T", "rms") != s(clean, 2, "T", "rms")
-    assert s(ent, 2, "u") == s(clean, 2, "u")
-    assert s(ext, 1, "ssh") > 1e-4 > s(clean, 1, "ssh")
+    assert _stage_val(ent, 2, "T", "rms") == _stage_val(clean, 2, "T", "rms")
+    assert _stage_val(ent, 2, "u") == _stage_val(clean, 2, "u")
+    assert _stage_val(ext, 1, "ssh") > 1e-4 > _stage_val(clean, 1, "ssh")
+    _plant_card(monkeypatch, tracer_advection="fct2")
+    assert (_stage_val(_run("stages", plant="stage_entry"), 2, "T", "rms")
+            != _stage_val(_run("stages"), 2, "T", "rms"))
 
 
 def test_forcing_plant_moves_the_nemo_forcing_arm():
@@ -121,13 +127,54 @@ def test_row_helper_reports_first_unequal_cell_and_stats():
     assert lad.row("y", a, a)["bit_identical"]
 
 
-def test_b6_scaling_is_quadratic_in_velocity_and_the_floor_is_tiny(monkeypatch):
+def _plant_card(monkeypatch, **fields):
+    import legoesm.ocean.fidelity.nemo_testcase_recipe as rec
+    real = rec.build_tsunami_zco_card
+
+    def planted():
+        c = real()
+        m = c.recipe.model_config._replace(**fields)
+        return c._replace(recipe=c.recipe._replace(model_config=m))
+
+    monkeypatch.setattr(rec, "build_tsunami_zco_card", planted)
+
+
+def _b6_errors(monkeypatch):
     # A stale (un-awaited) observer read breaks this: the first measurement
     # gave ratios 1.5 and 2.0 before the effects barrier was added.
     monkeypatch.setattr(lad, "B6_KTS", (2,))
     out = lad.run(ROOT, arm="b6_scaling", kt_max=2, allow_dirty=True,
                   eos_depth="geometric")
     k = out["per_kt"][0]
-    e = {r["lambda"]: r["max_abs_card_minus_prediction"] for r in k["lambdas"]}
+    return {r["lambda"]: r["max_abs_card_minus_prediction"] for r in k["lambdas"]}
+
+
+def test_b6_off_puts_every_lambda_on_the_floor(monkeypatch):
+    assert max(_b6_errors(monkeypatch).values()) < 1e-17
+
+
+def test_b6_up3_plant_is_quadratic_in_velocity(monkeypatch):
+    _plant_card(monkeypatch, momentum_flux_scheme="nemo_up3",
+                vertical_momentum_scheme="nemo_up3")
+    e = _b6_errors(monkeypatch)
     assert e[0.0] < 1e-15 < 1e-9 < e[1.0]
     assert abs(e[1.0] / e[0.5] - 4.0) < 1e-6
+
+
+def test_b7_off_keeps_tracers_bitwise_and_the_fct2_plant_moves_them(monkeypatch):
+    clean = _run("given_entry")
+    assert all(r["bit_identical"] for r in _rows(clean)
+               if r["name"].endswith((".T", ".S")))
+    _plant_card(monkeypatch, tracer_advection="fct2")
+    assert _max(_run("given_entry"), ".T") > 1e-4
+
+
+def test_record100_leaves_the_bar_at_kt15_on_the_j_seam():
+    with pytest.raises(Exception):
+        lad.run(ROOT, arm="independent", kt_max=11, allow_dirty=True)
+    with pytest.raises(Exception):
+        lad.run(ROOT, arm="record100", kt_max=101, allow_dirty=True)
+    out = lad.run(ROOT, arm="record100", kt_max=16, allow_dirty=True)
+    assert out["first_kt_over_bar"]["ssh"] == 15
+    last = {r["name"].split(".")[-1]: r for r in out["per_kt"][-1]["rows"]}
+    assert last["vv_b"]["max_abs_cell"][0] in (0, 200)

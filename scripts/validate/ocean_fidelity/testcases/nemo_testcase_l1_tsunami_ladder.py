@@ -41,7 +41,8 @@ DEFAULT_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/tsunami_rounds/round2/"
     "oracle_tsunami_r2/p3")
 ARMS = ("independent", "given_entry", "rhs", "spgts", "handoff", "stages",
-        "b6_scaling", "front")
+        "b6_scaling", "front", "record100")
+RECORD_STEPS = 100     # namelist_cfg nn_itend: the f_ groups exist for every kt
 B6_KTS = (2, 5, 10)
 B6_LAMBDAS = (0.0, 0.25, 0.5, 1.0)
 PLANTS = ("score", "entry", "external", "stage_entry", "forcing")
@@ -109,6 +110,8 @@ def row(name, ref, cand, *, plant=False):
         "n_unequal": int(bad.shape[0]),
         "first_unequal_cell": bad[0].tolist() if bad.size else None,
         "max_abs": float(np.max(np.abs(d))),
+        "max_abs_cell": [int(x) for x in np.unravel_index(
+            int(np.argmax(np.abs(d))), d.shape)],
         "rms": float(np.sqrt(np.mean(d * d))),
         "ref_max_abs": float(np.max(np.abs(ref))),
         "bit_identical": bool(bad.shape[0] == 0 and not plant),
@@ -186,8 +189,8 @@ def run(root: Path, *, arm: str, kt_max: int = 10, plant: str | None = None,
     nlev = int(card.recipe.z_coord.n_levels)
     require(nlev == 1, "the TSUNAMI card executes one level")
     kts = range(1, kt_max + 1)
-    require(1 <= kt_max <= cr.FULL_STEPS,
-            "kt_max must lie in 1..10 (the full-frame steps)")
+    kt_cap = RECORD_STEPS if arm == "record100" else cr.FULL_STEPS
+    require(1 <= kt_max <= kt_cap, f"kt_max must lie in 1..{kt_cap}")
 
     def seed(g, lam=1.0):
         eta = bump(g["e_ssh_bb"]) if plant == "entry" else g["e_ssh_bb"]
@@ -213,13 +216,14 @@ def run(root: Path, *, arm: str, kt_max: int = 10, plant: str | None = None,
             card.recipe.grid, card.recipe.z_coord, cfg,
             **({} if hooks is None else {"_nemo_ws_test_hooks": hooks}))
 
-    records = {kt: read_step(cr, root, kt) for kt in kts}
+    records = {kt: read_step(cr, root, kt) for kt in kts
+               if kt <= cr.FULL_STEPS}
     seam = {kt: max(float(np.max(np.abs(records[kt][k][:, [0, -1]])))
                     for k in ("e_uu_k1_bb", "e_uu_b_bb"))
-            for kt in kts}
+            for kt in records}
     seam |= {f"{kt}_j": max(float(np.max(np.abs(records[kt][k][[0, -1], :])))
                             for k in ("e_vv_k1_bb", "e_vv_b_bb"))
-             for kt in kts}
+             for kt in records}
     out = {"arm": arm, "label": None, "legoesm_git_sha": sha, "plant": plant,
            "seam_pad": SEAM_PAD,
            "eos_depth_arm": eos_depth or f"card's own ({card.recipe.model_config.eos_depth})",
@@ -229,15 +233,17 @@ def run(root: Path, *, arm: str, kt_max: int = 10, plant: str | None = None,
            "per_kt": []}
 
     with meridional_periodicity(card.j_periodic):
-        if arm in ("independent", "given_entry"):
+        if arm in ("independent", "given_entry", "record100"):
             m = model()
-            out["label"] = ("INDEPENDENT" if arm == "independent"
-                            else "GIVEN-NEMO-ENTRY (whole step)")
+            out["label"] = {
+                "independent": "INDEPENDENT",
+                "record100": "INDEPENDENT (the f_ record, kt = 1..100)",
+                "given_entry": "GIVEN-NEMO-ENTRY (whole step)"}[arm]
             state = s0
             for kt in kts:
-                g = records[kt]
+                g = records.get(kt) or read_step(cr, root, kt)
                 ref = after_step_reference(cr, root, kt, g)
-                state = m.step(state if arm == "independent" else seed(g),
+                state = m.step(state if arm != "given_entry" else seed(g),
                                dt=card.dt_s)
                 cand = state_fields(state)
                 rows = []
@@ -250,6 +256,11 @@ def run(root: Path, *, arm: str, kt_max: int = 10, plant: str | None = None,
                     rows.append(row(f"{arm}.kt{kt}.{f}", ref[f], c))
                 out["per_kt"].append({"kt": kt, "rows": rows,
                                       "first_unequal": first_unequal(rows)})
+            out["first_kt_over_bar"] = {
+                f: next((p["kt"] for p in out["per_kt"] for r in p["rows"]
+                         if r["name"].endswith("." + f)
+                         and r["status"] != "AT-BAR"), None)
+                for f in ("ssh", "uu_b", "vv_b", "u", "v")}
         elif arm == "rhs":
             out["label"] = "GIVEN-NEMO-ENTRY (stp_2D right-hand side)"
             for kt in kts:
