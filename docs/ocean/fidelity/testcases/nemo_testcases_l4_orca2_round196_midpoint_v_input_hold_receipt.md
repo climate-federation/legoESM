@@ -82,10 +82,30 @@ The four known-answer plants refuse as required (transcript SHA256
 `80db744ec1eb3cebc41b694d40d6b2a501a803636c9d6fd00a3ac94f772593e1`).
 The pre-measurement focused battery passed 37/37 in 1.52 s.
 
+The final focused set (rounds 146, 194, 195, 196 and the citation gate)
+passed 61/61 in 4.28 s (SHA256
+`bb08abd64ac34ec575a0475dac5cd6bc12b88020110bac3f3a41355e709553e4`).
+The default citation audit passes 274 citations with zero failures and zero
+unmapped citations (SHA256
+`2afd9263411a6a64400de2043498c858dd5d42e58817fcb566b0acf2ce92f64d`).
+This receipt passes five citations with the same zero counts (SHA256
+`536b3866d0ff2fd25d2ae5f4f986501655bd679dc5ed171a93105330115033db`).
+Shifting the AB3 span by two lines fails as required (SHA256
+`0fe3501289f7fc153fefbfa95215b95d90d40dd5b957a4d5f3c9e3b1b88959fe`).
+
+The required single `tests/ocean/fidelity -n 12` battery collected 2,938
+tests and reached 88%. It displayed exactly the four registered pre-existing
+reds: the SI3 scalar-math provenance gate, the GYRE spread-floor record gate,
+the stamp-scope ratchet and the worktree-stamp ratchet. It then stopped
+producing progress and was interrupted once; it was not rerun. This is an
+incomplete battery, not a green claim. Its transcript SHA256 is
+`8126b2f0b8ccc36b3db24c0b3e610be712520f2c95e7f93b0ea87f4e004a68a1`.
+
 The mandated separate `codex exec --sandbox read-only` review exited before
 loading the diff because its in-process app-server client could not initialize
 on a read-only filesystem. Verdict: **independent review unavailable
-in-sandbox**.
+in-sandbox** (transcript SHA256
+`eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5`).
 
 No configuration choice, carried-state change, stabiliser, tolerance, NEMO
 source change or executable observer was introduced. ASKED choices: round
