@@ -7,6 +7,18 @@ are reported separately as **independent OMT-0** and **given NEMO's entry**;
 their censuses are identical. The shipped rung-10 card, sea ice, its six
 selectors, and its `unmeasured_features` tuple are unchanged.
 
+## CORRECTION (round 207, 2026-10-09)
+
+The statements below that both DINO processes were externally killed before
+producing a score are **RETRACTED**. Codex's foreground tool call timed out;
+the detached integrations continued and both logs end in the complete gate
+result `2.056821682e-03 K <= 2.244317642e-03 K -- PASS`. Their SHA-256 values
+are `4026dcc50417660a2251902e76f045ff74bdaa34f5fd62566bc2bd6e52c3b63e`
+and `ba51562599d41738c5b4727a833f9f4948ee73c42506400456430e61f7293c7d`.
+Round 207 therefore resumes from the already-qualified census and promotes
+the exact candidate. The original text is retained below as the audit trail,
+but its resource-termination and DINO-unmeasured conclusions are false.
+
 ## Result
 
 The complete four-statement candidate is Decision-96 eligible on both OMT-0

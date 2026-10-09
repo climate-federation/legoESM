@@ -1511,6 +1511,9 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo/dynspg_ts.f90:532,535': [
         'zhU(ji,jj) = e2u(ji,jj) * ua_e(ji,jj) * zhup2_e(ji,jj)',
         'zhV(ji,jj) = e1v(ji,jj) * va_e(ji,jj) * zhvp2_e(ji,jj)', 2],
+    'ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo/dynspg_ts.f90:461-484': [
+        'IF ((jn<3).AND.ll_init) THEN',
+        'va_e(ji,jj) = za1 * vn_e(ji,jj) + za2 * vb_e(ji,jj) + za3 * vbb_e(ji,jj)', 24],
     'ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo/dynspg_ts.f90:512-519': [
         'zhup2_e(ji,jj) = hu_0(ji,jj)',
         ('e1e2t(ji,jj+1) * zsshp2_e(ji,jj+1)', 1), 8],
