@@ -1,6 +1,6 @@
 # ORCA2 round 192 preregistration — atomic slow-depth and V-transport unit
 
-Date: 2026-10-09. Base: `4191b3671f4d1de0197cab03c156c41c66d7db1f`.
+Date: 2026-10-09. Base: `4191b3671f4daf8605bb958e86281a1fc90eba55`.
 Rung-0 and month numbers are **independent hierarchy rung 0**. Rung-7
 numbers, if reached, are **given NEMO's entry**. They are never mixed in one
 table. The shipped rung-10 sea-ice selectors and `unmeasured_features` tuple
