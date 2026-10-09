@@ -226,8 +226,7 @@ def _nemo_literal_seed_from_reference_mesh(
     wet_t = h_k[..., :nlev] > 0.0
     wet_u = (wet_t & jnp.roll(wet_t, -1, axis=1)
              & (u_mask[:, 1:, None] > 0.5))
-    wet_t_north = jnp.concatenate(
-        [wet_t[1:], jnp.zeros_like(wet_t[:1])], axis=0)
+    wet_t_north = lat_north(wet_t)
     wet_v = (wet_t & wet_t_north & (v_mask[1:, :, None] > 0.5))
     wet2_u = wet_u[..., 0]
     wet2_v = wet_v[..., 0]
@@ -237,8 +236,7 @@ def _nemo_literal_seed_from_reference_mesh(
     area_v_safe = jnp.where(wet2_v, area_v, 1.0)
     area_eta = area_t * eta_dyn
     area_eta_east = jnp.roll(area_eta, -1, axis=1)
-    area_eta_north = jnp.concatenate(
-        [area_eta[1:], jnp.zeros_like(area_eta[:1])], axis=0)
+    area_eta_north = lat_north(area_eta)
     r3u = (0.5 * (area_eta + area_eta_east) / hu_safe / area_u_safe)
     r3v = (0.5 * (area_eta + area_eta_north) / hv_safe / area_v_safe)
     mask_u3 = wet_u.astype(eta_dyn.dtype)
