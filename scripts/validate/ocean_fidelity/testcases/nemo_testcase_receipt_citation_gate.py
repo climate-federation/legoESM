@@ -1375,6 +1375,24 @@ FILES = {
         NEMO / "tests/VORTEX_SMT3_VEC_R16_OMIP_L1_P3/BLD/ppsrc/nemo/domhgr.f90"),
     "VORTEX_SMT3_VEC_R16_OMIP_L1_P3/BLD/ppsrc/nemo/vortex_r23_ldf_terms.f90": (
         NEMO / "tests/VORTEX_SMT3_VEC_R16_OMIP_L1_P3/BLD/ppsrc/nemo/vortex_r23_ldf_terms.f90"),
+    "VORTEX_SMT5_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/trabbl.f90": (
+        NEMO / "tests/VORTEX_SMT5_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/trabbl.f90"),
+    "VORTEX_SMT5_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/trabbc.f90": (
+        NEMO / "tests/VORTEX_SMT5_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/trabbc.f90"),
+    "VORTEX_SMT5_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/eosbn2.f90": (
+        NEMO / "tests/VORTEX_SMT5_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/eosbn2.f90"),
+    "VORTEX_SMT5_VEC_R8_OMIP_L1/EXP00/namelist_ref": (
+        NEMO / "tests/VORTEX_SMT5_VEC_R8_OMIP_L1/EXP00/namelist_ref"),
+    "orca2_rung2/namelist_cfg": Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_hierarchy/"
+        "rung2/record/namelist_cfg"),
+    "orca2_rung2/ocean.output": Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_hierarchy/"
+        "rung2/record/ocean.output"),
+    "bbl_adv.py": REPO / "packages/ocean/legoesm/ocean/physics/bbl_adv.py",
+    "geothermal.py": REPO / "packages/ocean/legoesm/ocean/physics/geothermal.py",
+    "geothermal_apply.py":
+        REPO / "packages/ocean/legoesm/ocean/coupler/geothermal_apply.py",
 }
 
 # citation -> the anchors that IDENTIFY its first and last line, plus the
@@ -5925,6 +5943,74 @@ CITATION_MAP = {
     'VORTEX_SMT4_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynadv.f90:134-138': [
         'SELECT CASE( n_dynadv )    !==  compute advection trend and add it to general trend  ==!',
         'CALL dyn_zad     ( kt                , Kmm, puu, pvv, Krhs )                  !* vertical advection', 5],
+    # --- SMT-RUNGS round 4: SMT-5 build's compiled trabbl/trabbc and the legoESM side ---
+    'VORTEX_SMT5_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/stprk3_stg.f90:436': ('CALL bbl( kstp, nit000, Kbb, Kmm )', 1),
+    'VORTEX_SMT5_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/stprk3_stg.f90:458': ('CALL bbl( kstp, nit000, Kbb, Kmm )', 2),
+    'VORTEX_SMT5_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/stprk3_stg.f90:527': 'CALL tra_bbc( kstp',
+    'VORTEX_SMT5_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/stprk3_stg.f90:528': 'CALL tra_bbl( kstp',
+    'VORTEX_SMT5_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/trabbl.f90:184': 'CALL tra_bbl_dif( pts(:,:,:,:,Kbb), pts(:,:,:,:,Krhs), jpts, Kmm )',
+    'VORTEX_SMT5_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/trabbl.f90:193': ('IF( nn_bbl_adv /= 0 ) THEN', 1),
+    'VORTEX_SMT5_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/trabbl.f90:253': 'zptb(ji,jj) = pt(ji,jj,ik,jn)',
+    'VORTEX_SMT5_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/trabbl.f90:258-263': [
+        'pt_rhs(ji,jj,ik,jn) = pt_rhs(ji,jj,ik,jn)',
+        '* r1_e1e2t(ji,jj) / (e3t_3d(ji,jj,ik)', 6],
+    'VORTEX_SMT5_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/trabbl.f90:409': 'zts (ji,jj,jp_tem) = ts(ji,jj,ik,jp_tem,Kbb)',
+    'VORTEX_SMT5_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/trabbl.f90:412': 'zdep(ji,jj) = ((gdept_1d(ik) ) *(1._wp+r3t(ji,jj,Kmm)))',
+    'VORTEX_SMT5_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/trabbl.f90:417': 'CALL eos_rab( zts, zdep, zab, Kmm, kbnd=1 )',
+    'VORTEX_SMT5_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/trabbl.f90:427-428': [
+        ('zgdrho = (  za * ( zts(ji+1,jj,jp_tem) - zts(ji,jj,jp_tem) )', 1),
+        ('- zb * ( zts(ji+1,jj,jp_sal) - zts(ji,jj,jp_sal) )  ) * ssumask(ji,jj)', 1), 2],
+    'VORTEX_SMT5_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/trabbl.f90:427-431': [
+        ('zgdrho = (  za * ( zts(ji+1,jj,jp_tem) - zts(ji,jj,jp_tem) )', 1),
+        'ahu_bbl(ji,jj) = ( 0.5 - zsign ) * ahu_bbl_0(ji,jj)', 5],
+    'VORTEX_SMT5_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/trabbl.f90:430': 'zsign  = SIGN(  0.5_wp, -zgdrho * REAL( mgrhu(ji,jj) )  )',
+    'VORTEX_SMT5_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/trabbl.f90:431': 'ahu_bbl(ji,jj) = ( 0.5 - zsign ) * ahu_bbl_0(ji,jj)',
+    'VORTEX_SMT5_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/trabbl.f90:464': 'utr_bbl(ji,jj) = ( 0.5 + zsigna ) * ( 0.5 - zsign ) * e2u(ji,jj)',
+    'VORTEX_SMT5_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/trabbl.f90:498': 'utr_bbl(ji,jj) = e2u(ji,jj) * e3u_bbl_0(ji,jj) * zgbbl * zgdrho',
+    'VORTEX_SMT5_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/trabbl.f90:584-585': [
+        'gdept_1d(mbkt(ji+1,jj)) - gdept_1d(mbkt(ji,jj)) /= 0._wp',
+        'mgrhu(ji,jj) = INT(  SIGN( 1.0_wp', 2],
+    'VORTEX_SMT5_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/trabbl.f90:584-600': [
+        'gdept_1d(mbkt(ji+1,jj)) - gdept_1d(mbkt(ji,jj)) /= 0._wp',
+        'ahu_bbl_0(:,:) = rn_ahtbbl * e2_e1u(:,:) * e3u_bbl_0(:,:) * ssumask(:,:)', 17],
+    'VORTEX_SMT5_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/trabbl.f90:594': 'e3u_bbl_0(ji,jj) = MIN( e3u_3d(ji,jj,mbkt(ji+1,jj  ))',
+    'VORTEX_SMT5_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/trabbl.f90:600': 'ahu_bbl_0(:,:) = rn_ahtbbl * e2_e1u(:,:) * e3u_bbl_0(:,:) * ssumask(:,:)',
+    'VORTEX_SMT5_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/trabbc.f90:158-159': [
+        'pts(ji,jj,mbkt(ji,jj),jp_tem,Krhs) = pts(ji,jj,mbkt(ji,jj),jp_tem,Krhs)',
+        '+ qgh_trd0(ji,jj) / (e3t_3d(ji,jj,mbkt(ji,jj))', 2],
+    'VORTEX_SMT5_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/trabbc.f90:226': 'qgh_trd0(:,:) = r1_rho0_rcp * rn_geoflx_cst',
+    'VORTEX_SMT5_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/trabbc.f90:242': 'CALL fld_read( nit000, 1, sf_qgh )',
+    'VORTEX_SMT5_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/trabbc.f90:243': 'qgh_trd0(:,:) = r1_rho0_rcp * sf_qgh(1)%fnow(:,:,1) * 1.e-3',
+    'VORTEX_SMT5_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/eosbn2.f90:1344': 'pab(ji,jj,jp_tem) = zn * r1_rho0   ! alpha',
+    'VORTEX_SMT5_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/eosbn2.f90:1347': 'pab(ji,jj,jp_sal) = zn * r1_rho0   ! beta',
+    'VORTEX_SMT5_VEC_R8_OMIP_L1/EXP00/namelist_ref:848': 'rn_geoflx_cst = 86.4e-3',
+    'orca2_rung2/namelist_cfg:273': 'ln_trabbc   = .true.',
+    'orca2_rung2/namelist_cfg:274': 'nn_geoflx   =    2',
+    'orca2_rung2/namelist_cfg:280': "sn_qgh      ='geothermal_heating.nc'",
+    'orca2_rung2/namelist_cfg:285': 'ln_trabbl   = .true.',
+    'orca2_rung2/namelist_cfg:286': 'nn_bbl_ldf  =  1',
+    'orca2_rung2/namelist_cfg:287': 'nn_bbl_adv  =  0',
+    'orca2_rung2/namelist_cfg:288': 'rn_ahtbbl   =  1000.',
+    'orca2_rung2/namelist_cfg:289': 'rn_gambbl   =  10.',
+    'orca2_rung2/ocean.output:685': 'Constant geothermal flux value',
+    'bbl_adv.py:151': 'def nemo_bbl_diffusive_geometry(',
+    'bbl_adv.py:220': 'def nemo_bbl_diffusive_coefficients(',
+    'bbl_adv.py:243': 'alpha, beta = nemo_roquet_alpha_beta(',
+    'bbl_adv.py:274': 'def apply_bbl_diffusive_tendency(',
+    'ocean_model_latlon_cgrid.py:2282': 'if stage_index == 2 and bbl_context is not None:',
+    'ocean_model_latlon_cgrid.py:2325-2326': [
+        'grid=bbl_grid, eos_form=bbl_eos_form,', 'grid=bbl_grid, eos_form=bbl_eos_form,', 1],
+    'ocean_model_latlon_cgrid.py:2336': 'fd_a = fd_a - h_stage * bbl_a',
+    'eos.py:1501-1507': [
+        'if eos_form in ("teos10", "nemo_teos10"):',
+        "\"eos_form must name NEMO's 'teos10' or 'eos80' coefficient set\")", 7],
+    'geothermal.py:172': 'return flux * is_bottom / (rho_0 * c_sw * h_safe)',
+    'geothermal_apply.py:67-68': [
+        'rho0 = constants.rho_ocean if rho_0 is None else rho_0',
+        'cp = constants.c_sw if c_sw is None else c_sw', 2],
+    'geothermal_apply.py:86': 'T_new = (T0 + dt * dTdt).astype(T0.dtype)',
+    'nemo_testcase_recipe.py:1708': 'bbl_diffusive_option=1,',
+    'nemo_testcase_recipe.py:1071': 'bbl_adv_option=2,',
 }
 
 
