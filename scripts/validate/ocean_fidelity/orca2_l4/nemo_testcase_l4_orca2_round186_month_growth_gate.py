@@ -112,18 +112,18 @@ def _read_restart(root: Path, step: int, card) -> tuple[dict[str, np.ndarray], d
     return fields, {"step": step, "files": files, "status": "BIT_EXACT_ORIENTATION"}
 
 
-def _invalid_live_thickness(card, state) -> dict[str, object]:
-    """Replay the step-entry geometry outside the executable and locate debt."""
+def _invalid_live_thickness(card, state, eta, label: str) -> dict[str, object]:
+    """Replay one recorded eta boundary outside the executable and locate debt."""
 
     import jax
 
     from legoesm.ocean.eos import nemo_bn2_live_geometry, nemo_r3t_stretch
 
     _, _, e3w = nemo_bn2_live_geometry(
-        card.recipe.z_coord, state.eta.data, state.H_bathy.data,
+        card.recipe.z_coord, eta, state.H_bathy.data,
         r3t_evaluation="nemo_reciprocal")
     stretch = nemo_r3t_stretch(
-        card.recipe.z_coord, state.eta.data, state.H_bathy.data,
+        card.recipe.z_coord, eta, state.H_bathy.data,
         evaluation="nemo_reciprocal")
     e3w_np, stretch_np = (np.asarray(value) for value in jax.device_get((e3w, stretch)))
     invalid = ~(np.isfinite(e3w_np) & (e3w_np > 0.0))
@@ -137,10 +137,11 @@ def _invalid_live_thickness(card, state) -> dict[str, object]:
             "value": float(e3w_np[index]),
             "raw_e3w_0": float(raw[index]),
             "stretch": float(stretch_np[index[:2]]),
-            "eta": float(np.asarray(state.eta.data)[index[:2]]),
+            "eta": float(np.asarray(eta)[index[:2]]),
             "H_bathy": float(np.asarray(state.H_bathy.data)[index[:2]]),
         }
     return {
+        "boundary": label,
         "source": "offline replay of ordinary completed state",
         "shape": list(e3w_np.shape),
         "invalid_count": int(locations.shape[0]),
@@ -149,6 +150,54 @@ def _invalid_live_thickness(card, state) -> dict[str, object]:
         "nonfinite_count": int(np.count_nonzero(~np.isfinite(e3w_np))),
         "nonpositive_finite_count": int(np.count_nonzero(np.isfinite(e3w_np) & (e3w_np <= 0.0))),
     }
+
+
+def _stage_live_thickness_replay(
+    card, state, hooks, freshwater, surface,
+) -> tuple[list[dict[str, object]], dict[str, object]]:
+    """Bypass only the known guard, recover eta, then replay its three stages."""
+
+    import jax
+
+    import legoesm.ocean.eos as eos
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
+
+    original_error_if = eos.eqx.error_if
+
+    def selective_error_if(value, predicate, message, **kwargs):
+        if message == EXPECTED_ERROR:
+            return value
+        return original_error_if(value, predicate, message, **kwargs)
+
+    # A momentum-stage exposure changes only returned u/v, making this a fresh
+    # compiled replay while leaving the completed barotropic eta untouched.
+    replay_hooks = hooks._replace(expose_momentum_stage=1)
+    eos.eqx.error_if = selective_error_if
+    try:
+        replay = LatLonCGridOceanModel(
+            card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+            _nemo_ws_test_hooks=replay_hooks)
+        replay_state = jax.device_get(jax.block_until_ready(replay.step(
+            state, card.dt_s, freshwater=freshwater, surface_forcing=surface)))
+    finally:
+        eos.eqx.error_if = original_error_if
+    eta_entry = np.asarray(state.eta.data)
+    eta_after = np.asarray(replay_state.eta.data)
+    require(bool(np.isfinite(eta_after).all()),
+            "guard-bypassed replay did not return a finite eta")
+    etas = (
+        ("step_entry", eta_entry),
+        ("stage1_one_third", eta_entry + (eta_after - eta_entry) / 3.0),
+        ("stage2_one_half", 0.5 * (eta_entry + eta_after)),
+        ("barotropic_after", eta_after),
+    )
+    rows = [_invalid_live_thickness(card, state, eta, label)
+            for label, eta in etas]
+    first = next((copy.deepcopy(row) for row in rows
+                  if int(row["invalid_count"]) > 0), None)
+    require(first is not None,
+            "guard-bypassed stage replay has no invalid live thickness")
+    return rows, first
 
 
 def classify(report: dict[str, object], plant: str = "none") -> dict[str, object]:
@@ -191,13 +240,18 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
         0 <= int(index) < int(size)
         for index, size in zip(first["index_jik"], shape)),
         "first invalid live-thickness index is outside the field")
+    production = not bool(report.get("private_halo_unit"))
+    expected_checkpoints = (
+        CHECKPOINTS if production else
+        tuple(step for step in CHECKPOINTS if step < int(refusal["step"]))
+    )
     table = report.get("growth_table", [])
-    require([int(row["step"]) for row in table] == list(CHECKPOINTS),
+    require([int(row["step"]) for row in table] == list(expected_checkpoints),
             "growth table checkpoint registry moved")
     require(all(row.get("claim_label") == "independent" for row in table),
             "growth table mixed claim populations")
     missing = [int(value) for value in report.get("missing_oracle_steps", [])]
-    require(all(value in CHECKPOINTS for value in missing),
+    require(all(value in expected_checkpoints for value in missing),
             "missing-oracle registry contains an unrequested step")
     for row in table:
         require(tuple(row["candidate_max_abs"]) == month.FIELDS,
@@ -209,10 +263,9 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
             require(tuple(row.get("error_rows", {})) == month.FIELDS,
                     f"step {row['step']}: oracle score registry moved")
 
-    production = not bool(report.get("private_halo_unit"))
     boundary_step = int(refusal["step"])
     column = tuple(int(value) for value in first["index_jik"][:2])
-    complete_scores = not missing
+    complete_scores = production and not missing
     late_growth = False
     if complete_scores and len(table) >= 2:
         penultimate, last = table[-2:]
@@ -292,7 +345,6 @@ def measure(
     refusal = None
     rows: list[dict[str, object]] = []
     missing: list[int] = []
-    last_live = None
     for step in range(1, STEPS + 1):
         try:
             pending = model.step(
@@ -327,11 +379,11 @@ def measure(
                 "error_rows": error_rows,
                 "oracle_restart": record,
             })
-            last_live = _invalid_live_thickness(card, state)
             print(f"MONTH_PROGRESS step={step}/{STEPS} "
                   f"wall_s={time.time() - started:.1f}", flush=True)
     require(refusal is not None, "month completed without the frozen refusal")
-    require(last_live is not None, "no completed checkpoint supplied live geometry")
+    stage_live, first_live = _stage_live_thickness_replay(
+        card, state, hooks, freshwater, surface)
     return classify({
         "format": "nemo-testcase-l4-orca2-round186-month-growth-v1",
         "claim_label": "independent",
@@ -342,7 +394,8 @@ def measure(
         "initial_entry": initial,
         "steps_completed": completed,
         "runtime_refusal": refusal,
-        "live_thickness": last_live,
+        "stage_live_thickness": stage_live,
+        "live_thickness": first_live,
         "growth_table": rows,
         "missing_oracle_steps": missing,
         "oracle_root": str(oracle_root),

@@ -13,7 +13,8 @@ from scripts.validate.ocean_fidelity.orca2_l4 import (
 
 def _report(*, private: bool = False, missing: bool = False) -> dict:
     rows = []
-    for step in gate.CHECKPOINTS:
+    checkpoints = () if private else gate.CHECKPOINTS
+    for step in checkpoints:
         error = {
             name: {"max_abs": float(step)} for name in ("T", "S", "u", "v", "ssh")
         }
@@ -44,7 +45,7 @@ def _report(*, private: bool = False, missing: bool = False) -> dict:
             "first_invalid": {"index_jik": [86, 159, 3]},
         },
         "growth_table": rows,
-        "missing_oracle_steps": list(gate.CHECKPOINTS) if missing else [],
+        "missing_oracle_steps": list(checkpoints) if missing else [],
     }
 
 
