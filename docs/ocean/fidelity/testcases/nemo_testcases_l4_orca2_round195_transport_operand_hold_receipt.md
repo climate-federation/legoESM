@@ -96,9 +96,26 @@ plants each refuse with exit 2 (log SHA256
 ## Validation and choices
 
 The focused round-146 plus round-195 battery passed 28/28 before measurement;
-the corrected signature-focused battery passed 6/6. Final focused tests,
-citation gates and the required single fidelity battery are recorded in the
-closing commit.
+the corrected signature-focused battery passed 6/6. The final focused set
+(rounds 146, 194, 195 and the citation gate) passed 53/53 in 4.26 s (SHA256
+`3a94a372002087a124d7a7fc3bf79e8230874499387e279a4964a0452a2adf3e`).
+
+The default citation audit passes 274 citations with zero failures, unmapped
+citations or failing map entries (SHA256
+`c50cb496e51c2f087fda47124d843e666bab9045b887bfccf7ec7c30472bd559`).
+This receipt passes three citations with the same zero counts (SHA256
+`2a8f5107e37a1b77629f2416d70dca200ee63f802f58405de396fbcedcdcbb9c`).
+Shifting the midpoint-velocity citation by two lines fails as required (exit
+1; SHA256
+`15c6d1ab76a26df4c1a4dbde4166ed083f6933c634324b169f3bd16c6bc8c1b9`).
+
+The required single `tests/ocean/fidelity -n 12` battery collected 2,930
+tests and reached 97%. It displayed exactly the four registered pre-existing
+reds: the SI3 scalar-math provenance gate, the two worktree-stamp ratchets,
+and the GYRE spread-floor record gate. It then stopped producing a terminal
+summary and was interrupted once; it was not rerun. This is an incomplete
+battery, not a green claim. Its transcript SHA256 is
+`c8b2c30e8265281998133bcc4d9bd75d7f2330ffad34ff5dede496d0d8f21461`.
 
 The separate `codex exec --sandbox read-only` review could not initialize its
 in-process app-server client on the read-only filesystem. Verdict:
