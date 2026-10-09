@@ -14,6 +14,17 @@ All notable changes to legoESM. Format roughly follows
 
 ### Fixed
 
+- **`import legoesm` no longer crashes on platforms without a glibc
+  `libm.so.6`.** `legoesm.core.transcendentals` dlopened `libm.so.6` at
+  module import, so every import of `legoesm.ocean` (and everything
+  downstream) failed on macOS, where no `libm.so.6` exists. The load is
+  now deferred to the first `transcendentals='libm'` evaluation, with
+  `libm.dylib` as a fallback; the certification host still resolves the
+  same `libm.so.6` soname, and `native`-policy users load no C library
+  at all. The same import-time dlopen pattern remains in
+  `legoesm.ocean.forcing.nemo_fld_read` (lazily imported, certification
+  cards only) and is unchanged.
+
 - **Hines gravity-wave drag no longer launches at the surface.** The launch
   level now defaults to 700 hPa and must lie in 300–900 hPa; the surface-launch
   path is removed (a surface-launched wave broke in the boundary layer and

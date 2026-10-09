@@ -12,8 +12,86 @@ from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
 from legoesm.core.transcendentals import cos, exp, log, log10, sin, tanh
 
 
+def test_libm_load_is_deferred_until_first_use():
+    # The dlopen used to run at module import, crashing the import on any
+    # platform without a libm.so.6 (e.g. macOS). After a fresh import the
+    # handle must still be unresolved until the libm policy is first used.
+    import importlib
+
+    import legoesm.core.transcendentals as module
+
+    importlib.reload(module)
+    try:
+        assert module._LIBM is None
+        assert not module._LIBM_LOADED
+        _ = module._load_libm()
+        assert module._LIBM is not None
+    finally:
+        importlib.reload(module)
+
+
+def test_libm_load_prefers_glibc_soname_and_caches(monkeypatch):
+    import legoesm.core.transcendentals as module
+
+    attempted: list[str] = []
+    real_cdll = ctypes.CDLL
+
+    def recording_cdll(soname, *args, **kwargs):
+        attempted.append(soname)
+        return real_cdll(soname, *args, **kwargs)
+
+    monkeypatch.setattr(ctypes, "CDLL", recording_cdll)
+    monkeypatch.setattr(module, "_LIBM", None)
+    monkeypatch.setattr(module, "_LIBM_LOADED", False)
+    assert module._load_libm() is module._load_libm()
+    # The glibc soname is always tried first (on Linux it is the only try;
+    # on macOS the real dlopen of it fails and the fallback is attempted).
+    assert attempted[0] == module._LIBM_SONAMES[0]
+    assert len(attempted) <= len(module._LIBM_SONAMES)
+    cached = list(attempted)
+    assert module._load_libm() is module._load_libm()
+    assert attempted == cached
+
+
+def test_libm_load_falls_back_to_platform_libm(monkeypatch):
+    import legoesm.core.transcendentals as module
+
+    fallback = object()
+
+    def failing_first_soname(soname, *args, **kwargs):
+        if soname == module._LIBM_SONAMES[0]:
+            raise OSError(soname)
+        return fallback
+
+    monkeypatch.setattr(ctypes, "CDLL", failing_first_soname)
+    monkeypatch.setattr(module, "_LIBM", None)
+    monkeypatch.setattr(module, "_LIBM_LOADED", False)
+    assert module._load_libm() is fallback
+
+
+def test_libm_load_raises_informative_error_when_unavailable(monkeypatch):
+    import legoesm.core.transcendentals as module
+
+    def unavailable(soname, *args, **kwargs):
+        raise OSError(soname)
+
+    monkeypatch.setattr(ctypes, "CDLL", unavailable)
+    monkeypatch.setattr(module, "_LIBM", None)
+    monkeypatch.setattr(module, "_LIBM_LOADED", False)
+    with pytest.raises(RuntimeError, match="transcendentals='libm'"):
+        module._load_libm()
+
+
 def _libm_reference(name: str, values: np.ndarray) -> np.ndarray:
-    libm = ctypes.CDLL("libm.so.6")
+    libm = None
+    for soname in ("libm.so.6", "libm.dylib"):
+        try:
+            libm = ctypes.CDLL(soname)
+            break
+        except OSError:
+            continue
+    if libm is None:
+        pytest.skip("no scalar libm available on this platform")
     function = getattr(libm, name)
     function.argtypes = (ctypes.c_double,)
     function.restype = ctypes.c_double

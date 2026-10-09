@@ -25,15 +25,44 @@ import jax.numpy as jnp
 import numpy as np
 from legoesm.core.precision import get_policy
 
-_LIBM_SONAME = "libm.so.6"
-_LIBM = ctypes.CDLL(_LIBM_SONAME)
+_LIBM_SONAMES = ("libm.so.6", "libm.dylib")
+_LIBM: ctypes.CDLL | None = None
+_LIBM_LOADED = False
+
+
+def _load_libm() -> ctypes.CDLL:
+    """Resolve the scalar libm backing the ``libm`` precision policy.
+
+    ``libm.so.6`` is the glibc soname linked by the NEMO certification
+    executables on the campaign host; ``libm.dylib`` is the same scalar
+    library on macOS, where libm is folded into libSystem and no
+    ``libm.so.6`` exists.  The load is deferred to the first ``libm``-policy
+    evaluation so that importing this module — and everything downstream
+    of it — succeeds on platforms without a ``libm.so.6``.
+    """
+    global _LIBM, _LIBM_LOADED
+    if not _LIBM_LOADED:
+        _LIBM_LOADED = True
+        for soname in _LIBM_SONAMES:
+            try:
+                _LIBM = ctypes.CDLL(soname)
+                break
+            except OSError:
+                continue
+    if _LIBM is None:
+        raise RuntimeError(
+            "PrecisionPolicy.transcendentals='libm' requires a scalar libm "
+            f"({', '.join(_LIBM_SONAMES)}); none could be loaded on this "
+            "platform"
+        )
+    return _LIBM
 
 
 def _scalar_libm(name: str, values: np.ndarray) -> np.ndarray:
     source = np.asarray(values)
     if source.dtype not in (np.dtype(np.float32), np.dtype(np.float64)):
         raise TypeError(f"libm {name} requires float32/float64, got {source.dtype}")
-    function = getattr(_LIBM, name)
+    function = getattr(_load_libm(), name)
     function.argtypes = (ctypes.c_double,)
     function.restype = ctypes.c_double
     result = np.empty_like(source)
