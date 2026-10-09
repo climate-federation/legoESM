@@ -8,6 +8,22 @@ Claim labels: every rung-0 scientific number referenced here is
 **independent**. No given-entry rung-7 number is mixed into the table or
 verdict. Sea ice and the shipped rung-10 card are untouched.
 
+## LOUD CORRECTION FROM ROUND 189: the eleven-entry list is invalid
+
+The round-188 claim that the `10,...,95,96` restart list was preflight-ready is
+**RETRACTED**. The operator ran it; NEMO stopped during namelist
+initialisation with exit 123 and `iostat=5010`, before the first time step.
+The executed binary declares `nn_stocklist` with only ten elements at
+`ORCA2_OMIP_L4/BLD/ppsrc/nemo/in_out_manager.f90:51-51`, and reads the config
+namelist at `ORCA2_OMIP_L4/BLD/ppsrc/nemo/domain.f90:323-325`. The eleven-value
+assignment is therefore not a valid NEMO deck. No restart payload exists.
+
+The gate now refuses that actual deck with
+`compiled nn_stocklist capacity 10 exceeded`, and the round-188 launcher exits
+78 before staging or running. Round 189 replaces it with the bounded list
+`95,96`, reusing the already-admitted step-10..90 prefix rather than requesting
+eleven checkpoints in one run.
+
 ## Outcome
 
 Round 187's proposed 95-step replacement protocol is retracted and disabled.

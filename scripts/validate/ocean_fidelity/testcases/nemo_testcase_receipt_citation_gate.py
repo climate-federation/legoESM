@@ -162,6 +162,10 @@ FILES = {
         _ORCA2_COMPILED / "icb_oce.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/restart.f90": (
         _ORCA2_COMPILED / "restart.f90"),
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/domain.f90": (
+        _ORCA2_COMPILED / "domain.f90"),
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/in_out_manager.f90": (
+        _ORCA2_COMPILED / "in_out_manager.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcflx.f90": (
         _ORCA2_COMPILED / "sbcflx.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90": (
@@ -2178,6 +2182,15 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/restart.f90:188-202': [
         ('IF( kt == nitrst ) THEN', 1),
         ('ENDIF', 14), 15],
+    # --- ORCA2 round 189: bounded replacement restart list ---
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/in_out_manager.f90:51-51':
+        'INTEGER, DIMENSION(10) :: nn_stocklist',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/domain.f90:323-325': [
+        'READ(numnam_ref(MAX(INDEX(numnam_ref,"&namrun "),1):),namrun,IOSTAT=ios)',
+        'IF(lwm) WRITE ( numond, namrun )', 3],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcmod.f90:341-349': [
+        'IF( ln_rst_list .OR. nn_stock /= -1 ) THEN',
+        "CALL ctl_stop( ctmp1, 'Impossible to properly do model restart' )", 9],
     # --- ORCA2 round 82: hierarchy rung-0 deck semantics ---
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcmod.f90:299-306': [
         'IF( ln_usr          ) THEN   ;   nsbc = jp_usr',
