@@ -108,9 +108,11 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
             and [row["substep"] for row in rows] == list(range(1, SUBSTEPS + 1)),
             "65-substep source order moved")
     for row in rows:
-        require(all(row[name]["bit_exact"] for name in (
-            "incoming", "transport", "weight", "exit")),
-            f"substep {row['substep']} reciprocal recurrence is not bit-exact")
+        for name in ("incoming", "transport", "weight", "exit"):
+            require(row[name]["bit_exact"],
+                    f"substep {row['substep']} {name} is not bit-exact: "
+                    f"{row[name]['differing_cells']} cells, "
+                    f"max {row[name]['max_abs']}")
     require(report["masked_control"]["differing_substeps"] > 0
             and report["masked_control"]["first_differing_substep"] == 2,
             "masked reciprocal control did not reproduce the first debt")
