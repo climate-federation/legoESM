@@ -775,8 +775,10 @@ class SegmentForcing(NamedTuple):
     land_ml_params: object | None = None
 
 
-# Canonical GHG species ordering for the ghg_vmr array.
-GHG_SPECIES_ORDER = ("co2", "ch4", "n2o", "cfc11", "cfc12")
+# Canonical GHG species ordering for the ghg_vmr array.  The three halogens
+# are present only when the GHG file carries them (else RRTMGP's fixed means);
+# a key missing here is silently dropped from every compiled lane.
+GHG_SPECIES_ORDER = ("co2", "ch4", "n2o", "cfc11", "cfc12", "cfc22", "ccl4", "cf4")
 
 
 def ghg_dict_to_array(ghg_dict: dict | None) -> jax.Array:

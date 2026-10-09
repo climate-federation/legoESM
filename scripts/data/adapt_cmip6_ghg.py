@@ -48,9 +48,40 @@ GAS_TO_CFVAR: dict[str, str] = {
     "CFC_11": "mole_fraction_of_cfc11_in_air",
     "CFC_12": "mole_fraction_of_cfc12_in_air",
 }
+# Optional halogens: merged when supplied (the loader reads them if present,
+# else RRTMGP keeps its fixed global means).  Physical species, not
+# equivalents -- RRTMGP carries each one, so equivalents would double count.
+OPTIONAL_GAS_TO_CFVAR: dict[str, str] = {
+    "CFC_22": "mole_fraction_of_hcfc22_in_air",
+    "CCl4": "mole_fraction_of_carbon_tetrachloride_in_air",
+    "CF4": "mole_fraction_of_cf4_in_air",
+}
+_ALL_GAS_TO_CFVAR = {**GAS_TO_CFVAR, **OPTIONAL_GAS_TO_CFVAR}
 # CLI flag stem -> deck short name (for the explicit-file form).
 FLAG_TO_GAS = {"co2": "CO2", "ch4": "CH4", "n2o": "N2O",
-               "cfc11": "CFC_11", "cfc12": "CFC_12"}
+               "cfc11": "CFC_11", "cfc12": "CFC_12",
+               "cfc22": "CFC_22", "ccl4": "CCl4", "cf4": "CF4"}
+
+
+def _open(path):
+    """Open one input4MIPs GHG file.  The UoM-CMIP-1-2-0 axis is 'days since
+    0-1-1', which cftime refuses (year zero): fall back to the raw axis,
+    check it is one value per year from year 0, and store mid-year
+    fractional years (``_to_fractional_year`` passes numeric axes through)."""
+    import xarray as xr
+    try:
+        return xr.open_dataset(path, decode_times=True)
+    except ValueError:
+        ds = xr.open_dataset(path, decode_times=False)
+        units = str(ds["time"].attrs.get("units", ""))
+        if not units.startswith("days since 0-1-1"):
+            ds.close()
+            raise
+        yi = np.floor(np.asarray(ds["time"].values, np.float64) / 365.2425)
+        if yi[0] != 0 or not np.all(np.diff(yi) == 1):
+            ds.close()
+            raise ValueError(f"{path}: year-0 axis is not annual from year 0")
+        return ds.assign_coords(time=("time", yi + 0.5))
 
 
 def _to_fractional_year(time_da) -> np.ndarray:
@@ -209,7 +240,9 @@ def merge_ghg(per_gas: dict) -> object:
 
     ref_years = None
     data_vars = {}
-    for gas, cf_var in GAS_TO_CFVAR.items():
+    for gas, cf_var in _ALL_GAS_TO_CFVAR.items():
+        if gas not in per_gas:  # optional halogen not supplied
+            continue
         years, values, units = _extract_gas_series(per_gas[gas], cf_var)
         if ref_years is None:
             ref_years = years
@@ -242,11 +275,10 @@ def merge_ghg(per_gas: dict) -> object:
 def _match_in_dir(in_dir: Path) -> dict:
     """Map each gas to a file in ``in_dir`` by its CF variable name in the
     filename (input4MIPs names encode the variable), else by a substring."""
-    import xarray as xr
 
     files = sorted(glob.glob(str(in_dir / "*.nc")))
     out: dict = {}
-    for gas, cf_var in GAS_TO_CFVAR.items():
+    for gas, cf_var in _ALL_GAS_TO_CFVAR.items():
         # input4MIPs filenames use the hyphenated variable id.
         stem = cf_var.replace("_", "-")
         hit = next((f for f in files if stem in Path(f).name), None)
@@ -254,14 +286,14 @@ def _match_in_dir(in_dir: Path) -> dict:
             # fall back: open each and check the variable is present.
             for f in files:
                 try:
-                    with xr.open_dataset(f, decode_times=True) as ds:
+                    with _open(f) as ds:
                         if cf_var in ds.variables:
                             hit = f
                             break
                 except Exception:
                     continue
         if hit is not None:
-            out[gas] = xr.open_dataset(hit, decode_times=True)
+            out[gas] = _open(hit)
     return out
 
 
@@ -280,7 +312,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> int:
-    import xarray as xr
 
     args = parse_args(argv)
     if args.in_dir is not None:
@@ -290,7 +321,7 @@ def main(argv: list[str] | None = None) -> int:
         for flag, gas in FLAG_TO_GAS.items():
             path = getattr(args, flag)
             if path is not None:
-                per_gas[gas] = xr.open_dataset(path, decode_times=True)
+                per_gas[gas] = _open(path)
     if not per_gas:
         print("No input files (pass --in-dir or the per-gas flags).",
               file=sys.stderr)
@@ -306,7 +337,7 @@ def main(argv: list[str] | None = None) -> int:
     merged.to_netcdf(args.out)
     yrs = np.asarray(merged["time"].values)
     print(f"Wrote {args.out} ({yrs.size} years, {yrs[0]:.1f}->{yrs[-1]:.1f}; "
-          f"vars {list(GAS_TO_CFVAR)})")
+          f"vars {list(merged.data_vars)})")
     print("Consume: run_amip_cmip6_deck.py --ghg-forcing external "
           f"--ghg-file {args.out}")
     return 0

@@ -1573,7 +1573,15 @@ def _load_ghg_annual_file(path: str) -> tuple[np.ndarray, dict[str, np.ndarray]]
     years = np.asarray(ds["time"].values, dtype=np.float64)
 
     data = {}
-    for varname in ("CO2", "CH4", "N2O", "CFC_11", "CFC_12"):
+    # Optional halogens (read when present; older files carry only the five):
+    # RRTMGP holds these species at fixed global means otherwise.
+    _optional = tuple(v for v in _GHG_OPTIONAL_HALOGENS if v in ds.data_vars)
+    if len(_optional) < len(_GHG_OPTIONAL_HALOGENS):
+        logger.warning(
+            "GHG file %s lacks %s: RRTMGP keeps its FIXED present-day global "
+            "means for those species (not transient).", path,
+            sorted(set(_GHG_OPTIONAL_HALOGENS) - set(_optional)))
+    for varname in ("CO2", "CH4", "N2O", "CFC_11", "CFC_12") + _optional:
         if varname not in ds.data_vars:
             ds.close()
             raise ValueError(f"Variable {varname!r} not found in {path!r}")
@@ -1677,9 +1685,22 @@ def get_ghg_at_time(config: GHGConfig, day: float) -> dict:
             "n2o_ppbv": _interp_1d(years, data["N2O"], year) * 1.0e9,
             "cfc11_pptv": _interp_1d(years, data["CFC_11"], year) * 1.0e12,
             "cfc12_pptv": _interp_1d(years, data["CFC_12"], year) * 1.0e12,
+            **{key: _interp_1d(years, data[var], year) * 1.0e12
+               for var, (key, _) in _GHG_OPTIONAL_HALOGENS.items()
+               if var in data},
         }
     else:
         raise ValueError(f"Unknown GHG source: {config.source!r}")
+
+
+# File variable -> (get_ghg_at_time key [pptv], RRTMGP gas name).  Physical
+# species, not CFC-equivalents: RRTMGP carries each of these itself (fixed
+# global means in rrtmgp.py otherwise), so equivalents would double count.
+_GHG_OPTIONAL_HALOGENS = {
+    "CFC_22": ("cfc22_pptv", "cfc22"),
+    "CCl4": ("ccl4_pptv", "ccl4"),
+    "CF4": ("cf4_pptv", "cf4"),
+}
 
 
 def ghg_concentrations_to_vmr(ghg: dict) -> dict:
@@ -1703,6 +1724,9 @@ def ghg_concentrations_to_vmr(ghg: dict) -> dict:
         vmr["cfc11"] = ghg["cfc11_pptv"] * 1.0e-12
     if "cfc12_pptv" in ghg:
         vmr["cfc12"] = ghg["cfc12_pptv"] * 1.0e-12
+    for key, gas in _GHG_OPTIONAL_HALOGENS.values():
+        if key in ghg:
+            vmr[gas] = ghg[key] * 1.0e-12
     return vmr
 
 
