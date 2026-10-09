@@ -108,6 +108,14 @@ pre-existing reds: SI3 scalar-math provenance, the GYRE spread-floor record,
 the 13-driver scoped-stamp ratchet and the 13-emitter worktree-stamp ratchet.
 All four were rerun together and reproduced; none names a round-200 file.
 
+The default citation audit passes 274 citations with zero failures, unmapped
+citations or failing map entries. This receipt passes all six distinct
+compiled citations with the same zero counts.
+Shifting the `ORCA2_OMIP_L4/BLD/ppsrc/nemo/stpctl.f90:243-250` span by two
+lines fires as required with `SYMBOL-NOT-AT-LINE`, exit 1. The three reports
+are stored as `citations_default.json`, `citations_round200.json` and
+`citations_round200_plant.json` under the evidence root.
+
 Independent review unavailable in-sandbox: the required separate
 `codex exec --sandbox read-only` invocation failed before reading the diff with
 `failed to initialize in-process app-server client: Read-only file system
