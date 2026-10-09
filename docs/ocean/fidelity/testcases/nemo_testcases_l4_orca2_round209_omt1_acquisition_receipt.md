@@ -1,5 +1,15 @@
 # ORCA2 round 209 — OMT-1 vector-form acquisition handoff
 
+> **ROUND-210 CORRECTION (2026-10-09):** The claim below that this launcher
+> copied the admitted build protocol is retracted. It passed only static
+> preflight, then the operator run failed at the first `makenemo` call because
+> it supplied work configuration `ORCA2_OMIP_L4_R90FRAMES` as `-r`; `makenemo`
+> resolves that operand only from `cfgs/ref_cfgs.txt`, leaving the reference and
+> component list empty. No record binary or trajectory resulted. Round 210
+> repairs the bootstrap using registered reference `ORCA2_ICE_PISCES`, followed
+> by the pinned R90 `EXP00`, `MY_SRC`, and CPP copy used by admitted ORCA2
+> acquisition launchers.
+
 Date: 2026-10-09. Base: `9884a20d9`. Preregistration commit: `f80e35c38`.
 Implementation commits: `9e5417c98` and `6e6bc3970`. Status:
 **STOPPED_FOR_RECORD**. Evidence root:
