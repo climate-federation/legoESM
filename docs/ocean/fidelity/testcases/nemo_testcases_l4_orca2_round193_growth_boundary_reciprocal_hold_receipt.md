@@ -20,7 +20,7 @@ growth boundary remains kt=1 stage 1: salinity carries the largest error,
 3.2847473521544472 PSU at `[j=147,i=49,k=0]`, from the fixed 2e-10 floor, a
 ratio of 16423736760.772236. This respects NEMO's external-mode then RK3
 stage-1/2/3 order in
-`ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo/stprk3.f90:200-233`.
+`ORCA2_OMIP_L4_R90FRAMES/BLD/ppsrc/nemo/stprk3.f90:202-233`.
 
 Offline replay from that exact entry clears every recorded external-mode row
 through substep 1 and substep-2 U accumulation. The first non-bit statement is
@@ -123,4 +123,3 @@ Only if that complete unit is a Decision-96 net improvement may it proceed to
 the rung-7 ladder, independent month boundary, GYRE, DINO and tank gates. No
 partial operand may land. No acquisition is needed: the admitted round-96
 record contains the required accumulator operands.
-
