@@ -443,3 +443,75 @@ def test_mask_rebuilds_and_runtime_check_follow_the_config(card):
     assert np.asarray(replace_land_mask(
         s0, mask, meridionally_periodic=True).v_mask.data).tobytes() == v0
     assert np.asarray(replace_land_mask(s0, mask).v_mask.data).tobytes() != v0
+
+
+_OUTER_PATHS = ("_ab2_step", "_leapfrog_step", "_nemo_mlf_step",
+                "_unsplit_ab2_step")
+
+
+def _partial_cell_periodic_ab2(periodic, caller_scope, unwrap=False):
+    """One AB2 outer step of a partial-cell lat-lon basin whose config says
+    ``meridionally_periodic=periodic``, under ``caller_scope``.  ``unwrap``
+    plants the defect: the outer integrators lose the config scoping."""
+    import contextlib
+    import jax.numpy as jnp
+    from legoesm.grids.halo_latlon import meridional_periodicity
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel)
+    from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
+    from legoesm.ocean.state import LatLonCGridOceanConfig
+    from legoesm.ocean.vertical import (
+        create_ocean_z_star, create_partial_cell_coordinate)
+    grid = create_latlon_grid(8, 16)
+    zs = create_ocean_z_star(n_levels=4, H_max=4000.0)
+    jj, ii = np.meshgrid(np.arange(8), np.arange(16), indexing="ij")
+    bathy = jnp.asarray(2500.0 + 700.0 * np.sin(jj + 0.7 * ii))
+    z = create_partial_cell_coordinate(zs, bathy)
+    state = rest_state_latlon_cgrid_ocean(
+        grid, z, H_max=4000.0, land_lat_threshold=90.0,
+        meridionally_periodic=periodic)
+    eta = np.zeros((8, 16))
+    eta[0, 4:8] = 0.5  # on the j seam: only a wrapped seam moves it south
+    eta[7, 8:12] = -0.5
+    state = state._replace(eta=state.eta.replace(data=jnp.asarray(eta)))
+    cfg = LatLonCGridOceanConfig.from_flat(
+        A_h=2.0e4, bottom_drag_r=1.0e-3, n_barotropic_substeps=8,
+        enable_runtime_checks=False, outer_integrator="ab2",
+        implicit_vertical_mixing=True, meridionally_periodic=periodic)
+    model = LatLonCGridOceanModel(grid, z, cfg)
+    saved = {}
+    if unwrap:
+        for n in _OUTER_PATHS:
+            saved[n] = getattr(LatLonCGridOceanModel, n)
+            setattr(LatLonCGridOceanModel, n, getattr(saved[n], "__wrapped__", saved[n]))
+    try:
+        with meridional_periodicity(caller_scope) if caller_scope is not None \
+                else contextlib.nullcontext():
+            out = model.step(state, 600.0)
+    finally:
+        for n, f in saved.items():
+            setattr(LatLonCGridOceanModel, n, f)
+    return {f: np.asarray(getattr(out, f).data).tobytes()
+            for f in ("u", "v", "eta")}
+
+
+def test_partial_cell_ab2_outer_path_takes_its_topology_from_the_config():
+    """The outer integrators build partial-cell face masks outside the step
+    body; they must read the config's y-wrap, True or False, whatever the
+    caller's scope."""
+    on = _partial_cell_periodic_ab2(True, None)
+    assert on == _partial_cell_periodic_ab2(True, False)
+    # reference: the unscoped integrator under the CORRECT caller scope
+    assert on == _partial_cell_periodic_ab2(True, True, unwrap=True)
+    off = _partial_cell_periodic_ab2(False, None)
+    assert off == _partial_cell_periodic_ab2(False, True)
+    assert on != off
+
+
+def test_partial_cell_ab2_plant_unscoped_outer_path_fires():
+    """Plant: without the config scoping, a periodic config under the default
+    (walled) caller scope gets its seam walled in the outer integrator."""
+    good = _partial_cell_periodic_ab2(True, False)
+    bad = _partial_cell_periodic_ab2(True, False, unwrap=True)
+    assert bad != good
