@@ -103,9 +103,12 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
     require(report["midpoint_replay"]["candidate_written_association"][
                 "comparison_bit_exact"],
             "offline helper does not reproduce candidate va_e")
+    # R208-P2 is explicitly a WET-cell claim.  ``comparison_bit_exact`` also
+    # votes dry/halo signed-zero storage (round 207's e1v row demonstrates the
+    # distinction); ``bit_exact`` is the registered wet-domain predicate.
     require(report["midpoint_replay"]["candidate_midpoint_equals_now"][
-                "comparison_bit_exact"],
-            "Forward midpoint is not the current vn_e")
+                "bit_exact"],
+            "Forward midpoint is not the current vn_e on wet cells")
     require(report["midpoint_replay"]["all_recorded"]["comparison_bit_exact"],
             "recorded midpoint operands do not close va_e bit-exactly")
     require(report["midpoint_replay"]["first_effective_input"] == "v_entry",

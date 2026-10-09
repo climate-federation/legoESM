@@ -8,7 +8,7 @@ from scripts.validate.ocean_fidelity.orca2_l4 import (
 
 
 def _score(exact=True):
-    return {"comparison_bit_exact": exact}
+    return {"comparison_bit_exact": exact, "bit_exact": exact}
 
 
 def _fixture():
