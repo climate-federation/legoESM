@@ -15,6 +15,7 @@ nemo_root=/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2
 source_cfg=ORCA2_OMIP_L4_R90FRAMES
 target_cfg=ORCA2_OMIP_L4_R209OMT1_P3
 target_root=$nemo_root/cfgs/$target_cfg
+source_root=$nemo_root/cfgs/$source_cfg
 source_deck=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round203/acquisition/omt0_namelist_cfg
 base=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round203/acquisition/orca2_omt0_uninstrumented_10step_np2
 evidence=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round209/acquisition
@@ -27,16 +28,27 @@ month=$evidence/orca2_omt1_month_boundary_96step_np2
 deck_gate=$here/../nemo_testcase_l4_orca2_round209_omt1_deck_gate.py
 record_gate=$here/../nemo_testcase_l4_orca2_round209_omt1_frame_record_gate.py
 prereg=$repo/docs/ocean/fidelity/PREREG_nemo_testcases_l4_orca2_round209.md
+source_manifest=$here/source_files.sha256
 
 cd "$repo"
 [[ -z "$(git status --porcelain --untracked-files=all)" ]] || { printf 'REFUSE: acquisition requires a clean committed tree\n' >&2; exit 63; }
-for path in "$0" "$deck_gate" "$record_gate" "$prereg"; do
+for path in "$0" "$deck_gate" "$record_gate" "$prereg" "$source_manifest"; do
   git ls-files --error-unmatch "${path#"$repo"/}" >/dev/null || { printf 'REFUSE: acquisition artifact is not committed: %s\n' "$path" >&2; exit 65; }
   git diff --quiet HEAD -- "$path" || { printf 'REFUSE: acquisition artifact differs from HEAD: %s\n' "$path" >&2; exit 65; }
 done
 [[ "$(sha256sum "$source_deck" | awk '{print $1}')" == 9279c638a9fe50b551fcca8dc62dc1c19c0fc2c55bdcae7f3501a8afeb5ca8ac ]] || { printf 'REFUSE: admitted OMT-0 source deck changed\n' >&2; exit 66; }
 [[ "$(sha256sum "$base/nemo" | awk '{print $1}')" == c4907e476cf3969052b44c5c7fa966f3dac493e8cfb563f6554c8f3a27186343 ]] || { printf 'REFUSE: admitted uninstrumented binary changed\n' >&2; exit 66; }
 (cd "$base" && sha256sum -c deck_files.sha256 >/dev/null && sha256sum -c input_files.sha256 >/dev/null)
+[[ "$(sha256sum "$source_root/cpp_$source_cfg.fcm" | awk '{print $1}')" == \
+  2e0d729f348b2377e52a6421afbb56e9dabbbc5ae57e39fbcfa1a3f5edbd8f67 ]] || {
+  printf 'REFUSE: admitted record CPP card changed\n' >&2; exit 66;
+}
+(cd "$source_root/MY_SRC" && sha256sum -c "$source_manifest" >/dev/null)
+actual_sources=$(find "$source_root/MY_SRC" -maxdepth 1 -type f -printf '%f\n' | sort)
+expected_sources=$(awk '{print $2}' "$source_manifest" | sort)
+[[ "$actual_sources" == "$expected_sources" ]] || {
+  printf 'REFUSE: admitted record source inventory changed\n' >&2; exit 66;
+}
 mkdir -p "$evidence"
 [[ -d "$evidence" && ! -L "$evidence" ]] || { printf 'REFUSE: evidence root is not a real directory\n' >&2; exit 65; }
 export PYTHONPATH=$repo:$repo/packages/core:$repo/packages/ocean:$repo/packages/atmosphere:$repo/packages/coupler:$repo/packages/ice:$repo/packages/land:$repo/packages/ml:$repo/packages/tools:$repo/src
