@@ -32,7 +32,7 @@ external-mode walk is more discriminating:
 
 1. `ssh_frc = sshe_rhs` is the first non-bit statement, but all 8,794 wet
    differences are signed zero and its numerical error is exactly zero
-   (`ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:286-289`).
+   (`ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:287-289`).
 2. `zv_frc = Ve_rhs` is the first numerical debt: 35 northern-fold halo cells,
    maximum `1.6557659420864476e-06 m/s²`; active wet interiors are exact. The
    paired U forcing is bit-exact.
