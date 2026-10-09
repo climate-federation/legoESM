@@ -184,20 +184,6 @@ def _nemo_literal_seed_depth_mean(field, h_face, face_mask, r1_live):
     return (acc * r1_live) * face_mask
 
 
-def _nemo_literal_slow_depth_mean(
-    field, h_face, level_mask, r1_reference, face_mask,
-):
-    """NEMO ``stp2d.f90:206-212`` source-associated slow depth mean."""
-
-    b = nemo_source_round
-    acc = jnp.zeros_like(field[..., 0])
-    for jk in range(field.shape[-1]):
-        product = b(b(h_face[..., jk] * field[..., jk])
-                    * level_mask[..., jk])
-        acc = b(acc + product)
-    return b(b(acc * r1_reference) * face_mask)
-
-
 def _nemo_literal_seed_from_reference_mesh(
     u_3d, v_3d, h_k, eta_dyn, u_mask, v_mask, z_coord,
 ):
@@ -826,7 +812,7 @@ def nemo_literal_metric_transports(
 
 def nemo_literal_accumulate_transport(
     Hu_sum, Hv_sum, raw_weight, H_u, H_v, U, V, u_mask, v_mask, grid,
-    *, mask_v=True, materialize_v=False, unmasked_v_reciprocal=False,
+    *, mask_v=True, materialize_v=False,
 ):
     """One source-ordered DINO ``un_adv/vn_adv`` accumulation row.
 
@@ -851,17 +837,11 @@ def nemo_literal_accumulate_transport(
         grid.dx_v if hasattr(grid, "dx_v")
         else (grid.radius * grid.dlon
               * vface_zonal_cos_lat(grid))[:, jnp.newaxis], dtype=dtype)
-    # NEMO constructs r1_e1v = 1/e1v without a mask (domhgr.f90:152), then
-    # consumes it directly in dynspg_ts.f90:608.  The private ORCA2 arm uses
-    # that value wherever this compact grid carries a geometric metric.  Its
-    # zero-width halo sentinel has no NEMO counterpart and remains zero so the
-    # representation cannot manufacture 0*Inf.
+    # NEMO's reciprocal metric arrays are zero on masked/polar faces.  A raw
+    # divide by the geometric zero would turn the already-masked transport
+    # into 0*Inf=NaN on lean-grid tests and at wall halos.
     r1_e2u = jnp.where(u_mask != 0, 1.0 / e2u, 0.0)
-    r1_e1v = jnp.where(
-        e1v != 0.0, 1.0 / e1v, 0.0,
-    ) if unmasked_v_reciprocal else jnp.where(
-        v_mask != 0, 1.0 / e1v, 0.0,
-    )
+    r1_e1v = jnp.where(v_mask != 0, 1.0 / e1v, 0.0)
     # Every ``b`` below is one written operation from dynspg_ts.F90's
     # dyn_cor_2D_init recurrence.  ``optimization_barrier`` alone is stripped
     # by XLA; use the shared IEEE identity that keeps each source result
@@ -1770,7 +1750,6 @@ def _run_substep_loop(
     nemo_reference_face_depth_override=None,
     nemo_unmasked_v_transport_test_override=False,
     nemo_materialize_v_transport_test_override=False,
-    nemo_unmasked_v_reciprocal_test_override=False,
     nemo_external_mode_association_test_override=False,
     nemo_external_mode_association_field_test_override="",
     nemo_external_mode_association_component_test_override="",
@@ -2064,9 +2043,7 @@ def _run_substep_loop(
                 H_u_flux, H_v_flux, U_mid, V_mid,
                 u_mask, v_mask, grid,
                 mask_v=not nemo_unmasked_v_transport_test_override,
-                materialize_v=nemo_materialize_v_transport_test_override,
-                unmasked_v_reciprocal=(
-                    nemo_unmasked_v_reciprocal_test_override))
+                materialize_v=nemo_materialize_v_transport_test_override)
         else:
             Hu_sum_new = Hu_sum_c + w_tr_i * flux_u.astype(dtype)
             Hv_sum_new = Hv_sum_c + w_tr_i * flux_v.astype(dtype)
@@ -2934,7 +2911,6 @@ def barotropic_substeps_latlon_cgrid(
     _nemo_reference_face_depth_test_override=None,
     _nemo_unmasked_v_transport_test_override=False,
     _nemo_materialize_v_transport_test_override=False,
-    _nemo_unmasked_v_reciprocal_test_override=False,
     _nemo_flux_form_update_test_override=None,
     _nemo_continuity_update_test_override=None,
     _nemo_legacy_seed_faces_test_override=None,
@@ -3438,8 +3414,6 @@ def barotropic_substeps_latlon_cgrid(
             _nemo_unmasked_v_transport_test_override),
         nemo_materialize_v_transport_test_override=(
             _nemo_materialize_v_transport_test_override),
-        nemo_unmasked_v_reciprocal_test_override=(
-            _nemo_unmasked_v_reciprocal_test_override),
         nemo_external_mode_association_test_override=(
             _nemo_external_mode_association_test_override),
         nemo_external_mode_association_field_test_override=(

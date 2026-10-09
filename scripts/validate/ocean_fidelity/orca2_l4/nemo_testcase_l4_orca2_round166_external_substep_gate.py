@@ -181,7 +181,7 @@ def _install_trace_wrapper(frames: list[dict[str, object]]):
     return model_module, original
 
 
-def _hooks(card, *, expose_stage: int = 0, unmasked_v_reciprocal: bool = False):
+def _hooks(card, *, expose_stage: int = 0):
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         _NEMOWSRK3TestHooks,
     )
@@ -194,7 +194,6 @@ def _hooks(card, *, expose_stage: int = 0, unmasked_v_reciprocal: bool = False):
             rung0.ladder.build_reference_depth_override(card)),
         barotropic_unmasked_v_transport=True,
         barotropic_materialize_v_transport=True,
-        barotropic_unmasked_v_reciprocal=unmasked_v_reciprocal,
     )
 
 

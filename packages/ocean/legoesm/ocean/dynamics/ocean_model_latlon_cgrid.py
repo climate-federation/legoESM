@@ -90,7 +90,6 @@ from legoesm.ocean.dynamics.barotropic_common import (
     validate_after_reconcile,
 )
 from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
-    _nemo_literal_slow_depth_mean,
     barotropic_substeps_latlon_cgrid,
 )
 from legoesm.ocean.dynamics.barotropic_implicit_latlon_cgrid import (
@@ -1162,10 +1161,6 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # result before its later north-minus-south subtraction. False is the
     # unchanged production path; no constructible config can select it.
     barotropic_materialize_v_transport: bool = False
-    # Private round-194 companion: use NEMO's unmasked ``r1_e1v`` in the
-    # completed V-transport accumulation. False is the unchanged production
-    # path; no constructible configuration can select this measurement arm.
-    barotropic_unmasked_v_reciprocal: bool = False
     # WRITE-only developed-state observer for the completed three-dimensional
     # momentum RHS before its depth reduction.  Kept separate from the final
     # slow-forcing callback so the round-141 gate can prove this minimum
@@ -6263,12 +6258,12 @@ class LatLonCGridOceanModel:
             _wet_v0 = (_ops0.hv_0 > 0.0).astype(du_dt.dtype)
             _r1_hu_0 = _wet_u0 / (_ops0.hu_0 + _one - _wet_u0)
             _r1_hv_0 = _wet_v0 / (_ops0.hv_0 + _one - _wet_v0)
-            _slow_u_native = _nemo_literal_slow_depth_mean(
-                du_dt[:, 1:, :], _ops0.e3u_0, _ops0.umask3,
-                _r1_hu_0, state.u_mask.data[:, 1:])
-            _slow_v_native = _nemo_literal_slow_depth_mean(
-                dv_dt[1:, :, :], _ops0.e3v_0, _ops0.vmask3,
-                _r1_hv_0, state.v_mask.data[1:, :])
+            _slow_u_native = jnp.sum(
+                _ops0.e3u_0 * du_dt[:, 1:, :] * _ops0.umask3,
+                axis=-1) * _r1_hu_0
+            _slow_v_native = jnp.sum(
+                _ops0.e3v_0 * dv_dt[1:, :, :] * _ops0.vmask3,
+                axis=-1) * _r1_hv_0
             if _atomic_hpg_unit:
                 # NEMO's fold exchange keeps these V faces wet.  The raw
                 # e3v/vmask/hv_0 operands and the folded HPG neighbour are one
@@ -6279,9 +6274,9 @@ class LatLonCGridOceanModel:
                 _raw_r1_hv_0 = (
                     _raw_wet_v0
                     / (_raw_hv0 + _one - _raw_wet_v0))
-                _raw_slow_v = _nemo_literal_slow_depth_mean(
-                    dv_dt[1:, :, :], _raw_e3v0, _raw_vmask0,
-                    _raw_r1_hv_0, _raw_wet_v0)
+                _raw_slow_v = jnp.sum(
+                    _raw_e3v0 * dv_dt[1:, :, :] * _raw_vmask0,
+                    axis=-1) * _raw_r1_hv_0
                 _slow_v_native = jnp.where(
                     _fold_unit_v, _raw_slow_v, _slow_v_native)
             F_slow_u = (F_slow_u.at[:, 1:].set(_slow_u_native)
@@ -7392,11 +7387,6 @@ class LatLonCGridOceanModel:
                     _baro_seed = dict(
                         _baro_seed,
                         _nemo_materialize_v_transport_test_override=True)
-                if (self._nemo_ws_test_hooks
-                        .barotropic_unmasked_v_reciprocal):
-                    _baro_seed = dict(
-                        _baro_seed,
-                        _nemo_unmasked_v_reciprocal_test_override=True)
                 if self._nemo_ws_test_hooks.legacy_seed_min_rule_faces:
                     _baro_seed = dict(
                         _baro_seed,

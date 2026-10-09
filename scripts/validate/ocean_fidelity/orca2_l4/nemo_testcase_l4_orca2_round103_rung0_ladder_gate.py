@@ -100,7 +100,6 @@ def run(
     raw_reference_depth: bool = False,
     unmasked_v_transport: bool = False,
     materialize_v_transport: bool = False,
-    unmasked_v_reciprocal: bool = False,
     stage_observer=None,
 ) -> dict[str, object]:
     import jax
@@ -161,8 +160,7 @@ def run(
             barotropic_final_mean_association=final_mean_association,
             barotropic_reference_face_depth_override=reference_depth_override,
             barotropic_unmasked_v_transport=unmasked_v_transport,
-            barotropic_materialize_v_transport=materialize_v_transport,
-            barotropic_unmasked_v_reciprocal=unmasked_v_reciprocal),
+            barotropic_materialize_v_transport=materialize_v_transport),
     ) for stage in (1, 2))
     final_model = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
@@ -171,8 +169,7 @@ def run(
             barotropic_final_mean_association=final_mean_association,
             barotropic_reference_face_depth_override=reference_depth_override,
             barotropic_unmasked_v_transport=unmasked_v_transport,
-            barotropic_materialize_v_transport=materialize_v_transport,
-            barotropic_unmasked_v_reciprocal=unmasked_v_reciprocal))
+            barotropic_materialize_v_transport=materialize_v_transport))
 
     checkpoints: list[dict[str, object]] = []
     first_non_bit: dict[str, object] | None = None
@@ -240,7 +237,6 @@ def run(
             "raw_reference_depth": raw_reference_depth,
             "unmasked_v_transport": unmasked_v_transport,
             "materialize_v_transport": materialize_v_transport,
-            "unmasked_v_reciprocal": unmasked_v_reciprocal,
         },
         "entry_identity": entry_row,
         "checkpoint_count": len(checkpoints),
@@ -261,7 +257,6 @@ def main() -> int:
     parser.add_argument("--raw-reference-depth", action="store_true")
     parser.add_argument("--unmasked-v-transport", action="store_true")
     parser.add_argument("--materialize-v-transport", action="store_true")
-    parser.add_argument("--unmasked-v-reciprocal", action="store_true")
     parser.add_argument("--json-out", type=Path)
     args = parser.parse_args()
     try:
@@ -274,7 +269,6 @@ def main() -> int:
             raw_reference_depth=args.raw_reference_depth,
             unmasked_v_transport=args.unmasked_v_transport,
             materialize_v_transport=args.materialize_v_transport,
-            unmasked_v_reciprocal=args.unmasked_v_reciprocal,
         )
         require(args.plant == "none", f"{args.plant} plant stayed green")
     except (GateError, rung0.GateError, frames.GateError, OSError, ValueError) as error:

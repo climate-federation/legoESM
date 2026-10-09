@@ -46,7 +46,6 @@ from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
     _nemo_ssh_avg_prep,
     _nemo_literal_barotropic_pressure_gradient,
     _nemo_literal_seed_depth_mean,
-    _nemo_literal_slow_depth_mean,
     nemo_literal_accumulate_transport,
 )
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
@@ -89,31 +88,6 @@ def _cfg(**over):
 
 class TestNemoLiteralTransportAccumulation:
     """Round 59: raw za2*zhU*r1_e2u recurrence, one final division."""
-
-    def test_unmasked_v_reciprocal_is_distinct_and_zero_metric_safe(self):
-        """Round 194: the NEMO reciprocal has no compact-mask factor."""
-
-        e2u = jnp.ones((1, 2), dtype=jnp.float64)
-        e1v = jnp.asarray([[2.0], [0.0]], dtype=jnp.float64)
-        grid = SimpleNamespace(dy_u=e2u, dx_v=e1v)
-        hu = jnp.ones_like(e2u)
-        hv = jnp.ones_like(e1v)
-        u = jnp.zeros_like(e2u)
-        v = jnp.ones_like(e1v)
-        um = jnp.ones_like(e2u)
-        vm = jnp.zeros_like(e1v)
-
-        _, masked = nemo_literal_accumulate_transport(
-            jnp.zeros_like(u), jnp.zeros_like(v), 1.0,
-            hu, hv, u, v, um, vm, grid, mask_v=False)
-        _, unmasked = nemo_literal_accumulate_transport(
-            jnp.zeros_like(u), jnp.zeros_like(v), 1.0,
-            hu, hv, u, v, um, vm, grid, mask_v=False,
-            unmasked_v_reciprocal=True)
-
-        np.testing.assert_array_equal(np.asarray(masked), 0.0)
-        np.testing.assert_array_equal(np.asarray(unmasked), [[1.0], [0.0]])
-        assert np.isfinite(np.asarray(unmasked)).all()
 
     def test_source_association_and_cancelled_form_violation(self):
         """The control proves this test detects the old cancelled topology."""
@@ -1111,35 +1085,3 @@ class TestBarotropicSeedFaceDepth:
                     == "generic"), name
             assert c.barotropic_een_coefficient_evaluation == "generic", name
             assert c.barotropic_pgf_evaluation == "generic", name
-    def test_nemo_slow_depth_mean_materializes_compiled_products(self):
-        """The fused reduction is a firing control for ``stp2d`` association."""
-
-        field_np = np.asarray(
-            [[[-0.0006998246757532552, 50.213546544575564]]],
-            dtype=np.float64,
-        )
-        h_np = np.asarray(
-            [[[752.9006358246162, 0.7354579872041004]]],
-            dtype=np.float64,
-        )
-        field, h_face = jnp.asarray(field_np), jnp.asarray(h_np)
-        level_mask = jnp.ones_like(field)
-        face = jnp.ones((1, 1), dtype=jnp.float64)
-
-        expected = np.zeros((1, 1), dtype=np.float64)
-        for jk in range(field_np.shape[-1]):
-            expected = expected + h_np[..., jk] * field_np[..., jk]
-        expected = expected * np.asarray(face) * np.asarray(face)
-
-        got = jax.jit(_nemo_literal_slow_depth_mean)(
-            field, h_face, level_mask, face, face)
-        fused = jax.jit(lambda f, h: jnp.sum(f * h, axis=-1))(
-            field, h_face)
-        np.testing.assert_array_equal(np.asarray(got), expected)
-        assert not np.array_equal(np.asarray(fused), expected), (
-            "fused reduction plant did not separate from source association")
-
-        grad = jax.grad(lambda f: jnp.sum(_nemo_literal_slow_depth_mean(
-            f, h_face, level_mask, face, face)))(field)
-        assert np.all(np.isfinite(np.asarray(grad)))
-        assert np.any(np.asarray(grad) != 0.0)
