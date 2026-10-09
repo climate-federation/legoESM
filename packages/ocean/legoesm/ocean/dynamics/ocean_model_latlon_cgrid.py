@@ -1494,6 +1494,8 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # PLANT: move the card's tra_dmp increment from the stage-3 RHS to the
     # stage-1 RHS.  A gate that binds on the stage-3 placement must fire.
     tracer_damping_stage1_plant: bool = False
+    # PLANT: the same move for the card's tra_bbc geothermal increment.
+    geothermal_stage1_plant: bool = False
     # WRITE-only: return ``(state_after, (dT_dmp, dS_dmp, rate3_T, rate3_S,
     # consumed3_T, consumed3_S))`` -- the tra_dmp increments, the stage-3
     # tracer RHS before them and the stage-3 RHS the tracer program consumed.
@@ -2288,7 +2290,8 @@ def _nemo_ws_rk3_tracer_pair_step(
             )
             (adv_option, diffusive_option, geom, diffusive_geom,
              area, dy_u, dx_v, gamma_s, aht_m2_s, rho0,
-             nemo_reference_geometry, bbl_grid, bbl_eos_form) = bbl_context
+             nemo_reference_geometry, bbl_grid, bbl_eos_form,
+             bbl_seos_cfg) = bbl_context
             if diffusive_option == 1:
                 # trabbl.F90:348 reads gdept(bottom,Kmm).  Under key_qco that
                 # is gdept_0(bottom)*(1+r3t(Kmm)); the stage thickness sum is
@@ -2324,6 +2327,7 @@ def _nemo_ws_rk3_tracer_pair_step(
                     tr_a, tr_b, diffusive_geom,
                     bottom_depth_m=live_bottom_depth, rho_0=rho0,
                     grid=bbl_grid, eos_form=bbl_eos_form,
+                    seos_cfg=bbl_seos_cfg,
                 )
                 bbl_a, bbl_b = apply_bbl_diffusive_tendency(
                     bbl_a, bbl_b, tr_a, tr_b, h_stage, area,
@@ -3493,6 +3497,20 @@ class LatLonCGridOceanModel:
                     != "rk3_ws"):
                 raise ValueError(
                     "nemo_tracer_damping is transcribed only on the NEMO "
+                    "WS-RK3 stage-3 tracer RHS (momentum and tracer "
+                    "integrators 'rk3_ws')")
+        _qgh = config.nemo_geothermal_qgh_wm2
+        if _qgh is not None:
+            if (isinstance(_qgh, bool) or not isinstance(_qgh, (int, float))
+                    or not np.isfinite(_qgh) or _qgh <= 0.0):
+                raise ValueError(
+                    "nemo_geothermal_qgh_wm2 must be a finite flux > 0 "
+                    f"[W/m2] or None, got {_qgh!r}")
+            if (config.tracer_time_integrator != "rk3_ws"
+                    or getattr(config, "momentum_time_integrator", "euler")
+                    != "rk3_ws"):
+                raise ValueError(
+                    "nemo_geothermal_qgh_wm2 is transcribed only on the NEMO "
                     "WS-RK3 stage-3 tracer RHS (momentum and tracer "
                     "integrators 'rk3_ws')")
         nonnegative = {
@@ -6360,6 +6378,8 @@ class LatLonCGridOceanModel:
         _nemo_ws_exposed_stage1_transport_operand = None
         _nemo_ws_tracer_damping_rates = None
         _nemo_ws_live_damping = None
+        _nemo_ws_geothermal_rate = None
+        _nemo_ws_live_geothermal = None
         _nemo_ws_exposed_momentum_operator = None
         _nemo_ws_exposed_stage1_rhs = None
         _nemo_ws_exposed_stage1_raw = None
@@ -7763,6 +7783,27 @@ class LatLonCGridOceanModel:
                         _h_live_one_half),
                 ),
             )
+            if _cfg_b.nemo_geothermal_qgh_wm2 is not None:
+                # trabbc.F90: qgh_trd0/(e3t_0(mbkt)*(1+r3t(Kmm))), Kmm = the
+                # stage-3 level N+1/2; joins stage 3's Krhs below.
+                from legoesm.ocean.eos import nemo_r3t_stretch as _r3t_s
+                from legoesm.ocean.physics.geothermal import nemo_tra_bbc_rate
+                if getattr(_zc, "nemo_e3t_0", None) is None:
+                    raise ValueError(
+                        "nemo_geothermal_qgh_wm2 needs NEMO's e3t_0 on the "
+                        "vertical coordinate (nemo_e3t_0)")
+                _nemo_ws_geothermal_rate = nemo_tra_bbc_rate(
+                    _cfg_b.nemo_geothermal_qgh_wm2, _zc.nemo_e3t_0,
+                    _r3t_s(_zc, _eta_live_one_half, state.H_bathy.data,
+                           evaluation="nemo_reciprocal"),
+                    _active_live, rho0=_cfg_b.rho_0,
+                    rcp=_cfg_b.physics.constants.c_sw)
+                if self._nemo_ws_test_hooks.geothermal_stage1_plant:
+                    _stage_source_rates = (
+                        (_stage_source_rates[0][0] + _nemo_ws_geothermal_rate,
+                         _stage_source_rates[0][1]),
+                        *_stage_source_rates[1:],
+                    )
             if _cfg_b.nemo_tracer_damping is not None:
                 # tradmp.f90:190-195 on ts(Kbb), the step-entry tracers; the
                 # increment joins stage 3's Krhs below (stprk3_stg.f90:529).
@@ -9397,6 +9438,17 @@ class LatLonCGridOceanModel:
                             _stage_source_rates[2][1] + dS_gm * active_3d,
                         ),
                     )
+                if _nemo_ws_geothermal_rate is not None:
+                    # Stage 3 only: after tra_ldf, before tra_bbl and tra_dmp.
+                    _ws_rate3 = _ws_stage_source_rates[2]
+                    _ws_rate3_geo = _ws_rate3 if (
+                        self._nemo_ws_test_hooks.geothermal_stage1_plant) else (
+                        _ws_rate3[0] + _nemo_ws_geothermal_rate, _ws_rate3[1])
+                    _ws_stage_source_rates = (
+                        *_ws_stage_source_rates[:2], _ws_rate3_geo)
+                    _nemo_ws_live_geothermal = (
+                        _nemo_ws_geothermal_rate, _ws_rate3[0],
+                        _ws_rate3_geo[0])
                 if _nemo_ws_tracer_damping_rates is not None:
                     # Stage 3 only: after tra_ldf (the Redi term above), before
                     # tra_zdf (stprk3_stg.f90:526, :529, :538).
@@ -9476,6 +9528,7 @@ class LatLonCGridOceanModel:
                         _nemo_bbl_geometry,
                         _grid,
                         _cfg_b.eos,
+                        _cfg_b.eos_nemo_seos,
                     )
                 _ws_tracer_result = _nemo_ws_rk3_tracer_pair_step(
                     # NEMO's stage ladder always restarts from ts(Kbb).
@@ -10331,6 +10384,8 @@ class LatLonCGridOceanModel:
                 raise ValueError(
                     "expose_stage3_tracer_damping needs a card that selects "
                     "nemo_tracer_damping on the rk3_ws tracer program")
+            if _nemo_ws_live_geothermal is not None:
+                return state_new, _nemo_ws_live_damping, _nemo_ws_live_geothermal
             return state_new, _nemo_ws_live_damping
         if _return_live_stage_operands:
             if (getattr(_cfg_b, "momentum_time_integrator", "euler")

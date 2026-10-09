@@ -2793,6 +2793,13 @@ class LatLonCGridOceanConfig(NamedTuple):
     # sponge (``SpongeForcing``) and surface restoring are different statements
     # (no stage placement, no time-interpolated target) and are untouched.
     nemo_tracer_damping: object = None
+    # NEMO ln_trabbc with nn_geoflx = 1 (trabbc.F90): the constant geothermal
+    # flux rn_geoflx_cst [W/m2] heats the bottom wet T-cell through the
+    # STAGE-3 tracer RHS, after lateral mixing and before tra_bbl/tra_dmp
+    # (stprk3_stg.F90 tra_ldf, tra_bbc, tra_bbl, tra_dmp).  A float or None
+    # (OFF, the library default); rk3_ws only.  The operator-split helper
+    # (``GeothermalConfig`` / ``geothermal_apply``) is a different statement.
+    nemo_geothermal_qgh_wm2: object = None
     # --- Implicit (weight-1.0 pre-vmix) sponge placement (EXT-N2) -----------
     # Apply the SPONGE tracer relaxation (``SpongeForcing`` gamma·(ref − q))
     # at weight 1.0 inside the backward-Euler vertical-mixing solve instead of

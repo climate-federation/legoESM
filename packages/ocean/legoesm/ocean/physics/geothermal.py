@@ -170,3 +170,36 @@ def geothermal_bottom_heating_tendency(
             f"ndim {dz.ndim}: pass a scalar or a per-column field shape "
             f"{dz.shape[:-1]}")
     return flux * is_bottom / (rho_0 * c_sw * h_safe)
+
+
+def nemo_tra_bbc_rate(
+    qgh_wm2: float,
+    e3t_0: jnp.ndarray,
+    stretch_kmm: jnp.ndarray,
+    wet_cell: jnp.ndarray,
+    *,
+    rho0: float,
+    rcp: float,
+) -> jnp.ndarray:
+    """NEMO ``tra_bbc`` temperature Krhs increment [K/s], ``nn_geoflx = 1``.
+
+    eosbn2.F90 ``rho0_rcp = rho0*rcp``, ``r1_rho0_rcp = 1/rho0_rcp``;
+    trabbc.F90 ``qgh_trd0 = r1_rho0_rcp * rn_geoflx_cst`` (the constant is
+    used as W/m2, no 1e-3); then on the bottom wet level ``mbkt`` only::
+
+        Krhs += qgh_trd0 / ( e3t_0(mbkt) * (1 + r3t(Kmm)*tmask(mbkt)) )
+
+    ``stretch_kmm`` is ``1 + r3t(Kmm)`` per column; ``tmask(mbkt) = 1``.
+    Unlike :func:`geothermal_bottom_heating_tendency` this keeps NEMO's
+    association (reciprocal first, live thickness as one divisor).
+    """
+    from legoesm.core.source_rounding import nemo_source_round as b
+
+    e3t = jnp.asarray(e3t_0)
+    dtype = e3t.dtype
+    r1_rho0_rcp = 1.0 / (rho0 * rcp)                 # python fp64 = Fortran
+    qgh_trd0 = jnp.asarray(r1_rho0_rcp * qgh_wm2, dtype=dtype)
+    bottom = _bottom_cell_onehot(wet_cell, dtype) > 0.5
+    denom = b(e3t * jnp.asarray(stretch_kmm, dtype=dtype)[..., None])
+    safe = jnp.where(bottom, denom, jnp.asarray(1.0, dtype=dtype))
+    return jnp.where(bottom, b(qgh_trd0 / safe), jnp.asarray(0.0, dtype=dtype))

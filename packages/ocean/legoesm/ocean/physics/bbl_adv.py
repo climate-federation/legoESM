@@ -226,23 +226,32 @@ def nemo_bbl_diffusive_coefficients(
     rho_0: float,
     grid,
     eos_form: str = "teos10",
+    seos_cfg=None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Evaluate NEMO ``bbl``'s diffusive face gate.
 
     Source: ``trabbl.F90:342-380``.  In particular this preserves NEMO's
     two-times-alpha/beta sums and Fortran ``SIGN`` zero convention; it does
-    not replace the gate with a direct density comparison.
+    not replace the gate with a direct density comparison.  ``eos_form=
+    "nemo_seos"`` takes the ``np_seos`` branch of ``eos_rab`` (eosbn2.F90
+    rab_2d) with the deck's ``seos_cfg`` coefficients, which it requires.
     """
-    from legoesm.ocean.eos import nemo_roquet_alpha_beta
+    from legoesm.ocean.eos import nemo_roquet_alpha_beta, nemo_seos_alpha_beta
 
     b = nemo_source_round
     dtype = jnp.asarray(T).dtype
     half = jnp.asarray(0.5, dtype=dtype)
     Tb = _gather_level(jnp.asarray(T), geom.bot_k)
     Sb = _gather_level(jnp.asarray(S), geom.bot_k)
-    alpha, beta = nemo_roquet_alpha_beta(
-        Tb, Sb, jnp.asarray(bottom_depth_m, dtype=dtype), rho0=rho_0,
-        eos_form=eos_form)
+    depth = jnp.asarray(bottom_depth_m, dtype=dtype)
+    if eos_form == "nemo_seos":
+        if seos_cfg is None:
+            raise ValueError(
+                "eos_form='nemo_seos' needs the deck's NemoSEOSConfig")
+        alpha, beta = nemo_seos_alpha_beta(Tb, Sb, depth, cfg=seos_cfg)
+    else:
+        alpha, beta = nemo_roquet_alpha_beta(
+            Tb, Sb, depth, rho0=rho_0, eos_form=eos_form)
 
     def sign_half(argument):
         # GFortran's SIGN result for a zero second argument is +ABS(first),
