@@ -93,8 +93,8 @@ them; none touched this round):
 5. **`nn_zdmp = 1, 2`** (turbocline / mixed-layer exclusion) do not exist in
    legoESM. Not needed for `nn_zdmp = 0`.
 6. **Masking.** NEMO multiplies the target by `tmask` (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/dtatsd.f90:308`);
-   legoESM masks the tendency. Equivalent on wet cells; on partial cells and
-   land both give zero tendency (land `T = 0` in both).
+   legoESM masks the tendency. Equivalent on wet cells; partial bottom cells are wet in both and are damped in both; land gives
+   zero tendency (land `T = 0` in both).
 
 ## Round 1 — SMT-5 deck proposal (not built)
 
@@ -108,34 +108,42 @@ above); both namelist blocks exist in the SMT-4 `namelist_ref` (lines 116 and
 1012); no `run.sh` was written, so `bash -n` has nothing to check and the
 2-step smoke run is the operator's.
 
-**How to produce the data files faithfully.** NEMO writes its own analytical
-initial state when `nn_istate = 1`: `dia_wri_state` stores the step-entry
-`votemper` and `vosaline` (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/diawri.f90:134` and `ORCA2_OMIP_L4/BLD/ppsrc/nemo/diawri.f90:601`) to `output.init.nc`, global size, already masked. Using that file
-as the target, copied to the `sn_tem`/`sn_sal` names, means no second
-implementation of `usrdef_istate` (Rule 4) and bit-faithful targets. This is
-an acquisition (operator runs a 0-step job); it is the first item of round 2.
-The restoring field is a uniform or profile constant, so it needs no NEMO
-tool: write it with the `resto` variable, double, dims `(z,y,x)`, matching the
-global grid, in the layout of ORCA2's file; `custom.F90` is DMP_TOOLS' hook for
-exactly this.
+**How to produce the data files faithfully.** Correction after review: NEMO's
+`nn_istate = 1` file (`dia_wri_state`, triggered inside `dia_wri`,
+`ORCA2_OMIP_L4/BLD/ppsrc/nemo/diawri.f90:134`, fields from
+`ORCA2_OMIP_L4/BLD/ppsrc/nemo/diawri.f90:601`) is written when the output
+routine runs at the end of step 1, so it holds the state **after** the first
+step, not the analytical initial state; it is NOT a valid target. Two
+candidates remain: (T1) evaluate the card's analytical initial T/S once, on the
+NEMO grid, with the already-certified legoESM VORTEX initial state (SMT-4
+proved initial state against NEMO at kt=0) and write it to the two files, which
+NEMO and legoESM then both read; (T2) a card-local `MY_SRC` dump of NEMO's own
+`usr_def_istate` output. Pick **T1** (no NEMO source change, no second
+implementation: the field is just a deck input read identically by both
+models). Consequence: damping at step 1 is zero only to the accuracy of the
+proven initial-state match, not exactly. Either is an acquisition-free step
+this round; the file write is round 2 work. The restoring field is a constant
+or profile, so it needs no NEMO tool: write `resto`, double, dims `(z,y,x)`,
+global grid size, in ORCA2's layout (`custom.F90` is DMP_TOOLS' hook for
+exactly this). `resto` is not masked by `tra_dmp`; on wet cells (including
+z-partial-step bottom cells, which have `tmask = 1` and ARE damped) it acts;
+on land the target and state are both zero so the tendency is zero.
 
 ### Open deck values (all DECISIONS for the user)
 
 | | option | what it means | pick |
 |---|---|---|---|
-| (a) | **a1** target = the analytical initial T/S (NEMO's `output.init.nc`) | step 1 damping is exactly zero; the vortex anomaly relaxes back to its initial shape, which is the signal the module must reproduce | **a1** |
+| (a) | **a1** target = the analytical initial T/S (NEMO's `output.init.nc`) | step 1 damping is zero to the accuracy of the proven initial-state match; the vortex anomaly relaxes back to its initial shape, which is the signal the module must reproduce | **a1** |
 | | a2 target = a perturbed T/S | needs a new analytical definition: a new, unreviewed scientific choice | |
 | (b) | **b1** uniform `1/86400` s⁻¹ (ORCA2's deep value) on every wet level | strongest test, one day, every cell | **b1** |
 | | b2 ORCA2's vertical profile (ramp, zero at the surface level) mapped to the 11 levels by depth | mimics ORCA2's shape, but the mapping to 500 m levels is a further choice | |
 | | b3 same as b1 with a weaker timescale (e.g. 10 days) | slower damping, less dominated by the restoring | |
+| (d) | **d1** 12 identical monthly records, ORCA2's `-1`, `ln_tint=T`, `clim=T`, `'yearly'` | same NEMO read path as ORCA2; interpolation of equal records may differ from the record by ~1e-16 relative | **d1** |
+| | d2 `ln_tint=.false.` (or one record) | exactly constant target | |
+| (e) | **e1** target files = card's analytical initial T/S written once (T1 above) | both models read the same file | **e1** |
+| | e2 NEMO `MY_SRC` dump of `usr_def_istate` (T2) | exact NEMO field, needs a card-local source file | |
 | (c) | **c1** `nn_zdmp = 0` | what ORCA2 rung 1 resolves to; no `avt`/mixed-layer inputs needed | **c1** |
 | | c2 `nn_zdmp = 1` or `2` | needs turbocline or mixed-layer diagnostics, untested in the legoESM card | |
-
-Noted, not asked: time interpolation follows ORCA2 (`-1`, `ln_tint=T`,
-`clim=T`, `'yearly'`) with 12 identical monthly records, so the NEMO
-time-interpolation path stays the same; linear interpolation of equal records
-may differ from the record by one rounding step (about 1e-16 relative). If the
-user prefers exact constancy, `ln_tint=.false.` is the alternative.
 
 Why b1 and not ORCA2's regional mask: the 691-column mask is Mediterranean/Red
 Sea geometry that has no seamount analogue (a hidden choice if invented).
@@ -148,18 +156,22 @@ ORCA2's value.
 
 | choice | status |
 |---|---|
-| citation-gate map entries for the new NEMO citations (gate file only) | ASKED (gate must stay green; no behaviour change) |
+| citation-gate map entries for the new NEMO citations (gate file only, no behaviour change) | UNASKED (revert = drop the SMT-RUNGS block from the map) |
 | none other; no deck, default, or library change | n/a |
 
 UNASKED list: empty.
 
 ## Review, citations
 
-Single review (codex): see the final section of this file's commit message;
-if unavailable it reads "independent review unavailable".
+Single review (codex), 4 findings, all CONFIRMED and acted on: (1) the
+`nn_istate` file is the post-step-1 state, not the initial state (target
+section rewritten, T1/T2); (2) partial bottom cells are wet and damped
+(corrected); (3) the time-interpolation choice was hidden (now decision d);
+(4) the `diawri` citations support only the trigger and the written field
+(prose narrowed).
 
-Controls: **not run** — no code was added; the only code edit is the citation
-map. The gate result is recorded in the commit message.
+Citation gate: PASS, 20 citations, 0 unmapped, 0 failures; planting a 2-line
+shift on the `tradmp.f90:194` citation makes it FAIL (exit 1).
 
 UNVERIFIED: RK3 placement of legoESM's sponge tendency (gap 2) and the
 implicit/explicit question (gap 3) are read from comments and call sites, not
