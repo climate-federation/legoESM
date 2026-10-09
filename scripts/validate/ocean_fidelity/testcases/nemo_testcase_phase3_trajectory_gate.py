@@ -83,6 +83,11 @@ DEFAULT_ORACLE_ROOTS = {
     "VORTEX_SMT4_VEC-zps": Path(
         "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round237/"
         "oracle_vortex_smt4/kt1_10"),
+    # SMT-5 (Decision 107): SMT-4 + ORCA2 rung 1's T/S damping; the card reads
+    # NEMO's dumped inputs from this same directory.
+    "VORTEX_SMT5_VEC-zps": Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/smtrungs_rounds/"
+        "round2/oracle_vortex_smt5/kt1_10"),
 }
 
 # NEMO writes its records with a halo of this width on every side; the gate
@@ -316,7 +321,10 @@ def run(
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
     require(get_policy() == PrecisionPolicy.fp64(transcendentals="libm"), "precision policy is not fp64")
     require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
-    card = build_nemo_testcase_card(case)
+    card = build_nemo_testcase_card(
+        case, deck_root=oracle_root if case == "VORTEX_SMT5_VEC-zps" else None)
+    # fld_read interpolates the damping target at the step's elapsed time.
+    damped = card.recipe.model_config.nemo_tracer_damping is not None
     # Measurement arm only -- the card still STATES its own form; this scores
     # the same card under the other one so the pair is one run's numbers.
     arm_config = with_first_wzv_after_ssh(
@@ -391,7 +399,9 @@ def run(
             if not continue_after_first:
                 break
         if kt < max_step:
-            state = model.step(state, dt=card.dt_s)
+            state = model.step(
+                state, dt=card.dt_s,
+                **({"t_seconds": (kt - 1) * card.dt_s} if damped else {}))
 
     cfg = card.recipe.model_config
     bbl_attribution = None

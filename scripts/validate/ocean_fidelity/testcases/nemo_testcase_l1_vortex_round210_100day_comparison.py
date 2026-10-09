@@ -102,6 +102,16 @@ CERTIFIED_LADDER["smt3"] = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round237/"
     "landing_smt3.json")
 
+CARDS["smt5"] = (
+    "VORTEX_SMT5_VEC-zps",
+    Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/smtrungs_rounds/"
+         "round2/oracle_vortex_smt5/day100"),
+)
+# No certified ladder exists for SMT-5 yet: pass --ladder-reference.
+CERTIFIED_LADDER["smt5"] = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/smtrungs_rounds/"
+    "round3/smt5_ladder.json")
+
 CARDS["smt4"] = (
     "VORTEX_SMT4_VEC-zps",
     Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round237/"
@@ -173,6 +183,15 @@ def sanity_check_kt1_10(
     }
 
 
+def build_card(case: str, nemo_dir: Path):
+    """The named card; SMT-5 reads NEMO's dumped damping inputs from its run."""
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_nemo_testcase_card,
+    )
+    return build_nemo_testcase_card(
+        case, deck_root=nemo_dir if case == "VORTEX_SMT5_VEC-zps" else None)
+
+
 def run_lego_card(card, lego_dir: Path, *, model_hooks=None,
                   snapshot_days=range(1, N_DAYS + 1)) -> dict:
     """Step one resolved card for 100 days through the production closure."""
@@ -190,11 +209,14 @@ def run_lego_card(card, lego_dir: Path, *, model_hooks=None,
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
         **({} if model_hooks is None else {"_nemo_ws_test_hooks": model_hooks}))
     state = card.recipe.initial_state
+    damped = card.recipe.model_config.nemo_tracer_damping is not None
     lego_dir.mkdir(parents=True, exist_ok=True)
     snapshot_days = frozenset(int(day) for day in snapshot_days)
     day9_T = None
     for step in range(1, N_DAYS * STEPS_PER_DAY + 1):
-        state = model.step(state, dt=card.dt_s)
+        state = model.step(
+            state, dt=card.dt_s,
+            **({"t_seconds": (step - 1) * card.dt_s} if damped else {}))
         if step == 9:
             # The kt=10 "before" entry in the ladder is the state after 9
             # completed steps; keep it for the sanity cross-check.
@@ -208,13 +230,9 @@ def run_lego_card(card, lego_dir: Path, *, model_hooks=None,
     return {"card": card, "day9_T": day9_T}
 
 
-def run_lego(case: str, lego_dir: Path) -> dict:
+def run_lego(case: str, lego_dir: Path, nemo_dir: Path | None = None) -> dict:
     """Step the certified named card 3000 times; snapshot every day."""
-    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
-        build_nemo_testcase_card,
-    )
-
-    return run_lego_card(build_nemo_testcase_card(case), lego_dir)
+    return run_lego_card(build_card(case, nemo_dir), lego_dir)
 
 
 def load_nemo(nemo_dir: Path, day: int, nlev: int) -> dict:
@@ -280,7 +298,7 @@ def main() -> int:
         "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round210"))
     ap.add_argument("--cards", default="flux,vec",
                      help=("comma-separated tags: flux, vec, smtflux, smtvec, "
-                           "smt1, smt2, smt3, smt4"))
+                           "smt1, smt2, smt3, smt4, smt5"))
     ap.add_argument("--skip-run", action="store_true",
                      help="scoring only; legoESM snapshots already written")
     ap.add_argument(
@@ -313,13 +331,10 @@ def main() -> int:
 
         lego_dir = args.out / f"lego_{tag}"
         if args.skip_run and (lego_dir / "day100.npz").is_file():
-            from legoesm.ocean.fidelity.nemo_testcase_recipe import (
-                build_nemo_testcase_card,
-            )
-            card = build_nemo_testcase_card(case)
+            card = build_card(case, nemo_dir)
             day9_T = None
         else:
-            run_out = run_lego(case, lego_dir)
+            run_out = run_lego(case, lego_dir, nemo_dir)
             card = run_out["card"]
             day9_T = run_out["day9_T"]
 
