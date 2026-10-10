@@ -200,6 +200,8 @@ FILES = {
         _ORCA2_R214VECPREV3_COMPILED / "dynspg_ts.f90"),
     "ORCA2_OMIP_L4_R214VECPREV3/BLD/ppsrc/nemo/lbcnfd.f90": (
         _ORCA2_R214VECPREV3_COMPILED / "lbcnfd.f90"),
+    "ORCA2_OMIP_L4_R214VECPREV3/BLD/ppsrc/nemo/stprk3_stg.f90": (
+        _ORCA2_R214VECPREV3_COMPILED / "stprk3_stg.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynadv.f90": (
         _ORCA2_COMPILED / "dynadv.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/ldfdyn.f90": (

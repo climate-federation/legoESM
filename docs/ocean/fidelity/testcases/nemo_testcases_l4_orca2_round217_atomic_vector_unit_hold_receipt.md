@@ -19,10 +19,12 @@ the round-215 slow-V/raw-`ssvmask` pair, raw reference face depths, the complete
 seven-array association, and the unmasked/materialised V transport. The
 executed vector update is compiled at
 `ORCA2_OMIP_L4_R214VECPREV3/BLD/ppsrc/nemo/dynspg_ts.f90:669-682`; the one
-association follows at `dynspg_ts.f90:747-756`; and the next substep's V
-transport and continuity consumer are `dynspg_ts.f90:533-560`. These are the
-same compiled spans admitted in rounds 215-216. No constituent was scored as
-a landing by itself.
+association follows at
+`ORCA2_OMIP_L4_R214VECPREV3/BLD/ppsrc/nemo/dynspg_ts.f90:747-756`; and the
+next substep's V transport and continuity consumer are
+`ORCA2_OMIP_L4_R214VECPREV3/BLD/ppsrc/nemo/dynspg_ts.f90:533-560`. These are
+the same compiled spans admitted in rounds 215-216. No constituent was scored
+as a landing by itself.
 
 The candidate extended the already-landed literal external-mode predicate to
 the vector-form RK3 branch and used NEMO's raw compact V mask at both the slow
