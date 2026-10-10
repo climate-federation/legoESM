@@ -201,8 +201,8 @@ def measure(deck_root: Path, frames_root: Path,
         frames_root / "oracle_rktracer_stage3_kt00000001.bin")
     owned_kmm = np.asarray(record["Kmm_T"])[..., :-1]
     halves = {
-        "south": np.asarray(frames[2]["T"])[:owned_kmm.shape[0]],
-        "north": np.asarray(frames[2]["T"])[-owned_kmm.shape[0]:],
+        "south": np.asarray(frames[2]["T"])[:, :owned_kmm.shape[1]],
+        "north": np.asarray(frames[2]["T"])[:, -owned_kmm.shape[1]:],
     }
     half_counts = {
         name: int(np.count_nonzero(field != owned_kmm))
@@ -211,7 +211,9 @@ def measure(deck_root: Path, frames_root: Path,
     matches = [name for name, count in half_counts.items() if count == 0]
     require(len(matches) == 1, "rank-0 Kmm record has ambiguous ownership")
     matched = matches[0]
-    sl = slice(0, owned_kmm.shape[0]) if matched == "south" else slice(-owned_kmm.shape[0], None)
+    lat_slice = (slice(0, owned_kmm.shape[1]) if matched == "south"
+                 else slice(-owned_kmm.shape[1], None))
+    sl = (slice(None), lat_slice, slice(None))
     support = active[sl]
 
     tracer_rows = {}
