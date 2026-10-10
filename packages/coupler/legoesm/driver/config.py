@@ -339,12 +339,13 @@ class DycoreConfig(NamedTuple):
     # invariant both sides were preserving independently.
     fv3_duo_windows: int | None = None
     fv3_duo_window_pad: int | None = None
-    # FV3 duo as a COLUMN model inside the MPAS lane (route A, 2026-09-26,
-    # docs/architecture/fv3_duo_amip_adapter_plan.md): the duo is the
-    # dynamics operator of ``_run_mpas`` through FV3DuoColumnModel, so the
-    # CAM6 AMIP suite (physics on (nCells, nlev) columns) drives it
-    # without any physics rewrite.  False = the closed certified duo lane.
-    fv3_duo_column_lane: bool = False
+    # Column lane (route A, 2026-09-26; composable physics P2): the dycore
+    # runs as a ColumnModel (legoesm.grids.column_mesh) behind the shared
+    # column loop, so the CAM6 AMIP suite (physics on (nCells, nlev)
+    # columns) drives it without any physics rewrite.  fv3_duo only today.
+    # Old key ``fv3_duo_column_lane`` is an alias (RENAMED_CONFIG_KEYS).
+    # False = the closed certified duo lane.
+    column_lane: bool = False
     # FV3's own tracer positivity in the vertical remap (fv_mapz.F90 fill
     # -> fillz column borrow, fv_fill.F90).  Default False = the certified
     # oracle deck (input.nml fill=.F.); the CAM6 deck sets it True
@@ -1994,13 +1995,13 @@ class ExperimentConfig(NamedTuple):
         """True when the run executes the MPAS lane's physics loop, which
         consumes the whole ExperimentConfig surface: the MPAS dycore itself,
         or the FV3 duo as that loop's dynamics operator (route A,
-        ``dycore.fv3_duo_column_lane``; what the column model cannot honour
+        ``dycore.column_lane``; what the column model cannot honour
         is refused by name in its factory).  The lane-keyed guards in
         :meth:`validate_strict` read this, not the discretization string."""
         d = self.dycore
         return (d.discretization == "mpas"
                 or normalize_grid_type(self.grid.grid_type) == "mpas"
-                or (d.discretization == "fv3_duo" and bool(d.fv3_duo_column_lane)))
+                or bool(d.column_lane))
 
     def validate_strict(self) -> None:
         """Raise ValueError for invalid parameter values.
@@ -2156,11 +2157,30 @@ class ExperimentConfig(NamedTuple):
         if d.corner_fill not in CORNER_FILL_MODES:
             errors.append(f"dycore.corner_fill must be one of {CORNER_FILL_MODES}, "
                           f"got {d.corner_fill!r}")
-        if d.fv3_duo_column_lane:
+        if d.column_lane:
             if d.discretization != "fv3_duo":
                 errors.append(
-                    "dycore.fv3_duo_column_lane needs "
-                    f"dycore.discretization='fv3_duo', got {d.discretization!r}")
+                    "dycore.column_lane: no column adapter for "
+                    f"dycore.discretization={d.discretization!r} (fv3_duo only)")
+            # every column lane: the columns are a VIEW of the native
+            # state and only the dycore's step may move the winds
+            if self.sponge_enabled:
+                errors.append("sponge_enabled=True on a column lane "
+                              "(post-step wind edit)")
+            # the column mesh carries no edge topology: a convection
+            # scheme reading moisture convergence / resolved w would get
+            # None and run inert (Kuo) or fail (Kain-Fritsch); Tiedtke /
+            # Bechtold degrade to their saturation-deficit proxy
+            if self.convection != "none":
+                from legoesm.atmosphere.physics.convection.integration import (
+                    convection_scheme_traits)
+                _tr = convection_scheme_traits(self.convection)
+                if _tr.is_simple_mc_consumer or _tr.is_w_grid_consumer:
+                    errors.append(
+                        f"convection={self.convection!r} on a column lane "
+                        "(reads a grid operator -- moisture convergence / "
+                        "resolved w -- the column mesh has no edge "
+                        "topology for; it would run inert)")
         if d.fv3_duo_fill and d.discretization != "fv3_duo":
             errors.append(
                 "dycore.fv3_duo_fill is the fv3_duo remap's fillz; got "
@@ -4889,6 +4909,30 @@ _SUB_CONFIGS = {
 }
 
 
+# Renamed config keys, old -> new (composable physics P2, decision D8).  The
+# old spellings stay working aliases: YAML decks (read_yaml_with_includes),
+# the CLI (second option string), stored configs (experiment_config_from_dict)
+# and run manifests (restart.config_hash_matches).
+RENAMED_CONFIG_KEYS = {
+    "fv3_duo_column_lane": "column_lane",
+}
+
+
+def migrate_renamed_keys(d: dict) -> dict:
+    """*d* with every old key of :data:`RENAMED_CONFIG_KEYS` renamed, at any
+    dict depth.  Old and new name both set to different values raises."""
+    out = {k: (migrate_renamed_keys(v) if isinstance(v, dict) else v)
+           for k, v in d.items() if k not in RENAMED_CONFIG_KEYS}
+    for old, new in RENAMED_CONFIG_KEYS.items():
+        if old in d:
+            if new in out and out[new] != d[old]:
+                raise ValueError(
+                    f"config sets both {old!r} (old name) and {new!r} to "
+                    f"different values ({d[old]!r} vs {out[new]!r})")
+            out[new] = d[old]
+    return out
+
+
 def experiment_config_to_dict(config: ExperimentConfig) -> dict:
     """Serialize ExperimentConfig to a JSON-safe dict.
 
@@ -4927,6 +4971,7 @@ def experiment_config_from_dict(d: dict, *, strict: bool = False) -> ExperimentC
     experiment than the file describes, with nothing in the log to say so.
     Checkpoint reload keeps the permissive default.
     """
+    d = migrate_renamed_keys(d)
     if strict:
         unknown = []
         for key, cls in _SUB_CONFIGS.items():
@@ -5072,17 +5117,15 @@ def mpas_land_flux_handoff_eligibility(cfg) -> tuple[bool, str]:
     (``mpas_land_beta_soil`` publishes the land's fluxes) and a turbulence
     kernel that accepts an injected surface flux.
     """
-    # The lane predicate mirrors ModelDriver.run's dispatch: fv3_duo first --
-    # its COLUMN lane (dycore.fv3_duo_column_lane) runs _run_mpas with the
-    # duo as the dynamics operator (user decision 2026-10-09: it takes the
-    # land model's stress too), the closed duo lane does not -- then
-    # grid_type == "mpas" -> _run_mpas.
-    if cfg.dycore.discretization == "fv3_duo":
-        if not bool(getattr(cfg.dycore, "fv3_duo_column_lane", False)):
-            return False, ("this is not the MPAS lane (the closed fv3_duo "
-                           "lane has no land model)")
-    elif cfg.grid.grid_type != "mpas":
-        return False, "this is not the MPAS lane"
+    # Mirrors ModelDriver.run's dispatch into the column loop: any column
+    # lane (user decision 2026-10-09: it takes the land model's stress
+    # too), else grid_type == "mpas" off the closed fv3_duo lane (which has
+    # no land model).  Not mpas_loop_lane: an mpas discretization on
+    # another grid never reaches the loop.
+    if not (cfg.dycore.column_lane
+            or (cfg.dycore.discretization != "fv3_duo"
+                and cfg.grid.grid_type == "mpas")):
+        return False, "this is not the MPAS lane or a column lane"
     if not cfg.use_multilayer_land:
         return False, "use_multilayer_land is off (no land model)"
     if not cfg.mpas_land_beta_soil:

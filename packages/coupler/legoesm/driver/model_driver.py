@@ -2087,7 +2087,7 @@ class ModelDriver:
                 dx=10_000.0, dy=10_000.0,
             )
         elif (gc.grid_type == "cubed_sphere"
-              and getattr(self.config.dycore, "fv3_duo_column_lane", False)):
+              and self.config.dycore.column_lane):
             # M6: the FV3 duo column lane's grid IS the duo's column mesh
             # (its six faces' A-grid centres, per-cell like the Voronoi
             # mesh), built here so every setup-time regrid -- topography,
@@ -2473,7 +2473,7 @@ class ModelDriver:
         self.model = create_atmosphere_dycore(
             self.config, self.grid, self.sigma, coeff_grid=coeff_grid,
             fv3_duo_bundle=getattr(self, "_fv3_duo_bundle", None))
-        if self._fv3_duo_column_model() is not None:
+        if self._column_model() is not None:
             # the model's own mesh (same values as the grid built in
             # _create_grid, by construction -- asserted) and the hybrid
             # coordinate of ITS ak/bk table replace the driver's
@@ -2820,8 +2820,9 @@ class ModelDriver:
         N = cfg.grid.resolution
         NLEV = cfg.grid.nlev
 
-        if self._fv3_duo_column_model() is not None:
-            self._fv3_duo_column_init_state()
+        _col = self._column_model()
+        if _col is not None:
+            _col.init_state(self)
             return
 
         if cfg.grid.grid_type == "mpas":
@@ -2991,9 +2992,9 @@ class ModelDriver:
         # Applied after the default moisture init so the Field metadata (dims,
         # units, names) from held_suarez_init is preserved as the template.
         if (cfg.ic == "era5" and cfg.ic_path
-                and not getattr(cfg.dycore, "fv3_duo_column_lane", False)):
+                and not cfg.dycore.column_lane):
             # (the fv3_duo column lane builds its ERA5 IC on its own mesh
-            # in _run_fv3_duo_column; the driver grid is not the duo's)
+            # in _run_column_lane; the driver grid is not the duo's)
             from legoesm.training.era5_to_state import (
                 load_era5_ic,
                 era5_to_cubedsphere_carry,
@@ -4766,7 +4767,7 @@ class ModelDriver:
             self.diagnostics.set_cmip_grid_info(
                 # the duo column mesh is a cell list: the Voronoi branch
                 # (lat/lon KD-tree weights), not the standard cube's
-                grid_type=("mpas" if self._fv3_duo_column_model() is not None
+                grid_type=("mpas" if self._column_model() is not None
                            else self.config.grid.grid_type),
                 grid=_cmip_grid,
                 start_year=self.config.start_year,
@@ -6520,7 +6521,7 @@ class ModelDriver:
         # (the fv3_duo COLUMN lane -- grid_type cubed_sphere, MPAS-shaped
         # column state -- checkpoints through this branch too, M5)
         if (self.config.grid.grid_type == "mpas"
-                or self._fv3_duo_column_model() is not None):
+                or self._column_model() is not None):
             ckpt_path = self._output_dir / f"checkpoint_day_{int(round(day)):04d}.npz"
             s = self.state
             _ps_carry = getattr(self, "_mpas_phys_state", None)
@@ -7400,7 +7401,7 @@ class ModelDriver:
         refused loudly instead of dying on an unrelated shape error
         deeper in a decode (codex 2026-08-18 MAJOR, kept as a gate).
         """
-        _col_lane = self._fv3_duo_column_model() is not None
+        _col_lane = self._column_model() is not None
         if self.config.dycore.discretization == "fv3_duo" and not _col_lane:
             return self._load_fv3_duo_checkpoint(Path(path))
         path = Path(path)
@@ -8218,9 +8219,8 @@ class ModelDriver:
                 # discovering its host callback has nowhere to land
                 # (GLM 2026-09-22)
                 require_cpu_for_strict_sedimentation()
-            if (self.config.dycore.discretization == "fv3_duo"
-                    and self.config.dycore.fv3_duo_column_lane):
-                status = self._run_fv3_duo_column(start_step, start_day)
+            if self.config.dycore.column_lane:
+                status = self._run_column_lane(start_step, start_day)
             elif self.config.dycore.discretization == "fv3_duo":
                 warn_sed_substeps_unreported(
                     self.config, "fv3_duo",
@@ -8680,7 +8680,7 @@ class ModelDriver:
             # 2026-10-04: the #1545 tripwire fired on this lane).
             or (self._voronoi_layout is None
                 and self._is_spmd_multiprocess()
-                and self._fv3_duo_column_model() is not None)
+                and self._column_model() is not None)
         )
         wants_cmip = diag is not None and (
             getattr(diag, "_spatial_monthly", None) is not None
@@ -9032,7 +9032,7 @@ class ModelDriver:
             logger.warning(
                 "no vertical coordinate on the driver: publishing no wap, so "
                 "subsidence cannot be scored for this run")
-        elif self._fv3_duo_column_model() is not None:
+        elif self._column_model() is not None:
             # The duo column mesh has no edge topology for the divergence
             # route, and the duo bundle's own ``omga`` is flagged
             # ``omga_is_meaningless`` (fv3_native_dynamics): no wap, said
@@ -9552,49 +9552,46 @@ class ModelDriver:
     _FV3_DUO_CKPT_SCHEMA = "fv3duo_ckpt_v1"
     _FV3_DUO_PRESS_KEYS = ("ps", "pe", "peln", "pk", "pkz")
 
-    def _run_fv3_duo_column(self, start_step: int = 0,
-                            start_day: float | None = None) -> str:
-        """The FV3 duo through the MPAS lane (route A): the driver's grid,
-        vertical coordinate and state become the column model's, then
-        ``_run_mpas`` runs unchanged with the duo as its dynamics
-        operator.  Fresh IC = the closed lane's own builder
-        (``_fv3_duo_fresh_ic``: DCMIP16 baroclinic wave, Kessler slots)
-        seen through the column view, so rung 1 of the ladder is the
-        SAME bundle on both lanes.
+    def _run_column_lane(self, start_step: int = 0,
+                         start_day: float | None = None) -> str:
+        """A column lane (``dycore.column_lane``): the driver's grid,
+        vertical coordinate and state are the column model's
+        (:class:`~legoesm.grids.column_mesh.ColumnModel`), then
+        ``_run_mpas`` runs unchanged with it as its dynamics operator.
+        Fresh IC = the adapter's ``init_state`` (the duo: the closed
+        lane's own builder ``_fv3_duo_fresh_ic`` seen through the column
+        view, so rung 1 of the ladder is the SAME bundle on both lanes).
 
         Restart (M5): ``load_checkpoint`` on an MPAS checkpoint that
-        carries the duo bundle (``fv3duo_ckpt_v1`` keys next to the MPAS
-        payload) has already rebuilt the column state through
+        carries the native bundle (duo: ``fv3duo_ckpt_v1`` keys next to
+        the MPAS payload) has already rebuilt the column state through
         ``from_bundle`` and staged the physics/land/accumulator carry
         exactly as on the MPAS lane, so this entry skips the IC and
         hands the loaded state to ``_run_mpas`` (days-this-job
         convention, as for MPAS).
         """
-        if self._fv3_duo_column_model() is None:
+        if self._column_model() is None:
             raise ValueError(
-                "fv3_duo_column_lane: the constructed dycore is "
-                f"{type(self.model).__name__}, not FV3DuoColumnModel")
+                "column_lane: the constructed dycore is "
+                f"{type(self.model).__name__}, not a ColumnModel")
         if getattr(self, "_ensemble_size", 1) not in (None, 1):
             raise NotImplementedError(
-                "fv3_duo column lane threads no ensemble axis")
+                "column lane threads no ensemble axis")
         if getattr(self, "_fv3_duo_column_restored", False):
             if start_step == 0 and self._loaded_checkpoint_step_day is None:
                 raise ValueError(
-                    "fv3_duo column lane: a checkpoint was loaded but "
+                    "column lane: a checkpoint was loaded but "
                     "run() was called from step 0; pass the (step, day) "
                     "load_checkpoint returned.")
         if not (self.grid is self.model.mesh
                 and self.sigma is self.model.sigma_coord
                 and isinstance(self.state, self.model._state_type)):
             raise AssertionError(
-                "fv3_duo column lane: the driver's grid / coordinate / state "
+                "column lane: the driver's grid / coordinate / state "
                 "are not the column model's (setup order broken)")
-        dyn = self.model.dyn
         self.tracers = {nm: f.data for nm, f in self.state.tracers.items()}
-        logger.info(
-            "  fv3_duo COLUMN lane: C%d km=%d moist=%s, %d columns through "
-            "_run_mpas", dyn.grid.n, dyn.config.km, dyn.config.moist,
-            self.model.mesh.nCells)
+        logger.info("  COLUMN lane: %s, %d columns through _run_mpas",
+                    type(self.model).__name__, self.model.mesh.nCells)
         return self._run_mpas(start_step, start_day)
 
     def _run_fv3_duo(self, start_step: int = 0,
@@ -10296,6 +10293,13 @@ class ModelDriver:
         )
         m = getattr(self, "model", None)
         return m if isinstance(m, FV3DuoColumnModel) else None
+
+    def _column_model(self):
+        """The dycore when the driver runs a column lane (a
+        :class:`~legoesm.grids.column_mesh.ColumnModel`), else None."""
+        from legoesm.grids.column_mesh import ColumnModel
+        m = getattr(self, "model", None)
+        return m if isinstance(m, ColumnModel) else None
 
     @staticmethod
     def _fv3_duo_column_hs6(col) -> np.ndarray:
@@ -13257,7 +13261,7 @@ class ModelDriver:
                 # there has been no surface heating yet.
                 if _capdcycl_on:
                     _sd_prev = getattr(self.model, "_sfc_diag", None)
-                    _zero = jnp.zeros((self.grid.grid_shape_2d[0],),
+                    _zero = jnp.zeros((self.grid.grid_n_columns,),
                                       dtype=self.state.p_s.data.dtype)
                     for _slot, _key in ((6, "shflx_sfc"), (7, "lhflx_sfc")):
                         _v = None

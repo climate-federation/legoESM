@@ -773,7 +773,7 @@ def test_land_stress_lane_predicate_is_the_driver_dispatch():
     duo_col = cfg._replace(
         grid=cfg.grid._replace(grid_type="cubed_sphere"),
         dycore=cfg.dycore._replace(discretization="fv3_duo",
-                                   fv3_duo_column_lane=True))
+                                   column_lane=True))
     assert mpas_land_stress_eligibility(duo_col)[0]
 
 
@@ -1029,7 +1029,7 @@ def test_pipeline_silent_drops_refused_or_warned(kw, match, refused, caplog):
     # FV3-duo column lane) or spectral (spectral's own multilayer refusal is
     # tested below).
     duo = _cdgrid_cfg(**kw)._replace(dycore=DycoreConfig(
-        dt=600.0, discretization="fv3_duo", fv3_duo_column_lane=True))
+        dt=600.0, discretization="fv3_duo", column_lane=True))
     assert duo.mpas_loop_lane
     spectral = _cdgrid_cfg(**kw)._replace(
         dycore=DycoreConfig(dt=600.0, discretization="spectral"))

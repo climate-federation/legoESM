@@ -1186,7 +1186,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help=("Window halo width for --fv3-duo-windows (a measured per-deck "
               "value, e.g. 11 at C48 with 3 acoustic substeps; no default)."))
     parser.add_argument(
-        "--fv3-duo-column-lane", action="store_true", default=False,
+        "--column-lane", "--fv3-duo-column-lane", action="store_true",
+        default=False, dest="column_lane",
         help=("fv3_duo as a COLUMN model inside the MPAS lane (route A): the "
               "duo is the dynamics operator of the CAM6-suite loop through "
               "FV3DuoColumnModel; physics runs on (nCells, nlev) columns "
@@ -2526,7 +2527,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         dt=args.dt,
         fv3_duo_windows=args.fv3_duo_windows,
         fv3_duo_window_pad=args.fv3_duo_window_pad,
-        fv3_duo_column_lane=args.fv3_duo_column_lane,
+        column_lane=args.column_lane,
         fv3_duo_fill=args.fv3_duo_fill,
         fv3_duo_nord=args.fv3_duo_nord,
         fv3_duo_d4_bg=args.fv3_duo_d4_bg,

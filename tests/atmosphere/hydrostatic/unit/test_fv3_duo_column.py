@@ -461,7 +461,7 @@ def _driver_cfg(tmp_path, **over):
     dycore = DycoreConfig(
         model_type="hydrostatic", discretization="fv3_duo",
         dt=over.pop("dt", 1920.0),
-        fv3_duo_column_lane=over.pop("column", True))
+        column_lane=over.pop("column", True))
     base = dict(
         grid=grid, dycore=dycore, days=over.pop("days", 0.25),
         radiation="none", convection="none", microphysics="none",

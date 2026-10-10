@@ -4369,9 +4369,9 @@ def test_fv3_duo_column_lane_flag_round_trips_and_validates():
     validate_strict accepts it with the window layout (M7: the column
     lane runs on the closed lane's layouts)."""
     cfg = _fv3_duo_cfg([])
-    assert cfg.dycore.fv3_duo_column_lane is False
+    assert cfg.dycore.column_lane is False
     cfg = _fv3_duo_cfg(["--fv3-duo-column-lane"])
-    assert cfg.dycore.fv3_duo_column_lane is True
+    assert cfg.dycore.column_lane is True
     cfg.validate_strict()
     cfg = _fv3_duo_cfg(["--fv3-duo-column-lane", "--fv3-duo-windows", "2",
                         "--fv3-duo-window-pad", "5"])
@@ -4379,8 +4379,34 @@ def test_fv3_duo_column_lane_flag_round_trips_and_validates():
     assert cfg.dycore.fv3_duo_windows == 2
     cfg = _fv3_duo_cfg(["--fv3-duo-column-lane"])
     cfg = cfg._replace(dycore=cfg.dycore._replace(discretization="cdgrid"))
-    with pytest.raises(ValueError, match="fv3_duo_column_lane needs"):
+    with pytest.raises(ValueError, match="no column adapter"):
         cfg.validate_strict()
+
+
+def test_renamed_config_keys_stay_aliases():
+    """Old key spellings (RENAMED_CONFIG_KEYS) load from a stored config and
+    match an old run manifest; old and new set differently is refused."""
+    import hashlib
+    import json
+    from legoesm.driver.config import (
+        RENAMED_CONFIG_KEYS, experiment_config_from_dict, migrate_renamed_keys)
+    from legoesm.driver.restart import _serialize_config, config_hash_matches
+    cfg = _fv3_duo_cfg(["--column-lane"])
+    new = _serialize_config(cfg, "atmosphere")
+    old = json.loads(json.dumps(new))
+    for o, n in RENAMED_CONFIG_KEYS.items():
+        for blk in (old, old["dycore"]):
+            if n in blk:
+                blk[o] = blk.pop(n)
+    assert old != new
+    assert experiment_config_from_dict(old, strict=True) == cfg
+    h = hashlib.sha256(json.dumps(old, sort_keys=True).encode()).hexdigest()
+    assert config_hash_matches(h, old, cfg)
+    assert not config_hash_matches(h, old, cfg._replace(
+        dycore=cfg.dycore._replace(column_lane=False)))
+    with pytest.raises(ValueError, match="different values"):
+        migrate_renamed_keys({"fv3_duo_column_lane": True,
+                              "column_lane": False})
 
 
 def test_fv3_duo_windows_without_pad_is_refused():
@@ -4814,9 +4840,9 @@ def test_cam6_duo_deck_passes_the_lane_guards_on_the_column_lane_only():
     """The CAM6 duo deck (config/amip/amip_production_fv3duo_c24.yaml) sets the
     eight physics-loop knobs validate_strict keys on the lane (cadence, CLUBB
     cloud scheme, land cadence / calibrated land, mpas_land_* / ice skin).
-    The COLUMN lane runs the MPAS loop itself (model_driver._run_fv3_duo_column
+    The COLUMN lane runs the MPAS loop itself (model_driver._run_column_lane
     -> _run_mpas), so the deck must pass; the same deck on the CLOSED duo lane
-    (fv3_duo_column_lane=False) must be refused with those messages -- the
+    (column_lane=False) must be refused with those messages -- the
     guards are not vacuous."""
     from legoesm.driver.run_config_yaml import load_yaml_config
     parser = build_arg_parser()
@@ -4824,10 +4850,10 @@ def test_cam6_duo_deck_passes_the_lane_guards_on_the_column_lane_only():
     parser.set_defaults(**load_yaml_config(str(deck), parser))
     cfg = build_config_from_args(_postprocess_args(parser.parse_args(
         _AMIP_DUMMY_PATHS + ["--clm-surfdata-path", "/dummy/surfdata.nc"]), parser))
-    assert cfg.dycore.discretization == "fv3_duo" and cfg.dycore.fv3_duo_column_lane
+    assert cfg.dycore.discretization == "fv3_duo" and cfg.dycore.column_lane
     assert cfg.mpas_loop_lane
     cfg.validate_strict()
-    closed = cfg._replace(dycore=cfg.dycore._replace(fv3_duo_column_lane=False))
+    closed = cfg._replace(dycore=cfg.dycore._replace(column_lane=False))
     assert not closed.mpas_loop_lane
     with pytest.raises(ValueError) as ei:
         closed.validate_strict()

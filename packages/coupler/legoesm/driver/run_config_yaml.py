@@ -47,6 +47,12 @@ def read_yaml_with_includes(path, _seen=None) -> dict:
         raise SystemExit(
             f"--config {path}: expected a YAML mapping of argument=value, "
             f"got {type(doc).__name__}.")
+    # renamed keys (config.RENAMED_CONFIG_KEYS): an old spelling is an alias
+    from legoesm.driver.config import migrate_renamed_keys
+    try:
+        doc = migrate_renamed_keys(doc)
+    except ValueError as exc:
+        raise SystemExit(f"--config {path}: {exc}.")
     base_ref = doc.pop("include", None)
     merged: dict = {}
     if base_ref is not None:
