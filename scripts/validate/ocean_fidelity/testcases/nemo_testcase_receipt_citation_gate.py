@@ -1552,10 +1552,10 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/trazdf.f90:171-216': [
         'Matrix construction', 'zwt(:,1) = 0._wp', 46],
     'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/trazdf.f90:218-235': [
-        'Diagonal, lower (i), upper (s)', ('ENDIF', 6), 18],
+        'Diagonal, lower (i), upper (s)', ('ENDIF', 11), 18],
     'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/trazdf.f90:249-273': [
         'Matrix inversion from the first level',
-        'zwt(ji,jk) = zwd(ji,jk) - zwi(ji,jk) * zws(ji,jk-1) / zwt(ji,jk-1)',
+        ('END DO   ;   END DO', 11),
         25],
     'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/trazdf.f90:283-299': [
         '2nd recurrence', ('END DO   ;   END DO', 14), 17],
