@@ -2642,7 +2642,7 @@ CITATION_MAP = {
         4],
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/traadv_cen.f90:150-160': [
         ('DO jk = 1, jpkm1', 1),
-        '/ (e3t_3d(ji,jj,jk)',
+        ('/ (e3t_3d(ji,jj,jk)', 1),
         11],
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/stprk3_stg.f90:269-279': [
         ('SELECT CASE( n_baro_upd )', 4),
