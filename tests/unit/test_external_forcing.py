@@ -596,6 +596,57 @@ class TestInterannualOzoneBug2:
         assert not np.allclose(v_y1, v_y2)
 
 
+class TestNonCyclicCoverage:
+    """F37 (review 2026-10-10): a day outside a multi-year file's years must
+    RAISE, not hold the end record (an 1850 run silently read January 1979)."""
+
+    @staticmethod
+    def _aod_1979_1980(path):
+        import netCDF4
+        lens = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31] * 2
+        starts = np.concatenate([[0], np.cumsum(lens)[:-1]])
+        lat = np.linspace(-90, 90, 5)
+        with netCDF4.Dataset(path, "w") as ds:
+            ds.createDimension("time", 24)
+            ds.createDimension("lat", 5)
+            t = ds.createVariable("time", "f8", ("time",))
+            t[:] = starts + np.asarray(lens) / 2.0
+            t.units = "days since 1979-01-01 00:00:00"
+            t.calendar = "noleap"
+            la = ds.createVariable("lat", "f8", ("lat",))
+            la[:] = lat
+            v = ds.createVariable("aod", "f8", ("time", "lat"))
+            v[:] = np.repeat(np.arange(24.0)[:, None], 5, axis=1)
+
+    @pytest.mark.parametrize("volcanic", [False, True])
+    def test_inside_covered_outside_raises(self, tmp_path, volcanic):
+        path = str(tmp_path / "aod_1979_1980.nc")
+        self._aod_1979_1980(path)
+
+        def cfg(start_year, hold=False):
+            if volcanic:
+                return AerosolConfig(
+                    enabled=True, path="", use_reference_if_missing=True,
+                    reference_aod_550=0.0, reference_lat_factor=0.0,
+                    volcanic_enabled=True, volcanic_path=path,
+                    volcanic_scale=1.0, start_year=start_year,
+                    hold_outside_file_years=hold)
+            return AerosolConfig(enabled=True, path=path, start_year=start_year,
+                                 hold_outside_file_years=hold)
+
+        # The file's own first and last days are covered (held end months).
+        first = get_aerosol_at_time(cfg(1979), day=0.0)
+        last = get_aerosol_at_time(cfg(1979), day=729.5)
+        assert np.allclose(first["aod"], 0.0) and np.allclose(last["aod"], 23.0)
+        # 1850 start, and two months past the file, both refuse.
+        for start_year, day, held in ((1850, 0.0, 0.0), (1979, 790.0, 23.0)):
+            with pytest.raises(ValueError, match="outside its coverage"):
+                get_aerosol_at_time(cfg(start_year), day=day)
+            # The explicit opt-in holds the end record instead.
+            out = get_aerosol_at_time(cfg(start_year, hold=True), day=day)
+            assert np.allclose(out["aod"], held)
+
+
 class TestCaseInsensitiveTSIBug4:
     """Issue #207 bug 4: ``_load_time_gpt`` must do case-insensitive
     variable lookup so that the MPI-M CMIP6 solar file (which stores

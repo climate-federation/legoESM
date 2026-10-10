@@ -25,12 +25,6 @@ _PRESCRIBED_ALBEDO_MIN_SW_DOWN_W_M2 = 1.0  # coeff-ok: owner-confirmed dark-sky 
 
 logger = logging.getLogger(__name__)
 
-# Ambient CO2 handed to the land tile's photosynthesis [ppmv].  One definition,
-# because the land step and the land-tile surface humidity must see the SAME air
-# or their two stomatal conductances would disagree about the same column.
-# AMIP prescribes no interactive CO2.  Routing the configured / transient CO2
-# here is NOT implemented: every land photosynthesis call uses this value.
-_CO2_PPMV_DEFAULT = 412.0
 # Visible share of surface solar irradiance, for collapsing a canopy's two
 # band albedos into the one broadband number radiation asks for.  ~0.43 of
 # surface shortwave falls below 0.7 um in a clear-sky standard atmosphere
@@ -169,8 +163,12 @@ class PhysicsPipeline:
         gwd_config=None,
         physics_parameterization=None,
         column_mesh=None,
+        co2_ppmv=None,
     ):
         self.adapter = adapter
+        # The run's fixed CO2 [ppmv] (radiation's, when no GHG file drives it);
+        # the land canopy reads the same value (land_co2_ppmv).
+        self.co2_ppmv = co2_ppmv
         self.sigma_full = sigma_full
         self.sigma_half = sigma_half
         self.dsigma = dsigma
@@ -887,7 +885,8 @@ class PhysicsPipeline:
 
     def _step_multilayer_land_tile(self, land_ml, sw_down_col, lw_down_col,
                                    T, p_s, q_v, u, v, precip_col, dt,
-                                   land_ml_params=None, cos_zenith_col=None):
+                                   land_ml_params=None, cos_zenith_col=None,
+                                   ghg_vmr_override=None):
         """Advance the MULTILAYER (Richards) land tile one radiation step and return
         ``(land_ml_new, T_sfc_col, albedo_col)`` — all in flattened COLUMN space.
 
@@ -896,7 +895,8 @@ class PhysicsPipeline:
         ``step_multilayer_land`` with the pipeline's land config / per-column params.
         Pure + differentiable w.r.t. the land params (the whole point of the refactor).
         Deferred land imports avoid a core->land top-level cross-package cycle."""
-        from legoesm.core.coupling_fields import AtmToSurface, lowest_level_height
+        from legoesm.core.coupling_fields import (
+            AtmToSurface, land_co2_ppmv, lowest_level_height)
         from legoesm.land.multilayer_land import step_multilayer_land
         from legoesm.thermo import saturation_mixing_ratio
         ad = self.adapter
@@ -912,6 +912,11 @@ class PhysicsPipeline:
         # tiles pass None here and keep the historical 0.5 placeholder (unchanged —
         # a shared faithful-zenith upgrade for those is a separate follow-up).
         _cosz = cos_zenith_col if cos_zenith_col is not None else 0.5 * ones
+        # Photosynthesis CO2 = radiation's CO2 (GHG file, else the run's fixed).
+        _co2 = land_co2_ppmv(ghg_vmr_override, self.co2_ppmv)
+        if _co2 is None:
+            raise ValueError("PhysicsPipeline.co2_ppmv is unset; the land canopy "
+                             "needs the run's CO2 (build_physics_pipeline sets it).")
         forcing = AtmToSurface(
             z_lowest=lowest_level_height(
                 T_air, self.sigma_coord.pressure_at_half(p_s_col),
@@ -920,7 +925,7 @@ class PhysicsPipeline:
             precip_snow=jnp.where(T_air < constants.T_freeze, precip, 0.0),
             T_lowest=T_air, q_lowest=q_air, u_lowest=u_low, v_lowest=v_low,
             p_lowest=0.99 * p_s_col, p_surface=p_s_col, rho_lowest=rho,
-            cos_zenith=_cosz, co2_ppmv=_CO2_PPMV_DEFAULT * ones,
+            cos_zenith=_cosz, co2_ppmv=_co2 * ones,
             has_radiation=ones, has_precipitation=ones)
         dt_rad = dt * self.rad_update_steps
         # CLM-ML needs a CONCRETE dt to resolve its static ML sub-step count
@@ -2940,7 +2945,7 @@ class PhysicsPipeline:
             land_ml_new, T_sfc_ml_col, _ = self._step_multilayer_land_tile(
                 land_ml, rad_out.sw_flux_down[:, -1], rad_out.lw_flux_down[:, -1],
                 T, p_s, q_v, u, v, precip_col, dt, land_ml_params=_lmp_rad,
-                cos_zenith_col=_cosz_col)
+                cos_zenith_col=_cosz_col, ghg_vmr_override=ghg_vmr_override)
             # Couple the multilayer land SKIN TEMPERATURE back to T_land so the
             # atmospheric BL surface fluxes (tiled _tiled_surface_flux / the non-
             # tiled T_sfc blend) see the EVOLVING Richards soil column.  Previously
@@ -3745,9 +3750,7 @@ def convection_config_for(config, grid_dx_m=None):
         # Schemes without a leaf slot (or resolver-handled specially) keep
         # the plain scheme selection — the factory dispatch validates it.
         return cc
-    if (scheme == "bechtold" and grid_dx_m is not None
-            and float(grid_dx_m) > 0.0 and leaf.dx_m == 0.0):
-        leaf = leaf._replace(dx_m=float(grid_dx_m))
+    leaf = _fill_bechtold_dx(scheme, leaf, grid_dx_m)
     cc = cc._replace(**{scheme: leaf})
     if getattr(leaf, "enable_cmt", False) and _is_mpas_grid(config):
         # The MPAS bridge reconstructs winds only on this explicit switch;
@@ -3757,6 +3760,20 @@ def convection_config_for(config, grid_dx_m=None):
         # winds and silently discarded its momtran output.
         cc = cc._replace(mpas_cmt=True)
     return cc
+
+
+def _fill_bechtold_dx(scheme, leaf, grid_dx_m):
+    """Bechtold ``dx_m`` from the grid when the user left the 0.0 sentinel
+    (see :func:`convection_config_for`); every other case unchanged."""
+    if (scheme == "bechtold" and grid_dx_m is not None
+            and float(grid_dx_m) > 0.0 and leaf.dx_m == 0.0):
+        return leaf._replace(dx_m=float(grid_dx_m))
+    return leaf
+
+
+def mean_grid_spacing_m(grid):
+    """Grid spacing [m] = sqrt of the mean cell area (``GridProtocol``)."""
+    return float(jnp.sqrt(jnp.mean(jnp.asarray(grid.grid_area))))
 
 
 def _zm_overrides(config):
@@ -3959,20 +3976,16 @@ def _resolve_convection(config):
 
 
 def _resolve_enable_cmt(config) -> bool:
-    """CMT switch with a LANE-PRESERVING default (2026-09-15).
-
-    ``bechtold_enable_cmt`` None keeps every lane where it was before the MPAS
-    wiring: the MPAS bridge handed Bechtold zero winds (CMT inert), the other
-    lanes inherited ``BechtoldConfig.enable_cmt`` (True).  An explicit bool
-    wins everywhere."""
+    """Bechtold CMT switch: an explicit ``bechtold_enable_cmt`` wins; unset is
+    the scheme default (``BechtoldConfig.enable_cmt``) on EVERY lane.  It used
+    to resolve OFF on MPAS only (F22, review 2026-10-10: the same deck ran
+    different physics per grid); MPAS reconstructs cell winds for CMT since
+    2026-09-15, so no lane needs a different default."""
     from legoesm.atmosphere.physics.convection.config import BechtoldConfig
-    from legoesm.driver.config import normalize_grid_type
 
     val = getattr(config, "bechtold_enable_cmt", None)
     if val is not None:
         return bool(val)
-    if _is_mpas_grid(config):
-        return False
     return bool(BechtoldConfig().enable_cmt)
 
 
@@ -4942,6 +4955,11 @@ def build_physics_pipeline(grid, sigma, config):
 
     # Resolve convection via registry
     convection_fn, convection_config = _resolve_convection(config)
+    # Bechtold's resolution-aware closure, filled from the grid as on the
+    # column lanes (a single column has no horizontal spacing).
+    if not isinstance(grid, SingleColumnGrid):
+        convection_config = _fill_bechtold_dx(
+            config.convection, convection_config, mean_grid_spacing_m(grid))
 
     # Resolve microphysics via registry
     micro_fn, micro_config = _resolve_microphysics(config)
@@ -5083,6 +5101,7 @@ def build_physics_pipeline(grid, sigma, config):
         gwd_config=gwd_config,
         physics_parameterization=physics_parameterization,
         column_mesh=column_mesh,
+        co2_ppmv=config.co2_ppmv,
     )
     from legoesm.atmosphere.physics.radiation.solar import earth_orbit
     pipeline.orbit = (earth_orbit()

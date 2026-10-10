@@ -17,6 +17,7 @@ import jax
 import jax.numpy as jnp
 import netCDF4
 import numpy as np
+import pytest
 
 jax.config.update("jax_enable_x64", True)
 
@@ -333,3 +334,15 @@ def test_wmo_tropopause_polar_inversion_double_and_nan():
         stratospheric_layer_weight(
             jnp.asarray(ph), lat, jnp.asarray(p[None]), jnp.asarray(temp[None])),
         stratospheric_layer_weight(jnp.asarray(ph), lat))
+
+
+@pytest.mark.parametrize("hold", [False, True])
+def test_hold_outside_file_years_reaches_the_driver_forcing_configs(hold):
+    """F37 (review 2026-10-10): the opt-in end-record hold must reach the
+    ozone and aerosol (hence CCN / volcanic) configs the driver samples."""
+    from legoesm.driver.model_driver import ModelDriver
+    fake = SimpleNamespace(config=_cfg(ozone_forcing="external",
+                                       forcing_hold_outside_file_years=hold))
+    ModelDriver._setup_external_forcing(fake)
+    assert fake._aerosol_config.hold_outside_file_years is hold
+    assert fake._ozone_ext_config.hold_outside_file_years is hold

@@ -1043,6 +1043,26 @@ def test_pipeline_cmt_off_not_flagged(caplog):
     assert "momentum transport" not in err + warn
 
 
+@pytest.mark.parametrize("scheme, refused", [
+    ("kuo", True), ("kain_fritsch", True), ("tiedtke", False), ("bechtold", False),
+])
+def test_column_lane_convection_without_its_grid_operator(scheme, refused, caplog):
+    """F23/F24 (review 2026-10-10, majority vote): the column-loop meshes have
+    no moisture-convergence / resolved-w operator.  Kuo (source) and
+    Kain-Fritsch (trigger) are refused there; Tiedtke / Bechtold close on their
+    saturation proxy and are named.  The lat-lon / cube pipeline has the
+    operators, so neither message fires there (control)."""
+    from legoesm.driver.config import DycoreConfig
+    duo = _cdgrid_cfg(convection=scheme)._replace(dycore=DycoreConfig(
+        dt=600.0, discretization="fv3_duo", fv3_duo_column_lane=True))
+    for cfg in (_mpas_cfg(convection=scheme), duo):
+        err, warn = _strict_msgs(cfg, caplog)
+        assert ("reads a grid operator" in err) == refused, err
+        assert ("saturation proxy" in warn) == (not refused), warn
+    err, warn = _strict_msgs(_cdgrid_cfg(convection=scheme), caplog)
+    assert "reads a grid operator" not in err and "saturation proxy" not in warn
+
+
 def test_spectral_multilayer_land_refused():
     from legoesm.driver.config import DycoreConfig
     cfg = _cdgrid_cfg(use_multilayer_land=True)._replace(

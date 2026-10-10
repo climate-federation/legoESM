@@ -719,6 +719,11 @@ class ExperimentConfig(NamedTuple):
     aerosol_reference_aod: float = 0.03
     volcanic_aerosol_file: str = ""
     volcanic_aerosol_scale: float = 1.0
+    # A run date outside a multi-year (non-cyclic) ozone / aerosol / CCN /
+    # volcanic file RAISES; True opts in to holding the file's end record
+    # there instead (review 2026-10-10 F37, majority vote: an 1850 coupled run
+    # silently read the January-1979 aerosol record for 129 years).
+    forcing_hold_outside_file_years: bool = False
     # Volcanic stratospheric LONGWAVE aerosol (gap #9): when True, ALSO
     # load the ``ext_earth`` LW band from ``volcanic_aerosol_file`` and
     # thread it into RRTMGP as the LW absorption optical depth.  Default
@@ -1530,10 +1535,9 @@ class ExperimentConfig(NamedTuple):
     # 0.05/0.10 were stable with small effects (cover -2/-5 pts).
     bechtold_M_b_max: float = 0.05   # BechtoldConfig.M_b_max [kg/m^2/s]
     # Gregory-1997 convective momentum transport, applied to MPAS edge winds
-    # through the shared cell->edge projection (2026-09-15).  None preserves
-    # each lane's earlier behaviour: OFF on MPAS (where the bridge handed the
-    # scheme zero winds, so CMT was inert) and the scheme's own default (ON)
-    # elsewhere.  The MPAS production default is a pending user decision.
+    # through the shared cell->edge projection (2026-09-15).  None = the
+    # scheme's own default (BechtoldConfig.enable_cmt, ON) on every lane
+    # (review 2026-10-10 F22, majority vote; it used to be OFF on MPAS only).
     bechtold_enable_cmt: bool | None = None
     bechtold_dnoprc: float = 3.0e-4   # BechtoldConfig.dnoprc [kg/kg]
     # Deep-plume entrainment / detrainment base rates (IFS cuascn), exposed
@@ -3214,6 +3218,29 @@ class ExperimentConfig(NamedTuple):
                         "opaque twice. Set them to 0 explicitly (None means "
                         "the scheme's non-zero default, not 'off')")
         if _is_mpas:
+            # Grid operators the column-loop meshes (MPAS Voronoi, FV3-duo
+            # columns) do not provide: column moisture convergence and the
+            # resolved w (review 2026-10-10 F23/F24, majority vote).  A scheme
+            # whose SOURCE or trigger is one of them is refused; Tiedtke /
+            # Bechtold close on their documented saturation proxy -> named.
+            if self.convection != "none":
+                from legoesm.atmosphere.physics.convection.integration import (
+                    convection_scheme_traits)
+                _ctr = convection_scheme_traits(self.convection)
+                if _ctr.is_simple_mc_consumer or _ctr.is_w_grid_consumer:
+                    errors.append(
+                        f"convection={self.convection!r} reads a grid operator "
+                        "(moisture convergence / resolved w) the column-loop "
+                        "lane (MPAS / FV3-duo column) does not provide: Kuo "
+                        "would run inert, Kain-Fritsch on a CAPE-only trigger. "
+                        "Use a lat-lon / cube / spectral lane or another scheme.")
+                elif _ctr.is_mc_consumer:
+                    _wlog.warning(
+                        "SILENT DROP: convection=%r closes on its saturation "
+                        "proxy on the column-loop lane (no moisture-convergence "
+                        "operator there), not on the resolved moisture "
+                        "convergence it uses on lat-lon / cube / spectral.",
+                        self.convection)
             for _flag in ("slab_land_active", "land_soil_bucket",
                           "surface_tiled"):
                 if getattr(self, _flag):

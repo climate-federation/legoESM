@@ -17,7 +17,7 @@ public HTTPS replica, and pull it with a resumable ``curl``.
 The files land RAW (their native input4MIPs variable names + units, e.g.
 ``tosbcs`` in K, ``siconcbcs`` in percent).  The AMIP loaders resolve variables
 by NAME + CF units (not by path), so most channels are consumed directly:
-``sst_sic``, ``ozone`` and ``volcanic`` need only ``run_amip_cmip6_deck.py``
+``sst_sic``, ``ozone`` and ``volcanic`` need only ``run_amip_smoke_deck.py``
 flags (e.g. ``--sst-file`` + ``--sst-var tosbcs --sst-offset 0 --sic-var
 siconcbcs --sic-scale 0.01``).  ``ghg``, ``solar`` and ``aerosol`` need a thin
 one-off adapter first (a variable rename / spectral rebin) — flagged per channel
@@ -61,7 +61,7 @@ from pathlib import Path
 # ``source_id`` is the canonical input4MIPs producer-dataset id; the Solr query
 # resolves the concrete file URLs + versions at fetch time, so only the stable
 # facets (project, source_id, variable_id) are pinned here.  ``deck_flags`` is
-# the exact ``run_amip_cmip6_deck.py`` invocation that consumes the RAW files
+# the exact ``run_amip_smoke_deck.py`` invocation that consumes the RAW files
 # (printed after a run) — the raw input4MIPs variable name + unit convention.
 # ---------------------------------------------------------------------------
 
@@ -72,7 +72,7 @@ class ForcingSpec:
     variable_ids: tuple[str, ...]   # input4MIPs variable_id(s) to fetch
     target_mip: str         # input4MIPs target_mip facet ("CMIP" for the DECK set)
     description: str
-    deck_flags: str         # how run_amip_cmip6_deck.py consumes the raw file(s)
+    deck_flags: str         # how run_amip_smoke_deck.py consumes the raw file(s)
     # True: the AMIP loader reads the RAW input4MIPs file as-is (its variable
     # name + CF units are what the loader detects, verified against the schema
     # in packages/tools/legoesm/forcing/{amip,external}.py).  False: the raw
@@ -97,7 +97,7 @@ FORCINGS: dict[str, ForcingSpec] = {
         description="AMIP II prescribed SST + sea-ice boundary conditions "
                     "(tosbcs [K], siconcbcs [percent]).",
         # The deck takes ONE --sst-file and reads SIC from it via --sic-var
-        # (run_amip_cmip6_deck.py has no --sic-path).  PCMDI usually ships one
+        # (run_amip_smoke_deck.py has no --sic-path).  PCMDI usually ships one
         # file carrying BOTH tosbcs and siconcbcs; if the download yields them as
         # two files, merge them into one (or drive run_amip.py directly, which
         # does take --sic-path).  The loader units-guard
@@ -534,7 +534,7 @@ def main(argv: list[str] | None = None) -> int:
             failures += 1
     print(f"\nDone. {len(plan) - failures}/{len(plan)} files complete.")
 
-    print("\nConsume the raw files with run_amip_cmip6_deck.py, e.g.:")
+    print("\nConsume the raw files with run_amip_smoke_deck.py, e.g.:")
     for spec in specs:
         tag = "" if spec.directly_consumable else "  [needs adapter first]"
         print(f"  # {spec.channel}{tag}: {spec.deck_flags}")

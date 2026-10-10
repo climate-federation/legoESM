@@ -1196,22 +1196,44 @@ def _interp_monthly_cyclic(mid_days: np.ndarray, data: np.ndarray, day: float) -
 
 
 def _interp_monthly_noncyclic(mid_days: np.ndarray, data: np.ndarray,
-                               day: float) -> np.ndarray:
+                               day: float, source: str = "",
+                               hold_outside: bool = False) -> np.ndarray:
     """Linear interpolation along a non-cyclic multi-year monthly axis.
 
     For multi-year forcing files (e.g. CMIP6 ozone 1850–2014, 1980
     months), ``_interp_monthly_cyclic`` wraps with period 365 d and
     throws away interannual evolution.  This helper treats ``mid_days``
-    as a monotonic absolute time axis and uses :func:`numpy.interp`
-    semantics per trailing column (clamps at the endpoints when ``day``
-    falls outside the file range).
+    as a monotonic absolute time axis and interpolates linearly per
+    trailing column.
+
+    Coverage: the record stamps widened by one record interval at each
+    end, so the first and last months (stamped mid-month) are covered
+    end to end and hold their record there.  A ``day`` beyond that RAISES:
+    holding an end record across years is a different forcing, not an
+    interpolation (an 1850 run read the January-1979 aerosol record for
+    129 years without a word).  ``hold_outside=True`` is the explicit opt-in
+    that holds the end record instead (``forcing_hold_outside_file_years``).
 
     Parameters
     ----------
     mid_days : (ntime,) float, ascending.
     data : (ntime, ...) float, any trailing shape.
     day : float — requested day on the same axis as ``mid_days``.
+    source : str — file name, used only in the out-of-range error.
+    hold_outside : bool — opt-in end-record hold outside the coverage.
     """
+    if mid_days.shape[0] > 1 and not hold_outside:
+        lo = mid_days[0] - (mid_days[1] - mid_days[0])
+        hi = mid_days[-1] + (mid_days[-1] - mid_days[-2])
+        if not lo <= day <= hi:
+            raise ValueError(
+                f"{source or 'non-cyclic forcing file'}: the simulated date "
+                f"maps to day {day:.1f} of the file axis, outside its coverage "
+                f"[{lo:.1f}, {hi:.1f}] (records {mid_days[0]:.1f}..{mid_days[-1]:.1f}). "
+                "Stage a file covering the run's years, check start_year, or "
+                "opt in to holding the end record "
+                "(forcing_hold_outside_file_years)."
+            )
     if data.ndim == 1:
         return np.array(np.interp(day, mid_days, data), dtype=np.float64)
     trailing = data.shape[1:]
@@ -1839,6 +1861,9 @@ class OzoneConfig(NamedTuple):
     reference_sigma_logp: float = 1.5
     reference_lat_dependence: bool = True
     start_year: int = 1850
+    # Opt-in: hold a multi-year file's end record outside its years instead
+    # of raising (see _interp_monthly_noncyclic).
+    hold_outside_file_years: bool = False
 
 
 def _reference_ozone_profile(
@@ -1933,7 +1958,9 @@ def get_ozone_at_time(config: OzoneConfig, day: float,
     # to map simulation day → file absolute time.
     if len(mid_days) > 12:
         file_day = _simday_to_file_day(day, config.start_year, first_date)
-        ozone_interp = _interp_monthly_noncyclic(mid_days, data, file_day)
+        ozone_interp = _interp_monthly_noncyclic(
+            mid_days, data, file_day, config.path,
+            config.hold_outside_file_years)
     else:
         # Phase-anchor a CF-dated climatology at its first record's
         # day-of-year (audit F4: days-since-first-record put mid-Jan at Jan 1).
@@ -2018,6 +2045,9 @@ class AerosolConfig(NamedTuple):
     # actual calendar months instead of being collapsed onto a 12-month
     # cyclic axis.  Mirrors :class:`OzoneConfig.start_year`.
     start_year: int = 1979
+    # Opt-in: hold a multi-year file's end record outside its years instead
+    # of raising (see _interp_monthly_noncyclic).  Mirrors OzoneConfig.
+    hold_outside_file_years: bool = False
 
 
 def _reference_aerosol_profile(lat_grid: jnp.ndarray, config: AerosolConfig) -> jnp.ndarray:
@@ -2064,7 +2094,9 @@ def get_aerosol_at_time(config: AerosolConfig, day: float,
         )
         if len(mid_days) > 12:
             file_day = _simday_to_file_day(day, config.start_year, first_date)
-            aod_interp = _interp_monthly_noncyclic(mid_days, data, file_day)
+            aod_interp = _interp_monthly_noncyclic(
+                mid_days, data, file_day, config.path,
+                config.hold_outside_file_years)
         else:
             # Phase-anchor a CF-dated climatology at its first record's
             # day-of-year (audit F4).
@@ -2118,7 +2150,9 @@ def get_aerosol_at_time(config: AerosolConfig, day: float,
                     day, config.start_year, first_date_v,
                 )
                 aod_v = (
-                    _interp_monthly_noncyclic(mid_days_v, data_v, file_day_v)
+                    _interp_monthly_noncyclic(
+                        mid_days_v, data_v, file_day_v, config.volcanic_path,
+                        config.hold_outside_file_years)
                     * config.volcanic_scale
                 )
             else:
@@ -2233,7 +2267,9 @@ def _volcanic_profile_at_time(config, day, lat_grid, kind):
     # Interpolate the (ntime, nlat, nlayer) profile in time -> (nlat, nlayer).
     if len(mid_days_v) > 12:
         file_day_v = _simday_to_file_day(day, config.start_year, first_date_v)
-        prof_t = _interp_monthly_noncyclic(mid_days_v, prof_v, file_day_v)
+        prof_t = _interp_monthly_noncyclic(
+            mid_days_v, prof_v, file_day_v, config.volcanic_path,
+            config.hold_outside_file_years)
     else:
         mid_anchored_v, prof_anchored_v = _cyclic_phase_anchor(
             mid_days_v, prof_v, first_date_v,

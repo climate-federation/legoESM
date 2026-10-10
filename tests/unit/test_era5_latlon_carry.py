@@ -156,8 +156,8 @@ def _product_from_raw(grid, raw, passes=4):
     """The grid's terrain product stand-in: the masked diffusion of a raw
     field with an all-land mask (what load_real_topography does to the binned
     elevation), so carry tests exercise the real target path."""
-    from legoesm.grids.topography import _neighbour_table, masked_diffusion
-    nb, area = _neighbour_table(grid)
+    from legoesm.grids.topography import neighbour_table, masked_diffusion
+    nb, area = neighbour_table(grid)
     return jnp.asarray(masked_diffusion(np.asarray(raw).ravel(), np.ones(area.shape),
                                         nb, area, passes=passes).reshape(np.shape(raw)))
 

@@ -144,7 +144,8 @@ component plugs into the matrix framework.
 
 - **GHG**: constant or time-varying (NetCDF), with CMIP6 experiment templates (piControl, historical, AMIP, 1pctCO2, SSP2-4.5, SSP5-8.5)
 - **Ozone / aerosol / solar**: climatological or transient from files; CMIP6-shape loaders for `vmro3`, Kinne aerosol, MPI-M 14-band TSI, and CMIP6 volcanic AOD
-- **AMIP CMIP6 deck** (`scripts/run/run_amip_cmip6_deck.py`): RRTMG + Sundqvist clouds + Morrison microphysics + SBM + Louis with the full transient stack on cubed-sphere and lat-lon production grids; Gaussian spectral and Voronoi/MPAS exercised by the dispatch smoke test
+- **Production AMIP**: `scripts/run/run_amip.py --config config/amip/amip_production.yaml` plus the machine input paths of `config/amip/amip_production.sh` (Levante) or `config/amip/amip_production.ginsburg.sh` (Ginsburg)
+- **AMIP forcing smoke deck** (`scripts/run/run_amip_smoke_deck.py`, not production): a C16 RRTMG + Sundqvist + Morrison + SBM + Louis stack on flat terrain (no land) with synthetic forcing by default, exercising the transient forcing plumbing on every grid
 - **OMIP forcing** (`scripts/run/run_omip.py`)
 - **Real topography / bathymetry** as above
 
@@ -264,8 +265,13 @@ JAX_ENABLE_X64=1 python scripts/run/run_omip.py --grid tripole --days 10950
 # Single-point multi-year multilayer land spin-up
 JAX_ENABLE_X64=1 python scripts/run/run_lmip.py --lat 45.5 --lon -93.1 --days 3650
 
-# Run the AMIP CMIP6 deck (transient GHG / ozone / aerosol / solar / volcanic)
-JAX_ENABLE_X64=1 python scripts/run/run_amip_cmip6_deck.py
+# Run production AMIP (machine input paths from the launcher)
+source config/amip/amip_production.ginsburg.sh   # or amip_production.sh on Levante
+JAX_ENABLE_X64=1 python scripts/run/run_amip.py \
+    --config config/amip/amip_production.yaml "${AMIP_PATH_FLAGS[@]}" --days 30
+
+# Smoke-test the AMIP forcing plumbing (synthetic forcing, flat, not production)
+JAX_ENABLE_X64=1 python scripts/run/run_amip_smoke_deck.py
 
 # Tests
 JAX_ENABLE_X64=1 pytest tests/

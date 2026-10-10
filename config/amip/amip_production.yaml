@@ -370,6 +370,9 @@ solar_spectral_band_order: rrtmg_sw   # explicit: SSI_frac is in RRTMG-SW band o
 ozone_forcing: external
 ghg_forcing: external
 aerosol_forcing: external
+# A date outside a multi-year forcing file's years raises (explicit: the
+# end-record hold is an opt-in for deliberate experiments only; F37).
+forcing_hold_outside_file_years: false
 start_year: 1979
 diag_days: 1
 checkpoint_days: 30         # run control, carried from the outgoing production
