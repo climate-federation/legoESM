@@ -2637,22 +2637,20 @@ CITATION_MAP = {
         ('pt_up1(ji,jj,jk) = ( (e3t_3d(ji,jj,jk)', 2),
     # --- ORCA2 round 231: admitted fold record and V-transport boundary ---
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/stprk3_stg.f90:282-285': [
-        'DO jk =  1,  jpkm1',
-        'zFv(ji,jj,jk) = e1v(ji,jj)',
+        ('DO jk =  1,  jpkm1', 1),
+        ('END DO   ;   END DO   ;   END DO', 1),
         4],
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/traadv_cen.f90:150-160': [
-        'DO jk = 1, jpkm1',
-        'ztFv(ji,jj) = 0.5_wp * pV(ji,jj,jk)',
-        'pt(ji,jj,jk,jn,Krhs) = pt(ji,jj,jk,jn,Krhs)',
+        ('DO jk = 1, jpkm1', 1),
+        '/ (e3t_3d(ji,jj,jk)',
         11],
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/stprk3_stg.f90:269-279': [
-        'SELECT CASE( n_baro_upd )',
-        ('zvb(ji,jj) =', 2),
+        ('SELECT CASE( n_baro_upd )', 4),
+        ('END DO   ;   END DO', 2),
         11],
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/stprk3_stg.f90:552-559': [
-        'IF( .NOT.ln_shuman ) THEN',
-        'CALL tra_adv_trp( kstp, kstg, nit000, Kbb, Kmm, Kaa, Krhs, zFu, zFv, zFw )',
-        'CALL r229_dump_fold_operands',
+        ('IF( .NOT.ln_shuman ) THEN', 1),
+        '& r3t(:,:,Kmm), tmask(:,:,:) )',
         8],
     # --- ORCA2 round 189: bounded replacement restart list ---
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/in_out_manager.f90:51-51':

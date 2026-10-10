@@ -96,8 +96,9 @@ Round 232 resumes at `zvb` before the product. First obtain or locate a
 rank-complete, self-describing stage-1 V-transport operand stream containing
 `e1v`, live `e3v(Kmm)`, `vv(Kmm)`, `zvb`, `vmask`, `vn_adv`, `r1_hv_0 /
 (1+r3v(Kmm))`, and `vv_b(Kmm)`. Offline replay then splits, in source order,
-the correction at `stprk3_stg.f90:269-279` and the product at :282-285 on the
-fold rank. The first operand that leaves the floor is the next citable owner.
+the correction and product at the two compiled `stprk3_stg` spans cited
+above, on the fold rank. The first operand that leaves the floor is the next
+citable owner.
 No tracer-fold exchange or atomic unit lands from this refuted hypothesis.
 
 ASKED choices: Decisions 103, 109, 113, and standing Decision 96. UNASKED
