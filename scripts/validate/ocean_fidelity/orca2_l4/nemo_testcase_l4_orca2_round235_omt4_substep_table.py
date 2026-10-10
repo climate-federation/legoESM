@@ -75,7 +75,8 @@ def _native(value, face: str) -> np.ndarray:
     if face == "v":
         return r97._native_v(value)
     require(face == "t", f"unknown face {face!r}")
-    return value
+    # The admitted canonical stream is rank 0's 90-column owned slab.
+    return value[:, :90]
 
 
 def _regional_row(candidate, oracle) -> dict[str, object]:
