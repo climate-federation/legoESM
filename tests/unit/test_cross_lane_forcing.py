@@ -227,7 +227,7 @@ _SWITCHES = ("ozone_forcing", "solar_source", "solar_tsi_var", "solar_spectral_v
              "solar_spectral_band_order", "ghg_forcing", "aerosol_forcing",
              "orbital_insolation", "diurnal_cycle")
 _DECKS = ("amip_production.yaml", "amip_production_fv3duo_c24.yaml",
-          "amip_sundqvist_l36.yaml", "amip_production_latlon24.yaml",
+          "amip_sundqvist_l36.yaml", "amip_sundqvist_latlon24.yaml",
           "amip_production_l36.yaml")
 
 
