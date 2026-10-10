@@ -2684,10 +2684,10 @@ CITATION_MAP = {
         ('IF ( MAXVAL(umask(ji,jj,:))/=0._wp )', 1),
         ("CALL lbc_lnk( 'dommsk', umask, 'U', 1.0_wp", 1),
         5],
-    'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/lbcnfd.f90:973-981': [
+    'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/lbcnfd.f90:973-980': [
         ("CASE ( 'V' )", 7),
-        ('ptab(1,ipj+jh) = psgn * ptab(3,ipj-3-jh)', 1),
-        9],
+        ('ptab(1,ipj+jh) = psgn * ptab(3,ipj-3-jh)', 2),
+        8],
     'ocean_model_latlon_cgrid.py:1821-1825': [
         ('ops = nemo_qco_card_mesh_operands', 1),
         ('include_reciprocals=include_reciprocals', 1),

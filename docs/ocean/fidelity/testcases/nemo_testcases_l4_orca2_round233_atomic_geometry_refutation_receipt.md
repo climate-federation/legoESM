@@ -21,7 +21,7 @@ U/V/F masks from `tmask` at
 sign-`+1` boundary association at
 `ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dommsk.f90:228-232`, and executes the
 V-point T-pivot fold rule at
-`ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/lbcnfd.f90:973-981`. It builds the
+`ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/lbcnfd.f90:973-980`. It builds the
 barotropic correction at
 `ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/stprk3_stg.f90:269-279` and the
 stage-1 transport at
