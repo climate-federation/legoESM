@@ -81,7 +81,7 @@ def classify(independent: dict, given: dict, rung0_log: str,
             "name": "live W-thickness construction before completed kt=8 stage 3",
             "compiled_consumer": (
                 "ORCA2_OMIP_L4_R214VECPREV3/BLD/ppsrc/nemo/"
-                "stprk3_stg.f90:384-402"),
+                "stprk3_stg.f90:383-402"),
             "statement_verdict": "UNMEASURED_WITH_SPEC",
         },
         "predictions": {

@@ -69,7 +69,7 @@ partner for rung 0.
 The first observed downstream boundary is the live W-thickness construction
 before completed kt=8 stage 3. NEMO consumes density and live W thickness at
 the HPG boundary in compiled
-`ORCA2_OMIP_L4_R214VECPREV3/BLD/ppsrc/nemo/stprk3_stg.f90:384-402` and remains
+`ORCA2_OMIP_L4_R214VECPREV3/BLD/ppsrc/nemo/stprk3_stg.f90:383-402` and remains
 finite on the admitted record. The exact first non-finite operand inside the
 candidate's live `e3w` construction is **UNMEASURED_WITH_SPEC**; no source
 statement is attributed from a runtime guard alone.
