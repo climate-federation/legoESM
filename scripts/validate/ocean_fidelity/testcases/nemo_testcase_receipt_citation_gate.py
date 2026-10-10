@@ -2470,7 +2470,7 @@ CITATION_MAP = {
     # --- ORCA2 round 224: source-ordered northern-fold tracer walk ---
     'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/traadv_cen.f90:149-160': [
         ('CASE(  2  )                         !* 2nd order centered', 1),
-        '&                                        / (e3t_3d(ji,jj,jk) *(1._wp+r3t(ji,jj,Kmm)*tmask(ji,jj,jk)))',
+        ('&                                        / (e3t_3d(ji,jj,jk) *(1._wp+r3t(ji,jj,Kmm)*tmask(ji,jj,jk)))', 1),
         12],
     'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/traadv_fct.f90:191-199': [
         '! -- Anti-diffusive fluxes : high order minus low order',
