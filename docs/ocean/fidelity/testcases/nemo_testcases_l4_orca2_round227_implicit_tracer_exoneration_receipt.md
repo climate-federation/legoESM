@@ -86,8 +86,8 @@ results are:
 - the round receipt citation gate passes with four citations, zero failures,
   zero unmapped citations, and zero map-audit failures; the cumulative default
   receipt passes with 274 citations and the same zero counts;
-- the rigid-shift plant on `trazdf.f90:218-235` exits nonzero and names the
-  shifted first endpoint (`citation_plant.json`, SHA256
+- the rigid-shift plant on the matrix-band citation above exits nonzero and
+  names the shifted first endpoint (`citation_plant.json`, SHA256
   `7cf88bec192ff38338fc83df4ec1dc8bf8e3d24374ec80b940d91012afa25f55`);
 - the one prescribed `tests/ocean/fidelity -n 12` battery collected 3,108
   items. Before its quiet, still-running final LOCK control was mistakenly
