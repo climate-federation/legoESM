@@ -78,6 +78,10 @@ The classification JSON SHA-256 is
 `2dedf9bd774ce48d93dbe8ac86a93db0a36f6dc535af2443c5be0a2c2e0e8639`.
 
 The U-depth, SSH, label-coverage, false-owner, and endpoint plants all refuse.
+The clean-tree citation gate passes both this receipt and the cumulative
+default receipt with zero unmapped citations, endpoint failures, or map-audit
+failures.  Its rigid two-line shift of the seven-array-call citation refuses
+with exit 1, as required.
 Focused round-233/234 tests pass 10/10 (log SHA-256
 `af7630bd9ec7db520f9a83052dfab618c49360ae2a49414183fb767d84bbee42`).
 The prescribed `tests/ocean/fidelity -n 12` battery collected 3,148 tests and
