@@ -91,7 +91,7 @@ geometry-closure, and false-root plants (log SHA-256
 `0e712fbd64eeecef1c415a672fc835407b5cfd0eed22f6bf7a5b7cdfdd29e035`).
 The round receipt citation gate passes 6/6 citations and the cumulative
 default gate passes 274/274, both with zero failures or unmapped citations.
-The rigid two-line-shift plant on the `domzgr.f90:184-188` citation refuses.
+The rigid two-line-shift plant on the raw-thickness citation refuses.
 Round/default/plant log SHA-256 values are
 `6a29dd6348f3acc785c26f080a10a6df7ca05300dcf7510937c18764c1c97ce9`,
 `4136317d58965de5347339a30380431b81a6e1e53243292e134f85bdfdb9bdfc`,
