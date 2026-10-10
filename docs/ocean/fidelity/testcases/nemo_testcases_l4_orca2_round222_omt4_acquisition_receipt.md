@@ -100,7 +100,7 @@ No `packages/` file changed, so no production GYRE/DINO/tank trajectory can
 move in this round. On clean receipt/map commit `756605a36`, the round
 citation gate passes five citations and the cumulative default gate passes
 274; both report zero failures, unmapped citations, or map-audit failures. The
-explicit two-line shift plant on the mapped `traadv.f90:592-602` range exits 1
+explicit two-line shift plant on the mapped tracer-advection range exits 1
 and makes the gate fail. Round/default/plant JSON SHA-256 values are
 `c00f3ebe6b133d39ca27076f45775316db944cd0bbd5004fd99bab532e662e20`,
 `88df3f34246d1d61780d5ab80372b16e5780c01343803e6e4758f662a848e9eb`,
