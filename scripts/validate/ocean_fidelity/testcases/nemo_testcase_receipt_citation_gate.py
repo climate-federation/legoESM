@@ -240,6 +240,12 @@ FILES = {
         _ORCA2_R230FOLDTRP / "ppsrc/nemo/stprk3_stg.f90"),
     "ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/traadv_cen.f90": (
         _ORCA2_R230FOLDTRP / "ppsrc/nemo/traadv_cen.f90"),
+    "ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/domzgr.f90": (
+        _ORCA2_R230FOLDTRP / "ppsrc/nemo/domzgr.f90"),
+    "ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/domqco.f90": (
+        _ORCA2_R230FOLDTRP / "ppsrc/nemo/domqco.f90"),
+    "ORCA2_OMIP_L4_R230FOLDTRP/BLD/inc/domzgr_substitute.h90": (
+        _ORCA2_R230FOLDTRP / "inc/domzgr_substitute.h90"),
     "ORCA2_OMIP_L4_R214VECPREV3/BLD/ppsrc/nemo/stprk3_stg.f90": (
         _ORCA2_R214VECPREV3_COMPILED / "stprk3_stg.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynadv.f90": (
@@ -2652,6 +2658,19 @@ CITATION_MAP = {
         ('IF( .NOT.ln_shuman ) THEN', 1),
         '& r3t(:,:,Kmm), tmask(:,:,:) )',
         8],
+    # --- ORCA2 round 232: stage-1 V-transport operand split -----------
+    'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/domzgr.f90:184-188': [
+        ('! t-level: 3D reference', 1),
+        ("CALL iom_get( inum, jpdom_global, 'e3f_0'", 1),
+        5],
+    'ORCA2_OMIP_L4_R230FOLDTRP/BLD/inc/domzgr_substitute.h90:114-121': [
+        ('#     define  E3t_0', 1),
+        ('#     define  e3v_0', 1),
+        8],
+    'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/domqco.f90:261-270': [
+        ('!==  ratio at u-,v-point  ==!', 1),
+        ('END DO   ;   END DO', 1),
+        10],
     # --- ORCA2 round 189: bounded replacement restart list ---
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/in_out_manager.f90:51-51':
         'INTEGER, DIMENSION(10) :: nn_stocklist',
