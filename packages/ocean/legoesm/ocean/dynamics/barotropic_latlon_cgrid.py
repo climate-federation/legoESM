@@ -695,9 +695,8 @@ def _nemo_external_mode_boundary_association(
     the V fold as explicit south/north rows.  NEMO associates all seven
     arrays together at ``dynspg_ts.f90:771-779``; this helper preserves that
     single source boundary for the private operand trace and causal arm.
-    The compact T/U arrays retain the T-pivot row rather than NEMO's northern
-    halo. Their association therefore writes the pivot row's mirrored half;
-    the compact U array additionally owns one periodic closure column.
+    Cell-centred SSH has no explicit halo in the compact representation, so
+    its associated image is the same array.
     """
     legal_components = ("", "u_cyclic", "u_fold", "v_cyclic", "v_fold")
     if component not in legal_components:
@@ -708,29 +707,30 @@ def _nemo_external_mode_boundary_association(
     do_v_fold = component in ("", "v_fold")
     # Compact V has no redundant zonal halo: its east/west MPI exchange is
     # represented by periodic indexing, so the ``v_cyclic`` image is a no-op.
+    u_post = u.at[:, 0].set(u[:, -1]) if do_u_cyclic else u
     fold = getattr(grid, "fold", None)
     nmask = north_fold_mask(grid)
-
-    def associate_u(field, sign, *, cyclic=True, north_fold=True):
-        """Compact image of NEMO's T-pivot U-point association."""
-
-        post = field.at[:, 0].set(field[:, -1]) if cyclic else field
-        if (north_fold and (fold_is_local(grid) or nmask is not None)
-                and bool(getattr(fold, "pivot_row_stored", False))):
-            n_lon = fold.perm_T.shape[0]
-            half = n_lon // 2
-            perm = fold_perm_u(fold)[half:]
-            folded = post.at[-1, half + 1:].set(sign * post[-1, 1:][perm])
-            folded = folded.at[-1, 0].set(sign * post[-1, 1])
-            post = (folded if fold_is_local(grid)
-                    else jnp.where(nmask, folded, post))
-        return post
-
-    u_post = associate_u(
-        u, fold.vector_sign_u if fold is not None else -1.0,
-        cyclic=do_u_cyclic, north_fold=do_u_fold)
-    depth_u_post = associate_u(depth_u, 1.0)
-    inverse_u_post = associate_u(inverse_u, 1.0)
+    if (do_u_fold and (fold_is_local(grid) or nmask is not None)
+            and bool(getattr(fold, "pivot_row_stored", False))):
+        # T-pivot U arm (lbcnfd.f90:639-683).  Compact U column zero is the
+        # periodic closure; columns 1: are NEMO's native U row.  The pivot
+        # branch leaves its left half in place and writes the right half from
+        # the sign-flipped U-stagger permutation of that same row.
+        n_lon = fold.perm_T.shape[0]
+        half = n_lon // 2
+        perm = fold_perm_u(fold)[half:]
+        folded = u_post.at[-1, half + 1:].set(
+            fold.vector_sign_u * u_post[-1, 1:][perm])
+        # mppini.f90:1425-1427 also marks the periodic west closure for the
+        # no-gather T-pivot overwrite.  It is the image of native U column 0.
+        folded = folded.at[-1, 0].set(
+            fold.vector_sign_u * u_post[-1, 1])
+        if fold_is_local(grid):
+            u_post = folded
+        else:
+            u_post = jnp.where(nmask, folded, u_post)
+    depth_u_post = depth_u.at[:, 0].set(depth_u[:, -1])
+    inverse_u_post = inverse_u.at[:, 0].set(inverse_u[:, -1])
     v_post = v
     depth_v_post = depth_v
     inverse_v_post = inverse_v
@@ -738,17 +738,9 @@ def _nemo_external_mode_boundary_association(
         v_post = pad_ns_vector_v(v[1:-1], grid)
         depth_v_post = pad_ns_scalar(depth_v[1:-1], grid)
         inverse_v_post = pad_ns_scalar(inverse_v[1:-1], grid)
-    eta_post = eta
-    if ((fold_is_local(grid) or nmask is not None)
-            and bool(getattr(fold, "pivot_row_stored", False))):
-        n_lon = fold.perm_T.shape[0]
-        half = n_lon // 2
-        folded = eta.at[-1, half:].set(eta[-1, fold.perm_T[half:]])
-        eta_post = (folded if fold_is_local(grid)
-                    else jnp.where(nmask, folded, eta))
     return (
         u_post, v_post, depth_u_post, depth_v_post,
-        inverse_u_post, inverse_v_post, eta_post,
+        inverse_u_post, inverse_v_post, eta,
     )
 
 
@@ -1761,7 +1753,6 @@ def _run_substep_loop(
     nemo_external_mode_association_test_override=False,
     nemo_external_mode_association_field_test_override="",
     nemo_external_mode_association_component_test_override="",
-    nemo_vector_update_v_mask=None,
     nemo_t_pivot_north_neighbor_test_override=False,
     return_boundary_association_trace=False,
 ):
@@ -2285,10 +2276,7 @@ def _run_substep_loop(
                 _inc_v = nemo_source_round(dt_s * _rhs_v)
                 V_bar_new = nemo_source_round(
                     nemo_source_round(V_bar_c) + _inc_v)
-                _v_update_mask = (
-                    v_mask if nemo_vector_update_v_mask is None
-                    else nemo_vector_update_v_mask)
-                V_bar_new = nemo_source_round(V_bar_new * _v_update_mask)
+                V_bar_new = nemo_source_round(V_bar_new * v_mask)
             else:
                 V_bar_new = (V_bar_c + dt_s * (
                     _cor_v + _drag_v + _pgf_v + F_slow_v_i
@@ -2373,7 +2361,6 @@ def _run_substep_loop(
                     nemo_external_mode_association_component_test_override))
         if nemo_external_mode_association_test_override:
             U_bar_new, V_bar_new = association_post[:2]
-            eta_new = association_post[6]
         elif nemo_external_mode_association_field_test_override == "u":
             U_bar_new = association_post[0]
         elif nemo_external_mode_association_field_test_override == "v":
@@ -2952,7 +2939,6 @@ def barotropic_substeps_latlon_cgrid(
     _nemo_external_mode_association_test_override=False,
     _nemo_external_mode_association_field_test_override="",
     _nemo_external_mode_association_component_test_override="",
-    _nemo_vector_update_v_mask_test_override=None,
     _nemo_final_mean_association_test_override=False,
     _nemo_t_pivot_north_neighbor_test_override=False,
     _nemo_boundary_association_trace_test_hook=False,
@@ -3493,8 +3479,6 @@ def barotropic_substeps_latlon_cgrid(
             _nemo_external_mode_association_field_test_override),
         nemo_external_mode_association_component_test_override=(
             _nemo_external_mode_association_component_test_override),
-        nemo_vector_update_v_mask=(
-            _nemo_vector_update_v_mask_test_override),
         nemo_t_pivot_north_neighbor_test_override=(
             _nemo_t_pivot_north_neighbor_test_override),
         return_boundary_association_trace=(
