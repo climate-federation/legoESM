@@ -51,6 +51,13 @@ def test_failed_replay_is_not_admitted() -> None:
         gate.classify(report)
 
 
+def test_midpoint_metric_cannot_be_silently_admitted() -> None:
+    report = _report("e3w_now")
+    result = gate.classify(report)
+    assert result["first_non_bit_statement"] == "e3w_now"
+    assert not result["upstream_overlap"]["first_non_bit_row_is_semantically_touched"]
+
+
 @pytest.mark.parametrize("plant", gate.PLANTS[1:])
 def test_each_plant_fires(plant: str) -> None:
     report = _report("lower" if plant == "overlap" else "content_T")

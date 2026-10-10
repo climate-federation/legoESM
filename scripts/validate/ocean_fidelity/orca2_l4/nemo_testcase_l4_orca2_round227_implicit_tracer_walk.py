@@ -232,16 +232,21 @@ def measure(deck_root: Path, frames_root: Path,
     active = np.asarray(card.recipe.z_coord.is_active, dtype=bool)[:, :90, :]
     support = active
     tmask2 = active[..., 0]
-    h0 = np.asarray(card.recipe.z_coord.h_partial, dtype=np.float64)[:, :90, :]
+    e3t0 = np.asarray(
+        card.recipe.z_coord.nemo_e3t_0, dtype=np.float64)[:, :90, :]
     rbb = stage["r3t_Kbb"]
     rmm = stage["r3t_Kmm"]
     raa = stage["r3t_Kaa"]
-    e3t_bb = h0 * (1.0 + rbb[..., None] * active)
-    e3t_mm = h0 * (1.0 + rmm[..., None] * active)
-    e3t_aa = h0 * (1.0 + raa[..., None] * active)
-    e3w_ref = np.asarray(card.recipe.z_coord.dz_half_ref, dtype=np.float64)
-    e3w = np.broadcast_to(e3w_ref, active.shape[:-1] + e3w_ref.shape)
-    e3w = e3w * (1.0 + rmm[..., None])
+    e3t_bb = e3t0 * (1.0 + rbb[..., None] * active)
+    e3t_mm = e3t0 * (1.0 + rmm[..., None] * active)
+    e3t_aa = e3t0 * (1.0 + raa[..., None] * active)
+    # key_vco_1d3d keeps e3w on NEMO's own 1-D reference ladder.  The
+    # interior solve consumes jk=2..jpkm1, hence the 1:30 slice.  Using the
+    # coordinate midpoint ``dz_half_ref`` here was the first refused checker
+    # draft; it differs by up to metres on ORCA2's stretched ladder.
+    e3w0 = np.asarray(
+        card.recipe.z_coord.nemo_e3w_0, dtype=np.float64)[:, :90, 1:]
+    e3w = e3w0 * (1.0 + rmm[..., None])
     heat_K = avt[..., 1:-1]
     tbb = stage["Kbb_T"][..., :-1]
     rhs = stage["after_ldf_T"][..., :-1]
