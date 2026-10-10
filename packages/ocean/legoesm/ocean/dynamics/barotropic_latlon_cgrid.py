@@ -2882,14 +2882,15 @@ def nemo_vector_form_update_active(config) -> bool:
 
 
 def nemo_raw_surface_vmask(z_coord, dtype):
-    """Return NEMO's raw ``ssvmask`` carried by a reference mesh."""
+    """Return the compact-grid image of NEMO's raw ``ssvmask``."""
     raw = getattr(z_coord, "nemo_een_barotropic", None)
     if raw is None:
         return None
     vmask = jnp.asarray(raw.vmask, dtype=dtype)
     if vmask.ndim != 3:
         raise ValueError("raw NEMO vmask must be three-dimensional")
-    return jnp.max(vmask, axis=-1)
+    native = jnp.max(vmask, axis=-1)
+    return jnp.concatenate([jnp.zeros_like(native[:1]), native], axis=0)
 
 
 def nemo_carried_barotropic_state_active(config) -> bool:

@@ -38,7 +38,9 @@ def test_vector_form_predicate_and_raw_surface_mask() -> None:
     ]))
     actual = np.asarray(nemo_raw_surface_vmask(
         SimpleNamespace(nemo_een_barotropic=raw), np.float64))
-    assert np.array_equal(actual, np.array([[1.0, 0.0], [1.0, 1.0]]))
+    assert np.array_equal(actual, np.array([
+        [0.0, 0.0], [1.0, 0.0], [1.0, 1.0],
+    ]))
 
 
 @pytest.mark.skipif(not REPORT.is_file(), reason="round-215 measurement not present")
