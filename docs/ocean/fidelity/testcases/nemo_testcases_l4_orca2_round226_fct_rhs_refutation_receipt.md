@@ -78,6 +78,20 @@ Independent review unavailable in-sandbox. The required separate
 the complete output and exit status are retained as
 `independent_review.log` and `independent_review.exit`.
 
+The focused round-226 battery passes 6/6. The prescribed parallel
+tests/ocean/fidelity battery collected 3,100 tests and reached 97% plus 56
+more completions before its last worker ceased producing output; the idle
+wrapper was interrupted and the run is not called PASS. Its four failures
+were then rerun together in isolation: 27 passed and exactly the four
+registered pre-existing reds remained — the GYRE round-129 spread-floor
+record (certified year harness moved), allow-dirty scope ratchet (13 existing
+drivers), worktree-stamp ratchet (13 existing report emitters), and SI3
+scalar-math provenance gate (`A MY_SRC is not verbatim`). The interrupted
+parallel log SHA256 is
+`b27d566fc64ff0fd8b42ca1637b0fc287386b56b0538abaaf63cc983ce0a38ae`;
+the isolated known-red log SHA256 is
+`5e6ddc5e298392a3ff670cbeed7255734855ba464e1ae1100a8a5f770e804854`.
+
 ## Prediction disposition
 
 | prediction | disposition |
