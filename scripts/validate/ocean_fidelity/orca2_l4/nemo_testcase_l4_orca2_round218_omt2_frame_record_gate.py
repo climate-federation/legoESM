@@ -269,7 +269,8 @@ def main() -> int:
                 args.month, args.plant,
             )
             require(args.plant == "none", f"{args.plant} plant stayed green")
-    except (GateError, omt1_record.GateError, omt2_deck.GateError,
+    except (GateError, omt1_record.GateError, omt1_record.frame_gate.GateError,
+            omt2_deck.GateError,
             protocol.GateError, OSError, UnicodeError, ValueError) as error:
         print(f"STATUS {'PLANT-FIRED' if args.plant != 'none' else 'REFUSE'}: {error}")
         return 1
