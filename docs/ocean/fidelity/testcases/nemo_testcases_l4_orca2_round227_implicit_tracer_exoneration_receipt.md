@@ -78,7 +78,34 @@ Artifacts:
 
 The gate has direct classifier tests for source order, exact-replay refusal,
 metric-source scope, and all four planted violations. The final validation
-results and independent-review disposition are recorded in the closing commit.
+results are:
+
+- the focused round-227 gate, receipt-citation, and citation-gate tests pass,
+  25/25 (`focused_tests.log`, SHA256
+  `b001a8bffd7016d99621f70607651d7ff8de89b389df48c6614d6d94d2a3ea7f`);
+- the round receipt citation gate passes with four citations, zero failures,
+  zero unmapped citations, and zero map-audit failures; the cumulative default
+  receipt passes with 274 citations and the same zero counts;
+- the rigid-shift plant on `trazdf.f90:218-235` exits nonzero and names the
+  shifted first endpoint (`citation_plant.json`, SHA256
+  `7cf88bec192ff38338fc83df4ec1dc8bf8e3d24374ec80b940d91012afa25f55`);
+- the one prescribed `tests/ocean/fidelity -n 12` battery collected 3,108
+  items. Before its quiet, still-running final LOCK control was mistakenly
+  interrupted at 99%, its preserved log contained 3,088 passes, seven skips,
+  and four registered pre-existing reds: the certified-year worktree-stamp
+  ratchet, the round-35 stamp-scope ratchet, the report-emitter worktree-stamp
+  ratchet, and the SI3 scalar-math provenance gate. The only scheduled test
+  without a terminal result was
+  `test_planted_stage_control_exits_nonzero_end_to_end`; its isolated rerun
+  passed in 558.94 s (`battery_missing_id.log`, SHA256
+  `6886bee2e29cb6f81a10373c2ae43141eebbdd8caaba2541308219792e423d10`).
+  The full battery was not rerun.
+
+The required `codex exec --sandbox read-only` review could not initialize its
+app-server client because the sandbox denied its PATH-alias write. The verdict
+is therefore **independent review unavailable in-sandbox**, not PASS
+(`independent_review.log`, SHA256
+`eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5`).
 
 No `packages/` file changed, so the GYRE year, DINO month, tanks, rung-0,
 rung-7/rung-10, and OMT-4 trajectories cannot execute a changed model
