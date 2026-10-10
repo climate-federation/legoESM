@@ -115,7 +115,7 @@ admit() {
   [[ "$(find "$TARGET_RUN" -maxdepth 1 -type f -name 'oracle_r229_fold_rank????_kt00000001_s1.bin' | wc -l)" -eq 2 ]] || {
     printf 'REFUSE: expected exactly two rank-complete operand records\n' >&2; exit 70;
   }
-  for plant in rank field-name truncation; do
+  for plant in rank field-name truncation consumed-nonfinite; do
     if "$PY" "$CHECKER" --root "$TARGET_RUN" --plant "$plant" >"$TARGET_RUN/round229_${plant}_plant.log" 2>&1; then
       printf 'REFUSE: %s plant stayed green\n' "$plant" >&2; exit 71
     fi

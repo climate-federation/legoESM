@@ -11,7 +11,7 @@ from scripts.validate.ocean_fidelity.orca2_l4.nemo_testcase_l4_orca2_round229_fo
 )
 
 
-def _write(path, rank: int) -> None:
+def _write(path, rank: int, *, outer_nonfinite: bool = False) -> None:
     nx, ny, nz = 94, 152, 31
     with path.open("wb") as handle:
         handle.write(b"NEMO_L4_R229FLD1")
@@ -21,17 +21,38 @@ def _write(path, rank: int) -> None:
         for name in ("zFv_after_trp", "T_Kmm", "S_Kmm", "e3t_Kmm", "tmask"):
             handle.write(name.encode("ascii").ljust(16, b" "))
             handle.write(struct.pack("=4i", 3, nx, ny, nz))
-            value = 1.0 if name == "e3t_Kmm" else 0.0
-            np.full(nx * ny * nz, value, np.float64).tofile(handle)
+            value = 1.0 if name in {"e3t_Kmm", "tmask"} else 0.0
+            values = np.full((nx, ny, nz), value, np.float64)
+            if outer_nonfinite and name == "zFv_after_trp":
+                values[-1, 105, 5] = np.nan
+            values.ravel(order="F").tofile(handle)
 
 
 def test_rank_complete_record_and_plants(tmp_path) -> None:
     for rank in (0, 1):
         _write(tmp_path / f"oracle_r229_fold_rank{rank:04d}_kt00000001_s1.bin", rank)
     assert gate.validate(tmp_path, "none")["status"] == "PASS_R229_FOLD_RECORD"
-    for plant in ("rank", "field-name", "truncation"):
+    for plant in ("rank", "field-name", "truncation", "consumed-nonfinite"):
         with pytest.raises(gate.GateError):
             gate.validate(tmp_path, plant)
+
+
+def test_unwritten_outer_work_cell_is_reported_but_not_rejected(tmp_path) -> None:
+    for rank in (0, 1):
+        _write(
+            tmp_path / f"oracle_r229_fold_rank{rank:04d}_kt00000001_s1.bin",
+            rank,
+            outer_nonfinite=rank == 1,
+        )
+    result = gate.validate(tmp_path, "none")
+    rank1 = result["records"][1]["fields"]["zFv_after_trp"]
+    assert rank1["nonfinite_total"] == 1
+    assert rank1["nonfinite_excluded"] == [{
+        "local_fortran_ijk": [94, 106, 6],
+        "global_ij": [184, 106],
+        "record_tmask": 1.0,
+        "vmask_status": "outside_owned_mesh_payload",
+    }]
 
 
 def test_live_thickness_writer_avoids_whole_array_e3t_macro() -> None:

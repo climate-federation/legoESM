@@ -40,6 +40,7 @@ def read(path: Path, plant: str = "none") -> dict:
     require((i0, j0, i1, j1) == (3, 3, 92, 150),
             f"{path.name}: bad owned bounds")
     expected = ["zFv_after_trp", "T_Kmm", "S_Kmm", "e3t_Kmm", "tmask"]
+    arrays = {}
     fields = {}
     for index, expected_name in enumerate(expected):
         require(offset + 32 <= len(raw), f"{path.name}: truncated field header")
@@ -55,15 +56,51 @@ def read(path: Path, plant: str = "none") -> dict:
         size = n1 * n2 * n3
         require(offset + 8 * size <= len(raw), f"{path.name}: truncated {name}")
         values = np.frombuffer(raw, dtype=np.float64, count=size, offset=offset)
+        values = values.reshape((n1, n2, n3), order="F")
         offset += 8 * size
-        require(np.all(np.isfinite(values)), f"{path.name}: nonfinite {name}")
-        fields[name] = {
-            "shape": [n1, n2, n3],
-            "min": float(values.min()),
-            "max": float(values.max()),
-        }
+        arrays[name] = values
     require(offset == len(raw), f"{path.name}: trailing payload")
-    require(fields["e3t_Kmm"]["min"] > 0.0,
+
+    # The compiled stage-1 centred tracer consumer reads pV on
+    # i=ntsi-1..ntei, j=ntsj-1..ntej, k=1..jpkm1.  zFv is a work array and
+    # cells outside that source-defined support are not model operands.
+    consumed = np.zeros((nx, ny, nz), dtype=bool)
+    consumed[i0 - 2:i1, j0 - 2:j1, :nz - 1] = True
+    zfv = arrays["zFv_after_trp"]
+    if plant == "consumed-nonfinite":
+        wet = consumed & (arrays["tmask"] != 0.0)
+        location = np.argwhere(wet)
+        require(location.size != 0, "consumed-nonfinite plant has no wet target")
+        zfv = zfv.copy()
+        zfv[tuple(location[0])] = np.nan
+        arrays["zFv_after_trp"] = zfv
+    nonfinite = ~np.isfinite(zfv)
+    require(not np.any(nonfinite & consumed),
+            f"{path.name}: nonfinite zFv_after_trp inside consumed support")
+
+    excluded_locations = []
+    for ii, jj, kk in np.argwhere(nonfinite & ~consumed):
+        owned = i0 - 1 <= ii <= i1 - 1 and j0 - 1 <= jj <= j1 - 1
+        excluded_locations.append({
+            "local_fortran_ijk": [int(ii + 1), int(jj + 1), int(kk + 1)],
+            "global_ij": [int(origin_x + ii), int(origin_y + jj)],
+            "record_tmask": float(arrays["tmask"][ii, jj, kk]),
+            "vmask_status": "owned_mesh_value_available" if owned else "outside_owned_mesh_payload",
+        })
+
+    for name, values in arrays.items():
+        if name != "zFv_after_trp":
+            require(np.all(np.isfinite(values)), f"{path.name}: nonfinite {name}")
+        finite = values[np.isfinite(values)]
+        fields[name] = {
+            "shape": list(values.shape),
+            "finite_min": float(finite.min()),
+            "finite_max": float(finite.max()),
+            "nonfinite_total": int(np.count_nonzero(~np.isfinite(values))),
+        }
+    fields["zFv_after_trp"]["nonfinite_excluded"] = excluded_locations
+    fields["zFv_after_trp"]["consumed_shape"] = [i1 - i0 + 2, j1 - j0 + 2, nz - 1]
+    require(fields["e3t_Kmm"]["finite_min"] > 0.0,
             f"{path.name}: non-positive live thickness")
     return {"rank": rank, "origin": [origin_x, origin_y], "fields": fields}
 
@@ -85,7 +122,11 @@ def validate(root: Path, plant: str) -> dict:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, required=True)
-    parser.add_argument("--plant", choices=("none", "rank", "field-name", "truncation"), default="none")
+    parser.add_argument(
+        "--plant",
+        choices=("none", "rank", "field-name", "truncation", "consumed-nonfinite"),
+        default="none",
+    )
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     try:
