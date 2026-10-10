@@ -116,6 +116,45 @@ def validate_omt3_card(deck_root: Path, card) -> dict[str, object]:
     }
 
 
+def _score_card(card, selectors: dict[str, object], admission: dict,
+                twin_a: Path, *, plant: str, atomic_fold_unit,
+                claim_label: str, status: str, card_label: str) -> dict[str, object]:
+    """Run the shared independent/given-entry OMT ladder protocol."""
+    entry = rung0.assemble_frame(twin_a, 1, 0)
+    independent_state = card.recipe.initial_state
+    entry_actual = rung0.candidate_fields(independent_state)
+    if plant == "entry-bit":
+        entry = {name: np.array(value, copy=True) for name, value in entry.items()}
+        entry["T"].flat[0] = np.nextafter(entry["T"].flat[0], np.inf)
+    entry_identity = rung0.ladder.compare_card_entry_to_masked_record(
+        entry_actual, entry)
+    require(entry_identity["first_non_bit_field"] is None,
+            f"{card_label} independent card entry is not bit-exact after the "
+            "admitted dry-temperature signed-zero classification")
+    given_state = rung0.bridge_entry(
+        card, rung0.assemble_frame(twin_a, 1, 0))
+
+    ladders = {}
+    if claim_label in ("both", "independent"):
+        ladders["independent"] = omt1._run_ladder(
+            card, twin_a, independent_state, "independent",
+            atomic_fold_unit=atomic_fold_unit, steps=record_gate.STEPS)
+    if claim_label in ("both", "given_nemo_entry"):
+        ladders["given_nemo_entry"] = omt1._run_ladder(
+            card, twin_a, given_state, "given_nemo_entry",
+            atomic_fold_unit=atomic_fold_unit, steps=record_gate.STEPS)
+    return {
+        "status": status,
+        "execution": "production-jit-cpu-fp64-x64-libm",
+        "record_status": admission["status"],
+        "card_case": card.case,
+        "selectors": selectors,
+        "entry_identity": entry_identity,
+        **ladders,
+        "stability_boundary": admission["month_boundary"],
+    }
+
+
 def run(deck_root: Path, canonical: Path, calibration: Path, twin_a: Path,
         twin_b: Path, month: Path, *, plant: str = "none",
         atomic_fold_unit=None, claim_label: str = "both") -> dict[str, object]:
@@ -136,39 +175,10 @@ def run(deck_root: Path, canonical: Path, calibration: Path, twin_a: Path,
         canonical, calibration, twin_a, twin_b, month, "none")
     card = build_omt3_card(deck_root, plant=plant)
     selectors = validate_omt3_card(deck_root, card)
-    entry = rung0.assemble_frame(twin_a, 1, 0)
-    independent_state = card.recipe.initial_state
-    entry_actual = rung0.candidate_fields(independent_state)
-    if plant == "entry-bit":
-        entry = {name: np.array(value, copy=True) for name, value in entry.items()}
-        entry["T"].flat[0] = np.nextafter(entry["T"].flat[0], np.inf)
-    entry_identity = rung0.ladder.compare_card_entry_to_masked_record(
-        entry_actual, entry)
-    require(entry_identity["first_non_bit_field"] is None,
-            "OMT-3 independent card entry is not bit-exact after the admitted "
-            "dry-temperature signed-zero classification")
-    given_state = rung0.bridge_entry(
-        card, rung0.assemble_frame(twin_a, 1, 0))
-
-    ladders = {}
-    if claim_label in ("both", "independent"):
-        ladders["independent"] = omt1._run_ladder(
-            card, twin_a, independent_state, "independent",
-            atomic_fold_unit=atomic_fold_unit, steps=record_gate.STEPS)
-    if claim_label in ("both", "given_nemo_entry"):
-        ladders["given_nemo_entry"] = omt1._run_ladder(
-            card, twin_a, given_state, "given_nemo_entry",
-            atomic_fold_unit=atomic_fold_unit, steps=record_gate.STEPS)
-    return {
-        "status": "PASS_R221_OMT3_CARD_AND_LADDERS",
-        "execution": "production-jit-cpu-fp64-x64-libm",
-        "record_status": admission["status"],
-        "card_case": card.case,
-        "selectors": selectors,
-        "entry_identity": entry_identity,
-        **ladders,
-        "stability_boundary": admission["month_boundary"],
-    }
+    return _score_card(
+        card, selectors, admission, twin_a, plant=plant,
+        atomic_fold_unit=atomic_fold_unit, claim_label=claim_label,
+        status="PASS_R221_OMT3_CARD_AND_LADDERS", card_label="OMT-3")
 
 
 def main() -> int:
