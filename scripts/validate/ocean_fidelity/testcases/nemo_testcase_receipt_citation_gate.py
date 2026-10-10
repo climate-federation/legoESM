@@ -194,6 +194,14 @@ FILES = {
         _ORCA2_R210OMT1_COMPILED / "dynzdf.f90"),
     "ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/zdfdrg.f90": (
         _ORCA2_R210OMT1_COMPILED / "zdfdrg.f90"),
+    "ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/ldfdyn.f90": (
+        _ORCA2_R210OMT1_COMPILED / "ldfdyn.f90"),
+    "ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/dynldf.f90": (
+        _ORCA2_R210OMT1_COMPILED / "dynldf.f90"),
+    "ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/dynldf_lev.f90": (
+        _ORCA2_R210OMT1_COMPILED / "dynldf_lev.f90"),
+    "ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/stprk3_stg.f90": (
+        _ORCA2_R210OMT1_COMPILED / "stprk3_stg.f90"),
     "ORCA2_OMIP_L4_R213VECPRE/BLD/ppsrc/nemo/stprk3.f90": (
         _ORCA2_R213VECPRE_COMPILED / "stprk3.f90"),
     "ORCA2_OMIP_L4_R213VECPRE/BLD/ppsrc/nemo/stp2d.f90": (
@@ -2413,6 +2421,28 @@ CITATION_MAP = {
         'SUBROUTINE dyn_drg_init( Kbb, Kmm, puu, pvv, puu_b ,pvv_b, pu_RHSi, pv_RHSi, pCdU_u, pCdU_v )',
         'pv_RHSi(ji,jj) = pv_RHSi(ji,jj) + (r1_hv_0(ji,jj) /(1._wp+r3v(ji,jj,Kmm))) * r1_2*( rCdU_bot(ji,jj+1)+rCdU_bot(ji,jj) ) * zv_i(ji,jj)',
         60],
+    # --- ORCA2 round 220: OMT-3 lateral momentum diffusion ---
+    'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/ldfdyn.f90:177-184': [
+        'NAMELIST/namdyn_ldf/ ln_dynldf_OFF',
+        'READ(numnam_cfg(MAX(INDEX(numnam_cfg,"&namdyn_ldf "),1):),namdyn_ldf', 8],
+    'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/ldfdyn.f90:221-228': [
+        'nldf_dyn = np_ERROR',
+        'IF(.NOT.ln_dynldf_OFF ) THEN', 8],
+    'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/ldfdyn.f90:250':
+        ('IF( ln_dynldf_lev )   nldf_dyn = np_lap', 1),
+    'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/ldfdyn.f90:297-305': [
+        ('IF( ln_dynldf_OFF ) THEN', 2),
+        "IF( ierr /= 0 )   CALL ctl_stop( 'STOP', 'ldf_dyn_init: failed to allocate arrays')", 9],
+    'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:488-493': [
+        ('CASE ( 3 )        !==  Stage 3  ==!', 1),
+        'CALL dyn_ldf( kstp, Kbb, Kmm, uu, vv, Krhs )', 6],
+    'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/dynldf.f90:81-85': [
+        'SELECT CASE ( nldf_dyn )',
+        'CALL dynldf_lev_lap( kt, Kbb, Kmm, puu, pvv, Krhs )', 5],
+    'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/dynldf_lev.f90:123-140': [
+        ('zwf(ji-1,jj-1) = ahmf(ji-1,jj-1,jk)', 1),
+        ('&              + ( zwt(ji,jj+1) - zwt(ji  ,jj) ) * r1_e2v(ji,jj)', 1),
+        18],
     # --- ORCA2 round 214: live RK indices and malformed round-213 schema ---
     'ORCA2_OMIP_L4_R213VECPRE/BLD/ppsrc/nemo/stprk3.f90:204-215': [
         'CALL stp_2D( kstp, Nbb, Nbb, Naa, Nrhs )',
