@@ -2339,7 +2339,7 @@ class ModelDriver:
                     raise ValueError(
                         f"subgrid_orography_path is set but grid type "
                         f"{type(self.grid).__name__} has no subgrid_topo_stddev "
-                        f"field (supported: CubedSphereGrid, GaussianGrid, DuoColumnMesh, "
+                        f"field (supported: CubedSphereGrid, GaussianGrid, ColumnMesh, "
                         f"VoronoiMesh)"
                     ) from e
                 # The compiled MPI step closes over the layout's local mesh
