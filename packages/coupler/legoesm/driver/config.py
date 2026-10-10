@@ -5018,19 +5018,16 @@ def mpas_land_flux_handoff_eligibility(cfg) -> tuple[bool, str]:
     (``mpas_land_beta_soil`` publishes the land's fluxes) and a turbulence
     kernel that accepts an injected surface flux.
     """
-    # The lane predicate mirrors ModelDriver.run's dispatch (fv3_duo first,
-    # then grid_type == "mpas" -> _run_mpas).  The fv3_duo COLUMN lane also
-    # runs _run_mpas (cfg.mpas_loop_lane) but is held out BY NAME (merge of
-    # cf/main 2026-10-09): admitting it would switch the land stress ON by
-    # default (auto) on the duo decks, a physics change no one has run or
-    # reviewed on that lane.  Extending it is an open user decision, not a
-    # merge default.
+    # The lane predicate mirrors ModelDriver.run's dispatch: fv3_duo first --
+    # its COLUMN lane (dycore.fv3_duo_column_lane) runs _run_mpas with the
+    # duo as the dynamics operator (user decision 2026-10-09: it takes the
+    # land model's stress too), the closed duo lane does not -- then
+    # grid_type == "mpas" -> _run_mpas.
     if cfg.dycore.discretization == "fv3_duo":
-        return False, ("this is not the MPAS lane for this purpose: the "
-                       "fv3_duo lanes do not take the land model's stress "
-                       "or ocean-surface fluxes (not yet enabled or "
-                       "validated on the duo column lane)")
-    if cfg.grid.grid_type != "mpas":
+        if not bool(getattr(cfg.dycore, "fv3_duo_column_lane", False)):
+            return False, ("this is not the MPAS lane (the closed fv3_duo "
+                           "lane has no land model)")
+    elif cfg.grid.grid_type != "mpas":
         return False, "this is not the MPAS lane"
     if not cfg.use_multilayer_land:
         return False, "use_multilayer_land is off (no land model)"

@@ -222,6 +222,9 @@ land_calibrated_physics: true
 land_surface_scheme: two_leaf
 land_canopy_max_iters: 10   # NEW BASELINE 2026-10-05 (user): A/B vs 60 = 4.2x/2.7x faster, land LH -1.5/-3.4 %; see fv3_duo_gaps/q_review/deck_ledgers.md
 mpas_land_beta_soil: true
+mpas_land_stress_from_land: true  # land model's own stress to the boundary layer, as
+                                  # amip_production.yaml (user 2026-10-09: the duo
+                                  # column lane takes it too)
 land_soil_init: aridity
 
 # ---- moisture smoothing / clamps (unchanged) -----------------------------------

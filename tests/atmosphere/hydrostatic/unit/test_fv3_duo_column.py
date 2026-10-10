@@ -1099,6 +1099,102 @@ def test_m6_multilayer_land_and_rrtmgp_run_on_the_duo_columns(tmp_path, monkeypa
     assert corr > 0.5, corr
 
 
+def _land_stress_cfg(tmp_path, monkeypatch, *, stress, days, **over):
+    import legoesm.grids.topography as topo
+    import legoesm.land.clm_surface_map as clm
+    monkeypatch.setattr(clm, "download_clm_surfdata", lambda *a, **k: "synthetic")
+    monkeypatch.setattr(clm, "load_clm_surface", _fake_surface_map_by_latitude)
+    # land north of the equator, pure ocean south: the packed land solve and
+    # the scatter back onto ocean columns are exercised
+    monkeypatch.setattr(
+        topo, "load_land_fraction",
+        lambda grid, path, *a, **k: jnp.where(jnp.asarray(grid.lat) > 0.0,
+                                              0.6, 0.0))
+    return _driver_cfg(
+        tmp_path, days=days, radiation="rrtmgp", turbulence="louis",
+        land_mask_path="synthetic.nc", use_multilayer_land=True,
+        multilayer_n_layers=6, multilayer_soil_depth=2.5,
+        land_surface_scheme="simple_seb", mpas_land_params_refresh=False,
+        mpas_land_beta_soil=True, mpas_land_stress_from_land=stress, **over)
+
+
+def test_land_stress_from_land_reaches_the_boundary_layer_on_the_duo_columns(
+        tmp_path, monkeypatch):
+    """User decision 2026-10-09: the duo COLUMN lane takes the land model's
+    surface stress like MPAS.  Auto (None) resolves ON on this eligible deck;
+    the land stress reaches the boundary layer (the winds differ from the
+    bulk-stress run of the same deck, finite), and the driver publishes the
+    land's own |stress| on land columns and nothing on pure-ocean ones."""
+    from legoesm.driver.config import resolve_mpas_land_stress_from_land
+    from legoesm.driver.model_driver import ModelDriver
+    days = 3 * 600.0 / 86400.0
+    runs = {}
+    for tag, stress in (("off", False), ("on", None)):
+        d = tmp_path / tag
+        d.mkdir()
+        cfg = _land_stress_cfg(d, monkeypatch, stress=stress, days=days,
+                               dt=600.0, rad_update_steps=1)
+        assert resolve_mpas_land_stress_from_land(cfg) is (tag == "on")
+        drv = ModelDriver(cfg, output_dir=d)
+        drv.setup()
+        assert drv.run() == "COMPLETED"
+        runs[tag] = drv
+    on, off = runs["on"], runs["off"]
+    u_on = np.asarray(on.state.native["state"]["u"])
+    u_off = np.asarray(off.state.native["state"]["u"])
+    assert np.isfinite(u_on).all() and np.isfinite(
+        np.asarray(on.state.native["state"]["pt"])).all()
+    assert np.max(np.abs(u_on - u_off)) > 0.0, (
+        "the land stress left the duo winds bit-identical: it does not reach "
+        "the boundary layer on the column lane")
+    land = np.asarray(on._f_land).reshape(-1) > 0.0
+    assert land.any() and (~land).any()
+    tau = np.asarray(on._land_stress_last).reshape(-1)
+    assert np.isfinite(tau).all()
+    assert tau[land].max() > 0.0 and np.all(tau[~land] == 0.0)
+    assert getattr(off, "_land_stress_last", None) is None
+
+
+def test_land_stress_rides_the_duo_column_checkpoint(tmp_path, monkeypatch):
+    """The column lane checkpoints through the MPAS writer: the land stress
+    (last valid |stress|, valid and fresh masks) is in the file, a fresh
+    driver stages the same arrays, and the RESUMED run uses them: no land
+    column-step falls back to the neutral seed (a re-seeded restart would
+    count every land column on its first step)."""
+    from legoesm.driver.model_driver import ModelDriver
+    dir_a, dir_b = tmp_path / "a", tmp_path / "b"
+    dir_a.mkdir(), dir_b.mkdir()
+    cfg = _land_stress_cfg(dir_a, monkeypatch, stress=True, days=1,
+                           dt=1920.0, rad_update_steps=4)
+    cfg = cfg._replace(output=cfg.output._replace(checkpoint_days=1))
+    drv_a = ModelDriver(cfg, output_dir=dir_a)
+    drv_a.setup()
+    assert drv_a.run() == "COMPLETED"
+    ck = dir_a / "checkpoint_day_0001.npz"
+    assert ck.is_file(), sorted(p.name for p in dir_a.iterdir())
+    with np.load(ck) as d:
+        saved = {k: np.asarray(d[k]) for k in
+                 ("land_taumag", "land_taumag_valid", "land_taumag_fresh")}
+    np.testing.assert_array_equal(saved["land_taumag"],
+                                  np.asarray(drv_a._land_taumag))
+    land = np.asarray(drv_a._f_land).reshape(-1) > 0.0
+    assert saved["land_taumag_valid"][land].all()
+    assert drv_a._land_stress_seed_total > 0        # the fresh start DID seed
+    drv_b = ModelDriver(_land_stress_cfg(dir_b, monkeypatch, stress=True,
+                                         days=2 * 1920.0 / 86400.0,
+                                         dt=1920.0, rad_update_steps=4),
+                        output_dir=dir_b)
+    drv_b.setup()
+    step, day = drv_b.load_checkpoint(ck)
+    for k, v in saved.items():
+        np.testing.assert_array_equal(np.asarray(drv_b._carry_aux[k]), v)
+    assert drv_b.run(start_step=step, start_day=day) == "COMPLETED"
+    assert drv_b._land_stress_seed_total == 0, (
+        "the resumed column-lane run re-seeded the land drag")
+    tau_b = np.asarray(drv_b._land_taumag).reshape(-1)
+    assert np.isfinite(tau_b).all() and tau_b[land].max() > 0.0
+
+
 def test_m6_the_model_is_built_on_the_grid_the_forcings_saw(tmp_path):
     """The factory refuses to build its own grid: without the bundle the
     driver built at grid creation, the model's mesh could differ from
