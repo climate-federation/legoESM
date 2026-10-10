@@ -135,8 +135,8 @@ No `packages/` file changed, so no production GYRE/DINO/tank trajectory can
 move in this round. On clean implementation commit `cbc64c340`, the round
 citation gate passes six citations and the cumulative default gate passes 274;
 both report zero failures, unmapped citations, or map-audit failures. The
-explicit two-line `dynldf.f90:81-85` shift plant exits 1 and makes the gate
-fail. Round/default/plant SHA-256 values are
+explicit two-line shift plant on the mapped dynldf range exits 1 and makes the
+gate fail. Round/default/plant SHA-256 values are
 `25d01a542c6069058912fdd7f25ef426388282af2ef5804fcf618b220999d245`,
 `6f0a08c5a411885077e6e0824cbc99fd686de70f0ef865c231fad0de798ffd83`,
 and `4173c61a45f73de90e65a7ef3e5e02a5edf11a3738517956b2c8582c0681b3b6`.
