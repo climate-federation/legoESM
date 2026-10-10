@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import copy
 import json
 import sys
 from pathlib import Path
@@ -42,6 +43,7 @@ from scripts.validate.ocean_fidelity.orca2_l4 import (  # noqa: E402
 )
 
 PLANTS = ("none", "reconstructed-source", "e3v-bit", "vmask-bit", "missing-member")
+CLASSIFY_PLANTS = ("none", "label-coverage", "geometry-closure", "false-root")
 
 
 class GateError(RuntimeError):
@@ -276,6 +278,75 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path, label: str,
             "umask": list(np.asarray(raw_ops.umask).shape),
             "vmask": list(np.asarray(raw_ops.vmask).shape),
         },
+    }
+
+
+def classify(reports: list[dict[str, object]], *, plant: str = "none") -> dict[str, object]:
+    """Apply the preregistered root-owner falsifier without rerunning JAX."""
+
+    require(plant in CLASSIFY_PLANTS, f"unknown classify plant {plant!r}")
+    reports = copy.deepcopy(reports)
+    if plant == "label-coverage":
+        reports.pop()
+    by_label = {report["label"]: report for report in reports}
+    require(set(by_label) == {"independent", "given_nemo_entry"},
+            "claim-label coverage moved")
+    if plant == "geometry-closure":
+        by_label["independent"]["operand_rows"]["e3v"]["unequal"] = 1
+    elif plant == "false-root":
+        by_label["independent"]["operand_rows"]["vn_adv"]["unequal"] = 35
+
+    endpoint = {}
+    for label, report in by_label.items():
+        require(report["status"] == "PASS_R233_GEOMETRY_UNIT_BOUNDARY",
+                f"{label}: boundary measurement did not pass")
+        require(all(report["passivity"].values()),
+                f"{label}: passive trace moved state")
+        require(tuple(report["geometry_registry"])
+                == ("fmask", "tmask", "umask", "vmask"),
+                f"{label}: atomic geometry registry moved")
+        require(all(row["unequal"] == 0
+                    for row in report["geometry_rows"].values()),
+                f"{label}: raw geometry is not exact")
+        rows = report["operand_rows"]
+        require(rows["e3v"]["unequal"] == 0,
+                f"{label}: live e3v did not close")
+        require(rows["vmask"]["unequal"] == 0,
+                f"{label}: vmask did not close")
+        require(rows["vn_adv"]["support"] == 8589,
+                f"{label}: vn_adv support moved")
+        require(rows["vn_adv"]["unequal"] > 35,
+                f"{label}: false-root plant erased the independent external-mode debt")
+        require(rows["zFv"]["unequal"] > 0,
+                f"{label}: zFv unexpectedly closed")
+        endpoint[label] = {
+            "e3v_unequal": rows["e3v"]["unequal"],
+            "vmask_unequal": rows["vmask"]["unequal"],
+            "vn_adv_unequal": rows["vn_adv"]["unequal"],
+            "zvb_unequal": rows["zvb"]["unequal"],
+            "zFv_unequal": rows["zFv"]["unequal"],
+            "fold_T_max_abs": report["fold_band"]["T"]["max_abs"],
+            "fold_S_max_abs": report["fold_band"]["S"]["max_abs"],
+        }
+    require(endpoint["independent"] == endpoint["given_nemo_entry"],
+            "the two claim labels disagree on the frozen endpoint signature")
+    return {
+        "format": "nemo-testcase-l4-orca2-round233-classification-v1",
+        "status": "HELD_R233_INDEPENDENT_EXTERNAL_MODE_DEBT",
+        "rows": endpoint,
+        "predictions": {
+            "R233-P1": "CONFIRMED",
+            "R233-P2": "REFUTED_VN_ADV_8589_OF_8589",
+            "R233-P3": "REFUTED_FOLD_TS_UNCHANGED",
+            "R233-P4": "NOT_ACTIVATED_PREREQUISITE_R233-P3",
+            "R233-P5": "NOT_ACTIVATED_PREREQUISITE_R233-P4",
+            "R233-P6": "CONFIRMED_DIAGNOSTIC_RESTORED",
+        },
+        "decision_needed": (
+            "Land the independently exact raw face-thickness/mask geometry now, "
+            "or retain it privately until the separate external-mode vn_adv debt closes?"
+        ),
+        "pick": "land the independently exact geometry unit",
     }
 
 
