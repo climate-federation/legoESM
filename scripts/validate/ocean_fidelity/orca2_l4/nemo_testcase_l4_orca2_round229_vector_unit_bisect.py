@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import struct
 import sys
 from pathlib import Path
 
@@ -31,11 +32,6 @@ from scripts.validate.ocean_fidelity.orca2_l4 import (
 from scripts.validate.ocean_fidelity.orca2_l4 import (
     nemo_testcase_l4_orca2_round228_fold_invariant_audit as r228,
 )
-from scripts.validate.ocean_fidelity.orca2_l4 import (
-    nemo_testcase_l4_orca2_phase2n_overflow_runoff_gate as transport_reader,
-)
-
-
 PARTS = ("slow_v_pair", "vector_v_mask", "association", "v_transport")
 VARIANTS = ("off", "full") + tuple(f"drop_{part}" for part in PARTS)
 PLANTS = (
@@ -222,13 +218,34 @@ def _score_stage(card, candidate_state, oracle_state) -> dict[str, object]:
 def _calibrate_oracle_transport(card, record_root: Path, oracle_state) -> dict[str, object]:
     """Calibrate the reconstructed full-domain zFv on the recorded rank-0 slab."""
 
-    _, recorded_v = transport_reader.read_transport(
+    _, recorded_v = _read_transport_self_describing(
         record_root / "oracle_transport_kt00000001_s1.bin")
     oracle_v = r228._quantities(card, oracle_state)["zFv"]
     # The stream is the rank-0 94x152 haloed slab.  Its owned bounds are the
     # same frozen 3:92,3:150 layout as the admitted stage frames.
     owned = np.asarray(recorded_v[2:150, 2:92, :30], np.float64)
     return _exact(oracle_v[:, :90], owned)
+
+
+def _read_transport_self_describing(path: Path) -> tuple[np.ndarray, np.ndarray]:
+    """Read the stream dimensions from its header (Note-BD policy)."""
+
+    with path.open("rb") as handle:
+        magic = handle.read(16).decode("ascii").rstrip()
+        version, kt, stage, rank, nx, ny, nz, bits = struct.unpack(
+            "=8i", handle.read(32))
+        values = np.fromfile(handle, np.float64)
+    require(magic == "NEMO_L1_TRANSP_1", f"bad transport magic {magic!r}")
+    require((version, kt, stage, rank, bits) == (1, 1, 1, 1, 64),
+            "bad transport provenance header")
+    require(nx > 0 and ny > 0 and nz > 0, "non-positive transport shape")
+    n3 = nx * ny * nz
+    require(values.size == 3 * n3, "bad transport payload length")
+
+    def xyz(payload: np.ndarray) -> np.ndarray:
+        return payload.reshape((nx, ny, nz), order="F").transpose(1, 0, 2)
+
+    return xyz(values[:n3]), xyz(values[n3:2 * n3])
 
 
 def measure_variant(deck_root: Path, record_root: Path, label: str,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import struct
 from types import SimpleNamespace
 
 import numpy as np
@@ -151,3 +152,18 @@ def test_isolated_variant_reports_assemble_in_frozen_order() -> None:
     assert tuple(assembled["variants"]) == gate.VARIANTS
     with pytest.raises(gate.GateError):
         gate.assemble_scenario(list(reversed(reports)))
+
+
+def test_transport_reader_obeys_self_describing_level_count(tmp_path) -> None:
+    path = tmp_path / "transport.bin"
+    nx, ny, nz = 3, 4, 5
+    values = np.arange(3 * nx * ny * nz, dtype=np.float64)
+    with path.open("wb") as handle:
+        handle.write(b"NEMO_L1_TRANSP_1")
+        handle.write(struct.pack("=8i", 1, 1, 1, 1, nx, ny, nz, 64))
+        values.tofile(handle)
+    u, v = gate._read_transport_self_describing(path)
+    assert u.shape == (ny, nx, nz)
+    assert v.shape == (ny, nx, nz)
+    assert np.array_equal(
+        u, values[:nx * ny * nz].reshape((nx, ny, nz), order="F").transpose(1, 0, 2))
