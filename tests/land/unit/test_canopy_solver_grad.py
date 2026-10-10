@@ -274,11 +274,12 @@ def test_two_leaf_public_export_gpp_is_gross():
     sw = canopy_shortwave_rt(
         PAR_dir, PAR_diff, NIR_dir, NIR_diff, UV, SZA, LAI, params.CI,
         params.ALB_VIS, params.ALB_NIR, params.Vcmax25_C3_leaf,
-        params.Vcmax25_C4_leaf, params.kn, params.FNonVeg)
+        params.Vcmax25_C4_leaf, params.kn)
     Ta = forcing.T_lowest
     Ps = forcing.p_surface
     q_atm = forcing.q_lowest
     Ca = forcing.co2_ppmv
+    from legoesm.thermo import latent_heat_vaporization
     q_c_init = 0.5 * (sat_specific_humidity(T_soil_top, Ps) + q_atm)
     Ci_init = Ca * tlc._CI_CA_C3          # chi = _CI_CA_C3 - _..._MINUS_C4*fC4, fC4=0
     x0 = jnp.stack([Ta, Ta, Ci_init, Ci_init, Ta, q_c_init], axis=-1)  # (ncol, 6)
@@ -290,14 +291,14 @@ def test_two_leaf_public_export_gpp_is_gross():
         Vcmax25_C4Sun=sw.Vcmax25_C4Sun, Vcmax25_C4Sh=sw.Vcmax25_C4Sh,
         ASW_Sun=sw.ASW_Sun, ASW_Sh=sw.ASW_Sh, ASW_Soil=sw.ASW_Soil,
         Ts_bc=T_soil_top, Ca=Ca, Ps=Ps, Ta=Ta,
-        lam=jnp.full(ncol, constants.L_v), Cp=jnp.full(ncol, constants.c_pd),
+        lam=latent_heat_vaporization(T_soil_top), Cp=jnp.full(ncol, constants.c_pd),
         rhoa=forcing.rho_lowest, Tv_atm=Ta * (1.0 + tlc._VIRT_T_COEF * q_atm),
         q_atm=q_atm,
         m=params.m_C3, b0=params.b0_C3, alf=params.alf, TgC=params.TgC,
         fC4=params.fC4, fStress_soil=jnp.ones(ncol),
         ur=wind, CI=params.CI, z0m=z0m, displa=displa, z0=z_ref,
         cv=jnp.full(ncol, cc.cv), d_leaf=jnp.full(ncol, tlc._DEFAULT_D_LEAF),
-        r_soil_surface=jnp.zeros(ncol))
+        r_soil_surface=jnp.zeros(ncol), fwet=jnp.zeros(ncol))
     x_star, _, _ = jax.vmap(lambda x, b: solve_canopy_closure(x, b, cc))(x0, bundle)
     d = jax.vmap(lambda x, b: canopy_forward(
         x, b, cc.LE_module, cc.stomatal_model, cc.le_cap_mode,
