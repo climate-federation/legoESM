@@ -4909,36 +4909,9 @@ _SUB_CONFIGS = {
 }
 
 
-# Renamed config keys, old -> new (composable physics P2, decision D8).  The
-# old spellings stay working aliases: YAML decks (read_yaml_with_includes),
-# the CLI (second option string), stored configs (experiment_config_from_dict)
-# and run manifests (restart.config_hash_matches).
-RENAMED_CONFIG_KEYS = {
-    "fv3_duo_column_lane": "column_lane",
-    "mpas_land_lapse_K_per_km": "land_lapse_K_per_km",
-    "mpas_land_beta": "land_beta",
-    "mpas_land_beta_soil": "land_beta_soil",
-    "mpas_land_stress_from_land": "land_stress_from_land",
-    "mpas_ocean_flux_on_ocean_surface": "ocean_flux_on_ocean_surface",
-    "mpas_land_params_refresh": "land_params_refresh",
-    "mpas_ice_skin_prognostic": "ice_skin_prognostic",
-    "mpas_ice_thickness_m": "ice_thickness_m",
-}
-
-
-def migrate_renamed_keys(d: dict) -> dict:
-    """*d* with every old key of :data:`RENAMED_CONFIG_KEYS` renamed, at any
-    dict depth.  Old and new name both set to different values raises."""
-    out = {k: (migrate_renamed_keys(v) if isinstance(v, dict) else v)
-           for k, v in d.items() if k not in RENAMED_CONFIG_KEYS}
-    for old, new in RENAMED_CONFIG_KEYS.items():
-        if old in d:
-            if new in out and out[new] != d[old]:
-                raise ValueError(
-                    f"config sets both {old!r} (old name) and {new!r} to "
-                    f"different values ({d[old]!r} vs {out[new]!r})")
-            out[new] = d[old]
-    return out
+# (pure stdlib, in run_config_yaml: run_amip loads that module pre-JAX)
+from legoesm.driver.run_config_yaml import (  # noqa: E402
+    RENAMED_CONFIG_KEYS, migrate_renamed_keys)
 
 
 def experiment_config_to_dict(config: ExperimentConfig) -> dict:

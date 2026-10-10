@@ -5255,12 +5255,16 @@ class ModelDriver:
 
         def _h(tree):
             d, n = hashlib.sha256(), 0
-            for x in jax.tree_util.tree_leaves(jax.device_get(tree)):
-                a = np.asarray(x)
-                if a.dtype != object:
-                    d.update(f"{a.shape}{a.dtype}".encode())
-                    d.update(a.tobytes())
-                    n += 1
+            for x in jax.tree_util.tree_leaves(tree):
+                # a sharded leaf spanning other processes: this rank's shards
+                xs = ([s.data for s in x.addressable_shards]
+                      if isinstance(x, jax.Array)
+                      and not x.is_fully_addressable else [x])
+                for a in map(np.asarray, jax.device_get(xs)):
+                    if a.dtype != object:
+                        d.update(f"{a.shape}{a.dtype}".encode())
+                        d.update(a.tobytes())
+                        n += 1
             return f"{d.hexdigest()[:16]}/{n}"
         path = self._output_dir / f"digest_steps_r{self._mpi_rank or 0}.log"
         with open(path, "a") as f:

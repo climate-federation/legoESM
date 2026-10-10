@@ -4407,6 +4407,50 @@ def test_renamed_config_keys_stay_aliases():
     with pytest.raises(ValueError, match="different values"):
         migrate_renamed_keys({"fv3_duo_column_lane": True,
                               "column_lane": False})
+    # a manifest spelling one key BOTH ways (codex P2 r1 #4)
+    both = json.loads(json.dumps(new))
+    both["dycore"]["fv3_duo_column_lane"] = both["dycore"]["column_lane"]
+    hb = hashlib.sha256(json.dumps(both, sort_keys=True).encode()).hexdigest()
+    assert config_hash_matches(hb, both, cfg)
+
+
+def test_two_spellings_of_one_renamed_flag_are_refused():
+    """--land-beta and --mpas-land-beta are one option: both on one command
+    line is an error, not last-wins (codex P2 r1 #2)."""
+    p = build_arg_parser()
+    with pytest.raises(SystemExit):
+        p.parse_args(["--land-beta", "0.6", "--mpas-land-beta", "0.8"])
+    with pytest.raises(SystemExit):
+        p.parse_args(["--land-beta-soil", "--no-mpas-land-beta-soil"])
+    with pytest.raises(SystemExit):
+        p.parse_args(["--column-lane", "--fv3-duo-column-lane"])
+    assert p.parse_args(["--mpas-land-beta", "0.8"]).land_beta == 0.8
+    assert p.parse_args(["--mpas-land-beta-soil"]).land_beta_soil is True
+    assert p.parse_args(["--land-beta-soil", "--no-land-beta-soil"]).land_beta_soil is False
+    assert p.parse_args(["--no-land-beta-soil", "--land-beta-soil"]).land_beta_soil is True
+    assert p.parse_args(["--no-land-params-refresh"]).land_params_refresh is False
+    assert p.parse_args(["--fv3-duo-column-lane"]).column_lane is True
+    assert p.parse_args([]).column_lane is False
+    assert p.parse_args(["--land-beta", "0.6", "--land-beta", "0.7"]).land_beta == 0.7
+
+
+def test_prejax_yaml_read_migrates_old_keys_without_importing_jax(tmp_path):
+    """run_amip reads --config before the JAX federation decision: the alias
+    migration must not pull in JAX (codex P2 r1)."""
+    import subprocess
+    import sys
+    deck = tmp_path / "d.yaml"
+    deck.write_text("fv3_duo_column_lane: true\n")
+    # the loading run_amip._read_run_yaml_prejax does
+    code = ("import sys, importlib.util as u; from pathlib import Path; "
+            "loc = u.find_spec('legoesm.driver').submodule_search_locations[0]; "
+            "s = u.spec_from_file_location('m', Path(loc) / 'run_config_yaml.py'); "
+            "m = u.module_from_spec(s); "
+            "s.loader.exec_module(m); "
+            f"print(m.read_yaml_with_includes({str(deck)!r}), 'jax' in sys.modules)")
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True,
+                         text=True, check=True).stdout.strip()
+    assert out == "{'column_lane': True} False"
 
 
 def test_fv3_duo_windows_without_pad_is_refused():

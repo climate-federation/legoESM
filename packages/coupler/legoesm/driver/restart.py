@@ -228,9 +228,10 @@ def _stored_spelling(cur, stored):
     old_of = {new: old for old, new in RENAMED_CONFIG_KEYS.items()}
     out = {}
     for k, v in cur.items():
-        if k in old_of and k not in stored and old_of[k] in stored:
-            k = old_of[k]
-        out[k] = _stored_spelling(v, stored.get(k))
+        # a manifest spelling the key both ways (equal values) hashes both
+        names = [n for n in (k, old_of.get(k)) if n in stored] or [k]
+        for n in names:
+            out[n] = _stored_spelling(v, stored.get(n))
     return out
 
 
