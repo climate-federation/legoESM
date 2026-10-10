@@ -124,7 +124,7 @@ Pair-closure, exact-loss, and false-majority plants all refuse.
 
 ## Validation and review
 
-Focused acquisition/card tests pass 10/10. Independent review was attempted
+Focused acquisition/card/citation tests pass 11/11. Independent review was attempted
 with `codex exec --sandbox read-only` and exited 1 before reading the diff:
 `failed to initialize in-process app-server client: Read-only file system (os
 error 30)`. **Independent review unavailable in-sandbox**; this is not a PASS.
@@ -132,8 +132,24 @@ The review log SHA-256 is
 `eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5`.
 
 No `packages/` file changed, so no production GYRE/DINO/tank trajectory can
-move in this round. Citation-gate and full fidelity-battery results are
-recorded below after their clean-tree runs.
+move in this round. On clean implementation commit `cbc64c340`, the round
+citation gate passes six citations and the cumulative default gate passes 274;
+both report zero failures, unmapped citations, or map-audit failures. The
+explicit two-line `dynldf.f90:81-85` shift plant exits 1 and makes the gate
+fail. Round/default/plant SHA-256 values are
+`25d01a542c6069058912fdd7f25ef426388282af2ef5804fcf618b220999d245`,
+`6f0a08c5a411885077e6e0824cbc99fd686de70f0ef865c231fad0de798ffd83`,
+and `4173c61a45f73de90e65a7ef3e5e02a5edf11a3738517956b2c8582c0681b3b6`.
+
+The prescribed `tests/ocean/fidelity -n 12` battery collected 3,072 tests and
+reached 99%; 3,037 passed and seven skipped. Its four failures are the same
+registered pre-existing reds reported in round 220: the GYRE round-129
+spread-floor record stamp, allow-dirty scope, worktree-stamp ratchet, and SI3
+scalar-math provenance gate. The remaining 24 tests were unclassified when
+the pytest processes disappeared without a terminal summary; the idle wrapper
+was then interrupted. The battery is not called PASS and was not relaunched.
+Its log SHA-256 is
+`8e35c1843ef30a184e4be649027aa6978d5c7356e0b5348170628e4002f5bf33`.
 
 ## OPEN
 
