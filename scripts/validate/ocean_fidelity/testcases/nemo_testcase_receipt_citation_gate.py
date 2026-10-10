@@ -2523,22 +2523,21 @@ CITATION_MAP = {
         ("& l4_canon_3d(ts(:,:,:,jp_sal,Krhs),'T')", 4), 11],
     # --- ORCA2 round 226: final FCT RHS association and refutation ---
     'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/traadv_fct.f90:598-609': [
-        '! -- after tracer with upstream scheme',
+        ('! -- after tracer with upstream scheme', 2),
         ('pt_up1(ji,jj,jk) = ( (e3t_3d(ji,jj,jk)', 1), 12],
-    'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/traadv_fct.f90:318-330': [
-        '! -- Final trend with corrected fluxes',
-        ('END DO   ;   END DO   ;   END DO', 10), 13],
-    'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:600-649,700-760': [
-        ('ts(:,:,:,jn,Krhs) = 0._wp', 1),
-        ('CALL tra_adv', 2),
-        ('CASE ( 3 )', 5),
-        ('CALL tra_zdf', 1), 111],
-    'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:700-760': [
-        ('CASE ( 3 )', 5),
-        ('CALL tra_zdf', 1), 61],
-    'nemo_testcase_l4_orca2_round226_fct_rhs_walk.py:1-367': [
+    'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/traadv_fct.f90:318-329': [
+        '!        !==  final trend with corrected fluxes  ==!',
+        'zta_up1(ji,jj,jk) = zta_up1(ji,jj,jk) + p2Dt * ztra /', 12],
+    'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:600-649': [
+        '!                       !==  T-S Tracers  ==!',
+        ('IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 .AND. kstg <= 2 ) &', 2),
+        50],
+    'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:700-749': [
+        'CASE ( 3 )        !==  Stage 3  ==!   add all left over RHS terms',
+        'CALL tra_zdf( kstp, Kbb, Kmm, Krhs, ts    , Kaa  )', 50],
+    'nemo_testcase_l4_orca2_round226_fct_rhs_walk.py:2-367': [
         '"""Compare OMT-4',
-        'raise SystemExit(main())', 367],
+        'raise SystemExit(main())', 366],
     'test_nemo_testcase_l4_orca2_round226_fct_rhs_walk.py:1-50': [
         'from __future__ import annotations',
         'gate.classify(_report(), plant=plant)', 50],

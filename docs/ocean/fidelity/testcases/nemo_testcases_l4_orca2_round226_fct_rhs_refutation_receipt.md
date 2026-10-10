@@ -14,10 +14,11 @@ already divided by live `Kmm` thickness, at
 `ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/traadv_fct.f90:598-609`; after
 `nonosc` it differences the limited anti-fluxes and adds a second divided
 rate at
-`ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/traadv_fct.f90:318-330`. The active stage program zeroes `Krhs`,
+`ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/traadv_fct.f90:318-329`. The active stage program zeroes `Krhs`,
 calls advection, and hands that completed rate to its stage-3 implicit tracer
 solve at
-`ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:600-649,700-760`.
+`ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:600-649` and
+`ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:700-749`.
 
 The committed offline replay uses only admitted passive completed states and
 the rank-0 `NEMO_L2_RKTR3_1` record; no executable observer is present. Its
@@ -54,7 +55,7 @@ No Decision-96 census is manufactured, so R226-P4 is **NOT REACHED**.
 ## Mechanical controls and validation
 
 The gate at
-`nemo_testcase_l4_orca2_round226_fct_rhs_walk.py:1-367` owns the ORCA2 record
+`nemo_testcase_l4_orca2_round226_fct_rhs_walk.py:2-367` owns the ORCA2 record
 schema, rank-half cross-check, RHS and stage associations, sufficiency log
 hash, prediction classification, and fail-closed plants. All four planted
 violations fired:
@@ -91,7 +92,7 @@ the complete output and exit status are retained as
 
 OMT-4 remains HELD and OMT-5 remains blocked. Continue in compiled source
 order at the stage-3 implicit tracer solve
-(`ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:700-760`): replay
+(`ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:700-749`): replay
 the input `Krhs`, vertical-diffusion coefficients and tridiagonal
 forward/back substitutions from passive completed states, and name the first
 non-bit statement. The known `t3d` off-diagonal/diagonal thickness association
