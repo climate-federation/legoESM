@@ -28,9 +28,6 @@ from scripts.validate.ocean_fidelity.orca2_l4 import (
 from scripts.validate.ocean_fidelity.orca2_l4 import (
     nemo_testcase_l4_orca2_round228_fold_invariant_audit as r228,
 )
-from scripts.validate.ocean_fidelity.orca2_l4 import (
-    nemo_testcase_l4_orca2_round229_vector_unit_bisect as r229,
-)
 from scripts.validate.ocean_fidelity.orca2_l4.nemo_testcase_l4_orca2_round229_fold_transport_acquisition import (
     check_record as admission,
 )
@@ -142,6 +139,10 @@ def measure(deck_root: Path, frame_root: Path, operand_root: Path,
     import jax
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
     from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import interp_to_v_points
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+        _NEMOWSLiveOperandTrace,
+    )
     from legoesm.ocean.fidelity.provenance import worktree_stamp
 
     require(plant in PLANTS, f"unknown plant {plant!r}")
@@ -163,9 +164,29 @@ def measure(deck_root: Path, frame_root: Path, operand_root: Path,
              else rung0.bridge_entry(card, entry))
     oracle_stage = rung0.bridge_entry(card, rung0.assemble_frame(frame_root, 1, 1))
     freshwater, surface = omt0.rung0_ladder._zero_forcing((148, 180))
-    slow_override, raw_mask = r229._slow_override(card, state, freshwater, surface)
-    stage, candidate_zfv = r229._run_variant(
-        card, state, freshwater, surface, "full", slow_override, raw_mask)
+    ordinary_model = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+        _nemo_ws_test_hooks=r228._hooks(card, True))
+    trace_model = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+        _nemo_ws_test_hooks=r228._hooks(card, True, live=True))
+    ordinary = jax.device_get(ordinary_model.step(
+        state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
+    traced = jax.device_get(trace_model.step(
+        state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
+    require(isinstance(traced, _NEMOWSLiveOperandTrace),
+            "live-stage trace has the wrong return type")
+    passivity = r228.passive._ordinary_state_equal(traced.state_after, ordinary)
+    require(all(passivity.values()), "live-stage trace is not passive")
+    values = traced.stage_outputs[0]
+    stage = state._replace(
+        u=state.u.replace(data=values[0]),
+        v=state.v.replace(data=values[1]),
+        T=state.T.replace(data=values[2]),
+        S=state.S.replace(data=values[3]),
+        eta=state.eta.replace(data=values[4]),
+    )
+    candidate_zfv = np.asarray(traced.stage_geometry[0][8], np.float64)[1:]
     record = assemble_record(operand_root)
 
     recorded_zfv = np.asarray(record["zFv_after_trp"], np.float64)
@@ -209,6 +230,7 @@ def measure(deck_root: Path, frame_root: Path, operand_root: Path,
         "status": "PASS_R231_TRACER_FOLD_OPERAND_NAMED",
         "label": label,
         "worktree": stamp,
+        "passivity": passivity,
         "transport": transport,
         "entry_owned": {
             "T": _exact(state_t, record["T_Kmm"]),
