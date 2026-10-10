@@ -11,6 +11,20 @@ Decision-109 OMT-2 deck and a fail-closed operator acquisition. No NEMO run was
 attempted in the sandbox. OMT-2 trajectories are therefore **UNMEASURED WITH
 SPEC**, and no independent/given-entry numbers are mixed or reported.
 
+## CORRECTION FROM ROUND 219 — acquisition ran; month prediction refuted
+
+The operator subsequently ran this acquisition. The smoke, uninstrumented
+calibration, and both P3 twins completed through kt=10. The month run stopped
+through compiled `stp_ctl` at kt=11 with `|V|=10.54 m/s`. Round 218's launcher
+then falsely refused because it grepped for a shortened diagnostic while the
+compiled source prints additional salinity and NaN clauses. Round 219 repaired
+that checker only and admitted the existing output without rerunning NEMO.
+
+Therefore R218-P2 is **CONFIRMED**, R218-P3 is **REFUTED at kt=11**, and the
+remaining OMT-2 card/trajectory predictions are dispositioned in the round-219
+receipt. The original preregistered prediction below is preserved; this is a
+loud correction, not a silent rewrite.
+
 ## Exact OMT-1 to OMT-2 edge
 
 The canonical deck is rendered from the admitted round-211 OMT-1 deck, SHA-256

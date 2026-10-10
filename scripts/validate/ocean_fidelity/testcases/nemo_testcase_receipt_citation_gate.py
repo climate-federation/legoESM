@@ -2372,6 +2372,12 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/stpctl.f90:293-298': [
         "WRITE(ctmp1,*) ' stp_ctl: |ssh| > 20 m  or  |U| > 10 m/s  or  S <= 0  or  S >= 100  or  NaN encounter in the tests'",
         "CALL wrt_line( ctmp6, kt, 'Sal   max'", 6],
+    'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/stpctl.f90:243-250': [
+        'IF(  zmax(1) >   20._wp .OR.',
+        '& ABS(   SUM(zmax(1:jptst)) ) > HUGE(1._wp) ) THEN', 8],
+    'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/stpctl.f90:293-310': [
+        "WRITE(ctmp1,*) ' stp_ctl: |ssh| > 20 m  or  |U| > 10 m/s  or  S <= 0  or  S >= 100  or  NaN encounter in the tests'",
+        'IF(lwp) THEN   ;   CALL ctl_stop(', 18],
     'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:666-679': [
         'IF( ln_dynadv_vec .OR. lk_linssh ) THEN      !* Vector form',
         ('END DO   ;   END DO', 17), 14],
