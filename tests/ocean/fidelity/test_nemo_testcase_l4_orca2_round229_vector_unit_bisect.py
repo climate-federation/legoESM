@@ -23,14 +23,18 @@ def _row(maximum: float, unequal: int = 1) -> dict[str, object]:
 
 
 def _variant(s_value: float, *, zfv_unequal: int = 0) -> dict:
-    return {
+    result = {
         "T": _row(0.177 if s_value > 1.0 else 0.001),
         "S": _row(s_value),
         "e3t": _row(0.0, 0),
-        "zFv": _row(0.0, 0),
         "tmask": _row(0.0, 0),
+        "zFv_recorded_slab": _row(0.0, zfv_unequal),
         "zFv_pivot": _row(0.0, zfv_unequal),
     }
+    for name in ("T", "S", "e3t"):
+        for suffix in ("pivot", "south1", "south2"):
+            result[f"{name}_{suffix}"] = result[name]
+    return result
 
 
 def _scenario(label: str) -> dict:
@@ -50,7 +54,7 @@ def _scenario(label: str) -> dict:
             "t_pivot_right_half": _row(0.0, 0),
             "t_halo_source_check": _row(0.0, 0),
         },
-        "oracle_transport_calibration": _row(0.0, 0),
+        "recorded_transport_shape": [152, 94, 31],
         "variants": variants,
     }
 
@@ -63,8 +67,7 @@ def _variant_report(label: str, variant: str) -> dict:
         "variant": variant,
         "worktree": {"commit": "test"},
         "support": scenario["support"],
-        "oracle_transport_calibration": scenario[
-            "oracle_transport_calibration"],
+        "recorded_transport_shape": scenario["recorded_transport_shape"],
         "score": scenario["variants"][variant],
     }
 def test_compact_support_uses_distinct_v_source_and_t_pivot_rows() -> None:

@@ -174,7 +174,11 @@ def _run_variant(card, state, freshwater, surface, variant, slow_override, raw_v
             f"{variant}: live trace return type moved")
     equality = passive._ordinary_state_equal(traced.state_after, ordinary)
     require(all(equality.values()), f"{variant}: live trace is not passive")
-    return _stage_state(state, traced.stage_outputs[0])
+    # stprk3_stg.F90:257-304: _g0[8] is the live stage-1 metric zFv
+    # handed to tra_adv_trp.  Score this object directly, not a later
+    # reconstruction from the completed stage state.
+    return (_stage_state(state, traced.stage_outputs[0]),
+            np.asarray(traced.stage_geometry[0][8], np.float64)[1:])
 
 
 def _slow_override(card, state, freshwater, surface):
@@ -203,28 +207,27 @@ def _slow_override(card, state, freshwater, surface):
     return (jnp.asarray(producer["final_u"]), final_v), raw_mask
 
 
-def _score_stage(card, candidate_state, oracle_state) -> dict[str, object]:
+def _score_stage(card, candidate_state, oracle_state,
+                 candidate_zfv: np.ndarray,
+                 recorded_zfv: np.ndarray) -> dict[str, object]:
     candidate = r228._quantities(card, candidate_state)
     oracle = r228._quantities(card, oracle_state)
     rows = {}
-    for name in ("T", "S", "e3t", "zFv"):
+    for name in ("T", "S", "e3t"):
         rows[name] = _exact(candidate[name][-3:], oracle[name][-3:])
+        rows[f"{name}_pivot"] = _exact(candidate[name][-1], oracle[name][-1])
+        rows[f"{name}_south1"] = _exact(candidate[name][-2], oracle[name][-2])
+        rows[f"{name}_south2"] = _exact(candidate[name][-3], oracle[name][-3])
     active = np.asarray(card.recipe.z_coord.is_active, np.float64)
     rows["tmask"] = _exact(active[-3:], active[-3:])
-    rows["zFv_pivot"] = _exact(candidate["zFv"][-1], oracle["zFv"][-1])
+    require(candidate_zfv.shape[:2] == (148, 180),
+            f"candidate zFv shape moved: {candidate_zfv.shape}")
+    require(recorded_zfv.shape[:2] == (148, 90),
+            f"recorded zFv owned shape moved: {recorded_zfv.shape}")
+    rows["zFv_recorded_slab"] = _exact(
+        candidate_zfv[:, :90], recorded_zfv)
+    rows["zFv_pivot"] = _exact(candidate_zfv[-1, :90], recorded_zfv[-1])
     return rows
-
-
-def _calibrate_oracle_transport(card, record_root: Path, oracle_state) -> dict[str, object]:
-    """Calibrate the reconstructed full-domain zFv on the recorded rank-0 slab."""
-
-    _, recorded_v = _read_transport_self_describing(
-        record_root / "oracle_transport_kt00000001_s1.bin")
-    oracle_v = r228._quantities(card, oracle_state)["zFv"]
-    # The stream is the rank-0 94x152 haloed slab.  Its owned bounds are the
-    # same frozen 3:92,3:150 layout as the admitted stage frames.
-    owned = np.asarray(recorded_v[2:150, 2:92, :30], np.float64)
-    return _exact(oracle_v[:, :90], owned)
 
 
 def _read_transport_self_describing(path: Path) -> tuple[np.ndarray, np.ndarray]:
@@ -283,13 +286,15 @@ def measure_variant(deck_root: Path, record_root: Path, label: str,
 
     if plant == "part-registry":
         require(False, "four-part variant registry moved")
-    stage = _run_variant(
+    stage, candidate_zfv = _run_variant(
         card, state, freshwater, surface, variant,
         slow_override, raw_mask)
 
     support = derive_compact_support(
         card, rung0.assemble_frame(record_root, 1, 1), plant=plant)
-    calibration = _calibrate_oracle_transport(card, record_root, oracle_state)
+    _, recorded_v = _read_transport_self_describing(
+        record_root / "oracle_transport_kt00000001_s1.bin")
+    recorded_v_owned = np.asarray(recorded_v[2:150, 2:92], np.float64)
     result = {
         "format": "nemo-testcase-l4-orca2-round229-variant-v1",
         "status": "PASS_R229_VARIANT",
@@ -298,8 +303,9 @@ def measure_variant(deck_root: Path, record_root: Path, label: str,
         "execution": "production-jit-cpu-fp64-libm",
         "worktree": stamp,
         "support": support,
-        "oracle_transport_calibration": calibration,
-        "score": _score_stage(card, stage, oracle_state),
+        "recorded_transport_shape": list(recorded_v.shape),
+        "score": _score_stage(
+            card, stage, oracle_state, candidate_zfv, recorded_v_owned),
     }
     if plant in ("v-source-row", "v-sign", "t-halo-source", "special-longitude"):
         require(support["v_pivot"]["unequal"] == 0
@@ -327,9 +333,9 @@ def assemble_scenario(variant_reports: list[dict]) -> dict[str, object]:
                 f"{variant}: variant did not pass")
         require(report["support"] == variant_reports[0]["support"],
                 f"{variant}: compact support moved between processes")
-        require(report["oracle_transport_calibration"]
-                == variant_reports[0]["oracle_transport_calibration"],
-                f"{variant}: oracle transport calibration moved")
+        require(report["recorded_transport_shape"]
+                == variant_reports[0]["recorded_transport_shape"],
+                f"{variant}: recorded transport shape moved")
     return {
         "format": "nemo-testcase-l4-orca2-round229-scenario-v1",
         "status": "PASS_R229_SCENARIO",
@@ -337,8 +343,8 @@ def assemble_scenario(variant_reports: list[dict]) -> dict[str, object]:
         "execution": "production-jit-cpu-fp64-libm-isolated-processes",
         "worktrees": [report["worktree"] for report in variant_reports],
         "support": variant_reports[0]["support"],
-        "oracle_transport_calibration": variant_reports[0][
-            "oracle_transport_calibration"],
+        "recorded_transport_shape": variant_reports[0][
+            "recorded_transport_shape"],
         "variants": {
             variant: by_variant[variant]["score"] for variant in VARIANTS
         },
@@ -364,8 +370,6 @@ def classify(reports: list[dict], *, plant: str = "none") -> dict[str, object]:
                 f"{label}: compact T support is not exact")
         require(report["support"]["t_halo_source_check"]["unequal"] == 0,
                 f"{label}: compact T halo source is not exact")
-        require(report["oracle_transport_calibration"]["unequal"] == 0,
-                f"{label}: reconstructed oracle zFv is not calibrated")
 
     rows = {}
     for label, report in by_label.items():
