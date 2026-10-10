@@ -49,13 +49,26 @@ def test_nla10_one_makes_first_level_the_mixed_layer_and_psi_exactly_zero():
     assert np.abs(psi).max() == 0.0
 
 
-def test_column_mixed_layer_with_a_front_has_nonzero_psi():
+def test_front_gives_restratifying_signed_increments_that_sum_to_zero():
+    # east column (i=1) lighter than west (i=0): NEMO adds psi[jk]-psi[jk+1];
+    # psi[0] = 0 and psi >= 0 for psim > 0, so the TOP increment is negative
+    # (light water over dense: westward at the top), and the column sums to 0.
     rho, tm, e3, r3, mb = _column()
-    rho[:, :, 2] += 1.0
+    rho[:, :, 1] -= 1.0                          # column i=1 lighter
     _, ikmax, zmld, zbm = S.mle_mixed_layer(rho, tm, e3, r3, mb, 0, 1)
+    assert zbm[0, 1] > zbm[0, 0]
     _, psi = S.mle_psi_u(zmld, zbm, G500[:6], r3, 3e4 * np.ones((1, 3)),
                          3e4 * np.ones((1, 3)), np.ones_like(tm), ikmax)
-    assert np.abs(psi).max() > 1.0
+    inc = psi[:-1, 0, 0] - psi[1:, 0, 0]
+    assert psi[0, 0, 0] == 0.0 and np.abs(psi).max() > 1.0
+    assert inc[0] < 0.0 and inc[-1] > 0.0 and abs(inc.sum() + psi[-1, 0, 0]) < 1e-6
+
+
+def test_legoesm_mixed_layer_is_the_first_level_when_nla10_is_zero():
+    pytest.importorskip("jax")
+    rho, tm, e3, _, _ = _column(nk=6)
+    z, k = S.legoesm_zmld(rho, tm, e3, G500[:7], G500[:6] + 250.0)
+    assert np.allclose(z, 500.0) and np.allclose(k, 1.0)
 
 
 @pytest.mark.skipif(not S.RECORD.exists(), reason="NEMO SMT-6 record absent")

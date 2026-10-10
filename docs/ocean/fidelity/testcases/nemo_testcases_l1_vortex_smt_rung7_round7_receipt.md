@@ -8,7 +8,7 @@ takes a different branch on the same state (mixed layer = the 500 m top level, s
 streamfunction is exactly zero). (3) legoESM's RK3 lane refuses a non-zero GM coefficient
 outright, so the eddy-induced transport cannot run on this deck today. Base `e7778df27`;
 evidence `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/smtrungs_rounds/round7/`
-(`survey.json` sha256 `2db7434c…`, `survey_plant.json` `2fd343ed…`).
+(`survey.json` sha256 `3cb19fc2…`, `survey_plant.json` `9d8213ae…`).
 
 **ORCA2 pointer.** ORCA2 rung 3 = rung 2 + exactly two switches (`diff` of the rung-2 and
 rung-3 `namelist_cfg` shows only `ln_mle` and `ln_ldfeiv` changed). Sections 1-2 are what
@@ -121,8 +121,8 @@ used by the ORCA2 zps card with `kappa_GM` resolved to a non-zero Treguier ceili
 ## Round 7 — 3. What this deck does with them (REPLAY of NEMO's statements on a NEMO-written record)
 
 Instrument: `scripts/validate/ocean_fidelity/testcases/nemo_testcase_l1_vortex_smtrungs_round7_smt7_survey.py`
-(fp64 numpy transcription of the cited statements; input = the SMT-6 mesh and the day-30
-and day-100 restart `tn`/`sshn`; S-EOS `rn_a0 = 0.28`, `rho0 = 1026`, `grav = 9.80665`
+(fp64 numpy transcription of the cited statements; input = the SMT-6 mesh and the step-30
+(day 1, 2880 s steps) and step-3000 (day 100) restart `tn`/`sshn`; S-EOS `rn_a0 = 0.28`, `rho0 = 1026`, `grav = 9.80665`
 from the run's `ocean.output`; ORCA2 rung-3 values). It was NOT validated against a NEMO
 `psiu_mle` dump (none exists for this deck): the numbers are PLAUSIBLE until the SMT-7
 acquisition writes one.
@@ -132,10 +132,12 @@ acquisition writes one.
   `VORTEX_SMT5_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/tramle.f90:240` is skipped and
   `rn_rho_c_mle` is never read. Changing it cannot open or close anything on this grid.
 - **NEMO's mixed layer = the whole wet column** (capped at `jpkm1`): 4000.0 to 5000.0 m
-  over 3721 wet columns, in both restarts. legoESM's own function on the same state
-  returns 500.0 m everywhere (one level), so its streamfunction is exactly zero.
+  over 3721 wet columns, in both restarts. legoESM's own function (called by the probe
+  on the same state, `survey.json` key `legoesm_mle_mixed_layer`) returns 500.0 m
+  everywhere (one level; 499.997 to 500.08 m with the sea-surface stretch), so its
+  streamfunction is exactly zero.
 - **Size, NEMO branch (replay).** Largest stream function on a wet face: 1.08e8 m3/s
-  (day 100). Largest bolus velocity (increment over `e2u*e3u`): 3.3 m/s in a full 500 m
+  (both restarts). Largest bolus velocity (increment over `e2u*e3u`): 3.3 m/s in a full 500 m
   cell, 3.4 m/s in a partial cell; all 3660 wet U faces are non-zero. At `rn_Dt = 2880 s`
   and `e1u = 30 km` that is a horizontal Courant number near 0.3 per step. This is the
   literal ORCA2 setting applied to a 5 km "mixed layer" (`rc_f*H^2` scaling): large by
@@ -234,10 +236,17 @@ both on the seamount card; (5) the acquisition `run.sh` (SMT-6 pattern) with the
   planted shift control is recorded next to it.
 - New tests: `tests/ocean/fidelity/test_nemo_testcase_l1_vortex_smtrungs_round7_smt7_survey.py`
   (run with `packages/*` and `src` on `PYTHONPATH`).
-- Review: see the final commit message / `round7/codex_review.txt`.
+- Review: single review (codex), `round7/codex_review.txt`: 4 findings, all CONFIRMED and
+  fixed in the follow-up commit: the first restart is step 30 = day 1 (the probe called it
+  day 30); the replay negated NEMO's increment (`psi[jk] - psi[jk+1]`) and omitted `1+r3u`
+  (magnitudes unchanged, sign now right); the "signed right" test asserted only `|psi| > 1`
+  (now asserts the top increment is negative, the bottom positive, the column sums to 0);
+  the legoESM 500 m figure had no committed instrument (the probe now calls the repo's
+  function, plus a direct test). Codex contradicted no NEMO-side claim of the receipt.
+  The second reviewer (GLM) was not run this round.
 
 UNVERIFIED: that the replay equals NEMO's `psiu_mle` (no dump exists); the bolus
 velocities (3.3-3.4 m/s) are replay numbers; the size of the Rossby-radius effect on
-`aeiu` (slopes not replayed); that the stage-3 `tend` placement of legoESM's MLE is the
+`aeiu` (slopes not replayed); `1+r3u` is the mean of the two `r3t` (|r3| < 2e-4); that the stage-3 `tend` placement of legoESM's MLE is the
 step-entry call (read from source, not traced); whether a Treguier-enabled `kappa_GM = 0.0`
 card slips the RK3 guard; the partial-cell `gdepw` difference in the structure function.

@@ -89,6 +89,19 @@ def mle_psi_u(zmld, zbm, gdepw_1d, r3t, e1u, e2u, umask3, ikmax):
     return psim, psi
 
 
+def legoesm_zmld(rhop, tmask, e3t, gdepw_1d, gdept_1d):
+    """The repo's own MLE mixed-layer function on the same state (card nlev = 10)."""
+    import jax.numpy as jnp
+    from legoesm.ocean.physics.lateral_mixing.mle import mle_mld_and_buoyancy
+    nl = len(gdepw_1d) - 1
+    mv = lambda a: jnp.asarray(np.moveaxis(a[:nl], 0, -1))      # noqa: E731
+    zmld, _, in_ml = mle_mld_and_buoyancy(
+        mv(rhop), mv(e3t), mv(tmask), z_faces=jnp.asarray(gdepw_1d),
+        z_centers_ref=jnp.asarray(gdept_1d[:nl]), rho_c_mle=RN_RHO_C,
+        ref_depth_m=10.0, rho0=RHO0, grav=GRAV)
+    return np.asarray(zmld), np.asarray(in_ml).sum(-1)
+
+
 def measure(rec: Path, min_e3w_override: float | None = None) -> dict:
     import netCDF4
     m = netCDF4.Dataset(rec / "mesh_mask.nc")
@@ -106,7 +119,7 @@ def measure(rec: Path, min_e3w_override: float | None = None) -> dict:
     umask3 = tmask * np.concatenate([tmask[:, :, 1:], np.zeros_like(tmask[:, :, :1])], 2)
     mbkt = np.maximum(tmask.sum(0).astype(int), 1)
     ht0 = (e3t0 * tmask).sum(0)
-    for tag, f in (("day100", ssh_files[-1]), ("day30", ssh_files[0])):
+    for tag, f in (("step3000_day100", ssh_files[-1]), ("step30_day1", ssh_files[0])):
         d = netCDF4.Dataset(f)
         fl = lambda n: np.squeeze(np.ma.filled(d[n][:], 0)).astype(float)  # noqa: E731
         T, S = fl("tn"), fl("sn")
@@ -118,12 +131,21 @@ def measure(rec: Path, min_e3w_override: float | None = None) -> dict:
         psim, psi = mle_psi_u(zmld, zbm, gdepw, r3t, e1u, e2u, umask3, ikmax)
         dpsi = psi[:-1] - psi[1:]
         e3u = np.minimum(e3t0[:, :, 1:], e3t0[:, :, :-1])
-        den = e2u[None, :, :-1] * e3u[:ikmax]
-        u = np.where(umask3[:ikmax, :, :-1] > 0, -dpsi[:, :, :-1] / np.maximum(den, 1e-30), 0.0)
+        r3u = 0.5 * (r3t[:, 1:] + r3t[:, :-1])      # PROXY for NEMO's r3u (|r3| < 2e-4 here)
+        den = e2u[None, :, :-1] * e3u[:ikmax] * (1.0 + r3u)[None]
+        # tramle.f90:346  pFu += zpsi_uw(1) - zpsi_uw(2)  =  psi[jk] - psi[jk+1]
+        u = np.where(umask3[:ikmax, :, :-1] > 0, dpsi[:, :, :-1] / np.maximum(den, 1e-30), 0.0)
         wetu = umask3[0, :, :-1] > 0            # land-side faces carry psim but wumask = 0
         full = (e3u[:ikmax] >= e3w1d.max() - 1e-9)
         col = (e3t0[:nk - 1] * tmask[:nk - 1]).sum(0) * (1.0 + r3t)
+        try:
+            lz, lk = legoesm_zmld(rhop, tmask, e3t0 * (1.0 + r3t), gdepw, sq("gdept_1d"))
+            lego = {"zmld_min_max_m": [float(lz[wet].min()), float(lz[wet].max())],
+                    "levels_in_ml_max": float(lk[wet].max())}
+        except Exception as exc:                 # noqa: BLE001 - recorded, not hidden
+            lego = {"unavailable": f"{type(exc).__name__}: {exc}"[:200]}
         out["restarts"][tag] = {
+            "legoesm_mle_mixed_layer": lego,
             "file": f.name,
             "ml_equals_column": bool(np.allclose(zmld[wet], col[wet], rtol=1e-12)),
             "zmld_min_max_m": [float(zmld[wet].min()), float(zmld[wet].max())],
