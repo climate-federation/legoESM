@@ -71,7 +71,7 @@ at this boundary. It is registered evidence, not the first executable debt.
 
 Thus the first source-ordered non-bit statement after the now-exact
 association is the unmasked, materialised V transport at compiled
-`dynspg_ts.f90:533-560`. It must be scored with the round-215 vector pair and
+`ORCA2_OMIP_L4_R214VECPREV3/BLD/ppsrc/nemo/dynspg_ts.f90:533-560`. It must be scored with the round-215 vector pair and
 the complete seven-array association as one indivisible candidate unit.
 
 ## Preregistered predictions
@@ -105,4 +105,3 @@ independent-review results are recorded in the final round commit.
    cancelling partner from the admitted substep stream. Do not resume a
    partial operand walk.
 3. OMT-2 waits. No acquisition and no configuration decision are requested.
-
