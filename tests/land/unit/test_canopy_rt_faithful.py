@@ -326,7 +326,9 @@ def test_canopy_shortwave_rt_matches_sellers_ryu_oracle(case):
                         ALB_VIS, ALB_NIR, Vc3, Vc4, kn)
     for field, e in exp.items():
         g = float(getattr(out, field)[0])
-        assert g == pytest.approx(e, rel=1e-9, abs=0.0), (field, g, e)
+        # abs floor: at LAI=1e-7 the leaf terms are ~1e-12 W m-2 and 1 - exp(-x)
+        # cancellation alone moves them 1.5e-8 relative (1.5e-20 absolute).
+        assert g == pytest.approx(e, rel=1e-9, abs=1e-15), (field, g, e)
 
 
 def test_canopy_shortwave_sunlit_fraction_beer_law_and_vcmax_partition():
