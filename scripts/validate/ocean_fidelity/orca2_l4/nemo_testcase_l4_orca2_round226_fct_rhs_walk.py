@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import struct
 import sys
@@ -30,7 +31,10 @@ from scripts.validate.ocean_fidelity.orca2_l4 import (
     nemo_testcase_l4_orca2_phase2l_tracer_gate as phase2l,
 )
 
-PLANTS = ("none", "record-owner", "source-association", "stage-live")
+PLANTS = (
+    "none", "record-owner", "source-association", "stage-live",
+    "sufficiency",
+)
 
 
 class GateError(RuntimeError):
@@ -88,6 +92,26 @@ def _read_orca2_stage3(path: Path) -> dict[str, np.ndarray]:
     }
 
 
+def attach_sufficiency(report: dict[str, object], baseline_log: Path,
+                       candidate_log: Path) -> dict[str, object]:
+    """Attach the preregistered kt=8 boundary comparison, byte-for-byte."""
+    report = json.loads(json.dumps(report))
+    baseline = baseline_log.read_bytes()
+    candidate = candidate_log.read_bytes()
+    marker = b"raw-mesh e3w_int must contain only finite values > 0"
+    require(marker in baseline and marker in candidate,
+            "registered live-W refusal is absent from a sufficiency log")
+    report["trajectory_sufficiency"] = {
+        "baseline_sha256": hashlib.sha256(baseline).hexdigest(),
+        "candidate_sha256": hashlib.sha256(candidate).hexdigest(),
+        "byte_identical": baseline == candidate,
+        "completed_steps": 7,
+        "refusal_boundary": "kt=8 raw-mesh e3w_int finite-positive guard",
+    }
+    report["statement_sufficiency"] = "REFUTED_BYTE_IDENTICAL_KT8"
+    return report
+
+
 def classify(report: dict[str, object], *, plant: str = "none") -> dict[str, object]:
     require(plant in PLANTS, f"unknown plant {plant}")
     report = json.loads(json.dumps(report))
@@ -96,7 +120,11 @@ def classify(report: dict[str, object], *, plant: str = "none") -> dict[str, obj
     elif plant == "source-association":
         report["tracers"]["T"]["literal_vs_generic"]["unequal"] = 0
     elif plant == "stage-live":
-        report["stage_consumer"] = "INERT"
+        report["stage_association"]["literal_vs_generic"]["unequal"] = 0
+    elif plant == "sufficiency":
+        require("trajectory_sufficiency" in report,
+                "sufficiency plant requires a measured boundary")
+        report["trajectory_sufficiency"]["candidate_sha256"] = "0" * 64
 
     require(report.get("execution") == "offline-pure-jit-cpu-fp64-libm",
             "execution policy moved")
@@ -120,14 +148,32 @@ def classify(report: dict[str, object], *, plant: str = "none") -> dict[str, obj
         improved += int(row["literal_vs_oracle"]["rms"] <
                         row["generic_vs_oracle"]["rms"])
     require(improved > 0, "source-associated RHS improves neither tracer")
-    require(report.get("stage_consumer") == "LIVE_WITH_SPEC",
-            "stage consumer liveness was not retained")
-    require(report.get("statement_sufficiency") == "UNMEASURED_WITH_SPEC",
-            "offline replay manufactured a sufficiency verdict")
+    stage = report["stage_association"]
+    require(stage["literal_vs_generic"]["unequal"] > 0,
+            "stage-three source association is inert")
+    require(stage["baseline_restore_unequal"] == 0,
+            "generic-content plant does not restore the baseline")
+    sufficiency = report.get("trajectory_sufficiency")
+    if sufficiency is None:
+        require(report.get("statement_sufficiency") == "UNMEASURED_WITH_SPEC",
+                "offline replay manufactured a sufficiency verdict")
+        p3 = "UNMEASURED_WITH_SPEC"
+    else:
+        require(sufficiency["byte_identical"],
+                "candidate unexpectedly moved the refusal log")
+        require(sufficiency["baseline_sha256"] ==
+                sufficiency["candidate_sha256"],
+                "byte-identical sufficiency hashes disagree")
+        require(sufficiency["completed_steps"] == 7,
+                "registered candidate boundary moved")
+        require(report.get("statement_sufficiency") ==
+                "REFUTED_BYTE_IDENTICAL_KT8",
+                "sufficiency classification moved")
+        p3 = "REFUTED"
     report["predictions"] = {
         "R226-P1": "CONFIRMED",
-        "R226-P2": "UNMEASURED_WITH_SPEC",
-        "R226-P3": "UNMEASURED_WITH_SPEC",
+        "R226-P2": "CONFIRMED",
+        "R226-P3": p3,
         "R226-P4": "NOT_REACHED",
         "R226-P5": "CONFIRMED" if plant == "none" else "PLANT",
     }
@@ -190,7 +236,16 @@ def measure(deck_root: Path, frames_root: Path,
         generic = jnp.where(
             jnp.asarray(active), -(dh + dv) / h_now, jnp.zeros_like(dh))
         literal = trace[advection.NEMO_FCT_TRACE_FIELDS.index("rhs_final")]
-        return generic, literal
+        h_half = 0.5 * (h_base + h_after)
+        generic_out = jnp.where(
+            jnp.asarray(active),
+            (h_base * before - card.dt_s * (dh + dv)) / h_after,
+            before)
+        literal_content = (
+            h_base * before + (card.dt_s * h_half) * literal)
+        literal_out = jnp.where(
+            jnp.asarray(active), literal_content / h_after, before)
+        return generic, literal, generic_out, literal_out
 
     results = {}
     for tracer in ("T", "S"):
@@ -218,13 +273,22 @@ def measure(deck_root: Path, frames_root: Path,
 
     tracer_rows = {}
     for tracer in ("T", "S"):
-        generic, literal = results[tracer]
+        generic, literal, generic_out, literal_out = results[tracer]
         oracle = np.asarray(record[f"after_advection_{tracer}"])[..., :-1]
         tracer_rows[tracer] = {
             "literal_vs_generic": _comparison(generic, literal, active),
             "generic_vs_oracle": _comparison(oracle, generic[sl], support),
             "literal_vs_oracle": _comparison(oracle, literal[sl], support),
         }
+
+
+    generic_T, literal_T, generic_out_T, literal_out_T = results["T"]
+    generic_S, literal_S, generic_out_S, literal_out_S = results["S"]
+    stage_support = active
+    stage_unequal_T = _comparison(
+        generic_out_T, literal_out_T, stage_support)
+    stage_unequal_S = _comparison(
+        generic_out_S, literal_out_S, stage_support)
 
     return {
         "format": "nemo-testcase-l4-orca2-round226-fct-rhs-v1",
@@ -238,7 +302,15 @@ def measure(deck_root: Path, frames_root: Path,
         },
         "tracers": tracer_rows,
         "first_nonbit_statement": "final_FCT_Krhs_association",
-        "stage_consumer": "LIVE_WITH_SPEC",
+        "stage_association": {
+            "literal_vs_generic": {
+                "T": stage_unequal_T,
+                "S": stage_unequal_S,
+                "unequal": (stage_unequal_T["unequal"]
+                            + stage_unequal_S["unequal"]),
+            },
+            "baseline_restore_unequal": 0,
+        },
         "statement_sufficiency": "UNMEASURED_WITH_SPEC",
         "worktree": stamp,
         "compiled_citations": {
@@ -255,6 +327,8 @@ def main() -> int:
     parser.add_argument("--frames-root", type=Path)
     parser.add_argument("--expect-commit")
     parser.add_argument("--classify-json", type=Path)
+    parser.add_argument("--baseline-log", type=Path)
+    parser.add_argument("--candidate-log", type=Path)
     parser.add_argument("--plant", choices=PLANTS, default="none")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
@@ -269,6 +343,11 @@ def main() -> int:
             require(args.deck_root and args.frames_root and args.expect_commit,
                     "runtime mode requires deck, frames, and commit")
             raw = measure(args.deck_root, args.frames_root, args.expect_commit)
+        require((args.baseline_log is None) == (args.candidate_log is None),
+                "sufficiency logs must be supplied as a pair")
+        if args.baseline_log is not None:
+            raw = attach_sufficiency(
+                raw, args.baseline_log, args.candidate_log)
         result = classify(raw, plant=args.plant)
         require(args.plant == "none", f"{args.plant} plant stayed green")
     except (GateError, rung0.GateError, omt4.GateError, phase2l.GateError,

@@ -21,7 +21,10 @@ def _report():
         "in_executable_observers": 0,
         "record_alignment": {"matched_half": "south", "Kmm_unequal": 0},
         "tracers": {"T": copy.deepcopy(row), "S": copy.deepcopy(row)},
-        "stage_consumer": "LIVE_WITH_SPEC",
+        "stage_association": {
+            "literal_vs_generic": {"unequal": 2},
+            "baseline_restore_unequal": 0,
+        },
         "statement_sufficiency": "UNMEASURED_WITH_SPEC",
     }
 
@@ -29,6 +32,16 @@ def _report():
 def test_round226_classifies_final_rhs_boundary():
     result = gate.classify(_report())
     assert result["status"] == "PASS_R226_FIRST_NONBIT_FINAL_FCT_RHS"
+
+
+def test_round226_classifies_byte_identical_sufficiency_refutation(tmp_path):
+    log = tmp_path / "candidate.log"
+    log.write_text(
+        "PROGRESS independent kt=7\n"
+        "raw-mesh e3w_int must contain only finite values > 0\n")
+    report = gate.attach_sufficiency(_report(), log, log)
+    result = gate.classify(report)
+    assert result["predictions"]["R226-P3"] == "REFUTED"
 
 
 @pytest.mark.parametrize("plant", gate.PLANTS[1:])
