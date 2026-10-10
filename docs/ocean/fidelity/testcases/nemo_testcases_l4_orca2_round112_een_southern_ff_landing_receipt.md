@@ -15,7 +15,7 @@ literal EEN quotient consumes `ff_f(ji,jj-1)`
 
 The production literal EEN coefficient builder now gives only that numerator
 the source-exact southern association
-(`barotropic_latlon_cgrid.py:904-906`, `barotropic_latlon_cgrid.py:1002-1008`).
+(`barotropic_latlon_cgrid.py:909-913`, `barotropic_latlon_cgrid.py:1009-1015`).
 The denominator's independently open `e3f_0vor`, `r3f`, and `fe3mask`
 associations are unchanged. No configuration, forcing, initial state, carried
 state, stabiliser, sea-ice selector, or `unmeasured_features` entry changed.

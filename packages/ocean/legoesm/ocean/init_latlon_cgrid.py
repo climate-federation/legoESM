@@ -114,6 +114,7 @@ def rest_state_latlon_cgrid_ocean(
     H_bathy_override: jnp.ndarray | None = None,
     stratification: str = "exponential",
     nemo_prognostic_barotropic_velocity: bool = False,
+    meridionally_periodic: bool = False,
 ) -> LatLonCGridOceanState:
     """Create a rest-state initial condition on a C-grid lat-lon grid.
 
@@ -164,11 +165,26 @@ def rest_state_latlon_cgrid_ocean(
         the depth mean of zero 3-D velocity and copies Kbb to Kmm, hence exact
         zero.  Non-NEMO recipes leave the pair as ``None`` and gain no array
         pytree leaves.
+    meridionally_periodic : bool, default False
+        Build the face masks under the y-wrap (the j-seam v-faces wet), as
+        the model's ``config.meridionally_periodic`` steps them.  Default =
+        the closed N/S walls.
 
     Returns
     -------
     LatLonCGridOceanState
     """
+    from legoesm.grids.halo_latlon import meridional_periodicity
+    with meridional_periodicity(meridionally_periodic):
+        return _rest_state_body(
+            grid, z_coord, T_water_init_C, T_deep, S_uniform, H_max,
+            land_lat_threshold, land_mask_override, H_bathy_override,
+            stratification, nemo_prognostic_barotropic_velocity)
+
+
+def _rest_state_body(grid, z_coord, T_water_init_C, T_deep, S_uniform, H_max,
+                     land_lat_threshold, land_mask_override, H_bathy_override,
+                     stratification, nemo_prognostic_barotropic_velocity):
     n_lat = grid.n_lat
     n_lon = grid.n_lon
     nlev = z_coord.n_levels
@@ -346,6 +362,7 @@ def replace_land_mask(
     state: LatLonCGridOceanState,
     new_land_mask: jnp.ndarray,
     seam_wall_rows: jnp.ndarray | None = None,
+    meridionally_periodic: bool = False,
 ) -> LatLonCGridOceanState:
     """Replace land_mask and recompute u_mask/v_mask atomically.
 
@@ -353,10 +370,15 @@ def replace_land_mask(
     face masks stay consistent with the cell mask.  ``seam_wall_rows``
     (optional, ``(n_lat,)``, 1 = walled) closes the periodic-seam u-face
     on those rows for a partial-periodic geometry; ``None`` (default) =
-    fully periodic (byte-identical).
+    fully periodic (byte-identical).  ``meridionally_periodic`` must match
+    the model's config (True: the j-seam v-faces stay wet); default = the
+    closed N/S walls.
     """
+    from legoesm.grids.halo_latlon import meridional_periodicity
     new_land_mask = jnp.asarray(new_land_mask)
-    u_mask, v_mask = compute_face_masks(new_land_mask, seam_wall_rows=seam_wall_rows)
+    with meridional_periodicity(meridionally_periodic):
+        u_mask, v_mask = compute_face_masks(new_land_mask,
+                                            seam_wall_rows=seam_wall_rows)
     return state._replace(
         land_mask=Field(data=new_land_mask, name="land_mask",
                         dims=state.land_mask.dims, units=""),

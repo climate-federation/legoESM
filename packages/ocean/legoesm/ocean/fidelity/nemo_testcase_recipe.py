@@ -71,6 +71,12 @@ class NEMOTestcaseCard(NamedTuple):
     # must spell this out so no caller can inherit an implicit iceberg choice.
     icebergs_enabled: bool | None = None
     iceberg_inputs: tuple[str, ...] | None = None
+    # NEMO ln_Jperio as card data; False is the walled N/S boundary every
+    # other card runs.  The card's model config carries it
+    # (``meridionally_periodic``), and the model scopes every entry point to
+    # that value; the step's j-neighbour statements read it there
+    # (lbclnk.f90:2028-2034).
+    j_periodic: bool = False
 
 
 class GYRESurfaceBoundaryCondition(NamedTuple):
@@ -2854,6 +2860,395 @@ def build_vortex_smt_zps_card(
     return card
 
 
+# --- TSUNAMI (NEMO 5.0.2 tests/TSUNAMI): the RK3 build, lane round 2 ---
+# Every value below is the RESOLVED namelist (EXPREF/namelist_cfg over
+# cfgs/SHARED/namelist_ref) or a usrdef formula, cited where it is read.
+# The card is selected only by calling build_tsunami_zco_card; it is NOT in
+# build_nemo_testcase_card's dispatch, so no existing gate or card can reach it.
+#
+# THE STEP PROGRAM (DECISION 100).  The card reproduces TSUNAMI built WITH
+# key_RK3, a documented deviation from cpp_TSUNAMI.fcm (TSUNAMI_DEVIATIONS).
+# nemogcm.F90:166 then calls the case's own MY_SRC/stprk3.F90:
+#   sbc (:98) -> stp_2D (:107) -> stp_RK3_stg 1, 2, 3 (:113, :118, :123)
+#   -> swap (:125) -> ssh(Naa) = 2 ssh(Nbb) - ssh(Naa) (:129) -> dia_wri
+# with NO zdf_phy, eos_rab/bn2, ldf_slp or ldf coefficient updates (cut from
+# the case's copy).  eos IS called (stp2d.F90:127, stprk3_stg.F90:322), and
+# dyn_ldf/tra_ldf are called with their OFF operators (:400, :586).  The stages are src/OCE/stprk3_stg.F90, not overridden, under
+# n_baro_upd = np_HYB (:44) and ln_dynadv_vec = .false.: flux-form stage
+# stepping weighted by (1 + r3u/r3v) (:373-378), dyn_hpg + EEN dyn_vor at
+# stages 2-3 (:324, :327), dyn_zdf at stage 3 (:430), the barotropic
+# correction every stage (:439-446), and T/S stepped every stage with NO
+# advection trend (:546-554; traadv.F90 np_NO_adv has no CASE).  The card's
+# carrier is the shared VORTEX flux-form EEN RK3 identity; what it lacks is
+# declared in TSUNAMI_UNMEASURED (empty since round 5).
+
+
+class TsunamiResolvedNamelist(NamedTuple):
+    """The resolved TSUNAMI switch set, every one stated (none defaulted)."""
+
+    # &namusr_def, namelist_cfg:19-29 (read at usrdef_nam.F90:74)
+    rn_domszx_km: float = 2000.0
+    rn_domszy_km: float = 2000.0
+    rn_domszz_m: float = 100.0
+    rn_dx_km: float = 10.0
+    rn_dy_km: float = 10.0
+    rn_0xratio: float = 0.2
+    rn_0yratio: float = 0.4
+    nn_fcase: int = 0
+    rn_ppgphi0_deg: float = 38.5
+    ln_Iperio: bool = True
+    ln_Jperio: bool = True
+    # &namrun namelist_cfg:40-43, &namdom :48
+    nn_it000: int = 1
+    nn_itend: int = 100
+    rn_Dt_s: float = 1000.0
+    ln_rstart: bool = False
+    # the BUILT keys: cpp_TSUNAMI.fcm's key_qco key_vco_1d plus key_RK3
+    # (TSUNAMI_DEVIATIONS); key_xios is dropped by the acquisition toolchain
+    key_RK3: bool = True
+    key_qco: bool = True
+    key_vco_1d: bool = True
+    # RK3 stage program selectors: n_baro_upd is a module constant
+    # (stprk3_stg.F90:44), the two flags are namelist_ref's
+    n_baro_upd: str = "np_HYB"
+    ln_dynadv_vec: bool = False
+    ln_shuman: bool = False
+    # &namdyn_spg namelist_cfg:163 + namelist_ref
+    ln_dynspg_ts: bool = True
+    ln_bt_fw: bool = True
+    nn_bt_flt: int = 1
+    rn_bt_alpha: float = 0.0
+    ln_bt_auto: bool = True
+    rn_bt_cmax: float = 0.8
+    nn_e_resolved: int = 6        # dynspg_ts.F90:1240 CEILING(rn_Dt/rn_bt_cmax*zcmax)
+    # &namdyn_vor namelist_cfg:153 + namelist_ref nn_e3f_typ
+    ln_dynvor_een: bool = True
+    nn_e3f_typ: int = 0
+    # the deck's remaining selections; the RK3 stages read each of them
+    ln_dynadv_OFF: bool = True
+    ln_traadv_OFF: bool = True
+    ln_traldf_OFF: bool = True
+    ln_dynldf_OFF: bool = True
+    ln_hpg_sco: bool = True
+    ln_zdfcst: bool = True
+    rn_avm0_m2_s: float = 1.2e-4
+    rn_avt0_m2_s: float = 1.2e-5
+    ln_zad_Aimp: bool = False
+    rn_shlat: float = 0.0
+    ln_drg_OFF: bool = True
+    ln_seos: bool = True
+    ln_usr_sbc: bool = True
+    nn_fsbc: int = 1
+    # &nammpp nn_hls from namelist_ref (enters no formula: dom_hgr's lbc_lnk
+    # wraps glamt/gphit periodically before usr_def_istate_ssh reads them)
+    nn_hls: int = 2
+    # selectors dyn_spg_ts reads on the executed path (dynspg_ts.F90:373-446,
+    # 512-525, 601-692, 781-849); namelist_ref, not overridden by the deck
+    ln_dynvor_msk: bool = False
+    ln_apr_dyn: bool = False
+    ln_rnf: bool = False
+    ln_isf: bool = False
+    ln_sdw: bool = False
+    ln_bdy: bool = False
+    ln_tide: bool = False
+    ln_tide_pot: bool = False
+    ln_wd_dl: bool = False
+    ln_wd_dl_bc: bool = False
+    ln_sshinc: bool = False
+    ln_asmiau: bool = False
+    # selectors the RK3 stages read (stprk3_stg.F90:246, :585-599);
+    # namelist_ref, not overridden by the deck
+    ln_tile: bool = False
+    ln_traqsr: bool = False
+    ln_trabbc: bool = False
+    ln_trabbl: bool = False
+    ln_tradmp: bool = False
+    ln_zdfosm: bool = False
+    ln_zdfnpc: bool = False
+    ln_zdfmfc: bool = False
+
+
+TSUNAMI_NAMELIST = TsunamiResolvedNamelist()
+# (field, shipped value, built value, authority).  DECISION 100, user,
+# 2026-10-08: build and score TSUNAMI on NEMO's RK3 program.
+TSUNAMI_DEVIATIONS: tuple[tuple[str, bool, bool, str], ...] = (
+    ("key_RK3", False, True, "DECISION 100"),
+)
+# the card carries none of these forcings/limiters/increments
+_TSUNAMI_ABSENT_SPG_TERMS = (
+    "ln_dynvor_msk", "ln_apr_dyn", "ln_rnf", "ln_isf", "ln_sdw", "ln_bdy",
+    "ln_tide", "ln_tide_pot", "ln_wd_dl", "ln_wd_dl_bc", "ln_sshinc",
+    "ln_asmiau", "ln_tile", "ln_traqsr", "ln_trabbc", "ln_trabbl",
+    "ln_tradmp", "ln_zdfosm", "ln_zdfnpc", "ln_zdfmfc",
+)
+
+_TSUNAMI_NLEV = 1                    # jpkm1 (usrdef_nam.F90:98 kpk = 2)
+_TSUNAMI_H_M = TSUNAMI_NAMELIST.rn_domszz_m
+
+# nameos: namelist_cfg:121 selects ln_seos and sets NO coefficient, so every
+# one is namelist_ref's.  The RK3 program evaluates density for dyn_hpg in
+# stp_2D and at stages 2-3 (stp2d.F90:127, stprk3_stg.F90:322).
+_TSUNAMI_SEOS = NemoSEOSConfig(
+    rho0=float(NEMO_CONSTANTS_CONFIG.rho_0),
+    a0=1.6550e-1, b0=7.6554e-1, lambda1=5.9520e-2, lambda2=7.4914e-4,
+    mu1=1.4970e-4, mu2=1.1090e-5, nu=2.4341e-3, T0=10.0, S0=35.0,
+)
+
+# B1/B2 (the leapfrog program and its lagged metric) are void under
+# DECISION 100.  B3 is card data (j_periodic).  B5 is proven at rest
+# (test_nemo_tsunami_card); its NEMO comparison waits for the record.
+TSUNAMI_UNMEASURED: tuple[str, ...] = (
+    # B4 (the NEMO-literal barotropic arms across both open periodic seams)
+    # and B4j (the j-periodic step) are measured against NEMO's 100-step
+    # record at the floor (round 5); B6/B7 are card selections (round 4).
+)
+
+
+def tsunami_horizontal_coordinates() -> dict[str, np.ndarray]:
+    """Transcribe ``tests/TSUNAMI/MY_SRC/usrdef_hgr.F90:79-122``.
+
+    Positions in KILOMETRES, as the source writes them.  ``mig(ji,0)`` is the
+    1-based global interior index, so the 0-based ``i`` gives
+    ``zti = (i + 1) - ii0``.
+    """
+    nl = TSUNAMI_NAMELIST
+    ni = _vortex_nint(nl.rn_domszx_km / nl.rn_dx_km) + 1   # usrdef_nam.F90:92
+    nj = _vortex_nint(nl.rn_domszy_km / nl.rn_dy_km) + 1   # usrdef_nam.F90:93
+    ii0 = _vortex_nint(float(ni) * nl.rn_0xratio)          # usrdef_hgr.F90:79
+    ij0 = _vortex_nint(float(nj) * nl.rn_0yratio)          # usrdef_hgr.F90:80
+    zti = np.arange(1, ni + 1, dtype=np.float64) - ii0     # :90
+    ztj = np.arange(1, nj + 1, dtype=np.float64) - ij0     # :91
+    lam_t = nl.rn_dx_km * zti                              # :93
+    lam_u = nl.rn_dx_km * (zti + 0.5)                      # :94
+    phi_t = nl.rn_dy_km * ztj                              # :98
+    phi_v = nl.rn_dy_km * (ztj + 0.5)                      # :99
+    shape = (nj, ni)
+    glamt = np.broadcast_to(lam_t[None, :], shape).copy()
+    glamu = np.broadcast_to(lam_u[None, :], shape).copy()
+    gphit = np.broadcast_to(phi_t[:, None], shape).copy()
+    gphiv = np.broadcast_to(phi_v[:, None], shape).copy()
+    # :120-123, nn_fcase = 0: an f-plane, f0 = 2*omega*SIN(rad*rn_ppgphi0).
+    if nl.nn_fcase != 0:
+        raise ValueError("TSUNAMI card transcribes nn_fcase = 0 only")
+    rad = math.pi / 180.0                                  # phycst.F90 rad
+    f0 = 2.0 * float(NEMO_CONSTANTS_CONFIG.Omega) * math.sin(
+        rad * nl.rn_ppgphi0_deg)
+    return {
+        "ni": ni, "nj": nj, "ii0": ii0, "ij0": ij0,
+        "glamt": glamt, "glamu": glamu, "glamv": glamt.copy(),
+        "glamf": glamu.copy(),
+        "gphit": gphit, "gphiu": gphit.copy(), "gphiv": gphiv,
+        "gphif": gphiv.copy(),
+        "ff_t": np.full(shape, f0), "ff_f": np.full(shape, f0), "f0": f0,
+    }
+
+
+def tsunami_initial_ssh(glamt_km: np.ndarray, gphit_km: np.ndarray) -> np.ndarray:
+    """Transcribe ``usr_def_istate_ssh`` (usrdef_istate.F90:93-101).
+
+    ``dom_hgr`` wraps ``glamt``/``gphit`` periodically before this routine
+    runs (domhgr.F90:114), so ``MAXVAL`` over the halo-inclusive array is the
+    interior maximum.  ``0.1`` is double under ``-fdefault-real-8``.
+    """
+    glamt_km = np.asarray(glamt_km, dtype=np.float64)
+    gphit_km = np.asarray(gphit_km, dtype=np.float64)
+    zdist = np.sqrt(glamt_km * glamt_km + gphit_km * gphit_km)   # :94
+    zmax = np.max(zdist) / 20.0                                  # :96
+    ssh = np.zeros_like(zdist)                                   # :99
+    inside = zdist <= zmax                                       # :101
+    ssh[inside] = 0.1 * np.cos(zdist[inside] / zmax * math.pi * 0.5)
+    return ssh
+
+
+def build_tsunami_zco_card() -> NEMOTestcaseCard:
+    """TSUNAMI: doubly periodic 201x201 f-plane, one 100 m z level.
+
+    Geometry from usrdef_nam/hgr/zgr, initial state from usrdef_istate, zero
+    forcing (usrdef_sbc.F90:60-68).  Execution-ready since round 5
+    (``TSUNAMI_UNMEASURED`` is empty).
+    """
+    nl = TSUNAMI_NAMELIST
+    src = tsunami_horizontal_coordinates()
+    ni, nj = src["ni"], src["nj"]
+    dx_m, dy_m = nl.rn_dx_km * 1.e3, nl.rn_dy_km * 1.e3     # usrdef_hgr.F90:106-109
+    grid = create_beta_plane_cgrid_geometry(
+        nj, ni, dx_m=dx_m, dy_m=dy_m, f0=src["f0"], beta=0.0,
+        x_origin_m=float(src["glamt"][0, 0]) * 1.e3 - 0.5 * dx_m,
+        y_origin_m=float(src["gphit"][0, 0]) * 1.e3 - 0.5 * dy_m,
+        radius=float(NEMO_CONSTANTS_CONFIG.R_earth),
+        cartesian_pseudo_lat=True, dtype=jnp.float64,
+    )
+    grid = grid._replace(
+        f_T=jnp.asarray(src["ff_t"], dtype=jnp.float64),
+        f_u=jnp.full((nj, ni + 1), src["f0"], dtype=jnp.float64),
+        f_v=jnp.full((nj + 1, ni), src["f0"], dtype=jnp.float64),
+        ff_f=jnp.asarray(src["ff_f"], dtype=jnp.float64),
+    )
+    # usrdef_zgr.F90:187-189: k_top = 1, k_bot = jpkm1 EVERYWHERE -- no land
+    # ring; periodicity (not walls) closes the box.
+    wet = jnp.ones((nj, ni), dtype=jnp.float64)
+    native_3d = (nj, ni, _TSUNAMI_NLEV)
+    # usrdef_zgr.F90:128-154 with depth_e3.F90:68-73,125-130: zd = 100/1,
+    # gdepw_1d = (0, 100), gdept_1d = (50, 150), e3t_1d = e3w_1d = (100, 100)
+    # exactly, unchanged by the e3->depth round trip.  key_vco_1d makes every
+    # e3*_0 the 1-D ladder (domzgr_substitute.h90:72-91); key_qco stretches it
+    # by (1 + r3*) at run time (:126-140).  Record jpk is the dummy bottom.
+    zd = nl.rn_domszz_m / float(_TSUNAMI_NLEV)
+    thickness = np.full(native_3d, zd)
+    gdept_1d = np.array([0.5 * zd])
+    gdepw_1d = np.array([0.0])
+    ones2 = np.ones((nj, ni))
+    ones3 = np.ones(native_3d)
+    area = np.full((nj, ni), dx_m * dy_m)
+    metric_x = np.full((nj, ni), dx_m)
+    metric_y = np.full((nj, ni), dy_m)
+    operands = NemoEENBarotropicOperands(
+        ff_f=np.asarray(grid.ff_f),
+        e3u_0=thickness, e3v_0=thickness, e3f_0=thickness,
+        # all-wet periodic box: every face and vertex mask is 1, and
+        # rn_shlat = 0 (namelist_cfg:90) has no coast to act on
+        umask=ones3, vmask=ones3, fmask=ones3, fe3mask=ones3,
+        hu_0=_TSUNAMI_H_M * ones2, hv_0=_TSUNAMI_H_M * ones2,
+        hf_0=_TSUNAMI_H_M * ones2,
+        e1t=metric_x, e2t=metric_y, e1u=metric_x, e2u=metric_y,
+        e1v=metric_x, e2v=metric_y, e1f=metric_x, e2f=metric_y,
+    )
+    z_ref = create_z_star_from_thicknesses(
+        jnp.full((_TSUNAMI_NLEV,), zd),
+        t_depth_ref_m=gdept_1d,
+        nemo_gdept_0_m=np.broadcast_to(gdept_1d, native_3d),
+        nemo_gdepw_0_m=np.broadcast_to(gdepw_1d, native_3d),
+        nemo_e3t_0_m=thickness,
+        nemo_e3w_0_m=thickness,
+        nemo_hu_0_m=_TSUNAMI_H_M * ones2,
+        nemo_hv_0_m=_TSUNAMI_H_M * ones2,
+        nemo_e1e2t_m=area, nemo_e1e2u_m=area, nemo_e1e2v_m=area,
+        nemo_e2u_m=metric_y, nemo_e1v_m=metric_x,
+        nemo_een_barotropic_m=operands,
+        allow_single_level=True,   # jpkm1 = 1 (usrdef_nam.F90:98)
+    )
+    z_coord = create_full_step_coordinate(
+        z_ref, jnp.full((nj, ni), _TSUNAMI_NLEV - 1))
+    ssh = tsunami_initial_ssh(src["glamt"], src["gphit"])
+    # ln_Jperio: the j-seam v-faces are wet faces (lbclnk.f90:1868), so the
+    # face masks are built under the y-wrap the step runs in.
+    state = rest_state_latlon_cgrid_ocean(
+        grid, z_coord,
+        T_water_init_C=0.0, T_deep=0.0, S_uniform=0.0,
+        H_max=_TSUNAMI_H_M,
+        land_mask_override=wet,
+        H_bathy_override=wet * _TSUNAMI_H_M,
+        nemo_prognostic_barotropic_velocity=True,
+        meridionally_periodic=nl.ln_Jperio,
+    )
+    # usrdef_istate.F90:65-68: T = 20, S = 30, u = v = 0; istate.F90 then
+    # builds uu_b/vv_b from u = v = 0, i.e. exactly zero.
+    state = state._replace(
+        T=state.T.replace(data=jnp.full(native_3d, 20.0, dtype=jnp.float64)),
+        S=state.S.replace(data=jnp.full(native_3d, 30.0, dtype=jnp.float64)),
+        u=state.u.replace(data=jnp.zeros((nj, ni + 1, _TSUNAMI_NLEV), dtype=jnp.float64)),
+        v=state.v.replace(data=jnp.zeros((nj + 1, ni, _TSUNAMI_NLEV), dtype=jnp.float64)),
+        eta=state.eta.replace(data=jnp.asarray(ssh, dtype=jnp.float64)),
+        uu_b=state.uu_b.replace(data=jnp.zeros((nj, ni + 1), dtype=jnp.float64)),
+        vv_b=state.vv_b.replace(data=jnp.zeros((nj + 1, ni), dtype=jnp.float64)),
+    )
+    n_e = _resolved_auto_substeps(grid, np.asarray(wet) * _TSUNAMI_H_M, nl.rn_Dt_s)
+    if n_e != nl.nn_e_resolved:
+        raise ValueError(
+            f"TSUNAMI ln_bt_auto resolves nn_e = {n_e}, card states "
+            f"{nl.nn_e_resolved}")
+    # Carrier: the shared VORTEX flux-form EEN RK3 identity (the same stage
+    # program, EEN dyn_vor/dyn_cor_2D, hpg_sco, zdfcst) with advection OFF.
+    base = _model_config(
+        barotropic_time_filter="nemo_boxcar1_ab3",   # nn_bt_flt = 1, ln_bt_fw = T
+        n_barotropic_substeps=nl.nn_e_resolved,
+        bbl_adv_option=0, bbl_gamma_s=0.0,
+        bbl_diffusive_option=0, bbl_aht_m2_s=0.0,
+        whole_step_identity="vortex_flux_up3_een",
+        tke_langmuir_evaluation=None,
+    )
+    model_config = base._replace(
+        # DECISION 101: stp_2D's eos takes the live depth
+        # gdept_1d*(1+r3t) (eosbn2.f90:361; stp2d.f90:137), and rn_mu1/mu2
+        # are nonzero here, unlike VORTEX.
+        eos="nemo_seos", eos_nemo_seos=_TSUNAMI_SEOS, eos_depth="geometric",
+        adaptive_implicit_vertadv=nl.ln_zad_Aimp,
+        # ln_dynadv_OFF -> np_LIN_dyn (dynadv.f90:185): no dyn_adv in stp_2D
+        # (stp2d.f90:176) or at any stage (stprk3_stg.f90:316, :334).
+        momentum_flux_scheme="none", vertical_momentum_scheme="none",
+        # ln_traadv_OFF -> np_NO_adv (traadv.f90:444): T/S only take the
+        # (1+r3t) ratio at stages 1-2 (stprk3_stg.f90:503-505).
+        tracer_advection="none",
+        K_h=0.0,                                  # ln_traldf_OFF
+        A_v=nl.rn_avm0_m2_s, K_v=nl.rn_avt0_m2_s,  # ln_zdfcst, namelist_ref
+        lateral_viscosity=base.lateral_viscosity._replace(A_h=0.0),  # ln_dynldf_OFF
+        bottom_drag=base.bottom_drag._replace(bottom_drag_r=0.0),    # ln_drg_OFF
+        # ln_Jperio (namelist_cfg:29): the step traces inside the y-wrap.
+        meridionally_periodic=nl.ln_Jperio,
+    )
+    recipe = NEMORecipe(
+        model_config=model_config,
+        physics_config=model_config.physics,
+        grid=grid, z_coord=z_coord, land_mask=wet, initial_state=state,
+    )
+    card = NEMOTestcaseCard(
+        "TSUNAMI-zco", recipe, nl.rn_Dt_s, nl.nn_itend, 1, 0, 0, 0.0, 0.0,
+        unmeasured_features=TSUNAMI_UNMEASURED,
+        j_periodic=nl.ln_Jperio,
+    )
+    validate_nemo_testcase_card(card)
+    return card
+
+
+def _validate_tsunami_card(card: NEMOTestcaseCard) -> None:
+    """TSUNAMI's own validator branch; refuses any drift from the deck."""
+    nl = TSUNAMI_NAMELIST
+    cfg = card.recipe.model_config
+    if card.unmeasured_features != TSUNAMI_UNMEASURED:
+        raise ValueError("TSUNAMI-zco must declare exactly TSUNAMI_UNMEASURED")
+    if card.j_periodic is not nl.ln_Jperio:
+        raise ValueError("TSUNAMI-zco j_periodic must be the deck's ln_Jperio")
+    if not (nl.key_RK3 and nl.n_baro_upd == "np_HYB" and not nl.ln_dynadv_vec
+            and not nl.ln_shuman):
+        raise ValueError("TSUNAMI-zco transcribes the RK3 HYB flux-form stages")
+    on = [k for k in _TSUNAMI_ABSENT_SPG_TERMS if getattr(nl, k)]
+    if on:
+        raise ValueError(f"TSUNAMI-zco carries no term for {on}")
+    if (card.dt_s, card.n_steps) != (nl.rn_Dt_s, nl.nn_itend):
+        raise ValueError("TSUNAMI-zco rn_Dt/nn_itend disagree with the deck")
+    if (card.recipe.initial_state.uu_b is None
+            or card.recipe.initial_state.vv_b is None):
+        raise ValueError("TSUNAMI-zco requires the prognostic uu_b/vv_b pair")
+    got = (cfg.barotropic.barotropic_time_filter,
+           cfg.barotropic.n_barotropic_substeps)
+    if got != ("nemo_boxcar1_ab3", nl.nn_e_resolved):
+        raise ValueError(f"TSUNAMI-zco barotropic filter/substeps {got!r}")
+    if cfg.eos != "nemo_seos" or cfg.eos_nemo_seos != _TSUNAMI_SEOS:
+        raise ValueError("TSUNAMI-zco requires namelist_ref's S-EOS set")
+    if (cfg.lateral_viscosity.A_h, cfg.K_h,
+            cfg.bottom_drag.bottom_drag_r) != (0.0, 0.0, 0.0):
+        raise ValueError("TSUNAMI-zco has no lateral mixing and no drag")
+    if (cfg.A_v, cfg.K_v) != (nl.rn_avm0_m2_s, nl.rn_avt0_m2_s):
+        raise ValueError("TSUNAMI-zco zdfcst coefficients disagree")
+    if cfg.adaptive_implicit_vertadv:
+        raise ValueError("TSUNAMI-zco resolves ln_zad_Aimp = .false.")
+    if cfg.eos_depth != "geometric":
+        raise ValueError("TSUNAMI-zco eos takes the live depth (DECISION 101)")
+    got = (cfg.momentum_advection, cfg.momentum_flux_scheme,
+           cfg.vertical_momentum_scheme, cfg.tracer_advection)
+    if got != ("flux_form", "none", "none", "none"):
+        raise ValueError(
+            f"TSUNAMI-zco runs ln_dynadv_OFF and ln_traadv_OFF; got {got!r}")
+    if cfg.barotropic.barotropic_coriolis != "een_metric":
+        raise ValueError("TSUNAMI-zco requires the EEN barotropic Coriolis")
+    if not np.all(np.asarray(card.recipe.land_mask) == 1.0):
+        raise ValueError("TSUNAMI-zco is fully wet (usrdef_zgr.F90:187-189)")
+    f0 = tsunami_horizontal_coordinates()["f0"]
+    for name in ("f_T", "f_u", "f_v", "ff_f"):
+        if not np.all(np.asarray(getattr(card.recipe.grid, name)) == f0):
+            raise ValueError(f"TSUNAMI-zco {name} is not the f-plane f0")
+
+
 def validate_nemo_testcase_card(card: NEMOTestcaseCard) -> None:
     """Reject any card composition not exercised by its named oracle run."""
     if card.transcendentals != "libm":
@@ -2861,6 +3256,13 @@ def validate_nemo_testcase_card(card: NEMOTestcaseCard) -> None:
             f"{card.case} requires scalar-libm certification transcendentals, "
             f"got {card.transcendentals!r}"
         )
+    if card.recipe.model_config.meridionally_periodic is not card.j_periodic:
+        raise ValueError(
+            f"{card.case}: model_config.meridionally_periodic must equal the "
+            f"card's j_periodic ({card.j_periodic})")
+    if card.case == "TSUNAMI-zco":
+        _validate_tsunami_card(card)
+        return
     expected = {
         "LOCK_EXCHANGE-zco": ("nemo_ab3am4", 1, 0, 0.0, 0, 0.0),
         "OVERFLOW-zps": ("nemo_boxcar1_ab3", 3, 2, 20.0, 0, 1000.0),
@@ -3372,6 +3774,12 @@ __all__ = (
     "build_orca2_zps_card",
     "build_vortex_zco_card",
     "build_vortex_smt_zps_card",
+    "build_tsunami_zco_card",
+    "tsunami_horizontal_coordinates",
+    "tsunami_initial_ssh",
+    "TSUNAMI_NAMELIST",
+    "TSUNAMI_DEVIATIONS",
+    "TSUNAMI_UNMEASURED",
     "vortex_smt_bathymetry",
     "vortex_smt_partial_cell_geometry",
     "validate_vortex_resolution",

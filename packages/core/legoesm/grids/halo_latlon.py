@@ -27,6 +27,9 @@ no separate operator entry points per backend.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+from contextvars import ContextVar
+
 import jax.numpy as jnp
 
 # --- Meridionally-periodic (y-re-entrant channel) mode -----------------------
@@ -39,8 +42,11 @@ import jax.numpy as jnp
 # x–z cases (internal_tide #576) whose barotropic Rossby radius spans the basin,
 # so a closed basin geostrophically adjusts instead of oscillating freely.
 # Mirrors the ``_halo_backend`` global-state pattern (accessor, never import the
-# global directly).
-_MERIDIONALLY_PERIODIC = False
+# global directly).  A ContextVar, not a module bool, so a scope set in one
+# thread never leaks into a trace running in another; the latlon ocean model
+# scopes it to ``config.meridionally_periodic`` at every public entry point.
+_MERIDIONALLY_PERIODIC: ContextVar[bool] = ContextVar(
+    "meridionally_periodic", default=False)
 
 
 def set_meridionally_periodic(enabled: bool) -> None:
@@ -50,13 +56,22 @@ def set_meridionally_periodic(enabled: bool) -> None:
     (a periodic-y band exchange is a follow-up).  Default OFF = bit-identical
     closed-basin BC.
     """
-    global _MERIDIONALLY_PERIODIC
-    _MERIDIONALLY_PERIODIC = bool(enabled)
+    _MERIDIONALLY_PERIODIC.set(bool(enabled))
 
 
 def get_meridionally_periodic() -> bool:
     """Return whether the meridionally-periodic boundary mode is active."""
-    return _MERIDIONALLY_PERIODIC
+    return _MERIDIONALLY_PERIODIC.get()
+
+
+@contextmanager
+def meridional_periodicity(enabled: bool):
+    """Scope the y-wrap mode to a block (trace inside it); restores on exit."""
+    token = _MERIDIONALLY_PERIODIC.set(bool(enabled))
+    try:
+        yield
+    finally:
+        _MERIDIONALLY_PERIODIC.reset(token)
 
 
 # --- Meridionally-FLAT (Oceananigans `Flat`-y topology) mode ------------------
@@ -81,6 +96,45 @@ def set_meridionally_flat(enabled: bool) -> None:
 def get_meridionally_flat() -> bool:
     """Return whether the meridionally-flat (`Flat`-y) mode is active."""
     return _MERIDIONALLY_FLAT
+
+
+def _ywrap_pad(value: jnp.ndarray) -> jnp.ndarray:
+    """One wrap row each side; the y-wrap is local-backend only."""
+    from legoesm.grids.halo import get_halo_backend
+    if get_halo_backend() == "mpi" or _spmd_lat_mesh() is not None:
+        raise NotImplementedError(
+            "meridional_periodicity: the j-neighbour helpers have no MPI/SPMD "
+            "band exchange; refuse rather than wall the seam")
+    return pad_with_pole_bc_lat(value, 1)
+
+
+def lat_north(value: jnp.ndarray) -> jnp.ndarray:
+    """``value[j+1]`` along axis 0: the wrapped row under the y-wrap (NEMO
+    ``jpfillperio``, lbclnk.f90:2033), else zero (the closed north wall)."""
+    if _MERIDIONALLY_PERIODIC.get():
+        return _ywrap_pad(value)[2:]
+    return jnp.concatenate([value[1:], jnp.zeros_like(value[:1])], axis=0)
+
+
+def lat_south(value: jnp.ndarray) -> jnp.ndarray:
+    """``value[j-1]`` along axis 0: the wrapped row under the y-wrap (NEMO
+    ``jpfillperio``, lbclnk.f90:2028), else zero (the closed south wall)."""
+    if _MERIDIONALLY_PERIODIC.get():
+        return _ywrap_pad(value)[:-2]
+    return jnp.concatenate([jnp.zeros_like(value[:1]), value[:-1]], axis=0)
+
+
+def lat_faces_from_north(native: jnp.ndarray, south=None) -> jnp.ndarray:
+    """NEMO native north-face rows (n) -> legoESM south-to-north faces (n+1).
+
+    Face 0 is the south seam face: under the y-wrap it is the last native
+    row (lbclnk.f90:2028, a plain copy, no sign), else ``south`` (zeros when
+    None, the closed wall).
+    """
+    if _MERIDIONALLY_PERIODIC.get():
+        return _ywrap_pad(native)[:-1]
+    first = jnp.zeros_like(native[:1]) if south is None else south
+    return jnp.concatenate([first, native], axis=0)
 
 
 def fold_pole_rows(
@@ -462,7 +516,7 @@ def zero_polar_lat_ends(field: jnp.ndarray) -> jnp.ndarray:
     # Meridionally-periodic (y-re-entrant) mode: the lat-axis WRAPS, so the
     # boundary v-faces are genuine periodic interfaces, not walls — do NOT zero
     # them.  Local backend only (the MPI/SPMD band paths below still wall).
-    if _MERIDIONALLY_PERIODIC:
+    if _MERIDIONALLY_PERIODIC.get():
         from legoesm.grids.halo import get_halo_backend
         if get_halo_backend() != "mpi" and _spmd_lat_mesh() is None:
             return field
@@ -577,7 +631,7 @@ def pad_with_pole_bc_lat(
     # MPI/SPMD band paths below keep the wall constant; periodic-y band exchange
     # is a follow-up).  No vector sign flip: a y-periodic f-plane channel has no
     # pole fold.
-    if _MERIDIONALLY_PERIODIC:
+    if _MERIDIONALLY_PERIODIC.get():
         from legoesm.grids.halo import get_halo_backend
         if get_halo_backend() != "mpi" and _spmd_lat_mesh() is None:
             return jnp.pad(interior, pad_widths, mode="wrap")

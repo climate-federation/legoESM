@@ -1,0 +1,125 @@
+--- stprk3.F90
++++ stprk3.F90
+@@ -22,6 +22,7 @@
+    USE domqco         ! quasi-eulerian coordinate      (dom_qco_r3c routine)
+    USE stprk3_stg     ! RK3 stages
+    USE stp2d          ! external mode solver
++   USE tsunami_r1_step_record   ! lane round 2: read-only RK3 step record
+ 
+    IMPLICIT NONE
+    PRIVATE
+@@ -91,6 +92,24 @@
+ 
+       IF( kstp /= nit000 )   CALL day( kstp )         ! Calendar (day was already called at nit000 in day_init)
+                              CALL iom_setkt( kstp - nit000 + 1,      cxios_context          )   ! tell IOM we are at time step kstp
++      !                                   !== lane round 2: read-only RK3 step record ==!
++      CALL tsu_open( kstp, Nbb, Nnn, Naa, Nrhs, jpi, jpj, jpk, Nis0, Njs0, Nie0, Nje0 )
++      IF( kstp <= nit000 + 9 ) THEN
++         CALL tsu_frame( 'e' )
++         CALL tsu_w2( 'ssh_bb', ssh(:,:,Nbb) )
++         CALL tsu_w2( 'ssh_nn', ssh(:,:,Nnn) )
++         CALL tsu_w2( 'ssh_aa', ssh(:,:,Naa) )
++         CALL tsu_w2( 'uu_b_bb', uu_b(:,:,Nbb) )
++         CALL tsu_w2( 'vv_b_bb', vv_b(:,:,Nbb) )
++         CALL tsu_w2( 'r3t_bb', r3t(:,:,Nbb) )
++         CALL tsu_w2( 'r3u_bb', r3u(:,:,Nbb) )
++         CALL tsu_w2( 'r3v_bb', r3v(:,:,Nbb) )
++         CALL tsu_w2( 'r3f', r3f(:,:) )
++         CALL tsu_w2( 'uu_k1_bb', uu(:,:,1,Nbb) )
++         CALL tsu_w2( 'vv_k1_bb', vv(:,:,1,Nbb) )
++         CALL tsu_w2( 'tn_k1_bb', ts(:,:,1,jp_tem,Nbb) )
++         CALL tsu_w2( 'sn_k1_bb', ts(:,:,1,jp_sal,Nbb) )
++      ENDIF
+ 
+       !>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+       ! Update external forcing (tides, open boundaries, ice shelf interaction and surface boundary condition (including sea-ice)
+@@ -105,28 +124,89 @@
+       !  RK3 : single first external mode computation
+       !<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+       CALL stp_2D( kstp, Nbb, Nbb, Naa, Nrhs )         ! out: ssh, (uu_b,vv_b) at Naa and (un_adv,vn_adv) between Nbb and Naa
++      IF( kstp <= nit000 + 9 ) THEN
++         CALL tsu_frame( 'b' )
++         CALL tsu_w2( 'ssh_aa', ssh(:,:,Naa) )
++         CALL tsu_w2( 'uu_b_aa', uu_b(:,:,Naa) )
++         CALL tsu_w2( 'vv_b_aa', vv_b(:,:,Naa) )
++         CALL tsu_w2( 'r3t_aa', r3t(:,:,Naa) )
++         CALL tsu_w2( 'un_adv', un_adv(:,:) )
++         CALL tsu_w2( 'vn_adv', vn_adv(:,:) )
++         CALL tsu_w2( 'uu_rhs_k1', uu(:,:,1,Nrhs) )
++         CALL tsu_w2( 'vv_rhs_k1', vv(:,:,1,Nrhs) )
++      ENDIF
+       !>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+       !  RK3 time integration
+       !<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+       !
+       ! Stage 1 :
+       CALL stp_RK3_stg( 1, kstp, Nbb, Nbb, Nrhs, Naa )
++      IF( kstp <= nit000 + 9 ) THEN
++         CALL tsu_frame( '1' )
++         CALL tsu_w2( 'ssh_aa', ssh(:,:,Naa) )
++         CALL tsu_w2( 'uu_b_aa', uu_b(:,:,Naa) )
++         CALL tsu_w2( 'vv_b_aa', vv_b(:,:,Naa) )
++         CALL tsu_w2( 'uu_k1_aa', uu(:,:,1,Naa) )
++         CALL tsu_w2( 'vv_k1_aa', vv(:,:,1,Naa) )
++         CALL tsu_w2( 'tn_k1_aa', ts(:,:,1,jp_tem,Naa) )
++         CALL tsu_w2( 'sn_k1_aa', ts(:,:,1,jp_sal,Naa) )
++         CALL tsu_w2( 'r3t_aa', r3t(:,:,Naa) )
++         CALL tsu_w2( 'r3u_aa', r3u(:,:,Naa) )
++         CALL tsu_w2( 'r3v_aa', r3v(:,:,Naa) )
++         CALL tsu_w2( 'r3f', r3f(:,:) )
++      ENDIF
+       !
+       Nrhs = Nnn   ;   Nnn  = Naa   ;   Naa  = Nrhs    ! Swap: Nbb unchanged, Nnn <==> Naa
+       !
+       ! Stage 2 :
+       CALL stp_RK3_stg( 2, kstp, Nbb, Nnn, Nrhs, Naa )
++      IF( kstp <= nit000 + 9 ) THEN
++         CALL tsu_frame( '2' )
++         CALL tsu_w2( 'ssh_aa', ssh(:,:,Naa) )
++         CALL tsu_w2( 'uu_b_aa', uu_b(:,:,Naa) )
++         CALL tsu_w2( 'vv_b_aa', vv_b(:,:,Naa) )
++         CALL tsu_w2( 'uu_k1_aa', uu(:,:,1,Naa) )
++         CALL tsu_w2( 'vv_k1_aa', vv(:,:,1,Naa) )
++         CALL tsu_w2( 'tn_k1_aa', ts(:,:,1,jp_tem,Naa) )
++         CALL tsu_w2( 'sn_k1_aa', ts(:,:,1,jp_sal,Naa) )
++         CALL tsu_w2( 'r3t_aa', r3t(:,:,Naa) )
++         CALL tsu_w2( 'r3u_aa', r3u(:,:,Naa) )
++         CALL tsu_w2( 'r3v_aa', r3v(:,:,Naa) )
++         CALL tsu_w2( 'r3f', r3f(:,:) )
++      ENDIF
+       !
+       Nrhs = Nnn   ;   Nnn  = Naa   ;   Naa  = Nrhs    ! Swap: Nbb unchanged, Nnn <==> Naa
+       !
+       ! Stage 3 :
+       CALL stp_RK3_stg( 3, kstp, Nbb, Nnn, Nrhs, Naa )
++      IF( kstp <= nit000 + 9 ) THEN
++         CALL tsu_frame( '3' )
++         CALL tsu_w2( 'ssh_aa', ssh(:,:,Naa) )
++         CALL tsu_w2( 'uu_b_aa', uu_b(:,:,Naa) )
++         CALL tsu_w2( 'vv_b_aa', vv_b(:,:,Naa) )
++         CALL tsu_w2( 'uu_k1_aa', uu(:,:,1,Naa) )
++         CALL tsu_w2( 'vv_k1_aa', vv(:,:,1,Naa) )
++         CALL tsu_w2( 'tn_k1_aa', ts(:,:,1,jp_tem,Naa) )
++         CALL tsu_w2( 'sn_k1_aa', ts(:,:,1,jp_sal,Naa) )
++         CALL tsu_w2( 'r3t_aa', r3t(:,:,Naa) )
++         CALL tsu_w2( 'r3u_aa', r3u(:,:,Naa) )
++         CALL tsu_w2( 'r3v_aa', r3v(:,:,Naa) )
++         CALL tsu_w2( 'r3f', r3f(:,:) )
++      ENDIF
+       !
+       Nrhs = Nbb   ;   Nbb  = Naa   ;   Naa  = Nrhs    ! Swap: Nnn unchanged, Nbb <==> Naa
+ 
+       ! linear extrapolation of ssh to compute ww at the beginning of the next time-step
+       ! ssh(n+1) = 2*ssh(n) - ssh(n-1)    
+       ssh(:,:,Naa) = 2*ssh(:,:,Nbb) - ssh(:,:,Naa)
++      CALL tsu_frame( 'f' )
++      CALL tsu_w2( 'ssh_bb', ssh(:,:,Nbb) )
++      CALL tsu_w2( 'uu_b_bb', uu_b(:,:,Nbb) )
++      CALL tsu_w2( 'vv_b_bb', vv_b(:,:,Nbb) )
++      CALL tsu_w2( 'uu_k1_bb', uu(:,:,1,Nbb) )
++      CALL tsu_w2( 'vv_k1_bb', vv(:,:,1,Nbb) )
++      CALL tsu_w2( 'ssh_aa', ssh(:,:,Naa) )
++      CALL tsu_close( kstp )
+       !!st: ssh recomputed at the begining of stp2d
+ 
+       !>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
