@@ -92,6 +92,8 @@ _ORCA2_R210OMT1_COMPILED = (
     NEMO / "cfgs/ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo")
 _ORCA2_R213VECPRE_COMPILED = (
     NEMO / "cfgs/ORCA2_OMIP_L4_R213VECPRE/BLD/ppsrc/nemo")
+_ORCA2_R214VECPREV3_COMPILED = (
+    NEMO / "cfgs/ORCA2_OMIP_L4_R214VECPREV3/BLD/ppsrc/nemo")
 _ORCA2_R104EENACC_COMPILED = (
     NEMO / "cfgs/ORCA2_OMIP_L4_R104EENACC/BLD/ppsrc/nemo")
 _ORCA2_R105EENACC_COMPILED = (
@@ -194,6 +196,10 @@ FILES = {
         _ORCA2_R213VECPRE_COMPILED / "stp2d.f90"),
     "ORCA2_OMIP_L4_R213VECPRE/BLD/ppsrc/nemo/dynspg_ts.f90": (
         _ORCA2_R213VECPRE_COMPILED / "dynspg_ts.f90"),
+    "ORCA2_OMIP_L4_R214VECPREV3/BLD/ppsrc/nemo/dynspg_ts.f90": (
+        _ORCA2_R214VECPREV3_COMPILED / "dynspg_ts.f90"),
+    "ORCA2_OMIP_L4_R214VECPREV3/BLD/ppsrc/nemo/lbcnfd.f90": (
+        _ORCA2_R214VECPREV3_COMPILED / "lbcnfd.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynadv.f90": (
         _ORCA2_COMPILED / "dynadv.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/ldfdyn.f90": (
@@ -2381,6 +2387,17 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4_R213VECPRE/BLD/ppsrc/nemo/dynspg_ts.f90:714-726': [
         "r213_magic = 'NEMO_L4_R213VV1'",
         'WRITE(r213_unit) va_e', 13],
+    # --- ORCA2 round 215: vector update and T-pivot association -----------
+    'ORCA2_OMIP_L4_R214VECPREV3/BLD/ppsrc/nemo/dynspg_ts.f90:669-682': [
+        'IF( ln_dynadv_vec .OR. lk_linssh ) THEN      !* Vector form',
+        ('END DO   ;   END DO', 13), 14],
+    'ORCA2_OMIP_L4_R214VECPREV3/BLD/ppsrc/nemo/dynspg_ts.f90:747-756': [
+        'IF( .NOT.lk_linssh ) THEN   !* Update ocean depth (variable volume case only)',
+        ("&                   , hur_e, 'U',  1._wp, hvr_e, 'V',  1._wp  , ssha_e, 'T', 1._wp, ldfull=.TRUE. )", 9),
+        10],
+    'ORCA2_OMIP_L4_R214VECPREV3/BLD/ppsrc/nemo/lbcnfd.f90:684-718': [
+        "CASE ( 'V' )                               ! V-point",
+        ('END DO', 34), 35],
     # --- ORCA2 round 189: bounded replacement restart list ---
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/in_out_manager.f90:51-51':
         'INTEGER, DIMENSION(10) :: nn_stocklist',
