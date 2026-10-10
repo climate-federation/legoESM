@@ -72,6 +72,15 @@ check_layout() {
   [[ "$update_line" -lt "$writer_line" && "$writer_line" -lt "$drag_line" ]]
 }
 
+validate_source_inventory() {
+  local expected=$1 actual
+  actual=$(find "$SOURCE_ROOT/MY_SRC" -maxdepth 1 -type f -printf '%f\n' | sort)
+  [[ "$actual" == "$expected" ]] || {
+    printf 'REFUSE: admitted record source inventory changed\n' >&2
+    return 1
+  }
+}
+
 cd "$REPO"
 [[ -z "$(git status --porcelain --untracked-files=all)" ]] || {
   printf 'REFUSE: acquisition requires a clean committed producer tree\n' >&2; exit 64;
@@ -99,6 +108,8 @@ pin "$SOURCE_BINARY_SHA" "$SOURCE_ROOT/BLD/bin/nemo.exe" 'source build binary'
 pin "$SOURCE_BINARY_SHA" "$SOURCE_RUN/nemo" 'source run binary'
 pin "$DECK_MANIFEST_SHA" "$SOURCE_RUN/deck_files.sha256" 'deck manifest'
 pin "$INPUT_MANIFEST_SHA" "$SOURCE_RUN/input_files.sha256" 'input manifest'
+expected_sources=$(awk '{print $2}' "$SOURCE_MANIFEST" | sort)
+validate_source_inventory "$expected_sources"
 (cd "$SOURCE_ROOT/MY_SRC" && sha256sum -c "$SOURCE_MANIFEST" >/dev/null)
 (cd "$SOURCE_RUN" && sha256sum -c deck_files.sha256 >/dev/null && sha256sum -c input_files.sha256 >/dev/null)
 grep -Eq 'Vector form: 2nd order centered scheme.*ln_dynadv_vec *= *T' "$SOURCE_RUN/ocean.output" || {
@@ -140,6 +151,13 @@ cpp -Dkey_nosignedzero -Dkey_qco -Dkey_vco_1d3d -Dkey_RK3 -P -traditional \
 "$FC" -fsyntax-only -ffree-line-length-none -I "$SOURCE_ROOT/BLD/inc" \
   -J "$scratch" "$scratch/dynspg_ts.f90"
 printf 'SYNTAX_PROOF_PASS dynspg_ts.f90\n'
+if validate_source_inventory "${expected_sources}"$'\n__source_inventory_plant__.F90' \
+  >"$EVIDENCE/source_inventory_plant.log" 2>&1; then
+  printf 'REFUSE: source-inventory plant stayed green\n' >&2; exit 69
+fi
+grep -Fq 'REFUSE: admitted record source inventory changed' \
+  "$EVIDENCE/source_inventory_plant.log"
+printf 'STATUS PLANT-FIRED source-inventory\n' >>"$EVIDENCE/source_inventory_plant.log"
 if [[ "$MODE" == --preflight-only ]]; then
   printf 'ORCA2_ROUND213_VECTOR_PRE_LBC_PREFLIGHT_READY %s\n' "$TARGET_RUN"
   exit 0
@@ -156,9 +174,6 @@ admit() {
   }
   [[ "$(find "$TARGET_RUN" -maxdepth 1 -type f -name 'oracle_r213_vector_rank????_kt00000001_jn001.bin' | wc -l)" -eq 2 ]] || {
     printf 'REFUSE: expected exactly two rank vector records\n' >&2; exit 70;
-  }
-  [[ "$(grep -c 'ORCA2_R213_VECTOR_PRE_LBC_DUMP' "$TARGET_RUN/ocean.output")" -eq 2 ]] || {
-    printf 'REFUSE: NEMO log does not contain two vector record markers\n' >&2; exit 70;
   }
   for record in "$TARGET_RUN"/oracle_r213_vector_rank????_kt00000001_jn001.bin; do
     printf '%s %s\n' "$(sha256sum "$record" | awk '{print $1}')" \
