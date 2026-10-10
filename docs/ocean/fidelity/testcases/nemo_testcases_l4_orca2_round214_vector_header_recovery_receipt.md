@@ -1,8 +1,8 @@
 # ORCA2 round 214 — OMT-1 vector-record header recovery
 
 Date: 2026-10-09. Base: `8460116cc`. Preregistration commit:
-`be7a93b34`. Checker commit: `933103565`. Recovery acquisition commit:
-`b88a73a1c`. Status: **STOPPED_FOR_RECORD**. Evidence root:
+`be7a93b34`. Checker commit: `933103565`. Recovery acquisition commits:
+`b88a73a1c`, `13e88b954`. Status: **STOPPED_FOR_RECORD**. Evidence root:
 `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round214/`.
 No trajectory number is reported. Future numbers remain separately labelled
 **independent OMT-1** and **given NEMO's entry OMT-1**.
@@ -58,7 +58,8 @@ check is clean.
 - Existing-record refusal log SHA256:
   `539fcee8f9c8a945c47ab5106073c6b7b299e6b4089e32c09cef7f741f27d001`.
 - Recovery preflight log SHA256:
-  `0398b7d205c0c425317e7b5830daf57ac4298c570da2b83bdeedfa0eeab02748`.
+  `2ffde9fb1951aad702a4b7cd1b3326fb155b7d04db0a707ba6c92d5fa8379354`
+  (fresh V3 target).
 - The focused parser/citation battery passes 12/12; the bad-level, bad-dimension,
   truncation, malformed-header/name/rank/non-finite, frame-byte, and
   restart-byte controls are non-vacuous.
