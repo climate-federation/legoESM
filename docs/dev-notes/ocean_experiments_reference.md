@@ -715,6 +715,67 @@ z-star, 10 levels, H_max = 5500 m.
 
 ---
 
+## 10b. BENCH Performance Benchmark (`bench`)
+
+**Status:** implemented (branch `bench/ocean-bench`, 2026-10-10); see
+`docs/ocean/experiments/bench_plan.md` for the full provenance
+(Irrmann et al. 2022, GMD 15, 1567-1582, Sect. 2.2 + NEMO `tests/BENCH`).
+
+### Purpose
+
+Performance benchmarking ONLY — results are physically meaningless by
+design. Zero input files (grid, bathymetry, ICs, forcing all analytic);
+every grid point carries a unique value (per-point `z2d` ramp, NEMO
+`usrdef_istate.F90:44-54` ported verbatim) so halo/sharding bugs are
+detectable in the fields. Runs the production-like
+`legoesm_nemo_like_v1` recipe + TKE vertical mixing, so the measured
+step cost is the production cost.
+
+### Vertical Grid
+
+Uniform z* levels, `dz = H_max / nlev`, flat bottom H_max = 5000 m,
+75 levels in the presets (NEMO BENCH `usrdef_zgr.F90:139-165`).
+
+### Initialization
+
+| Field | Formula (NEMO port) | Range |
+|---|---|---|
+| T | `10 + 20*z2d - 4*f` (f = k/(nlev-1)) | ~6-10 ± 1 °C |
+| S | `34 + f + z2d` | ~34-35 ± 0.1 psu |
+| u | `0.1 * z2d` | ± 0.01 m/s |
+| v | `0.01 * z2d` | ± 0.001 m/s |
+| eta | `0.1 * (0.5 - p)` (p = point index) | ± 0.05 m |
+
+Light stable stratification (T down, S up with depth); per-point ramp
+amplitudes verbatim from NEMO; backgrounds temperate (divergence: no
+SI3, so NEMO's near-freezing targets are inapplicable).
+
+### Forcing
+
+None (NEMO `usrdef_sbc.F90`: all surface fluxes zero).
+
+### Expected Behavior
+
+Stability only, gated by pre-registered gates: finite fields,
+max speed < 1 m/s, max |eta| < 1 m (planted-violation controls in
+`test_bench.py` prove the gates fire). Preset dt values are measured
+stability boundaries (36×72×20 unstable at dt=3600 s, stable at
+dt<=1800 s; probes 2026-10-10).
+
+### What This Tests
+
+The production step cost on global-size grids without any data
+dependency: JIT-compile time, steady per-step wall time, SYPD,
+Mcells/s; and the north-fold communication pattern via the synthetic
+tripole lane (`run_bench.py --grid tripole`).
+
+### Duration
+
+Arbitrary (benchmarks count steps; NEMO default `nn_itend = 1000`).
+Matrix lane: 0.5 days.
+
+---
+
 ## Cross-Experiment Summary
 
 ### Grid Coverage Matrix

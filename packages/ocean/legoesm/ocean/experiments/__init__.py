@@ -71,6 +71,7 @@ from . import munk_gyre
 from . import held_larichev
 from . import neverworld2_lite
 from . import isomip_plus
+from . import bench
 from .recipe_map import (
     EXPERIMENT_RECIPES,
     recipe_for,
@@ -101,6 +102,7 @@ AVAILABLE_EXPERIMENTS = {
     "held_larichev": held_larichev.EXPERIMENT_CONFIG,
     "neverworld2_lite": neverworld2_lite.EXPERIMENT_CONFIG,
     "isomip_plus": isomip_plus.EXPERIMENT_CONFIG,
+    "bench": bench.EXPERIMENT_CONFIG,
 }
 
 __all__ = [
@@ -125,6 +127,7 @@ __all__ = [
     "held_larichev",
     "neverworld2_lite",
     "isomip_plus",
+    "bench",
     "AVAILABLE_EXPERIMENTS",
     "EXPERIMENT_RECIPES",
     "recipe_for",
