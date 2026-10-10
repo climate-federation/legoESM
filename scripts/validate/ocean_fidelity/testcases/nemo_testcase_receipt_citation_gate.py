@@ -204,6 +204,10 @@ FILES = {
         _ORCA2_R210OMT1_COMPILED / "stprk3_stg.f90"),
     "ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/traadv.f90": (
         _ORCA2_R210OMT1_COMPILED / "traadv.f90"),
+    "ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/traadv_cen.f90": (
+        _ORCA2_R210OMT1_COMPILED / "traadv_cen.f90"),
+    "ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/traadv_fct.f90": (
+        _ORCA2_R210OMT1_COMPILED / "traadv_fct.f90"),
     "ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/restart.f90": (
         _ORCA2_R210OMT1_COMPILED / "restart.f90"),
     "ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/daymod.f90": (
