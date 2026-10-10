@@ -129,7 +129,7 @@ def _literal_fold_correction(
     new_flux = sr(sr(0.5 * p_v) * nemo_sum)
     delta_flux = sr(new_flux - old_flux)
     area = np.asarray(card.recipe.grid.area_T[-1], np.float64)[:, None]
-    h_after = r228._quantities(card, stage)["e3t"][-1, :, :-1]
+    h_after = r228._quantities(card, stage)["e3t"][-1]
     delta = sr(-(card.dt_s / 3.0) * sr(delta_flux / area) / h_after)
     return delta
 
@@ -206,26 +206,28 @@ def measure(deck_root: Path, frame_root: Path, operand_root: Path,
     candidate_t_sum = np.asarray(
         interp_to_v_points(state_t, card.recipe.grid, nemo_source_sum=True)[-1],
         np.float64,
-    )[..., :-1]
+    )
     candidate_s_sum = np.asarray(
         interp_to_v_points(state_s, card.recipe.grid, nemo_source_sum=True)[-1],
         np.float64,
-    )[..., :-1]
-    nemo_t_halo = record["T_Kmm_north_halo"]
-    nemo_s_halo = record["S_Kmm_north_halo"]
+    )
+    # The NEMO record retains its closed jpk level; legoESM stores only the
+    # jpkm1 prognostic levels that these stage statements execute.
+    nemo_t_halo = record["T_Kmm_north_halo"][..., :-1]
+    nemo_s_halo = record["S_Kmm_north_halo"][..., :-1]
     if plant == "halo-bit":
         nemo_t_halo = nemo_t_halo.copy()
         nemo_t_halo[0, 0] = np.nextafter(nemo_t_halo[0, 0], np.inf)
     nemo_t_sum = np.asarray(
-        nemo_source_round(record["T_Kmm"][-1] + nemo_t_halo))[..., :-1]
+        nemo_source_round(record["T_Kmm"][-1, :, :-1] + nemo_t_halo))
     nemo_s_sum = np.asarray(
-        nemo_source_round(record["S_Kmm"][-1] + nemo_s_halo))[..., :-1]
+        nemo_source_round(record["S_Kmm"][-1, :, :-1] + nemo_s_halo))
 
     corrected_t = np.asarray(stage.T.data, np.float64).copy()
     corrected_s = np.asarray(stage.S.data, np.float64).copy()
-    corrected_t[-1, :, :-1] += _literal_fold_correction(
+    corrected_t[-1] += _literal_fold_correction(
         card, stage, candidate_zfv, candidate_t_sum, nemo_t_sum, plant=plant)
-    corrected_s[-1, :, :-1] += _literal_fold_correction(
+    corrected_s[-1] += _literal_fold_correction(
         card, stage, candidate_zfv, candidate_s_sum, nemo_s_sum, plant=plant)
     oracle_t = np.asarray(oracle_stage.T.data, np.float64)
     oracle_s = np.asarray(oracle_stage.S.data, np.float64)
@@ -238,18 +240,26 @@ def measure(deck_root: Path, frame_root: Path, operand_root: Path,
         "passivity": passivity,
         "transport": transport,
         "entry_owned": {
-            "T": _exact(state_t, record["T_Kmm"]),
-            "S": _exact(state_s, record["S_Kmm"]),
-            "e3t": _exact(r228._quantities(card, state)["e3t"], record["e3t_Kmm"]),
-            "tmask": _exact(np.asarray(card.recipe.z_coord.is_active), record["tmask"]),
+            "T": _exact(state_t, record["T_Kmm"][..., :-1]),
+            "S": _exact(state_s, record["S_Kmm"][..., :-1]),
+            "e3t": _exact(
+                r228._quantities(card, state)["e3t"],
+                record["e3t_Kmm"][..., :-1]),
+            "tmask": _exact(
+                np.asarray(card.recipe.z_coord.is_active),
+                record["tmask"][..., :-1]),
         },
         "nemo_fold_identity": {
-            "T_halo": _exact(nemo_t_halo, record["T_Kmm"][-2, perm_t]),
-            "S_halo": _exact(nemo_s_halo, record["S_Kmm"][-2, perm_t]),
+            "T_halo": _exact(
+                nemo_t_halo, record["T_Kmm"][-2, perm_t, :-1]),
+            "S_halo": _exact(
+                nemo_s_halo, record["S_Kmm"][-2, perm_t, :-1]),
             "e3t_halo": _exact(
-                record["e3t_Kmm_north_halo"], record["e3t_Kmm"][-2, perm_t]),
+                record["e3t_Kmm_north_halo"][..., :-1],
+                record["e3t_Kmm"][-2, perm_t, :-1]),
             "tmask_halo": _exact(
-                record["tmask_north_halo"], record["tmask"][-2, perm_t]),
+                record["tmask_north_halo"][..., :-1],
+                record["tmask"][-2, perm_t, :-1]),
         },
         "consumer_north_sum": {
             "T": _exact(candidate_t_sum, nemo_t_sum),
