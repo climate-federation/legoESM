@@ -317,9 +317,16 @@ def classify(reports: list[dict], *, plant: str = "none") -> dict:
             == endpoint["given_nemo_entry"]["first_operand"],
             "the two labels disagree on first operand")
     require(plant == "none", f"{plant} plant stayed green")
-    prediction = (
-        "CONFIRMED_GLOBAL" if endpoint["independent"]["owner_class"] == "GLOBAL"
+    first = endpoint["independent"]
+    owner_class_prediction = (
+        "CONFIRMED_GLOBAL" if first["owner_class"] == "GLOBAL"
         else "REFUTED_NOT_GLOBAL"
+    )
+    forcing_prediction = (
+        "CONFIRMED_SUBSTEP1_SLOW_FORCING"
+        if first["first_substep"] == 1
+        and first["first_operand"] in {"slow_u", "slow_v"}
+        else "REFUTED_FIRST_GLOBAL_NOT_SUBSTEP1_SLOW_FORCING"
     )
     return {
         "format": "nemo-testcase-l4-orca2-round235-classification-v1",
@@ -327,7 +334,8 @@ def classify(reports: list[dict], *, plant: str = "none") -> dict:
         "rows": endpoint,
         "predictions": {
             "R235-P1": "CONFIRMED_PASSIVE_ADMITTED_RECORD",
-            "R235-P2": prediction,
+            "R235-P2": forcing_prediction,
+            "R235-P2-owner-class": owner_class_prediction,
             "R235-P3": "CONFIRMED_SOURCE_ORDER",
             "R235-P4": "CONFIRMED_LABEL_AGREEMENT",
             "R235-P5": "CONFIRMED_MEASUREMENT_ONLY",
