@@ -54,6 +54,18 @@ def _scenario(label: str) -> dict:
     }
 
 
+def _variant_report(label: str, variant: str) -> dict:
+    scenario = _scenario(label)
+    return {
+        "status": "PASS_R229_VARIANT",
+        "label": label,
+        "variant": variant,
+        "worktree": {"commit": "test"},
+        "support": scenario["support"],
+        "oracle_transport_calibration": scenario[
+            "oracle_transport_calibration"],
+        "score": scenario["variants"][variant],
+    }
 def test_compact_support_uses_distinct_v_source_and_t_pivot_rows() -> None:
     perm = np.array([2, 1, 0, 5, 4, 3])
     fold = SimpleNamespace(perm_T=perm, perm_v=perm)
@@ -130,3 +142,12 @@ def test_part_registry_and_leave_one_out_sets_are_exact() -> None:
     assert gate._enabled("full") == set(gate.PARTS)
     for part in gate.PARTS:
         assert gate._enabled(f"drop_{part}") == set(gate.PARTS) - {part}
+
+
+def test_isolated_variant_reports_assemble_in_frozen_order() -> None:
+    reports = [_variant_report("independent", variant)
+               for variant in gate.VARIANTS]
+    assembled = gate.assemble_scenario(reports)
+    assert tuple(assembled["variants"]) == gate.VARIANTS
+    with pytest.raises(gate.GateError):
+        gate.assemble_scenario(list(reversed(reports)))

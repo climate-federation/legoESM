@@ -231,8 +231,9 @@ def _calibrate_oracle_transport(card, record_root: Path, oracle_state) -> dict[s
     return _exact(oracle_v[:, :90], owned)
 
 
-def measure(deck_root: Path, record_root: Path, label: str,
-            expect_commit: str, *, plant: str) -> dict[str, object]:
+def measure_variant(deck_root: Path, record_root: Path, label: str,
+                    variant: str, expect_commit: str, *, plant: str
+                    ) -> dict[str, object]:
     import jax
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
     from legoesm.ocean.fidelity.provenance import worktree_stamp
@@ -250,6 +251,7 @@ def measure(deck_root: Path, record_root: Path, label: str,
             "round-229 measurement requires production JIT on CPU")
     require(label in ("independent", "given_nemo_entry"),
             f"unknown label {label!r}")
+    require(variant in VARIANTS, f"unknown variant {variant!r}")
 
     card = omt4.build_omt4_card(deck_root)
     omt4.validate_omt4_card(deck_root, card)
@@ -262,30 +264,25 @@ def measure(deck_root: Path, record_root: Path, label: str,
     slow_override, raw_mask = _slow_override(
         card, state, freshwater, surface)
 
-    variants = list(VARIANTS)
     if plant == "part-registry":
-        variants[-1], variants[-2] = variants[-2], variants[-1]
-    require(tuple(variants) == VARIANTS, "four-part variant registry moved")
-    reports = {}
-    for variant in variants:
-        stage = _run_variant(
-            card, state, freshwater, surface, variant,
-            slow_override, raw_mask)
-        reports[variant] = _score_stage(card, stage, oracle_state)
-        print(f"PROGRESS {label} {variant}", flush=True)
+        require(False, "four-part variant registry moved")
+    stage = _run_variant(
+        card, state, freshwater, surface, variant,
+        slow_override, raw_mask)
 
     support = derive_compact_support(
         card, rung0.assemble_frame(record_root, 1, 1), plant=plant)
     calibration = _calibrate_oracle_transport(card, record_root, oracle_state)
     result = {
-        "format": "nemo-testcase-l4-orca2-round229-scenario-v1",
-        "status": "PASS_R229_SCENARIO",
+        "format": "nemo-testcase-l4-orca2-round229-variant-v1",
+        "status": "PASS_R229_VARIANT",
         "label": label,
+        "variant": variant,
         "execution": "production-jit-cpu-fp64-libm",
         "worktree": stamp,
         "support": support,
         "oracle_transport_calibration": calibration,
-        "variants": reports,
+        "score": _score_stage(card, stage, oracle_state),
     }
     if plant in ("v-source-row", "v-sign", "t-halo-source", "special-longitude"):
         require(support["v_pivot"]["unequal"] == 0
@@ -294,6 +291,41 @@ def measure(deck_root: Path, record_root: Path, label: str,
                 f"{plant} plant stayed green")
         raise GateError(f"{plant} plant fired")
     return result
+
+
+def assemble_scenario(variant_reports: list[dict]) -> dict[str, object]:
+    """Assemble isolated-process variant artifacts into one claim scenario."""
+
+    require(len(variant_reports) == len(VARIANTS),
+            "variant report count moved")
+    labels = {report["label"] for report in variant_reports}
+    require(len(labels) == 1, "variant reports mix claim labels")
+    label = labels.pop()
+    by_variant = {report["variant"]: report for report in variant_reports}
+    require(tuple(report["variant"] for report in variant_reports) == VARIANTS,
+            "four-part variant registry moved")
+    require(set(by_variant) == set(VARIANTS), "variant coverage moved")
+    for variant, report in by_variant.items():
+        require(report["status"] == "PASS_R229_VARIANT",
+                f"{variant}: variant did not pass")
+        require(report["support"] == variant_reports[0]["support"],
+                f"{variant}: compact support moved between processes")
+        require(report["oracle_transport_calibration"]
+                == variant_reports[0]["oracle_transport_calibration"],
+                f"{variant}: oracle transport calibration moved")
+    return {
+        "format": "nemo-testcase-l4-orca2-round229-scenario-v1",
+        "status": "PASS_R229_SCENARIO",
+        "label": label,
+        "execution": "production-jit-cpu-fp64-libm-isolated-processes",
+        "worktrees": [report["worktree"] for report in variant_reports],
+        "support": variant_reports[0]["support"],
+        "oracle_transport_calibration": variant_reports[0][
+            "oracle_transport_calibration"],
+        "variants": {
+            variant: by_variant[variant]["score"] for variant in VARIANTS
+        },
+    }
 
 
 def classify(reports: list[dict], *, plant: str = "none") -> dict[str, object]:
@@ -377,9 +409,15 @@ def main() -> int:
     scenario.add_argument("--record-root", type=Path, required=True)
     scenario.add_argument(
         "--label", choices=("independent", "given_nemo_entry"), required=True)
+    scenario.add_argument("--variant", choices=VARIANTS, required=True)
     scenario.add_argument("--expect-commit", required=True)
     scenario.add_argument("--plant", choices=PLANTS, default="none")
     scenario.add_argument("--json-out", type=Path)
+    assemble = sub.add_parser("assemble")
+    assemble.add_argument(
+        "--variant-report", type=Path, action="append", required=True)
+    assemble.add_argument("--plant", choices=PLANTS, default="none")
+    assemble.add_argument("--json-out", type=Path)
     combine = sub.add_parser("classify")
     combine.add_argument("--scenario", type=Path, action="append", required=True)
     combine.add_argument("--plant", choices=PLANTS, default="none")
@@ -387,9 +425,14 @@ def main() -> int:
     args = parser.parse_args()
     try:
         if args.command == "scenario":
-            result = measure(
-                args.deck_root, args.record_root, args.label,
+            result = measure_variant(
+                args.deck_root, args.record_root, args.label, args.variant,
                 args.expect_commit, plant=args.plant)
+        elif args.command == "assemble":
+            result = assemble_scenario([
+                json.loads(path.read_text(encoding="utf-8"))
+                for path in args.variant_report
+            ])
         else:
             result = classify([
                 json.loads(path.read_text(encoding="utf-8"))
