@@ -715,6 +715,84 @@ z-star, 10 levels, H_max = 5500 m.
 
 ---
 
+## 10b. BENCH Performance Benchmark (`bench`)
+
+**Status:** implemented (branch `bench/ocean-bench`, 2026-10-10); see
+`docs/ocean/experiments/bench_plan.md` for the full provenance
+(Irrmann et al. 2022, GMD 15, 1567-1582, Sect. 2.2 + NEMO `tests/BENCH`).
+
+### Purpose
+
+Performance benchmarking ONLY — results are physically meaningless by
+design. Zero input files (grid, bathymetry, ICs, forcing all analytic);
+every grid point carries a unique value (per-point `z2d` ramp, NEMO
+`usrdef_istate.F90:44-54` ported verbatim) so halo/sharding bugs are
+detectable in the fields. Runs the production-like
+`legoesm_nemo_like_v1` recipe + TKE vertical mixing, so the measured
+step cost is the production cost.
+
+### Vertical Grid
+
+Uniform z* levels with `dz = H_max / n_levels` where `n_levels` is the
+WET count (NEMO `usrdef_zgr.F90:139-165`: `zd = 5000/jpkm1`, 74 wet
+levels for `nn_ksize=75`), flat bottom H_max = 5000 m; 74 wet levels
+in the presets (dz ≈ 67.57 m).
+
+### Initialization
+
+| Field | Formula (NEMO port) | Range |
+|---|---|---|
+| T | `10 + 20*z2d - 4*f` (f = k/nlev, max 73/74) | ~6-10 ± 1 °C |
+| S | `34 + f + z2d` | ~34-35 ± 0.05 psu |
+| u | `0.1 * z2d` (face-count ramp) | ± 0.005 m/s |
+| v | `0.01 * z2d` (face-count ramp) | ± 0.0005 m/s |
+| eta | `0.1 * (0.5 - p)` (p = point index) | ± 0.05 m |
+
+`z2d` is the hemisphere-mirrored per-point ramp in [-0.05, +0.05]
+(NEMO's quoted range; the first north row overshoots by one ramp step —
+NEMO's construction). Light stable stratification (T down, S up with
+depth); per-point ramp amplitudes verbatim from NEMO; backgrounds
+temperate (divergence: no SI3, so NEMO's near-freezing targets are
+inapplicable); u/v built from face-count ramps (documented divergence —
+every face value unique).
+
+### Forcing
+
+None (NEMO `usrdef_sbc.F90`: all surface fluxes zero). Vertical mixing
+is the production TKE closure (NEMO `ln_zdftke`) — on these ICs its
+trajectory effect is below detection by design (K → background under
+zero forcing), but its solve cost is inside the measured step
+(control-measured 1.07× vs `vmix=none`, committed probe).
+
+### Expected Behavior
+
+Stability only, gated by pre-registered gates: finite fields, max
+pointwise speed (cell-centred) < 1 m/s, max |eta| < 1 m
+(planted-violation controls in `test_bench.py` prove the gates fire,
+including via the matrix's `max_abs_eta` key). Preset dt values are
+measured boundaries halved for margin (committed probe
+`scripts/validate/ocean_bench/stability_probes.py`, 2026-10-10: 1°
+Mercator analog stable ≤ 1500 s / NaN at 1650 s; eq 36×72 unstable at
+dt=3600 s, stable ≤ 1800 s). The full-sphere equirectangular latlon
+grid is structurally unusable at preset sizes (pole-row barotropic
+CFL — the latlon lane is Mercator-truncated at 80°; see bench_plan.md
+divergence 1).
+
+### What This Tests
+
+The production step cost on global-size grids without any data
+dependency: JIT-compile time, steady per-step wall time, SYPD,
+Mcells/s; and the north-fold communication pattern via the synthetic
+tripole lane (`run_bench.py --grid tripole`, NEMO's exact per-preset
+j-counts 331/1206/3146).
+
+### Duration
+
+Arbitrary (benchmarks count steps; NEMO default `nn_itend = 1000`).
+Matrix lane: 0.5 days.
+
+---
+
 ## Cross-Experiment Summary
 
 ### Grid Coverage Matrix
@@ -732,6 +810,7 @@ z-star, 10 levels, H_max = 5500 m.
 | lock_exchange | yes | yes | no | no |
 | overflow | yes | yes | no | no |
 | stommel_gyre_tracer | yes | yes | no (issue #55) | no |
+| bench | no | yes (Mercator 80°) | no (follow-up) | no; synthetic tripole lane via run_bench.py |
 
 ### Experiment Hierarchy
 
@@ -755,7 +834,7 @@ unlikely to succeed.
 
 | Category | Experiments | Land Handling |
 |---|---|---|
-| No land (all grids) | rest_state_no_land, inertia_gravity_wave | land_lat_threshold = 90 deg |
+| No land (all grids) | rest_state_no_land, inertia_gravity_wave, bench | land_lat_threshold = 90 deg (bench: closed Mercator box truncated at ±80°) |
 | Polar land strips | rest_state, lock_exchange, overflow | \|lat\| > 80 deg |
 | Rectangular basin | barotropic_gyre, barotropic_double_gyre, stommel_gyre_tracer | 0-120 E, 15-75 N; land everywhere else |
 | Spectral uses no land | barotropic_wave, baroclinic, phillips_two_layer | FV grids: land at 80 deg; spectral: 90 deg |
@@ -778,6 +857,7 @@ was changed to include land for spectral (2026-04-04) to expose and track this i
 | lock_exchange | 500 | 20 | Shallow + high vertical resolution for gravity currents |
 | overflow | 2000 | 20 | Shelf-to-basin topography |
 | stommel_gyre_tracer | 5500 | 10 | Rectangular basin, uniform T/S + tracer blob |
+| bench | 5000 | 74 (wet) | NEMO BENCH usrdef_zgr: flat bottom, uniform dz = 5000/74 |
 
 ### Expected Field Ranges (for plotting and sanity checks)
 
@@ -794,6 +874,7 @@ was changed to include land for spectral (2026-04-04) to expose and track this i
 | lock_exchange | (-0.05, 0.05) | (-1, 21) | |
 | overflow | (-0.1, 0.1) | (-1, 21) | |
 | stommel_gyre_tracer | (-0.02, 0.02) | (9.5, 10.5) | SSS: (33, 37) |
+| bench | IC ± 0.05 (gates < 1.0) | (5, 11) | physically meaningless by design; gates are stability-only |
 
 ### Known Issues (as of 2026-04-04)
 

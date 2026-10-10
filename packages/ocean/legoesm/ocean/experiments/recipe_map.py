@@ -24,6 +24,9 @@ EXPERIMENT_RECIPES: dict[str, str] = {
     # --- the corrected / designed recipes (deliberately chosen dycores) ---
     "eady_uniform": "eady_weno5_v1",
     "dino": "nemo_dino_v1",
+    # BENCH (Irrmann et al. 2022) deliberately runs the production-like
+    # NEMO-style dycore — the benchmark must measure the production step.
+    "bench": "legoesm_nemo_like_v1",
     # --- legoESM default dycore, linear EOS (runner injects eos_linear) ---
     "global_overturning": "legoesm_linear_v1",
     "eady_instability": "legoesm_linear_v1",

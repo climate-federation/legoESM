@@ -1,0 +1,31 @@
+# legoESM experiment template — BENCH performance benchmark.
+#
+# Names the procedural `bench` experiment via the `setup:` selector (#388
+# Ask#2): a NEMO-BENCH-inspired (Irrmann et al. 2022, GMD 15, 1567-1582,
+# Sect. 2.2) performance-benchmark configuration — flat-bottom all-ocean
+# global box, analytic zero forcing, per-point unique initial conditions,
+# running the production-like `legoesm_nemo_like_v1` dycore. Results are
+# physically MEANINGLESS by design; use only for benchmarking. Routed to
+# run_ocean_test_matrix.py (latlon lane); the resolution presets and the
+# synthetic-tripole fold lane belong to scripts/run/run_bench.py.
+experiment:
+  tier: tier1
+  complexity: primitive_equation
+  extent: global
+  maturity: experimental
+  description: >
+    NEMO-BENCH-inspired performance benchmark: flat-bottom all-ocean box,
+    zero analytic forcing, per-point unique ICs (MPI/sharding bug
+    detection), production recipe. Zero input files by construction.
+    Stability-gated only (finite fields, max speed, max |eta|) — results
+    are physically meaningless by design, so no conservation gates.
+  data: []
+  conservation_gates: []
+model:
+  name: "ocean-bench"
+  type: ocean_only
+setup:
+  name: bench
+  grid: latlon
+output:
+  path: output/ocean/bench/

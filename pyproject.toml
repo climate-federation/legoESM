@@ -191,6 +191,13 @@ select = ["E", "F", "I", "N", "W", "UP"]
 "tests/grids/test_fv3_native_duo_phase4c.py" = ["N806"]
 "tests/grids/test_fv3_native_geopk_pgrad.py" = ["N806"]
 "tests/grids/test_fv3_native_pgrad.py" = ["N803", "N806"]
+# BENCH (NEMO tests/BENCH port, Irrmann 2022): the tracer/heat variables keep
+# the NEMO usrdef_istate.F90 symbol names (T, S, T_ic, S_ic, H_max) so every
+# formula cross-references its NEMO source line 1:1 (same rationale as the
+# FV3-native ports above).
+"packages/ocean/legoesm/ocean/experiments/bench.py" = ["N803", "N806"]
+"tests/ocean/unit/test_bench.py" = ["N806", "N802"]
+"scripts/run/run_bench.py" = ["N806"]
 # Fuller CLUBB port (PORT_CLUBB.md): the closure coefficients, model flags and
 # intermediate variables mirror CLUBB's canonical symbol names 1:1 (c_K1,
 # iiPDF_type, l_use_C7_Richardson, C2rt, Skw, wpthlp, Lscale, ...) as in
