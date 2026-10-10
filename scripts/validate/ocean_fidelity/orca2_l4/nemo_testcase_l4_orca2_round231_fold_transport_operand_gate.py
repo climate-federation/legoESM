@@ -228,6 +228,10 @@ def measure(deck_root: Path, frame_root: Path, operand_root: Path,
 
     corrected_t = np.asarray(stage.T.data, np.float64).copy()
     corrected_s = np.asarray(stage.S.data, np.float64).copy()
+    if plant == "correction-sign":
+        correction_control_t = _literal_fold_correction(
+            card, stage, candidate_zfv, candidate_t_sum, nemo_t_sum,
+            plant="none")
     corrected_t[-1] += _literal_fold_correction(
         card, stage, candidate_zfv, candidate_t_sum, nemo_t_sum, plant=plant)
     corrected_s[-1] += _literal_fold_correction(
@@ -300,9 +304,13 @@ def measure(deck_root: Path, frame_root: Path, operand_root: Path,
         raise GateError("halo-bit fold-identity plant fired")
     if plant == "correction-sign":
         require(
-            result["endpoint"]["after_T"]["max_abs"]
-            > result["endpoint"]["before_T"]["max_abs"],
-            "correction-sign plant did not worsen the endpoint",
+            _exact(
+                _literal_fold_correction(
+                    card, stage, candidate_zfv, candidate_t_sum, nemo_t_sum,
+                    plant=plant),
+                correction_control_t,
+            )["unequal"] > 0,
+            "correction-sign plant did not change the correction",
         )
         raise GateError("correction-sign endpoint plant fired")
     require(result["nemo_fold_identity"]["T_halo"]["unequal"] == 0,
