@@ -112,7 +112,7 @@ def run_one(label: str, *, days: int, resolution: int | None,
         out = Path(td) / "run"
         cmd = [
             sys.executable,
-            str(_REPO_ROOT / "scripts" / "run" / "run_amip_cmip6_deck.py"),
+            str(_REPO_ROOT / "scripts" / "run" / "run_amip_smoke_deck.py"),
             "--forcing-dir", str(forcing_dir),
             "--start-year", str(_FORCING_START_YEAR),
             "--end-year", str(_FORCING_END_YEAR),

@@ -21,6 +21,18 @@ def lowest_level_height(T_lowest, p_half, p_full):
             * jnp.log(p_half[..., -1] / p_full[..., -1]))
 
 
+def land_co2_ppmv(ghg_vmr, fixed_co2_ppmv):
+    """CO2 [ppmv] the land canopy sees: the SAME value radiation uses.
+
+    ``ghg_vmr`` is the radiation's GHG override (mole fractions, mol/mol;
+    present when a GHG forcing file drives radiation), else ``None``; then
+    radiation uses the run's fixed ``co2_ppmv`` and so does the land.
+    """
+    if ghg_vmr is not None and "co2" in ghg_vmr:
+        return jnp.asarray(ghg_vmr["co2"]) * 1.0e6   # mol/mol -> ppmv
+    return fixed_co2_ppmv
+
+
 def require_surface_radiation_aux(aux, *, radiation_active: bool,
                                   precip_active: bool, lane: str) -> None:
     """Raise when a coupled atmosphere lane advanced a segment but stashed no

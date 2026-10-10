@@ -36,6 +36,7 @@ from legoesm.driver.physics_pipeline import (
     convection_config_for,
     build_physics_pipeline,
     gwd_config_for,
+    mean_grid_spacing_m,
     moisture_registry_for,
     turbulence_config_for,
     validate_microphysics_tracer_slots,
@@ -697,15 +698,34 @@ def make_mpas_qv_smooth_fn(mesh, nu, dt, nu4=0.0, halo_refresh=None,
 
 
 def _spectral_micro_config(cfg):
-    """MicrophysicsConfig for the spectral standalone lane, with the flat
-    ``morrison_*`` ExperimentConfig scalars threaded exactly as the FV and MPAS
-    lanes do (untouched config -> the default leaf, unchanged)."""
-    from legoesm.atmosphere.physics.microphysics.config import MicrophysicsConfig
+    """MicrophysicsConfig for the spectral standalone lane: the experiment
+    switches (sub-grid autoconversion, cirrus homogeneous nucleation, hard
+    saturation adjustment IN-SCHEME as on the lat-lon / cube pipeline) through
+    the shared helper the other lanes use, then the flat ``morrison_*`` scalars
+    (review 2026-10-10 F26: the switches were silently dropped here).
+    Aerosol droplet number is REFUSED: neither the spectral microphysics nor
+    its radiation optics receive the aerosol field.  Untouched config -> the
+    default leaf."""
+    from legoesm.atmosphere.physics.microphysics.config import (
+        MicrophysicsConfig, apply_microphysics_experiment_flags)
     from legoesm.driver.physics_pipeline import thread_morrison_scalars
     mc = MicrophysicsConfig(scheme=cfg.microphysics)
     leaf = getattr(mc, cfg.microphysics, None)
     if leaf is None:   # 'none': no scheme leaf; validate_strict refuses morrison_* there
         return mc
+    if cfg.nc_from_aerosol:
+        raise ValueError(
+            "nc_from_aerosol (--aerosol-ccn) is not wired on the spectral lane: "
+            "its microphysics and radiation optics never see the aerosol "
+            "field, so the droplet number would stay the scheme constant. Use "
+            "the MPAS / FV3-duo column or lat-lon / cube lane, or drop it.")
+    leaf = apply_microphysics_experiment_flags(
+        leaf, cfg.microphysics,
+        subgrid_autoconversion=cfg.subgrid_autoconversion,
+        hard_saturation_adjustment=cfg.hard_saturation_adjustment,
+        hard_sat_adjust_threshold=cfg.hard_sat_adjust_threshold,
+        hard_sat_max_heating_K=cfg.hard_sat_max_heating_K,
+        homogeneous_ice_nucleation=cfg.homogeneous_ice_nucleation)
     return mc._replace(**{cfg.microphysics: thread_morrison_scalars(
         cfg, cfg.microphysics, leaf)})
 
@@ -4345,6 +4365,7 @@ class ModelDriver:
             # simulation calendar year instead of falling back to a
             # 1850 climatology.
             start_year=cfg.start_year,
+            hold_outside_file_years=cfg.forcing_hold_outside_file_years,
         )
 
         # Aerosol external forcing
@@ -4382,6 +4403,7 @@ class ModelDriver:
             # sampled at their actual eruption calendars instead of
             # being collapsed onto a 12-month cycle.
             start_year=cfg.start_year,
+            hold_outside_file_years=cfg.forcing_hold_outside_file_years,
         )
 
         # Solar init
@@ -12417,7 +12439,8 @@ class ModelDriver:
                 # canopy now runs on this lane and its radiation partitioning
                 # is zenith-driven -- a fixed sun would give the canopy neither
                 # a diurnal cycle nor night.
-                from legoesm.core.coupling_fields import lowest_level_height
+                from legoesm.core.coupling_fields import (
+                    land_co2_ppmv, lowest_level_height)
                 z_lowest = lowest_level_height(
                     T_air, self.sigma.pressure_at_half(p_s),
                     self.sigma.pressure_at_full(p_s))
@@ -12434,8 +12457,9 @@ class ModelDriver:
                     cos_zenith=_cos_zen_fn(
                         jnp.asarray(_doy, dtype=jnp.float64),
                         jnp.asarray(_sod, dtype=jnp.float64) / 3600.0),
-                    co2_ppmv=jnp.full_like(T_air, float(
-                        getattr(cfg, "co2_ppmv", 412.0))),
+                    # Radiation's CO2 (daily GHG file, else cfg.co2_ppmv).
+                    co2_ppmv=jnp.full_like(T_air, land_co2_ppmv(
+                        _forcing_daily.get("ghg_vmr"), cfg.co2_ppmv)),
                     has_radiation=jnp.ones_like(T_air),
                     has_precipitation=jnp.ones_like(T_air),
                 )
@@ -14169,7 +14193,8 @@ class ModelDriver:
         _orbit_params = (earth_orbit()
                          if getattr(self.config, "orbital_insolation", False)
                          else None)
-        from legoesm.forcing.surface_utils import blend_surface_temperature
+        from legoesm.forcing.surface_utils import (
+            blend_surface_temperature, blended_surface_albedo)
 
         cfg = self.config
         DT = cfg.dycore.dt
@@ -14412,7 +14437,8 @@ class ModelDriver:
                     orbit=_orbit_params,
                     ozone=OzoneProfileConfig(source=cfg.ozone_source),
                 ),
-                convection=convection_config_for(cfg),
+                convection=convection_config_for(
+                    cfg, grid_dx_m=mean_grid_spacing_m(self.grid)),
                 turbulence=turbulence_config_for(cfg),
                 microphysics=_spectral_micro_config(cfg),
                 gravity_wave_drag=gwd_config_for(cfg),
@@ -14474,6 +14500,25 @@ class ModelDriver:
             _solar_spectral = (_solar_ext
                                and cfg.solar_source == "spectral_file"
                                and cfg.radiation in ("rrtmg", "rrtmgp"))
+            # Tile-blended surface albedo, the MPAS loop's helper and inputs
+            # (per-step SIC; the land fraction / land albedo _create_physics
+            # loaded).  Without it radiation used the scalar config albedo
+            # (0.06 open ocean) on sea ice and land (review 2026-10-10 F25).
+            _sp_alb_on = cfg.radiation != "none"
+            if _sp_alb_on and cfg.dynamic_albedo:
+                raise ValueError(
+                    "dynamic_albedo (zenith-dependent ocean albedo) is not wired "
+                    "on the spectral lane; its surface albedo uses the fixed "
+                    "albedo_ocean. Use the MPAS / FV3-duo column or lat-lon / "
+                    "cube lane, or drop it.")
+            _sp_f_land = _sp_alb_land = None
+            if _sp_alb_on and self._has_land_anywhere:
+                _sp_f_land = jnp.asarray(self.physics.f_land).reshape(-1)
+                _sp_alb_land = jnp.asarray(self.physics.albedo_land).reshape(-1)
+                if _sp_alb_land.shape != _sp_f_land.shape:
+                    raise ValueError(
+                        f"land albedo shape {_sp_alb_land.shape} != land "
+                        f"fraction shape {_sp_f_land.shape} on the spectral grid")
             logger.info(
                 "  Spectral full-physics AMIP pipeline: "
                 f"radiation={_rad_scheme} clouds={_cloud_scheme} "
@@ -14668,6 +14713,10 @@ class ModelDriver:
                     "seconds_of_day": jnp.asarray(_sod),
                     **_ext_daily,
                 }
+                if _sp_alb_on:
+                    forcing_data["sfc_albedo"] = blended_surface_albedo(
+                        sic_step.reshape(-1), _sp_f_land, float(cfg.albedo_ice),
+                        float(cfg.albedo_ocean), _sp_alb_land)
             else:
                 # Legacy dry gray path: traced SST/SIC + daily-mean insol
                 sst_step, sic_step = self.get_sst_sic(self._current_day)

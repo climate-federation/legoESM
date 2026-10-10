@@ -14,7 +14,7 @@ from legoesm.grids.topography import (
     TopographyConfig,
     load_real_topography,
     _regrid_to_target,
-    _neighbour_table,
+    neighbour_table,
     bin_latlon_to_cells,
     masked_diffusion,
     gaussian_mountain,
@@ -254,7 +254,7 @@ class TestMaskedDiffusion(unittest.TestCase):
 
     def test_cube_conserves_area_integral_and_damps_noise(self):
         grid = create_cubed_sphere(8)
-        nb, area = _neighbour_table(grid)
+        nb, area = neighbour_table(grid)
         self.assertEqual(nb.shape, (4, 6 * 64))
         # symmetric neighbour relation
         for i in range(nb.shape[1]):
@@ -270,7 +270,7 @@ class TestMaskedDiffusion(unittest.TestCase):
 
     def test_ocean_pinned_and_island_isolated(self):
         grid = create_cubed_sphere(8)
-        nb, area = _neighbour_table(grid)
+        nb, area = neighbour_table(grid)
         q = np.zeros(6 * 64)
         f = np.zeros(6 * 64)
         q[100] = 1000.0  # a one-cell island
@@ -289,7 +289,7 @@ class TestMaskedDiffusion(unittest.TestCase):
     def test_latlon_table_is_periodic_and_pole_clamped(self):
         from legoesm.grids.factory import create_grid
         grid = create_grid("latlon", 16)
-        nb, area = _neighbour_table(grid)
+        nb, area = neighbour_table(grid)
         n_lat, n_lon = np.asarray(grid.grid_lat).shape
         self.assertEqual(nb.shape, (4, n_lat * n_lon))
         self.assertTrue(np.all(nb[0, :n_lon] == -1) and np.all(nb[1, -n_lon:] == -1))
@@ -302,7 +302,7 @@ class TestMaskedDiffusion(unittest.TestCase):
     def test_voronoi_table(self):
         from legoesm.grids.voronoi import create_voronoi_mesh
         mesh = create_voronoi_mesh(2)
-        nb, area = _neighbour_table(mesh)
+        nb, area = neighbour_table(mesh)
         for i in range(nb.shape[1]):                 # symmetric relation
             for j in nb[:, i]:
                 if j >= 0:
@@ -317,7 +317,7 @@ class TestMaskedDiffusion(unittest.TestCase):
 
     def test_monotone_bound(self):
         grid = create_cubed_sphere(4)
-        nb, area = _neighbour_table(grid)
+        nb, area = neighbour_table(grid)
         with self.assertRaises(ValueError):
             masked_diffusion(np.zeros(96), np.ones(96), nb, area, k=0.3)
 
@@ -847,7 +847,7 @@ class TestMaskedDiffusionCrossFace(unittest.TestCase):
 
     def _cube(self, n=6):
         grid = create_cubed_sphere(n)
-        nb, area = _neighbour_table(grid)
+        nb, area = neighbour_table(grid)
         return nb, area
 
     def test_smoothing_leaks_across_face_boundaries(self):
@@ -873,11 +873,11 @@ class TestMaskedDiffusionCrossFace(unittest.TestCase):
         the global MPI/SPMD halo backend (codex PR F)."""
         from legoesm.grids.halo import get_halo_backend, set_halo_backend
         grid = create_cubed_sphere(6)
-        nb_local, _ = _neighbour_table(grid)
+        nb_local, _ = neighbour_table(grid)
         prev = get_halo_backend()
         try:
             set_halo_backend("spmd")
-            nb_other, _ = _neighbour_table(grid)
+            nb_other, _ = neighbour_table(grid)
         finally:
             set_halo_backend(prev)
         npt.assert_array_equal(nb_other, nb_local)

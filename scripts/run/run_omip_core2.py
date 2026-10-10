@@ -10415,7 +10415,8 @@ def main() -> int:
                     grid_type=app_grid_type, runoff_R=_R,
                     emp=args.emp_freshwater, ramp=ramp,
                     u_oce=_u_oce, v_oce=_v_oce,
-                    wind_current_feedback_vfac=_wind_vfac)
+                    wind_current_feedback_vfac=_wind_vfac,
+                    forcing_remap=args.forcing_remap)
                 sf = sf._replace(freshwater=net_freshwater_flux(fw))
             state = model.step(state, dt, surface_forcing=sf,
                                t_seconds=_t_sec)
@@ -10430,7 +10431,8 @@ def main() -> int:
                     grid_type=app_grid_type, runoff_R=_R,
                     emp=args.emp_freshwater, ramp=ramp,
                     u_oce=_u_oce, v_oce=_v_oce,
-                    wind_current_feedback_vfac=_wind_vfac)
+                    wind_current_feedback_vfac=_wind_vfac,
+                    forcing_remap=args.forcing_remap)
             if ice_resp is not None:
                 # ONE shared, mask-aware partition (coupler.ocean_forcing):
                 # open-water stress/evap/heat/SW x f_open=(1-A) at the SINGLE

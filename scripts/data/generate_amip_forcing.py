@@ -41,7 +41,7 @@ Files produced (under ``--out``):
     aerosol_amip_clim.nc
     volcanic_amip_1979-2014.nc
 
-The driver (``scripts/run/run_amip_cmip6_deck.py``) consumes them through
+The driver (``scripts/run/run_amip_smoke_deck.py``) consumes them through
 the standard ``run_amip.py`` flags (``--forcing-path``, ``--ghg-file``,
 ``--ozone-file`` …).
 """

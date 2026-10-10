@@ -582,6 +582,10 @@ def build_parser():
     parser.add_argument("--volcanic-aerosol-scale", type=float, default=1.0)
     parser.add_argument("--volcanic-aerosol-lw", action="store_true",
                         default=False)
+    parser.add_argument(
+        "--forcing-hold-outside-file-years", action="store_true", default=False,
+        help="Hold a multi-year ozone/aerosol/volcanic file's end record for "
+             "run dates outside its years (default: raise).")
     # Diurnal (instantaneous-zenith) radiation, as run_amip.py; every AMIP deck
     # sets diurnal_cycle: true (gridaudit 2026-10-09).
     parser.add_argument("--diurnal-cycle", action=argparse.BooleanOptionalAction,
@@ -1439,6 +1443,7 @@ def main():
         volcanic_aerosol_file=args.volcanic_aerosol_file,
         volcanic_aerosol_scale=args.volcanic_aerosol_scale,
         volcanic_aerosol_lw=args.volcanic_aerosol_lw,
+        forcing_hold_outside_file_years=args.forcing_hold_outside_file_years,
         ic=args.ic,
         ic_path=args.ic_path,
         convection=args.convection,

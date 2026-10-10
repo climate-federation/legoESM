@@ -154,6 +154,10 @@ morrison_sed_cfl_substeps: true  # user decision 2026-09-22: MG2 CFL sub-stepped
                                  # 256 cap; turning the abort on is a user choice, not taken.
 convection: bechtold        # mass-flux (IFS lineage), water-conserving by
                             # construction; C24 screen = revalidation gate
+# Convective momentum transport, recorded explicitly (review 2026-10-10 F22,
+# majority vote): unset now means ON on every lane; it used to resolve OFF on
+# MPAS only, so runs of this deck before 2026-10-10 had NO Bechtold CMT.
+bechtold_enable_cmt: true
 # NEW BASELINE, 2026-09-13 (owner decision). This moves TWO things at once and
 # is therefore a deliberate re-baselining, not a one-variable arm: the boundary
 # layer changes closure AND gains prognostic sub-grid variance. Nothing here is

@@ -778,7 +778,8 @@ def compute_omip2_freshwater_forcing(state, *, forcing, idx_t: int,
                                      ramp: float = 1.0,
                                      rho_air: float = constants.rho_air,
                                      u_oce=None, v_oce=None,
-                                     wind_current_feedback_vfac: float = 0.0):
+                                     wind_current_feedback_vfac: float = 0.0,
+                                     forcing_remap: str = "bilinear"):
     """Build a :class:`FreshwaterForcing` (P, E, runoff) for the OMIP-2 run.
 
     Delivered to the ocean via the in-core channel
@@ -818,10 +819,16 @@ def compute_omip2_freshwater_forcing(state, *, forcing, idx_t: int,
         flux ``E`` (P - E salinity) stays the SAME physical flux as the latent
         HEAT flux in ``q_net`` (``E = -lhflx / L_vap``).  ``vfac == 0.0``
         (default) is byte-identical.
+    forcing_remap :
+        The atmosphere-to-ocean sampling, as for
+        :func:`compute_omip2_surface_forcing`; MUST be the same value so P and
+        E here are the same sampled fields as the heat flux's (review
+        2026-10-10 F19: this builder ignored ``nemo_scrip``).
     """
     from legoesm.ocean.freshwater import FreshwaterForcing
 
-    forc = _sample_omip2_forcing(forcing, idx_t, grid, grid_type)
+    forc = _sample_omip2_forcing(forcing, idx_t, grid, grid_type,
+                                 forcing_remap=forcing_remap)
     # MPAS state is (nCells,) at the surface; cube/latlon/tripole are (..., 0).
     # Slice FIRST (device-side), THEN convert: np.asarray on the full leaf
     # would assemble the entire 3-D (possibly lat-band-sharded) T field on

@@ -493,6 +493,31 @@ class TestMultilayerLandTile:
         assert jnp.all((albedo > 0.0) & (albedo < 1.0))
         assert land_new.T_soil.shape == land_ml.T_soil.shape
 
+    def test_land_co2_is_radiation_co2(self, monkeypatch):
+        """F30 (review 2026-10-10): the canopy sees radiation's CO2 -- the GHG
+        file's when one drives radiation, else the run's co2_ppmv -- never a
+        separate constant (it was 412 ppm while radiation read ~337 in 1979)."""
+        import legoesm.land.multilayer_land as mll
+        seen = []
+
+        class _Stop(Exception):
+            pass
+
+        def spy(state, forcing, *a, **k):   # record the forcing, skip the solve
+            seen.append(float(jnp.mean(forcing.co2_ppmv)))
+            raise _Stop
+
+        monkeypatch.setattr(mll, "step_multilayer_land", spy)
+        pipe, land_ml, atm, sw, lw, _ = self._setup()
+        args = (land_ml, sw, lw, atm["T"], atm["p_s"], atm["q_v"], atm["u"],
+                atm["v"], None, 1800.0)
+        for kw in ({}, {"ghg_vmr_override": {"co2": 337.0e-6}}):
+            with pytest.raises(_Stop):
+                pipe._step_multilayer_land_tile(*args, **kw)
+        assert seen[0] == pytest.approx(pipe.co2_ppmv)
+        assert pipe.co2_ppmv == ExperimentConfig().co2_ppmv
+        assert seen[1] == pytest.approx(337.0, rel=1e-9)
+
     def test_differentiable_wrt_z0(self):
         """jax.grad of the tile's surface T w.r.t. the roughness z0 — the capability
         the slab-embedded T_land cannot provide (the refactor's point)."""

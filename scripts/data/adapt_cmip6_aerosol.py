@@ -29,7 +29,7 @@ Usage::
         --out data/cmip6_forcing/aerosol_macv2sp.nc \\
         --resolution 96 --year 2000
 
-Consume with ``run_amip_cmip6_deck.py --aerosol-forcing external --aerosol-file
+Consume with ``run_amip_smoke_deck.py --aerosol-forcing external --aerosol-file
 <out>``.
 """
 
@@ -324,7 +324,7 @@ def main(argv: list[str] | None = None) -> int:
     to_dataset(mid_days, lat, lon, aod).to_netcdf(args.out)
     print(f"Wrote {args.out} (12-month AOD climatology for {args.year}, "
           f"{nlat}x{2 * nlat}; peak AOD {aod.max():.3f})")
-    print("Consume: run_amip_cmip6_deck.py --aerosol-forcing external "
+    print("Consume: run_amip_smoke_deck.py --aerosol-forcing external "
           f"--aerosol-file {args.out}")
     print("NOTE: from-specification MACv2-SP (Stevens 2017); validate vs the "
           "reference sp_aop / real parameter file before production use.")

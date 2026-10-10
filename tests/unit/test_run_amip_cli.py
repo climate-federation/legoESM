@@ -4509,12 +4509,11 @@ def test_bechtold_M_b_max_threads_and_validates():
         ExperimentConfig(bechtold_M_b_max=0.5).validate_strict()
 
 
-def test_bechtold_enable_cmt_round_trips_and_default_preserves_each_lane():
+def test_bechtold_enable_cmt_round_trips_and_default_is_one_value_on_every_lane():
     """--bechtold-enable-cmt reaches the BechtoldConfig leaf on both resolvers.
-    The None default keeps every lane where it was before the MPAS wiring:
-    OFF on MPAS (the bridge handed the scheme zero winds), ON elsewhere
-    (BechtoldConfig.enable_cmt); codex review of 2bfdf5413 caught the first
-    version silently switching the spectral lane's CMT off."""
+    The None default is the scheme's own (ON) on EVERY lane (review 2026-10-10
+    F22: it used to resolve OFF on MPAS only, so one deck ran different
+    physics per grid)."""
     from legoesm.driver.physics_pipeline import _resolve_convection, convection_config_for
 
     parser = build_arg_parser()
@@ -4529,8 +4528,9 @@ def test_bechtold_enable_cmt_round_trips_and_default_preserves_each_lane():
     dflt = build_config_from_args(_postprocess_args(parser.parse_args([
         "--dataset", "analytical", "--convection", "bechtold"]), parser))
     assert dflt.bechtold_enable_cmt is None
-    assert convection_config_for(dflt._replace(grid=dflt.grid._replace(grid_type="mpas"))).bechtold.enable_cmt is False
-    assert convection_config_for(dflt._replace(grid=dflt.grid._replace(grid_type="gaussian"))).bechtold.enable_cmt is True
+    for gt in ("mpas", "gaussian", "cubed_sphere"):
+        assert convection_config_for(dflt._replace(
+            grid=dflt.grid._replace(grid_type=gt))).bechtold.enable_cmt is True
 
 
 def test_persistent_dgrid_flag_flows_to_config_1028():
@@ -5134,3 +5134,16 @@ def test_land_canopy_most_n_iters_round_trip_and_validate():
                        (cfg._replace(land_surface_scheme="simple_seb"), "inert")):
         with pytest.raises(ValueError, match=match):
             bad.validate_strict()
+
+
+def test_forcing_hold_outside_file_years_round_trips_and_defaults_off():
+    """F37 (review 2026-10-10): a date outside a multi-year forcing file
+    raises unless --forcing-hold-outside-file-years opts in; the flag reaches
+    ExperimentConfig and the driver's ozone / aerosol forcing configs."""
+    parser = build_arg_parser()
+    base = ["--dataset", "analytical"]
+    off = build_config_from_args(_postprocess_args(parser.parse_args(base), parser))
+    on = build_config_from_args(_postprocess_args(parser.parse_args(
+        base + ["--forcing-hold-outside-file-years"]), parser))
+    assert off.forcing_hold_outside_file_years is False
+    assert on.forcing_hold_outside_file_years is True

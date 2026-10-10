@@ -562,13 +562,14 @@ HYDRAULICS_SOURCE_SURFDATA_COSBY = "surfdata_cosby"    # build_soil_hydraulics (
 # it, checksums of the file it came from) is provenance and never compared.
 _STAMP_COMPAT_KEYS = ("version", "retention_curve", "parameter_source",
                       "parameter_md5")
+_MD5_CHUNK_BYTES = 1 << 24    # file read size for the md5, not physics
 
 
 def file_md5(path) -> str:
     """md5 of a file's bytes (chunked)."""
     h = hashlib.md5()
     with open(path, "rb") as fh:
-        for chunk in iter(lambda: fh.read(1 << 24), b""):
+        for chunk in iter(lambda: fh.read(_MD5_CHUNK_BYTES), b""):
             h.update(chunk)
     return h.hexdigest()
 
@@ -586,7 +587,9 @@ def soil_hydraulics_stamp(retention_curve: str, parameter_source: str,
                                 HYDRAULICS_SOURCE_SURFDATA_COSBY):
         raise ValueError(f"unknown soil-hydraulics source {parameter_source!r}")
     from legoesm.land.soil_hydraulics import SoilHydraulicsConfig, psi_from_theta
-    psi_from_theta(0.3, SoilHydraulicsConfig(retention_curve=str(retention_curve)))
+    # Rejects an unknown curve name (psi_from_theta raises on it).
+    _cfg = SoilHydraulicsConfig(retention_curve=str(retention_curve))
+    psi_from_theta(_cfg.theta_sat, _cfg)
     return {
         "version": SOIL_HYDRAULICS_STAMP_VERSION,
         "retention_curve": str(retention_curve),

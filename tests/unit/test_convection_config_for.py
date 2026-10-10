@@ -65,3 +65,23 @@ def test_grid_dx_ignored_for_non_bechtold():
     cc = convection_config_for(_cfg(convection="sbm"), grid_dx_m=223e3)
     assert cc.scheme == "sbm"
     assert not hasattr(cc.sbm, "dx_m")
+
+
+def test_pipeline_fills_bechtold_dx_from_grid():
+    """F27 (review 2026-10-10): the PhysicsPipeline lanes (lat-lon / cube) fill
+    Bechtold's dx_m from the grid like the column lanes, not the 0 sentinel."""
+    import numpy as np
+    from legoesm.driver.physics_pipeline import (
+        build_physics_pipeline, mean_grid_spacing_m)
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from legoesm.grids.vertical import create_sigma_coordinate
+
+    grid = create_cubed_sphere(8)
+    sigma = create_sigma_coordinate(8)
+    pipe = build_physics_pipeline(grid, sigma, _cfg(convection="bechtold"))
+    dx = float(np.sqrt(np.mean(np.asarray(grid.area))))
+    assert dx > 1.0e5
+    assert pipe.convection_config.dx_m == mean_grid_spacing_m(grid) == dx
+    explicit = build_physics_pipeline(
+        grid, sigma, _cfg(convection="bechtold", bechtold_dx_m=50e3))
+    assert explicit.convection_config.dx_m == 50e3

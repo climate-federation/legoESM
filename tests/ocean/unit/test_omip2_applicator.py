@@ -304,6 +304,29 @@ def test_compute_omip2_freshwater_forcing_grid_routing(grid_type, res):
     assert float(np.mean(np.asarray(net_freshwater_flux(fw_wet)))) > 0.0
 
 
+def test_freshwater_builder_samples_with_the_heat_builders_remap(monkeypatch):
+    """F19 (review 2026-10-10): the freshwater builder must sample P and E with
+    the SAME ``forcing_remap`` as the heat / momentum builder; it ignored
+    ``nemo_scrip``, so evaporated mass and latent heat came from different
+    fields.  The sampler is intercepted to record the remap it is asked for."""
+    import legoesm.ocean.coupler.omip2_applicator as app
+    seen = []
+
+    class _Stop(Exception):
+        pass
+
+    def _record(forcing, idx_t, grid, grid_type, forcing_remap="bilinear"):
+        seen.append(forcing_remap)
+        raise _Stop
+
+    monkeypatch.setattr(app, "_sample_omip2_forcing", _record)
+    with pytest.raises(_Stop):
+        app.compute_omip2_freshwater_forcing(
+            None, forcing={}, idx_t=0, grid=None, grid_type="tripole",
+            forcing_remap="nemo_scrip")
+    assert seen == ["nemo_scrip"]
+
+
 def _sw_forcing(*, sw=250.0, nlat=18, nlon=36):
     """OceanForcing with uniform downwelling shortwave (isolates the SW albedo)."""
     from legoesm.ocean.forcing.jra55_do import OceanForcing

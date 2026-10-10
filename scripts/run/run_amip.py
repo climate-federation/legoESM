@@ -126,7 +126,7 @@ _EVALUATION_DEFAULTS = EvaluationConfig()
 def _print_forcing_activity(args) -> None:
     """Print a forcing-channel activity summary (call on rank-0 only).
 
-    Mirrors the table in ``run_amip_cmip6_deck.py`` for the direct AMIP
+    Mirrors the table in ``run_amip_smoke_deck.py`` for the direct AMIP
     path.  GHG/ozone/aerosol/volcanic are gated on rrtmg/rrtmgp radiation;
     SST/SIC is always active; solar file threading is active when
     ``--solar-source`` is file-based.
@@ -767,6 +767,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--volcanic-aerosol-lw", action="store_true",
                         default=False,
                         help="Load and apply volcanic longwave aerosol optical depth")
+    parser.add_argument(
+        "--forcing-hold-outside-file-years", action="store_true", default=False,
+        help="Hold a multi-year ozone/aerosol/volcanic file's end record for "
+             "run dates outside its years (default: raise).")
 
     # Subgrid physics
     parser.add_argument("--convection", type=str, default="tiedtke",
@@ -2663,6 +2667,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         volcanic_aerosol_file=args.volcanic_aerosol_file,
         volcanic_aerosol_scale=args.volcanic_aerosol_scale,
         volcanic_aerosol_lw=args.volcanic_aerosol_lw,
+        forcing_hold_outside_file_years=args.forcing_hold_outside_file_years,
         cloud_scheme=args.clouds,
         use_clubb_cloud_fraction=args.use_clubb_cloud_fraction,
         clubb_prognostic=args.clubb_prognostic,
