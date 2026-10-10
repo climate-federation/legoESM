@@ -1314,7 +1314,7 @@ def make_voronoi_mpi_step(
                 physics_fn, phys_state,
                 where="make_voronoi_mpi_step(return_phys_state=True)")
             _state_out, _phys_out, _sfc = _step(state, dt, forcing, phys_state)
-            # Publish the surface-flux diagnostic on the model so ``_run_mpas``
+            # Publish the surface-flux diagnostic on the model so ``_run_column``
             # stashes it into ``_carry_aux`` for the coupler — the coupled
             # MPI-voronoi path otherwise forced the ocean/land with zero surface
             # flux.  Guard against stashing a Tracer (an outer jit/scan/grad would

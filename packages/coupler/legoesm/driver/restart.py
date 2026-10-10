@@ -190,8 +190,14 @@ def config_hash_matches(stored_hash: str, stored_resolved: dict, config,
     # False, and bricked every older run directory even with the new flag at
     # its default (codex round 2 on that PR, reproduced).
     try:
-        current = _serialize_config(config, kind)
-        defaults = _serialize_config(type(config)(), kind)
+        # a manifest written before a key rename spells it the old way
+        current = _stored_spelling(_serialize_config(config, kind),
+                                   stored_resolved)
+        if hashlib.sha256(json.dumps(current, sort_keys=True).encode(
+                "utf-8")).hexdigest() == stored_hash:
+            return True
+        defaults = _stored_spelling(_serialize_config(type(config)(), kind),
+                                    stored_resolved)
         restricted = _restrict_to_stored_shape(current, stored_resolved,
                                                defaults)
         if restricted is _REFUSE:
@@ -211,6 +217,22 @@ def config_hash_matches(stored_hash: str, stored_resolved: dict, config,
 # with ``None`` as the signal, three manifest tests went red, including two that
 # predate this change.
 _REFUSE = object()
+
+
+def _stored_spelling(cur, stored):
+    """*cur* with every renamed key (config.RENAMED_CONFIG_KEYS) spelled the
+    old way where *stored* (at the same depth) spells it so."""
+    if not (isinstance(cur, dict) and isinstance(stored, dict)):
+        return cur
+    from legoesm.driver.config import RENAMED_CONFIG_KEYS
+    old_of = {new: old for old, new in RENAMED_CONFIG_KEYS.items()}
+    out = {}
+    for k, v in cur.items():
+        # a manifest spelling the key both ways (equal values) hashes both
+        names = [n for n in (k, old_of.get(k)) if n in stored] or [k]
+        for n in names:
+            out[n] = _stored_spelling(v, stored.get(n))
+    return out
 
 
 def _restrict_to_stored_shape(current, stored, defaults):

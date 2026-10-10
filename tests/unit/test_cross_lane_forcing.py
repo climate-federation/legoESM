@@ -3,7 +3,7 @@
 Each lane is set up for real (tiny grid, rrtmg) with the forcing readers
 monkeypatched to a synthetic latitude- and day-dependent set, then stopped at
 its first hand-off to physics: the per-step ``forcing`` dict given to
-``model.step`` (MPAS; the fv3_duo column lane runs this same ``_run_mpas``),
+``model.step`` (MPAS; the fv3_duo column lane runs this same ``_run_column``),
 the spectral ``forcing_data`` dict, or the ``pack_forcing`` kwargs that become
 the compiled cube / lat-lon SegmentForcing.  Every lane must hand its
 radiation the same TSI, spectrum, ozone, aerosol column, CCN AOD, volcanic LW
@@ -97,7 +97,7 @@ def _spy_lane(monkeypatch, d, lane):
             raise _Stop
         monkeypatch.setattr(type(d.model), "step", _step)
         with pytest.raises(_Stop):
-            (d._run_mpas if lane == "mpas" else d._run_spectral)(0, None)
+            (d._run_column if lane == "mpas" else d._run_spectral)(0, None)
         f, rad = rec["forcing"], rec["rad"]
         s0 = rad.rrtmgp.S_0 if rad.scheme == "rrtmgp" else rad.gray.S_0
         return dict(

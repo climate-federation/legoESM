@@ -184,7 +184,7 @@ def test_mpas_config_flag_defaults_on_and_is_wired():
     # The floors stage lives in ``_step_jit`` (``step`` delegates to it) — the
     # method actually executed by the MPAS lane.  Asserting against ``step``
     # silently passed nothing, the same wrong-target mistake that once had a
-    # clamp blamed in ``_run_per_step`` while the century ran ``_run_mpas``.
+    # clamp blamed in ``_run_per_step`` while the century ran ``_run_column``.
     src = inspect.getsource(MPASPrimitiveEquationModel._step_jit)
     assert "conservative_tracer_clamp" in src
     # #1354/#1515: the borrow now lives in the shared positivity stage; the

@@ -357,9 +357,9 @@ def _cdgrid_cfg(**kw):
     )
 
 
-@pytest.mark.parametrize("knob", ["mpas_land_lapse_K_per_km", "mpas_land_beta"])
+@pytest.mark.parametrize("knob", ["land_lapse_K_per_km", "land_beta"])
 def test_validate_mpas_accepts_land_boundary_knobs(knob):
-    cfg = _mpas_cfg(**{knob: 6.5 if knob == "mpas_land_lapse_K_per_km" else 0.6})
+    cfg = _mpas_cfg(**{knob: 6.5 if knob == "land_lapse_K_per_km" else 0.6})
     cfg.validate_strict()
     for topography in ("flat", "gaussian"):
         idealized = cfg._replace(topography=topography)
@@ -383,29 +383,29 @@ def test_validate_mpas_refuses_pipeline_land_flags(flag):
 
 def test_validate_cdgrid_refuses_mpas_knobs():
     with pytest.raises(ValueError, match="MPAS-lane"):
-        _cdgrid_cfg(mpas_land_beta=0.6).validate_strict()
+        _cdgrid_cfg(land_beta=0.6).validate_strict()
     with pytest.raises(ValueError, match="MPAS-lane"):
-        _cdgrid_cfg(mpas_land_lapse_K_per_km=6.5).validate_strict()
+        _cdgrid_cfg(land_lapse_K_per_km=6.5).validate_strict()
 
 
 def test_validate_refuses_inert_corners():
     """Codex F1-F3: a knob whose machinery is off must be refused, not
     silently accepted."""
     with pytest.raises(ValueError, match="silently inert"):
-        _mpas_cfg(mpas_land_lapse_K_per_km=6.5,
+        _mpas_cfg(land_lapse_K_per_km=6.5,
                   radiation="none").validate_strict()
     with pytest.raises(ValueError, match="silently inert"):
-        _mpas_cfg(mpas_land_beta=0.6, turbulence="none").validate_strict()
+        _mpas_cfg(land_beta=0.6, turbulence="none").validate_strict()
     for topography in ("flat", "gaussian"):
         with pytest.raises(ValueError, match=f"topography={topography!r}.*all-zero"):
-            _mpas_cfg(mpas_land_beta=0.6, topography=topography).validate_strict()
+            _mpas_cfg(land_beta=0.6, topography=topography).validate_strict()
     # beta without radiation is fine (the turbulence anchor falls back but
     # the humidity throttle still applies).
-    _mpas_cfg(mpas_land_beta=0.6, radiation="none").validate_strict()
+    _mpas_cfg(land_beta=0.6, radiation="none").validate_strict()
 
 
 def test_validate_lane_guard_keys_on_grid_type_too():
-    """Codex F4: _run_mpas dispatch keys on grid_type; a grid_type='mpas'
+    """Codex F4: _run_column dispatch keys on grid_type; a grid_type='mpas'
     config with the default discretization must still be treated as the
     MPAS lane by the guard (pipeline land flags refused with the
     MPAS-lane message, not the wrong-lane one)."""
@@ -426,14 +426,14 @@ def test_validate_lane_guard_keys_on_grid_type_too():
 
 
 def test_validate_bounds():
-    with pytest.raises(ValueError, match="mpas_land_beta"):
-        _mpas_cfg(mpas_land_beta=1.5).validate_strict()
-    with pytest.raises(ValueError, match="mpas_land_beta"):
-        _mpas_cfg(mpas_land_beta=float("nan")).validate_strict()
-    with pytest.raises(ValueError, match="mpas_land_lapse_K_per_km"):
-        _mpas_cfg(mpas_land_lapse_K_per_km=-1.0).validate_strict()
-    with pytest.raises(ValueError, match="mpas_land_lapse_K_per_km"):
-        _mpas_cfg(mpas_land_lapse_K_per_km=25.0).validate_strict()
+    with pytest.raises(ValueError, match="land_beta"):
+        _mpas_cfg(land_beta=1.5).validate_strict()
+    with pytest.raises(ValueError, match="land_beta"):
+        _mpas_cfg(land_beta=float("nan")).validate_strict()
+    with pytest.raises(ValueError, match="land_lapse_K_per_km"):
+        _mpas_cfg(land_lapse_K_per_km=-1.0).validate_strict()
+    with pytest.raises(ValueError, match="land_lapse_K_per_km"):
+        _mpas_cfg(land_lapse_K_per_km=25.0).validate_strict()
 
 
 def test_land_latent_heat_without_its_water_is_refused(mpas_mesh, sigma_coord,
@@ -482,7 +482,7 @@ def test_undefined_land_fluxes_over_ocean_cells_do_not_poison(mpas_mesh,
 
 
 # ---------------------------------------------------------------------------
-# Land-model surface stress over the land fraction (mpas_land_stress_from_land)
+# Land-model surface stress over the land fraction (land_stress_from_land)
 # ---------------------------------------------------------------------------
 
 from legoesm import constants as _const
@@ -713,7 +713,7 @@ def test_land_stress_without_land_heat_fluxes_is_refused(
 
 def _eligible_cfg(**kw):
     kw.setdefault("use_multilayer_land", True)
-    kw.setdefault("mpas_land_beta_soil", True)
+    kw.setdefault("land_beta_soil", True)
     kw.setdefault("turbulence", "clubb")
     kw.setdefault("land_surface_scheme", "two_leaf")
     return _mpas_cfg(**kw)
@@ -722,9 +722,9 @@ def _eligible_cfg(**kw):
 @pytest.mark.parametrize("kw,why", [
     (dict(), None),
     (dict(land_surface_scheme="simple_seb"), None),
-    (dict(use_multilayer_land=False, mpas_land_beta_soil=False),
+    (dict(use_multilayer_land=False, land_beta_soil=False),
      "use_multilayer_land"),
-    (dict(mpas_land_beta_soil=False), "mpas_land_beta_soil"),
+    (dict(land_beta_soil=False), "land_beta_soil"),
     (dict(turbulence="ysu"), "turbulence"),
     (dict(land_surface_scheme="clm_ml"), "land_surface_scheme"),
 ])
@@ -733,52 +733,52 @@ def test_land_stress_auto_resolution_per_predicate(kw, why):
     predicate (validation unchanged); explicit True is refused there; explicit
     False is always accepted and resolves off."""
     from legoesm.driver.config import (
-        mpas_land_stress_eligibility, resolve_mpas_land_stress_from_land,
+        land_stress_eligibility, resolve_land_stress_from_land,
     )
     cfg = _eligible_cfg(**kw)
-    ok, reason = mpas_land_stress_eligibility(cfg)
+    ok, reason = land_stress_eligibility(cfg)
     assert ok is (why is None), reason
-    assert resolve_mpas_land_stress_from_land(cfg) is ok
-    assert resolve_mpas_land_stress_from_land(
-        cfg._replace(mpas_land_stress_from_land=False)) is False
+    assert resolve_land_stress_from_land(cfg) is ok
+    assert resolve_land_stress_from_land(
+        cfg._replace(land_stress_from_land=False)) is False
     if why is not None:
         assert why in reason
-        with pytest.raises(ValueError, match="mpas_land_stress_from_land=True"):
-            cfg._replace(mpas_land_stress_from_land=True).validate_strict()
+        with pytest.raises(ValueError, match="land_stress_from_land=True"):
+            cfg._replace(land_stress_from_land=True).validate_strict()
 
 
 def test_land_stress_auto_off_and_true_refused_off_the_mpas_lane():
-    from legoesm.driver.config import resolve_mpas_land_stress_from_land
+    from legoesm.driver.config import resolve_land_stress_from_land
     cfg = _cdgrid_cfg()
-    assert resolve_mpas_land_stress_from_land(cfg) is False
+    assert resolve_land_stress_from_land(cfg) is False
     cfg.validate_strict()
     with pytest.raises(ValueError, match="not the MPAS lane"):
-        cfg._replace(mpas_land_stress_from_land=True).validate_strict()
+        cfg._replace(land_stress_from_land=True).validate_strict()
 
 
 def test_land_stress_lane_predicate_is_the_driver_dispatch():
     """The driver runs the MPAS lane on grid_type == 'mpas' (fv3_duo first);
     an mpas discretization on another grid never reaches it."""
-    from legoesm.driver.config import mpas_land_stress_eligibility
+    from legoesm.driver.config import land_stress_eligibility
     cfg = _eligible_cfg()
-    assert mpas_land_stress_eligibility(cfg)[0]
+    assert land_stress_eligibility(cfg)[0]
     for bad in (cfg._replace(grid=cfg.grid._replace(grid_type="cubed_sphere")),
                 cfg._replace(dycore=cfg.dycore._replace(
                     discretization="fv3_duo"))):
-        ok, why = mpas_land_stress_eligibility(bad)
+        ok, why = land_stress_eligibility(bad)
         assert not ok and "not the MPAS lane" in why
-    # the duo COLUMN lane runs _run_mpas (the duo as the loop's dynamics
+    # the duo COLUMN lane runs _run_column (the duo as the loop's dynamics
     # operator) and takes the land stress like MPAS (user 2026-10-09), on
     # its cube grid_type
     duo_col = cfg._replace(
         grid=cfg.grid._replace(grid_type="cubed_sphere"),
         dycore=cfg.dycore._replace(discretization="fv3_duo",
-                                   fv3_duo_column_lane=True))
-    assert mpas_land_stress_eligibility(duo_col)[0]
+                                   column_lane=True))
+    assert land_stress_eligibility(duo_col)[0]
 
 
 # ---------------------------------------------------------------------------
-# Non-land fraction on the ocean surface (mpas_ocean_flux_on_ocean_surface,
+# Non-land fraction on the ocean surface (ocean_flux_on_ocean_surface,
 # #1320 stage 1)
 # ---------------------------------------------------------------------------
 
@@ -958,36 +958,36 @@ def test_ocean_surface_gradient_finite_and_jit_parity(mpas_mesh, sigma_coord,
 
 
 @pytest.mark.parametrize("kw,why", [
-    (dict(use_multilayer_land=False, mpas_land_beta_soil=False),
+    (dict(use_multilayer_land=False, land_beta_soil=False),
      "use_multilayer_land"),
-    (dict(mpas_land_beta_soil=False), "mpas_land_beta_soil"),
+    (dict(land_beta_soil=False), "land_beta_soil"),
     (dict(turbulence="ysu"), "turbulence"),
 ])
 def test_ocean_surface_flag_refused_where_inert(kw, why):
-    cfg = _eligible_cfg(mpas_ocean_flux_on_ocean_surface=True)
+    cfg = _eligible_cfg(ocean_flux_on_ocean_surface=True)
     cfg.validate_strict()
     bad = cfg._replace(**kw)
-    with pytest.raises(ValueError, match="mpas_ocean_flux_on_ocean_surface"):
+    with pytest.raises(ValueError, match="ocean_flux_on_ocean_surface"):
         bad.validate_strict()
-    from legoesm.driver.config import mpas_land_flux_handoff_eligibility
-    ok, reason = mpas_land_flux_handoff_eligibility(bad)
+    from legoesm.driver.config import land_flux_handoff_eligibility
+    ok, reason = land_flux_handoff_eligibility(bad)
     assert not ok and why in reason
 
 
 def test_ocean_surface_flag_refused_without_sst_or_land_stress():
-    cfg = _eligible_cfg(mpas_ocean_flux_on_ocean_surface=True)
+    cfg = _eligible_cfg(ocean_flux_on_ocean_surface=True)
     with pytest.raises(ValueError, match="radiation='none'"):
         cfg._replace(radiation="none").validate_strict()
     with pytest.raises(ValueError, match="land model's stress"):
-        cfg._replace(mpas_land_stress_from_land=False).validate_strict()
+        cfg._replace(land_stress_from_land=False).validate_strict()
     with pytest.raises(ValueError, match="land model's stress"):
         cfg._replace(land_surface_scheme="clm_ml").validate_strict()
-    cfg._replace(mpas_land_stress_from_land=True).validate_strict()
+    cfg._replace(land_stress_from_land=True).validate_strict()
 
 
 def test_ocean_surface_flag_refused_off_the_mpas_lane():
     with pytest.raises(ValueError, match="not the MPAS lane"):
-        _cdgrid_cfg(mpas_ocean_flux_on_ocean_surface=True).validate_strict()
+        _cdgrid_cfg(ocean_flux_on_ocean_surface=True).validate_strict()
 
 
 # Composable-physics P1: what the PhysicsPipeline (cd-grid / lat-lon) and the
@@ -1013,7 +1013,7 @@ def _strict_msgs(cfg, caplog):
     (dict(turbulence="clubb", clubb_prognostic=True), "CLUBB-moment slot", True),
     (dict(convection="tiedtke"), "momentum transport", False),
     (dict(convection="bechtold"), "bechtold_enable_cmt=false", False),
-    (dict(use_multilayer_land=True), "mpas_land_params_refresh=True is inert",
+    (dict(use_multilayer_land=True), "land_params_refresh=True is inert",
      False),
 ])
 def test_pipeline_silent_drops_refused_or_warned(kw, match, refused, caplog):
@@ -1029,8 +1029,8 @@ def test_pipeline_silent_drops_refused_or_warned(kw, match, refused, caplog):
     # FV3-duo column lane) or spectral (spectral's own multilayer refusal is
     # tested below).
     duo = _cdgrid_cfg(**kw)._replace(dycore=DycoreConfig(
-        dt=600.0, discretization="fv3_duo", fv3_duo_column_lane=True))
-    assert duo.mpas_loop_lane
+        dt=600.0, discretization="fv3_duo", column_lane=True))
+    assert duo.column_loop_lane
     spectral = _cdgrid_cfg(**kw)._replace(
         dycore=DycoreConfig(dt=600.0, discretization="spectral"))
     for cfg in (_mpas_cfg(**kw), duo, spectral):

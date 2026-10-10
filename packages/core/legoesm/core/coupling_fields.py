@@ -40,7 +40,7 @@ def require_surface_radiation_aux(aux, *, radiation_active: bool,
 
     Gated on the atmosphere CONFIG, not on bare key presence: zero IS the
     physically correct forcing for a dry run or ``radiation="none"``, and
-    ``_run_mpas`` stashes each key only when its source produced one
+    ``_run_column`` stashes each key only when its source produced one
     (model_driver.py:5795-5802).  An unconditional "require all three keys"
     check would raise on those legitimate coupled runs.
 

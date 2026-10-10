@@ -1991,7 +1991,7 @@ def _hold_unsolved_columns(state, new_state, response, surface_out, forcing,
     The canopy warm-start cache (``canopy_x``) is NaN by design where a column
     has never converged ("cold start"), so NaN there is not a failure; Inf is.
 
-    On the MPAS lane with ``mpas_land_beta_soil`` (production) the atmosphere
+    On the MPAS lane with ``land_beta_soil`` (production) the atmosphere
     receives the land's own sensible and latent fluxes (``shflx_land`` /
     ``lhflx_land``), so what this returns is what it exchanges with; without
     that switch it recomputes its fluxes from the returned skin state.  This

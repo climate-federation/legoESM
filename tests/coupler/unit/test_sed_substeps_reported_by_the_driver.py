@@ -3,7 +3,7 @@
 Both reviewers (codex + GLM, 2026-09-22) rejected the unit tests that drive
 ``report_sed_substep_overflow`` / ``sed_substeps_window_max`` directly: they
 stay green if the driver's own calls are deleted.  This runs the real MPAS
-loop (``ModelDriver._run_mpas`` via the coupled voronoi driver, the same
+loop (``ModelDriver._run_column`` via the coupled voronoi driver, the same
 harness as the surface-flux export regression) for fewer steps than the
 report cadence, so the ONLY thing that can emit the line is the post-loop
 flush.  Deleting the flush, the slot publication, the microphysics count or

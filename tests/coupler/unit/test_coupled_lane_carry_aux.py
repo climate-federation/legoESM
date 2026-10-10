@@ -75,7 +75,7 @@ def test_present_but_none_value_is_treated_as_missing():
 
 def test_inactive_sources_tolerate_empty_aux():
     """NO FALSE POSITIVES: zero IS the correct forcing for a dry,
-    radiation='none' run, and _run_mpas legitimately stashes nothing there
+    radiation='none' run, and _run_column legitimately stashes nothing there
     (model_driver.py:5795-5802).  A blanket 'require all three keys' check
     would break this."""
     require_surface_radiation_aux(

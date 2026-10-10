@@ -444,7 +444,7 @@ explicitly that you did not. "I was careful" is not compliance.
   require showing that line run in configuration under test: print ENCLOSING
   FUNCTION (`awk` nearest `def` above it), confirm active lane/driver call it.
   FAILURE: blamed positivity clamps at `model_driver.py:10923` for century's
-  water source; they live in `_run_per_step` while century run `_run_mpas`,
+  water source; they live in `_run_per_step` while century run `_run_column`,
   which contain no moisture clamp at all. Fix nearly written for lane the run
   never touch. Same class as reading entry point instead of full path.
 - **REUSING A REFERENCE IMPL MEANS PORTING ITS EXCLUSIONS, not just its
@@ -493,7 +493,7 @@ explicitly that you did not. "I was careful" is not compliance.
   missing feature MUST be re-verified in CURRENT code at point of use before
   repeated as finding — this repo routinely fix things without updating prose.
   Comment name module imposing guard → OPEN THAT MODULE. FAILURES (2026-07-30,
-  three in one day): quoted `_run_mpas` "turbulent surface fluxes are
+  three in one day): quoted `_run_column` "turbulent surface fluxes are
   intentionally NOT applied" comment and `AMIP.md` Known #3 to claim MPAS has no
   turbulence — MPAS turbulence path exist (`turbulence/integration.py`, Perot
   edge->cell) and run resolve `turbulence=louis` + `surface_bulk_scheme=coare3`;

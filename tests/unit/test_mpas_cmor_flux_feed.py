@@ -807,7 +807,7 @@ class TestRound4:
         MPAS loop."""
         import inspect
         from legoesm.driver.model_driver import ModelDriver
-        src = inspect.getsource(ModelDriver._run_mpas)
+        src = inspect.getsource(ModelDriver._run_column)
         assert "(DIAG_PHASE + step + 1) % DIAG_INTERVAL == 0" in src, (
             "MPAS diagnostics must trigger on the phased step index")
         assert ("DIAG_PHASE = start_step if cfg.output.diag_days > 0 else 0"
@@ -894,7 +894,7 @@ class TestRound4:
         steps, producing a wrong interval mean."""
         import inspect
         from legoesm.driver.model_driver import ModelDriver
-        src = inspect.getsource(ModelDriver._run_mpas)
+        src = inspect.getsource(ModelDriver._run_column)
         assert "DROPPED a partial diag" in src, (
             "feed-off runs must drop (and log) staged cmor_flux* payloads")
         # The drop must be in the else-branch of the accumulator build,
@@ -1516,7 +1516,7 @@ class TestClearSkyPassEffective:
     def test_run_mpas_uses_the_helper_for_the_radiation_config(self):
         """The gate must reach the RadiationConfig the MPAS lane BUILDS —
         passing the raw flag there is the defect this helper exists to stop.
-        Asserted on the AST of the symbol that runs (_run_mpas)."""
+        Asserted on the AST of the symbol that runs (_run_column)."""
         import ast
         import inspect
         import textwrap
@@ -1524,18 +1524,18 @@ class TestClearSkyPassEffective:
         from legoesm.driver.model_driver import ModelDriver
 
         tree = ast.parse(textwrap.dedent(
-            inspect.getsource(ModelDriver._run_mpas)))
+            inspect.getsource(ModelDriver._run_column)))
         kw = [k for n in ast.walk(tree) if isinstance(n, ast.Call)
               and isinstance(n.func, ast.Name)
               and n.func.id == "RadiationConfig"
               for k in (n.keywords or []) if k.arg == "clear_sky_diag"]
         assert len(kw) == 1, (
             "expected exactly one RadiationConfig(clear_sky_diag=...) in "
-            "_run_mpas")
+            "_run_column")
         names = {n.attr for n in ast.walk(kw[0].value)
                  if isinstance(n, ast.Attribute)}
         assert "_mpas_clear_sky_effective" in names, (
-            "_run_mpas passes the RAW flag into RadiationConfig; it must pass "
+            "_run_column passes the RAW flag into RadiationConfig; it must pass "
             "the publishability-checked value from clear_sky_pass_effective.")
         assert "clear_sky_diag" not in names
 

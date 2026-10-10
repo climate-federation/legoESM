@@ -3,9 +3,9 @@
 The functional behaviour is pinned at the two layers below the driver:
 ``test_mpas_physics_ledger`` (per-scheme rows close against the applied
 physics) and ``test_mpas_step_ledger`` (full step ledger closes per column).
-A full ``_run_mpas`` e2e needs forcing assets and is not a unit test, so the
+A full ``_run_column`` e2e needs forcing assets and is not a unit test, so the
 driver layer gets SOURCE tripwires — each names the symbol that RUNS
-(``ModelDriver._run_mpas``, the method the production chain calls) and each
+(``ModelDriver._run_column``, the method the production chain calls) and each
 fails if its forward/read/write is deleted (verified by construction: the
 asserted strings exist only in the added wiring).
 """
@@ -18,7 +18,7 @@ import pytest
 def run_mpas_src():
     from legoesm.driver.model_driver import ModelDriver
 
-    return inspect.getsource(ModelDriver._run_mpas)
+    return inspect.getsource(ModelDriver._run_column)
 
 
 def test_physics_factory_receives_the_ledger_flag(run_mpas_src):
@@ -33,7 +33,7 @@ def test_physics_factory_receives_the_ledger_flag(run_mpas_src):
 
 def test_step_ledger_side_channel_is_read(run_mpas_src):
     assert '_step_ledger' in run_mpas_src, (
-        "_run_mpas no longer reads model._step_ledger — accumulation is dead")
+        "_run_column no longer reads model._step_ledger — accumulation is dead")
 
 
 def test_percolumn_file_is_written_with_its_own_name(run_mpas_src):

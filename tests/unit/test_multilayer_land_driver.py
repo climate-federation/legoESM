@@ -935,7 +935,7 @@ def test_calibrated_physics_deploys_the_model_the_tables_were_fitted_to(
     cfg = _small_cfg()._replace(
         grid=GridConfig(grid_type="mpas", resolution=2, nlev=8),
         dycore=DycoreConfig(dt=600.0, discretization="mpas"),
-        mpas_land_beta_soil=True,
+        land_beta_soil=True,
         # The flux handoff rides the turbulence surface flux, so it needs a
         # turbulence scheme to ride (validation says so).
         turbulence="louis",
@@ -1069,7 +1069,7 @@ def test_snow_ageing_override_survives_the_calibration_reapply(monkeypatch, tmp_
     base = _small_cfg()._replace(
         grid=GridConfig(grid_type="mpas", resolution=2, nlev=8),
         dycore=DycoreConfig(dt=600.0, discretization="mpas"),
-        mpas_land_beta_soil=True,
+        land_beta_soil=True,
         turbulence="louis",
         land_calibrated_physics=True,      # the re-apply that used to win
         land_stomatal_beta=False,
@@ -1115,7 +1115,7 @@ def test_soil_freeze_thaw_reaches_the_land_the_mpas_run_builds(monkeypatch, tmp_
     base = _small_cfg()._replace(
         grid=GridConfig(grid_type="mpas", resolution=2, nlev=8),
         dycore=DycoreConfig(dt=600.0, discretization="mpas"),
-        mpas_land_beta_soil=True,
+        land_beta_soil=True,
         turbulence="louis",
         land_calibrated_physics=True,
         land_stomatal_beta=False,
@@ -1149,7 +1149,7 @@ def test_canopy_b0_stress_and_interception_reach_the_mpas_land(monkeypatch, tmp_
     base = _small_cfg()._replace(
         grid=GridConfig(grid_type="mpas", resolution=2, nlev=8),
         dycore=DycoreConfig(dt=600.0, discretization="mpas"),
-        mpas_land_beta_soil=True,
+        land_beta_soil=True,
         turbulence="louis",
         land_calibrated_physics=True,
         land_stomatal_beta=False,
@@ -1175,7 +1175,7 @@ def test_canopy_b0_stress_and_interception_reach_the_mpas_land(monkeypatch, tmp_
 
 
 def test_two_leaf_land_stress_reaches_clubb_winds(monkeypatch, tmp_path):
-    """mpas_land_stress_from_land on the production pairing: the TWO-LEAF
+    """land_stress_from_land on the production pairing: the TWO-LEAF
     canopy's solved stress handed to CLUBB on the mesh lane.  The run must
     complete finite and its winds must differ from the same run with the bulk
     stress (the canopy's tau reaches the boundary layer).  Unset (AUTO) on
@@ -1186,12 +1186,12 @@ def test_two_leaf_land_stress_reaches_clubb_winds(monkeypatch, tmp_path):
         grid=GridConfig(grid_type="mpas", resolution=2, nlev=8),
         dycore=DycoreConfig(dt=600.0, discretization="mpas"),
         days=2401.0 / 86400.0,               # 4 steps
-        mpas_land_beta_soil=True, turbulence="clubb",
+        land_beta_soil=True, turbulence="clubb",
         land_surface_scheme="two_leaf", snow_albedo_feedback=True,
-        mpas_land_params_refresh=False)   # the fixture has no LAI climatology
+        land_params_refresh=False)   # the fixture has no LAI climatology
     runs = {}
     for name, on in (("off", False), ("on", True), ("auto", None)):
-        cfg = base._replace(mpas_land_stress_from_land=on)
+        cfg = base._replace(land_stress_from_land=on)
         cfg.validate_strict()
         d = ModelDriver(cfg, output_dir=tmp_path / name)
         d.setup()
@@ -1214,7 +1214,7 @@ def test_canopy_smoothing_widths_survive_the_calibration(monkeypatch, tmp_path):
     base = _small_cfg()._replace(
         grid=GridConfig(grid_type="mpas", resolution=2, nlev=8),
         dycore=DycoreConfig(dt=600.0, discretization="mpas"),
-        mpas_land_beta_soil=True,
+        land_beta_soil=True,
         turbulence="louis",
         land_calibrated_physics=True,
         land_stomatal_beta=False,

@@ -14,6 +14,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import weakref
 import logging
 import os
 import sys
@@ -177,6 +178,33 @@ def _print_forcing_activity(args) -> None:
             "[run_amip] NOTE: --radiation gray disables GHG/ozone/aerosol/"
             "volcanic. Use --radiation rrtmg for production AMIP."
         )
+
+
+class _OneSpelling:
+    """Mixin: a renamed flag keeps its old ``--mpas-*`` spelling as an alias;
+    both spellings on one command line is an error, not last-wins."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        key = (option_string or "").replace("--no-", "--", 1)
+        seen = getattr(self, "_seen", None)
+        if seen is None or seen[0]() is not namespace:
+            self._seen = seen = (weakref.ref(namespace), key)
+        if seen[1] != key:
+            parser.error(f"{seen[1]} and {option_string} are two spellings "
+                         f"of one option; give one of them")
+        self._set(parser, namespace, values, option_string)
+
+
+class _StoreOneSpelling(_OneSpelling, argparse.Action):
+    def _set(self, parser, namespace, values, option_string):
+        setattr(namespace, self.dest,
+                self.const if self.nargs == 0 else values)
+
+
+class _BoolOneSpelling(_OneSpelling, argparse.BooleanOptionalAction):
+    def _set(self, parser, namespace, values, option_string):
+        argparse.BooleanOptionalAction.__call__(
+            self, parser, namespace, values, option_string)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -1186,7 +1214,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help=("Window halo width for --fv3-duo-windows (a measured per-deck "
               "value, e.g. 11 at C48 with 3 acoustic substeps; no default)."))
     parser.add_argument(
-        "--fv3-duo-column-lane", action="store_true", default=False,
+        "--column-lane", "--fv3-duo-column-lane", action=_StoreOneSpelling,
+        nargs=0, const=True, default=False, dest="column_lane",
         help=("fv3_duo as a COLUMN model inside the MPAS lane (route A): the "
               "duo is the dynamics operator of the CAM6-suite loop through "
               "FV3DuoColumnModel; physics runs on (nCells, nlev) columns "
@@ -1854,23 +1883,25 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         dest="sponge_sigma_top",
                         help="Sponge base: sigma below which the sin^2 damping "
                              "ramps up toward the lid (default 0.15).")
-    parser.add_argument("--mpas-land-lapse-k-per-km", type=float, default=None,
-                        dest="mpas_land_lapse_K_per_km",
+    parser.add_argument("--land-lapse-k-per-km", "--mpas-land-lapse-k-per-km",
+                        type=float, default=None, action=_StoreOneSpelling,
+                        dest="land_lapse_K_per_km",
                         help="MPAS lane only: lapse-adjust the LAND fraction's "
                              "surface-temperature anchor by this rate [K/km] "
                              "times elevation (the AMIP loader fills land "
                              "cells with nearest-ocean sea-level SST, which "
                              "overheats elevated terrain). 0=off (default); "
                              "6.5=ICAO standard atmosphere.")
-    parser.add_argument("--mpas-land-beta", type=float, default=None,
-                        dest="mpas_land_beta",
+    parser.add_argument("--land-beta", "--mpas-land-beta",
+                        type=float, default=None, action=_StoreOneSpelling,
+                        dest="land_beta",
                         help="MPAS lane only: land evaporation efficiency in "
                              "[0, 1] throttling the land-fraction surface "
                              "humidity gradient (1.0=saturated wet swamp, "
                              "default; ~0.6 first-order continental mean).")
-    parser.add_argument("--mpas-land-beta-soil",
-                        action=argparse.BooleanOptionalAction, default=False,
-                        dest="mpas_land_beta_soil",
+    parser.add_argument("--land-beta-soil", "--mpas-land-beta-soil",
+                        action=_BoolOneSpelling, default=False,
+                        dest="land_beta_soil",
                         help="MPAS lane only (#1312 phase 2b): thread the "
                              "interactive multilayer land's per-cell "
                              "root-zone beta_soil into the turbulence "
@@ -1879,9 +1910,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "throttled by the soil's own moisture state, "
                              "REPLACING the static --mpas-land-beta over "
                              "land. Requires --use-multilayer-land.")
-    parser.add_argument("--mpas-land-stress-from-land",
-                        action=argparse.BooleanOptionalAction, default=None,
-                        dest="mpas_land_stress_from_land",
+    parser.add_argument("--land-stress-from-land", "--mpas-land-stress-from-land",
+                        action=_BoolOneSpelling, default=None,
+                        dest="land_stress_from_land",
                         help="MPAS lane: surface stress over the land fraction "
                              "from the land model (its roughness / canopy drag, "
                              "rho u*^2) instead of the atmosphere's bulk "
@@ -1890,9 +1921,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "multilayer land with --mpas-land-beta-soil, a "
                              "turbulence scheme taking injected fluxes, "
                              "two_leaf/simple_seb); --no-... = old bulk stress.")
-    parser.add_argument("--mpas-ocean-flux-on-ocean-surface",
-                        action=argparse.BooleanOptionalAction, default=False,
-                        dest="mpas_ocean_flux_on_ocean_surface",
+    parser.add_argument("--ocean-flux-on-ocean-surface",
+                        "--mpas-ocean-flux-on-ocean-surface",
+                        action=_BoolOneSpelling, default=False,
+                        dest="ocean_flux_on_ocean_surface",
                         help="MPAS lane, land-flux handoff on: evaluate the "
                              "non-land fraction's bulk surface fluxes on the "
                              "ocean/ice surface (SST/SIC blend) instead of on "
@@ -1901,9 +1933,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "land model's stress over land (--mpas-land-"
                              "stress-from-land, default auto) and radiation "
                              "!= none.")
-    parser.add_argument("--mpas-land-params-refresh",
-                        action=argparse.BooleanOptionalAction, default=True,
-                        dest="mpas_land_params_refresh",
+    parser.add_argument("--land-params-refresh", "--mpas-land-params-refresh",
+                        action=_BoolOneSpelling, default=True,
+                        dest="land_params_refresh",
                         help="MPAS lane, multilayer two-leaf land: rebuild "
                              "LAI, canopy height and soil albedo from the "
                              "surfdata climatology every land step, as the "
@@ -2142,17 +2174,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "cold condensate to cloud ice). Fixes the "
                              "TTL ice-supersaturation vapour bias. Requires "
                              "--hard-saturation-adjustment.")
-    parser.add_argument("--mpas-ice-skin-prognostic",
-                        action=argparse.BooleanOptionalAction, default=False,
-                        dest="mpas_ice_skin_prognostic",
+    parser.add_argument("--ice-skin-prognostic", "--mpas-ice-skin-prognostic",
+                        action=_BoolOneSpelling, default=False,
+                        dest="ice_skin_prognostic",
                         help="MPAS lane only: prognostic sea-ice skin "
                              "temperature (Semtner 1976 zero-layer conduction "
                              "+ slab thermal inertia) replacing the constant "
                              "T_ice anchor over ice-covered cells — removes "
                              "the year-round 271.35 K pin behind the polar "
                              "tas warm bias. Needs radiation != none.")
-    parser.add_argument("--mpas-ice-thickness-m", type=float, default=None,
-                        dest="mpas_ice_thickness_m",
+    parser.add_argument("--ice-thickness-m", "--mpas-ice-thickness-m",
+                        type=float, default=None, action=_StoreOneSpelling,
+                        dest="ice_thickness_m",
                         help="Climatological ice slab thickness [m] for the "
                              "prognostic ice skin (default 2.0; bounds "
                              "[0.1, 10]). Requires --mpas-ice-skin-prognostic.")
@@ -2526,7 +2559,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         dt=args.dt,
         fv3_duo_windows=args.fv3_duo_windows,
         fv3_duo_window_pad=args.fv3_duo_window_pad,
-        fv3_duo_column_lane=args.fv3_duo_column_lane,
+        column_lane=args.column_lane,
         fv3_duo_fill=args.fv3_duo_fill,
         fv3_duo_nord=args.fv3_duo_nord,
         fv3_duo_d4_bg=args.fv3_duo_d4_bg,
@@ -2777,17 +2810,17 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         sponge_sigma_top=(args.sponge_sigma_top
                           if args.sponge_sigma_top is not None
                           else _EXPERIMENT_DEFAULTS.sponge_sigma_top),
-        mpas_land_lapse_K_per_km=(
-            args.mpas_land_lapse_K_per_km
-            if args.mpas_land_lapse_K_per_km is not None
-            else _EXPERIMENT_DEFAULTS.mpas_land_lapse_K_per_km),
-        mpas_land_beta=(args.mpas_land_beta
-                        if args.mpas_land_beta is not None
-                        else _EXPERIMENT_DEFAULTS.mpas_land_beta),
-        mpas_land_beta_soil=args.mpas_land_beta_soil,
-        mpas_land_stress_from_land=args.mpas_land_stress_from_land,
-        mpas_ocean_flux_on_ocean_surface=args.mpas_ocean_flux_on_ocean_surface,
-        mpas_land_params_refresh=args.mpas_land_params_refresh,
+        land_lapse_K_per_km=(
+            args.land_lapse_K_per_km
+            if args.land_lapse_K_per_km is not None
+            else _EXPERIMENT_DEFAULTS.land_lapse_K_per_km),
+        land_beta=(args.land_beta
+                        if args.land_beta is not None
+                        else _EXPERIMENT_DEFAULTS.land_beta),
+        land_beta_soil=args.land_beta_soil,
+        land_stress_from_land=args.land_stress_from_land,
+        ocean_flux_on_ocean_surface=args.ocean_flux_on_ocean_surface,
+        land_params_refresh=args.land_params_refresh,
         mpas_qv_smooth_del2_m2s=(
             args.mpas_qv_smooth_del2_m2s
             if args.mpas_qv_smooth_del2_m2s is not None
@@ -2869,11 +2902,11 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         mcfarlane_k_wave=(
             args.mcfarlane_k_wave if args.mcfarlane_k_wave is not None
             else _EXPERIMENT_DEFAULTS.mcfarlane_k_wave),
-        mpas_ice_skin_prognostic=args.mpas_ice_skin_prognostic,
-        mpas_ice_thickness_m=(
-            args.mpas_ice_thickness_m
-            if args.mpas_ice_thickness_m is not None
-            else _EXPERIMENT_DEFAULTS.mpas_ice_thickness_m),
+        ice_skin_prognostic=args.ice_skin_prognostic,
+        ice_thickness_m=(
+            args.ice_thickness_m
+            if args.ice_thickness_m is not None
+            else _EXPERIMENT_DEFAULTS.ice_thickness_m),
         snow_albedo_feedback=args.snow_albedo_feedback,
         cloud_conv_cloud_max=args.conv_cloud_max,
         cloud_conv_cloud_condensate=args.conv_cloud_condensate,

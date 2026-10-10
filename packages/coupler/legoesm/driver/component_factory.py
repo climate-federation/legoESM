@@ -485,9 +485,9 @@ def _create_fv3_duo_column_model(config: ExperimentConfig, gc, model_type,
     cannot honour yet is refused HERE, by name, so nothing is silently
     inert (the wall's failure mode):
       * the MPAS-lane numerics knobs that edit the state after the step
-        (top sponge, q_v del2/del4 smoothing): the columns are a VIEW of
-        the duo bundle and the model refuses wind edits; q_v smoothing
-        is OFF on the duo by decision (user 2026-09-26);
+        (q_v del2/del4 smoothing): OFF on the duo by decision (user
+        2026-09-26); the top sponge and grid-operator convection are
+        refused for every column lane in ``validate_strict``;
       * held_suarez_forcing: the closed lane's FV3 hswf is the certified
         HS on this dycore; the MPAS lane's HS drops the meridional drag;
       * NH / km outside {5, 10} (M4); distributed and windows run through
@@ -501,8 +501,6 @@ def _create_fv3_duo_column_model(config: ExperimentConfig, gc, model_type,
     )
 
     refused = []
-    if getattr(config, "sponge_enabled", False):
-        refused.append("sponge_enabled=True (post-step wind edit)")
     for k in ("mpas_qv_smooth_del2_m2s", "mpas_qv_smooth_del4_m4s"):
         if float(getattr(config, k, 0.0) or 0.0) != 0.0:
             refused.append(f"{k}={getattr(config, k)!r} (q_v smoothing is "
@@ -549,22 +547,6 @@ def _create_fv3_duo_column_model(config: ExperimentConfig, gc, model_type,
     # :324/:335/:352, moist_cp case(6)).  A scheme whose tendencies
     # target a tracer the registry does not carry is refused by the
     # registry's own slot validation below.
-    # Convection schemes that READ A GRID OPERATOR are refused by trait:
-    # the column mesh carries no edge topology, so the moisture-
-    # convergence operator and the resolved-w diagnostic return None,
-    # which Kuo turns into a zero source (an inert scheme that runs,
-    # codex 2026-09-30) and Kain-Fritsch needs concretely.  Tiedtke /
-    # Bechtold engage their internal saturation-deficit proxy on None
-    # (the unified pipeline's own degrade path) and are admitted.
-    if config.convection != "none":
-        from legoesm.atmosphere.physics.convection.integration import (
-            convection_scheme_traits)
-        _tr = convection_scheme_traits(config.convection)
-        if _tr.is_simple_mc_consumer or _tr.is_w_grid_consumer:
-            refused.append(
-                f"convection={config.convection!r} (reads a grid operator "
-                f"-- moisture convergence / resolved w -- the column mesh "
-                f"has no edge topology for; it would run inert)")
     # MPAS-dycore numerics knobs (dycore.mpas_*) are the MPAS model's; the
     # duo reads none of them except the grid-general positivity knob, so a
     # non-default value would be inert
@@ -1092,7 +1074,7 @@ def create_atmosphere_dycore(
 
     # ----- FV3 six-face duo cube (certified fv_dynamics JAX lane) -----
     if (solver_name == "fv3_duo_primitive_equations"
-            and getattr(config.dycore, "fv3_duo_column_lane", False)):
+            and config.dycore.column_lane):
         return _create_fv3_duo_column_model(config, gc, model_type,
                                             bundle=fv3_duo_bundle)
     if solver_name == "fv3_duo_primitive_equations":

@@ -36,7 +36,7 @@ column leaves the driver holds are gathered to every host each step
 
 from __future__ import annotations
 
-from typing import Any, NamedTuple
+from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -50,6 +50,7 @@ from legoesm.core.fv3_native_physics_coupling import (
 from legoesm.grids.fv3_native_gridstruct import (
     FV3_KAPPA, FV3_OMEGA, FV3_RADIUS_M,
 )
+from legoesm.grids.column_mesh import ColumnMesh
 from legoesm.grids.vertical import create_hybrid_coordinate
 from legoesm.timestepping.integration import (
     refuse_unthreaded_stateful_physics)
@@ -61,74 +62,11 @@ from .fv3_duo_dynamics import FV3DuoDynamicsModel
 # water species in order (nwat = 6), passengers (N_*) after them
 DUO_COLUMN_TRACER_NAMES = FV3_WATER_SPECIES[:3]
 
-
-class DuoColumnMesh(NamedTuple):
-    """What the MPAS lane and its physics read off ``model.mesh``: cell
-    lat/lon [rad] and area [m^2] per column, no edge topology (a frontal
-    GWD source, which needs gradients, is refused on it).  Per-cell 1-D
-    like the Voronoi mesh (``grid_shape_2d == (nCells,)``), so every
-    setup-time regrid (topography, SST/SIC, land, ozone) lands on the
-    duo's own A-grid centres -- the driver's standard cubed-sphere
-    centres are NOT these (MEASURED 2026-09-26: 1.6 deg offsets)."""
-    latCell: jax.Array
-    lonCell: jax.Array
-    areaCell: jax.Array
-    nCells: int
-    grid_lat: jax.Array
-    grid_lon: jax.Array
-    grid_shape_2d: tuple
-    lat: jax.Array
-    lon: jax.Array
-    #: cell corners ``(nCells, 4)`` [rad], the B-grid nodes of each compute
-    #: cell in ring order: the terrain product's exact quad ownership
-    cornerLat: jax.Array
-    cornerLon: jax.Array
-    #: per-column subgrid orographic stddev [m] for the orographic GWD launch,
-    #: attached by the driver (``grid._replace``) like the Voronoi mesh's;
-    #: None = the scheme's scalar fallback
-    subgrid_topo_stddev: Any = None
-    #: per-column land fraction for convection (ZM autoconversion split)
-    #: and orographic GWD, attached by the driver like the Voronoi mesh's;
-    #: None = no land field (ZM land_fraction="required" then refuses)
-    land_frac: Any = None
-
-    # the rest of GridProtocol, as the Voronoi mesh defines them.  Radius
-    # and rotation rate are the DUO GRID'S (FV3's gfs_constants, which the
-    # six-face context is built with: areas, metrics, Coriolis), not
-    # legoESM's -- 3.1e-5 relative apart; a mesh reporting one radius
-    # while its areas use another would be a hidden choice.
-    @property
-    def grid_area(self) -> jax.Array:
-        return self.areaCell
-
-    @property
-    def grid_total_area(self) -> jax.Array:
-        return jnp.sum(self.areaCell)
-
-    @property
-    def grid_coriolis(self) -> jax.Array:
-        return 2.0 * FV3_OMEGA * jnp.sin(self.latCell)
-
-    @property
-    def grid_radius(self) -> float:
-        return FV3_RADIUS_M
-
-    @property
-    def radius(self) -> float:
-        return FV3_RADIUS_M
-
-    @property
-    def grid_n_columns(self) -> int:
-        return self.nCells
-
-    def to_columns(self, field):
-        return field
-
-    def from_columns(self, cols):
-        return cols
+#: the column mesh moved to legoesm.grids.column_mesh (old name kept)
+DuoColumnMesh = ColumnMesh
 
 
-def build_duo_column_mesh(ctx_np, n: int, ng: int) -> DuoColumnMesh:
+def build_duo_column_mesh(ctx_np, n: int, ng: int) -> ColumnMesh:
     """The column mesh of a duo grid context: the six faces' compute-
     window A-grid centres and areas, flattened ``(6, n, n) -> (6*n*n,)``
     row-major (the model's ``_columns`` order).  Built by the driver at
@@ -152,11 +90,12 @@ def build_duo_column_mesh(ctx_np, n: int, ng: int) -> DuoColumnMesh:
             ne, nw = g[ng + 1:ng + n + 1, ng + 1:ng + n + 1], g[ng:ng + n, ng + 1:ng + n + 1]
             out.append(np.stack([sw, se, ne, nw], axis=-1))
         return jnp.asarray(np.stack(out).reshape(6 * n * n, 4))
-    return DuoColumnMesh(
+    return ColumnMesh(
         latCell=jlat, lonCell=jlon, areaCell=jnp.asarray(area),
         nCells=int(lat.shape[0]), grid_lat=jlat, grid_lon=jlon,
         grid_shape_2d=(int(lat.shape[0]),), lat=jlat, lon=jlon,
-        cornerLat=corners("grid_lat"), cornerLon=corners("grid_lon"))
+        cornerLat=corners("grid_lat"), cornerLon=corners("grid_lon"),
+        radius=FV3_RADIUS_M, omega=FV3_OMEGA)
 
 
 class FV3DuoColumnState(NamedTuple):
@@ -472,6 +411,11 @@ class FV3DuoColumnModel:
             self._post_fns["view"] = fn
         self._last = self._host_state(fn(bundle))
         return self._last
+
+    def init_state(self, driver) -> None:
+        """ColumnModel fresh IC: the driver's duo builder (terrain-product
+        grid rebuild, ERA5 or DCMIP16 through the bundle)."""
+        driver._fv3_duo_column_init_state()
 
     def _native_of(self, state):
         """The bundle a column state stands for, with the driver's

@@ -1,7 +1,7 @@
 """Prognostic sea-ice skin on the distributed MPAS (Voronoi) lane.
 
 Until now the feature refused this lane outright: the driver raised
-"mpas_ice_skin_prognostic is not wired for the distributed Voronoi (MPI) lane
+"ice_skin_prognostic is not wired for the distributed Voronoi (MPI) lane
 yet". Because the production AMIP deck turns the skin ON, that refusal is what
 stopped every production arm from running on more than one GPU -- it surfaced
 the first time a four-rank smoke run was attempted against the production deck.
@@ -90,7 +90,7 @@ def _build(distributed, output_dir=None):
         output=OutputConfig(output_dir="", diag_days=0),
         days=DAYS, dataset="analytical", radiation="gray",
         convection="none", turbulence="none", precision="fp64",
-        mpas_ice_skin_prognostic=True,
+        ice_skin_prognostic=True,
         distributed=distributed,
     )
     d = ModelDriver(cfg, output_dir=output_dir or tempfile.mkdtemp())

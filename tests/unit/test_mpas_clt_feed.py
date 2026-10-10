@@ -2,7 +2,7 @@
 
 ``clt`` was computed ONLY inside ``DiagnosticCollector.collect`` — the
 cube/lat-lon spatial path. Production AMIP runs on ``grid_type="mpas"``, which
-dispatches to ``ModelDriver._run_mpas``; that lane never calls ``collect`` at
+dispatches to ``ModelDriver._run_column``; that lane never calls ``collect`` at
 all, feeding CMOR exclusively through ``feed_cmip_accumulators_native``, whose
 hardcoded field list had no ``clt`` and whose signature took no cloud tracers.
 Net effect: 20+ production run directories, zero ``clt`` files ever written,

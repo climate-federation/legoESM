@@ -322,7 +322,7 @@ def _driver_cfg(out_dir, *, windows, **over):
         DycoreConfig, ExperimentConfig, GridConfig, OutputConfig)
     dyc = dict(model_type="hydrostatic", discretization="fv3_duo",
                dt=over.pop("dt", DDT),
-               fv3_duo_column_lane=over.pop("fv3_duo_column_lane", True))
+               column_lane=over.pop("column_lane", True))
     if windows:
         dyc.update(fv3_duo_windows=2, fv3_duo_window_pad=4)
     base = dict(
@@ -385,9 +385,9 @@ def test_driver_column_lane_on_windows_is_the_single_device_run(tmp_path, phys):
     # dynamics' class, not the column seam's), x10 -- the column seam must
     # add nothing to it
     c_win = _driver(tmp_path / "c_win", windows=True,
-                    fv3_duo_column_lane=False, **phys)
+                    column_lane=False, **phys)
     c_one = _driver(tmp_path / "c_one", windows=False,
-                    fv3_duo_column_lane=False, **phys)
+                    column_lane=False, **phys)
     ci = slice(3, 3 + DN)
     worst = 0.0
     for k in ("u", "v", "pt", "delp"):

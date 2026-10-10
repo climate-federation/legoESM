@@ -461,7 +461,7 @@ def _driver_cfg(tmp_path, **over):
     dycore = DycoreConfig(
         model_type="hydrostatic", discretization="fv3_duo",
         dt=over.pop("dt", 1920.0),
-        fv3_duo_column_lane=over.pop("column", True))
+        column_lane=over.pop("column", True))
     base = dict(
         grid=grid, dycore=dycore, days=over.pop("days", 0.25),
         radiation="none", convection="none", microphysics="none",
@@ -1069,7 +1069,7 @@ def test_m6_multilayer_land_and_rrtmgp_run_on_the_duo_columns(tmp_path, monkeypa
         land_surface_scheme="simple_seb",
         # main b602fc9d9: the per-step two-leaf parameter refresh is on by
         # default and refuses simple_seb (it has no rebuild for it)
-        mpas_land_params_refresh=False)
+        land_params_refresh=False)
     drv = ModelDriver(cfg, output_dir=tmp_path)
     drv.setup()
     mesh = drv.model.mesh
@@ -1114,8 +1114,8 @@ def _land_stress_cfg(tmp_path, monkeypatch, *, stress, days, **over):
         tmp_path, days=days, radiation="rrtmgp", turbulence="louis",
         land_mask_path="synthetic.nc", use_multilayer_land=True,
         multilayer_n_layers=6, multilayer_soil_depth=2.5,
-        land_surface_scheme="simple_seb", mpas_land_params_refresh=False,
-        mpas_land_beta_soil=True, mpas_land_stress_from_land=stress, **over)
+        land_surface_scheme="simple_seb", land_params_refresh=False,
+        land_beta_soil=True, land_stress_from_land=stress, **over)
 
 
 def test_land_stress_from_land_reaches_the_boundary_layer_on_the_duo_columns(
@@ -1125,7 +1125,7 @@ def test_land_stress_from_land_reaches_the_boundary_layer_on_the_duo_columns(
     the land stress reaches the boundary layer (the winds differ from the
     bulk-stress run of the same deck, finite), and the driver publishes the
     land's own |stress| on land columns and nothing on pure-ocean ones."""
-    from legoesm.driver.config import resolve_mpas_land_stress_from_land
+    from legoesm.driver.config import resolve_land_stress_from_land
     from legoesm.driver.model_driver import ModelDriver
     days = 3 * 600.0 / 86400.0
     runs = {}
@@ -1134,7 +1134,7 @@ def test_land_stress_from_land_reaches_the_boundary_layer_on_the_duo_columns(
         d.mkdir()
         cfg = _land_stress_cfg(d, monkeypatch, stress=stress, days=days,
                                dt=600.0, rad_update_steps=1)
-        assert resolve_mpas_land_stress_from_land(cfg) is (tag == "on")
+        assert resolve_land_stress_from_land(cfg) is (tag == "on")
         drv = ModelDriver(cfg, output_dir=d)
         drv.setup()
         assert drv.run() == "COMPLETED"

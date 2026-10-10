@@ -1299,7 +1299,7 @@ def apply_microphysics_experiment_flags(
     (iterated) saturation-adjustment guard (kessler/seifert_beheng/morrison/
     thompson/p3).  This single helper is shared by the coupled
     (``physics_pipeline._resolve_microphysics``) and the combined-physics /
-    MPAS (``model_driver._run_mpas``) paths so the gating + fail-loud
+    MPAS (``model_driver._run_column``) paths so the gating + fail-loud
     validation is written ONCE — a scheme that would silently ignore the
     flag raises instead, on either path (no duplicated dispatch).
 
