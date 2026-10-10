@@ -84,6 +84,9 @@ failures.  Its rigid two-line shift of the seven-array-call citation refuses
 with exit 1, as required.
 Focused round-233/234 tests pass 10/10 (log SHA-256
 `af7630bd9ec7db520f9a83052dfab618c49360ae2a49414183fb767d84bbee42`).
+After the citation anchors were added, the round-234 and citation-gate focused
+battery passes 23/23 (log SHA-256
+`980d364e80033cbc179b46228b484d0bbb5bcf84bf41fdab6e9c4d151c593abb`).
 The prescribed `tests/ocean/fidelity -n 12` battery collected 3,148 tests and
 reached 99% before the registered compiler-limit tail loss: 3,108 PASS, seven
 SKIP, four FAIL, 29 unclassified. The four failures are exactly the registered
