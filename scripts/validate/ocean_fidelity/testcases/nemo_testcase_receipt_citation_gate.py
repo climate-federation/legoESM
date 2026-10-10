@@ -190,6 +190,10 @@ FILES = {
         _ORCA2_R210OMT1_COMPILED / "stpctl.f90"),
     "ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/dynspg_ts.f90": (
         _ORCA2_R210OMT1_COMPILED / "dynspg_ts.f90"),
+    "ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/dynzdf.f90": (
+        _ORCA2_R210OMT1_COMPILED / "dynzdf.f90"),
+    "ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/zdfdrg.f90": (
+        _ORCA2_R210OMT1_COMPILED / "zdfdrg.f90"),
     "ORCA2_OMIP_L4_R213VECPRE/BLD/ppsrc/nemo/stprk3.f90": (
         _ORCA2_R213VECPRE_COMPILED / "stprk3.f90"),
     "ORCA2_OMIP_L4_R213VECPRE/BLD/ppsrc/nemo/stp2d.f90": (
@@ -2380,6 +2384,29 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:721-753': [
         'IF( .NOT.lk_linssh ) THEN   !* Update ocean depth (variable volume case only)',
         ("& l4_canon_2d(zhU,'U'), l4_canon_2d(zhV,'V')", 1), 33],
+    # --- ORCA2 round 218: OMT-2 linear implicit bottom drag ---
+    'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/zdfdrg.f90:258-284': [
+        'SUBROUTINE zdf_drg_lin( pCd0, pCdU )',
+        'END SUBROUTINE zdf_drg_lin', 27],
+    'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/zdfdrg.f90:540-547': [
+        'CASE( np_lin )             !==  linear friction  ==!',
+        'CALL zdf_drg_lin( pCd0(:,:), pCdU(:,:) )', 8],
+    'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/dynzdf.f90:158-169': [
+        'IF( ln_drgimp .AND. ln_dynspg_ts ) THEN',
+        'pvv(ji,jj,ikv,Kaa) = pvv(ji,jj,ikv,Kaa) + zDt_2 * ( rCdU_bot(ji,jj+1)+rCdU_bot(ji,jj) ) * vv_b(ji,jj,Kaa)',
+        12],
+    'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/dynzdf.f90:303-312': [
+        'IF( ln_drgimp ) THEN      ! implicit bottom friction',
+        'zwd(ji,iku) = zwd(ji,iku) - zDt_2 *( rCdU_top(ji+1,jj)+rCdU_top(ji,jj) ) / (e3u_3d(ji,jj,iku) *(1._wp+r3u(ji,jj,Kaa)*umask(ji,jj,iku)))',
+        10],
+    'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/dynzdf.f90:470-474': [
+        'IF ( ln_drgimp ) THEN      ! implicit bottom friction',
+        '&                                   / (e3v_3d(ji,jj,ikv) *(1._wp+r3v(ji,jj,Kaa)*vmask(ji,jj,ikv)))',
+        5],
+    'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:1404-1463': [
+        'SUBROUTINE dyn_drg_init( Kbb, Kmm, puu, pvv, puu_b ,pvv_b, pu_RHSi, pv_RHSi, pCdU_u, pCdU_v )',
+        'pv_RHSi(ji,jj) = pv_RHSi(ji,jj) + (r1_hv_0(ji,jj) /(1._wp+r3v(ji,jj,Kmm))) * r1_2*( rCdU_bot(ji,jj+1)+rCdU_bot(ji,jj) ) * zv_i(ji,jj)',
+        60],
     # --- ORCA2 round 214: live RK indices and malformed round-213 schema ---
     'ORCA2_OMIP_L4_R213VECPRE/BLD/ppsrc/nemo/stprk3.f90:204-215': [
         'CALL stp_2D( kstp, Nbb, Nbb, Naa, Nrhs )',
