@@ -35,6 +35,14 @@ two byte-identical step-8 restarts, and nine firing corruption/passivity
 plants. Its committed preflight reports `SYNTAX_PROOF_PASS` and
 `ORCA2_ROUND214_VECTOR_HEADER_PREFLIGHT_READY`.
 
+The initially reserved `ORCA2_OMIP_L4_R214VECPREV2` configuration name is
+retired: a local final-verification command accidentally selected the
+launcher's default `--run` mode and created a partial build directory, but did
+not reach `mpirun` and wrote no run directory. Nothing was deleted. The
+operator launcher is repinned to the fresh `ORCA2_OMIP_L4_R214VECPREV3`
+configuration and `headerfix_v3` run target; its explicit `--preflight-only`
+check is clean.
+
 ## Frozen-prediction disposition
 
 | ID | disposition |

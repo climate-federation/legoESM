@@ -22,13 +22,13 @@ export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
 readonly NEMO_ROOT=/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2
 readonly REFERENCE_CFG=ORCA2_ICE_PISCES
 readonly SOURCE_CFG=ORCA2_OMIP_L4_R213VECPRE
-readonly TARGET_CFG=ORCA2_OMIP_L4_R214VECPREV2
+readonly TARGET_CFG=ORCA2_OMIP_L4_R214VECPREV3
 readonly SOURCE_ROOT=$NEMO_ROOT/cfgs/$SOURCE_CFG
 readonly TARGET_ROOT=$NEMO_ROOT/cfgs/$TARGET_CFG
 readonly SOURCE_RUN=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round213/acquisition/orca2_omt1_vector_pre_lbc_8step_np2
 readonly BASELINE_RUN=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round211/acquisition/orca2_omt1_frames_8step_a_np2
 readonly EVIDENCE=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round214/acquisition
-readonly TARGET_RUN=$EVIDENCE/orca2_omt1_vector_pre_lbc_headerfix_8step_np2
+readonly TARGET_RUN=$EVIDENCE/orca2_omt1_vector_pre_lbc_headerfix_v3_8step_np2
 readonly WORK_ROOT=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/work
 readonly SOURCE_DYNSPG_SHA=c5745bfff2e99e521e4786f87f1c2d3c4d9a5c4a283a10290ff08a5b3311ffff
 readonly SOURCE_CPP_SHA=2e0d729f348b2377e52a6421afbb56e9dabbbc5ae57e39fbcfa1a3f5edbd8f67
