@@ -37,7 +37,12 @@ def _report():
         "tracers": {"T": copy.deepcopy(tracer), "S": copy.deepcopy(tracer)},
         "first_nonbit_statement": "dry_bound_sentinel",
         "first_effective_statement": "zup",
-        "statement_sufficiency": "UNMEASURED_WITH_SPEC",
+        "statement_sufficiency": "REFUTED_IDENTICAL_KT8_REFUSAL",
+        "sufficiency_evidence": {
+            "byte_identical": True,
+            "completed_steps": list(range(1, 8)),
+            "refusal_step": 8,
+        },
     }
 
 
@@ -45,7 +50,7 @@ def test_round225_classifies_source_ordered_nonosc_fold():
     result = gate.classify(_report())
     assert result["status"] == "PASS_R225_FIRST_NONBIT_NONOSC_FOLD"
     assert result["predictions"]["R225-P1"] == "REFUTED"
-    assert result["predictions"]["R225-P4"] == "UNMEASURED_WITH_SPEC"
+    assert result["predictions"]["R225-P4"] == "REFUTED"
 
 
 @pytest.mark.parametrize("plant", gate.PLANTS[1:])

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -40,6 +41,37 @@ class GateError(RuntimeError):
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise GateError(message)
+
+
+def attach_sufficiency_refutation(
+    report: dict[str, object], candidate_log: Path, baseline_log: Path,
+) -> dict[str, object]:
+    """Gate the production arm's identical kt=8 refusal, not its prose."""
+    candidate = candidate_log.read_bytes()
+    baseline = baseline_log.read_bytes()
+    require(candidate == baseline,
+            "literal limiter candidate moved the registered refusal log")
+    decoded = candidate.decode("utf-8")
+    for kt in range(1, 8):
+        require(f"PROGRESS independent kt={kt}\n" in decoded,
+                f"literal limiter arm did not complete kt={kt}")
+    require("PROGRESS independent kt=8\n" not in decoded,
+            "literal limiter arm completed the registered refusal step")
+    refusal = "raw-mesh e3w_int must contain only finite values > 0"
+    require(refusal in decoded, "registered live-W refusal text moved")
+    digest = hashlib.sha256(candidate).hexdigest()
+    report = json.loads(json.dumps(report))
+    report["statement_sufficiency"] = "REFUTED_IDENTICAL_KT8_REFUSAL"
+    report["sufficiency_evidence"] = {
+        "candidate_log": str(candidate_log.resolve()),
+        "baseline_log": str(baseline_log.resolve()),
+        "byte_identical": True,
+        "sha256": digest,
+        "completed_steps": list(range(1, 8)),
+        "refusal_step": 8,
+        "refusal": refusal,
+    }
+    return report
 
 
 def classify(report: dict[str, object], *, plant: str = "none") -> dict[str, object]:
@@ -111,13 +143,21 @@ def classify(report: dict[str, object], *, plant: str = "none") -> dict[str, obj
             "reported first bit difference is not the dry-bound sentinel")
     require(report.get("first_effective_statement") == first,
             "reported first effective limiter statement is not source ordered")
-    require(report.get("statement_sufficiency") == "UNMEASURED_WITH_SPEC",
-            "offline replay manufactured a landing verdict")
+    require(report.get("statement_sufficiency") ==
+            "REFUTED_IDENTICAL_KT8_REFUSAL",
+            "sufficiency arm is not the gated identical kt=8 refusal")
+    evidence = report.get("sufficiency_evidence", {})
+    require(evidence.get("byte_identical") is True,
+            "sufficiency logs are not byte-identical")
+    require(evidence.get("refusal_step") == 8,
+            "registered sufficiency refusal step moved")
+    require(evidence.get("completed_steps") == list(range(1, 8)),
+            "registered completed-step prefix moved")
     report["predictions"] = {
         "R225-P1": "REFUTED",
         "R225-P2": "CONFIRMED",
         "R225-P3": "CONFIRMED",
-        "R225-P4": "UNMEASURED_WITH_SPEC",
+        "R225-P4": "REFUTED",
         "R225-P5": "CONFIRMED" if plant == "none" else "PLANT",
     }
     report["status"] = "PASS_R225_FIRST_NONBIT_NONOSC_FOLD"
@@ -445,6 +485,8 @@ def main() -> int:
     parser.add_argument("--frames-root", type=Path)
     parser.add_argument("--expect-commit")
     parser.add_argument("--classify-json", type=Path)
+    parser.add_argument("--sufficiency-log", type=Path, required=True)
+    parser.add_argument("--baseline-sufficiency-log", type=Path, required=True)
     parser.add_argument("--plant", choices=PLANTS, default="none")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
@@ -459,6 +501,8 @@ def main() -> int:
             require(args.deck_root and args.frames_root and args.expect_commit,
                     "runtime mode requires deck, frames, and commit")
             raw = measure(args.deck_root, args.frames_root, args.expect_commit)
+        raw = attach_sufficiency_refutation(
+            raw, args.sufficiency_log, args.baseline_sufficiency_log)
         result = classify(raw, plant=args.plant)
         require(args.plant == "none", f"{args.plant} plant stayed green")
     except (GateError, rung0.GateError, omt4.GateError, OSError, KeyError,
