@@ -4877,7 +4877,16 @@ def _resolved_deck_fields(deck):
 
 
 def test_cam6_duo_deck_resolves_to_the_mpas_deck_outside_grid_intrinsic_rows():
+    import yaml
     amip = _repo_root() / "config" / "amip"
+    # the deck file itself sets nothing but the MPAS include and its own rows
+    # (closes what the resolved config cannot see: --params, machine paths)
+    own = yaml.safe_load((amip / "amip_production_fv3duo_c24.yaml").read_text())
+    assert own.get("include") == "amip_production.yaml"
+    own_dests = ({k.split(".")[-1] for k in _DUO_DECK_OWN_ROWS} - {"land_ic_path"}
+                 | {"land_ic"})
+    extra = set(own) - {"include"} - own_dests
+    assert not extra, f"duo deck sets rows that are not its own: {sorted(extra)}"
     mpas = _resolved_deck_fields(amip / "amip_production.yaml")
     duo = _resolved_deck_fields(amip / "amip_production_fv3duo_c24.yaml")
     differ = {k for k in mpas.keys() | duo.keys()
