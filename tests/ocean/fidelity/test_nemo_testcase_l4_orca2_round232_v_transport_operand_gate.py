@@ -26,6 +26,8 @@ def test_rank0_mapping_and_ratio_signature() -> None:
     mapped = gate._rank0(values)
     assert mapped.shape == (148, 90)
     assert np.array_equal(mapped, values[1:, :90])
+    native = np.arange(148 * 180 * 2, dtype=np.float64).reshape(148, 180, 2)
+    assert np.array_equal(gate._rank0_native(native), native[:, :90])
     oracle = np.ones((2, 2), np.float64)
     candidate = np.array([[1.0, -2.0], [3.0, 4.0]])
     signature = gate._ratio_sign(candidate, oracle)

@@ -85,6 +85,14 @@ def _rank0(values: np.ndarray) -> np.ndarray:
     return values[1:, :90, ...]
 
 
+def _rank0_native(values: np.ndarray) -> np.ndarray:
+    values = np.asarray(values, np.float64)
+    require(values.ndim == 3, f"unexpected native candidate rank {values.shape}")
+    require(values.shape[:2] == (148, 180),
+            f"candidate native V shape moved {values.shape}")
+    return values[:, :90, ...]
+
+
 def _ratio_sign(candidate: np.ndarray, oracle: np.ndarray) -> dict[str, object]:
     candidate = np.asarray(candidate, np.float64)
     oracle = np.asarray(oracle, np.float64)
@@ -131,7 +139,12 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path, label: str,
         _NEMOWSLiveOperandTrace,
     )
     from legoesm.ocean.fidelity.provenance import worktree_stamp
-    from legoesm.ocean.vertical import compute_layer_thickness
+    from legoesm.ocean.vertical import (
+        compute_layer_thickness,
+        nemo_qco_card_mesh_operands,
+        nemo_qco_live_face_geometry_cgrid,
+        nemo_qco_resolved_mesh_operands,
+    )
 
     require(plant in PLANTS, f"unknown plant {plant!r}")
     require(label in ("independent", "given_nemo_entry"), f"bad label {label!r}")
@@ -265,6 +278,29 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path, label: str,
         name for name in CORRECTION_INPUTS if correction_rows[name]["unequal"]
     ), None)
 
+    def split_e3v_source(eta_value, h_ref_value, umask_value, vmask_value):
+        reconstructed = nemo_qco_card_mesh_operands(
+            h_ref_value, umask_value, vmask_value, grid, eta_value.dtype)
+        resolved = nemo_qco_resolved_mesh_operands(
+            z_coord, grid, umask_value, vmask_value, eta_value.dtype,
+            h_ref_value.shape[-1])
+        resolved_live = nemo_qco_live_face_geometry_cgrid(
+            eta_value, resolved.e3u_0, resolved.e3v_0,
+            resolved.umask3, resolved.vmask3, resolved.hu_0, resolved.hv_0,
+            resolved.area_t, resolved.area_u, resolved.area_v,
+            include_reciprocals=True)
+        return reconstructed.e3v_0, resolved.e3v_0, resolved_live[1]
+
+    reconstructed_e3v0, resolved_e3v0, resolved_live_e3v = jax.device_get(
+        jax.jit(split_e3v_source)(eta, h_ref, umask, vmask))
+    e3v_source_split = {
+        "reconstructed_reference_vs_recorded_reference": _exact_masked(
+            _rank0_native(reconstructed_e3v0), _rank0_native(resolved_e3v0),
+            live_3d),
+        "recorded_reference_live_replay_vs_nemo": _exact_masked(
+            _rank0(resolved_live_e3v), expected["e3v"], live_3d),
+    }
+
     if plant == "replay-input":
         trial = correction_candidate["vn_adv"].copy()
         active = np.argwhere(expected["vmask"][..., 0] != 0.0)[0]
@@ -325,6 +361,7 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path, label: str,
         "correction_input_order": list(CORRECTION_INPUTS),
         "correction_input_rows": correction_rows,
         "first_unequal_correction_input": correction_first,
+        "e3v_source_split": e3v_source_split,
         "substitutions": substitutions,
         "operand_substitutions": operand_substitutions,
         "operand_signatures": {
