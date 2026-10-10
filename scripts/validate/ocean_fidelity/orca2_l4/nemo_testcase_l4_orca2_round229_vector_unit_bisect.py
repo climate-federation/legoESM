@@ -1,0 +1,412 @@
+#!/usr/bin/env python3
+"""Bisect the held ORCA2 vector unit at kt=1 stage 1 on OMT-4."""
+
+from __future__ import annotations
+
+import argparse
+import copy
+import json
+import sys
+from pathlib import Path
+
+import numpy as np
+
+REPO_ROOT = Path(__file__).resolve().parents[4]
+for package in (REPO_ROOT, REPO_ROOT / "packages/core", REPO_ROOT / "packages/ocean"):
+    if str(package) not in sys.path:
+        sys.path.insert(0, str(package))
+
+from scripts.validate.ocean_fidelity.orca2_l4 import (
+    nemo_testcase_l4_orca2_round92_rung0_card_gate as rung0,
+)
+from scripts.validate.ocean_fidelity.orca2_l4 import (
+    nemo_testcase_l4_orca2_round135_step36_fct_gate as passive,
+)
+from scripts.validate.ocean_fidelity.orca2_l4 import (
+    nemo_testcase_l4_orca2_round204_omt0_ladder_gate as omt0,
+)
+from scripts.validate.ocean_fidelity.orca2_l4 import (
+    nemo_testcase_l4_orca2_round223_omt4_ladder_gate as omt4,
+)
+from scripts.validate.ocean_fidelity.orca2_l4 import (
+    nemo_testcase_l4_orca2_round228_fold_invariant_audit as r228,
+)
+from scripts.validate.ocean_fidelity.orca2_l4 import (
+    nemo_testcase_l4_orca2_phase2n_overflow_runoff_gate as transport_reader,
+)
+
+
+PARTS = ("slow_v_pair", "vector_v_mask", "association", "v_transport")
+VARIANTS = ("off", "full") + tuple(f"drop_{part}" for part in PARTS)
+PLANTS = (
+    "none", "v-source-row", "v-sign", "t-halo-source",
+    "special-longitude", "part-registry", "leave-one-out", "label-coverage",
+    "operand-bit",
+)
+
+
+class GateError(RuntimeError):
+    """The diagnostic or a planted violation refused."""
+
+
+def require(condition: bool, message: str) -> None:
+    if not condition:
+        raise GateError(message)
+
+
+def _exact(left, right) -> dict[str, object]:
+    return r228._difference(np.asarray(left, np.float64), np.asarray(right, np.float64))
+
+
+def _enabled(variant: str) -> set[str]:
+    require(variant in VARIANTS, f"unknown variant {variant!r}")
+    if variant == "off":
+        return set()
+    if variant == "full":
+        return set(PARTS)
+    return set(PARTS) - {variant.removeprefix("drop_")}
+
+
+def derive_compact_support(card, oracle: dict[str, np.ndarray], *, plant: str) -> dict:
+    """Derive the stored pivot rows from compiled T-pivot V and T/W loops."""
+
+    fold = card.recipe.grid.fold
+    perm_t = np.asarray(fold.perm_T)
+    perm_v = np.asarray(fold.perm_v)
+    sign_v = -1.0
+    v_source_row = -2
+    t_halo_source_row = -2
+    if plant == "v-source-row":
+        v_source_row = -3
+    elif plant == "v-sign":
+        sign_v = 1.0
+    elif plant == "t-halo-source":
+        t_halo_source_row = -1
+    elif plant == "special-longitude":
+        perm_v = np.array(perm_v, copy=True)
+        perm_v[0] = perm_v[1]
+
+    # Compact V stores the pivot face as its final row.  The next halo row is
+    # implicit; compiled lbcnfd supplies both from consecutive southern rows.
+    v = np.asarray(oracle["v"], np.float64)
+    v_pivot_expected = sign_v * v[v_source_row, perm_v, :]
+    v_pivot = _exact(v[-1], v_pivot_expected)
+
+    # T storage keeps the self-mirrored pivot row; its implicit halo above the
+    # pivot comes from the row immediately south under the compact mapping.
+    half = perm_t.size // 2
+    t = np.asarray(oracle["T"], np.float64)
+    t_pivot = _exact(t[-1, half:], t[-1, perm_t[half:], :])
+    t_halo = t[t_halo_source_row, perm_t, :]
+    t_halo_expected = t[-2, perm_t, :]
+    return {
+        "mapping": {
+            "v_pivot_target": -1, "v_pivot_source": v_source_row,
+            "v_halo_source": -3, "v_sign": sign_v,
+            "t_pivot_target": -1, "t_halo_source": t_halo_source_row,
+            "t_sign": 1.0,
+        },
+        "v_pivot": v_pivot,
+        "t_pivot_right_half": t_pivot,
+        "t_halo_source_check": _exact(t_halo, t_halo_expected),
+        "t_halo_shape": list(t_halo.shape),
+        "special_longitude_source": int(perm_v[0]),
+    }
+
+
+def _raw_vmask(card):
+    import jax.numpy as jnp
+
+    raw = card.recipe.z_coord.nemo_een_barotropic
+    require(raw is not None, "OMT-4 card has no raw NEMO mask bundle")
+    native = jnp.max(jnp.asarray(raw.vmask, dtype=jnp.float64), axis=-1)
+    return jnp.concatenate([jnp.zeros_like(native[:1]), native], axis=0)
+
+
+def _stage_state(state, values):
+    return state._replace(
+        u=state.u.replace(data=values[0]),
+        v=state.v.replace(data=values[1]),
+        T=state.T.replace(data=values[2]),
+        S=state.S.replace(data=values[3]),
+        eta=state.eta.replace(data=values[4]),
+    )
+
+
+def _hooks(card, enabled: set[str], slow_override, raw_vmask, *, live: bool):
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import _NEMOWSRK3TestHooks
+
+    association = "association" in enabled
+    transport = "v_transport" in enabled
+    reference_depth = (
+        omt0.rung0.ladder.build_reference_depth_override(card)
+        if association else None)
+    return _NEMOWSRK3TestHooks(
+        expose_live_stage_operands=live,
+        barotropic_slow_forcing_override=(
+            slow_override if "slow_v_pair" in enabled else None),
+        barotropic_vector_update_v_mask_override=(
+            raw_vmask if "vector_v_mask" in enabled else None),
+        barotropic_external_mode_association=association,
+        barotropic_reference_face_depth_override=reference_depth,
+        barotropic_unmasked_v_transport=transport,
+        barotropic_materialize_v_transport=transport,
+        barotropic_atomic_fold_unit=False,
+    )
+
+
+def _run_variant(card, state, freshwater, surface, variant, slow_override, raw_vmask):
+    import jax
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel, _NEMOWSLiveOperandTrace,
+    )
+
+    enabled = _enabled(variant)
+    ordinary_model = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+        _nemo_ws_test_hooks=_hooks(
+            card, enabled, slow_override, raw_vmask, live=False))
+    trace_model = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+        _nemo_ws_test_hooks=_hooks(
+            card, enabled, slow_override, raw_vmask, live=True))
+    ordinary = jax.device_get(ordinary_model.step(
+        state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
+    traced = jax.device_get(trace_model.step(
+        state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
+    require(isinstance(traced, _NEMOWSLiveOperandTrace),
+            f"{variant}: live trace return type moved")
+    equality = passive._ordinary_state_equal(traced.state_after, ordinary)
+    require(all(equality.values()), f"{variant}: live trace is not passive")
+    return _stage_state(state, traced.stage_outputs[0])
+
+
+def _slow_override(card, state, freshwater, surface):
+    """Read the passive producer once, then form NEMO's raw-mask pair."""
+
+    import jax
+    import jax.numpy as jnp
+    from legoesm.core.source_rounding import nemo_source_round
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel, _NEMOWSLiveOperandTrace,
+    )
+
+    model = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+        _nemo_ws_test_hooks=_hooks(
+            card, set(), None, _raw_vmask(card), live=True))
+    traced = jax.device_get(model.step(
+        state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
+    require(isinstance(traced, _NEMOWSLiveOperandTrace),
+            "slow-forcing producer trace return type moved")
+    producer = traced.slow_forcing_producer
+    raw_mask = _raw_vmask(card)
+    b = nemo_source_round
+    final_v = b(jnp.asarray(producer["incoming_v"]) - b(
+        jnp.asarray(producer["coriolis_v"]) * raw_mask))
+    return (jnp.asarray(producer["final_u"]), final_v), raw_mask
+
+
+def _score_stage(card, candidate_state, oracle_state) -> dict[str, object]:
+    candidate = r228._quantities(card, candidate_state)
+    oracle = r228._quantities(card, oracle_state)
+    rows = {}
+    for name in ("T", "S", "e3t", "zFv"):
+        rows[name] = _exact(candidate[name][-3:], oracle[name][-3:])
+    active = np.asarray(card.recipe.z_coord.is_active, np.float64)
+    rows["tmask"] = _exact(active[-3:], active[-3:])
+    rows["zFv_pivot"] = _exact(candidate["zFv"][-1], oracle["zFv"][-1])
+    return rows
+
+
+def _calibrate_oracle_transport(card, record_root: Path, oracle_state) -> dict[str, object]:
+    """Calibrate the reconstructed full-domain zFv on the recorded rank-0 slab."""
+
+    _, recorded_v = transport_reader.read_transport(
+        record_root / "oracle_transport_kt00000001_s1.bin")
+    oracle_v = r228._quantities(card, oracle_state)["zFv"]
+    # The stream is the rank-0 94x152 haloed slab.  Its owned bounds are the
+    # same frozen 3:92,3:150 layout as the admitted stage frames.
+    owned = np.asarray(recorded_v[2:150, 2:92, :30], np.float64)
+    return _exact(oracle_v[:, :90], owned)
+
+
+def measure(deck_root: Path, record_root: Path, label: str,
+            expect_commit: str, *, plant: str) -> dict[str, object]:
+    import jax
+    from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+    from legoesm.ocean.fidelity.provenance import worktree_stamp
+
+    require(plant in PLANTS, f"unknown plant {plant!r}")
+    stamp = worktree_stamp()
+    require(stamp["clean"], "round-229 measurement worktree is dirty")
+    require(stamp["commit"].lower() == expect_commit.lower(),
+            "round-229 measurement commit stamp mismatch")
+    policy = PrecisionPolicy.fp64(transcendentals="libm")
+    set_policy(policy)
+    require(get_policy() == policy and bool(jax.config.jax_enable_x64),
+            "fp64/libm policy is not active")
+    require(jax.default_backend() == "cpu" and not jax.config.jax_disable_jit,
+            "round-229 measurement requires production JIT on CPU")
+    require(label in ("independent", "given_nemo_entry"),
+            f"unknown label {label!r}")
+
+    card = omt4.build_omt4_card(deck_root)
+    omt4.validate_omt4_card(deck_root, card)
+    entry = rung0.assemble_frame(record_root, 1, 0)
+    state = (card.recipe.initial_state if label == "independent"
+             else rung0.bridge_entry(card, entry))
+    oracle_state = rung0.bridge_entry(
+        card, rung0.assemble_frame(record_root, 1, 1))
+    freshwater, surface = omt0.rung0_ladder._zero_forcing((148, 180))
+    slow_override, raw_mask = _slow_override(
+        card, state, freshwater, surface)
+
+    variants = list(VARIANTS)
+    if plant == "part-registry":
+        variants[-1], variants[-2] = variants[-2], variants[-1]
+    require(tuple(variants) == VARIANTS, "four-part variant registry moved")
+    reports = {}
+    for variant in variants:
+        stage = _run_variant(
+            card, state, freshwater, surface, variant,
+            slow_override, raw_mask)
+        reports[variant] = _score_stage(card, stage, oracle_state)
+        print(f"PROGRESS {label} {variant}", flush=True)
+
+    support = derive_compact_support(
+        card, rung0.assemble_frame(record_root, 1, 1), plant=plant)
+    calibration = _calibrate_oracle_transport(card, record_root, oracle_state)
+    result = {
+        "format": "nemo-testcase-l4-orca2-round229-scenario-v1",
+        "status": "PASS_R229_SCENARIO",
+        "label": label,
+        "execution": "production-jit-cpu-fp64-libm",
+        "worktree": stamp,
+        "support": support,
+        "oracle_transport_calibration": calibration,
+        "variants": reports,
+    }
+    if plant in ("v-source-row", "v-sign", "t-halo-source", "special-longitude"):
+        require(support["v_pivot"]["unequal"] == 0
+                and support["t_pivot_right_half"]["unequal"] == 0
+                and support["t_halo_source_check"]["unequal"] == 0,
+                f"{plant} plant stayed green")
+        raise GateError(f"{plant} plant fired")
+    return result
+
+
+def classify(reports: list[dict], *, plant: str = "none") -> dict[str, object]:
+    require(plant in PLANTS, f"unknown plant {plant!r}")
+    reports = copy.deepcopy(reports)
+    if plant == "label-coverage":
+        reports.pop()
+    by_label = {report["label"]: report for report in reports}
+    require(set(by_label) == {"independent", "given_nemo_entry"},
+            "claim-label coverage moved")
+    for label, report in by_label.items():
+        require(report["status"] == "PASS_R229_SCENARIO",
+                f"{label}: scenario did not pass")
+        require(tuple(report["variants"]) == VARIANTS,
+                f"{label}: variant coverage/order moved")
+        require(report["support"]["v_pivot"]["unequal"] == 0,
+                f"{label}: compact V support is not exact")
+        require(report["support"]["t_pivot_right_half"]["unequal"] == 0,
+                f"{label}: compact T support is not exact")
+        require(report["support"]["t_halo_source_check"]["unequal"] == 0,
+                f"{label}: compact T halo source is not exact")
+        require(report["oracle_transport_calibration"]["unequal"] == 0,
+                f"{label}: reconstructed oracle zFv is not calibrated")
+
+    rows = {}
+    for label, report in by_label.items():
+        variants = report["variants"]
+        off_s = variants["off"]["S"]["max_abs"]
+        full_s = variants["full"]["S"]["max_abs"]
+        removals = {
+            part: variants[f"drop_{part}"]["S"]["max_abs"]
+            for part in PARTS
+        }
+        if plant == "leave-one-out":
+            removals["association"] = off_s
+        exposure = min(removals, key=lambda part: abs(removals[part] - off_s))
+        if plant == "operand-bit":
+            variants["full"]["zFv_pivot"]["unequal"] += 1
+        rows[label] = {
+            "off_S_max": off_s,
+            "full_S_max": full_s,
+            "off_T_max": variants["off"]["T"]["max_abs"],
+            "full_T_max": variants["full"]["T"]["max_abs"],
+            "leave_one_out_S_max": removals,
+            "exposure_part": exposure,
+            "full_zFv_pivot": variants["full"]["zFv_pivot"],
+        }
+        require(exposure == "v_transport",
+                f"{label}: leave-one-out exposure moved to {exposure}")
+        require(full_s > 1.0 and variants["full"]["T"]["max_abs"] > 0.1,
+                f"{label}: round-228 endpoint did not reproduce")
+
+    require(rows["independent"]["exposure_part"]
+            == rows["given_nemo_entry"]["exposure_part"],
+            "labels disagree on the exposure part")
+    transport_exact = all(
+        row["full_zFv_pivot"]["unequal"] == 0 for row in rows.values())
+    status = (
+        "HELD_R229_MISSING_TRACER_FOLD_OWNER_CANDIDATE"
+        if transport_exact else "HELD_R229_VECTOR_TRANSPORT_UNRESOLVED")
+    return {
+        "format": "nemo-testcase-l4-orca2-round229-bisect-v1",
+        "status": status,
+        "rows": rows,
+        "predictions": {
+            "R229-P1": "CONFIRMED",
+            "R229-P2": "CONFIRMED_EXPOSURE" if transport_exact else "REFUTED",
+            "R229-P3": (
+                "CONFIRMED_OWNER_CANDIDATE" if transport_exact else "REFUTED"),
+            "R229-P4": "CONFIRMED",
+            "R229-P5": "CONFIRMED" if plant == "none" else "PLANT",
+        },
+    }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest="command", required=True)
+    scenario = sub.add_parser("scenario")
+    scenario.add_argument("--deck-root", type=Path, required=True)
+    scenario.add_argument("--record-root", type=Path, required=True)
+    scenario.add_argument(
+        "--label", choices=("independent", "given_nemo_entry"), required=True)
+    scenario.add_argument("--expect-commit", required=True)
+    scenario.add_argument("--plant", choices=PLANTS, default="none")
+    scenario.add_argument("--json-out", type=Path)
+    combine = sub.add_parser("classify")
+    combine.add_argument("--scenario", type=Path, action="append", required=True)
+    combine.add_argument("--plant", choices=PLANTS, default="none")
+    combine.add_argument("--json-out", type=Path)
+    args = parser.parse_args()
+    try:
+        if args.command == "scenario":
+            result = measure(
+                args.deck_root, args.record_root, args.label,
+                args.expect_commit, plant=args.plant)
+        else:
+            result = classify([
+                json.loads(path.read_text(encoding="utf-8"))
+                for path in args.scenario
+            ], plant=args.plant)
+        require(args.plant == "none", f"{args.plant} plant stayed green")
+    except (OSError, ValueError, KeyError, TypeError, GateError) as error:
+        marker = "PLANT-FIRED" if args.plant != "none" else "REFUSE"
+        print(f"STATUS {marker}: {error}")
+        return 2
+    rendered = json.dumps(result, indent=2, sort_keys=True) + "\n"
+    if args.json_out:
+        args.json_out.write_text(rendered, encoding="utf-8")
+    print(rendered, end="")
+    print(f"STATUS {result['status']}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
