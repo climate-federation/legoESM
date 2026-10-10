@@ -1381,6 +1381,10 @@ FILES = {
         NEMO / "tests/VORTEX_SMT5_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/trabbc.f90"),
     "VORTEX_SMT5_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/eosbn2.f90": (
         NEMO / "tests/VORTEX_SMT5_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/eosbn2.f90"),
+    "VORTEX_SMT5_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/ldfslp.f90": (
+        NEMO / "tests/VORTEX_SMT5_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/ldfslp.f90"),
+    "VORTEX_SMT6B_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90": (
+        NEMO / "tests/VORTEX_SMT6B_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90"),
     "VORTEX_SMT5_VEC_R8_OMIP_L1/EXP00/namelist_ref": (
         NEMO / "tests/VORTEX_SMT5_VEC_R8_OMIP_L1/EXP00/namelist_ref"),
     "orca2_rung2/namelist_cfg": Path(
@@ -5983,6 +5987,10 @@ CITATION_MAP = {
     'VORTEX_SMT5_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/trabbc.f90:242': 'CALL fld_read( nit000, 1, sf_qgh )',
     'VORTEX_SMT5_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/trabbc.f90:243': 'qgh_trd0(:,:) = r1_rho0_rcp * sf_qgh(1)%fnow(:,:,1) * 1.e-3',
     'VORTEX_SMT5_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/eosbn2.f90:1344': 'pab(ji,jj,jp_tem) = zn * r1_rho0   ! alpha',
+    # --- SMT-RUNGS round 6: slope limiter the SMT-6b anomaly exercises, stage writer ---
+    'VORTEX_SMT5_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/ldfslp.f90:231': 'zbu = MIN(  zbu, - z1_slpmax * ABS( zau )',
+    'VORTEX_SMT5_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/ldfslp.f90:232': 'zbv = MIN(  zbv, - z1_slpmax * ABS( zav )',
+    'VORTEX_SMT6B_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:215': 'CALL l1_dump_stage( kstp, 3, Naa )',
     'VORTEX_SMT5_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/eosbn2.f90:1347': 'pab(ji,jj,jp_sal) = zn * r1_rho0   ! beta',
     'VORTEX_SMT5_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/eosbn2.f90:1947': 'rcp         = 3991.86795711963_wp',
     'VORTEX_SMT5_VEC_R8_OMIP_L1/BLD/ppsrc/nemo/eosbn2.f90:2379': 'rho0_rcp    = rho0 * rcp',
