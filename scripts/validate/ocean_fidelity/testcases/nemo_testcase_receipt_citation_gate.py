@@ -204,6 +204,10 @@ FILES = {
         _ORCA2_R210OMT1_COMPILED / "stprk3_stg.f90"),
     "ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/traadv.f90": (
         _ORCA2_R210OMT1_COMPILED / "traadv.f90"),
+    "ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/restart.f90": (
+        _ORCA2_R210OMT1_COMPILED / "restart.f90"),
+    "ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/daymod.f90": (
+        _ORCA2_R210OMT1_COMPILED / "daymod.f90"),
     "ORCA2_OMIP_L4_R213VECPRE/BLD/ppsrc/nemo/stprk3.f90": (
         _ORCA2_R213VECPRE_COMPILED / "stprk3.f90"),
     "ORCA2_OMIP_L4_R213VECPRE/BLD/ppsrc/nemo/stp2d.f90": (
@@ -2462,6 +2466,16 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:633-643': [
         ('IF( ln_tile )   CALL dom_tile_start', 1),
         ("& l4_canon_3d(ts(:,:,:,jp_sal,Krhs),'T')", 4), 11],
+    # --- ORCA2 round 223: completed-month terminal restart overwrite ---
+    'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/restart.f90:94-146': [
+        'IF( kt == nit000 ) THEN   ! default definitions',
+        'lrst_oce = .TRUE.', 53],
+    'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/restart.f90:153-201': [
+        'SUBROUTINE rst_write( kt, Kbb, Kmm, Kaa )',
+        'nitrst   = nn_stocklist( nrst_lst )', 49],
+    'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/daymod.f90:405-417': [
+        "ELSEIF( TRIM(cdrw) == 'WRITE' ) THEN",
+        "CALL iom_rstput( kt, nitrst, numrow, 'ntime'  , REAL( nn_time0, wp) ) ! time", 13],
     # --- ORCA2 round 214: live RK indices and malformed round-213 schema ---
     'ORCA2_OMIP_L4_R213VECPRE/BLD/ppsrc/nemo/stprk3.f90:204-215': [
         'CALL stp_2D( kstp, Nbb, Nbb, Naa, Nrhs )',
