@@ -70,6 +70,13 @@ TwoLeafCanopyConfig = CanopyConfig
 _DEFAULT_N_PICARD = 6
 _DEFAULT_PICARD_OMEGA = 0.15
 
+# Columns per group in the canopy Newton solve.  Under one vmap every column
+# iterates until the slowest column on the rank stops, so one hard column costs
+# the whole rank up to the iteration cap; groups stop independently.  Pure
+# performance: measured on recorded production batches, iteration counts and
+# converged flags identical, state differs only by rounding (<= 5e-13 K).
+_CANOPY_SOLVE_GROUP = 64
+
 # Time constant of the growth-temperature exponential moving average [s].
 # 30 days * 86400 s/day = 2.592e6 s.  At dt = 1800 s, ~76 days reach 95 %
 # of the equilibrium.  Used by the caller (``step_*_land``) to advance
@@ -526,7 +533,8 @@ def compute_two_leaf_canopy_fluxes(
         _seed_k = jnp.where(jnp.all(jnp.isfinite(x_conv), axis=-1, keepdims=True),
                             jnp.nan_to_num(x_conv), _fallback)
         (x_final, n_iters, converged, resid_sq, resid_rel, lam_f,
-         hit_cap) = jax.vmap(_solve_one_col)(_seed_k, bundles_k)
+         hit_cap) = jax.lax.map(lambda a: _solve_one_col(*a), (_seed_k, bundles_k),
+                                batch_size=_CANOPY_SOLVE_GROUP)
         x_conv = jnp.where(converged[:, None], x_final, x_conv)
         # A rejected iterate may be non-finite: evaluate the fluxes of a failed
         # column at the (finite) cold state instead, so no NaN enters a

@@ -220,3 +220,7 @@ class SurfaceFluxOutput(NamedTuple):
     # last, same positional reason).  Over snow it carries the sublimation share
     # (#1875).  ``None`` for SimpleSEB.
     L_soil: jax.Array | None = None
+    # Columns whose soil-water (Richards) solve kept an unconverged last
+    # iterate this step (any water left over is in RichardsOutput.water_created).
+    # Filled in by the land step (appended last, same positional reason).
+    soil_unconverged: jax.Array | None = None

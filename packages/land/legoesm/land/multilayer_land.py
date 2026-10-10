@@ -1900,7 +1900,8 @@ def _step_multilayer_land_impl(
     surface_out = surface_out._replace(
         held=_held_mask, n_held=_n_held, fallback=_fb_mask,
         n_fallback=_n_fb, fallback_rejected=_fb_rej_mask,
-        n_fallback_rejected=_n_fb_rej)
+        n_fallback_rejected=_n_fb_rej,
+        soil_unconverged=~richards_out.converged)
     if layered:
         surface_out = surface_out._replace(
             snow_T_top_excess=snow_T_top_excess,
