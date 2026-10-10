@@ -1,0 +1,64 @@
+"""SMT-RUNGS round 7: the MLE branch replay is signed right and the plant fires."""
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]
+                       / "scripts/validate/ocean_fidelity/testcases"))
+import nemo_testcase_l1_vortex_smtrungs_round7_smt7_survey as S  # noqa: E402
+
+G500 = np.arange(0.0, 5500.0, 500.0)          # gdepw_1d of the seamount deck
+
+
+def test_500m_top_layer_gives_nla10_zero():
+    assert S.nla10_nlb10(G500, 500.0)[:2] == (0, 1)
+
+
+def test_thin_top_layer_gives_nla10_one():
+    assert S.nla10_nlb10(G500, 10.0)[:2] == (1, 2)
+
+
+def _column(nk=5, nla10=0, drho=0.47):
+    rho = np.array([1025.0 + drho * k for k in range(nk)])[:, None, None] * np.ones((1, 1, 3))
+    tm = np.ones_like(rho)
+    e3 = 500.0 * np.ones_like(rho)
+    r3 = np.zeros((1, 3))
+    mb = np.full((1, 3), nk)
+    return rho, tm, e3, r3, mb
+
+
+def test_nla10_zero_makes_whole_column_the_mixed_layer():
+    rho, tm, e3, r3, mb = _column()
+    _, ikmax, zmld, _ = S.mle_mixed_layer(rho, tm, e3, r3, mb, 0, 1)
+    assert ikmax == 4 and np.allclose(zmld, 2000.0)      # jpkm1 = 4 levels
+
+
+def test_nla10_one_makes_first_level_the_mixed_layer_and_psi_exactly_zero():
+    rho, tm, e3, r3, mb = _column()
+    inml, ikmax, zmld, zbm = S.mle_mixed_layer(rho, tm, e3, r3, mb, 1, 2)
+    assert np.allclose(zmld, 500.0)
+    rho[:, :, 2] += 1.0                                    # a horizontal buoyancy step
+    _, _, zmld, zbm = S.mle_mixed_layer(rho, tm, e3, r3, mb, 1, 2)
+    um = np.ones_like(tm)
+    _, psi = S.mle_psi_u(zmld, zbm, G500[:6], r3, 3e4 * np.ones((1, 3)),
+                         3e4 * np.ones((1, 3)), um, ikmax)
+    assert np.abs(psi).max() == 0.0
+
+
+def test_column_mixed_layer_with_a_front_has_nonzero_psi():
+    rho, tm, e3, r3, mb = _column()
+    rho[:, :, 2] += 1.0
+    _, ikmax, zmld, zbm = S.mle_mixed_layer(rho, tm, e3, r3, mb, 0, 1)
+    _, psi = S.mle_psi_u(zmld, zbm, G500[:6], r3, 3e4 * np.ones((1, 3)),
+                         3e4 * np.ones((1, 3)), np.ones_like(tm), ikmax)
+    assert np.abs(psi).max() > 1.0
+
+
+@pytest.mark.skipif(not S.RECORD.exists(), reason="NEMO SMT-6 record absent")
+def test_main_exit_codes_unplanted_zero_planted_three(tmp_path):
+    assert S.main(["--out", str(tmp_path / "a.json")]) == 0
+    assert S.main(["--out", str(tmp_path / "b.json"), "--plant-min-e3w", "10"]) == 3
