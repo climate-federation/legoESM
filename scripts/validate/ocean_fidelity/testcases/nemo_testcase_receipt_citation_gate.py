@@ -2664,19 +2664,19 @@ CITATION_MAP = {
         ("CALL iom_get( inum, jpdom_global, 'e3f_0'", 1),
         5],
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/inc/domzgr_substitute.h90:114-121': [
-        ('#     define  E3t_0', 2),
-        ('#     define  e3v_0', 1),
+        ('#     define  E3t_0', 3),
+        ('#     define  e3v_0', 3),
         8],
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/domqco.f90:261-270': [
         ('!==  ratio at u-,v-point  ==!', 2),
-        ('END DO   ;   END DO', 1),
+        ('END DO   ;   END DO', 5),
         10],
     'ocean_model_latlon_cgrid.py:1821-1825': [
         ('ops = nemo_qco_card_mesh_operands', 1),
         ('include_reciprocals=include_reciprocals', 1),
         5],
     'vertical.py:647-654': [
-        ('geom_grid = ensure_geometry(grid)', 1),
+        ('geom_grid = ensure_geometry(grid)', 2),
         ('hv_0 = jnp.sum(e3v_0 * vmask3, axis=-1)', 1),
         8],
     'vertical.py:673-748': [
