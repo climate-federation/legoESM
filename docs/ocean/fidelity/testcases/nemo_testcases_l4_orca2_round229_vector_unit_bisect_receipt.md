@@ -159,5 +159,13 @@ their certified trajectories are unchanged by construction.
 3. The round-217 unit remains private, OMT-5 remains blocked, and the kt=8
    live-W refusal remains registered debt.
 
+## Post-round correction (round 230)
+
+The operator ran the acquisition after this receipt was committed. NEMO did
+not run: the additions-only writer failed to compile because the whole-array
+`e3t(:,:,:,Kmm)` macro expanded to incompatible 3-D and 2-D ranks. Round 230
+repairs the instrument under a fresh target. This does not change any round-229
+measurement or its STOPPED_FOR_RECORD disposition.
+
 ASKED choices: Decisions 103, 109, 113, and standing Decision 96. UNASKED
 choices: empty. No decision is requested this round.

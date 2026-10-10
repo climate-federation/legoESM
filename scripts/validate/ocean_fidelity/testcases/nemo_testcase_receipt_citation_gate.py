@@ -94,6 +94,7 @@ _ORCA2_R213VECPRE_COMPILED = (
     NEMO / "cfgs/ORCA2_OMIP_L4_R213VECPRE/BLD/ppsrc/nemo")
 _ORCA2_R214VECPREV3_COMPILED = (
     NEMO / "cfgs/ORCA2_OMIP_L4_R214VECPREV3/BLD/ppsrc/nemo")
+_ORCA2_R229FOLDTRP = NEMO / "cfgs/ORCA2_OMIP_L4_R229FOLDTRP/BLD"
 _ORCA2_R104EENACC_COMPILED = (
     NEMO / "cfgs/ORCA2_OMIP_L4_R104EENACC/BLD/ppsrc/nemo")
 _ORCA2_R105EENACC_COMPILED = (
@@ -226,6 +227,14 @@ FILES = {
         _ORCA2_R214VECPREV3_COMPILED / "dynspg_ts.f90"),
     "ORCA2_OMIP_L4_R214VECPREV3/BLD/ppsrc/nemo/lbcnfd.f90": (
         _ORCA2_R214VECPREV3_COMPILED / "lbcnfd.f90"),
+    "ORCA2_OMIP_L4_R229FOLDTRP/BLD/ppsrc/nemo/stprk3_stg.f90": (
+        _ORCA2_R229FOLDTRP / "ppsrc/nemo/stprk3_stg.f90"),
+    "ORCA2_OMIP_L4_R229FOLDTRP/BLD/inc/domzgr_substitute.h90": (
+        _ORCA2_R229FOLDTRP / "inc/domzgr_substitute.h90"),
+    "ORCA2_OMIP_L4_R229FOLDTRP/BLD/ppsrc/nemo/dom_oce.f90": (
+        _ORCA2_R229FOLDTRP / "ppsrc/nemo/dom_oce.f90"),
+    "ORCA2_OMIP_L4_R229FOLDTRP/BLD/ppsrc/nemo/traadv_fct.f90": (
+        _ORCA2_R229FOLDTRP / "ppsrc/nemo/traadv_fct.f90"),
     "ORCA2_OMIP_L4_R214VECPREV3/BLD/ppsrc/nemo/stprk3_stg.f90": (
         _ORCA2_R214VECPREV3_COMPILED / "stprk3_stg.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynadv.f90": (
@@ -2610,6 +2619,17 @@ CITATION_MAP = {
         ("CASE ( 'V' )                               ! V-point", 7),
         ('ptab(1,ipj+jh) = psgn * ptab(3,ipj-3-jh)', 2),
         8],
+    # --- ORCA2 round 230: repair the failed fold-operand writer ----------
+    'ORCA2_OMIP_L4_R229FOLDTRP/BLD/ppsrc/nemo/stprk3_stg.f90:558-558':
+        'e3t_3d(:,:,:) *(1._wp+r3t(:,:,Kmm)*tmask(:,:,:))',
+    'ORCA2_OMIP_L4_R229FOLDTRP/BLD/inc/domzgr_substitute.h90:126-126':
+        '# define  e3t(i,j,k,t)      (E3t_0(i,j,k) Tmsk(r3t,tmask,i,j,k,t))',
+    'ORCA2_OMIP_L4_R229FOLDTRP/BLD/ppsrc/nemo/dom_oce.f90:170-170':
+        'REAL(wp), PUBLIC, ALLOCATABLE, DIMENSION(:,:,:) ::     e3t_3d',
+    'ORCA2_OMIP_L4_R229FOLDTRP/BLD/ppsrc/nemo/dom_oce.f90:180-180':
+        'REAL(wp), PUBLIC, ALLOCATABLE, DIMENSION(:,:,:)   ::   r3t, r3u, r3v',
+    'ORCA2_OMIP_L4_R229FOLDTRP/BLD/ppsrc/nemo/traadv_fct.f90:538-538':
+        'pt_up1(ji,jj,jk) = ( (e3t_3d(ji,jj,jk)',
     # --- ORCA2 round 189: bounded replacement restart list ---
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/in_out_manager.f90:51-51':
         'INTEGER, DIMENSION(10) :: nn_stocklist',
