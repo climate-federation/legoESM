@@ -355,6 +355,13 @@ def assemble_scenario(variant_reports: list[dict]) -> dict[str, object]:
             "recorded_transport_shape"],
         "recorded_transport_bottom": variant_reports[0][
             "recorded_transport_bottom"],
+        "transport_record_admission": {
+            "admitted": False,
+            "reason": (
+                "round-222 admission certifies only rank-complete stage "
+                "frames; oracle_transport is rank-0-only and precedes "
+                "tra_adv_trp, so its score is diagnostic-only"),
+        },
         "variant_order": list(VARIANTS),
         "variants": {
             variant: by_variant[variant]["score"] for variant in VARIANTS
@@ -385,6 +392,8 @@ def classify(reports: list[dict], *, plant: str = "none") -> dict[str, object]:
                 f"{label}: compact T halo source is not exact")
         require(report["recorded_transport_bottom"]["unequal"] == 0,
                 f"{label}: recorded zFv structural bottom moved")
+        require(report["transport_record_admission"]["admitted"] is False,
+                f"{label}: transport admission status moved")
 
     rows = {}
     for label, report in by_label.items():
@@ -417,20 +426,19 @@ def classify(reports: list[dict], *, plant: str = "none") -> dict[str, object]:
     require(rows["independent"]["exposure_part"]
             == rows["given_nemo_entry"]["exposure_part"],
             "labels disagree on the exposure part")
-    transport_exact = all(
-        row["full_zFv_pivot"]["unequal"] == 0 for row in rows.values())
-    status = (
-        "HELD_R229_MISSING_TRACER_FOLD_OWNER_CANDIDATE"
-        if transport_exact else "HELD_R229_VECTOR_TRANSPORT_UNRESOLVED")
+    # The round-222 admission JSON certifies the rank-complete stage frames,
+    # not the legacy lwp-only transport stream.  That stream is also written
+    # before tra_adv_trp updates vector-form zFv.  Retain its numbers as a
+    # diagnostic, but never let them confirm or refute P2/P3.
+    status = "HELD_R229_RANK_COMPLETE_TRANSPORT_ACQUISITION_NEEDED"
     return {
         "format": "nemo-testcase-l4-orca2-round229-bisect-v1",
         "status": status,
         "rows": rows,
         "predictions": {
             "R229-P1": "CONFIRMED",
-            "R229-P2": "CONFIRMED_EXPOSURE" if transport_exact else "REFUTED",
-            "R229-P3": (
-                "CONFIRMED_OWNER_CANDIDATE" if transport_exact else "REFUTED"),
+            "R229-P2": "UNMEASURED_RANK_COMPLETE_RECORD_GAP",
+            "R229-P3": "UNMEASURED_RANK_COMPLETE_RECORD_GAP",
             "R229-P4": "CONFIRMED",
             "R229-P5": "CONFIRMED" if plant == "none" else "PLANT",
         },

@@ -1,0 +1,18 @@
+--- stprk3_stg.F90
++++ stprk3_stg.F90
+@@ -21,4 +21,5 @@
+    USE step_oce       ! time stepping used modules
+    USE eosbn2, ONLY : eos_l2_dump_next ! config-local WRITE-only lane-2 instrument
++   USE l4_r229_fold, ONLY : r229_dump_fold_operands
+    USE domqco         ! quasi-eulerian coordinate      (dom_qco_r3c routine)
+    USE bdydyn         ! ocean open boundary conditions (define bdy_dyn)
+@@ -585,6 +586,9 @@
+ #endif
+             !                        !* Update or Compute (VIF) advective transport
+             CALL tra_adv_trp( kstp, kstg, nit000, Kbb, Kmm, Kaa, Krhs, zFu, zFv, zFw )
++            IF( kstp == nit000 ) CALL r229_dump_fold_operands( kstp, kstg, zFv, &
++               & ts(:,:,:,jp_tem,Kmm), ts(:,:,:,jp_sal,Kmm), e3t(:,:,:,Kmm), &
++               & tmask(:,:,:) )
+             !
+ !!gm ==>>> Question: it probably be better to activate BBL at each stages (==> it have to be tested)
+             !                                            ! BBL coefficients required for both passive- and active-tracer transport within

@@ -56,6 +56,7 @@ def _scenario(label: str) -> dict:
         },
         "recorded_transport_shape": [152, 94, 31],
         "recorded_transport_bottom": _row(0.0, 0),
+        "transport_record_admission": {"admitted": False},
         "variant_order": list(gate.VARIANTS),
         "variants": variants,
     }
@@ -124,7 +125,7 @@ def test_compact_t_halo_source_plant_moves_the_source_row() -> None:
 def test_classifier_names_transport_as_exposure_not_wrong_statement() -> None:
     result = gate.classify([
         _scenario("independent"), _scenario("given_nemo_entry")])
-    assert result["status"] == "HELD_R229_MISSING_TRACER_FOLD_OWNER_CANDIDATE"
+    assert result["status"] == "HELD_R229_RANK_COMPLETE_TRANSPORT_ACQUISITION_NEEDED"
     assert all(row["exposure_part"] == "v_transport"
                for row in result["rows"].values())
 
@@ -141,7 +142,8 @@ def test_one_bit_transport_violation_changes_the_verdict() -> None:
     result = gate.classify([
         _scenario("independent"), _scenario("given_nemo_entry")],
         plant="operand-bit")
-    assert result["status"] == "HELD_R229_VECTOR_TRANSPORT_UNRESOLVED"
+    assert result["status"] == "HELD_R229_RANK_COMPLETE_TRANSPORT_ACQUISITION_NEEDED"
+    assert result["rows"]["independent"]["full_zFv_pivot"]["unequal"] == 1
 
 
 def test_part_registry_and_leave_one_out_sets_are_exact() -> None:
