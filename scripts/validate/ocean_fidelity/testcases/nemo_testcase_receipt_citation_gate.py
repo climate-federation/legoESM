@@ -202,6 +202,8 @@ FILES = {
         _ORCA2_R210OMT1_COMPILED / "dynldf_lev.f90"),
     "ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/stprk3_stg.f90": (
         _ORCA2_R210OMT1_COMPILED / "stprk3_stg.f90"),
+    "ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/traadv.f90": (
+        _ORCA2_R210OMT1_COMPILED / "traadv.f90"),
     "ORCA2_OMIP_L4_R213VECPRE/BLD/ppsrc/nemo/stprk3.f90": (
         _ORCA2_R213VECPRE_COMPILED / "stprk3.f90"),
     "ORCA2_OMIP_L4_R213VECPRE/BLD/ppsrc/nemo/stp2d.f90": (
@@ -2443,6 +2445,23 @@ CITATION_MAP = {
         ('zwf(ji-1,jj-1) = ahmf(ji-1,jj-1,jk)', 1),
         ('&              + ( zwt(ji,jj+1) - zwt(ji  ,jj) ) * r1_e2v(ji,jj)', 1),
         18],
+    # --- ORCA2 round 222: OMT-4 FCT tracer advection ---
+    'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/traadv.f90:592-602': [
+        'NAMELIST/namtra_adv/ ln_traadv_OFF',
+        'READ(numnam_cfg(MAX(INDEX(numnam_cfg,"&namtra_adv "),1):),namtra_adv', 11],
+    'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/traadv.f90:630-647': [
+        '!                                !==  Parameter control & set nadv ==!',
+        "CALL ctl_stop( 'tra_adv_init: FCT scheme, choose 2nd or 4th order, and optimized or accurate treatment of implicit' )",
+        18],
+    'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/traadv.f90:668-674': [
+        ('SELECT CASE ( nadv )', 2),
+        "' Implicit treatment: ', nn_fct_imp", 7],
+    'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/traadv.f90:497-540': [
+        '! FCT at last stage only with RK3',
+        'CALL tra_adv_cen ( kt, nit000,', 44],
+    'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:633-643': [
+        ('IF( ln_tile )   CALL dom_tile_start', 1),
+        ("& l4_canon_3d(ts(:,:,:,jp_sal,Krhs),'T')", 4), 11],
     # --- ORCA2 round 214: live RK indices and malformed round-213 schema ---
     'ORCA2_OMIP_L4_R213VECPRE/BLD/ppsrc/nemo/stprk3.f90:204-215': [
         'CALL stp_2D( kstp, Nbb, Nbb, Naa, Nrhs )',
