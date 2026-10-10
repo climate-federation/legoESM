@@ -60,8 +60,26 @@ refuses the whole-array `e3t` macro and requires the per-level expression.
 No `packages/` file changed, so the shared GYRE, DINO, tank, rung-0, rung-10,
 and OMT-4 trajectory gates cannot execute changed model code.
 
-The receipt citation gate, rigid-shift plant, cumulative citation gate, and
-separate read-only review are recorded in the final validation commit.
+The round receipt citation gate passes 5/5 citations with zero failures,
+unmapped citations, or map-audit failures. The cumulative default receipt
+passes 274 citations with the same zero counts. The rigid-shift plant exits
+nonzero and fails exactly the shifted line-558 citation.
+
+The prescribed `tests/ocean/fidelity -n 12` battery collected 3,131 tests.
+All pytest processes disappeared at 99% without a final summary after 3,101
+passes, seven skips, and four failures, leaving 19 tests unreported. The four
+failures reproduce individually and are the branch's registered pre-existing
+reds: the certified-year harness stamp, round-35 allow-dirty scope ratchet,
+report-emitter worktree-stamp ratchet, and SI3 scalar-math provenance gate.
+The first unreported ID,
+`test_both_new_hooks_at_their_defaults_change_nothing`, passes alone in
+135.42 s. The full battery was not repeated.
+
+The required separate `codex exec --sandbox read-only` review could not
+initialize its app-server client because the sandbox denied its PATH-alias
+write. The verdict is **independent review unavailable in-sandbox**, not PASS
+(`independent_review.log`, SHA-256
+`eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5`).
 
 ## OPEN
 
