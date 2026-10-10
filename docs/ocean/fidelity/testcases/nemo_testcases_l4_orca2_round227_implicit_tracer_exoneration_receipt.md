@@ -114,13 +114,15 @@ construction.
 
 ## OPEN
 
-The stage-3 implicit tracer solve is closed. OMT-4's kt=8 live-W refusal still
-requires a compensating partner, but it is upstream of `tra_zdf`: under the
-atomic unit, walk the carried stage-2 SSH/`r3t` producer that first changes the
-otherwise exact `e3w(Kmm)` operand, in completed-state/offline-replay order.
-Do not climb to OMT-5 and do not merge main for this finding. The literal
+The stage-3 implicit tracer solve is closed. OMT-4's kt=8 live-W refusal is
+carried in through the stage-2 SSH/`r3t` state upstream of `tra_zdf`, but
+Decision 113 now stops this statement walk. Round 228 is measurement-only: it
+measures the complete round-217 vector unit's kt=1..7 fold-row error growth on
+rung 0 and OMT-4, under both labels, to distinguish "wrong from the first
+step" from "correct then unstable." It makes no transcription or landing. Do
+not climb to OMT-5 and do not merge main for this finding. The literal
 nonosc/FCT associations and the implicit solve remain exonerated; none should
 be transcribed again.
 
-ASKED choices: Decisions 103, 109, and standing Decision 96. UNASKED choices:
-empty.
+ASKED choices: Decisions 103, 109, 113, and standing Decision 96. UNASKED
+choices: empty.
