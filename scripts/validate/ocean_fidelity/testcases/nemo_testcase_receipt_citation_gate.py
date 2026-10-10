@@ -2601,6 +2601,9 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4_R214VECPREV3/BLD/ppsrc/nemo/dynspg_ts.f90:669-682': [
         'IF( ln_dynadv_vec .OR. lk_linssh ) THEN      !* Vector form',
         ('END DO   ;   END DO', 17), 14],
+    'ORCA2_OMIP_L4_R214VECPREV3/BLD/ppsrc/nemo/dynspg_ts.f90:738-744': [
+        'IF( .NOT.lk_linssh ) THEN !* Update ocean depth (variable volume case only)',
+        ('END DO   ;   END DO', 20), 7],
     'ORCA2_OMIP_L4_R214VECPREV3/BLD/ppsrc/nemo/dynspg_ts.f90:747-756': [
         'IF( .NOT.lk_linssh ) THEN   !* Update ocean depth (variable volume case only)',
         "&                   , hur_e, 'U',  1._wp, hvr_e, 'V',  1._wp  , ssha_e, 'T', 1._wp, ldfull=.TRUE. )",
@@ -2616,6 +2619,9 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4_R214VECPREV3/BLD/ppsrc/nemo/lbcnfd.f90:684-718': [
         ("CASE ( 'V' )                               ! V-point", 5),
         ('END DO', 105), 35],
+    'ORCA2_OMIP_L4_R214VECPREV3/BLD/ppsrc/nemo/lbcnfd.f90:945-972': [
+        ("IF( c_NFtype == 'T' ) THEN            ! *  North fold  T-point pivot", 4),
+        ('ptab(ji,ipjm1) = psgn * ptab(iju,ipjm1)', 4), 28],
     # --- ORCA2 round 228: post-stage four-field association -------------
     'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:784-796': [
         "CALL lbc_lnk( 'stp_RK3_stg', ts(:,:,:,jp_tem,Kaa), 'T',  1._wp, ts(:,:,:,jp_sal,Kaa), 'T',  1._wp   &",
