@@ -2621,7 +2621,7 @@ CITATION_MAP = {
         ('END DO', 105), 35],
     'ORCA2_OMIP_L4_R214VECPREV3/BLD/ppsrc/nemo/lbcnfd.f90:945-972': [
         ("IF( c_NFtype == 'T' ) THEN            ! *  North fold  T-point pivot", 4),
-        ('ptab(ji,ipjm1) = psgn * ptab(iju,ipjm1)', 4), 28],
+        ('END DO', 149), 28],
     # --- ORCA2 round 228: post-stage four-field association -------------
     'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:784-796': [
         "CALL lbc_lnk( 'stp_RK3_stg', ts(:,:,:,jp_tem,Kaa), 'T',  1._wp, ts(:,:,:,jp_sal,Kaa), 'T',  1._wp   &",
