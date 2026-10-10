@@ -764,13 +764,17 @@ def test_land_stress_lane_predicate_is_the_driver_dispatch():
     assert mpas_land_stress_eligibility(cfg)[0]
     for bad in (cfg._replace(grid=cfg.grid._replace(grid_type="cubed_sphere")),
                 cfg._replace(dycore=cfg.dycore._replace(
-                    discretization="fv3_duo")),
-                # the duo COLUMN lane runs the MPAS loop (mpas_loop_lane)
-                # but is held out by name (not enabled or validated there)
-                cfg._replace(dycore=cfg.dycore._replace(
-                    discretization="fv3_duo", fv3_duo_column_lane=True))):
+                    discretization="fv3_duo"))):
         ok, why = mpas_land_stress_eligibility(bad)
         assert not ok and "not the MPAS lane" in why
+    # the duo COLUMN lane runs _run_mpas (the duo as the loop's dynamics
+    # operator) and takes the land stress like MPAS (user 2026-10-09), on
+    # its cube grid_type
+    duo_col = cfg._replace(
+        grid=cfg.grid._replace(grid_type="cubed_sphere"),
+        dycore=cfg.dycore._replace(discretization="fv3_duo",
+                                   fv3_duo_column_lane=True))
+    assert mpas_land_stress_eligibility(duo_col)[0]
 
 
 # ---------------------------------------------------------------------------
