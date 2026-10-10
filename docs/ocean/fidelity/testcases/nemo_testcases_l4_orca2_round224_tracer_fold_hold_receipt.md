@@ -82,10 +82,41 @@ falsification record.
 
 ## Validation and review
 
-The focused gate suite passes 5/5. Each of the four planted violations exits
-nonzero with `STATUS PLANT-FIRED`. Citation, cumulative citation, independent
-review, and the prescribed ocean-fidelity battery results are recorded below
-after their final-tree executions.
+The focused gate suite passes 5/5 (log SHA-256
+`9f6861b9d0df9f2a48509f9b9eb83f15d2fd2c7de6d6afa71ac05607dddaacb3`).
+Each of the four planted violations exits nonzero with
+`STATUS PLANT-FIRED`; their log hashes are, in order, wall
+`3c04946d39d50849dcee98a2fd7aaf366ca3ca5b5d81601a7f136e8d157519da`,
+source-order
+`67979f18113364e01c66b809453a2cafe3510be6a1f6262c3528d40bc5130b03`,
+support
+`4d9c0f79ab3cc0cfea80f1f530eaf93101d53e13c3c95272e110c5708154f241`,
+and sufficiency
+`82be91bbca38b37c14880cdf839cad58bff2989e562f4e959742798a01666487`.
+
+The round citation gate passes 5/5 compiled citations, and the cumulative
+default gate passes 274 with zero unmapped citations, failures, or map-audit
+failures. Shifting the donor range by two lines makes the round gate fail
+`SYMBOL-NOT-AT-LINE`. The round/default/plant JSON SHA-256 values are
+`80b40276bf90fe8132744cfcc227a4227283e3e7cb569d6cf806058c8e913356`,
+`0ccf69df7544094101b44fbcdcc07b06a2a37315bd94b84b0f66cfc9e7a8b218`,
+and `db2b63e1315e8237ddd904ef39827aed28c43b20e4afa3c6a55cf628f180c6b5`.
+
+Independent review was attempted with `codex exec --sandbox read-only` and
+exited 1 before reading the diff: `failed to initialize in-process app-server
+client: Read-only file system (os error 30)`. **Independent review unavailable
+in-sandbox**; this is not a PASS. Review-log SHA-256:
+`eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5`.
+
+The prescribed `tests/ocean/fidelity -n 12` battery collected 3,088 tests and
+reached 99%. It recorded 3,058 passed, seven skipped, and the same four
+registered failures as round 223: the GYRE round-129 spread-floor record
+stamp, allow-dirty scope, worktree-stamp ratchet, and SI3 scalar-math
+provenance gate. Nineteen tests remained unclassified when every real pytest
+process disappeared without a terminal summary; the idle wrapper was
+interrupted and the battery was not relaunched. It is not called PASS. Log
+SHA-256:
+`db66615756322eed0157972d171760ae886df171081cacf1cc9bbc4b00eba89e`.
 
 ## OPEN
 
