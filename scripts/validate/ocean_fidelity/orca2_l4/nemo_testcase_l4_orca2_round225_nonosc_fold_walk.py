@@ -62,7 +62,8 @@ def classify(report: dict[str, object], *, plant: str = "none") -> dict[str, obj
             "passive-state source moved")
     require(report.get("in_executable_observers") == 0,
             "an in-executable observer entered the walk")
-    require(report.get("source_order") == ["zup", "zdo", "guards", "coef_v"],
+    require(report.get("source_order") == [
+        "dry_bound_sentinel", "zup", "zdo", "guards", "coef_v"],
             "compiled limiter source order moved")
 
     first = None
@@ -70,8 +71,12 @@ def classify(report: dict[str, object], *, plant: str = "none") -> dict[str, obj
         row = report["tracers"][tracer]
         require(row["active_fold_support"] > 0,
                 f"{tracer}: active fold support is empty")
-        require(row["nonnorth_member_unequal"] == 0,
-                f"{tracer}: a pre-north stencil member moved")
+        require(row["nonnorth_member_unequal"] > 0,
+                f"{tracer}: NEMO HUGE dry sentinel unexpectedly matches")
+        require(row["nonnorth_differences_are_dry_sentinels"],
+                f"{tracer}: pre-north difference is not only the dry sentinel")
+        require(row["sentinel_wet_bound_unequal"] == 0,
+                f"{tracer}: dry sentinel changes a wet limiter bound")
         require(row["north_member_unequal"] > 0,
                 f"{tracer}: T-pivot north source is inert")
         require(row["off_fold_bound_unequal"] == 0,
@@ -102,12 +107,14 @@ def classify(report: dict[str, object], *, plant: str = "none") -> dict[str, obj
         require(tracer_first == first,
                 "T and S disagree on the first limiter statement")
 
-    require(report.get("first_nonbit_statement") == first,
-            "reported first limiter statement is not source ordered")
+    require(report.get("first_nonbit_statement") == "dry_bound_sentinel",
+            "reported first bit difference is not the dry-bound sentinel")
+    require(report.get("first_effective_statement") == first,
+            "reported first effective limiter statement is not source ordered")
     require(report.get("statement_sufficiency") == "UNMEASURED_WITH_SPEC",
             "offline replay manufactured a landing verdict")
     report["predictions"] = {
-        "R225-P1": "CONFIRMED",
+        "R225-P1": "REFUTED",
         "R225-P2": "CONFIRMED",
         "R225-P3": "CONFIRMED",
         "R225-P4": "UNMEASURED_WITH_SPEC",
@@ -336,10 +343,30 @@ def measure(deck_root: Path, frames_root: Path, expect_commit: str) -> dict[str,
             "zbup_center", "zbup_west", "zbup_east", "zbup_south",
             "zbup_north", "zbup_above", "zbup_below"))
         source_members = _neighbours(source_bup, north_up)
-        nonnorth_unequal = sum(int(np.count_nonzero(
-            _bit_unequal(current, source)[-1] & support))
+        nonnorth_differences = [
+            _bit_unequal(current, source)[-1] & support
             for index, (current, source) in enumerate(zip(
-                current_members, source_members, strict=True)) if index != 4)
+                current_members, source_members, strict=True)) if index != 4]
+        nonnorth_unequal = sum(int(np.count_nonzero(mask))
+                               for mask in nonnorth_differences)
+        half_huge = np.asarray(0.5 * np.finfo(base.dtype).max, dtype=base.dtype)
+        full_huge = np.asarray(np.finfo(base.dtype).max, dtype=base.dtype)
+        sentinel_only = True
+        for index, (current, source) in enumerate(zip(
+                current_members, source_members, strict=True)):
+            if index == 4:
+                continue
+            changed = _bit_unequal(current, source)[-1] & support
+            sentinel_only &= bool(np.all(
+                (~changed) | ((current[-1] == -half_huge)
+                              & (source[-1] == -full_huge))))
+        wall_north = np.concatenate([source_bup[1:], source_bup[-1:]], axis=0)
+        sentinel_only_zup = np.maximum.reduce(_neighbours(source_bup, wall_north))
+        wall_north_do = np.concatenate([source_bdo[1:], source_bdo[-1:]], axis=0)
+        sentinel_only_zdo = np.minimum.reduce(_neighbours(source_bdo, wall_north_do))
+        sentinel_wet_bound_unequal = int(np.count_nonzero(
+            ((_bit_unequal(current_zup, sentinel_only_zup)
+              | _bit_unequal(current_zdo, sentinel_only_zdo)) & wet)))
 
         tracer_first = "zup" if np.any(zup_changed[-1] & support) else (
             "zdo" if np.any(zdo_changed[-1] & support) else "coef_v")
@@ -348,6 +375,8 @@ def measure(deck_root: Path, frames_root: Path, expect_commit: str) -> dict[str,
         rows[tracer] = {
             "active_fold_support": int(np.count_nonzero(support)),
             "nonnorth_member_unequal": nonnorth_unequal,
+            "nonnorth_differences_are_dry_sentinels": sentinel_only,
+            "sentinel_wet_bound_unequal": sentinel_wet_bound_unequal,
             "north_member_unequal": int(np.count_nonzero(
                 _bit_unequal(current_north[-1:], north_up[-1:]) & support[None])),
             "off_fold_bound_unequal": int(np.count_nonzero(
@@ -392,13 +421,16 @@ def measure(deck_root: Path, frames_root: Path, expect_commit: str) -> dict[str,
         "execution": "offline-pure-jit-cpu-fp64-libm",
         "record_scope": "admitted OMT-4 kt=1 completed states",
         "in_executable_observers": 0,
-        "source_order": ["zup", "zdo", "guards", "coef_v"],
+        "source_order": [
+            "dry_bound_sentinel", "zup", "zdo", "guards", "coef_v"],
         "tracers": rows,
-        "first_nonbit_statement": first_statement,
+        "first_nonbit_statement": "dry_bound_sentinel",
+        "first_effective_statement": first_statement,
         "statement_sufficiency": "UNMEASURED_WITH_SPEC",
         "worktree": stamp,
         "compiled_citations": {
             "call": "ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/traadv_fct.f90:306-316",
+            "dry_sentinel": "ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/traadv_fct.f90:768-821",
             "bounds": "ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/traadv_fct.f90:798-861",
             "guards": "ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/traadv_fct.f90:862-878",
             "v_coefficient": "ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/traadv_fct.f90:888-915",
