@@ -146,9 +146,19 @@ in-process app-server client: Read-only file system (os error 30)`.
 Independent review is unavailable in-sandbox; this is not a PASS. Log SHA-256:
 `eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5`.
 
-The final-tree citation gate and clean replay of the 27 emitted failure IDs run
-after this receipt/map commit. Their verdicts are recorded by a final receipt
-commit; no pending check is called green here.
+On clean receipt/map commit `65321007c`, the round-219 citation gate passes all
+eight compiled citations with zero failures/unmapped entries, the cumulative
+default gate passes 274 citations with zero failures/unmapped entries, and the
+explicit two-line `stpctl` shift plant fails. Receipt/default JSON SHA-256
+values are `fd29d6715db916d4931bba153916cb8632f1304a28c9e1076460aca818b268f7`
+and `0f642c762a6ef91191d70bde6d12bd849f1c8e2ed273ec9bff6e49a581e54ab9`.
+
+The 27 emitted failure IDs were replayed on that clean tree: 23 pass and four
+remain as the registered pre-existing reds named in the campaign brief — SI3
+scalar-math provenance, GYRE round-129 spread-floor record stamp, allow-dirty
+scope, and worktree-stamp ratchet. Clean-replay log SHA-256:
+`f3bdc09963bcabba2bd5c0d7f18781a2a17efa7ba1252a278ff43623a0ef5e02`.
+No round-219 test is red.
 
 ## OPEN
 
