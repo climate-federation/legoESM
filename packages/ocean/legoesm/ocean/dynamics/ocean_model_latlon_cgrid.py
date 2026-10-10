@@ -1168,10 +1168,6 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # result before its later north-minus-south subtraction. False is the
     # unchanged production path; no constructible config can select it.
     barotropic_materialize_v_transport: bool = False
-    # Private round-234 atomic-unit diagnostic: substitute NEMO's raw surface
-    # V mask at the vector-form external update only.  None is production;
-    # no constructible model configuration can select this operand arm.
-    barotropic_vector_update_v_mask_override: object = None
     # Private round-206 before/after control for the indivisible NEMO literal
     # fold unit. None selects the production config predicate; False restores
     # the legacy four-statement path and True selects the complete unit.
@@ -7434,14 +7430,6 @@ class LatLonCGridOceanModel:
                     _baro_seed = dict(
                         _baro_seed,
                         _nemo_materialize_v_transport_test_override=True)
-                _vector_update_v_mask_override = (
-                    self._nemo_ws_test_hooks
-                    .barotropic_vector_update_v_mask_override)
-                if _vector_update_v_mask_override is not None:
-                    _baro_seed = dict(
-                        _baro_seed,
-                        _nemo_vector_update_v_mask_test_override=(
-                            _vector_update_v_mask_override))
                 _atomic_fold_unit = (
                     self._nemo_ws_test_hooks.barotropic_atomic_fold_unit)
                 if _atomic_fold_unit is not None:
