@@ -51,9 +51,20 @@ plants. Its committed preflight reports `SYNTAX_PROOF_PASS` and
   `539fcee8f9c8a945c47ab5106073c6b7b299e6b4089e32c09cef7f741f27d001`.
 - Recovery preflight log SHA256:
   `0398b7d205c0c425317e7b5830daf57ac4298c570da2b83bdeedfa0eeab02748`.
-- The focused parser battery passes 10/10; the bad-level, bad-dimension,
+- The focused parser/citation battery passes 12/12; the bad-level, bad-dimension,
   truncation, malformed-header/name/rank/non-finite, frame-byte, and
   restart-byte controls are non-vacuous.
+- The required `tests/ocean/fidelity -n 12` battery reached 99% before its
+  xdist coordinator stopped making progress after all visible workers had
+  exited: 3,003 passed, 7 skipped, and 4 failed. The four failures reproduce
+  in one serial battery and are outside this round's files: the registered
+  GYRE-year harness stamp moved; 13 pre-existing drivers do not scope the
+  allow-dirty escape; 13 pre-existing report emitters lack worktree stamps;
+  and the known SI3 scalar-math provenance record is not verbatim. The stalled
+  coordinator was interrupted only after no pytest worker remained.
+- Independent review unavailable in-sandbox: `codex exec --sandbox read-only`
+  failed while initializing its in-process app-server client, before it could
+  inspect the diff.
 - No `packages/` file, card, configuration selection, sea-ice selector, or
   carried state changed. GYRE, DINO, tanks, rung 0, rung 10, and the ORCA2
   `unmeasured_features` tuple cannot execute changed model code.
