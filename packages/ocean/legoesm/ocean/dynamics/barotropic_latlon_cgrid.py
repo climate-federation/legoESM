@@ -1753,7 +1753,6 @@ def _run_substep_loop(
     nemo_external_mode_association_test_override=False,
     nemo_external_mode_association_field_test_override="",
     nemo_external_mode_association_component_test_override="",
-    nemo_vector_update_v_mask=None,
     nemo_t_pivot_north_neighbor_test_override=False,
     return_boundary_association_trace=False,
 ):
@@ -2277,10 +2276,7 @@ def _run_substep_loop(
                 _inc_v = nemo_source_round(dt_s * _rhs_v)
                 V_bar_new = nemo_source_round(
                     nemo_source_round(V_bar_c) + _inc_v)
-                _v_update_mask = (
-                    v_mask if nemo_vector_update_v_mask is None
-                    else nemo_vector_update_v_mask)
-                V_bar_new = nemo_source_round(V_bar_new * _v_update_mask)
+                V_bar_new = nemo_source_round(V_bar_new * v_mask)
             else:
                 V_bar_new = (V_bar_c + dt_s * (
                     _cor_v + _drag_v + _pgf_v + F_slow_v_i
@@ -2943,7 +2939,6 @@ def barotropic_substeps_latlon_cgrid(
     _nemo_external_mode_association_test_override=False,
     _nemo_external_mode_association_field_test_override="",
     _nemo_external_mode_association_component_test_override="",
-    _nemo_vector_update_v_mask_test_override=None,
     _nemo_final_mean_association_test_override=False,
     _nemo_t_pivot_north_neighbor_test_override=False,
     _nemo_boundary_association_trace_test_hook=False,
@@ -3484,8 +3479,6 @@ def barotropic_substeps_latlon_cgrid(
             _nemo_external_mode_association_field_test_override),
         nemo_external_mode_association_component_test_override=(
             _nemo_external_mode_association_component_test_override),
-        nemo_vector_update_v_mask=(
-            _nemo_vector_update_v_mask_test_override),
         nemo_t_pivot_north_neighbor_test_override=(
             _nemo_t_pivot_north_neighbor_test_override),
         return_boundary_association_trace=(
