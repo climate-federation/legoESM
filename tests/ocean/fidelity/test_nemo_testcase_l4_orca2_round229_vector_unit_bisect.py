@@ -55,6 +55,7 @@ def _scenario(label: str) -> dict:
             "t_halo_source_check": _row(0.0, 0),
         },
         "recorded_transport_shape": [152, 94, 31],
+        "recorded_transport_bottom": _row(0.0, 0),
         "variants": variants,
     }
 
@@ -68,6 +69,7 @@ def _variant_report(label: str, variant: str) -> dict:
         "worktree": {"commit": "test"},
         "support": scenario["support"],
         "recorded_transport_shape": scenario["recorded_transport_shape"],
+        "recorded_transport_bottom": scenario["recorded_transport_bottom"],
         "score": scenario["variants"][variant],
     }
 def test_compact_support_uses_distinct_v_source_and_t_pivot_rows() -> None:

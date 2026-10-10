@@ -222,7 +222,7 @@ def _score_stage(card, candidate_state, oracle_state,
     rows["tmask"] = _exact(active[-3:], active[-3:])
     require(candidate_zfv.shape[:2] == (148, 180),
             f"candidate zFv shape moved: {candidate_zfv.shape}")
-    require(recorded_zfv.shape[:2] == (148, 90),
+    require(recorded_zfv.shape == (148, 90, candidate_zfv.shape[-1]),
             f"recorded zFv owned shape moved: {recorded_zfv.shape}")
     rows["zFv_recorded_slab"] = _exact(
         candidate_zfv[:, :90], recorded_zfv)
@@ -294,7 +294,11 @@ def measure_variant(deck_root: Path, record_root: Path, label: str,
         card, rung0.assemble_frame(record_root, 1, 1), plant=plant)
     _, recorded_v = _read_transport_self_describing(
         record_root / "oracle_transport_kt00000001_s1.bin")
-    recorded_v_owned = np.asarray(recorded_v[2:150, 2:92], np.float64)
+    recorded_v_bottom = _exact(
+        recorded_v[..., -1], np.zeros_like(recorded_v[..., -1]))
+    require(recorded_v_bottom["unequal"] == 0,
+            "recorded zFv structural bottom slot is not positive zero")
+    recorded_v_owned = np.asarray(recorded_v[2:150, 2:92, :-1], np.float64)
     result = {
         "format": "nemo-testcase-l4-orca2-round229-variant-v1",
         "status": "PASS_R229_VARIANT",
@@ -304,6 +308,7 @@ def measure_variant(deck_root: Path, record_root: Path, label: str,
         "worktree": stamp,
         "support": support,
         "recorded_transport_shape": list(recorded_v.shape),
+        "recorded_transport_bottom": recorded_v_bottom,
         "score": _score_stage(
             card, stage, oracle_state, candidate_zfv, recorded_v_owned),
     }
@@ -336,6 +341,9 @@ def assemble_scenario(variant_reports: list[dict]) -> dict[str, object]:
         require(report["recorded_transport_shape"]
                 == variant_reports[0]["recorded_transport_shape"],
                 f"{variant}: recorded transport shape moved")
+        require(report["recorded_transport_bottom"]
+                == variant_reports[0]["recorded_transport_bottom"],
+                f"{variant}: recorded transport bottom slot moved")
     return {
         "format": "nemo-testcase-l4-orca2-round229-scenario-v1",
         "status": "PASS_R229_SCENARIO",
@@ -345,6 +353,8 @@ def assemble_scenario(variant_reports: list[dict]) -> dict[str, object]:
         "support": variant_reports[0]["support"],
         "recorded_transport_shape": variant_reports[0][
             "recorded_transport_shape"],
+        "recorded_transport_bottom": variant_reports[0][
+            "recorded_transport_bottom"],
         "variants": {
             variant: by_variant[variant]["score"] for variant in VARIANTS
         },
@@ -370,6 +380,8 @@ def classify(reports: list[dict], *, plant: str = "none") -> dict[str, object]:
                 f"{label}: compact T support is not exact")
         require(report["support"]["t_halo_source_check"]["unequal"] == 0,
                 f"{label}: compact T halo source is not exact")
+        require(report["recorded_transport_bottom"]["unequal"] == 0,
+                f"{label}: recorded zFv structural bottom moved")
 
     rows = {}
     for label, report in by_label.items():
