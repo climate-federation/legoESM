@@ -56,7 +56,7 @@ check_layout() {
   [[ "$(grep -Fc 'USE l4_r229_fold, ONLY : r229_dump_fold_operands' "$source")" -eq 1 ]] || return 1
   [[ "$(grep -Fc 'CALL r229_dump_fold_operands' "$source")" -eq 1 ]] || return 1
   call_line=$(grep -nF 'CALL r229_dump_fold_operands' "$source" | cut -d: -f1)
-  consumer_line=$(grep -nF 'CALL tra_adv_trp' "$source" | tail -1 | cut -d: -f1)
+  consumer_line=$(grep -nF 'CALL tra_adv_trp' "$source" | head -1 | cut -d: -f1)
   [[ -n "$call_line" && -n "$consumer_line" && "$call_line" -gt "$consumer_line" ]]
 }
 
@@ -84,6 +84,9 @@ pin "$INPUT_MANIFEST_SHA" "$SOURCE_RUN/input_files.sha256" 'input manifest'
 (cd "$SOURCE_RUN" && sha256sum -c deck_files.sha256 >/dev/null && sha256sum -c input_files.sha256 >/dev/null)
 grep -Fxq 'STOP 0' "$SOURCE_RUN/run.user.stdout.log" || {
   printf 'REFUSE: admitted OMT-4 source run did not complete\n' >&2; exit 65;
+}
+grep -Eq 'shuman averaging.*ln_shuman *= *F' "$SOURCE_RUN/ocean.output" || {
+  printf 'REFUSE: OMT-4 no longer takes the instrumented non-Shuman consumer\n' >&2; exit 65;
 }
 removed=$(awk '/^--- / {next} /^-/ {n++} END {print n+0}' "$PATCH")
 [[ "$removed" -eq 0 ]] || {
