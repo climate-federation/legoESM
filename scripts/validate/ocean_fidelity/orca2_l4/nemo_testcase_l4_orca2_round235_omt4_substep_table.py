@@ -71,9 +71,9 @@ def require(condition: bool, message: str) -> None:
 def _native(value, face: str) -> np.ndarray:
     value = np.asarray(value, dtype=np.float64)
     if face == "u":
-        return r97._native_u(value)
+        return r97._native_u(value)[:, :90]
     if face == "v":
-        return r97._native_v(value)
+        return r97._native_v(value)[:, :90]
     require(face == "t", f"unknown face {face!r}")
     # The admitted canonical stream is rank 0's 90-column owned slab.
     return value[:, :90]

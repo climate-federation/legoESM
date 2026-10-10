@@ -49,7 +49,8 @@ def test_first_selector_uses_frozen_order_and_floor():
 
 
 def test_regional_row_splits_final_three_rows():
-    left = __import__("numpy").zeros((148, 90))
+    np = __import__("numpy")
+    left = np.zeros((148, 90))
     right = left.copy()
     left[10, 2] = 1.0
     left[147, 3] = 2.0
@@ -57,3 +58,10 @@ def test_regional_row_splits_final_three_rows():
     assert row["interior"]["max_abs"] == 1.0
     assert row["fold_band"]["max_abs"] == 2.0
     assert row["complete"]["argmax"] == [147, 3]
+
+
+def test_native_converters_select_rank_zero_owned_slab():
+    np = __import__("numpy")
+    assert gate._native(np.zeros((148, 181)), "u").shape == (148, 90)
+    assert gate._native(np.zeros((149, 180)), "v").shape == (148, 90)
+    assert gate._native(np.zeros((148, 180)), "t").shape == (148, 90)
