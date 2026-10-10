@@ -2597,6 +2597,19 @@ CITATION_MAP = {
         "CALL lbc_lnk( 'stp_RK3_stg', ts(:,:,:,jp_tem,Kaa), 'T',  1._wp, ts(:,:,:,jp_sal,Kaa), 'T',  1._wp   &",
         "&                       , ts(:,:,:,jp_tem,Kaa), 'T',  1._wp, ts(:,:,:,jp_sal,Kaa), 'T',  1._wp, ldfull=.TRUE. )",
         13],
+    # --- ORCA2 round 229: rank-complete tracer-consumer record gap -------
+    'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:342-352': [
+        'IF( lwp .AND. kstp == nit000 ) THEN',
+        "WRITE(l1_unit) l4_canon_3d(zFu,'U'), l4_canon_3d(zFv,'V'), l4_canon_3d(zFw,'T')",
+        11],
+    'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:551-555': [
+        'IF( .NOT.ln_shuman ) THEN',
+        'CALL tra_adv_trp( kstp, kstg, nit000, Kbb, Kmm, Kaa, Krhs, zFu, zFv, zFw )',
+        5],
+    'ORCA2_OMIP_L4_R214VECPREV3/BLD/ppsrc/nemo/lbcnfd.f90:973-981': [
+        "CASE ( 'V' )                               ! V-point",
+        'ptab(1,ipj+jh) = psgn * ptab(3,ipj-3-jh)',
+        9],
     # --- ORCA2 round 189: bounded replacement restart list ---
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/in_out_manager.f90:51-51':
         'INTEGER, DIMENSION(10) :: nn_stocklist',
