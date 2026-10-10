@@ -208,6 +208,8 @@ FILES = {
         _ORCA2_R210OMT1_COMPILED / "traadv_cen.f90"),
     "ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/traadv_fct.f90": (
         _ORCA2_R210OMT1_COMPILED / "traadv_fct.f90"),
+    "ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/lbcnfd.f90": (
+        _ORCA2_R210OMT1_COMPILED / "lbcnfd.f90"),
     "ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/restart.f90": (
         _ORCA2_R210OMT1_COMPILED / "restart.f90"),
     "ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/daymod.f90": (
@@ -2481,6 +2483,35 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/traadv_fct.f90:562-573': [
         '! *** 2nd step',
         ('END DO   ;   END DO   ;   END DO', 26), 12],
+    # --- ORCA2 round 225: live nonosc fold walk and next boundary ---
+    'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/traadv_fct.f90:306-316': [
+        ("CALL lbc_lnk( 'traadv_fct'", 1),
+        'CALL nonosc( Kaa, pt(:,:,:,jn,Kbb), ztFu, ztFv, ztFw, zta_up1, p2dt )',
+        11],
+    'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/traadv_fct.f90:768-821': [
+        'REAL(wp) ::   zpos, zneg, zbig, zsmall, zup, zdo, zbt, zland, z1_Dt',
+        'zbdo(ji,jj,ikp1) = MERGE( MIN( pbef(ji,jj,2), paft(ji,jj,2) ),  zbig, tmask(ji,jj,2) == 1._wp )',
+        54],
+    'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/traadv_fct.f90:798-861': [
+        'DO jk = 1, jpkm1',
+        '&        zbdo(ji  ,jj  ,ikm1), zbdo(ji  ,jj  ,ikp1)  )',
+        64],
+    'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/traadv_fct.f90:862-878': [
+        'zpos = MAX( 0., paa(ji-1,jj  ,jk  ) )',
+        'ENDIF',
+        17],
+    'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/traadv_fct.f90:888-915': [
+        'DO jj = ntsj-( 1), ntej+(  0 )',
+        'END DO   ;   END DO',
+        28],
+    'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/traadv_fct.f90:322-329': [
+        'DO jk =  1,  jpkm1',
+        'zta_up1(ji,jj,jk) = zta_up1(ji,jj,jk) + p2Dt * ztra',
+        8],
+    'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/lbcnfd.f90:581-638': [
+        "IF( c_NFtype == 'T' ) THEN",
+        'END DO   ;   END DO',
+        58],
     'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:633-643': [
         ('IF( ln_tile )   CALL dom_tile_start', 1),
         ("& l4_canon_3d(ts(:,:,:,jp_sal,Krhs),'T')", 4), 11],
