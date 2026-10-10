@@ -2608,7 +2608,7 @@ CITATION_MAP = {
         5],
     'ORCA2_OMIP_L4_R214VECPREV3/BLD/ppsrc/nemo/lbcnfd.f90:973-980': [
         ("CASE ( 'V' )                               ! V-point", 7),
-        'ptab(1,ipj+jh) = psgn * ptab(3,ipj-3-jh)',
+        ('ptab(1,ipj+jh) = psgn * ptab(3,ipj-3-jh)', 2),
         8],
     # --- ORCA2 round 189: bounded replacement restart list ---
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/in_out_manager.f90:51-51':
