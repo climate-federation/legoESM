@@ -20,7 +20,6 @@ jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 import numpy as np
 import pytest
-import yaml
 
 from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
 from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
@@ -143,8 +142,9 @@ def test_cli_and_cam6_decks():
     from scripts.run import run_coupled
     assert ("rrtmgp_overhead_layer=args.rrtmgp_overhead_layer,"
             in inspect.getsource(run_coupled.main))
+    from legoesm.driver.run_config_yaml import read_yaml_with_includes
     for deck in ("amip_production.yaml", "amip_production_fv3duo_c24.yaml"):
-        d = yaml.safe_load((_REPO / "config" / "amip" / deck).read_text())
+        d = read_yaml_with_includes(_REPO / "config" / "amip" / deck)
         assert d["rrtmgp_overhead_layer"] is True, deck
     sh = (_REPO / "config" / "amip" / "amip_production.ginsburg.sh").read_text()
     assert "CMIP6_FORCING_FLAGS+=( --rrtmgp-overhead-layer )" in sh

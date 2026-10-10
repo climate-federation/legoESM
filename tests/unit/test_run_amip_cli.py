@@ -4838,6 +4838,69 @@ def test_cam6_duo_deck_passes_the_lane_guards_on_the_column_lane_only():
         assert needle in msg, needle
 
 
+# The ONLY resolved-config fields the FV3 duo C24 deck may hold differently from
+# the MPAS production deck (review 2026-10-10 F32: six physics rows had drifted
+# under a "byte-identical" header).  Every other row is physics/land/forcing and
+# must resolve to the MPAS value.
+_DUO_DECK_OWN_ROWS = frozenset({
+    # grid and dycore (deck ledger A, B1-B5): the MPAS-only dycore rows are
+    # switched off because the duo's own sponge / damping replace them
+    "grid.grid_type", "grid.resolution",
+    "dycore.discretization", "dycore.dt", "dycore.fv3_duo_column_lane",
+    "dycore.fv3_duo_sponge_layers", "dycore.fv3_duo_sponge_factor",
+    "dycore.fv3_duo_sponge_d2_top", "dycore.fv3_duo_nord",
+    "dycore.fv3_duo_d4_bg", "dycore.fv3_duo_fill",
+    "dycore.mpas_sponge_del2_top_layers", "dycore.mpas_sponge_del2_top_factor",
+    "dycore.mpas_div_damp4_scale", "dycore.mpas_vert_advection_scheme",
+    "mpas_qv_smooth_del4_m4s",
+    # step COUNTS at this dt; the cadence in seconds is asserted equal below
+    "physics_update_steps", "rad_update_steps",
+    # the same land IC recipe on this grid's own columns (a per-grid file)
+    "land_ic_path",
+    # hardware, not physics: GPU g-point batch (fluxes differ by summation order)
+    "rrtmgp_gpoint_batch_size",
+})
+
+
+def _resolved_deck_fields(deck):
+    """Flattened ExperimentConfig a deck resolves to through the run_amip
+    --config route (dummy machine paths), keyed like amip_config_diff."""
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    from scripts.validate.amip_config_diff import _as_plain, _flatten
+    parser = build_arg_parser()
+    keys = load_yaml_config(str(deck), parser)
+    parser.set_defaults(**keys, _config_keys=frozenset(keys))
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args(
+        _AMIP_DUMMY_PATHS + ["--clm-surfdata-path", "/dummy/surfdata.nc"]), parser))
+    cfg.validate_strict()
+    return _flatten(_as_plain(cfg))
+
+
+def test_cam6_duo_deck_resolves_to_the_mpas_deck_outside_grid_intrinsic_rows():
+    import yaml
+    amip = _repo_root() / "config" / "amip"
+    # the deck file itself sets nothing but the MPAS include and its own rows
+    # (closes what the resolved config cannot see: --params, machine paths)
+    own = yaml.safe_load((amip / "amip_production_fv3duo_c24.yaml").read_text())
+    assert own.get("include") == "amip_production.yaml"
+    own_dests = ({k.split(".")[-1] for k in _DUO_DECK_OWN_ROWS} - {"land_ic_path"}
+                 | {"land_ic"})
+    extra = set(own) - {"include"} - own_dests
+    assert not extra, f"duo deck sets rows that are not its own: {sorted(extra)}"
+    mpas = _resolved_deck_fields(amip / "amip_production.yaml")
+    duo = _resolved_deck_fields(amip / "amip_production_fv3duo_c24.yaml")
+    differ = {k for k in mpas.keys() | duo.keys()
+              if repr(mpas.get(k, "<absent>")) != repr(duo.get(k, "<absent>"))}
+    stray = {k: (mpas.get(k, "<absent>"), duo.get(k, "<absent>"))
+             for k in sorted(differ - _DUO_DECK_OWN_ROWS)}
+    assert not stray, f"duo deck differs from MPAS outside its own rows: {stray}"
+    # the comparison is live: the grid itself does differ
+    assert {"grid.grid_type", "dycore.discretization", "land_ic_path"} <= differ
+    # physics and radiation run on the same clock (1800 s / 3600 s) on both
+    for k in ("physics_update_steps", "rad_update_steps"):
+        assert mpas[k] * mpas["dycore.dt"] == duo[k] * duo["dycore.dt"], k
+
+
 def test_argv_distributed_mode_matches_the_parser_and_config_default():
     """The import-time federation decision reads argv by hand (before the
     driver config can be imported); it must agree with argparse on every

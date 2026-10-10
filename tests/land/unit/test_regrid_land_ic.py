@@ -495,6 +495,58 @@ def test_production_deck_resolves_to_the_era5_soil_t_ic():
     assert cfg.land_ic_path == "data/lmip_soil_ic/soil_ic_mpas6_era5T_19790101.npz"
 
 
+def test_fv3_duo_target_writes_the_duo_column_mesh_not_the_generic_cube(
+        tmp_path, monkeypatch):
+    """--target-grid fv3_duo puts every IC column on the duo column lane's own
+    A-grid centre, in its face-major order: the mesh the driver steps
+    (create_fv3_duo_grid + build_duo_column_mesh).  The generic cubed sphere
+    has the same column count but other centres, so the loader's count check
+    cannot catch the wrong target.  Source columns carry their own index, so
+    the written IC must hold exactly the duo mesh's nearest-column map -- which
+    disagrees with the generic cube's map on a large share of columns here."""
+    import json
+    from legoesm.atmosphere.dynamics.gcm.fv3_duo_column import (
+        build_duo_column_mesh)
+    from legoesm.coupler.grid_remap import nearest_column_map
+    from legoesm.grids.factory import create_fv3_duo_grid, create_grid
+    from legoesm.land.restart import load_land_restart
+    pf = tmp_path / "cosby.nc"
+    pf.write_bytes(b"cosby")
+    mod = _load("scripts/data/regrid_land_ic.py", "regrid_land_ic")
+    monkeypatch.setattr(mod, "_source_land_mask",
+                        lambda surfdata, grid, n: np.ones(n, dtype=bool))
+    n_src = 90 * 180                                   # the 2-deg lat-lon grid
+    tag = np.arange(n_src, dtype=np.float64)
+    src = _source(tmp_path, ncol=n_src, extra={
+        "T_soil": np.repeat(tag[:, None], 10, axis=1),
+        "metadata_json": np.array(json.dumps(
+            {"grid_type": "latlon", "resolution": 90}))})
+    out = tmp_path / "duo.npz"
+    assert mod.main(["--source", str(src), "--surfdata", "unused.nc",
+                     "--target-grid", "fv3_duo", "--target-resolution", "8",
+                     "--out", str(out), "--source-soil-column", "10,3.0,2.0",
+                     "--source-soil-hydraulics", "clapp_hornberger",
+                     "surfdata_cosby", str(pf)]) == 0
+
+    b = create_fv3_duo_grid(8)
+    mesh = build_duo_column_mesh(b.ctx_np, b.n, b.ng)
+    state, meta = load_land_restart(out, expected_land_mode="multilayer",
+                                    expected_ncol=mesh.nCells)
+    assert meta["metadata"]["grid_type"] == "fv3_duo"
+    sl, so = mod._cols_rad(create_grid("latlon", resolution=90))
+    want = nearest_column_map(sl, so, np.asarray(mesh.latCell),
+                              np.asarray(mesh.lonCell))
+    np.testing.assert_array_equal(np.asarray(state.T_soil)[:, 0], want)
+    cl, co = mod._cols_rad(create_grid("cubed_sphere", resolution=8))
+    assert cl.size == mesh.nCells
+    assert np.mean(nearest_column_map(sl, so, cl, co) != want) > 0.25
+    # a duo IC is itself a valid source: its metadata names fv3_duo
+    assert mod.main(["--source", str(out), "--surfdata", "unused.nc",
+                     "--target-grid", "latlon", "--target-resolution", "4",
+                     "--out", str(tmp_path / "back.npz"),
+                     "--source-soil-column", "10,3.0,2.0"]) == 0
+
+
 def test_warm_era5_soil_is_ice_consistent_with_freeze_thaw_on():
     """ERA5-warm soil over spin-up water: diagnosed liquid stays within
     [residual, total] and the apparent heat capacity stays finite and above the
