@@ -95,6 +95,7 @@ _ORCA2_R213VECPRE_COMPILED = (
 _ORCA2_R214VECPREV3_COMPILED = (
     NEMO / "cfgs/ORCA2_OMIP_L4_R214VECPREV3/BLD/ppsrc/nemo")
 _ORCA2_R229FOLDTRP = NEMO / "cfgs/ORCA2_OMIP_L4_R229FOLDTRP/BLD"
+_ORCA2_R230FOLDTRP = NEMO / "cfgs/ORCA2_OMIP_L4_R230FOLDTRP/BLD"
 _ORCA2_R104EENACC_COMPILED = (
     NEMO / "cfgs/ORCA2_OMIP_L4_R104EENACC/BLD/ppsrc/nemo")
 _ORCA2_R105EENACC_COMPILED = (
@@ -235,6 +236,10 @@ FILES = {
         _ORCA2_R229FOLDTRP / "ppsrc/nemo/dom_oce.f90"),
     "ORCA2_OMIP_L4_R229FOLDTRP/BLD/ppsrc/nemo/traadv_fct.f90": (
         _ORCA2_R229FOLDTRP / "ppsrc/nemo/traadv_fct.f90"),
+    "ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/stprk3_stg.f90": (
+        _ORCA2_R230FOLDTRP / "ppsrc/nemo/stprk3_stg.f90"),
+    "ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/traadv_cen.f90": (
+        _ORCA2_R230FOLDTRP / "ppsrc/nemo/traadv_cen.f90"),
     "ORCA2_OMIP_L4_R214VECPREV3/BLD/ppsrc/nemo/stprk3_stg.f90": (
         _ORCA2_R214VECPREV3_COMPILED / "stprk3_stg.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynadv.f90": (
@@ -2630,6 +2635,25 @@ CITATION_MAP = {
         'REAL(wp), PUBLIC, ALLOCATABLE, DIMENSION(:,:,:)   ::   r3t, r3u, r3v',
     'ORCA2_OMIP_L4_R229FOLDTRP/BLD/ppsrc/nemo/traadv_fct.f90:538-538':
         ('pt_up1(ji,jj,jk) = ( (e3t_3d(ji,jj,jk)', 2),
+    # --- ORCA2 round 231: admitted fold record and V-transport boundary ---
+    'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/stprk3_stg.f90:282-285': [
+        'DO jk =  1,  jpkm1',
+        'zFv(ji,jj,jk) = e1v(ji,jj)',
+        4],
+    'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/traadv_cen.f90:150-160': [
+        'DO jk = 1, jpkm1',
+        'ztFv(ji,jj) = 0.5_wp * pV(ji,jj,jk)',
+        'pt(ji,jj,jk,jn,Krhs) = pt(ji,jj,jk,jn,Krhs)',
+        11],
+    'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/stprk3_stg.f90:269-279': [
+        'SELECT CASE( n_baro_upd )',
+        ('zvb(ji,jj) =', 2),
+        11],
+    'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/stprk3_stg.f90:552-559': [
+        'IF( .NOT.ln_shuman ) THEN',
+        'CALL tra_adv_trp( kstp, kstg, nit000, Kbb, Kmm, Kaa, Krhs, zFu, zFv, zFw )',
+        'CALL r229_dump_fold_operands',
+        8],
     # --- ORCA2 round 189: bounded replacement restart list ---
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/in_out_manager.f90:51-51':
         'INTEGER, DIMENSION(10) :: nn_stocklist',
