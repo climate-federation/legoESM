@@ -62,7 +62,6 @@ RESULTS = REPO / "results" / "old"
 DOCS = REPO / "docs"
 DIAG = REPO / "diagnostics" / "fv3_visual"
 DEBUG = REPO / "tests" / "debug"
-LOGO_PATH = REPO / "docs" / "assets" / "legoESM.png"
 
 
 def first_existing(*candidates: Path) -> Path:
@@ -363,7 +362,6 @@ def slide_title():
     logo_h = 4.6
     logo_x = SLIDE_W_IN - M - logo_w
     logo_y = 0.85
-    b.add_image_rect(idg, logo_x, logo_y, logo_w, logo_h, LOGO_PATH)
     text_w = logo_x - M - 0.35
     b.add(sp_textbox(idg, M, 1.1, text_w, 0.45,
         [Para([Run("DIFFERENTIABLE EARTH SYSTEM MODELING",
@@ -1091,8 +1089,7 @@ def slide_amip():
     rw = SLIDE_W_IN - rx - M
     fig = first_existing(
         RESULTS / "held_suarez_gray_fv_C16_L20_10d_rerun_20260307" / "amip_snapshots.png",
-        DEBUG / "spectral_hs100_final.png",
-        LOGO_PATH)
+        DEBUG / "spectral_hs100_final.png")
     b.add_image_rect(idg, rx, 1.70, rw, 4.4, fig,
         caption="AMIP-style diagnostic stack — Held-Suarez + gray radiation rollout.")
     return b
@@ -1563,8 +1560,6 @@ def slide_roadmap():
     add_content_chrome(b, idg, "Where we are, where we're going",
                        "roadmap", 33, TOTAL_SLIDES)
 
-    # Small logo accent — bottom-right above the call-to-action bar.
-    b.add_image_rect(idg, SLIDE_W_IN - M - 1.4, 5.55, 1.4, 1.4, LOGO_PATH)
 
     lx, lw = M, 5.6
     b.add(sp_textbox(idg, lx, 1.70, lw, 0.4,
