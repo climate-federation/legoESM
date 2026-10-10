@@ -126,10 +126,12 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
             "zv_frc half closes alone")
     require(not report["replays"]["ssvmask_only"]["bit_exact"],
             "ssvmask half closes alone")
-    require(report["operand_rows"]["zv_frc"]["differing_cells"] == 35,
-            "zv_frc cell census moved")
-    require(report["operand_rows"]["ssvmask"]["differing_cells"] == 35,
-            "ssvmask cell census moved")
+    # Round 212's 35-cell count covered rank 0 only.  The new rank-complete
+    # record makes the source statement's global census observable: 68 cells.
+    require(report["operand_rows"]["zv_frc"]["differing_cells"] == 68,
+            "global zv_frc cell census moved")
+    require(report["operand_rows"]["ssvmask"]["differing_cells"] == 68,
+            "global ssvmask cell census moved")
     report["status"] = "PASS_R215_OMT1_VECTOR_PAIR_REPLAY"
     return report
 
