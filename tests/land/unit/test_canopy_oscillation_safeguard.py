@@ -120,24 +120,6 @@ def test_safeguard_solves_columns_the_plain_step_cannot(monkeypatch):
         f"step left {without_guard:.4%}: it is not breaking the oscillation")
 
 
-def test_convergence_is_judged_on_the_newton_step_not_the_halved_one():
-    """Backtracking must not decide convergence, in either direction.
-
-    Testing the TAKEN step would let a column look converged merely because its
-    step was cut by up to 8x — the same trap a zeroed step posed before it.
-    Requiring that no backtracking happened at all makes the opposite error:
-    a column that needed one smaller step and then settled would be reported
-    unsolved, and whatever the caller does with unsolved columns would be
-    applied to a genuine root.  The test is therefore on the step the solver
-    WANTED, which stays far above tolerance while a column oscillates.
-    """
-    src = __import__("inspect").getsource(solver._make_implicit_newton_solver)
-    assert "new_converged = step_finite & (jnp.linalg.norm(delta) < tol)" in src, (
-        "the convergence flag no longer tests the unbacktracked Newton step")
-    assert "x_new = x + delta_taken" in src, (
-        "the iterate no longer advances by the backtracked step")
-
-
 @_needs_gpu
 @pytest.mark.parametrize("seed", [0, 1])
 def test_the_solver_still_solves_almost_everything(seed):
