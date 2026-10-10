@@ -105,7 +105,8 @@ fi
 admit() {
   local plant
   for plant in cadence header field-name truncation nonfinite missing-frame \
-    twin-ulp terminal-byte changed-binary early-month stop-line; do
+    twin-ulp terminal-byte changed-binary early-month stop-line \
+    month-overwrite; do
     if "$py" "$record_gate" --candidate "$canonical" \
       --calibration "$calibration" --twin-a "$twin_a" --twin-b "$twin_b" \
       --month "$month" --plant "$plant" \

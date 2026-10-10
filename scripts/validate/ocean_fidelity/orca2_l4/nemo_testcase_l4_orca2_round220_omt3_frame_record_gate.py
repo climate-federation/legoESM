@@ -11,6 +11,9 @@ from pathlib import Path
 import numpy as np
 
 from scripts.validate.ocean_fidelity.orca2_l4 import (
+    nemo_testcase_l4_orca2_round186_growth_record_gate as growth_record,
+)
+from scripts.validate.ocean_fidelity.orca2_l4 import (
     nemo_testcase_l4_orca2_round199_omt0_record_gate as protocol,
 )
 from scripts.validate.ocean_fidelity.orca2_l4 import (
@@ -32,7 +35,7 @@ MONTH_STEPS = (10, 20, 30, 40, 50, 60, 70, 80, 90, 95)
 PLANTS = (
     "none", "cadence", "header", "field-name", "truncation", "nonfinite",
     "missing-frame", "twin-ulp", "terminal-byte", "changed-binary",
-    "early-month", "stop-line",
+    "early-month", "stop-line", "month-overwrite",
 )
 
 STP_CTL_LINE = (
@@ -105,6 +108,25 @@ def _frame_arrays(path: Path) -> tuple[dict, dict[str, np.ndarray]]:
     return omt1_record._frame_arrays(path)
 
 
+def _terminal_overwrites(root: Path, step: int, plant: str) -> list[dict]:
+    """Classify NEMO's final-list-entry reopen on every rank, or none."""
+    rows = [
+        growth_record._terminal_overwrite(
+            root / f"ORCA2_{step:08d}_restart_{rank:04d}.nc"
+        )
+        for rank in RANKS
+    ]
+    if all(row is None for row in rows):
+        require(plant != "month-overwrite",
+                "month-overwrite plant target is absent")
+        return []
+    if plant == "month-overwrite":
+        rows[0] = None
+    require(all(row is not None for row in rows),
+            "terminal overwrite signature differs between ranks")
+    return [row for row in rows if row is not None]
+
+
 def _month_boundary(root: Path, canonical: Path, plant: str,
                     deck_gate=omt3_deck) -> dict:
     require(sha256(root / "nemo") == BASE_BINARY_SHA256,
@@ -119,7 +141,9 @@ def _month_boundary(root: Path, canonical: Path, plant: str,
     if "STOP 0" in stdout and "RUN_DONE" in timing:
         disposition = "COMPLETED"
         boundary_step = MONTH_ITEND
-        available = MONTH_STEPS
+        terminal_overwrites = _terminal_overwrites(
+            root, MONTH_STEPS[-1], plant)
+        available = MONTH_STEPS[:-1] if terminal_overwrites else MONTH_STEPS
     else:
         # The raw MPI/stpctl/abort-state evidence is authoritative; the
         # launcher's derived expected-stop marker is informational.
@@ -144,6 +168,7 @@ def _month_boundary(root: Path, canonical: Path, plant: str,
                 "month boundary lacks rank-0 abort state")
         disposition = "STP_CTL"
         available = tuple(step for step in MONTH_STEPS if step < boundary_step)
+        terminal_overwrites = []
     require(available and available[0] == 10,
             "month record does not retain the ten-step calibration")
     headers = []
@@ -158,6 +183,7 @@ def _month_boundary(root: Path, canonical: Path, plant: str,
         "last_step": boundary_step,
         "available_restart_steps": list(available),
         "restart_headers": headers,
+        "terminal_overwrites": terminal_overwrites,
         "deck": deck,
     }
 

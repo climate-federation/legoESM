@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from netCDF4 import Dataset
 
 from scripts.validate.ocean_fidelity.orca2_l4 import (
     nemo_testcase_l4_orca2_round222_omt4_deck_gate as deck_gate,
@@ -53,6 +54,28 @@ def test_record_preflight_reuses_admitted_writer_for_ten_steps() -> None:
     assert report["writer_preflight"]["removed_source_lines"] == 0
 
 
+def test_completed_month_terminal_overwrite_and_plant(tmp_path: Path) -> None:
+    for rank in record_gate.RANKS:
+        path = tmp_path / f"ORCA2_00000095_restart_{rank:04d}.nc"
+        with Dataset(path, "w") as dataset:
+            dataset.createDimension("time_counter", None)
+            dataset.createVariable("kt", "f8").assignValue(0.0)
+            for name in record_gate.omt3_record.growth_record.FIELDS:
+                dataset.createVariable(name, "f8", ("time_counter",))
+
+    rows = record_gate.omt3_record._terminal_overwrites(
+        tmp_path, 95, "none")
+    assert len(rows) == 2
+    assert {row["classification"] for row in rows} == {
+        "TERMINAL_REOPEN_TRUNCATED_COMPLETED_RESTART"
+    }
+    with pytest.raises(
+            record_gate.omt3_record.GateError,
+            match="signature differs between ranks"):
+        record_gate.omt3_record._terminal_overwrites(
+            tmp_path, 95, "month-overwrite")
+
+
 def test_runner_reuses_binaries_and_smokes_before_records() -> None:
     text = RUNNER.read_text()
     assert "makenemo" not in text
@@ -69,6 +92,7 @@ def test_runner_month_boundary_is_admitted_after_the_ladder() -> None:
     text = RUNNER.read_text()
     assert "10,20,30,40,50,60,70,80,90,95" in text
     assert '[[ "$last_step" -gt 10 ]]' in text
+    assert "month-overwrite" in text
     assert "/usr/bin/time" not in text
     month_body = text.split("run_month() {", 1)[1].split("\n}", 1)[0]
     assert '|| pipe_rc=("${PIPESTATUS[@]}")' in month_body
