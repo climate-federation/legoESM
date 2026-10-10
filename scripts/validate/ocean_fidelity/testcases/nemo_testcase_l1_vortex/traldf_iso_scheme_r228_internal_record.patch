@@ -1,0 +1,67 @@
+--- traldf_iso_scheme.h90
++++ traldf_iso_scheme.h90
+@@ -56,6 +56,16 @@
+                END_2D
+             ENDIF
+ 	    !
++#if defined iso_lap
++            IF( r227_iso_active .AND. jn == jp_tem ) THEN
++               DO_2D( INN+1, INN+1, INN+1, INN+1 )
++                  r227_dit(ji,jj,jk) = zdit(ji,jj,ik)
++                  r227_djt(ji,jj,jk) = zdjt(ji,jj,ik)
++                  r227_dkt(ji,jj,jk) = zdkt(ji,jj,ik)
++                  IF( jk == jpkm1 ) r227_dkt(ji,jj,jpk) = zdkt(ji,jj,ikp1)
++               END_2D
++            ENDIF
++#endif
+             !!----------------------------------------------------------------------
+             !                             (  A11   0   A13  )      
+             !  rotation matrix        A = (   0   A22  A23  )
+@@ -88,6 +98,14 @@
+                zfv(ji,jj) = ahtv(ji,jj,jk)                                                                       &   ! v-masked
+                   &       * (   zA22 * zdjt(ji,jj,ik) + zA23 * (  ( zdkt(ji,jj+1,ik  ) + zdkt(ji,jj,ikp1) )      &
+                   &                                             + ( zdkt(ji,jj+1,ikp1) + zdkt(ji,jj,ik  ) )  )   )
++#if defined iso_lap
++               IF( r227_iso_active .AND. jn == jp_tem ) THEN
++                  r227_A11(ji,jj,jk) = zA11 ; r227_A22(ji,jj,jk) = zA22
++                  r227_A13(ji,jj,jk) = zA13 ; r227_A23(ji,jj,jk) = zA23
++                  r227_hmsku(ji,jj,jk) = zmsku ; r227_hmskv(ji,jj,jk) = zmskv
++                  r227_fu(ji,jj,jk) = zfu(ji,jj) ; r227_fv(ji,jj,jk) = zfv(ji,jj)
++               ENDIF
++#endif
+             END_2D
+ !!gm
+ !!gm OPTIM???    also verify the usage of akz ah_wslp2 in trazdf !!!
+ !!gm
+             !
+@@ -148,6 +168,16 @@
+                      &                   + ( zfw(ji,jj) - zfw_kp1      )  )   & 
+                      &                 * r1_e1e2t(ji,jj) / e3t(ji,jj,jk,Kmm)
+                   !
++#if defined iso_lap
++                  IF( r227_iso_active .AND. jn == jp_tem ) THEN
++                     r227_vmsku(ji,jj,jk) = zmsku ; r227_vmskv(ji,jj,jk) = zmskv
++                     r227_ahu_w(ji,jj,jk) = zahu_w ; r227_ahv_w(ji,jj,jk) = zahv_w
++                     r227_A31(ji,jj,jk) = zA31 ; r227_A32(ji,jj,jk) = zA32
++                     r227_fw_lower(ji,jj,jk) = zfw(ji,jj)
++                     r227_fw_upper(ji,jj,jk) = zfw_kp1
++                  ENDIF
++#endif
++                  !
+                   zfw(ji,jj) = zfw_kp1          !==  Store zfw for next level calculation  ==!
+                   !
+                END_2D
+@@ -168,6 +198,13 @@
+                      &                 * r1_e1e2t(ji,jj) / e3t(ji,jj,jk,Kmm)
+                END_2D
+                !
++#if defined iso_lap
++               IF( r227_iso_active .AND. jn == jp_tem ) THEN
++                  DO_2D( INN, INN, INN, INN )
++                     r227_fw_lower(ji,jj,jk) = zfw(ji,jj) ; r227_fw_upper(ji,jj,jk) = 0._wp
++                  END_2D
++               ENDIF
++#endif
+ 	    ENDIF
+             !
+ 	         

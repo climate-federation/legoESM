@@ -3045,11 +3045,18 @@ class LatLonCGridOceanModel:
                 and _process_trace is None):
             raise ValueError(
                 "vertical_solve_trace requires tracer_process_trace")
-        if ((self._nemo_ws_test_hooks.tracer_process_branch_activity or self._nemo_ws_test_hooks.tracer_ldf_diagnostics is not None)
+        if (self._nemo_ws_test_hooks.tracer_process_branch_activity
                 and _process_trace is None):
             raise ValueError(
                 "tracer diagnostic hook requires "
                 "tracer_process_trace")
+        if (self._nemo_ws_test_hooks.tracer_ldf_diagnostics is not None
+                and (self.config.outer_integrator != "forward_euler"
+                     or self.config.tracer_time_integrator != "rk3_ws"
+                     or self.config.gm_redi is None)):
+            raise ValueError(
+                "tracer_ldf_diagnostics requires the forward-Euler WS-RK3 "
+                "GM/Redi production path")
         if _process_trace is not None:
             if not isinstance(_process_trace, tuple) or len(
                     _process_trace) not in (0, 4):
@@ -5549,6 +5556,7 @@ class LatLonCGridOceanModel:
                    _return_barotropic_substeps: bool = False,
                    _return_live_stage_operands: bool = False,
                    _return_tracer_process_trace: bool = False,
+                   _return_ldf_diagnostic_trace: bool = False,
                    _ldf_state=None, _tke_n2_bundle_override=None,
                    _return_raw_kaa_qco: bool = False,
                    z_coord=None, config=None, iwm_fields=None):
@@ -9127,9 +9135,25 @@ class LatLonCGridOceanModel:
                 native_bolus_slope_eta=_eta_gm_in,
                 # tra_ldf e3u/e3v use the step-entry Nnn SSH (Kmm).
                 redi_flux_eta=state.eta.data,
+                # Stage-3 tra_ldf receives the stage-2 output as Kmm
+                # (stprk3_stg.f90:531-532).  Its T-point divisor therefore
+                # uses the materialized one-half-stage sea surface, while the
+                # once-per-step slope and current face path above retain their
+                # independently cited operands.
+                redi_divisor_eta=(
+                    _eta_live_one_half
+                    if getattr(_cfg_b, "tracer_time_integrator", "euler")
+                    == "rk3_ws" else None),
                 return_bolus_transport=_want_bolus,
-                return_redi_diagnostics=(_return_tracer_process_trace and self._nemo_ws_test_hooks.tracer_ldf_diagnostics is not None), return_redi_slope_diagnostics=(_return_tracer_process_trace and (self._nemo_ws_test_hooks.tracer_ldf_diagnostics == "slope" or isinstance(self._nemo_ws_test_hooks.tracer_ldf_diagnostics, dict))), native_slope_nmln_override=(self._nemo_ws_test_hooks.tracer_ldf_diagnostics.get("nmln") if isinstance(self._nemo_ws_test_hooks.tracer_ldf_diagnostics, dict) else None),
-                redi_face_thickness_override=(self._nemo_ws_test_hooks.tracer_ldf_diagnostics if isinstance(self._nemo_ws_test_hooks.tracer_ldf_diagnostics, tuple) else None),
+                return_redi_diagnostics=((_return_tracer_process_trace or _return_ldf_diagnostic_trace) and self._nemo_ws_test_hooks.tracer_ldf_diagnostics is not None), return_redi_slope_diagnostics=((_return_tracer_process_trace or _return_ldf_diagnostic_trace) and (self._nemo_ws_test_hooks.tracer_ldf_diagnostics == "slope" or isinstance(self._nemo_ws_test_hooks.tracer_ldf_diagnostics, dict))), native_slope_nmln_override=(self._nemo_ws_test_hooks.tracer_ldf_diagnostics.get("nmln") if isinstance(self._nemo_ws_test_hooks.tracer_ldf_diagnostics, dict) else None),
+                redi_face_thickness_override=(self._nemo_ws_test_hooks.tracer_ldf_diagnostics.get("face_thickness") if isinstance(self._nemo_ws_test_hooks.tracer_ldf_diagnostics, dict) else (self._nemo_ws_test_hooks.tracer_ldf_diagnostics if isinstance(self._nemo_ws_test_hooks.tracer_ldf_diagnostics, tuple) else None)),
+                redi_divisor_thickness_override=(self._nemo_ws_test_hooks.tracer_ldf_diagnostics.get("divisor_thickness") if isinstance(self._nemo_ws_test_hooks.tracer_ldf_diagnostics, dict) else None),
+                redi_closed_bottom_wmask_override=(self._nemo_ws_test_hooks.tracer_ldf_diagnostics.get("closed_bottom_wmask") if isinstance(self._nemo_ws_test_hooks.tracer_ldf_diagnostics, dict) else None),
+                redi_horizontal_flux_evaluation_override=(self._nemo_ws_test_hooks.tracer_ldf_diagnostics.get("horizontal_flux_evaluation") if isinstance(self._nemo_ws_test_hooks.tracer_ldf_diagnostics, dict) else None),
+                redi_area_reciprocal_override=(self._nemo_ws_test_hooks.tracer_ldf_diagnostics.get("area_reciprocal") if isinstance(self._nemo_ws_test_hooks.tracer_ldf_diagnostics, dict) else None),
+                redi_area_reciprocal_evaluation_override=(self._nemo_ws_test_hooks.tracer_ldf_diagnostics.get("area_reciprocal_evaluation") if isinstance(self._nemo_ws_test_hooks.tracer_ldf_diagnostics, dict) else None),
+                redi_final_update_evaluation_override=(self._nemo_ws_test_hooks.tracer_ldf_diagnostics.get("final_update_evaluation") if isinstance(self._nemo_ws_test_hooks.tracer_ldf_diagnostics, dict) else None),
+                redi_rhs_accumulator_override=(self._nemo_ws_test_hooks.tracer_ldf_diagnostics.get("rhs_accumulator") if isinstance(self._nemo_ws_test_hooks.tracer_ldf_diagnostics, dict) else None),
                 dt=dt,
                 eos_depth=getattr(_cfg_b, "eos_depth", "insitu"),
             )
@@ -10219,6 +10243,12 @@ class LatLonCGridOceanModel:
         # carry's dtypes stay stable.
         state_new = self._carry_nemo_rk3_after_ssh(state, state_new)
         state_new = cast_pytree(state_new, None, "storage", allow_downcast=True)
+        if _return_ldf_diagnostic_trace:
+            if _nemo_ws_ldf_diagnostics is None:
+                raise ValueError("WS-RK3 LDF diagnostic trace is incomplete")
+            return _NEMOWSLdfDiagnosticTrace(
+                state_after=state_new,
+                ldf_diagnostics=_nemo_ws_ldf_diagnostics)
         if _return_tracer_process_trace:
             if (_nemo_ws_process_qco is None
                     or _nemo_ws_process_boundaries is None
@@ -13134,7 +13164,8 @@ class LatLonCGridOceanModel:
                     _nemo_stage1_zad_eta_after_override=(
                         _nemo_stage1_zad_eta_after_override))
                 return result._replace(state_after=state_after)
-            if self._nemo_ws_test_hooks.tracer_process_trace is not None:
+            if (self._nemo_ws_test_hooks.tracer_process_trace is not None
+                    or self._nemo_ws_test_hooks.tracer_ldf_diagnostics is not None):
                 # As with the live stage operands, returning extra arrays can
                 # change XLA fusion.  The next-step state therefore comes only
                 # from an independently compiled ordinary production call.
@@ -13234,6 +13265,18 @@ class LatLonCGridOceanModel:
                 grid=grid, vertex_mask=vertex_mask, t_seconds=t_seconds,
                 _return_tracer_process_trace=True,
                 _vertical_K_test_override=_vertical_K_test_override,
+                _nemo_stage1_zad_eta_after_override=(
+                    _nemo_stage1_zad_eta_after_override))
+        if self._nemo_ws_test_hooks.tracer_ldf_diagnostics is not None:
+            if _oi != "forward_euler":
+                raise ValueError(
+                    "tracer_ldf_diagnostics is a private forward_euler "
+                    "WS-RK3 fidelity hook")
+            return self._step_impl(
+                state, dt, freshwater=freshwater,
+                surface_forcing=surface_forcing, sponge=sponge,
+                grid=grid, vertex_mask=vertex_mask, t_seconds=t_seconds,
+                _return_ldf_diagnostic_trace=True,
                 _nemo_stage1_zad_eta_after_override=(
                     _nemo_stage1_zad_eta_after_override))
         if self.config.barotropic.barotropic_solver == "implicit_unsplit":
@@ -15865,4 +15908,11 @@ class _NEMOWSTracerProcessTrace(NamedTuple):
     qsr_association: object
     vertical_solve: object
     fct_activity: object
+    ldf_diagnostics: object
+
+
+class _NEMOWSLdfDiagnosticTrace(NamedTuple):
+    """Write-only production-JIT LDF internals without the QSR observer."""
+
+    state_after: object
     ldf_diagnostics: object

@@ -768,4 +768,3 @@ def test_conservative_regrid_rejects_partial_longitude_source():
         field, src_lat, _uniform_centres(n_src_lon, 0.0, 360.0), dst_lat, dst_lon,
     )
     assert np.all(np.isfinite(out))
-

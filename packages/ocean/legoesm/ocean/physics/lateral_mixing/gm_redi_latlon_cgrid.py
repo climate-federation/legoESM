@@ -24,6 +24,7 @@ from jax import lax
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.core.source_rounding import nemo_source_round
 from legoesm.grids.latlon import LatLonGrid
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     compute_face_masks_3d,
@@ -50,7 +51,10 @@ from legoesm.ocean.eos import (
     nemo_seos_prd_literal,
     rho_0 as _RHO_0,
 )
-from legoesm.ocean.vertical import nemo_qco_live_face_thicknesses
+from legoesm.ocean.vertical import (
+    nemo_qco_live_face_thicknesses,
+    nemo_qco_live_t_thickness,
+)
 from legoesm.ocean.physics.lateral_mixing._gm_redi_common import (
     EPS,
     EPS_DIV as _EPS_DIV,
@@ -2359,6 +2363,13 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
     a33_evaluation: str = "normalized_square",
     return_diagnostics: bool = False,
     return_operand_diagnostics: bool = False,
+    divisor_thickness: jnp.ndarray | None = None,
+    closed_bottom_wmask: bool = True,
+    horizontal_flux_evaluation: str = "vectorized",
+    area_reciprocal: jnp.ndarray | None = None,
+    area_reciprocal_evaluation: str = "vectorized",
+    final_update_evaluation: str = "masked",
+    rhs_accumulator: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """NEMO ``traldf_iso`` (``#define iso_lap``) iso-neutral Laplacian Redi
     tracer tendency on the lat-lon C-grid.
@@ -2420,6 +2431,11 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
         vertical gradient into the deepest wet cell.  ``None`` ⇒ assume
         every level of a wet column is water (full-depth flat bottom) —
         only correct when ``q`` has no below-bathymetry levels.
+    closed_bottom_wmask : bool
+        ``True`` by default for every lat-lon C-grid caller. NEMO's
+        ``traldf_iso`` closes the W mask below the deepest wet tracer cell
+        before forming the horizontal/vertical tensor pair; ``False`` exists
+        only as a fidelity discriminator.
 
     Returns
     -------
@@ -2453,6 +2469,35 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
         raise ValueError(
             "a33_evaluation must be 'normalized_square' or 'nemo_literal', "
             f"got {a33_evaluation!r}")
+    if horizontal_flux_evaluation not in (
+            "vectorized", "nemo_pairwise", "nemo_literal",
+            "nemo_literal_differences", "nemo_literal_horizontal_sum",
+            "nemo_literal_flux_sum", "nemo_literal_divergence"):
+        raise ValueError(
+            "horizontal_flux_evaluation must be 'vectorized', "
+            "'nemo_pairwise', 'nemo_literal', "
+            "'nemo_literal_differences', 'nemo_literal_horizontal_sum', "
+            "'nemo_literal_flux_sum' or 'nemo_literal_divergence', got "
+            f"{horizontal_flux_evaluation!r}")
+    if area_reciprocal_evaluation not in ("vectorized", "nemo_stored"):
+        raise ValueError(
+            "area_reciprocal_evaluation must be 'vectorized' or "
+            f"'nemo_stored', got {area_reciprocal_evaluation!r}")
+    if (area_reciprocal is not None
+            and area_reciprocal_evaluation != "vectorized"):
+        raise ValueError(
+            "area_reciprocal and a non-vectorized "
+            "area_reciprocal_evaluation are mutually exclusive")
+    if final_update_evaluation not in (
+            "masked", "unmasked", "nemo_rhs_increment"):
+        raise ValueError(
+            "final_update_evaluation must be 'masked', 'unmasked' or "
+            f"'nemo_rhs_increment', got {final_update_evaluation!r}")
+    if ((rhs_accumulator is None)
+            != (final_update_evaluation != "nemo_rhs_increment")):
+        raise ValueError(
+            "rhs_accumulator must be supplied exactly when "
+            "final_update_evaluation='nemo_rhs_increment'")
     ones_z = jnp.ones((1, 1, nlev), dtype=dtype)
     if (face_thickness_u is None) != (face_thickness_v is None):
         raise ValueError(
@@ -2562,10 +2607,16 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
     # zmsku = 1/max(Σ4 wmask around the u-face vertical pair, 1)
     wm_ip1 = jnp.roll(wmask, -1, ax_x)
     wm_kp1 = jnp.roll(wmask, -1, ax_z)
-    wm_ip1_kp1 = jnp.roll(wm_ip1, -1, ax_z)
+    if closed_bottom_wmask:
+        # NEMO's deepest tracer level reads the closed jpk W level, not the
+        # surface W level.  This private discriminator prevents the periodic
+        # vertical roll from wrapping that surface mask onto the floor
+        # (traldf_iso.f90:246-249).
+        wm_kp1 = wm_kp1.at[:, :, -1].set(0.0)
+    wm_ip1_kp1 = jnp.roll(wm_kp1, -1, ax_x)
     zmsku_h = 1.0 / jnp.maximum(wm_ip1 + wm_kp1 + wm_ip1_kp1 + wmask, 1.0)
     wm_jp1 = jnp.roll(wmask, -1, ax_y)
-    wm_jp1_kp1 = jnp.roll(wm_jp1, -1, ax_z)
+    wm_jp1_kp1 = jnp.roll(wm_kp1, -1, ax_y)
     zmskv_h = 1.0 / jnp.maximum(wm_jp1 + wm_kp1 + wm_jp1_kp1 + wmask, 1.0)
 
     zA13 = -e2u[:, :, jnp.newaxis] * uslp * zmsku_h
@@ -2573,13 +2624,36 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
 
     # 4-pt vertical-gradient average around the u-face / v-face
     zdkt_kp1 = jnp.roll(zdkt, -1, ax_z)
-    avg4_u = (jnp.roll(zdkt, -1, ax_x) + zdkt_kp1
-              + jnp.roll(zdkt_kp1, -1, ax_x) + zdkt)
-    avg4_v = (jnp.roll(zdkt, -1, ax_y) + zdkt_kp1
-              + jnp.roll(zdkt_kp1, -1, ax_y) + zdkt)
+    literal_flux = horizontal_flux_evaluation.startswith("nemo_literal")
+    if horizontal_flux_evaluation == "nemo_pairwise" or literal_flux:
+        # traldf_iso.f90:254-259: NEMO requires the two explicit pairs for
+        # halo/fold compatibility.  Keep this private selector until the
+        # production-step discriminator closes the complete statement.
+        avg4_u = ((jnp.roll(zdkt, -1, ax_x) + zdkt_kp1)
+                  + (jnp.roll(zdkt_kp1, -1, ax_x) + zdkt))
+        avg4_v = ((jnp.roll(zdkt, -1, ax_y) + zdkt_kp1)
+                  + (jnp.roll(zdkt_kp1, -1, ax_y) + zdkt))
+    else:
+        avg4_u = (jnp.roll(zdkt, -1, ax_x) + zdkt_kp1
+                  + jnp.roll(zdkt_kp1, -1, ax_x) + zdkt)
+        avg4_v = (jnp.roll(zdkt, -1, ax_y) + zdkt_kp1
+                  + jnp.roll(zdkt_kp1, -1, ax_y) + zdkt)
 
-    zfu = aht * (zA11 * zdit + zA13 * avg4_u)
-    zfv = aht_v * (zA22 * zdjt + zA23 * avg4_v)
+    if literal_flux:
+        # Materialize every source operation in traldf_iso.f90:254-259.  Bare
+        # parentheses are reassociated by the production XLA closure; the
+        # shared identity helper retains each gfortran rounding boundary.
+        diag_u = nemo_source_round(zA11 * zdit)
+        cross_u = nemo_source_round(zA13 * nemo_source_round(avg4_u))
+        diag_v = nemo_source_round(zA22 * zdjt)
+        cross_v = nemo_source_round(zA23 * nemo_source_round(avg4_v))
+        zfu = nemo_source_round(
+            aht * nemo_source_round(diag_u + cross_u))
+        zfv = nemo_source_round(
+            aht_v * nemo_source_round(diag_v + cross_v))
+    else:
+        zfu = aht * (zA11 * zdit + zA13 * avg4_u)
+        zfv = aht_v * (zA22 * zdjt + zA23 * avg4_v)
 
     # ================= VERTICAL flux zfw at w-level jk+1 (A31 + A32) ========
     # Shared a33 kappa sums (#1226): faces (k,k+1) here = the "above"
@@ -2770,17 +2844,75 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
                 "'centred' or 'through_fct'.")
 
     # ================= 3-D DIVERGENCE (added to RHS with + sign) =============
-    hdiv = (zfu - jnp.roll(zfu, +1, ax_x)) + (zfv - jnp.roll(zfv, +1, ax_y))
     zfw_top = jnp.roll(zfw_kp1, +1, ax_z)            # flux at interface ABOVE cell k
     zfw_top = zfw_top.at[:, :, 0].set(0.0)           # surface flux = 0
-    vdiv = zfw_top - zfw_kp1
-
-    r1_e1e2t = 1.0 / (e1t * e2t)
-    tend = (hdiv + vdiv) * r1_e1e2t[:, :, jnp.newaxis] / e3t
+    if area_reciprocal is not None:
+        r1_e1e2t = jnp.asarray(area_reciprocal, dtype=dtype)
+        if r1_e1e2t.shape != e1t.shape:
+            raise ValueError(
+                "area_reciprocal must have the tracer-cell horizontal "
+                f"shape {e1t.shape}, got {r1_e1e2t.shape}")
+    elif area_reciprocal_evaluation == "nemo_stored":
+        # domhgr.f90:155 stores e1e2t first, then its reciprocal. Retain both
+        # assignments as compiled source-rounding boundaries for the private
+        # production-step discriminator.
+        r1_e1e2t = nemo_source_round(
+            1.0 / nemo_source_round(e1t * e2t))
+    else:
+        r1_e1e2t = 1.0 / (e1t * e2t)
+    e3t_divisor = e3t if divisor_thickness is None else jnp.asarray(
+        divisor_thickness, dtype=dtype)
+    if e3t_divisor.shape != q.shape:
+        raise ValueError(
+            "divisor_thickness must have the full tracer shape "
+            f"{q.shape}, got {e3t_divisor.shape}")
+    divergence_mode = horizontal_flux_evaluation.removeprefix(
+        "nemo_literal_")
+    if divergence_mode in (
+            "differences", "horizontal_sum", "flux_sum", "divergence"):
+        # traldf_iso.f90:306-310/:327-331.  These cumulative private modes
+        # retain one more compiled boundary at a time after the horizontal
+        # fluxes have become exact.  The deepest level uses zfw alone rather
+        # than subtracting the identically-zero flux below the model floor.
+        du = nemo_source_round(zfu - jnp.roll(zfu, +1, ax_x))
+        dv = nemo_source_round(zfv - jnp.roll(zfv, +1, ax_y))
+        dw = nemo_source_round(zfw_top - zfw_kp1)
+        dw = dw.at[:, :, -1].set(zfw_top[:, :, -1])
+        hdiv = du + dv
+        if divergence_mode in ("horizontal_sum", "flux_sum", "divergence"):
+            hdiv = nemo_source_round(hdiv)
+        total_div = hdiv + dw
+        if divergence_mode in ("flux_sum", "divergence"):
+            total_div = nemo_source_round(total_div)
+        scaled_div = total_div * r1_e1e2t[:, :, jnp.newaxis]
+        if divergence_mode == "divergence":
+            scaled_div = nemo_source_round(scaled_div)
+            tend = nemo_source_round(scaled_div / e3t_divisor)
+        else:
+            tend = scaled_div / e3t_divisor
+    else:
+        hdiv = ((zfu - jnp.roll(zfu, +1, ax_x))
+                + (zfv - jnp.roll(zfv, +1, ax_y)))
+        vdiv = zfw_top - zfw_kp1
+        tend = ((hdiv + vdiv) * r1_e1e2t[:, :, jnp.newaxis]
+                / e3t_divisor)
     # Mask by the 3-D cell wet mask (NEMO tmask), not just the 2-D surface mask,
     # so sub-seafloor dry levels of a wet column are zeroed too (byte-identical
     # on flat bottom, where those levels already carry zero divergence).
-    tend = tend * act
+    if final_update_evaluation != "unmasked":
+        tend = tend * act
+    if final_update_evaluation == "nemo_rhs_increment":
+        rhs_before = jnp.asarray(rhs_accumulator, dtype=dtype)
+        if rhs_before.shape != q.shape:
+            raise ValueError(
+                "rhs_accumulator must have the full tracer shape "
+                f"{q.shape}, got {rhs_before.shape}")
+        # traldf_iso.f90:306-310/:327-331 updates Krhs in place.  The Round
+        # 235 private discriminator returns the exact increment subsequently
+        # written by the oracle (rhs_after-rhs_before), preserving both
+        # compiled assignment boundaries without changing any production arm.
+        tend = nemo_source_round(
+            nemo_source_round(rhs_before + tend) - rhs_before)
     if return_diagnostics:
         diagnostics = {
             "zfu": zfu,
@@ -2792,13 +2924,14 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
                 "q": q, "tmask": act, "umask": umask, "vmask": vmask,
                 "wmask": wmask, "ahtu": aht, "ahtv": aht_v,
                 "uslp": uslp, "vslp": vslp, "wslpi": wslpi,
-                "wslpj": wslpj, "e3t": e3t, "e3u_flux": e3u_flux,
+                "wslpj": wslpj, "e3t": e3t_divisor, "e3u_flux": e3u_flux,
                 "e3v_flux": e3v_flux, "dit": zdit, "djt": zdjt,
                 "dkt": zdkt, "A11": zA11, "A22": zA22, "A13": zA13,
                 "A23": zA23, "hmsku": zmsku_h, "hmskv": zmskv_h,
                 "vmsku": zmsku_w, "vmskv": zmskv_w, "ahu_w": zahu_w,
                 "ahv_w": zahv_w, "A31": zA31, "A32": zA32,
                 "zfw_top": zfw_top, "tendency": tend,
+                "r1_e1e2t": r1_e1e2t,
             })
             diagnostics["zfu_operands"] = {
                 # NOTE: face-MASKED, as NEMO's own ahtu is (ldftra.f90:433).
@@ -2829,6 +2962,7 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
                     "wmask": wmask,
                     "ah_wslp2": ah_wslp2,
                     "akz": akz,
+                    "ah_wslp2_above": _ahw_ab, "akz_above": _akz_ab,
                     "e1e2t": e1t * e2t,
                     "e3w_kp1": e3w_kp1,
                     "qdiff_kp1": q - jnp.roll(q, -1, axis=2),
@@ -4048,10 +4182,18 @@ def gm_redi_tracer_tendency_latlon(
     native_kappa_slope_eta: jnp.ndarray | None = None,
     native_bolus_slope_eta: jnp.ndarray | None = None,
     redi_flux_eta: jnp.ndarray | None = None,
+    redi_divisor_eta: jnp.ndarray | None = None,
     dt: float | None = None,
     return_bolus_transport: bool = False,
     return_redi_diagnostics: bool = False, return_redi_slope_diagnostics: bool = False, native_slope_nmln_override: jnp.ndarray | None = None,
     redi_face_thickness_override: tuple[jnp.ndarray, jnp.ndarray] | None = None,
+    redi_divisor_thickness_override: jnp.ndarray | None = None,
+    redi_closed_bottom_wmask_override: bool | None = None,
+    redi_horizontal_flux_evaluation_override: str | None = None,
+    redi_area_reciprocal_override: jnp.ndarray | None = None,
+    redi_area_reciprocal_evaluation_override: str | None = None,
+    redi_final_update_evaluation_override: str | None = None,
+    redi_rhs_accumulator_override: jnp.ndarray | None = None,
     eos_depth: str = "insitu",
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Top-level GM/Redi for lat-lon C-grid.  ``kappa_redi_v_override``:
@@ -4073,6 +4215,10 @@ def gm_redi_tracer_tendency_latlon(
         tracer flux after the dynamics update but indexes these faces at Kmm,
         so the MLF model step supplies its step-entry eta here. ``None`` keeps
         same-level callers byte-identical.
+    redi_divisor_eta : (n_lat, n_lon) or None
+        Kmm sea-surface height consumed by ``traldf_iso``'s live T-thickness
+        divisor. On WS-RK3 this is the stage-2 output entering stage 3, not
+        the step-entry height used by the once-per-step slope calculation.
     H_bathy : (n_lat, n_lon)
         Bottom depth (positive).
     grid : LatLonGrid
@@ -4436,24 +4582,58 @@ def gm_redi_tracer_tendency_latlon(
                 "unknown GMRediConfig.redi_flux_face_thickness_evaluation "
                 f"{_flux_face_mode!r}; expected 'tpoint_jacobian' or "
                 "'nemo_qco_live'")
+        _divisor_mode = cfg.redi_divisor_thickness_evaluation
+        if _divisor_mode not in ("reference_jacobian", "nemo_qco_live"):
+            raise ValueError(
+                "unknown GMRediConfig.redi_divisor_thickness_evaluation "
+                f"{_divisor_mode!r}; expected 'reference_jacobian' or "
+                "'nemo_qco_live'")
         _flux_e3u = None
         _flux_e3v = None
-        if _flux_face_mode == "nemo_qco_live":
+        _divisor_e3t = redi_divisor_thickness_override
+        _needs_raw_e3t = (
+            _flux_face_mode == "nemo_qco_live"
+            or (_divisor_mode == "nemo_qco_live" and _divisor_e3t is None))
+        _e3t0 = None
+        if _needs_raw_e3t:
             if eta is None:
                 raise ValueError(
-                    "redi_flux_face_thickness_evaluation='nemo_qco_live' "
-                    "requires NOW sea-surface height")
+                    "live Redi face or divisor thickness requires NOW "
+                    "sea-surface height")
             _e3t0 = getattr(z_coord, "nemo_e3t_0", None)
             if _e3t0 is None:
                 raise ValueError(
-                    "redi_flux_face_thickness_evaluation='nemo_qco_live' "
-                    "requires raw NEMO e3t_0")
+                    "live Redi face or divisor thickness requires raw NEMO "
+                    "e3t_0")
+            _e3t0 = jnp.asarray(_e3t0, dtype=T.dtype)[..., :T.shape[-1]]
+        if _flux_face_mode == "nemo_qco_live":
             _umask3, _vmask3, _ = nemo_iso_face_masks(
                 u_mask, v_mask, _active_3d)
-            _e3t0 = jnp.asarray(_e3t0, dtype=T.dtype)[..., :T.shape[-1]]
             _flux_eta = eta if redi_flux_eta is None else redi_flux_eta
             _flux_e3u, _flux_e3v = nemo_qco_live_face_thicknesses(
                 _flux_eta, z_coord, _e3t0, _e3t0, _umask3, _vmask3)
+        if _divisor_mode == "nemo_qco_live" and _divisor_e3t is None:
+            # traldf_iso.f90:306-310/:327-331 divides the flux divergence by
+            # e3t(Kmm). NEMO's r3t divisor uses ht_0, the source-ordered sum
+            # of e3t_0*tmask (domain.f90:193-212), independently of which
+            # horizontal face-thickness construction the card selects.
+            _ht0 = jnp.zeros_like(eta, dtype=T.dtype)
+            for _jk in range(T.shape[-1]):
+                _ht0 = nemo_source_round(
+                    _ht0 + nemo_source_round(
+                        _e3t0[..., _jk] * _active_3d[..., _jk]))
+            # Preserve the pre-split operand precedence: cards that do not
+            # name a distinct divisor SSH inherit the independently routed
+            # Kmm face SSH, and only then the dispatcher's primary SSH.
+            _divisor_eta = (
+                redi_divisor_eta
+                if redi_divisor_eta is not None
+                else redi_flux_eta if redi_flux_eta is not None else eta)
+            _divisor_e3t = nemo_qco_live_t_thickness(
+                _divisor_eta, _ht0, z_coord, T.dtype, e3t_0=_e3t0)
+        _closed_bottom_wmask = (
+            True if redi_closed_bottom_wmask_override is None
+            else redi_closed_bottom_wmask_override)
         _positions = getattr(cfg, "slope_positions", "mode_b")
         if _positions not in ("mode_b", "nemo_native"):
             raise ValueError(
@@ -4525,7 +4705,23 @@ def gm_redi_tracer_tendency_latlon(
                 vertical_skew_evaluation=_skew_eval,
                 a33_evaluation=_a33_eval,
                 return_diagnostics=return_redi_diagnostics,
-                return_operand_diagnostics=return_redi_diagnostics)
+                return_operand_diagnostics=return_redi_diagnostics,
+                divisor_thickness=_divisor_e3t,
+                closed_bottom_wmask=_closed_bottom_wmask,
+                horizontal_flux_evaluation=(
+                    redi_horizontal_flux_evaluation_override
+                    if redi_horizontal_flux_evaluation_override is not None
+                    else "vectorized"),
+                area_reciprocal=redi_area_reciprocal_override,
+                area_reciprocal_evaluation=(
+                    redi_area_reciprocal_evaluation_override
+                    if redi_area_reciprocal_evaluation_override is not None
+                    else "vectorized"),
+                final_update_evaluation=(
+                    redi_final_update_evaluation_override
+                    if redi_final_update_evaluation_override is not None
+                    else "masked"),
+                rhs_accumulator=redi_rhs_accumulator_override)
             if return_bolus_transport:
                 dT_dt, _bolus = _dT
             elif return_redi_diagnostics:
@@ -4543,7 +4739,18 @@ def gm_redi_tracer_tendency_latlon(
                 face_thickness_u=_flux_e3u,
                 face_thickness_v=_flux_e3v,
                 vertical_skew_evaluation=_skew_eval,
-                a33_evaluation=_a33_eval)
+                a33_evaluation=_a33_eval,
+                divisor_thickness=_divisor_e3t,
+                closed_bottom_wmask=_closed_bottom_wmask,
+                horizontal_flux_evaluation=(
+                    redi_horizontal_flux_evaluation_override
+                    if redi_horizontal_flux_evaluation_override is not None
+                    else "vectorized"),
+                area_reciprocal=redi_area_reciprocal_override,
+                area_reciprocal_evaluation=(
+                    redi_area_reciprocal_evaluation_override
+                    if redi_area_reciprocal_evaluation_override is not None
+                    else "vectorized"))
             if return_bolus_transport:
                 return dT_dt, dS_dt, _bolus
             if return_redi_diagnostics:
@@ -4572,6 +4779,8 @@ def gm_redi_tracer_tendency_latlon(
             kappa_Redi_v=kappa_Redi_v_eff,
             face_thickness_u=_flux_e3u,
             face_thickness_v=_flux_e3v,
+            divisor_thickness=_divisor_e3t,
+            closed_bottom_wmask=_closed_bottom_wmask,
         )
         if return_bolus_transport:
             dT_dt, _bolus = _dT
@@ -4585,6 +4794,8 @@ def gm_redi_tracer_tendency_latlon(
             kappa_Redi_v=kappa_Redi_v_eff,
             face_thickness_u=_flux_e3u,
             face_thickness_v=_flux_e3v,
+            divisor_thickness=_divisor_e3t,
+            closed_bottom_wmask=_closed_bottom_wmask,
         )
         if return_bolus_transport:
             return dT_dt, dS_dt, _bolus
@@ -5830,7 +6041,7 @@ def _nemo_native_slope_diagnostics(scope):
         "zww": scope["_vslp_raw"], "zuslp_pre": pre_u,
         "zvslp_pre": pre_v, "zuslp_post": post_u,
         "zvslp_post": post_v, "uslp": scope["uslp"],
-        "vslp": scope["vslp"], "r3t_Kmm": r3t,
+        "vslp": scope["vslp"], "wslpi": scope["wslpi"], "wslpj": scope["wslpj"], "r3t_Kmm": r3t,
         "r3u_Kmm": r3u, "r3v_Kmm": r3v,
         "zhmlpt": scope["zhmlpt"], "r1_hmlu": scope["r1_hmlu"],
         "r1_hmlv": scope["r1_hmlv"],
