@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import importlib
 import sys
 import types
 
@@ -97,6 +98,8 @@ def test_production_entry_applies_the_scheme():
 # tables, read by four lookup entry points.
 # ---------------------------------------------------------------------------
 
+_BACKEND = "legoesm.land.canopy.clm_ml_backend.multilayer_canopy"
+
 _TABLE_ATTRS = ("psigridM", "psigridH", "_psigridM_jax", "_psigridH_jax")
 
 
@@ -121,11 +124,10 @@ def fake_clm(monkeypatch):
     fake tables would make the real-dependency tests in the same pytest process
     silently validate against a stub.
     """
-    pkg = types.ModuleType("multilayer_canopy")
+    pkg = importlib.import_module(_BACKEND)
     mod = _fake_turbulence_module()
-    pkg.MLCanopyTurbulenceMod = mod
-    monkeypatch.setitem(sys.modules, "multilayer_canopy", pkg)
-    monkeypatch.setitem(sys.modules, "multilayer_canopy.MLCanopyTurbulenceMod", mod)
+    monkeypatch.setattr(pkg, "MLCanopyTurbulenceMod", mod, raising=False)
+    monkeypatch.setitem(sys.modules, f"{_BACKEND}.MLCanopyTurbulenceMod", mod)
     monkeypatch.setattr(iface, "_ensure_clm_initialized", lambda: None)
     monkeypatch.setattr(iface, "_PSIHAT_RSL", None)
     monkeypatch.setattr(iface, "_DIFF_TURBULENCE_SCHEME", None)
