@@ -123,7 +123,28 @@ in-process app-server client: Read-only file system (os error 30)`.
 Independent review unavailable in-sandbox. Log SHA-256:
 `eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5`.
 
-Citation and pytest results are recorded in the final validation commit.
+The round receipt citation gate passes 8/8 citations and the cumulative
+default gate passes 274/274, both with zero failures or unmapped citations.
+The rigid `domzgr.f90:184-188` two-line-shift plant fails. Receipt/default/
+plant log SHA-256 values are
+`3d98ef0b25b62b45c510b600eccdd376f4a2bd7c9a52f7327f73f46c5719965b`,
+`9884ac54d45927175c479a0ba89bca438c7e0e58fbe4593ba1e51459a0370eb4`,
+and `8433e52cf3d98ac92e9b03070039977402c6fc78f7eb79277ba55c5bf2bd1c0f`.
+
+The focused round-232 plus citation-gate tests pass 21/21 (log SHA-256
+`f38af7c780487348e3887081c65675cf32b0ded8171cd8bdcdd096241516ea69`).
+The one prescribed `tests/ocean/fidelity -n 12` battery collected 3,138
+selected tests. Before the bounded compiler-limit interrupt at 99%, it emitted
+3,114 PASS, seven SKIP, and four FAIL results. The four failures are exactly
+the registered pre-existing reds also reported in round 219: GYRE round-129
+spread-floor record stamp, allow-dirty scope, worktree-stamp ratchet, and SI3
+scalar-math provenance. No round-232 test is red. Thirteen tests were
+unclassified; the ten round-35 record checks pass 10/10 in isolation. The
+three end-to-end phase-3 stage-sweep controls again stalled at their first ID
+in a clean non-xdist isolated process and remain explicitly **unclassified**,
+not passed. Full/round-35 log SHA-256 values are
+`9b3813231e0b41f5c0ee5fbb251c42f9f5e2d1780e8d324e77b8fbf77b737120`
+and `099ae4442601e783099abc31415d97ae65e8bb79a7d289656aea7f851a404221`.
 
 ## Preregistered predictions
 
