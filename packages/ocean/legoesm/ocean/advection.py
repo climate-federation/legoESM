@@ -33,6 +33,12 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     is_tripolar,
     vface_zonal_cos_lat,
 )
+from legoesm.grids.operators_latlon_cgrid import (
+    apply_north_fold,
+    fold_ghost_source_T,
+    fold_is_local,
+    north_fold_mask,
+)
 
 # =============================================================================
 # Flux limiter — DST-3 uses Van Leer (less aggressive than Sweby, better
@@ -812,15 +818,15 @@ def centred2_to_u_points(f: jnp.ndarray) -> jnp.ndarray:
     return jnp.concatenate([f_face, f_face[:, 0:1, :]], axis=1)
 
 
-def centred2_to_v_points(f: jnp.ndarray) -> jnp.ndarray:
+def centred2_to_v_points(f: jnp.ndarray, grid=None) -> jnp.ndarray:
     """2nd-order centred tracer at v-faces: 0.5·(T_south + T_north).
 
-    Wall faces (j=0, n_lat) copy the adjacent cell — their mass flux is
-    zero so the value only needs to be finite. Returns (n_lat+1, n_lon,
-    nlev).
+    Reuses the canonical cell-to-V interpolation so regular walls remain
+    closed while a tripolar north face reads NEMO's exchanged T-pivot halo.
+    Returns (n_lat+1, n_lon, nlev).
     """
-    f_int = 0.5 * (f[:-1, :, :] + f[1:, :, :])           # interior n_lat-1 faces
-    return jnp.concatenate([f[:1, :, :], f_int, f[-1:, :, :]], axis=0)
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import interp_to_v_points
+    return interp_to_v_points(f, grid)
 
 
 FCT_HIGH_ORDER_SCHEMES = ("ppm", "centred2")
@@ -1003,7 +1009,7 @@ def fct_tracer_advection(
 
     # --- Step 1: Horizontal face fluxes (low and high order) ---
     tr_u_low = upwind_to_u_points(base, mass_flux_u)
-    tr_v_low = upwind_to_v_points(base, mass_flux_v)
+    tr_v_low = upwind_to_v_points(base, mass_flux_v, grid=grid)
     flux_u_low = mass_flux_u * tr_u_low
     flux_v_low = mass_flux_v * tr_v_low
     div_h_low = divergence_cgrid(flux_u_low, flux_v_low, grid)
@@ -1016,7 +1022,7 @@ def fct_tracer_advection(
         tr_v_hi = ppm_to_v_points(tracer, mass_flux_v)
     else:
         tr_u_hi = centred2_to_u_points(tracer)
-        tr_v_hi = centred2_to_v_points(tracer)
+        tr_v_hi = centred2_to_v_points(tracer, grid=grid)
     flux_u_hi = mass_flux_u * tr_u_hi
     flux_v_hi = mass_flux_v * tr_v_hi
 
@@ -1098,7 +1104,7 @@ def fct_tracer_advection(
         if active_mask is not None:
             q_mid = jnp.where(active_mask > 0.5, q_mid, base)
         qmid_u = upwind_to_u_points(q_mid, mass_flux_u)
-        qmid_v = upwind_to_v_points(q_mid, mass_flux_v)
+        qmid_v = upwind_to_v_points(q_mid, mass_flux_v, grid=grid)
         flux_u_low = 0.5 * (flux_u_low + mass_flux_u * qmid_u)
         flux_v_low = 0.5 * (flux_v_low + mass_flux_v * qmid_v)
         div_h_low = divergence_cgrid(flux_u_low, flux_v_low, grid)
@@ -1219,13 +1225,24 @@ def fct_tracer_advection(
         # tracer update masks the cell out anyway) and must not widen a
         # WET neighbour's box.  ``zbig`` finite-sentineled to the dtype's
         # max (not ``inf``) so float32 callers stay finite under AD.
-        zbig = jnp.asarray(0.5, dtype=bnd_up.dtype) * jnp.finfo(bnd_up.dtype).max
+        # NEMO's live ``nonosc`` uses ``HUGE(1._wp)`` exactly
+        # (traadv_fct.f90:775,817-844), not a reduced finite surrogate.
+        zbig = jnp.asarray(jnp.finfo(bnd_up.dtype).max, dtype=bnd_up.dtype)
         bnd_up = jnp.where(wet, bnd_up, -zbig)
         bnd_do = jnp.where(wet, bnd_do, zbig)
     tr_west = jnp.roll(bnd_up, 1, axis=1)
     tr_east = jnp.roll(bnd_up, -1, axis=1)
     tr_south = jnp.concatenate([bnd_up[:1, :, :], bnd_up[:-1, :, :]], axis=0)
     tr_north = jnp.concatenate([bnd_up[1:, :, :], bnd_up[-1:, :, :]], axis=0)
+    fold = getattr(grid, "fold", None)
+    nfold_mask = north_fold_mask(grid)
+    if fold_is_local(grid) or nfold_mask is not None:
+        # ``nonosc`` reads jj+1 after the T-point exchange.  On a stored
+        # T-pivot mesh that ghost comes from the row below the pivot, then the
+        # T permutation (lbcnfd.f90:581-638; traadv_fct.f90:853-861).
+        north = fold_ghost_source_T(bnd_up, fold)[:, fold.perm_T]
+        tr_north = apply_north_fold(
+            tr_north, north, grid, north_mask=nfold_mask)
     tr_above = jnp.concatenate([bnd_up[..., :1], bnd_up[..., :-1]], axis=-1)
     tr_below = jnp.concatenate([bnd_up[..., 1:], bnd_up[..., -1:]], axis=-1)
     q_max = jnp.maximum(
@@ -1244,6 +1261,10 @@ def fct_tracer_advection(
     tr_east_do = jnp.roll(bnd_do, -1, axis=1)
     tr_south_do = jnp.concatenate([bnd_do[:1, :, :], bnd_do[:-1, :, :]], axis=0)
     tr_north_do = jnp.concatenate([bnd_do[1:, :, :], bnd_do[-1:, :, :]], axis=0)
+    if fold_is_local(grid) or nfold_mask is not None:
+        north_do = fold_ghost_source_T(bnd_do, fold)[:, fold.perm_T]
+        tr_north_do = apply_north_fold(
+            tr_north_do, north_do, grid, north_mask=nfold_mask)
     tr_above_do = jnp.concatenate([bnd_do[..., :1], bnd_do[..., :-1]], axis=-1)
     tr_below_do = jnp.concatenate([bnd_do[..., 1:], bnd_do[..., -1:]], axis=-1)
     q_min = jnp.minimum(
@@ -1801,8 +1822,7 @@ def _zalesak_signsplit_face_alphas(
         zpos = zpos_h + P_in_w * area
         zneg = zneg_h + P_out_w * area
         zbt = area * h_k / dt
-        zbig_beta = (
-            jnp.asarray(0.5, dtype=q_td.dtype) * jnp.finfo(q_td.dtype).max)
+        zbig_beta = jnp.asarray(jnp.finfo(q_td.dtype).max, dtype=q_td.dtype)
         zbetup_literal = jnp.where(
             (q_max != -zbig_beta) & (zpos != 0.0),
             (q_max - q_td) / zpos * zbt,
@@ -1851,11 +1871,17 @@ def _zalesak_signsplit_face_alphas(
         ad_v_int > 0.0, alpha_v_pos,
         jnp.where(ad_v_int < 0.0, alpha_v_neg, 1.0),
     )
-    # Wall faces (south & north): the wall mass flux is zero, so any
-    # alpha is harmless; use 1 as a neutral placeholder.
+    # Wall faces use 1 as a neutral placeholder.  On a tripolar mesh the
+    # north face is not a wall: NEMO exchanges the computed V coefficient
+    # across the T-pivot fold (traadv_fct.f90:888-915).
     walls_shape = (1, ad_flux_v.shape[1], ad_flux_v.shape[2])
     walls = jnp.ones(walls_shape, dtype=ad_flux_v.dtype)
     alpha_v = jnp.concatenate([walls, alpha_v_int_face, walls], axis=0)
+    nfold_mask = north_fold_mask(grid)
+    if fold_is_local(grid) or nfold_mask is not None:
+        north = alpha_v[-2:-1, grid.fold.perm_T]
+        alpha_v = apply_north_fold(
+            alpha_v, north, grid, north_mask=nfold_mask)
 
     # Vertical interface k between cell k (above) and cell k+1 (below).
     # F > 0 = upward → out of (k+1) below, into k above → α = min(R+_above, R-_below).
