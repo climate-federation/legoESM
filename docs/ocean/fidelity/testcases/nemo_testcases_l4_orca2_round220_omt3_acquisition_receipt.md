@@ -89,15 +89,36 @@ the full preflight log SHA-256 is
 
 ## Validation and review
 
-Focused round-220 tests pass 7/7. Independent review was attempted separately
+Focused round-220 plus citation-gate tests pass 25/25 (log SHA-256
+`0190cd2518229d8d336254c25b7fefb35dddec933048ebbbac243eb306aabc76`).
+Independent review was attempted separately
 with `codex exec --sandbox read-only` and exited 1 before reading the diff:
 `failed to initialize in-process app-server client: Read-only file system (os
 error 30)`. Independent review is unavailable in-sandbox; this is not a PASS.
 The review log SHA-256 is
 `eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5`.
 
-Citation-gate and full ocean-fidelity battery results are pending the clean
-receipt/map commit and will be appended before the round closes.
+On clean receipt/map commit `c0cf865f7`, the round citation gate passes seven
+citations with zero failures, unmapped entries, or map-audit failures; the
+cumulative default gate passes 274 citations with the same zero counts. The
+explicit two-line shift plant on
+`ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/dynldf.f90:81-85` fails with one
+finding.
+Round/default/plant JSON SHA-256 values are
+`dbd9ba210ae1a168d07df8e84f0cc8f872653a0b0ca47ba138c0dfcb30f78625`,
+`822bcba7de0054e3d9c38d7243faed26a6d9db1c12662d433526289aeaac2bbb`,
+and `e36a4504993036b997210afb2e3c04bd21f342de09f98895028211b916e300f9`.
+
+The one prescribed `tests/ocean/fidelity -n 12` battery collected 3,068
+tests and reached 99% before a bounded interrupt: 3,039 PASS, seven SKIP, four
+registered pre-existing FAIL lines, and 18 tests unclassified. It is not called
+PASS. The four failures are the GYRE round-129 spread-floor record stamp,
+allow-dirty scope, worktree-stamp ratchet, and SI3 scalar-math provenance gate.
+The unfinished `test_prediction_plant_is_fail_closed` was replayed alone and
+timed out without a verdict at 15 minutes; it is unrelated to this round's
+files. Full-battery and isolated logs have SHA-256
+`b3d3ad503503f118a726137c3f0ad05ccd9612160a0f081abc28f5beab2543f5`
+and `fd01b65d6fe039cabb36640d3f81768dfec661d3b190e4e91c26434bc4f24ed0`.
 
 ## OPEN
 
