@@ -2676,16 +2676,16 @@ CITATION_MAP = {
         ('END DO   ;   END DO', 5),
         10],
     # --- ORCA2 round 233: atomic stage-transport geometry unit -------
-    'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dommsk.f90:206-214': [
+    'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dommsk.f90:206-213': [
         ('Ocean/land mask at u-, v-, and f-points', 1),
         ('* tmask(ji+1,jj+1,jk)', 1),
-        9],
+        8],
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dommsk.f90:228-232': [
         ('IF ( MAXVAL(umask(ji,jj,:))/=0._wp )', 1),
         ("CALL lbc_lnk( 'dommsk', umask, 'U', 1.0_wp", 1),
         5],
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/lbcnfd.f90:973-981': [
-        ("CASE ( 'V' )", 1),
+        ("CASE ( 'V' )", 7),
         ('ptab(1,ipj+jh) = psgn * ptab(3,ipj-3-jh)', 1),
         9],
     'ocean_model_latlon_cgrid.py:1821-1825': [

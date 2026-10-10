@@ -17,13 +17,15 @@ empty. Every binding number below is kept separately as **independent** and
 The executing record build reads the four raw reference face thicknesses at
 `ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/domzgr.f90:184-188`, constructs the
 U/V/F masks from `tmask` at
-`ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dommsk.f90:206-214`, applies their
+`ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dommsk.f90:206-213`, applies their
 sign-`+1` boundary association at
 `ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dommsk.f90:228-232`, and executes the
 V-point T-pivot fold rule at
 `ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/lbcnfd.f90:973-981`. It builds the
-barotropic correction and stage-1 transport in source order at
-`ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/stprk3_stg.f90:269-285`.
+barotropic correction at
+`ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/stprk3_stg.f90:269-279` and the
+stage-1 transport at
+`ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/stprk3_stg.f90:282-285`.
 
 The private arm combined the complete round-217 vector unit with
 `nemo_qco_resolved_mesh_operands`; it did not add a second geometry builder.
