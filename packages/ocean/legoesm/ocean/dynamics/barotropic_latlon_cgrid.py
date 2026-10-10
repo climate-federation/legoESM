@@ -1753,6 +1753,7 @@ def _run_substep_loop(
     nemo_external_mode_association_test_override=False,
     nemo_external_mode_association_field_test_override="",
     nemo_external_mode_association_component_test_override="",
+    nemo_vector_update_v_mask=None,
     nemo_t_pivot_north_neighbor_test_override=False,
     return_boundary_association_trace=False,
 ):
@@ -2276,7 +2277,10 @@ def _run_substep_loop(
                 _inc_v = nemo_source_round(dt_s * _rhs_v)
                 V_bar_new = nemo_source_round(
                     nemo_source_round(V_bar_c) + _inc_v)
-                V_bar_new = nemo_source_round(V_bar_new * v_mask)
+                _v_update_mask = (
+                    v_mask if nemo_vector_update_v_mask is None
+                    else nemo_vector_update_v_mask)
+                V_bar_new = nemo_source_round(V_bar_new * _v_update_mask)
             else:
                 V_bar_new = (V_bar_c + dt_s * (
                     _cor_v + _drag_v + _pgf_v + F_slow_v_i
@@ -2867,6 +2871,27 @@ def nemo_literal_external_mode_active(config) -> bool:
     )
 
 
+def nemo_vector_form_update_active(config) -> bool:
+    """Whether NEMO's RK3 split-explicit solver takes its vector update."""
+    return (
+        getattr(config, "momentum_time_integrator", "euler") == "rk3_ws"
+        and getattr(config, "momentum_advection", "vector_invariant")
+        == "vector_invariant"
+        and not nemo_flux_form_update_active(config)
+    )
+
+
+def nemo_raw_surface_vmask(z_coord, dtype):
+    """Return NEMO's raw ``ssvmask`` carried by a reference mesh."""
+    raw = getattr(z_coord, "nemo_een_barotropic", None)
+    if raw is None:
+        return None
+    vmask = jnp.asarray(raw.vmask, dtype=dtype)
+    if vmask.ndim != 3:
+        raise ValueError("raw NEMO vmask must be three-dimensional")
+    return jnp.max(vmask, axis=-1)
+
+
 def nemo_carried_barotropic_state_active(config) -> bool:
     """Does this CONFIG select NEMO's carried external mode at the window seed?
 
@@ -3441,6 +3466,13 @@ def barotropic_substeps_latlon_cgrid(
         if len(_nemo_raw_history_test_override) != 6:
             raise ValueError(
                 "raw barotropic-history substitution requires six arrays")
+    _vector_update_v_mask = None
+    if nemo_vector_form_update_active(config):
+        _vector_update_v_mask = nemo_raw_surface_vmask(z_coord, eta.dtype)
+        if (_vector_update_v_mask is not None
+                and _vector_update_v_mask.shape != v_mask.shape):
+            raise ValueError(
+                "raw NEMO ssvmask shape does not match the barotropic V grid")
     _loop_result = _run_substep_loop(
         eta, U_bar, V_bar,
         dt_s=dt_s, n_loop=n_loop, w_filter=w_filter, w_transport=w_transport,
@@ -3479,6 +3511,7 @@ def barotropic_substeps_latlon_cgrid(
             _nemo_external_mode_association_field_test_override),
         nemo_external_mode_association_component_test_override=(
             _nemo_external_mode_association_component_test_override),
+        nemo_vector_update_v_mask=_vector_update_v_mask,
         nemo_t_pivot_north_neighbor_test_override=(
             _nemo_t_pivot_north_neighbor_test_override),
         return_boundary_association_trace=(
