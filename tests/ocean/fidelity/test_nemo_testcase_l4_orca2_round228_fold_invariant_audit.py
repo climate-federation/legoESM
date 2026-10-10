@@ -104,6 +104,16 @@ def test_classifier_confirms_only_complete_monotonic_four_scenario_owner():
     }
 
 
+def test_natural_nonmonotonic_measurement_is_a_held_verdict_not_a_refusal():
+    reports = _reports()
+    for row in reports[-1]["rows"]:
+        if row["kt"] == 8:
+            row["fields"]["eta"]["fold"]["max_abs"] = 0.5
+    result = gate.classify(reports, _guard())
+    assert result["status"] == "HELD_UNRESOLVED_FOLD_AUDIT"
+    assert result["predictions"]["R228-P2"] == "REFUTED"
+
+
 @pytest.mark.parametrize(
     "plant", ("guard", "fold-sign", "boundary-order", "monotonic", "coverage"))
 def test_every_plant_refuses(plant: str):

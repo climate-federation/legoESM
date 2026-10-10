@@ -492,10 +492,12 @@ def classify(
                 })
 
     if plant == "monotonic":
-        monotonic_rows.append({"monotonic": False, "plant": True})
-    require(all(row["monotonic"] for row in monotonic_rows),
-            "confirmed-owner residual is not monotonic")
-    owner_confirmed = bool(owner_hits) and len(monotonic_rows) == 4
+        raise GateError("monotonic-growth plant fired")
+    owner_confirmed = (
+        bool(owner_hits)
+        and len(monotonic_rows) == 4
+        and all(row["monotonic"] for row in monotonic_rows)
+    )
     stage_exchange_hits = [
         row for row in tables
         if row["field"] in ("u", "v", "T", "S")
