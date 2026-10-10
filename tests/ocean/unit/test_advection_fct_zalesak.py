@@ -23,7 +23,8 @@ import pytest
 
 jax.config.update("jax_enable_x64", True)
 
-from legoesm.grids.latlon import create_latlon_grid
+from legoesm.grids.latlon import create_beta_plane_cgrid_geometry, create_latlon_grid
+from legoesm.grids.latlon import FoldDescriptor
 from legoesm.ocean.advection import (
     NEMO_FCT_BETA_TRACE_FIELDS,
     NEMO_FCT_STENCIL_TRACE_FIELDS,
@@ -915,6 +916,61 @@ class TestFct2Centred:
             fct_tracer_advection(
                 tracer, mu, mv, w_half, h_k, grid_small, dt,
                 high_order="quintic")
+
+    def test_nemo_two_step_v_faces_read_tripolar_fold_halo(
+        self, grid_small, smooth_state,
+    ):
+        """Both donor passes and the centred flux use the T-fold ghost."""
+        tracer, mu, mv, w_half, h_k, dt = smooth_state
+        n_lat, n_lon, _ = tracer.shape
+        perm = jnp.arange(n_lon - 1, -1, -1, dtype=jnp.int32)
+        fold = FoldDescriptor(
+            is_active=True,
+            fold_j=n_lat - 1,
+            cap_j=n_lat - 1,
+            perm_T=perm,
+            perm_v=perm,
+            vector_sign_u=-1.0,
+            vector_sign_v=-1.0,
+            pivot_row_stored=True,
+        )
+        cgrid = create_beta_plane_cgrid_geometry(
+            n_lat, n_lon, dx_m=1.0, dy_m=1.0,
+            f0=0.0, beta=0.0, cartesian_pseudo_lat=True,
+        )
+        folded_grid = cgrid._replace(fold=fold)
+        # Make the north face active and directionally heterogeneous so a
+        # wall-copy implementation cannot accidentally match the fold arm.
+        mv = mv.at[-1].set(jnp.where(
+            (jnp.arange(n_lon)[:, None] % 2) == 0, 0.2, -0.3))
+
+        folded = fct_tracer_advection(
+            tracer, mu, mv, w_half, h_k, folded_grid, dt,
+            high_order="centred2",
+            low_order_predictor="nemo_rk3_two_step",
+            tracer_before=tracer,
+            base_thickness=h_k,
+            return_nemo_trace=True,
+        )[2]
+        wall = fct_tracer_advection(
+            tracer, mu, mv, w_half, h_k, cgrid, dt,
+            high_order="centred2",
+            low_order_predictor="nemo_rk3_two_step",
+            tracer_before=tracer,
+            base_thickness=h_k,
+            return_nemo_trace=True,
+        )[2]
+
+        first_v = NEMO_FCT_TRACE_FIELDS.index("first_v")
+        average_v = NEMO_FCT_TRACE_FIELDS.index("average_v")
+        assert not np.array_equal(
+            np.asarray(folded[first_v][-1]),
+            np.asarray(wall[first_v][-1]),
+        )
+        assert not np.array_equal(
+            np.asarray(folded[average_v][-1]),
+            np.asarray(wall[average_v][-1]),
+        )
 
     def test_centred_faces_exact_on_linear_field(self):
         """0.5·(T_west+T_east) reproduces a zonally-linear field's face

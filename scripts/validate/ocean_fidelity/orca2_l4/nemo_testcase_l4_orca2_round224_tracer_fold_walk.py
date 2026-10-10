@@ -221,10 +221,11 @@ def measure(deck_root: Path, frames_root: Path, expect_commit: str) -> dict[str,
 
     original_upwind = pe.upwind_to_v_points
 
-    def run_trace(tracer, before, *, fold_upwind: bool):
-        if fold_upwind:
+    def run_trace(tracer, before, *, legacy_wall: bool):
+        if legacy_wall:
             pe.upwind_to_v_points = (
-                lambda value, flux: original_upwind(value, flux, grid=grid))
+                lambda value, flux, grid=None:
+                original_upwind(value, flux, grid=None))
         else:
             pe.upwind_to_v_points = original_upwind
         try:
@@ -246,12 +247,12 @@ def measure(deck_root: Path, frames_root: Path, expect_commit: str) -> dict[str,
     first_moved = None
     off_fold_unequal = 0
     for tracer in ("T", "S"):
-        current = run_trace(frames[2][tracer], frames[0][tracer],
-                            fold_upwind=False)
-        folded = run_trace(frames[2][tracer], frames[0][tracer],
-                           fold_upwind=True)
+        production = run_trace(frames[2][tracer], frames[0][tracer],
+                               legacy_wall=False)
+        legacy = run_trace(frames[2][tracer], frames[0][tracer],
+                           legacy_wall=True)
         rows = {name: _row(a, b) for name, a, b in
-                zip(TRACE_ORDER, current, folded, strict=True)}
+                zip(TRACE_ORDER, legacy, production, strict=True)}
         trace_rows[tracer] = rows
         if first_moved is None:
             first_moved = next((name for name in TRACE_ORDER
@@ -259,9 +260,10 @@ def measure(deck_root: Path, frames_root: Path, expect_commit: str) -> dict[str,
         # Both V-face traces may move on the north fold only.  Check the first
         # donor pass explicitly; later cell-centred fields legitimately spread
         # its divergence onto the adjacent T row.
-        current_first_v = current[TRACE_ORDER.index("first_v_raw")]
-        folded_first_v = folded[TRACE_ORDER.index("first_v_raw")]
-        changed = current_first_v.view(np.uint64) != folded_first_v.view(np.uint64)
+        legacy_first_v = legacy[TRACE_ORDER.index("first_v_raw")]
+        production_first_v = production[TRACE_ORDER.index("first_v_raw")]
+        changed = (legacy_first_v.view(np.uint64)
+                   != production_first_v.view(np.uint64))
         off_fold_unequal += int(np.count_nonzero(changed[:-1]))
 
     stage3 = {
