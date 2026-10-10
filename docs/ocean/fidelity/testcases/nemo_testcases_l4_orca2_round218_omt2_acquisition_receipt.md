@@ -86,8 +86,14 @@ kt=10; an earlier boundary refuses the entire record. The preflight finishes
 
 ## Validation and review
 
-The citation result is recorded after this receipt enters a clean commit; the
-gate refuses a dirty tracked tree by design.
+The citation gate passes all six compiled-source citations with zero unmapped
+citations and zero map-audit failures. Its explicit `zdfdrg.f90:258-284`
+two-line shift plant exits 1 with `FAIL`; the cumulative default receipt also
+passes with zero unmapped citations. The retained artifacts are
+`citation_gate.json`, `citation_gate_plant.json`, and
+`citation_gate_default.json` under the evidence root. The citation gate's
+focused tests pass 17/17 (log SHA-256
+`7f8720e3b77e4ca05d21ca77bf66f5af4a32d9dd5c50faa2b2973503e9be6ebd`).
 
 Focused round-218 tests pass 7/7. The one prescribed
 `tests/ocean/fidelity -n 12` battery collected 3,056 tests and reached 99%.
