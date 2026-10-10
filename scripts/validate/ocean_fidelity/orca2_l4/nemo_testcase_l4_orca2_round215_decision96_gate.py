@@ -30,8 +30,8 @@ def _rows(document: dict) -> tuple[list[dict], object]:
 def _comparison(base: dict, candidate: dict) -> dict:
     old_rows, old_first = _rows(base)
     new_rows, new_first = _rows(candidate)
-    require(len(old_rows) == 160 and len(new_rows) == 160,
-            "OMT-1 ladder must contain exactly 160 rows")
+    require(len(old_rows) in (160, 200) and len(new_rows) == len(old_rows),
+            "ORCA2 ladder must contain exactly 160 or 200 rows")
     key = lambda row: (row["kt"], row["checkpoint"], row["field"])
     old = {key(row): row for row in old_rows}
     new = {key(row): row for row in new_rows}
@@ -130,7 +130,11 @@ def classify(base: dict, candidate: dict, pair: dict, *, plant: str = "none") ->
     first_direction = _direction(first_before, first_after, "rms")
     ssh_target = (1, "stage1", "ssh")
     ssh_before, ssh_after = _row(base, ssh_target), _row(candidate, ssh_target)
-    ssh_not_worse = float(ssh_after["max_abs"]) <= float(ssh_before["max_abs"])
+    last_kt = max(row["kt"] for row in _rows(base)[0])
+    final_target = (last_kt, "stage3", "ssh")
+    final_before = _row(base, final_target)
+    final_after = _row(candidate, final_target)
+    ssh_not_worse = float(final_after["max_abs"]) <= float(final_before["max_abs"])
     eligible = (
         majority and first_direction in ("toward", "equal")
         and not comparison["bit_identical_losses"] and ssh_not_worse)
@@ -152,7 +156,13 @@ def classify(base: dict, candidate: dict, pair: dict, *, plant: str = "none") ->
             "kt1_stage1_ssh": {
                 "rms_before": ssh_before["rms"], "rms_after": ssh_after["rms"],
                 "max_before": ssh_before["max_abs"], "max_after": ssh_after["max_abs"],
-                "max_not_worse": ssh_not_worse,
+                "max_direction": _direction(ssh_before, ssh_after, "max_abs"),
+            },
+            "final_stage3_ssh_max": {
+                "kt": last_kt,
+                "before": final_before["max_abs"],
+                "after": final_after["max_abs"],
+                "not_worse": ssh_not_worse,
             },
         },
         "decision96_eligible": True,
