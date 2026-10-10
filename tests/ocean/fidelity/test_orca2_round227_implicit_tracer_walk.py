@@ -28,6 +28,7 @@ def _report(first: str | None = "content_T") -> dict[str, object]:
         "candidate_vs_oracle": rows,
         "first_non_bit_statement": first,
         "oracle_replay_vs_recorded_Kaa": {"unequal": 0},
+        "source_e3w_vs_oracle": {"unequal": 0},
         "upstream_overlap": {
             "commit": "5e368e87ba",
             "literal_path_executes_upstream_rewrite": False,

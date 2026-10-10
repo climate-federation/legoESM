@@ -150,6 +150,8 @@ def classify(report: dict[str, object], *, plant: str = "none") -> dict[str, obj
             "first non-bit row is not source ordered")
     require(report["oracle_replay_vs_recorded_Kaa"]["unequal"] == 0,
             "source replay does not reproduce NEMO's recorded Kaa")
+    require(report["source_e3w_vs_oracle"]["unequal"] == 0,
+            "stored-reciprocal e3w replay does not reproduce NEMO")
     overlap = report["upstream_overlap"]
     require(overlap["commit"] == "5e368e87ba",
             "upstream rewrite identity moved")
@@ -180,9 +182,12 @@ def measure(deck_root: Path, frames_root: Path,
         _NEMOWSTracerZDFTrace,
     )
     from legoesm.ocean.physics.vertical_mixing.implicit_solver import (
+        nemo_e3w_kmm,
         nemo_ordered_tridiagonal_solve,
         nemo_tracer_tridiagonal,
     )
+    from legoesm.ocean.eos import nemo_r3t_stretch
+    from legoesm.ocean.vertical import compute_layer_thickness
 
     stamp = worktree_stamp()
     require(stamp["clean"], "round-227 measurement worktree is dirty")
@@ -229,6 +234,7 @@ def measure(deck_root: Path, frames_root: Path,
         frames_root / "oracle_rktracer_stage3_kt00000001.bin")
     avt = _read_avt(frames_root / "oracle_zdf_entry_kt00000001.bin")
     stage2_frame = omt4.rung0.assemble_frame(frames_root, 1, 2)
+    stage3_frame = omt4.rung0.assemble_frame(frames_root, 1, 3)
     active = np.asarray(card.recipe.z_coord.is_active, dtype=bool)[:, :90, :]
     support = active
     tmask2 = active[..., 0]
@@ -288,13 +294,65 @@ def measure(deck_root: Path, frames_root: Path,
         "forward_T": np.asarray(solve.forward_T)[:, :90, :],
         "solved_T": np.asarray(solve.solved_T)[:, :90, :],
     }
+    carried_trace_rows = {
+        name: _comparison(oracle[name], candidate[name],
+                          (active[..., :-1] & active[..., 1:])
+                          if name in ("heat_K", "e3w_now") else support)
+        for name in ROW_ORDER
+    }
+
+    # One-variable statement replay: hold NEMO's recorded stage state fixed.
+    # The live implicit path currently asks nemo_r3t_stretch for its default
+    # quotient evaluation, whereas NEMO stores r1_ht_0 and multiplies SSH by
+    # that reciprocal.  All later solve rows are driven with the same oracle
+    # K/content so this is a statement test, not a trajectory comparison.
+    H = card.recipe.initial_state.H_bathy.data
+    eta_kmm = jnp.asarray(stage2_frame["ssh"])
+    eta_kaa = jnp.asarray(stage3_frame["ssh"])
+    stretch_quotient = nemo_r3t_stretch(
+        card.recipe.z_coord, eta_kmm, H, evaluation="quotient")
+    stretch_reciprocal = nemo_r3t_stretch(
+        card.recipe.z_coord, eta_kmm, H, evaluation="nemo_reciprocal")
+    e3t_now = compute_layer_thickness(
+        eta_kmm, H, card.recipe.z_coord,
+        card.recipe.model_config.min_water_column_m)
+    e3w_candidate = np.asarray(nemo_e3w_kmm(
+        card.recipe.z_coord, e3t_now, stretch_quotient))[:, :90, :]
+    e3w_source = np.asarray(nemo_e3w_kmm(
+        card.recipe.z_coord, e3t_now, stretch_reciprocal))[:, :90, :]
+    e3t_candidate = np.asarray(compute_layer_thickness(
+        eta_kaa, H, card.recipe.z_coord,
+        card.recipe.model_config.min_water_column_m))[:, :90, :]
+
+    candidate_replay = jax.jit(lambda k, et, ew, wet, source: (
+        *nemo_tracer_tridiagonal(k, et, ew, card.dt_s, wet),
+        nemo_ordered_tridiagonal_solve(
+            *nemo_tracer_tridiagonal(k, et, ew, card.dt_s, wet), source,
+            return_trace=True),
+    ))(jnp.asarray(heat_K), jnp.asarray(e3t_candidate),
+       jnp.asarray(e3w_candidate), jnp.asarray(active), jnp.asarray(content))
+    c_lower, c_diagonal, c_upper, c_solve_trace = candidate_replay
+    c_solution, (c_eliminated, c_forward) = c_solve_trace
+    statement_candidate = {
+        "heat_K": heat_K,
+        "e3w_now": e3w_candidate,
+        "e3t_after": e3t_candidate,
+        "lower": np.asarray(c_lower),
+        "diagonal": np.asarray(c_diagonal),
+        "upper": np.asarray(c_upper),
+        "eliminated": np.asarray(c_eliminated),
+        "content_T": content,
+        "forward_T": np.asarray(c_forward),
+        "solved_T": np.asarray(c_solution),
+    }
     row_support = {
         name: (active[..., :-1] & active[..., 1:])
         if name in ("heat_K", "e3w_now") else support
         for name in ROW_ORDER
     }
     rows = {
-        name: _comparison(oracle[name], candidate[name], row_support[name])
+        name: _comparison(
+            oracle[name], statement_candidate[name], row_support[name])
         for name in ROW_ORDER
     }
     first = _first_non_bit(rows)
@@ -318,7 +376,11 @@ def measure(deck_root: Path, frames_root: Path,
         },
         "row_order": list(ROW_ORDER),
         "candidate_vs_oracle": rows,
+        "carried_trace_vs_oracle": carried_trace_rows,
         "first_non_bit_statement": first,
+        "source_e3w_vs_oracle": _comparison(
+            oracle["e3w_now"], e3w_source,
+            active[..., :-1] & active[..., 1:]),
         "oracle_replay_vs_recorded_Kaa": _comparison(
             recorded_kaa, oracle["solved_T"], support),
         "upstream_overlap": {
