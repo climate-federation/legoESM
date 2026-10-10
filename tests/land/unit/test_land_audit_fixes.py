@@ -23,6 +23,7 @@ from legoesm import constants
 from legoesm.core.field import Field
 from legoesm.core.coupling_fields import AtmToSurface
 from legoesm.land.config import LandConfig, MultiLayerLandConfig
+from legoesm.land.surface_scheme import SimpleSEBConfig
 from legoesm.land.state import LandState
 
 
@@ -158,7 +159,7 @@ class TestTileResponseConsistency(unittest.TestCase):
         from legoesm.land.slab_land import step_land
 
         ncol = 4
-        config = LandConfig()
+        config = LandConfig(surface_scheme=SimpleSEBConfig())   # the slab bulk-flux audit
         forcing = _make_forcing(ncol)
         state = _make_slab_state(ncol, T_init=290.0, W_init=50.0)
 
@@ -177,7 +178,7 @@ class TestTileResponseConsistency(unittest.TestCase):
         from legoesm.thermo import saturation_mixing_ratio
 
         ncol = 4
-        config = LandConfig()
+        config = LandConfig(surface_scheme=SimpleSEBConfig())   # the slab bulk-flux audit
         forcing = _make_forcing(ncol)
         state = _make_slab_state(ncol, T_init=290.0, W_init=50.0)
 
