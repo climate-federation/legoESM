@@ -178,7 +178,7 @@ def measure(deck_root: Path, frame_root: Path, twin_a: Path, twin_b: Path,
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         LatLonCGridOceanModel,
-        _NEMOWSBarotropicTrace,
+        _NEMOWSBoundaryAssociationTrace,
         _NEMOWSRK3TestHooks,
     )
 
@@ -219,6 +219,7 @@ def measure(deck_root: Path, frame_root: Path, twin_a: Path, twin_b: Path,
     def run(expose: bool):
         hooks = _NEMOWSRK3TestHooks(
             expose_barotropic_substeps=expose,
+            expose_barotropic_boundary_association=expose,
             barotropic_slow_forcing_override=slow_override,
             barotropic_vector_update_v_mask_override=raw_vmask,
             barotropic_atomic_fold_unit=True,
@@ -231,7 +232,7 @@ def measure(deck_root: Path, frame_root: Path, twin_a: Path, twin_b: Path,
 
     ordinary = run(False)
     observed = run(True)
-    require(isinstance(observed, _NEMOWSBarotropicTrace),
+    require(isinstance(observed, _NEMOWSBoundaryAssociationTrace),
             "barotropic trace return type moved")
     passivity = passive._ordinary_state_equal(observed.state_after, ordinary)
     if plant == "observer-bit":
