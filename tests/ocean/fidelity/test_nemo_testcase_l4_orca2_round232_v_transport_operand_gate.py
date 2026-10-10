@@ -47,5 +47,6 @@ def test_masked_score_excludes_canonical_support_zero() -> None:
     oracle = np.array([2.0, 0.0])
     row = gate._exact_masked(candidate, oracle, np.array([True, False]))
     assert row["unequal"] == 0
+    assert row["argmax"] == [0]
     with pytest.raises(gate.GateError, match="support is empty"):
         gate._exact_masked(candidate, oracle, np.zeros(2, dtype=bool))

@@ -60,7 +60,17 @@ def _exact_masked(left, right, mask) -> dict[str, object]:
     mask = np.asarray(mask, bool)
     require(left.shape == right.shape == mask.shape, "masked score shape mismatch")
     require(np.any(mask), "masked score support is empty")
-    return _exact(left[mask], right[mask])
+    row = _exact(left[mask], right[mask])
+    finite = mask & np.isfinite(left) & np.isfinite(right)
+    delta = np.zeros_like(left)
+    np.subtract(left, right, out=delta, where=finite)
+    if np.any(finite):
+        flat = int(np.argmax(np.where(finite, np.abs(delta), -np.inf)))
+        row["argmax"] = list(map(int, np.unravel_index(flat, left.shape)))
+        row["max_abs"] = float(np.abs(delta).ravel()[flat])
+    bad = np.argwhere(mask & ~(np.isfinite(left) & np.isfinite(right)))
+    row["first_nonfinite"] = list(map(int, bad[0])) if bad.size else None
+    return row
 
 
 def _first_unequal(rows: dict[str, dict[str, object]], order=OPERANDS) -> str | None:
@@ -287,6 +297,21 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path, label: str,
             "zFv": _exact(trial_zfv, np.asarray(oracle["zFv"])[..., :-1]),
         }
 
+    operand_substitutions = {}
+    target_zfv = np.asarray(oracle["zFv"])[..., :-1]
+    for replacement in (*OPERANDS, "all_nemo_operands"):
+        values = {
+            name: (expected[name]
+                   if replacement in (name, "all_nemo_operands")
+                   else candidate[name])
+            for name in OPERANDS
+        }
+        trial_zfv = np.asarray(jax.device_get(jax.jit(_source_replay)(
+            jnp.asarray(values["e1v"]), jnp.asarray(values["e3v"]),
+            jnp.asarray(values["vv"]), jnp.asarray(values["zvb"]),
+            jnp.asarray(values["vmask"]))))
+        operand_substitutions[replacement] = _exact(trial_zfv, target_zfv)
+
     result = {
         "format": "nemo-testcase-l4-orca2-round232-v-operand-v1",
         "status": "PASS_R232_V_TRANSPORT_OPERAND_SPLIT",
@@ -301,6 +326,11 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path, label: str,
         "correction_input_rows": correction_rows,
         "first_unequal_correction_input": correction_first,
         "substitutions": substitutions,
+        "operand_substitutions": operand_substitutions,
+        "operand_signatures": {
+            name: _ratio_sign(candidate[name], expected[name])
+            for name in OPERANDS
+        },
         "zFv_signature": _ratio_sign(
             _rank0(replay_zfv), np.asarray(oracle["zFv"])[..., :-1]),
         "record": {
