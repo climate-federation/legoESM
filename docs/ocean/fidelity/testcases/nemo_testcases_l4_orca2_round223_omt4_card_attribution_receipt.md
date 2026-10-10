@@ -112,8 +112,37 @@ Artifacts and SHA-256:
 
 ## Validation and review
 
-Focused tests, citation gates, the prescribed ocean-fidelity battery, and the
-separate read-only review are reported in the final validation commit.
+The focused acquisition/card/citation run collected ten tests: nine passed,
+then the new citation test caught two non-unique anchors. After pinning those
+anchors, the failed ID passed in isolation, so the final tree is 10/10 for the
+focused set. This run also executes the new terminal-overwrite violation and
+proves it raises rather than classifying a plausible empty file as data. The
+combined log SHA-256 is
+`7550115b2d93b9bc177e76ef11ba68c797adfe6ade01606cd5237ea0759a0bd6`.
+
+On clean commit `1b93c1c33`, the round citation gate passes six citations and
+the cumulative default gate passes 274; both have zero failures, unmapped
+citations, or map-audit failures. Shifting the mapped restart range by two
+lines makes the round gate fail with `SYMBOL-NOT-AT-LINE` and exit 1. The
+round/default/plant JSON SHA-256 values are
+`377e051476139e3f46deb3670b019073d19b1bbe99a3939c130322dca1593fa1`,
+`0c048355bd6c5dde24403ba1d1034b7cc20571f062a67857c1e87d23e06929f0`,
+and `47091ec415321490d00e904f345b44a8ec63ce6ad0b2867cd4697385240000c7`.
+
+Independent review was attempted with `codex exec --sandbox read-only` and
+exited 1 before reading the diff: `failed to initialize in-process app-server
+client: Read-only file system (os error 30)`. **Independent review unavailable
+in-sandbox**; this is not a PASS. The review log SHA-256 is
+`eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5`.
+
+The prescribed `tests/ocean/fidelity -n 12` battery collected 3,083 tests and
+reached 99%. It recorded 3,062 passed, seven skipped, and four registered
+pre-existing failures: the GYRE round-129 spread-floor record stamp,
+allow-dirty scope, worktree-stamp ratchet, and SI3 scalar-math provenance
+gate. The remaining ten tests were unclassified when every real pytest process
+disappeared without a terminal summary; the idle wrapper was interrupted and
+the battery was not relaunched. It is not called PASS. Log SHA-256:
+`cb79480fdfdbdd20ce1ccf642361b3a411d19933c3f25d8d8cbfadae50316636`.
 
 No `packages/` file changed, so GYRE, DINO, lock-exchange, overflow, and the
 shipped ORCA2 cards cannot execute a changed statement. Their trajectories are
