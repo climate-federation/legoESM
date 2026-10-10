@@ -7155,8 +7155,6 @@ class LatLonCGridOceanModel:
                         else "een")
                     from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
                         nemo_carried_barotropic_depth_mean,
-                        nemo_raw_surface_vmask,
-                        nemo_vector_form_update_active,
                     )
                     # The SAME selector the window seed uses: a card that
                     # selects NEMO's carried external mode and carries no
@@ -7206,24 +7204,7 @@ class LatLonCGridOceanModel:
                     if _een_eval == "nemo_literal":
                         _een_pre_shared = _een_pre_built
                     F_slow_u = (F_slow_u - _cor_u_sub) * state.u_mask.data
-                    _raw_ssvmask = (
-                        nemo_raw_surface_vmask(_zc, F_slow_v.dtype)
-                        if nemo_vector_form_update_active(_cfg_b) else None)
-                    if _raw_ssvmask is None:
-                        F_slow_v = ((F_slow_v - _cor_v_sub)
-                                    * state.v_mask.data)
-                    else:
-                        if _raw_ssvmask.shape != F_slow_v.shape:
-                            raise ValueError(
-                                "raw NEMO ssvmask shape does not match slow V forcing")
-                        # dynspg_ts.f90:292,325-328 assigns Ve_rhs first,
-                        # then subtracts only the masked Coriolis trend.  The
-                        # raw fold-halo Ve_rhs and raw ssvmask are one unit
-                        # with the vector update at :669-682; compact-remasking
-                        # here destroys both operands.
-                        F_slow_v = nemo_source_round(
-                            F_slow_v - nemo_source_round(
-                                _cor_v_sub * _raw_ssvmask))
+                    F_slow_v = (F_slow_v - _cor_v_sub) * state.v_mask.data
                     _slow_final_override = self._nemo_ws_test_hooks.barotropic_slow_forcing_override
                     if callable(_slow_final_override):
                         jax.debug.callback(
