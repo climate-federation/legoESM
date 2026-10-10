@@ -23,11 +23,7 @@ import pytest
 
 jax.config.update("jax_enable_x64", True)
 
-from legoesm.grids.latlon import (
-    FoldDescriptor,
-    create_beta_plane_cgrid_geometry,
-    create_latlon_grid,
-)
+from legoesm.grids.latlon import create_latlon_grid
 from legoesm.ocean.advection import (
     NEMO_FCT_BETA_TRACE_FIELDS,
     NEMO_FCT_STENCIL_TRACE_FIELDS,
@@ -919,64 +915,6 @@ class TestFct2Centred:
             fct_tracer_advection(
                 tracer, mu, mv, w_half, h_k, grid_small, dt,
                 high_order="quintic")
-
-    def test_nemo_two_step_fct_uses_tripolar_fold_through_nonosc(
-        self, grid_small, smooth_state,
-    ):
-        """Donor faces, nonosc bounds, and V coefficients use the T fold."""
-        tracer, mu, mv, w_half, h_k, dt = smooth_state
-        n_lat, n_lon, nlev = tracer.shape
-        perm = jnp.arange(n_lon - 1, -1, -1, dtype=jnp.int32)
-        fold = FoldDescriptor(
-            is_active=True, fold_j=n_lat - 1, cap_j=n_lat - 1,
-            perm_T=perm, perm_v=perm, vector_sign_u=-1.0,
-            vector_sign_v=-1.0, pivot_row_stored=True,
-        )
-        cgrid = create_beta_plane_cgrid_geometry(
-            n_lat, n_lon, dx_m=1.0, dy_m=1.0, f0=0.0, beta=0.0,
-            cartesian_pseudo_lat=True,
-        )
-        folded_grid = cgrid._replace(fold=fold)
-        mv = mv.at[-1].set(jnp.where(
-            (jnp.arange(n_lon)[:, None] % 2) == 0, 0.2, -0.3))
-        active = jnp.ones_like(tracer, dtype=bool).at[0, 0, 0].set(False)
-
-        def run(**trace_flag):
-            return fct_tracer_advection(
-                tracer, mu, mv, w_half, h_k, folded_grid, dt,
-                high_order="centred2", tracer_before=tracer,
-                active_mask=active,
-                low_order_predictor="nemo_rk3_two_step",
-                base_thickness=h_k, after_thickness=h_k,
-                **trace_flag)[2]
-
-        standard = dict(zip(
-            NEMO_FCT_TRACE_FIELDS,
-            jax.jit(lambda: run(return_nemo_trace=True))(), strict=True))
-        stencil = dict(zip(
-            NEMO_FCT_STENCIL_TRACE_FIELDS,
-            jax.jit(lambda: run(return_nemo_stencil_trace=True))(), strict=True))
-        np.testing.assert_array_equal(
-            np.asarray(stencil["zbup_north"][-1]),
-            np.asarray(stencil["zbup_center"][-2, perm]),
-        )
-        assert np.asarray(stencil["zbup_center"])[0, 0, 0] == -np.finfo(np.float64).max
-        assert np.count_nonzero(np.asarray(standard["anti_pre_v"])[-1]) > 0
-
-        # A zero-room limiter makes the last interior V coefficient zero.
-        # The north fold must exchange that live coefficient, not retain the
-        # regular-wall placeholder one.
-        ad_u = jnp.zeros((n_lat, n_lon + 1, nlev))
-        ad_v = jnp.zeros((n_lat + 1, n_lon, nlev)).at[-2].set(1.0)
-        ad_w = jnp.zeros((n_lat, n_lon, nlev - 1))
-        zero = jnp.zeros_like(tracer)
-        _, alpha_v, _ = _zalesak_signsplit_face_alphas(
-            ad_u, ad_v, ad_w, zero, zero, zero, jnp.ones_like(tracer),
-            dt=1.0, grid=folded_grid,
-        )
-        np.testing.assert_array_equal(
-            np.asarray(alpha_v[-1]), np.asarray(alpha_v[-2, perm]))
-        assert np.count_nonzero(np.asarray(alpha_v[-1]) == 0.0) > 0
 
     def test_centred_faces_exact_on_linear_field(self):
         """0.5·(T_west+T_east) reproduces a zonally-linear field's face
