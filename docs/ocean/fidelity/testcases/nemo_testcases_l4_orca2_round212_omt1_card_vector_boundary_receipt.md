@@ -92,7 +92,7 @@ not a change to an existing production card or selector.
 - Focused final battery: **37 passed in 12.57 s**, including the round-209,
   round-211, round-212, and receipt-citation gates.
 - Citation gate: **PASS**, 3 compiled-source citations, 0 failures, 0 unmapped;
-  the rigid-shift plant on `dynspg_ts.f90:674-678` fires.  The cumulative
+  the rigid-shift plant on the registered pre-exchange range fires.  The cumulative
   default-receipt citation gate also passes with 0 unmapped citations.
 - The single 12-worker `tests/ocean/fidelity` battery reached 99% before its
   controller was interrupted: 2,980 passed, 7 skipped, 4 failed, and 30 of
