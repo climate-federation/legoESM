@@ -228,6 +228,9 @@ FILES = {
         _ORCA2_R214VECPREV3_COMPILED / "dynspg_ts.f90"),
     "ORCA2_OMIP_L4_R214VECPREV3/BLD/ppsrc/nemo/lbcnfd.f90": (
         _ORCA2_R214VECPREV3_COMPILED / "lbcnfd.f90"),
+    "orca2_rounds/round222/acquisition/orca2_omt4_frames_10step_a_np2/namelist_cfg": Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/"
+        "round222/acquisition/orca2_omt4_frames_10step_a_np2/namelist_cfg"),
     "ORCA2_OMIP_L4_R229FOLDTRP/BLD/ppsrc/nemo/stprk3_stg.f90": (
         _ORCA2_R229FOLDTRP / "ppsrc/nemo/stprk3_stg.f90"),
     "ORCA2_OMIP_L4_R229FOLDTRP/BLD/inc/domzgr_substitute.h90": (
@@ -2612,6 +2615,29 @@ CITATION_MAP = {
         '! resulting flux at mid-step (not over the full domain)',
         'ssha_e(ji,jj) = (  sshn_e(ji,jj) - rDt_e * ( ssh_frc(ji,jj) + zhdiv )  ) * ssmask(ji,jj)',
         28],
+    # --- ORCA2 round 235: OMT-4 global back-interpolation owner ---
+    'ORCA2_OMIP_L4_R214VECPREV3/BLD/ppsrc/nemo/dynspg_ts.f90:289-294': [
+        '!                          ! set values computed in RK3_ssh',
+        'zCdU_v  (:,:) = CdU_v   (:,:)', 6],
+    'ORCA2_OMIP_L4_R214VECPREV3/BLD/ppsrc/nemo/dynspg_ts.f90:323-328': [
+        'CALL dyn_cor_2D( puu_b(:,:,Kmm), pvv_b(:,:,Kmm), zu_trd, zv_trd )',
+        ('END DO   ;   END DO', 1), 6],
+    'ORCA2_OMIP_L4_R214VECPREV3/BLD/ppsrc/nemo/dynspg_ts.f90:604-612': [
+        '! Half-step back interpolation of SSH for surface pressure computation at step jit+1/2',
+        ('END DO   ;   END DO', 13), 9],
+    'ORCA2_OMIP_L4_R214VECPREV3/BLD/ppsrc/nemo/dynspg_ts.f90:1522-1557': [
+        'SUBROUTINE ts_bck_interp( jn, ll_init,',
+        'END SUBROUTINE ts_bck_interp', 36],
+    'barotropic_latlon_cgrid.py:112-125': [
+        '# --- NEMO dynspg_ts nn_bt_flt=3 (Demange 2019 dissipative FB) coefficients ---',
+        'def nemo_ab3am4_coeff_arrays(n_loop: int, alpha: float = _NEMO_BT_ALPHA,',
+        14],
+    'barotropic_latlon_cgrid.py:3389-3390': [
+        '_ab3_za, _ab3_zb = nemo_ab3am4_coeff_arrays(',
+        'n_loop, ramp=_ab3_hist is None)', 2],
+    'orca2_rounds/round222/acquisition/orca2_omt4_frames_10step_a_np2/namelist_cfg:383-387': [
+        'ln_dynspg_ts  = .true.',
+        'rn_bt_alpha   = 0.09', 5],
     'ORCA2_OMIP_L4_R214VECPREV3/BLD/ppsrc/nemo/stprk3_stg.f90:383-402': [
         'CALL    eos    (        ts, Kmm, rhd, rhop )     ! Kmm in situ density anomaly for hpg computation',
         'CALL    dyn_hpg( kstp,      Kmm, uu, vv, Krhs )  ! Hydrostratic Pressure Gradient (HPG)',
