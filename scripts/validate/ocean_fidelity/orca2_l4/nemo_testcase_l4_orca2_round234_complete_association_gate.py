@@ -30,7 +30,7 @@ def classify(association: dict, reports: list[dict], *, plant: str = "none") -> 
     elif plant == "label-coverage":
         reports.pop()
 
-    require(association.get("status") == "MEASURED_R146_BOUNDARY_ASSOCIATION",
+    require(association.get("status") == "PASS_R234_LITERAL_ASSOCIATION",
             "association measurement status moved")
     post = association["post_association_rows"]
     require(tuple(sorted(post)) == (
