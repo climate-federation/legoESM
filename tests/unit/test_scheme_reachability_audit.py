@@ -336,6 +336,10 @@ def test_every_offered_scheme_passes_validate_strict(parsers, driver):
                 kwargs.update(turbulence="clubb", use_clubb_cloud_fraction=True,
                               microphysics="sundqvist", radiation="rrtmgp",
                               dycore=DycoreConfig(discretization="mpas"))
+            # ZM CMT is dropped on the compiled pipeline (refused there, P1).
+            if axis == "convection" and scheme == "zhang_mcfarlane":
+                from legoesm.driver.config import DycoreConfig
+                kwargs["dycore"] = DycoreConfig(discretization="mpas")
             try:
                 ExperimentConfig(**kwargs).validate_strict()
             except ValueError as e:  # pragma: no cover - failure path

@@ -79,6 +79,10 @@ class TestSchemeLiteralsResolveOrExplicitNIE:
 
     @pytest.mark.parametrize("scheme", CONVECTION_LITERALS)
     def test_convection(self, scheme):
+        if scheme == "zhang_mcfarlane":  # CMT dropped on the pipeline (P1)
+            with pytest.raises(ValueError, match="momentum transport"):
+                _cfg(convection=scheme)
+            return
         config = _cfg(convection=scheme)
         if scheme in _PIPELINE_UNSUPPORTED_CONVECTION:
             with pytest.raises(NotImplementedError, match="bridge"):

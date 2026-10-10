@@ -988,3 +988,64 @@ def test_ocean_surface_flag_refused_without_sst_or_land_stress():
 def test_ocean_surface_flag_refused_off_the_mpas_lane():
     with pytest.raises(ValueError, match="not the MPAS lane"):
         _cdgrid_cfg(mpas_ocean_flux_on_ocean_surface=True).validate_strict()
+
+
+# Composable-physics P1: what the PhysicsPipeline (cd-grid / lat-lon) and the
+# spectral lane would silently drop is refused by name (opt-ins) or warned
+# loudly (drops a default config already makes).
+def _strict_msgs(cfg, caplog):
+    """(error text, logged-warning text) from validate_strict."""
+    caplog.clear()
+    err = ""
+    try:
+        cfg.validate_strict()
+    except ValueError as e:
+        err = str(e)
+    return err, caplog.text
+
+
+@pytest.mark.parametrize("kw, match, refused", [
+    (dict(cloud_vertical_overlap_optics="mcica"), "McICA", True),
+    (dict(cloud_vertical_overlap_optics="max_random"), "McICA", True),
+    (dict(convection="zhang_mcfarlane"), "momentum transport", True),
+    (dict(convection="bechtold", bechtold_enable_cmt=True),
+     "bechtold_enable_cmt=false", True),
+    (dict(turbulence="clubb", clubb_prognostic=True), "CLUBB-moment slot", True),
+    (dict(convection="tiedtke"), "momentum transport", False),
+    (dict(convection="bechtold"), "bechtold_enable_cmt=false", False),
+    (dict(use_multilayer_land=True), "mpas_land_params_refresh=True is inert",
+     False),
+])
+def test_pipeline_silent_drops_refused_or_warned(kw, match, refused, caplog):
+    import re
+    from legoesm.driver.config import DycoreConfig, GridConfig
+    latlon = _cdgrid_cfg(**kw)._replace(
+        grid=GridConfig(grid_type="latlon", resolution=8, nlev=8))
+    for cfg in (_cdgrid_cfg(**kw), latlon):
+        err, warn = _strict_msgs(cfg, caplog)
+        assert bool(re.search(match, err)) == refused, err
+        assert bool(re.search(match, warn)) == (not refused), warn
+    # Controls: none of these pipeline messages fire on the column loop (MPAS,
+    # FV3-duo column lane) or spectral (spectral's own multilayer refusal is
+    # tested below).
+    duo = _cdgrid_cfg(**kw)._replace(dycore=DycoreConfig(
+        dt=600.0, discretization="fv3_duo", fv3_duo_column_lane=True))
+    assert duo.mpas_loop_lane
+    spectral = _cdgrid_cfg(**kw)._replace(
+        dycore=DycoreConfig(dt=600.0, discretization="spectral"))
+    for cfg in (_mpas_cfg(**kw), duo, spectral):
+        assert not re.search(match, " ".join(_strict_msgs(cfg, caplog)))
+
+
+def test_pipeline_cmt_off_not_flagged(caplog):
+    err, warn = _strict_msgs(
+        _cdgrid_cfg(convection="bechtold", bechtold_enable_cmt=False), caplog)
+    assert "momentum transport" not in err + warn
+
+
+def test_spectral_multilayer_land_refused():
+    from legoesm.driver.config import DycoreConfig
+    cfg = _cdgrid_cfg(use_multilayer_land=True)._replace(
+        dycore=DycoreConfig(dt=600.0, discretization="spectral"))
+    with pytest.raises(ValueError, match="never stepped on the spectral lane"):
+        cfg.validate_strict()

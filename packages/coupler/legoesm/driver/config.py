@@ -3349,6 +3349,60 @@ class ExperimentConfig(NamedTuple):
                     f"discretization={d.discretization!r} has its own "
                     "surface/ice tiles and would silently ignore it."
                 )
+        # What the compiled PhysicsPipeline lanes (lat-lon, cube; neither the
+        # column loop nor spectral) and the spectral lane would silently drop
+        # (composable-physics design P1, 2026-10-10). Opt-in features are
+        # refused by name; drops a DEFAULT config already makes (Tiedtke is
+        # the run_amip --convection default, Bechtold CMT=None resolves on,
+        # params_refresh defaults True) log a warning (_wlog, as the
+        # NON-CONSERVING notices above) instead of refusing the
+        # default command. ponytail: flip those to errors.append once the
+        # pipeline is retired from production (design P6).
+        if not (_is_mpas or d.discretization == "spectral"):
+            _where = (f"the PhysicsPipeline lane (discretization="
+                      f"{d.discretization!r}, grid_type={g.grid_type!r})")
+            _cmt = (f"convection={self.convection!r} computes convective "
+                    f"momentum transport (CMT on), which {_where} discards "
+                    "(its du/dv sum never reads du_dt_conv). Use the MPAS / "
+                    "FV3-duo column lane or spectral"
+                    + (", or bechtold_enable_cmt=false."
+                       if self.convection == "bechtold" else "."))
+            _drops = []
+            if self.cloud_vertical_overlap_optics != "none":
+                errors.append(
+                    f"cloud_vertical_overlap_optics="
+                    f"{self.cloud_vertical_overlap_optics!r} is not applied on "
+                    f"{_where}: its radiation solves grid-mean cloud paths "
+                    "only (no McICA / max-random subcolumns). Use the MPAS / "
+                    "FV3-duo column lane or spectral, or 'none'.")
+            if (self.convection == "zhang_mcfarlane"
+                    or (self.convection == "bechtold"
+                        and self.bechtold_enable_cmt)):
+                errors.append(_cmt)
+            elif (self.convection == "tiedtke"
+                    or (self.convection == "bechtold"
+                        and self.bechtold_enable_cmt is None)):
+                _drops.append(_cmt)
+            if self.mpas_land_params_refresh and self.use_multilayer_land:
+                _drops.append(
+                    f"mpas_land_params_refresh=True is inert on {_where}: "
+                    "only the column loop rebuilds LAI / canopy height / soil "
+                    "albedo each land step (mpas_land_params_refresh=false / "
+                    "--no-mpas-land-params-refresh "
+                    "silences this).")
+            if self.clubb_prognostic:
+                errors.append(
+                    f"clubb_prognostic=True is not wired on {_where}: its "
+                    "segment carry has no CLUBB-moment slot, so the CLUBB "
+                    "call fails at trace time. Use the MPAS or FV3-duo "
+                    "column lane.")
+            if _drops:
+                _wlog.warning("SILENT DROP: " + " | ".join(_drops))
+        elif not _is_mpas and self.use_multilayer_land:
+            errors.append(
+                "use_multilayer_land=True is built but never stepped on the "
+                "spectral lane (no land in _run_spectral; the f_land path is "
+                "refused there). Use the MPAS or FV3-duo column lane.")
         if not (math.isfinite(self.mpas_land_lapse_K_per_km)
                 and 0.0 <= self.mpas_land_lapse_K_per_km <= 20.0):
             errors.append(
