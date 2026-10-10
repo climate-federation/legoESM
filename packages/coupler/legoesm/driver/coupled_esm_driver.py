@@ -28,6 +28,9 @@ from legoesm import constants
 
 logger = logging.getLogger("legoesm.driver.coupled_esm")
 
+# F38 flux handback tuple order (also the checkpoint key suffixes).
+_HANDBACK_KEYS = ("shflx", "lhflx", "surface_mass_flux", "tau_x", "tau_y")
+
 # Exact time-unit conversion for the day-valued restoring timescales.
 _SECONDS_PER_DAY = 86400.0
 
@@ -232,6 +235,9 @@ class CoupledESMDriver:
         self._ocean_T_target = None
         self._ocean_S_target = None
         self._last_sfc_response = None
+        # F38: segment-mean (shflx, lhflx, E, tau_x, tau_y) handed back to the
+        # atmosphere when couple_surface_fluxes (set by _segment_hook).
+        self._sfc_flux_handback = None
         self._coupled_diag = []
         self._sst_mean_init = None  # set on first diag — SST-drift reference
         # F2 water-conservation tripwire state (diagnostics-only, host-side).
@@ -302,6 +308,10 @@ class CoupledESMDriver:
         #     already ran; identity (shared-grid) remapper -> no-op.
         self._attach_ocean_wet_masks()
 
+        # 3c. Static dry->wet routing on the ocean grid (F17/F18): exchange
+        #     fluxes that land on dry ocean cells are moved, not discarded.
+        self._build_dry_to_wet_map()
+
         # 4. Carbon / CO2 tracer (if active)
         self._init_carbon()
 
@@ -345,6 +355,39 @@ class CoupledESMDriver:
             return
         self._grid_remapper = attach_wet_masks(
             rem, self._atm.grid, self._ocean_grid, owet)
+
+    def _build_dry_to_wet_map(self):
+        """Static dry->wet routing map on the OCEAN grid (F17/F18).
+
+        Land runoff, ice melt/lake water, basal heat, brine salt and ice-ocean
+        stress reach the ocean grid with a share on DRY ocean cells: on the
+        shared grid all land runoff sits on cells the ocean masks dry (f_land =
+        1 - wet), and across grids the a2o remap spreads every coastal atm value
+        over the wet AND dry ocean cells under it.  The ocean multiplies by its
+        wet mask, so that share was discarded.  Each dry cell's flux now goes to
+        its nearest wet cell, scaled by A_dry/A_wet, so sum(F * area) over the
+        ocean grid is unchanged (nearest, unbounded radius: vote 2026-10-10).
+        Built once (host); applied per coupling step as one scatter-add,
+        differentiable in the flux.  No dynamic ocean or no dry cell -> None.
+        """
+        self._dry_to_wet_map = None
+        owet = getattr(self, "_ocean_land_mask", None)
+        if owet is None:
+            return
+        owet = np.asarray(owet)
+        if not np.all((owet == 0.0) | (owet == 1.0)):
+            raise ValueError(
+                "dry->wet routing needs a binary ocean wet mask (1=ocean, "
+                "0=land): the ocean multiplies every exchange flux by it, so a "
+                "fractional value would still discard part of the routed flux.")
+        if owet.all():
+            return
+        from legoesm.ocean.forcing.runoff_mapper import build_runoff_map
+        g = self._ocean_grid
+        self._dry_to_wet_map = build_runoff_map(
+            owet, np.asarray(g.grid_area), np.asarray(g.grid_lat),
+            np.asarray(g.grid_lon),
+            radius_m=np.pi * constants.R_earth, scheme="nearest")
 
     def _init_ocean(self):
         """Initialize the slab/two-layer ocean (on the ocean grid)."""
@@ -1023,8 +1066,11 @@ class CoupledESMDriver:
                 logger.info("  Snow: sub-grid elevation-band scheme (CLM STD_ELEV, "
                             "5 equal-area bands)")
 
-        # Coupled DIURNAL surface model (default ON for the multilayer land): the
-        # coupled atmosphere supplies a fully-resolved diurnal cycle at a single,
+        # Coupled DIURNAL surface model (default ON for the multilayer land).
+        # NOTE (F35): the surfaces get the atmosphere at the coupling cadence
+        # (one segment-mean radiation + segment-end state per segment), NOT a
+        # resolved diurnal cycle, until sub-daily coupling (design P5b) lands.
+        # The coupled atmosphere supplies a single,
         # consistent lowest-model-level height, so the surface exchange can be the
         # physical Monin-Obukhov (MOST) scheme (roughness-driven, stability-dependent)
         # and transpiration the Farquhar photosynthesis-stomata coupling — both of
@@ -1512,9 +1558,14 @@ class CoupledESMDriver:
         as a unit of heat into the atmosphere (and evap mass leaving the ocean
         arrives as vapour into the atmosphere).
 
-        Returns ``(None, None)`` until the first coupler step populates
-        ``_last_sfc_response`` (segment 0 falls back to the atmosphere's own bulk
-        fluxes, as before).  The hook being installed (or not) is fixed for the
+        Returns ``(shflx, lhflx, surface_mass_flux, tau_x, tau_y)``, the
+        dt-weighted MEAN of the blended response over the previous segment's
+        coupling sub-steps (F38: stress included; lagged one segment, so the
+        integrals match exactly when consecutive segments are equally long -- a
+        shorter final segment takes the previous segment's rate), or five
+        ``None`` until the
+        first segment has been coupled (segment 0 falls back to the
+        atmosphere's own bulk fluxes, as before).  The hook being installed (or not) is fixed for the
         whole run; within a flux-coupled run ``model_driver`` packs ``None`` on
         segment 0 and arrays thereafter -- a one-time recompile when the override
         first appears, identical to the ``couple_surface_radiation`` lag.
@@ -1582,20 +1633,23 @@ class CoupledESMDriver:
             # ocean_tile over its wet area -- the same partition.  For an
             # all-ocean cell blended == ocean_tile exactly (proven in the
             # conservation tests).
-            r = self._last_sfc_response
-            if r is None or getattr(r, "shflx", None) is None:
-                return None, None, None
-            if getattr(r, "surface_mass_flux", None) is None:
-                raise ValueError(
-                    "couple_surface_fluxes: the surface response carries no "
-                    "surface_mass_flux; the atmosphere's moisture source must be "
-                    "the tiles' water flux, never lhflx re-divided by a latent heat.")
-            # Physical latent heat (each tile's own L(T, phase)) for the heat
-            # consumers, and the tiles' WATER flux for the moisture source.
-            # Energy closes inside the atmosphere: its heat lower BC adds
-            # surface_layer.latent_enthalpy_correction = lhflx - L_v*E to the
-            # sensible heat, so the column takes up exactly shflx + lhflx.
-            return r.shflx, r.lhflx, r.surface_mass_flux
+            #
+            # F38: the handback is the TIME-MEAN of the blended response over
+            # the previous segment's coupling sub-steps (``_segment_hook``), so
+            # the integral the atmosphere receives equals the integral the
+            # surface tiles sent (lagged one segment), and it carries the
+            # surface STRESS too: tau_x/tau_y are the stress ON the atmosphere
+            # [Pa] (bulk_flux: -rho*Cd*|U|*u), the convention of the pipeline's
+            # sfc_taux_override, so they pass through unchanged.
+            hb = getattr(self, "_sfc_flux_handback", None)
+            if hb is None:
+                return (None,) * 5
+            # (shflx, lhflx, surface_mass_flux, tau_x, tau_y).  Physical
+            # latent heat (each tile's own L(T, phase)) for the heat consumers,
+            # the tiles' WATER flux for the moisture source: the atmosphere's
+            # heat lower BC adds latent_enthalpy_correction = lhflx - L_v*E to
+            # the sensible heat, so the column takes up exactly shflx + lhflx.
+            return hb
 
         self._atm.get_sfc_flux_override = _coupled_get_sfc_flux_override
         logger.info(
@@ -1687,8 +1741,30 @@ class CoupledESMDriver:
                 or getattr(_acfg, "convection", "none") not in (None, "none")),
             lane=type(self._atm).__name__,
         )
-        sw_net_sfc = aux.get("held_sw_net_sfc", jnp.zeros_like(p_s))
-        lw_net_sfc = aux.get("held_lw_net_sfc", jnp.zeros_like(p_s))
+        # F35: the surfaces integrate a whole segment with this forcing, so they
+        # take the segment-MEAN net radiation when the lane exports it.  The
+        # held_* values are the last radiation call: under diurnal_cycle that is
+        # one fixed UTC hour (night at some longitudes, noon at others) for the
+        # whole segment, so a lane without the means is refused there.
+        # With couple_surface_radiation (run_coupled default) the gross
+        # inversion below stays exact for the MEANS: radiation held the
+        # coupler's albedo / emitting temperature fixed for the whole segment,
+        # and the inversion uses that same pair.  Without it the static
+        # de-blend approximation documented below applies, as before.
+        if aux.get("seg_sw_net_sfc") is not None:
+            sw_net_sfc = aux["seg_sw_net_sfc"]
+            lw_net_sfc = aux["seg_lw_net_sfc"]
+        elif getattr(_acfg, "diurnal_cycle", False):
+            raise NotImplementedError(
+                f"{type(self._atm).__name__}: diurnal_cycle=True but this "
+                "atmosphere lane exports no segment-mean surface radiation "
+                "(seg_sw_net_sfc), so the coupled surfaces would see ONE "
+                "instantaneous sun position for the whole coupling segment. "
+                "Run the coupled case on a compiled lat-lon/cube lane, or "
+                "without diurnal_cycle.")
+        else:
+            sw_net_sfc = aux.get("held_sw_net_sfc", jnp.zeros_like(p_s))
+            lw_net_sfc = aux.get("held_lw_net_sfc", jnp.zeros_like(p_s))
         seg_precip = aux.get("seg_precip", jnp.zeros_like(p_s))
 
         # Reconstruct gross downward fluxes from net
@@ -2195,11 +2271,14 @@ class CoupledESMDriver:
         # (which would leak a stale-P−E / coastal area-weight residual into
         # ice_fw).  Direct attribute access (not getattr-with-default) so a
         # malformed surface response fails loudly instead of silently routing
-        # river runoff into the wrong channel.  Interior-land runoff at fully-dry
-        # cells is gated out by the ocean wet mask (no river-routing map here — a
-        # separate Dai-Trenberth concern); fractional coastal cells receive their
-        # local f_land·runoff.
+        # river runoff into the wrong channel.  The share that lands on DRY ocean
+        # cells (all interior-land runoff on the shared grid; the dry part of a
+        # coastal atm cell across grids) is routed to the nearest wet cell by the
+        # static dry->wet map (F17), so the ocean wet mask no longer discards it.
         prev = self._last_sfc_response
+        _route = getattr(self, "_dry_to_wet_map", None)
+        if _route is not None:
+            from legoesm.ocean.forcing.runoff_mapper import apply_runoff_map
         if prev is None:
             river = z
             surface_extra = z
@@ -2219,6 +2298,10 @@ class CoupledESMDriver:
             if _remapper is not None:
                 river = remap_field(river, _remapper.a2o)
                 surface_extra = remap_field(surface_extra, _remapper.a2o)
+            if _route is not None:
+                # dry->wet: sum(F*area) over the ocean grid unchanged (F17/F18)
+                river = apply_runoff_map(river, _route)
+                surface_extra = apply_runoff_map(surface_extra, _route)
         fw = FreshwaterForcing(
             precip=precip, evap=evap, runoff=river,
             ice_fw=surface_extra,
@@ -2251,9 +2334,10 @@ class CoupledESMDriver:
                 + area_integral(surface_extra, _oa_fw)
             )
         # F2 (M2) runoff-conservation tripwire: the conservative a2o remap
-        # preserves the river-runoff INTEGRAL; the ocean wet mask then drops
-        # interior-land runoff at fully-dry ocean cells (a silent freshwater
-        # leak).  We RECONSTRUCT the horizontal wet-mask gating here as
+        # preserves the river-runoff INTEGRAL; the dry->wet map then moves the
+        # dry-cell share onto wet cells, so the wet-mask gating below keeps all
+        # of it (residual = remap error only; roundoff on the shared grid, F17).
+        # We RECONSTRUCT the horizontal wet-mask gating here as
         # ``river * clip(_owet,0,1)`` -- ``self._ocean_land_mask`` is the ocean's
         # OWN wet mask (1 = ocean; see cross_grid_open_water_fraction) so this
         # matches the gating the ocean applies for a binary interior-land
@@ -2301,6 +2385,14 @@ class CoupledESMDriver:
                 salt = remap_field(salt, _remapper.a2o)
                 ice_tau_x = remap_field(ice_tau_x, _remapper.a2o)
                 ice_tau_y = remap_field(ice_tau_y, _remapper.a2o)
+            if _route is not None:
+                # F18: these channels are pre-weighted by the ATM water fraction,
+                # so across grids part of them lands on dry ocean cells; route it
+                # to the nearest wet cell instead of letting the wet mask drop it.
+                ohe = apply_runoff_map(ohe, _route)
+                salt = apply_runoff_map(salt, _route)
+                ice_tau_x = apply_runoff_map(ice_tau_x, _route)
+                ice_tau_y = apply_runoff_map(ice_tau_y, _route)
             # ocean_heat_extraction is +ocean-LOSES; q_net is +into ocean ⇒ subtract
             # (the ocean loses this basal heat to melting ice = pairs with ice_fw).
             q_net = q_net - ohe
@@ -2408,6 +2500,28 @@ class CoupledESMDriver:
         # current model day.  ``None`` when no climatology is loaded => the slab
         # uses the scalar config.Q_flux (byte-identical).  Interpolated once per
         # segment (it varies on a monthly scale, far slower than sub_dt).
+        # F38: dt-weighted mean of the blended response over this segment's
+        # sub-steps, handed back to the atmosphere for the next segment.
+        _handback = self.coupled_cfg.couple_surface_fluxes
+        _acc = None
+        if _handback:
+            from legoesm.coupler.accumulator import (
+                accumulate, accumulator_from_flux, mean_accumulator)
+            from legoesm.coupler.config import CouplerConfig
+            # step_surface emits its own coupling-window MEAN on the sub-step
+            # that closes a window and the instantaneous blend otherwise; the
+            # emitted response is the sub-step's own flux only when the window
+            # equals the sub-step (codex r1).  Otherwise this mean would weight
+            # some sub-steps twice.
+            _win = float((getattr(self, "_coupler_cfg", None)
+                          or CouplerConfig()).coupling_dt)
+            if abs(_win - sub_dt) > 1.0e-6 * sub_dt:
+                raise ValueError(
+                    f"couple_surface_fluxes: coupling sub-step {sub_dt} s != "
+                    f"the coupler's flux window {_win} s; set "
+                    "CouplerConfig.coupling_dt to the sub-step so the handed-"
+                    "back mean weights every sub-step once.")
+
         q_flux_now = None
         if getattr(self, "_qflux_forcing", None) is not None:
             from legoesm.ocean.forcing.qflux import qflux_at_time
@@ -2447,9 +2561,24 @@ class CoupledESMDriver:
                 year=cover_year,
             )
             self._last_sfc_response = sfc_response
+            if _handback:
+                if sfc_response.surface_mass_flux is None:
+                    raise ValueError(
+                        "couple_surface_fluxes: the surface response carries no "
+                        "surface_mass_flux; the atmosphere's moisture source "
+                        "must be the tiles' water flux, never lhflx re-divided "
+                        "by a latent heat.")
+                _acc = (accumulator_from_flux(sfc_response, sub_dt)
+                        if _acc is None
+                        else accumulate(_acc, sfc_response, sub_dt))
 
             # CO2 tracer update
             self._step_co2_tracer(sub_dt)
+
+        if _acc is not None:
+            _m = mean_accumulator(_acc)
+            self._sfc_flux_handback = (
+                _m.shflx, _m.lhflx, _m.surface_mass_flux, _m.tau_x, _m.tau_y)
 
         # Interactive carbon-radiation coupling (#3 / C4MIP): feed the prognostic
         # CO2 back to atmospheric radiation.  The next atmosphere segment's GHG
@@ -2786,6 +2915,13 @@ class CoupledESMDriver:
             arrays.update(
                 _flatten_pytree_to_npz(self._last_sfc_response, "sfcresp_"))
 
+        # Flux handback (F38): the segment-mean surface fluxes the NEXT
+        # atmosphere segment consumes; without it a resumed run's first segment
+        # would fall back to the atmosphere's own bulk fluxes.
+        if self._sfc_flux_handback is not None:
+            for _k, _v in zip(_HANDBACK_KEYS, self._sfc_flux_handback):
+                arrays["handback_" + _k] = np.asarray(_v)
+
         # SST-drift reference (ckpt v3): the run-start SST mean, so the
         # resumed sst_drift_K diagnostic stays referenced to the ORIGINAL run
         # start rather than resetting at the restart point.
@@ -2973,5 +3109,15 @@ class CoupledESMDriver:
             self._sst_mean_init = float(data["sst_mean_init"])
         # else: pre-v3 checkpoint — keep None: the drift re-references at the
         # restart point (the pre-v3 resume behavior), explicit not silent.
+
+        # F38 flux handback: all five keys or none (saved dtype kept).
+        _hb = ["handback_" + k for k in _HANDBACK_KEYS]
+        if all(k in data.files for k in _hb):
+            self._sfc_flux_handback = tuple(jnp.asarray(data[k]) for k in _hb)
+        elif self.coupled_cfg.couple_surface_fluxes:
+            logger.warning(
+                f"Coupled checkpoint {coupled_path.name}: no flux handback "
+                "saved; the first resumed segment uses the atmosphere's own "
+                "bulk fluxes.")
 
         logger.info(f"  Loaded coupled checkpoint: {coupled_path.name}")

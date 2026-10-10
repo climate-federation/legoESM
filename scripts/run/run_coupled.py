@@ -594,6 +594,30 @@ def build_parser():
              "eccentricity asymmetry (~+/-3.4%%). Default off = circular "
              "orbit. Recommended for CMIP historical/abrupt-4xCO2/1pctCO2.",
     )
+    # Terrain / land-sea mask / subgrid orography (F36): the SAME flags, dests
+    # and defaults as run_amip.py (tests/unit/test_run_coupled_forcing_cli.py
+    # pins them).  Without them the coupled atmosphere was always flat and the
+    # slab deck's land the analytic 50%-poleward-of-25-deg band.  In a coupled
+    # run the land fraction feeds the coupler's land tile (the atmosphere's own
+    # slab land is not activated: the coupler owns land).
+    # Vertical coordinate (F36): the same dests/defaults as run_amip.py.  The
+    # default hybrid table (transition exponent 3) carries NEGATIVE layer mass
+    # below ~658 hPa, i.e. over real Tibet; exponent 2 holds all of ETOPO.
+    parser.add_argument("--vertical-coord", type=str, default="hybrid",
+                        choices=["sigma", "hybrid", "cam_l32"],
+                        help="cam_l32 = CAM6's 32-level hybrid table (nlev must be 32)")
+    parser.add_argument("--transition-exponent", type=int, default=None,
+                        choices=[2, 3],
+                        help="hybrid B(eta)=eta**n exponent; 2 holds all of "
+                             "ETOPO, 3 (default) inverts below ~658 hPa (#1029).")
+    parser.add_argument("--topography", type=str, default="flat")
+    parser.add_argument("--topo-smoothing", type=int, default=4)
+    parser.add_argument("--land-mask-file", type=str, default="",
+                        help="Land-sea-mask NetCDF (CMIP6 sftlf / ERA5 lsm); "
+                             "replaces the terrain product's land fraction.")
+    parser.add_argument("--subgrid-orography-file", type=str, default="",
+                        help="Subgrid orographic stddev NetCDF (SSO_STDH) for "
+                             "an orographic GWD launch; see run_amip.py.")
     # RRTMGP g-point compile/runtime tuning (forward CMIP runs only — these are
     # ANSWER-IDENTITY for a non-AD forward integration).  ``--rrtmgp-gpoint-
     # batch-size N>0`` processes the two-stream g-points in vmap blocks of N
@@ -1382,6 +1406,9 @@ def main():
             grid_type=args.grid,
             resolution=args.resolution,
             nlev=args.nlev,
+            vertical_coord=args.vertical_coord,
+            transition_exponent=(args.transition_exponent
+                                 if args.transition_exponent is not None else 3),
         ),
         dycore=DycoreConfig(
             dt=args.dt, model_type="hydrostatic",
@@ -1439,6 +1466,10 @@ def main():
         volcanic_aerosol_file=args.volcanic_aerosol_file,
         volcanic_aerosol_scale=args.volcanic_aerosol_scale,
         volcanic_aerosol_lw=args.volcanic_aerosol_lw,
+        topography=args.topography,
+        topo_smoothing=args.topo_smoothing,
+        land_mask_path=args.land_mask_file,
+        subgrid_orography_path=args.subgrid_orography_file,
         ic=args.ic,
         ic_path=args.ic_path,
         convection=args.convection,

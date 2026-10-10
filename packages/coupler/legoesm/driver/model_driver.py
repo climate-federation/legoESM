@@ -3321,6 +3321,17 @@ class ModelDriver:
             _activate = bool(getattr(self.config, "land_mask_path", "")) or bool(
                 getattr(self.config, "slab_land_active", False)
             )
+            # Coupled atmosphere (F36, vote 2026-10-10): the coupler's land tile
+            # owns land, so a land-mask file only sets the land FRACTION here;
+            # running the atmosphere's own slab land as well would be a second,
+            # unconserved land model.  An explicit request for it is refused.
+            if getattr(self, "_requires_surface_flux_export", False):
+                if getattr(self.config, "slab_land_active", False):
+                    raise ValueError(
+                        "slab_land_active=True in a coupled run: the coupler's "
+                        "land tile owns land; the atmosphere's slab land would "
+                        "be a second land model.")
+                _activate = False
             if _activate:
                 self.physics.slab_land_active = True
                 # Prognostic soil-water bucket: soil-moisture-limited land
@@ -8200,15 +8211,19 @@ class ModelDriver:
                 require_cpu_for_strict_sedimentation()
             if (self.config.dycore.discretization == "fv3_duo"
                     and self.config.dycore.fv3_duo_column_lane):
+                self._reject_unconsumed_flux_override("the FV3-duo column lane")
                 status = self._run_fv3_duo_column(start_step, start_day)
             elif self.config.dycore.discretization == "fv3_duo":
+                self._reject_unconsumed_flux_override("the FV3-duo lane")
                 warn_sed_substeps_unreported(
                     self.config, "fv3_duo",
                     getattr(self.physics, "micro_config", None))
                 status = self._run_fv3_duo(start_step, start_day)
             elif self.config.grid.grid_type == "mpas":
+                self._reject_unconsumed_flux_override("the MPAS column loop")
                 status = self._run_mpas(start_step, start_day)
             elif self.config.dycore.discretization == "spectral":
+                self._reject_unconsumed_flux_override("the spectral lane")
                 warn_sed_substeps_unreported(
                     self.config, "spectral",
                     getattr(self.physics, "micro_config", None))
@@ -8260,6 +8275,7 @@ class ModelDriver:
                     getattr(self.physics, "micro_config", None))
                 status = self._run_compiled(start_step, start_day)
             else:
+                self._reject_unconsumed_flux_override("the per-step lane")
                 status = self._run_per_step(start_step, start_day)
             # Record the final-state digest into the run manifest so
             # ``legoesm reproduce --check`` has a bit-repro reference — but ONLY
@@ -15015,6 +15031,20 @@ class ModelDriver:
             "lat-major reshape-aware shard (see run_atm_latlon_spmd_segment). "
             "Set those schemes to 'none' or use held_suarez_forcing=True.")
 
+    def _reject_unconsumed_flux_override(self, lane: str) -> None:
+        """Refuse a coupler flux handback (``get_sfc_flux_override``, set by
+        ``couple_surface_fluxes``) on a run loop that never reads it: the
+        atmosphere would keep its own bulk fluxes while the run claims the
+        shared-flux coupling (F38, vote 2026-10-10).  Only ``_run_compiled``
+        and the operator-split lanes it dispatches pack the override."""
+        if self.get_sfc_flux_override is None:
+            return
+        raise NotImplementedError(
+            f"couple_surface_fluxes is set but {lane} never reads the coupler's "
+            "surface-flux handback, so the atmosphere would silently keep its "
+            "own bulk fluxes. Run the coupled case on a compiled lat-lon / cube "
+            "lane, or turn couple_surface_fluxes off.")
+
     def _reject_coupled_lane(self, lane: str, envelope: str,
                              remedy: str) -> None:
         """Refuse a COUPLED run on an atmosphere lane that never stashes the
@@ -15408,9 +15438,10 @@ class ModelDriver:
             _alb, _T, _emis = (None, None, None)
             if self.get_sfc_override is not None:
                 _alb, _T, _emis = self.get_sfc_override(day)
-            _shflx, _lhflx, _evap = (None, None, None)
+            _shflx, _lhflx, _evap, _taux, _tauy = (None,) * 5
             if self.get_sfc_flux_override is not None:
-                _shflx, _lhflx, _evap = self.get_sfc_flux_override(day)
+                (_shflx, _lhflx, _evap, _taux, _tauy) = \
+                    self.get_sfc_flux_override(day)
             forcing = pack_forcing(
                 sst=jnp.asarray(sst), sic=jnp.asarray(sic),
                 day_of_year=doy, seconds_of_day=sod,
@@ -15424,6 +15455,8 @@ class ModelDriver:
                 sfc_emissivity_override=_emis,
                 sfc_shflx_override=_shflx, sfc_lhflx_override=_lhflx,
                 sfc_evap_override=_evap,
+                # stress ON the atmosphere [Pa] (F38: coupler handback)
+                sfc_taux_override=_taux, sfc_tauy_override=_tauy,
             )
 
             if seg_idx == 0:
@@ -15994,9 +16027,10 @@ class ModelDriver:
             _alb, _T, _emis = (None, None, None)
             if self.get_sfc_override is not None:
                 _alb, _T, _emis = self.get_sfc_override(day)
-            _shflx, _lhflx, _evap = (None, None, None)
+            _shflx, _lhflx, _evap, _taux, _tauy = (None,) * 5
             if self.get_sfc_flux_override is not None:
-                _shflx, _lhflx, _evap = self.get_sfc_flux_override(day)
+                (_shflx, _lhflx, _evap, _taux, _tauy) = \
+                    self.get_sfc_flux_override(day)
             forcing = pack_forcing(
                 sst=jnp.asarray(sst), sic=jnp.asarray(sic),
                 day_of_year=doy, seconds_of_day=sod,
@@ -16010,6 +16044,8 @@ class ModelDriver:
                 sfc_emissivity_override=_emis,
                 sfc_shflx_override=_shflx, sfc_lhflx_override=_lhflx,
                 sfc_evap_override=_evap,
+                # stress ON the atmosphere [Pa] (F38: coupler handback)
+                sfc_taux_override=_taux, sfc_tauy_override=_tauy,
             )
             forcing = shard_operator_split_forcing(forcing, mesh)
 
@@ -16066,6 +16102,11 @@ class ModelDriver:
             self._carry_aux["held_lw_net_sfc"] = carry_full.held_lw_net_sfc
             self._carry_aux["seg_precip"] = segment_accum_to_rate(
                 carry_full.precip_accum, seg_steps, DT)
+            # segment-MEAN net surface radiation for the coupler (F35)
+            self._carry_aux["seg_sw_net_sfc"] = segment_accum_to_rate(
+                carry_full.sw_net_sfc_accum, seg_steps, DT)
+            self._carry_aux["seg_lw_net_sfc"] = segment_accum_to_rate(
+                carry_full.lw_net_sfc_accum, seg_steps, DT)
             # RESEED every segment accumulator.  ``segment_accum_to_rate``
             # divides by THIS segment's duration and its contract
             # (compiled_segments.py:531-534) is "from a zero reseed at every
@@ -17083,9 +17124,11 @@ class ModelDriver:
             # (None unless a coupled driver wired the shared-flux feedback).
             # When present the atmosphere consumes these instead of its own
             # bulk fluxes so the air-sea heat+water budget closes.
-            _sfc_shflx_ovr, _sfc_lhflx_ovr, _sfc_evap_ovr = (None, None, None)
+            (_sfc_shflx_ovr, _sfc_lhflx_ovr, _sfc_evap_ovr,
+             _sfc_taux_ovr, _sfc_tauy_ovr) = (None,) * 5
             if self.get_sfc_flux_override is not None:
-                _sfc_shflx_ovr, _sfc_lhflx_ovr, _sfc_evap_ovr = self.get_sfc_flux_override(day)
+                (_sfc_shflx_ovr, _sfc_lhflx_ovr, _sfc_evap_ovr,
+                 _sfc_taux_ovr, _sfc_tauy_ovr) = self.get_sfc_flux_override(day)
 
             # Pack per-segment forcing into a SegmentForcing pytree.
             forcing = pack_forcing(
@@ -17103,6 +17146,9 @@ class ModelDriver:
                 sfc_shflx_override=_sfc_shflx_ovr,
                 sfc_lhflx_override=_sfc_lhflx_ovr,
                 sfc_evap_override=_sfc_evap_ovr,
+                # stress ON the atmosphere [Pa] (F38: coupler handback)
+                sfc_taux_override=_sfc_taux_ovr,
+                sfc_tauy_override=_sfc_tauy_ovr,
                 # Transient land-use cover: this segment's re-weighted multilayer
                 # land params (None unless transient_land_cover is active), fed as a
                 # traced arg so the jitted step follows the cover — the 5th-issue fix.
@@ -17363,6 +17409,14 @@ class ModelDriver:
                 "seg_precip": segment_accum_to_rate(seg_precip, seg_steps, DT),
                 "seg_shflx": seg_shflx,
                 "seg_lhflx": seg_lhflx,
+                # Segment-MEAN net surface SW/LW [W/m2, +into surface] for the
+                # coupler (F35): the held_* above are the LAST radiation call's
+                # instantaneous values, which under diurnal_cycle are one fixed
+                # UTC hour (night at some longitudes, noon at others).
+                "seg_sw_net_sfc": segment_accum_to_rate(
+                    _dm_carry.sw_net_sfc_accum, seg_steps, DT),
+                "seg_lw_net_sfc": segment_accum_to_rate(
+                    _dm_carry.lw_net_sfc_accum, seg_steps, DT),
             }
             # Carry the slab-land temperature to the next segment and
             # into the checkpoint (mirrors the held-radiation fields).

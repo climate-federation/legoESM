@@ -66,8 +66,10 @@ DATA="${AMIP_DATA:-${REPO}/data/amip}"
 : "${CMIP6_FORCING_DIR:=/burg-archive/glab/users/pg2328/legoESM/data/cmip6_forcing}"
 : "${SOLAR:=${CMIP6_FORCING_DIR}/solar_cmip6_SOLARIS-HEPPA-3-2_mon.nc}"
 : "${OZONE:=${CMIP6_FORCING_DIR}/vmro3_input4MIPs_ozone_CMIP_UReading-CCMI-1-0_zonalmean_185001-201412.nc}"
-# The coupled CMIP lane (run_coupled.py) has no YAML for these: pass the whole
-# set so it consumes the SAME real forcing as every AMIP grid.
+# Coupled CMIP lane: the canonical decks (config/cmip/cmip_ocean_*.yaml) now
+# carry the forcing SCHEME keys (F40) and take only PATHS from CMIP_PATH_FLAGS
+# below.  CMIP6_FORCING_FLAGS (schemes + paths) remains for the CLI-only
+# probes under scripts/cluster/cmip6_coupled/ that run without a deck.
 CMIP6_FORCING_FLAGS=(
   --ozone-source standard --ozone-forcing external --ozone-file "${OZONE}"
   --solar-source spectral_file --solar-file "${SOLAR}"
@@ -162,6 +164,22 @@ fi
 # twin so an empty AMIP_SSO is an explicit opt-out rather than a silent drop.
 if [[ -n "${AMIP_SSO}" ]]; then
   AMIP_PATH_FLAGS+=( --subgrid-orography-file "${AMIP_SSO}" )
+fi
+
+# Coupled CMIP decks (config/cmip/cmip_ocean_*.yaml): machine PATHS only --
+# the decks select the forcing schemes (F40).  Terrain + subgrid orography are
+# the AMIP lane's (F36); the AMIP_VOLCANIC_LW / AMIP_SSO opt-outs apply as above.
+CMIP_PATH_FLAGS=(
+  --ozone-file "${OZONE}" --solar-file "${SOLAR}" --ghg-file "${GHG}"
+  --aerosol-file "${AEROSOL}" --aerosol-ccn-file "${AEROSOL_CCN}"
+  --volcanic-aerosol-file "${VOLCANIC}"
+  --topography "${ETOPO}"
+)
+if [[ "${AMIP_VOLCANIC_LW:-1}" == "1" ]]; then
+  CMIP_PATH_FLAGS+=( --volcanic-aerosol-lw )
+fi
+if [[ -n "${AMIP_SSO}" ]]; then
+  CMIP_PATH_FLAGS+=( --subgrid-orography-file "${AMIP_SSO}" )
 fi
 
 # Warn (don't fail) on a missing local input so a Stage-0 flat-topo smoke still works.

@@ -1,7 +1,8 @@
 # Canonical coupled CMIP run — full prognostic 3D ocean (LatLonCGridOceanModel)
 # from realistic WOA18 initial conditions.
 #
-#   run_coupled.py --config config/cmip/cmip_ocean_3D.yaml
+#   source config/amip/amip_production.ginsburg.sh
+#   run_coupled.py "${CMIP_PATH_FLAGS[@]}" --config config/cmip/cmip_ocean_3D.yaml
 #
 # The dynamic-ocean twin of config/cmip/cmip_ocean_slab.yaml: it inherits the
 # SAME tuned atmosphere + air-sea physics from cmip_tuned_physics.yaml; only the
@@ -24,6 +25,10 @@ preset: slab_richards
 grid: latlon
 resolution: 24
 nlev: 20
+# hybrid B(eta)=eta**2: holds all of ETOPO (exponent 3 carries negative layer
+# mass below ~658 hPa, i.e. over Tibet, once real terrain is on; F36, vote
+# 2026-10-10).
+transition_exponent: 2
 dt: 300.0
 ic: standard
 days: 240
@@ -42,6 +47,24 @@ ocean_dt: 300.0                # ocean sub-step [s]
 # (which is deliberately scheme-only; see tests/test_param_specs.py scope).
 ocean_restore_sst_tau_days: 5.0
 ocean_restore_sss_tau_days: 30.0
+
+# --- CMIP6 historical forcing SCHEMES (F40): the same selectors as
+# config/amip/amip_production.yaml.  File PATHS are machine-specific and come
+# from the launcher (CMIP_PATH_FLAGS in config/amip/amip_production.ginsburg.sh:
+# ozone/solar/GHG/aerosol/CCN/volcanic files, plus terrain + subgrid orography,
+# F36).  Without the forcing file paths this deck refuses to start (no idealized
+# forcing under a "historical" label).  Volcanic aerosol is on when the launcher
+# passes its file; its LW toggle follows the launcher's AMIP_VOLCANIC_LW policy.
+ozone_forcing: external
+solar_source: spectral_file
+solar_tsi_var: TSI
+solar_spectral_var: SSI_frac
+solar_spectral_band_order: rrtmg_sw
+ghg_forcing: external
+aerosol_forcing: external
+diurnal_cycle: true            # coupler takes segment-MEAN surface radiation (F35)
+orbital_insolation: true
+rrtmgp_overhead_layer: true
 
 # --- CMOR output (historical-1850 forcing) ---
 experiment: historical
