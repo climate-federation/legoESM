@@ -2393,7 +2393,7 @@ CITATION_MAP = {
         ('CALL zdf_drg_lin( pCd0(:,:), pCdU(:,:) )', 2), 8],
     'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/dynzdf.f90:158-169': [
         'IF( ln_drgimp .AND. ln_dynspg_ts ) THEN',
-        '&                                            / (e3v_3d(ji,jj,ikv) *(1._wp+r3v(ji,jj,Kaa)*vmask(ji,jj,ikv)))',
+        ('&                                            / (e3v_3d(ji,jj,ikv) *(1._wp+r3v(ji,jj,Kaa)*vmask(ji,jj,ikv)))', 1),
         12],
     'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/dynzdf.f90:303-312': [
         'IF( ln_drgimp ) THEN      ! implicit bottom friction',
