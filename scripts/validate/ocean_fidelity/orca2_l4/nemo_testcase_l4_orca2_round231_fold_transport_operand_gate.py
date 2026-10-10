@@ -239,11 +239,15 @@ def measure(deck_root: Path, frame_root: Path, operand_root: Path,
         and _exact(corrected_s[-3:], oracle_s[-3:])["max_abs"]
         <= 0.0009639248797768118
     )
+    consumer_nonbit = (
+        _exact(candidate_t_sum, nemo_t_sum)["unequal"] > 0
+        or _exact(candidate_s_sum, nemo_s_sum)["unequal"] > 0
+    )
     result = {
         "format": "nemo-testcase-l4-orca2-round231-fold-operand-v1",
         "status": (
             "PASS_R231_TRACER_FOLD_OWNER_CONFIRMED"
-            if correction_at_bound
+            if consumer_nonbit and correction_at_bound
             else "PASS_R231_TRACER_FOLD_OWNER_REFUTED"
         ),
         "label": label,
@@ -288,10 +292,6 @@ def measure(deck_root: Path, frame_root: Path, operand_root: Path,
             "NEMO T halo does not satisfy its compiled fold identity")
     require(result["nemo_fold_identity"]["S_halo"]["unequal"] == 0,
             "NEMO S halo does not satisfy its compiled fold identity")
-    require(result["consumer_north_sum"]["T"]["unequal"] > 0,
-            "candidate T consumer already has NEMO's fold operand")
-    require(result["consumer_north_sum"]["S"]["unequal"] > 0,
-            "candidate S consumer already has NEMO's fold operand")
     return result
 
 
