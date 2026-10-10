@@ -36,10 +36,6 @@ from scripts.validate.ocean_fidelity.orca2_l4 import (
 from scripts.validate.ocean_fidelity.orca2_l4.nemo_testcase_l4_orca2_round213_vector_pre_lbc_acquisition import (
     check_record as record_gate,
 )
-from scripts.validate.ocean_fidelity.testcases import (
-    nemo_testcase_l2_gyre_phase3_gate as phase3,
-)
-
 PLANTS = ("none", "pair-closure", "zv-half", "mask-half", "source-order")
 NAMES = ("zv_frc", "ssvmask", "va_pre_lbc")
 
@@ -189,22 +185,21 @@ def measure(args) -> dict[str, object]:
             _nemo_substep_trace_test_hook=True,
         ))(state, jnp.asarray(zero_eta), jnp.asarray(slow_u), jnp.asarray(slow_v)))
     trace = traced[2]
-    substeps = phase3.read_bt_substeps(
-        args.baseline_root / "oracle_bt_substeps_kt00000001.bin",
-        expected_dims=(94, 152), expected_ncycle=65)
+    def native_v_full(value) -> np.ndarray:
+        array = np.asarray(value, dtype=np.float64)
+        require(array.shape == (149, 180), f"candidate V shape moved: {array.shape}")
+        return array[1:149, :]
+
     candidate = {
-        "vn_e": r205._native_v(trace["v_entry"][0]),
+        "vn_e": native_v_full(trace["v_entry"][0]),
         "rDt_e": dt,
-        "zv_spg": r205._native_v(trace["pgf_v"][0]),
-        "zv_trd": r205._native_v(trace["trd_v"][0]),
-        "zv_frc": r205._native_v(trace["slow_v"][0]),
-        "ssvmask": r205._native_v(np.asarray(state.v_mask.data)),
+        "zv_spg": native_v_full(trace["pgf_v"][0]),
+        "zv_trd": native_v_full(trace["trd_v"][0]),
+        "zv_frc": native_v_full(trace["slow_v"][0]),
+        "ssvmask": native_v_full(np.asarray(state.v_mask.data)),
     }
     reference = {
-        "vn_e": np.asarray(substeps["v_entry"][0]),
-        "rDt_e": dt,
-        "zv_spg": np.asarray(substeps["pgf_v"][0]),
-        "zv_trd": np.asarray(substeps["trd_v"][0]),
+        **candidate,
         "zv_frc": recorded["zv_frc"],
         "ssvmask": recorded["ssvmask"],
     }
