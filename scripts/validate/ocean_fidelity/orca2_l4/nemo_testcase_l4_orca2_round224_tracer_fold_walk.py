@@ -221,11 +221,10 @@ def measure(deck_root: Path, frames_root: Path, expect_commit: str) -> dict[str,
 
     original_upwind = pe.upwind_to_v_points
 
-    def run_trace(tracer, before, *, legacy_wall: bool):
-        if legacy_wall:
+    def run_trace(tracer, before, *, fold_upwind: bool):
+        if fold_upwind:
             pe.upwind_to_v_points = (
-                lambda value, flux, grid=None:
-                original_upwind(value, flux, grid=None))
+                lambda value, flux: original_upwind(value, flux, grid=grid))
         else:
             pe.upwind_to_v_points = original_upwind
         try:
@@ -247,10 +246,10 @@ def measure(deck_root: Path, frames_root: Path, expect_commit: str) -> dict[str,
     first_moved = None
     off_fold_unequal = 0
     for tracer in ("T", "S"):
-        production = run_trace(frames[2][tracer], frames[0][tracer],
-                               legacy_wall=False)
         legacy = run_trace(frames[2][tracer], frames[0][tracer],
-                           legacy_wall=True)
+                           fold_upwind=False)
+        production = run_trace(frames[2][tracer], frames[0][tracer],
+                               fold_upwind=True)
         rows = {name: _row(a, b) for name, a, b in
                 zip(TRACE_ORDER, legacy, production, strict=True)}
         trace_rows[tracer] = rows
