@@ -182,36 +182,10 @@ def _thomas_solve_impl(
     # the full broadcast shape by construction.
     a, b, c, d = (jnp.moveaxis(v, -1, 0)
                   for v in jnp.broadcast_arrays(a, b, c, d))
-    c0_star = c[0] / (b[0] + _TINY)
-    d0_star = d[0] / (b[0] + _TINY)
-    if n == 1:
-        # no sweep to run (and lax.scan refuses zero-length scans without jit)
-        return jax.lax.convert_element_type(d0_star[..., None], out_dtype)
-
-    def forward_body(carry, xs):
-        c_prev, d_prev = carry
-        ak, bk, ck, dk = xs
-        denom = bk - ak * c_prev
-        denom = jnp.where(jnp.abs(denom) < _TINY, _TINY, denom)
-        c_star_k = ck / denom
-        d_star_k = (dk - ak * d_prev) / denom
-        return (c_star_k, d_star_k), (c_star_k, d_star_k)
-
-    _, (c_star, d_star) = jax.lax.scan(
-        forward_body, (c0_star, d0_star), (a[1:], b[1:], c[1:], d[1:]))
-    c_star = jnp.concatenate([c0_star[None], c_star])
-    d_star = jnp.concatenate([d0_star[None], d_star])
-
-    # Backward substitution: x[n-1] = d_star[n-1], x[k] = d*[k] - c*[k] x[k+1]
-    def backward_body(x_next, xs):
-        c_k, d_k = xs
-        x_k = d_k - c_k * x_next
-        return x_k, x_k
-
-    _, x = jax.lax.scan(backward_body, d_star[-1], (c_star[:-1], d_star[:-1]),
-                        reverse=True)
-    x = jnp.moveaxis(jnp.concatenate([x, d_star[-1:]]), 0, -1)
-
+    # n == 1: no sweep (lax.scan refuses zero-length scans without jit)
+    x = (d[:1] / (b[:1] + _TINY) if n == 1 else
+         _sweep_levels_first(b[0], c[0], d, (a[1:], b[1:], c[1:]), lambda abc: abc))
+    x = jnp.moveaxis(x, 0, -1)
     return jax.lax.convert_element_type(x, out_dtype)
 
 
