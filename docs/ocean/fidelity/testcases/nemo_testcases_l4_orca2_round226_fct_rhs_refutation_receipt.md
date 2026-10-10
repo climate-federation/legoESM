@@ -10,11 +10,14 @@ changed. OMT-5 remains blocked.
 
 The next source-ordered non-bit statement is NEMO's two-write final FCT
 tracer-RHS association. NEMO first writes the averaged-upstream divergence,
-already divided by live `Kmm` thickness, at `traadv_fct.f90:598-609`; after
+already divided by live `Kmm` thickness, at
+`ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/traadv_fct.f90:598-609`; after
 `nonosc` it differences the limited anti-fluxes and adds a second divided
-rate at `traadv_fct.f90:318-330`. The active stage program zeroes `Krhs`,
+rate at
+`ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/traadv_fct.f90:318-330`. The active stage program zeroes `Krhs`,
 calls advection, and hands that completed rate to its stage-3 implicit tracer
-solve at `stprk3_stg.f90:600-649,700-760`.
+solve at
+`ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:600-649,700-760`.
 
 The committed offline replay uses only admitted passive completed states and
 the rank-0 `NEMO_L2_RKTR3_1` record; no executable observer is present. Its
@@ -87,7 +90,8 @@ the complete output and exit status are retained as
 ## OPEN
 
 OMT-4 remains HELD and OMT-5 remains blocked. Continue in compiled source
-order at the stage-3 implicit tracer solve (`stprk3_stg.f90:700-760`): replay
+order at the stage-3 implicit tracer solve
+(`ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:700-760`): replay
 the input `Krhs`, vertical-diffusion coefficients and tridiagonal
 forward/back substitutions from passive completed states, and name the first
 non-bit statement. The known `t3d` off-diagonal/diagonal thickness association

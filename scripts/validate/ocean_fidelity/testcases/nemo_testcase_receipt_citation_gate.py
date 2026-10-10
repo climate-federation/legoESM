@@ -1103,6 +1103,12 @@ FILES = {
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM/cpp_GYRE_OMIP_L2_P3_SM.fcm",
     "nemo_testcase_recipe.py":
         REPO / "packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py",
+    "nemo_testcase_l4_orca2_round226_fct_rhs_walk.py":
+        REPO / "scripts/validate/ocean_fidelity/orca2_l4"
+             / "nemo_testcase_l4_orca2_round226_fct_rhs_walk.py",
+    "test_nemo_testcase_l4_orca2_round226_fct_rhs_walk.py":
+        REPO / "tests/ocean/fidelity"
+             / "test_nemo_testcase_l4_orca2_round226_fct_rhs_walk.py",
     "nemo_testcase_l4_orca2_round174_stage_growth_gate.py":
         REPO / "scripts/validate/ocean_fidelity/orca2_l4"
              / "nemo_testcase_l4_orca2_round174_stage_growth_gate.py",
@@ -2515,6 +2521,27 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:633-643': [
         ('IF( ln_tile )   CALL dom_tile_start', 1),
         ("& l4_canon_3d(ts(:,:,:,jp_sal,Krhs),'T')", 4), 11],
+    # --- ORCA2 round 226: final FCT RHS association and refutation ---
+    'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/traadv_fct.f90:598-609': [
+        '! -- after tracer with upstream scheme',
+        ('pt_up1(ji,jj,jk) = ( (e3t_3d(ji,jj,jk)', 1), 12],
+    'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/traadv_fct.f90:318-330': [
+        '! -- Final trend with corrected fluxes',
+        ('END DO   ;   END DO   ;   END DO', 10), 13],
+    'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:600-649,700-760': [
+        ('ts(:,:,:,jn,Krhs) = 0._wp', 1),
+        ('CALL tra_adv', 2),
+        ('CASE ( 3 )', 5),
+        ('CALL tra_zdf', 1), 111],
+    'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:700-760': [
+        ('CASE ( 3 )', 5),
+        ('CALL tra_zdf', 1), 61],
+    'nemo_testcase_l4_orca2_round226_fct_rhs_walk.py:1-367': [
+        '"""Compare OMT-4',
+        'raise SystemExit(main())', 367],
+    'test_nemo_testcase_l4_orca2_round226_fct_rhs_walk.py:1-50': [
+        'from __future__ import annotations',
+        'gate.classify(_report(), plant=plant)', 50],
     # --- ORCA2 round 223: completed-month terminal restart overwrite ---
     'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/restart.f90:94-146': [
         'IF( kt == nit000 ) THEN   ! default definitions',
