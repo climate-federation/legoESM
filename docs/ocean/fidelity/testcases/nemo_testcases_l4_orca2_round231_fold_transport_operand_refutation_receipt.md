@@ -82,9 +82,20 @@ endpoint-maximum predicate was correctly caught as vacuous and retained in
 `correction_sign_plant.log` (SHA-256
 `de3e0ed41c25b78c2542da0a30c61ddc12fa259258e16fc57aabef42919d9371`).
 
-The focused round-229/231 tests pass 5/5. No `packages/` file changed, so no
-GYRE, DINO, tank, rung-0, rung-10, or OMT trajectory can execute changed
-model code. The required separate `codex exec --sandbox read-only` review
+The focused round-229/231 tests pass 5/5. The one required
+`tests/ocean/fidelity -n 12` battery was launched only after the process-count
+gate returned zero. It reported 3,109 passes, seven skips, and four unrelated
+branch-wide reds before its last legacy prediction-plant test failed to
+complete; that test also exceeded a bounded 600-second isolated run. The four
+reds reproduce in isolation: the registered GYRE year-harness-stamp move, the
+round-35 allow-dirty scope ratchet, the registered worktree-stamp ratchet, and
+the registered SI3 verbatim-source gate. Logs have SHA-256
+`d24a2f4536c8672b244f956c4edab2cf9241e70fe68501bbbaf942a2c4ae828f`,
+`57d5595cc2e38fdb4d7b1b6466a81244a3d02826b5f07c0bce70c4e8401ee0aa`,
+and `a8fd15ff28de307393503ef55796f2ce7321b4ab88c9983b2b35e27232e7b683`.
+No `packages/` file changed, so no GYRE, DINO, tank, rung-0, rung-10, or OMT
+trajectory can execute changed model code. The required separate
+`codex exec --sandbox read-only` review
 could not initialize because its app-server PATH-alias write was denied by
 the read-only sandbox. Verdict: **independent review unavailable in-sandbox**
 (`independent_review.log`, SHA-256
