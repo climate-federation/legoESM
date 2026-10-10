@@ -2395,6 +2395,10 @@ CITATION_MAP = {
         'IF( .NOT.lk_linssh ) THEN   !* Update ocean depth (variable volume case only)',
         "&                   , hur_e, 'U',  1._wp, hvr_e, 'V',  1._wp  , ssha_e, 'T', 1._wp, ldfull=.TRUE. )",
         10],
+    'ORCA2_OMIP_L4_R214VECPREV3/BLD/ppsrc/nemo/dynspg_ts.f90:533-560': [
+        'zhV(ji,jj) = e1v(ji,jj) * va_e(ji,jj) * zhvp2_e(ji,jj)',
+        'ssha_e(ji,jj) = (  sshn_e(ji,jj) - rDt_e * ( ssh_frc(ji,jj) + zhdiv )  ) * ssmask(ji,jj)',
+        28],
     'ORCA2_OMIP_L4_R214VECPREV3/BLD/ppsrc/nemo/lbcnfd.f90:684-718': [
         ("CASE ( 'V' )                               ! V-point", 5),
         ('END DO', 105), 35],
