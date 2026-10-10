@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import struct
 import sys
 from pathlib import Path
 
@@ -25,8 +26,8 @@ from scripts.validate.ocean_fidelity.orca2_l4 import (
 from scripts.validate.ocean_fidelity.orca2_l4 import (
     nemo_testcase_l4_orca2_round224_tracer_fold_walk as fold_walk,
 )
-from scripts.validate.ocean_fidelity.testcases import (
-    nemo_testcase_l2_gyre_phase3_gate as phase3,
+from scripts.validate.ocean_fidelity.orca2_l4 import (
+    nemo_testcase_l4_orca2_phase2l_tracer_gate as phase2l,
 )
 
 PLANTS = ("none", "record-owner", "source-association", "stage-live")
@@ -58,6 +59,32 @@ def _comparison(reference: np.ndarray, candidate: np.ndarray,
         "unequal": int(np.count_nonzero(unequal)),
         "maximum_absolute": float(np.max(np.abs(values))),
         "rms": float(np.sqrt(np.mean(values * values))),
+    }
+
+
+def _read_orca2_stage3(path: Path) -> dict[str, np.ndarray]:
+    """Read the fixed ORCA2 RKTR3 schema already admitted by phase 1."""
+    with path.open("rb") as handle:
+        magic = handle.read(16).decode("ascii").rstrip()
+        header = struct.unpack("=11i", handle.read(44))
+        values = np.fromfile(handle, np.float64)
+    expected = (1, 1, 3, 1, 2, 3, 3, phase2l.NX, phase2l.NY,
+                phase2l.NZ, 64)
+    require(magic == "NEMO_L2_RKTR3_1", f"bad RKTR3 magic {magic!r}")
+    require(header == expected, f"bad RKTR3 header {header}")
+    n2 = phase2l.NX * phase2l.NY
+    n3 = n2 * phase2l.NZ
+    require(values.size == 16 * n3 + 3 * n2, "bad RKTR3 payload")
+    require(np.isfinite(values).all(), "non-finite RKTR3 payload")
+    names = (
+        "zero_T", "zero_S", "after_advection_T", "after_advection_S",
+        "after_sbc_T", "after_sbc_S", "after_qsr_T", "after_qsr_S",
+        "after_ldf_T", "after_ldf_S", "Kbb_T", "Kbb_S", "Kmm_T",
+        "Kmm_S", "Kaa_T", "Kaa_S",
+    )
+    return {
+        name: phase2l._xyz(values[index * n3:(index + 1) * n3])
+        for index, name in enumerate(names)
     }
 
 
@@ -170,9 +197,9 @@ def measure(deck_root: Path, frames_root: Path,
         results[tracer] = tuple(np.asarray(value) for value in jax.jit(replay)(
             jnp.asarray(frames[2][tracer]), jnp.asarray(frames[0][tracer])))
 
-    record = phase3.read_tracer_stage3(
+    record = _read_orca2_stage3(
         frames_root / "oracle_rktracer_stage3_kt00000001.bin")
-    owned_kmm = np.asarray(record["Kmm_T"])[2:-2, 2:-2, :-1]
+    owned_kmm = np.asarray(record["Kmm_T"])[..., :-1]
     halves = {
         "south": np.asarray(frames[2]["T"])[:owned_kmm.shape[0]],
         "north": np.asarray(frames[2]["T"])[-owned_kmm.shape[0]:],
@@ -190,7 +217,7 @@ def measure(deck_root: Path, frames_root: Path,
     tracer_rows = {}
     for tracer in ("T", "S"):
         generic, literal = results[tracer]
-        oracle = np.asarray(record[f"after_advection_{tracer}"])[2:-2, 2:-2, :-1]
+        oracle = np.asarray(record[f"after_advection_{tracer}"])[..., :-1]
         tracer_rows[tracer] = {
             "literal_vs_generic": _comparison(generic, literal, active),
             "generic_vs_oracle": _comparison(oracle, generic[sl], support),
@@ -242,7 +269,7 @@ def main() -> int:
             raw = measure(args.deck_root, args.frames_root, args.expect_commit)
         result = classify(raw, plant=args.plant)
         require(args.plant == "none", f"{args.plant} plant stayed green")
-    except (GateError, rung0.GateError, omt4.GateError, phase3.GateError,
+    except (GateError, rung0.GateError, omt4.GateError, phase2l.GateError,
             OSError, KeyError, TypeError, ValueError) as error:
         marker = "PLANT-FIRED" if args.plant != "none" else "REFUSE"
         print(f"STATUS {marker}: {error}")
