@@ -9,13 +9,40 @@ enhanced-diffusion convection).
 
 Quick start::
 
-    JAX_ENABLE_X64=1 python scripts/run_dino.py --days 10
-    JAX_ENABLE_X64=1 python scripts/run_dino.py --grid mpas --days 10
+    JAX_ENABLE_X64=1 python scripts/run/run_dino.py --days 10
+    JAX_ENABLE_X64=1 python scripts/run/run_dino.py --grid mpas --days 10
     JAX_ENABLE_X64=1 python scripts/plot/plot_dino.py results/dino   # visualize
+
+Multi-GPU SPMD (lat-lon only; the state is sharded into latitude bands
+across N devices — ``make_sharded_ocean_step``)::
+
+    # Single controller, 4 local GPUs:
+    JAX_ENABLE_X64=1 python scripts/run/run_dino.py --n-devices 4
+
+    # One process per GPU (SLURM/srun, NCCL across processes):
+    srun -n 8 python scripts/run/run_dino.py --n-devices 8 \
+        --multicontroller --allow-multiyear
+
+``n_lat % n_devices`` must be 0: the default R1 grid (198 rows)
+divides only by 1 and 2; the R2 grid (``--n-lon 100`` -> 396 rows)
+divides by 4. No exact DINO Mercator row count divides by 8 — wider
+device counts belong on the synthetic-grid scaling benches
+(``scripts/bench/bench_ocean_latlon_spmd_scaling.py``).
+
+Restart from a previous snapshot (lat-lon only; the NPZ written by this
+script's snapshot cadence)::
+
+    python scripts/run/run_dino.py --restart-from \
+        results/dino/snapshots/snapshot_00010.npz
+
+Ensemble initial-condition perturbation (``--seed``; 0 = the canonical
+rest-state IC, identical to the unseeded run)::
+
+    python scripts/run/run_dino.py --seed 7
 
 For the full list of options::
 
-    python scripts/run_dino.py --help
+    python scripts/run/run_dino.py --help
 
 This script is **portable** by design: no project-internal CI hooks,
 no test-matrix integration. The output directory is self-contained
@@ -379,6 +406,51 @@ def _parse_args():
         "--physics-off", action="store_true",
         help="Disable KPP / GM-Redi / convection — dycore only.",
     )
+    p.add_argument(
+        "--n-devices", type=int, default=1,
+        help="Number of devices for lat-band SPMD sharding (lat-lon only; "
+             "1 = the plain single-device step). Requires "
+             "n_lat %% n_devices == 0 — the default R1 grid (198 rows) "
+             "divides only by 1 and 2; --n-lon 100 (396 rows) divides by "
+             "4. Global build runs on the host CPU when n > 1 (set "
+             "JAX_PLATFORMS=cuda,cpu to enable that).",
+    )
+    p.add_argument(
+        "--multicontroller", action="store_true",
+        help="Multi-process mode: one process per device via "
+             "jax.distributed (route-B). MUST be launched with one "
+             "process per device (srun -n N / mpiexec -n N); "
+             "init_multicontroller_distributed runs before any other "
+             "JAX use. Requires --n-devices == the GLOBAL device count.",
+    )
+    p.add_argument(
+        "--coordinator", type=str, default=None,
+        help="Coordinator host:port for --multicontroller bootstrap "
+             "(mpiexec path; SLURM auto-detects when omitted).",
+    )
+    p.add_argument(
+        "--restart-from", type=Path, default=None,
+        help="Load the initial state from a snapshot NPZ written by this "
+             "script (lat-lon only). Restarts eta/T/S/u/v; the vertical "
+             "grid and geometry are rebuilt from the config, so the "
+             "restart MUST come from the same --n-lon/grid settings. "
+             "Restarts the CLOCK at 0 (the snapshot's time metadata is "
+             "recorded in the run metadata, not replayed).",
+    )
+    p.add_argument(
+        "--seed", type=int, default=0,
+        help="Initial-condition perturbation seed for ensemble runs "
+             "(0 = no perturbation, the canonical rest-state IC; "
+             "identical to the unseeded run). Adds small masked Gaussian "
+             "noise to u/v/eta (lat-lon) or u/eta (MPAS).",
+    )
+    p.add_argument(
+        "--timing-jsonl", type=Path, default=None,
+        help="Append a JSON line of per-step timing (compile/warmup/"
+             "steady-step wall times, SYPD, Mcells/s) to this file "
+             "(default: <output-dir>/timing.jsonl; multicontroller: "
+             "rank 0 writes, other ranks skip).",
+    )
     # Two-pass: if --config is given, load the YAML as argparse DEFAULTS, then
     # re-parse so any explicit CLI flag overrides the file. Unknown YAML keys
     # are rejected (typo guard) — only argparse dests are accepted.
@@ -513,6 +585,94 @@ def _save_run_metadata(args, cfg: DINOConfig, grid, z, output_dir: Path,
 
 
 # ---------------------------------------------------------------------
+# Restart / IC perturbation
+# ---------------------------------------------------------------------
+
+def _load_restart(snapshot_path: Path):
+    """Load a snapshot NPZ written by ``_save_snapshot`` as a dict."""
+    print(f"[restart] Loading {snapshot_path}")
+    data = np.load(snapshot_path)
+    return {k: data[k] for k in data.files}
+
+
+def _apply_restart_arrays(state, restart_arrays, grid_kind: str):
+    """Replace the prognostic fields with the restart snapshot's arrays."""
+    import jax.numpy as jnp
+
+    state = state._replace(
+        eta=state.eta.replace(data=jnp.asarray(restart_arrays["eta"])),
+        T=state.T.replace(data=jnp.asarray(restart_arrays["T"])),
+        S=state.S.replace(data=jnp.asarray(restart_arrays["S"])),
+        u=state.u.replace(data=jnp.asarray(restart_arrays["u"])),
+    )
+    if grid_kind == "latlon":
+        if "v" not in restart_arrays:
+            raise SystemExit(
+                f"restart NPZ {restart_arrays.get('time_days', '?')} lacks "
+                "'v' — not a lat-lon DINO snapshot.")
+        state = state._replace(
+            v=state.v.replace(data=jnp.asarray(restart_arrays["v"])))
+    return state
+
+
+def _perturb_state(state, seed: int, grid_kind: str):
+    """Add small masked Gaussian noise to the IC (ensemble runs).
+
+    ``seed=0`` is the canonical un-perturbed IC (returns the state
+    unchanged). The velocity noise is projected through the face masks so
+    a seeded IC stays a VALID model state (the same convention as the
+    SPMD scaling bench's IC recipe).
+    """
+    if seed == 0:
+        return state
+
+    import jax.numpy as jnp
+
+    rng = np.random.default_rng(seed)
+    u = np.asarray(state.u.data)
+    u_mask = np.asarray(state.u_mask.data)[..., None] if hasattr(state, "u_mask") else None
+    u_noise = 0.02 * rng.standard_normal(u.shape)
+    if u_mask is not None:
+        u_noise = u_noise * u_mask
+    state = state._replace(
+        u=state.u.replace(data=jnp.asarray(u + u_noise)))
+    if grid_kind == "latlon":
+        v = np.asarray(state.v.data)
+        v_mask = np.asarray(state.v_mask.data)[..., None] if hasattr(state, "v_mask") else None
+        v_noise = 0.02 * rng.standard_normal(v.shape)
+        if v_mask is not None:
+            v_noise = v_noise * v_mask
+        state = state._replace(
+            v=state.v.replace(data=jnp.asarray(v + v_noise)))
+    eta = np.asarray(state.eta.data)
+    eta_noise = 0.005 * rng.standard_normal(eta.shape)
+    state = state._replace(
+        eta=state.eta.replace(data=jnp.asarray(eta + eta_noise)))
+    print(f"[seed] IC perturbed with seed={seed} "
+          "(u,v: 0.02 m/s; eta: 0.005 m std)")
+    return state
+
+
+# ---------------------------------------------------------------------
+# Per-step timing
+# ---------------------------------------------------------------------
+
+def _write_timing_jsonl(args, record: dict):
+    """Append the timing record (rank 0 only under multicontroller)."""
+    import jax
+
+    if args.multicontroller and jax.process_index() != 0:
+        return
+    out_path = args.timing_jsonl or (args.output_dir / "timing.jsonl")
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_path, "a") as f:
+        f.write(json.dumps(record) + "\n")
+    if not args.multicontroller or jax.process_index() == 0:
+        print(f"  Timing record: {out_path}")
+
+
+# ---------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------
 
@@ -544,6 +704,12 @@ def _force_fp64_for_nemo_fidelity(args) -> None:
 def main():
     args = _parse_args()
     _force_fp64_for_nemo_fidelity(args)
+
+    # Multi-controller init MUST run before any other JAX use (backend
+    # init) — shared helper with the ocean/atm SPMD benches.
+    if args.multicontroller:
+        from legoesm.parallel.early_init import init_multicontroller_distributed
+        init_multicontroller_distributed(args.coordinator)
 
     # JAX x64 sanity check: DINO uses Wright EOS + barotropic split;
     # both need 64-bit precision to avoid silent eta drift and EOS noise.
@@ -707,48 +873,110 @@ def main():
             f"an MPAS K-profile builder. Use --grid latlon, or override with "
             f"--vmix kpp on MPAS.")
 
-    # Build grid, state, model — branch on grid type
-    if grid_kind == "latlon":
-        grid = dino_lat_lon_grid(cfg, n_lon=args.n_lon)
-        # zstar OR masked_zco (NEMO ln_zco full-cell masking) per
-        # cfg.vertical_coordinate — the coordinate drives state + model.
-        z = dino_lat_lon_vertical(grid, cfg)
-        state = dino_lat_lon_state(grid, z, cfg)
-        model_cfg, _ = dino_lat_lon_model_config(
-            grid, cfg, physics=not args.physics_off,
-        )
-        model = LatLonCGridOceanModel(grid, z, model_cfg)
-        forcing = (None if args.no_forcing
-                   else dino_lat_lon_surface_forcing_arrays(grid, cfg))
-        apply_forcing = apply_dino_lat_lon_surface_forcing
-        from legoesm.ocean.experiments.dino import dino_step_surface_forcing
-        sf_step = (
-            dino_step_surface_forcing(forcing)
-            if forcing is not None
-            and getattr(cfg, "wind_through_step", False)
-            else None)
-        grid_desc = f"{grid.n_lat}x{grid.n_lon} lat-lon Mercator"
-    else:  # mpas
-        z = create_dino_z_star(cfg)
-        grid = create_regional_voronoi_mesh(
-            lon_range=(cfg.lon_west_deg, cfg.lon_east_deg),
-            lat_range=(-cfg.lat_max_deg, cfg.lat_max_deg),
-            resolution_km=args.mpas_resolution_km,
-            periodic_x=True,
-        )
-        state = dino_mpas_state(grid, z, cfg)
-        model_cfg, _ = dino_mpas_model_config(
-            grid, cfg, physics=not args.physics_off,
-        )
-        model = MPASOceanModel(grid, z, model_cfg)
-        forcing = (None if args.no_forcing
-                   else dino_mpas_surface_forcing_arrays(grid, cfg))
-        apply_forcing = apply_dino_mpas_surface_forcing
-        if getattr(cfg, "wind_through_step", False):
+    # --- SPMD / restart / seed guards (dispatch-hardening, before build) ---
+    nd = args.n_devices
+    if nd > 1 and grid_kind != "latlon":
+        raise SystemExit(
+            "--n-devices (lat-band SPMD) is lat-lon only; rerun with "
+            "--grid latlon or --n-devices 1.")
+    if args.multicontroller and nd < 2:
+        raise SystemExit(
+            "--multicontroller needs --n-devices >= 2 (it federates one "
+            "process per device; single-device runs need no federation).")
+    if args.restart_from is not None and grid_kind != "latlon":
+        raise SystemExit(
+            "--restart-from is lat-lon only (the snapshot NPZ carries "
+            "lat-lon C-grid fields).")
+    avail = len(jax.devices())
+    if avail < nd:
+        raise SystemExit(
+            f"need {nd} devices, have {avail}. For a CPU smoke test set "
+            "XLA_FLAGS=--xla_force_host_platform_device_count=<N>.")
+    if args.multicontroller and nd != avail:
+        raise SystemExit(
+            f"--multicontroller: --n-devices ({nd}) must equal the GLOBAL "
+            f"device count ({avail} across {jax.process_count()} processes).")
+
+    # Build grid, state, model — branch on grid type. For nd > 1 the GLOBAL
+    # build runs on the host CPU backend (rest-state init at global shape
+    # would materialise the whole domain per device; only the per-band
+    # shards reach the accelerator via shard_state_latlon — the #1370
+    # convention shared with the ocean SPMD bench / run_omip lane).
+    import contextlib
+
+    _build_ctx = contextlib.nullcontext()
+    if nd > 1:
+        try:
+            _build_ctx = jax.default_device(
+                jax.local_devices(backend="cpu")[0])
+        except RuntimeError:
+            print("[SPMD] WARNING: no cpu backend — global init will "
+                  "materialise on the accelerator (set "
+                  "JAX_PLATFORMS=cuda,cpu to enable the host-side build)",
+                  flush=True)
+
+    with _build_ctx:
+        if grid_kind == "latlon":
+            grid = dino_lat_lon_grid(cfg, n_lon=args.n_lon)
+            # zstar OR masked_zco (NEMO ln_zco full-cell masking) per
+            # cfg.vertical_coordinate — the coordinate drives state + model.
+            z = dino_lat_lon_vertical(grid, cfg)
+            state = dino_lat_lon_state(grid, z, cfg)
+            model_cfg, _ = dino_lat_lon_model_config(
+                grid, cfg, physics=not args.physics_off,
+            )
+            model = LatLonCGridOceanModel(grid, z, model_cfg)
+            forcing = (None if args.no_forcing
+                       else dino_lat_lon_surface_forcing_arrays(grid, cfg))
+            apply_forcing = apply_dino_lat_lon_surface_forcing
+            from legoesm.ocean.experiments.dino import dino_step_surface_forcing
+            sf_step = (
+                dino_step_surface_forcing(forcing)
+                if forcing is not None
+                and getattr(cfg, "wind_through_step", False)
+                else None)
+            grid_desc = f"{grid.n_lat}x{grid.n_lon} lat-lon Mercator"
+        else:  # mpas
+            z = create_dino_z_star(cfg)
+            grid = create_regional_voronoi_mesh(
+                lon_range=(cfg.lon_west_deg, cfg.lon_east_deg),
+                lat_range=(-cfg.lat_max_deg, cfg.lat_max_deg),
+                resolution_km=args.mpas_resolution_km,
+                periodic_x=True,
+            )
+            state = dino_mpas_state(grid, z, cfg)
+            model_cfg, _ = dino_mpas_model_config(
+                grid, cfg, physics=not args.physics_off,
+            )
+            model = MPASOceanModel(grid, z, model_cfg)
+            forcing = (None if args.no_forcing
+                       else dino_mpas_surface_forcing_arrays(grid, cfg))
+            apply_forcing = apply_dino_mpas_surface_forcing
+            if getattr(cfg, "wind_through_step", False):
+                raise SystemExit(
+                    "wind_through_step is wired on the lat-lon DINO path only")
+            sf_step = None
+            grid_desc = f"{grid.nCells} cells MPAS regional Voronoi"
+
+        if nd > 1 and grid.n_lat % nd != 0:
             raise SystemExit(
-                "wind_through_step is wired on the lat-lon DINO path only")
-        sf_step = None
-        grid_desc = f"{grid.nCells} cells MPAS regional Voronoi"
+                f"--n-devices {nd}: n_lat ({grid.n_lat}) not divisible by "
+                f"the device count; pick --n-devices dividing n_lat (the "
+                f"default R1 grid's 198 rows divide only by 1 and 2; "
+                f"--n-lon 100 -> 396 rows divides by 4). No exact DINO "
+                f"Mercator row count divides by 8 — wider device counts "
+                f"belong on the synthetic-grid SPMD benches.")
+
+        # --- Restart from a previous snapshot (lat-lon only) ---
+        if args.restart_from is not None:
+            restart = _load_restart(args.restart_from)
+            state = _apply_restart_arrays(state, restart, grid_kind)
+            print(f"[restart] Applied restart at "
+                  f"t={float(restart['time_days']):.2f} days "
+                  f"(clock restarts at 0)")
+
+        # --- IC perturbation (ensemble runs; seed=0 = canonical IC) ---
+        state = _perturb_state(state, args.seed, grid_kind)
 
     # Output directory
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -786,9 +1014,63 @@ def main():
             or model_cfg.flat_get("barotropic_slow_forcing_ab2")):
         state = model.seed_scan_carry(state, dt)
 
+    # --- Lat-band SPMD sharding (lat-lon only, nd > 1) ---
+    # The rigid-lid island streamfunction solver and the SPMD band step
+    # are mutually exclusive lanes (rigid_lid has no sharded step); refuse
+    # the combination loudly instead of sharding a solver that cannot run.
+    mesh = None
+    if nd > 1:
+        if cfg.barotropic_solver == "rigid_lid":
+            raise SystemExit(
+                "--n-devices with --barotropic-solver rigid_lid is not "
+                "supported (the island-streamfunction solver has no "
+                "lat-band SPMD step); use implicit_cn (default) or "
+                "explicit_substep.")
+        if sf_step is not None:
+            raise SystemExit(
+                "--n-devices with wind_through_step is not supported "
+                "(the in-step OceanSurfaceForcing lane has no sharded "
+                "path here); run with the pre-step applicator "
+                "(wind_through_step=False).")
+        from legoesm.ocean.dynamics.sharded_ocean_step import (
+            make_sharded_ocean_step,
+            shard_forcing_latlon,
+            shard_state_latlon,
+        )
+
+        # Prime the build-once caches from the CONCRETE state so the
+        # wrapper can build the per-band vertex masks host-side.
+        model.prime_step_caches(state)
+        mesh = jax.sharding.Mesh(
+            np.array(jax.devices()[:nd]), axis_names=("lat",))
+        step_fn = make_sharded_ocean_step(model, mesh)
+        state = shard_state_latlon(state, mesh)
+        if forcing is not None:
+            forcing = shard_forcing_latlon(forcing, mesh)
+        print(f"[SPMD] Sharded across {nd} devices "
+              f"(lat bands of {grid.n_lat // nd} rows)")
+    else:
+        step_fn = model.step
+
+    # Under multicontroller, ONLY rank 0 writes snapshots / metadata /
+    # stdout (every rank would otherwise write identical copies to the
+    # shared path, or corrupt each other).
+    _is_writer = (not args.multicontroller) or (jax.process_index() == 0)
+
     t_wall_start = time.time()
     snapshot_idx = 0
-    _save_snapshot(state, 0.0, snapshot_dir, snapshot_idx, grid_kind)
+    # Under SPMD the initial state is the sharded v_lower carrier — save
+    # the GLOBAL gathered state (the snapshot/restart contract is the
+    # single-device layout).
+    if _is_writer:
+        if mesh is not None:
+            from legoesm.ocean.dynamics.sharded_ocean_step import (
+                gather_state_latlon,
+            )
+            _save_snapshot(gather_state_latlon(state, mesh, to_host=True),
+                           0.0, snapshot_dir, snapshot_idx, grid_kind)
+        else:
+            _save_snapshot(state, 0.0, snapshot_dir, snapshot_idx, grid_kind)
 
     # #1492: NEMO-faithful surface-tracer-tendency placement (lat-lon only —
     # the MPAS applicator has no return_rate= mode / model.step has no
@@ -806,7 +1088,13 @@ def main():
             "--grid latlon (apply_dino_mpas_surface_forcing has no "
             "return_rate= mode).")
 
+    # Per-step timing: compile (step 1), warmup, steady state (the
+    # hackathon-measured R1 plateau is ~4-5 steps on H100; 5 warmup steps
+    # are discarded before the steady mean).
+    step_times_ms = []
+
     for k in range(n_steps_total):
+        t_step_start = time.perf_counter()
         _ext_rate = None
         if forcing is not None:
             # NEMO time convention: step k (0-based) ends at t=(k+1)*dt —
@@ -819,26 +1107,106 @@ def main():
                 state = apply_forcing(state, forcing, z, cfg, dt,
                                       t_seconds=(k + 1) * dt)
 
-        state = model.step(
-            state, dt=dt,
-            surface_forcing=(sf_step if getattr(cfg, "wind_through_step",
-                                                False) else None),
-            external_tracer_rate=_ext_rate)
+        if nd > 1:
+            # The sharded step rides the pre-step applicator (EAGER, host
+            # side); the in-step surface_forcing lane is refused above.
+            state = step_fn(state, dt=dt)
+        else:
+            state = step_fn(
+                state, dt=dt,
+                surface_forcing=(sf_step if getattr(
+                    cfg, "wind_through_step", False) else None),
+                external_tracer_rate=_ext_rate)
+
+        # Block until ready (per-step wall time is only meaningful when
+        # the async dispatch is synchronized).
+        jax.block_until_ready([leaf for leaf in jax.tree.leaves(state)
+                               if leaf is not None])
+
+        ms = (time.perf_counter() - t_step_start) * 1000.0
+        step_times_ms.append(ms)
+        if k == 0:
+            print(f"[step 1] compile+step = {ms:.1f} ms (JIT compile)")
+        elif (k + 1) % 10 == 0 or k == n_steps_total - 1:
+            print(f"[step {k+1}] {ms:.1f} ms")
 
         is_last = (k == n_steps_total - 1)
-        if (k + 1) % snapshot_every_steps == 0 or is_last:
+        if _is_writer and ((k + 1) % snapshot_every_steps == 0 or is_last):
             snapshot_idx += 1
             t_seconds = (k + 1) * dt
-            _save_snapshot(state, t_seconds, snapshot_dir, snapshot_idx, grid_kind)
-            d = _diagnose(state, grid, grid_kind)
+            # Under SPMD the live state is the sharded v_lower carrier —
+            # gather the GLOBAL state (re-appends the pole-wall v-row) for
+            # the snapshot + diagnostics, then re-shard the live carrier.
+            if mesh is not None:
+                from legoesm.ocean.dynamics.sharded_ocean_step import (
+                    gather_state_latlon,
+                )
+                state_global = gather_state_latlon(state, mesh, to_host=True)
+                _save_snapshot(state_global, t_seconds, snapshot_dir,
+                               snapshot_idx, grid_kind)
+                d = _diagnose(state_global, grid, grid_kind)
+                del state_global
+            else:
+                _save_snapshot(state, t_seconds, snapshot_dir,
+                               snapshot_idx, grid_kind)
+                d = _diagnose(state, grid, grid_kind)
             print(f"{k+1:6d} {t_seconds/86400.0:7.2f} "
                   f"{d['u_max']:10.4e} {d['v_max']:10.4e} {d['eta_max']:10.4e} "
                   f"{d['T_max']:7.2f} {d['T_min']:7.2f} {d['ke_total']:10.4e}")
 
     wall = time.time() - t_wall_start
+    n_warmup = min(5, len(step_times_ms))
+    steady_times = step_times_ms[n_warmup:]
+    steady_mean = float(np.mean(steady_times)) if steady_times else 0.0
+    steady_std = float(np.std(steady_times)) if steady_times else 0.0
+    compile_ms = step_times_ms[0] if step_times_ms else 0.0
+    sypd = (dt / (steady_mean / 1000.0)) / 365.25 if steady_mean > 0 else 0.0
+    if grid_kind == "latlon":
+        n_cells = grid.n_lat * grid.n_lon * z.n_levels
+    else:
+        n_cells = grid.nCells * z.n_levels
+    mcells_s = (n_cells / (steady_mean / 1000.0) / 1e6) if steady_mean > 0 else 0.0
+
     print()
-    print(f"Done. Wall time: {wall:.1f}s ({wall/n_steps_total*1000:.1f} ms/step). "
-          f"Snapshots: {snapshot_idx + 1}")
+    print("=== TIMING SUMMARY ===")
+    print(f"  Steps:        {n_steps_total}")
+    print(f"  Compile (s1): {compile_ms:.1f} ms")
+    print(f"  Steady mean:  {steady_mean:.1f} ms (steps {n_warmup+1}–{n_steps_total})")
+    print(f"  Steady std:   {steady_std:.1f} ms")
+    print(f"  SYPD:         {sypd:.1f}")
+    print(f"  Mcells/s:     {mcells_s:.1f}")
+    print(f"Done. Wall time: {wall:.1f}s. Snapshots: {snapshot_idx + 1}")
+
+    _write_timing_jsonl(args, {
+        "script": "run_dino",
+        "resolution_label": f"n_lon={args.n_lon}",
+        "n_lat": int(grid.n_lat) if grid_kind == "latlon" else None,
+        "n_lon": int(grid.n_lon) if grid_kind == "latlon" else None,
+        "n_cells": int(n_cells),
+        "n_levels": int(z.n_levels),
+        "dt": dt,
+        "days": args.days,
+        "n_steps": n_steps_total,
+        "n_devices": nd,
+        "multicontroller": args.multicontroller,
+        "n_processes": int(jax.process_count()),
+        "precision": "float64" if jax.config.jax_enable_x64 else "float32",
+        "recipe": args.recipe,
+        "preset": args.preset,
+        "vmix": cfg.vmix_scheme,
+        "barotropic_solver": cfg.barotropic_solver,
+        "forcing": not args.no_forcing,
+        "physics": not args.physics_off,
+        "seed": args.seed,
+        "compile_ms": compile_ms,
+        "steady_mean_ms": steady_mean,
+        "steady_std_ms": steady_std,
+        "n_warmup": n_warmup,
+        "sypd": sypd,
+        "mcells_s": mcells_s,
+        "total_wall_s": wall,
+        "step_times_ms": step_times_ms,
+    })
 
 
 if __name__ == "__main__":
