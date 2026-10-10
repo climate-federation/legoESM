@@ -12,7 +12,10 @@ from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
     _nemo_literal_reference_face_depths,
     _nemo_ssh_avg_apply,
     nemo_literal_continuity_divergence,
+    nemo_literal_external_mode_active,
     nemo_literal_metric_transports,
+    nemo_raw_surface_vmask,
+    nemo_vector_form_update_active,
 )
 from legoesm.core.source_rounding import nemo_source_round
 from legoesm.grids.tripole import (
@@ -37,6 +40,43 @@ def _case():
                         [2.07e9, 2.07e9, 2.07e9]], dtype=jnp.float64),
     )
     return h_u, h_v, u, v, um, vm, grid
+
+
+def _identity_config(momentum_advection="vector_invariant"):
+    return SimpleNamespace(
+        momentum_time_integrator="rk3_ws",
+        momentum_advection=momentum_advection,
+        barotropic=SimpleNamespace(
+            barotropic_face_depth="nemo_ssh_avg",
+            barotropic_continuity_evaluation="nemo_literal",
+            barotropic_transport_accumulation_evaluation="nemo_literal",
+        ),
+    )
+
+
+def test_literal_external_mode_selects_vector_and_flux_rk3_branches():
+    vector = _identity_config()
+    flux = _identity_config("flux_form")
+    assert nemo_vector_form_update_active(vector)
+    assert not nemo_vector_form_update_active(flux)
+    assert nemo_literal_external_mode_active(vector)
+    assert nemo_literal_external_mode_active(flux)
+    assert not nemo_literal_external_mode_active(
+        SimpleNamespace(**{**vector.__dict__, "momentum_time_integrator": "rk3"}))
+
+
+def test_raw_surface_vmask_preserves_native_fold_row_and_compact_south_halo():
+    native = jnp.array(
+        [[[1.0, 0.0], [0.0, 0.0]], [[0.0, 1.0], [1.0, 1.0]]],
+        dtype=jnp.float64,
+    )
+    got = nemo_raw_surface_vmask(
+        SimpleNamespace(nemo_een_barotropic=SimpleNamespace(vmask=native)),
+        jnp.float64,
+    )
+    expected = np.concatenate(
+        [np.zeros((1, 2)), np.max(np.asarray(native), axis=-1)], axis=0)
+    np.testing.assert_array_equal(np.asarray(got), expected)
 
 
 def test_matches_nemo_literal_source_order_bitwise():
