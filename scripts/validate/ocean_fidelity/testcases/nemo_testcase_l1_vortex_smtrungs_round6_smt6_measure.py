@@ -450,9 +450,36 @@ def replay_section(cards) -> dict:
     rep = np.zeros(e3t0.shape)
     denom = e3t0 * (1.0 + r3t[..., None] * tm)
     rep[is_bottom] = qgh_trd0 / denom[is_bottom]
+    # legoESM's own ssh at the stage-3 level differs from NEMO's by the
+    # inherited ssh residual, which moves (1+r3t) at 1e-14 relative; start
+    # stage 3 from NEMO's stage-2 bundle so r3t is NEMO's.
+    import jax.numpy as jnp
+    from nemo_testcase_l1_vortex_kt2_walk import (
+        _u_full, _v_full, read_bt_frame,
+    )
+    interior = np.asarray(card.recipe.initial_state.T.data).shape[:2]
+    e1 = read_entry(root / "oracle_step_entry_kt00000001.bin", CASES["smt6"],
+                    expect_interior=interior)
+    e2 = read_entry(root / "oracle_step_entry_kt00000002.bin", CASES["smt6"],
+                    expect_interior=interior)
+    frame = read_bt_frame(root / "oracle_bt_frames_kt00000001.bin",
+                          expect_step=1)
+    external = (
+        jnp.asarray(e2["ssh"]),
+        jnp.asarray(_u_full(frame["uu_b"][..., None])[..., 0]),
+        jnp.asarray(_v_full(frame["vv_b"][..., None])[..., 0]),
+        jnp.asarray(_u_full(frame["un_adv"][..., None])[..., 0]),
+        jnp.asarray(_v_full(frame["vn_adv"][..., None])[..., 0]),
+    )
+    entry3 = (3, jnp.asarray(_u_full(s2["u"][..., :nlev])),
+              jnp.asarray(_v_full(s2["v"][..., :nlev])),
+              jnp.asarray(s2["T"][..., :nlev]),
+              jnp.asarray(s2["S"][..., :nlev]), jnp.asarray(s2["ssh"]))
+    seed = _seed_from_record(card.recipe.initial_state, e1, nlev)
     trace = _model(card, hooks=_NEMOWSRK3TestHooks(
-        expose_stage3_tracer_damping=True)).step(
-            card.recipe.initial_state, dt=card.dt_s, t_seconds=0.0)
+        expose_stage3_tracer_damping=True,
+        stage_barotropic_output_override=external,
+        stage_entry_override=entry3)).step(seed, dt=card.dt_s, t_seconds=0.0)
     geo = np.asarray(trace[2][0])
     out["n_bottom_cells"] = int(is_bottom.sum())
     out["n_nonzero_replay"] = int(np.count_nonzero(rep))
