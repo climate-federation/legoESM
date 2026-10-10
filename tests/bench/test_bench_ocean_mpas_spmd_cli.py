@@ -23,8 +23,8 @@ PCG_FIELDS = ("barotropic_implicit_pcg_fixed_iters",
               "barotropic_implicit_pcg_poly_sweeps",
               "barotropic_implicit_pcg_variant")
 
-# Owner decisions 2026-10-04/05, written out independently of the table.
-_PRODUCTION = {"cpu": (30, "jacobi", 4, "single_reduce_deep"),
+# Owner decisions 2026-10-04/05 and 2026-10-10 (CPU), written out independently of the table.
+_PRODUCTION = {"cpu": (40, "jacobi", 4, "chebyshev_deep"),
                "gpu": (20, "gpoly", 4, "standard")}
 
 

@@ -873,6 +873,27 @@ def _spmd_sum(x: jax.Array, axis_name) -> jax.Array:
     return x
 
 
+def spmd_max(x: jax.Array, axis_name) -> jax.Array:
+    """Maximum of ``x`` over the shard_map axis ``axis_name``: the same
+    recursive-doubling butterfly as :func:`_spmd_sum` (same backend and
+    ``LEGOESM_SPMD_TREE_PSUM`` choice) with ``maximum`` in place of ``+``,
+    else ``jax.lax.pmax``. Not differentiable; callers stop_gradient it."""
+    import jax.numpy as jnp
+    tree = _resolve_tree_psum(os.environ.get("LEGOESM_SPMD_TREE_PSUM", ""),
+                              jax.default_backend())
+    if not tree or isinstance(axis_name, (tuple, list)):
+        return jax.lax.pmax(x, axis_name)
+    n = int(jax.lax.axis_size(axis_name))
+    if n & (n - 1):
+        return jax.lax.pmax(x, axis_name)
+    k = 1
+    while k < n:
+        x = jnp.maximum(
+            x, jax.lax.ppermute(x, axis_name, [(i, i ^ k) for i in range(n)]))
+        k *= 2
+    return x
+
+
 def batch_psum_spmd(
     values: list[jax.Array],
     axis_name: str | tuple[str, ...],

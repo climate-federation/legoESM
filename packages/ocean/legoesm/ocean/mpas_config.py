@@ -376,7 +376,7 @@ class MPASOceanConfig(NamedTuple):
     barotropic_implicit_pcg_fixed_iters: int | None = None
     barotropic_implicit_pcg_residual_tol: float = 1.0e-10
     # Unset (None) = per-backend bundle (MPAS_BAROTROPIC_PCG_DEFAULTS):
-    # "standard" on GPU, "single_reduce_deep" on CPU.
+    # "standard" on GPU, "chebyshev_deep" on CPU.
     # "standard" (two allreduces per iteration) was the default 2026-10-02..
     # 2026-10-04 (owner decision): it is the recurrence gpoly x 15 was
     # measured with (GPU weak ladder -6 / -8.5 / -10.4 % at 8 / 32 / 128
@@ -402,6 +402,18 @@ class MPASOceanConfig(NamedTuple):
     # -> 75.8 with deep Jacobi x 30; 2 nodes 164.2 -> 152.8; Jacobi x 30
     # with per-iteration exchange 92.7 / 165.3.  The CPU default since
     # 2026-10-04 (owner decision, per-backend bundle); never measured on GPU.
+    # "chebyshev_deep" (the CPU default since 2026-10-10, owner decision):
+    # Jacobi-scaled Chebyshev iteration on the same
+    # deep-halo schedule, window [1/dmax, 2 - 1/dmax] from the operator's
+    # diagonal (one global max per solve) and no global sums in the loop.
+    # Needs precond "jacobi"; fixed_iters = Chebyshev updates (36 reached the
+    # 1e-10 residual on the s7/L40 test systems where Jacobi CG needed 32).
+    # CPU default runs 40: Derecho s7 L40 f64, 2 repeats, ms/step 8 nodes
+    # 60.0/59.7 (deep Jacobi CG x 30) -> 47.8/48.3; 1 node 268.8/267.6 ->
+    # 269.4/269.5.  True relative residual fresh/spun 2e-10/3.6e-11 -> 8e-12/
+    # 5.6e-12; 1-day trajectory vs a 200-iteration reference 7e-9 -> 1.6e-10.
+    # Measured on the flat 4000 m test ocean only; MPI-per-rank lane and GPU
+    # never measured.
     barotropic_implicit_pcg_variant: str | None = None  # per backend, see fixed_iters
     # Distributed-only preconditioner for the fixed-iteration PCG
     # (unset = per-backend bundle: "gpoly" on GPU, "jacobi" on CPU; the MPI Voronoi lane
@@ -661,14 +673,16 @@ class MPASSimpleOceanConfig(NamedTuple):
 #: Distributed barotropic PCG bundle per JAX backend (owner decisions
 #: 2026-10-04/05).  CPU, Derecho s7 L40 f64, 3 repeats, ms/step on main 87144e259
 #: with only these flags changed: 8 nodes gpoly x15 standard 67.7 vs deep-halo
-#: jacobi x30 61.0; 2 nodes 152.3 vs 144.4; 1 node 290.7 vs 280.5.  GPU:
+#: jacobi x30 61.0; 2 nodes 152.3 vs 144.4; 1 node 290.7 vs 280.5.  CPU since
+#: 2026-10-10 (owner decision): deep-halo Jacobi-Chebyshev x40, 8 nodes 48 vs
+#: 60 ms/step, 1 node 269 vs 268 (see barotropic_implicit_pcg_variant).  GPU:
 #: gpoly standard at 20 iterations (owner decision 2026-10-05; x15 failed the
 #: L10 / dt=600 s check, see barotropic_implicit_pcg_fixed_iters); deep-halo
 #: was never measured on GPU.
 MPAS_BAROTROPIC_PCG_DEFAULTS = {
-    "cpu": dict(barotropic_implicit_pcg_variant="single_reduce_deep",
+    "cpu": dict(barotropic_implicit_pcg_variant="chebyshev_deep",
                 barotropic_implicit_pcg_precond="jacobi",
-                barotropic_implicit_pcg_fixed_iters=30),
+                barotropic_implicit_pcg_fixed_iters=40),
     "gpu": dict(barotropic_implicit_pcg_variant="standard",
                 barotropic_implicit_pcg_precond="gpoly",
                 barotropic_implicit_pcg_fixed_iters=20),
