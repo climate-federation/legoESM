@@ -248,7 +248,7 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path, label: str,
         }
         trial_zvb = np.asarray(jax.device_get(jax.jit(
             lambda vn, r1, vb: _nemo_stage_corrected_velocity(
-                jnp.zeros_like(vmask[1:, :90, ..., 0]), vn, r1, vb,
+                jnp.zeros_like(vmask[1:, :90]), vn, r1, vb,
                 jnp.zeros_like(vmask[1:, :90]), return_correction=True)[1]
         )(jnp.asarray(values["vn_adv"]), jnp.asarray(values["r1_hv"]),
           jnp.asarray(values["vv_b"]))))
