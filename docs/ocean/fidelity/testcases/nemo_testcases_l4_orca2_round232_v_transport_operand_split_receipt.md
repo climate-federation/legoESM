@@ -125,7 +125,9 @@ Independent review unavailable in-sandbox. Log SHA-256:
 
 The round receipt citation gate passes 8/8 citations and the cumulative
 default gate passes 274/274, both with zero failures or unmapped citations.
-The rigid `domzgr.f90:184-188` two-line-shift plant fails. Receipt/default/
+The rigid
+`ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/domzgr.f90:184-188` two-line-shift
+plant fails. Receipt/default/
 plant log SHA-256 values are
 `3d98ef0b25b62b45c510b600eccdd376f4a2bd7c9a52f7327f73f46c5719965b`,
 `9884ac54d45927175c479a0ba89bca438c7e0e58fbe4593ba1e51459a0370eb4`,
