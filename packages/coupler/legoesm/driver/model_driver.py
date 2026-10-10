@@ -5246,6 +5246,26 @@ class ModelDriver:
         except Exception as exc:  # pragma: no cover - provenance best-effort
             logger.warning(f"Could not record final state digest: {exc}")
 
+    def _write_step_digest(self, abs_step: int, parts: dict) -> None:
+        """One line of ``digest_steps_r<rank>.log``: per part of the restart
+        set, a SHA-256 prefix of its array leaves (shape, dtype, bytes) and
+        the leaf count.  Rank-local (each rank hashes its own cells)."""
+        import hashlib
+
+        def _h(tree):
+            d, n = hashlib.sha256(), 0
+            for x in jax.tree_util.tree_leaves(jax.device_get(tree)):
+                a = np.asarray(x)
+                if a.dtype != object:
+                    d.update(f"{a.shape}{a.dtype}".encode())
+                    d.update(a.tobytes())
+                    n += 1
+            return f"{d.hexdigest()[:16]}/{n}"
+        path = self._output_dir / f"digest_steps_r{self._mpi_rank or 0}.log"
+        with open(path, "a") as f:
+            f.write(f"step={abs_step} " + " ".join(
+                f"{k}={_h(v)}" for k, v in parts.items()) + "\n")
+
 
     def _maybe_build_tiled_step(self, dt):
         """Build the sub-face-tiled dynamics step (P4 increment 1b) or None.
@@ -13018,6 +13038,9 @@ class ModelDriver:
         _phase_n = 0
         _loop_t0 = 0.0
         _PHASE_LOG_EVERY = 24
+        # LEGOESM_DIGEST_EVERY_STEPS=N: per-step restart-set digest log
+        # (bitwise gate of refactors); off by default
+        _DIGEST_EVERY = int(os.environ.get("LEGOESM_DIGEST_EVERY_STEPS", "0"))
         for step in range(n_steps_total):
             if _trace_win is not None and step in _trace_win[:2]:
                 jax.block_until_ready(self.state)
@@ -13995,6 +14018,24 @@ class ModelDriver:
                     self._feed_mpas_cmip_accumulators(
                         START_DAY + elapsed_day, flux_only=True)
 
+            if _DIGEST_EVERY > 0 and (step + 1) % _DIGEST_EVERY == 0:
+                _lv = locals()
+                _facc = self._mpas_sfc_accum
+                self._write_step_digest(start_step + step + 1, dict(
+                    state=self.state, phys=_phys_state,
+                    land=self._land_ml_state,
+                    landio=[_lv.get(_k) for _k in (
+                        "_land_T_skin", "_land_albedo_cells",
+                        "_land_qsfc_cells", "_land_shflx_cells",
+                        "_land_lhflx_cells", "_land_evap_cells",
+                        "_land_beta_cells", "_land_taumag_cells",
+                        "_land_taumag_valid", "_land_taumag_fresh",
+                        "_land_a2s_sum", "_land_a2s_n", "_land_cz_wsum",
+                        "_land_w_sum")],
+                    ice=getattr(self, "_ice_T_skin", None),
+                    sfc=getattr(self.model, "_sfc_diag", None),
+                    forcing=_lv.get("_forcing"), carry=self._carry_aux,
+                    cmor=(_facc.dump() if _facc is not None else None)))
             # Periodic checkpoint for the 100-yr restart chain — cadence is
             # independent of the diagnostic interval.  ``day`` is the
             # absolute simulated day (START_DAY + local elapsed); the
