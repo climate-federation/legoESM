@@ -114,15 +114,35 @@ log ends `STATUS PASS_R228_ALL_PLANTS_FIRED`.
 - `fold_audit.json`: `cc8f6096f623c10af1fc71e04fe9e77e5e264842fd27774b96d55d9c09c0ea38`
 - `fold_audit.log`: `8c715da3a7c3a0d5c649e896a365189af5a35c3f69dad692b3d8c7b7c9fc051b`
 - `plants.log`: `17e71214c95c3d4a2a942a513daf3beb6bc64e5868a586e53e19a56df096db9c`
-- eight scenario JSON artifacts and logs: hashes are printed in the evidence
-  directory's round receipt command log; each JSON stamps measurement commit
+- `SHA256SUMS`: `491f680bd3d2405dd82e16a0c7b55a3b5a533d253a670f50d00d78ea378ad0cc`
+  (28 JSON/log entries, including all eight scenario JSON artifacts and
+  logs). Each scenario JSON stamps measurement commit
   `d7a4942ccfc8613b1c828cef738ea414145d87f5` and a clean worktree.
 
 ## Validation and review
 
-The focused classifier tests pass 8/8. The final citation gate, rigid-shift
-plant, full `tests/ocean/fidelity -n 12` battery, and independent read-only
-review are recorded by the final round commit.
+The final validation results are:
+
+- focused audit, receipt-citation, and citation-gate tests pass 26/26
+  (`focused_tests.log`, SHA256
+  `477094a18eeb7bb2b62d98b5e1e15cf9ebc77e87abf296d2556efaa8a55e46ee`);
+- the round receipt citation gate passes with four citations, zero failures,
+  zero unmapped citations, and zero map-audit failures; the cumulative
+  default receipt passes with 274 citations and the same zero counts;
+- the rigid-shift plant exits nonzero and fails exactly the shifted stage
+  association citation (`citation_plant.json`, SHA256
+  `c53ee0a46216c7e064e335b2ab1447503783de5de9df757b2895f6745ba6e5e1`);
+- the single prescribed `tests/ocean/fidelity -n 12` battery completes with
+  3,106 passes, seven skips, and four registered pre-existing reds in
+  2,439.84 s: the certified-year harness stamp, round-35 allow-dirty scope
+  ratchet, report-emitter worktree-stamp ratchet, and SI3 scalar-math
+  provenance gate (`battery.log`, SHA256
+  `fd0a8ea4f01ac00647945af96088e4072a101ff16e639011c9ba8cfdbf3bf8dc`);
+- the required `codex exec --sandbox read-only` review could not initialize
+  its app-server client because the sandbox denied its PATH-alias write. The
+  verdict is **independent review unavailable in-sandbox**, not PASS
+  (`independent_review.log`, SHA256
+  `eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5`).
 
 No `packages/` file changed, so GYRE, DINO, tanks, rung 0, rung 7/rung 10,
 and OMT-4 cannot execute a changed model statement. Their certified
