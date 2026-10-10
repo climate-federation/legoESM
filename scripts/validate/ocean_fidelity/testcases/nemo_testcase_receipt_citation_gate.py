@@ -2469,18 +2469,18 @@ CITATION_MAP = {
         'CALL tra_adv_cen ( kt, nit000,', 44],
     # --- ORCA2 round 224: source-ordered northern-fold tracer walk ---
     'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/traadv_cen.f90:149-160': [
-        'CASE(  2  )                         !* 2nd order centered',
+        ('CASE(  2  )                         !* 2nd order centered', 1),
         '&                                        / (e3t_3d(ji,jj,jk) *(1._wp+r3t(ji,jj,Kmm)*tmask(ji,jj,jk)))',
         12],
     'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/traadv_fct.f90:191-199': [
         '! -- Anti-diffusive fluxes : high order minus low order',
-        'END DO   ;   END DO   ;   END DO', 9],
+        ('END DO   ;   END DO   ;   END DO', 4), 9],
     'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/traadv_fct.f90:495-539': [
         '! *** 1st step',
-        'END DO   ;   END DO   ;   END DO', 45],
+        ('END DO   ;   END DO   ;   END DO', 23), 45],
     'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/traadv_fct.f90:562-573': [
         '! *** 2nd step',
-        'END DO   ;   END DO   ;   END DO', 12],
+        ('END DO   ;   END DO   ;   END DO', 26), 12],
     'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:633-643': [
         ('IF( ln_tile )   CALL dom_tile_start', 1),
         ("& l4_canon_3d(ts(:,:,:,jp_sal,Krhs),'T')", 4), 11],
