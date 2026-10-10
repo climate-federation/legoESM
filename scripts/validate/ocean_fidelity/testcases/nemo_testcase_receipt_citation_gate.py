@@ -2623,13 +2623,13 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4_R229FOLDTRP/BLD/ppsrc/nemo/stprk3_stg.f90:558-558':
         'e3t_3d(:,:,:) *(1._wp+r3t(:,:,Kmm)*tmask(:,:,:))',
     'ORCA2_OMIP_L4_R229FOLDTRP/BLD/inc/domzgr_substitute.h90:126-126':
-        '# define  e3t(i,j,k,t)      (E3t_0(i,j,k) Tmsk(r3t,tmask,i,j,k,t))',
+        ('# define  e3t(i,j,k,t)      (E3t_0(i,j,k) Tmsk(r3t,tmask,i,j,k,t))', 1),
     'ORCA2_OMIP_L4_R229FOLDTRP/BLD/ppsrc/nemo/dom_oce.f90:170-170':
         'REAL(wp), PUBLIC, ALLOCATABLE, DIMENSION(:,:,:) ::     e3t_3d',
     'ORCA2_OMIP_L4_R229FOLDTRP/BLD/ppsrc/nemo/dom_oce.f90:180-180':
         'REAL(wp), PUBLIC, ALLOCATABLE, DIMENSION(:,:,:)   ::   r3t, r3u, r3v',
     'ORCA2_OMIP_L4_R229FOLDTRP/BLD/ppsrc/nemo/traadv_fct.f90:538-538':
-        'pt_up1(ji,jj,jk) = ( (e3t_3d(ji,jj,jk)',
+        ('pt_up1(ji,jj,jk) = ( (e3t_3d(ji,jj,jk)', 2),
     # --- ORCA2 round 189: bounded replacement restart list ---
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/in_out_manager.f90:51-51':
         'INTEGER, DIMENSION(10) :: nn_stocklist',
