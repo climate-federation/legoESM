@@ -42,8 +42,13 @@ DEFAULT_ROOT = Path(
 BOUNDARIES = ("hpg", "vor", "adv", "pre_ldf", "post_ldf")
 
 
+_DECK_ROOT_CASES = ("VORTEX_SMT5_VEC-zps", "VORTEX_SMT6_VEC-zps",
+                    "VORTEX_SMT6B_VEC-zps")
+
+
 def run(root: Path, *, plant: str | None = None,
-        allow_dirty: bool = False, source_order: bool = False) -> dict:
+        allow_dirty: bool = False, source_order: bool = False,
+        case: str = CASE) -> dict:
     import jax
     import jax.numpy as jnp
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
@@ -65,13 +70,15 @@ def run(root: Path, *, plant: str | None = None,
     require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
     require(jax.default_backend() == "cpu", "this walk must run on CPU")
 
-    card = build_nemo_testcase_card(CASE)
+    card = build_nemo_testcase_card(
+        case, deck_root=root if case in _DECK_ROOT_CASES else None)
+    damped = card.recipe.model_config.nemo_tracer_damping is not None
     nlev = int(card.recipe.z_coord.n_levels)
     masks = expected_masks(card)
     interior = np.asarray(card.recipe.initial_state.T.data).shape[:2]
-    entry1 = read_entry(root / "oracle_step_entry_kt00000001.bin", CASE,
+    entry1 = read_entry(root / "oracle_step_entry_kt00000001.bin", case,
                         expect_interior=interior)
-    entry2 = read_entry(root / "oracle_step_entry_kt00000002.bin", CASE,
+    entry2 = read_entry(root / "oracle_step_entry_kt00000002.bin", case,
                         expect_interior=interior)
     stages = {
         stage: read_stage(
@@ -121,7 +128,8 @@ def run(root: Path, *, plant: str | None = None,
         model = LatLonCGridOceanModel(
             card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
             _nemo_ws_test_hooks=hooks)
-        return lego_fields(model.step(seed, dt=card.dt_s))
+        return lego_fields(model.step(
+            seed, dt=card.dt_s, **({"t_seconds": 0.0} if damped else {})))
 
     references = {
         "hpg": (groups["hpg_u"], groups["hpg_v"]),
@@ -145,7 +153,7 @@ def run(root: Path, *, plant: str | None = None,
                 candidate[where] = np.nextafter(
                     candidate[where], np.float64(np.inf))
             row = score(
-                f"{CASE}.stage3.{boundary}.{face}",
+                f"{case}.stage3.{boundary}.{face}",
                 reference, candidate, active)
             delta = candidate - reference
             row.update(
@@ -181,7 +189,7 @@ def run(root: Path, *, plant: str | None = None,
             break
     report = {
         "format": "nemo-testcase-l1-vortex-smt-round238-ldf-walk-v1",
-        "case": CASE,
+        "case": case,
         "oracle_root": str(root),
         "legoesm_git_sha": sha,
         "precision_policy": "fp64/libm",
@@ -209,13 +217,16 @@ def main(argv=None) -> int:
     parser.add_argument("--output", type=Path)
     parser.add_argument("--plant", choices=BOUNDARIES)
     parser.add_argument("--allow-dirty", action="store_true")
+    parser.add_argument("--case", default=CASE,
+                        help="card name; the deck-root cases read their "
+                             "dumped inputs from --oracle-root")
     parser.add_argument("--source-order", action="store_true",
                         help="one-variable NEMO accumulator-order arm")
     args = parser.parse_args(argv)
     try:
         report = run(args.oracle_root, plant=args.plant,
                      allow_dirty=args.allow_dirty,
-                     source_order=args.source_order)
+                     source_order=args.source_order, case=args.case)
     except GateError as error:
         print(f"REFUSE: {error}", file=sys.stderr)
         return 2

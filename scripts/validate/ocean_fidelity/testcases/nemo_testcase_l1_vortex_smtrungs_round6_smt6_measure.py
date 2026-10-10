@@ -811,31 +811,62 @@ def stage3_arms_section(cards) -> dict:
     return out
 
 
+SECTIONS = ("inputs", "gate", "ladder", "footprint_smt6b", "geothermal",
+            "replay_trabbc", "stages_kt1", "bbl_replay", "stage3_from_nemo_stage2")
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--plant", action="store_true")
+    parser.add_argument(
+        "--sections", default=",".join(SECTIONS),
+        help=("comma-separated subset of " + ", ".join(SECTIONS) + ".  Every "
+              "section jit-compiles its own models; run the heavy ones in "
+              "separate processes (one process holding all of them exhausts "
+              "the JIT code memory)"))
     args = parser.parse_args(argv)
+    wanted = [x for x in args.sections.split(",") if x]
+    require(all(x in SECTIONS for x in wanted), f"unknown section in {wanted}")
+    require(not args.plant or "ladder" in wanted, "--plant needs the ladder")
     cards = _cards()
-    report = {"format": "nemo-testcase-l1-vortex-smtrungs-round6-v1"}
-    report["inputs"] = inputs_section(cards)
-    report["gate"] = gate_section(cards)
-    ladder, entries = ladder_section(cards, args.plant)
-    report["ladder"] = ladder
-    report["footprint_smt6b"] = footprint_section(cards, entries)
-    report["geothermal"] = geothermal_section(cards, entries)
-    report["replay_trabbc"] = replay_section(cards)
-    report["stages_kt1"] = stage_section(cards)
-    report["bbl_replay"] = bbl_replay_section(cards)
-    report["stage3_from_nemo_stage2"] = stage3_arms_section(cards)
+    report = {"format": "nemo-testcase-l1-vortex-smtrungs-round6-v2",
+              "sections": wanted}
+    entries = None
+
+    def need_entries():
+        return {t: _entries(t, cards[t], int(cards[t].recipe.z_coord.n_levels))
+                for t in ("smt5", "smt6", "smt6b")}
+
+    for name in wanted:
+        if name == "inputs":
+            report[name] = inputs_section(cards)
+        elif name == "gate":
+            report[name] = gate_section(cards)
+        elif name == "ladder":
+            report[name], entries = ladder_section(cards, args.plant)
+        elif name == "footprint_smt6b":
+            report[name] = footprint_section(cards, entries or need_entries())
+        elif name == "geothermal":
+            report[name] = geothermal_section(cards, entries or need_entries())
+        elif name == "replay_trabbc":
+            report[name] = replay_section(cards)
+        elif name == "stages_kt1":
+            report[name] = stage_section(cards)
+        elif name == "bbl_replay":
+            report[name] = bbl_replay_section(cards)
+        elif name == "stage3_from_nemo_stage2":
+            report[name] = stage3_arms_section(cards)
     args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
-    kt1 = report["ladder"]["smt6"]["card"]["independent"]["1"]["T"]["n_unequal"]
     if args.plant:
+        kt1 = report["ladder"]["smt6"]["card"]["independent"]["1"]["T"][
+            "n_unequal"]
         require(kt1 == 1, f"plant moved {kt1} cells, expected exactly 1")
         print("PLANT-FIRED independent smt6 kt=1 T n_unequal", kt1)
         return 1
-    print("INPUTS-" + report["inputs"]["status"], "smt6 kt1 T n_unequal", kt1)
-    return 0 if report["inputs"]["status"] == "IDENTICAL" else 1
+    status = report.get("inputs", {}).get("status", "NOT-RUN")
+    print("SECTIONS", ",".join(wanted), "INPUTS-" + status)
+    return 1 if status == "DIFFERS" else 0
 
 
 if __name__ == "__main__":
