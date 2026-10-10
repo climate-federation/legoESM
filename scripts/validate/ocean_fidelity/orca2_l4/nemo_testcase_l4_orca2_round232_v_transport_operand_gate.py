@@ -54,6 +54,15 @@ def _exact(left, right) -> dict[str, object]:
     return r228._difference(np.asarray(left, np.float64), np.asarray(right, np.float64))
 
 
+def _exact_masked(left, right, mask) -> dict[str, object]:
+    left = np.asarray(left, np.float64)
+    right = np.asarray(right, np.float64)
+    mask = np.asarray(mask, bool)
+    require(left.shape == right.shape == mask.shape, "masked score shape mismatch")
+    require(np.any(mask), "masked score support is empty")
+    return _exact(left[mask], right[mask])
+
+
 def _first_unequal(rows: dict[str, dict[str, object]], order=OPERANDS) -> str | None:
     require(tuple(order) == OPERANDS, "compiled operand order moved")
     return next((name for name in order if rows[name]["unequal"]), None)
@@ -198,7 +207,23 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path, label: str,
         "zvb": np.asarray(oracle["zvb"]),
         "vmask": np.asarray(oracle["vmask"])[..., :-1],
     }
-    rows = {name: _exact(candidate[name], expected[name]) for name in OPERANDS}
+    # l4_canon_* writes zero outside the NEMO V mask, so those zeroes are
+    # record support markers rather than metric/velocity values.  Score the
+    # first four operands only where NEMO executes their product.  Score vmask
+    # everywhere so a candidate-only live face remains visible as mask debt.
+    live_3d = expected["vmask"] != 0.0
+    live_2d = np.any(live_3d, axis=-1)
+    support = {
+        "e1v": live_2d,
+        "e3v": live_3d,
+        "vv": live_3d,
+        "zvb": live_2d,
+        "vmask": np.ones_like(live_3d, dtype=bool),
+    }
+    rows = {
+        name: _exact_masked(candidate[name], expected[name], support[name])
+        for name in OPERANDS
+    }
     order = OPERANDS if plant != "source-order" else (
         "e1v", "vv", "e3v", "zvb", "vmask")
     if plant == "source-order":
@@ -206,9 +231,9 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path, label: str,
     if plant.endswith("-bit"):
         name = plant.removesuffix("-bit")
         control = expected[name].copy()
-        index = tuple(np.argwhere(np.isfinite(control))[0])
+        index = tuple(np.argwhere(support[name] & np.isfinite(control))[0])
         control[index] = np.nextafter(control[index], np.inf)
-        score = _exact(control, expected[name])
+        score = _exact_masked(control, expected[name], support[name])
         require(score["unequal"] == 1, f"{name} bit plant did not fire once")
         raise GateError(f"{name} operand-bit plant fired")
 
@@ -222,7 +247,8 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path, label: str,
         name: np.asarray(oracle[name]) for name in CORRECTION_INPUTS
     }
     correction_rows = {
-        name: _exact(correction_candidate[name], correction_expected[name])
+        name: _exact_masked(
+            correction_candidate[name], correction_expected[name], live_2d)
         for name in CORRECTION_INPUTS
     }
     correction_first = next((

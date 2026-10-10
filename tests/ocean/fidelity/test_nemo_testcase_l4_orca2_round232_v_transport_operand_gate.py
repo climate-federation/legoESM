@@ -40,3 +40,12 @@ def test_each_operand_bit_control_is_nonvacuous() -> None:
         control = baseline.copy()
         control[0, 0] = np.nextafter(control[0, 0], np.inf)
         assert gate._exact(control, baseline)["unequal"] == 1, name
+
+
+def test_masked_score_excludes_canonical_support_zero() -> None:
+    candidate = np.array([2.0, 7.0])
+    oracle = np.array([2.0, 0.0])
+    row = gate._exact_masked(candidate, oracle, np.array([True, False]))
+    assert row["unequal"] == 0
+    with pytest.raises(gate.GateError, match="support is empty"):
+        gate._exact_masked(candidate, oracle, np.zeros(2, dtype=bool))
