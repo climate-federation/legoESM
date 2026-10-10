@@ -1,7 +1,24 @@
 # =============================================================================
-# AMIP production — LAT-LON n_lat24/L20 variant (#869)
+# HISTORICAL — Sundqvist/L36-physics LAT-LON n_lat24/L20 deck (#869)
 # =============================================================================
-# The lat-lon lane of the production AMIP (the cubed-sphere C12 lane stays in
+# NOT the CAM6 production suite (amip_production.yaml is).  Renamed from
+# amip_production_latlon24.yaml 2026-10-10; kept for the #869 record.  A CAM6
+# lat-lon deck comes with the composable-physics work.
+#
+# KNOWN validate_strict FAILURES (main 6b89c213c7; this deck is asserted-failing in
+# test_config_yaml_builds_and_validates_strict) — not fixed here:
+#   1. sigma_layout l30_trop_logstrat (inherited) needs nlev >= 28; nlev is 20
+#   2. land_update_seconds > 0 is MPAS-lane only
+#   3. land_calibrated_physics=True is MPAS-lane only
+#   4. mpas_land_lapse_K_per_km / mpas_land_beta are MPAS-lane knobs
+#   5. mpas_land_beta_soil is an MPAS-lane flag
+#   6. mpas_qv_smooth_del4_m4s is an MPAS-lane knob
+#   7. mpas_ice_skin_prognostic is an MPAS-lane knob
+#   8. hard_sat_ice_curve=True requires an MPAS grid
+#   9. dycore.mpas_sponge_del2_top_layers is hydrostatic-MPAS only
+# All but 1 are inherited MPAS-lane keys from amip_sundqvist_l36.yaml.
+# -----------------------------------------------------------------------------
+# Was the lat-lon lane of the then-production AMIP (the cubed-sphere C12 lane was
 # amip_production.yaml).  Two lane-critical pins, validated on the 2026-07-08
 # Levante campaign (#869):
 #   * use_polar_filter: true — MANDATORY on coarse lat-lon: the Fourier pole
@@ -11,7 +28,7 @@
 #     clean past the old day-9/10 wall.
 #   * dt: 600.0 — the filter handles the pole CFL, lifting the pole-cell
 #     auto-clamp (dt 60-145 s -> 600 s, ~10x throughput; 30-day soak clean).
-# Physics/forcing/diagnostics inherit the production set via `include`.
+# Physics/forcing/diagnostics inherit the Sundqvist/L36 set via `include`.
 # Pinned by the production-YAML round-trip test (test_run_amip_cli).
 # Include repointed 2026-09-23: amip_production.yaml is now the CAM6 suite.
 # This deck's overrides and measurements describe the Sundqvist/L36

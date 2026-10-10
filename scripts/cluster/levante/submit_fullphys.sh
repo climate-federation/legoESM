@@ -77,7 +77,7 @@ sbatch --job-name=fullphys_mpas --time=08:00:00 \
 # --- lat-lon lane ----------------------------------------------------------
 # CFL at the poles: the latlon24 YAML carries the polar filter; keep its dt.
 NAME=fullphys_latlon TARGET_DAYS="${TARGET_DAYS}" CENTURY_DECK=1 START_YEAR=1923 \
-CONFIG_YAML="${REPO}/config/amip/amip_production_latlon24.yaml" \
+CONFIG_YAML="${REPO}/config/amip/amip_sundqvist_latlon24.yaml" \
 EXTRA="${SHARED}" \
 sbatch --job-name=fullphys_latlon --time=08:00:00 \
        "${REPO}/scripts/cluster/levante/amip_mpas_gpu_chain.sbatch"

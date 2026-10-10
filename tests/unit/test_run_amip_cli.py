@@ -2243,6 +2243,44 @@ def test_config_yaml_loads_all_keys_are_valid_dests(cfg_file):
     assert set(defaults).issubset(valid_dests)
 
 
+# Decks that do NOT pass validate_strict (none is a production deck): name -> why.
+# Asserted to raise, so a fix (or a new error class) flips the test.
+_STRICT_FAILING_DECKS = {
+    "amip_sundqvist_latlon24.yaml":
+        "HISTORICAL Sundqvist/L36 lat-lon deck; known strict errors listed in its header",
+    "amip_land_calibrated.yaml":
+        "land overlay, not a standalone deck: no grid, so it lands on the default lane",
+    "amip_campaign_mpas.yaml":
+        "campaign deck: land_update_seconds/land_calibrated_physics without multilayer land",
+    "amip_aug13_control.yaml":
+        "rerun of the 13 Aug campaign reference; inherits amip_campaign_mpas.yaml's errors",
+}
+
+
+@pytest.mark.parametrize("cfg_file", _amip_config_yamls(), ids=lambda p: p.name)
+def test_config_yaml_builds_and_validates_strict(cfg_file):
+    """Every shipped AMIP deck builds the way run_amip.main() builds it and
+    passes validate_strict, so a deck the run would refuse cannot ship.  The
+    config/cmip decks are run_coupled decks whose ExperimentConfig is built
+    inline in run_coupled.main(); their keys are checked in
+    test_run_coupled_config_yaml."""
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    from scripts.run.run_amip import _resolve_land_model
+    parser = build_arg_parser()
+    keys = load_yaml_config(str(cfg_file), parser)
+    parser.set_defaults(**keys, _config_keys=frozenset(keys))
+    argv = _AMIP_DUMMY_PATHS + ["--clm-surfdata-path", "/dummy/surfdata.nc",
+                                "--land-mask-file", "/dummy/lsm.nc"]
+    args = parser.parse_args(argv)
+    _resolve_land_model(args, parser, argv)
+    cfg = build_config_from_args(_postprocess_args(args, parser, argv))
+    if cfg_file.name in _STRICT_FAILING_DECKS:
+        with pytest.raises(ValueError, match="Invalid ExperimentConfig"):
+            cfg.validate_strict()
+    else:
+        cfg.validate_strict()
+
+
 def test_amip_sota_config_builds_valid_experiment_config():
     """config/amip/amip_sota.yaml (SOTA: multilayer land + conv-cloud-off)
     builds a valid ExperimentConfig — the SOTA knobs are consistent (e.g.
@@ -3355,7 +3393,7 @@ def test_yaml_settable_bools_have_no_switches():
         "aerosol_ccn", "clear_sky_diag", "cmip_output", "diurnal_cycle",
         "land_stomatal_beta", "monthly_means", "orbital_insolation",
         "snow_albedo_feedback", "slab_land_active", "dynamic_albedo",
-        # amip_production_latlon24.yaml sets it true (#869) — the filter-off
+        # amip_sundqvist_latlon24.yaml sets it true (#869) — the filter-off
         # A/B leg needs --no-use-polar-filter (codex: the variant YAML created
         # a fresh instance of exactly this pattern).
         "use_polar_filter",
@@ -3374,14 +3412,14 @@ def test_yaml_settable_bools_have_no_switches():
         assert getattr(args, dest) is True
 
 
-def test_latlon24_production_variant_pins_polar_filter():
-    """#869: the lat-lon production lane variant MUST carry the polar filter
+def test_sundqvist_latlon24_deck_pins_polar_filter():
+    """#869: the (historical) Sundqvist lat-lon deck MUST carry the polar filter
     (the 12-day one-variable A/B convicted filter-off: blowup day 1 vs
     COMPLETED) and the filter-enabled dt=600 (pole clamp lifted, ~10x
     throughput, 30-day soak clean). A silent drop of either re-opens the
     day-9/10 blowup."""
     from legoesm.driver.run_config_yaml import load_yaml_config
-    cfg_file = _repo_root() / "config" / "amip" / "amip_production_latlon24.yaml"
+    cfg_file = _repo_root() / "config" / "amip" / "amip_sundqvist_latlon24.yaml"
     parser = build_arg_parser()
     parser.set_defaults(**load_yaml_config(str(cfg_file), parser))
     args = _postprocess_args(parser.parse_args(_AMIP_DUMMY_PATHS), parser)
@@ -3403,7 +3441,7 @@ def test_latlon24_production_variant_pins_polar_filter():
     # UNSET (#929 None sentinel; an explicit 0.0 now means "force legacy
     # no-split", not "unset"): the latlon24 YAML clears the inherited bechtold
     # knob to null, and sbm ignores it (sbm_precip_efficiency is its own knob)
-    # — see the convective_precip_efficiency note in amip_production_latlon24.yaml.
+    # — see the convective_precip_efficiency note in amip_sundqvist_latlon24.yaml.
     assert cfg.convective_precip_efficiency is None
 
 
