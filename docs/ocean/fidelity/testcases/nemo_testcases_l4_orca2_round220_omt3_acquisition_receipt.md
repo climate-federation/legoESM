@@ -11,6 +11,21 @@ Decision-109 OMT-3 deck and a fail-closed operator acquisition. No NEMO run was
 attempted in the sandbox. OMT-3 trajectories are therefore **UNMEASURED WITH
 SPEC**, and no independent/given-entry numbers are mixed or reported.
 
+## LOUD CORRECTION FROM ROUND 221
+
+The operator did run this acquisition. The smoke, uninstrumented ten-step
+calibration, and both rank-complete ten-step twins all ended with `STOP 0` and
+the existing output admits as `PASS_R220_OMT3_ENTRY_STAGE_AND_MONTH_RECORD`.
+The month did **not** complete step 96: NEMO's compiled `stp_ctl` stopped at
+kt=15 because max |V| was 10.49 m/s. Thus R220-P2 is **CONFIRMED** and R220-P3
+is **REFUTED**. The launcher's exit 123 was not a record failure: its global
+shell `ERR` trap ran before the already-specified compiled-boundary classifier.
+Round 221 repairs that control-flow bug, adds a non-vacuous regression test,
+and admits the existing files without rebuilding or rerunning NEMO. The
+original handoff text below is retained as the contemporaneous round-220
+record; its **UNMEASURED WITH SPEC** labels are superseded by this correction
+and the round-221 receipt.
+
 ## Exact OMT-2 to OMT-3 edge
 
 The canonical deck is rendered from the admitted round-218 OMT-2 deck,

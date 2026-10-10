@@ -78,3 +78,10 @@ def test_runner_month_protocol_obeys_compiled_limits() -> None:
     assert "10,20,30,40,50,60,70,80,90,95" in text
     assert '[[ "$last_step" -gt 10 ]]' in text
     assert "/usr/bin/time" not in text
+
+
+def test_expected_month_abort_bypasses_the_global_err_trap() -> None:
+    text = RUNNER.read_text()
+    month_body = text.split("run_month() {", 1)[1].split("\n}", 1)[0]
+    assert "|| pipe_rc=(\"${PIPESTATUS[@]}\")" in month_body
+    assert "set +e" not in month_body

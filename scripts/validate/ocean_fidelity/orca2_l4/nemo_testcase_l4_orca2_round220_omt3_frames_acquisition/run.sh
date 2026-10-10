@@ -200,10 +200,12 @@ run_month() {
     cd "$month"
     printf 'RUN_STARTED_UTC=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >run.user.time.log
     started=$SECONDS
-    set +e
-    mpirun -np 2 --oversubscribe ./nemo 2>&1 | tee run.user.stdout.log
-    pipe_rc=("${PIPESTATUS[@]}")
-    set -e
+    # A compiled stp_ctl exit is an admitted month boundary.  Put the
+    # pipeline in an OR-list so Bash does not invoke the global ERR trap
+    # before its two statuses can be classified below.
+    pipe_rc=(0 0)
+    mpirun -np 2 --oversubscribe ./nemo 2>&1 | tee run.user.stdout.log \
+      || pipe_rc=("${PIPESTATUS[@]}")
     if [[ "${pipe_rc[0]}" -eq 0 && "${pipe_rc[1]:-0}" -eq 0 ]]; then
       grep -q 'STOP 0' run.user.stdout.log
       printf 'wall_seconds %s\nRUN_FINISHED_UTC=%s\nRUN_DONE\n' \
