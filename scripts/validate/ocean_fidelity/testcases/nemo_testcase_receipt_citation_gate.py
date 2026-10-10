@@ -2524,7 +2524,7 @@ CITATION_MAP = {
     # --- ORCA2 round 226: final FCT RHS association and refutation ---
     'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/traadv_fct.f90:598-609': [
         ('! -- after tracer with upstream scheme', 2),
-        ('pt_up1(ji,jj,jk) = ( (e3t_3d(ji,jj,jk)', 1), 12],
+        ('pt_up1(ji,jj,jk) = ( (e3t_3d(ji,jj,jk)', 3), 12],
     'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/traadv_fct.f90:318-329': [
         '!        !==  final trend with corrected fluxes  ==!',
         'zta_up1(ji,jj,jk) = zta_up1(ji,jj,jk) + p2Dt * ztra /', 12],
