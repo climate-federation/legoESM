@@ -64,11 +64,10 @@ constructs the live V ratio at
 live thickness in the transport product above.
 
 The candidate stage path instead calls the reconstructed-card builder at
-`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py:1821-1825`;
-that builder derives `e3v_0` from neighbouring T thicknesses at
-`packages/ocean/legoesm/ocean/vertical.py:647-654`. The already-shared resolved
-builder reads the card's raw NEMO face thickness at
-`packages/ocean/legoesm/ocean/vertical.py:673-748`.
+`ocean_model_latlon_cgrid.py:1821-1825`; that builder derives `e3v_0` from
+neighbouring T thicknesses at `vertical.py:647-654`. The already-shared
+resolved builder reads the card's raw NEMO face thickness at
+`vertical.py:673-748`.
 
 On both labels:
 
