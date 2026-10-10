@@ -97,8 +97,25 @@ in-sandbox**; this is not a PASS. The review log SHA-256 is
 `eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5`.
 
 No `packages/` file changed, so no production GYRE/DINO/tank trajectory can
-move in this round. Citation-gate and broader battery results are appended at
-the clean final tip.
+move in this round. On clean receipt/map commit `756605a36`, the round
+citation gate passes five citations and the cumulative default gate passes
+274; both report zero failures, unmapped citations, or map-audit failures. The
+explicit two-line shift plant on the mapped `traadv.f90:592-602` range exits 1
+and makes the gate fail. Round/default/plant JSON SHA-256 values are
+`c00f3ebe6b133d39ca27076f45775316db944cd0bbd5004fd99bab532e662e20`,
+`88df3f34246d1d61780d5ab80372b16e5780c01343803e6e4758f662a848e9eb`,
+and `6de539a46ef2362d84e3122c42423edd94bbc92e34063d025e7d029de3efecaf`.
+
+Focused acquisition/compatibility/citation tests pass 15/15 (log SHA-256
+`5ccecaa324164f02c67856e15b39f111e185137dd7166f2f25bd1da0d2f48829`).
+The prescribed `tests/ocean/fidelity -n 12` battery collected 3,079 tests and
+reached 99%; 3,055 passed and seven skipped. Its four failures are the same
+registered pre-existing reds reported in rounds 220 and 221: the GYRE
+round-129 spread-floor record stamp, allow-dirty scope, worktree-stamp ratchet,
+and SI3 scalar-math provenance gate. The remaining 13 tests were unclassified
+when the pytest processes disappeared without a terminal summary. The battery
+is not called PASS and was not relaunched. Its log SHA-256 is
+`22fa97e0f85aeb304d797ff557a71a5f893b1708c764a82e4d70025bafb8e2b5`.
 
 ## OPEN
 
