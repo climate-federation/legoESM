@@ -90,6 +90,8 @@ _ORCA2_R182HPGFOLD_COMPILED = (
     NEMO / "cfgs/ORCA2_OMIP_L4_R182HPGFOLD/BLD/ppsrc/nemo")
 _ORCA2_R210OMT1_COMPILED = (
     NEMO / "cfgs/ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo")
+_ORCA2_R213VECPRE_COMPILED = (
+    NEMO / "cfgs/ORCA2_OMIP_L4_R213VECPRE/BLD/ppsrc/nemo")
 _ORCA2_R104EENACC_COMPILED = (
     NEMO / "cfgs/ORCA2_OMIP_L4_R104EENACC/BLD/ppsrc/nemo")
 _ORCA2_R105EENACC_COMPILED = (
@@ -186,6 +188,12 @@ FILES = {
         _ORCA2_R210OMT1_COMPILED / "stpctl.f90"),
     "ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/dynspg_ts.f90": (
         _ORCA2_R210OMT1_COMPILED / "dynspg_ts.f90"),
+    "ORCA2_OMIP_L4_R213VECPRE/BLD/ppsrc/nemo/stprk3.f90": (
+        _ORCA2_R213VECPRE_COMPILED / "stprk3.f90"),
+    "ORCA2_OMIP_L4_R213VECPRE/BLD/ppsrc/nemo/stp2d.f90": (
+        _ORCA2_R213VECPRE_COMPILED / "stp2d.f90"),
+    "ORCA2_OMIP_L4_R213VECPRE/BLD/ppsrc/nemo/dynspg_ts.f90": (
+        _ORCA2_R213VECPRE_COMPILED / "dynspg_ts.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynadv.f90": (
         _ORCA2_COMPILED / "dynadv.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/ldfdyn.f90": (
@@ -2364,6 +2372,15 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:721-753': [
         'IF( .NOT.lk_linssh ) THEN   !* Update ocean depth (variable volume case only)',
         ("& l4_canon_2d(zhU,'U'), l4_canon_2d(zhV,'V')", 1), 33],
+    # --- ORCA2 round 214: live RK indices and malformed round-213 schema ---
+    'ORCA2_OMIP_L4_R213VECPRE/BLD/ppsrc/nemo/stprk3.f90:204-215': [
+        'CALL stp_2D( kstp, Nbb, Nbb, Naa, Nrhs )',
+        'CALL stp_RK3_stg( 1, kstp, Nbb, Nbb, Nrhs, Naa )', 12],
+    'ORCA2_OMIP_L4_R213VECPRE/BLD/ppsrc/nemo/stp2d.f90:303-303':
+        'CALL dyn_spg_ts( kt, Kbb, Kbb, Krhs, uu, vv, ssh, uu_b, vv_b, Kaa )',
+    'ORCA2_OMIP_L4_R213VECPRE/BLD/ppsrc/nemo/dynspg_ts.f90:714-726': [
+        "r213_magic = 'NEMO_L4_R213VV1'",
+        'WRITE(r213_unit) va_e', 13],
     # --- ORCA2 round 189: bounded replacement restart list ---
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/in_out_manager.f90:51-51':
         'INTEGER, DIMENSION(10) :: nn_stocklist',
