@@ -6,9 +6,9 @@ Sections (one JSON report, fp64 libm, CPU):
 
 ``inputs``     mesh_mask / dumped T,S / resto identity across SMT-5, SMT-6,
                SMT-6b; the SMT-6b dumped T equals the card's analytical initial
-               T plus the anomaly bit for bit (the card is built FROM the dump,
-               which refuses otherwise, and compared again here); the anomaly
-               cells and values.
+               T plus the anomaly bit for bit (the card builds only if its analytic T
+               equals the dump, and the equality is re-read here, for S as
+               well); the anomaly cells and values.
 ``gate``       NEMO's BBL criterion evaluated on NEMO's OWN T/S (initial dump,
                the ten kt entries, every daily restart): open U/V faces and the
                bottom cells they touch (shelf-side / deep-side).
@@ -143,6 +143,13 @@ def inputs_section(cards) -> dict:
     for t in ("smt6", "smt6b"):
         raw, rec1 = target(t)
         card = cards[t]
+        with netCDF4.Dataset(ROOTS[t] / "kt1_10" / INPUT_FILES[1]) as h:
+            rawS = np.asarray(h.variables["vosaline"][:], dtype=np.float64)
+        s1 = np.moveaxis(rawS[0, :int(card.recipe.z_coord.n_levels)], 0, -1)
+        out[f"{t}_dump_S_records_identical"] = bool(np.all(rawS == rawS[:1]))
+        out[f"{t}_dump_vs_card_initial_S_wet"] = field_stats(
+            np.asarray(card.recipe.initial_state.S.data), s1,
+            np.asarray(card.recipe.z_coord.is_active))
         T0 = np.asarray(card.recipe.initial_state.T.data)
         wet = np.asarray(card.recipe.z_coord.is_active)
         out[f"{t}_dump_records_identical"] = bool(np.all(raw == raw[:1]))
@@ -172,6 +179,8 @@ def inputs_section(cards) -> dict:
           and not out["mesh_variables_differing_smt6_vs_smt5"]
           and out["smt6_dump_vs_card_initial_T_wet"]["n_unequal"] == 0
           and out["smt6b_dump_vs_card_initial_T_wet"]["n_unequal"] == 0
+          and out["smt6_dump_vs_card_initial_S_wet"]["n_unequal"] == 0
+          and out["smt6b_dump_vs_card_initial_S_wet"]["n_unequal"] == 0
           and out["smt6_dump_vs_smt5_dump_wet"]["n_unequal"] == 0
           and out["anomaly"]["n_moved_not_bottom"] == 0)
     out["status"] = "IDENTICAL" if ok else "DIFFERS"
@@ -847,7 +856,7 @@ def main(argv=None) -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--plant", action="store_true")
     parser.add_argument(
-        "--sections", default=",".join(SECTIONS),
+        "--sections", required=True,
         help=("comma-separated subset of " + ", ".join(SECTIONS) + ".  Every "
               "section jit-compiles its own models; run the heavy ones in "
               "separate processes (one process holding all of them exhausts "

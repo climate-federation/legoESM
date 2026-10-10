@@ -19,8 +19,11 @@ preregistration `docs/ocean/fidelity/PREREG_nemo_testcases_l1_vortex_smtrungs_ro
 (`nn_bbl_ldf = 1`, `nn_bbl_adv = 0`, `rn_ahtbbl = 1000`, trabbc) on its
 marginal-sea geometry. What carries to the ORCA2 rung-2 walk unchanged:
 (1) the BBL gate/trend replay below is written from NEMO's own `mesh_mask`,
-namelist coefficients and the entry record at Kbb — for ORCA2 only the
-`eos_rab` branch changes (TEOS-10 polynomial, not S-EOS); (2) NEMO closes a
+namelist coefficients and the entry record at Kbb; for ORCA2 it needs two
+additions it does not have — the `eos_rab` TEOS-10 polynomial branch, and
+NEMO's lateral-boundary exchange (it clamps the north/east neighbours, which is
+exact only on this closed box; ORCA2's periodic/fold exchange of `mbku_d`,
+`e3u_bbl_0` and the bottom fields is not replayed); (2) NEMO closes a
 face whose `-zgdrho*mgrh` is a signed zero (measured below), so the replay and
 the card use `>= 0` = closed, never a `copysign` reading; (3) the geothermal
 replay (reciprocal first, `r3t = ssh*r1_ht_0` at the stage-3 level taken from
@@ -72,8 +75,9 @@ resolve `ln_trabbc = T`, `nn_geoflx = 1`, `rn_geoflx_cst = 8.64E-02`,
   cells (0 unequal) and equals SMT-5's dump (0 unequal); S = 35, resto equal.
 - **SMT-6b (Q1)**: NEMO's dumped T record 1 equals the card's initial T —
   analytical profile plus the anomaly — on all 37144 wet cells (0 unequal; the
-  card is built FROM the dump and refuses otherwise, and the equality is
-  re-checked independently here). Against SMT-5's dump exactly 61 cells differ,
+  card applies the anomaly analytically and refuses unless that equals the
+  dump; the equality is re-read here for T, and for S: 0 unequal of 37144 on
+  both decks). Against SMT-5's dump exactly 61 cells differ,
   all bottom cells: 56 by 1.7 K and 5 by 3.4 K (0 off the bottom level).
 - **NEMO's own BBL criterion on NEMO's own T/S** (trabbl lines 409-431 and the
   geometry 584-600, read from NEMO's `mesh_mask` and the dumped T; the card's
@@ -301,7 +305,9 @@ Open for the next round (named, not built — not asked for here):
 ## Tests, instruments, review
 
 - New `tests/ocean/fidelity/test_nemo_testcase_l1_vortex_smtrungs_round6_measure.py`:
-  4 passed. It covers the touched-column logic, the real-record input
+  4 passed (the review's four findings fixed: S identity read, `--sections`
+  required, the ORCA2 caveat widened, the "built from the dump" wording
+  corrected). It covers the touched-column logic, the real-record input
   identity (61 anomaly cells, all bottom), the BBL replay equalling the card on
   both decks together with the signed-zero reading predicting increments
   NEMO's record excludes, and non-vacuity: with the card's gate forced closed
@@ -320,7 +326,7 @@ Open for the next round (named, not built — not asked for here):
   the measurements above; `m_d_replay_stages.json` still holds the superseded
   geothermal replay, `m_d2_replay.json` the corrected one.
 
-Review: see the final message.
+Single review (codex): HOLD, four findings, all CONFIRMED and fixed above (input-identity gate compared T only; the default CLI ran every section in one process, which exhausts JIT memory; the replay's ORCA2 portability claim ignored lateral-boundary exchange; "card built from the dump" was reversed). The second reviewer (GLM) was not run: NO GATE, single review only, as the standing note asks.
 
 ## Choices made this round
 
