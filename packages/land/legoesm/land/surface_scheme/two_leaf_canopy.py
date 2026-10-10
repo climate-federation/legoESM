@@ -72,7 +72,7 @@ _DEFAULT_PICARD_OMEGA = 0.15
 
 # Columns per group in the canopy Newton solve.  Under one vmap every column
 # iterates until the slowest column on the rank stops, so one hard column costs
-# the whole rank up to the 60-iteration cap; groups stop independently.  Pure
+# the whole rank up to the iteration cap; groups stop independently.  Pure
 # performance: measured on recorded production batches, iteration counts and
 # converged flags identical, state differs only by rounding (<= 5e-13 K).
 _CANOPY_SOLVE_GROUP = 64
