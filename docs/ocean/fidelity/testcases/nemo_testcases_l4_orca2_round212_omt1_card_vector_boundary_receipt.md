@@ -89,10 +89,23 @@ not a change to an existing production card or selector.
 - OMT-1 ladders: PASS, 32 checkpoints / 160 rows for each label.
 - OMT-1 offline vector walk: `PASS_R212_OMT1_VECTOR_WALK`; seven distinct
   replay plants fire.
-- Focused OMT-1 and round-212 tests: PASS (14, then 8 tests during gate
-  construction; final focused and full fidelity results recorded below).
-- Citation gate and independent review results are recorded below after their
-  mandatory final-diff runs.
+- Focused final battery: **37 passed in 12.57 s**, including the round-209,
+  round-211, round-212, and receipt-citation gates.
+- Citation gate: **PASS**, 3 compiled-source citations, 0 failures, 0 unmapped;
+  the rigid-shift plant on `dynspg_ts.f90:674-678` fires.  The cumulative
+  default-receipt citation gate also passes with 0 unmapped citations.
+- The single 12-worker `tests/ocean/fidelity` battery reached 99% before its
+  controller was interrupted: 2,980 passed, 7 skipped, 4 failed, and 30 of
+  3,021 collected tests did not report a terminal result.  The four failures
+  reproduce in isolation and are pre-existing/off-scope: the moved GYRE
+  round-129 harness pin, two cumulative worktree-stamp ratchets (neither names
+  the round-212 gate), and the listed SI3 scalar-math record mismatch.  All
+  round-212 tests completed green in the focused battery; the incomplete wide
+  run is retained, not relabelled PASS.
+- Independent review unavailable in-sandbox: `codex exec --sandbox read-only`
+  exited 1 while initializing its in-process app-server client because the
+  read-only sandbox could not create PATH aliases.  No review verdict is
+  claimed.
 
 ## OPEN
 
