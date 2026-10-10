@@ -67,14 +67,17 @@ def read_record(path: Path, plant: str = "none") -> dict[str, object]:
         if plant == "field-dims" and index == 0:
             n1 += 1
         require(name == expected, f"{path.name}: bad field {index} {name!r}")
-        require((ndim, n1, n2, n3) == (2, nx, ny, 1),
+        expected_shape = ((ntei - ntsi + 1, ntej - ntsj + 1)
+                          if expected == "zv_frc" else (nx, ny))
+        require((ndim, n1, n2, n3) == (2, *expected_shape, 1),
                 f"{path.name}: {name} dimensions moved")
         count = n1 * n2
         end = offset + count * 8
         require(end <= len(raw), f"{path.name}: truncated {name} payload")
         values = np.frombuffer(raw, dtype="=f8", count=count, offset=offset)
         values = values.reshape((n1, n2), order="F")
-        owned = values[ntsi - 1:ntei, ntsj - 1:ntej]
+        owned = (values if expected == "zv_frc" else
+                 values[ntsi - 1:ntei, ntsj - 1:ntej])
         finite = bool(np.isfinite(owned).all())
         if plant == "nonfinite" and index == 0:
             finite = False

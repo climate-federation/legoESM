@@ -1,0 +1,10 @@
+--- dynspg_ts.F90
++++ dynspg_ts.F90
+@@ -909,6 +909,6 @@
+                & ntsi, ntsj, ntei, ntej, STORAGE_SIZE(1._wp), 3
+             r213_name = 'zv_frc'
+-            WRITE(r213_unit) r213_name, 2, jpi, jpj, 1
++            WRITE(r213_unit) r213_name, 2, SIZE(zv_frc,1), SIZE(zv_frc,2), 1
+             WRITE(r213_unit) zv_frc
+             r213_name = 'ssvmask'
+             WRITE(r213_unit) r213_name, 2, jpi, jpj, 1

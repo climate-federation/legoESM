@@ -19,9 +19,10 @@ def _write_record(path: Path, rank: int) -> None:
     raw = bytearray(gate.MAGIC)
     raw.extend(struct.pack("=16i", *header))
     for index, name in enumerate(gate.NAMES):
-        values = np.full((nx, ny), index + rank / 10, dtype="=f8", order="F")
+        shape = (90, 148) if name == "zv_frc" else (nx, ny)
+        values = np.full(shape, index + rank / 10, dtype="=f8", order="F")
         raw.extend(name.encode("ascii").ljust(16, b" "))
-        raw.extend(struct.pack("=4i", 2, nx, ny, 1))
+        raw.extend(struct.pack("=4i", 2, *shape, 1))
         raw.extend(values.tobytes(order="F"))
     path.write_bytes(raw)
 
