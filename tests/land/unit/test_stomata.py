@@ -443,11 +443,12 @@ class TestSlabLandIntegration(unittest.TestCase):
         """Jarvis model (no carbon) changes latent heat flux."""
         from legoesm.land.slab_land import step_land
         from legoesm.land.config import LandConfig
+        from legoesm.land.surface_scheme import SimpleSEBConfig   # stomata is the bulk-flux option
         from legoesm.land.stomata import StomataConfig
 
         shape = (4,)
-        cfg_off = LandConfig()
-        cfg_jarvis = LandConfig(stomata=StomataConfig(enabled=True))
+        cfg_off = LandConfig(surface_scheme=SimpleSEBConfig())
+        cfg_jarvis = LandConfig(surface_scheme=SimpleSEBConfig(), stomata=StomataConfig(enabled=True))
         state = self._make_state(shape)
         forcing = self._make_forcing(shape)
 
@@ -488,16 +489,19 @@ class TestSlabLandIntegration(unittest.TestCase):
         """Farquhar+Medlyn stomata give different results from Ball-Berry."""
         from legoesm.land.slab_land import step_land
         from legoesm.land.config import LandConfig
+        from legoesm.land.surface_scheme import SimpleSEBConfig   # stomata is the bulk-flux option
         from legoesm.land.stomata import StomataConfig
         from legoesm.land.carbon.config import CarbonConfig
         from legoesm.land.carbon.carbon_cycle import init_carbon_state
 
         shape = (4,)
         cfg_bb = LandConfig(
+            surface_scheme=SimpleSEBConfig(),
             carbon=CarbonConfig(scheme="differland"),
             stomata=StomataConfig(enabled=True, stomata_model="ball_berry"),
         )
         cfg_med = LandConfig(
+            surface_scheme=SimpleSEBConfig(),
             carbon=CarbonConfig(scheme="differland"),
             stomata=StomataConfig(enabled=True, stomata_model="medlyn"),
         )
