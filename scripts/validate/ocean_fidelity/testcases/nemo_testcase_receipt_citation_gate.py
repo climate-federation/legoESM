@@ -2390,14 +2390,14 @@ CITATION_MAP = {
     # --- ORCA2 round 215: vector update and T-pivot association -----------
     'ORCA2_OMIP_L4_R214VECPREV3/BLD/ppsrc/nemo/dynspg_ts.f90:669-682': [
         'IF( ln_dynadv_vec .OR. lk_linssh ) THEN      !* Vector form',
-        ('END DO   ;   END DO', 13), 14],
+        ('END DO   ;   END DO', 17), 14],
     'ORCA2_OMIP_L4_R214VECPREV3/BLD/ppsrc/nemo/dynspg_ts.f90:747-756': [
         'IF( .NOT.lk_linssh ) THEN   !* Update ocean depth (variable volume case only)',
-        ("&                   , hur_e, 'U',  1._wp, hvr_e, 'V',  1._wp  , ssha_e, 'T', 1._wp, ldfull=.TRUE. )", 9),
+        "&                   , hur_e, 'U',  1._wp, hvr_e, 'V',  1._wp  , ssha_e, 'T', 1._wp, ldfull=.TRUE. )",
         10],
     'ORCA2_OMIP_L4_R214VECPREV3/BLD/ppsrc/nemo/lbcnfd.f90:684-718': [
-        "CASE ( 'V' )                               ! V-point",
-        ('END DO', 34), 35],
+        ("CASE ( 'V' )                               ! V-point", 5),
+        ('END DO', 105), 35],
     # --- ORCA2 round 189: bounded replacement restart list ---
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/in_out_manager.f90:51-51':
         'INTEGER, DIMENSION(10) :: nn_stocklist',
