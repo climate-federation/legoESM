@@ -89,9 +89,28 @@ The classification SHA-256 is
 The focused round-232/233 gate battery passes 8/8, including label-coverage,
 geometry-closure, and false-root plants (log SHA-256
 `0e712fbd64eeecef1c415a672fc835407b5cfd0eed22f6bf7a5b7cdfdd29e035`).
-The receipt citation gate, cumulative default citation gate, rigid-shift
-plant, prescribed ocean-fidelity battery, and independent review are recorded
-below after execution.
+The round receipt citation gate passes 6/6 citations and the cumulative
+default gate passes 274/274, both with zero failures or unmapped citations.
+The rigid two-line-shift plant on the `domzgr.f90:184-188` citation refuses.
+Round/default/plant log SHA-256 values are
+`6a29dd6348f3acc785c26f080a10a6df7ca05300dcf7510937c18764c1c97ce9`,
+`4136317d58965de5347339a30380431b81a6e1e53243292e134f85bdfdb9bdfc`,
+and `f1201febbbf03c76475c49348ab47598bc8234c8eed98842f6b22a5de55a0919`.
+
+Independent review was attempted with a separate `codex exec --sandbox
+read-only` process. It exited before reading the diff with `failed to
+initialize in-process app-server client: Read-only file system (os error 30)`.
+Independent review unavailable in-sandbox. Log SHA-256:
+`eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5`.
+
+The one prescribed `tests/ocean/fidelity -n 12` battery collected 3,142
+tests. At the bounded 99% compiler-limit stall it had emitted 3,113 PASS,
+seven SKIP, and four FAIL results; 18 tests were unclassified rather than
+called passed. The four failures are exactly the registered pre-existing
+reds: the GYRE round-129 record stamp, allow-dirty scope, worktree-stamp
+ratchet, and SI3 scalar-math provenance. No round-233 test is red. Battery
+log SHA-256:
+`6e716bfe6a7f0ea00275f205155f078c800c1299debf06ea6f6ad1770ed959e6`.
 
 ## Preregistered predictions
 
