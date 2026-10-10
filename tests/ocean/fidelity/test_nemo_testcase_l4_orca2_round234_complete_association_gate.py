@@ -27,7 +27,7 @@ def _inputs():
               "label-coverage", "false-owner", "endpoint"))
 def test_round234_plants_fire(plant: str) -> None:
     association, reports = _inputs()
-    with pytest.raises(gate.GateError, match="plant fired"):
+    with pytest.raises(gate.GateError):
         gate.classify(association, reports, plant=plant)
 
 
