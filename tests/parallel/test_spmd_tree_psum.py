@@ -70,3 +70,35 @@ def test_non_power_of_two_axis_keeps_psum():
     out, ref, _, has_ar, _ = _run("1", ndev=6)
     assert has_ar
     np.testing.assert_allclose(out, np.broadcast_to(ref, out.shape), rtol=1e-14)
+
+
+_MAX_CHILD = textwrap.dedent('''
+    import os
+    os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=" + os.environ["NDEV"]
+    import jax, jax.numpy as jnp, numpy as np
+    jax.config.update("jax_enable_x64", True)
+    from jax.sharding import Mesh, PartitionSpec as P
+    from jax import shard_map
+    from legoesm.parallel.reductions import spmd_max
+    mesh = Mesh(np.array(jax.devices()), ("d",))
+    g = jax.jit(shard_map(lambda x: spmd_max(x, "d"), mesh=mesh, in_specs=P("d"), out_specs=P("d")))
+    x = jnp.asarray(np.random.default_rng(1).normal(size=(len(jax.devices()), 2)))
+    hlo = g.lower(x).compile().as_text()
+    print(repr((np.asarray(g(x)).tolist(), np.asarray(x.max(axis=0)).tolist(), "all-reduce" in hlo)))
+''')
+
+
+@pytest.mark.parametrize("ndev,tree", [(8, True), (6, False)])
+def test_spmd_max_equals_global_max_on_every_device(ndev, tree):
+    """Butterfly max on a power-of-two axis (no all-reduce), pmax otherwise;
+    every device holds the exact global maximum."""
+    import ast
+    import numpy as np
+    env = dict(os.environ, JAX_PLATFORMS="cpu", NDEV=str(ndev))
+    env.pop("LEGOESM_SPMD_TREE_PSUM", None)
+    r = subprocess.run([sys.executable, "-c", _MAX_CHILD], env=env,
+                       capture_output=True, text=True, timeout=600)
+    assert r.returncode == 0, r.stderr[-2000:]
+    out, ref, has_ar = ast.literal_eval(r.stdout.strip().splitlines()[-1])
+    assert has_ar != tree
+    assert (np.array(out) == np.array(ref)[None]).all()

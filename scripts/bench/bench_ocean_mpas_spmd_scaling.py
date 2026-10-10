@@ -101,14 +101,16 @@ def build_parser() -> argparse.ArgumentParser:
     # how much of the plateau the barotropic solve owns, instead of inferring
     # it from a reduction count.
     p.add_argument("--pcg-variant",
-                   choices=["standard", "single_reduce", "single_reduce_deep"],
+                   choices=["standard", "single_reduce", "single_reduce_deep",
+                            "chebyshev_deep"],
                    default=None,
-                   help="unset = the backend's bundle (standard on GPU, single_reduce_deep on CPU); "
+                   help="unset = the backend's bundle (standard on GPU, chebyshev_deep x40 on CPU); "
                         "single_reduce_deep runs with the jacobi preconditioner "
-                        "(30 iterations for the 1e-10 residual; the CPU bundle's "
-                        "values); poly/gpoly need standard or single_reduce")
+                        "(30 iterations for the 1e-10 residual); chebyshev_deep also needs jacobi (no global sums "
+                        "in the loop; 40 updates in the CPU bundle); poly/gpoly need "
+                        "standard or single_reduce")
     p.add_argument("--pcg-fixed-iters", type=int, default=None,
-                   help="distributed PCG iteration count (unset = the backend bundle: 20 on GPU, 30 on CPU); "
+                   help="distributed PCG iteration count (unset = the backend bundle: 20 on GPU, 40 on CPU); "
                         "a PROBE knob -- lowering it changes the solve")
     p.add_argument("--eta-clamp-iters", type=int, default=3)
     p.add_argument("--profile-dir", type=str, default=None,
@@ -321,9 +323,10 @@ def main() -> int:
                "pcg_solver_path": ("fixed_iter_pcg" if nd > 1 else "stock_cg_to_tol"),
                "eta_floor_clamp_iters": args.eta_clamp_iters,
                "barotropic_allreduces_per_step": (
+                   None if nd <= 1 else
+                   3 if config.barotropic_implicit_pcg_variant == "chebyshev_deep" else
                    1 + (1 if config.barotropic_implicit_pcg_variant != "standard" else 2)
-                   * int(config.barotropic_implicit_pcg_fixed_iters)
-                   if nd > 1 else None)},
+                   * int(config.barotropic_implicit_pcg_fixed_iters))},
     ))
     if jax.process_index() == 0:
         with open(args.out, "a") as fh:

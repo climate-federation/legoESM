@@ -1263,6 +1263,111 @@ def _fixed_iteration_pcg_single_reduce(
     return x_last, rr_last
 
 
+def _global_max(x: jnp.ndarray) -> jnp.ndarray:
+    """Global maximum with the same lane branching as :func:`_global_dot_batch`
+    (SPMD axis -> butterfly max, multi-process -> MPI, else local)."""
+    from legoesm.parallel.reductions import (
+        global_max_mpi, is_multi_process, spmd_max, spmd_reduce_axis,
+    )
+    ax = spmd_reduce_axis()
+    if ax is not None:
+        return spmd_max(x, ax)
+    return global_max_mpi(x) if is_multi_process() else x
+
+
+def _fixed_iteration_chebyshev(
+    A_op: Callable[[jnp.ndarray], jnp.ndarray],
+    b: jnp.ndarray,
+    M_inv: Callable[[jnp.ndarray], jnp.ndarray],
+    x0: jnp.ndarray,
+    *,
+    max_iter: int,
+    dot_weight: jnp.ndarray,
+    deep_halo: tuple,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Jacobi-scaled Chebyshev iteration (Saad, Iterative Methods, Alg. 12.1
+    with preconditioner D^-1): ``max_iter`` updates, ``max_iter + 1`` matvecs
+    (initial residual, ``max_iter - 1`` in the loop, final residual) and NO
+    global sums inside the loop.
+
+    ``M_inv`` must be the pointwise Jacobi scaling D^-1. The spectrum of D^-1 A
+    on wet cells lies in [1/dmax, 2 - 1/dmax] (A = I + K with K's off-diagonal
+    row sum equal to diag - 1, Gershgorin); dmax is taken once per call from
+    the CURRENT operator's diagonal (one global max, stop_gradient'd: the
+    window only sets fixed iteration coefficients). A fixed linear iteration,
+    so it differentiates straight through.
+
+    Deep halo as in :func:`_fixed_iteration_pcg_single_reduce`: ``A_op`` is
+    the LOCAL operator; residual and update direction are exchanged together
+    once every ``rings`` matvecs (each matvec leaves both one ring shallower).
+    ``x`` accumulates only owned updates, so its halo stays ``x0``.
+
+    Returns ``(x, rr)`` with ``rr`` = W-weighted ``res . res`` of the RETURNED
+    ``x`` (recursive residual updated with the last direction), same contract
+    as the PCG bodies.
+    """
+    exchange, owned, rings = deep_halo
+    rings = int(rings)
+    if rings < 1:
+        raise ValueError(
+            f"deep-halo Chebyshev needs >= 1 complete halo ring, got {rings}")
+    if int(max_iter) < 1:
+        raise ValueError(f"Chebyshev needs >= 1 update, got max_iter={max_iter}")
+    owned = owned.astype(b.dtype)
+    W = dot_weight
+    inv_d = M_inv(jnp.ones_like(b))
+    wet = W > 0
+    # stop_gradient BEFORE the collective: MAX has no VJP on pmax/MPI lanes.
+    dmax = _global_max(jax.lax.stop_gradient(jnp.max(
+        jnp.where(wet, 1.0 / jnp.where(wet, inv_d, 1.0), 0.0))))
+    lmin, lmax = 1.0 / dmax, 2.0 - 1.0 / dmax
+    theta = 0.5 * (lmax + lmin)
+    # dmax == 1 (no coupling, D^-1 A = I) collapses the window to a point.
+    delta = jnp.maximum(0.5 * (lmax - lmin), jnp.finfo(b.dtype).eps * theta)
+    sigma = theta / delta
+
+    (xf,) = exchange(x0)
+    (res,) = exchange(b - A_op(xf))
+    d = inv_d * res / theta
+    x = x0 + d * owned
+    rho = 1.0 / sigma
+
+    def body(_i, c):
+        x, res, d, rho = c
+        res = res - A_op(d)
+        rho_n = 1.0 / (2.0 * sigma - rho)
+        d = rho_n * rho * d + (2.0 * rho_n / delta) * inv_d * res
+        return x + d * owned, res, d, rho_n
+
+    def block(_i, c):
+        x, res, d, rho = c
+        res, d = exchange(res, d)
+        c = (x, res, d, rho)
+        for _ in range(rings):
+            c = body(0, c)
+        return c
+
+    n_body = int(max_iter) - 1
+    c = (x, res, d, rho)
+    if n_body > 0:
+        n_first = min(rings, n_body)
+        for _ in range(n_first):
+            c = body(0, c)
+        n_blocks, n_rem = divmod(n_body - n_first, rings)
+        c = jax.lax.fori_loop(0, n_blocks, block, c)
+        if n_rem:
+            x, res, d, rho = c
+            res, d = exchange(res, d)
+            c = (x, res, d, rho)
+            for _ in range(n_rem):
+                c = body(0, c)
+    x, res, d, _ = c
+    (d,) = exchange(d)
+    res = res - A_op(d)
+    (rr,) = _global_dot_batch([(res * W, res)])
+    return x, rr
+
+
 def global_rel_residual(
     A_op: Callable[[jnp.ndarray], jnp.ndarray],
     x: jnp.ndarray,
@@ -1333,6 +1438,9 @@ def precision_aware_rel_tol(
     return jnp.maximum(requested, floor)
 
 
+_DEEP_VARIANTS = ("single_reduce_deep", "chebyshev_deep")
+
+
 def solve_helmholtz_implicit(
     A_op: Callable[[jnp.ndarray], jnp.ndarray],
     rhs: jnp.ndarray,
@@ -1398,11 +1506,11 @@ def solve_helmholtz_implicit(
     """
     # Before ANY dispatch (incl. the single-rank stock CG): a LOCAL operator handed to a variant that never
     # exchanges would silently drop the communication.
-    if (pcg_variant == "single_reduce_deep") != (deep_halo is not None):
+    if (pcg_variant in _DEEP_VARIANTS) != (deep_halo is not None):
         raise ValueError(
-            "solve_helmholtz_implicit: pcg_variant='single_reduce_deep' "
+            f"solve_helmholtz_implicit: pcg_variant in {_DEEP_VARIANTS} "
             "requires deep_halo=(exchange, owned, rings), and deep_halo "
-            f"is only valid with it (got variant {pcg_variant!r}).")
+            f"is only valid with them (got variant {pcg_variant!r}).")
     if not distributed:
         eta_new, _info = jax.scipy.sparse.linalg.cg(
             A_op, rhs, x0=x0, tol=stock_cg_tol,
@@ -1447,11 +1555,21 @@ def solve_helmholtz_implicit(
             A_op, rhs, M_inv, x0, max_iter=fixed_iters,
             dot_weight=dot_weight, deep_halo=deep_halo,
         )
+    elif pcg_variant == "chebyshev_deep":
+        if dot_weight is None:
+            raise ValueError(
+                "solve_helmholtz_implicit: pcg_variant='chebyshev_deep' "
+                "requires dot_weight (masked cell area: wet-cell mask and "
+                "the residual diagnostic's weighting).")
+        eta_new, rr = _fixed_iteration_chebyshev(
+            A_op, rhs, M_inv, x0, max_iter=fixed_iters,
+            dot_weight=dot_weight, deep_halo=deep_halo,
+        )
     else:
         raise ValueError(
             "solve_helmholtz_implicit: unknown pcg_variant "
-            f"{pcg_variant!r}; expected 'standard', 'single_reduce' or "
-            "'single_reduce_deep'."
+            f"{pcg_variant!r}; expected 'standard', 'single_reduce', "
+            "'single_reduce_deep' or 'chebyshev_deep'."
         )
     # rhs norm for the relative-residual diagnostic — same weighting as
     # the solver's rr (owned-masked on partitioned meshes; halo entries

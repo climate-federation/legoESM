@@ -393,3 +393,67 @@ def test_deep_halo_variant_matches_per_iteration_exchange():
     scale = comm.allreduce(float(np.max(np.abs(np.asarray(ref)[:n]))), op=MPI.MAX)
     assert gap <= 1e-12 * scale, (gap, scale)
     assert mut > 1e-6 * scale, (mut, scale)
+
+
+def test_chebyshev_deep_on_mpi_lane_matches_serial_and_overclaim_breaks():
+    """chebyshev_deep on the MPI-per-rank partition (1 certified ring; its one
+    global max goes through global_max_mpi) converges to the serial solve, and
+    claiming two rings more than certified changes the iterate."""
+    from legoesm.parallel.halo_exchange_voronoi import VoronoiHaloExchange
+    from legoesm.parallel.voronoi_mpi import (
+        get_active_voronoi_layout,
+        initialize_voronoi_mpi,
+    )
+
+    mesh, mask, H_e, rhs = _global_problem()
+    coeff = jnp.asarray(COEFF)
+    edge_mask = mask[mesh.cellsOnEdge[0]] * mask[mesh.cellsOnEdge[1]]
+    eta_ref, _ = solve_helmholtz_implicit(
+        _make_helmholtz(H_e, coeff, mesh, mask, edge_mask), rhs,
+        _make_diag_preconditioner(H_e, coeff, mesh, mask, edge_mask),
+        jnp.zeros_like(rhs), distributed=False, fixed_iters=M_ITERS,
+        residual_tol=1.0e-9, stock_cg_tol=1.0e-12, stock_cg_maxiter=600)
+    eta_ref = np.asarray(eta_ref)
+
+    layout = get_active_voronoi_layout()
+    if layout is None:
+        _r, _n, layout = initialize_voronoi_mpi(mesh)
+    rings = int(layout.complete_cell_rings)
+    part, lmesh = layout.partition, layout.local_mesh
+    lc, le = np.asarray(part.local_cells), np.asarray(part.local_edges)
+    mask_l = jnp.asarray(np.asarray(mask)[lc])
+    rhs_l = jnp.asarray(np.asarray(rhs)[lc])
+    H_e_l = jnp.asarray(np.asarray(H_e)[le])
+    edge_mask_l = mask_l[lmesh.cellsOnEdge[0]] * mask_l[lmesh.cellsOnEdge[1]]
+    A_loc = _make_helmholtz(H_e_l, coeff, lmesh, mask_l, edge_mask_l)
+    M_loc = _make_diag_preconditioner(H_e_l, coeff, lmesh, mask_l, edge_mask_l)
+    ex = VoronoiHaloExchange(part, backend="mpi")
+    owned = layout.owned_mask_cells.astype(rhs_l.dtype)
+    w_dots = owned * lmesh.areaCell.astype(rhs_l.dtype) * mask_l
+    x0 = jnp.zeros_like(rhs_l)
+
+    def exch(*fs):
+        return tuple(ex.exchange_cell_field(f) for f in fs)
+
+    def cheb(n, r):
+        return solve_helmholtz_implicit(
+            A_loc, rhs_l, M_loc, x0, distributed=True, fixed_iters=n,
+            residual_tol=1.0e-9, stock_cg_tol=1.0e-12, stock_cg_maxiter=600,
+            pcg_variant="chebyshev_deep", dot_weight=w_dots, deep_halo=(exch, owned, r))
+
+    eta, diag = cheb(400, rings)
+    assert bool(diag.converged), f"rel_residual={float(diag.rel_residual)}"
+    n = int(part.n_owned_cells)
+    good, _ = cheb(7, rings)
+    bad, _ = cheb(7, rings + 2)
+    mut = comm.allreduce(float(np.max(np.abs(np.asarray(good - bad)[:n]))), op=MPI.MAX)
+    scale = comm.allreduce(float(np.max(np.abs(np.asarray(good)[:n]))), op=MPI.MAX)
+    assert mut > 1e-6 * scale, (mut, scale)
+    pieces = comm.gather((lc[:n], np.asarray(eta)[:n]), root=0)
+    if RANK != 0:
+        return
+    eta_glob = np.full(eta_ref.shape, np.nan)
+    for ids, vals in pieces:
+        eta_glob[ids] = vals
+    assert not np.isnan(eta_glob).any(), "gather left unowned cells"
+    np.testing.assert_allclose(eta_glob, eta_ref, rtol=TOL, atol=TOL)
