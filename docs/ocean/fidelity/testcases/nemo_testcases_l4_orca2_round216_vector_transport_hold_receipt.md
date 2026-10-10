@@ -93,8 +93,28 @@ a record stop.
 
 Focused round-216 tests pass 5/5. The downstream gate passes normally and its
 boundary-V, registry, transport-mask and materialisation plants each refuse.
-Citation-gate, cumulative-gate, rigid-shift-plant, fidelity-battery and
-independent-review results are recorded in the final round commit.
+The receipt citation gate passes all three distinct compiled spans with no
+failures or unmapped entries. The cumulative default citation gate passes all
+274 spans with no failures or unmapped entries. Shifting the new transport
+span by two lines makes the receipt gate exit 1 at its first endpoint, as
+required.
+
+The one prescribed `tests/ocean/fidelity -n 12` battery collected 3,045 tests.
+It reached 98%, then the retained execution session stopped emitting and no
+pytest process remained. The orphaned session was bounded and is not called a
+PASS: 2,981 tests passed, seven skipped, 53 remained unclassified, and exactly
+four registered pre-existing failures emitted verdicts (the GYRE round-129
+spread-floor record stamp, allow-dirty scope, worktree-stamp ratchet and SI3
+scalar-math provenance gate). The retained log is
+`round216/pytest_fidelity.log`, SHA-256
+`46abc9c60d94b2756c5a364aa895d4bce2d5da4fbe6fd77f3381ce9234319f34`.
+
+Independent review was attempted separately with `codex exec --sandbox
+read-only` and exited 1 before reading the diff: `failed to initialize
+in-process app-server client: Read-only file system (os error 30)`.
+Independent review is unavailable in-sandbox; this is not a PASS. The retained
+log SHA-256 is
+`7a448ab7f3a0eaa6dcf6d3bdcd3b19bf6704738b14f260ce68cf0c5adf558222`.
 
 ## OPEN
 
