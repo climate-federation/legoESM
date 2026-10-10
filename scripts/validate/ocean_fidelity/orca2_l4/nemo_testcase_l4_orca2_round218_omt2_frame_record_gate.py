@@ -32,7 +32,12 @@ MONTH_STEPS = (10, 20, 30, 40, 50, 60, 70, 80, 90, 95)
 PLANTS = (
     "none", "cadence", "header", "field-name", "truncation", "nonfinite",
     "missing-frame", "twin-ulp", "terminal-byte", "changed-binary",
-    "early-month",
+    "early-month", "stop-line",
+)
+
+STP_CTL_LINE = (
+    "stp_ctl: |ssh| > 20 m  or  |U| > 10 m/s  or  S <= 0  or  "
+    "S >= 100  or  NaN encounter in the tests"
 )
 
 
@@ -115,11 +120,17 @@ def _month_boundary(root: Path, canonical: Path, plant: str) -> dict:
         boundary_step = MONTH_ITEND
         available = MONTH_STEPS
     else:
-        require("RUN_EXPECTED_STP_CTL" in timing,
-                "month neither completed nor recorded an expected stp_ctl")
+        # Round 218's launcher reached the compiled stop, but its shorter
+        # literal grep rejected the real source line before it could append
+        # RUN_EXPECTED_STP_CTL.  The raw MPI/stpctl/abort-state evidence is
+        # the authority; the launcher's derived marker is informational.
+        require("RUN_STARTED_UTC=" in timing,
+                "month lacks its run-start provenance stamp")
         require("MPI_ABORT was invoked" in stdout and "Errorcode: 123" in stdout,
                 "month stp_ctl lacks exact MPI abort evidence")
-        require("stp_ctl: |ssh| > 20 m  or  |U| > 10 m/s" in ocean,
+        if plant == "stop-line":
+            ocean = ocean.replace(STP_CTL_LINE, "different compiled stop")
+        require(STP_CTL_LINE in ocean,
                 "month did not stop through compiled stp_ctl")
         steps = tuple(int(value) for value in re.findall(
             r"(?m)^\s*kt\s+(\d+)\s", ocean,

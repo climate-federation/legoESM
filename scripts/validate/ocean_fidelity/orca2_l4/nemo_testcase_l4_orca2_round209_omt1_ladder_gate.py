@@ -108,6 +108,7 @@ def _run_ladder(
     label: str,
     *,
     atomic_fold_unit=None,
+    steps=None,
 ) -> dict[str, object]:
     import jax
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
@@ -143,7 +144,8 @@ def _run_ladder(
 
     checkpoints: list[dict[str, object]] = []
     first_non_bit = None
-    for kt in record_gate.STEPS:
+    selected_steps = tuple(record_gate.STEPS if steps is None else steps)
+    for kt in selected_steps:
         entry = rung0.assemble_frame(record_root, kt, 0)
         checkpoints.append(_checkpoint(
             kt, "entry", rung0.candidate_fields(state), entry))
@@ -167,13 +169,16 @@ def _run_ladder(
         print(f"PROGRESS {label} kt={kt}", file=sys.stderr, flush=True)
         state = state_after
 
-    require(len(checkpoints) == 32, f"{label}: incomplete checkpoint ladder")
+    expected_checkpoints = 4 * len(selected_steps)
+    require(len(checkpoints) == expected_checkpoints,
+            f"{label}: incomplete checkpoint ladder")
     rows = [
         {"kt": cp["kt"], "checkpoint": cp["checkpoint"], "field": field,
          **cp["rows"][field]}
         for cp in checkpoints for field in FIELDS
     ]
-    require(len(rows) == 160, f"{label}: incomplete row ladder")
+    require(len(rows) == 5 * expected_checkpoints,
+            f"{label}: incomplete row ladder")
     return {
         "label": label,
         "private_arm": {

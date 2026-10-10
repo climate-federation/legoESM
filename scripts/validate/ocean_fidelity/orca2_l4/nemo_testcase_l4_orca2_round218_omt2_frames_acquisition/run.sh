@@ -106,7 +106,7 @@ fi
 admit() {
   local plant
   for plant in cadence header field-name truncation nonfinite missing-frame \
-    twin-ulp terminal-byte changed-binary early-month; do
+    twin-ulp terminal-byte changed-binary early-month stop-line; do
     if "$py" "$record_gate" --candidate "$canonical" \
       --calibration "$calibration" --twin-a "$twin_a" --twin-b "$twin_b" \
       --month "$month" --plant "$plant" \
@@ -207,7 +207,7 @@ run_month() {
       printf 'REFUSE: unexpected OMT-2 month exit (%s,%s)\n' \
         "${pipe_rc[0]}" "${pipe_rc[1]:-0}" >&2; exit 70;
     }
-    grep -q 'stp_ctl: |ssh| > 20 m  or  |U| > 10 m/s' ocean.output
+    grep -Fq 'stp_ctl: |ssh| > 20 m  or  |U| > 10 m/s  or  S <= 0  or  S >= 100  or  NaN encounter in the tests' ocean.output
     last_step=$(awk '/^[[:space:]]*kt[[:space:]]+[0-9]+/{step=$2} END{print step+0}' ocean.output)
     [[ "$last_step" -gt 10 ]] || {
       printf 'REFUSE: OMT-2 did not complete its ten-step ladder (kt=%s)\n' "$last_step" >&2; exit 70;

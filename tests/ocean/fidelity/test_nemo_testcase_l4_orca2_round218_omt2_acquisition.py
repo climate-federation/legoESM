@@ -77,3 +77,16 @@ def test_runner_month_protocol_obeys_compiled_limits() -> None:
     assert "10,20,30,40,50,60,70,80,90,95" in text
     assert '[[ "$last_step" -gt 10 ]]' in text
     assert "/usr/bin/time" not in text
+
+
+def test_existing_month_stop_line_plant_fires() -> None:
+    evidence = Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/"
+        "round218/acquisition"
+    )
+    with pytest.raises(record_gate.GateError, match="compiled stp_ctl"):
+        record_gate._month_boundary(
+            evidence / "orca2_omt2_month_boundary_96step_np2",
+            evidence / "omt2_namelist_cfg",
+            "stop-line",
+        )
