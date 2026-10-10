@@ -96,7 +96,9 @@ the failed-candidate record.
 
 ## Validation and review
 
-The focused round-225 suite passes 6/6. Each of the north-source,
+The focused round-225 plus citation-gate suite passes 23/23 (log SHA-256
+`a0884ddc8369bc59e2b20961a37c8b21c85fcb8d04020de1c7810ee1c24a1af7`).
+Each of the north-source,
 fold-support, guard, coefficient, and sufficiency plants exits 2 with
 `STATUS PLANT-FIRED`. Their log SHA-256 values are respectively
 `34f7dc8b5cc2434d25f20b533877767aed0e67a145f79141a1c41e151fa212c1`,
@@ -105,14 +107,29 @@ fold-support, guard, coefficient, and sufficiency plants exits 2 with
 `227ef7ce66de2d077c974fe6539e903cc4631dcc0cca56ff180ad47e620a6966`,
 and `0fc6443069ed55fff6a613fa6a9d6a0558e78621581f38f93998fb62b1cf0ce3`.
 
+The round citation gate passes all 7 cited compiled spans; the cumulative
+default gate passes 274 citations with zero failures, unmapped citations, or
+map-audit failures. Shifting the guarded-budget range by two lines makes the
+round gate fail `SYMBOL-NOT-AT-LINE`. Round/default/plant JSON SHA-256 values
+are `50bec612a9fe51c2690e73565522ed0371154cc9160991ef7d102787c2e2a75e`,
+`c2a5bfc3017a81867da6418fcbe343343ac797be60cdba57cb67310e2f0a24ed`,
+and `df28c243d4e65f1e2e06a8f8b9c3a0a59d24be4ee25e27341da12e104b270f8e`.
+
 Independent review was attempted with `codex exec --sandbox read-only` and
 exited 1 before reading the diff: `failed to initialize in-process app-server
 client: Read-only file system (os error 30)`. **Independent review unavailable
 in-sandbox**; this is not a PASS. Review-log SHA-256:
 `eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5`.
 
-Citation-gate and prescribed pytest results are appended below after their
-single clean executions.
+The single prescribed `tests/ocean/fidelity -n 12` battery collected 3,094
+tests and reached 98%. It classified 3,051 passed, seven skipped, and four
+registered pre-existing failures: the GYRE round-129 spread-floor record,
+the allow-dirty scope ratchet, the worktree-stamp ratchet, and the SI3
+scalar-math provenance gate. Thirty-two tests remained unclassified when
+every real pytest process disappeared without a terminal summary; the idle
+wrapper was interrupted and the battery was not relaunched. This result is
+not called PASS. Log SHA-256:
+`5be62a9bc88b52dd62c1dacb4f6516d04803a12cfb5c4c494461d624833a7ce5`.
 
 ## OPEN
 
