@@ -517,8 +517,7 @@ def solve_richards(
         dh_s = dh_s * lam
         h_s_new = h_s_m + dh_s
 
-        # Update psi and theta unconditionally.  Converged columns get near-zero
-        # dpsi, so extra iterations are effectively no-ops.  Clamp psi at the config-
+        # Update psi and theta (converged columns are frozen below).  Clamp psi at the config-
         # aware dry-side floor (_psi_dry_floor, see _SE_DRY_FLOOR): a fully-dried
         # layer (C, K -> 0) would otherwise drive dpsi -> ±inf and NaN the Thomas
         # solve.  maximum() leaves the whole normal + wet range untouched.
