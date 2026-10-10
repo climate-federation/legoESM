@@ -2390,10 +2390,10 @@ CITATION_MAP = {
         'END SUBROUTINE zdf_drg_lin', 27],
     'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/zdfdrg.f90:540-547': [
         'CASE( np_lin )             !==  linear friction  ==!',
-        'CALL zdf_drg_lin( pCd0(:,:), pCdU(:,:) )', 8],
+        ('CALL zdf_drg_lin( pCd0(:,:), pCdU(:,:) )', 2), 8],
     'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/dynzdf.f90:158-169': [
         'IF( ln_drgimp .AND. ln_dynspg_ts ) THEN',
-        'pvv(ji,jj,ikv,Kaa) = pvv(ji,jj,ikv,Kaa) + zDt_2 * ( rCdU_bot(ji,jj+1)+rCdU_bot(ji,jj) ) * vv_b(ji,jj,Kaa)',
+        '&                                            / (e3v_3d(ji,jj,ikv) *(1._wp+r3v(ji,jj,Kaa)*vmask(ji,jj,ikv)))',
         12],
     'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/dynzdf.f90:303-312': [
         'IF( ln_drgimp ) THEN      ! implicit bottom friction',
@@ -2401,7 +2401,7 @@ CITATION_MAP = {
         10],
     'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/dynzdf.f90:470-474': [
         'IF ( ln_drgimp ) THEN      ! implicit bottom friction',
-        '&                                   / (e3v_3d(ji,jj,ikv) *(1._wp+r3v(ji,jj,Kaa)*vmask(ji,jj,ikv)))',
+        ('&                                   / (e3v_3d(ji,jj,ikv) *(1._wp+r3v(ji,jj,Kaa)*vmask(ji,jj,ikv)))', 1),
         5],
     'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:1404-1463': [
         'SUBROUTINE dyn_drg_init( Kbb, Kmm, puu, pvv, puu_b ,pvv_b, pu_RHSi, pv_RHSi, pCdU_u, pCdU_v )',
