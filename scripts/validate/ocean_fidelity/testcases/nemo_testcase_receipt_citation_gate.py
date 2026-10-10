@@ -2633,7 +2633,7 @@ CITATION_MAP = {
         'def nemo_ab3am4_coeff_arrays(n_loop: int, alpha: float = _NEMO_BT_ALPHA,',
         14],
     'barotropic_latlon_cgrid.py:3389-3390': [
-        '_ab3_za, _ab3_zb = nemo_ab3am4_coeff_arrays(',
+        ('_ab3_za, _ab3_zb = nemo_ab3am4_coeff_arrays(', 2),
         'n_loop, ramp=_ab3_hist is None)', 2],
     'orca2_rounds/round222/acquisition/orca2_omt4_frames_10step_a_np2/namelist_cfg:383-387': [
         'ln_dynspg_ts  = .true.',
