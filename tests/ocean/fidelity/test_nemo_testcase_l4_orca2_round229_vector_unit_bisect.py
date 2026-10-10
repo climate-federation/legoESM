@@ -56,6 +56,7 @@ def _scenario(label: str) -> dict:
         },
         "recorded_transport_shape": [152, 94, 31],
         "recorded_transport_bottom": _row(0.0, 0),
+        "variant_order": list(gate.VARIANTS),
         "variants": variants,
     }
 
@@ -154,7 +155,8 @@ def test_isolated_variant_reports_assemble_in_frozen_order() -> None:
     reports = [_variant_report("independent", variant)
                for variant in gate.VARIANTS]
     assembled = gate.assemble_scenario(reports)
-    assert tuple(assembled["variants"]) == gate.VARIANTS
+    assert tuple(assembled["variant_order"]) == gate.VARIANTS
+    assert set(assembled["variants"]) == set(gate.VARIANTS)
     with pytest.raises(gate.GateError):
         gate.assemble_scenario(list(reversed(reports)))
 

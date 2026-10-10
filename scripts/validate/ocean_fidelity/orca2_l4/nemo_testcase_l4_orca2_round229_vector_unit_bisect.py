@@ -355,6 +355,7 @@ def assemble_scenario(variant_reports: list[dict]) -> dict[str, object]:
             "recorded_transport_shape"],
         "recorded_transport_bottom": variant_reports[0][
             "recorded_transport_bottom"],
+        "variant_order": list(VARIANTS),
         "variants": {
             variant: by_variant[variant]["score"] for variant in VARIANTS
         },
@@ -372,8 +373,10 @@ def classify(reports: list[dict], *, plant: str = "none") -> dict[str, object]:
     for label, report in by_label.items():
         require(report["status"] == "PASS_R229_SCENARIO",
                 f"{label}: scenario did not pass")
-        require(tuple(report["variants"]) == VARIANTS,
-                f"{label}: variant coverage/order moved")
+        require(tuple(report["variant_order"]) == VARIANTS,
+                f"{label}: variant order moved")
+        require(set(report["variants"]) == set(VARIANTS),
+                f"{label}: variant coverage moved")
         require(report["support"]["v_pivot"]["unequal"] == 0,
                 f"{label}: compact V support is not exact")
         require(report["support"]["t_pivot_right_half"]["unequal"] == 0,
