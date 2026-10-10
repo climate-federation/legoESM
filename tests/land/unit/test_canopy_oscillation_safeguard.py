@@ -18,7 +18,8 @@ halving it until it does, armed only once the plain step has had ~18 iterations
 to work (under batching every column pays for the extra residual evaluations
 the hardest one needs, so arming it from the start is pure cost).
 
-Both tests below are written to FAIL if the safeguard is disabled.
+That line-search safeguard was replaced on 2026-08-23 by adaptive damping in
+the shared solver; the test below checks the solver still solves this regime.
 """
 from __future__ import annotations
 
@@ -27,7 +28,6 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-import legoesm.land.canopy.solver as solver
 from legoesm.core.coupling_fields import AtmToSurface
 from legoesm.land.config import MultiLayerLandConfig
 from legoesm.land.surface_scheme import TwoLeafCanopyConfig
@@ -90,34 +90,12 @@ def _unsolved_fraction(ncol: int, cap: int, seed: int = 0) -> float:
 # very conditions the fix addresses, so the test measured nothing while still
 # passing its non-vacuity check.  A cheaper version of this test is a test of a
 # different solver.  So the batch and the outer loop are left at realistic
-# values and the behavioural tests are skipped where that is unaffordable; the
-# source-level test below has no such cost and always runs.
+# values and the behavioural test is skipped where that is unaffordable.
 _GPU = any(d.platform == "gpu" for d in jax.devices())
 _needs_gpu = pytest.mark.skipif(
     not _GPU, reason="the safeguard's effect only appears at a realistic batch "
                      "size and outer-loop count, which is too slow on CPU")
 NCOL = 512
-
-
-@_needs_gpu
-def test_safeguard_solves_columns_the_plain_step_cannot(monkeypatch):
-    """Fewer columns are left unsolved with the safeguard than without it.
-
-    Disabling it means arming it past the iteration limit, so the solver falls
-    back to the plain clipped step it used before -- which is exactly the
-    reverted state this test has to fail in.
-    """
-    with_guard = _unsolved_fraction(NCOL, cap=25)
-
-    monkeypatch.setattr(solver, "_LINESEARCH_ARM_ITER", 10_000)
-    without_guard = _unsolved_fraction(NCOL, cap=25)
-
-    assert without_guard > 0.0, (
-        "no column failed even without the safeguard, so this forcing cannot "
-        "detect whether the safeguard works — widen the spread")
-    assert with_guard < without_guard, (
-        f"the safeguard left {with_guard:.4%} of columns unsolved but the plain "
-        f"step left {without_guard:.4%}: it is not breaking the oscillation")
 
 
 @_needs_gpu
