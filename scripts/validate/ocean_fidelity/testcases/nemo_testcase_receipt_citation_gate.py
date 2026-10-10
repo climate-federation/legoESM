@@ -244,6 +244,10 @@ FILES = {
         _ORCA2_R230FOLDTRP / "ppsrc/nemo/domzgr.f90"),
     "ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/domqco.f90": (
         _ORCA2_R230FOLDTRP / "ppsrc/nemo/domqco.f90"),
+    "ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dommsk.f90": (
+        _ORCA2_R230FOLDTRP / "ppsrc/nemo/dommsk.f90"),
+    "ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/lbcnfd.f90": (
+        _ORCA2_R230FOLDTRP / "ppsrc/nemo/lbcnfd.f90"),
     "ORCA2_OMIP_L4_R230FOLDTRP/BLD/inc/domzgr_substitute.h90": (
         _ORCA2_R230FOLDTRP / "inc/domzgr_substitute.h90"),
     "ORCA2_OMIP_L4_R214VECPREV3/BLD/ppsrc/nemo/stprk3_stg.f90": (
@@ -2671,6 +2675,19 @@ CITATION_MAP = {
         ('!==  ratio at u-,v-point  ==!', 2),
         ('END DO   ;   END DO', 5),
         10],
+    # --- ORCA2 round 233: atomic stage-transport geometry unit -------
+    'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dommsk.f90:206-214': [
+        ('Ocean/land mask at u-, v-, and f-points', 1),
+        ('* tmask(ji+1,jj+1,jk)', 1),
+        9],
+    'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dommsk.f90:228-232': [
+        ('IF ( MAXVAL(umask(ji,jj,:))/=0._wp )', 1),
+        ("CALL lbc_lnk( 'dommsk', umask, 'U', 1.0_wp", 1),
+        5],
+    'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/lbcnfd.f90:973-981': [
+        ("CASE ( 'V' )", 1),
+        ('ptab(1,ipj+jh) = psgn * ptab(3,ipj-3-jh)', 1),
+        9],
     'ocean_model_latlon_cgrid.py:1821-1825': [
         ('ops = nemo_qco_card_mesh_operands', 1),
         ('include_reciprocals=include_reciprocals', 1),
