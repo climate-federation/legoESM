@@ -91,7 +91,7 @@ the final package tree is byte-identical to the frozen base.
 
 The committed classifier finishes `STATUS HELD_R217_RUNG0_LIVE_THICKNESS`.
 Its report SHA-256 is
-`2fa05b109933fb17bd9370377f94a73e88416b047cf53937fefb26c3fd430281`.
+`8b183bad4e41bc65f6feb65ca388ee55838ca57bfac3e40cca057e1417426f8a`.
 
 ## Validation and review
 
