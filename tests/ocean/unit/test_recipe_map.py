@@ -59,7 +59,7 @@ def test_recipe_for_unknown_raises():
         recipe_for("not_an_experiment")
 
 
-def test_only_four_recipes_cover_the_matrix():
+def test_a_handful_of_recipes_cover_the_matrix():
     """The headline finding: ~21 experiments collapse to a handful of recipes.
 
     bench deliberately joins the NEMO-like recipe (the benchmark measures

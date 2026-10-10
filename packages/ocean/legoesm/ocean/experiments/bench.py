@@ -24,13 +24,14 @@ Design principles (verbatim from the paper, Sect. 2.2.1):
 NEMO BENCH reference formulas (sources quoted as file:line, NEMO main):
 
 * ``usrdef_istate.F90:44-77`` — with the global 1-D point index
-  ``p = (i_g + (j_g - 1) * Ni0glo) / (Ni0glo * Nj0glo)`` and the
-  hemisphere-mirrored ramp::
+  ``p = (2*i_g - 1 + 2*(j_g - 1)*Ni0glo) / (Ni0glo * Nj0glo)``
+  (doubled numerator — NEMO's own device so u/v face points also
+  get unique values) and the hemisphere-mirrored ramp::
 
       z2d = 0.1 * (p - 0.5)                (southern hemisphere)
       z2d = 0.1 * (1.5 - p')              (northern hemisphere, p' the
-                                          same index counted so the ramp
-                                          mirrors at the equator row)
+                                           same index counted so the ramp
+                                           mirrors at the equator row)
 
   then, with depth factor ``f = (k) / (jpk - 1)``::
 
@@ -40,17 +41,23 @@ NEMO BENCH reference formulas (sources quoted as file:line, NEMO main):
       v = 0.01 * z2d [m/s]
       ssh = 0.1 * (0.5 - p)               [+/- 0.05 m]
 
+  (amplitudes are NEMO's coefficients times the z2d range — see
+  ``build_z2d_ramp`` for the exact range statement.)
+
 * ``usrdef_zgr.F90:139-165`` — flat bottom, UNIFORM vertical grid with
-  ``dz = H / (jpk - 1)`` (NEMO's ``zd = 5000./REAL(jpkm1)``; k_bot =
-  jpkm1 everywhere, no land, no cavities).
+  ``zd = 5000/jpkm1``: NEMO's ``nn_ksize=75`` gives ``jpk=75`` hence
+  **74 wet levels** of ``dz = 5000/74 ≈ 67.57 m`` (k_bot = jpkm1
+  everywhere, no land, no cavities); ``n_levels`` here is that wet
+  count.
 
 * ``usrdef_sbc.F90:56-92`` — surface forcing ALL ZERO for the ocean
   (utau = vtau = qns = qsr = emp = sfx = 0).
 
-* ``namusr_def`` (usrdef_nam.F90:103-114) — domain size set by parameters
-  (``nn_isize/jsize/ksize``); a NEGATIVE size means per-subdomain size
-  (weak-scaling mode), reproduced here by ``local_*`` sizing in the run
-  harness.
+* ``namusr_def`` (usrdef_nam.F90:103-114) — domain size set by
+  parameters (``nn_isize/jsize/ksize``); a NEGATIVE size means
+  per-subdomain size (weak-scaling mode), which requires actual SPMD
+  sharding — a documented follow-up in the runners-repo harness, NOT
+  wired here (see ``bench_plan.md`` divergences).
 
 legoESM divergences (each deliberate, recorded in
 ``docs/ocean/experiments/bench_plan.md``):
@@ -91,17 +98,27 @@ class BenchConfig:
     """Configuration for the BENCH performance-benchmark experiment.
 
     Defaults mirror NEMO BENCH's ORCA1-like preset geometry where the
-    concepts transfer (75 levels, 5000 m flat bottom) and legoESM's OMIP
-    conventions elsewhere.  ``n_lat``/``n_lon`` are deliberately NOT
-    defaulted to a production size: the test matrix and run harness set
-    them per preset (see ``BENCH_PRESETS``).
+    concepts transfer (74 wet levels = NEMO jpkm1 for nn_ksize=75,
+    5000 m flat bottom) and legoESM's OMIP conventions elsewhere.
+    ``n_lat``/``n_lon`` are deliberately NOT defaulted to a production
+    size: the test matrix and run harness set them per preset (see
+    ``BENCH_PRESETS``).
     """
 
     # --- Domain / grid ---
-    n_lat: int = 180  # Latitude cells (latlon preset sizing)
+    n_lat: int = 278  # Latitude rows (derived: 2K for the mercator preset)
     n_lon: int = 360  # Longitude cells
-    n_levels: int = 75  # Vertical levels (NEMO BENCH nn_ksize=75)
+    n_levels: int = 74  # WET levels (NEMO nn_ksize=75 -> jpk=75 -> jpkm1=74)
     H_max: float = 5000.0  # Flat-bottom depth [m] (NEMO: 5000 m)
+    # Mercator truncation latitude [deg] for the latlon lane (see
+    # BENCH_PRESETS): NEMO BENCH never runs a full-sphere equirectangular
+    # grid (its 100-km box is closed / the ORCA-like presets fold); a
+    # full-sphere equirectangular latlon grid's pole-row dx (~110 m at
+    # 89.75 deg for 1 deg) is barotropic-CFL-unstable at ANY preset dt
+    # (measured, scripts/validate/ocean_bench/stability_probes.py), so the
+    # legoESM latlon analog truncates at 80 deg with isotropic (DINO-style
+    # Mercator) row placement.
+    lat_max_deg: float = 80.0
 
     # --- NEMO usrdef_istate.F90 amplitudes (ported verbatim) ---
     # z2d is O(0.1) by construction (the 0.1 prefactor is IN the ramp
@@ -120,29 +137,75 @@ class BenchConfig:
     max_eta_limit: float = 1.0  # |eta| must stay below [m]
 
     # --- Resolution presets (NEMO BENCH namelist_cfg_orca{1,025,12}_like) ---
-    # Point counts mirror NEMO's isize x jsize: orca1_like 360x331,
-    # orca025_like 1440x1206, orca12_like 4320x3146.  latlon rows are the
-    # equirectangular analog (full sphere 360 x 180 etc.); tripole presets
-    # keep NEMO's exact j-count for fold-row-count parity.
+    # NEMO sizes: orca1_like 360x331, orca025_like 1440x1206,
+    # orca12_like 4320x3146 (nn_isize x nn_jsize), nn_ksize = 75 (74 wet
+    # levels).  The latlon presets are the equirectangular full-sphere
+    # analog (360x180 etc.); the tripole presets keep NEMO's EXACT
+    # j-count (331/1206/3146) for fold-row-count parity.  Note: NEMO's
+    # orca1_like uses an F-point fold (cn_NFtype='F') while the
+    # synthetic tripole is a T-fold — a documented divergence.
     A_h: float = 1.0e4  # Laplacian viscosity [m2/s] (1-deg OMIP)
     A_v: float = 1.0e-3  # Vertical viscosity [m2/s]
     K_v: float = 1.0e-4  # Background vertical diffusivity [m2/s]
 
 
-# Resolution presets: (n_lat, n_lon, nlev, dt_seconds).
-# dt values are MEASURED stability values for the legoesm_nemo_like_v1
-# recipe (RK3 momentum + explicit barotropic substeps) on this IC: 10-step
-# probes 2026-10-10 found 36x72x20 UNSTABLE at dt=3600 s (NaN on step 1,
-# even with vertical mixing off) and stable at dt<=1800 s; 24x48x10 is
-# stable at dt=3600 s. The presets halve the first-guess OMIP dt to keep
-# a stability margin (NEMO BENCH's dt is likewise a per-preset namelist
-# value: 5400/1440/480 s for orca{1,025,12}_like — its fixed 100-km box
-# allows one dt family, our spherical grids do not).
+# Resolution presets for the latlon (Mercator-truncated) lane.  NEMO
+# sizes: orca1_like 360x331, orca025_like 1440x1206, orca12_like
+# 4320x3146 (nn_isize x nn_jsize), nn_ksize = 75 (74 wet levels).
+# The legoESM latlon analog keeps NEMO's n_lon and truncates at
+# lat_max_deg=80 with isotropic Mercator rows (n_lat = 2K is DERIVED:
+# 278/1116/3350); the tripole presets keep NEMO's EXACT j-count
+# (331/1206/3146) for fold-row-count parity.  n_levels is the WET count
+# (NEMO jpkm1 = nn_ksize - 1 = 74).
+#
+# dt values are MEASURED first-stable-guess boundaries from the
+# committed probe (scripts/validate/ocean_bench/stability_probes.py,
+# 2026-10-10) halved for margin: the 1-deg analog (n_lon=360) is stable
+# 60 steps at dt<=1500 s and NaN by dt=1650 s; the 0.5-deg analog
+# (n_lon=720) is stable at dt<=600 s, NaN by dt=750 s (the dt ceiling is
+# the Mercator-wall row's CFL, scaling with n_lon).  The finer presets
+# follow the measured dx-scaling; re-measure before long runs.
+# NEMO BENCH's dt is likewise a per-preset namelist value (5400/1440/480
+# s for orca{1,025,12}_like — its fixed 100-km box allows one dt family,
+# our spherical grids do not).
 BENCH_PRESETS: dict[str, dict[str, Any]] = {
-    "orca1_like": {"n_lat": 180, "n_lon": 360, "n_levels": 75, "dt_seconds": 1800.0},
-    "orca025_like": {"n_lat": 720, "n_lon": 1440, "n_levels": 75, "dt_seconds": 450.0},
-    "orca12_like": {"n_lat": 2160, "n_lon": 4320, "n_levels": 75, "dt_seconds": 120.0},
+    "orca1_like": {
+        "n_lon": 360,
+        "n_lat": 278,
+        "n_lat_tripole": 331,
+        "n_levels": 74,
+        "dt_seconds": 1200.0,
+        "lat_max_deg": 80.0,
+    },
+    "orca025_like": {
+        "n_lon": 1440,
+        "n_lat": 1116,
+        "n_lat_tripole": 1206,
+        "n_levels": 74,
+        "dt_seconds": 300.0,
+        "lat_max_deg": 80.0,
+    },
+    "orca12_like": {
+        "n_lon": 4320,
+        "n_lat": 3350,
+        "n_lat_tripole": 3146,
+        "n_levels": 74,
+        "dt_seconds": 120.0,
+        "lat_max_deg": 80.0,
+    },
 }
+
+
+def create_latlon_grid_for_preset(n_lon: int, lat_max_deg: float):
+    """The BENCH latlon grid builder (Mercator-truncated, isotropic rows).
+
+    n_lat = 2K is DERIVED from (n_lon, lat_max_deg) — the same placement
+    as NEMO's DINO test case (K = floor(arctanh(sin(lat_max))/dlon));
+    callers must read the row count off the returned grid, not assume it.
+    """
+    from legoesm.grids.latlon import create_mercator_grid
+
+    return create_mercator_grid(n_lon=n_lon, lat_max_deg=lat_max_deg)
 
 
 def build_z2d_ramp(n_lat: int, n_lon: int, dtype=None) -> jnp.ndarray:
@@ -158,11 +221,21 @@ def build_z2d_ramp(n_lat: int, n_lon: int, dtype=None) -> jnp.ndarray:
     where the northern-hemisphere index ``p'`` counts so the ramp mirrors
     across the equator: NEMO writes ``(2*i_g + 2*(j_g-1)*Ni0glo)`` over the
     northern rows, i.e. the same 0 -> 1 sweep traversed in reverse.  The
-    result is in [-0.1, +0.1] with a unique value per (i, j) — the MPI-bug
-    detector.
+    doubled numerator (NEMO ``mig(ji)*2 - 1 + 2*(mjg(jj)-1)*Ni0glo``) is
+    what makes the ramp unique per point; it is reproduced exactly here.
+    NEMO's own comment says "from -0.05 to 0.05 (Southern Hemisphere) and
+    from 0.05 to -0.05 (Northern Hemisphere)"; with the hemisphere
+    split at ``mjg < Nj0glo/2`` (REAL division) the first north row
+    overshoots by one ramp step: the max is ``0.1*(1.5 - (2 + 2*(j_g-1)
+    *Ni0glo)/(Ni0glo*Nj0glo))`` at the first north row (e.g. +0.0621 at
+    Nj=16, +0.0503 at Nj=331 — NEMO's construction, reproduced).  A
+    unique value per (i, j) — the MPI-bug detector.
 
-    The returned array has shape ``(n_lat, n_lon)``.  The equator split is
-    at ``j_g <= Nj0glo // 2`` (NEMO: ``mjg(jj) < Nj0glo/2``).
+    The returned array has shape ``(n_lat, n_lon)``.  The equator split
+    follows NEMO's REAL division ``mjg(jj,0) < Nj0glo/2._wp``
+    (usrdef_istate.F90:49): for even ``n_lat`` the southern half has
+    ``n_lat/2 - 1`` rows, for odd ``n_lat`` it has ``(n_lat-1)/2`` rows —
+    expressed branch-free as ``2*j_g < n_lat`` on the 1-based row index.
     """
     i_g = jnp.arange(1, n_lon + 1, dtype=jnp.result_type(jnp.float32) if dtype is None else dtype)
     j_g = jnp.arange(1, n_lat + 1, dtype=i_g.dtype)
@@ -177,7 +250,7 @@ def build_z2d_ramp(n_lat: int, n_lon: int, dtype=None) -> jnp.ndarray:
     south = 0.1 * (num_s / denom - 0.5)
     north = 0.1 * (1.5 - num_n / denom)
 
-    is_south = j_g[:, None] < (n_lat // 2 + 1)  # Nj0glo/2 rows (1-based <)
+    is_south = 2.0 * j_g[:, None] < n_lat  # NEMO: mjg < Nj0glo/2._wp (REAL div)
     z2d = jnp.where(is_south, south, north)
     return z2d.astype(dtype) if dtype is not None else z2d
 
@@ -185,11 +258,13 @@ def build_z2d_ramp(n_lat: int, n_lon: int, dtype=None) -> jnp.ndarray:
 def bench_uniform_z_star(n_levels: int, H_max: float):
     """Uniform-level z* coordinate — NEMO BENCH ``usrdef_zgr.F90:139-165``.
 
-    NEMO: ``zd = 5000/jpkm1`` and interfaces at ``k*zd`` (a uniform grid
-    with jpkm1 wet layers; the top/bottom half-cells make it exact).  The
-    legoESM ``create_ocean_z_star`` cannot produce uniform levels (its
-    linear ramp is always normalized), so the explicit-thickness builder
-    is used with constant ``dz = H_max / n_levels``.
+    NEMO: ``zd = 5000./REAL(jpkm1, wp)`` with ``jpk = nn_ksize = 75``,
+    i.e. **74 wet levels** of ``dz = 5000/74 ≈ 67.57 m`` (interfaces at
+    ``k*zd``, k_bot = jpkm1 everywhere).  ``n_levels`` here is the WET
+    count, so the exact port is the constant ``dz = H_max / n_levels``
+    with ``n_levels = 74``.  The legoESM ``create_ocean_z_star`` cannot
+    produce uniform levels (its linear ramp is always normalized), so
+    the explicit-thickness builder is used.
 
     Returns an ``OceanZStarCoordinate`` with n_levels uniform layers.
     """
@@ -252,21 +327,24 @@ def create_initial_conditions(grid_type: str, grid, z_coord, config: BenchConfig
     n_lon = int(state.T.data.shape[1])
     nlev = int(state.T.data.shape[2])
 
-    # Per-point ramp z2d in [-0.1, 0.1] (usrdef_istate.F90:44-54).
+    # Per-point ramp z2d (usrdef_istate.F90:44-54): [-0.05, +0.05] for
+    # odd n_lat, up to +0.05 + 0.1/n_lat for even n_lat (NEMO's
+    # hemisphere-split construction — see build_z2d_ramp).
     z2d = build_z2d_ramp(n_lat, n_lon, dtype=state.T.data.dtype)
 
-    # Depth factor f = k / (jpk - 1), 0 at surface -> 1 at bottom
-    # (NEMO: zfact = REAL(jk-1)/REAL(jpk-1), 1-based jk => f in [0, 1)).
+    # Depth factor f = (jk-1)/(jpk-1) over the wet levels: 0 at the
+    # surface, (nlev-1)/nlev at the last wet level (NEMO: zfact =
+    # REAL(jk-1)/REAL(jpk-1) with jpk = wet count + 1).
     k = jnp.arange(nlev, dtype=z2d.dtype)
-    f = k / jnp.maximum(nlev - 1.0, 1.0)
+    f = k / jnp.maximum(nlev, 1.0)
 
     # usrdef_istate.F90:70-76 (amplitudes from BenchConfig; backgrounds
     # per the divergence note).  C-grid staggering: u lives on the
     # (n_lat, n_lon+1) lon-faces, v on the (n_lat+1, n_lon) lat-faces.
-    # NEMO perturbs the face values from the same z2d ramp (its u/v
-    # arrays are index-aligned to the T-grid); here each FACE axis gets
-    # its own ramp built with the face count, so every face value stays
-    # unique — preserving the MPI-bug-detection property.
+    # DIVERGENCE (recorded in bench_plan.md): NEMO evaluates z2d at the
+    # T-grid point and multiplies by umask/vmask; here each FACE axis
+    # gets its own ramp built with the face count, so every face value
+    # stays unique — preserving the MPI-bug-detection property.
     T_ic = (
         config.T_z2d_coeff * z2d[:, :, None] + config.T_base_C - config.T_strat_C * f[None, None, :]
     )
@@ -369,13 +447,20 @@ def bench_model_config(
     NEMO BENCH physics mapping (per-preset namelist choices, translated):
 
     * ``ln_zdftke`` → ``VerticalMixingConfig(scheme="tke")`` (via
-      ``create_forcings``; pass ``physics=`` to override)
-    * ``ln_non_lin`` (nonlinear bottom drag) →
-      ``bottom_drag_scheme="nemo_quadratic"``
-    * ``ln_zdfevd`` → ``convection.scheme="enhanced_diffusion"``
+      ``create_forcings``; pass ``physics=`` to override) — APPLIED
+    * ``ln_zdfevd`` → ``convection.scheme="enhanced_diffusion"`` — APPLIED
     * ``ln_dynspg_ts`` (split-explicit) → recipe barotropic
-      ``explicit_substep``
-    * ``ln_teos10`` → recipe ``eos="veros_gsw"``
+      ``explicit_substep`` — APPLIED (recipe card)
+    * ``ln_teos10`` → recipe ``eos="veros_gsw"`` — APPLIED (recipe card)
+    * ``ln_non_lin`` (quadratic bottom drag): NEMO's presets enable it,
+      but BENCH here keeps the recipe default (linear drag,
+      ``bottom_drag_r=0``) — a documented divergence; pass
+      ``bottom_drag_scheme="nemo_quadratic"`` via ``overrides`` to
+      enable it.
+    * NOT mapped (documented in ``bench_plan.md``): MLE/EIV (orca1
+      namelist), bilaplacian tracer diffusion (orca025/12), UBS
+      momentum + no lateral dyn. diffusion (orca12), double-diffusion
+      and internal-wave mixing (all presets).
 
     Decision-90 statements (required by the NEMO RK3 momentum program —
     there is no default): the BENCH box is a full-step flat-bottom
@@ -428,6 +513,20 @@ def bench_model_config(
         K_v=config.K_v,
         bottom_drag_r=0.0,
     )
+
+
+def create_z_coord(config: BenchConfig = None):
+    """Uniform z* coordinate for BENCH (the matrix registry hook).
+
+    ``EXPERIMENT_CONFIG["create_z_coord"]`` lets ``_run_experiment_via_
+    registry`` build the experiment's OWN vertical grid instead of the
+    default stretched ``create_ocean_z_star`` — without it the matrix
+    lane would silently run a different vertical grid than the
+    standalone ``run_bench.py`` harness.
+    """
+    if config is None:
+        config = BenchConfig()
+    return bench_uniform_z_star(config.n_levels, config.H_max)
 
 
 def create_domain_config(config: BenchConfig = None) -> dict[str, Any]:
@@ -490,7 +589,11 @@ def validate_results(
             notes_parts.append(f"FAIL: max_speed {speed:.4f} exceeds {config.max_speed_limit} m/s")
 
     # SSH gate (planted-violation: |eta| > max_eta_limit in the unit test).
-    max_eta_list = diagnostics.get("max_eta", [])
+    # The matrix scalar function emits ``max_abs_eta`` (its canonical key)
+    # and the standalone harness records ``max_eta``; both are accepted so
+    # the gate is LIVE in every consumer (a gate that reads a key nobody
+    # writes does not check).
+    max_eta_list = diagnostics.get("max_eta") or diagnostics.get("max_abs_eta") or []
     if max_eta_list:
         max_eta = float(max_eta_list[-1])
         notes_parts.append(f"max_eta={max_eta:.4f} m")
@@ -536,6 +639,7 @@ EXPERIMENT_CONFIG = {
     "create_initial_conditions": create_initial_conditions,
     "create_forcings": create_forcings,
     "create_model_config": bench_model_config,
+    "create_z_coord": create_z_coord,
     "create_domain": create_domain_config,
     "validate": validate_results,
     "get_field_specs": get_diagnostic_field_specs,

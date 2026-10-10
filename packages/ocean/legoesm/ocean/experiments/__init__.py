@@ -41,6 +41,9 @@ Available Experiments:
   re-entrant channel basin from Hochet et al. (2025), zonally averaged
   bathymetry, Bryan-Cox-Semtner-style temperature/salinity restoring,
   Visbeck GM/Redi, and Jerlov shortwave penetration.
+- bench: NEMO-BENCH-inspired performance benchmark (Irrmann et al. 2022)
+  — flat-bottom all-ocean box, zero forcing, per-point unique ICs;
+  stability-gated only (results physically meaningless by design).
 
 Design Principles:
 1. Each experiment is self-documenting with scientific context

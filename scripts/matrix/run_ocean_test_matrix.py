@@ -6803,6 +6803,15 @@ def _run_experiment_via_registry(
             run_kwargs=dict(tc.run_kwargs, **bounds),
         )
 
+    # Experiment-owned vertical grid: when the experiment exposes a
+    # z-coordinate factory (EXPERIMENT_CONFIG["create_z_coord"], e.g.
+    # BENCH's uniform NEMO-BENCH grid), build it and inject it so the
+    # matrix lane runs the SAME vertical grid the production driver does.
+    # Without this the lane silently runs the default stretched z* grid.
+    z_coord_factory = exp_config.get("create_z_coord")
+    if z_coord_factory is not None:
+        setup_kw["z_coord"] = z_coord_factory(cfg)
+
     grid, z_coord, _, model, coord_kind, lon_deg, lat_deg = (
         _create_ocean_setup_rich(tc, **setup_kw)
     )

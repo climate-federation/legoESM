@@ -34,12 +34,60 @@ from legoesm.ocean.experiments import bench  # noqa: E402
 # ---------------------------------------------------------------------------
 
 
+def _z2d_max(n_lat, n_lon):
+    """Exact NEMO max: the first north row (j_g = n_lat//2 even /
+    (n_lat+1)//2 odd), column i_g = 1: 0.1*(1.5 - (2*1 + 2*(j_g-1)*Ni)/(Ni*Nj))."""
+    j_first_north = n_lat // 2 if n_lat % 2 == 0 else (n_lat + 1) // 2
+    return 0.1 * (1.5 - (2.0 + 2.0 * (j_first_north - 1) * n_lon) / (n_lon * n_lat))
+
+
 class TestZ2dRamp:
     def test_range(self):
         z2d = np.asarray(bench.build_z2d_ramp(16, 32))
         assert z2d.shape == (16, 32)
-        assert np.all(z2d >= -0.11)
-        assert np.all(z2d <= 0.11)
+        # NEMO's comment (usrdef_istate.F90:41-42): "from -0.05 to 0.05
+        # (Southern Hemisphere) and from 0.05 to -0.05 (Northern)".  With
+        # the mjg < Nj0glo/2 REAL-division split, the first north row
+        # overshoots by one ramp step (NEMO's own construction).
+        assert z2d.min() == pytest.approx(-0.05, abs=1e-6)
+        assert z2d.max() == pytest.approx(_z2d_max(16, 32), abs=1e-6)
+        assert _z2d_max(16, 32) == pytest.approx(0.0621, abs=1e-4)
+
+    def test_range_odd_jcount_near_nemo_comment(self):
+        # Odd j-count (NEMO's tripole rows, e.g. 331): the closed form
+        # is max = 0.05 + 0.1/Nj - 0.2/(Ni*Nj) — the first north row
+        # overshoots by less than 0.1/Nj (0.003 at Nj=33, 0.0003 at 331).
+        z2d = np.asarray(bench.build_z2d_ramp(33, 64))
+        assert z2d.min() == pytest.approx(-0.05, abs=1e-6)
+        assert z2d.max() == pytest.approx(_z2d_max(33, 64), abs=1e-6)
+        assert _z2d_max(33, 64) <= 0.05 + 0.1 / 33 + 1e-12
+
+    def test_hemisphere_split_nemo_real_division(self):
+        # NEMO: IF ( mjg(jj,0) < ( Nj0glo / 2._wp ) ) — REAL division.
+        # Even Nj0glo=16: threshold 8.0 -> 1-based rows 1..7 south (7
+        # rows), 8..16 north (9 rows).  A floor-division port would give
+        # 8 south rows — the off-by-one this test guards against.
+        z2d = np.asarray(bench.build_z2d_ramp(16, 32))
+        # Row j (0-based) has 1-based index j+1; south iff 2*(j+1) < 16.
+        n_south = sum(1 for j in range(16) if 2 * (j + 1) < 16)
+        assert n_south == 7
+        # The southern rows follow the south ramp formula, the northern
+        # rows the mirrored one — check one column (i_g=1, 0-based i=0).
+        i = 0
+        for j in range(16):
+            j_g = j + 1
+            if 2 * j_g < 16:
+                want = 0.1 * ((2 * 1 - 1 + 2 * (j_g - 1) * 32) / (16 * 32) - 0.5)
+            else:
+                want = 0.1 * (1.5 - (2 * 1 + 2 * (j_g - 1) * 32) / (16 * 32))
+            assert z2d[j, i] == pytest.approx(want), f"row {j}"
+
+    def test_hemisphere_split_odd_matches_even_minus_half(self):
+        # Odd Nj (NEMO tripole j-count 331): threshold 165.5 -> 165
+        # south rows; the same branch-free 2*j_g < n_lat rule.
+        n_lat = 331
+        n_south = sum(1 for j in range(n_lat) if 2 * (j + 1) < n_lat)
+        assert n_south == 165
 
     def test_unique_per_point(self):
         # The MPI/sharding-bug detector: every point carries a unique value.
@@ -47,14 +95,12 @@ class TestZ2dRamp:
         assert np.unique(z2d.round(12)).size == z2d.size
 
     def test_hemisphere_mirroring(self):
-        # NEMO: z2d(j=Nj0/2 row) ≈ -z2d(j=Nj0/2 + 1 row) — the two halves
-        # sweep the ramp in opposite directions across the equator split.
+        # The mirrored sweep: the LAST south row and the FIRST north
+        # row sum to a constant per column (NEMO's north numerator omits
+        # the -1 offset so the two halves meet mirrored).
         z2d = np.asarray(bench.build_z2d_ramp(16, 32))
-        south_row = z2d[7]
-        north_row = z2d[8]
-        # The mirrored sweep: sum of the two rows is constant per column
-        # (0.1*(p-0.5) + 0.1*(1.5-p') with the NEMO index construction is
-        # constant per column up to the row-pairing offset).
+        south_row = z2d[6]  # last southern row (1-based j_g=7)
+        north_row = z2d[7]  # first northern row (1-based j_g=8)
         sums = south_row + north_row
         assert np.allclose(sums, sums[0], atol=1e-12)
 
@@ -73,6 +119,14 @@ class TestUniformZStar:
         # Interfaces: 0, -400, ..., -4000 (NEMO: depw(k) = (k-1)*zd)
         zh = np.asarray(z.z_half_ref)
         assert np.allclose(zh, -400.0 * np.arange(11.0))
+
+    def test_nemo_sizing_74_wet_levels(self):
+        # NEMO BENCH: nn_ksize=75 -> jpk=75 -> jpkm1=74 wet levels with
+        # zd = 5000/74 ~= 67.57 m (usrdef_zgr.F90:139, usrdef_nam.F90).
+        z = bench.bench_uniform_z_star(74, 5000.0)
+        dz = np.asarray(z.dz_ref)
+        assert np.allclose(dz, 5000.0 / 74.0)
+        assert np.allclose(dz, 67.56756756756757, atol=1e-10)
 
 
 # ---------------------------------------------------------------------------
@@ -130,11 +184,29 @@ class TestLatlonICs:
         assert np.unique(eta.round(12)).size == eta.size
 
     def test_velocity_bounded_by_ic_amplitudes(self, latlon_setup):
+        # u = 0.1*z2d, v = 0.01*z2d where each FACE axis carries its own
+        # face-count ramp (u: (n_lat, n_lon+1), v: (n_lat+1, n_lon) —
+        # the face-uniqueness divergence); float32 headroom 1e-6.
         _, _, cfg, st = latlon_setup
+        n_lat, n_lon = np.asarray(st.T.data).shape[:2]
         u = np.asarray(st.u.data)
         v = np.asarray(st.v.data)
-        assert np.all(np.abs(u) <= cfg.u_z2d_coeff * 0.1 + 1e-12)
-        assert np.all(np.abs(v) <= cfg.v_z2d_coeff * 0.1 + 1e-12)
+        assert np.all(np.abs(u) <= cfg.u_z2d_coeff * _z2d_max(n_lat, n_lon + 1) + 1e-6)
+        assert np.all(np.abs(v) <= cfg.v_z2d_coeff * _z2d_max(n_lat + 1, n_lon) + 1e-6)
+
+    def test_depth_factor_max_is_nemo_ratio(self, latlon_setup):
+        # NEMO: zfact = (jk-1)/(jpk-1) over wet levels, so the deepest
+        # wet level carries f = (nlev-1)/nlev (not 1.0) — with the
+        # n_levels-as-wet-count convention, k/(nlev) 0-based.
+        _, _, cfg, st = latlon_setup
+        T = np.asarray(st.T.data)
+        nlev = T.shape[2]
+        # T = T_base + 20*z2d - T_strat*f; f max = (nlev-1)/nlev.
+        f_max = (nlev - 1) / nlev
+        z2d_point = np.asarray(bench.build_z2d_ramp(12, 24))
+        j, i = 3, 5
+        want_bottom = cfg.T_base_C + cfg.T_z2d_coeff * z2d_point[j, i] - cfg.T_strat_C * f_max
+        assert T[j, i, -1] == pytest.approx(want_bottom, abs=1e-10)
 
     def test_light_stratification_stable(self, latlon_setup):
         # T decreases, S increases with depth (the light stratification
@@ -246,6 +318,13 @@ class TestValidateGates:
         ok, _ = bench.validate_results(_state_with(), {"max_speed": [0.01], "max_eta": [5.0]})
         assert not ok
 
+    def test_planted_overshot_eta_fails_via_matrix_key(self):
+        # Control: the eta gate must ALSO fire on the matrix scalar
+        # function's key ("max_abs_eta" — the canonical matrix key); a
+        # gate that only reads keys the matrix never writes is dead.
+        ok, _ = bench.validate_results(_state_with(), {"max_speed": [0.01], "max_abs_eta": [5.0]})
+        assert not ok
+
 
 # ---------------------------------------------------------------------------
 # Registry / presets
@@ -266,9 +345,22 @@ class TestRegistry:
 
     def test_presets_nemo_sizes(self):
         # NEMO BENCH namelist nn_isize/jsize: orca1 360x331, orca025
-        # 1440x1206, orca12 4320x3146 — the latlon analog keeps n_lon.
+        # 1440x1206, orca12 4320x3146 — the latlon analog keeps n_lon;
+        # the tripole presets keep NEMO's EXACT j-count.
         assert bench.BENCH_PRESETS["orca1_like"]["n_lon"] == 360
         assert bench.BENCH_PRESETS["orca12_like"]["n_lon"] == 4320
+        assert bench.BENCH_PRESETS["orca1_like"]["n_lat_tripole"] == 331
+        assert bench.BENCH_PRESETS["orca025_like"]["n_lat_tripole"] == 1206
+        assert bench.BENCH_PRESETS["orca12_like"]["n_lat_tripole"] == 3146
         for p in bench.BENCH_PRESETS.values():
-            assert p["n_levels"] == 75  # nn_ksize = 75
+            # nn_ksize = 75 -> jpk = 75 -> 74 WET levels (jpkm1)
+            assert p["n_levels"] == 74
             assert p["dt_seconds"] > 0
+
+    def test_create_z_coord_hook_uniform(self):
+        # The matrix registry hook must produce the SAME uniform grid as
+        # the standalone harness (a stretched default would silently
+        # change the vertical CFL of the matrix lane).
+        z = bench.EXPERIMENT_CONFIG["create_z_coord"](bench.BenchConfig())
+        dz = np.asarray(z.dz_ref)
+        assert np.allclose(dz, 5000.0 / 74.0)

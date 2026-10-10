@@ -2,9 +2,10 @@
 """BENCH — NEMO-BENCH-inspired ocean performance benchmark (standalone runner).
 
 Drives the ``bench`` experiment (Irrmann et al. 2022, GMD 15, 1567-1582,
-Sect. 2.2) on the lat-lon or synthetic-tripole C-grid and reports the
-production step cost: compile time, steady-state per-step wall time,
-SYPD and Mcells/s, following the ``run_dino.py`` timing-JSONL contract.
+Sect. 2.2) on the Mercator-truncated lat-lon or synthetic-tripole C-grid
+and reports the production step cost: compile time, steady-state per-step
+wall time, SYPD and Mcells/s, following the ``run_dino.py`` timing-JSONL
+contract.
 
 Zero input files by construction: the grid, bathymetry, initial conditions
 and forcing are all analytic (see
@@ -13,18 +14,15 @@ provenance of every formula).
 
 Quick start::
 
-    # ORCA1-like global lat-lon, default 1000 steps (NEMO's nn_itend):
+    # ORCA1-like global latlon (default 1000 steps, NEMO's nn_itend):
     JAX_ENABLE_X64=1 python scripts/run/run_bench.py
 
     # ORCA025-like preset (sizing from BENCH_PRESETS):
     JAX_ENABLE_X64=1 python scripts/run/run_bench.py --preset orca025_like
 
-    # Synthetic tripole (active north fold, no mesh file):
+    # Synthetic tripole (active north fold, no mesh file; sizing keeps
+    # NEMO's exact j-count per preset — see BENCH_PRESETS):
     JAX_ENABLE_X64=1 python scripts/run/run_bench.py --grid tripole
-
-    # Weak-scaling sizing (NEMO's negative nn_isize): fix the PER-BAND
-    # latitude rows and let the global size grow with the process count:
-    srun -n 8 python scripts/run/run_bench.py --weak-lat-rows 24
 
 Timing contract (one JSON line appended per run, run_dino-compatible
 fields plus BENCH provenance): ``compile_ms``, ``steady_mean_ms``,
@@ -38,6 +36,11 @@ steps).  No snapshots are written (the paper: no I/O perturbing the
 measurement); a final stability summary is printed and validated against
 the pre-registered BENCH gates (finite fields, max|u| < 1 m/s,
 max|eta| < 1 m — see ``bench.validate_results``).
+
+Weak scaling (NEMO's negative ``nn_jsize`` semantics) is NOT wired here:
+it requires actual SPMD sharding, which belongs to the runners-repo
+SPMD harness (documented follow-up in
+``docs/ocean/experiments/bench_plan.md``).
 """
 
 from __future__ import annotations
@@ -55,7 +58,6 @@ if str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
 
 import jax  # noqa: E402
-import jax.numpy as jnp  # noqa: E402
 from legoesm.ocean.experiments import bench as bench_exp  # noqa: E402
 
 
@@ -76,8 +78,24 @@ def _parse_args(argv=None):
         choices=sorted(bench_exp.BENCH_PRESETS),
         help="Resolution preset (sizes + first-guess dt). Default: orca1_like.",
     )
-    p.add_argument("--n-lat", type=int, default=None, help="Latitude rows (overrides preset).")
+    p.add_argument(
+        "--n-lat",
+        type=int,
+        default=None,
+        help="Latitude rows (tripole only; the latlon lane's row count is "
+        "DERIVED from --n-lat... i.e. n_lon and --lat-max via the "
+        "Mercator placement).",
+    )
     p.add_argument("--n-lon", type=int, default=None, help="Longitude columns (overrides preset).")
+    p.add_argument(
+        "--lat-max",
+        type=float,
+        default=None,
+        help="Latlon Mercator truncation latitude [deg] (default 80, "
+        "preset). The full-sphere equirectangular latlon grid is "
+        "barotropic-CFL-unstable at the pole row (measured — see "
+        "bench_plan.md).",
+    )
     p.add_argument(
         "--nlev",
         type=int,
@@ -93,14 +111,6 @@ def _parse_args(argv=None):
         type=int,
         default=5,
         help="Warmup steps excluded from the steady-state mean.",
-    )
-    p.add_argument(
-        "--weak-lat-rows",
-        type=int,
-        default=None,
-        help="Weak-scaling mode (NEMO negative nn_jsize): the "
-        "PER-PROCESS latitude rows; global n_lat = rows x "
-        "n_processes. Requires an even SPMD split.",
     )
     p.add_argument(
         "--H-max",
@@ -122,34 +132,33 @@ def _parse_args(argv=None):
 
 
 def _build_setup(args):
-    """Return (grid, z_coord, state, model_config, n_lat, n_lon, dt)."""
+    """Return (grid, z_coord, state, model_config, dt, preset_name)."""
     preset_name = args.preset or "orca1_like"
     preset = bench_exp.BENCH_PRESETS[preset_name]
 
-    n_lat = args.n_lat if args.n_lat is not None else preset["n_lat"]
     n_lon = args.n_lon if args.n_lon is not None else preset["n_lon"]
+    lat_max = args.lat_max if args.lat_max is not None else preset["lat_max_deg"]
     nlev = args.nlev if args.nlev is not None else preset["n_levels"]
     H_max = args.H_max if args.H_max is not None else 5000.0
     dt = args.dt if args.dt is not None else preset["dt_seconds"]
 
-    if args.weak_lat_rows is not None:
-        n_processes = max(1, jax.process_count())
-        n_lat = args.weak_lat_rows * n_processes
-        if n_processes > 1 and n_lat % n_processes != 0:
-            raise SystemExit(f"weak-scaling n_lat {n_lat} not divisible by {n_processes} processes")
-
     if args.grid == "latlon":
-        from legoesm.grids.latlon import create_latlon_grid
-
-        grid = create_latlon_grid(n_lat, n_lon)
+        # Mercator-truncated isotropic grid (NEMO-BENCH never runs a
+        # full-sphere equirectangular grid — see bench.py); n_lat is
+        # DERIVED from (n_lon, lat_max_deg), read off the grid.
+        grid = bench_exp.create_latlon_grid_for_preset(n_lon, lat_max)
+        n_lat = len(np.asarray(grid.lat))
     else:
+        n_lat = args.n_lat if args.n_lat is not None else preset["n_lat_tripole"]
         from legoesm.grids.tripole import create_synthetic_tripole
 
         grid = create_synthetic_tripole(n_lat=n_lat, n_lon=n_lon)
 
     z_coord = bench_exp.bench_uniform_z_star(nlev, H_max)
 
-    cfg = bench_exp.BenchConfig(n_lat=n_lat, n_lon=n_lon, n_levels=nlev, H_max=H_max)
+    cfg = bench_exp.BenchConfig(
+        n_lat=n_lat, n_lon=n_lon, n_levels=nlev, H_max=H_max, lat_max_deg=lat_max
+    )
     state = bench_exp.create_initial_conditions(args.grid, grid, z_coord, cfg)
     model_config = bench_exp.bench_model_config(cfg)
     return grid, z_coord, state, model_config, dt, preset_name
@@ -188,7 +197,11 @@ def main(argv=None):
         f"fold_active={fold_active}"
     )
 
-    step_fn = jax.jit(lambda s: model.step(s, dt=dt))
+    # No outer jax.jit wrapper: ``model.step`` is itself jitted
+    # (``_step_jitted``), so the loop measures the production per-step
+    # cost INCLUDING the eager Python overhead of the step shim (cache
+    # checks etc.) — the same path run_dino.py times.
+    step_fn = lambda s: model.step(s, dt=dt)  # noqa: E731
 
     step_times_ms: list[float] = []
     state = state0
@@ -222,8 +235,15 @@ def main(argv=None):
     eta = np.asarray(state.eta.data)
     T = np.asarray(state.T.data)
     S = np.asarray(state.S.data)
-    max_speed = float(jnp.sqrt(jnp.max(u**2) + jnp.max(v**2)))
-    max_eta = float(jnp.max(jnp.abs(eta)))
+    # Pointwise max speed on cell centers: interpolate the C-grid
+    # staggered velocities to T-points, then max(sqrt(u^2 + v^2)).
+    # (sqrt(max u^2 + max v^2) would overestimate by pairing maxima from
+    # different points; max(max|u|, max|v|) would underestimate by
+    # dropping the cross term.)
+    u_cc = 0.5 * (u[:, :-1, :] + u[:, 1:, :])
+    v_cc = 0.5 * (v[:-1, :, :] + v[1:, :, :])
+    max_speed = float(np.max(np.sqrt(u_cc**2 + v_cc**2)))
+    max_eta = float(np.max(np.abs(eta)))
     finite = bool(
         np.all(np.isfinite(u))
         and np.all(np.isfinite(v))
