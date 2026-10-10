@@ -87,8 +87,8 @@ kt=10; an earlier boundary refuses the entire record. The preflight finishes
 ## Validation and review
 
 The citation gate passes all six compiled-source citations with zero unmapped
-citations and zero map-audit failures. Its explicit `zdfdrg.f90:258-284`
-two-line shift plant exits 1 with `FAIL`; the cumulative default receipt also
+citations and zero map-audit failures. Its explicit two-line shift plant on
+the linear-drag routine exits 1 with `FAIL`; the cumulative default receipt also
 passes with zero unmapped citations. The retained artifacts are
 `citation_gate.json`, `citation_gate_plant.json`, and
 `citation_gate_default.json` under the evidence root. The citation gate's
