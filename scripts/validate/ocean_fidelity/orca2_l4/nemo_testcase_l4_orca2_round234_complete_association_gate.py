@@ -9,7 +9,10 @@ import json
 from pathlib import Path
 
 
-PLANTS = ("none", "association-bit", "label-coverage", "false-owner", "endpoint")
+PLANTS = (
+    "none", "association-depth-bit", "association-ssh-bit",
+    "label-coverage", "false-owner", "endpoint",
+)
 
 
 class GateError(RuntimeError):
@@ -25,7 +28,9 @@ def classify(association: dict, reports: list[dict], *, plant: str = "none") -> 
     require(plant in PLANTS, f"unknown plant {plant!r}")
     association = copy.deepcopy(association)
     reports = copy.deepcopy(reports)
-    if plant == "association-bit":
+    if plant == "association-depth-bit":
+        association["post_association_rows"]["depth_u"]["bit_exact"] = False
+    elif plant == "association-ssh-bit":
         association["post_association_rows"]["eta"]["bit_exact"] = False
     elif plant == "label-coverage":
         reports.pop()

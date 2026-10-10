@@ -23,7 +23,8 @@ def _inputs():
 
 
 @pytest.mark.parametrize(
-    "plant", ("association-bit", "label-coverage", "false-owner", "endpoint"))
+    "plant", ("association-depth-bit", "association-ssh-bit",
+              "label-coverage", "false-owner", "endpoint"))
 def test_round234_plants_fire(plant: str) -> None:
     association, reports = _inputs()
     with pytest.raises(gate.GateError, match="plant fired"):
