@@ -14,7 +14,7 @@ import numpy as np
 MAGIC = b"NEMO_L4_R213VV1".ljust(16, b" ")
 NAMES = ("zv_frc", "ssvmask", "va_pre_lbc")
 PLANTS = (
-    "none", "header", "field-name", "field-dims", "truncation",
+    "none", "header", "rk-level", "field-name", "field-dims", "truncation",
     "swapped-rank", "nonfinite", "frame-byte", "restart-byte",
 )
 
@@ -42,9 +42,14 @@ def read_record(path: Path, plant: str = "none") -> dict[str, object]:
      ntsi, ntsj, ntei, ntej, bits, nfields) = header
     if plant == "swapped-rank":
         rank = 1 - rank
+    if plant == "rk-level":
+        krhs = 2
     require((version, kt, jn, bits, nfields) == (1, 1, 1, 64, len(NAMES)),
             f"{path.name}: version/step/substep/precision/count moved")
-    require((kmm, krhs) == (1, 2), f"{path.name}: RK levels moved")
+    # stprk3.F90 calls stp_2D(kstp,Nbb,Nbb,Naa,Nrhs), whose executing
+    # stp2d.F90 call passes Kbb,Kbb,Krhs to dyn_spg_ts.  At kt=1 those live
+    # indices are (Kmm,Krhs)=(1,3); they are not consecutive stage numbers.
+    require((kmm, krhs) == (1, 3), f"{path.name}: RK levels moved")
     require(nx > 0 and ny > 0, f"{path.name}: invalid local shape")
     require(1 <= ntsi <= ntei <= nx and 1 <= ntsj <= ntej <= ny,
             f"{path.name}: invalid owned bounds")
@@ -114,7 +119,7 @@ def run(root: Path, baseline: Path, plant: str = "none") -> dict[str, object]:
         path = root / (
             f"oracle_r213_vector_rank{expected_rank:04d}_kt00000001_jn001.bin")
         record_plant = plant if expected_rank == 0 and plant in {
-            "header", "field-name", "field-dims", "truncation",
+            "header", "rk-level", "field-name", "field-dims", "truncation",
             "swapped-rank", "nonfinite",
         } else "none"
         record = read_record(path, record_plant)

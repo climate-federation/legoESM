@@ -14,7 +14,7 @@ from scripts.validate.ocean_fidelity.orca2_l4.nemo_testcase_l4_orca2_round213_ve
 def _write_record(path: Path, rank: int) -> None:
     nx, ny = 94, 152
     nimpp = 1 if rank == 0 else 91
-    header = (1, 1, 1, 1, 2, rank, nx, ny, nimpp, 1,
+    header = (1, 1, 1, 1, 3, rank, nx, ny, nimpp, 1,
               3, 3, 92, 150, 64, len(gate.NAMES))
     raw = bytearray(gate.MAGIC)
     raw.extend(struct.pack("=16i", *header))
@@ -53,6 +53,7 @@ def test_round213_record_admits_headers_coverage_and_passivity(tmp_path: Path) -
     result = gate.run(root, baseline)
     assert result["status"] == "PASS_R213_OMT1_VECTOR_PRE_LBC_ADMISSION"
     assert result["rank_coverage"] == "exactly-once"
+    assert [row["levels"] for row in result["records"]] == [[1, 3], [1, 3]]
     assert len(result["existing_frame_comparisons"]) == 64
     assert len(result["terminal_restart_comparisons"]) == 2
 

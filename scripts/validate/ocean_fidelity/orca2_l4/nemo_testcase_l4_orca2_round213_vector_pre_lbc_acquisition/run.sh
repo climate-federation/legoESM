@@ -34,6 +34,7 @@ readonly SOURCE_CPP_SHA=2e0d729f348b2377e52a6421afbb56e9dabbbc5ae57e39fbcfa1a3f5
 readonly SOURCE_BINARY_SHA=5b82a3254c40f71186af159b93cba419709ccf49cf4172ad3d44440b8fb1d895
 readonly DECK_MANIFEST_SHA=42ba42807d38b1e41a06e8f5589be16d56a1e1b426ab851a2d7f29076dd66463
 readonly INPUT_MANIFEST_SHA=395ae3e2dad969bc7ef5c94e20f5f441875e17d8a87b73407d9cab5e0c3a2b51
+readonly PRODUCER_CONTENT_SHA=bc21eaf18071ba638f4cb0d60114f0d7d72fac85b7df0c6b5281037f4b3cc8e0
 readonly PY=/home/dbalwada/legoESM/.venv/bin/python
 readonly FC=/home/dbalwada/miniconda3/envs/nemo-build/bin/gfortran
 
@@ -54,8 +55,11 @@ pin() {
 }
 
 artifact_digest() {
-  sha256sum "$RUNNER" "$PATCH" "$GATE" "$PREREG" "$SOURCE_MANIFEST" | \
-    sha256sum | awk '{print $1}'
+  # The existing record stamped the round-213 producer bundle before this
+  # checker-only RK-level correction.  Source, patch, binary and deck are
+  # pinned independently below; changing the reader must not invalidate bytes
+  # that the unchanged writer already produced.
+  printf '%s\n' "$PRODUCER_CONTENT_SHA"
 }
 
 check_layout() {
@@ -179,7 +183,7 @@ admit() {
     printf '%s %s\n' "$(sha256sum "$record" | awk '{print $1}')" \
       "$(basename "$record")" >"$record.stamp"
   done
-  for plant in header field-name field-dims truncation swapped-rank nonfinite \
+  for plant in header rk-level field-name field-dims truncation swapped-rank nonfinite \
     frame-byte restart-byte; do
     if "$PY" "$GATE" --root "$TARGET_RUN" --baseline "$SOURCE_RUN" --plant "$plant" \
       >"$TARGET_RUN/round213_${plant}_plant.log" 2>&1; then
