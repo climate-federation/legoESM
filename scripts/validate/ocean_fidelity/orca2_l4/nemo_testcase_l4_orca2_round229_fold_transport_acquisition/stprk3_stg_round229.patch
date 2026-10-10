@@ -11,8 +11,8 @@
              !                        !* Update or Compute (VIF) advective transport
              CALL tra_adv_trp( kstp, kstg, nit000, Kbb, Kmm, Kaa, Krhs, zFu, zFv, zFw )
 +            IF( kstp == nit000 ) CALL r229_dump_fold_operands( kstp, kstg, zFv, &
-+               & ts(:,:,:,jp_tem,Kmm), ts(:,:,:,jp_sal,Kmm), e3t(:,:,:,Kmm), &
-+               & tmask(:,:,:) )
++               & ts(:,:,:,jp_tem,Kmm), ts(:,:,:,jp_sal,Kmm), e3t_3d(:,:,:), &
++               & r3t(:,:,Kmm), tmask(:,:,:) )
              !
  !!gm ==>>> Question: it probably be better to activate BBL at each stages (==> it have to be tested)
              !                                            ! BBL coefficients required for both passive- and active-tracer transport within

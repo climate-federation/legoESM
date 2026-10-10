@@ -21,14 +21,19 @@ CONTAINS
       WRITE(unit) value
    END SUBROUTINE put3
 
-   SUBROUTINE r229_dump_fold_operands(kt, stage, zfv, temp, salt, e3t_live, tmask_live)
+   SUBROUTINE r229_dump_fold_operands(kt, stage, zfv, temp, salt, e3t_ref, r3t_live, tmask_live)
       INTEGER, INTENT(in) :: kt, stage
-      REAL(wp), DIMENSION(:,:,:), INTENT(in) :: zfv, temp, salt, e3t_live, tmask_live
-      INTEGER :: unit, ios
+      REAL(wp), DIMENSION(:,:,:), INTENT(in) :: zfv, temp, salt, e3t_ref, tmask_live
+      REAL(wp), DIMENSION(:,:), INTENT(in) :: r3t_live
+      REAL(wp), DIMENSION(SIZE(e3t_ref,1),SIZE(e3t_ref,2),SIZE(e3t_ref,3)) :: e3t_live
+      INTEGER :: unit, ios, jk
       CHARACTER(LEN=16) :: magic
       CHARACTER(LEN=112) :: filename
       IF(stage /= 1) RETURN
       IF(STORAGE_SIZE(1._wp) /= 64) CALL ctl_stop('round229: record requires fp64')
+      DO jk = 1, SIZE(e3t_ref,3)
+         e3t_live(:,:,jk) = e3t_ref(:,:,jk) * (1._wp + r3t_live(:,:) * tmask_live(:,:,jk))
+      END DO
       WRITE(filename,'("oracle_r229_fold_rank",I4.4,"_kt",I8.8,"_s1.bin")') mpprank, kt
       OPEN(NEWUNIT=unit, FILE=TRIM(filename), ACCESS='STREAM', FORM='UNFORMATTED', &
          & STATUS='NEW', ACTION='WRITE', IOSTAT=ios)

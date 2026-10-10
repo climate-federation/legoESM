@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# Operator-executed OMT-4 rank-complete tracer-consumer operand acquisition.
+# Operator-executed round-230 recovery of the OMT-4 rank-complete
+# tracer-consumer operand acquisition.
 set -Eeuo pipefail
 
 refuse_unexpected() {
   local status=$?
-  printf 'REFUSE: round-229 fold acquisition failed at line %s (exit %s)\n' \
+  printf 'REFUSE: round-230 fold acquisition failed at line %s (exit %s)\n' \
     "${BASH_LINENO[0]:-unknown}" "$status" >&2
   exit "$status"
 }
@@ -22,11 +23,11 @@ export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
 readonly NEMO_ROOT=/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2
 readonly REFERENCE_CFG=ORCA2_ICE_PISCES
 readonly SOURCE_CFG=ORCA2_OMIP_L4_R210OMT1_P3
-readonly TARGET_CFG=ORCA2_OMIP_L4_R229FOLDTRP
+readonly TARGET_CFG=ORCA2_OMIP_L4_R230FOLDTRP
 readonly SOURCE_ROOT=$NEMO_ROOT/cfgs/$SOURCE_CFG
 readonly TARGET_ROOT=$NEMO_ROOT/cfgs/$TARGET_CFG
 readonly SOURCE_RUN=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round222/acquisition/orca2_omt4_frames_10step_a_np2
-readonly EVIDENCE=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round229/acquisition
+readonly EVIDENCE=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round230/acquisition
 readonly TARGET_RUN=$EVIDENCE/orca2_omt4_fold_transport_10step_np2
 readonly WORK_ROOT=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/work
 readonly SOURCE_STP_SHA=2b1636336acc5a5e3326291801c217f263f8ccc3ca875dbfec0d3b789d911e5b
@@ -41,7 +42,7 @@ readonly REPO=$(CDPATH= cd -- "$here/../../../../.." && pwd -P)
 readonly PATCH=$here/stprk3_stg_round229.patch
 readonly WRITER=$here/l4_r229_fold.F90
 readonly CHECKER=$here/check_record.py
-readonly PREREG=$REPO/docs/ocean/fidelity/PREREG_nemo_testcases_l4_orca2_round229.md
+readonly PREREG=$REPO/docs/ocean/fidelity/PREREG_nemo_testcases_l4_orca2_round230.md
 
 pin() {
   local digest=$1 path=$2 label=$3
@@ -95,7 +96,7 @@ removed=$(awk '/^--- / {next} /^-/ {n++} END {print n+0}' "$PATCH")
 mkdir -p "$EVIDENCE" "$WORK_ROOT"
 bash -n "$0"
 "$PY" -m py_compile "$CHECKER"
-scratch=$(mktemp -d "$WORK_ROOT/orca2-r229-fold.XXXXXX")
+scratch=$(mktemp -d "$WORK_ROOT/orca2-r230-fold.XXXXXX")
 cp "$SOURCE_ROOT/MY_SRC/stprk3_stg.F90" "$scratch/stprk3_stg.F90"
 patch -s --fuzz=0 -p0 -d "$scratch" <"$PATCH"
 check_layout "$scratch/stprk3_stg.F90" || {
@@ -105,7 +106,7 @@ grep -Fq "STATUS='NEW'" "$WRITER" || {
   printf 'REFUSE: writer does not fail on an existing record\n' >&2; exit 66;
 }
 if [[ "$MODE" == --preflight-only ]]; then
-  printf 'ORCA2_ROUND229_FOLD_TRANSPORT_PREFLIGHT_READY %s\n' "$TARGET_RUN"
+  printf 'ORCA2_ROUND230_FOLD_TRANSPORT_PREFLIGHT_READY %s\n' "$TARGET_RUN"
   exit 0
 fi
 
@@ -131,7 +132,7 @@ admit() {
   done
   (cd "$TARGET_RUN" && sha256sum oracle_r229_fold_rank*.bin ORCA2_00000010_restart_????.nc \
     round229_*_plant.log round229_fold_record_admission.json >round229_outputs.sha256)
-  printf 'ORCA2_ROUND229_FOLD_TRANSPORT_ACQUISITION_PASS %s\n' "$TARGET_RUN"
+  printf 'ORCA2_ROUND230_FOLD_TRANSPORT_ACQUISITION_PASS %s\n' "$TARGET_RUN"
 }
 
 if [[ "$MODE" == --admit-existing ]]; then
