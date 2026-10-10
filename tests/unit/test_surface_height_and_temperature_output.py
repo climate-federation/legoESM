@@ -133,7 +133,7 @@ def test_extremes_only_preserves_means_counts_sparse_days_and_restart():
 def test_actual_mpas_loop_samples_hourly_across_restart():
     """Execute the actual loop's scheduling statements, including its feed call."""
     tree = ast.parse(inspect.getsource(inspect.getmodule(ModelDriver)))
-    loop = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == '_run_mpas')
+    loop = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == '_run_column')
     block = next(n for n in ast.walk(loop) if isinstance(n, ast.For)
                  and any(isinstance(s, ast.Assign) and any(
                      isinstance(t, ast.Name) and t.id == '_sample_day' for t in s.targets)

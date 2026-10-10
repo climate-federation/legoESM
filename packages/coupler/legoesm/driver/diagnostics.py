@@ -1582,7 +1582,7 @@ class DiagnosticCollector:
         _v_data = _v_data.data if _v_data is not None else None
         if sw_down_toa is not None and q_v is not None and _v_data is not None:
             # Only the grids that carry a cell-centred v (cube / lat-lon) run
-            # the tracker here; the MPAS edge-wind lane runs it in _run_mpas
+            # the tracker here; the MPAS edge-wind lane runs it in _run_column
             # with a Perot reconstruction (a None v here means edge winds we
             # must not feed the column KE term as if they were cell winds).
             self.energy_tracker.update(

@@ -939,7 +939,7 @@ def _make_mpas_turbulence(
         #   1. ``forcing["beta_land"]`` — TRACED per-cell root-zone beta_soil
         #      from the interactive multilayer land (#1312 phase 2b; one-step
         #      lag, updated by the driver loop each step without retrace).
-        #   2. the STATIC ``land_beta`` build-time knob (mpas_land_beta).
+        #   2. the STATIC ``land_beta`` build-time knob (land_beta).
         # Both gates are static Python ``if``s (dict-key membership is part
         # of the forcing pytree structure; the knob is a build-time closure
         # const — the JAX feature-gating exception): defaults keep these
@@ -979,7 +979,7 @@ def _make_mpas_turbulence(
                     "forcing['beta_land'] (traced per-cell beta_soil) "
                     "requires the land fraction to be threaded into the "
                     "turbulence factory (make_physics f_land=...); the "
-                    "driver must pass f_land whenever mpas_land_beta_soil "
+                    "driver must pass f_land whenever land_beta_soil "
                     "is enabled."
                 )
             from legoesm.atmosphere.physics.turbulence.surface_layer import (
@@ -1043,7 +1043,7 @@ def _make_mpas_turbulence(
                 surface_fluxes_at_lowest_level,
             )
             _fl = jnp.asarray(f_land, dtype=q_sfc.dtype).reshape(nCells)
-            # ``forcing["T_sfc_ocean"]`` (mpas_ocean_flux_on_ocean_surface,
+            # ``forcing["T_sfc_ocean"]`` (ocean_flux_on_ocean_surface,
             # #1320): the non-land fraction's bulk call sees the ocean/ice
             # surface instead of the land-blended T_sfc/q_sfc, whose land skin
             # and land humidity belong to the fraction the land model already
@@ -1106,7 +1106,7 @@ def _make_mpas_turbulence(
                 (1.0 - _fl) * _lh + _fl * _lh_land,
                 _us,
             )
-            # ``forcing["taumag_land"]`` (mpas_land_stress_from_land): the land
+            # ``forcing["taumag_land"]`` (land_stress_from_land): the land
             # model's stress replaces the bulk (ocean-roughness) stress over the
             # land fraction, with ``taumag_land_valid`` (a land step has
             # succeeded for the column; the driver carries the last valid value

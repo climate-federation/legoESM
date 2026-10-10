@@ -767,16 +767,16 @@ def test_mpas_land_boundary_flags_flow_to_config():
     parser = build_arg_parser()
     cfg_default = build_config_from_args(_postprocess_args(
         parser.parse_args(["--dataset", "analytical"]), parser))
-    assert cfg_default.mpas_land_lapse_K_per_km == 0.0
-    assert cfg_default.mpas_land_beta == 1.0
+    assert cfg_default.land_lapse_K_per_km == 0.0
+    assert cfg_default.land_beta == 1.0
 
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
         "--dataset", "analytical",
         "--grid-type", "voronoi", "--discretization", "mpas",
         "--mpas-land-lapse-k-per-km", "6.5", "--mpas-land-beta", "0.6",
     ]), parser))
-    assert cfg.mpas_land_lapse_K_per_km == 6.5
-    assert cfg.mpas_land_beta == 0.6
+    assert cfg.land_lapse_K_per_km == 6.5
+    assert cfg.land_beta == 0.6
     # validate_strict is exercised in test_mpas_land_boundary (the bare CLI
     # invocation here has topography='flat', which the inert-corner guard
     # correctly refuses).
@@ -972,21 +972,21 @@ def test_mpas_land_beta_soil_flag_flows_to_config():
     parser = build_arg_parser()
     cfg_default = build_config_from_args(_postprocess_args(
         parser.parse_args(["--dataset", "analytical"]), parser))
-    assert cfg_default.mpas_land_beta_soil is False
+    assert cfg_default.land_beta_soil is False
 
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
         "--dataset", "analytical",
         "--grid-type", "voronoi", "--discretization", "mpas",
         "--use-multilayer-land", "--mpas-land-beta-soil",
     ]), parser))
-    assert cfg.mpas_land_beta_soil is True
+    assert cfg.land_beta_soil is True
 
     parser2 = build_arg_parser()
-    parser2.set_defaults(mpas_land_beta_soil=True)   # simulates a YAML pin
+    parser2.set_defaults(land_beta_soil=True)   # simulates a YAML pin
     cfg_off = build_config_from_args(_postprocess_args(parser2.parse_args([
         "--dataset", "analytical", "--no-mpas-land-beta-soil",
     ]), parser2))
-    assert cfg_off.mpas_land_beta_soil is False
+    assert cfg_off.land_beta_soil is False
     # validate_strict inert-corner guards live in
     # test_mpas_multilayer_land_port (refusal without multilayer land).
 def test_mpas_land_stress_from_land_flag_flows_to_config():
@@ -995,12 +995,12 @@ def test_mpas_land_stress_from_land_flag_flows_to_config():
     parser = build_arg_parser()
     cfg_default = build_config_from_args(_postprocess_args(
         parser.parse_args(["--dataset", "analytical"]), parser))
-    assert cfg_default.mpas_land_stress_from_land is None
+    assert cfg_default.land_stress_from_land is None
     for flag, want in (("--mpas-land-stress-from-land", True),
                        ("--no-mpas-land-stress-from-land", False)):
         cfg = build_config_from_args(_postprocess_args(parser.parse_args([
             "--dataset", "analytical", flag]), parser))
-        assert cfg.mpas_land_stress_from_land is want
+        assert cfg.land_stress_from_land is want
 
 
 def test_mpas_ocean_flux_on_ocean_surface_flag_flows_to_config():
@@ -1008,12 +1008,12 @@ def test_mpas_ocean_flux_on_ocean_surface_flag_flows_to_config():
     parser = build_arg_parser()
     cfg_default = build_config_from_args(_postprocess_args(
         parser.parse_args(["--dataset", "analytical"]), parser))
-    assert cfg_default.mpas_ocean_flux_on_ocean_surface is False
+    assert cfg_default.ocean_flux_on_ocean_surface is False
     for flag, want in (("--mpas-ocean-flux-on-ocean-surface", True),
                        ("--no-mpas-ocean-flux-on-ocean-surface", False)):
         cfg = build_config_from_args(_postprocess_args(parser.parse_args([
             "--dataset", "analytical", flag]), parser))
-        assert cfg.mpas_ocean_flux_on_ocean_surface is want
+        assert cfg.ocean_flux_on_ocean_surface is want
 
 
 def test_land_surface_scheme_validate_strict_rejects_unknown():
@@ -2407,7 +2407,7 @@ def _assert_optics_thinning(cfg, *, thinned: bool):
     from legoesm.atmosphere.physics.clouds.cloud_fraction import (
         compute_cloud_properties,
     )
-    # The MPAS lane's own builder (model_driver._run_mpas), so the pin reads
+    # The MPAS lane's own builder (model_driver._run_column), so the pin reads
     # the config the run would radiate with, not the YAML.
     from legoesm.driver.model_driver import _standalone_cloud_config
     cloud_cfg = _standalone_cloud_config(
@@ -4841,7 +4841,7 @@ def test_cam6_duo_deck_passes_the_lane_guards_on_the_column_lane_only():
     eight physics-loop knobs validate_strict keys on the lane (cadence, CLUBB
     cloud scheme, land cadence / calibrated land, mpas_land_* / ice skin).
     The COLUMN lane runs the MPAS loop itself (model_driver._run_column_lane
-    -> _run_mpas), so the deck must pass; the same deck on the CLOSED duo lane
+    -> _run_column), so the deck must pass; the same deck on the CLOSED duo lane
     (column_lane=False) must be refused with those messages -- the
     guards are not vacuous."""
     from legoesm.driver.run_config_yaml import load_yaml_config
@@ -4851,16 +4851,16 @@ def test_cam6_duo_deck_passes_the_lane_guards_on_the_column_lane_only():
     cfg = build_config_from_args(_postprocess_args(parser.parse_args(
         _AMIP_DUMMY_PATHS + ["--clm-surfdata-path", "/dummy/surfdata.nc"]), parser))
     assert cfg.dycore.discretization == "fv3_duo" and cfg.dycore.column_lane
-    assert cfg.mpas_loop_lane
+    assert cfg.column_loop_lane
     cfg.validate_strict()
     closed = cfg._replace(dycore=cfg.dycore._replace(column_lane=False))
-    assert not closed.mpas_loop_lane
+    assert not closed.column_loop_lane
     with pytest.raises(ValueError) as ei:
         closed.validate_strict()
     msg = str(ei.value)
     for needle in ("physics_update_steps", "cld_macmic_num_steps", "cam6_clubb",
                    "land_update_seconds", "land_calibrated_physics",
-                   "mpas_land_beta", "mpas_land_beta_soil", "mpas_ice_skin_prognostic"):
+                   "land_beta", "land_beta_soil", "ice_skin_prognostic"):
         assert needle in msg, needle
 
 
@@ -5063,18 +5063,18 @@ def test_mpas_land_params_refresh_flag_flows_to_config():
     parser = build_arg_parser()
     cfg_default = build_config_from_args(_postprocess_args(
         parser.parse_args(["--dataset", "analytical"]), parser))
-    assert cfg_default.mpas_land_params_refresh is True
+    assert cfg_default.land_params_refresh is True
 
     cfg_off = build_config_from_args(_postprocess_args(parser.parse_args([
         "--dataset", "analytical", "--no-mpas-land-params-refresh",
     ]), parser))
-    assert cfg_off.mpas_land_params_refresh is False
+    assert cfg_off.land_params_refresh is False
 
     parser2 = build_arg_parser()
-    parser2.set_defaults(mpas_land_params_refresh=False)   # simulates a YAML pin
+    parser2.set_defaults(land_params_refresh=False)   # simulates a YAML pin
     cfg_pin = build_config_from_args(_postprocess_args(parser2.parse_args([
         "--dataset", "analytical"]), parser2))
-    assert cfg_pin.mpas_land_params_refresh is False
+    assert cfg_pin.land_params_refresh is False
 
 
 def test_land_canopy_snow_masking_round_trip_and_refusal():

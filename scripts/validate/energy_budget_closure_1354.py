@@ -77,7 +77,7 @@ def main(argv=None):
     a = ap.parse_args(argv)
 
     # Two layouts: the full-collector path writes energy_chunk_*.npz; the MPAS
-    # lane (_run_mpas -> _save_lightweight_timeseries) writes one timeseries.npz
+    # lane (_run_column -> _save_lightweight_timeseries) writes one timeseries.npz
     # with the energy_* series inline.  Prefer the MPAS single file if present.
     ts_path = os.path.join(a.run_dir, "timeseries.npz")
     if os.path.exists(ts_path):

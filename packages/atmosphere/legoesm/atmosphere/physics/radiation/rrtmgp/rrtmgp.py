@@ -474,7 +474,7 @@ class RRTMGP:
               # fp64).  GATED OFF in production: the MPAS driver sets
               # ``compute_fp32=False`` because the fp32 RTE path still crashes
               # (the shortwave direct-beam recurrence re-promotes the scan carry
-              # to float64) -- see ``_run_mpas`` + PR #343.  Retained inert so a
+              # to float64) -- see ``_run_column`` + PR #343.  Retained inert so a
               # future kernel-wide precision audit can flip the flag.
               # ``_cast_optics_f64_to_f32`` walks the RRTMOptics object + its
               # frozen-dataclass tables by hand (they are NOT registered JAX

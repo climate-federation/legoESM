@@ -138,7 +138,7 @@ class MPASPrimitiveEquationConfig(NamedTuple):
     # This supersedes the earlier "undamped gravity wave on the imaginary
     # axis / hidden-CFL at ~300 s any resolution" explanation, which the
     # zero-dissipation sweep disproved.  The separate ~450 s dt-ceiling seen
-    # with the gray AMIP deck (driver ``_run_mpas``) is a radiative startup
+    # with the gray AMIP deck (driver ``_run_column``) is a radiative startup
     # transient (T=300 K isothermal IC), integrator-independent — and well
     # above the production dt=240 s, which is stable for both integrators.
     #

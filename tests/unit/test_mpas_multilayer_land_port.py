@@ -86,7 +86,7 @@ def _build_driver(tmpdir: str, days: float, *, turbulence: str = "none",
         land_mask_path="synthetic.nc",      # truthy -> land block (loader patched)
         use_multilayer_land=use_multilayer,
         multilayer_n_layers=4, multilayer_soil_depth=2.0,
-        mpas_land_beta_soil=beta_soil,
+        land_beta_soil=beta_soil,
         **extra,
     )
     d = ModelDriver(cfg, output_dir=tmpdir)
@@ -149,7 +149,7 @@ def test_tendencies_carry_downwelling_fields():
 
 
 def test_traced_beta_soil_reaches_turbulence(monkeypatch, tmp_path):
-    """#1312 phase 2b: mpas_land_beta_soil threads a per-cell root-zone
+    """#1312 phase 2b: land_beta_soil threads a per-cell root-zone
     beta_soil into the turbulence surface humidity (forcing['beta_land']).
 
     The synthetic map cold-starts the soil BETWEEN wilting and field capacity
@@ -182,30 +182,30 @@ def test_traced_beta_soil_reaches_turbulence(monkeypatch, tmp_path):
                        - np.asarray(d_off.state.tracers["q_v"].data)))
     assert np.isfinite(np.asarray(d_on.state.T.data)).all()
     assert dq > 0.0, (
-        "mpas_land_beta_soil=True left q_v bit-identical to the saturated "
+        "land_beta_soil=True left q_v bit-identical to the saturated "
         "run — forcing['beta_land'] is not reaching the turbulence "
         "surface flux")
 
 
 def test_land_stress_from_land_reaches_the_winds(monkeypatch, tmp_path):
-    """mpas_land_stress_from_land hands the land tile's stress magnitude to the
+    """land_stress_from_land hands the land tile's stress magnitude to the
     turbulence (forcing['taumag_land']); the run must differ from the same run
     with the bulk stress, and only in the winds' surface drag path."""
     _patch_land_loaders(monkeypatch)
     # The synthetic map carries no per-PFT canopy tables, so the bulk-flux
     # land scheme (which also solves a stress) stands in for the canopy.
     kw = dict(turbulence="louis", beta_soil=True,
-              land_surface_scheme="simple_seb", mpas_land_params_refresh=False)
+              land_surface_scheme="simple_seb", land_params_refresh=False)
     d_off = _build_driver(str(tmp_path / "off"), FOUR_STEPS_DAYS, **kw,
-                          mpas_land_stress_from_land=False)
+                          land_stress_from_land=False)
     assert d_off.run() == "COMPLETED"
     d_on = _build_driver(str(tmp_path / "on"), FOUR_STEPS_DAYS, **kw,
-                         mpas_land_stress_from_land=True)
+                         land_stress_from_land=True)
     assert d_on.run() == "COMPLETED"
     u_on = np.asarray(d_on.state.u.data)
     assert np.isfinite(u_on).all()
     assert np.max(np.abs(u_on - np.asarray(d_off.state.u.data))) > 0.0, (
-        "mpas_land_stress_from_land=True left the winds bit-identical — the "
+        "land_stress_from_land=True left the winds bit-identical — the "
         "land stress is not reaching the turbulence")
 
 
@@ -214,7 +214,7 @@ def test_beta_soil_without_multilayer_land_is_refused(monkeypatch, tmp_path):
     soil moisture to derive beta from — refused FAIL-EARLY at config
     validation (driver construction), not silently ignored."""
     _patch_land_loaders(monkeypatch)
-    with pytest.raises(ValueError, match="mpas_land_beta_soil"):
+    with pytest.raises(ValueError, match="land_beta_soil"):
         _build_driver(str(tmp_path), FOUR_STEPS_DAYS, turbulence="louis",
                       beta_soil=True, use_multilayer=False)
 
@@ -245,12 +245,12 @@ def test_params_refresh_with_a_non_canopy_scheme_is_refused(monkeypatch, tmp_pat
     """The per-step rebuild is two-leaf only; asking for it with another land
     scheme is refused at config validation, never skipped silently."""
     _patch_land_loaders(monkeypatch)
-    with pytest.raises(ValueError, match="mpas_land_params_refresh"):
+    with pytest.raises(ValueError, match="land_params_refresh"):
         _build_driver(str(tmp_path), FOUR_STEPS_DAYS,
                       land_surface_scheme="simple_seb")
     _build_driver(str(tmp_path), FOUR_STEPS_DAYS,
                   land_surface_scheme="simple_seb",
-                  mpas_land_params_refresh=False)
+                  land_params_refresh=False)
 
 
 def _run_with_updater(tmp_path, monkeypatch, name, transform):
@@ -262,8 +262,8 @@ def _run_with_updater(tmp_path, monkeypatch, name, transform):
     _patch_land_loaders(monkeypatch)
     d = _build_driver(str(tmp_path / name), FOUR_STEPS_DAYS, start_year=2001,
                       land_surface_scheme="simple_seb",
-                      mpas_land_params_refresh=False)
-    d.config = d.config._replace(mpas_land_params_refresh=True)
+                      land_params_refresh=False)
+    d.config = d.config._replace(land_params_refresh=True)
     base = d.physics.land_ml_params
     traced, seen = [], []
 
@@ -300,7 +300,7 @@ def test_land_step_rebuilds_params_every_call(monkeypatch, tmp_path):
 
 
 _LS_KW = dict(turbulence="louis", beta_soil=True,
-              land_surface_scheme="simple_seb", mpas_land_params_refresh=False)
+              land_surface_scheme="simple_seb", land_params_refresh=False)
 ONE_STEP_DAYS = 301.0 / 86400.0
 
 
@@ -317,7 +317,7 @@ def test_land_stress_first_step_is_the_seed(monkeypatch, tmp_path):
     u = {}
     for name, on in (("off", False), ("on", True)):
         d = _build_driver(str(tmp_path / name), ONE_STEP_DAYS, **_LS_KW,
-                          mpas_land_stress_from_land=on)
+                          land_stress_from_land=on)
         assert d.run() == "COMPLETED"
         u[name] = np.asarray(d.state.u.data)
     assert np.max(np.abs(u["on"] - u["off"])) > 0.0
@@ -331,7 +331,7 @@ THREE_STEPS_DAYS = 901.0 / 86400.0
 def _ls_checkpoint(tmp_path):
     """Two land-stress steps, checkpointed; returns (driver, checkpoint path)."""
     dA = _build_driver(str(tmp_path / "a"), TWO_STEPS_DAYS, **_LS_KW,
-                       mpas_land_stress_from_land=True)
+                       land_stress_from_land=True)
     assert dA.run() == "COMPLETED"
     ckpt = sorted(glob.glob(os.path.join(str(tmp_path / "a"),
                                          "checkpoint_day_*.npz")))[-1]
@@ -350,12 +350,12 @@ def test_land_stress_restart_matches_an_unbroken_run(monkeypatch, tmp_path,
     with np.load(ckpt) as z:
         assert "land_taumag" in z.files and z["land_taumag_valid"].any()
     dC = _build_driver(str(tmp_path / "c"), THREE_STEPS_DAYS, **_LS_KW,
-                       mpas_land_stress_from_land=True)
+                       land_stress_from_land=True)
     assert dC.run() == "COMPLETED"
     # On the MPAS lane ``days`` counts the steps of THIS job, so one step here
     # is absolute step 2: the first post-restart step.
     dB = _build_driver(str(tmp_path / "b"), ONE_STEP_DAYS, **_LS_KW,
-                       mpas_land_stress_from_land=True)
+                       land_stress_from_land=True)
     step, day = dB.load_checkpoint(ckpt)
     assert step == 2
     with caplog.at_level(logging.WARNING):
@@ -383,7 +383,7 @@ def test_restart_after_a_held_solve_counts_the_reuse(monkeypatch, tmp_path):
 
     def build(name, days):
         d = _build_driver(str(tmp_path / name), days, **_LS_KW,
-                          mpas_land_stress_from_land=True)
+                          land_stress_from_land=True)
         _T0[0] = jnp.sum(d._land_ml_state.T_soil)
         return d
 
@@ -397,7 +397,7 @@ def test_restart_after_a_held_solve_counts_the_reuse(monkeypatch, tmp_path):
     ckpt = sorted(glob.glob(os.path.join(str(tmp_path / "a"),
                                          "checkpoint_day_*.npz")))[-1]
     dB = _build_driver(str(tmp_path / "b"), ONE_STEP_DAYS, **_LS_KW,
-                       mpas_land_stress_from_land=True)
+                       land_stress_from_land=True)
     step, day = dB.load_checkpoint(ckpt)
     assert dB.run(start_step=step, start_day=day) == "COMPLETED"
     unbroken = dC._land_stress_reused_total - dA._land_stress_reused_total
@@ -420,11 +420,11 @@ def test_old_checkpoint_without_land_stress_reseeds_loudly(monkeypatch,
         np.savez(partial, **{k: z[k] for k in z.files
                              if k != "land_taumag_fresh"})
     dP = _build_driver(str(tmp_path / "p"), ONE_STEP_DAYS, **_LS_KW,
-                       mpas_land_stress_from_land=True)
+                       land_stress_from_land=True)
     dP.load_checkpoint(partial)
     assert dP._land_stress_ckpt_missing
     dB = _build_driver(str(tmp_path / "b"), FOUR_STEPS_DAYS, **_LS_KW,
-                       mpas_land_stress_from_land=True)
+                       land_stress_from_land=True)
     step, day = dB.load_checkpoint(old)
     with caplog.at_level(logging.WARNING):
         assert dB.run(start_step=step, start_day=day) == "COMPLETED"
@@ -449,7 +449,7 @@ def test_land_stress_held_column_reuses_its_last_valid_drag(monkeypatch,
         lambda grid, path, *a, **k: jnp.where(
             jnp.asarray(grid.grid_lat) > 0.0, 0.5, 0.0))
     d = _build_driver(str(tmp_path / "h"), FOUR_STEPS_DAYS, **_LS_KW,
-                      mpas_land_stress_from_land=True)
+                      land_stress_from_land=True)
     land = np.flatnonzero(np.asarray(d._f_land).reshape(-1) > 0.0)
     assert 0 < land.size < np.asarray(d._f_land).size and land[0] > 0
     j = int(land[0])
@@ -504,7 +504,7 @@ def _record_turbulence_forcing_keys(monkeypatch):
                                              (False, True)])
 def test_ocean_surface_key_reaches_turbulence_from_the_first_step(
         monkeypatch, tmp_path, ice_skin, lapse):
-    """mpas_ocean_flux_on_ocean_surface: T_sfc_ocean is in the turbulence
+    """ocean_flux_on_ocean_surface: T_sfc_ocean is in the turbulence
     forcing on EVERY trace (step 0 included, and on the prognostic ice-skin
     re-anchor path), never without it, and the run differs from the flag-off
     run; flag off, the key never appears.  Its VALUE is the non-land surface:
@@ -528,10 +528,10 @@ def test_ocean_surface_key_reaches_turbulence_from_the_first_step(
                              1000.0 * constants.g),
                     jnp.full(jnp.asarray(grid.grid_lat).shape, 0.5)))
             extra = dict(topography="synthetic_elevation.nc",
-                         mpas_land_lapse_K_per_km=6.5)
+                         land_lapse_K_per_km=6.5)
         d = _build_driver(str(tmp_path / str(on)), TWO_STEPS_DAYS, **_LS_KW,
-                          mpas_ice_skin_prognostic=ice_skin,
-                          mpas_ocean_flux_on_ocean_surface=on, **extra)
+                          ice_skin_prognostic=ice_skin,
+                          ocean_flux_on_ocean_surface=on, **extra)
         assert d.run() == "COMPLETED"
         assert seen, "the turbulence was never traced"
         has = ["T_sfc_ocean" in s for s in seen]

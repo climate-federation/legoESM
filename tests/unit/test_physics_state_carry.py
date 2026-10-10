@@ -496,7 +496,7 @@ def test_checkpoint_roundtrip_restores_stateful_carries(tmp_path):
 
 def test_mpas_checkpoint_roundtrip_restores_physics_state(tmp_path):
     """#413 item 3 (MPAS/npz path): the full PhysicsState is persisted
-    as physstate_* fields and restored into the _run_mpas seed."""
+    as physstate_* fields and restored into the _run_column seed."""
     from legoesm.driver.model_driver import ModelDriver
     from legoesm.driver.config import (
         ExperimentConfig, GridConfig, DycoreConfig, OutputConfig,
@@ -849,7 +849,7 @@ def test_mpas_step_refuses_stateful_physics_without_carry():
 def test_mpas_repeated_load_clears_stale_physstate(tmp_path):
     """Codex adversarial (#413 stale-persistence class): reusing a driver
     to load a checkpoint WITHOUT physstate_* must drop the carry from a
-    PRIOR load, so _run_mpas freshly seeds rather than resuming carry
+    PRIOR load, so _run_column freshly seeds rather than resuming carry
     from the wrong checkpoint."""
     from legoesm.driver.model_driver import ModelDriver
     from legoesm.driver.config import (
@@ -887,7 +887,7 @@ def test_mpas_repeated_load_clears_stale_physstate(tmp_path):
     # Reload a physstate-free checkpoint into the SAME driver.
     driver_b.load_checkpoint(legacy)
     assert not any(k.startswith("physstate_") for k in driver_b._carry_aux), (
-        "stale physstate_* survived a physstate-free reload — _run_mpas "
+        "stale physstate_* survived a physstate-free reload — _run_column "
         "would resume carry from the WRONG checkpoint (issue #413)"
     )
 
@@ -914,7 +914,7 @@ def test_mpas_load_then_save_without_run_refuses_and_drops_stale(tmp_path):
     """Codex adversarial rounds 2+4-7 (#413): load_checkpoint clears the
     stale save channel and does NOT adopt the staged carry — validating
     it faithfully (shape / dtype / scheme / completeness) needs the
-    run-time seed _run_mpas builds.  So a save before any run REFUSES
+    run-time seed _run_column builds.  So a save before any run REFUSES
     rather than emitting an unvalidated / stale / fresh-seed checkpoint,
     and the normal load->run->save path remains the way to persist a
     restored carry."""
@@ -938,7 +938,7 @@ def test_mpas_load_then_save_without_run_refuses_and_drops_stale(tmp_path):
     # Stale carry dropped; the staged carry is NOT adopted before a run.
     assert driver_b._mpas_phys_state is None, "stale carry survived the load"
     assert any(k.startswith("physstate_") for k in driver_b._carry_aux), (
-        "load should still stage the checkpoint's carry for _run_mpas"
+        "load should still stage the checkpoint's carry for _run_column"
     )
     # A save before the validating run is refused (no laundering).
     with pytest.raises(ValueError, match="launder"):
