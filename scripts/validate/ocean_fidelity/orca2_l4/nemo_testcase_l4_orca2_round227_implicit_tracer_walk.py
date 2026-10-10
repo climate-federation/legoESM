@@ -343,6 +343,7 @@ def main() -> int:
     parser.add_argument("--frames-root", type=Path)
     parser.add_argument("--expect-commit")
     parser.add_argument("--classify-json", type=Path)
+    parser.add_argument("--raw-output", type=Path)
     parser.add_argument("--plant", choices=PLANTS, default="none")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
@@ -356,6 +357,10 @@ def main() -> int:
             require(args.deck_root and args.frames_root and args.expect_commit,
                     "runtime mode requires deck, frames, and commit")
             raw = measure(args.deck_root, args.frames_root, args.expect_commit)
+        if args.raw_output:
+            args.raw_output.write_text(
+                json.dumps(raw, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8")
         result = classify(raw, plant=args.plant)
         require(args.plant == "none", f"{args.plant} plant stayed green")
     except (GateError, omt4.GateError, OSError, KeyError, TypeError, ValueError) as error:

@@ -44,6 +44,13 @@ def test_classify_keeps_source_order_and_path_scope() -> None:
     assert result["predictions"]["R227-P4"] == "REFUTED"
 
 
+def test_failed_replay_is_not_admitted() -> None:
+    report = _report()
+    report["oracle_replay_vs_recorded_Kaa"]["unequal"] = 1
+    with pytest.raises(gate.GateError, match="does not reproduce"):
+        gate.classify(report)
+
+
 @pytest.mark.parametrize("plant", gate.PLANTS[1:])
 def test_each_plant_fires(plant: str) -> None:
     report = _report("lower" if plant == "overlap" else "content_T")
