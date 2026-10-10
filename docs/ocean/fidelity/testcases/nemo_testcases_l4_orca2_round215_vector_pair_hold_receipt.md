@@ -97,12 +97,22 @@ evidence.
 Focused round-215 tests pass 7/7. The Decision-96 gate accepts both OMT-1
 labels and refuses rung 0; its pair-closure, exact-loss and false-majority
 plants all fire. The replay gate's pair, each-half, and source-order plants
-all fire. The cumulative and receipt citation gates are run on the final
-restored tree; their results and the fidelity battery are recorded in the
-final validation commit.
+all fire. The receipt citation gate passes all three compiled citations with
+no failures or unmapped entries; its rigid-shift plant exits 1. The cumulative
+default citation gate also passes with no failures or unmapped entries.
 
-Independent review is attempted separately with `codex exec --sandbox
-read-only`; its exact verdict is recorded after the final diff exists.
+The one prescribed `tests/ocean/fidelity -n 12` battery collected 3,040
+tests and reached 99% before the remaining compiler-heavy workers stopped
+making progress. It was bounded rather than called a PASS: 3,013 passed,
+seven skipped, 16 remained unclassified, and exactly four registered
+pre-existing failures had emitted verdicts: the GYRE round-129 spread-floor
+record stamp, allow-dirty scope, worktree-stamp ratchet, and SI3 scalar-math
+provenance gate. The retained log is `round215/pytest_fidelity.log`.
+
+Independent review was attempted separately with `codex exec --sandbox
+read-only` and exited 1 before reading the diff: `failed to initialize
+in-process app-server client: Read-only file system (os error 30)`.
+Independent review is unavailable in-sandbox; this is not a PASS.
 
 ## OPEN
 
