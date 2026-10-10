@@ -194,8 +194,10 @@ def measure(deck_root: Path, frame_root: Path, operand_root: Path,
     # is.  T/S/e3t still carry all jpk levels in the same record.
     recorded_zfv = np.asarray(record["zFv_after_trp"][..., :-1], np.float64)
     if plant == "transport-bit":
-        recorded_zfv = recorded_zfv.copy()
-        recorded_zfv[-1, 0, 0] = np.nextafter(recorded_zfv[-1, 0, 0], np.inf)
+        transport_control = recorded_zfv.copy()
+        transport_control[-1, 0, 0] = np.nextafter(
+            transport_control[-1, 0, 0], np.inf)
+        transport_control_score = _exact(transport_control, recorded_zfv)
     transport = _exact(candidate_zfv, recorded_zfv)
     transport_fold = _exact(candidate_zfv[-3:], recorded_zfv[-3:])
 
@@ -288,6 +290,21 @@ def measure(deck_root: Path, frame_root: Path, operand_root: Path,
             "after_S": _exact(corrected_s[-3:], oracle_s[-3:]),
         },
     }
+    if plant == "transport-bit":
+        require(transport_control_score["unequal"] == 1,
+                "transport-bit plant did not fire exactly once")
+        raise GateError("transport-bit scorer plant fired")
+    if plant == "halo-bit":
+        require(result["nemo_fold_identity"]["T_halo"]["unequal"] == 1,
+                "halo-bit plant did not fire exactly once")
+        raise GateError("halo-bit fold-identity plant fired")
+    if plant == "correction-sign":
+        require(
+            result["endpoint"]["after_T"]["max_abs"]
+            > result["endpoint"]["before_T"]["max_abs"],
+            "correction-sign plant did not worsen the endpoint",
+        )
+        raise GateError("correction-sign endpoint plant fired")
     require(result["nemo_fold_identity"]["T_halo"]["unequal"] == 0,
             "NEMO T halo does not satisfy its compiled fold identity")
     require(result["nemo_fold_identity"]["S_halo"]["unequal"] == 0,
