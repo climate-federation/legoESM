@@ -17,7 +17,7 @@ measured, not assumed.
 The compiled T-pivot V program writes the pivot from the mirrored southern row
 and the halo from the next southern row, both with sign -1, including the
 special first longitude, at
-`ORCA2_OMIP_L4_R214VECPREV3/BLD/ppsrc/nemo/lbcnfd.f90:973-981`. The vector
+`ORCA2_OMIP_L4_R214VECPREV3/BLD/ppsrc/nemo/lbcnfd.f90:973-980`. The vector
 external update, seven-array association, and V transport are respectively at
 `ORCA2_OMIP_L4_R214VECPREV3/BLD/ppsrc/nemo/dynspg_ts.f90:669-682`,
 `:747-756`, and `:533-560`. NEMO associates T and S after every RK3 stage at

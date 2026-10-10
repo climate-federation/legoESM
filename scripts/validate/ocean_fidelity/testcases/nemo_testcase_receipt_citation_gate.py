@@ -2599,17 +2599,17 @@ CITATION_MAP = {
         13],
     # --- ORCA2 round 229: rank-complete tracer-consumer record gap -------
     'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:342-352': [
-        'IF( lwp .AND. kstp == nit000 ) THEN',
-        "WRITE(l1_unit) l4_canon_3d(zFu,'U'), l4_canon_3d(zFv,'V'), l4_canon_3d(zFw,'T')",
+        '! Phase-3 read-only transport instrument.  This is exactly the zF',
+        ('CLOSE(l1_unit)', 2),
         11],
     'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:551-555': [
-        'IF( .NOT.ln_shuman ) THEN',
-        'CALL tra_adv_trp( kstp, kstg, nit000, Kbb, Kmm, Kaa, Krhs, zFu, zFv, zFw )',
+        ('IF( .NOT.ln_shuman ) THEN', 1),
+        ('CALL tra_adv_trp( kstp, kstg, nit000, Kbb, Kmm, Kaa, Krhs, zFu, zFv, zFw )', 1),
         5],
-    'ORCA2_OMIP_L4_R214VECPREV3/BLD/ppsrc/nemo/lbcnfd.f90:973-981': [
-        "CASE ( 'V' )                               ! V-point",
+    'ORCA2_OMIP_L4_R214VECPREV3/BLD/ppsrc/nemo/lbcnfd.f90:973-980': [
+        ("CASE ( 'V' )                               ! V-point", 7),
         'ptab(1,ipj+jh) = psgn * ptab(3,ipj-3-jh)',
-        9],
+        8],
     # --- ORCA2 round 189: bounded replacement restart list ---
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/in_out_manager.f90:51-51':
         'INTEGER, DIMENSION(10) :: nn_stocklist',
