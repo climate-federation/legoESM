@@ -87,14 +87,14 @@ def _validate_inventory(root: Path, plant: str) -> list[str]:
 
 def _validate_run(root: Path, canonical: Path, binary_sha: str, *, itend: int,
                   stock: int, restart_steps: tuple[int, ...],
-                  plant: str = "none") -> dict:
+                  plant: str = "none", deck_gate=omt3_deck) -> dict:
     expected = "0" * 64 if plant == "changed-binary" else binary_sha
     require(sha256(root / "nemo") == expected, f"{root}: binary changed")
     stdout = (root / "run.user.stdout.log").read_text()
     timing = (root / "run.user.time.log").read_text()
     require("STOP 0" in stdout and "RUN_DONE" in timing,
             f"{root}: incomplete normal run")
-    deck = omt3_deck.validate_run_deck(
+    deck = deck_gate.validate_run_deck(
         canonical, root, itend=itend, stock=stock,
         restart_steps=restart_steps,
     )
@@ -105,13 +105,14 @@ def _frame_arrays(path: Path) -> tuple[dict, dict[str, np.ndarray]]:
     return omt1_record._frame_arrays(path)
 
 
-def _month_boundary(root: Path, canonical: Path, plant: str) -> dict:
+def _month_boundary(root: Path, canonical: Path, plant: str,
+                    deck_gate=omt3_deck) -> dict:
     require(sha256(root / "nemo") == BASE_BINARY_SHA256,
             f"{root}: binary changed")
     stdout = (root / "run.user.stdout.log").read_text()
     timing = (root / "run.user.time.log").read_text()
     ocean = (root / "ocean.output").read_text()
-    deck = omt3_deck.validate_run_deck(
+    deck = deck_gate.validate_run_deck(
         canonical, root, itend=MONTH_ITEND, stock=MONTH_ITEND,
         restart_steps=MONTH_STEPS,
     )
@@ -138,7 +139,7 @@ def _month_boundary(root: Path, canonical: Path, plant: str) -> dict:
         if plant == "early-month":
             boundary_step = 9
         require(10 < boundary_step <= MONTH_ITEND,
-                f"OMT-3 boundary is not later than its ten-step ladder: kt={boundary_step}")
+                f"record boundary is not later than its ten-step ladder: kt={boundary_step}")
         require((root / "output.abort_0000.nc").is_file(),
                 "month boundary lacks rank-0 abort state")
         disposition = "STP_CTL"
@@ -162,7 +163,7 @@ def _month_boundary(root: Path, canonical: Path, plant: str) -> dict:
 
 
 def admit(canonical: Path, calibration: Path, twin_a: Path, twin_b: Path,
-          month: Path, plant: str = "none") -> dict:
+          month: Path, plant: str = "none", *, deck_gate=omt3_deck) -> dict:
     require(plant in PLANTS, f"unknown plant {plant}")
     report = preflight()
     if plant == "cadence":
@@ -173,6 +174,7 @@ def admit(canonical: Path, calibration: Path, twin_a: Path, twin_b: Path,
         calibration, canonical, BASE_BINARY_SHA256, itend=10, stock=10,
         restart_steps=(10,),
         plant="changed-binary" if plant == "changed-binary" else "none",
+        deck_gate=deck_gate,
     )
     twin_binary = sha256(twin_a / "nemo")
     require(twin_binary == INSTRUMENT_BINARY_SHA256,
@@ -181,7 +183,7 @@ def admit(canonical: Path, calibration: Path, twin_a: Path, twin_b: Path,
             "instrumented twin binaries differ")
     twin_rows = [
         _validate_run(root, canonical, twin_binary, itend=10, stock=10,
-                      restart_steps=(10,))
+                      restart_steps=(10,), deck_gate=deck_gate)
         for root in (twin_a, twin_b)
     ]
 
@@ -228,7 +230,8 @@ def admit(canonical: Path, calibration: Path, twin_a: Path, twin_b: Path,
                     f"{label}: instrument changed terminal restart rank {rank}")
             terminal_comparisons += 1
 
-    month_boundary = _month_boundary(month, canonical, plant)
+    month_boundary = _month_boundary(
+        month, canonical, plant, deck_gate=deck_gate)
     report.update({
         "status": "PASS_R220_OMT3_ENTRY_STAGE_AND_MONTH_RECORD",
         "calibration": calibration_row,
