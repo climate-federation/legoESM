@@ -122,9 +122,22 @@ variant JSONs stamps clean measurement commit
 ## Validation and review
 
 Focused diagnostic and acquisition tests pass 13/13. The acquisition
-preflight ends `ORCA2_ROUND229_FOLD_TRANSPORT_PREFLIGHT_READY`. Citation-gate,
-focused-suite, and full-battery results are recorded in the final validation
-commit and external evidence logs.
+preflight ends `ORCA2_ROUND229_FOLD_TRANSPORT_PREFLIGHT_READY`. The receipt
+citation gate passes 7/7 citations with no unmapped citation; the cumulative
+default-receipt gate also passes, and the rigid-shift plant refuses.
+
+The single required `tests/ocean/fidelity -n 12` battery collected 3,130
+tests. Before the pytest processes disappeared without emitting their final
+summary, it reported 3,099 passed, 7 skipped, and 4 failed, with 20 tests not
+reported. The four failures were re-run individually and reproduce the
+branch's known pre-existing reds: the GYRE certified-year harness stamp,
+round-35 allow-dirty scoping ratchet, report-emitter worktree-stamp ratchet,
+and SI3 scalar-math record provenance. The first unreported VORTEX round-205
+ID was also re-run alone; its compiler process again disappeared without a
+result, so the full battery was not repeated. These facts and the individual
+failure traces are retained in `battery.log`, `battery_isolated.log`, and the
+`isolated_*.log` files. The evidence manifest is `SHA256SUMS` (manifest digest
+`762a99a9ae5ae14e74b0f42e440e55e8d02a968f1cb155b7911cf2934e7c545b`).
 
 The required `codex exec --sandbox read-only` review could not initialize its
 app-server client because the sandbox denied its PATH-alias write. The verdict
