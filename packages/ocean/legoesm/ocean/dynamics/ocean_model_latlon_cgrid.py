@@ -489,6 +489,7 @@ def _compute_advection_flux_div(
     fct_implicit_w=None,
     return_fct_activity: bool = False,
     return_fct_inputs: bool = False,
+    return_nemo_fct_rhs: bool = False,
 ):
     """Compute advection flux divergence for a single tracer field.
 
@@ -589,9 +590,12 @@ def _compute_advection_flux_div(
             base_thickness=fct_base_thickness,
             after_thickness=fct_after_thickness,
             implicit_w=fct_implicit_w,
+            return_nemo_rhs=return_nemo_fct_rhs,
             return_limiter_activity=return_fct_activity,
         )
-        if return_fct_activity:
+        if return_nemo_fct_rhs:
+            div_hut, vert_flux_div, nemo_fct_rhs = fct_result
+        elif return_fct_activity:
             div_hut, vert_flux_div, fct_activity = fct_result
         else:
             div_hut, vert_flux_div = fct_result
@@ -727,6 +731,10 @@ def _compute_advection_flux_div(
             raise ValueError(
                 "return_fct_activity requires an FCT tracer scheme")
         return div_hut, vert_flux_div, fct_activity
+    if return_nemo_fct_rhs:
+        if tracer_advection not in ("ppm_fct", "fct2"):
+            raise ValueError("return_nemo_fct_rhs requires an FCT tracer scheme")
+        return div_hut, vert_flux_div, nemo_fct_rhs
     if return_fct_inputs:
         if tracer_advection not in ("ppm_fct", "fct2"):
             raise ValueError(
@@ -772,6 +780,7 @@ def compute_advection_flux_div_pair(
     fct_implicit_w=None,
     return_a_fct_activity: bool = False,
     return_fct_inputs: bool = False,
+    return_nemo_fct_rhs: bool = False,
 ):
     """Advection flux divergence for TWO tracers (T, S) in one pass.
 
@@ -806,9 +815,9 @@ def compute_advection_flux_div_pair(
     bit-identical to ``_compute_advection_flux_div`` on that tracer
     (identical elementwise ops applied to the same per-level values).
     """
-    if return_a_fct_activity and return_fct_inputs:
+    if sum((return_a_fct_activity, return_fct_inputs, return_nemo_fct_rhs)) > 1:
         raise ValueError(
-            "return_a_fct_activity and return_fct_inputs are mutually exclusive")
+            "FCT diagnostic returns are mutually exclusive")
     # Trace-time opt-in gate (LEGOESM_TRACER_PAIR=1 → level-stacked
     # pair; baked into the compiled graph — flip BEFORE first compile).
     # DEFAULT OFF: the stack halves pad count + reconstruction calls
@@ -835,6 +844,7 @@ def compute_advection_flux_div_pair(
             fct_implicit_w=fct_implicit_w,
             return_fct_activity=return_a_fct_activity,
             return_fct_inputs=return_fct_inputs,
+            return_nemo_fct_rhs=return_nemo_fct_rhs,
         )
         if return_a_fct_activity:
             pair_a = pair_a_result[:2]
@@ -842,6 +852,9 @@ def compute_advection_flux_div_pair(
         elif return_fct_inputs:
             pair_a = pair_a_result[:2]
             inputs_a = pair_a_result[2]
+        elif return_nemo_fct_rhs:
+            pair_a = pair_a_result[:2]
+            rhs_a = pair_a_result[2]
         else:
             pair_a = pair_a_result
         out_b = _compute_advection_flux_div(
@@ -856,6 +869,7 @@ def compute_advection_flux_div_pair(
             fct_after_thickness=fct_after_thickness,
             fct_implicit_w=fct_implicit_w,
             return_fct_inputs=return_fct_inputs,
+            return_nemo_fct_rhs=return_nemo_fct_rhs,
         )
         if return_b_h_fluxes:
             div_b, vert_b, sf_u, sf_v = out_b
@@ -864,6 +878,8 @@ def compute_advection_flux_div_pair(
             return pair_a, out_b, activity_a
         if return_fct_inputs:
             return pair_a, out_b[:2], (inputs_a, out_b[2])
+        if return_nemo_fct_rhs:
+            return pair_a, out_b[:2], (rhs_a, out_b[2])
         return pair_a, out_b
 
     nlev = tr_a.shape[-1]
@@ -2399,6 +2415,9 @@ def _nemo_ws_rk3_tracer_pair_step(
                     return_fct_activity and stage_index == 2),
                 return_fct_inputs=(
                     return_fct_inputs and stage_index == 2),
+                return_nemo_fct_rhs=(
+                    tracer_advection == "fct2" and stage_index == 2
+                    and not return_fct_activity and not return_fct_inputs),
             )
             if return_fct_activity and stage_index == 2:
                 (dh_a, dv_a), (dh_b, dv_b), fct_activity = pair_result
@@ -2411,11 +2430,15 @@ def _nemo_ws_rk3_tracer_pair_step(
                     _inputs_a[5], _inputs_b[5],
                     *_inputs_a[6:],
                 )
+            elif tracer_advection == "fct2" and stage_index == 2:
+                (dh_a, dv_a), (dh_b, dv_b), (rhs_a, rhs_b) = pair_result
+                fct_activity = None
             else:
                 (dh_a, dv_a), (dh_b, dv_b) = pair_result
                 fct_activity = None
             fd_a, fd_b = dh_a + dv_a, dh_b + dv_b
-            rhs_a = rhs_b = None
+            if not (tracer_advection == "fct2" and stage_index == 2):
+                rhs_a = rhs_b = None
         if stage_index == 2 and bbl_context is not None:
             from legoesm.ocean.physics.bbl_adv import (
                 apply_bbl_diffusive_tendency,
@@ -2555,10 +2578,21 @@ def _nemo_ws_rk3_tracer_pair_step(
             None if _terms1 is None else _terms1[1])
     if stop_after_stage == 2:
         return a2, b2
-    fd2_a, fd2_b, _, _, fct_activity, fct_inputs = _flux_pair(
+    fd2_a, fd2_b, rhs2_a, rhs2_b, fct_activity, fct_inputs = _flux_pair(
         a2, b2, dt, 2, h_k_new)
-    advection_content_a = h_k_old * tr_a - dt * fd2_a
-    advection_content_b = h_k_old * tr_b - dt * fd2_b
+    if rhs2_a is None:
+        advection_content_a = h_k_old * tr_a - dt * fd2_a
+        advection_content_b = h_k_old * tr_b - dt * fd2_b
+    else:
+        # stprk3_stg.f90 consumes the already-divided Krhs at the stage-three
+        # midpoint thickness.  Keep the source store boundaries explicit.
+        stage_weight = nemo_source_round(dt * h_one_half)
+        advection_content_a = nemo_source_round(
+            nemo_source_round(h_k_old * tr_a)
+            + nemo_source_round(stage_weight * rhs2_a))
+        advection_content_b = nemo_source_round(
+            nemo_source_round(h_k_old * tr_b)
+            + nemo_source_round(stage_weight * rhs2_b))
     if stage3_advection_content_override is not None:
         advection_content_a, advection_content_b = (
             stage3_advection_content_override)
