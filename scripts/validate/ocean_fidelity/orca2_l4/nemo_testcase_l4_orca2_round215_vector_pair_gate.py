@@ -33,8 +33,8 @@ from scripts.validate.ocean_fidelity.orca2_l4 import (
 from scripts.validate.ocean_fidelity.orca2_l4 import (
     nemo_testcase_l4_orca2_round209_omt1_ladder_gate as omt1,
 )
-from scripts.validate.ocean_fidelity.orca2_l4 import (
-    nemo_testcase_l4_orca2_round213_vector_pre_lbc_acquisition as acquisition,
+from scripts.validate.ocean_fidelity.orca2_l4.nemo_testcase_l4_orca2_round213_vector_pre_lbc_acquisition import (
+    check_record as record_gate,
 )
 from scripts.validate.ocean_fidelity.testcases import (
     nemo_testcase_l2_gyre_phase3_gate as phase3,
@@ -55,7 +55,7 @@ def require(condition: bool, message: str) -> None:
 
 def _payloads(path: Path) -> tuple[dict[str, int], dict[str, np.ndarray]]:
     raw = path.read_bytes()
-    require(raw[:16] == acquisition.check_record.MAGIC, f"{path.name}: bad magic")
+    require(raw[:16] == record_gate.MAGIC, f"{path.name}: bad magic")
     header = struct.unpack_from("=16i", raw, 16)
     keys = ("version", "kt", "jn", "kmm", "krhs", "rank", "nx", "ny",
             "nimpp", "njmpp", "ntsi", "ntsj", "ntei", "ntej", "bits", "nfields")
@@ -158,7 +158,7 @@ def measure(args) -> dict[str, object]:
     require(jax.default_backend() == "cpu" and not jax.config.jax_disable_jit,
             "round-215 replay requires production JIT on CPU")
 
-    admission = acquisition.check_record.run(args.record_root, args.baseline_root)
+    admission = record_gate.run(args.record_root, args.baseline_root)
     recorded = _assemble(args.record_root)
     prior = json.loads(args.prior_report.read_text(encoding="utf-8"))
     require(prior["status"] == "PASS_R212_OMT1_VECTOR_WALK",
@@ -272,7 +272,7 @@ def main() -> int:
             result = classify(json.loads(args.report_in.read_text()), args.plant)
         require(args.plant == "none", f"{args.plant} plant stayed green")
     except (OSError, ValueError, KeyError, TypeError, GateError,
-            acquisition.check_record.Refusal, omt1.GateError) as error:
+            record_gate.Refusal, omt1.GateError) as error:
         marker = "PLANT-FIRED" if args.plant != "none" else "REFUSE"
         print(f"STATUS {marker} {args.plant}: {error}")
         return 2
