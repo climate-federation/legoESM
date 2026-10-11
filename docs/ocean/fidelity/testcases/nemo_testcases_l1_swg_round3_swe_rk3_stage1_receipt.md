@@ -70,19 +70,83 @@ replay boundary, not a new prognostic carry.
 
 ## Measurement
 
-Pending preregistration commit.
+Preregistration commit: `edcc0c9c15b2b4d33886c6be164fb3da9b3a1f77`.
+Clean measured implementation: `bd41322dcfc3ea8f66e88bcbb8649706feb3dac8`.
+
+1. **CONFIRMED.**  The card selects `outer_integrator="swe_rk3"`.  The
+   production entry point is JIT compiled in fp64 and accepts stage 1 only;
+   stage 2, stage 3, ordinary full-step execution, and a non-SWE selector all
+   raise.  The remaining two stage arms stay in `SWG_UNMEASURED`.
+2. **CONFIRMED.**  A nonzero SSH impulse is checked against the independently
+   evaluated source-order pressure and QCO scalars: the selected wet U output
+   is exactly `9.600000000000001e-07 m s-1` and the T ratio is exactly
+   `2e-06`.  The stage is differentiable through that pressure path.  Existing
+   stored C2 and ENS direct-division tests remain green; the SWE T-ratio path
+   exposes the unfloored source value, while the generic guarded stretch
+   operator is unchanged.
+3. **CONFIRMED.**  Driving the production JIT from the admitted `kt=1,
+   stage=1` entry gives 13/13 bit-identical rows against the recorded
+   `kt=1, stage=2` entry.  Every row has `max_abs=0`, zero unequal wet cells,
+   and status AT-BAR.  The clean artifact is
+   `swg_stage1_clean.json`, SHA-256
+   `600e270b3a5da0bd1d40ca98c45e6fd6c21e7806994e0047bb1bda120b36d60e`.
+4. **CONFIRMED.**  Both controls change a wet U-staggered `utau_before` input
+   at `[1,1]` before the JIT replay.  The zero control moves by `5e-324`; the
+   one control moves by `2.220446049250313e-16`.  Each produces exactly one
+   unequal production output, is classified DEBT by the bit endpoint, and
+   exits 1.  The corresponding artifact SHA-256 values are
+   `78233e8624e4ee4f0ecb8ec58866485ea8af3af6ddb3b9e6a92ae79f0b3fad0a`
+   and
+   `54c5ac90b7f3709dafe77bc0b92bf12066a4b126332a9a79cac6f9775d2cc11a`.
+5. **CONFIRMED.**  The card, physics configuration, and stage consumer all
+   resolve `g=0.02`.  The source-literal impulse test becomes wrong if that
+   constants value does not reach the pressure statements at
+   `SWG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:170-176`; the stage contains no
+   literal `0.02`.
+6. **CONFIRMED.**  No other card selects `swe_rk3`.  The six existing fp64
+   digests are unchanged: TSUNAMI `8bb5ed6c1bc031bd`, VORTEX
+   `f7489467bc156303`, VORTEX_VEC `5041b91c67bd1443`, GYRE
+   `f02d2f42a570f413`, LOCK_EXCHANGE `d5dfdf83b3a1e0ab`, and OVERFLOW
+   `83de0010e1170032`.  DINO and ORCA2 retain their EEN programs and cannot
+   enter the new outer dispatch.
 
 ## First non-bit statement
 
-Pending measurement.
+There is no non-bit statement on the measured stage-1 boundary: all 13 output
+rows are bit-identical.  The first source-order statement not yet represented
+is the stage-2 program and its `rn_Dt/2` stage length at
+`SWG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:213-215`; it is UNMEASURED, not
+DEBT.  This round makes no claim beyond the preregistered kt=1 stage-1
+boundary.
 
 ## Rule 12 disposition
 
-Pending measurement.
+The only existing shared statements touched are exposed names or optional
+arguments whose old call signatures and arithmetic remain unchanged.  C2's
+historical private name aliases the same public function; the default QCO
+F-thickness builder still executes its old statements when no override is
+supplied; and the generic positive-thickness stretch retains its original
+body.  The new stage program is reachable only when the SWG card explicitly
+selects `swe_rk3`.
+
+The TSUNAMI card and ladder, both VORTEX families, the GYRE card reconciliation
+suite, and the ORCA2 round-92 card gate were re-run on CPU.  One large combined
+process hit the repository's documented JAX compiler-resource limit at the
+GYRE full-step compile after reporting only the three already-known stale
+GYRE/LOCK_EXCHANGE/OVERFLOW expected-digest pins.  The affected GYRE full-step
+test passed alone in a fresh process, and ORCA2 passed 4/4 separately.  No
+AT-BAR row moved and no first-over-bar boundary became earlier.
 
 ## Gates
 
-Pending measurement.
+The focused SWG battery is 162/162 green.  Direct shared-operator tests are
+19/19 green.  The split cross-card runs keep all substantive tests green; the
+only assertion failures are the three pre-existing stale digest pins, whose
+actual values remain the unchanged values above.  The geometry gate remains
+34/34 bit-identical, and its signed-y Coriolis, wet-cell, and layer-thickness
+plants each exit nonzero.  The zero and one production-input plants each exit
+1.  The citation gate accepts every cited compiled statement, and its shifted
+stage-program citation plant exits nonzero.
 
 ## Independent review
 
@@ -90,5 +154,12 @@ Independent review run by the operator.
 
 ## OPEN
 
-Pending measurement.  Stage 2, stage 3, the chained ten-step ladder, 30 days,
-and shipped-run statistics remain outside this round.
+1. Build and preregister stage 2 from the admitted stage-2 entry, beginning at
+   `SWG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:213-215`, then score its output
+   against the admitted stage-3 entry.
+2. Build stage 3 with its stage-3-only viscosity, centred wind stress, and
+   before-velocity layer drag; only then enable ordinary full-step execution.
+3. Run the chained ten-step ladder, then acquire/score 30 days, then score the
+   shipped 172800-step statistics.
+
+No acquisition or configuration/carried-state decision is requested.

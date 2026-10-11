@@ -61,7 +61,8 @@ def test_stage1_one_ulp_record_input_reaches_production_output(card_and_model):
     assert np.asarray(out.utau_before)[at] == before[at]
 
 
-def test_stage1_is_differentiable_through_reduced_gravity_pressure(card_and_model):
+def test_stage1_nonzero_pressure_is_source_literal_and_differentiable(
+        card_and_model):
     card, model = card_and_model
     wet = jnp.asarray(card.recipe.land_mask)
     jj, ii = np.argwhere(np.asarray(wet, dtype=bool))[20]
@@ -72,7 +73,20 @@ def test_stage1_is_differentiable_through_reduced_gravity_pressure(card_and_mode
         return model.replay_swe_rk3_stage(
             entry, card.dt_s, 1).u_k[jj, ii]
 
-    derivative = jax.grad(one_output)(jnp.asarray(1.0e-3, dtype=jnp.float64))
+    amplitude = jnp.asarray(1.0e-3, dtype=jnp.float64)
+    result = model.replay_swe_rk3_stage(
+        _entry()._replace(ssh_k=amplitude * pattern), card.dt_s, 1)
+    # stprk3.f90:172 and :189, retaining each fp64 source boundary.
+    r1_e1u = np.float64(1.0) / np.float64(25_000.0)
+    zrhs = np.float64(
+        np.float64(-np.float64(0.02) * np.float64(0.0 - 1.0e-3))
+        * r1_e1u)
+    expected_u = np.float64(
+        np.float64(3600.0 / 3.0) * zrhs)
+    assert np.asarray(result.u_k)[jj, ii] == expected_u
+    assert np.asarray(result.r3t_k)[jj, ii] == np.float64(1.0e-3 / 500.0)
+
+    derivative = jax.grad(one_output)(amplitude)
     assert np.isfinite(float(derivative))
     assert float(derivative) != 0.0
 

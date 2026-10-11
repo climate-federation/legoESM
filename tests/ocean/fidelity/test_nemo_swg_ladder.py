@@ -46,10 +46,13 @@ def test_stage_entry_reader_refuses_absent_acquisition(tmp_path):
 def test_ens_stage1_executes_production_jit_and_scores_all_fields():
     clean = lad.ens_stage1(lad.DEFAULT_STAGE_ROOT, allow_dirty=True)
     assert clean["production_stage_executed"]
+    assert clean["all_at_bar"] and clean["all_bit_identical"]
     assert len(clean["per_kt"][0]["rows"]) == 13
     assert {row["status"] for row in clean["per_kt"][0]["rows"]} <= {
         "AT-BAR", "DEBT"}
     assert all("max_abs" in row for row in clean["per_kt"][0]["rows"])
+    assert all(row["max_abs"] == 0.0 for row in clean["per_kt"][0]["rows"])
+    assert lad._exit_code(clean) == 0
 
 
 @pytest.mark.skipif(not lad.DEFAULT_STAGE_ROOT.is_dir(),
