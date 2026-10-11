@@ -1423,16 +1423,16 @@ CITATION_MAP = {
     'SWG_OMIP_L1/BLD/ppsrc/nemo/usrdef_hgr.f90:123-168': [
         'DO jj = 1, jpj',
         'pff_t(:,:) =  REAL( rn_f0, wp ) + REAL( rn_beta, wp ) * ABS( pphit(:,:) )', 46],
-    'SWG_OMIP_L1/BLD/ppsrc/nemo/usrdef_zgr.f90:157-168': [
+    'SWG_OMIP_L1/BLD/ppsrc/nemo/usrdef_zgr.f90:158-168': [
         'pdepw_1d(1) =   0._wp',
-        'CALL e3_to_depth( pe3t_1d, pe3w_1d, pdept_1d, pdepw_1d )', 12],
+        'CALL e3_to_depth( pe3t_1d, pe3w_1d, pdept_1d, pdepw_1d )', 11],
     'SWG_OMIP_L1/BLD/ppsrc/nemo/usrdef_zgr.f90:206-235': [
         'z2d(:,:) = REAL( jpkm1 , wp )',
-        'k_bot(ji,jj) = 0', 30],
+        ('k_bot(ji,jj) = 0', 2), 30],
     'SWG_OMIP_L1/BLD/ppsrc/nemo/usrdef_sbc.f90:84-87': [
         'emp (:,:) = 0._wp', 'qsr (:,:) = 0._wp', 4],
     'SWG_OMIP_L1/BLD/ppsrc/nemo/dynvor.f90:250-251': [
-        'CASE( np_ENS )',
+        ('CASE( np_ENS )', 2),
         'CALL vor_ens( kt, Kmm, ntot, puu(:,:,:,Kmm)', 2],
     'SWG_OMIP_L1/BLD/ppsrc/nemo/dynzad.f90:111-146': [
         'zWdzU(ntsi-(0):ntei+(0),ntsj-(0):ntej+(0)) = 0._wp',
@@ -1440,15 +1440,15 @@ CITATION_MAP = {
     'SWG_OMIP_L1/BLD/ppsrc/nemo/stprk3.f90:140,196,252': [
         'rDt   = rn_Dt / 3._wp',
         'rDt   = rn_Dt / 2._wp',
-        'rDt   = rn_Dt'],
+        'rDt   = rn_Dt', 3],
     'SWG_OMIP_L1/BLD/ppsrc/nemo/stprk3.f90:148-149': [
         'CALL dyn_adv( kstp, Nbb, Nbb, uu, vv, Nrhs )',
         'CALL dyn_vor( kstp,      Nbb, uu, vv, Nrhs )', 2],
     'SWG_OMIP_L1/BLD/ppsrc/nemo/stprk3.f90:260-273': [
-        'CALL dyn_adv( kstp, Nbb, Nnn, uu, vv, Nrhs )',
+        ('CALL dyn_adv( kstp, Nbb, Nnn, uu, vv, Nrhs )', 2),
         '&            - rn_rfr   * vv(ji,jj,jk,Nbb)', 14],
     'SWG_OMIP_L1/BLD/ppsrc/nemo/stprk3.f90:281-283': [
-        'CALL ssh_nxt( kstp, Nbb, Nnn, ssh, Naa )',
+        ('CALL ssh_nxt( kstp, Nbb, Nnn, ssh, Naa )', 2),
         'CALL dom_qco_r3c( ssh(:,:,Naa), r3t(:,:,Naa), r3u(:,:,Naa), r3v(:,:,Naa), r3f(:,:) )', 3],
     # --- TSUNAMI lane round 1 (survey + card + acquisition) ---
     'tests/TSUNAMI/MY_SRC/usrdef_nam.F90:92-93': [

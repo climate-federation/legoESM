@@ -3280,261 +3280,6 @@ def _validate_tsunami_card(card: NEMOTestcaseCard) -> None:
             raise ValueError(f"TSUNAMI-zco {name} is not the f-plane f0")
 
 
-# --- SWG (NEMO 5.0.2 tests/SWG): shallow-water engine, round-1 skeleton ---
-# This is a pure configuration of the shared lat-lon C-grid lane.  The card is
-# deliberately not executable until the three source-selected arms in
-# SWG_UNMEASURED exist in that lane; validate_nemo_testcase_card_for_execution
-# therefore refuses it instead of silently substituting the GYRE RK3 program.
-
-
-class SwgResolvedNamelist(NamedTuple):
-    """Resolved shipped SWG choices, including inert SWE-deck selections."""
-
-    # namrun / namdom, tests/SWG/EXPREF/namelist_cfg
-    nn_it000: int = 1
-    nn_itend: int = 172800
-    nn_leapy: int = 30
-    nn_write: int = 480
-    nn_istate: int = 1
-    ln_rstart: bool = False
-    rn_Dt_s: float = 3600.0
-    ln_meshmask: bool = False
-    ln_shuman: bool = False
-    # namcfg / namusr_def; usrdef_nam.f90:138-167
-    ln_read_cfg: bool = False
-    nn_SWG: int = 4
-    jpkglo: int = 2
-    rn_theta_deg: float = 0.0
-    nn_gc: int = 2
-    rn_domsiz_m: float = 2_000_000.0
-    rn_dx_m: float = 100_000.0
-    rn_tau_pa: float = 0.20
-    rn_modified_grav_m_s2: float = 0.02
-    rn_rfr_s: float = 1.0e-7
-    rn_beta_m_s: float = 2.0e-11
-    rn_f0_s: float = 0.7e-4
-    nn_dynldf_lap_typ: int = 1
-    ln_dynldf_lap_PM: bool = False
-    rn_abp: float = 1.0e-2
-    nn_cnp: int = 1
-    rn_fsp_s: float = 0.0
-    ln_Iperio: bool = False
-    ln_Jperio: bool = False
-    # built keys, tests/SWG_OMIP_L1/cpp_SWG_OMIP_L1.fcm
-    key_xios: bool = False
-    key_qco: bool = True
-    key_vco_3d: bool = True
-    key_RK3: bool = True
-    # namsbc / namlbc / namdrg
-    nn_fsbc: int = 1
-    ln_usr_sbc: bool = True
-    ln_flx: bool = False
-    ln_blk: bool = False
-    ln_cpl: bool = False
-    ln_traqsr: bool = False
-    ln_rnf: bool = False
-    ln_apr_dyn: bool = False
-    rn_shlat: float = 0.0
-    ln_drg_OFF: bool = True
-    # namdyn_adv / namdyn_vor
-    ln_dynadv_OFF: bool = False
-    ln_dynadv_vec: bool = True
-    nn_dynkeg: int = 0
-    ln_dynadv_cen2: bool = False
-    ln_dynadv_up3: bool = False
-    ln_dynvor_ene: bool = False
-    ln_dynvor_ens: bool = True
-    ln_dynvor_enT: bool = False
-    ln_dynvor_een: bool = False
-    nn_e3f_typ: int = 1
-    ln_dynvor_msk: bool = True
-    # The SWE engine never calls dyn_spg_init or zdf_phy_init, but these deck
-    # values are stated so an inert namelist block cannot become a hidden
-    # choice if that call graph changes (nemogcm.f90:285-316).
-    ln_dynspg_exp: bool = True
-    nn_bt_flt: int = 3
-    rn_bt_alpha: float = 0.07
-    ln_dynldf_lap: bool = True
-    ln_dynldf_lev: bool = True
-    nn_ahm_ijk_t: int = 0
-    rn_Uv_m_s: float = 2.0
-    rn_Lv_m: float = 500.0
-    ln_zdftke: bool = True
-    ln_zdfevd: bool = True
-    nn_evdm: int = 1
-    rn_evd_m2_s: float = 100.0
-    rn_avm0_m2_s: float = 1.2e-4
-    rn_avt0_m2_s: float = 1.2e-5
-    nn_avb: int = 0
-    nn_havtb: int = 0
-    nn_etau: int = 0
-
-
-SWG_NAMELIST = SwgResolvedNamelist()
-SWG_DEVIATIONS: tuple[tuple[str, bool, bool, str], ...] = (
-    ("key_xios", True, False, "conda-scalarmath reference toolchain"),
-)
-SWG_UNMEASURED: tuple[str, ...] = (
-    "ENS total-vorticity operator with ln_dynvor_msk",
-    "SWE three-stage explicit free-surface RK3 program",
-    "stage-3-only viscosity, wind stress, and before-velocity layer drag",
-)
-
-
-def swg_horizontal_coordinates() -> dict[str, np.ndarray]:
-    """Transcribe compiled ``usrdef_nam/hgr`` for the shipped zero rotation."""
-    nl = SWG_NAMELIST
-    if nl.rn_theta_deg != 0.0:
-        raise ValueError("SWG round-1 card transcribes rn_theta = 0 only")
-    spacing = nl.rn_dx_m / float(nl.nn_SWG)       # usrdef_nam.f90:154
-    zgl = nl.rn_domsiz_m + 2.0 * nl.nn_gc * spacing
-    n = math.ceil(zgl / spacing)                   # usrdef_nam.f90:159-160
-    # usrdef_hgr.f90:110-116, for theta=0: zlam1=zphi1=50 km and ANINT
-    # is exact because the ratio is the integer two.
-    origin = round((0.5 * zgl - 0.5 * nl.rn_domsiz_m) / spacing) * spacing
-    # mesh_mask/restarts expose NEMO's data domain, which removes nn_hls=2
-    # computational halo rows from each side.  In usrdef_hgr.f90:125-126 the
-    # first written point is therefore local ji=jj=3: zim05=zjm05=1.5 and
-    # zim1=zjm1=2.0 (ocean.output:150-166 reports jpi=88, data domain 84).
-    centre = (np.arange(n, dtype=np.float64) + 1.5) * spacing - origin
-    face = (np.arange(n, dtype=np.float64) + 2.0) * spacing - origin
-    glamt = np.broadcast_to(centre[None, :], (n, n)).copy()
-    glamu = np.broadcast_to(face[None, :], (n, n)).copy()
-    gphit = np.broadcast_to(centre[:, None], (n, n)).copy()
-    gphiv = np.broadcast_to(face[:, None], (n, n)).copy()
-    ff_t = nl.rn_f0_s + nl.rn_beta_m_s * np.abs(gphit)
-    ff_f = nl.rn_f0_s + nl.rn_beta_m_s * np.abs(gphiv)
-    return {
-        "ni": n, "nj": n, "spacing_m": spacing,
-        "glamt": glamt, "glamu": glamu,
-        "glamv": glamt.copy(), "glamf": glamu.copy(),
-        "gphit": gphit, "gphiu": gphit.copy(),
-        "gphiv": gphiv, "gphif": gphiv.copy(),
-        "ff_t": ff_t, "ff_f": ff_f,
-    }
-
-
-def swg_wet_mask(source: dict[str, np.ndarray] | None = None) -> np.ndarray:
-    """Transcribe ``usrdef_zgr.f90:206-235`` for the shipped rectangle."""
-    src = source or swg_horizontal_coordinates()
-    wet = ((src["gphiv"] > 10_000.0) & (src["gphiv"] < 2_010_000.0)
-           & (src["glamu"] > 10_000.0) & (src["glamu"] < 2_010_000.0))
-    neighbours = (np.roll(wet, 1, 0).astype(int) + np.roll(wet, -1, 0)
-                  + np.roll(wet, 1, 1) + np.roll(wet, -1, 1))
-    return (wet & (neighbours > 1)).astype(np.float64)
-
-
-def build_swg_card() -> NEMOTestcaseCard:
-    """Shipped SWG deck as a fail-closed, currently non-executable card."""
-    nl = SWG_NAMELIST
-    src = swg_horizontal_coordinates()
-    wet_np = swg_wet_mask(src)
-    wet = jnp.asarray(wet_np, dtype=jnp.float64)
-    n, spacing = src["ni"], src["spacing_m"]
-    grid = create_beta_plane_cgrid_geometry(
-        n, n, dx_m=spacing, dy_m=spacing, f0=0.0, beta=0.0,
-        x_origin_m=float(src["glamt"][0, 0]) - 0.5 * spacing,
-        y_origin_m=float(src["gphit"][0, 0]) - 0.5 * spacing,
-        radius=float(NEMO_CONSTANTS_CONFIG.R_earth),
-        cartesian_pseudo_lat=True, dtype=jnp.float64,
-    )
-    # Native NEMO V/F rows map to model v rows 1..n.  The extra south face is
-    # a model-layout record, evaluated from the same |y| statement.
-    south_y = float(src["gphiv"][0, 0]) - spacing
-    f_v = np.concatenate([
-        np.full((1, n), nl.rn_f0_s + nl.rn_beta_m_s * abs(south_y)),
-        src["ff_f"],
-    ], axis=0)
-    f_u = np.concatenate([src["ff_t"], src["ff_t"][:, -1:]], axis=1)
-    grid = grid._replace(
-        f_T=jnp.asarray(src["ff_t"]), f_u=jnp.asarray(f_u),
-        f_v=jnp.asarray(f_v), ff_f=jnp.asarray(src["ff_f"]),
-    )
-
-    native = (n, n, 1)
-    thickness = np.full(native, 500.0)
-    tmask = wet_np[..., None]
-    u_wet = wet_np * np.roll(wet_np, -1, axis=1); u_wet[:, -1] = 0.0
-    v_wet = wet_np * np.roll(wet_np, -1, axis=0); v_wet[-1, :] = 0.0
-    umask = u_wet[..., None]
-    vmask = v_wet[..., None]
-    fe3mask = np.asarray(nemo_fe3mask_from_tmask(jnp.asarray(tmask)))
-    metric = np.full((n, n), spacing)
-    area = metric * metric
-    operands = NemoEENBarotropicOperands(
-        ff_f=src["ff_f"], e3u_0=thickness, e3v_0=thickness,
-        e3f_0=thickness, umask=umask, vmask=vmask,
-        fmask=fe3mask, fe3mask=fe3mask,
-        hu_0=500.0 * u_wet, hv_0=500.0 * v_wet,
-        hf_0=500.0 * fe3mask[..., 0],
-        e1t=metric, e2t=metric, e1u=metric, e2u=metric,
-        e1v=metric, e2v=metric, e1f=metric, e2f=metric,
-    )
-    z_ref = create_z_star_from_thicknesses(
-        jnp.asarray([500.0]), t_depth_ref_m=np.asarray([250.0]),
-        nemo_gdept_0_m=np.full(native, 250.0),
-        nemo_gdepw_0_m=np.zeros(native),
-        nemo_e3t_0_m=thickness, nemo_e3w_0_m=thickness,
-        nemo_hu_0_m=500.0 * u_wet, nemo_hv_0_m=500.0 * v_wet,
-        nemo_e1e2t_m=area, nemo_e1e2u_m=area, nemo_e1e2v_m=area,
-        nemo_e2u_m=metric, nemo_e1v_m=metric,
-        nemo_een_barotropic_m=operands, allow_single_level=True,
-    )
-    z_coord = create_full_step_coordinate(
-        z_ref, jnp.where(wet > 0.0, 0, -1))
-    state = rest_state_latlon_cgrid_ocean(
-        grid, z_coord, T_water_init_C=0.0, T_deep=0.0, S_uniform=0.0,
-        H_max=500.0, land_mask_override=wet,
-        H_bathy_override=500.0 * wet,
-        nemo_prognostic_barotropic_velocity=True,
-    )
-    base = _model_config(
-        barotropic_time_filter="nemo_ab3am4", n_barotropic_substeps=1,
-        bbl_adv_option=0, bbl_gamma_s=0.0,
-        bbl_diffusive_option=0, bbl_aht_m2_s=0.0,
-        whole_step_identity="gyre_vector_ene_c2",
-        tke_langmuir_evaluation="nemo_literal",
-    )
-    cc = NEMO_CONSTANTS_CONFIG._replace(g=nl.rn_modified_grav_m_s2)
-    physics = base.physics._replace(constants=cc)
-    config = base._replace(
-        constants=cc, physics=physics, tracer_advection="none", K_h=0.0,
-        implicit_vertical_mixing=False, A_v=0.0, K_v=0.0, gm_redi=None,
-        lateral_viscosity=base.lateral_viscosity._replace(A_h=500.0),
-        bottom_drag=base.bottom_drag._replace(bottom_drag_r=0.0),
-        meridionally_periodic=False,
-    )
-    recipe = NEMORecipe(config, config.physics, grid, z_coord, wet, state)
-    card = NEMOTestcaseCard(
-        "SWG-zco", recipe, nl.rn_Dt_s, nl.nn_itend, 1, 0, 0, 0.0, 0.0,
-        surface_boundary_condition="swg_analytic_wind",
-        surface_input_operator="swe_stage3",
-        unmeasured_features=SWG_UNMEASURED,
-    )
-    validate_nemo_testcase_card(card)
-    return card
-
-
-def _validate_swg_card(card: NEMOTestcaseCard) -> None:
-    nl = SWG_NAMELIST
-    if card.unmeasured_features != SWG_UNMEASURED:
-        raise ValueError("SWG-zco must declare exactly SWG_UNMEASURED")
-    if (card.dt_s, card.n_steps, card.dummy_bottom_records) != (
-            nl.rn_Dt_s, nl.nn_itend, 1):
-        raise ValueError("SWG-zco run length or vertical record count drifted")
-    if card.j_periodic or card.recipe.model_config.meridionally_periodic:
-        raise ValueError("SWG-zco is closed in both horizontal directions")
-    if card.recipe.model_config.constants.g != nl.rn_modified_grav_m_s2:
-        raise ValueError("SWG-zco must carry rn_modified_grav as model g")
-    if card.recipe.model_config.lateral_viscosity.A_h != 500.0:
-        raise ValueError("SWG-zco must state 0.5*rn_Uv*rn_Lv = 500 m2/s")
-    wet = np.asarray(card.recipe.land_mask)
-    if wet.shape != (84, 84) or int(np.count_nonzero(wet)) != 6400:
-        raise ValueError("SWG-zco must carry the compiled 84x84 / 6400-wet mesh")
-    if int(card.recipe.z_coord.n_levels) != 1:
-        raise ValueError("SWG-zco must carry one executed 500 m layer")
-
-
 def validate_nemo_testcase_card(card: NEMOTestcaseCard) -> None:
     """Reject any card composition not exercised by its named oracle run."""
     if card.transcendentals != "libm":
@@ -3548,9 +3293,6 @@ def validate_nemo_testcase_card(card: NEMOTestcaseCard) -> None:
             f"card's j_periodic ({card.j_periodic})")
     if card.case == "TSUNAMI-zco":
         _validate_tsunami_card(card)
-        return
-    if card.case == "SWG-zco":
-        _validate_swg_card(card)
         return
     expected = {
         "LOCK_EXCHANGE-zco": ("nemo_ab3am4", 1, 0, 0.0, 0, 0.0),
@@ -4078,6 +3820,274 @@ def with_first_wzv_after_ssh(model_config, form):
             "on it would measure nothing")
     return model_config._replace(nemo_first_wzv_after_ssh=form)
 
+
+# --- SWG (NEMO 5.0.2 tests/SWG): shallow-water engine, round-1 skeleton ---
+# This is a pure configuration of the shared lat-lon C-grid lane.  The card is
+# deliberately not executable until the three source-selected arms in
+# SWG_UNMEASURED exist in that lane; validate_nemo_testcase_card_for_execution
+# therefore refuses it instead of silently substituting the GYRE RK3 program.
+
+
+class SwgResolvedNamelist(NamedTuple):
+    """Resolved shipped SWG choices, including inert SWE-deck selections."""
+
+    # namrun / namdom, tests/SWG/EXPREF/namelist_cfg
+    nn_it000: int = 1
+    nn_itend: int = 172800
+    nn_leapy: int = 30
+    nn_write: int = 480
+    nn_istate: int = 1
+    ln_rstart: bool = False
+    rn_Dt_s: float = 3600.0
+    ln_meshmask: bool = False
+    ln_shuman: bool = False
+    # namcfg / namusr_def; usrdef_nam.f90:138-167
+    ln_read_cfg: bool = False
+    nn_SWG: int = 4
+    jpkglo: int = 2
+    rn_theta_deg: float = 0.0
+    nn_gc: int = 2
+    rn_domsiz_m: float = 2_000_000.0
+    rn_dx_m: float = 100_000.0
+    rn_tau_pa: float = 0.20
+    rn_modified_grav_m_s2: float = 0.02
+    rn_rfr_s: float = 1.0e-7
+    rn_beta_m_s: float = 2.0e-11
+    rn_f0_s: float = 0.7e-4
+    nn_dynldf_lap_typ: int = 1
+    ln_dynldf_lap_PM: bool = False
+    rn_abp: float = 1.0e-2
+    nn_cnp: int = 1
+    rn_fsp_s: float = 0.0
+    ln_Iperio: bool = False
+    ln_Jperio: bool = False
+    # built keys, tests/SWG_OMIP_L1/cpp_SWG_OMIP_L1.fcm
+    key_xios: bool = False
+    key_qco: bool = True
+    key_vco_3d: bool = True
+    key_RK3: bool = True
+    # namsbc / namlbc / namdrg
+    nn_fsbc: int = 1
+    ln_usr_sbc: bool = True
+    ln_flx: bool = False
+    ln_blk: bool = False
+    ln_cpl: bool = False
+    ln_traqsr: bool = False
+    ln_rnf: bool = False
+    ln_apr_dyn: bool = False
+    rn_shlat: float = 0.0
+    ln_drg_OFF: bool = True
+    # namdyn_adv / namdyn_vor
+    ln_dynadv_OFF: bool = False
+    ln_dynadv_vec: bool = True
+    nn_dynkeg: int = 0
+    ln_dynadv_cen2: bool = False
+    ln_dynadv_up3: bool = False
+    ln_dynvor_ene: bool = False
+    ln_dynvor_ens: bool = True
+    ln_dynvor_enT: bool = False
+    ln_dynvor_een: bool = False
+    nn_e3f_typ: int = 1
+    ln_dynvor_msk: bool = True
+    # The SWE engine never calls dyn_spg_init or zdf_phy_init, but these deck
+    # values are stated so an inert namelist block cannot become a hidden
+    # choice if that call graph changes (nemogcm.f90:285-316).
+    ln_dynspg_exp: bool = True
+    nn_bt_flt: int = 3
+    rn_bt_alpha: float = 0.07
+    ln_dynldf_lap: bool = True
+    ln_dynldf_lev: bool = True
+    nn_ahm_ijk_t: int = 0
+    rn_Uv_m_s: float = 2.0
+    rn_Lv_m: float = 500.0
+    ln_zdftke: bool = True
+    ln_zdfevd: bool = True
+    nn_evdm: int = 1
+    rn_evd_m2_s: float = 100.0
+    rn_avm0_m2_s: float = 1.2e-4
+    rn_avt0_m2_s: float = 1.2e-5
+    nn_avb: int = 0
+    nn_havtb: int = 0
+    nn_etau: int = 0
+
+
+SWG_NAMELIST = SwgResolvedNamelist()
+SWG_DEVIATIONS: tuple[tuple[str, bool, bool, str], ...] = (
+    ("key_xios", True, False, "conda-scalarmath reference toolchain"),
+)
+SWG_UNMEASURED: tuple[str, ...] = (
+    "ENS total-vorticity operator with ln_dynvor_msk",
+    "SWE three-stage explicit free-surface RK3 program",
+    "stage-3-only viscosity, wind stress, and before-velocity layer drag",
+)
+
+
+def swg_horizontal_coordinates() -> dict[str, np.ndarray]:
+    """Transcribe compiled ``usrdef_nam/hgr`` for the shipped zero rotation."""
+    nl = SWG_NAMELIST
+    if nl.rn_theta_deg != 0.0:
+        raise ValueError("SWG round-1 card transcribes rn_theta = 0 only")
+    spacing = nl.rn_dx_m / float(nl.nn_SWG)       # usrdef_nam.f90:154
+    zgl = nl.rn_domsiz_m + 2.0 * nl.nn_gc * spacing
+    n = math.ceil(zgl / spacing)                   # usrdef_nam.f90:159-160
+    # usrdef_hgr.f90:110-116, for theta=0: zlam1=zphi1=50 km and ANINT
+    # is exact because the ratio is the integer two.
+    origin = round((0.5 * zgl - 0.5 * nl.rn_domsiz_m) / spacing) * spacing
+    # mesh_mask/restarts expose NEMO's data domain, which removes nn_hls=2
+    # computational halo rows from each side.  In usrdef_hgr.f90:125-126 the
+    # first written point is therefore local ji=jj=3: zim05=zjm05=1.5 and
+    # zim1=zjm1=2.0 (ocean.output:150-166 reports jpi=88, data domain 84).
+    centre = (np.arange(n, dtype=np.float64) + 1.5) * spacing - origin
+    face = (np.arange(n, dtype=np.float64) + 2.0) * spacing - origin
+    glamt = np.broadcast_to(centre[None, :], (n, n)).copy()
+    glamu = np.broadcast_to(face[None, :], (n, n)).copy()
+    gphit = np.broadcast_to(centre[:, None], (n, n)).copy()
+    gphiv = np.broadcast_to(face[:, None], (n, n)).copy()
+    ff_t = nl.rn_f0_s + nl.rn_beta_m_s * np.abs(gphit)
+    ff_f = nl.rn_f0_s + nl.rn_beta_m_s * np.abs(gphiv)
+    return {
+        "ni": n, "nj": n, "spacing_m": spacing,
+        "glamt": glamt, "glamu": glamu,
+        "glamv": glamt.copy(), "glamf": glamu.copy(),
+        "gphit": gphit, "gphiu": gphit.copy(),
+        "gphiv": gphiv, "gphif": gphiv.copy(),
+        "ff_t": ff_t, "ff_f": ff_f,
+    }
+
+
+def swg_wet_mask(source: dict[str, np.ndarray] | None = None) -> np.ndarray:
+    """Transcribe ``usrdef_zgr.f90:206-235`` for the shipped rectangle."""
+    src = source or swg_horizontal_coordinates()
+    wet = ((src["gphiv"] > 10_000.0) & (src["gphiv"] < 2_010_000.0)
+           & (src["glamu"] > 10_000.0) & (src["glamu"] < 2_010_000.0))
+    neighbours = (np.roll(wet, 1, 0).astype(int) + np.roll(wet, -1, 0)
+                  + np.roll(wet, 1, 1) + np.roll(wet, -1, 1))
+    return (wet & (neighbours > 1)).astype(np.float64)
+
+
+def build_swg_card() -> NEMOTestcaseCard:
+    """Shipped SWG deck as a fail-closed, currently non-executable card."""
+    nl = SWG_NAMELIST
+    src = swg_horizontal_coordinates()
+    wet_np = swg_wet_mask(src)
+    wet = jnp.asarray(wet_np, dtype=jnp.float64)
+    n, spacing = src["ni"], src["spacing_m"]
+    grid = create_beta_plane_cgrid_geometry(
+        n, n, dx_m=spacing, dy_m=spacing, f0=0.0, beta=0.0,
+        x_origin_m=float(src["glamt"][0, 0]) - 0.5 * spacing,
+        y_origin_m=float(src["gphit"][0, 0]) - 0.5 * spacing,
+        radius=float(NEMO_CONSTANTS_CONFIG.R_earth),
+        cartesian_pseudo_lat=True, dtype=jnp.float64,
+    )
+    # Native NEMO V/F rows map to model v rows 1..n.  The extra south face is
+    # a model-layout record, evaluated from the same |y| statement.
+    south_y = float(src["gphiv"][0, 0]) - spacing
+    f_v = np.concatenate([
+        np.full((1, n), nl.rn_f0_s + nl.rn_beta_m_s * abs(south_y)),
+        src["ff_f"],
+    ], axis=0)
+    f_u = np.concatenate([src["ff_t"], src["ff_t"][:, -1:]], axis=1)
+    grid = grid._replace(
+        f_T=jnp.asarray(src["ff_t"]), f_u=jnp.asarray(f_u),
+        f_v=jnp.asarray(f_v), ff_f=jnp.asarray(src["ff_f"]),
+    )
+
+    native = (n, n, 1)
+    thickness = np.full(native, 500.0)
+    tmask = wet_np[..., None]
+    u_wet = wet_np * np.roll(wet_np, -1, axis=1); u_wet[:, -1] = 0.0
+    v_wet = wet_np * np.roll(wet_np, -1, axis=0); v_wet[-1, :] = 0.0
+    umask = u_wet[..., None]
+    vmask = v_wet[..., None]
+    fe3mask = np.asarray(nemo_fe3mask_from_tmask(jnp.asarray(tmask)))
+    metric = np.full((n, n), spacing)
+    area = metric * metric
+    operands = NemoEENBarotropicOperands(
+        ff_f=src["ff_f"], e3u_0=thickness, e3v_0=thickness,
+        e3f_0=thickness, umask=umask, vmask=vmask,
+        fmask=fe3mask, fe3mask=fe3mask,
+        hu_0=500.0 * u_wet, hv_0=500.0 * v_wet,
+        hf_0=500.0 * fe3mask[..., 0],
+        e1t=metric, e2t=metric, e1u=metric, e2u=metric,
+        e1v=metric, e2v=metric, e1f=metric, e2f=metric,
+    )
+    z_ref = create_z_star_from_thicknesses(
+        jnp.asarray([500.0]), t_depth_ref_m=np.asarray([250.0]),
+        nemo_gdept_0_m=np.full(native, 250.0),
+        nemo_gdepw_0_m=np.zeros(native),
+        nemo_e3t_0_m=thickness, nemo_e3w_0_m=thickness,
+        nemo_hu_0_m=500.0 * u_wet, nemo_hv_0_m=500.0 * v_wet,
+        nemo_e1e2t_m=area, nemo_e1e2u_m=area, nemo_e1e2v_m=area,
+        nemo_e2u_m=metric, nemo_e1v_m=metric,
+        nemo_een_barotropic_m=operands, allow_single_level=True,
+    )
+    z_coord = create_full_step_coordinate(
+        z_ref, jnp.where(wet > 0.0, 0, -1))
+    state = rest_state_latlon_cgrid_ocean(
+        grid, z_coord, T_water_init_C=0.0, T_deep=0.0, S_uniform=0.0,
+        H_max=500.0, land_mask_override=wet,
+        H_bathy_override=500.0 * wet,
+        nemo_prognostic_barotropic_velocity=True,
+    )
+    base = _model_config(
+        barotropic_time_filter="nemo_ab3am4", n_barotropic_substeps=1,
+        bbl_adv_option=0, bbl_gamma_s=0.0,
+        bbl_diffusive_option=0, bbl_aht_m2_s=0.0,
+        whole_step_identity="gyre_vector_ene_c2",
+        tke_langmuir_evaluation="nemo_literal",
+    )
+    cc = NEMO_CONSTANTS_CONFIG._replace(g=nl.rn_modified_grav_m_s2)
+    physics = base.physics._replace(constants=cc)
+    config = base._replace(
+        constants=cc, physics=physics, tracer_advection="none", K_h=0.0,
+        implicit_vertical_mixing=False, A_v=0.0, K_v=0.0, gm_redi=None,
+        lateral_viscosity=base.lateral_viscosity._replace(A_h=500.0),
+        bottom_drag=base.bottom_drag._replace(bottom_drag_r=0.0),
+        meridionally_periodic=False,
+    )
+    recipe = NEMORecipe(config, config.physics, grid, z_coord, wet, state)
+    card = NEMOTestcaseCard(
+        "SWG-zco", recipe, nl.rn_Dt_s, nl.nn_itend, 1, 0, 0, 0.0, 0.0,
+        surface_boundary_condition="swg_analytic_wind",
+        surface_input_operator="swe_stage3",
+        unmeasured_features=SWG_UNMEASURED,
+    )
+    validate_nemo_testcase_card(card)
+    return card
+
+
+def _validate_swg_card(card: NEMOTestcaseCard) -> None:
+    nl = SWG_NAMELIST
+    if card.unmeasured_features != SWG_UNMEASURED:
+        raise ValueError("SWG-zco must declare exactly SWG_UNMEASURED")
+    if (card.dt_s, card.n_steps, card.dummy_bottom_records) != (
+            nl.rn_Dt_s, nl.nn_itend, 1):
+        raise ValueError("SWG-zco run length or vertical record count drifted")
+    if card.j_periodic or card.recipe.model_config.meridionally_periodic:
+        raise ValueError("SWG-zco is closed in both horizontal directions")
+    if card.recipe.model_config.constants.g != nl.rn_modified_grav_m_s2:
+        raise ValueError("SWG-zco must carry rn_modified_grav as model g")
+    if card.recipe.model_config.lateral_viscosity.A_h != 500.0:
+        raise ValueError("SWG-zco must state 0.5*rn_Uv*rn_Lv = 500 m2/s")
+    wet = np.asarray(card.recipe.land_mask)
+    if wet.shape != (84, 84) or int(np.count_nonzero(wet)) != 6400:
+        raise ValueError("SWG-zco must carry the compiled 84x84 / 6400-wet mesh")
+    if int(card.recipe.z_coord.n_levels) != 1:
+        raise ValueError("SWG-zco must carry one executed 500 m layer")
+
+
+
+# Keep the legacy validator statements at their citation-pinned source lines.
+# The SWG round-1 extension is appended below those statements and wraps the
+# existing dispatcher without changing any prior case branch.
+_validate_pre_swg_testcase_card = validate_nemo_testcase_card
+
+
+def validate_nemo_testcase_card(card: NEMOTestcaseCard) -> None:
+    if card.case == "SWG-zco":
+        _validate_swg_card(card)
+        return
+    _validate_pre_swg_testcase_card(card)
 
 __all__ = (
     "NEMOTestcaseCard",

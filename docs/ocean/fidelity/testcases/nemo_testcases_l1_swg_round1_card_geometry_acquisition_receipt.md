@@ -136,7 +136,7 @@ the operator probe:
 - T/U/V/F metre coordinates, uniform metrics, and the absolute-y beta plane:
   `SWG_OMIP_L1/BLD/ppsrc/nemo/usrdef_hgr.f90:123-168`.
 - The one-layer W/T depth ladder:
-  `SWG_OMIP_L1/BLD/ppsrc/nemo/usrdef_zgr.f90:157-168`; flat-bottom and wet-mask
+  `SWG_OMIP_L1/BLD/ppsrc/nemo/usrdef_zgr.f90:158-168`; flat-bottom and wet-mask
   construction: `SWG_OMIP_L1/BLD/ppsrc/nemo/usrdef_zgr.f90:206-235`.
 - The shipped surface freshwater, salt, and heat fluxes are zero:
   `SWG_OMIP_L1/BLD/ppsrc/nemo/usrdef_sbc.f90:84-87`.
