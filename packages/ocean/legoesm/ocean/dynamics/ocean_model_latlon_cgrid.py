@@ -4385,6 +4385,21 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 f"barotropic_time_filter must be one of {_valid_time_filters}, "
                 f"got {config.barotropic.barotropic_time_filter!r}")
+        _nemo_filters = {
+            "nemo_ab3am4", "nemo_boxcar_ab3", "nemo_boxcar1_ab3",
+        }
+        _nemo_filter_alpha = config.barotropic.nemo_barotropic_filter_alpha
+        if (config.barotropic.barotropic_time_filter in _nemo_filters
+                and _nemo_filter_alpha is None):
+            raise ValueError(
+                f"barotropic_time_filter="
+                f"{config.barotropic.barotropic_time_filter!r} requires an "
+                "explicit nemo_barotropic_filter_alpha from the NEMO deck")
+        if (_nemo_filter_alpha is not None
+                and not np.isfinite(_nemo_filter_alpha)):
+            raise ValueError(
+                "nemo_barotropic_filter_alpha must be finite when stated, "
+                f"got {_nemo_filter_alpha!r}")
         # nemo_boxcar_ab3 (NEMO nn_bt_flt=2) is only flt=2-faithful under the
         # MLF leap-frog family (_leapfrog_step OR nemo_mlf's _nemo_mlf_step --
         # both supply the SAME ×2 substep scale + Nbb before-level seed, per

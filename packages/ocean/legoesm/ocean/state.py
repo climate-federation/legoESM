@@ -1142,6 +1142,11 @@ class BarotropicConfig(NamedTuple):
     bebt: float = 0.2               # Semi-implicit barotropic PGF [0,1]. 0=forward-backward, 0.2=MOM6 default.
     maxvel_barotropic: float = 0.0  # Velocity clipping [m/s]. 0=disabled. MOM6 uses 6.0.
     barotropic_time_filter: str = "cosine"  # "box", "cosine", "power_law" (SM2005 extended window), "nemo_boxcar_centred"/"nemo_boxcar_ab3" (centred nn_bt_flt=2), "nemo_boxcar1_ab3" (forward nn_bt_flt=1), or "nemo_ab3am4" (nn_bt_flt=3)
+    # NEMO namdyn_spg ``rn_bt_alpha``.  No physical default: every NEMO card
+    # states its resolved deck value, including cards whose selected filter
+    # makes the value inert.  ``None`` is an unset sentinel and the NEMO-card
+    # validator plus every consuming nn_bt_flt=1/2/3 path refuse it.
+    nemo_barotropic_filter_alpha: float | None = None
     # In-substep barotropic Coriolis discretization (node 16, DINO deep-eq jet).
     # "avg" (DEFAULT, bit-identical legacy): plain 4-point V->u / U->v average,
     #   which ANNIHILATES the 2dx zonal checkerboard (the C-grid barotropic

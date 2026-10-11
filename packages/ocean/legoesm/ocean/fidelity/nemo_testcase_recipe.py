@@ -87,6 +87,7 @@ class GYRESurfaceBoundaryCondition(NamedTuple):
 
 def _model_config(
     *, barotropic_time_filter: str, n_barotropic_substeps: int,
+    nemo_barotropic_filter_alpha: float,
     bbl_adv_option: int, bbl_gamma_s: float,
     bbl_diffusive_option: int, bbl_aht_m2_s: float,
     whole_step_identity: str,
@@ -128,6 +129,7 @@ def _model_config(
         base = _model_config(
             barotropic_time_filter=barotropic_time_filter,
             n_barotropic_substeps=n_barotropic_substeps,
+            nemo_barotropic_filter_alpha=nemo_barotropic_filter_alpha,
             bbl_adv_option=bbl_adv_option,
             bbl_gamma_s=bbl_gamma_s,
             bbl_diffusive_option=bbl_diffusive_option,
@@ -213,6 +215,7 @@ def _model_config(
         base = _model_config(
             barotropic_time_filter=barotropic_time_filter,
             n_barotropic_substeps=n_barotropic_substeps,
+            nemo_barotropic_filter_alpha=nemo_barotropic_filter_alpha,
             bbl_adv_option=bbl_adv_option,
             bbl_gamma_s=bbl_gamma_s,
             bbl_diffusive_option=bbl_diffusive_option,
@@ -284,6 +287,7 @@ def _model_config(
         base = _model_config(
             barotropic_time_filter=barotropic_time_filter,
             n_barotropic_substeps=n_barotropic_substeps,
+            nemo_barotropic_filter_alpha=nemo_barotropic_filter_alpha,
             bbl_adv_option=bbl_adv_option,
             bbl_gamma_s=bbl_gamma_s,
             bbl_diffusive_option=bbl_diffusive_option,
@@ -573,6 +577,7 @@ def _model_config(
             freshwater_closure="real_freshwater",
             fix_eta_drift=False,
             barotropic=config.barotropic._replace(
+                nemo_barotropic_filter_alpha=nemo_barotropic_filter_alpha,
                 barotropic_diffusion_alpha=0.0,
                 barotropic_face_depth="nemo_ssh_avg",
                 barotropic_continuity_evaluation="nemo_literal",
@@ -626,6 +631,7 @@ def _model_config(
         pgf_quadrature="nemo_trapezoid",
         barotropic_solver="explicit_substep",
         barotropic_time_filter=barotropic_time_filter,
+        nemo_barotropic_filter_alpha=nemo_barotropic_filter_alpha,
         n_barotropic_substeps=n_barotropic_substeps,
         barotropic_face_depth="nemo_ssh_avg",
         barotropic_continuity_evaluation="nemo_literal",
@@ -976,6 +982,7 @@ def build_lock_exchange_zco_card() -> NEMOTestcaseCard:
     # 536-553,1676-1711. The canonical option carries substep history.
     model_config = _model_config(
         barotropic_time_filter="nemo_ab3am4",
+        nemo_barotropic_filter_alpha=0.07,
         n_barotropic_substeps=_resolved_auto_substeps(grid, bathymetry, 1.0),
         bbl_adv_option=0,
         bbl_gamma_s=0.0,
@@ -1065,6 +1072,7 @@ def build_overflow_zps_card() -> NEMOTestcaseCard:
     # 1676-1711. The canonical option re-runs the cold-start ramp each step.
     model_config = _model_config(
         barotropic_time_filter="nemo_boxcar1_ab3",
+        nemo_barotropic_filter_alpha=0.0,
         n_barotropic_substeps=_resolved_auto_substeps(
             grid, effective_bathymetry, 10.0
         ),
@@ -1182,6 +1190,7 @@ def build_gyre_zco_card() -> NEMOTestcaseCard:
     # auto-resolution is separately checked from the live card geometry.
     model_config = _model_config(
         barotropic_time_filter="nemo_ab3am4",
+        nemo_barotropic_filter_alpha=0.07,
         n_barotropic_substeps=50,
         bbl_adv_option=0,
         bbl_gamma_s=0.0,
@@ -1702,6 +1711,7 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
 
     model_config = _model_config(
         barotropic_time_filter="nemo_ab3am4",
+        nemo_barotropic_filter_alpha=0.09,
         n_barotropic_substeps=65,
         bbl_adv_option=0,
         bbl_gamma_s=0.0,
@@ -2340,6 +2350,7 @@ def build_vortex_zco_card(
     # namelist -- it is not the resolved auto value the tanks use.
     model_config = _model_config(
         barotropic_time_filter="nemo_ab3am4",
+        nemo_barotropic_filter_alpha=0.07,
         n_barotropic_substeps=48,
         bbl_adv_option=0, bbl_gamma_s=0.0,
         bbl_diffusive_option=0, bbl_aht_m2_s=0.0,
@@ -2648,6 +2659,7 @@ def build_vortex_smt_zps_card(
     )
     model_config = _model_config(
         barotropic_time_filter="nemo_ab3am4",
+        nemo_barotropic_filter_alpha=0.07,
         n_barotropic_substeps=48,
         bbl_adv_option=0, bbl_gamma_s=0.0,
         bbl_diffusive_option=0, bbl_aht_m2_s=0.0,
@@ -2922,6 +2934,26 @@ def validate_nemo_testcase_card(card: NEMOTestcaseCard) -> None:
     }
     if card.case not in expected:
         raise ValueError(f"unknown NEMO testcase card {card.case!r}")
+    expected_filter_alpha = {
+        "LOCK_EXCHANGE-zco": 0.07,
+        "OVERFLOW-zps": 0.0,
+        "GYRE-zco": 0.07,
+        "ORCA2-zps": 0.09,
+        "VORTEX-zco": 0.07,
+        "VORTEX_VEC-zco": 0.07,
+        "VORTEX-15km-zco": 0.07,
+        "VORTEX_VEC-15km-zco": 0.07,
+        "VORTEX-10km-zco": 0.07,
+        "VORTEX_VEC-10km-zco": 0.07,
+        "VORTEX_SMT-zps": 0.07,
+        "VORTEX_SMT_VEC-zps": 0.07,
+        "VORTEX_SMT1_VEC-zps": 0.07,
+        "VORTEX_SMT2_VEC-zps": 0.07,
+        "VORTEX_SMT3_VEC-zps": 0.07,
+        "VORTEX_SMT4_VEC-zps": 0.07,
+    }
+    if set(expected_filter_alpha) != set(expected):
+        raise ValueError("NEMO testcase filter-alpha registry is incomplete")
     cfg = card.recipe.model_config
     if (card.recipe.initial_state.uu_b is None
             or card.recipe.initial_state.vv_b is None):
@@ -2941,6 +2973,15 @@ def validate_nemo_testcase_card(card: NEMOTestcaseCard) -> None:
             f"{card.case} filter/substep/BBL composition {actual!r} does not "
             f"match the executed oracle "
             f"{(filt, count, bbl_option, gamma, diffusive, aht)!r}")
+    filter_alpha = cfg.barotropic.nemo_barotropic_filter_alpha
+    if filter_alpha is None:
+        raise ValueError(
+            f"{card.case} must state its deck's rn_bt_alpha; no library "
+            "default is permitted")
+    if filter_alpha != expected_filter_alpha[card.case]:
+        raise ValueError(
+            f"{card.case} rn_bt_alpha={filter_alpha!r} does not match the "
+            f"executed deck value {expected_filter_alpha[card.case]!r}")
     if ((card.bbl_adv_option, card.bbl_gamma_s,
          card.bbl_diffusive_option, card.bbl_aht_m2_s)
             != (bbl_option, gamma, diffusive, aht)):

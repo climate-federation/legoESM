@@ -111,8 +111,7 @@ from legoesm.ocean.dynamics.ocean_tendency_common import (
 
 # --- NEMO dynspg_ts nn_bt_flt=3 (Demange 2019 dissipative FB) coefficients ---
 # (dynspg_ts.F90:536-553 velocity AB3 extrapolation; ts_bck_interp the 4-level
-# backward ssh interpolation; rn_bt_alpha = GYRE namelist_cfg 0.07.)
-_NEMO_BT_ALPHA = 0.07              # rn_bt_alpha [1]
+# backward ssh interpolation; rn_bt_alpha is supplied by each NEMO card.)
 _NEMO_AB3_ZA = (1.781105, -1.06221, 0.281105)   # 3/2+bet, -(1/2+2bet), bet
 
 
@@ -122,7 +121,7 @@ _NEMO_AB3_ZA = (1.781105, -1.06221, 0.281105)   # 3/2+bet, -(1/2+2bet), bet
 _NEMO_TS_BCK_FLT2 = (0.614, 0.285, 0.088, 0.013)   # za0..za3 (sum == 1)
 
 
-def nemo_ab3am4_coeff_arrays(n_loop: int, alpha: float = _NEMO_BT_ALPHA,
+def nemo_ab3am4_coeff_arrays(n_loop: int, alpha: float,
                              ramp: bool = True, flt2: bool = False):
     """Per-substep coefficient arrays for the NEMO AB3-AM4 barotropic substep.
 
@@ -3362,6 +3361,11 @@ def barotropic_substeps_latlon_cgrid(
     if _nemo_primary_transport_average_test_override is not None:
         _primary_transport_average = bool(
             _nemo_primary_transport_average_test_override)
+    _nemo_filter_alpha = config.barotropic.nemo_barotropic_filter_alpha
+    if _ab3 and _nemo_filter_alpha is None:
+        raise ValueError(
+            f"barotropic_time_filter={_filter!r} requires the card's "
+            "explicit nemo_barotropic_filter_alpha (NEMO rn_bt_alpha)")
     if _boxcar_ab3:
         # NEMO nn_bt_flt=1/2: the barotropic sub-state is re-initialised EVERY
         # baroclinic step (ll_init=ll_bt_av=T, dynspg_ts.F90:202/469-476) ⇒ the
@@ -3371,7 +3375,7 @@ def barotropic_substeps_latlon_cgrid(
         # to the raw per-substep ssh, matching NEMO's pssh(Kaa) accumulation.
         _ab3_hist = None
         _ab3_za, _ab3_zb = nemo_ab3am4_coeff_arrays(
-            n_loop, ramp=True, flt2=True)
+            n_loop, alpha=_nemo_filter_alpha, ramp=True, flt2=True)
         _ab3_za = _ab3_za.astype(eta.dtype)
         _ab3_zb = _ab3_zb.astype(eta.dtype)
     elif _ab3:
@@ -3387,7 +3391,7 @@ def barotropic_substeps_latlon_cgrid(
                 "nemo_ab3am4 continuation requires the paired prognostic "
                 "uu_b/vv_b boundary mean when bt_hist is present")
         _ab3_za, _ab3_zb = nemo_ab3am4_coeff_arrays(
-            n_loop, ramp=_ab3_hist is None)
+            n_loop, alpha=_nemo_filter_alpha, ramp=_ab3_hist is None)
         # cast to the state dtype: f64 coefficients would silently promote the
         # f32 carry and break the scan carry-type invariant.
         _ab3_za = _ab3_za.astype(eta.dtype)

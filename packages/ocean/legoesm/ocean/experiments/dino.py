@@ -866,6 +866,10 @@ class DINOConfig:
     # (legacy) | "power_law" | "box" | "nemo_boxcar_centred" (dynspg_ts
     # ln_bt_fw=F + nn_bt_flt=1 — the DINO namelist selection).
     barotropic_time_filter: str = "cosine"
+    # NEMO namdyn_spg rn_bt_alpha.  The NEMO DINO cards state the deck's 0.0
+    # explicitly even though nn_bt_flt=2 takes the hard-coded coefficient arm.
+    # None is an unset sentinel, never a physical fallback.
+    nemo_barotropic_filter_alpha: float | None = None
     # In-substep barotropic Coriolis (node 16): "avg" (legacy 4-pt average,
     # which annihilates the 2Δx checkerboard -> spurious deep-equatorial jet)
     # | "een" (NEMO dyn_spg_ts::dyn_cor_2D enstrophy-conserving EEN
@@ -1629,6 +1633,7 @@ DINO_RECIPES: dict[str, dict] = {
         "nemo_prognostic_barotropic_state": False,
         "barotropic_solver": "explicit_substep",
         "barotropic_time_filter": "nemo_boxcar_centred",
+        "nemo_barotropic_filter_alpha": 0.0,
         # namdyn_vor: ln_dynvor_een — enstrophy-conserving EEN barotropic
         # Coriolis (node 16; cures the deep-equatorial jet velocity null mode).
         # "een_metric" = METRIC-COMPLETE: folds NEMO's e1v/r1_e1u + e2u/r1_e2v
@@ -4065,6 +4070,7 @@ def dino_lat_lon_model_config(
         barotropic_solver=cfg.barotropic_solver,
         barotropic_implicit_theta_eta=cfg.barotropic_implicit_theta_eta,
         barotropic_time_filter=cfg.barotropic_time_filter,
+        nemo_barotropic_filter_alpha=cfg.nemo_barotropic_filter_alpha,
         barotropic_coriolis=cfg.barotropic_coriolis,
         barotropic_coriolis_split=cfg.barotropic_coriolis_split,
         # BarotropicConfig fields (#1226; see the DINOConfig docstrings).

@@ -78,6 +78,7 @@ def test_orca2_structural_guard_rejects_iceberg_option_drift():
                 barotropic=good.recipe.model_config.barotropic._replace(
                     barotropic_coriolis="een_metric",
                     n_barotropic_substeps=65,
+                    nemo_barotropic_filter_alpha=0.09,
                 ),
                 physics=good.recipe.model_config.physics._replace(
                     vertical_mixing=(good.recipe.model_config.physics
@@ -322,11 +323,23 @@ def test_testcase_cards_select_their_resolved_barotropic_filters():
     assert lock_baro.barotropic_time_filter == "nemo_ab3am4"
     assert overflow_baro.barotropic_time_filter == "nemo_boxcar1_ab3"
     assert gyre_baro.barotropic_time_filter == "nemo_ab3am4"
+    assert lock_baro.nemo_barotropic_filter_alpha == 0.07
+    assert overflow_baro.nemo_barotropic_filter_alpha == 0.0
+    assert gyre_baro.nemo_barotropic_filter_alpha == 0.07
     # Resolved ln_bt_auto counts, independently printed by the pinned NEMO
     # runs: LOCK ocean.output:763 and OVERFLOW ocean.output:879.
     assert lock_baro.n_barotropic_substeps == 1
     assert overflow_baro.n_barotropic_substeps == 3
     assert gyre_baro.n_barotropic_substeps == 50
+
+    missing = build_gyre_zco_card()
+    missing = missing._replace(
+        recipe=missing.recipe._replace(
+            model_config=missing.recipe.model_config._replace(
+                barotropic=missing.recipe.model_config.barotropic._replace(
+                    nemo_barotropic_filter_alpha=None))))
+    with pytest.raises(ValueError, match="must state its deck's rn_bt_alpha"):
+        validate_nemo_testcase_card(missing)
 
 
 def test_gyre_card_pins_rotated_grid_mi96_ic_and_seasonal_sbc():

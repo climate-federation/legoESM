@@ -92,6 +92,9 @@ class NEMOModelRecipeConfig:
     barotropic_solver: str = "explicit_substep"
     n_barotropic_substeps: int = 30
     barotropic_time_filter: str = "cosine"
+    # NEMO namdyn_spg rn_bt_alpha.  None is an unset sentinel; a NEMO card
+    # selecting a NEMO time filter must state the value read from its deck.
+    nemo_barotropic_filter_alpha: float | None = None
     # "rk3" = Shu-Osher SSP; "rk3_ws" = NEMO stprk3 Wicker-Skamarock (stage
     # dt/3, dt/2, dt from u0; LDF stages 1&3 only) — the GYRE card selects ws.
     momentum_time_integrator: str = "rk3"
@@ -475,6 +478,7 @@ def nemo_lat_lon_model_config(
         barotropic_slow_forcing_depth_evaluation="nemo_literal",
         n_barotropic_substeps=cfg.n_barotropic_substeps,
         barotropic_time_filter=cfg.barotropic_time_filter,
+        nemo_barotropic_filter_alpha=cfg.nemo_barotropic_filter_alpha,
         momentum_time_integrator=cfg.momentum_time_integrator,
         adaptive_implicit_vertadv=cfg.adaptive_implicit_vertadv,
         implicit_vertical_mixing=cfg.implicit_vertical_mixing,
@@ -966,6 +970,7 @@ _NEMO_GYRE_CARD_CONFIG = NEMOModelRecipeConfig(
     # WINDOW (NEMO carries them across windows in SAVE arrays) — 2/120 substeps
     # lower-order each step, slightly more dissipative.
     barotropic_time_filter="nemo_ab3am4",
+    nemo_barotropic_filter_alpha=0.07,
     # NEMO dynhpg hpg_zco e3w-weighted trapezoid (t_depth_ref = exact gdept is
     # carried by the GYRE coordinate). Closes part of the hpg amplitude gap
     # (single-step ratio vs utrd_hpg: 0.9656 -> 0.9702); the remaining ~3%

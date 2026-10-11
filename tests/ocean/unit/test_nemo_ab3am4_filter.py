@@ -13,10 +13,11 @@ import pytest
 
 from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
     _NEMO_AB3_ZA,
-    _NEMO_BT_ALPHA,
     _NEMO_TS_BCK_FLT2,
     nemo_ab3am4_coeff_arrays,
 )
+
+_GYRE_FILTER_ALPHA = 0.07
 
 
 def test_flt2_interior_ssh_weights_are_alpha0_literals():
@@ -24,21 +25,22 @@ def test_flt2_interior_ssh_weights_are_alpha0_literals():
     hard-coded rn_bt_alpha=0 literals 0.614/0.285/0.088/0.013
     (dynspg_ts.F90:1698-1701), NOT the Demange formula — and the AB3 velocity
     weights are unchanged (shared by both filters)."""
-    za, zb = nemo_ab3am4_coeff_arrays(10, flt2=True)
+    za, zb = nemo_ab3am4_coeff_arrays(10, alpha=0.0, flt2=True)
     np.testing.assert_allclose(np.asarray(zb)[5], _NEMO_TS_BCK_FLT2, atol=1e-12)
     np.testing.assert_allclose(np.asarray(za)[5], _NEMO_AB3_ZA, atol=1e-12)
     # rows still sum to 1 (exact on a constant field)
     np.testing.assert_allclose(np.asarray(zb).sum(axis=1), 1.0, atol=1e-12)
     np.testing.assert_allclose(np.asarray(za).sum(axis=1), 1.0, atol=1e-12)
     # dissipative and DISTINCT from the nn_bt_flt=3 (alpha=0.07) weights
-    _, zb3 = nemo_ab3am4_coeff_arrays(10, flt2=False)
+    _, zb3 = nemo_ab3am4_coeff_arrays(
+        10, alpha=_GYRE_FILTER_ALPHA, flt2=False)
     assert not np.allclose(np.asarray(zb)[5], np.asarray(zb3)[5])
     assert float(_NEMO_TS_BCK_FLT2[0]) > 0.5  # forward-weighted (dissipative)
 
 
 def test_flt2_ll_init_ramp_shared():
     """flt2 keeps the ll_init ramp (nn_bt_flt=2 re-inits every step)."""
-    za, zb = nemo_ab3am4_coeff_arrays(4, flt2=True)
+    za, zb = nemo_ab3am4_coeff_arrays(4, alpha=0.0, flt2=True)
     np.testing.assert_allclose(np.asarray(za)[0], [1.0, 0.0, 0.0], atol=0)
     np.testing.assert_allclose(np.asarray(zb)[0], [1.0, 0.0, 0.0, 0.0], atol=0)
     np.testing.assert_allclose(
@@ -49,7 +51,7 @@ def test_flt2_ll_init_ramp_shared():
 def test_coefficient_rows_sum_to_one():
     """Consistency: extrapolation/interpolation exact on a constant field —
     every row of za and zb sums to 1 (NEMO's coefficients do)."""
-    za, zb = nemo_ab3am4_coeff_arrays(50)
+    za, zb = nemo_ab3am4_coeff_arrays(50, alpha=_GYRE_FILTER_ALPHA)
     np.testing.assert_allclose(np.asarray(za).sum(axis=1), 1.0, atol=1e-12)
     np.testing.assert_allclose(np.asarray(zb).sum(axis=1), 1.0, atol=1e-12)
 
@@ -57,8 +59,8 @@ def test_coefficient_rows_sum_to_one():
 def test_interior_coefficients_match_ts_bck_interp_alpha007():
     """The alpha=0.07 AM4 branch (dynspg_ts.F90 ts_bck_interp), NOT the
     alpha==0 published table (0.614/0.285/0.088/0.013)."""
-    za, zb = nemo_ab3am4_coeff_arrays(10)
-    a = _NEMO_BT_ALPHA
+    za, zb = nemo_ab3am4_coeff_arrays(10, alpha=_GYRE_FILTER_ALPHA)
+    a = _GYRE_FILTER_ALPHA
     eps = 0.00976186 - 0.13451357 * a
     gam = 0.08344500 - 0.51358400 * a
     zb0 = 0.5 + gam + 2.0 * a + 2.0 * eps
@@ -72,7 +74,7 @@ def test_interior_coefficients_match_ts_bck_interp_alpha007():
 def test_ll_init_ramp_rows():
     """Per-window ramp: substep 0 forward/FB, substep 1 forward/AB2-AM3
     (dynspg_ts:536-543 + ts_bck_interp jn==1/2)."""
-    za, zb = nemo_ab3am4_coeff_arrays(4)
+    za, zb = nemo_ab3am4_coeff_arrays(4, alpha=_GYRE_FILTER_ALPHA)
     np.testing.assert_allclose(np.asarray(za)[0], [1.0, 0.0, 0.0], atol=0)
     np.testing.assert_allclose(np.asarray(zb)[0], [1.0, 0.0, 0.0, 0.0], atol=0)
     np.testing.assert_allclose(np.asarray(za)[1], [1.0, 0.0, 0.0], atol=0)
@@ -82,7 +84,7 @@ def test_ll_init_ramp_rows():
 
 
 def test_n1_edge_is_forward():
-    za, zb = nemo_ab3am4_coeff_arrays(1)
+    za, zb = nemo_ab3am4_coeff_arrays(1, alpha=_GYRE_FILTER_ALPHA)
     np.testing.assert_allclose(np.asarray(za)[0], [1.0, 0.0, 0.0], atol=0)
     np.testing.assert_allclose(np.asarray(zb)[0], [1.0, 0.0, 0.0, 0.0], atol=0)
 
@@ -95,6 +97,7 @@ def test_wide_halo_rejected_and_filter_typo_raises():
 
     r = build_nemo_gyre_recipe()
     assert r.model_config.barotropic.barotropic_time_filter == "nemo_ab3am4"
+    assert r.model_config.barotropic.nemo_barotropic_filter_alpha == 0.07
     with pytest.raises(ValueError, match="wide_halo"):
         LatLonCGridOceanModel(
             r.grid, r.z_coord,
@@ -107,13 +110,21 @@ def test_wide_halo_rejected_and_filter_typo_raises():
             r.model_config._replace(
                 barotropic=r.model_config.barotropic._replace(
                     barotropic_time_filter="typo")))
+    with pytest.raises(ValueError, match="nemo_barotropic_filter_alpha"):
+        LatLonCGridOceanModel(
+            r.grid, r.z_coord,
+            r.model_config._replace(
+                barotropic=r.model_config.barotropic._replace(
+                    nemo_barotropic_filter_alpha=None)))
 
 
 def test_ramp_false_gives_full_rows():
     """ramp=False (continuation windows): full AB3/AM4 coefficients from
     substep 0 — no ll_init override."""
-    za_r, zb_r = nemo_ab3am4_coeff_arrays(4, ramp=True)
-    za_f, zb_f = nemo_ab3am4_coeff_arrays(4, ramp=False)
+    za_r, zb_r = nemo_ab3am4_coeff_arrays(
+        4, alpha=_GYRE_FILTER_ALPHA, ramp=True)
+    za_f, zb_f = nemo_ab3am4_coeff_arrays(
+        4, alpha=_GYRE_FILTER_ALPHA, ramp=False)
     np.testing.assert_allclose(np.asarray(za_f)[0], _NEMO_AB3_ZA, atol=1e-12)
     np.testing.assert_allclose(np.asarray(za_f)[1], _NEMO_AB3_ZA, atol=1e-12)
     np.testing.assert_allclose(np.asarray(zb_f)[0], np.asarray(zb_f)[2], atol=0)
@@ -360,7 +371,8 @@ def _tiny_vvl_basin(H=500.0, n_lat=16, n_lon=24):
         bebt=0.0, maxvel_barotropic=0.0, barotropic_diffusion_alpha=0.0,
         barotropic_div_damp=0.0, barotropic_local_subcycle_clamp=True,
         barotropic_solver="explicit_substep",
-        barotropic_time_filter="nemo_boxcar_ab3"))
+        barotropic_time_filter="nemo_boxcar_ab3",
+        nemo_barotropic_filter_alpha=0.0))
     return grid, z, st, cfg
 
 
@@ -450,7 +462,8 @@ def test_flt2_vvl_substep_sequence_matches_nemo_reference():
 
     w_filter, w_total, w_transport, n_loop = compute_nemo_boxcar_centred_weights(
         n, jnp.float64)
-    za, zb = nemo_ab3am4_coeff_arrays(n_loop, ramp=True, flt2=True)
+    za, zb = nemo_ab3am4_coeff_arrays(
+        n_loop, alpha=0.0, ramp=True, flt2=True)
     za, zb = np.asarray(za), np.asarray(zb)
     w_filter = np.asarray(w_filter)
     w_transport = np.asarray(w_transport)
