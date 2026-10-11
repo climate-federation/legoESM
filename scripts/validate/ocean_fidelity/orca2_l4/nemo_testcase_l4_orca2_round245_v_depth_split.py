@@ -85,10 +85,12 @@ def _raw_compact_face_masks(card):
 
 
 @contextlib.contextmanager
-def _barotropic_surface_mask_arm(card, enabled: bool):
-    """Private causal arm: hand NEMO's raw ssumask/ssvmask to dynspg only."""
+def _barotropic_surface_mask_arm(
+    card, enabled: bool, *, t_pivot_north_neighbor: bool = False,
+):
+    """Private causal arm for the measured mask/T-halo cancelling pair."""
 
-    if not enabled:
+    if not enabled and not t_pivot_north_neighbor:
         yield
         return
     import jax.numpy as jnp
@@ -98,11 +100,15 @@ def _barotropic_surface_mask_arm(card, enabled: bool):
     raw_u, raw_v = _raw_compact_face_masks(card)
 
     def wrapped(state, *args, **kwargs):
-        dtype = state.eta.data.dtype
-        masked = state._replace(
-            u_mask=state.u_mask.replace(data=jnp.asarray(raw_u, dtype=dtype)),
-            v_mask=state.v_mask.replace(data=jnp.asarray(raw_v, dtype=dtype)),
-        )
+        masked = state
+        if enabled:
+            dtype = state.eta.data.dtype
+            masked = state._replace(
+                u_mask=state.u_mask.replace(data=jnp.asarray(raw_u, dtype=dtype)),
+                v_mask=state.v_mask.replace(data=jnp.asarray(raw_v, dtype=dtype)),
+            )
+        if t_pivot_north_neighbor:
+            kwargs["_nemo_t_pivot_north_neighbor_test_override"] = True
         return original(masked, *args, **kwargs)
 
     model_module.barotropic_substeps_latlon_cgrid = wrapped
@@ -162,6 +168,7 @@ def _one_bit_control() -> dict[str, object]:
 def measure(
     deck_root: Path, frame_root: Path, twin_a: Path, twin_b: Path,
     label: str, expect_commit: str, *, raw_surface_masks: bool = False,
+    t_pivot_north_neighbor: bool = False,
 ) -> dict[str, object]:
     import jax
     import jax.numpy as jnp
@@ -191,7 +198,10 @@ def measure(
         twin_a / "oracle_bt_advmean_operands_kt00000001.bin",
         expected_dims=(94, 152), expected_ncycle=65)
     card = r244.omt4.build_omt4_card(deck_root)
-    with _barotropic_surface_mask_arm(card, raw_surface_masks):
+    with _barotropic_surface_mask_arm(
+        card, raw_surface_masks,
+        t_pivot_north_neighbor=t_pivot_north_neighbor,
+    ):
         card, trace, passivity = r244._trace_run(deck_root, frame_root, label)
 
     state = card.recipe.initial_state
@@ -296,6 +306,7 @@ def measure(
             if raw_surface_masks
             else "D114 raw hv_0; current compact area/mask"),
         "raw_surface_masks": raw_surface_masks,
+        "t_pivot_north_neighbor": t_pivot_north_neighbor,
         "record_admission": admission,
         "passivity": passivity,
         "substeps": list(SUBSTEPS),
@@ -398,6 +409,7 @@ def main() -> int:
     parser.add_argument("--label", choices=("independent", "given_nemo_entry"))
     parser.add_argument("--expect-commit")
     parser.add_argument("--raw-surface-masks", action="store_true")
+    parser.add_argument("--t-pivot-north-neighbor", action="store_true")
     parser.add_argument("--classify", nargs=2, type=Path,
                         metavar=("INDEPENDENT", "GIVEN"))
     parser.add_argument("--classify-plant", choices=CLASSIFY_PLANTS, default="none")
@@ -417,7 +429,8 @@ def main() -> int:
             result = measure(
                 args.deck_root, args.frame_root, args.twin_a, args.twin_b,
                 args.label, args.expect_commit,
-                raw_surface_masks=args.raw_surface_masks)
+                raw_surface_masks=args.raw_surface_masks,
+                t_pivot_north_neighbor=args.t_pivot_north_neighbor)
     except (OSError, ValueError, KeyError, TypeError, GateError) as error:
         planted = args.classify is not None and args.classify_plant != "none"
         print(f"STATUS {'PLANT-FIRED' if planted else 'REFUSE'}: {error}")
