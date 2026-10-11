@@ -331,8 +331,8 @@ def swe_rk3_stages(stage_root: Path, *, mode: str = "given",
             current["u_k"][at], np.float64(np.inf))
         moved = replay(current, planted, 2)
         control = _row(
-            f"production_consumed_u_nextafter_{plant}", baseline["ssh_k"],
-            moved["ssh_k"], masks["T"])
+            f"production_consumed_u_nextafter_{plant}", baseline["u_k"],
+            moved["u_k"], masks["U"])
         if plant == "zero" and control["bit_identical"]:
             # The frozen prediction is honestly refuted: XLA's CPU arithmetic
             # flushes the smallest binary64 subnormal once it enters the
