@@ -17,6 +17,12 @@ models default to float32 compute REGARDLESS of JAX_ENABLE_X64, and at
 float32 these gates measure precision floors instead of correctness
 (audit Finding 5). The policy is restored after the module's tests.
 
+The certified ``gyre_nemo_card`` row is deliberately separate from the
+small-grid variants: it starts from the card's day-0 state, enters every step
+through production ``_step_jitted``, and gates both one step and six steps.
+Its four-field normalized objective and per-step composition reuse the GYRE
+gradient twin at ``origin/feat/gyre-gradient-twin-2`` commit ``901cfe0d8``.
+
 Axes covered (one variant each — the audit's previously-untested set):
 limiter advection (superbee), FCT (ppm_fct, with a looser gate: its
 Zalesak ratio chain is the worst-conditioned operator in the family),
@@ -29,9 +35,12 @@ cache pre-built eagerly — required for cold models traced under jit).
 
 from __future__ import annotations
 
+import importlib.util
+import sys
+from pathlib import Path
+
 import jax
 import jax.numpy as jnp
-import numpy as np
 import pytest
 
 jax.config.update("jax_enable_x64", True)
@@ -43,6 +52,18 @@ N_STEPS = 2
 
 REVFWD_TOL = 1e-9
 REVFWD_TOL_FCT = 1e-5  # ppm_fct: Zalesak ratio conditioning (audit S3)
+
+_REPO = Path(__file__).resolve().parents[3]
+_GYRE_GATE_PATH = (
+    _REPO / "scripts/validate/ocean_fidelity/testcases/"
+    "nemo_testcase_l2_gyre_gradient_gate.py"
+)
+_GYRE_SPEC = importlib.util.spec_from_file_location(
+    "gyre_gradient_gate_matrix", _GYRE_GATE_PATH)
+assert _GYRE_SPEC is not None and _GYRE_SPEC.loader is not None
+GYRE_GATE = importlib.util.module_from_spec(_GYRE_SPEC)
+sys.modules[_GYRE_SPEC.name] = GYRE_GATE
+_GYRE_SPEC.loader.exec_module(GYRE_GATE)
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -166,8 +187,13 @@ def _variants():
 @pytest.mark.parametrize("name", [
     "base_upwind", "adv_superbee", "adv_ppm_fct", "outer_ab2", "kpp",
     "conv_enhanced", "flux_feedback", "gm_eke_geometric", "rigid_lid_ab2",
+    "gyre_nemo_card",
 ])
 def test_step_gradient_health(name):
+    if name == "gyre_nemo_card":
+        rows = [GYRE_GATE.measure_agreement(n_steps) for n_steps in (1, 6)]
+        assert all(row["status"] == "CONFIRMED" for row in rows), rows
+        return
     config, opts = _variants()[name]
     model, state = _build(
         config,
