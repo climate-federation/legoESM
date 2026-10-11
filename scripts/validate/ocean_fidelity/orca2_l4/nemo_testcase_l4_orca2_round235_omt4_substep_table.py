@@ -176,10 +176,13 @@ def _first(rows, region: str):
 def measure(deck_root: Path, frame_root: Path, twin_a: Path, twin_b: Path,
             label: str, expect_commit: str, *, plant: str = "none") -> dict:
     import jax
+    import jax.numpy as jnp
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+    from legoesm.core.source_rounding import nemo_source_round
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         LatLonCGridOceanModel,
         _NEMOWSBoundaryAssociationTrace,
+        _NEMOWSLiveOperandTrace,
         _NEMOWSRK3TestHooks,
     )
 
@@ -214,15 +217,30 @@ def measure(deck_root: Path, frame_root: Path, twin_a: Path, twin_b: Path,
     state = (card.recipe.initial_state if label == "independent"
              else rung0.bridge_entry(card, entry))
     freshwater, surface = omt0.rung0_ladder._zero_forcing((148, 180))
-    slow_override, raw_vmask = r229._slow_override(
-        card, state, freshwater, surface)
+    producer_model = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+            expose_live_stage_operands=True,
+            barotropic_atomic_fold_unit=True))
+    producer_trace = jax.device_get(producer_model.step(
+        state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
+    require(isinstance(producer_trace, _NEMOWSLiveOperandTrace),
+            "slow-forcing producer trace return type moved")
+    producer = producer_trace.slow_forcing_producer
+    raw_vmask = r229._raw_vmask(card)
+    slow_override = (
+        jnp.asarray(producer["final_u"]),
+        nemo_source_round(
+            jnp.asarray(producer["incoming_v"])
+            - nemo_source_round(
+                jnp.asarray(producer["coriolis_v"]) * raw_vmask)),
+    )
 
     def run(expose: bool):
         hooks = _NEMOWSRK3TestHooks(
             expose_barotropic_substeps=expose,
             expose_barotropic_boundary_association=expose,
             barotropic_slow_forcing_override=slow_override,
-            barotropic_vector_update_v_mask_override=raw_vmask,
             barotropic_atomic_fold_unit=True,
         )
         model = LatLonCGridOceanModel(
