@@ -94,7 +94,8 @@ def _raw_compact_face_masks(card):
 
 @contextlib.contextmanager
 def _barotropic_surface_mask_arm(
-    card, enabled: bool, *, t_pivot_north_neighbor: bool = False,
+    card, enabled: bool, *, v_only: bool = False,
+    t_pivot_north_neighbor: bool = False,
 ):
     """Private causal arm for the measured mask/T-halo cancelling pair."""
 
@@ -112,7 +113,8 @@ def _barotropic_surface_mask_arm(
         if enabled:
             dtype = state.eta.data.dtype
             masked = state._replace(
-                u_mask=state.u_mask.replace(data=jnp.asarray(raw_u, dtype=dtype)),
+                u_mask=(state.u_mask if v_only else state.u_mask.replace(
+                    data=jnp.asarray(raw_u, dtype=dtype))),
                 v_mask=state.v_mask.replace(data=jnp.asarray(raw_v, dtype=dtype)),
             )
         if t_pivot_north_neighbor:
@@ -176,6 +178,7 @@ def _one_bit_control() -> dict[str, object]:
 def measure(
     deck_root: Path, frame_root: Path, twin_a: Path, twin_b: Path,
     label: str, expect_commit: str, *, raw_surface_masks: bool = False,
+    raw_v_surface_mask: bool = False,
     t_pivot_north_neighbor: bool = False,
 ) -> dict[str, object]:
     import jax
@@ -188,6 +191,8 @@ def measure(
     )
 
     require(label in ("independent", "given_nemo_entry"), f"bad label {label!r}")
+    require(not (raw_surface_masks and raw_v_surface_mask),
+            "raw all-face and V-only mask arms are mutually exclusive")
     stamp = worktree_stamp()
     require(stamp["clean"] and stamp["commit"].lower() == expect_commit.lower(),
             "round-245 measurement requires its clean committed gate")
@@ -207,7 +212,8 @@ def measure(
         expected_dims=(94, 152), expected_ncycle=65)
     card = r244.omt4.build_omt4_card(deck_root)
     with _barotropic_surface_mask_arm(
-        card, raw_surface_masks,
+        card, raw_surface_masks or raw_v_surface_mask,
+        v_only=raw_v_surface_mask,
         t_pivot_north_neighbor=t_pivot_north_neighbor,
     ):
         card, trace, passivity = r244._trace_run(deck_root, frame_root, label)
@@ -226,7 +232,8 @@ def measure(
     r1_area_candidate = prep[3]
     raw_compact_u, raw_compact_v = _raw_compact_face_masks(card)
     vmask_candidate = jnp.asarray(
-        raw_compact_v if raw_surface_masks else state.v_mask.data, dtype=dtype)
+        raw_compact_v if (raw_surface_masks or raw_v_surface_mask)
+        else state.v_mask.data, dtype=dtype)
 
     raw_hv = np.asarray(z_coord.nemo_hv_0, np.float64)
     raw_area_t = np.asarray(z_coord.nemo_e1e2t, np.float64)
@@ -310,10 +317,13 @@ def measure(
                 "(e1e2t(j)*zsshp2_e(j)+e1e2t(j+1)*zsshp2_e(j+1))*ssvmask"),
         },
         "production_operand_route": (
+            "D114 raw hv_0; raw NEMO V-only ssvmask causal arm"
+            if raw_v_surface_mask else
             "D114 raw hv_0; raw NEMO ssumask/ssvmask causal arm"
             if raw_surface_masks
             else "D114 raw hv_0; current compact area/mask"),
         "raw_surface_masks": raw_surface_masks,
+        "raw_v_surface_mask": raw_v_surface_mask,
         "t_pivot_north_neighbor": t_pivot_north_neighbor,
         "record_admission": admission,
         "passivity": passivity,
@@ -540,6 +550,7 @@ def main() -> int:
     parser.add_argument("--label", choices=("independent", "given_nemo_entry"))
     parser.add_argument("--expect-commit")
     parser.add_argument("--raw-surface-masks", action="store_true")
+    parser.add_argument("--raw-v-surface-mask", action="store_true")
     parser.add_argument("--t-pivot-north-neighbor", action="store_true")
     parser.add_argument("--classify", nargs=2, type=Path,
                         metavar=("INDEPENDENT", "GIVEN"))
@@ -571,6 +582,7 @@ def main() -> int:
                 args.deck_root, args.frame_root, args.twin_a, args.twin_b,
                 args.label, args.expect_commit,
                 raw_surface_masks=args.raw_surface_masks,
+                raw_v_surface_mask=args.raw_v_surface_mask,
                 t_pivot_north_neighbor=args.t_pivot_north_neighbor)
     except (OSError, ValueError, KeyError, TypeError, GateError) as error:
         planted = ((args.classify is not None and args.classify_plant != "none")
