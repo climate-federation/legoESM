@@ -1783,10 +1783,17 @@ def _nemo_cen2_tracer_rhs(
     horizontal_sum = sr(delta_u + delta_v)
     r1_e1e2t = sr(1.0 / jnp.asarray(grid.area_T)[..., None])
     horizontal_scaled = sr(horizontal_sum * r1_e1e2t)
-    rhs = sr(-sr(horizontal_scaled / e3t_kmm))
+    tmask_kmm = jnp.broadcast_to(jnp.asarray(tmask_kmm), tracer.shape)
+    active_t = tmask_kmm > 0.0
+    # NEMO evaluates these divisions only on its owned tracer-cell loop
+    # domain.  The cropped card retains that outer ring as inactive zero-
+    # thickness storage, so keep its transpose away from an unselected 0/0
+    # while preserving the active-cell division bit for bit.
+    e3t_kmm_active = jnp.where(active_t, e3t_kmm, 1.0)
+    horizontal_divergence = sr(horizontal_scaled / e3t_kmm_active)
+    rhs = sr(jnp.where(active_t, sr(-horizontal_divergence), 0.0))
 
     tracer_w_sum = sr(tracer[..., :-1] + tracer[..., 1:])
-    tmask_kmm = jnp.broadcast_to(jnp.asarray(tmask_kmm), tracer.shape)
     wmask_inner = sr(tmask_kmm[..., 1:] * tmask_kmm[..., :-1])
     flux_w_inner = sr(
         sr(sr(0.5 * p_w[..., 1:-1]) * tracer_w_sum) * wmask_inner)
@@ -1796,7 +1803,9 @@ def _nemo_cen2_tracer_rhs(
     )
     vertical_difference = sr(flux_w[..., :-1] - flux_w[..., 1:])
     vertical_scaled = sr(vertical_difference * r1_e1e2t)
-    return sr(rhs - sr(vertical_scaled / e3t_kmm))
+    vertical_divergence = sr(vertical_scaled / e3t_kmm_active)
+    combined = sr(rhs - sr(jnp.where(active_t, vertical_divergence, 0.0)))
+    return sr(jnp.where(active_t, combined, 0.0))
 
 
 def _nemo_stage_corrected_velocity(

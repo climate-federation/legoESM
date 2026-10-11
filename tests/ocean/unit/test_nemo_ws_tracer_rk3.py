@@ -171,6 +171,7 @@ def test_nemo_cen2_tracer_rhs_matches_literal_source_bits():
         (np.float64(0.5) * p_w[..., 1:-1]) * sum_w) * wmask_inner
     expected = expected - (
         (flux_w[..., :-1] - flux_w[..., 1:]) * r1_area) / e3t
+    expected[tmask == 0.0] = 0.0
 
     actual = np.asarray(jax.jit(
         lambda tr, pu, pv, pw, h, tm: model_module._nemo_cen2_tracer_rhs(
@@ -178,6 +179,28 @@ def test_nemo_cen2_tracer_rhs_matches_literal_source_bits():
         jnp.asarray(tracer), jnp.asarray(p_u), jnp.asarray(p_v),
         jnp.asarray(p_w), jnp.asarray(e3t), jnp.asarray(tmask)))
     np.testing.assert_array_equal(actual.view(np.uint64), expected.view(np.uint64))
+
+    # The cropped GYRE card stores its unowned perimeter as zero-thickness
+    # cells.  Seed the pullback only at such a cell: the outer selection must
+    # make every operand cotangent finite and exactly zero, including the
+    # denominator cotangent that was poisoned before the active-cell guard.
+    inactive_e3t = e3t.copy()
+    inactive_e3t[0, 0, 1] = 0.0
+    args = tuple(map(jnp.asarray, (
+        tracer, p_u, p_v, p_w, inactive_e3t, tmask)))
+    actual_inactive, pullback = jax.vjp(
+        lambda tr, pu, pv, pw, h, tm: model_module._nemo_cen2_tracer_rhs(
+            tr, pu, pv, pw, h, tm, grid),
+        *args,
+    )
+    assert float(actual_inactive[0, 0, 1]) == 0.0
+    output_cotangent = np.zeros_like(expected)
+    output_cotangent[0, 0, 1] = 1.0
+    operand_cotangents = pullback(jnp.asarray(output_cotangent))
+    for cotangent in operand_cotangents:
+        cotangent_np = np.asarray(cotangent)
+        assert np.all(np.isfinite(cotangent_np))
+        np.testing.assert_array_equal(cotangent_np, np.zeros_like(cotangent_np))
 
     # Non-vacuity: the old path materialised averages, cancelled them with 2,
     # and multiplied a precomputed inverse thickness.

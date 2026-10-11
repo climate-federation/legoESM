@@ -196,17 +196,10 @@ def test_step_gradient_health(name):
             "memory! during the XLA large-function compile; tracked in OPEN")
     if name == "gyre_nemo_card_1step":
         row = GYRE_GATE.measure_agreement(1)
-        assert (
-            row["status"] == "REFUTED"
-            and row["reverse"] is None
-            and row["forward"] == pytest.approx(-3.884979632703889e-06)
-            and row["finite_difference"]
-            == pytest.approx(-3.884977393501259e-06)
-        ), (
-            "gyre_nemo_card_1step current DEBT changed: expected a reverse "
-            "NaN owned by _nemo_cen2_tracer_rhs e3t_kmm divisions "
-            "(traadv_cen.F90:146-148,208-216); a finite reverse row must fail "
-            "until this expectation is visibly promoted to CONFIRMED; "
+        assert row["status"] == "CONFIRMED", (
+            "gyre_nemo_card_1step gradient agreement failed after the "
+            "active-cell CEN2 e3t(Kmm) denominator treatment "
+            "(traadv_cen.F90:146-148,208-216); "
             f"measured={row}"
         )
         return
