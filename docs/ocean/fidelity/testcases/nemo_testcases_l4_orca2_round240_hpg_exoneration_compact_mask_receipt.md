@@ -115,10 +115,7 @@ values are:
 The round-240 and round-239 focused tests pass `27/27`. The round receipt and
 the default cumulative receipt both pass the citation gate with zero unmapped
 citations and zero failures; the rigid-shift citation plant refuses. Their
-round/default/plant log SHA-256 values are
-`1c8629ebfc78ba801253345186c4c7945679167c72b0990661ffb8adb72c4c43`,
-`f77199da832d8586a991a0f1020d673c6ae8c231dadd4abfdb6f44933df49809`,
-and `3554095b656734ee2e747a49bcbed4d312026c4def081b10e89fe5e31533ab30`.
+reports and the plant report are preserved in the round evidence directory.
 
 The single `tests/ocean/fidelity -n 12` battery reached `99%`: `3,168`
 passed, `7` skipped, and its only four failures were the registered GYRE
