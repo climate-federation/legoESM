@@ -2313,7 +2313,7 @@ CITATION_MAP = {
         '!*  vertical averaging  *!',
         ('END SELECT', 2), 13],
     'ocean_pe_latlon_cgrid.py:5982-5983': [
-        'du_dt = du_dt * u_mask_3d',
+        ('du_dt = du_dt * u_mask_3d', 1),
         'dv_dt = dv_dt * v_mask_3d',
         2],
     'ORCA2_OMIP_L4_R92RHS/BLD/ppsrc/nemo/dynhpg.f90:386-427': [
