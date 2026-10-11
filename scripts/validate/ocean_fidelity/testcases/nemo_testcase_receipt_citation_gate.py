@@ -6408,7 +6408,7 @@ CITATION_MAP = {
         'r1_hf_0(:,:) = ssfmask', 4],
     'ocean_model_latlon_cgrid.py:6007-6106': [
         '_ws_face_thickness_kbb = None',
-        ('_ws_v_live_mask, _grid, z_coord=_zc)[:2])', 1), 81],
+        ('_ws_v_live_mask, _grid, z_coord=_zc)[:2])', 1), 100],
     'ocean_model_latlon_cgrid.py:6460-6501': [
         ('if _sfx is not None:', 1),
         ('F_slow_v + _wind_increment_v) * state.v_mask.data', 1), 42],
