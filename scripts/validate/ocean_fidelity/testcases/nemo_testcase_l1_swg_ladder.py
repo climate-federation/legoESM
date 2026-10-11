@@ -154,6 +154,34 @@ def _exit_code(out: dict) -> int:
     return 0 if out.get("all_at_bar", True) else 1
 
 
+def _stage3_input_audit(entries, masks) -> dict:
+    """Audit the recorded kt=2 stage-3 wind and whole-step inputs."""
+    stage3 = entries[2, 3]
+    step_entry = entries[2, 1]
+
+    def compare(left, right, mask):
+        use = np.asarray(mask, dtype=bool)
+        delta = np.asarray(left) - np.asarray(right)
+        unequal = (np.asarray(left) != np.asarray(right)) & use
+        return {
+            "bit_identical": bool(not np.any(unequal)),
+            "n_unequal": int(np.count_nonzero(unequal)),
+            "max_abs": float(np.max(np.abs(delta[use]))),
+        }
+
+    return {
+        "wind_before_vs_now": {
+            "u": compare(stage3["utau_before"], stage3["utau_now"], masks["U"]),
+            "v": compare(stage3["vtau_before"], stage3["vtau_now"], masks["V"]),
+        },
+        "whole_step_entry_vs_stage3_entry": {
+            "u_k": compare(step_entry["u_k"], stage3["u_k"], masks["U"]),
+            "v_k": compare(step_entry["v_k"], stage3["v_k"], masks["V"]),
+            "r3f": compare(step_entry["r3f"], stage3["r3f"], masks["F"]),
+        },
+    }
+
+
 def self_check(root: Path, *, plant: bool = False, allow_dirty: bool = False) -> dict:
     """Calibrate restart decoding only; this is not a fidelity measurement."""
     from legoesm.ocean.fidelity.provenance import allow_dirty_stamps, git_sha
@@ -350,6 +378,7 @@ def swe_rk3_stages(stage_root: Path, *, mode: str = "given",
     return _gate_rows({
         "label": f"SWE-RK3-STAGES-{mode.upper()}", "legoesm_git_sha": sha,
         "bar": BAR, "plant": plant, "production_stage_executed": True,
+        "stage3_input_audit": _stage3_input_audit(entries, masks),
         "nondiscriminating": [nondiscriminating], "controls": controls,
         "per_kt": per_kt,
     })

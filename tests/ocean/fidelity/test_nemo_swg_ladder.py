@@ -65,6 +65,19 @@ def test_all_given_stages_execute_production_jit_and_report_honest_debt():
 
 @pytest.mark.skipif(not lad.DEFAULT_STAGE_ROOT.is_dir(),
                     reason="admitted SWG stage records not mounted")
+def test_recorded_stage3_wind_and_whole_step_inputs_are_discriminating():
+    entries = lad.read_stage_entries(lad.DEFAULT_STAGE_ROOT)
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import build_swg_card
+
+    audit = lad._stage3_input_audit(entries, lad._card_masks(build_swg_card()))
+    assert all(row["bit_identical"]
+               for row in audit["wind_before_vs_now"].values())
+    assert all(not row["bit_identical"] and row["n_unequal"] > 0
+               for row in audit["whole_step_entry_vs_stage3_entry"].values())
+
+
+@pytest.mark.skipif(not lad.DEFAULT_STAGE_ROOT.is_dir(),
+                    reason="admitted SWG stage records not mounted")
 def test_recorded_nonzero_stage_entry_one_ulp_plant_leaves_bar():
     out = lad.ens_stage1(
         lad.DEFAULT_STAGE_ROOT, plant="ulp", allow_dirty=True)

@@ -211,6 +211,40 @@ def test_nonzero_manufactured_stage_matches_literal_nemo_statements(
     assert np.asarray(out.v_k)[dry_v] == 0.0
 
 
+def test_stage3_wind_reads_distinct_before_and_now_stresses_once(card_and_model):
+    card, model = card_and_model
+    tau_before = np.float64(0.25)
+    tau_now = np.float64(0.5)
+    entry = _entry()._replace(
+        utau_before=jnp.full((84, 84), tau_before, dtype=jnp.float64),
+        utau_now=jnp.full((84, 84), tau_now, dtype=jnp.float64))
+    out = model.replay_swe_rk3_stage(entry, card.dt_s, 3, _entry())
+    at = (40, 40)
+    rho0 = np.float64(card.recipe.model_config.constants.rho_0)
+    height = np.float64(np.asarray(card.recipe.z_coord.dz_ref)[0])
+    r1_rho0 = np.float64(np.float64(1.0) / rho0)
+    half_r1_rho0 = np.float64(np.float64(0.5) * r1_rho0)
+    tau_sum = np.float64(tau_before + tau_now)
+    wind = np.float64(np.float64(half_r1_rho0 * tau_sum) / height)
+    expected = np.float64(np.float64(card.dt_s) * wind)
+    assert np.asarray(out.u_k)[at] == expected
+
+
+def test_stage3_drag_uses_whole_step_before_velocity(card_and_model):
+    card, model = card_and_model
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import compute_face_masks
+
+    u_mask, _ = compute_face_masks(card.recipe.land_mask, card.recipe.grid)
+    before_u = np.asarray(u_mask[:, 1:], dtype=np.float64) * np.float64(0.25)
+    before = _entry()._replace(u_k=jnp.asarray(before_u))
+    out = model.replay_swe_rk3_stage(_entry(), card.dt_s, 3, before)
+    at = (40, 40)
+    drag = np.float64(card.recipe.model_config.bottom_drag.bottom_drag_r)
+    drag_rhs = np.float64(-np.float64(drag * before_u[at]))
+    expected = np.float64(before_u[at] + np.float64(card.dt_s) * drag_rhs)
+    assert np.asarray(out.u_k)[at] == expected
+
+
 def test_stage_replay_refuses_a_non_swe_selector(card_and_model):
     card, _ = card_and_model
     bad = card.recipe.model_config._replace(
