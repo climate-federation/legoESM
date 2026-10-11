@@ -1584,10 +1584,10 @@ CITATION_MAP = {
         '!  Ocean/land mask at u-, v-, and f-points   (computed from tmask)',
         'ssvmask(:,:) = MAXVAL( vmask(:,:,:), DIM=3 )',
         44],
-    'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/lbcnfd.f90:945-959': [
+    'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/lbcnfd.f90:945-958': [
         ("IF( c_NFtype == 'T' ) THEN            ! *  North fold  T-point pivot", 4),
         ('ptab(ji,ipjm1) = psgn * ptab(ijt,ipjm1)', 3),
-        15],
+        14],
     # --- ORCA2 round 243: OMT-4 substep-6 V-transport operand split ---
     'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:460-484': [
         '!* Set extrapolation coefficients for predictor step:',

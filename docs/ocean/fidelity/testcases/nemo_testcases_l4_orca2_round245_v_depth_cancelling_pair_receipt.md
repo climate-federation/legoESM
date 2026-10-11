@@ -27,7 +27,7 @@ The same compiled tree builds `vmask` from adjacent T masks, associates it as
 a V point, and reduces it vertically to `ssvmask` at
 `ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/dommsk.f90:206-249`. Its T-pivot
 T/W boundary maps the halo row from the mirrored row two positions south at
-`ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/lbcnfd.f90:945-959`.
+`ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/lbcnfd.f90:945-958`.
 
 The committed gate reuses the admitted round-222 twins and round-244 passive
 trace. It replays the written arithmetic in source order, then runs two causal
