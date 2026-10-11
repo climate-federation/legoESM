@@ -11,7 +11,7 @@ from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanMode
 from legoesm.ocean.dynamics.swe_rk3 import SWERK3StageEntry
 from legoesm.ocean.eos import nemo_qco_r3t_ratio
 from legoesm.ocean.fidelity.nemo_testcase_recipe import (
-    build_swg_card, swg_horizontal_coordinates)
+    SWG_NAMELIST, build_swg_card, swg_horizontal_coordinates)
 from legoesm.ocean.state import OceanSurfaceForcing
 
 
@@ -119,7 +119,8 @@ def test_later_stage_and_full_step_dispatches_fail_closed(card_and_model):
 def test_normal_step_uses_the_jitted_three_stage_production_program(card_and_model):
     card, model = card_and_model
     src = swg_horizontal_coordinates()
-    tau_u = -0.2 * np.cos(np.pi * src["gphit"] / 2_000_000.0)
+    tau_u = (-SWG_NAMELIST.rn_tau_pa
+             * np.cos(np.pi * src["gphit"] / SWG_NAMELIST.rn_domsiz_m))
     forcing = OceanSurfaceForcing(
         tau_i_native=jnp.asarray(tau_u),
         tau_j_native=jnp.zeros_like(jnp.asarray(tau_u)))
@@ -139,6 +140,27 @@ def test_normal_step_uses_the_jitted_three_stage_production_program(card_and_mod
             card.recipe.initial_state, card.dt_s,
             surface_forcing=forced).u.data)
     assert np.isfinite(float(jax.grad(objective)(jnp.asarray(1.0))))
+
+
+def test_normal_step_materializes_each_jitted_stage(card_and_model):
+    """The old monolithic JIT is a binding one-bit step-six plant."""
+    card, model = card_and_model
+    src = swg_horizontal_coordinates()
+    tau_u = (-SWG_NAMELIST.rn_tau_pa
+             * np.cos(np.pi * src["gphit"] / SWG_NAMELIST.rn_domsiz_m))
+    forcing = OceanSurfaceForcing(
+        tau_i_native=jnp.asarray(tau_u, dtype=jnp.float64),
+        tau_j_native=jnp.zeros_like(jnp.asarray(tau_u), dtype=jnp.float64))
+    state = card.recipe.initial_state
+    for _ in range(5):
+        state = model.step(state, card.dt_s, surface_forcing=forcing)
+    materialized = model.step(state, card.dt_s, surface_forcing=forcing)
+    fused = model._step_jitted(state, card.dt_s, None, forcing, None)
+    unequal = np.asarray(materialized.u.data) != np.asarray(fused.u.data)
+    assert np.count_nonzero(unequal) == 1
+    assert np.max(np.abs(
+        np.asarray(materialized.u.data) - np.asarray(fused.u.data))) == np.float64(
+            4.336808689942018e-19)
 
 
 def test_nonzero_manufactured_stage_matches_literal_nemo_statements(

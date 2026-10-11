@@ -35,13 +35,10 @@ def test_real_independent_ladder_executes_normal_production_step():
     out = lad.independent(ROOT, allow_dirty=True)
     assert len(out["per_kt"]) == 10
     assert all(len(step["rows"]) == 5 for step in out["per_kt"])
-    assert out["first_kt_over_bar"] == 6
+    assert out["first_kt_over_bar"] is None
+    assert out["all_at_bar"] and out["all_bit_identical"]
     assert all(row["bit_identical"]
-               for step in out["per_kt"][:5] for row in step["rows"])
-    first = next(row for row in out["per_kt"][5]["rows"]
-                 if row["status"] == "DEBT")
-    assert first["name"] == "independent.kt6.un"
-    assert first["n_unequal"] == 1
+               for step in out["per_kt"] for row in step["rows"])
 
 
 @pytest.mark.skipif(not lad.DEFAULT_STAGE_ROOT.is_dir(),
@@ -55,6 +52,8 @@ def test_carried_state_audit_covers_every_stage_and_state_field():
     assert len(stage) == len(rebuilt) == 13
     assert len(whole_step6) == 3
     assert all(row["bit_identical"] for row in stage)
+    assert all(row["bit_identical"] for row in rebuilt + whole_step6)
+    assert out["all_at_bar"] and out["all_bit_identical"]
     disposition = out["state_disposition"]
     assert len(disposition["scored_public"]) == 5
     assert all(row["bit_identical"]

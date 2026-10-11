@@ -13173,6 +13173,24 @@ class LatLonCGridOceanModel:
         # boundary), so an eager-vs-production comparison was not comparing
         # the same program.  Re-enable only this explicitly jitted kernel;
         # private hooks remain inside the identical compiled step.
+        if self.config.outer_integrator == "swe_rk3":
+            if any(value is not None for value in (
+                    freshwater, sponge, external_tracer_rate,
+                    _shortwave_tendency_test_delta,
+                    _vertical_K_test_override,
+                    _nemo_stage1_zad_eta_after_override)):
+                raise ValueError(
+                    "SWE RK3 accepts only its grid-native surface stress input")
+            # NEMO materializes Naa and then swaps it into Nnn between each
+            # stage (compiled stprk3.f90:204-213,278-287,360-366).  Preserve
+            # those three compiled boundaries by calling the same JIT stage
+            # kernel used by the admitted replay; wrapping all three in the
+            # outer whole-step JIT lets XLA fuse across those source barriers.
+            from legoesm.ocean.dynamics.swe_rk3 import swe_rk3_step
+            with jax.disable_jit(False):
+                return swe_rk3_step(
+                    state, dt, surface_forcing, self.grid, self.z_coord,
+                    self.config, stage_runner=self.replay_swe_rk3_stage)
         with jax.disable_jit(False):
             result = self._step_jitted(
                 state, dt, freshwater, surface_forcing, sponge,

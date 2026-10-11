@@ -324,7 +324,8 @@ def _entry_from_state(state, stress_before, stress_now, grid, z_coord, config):
         u, v, stress_before[0], stress_before[1], stress_now[0], stress_now[1])
 
 
-def swe_rk3_step(state, dt, surface_forcing, grid, z_coord, config):
+def swe_rk3_step(state, dt, surface_forcing, grid, z_coord, config,
+                 stage_runner=None):
     """Advance the shared ocean state with the three-stage SWE RK3 program.
 
     The surface caller supplies grid-native U/V stresses through
@@ -347,12 +348,17 @@ def swe_rk3_step(state, dt, surface_forcing, grid, z_coord, config):
         now[1] if state.tau_y_prev is None else jnp.asarray(state.tau_y_prev),
     )
     boundary = _entry_from_state(state, before, now, grid, z_coord, config)
-    s1 = swe_rk3_stage(
-        boundary, boundary, dt, 1, grid, z_coord, state.land_mask.data, config)
-    s2 = swe_rk3_stage(
-        s1, boundary, dt, 2, grid, z_coord, state.land_mask.data, config)
-    s3 = swe_rk3_stage(
-        s2, boundary, dt, 3, grid, z_coord, state.land_mask.data, config)
+    if stage_runner is None:
+        def run(entry, before_entry, stage):
+            return swe_rk3_stage(
+                entry, before_entry, dt, stage, grid, z_coord,
+                state.land_mask.data, config)
+    else:
+        def run(entry, before_entry, stage):
+            return stage_runner(entry, dt, stage, before_entry)
+    s1 = run(boundary, boundary, 1)
+    s2 = run(s1, boundary, 2)
+    s3 = run(s2, boundary, 3)
     u = _native_to_u(s3.u_k)
     v = _native_to_v(s3.v_k)
     return state._replace(
