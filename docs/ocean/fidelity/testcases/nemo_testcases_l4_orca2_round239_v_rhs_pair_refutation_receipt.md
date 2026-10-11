@@ -12,10 +12,11 @@ number is kept separately as **independent** or **given NEMO's entry**.
 
 The executing vector-form OMT-4 build forms completed `Ve_rhs` from live
 `e3v_3d`, completed three-dimensional V RHS, `vmask`, and `r1_hv_0` at
-`ORCA2_OMIP_L4_R214VECPREV3/BLD/ppsrc/nemo/stp2d.f90:194-200`. It copies
+`ORCA2_OMIP_L4_R214VECPREV3/BLD/ppsrc/nemo/stp2d.f90:194-199`. It copies
 that forcing and subtracts the two-dimensional Coriolis trend through raw
 `ssvmask` at
-`ORCA2_OMIP_L4_R214VECPREV3/BLD/ppsrc/nemo/dynspg_ts.f90:289-328`.
+`ORCA2_OMIP_L4_R214VECPREV3/BLD/ppsrc/nemo/dynspg_ts.f90:289-294` and
+`ORCA2_OMIP_L4_R214VECPREV3/BLD/ppsrc/nemo/dynspg_ts.f90:323-328`.
 
 The round-217 Ve_rhs/raw-mask pair is downstream of the completed 3-D RHS.
 The round-239 causal arm nevertheless runs the entire passive step with the
@@ -33,8 +34,8 @@ and completed-RHS row are inherited.
 
 ## Source-ordered operator table
 
-NEMO calls HPG, LDF, VOR, KEG and ZAD in that order at
-`ORCA2_OMIP_L4_R214VECPREV3/BLD/ppsrc/nemo/stp2d.f90:139-166`.
+The admitted RHS record build calls HPG, LDF, VOR, KEG and ZAD in that order
+at `ORCA2_OMIP_L4_R92RHS/BLD/ppsrc/nemo/stp2d.f90:141-175`.
 The offline pure-function replay is calibrated to the live completed RHS with
 zero maximum residual and zero symmetric-difference cells. Its rank-complete
 fold-row target is a 68-face superset of the 35 OMT-4 owner faces; HPG differs
