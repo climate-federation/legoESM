@@ -2731,10 +2731,10 @@ CITATION_MAP = {
         ("CASE ( 'V' )", 7),
         ('ptab(1,ipj+jh) = psgn * ptab(3,ipj-3-jh)', 2),
         8],
-    'ocean_model_latlon_cgrid.py:1830-1834': [
-        ('ops = nemo_qco_card_mesh_operands', 1),
+    'ocean_model_latlon_cgrid.py:1823-1834': [
+        ('nemo_qco_card_mesh_operands(', 1),
         ('include_reciprocals=include_reciprocals', 1),
-        5],
+        12],
     'vertical.py:647-654': [
         ('geom_grid = ensure_geometry(grid)', 2),
         ('hv_0 = jnp.sum(e3v_0 * vmask3, axis=-1)', 1),
@@ -2742,7 +2742,7 @@ CITATION_MAP = {
     'vertical.py:673-755': [
         ('def nemo_qco_resolved_mesh_operands(', 1),
         ('e2u=e2u, e1v=e1v)', 1),
-        76],
+        83],
     # --- ORCA2 round 189: bounded replacement restart list ---
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/in_out_manager.f90:51-51':
         'INTEGER, DIMENSION(10) :: nn_stocklist',
@@ -6402,9 +6402,9 @@ CITATION_MAP = {
     'GYRE_OMIP_L2_P3_SM_R140RHS/BLD/ppsrc/nemo/domain.f90:212-215': [
         'r1_ht_0(:,:) = ssmask',
         'r1_hf_0(:,:) = ssfmask', 4],
-    'ocean_model_latlon_cgrid.py:5992-6047': [
+    'ocean_model_latlon_cgrid.py:5992-6054': [
         '_ws_face_thickness_kbb = None',
-        ('_ws_v_live_mask, _grid)[:2]', 1), 56],
+        ('_ws_v_live_mask, _grid, z_coord=_zc)[:2])', 1), 63],
     'ocean_model_latlon_cgrid.py:6407-6448': [
         ('if _sfx is not None:', 1),
         ('F_slow_v + _wind_increment_v) * state.v_mask.data', 1), 42],
@@ -6630,7 +6630,7 @@ CITATION_MAP = {
     'vertical.py:673-738': [
         'def nemo_qco_resolved_mesh_operands(',
         'e3v0 = jnp.asarray(e3v0, dtype=dtype)[..., :nlev]',
-        63],
+        66],
     'VORTEX_VEC_OMIP_L1_P3/BLD/ppsrc/nemo/stp2d.f90:137-163': [
         'CALL eos    ( ts, Kbb, rhd )                          ! in situ density anomaly at Kbb',
         'CALL dyn_zad( kt, Kbb, uu, vv, Krhs )                 !- vertical advection', 27],
