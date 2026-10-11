@@ -17,10 +17,12 @@ namelist switches. The executing compiled source builds the midpoint V
 transport in this order:
 
 1. AB3 extrapolation produces `va_e` from `vn_e`, `vb_e`, and `vbb_e` at
-   `ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:460-485`;
+   `ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:460-484`;
 2. the live V depth `zhvp2_e` is built from `hv_0`, the midpoint SSH,
-   horizontal areas, and `ssvmask` at `dynspg_ts.f90:487-520`;
-3. `zhV = e1v * va_e * zhvp2_e` at `dynspg_ts.f90:530-536`.
+   horizontal areas, and `ssvmask` at
+   `ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:487-519`;
+3. `zhV = e1v * va_e * zhvp2_e` at
+   `ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:530-535`.
 
 The admitted `NEMO_L2_BTADV_2` record contains `va_e`, `zhvp2_e`, and `zhV`
 for all 65 external substeps. Its static `e1v` comes from the admitted
@@ -39,8 +41,9 @@ slots to the recorder's canonical array and falsely reported 4,731 unequal
 metrics with maximum 222,395.72857949696 m. This is **RETRACTED**. The run's
 `mesh_mask_0000.nc` and production `grid.dx_v` carry positive `e1v` in those
 slots, while the record writer canonicalises V fields at
-`ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:753-758` and
-`:952-959`; its 4,731 zeros are fill outside the V-defined support. On the
+`ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:574-580` and
+`ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:755-779`; its 4,731
+zeros are fill outside the V-defined support. On the
 self-described 8,589-cell nonzero support, production `e1v` is bit-exact:
 0/8,589 unequal, maximum 0.0.
 
@@ -88,9 +91,12 @@ closer:
 
 Thus the compiled multiplication itself is **DISCHARGED** given NEMO's own
 operands: zero cells unequal. The first upstream non-bit statement is the AB3
-midpoint-V producer at `dynspg_ts.f90:460-485`, but its depth partner at
-`:487-520` must be walked with it. Landing either alone would split a measured
-cancelling pair and is forbidden.
+midpoint-V producer at
+`ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:460-484`, but its
+depth partner at
+`ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:487-519` must be
+walked with it. Landing either alone would split a measured cancelling pair
+and is forbidden.
 
 ## Controls and tests
 
@@ -117,7 +123,11 @@ second time.
 
 ## Independent review
 
-Pending the committed receipt and read-only `codex exec` attempt.
+`codex exec --sandbox read-only` was attempted against `92358803b..HEAD` and
+failed before reading the diff: `failed to initialize in-process app-server
+client: Read-only file system (os error 30)`. **Independent review unavailable
+in-sandbox.** The exact output is retained as `independent_review.log`; no
+verdict is invented.
 
 ## OPEN
 

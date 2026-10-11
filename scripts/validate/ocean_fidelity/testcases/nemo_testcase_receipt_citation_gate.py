@@ -1577,6 +1577,28 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 round 243: OMT-4 substep-6 V-transport operand split ---
+    'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:460-484': [
+        '!* Set extrapolation coefficients for predictor step:',
+        'va_e(ji,jj) = za1 * vn_e(ji,jj) + za2 * vb_e(ji,jj) + za3 * vbb_e(ji,jj)',
+        25],
+    'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:487-519': [
+        'IF( .NOT.lk_linssh ) THEN                        !* Update ocean depth (variable volume case only)',
+        ('+ e1e2t(ji,jj+1) * zsshp2_e(ji,jj+1)  ) * ssvmask(ji,jj)', 1),
+        33],
+    'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:530-535': [
+        '! resulting flux at mid-step (not over the full domain)',
+        'zhV(ji,jj) = e1v(ji,jj) * va_e(ji,jj) * zhvp2_e(ji,jj)',
+        6],
+    'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:574-580': [
+        'WRITE(l2_adv_unit) jn, za2',
+        "& l4_canon_2d(vn_adv,'V')", 7],
+    'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:755-779': [
+        ('IF( lwp .AND. kt == nit000 .AND. jn <= 2 ) THEN', 3),
+        ("& l4_canon_2d(ffv_nw,'V'), l4_canon_2d(ffv_ne,'V')", 2),
+        25],
+    'barotropic_latlon_cgrid.py:789-809': [
+        'def nemo_literal_metric_transports(', 'return zh_u, zh_v', 21],
     # --- ORCA2 round 227: OMT-4 stage-3 implicit tracer solve ---
     'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/trazdf.f90:171-216': [
         'Matrix construction', 'zwt(:,1) = 0._wp', 46],
