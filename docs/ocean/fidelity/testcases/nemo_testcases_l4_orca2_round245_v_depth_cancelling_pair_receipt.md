@@ -96,11 +96,29 @@ direct-boundary closure is not a trajectory landing predicate.
 
 ## Evidence, tests, and review
 
-Focused round-245 tests pass 4/4 and cover source-order classification, all
-baseline plants, V-depth replay sensitivity, native-to-compact mask mapping,
-the single-arm control, the two-label atomic closure, and every pair plant.
-The citation gate, once-only fidelity battery, and independent review are
-reported below after their final executions.
+Focused round-243/244/245 and citation tests pass 30/30. They cover
+source-order classification, all baseline plants, V-depth replay sensitivity,
+native-to-compact mask mapping, the single-arm control, the two-label atomic
+closure, every pair plant, and the citation-gate controls. The receipt
+citation gate passes 4/4 citations; the campaign default passes 274/274, both
+with zero unmapped or bad citations. The planted shift of the midpoint-depth
+citation exits red.
+
+The required once-only `tests/ocean/fidelity -n 12` battery collected 3,216
+items and stalled after printing 3,164 passes, seven skips, and four failures;
+two scheduled nodes had no verdict and 39 further nodes were not scheduled.
+The four failures reproduce serially with the registered pre-existing
+messages: the GYRE round-129 certified-year harness moved after its registered
+members ran; SI3 `A MY_SRC is not verbatim`; 13 allow-dirty scope offenders;
+and 13 missing worktree-stamp emitters. The two no-verdict nodes both pass
+serially: the phase-3 planted stage control in 539.33 s and the VORTEX
+round-205 default hooks in 132.52 s. No second full battery was run. Exact
+logs and hashes are retained in the evidence root.
+
+`codex exec --sandbox read-only` failed before reading the diff with
+`failed to initialize in-process app-server client: Read-only file system
+(os error 30)`. **Independent review unavailable in-sandbox.** The exact
+output is retained as `independent_review.log`; no verdict is invented.
 
 ## OPEN
 
