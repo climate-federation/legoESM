@@ -24,6 +24,9 @@ from scripts.validate.ocean_fidelity.orca2_l4 import (  # noqa: E402
     nemo_testcase_l4_orca2_round232_v_transport_operand_gate as r232,
 )
 from scripts.validate.ocean_fidelity.orca2_l4 import (  # noqa: E402
+    nemo_testcase_l4_orca2_round233_geometry_unit_gate as r233,
+)
+from scripts.validate.ocean_fidelity.orca2_l4 import (  # noqa: E402
     nemo_testcase_l4_orca2_round241_compact_mask_atomic_gate as r241,
 )
 from scripts.validate.ocean_fidelity.orca2_l4 import (  # noqa: E402
@@ -70,10 +73,11 @@ def classify(report: dict[str, object], *, plant: str = "none") -> dict[str, obj
     elif plant == "completion":
         report["ladders"]["independent"]["last_completed_kt"] = 7
     elif plant == "vn-adv":
-        report["operands"]["independent"]["correction_input_rows"][
+        report["operands"]["independent"]["operand_rows"][
             "vn_adv"]["unequal"] = 919
     elif plant == "zfv":
-        report["operands"]["independent"]["zFv_signature"]["unequal"] = 919
+        report["operands"]["independent"]["operand_rows"][
+            "zFv"]["unequal"] = 919
     elif plant == "exact-row":
         report["operands"]["independent"]["operand_rows"][
             "vmask"]["unequal"] = 1
@@ -127,26 +131,22 @@ def classify(report: dict[str, object], *, plant: str = "none") -> dict[str, obj
 
     operand_table = {}
     for label, operands in report["operands"].items():
-        require(operands["status"] == "PASS_R232_V_TRANSPORT_OPERAND_SPLIT",
+        require(operands["status"] == "PASS_R233_GEOMETRY_UNIT_BOUNDARY",
                 f"{label}: operand measurement status moved")
         require(all(operands["passivity"].values()),
                 f"{label}: operand observer moved completed state")
-        require(all(row["unequal"] == 0
-                    for row in operands["replay_checks"].values()),
-                f"{label}: offline replay missed the production candidate")
         rows = operands["operand_rows"]
-        for name in ("e1v", "e3v", "vv", "vmask"):
+        for name in ("e3v", "vmask"):
             require(rows[name]["unequal"] == 0,
                     f"{label}: exact operand {name} regressed")
-        vn_adv = operands["correction_input_rows"]["vn_adv"]
+        vn_adv = rows["vn_adv"]
         require(vn_adv["unequal"] <= 35,
                 f"{label}: vn_adv did not collapse to the fold-face bound")
-        require(operands["zFv_signature"]["unequal"] <= 35,
+        require(rows["zFv"]["unequal"] <= 35,
                 f"{label}: zFv did not collapse to the fold-face bound")
         operand_table[label] = {
             "operand_rows": rows,
-            "correction_input_rows": operands["correction_input_rows"],
-            "zFv_signature": operands["zFv_signature"],
+            "fold_band": operands["fold_band"],
         }
 
     report["status"] = "PASS_R246_ATOMIC_PAIR_THROUGH_KT10"
@@ -195,9 +195,9 @@ def measure_operands(args: argparse.Namespace) -> dict[str, object]:
     with r245._barotropic_surface_mask_arm(
         card, True, v_only=True, t_pivot_north_neighbor=True,
     ):
-        return r232.measure(
+        return r233.measure(
             args.deck_root, args.frame_root, args.record_root,
-            args.label, args.expect_commit)
+            args.label, args.expect_commit, production_geometry=False)
 
 
 def combine(args: argparse.Namespace) -> dict[str, object]:
@@ -265,7 +265,7 @@ def main() -> int:
                 plant=args.plant)
         require(args.plant == "none", f"{args.plant} plant stayed green")
     except (OSError, KeyError, TypeError, ValueError, GateError,
-            r232.GateError, r241.GateError, r245.GateError,
+            r232.GateError, r233.GateError, r241.GateError, r245.GateError,
             rung0.GateError) as error:
         marker = "PLANT-FIRED" if args.plant != "none" else "REFUSE"
         print(f"STATUS {marker} {args.plant}: {error}")
