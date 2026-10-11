@@ -1033,7 +1033,7 @@ def _sample_omip2_forcing(forcing, idx_t, grid, grid_type,
     comparison is not confounded by the forcing remap (review 2026-10-10 F20:
     MPAS/FESOM/cube were nearest-neighbour while the tripole was bilinear).
     Measured on CORE-II NYF day means (probe
-    ``results/fix_1010/b/omipremap/probe_f20_flux_integrals.py``): the ocean
+    ``scripts/validate/ocean_fidelity/omip_forcing_remap_integrals.py``): the ocean
     area integral of precip / sw_down after either point sampling is within
     0.4% of the first-order conservative integral, so no renormalisation.
     """

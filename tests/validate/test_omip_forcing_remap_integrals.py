@@ -7,9 +7,10 @@ on a synthetic global point set with KNOWN answers:
 * a constant field: every method and the conservative reference return the
   source global integral (the instrument self-check is exact for constants);
 * a field with a strong meridional gradient: the conservative reference still
-  reproduces the source integral to quadrature accuracy, while the sampled
-  integrals differ from it (so a probe that returned the reference for every
-  method would fail here).
+  reproduces the source integral to quadrature accuracy (< 0.5%) on a global
+  target with true Voronoi areas, while the sampled fields differ from it
+  pointwise (so a probe that returned the reference for every method would
+  fail here).
 """
 
 from __future__ import annotations
@@ -40,19 +41,22 @@ def _src():
 
 
 def _global_points(mod):
-    """A global equal-area-ish point set (Fibonacci sphere), with each point
-    carrying an equal share of the source grid's area so that the target
-    footprint is the source footprint."""
+    """A global Fibonacci point set with its TRUE spherical-Voronoi areas, so
+    the target footprint is the whole sphere and the conservative reference
+    must reproduce the source global integral."""
+    from scipy.spatial import SphericalVoronoi
+
+    from legoesm import constants
+
     n = 3000
     k = np.arange(n) + 0.5
     lat = np.degrees(np.arcsin(1.0 - 2.0 * k / n))
     lon = np.degrees(np.pi * (1.0 + 5.0 ** 0.5) * k) % 360.0
-    src_lat, src_lon = _src()
-    _, src_area = mod.source_grid(src_lat, src_lon)
-    area = np.full(n, src_area.sum() / n)
-    # keep the points inside the source band so all footprints agree
-    keep = np.abs(lat) < 85.0
-    return lat[keep], lon[keep], area[keep] * n / keep.sum()
+    la, lo = np.radians(lat), np.radians(lon)
+    xyz = np.stack([np.cos(la) * np.cos(lo), np.cos(la) * np.sin(lo),
+                    np.sin(la)], -1)
+    area = SphericalVoronoi(xyz).calculate_areas() * float(constants.R_earth) ** 2
+    return lat, lon, area
 
 
 def test_constant_field_every_method_matches_source(mod):
@@ -63,8 +67,8 @@ def test_constant_field_every_method_matches_source(mod):
                             {"global": np.ones(lat.size, bool)})["global"]
     for k in ("nearest", "bilinear", "nearest_rms", "bilinear_rms"):
         assert abs(r[k]) < 1e-12, k
-    # cons uses the points' own areas; src the source areas: equal by build
-    assert abs(r["cons_vs_src"]) < 1e-12
+    # both footprints are the whole sphere
+    assert abs(r["cons_vs_src"]) < 1e-9
 
 
 def test_gradient_field_methods_differ_from_reference(mod):
@@ -78,6 +82,9 @@ def test_gradient_field_methods_differ_from_reference(mod):
     g = res["global"]
     assert g["nearest_rms"] > 1e-3 and g["bilinear_rms"] > 1e-3
     assert g["nearest"] != 0.0 and g["bilinear"] != 0.0
+    # the instrument self-check on a NON-constant field: the first-order
+    # conservative reference reproduces the source integral on a global target
+    assert abs(g["cons_vs_src"]) < 5e-3, g["cons_vs_src"]
     assert "cons_vs_src" not in res["north"]
     assert np.isfinite(res["north"]["cons"])
 
