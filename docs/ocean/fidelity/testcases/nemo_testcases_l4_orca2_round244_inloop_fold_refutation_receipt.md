@@ -72,10 +72,22 @@ The baseline reports hash to `97b4c21d...` (independent), `c542dc1a...`
 hash to `37977af0...` and `bfc6d454...`; the refusing classifier log hashes
 to `4b4bb76f...`. Full SHA256 values are retained in the round evidence.
 
-Focused tests cover measurement schema, all six plants, both-label
-classification, and candidate refusal. The citation gate audits this receipt
-and the campaign default receipt; its planted shift must fire. The required
-once-only fidelity battery result is recorded below after completion.
+Focused round-243/244 tests pass 9/9 and cover measurement schema, all six
+plants, both-label classification, and candidate refusal. The citation gate
+passes this receipt and the campaign default receipt with zero unmapped or
+bad citations; its planted shift exits nonzero.
+
+The required once-only `tests/ocean/fidelity -n 12` run reached 98% before
+its remaining worker stopped and no pytest process remained: 3,160 printed
+passes, seven skips, four printed failures, and two scheduled nodes without a
+verdict. The four failures reproduce serially with the registered pre-existing
+messages: the GYRE round-129 certified-year harness moved after its registered
+members ran; SI3 `A MY_SRC is not verbatim`; the same 13 allow-dirty scope
+offenders; and the same 13 missing worktree-stamp emitters. The two unfinished
+nodes were the VORTEX round-204 default split hook and the phase-3 planted
+stage control. Their serial isolation again terminated during the first node
+without a pytest verdict. No second full battery was run, and this held,
+model-no-op round does not claim a green full battery.
 
 `codex exec --sandbox read-only` failed before reading the diff with
 `failed to initialize in-process app-server client: Read-only file system
