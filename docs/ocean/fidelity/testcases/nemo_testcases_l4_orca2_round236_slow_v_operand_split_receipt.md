@@ -126,12 +126,19 @@ Three refused attempts are retained, not promoted:
 
 ## Verification
 
-- focused gate tests: **4 passed**
+- focused round-236 and citation tests: **21 passed** in 4.14 s
 - production measurement: **PASS_R236_SLOW_V_SPLIT** under both labels
 - classification: **HELD_R236_SLOW_V_OWNER_NAMED**
-- citation gate and rigid-shift plant: pending below
-- `tests/ocean/fidelity -n 12`: pending below
-- independent review: pending below
+- citation gate, default receipt: **PASS**, zero unmapped citations
+- citation gate, this receipt: **PASS**, zero unmapped citations
+- rigid shift of the compiled depth-average citation: **FIRED** (exit 1)
+- `tests/ocean/fidelity -n 12`: **3,148 passed, 7 skipped, 4 failed** in
+  2,411.96 s. All four reds are registered pre-existing failures outside this
+  round's diff: the certified-year harness stamp, allow-dirty scope ratchet,
+  worktree-stamp ratchet, and SI3 scalar-math `MY_SRC` provenance.
+- independent review: **independent review unavailable in-sandbox**;
+  `codex exec --sandbox read-only` could not initialize because its app-server
+  client attempted a write on the read-only filesystem
 - production-package diff from base: empty
 
 ## OPEN
