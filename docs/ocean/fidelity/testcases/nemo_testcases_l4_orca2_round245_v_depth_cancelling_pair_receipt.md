@@ -25,7 +25,7 @@ then writes `zhV=e1v*va_e*zhvp2_e` at
 `ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:530-535`.
 The same compiled tree builds `vmask` from adjacent T masks, associates it as
 a V point, and reduces it vertically to `ssvmask` at
-`ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/dommsk.f90:205-249`. Its T-pivot
+`ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/dommsk.f90:206-249`. Its T-pivot
 T/W boundary maps the halo row from the mirrored row two positions south at
 `ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/lbcnfd.f90:945-959`.
 

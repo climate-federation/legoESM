@@ -1580,12 +1580,12 @@ FILES = {
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
     # --- ORCA2 round 245: OMT-4 midpoint V-depth cancelling pair ---
-    'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/dommsk.f90:205-249': [
+    'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/dommsk.f90:206-249': [
         '!  Ocean/land mask at u-, v-, and f-points   (computed from tmask)',
         'ssvmask(:,:) = MAXVAL( vmask(:,:,:), DIM=3 )',
-        45],
+        44],
     'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/lbcnfd.f90:945-959': [
-        "IF( c_NFtype == 'T' ) THEN            ! *  North fold  T-point pivot",
+        ("IF( c_NFtype == 'T' ) THEN            ! *  North fold  T-point pivot", 4),
         'ptab(ji,ipjm1) = psgn * ptab(ijt,ipjm1)',
         15],
     # --- ORCA2 round 243: OMT-4 substep-6 V-transport operand split ---
