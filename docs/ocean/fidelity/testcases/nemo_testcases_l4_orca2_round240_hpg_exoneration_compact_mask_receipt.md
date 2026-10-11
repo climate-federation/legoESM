@@ -27,7 +27,7 @@ its live `e3v_3d`, stored `vmask`, and `r1_hv_0` at
 `ORCA2_OMIP_L4_R92RHS/BLD/ppsrc/nemo/stp2d.f90:203-215`.
 
 legoESM instead applies a generic compact mask to every completed momentum
-tendency at `ocean_pe_latlon_cgrid.py:5981-5985`. On the 68 northern-fold
+tendency at `ocean_pe_latlon_cgrid.py:5982-5983`. On the 68 northern-fold
 faces this compact V mask is not NEMO's stored raw mask. That multiplication,
 not an HPG arithmetic statement, is the first effective non-bit statement.
 

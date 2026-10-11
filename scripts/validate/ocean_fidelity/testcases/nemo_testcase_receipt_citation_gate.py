@@ -2312,10 +2312,10 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4_R92RHS/BLD/ppsrc/nemo/stp2d.f90:203-215': [
         '!*  vertical averaging  *!',
         ('END SELECT', 2), 13],
-    'ocean_pe_latlon_cgrid.py:5981-5985': [
-        '# --- 11. Land masking ---',
+    'ocean_pe_latlon_cgrid.py:5982-5983': [
+        'du_dt = du_dt * u_mask_3d',
         'dv_dt = dv_dt * v_mask_3d',
-        'dS_dt = dS_dt * mask_3d', 5],
+        2],
     'ORCA2_OMIP_L4_R92RHS/BLD/ppsrc/nemo/dynhpg.f90:386-427': [
         ('DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  0)              ! Surface value', 2),
         'pvv(ji,jj,jk,Krhs) = zhpj(ji,jj) + zvap', 42],
