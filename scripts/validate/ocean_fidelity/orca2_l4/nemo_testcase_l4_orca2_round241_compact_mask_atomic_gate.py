@@ -148,7 +148,11 @@ def _rhs_row(card, state, freshwater, surface, oracle_rhs) -> dict[str, object]:
 
     legacy = r170._candidate_reference_operands(card, state)
     compact = np.asarray(legacy["mask_v"])
-    raw = r236.r229._raw_vmask(card)
+    raw_live = np.asarray(card.recipe.z_coord.nemo_een_barotropic.vmask)
+    raw = np.zeros_like(compact)
+    require(raw_live.shape == compact.shape[:-1] + (compact.shape[-1] - 1,),
+            "raw/native V-mask shape relation moved")
+    raw[..., :raw_live.shape[-1]] = raw_live
     support = (raw != 0.0) & (compact == 0.0)
     changed = arm_rhs != baseline_rhs
     off_support = changed & ~support
