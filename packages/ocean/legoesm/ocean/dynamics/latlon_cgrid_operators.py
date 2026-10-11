@@ -4563,6 +4563,7 @@ def pv_flux_ene(
     metric_widths: tuple | None = None,
     metric_reciprocals: tuple | None = None,
     total_vorticity_override: jnp.ndarray | None = None,
+    direct_thickness_division: bool = False,
 ) -> tuple[jnp.ndarray, jnp.ndarray] | tuple[
     jnp.ndarray, jnp.ndarray, tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]
 ]:
@@ -4632,12 +4633,17 @@ def pv_flux_ene(
         total_vorticity_override
         if total_vorticity_override is not None
         else zeta if f_vtx is None else (zeta + f_vtx[..., jnp.newaxis]))
+    # NEMO ENS divides directly by its live F thickness
+    # (compiled dynvor.f90:659-660).  ENE's historical floor remains the
+    # default for every existing caller; only the explicit ENS seam bypasses
+    # it, so no oracle-absent stabiliser enters that arm.
+    denominator = h_vtx if direct_thickness_division else jnp.maximum(h_vtx, eps_h)
     if metric_widths is None:
-        q = total_vort / jnp.maximum(h_vtx, eps_h)
+        q = total_vort / denominator
     else:
         q = nemo_source_round(
             nemo_source_round(total_vort)
-            / jnp.maximum(h_vtx, eps_h))
+            / denominator)
     # Neumann-fill only the RELATIVE part's discontinuity at the coast; the
     # planetary f is smooth everywhere, so fill the whole q (idempotent at
     # interior wet vertices).
@@ -4759,7 +4765,7 @@ def pv_flux_ens(
     v_mask_3d: jnp.ndarray,
     vtx_mask: jnp.ndarray,
     *,
-    relative_vorticity_mask: jnp.ndarray | None = None,
+    ln_dynvor_msk: bool,
     f_vtx: jnp.ndarray | None = None,
     eps_h: float = 1.0e-10,
     q_boundary: str = "nemo_live",
@@ -4776,8 +4782,8 @@ def pv_flux_ens(
     vorticity value with the two transports on its own side.
 
     ``ln_dynvor_msk`` masks the relative vorticity before ``ff_f`` is added;
-    requiring that mask as an argument prevents callers from accidentally
-    masking the planetary term as well.  The shared ENE operand builder is
+    requiring the boolean switch prevents callers from silently substituting
+    a mask.  The shared ENE operand builder is
     deliberately reused so NEMO's metric, QCO, coast, and source-rounding
     statements have one implementation.
 
@@ -4787,8 +4793,11 @@ def pv_flux_ens(
     """
     if f_vtx is None:
         raise ValueError("pv_flux_ens requires total vorticity at NEMO F points")
-    mask = jnp.asarray(
-        vtx_mask if relative_vorticity_mask is None else relative_vorticity_mask)
+    if type(ln_dynvor_msk) is not bool:
+        raise ValueError(
+            "pv_flux_ens requires explicit boolean ln_dynvor_msk; "
+            f"got {ln_dynvor_msk!r}")
+    mask = jnp.asarray(vtx_mask if ln_dynvor_msk else jnp.ones_like(vtx_mask))
     if mask.ndim == zeta.ndim - 1:
         mask = mask[..., jnp.newaxis]
     if mask.shape != zeta.shape:
@@ -4811,6 +4820,7 @@ def pv_flux_ens(
         return_operands=True, metric_widths=metric_widths,
         metric_reciprocals=metric_reciprocals,
         total_vorticity_override=total_vort,
+        direct_thickness_division=True,
     )
 
     q_s = q[:-1]

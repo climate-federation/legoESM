@@ -23,20 +23,20 @@ Frozen predictions and falsifiers:
    DEBT by the bit-for-bit ladder gate.  A post-computation perturbation, a
    larger move, or either control remaining AT-BAR **REFUTES** the instrument.
 3. The ENS production path will use NEMO's direct division by live F-thickness
-   at `SWG_OMIP_L1_P3/BLD/ppsrc/nemo/dynvor.f90:659-661`, without the shared
+   at `SWG_OMIP_L1_P3/BLD/ppsrc/nemo/dynvor.f90:659-660`, without the shared
    ENE thickness floor.  A tiny-positive-thickness plant must distinguish the
    direct result from the guarded result; equality with the guarded result or
    non-finite output on the positive plant **REFUTES** the transcription.
 4. `ln_dynvor_msk` will be an explicit required ENS production choice.  The
    SWG card will state `true`, matching the executed compiled branch at
-   `SWG_OMIP_L1_P3/BLD/ppsrc/nemo/dynvor.f90:639-648`; absent, non-boolean, or
+   `SWG_OMIP_L1_P3/BLD/ppsrc/nemo/dynvor.f90:639-646`; absent, non-boolean, or
    unknown values must raise before array evaluation.  A silent fallback to a
    vertex mask **REFUTES** the configuration boundary.
 5. Every SWG receipt citation accepted by the citation gate will resolve under
    the admitted `SWG_OMIP_L1_P3/BLD/ppsrc/nemo` tree.  The shifted-citation
    plant must exit nonzero.  In particular, stage-1 velocity advance must bind
    to `SWG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:187-190`, and stage-3 forcing
-   and updates to `SWG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:317-345`.
+   and updates to `SWG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:317-338`.
 6. No certified non-SWG card selects ENS.  TSUNAMI, VORTEX, VORTEX_VEC, GYRE,
    LOCK_EXCHANGE, OVERFLOW, DINO, and ORCA2 must retain their previous selector
    and card hashes or focused-test disposition.  Any previously AT-BAR row
@@ -52,7 +52,15 @@ Pending.
 
 ## Review findings and fixes
 
-Pending.
+The operator's independent round-2 review verdict was:
+
+> DO NOT SHIP — The claimed fidelity rows do not measure a JIT production replay, and the required one-ULP control cannot fail the bar.
+
+All five reproduced blockers are fixed as preregistered: the copied rows are
+withdrawn as REFUTED and replaced by UNMEASURED output rows; the controls move
+stage-entry inputs by one ULP at zero and one; ENS uses direct F-thickness
+division; its required mask switch has no default; and every SWG citation in
+this receipt resolves under the admitted P3 compiled tree.
 
 ## Independent review
 

@@ -90,13 +90,24 @@ def test_card_shape_constants_and_initial_state(card):
     assert int(np.count_nonzero(card.recipe.land_mask)) == 6400
     assert card.recipe.z_coord.n_levels == 1
     assert card.recipe.model_config.constants.g == 0.02
-    assert card.recipe.model_config.vorticity_scheme == "ens_total"
+    assert card.recipe.model_config.vorticity_scheme.scheme == "ens_total"
+    assert card.recipe.model_config.vorticity_scheme.ln_dynvor_msk is True
     assert card.recipe.model_config.coriolis_scheme == "explicit_ab2"
     assert card.recipe.model_config.een_e3f_scheme == "nemo_avg4"
     assert card.recipe.model_config.een_metric_weighting == "nemo"
     assert card.recipe.model_config.een_q_boundary == "nemo_live"
     for field in (state.T, state.S, state.u, state.v, state.eta, state.uu_b, state.vv_b):
         assert not np.any(np.asarray(field.data))
+
+
+@pytest.mark.parametrize("value", (None, "true", 1))
+def test_swg_card_requires_explicit_boolean_ln_dynvor_msk(card, value):
+    bad_vor = card.recipe.model_config.vorticity_scheme._replace(
+        ln_dynvor_msk=value)
+    bad_config = card.recipe.model_config._replace(vorticity_scheme=bad_vor)
+    bad = card._replace(recipe=card.recipe._replace(model_config=bad_config))
+    with pytest.raises(ValueError, match="compiled vor_ens total vorticity"):
+        validate_nemo_testcase_card(bad)
 
 
 def test_source_coordinate_formula_and_absolute_y_coriolis():

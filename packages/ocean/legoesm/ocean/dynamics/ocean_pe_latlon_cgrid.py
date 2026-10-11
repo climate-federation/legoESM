@@ -2608,6 +2608,7 @@ def _bc_pv_flux(
     h_vtx_override=None,
     f_vtx_override=None,
     metric_reciprocals=None,
+    ln_dynvor_msk=None,
 ):
     """Stage 7b: vector-invariant potential-vorticity (vorticity) flux
     (Sadourny EC / Arakawa-Lamb-81 triad, or WENO-Z when momentum_advection is
@@ -2628,6 +2629,10 @@ def _bc_pv_flux(
             f"unknown vorticity_scheme {vorticity_scheme!r}; expected "
             f"'al81', 'ene', 'ene_total', 'ens_total', 'een_total', or 'een_planetary'"
         )
+    if vorticity_scheme == "ens_total" and type(ln_dynvor_msk) is not bool:
+        raise ValueError(
+            "ens_total requires explicit boolean ln_dynvor_msk; "
+            f"got {ln_dynvor_msk!r}")
     # Fail-early on an unknown EEN vertex-thickness (e3f) scheme (static
     # config value) — see the h_vtx construction below for the two rules.
     if een_e3f_scheme not in ("min", "nemo_avg", "nemo_avg4"):
@@ -2951,6 +2956,8 @@ def _bc_pv_flux(
                 q_boundary=een_q_boundary,
                 metric_widths=_mw,
                 metric_reciprocals=metric_reciprocals,
+                **({"ln_dynvor_msk": ln_dynvor_msk}
+                   if vorticity_scheme == "ens_total" else {}),
             )
 
     # Capture PV-flux advection contribution as the `vortcor` diagnostic
@@ -5379,6 +5386,9 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # --- Stage 7b: horizontal momentum advection. Flux-form (-div(transport(x)u),
     # Veros/MOM6 style) or the default vector-invariant PV flux. Both fill the
     # same diagnostic slot. ---
+    _vorticity_selection = getattr(config, "vorticity_scheme", "al81")
+    _vorticity_scheme = getattr(
+        _vorticity_selection, "scheme", _vorticity_selection)
     if _mom_adv == "flux_form":
         # NEMO dynadv_up3 consumes ONE face thickness -- e3u(Kmm) =
         # e3u_0*(1+r3u(Kmm)) (domzgr_substitute.h90:127; domqco.F90:219-220)
@@ -5408,7 +5418,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         # same diagnostic slot.
         _flux_hadv_u = diag_vortcor_u
         _flux_hadv_v = diag_vortcor_v
-        if getattr(config, "vorticity_scheme", "al81") == "een_planetary":
+        if _vorticity_scheme == "een_planetary":
             # NEMO runs dyn_vor and dyn_adv as two separate subroutines even in
             # flux form: the energy-and-enstrophy triad supplies the ROTATION
             # (dynvor.F90:711-814 under ln_dynvor_een), and dynadv_up3 supplies
@@ -5487,7 +5497,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             vertex_mask=vertex_mask,
             enstrophy_metric=config.vortcor_enstrophy_metric,
             reconstruct_zeta=config.vortcor_reconstruct_zeta,
-            vorticity_scheme=getattr(config, "vorticity_scheme", "al81"),
+            vorticity_scheme=_vorticity_scheme,
             een_q_boundary=getattr(config, "een_q_boundary", "neumann_fill"),
             een_e3f_scheme=config.een_e3f_scheme,
             een_metric_weighting=getattr(
@@ -5496,6 +5506,8 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             h_vtx_override=_h_vtx_override,
             f_vtx_override=_f_vtx_override,
             metric_reciprocals=ene_metric_reciprocals,
+            ln_dynvor_msk=getattr(
+                _vorticity_selection, "ln_dynvor_msk", None),
         )
 
     # --- Stage 7b': PLANETARY Coriolis as an explicit tendency (Veros-faithful).
@@ -5516,7 +5528,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # the config string ⇒ default ("matsuno_split") is bit-identical: this block
     # is not traced at all.
     if (getattr(config, "coriolis_scheme", "matsuno_split") == "explicit_ab2"
-            and getattr(config, "vorticity_scheme", "al81")
+            and _vorticity_scheme
             not in ("ene_total", "ens_total", "een_total", "een_planetary")):
         # (ene_total / een_total carry the planetary term INSIDE the vorticity
         # flux — NEMO np_CRV (ENE) / ln_dynvor_een (EEN) — so the separate

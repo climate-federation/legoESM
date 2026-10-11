@@ -1942,6 +1942,13 @@ def wet_min_spacing(grid, land_mask, *, clamp_floor_m: float = 0.0) -> float:
             "with a smaller floor, or pin the coefficient explicitly.")
     return d_min
 
+class ENSVorticityConfig(NamedTuple):
+    """Required NEMO ENS production choices; no physical defaults."""
+
+    scheme: str
+    ln_dynvor_msk: bool
+
+
 class LatLonCGridOceanConfig(NamedTuple):
     """Configuration for the lat-lon C-grid FV ocean model.
 
@@ -2201,7 +2208,10 @@ class LatLonCGridOceanConfig(NamedTuple):
     #     form with total vorticity and the optional compiled relative-
     #     vorticity mask.  The shipped SWG card selects this arm.
     #     Dispatched in ``_bc_pv_flux``; an unknown value raises ValueError there.
-    vorticity_scheme: str = "al81"
+    # ENS cards pass ``ENSVorticityConfig(scheme="ens_total",
+    # ln_dynvor_msk=...)`` so the NEMO mask switch is required and carries no
+    # default.  Plain strings retain every pre-existing card byte-for-byte.
+    vorticity_scheme: str | ENSVorticityConfig = "al81"
     # Boundary-q convention for the AL81/EEN PV flux at land-adjacent vertices:
     # "neumann_fill" (default; smooth fill — WENO-stencil safety) or "nemo_live"
     # (NEMO vor_een ln_dynvor_msk=F: coast shear-vorticity stays LIVE in the

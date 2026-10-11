@@ -130,7 +130,7 @@ def test_ens_exact_total_vorticity_form_and_relative_only_mask():
 
     du, dv = pv_flux_ens(
         zeta, ones_vtx, ones_v, v, ones_u, u, ones_u, ones_v,
-        jnp.asarray(relmask), relative_vorticity_mask=jnp.asarray(relmask),
+        jnp.asarray(relmask), ln_dynvor_msk=True,
         f_vtx=f_vtx,
     )
     du, dv = np.asarray(du), np.asarray(dv)
@@ -157,6 +157,12 @@ def test_ens_exact_total_vorticity_form_and_relative_only_mask():
     assert dv[j, i, 0] == expected_v
     # The zero relative mask must retain the planetary term at that vertex.
     assert q[2, 3, 0] == np.asarray(f_vtx)[2, 3]
+    unmasked_u, unmasked_v = pv_flux_ens(
+        zeta, ones_vtx, ones_v, v, ones_u, u, ones_u, ones_v,
+        jnp.asarray(relmask), ln_dynvor_msk=False, f_vtx=f_vtx)
+    assert any(not np.array_equal(masked, np.asarray(unmasked))
+               for masked, unmasked in zip((du, dv), (unmasked_u, unmasked_v),
+                                           strict=True))
 
 
 def test_ens_is_jit_and_autodiff_safe_and_differs_from_ene():
@@ -171,7 +177,7 @@ def test_ens_is_jit_and_autodiff_safe_and_differs_from_ene():
         return pv_flux_ens(
             zeta, state["h_vtx"], state["h_v"], state["v"],
             state["h_u"], u, state["u_mask_3d"], state["v_mask_3d"],
-            state["vtx_mask"], relative_vorticity_mask=relmask,
+            state["vtx_mask"], ln_dynvor_msk=True,
             f_vtx=f_vtx,
         )
 
@@ -214,6 +220,7 @@ def test_ens_total_production_dispatch_matches_direct_operator():
         state["u_mask_3d"], state["v_mask_3d"], None, grid,
         "vector_invariant", vertex_mask=state["vtx_mask"],
         vorticity_scheme="ens_total", een_q_boundary="nemo_live",
+        ln_dynvor_msk=True,
         een_e3f_scheme="nemo_avg4", een_metric_weighting="nemo",
         dz_ref=jnp.asarray([4000.0]),
         h_vtx_override=state["h_vtx"], f_vtx_override=f_vtx,
@@ -223,13 +230,60 @@ def test_ens_total_production_dispatch_matches_direct_operator():
     direct_u, direct_v = pv_flux_ens(
         zeta, state["h_vtx"], state["h_v"], state["v"], state["h_u"],
         state["u"], state["u_mask_3d"], state["v_mask_3d"],
-        state["vtx_mask"], relative_vorticity_mask=state["vtx_mask"],
-        f_vtx=f_vtx, q_boundary="nemo_live",
+        state["vtx_mask"], ln_dynvor_msk=True, f_vtx=f_vtx,
+        q_boundary="nemo_live",
         metric_widths=(grid.dx_u, grid.dx_v, grid.dy_u, grid.dy_v),
         metric_reciprocals=reciprocals,
     )
     np.testing.assert_array_equal(np.asarray(dispatched_u), np.asarray(direct_u))
     np.testing.assert_array_equal(np.asarray(dispatched_v), np.asarray(direct_v))
+
+
+def test_ens_requires_explicit_boolean_mask_switch_before_array_use():
+    """The production ENS dispatcher has no implicit mask selection."""
+    import pytest
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import _bc_pv_flux
+
+    for absent_or_unknown in (None, "true", 1):
+        with pytest.raises(ValueError, match="explicit boolean ln_dynvor_msk"):
+            _bc_pv_flux(
+                None, None, None, None, None, None, None, None, None,
+                None, None, None, vorticity_scheme="ens_total",
+                ln_dynvor_msk=absent_or_unknown,
+            )
+
+
+def test_ens_direct_thickness_division_bypasses_ene_floor():
+    """Compiled dynvor.f90:659-660 divides by e3f without a floor."""
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import build_swg_card
+
+    swg_mask_switch = (
+        build_swg_card().recipe.model_config.vorticity_scheme.ln_dynvor_msk)
+    assert swg_mask_switch is True
+    n_lat, n_lon, nlev = 3, 4, 1
+    tiny = np.float64(1.0e-20)
+    zeta = jnp.zeros((n_lat + 1, n_lon + 1, nlev), dtype=jnp.float64)
+    f_vtx = jnp.ones((n_lat + 1, n_lon + 1), dtype=jnp.float64)
+    h_vtx = jnp.full_like(zeta, tiny)
+    u = jnp.ones((n_lat, n_lon + 1, nlev), dtype=jnp.float64)
+    v = jnp.ones((n_lat + 1, n_lon, nlev), dtype=jnp.float64)
+    ones_u, ones_v = jnp.ones_like(u), jnp.ones_like(v)
+    vtx_mask = jnp.ones((n_lat + 1, n_lon + 1), dtype=jnp.float64)
+
+    ens = pv_flux_ens(
+        zeta, h_vtx, ones_v, v, ones_u, u, ones_u, ones_v, vtx_mask,
+        ln_dynvor_msk=swg_mask_switch, f_vtx=f_vtx,
+        q_boundary="nemo_live")
+    guarded = pv_flux_ene(
+        zeta, h_vtx, ones_v, v, ones_u, u, ones_u, ones_v, vtx_mask,
+        f_vtx=f_vtx, q_boundary="nemo_live")
+    assert all(np.all(np.isfinite(np.asarray(a))) for a in ens)
+    assert any(not np.array_equal(np.asarray(a), np.asarray(b))
+               for a, b in zip(ens, guarded, strict=True))
+    # The 1e-10 historical ENE denominator versus the 1e-20 direct NEMO
+    # denominator yields exactly the planted ten-order response separation.
+    assert np.max(np.abs(np.asarray(ens[0]))) > 1.0e9 * np.max(
+        np.abs(np.asarray(guarded[0])))
 
 
 def test_ene_default_total_vorticity_path_is_byte_identical_with_override_seam():

@@ -12,10 +12,10 @@ stage-entry payload or running a model measurement.
 Round 2 lands only the first source-order missing operator: NEMO's total-ENS
 vorticity term with `ln_dynvor_msk = T`.  The compiled five-argument stage-1
 call dispatches to `vor_ens(..., ntot, ...)` at
-`SWG_OMIP_L1/BLD/ppsrc/nemo/dynvor.f90:250-251`.  The operator builds relative
+`SWG_OMIP_L1_P3/BLD/ppsrc/nemo/dynvor.f90:250-251`.  The operator builds relative
 vorticity, masks only that relative part, adds `ff_f`, divides by the live F
 thickness, and applies the Sadourny enstrophy stencil at
-`SWG_OMIP_L1/BLD/ppsrc/nemo/dynvor.f90:639-675`.  The card will select this as
+`SWG_OMIP_L1_P3/BLD/ppsrc/nemo/dynvor.f90:639-675`.  The card will select this as
 one guarded shared-lane option; an unknown vorticity selection must still
 raise.  The other two `SWG_UNMEASURED` entries remain refused.
 
@@ -30,8 +30,8 @@ Frozen predictions and falsifiers:
    gradient **REFUTES** the lane requirement.
 3. NEMO stage 1 of `kt=1` starts from the shipped zero SSH and zero velocity;
    stage-3-only wind, drag, and viscosity are absent from this stage
-   (`SWG_OMIP_L1/BLD/ppsrc/nemo/stprk3.f90:140-171`, versus the stage-3 terms
-   at `:260-273` and `:281-283`).  Therefore the admitted stage-2 entry for the same step is
+   (`SWG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:164-190`, versus the stage-3 terms
+   at `:317-338`).  Therefore the admitted stage-2 entry for the same step is
    predicted bit-identical to the stage-1 entry for `ssh_k`, `u_k`, `v_k`,
    `r3t_k`, `r3u_k`, `r3v_k`, and `r3f`.  Any unequal wet value or any row over
    the `1e-15` relative bar **REFUTES** the prediction.  A planted wet U value
@@ -55,7 +55,7 @@ its passive-output check.
 The shared `pv_flux_ens` operator transcribes the compiled `np_CRV` construction
 and mask ordering, the live F-thickness division, metric transports, and ENS
 U/V sums at
-`SWG_OMIP_L1/BLD/ppsrc/nemo/dynvor.f90:639-675`.  It reuses the existing ENE
+`SWG_OMIP_L1_P3/BLD/ppsrc/nemo/dynvor.f90:639-675`.  It reuses the existing ENE
 operand builder through an optional pre-associated total-vorticity input; the
 ordinary ENE call with that input omitted is bit-identical to the historical
 path.  The guarded shared dispatcher accepts `ens_total`; unknown selections
@@ -76,17 +76,15 @@ Frozen prediction results:
    through the NEMO source-ordered implementation reduced the discrepancy but
    did not eliminate XLA's last-bit reassociation.  No claim was relaxed: this
    prediction is red, while the NEMO-versus-legoESM record bar remains exact.
-3. **CONFIRMED.**  The formal `ens-stage1` arm executes the production ENS
-   dispatcher on the zero kt=1/stage-1 card state, requires both resulting
-   tendencies to be bit-zero, carries that isolated source result forward, and
-   scores it against NEMO's recorded stage-2 entry.  All 13 stored groups are
-   bit-identical and AT-BAR, not only the seven frozen state/ratio groups.
-   `ens_stage1.json` records `first_kt_over_bar=null` and commit
-   `1816a3724f218c8ba696c3bb73a10cfaed6ad224`; its SHA-256 is
-   `c0c121878feb6e24a1425ab3955d5f3caccafea30b9a60d5de9a81efbf07632b`.
-   The wet-U plant exits 1, reports DEBT at kt=1, one unequal cell `[1,1]`, and
-   `max_abs=0.001`; its JSON SHA-256 is
-   `e36edd81b606e4d773b3830a2c3c6b3fddc0cc199cfb06af4b054981517a8293`.
+3. **REFUTED and withdrawn.**  The formal `ens-stage1` arm evaluated an isolated
+   ENS tendency, discarded it, copied NEMO's recorded stage-1 entry, and scored
+   that NEMO copy against NEMO's recorded stage-2 entry.  No recorded input
+   entered a JIT production stage.  The 13 reported AT-BAR rows and their
+   `ens_stage1.json` artifact are therefore not legoESM fidelity evidence.
+   Round 2b changes the arm to report all 13 outputs UNMEASURED until the SWE
+   RK3 production stage exists.  Its controls move a stage-entry input by one
+   `nextafter` step at zero and at one; both are DEBT under the bit-for-bit
+   ladder gate.  The old `+0.001` post-computation plant is retired.
 4. **CONFIRMED.**  The 160-test focused implementation battery passed before
    the measurement commit.  The post-commit certified-card battery reports 117
    passes and the same three pre-existing stale digest assertions for GYRE,
@@ -95,24 +93,23 @@ Frozen prediction results:
    field, changes no non-SWG card builder, and repository selection inspection
    shows no other card chooses `ens_total`.
 
-The stage-1 zero result follows the compiled order: stage 1 zeros and evaluates
-the momentum RHS and advances U/V over `rn_Dt/3` at
-`SWG_OMIP_L1/BLD/ppsrc/nemo/stprk3.f90:140-171`; the wind, drag, and viscosity
-terms first appear only in stage 3 at `:260-273`, before that stage's surface
-and ratio updates at `:281-283`.  Therefore this is a certified isolated ENS
-source replay, not a claim that the complete stage program has landed.
+The compiled P3 branch advances the stage-1 velocity at
+`SWG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:187-190` and applies stage-3
+viscosity, forcing, surface, and QCO updates at `:317-338`.  Because legoESM's
+SWE production stage remains unbuilt, round 2 makes no stage-boundary fidelity
+claim.
 
 ## First non-bit statement
 
-No NEMO-versus-legoESM row in the measured zero-state arm is non-bit: every
-record row is identical.  The first non-bit result exposed this round is the
+No NEMO-versus-legoESM stage row was measured: the 13 former rows are withdrawn
+and now UNMEASURED.  The first non-bit result exposed this round is the
 internal eager-versus-JIT evaluation of the nonzero manufactured ENS U/V
 updates—the final `pu_rhs`/`pv_rhs` statements in
-`SWG_OMIP_L1/BLD/ppsrc/nemo/dynvor.f90:639-675`.  It is the retained refutation
+`SWG_OMIP_L1_P3/BLD/ppsrc/nemo/dynvor.f90:639-675`.  It is the retained refutation
 above, not evidence of an oracle mismatch.  The first unlanded statement on the
 oracle ladder remains the coupled SWE stage program surrounding the now-landed
 vorticity call: the compiled dispatcher calls ENS total vorticity at
-`SWG_OMIP_L1/BLD/ppsrc/nemo/dynvor.f90:250-251`, but the card still refuses the
+`SWG_OMIP_L1_P3/BLD/ppsrc/nemo/dynvor.f90:250-251`, but the card still refuses the
 full stage.
 
 ## Rule 12 disposition
@@ -121,10 +118,10 @@ full stage.
 |---|---|---|---|
 | ENS total-vorticity stencil | `pv_flux_ens` plus guarded `ens_total` dispatch | SWG only | Every other card selects AL81, ENE, ENE-total, EEN-total, or EEN-planetary; no other selector reaches the new branch. |
 | Source-associated total-vorticity operand seam | Optional argument on shared `pv_flux_ene` | ENE cards use the omitted/default arm | A direct test proves omitted/default versus the explicit historical `zeta+f` input is byte-identical.  All pre-existing ENE operator tests pass. |
-| kt=1 stage-1 isolated replay | SWG-named ladder arm | SWG CLI only | It cannot be imported or selected by another card and it refuses to certify the complete RK3 program. |
+| kt=1 stage-1 boundary | SWG-named ladder arm | SWG CLI only | REFUTED as a replay; all 13 outputs are UNMEASURED until a JIT production SWE stage exists. |
 
-No previously AT-BAR row moved, the new clean arm has no over-bar row, and its
-plant makes the first-over-bar boundary kt=1.  TSUNAMI and VORTEX focused tests
+The 13 alleged AT-BAR stage rows are withdrawn rather than moved; no certified
+row moved.  TSUNAMI and VORTEX focused tests
 plus the cross-card constructibility suite produced the 117 green results
 reported above; the three digest failures exactly reproduce the stale base
 pins and are not a new digest.  DINO and ORCA2 select EEN-total, GYRE selects
@@ -141,6 +138,30 @@ citation gate finds five mapped compiled-source citations, no failures, no
 unmapped citations, and an empty map audit.  Shifting the ENS citation by two
 lines exits 1 with `SYMBOL-NOT-AT-LINE`.  `git diff --check` passes and the
 tracked worktree is clean.
+
+## Review findings and fixes
+
+The operator's independent round-2 review verdict was:
+
+> DO NOT SHIP — The claimed fidelity rows do not measure a JIT production replay, and the required one-ULP control cannot fail the bar.
+
+Round 2b fixes all five reproduced blockers:
+
+1. The 13 copied NEMO-to-NEMO rows are withdrawn and the ladder now reports
+   them UNMEASURED until the JIT production SWE stage exists.
+2. The old post-computation `+0.001` plant is replaced by separate one-ULP
+   stage-entry input controls at zero and one; the bit-for-bit ladder marks
+   both DEBT while retaining their `1e-15` numerical score as metadata.
+3. ENS takes the compiled direct F-thickness division; the ENE floor remains
+   only on its historical arm, and a tiny-positive-thickness plant separates
+   the two by more than nine orders of magnitude.
+4. The SWG card selects an `ENSVorticityConfig` whose `ln_dynvor_msk` field
+   has no default.  Missing or non-boolean values raise before array evaluation.
+5. SWG citations now bind to the admitted P3 compiled tree.  The P3 stage
+   statements are re-anchored rather than borrowing line numbers from the
+   uninstrumented build.
+
+No later SWE program or stage-3 forcing arm is started in this fix round.
 
 ## Independent review
 

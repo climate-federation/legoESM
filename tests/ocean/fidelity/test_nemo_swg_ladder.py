@@ -43,16 +43,29 @@ def test_stage_entry_reader_refuses_absent_acquisition(tmp_path):
 
 @pytest.mark.skipif(not lad.DEFAULT_STAGE_ROOT.is_dir(),
                     reason="admitted SWG stage records not mounted")
-def test_ens_stage1_source_replay_is_exact_and_plant_leaves_bar():
+def test_ens_stage1_is_unmeasured_until_production_stage_exists():
     clean = lad.ens_stage1(lad.DEFAULT_STAGE_ROOT, allow_dirty=True)
-    plant = lad.ens_stage1(
-        lad.DEFAULT_STAGE_ROOT, plant=True, allow_dirty=True)
-    assert clean["ens_u_bit_zero"] and clean["ens_v_bit_zero"]
-    assert clean["all_at_bar"] and clean["all_bit_identical"]
+    assert not clean["production_stage_executed"]
+    assert not clean["all_at_bar"] and not clean["all_bit_identical"]
     assert len(clean["per_kt"][0]["rows"]) == 13
-    assert not plant["all_at_bar"] and not plant["all_bit_identical"]
-    assert plant["first_kt_over_bar"] == 1
-    assert lad._exit_code(plant) == 1
+    assert {row["status"] for row in clean["per_kt"][0]["rows"]} == {
+        "UNMEASURED"}
+    assert clean["first_kt_over_bar"] is None
+    assert lad._exit_code(clean) == 1
+
+
+@pytest.mark.skipif(not lad.DEFAULT_STAGE_ROOT.is_dir(),
+                    reason="admitted SWG stage records not mounted")
+@pytest.mark.parametrize("value", ("zero", "one"))
+def test_stage_entry_one_ulp_input_plants_leave_bit_for_bit_bar(value):
+    out = lad.ens_stage1(
+        lad.DEFAULT_STAGE_ROOT, plant=value, allow_dirty=True)
+    assert len(out["controls"]) == 1
+    row = out["controls"][0]
+    assert row["status"] == "DEBT"
+    assert row["numerical_status"] == "AT-BAR"
+    assert row["n_unequal"] == 1
+    assert not row["bit_identical"]
 
 
 def test_rows_use_card_t_u_v_masks_and_distinguish_wet_from_dry():

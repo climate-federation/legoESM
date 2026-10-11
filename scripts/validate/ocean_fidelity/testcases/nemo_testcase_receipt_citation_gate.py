@@ -86,6 +86,7 @@ _OVERFLOW_R56UP3_COMPILED = (
 _OVERFLOW_R62ZDF_COMPILED = (
     NEMO / "tests/OVERFLOW_OMIP_L1_P3_R62ZDF/BLD/ppsrc/nemo")
 _SWG_COMPILED = NEMO / "tests/SWG_OMIP_L1/BLD/ppsrc/nemo"
+_SWG_P3_COMPILED = NEMO / "tests/SWG_OMIP_L1_P3/BLD/ppsrc/nemo"
 FILES = {
     "stprk3.F90": _OCE / "stprk3.F90",
     "SWG_OMIP_L1/BLD/ppsrc/nemo/usrdef_nam.f90": (
@@ -134,6 +135,10 @@ FILES = {
         _SWG_COMPILED / "dynadv.f90"),
     "SWG_OMIP_L1/BLD/ppsrc/nemo/ldfdyn.f90": (
         _SWG_COMPILED / "ldfdyn.f90"),
+    "SWG_OMIP_L1_P3/BLD/ppsrc/nemo/dynvor.f90": (
+        _SWG_P3_COMPILED / "dynvor.f90"),
+    "SWG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90": (
+        _SWG_P3_COMPILED / "stprk3.f90"),
     "stprk3_stg.F90": _OCE / "stprk3_stg.F90",
     # round 202: the PRODUCTION GYRE build, so a GYRE resolved statement
     # cannot bind to one of the _SM_ probe builds.
@@ -1986,8 +1991,8 @@ CITATION_MAP = {
     'overflow_kt1_10/namelist_cfg:92': 'ln_dynvor_ens = .true.',
     'nemo_testcase_recipe.py:3392':
         'if (cfg.momentum_advection != "vector_invariant"',
-    'ocean_pe_latlon_cgrid.py:5382': ('if _mom_adv == "flux_form":', 2),
-    'ocean_pe_latlon_cgrid.py:5400': (
+    'ocean_pe_latlon_cgrid.py:5392': ('if _mom_adv == "flux_form":', 2),
+    'ocean_pe_latlon_cgrid.py:5410': (
         '_bc_horizontal_momentum_advection_flux_form(', 2),
     'nemo_testcase_recipe.py:3395':
         'requires ln_dynadv_vec=.true. with nn_dynkeg=0',
@@ -4491,10 +4496,10 @@ CITATION_MAP = {
         ('IF( ln_sdw ) THEN', 1), 'wsd   (:,:,:) = 0._wp', 9],
     'ocean_pe_latlon_cgrid.py:2040-2074': [
         'elif config.ke_gradient_scheme == "c2":', 'dp_dy = _dKp_dy[..., 1]', 35],
-    'ocean_pe_latlon_cgrid.py:3269-3295': [
+    'ocean_pe_latlon_cgrid.py:3276-3302': [
         'area_w = jax.lax.optimization_barrier(',
         'diag_vertadv_v = jax.lax.optimization_barrier(diag_vertadv_v)', 27],
-    'ocean_pe_latlon_cgrid.py:5221-5259': [
+    'ocean_pe_latlon_cgrid.py:5228-5266': [
         'zad_w, zad_h_u, zad_h_v = w, h_u, h_v',
         ('zad_h_v = jax.lax.optimization_barrier(zad_h_v)', 1), 39],
     'ocean_model_latlon_cgrid.py:7366-7376': [
@@ -5210,7 +5215,7 @@ CITATION_MAP = {
     'nemo_testcase_l1_overflow_round63_dynzdf_walk_gate.py:280-292': [
         'planted = None',
         'R60.require(after == before + 1, "plant did not add one refusal")', 13],
-    'ocean_pe_latlon_cgrid.py:3561-3564': [
+    'ocean_pe_latlon_cgrid.py:3568-3571': [
         ('if not (getattr(grid, "dlon", 0.0) and grid.dlon > 0.0):', 1),
         ('"with a scalar dlon (got dlon<=0; tripolar unsupported)."', 1),
         4],
@@ -5277,8 +5282,8 @@ CITATION_MAP = {
     'ocean.output:875': 'Barotropic time filter => nn_bt_flt',
     'lock_kt1_10/ocean.output:615': 'no explicit diffusion                ln_dynldf_OFF',
     'overflow_kt1_10/ocean.output:727': 'no explicit diffusion                ln_dynldf_OFF',
-    'ocean_pe_latlon_cgrid.py:5666': 'rho_prime=rho_prime, h_k=h_k,',
-    'ocean_pe_latlon_cgrid.py:5643-5644': [
+    'ocean_pe_latlon_cgrid.py:5678': 'rho_prime=rho_prime, h_k=h_k,',
+    'ocean_pe_latlon_cgrid.py:5655-5656': [
         '_u_ldf_local = u if ldf_state is None else ldf_state[2]',
         '_v_ldf_local = v if ldf_state is None else ldf_state[3]',
         2],
@@ -6156,6 +6161,33 @@ CITATION_MAP = {
     'VORTEX_SMT4_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynadv.f90:134-138': [
         'SELECT CASE( n_dynadv )    !==  compute advection trend and add it to general trend  ==!',
         'CALL dyn_zad     ( kt                , Kmm, puu, pvv, Krhs )                  !* vertical advection', 5],
+    # --- SWG round 2: exact admitted, instrumented P3 compiled branch ---
+    'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/dynvor.f90:250-251': [
+        ('CASE( np_ENS )', 2),
+        'CALL vor_ens( kt, Kmm, ntot, puu(:,:,:,Kmm)', 2],
+    'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/dynvor.f90:639-675': [
+        ('CASE ( np_CRV )', 3),
+        'pv_rhs(ji,jj,jk) = pv_rhs(ji,jj,jk) + zvau', 37],
+    'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/dynvor.f90:639-646': [
+        ("CASE ( np_CRV )", 3),
+        ("zwz(ji,jj) = ( zwz(ji,jj) - ff_f(ji,jj) ) * fmask(ji,jj,jk) + ff_f(ji,jj)", 2),
+        8],
+    'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/dynvor.f90:659-660': [
+        ("DO jj = ntsj-( 1), ntej+(  0 ) ; DO ji = ntsi-( 1), ntei+(  0)                 !==  potential vorticity  ==!   (1)", 2),
+        ("zwz(ji,jj) = zwz(ji,jj) / (e3f_0vor(ji,jj,jk)*(1._wp+r3f(ji,jj)))", 2),
+        2],
+    'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:187-190': [
+        ("IF( ln_dynadv_vec ) THEN", 1),
+        ("vv(ji,jj,jk,Naa) = vv(ji,jj,jk,Nbb) + rDt * vv(ji,jj,jk,Nrhs) * vmask(ji,jj,jk)", 1),
+        4],
+    'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:164-190': [
+        ("uu(:,:,:,Nrhs) = 0._wp", 1),
+        ("vv(ji,jj,jk,Naa) = vv(ji,jj,jk,Nbb) + rDt * vv(ji,jj,jk,Nrhs) * vmask(ji,jj,jk)", 1),
+        27],
+    'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:317-338': [
+        "CALL dyn_ldf( kstp, Nbb, Nnn, uu, vv, Nrhs )  ! lateral mixing",
+        ("CALL dom_qco_r3c( ssh(:,:,Naa), r3t(:,:,Naa), r3u(:,:,Naa), r3v(:,:,Naa), r3f(:,:) )", 3),
+        22],
 }
 
 

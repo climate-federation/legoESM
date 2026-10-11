@@ -122,16 +122,25 @@ def _row(name, ref, cand, mask):
         "first_unequal_cell": bad[0].tolist() if bad.size else None,
         "max_abs": float(np.max(np.abs(delta[use]))),
     })
+    # This campaign's requested endpoint is bit-for-bit.  Retain the TSUNAMI
+    # 1e-15 numerical score, but never let a non-bit row claim AT-BAR: a
+    # one-ULP input control must make the ladder red at both zero and one.
+    if bad.size and result["status"] == "AT-BAR":
+        result["numerical_status"] = "AT-BAR"
+        result["status"] = "DEBT"
+        result["reason"] = "bit-for-bit SWG ladder: non-identical value"
     return result
 
 
 def _gate_rows(out: dict) -> dict:
     rows = [row for step in out.get("per_kt", ()) for row in step["rows"]]
-    out["all_at_bar"] = all(row["status"] == "AT-BAR" for row in rows)
-    out["all_bit_identical"] = all(row["bit_identical"] for row in rows)
+    out["all_at_bar"] = bool(rows) and all(
+        row["status"] == "AT-BAR" for row in rows)
+    out["all_bit_identical"] = bool(rows) and all(
+        row["bit_identical"] for row in rows)
     out["first_kt_over_bar"] = next(
         (step["kt"] for step in out.get("per_kt", ())
-         if any(row["status"] != "AT-BAR" for row in step["rows"])), None)
+         if any(row["status"] == "DEBT" for row in step["rows"])), None)
     return out
 
 
@@ -199,24 +208,17 @@ def independent(root: Path, *, allow_dirty: bool = False) -> dict:
                        "per_kt": per_kt})
 
 
-def ens_stage1(stage_root: Path, *, plant: bool = False,
+def ens_stage1(stage_root: Path, *, plant: str | None = None,
                allow_dirty: bool = False) -> dict:
-    """Replay only the landed ENS source across the kt=1 stage-1 boundary.
+    """Report the stage boundary unmeasured until a production stage exists.
 
-    The acquired stage-1 entry is motionless.  The compiled source calls
-    ``vor_ens`` in every stage, while wind, drag, and viscosity are stage-3
-    terms.  This arm therefore executes the shared production ENS dispatcher,
-    requires its two tendencies to be bit-zero, then scores the carried stage
-    fields against NEMO's recorded stage-2 entry.  It is deliberately not a
-    substitute for the still-unmeasured complete SWE RK3 stage program.
+    Round 2 incorrectly copied the recorded entry across this boundary after
+    evaluating and discarding an isolated ENS tendency.  The production SWE
+    RK3 stage is still unbuilt, so no candidate output exists to score.  The
+    optional controls perturb a stage-entry input, never an output.
     """
     import jax
-    import jax.numpy as jnp
     from legoesm.core.precision import PrecisionPolicy, set_policy
-    from legoesm.grids.operators_latlon_cgrid import compute_vertex_mask
-    from legoesm.ocean.dynamics.latlon_cgrid_operators import (
-        min_cell_to_uface, min_cell_to_vface)
-    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import _bc_pv_flux
     from legoesm.ocean.fidelity.nemo_testcase_recipe import build_swg_card
     from legoesm.ocean.fidelity.provenance import allow_dirty_stamps, git_sha
 
@@ -226,46 +228,39 @@ def ens_stage1(stage_root: Path, *, plant: bool = False,
     require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
     require(jax.default_backend() == "cpu", "ladder must run on CPU")
     card = build_swg_card()
-    require(card.recipe.model_config.vorticity_scheme == "ens_total",
+    vor = card.recipe.model_config.vorticity_scheme
+    require(vor.scheme == "ens_total",
             "SWG card does not select ens_total")
+    require(vor.ln_dynvor_msk is True,
+            "SWG card does not explicitly select ln_dynvor_msk=true")
     entries = read_stage_entries(stage_root)
     masks = _card_masks(card)
-
-    state, grid = card.recipe.initial_state, card.recipe.grid
-    h_k = jnp.asarray(card.recipe.z_coord.h_partial, dtype=jnp.float64)
-    h_u, h_v = min_cell_to_uface(h_k), min_cell_to_vface(h_k, grid)
-    u = jnp.asarray(state.u.data, dtype=jnp.float64)
-    v = jnp.asarray(state.v.data, dtype=jnp.float64)
-    u_mask = jnp.asarray(state.u_mask.data, dtype=jnp.float64)[..., None]
-    v_mask = jnp.asarray(state.v_mask.data, dtype=jnp.float64)[..., None]
-    t_mask = jnp.asarray(state.land_mask.data, dtype=jnp.float64)
-    _, _, ens_u, ens_v = _bc_pv_flux(
-        jnp.zeros_like(u), jnp.zeros_like(v), u, v, h_u, h_v, h_k,
-        u_mask, v_mask, t_mask, grid, "vector_invariant",
-        vertex_mask=compute_vertex_mask(t_mask, grid=grid),
-        vorticity_scheme="ens_total", een_q_boundary="nemo_live",
-        een_e3f_scheme="nemo_avg4", een_metric_weighting="nemo",
-        dz_ref=jnp.asarray(card.recipe.z_coord.dz_ref, dtype=jnp.float64),
-        metric_reciprocals=(
-            1.0 / jnp.asarray(grid.dx_u, dtype=jnp.float64),
-            1.0 / jnp.asarray(grid.dy_v, dtype=jnp.float64)),
-    )
-    ens_u_np, ens_v_np = np.asarray(ens_u), np.asarray(ens_v)
-    require(np.all(ens_u_np == 0.0) and np.all(ens_v_np == 0.0),
-            "motionless kt=1 stage-1 ENS tendency is not bit-zero")
-
-    before, after = entries[1, 1], entries[1, 2]
-    rows = []
-    for name in sorted(before):
-        cand = before[name].copy()
-        if plant and name == "u_k":
-            cand[tuple(np.argwhere(masks["U"])[0])] += 1.0e-3
-        rows.append(_row(f"ens_stage1.kt1.s1_to_s2.{name}", after[name], cand,
-                         _field_mask(name, masks)))
+    before = entries[1, 1]
+    reason = (
+        "SWE RK3 production stage is unbuilt; no legoESM stage-1 output "
+        "exists to compare with NEMO's recorded stage-2 entry")
+    rows = [{
+        "name": f"ens_stage1.kt1.s1_to_s2.{name}",
+        "status": "UNMEASURED", "bit_identical": False,
+        "reason": reason,
+    } for name in sorted(before)]
+    controls = []
+    if plant is not None:
+        require(plant in ("zero", "one"),
+                f"unknown stage-entry plant {plant!r}")
+        baseline = before["u_k"].copy()
+        at = tuple(np.argwhere(masks["U"])[0])
+        baseline[at] = 0.0 if plant == "zero" else 1.0
+        moved = baseline.copy()
+        moved[at] = np.nextafter(moved[at], np.float64(np.inf))
+        controls.append(_row(
+            f"stage_entry_input_nextafter_{plant}", baseline, moved,
+            masks["U"]))
     return _gate_rows({
-        "label": "ENS-STAGE1-SOURCE-REPLAY", "legoesm_git_sha": sha,
-        "bar": BAR, "plant": plant, "ens_u_bit_zero": True,
-        "ens_v_bit_zero": True, "per_kt": [{"kt": 1, "stage": 1, "rows": rows}],
+        "label": "ENS-STAGE1-UNMEASURED", "legoesm_git_sha": sha,
+        "bar": BAR, "plant": plant, "production_stage_executed": False,
+        "controls": controls,
+        "per_kt": [{"kt": 1, "stage": 1, "rows": rows}],
     })
 
 
@@ -276,13 +271,15 @@ def main(argv=None) -> int:
                    required=True)
     p.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     p.add_argument("--stage-root", type=Path, default=DEFAULT_STAGE_ROOT)
-    p.add_argument("--plant", action="store_true")
+    p.add_argument("--plant", nargs="?", const="zero", choices=(
+        "zero", "one"))
     p.add_argument("--allow-dirty", action="store_true")
     p.add_argument("--json", type=Path)
     a = p.parse_args(argv)
     try:
         if a.arm == "self-check":
-            out = self_check(a.root, plant=a.plant, allow_dirty=a.allow_dirty)
+            out = self_check(a.root, plant=a.plant is not None,
+                             allow_dirty=a.allow_dirty)
         elif a.arm == "independent":
             out = independent(a.root, allow_dirty=a.allow_dirty)
         elif a.arm == "stage-entry-read":

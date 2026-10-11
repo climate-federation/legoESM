@@ -35,7 +35,7 @@ from legoesm.ocean.physics.convection.config import (
     OceanConvectionConfig,
 )
 from legoesm.ocean.physics.shortwave_penetration import ShortwavePenetrationConfig
-from legoesm.ocean.state import LatLonCGridOceanConfig
+from legoesm.ocean.state import ENSVorticityConfig, LatLonCGridOceanConfig
 from legoesm.ocean.vertical import (
     NemoEENBarotropicOperands,
     nemo_fe3mask_from_tmask,
@@ -4262,7 +4262,9 @@ def build_swg_card() -> NEMOTestcaseCard:
     config = base._replace(
         constants=cc, physics=physics, tracer_advection="none", K_h=0.0,
         implicit_vertical_mixing=False, A_v=0.0, K_v=0.0, gm_redi=None,
-        vorticity_scheme="ens_total", coriolis_scheme="explicit_ab2",
+        vorticity_scheme=ENSVorticityConfig(
+            scheme="ens_total", ln_dynvor_msk=nl.ln_dynvor_msk),
+        coriolis_scheme="explicit_ab2",
         een_e3f_scheme="nemo_avg4", een_metric_weighting="nemo",
         een_q_boundary="nemo_live",
         lateral_viscosity=base.lateral_viscosity._replace(A_h=500.0),
@@ -4291,7 +4293,10 @@ def _validate_swg_card(card: NEMOTestcaseCard) -> None:
         raise ValueError("SWG-zco is closed in both horizontal directions")
     if card.recipe.model_config.constants.g != nl.rn_modified_grav_m_s2:
         raise ValueError("SWG-zco must carry rn_modified_grav as model g")
-    if (card.recipe.model_config.vorticity_scheme != "ens_total"
+    vor = card.recipe.model_config.vorticity_scheme
+    if (not isinstance(vor, ENSVorticityConfig)
+            or vor.scheme != "ens_total"
+            or vor.ln_dynvor_msk is not nl.ln_dynvor_msk
             or card.recipe.model_config.coriolis_scheme != "explicit_ab2"
             or card.recipe.model_config.een_e3f_scheme != "nemo_avg4"
             or card.recipe.model_config.een_metric_weighting != "nemo"
