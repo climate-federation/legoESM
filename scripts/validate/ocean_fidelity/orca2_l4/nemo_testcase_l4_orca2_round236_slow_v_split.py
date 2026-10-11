@@ -112,6 +112,16 @@ def _source_depth(e3v, rhs, mask, reciprocal) -> np.ndarray:
     return total * np.asarray(reciprocal, np.float64)
 
 
+def _candidate_depth(e3v, rhs, mask, reciprocal) -> np.ndarray:
+    """The candidate's executing jnp.sum statement, outside model state."""
+
+    import jax.numpy as jnp
+
+    return np.asarray(jnp.sum(
+        jnp.asarray(e3v) * jnp.asarray(rhs) * jnp.asarray(mask), axis=-1)
+        * jnp.asarray(reciprocal), dtype=np.float64)
+
+
 def _admit(twin_a: Path, twin_b: Path) -> list[dict[str, object]]:
     masks = o1_gate._defined_masks(twin_a)
     rows = []
@@ -269,12 +279,17 @@ def measure(deck_root: Path, frame_root: Path, twin_a: Path, twin_b: Path,
         fold_unit[..., None], raw_vmask3, ops_vmask)
     effective_r1 = np.where(fold_unit, raw_r1_hv, ops_r1)
 
+    candidate_depth = _candidate_depth(
+        effective_e3v, _native_v(producer["rhs_v"]),
+        effective_vmask, effective_r1)
     candidate = {
         "e3v_3d": effective_e3v,
         "completed_v_rhs": _native_v(producer["rhs_v"]),
         "vmask_3d": effective_vmask,
         "r1_hv0": effective_r1,
-        "depth_mean_v": _native_v(producer["depth_v"]),
+        # ``producer['depth_v']`` is H_v_pre (metres), not this acceleration.
+        # Reconstruct the executing statement from its already-passive inputs.
+        "depth_mean_v": candidate_depth,
         "post_drag_v": _native_v(producer["post_drag_v"]),
         "post_wind_incoming_v": _native_v(producer["incoming_v"]),
         "coriolis_v": _native_v(producer["coriolis_v"]),
