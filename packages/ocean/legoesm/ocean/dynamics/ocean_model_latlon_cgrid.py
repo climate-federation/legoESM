@@ -6068,10 +6068,29 @@ class LatLonCGridOceanModel:
             if (_hpg_mask_arm is True
                     or (_hpg_mask_arm is None
                         and _cfg_b.momentum_advection != "flux_form")):
-                _raw_ops = nemo_qco_resolved_mesh_operands(
-                    _zc, _grid, _ws_u_live_mask, _ws_v_live_mask,
-                    state.eta.data.dtype, state.T.data.shape[-1])
-                _ws_literal_hpg_vmask = jnp.zeros_like(_ws_v_live_mask)
+                # A raw NEMO face bundle selects the literal mesh operands.
+                # Analytic cards (notably GYRE) retain the same card-built
+                # operand source used by _nemo_ws_qco_stage_faces; requiring
+                # a mesh-file bundle here would make the HPG ordering depend
+                # on an unrelated input representation.
+                _raw_face_bundle = getattr(
+                    _zc, "nemo_een_barotropic", None)
+                _card_u_mask = jnp.broadcast_to(
+                    _ws_u_live_mask,
+                    (*_ws_u_live_mask.shape[:-1], _ws_h_ref.shape[-1]))
+                _card_v_mask = jnp.broadcast_to(
+                    _ws_v_live_mask,
+                    (*_ws_v_live_mask.shape[:-1], _ws_h_ref.shape[-1]))
+                _raw_ops = (
+                    nemo_qco_card_mesh_operands(
+                        _ws_h_ref, _card_u_mask, _card_v_mask,
+                        _grid, state.eta.data.dtype)
+                    if _raw_face_bundle is None
+                    else nemo_qco_resolved_mesh_operands(
+                        _zc, _grid, _ws_u_live_mask, _ws_v_live_mask,
+                        state.eta.data.dtype, state.T.data.shape[-1])
+                )
+                _ws_literal_hpg_vmask = jnp.zeros_like(_card_v_mask)
                 _ws_literal_hpg_vmask = _ws_literal_hpg_vmask.at[1:].set(
                     _raw_ops.vmask3)
             if not self._nemo_ws_test_hooks.legacy_hadv_min_face_thickness:
@@ -6326,7 +6345,6 @@ class LatLonCGridOceanModel:
                 f"{_slow_depth_eval!r}: must be one of "
                 "('min_rule_live', 'nemo_literal').")
         if _slow_depth_eval == "nemo_literal":
-            from legoesm.ocean.vertical import nemo_qco_card_mesh_operands
             _h_ref0 = compute_layer_thickness(
                 jnp.zeros_like(state.eta.data), state.H_bathy.data, _zc,
                 min_water_column_m=_cfg_b.min_water_column_m,
