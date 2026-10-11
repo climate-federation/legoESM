@@ -179,7 +179,7 @@ def _variants():
             {}),
         "rigid_lid_ab2": (base._replace(
             outer_integrator="ab2", coriolis_scheme="explicit_ab2",
-            barotropic_solver="rigid_lid"),
+            barotropic=base.barotropic._replace(barotropic_solver="rigid_lid")),
             {"land_lat_threshold": 70.0, "warm_rigid_lid": True}),
     }
 
