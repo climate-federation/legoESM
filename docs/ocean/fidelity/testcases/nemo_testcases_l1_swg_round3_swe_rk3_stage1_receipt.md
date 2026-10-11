@@ -20,11 +20,11 @@ before level, applies U/V masks and lateral boundary conditions, then rotates
 the stage indices at
 `SWG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:164-210`.  Vector advection dispatches
 to C2 kinetic energy followed by vertical advection at
-`SWG_OMIP_L1_P3/BLD/ppsrc/nemo/dynadv.f90:134-138`; the one executed layer makes
+`SWG_OMIP_L1_P3/BLD/ppsrc/nemo/dynadv.f90:134-139`; the one executed layer makes
 the vertical-advection flux divergence structurally zero.  Continuity is the
 live-thickness transport divergence and masked SSH update at
 `SWG_OMIP_L1_P3/BLD/ppsrc/nemo/sshwzv.f90:135-149`, followed by the T/U/V/F QCO
-ratios at `SWG_OMIP_L1_P3/BLD/ppsrc/nemo/domqco.f90:208-234`.
+ratios at `SWG_OMIP_L1_P3/BLD/ppsrc/nemo/domqco.f90:207-234`.
 
 Frozen predictions and falsifiers:
 
@@ -52,7 +52,7 @@ Frozen predictions and falsifiers:
    bit-identical **REFUTES** the instrument.
 5. `g=0.02` will be read from the card's constants by the only stage-1 gravity
    consumer, the inline pressure-gradient statements at
-   `SWG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:172-176`.  A literal gravity in
+   `SWG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:170-176`.  A literal gravity in
    the stage program, a different resolved value, or another stage-1 gravity
    consumer that does not receive the card value **REFUTES** the constants
    path.
