@@ -226,6 +226,8 @@ FILES = {
         _ORCA2_R213VECPRE_COMPILED / "dynspg_ts.f90"),
     "ORCA2_OMIP_L4_R214VECPREV3/BLD/ppsrc/nemo/dynspg_ts.f90": (
         _ORCA2_R214VECPREV3_COMPILED / "dynspg_ts.f90"),
+    "ORCA2_OMIP_L4_R214VECPREV3/BLD/ppsrc/nemo/stp2d.f90": (
+        _ORCA2_R214VECPREV3_COMPILED / "stp2d.f90"),
     "ORCA2_OMIP_L4_R214VECPREV3/BLD/ppsrc/nemo/lbcnfd.f90": (
         _ORCA2_R214VECPREV3_COMPILED / "lbcnfd.f90"),
     "orca2_rounds/round222/acquisition/orca2_omt4_frames_10step_a_np2/namelist_cfg": Path(
@@ -2615,6 +2617,15 @@ CITATION_MAP = {
         '! resulting flux at mid-step (not over the full domain)',
         'ssha_e(ji,jj) = (  sshn_e(ji,jj) - rDt_e * ( ssh_frc(ji,jj) + zhdiv )  ) * ssmask(ji,jj)',
         28],
+    # --- ORCA2 round 236: OMT-4 fold-local slow-V operand split ---
+    'ORCA2_OMIP_L4_R214VECPREV3/BLD/ppsrc/nemo/stp2d.f90:194-199': [
+        '!*  vertical averaging  *!',
+        'Ve_rhs(ji,jj) = SUM( e3v_3d(ji,jj,1:jpkm1)*vv(ji,jj,1:jpkm1,Krhs)*vmask(ji,jj,1:jpkm1) ) * r1_hv_0(ji,jj)',
+        6],
+    'ORCA2_OMIP_L4_R214VECPREV3/BLD/ppsrc/nemo/stp2d.f90:219-230': [
+        'CALL dyn_drg_init( Kbb, Kbb, uu, vv, uu_b, vv_b, Ue_rhs, Ve_rhs, CdU_u, CdU_v )',
+        'Ve_rhs(ji,jj) =  Ve_rhs(ji,jj) + r1_rho0 * vtauV(ji,jj) * (r1_hv_0(ji,jj) /(1._wp+r3v(ji,jj,Kbb)))',
+        12],
     # --- ORCA2 round 235: OMT-4 global back-interpolation owner ---
     'ORCA2_OMIP_L4_R214VECPREV3/BLD/ppsrc/nemo/dynspg_ts.f90:289-294': [
         '!                          ! set values computed in RK3_ssh',
