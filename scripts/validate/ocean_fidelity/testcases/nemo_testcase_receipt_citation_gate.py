@@ -149,12 +149,19 @@ FILES = {
         _SWG_P3_COMPILED / "ldfdyn.f90"),
     "SWG_OMIP_L1_P3/BLD/ppsrc/nemo/dynldf_lev.f90": (
         _SWG_P3_COMPILED / "dynldf_lev.f90"),
+    "SWG_OMIP_L1_P3/BLD/ppsrc/nemo/dynldf.f90": (
+        _SWG_P3_COMPILED / "dynldf.f90"),
+    "SWG_OMIP_L1_P3/BLD/ppsrc/nemo/sbcmod.f90": (
+        _SWG_P3_COMPILED / "sbcmod.f90"),
     # The frozen round-3 preregistration used these shortened names.  Pin
     # them to the admitted P3 build rather than silently resolving another
     # same-basename source tree.
     "dynadv.f90": _SWG_P3_COMPILED / "dynadv.f90",
     "domqco.f90": _SWG_P3_COMPILED / "domqco.f90",
     "stprk3.f90": _SWG_P3_COMPILED / "stprk3.f90",
+    "sbcmod.f90": _SWG_P3_COMPILED / "sbcmod.f90",
+    "dynldf.f90": _SWG_P3_COMPILED / "dynldf.f90",
+    "dynldf_lev.f90": _SWG_P3_COMPILED / "dynldf_lev.f90",
     "stprk3_stg.F90": _OCE / "stprk3_stg.F90",
     # round 202: the PRODUCTION GYRE build, so a GYRE resolved statement
     # cannot bind to one of the _SM_ probe builds.
@@ -6272,6 +6279,82 @@ CITATION_MAP = {
         "z1_2rho0 = 0.5_wp * r1_rho0",
         ("END DO   ;   END DO   ;   END DO", 7),
         14],
+    'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:312-317': [
+        ("uu(:,:,:,Nrhs) = 0._wp", 3),
+        "CALL dyn_ldf( kstp, Nbb, Nnn, uu, vv, Nrhs )  ! lateral mixing",
+        6],
+    'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:319-328': [
+        "z1_2rho0 = 0.5_wp * r1_rho0",
+        "- rn_rfr   * vv(ji,jj,jk,Nbb)",
+        10],
+    'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:329-331': [
+        ("! ==> RHS", 3),
+        ("vv(ji,jj,jk,Nrhs) = vv(ji,jj,jk,Nrhs) + zrhs_v", 3),
+        3],
+    'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:342-345': [
+        ("IF( ln_dynadv_vec ) THEN", 3),
+        ("vv(ji,jj,jk,Naa) = vv(ji,jj,jk,Nbb) + rDt * vv(ji,jj,jk,Nrhs) * vmask(ji,jj,jk)", 3),
+        4],
+    'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:325-328': [
+        "zrhs_u = zrhs_u + z1_2rho0",
+        "- rn_rfr   * vv(ji,jj,jk,Nbb)",
+        4],
+    'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:326,328': [
+        "- rn_rfr   * uu(ji,jj,jk,Nbb)",
+        "- rn_rfr   * vv(ji,jj,jk,Nbb)",
+        2],
+    'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:344-345': [
+        ("uu(ji,jj,jk,Naa) = uu(ji,jj,jk,Nbb)", 3),
+        ("vv(ji,jj,jk,Naa) = vv(ji,jj,jk,Nbb)", 3),
+        2],
+    'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:255-257': [
+        ("CALL ssh_nxt( kstp, Nbb, Nnn, ssh, Naa )", 1),
+        ("CALL dom_qco_r3c( ssh(:,:,Naa), r3t(:,:,Naa), r3u(:,:,Naa), r3v(:,:,Naa), r3f(:,:) )", 2),
+        3],
+    'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/sbcmod.f90:553-560': [
+        "calculate utau and vtau on U,V-points",
+        ("vmask(ji,jj,1) ) * MAX( tmask(ji,jj,1), tmask(ji,jj+1,1) )", 2),
+        8],
+    'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/sbcmod.f90:563-585': [
+        "IF( kt == nit000 ) THEN",
+        ("ENDIF", 29),
+        23],
+    'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/dynldf.f90:81-92': [
+        "SELECT CASE ( nldf_dyn )",
+        ("END SELECT", 1),
+        12],
+    'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/domqco.f90:220-230': [
+        ("IF( PRESENT( pr3f ) ) THEN", 1),
+        ("END DO   ;   END DO", 3),
+        11],
+    'sbcmod.f90:553-560': [
+        "calculate utau and vtau on U,V-points",
+        ("vmask(ji,jj,1) ) * MAX( tmask(ji,jj,1), tmask(ji,jj+1,1) )", 2),
+        8],
+    'sbcmod.f90:563-585': [
+        "IF( kt == nit000 ) THEN",
+        ("ENDIF", 29),
+        23],
+    'stprk3.f90:325-328': [
+        "zrhs_u = zrhs_u + z1_2rho0",
+        "- rn_rfr   * vv(ji,jj,jk,Nbb)",
+        4],
+    'stprk3.f90:326,328': [
+        "- rn_rfr   * uu(ji,jj,jk,Nbb)",
+        "- rn_rfr   * vv(ji,jj,jk,Nbb)",
+        2],
+    'stprk3.f90:344-345': [
+        ("uu(ji,jj,jk,Naa) = uu(ji,jj,jk,Nbb)", 3),
+        ("vv(ji,jj,jk,Naa) = vv(ji,jj,jk,Nbb)", 3),
+        2],
+    'dynldf.f90:81-92': [
+        "SELECT CASE ( nldf_dyn )",
+        ("END SELECT", 1),
+        12],
+    'dynldf_lev.f90:130-150': [
+        ("DO jj = ntsj-( 0), ntej+(  0+1 ) ; DO ji = ntsi-( 0), ntei+(  0+1)", 1),
+        ("END DO   ;   END DO", 2),
+        21],
 }
 
 
