@@ -16,12 +16,13 @@ The executing ORCA2 record build reads the reference U/V face thicknesses at
 `ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/domzgr.f90:184-188`, with the
 compiled three-dimensional association at
 `ORCA2_OMIP_L4_R230FOLDTRP/BLD/inc/domzgr_substitute.h90:114-121`. It derives
-the U/V/F masks from `tmask` and exchanges them with sign `+1` at
-`ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dommsk.f90:206-214,228-232`.
+the U/V/F masks from `tmask` at
+`ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dommsk.f90:206-213` and exchanges
+them with sign `+1` at
+`ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dommsk.f90:228-232`.
 The executing T-pivot V rule writes the pivot and halo rows from the mirrored
 source rows at
-`ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/lbcnfd.f90:973-981`; the T/U/F
-cases are the adjacent `:945-972,982-990` statements.
+`ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/lbcnfd.f90:973-980`.
 
 legoESM now routes every WS-RK3 stage-geometry consumer through the existing
 resolved builder. A card carrying NEMO's raw mesh must carry all four of
