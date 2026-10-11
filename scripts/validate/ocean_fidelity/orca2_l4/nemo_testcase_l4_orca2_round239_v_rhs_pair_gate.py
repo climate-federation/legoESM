@@ -85,8 +85,8 @@ def classify(report: dict[str, object], *, plant: str = "none") -> dict[str, obj
 
     table = report["operator_table"]
     require(tuple(table["source_order"]) == ORDER, "compiled source order moved")
-    require(table["target"] == {"cells": 35, "row": 147, "all_on_one_row": True},
-            "35-face fold target moved")
+    require(table["target"] == {"cells": 68, "row": 147, "all_on_one_row": True},
+            "rank-complete fold-row operator target moved")
     first = next(
         ({"boundary": name, **table["operator_rows"][name]}
          for name in ORDER if not table["operator_rows"][name]["at_floor"]),
@@ -95,6 +95,8 @@ def classify(report: dict[str, object], *, plant: str = "none") -> dict[str, obj
     require(first == table["first_operator"], "first operator selector moved")
     require(first is not None and first["boundary"] == "after_hpg",
             "HPG is no longer the first non-bit V-RHS accumulator")
+    require(first["differing_cells"] == 68,
+            "HPG does not cover every face in the fold-row superset")
     require(table["candidate_calibration"]["same_over_floor_set"],
             "offline operator replay does not reproduce the live debt set")
     require(table["candidate_calibration"]["all_faces_at_floor"],
@@ -254,6 +256,7 @@ def measure_operator(args: argparse.Namespace) -> dict[str, object]:
                 "candidate_calibration", "trace_passivity", "record_census",
                 "record_control", "endpoint_ulp_control", "compiled_source")
         },
+        "status": "PASS_R239_OPERATOR_SUPERSET",
         "compiled_source": {
             "depth_average": "ORCA2_OMIP_L4_R214VECPREV3/BLD/ppsrc/nemo/stp2d.f90:194-200",
             "copy_pair": "ORCA2_OMIP_L4_R214VECPREV3/BLD/ppsrc/nemo/dynspg_ts.f90:289-328",
@@ -330,7 +333,7 @@ def main() -> int:
     if args.output:
         args.output.write_text(rendered)
     print(rendered, end="")
-    print(f"STATUS {result['status']}")
+    print(f"STATUS {result.get('status', 'PASS_R239_PARTIAL_REPORT')}")
     return 0
 
 

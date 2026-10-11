@@ -9,8 +9,8 @@ from scripts.validate.ocean_fidelity.orca2_l4 import (
 
 def _row():
     return {
-        "at_floor": False, "bit_exact": False, "differing_cells": 35,
-        "compared_cells": 35, "absolute_max": 1.0, "rms": 1.0,
+        "at_floor": False, "bit_exact": False, "differing_cells": 68,
+        "compared_cells": 68, "absolute_max": 1.0, "rms": 1.0,
         "argmax": [147, 1], "candidate_at_argmax": 1.0,
         "oracle_at_argmax": 0.0,
     }
@@ -32,7 +32,7 @@ def _report():
         },
         "operator_table": {
             "source_order": list(gate.ORDER),
-            "target": {"cells": 35, "row": 147, "all_on_one_row": True},
+            "target": {"cells": 68, "row": 147, "all_on_one_row": True},
             "operator_rows": rows, "first_operator": first,
             "candidate_calibration": {
                 "same_over_floor_set": True, "all_faces_at_floor": True,
