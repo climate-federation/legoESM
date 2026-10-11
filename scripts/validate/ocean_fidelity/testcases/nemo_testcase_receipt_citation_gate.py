@@ -1440,7 +1440,7 @@ CITATION_MAP = {
     'SWG_OMIP_L1/BLD/ppsrc/nemo/stprk3.f90:140,196,252': [
         'rDt   = rn_Dt / 3._wp',
         'rDt   = rn_Dt / 2._wp',
-        'rDt   = rn_Dt', 3],
+        ('rDt   = rn_Dt', 3), 3],
     'SWG_OMIP_L1/BLD/ppsrc/nemo/stprk3.f90:148-149': [
         'CALL dyn_adv( kstp, Nbb, Nbb, uu, vv, Nrhs )',
         'CALL dyn_vor( kstp,      Nbb, uu, vv, Nrhs )', 2],
@@ -1449,7 +1449,7 @@ CITATION_MAP = {
         '&            - rn_rfr   * vv(ji,jj,jk,Nbb)', 14],
     'SWG_OMIP_L1/BLD/ppsrc/nemo/stprk3.f90:281-283': [
         ('CALL ssh_nxt( kstp, Nbb, Nnn, ssh, Naa )', 2),
-        'CALL dom_qco_r3c( ssh(:,:,Naa), r3t(:,:,Naa), r3u(:,:,Naa), r3v(:,:,Naa), r3f(:,:) )', 3],
+        ('CALL dom_qco_r3c( ssh(:,:,Naa), r3t(:,:,Naa), r3u(:,:,Naa), r3v(:,:,Naa), r3f(:,:) )', 3), 3],
     # --- TSUNAMI lane round 1 (survey + card + acquisition) ---
     'tests/TSUNAMI/MY_SRC/usrdef_nam.F90:92-93': [
         'kpi = NINT( rn_domszx / rn_dx ) + 1',
@@ -3780,7 +3780,7 @@ CITATION_MAP = {
     # the pinned extent grows with it: 88 -> 97, same two symbols.
     'nemo_testcase_recipe.py:603-699': [
         'return LatLonCGridOceanConfig.from_flat(',
-        'gm_redi=None,', 97],
+        ('gm_redi=None,', 1), 97],
     # --- round 66: admitted content operands and Krhs/LDF walk ---
     'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stprk3_stg.f90:827-868': [
         ('DO jn = 1, jpts', 1),
