@@ -336,15 +336,25 @@ def classify_agreement(reverse: float, forward: float, finite_difference: float)
 
 
 def directional_derivatives(loss, base, direction, *, plant=False):
-    """Measure reverse, forward, and central-FD derivatives at one point."""
-    reverse_loss = (
-        (lambda value: loss(broken_vjp_identity(value))) if plant else loss)
-    _, pullback = jax.vjp(reverse_loss, base)
-    reverse = float(np.asarray(jnp.vdot(pullback(jnp.asarray(1.0))[0], direction)))
-    _, forward_value = jax.jvp(loss, (base,), (direction,))
+    """Measure the scalar line ``loss(base + alpha*direction)`` three ways.
+
+    Reverse mode with respect to ``alpha`` is exactly the full input VJP dotted
+    with ``direction``, but avoids materializing that 22x32x30 result.  The
+    direct unit test pins this equality and prevents this representation from
+    silently changing the requested directional derivative.
+    """
+    zero = jnp.asarray(0.0, dtype=base.dtype)
+
+    def line(alpha):
+        return loss(base + alpha * direction)
+
+    reverse_line = (
+        (lambda alpha: line(broken_vjp_identity(alpha))) if plant else line)
+    reverse = float(np.asarray(jax.grad(reverse_line)(zero)))
+    _, forward_value = jax.jvp(line, (zero,), (jnp.asarray(1.0, base.dtype),))
     forward = float(np.asarray(forward_value))
-    plus = float(np.asarray(loss(base + FD_STEP * direction)))
-    minus = float(np.asarray(loss(base - FD_STEP * direction)))
+    plus = float(np.asarray(line(jnp.asarray(FD_STEP, base.dtype))))
+    minus = float(np.asarray(line(jnp.asarray(-FD_STEP, base.dtype))))
     finite_difference = (plus - minus) / (2.0 * FD_STEP)
     return classify_agreement(reverse, forward, finite_difference)
 
@@ -462,11 +472,16 @@ def measure_resources(n_steps: int, schedule: str):
     require(states_bitwise_equal(truth_state, scheduled_truth),
             f"{schedule} schedule primal differs from per-step production")
     loss = make_loss(context, reference, n_steps, schedule=schedule)
-    base, _ = perturbations(context)
-    reverse = jax.value_and_grad(loss)
+    base, direction = perturbations(context)
+
+    def line(alpha):
+        return loss(base + alpha * direction)
+
+    reverse = jax.value_and_grad(line)
+    zero_alpha = jnp.asarray(0.0, dtype=base.dtype)
 
     cold_started = time.perf_counter()
-    cold_value, cold_gradient = reverse(base)
+    cold_value, cold_gradient = reverse(zero_alpha)
     jax.block_until_ready((cold_value, cold_gradient))
     cold_wall_s = time.perf_counter() - cold_started
 
@@ -478,7 +493,7 @@ def measure_resources(n_steps: int, schedule: str):
     sampler = PeakMemorySampler(backend)
     sampler.start()
     started = time.perf_counter()
-    value, gradient = reverse(base)
+    value, gradient = reverse(zero_alpha)
     jax.block_until_ready((value, gradient))
     wall_s = time.perf_counter() - started
     sampler.stop()

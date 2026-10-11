@@ -6,6 +6,7 @@ import importlib.util
 import sys
 from pathlib import Path
 
+import jax
 import jax.numpy as jnp
 import pytest
 
@@ -34,6 +35,19 @@ def test_broken_vjp_plant_flips_passing_row():
     assert control["status"] == "CONFIRMED"
     assert planted["status"] == "REFUTED"
     assert planted["reverse"] == pytest.approx(2.0 * planted["forward"])
+
+
+def test_scalar_line_reverse_equals_full_vjp_dot_direction():
+    base = jnp.asarray([0.2, -0.4, 0.7], dtype=jnp.float64)
+    direction = jnp.asarray([0.5, -0.1, 0.3], dtype=jnp.float64)
+
+    def loss(value):
+        return jnp.sum(jnp.sin(value) + value**3)
+
+    full_gradient = jnp.asarray(jax.grad(loss)(base))
+    expected = float(jnp.vdot(full_gradient, direction))
+    row = G.directional_derivatives(loss, base, direction)
+    assert row["reverse"] == pytest.approx(expected, rel=1.0e-13)
 
 
 @pytest.mark.parametrize(
