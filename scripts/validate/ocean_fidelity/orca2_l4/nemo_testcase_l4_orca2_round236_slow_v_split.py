@@ -103,7 +103,11 @@ def _source_depth(e3v, rhs, mask, reciprocal) -> np.ndarray:
     product = (np.asarray(e3v, np.float64) * np.asarray(rhs, np.float64))
     product = product * np.asarray(mask, np.float64)
     total = np.array(product[..., 0], copy=True)
-    for level in range(1, product.shape[-1] - 1):
+    # The reader has already removed NEMO's structural jpk slot, leaving the
+    # full 1:jpkm1 physical range. Include every remaining level; an older
+    # helper's second truncation stayed green only because its oracle bottom
+    # product was zero and fails on the candidate's partial bottom cells.
+    for level in range(1, product.shape[-1]):
         total = total + product[..., level]
     return total * np.asarray(reciprocal, np.float64)
 
