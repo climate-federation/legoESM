@@ -32,13 +32,27 @@ def test_reader_self_check_is_exact_and_score_plant_leaves_bar():
 
 @pytest.mark.skipif(not ROOT.is_dir(), reason="SWG probe not mounted")
 def test_real_independent_ladder_refuses_unmeasured_physics():
-    with pytest.raises(ValueError, match="ENS total-vorticity"):
+    with pytest.raises(ValueError, match="SWE three-stage"):
         lad.independent(ROOT, allow_dirty=True)
 
 
 def test_stage_entry_reader_refuses_absent_acquisition(tmp_path):
     with pytest.raises(Exception, match="missing"):
         lad.read_stage_entries(tmp_path)
+
+
+@pytest.mark.skipif(not lad.DEFAULT_STAGE_ROOT.is_dir(),
+                    reason="admitted SWG stage records not mounted")
+def test_ens_stage1_source_replay_is_exact_and_plant_leaves_bar():
+    clean = lad.ens_stage1(lad.DEFAULT_STAGE_ROOT, allow_dirty=True)
+    plant = lad.ens_stage1(
+        lad.DEFAULT_STAGE_ROOT, plant=True, allow_dirty=True)
+    assert clean["ens_u_bit_zero"] and clean["ens_v_bit_zero"]
+    assert clean["all_at_bar"] and clean["all_bit_identical"]
+    assert len(clean["per_kt"][0]["rows"]) == 13
+    assert not plant["all_at_bar"] and not plant["all_bit_identical"]
+    assert plant["first_kt_over_bar"] == 1
+    assert lad._exit_code(plant) == 1
 
 
 def test_rows_use_card_t_u_v_masks_and_distinguish_wet_from_dry():

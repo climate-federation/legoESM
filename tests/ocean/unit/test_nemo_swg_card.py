@@ -90,6 +90,11 @@ def test_card_shape_constants_and_initial_state(card):
     assert int(np.count_nonzero(card.recipe.land_mask)) == 6400
     assert card.recipe.z_coord.n_levels == 1
     assert card.recipe.model_config.constants.g == 0.02
+    assert card.recipe.model_config.vorticity_scheme == "ens_total"
+    assert card.recipe.model_config.coriolis_scheme == "explicit_ab2"
+    assert card.recipe.model_config.een_e3f_scheme == "nemo_avg4"
+    assert card.recipe.model_config.een_metric_weighting == "nemo"
+    assert card.recipe.model_config.een_q_boundary == "nemo_live"
     for field in (state.T, state.S, state.u, state.v, state.eta, state.uu_b, state.vv_b):
         assert not np.any(np.asarray(field.data))
 
@@ -200,8 +205,8 @@ def test_engine_read_defaults_match_the_resolved_oracle_echo():
 
 
 def test_execution_refuses_every_unbuilt_oracle_arm(card):
-    assert len(SWG_UNMEASURED) == 3
-    with pytest.raises(ValueError, match="ENS total-vorticity"):
+    assert len(SWG_UNMEASURED) == 2
+    with pytest.raises(ValueError, match="SWE three-stage"):
         validate_nemo_testcase_card_for_execution(card)
     for item in SWG_UNMEASURED:
         assert item in str(card.unmeasured_features)

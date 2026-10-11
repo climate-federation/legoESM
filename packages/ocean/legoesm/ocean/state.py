@@ -2197,6 +2197,9 @@ class LatLonCGridOceanConfig(NamedTuple):
     #     which is byte-identical to ENE-planetary on a uniform-metric grid.
     #     ``pv_flux_ene`` CAN fold planetary f into the same ``q=(f+ζ)/h`` operator
     #     (pass ``f_vtx``), but that is not the wired default. NEMO oracle fidelity.
+    #   "ens_total" — NEMO ``vor_ens`` Sadourny-1975 ENSTROPHY-conserving
+    #     form with total vorticity and the optional compiled relative-
+    #     vorticity mask.  The shipped SWG card selects this arm.
     #     Dispatched in ``_bc_pv_flux``; an unknown value raises ValueError there.
     vorticity_scheme: str = "al81"
     # Boundary-q convention for the AL81/EEN PV flux at land-adjacent vertices:

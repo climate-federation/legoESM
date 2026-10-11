@@ -4133,7 +4133,6 @@ SWG_DEVIATIONS: tuple[tuple[str, bool, bool, str], ...] = (
     ("key_xios", True, False, "conda-scalarmath reference toolchain"),
 )
 SWG_UNMEASURED: tuple[str, ...] = (
-    "ENS total-vorticity operator with ln_dynvor_msk",
     "SWE three-stage explicit free-surface RK3 program",
     "stage-3-only viscosity, wind stress, and before-velocity layer drag",
 )
@@ -4263,6 +4262,9 @@ def build_swg_card() -> NEMOTestcaseCard:
     config = base._replace(
         constants=cc, physics=physics, tracer_advection="none", K_h=0.0,
         implicit_vertical_mixing=False, A_v=0.0, K_v=0.0, gm_redi=None,
+        vorticity_scheme="ens_total", coriolis_scheme="explicit_ab2",
+        een_e3f_scheme="nemo_avg4", een_metric_weighting="nemo",
+        een_q_boundary="nemo_live",
         lateral_viscosity=base.lateral_viscosity._replace(A_h=500.0),
         bottom_drag=base.bottom_drag._replace(bottom_drag_r=0.0),
         meridionally_periodic=False,
@@ -4289,6 +4291,12 @@ def _validate_swg_card(card: NEMOTestcaseCard) -> None:
         raise ValueError("SWG-zco is closed in both horizontal directions")
     if card.recipe.model_config.constants.g != nl.rn_modified_grav_m_s2:
         raise ValueError("SWG-zco must carry rn_modified_grav as model g")
+    if (card.recipe.model_config.vorticity_scheme != "ens_total"
+            or card.recipe.model_config.coriolis_scheme != "explicit_ab2"
+            or card.recipe.model_config.een_e3f_scheme != "nemo_avg4"
+            or card.recipe.model_config.een_metric_weighting != "nemo"
+            or card.recipe.model_config.een_q_boundary != "nemo_live"):
+        raise ValueError("SWG-zco must select compiled vor_ens total vorticity")
     if card.recipe.model_config.lateral_viscosity.A_h != 500.0:
         raise ValueError("SWG-zco must state 0.5*rn_Uv*rn_Lv = 500 m2/s")
     wet = np.asarray(card.recipe.land_mask)

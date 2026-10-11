@@ -28,6 +28,10 @@ RESTART_FIELDS = (
 # sbcmod.f90:567-568 reads the restart records with cd_type='U'/'V'.
 U_FIELDS = frozenset(("un", "uu_n", "utau_b"))
 V_FIELDS = frozenset(("vn", "vv_n", "vtau_b"))
+STAGE_U_FIELDS = frozenset((
+    "u_k", "r3u_k", "u_before", "utau_before", "utau_now"))
+STAGE_V_FIELDS = frozenset((
+    "v_k", "r3v_k", "v_before", "vtau_before", "vtau_now"))
 
 
 def _stage_checker():
@@ -101,7 +105,9 @@ def _card_masks(card) -> dict[str, np.ndarray]:
 
 
 def _field_mask(field: str, masks: dict[str, np.ndarray]) -> np.ndarray:
-    return masks["U" if field in U_FIELDS else "V" if field in V_FIELDS else "T"]
+    return masks[
+        "U" if field in U_FIELDS | STAGE_U_FIELDS
+        else "V" if field in V_FIELDS | STAGE_V_FIELDS else "T"]
 
 
 def _row(name, ref, cand, mask):
@@ -193,9 +199,80 @@ def independent(root: Path, *, allow_dirty: bool = False) -> dict:
                        "per_kt": per_kt})
 
 
+def ens_stage1(stage_root: Path, *, plant: bool = False,
+               allow_dirty: bool = False) -> dict:
+    """Replay only the landed ENS source across the kt=1 stage-1 boundary.
+
+    The acquired stage-1 entry is motionless.  The compiled source calls
+    ``vor_ens`` in every stage, while wind, drag, and viscosity are stage-3
+    terms.  This arm therefore executes the shared production ENS dispatcher,
+    requires its two tendencies to be bit-zero, then scores the carried stage
+    fields against NEMO's recorded stage-2 entry.  It is deliberately not a
+    substitute for the still-unmeasured complete SWE RK3 stage program.
+    """
+    import jax
+    import jax.numpy as jnp
+    from legoesm.core.precision import PrecisionPolicy, set_policy
+    from legoesm.grids.operators_latlon_cgrid import compute_vertex_mask
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+        min_cell_to_uface, min_cell_to_vface)
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import _bc_pv_flux
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import build_swg_card
+    from legoesm.ocean.fidelity.provenance import allow_dirty_stamps, git_sha
+
+    allow_dirty_stamps(allow_dirty)
+    sha = git_sha(allow_dirty=allow_dirty)
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
+    require(jax.default_backend() == "cpu", "ladder must run on CPU")
+    card = build_swg_card()
+    require(card.recipe.model_config.vorticity_scheme == "ens_total",
+            "SWG card does not select ens_total")
+    entries = read_stage_entries(stage_root)
+    masks = _card_masks(card)
+
+    state, grid = card.recipe.initial_state, card.recipe.grid
+    h_k = jnp.asarray(card.recipe.z_coord.h_partial, dtype=jnp.float64)
+    h_u, h_v = min_cell_to_uface(h_k), min_cell_to_vface(h_k, grid)
+    u = jnp.asarray(state.u.data, dtype=jnp.float64)
+    v = jnp.asarray(state.v.data, dtype=jnp.float64)
+    u_mask = jnp.asarray(state.u_mask.data, dtype=jnp.float64)[..., None]
+    v_mask = jnp.asarray(state.v_mask.data, dtype=jnp.float64)[..., None]
+    t_mask = jnp.asarray(state.land_mask.data, dtype=jnp.float64)
+    _, _, ens_u, ens_v = _bc_pv_flux(
+        jnp.zeros_like(u), jnp.zeros_like(v), u, v, h_u, h_v, h_k,
+        u_mask, v_mask, t_mask, grid, "vector_invariant",
+        vertex_mask=compute_vertex_mask(t_mask, grid=grid),
+        vorticity_scheme="ens_total", een_q_boundary="nemo_live",
+        een_e3f_scheme="nemo_avg4", een_metric_weighting="nemo",
+        dz_ref=jnp.asarray(card.recipe.z_coord.dz_ref, dtype=jnp.float64),
+        metric_reciprocals=(
+            1.0 / jnp.asarray(grid.dx_u, dtype=jnp.float64),
+            1.0 / jnp.asarray(grid.dy_v, dtype=jnp.float64)),
+    )
+    ens_u_np, ens_v_np = np.asarray(ens_u), np.asarray(ens_v)
+    require(np.all(ens_u_np == 0.0) and np.all(ens_v_np == 0.0),
+            "motionless kt=1 stage-1 ENS tendency is not bit-zero")
+
+    before, after = entries[1, 1], entries[1, 2]
+    rows = []
+    for name in sorted(before):
+        cand = before[name].copy()
+        if plant and name == "u_k":
+            cand[tuple(np.argwhere(masks["U"])[0])] += 1.0e-3
+        rows.append(_row(f"ens_stage1.kt1.s1_to_s2.{name}", after[name], cand,
+                         _field_mask(name, masks)))
+    return _gate_rows({
+        "label": "ENS-STAGE1-SOURCE-REPLAY", "legoesm_git_sha": sha,
+        "bar": BAR, "plant": plant, "ens_u_bit_zero": True,
+        "ens_v_bit_zero": True, "per_kt": [{"kt": 1, "stage": 1, "rows": rows}],
+    })
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--arm", choices=("self-check", "independent", "stage-entry-read"),
+    p.add_argument("--arm", choices=(
+        "self-check", "independent", "stage-entry-read", "ens-stage1"),
                    required=True)
     p.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     p.add_argument("--stage-root", type=Path, default=DEFAULT_STAGE_ROOT)
@@ -208,10 +285,13 @@ def main(argv=None) -> int:
             out = self_check(a.root, plant=a.plant, allow_dirty=a.allow_dirty)
         elif a.arm == "independent":
             out = independent(a.root, allow_dirty=a.allow_dirty)
-        else:
+        elif a.arm == "stage-entry-read":
             entries = read_stage_entries(a.stage_root)
             out = {"label": "STAGE-ENTRY-READ", "records": len(entries),
                    "keys": [list(k) for k in entries]}
+        else:
+            out = ens_stage1(a.stage_root, plant=a.plant,
+                             allow_dirty=a.allow_dirty)
     except Exception as exc:  # noqa: BLE001 - fail-closed CLI boundary
         print(f"REFUSE: {exc}", file=sys.stderr)
         return 2

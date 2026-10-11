@@ -29,6 +29,7 @@ import jax.numpy as jnp
 
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     pv_flux_ene,
+    pv_flux_ens,
     pv_flux_al81_partial_cell,
     curl_vertex_cgrid,
     nemo_vor_ene_vorticity_cgrid,
@@ -111,6 +112,124 @@ def test_ene_exact_2pt_form():
         + q[j, i + 1, 0] * (uN[j - 1, i + 1, 0] + uN[j, i + 1, 0])
     )
     assert np.isclose(dv[j, i, 0], exp_dv, rtol=1e-12, atol=1e-12), (dv[j, i, 0], exp_dv)
+
+
+def test_ens_exact_total_vorticity_form_and_relative_only_mask():
+    """Compiled vor_ens: mean(q) times mean(transport), with -V sign."""
+    n_lat, n_lon, nlev = 6, 8, 1
+    rng = np.random.default_rng(21)
+    u = jnp.asarray(rng.standard_normal((n_lat, n_lon + 1, nlev)))
+    v = jnp.asarray(rng.standard_normal((n_lat + 1, n_lon, nlev)))
+    zeta = jnp.asarray(rng.standard_normal((n_lat + 1, n_lon + 1, nlev)))
+    f_vtx = jnp.asarray(rng.standard_normal((n_lat + 1, n_lon + 1)))
+    relmask = np.ones((n_lat + 1, n_lon + 1), dtype=np.float64)
+    relmask[2, 3] = 0.0
+    ones_vtx = jnp.ones_like(zeta)
+    ones_u = jnp.ones_like(u)
+    ones_v = jnp.ones_like(v)
+
+    du, dv = pv_flux_ens(
+        zeta, ones_vtx, ones_v, v, ones_u, u, ones_u, ones_v,
+        jnp.asarray(relmask), relative_vorticity_mask=jnp.asarray(relmask),
+        f_vtx=f_vtx,
+    )
+    du, dv = np.asarray(du), np.asarray(dv)
+    f_np = np.asarray(f_vtx)[..., None]
+    # Independent literal port of dynvor.f90:641-646: form CRV first, then
+    # subtract f, mask only that recovered relative part, and add f again.
+    total = np.add(f_np, np.asarray(zeta))
+    relative = np.subtract(total, f_np)
+    q = np.add(np.multiply(relative, relmask[..., None]), f_np)
+    u_np, v_np = np.asarray(u), np.asarray(v)
+
+    j, i = 2, 3
+    expected_u = 0.125 * (q[j, i, 0] + q[j + 1, i, 0]) * (
+        v_np[j, i - 1, 0] + v_np[j, i, 0]
+        + v_np[j + 1, i - 1, 0] + v_np[j + 1, i, 0]
+    )
+    assert du[j, i, 0] == expected_u
+
+    j, i = 2, 2
+    expected_v = -0.125 * (q[j, i, 0] + q[j, i + 1, 0]) * (
+        u_np[j - 1, i, 0] + u_np[j, i, 0]
+        + u_np[j - 1, i + 1, 0] + u_np[j, i + 1, 0]
+    )
+    assert dv[j, i, 0] == expected_v
+    # The zero relative mask must retain the planetary term at that vertex.
+    assert q[2, 3, 0] == np.asarray(f_vtx)[2, 3]
+
+
+def test_ens_is_jit_and_autodiff_safe_and_differs_from_ene():
+    state = _build_test_state(n_lat=8, n_lon=12, partial_cells=False, seed=23)
+    from legoesm.grids.latlon import ensure_geometry
+    grid = ensure_geometry(state["grid"])
+    f_vtx = jnp.ones(state["h_vtx"].shape[:2]) * 1.0e-4
+    relmask = state["vtx_mask"]
+
+    def operator(u):
+        zeta = nemo_vor_ene_vorticity_cgrid(u, state["v"], grid)
+        return pv_flux_ens(
+            zeta, state["h_vtx"], state["h_v"], state["v"],
+            state["h_u"], u, state["u_mask_3d"], state["v_mask_3d"],
+            state["vtx_mask"], relative_vorticity_mask=relmask,
+            f_vtx=f_vtx,
+        )
+
+    eager = operator(state["u"])
+    compiled = jax.jit(operator)(state["u"])
+    for left, right in zip(eager, compiled, strict=True):
+        assert np.allclose(
+            np.asarray(left), np.asarray(right), rtol=1.0e-14, atol=0.0)
+
+    def loss(u):
+        du, dv = operator(u)
+        return jnp.sum(du * du) + jnp.sum(dv * dv)
+
+    grad = jax.jit(jax.grad(loss))(state["u"])
+    assert np.all(np.isfinite(np.asarray(grad)))
+
+    zeta = curl_vertex_cgrid(state["u"], state["v"], state["grid"])
+    ene = pv_flux_ene(
+        zeta, state["h_vtx"], state["h_v"], state["v"], state["h_u"],
+        state["u"], state["u_mask_3d"], state["v_mask_3d"],
+        state["vtx_mask"], f_vtx=f_vtx,
+    )
+    assert any(not np.array_equal(np.asarray(a), np.asarray(b))
+               for a, b in zip(eager, ene, strict=True))
+
+
+def test_ens_total_production_dispatch_matches_direct_operator():
+    """The shared dynamics dispatcher selects ENS, not an ENE/EEN alias."""
+    from legoesm.grids.latlon import ensure_geometry
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import _bc_pv_flux
+
+    state = _build_test_state(n_lat=8, n_lon=12, partial_cells=False, seed=29)
+    grid = ensure_geometry(state["grid"])
+    f_vtx = jnp.full(state["h_vtx"].shape[:2], 1.0e-4)
+    reciprocals = (1.0 / grid.dx_u, 1.0 / grid.dy_v)
+    zeros_u, zeros_v = jnp.zeros_like(state["u"]), jnp.zeros_like(state["v"])
+    _, _, dispatched_u, dispatched_v = _bc_pv_flux(
+        zeros_u, zeros_v, state["u"], state["v"],
+        state["h_u"], state["h_v"], state["h_T"],
+        state["u_mask_3d"], state["v_mask_3d"], None, grid,
+        "vector_invariant", vertex_mask=state["vtx_mask"],
+        vorticity_scheme="ens_total", een_q_boundary="nemo_live",
+        een_e3f_scheme="nemo_avg4", een_metric_weighting="nemo",
+        dz_ref=jnp.asarray([4000.0]),
+        h_vtx_override=state["h_vtx"], f_vtx_override=f_vtx,
+        metric_reciprocals=reciprocals,
+    )
+    zeta = nemo_vor_ene_vorticity_cgrid(state["u"], state["v"], grid)
+    direct_u, direct_v = pv_flux_ens(
+        zeta, state["h_vtx"], state["h_v"], state["v"], state["h_u"],
+        state["u"], state["u_mask_3d"], state["v_mask_3d"],
+        state["vtx_mask"], relative_vorticity_mask=state["vtx_mask"],
+        f_vtx=f_vtx, q_boundary="nemo_live",
+        metric_widths=(grid.dx_u, grid.dx_v, grid.dy_u, grid.dy_v),
+        metric_reciprocals=reciprocals,
+    )
+    np.testing.assert_array_equal(np.asarray(dispatched_u), np.asarray(direct_u))
+    np.testing.assert_array_equal(np.asarray(dispatched_v), np.asarray(direct_v))
 
 
 def test_ene_energy_conservation_flat_bottom():

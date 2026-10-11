@@ -4562,6 +4562,7 @@ def pv_flux_ene(
     return_operands: bool = False,
     metric_widths: tuple | None = None,
     metric_reciprocals: tuple | None = None,
+    total_vorticity_override: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray] | tuple[
     jnp.ndarray, jnp.ndarray, tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]
 ]:
@@ -4610,6 +4611,11 @@ def pv_flux_ene(
         planetary Coriolis and the relative-vorticity flux.  When ``None``,
         the relative-only form ``q = ζ/h`` (NEMO ``np_RVO``), for isolating
         the ``rvo`` trend.
+    total_vorticity_override : array or None
+        Internal shared-operand seam for a caller that has already evaluated
+        NEMO's source-associated total-vorticity statements.  ENS uses it for
+        the ``(zwz-ff_f)*fmask+ff_f`` statement; ordinary ENE callers leave it
+        unset and retain their historical arithmetic.
     Other parameters : identical to :func:`pv_flux_al81_partial_cell`.
 
     Returns
@@ -4622,7 +4628,10 @@ def pv_flux_ene(
     # f is added BEFORE the /h division (matching NEMO: zwz = ff_f + ζ,
     # then zwz /= e3f) so the planetary term also gets the F-point
     # thickness weighting — the two are one operator, not two.
-    total_vort = zeta if f_vtx is None else (zeta + f_vtx[..., jnp.newaxis])
+    total_vort = (
+        total_vorticity_override
+        if total_vorticity_override is not None
+        else zeta if f_vtx is None else (zeta + f_vtx[..., jnp.newaxis]))
     if metric_widths is None:
         q = total_vort / jnp.maximum(h_vtx, eps_h)
     else:
@@ -4737,6 +4746,112 @@ def pv_flux_ene(
         # production callers retain the historical two-array return.
         return diag_vortcor_u, diag_vortcor_v, (q, F_u, F_v)
     return diag_vortcor_u, diag_vortcor_v
+
+
+def pv_flux_ens(
+    zeta: jnp.ndarray,
+    h_vtx: jnp.ndarray,
+    h_v: jnp.ndarray,
+    v: jnp.ndarray,
+    h_u: jnp.ndarray,
+    u: jnp.ndarray,
+    u_mask_3d: jnp.ndarray,
+    v_mask_3d: jnp.ndarray,
+    vtx_mask: jnp.ndarray,
+    *,
+    relative_vorticity_mask: jnp.ndarray,
+    f_vtx: jnp.ndarray,
+    eps_h: float = 1.0e-10,
+    q_boundary: str = "nemo_live",
+    metric_widths: tuple | None = None,
+    metric_reciprocals: tuple | None = None,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """NEMO ``vor_ens`` total-vorticity Sadourny enstrophy stencil.
+
+    This is the compiled ``np_CRV`` arm used by the shipped SWG deck.  It
+    differs from :func:`pv_flux_ene` only after the shared potential-vorticity
+    and transport operands have been built: ENS multiplies the mean of the two
+    adjacent potential-vorticity values by the mean of all four transverse
+    transports (``dynvor.f90:639-675``), whereas ENE pairs each potential-
+    vorticity value with the two transports on its own side.
+
+    ``ln_dynvor_msk`` masks the relative vorticity before ``ff_f`` is added;
+    requiring that mask as an argument prevents callers from accidentally
+    masking the planetary term as well.  The shared ENE operand builder is
+    deliberately reused so NEMO's metric, QCO, coast, and source-rounding
+    statements have one implementation.
+
+    Sign convention: positive total vorticity rotates meridional transport
+    into positive zonal acceleration and zonal transport into negative
+    meridional acceleration, matching ``du/dt=+qFv`` and ``dv/dt=-qFu``.
+    """
+    if f_vtx is None:
+        raise ValueError("pv_flux_ens requires total vorticity at NEMO F points")
+    mask = jnp.asarray(relative_vorticity_mask)
+    if mask.ndim == zeta.ndim - 1:
+        mask = mask[..., jnp.newaxis]
+    if mask.shape != zeta.shape:
+        raise ValueError(
+            "relative_vorticity_mask must match zeta (with an optional "
+            f"broadcast level), got {mask.shape} and {zeta.shape}"
+        )
+
+    f_3d = jnp.asarray(f_vtx)[..., jnp.newaxis]
+    # dynvor.f90:641-646 writes CRV as ``f + zeta`` first, then recovers and
+    # masks only its relative part as ``(zwz-f)*fmask + f``.  Keeping both
+    # source statements matters when ``f`` and ``zeta`` differ greatly.
+    total_vort = nemo_source_round(f_3d + zeta)
+    total_vort = nemo_source_round(
+        nemo_source_round(nemo_source_round(total_vort - f_3d) * mask)
+        + f_3d)
+    _, _, (q, F_u, F_v) = pv_flux_ene(
+        zeta, h_vtx, h_v, v, h_u, u, u_mask_3d, v_mask_3d,
+        vtx_mask, eps_h=eps_h, q_boundary=q_boundary,
+        return_operands=True, metric_widths=metric_widths,
+        metric_reciprocals=metric_reciprocals,
+        total_vorticity_override=total_vort,
+    )
+
+    q_s = q[:-1]
+    q_n = q[1:]
+    fv_s = F_v[:-1]
+    fv_n = F_v[1:]
+    fv_sw_native = jnp.roll(fv_s, 1, axis=1)
+    fv_nw_native = jnp.roll(fv_n, 1, axis=1)
+    fv_se = jnp.concatenate([fv_s, fv_s[:, :1]], axis=1)
+    fv_ne = jnp.concatenate([fv_n, fv_n[:, :1]], axis=1)
+    fv_sw = jnp.concatenate(
+        [fv_sw_native, fv_sw_native[:, :1]], axis=1)
+    fv_nw = jnp.concatenate(
+        [fv_nw_native, fv_nw_native[:, :1]], axis=1)
+
+    from legoesm.grids.halo_latlon import pad_with_pole_bc_lat_multi
+    (fu_pad,) = pad_with_pole_bc_lat_multi((F_u,), halo=1)
+    fu_s = fu_pad[:-1]
+    fu_n = fu_pad[1:]
+    fu_sw, fu_se_v = fu_s[:, :-1], fu_s[:, 1:]
+    fu_nw, fu_ne_v = fu_n[:, :-1], fu_n[:, 1:]
+    q_w, q_e = q[:, :-1], q[:, 1:]
+
+    sr = nemo_source_round
+    sum_v = sr(sr(fv_sw + fv_se) + sr(fv_nw + fv_ne))
+    sum_u = sr(sr(fu_sw + fu_nw) + sr(fu_se_v + fu_ne_v))
+    if metric_reciprocals is None:
+        if metric_widths is None:
+            r1_e1u = jnp.ones(u.shape[:2], dtype=u.dtype)
+            r1_e2v = jnp.ones(v.shape[:2], dtype=v.dtype)
+        else:
+            e1u, _, _, e2v = metric_widths
+            r1_e1u = sr(1.0 / jnp.asarray(e1u))
+            r1_e2v = sr(1.0 / jnp.asarray(e2v))
+    else:
+        r1_e1u, r1_e2v = metric_reciprocals
+
+    zuav = sr(sr(0.125 * jnp.asarray(r1_e1u)[..., None]) * sum_v)
+    zvau = -sr(sr(0.125 * jnp.asarray(r1_e2v)[..., None]) * sum_u)
+    du = sr(zuav * sr(q_s + q_n))
+    dv = sr(zvau * sr(q_w + q_e))
+    return du, dv
 
 
 def pv_flux_al81_partial_cell(
