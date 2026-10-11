@@ -133,11 +133,12 @@ plant targets a rendered citation and exits red as required.
 
 ## Independent review
 
-Independent review is attempted after the final receipt and citation map are
-committed. Its exact verdict is recorded in
-`round242/independent_review.log`; if Codex cannot initialize under the
-read-only sandbox, the round records “independent review unavailable
-in-sandbox” rather than inventing a review.
+Independent review was attempted after the receipt and citation map were
+committed. `codex exec --sandbox read-only` failed before reading the diff:
+`failed to initialize in-process app-server client: Read-only file system
+(os error 30)`. **Independent review unavailable in-sandbox.** The exact
+output is retained in `round242/independent_review.log`; no review verdict is
+invented.
 
 ## OPEN
 
