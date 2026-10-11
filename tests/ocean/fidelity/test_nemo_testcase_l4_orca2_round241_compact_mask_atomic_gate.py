@@ -27,6 +27,17 @@ def _report():
     }}
 
 
+def _atomic_report():
+    row = {
+        "last_completed_kt": 10,
+        "kt1_stage1": {"S_max_abs": 0.001, "T_max_abs": 0.001},
+    }
+    return {"ladders": {
+        "independent": copy.deepcopy(row),
+        "given_nemo_entry": copy.deepcopy(row),
+    }}
+
+
 def test_private_arm_defaults_off():
     assert _NEMOWSRK3TestHooks().preserve_literal_hpg_vmask is False
 
@@ -36,7 +47,18 @@ def test_classifier_requires_exact_rhs_closure():
         "PASS_R241_LITERAL_HPG_RHS_CLOSED")
 
 
+def test_atomic_classifier_requires_kt8_and_preregistered_limits():
+    assert gate.classify_atomic(_atomic_report())["status"] == (
+        "PASS_R241_ATOMIC_UNIT_THROUGH_KT8")
+
+
 @pytest.mark.parametrize("plant", gate.PLANTS[1:])
 def test_every_plant_refuses(plant):
     with pytest.raises(gate.GateError):
         gate.classify_rhs(_report(), plant=plant)
+
+
+@pytest.mark.parametrize("plant", gate.ATOMIC_PLANTS[1:])
+def test_every_atomic_plant_refuses(plant):
+    with pytest.raises(gate.GateError):
+        gate.classify_atomic(_atomic_report(), plant=plant)
