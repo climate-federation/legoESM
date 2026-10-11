@@ -47,8 +47,8 @@ round-1 card.
 ## Measurement
 
 The preregistration is commit
-`3f12f91347e9aa31b86df70aa8b109337450e969`; the measured implementation is
-commit `fd10b94998f90e951fe696047ca3c45c00332a9c`.  The admitted round-1
+`3f12f91347e9aa31b86df70aa8b109337450e969`; the clean measured implementation
+is commit `1816a3724f218c8ba696c3bb73a10cfaed6ad224`.  The admitted round-1
 acquisition supplied all 30 ordered stage-entry frames and had already passed
 its passive-output check.
 
@@ -82,12 +82,12 @@ Frozen prediction results:
    scores it against NEMO's recorded stage-2 entry.  All 13 stored groups are
    bit-identical and AT-BAR, not only the seven frozen state/ratio groups.
    `ens_stage1.json` records `first_kt_over_bar=null` and commit
-   `fd10b94998f90e951fe696047ca3c45c00332a9c`; its SHA-256 is
-   `0c9a66627a35253edabc5d633d3ca71b10ca7da95a7d53bbdd3b89a2a328fbcc`.
+   `1816a3724f218c8ba696c3bb73a10cfaed6ad224`; its SHA-256 is
+   `c0c121878feb6e24a1425ab3955d5f3caccafea30b9a60d5de9a81efbf07632b`.
    The wet-U plant exits 1, reports DEBT at kt=1, one unequal cell `[1,1]`, and
    `max_abs=0.001`; its JSON SHA-256 is
-   `49d7c8b8a4140719fa4e1d94b0d5ce40574bf21007667807e94a076ac9743fb6`.
-4. **CONFIRMED.**  The 159-test focused implementation battery passed before
+   `e36edd81b606e4d773b3830a2c3c6b3fddc0cc199cfb06af4b054981517a8293`.
+4. **CONFIRMED.**  The 160-test focused implementation battery passed before
    the measurement commit.  The post-commit certified-card battery reports 117
    passes and the same three pre-existing stale digest assertions for GYRE,
    LOCK_EXCHANGE, and OVERFLOW: actual digests `f02d2f42a570f413`,
