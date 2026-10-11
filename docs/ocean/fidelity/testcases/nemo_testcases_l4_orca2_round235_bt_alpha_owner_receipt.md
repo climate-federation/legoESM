@@ -121,10 +121,21 @@ without the user's decision. The statement is therefore named but not landed.
 
 ## Verification
 
-- focused round-235 unit tests: pending final battery
-- citation gate, default receipt and this receipt: pending final battery
-- citation rigid-shift plant: pending final battery
-- independent read-only diff review: pending
+- focused round-235 and citation tests: **24 passed** in 4.20 s
+- citation gate, default receipt: **PASS**, zero unmapped citations
+- citation gate, this receipt: **PASS**, zero unmapped citations
+- citation rigid-shift plant on the interpolation statement: **FIRED** (exit 1)
+- `tests/ocean/fidelity -n 12`: reached 99%; 3,131 passed and 7 skipped
+  before the final compilation-heavy control was split out. Four isolated
+  reds are pre-existing and outside this round's diff: the certified-year
+  harness-stamp mismatch, the allow-dirty scope ratchet, the worktree-stamp
+  ratchet, and SI3 scalar-math `MY_SRC` provenance.
+- the split final control
+  `test_nemo_testcase_phase3_stage_sweep_gate.py::test_prediction_plant_is_fail_closed`:
+  **1 passed** in 1,111.99 s
+- independent review: **independent review unavailable in-sandbox**;
+  `codex exec --sandbox read-only` could not initialize because its app-server
+  client attempted a write on the read-only filesystem
 - final production-package diff from base: empty
 
 ## OPEN
