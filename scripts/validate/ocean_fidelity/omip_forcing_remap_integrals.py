@@ -6,7 +6,9 @@ bilinear point sampling against a first-order conservative reference on the
 same footprint (the existing ``make_regular_to_curvilinear_weights``: tile the
 source, assign each sub-area to the nearest target centre).  On a GLOBAL
 target the conservative integral must reproduce the source global integral --
-that is the instrument self-check, printed as ``cons-vs-src``.
+that is the instrument self-check, printed as ``cons-vs-src``.  On the
+ocean-only FESOM mesh the reference also absorbs land source area at coastal
+nodes, so FESOM rows are indicative only.
 
 Net shortwave without sea ice is ``sw_down * (1 - constant albedo)``, so its
 relative error equals sw_down's.
@@ -201,7 +203,11 @@ def main(argv=None):
         fm = load_mesh(a.fesom_mesh_dir)
         geo = np.asarray(fm.geo_coord_nod2D, dtype=np.float64)
         farea = np.asarray(fm.areasvol[:, 0], dtype=np.float64)
-        # FESOM mesh is ocean-only: no global footprint, so no self-check.
+        # FESOM mesh is ocean-only: no global footprint, so no self-check,
+        # AND the reference is not a strict same-footprint integral -- source
+        # sub-areas over land are assigned to the nearest (coastal) node, so
+        # coastal reference values include land forcing.  The FESOM rows are
+        # therefore indicative; the MPAS/tripole rows carry the claim.
         _report("fesom", forcing, np.degrees(geo[:, 1]),
                 np.degrees(geo[:, 0]), farea,
                 {"ocean": np.ones(farea.size, bool)})

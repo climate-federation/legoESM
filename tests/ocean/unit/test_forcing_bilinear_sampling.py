@@ -139,7 +139,7 @@ def test_every_point_grid_uses_the_tripole_bilinear_sample(grid_type):
                           "lw_down", "precip")}
     forc = types.SimpleNamespace(lat=lat, lon=lon, **chans)
     p_lat = rng.uniform(-85.0, 85.0, 64)
-    p_lon = rng.uniform(0.0, 360.0, 64)
+    p_lon = rng.uniform(-180.0, 180.0, 64)   # FESOM-style signed lon
     rlat, rlon = jnp.asarray(np.deg2rad(p_lat)), jnp.asarray(np.deg2rad(p_lon))
     if grid_type == "mpas":
         grid = types.SimpleNamespace(latCell=rlat, lonCell=rlon)
