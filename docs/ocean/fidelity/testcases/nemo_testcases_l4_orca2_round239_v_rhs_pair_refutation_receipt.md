@@ -97,7 +97,32 @@ all refuse. Binding SHA-256 values are:
 | R239-P3 | **NOT ACTIVATED**: P2 is false. |
 | R239-P4 | **REFUTED PREREQUISITE**: closure threshold absent. |
 | R239-P5 | **NOT ACTIVATED**: no candidate qualified for trajectory gates. |
-| R239-P6 | **DOCUMENTARY ONLY**: focused/citation/battery/review results below; no package landing. |
+| R239-P6 | **CONFIRMED DOCUMENTARY**: focused and citation gates pass; the full battery has only the four registered reds before its one unclassified slow tail test; independent review is unavailable in-sandbox. |
+
+## Verification
+
+- The round-239 focused tests, the round-236/179 regression tests, and the
+  citation-gate tests pass `37/37`.
+- The round receipt and the default cumulative receipt both pass the citation
+  gate with zero unmapped citations and zero failures. The rigid citation
+  plant refuses as required.
+- The single `tests/ocean/fidelity -n 12` battery reached `99%`: `3,147`
+  passed, `7` skipped, and its only four failures were the registered GYRE
+  round-129 record-stamp, SI3 scalar-math provenance, escape-scope, and
+  worktree-stamp reds. The final
+  `test_prediction_plant_is_fail_closed` did not finish after fifteen silent
+  minutes in the battery or after fifteen minutes in exact-ID isolation, so it
+  is explicitly **UNCLASSIFIED**, not called green. The preserved battery and
+  isolated-tail logs have SHA-256
+  `511c11b9c2cb2817de05855813688132588fe4b72dd87a21f850df73d375724b`
+  and `69e9a64c7d702de990b4c30a4818750a1a34d952f52a55925ec805bfd981f58c`.
+- A separate `codex exec --sandbox read-only` review was attempted. It could
+  not initialize its in-process client because the sandbox refused the
+  required read-only filesystem alias; independent review is unavailable
+  in-sandbox.
+- The production-package diff against `1c0b948a3` is empty. Consequently no
+  model statement, card, GYRE trajectory, or sea-ice selector moved in this
+  HELD measurement round.
 
 ## OPEN
 
