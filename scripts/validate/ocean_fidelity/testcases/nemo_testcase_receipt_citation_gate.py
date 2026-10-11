@@ -145,6 +145,14 @@ FILES = {
         _SWG_P3_COMPILED / "domqco.f90"),
     "SWG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90": (
         _SWG_P3_COMPILED / "stprk3.f90"),
+    "SWG_OMIP_L1_P3/BLD/ppsrc/nemo/dynldf_lev.f90": (
+        _SWG_P3_COMPILED / "dynldf_lev.f90"),
+    # The frozen round-3 preregistration used these shortened names.  Pin
+    # them to the admitted P3 build rather than silently resolving another
+    # same-basename source tree.
+    "dynadv.f90": _SWG_P3_COMPILED / "dynadv.f90",
+    "domqco.f90": _SWG_P3_COMPILED / "domqco.f90",
+    "stprk3.f90": _SWG_P3_COMPILED / "stprk3.f90",
     "stprk3_stg.F90": _OCE / "stprk3_stg.F90",
     # round 202: the PRODUCTION GYRE build, so a GYRE resolved statement
     # cannot bind to one of the _SM_ probe builds.
@@ -2990,10 +2998,10 @@ CITATION_MAP = {
         'SELECT CASE( nn_e3f_typ )',
         'WHERE( e3f_0vor(:,:,:) == 0._wp )   e3f_0vor(:,:,:) = e3f_3d(:,:,:)',
         26],
-    'vertical.py:457-555': [
+    'vertical.py:457-565': [
         'def nemo_qco_live_vorticity_e3f_cgrid(',
         ('return e3f_cgrid', 2),
-        99],
+        109],
     'ocean_model_latlon_cgrid.py:5779-5781': [
         '_ws_uses_nemo_ldf_e3 = (',
         'and _cfg_b.lateral_viscosity_e3_weighting == "nemo_e3")', 3],
@@ -4735,7 +4743,7 @@ CITATION_MAP = {
         '-7.e+3_wp/e3w(ji,jj,jk,Kmm)* ABS( zai )  )',
         'zbj = MIN( zbw , -100._wp* ABS( zaj ) , '
         '-7.e+3_wp/e3w(ji,jj,jk,Kmm)* ABS( zaj )  )', 2],
-    'vertical.py:1915': ('def compute_ocean_jacobian(', 1),
+    'vertical.py:1925': ('def compute_ocean_jacobian(', 1),
     'ocean_model_latlon_cgrid.py:6513-6517': [
         'transport_velocity = (', ('* _ws_stage_v_mask,', 1), 5],
     'ocean_model_latlon_cgrid.py:8198': ('_g2 = _nemo_ws_stage_transport(', 1),
@@ -5130,7 +5138,7 @@ CITATION_MAP = {
     'domqco.F90:219-222': [('pr3u(ji,jj) = 0.5_wp * (  e1e2t(ji  ,jj) * pssh(ji  ,jj)  &', 2), ('&                    + e1e2t(ji,jj+1) * pssh(ji,jj+1)  ) * r1_hv_0(ji,jj) * r1_e1e2v(ji,jj)', 2), 4],
     # ROUND 34: decision 17 added twelve lines above this one.
     # Round 34 inserted the ten-line carried-hf_0 selector before this site.
-    'vertical.py:773': 'def nemo_qco_live_face_geometry_cgrid(',
+    'vertical.py:783': 'def nemo_qco_live_face_geometry_cgrid(',
     # --- round 31: the walk into dyn_zdf, and the stamp ---
     'dynzdf.F90:97': 'zDt_2 = rDt * 0.5_wp',
     'dynzdf.F90:148': 'IF( ln_drgimp .AND. ln_dynspg_ts ) THEN',
@@ -6218,6 +6226,44 @@ CITATION_MAP = {
         "CALL dyn_ldf( kstp, Nbb, Nnn, uu, vv, Nrhs )  ! lateral mixing",
         ("CALL dom_qco_r3c( ssh(:,:,Naa), r3t(:,:,Naa), r3u(:,:,Naa), r3v(:,:,Naa), r3f(:,:) )", 3),
         22],
+    'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:141-367': [
+        "rDt   = rn_Dt / 3._wp",
+        ("Naa = Nrhs", 3),
+        227],
+    'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/dynldf_lev.f90:130-150': [
+        ("DO jj = ntsj-( 0), ntej+(  0+1 ) ; DO ji = ntsi-( 0), ntei+(  0+1)", 1),
+        ("END DO   ;   END DO", 2),
+        21],
+    'dynadv.f90:134-139': [
+        ("SELECT CASE( n_dynadv )", 1),
+        ("         !", 13),
+        6],
+    'dynadv.f90:134-138': [
+        ("SELECT CASE( n_dynadv )", 1),
+        "CALL dyn_zad",
+        5],
+    'domqco.f90:207-234': [
+        ("DO jj = ntsj-( nn_hls), ntej+(  nn_hls ) ; DO ji = ntsi-( nn_hls), ntei+(  nn_hls)", 1),
+        ("END SUBROUTINE dom_qco_r3c", 1),
+        28],
+    'domqco.f90:208-234': [
+        ("pr3t(ji,jj) = pssh(ji,jj) * r1_ht_0(ji,jj)", 1),
+        ("END SUBROUTINE dom_qco_r3c", 1),
+        27],
+    'stprk3.f90:170-176': [
+        ("DO jk =  1,  jpkm1  ; DO jj = ntsj-(  0), ntej+(   0) ; DO ji = ntsi-( 0), ntei+(   0)", 1),
+        ("vv(ji,jj,jk,Nrhs) = vv(ji,jj,jk,Nrhs) + zrhs_v", 1),
+        7],
+    'stprk3.f90:172-176': [
+        ("zrhs_u =        - grav", 1),
+        ("vv(ji,jj,jk,Nrhs) = vv(ji,jj,jk,Nrhs) + zrhs_v", 1),
+        5],
+    'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:317-317': (
+        "CALL dyn_ldf( kstp, Nbb, Nnn, uu, vv, Nrhs )  ! lateral mixing", 1),
+    'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:319-332': [
+        "z1_2rho0 = 0.5_wp * r1_rho0",
+        ("END DO   ;   END DO   ;   END DO", 7),
+        14],
 }
 
 
