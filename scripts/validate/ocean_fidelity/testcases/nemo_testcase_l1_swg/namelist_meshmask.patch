@@ -1,0 +1,5 @@
+--- namelist_cfg
++++ namelist_cfg
+@@ -70 +70 @@
+-   ln_meshmask = .false.   !  =T create a mesh file
++   ln_meshmask = .true.    !  acquisition: geometry receipt
