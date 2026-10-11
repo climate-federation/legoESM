@@ -38,6 +38,9 @@ PLANTS = (
     "none", "label-coverage", "direct-closure", "completion", "vn-adv",
     "zfv", "exact-row",
 )
+HELD_PLANTS = (
+    "none", "label-coverage", "direct-closure", "boundary", "vmask", "zfv",
+)
 LABELS = ("independent", "given_nemo_entry")
 
 
@@ -169,6 +172,123 @@ def classify(report: dict[str, object], *, plant: str = "none") -> dict[str, obj
     return report
 
 
+def classify_held(direct: dict[str, dict], atomic_logs: dict[str, str],
+                  operands: dict[str, dict], *, plant: str = "none") -> dict:
+    """Fail closed on the preregistered kt=8 refusal and its first open owner."""
+
+    require(plant in HELD_PLANTS, f"unknown held plant {plant!r}")
+    direct = copy.deepcopy(direct)
+    atomic_logs = copy.deepcopy(atomic_logs)
+    operands = copy.deepcopy(operands)
+    if plant == "label-coverage":
+        operands.pop("given_nemo_entry")
+    elif plant == "direct-closure":
+        direct["independent"]["rows"][0]["pair"]["metric_transport_v"][
+            "complete"]["unequal"] = 1
+    elif plant == "boundary":
+        atomic_logs["independent"] = atomic_logs["independent"].replace(
+            "raw-mesh e3w_int must contain only finite values > 0",
+            "different refusal")
+    elif plant == "vmask":
+        operands["independent"]["operand_rows"]["vmask"]["unequal"] = 0
+    elif plant == "zfv":
+        operands["independent"]["zFv_signature"]["unequal"] = 0
+
+    for section, values in (
+        ("direct", direct), ("atomic logs", atomic_logs), ("operands", operands)
+    ):
+        require(set(values) == set(LABELS),
+                f"{section}: both claim labels are required")
+
+    direct_table = {}
+    boundary_table = {}
+    operand_table = {}
+    refusal = "raw-mesh e3w_int must contain only finite values > 0"
+    for label in LABELS:
+        report = direct[label]
+        require(report["status"] == "PASS_R245_V_DEPTH_OPERAND_SPLIT",
+                f"{label}: direct report status moved")
+        direct_rows = []
+        for row in report["rows"]:
+            counts = {
+                name: _complete(value)["unequal"]
+                for name, value in row["pair"].items()
+            }
+            require(all(value == 0 for value in counts.values()),
+                    f"{label}: direct pair closure moved at substep {row['substep']}")
+            direct_rows.append({"substep": row["substep"], **counts})
+        direct_table[label] = direct_rows
+
+        log = atomic_logs[label]
+        for kt in range(1, 8):
+            require(f"PROGRESS round241 {label} kt={kt}" in log,
+                    f"{label}: missing completed kt={kt}")
+        require(f"PROGRESS round241 {label} kt=8" not in log,
+                f"{label}: candidate unexpectedly completed kt=8")
+        require(refusal in log and "STATUS REFUSE none:" in log,
+                f"{label}: registered live-W refusal moved")
+        boundary_table[label] = {
+            "last_completed_kt": 7,
+            "first_refusing_kt": 8,
+            "message": refusal,
+        }
+
+        report = operands[label]
+        require(report["status"] == "PASS_R232_V_TRANSPORT_OPERAND_SPLIT",
+                f"{label}: five-operand report status moved")
+        require(all(report["passivity"].values()),
+                f"{label}: operand observer moved completed state")
+        require(all(row["unequal"] == 0
+                    for row in report["replay_checks"].values()),
+                f"{label}: offline replay missed the executable")
+        rows = report["operand_rows"]
+        for name in ("e1v", "e3v", "vv", "zvb"):
+            require(rows[name]["unequal"] == 0,
+                    f"{label}: upstream operand {name} is no longer exact")
+        require(rows["vmask"]["unequal"] == 668
+                and rows["vmask"]["max_abs"] == 1.0,
+                f"{label}: first stage-mask debt moved")
+        correction = report["correction_input_rows"]
+        require(all(row["unequal"] == 0 for row in correction.values()),
+                f"{label}: external correction is no longer exact")
+        require(report["zFv_signature"]["unequal"] == 668,
+                f"{label}: zFv debt moved")
+        require(report["first_unequal_operand"] == "vmask",
+                f"{label}: vmask is no longer the first non-bit operand")
+        operand_table[label] = {
+            "operand_rows": rows,
+            "correction_input_rows": correction,
+            "zFv_signature": report["zFv_signature"],
+        }
+
+    return {
+        "format": "nemo-testcase-l4-orca2-round246-held-v1",
+        "status": "HELD_R246_STAGE_VMASK_AND_KT8_LIVE_W",
+        "direct": direct_table,
+        "boundary": boundary_table,
+        "operands": operand_table,
+        "first_remaining_statement": {
+            "operand": "stage-1 three-dimensional V mask",
+            "candidate_boundary": "_nemo_stage_corrected_velocity / zFv product",
+            "compiled_source": (
+                "ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/"
+                "stprk3_stg.f90:269-285"),
+            "result": "668 mask and zFv slots unequal under both labels",
+        },
+        "predictions": {
+            "R246-P1": "CONFIRMED_DIRECT_0_0_0_BOTH_LABELS",
+            "R246-P2": "REFUTED_KT8_LIVE_W_REFUSAL_BOTH_LABELS",
+            "R246-P3": "REFUTED_STAGE_VMASK_668_AND_ZFV_668",
+            "R246-P4": "NOT_ACTIVATED_PREREQUISITE_R246-P2",
+            "R246-P5": "CONFIRMED" if plant == "none" else "PLANT",
+        },
+        "open": (
+            "Route the stage transport's three-dimensional V mask through "
+            "the production D114 resolved mesh operands, then re-score the "
+            "same atomic unit before any landing."),
+    }
+
+
 def measure_direct(args: argparse.Namespace) -> dict[str, object]:
     r241._policy_and_stamp(args.expect_commit)
     return r245.measure(
@@ -261,7 +381,8 @@ def combine(args: argparse.Namespace) -> dict[str, object]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--mode", choices=("direct", "atomic", "operands", "combine", "classify"),
+        "--mode", choices=("direct", "atomic", "operands", "combine",
+                           "classify", "classify-held"),
         default="classify")
     parser.add_argument("--deck-root", type=Path)
     parser.add_argument("--frame-root", type=Path)
@@ -277,7 +398,10 @@ def main() -> int:
                         metavar=("INDEPENDENT", "GIVEN"))
     parser.add_argument("--operands-in", nargs=2, type=Path,
                         metavar=("INDEPENDENT", "GIVEN"))
-    parser.add_argument("--plant", choices=PLANTS, default="none")
+    parser.add_argument("--atomic-log-in", nargs=2, type=Path,
+                        metavar=("INDEPENDENT", "GIVEN"))
+    parser.add_argument("--plant", choices=tuple(dict.fromkeys((*PLANTS, *HELD_PLANTS))),
+                        default="none")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     try:
@@ -300,6 +424,17 @@ def main() -> int:
             require(all((args.direct_in, args.atomic_in, args.operands_in)),
                     "combine needs all six section reports")
             result = combine(args)
+        elif args.mode == "classify-held":
+            require(all((args.direct_in, args.atomic_log_in, args.operands_in)),
+                    "held classification needs all six reports/logs")
+            result = classify_held(
+                {label: json.loads(path.read_text(encoding="utf-8"))
+                 for label, path in zip(LABELS, args.direct_in, strict=True)},
+                {label: path.read_text(encoding="utf-8")
+                 for label, path in zip(LABELS, args.atomic_log_in, strict=True)},
+                {label: json.loads(path.read_text(encoding="utf-8"))
+                 for label, path in zip(LABELS, args.operands_in, strict=True)},
+                plant=args.plant)
         else:
             require(args.report_in is not None, "classification needs --report-in")
             result = classify(

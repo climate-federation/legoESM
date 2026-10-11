@@ -73,3 +73,36 @@ def test_classifier_accepts_the_frozen_atomic_signature():
 def test_every_plant_refuses(plant):
     with pytest.raises(gate.GateError):
         gate.classify(copy.deepcopy(_report()), plant=plant)
+
+
+def _held_inputs():
+    report = _report()
+    direct = report["direct"]
+    operands = report["operands"]
+    for value in operands.values():
+        value["operand_rows"]["vmask"] = _difference(668)
+        value["operand_rows"]["vmask"]["max_abs"] = 1.0
+        value["first_unequal_operand"] = "vmask"
+        value["correction_input_rows"] = {
+            name: _difference() for name in ("vn_adv", "r1_hv", "vv_b")
+        }
+        value["zFv_signature"] = _difference(668)
+    logs = {
+        label: "\n".join(
+            [f"PROGRESS round241 {label} kt={kt}" for kt in range(1, 8)]
+            + ["raw-mesh e3w_int must contain only finite values > 0",
+               "STATUS REFUSE none: guard fired"])
+        for label in gate.LABELS
+    }
+    return direct, logs, operands
+
+
+def test_held_classifier_names_stage_mask_and_every_plant_refuses():
+    direct, logs, operands = _held_inputs()
+    result = gate.classify_held(direct, logs, operands)
+    assert result["status"] == "HELD_R246_STAGE_VMASK_AND_KT8_LIVE_W"
+    assert result["first_remaining_statement"]["operand"] == (
+        "stage-1 three-dimensional V mask")
+    for plant in gate.HELD_PLANTS[1:]:
+        with pytest.raises(gate.GateError):
+            gate.classify_held(direct, logs, operands, plant=plant)
