@@ -145,6 +145,8 @@ FILES = {
         _SWG_P3_COMPILED / "domqco.f90"),
     "SWG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90": (
         _SWG_P3_COMPILED / "stprk3.f90"),
+    "SWG_OMIP_L1_P3/BLD/ppsrc/nemo/ldfdyn.f90": (
+        _SWG_P3_COMPILED / "ldfdyn.f90"),
     "SWG_OMIP_L1_P3/BLD/ppsrc/nemo/dynldf_lev.f90": (
         _SWG_P3_COMPILED / "dynldf_lev.f90"),
     # The frozen round-3 preregistration used these shortened names.  Pin
@@ -6234,6 +6236,10 @@ CITATION_MAP = {
         ("DO jj = ntsj-( 0), ntej+(  0+1 ) ; DO ji = ntsi-( 0), ntei+(  0+1)", 1),
         ("END DO   ;   END DO", 2),
         21],
+    'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/ldfdyn.f90:311-322': [
+        "IF(     ln_dynldf_lap ) THEN   ;   zUfac = r1_2 *rn_Uv",
+        "ahmf(:,:,1:jpkm1) = zah0",
+        12],
     'dynadv.f90:134-139': [
         ("SELECT CASE( n_dynadv )", 1),
         ("         !", 13),
