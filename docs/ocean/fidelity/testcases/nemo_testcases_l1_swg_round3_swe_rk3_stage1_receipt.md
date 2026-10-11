@@ -71,7 +71,7 @@ replay boundary, not a new prognostic carry.
 ## Measurement
 
 Preregistration commit: `edcc0c9c15b2b4d33886c6be164fb3da9b3a1f77`.
-Clean measured implementation: `bd41322dcfc3ea8f66e88bcbb8649706feb3dac8`.
+Clean measured implementation: `fdde82e96e10659d7551b0b48226b59fe3afdf60`.
 
 1. **CONFIRMED.**  The card selects `outer_integrator="swe_rk3"`.  The
    production entry point is JIT compiled in fp64 and accepts stage 1 only;
@@ -88,16 +88,16 @@ Clean measured implementation: `bd41322dcfc3ea8f66e88bcbb8649706feb3dac8`.
    stage=1` entry gives 13/13 bit-identical rows against the recorded
    `kt=1, stage=2` entry.  Every row has `max_abs=0`, zero unequal wet cells,
    and status AT-BAR.  The clean artifact is
-   `swg_stage1_clean.json`, SHA-256
-   `600e270b3a5da0bd1d40ca98c45e6fd6c21e7806994e0047bb1bda120b36d60e`.
+   `swg_stage1_clean_final.json`, SHA-256
+   `1bd4a4a30db1e0a37c4ad521080dc22fcec607fc3b7ed03eadc0f3cc871000af`.
 4. **CONFIRMED.**  Both controls change a wet U-staggered `utau_before` input
    at `[1,1]` before the JIT replay.  The zero control moves by `5e-324`; the
    one control moves by `2.220446049250313e-16`.  Each produces exactly one
    unequal production output, is classified DEBT by the bit endpoint, and
    exits 1.  The corresponding artifact SHA-256 values are
-   `78233e8624e4ee4f0ecb8ec58866485ea8af3af6ddb3b9e6a92ae79f0b3fad0a`
+   `ff19f671ea3a294dd0aece2810ad70911ee1c23c39c9745aff6e52c8004033ad`
    and
-   `54c5ac90b7f3709dafe77bc0b92bf12066a4b126332a9a79cac6f9775d2cc11a`.
+   `d46d0b71a890514f64727ac0435f2b21e53aff03a7183477f140a6e50e4d08df`.
 5. **CONFIRMED.**  The card, physics configuration, and stage consumer all
    resolve `g=0.02`.  The source-literal impulse test becomes wrong if that
    constants value does not reach the pressure statements at
