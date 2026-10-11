@@ -316,6 +316,52 @@ def classify(reports: list[dict], *, plant: str = "none") -> dict[str, object]:
     }
 
 
+def classify_candidate(baseline: list[dict], candidate: list[dict]) -> dict[str, object]:
+    """Require the complete source statement to close the measured pair."""
+
+    before = classify(baseline)
+    by_label = {report["label"]: report for report in copy.deepcopy(candidate)}
+    require(set(by_label) == {"independent", "given_nemo_entry"},
+            "candidate requires both claim labels")
+    rows = {}
+    for label, report in by_label.items():
+        require(report["status"] == "PASS_R244_INLOOP_FOLD_AUDIT",
+                f"{label}: candidate measurement status moved")
+        require(tuple(report["substeps"]) == SUBSTEPS,
+                f"{label}: candidate substep order moved")
+        require(all(report["passivity"].values()),
+                f"{label}: candidate observer moved state")
+        require(report["one_bit_control"]["unequal"] == 1,
+                f"{label}: candidate one-bit control did not fire")
+        first = _first_fold_violation(report)
+        require(first is None,
+                f"{label}: candidate fold violation remains: {first}")
+        pair6 = report["rows"][5]["pair"]
+        for name in PAIR_ORDER:
+            require(pair6[name]["complete"]["unequal"] == 0,
+                    f"{label}: candidate substep-6 {name} is not exact")
+        rows[label] = {
+            "first_fold_violation": first,
+            "substep6_pair": pair6,
+        }
+    require(rows["independent"] == rows["given_nemo_entry"],
+            "candidate claim labels disagree")
+    return {
+        "format": "nemo-testcase-l4-orca2-round244-candidate-v1",
+        "status": "PASS_R244_COMPLETE_INLOOP_ASSOCIATION",
+        "source": by_label["independent"]["source"],
+        "baseline_first_fold_violation": before["first_fold_violation"],
+        "candidate": rows,
+        "predictions": {
+            "R244-P1": "CONFIRMED_PASSIVE_ADMITTED_FP64_BOTH_LABELS",
+            "R244-P3": "CONFIRMED_FOLD_IDENTITY_CLOSED",
+            "R244-P4": "CONFIRMED_PAIR_129_120_TO_ZERO",
+            "R244-P5": "QUALIFIED_FOR_TRAJECTORY_GATES",
+            "R244-P6": "CONFIRMED_BASELINE_PLANTS",
+        },
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--deck-root", type=Path)
@@ -326,11 +372,19 @@ def main() -> int:
     parser.add_argument("--expect-commit")
     parser.add_argument("--classify", nargs=2, type=Path,
                         metavar=("INDEPENDENT", "GIVEN"))
+    parser.add_argument("--candidate", nargs=2, type=Path,
+                        metavar=("INDEPENDENT", "GIVEN"))
     parser.add_argument("--classify-plant", choices=CLASSIFY_PLANTS, default="none")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     try:
-        if args.classify:
+        if args.classify and args.candidate:
+            baseline = [json.loads(path.read_text(encoding="utf-8"))
+                        for path in args.classify]
+            candidate = [json.loads(path.read_text(encoding="utf-8"))
+                         for path in args.candidate]
+            result = classify_candidate(baseline, candidate)
+        elif args.classify:
             reports = [json.loads(path.read_text(encoding="utf-8"))
                        for path in args.classify]
             result = classify(reports, plant=args.classify_plant)

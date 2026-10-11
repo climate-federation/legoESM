@@ -74,6 +74,23 @@ def test_classification_requires_both_labels_and_every_control():
             gate.classify(copy.deepcopy(reports), plant=plant)
 
 
+def test_candidate_must_close_fold_and_both_pair_operands():
+    baseline = [_report("independent"), _report("given_nemo_entry")]
+    candidate = copy.deepcopy(baseline)
+    for report in candidate:
+        for row in report["rows"]:
+            for values in row["exits"].values():
+                values["candidate_fold_identity"]["unequal"] = 0
+        for values in report["rows"][5]["pair"].values():
+            values["complete"]["unequal"] = 0
+    result = gate.classify_candidate(baseline, candidate)
+    assert result["status"] == "PASS_R244_COMPLETE_INLOOP_ASSOCIATION"
+
+    candidate[0]["rows"][5]["pair"]["v_mid"]["complete"]["unequal"] = 1
+    with pytest.raises(gate.GateError):
+        gate.classify_candidate(baseline, candidate)
+
+
 def test_one_bit_control_is_nonvacuous():
     result = gate._one_bit_control()
     assert result["unequal"] == 1
