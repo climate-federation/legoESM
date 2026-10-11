@@ -40,6 +40,14 @@ CLASSIFY_PLANTS = (
     "none", "label-coverage", "source-order", "one-bit",
     "replay-closure", "production-route", "passivity",
 )
+PAIR_PLANTS = (
+    "none", "label-coverage", "single-arm-control", "pair-closure",
+)
+PAIR_MEASUREMENT_COMMITS = {
+    "baseline": "1ab039cb198c2f33bc7fe8a79dde75e1f55f68be",
+    "raw-mask arm": "4d8974d66d0ddad60016c52a5cfdb79e78a97f09",
+    "atomic pair": "a9d4e310ba7902b4d12479c1fa362625a581189d",
+}
 
 
 class GateError(RuntimeError):
@@ -400,6 +408,129 @@ def classify(reports: list[dict], *, plant: str = "none") -> dict[str, object]:
     }
 
 
+def classify_pair(
+    baseline_reports: list[dict], raw_mask_reports: list[dict],
+    pair_reports: list[dict], *, plant: str = "none",
+) -> dict[str, object]:
+    """Fail closed on the measured surface-mask/T-halo cancelling pair."""
+
+    require(plant in PAIR_PLANTS, f"unknown pair plant {plant!r}")
+    baseline_reports = copy.deepcopy(baseline_reports)
+    raw_mask_reports = copy.deepcopy(raw_mask_reports)
+    pair_reports = copy.deepcopy(pair_reports)
+    if plant == "label-coverage":
+        pair_reports.pop()
+
+    def by_label(reports, name):
+        mapped = {report["label"]: report for report in reports}
+        require(set(mapped) == {"independent", "given_nemo_entry"},
+                f"{name}: both claim labels are required")
+        return mapped
+
+    baseline = by_label(baseline_reports, "baseline")
+    raw_mask = by_label(raw_mask_reports, "raw-mask arm")
+    pair = by_label(pair_reports, "atomic pair")
+    def complete(result):
+        return result.get("complete", result)
+
+    if plant == "single-arm-control":
+        complete(raw_mask["independent"]["rows"][0]["pair"][
+            "face_depth_v_mid"])["unequal"] = 0
+    elif plant == "pair-closure":
+        complete(pair["independent"]["rows"][-1]["pair"][
+            "metric_transport_v"])["unequal"] = 1
+
+    table = {}
+    for label in ("independent", "given_nemo_entry"):
+        base = baseline[label]
+        mask = raw_mask[label]
+        joined = pair[label]
+        for report, name, flags in (
+            (base, "baseline", (False, False)),
+            (mask, "raw-mask arm", (True, False)),
+            (joined, "atomic pair", (True, True)),
+        ):
+            require(report["status"] == "PASS_R245_V_DEPTH_OPERAND_SPLIT",
+                    f"{label} {name}: measurement status moved")
+            require(report["worktree"]["commit"] == PAIR_MEASUREMENT_COMMITS[name],
+                    f"{label} {name}: measurement commit moved")
+            # The first two committed gate revisions predate explicit false
+            # fields. Their immutable worktree stamps above disambiguate
+            # absence from a malformed current report.
+            actual_flags = (
+                report.get("raw_surface_masks", False),
+                report.get("t_pivot_north_neighbor", False),
+            )
+            require(actual_flags == flags,
+                    f"{label} {name}: causal-arm flags moved")
+            require(all(report["passivity"].values()),
+                    f"{label} {name}: observer moved completed state")
+            require(tuple(report["substeps"]) == SUBSTEPS,
+                    f"{label} {name}: substep order moved")
+
+        base_depth_row = base["rows"][0].get("pair", {}).get(
+            "face_depth_v_mid", base["rows"][0]["baseline_vs_nemo"])
+        base_depth = base_depth_row["unequal"]
+        mask_depth = complete(
+            mask["rows"][0]["pair"]["face_depth_v_mid"])["unequal"]
+        require(base_depth > 0, f"{label}: baseline depth control is vacuous")
+        require(mask["operand_rows"]["ssvmask"]["unequal"] == 0,
+                f"{label}: raw-mask arm did not make ssvmask exact")
+        require(mask_depth > 0,
+                f"{label}: raw mask alone unexpectedly closed depth")
+        require(complete(mask["rows"][0]["pair"]["face_depth_v_mid"])[
+                    "max_abs"] < base_depth_row["max_abs"],
+                f"{label}: raw mask did not reduce the depth maximum")
+        for row in joined["rows"]:
+            require(row["eta_mid_owned"]["unequal"] == 0,
+                    f"{label}: pair run changed the owned midpoint SSH")
+            for field in ("v_mid", "face_depth_v_mid", "metric_transport_v"):
+                result = complete(row["pair"][field])
+                require(result["unequal"] == 0,
+                        f"{label}: pair did not close {field} at substep "
+                        f"{row['substep']}")
+                require(result["first_nonfinite"] is None,
+                        f"{label}: pair made {field} non-finite")
+        table[label] = {
+            "baseline_substep3_depth": base_depth_row,
+            "raw_mask_substep3_depth": complete(
+                mask["rows"][0]["pair"]["face_depth_v_mid"]),
+            "pair_substeps": [
+                {name: complete(value) for name, value in row["pair"].items()}
+                for row in joined["rows"]],
+        }
+
+    def signature(label):
+        value = table[label]
+        return (
+            value["baseline_substep3_depth"]["unequal"],
+            value["raw_mask_substep3_depth"]["unequal"],
+            tuple(tuple(row[field]["unequal"] for field in (
+                "v_mid", "face_depth_v_mid", "metric_transport_v"))
+                  for row in value["pair_substeps"]),
+        )
+
+    require(signature("independent") == signature("given_nemo_entry"),
+            "claim labels disagree on the cancelling-pair result")
+    return {
+        "format": "nemo-testcase-l4-orca2-round245-pair-classification-v1",
+        "status": "HELD_R245_MASK_T_HALO_CANCELLING_PAIR_NAMED",
+        "source": pair["independent"]["source"],
+        "unit": ["raw_surface_ssvmask", "t_pivot_north_neighbor"],
+        "result": (
+            "raw mask alone exposes a north-neighbour debt; the atomic pair "
+            "closes depth, midpoint V, and zhV through substep 6"),
+        "table": table,
+        "predictions": {
+            "R245-P2": "REFUTED_CURRENT_SSVMASK_NONBIT",
+            "R245-P3": "REFUTED_FIRST_DIRECT_OPERAND_IS_SSVMASK",
+            "R245-P4": "REFUTED_SINGLE_OPERAND_DOES_NOT_CLOSE_CHAIN",
+            "R245-P5": "CONFIRMED_ATOMIC_PAIR_CLOSES_DIRECT_BOUNDARY",
+            "R245-P6": "CONFIRMED" if plant == "none" else "PLANT",
+        },
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--deck-root", type=Path)
@@ -412,11 +543,21 @@ def main() -> int:
     parser.add_argument("--t-pivot-north-neighbor", action="store_true")
     parser.add_argument("--classify", nargs=2, type=Path,
                         metavar=("INDEPENDENT", "GIVEN"))
+    parser.add_argument(
+        "--classify-pair", nargs=6, type=Path,
+        metavar=("BASE_INDEPENDENT", "BASE_GIVEN", "MASK_INDEPENDENT",
+                 "MASK_GIVEN", "PAIR_INDEPENDENT", "PAIR_GIVEN"))
     parser.add_argument("--classify-plant", choices=CLASSIFY_PLANTS, default="none")
+    parser.add_argument("--pair-plant", choices=PAIR_PLANTS, default="none")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     try:
-        if args.classify:
+        if args.classify_pair:
+            reports = [json.loads(path.read_text(encoding="utf-8"))
+                       for path in args.classify_pair]
+            result = classify_pair(
+                reports[:2], reports[2:4], reports[4:], plant=args.pair_plant)
+        elif args.classify:
             result = classify(
                 [json.loads(path.read_text(encoding="utf-8"))
                  for path in args.classify],
@@ -432,7 +573,9 @@ def main() -> int:
                 raw_surface_masks=args.raw_surface_masks,
                 t_pivot_north_neighbor=args.t_pivot_north_neighbor)
     except (OSError, ValueError, KeyError, TypeError, GateError) as error:
-        planted = args.classify is not None and args.classify_plant != "none"
+        planted = ((args.classify is not None and args.classify_plant != "none")
+                   or (args.classify_pair is not None
+                       and args.pair_plant != "none"))
         print(f"STATUS {'PLANT-FIRED' if planted else 'REFUSE'}: {error}")
         return 2
     rendered = json.dumps(result, indent=2, sort_keys=True) + "\n"

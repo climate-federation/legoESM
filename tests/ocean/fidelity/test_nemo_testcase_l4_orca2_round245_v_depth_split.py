@@ -24,8 +24,11 @@ def _report(label: str):
     return {
         "status": "PASS_R245_V_DEPTH_OPERAND_SPLIT",
         "label": label,
+        "worktree": {"commit": gate.PAIR_MEASUREMENT_COMMITS["baseline"]},
         "source": {"lines": "487-519"},
         "production_operand_route": "D114 raw hv_0; current compact area/mask",
+        "raw_surface_masks": False,
+        "t_pivot_north_neighbor": False,
         "passivity": {"eta": True, "u": True},
         "substeps": list(gate.SUBSTEPS),
         "operand_order": list(gate.OPERAND_ORDER),
@@ -38,6 +41,12 @@ def _report(label: str):
                 "substep": step,
                 "baseline_replay_vs_production": _difference(0),
                 "baseline_vs_nemo": _difference(35),
+                "eta_mid_owned": _difference(0),
+                "pair": {
+                    "v_mid": _difference(35),
+                    "face_depth_v_mid": _difference(35),
+                    "metric_transport_v": _difference(35),
+                },
                 "cumulative_substitution": copy.deepcopy(substitutions),
             }
             for step in gate.SUBSTEPS
@@ -54,6 +63,31 @@ def test_classification_and_every_plant_fail_closed():
     for plant in gate.CLASSIFY_PLANTS[1:]:
         with pytest.raises(gate.GateError):
             gate.classify(reports, plant=plant)
+
+
+def test_atomic_pair_classification_and_every_pair_plant_fail_closed():
+    baseline = [_report("independent"), _report("given_nemo_entry")]
+    raw_mask = copy.deepcopy(baseline)
+    pair = copy.deepcopy(baseline)
+    for report in raw_mask:
+        report["worktree"]["commit"] = gate.PAIR_MEASUREMENT_COMMITS["raw-mask arm"]
+        report["raw_surface_masks"] = True
+        report["operand_rows"]["ssvmask"] = _difference(0)
+        for row in report["rows"]:
+            row["pair"]["face_depth_v_mid"] = _difference(20)
+    for report in pair:
+        report["worktree"]["commit"] = gate.PAIR_MEASUREMENT_COMMITS["atomic pair"]
+        report["raw_surface_masks"] = True
+        report["t_pivot_north_neighbor"] = True
+        for row in report["rows"]:
+            for field in row["pair"].values():
+                field.update(_difference(0))
+    result = gate.classify_pair(baseline, raw_mask, pair)
+    assert result["status"] == "HELD_R245_MASK_T_HALO_CANCELLING_PAIR_NAMED"
+    assert result["unit"] == ["raw_surface_ssvmask", "t_pivot_north_neighbor"]
+    for plant in gate.PAIR_PLANTS[1:]:
+        with pytest.raises(gate.GateError):
+            gate.classify_pair(baseline, raw_mask, pair, plant=plant)
 
 
 def test_v_depth_replay_is_sensitive_to_each_live_operand():
