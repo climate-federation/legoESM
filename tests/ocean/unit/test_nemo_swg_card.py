@@ -110,6 +110,13 @@ def test_swg_card_requires_explicit_boolean_ln_dynvor_msk(card, value):
         validate_nemo_testcase_card(bad)
 
 
+def test_ens_vorticity_config_has_no_mask_default():
+    from legoesm.ocean.state import ENSVorticityConfig
+
+    with pytest.raises(TypeError):
+        ENSVorticityConfig("ens_total")
+
+
 def test_source_coordinate_formula_and_absolute_y_coriolis():
     src = swg_horizontal_coordinates()
     assert (src["ni"], src["nj"], src["spacing_m"]) == (84, 84, 25000.0)
