@@ -3,6 +3,7 @@
 Date: 2026-10-11.  Base: `17f6923ff76145ad36cd46de00ec66d5b22064d7`.
 Preregistration commit: `31e9c2f9b678a4954ba778fd2ce922c7b8343bac`.
 Implementation commit: `b466d706b6fb32dbd528c3b8df9a06c5463387b4`.
+Review-fix implementation commit: `4b2feb297e910bb5b85008e5c11d5314a24cd0a7`.
 Evidence directory:
 `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swg_rounds/round1`.
 
@@ -51,25 +52,61 @@ zero, false, and false respectively.
 
 ## Verdict
 
-**HELD.**  The round-1 implementation and deterministic gates are complete,
-but the required separate Codex review did not return a verdict because this
-sandbox denies the reviewer's model connection.  No acquisition should be run
-until that review returns `SHIP`.
+**HELD.**  The operator's independent review returned `DO NOT SHIP`.  All five
+reproduced findings are fixed and committed, but no acquisition should be run
+until the operator's independent re-review returns `SHIP`.
 
-The required command was attempted with `codex exec --sandbox read-only` in the
-writable clone.  Its app server was given an isolated temporary Codex state
-directory because the normal state directory is read-only.  It initialized,
-identified the sandbox as read-only, printed the full adversarial prompt, and
-then emitted the following terminal diagnosis (verbatim):
+The operator review's terminal verdict is quoted verbatim:
+
+```text
+DO NOT SHIP — The resolved card, stage-record admission, and future fidelity ladder each contain a reproduced blocking defect.
+```
+
+The original round-1 in-sandbox command had emitted the following terminal
+diagnosis (verbatim); per the operator note it was not retried here:
 
 ```text
 failed to connect to websocket: IO error: Operation not permitted (os error 1)
 ERROR: Reconnecting... waiting for network
 ```
 
-It emitted neither `SHIP` nor `DO NOT SHIP`; therefore there is no review
-verdict to quote and the no-review/no-land rule holds.  The complete attempt is
-`codex_review_attempt.log` in the evidence directory.
+The complete original attempt remains `codex_review_attempt.log` in the
+evidence directory.  The authoritative external review is
+`codex_review_r1.log` there.
+
+## Review findings and fixes
+
+1. **Incomplete resolved switch inventory — fixed.**  The card now freezes
+   the five omitted `namrun`/`namtile` defaults and every variable in the six
+   omitted engine reader groups.  The independent inventory contains 62
+   compiled reads across eight groups; the complete card inventory has 107
+   exact fields.  Removing either planted `ln_abl` or `ln_tile` makes the test
+   fail.  The executed readers are compiled `domain.f90:282-288`,
+   `sbcmod.f90:157-163`, `dommsk.f90:149`, `domqco.f90:303-306`,
+   `dynadv.f90:162`, `dynvor.f90:813-814`, and `ldfdyn.f90:177-180`.
+2. **Stored-halo non-finite admission — fixed.**  Admission now checks the
+   complete stored array while retaining the owned-crop bounds check.  Both a
+   halo NaN and a halo sentinel are refused; the complete clean 30-record
+   synthetic acquisition remains admitted.
+3. **All-ones ladder masks and ungated debt — fixed.**  Restart and future
+   independent rows now use the card's wet T mask and native U/V slices from
+   the shared staggered-face mask builder.  Dry-cell plants are excluded, wet
+   T/U/V plants are DEBT, and a DEBT result returns exit 1 with its first step.
+4. **Vacuous resolved inventory test — fixed.**  The test no longer derives
+   its expectation from the NamedTuple under test or accepts a field-count
+   lower bound.  It compares two frozen source-derived inventories and proves
+   non-vacuity with the two removal plants above.
+5. **Duplicated mask numerics — fixed.**  The hand-derived U/V products were
+   deleted.  The builder and ladder both call the shared `compute_face_masks`
+   operator and take the native NEMO U/V record slices.  The geometry gate
+   remains 34/34 bit-identical; signed-y, wet-cell, and thickness plants each
+   exit 1.
+
+Focused results at the review-fix commit: 30 SWG tests passed and 17 citation-
+gate tests passed.  The certified-card battery had 180 passes and the same
+three pre-existing stale digest assertions for GYRE, LOCK_EXCHANGE, and
+OVERFLOW already reproduced and recorded at the untouched round-1 base; no new
+card test failed.
 
 ## Frozen predictions and falsifiers
 
@@ -174,6 +211,17 @@ they are pre-existing at the stated base rather than Rule-12 movement.
 Every source claim below is bound to the exact compiled branch that produced
 the operator probe:
 
+- The domain reader states the reviewed `namrun`, `namdom`, and `namtile`
+  switches: `SWG_OMIP_L1/BLD/ppsrc/nemo/domain.f90:282-288`.
+- The complete surface-boundary reader inventory is
+  `SWG_OMIP_L1/BLD/ppsrc/nemo/sbcmod.f90:157-163`; the lateral-boundary
+  reader is `SWG_OMIP_L1/BLD/ppsrc/nemo/dommsk.f90:149`.
+- The complete variable-volume reader inventory is
+  `SWG_OMIP_L1/BLD/ppsrc/nemo/domqco.f90:303-306`.
+- Momentum advection, vorticity, and lateral-diffusion reader inventories are
+  `SWG_OMIP_L1/BLD/ppsrc/nemo/dynadv.f90:162`,
+  `SWG_OMIP_L1/BLD/ppsrc/nemo/dynvor.f90:813-814`, and
+  `SWG_OMIP_L1/BLD/ppsrc/nemo/ldfdyn.f90:177-180` respectively.
 - Domain spacing, dimensions, gravity override, and closed lateral boundaries:
   `SWG_OMIP_L1/BLD/ppsrc/nemo/usrdef_nam.f90:154-166`.
 - T/U/V/F metre coordinates, uniform metrics, and the absolute-y beta plane:
@@ -199,8 +247,8 @@ the operator probe:
 
 ## OPEN
 
-1. Re-run the exact adversarial Codex review where its model connection is
-   permitted.  Do not run acquisition unless the terminal verdict is `SHIP`.
+1. The operator independently re-reviews review-fix commit `4b2feb297`; do not
+   run acquisition unless the terminal verdict is `SHIP`.
 2. After `SHIP`, the operator runs the committed acquisition runner and returns
    the admitted stage-entry record plus passivity report.
 3. Round 2 starts from that admitted record and implements the three declared
