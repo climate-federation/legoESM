@@ -2484,6 +2484,10 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:721-753': [
         'IF( .NOT.lk_linssh ) THEN   !* Update ocean depth (variable volume case only)',
         ("& l4_canon_2d(zhU,'U'), l4_canon_2d(zhV,'V')", 1), 33],
+    # --- ORCA2 round 244: in-loop seven-field fold association ----------
+    'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:721-739': [
+        'IF( .NOT.lk_linssh ) THEN   !* Update ocean depth (variable volume case only)',
+        ('ENDIF', 32), 19],
     # --- ORCA2 round 218: OMT-2 linear implicit bottom drag ---
     'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/zdfdrg.f90:258-284': [
         'SUBROUTINE zdf_drg_lin( pCd0, pCdU )',
