@@ -73,11 +73,10 @@ def classify(report: dict[str, object], *, plant: str = "none") -> dict[str, obj
     elif plant == "completion":
         report["ladders"]["independent"]["last_completed_kt"] = 7
     elif plant == "vn-adv":
-        report["operands"]["independent"]["operand_rows"][
+        report["operands"]["independent"]["correction_input_rows"][
             "vn_adv"]["unequal"] = 919
     elif plant == "zfv":
-        report["operands"]["independent"]["operand_rows"][
-            "zFv"]["unequal"] = 919
+        report["operands"]["independent"]["zFv_signature"]["unequal"] = 919
     elif plant == "exact-row":
         report["operands"]["independent"]["operand_rows"][
             "vmask"]["unequal"] = 1
@@ -131,22 +130,26 @@ def classify(report: dict[str, object], *, plant: str = "none") -> dict[str, obj
 
     operand_table = {}
     for label, operands in report["operands"].items():
-        require(operands["status"] == "PASS_R233_GEOMETRY_UNIT_BOUNDARY",
+        require(operands["status"] == "PASS_R232_V_TRANSPORT_OPERAND_SPLIT",
                 f"{label}: operand measurement status moved")
         require(all(operands["passivity"].values()),
                 f"{label}: operand observer moved completed state")
+        require(all(row["unequal"] == 0
+                    for row in operands["replay_checks"].values()),
+                f"{label}: offline replay missed the production candidate")
         rows = operands["operand_rows"]
-        for name in ("e3v", "vmask"):
+        for name in ("e1v", "e3v", "vv", "vmask"):
             require(rows[name]["unequal"] == 0,
                     f"{label}: exact operand {name} regressed")
-        vn_adv = rows["vn_adv"]
+        vn_adv = operands["correction_input_rows"]["vn_adv"]
         require(vn_adv["unequal"] <= 35,
                 f"{label}: vn_adv did not collapse to the fold-face bound")
-        require(rows["zFv"]["unequal"] <= 35,
+        require(operands["zFv_signature"]["unequal"] <= 35,
                 f"{label}: zFv did not collapse to the fold-face bound")
         operand_table[label] = {
             "operand_rows": rows,
-            "fold_band": operands["fold_band"],
+            "correction_input_rows": operands["correction_input_rows"],
+            "zFv_signature": operands["zFv_signature"],
         }
 
     report["status"] = "PASS_R246_ATOMIC_PAIR_THROUGH_KT10"
@@ -189,32 +192,16 @@ def measure_atomic(args: argparse.Namespace) -> dict[str, object]:
 
 
 def measure_operands(args: argparse.Namespace) -> dict[str, object]:
-    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import _NEMOWSRK3TestHooks
-
     r241._policy_and_stamp(args.expect_commit)
     card = omt4.build_omt4_card(args.deck_root)
     omt4.validate_omt4_card(args.deck_root, card)
-    original_hooks = r233._hooks
-
-    def candidate_hooks(card, slow_override, raw_vmask, *, live,
-                        production_geometry=False):
-        del card, slow_override, raw_vmask, production_geometry
-        return _NEMOWSRK3TestHooks(
-            expose_live_stage_operands=live,
-            barotropic_atomic_fold_unit=True,
-            preserve_literal_hpg_vmask=True,
-        )
-
-    r233._hooks = candidate_hooks
-    try:
+    with r233._resolved_stage_geometry(card, reconstructed=False):
         with r245._barotropic_surface_mask_arm(
             card, True, v_only=True, t_pivot_north_neighbor=True,
         ):
-            return r233.measure(
+            return r232.measure(
                 args.deck_root, args.frame_root, args.record_root,
-                args.label, args.expect_commit, production_geometry=True)
-    finally:
-        r233._hooks = original_hooks
+                args.label, args.expect_commit)
 
 
 def combine(args: argparse.Namespace) -> dict[str, object]:

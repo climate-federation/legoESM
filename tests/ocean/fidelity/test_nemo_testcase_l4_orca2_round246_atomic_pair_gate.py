@@ -51,16 +51,16 @@ def _report():
             "row_count": 200, "rows": rows,
         }
         operands[label] = {
-            "status": "PASS_R233_GEOMETRY_UNIT_BOUNDARY",
+            "status": "PASS_R232_V_TRANSPORT_OPERAND_SPLIT",
             "passivity": {"T": True, "S": True},
+            "replay_checks": {"e3v": _difference(), "zFv": _difference()},
             "operand_rows": {
                 name: _difference() for name in (
-                    "e3v", "vmask", "vn_adv", "r1_hv", "zvb", "zFv")
+                    "e1v", "e3v", "vv", "zvb", "vmask")
             },
-            "fold_band": {"T": _difference(), "S": _difference()},
+            "correction_input_rows": {"vn_adv": _difference(35)},
+            "zFv_signature": _difference(35),
         }
-        operands[label]["operand_rows"]["vn_adv"] = _difference(35)
-        operands[label]["operand_rows"]["zFv"] = _difference(35)
     return {"direct": direct, "ladders": ladders, "operands": operands}
 
 
