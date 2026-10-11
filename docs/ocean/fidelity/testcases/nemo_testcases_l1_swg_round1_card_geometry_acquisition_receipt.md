@@ -50,6 +50,33 @@ Removing any of those fields must fail the same exact inventory gate.  This
 correction changes no deck choice: the shipped values remain false, zero,
 zero, false, and false respectively.
 
+## Fix-round-2 preregistration (2026-10-11)
+
+This section is committed before the second review fixes or their post-fix
+gates.  The operator re-review's terminal verdict is frozen verbatim:
+
+```text
+DO NOT SHIP — The resolved engine inventory still omits 59 compiled namelist reads, and the ladder scores two staggered stress records with the wrong mask.
+```
+
+Two repairs, and only these two, are in scope:
+
+1. A committed source-enumeration script will parse the 13 compiled SWE
+   namelist declarations named by the review and require exactly 131 unique
+   reads.  `SwgResolvedNamelist` will state every one with the resolved probe
+   value; fields disabled by a controlling switch will be marked inert with
+   the compiled branch citation.  The card inventory gate will compare
+   against the script's source-derived mapping.  Removing **any** of its 131
+   mapped card fields must report that field missing.  Any parsed total other
+   than 131, duplicate mapping, unmapped compiled read, missing card field, or
+   mismatch with the probe's resolved echo **REFUTES** this prediction.
+2. `utau_b` will score with the native U mask and `vtau_b` with the native V
+   mask, as required by compiled `sbc_oce.f90:116-117` and
+   `sbcmod.f90:567-568`.  A plant assigning either field to the T mask must go
+   red; clean reader self-check rows must remain at bar and bit-identical.
+   A T-mask result for either field, a plant that stays green, or movement of
+   any previously certified geometry/card row **REFUTES** this prediction.
+
 ## Verdict
 
 **HELD.**  The operator's independent review returned `DO NOT SHIP`.  All five
