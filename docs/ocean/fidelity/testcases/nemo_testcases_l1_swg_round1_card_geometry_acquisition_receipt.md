@@ -6,6 +6,39 @@ Implementation commit: `b466d706b6fb32dbd528c3b8df9a06c5463387b4`.
 Evidence directory:
 `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swg_rounds/round1`.
 
+## Review-fix preregistration (2026-10-11)
+
+This section was committed before changing code or running a post-review gate.
+It freezes the five operator-review repairs and their falsifiers:
+
+1. The resolved card will state every variable in the six namelist groups read
+   by the compiled SWE initialization: `namsbc`, `namlbc`, `nam_vvl`,
+   `namdyn_adv`, `namdyn_vor`, and `namdyn_ldf`.  The inventory gate will use a
+   frozen literal source inventory rather than derive its expectation from the
+   NamedTuple under test.  Removing any one field, planted with `ln_abl`, must
+   report that field missing.  Compiled citations are `sbcmod.f90:157-163`,
+   `dommsk.f90:149`, `domqco.f90:303-306`, `dynadv.f90:162`,
+   `dynvor.f90:813-814`, and `ldfdyn.f90:177-180`.
+2. Stage-entry admission will reject a NaN or sentinel anywhere in a stored
+   array, including a point outside the owned crop.  A halo-NaN plant must
+   raise `Refusal`; the clean synthetic record must remain admitted.
+3. The ladder will score T, U, and V records with the card's wet T mask and
+   the staggered masks returned by the shared `compute_face_masks`.  A dry-cell
+   score plant must be ignored, a wet-cell plant must be DEBT, and any DEBT in
+   an executable independent arm must produce a nonzero CLI result.
+4. The resolved-inventory test will compare the card against the frozen
+   compiled-reader inventory and an exact complete card-field inventory; it
+   will no longer compare the NamedTuple to its own `_asdict()` or use a lower
+   bound on field count.
+5. Hand-derived U/V mask products in the SWG builder will be removed in favor
+   of `compute_face_masks`.  The post-fix geometry gate must remain 34/34
+   bit-identical and all three existing geometry plants must still exit
+   nonzero.
+
+Any changed numerical geometry row, newly admitted non-finite record, masked
+wet-cell perturbation, unmasked dry-cell perturbation, or zero exit with DEBT
+**REFUTES** its corresponding prediction and will be retained here.
+
 ## Verdict
 
 **HELD.**  The round-1 implementation and deterministic gates are complete,
