@@ -10,8 +10,13 @@ Status: **HELD** (first upstream unit named; no production physics changed)
 This round executes round 235's alpha-independent OPEN: split substep 1's
 fold-local slow-V difference in NEMO source order. The frozen preregistration is
 `docs/ocean/fidelity/PREREG_nemo_testcases_l4_orca2_round236.md`. Decisions 114
-and 115 remain pending with the user and were not acted on. The shipped ORCA2
-card, every sea-ice selector, and its `unmeasured_features` tuple are unchanged.
+and 115 were still pending while the preregistered measurement ran and were not
+acted on. The user took both after the measurement completed: Decision 115 at
+21:58 authorizes the required per-card filter alpha, and Decision 114 at 22:02
+authorizes the exact raw face-geometry unit. They enter the OPEN plan below;
+they do not retroactively change this measurement-only round. The shipped
+ORCA2 card, every sea-ice selector, and its `unmeasured_features` tuple are
+unchanged.
 
 Every number is reported separately under **independent OMT-4** (legoESM's own
 corrected initial state) and **given NEMO's entry OMT-4**. The results are
@@ -94,10 +99,11 @@ At the downstream statement, replacing only incoming `Ve_rhs` closes final
 R236-P3's predicted Coriolis/mask cancelling pair is **REFUTED**. The 35-cell
 slow-V difference is carried entirely from the incoming depth average.
 
-This unit overlaps Decision 114's separately pending exact geometry question,
-but also contains an independent completed-RHS difference. Landing geometry
-alone would not close this boundary, and coupling it to an unwalked RHS would
-pre-empt that pending decision. No package change lands.
+This unit overlaps Decision 114's exact geometry unit, but also contains an
+independent completed-RHS difference. The user authorized geometry-alone
+landing after this measurement. Its current one-variable replay does not close
+the slow-forcing boundary, so the completed RHS remains registered debt after
+that landing. No package change lands in round 236.
 
 ## Instrument retractions
 
@@ -143,18 +149,19 @@ Three refused attempts are retained, not promoted:
 
 ## OPEN
 
-1. Walk the completed three-dimensional V RHS on the same 35 fold faces in
-   NEMO accumulation order (HPG, LDF, VOR, KEG, ZAD) from the existing passive
-   stage trace. Score an RHS-only replay as well as the cumulative
-   live-thickness + RHS unit; do not land a partial operand.
-2. Decision 114 remains pending with the user. If it authorizes the exact raw
-   geometry separately, land and register that unit first, then remeasure this
-   slow-forcing boundary; otherwise keep geometry private while walking the
-   independent RHS debt.
-3. Decision 115 remains pending with the user. Do not resume the global
-   external-mode walk past substep 3 until its explicit filter-alpha field is
-   authorized.
+1. Execute Decision 114 first in its own landing round: route U/V reference
+   face thickness through the existing raw NEMO builder, apply NEMO's T/U/V/F
+   mask fold rules, and run the full OMT-1..4, rung-0, rung-10, GYRE, DINO and
+   tank gates. Then remeasure this 35-cell slow-forcing boundary.
+2. Execute Decision 115 in the following landing round: make the barotropic
+   time-filter alpha a required NEMO-card field with no library default, state
+   each card's deck value, and run its full moved-row and cross-card gates.
+3. After those authorized landings, walk the completed three-dimensional V RHS
+   on the same 35 fold faces in NEMO accumulation order (HPG, LDF, VOR, KEG,
+   ZAD) from the existing passive stage trace. Score an RHS-only replay as well
+   as the cumulative live-thickness + RHS unit; do not land a partial operand.
 
-No acquisition is needed for item 1. The current passive stage/RHS record is
-sufficient; if its fold rank lacks one named operator accumulator, report the
-exact missing stream before writing a new acquisition.
+No acquisition is needed for the current OPEN. Existing records cover the
+authorized geometry and alpha gates plus the next passive stage/RHS replay; if
+the fold rank lacks one named operator accumulator, report the exact missing
+stream before writing a new acquisition.
