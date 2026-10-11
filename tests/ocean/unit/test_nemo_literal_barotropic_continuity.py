@@ -192,29 +192,6 @@ def test_external_mode_u_fold_is_compiled_half_row_map():
                                   np.asarray(-u[-1, 4:0:-1]))
 
 
-def test_external_mode_complete_call_folds_all_t_and_u_pivot_fields():
-    grid = create_synthetic_tripole_pivot(4, 8)
-    u = jnp.arange(4 * 9, dtype=jnp.float64).reshape(4, 9)
-    depth_u = u + 100.0
-    inverse_u = u + 200.0
-    v = jnp.arange(5 * 8, dtype=jnp.float64).reshape(5, 8)
-    eta = jnp.arange(4 * 8, dtype=jnp.float64).reshape(4, 8)
-    got = _nemo_external_mode_boundary_association(
-        u, v, depth_u, v, inverse_u, v, eta, grid)
-
-    for value, source in ((got[2], depth_u), (got[4], inverse_u)):
-        np.testing.assert_array_equal(np.asarray(value[-1, 0]),
-                                      np.asarray(source[-1, 1]))
-        np.testing.assert_array_equal(np.asarray(value[-1, 1:5]),
-                                      np.asarray(source[-1, 1:5]))
-        np.testing.assert_array_equal(np.asarray(value[-1, 5:]),
-                                      np.asarray(source[-1, 4:0:-1]))
-    np.testing.assert_array_equal(np.asarray(got[6][-1, :4]),
-                                  np.asarray(eta[-1, :4]))
-    np.testing.assert_array_equal(np.asarray(got[6][-1, 4:]),
-                                  np.asarray(eta[-1, grid.fold.perm_T[4:]]))
-
-
 def test_t_pivot_v_depth_uses_associated_row_below_as_north_neighbor():
     grid = create_synthetic_tripole_pivot(4, 8, dtype=jnp.float64)
     u_mask = jnp.ones((4, 9), dtype=jnp.float64)

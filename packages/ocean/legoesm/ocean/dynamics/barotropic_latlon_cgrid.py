@@ -690,13 +690,12 @@ def _nemo_external_mode_boundary_association(
 ):
     """Compact-grid image of NEMO's one seven-field ``lbc_lnk`` call.
 
-    The model stores the periodic U closure as the extra western column, the
-    T/U pivot as the stored northern row, and the V fold as explicit
-    south/north rows.  NEMO associates all seven arrays together at
-    ``dynspg_ts.f90:721-739``; this helper preserves that single source
-    boundary.  At a stored T pivot the right half of cell-centred SSH and the
-    three U-point arrays is therefore part of the association even though it
-    is not a separate compact halo row.
+    The model stores the periodic U closure as the extra western column and
+    the V fold as explicit south/north rows.  NEMO associates all seven
+    arrays together at ``dynspg_ts.f90:771-779``; this helper preserves that
+    single source boundary for the private operand trace and causal arm.
+    Cell-centred SSH has no explicit halo in the compact representation, so
+    its associated image is the same array.
     """
     legal_components = ("", "u_cyclic", "u_fold", "v_cyclic", "v_fold")
     if component not in legal_components:
@@ -731,25 +730,6 @@ def _nemo_external_mode_boundary_association(
             u_post = jnp.where(nmask, folded, u_post)
     depth_u_post = depth_u.at[:, 0].set(depth_u[:, -1])
     inverse_u_post = inverse_u.at[:, 0].set(inverse_u[:, -1])
-    if (do_u_fold and (fold_is_local(grid) or nmask is not None)
-            and bool(getattr(fold, "pivot_row_stored", False))):
-        n_lon = fold.perm_T.shape[0]
-        half = n_lon // 2
-        perm = fold_perm_u(fold)[half:]
-        depth_u_folded = depth_u_post.at[-1, half + 1:].set(
-            depth_u_post[-1, 1:][perm])
-        depth_u_folded = depth_u_folded.at[-1, 0].set(depth_u_post[-1, 1])
-        inverse_u_folded = inverse_u_post.at[-1, half + 1:].set(
-            inverse_u_post[-1, 1:][perm])
-        inverse_u_folded = inverse_u_folded.at[-1, 0].set(
-            inverse_u_post[-1, 1])
-        if fold_is_local(grid):
-            depth_u_post = depth_u_folded
-            inverse_u_post = inverse_u_folded
-        else:
-            depth_u_post = jnp.where(nmask, depth_u_folded, depth_u_post)
-            inverse_u_post = jnp.where(
-                nmask, inverse_u_folded, inverse_u_post)
     v_post = v
     depth_v_post = depth_v
     inverse_v_post = inverse_v
@@ -757,20 +737,9 @@ def _nemo_external_mode_boundary_association(
         v_post = pad_ns_vector_v(v[1:-1], grid)
         depth_v_post = pad_ns_scalar(depth_v[1:-1], grid)
         inverse_v_post = pad_ns_scalar(inverse_v[1:-1], grid)
-    eta_post = eta
-    if (component == "" and (fold_is_local(grid) or nmask is not None)
-            and bool(getattr(fold, "pivot_row_stored", False))):
-        n_lon = fold.perm_T.shape[0]
-        half = n_lon // 2
-        eta_folded = eta.at[-1, half:].set(
-            eta[-1, fold.perm_T[half:]])
-        if fold_is_local(grid):
-            eta_post = eta_folded
-        else:
-            eta_post = jnp.where(nmask, eta_folded, eta)
     return (
         u_post, v_post, depth_u_post, depth_v_post,
-        inverse_u_post, inverse_v_post, eta_post,
+        inverse_u_post, inverse_v_post, eta,
     )
 
 
@@ -2391,7 +2360,6 @@ def _run_substep_loop(
                     nemo_external_mode_association_component_test_override))
         if nemo_external_mode_association_test_override:
             U_bar_new, V_bar_new = association_post[:2]
-            eta_new = association_post[6]
         elif nemo_external_mode_association_field_test_override == "u":
             U_bar_new = association_post[0]
         elif nemo_external_mode_association_field_test_override == "v":
