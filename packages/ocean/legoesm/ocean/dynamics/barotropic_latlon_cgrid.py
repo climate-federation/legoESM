@@ -2391,6 +2391,7 @@ def _run_substep_loop(
                     nemo_external_mode_association_component_test_override))
         if nemo_external_mode_association_test_override:
             U_bar_new, V_bar_new = association_post[:2]
+            eta_new = association_post[6]
         elif nemo_external_mode_association_field_test_override == "u":
             U_bar_new = association_post[0]
         elif nemo_external_mode_association_field_test_override == "v":

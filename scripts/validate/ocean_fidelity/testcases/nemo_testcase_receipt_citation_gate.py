@@ -1985,7 +1985,7 @@ CITATION_MAP = {
         'def _nemo_ssh_avg_apply(eta_dyn, u_mask, v_mask, grid, area, prep, *,',
         'return H_u, H_v, r1_u_entry, r1_v_entry', 80],
     # --- ORCA2 round 149: carried V reciprocal retraction ---------------
-    'barotropic_latlon_cgrid.py:2589-2593': [
+    'barotropic_latlon_cgrid.py:2590-2594': [
         '# Preserve associated halo operands in the private trace.',
         '"inverse_depth_v": r1_H_v,', 5],
     'ORCA2_OMIP_L4_R144INITIAL/BLD/ppsrc/nemo/dynspg_ts.f90:680-699': [
@@ -2669,7 +2669,7 @@ CITATION_MAP = {
         '# --- NEMO dynspg_ts nn_bt_flt=3 (Demange 2019 dissipative FB) coefficients ---',
         'def nemo_ab3am4_coeff_arrays(n_loop: int, alpha: float,',
         13],
-    'barotropic_latlon_cgrid.py:3424-3425': [
+    'barotropic_latlon_cgrid.py:3425-3426': [
         ('_ab3_za, _ab3_zb = nemo_ab3am4_coeff_arrays(', 2),
         'n_loop, alpha=_nemo_filter_alpha, ramp=_ab3_hist is None)', 2],
     'orca2_rounds/round222/acquisition/orca2_omt4_frames_10step_a_np2/namelist_cfg:383-387': [
@@ -5448,7 +5448,7 @@ CITATION_MAP = {
         'vn_adv(:,:)     = 0._wp', 27],
     # --- PR #1802 final round: decisions 66 and 67 -----------------------
     # D67's own call site, and the DINO year screen's pre-existing refusal.
-    'barotropic_latlon_cgrid.py:3185-3186': [
+    'barotropic_latlon_cgrid.py:3186-3187': [
         'U_bar_corr, V_bar_corr = _depth_average_to_faces(',
         'u_corr, v_corr, _h_k_corr, min_water_col, mask, u_mask, v_mask, grid,',
         2],
