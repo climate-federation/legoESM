@@ -39,6 +39,16 @@ Any changed numerical geometry row, newly admitted non-finite record, masked
 wet-cell perturbation, unmasked dry-cell perturbation, or zero exit with DEBT
 **REFUTES** its corresponding prediction and will be retained here.
 
+**Preregistration correction, committed before the expanded implementation or
+its gates:** item 1's six-group boundary is **REFUTED** by the operator review's
+own compiled-source transcript.  It additionally names `ln_1st_euler`,
+`nn_rstctl`, `nn_stock`, and `ln_mskland` from compiled
+`domain.f90:282-286`, plus `ln_tile` from `domain.f90:288`.  The frozen reader
+inventory is therefore expanded to those two groups and five resolved defaults.
+Removing any of those fields must fail the same exact inventory gate.  This
+correction changes no deck choice: the shipped values remain false, zero,
+zero, false, and false respectively.
+
 ## Verdict
 
 **HELD.**  The round-1 implementation and deterministic gates are complete,
