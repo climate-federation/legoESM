@@ -197,8 +197,9 @@ honestly registered step-6 debt, and the admitted-entry one-ULP plant exits 1
 on its changed output. All comparisons use fp64 on CPU with the card's T/U/V/F
 masks.
 
-The receipt-citation gate result and its shifted-citation plant are recorded
-after this receipt is committed.
+The receipt-citation gate maps and passes all 16 compiled-source citations
+with zero unmapped citations, failures, or map-audit failures. Shifting the
+stage-3 viscosity-body citation by two lines produces FAIL and exit 1.
 
 ## OPEN
 
