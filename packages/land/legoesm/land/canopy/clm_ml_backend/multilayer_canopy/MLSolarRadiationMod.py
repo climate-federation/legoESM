@@ -59,9 +59,15 @@ def SolarRadiation(
     filter_patch: Sequence[int],
     mlcanopy_inst: mlcanopy_type,
     grid: "GridInfo | None" = None,
+    clump_fac_jax=None,
 ) -> mlcanopy_type:
     """
     Solar radiation transfer through the multilayer canopy.
+
+    ``clump_fac_jax``: optional array override for ``MLpftcon.clump_fac`` (the
+    per-PFT foliage clumping index, 1.0 in the stock table): the DifferBESS
+    runs pass each site's driver clumping index per time step (v10,
+    2026-10-11).  ``None`` keeps the module table.
 
     Mirrors Fortran subroutine ``SolarRadiation`` (lines 28-195).
 
@@ -115,7 +121,7 @@ def SolarRadiation(
     taul = pftcon.taul
     rhos = pftcon.rhos
     taus = pftcon.taus
-    clump_fac = MLpftcon.clump_fac
+    clump_fac = MLpftcon.clump_fac if clump_fac_jax is None else clump_fac_jax
 
     solar_zen = mlcanopy_inst.solar_zen_forcing
     ncan = mlcanopy_inst.ncan_canopy

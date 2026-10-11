@@ -120,6 +120,7 @@ class mlcanopy_type(NamedTuple):
     qflx_rain_forcing: jnp.ndarray  # Rainfall (kg H2O/m2/s)
     qflx_snow_forcing: jnp.ndarray  # Snowfall (kg H2O/m2/s)
     tacclim_forcing: jnp.ndarray  # Average temperature for acclimation (K)
+    thome_forcing: jnp.ndarray  # Home temperature for acclim_type 2 (K; DifferBESS v10)
 
     # ------------------------------------------------------------------
     # Derived atmospheric forcing variables              shape: (np,)
@@ -513,6 +514,7 @@ def create_mlcanopy(begp: int, endp: int) -> mlcanopy_type:
         qflx_rain_forcing=_r(np_),
         qflx_snow_forcing=_r(np_),
         tacclim_forcing=_r(np_),
+        thome_forcing=_r(np_),
         # Derived atmospheric forcing
         eref_forcing=_r(np_),
         thref_forcing=_r(np_),

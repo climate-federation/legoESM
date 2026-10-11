@@ -67,6 +67,7 @@ from legoesm.land.canopy.clm_ml_backend.multilayer_canopy.MLclm_varcon import ( 
     vcmaxse_noacclim,
     vpd_min_MED,
 )
+from legoesm.land.canopy.clm_ml_backend.multilayer_canopy.MLKnauerAcclim import KNAUER_C3_HD, KNAUER_RGAS, knauer_c3_leaf_params  # noqa: F401
 from legoesm.land.canopy.clm_ml_backend.multilayer_canopy.MLclm_varctl import (  # noqa: F401
     acclim_type,
     colim_type,
@@ -89,7 +90,7 @@ from legoesm.land.canopy.clm_ml_backend.multilayer_canopy.MLWaterVaporMod import
 # ---------------------------------------------------------------------------
 
 
-def _ft(tl: float, ha: float) -> float:
+def _ft(tl: float, ha: float, r: float = rgas) -> float:
     """
     Arrhenius activation temperature response for photosynthesis.
 
@@ -106,10 +107,10 @@ def _ft(tl: float, ha: float) -> float:
     Returns:
         Dimensionless temperature response factor.
     """
-    return jnp.exp(ha / (rgas * (tfrz + 25.0)) * (1.0 - (tfrz + 25.0) / tl))
+    return jnp.exp(ha / (r * (tfrz + 25.0)) * (1.0 - (tfrz + 25.0) / tl))
 
 
-def _fth(tl: float, hd: float, se: float, c: float) -> float:
+def _fth(tl: float, hd: float, se: float, c: float, r: float = rgas) -> float:
     """
     High-temperature deactivation factor for photosynthesis.
 
@@ -128,10 +129,10 @@ def _fth(tl: float, hd: float, se: float, c: float) -> float:
     Returns:
         Dimensionless deactivation factor.
     """
-    return c / (1.0 + jnp.exp((-hd + se * tl) / (rgas * tl)))
+    return c / (1.0 + jnp.exp((-hd + se * tl) / (r * tl)))
 
 
-def _fth25(hd: float, se: float) -> float:
+def _fth25(hd: float, se: float, r: float = rgas) -> float:
     """
     Scaling factor for deactivation such that :func:`_fth` = 1 at 25 °C.
 
@@ -149,7 +150,7 @@ def _fth25(hd: float, se: float) -> float:
         Dimensionless scaling factor ``c`` for :func:`_fth`.
     """
     t25 = tfrz + 25.0
-    return 1.0 + jnp.exp((-hd + se * t25) / (rgas * t25))
+    return 1.0 + jnp.exp((-hd + se * t25) / (r * t25))
 
 
 # ---------------------------------------------------------------------------
@@ -1142,16 +1143,15 @@ def _get_vmapped_photo_kernel(
 # ---------------------------------------------------------------------------
 
 
-def _make_leaf_photo_kernel_acclim(
+def _make_leaf_photo_kernel_acclim_ha(
     *,
     is_c3: bool,
     c3psn_pft_val: float,
-    vcmaxha: float,
     vcmaxhd: float,
-    jmaxha: float,
     jmaxhd: float,
     rdc: float,
     o2ref_p: float,
+    rgas_vj: float = rgas,
 ):
     """
     Factory returning a per-layer leaf-photosynthesis kernel for acclim_type==1.
@@ -1187,6 +1187,8 @@ def _make_leaf_photo_kernel_acclim(
         vcmaxc_rt,  # broadcast scalar: JAX runtime arg
         jmaxse_rt,  # broadcast scalar: JAX runtime arg
         jmaxc_rt,  # broadcast scalar: JAX runtime arg
+        vcmaxha_rt,  # broadcast scalar: activation energy of Vcmax (a closed-over float under acclim_type 1, Knauer's Ha_V(Tg) under 2)
+        jmaxha_rt,  # broadcast scalar: activation energy of Jmax
     ):
         """Per-layer photosynthesis + stomatal conductance kernel (acclim)."""
         active = dpai_ic > 0.0
@@ -1203,9 +1205,9 @@ def _make_leaf_photo_kernel_acclim(
         ko_val = ko25 * _ft(tleaf_ic, koha)
         cp_val = cp25 * _ft(tleaf_ic, cpha)
         vcmax_val = (
-            vcmax25_ic * _ft(tleaf_ic, vcmaxha) * _fth(tleaf_ic, vcmaxhd, vcmaxse_rt, vcmaxc_rt)
+            vcmax25_ic * _ft(tleaf_ic, vcmaxha_rt, rgas_vj) * _fth(tleaf_ic, vcmaxhd, vcmaxse_rt, vcmaxc_rt, rgas_vj)
         )
-        jmax_val = jmax25_ic * _ft(tleaf_ic, jmaxha) * _fth(tleaf_ic, jmaxhd, jmaxse_rt, jmaxc_rt)
+        jmax_val = jmax25_ic * _ft(tleaf_ic, jmaxha_rt, rgas_vj) * _fth(tleaf_ic, jmaxhd, jmaxse_rt, jmaxc_rt, rgas_vj)
         rd_val = rd25_ic * _ft(tleaf_ic, rdha) * _fth(tleaf_ic, rdhd, rdse, rdc)
         kp_val = jnp.zeros(())
 
@@ -1318,6 +1320,42 @@ def _make_leaf_photo_kernel_acclim(
         )
 
     return kernel
+
+
+def _make_leaf_photo_kernel_acclim(
+    *,
+    is_c3: bool,
+    c3psn_pft_val: float,
+    vcmaxha: float,
+    vcmaxhd: float,
+    jmaxha: float,
+    jmaxhd: float,
+    rdc: float,
+    o2ref_p: float,
+):
+    """acclim_type == 1 kernel: the generalised kernel with the activation energies closed over as Python floats (the
+    original signature; XLA constant-folds them exactly as before, see test_clm_ml_acclim.py's bit-identity test)."""
+    core = _make_leaf_photo_kernel_acclim_ha(is_c3=is_c3, c3psn_pft_val=c3psn_pft_val, vcmaxhd=vcmaxhd, jmaxhd=jmaxhd, rdc=rdc, o2ref_p=o2ref_p)
+
+    def kernel(*args):
+        return core(*args, vcmaxha, jmaxha)
+    return kernel
+
+
+@functools.lru_cache(maxsize=None)
+def _get_vmapped_photo_kernel_acclim2(
+    *,
+    is_c3: bool,
+    c3psn_pft_val: float,
+    vcmaxhd: float,
+    jmaxhd: float,
+    rdc: float,
+    o2ref_p: float,
+):
+    """acclim_type == 2 (Knauer): like the type-1 getter but the activation energies are runtime broadcast scalars too
+    (Ha_V depends on the growth temperature); 11 per-layer args, then g0, g1, vcmaxse, vcmaxc, jmaxse, jmaxc, vcmaxha, jmaxha."""
+    kernel = _make_leaf_photo_kernel_acclim_ha(is_c3=is_c3, c3psn_pft_val=c3psn_pft_val, vcmaxhd=vcmaxhd, jmaxhd=jmaxhd, rdc=rdc, o2ref_p=o2ref_p, rgas_vj=KNAUER_RGAS)
+    return jax.jit(jax.vmap(kernel, in_axes=(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, None, None, None, None, None, None, None)))
 
 
 @functools.lru_cache(maxsize=None)
@@ -2350,6 +2388,14 @@ def LeafPhotosynthesis(
             ta_c = jnp.clip(mlcanopy_inst.tacclim_forcing[p] - tfrz, 11.0, 35.0)
             vcmaxse = 668.39 - 1.07 * ta_c
             jmaxse = 659.70 - 0.75 * ta_c
+        elif acclim_type == 2:
+            # Knauer et al. (2023): tacclim_forcing carries the driver's 30-day growth temperature (the interface's
+            # tacclim_K override), t_home_C the site's home temperature; Ha_V, dS_V, dS_J follow the growth temperature
+            # (clipped to [3, 37] degC inside), Hd = 200 kJ mol-1 for both; Rd untouched (DifferBESS v10, plan D1)
+            tg_c = mlcanopy_inst.tacclim_forcing[p] - tfrz
+            vcmaxha, jmaxha, vcmaxse, jmaxse, _ = knauer_c3_leaf_params(tg_c, mlcanopy_inst.thome_forcing[p] - tfrz)
+            vcmaxhd = KNAUER_C3_HD
+            jmaxhd = KNAUER_C3_HD
         else:
             endrun(msg=" ERROR: LeafPhotosynthesis: acclim_type not valid")
             vcmaxha = vcmaxhd = vcmaxse = jmaxha = jmaxhd = jmaxse = 0.0
@@ -2368,6 +2414,10 @@ def LeafPhotosynthesis(
         if acclim_type == 0:
             vcmaxc = _fth25_py(vcmaxhd, vcmaxse)  # Python float (vcmaxse is float)
             jmaxc = _fth25_py(jmaxhd, jmaxse)  # Python float (jmaxse is float)
+        elif acclim_type == 2:
+            # Knauer: the 25 C normalisation with DifferBESS's gas constant (the whole Vcmax / Jmax response uses it)
+            vcmaxc = _fth25(vcmaxhd, vcmaxse, KNAUER_RGAS)
+            jmaxc = _fth25(jmaxhd, jmaxse, KNAUER_RGAS)
         else:
             # acclim_type == 1: vcmaxse/jmaxse are JAX traced — keep as JAX
             vcmaxc = _fth25(vcmaxhd, vcmaxse)  # JAX scalar, passed as runtime arg
@@ -2454,6 +2504,37 @@ def LeafPhotosynthesis(
                     _cair_p[_sl],
                     g0_val,
                     g1_val,  # JAX scalar broadcast — gradients flow here
+                )
+            elif acclim_type == 2:
+                # Knauer: the activation energies are JAX scalars of the growth temperature -> runtime args
+                vmapped = _get_vmapped_photo_kernel_acclim2(
+                    is_c3=is_c3,
+                    c3psn_pft_val=_c3psn_val,
+                    vcmaxhd=vcmaxhd,
+                    jmaxhd=jmaxhd,
+                    rdc=rdc,
+                    o2ref_p=_o2ref_cache_key,
+                )
+                layer_out = vmapped(
+                    _dpai_p[_sl],
+                    _tleaf_p[_sl],
+                    _vcmax25_p[_sl],
+                    _jmax25_p[_sl],
+                    _rd25_p[_sl],
+                    _kp25_p[_sl],
+                    _eair_p[_sl],
+                    _apar_p[_sl],
+                    _gbc_p[_sl],
+                    _gbv_p[_sl],
+                    _cair_p[_sl],
+                    g0_val,
+                    g1_val,
+                    vcmaxse,
+                    vcmaxc,
+                    jmaxse,
+                    jmaxc,
+                    vcmaxha,
+                    jmaxha,
                 )
             else:
                 # acclim_type == 1: vcmaxse/vcmaxc/jmaxse/jmaxc are JAX scalars
@@ -2558,6 +2639,8 @@ def LeafPhotosynthesis(
                     _gsmin_pft,  # JAX scalar broadcast — gradients flow via IFT
                 )
             else:
+                if acclim_type == 2:
+                    endrun(msg=" ERROR: LeafPhotosynthesis: Knauer acclimation (acclim_type 2) is ported for the Medlyn / Ball-Berry path only")
                 # acclim_type == 1: vcmaxse/vcmaxc/jmaxse/jmaxc are JAX scalars
                 vmapped = _get_vmapped_photo_kernel_wue_acclim(
                     is_c3=is_c3,

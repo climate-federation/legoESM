@@ -201,6 +201,8 @@ def step_multilayer_land_with_diagnostics(
     clm_ml_pft_per_col=None,
     clm_ml_vcmaxpft_jax=None,
     clm_ml_g1_medlyn_jax=None,
+    clm_ml_clump_fac_jax=None,
+    clm_ml_tacclim_K=None,
     soil_frozen_fraction: jnp.ndarray | None = None,
 ):
     """Like :func:`step_multilayer_land` but also returns the ``SurfaceFluxOutput``.
@@ -219,6 +221,8 @@ def step_multilayer_land_with_diagnostics(
         clm_ml_pft_per_col=clm_ml_pft_per_col,
         clm_ml_vcmaxpft_jax=clm_ml_vcmaxpft_jax,
         clm_ml_g1_medlyn_jax=clm_ml_g1_medlyn_jax,
+        clm_ml_clump_fac_jax=clm_ml_clump_fac_jax,
+        clm_ml_tacclim_K=clm_ml_tacclim_K,
         soil_frozen_fraction=soil_frozen_fraction)
 
 
@@ -294,6 +298,8 @@ def step_multilayer_land(
     clm_ml_pft_per_col=None,
     clm_ml_vcmaxpft_jax=None,
     clm_ml_g1_medlyn_jax=None,
+    clm_ml_clump_fac_jax=None,
+    clm_ml_tacclim_K=None,
     soil_frozen_fraction: jnp.ndarray | None = None,
 ) -> tuple[MultiLayerLandState, TileResponse, CarbonState | None]:
     """Step the multi-layer land model forward by ``dt`` seconds.
@@ -319,6 +325,8 @@ def step_multilayer_land(
         clm_ml_pft_per_col=clm_ml_pft_per_col,
         clm_ml_vcmaxpft_jax=clm_ml_vcmaxpft_jax,
         clm_ml_g1_medlyn_jax=clm_ml_g1_medlyn_jax,
+        clm_ml_clump_fac_jax=clm_ml_clump_fac_jax,
+        clm_ml_tacclim_K=clm_ml_tacclim_K,
         soil_frozen_fraction=soil_frozen_fraction)
     return new_state, response, carbon_new
 
@@ -384,6 +392,8 @@ def _step_multilayer_land_impl(
     clm_ml_pft_per_col=None,
     clm_ml_vcmaxpft_jax=None,
     clm_ml_g1_medlyn_jax=None,
+    clm_ml_clump_fac_jax=None,
+    clm_ml_tacclim_K=None,
     soil_frozen_fraction: jnp.ndarray | None = None,
 ):
     """Internal 4-tuple (new_state, TileResponse, carbon, SurfaceFluxOutput).
@@ -724,6 +734,8 @@ def _step_multilayer_land_impl(
             pft_per_col=clm_ml_pft_per_col,
             vcmaxpft_jax=clm_ml_vcmaxpft_jax,
             g1_medlyn_jax=clm_ml_g1_medlyn_jax,
+            clump_fac_jax=clm_ml_clump_fac_jax,
+            tacclim_K=clm_ml_tacclim_K,
         )
     elif isinstance(config.surface_scheme, SimpleSEBConfig):
         # SimpleSEB: bulk fluxes with skin T = T_soil[:, 0].

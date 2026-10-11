@@ -38,6 +38,7 @@ from legoesm.land.canopy.clm_ml_backend.multilayer_canopy.MLclm_varcon import ( 
     rd25_to_vcmax25_c4,
 )
 from legoesm.land.canopy.clm_ml_backend.multilayer_canopy.MLclm_varctl import acclim_type, kn_val, leaf_optics_type  # noqa: F401
+from legoesm.land.canopy.clm_ml_backend.multilayer_canopy.MLKnauerAcclim import knauer_c3_leaf_params  # noqa: F401
 from legoesm.land.canopy.clm_ml_backend.multilayer_canopy.MLclm_varpar import isha, isun, nlevmlcan  # noqa: F401
 from legoesm.land.canopy.clm_ml_backend.multilayer_canopy.MLpftconMod import MLpftcon  # noqa: F401
 
@@ -49,9 +50,14 @@ def CanopyNitrogenProfile(
     mlcanopy_inst: mlcanopy_type,
     vcmaxpft_jax=None,
     grid: "GridInfo | None" = None,
+    clump_fac_jax=None,
 ) -> mlcanopy_type:
     """
     Calculate the canopy profile of nitrogen and photosynthetic capacity.
+
+    ``clump_fac_jax`` overrides ``MLpftcon.clump_fac`` the same way
+    ``vcmaxpft_jax`` overrides ``MLpftcon.vcmaxpft`` (the site's driver
+    clumping index; v10, 2026-10-11).
 
     Mirrors Fortran subroutine ``CanopyNitrogenProfile`` (lines 22-175).
 
@@ -163,6 +169,9 @@ def CanopyNitrogenProfile(
         elif acclim_type == 1:
             ta_c = jnp.clip(mlcanopy_inst.tacclim_forcing[p] - tfrz, 11.0, 35.0)
             j2v = 2.59 - 0.035 * ta_c  # Fortran line 87
+        elif acclim_type == 2:
+            # Knauer et al. (2023) b_JV(Tg, Th): tacclim_forcing = the driver's 30-day growth temperature (DifferBESS v10)
+            j2v = knauer_c3_leaf_params(mlcanopy_inst.tacclim_forcing[p] - tfrz, mlcanopy_inst.thome_forcing[p] - tfrz)[4]
         else:
             endrun(msg=" ERROR: CanopyNitrogenProfile: acclim_type not valid")
             j2v = 0.0  # Unreachable
@@ -183,7 +192,7 @@ def CanopyNitrogenProfile(
             endrun(msg="ERROR: CanopyNitrogenProfile: incorrect Kn")
             kn = jnp.zeros(())  # Unreachable
 
-        clump = MLpftcon.clump_fac[pft]  # JAX scalar
+        clump = (MLpftcon.clump_fac if clump_fac_jax is None else clump_fac_jax)[pft]  # JAX scalar
         lai_p = mlcanopy_inst.lai_canopy[p]
         sai_p = mlcanopy_inst.sai_canopy[p]
 

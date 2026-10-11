@@ -54,7 +54,7 @@ gs_type: int = 2  # Stomatal conductance: Medlyn (0), Ball-Berry (1), WUE optimi
 gspot_type: int = 1  # Use potential conductance (0) or water-stressed conductance (1)
 gs_solver: int = 2  # WUE solver: Brent (1) or bisection (2)
 colim_type: int = 1  # Photosynthesis: minimum rate (0) or co-limited rate (1)
-acclim_type: int = 1  # Temperature acclimation: off (0) or on (1)
+acclim_type: int = 1  # Temperature acclimation: off (0), Kattge & Knorr with the 10-day mean (1), Knauer et al. 2023 with the driver's 30-day growth and home temperatures (2; DifferBESS v10)
 kn_val: float = -999.0  # Canopy nitrogen profile: user-specified Kn (>0); -999 = not set
 
 

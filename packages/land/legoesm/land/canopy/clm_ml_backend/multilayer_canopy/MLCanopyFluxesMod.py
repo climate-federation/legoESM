@@ -205,6 +205,7 @@ def MLCanopyFluxes(
     vcmaxpft_jax=None,
     g1_MED_jax=None,
     cos_zenith_device=None,
+    clump_fac_jax=None,
 ) -> mlcanopy_type:
     """
     Compute all multilayer canopy fluxes for one CLM timestep.
@@ -655,9 +656,9 @@ def MLCanopyFluxes(
             grid=grid,
         )
         # Solar radiation — Fortran line 290
-        inst = SolarRadiation(bounds, num_mlcan, filter_mlcan, inst, grid=grid)
+        inst = SolarRadiation(bounds, num_mlcan, filter_mlcan, inst, grid=grid, clump_fac_jax=clump_fac_jax)
         # Nitrogen profile — Fortran line 293
-        inst = CanopyNitrogenProfile(num_mlcan, filter_mlcan, inst, vcmaxpft_jax, grid=grid)
+        inst = CanopyNitrogenProfile(num_mlcan, filter_mlcan, inst, vcmaxpft_jax, grid=grid, clump_fac_jax=clump_fac_jax)
         # Runge-Kutta inner loop — Fortran lines 310-328
         for _irk in range(1, nrk_steps + 2):
             inst = CanopyWettedFraction(num_mlcan, filter_mlcan, inst, grid=grid)
@@ -1066,6 +1067,7 @@ def _GetCLMVar(
     soilresis = soilstate_inst.soilresis_col
     thk = soilstate_inst.thk_col
     t_a10_patch = temperature_inst.t_a10_patch
+    thome_patch = getattr(temperature_inst, "thome_patch", None)   # the site's home temperature (acclim_type 2); absent in stubs that predate it
     t_soisno = temperature_inst.t_soisno_col
     snl = col.snl
     z = col.z
@@ -1096,6 +1098,7 @@ def _GetCLMVar(
     qflx_rain = mlcanopy_inst.qflx_rain_forcing
     qflx_snow = mlcanopy_inst.qflx_snow_forcing
     tacclim = mlcanopy_inst.tacclim_forcing
+    thome = mlcanopy_inst.thome_forcing
     albsoib = mlcanopy_inst.albsoib_soil
     albsoid = mlcanopy_inst.albsoid_soil
     soilres = mlcanopy_inst.soilres_soil
@@ -1137,6 +1140,8 @@ def _GetCLMVar(
 
         # Acclimation temperature — Fortran line 87
         tacclim = tacclim.at[p].set(t_a10_patch[p])
+        if thome_patch is not None:
+            thome = thome.at[p].set(thome_patch[p])
 
         # Ground albedos: column (c) → patch (p) — Fortran lines 89-90
         albsoib = albsoib.at[p, ivis].set(albgrd[c, ivis])
@@ -1233,6 +1238,7 @@ def _GetCLMVar(
         qflx_rain_forcing=qflx_rain,
         qflx_snow_forcing=qflx_snow,
         tacclim_forcing=tacclim,
+        thome_forcing=thome,
         albsoib_soil=albsoib,
         albsoid_soil=albsoid,
         soilres_soil=soilres,

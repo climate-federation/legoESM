@@ -155,6 +155,7 @@ VALID_CLM_ML_TURBULENCE_SCHEMES = ("rsl_bonan", "most")
 # validator share one source of truth.
 CLM_ML_STOMATAL_GS_TYPE = {"medlyn": 0, "ball_berry": 1, "wue": 2}
 VALID_CLM_ML_STOMATAL_MODELS = tuple(CLM_ML_STOMATAL_GS_TYPE)
+CLM_ML_ACCLIM_TYPE = {"off": 0, "kk": 1, "knauer": 2}   # backend acclim_type codes (CLMMLCanopyConfig.acclimation)
 
 
 class CanopyConfig(NamedTuple):
@@ -623,6 +624,12 @@ class CLMMLCanopyConfig(NamedTuple):
     # Medlyn, Ball-Berry).  A trainable Vcmax25 is supplied as the traced
     # ``vcmaxpft_jax`` argument from the training loop instead.
     vcmax25_override: float | None = None
+    # Leaf thermal acclimation of Vcmax / Jmax (backend ``acclim_type``): "off" (0, CLM constants), "kk" (1, CLM-ML's
+    # Kattge & Knorr form on the 10-day running-mean air temperature, the stock default) or "knauer" (2, Knauer et al. 2023
+    # on the driver's 30-day growth temperature passed per step as ``tacclim_K`` and the site's home temperature
+    # ``t_home_C``; DifferBESS v10, 2026-10-11).  Rd and everything else are untouched.
+    acclimation: str = "kk"
+    t_home_C: float | None = None
 
     # SW band partitioning.
     # f_vis: fraction of total SW in the visible (PAR) band [0.4–0.7 µm].
@@ -851,4 +858,12 @@ class CLMMLCanopyConfig(NamedTuple):
                 f"one of {VALID_CLM_ML_STOMATAL_MODELS} "
                 "('wue'=water-use-efficiency optimization (default), "
                 "'medlyn'=Medlyn 2011, 'ball_berry'=Ball-Berry)")
+        if self.acclimation not in CLM_ML_ACCLIM_TYPE:
+            raise ValueError(f"unknown CLM-ML acclimation {self.acclimation!r}; one of {tuple(CLM_ML_ACCLIM_TYPE)}")
+        if self.acclimation == "knauer":
+            import math as _math
+            if self.t_home_C is None or not _math.isfinite(float(self.t_home_C)):
+                raise ValueError("CLM-ML acclimation 'knauer' needs a finite t_home_C (the site's home temperature, degC)")
+            if self.stomatal_model == "wue":
+                raise ValueError("CLM-ML acclimation 'knauer' is ported for the Medlyn / Ball-Berry path only (stomatal_model 'wue' given)")
         return self

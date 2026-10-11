@@ -313,6 +313,38 @@ def _apply_stomatal_model(canopy_config: CLMMLCanopyConfig) -> None:
     _APPLIED_GS_TYPE = gs
 
 
+_APPLIED_ACCLIM_TYPE: int | None = None
+
+
+def _apply_acclim_type(canopy_config: CLMMLCanopyConfig) -> None:
+    """Install the leaf thermal-acclimation form (backend ``acclim_type``) and the site's home temperature.
+
+    ``MLLeafPhotosynthesisMod`` and ``MLCanopyNitrogenProfileMod`` import ``acclim_type`` BY VALUE (the same trap as
+    ``gs_type``), so all three namespaces are patched; ``t_home_C`` is read from ``MLclm_varctl`` at call time. The
+    photosynthesis module's lru-cached kernel factories are keyed on their parameter tuples but close over
+    ``acclim_type``'s branch, so switching the form in one process clears them (one acclimation form per process is
+    the contract, as for the stomatal model). DifferBESS v10, 2026-10-11.
+    """
+    from legoesm.land.canopy.config import CLM_ML_ACCLIM_TYPE
+    code = CLM_ML_ACCLIM_TYPE[canopy_config.acclimation]
+    import legoesm.land.canopy.clm_ml_backend.multilayer_canopy.MLclm_varctl as _ml_ctl
+    import legoesm.land.canopy.clm_ml_backend.multilayer_canopy.MLLeafPhotosynthesisMod as _photo
+    import legoesm.land.canopy.clm_ml_backend.multilayer_canopy.MLCanopyNitrogenProfileMod as _nprof
+    _ml_ctl.acclim_type = code
+    _photo.acclim_type = code
+    _nprof.acclim_type = code
+    global _APPLIED_ACCLIM_TYPE
+    if _APPLIED_ACCLIM_TYPE is not None and _APPLIED_ACCLIM_TYPE != code:
+        for _name in dir(_photo):
+            _fn = getattr(_photo, _name, None)
+            if hasattr(_fn, "cache_clear"):
+                _fn.cache_clear()
+        _clear = getattr(_nprof.CanopyNitrogenProfile, "clear_cache", None)   # the jitted profile traced acclim_type's branch
+        if _clear is not None:
+            _clear()
+    _APPLIED_ACCLIM_TYPE = code
+
+
 def _apply_turbulence_scheme(scheme: str, *, differentiable: bool = False) -> None:
     """Point CLM-ML's ψ̂ lookup tables at the selected turbulence scheme.
 
@@ -989,6 +1021,7 @@ def _build_stubs(
     cos_zen: np.ndarray | None = None,
     T_soil_all: jnp.ndarray | None = None,
     t_a10_prior: jnp.ndarray | None = None,
+    t_home_K: float = 298.15,
     lai_override: jnp.ndarray | None = None,
 ) -> dict[str, Any]:
     """Build minimal CLM input stub objects from legoESM state.
@@ -1296,6 +1329,7 @@ def _build_stubs(
     )
     temperature = SimpleNamespace(
         t_a10_patch=t_a10_patch,
+        thome_patch=_pad1(jnp.full((ncol,), float(t_home_K), dtype=jnp.float64)),   # acclim_type 2's home temperature, runtime data (not a trace-time constant)
         t_soisno_col=t_soisno_col,
     )
     frictionvel = SimpleNamespace(
@@ -1707,6 +1741,8 @@ def compute_clm_ml_canopy_fluxes(
     lai_override: jnp.ndarray | None = None,
     vcmaxpft_jax: jnp.ndarray | None = None,
     g1_medlyn_jax: jnp.ndarray | None = None,
+    clump_fac_jax: jnp.ndarray | None = None,
+    tacclim_K: jnp.ndarray | None = None,
     grid_info: Any | None = None,
     pft_per_col: "np.ndarray | None" = None,
 ) -> tuple[SurfaceFluxOutput, CanopyState]:
@@ -2002,6 +2038,8 @@ def compute_clm_ml_canopy_fluxes(
             ("lai_override", lai_override),
             ("vcmaxpft_jax", vcmaxpft_jax),
             ("g1_medlyn_jax", g1_medlyn_jax),
+            ("clump_fac_jax", clump_fac_jax),
+            ("tacclim_K", tacclim_K),
         ]
         _traced_leaf = next(
             (
@@ -2173,7 +2211,14 @@ def compute_clm_ml_canopy_fluxes(
     #   T_a10_new = (1 - alpha) * T_a10_old + alpha * T_lowest
     #   alpha = dt / (10 * 86400)  (10-day e-folding, CLM default)
     alpha = min(dt / (10.0 * 86400.0), 1.0)
-    if _traceable:
+    if canopy_config.acclimation == "knauer" and tacclim_K is None:
+        raise ValueError("CLM-ML acclimation 'knauer' needs tacclim_K (the driver's 30-day growth temperature per column, K) every step")
+    if tacclim_K is not None:
+        # the acclimation temperature is prescribed (DifferBESS v10: the driver's 30-day growth temperature, shared with
+        # the big-leaf model); it replaces the 10-day running mean in tacclim_forcing AND in the carried state
+        t_a10_prior = jnp.asarray(tacclim_K, dtype=jnp.float64).reshape((ncol,))
+        t_a10_now = t_a10_prior
+    elif _traceable:
         # Traced running mean: t_a10 is the Vcmax temperature-acclimation state,
         # a real function of T_lowest, so keep it on device (a host
         # np.array(forcing.T_lowest) would raise on a tracer — scope item A).
@@ -2202,6 +2247,7 @@ def compute_clm_ml_canopy_fluxes(
         cos_zen=cos_zen,
         T_soil_all=T_soil,
         t_a10_prior=t_a10_prior,
+        t_home_K=(float(canopy_config.t_home_C) + 273.15 if canopy_config.acclimation == "knauer" else 298.15),
         lai_override=lai_override,
     )
 
@@ -2255,6 +2301,7 @@ def compute_clm_ml_canopy_fluxes(
     # Process-global like the turbulence tables; "medlyn" activates the traced
     # vcmaxpft_jax injection path below.
     _apply_stomatal_model(canopy_config)
+    _apply_acclim_type(canopy_config)
 
     # ---- Build GridInfo for the traceable (jax.jit / jax.grad) path ----
     # Structural ints must be concrete Python ints extracted BEFORE tracing (int()
@@ -2418,6 +2465,8 @@ def compute_clm_ml_canopy_fluxes(
             _opt_kwargs["vcmaxpft_jax"] = vcmaxpft_jax
         if g1_medlyn_jax is not None:
             _opt_kwargs["g1_MED_jax"] = g1_medlyn_jax
+        if clump_fac_jax is not None:
+            _opt_kwargs["clump_fac_jax"] = clump_fac_jax   # the site's driver clumping index (v10)
         return MLCanopyFluxes(
             bounds=bounds,
             num_exposedvegp=num,
