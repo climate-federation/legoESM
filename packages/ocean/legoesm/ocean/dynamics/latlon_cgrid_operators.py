@@ -4759,8 +4759,8 @@ def pv_flux_ens(
     v_mask_3d: jnp.ndarray,
     vtx_mask: jnp.ndarray,
     *,
-    relative_vorticity_mask: jnp.ndarray,
-    f_vtx: jnp.ndarray,
+    relative_vorticity_mask: jnp.ndarray | None = None,
+    f_vtx: jnp.ndarray | None = None,
     eps_h: float = 1.0e-10,
     q_boundary: str = "nemo_live",
     metric_widths: tuple | None = None,
@@ -4787,7 +4787,8 @@ def pv_flux_ens(
     """
     if f_vtx is None:
         raise ValueError("pv_flux_ens requires total vorticity at NEMO F points")
-    mask = jnp.asarray(relative_vorticity_mask)
+    mask = jnp.asarray(
+        vtx_mask if relative_vorticity_mask is None else relative_vorticity_mask)
     if mask.ndim == zeta.ndim - 1:
         mask = mask[..., jnp.newaxis]
     if mask.shape != zeta.shape:

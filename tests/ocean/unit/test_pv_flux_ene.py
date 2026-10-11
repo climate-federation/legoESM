@@ -232,6 +232,24 @@ def test_ens_total_production_dispatch_matches_direct_operator():
     np.testing.assert_array_equal(np.asarray(dispatched_v), np.asarray(direct_v))
 
 
+def test_ene_default_total_vorticity_path_is_byte_identical_with_override_seam():
+    """Rule 12: the new ENS-only operand seam cannot move an ENE caller."""
+    state = _build_test_state(n_lat=8, n_lon=12, partial_cells=False, seed=31)
+    f_vtx = jnp.full(state["h_vtx"].shape[:2], 1.0e-4)
+    zeta = curl_vertex_cgrid(state["u"], state["v"], state["grid"])
+    args = (
+        zeta, state["h_vtx"], state["h_v"], state["v"], state["h_u"],
+        state["u"], state["u_mask_3d"], state["v_mask_3d"],
+        state["vtx_mask"],
+    )
+    historical = pv_flux_ene(*args, f_vtx=f_vtx)
+    explicit = pv_flux_ene(
+        *args, f_vtx=f_vtx,
+        total_vorticity_override=zeta + f_vtx[..., jnp.newaxis])
+    for left, right in zip(historical, explicit, strict=True):
+        np.testing.assert_array_equal(np.asarray(left), np.asarray(right))
+
+
 def test_ene_energy_conservation_flat_bottom():
     """Sadourny 1975: the ENE vorticity flux does zero net work on KE.
     On a closed flat-bottom domain ``Σ h·u·F_u·A + h·v·F_v·A`` is round-off

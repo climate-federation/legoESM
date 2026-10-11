@@ -1562,6 +1562,9 @@ CITATION_MAP = {
     'SWG_OMIP_L1/BLD/ppsrc/nemo/dynvor.f90:250-251': [
         ('CASE( np_ENS )', 2),
         'CALL vor_ens( kt, Kmm, ntot, puu(:,:,:,Kmm)', 2],
+    'SWG_OMIP_L1/BLD/ppsrc/nemo/dynvor.f90:639-675': [
+        ('CASE ( np_CRV )', 3),
+        'pv_rhs(ji,jj,jk) = pv_rhs(ji,jj,jk) + zvau', 37],
     'SWG_OMIP_L1/BLD/ppsrc/nemo/dynzad.f90:111-146': [
         'zWdzU(ntsi-(0):ntei+(0),ntsj-(0):ntej+(0)) = 0._wp',
         '&                                              * zWdzV(ji,jj)', 36],
@@ -1572,6 +1575,9 @@ CITATION_MAP = {
     'SWG_OMIP_L1/BLD/ppsrc/nemo/stprk3.f90:148-149': [
         'CALL dyn_adv( kstp, Nbb, Nbb, uu, vv, Nrhs )',
         'CALL dyn_vor( kstp,      Nbb, uu, vv, Nrhs )', 2],
+    'SWG_OMIP_L1/BLD/ppsrc/nemo/stprk3.f90:140-171': [
+        'rDt   = rn_Dt / 3._wp',
+        ('vv(ji,jj,jk,Naa) = vv(ji,jj,jk,Nbb) + rDt', 1), 32],
     'SWG_OMIP_L1/BLD/ppsrc/nemo/stprk3.f90:260-273': [
         ('CALL dyn_adv( kstp, Nbb, Nnn, uu, vv, Nrhs )', 2),
         '&            - rn_rfr   * vv(ji,jj,jk,Nbb)', 14],

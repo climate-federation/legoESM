@@ -2623,12 +2623,10 @@ def _bc_pv_flux(
     # Fail-early on an unknown vorticity scheme (static config value) so a typo
     # raises even on the WENO path where the al81/ene branch is not reached.
     if vorticity_scheme not in (
-            "al81", "ene", "ene_total", "ens_total", "een_total",
-            "een_planetary"):
+            "al81", "ene", "ene_total", "ens_total", "een_total", "een_planetary"):
         raise ValueError(
             f"unknown vorticity_scheme {vorticity_scheme!r}; expected "
-            f"'al81', 'ene', 'ene_total', 'ens_total', 'een_total', or "
-            f"'een_planetary'"
+            f"'al81', 'ene', 'ene_total', 'ens_total', 'een_total', or 'een_planetary'"
         )
     # Fail-early on an unknown EEN vertex-thickness (e3f) scheme (static
     # config value) — see the h_vtx construction below for the two rules.
@@ -2894,25 +2892,7 @@ def _bc_pv_flux(
             from legoesm.grids.latlon import ensure_geometry
             _g = ensure_geometry(grid)
             _mw = (_g.dx_u, _g.dx_v, _g.dy_u, _g.dy_v)
-        if vorticity_scheme == "ens_total":
-            from legoesm.ocean.dynamics.latlon_cgrid_operators import (
-                nemo_een_ene_vertex_coriolis,
-                pv_flux_ens,
-            )
-            _f_vtx_ens = (
-                nemo_een_ene_vertex_coriolis(grid)
-                if f_vtx_override is None else f_vtx_override
-            )
-            diag_vortcor_u, diag_vortcor_v = pv_flux_ens(
-                zeta, h_vtx, h_v, v, h_u, u,
-                u_mask_3d, v_mask_3d, vtx_mask_va,
-                relative_vorticity_mask=vtx_mask_va,
-                f_vtx=_f_vtx_ens,
-                q_boundary=een_q_boundary,
-                metric_widths=_mw,
-                metric_reciprocals=metric_reciprocals,
-            )
-        elif vorticity_scheme in ("al81", "een_total", "een_planetary"):
+        if vorticity_scheme in ("al81", "een_total", "een_planetary"):
             # "een_total" = NEMO ln_dynvor_een (dyn_vor EEN, kvor=total): the
             # planetary Coriolis f rides the SAME 12-point Arakawa-Lamb-81 / EEN
             # triad as the relative vorticity, so the RHS carries the ABSOLUTE
@@ -2945,14 +2925,14 @@ def _bc_pv_flux(
                 q_boundary=een_q_boundary,
                 metric_widths=_mw,
             )
-        else:  # "ene"
+        else:  # "ene", "ene_total", or "ens_total"
             # NEMO vor_ene Sadourny 2-point.  f_vtx=None → relative-only
             # (rvo trend); the planetary Coriolis stays in its own path
             # (matsuno_split / explicit_ab2), matching the NEMO utrd_rvo /
             # utrd_pvo diagnostic split.
             from legoesm.ocean.dynamics.latlon_cgrid_operators import (
                 nemo_een_ene_vertex_coriolis,
-                pv_flux_ene,
+                pv_flux_ene, pv_flux_ens,
             )
             # "ene_total" = NEMO np_CRV (dynvor.F90 vor_ene, kvor=total):
             # q = (f + zeta)/e3f at the F-point with VERTEX f (ff_f) — the
@@ -2963,8 +2943,8 @@ def _bc_pv_flux(
             _f_vtx = (
                 (nemo_een_ene_vertex_coriolis(grid) if f_vtx_override is None
                  else f_vtx_override)
-                if vorticity_scheme == "ene_total" else None)
-            diag_vortcor_u, diag_vortcor_v = pv_flux_ene(
+                if vorticity_scheme in ("ene_total", "ens_total") else None)
+            diag_vortcor_u, diag_vortcor_v = (pv_flux_ens if vorticity_scheme == "ens_total" else pv_flux_ene)(
                 zeta, h_vtx, h_v, v, h_u, u,
                 u_mask_3d, v_mask_3d, vtx_mask_va,
                 f_vtx=_f_vtx,
