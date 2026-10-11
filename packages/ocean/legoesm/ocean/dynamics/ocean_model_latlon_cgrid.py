@@ -1173,6 +1173,10 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # fold unit. None selects the production config predicate; False restores
     # the legacy four-statement path and True selects the complete unit.
     barotropic_atomic_fold_unit: object = None
+    # Private round-241 arm: preserve literal HPG through legoESM's compact
+    # V-mask boundary wherever NEMO's recorded raw mask stays wet. False is
+    # the unchanged production path; no public config can select this.
+    preserve_literal_hpg_vmask: bool = False
     # WRITE-only developed-state observer for the completed three-dimensional
     # momentum RHS before its depth reduction.  Kept separate from the final
     # slow-forcing callback so the round-141 gate can prove this minimum
@@ -5656,7 +5660,8 @@ class LatLonCGridOceanModel:
                    return_nemo_operator_components=False,
                    nemo_stage_zad_operands=None,
                    nemo_stage_zad_operand_observer=None,
-                   nemo_stage_zad_eta_after_override=None):
+                   nemo_stage_zad_eta_after_override=None,
+                   nemo_literal_hpg_vmask=None):
         """Compute baroclinic tendencies.
 
         ``momentum_only=True`` skips the (T/S-frozen) tracer-diffusion
@@ -5719,6 +5724,7 @@ class LatLonCGridOceanModel:
             nemo_stage_zad_operand_observer=nemo_stage_zad_operand_observer,
             nemo_stage_zad_eta_after_override=(
                 nemo_stage_zad_eta_after_override),
+            nemo_literal_hpg_vmask=nemo_literal_hpg_vmask,
             diagnose_momentum=return_nemo_operator_components,
             return_nemo_operator_components=return_nemo_operator_components,
         )
@@ -6000,6 +6006,7 @@ class LatLonCGridOceanModel:
         _ws_face_thickness_kbb = None
         _ws_ldf_face_thickness_kbb = None
         _ws_ldf_thickness_kbb = None
+        _ws_literal_hpg_vmask = None
         _ws_uses_nemo_ldf_e3 = (
             _cfg_b.lateral_viscosity_operator == "nemo_div_curl"
             and _cfg_b.lateral_viscosity_e3_weighting == "nemo_e3")
@@ -6049,6 +6056,13 @@ class LatLonCGridOceanModel:
             _ws_h_ref = compute_layer_thickness(
                 jnp.zeros_like(state.eta.data), state.H_bathy.data, _zc,
                 min_water_column_m=_cfg_b.min_water_column_m)
+            if self._nemo_ws_test_hooks.preserve_literal_hpg_vmask:
+                _raw_ops = nemo_qco_resolved_mesh_operands(
+                    _zc, _grid, _ws_u_live_mask, _ws_v_live_mask,
+                    state.eta.data.dtype, state.T.data.shape[-1])
+                _ws_literal_hpg_vmask = jnp.zeros_like(_ws_v_live_mask)
+                _ws_literal_hpg_vmask = _ws_literal_hpg_vmask.at[1:].set(
+                    _raw_ops.vmask3)
             if not self._nemo_ws_test_hooks.legacy_hadv_min_face_thickness:
                 _ws_face_thickness_kbb = _nemo_ws_qco_stage_faces(
                     state.eta.data, _ws_h_ref, _ws_u_live_mask,
@@ -6110,6 +6124,8 @@ class LatLonCGridOceanModel:
                                    self._nemo_ws_test_hooks.stage1_zad_operand_observer),
                                nemo_stage_zad_eta_after_override=(
                                    _nemo_stage1_zad_eta_after_override),
+                               nemo_literal_hpg_vmask=(
+                                   _ws_literal_hpg_vmask),
                                return_nemo_operator_components=_want_rhs_components)
         if _want_rhs_components:
             tend, _mom_term_diagnostics, _live_operands = _tend_result
@@ -6872,6 +6888,8 @@ class LatLonCGridOceanModel:
                                      nemo_stage_zad_operands=stage_zad_operands,
                                      nemo_stage_zad_operand_observer=(
                                          _zad_observers[stage_index - 1]),
+                                     nemo_literal_hpg_vmask=(
+                                         _ws_literal_hpg_vmask),
                                      return_nemo_operator_components=(
                                          _return_components))
                 if _return_components:

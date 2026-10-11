@@ -5109,6 +5109,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     nemo_stage_zad_operands=None,
     nemo_stage_zad_operand_observer=None,
     nemo_stage_zad_eta_after_override=None,
+    nemo_literal_hpg_vmask=None,
 ):
     """Compute 3D baroclinic tendencies on a C-grid lat-lon grid.
 
@@ -5980,7 +5981,19 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
 
     # --- 11. Land masking ---
     du_dt = du_dt * u_mask_3d
-    dv_dt = dv_dt * v_mask_3d
+    if nemo_literal_hpg_vmask is None:
+        dv_dt = dv_dt * v_mask_3d
+    else:
+        # Private fidelity arm for NEMO's vector-form source order. NEMO
+        # stores literal HPG without this compact mask and applies its raw
+        # vmask only in the later depth integral (stp2d.f90:203-209).
+        _literal_vmask = jnp.asarray(nemo_literal_hpg_vmask, dtype=dv_dt.dtype)
+        if _literal_vmask.shape != dv_dt.shape:
+            raise ValueError(
+                "nemo_literal_hpg_vmask must match the V tendency shape; "
+                f"got {_literal_vmask.shape} versus {dv_dt.shape}")
+        _restore_hpg = (_literal_vmask != 0.0) & (v_mask_3d == 0.0)
+        dv_dt = jnp.where(_restore_hpg, hpg_tendency_v, dv_dt * v_mask_3d)
     dT_dt = dT_dt * mask_3d
     dS_dt = dS_dt * mask_3d
 
