@@ -91,7 +91,13 @@ Clean measured implementation: `65c0a29cbf0729943cc6c963ec7704354e3fba52`.
    one-layer thickness array; the related H/face/depth construction reuses the
    same array. The independent wind denominator reads resolved
    `rn_domsiz_m`. The former duplicate literals are absent from those paths.
-6. **Pending final gates.**
+6. **CONFIRMED.** A base-versus-round-4 digest run using the committed card
+   digest helper is byte-identical for all six certified cards: TSUNAMI
+   `8bb5ed6c1bc031bd`, VORTEX `f7489467bc156303`, VORTEX_VEC
+   `5041b91c67bd1443`, GYRE `f02d2f42a570f413`, LOCK_EXCHANGE
+   `d5dfdf83b3a1e0ab`, and OVERFLOW `83de0010e1170032`. The digest artifact
+   SHA-256 is
+   `68653dbdc89d8a5ae83845d7d955c13cffc30714bcdeda352716949598099209`.
 
 ## First non-bit statement
 
@@ -112,7 +118,8 @@ commit stamps. No AT-BAR row moved and neither first-over-bar frontier moved
 earlier. The new coefficient branch is opt-in: SWG alone selects
 `nemo_constant`; the shared default remains `nemo_ldf_c2d`, and the existing
 certified-card configuration test confirms GYRE, LOCK_EXCHANGE, and OVERFLOW
-retain that default. Final hash and focused-card results are pending below.
+retain that default. The six-card digest comparison is byte-identical to base,
+and 99 focused TSUNAMI, VORTEX, and ORCA2 card tests pass.
 
 ## Review input
 
@@ -126,9 +133,25 @@ an attribution.
 
 ## Gates
 
-The focused SWG battery initially passes 172/172 after the implementation. The
-geometry gate remains 34/34 bit-identical; its signed-y Coriolis, wet-cell and
-layer-thickness plants each exit 1. Remaining final gates are pending.
+The final focused SWG/shared-coefficient battery passes 194/194. The geometry
+gate remains 34/34 bit-identical, SHA-256
+`20e87409433a40578465bfee3ae60c2ca8ca2cd7b904d75aeffcdb819e866765`;
+its signed-y Coriolis, wet-cell and layer-thickness plants each exit 1.
+
+The receipt citation gate passes all three compiled P3 citations with zero
+unmapped citations, failures, or map-audit failures, SHA-256
+`29869b7547c136bbd7646c51f71395d827af48a1f851b2a77971390b520909e5`.
+Shifting the constant-branch citation by two lines produces FAIL and exit 1,
+SHA-256
+`772be6d25d3d658827704fa92b0c834de55e1fa2daba82ad5c7da8724cccaa9d`.
+
+The dispatch, strict-validation, hard-coded-constant, and inline-coefficient
+ratchets report 5,841 passed, two skipped, and two failures. Both failures are
+unrelated and reproduce identically at base `e3817a877`: the pre-existing
+JRA55 temperature literal and two land-restart coefficient sites. The focused
+TSUNAMI/VORTEX/ORCA2 set passes 99/99 after excluding only the three known stale
+expected digest pins; the independently compared actual digests are unchanged
+as recorded above.
 
 ## Independent review
 
