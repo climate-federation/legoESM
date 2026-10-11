@@ -134,10 +134,12 @@ def _row(name, ref, cand, mask):
 
 def _gate_rows(out: dict) -> dict:
     rows = [row for step in out.get("per_kt", ()) for row in step["rows"]]
-    out["all_at_bar"] = bool(rows) and all(
-        row["status"] == "AT-BAR" for row in rows)
-    out["all_bit_identical"] = bool(rows) and all(
-        row["bit_identical"] for row in rows)
+    controls = list(out.get("controls", ()))
+    gated = rows + controls
+    out["all_at_bar"] = bool(gated) and all(
+        row["status"] == "AT-BAR" for row in gated)
+    out["all_bit_identical"] = bool(gated) and all(
+        row["bit_identical"] for row in gated)
     out["first_kt_over_bar"] = next(
         (step["kt"] for step in out.get("per_kt", ())
          if any(row["status"] == "DEBT" for row in step["rows"])), None)
@@ -210,17 +212,14 @@ def independent(root: Path, *, allow_dirty: bool = False) -> dict:
 
 def ens_stage1(stage_root: Path, *, plant: str | None = None,
                allow_dirty: bool = False) -> dict:
-    """Report the stage boundary unmeasured until a production stage exists.
-
-    Round 2 incorrectly copied the recorded entry across this boundary after
-    evaluating and discarding an isolated ENS tendency.  The production SWE
-    RK3 stage is still unbuilt, so no candidate output exists to score.  The
-    optional controls perturb a stage-entry input, never an output.
-    """
+    """Drive the JIT production stage 1 from NEMO's recorded kt=1 entry."""
     import jax
     from legoesm.core.precision import PrecisionPolicy, set_policy
     from legoesm.ocean.fidelity.nemo_testcase_recipe import build_swg_card
     from legoesm.ocean.fidelity.provenance import allow_dirty_stamps, git_sha
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel)
+    from legoesm.ocean.dynamics.swe_rk3 import SWERK3StageEntry
 
     allow_dirty_stamps(allow_dirty)
     sha = git_sha(allow_dirty=allow_dirty)
@@ -236,29 +235,43 @@ def ens_stage1(stage_root: Path, *, plant: str | None = None,
     entries = read_stage_entries(stage_root)
     masks = _card_masks(card)
     before = entries[1, 1]
-    reason = (
-        "SWE RK3 production stage is unbuilt; no legoESM stage-1 output "
-        "exists to compare with NEMO's recorded stage-2 entry")
-    rows = [{
-        "name": f"ens_stage1.kt1.s1_to_s2.{name}",
-        "status": "UNMEASURED", "bit_identical": False,
-        "reason": reason,
-    } for name in sorted(before)]
+    target = entries[1, 2]
+    model = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
+
+    def replay(fields):
+        item = SWERK3StageEntry(**{
+            name: jax.numpy.asarray(fields[name], dtype=jax.numpy.float64)
+            for name in SWERK3StageEntry._fields
+        })
+        result = model.replay_swe_rk3_stage(item, card.dt_s, 1)
+        return {name: np.asarray(value) for name, value in result._asdict().items()}
+
+    candidate = replay(before)
+    require(all(value.dtype == np.dtype("float64") for value in candidate.values()),
+            "production stage output is not fp64")
+    rows = [
+        _row(f"swe_rk3_stage1.kt1.s1_to_s2.{name}", target[name], value,
+             _field_mask(name, masks))
+        for name, value in candidate.items()
+    ]
     controls = []
     if plant is not None:
         require(plant in ("zero", "one"),
                 f"unknown stage-entry plant {plant!r}")
-        baseline = before["u_k"].copy()
+        planted = {name: value.copy() for name, value in before.items()}
         at = tuple(np.argwhere(masks["U"])[0])
-        baseline[at] = 0.0 if plant == "zero" else 1.0
-        moved = baseline.copy()
-        moved[at] = np.nextafter(moved[at], np.float64(np.inf))
+        planted["utau_before"][at] = 0.0 if plant == "zero" else 1.0
+        baseline = replay(planted)
+        planted["utau_before"][at] = np.nextafter(
+            planted["utau_before"][at], np.float64(np.inf))
+        moved = replay(planted)
         controls.append(_row(
-            f"stage_entry_input_nextafter_{plant}", baseline, moved,
-            masks["U"]))
+            f"production_input_nextafter_{plant}", baseline["utau_before"],
+            moved["utau_before"], masks["U"]))
     return _gate_rows({
-        "label": "ENS-STAGE1-UNMEASURED", "legoesm_git_sha": sha,
-        "bar": BAR, "plant": plant, "production_stage_executed": False,
+        "label": "SWE-RK3-STAGE1", "legoesm_git_sha": sha,
+        "bar": BAR, "plant": plant, "production_stage_executed": True,
         "controls": controls,
         "per_kt": [{"kt": 1, "stage": 1, "rows": rows}],
     })

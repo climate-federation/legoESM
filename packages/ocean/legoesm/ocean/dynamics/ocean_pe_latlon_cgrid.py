@@ -2046,7 +2046,7 @@ def _bc_ke_and_pressure_gradients(
             # separately round the U pair and V pair before adding them
             # (compiled GYRE dynkeg.f90:121-125).
             # u(i-1,j)=u[:, :-1], u(i,j)=u[:, 1:]; v(i,j-1)=v[:-1], v(i,j)=v[1:].
-            KE = _nemo_c2_kinetic_energy(u, v)
+            KE = nemo_c2_kinetic_energy(u, v)
             # Keep the statement-level implementation in the named helper so
             # its stored NEMO-derived regression vector can exercise it
             # directly.  These lines intentionally retain the established
@@ -6233,7 +6233,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     return tendencies, diagnostics
 
 
-def _nemo_c2_kinetic_energy(u, v):
+def nemo_c2_kinetic_energy(u, v):
     """NEMO ``nkeg_C2`` kinetic energy with compiled source association.
 
     The GYRE build evaluates four products, two pair sums, then the final
@@ -6247,3 +6247,7 @@ def _nemo_c2_kinetic_energy(u, v):
     zu = nemo_source_round(u_w_sq + u_e_sq)
     zv = nemo_source_round(v_s_sq + v_n_sq)
     return nemo_source_round(0.25 * nemo_source_round(zv + zu))
+
+
+# Historical private import retained for existing focused tests and callers.
+_nemo_c2_kinetic_energy = nemo_c2_kinetic_energy

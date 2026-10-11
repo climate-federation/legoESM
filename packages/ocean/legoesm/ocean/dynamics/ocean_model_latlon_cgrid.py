@@ -4352,7 +4352,8 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 f"tracer_advection must be one of {sorted(_valid_tracer_adv)}, "
                 f"got {config.tracer_advection!r}")
-        _valid_outer_int = {"forward_euler", "ab2", "leapfrog", "nemo_mlf"}
+        _valid_outer_int = {
+            "forward_euler", "ab2", "leapfrog", "nemo_mlf", "swe_rk3"}
         _outer_int = getattr(config, "outer_integrator", "forward_euler")
         if _outer_int not in _valid_outer_int:
             raise ValueError(
@@ -4897,6 +4898,22 @@ class LatLonCGridOceanModel:
                             "upwind_perturbation") == "nemo_advective"
                 and not getattr(config, "adaptive_implicit_vertadv", False)
             )
+            # The SWE engine has its own RK3 stage dispatcher.  Its compiled
+            # SWG arm is otherwise the same vector C2/ZAD composition, but
+            # dyn_vor selects ENS through an explicit configuration object.
+            _ws_swe_ens_c2 = (
+                getattr(config, "outer_integrator", "forward_euler")
+                == "swe_rk3"
+                and config.momentum_advection == "vector_invariant"
+                and getattr(getattr(config, "vorticity_scheme", None),
+                            "scheme", None) == "ens_total"
+                and getattr(getattr(config, "vorticity_scheme", None),
+                            "ln_dynvor_msk", None) is True
+                and getattr(config, "ke_gradient_scheme", "centered") == "c2"
+                and getattr(config, "vertical_momentum_scheme",
+                            "upwind_perturbation") == "nemo_advective"
+                and not getattr(config, "adaptive_implicit_vertadv", False)
+            )
             # ln_dynadv_OFF: the flux-form program with no dyn_adv
             # (dynadv.f90:185; stp2d.f90:176; stprk3_stg.f90:316, :334).
             _ws_flux_lin = (
@@ -4904,13 +4921,14 @@ class LatLonCGridOceanModel:
                 and config.momentum_flux_scheme == "none"
             )
             if not (_ws_flux_up3 or _ws_flux_lin or _ws_vector_ene_c2
-                    or _ws_vector_een_c2):
+                    or _ws_vector_een_c2 or _ws_swe_ens_c2):
                 raise ValueError(
                     "NEMO rk3_ws requires one complete momentum program: "
                     "flux_form/nemo_up3/nemo_up3 or flux_form/none/none or "
-                    "vector_invariant/(ene_total|een_total)/c2/"
+                    "vector_invariant/(ene_total|een_total|ens_total)/c2/"
                     "nemo_advective")
-            if getattr(config, "outer_integrator", "forward_euler") != "forward_euler":
+            if (getattr(config, "outer_integrator", "forward_euler")
+                    not in ("forward_euler", "swe_rk3")):
                 raise ValueError(
                     "NEMO rk3_ws does not compose with a second outer "
                     "integrator")
@@ -13214,6 +13232,25 @@ class LatLonCGridOceanModel:
                 return result._replace(state_after=state_after)
             return result
 
+    @partial(jax.jit, static_argnums=(0, 3))
+    def replay_swe_rk3_stage(self, entry, dt: float, stage: int):
+        """Execute one landed SWE RK3 stage through the production JIT path.
+
+        The SWG fidelity ladder supplies NEMO's recorded stage entry.  The
+        selector is production configuration, while the stage number is a
+        static dispatch that fails closed until each source-order arm lands.
+        """
+        if self.config.outer_integrator != "swe_rk3":
+            raise ValueError(
+                "replay_swe_rk3_stage requires outer_integrator='swe_rk3'")
+        if stage != 1:
+            raise ValueError(
+                f"SWE RK3 stage {stage} is unmeasured; only stage 1 is landed")
+        from legoesm.ocean.dynamics.swe_rk3 import swe_rk3_stage1
+        return swe_rk3_stage1(
+            entry, dt, self.grid, self.z_coord,
+            jnp.any(self.z_coord.is_active, axis=-1), self.config)
+
     @partial(jax.jit, static_argnums=(0,))
     def _step_live_operand_reference_jitted(
             self, state: LatLonCGridOceanState, dt: float,
@@ -13259,11 +13296,17 @@ class LatLonCGridOceanModel:
         single-device path) and are threaded into ``_ab2_step`` /
         ``_step_impl`` / ``_apply_polar_filter``."""
         _oi = getattr(self.config, "outer_integrator", "forward_euler")
-        _valid_oi_jitted = ("forward_euler", "ab2", "leapfrog", "nemo_mlf")
+        _valid_oi_jitted = (
+            "forward_euler", "ab2", "leapfrog", "nemo_mlf", "swe_rk3")
         if _oi not in _valid_oi_jitted:
             raise ValueError(
                 f"config.outer_integrator must be one of {_valid_oi_jitted}, "
                 f"got {_oi!r}")
+        if _oi == "swe_rk3":
+            raise ValueError(
+                "outer_integrator='swe_rk3' is not full-step ready: stages 2 "
+                "and 3 remain unmeasured; use replay_swe_rk3_stage for the "
+                "landed stage-1 production boundary")
         if self._nemo_ws_test_hooks.expose_barotropic_substeps:
             if _oi != "forward_euler":
                 raise ValueError(

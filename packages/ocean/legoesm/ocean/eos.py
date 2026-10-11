@@ -909,6 +909,33 @@ def nemo_bn2_depth_ladders(z_coord) -> tuple[jnp.ndarray, jnp.ndarray]:
     return gdept, gdepw_int
 
 
+def nemo_qco_r3t_ratio(
+    z_coord, eta: jnp.ndarray, H_bathy: jnp.ndarray, *,
+    evaluation: str = "quotient",
+) -> jnp.ndarray:
+    """NEMO ``dom_qco_r3c`` T-point ratio ``r3t = ssh * r1_ht_0``.
+
+    Unlike :func:`nemo_r3t_stretch`, this returns the source ratio itself and
+    applies no positive-thickness floor.  The SWE RK3 program writes this
+    field at every stage boundary (compiled ``domqco.f90:207-209``), so an
+    oracle replay must expose the unfloored statement rather than recover it
+    by subtracting one from a guarded stretch factor.
+    """
+    if evaluation not in ("quotient", "nemo_reciprocal"):
+        raise ValueError(
+            f"unknown r3t evaluation {evaluation!r}; expected 'quotient' "
+            "or 'nemo_reciprocal'")
+    if getattr(z_coord, "linear_free_surface", False):
+        return jnp.zeros_like(jnp.asarray(eta))
+    H = jnp.asarray(H_bathy)
+    wet_H = H > 0.0
+    safe_H = jnp.where(wet_H, H, 1.0)
+    if evaluation == "nemo_reciprocal":
+        r1_H = lax.optimization_barrier(1.0 / safe_H)
+        return jnp.where(wet_H, jnp.asarray(eta) * r1_H, 0.0)
+    return jnp.where(wet_H, jnp.asarray(eta) / safe_H, 0.0)
+
+
 def nemo_r3t_stretch(
     z_coord, eta: jnp.ndarray, H_bathy: jnp.ndarray, *,
     evaluation: str = "quotient",
@@ -942,15 +969,15 @@ def nemo_r3t_stretch(
     -------
     array ``(...)`` — the stretch factor ``(1 + r3t)``, floored at 1e-6.
     """
-    if evaluation not in ("quotient", "nemo_reciprocal"):
-        raise ValueError(
-            f"unknown r3t evaluation {evaluation!r}; expected 'quotient' "
-            "or 'nemo_reciprocal'")
     if getattr(z_coord, "linear_free_surface", False):
         # NEMO key_linssh: domqco is NOT active, so r3t == 0 -- the column
         # never stretches.  Mirrors the same special case in
         # vertical.compute_ocean_jacobian (:813-815).
         return jnp.ones_like(jnp.asarray(eta))
+    if evaluation not in ("quotient", "nemo_reciprocal"):
+        raise ValueError(
+            f"unknown r3t evaluation {evaluation!r}; expected 'quotient' "
+            "or 'nemo_reciprocal'")
     # Dry columns (H_bathy == 0) -> r3t = 0 (inert; all their cells are masked)
     # rather than eta/0 -> inf/NaN poisoning the downstream chain.
     H = jnp.asarray(H_bathy)

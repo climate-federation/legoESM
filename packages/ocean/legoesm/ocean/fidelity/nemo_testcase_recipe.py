@@ -4133,7 +4133,7 @@ SWG_DEVIATIONS: tuple[tuple[str, bool, bool, str], ...] = (
     ("key_xios", True, False, "conda-scalarmath reference toolchain"),
 )
 SWG_UNMEASURED: tuple[str, ...] = (
-    "SWE three-stage explicit free-surface RK3 program",
+    "SWE RK3 explicit free-surface stages 2 and 3",
     "stage-3-only viscosity, wind stress, and before-velocity layer drag",
 )
 
@@ -4182,7 +4182,7 @@ def swg_wet_mask(source: dict[str, np.ndarray] | None = None) -> np.ndarray:
 
 
 def build_swg_card() -> NEMOTestcaseCard:
-    """Shipped SWG deck as a fail-closed, currently non-executable card."""
+    """Shipped SWG deck with landed stage 1 and fail-closed later stages."""
     from legoesm.ocean.dynamics.latlon_cgrid_operators import compute_face_masks
 
     nl = SWG_NAMELIST
@@ -4258,10 +4258,16 @@ def build_swg_card() -> NEMOTestcaseCard:
         tke_langmuir_evaluation="nemo_literal",
     )
     cc = NEMO_CONSTANTS_CONFIG._replace(g=nl.rn_modified_grav_m_s2)
-    physics = base.physics._replace(constants=cc)
+    physics = base.physics._replace(
+        constants=cc,
+        vertical_mixing=base.physics.vertical_mixing._replace(scheme="none"),
+        convection=base.physics.convection._replace(scheme="none"),
+    )
     config = base._replace(
         constants=cc, physics=physics, tracer_advection="none", K_h=0.0,
         implicit_vertical_mixing=False, A_v=0.0, K_v=0.0, gm_redi=None,
+        outer_integrator="swe_rk3", zdf_drag_in_matrix=False,
+        barotropic_drag_substep=False,
         vorticity_scheme=ENSVorticityConfig(
             scheme="ens_total", ln_dynvor_msk=nl.ln_dynvor_msk),
         coriolis_scheme="explicit_ab2",
@@ -4293,6 +4299,8 @@ def _validate_swg_card(card: NEMOTestcaseCard) -> None:
         raise ValueError("SWG-zco is closed in both horizontal directions")
     if card.recipe.model_config.constants.g != nl.rn_modified_grav_m_s2:
         raise ValueError("SWG-zco must carry rn_modified_grav as model g")
+    if card.recipe.model_config.outer_integrator != "swe_rk3":
+        raise ValueError("SWG-zco must select the SWE RK3 stage dispatcher")
     vor = card.recipe.model_config.vorticity_scheme
     if (not isinstance(vor, ENSVorticityConfig)
             or vor.scheme != "ens_total"

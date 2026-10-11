@@ -32,7 +32,7 @@ def test_reader_self_check_is_exact_and_score_plant_leaves_bar():
 
 @pytest.mark.skipif(not ROOT.is_dir(), reason="SWG probe not mounted")
 def test_real_independent_ladder_refuses_unmeasured_physics():
-    with pytest.raises(ValueError, match="SWE three-stage"):
+    with pytest.raises(ValueError, match="stages 2 and 3"):
         lad.independent(ROOT, allow_dirty=True)
 
 
@@ -43,15 +43,13 @@ def test_stage_entry_reader_refuses_absent_acquisition(tmp_path):
 
 @pytest.mark.skipif(not lad.DEFAULT_STAGE_ROOT.is_dir(),
                     reason="admitted SWG stage records not mounted")
-def test_ens_stage1_is_unmeasured_until_production_stage_exists():
+def test_ens_stage1_executes_production_jit_and_scores_all_fields():
     clean = lad.ens_stage1(lad.DEFAULT_STAGE_ROOT, allow_dirty=True)
-    assert not clean["production_stage_executed"]
-    assert not clean["all_at_bar"] and not clean["all_bit_identical"]
+    assert clean["production_stage_executed"]
     assert len(clean["per_kt"][0]["rows"]) == 13
-    assert {row["status"] for row in clean["per_kt"][0]["rows"]} == {
-        "UNMEASURED"}
-    assert clean["first_kt_over_bar"] is None
-    assert lad._exit_code(clean) == 1
+    assert {row["status"] for row in clean["per_kt"][0]["rows"]} <= {
+        "AT-BAR", "DEBT"}
+    assert all("max_abs" in row for row in clean["per_kt"][0]["rows"])
 
 
 @pytest.mark.skipif(not lad.DEFAULT_STAGE_ROOT.is_dir(),
@@ -66,6 +64,7 @@ def test_stage_entry_one_ulp_input_plants_leave_bit_for_bit_bar(value):
     assert row["numerical_status"] == "AT-BAR"
     assert row["n_unequal"] == 1
     assert not row["bit_identical"]
+    assert lad._exit_code(out) == 1
 
 
 def test_rows_use_card_t_u_v_masks_and_distinguish_wet_from_dry():
