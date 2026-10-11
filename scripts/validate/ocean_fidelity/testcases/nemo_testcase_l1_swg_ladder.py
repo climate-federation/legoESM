@@ -189,6 +189,9 @@ def independent(root: Path, *, allow_dirty: bool = False) -> dict:
         SWG_NAMELIST, build_swg_card, swg_horizontal_coordinates,
         validate_nemo_testcase_card_for_execution)
     from legoesm.ocean.state import OceanSurfaceForcing
+    from legoesm.ocean.fidelity.provenance import allow_dirty_stamps, git_sha
+    allow_dirty_stamps(allow_dirty)
+    sha = git_sha(allow_dirty=allow_dirty)
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
     require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
     require(jax.default_backend() == "cpu", "ladder must run on CPU")
@@ -223,7 +226,8 @@ def independent(root: Path, *, allow_dirty: bool = False) -> dict:
                      _field_mask(n, masks))
                 for n in cand]
         per_kt.append({"kt": kt, "rows": rows})
-    return _gate_rows({"label": "INDEPENDENT", "bar": BAR,
+    return _gate_rows({"label": "INDEPENDENT", "legoesm_git_sha": sha,
+                       "bar": BAR,
                        "per_kt": per_kt})
 
 
