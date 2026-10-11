@@ -182,7 +182,13 @@ def _run_trace(card, state, freshwater, surface):
 def measure(deck_root: Path, frame_root: Path, twin_a: Path, twin_b: Path,
             label: str, expect_commit: str, *, plant: str = "none") -> dict:
     import jax
+    import jax.numpy as jnp
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import compute_face_masks_3d
+    from legoesm.ocean.vertical import (
+        compute_layer_thickness,
+        nemo_qco_card_mesh_operands,
+    )
 
     require(plant in MEASURE_PLANTS, f"unknown plant {plant!r}")
     require(label in ("independent", "given_nemo_entry"), f"bad label {label!r}")
@@ -232,11 +238,38 @@ def measure(deck_root: Path, frame_root: Path, twin_a: Path, twin_b: Path,
     raw_r1_hv = wet / (raw_hv + 1.0 - wet)
     raw_ssvmask = np.max(raw_vmask3, axis=-1)
 
+    # Recreate the exact static branch at ocean_model_latlon_cgrid.py:6267-6337.
+    # The raw mesh is selected only where NEMO's fold keeps a V face wet but
+    # the reconstructed compact mesh marks it dry; every other face uses the
+    # shared reconstructed operands. Comparing raw geometry everywhere was a
+    # round-236 instrument refusal because it did not replay the candidate's
+    # own completed depth mean.
+    h_ref = compute_layer_thickness(
+        jnp.zeros_like(state.eta.data), state.H_bathy.data,
+        card.recipe.z_coord,
+        min_water_column_m=card.recipe.model_config.min_water_column_m,
+    ).astype(jnp.float64)
+    um3, vm3 = compute_face_masks_3d(
+        card.recipe.z_coord.is_active, card.recipe.grid)
+    ops = nemo_qco_card_mesh_operands(
+        h_ref, um3.astype(jnp.float64), vm3.astype(jnp.float64),
+        card.recipe.grid, jnp.float64)
+    ops_e3v = np.asarray(ops.e3v_0, np.float64)[:, :90, :]
+    ops_vmask = np.asarray(ops.vmask3, np.float64)[:, :90, :]
+    ops_hv = np.asarray(ops.hv_0, np.float64)[:, :90]
+    ops_wet = (ops_hv > 0.0).astype(np.float64)
+    ops_r1 = ops_wet / (ops_hv + 1.0 - ops_wet)
+    fold_unit = (wet > 0.0) & (ops_wet == 0.0)
+    effective_e3v = np.where(fold_unit[..., None], raw_e3v, ops_e3v)
+    effective_vmask = np.where(
+        fold_unit[..., None], raw_vmask3, ops_vmask)
+    effective_r1 = np.where(fold_unit, raw_r1_hv, ops_r1)
+
     candidate = {
-        "e3v_3d": raw_e3v,
+        "e3v_3d": effective_e3v,
         "completed_v_rhs": _native_v(producer["rhs_v"]),
-        "vmask_3d": raw_vmask3,
-        "r1_hv0": raw_r1_hv,
+        "vmask_3d": effective_vmask,
+        "r1_hv0": effective_r1,
         "depth_mean_v": _native_v(producer["depth_v"]),
         "post_drag_v": _native_v(producer["post_drag_v"]),
         "post_wind_incoming_v": _native_v(producer["incoming_v"]),
@@ -282,6 +315,10 @@ def measure(deck_root: Path, frame_root: Path, twin_a: Path, twin_b: Path,
                 oracle["vmask_3d"], oracle["r1_hv0"]),
             oracle["depth_mean_v"], owner),
     }
+    require(depth_replay["candidate_statement"]["at_floor"],
+            "candidate operands do not replay its completed depth mean within the floor")
+    require(depth_replay["oracle_statement"]["bit_exact"],
+            "oracle operands do not replay its completed depth mean")
     depth_accumulated = {
         "e3v": candidate["e3v_3d"],
         "rhs": candidate["completed_v_rhs"],
