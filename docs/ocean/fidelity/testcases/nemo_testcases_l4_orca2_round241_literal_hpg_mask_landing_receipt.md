@@ -1,7 +1,8 @@
 # ORCA2 round 241 — literal HPG mask-boundary landing
 
 Date: 2026-10-11. Frozen base: `cb476aa34`. Preregistration commit:
-`12e59890b`. Production commit: `555cf67ea`. Status: **LANDED**.
+`12e59890b`. Candidate commit: `555cf67ea`. Status: **HELD** because the
+mandatory full fidelity battery did not produce a terminal verdict.
 Evidence root:
 `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round241/`.
 
@@ -32,7 +33,7 @@ test-only legacy/force control; no public configuration choice was added.
 | P1: completed V RHS 668/1,050 unequal -> 0 under both labels | **CONFIRMED** |
 | P1: zero changed slots outside the 668-slot support | **CONFIRMED** |
 | P2: complete round-217 unit reaches kt=8 and S/T return to the OFF values | **REFUTED** |
-| P3: boundary alone may land if all campaign gates pass | **CONFIRMED** |
+| P3: boundary alone may land if all campaign gates pass | **UNMEASURED**; mandatory full-battery verdict unavailable |
 
 The source-exact gate reports, for both independent and given-NEMO-entry
 labels: baseline 668 unequal, arm 0 unequal, 668 changed support slots, zero
@@ -49,7 +50,7 @@ external-mode V correction: after Decision 115 and 114, `vn_adv` remains
 
 ## Trajectory gates
 
-The production OMT-4, rung-0, and shipped rung-10 gates all pass. Compared to
+The candidate OMT-4, rung-0, and shipped rung-10 gates all pass. Compared to
 round 238, no exact row is lost, no unequal count changes, and no row moves by
 more than the fixed `2e-10` floor.
 
@@ -89,6 +90,12 @@ client: Read-only file system (os error 30)`. Independent review unavailable
 in-sandbox; exact output is in `independent_review.log`.
 
 ## OPEN
+
+The literal-HPG candidate must not merge until a serial or otherwise
+terminating full fidelity battery identifies and dispositions the five reds
+seen before the 98% worker hang. The exact blocker is: `tests/ocean/fidelity
+-n 12` reached 3,182/3,203 with five failure markers, then the final worker
+never returned and pytest printed no node IDs or terminal summary.
 
 The complete round-217 unit remains private and HELD. The next walk begins at
 the external-mode V correction (`zvb` / time-averaged `vn_adv`) downstream of
