@@ -24,8 +24,10 @@ RESTART_FIELDS = (
     "sshn", "un", "vn", "uu_n", "vv_n", "utau_b", "vtau_b",
     "emp_b", "qns_b", "sfx_b",
 )
-U_FIELDS = frozenset(("un", "uu_n"))
-V_FIELDS = frozenset(("vn", "vv_n"))
+# Compiled sbc_oce.f90:116-117 defines the before stresses at U/V, and
+# sbcmod.f90:567-568 reads the restart records with cd_type='U'/'V'.
+U_FIELDS = frozenset(("un", "uu_n", "utau_b"))
+V_FIELDS = frozenset(("vn", "vv_n", "vtau_b"))
 
 
 def _stage_checker():

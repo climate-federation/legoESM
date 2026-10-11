@@ -3831,9 +3831,47 @@ def with_first_wzv_after_ssh(model_config, form):
 class SwgResolvedNamelist(NamedTuple):
     """Resolved shipped SWG choices, including inert SWE-deck selections."""
 
-    # namrun / namdom, tests/SWG/EXPREF/namelist_cfg
+    # namctl: every compiled nemogcm.f90:199 read.  output.namelist.dyn:1-23
+    # is the probe's resolved echo; all controls retain namelist_ref values.
+    sn_cfctl: tuple[tuple[str, bool | int], ...] = (
+        ("l_runstat", False), ("l_trcstat", False), ("l_obsstat", False),
+        ("l_oceout", False), ("l_layout", False), ("l_prtctl", False),
+        ("l_prttrc", False), ("l_oasout", False), ("procmin", 0),
+        ("procmax", 1_000_000), ("procincr", 1), ("ptimincr", 1),
+    )
+    ln_timing: bool = False
+    ln_diacfl: bool = False
+    nn_isplt: int = 1
+    nn_jsplt: int = 1
+    nn_ictls: int = 0
+    nn_npfchk: int = 0
+    nn_ictle: int = 0
+    nn_jctls: int = 0
+    nn_jctle: int = 0
+    # namcfg: every compiled nemogcm.f90:201 read.  With ln_read_cfg=False,
+    # cn_domcfg is inert and usr_def_nam runs (nemogcm.f90:292-296);
+    # ln_write_cfg=False makes cn_domcfg_out inert (domain.f90:253).
+    ln_read_cfg: bool = False
+    cn_domcfg: str = "domain_cfg"
+    ln_closea: bool = False
+    ln_write_cfg: bool = False
+    cn_domcfg_out: str = "domain_cfg_out"
+    # namrun: every compiled domain.f90:282-286 read.  Values are the shipped
+    # EXPREF deck over namelist_ref; acquisition-only 10-step overrides are not
+    # card values.  nn_stocklist is inert because ln_rst_list=False
+    # (domain.f90:354-358,399-406).
+    cn_ocerst_indir: str = "."
+    cn_ocerst_outdir: str = "."
+    nn_stocklist: tuple[int, ...] = (0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    ln_rst_list: bool = False
+    nn_no: int = 0
+    cn_exp: str = "SWG"
+    cn_ocerst_in: str = "restart"
+    cn_ocerst_out: str = "restart"
     nn_it000: int = 1
     nn_itend: int = 172800
+    nn_date0: int = 10101
+    nn_time0: int = 0
     nn_leapy: int = 30
     nn_write: int = 480
     nn_istate: int = 1
@@ -3844,13 +3882,32 @@ class SwgResolvedNamelist(NamedTuple):
     nn_rstctl: int = 0
     nn_stock: int = 0
     ln_mskland: bool = False
+    ln_clobber: bool = True
+    nn_chunksz: int = 0
+    ln_cfmeta: bool = False
+    ln_xios_read: bool = False
+    nn_wxios: int = 0
+    # key_top is absent, so this read is inert and reset false by the compiled
+    # no-TOP arm (domain.f90:364-371).
+    ln_top: bool = True
+    # namdom: every compiled domain.f90:287 read.
     rn_Dt_s: float = 3600.0
+    rn_atfp: float = 0.1
+    ln_c1d: bool = False
     ln_meshmask: bool = False
     ln_shuman: bool = False
-    # Compiled domain.f90:288 reads namtile before selecting the untiled path.
+    # namtile: every compiled domain.f90:288 read.  The lengths are inert
+    # because ln_tile=False skips domain.f90:446-472.
     ln_tile: bool = False
-    # namcfg / namusr_def; usrdef_nam.f90:138-167
-    ln_read_cfg: bool = False
+    nn_ltile_i: int = 99999
+    nn_ltile_j: int = 10
+    # namnc4: every compiled domain.f90:289 read; the chunk counts are carried
+    # into snc4set but disabled by ln_nc4zip=False (domain.f90:491-496).
+    nn_nchunks_i: int = 4
+    nn_nchunks_j: int = 4
+    nn_nchunks_k: int = 31
+    ln_nc4zip: bool = False
+    # namusr_def; compiled usrdef_nam.f90:138-167
     nn_SWG: int = 4
     jpkglo: int = 2
     rn_theta_deg: float = 0.0
@@ -3898,6 +3955,30 @@ class SwgResolvedNamelist(NamedTuple):
     # namlbc: compiled dommsk.f90:149.
     rn_shlat: float = 0.0
     ln_vorlat: bool = False
+    # nambdy: every compiled dommsk.f90:150-155 read.  ln_bdy=False makes the
+    # remaining controls inert; the only dom_msk consumer is guarded by
+    # ln_bdy AND ln_mask_file (dommsk.f90:192-203).
+    ln_bdy: bool = False
+    nb_bdy: int = 0
+    ln_coords_file: bool = True
+    cn_coords_file: str = "coordinates.bdy.nc"
+    ln_mask_file: bool = False
+    cn_mask_file: str = ""
+    cn_dyn2d: str = "none"
+    nn_dyn2d_dta: int = 0
+    cn_dyn3d: str = "none"
+    nn_dyn3d_dta: int = 0
+    cn_tra: str = "none"
+    nn_tra_dta: int = 0
+    ln_tra_dmp: bool = False
+    ln_dyn3d_dmp: bool = False
+    rn_time_dmp_days: float = 1.0
+    rn_time_dmp_out_days: float = 1.0
+    cn_ice: str = "none"
+    nn_ice_dta: int = 0
+    ln_vol: bool = False
+    nn_volctl: int = 1
+    nn_rimwidth: int = 10
     # namdrg is inert in SWE, but its shipped selection remains stated.
     ln_drg_OFF: bool = True
     # namdyn_adv / namdyn_vor
@@ -3963,25 +4044,54 @@ SWG_NAMELIST = SwgResolvedNamelist()
 # so the inventory test detects a removed field instead of deriving its own
 # expectation from the object under test.
 SWG_COMPILED_NAMELIST_READS: dict[str, tuple[str, ...]] = {
-    # tests/SWG_OMIP_L1/BLD/ppsrc/nemo/domain.f90:282-286
-    "namrun": ("ln_1st_euler", "nn_rstctl", "nn_stock", "ln_mskland"),
-    # tests/SWG_OMIP_L1/BLD/ppsrc/nemo/domain.f90:288
-    "namtile": ("ln_tile",),
-    # tests/SWG_OMIP_L1/BLD/ppsrc/nemo/sbcmod.f90:157-163
-    "namsbc": (
-        "nn_fsbc", "ln_usr_sbc", "ln_flx", "ln_blk", "ln_abl", "ln_cpl",
-        "ln_mixcpl", "nn_components", "nn_ice", "ln_ice_embd", "ln_traqsr",
-        "ln_dm2dc", "ln_rnf", "nn_fwb", "ln_ssr", "ln_apr_dyn", "ln_wave",
-        "nn_lsm",
+    # tests/SWG_OMIP_L1/BLD/ppsrc/nemo/nemogcm.f90:199
+    "namctl": (
+        "sn_cfctl", "ln_timing", "ln_diacfl", "nn_isplt", "nn_jsplt",
+        "nn_ictls", "nn_npfchk", "nn_ictle", "nn_jctls", "nn_jctle",
     ),
+    # tests/SWG_OMIP_L1/BLD/ppsrc/nemo/nemogcm.f90:201
+    "namcfg": (
+        "ln_read_cfg", "cn_domcfg", "ln_closea", "ln_write_cfg",
+        "cn_domcfg_out",
+    ),
+    # tests/SWG_OMIP_L1/BLD/ppsrc/nemo/domain.f90:282-286
+    "namrun": (
+        "cn_ocerst_indir", "cn_ocerst_outdir", "nn_stocklist", "ln_rst_list",
+        "nn_no", "cn_exp", "cn_ocerst_in", "cn_ocerst_out", "ln_rstart",
+        "nn_rstctl", "nn_it000", "nn_itend", "nn_date0", "nn_time0",
+        "nn_leapy", "nn_istate", "nn_stock", "nn_write", "ln_mskland",
+        "ln_clobber", "nn_chunksz", "ln_1st_euler", "ln_cfmeta",
+        "ln_xios_read", "nn_wxios", "ln_top",
+    ),
+    # tests/SWG_OMIP_L1/BLD/ppsrc/nemo/domain.f90:287
+    "namdom": ("rn_Dt_s", "rn_atfp", "ln_c1d", "ln_meshmask", "ln_shuman"),
+    # tests/SWG_OMIP_L1/BLD/ppsrc/nemo/domain.f90:288
+    "namtile": ("ln_tile", "nn_ltile_i", "nn_ltile_j"),
+    # tests/SWG_OMIP_L1/BLD/ppsrc/nemo/domain.f90:289
+    "namnc4": ("nn_nchunks_i", "nn_nchunks_j", "nn_nchunks_k", "ln_nc4zip"),
     # tests/SWG_OMIP_L1/BLD/ppsrc/nemo/dommsk.f90:149
     "namlbc": ("rn_shlat", "ln_vorlat"),
+    # tests/SWG_OMIP_L1/BLD/ppsrc/nemo/dommsk.f90:150-155
+    "nambdy": (
+        "ln_bdy", "nb_bdy", "ln_coords_file", "cn_coords_file",
+        "ln_mask_file", "cn_mask_file", "cn_dyn2d", "nn_dyn2d_dta",
+        "cn_dyn3d", "nn_dyn3d_dta", "cn_tra", "nn_tra_dta", "ln_tra_dmp",
+        "ln_dyn3d_dmp", "rn_time_dmp_days", "rn_time_dmp_out_days", "cn_ice",
+        "nn_ice_dta", "ln_vol", "nn_volctl", "nn_rimwidth",
+    ),
     # tests/SWG_OMIP_L1/BLD/ppsrc/nemo/domqco.f90:303-306
     "nam_vvl": (
         "ln_vvl_zstar", "ln_vvl_ztilde", "ln_vvl_layer",
         "ln_vvl_ztilde_as_zstar", "ln_vvl_zstar_at_eqtor", "rn_ahe3",
         "rn_rst_e3t_days", "rn_lf_cutoff_days", "rn_zdef_max", "ln_vvl_dbg",
         "nn_vvl_interp",
+    ),
+    # tests/SWG_OMIP_L1/BLD/ppsrc/nemo/sbcmod.f90:157-163
+    "namsbc": (
+        "nn_fsbc", "ln_usr_sbc", "ln_flx", "ln_blk", "ln_abl", "ln_cpl",
+        "ln_mixcpl", "nn_components", "nn_ice", "ln_ice_embd", "ln_traqsr",
+        "ln_dm2dc", "ln_rnf", "nn_fwb", "ln_ssr", "ln_apr_dyn", "ln_wave",
+        "nn_lsm",
     ),
     # tests/SWG_OMIP_L1/BLD/ppsrc/nemo/dynadv.f90:162
     "namdyn_adv": (

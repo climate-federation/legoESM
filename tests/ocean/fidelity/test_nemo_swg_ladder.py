@@ -58,6 +58,20 @@ def test_rows_use_card_t_u_v_masks_and_distinguish_wet_from_dry():
         assert lad._row(f"plant.{kind}.wet", ref, wet, mask)["status"] == "DEBT"
 
 
+@pytest.mark.parametrize("field,kind", [("utau_b", "U"), ("vtau_b", "V")])
+def test_before_stress_uses_native_stagger_and_wrong_stagger_plant_fails(field, kind):
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import build_swg_card
+
+    masks = lad._card_masks(build_swg_card())
+    selected = lad._field_mask(field, masks)
+    assert np.array_equal(selected, masks[kind])
+    # The reviewer's reproduced defect selected T; 80 cells distinguish it
+    # from each correct stagger, so assigning the old mask must go red.
+    assert np.count_nonzero(masks["T"] != masks[kind]) == 80
+    with pytest.raises(AssertionError):
+        assert np.array_equal(masks["T"], masks[kind])
+
+
 def test_numerical_debt_makes_the_ladder_gate_nonzero():
     clean = {"per_kt": [{"kt": 1, "rows": [
         {"status": "AT-BAR", "bit_identical": True}]}]}
