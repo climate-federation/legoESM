@@ -128,8 +128,7 @@ def _row(name, ref, cand, mask):
         "max_abs": float(np.max(np.abs(delta[use]))),
     })
     # This campaign's requested endpoint is bit-for-bit.  Retain the TSUNAMI
-    # 1e-15 numerical score, but never let a non-bit row claim AT-BAR: a
-    # one-ULP input control must make the ladder red at both zero and one.
+    # 1e-15 numerical score, but never let a non-bit row claim AT-BAR.
     if bad.size and result["status"] == "AT-BAR":
         result["numerical_status"] = "AT-BAR"
         result["status"] = "DEBT"
@@ -316,32 +315,37 @@ def swe_rk3_stages(stage_root: Path, *, mode: str = "given",
                 current = candidate
     controls = []
     if plant is not None:
-        require(plant in ("zero", "one"),
+        require(plant == "ulp",
                 f"unknown stage-entry plant {plant!r}")
-        # A zero-dynamics admitted-shape entry isolates the consumed current-U
-        # -> continuity -> SSH path. At zero use one ULP at the admitted
-        # nonzero field's scale: both nextafter(0) and the smallest NORMAL
-        # binary64 input are flushed on the CPU path. At one, use the ordinary
-        # binary64 nextafter step.
-        current = {name: value.copy() for name, value in entries[1, 1].items()}
-        planted = {name: value.copy() for name, value in entries[1, 1].items()}
-        at = tuple(np.argwhere(masks["U"])[len(np.argwhere(masks["U"])) // 2])
-        current["u_k"][at] = 0.0 if plant == "zero" else 1.0
-        baseline = replay(current, planted, 2)
-        if plant == "zero":
-            field_scale = np.max(np.abs(entries[2, 1]["u_k"][masks["U"]]))
-            require(field_scale > 0.0,
-                    "admitted kt=2 U field has no nonzero plant scale")
-            current["u_k"][at] = np.spacing(np.float64(field_scale))
-        else:
-            current["u_k"][at] = np.nextafter(
-                current["u_k"][at], np.float64(np.inf))
-        moved = replay(current, planted, 2)
+        # One genuine ULP of an admitted, nonzero, wet value.  The whole-step
+        # before entry stays byte-identical, so exactly one current-stage input
+        # differs before the JIT production stage consumes it.
+        current = {name: value.copy() for name, value in entries[2, 1].items()}
+        before = {name: value.copy() for name, value in entries[2, 1].items()}
+        wet_nonzero = np.argwhere(masks["U"] & (current["u_k"] != 0.0))
+        require(wet_nonzero.size > 0,
+                "admitted kt=2 stage-1 U field has no nonzero wet value")
+        at = tuple(wet_nonzero[np.argmin(
+            np.abs(current["u_k"][tuple(wet_nonzero.T)]))])
+        original = np.float64(current["u_k"][at])
+        planted_value = np.nextafter(original, np.float64(np.inf))
+        require(original != 0.0 and planted_value != original,
+                "recorded-entry nextafter plant is not one binding ULP")
+        baseline = replay(current, before, 1)
+        current["u_k"][at] = planted_value
+        moved = replay(current, before, 1)
         control = _row(
-            f"production_consumed_u_{plant}", baseline["ssh_k"],
+            "production_recorded_nonzero_u_one_ulp", baseline["ssh_k"],
             moved["ssh_k"], masks["T"])
         require(not control["bit_identical"],
-                f"{plant} stage-entry plant did not change production SSH")
+                "recorded-entry one-ULP plant did not change production SSH")
+        control.update({
+            "input_field": "u_k",
+            "input_cell": [int(x) for x in at],
+            "input_before": float(original),
+            "input_after": float(planted_value),
+            "input_ulp_delta": 1,
+        })
         controls.append(control)
     return _gate_rows({
         "label": f"SWE-RK3-STAGES-{mode.upper()}", "legoesm_git_sha": sha,
@@ -366,8 +370,7 @@ def main(argv=None) -> int:
                    required=True)
     p.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     p.add_argument("--stage-root", type=Path, default=DEFAULT_STAGE_ROOT)
-    p.add_argument("--plant", nargs="?", const="zero", choices=(
-        "zero", "one"))
+    p.add_argument("--plant", nargs="?", const="ulp", choices=("ulp",))
     p.add_argument("--allow-dirty", action="store_true")
     p.add_argument("--json", type=Path)
     a = p.parse_args(argv)

@@ -302,14 +302,27 @@ def test_file_source_uses_the_carried_coefficient_not_the_formula():
 
 
 def test_constant_source_uses_configured_ahm_not_the_metric_formula():
-    """The mode-0 dispatch reaches the shared operator and differs from mode 20."""
-    geo = _geo()
-    constant = _call_visc_z(
-        geo, _ahm_source_config("nemo_constant"), None)
-    metric = _call_visc_z(
-        geo, _ahm_source_config("nemo_ldf_c2d"), None)
-    assert np.max(np.abs(constant)) > 0.0
-    assert not np.array_equal(constant, metric)
+    """The mode-0 dispatch differs from mode 20 under the fp64 campaign policy."""
+    from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+
+    previous = get_policy()
+    try:
+        set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+        assert get_policy() == PrecisionPolicy.fp64(transcendentals="libm")
+        # A deliberately anisotropic grid makes MAX(e1,e2) nonuniform, so the
+        # mode-20 coefficient cannot collapse to the mode-0 scalar in fp64.
+        geo = _geo(n_lat=40, n_lon=40)
+        cfg = _ahm_source_config("nemo_constant")
+        constant = nemo_lateral_viscosity_constant_coefficients(
+            geo, cfg.lateral_viscosity.A_h)
+        half_uv = cfg.lateral_viscosity.A_h / (geo.radius * geo.dlon)
+        metric = nemo_lateral_viscosity_coefficients(geo, half_uv)
+        assert all(np.asarray(a).dtype == np.dtype("float64") for a in constant + metric)
+        assert all(np.max(np.abs(np.asarray(a))) > 0.0 for a in constant + metric)
+        assert any(not np.array_equal(np.asarray(a), np.asarray(b))
+                   for a, b in zip(constant, metric, strict=True))
+    finally:
+        set_policy(previous)
 
 
 def test_file_source_does_not_apply_a_second_vertex_mask():

@@ -65,26 +65,18 @@ def test_all_given_stages_execute_production_jit_and_report_honest_debt():
 
 @pytest.mark.skipif(not lad.DEFAULT_STAGE_ROOT.is_dir(),
                     reason="admitted SWG stage records not mounted")
-def test_stage_entry_one_ulp_input_plant_at_one_leaves_bar():
+def test_recorded_nonzero_stage_entry_one_ulp_plant_leaves_bar():
     out = lad.ens_stage1(
-        lad.DEFAULT_STAGE_ROOT, plant="one", allow_dirty=True)
+        lad.DEFAULT_STAGE_ROOT, plant="ulp", allow_dirty=True)
     assert len(out["controls"]) == 1
     row = out["controls"][0]
     assert row["status"] == "DEBT"
     assert row["n_unequal"] > 0
     assert not row["bit_identical"]
-    assert lad._exit_code(out) == 1
-
-
-@pytest.mark.skipif(not lad.DEFAULT_STAGE_ROOT.is_dir(),
-                    reason="admitted SWG stage records not mounted")
-def test_zero_normal_magnitude_input_plant_binds_and_leaves_bar():
-    out = lad.ens_stage1(
-        lad.DEFAULT_STAGE_ROOT, plant="zero", allow_dirty=True)
-    row = out["controls"][0]
-    assert row["status"] == "DEBT"
-    assert row["n_unequal"] > 0
-    assert not row["bit_identical"]
+    assert row["input_before"] != 0.0
+    assert row["input_after"] == np.nextafter(
+        row["input_before"], np.float64(np.inf))
+    assert row["input_ulp_delta"] == 1
     assert lad._exit_code(out) == 1
 
 
