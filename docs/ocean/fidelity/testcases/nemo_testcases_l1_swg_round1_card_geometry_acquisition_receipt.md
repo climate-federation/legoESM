@@ -4,6 +4,7 @@ Date: 2026-10-11.  Base: `17f6923ff76145ad36cd46de00ec66d5b22064d7`.
 Preregistration commit: `31e9c2f9b678a4954ba778fd2ce922c7b8343bac`.
 Implementation commit: `b466d706b6fb32dbd528c3b8df9a06c5463387b4`.
 Review-fix implementation commit: `4b2feb297e910bb5b85008e5c11d5314a24cd0a7`.
+Fix-round-2 implementation commit: `d70660e2780b50acf692649cac323d109f82eeb7`.
 Evidence directory:
 `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swg_rounds/round1`.
 
@@ -79,11 +80,17 @@ Two repairs, and only these two, are in scope:
 
 ## Verdict
 
-**HELD.**  The operator's independent review returned `DO NOT SHIP`.  All five
-reproduced findings are fixed and committed, but no acquisition should be run
-until the operator's independent re-review returns `SHIP`.
+**HELD.**  The operator's second independent review returned `DO NOT SHIP`.
+Its two remaining blockers are fixed and committed, but no acquisition should
+be run until the operator's next independent re-review returns `SHIP`.
 
-The operator review's terminal verdict is quoted verbatim:
+The second review's terminal verdict is quoted verbatim:
+
+```text
+DO NOT SHIP — The resolved engine inventory still omits 59 compiled namelist reads, and the ladder scores two staggered stress records with the wrong mask.
+```
+
+The first operator review's terminal verdict is retained verbatim:
 
 ```text
 DO NOT SHIP — The resolved card, stage-record admission, and future fidelity ladder each contain a reproduced blocking defect.
@@ -103,22 +110,40 @@ evidence directory.  The authoritative external review is
 
 ## Review findings and fixes
 
-1. **Incomplete resolved switch inventory — fixed.**  The card now freezes
-   the five omitted `namrun`/`namtile` defaults and every variable in the six
-   omitted engine reader groups.  The independent inventory contains 62
-   compiled reads across eight groups; the complete card inventory has 107
-   exact fields.  Removing either planted `ln_abl` or `ln_tile` makes the test
-   fail.  The executed readers are compiled `domain.f90:282-288`,
-   `sbcmod.f90:157-163`, `dommsk.f90:149`, `domqco.f90:303-306`,
-   `dynadv.f90:162`, `dynvor.f90:813-814`, and `ldfdyn.f90:177-180`.
+1. **Incomplete resolved switch inventory — first fix REFUTED; second fix
+   completed.**  The first repair covered only 62 of 131 unique reads and its
+   claim above is withdrawn.  A committed enumerator now parses all 13
+   declarations on the compiled initialization path
+   (`SWG_OMIP_L1/BLD/ppsrc/nemo/nemogcm.f90:332-352`): control and
+   configuration at `SWG_OMIP_L1/BLD/ppsrc/nemo/nemogcm.f90:199-201`, all
+   domain groups at `SWG_OMIP_L1/BLD/ppsrc/nemo/domain.f90:282-289`, lateral
+   boundary groups at `SWG_OMIP_L1/BLD/ppsrc/nemo/dommsk.f90:149-155`, and the
+   six already enumerated readers below.  It reports 13 groups and exactly 131
+   unique mapped card fields.  The card states all 131, including each
+   structured `sn_cfctl` member, and its complete exact inventory is now 166
+   fields.  The 131-way removal plant makes every single omission go red.
+
+   Disabled reads are explicit rather than silently defaulted.  In particular,
+   `ln_read_cfg = F` selects the user-defined domain branch at
+   `SWG_OMIP_L1/BLD/ppsrc/nemo/nemogcm.f90:292-296`; `ln_rst_list = F` makes
+   `nn_stocklist` inert at `SWG_OMIP_L1/BLD/ppsrc/nemo/domain.f90:354-358`;
+   `ln_tile = F` bypasses both tile lengths at `:446-472`; the chunk counts are
+   carried but disabled by `ln_nc4zip = F` at `:493-496`; and `ln_bdy = F`
+   bypasses the boundary-mask consumers at
+   `SWG_OMIP_L1/BLD/ppsrc/nemo/dommsk.f90:192-203`.
 2. **Stored-halo non-finite admission — fixed.**  Admission now checks the
    complete stored array while retaining the owned-crop bounds check.  Both a
    halo NaN and a halo sentinel are refused; the complete clean 30-record
    synthetic acquisition remains admitted.
-3. **All-ones ladder masks and ungated debt — fixed.**  Restart and future
-   independent rows now use the card's wet T mask and native U/V slices from
-   the shared staggered-face mask builder.  Dry-cell plants are excluded, wet
-   T/U/V plants are DEBT, and a DEBT result returns exit 1 with its first step.
+3. **All-ones ladder masks and ungated debt — first fix PARTLY REFUTED; second
+   fix completed.**  Restart and future independent rows use the card's wet T
+   mask and native U/V slices from the shared staggered-face mask builder.
+   `utau_b` is now classified U and `vtau_b` V, matching their compiled
+   definitions at `SWG_OMIP_L1/BLD/ppsrc/nemo/sbc_oce.f90:116-117` and restart
+   reads at `SWG_OMIP_L1/BLD/ppsrc/nemo/sbcmod.f90:567-568`.  Each old T mask
+   differs from the correct stagger at 80 cells, and the wrong-stagger plant
+   goes red.  Dry-cell plants remain excluded, wet T/U/V plants remain DEBT,
+   and a DEBT result returns exit 1 with its first step.
 4. **Vacuous resolved inventory test — fixed.**  The test no longer derives
    its expectation from the NamedTuple under test or accepts a field-count
    lower bound.  It compares two frozen source-derived inventories and proves
@@ -129,13 +154,18 @@ evidence directory.  The authoritative external review is
    remains 34/34 bit-identical; signed-y, wet-cell, and thickness plants each
    exit 1.
 
-Focused results at the review-fix commit: 30 SWG tests passed and 17 citation-
-gate tests passed.  The certified-card battery had 180 passes and the same
+Focused results at the fix-round-2 implementation commit: 163 SWG tests pass;
+the source inventory reports 13 groups, 131 total and 131 unique reads; its
+drop-`ln_abl` control exits 2; restart calibration remains at bar and
+bit-identical while its numerical plant exits 1; and geometry remains 34/34
+bit-identical while all three plants exit 1.  The 39 focused TSUNAMI tests pass.
+The VORTEX card suite has 69 passes and the same
 three pre-existing stale digest assertions for GYRE, LOCK_EXCHANGE, and
-OVERFLOW already reproduced and recorded at the untouched round-1 base; no new
-card test failed.  The clean-tree receipt gate admitted all 18 mapped citations
-with zero failures; shifting the surface-boundary citation by two lines made
-the planted gate fail and exit 1.
+OVERFLOW already reproduced by the independent review at the untouched
+round-1 base; their actual digests are unchanged.  TSUNAMI-zco, VORTEX-zco and
+VORTEX_VEC-zco retain the independently reviewed hashes `8bb5ed6c1bc031bd`,
+`f7489467bc156303`, and `5041b91c67bd1443`.  Acquisition preflight passes at
+the fix-round-2 commit without invoking `makenemo` or `mpirun`.
 
 ## Frozen predictions and falsifiers
 
@@ -242,9 +272,21 @@ the operator probe:
 
 - The domain reader states the reviewed `namrun`, `namdom`, and `namtile`
   switches: `SWG_OMIP_L1/BLD/ppsrc/nemo/domain.f90:282-288`.
+- The compiled SWE initialization path reaches the domain, SBC, lateral-
+  diffusion, advection, and vorticity readers:
+  `SWG_OMIP_L1/BLD/ppsrc/nemo/nemogcm.f90:332-352`; its own `namctl` and
+  `namcfg` declarations are at `:199-201`.
+- The complete domain declaration set, including `namnc4`, is
+  `SWG_OMIP_L1/BLD/ppsrc/nemo/domain.f90:282-289`; the complete lateral-
+  boundary declaration set is
+  `SWG_OMIP_L1/BLD/ppsrc/nemo/dommsk.f90:149-155`.
 - The complete surface-boundary reader inventory is
   `SWG_OMIP_L1/BLD/ppsrc/nemo/sbcmod.f90:157-163`; the lateral-boundary
   reader is `SWG_OMIP_L1/BLD/ppsrc/nemo/dommsk.f90:149`.
+- The before-level stresses are native U and V records at
+  `SWG_OMIP_L1/BLD/ppsrc/nemo/sbc_oce.f90:116-117`, and restart admission
+  requests those staggers explicitly at
+  `SWG_OMIP_L1/BLD/ppsrc/nemo/sbcmod.f90:567-568`.
 - The complete variable-volume reader inventory is
   `SWG_OMIP_L1/BLD/ppsrc/nemo/domqco.f90:303-306`.
 - Momentum advection, vorticity, and lateral-diffusion reader inventories are
@@ -276,7 +318,7 @@ the operator probe:
 
 ## OPEN
 
-1. The operator independently re-reviews review-fix commit `4b2feb297`; do not
+1. The operator independently re-reviews fix-round-2 commit `d70660e27`; do not
    run acquisition unless the terminal verdict is `SHIP`.
 2. After `SHIP`, the operator runs the committed acquisition runner and returns
    the admitted stage-entry record plus passivity report.

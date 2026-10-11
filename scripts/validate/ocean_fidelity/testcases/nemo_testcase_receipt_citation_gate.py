@@ -102,8 +102,14 @@ FILES = {
         _SWG_COMPILED / "dynzad.f90"),
     "SWG_OMIP_L1/BLD/ppsrc/nemo/stprk3.f90": (
         _SWG_COMPILED / "stprk3.f90"),
+    "SWG_OMIP_L1/BLD/ppsrc/nemo/nemogcm.f90": (
+        _SWG_COMPILED / "nemogcm.f90"),
     "SWG_OMIP_L1/BLD/ppsrc/nemo/domain.f90": (
         _SWG_COMPILED / "domain.f90"),
+    "SWG_OMIP_L1/BLD/ppsrc/nemo/mppini.f90": (
+        _SWG_COMPILED / "mppini.f90"),
+    "SWG_OMIP_L1/BLD/ppsrc/nemo/sbc_oce.f90": (
+        _SWG_COMPILED / "sbc_oce.f90"),
     "SWG_OMIP_L1/BLD/ppsrc/nemo/sbcmod.f90": (
         _SWG_COMPILED / "sbcmod.f90"),
     "SWG_OMIP_L1/BLD/ppsrc/nemo/dommsk.f90": (
@@ -1429,14 +1435,41 @@ FILES = {
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
     # --- SWG lane round 1 (survey + card + geometry + acquisition) ---
+    'SWG_OMIP_L1/BLD/ppsrc/nemo/nemogcm.f90:199-201': [
+        'NAMELIST/namctl/ sn_cfctl',
+        'NAMELIST/namcfg/ ln_read_cfg', 3],
+    'SWG_OMIP_L1/BLD/ppsrc/nemo/nemogcm.f90:292-296': [
+        'IF( ln_read_cfg ) THEN', ('ENDIF', 6), 5],
+    'SWG_OMIP_L1/BLD/ppsrc/nemo/nemogcm.f90:332-352': [
+        'CALL     dom_init( Nbb, Nnn, Naa )',
+        'CALL dyn_ldf_init', 21],
     'SWG_OMIP_L1/BLD/ppsrc/nemo/domain.f90:282-288': [
         'NAMELIST/namrun/ cn_ocerst_indir',
         'NAMELIST/namtile/ ln_tile, nn_ltile_i, nn_ltile_j', 7],
+    'SWG_OMIP_L1/BLD/ppsrc/nemo/domain.f90:282-289': [
+        'NAMELIST/namrun/ cn_ocerst_indir',
+        'NAMELIST/namnc4/ nn_nchunks_i, nn_nchunks_j, nn_nchunks_k, ln_nc4zip', 8],
+    'SWG_OMIP_L1/BLD/ppsrc/nemo/domain.f90:354-358': [
+        'IF( ln_rst_list ) THEN', ('ENDIF', 10), 5],
+    'SWG_OMIP_L1/BLD/ppsrc/nemo/domain.f90:446-472': [
+        'IF( ln_tile ) THEN', ('ENDIF', 24), 27],
+    'SWG_OMIP_L1/BLD/ppsrc/nemo/domain.f90:493-496': [
+        'snc4set%ni   = nn_nchunks_i', 'snc4set%luse = ln_nc4zip', 4],
     'SWG_OMIP_L1/BLD/ppsrc/nemo/sbcmod.f90:157-163': [
         'NAMELIST/namsbc/ nn_fsbc',
         '&             ln_wave  , nn_lsm', 7],
     'SWG_OMIP_L1/BLD/ppsrc/nemo/dommsk.f90:149': (
         'NAMELIST/namlbc/ rn_shlat, ln_vorlat'),
+    'SWG_OMIP_L1/BLD/ppsrc/nemo/dommsk.f90:149-155': [
+        'NAMELIST/namlbc/ rn_shlat, ln_vorlat',
+        '&             ln_vol, nn_volctl, nn_rimwidth', 7],
+    'SWG_OMIP_L1/BLD/ppsrc/nemo/dommsk.f90:192-203': [
+        '! Mask corrections for bdy (read in mppini2)', ('ENDIF', 4), 12],
+    'SWG_OMIP_L1/BLD/ppsrc/nemo/sbc_oce.f90:116-117': [
+        'utauU  , utau_b', 'vtauV  , vtau_b', 2],
+    'SWG_OMIP_L1/BLD/ppsrc/nemo/sbcmod.f90:567-568': [
+        "'utau_b', utau_b, cd_type = 'U'",
+        "'vtau_b', vtau_b, cd_type = 'V'", 2],
     'SWG_OMIP_L1/BLD/ppsrc/nemo/domqco.f90:303-306': [
         'NAMELIST/nam_vvl/ ln_vvl_zstar',
         '&              nn_vvl_interp', 4],
