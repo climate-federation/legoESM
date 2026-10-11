@@ -39,7 +39,7 @@ def _atomic_report():
 
 
 def test_private_arm_defaults_off():
-    assert _NEMOWSRK3TestHooks().preserve_literal_hpg_vmask is False
+    assert _NEMOWSRK3TestHooks().preserve_literal_hpg_vmask is None
 
 
 def test_classifier_requires_exact_rhs_closure():

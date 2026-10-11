@@ -1174,9 +1174,10 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # the legacy four-statement path and True selects the complete unit.
     barotropic_atomic_fold_unit: object = None
     # Private round-241 arm: preserve literal HPG through legoESM's compact
-    # V-mask boundary wherever NEMO's recorded raw mask stays wet. False is
-    # the unchanged production path; no public config can select this.
-    preserve_literal_hpg_vmask: bool = False
+    # V-mask boundary wherever NEMO's recorded raw mask stays wet. None takes
+    # the production NEMO predicate; False is the private legacy control and
+    # True forces the arm. No public config can select any of these values.
+    preserve_literal_hpg_vmask: object = None
     # WRITE-only developed-state observer for the completed three-dimensional
     # momentum RHS before its depth reduction.  Kept separate from the final
     # slow-forcing callback so the round-141 gate can prove this minimum
@@ -6056,7 +6057,17 @@ class LatLonCGridOceanModel:
             _ws_h_ref = compute_layer_thickness(
                 jnp.zeros_like(state.eta.data), state.H_bathy.data, _zc,
                 min_water_column_m=_cfg_b.min_water_column_m)
-            if self._nemo_ws_test_hooks.preserve_literal_hpg_vmask:
+            # NEMO's WS-RK3 vector branch stores literal HPG without the
+            # generic compact mask, then applies its raw mesh mask during the
+            # later depth integral (dynhpg.f90:400-402,425-427;
+            # stp2d.f90:203-209).  Route the resolved raw mask for every
+            # vector/non-flux NEMO stage.  The private hook only lets the
+            # measurement arm force this boundary independently.
+            _hpg_mask_arm = (
+                self._nemo_ws_test_hooks.preserve_literal_hpg_vmask)
+            if (_hpg_mask_arm is True
+                    or (_hpg_mask_arm is None
+                        and _cfg_b.momentum_advection != "flux_form")):
                 _raw_ops = nemo_qco_resolved_mesh_operands(
                     _zc, _grid, _ws_u_live_mask, _ws_v_live_mask,
                     state.eta.data.dtype, state.T.data.shape[-1])

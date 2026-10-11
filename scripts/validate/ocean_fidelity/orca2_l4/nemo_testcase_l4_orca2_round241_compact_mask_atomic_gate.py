@@ -165,7 +165,8 @@ def _rhs_row(card, state, freshwater, surface, oracle_rhs) -> dict[str, object]:
     common = dict(expose_live_stage_operands=True, barotropic_atomic_fold_unit=True)
     base_model = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
-        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(**common))
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+            **common, preserve_literal_hpg_vmask=False))
     arm_model = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
         _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
