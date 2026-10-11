@@ -96,7 +96,6 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     vector_bilaplacian_cgrid,
     vector_laplacian_cgrid,
     vector_laplacian_dissipation_cgrid,
-    nemo_lateral_viscosity_constant_coefficients,
     nemo_lateral_viscosity_coefficients,
     nemo_ldf_lap_viscosity_cgrid,
     nemo_ldf_lap_viscosity_e3_cgrid,
@@ -257,10 +256,9 @@ VALID_LATERAL_VISCOSITY_OPERATOR = frozenset(
 VALID_LATERAL_VISCOSITY_E3_WEIGHTING = frozenset({"off", "nemo_e3"})
 # WHERE the "nemo_div_curl" coefficient comes from, mirroring NEMO's
 # namdyn_ldf nn_ahm_ijk_t: "nemo_ldf_c2d" (default, bit-identical) is the
-# nn_ahm_ijk_t=20 metric formula; "nemo_constant" is nn_ahm_ijk_t=0 and
-# assigns the configured scalar directly; "nemo_ahm_3d_file" is
-# nn_ahm_ijk_t=-30, the whole 3-D field READ from eddy_viscosity_3D.nc and
-# carried on the vertical coordinate by the card (ldfdyn.f90:311-322,348-353).
+# nn_ahm_ijk_t=20 metric formula; "nemo_constant" is nn_ahm_ijk_t=0 direct;
+# "nemo_ahm_3d_file" is nn_ahm_ijk_t=-30, the whole 3-D field READ from
+# eddy_viscosity_3D.nc and carried by the card (ldfdyn.f90:311-322,348-353).
 VALID_LATERAL_VISCOSITY_COEFFICIENT_SOURCE = frozenset(
     {"nemo_ldf_c2d", "nemo_constant", "nemo_ahm_3d_file"})
 # Lateral side BC (config.lateral_side_bc): free-slip (default; viscous flux zeroed
@@ -3566,25 +3564,19 @@ def _bc_horizontal_viscosity(
                 )
             _ahmt = jnp.asarray(_ahmt)
             _ahmf = jnp.asarray(_ahmf)
-        elif _ahm_source == "nemo_constant":
-            # NEMO nn_ahm_ijk_t=0 (ldfdyn.f90:311-322): ldf_dyn_init forms
-            # zah0=1/2*rn_Uv*rn_Lv and assigns the same scalar at every T/F
-            # point. The card carries that resolved zah0 as A_h.
-            _ahmt, _ahmf = nemo_lateral_viscosity_constant_coefficients(
-                grid, config.lateral_viscosity.A_h)
         else:
             if not (getattr(grid, "dlon", 0.0) and grid.dlon > 0.0):
                 raise ValueError(
                     "lateral_viscosity_operator='nemo_div_curl' needs a lat-lon grid "
                     "with a scalar dlon (got dlon<=0; tripolar unsupported)."
                 )
-            _half_UM = config.lateral_viscosity.A_h / (grid.radius * grid.dlon)
-            _ahmt, _ahmf = nemo_lateral_viscosity_coefficients(grid, _half_UM)
-        # 3-D staircase vertex mask: a 2-D surface vertex mask broadcast over
-        # levels leaves zeta LIVE at submerged staircase side walls, where it
-        # is computed against the dry cells' zero velocities — an accidental
-        # NO-SLIP on every slope/sill face (ahmf·zeta stress) that NEMO's 3-D
-        # fmask zeroes.  Build per level from is_active; plain z-star coords
+            _half_UM = (
+                config.lateral_viscosity.A_h if _ahm_source == "nemo_constant"
+                else config.lateral_viscosity.A_h / (grid.radius * grid.dlon))
+            _ahmt, _ahmf = nemo_lateral_viscosity_coefficients(
+                grid, _half_UM, constant=_ahm_source == "nemo_constant")
+        # A 2-D surface vertex mask would leave zeta live at submerged walls.
+        # Build per level from is_active; plain z-star coords
         # (no is_active) keep the 2-D mask bit-identically.
         # THIS MASK IS NOT NEMO's fmask.  It is the four-T-cell product, 0 or
         # 1.  NEMO's fmask carries the lateral momentum boundary condition in

@@ -6266,6 +6266,8 @@ CITATION_MAP = {
         5],
     'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:317-317': (
         "CALL dyn_ldf( kstp, Nbb, Nnn, uu, vv, Nrhs )  ! lateral mixing", 1),
+    'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:317': (
+        "CALL dyn_ldf( kstp, Nbb, Nnn, uu, vv, Nrhs )  ! lateral mixing", 1),
     'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:319-332': [
         "z1_2rho0 = 0.5_wp * r1_rho0",
         ("END DO   ;   END DO   ;   END DO", 7),

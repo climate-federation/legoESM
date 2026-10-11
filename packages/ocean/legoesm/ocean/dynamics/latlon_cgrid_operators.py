@@ -1396,7 +1396,7 @@ def vector_bilaplacian_cgrid(
 
 
 def nemo_lateral_viscosity_coefficients(
-    grid: LatLonGrid, half_UM: float,
+    grid: LatLonGrid, half_UM: float, *, constant: bool = False,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     r"""NEMO ``ldf_c2d`` viscosity coefficients ``ahmt``/``ahmf`` (nn_ahm_ijk_t=20).
 
@@ -1439,6 +1439,8 @@ def nemo_lateral_viscosity_coefficients(
     ahmt : (n_lat,)      viscosity at T-points [m²/s].
     ahmf : (n_lat+1,)    viscosity at F-points [m²/s].
     """
+    if constant:
+        return nemo_lateral_viscosity_constant_coefficients(grid, half_UM)
     if not (hasattr(grid, "dx_u") and hasattr(grid, "dy_u")
             and hasattr(grid, "dx_v") and hasattr(grid, "dy_v")):
         raise ValueError(
