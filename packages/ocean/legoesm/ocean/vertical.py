@@ -455,12 +455,10 @@ def nemo_e3f_0vor_from_tmask(e3t_0, tmask, dry_vertex_fill, *,
 
 
 def nemo_qco_live_vorticity_e3f_cgrid(
-    eta, z_coord, dtype, nn_e3f_typ=0, *, grid=None, e3t_0=None, tmask=None,
-    reference_e3f=None, r3f_override=None, return_ratio=False,
-    apply_fe3mask=True, source_associated=False,
+    eta, z_coord, dtype, nn_e3f_typ=0, *, grid=None, e3t_0=None, tmask=None, reference_e3f=None,
+    r3f_override=None, return_ratio=False, apply_fe3mask=True, source_associated=False,
 ):
     """Build literal NEMO ``e3f_vor(Kmm)`` from the card's own mesh.
-
 
     ``dyn_vor_init`` freezes ``e3f_0vor`` from masked reference T-cell
     thicknesses (``dynvor.F90:918-950``); ``dom_qco_r3c_RK3`` builds live
@@ -509,11 +507,11 @@ def nemo_qco_live_vorticity_e3f_cgrid(
         e3t0, tmask, grid=grid, dtype=dtype, nn_e3f_typ=nn_e3f_typ,
         substitute_e3f=mesh_e3f)
 
-    round_op = nemo_source_round if source_associated else b
-    area_eta = round_op(jnp.asarray(geom_grid.area_T, dtype=dtype) * eta)
+    b = nemo_source_round if source_associated else b
+    area_eta = b(jnp.asarray(geom_grid.area_T, dtype=dtype) * eta)
     area_eta_n = north(area_eta)
-    quad = round_op(round_op(area_eta + east(area_eta))
-                    + round_op(area_eta_n + east(area_eta_n)))
+    quad = b(b(area_eta + east(area_eta))
+             + b(area_eta_n + east(area_eta_n)))
     fe3mask = nemo_fe3mask_from_tmask(tmask, grid=grid)
     hf0 = _nemo_qco_hf0(raw, e3f0vor, fe3mask, dtype)
     wet_f = (hf0 > 0.0).astype(dtype)
@@ -521,8 +519,7 @@ def nemo_qco_live_vorticity_e3f_cgrid(
     # Preserve NEMO's native F-layout operand and stored-reciprocal boundary
     # on cards that carry its raw mesh.
     r1_area_f = _nemo_qco_r1_area_f(raw, geom_grid, dtype)
-    r3f = round_op(
-        round_op(round_op(quarter * quad) * r1_hf0) * r1_area_f)
+    r3f = b(b(b(quarter * quad) * r1_hf0) * r1_area_f)
     if r3f_override is not None:
         supplied = jnp.asarray(r3f_override, dtype=dtype)
         if supplied.shape != r3f.shape:
@@ -547,14 +544,7 @@ def nemo_qco_live_vorticity_e3f_cgrid(
         raise ValueError(
             "reference_e3f must be the native A2D F-point thickness with "
             f"shape {e3f0vor.shape}; got {reference.shape}")
-    # Most OCE callers consume the domzgr-substituted thickness, whose live
-    # ratio is masked by ``fe3mask``.  SWE ``vor_ens`` is a distinct compiled
-    # statement: dynvor.f90:659-660 divides by
-    # ``e3f_0vor * (1 + r3f)`` directly, including coastal F halo values.
-    # Keep that source choice explicit rather than silently applying the
-    # generic substitution to the shallow-water engine.
-    ratio_mask = fe3mask if apply_fe3mask else jnp.ones_like(fe3mask)
-    e3f_native = b(reference * b(one + r3f[..., None] * ratio_mask))
+    e3f_native = b(reference * b(one + r3f[..., None] * (fe3mask if apply_fe3mask else jnp.ones_like(fe3mask))))
 
     # NEMO native F(i,j) maps to legoESM vertex [j+1,i+1].  The added
     # south/west rows are inert walls for this closed-box identity.
