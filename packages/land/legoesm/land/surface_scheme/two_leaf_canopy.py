@@ -77,6 +77,14 @@ _DEFAULT_PICARD_OMEGA = 0.15
 # converged flags identical, state differs only by rounding (<= 5e-13 K).
 _CANOPY_SOLVE_GROUP = 64
 
+# Retry seed for a column with no converged solution: the cold start with leaf
+# and canopy-air temperatures this much below the air.  On humid, light-wind
+# nights the cold start sits on the unstable side of the neutral-to-stable
+# switch, where the residual has a local minimum that is not a root; the root
+# is 1.5-2.2 K colder, past the ridge.  Measured on 266 such recorded columns:
+# cold start converged 34, 1/2/3 K colder 259/260/260; daytime unchanged.
+_RETRY_COOLING_K = 1.0
+
 # Time constant of the growth-temperature exponential moving average [s].
 # 30 days * 86400 s/day = 2.592e6 s.  At dt = 1800 s, ~76 days reach 95 %
 # of the equilibrium.  Used by the caller (``step_*_land``) to advance
@@ -437,6 +445,9 @@ def compute_two_leaf_canopy_fluxes(
 
     cold_state = jnp.stack(
         [Ta, Ta, Ci_init, Ci_init, Ta, q_c_init], axis=-1)  # (ncol, 6)
+    _Ta_retry = Ta - _RETRY_COOLING_K
+    retry_state = jnp.stack(
+        [_Ta_retry, _Ta_retry, Ci_init, Ci_init, _Ta_retry, q_c_init], axis=-1)
 
     # ---- Warm start (numerical cache) ----
     # ``canopy_seed`` is the previous timestep's LAST CONVERGED solution, carried
@@ -520,8 +531,8 @@ def compute_two_leaf_canopy_fluxes(
     # exists; it is both the next pass's seed and (after the loop) the cache
     # handed back to the caller.
     # A column with no converged solution yet alternates its seed across passes
-    # between the caller's seed and the COLD state, so a warm seed that led the
-    # solve astray gets a cold retry inside the same call.  The passes run over
+    # between the caller's seed and the (slightly cooled) cold state, so a seed
+    # that led the solve astray gets a different retry inside the same call.  The passes run over
     # every column anyway (vmap), so this costs nothing; for a column that never
     # converges, its frozen soil boundary makes later passes repeat passes 0/1.
     # A pass that did not converge must not move the soil boundary either: its
@@ -529,7 +540,7 @@ def compute_two_leaf_canopy_fluxes(
     x_conv = jnp.full_like(initial_state, jnp.nan)
     for _picard_iter in range(n_picard):
         bundles_k = _build_bundle(Ts_bc_k)
-        _fallback = initial_state if _picard_iter % 2 == 0 else cold_state
+        _fallback = initial_state if _picard_iter % 2 == 0 else retry_state
         _seed_k = jnp.where(jnp.all(jnp.isfinite(x_conv), axis=-1, keepdims=True),
                             jnp.nan_to_num(x_conv), _fallback)
         (x_final, n_iters, converged, resid_sq, resid_rel, lam_f,
