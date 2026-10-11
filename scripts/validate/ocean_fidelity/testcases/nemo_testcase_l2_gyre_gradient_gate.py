@@ -77,13 +77,14 @@ def require(condition: bool, message: str) -> None:
         raise RuntimeError(message)
 
 
-def configure_runtime() -> None:
-    """Select and verify the registered fp64/libm compute policy."""
+def configure_runtime(transcendentals: str = "libm") -> None:
+    """Select and verify the requested fp64 transcendental policy."""
     require(bool(jax.config.jax_enable_x64), "JAX_ENABLE_X64=1 is required")
-    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    policy = PrecisionPolicy.fp64(transcendentals=transcendentals)
+    set_policy(policy)
     require(
-        get_policy() == PrecisionPolicy.fp64(transcendentals="libm"),
-        "precision policy is not fp64/libm",
+        get_policy() == policy,
+        f"precision policy is not {policy!r}",
     )
 
 
@@ -101,9 +102,9 @@ def _load_surface_forcings():
     return module._surface_forcings
 
 
-def build_context() -> GYREContext:
+def build_context(*, transcendentals: str = "libm") -> GYREContext:
     """Build the certified card and prime only production step caches."""
-    configure_runtime()
+    configure_runtime(transcendentals)
     card = build_nemo_testcase_card(CASE)
     require(card.dt_s == DT_S, f"card dt changed: {card.dt_s}")
     cfg = card.recipe.model_config
@@ -379,9 +380,10 @@ def directional_derivatives(loss, base, direction, *, plant=False):
     return classify_agreement(reverse, forward, finite_difference)
 
 
-def measure_agreement(n_steps: int, *, plant=False):
+def measure_agreement(n_steps: int, *, plant=False,
+                      transcendentals: str = "libm"):
     """Build and evaluate one certified-card agreement row."""
-    context = build_context()
+    context = build_context(transcendentals=transcendentals)
     zero = jnp.zeros_like(context.initial_state.T.data)
     truth_state = production_rollout(context, zero, n_steps)
     jax.block_until_ready(truth_state)
@@ -484,9 +486,10 @@ def extrapolate_360(schedule: str, baseline_mib: float, peak6_mib: float) -> flo
     raise ValueError(f"unknown schedule {schedule!r}")
 
 
-def measure_resources(n_steps: int, schedule: str):
+def measure_resources(n_steps: int, schedule: str, *,
+                      transcendentals: str = "libm"):
     """Warm once, then measure one blocked reverse execution and peak memory."""
-    context = build_context()
+    context = build_context(transcendentals=transcendentals)
     zero = jnp.zeros_like(context.initial_state.T.data)
     truth_state = production_rollout(context, zero, n_steps)
     jax.block_until_ready(truth_state)
@@ -575,6 +578,10 @@ def parse_args(argv=None):
     parser.add_argument("--steps", type=int, choices=(1, 6), required=True)
     parser.add_argument("--schedule", choices=SCHEDULES)
     parser.add_argument("--plant", choices=("broken_vjp",))
+    parser.add_argument(
+        "--transcendentals", choices=("libm", "native"), default="libm",
+        help="libm is the certified CPU policy; GPU rows must select native",
+    )
     parser.add_argument("--expect-commit", required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
@@ -592,9 +599,12 @@ def main(argv=None) -> int:
     provenance = require_measurement_stamp(args.expect_commit)
     if args.mode == "agreement":
         row = measure_agreement(
-            args.steps, plant=args.plant == "broken_vjp")
+            args.steps, plant=args.plant == "broken_vjp",
+            transcendentals=args.transcendentals)
     else:
-        row = measure_resources(args.steps, args.schedule)
+        row = measure_resources(
+            args.steps, args.schedule,
+            transcendentals=args.transcendentals)
     row["provenance"] = provenance
     row["argv"] = list(sys.argv if argv is None else argv)
     write_result(args.output, row)

@@ -121,3 +121,11 @@ def test_resource_cli_requires_a_schedule():
             "resources", "--steps", "1", "--expect-commit", "deadbeef",
             "--output", "/tmp/unused-gyre-gradient-row.json",
         ])
+
+
+def test_gpu_cli_can_select_native_transcendentals_explicitly():
+    args = G.parse_args([
+        "agreement", "--steps", "1", "--transcendentals", "native",
+        "--expect-commit", "deadbeef", "--output", "/tmp/unused-row.json",
+    ])
+    assert args.transcendentals == "native"
