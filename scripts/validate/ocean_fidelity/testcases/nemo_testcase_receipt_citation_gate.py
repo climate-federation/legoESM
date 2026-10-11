@@ -214,6 +214,8 @@ FILES = {
         _ORCA2_R210OMT1_COMPILED / "trazdf.f90"),
     "ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/lbcnfd.f90": (
         _ORCA2_R210OMT1_COMPILED / "lbcnfd.f90"),
+    "ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/dommsk.f90": (
+        _ORCA2_R210OMT1_COMPILED / "dommsk.f90"),
     "ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/restart.f90": (
         _ORCA2_R210OMT1_COMPILED / "restart.f90"),
     "ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/daymod.f90": (
@@ -1577,6 +1579,15 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 round 245: OMT-4 midpoint V-depth cancelling pair ---
+    'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/dommsk.f90:205-249': [
+        '!  Ocean/land mask at u-, v-, and f-points   (computed from tmask)',
+        'ssvmask(:,:) = MAXVAL( vmask(:,:,:), DIM=3 )',
+        45],
+    'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/lbcnfd.f90:945-959': [
+        "IF( c_NFtype == 'T' ) THEN            ! *  North fold  T-point pivot",
+        'ptab(ji,ipjm1) = psgn * ptab(ijt,ipjm1)',
+        15],
     # --- ORCA2 round 243: OMT-4 substep-6 V-transport operand split ---
     'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:460-484': [
         '!* Set extrapolation coefficients for predictor step:',
