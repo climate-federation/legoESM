@@ -68,8 +68,8 @@ legoESM/NEMO fidelity claim.
 The corrected source transcription is bit-identical to all 34 admitted probe
 rows: T/U/V/F coordinates, eight e1/e2 metrics, source and card Coriolis,
 T/U/V/F masks, and the depth/thickness records.  `geometry.log` ends
-`GEOMETRY IDENTICAL`; `geometry.json` stamps implementation commit
-`b466d706b6fb32dbd528c3b8df9a06c5463387b4`.
+`GEOMETRY IDENTICAL`; `geometry.json` contains the clean-tree commit stamp for
+the final gate invocation.
 
 All three preregistered controls fired and exited nonzero:
 
