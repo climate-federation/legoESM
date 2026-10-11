@@ -113,13 +113,15 @@ def _resolved_stage_geometry(card, *, reconstructed: bool = False):
         model_module._nemo_ws_qco_stage_faces = original
 
 
-def _hooks(card, slow_override, raw_vmask, *, live: bool):
+def _hooks(card, slow_override, raw_vmask, *, live: bool,
+           production_geometry: bool = False):
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import _NEMOWSRK3TestHooks
 
+    if production_geometry:
+        return _NEMOWSRK3TestHooks(expose_live_stage_operands=live)
     return _NEMOWSRK3TestHooks(
         expose_live_stage_operands=live,
         barotropic_slow_forcing_override=slow_override,
-        barotropic_vector_update_v_mask_override=raw_vmask,
         barotropic_atomic_fold_unit=True,
     )
 
@@ -173,11 +175,13 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path, label: str,
         ordinary_model = LatLonCGridOceanModel(
             card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
             _nemo_ws_test_hooks=_hooks(
-                card, slow_override, raw_surface_vmask, live=False))
+                card, slow_override, raw_surface_vmask, live=False,
+                production_geometry=production_geometry))
         trace_model = LatLonCGridOceanModel(
             card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
             _nemo_ws_test_hooks=_hooks(
-                card, slow_override, raw_surface_vmask, live=True))
+                card, slow_override, raw_surface_vmask, live=True,
+                production_geometry=production_geometry))
         ordinary = jax.device_get(ordinary_model.step(
             state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
         traced = jax.device_get(trace_model.step(
