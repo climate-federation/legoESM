@@ -2992,7 +2992,7 @@ CITATION_MAP = {
         26],
     'vertical.py:457-555': [
         'def nemo_qco_live_vorticity_e3f_cgrid(',
-        'return jnp.concatenate([with_south[:, -1:], with_south], axis=1)',
+        ('return e3f_cgrid', 2),
         99],
     'ocean_model_latlon_cgrid.py:5779-5781': [
         '_ws_uses_nemo_ldf_e3 = (',
@@ -6194,26 +6194,26 @@ CITATION_MAP = {
         ("uu(:,:,:,Nrhs) = 0._wp", 1),
         ("Naa = Nrhs", 1),
         47],
-    'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:170-176': [
+    'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:172-176': [
         ("zrhs_u =        - grav", 1),
         ("vv(ji,jj,jk,Nrhs) = vv(ji,jj,jk,Nrhs) + zrhs_v", 1),
-        7],
+        5],
     'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:213-215': [
         ("RK3 2nd stage Ocean dynamics", 1),
         ("rDt   = rn_Dt / 2._wp", 1),
         3],
-    'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/dynadv.f90:134-139': [
+    'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/dynadv.f90:134-138': [
         ("SELECT CASE( n_dynadv )", 1),
         ("CALL dyn_zad", 1),
-        6],
+        5],
     'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/sshwzv.f90:135-149': [
         ("CALL div_hor( kt, Kbb, Kmm )", 1),
         ("CALL lbc_lnk( 'sshwzv'", 1),
         15],
-    'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/domqco.f90:207-234': [
+    'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/domqco.f90:208-234': [
         ("pr3t(ji,jj) = pssh(ji,jj) * r1_ht_0(ji,jj)", 1),
         ("END SUBROUTINE dom_qco_r3c", 1),
-        28],
+        27],
     'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:317-338': [
         "CALL dyn_ldf( kstp, Nbb, Nnn, uu, vv, Nrhs )  ! lateral mixing",
         ("CALL dom_qco_r3c( ssh(:,:,Naa), r3t(:,:,Naa), r3u(:,:,Naa), r3v(:,:,Naa), r3f(:,:) )", 3),

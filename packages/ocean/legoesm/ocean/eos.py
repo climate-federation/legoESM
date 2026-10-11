@@ -909,33 +909,6 @@ def nemo_bn2_depth_ladders(z_coord) -> tuple[jnp.ndarray, jnp.ndarray]:
     return gdept, gdepw_int
 
 
-def nemo_qco_r3t_ratio(
-    z_coord, eta: jnp.ndarray, H_bathy: jnp.ndarray, *,
-    evaluation: str = "quotient",
-) -> jnp.ndarray:
-    """NEMO ``dom_qco_r3c`` T-point ratio ``r3t = ssh * r1_ht_0``.
-
-    Unlike :func:`nemo_r3t_stretch`, this returns the source ratio itself and
-    applies no positive-thickness floor.  The SWE RK3 program writes this
-    field at every stage boundary (compiled ``domqco.f90:207-209``), so an
-    oracle replay must expose the unfloored statement rather than recover it
-    by subtracting one from a guarded stretch factor.
-    """
-    if evaluation not in ("quotient", "nemo_reciprocal"):
-        raise ValueError(
-            f"unknown r3t evaluation {evaluation!r}; expected 'quotient' "
-            "or 'nemo_reciprocal'")
-    if getattr(z_coord, "linear_free_surface", False):
-        return jnp.zeros_like(jnp.asarray(eta))
-    H = jnp.asarray(H_bathy)
-    wet_H = H > 0.0
-    safe_H = jnp.where(wet_H, H, 1.0)
-    if evaluation == "nemo_reciprocal":
-        r1_H = lax.optimization_barrier(1.0 / safe_H)
-        return jnp.where(wet_H, jnp.asarray(eta) * r1_H, 0.0)
-    return jnp.where(wet_H, jnp.asarray(eta) / safe_H, 0.0)
-
-
 def nemo_r3t_stretch(
     z_coord, eta: jnp.ndarray, H_bathy: jnp.ndarray, *,
     evaluation: str = "quotient",
@@ -3538,3 +3511,23 @@ def slab_freeze_point_K(T_freeze_const, scheme: str = "constant"):
     if scheme == "constant":
         return T_freeze_const
     return freezing_point(constants.S_ocean_ref, 0.0, scheme=scheme)
+
+
+def nemo_qco_r3t_ratio(
+    z_coord, eta: jnp.ndarray, H_bathy: jnp.ndarray, *,
+    evaluation: str = "quotient",
+) -> jnp.ndarray:
+    """NEMO ``dom_qco_r3c`` T-point ratio without a thickness floor."""
+    if evaluation not in ("quotient", "nemo_reciprocal"):
+        raise ValueError(
+            f"unknown r3t evaluation {evaluation!r}; expected 'quotient' "
+            "or 'nemo_reciprocal'")
+    if getattr(z_coord, "linear_free_surface", False):
+        return jnp.zeros_like(jnp.asarray(eta))
+    H = jnp.asarray(H_bathy)
+    wet_H = H > 0.0
+    safe_H = jnp.where(wet_H, H, 1.0)
+    if evaluation == "nemo_reciprocal":
+        r1_H = lax.optimization_barrier(1.0 / safe_H)
+        return jnp.where(wet_H, jnp.asarray(eta) * r1_H, 0.0)
+    return jnp.where(wet_H, jnp.asarray(eta) / safe_H, 0.0)

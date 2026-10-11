@@ -4352,8 +4352,7 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 f"tracer_advection must be one of {sorted(_valid_tracer_adv)}, "
                 f"got {config.tracer_advection!r}")
-        _valid_outer_int = {
-            "forward_euler", "ab2", "leapfrog", "nemo_mlf", "swe_rk3"}
+        _valid_outer_int = {"forward_euler", "ab2", "leapfrog", "nemo_mlf", "swe_rk3"}
         _outer_int = getattr(config, "outer_integrator", "forward_euler")
         if _outer_int not in _valid_outer_int:
             raise ValueError(
@@ -4892,23 +4891,7 @@ class LatLonCGridOceanModel:
             # operator; this arm only admits the source-valid composition.
             _ws_vector_een_c2 = (
                 config.momentum_advection == "vector_invariant"
-                and getattr(config, "vorticity_scheme", "al81") == "een_total"
-                and getattr(config, "ke_gradient_scheme", "centered") == "c2"
-                and getattr(config, "vertical_momentum_scheme",
-                            "upwind_perturbation") == "nemo_advective"
-                and not getattr(config, "adaptive_implicit_vertadv", False)
-            )
-            # The SWE engine has its own RK3 stage dispatcher.  Its compiled
-            # SWG arm is otherwise the same vector C2/ZAD composition, but
-            # dyn_vor selects ENS through an explicit configuration object.
-            _ws_swe_ens_c2 = (
-                getattr(config, "outer_integrator", "forward_euler")
-                == "swe_rk3"
-                and config.momentum_advection == "vector_invariant"
-                and getattr(getattr(config, "vorticity_scheme", None),
-                            "scheme", None) == "ens_total"
-                and getattr(getattr(config, "vorticity_scheme", None),
-                            "ln_dynvor_msk", None) is True
+                and (getattr(config, "vorticity_scheme", "al81") == "een_total" or _is_swe_rk3_ens(config))
                 and getattr(config, "ke_gradient_scheme", "centered") == "c2"
                 and getattr(config, "vertical_momentum_scheme",
                             "upwind_perturbation") == "nemo_advective"
@@ -4921,14 +4904,13 @@ class LatLonCGridOceanModel:
                 and config.momentum_flux_scheme == "none"
             )
             if not (_ws_flux_up3 or _ws_flux_lin or _ws_vector_ene_c2
-                    or _ws_vector_een_c2 or _ws_swe_ens_c2):
+                    or _ws_vector_een_c2):
                 raise ValueError(
                     "NEMO rk3_ws requires one complete momentum program: "
                     "flux_form/nemo_up3/nemo_up3 or flux_form/none/none or "
                     "vector_invariant/(ene_total|een_total|ens_total)/c2/"
                     "nemo_advective")
-            if (getattr(config, "outer_integrator", "forward_euler")
-                    not in ("forward_euler", "swe_rk3")):
+            if getattr(config, "outer_integrator", "forward_euler") not in ("forward_euler", "swe_rk3"):
                 raise ValueError(
                     "NEMO rk3_ws does not compose with a second outer "
                     "integrator")
@@ -16022,3 +16004,11 @@ for _name in ("_step_impl", "_ab2_step", "_leapfrog_step", "_nemo_mlf_step",
     setattr(LatLonCGridOceanModel, _name, _honour_meridional_periodicity(
         getattr(LatLonCGridOceanModel, _name)))
 del _name
+
+
+def _is_swe_rk3_ens(config):
+    """Return whether config selects the guarded SWE total-ENS program."""
+    vor = getattr(config, "vorticity_scheme", None)
+    return (getattr(config, "outer_integrator", "forward_euler") == "swe_rk3"
+            and getattr(vor, "scheme", None) == "ens_total"
+            and getattr(vor, "ln_dynvor_msk", None) is True)

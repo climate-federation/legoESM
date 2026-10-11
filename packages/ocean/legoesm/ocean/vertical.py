@@ -460,15 +460,11 @@ def nemo_qco_live_vorticity_e3f_cgrid(
 ):
     """Build literal NEMO ``e3f_vor(Kmm)`` from the card's own mesh.
 
+
     ``dyn_vor_init`` freezes ``e3f_0vor`` from masked reference T-cell
     thicknesses (``dynvor.F90:918-950``); ``dom_qco_r3c_RK3`` builds live
     ``r3f`` (``domqco.F90:233-246``); and
     ``domzgr_substitute.h90:130`` applies it through ``fe3mask``.
-
-    ``e3t_0`` and ``tmask`` default to the coordinate's bridge fields, but
-    callers may provide the same operands from their own state.  Horizontal
-    areas and F-depth are always rebuilt from that mesh; bridge-carried ENE
-    operands are an oracle check, not a production dependency.
 
     ``reference_e3f`` selects WHICH frozen F thickness the live ``r3f``
     stretch multiplies, because NEMO's two consumers do not share one.  The
@@ -479,13 +475,7 @@ def nemo_qco_live_vorticity_e3f_cgrid(
     ``domzgr_substitute.h90:100``, read from the domain file at
     ``domzgr.F90:173`` -- at ``dynldf_lev.f90:123``::
 
-        zwf(ji-1,jj-1) = ahmf(ji-1,jj-1,jk) * (e3f_3d(ji-1,jj-1,jk)          &
-           &   *(1._wp+r3f(ji-1,jj-1)*fe3mask(ji-1,jj-1,jk))) * r1_e1e2f(...)
-
-    Passing the card's carried ``e3f_0`` here therefore gives ``dyn_ldf`` its
-    own consumer-local reference while ``r3f`` and ``fe3mask``, which NEMO
-    genuinely shares between the two operators, stay the same arrays.  The
-    array is expected on the native A2D F layout, like the carried mesh.
+        zwf = ahmf * (e3f_3d * (1 + r3f * fe3mask)) * r1_e1e2f
     """
     if nn_e3f_typ not in (0, 1):
         raise ValueError("nn_e3f_typ must be 0 or 1")
