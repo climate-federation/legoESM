@@ -22,7 +22,9 @@ def _report(label):
         "owner_support": {"unequal": 35},
         "rows": rows,
         "first_unequal": "coriolis_v",
-        "final_replay": {"through_mask": exact},
+        "depth_replay": {"through_reciprocal": exact},
+        "final_replay": {"through_incoming": {**exact, "bit_exact": False},
+                         "through_mask": exact},
     }
 
 

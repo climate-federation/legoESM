@@ -97,6 +97,17 @@ def _source_final(incoming, coriolis, mask) -> np.ndarray:
         jnp.asarray(coriolis) * jnp.asarray(mask))), dtype=np.float64)
 
 
+def _source_depth(e3v, rhs, mask, reciprocal) -> np.ndarray:
+    """Literal scalar-order replay of stp2d's vertical SUM and multiply."""
+
+    product = (np.asarray(e3v, np.float64) * np.asarray(rhs, np.float64))
+    product = product * np.asarray(mask, np.float64)
+    total = np.array(product[..., 0], copy=True)
+    for level in range(1, product.shape[-1] - 1):
+        total = total + product[..., level]
+    return total * np.asarray(reciprocal, np.float64)
+
+
 def _admit(twin_a: Path, twin_b: Path) -> list[dict[str, object]]:
     masks = o1_gate._defined_masks(twin_a)
     rows = []
@@ -259,6 +270,35 @@ def measure(deck_root: Path, frame_root: Path, twin_a: Path, twin_b: Path,
             for name in SOURCE_ORDER}
     first = next((name for name in SOURCE_ORDER if not rows[name]["bit_exact"]), None)
 
+    depth_replay = {
+        "candidate_statement": _row(
+            _source_depth(
+                candidate["e3v_3d"], candidate["completed_v_rhs"],
+                candidate["vmask_3d"], candidate["r1_hv0"]),
+            candidate["depth_mean_v"], owner),
+        "oracle_statement": _row(
+            _source_depth(
+                oracle["e3v_3d"], oracle["completed_v_rhs"],
+                oracle["vmask_3d"], oracle["r1_hv0"]),
+            oracle["depth_mean_v"], owner),
+    }
+    depth_accumulated = {
+        "e3v": candidate["e3v_3d"],
+        "rhs": candidate["completed_v_rhs"],
+        "mask": candidate["vmask_3d"],
+        "reciprocal": candidate["r1_hv0"],
+    }
+    for name, key in (("e3v", "e3v_3d"),
+                      ("rhs", "completed_v_rhs"),
+                      ("mask", "vmask_3d"),
+                      ("reciprocal", "r1_hv0")):
+        depth_accumulated[name] = oracle[key]
+        depth_replay[f"through_{name}"] = _row(
+            _source_depth(
+                depth_accumulated["e3v"], depth_accumulated["rhs"],
+                depth_accumulated["mask"], depth_accumulated["reciprocal"]),
+            oracle["depth_mean_v"], owner)
+
     # Certify the source statement on each side, then replace its three
     # operands in NEMO order without feeding any replay back into the model.
     candidate_replay = _source_final(
@@ -299,6 +339,7 @@ def measure(deck_root: Path, frame_root: Path, twin_a: Path, twin_b: Path,
             candidate["final_slow_v"], oracle["final_slow_v"]),
         "rows": rows,
         "first_unequal": first,
+        "depth_replay": depth_replay,
         "final_replay": replay,
         "compiled_source": {
             "depth_drag_wind": "ORCA2_OMIP_L4_R214VECPREV3/BLD/ppsrc/nemo/stp2d.f90:194-230",
@@ -335,6 +376,7 @@ def classify(reports: list[dict], *, plant: str = "none") -> dict:
             "first_unequal": report["first_unequal"],
             "first_row": report["rows"][report["first_unequal"]],
             "owner_support": report["owner_support"],
+            "depth_replay": report["depth_replay"],
             "final_replay": report["final_replay"],
         }
         for label, report in by_label.items()
@@ -345,6 +387,9 @@ def classify(reports: list[dict], *, plant: str = "none") -> dict:
         if first_name in {"coriolis_v", "ssvmask", "final_slow_v"}
         else f"REFUTED_EARLIER_{first_name.upper()}"
     )
+    incoming_only_closes = all(
+        report["final_replay"]["through_incoming"]["bit_exact"]
+        for report in by_label.values())
     require(plant == "none", f"{plant} plant stayed green")
     return {
         "format": "nemo-testcase-l4-orca2-round236-classification-v1",
@@ -354,7 +399,9 @@ def classify(reports: list[dict], *, plant: str = "none") -> dict:
         "predictions": {
             "R236-P1": "CONFIRMED_ADMITTED_PASSIVE",
             "R236-P2": prediction,
-            "R236-P3": "MEASURED_FINAL_REPLAY",
+            "R236-P3": (
+                "REFUTED_INCOMING_ONLY_CLOSES_FINAL"
+                if incoming_only_closes else "CONFIRMED_CANCELLING_PAIR"),
             "R236-P4": "CONFIRMED_LABEL_AGREEMENT",
             "R236-P5": "CONFIRMED_MEASUREMENT_ONLY",
         },
