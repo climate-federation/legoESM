@@ -117,17 +117,36 @@ def _admit(twin_a: Path, twin_b: Path) -> list[dict[str, object]]:
 
 def _run_trace(card, state, freshwater, surface):
     import jax
+    import jax.numpy as jnp
+    from legoesm.core.source_rounding import nemo_source_round
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         LatLonCGridOceanModel,
         _NEMOWSLiveOperandTrace,
         _NEMOWSRK3TestHooks,
     )
 
-    slow_override, raw_vmask = r229._slow_override(
-        card, state, freshwater, surface)
+    # Round 235's temporary one-field raw-mask hook was removed when that
+    # measurement restored production. Rebuild the same slow-forcing arm from
+    # the surviving passive producer trace; the atomic hook owns the later
+    # vector-mask part of the indivisible unit.
+    seed_model = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+            expose_live_stage_operands=True))
+    seed = jax.device_get(seed_model.step(
+        state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
+    require(isinstance(seed, _NEMOWSLiveOperandTrace),
+            "slow-forcing seed trace return type moved")
+    producer = seed.slow_forcing_producer
+    raw_vmask = r229._raw_vmask(card)
+    b = nemo_source_round
+    slow_override = (
+        jnp.asarray(producer["final_u"]),
+        b(jnp.asarray(producer["incoming_v"]) - b(
+            jnp.asarray(producer["coriolis_v"]) * raw_vmask)),
+    )
     common = dict(
         barotropic_slow_forcing_override=slow_override,
-        barotropic_vector_update_v_mask_override=raw_vmask,
         barotropic_atomic_fold_unit=True,
     )
     ordinary = LatLonCGridOceanModel(
