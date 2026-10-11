@@ -2731,10 +2731,10 @@ CITATION_MAP = {
         ("CASE ( 'V' )", 7),
         ('ptab(1,ipj+jh) = psgn * ptab(3,ipj-3-jh)', 2),
         8],
-    'ocean_model_latlon_cgrid.py:1823-1834': [
+    'ocean_model_latlon_cgrid.py:1824-1834': [
         ('nemo_qco_card_mesh_operands(', 1),
         ('include_reciprocals=include_reciprocals', 1),
-        12],
+        11],
     'vertical.py:647-654': [
         ('geom_grid = ensure_geometry(grid)', 2),
         ('hv_0 = jnp.sum(e3v_0 * vmask3, axis=-1)', 1),
