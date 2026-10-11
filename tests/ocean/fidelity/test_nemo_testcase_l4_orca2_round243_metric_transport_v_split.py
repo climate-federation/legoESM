@@ -40,6 +40,11 @@ def _report(label: str) -> dict:
         "operand_rows": {"e1v": exact, "va_e": va, "zhvp2_e": exact},
         "candidate_product_vs_oracle": product,
         "candidate_replay_vs_production_trace": exact,
+        "individual_substitution": {
+            "e1v": product,
+            "va_e": exact,
+            "zhvp2_e": product,
+        },
         "cumulative_substitution": {
             "e1v": product,
             "va_e": exact,
@@ -73,6 +78,17 @@ def test_regional_split_excludes_three_fold_rows_from_interior():
     assert result["interior"]["unequal"] == 1
     assert result["fold_band"]["unequal"] == 1
     assert result["complete"]["argmax"] == [147, 5]
+
+
+def test_canonical_fill_is_excluded_from_operand_support():
+    left = np.ones((148, 90), np.float64)
+    right = left.copy()
+    support = np.ones_like(left, dtype=bool)
+    right[7, 8] = 0.0
+    support[7, 8] = False
+    result = gate._regional(left, right, support)
+    assert result["complete"]["unequal"] == 0
+    assert result["complete"]["support"] == left.size - 1
 
 
 def test_classification_requires_every_control_and_both_labels():

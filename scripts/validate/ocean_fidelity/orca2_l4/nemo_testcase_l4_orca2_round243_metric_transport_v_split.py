@@ -55,12 +55,22 @@ def _bits(values: np.ndarray) -> np.ndarray:
     return np.ascontiguousarray(np.asarray(values, np.float64)).view(np.uint64)
 
 
-def _score(left: np.ndarray, right: np.ndarray) -> dict[str, object]:
+def _score(
+    left: np.ndarray,
+    right: np.ndarray,
+    support: np.ndarray | None = None,
+) -> dict[str, object]:
     left = np.asarray(left, np.float64)
     right = np.asarray(right, np.float64)
     require(left.shape == right.shape, f"shape mismatch {left.shape} != {right.shape}")
-    unequal = _bits(left) != _bits(right)
-    finite = np.isfinite(left) & np.isfinite(right)
+    if support is None:
+        support = np.ones(left.shape, dtype=bool)
+    support = np.asarray(support, dtype=bool)
+    require(support.shape == left.shape,
+            f"support shape {support.shape} != value shape {left.shape}")
+    unequal = (_bits(left) != _bits(right)) & support
+    both_finite = np.isfinite(left) & np.isfinite(right)
+    finite = both_finite & support
     delta = np.zeros_like(left)
     np.subtract(left, right, out=delta, where=finite)
     absolute = np.abs(delta)
@@ -71,9 +81,9 @@ def _score(left: np.ndarray, right: np.ndarray) -> dict[str, object]:
     else:
         argmax = None
         maximum = None
-    nonfinite = np.argwhere(~finite)
+    nonfinite = np.argwhere(support & ~both_finite)
     return {
-        "support": int(left.size),
+        "support": int(np.count_nonzero(support)),
         "unequal": int(np.count_nonzero(unequal)),
         "over_floor": int(np.count_nonzero(finite & (absolute > FLOOR))),
         "signed_zero_only": int(np.count_nonzero(
@@ -85,15 +95,22 @@ def _score(left: np.ndarray, right: np.ndarray) -> dict[str, object]:
     }
 
 
-def _regional(left: np.ndarray, right: np.ndarray) -> dict[str, object]:
+def _regional(
+    left: np.ndarray,
+    right: np.ndarray,
+    support: np.ndarray | None = None,
+) -> dict[str, object]:
     left = np.asarray(left, np.float64)
     right = np.asarray(right, np.float64)
     require(left.shape == right.shape == (148, 90),
             f"expected rank-0 V slab, got {left.shape} / {right.shape}")
+    if support is None:
+        support = np.ones(left.shape, dtype=bool)
+    support = np.asarray(support, dtype=bool)
     return {
-        "complete": _score(left, right),
-        "interior": _score(left[:-3], right[:-3]),
-        "fold_band": _score(left[-3:], right[-3:]),
+        "complete": _score(left, right, support),
+        "interior": _score(left[:-3], right[:-3], support[:-3]),
+        "fold_band": _score(left[-3:], right[-3:], support[-3:]),
     }
 
 
@@ -217,15 +234,27 @@ def _measure(
                                                        *reference.values(), oracle)),
             "operand slab shape moved")
 
+    # l4_canon_2d writes zero outside the V-defined support.  e1v is a
+    # strictly-positive horizontal metric, so its canonical nonzero set is
+    # the self-described support for every V operand in this record.  Scoring
+    # raw candidate metrics against the recorder's fill zeros would create a
+    # false 4,731-cell geometry attribution (the first round-243 measurement
+    # did exactly that and is retained as a retracted instrument result).
+    defined_v = reference["e1v"] != 0.0
     operand_rows = {
-        name: _regional(candidate[name], reference[name]) for name in OPERAND_ORDER
+        name: _regional(candidate[name], reference[name], defined_v)
+        for name in OPERAND_ORDER
     }
     candidate_product = _product(candidate)
     cumulative = dict(candidate)
     cumulative_rows = {}
+    individual_rows = {}
     for name in OPERAND_ORDER:
+        individual = dict(candidate)
+        individual[name] = reference[name]
+        individual_rows[name] = _regional(_product(individual), oracle, defined_v)
         cumulative[name] = reference[name]
-        cumulative_rows[name] = _regional(_product(cumulative), oracle)
+        cumulative_rows[name] = _regional(_product(cumulative), oracle, defined_v)
 
     first_nonbit = next((name for name in OPERAND_ORDER
                          if operand_rows[name]["complete"]["unequal"]), None)
@@ -253,10 +282,17 @@ def _measure(
             name: {"shape": list(value.shape), "dtype": str(value.dtype)}
             for name, value in candidate.items()
         },
+        "record_defined_v_support": {
+            "defined": int(np.count_nonzero(defined_v)),
+            "canonical_fill": int(np.count_nonzero(~defined_v)),
+            "definition": "recorded e1v != 0.0",
+        },
         "operand_rows": operand_rows,
-        "candidate_product_vs_oracle": _regional(candidate_product, oracle),
+        "candidate_product_vs_oracle": _regional(
+            candidate_product, oracle, defined_v),
         "candidate_replay_vs_production_trace": _regional(
             candidate_product, observed_product),
+        "individual_substitution": individual_rows,
         "cumulative_substitution": cumulative_rows,
         "first_nonbit_operand": first_nonbit,
         "first_over_floor_operand": first_over_floor,
@@ -312,6 +348,7 @@ def classify(reports: list[dict[str, object]], *, plant: str = "none") -> dict:
             "first_interior_at_floor_after": report["first_interior_at_floor_after"],
             "operand_rows": report["operand_rows"],
             "candidate_product_vs_oracle": report["candidate_product_vs_oracle"],
+            "individual_substitution": report["individual_substitution"],
             "cumulative_substitution": report["cumulative_substitution"],
         }
     identity = lambda row: (
