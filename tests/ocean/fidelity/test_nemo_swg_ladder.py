@@ -44,6 +44,24 @@ def test_real_independent_ladder_executes_normal_production_step():
     assert first["n_unequal"] == 1
 
 
+@pytest.mark.skipif(not lad.DEFAULT_STAGE_ROOT.is_dir(),
+                    reason="admitted SWG stage records not mounted")
+def test_carried_state_audit_covers_every_stage_and_state_field():
+    out = lad.carried_state_audit(lad.DEFAULT_STAGE_ROOT, allow_dirty=True)
+    rows = out["per_kt"][0]["rows"]
+    stage = [row for row in rows if ".stage3_to_kt6." in row["name"]]
+    rebuilt = [row for row in rows if ".rebuilt_kt6." in row["name"]]
+    assert len(stage) == len(rebuilt) == 13
+    assert all(row["bit_identical"] for row in stage)
+    disposition = out["state_disposition"]
+    assert len(disposition["scored_public"]) == 5
+    assert all(row["bit_identical"]
+               for row in disposition["unchanged"].values())
+    assert len(disposition["optional_none"]) > 0
+    assert disposition["redundant_faces"]["u_west"]["n_nonzero"] == 0
+    assert disposition["redundant_faces"]["v_south"]["n_nonzero"] == 0
+
+
 def test_stage_entry_reader_refuses_absent_acquisition(tmp_path):
     with pytest.raises(Exception, match="missing"):
         lad.read_stage_entries(tmp_path)

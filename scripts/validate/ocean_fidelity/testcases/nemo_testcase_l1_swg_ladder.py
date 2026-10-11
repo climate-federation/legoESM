@@ -258,6 +258,133 @@ def independent(root: Path, *, allow_dirty: bool = False) -> dict:
                        "per_kt": per_kt})
 
 
+def carried_state_audit(stage_root: Path, *, allow_dirty: bool = False) -> dict:
+    """Compare the fifth production step and rebuilt sixth-step boundary."""
+    import jax
+    from legoesm.core.precision import PrecisionPolicy, set_policy
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
+    from legoesm.ocean.dynamics.swe_rk3 import _entry_from_state
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        SWG_NAMELIST, build_swg_card, swg_horizontal_coordinates,
+        validate_nemo_testcase_card_for_execution)
+    from legoesm.ocean.fidelity.provenance import allow_dirty_stamps, git_sha
+    from legoesm.ocean.state import OceanSurfaceForcing
+
+    allow_dirty_stamps(allow_dirty)
+    sha = git_sha(allow_dirty=allow_dirty)
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
+    require(jax.default_backend() == "cpu", "carry audit must run on CPU")
+    card = build_swg_card()
+    validate_nemo_testcase_card_for_execution(card)
+    masks = _card_masks(card)
+    entries = read_stage_entries(stage_root)
+    target = entries[6, 1]
+    model = LatLonCGridOceanModel(card.recipe.grid, card.recipe.z_coord,
+                                  card.recipe.model_config)
+    src = swg_horizontal_coordinates()
+    tau_u = (-np.float64(SWG_NAMELIST.rn_tau_pa)
+             * np.cos(np.float64(np.pi) * src["gphit"]
+                      / np.float64(SWG_NAMELIST.rn_domsiz_m)))
+    tau_v = np.zeros_like(tau_u)
+    forcing = OceanSurfaceForcing(
+        tau_i_native=jax.numpy.asarray(tau_u, dtype=jax.numpy.float64),
+        tau_j_native=jax.numpy.asarray(tau_v, dtype=jax.numpy.float64))
+
+    initial = card.recipe.initial_state
+    state = initial
+    state4 = None
+    for kt in range(1, 6):
+        if kt == 5:
+            state4 = state
+        state = model.step(state, card.dt_s, surface_forcing=forcing)
+    require(state4 is not None, "failed to retain the fourth-step state")
+
+    now = (forcing.tau_i_native, forcing.tau_j_native)
+    before4 = (
+        now[0] if state4.tau_x_prev is None else state4.tau_x_prev,
+        now[1] if state4.tau_y_prev is None else state4.tau_y_prev,
+    )
+    boundary5 = _entry_from_state(
+        state4, before4, now, card.recipe.grid, card.recipe.z_coord,
+        card.recipe.model_config)
+    s1 = model.replay_swe_rk3_stage(boundary5, card.dt_s, 1, boundary5)
+    s2 = model.replay_swe_rk3_stage(s1, card.dt_s, 2, boundary5)
+    s3 = model.replay_swe_rk3_stage(s2, card.dt_s, 3, boundary5)
+
+    before6 = (state.tau_x_prev, state.tau_y_prev)
+    rebuilt6 = _entry_from_state(
+        state, before6, now, card.recipe.grid, card.recipe.z_coord,
+        card.recipe.model_config)
+    stage_rows = [
+        _row(f"carry.stage3_to_kt6.{name}", target[name], value,
+             _field_mask(name, masks))
+        for name, value in s3._asdict().items()
+    ]
+    rebuilt_rows = [
+        _row(f"carry.rebuilt_kt6.{name}", target[name], value,
+             _field_mask(name, masks))
+        for name, value in rebuilt6._asdict().items()
+    ]
+
+    public_rows = [
+        _row("carry.public.ssh", target["ssh_k"], state.eta.data, masks["T"]),
+        _row("carry.public.u", target["u_k"], state.u.data[:, 1:, 0], masks["U"]),
+        _row("carry.public.v", target["v_k"], state.v.data[1:, :, 0], masks["V"]),
+        _row("carry.public.uu_b", np.zeros_like(target["u_k"]),
+             state.uu_b.data[:, 1:], masks["U"]),
+        _row("carry.public.vv_b", np.zeros_like(target["v_k"]),
+             state.vv_b.data[1:, :], masks["V"]),
+    ]
+    unchanged_fields = ("T", "S", "H_bathy", "land_mask", "u_mask",
+                        "v_mask", "w", "uu_b", "vv_b")
+    unchanged = {}
+    for name in unchanged_fields:
+        after = np.asarray(getattr(getattr(state, name), "data"))
+        start = np.asarray(getattr(getattr(initial, name), "data"))
+        unchanged[name] = {
+            "bit_identical": bool(np.array_equal(after, start)),
+            "n_unequal": int(np.count_nonzero(after != start)),
+        }
+    require(all(row["bit_identical"] for row in public_rows),
+            "step-five public state differs before the rebuilt boundary")
+    require(all(item["bit_identical"] for item in unchanged.values()),
+            "an inert/static SWG state leaf changed")
+    optional_none = [
+        name for name, value in state._asdict().items()
+        if value is None
+    ]
+    accounted = set(unchanged_fields) | {
+        "u", "v", "eta", "tau_x_prev", "tau_y_prev"
+    } | set(optional_none)
+    require(accounted == set(state._fields),
+            f"unaccounted SWG state leaves: {sorted(set(state._fields)-accounted)}")
+    redundant = {
+        "u_west": {
+            "shape": list(np.asarray(state.u.data[:, :1, :]).shape),
+            "n_nonzero": int(np.count_nonzero(np.asarray(state.u.data[:, :1, :]))),
+        },
+        "v_south": {
+            "shape": list(np.asarray(state.v.data[:1, :, :]).shape),
+            "n_nonzero": int(np.count_nonzero(np.asarray(state.v.data[:1, :, :]))),
+        },
+    }
+    require(redundant["u_west"]["n_nonzero"] == 0
+            and redundant["v_south"]["n_nonzero"] == 0,
+            "walled redundant face storage is nonzero")
+    return _gate_rows({
+        "label": "CARRIED-STATE-AUDIT", "legoesm_git_sha": sha,
+        "bar": BAR,
+        "state_disposition": {
+            "scored_public": [row["name"] for row in public_rows],
+            "unchanged": unchanged,
+            "optional_none": optional_none,
+            "redundant_faces": redundant,
+        },
+        "per_kt": [{"kt": 6, "rows": stage_rows + rebuilt_rows}],
+    })
+
+
 def swe_rk3_stages(stage_root: Path, *, mode: str = "given",
                    plant: str | None = None,
                    allow_dirty: bool = False) -> dict:
@@ -395,7 +522,7 @@ def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--arm", choices=(
         "self-check", "independent", "stage-entry-read", "ens-stage1",
-        "stages-given", "stages-chained"),
+        "stages-given", "stages-chained", "carried-state"),
                    required=True)
     p.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     p.add_argument("--stage-root", type=Path, default=DEFAULT_STAGE_ROOT)
@@ -409,6 +536,9 @@ def main(argv=None) -> int:
                              allow_dirty=a.allow_dirty)
         elif a.arm == "independent":
             out = independent(a.root, allow_dirty=a.allow_dirty)
+        elif a.arm == "carried-state":
+            out = carried_state_audit(
+                a.stage_root, allow_dirty=a.allow_dirty)
         elif a.arm == "stage-entry-read":
             entries = read_stage_entries(a.stage_root)
             out = {"label": "STAGE-ENTRY-READ", "records": len(entries),
