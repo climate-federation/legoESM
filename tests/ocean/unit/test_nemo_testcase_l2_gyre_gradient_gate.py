@@ -80,26 +80,38 @@ def test_nemo_literal_dissl_guard_preserves_primal_bits_and_zero_vjp():
     )
     divisors = jnp.asarray([2.0, 3.0, 5.0, 7.0, 11.0], dtype=jnp.float64)
 
-    def reverse_safe(value):
+    def reverse_safe(value, divisor):
         positive = value > 0.0
         safe = jnp.where(positive, value, 1.0)
-        return jnp.where(positive, jnp.sqrt(safe) / divisors, 0.0)
+        safe_divisor = jnp.where(positive, divisor, 1.0)
+        return jnp.where(positive, jnp.sqrt(safe) / safe_divisor, 0.0)
 
     old_primal = np.asarray(jnp.sqrt(values) / divisors)
-    new_primal = np.asarray(reverse_safe(values))
+    new_primal = np.asarray(reverse_safe(values, divisors))
     old_finite = np.isfinite(old_primal)
     np.testing.assert_array_equal(
         new_primal[old_finite].view(np.uint64),
         old_primal[old_finite].view(np.uint64),
     )
 
-    _, pullback = jax.vjp(reverse_safe, values)
-    vjp = np.asarray(pullback(jnp.ones_like(values))[0])
-    assert np.isfinite(vjp[1])
-    assert vjp[1] == 0.0
+    _, pullback = jax.vjp(reverse_safe, values, divisors)
+    tke_vjp, divisor_vjp = map(
+        np.asarray, pullback(jnp.ones_like(values)))
+    assert np.isfinite(tke_vjp[1])
+    assert tke_vjp[1] == 0.0
+    assert np.isfinite(divisor_vjp[1])
+    assert divisor_vjp[1] == 0.0
+
+    zero = jnp.asarray(0.0, dtype=jnp.float64)
+    _, zero_pullback = jax.vjp(reverse_safe, zero, zero)
+    zero_tke_vjp, zero_divisor_vjp = zero_pullback(
+        jnp.asarray(1.0, dtype=jnp.float64))
+    assert float(zero_tke_vjp) == 0.0
+    assert float(zero_divisor_vjp) == 0.0
 
     source = inspect.getsource(tke_mod.tke_vertical_mixing)
     assert "_dissl_sqrt_input = jnp.where(" in source
+    assert "_dissl_divisor = jnp.where(" in source
     assert "jnp.sqrt(_dissl_sqrt_input)" in source
 
 
