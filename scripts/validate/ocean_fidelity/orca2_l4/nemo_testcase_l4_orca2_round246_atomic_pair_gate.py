@@ -189,15 +189,32 @@ def measure_atomic(args: argparse.Namespace) -> dict[str, object]:
 
 
 def measure_operands(args: argparse.Namespace) -> dict[str, object]:
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import _NEMOWSRK3TestHooks
+
     r241._policy_and_stamp(args.expect_commit)
     card = omt4.build_omt4_card(args.deck_root)
     omt4.validate_omt4_card(args.deck_root, card)
-    with r245._barotropic_surface_mask_arm(
-        card, True, v_only=True, t_pivot_north_neighbor=True,
-    ):
-        return r233.measure(
-            args.deck_root, args.frame_root, args.record_root,
-            args.label, args.expect_commit, production_geometry=False)
+    original_hooks = r233._hooks
+
+    def candidate_hooks(card, slow_override, raw_vmask, *, live,
+                        production_geometry=False):
+        del card, slow_override, raw_vmask, production_geometry
+        return _NEMOWSRK3TestHooks(
+            expose_live_stage_operands=live,
+            barotropic_atomic_fold_unit=True,
+            preserve_literal_hpg_vmask=True,
+        )
+
+    r233._hooks = candidate_hooks
+    try:
+        with r245._barotropic_surface_mask_arm(
+            card, True, v_only=True, t_pivot_north_neighbor=True,
+        ):
+            return r233.measure(
+                args.deck_root, args.frame_root, args.record_root,
+                args.label, args.expect_commit, production_geometry=True)
+    finally:
+        r233._hooks = original_hooks
 
 
 def combine(args: argparse.Namespace) -> dict[str, object]:
