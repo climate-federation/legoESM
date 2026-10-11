@@ -182,6 +182,12 @@ its signed-y Coriolis, wet-cell and layer-thickness plants each exit 1.  The
 given, chained and independent numerical gates exit 1 on reported DEBT.  The
 ordinary-value input plant exits 1 on its own changed output; the zero plant
 also exits 1 but is explicitly REFUTED rather than credited as a control.
+The receipt citation gate maps and accepts all ten compiled-source citations,
+SHA-256
+`626e5b0d6c73437b12f18dbb04602e39f84ac0516a4c15e1b7fb68c228b15315`;
+shifting the first stage-3 `dyn_ldf` citation by two lines produces FAIL and
+exit 1, SHA-256
+`c6d78767031488d94c0caaf287274b4aa5cf51030d388eabaff7048ce54a4e50`.
 
 ## Independent review
 
