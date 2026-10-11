@@ -51,7 +51,9 @@ def test_carried_state_audit_covers_every_stage_and_state_field():
     rows = out["per_kt"][0]["rows"]
     stage = [row for row in rows if ".stage3_to_kt6." in row["name"]]
     rebuilt = [row for row in rows if ".rebuilt_kt6." in row["name"]]
+    whole_step6 = [row for row in rows if ".whole_step6." in row["name"]]
     assert len(stage) == len(rebuilt) == 13
+    assert len(whole_step6) == 3
     assert all(row["bit_identical"] for row in stage)
     disposition = out["state_disposition"]
     assert len(disposition["scored_public"]) == 5

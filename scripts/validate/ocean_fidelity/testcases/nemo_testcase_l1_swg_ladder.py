@@ -326,6 +326,20 @@ def carried_state_audit(stage_root: Path, *, allow_dirty: bool = False) -> dict:
              _field_mask(name, masks))
         for name, value in rebuilt6._asdict().items()
     ]
+    # The carried boundary is now fully specified.  Execute the next ordinary
+    # production step as one compiled whole-step graph and compare its public
+    # result with the admitted next entry.  The separately compiled stage
+    # chain remains the source-order control for the same transition.
+    state6 = model.step(state, card.dt_s, surface_forcing=forcing)
+    target7 = entries[7, 1]
+    whole_step6_rows = [
+        _row("carry.whole_step6.ssh", target7["ssh_k"], state6.eta.data,
+             masks["T"]),
+        _row("carry.whole_step6.u", target7["u_k"], state6.u.data[:, 1:, 0],
+             masks["U"]),
+        _row("carry.whole_step6.v", target7["v_k"], state6.v.data[1:, :, 0],
+             masks["V"]),
+    ]
 
     public_rows = [
         _row("carry.public.ssh", target["ssh_k"], state.eta.data, masks["T"]),
@@ -381,7 +395,8 @@ def carried_state_audit(stage_root: Path, *, allow_dirty: bool = False) -> dict:
             "optional_none": optional_none,
             "redundant_faces": redundant,
         },
-        "per_kt": [{"kt": 6, "rows": stage_rows + rebuilt_rows}],
+        "per_kt": [{"kt": 6,
+                    "rows": stage_rows + rebuilt_rows + whole_step6_rows}],
     })
 
 
