@@ -131,6 +131,17 @@ pins and are not a new digest.  DINO and ORCA2 select EEN-total, GYRE selects
 ENE-total, and the tank/VORTEX families do not select ENS, so none executes the
 landed numerical statement.
 
+## Gates
+
+The final focused run combines the ENS/operator, SWG card and ladder, and
+citation-gate suites: 177 tests pass.  The clean geometry rerun remains 34/34
+bit-identical; its signed-y Coriolis, wet-cell, and layer-thickness plants each
+exit 1 and identify respectively 84, one, and one changed values.  The receipt
+citation gate finds five mapped compiled-source citations, no failures, no
+unmapped citations, and an empty map audit.  Shifting the ENS citation by two
+lines exits 1 with `SYMBOL-NOT-AT-LINE`.  `git diff --check` passes and the
+tracked worktree is clean.
+
 ## Independent review
 
 Independent review run by the operator.
