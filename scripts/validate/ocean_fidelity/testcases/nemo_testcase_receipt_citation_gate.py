@@ -85,8 +85,23 @@ _OVERFLOW_R56UP3_COMPILED = (
     NEMO / "tests/OVERFLOW_OMIP_L1_P3_R56UP3/BLD/ppsrc/nemo")
 _OVERFLOW_R62ZDF_COMPILED = (
     NEMO / "tests/OVERFLOW_OMIP_L1_P3_R62ZDF/BLD/ppsrc/nemo")
+_SWG_COMPILED = NEMO / "tests/SWG_OMIP_L1/BLD/ppsrc/nemo"
 FILES = {
     "stprk3.F90": _OCE / "stprk3.F90",
+    "SWG_OMIP_L1/BLD/ppsrc/nemo/usrdef_nam.f90": (
+        _SWG_COMPILED / "usrdef_nam.f90"),
+    "SWG_OMIP_L1/BLD/ppsrc/nemo/usrdef_hgr.f90": (
+        _SWG_COMPILED / "usrdef_hgr.f90"),
+    "SWG_OMIP_L1/BLD/ppsrc/nemo/usrdef_zgr.f90": (
+        _SWG_COMPILED / "usrdef_zgr.f90"),
+    "SWG_OMIP_L1/BLD/ppsrc/nemo/usrdef_sbc.f90": (
+        _SWG_COMPILED / "usrdef_sbc.f90"),
+    "SWG_OMIP_L1/BLD/ppsrc/nemo/dynvor.f90": (
+        _SWG_COMPILED / "dynvor.f90"),
+    "SWG_OMIP_L1/BLD/ppsrc/nemo/dynzad.f90": (
+        _SWG_COMPILED / "dynzad.f90"),
+    "SWG_OMIP_L1/BLD/ppsrc/nemo/stprk3.f90": (
+        _SWG_COMPILED / "stprk3.f90"),
     "stprk3_stg.F90": _OCE / "stprk3_stg.F90",
     # round 202: the PRODUCTION GYRE build, so a GYRE resolved statement
     # cannot bind to one of the _SM_ probe builds.
@@ -1401,6 +1416,40 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- SWG lane round 1 (survey + card + geometry + acquisition) ---
+    'SWG_OMIP_L1/BLD/ppsrc/nemo/usrdef_nam.f90:154-166': [
+        'ze1 =  rn_dx / REAL(nn_SWG, wp)',
+        'ldIperio = .FALSE.   ;   ldJperio = .FALSE.', 13],
+    'SWG_OMIP_L1/BLD/ppsrc/nemo/usrdef_hgr.f90:123-168': [
+        'DO jj = 1, jpj',
+        'pff_t(:,:) =  REAL( rn_f0, wp ) + REAL( rn_beta, wp ) * ABS( pphit(:,:) )', 46],
+    'SWG_OMIP_L1/BLD/ppsrc/nemo/usrdef_zgr.f90:157-168': [
+        'pdepw_1d(1) =   0._wp',
+        'CALL e3_to_depth( pe3t_1d, pe3w_1d, pdept_1d, pdepw_1d )', 12],
+    'SWG_OMIP_L1/BLD/ppsrc/nemo/usrdef_zgr.f90:206-235': [
+        'z2d(:,:) = REAL( jpkm1 , wp )',
+        'k_bot(ji,jj) = 0', 30],
+    'SWG_OMIP_L1/BLD/ppsrc/nemo/usrdef_sbc.f90:84-87': [
+        'emp (:,:) = 0._wp', 'qsr (:,:) = 0._wp', 4],
+    'SWG_OMIP_L1/BLD/ppsrc/nemo/dynvor.f90:250-251': [
+        'CASE( np_ENS )',
+        'CALL vor_ens( kt, Kmm, ntot, puu(:,:,:,Kmm)', 2],
+    'SWG_OMIP_L1/BLD/ppsrc/nemo/dynzad.f90:111-146': [
+        'zWdzU(ntsi-(0):ntei+(0),ntsj-(0):ntej+(0)) = 0._wp',
+        '&                                              * zWdzV(ji,jj)', 36],
+    'SWG_OMIP_L1/BLD/ppsrc/nemo/stprk3.f90:140,196,252': [
+        'rDt   = rn_Dt / 3._wp',
+        'rDt   = rn_Dt / 2._wp',
+        'rDt   = rn_Dt'],
+    'SWG_OMIP_L1/BLD/ppsrc/nemo/stprk3.f90:148-149': [
+        'CALL dyn_adv( kstp, Nbb, Nbb, uu, vv, Nrhs )',
+        'CALL dyn_vor( kstp,      Nbb, uu, vv, Nrhs )', 2],
+    'SWG_OMIP_L1/BLD/ppsrc/nemo/stprk3.f90:260-273': [
+        'CALL dyn_adv( kstp, Nbb, Nnn, uu, vv, Nrhs )',
+        '&            - rn_rfr   * vv(ji,jj,jk,Nbb)', 14],
+    'SWG_OMIP_L1/BLD/ppsrc/nemo/stprk3.f90:281-283': [
+        'CALL ssh_nxt( kstp, Nbb, Nnn, ssh, Naa )',
+        'CALL dom_qco_r3c( ssh(:,:,Naa), r3t(:,:,Naa), r3u(:,:,Naa), r3v(:,:,Naa), r3f(:,:) )', 3],
     # --- TSUNAMI lane round 1 (survey + card + acquisition) ---
     'tests/TSUNAMI/MY_SRC/usrdef_nam.F90:92-93': [
         'kpi = NINT( rn_domszx / rn_dx ) + 1',
