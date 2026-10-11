@@ -113,6 +113,8 @@ def classify(report: dict[str, object], *, plant: str = "none") -> dict[str, obj
 
 def _pair_row(card, state, freshwater, surface, oracle_rhs) -> dict[str, object]:
     import jax
+    import jax.numpy as jnp
+    from legoesm.core.source_rounding import nemo_source_round
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         LatLonCGridOceanModel,
         _NEMOWSLiveOperandTrace,
@@ -124,8 +126,17 @@ def _pair_row(card, state, freshwater, surface, oracle_rhs) -> dict[str, object]
     off_model = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
         _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(expose_live_stage_operands=True))
-    slow_override, _raw_mask = r236.r229._slow_override(
-        card, state, freshwater, surface)
+    seed = jax.device_get(off_model.step(
+        state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
+    require(isinstance(seed, _NEMOWSLiveOperandTrace), "seed trace type moved")
+    producer = seed.slow_forcing_producer
+    raw_mask = r236.r229._raw_vmask(card)
+    b = nemo_source_round
+    slow_override = (
+        jnp.asarray(producer["final_u"]),
+        b(jnp.asarray(producer["incoming_v"])
+          - b(jnp.asarray(producer["coriolis_v"]) * raw_mask)),
+    )
     on_plain_model = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
         _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
@@ -139,8 +150,7 @@ def _pair_row(card, state, freshwater, surface, oracle_rhs) -> dict[str, object]
             barotropic_atomic_fold_unit=True))
     plain = jax.device_get(plain_model.step(
         state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
-    off = jax.device_get(off_model.step(
-        state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
+    off = seed
     on_plain = jax.device_get(on_plain_model.step(
         state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
     on = jax.device_get(on_model.step(
