@@ -25,7 +25,7 @@ at
 
 The current compact-grid helper instead cyclically closes `depth_u` and
 `inverse_u`, folds the three V arrays, and returns `eta` unchanged at
-`barotropic_latlon_cgrid.py:689-743`. That inspection motivated the frozen
+`barotropic_latlon_cgrid.py:688-742`. That inspection motivated the frozen
 hypothesis; it is not itself trajectory attribution.
 
 The committed audit executes rung 0 and OMT-4, each under the independent and
