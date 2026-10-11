@@ -165,7 +165,10 @@ OVERFLOW already reproduced by the independent review at the untouched
 round-1 base; their actual digests are unchanged.  TSUNAMI-zco, VORTEX-zco and
 VORTEX_VEC-zco retain the independently reviewed hashes `8bb5ed6c1bc031bd`,
 `f7489467bc156303`, and `5041b91c67bd1443`.  Acquisition preflight passes at
-the fix-round-2 commit without invoking `makenemo` or `mpirun`.
+the fix-round-2 commit without invoking `makenemo` or `mpirun`.  All 17
+citation-gate tests pass; the clean gate admits 24 mapped citations with no
+failure, and shifting the new U/V-stress citation by two lines makes the plant
+fail and exit 1.
 
 ## Frozen predictions and falsifiers
 
