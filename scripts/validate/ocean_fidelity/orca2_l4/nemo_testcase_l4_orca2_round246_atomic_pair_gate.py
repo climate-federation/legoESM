@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import copy
 import json
 import sys
@@ -191,11 +192,48 @@ def measure_atomic(args: argparse.Namespace) -> dict[str, object]:
             card, args.frame_root, state, args.label)
 
 
+@contextlib.contextmanager
+def _resolved_candidate_stage_geometry(card):
+    """Route an equivalent rebuilt OMT-4 card through D114's raw operands."""
+
+    import jax.numpy as jnp
+    from legoesm.ocean.dynamics import ocean_model_latlon_cgrid as model_module
+    from legoesm.ocean.vertical import (
+        nemo_qco_live_face_geometry_cgrid,
+        nemo_qco_resolved_mesh_operands,
+    )
+
+    original = model_module._nemo_ws_qco_stage_faces
+    raw_u, raw_v = r233._raw_masks(card)
+    raw_z_coord = card.recipe.z_coord
+
+    def resolved(eta, h_ref, u_mask_3d, v_mask_3d, grid, *,
+                 z_coord=None, include_reciprocals=False):
+        del u_mask_3d, v_mask_3d, z_coord
+        dtype = jnp.asarray(h_ref).dtype
+        ops = nemo_qco_resolved_mesh_operands(
+            raw_z_coord, grid, raw_u, raw_v, dtype,
+            jnp.asarray(h_ref).shape[-1])
+        return nemo_qco_live_face_geometry_cgrid(
+            jnp.asarray(eta, dtype=dtype), ops.e3u_0, ops.e3v_0,
+            ops.umask3, ops.vmask3, ops.hu_0, ops.hv_0,
+            ops.area_t, ops.area_u, ops.area_v,
+            include_reciprocals=include_reciprocals)
+
+    require(getattr(raw_z_coord, "nemo_een_barotropic", None) is not None,
+            "candidate has no raw NEMO geometry bundle")
+    model_module._nemo_ws_qco_stage_faces = resolved
+    try:
+        yield
+    finally:
+        model_module._nemo_ws_qco_stage_faces = original
+
+
 def measure_operands(args: argparse.Namespace) -> dict[str, object]:
     r241._policy_and_stamp(args.expect_commit)
     card = omt4.build_omt4_card(args.deck_root)
     omt4.validate_omt4_card(args.deck_root, card)
-    with r233._resolved_stage_geometry(card, reconstructed=False):
+    with _resolved_candidate_stage_geometry(card):
         with r245._barotropic_surface_mask_arm(
             card, True, v_only=True, t_pivot_north_neighbor=True,
         ):
