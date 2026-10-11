@@ -225,12 +225,9 @@ def test_engine_read_defaults_match_the_resolved_oracle_echo():
     assert {name: getattr(SWG_NAMELIST, name) for name in expected} == expected
 
 
-def test_execution_refuses_every_unbuilt_oracle_arm(card):
-    assert len(SWG_UNMEASURED) == 2
-    with pytest.raises(ValueError, match="stages 2 and 3"):
-        validate_nemo_testcase_card_for_execution(card)
-    for item in SWG_UNMEASURED:
-        assert item in str(card.unmeasured_features)
+def test_execution_admits_the_complete_dispatched_program(card):
+    assert SWG_UNMEASURED == ()
+    validate_nemo_testcase_card_for_execution(card)
 
 
 def test_validator_refuses_planted_card_drift(card, monkeypatch):

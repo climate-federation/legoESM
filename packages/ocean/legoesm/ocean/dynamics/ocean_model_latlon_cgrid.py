@@ -13215,7 +13215,8 @@ class LatLonCGridOceanModel:
             return result
 
     @partial(jax.jit, static_argnums=(0, 3))
-    def replay_swe_rk3_stage(self, entry, dt: float, stage: int):
+    def replay_swe_rk3_stage(self, entry, dt: float, stage: int,
+                             before_entry=None):
         """Execute one landed SWE RK3 stage through the production JIT path.
 
         The SWG fidelity ladder supplies NEMO's recorded stage entry.  The
@@ -13225,12 +13226,16 @@ class LatLonCGridOceanModel:
         if self.config.outer_integrator != "swe_rk3":
             raise ValueError(
                 "replay_swe_rk3_stage requires outer_integrator='swe_rk3'")
-        if stage != 1:
+        if stage not in (1, 2, 3):
             raise ValueError(
-                f"SWE RK3 stage {stage} is unmeasured; only stage 1 is landed")
-        from legoesm.ocean.dynamics.swe_rk3 import swe_rk3_stage1
-        return swe_rk3_stage1(
-            entry, dt, self.grid, self.z_coord,
+                f"unknown SWE RK3 stage {stage!r}; expected 1, 2, or 3")
+        if stage != 1 and before_entry is None:
+            raise ValueError(
+                "SWE RK3 stages 2 and 3 require the whole-step before entry")
+        from legoesm.ocean.dynamics.swe_rk3 import swe_rk3_stage
+        return swe_rk3_stage(
+            entry, entry if before_entry is None else before_entry,
+            dt, stage, self.grid, self.z_coord,
             jnp.any(self.z_coord.is_active, axis=-1), self.config)
 
     @partial(jax.jit, static_argnums=(0,))
@@ -13285,10 +13290,16 @@ class LatLonCGridOceanModel:
                 f"config.outer_integrator must be one of {_valid_oi_jitted}, "
                 f"got {_oi!r}")
         if _oi == "swe_rk3":
-            raise ValueError(
-                "outer_integrator='swe_rk3' is not full-step ready: stages 2 "
-                "and 3 remain unmeasured; use replay_swe_rk3_stage for the "
-                "landed stage-1 production boundary")
+            if any(value is not None for value in (
+                    freshwater, sponge, external_tracer_rate,
+                    _shortwave_tendency_test_delta,
+                    _vertical_K_test_override,
+                    _nemo_stage1_zad_eta_after_override)):
+                raise ValueError(
+                    "SWE RK3 accepts only its grid-native surface stress input")
+            from legoesm.ocean.dynamics.swe_rk3 import swe_rk3_step
+            return swe_rk3_step(
+                state, dt, surface_forcing, self.grid, self.z_coord, self.config)
         if self._nemo_ws_test_hooks.expose_barotropic_substeps:
             if _oi != "forward_euler":
                 raise ValueError(

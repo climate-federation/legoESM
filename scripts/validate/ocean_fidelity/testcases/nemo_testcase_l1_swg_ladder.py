@@ -32,6 +32,7 @@ STAGE_U_FIELDS = frozenset((
     "u_k", "r3u_k", "u_before", "utau_before", "utau_now"))
 STAGE_V_FIELDS = frozenset((
     "v_k", "r3v_k", "v_before", "vtau_before", "vtau_now"))
+STAGE_F_FIELDS = frozenset(("r3f",))
 
 
 def _stage_checker():
@@ -92,22 +93,26 @@ def read_stage_entries(root: Path) -> dict[tuple[int, int], dict[str, np.ndarray
 
 
 def _card_masks(card) -> dict[str, np.ndarray]:
-    """Return native NEMO T/U/V masks from the card and shared face builder."""
+    """Return native NEMO T/U/V/F masks from shared card operands."""
     from legoesm.ocean.dynamics.latlon_cgrid_operators import compute_face_masks
 
     tmask = np.asarray(card.recipe.land_mask, dtype=bool)
     u_full, v_full = compute_face_masks(card.recipe.land_mask, card.recipe.grid)
+    fmask = np.asarray(
+        card.recipe.z_coord.nemo_een_barotropic.fe3mask[..., 0], dtype=bool)
     return {
         "T": tmask,
         "U": np.asarray(u_full[:, 1:], dtype=bool),
         "V": np.asarray(v_full[1:, :], dtype=bool),
+        "F": fmask,
     }
 
 
 def _field_mask(field: str, masks: dict[str, np.ndarray]) -> np.ndarray:
     return masks[
         "U" if field in U_FIELDS | STAGE_U_FIELDS
-        else "V" if field in V_FIELDS | STAGE_V_FIELDS else "T"]
+        else "V" if field in V_FIELDS | STAGE_V_FIELDS
+        else "F" if field in STAGE_F_FIELDS else "T"]
 
 
 def _row(name, ref, cand, mask):
@@ -176,12 +181,14 @@ def self_check(root: Path, *, plant: bool = False, allow_dirty: bool = False) ->
 
 
 def independent(root: Path, *, allow_dirty: bool = False) -> dict:
-    """Run the real chained ladder; round 1 must refuse at the execution gate."""
+    """Run the independently initialized, production ``step()`` ladder."""
     import jax
     from legoesm.core.precision import PrecisionPolicy, set_policy
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
     from legoesm.ocean.fidelity.nemo_testcase_recipe import (
-        build_swg_card, validate_nemo_testcase_card_for_execution)
+        SWG_NAMELIST, build_swg_card, swg_horizontal_coordinates,
+        validate_nemo_testcase_card_for_execution)
+    from legoesm.ocean.state import OceanSurfaceForcing
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
     require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
     require(jax.default_backend() == "cpu", "ladder must run on CPU")
@@ -191,10 +198,20 @@ def independent(root: Path, *, allow_dirty: bool = False) -> dict:
     records = read_restarts(root)
     model = LatLonCGridOceanModel(card.recipe.grid, card.recipe.z_coord,
                                   card.recipe.model_config)
+    src = swg_horizontal_coordinates()
+    # Compiled usrdef_sbc.f90:99-106, with the shipped theta=0 deck.  This is
+    # generated from the card, never read from an oracle stage/restart record.
+    tau_u = (-np.float64(SWG_NAMELIST.rn_tau_pa)
+             * np.cos(np.float64(np.pi) * src["gphit"]
+                      / np.float64(2_000_000.0)))
+    tau_v = np.zeros_like(tau_u)
+    forcing = OceanSurfaceForcing(
+        tau_i_native=jax.numpy.asarray(tau_u, dtype=jax.numpy.float64),
+        tau_j_native=jax.numpy.asarray(tau_v, dtype=jax.numpy.float64))
     state = card.recipe.initial_state
     per_kt = []
     for kt in range(1, 11):
-        state = model.step(state, card.dt_s)
+        state = model.step(state, card.dt_s, surface_forcing=forcing)
         cand = {
             "sshn": np.asarray(state.eta.data),
             "un": np.asarray(state.u.data)[:, 1:, 0],
@@ -210,9 +227,10 @@ def independent(root: Path, *, allow_dirty: bool = False) -> dict:
                        "per_kt": per_kt})
 
 
-def ens_stage1(stage_root: Path, *, plant: str | None = None,
-               allow_dirty: bool = False) -> dict:
-    """Drive the JIT production stage 1 from NEMO's recorded kt=1 entry."""
+def swe_rk3_stages(stage_root: Path, *, mode: str = "given",
+                   plant: str | None = None,
+                   allow_dirty: bool = False) -> dict:
+    """Drive the JIT production stages on non-degenerate given/chained rows."""
     import jax
     from legoesm.core.precision import PrecisionPolicy, set_policy
     from legoesm.ocean.fidelity.nemo_testcase_recipe import build_swg_card
@@ -232,55 +250,115 @@ def ens_stage1(stage_root: Path, *, plant: str | None = None,
             "SWG card does not select ens_total")
     require(vor.ln_dynvor_msk is True,
             "SWG card does not explicitly select ln_dynvor_msk=true")
+    require(mode in ("given", "chained"),
+            f"unknown stage replay mode {mode!r}")
     entries = read_stage_entries(stage_root)
     masks = _card_masks(card)
-    before = entries[1, 1]
-    target = entries[1, 2]
     model = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
 
-    def replay(fields):
-        item = SWERK3StageEntry(**{
+    def item(fields):
+        return SWERK3StageEntry(**{
             name: jax.numpy.asarray(fields[name], dtype=jax.numpy.float64)
             for name in SWERK3StageEntry._fields
         })
-        result = model.replay_swe_rk3_stage(item, card.dt_s, 1)
+
+    def replay(fields, before_fields, stage):
+        result = model.replay_swe_rk3_stage(
+            item(fields), card.dt_s, stage, item(before_fields))
         return {name: np.asarray(value) for name, value in result._asdict().items()}
 
-    candidate = replay(before)
-    require(all(value.dtype == np.dtype("float64") for value in candidate.values()),
-            "production stage output is not fp64")
-    rows = [
-        _row(f"swe_rk3_stage1.kt1.s1_to_s2.{name}", target[name], value,
-             _field_mask(name, masks))
-        for name, value in candidate.items()
-    ]
+    identity = all(np.array_equal(entries[1, 1][name], entries[1, 2][name])
+                   for name in SWERK3StageEntry._fields)
+    require(identity, "kt=1 stage-1 boundary is no longer an identity")
+    nondiscriminating = {
+        "kt": 1, "stage": 1, "status": "NON-DISCRIMINATING",
+        "reason": "oracle entry and target are identical on all 13 fields",
+    }
+
+    per_kt = []
+    if mode == "given":
+        for kt in range(2, 11):
+            before = entries[kt, 1]
+            for stage in (1, 2, 3):
+                if stage == 3 and kt == 10:
+                    continue
+                target = entries[kt, stage + 1] if stage < 3 else entries[kt + 1, 1]
+                candidate = replay(entries[kt, stage], before, stage)
+                require(all(value.dtype == np.dtype("float64")
+                            for value in candidate.values()),
+                        "production stage output is not fp64")
+                rows = [
+                    _row(f"given.kt{kt}.s{stage}.{name}", target[name], value,
+                         _field_mask(name, masks))
+                    for name, value in candidate.items()
+                ]
+                per_kt.append({"kt": kt, "stage": stage, "rows": rows})
+    else:
+        current = {name: value.copy() for name, value in entries[2, 1].items()}
+        for kt in range(2, 11):
+            before = {name: value.copy() for name, value in current.items()}
+            for stage in (1, 2, 3):
+                if stage == 3 and kt == 10:
+                    continue
+                candidate = replay(current, before, stage)
+                target = entries[kt, stage + 1] if stage < 3 else entries[kt + 1, 1]
+                rows = [
+                    _row(f"chained.kt{kt}.s{stage}.{name}", target[name], value,
+                         _field_mask(name, masks))
+                    for name, value in candidate.items()
+                ]
+                per_kt.append({"kt": kt, "stage": stage, "rows": rows})
+                current = candidate
     controls = []
     if plant is not None:
         require(plant in ("zero", "one"),
                 f"unknown stage-entry plant {plant!r}")
-        planted = {name: value.copy() for name, value in before.items()}
-        at = tuple(np.argwhere(masks["U"])[0])
-        planted["utau_before"][at] = 0.0 if plant == "zero" else 1.0
-        baseline = replay(planted)
-        planted["utau_before"][at] = np.nextafter(
-            planted["utau_before"][at], np.float64(np.inf))
-        moved = replay(planted)
-        controls.append(_row(
-            f"production_input_nextafter_{plant}", baseline["utau_before"],
-            moved["utau_before"], masks["U"]))
+        # A zero-dynamics admitted-shape entry isolates the consumed current-U
+        # -> continuity -> SSH path.  At zero, the one-ULP subnormal is
+        # amplified by Dt*e2u*e3u/area before it is added to a zero SSH; at one,
+        # the ordinary binary64 ULP takes the identical production path.
+        current = {name: value.copy() for name, value in entries[1, 1].items()}
+        planted = {name: value.copy() for name, value in entries[1, 1].items()}
+        at = tuple(np.argwhere(masks["U"])[len(np.argwhere(masks["U"])) // 2])
+        current["u_k"][at] = 0.0 if plant == "zero" else 1.0
+        baseline = replay(current, planted, 2)
+        current["u_k"][at] = np.nextafter(
+            current["u_k"][at], np.float64(np.inf))
+        moved = replay(current, planted, 2)
+        control = _row(
+            f"production_consumed_u_nextafter_{plant}", baseline["ssh_k"],
+            moved["ssh_k"], masks["T"])
+        if plant == "zero" and control["bit_identical"]:
+            # The frozen prediction is honestly refuted: XLA's CPU arithmetic
+            # flushes the smallest binary64 subnormal once it enters the
+            # continuity multiply.  Never promote an ineffective plant to a
+            # green control merely because the physical replay also has debt.
+            control["status"] = "REFUTED"
+            control["reason"] = (
+                "smallest binary64 subnormal was consumed but flushed in "
+                "the production continuity arithmetic")
+        controls.append(control)
     return _gate_rows({
-        "label": "SWE-RK3-STAGE1", "legoesm_git_sha": sha,
+        "label": f"SWE-RK3-STAGES-{mode.upper()}", "legoesm_git_sha": sha,
         "bar": BAR, "plant": plant, "production_stage_executed": True,
-        "controls": controls,
-        "per_kt": [{"kt": 1, "stage": 1, "rows": rows}],
+        "nondiscriminating": [nondiscriminating], "controls": controls,
+        "per_kt": per_kt,
     })
+
+
+def ens_stage1(stage_root: Path, *, plant: str | None = None,
+               allow_dirty: bool = False) -> dict:
+    """Compatibility name for the complete given-entry production stage arm."""
+    return swe_rk3_stages(
+        stage_root, mode="given", plant=plant, allow_dirty=allow_dirty)
 
 
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--arm", choices=(
-        "self-check", "independent", "stage-entry-read", "ens-stage1"),
+        "self-check", "independent", "stage-entry-read", "ens-stage1",
+        "stages-given", "stages-chained"),
                    required=True)
     p.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     p.add_argument("--stage-root", type=Path, default=DEFAULT_STAGE_ROOT)
@@ -299,9 +377,14 @@ def main(argv=None) -> int:
             entries = read_stage_entries(a.stage_root)
             out = {"label": "STAGE-ENTRY-READ", "records": len(entries),
                    "keys": [list(k) for k in entries]}
-        else:
+        elif a.arm == "ens-stage1":
             out = ens_stage1(a.stage_root, plant=a.plant,
                              allow_dirty=a.allow_dirty)
+        else:
+            out = swe_rk3_stages(
+                a.stage_root,
+                mode="given" if a.arm == "stages-given" else "chained",
+                plant=a.plant, allow_dirty=a.allow_dirty)
     except Exception as exc:  # noqa: BLE001 - fail-closed CLI boundary
         print(f"REFUSE: {exc}", file=sys.stderr)
         return 2

@@ -10,7 +10,9 @@ from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
 from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
 from legoesm.ocean.dynamics.swe_rk3 import SWERK3StageEntry
 from legoesm.ocean.eos import nemo_qco_r3t_ratio
-from legoesm.ocean.fidelity.nemo_testcase_recipe import build_swg_card
+from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+    build_swg_card, swg_horizontal_coordinates)
+from legoesm.ocean.state import OceanSurfaceForcing
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -38,10 +40,13 @@ def _entry(fill=0.0):
     return SWERK3StageEntry(**arrays)
 
 
-def test_stage1_zero_state_executes_jit_and_preserves_record_layout(card_and_model):
+@pytest.mark.parametrize("stage", (1, 2, 3))
+def test_zero_state_executes_jit_and_preserves_record_layout(
+        card_and_model, stage):
     card, model = card_and_model
     entry = _entry()
-    out = model.replay_swe_rk3_stage(entry, card.dt_s, 1)
+    out = model.replay_swe_rk3_stage(
+        entry, card.dt_s, stage, entry if stage != 1 else None)
     assert out._fields == SWERK3StageEntry._fields
     for value in out:
         assert value.shape == (84, 84)
@@ -49,16 +54,19 @@ def test_stage1_zero_state_executes_jit_and_preserves_record_layout(card_and_mod
         assert np.array_equal(np.asarray(value), np.zeros((84, 84)))
 
 
-def test_stage1_one_ulp_record_input_reaches_production_output(card_and_model):
+def test_stage1_one_ulp_consumed_input_reaches_production_output(card_and_model):
     card, model = card_and_model
     entry = _entry()
     wet = np.asarray(card.recipe.land_mask, dtype=bool)
     at = tuple(np.argwhere(wet & np.roll(wet, -1, axis=1))[0])
-    before = np.zeros((84, 84), dtype=np.float64)
-    before[at] = np.nextafter(np.float64(0.0), np.float64(np.inf))
-    moved = entry._replace(utau_before=jnp.asarray(before))
-    out = model.replay_swe_rk3_stage(moved, card.dt_s, 1)
-    assert np.asarray(out.utau_before)[at] == before[at]
+    base = np.ones((84, 84), dtype=np.float64)
+    moved_u = base.copy()
+    moved_u[at] = np.nextafter(np.float64(1.0), np.float64(np.inf))
+    baseline = model.replay_swe_rk3_stage(
+        entry._replace(u_k=jnp.asarray(base)), card.dt_s, 1)
+    moved = model.replay_swe_rk3_stage(
+        entry._replace(u_k=jnp.asarray(moved_u)), card.dt_s, 1)
+    assert np.any(np.asarray(moved.ssh_k) != np.asarray(baseline.ssh_k))
 
 
 def test_stage1_nonzero_pressure_is_source_literal_and_differentiable(
@@ -102,10 +110,101 @@ def test_unfloored_qco_ratio_is_available_only_to_stage_boundary(card_and_model)
 
 def test_later_stage_and_full_step_dispatches_fail_closed(card_and_model):
     card, model = card_and_model
-    with pytest.raises(ValueError, match="only stage 1 is landed"):
+    with pytest.raises(ValueError, match="require the whole-step before"):
         model.replay_swe_rk3_stage(_entry(), card.dt_s, 2)
-    with pytest.raises(ValueError, match="not full-step ready"):
+    with pytest.raises(ValueError, match="surface stress"):
         model.step(card.recipe.initial_state, card.dt_s)
+
+
+def test_normal_step_uses_the_jitted_three_stage_production_program(card_and_model):
+    card, model = card_and_model
+    src = swg_horizontal_coordinates()
+    tau_u = -0.2 * np.cos(np.pi * src["gphit"] / 2_000_000.0)
+    forcing = OceanSurfaceForcing(
+        tau_i_native=jnp.asarray(tau_u),
+        tau_j_native=jnp.zeros_like(jnp.asarray(tau_u)))
+    out = model.step(card.recipe.initial_state, card.dt_s,
+                     surface_forcing=forcing)
+    assert np.any(np.asarray(out.u.data) != 0.0)
+    assert out.eta.data.dtype == jnp.float64
+    # The first whole step is the shipped non-degenerate forcing transition;
+    # reverse-mode must cross the same ordinary step() dispatch.
+    def objective(scale):
+        forced = forcing._replace(tau_i_native=scale * forcing.tau_i_native)
+        return jnp.sum(model.step(
+            card.recipe.initial_state, card.dt_s,
+            surface_forcing=forced).u.data)
+    assert np.isfinite(float(jax.grad(objective)(jnp.asarray(1.0))))
+
+
+def test_nonzero_manufactured_stage_matches_literal_nemo_statements(
+        card_and_model):
+    """Exercise C2, ENS, pressure, continuity, QCO, and face masking together."""
+    card, model = card_and_model
+    masks = np.asarray(card.recipe.land_mask, dtype=bool)
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import compute_face_masks
+    uf, vf = compute_face_masks(card.recipe.land_mask, card.recipe.grid)
+    um = np.asarray(uf[:, 1:], dtype=bool)
+    vm = np.asarray(vf[1:, :], dtype=bool)
+    jj, ii = np.indices((84, 84), dtype=np.float64)
+    u = um * (1.0e-3 + 2.0e-6 * ii + 3.0e-6 * jj)
+    v = vm * (-7.0e-4 + 1.0e-6 * ii - 2.0e-6 * jj)
+    ssh = masks * (1.0e-2 + 4.0e-5 * ii + 5.0e-5 * jj)
+    entry = _entry()._replace(
+        ssh_k=jnp.asarray(ssh), u_k=jnp.asarray(u), v_k=jnp.asarray(v),
+        u_before=jnp.asarray(u), v_before=jnp.asarray(v))
+    out = model.replay_swe_rk3_stage(entry, card.dt_s, 1)
+
+    j0, i0 = 40, 40
+    dx = np.float64(25_000.0)
+    height = np.float64(500.0)
+    dt = np.float64(1_200.0)
+    ke = np.float64(0.25) * (
+        (np.roll(u, 1, axis=1) ** 2 + u ** 2)
+        + (np.roll(v, 1, axis=0) ** 2 + v ** 2))
+    zeta = (((np.roll(v, -1, axis=1) - v) * dx
+             - (np.roll(u, -1, axis=0) - u) * dx) / (dx * dx))
+    fmask = np.asarray(
+        card.recipe.z_coord.nemo_een_barotropic.fe3mask[..., 0])
+    q = ((swg_horizontal_coordinates()["ff_f"] + zeta * fmask) / height)
+    fu = dx * height * u
+    fv = dx * height * v
+    keg_u = -(ke[j0, i0 + 1] - ke[j0, i0]) / dx
+    keg_v = -(ke[j0 + 1, i0] - ke[j0, i0]) / dx
+    ens_u = (np.float64(0.125) / dx
+             * ((fv[j0 - 1, i0] + fv[j0 - 1, i0 + 1])
+                + (fv[j0, i0] + fv[j0, i0 + 1]))
+             * (q[j0 - 1, i0] + q[j0, i0]))
+    ens_v = (-np.float64(0.125) / dx
+             * ((fu[j0, i0 - 1] + fu[j0 + 1, i0 - 1])
+                + (fu[j0, i0] + fu[j0 + 1, i0]))
+             * (q[j0, i0 - 1] + q[j0, i0]))
+    hpg_u = -np.float64(0.02) * (ssh[j0, i0 + 1] - ssh[j0, i0]) / dx
+    hpg_v = -np.float64(0.02) * (ssh[j0 + 1, i0] - ssh[j0, i0]) / dx
+    expected_u = u[j0, i0] + dt * (keg_u + ens_u + hpg_u)
+    expected_v = v[j0, i0] + dt * (keg_v + ens_v + hpg_v)
+    fu0 = np.float64(np.float64(dx * height) * u[j0, i0])
+    fuw = np.float64(np.float64(dx * height) * u[j0, i0 - 1])
+    fv0 = np.float64(np.float64(dx * height) * v[j0, i0])
+    fvs = np.float64(np.float64(dx * height) * v[j0 - 1, i0])
+    numerator = np.float64(
+        np.float64(fu0 - fuw) + np.float64(fv0 - fvs))
+    transport_div = np.float64(
+        numerator * np.float64(1.0 / (dx * dx)))
+    hdiv = np.float64(transport_div / height)
+    div = np.float64(height * hdiv)
+    expected_ssh = np.float64(ssh[j0, i0] - np.float64(dt * div))
+    assert np.asarray(out.u_k)[j0, i0] == expected_u
+    assert np.asarray(out.v_k)[j0, i0] == expected_v
+    assert np.asarray(out.ssh_k)[j0, i0] == expected_ssh
+    assert np.asarray(out.r3t_k)[j0, i0] == np.float64(
+        expected_ssh * np.float64(1.0 / height))
+    assert all(value != 0.0 for value in (
+        keg_u, keg_v, ens_u, ens_v, hpg_u, hpg_v, div))
+    dry_u = tuple(np.argwhere(~um)[0])
+    dry_v = tuple(np.argwhere(~vm)[0])
+    assert np.asarray(out.u_k)[dry_u] == 0.0
+    assert np.asarray(out.v_k)[dry_v] == 0.0
 
 
 def test_stage_replay_refuses_a_non_swe_selector(card_and_model):

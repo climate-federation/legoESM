@@ -31,9 +31,11 @@ def test_reader_self_check_is_exact_and_score_plant_leaves_bar():
 
 
 @pytest.mark.skipif(not ROOT.is_dir(), reason="SWG probe not mounted")
-def test_real_independent_ladder_refuses_unmeasured_physics():
-    with pytest.raises(ValueError, match="stages 2 and 3"):
-        lad.independent(ROOT, allow_dirty=True)
+def test_real_independent_ladder_executes_normal_production_step():
+    out = lad.independent(ROOT, allow_dirty=True)
+    assert len(out["per_kt"]) == 10
+    assert all(len(step["rows"]) == 5 for step in out["per_kt"])
+    assert out["first_kt_over_bar"] is not None
 
 
 def test_stage_entry_reader_refuses_absent_acquisition(tmp_path):
@@ -43,31 +45,45 @@ def test_stage_entry_reader_refuses_absent_acquisition(tmp_path):
 
 @pytest.mark.skipif(not lad.DEFAULT_STAGE_ROOT.is_dir(),
                     reason="admitted SWG stage records not mounted")
-def test_ens_stage1_executes_production_jit_and_scores_all_fields():
+def test_all_given_stages_execute_production_jit_and_report_honest_debt():
     clean = lad.ens_stage1(lad.DEFAULT_STAGE_ROOT, allow_dirty=True)
     assert clean["production_stage_executed"]
-    assert clean["all_at_bar"] and clean["all_bit_identical"]
+    assert not clean["all_at_bar"] and not clean["all_bit_identical"]
+    assert clean["nondiscriminating"][0]["status"] == "NON-DISCRIMINATING"
     assert len(clean["per_kt"][0]["rows"]) == 13
     assert {row["status"] for row in clean["per_kt"][0]["rows"]} <= {
         "AT-BAR", "DEBT"}
     assert all("max_abs" in row for row in clean["per_kt"][0]["rows"])
-    assert all(row["max_abs"] == 0.0 for row in clean["per_kt"][0]["rows"])
-    assert lad._exit_code(clean) == 0
+    # kt=2 stages 1 and 2 are exact; stage 3 first exposes the remaining LDF
+    # / forcing source-association debt.
+    assert all(row["max_abs"] == 0.0
+               for step in clean["per_kt"][:2] for row in step["rows"])
+    assert any(row["status"] == "DEBT"
+               for step in clean["per_kt"] for row in step["rows"])
+    assert lad._exit_code(clean) == 1
 
 
 @pytest.mark.skipif(not lad.DEFAULT_STAGE_ROOT.is_dir(),
                     reason="admitted SWG stage records not mounted")
-@pytest.mark.parametrize("value", ("zero", "one"))
-def test_stage_entry_one_ulp_input_plants_leave_bit_for_bit_bar(value):
+def test_stage_entry_one_ulp_input_plant_at_one_leaves_bar():
     out = lad.ens_stage1(
-        lad.DEFAULT_STAGE_ROOT, plant=value, allow_dirty=True)
+        lad.DEFAULT_STAGE_ROOT, plant="one", allow_dirty=True)
     assert len(out["controls"]) == 1
     row = out["controls"][0]
     assert row["status"] == "DEBT"
-    assert row["numerical_status"] == "AT-BAR"
-    assert row["n_unequal"] == 1
+    assert row["n_unequal"] > 0
     assert not row["bit_identical"]
     assert lad._exit_code(out) == 1
+
+
+@pytest.mark.skipif(not lad.DEFAULT_STAGE_ROOT.is_dir(),
+                    reason="admitted SWG stage records not mounted")
+def test_zero_subnormal_control_is_reported_as_refuted_not_as_a_pass():
+    out = lad.ens_stage1(
+        lad.DEFAULT_STAGE_ROOT, plant="zero", allow_dirty=True)
+    row = out["controls"][0]
+    assert row["status"] == "REFUTED"
+    assert "subnormal" in row["reason"]
 
 
 def test_rows_use_card_t_u_v_masks_and_distinguish_wet_from_dry():
@@ -75,7 +91,7 @@ def test_rows_use_card_t_u_v_masks_and_distinguish_wet_from_dry():
 
     masks = lad._card_masks(build_swg_card())
     assert {name: mask.shape for name, mask in masks.items()} == {
-        "T": (84, 84), "U": (84, 84), "V": (84, 84)}
+        "T": (84, 84), "U": (84, 84), "V": (84, 84), "F": (84, 84)}
     assert all(mask.any() and not mask.all() for mask in masks.values())
     for kind, mask in masks.items():
         ref = np.zeros(mask.shape, dtype=np.float64)

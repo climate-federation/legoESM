@@ -4132,10 +4132,7 @@ SWG_COMPILED_NAMELIST_READS: dict[str, tuple[str, ...]] = {
 SWG_DEVIATIONS: tuple[tuple[str, bool, bool, str], ...] = (
     ("key_xios", True, False, "conda-scalarmath reference toolchain"),
 )
-SWG_UNMEASURED: tuple[str, ...] = (
-    "SWE RK3 explicit free-surface stages 2 and 3",
-    "stage-3-only viscosity, wind stress, and before-velocity layer drag",
-)
+SWG_UNMEASURED: tuple[str, ...] = ()
 
 
 def swg_horizontal_coordinates() -> dict[str, np.ndarray]:
@@ -4182,7 +4179,7 @@ def swg_wet_mask(source: dict[str, np.ndarray] | None = None) -> np.ndarray:
 
 
 def build_swg_card() -> NEMOTestcaseCard:
-    """Shipped SWG deck with landed stage 1 and fail-closed later stages."""
+    """Shipped SWG deck on the shared three-stage SWE RK3 program."""
     from legoesm.ocean.dynamics.latlon_cgrid_operators import compute_face_masks
 
     nl = SWG_NAMELIST
@@ -4221,6 +4218,18 @@ def build_swg_card() -> NEMOTestcaseCard:
     umask = u_wet[..., None]
     vmask = v_wet[..., None]
     fe3mask = np.asarray(nemo_fe3mask_from_tmask(jnp.asarray(tmask)))
+    # domain.f90:211-218 first builds 500*vmask(i,j)*vmask(i+1,j), applies
+    # the closed-box F-point lbc, and only then adds 500*ssfmask for SWE.
+    # Thus wet interior F points carry 1000 m while their first coastal halo
+    # carries 500 m; that halo is consumed by the next RK stage's ENS stencil.
+    hf_base = v_wet * np.roll(v_wet, -1, axis=1)
+    wet_j, wet_i = np.where(wet_np > 0.5)
+    west, east = int(wet_i.min() - 1), int(wet_i.max())
+    south, north = int(wet_j.min() - 1), int(wet_j.max())
+    hf_base[:, west] = hf_base[:, west + 1]
+    hf_base[:, east] = hf_base[:, east - 1]
+    hf_base[south, :] = hf_base[south + 1, :]
+    hf_base[north, :] = hf_base[north - 1, :]
     metric = np.full((n, n), spacing)
     area = metric * metric
     operands = NemoEENBarotropicOperands(
@@ -4228,7 +4237,7 @@ def build_swg_card() -> NEMOTestcaseCard:
         e3f_0=thickness, umask=umask, vmask=vmask,
         fmask=fe3mask, fe3mask=fe3mask,
         hu_0=500.0 * u_wet, hv_0=500.0 * v_wet,
-        hf_0=500.0 * fe3mask[..., 0],
+        hf_0=500.0 * hf_base + 500.0 * fe3mask[..., 0],
         e1t=metric, e2t=metric, e1u=metric, e2u=metric,
         e1v=metric, e2v=metric, e1f=metric, e2f=metric,
     )
@@ -4274,7 +4283,8 @@ def build_swg_card() -> NEMOTestcaseCard:
         een_e3f_scheme="nemo_avg4", een_metric_weighting="nemo",
         een_q_boundary="nemo_live",
         lateral_viscosity=base.lateral_viscosity._replace(A_h=500.0),
-        bottom_drag=base.bottom_drag._replace(bottom_drag_r=0.0),
+        # stprk3.f90:325-328 applies rn_rfr to the whole-step before velocity.
+        bottom_drag=base.bottom_drag._replace(bottom_drag_r=nl.rn_rfr_s),
         meridionally_periodic=False,
     )
     recipe = NEMORecipe(config, config.physics, grid, z_coord, wet, state)
@@ -4312,6 +4322,8 @@ def _validate_swg_card(card: NEMOTestcaseCard) -> None:
         raise ValueError("SWG-zco must select compiled vor_ens total vorticity")
     if card.recipe.model_config.lateral_viscosity.A_h != 500.0:
         raise ValueError("SWG-zco must state 0.5*rn_Uv*rn_Lv = 500 m2/s")
+    if card.recipe.model_config.bottom_drag.bottom_drag_r != nl.rn_rfr_s:
+        raise ValueError("SWG-zco must state the compiled rn_rfr layer drag")
     wet = np.asarray(card.recipe.land_mask)
     if wet.shape != (84, 84) or int(np.count_nonzero(wet)) != 6400:
         raise ValueError("SWG-zco must carry the compiled 84x84 / 6400-wet mesh")
