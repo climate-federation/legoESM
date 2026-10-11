@@ -112,10 +112,23 @@ values are:
 - plant log: `b4f90abb5838f4ec41ceb8024f44954dd6f2dc4c27cf9c570581a70568ff41c1`
 - focused tests: `75a3eda3c37782ebda638b7cffd2116b8e4c6cd6b9cce64477fe1050e37ec8d4`
 
-The round-240 and round-239 focused tests pass `27/27`. The receipt citation
-gate and its rigid-shift plant, the default cumulative receipt citation gate,
-and the one `tests/ocean/fidelity -n 12` battery are recorded below after
-execution. A separate `codex exec --sandbox read-only` review was attempted;
+The round-240 and round-239 focused tests pass `27/27`. The round receipt and
+the default cumulative receipt both pass the citation gate with zero unmapped
+citations and zero failures; the rigid-shift citation plant refuses. Their
+round/default/plant log SHA-256 values are
+`1c8629ebfc78ba801253345186c4c7945679167c72b0990661ffb8adb72c4c43`,
+`f77199da832d8586a991a0f1020d673c6ae8c231dadd4abfdb6f44933df49809`,
+and `3554095b656734ee2e747a49bcbed4d312026c4def081b10e89fe5e31533ab30`.
+
+The single `tests/ocean/fidelity -n 12` battery reached `99%`: `3,168`
+passed, `7` skipped, and its only four failures were the registered GYRE
+round-129 record-stamp, SI3 scalar-math provenance, escape-scope, and
+worktree-stamp reds. The final `test_prediction_plant_is_fail_closed` emitted
+no verdict for fifteen minutes and is explicitly **UNCLASSIFIED**, not called
+green. The preserved battery log has SHA-256
+`9a4eb94afd77cda093c2ea41067418ad7c278d9cdb1e08749a03e1ab55aca4dc`.
+
+A separate `codex exec --sandbox read-only` review was attempted;
 it could not initialize its in-process client because the sandbox refused the
 required read-only filesystem alias. Independent review is unavailable
 in-sandbox (log SHA-256
