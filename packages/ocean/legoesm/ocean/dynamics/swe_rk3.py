@@ -214,15 +214,17 @@ def swe_rk3_stage(entry, before_entry, dt, stage, grid, z_coord, land_mask,
     grav = jnp.asarray(config.constants.g, dtype=dtype)
     hpg_u_native = sr(sr(-grav * sr(jnp.roll(ssh, -1, axis=1) - ssh)) * r1_e1u)
     hpg_v_native = sr(sr(-grav * sr(_native_north(ssh) - ssh)) * r1_e2v)
-    rhs_u = sr(rhs_u + _native_to_u(hpg_u_native))
-    rhs_v = sr(rhs_v + _native_to_v(hpg_v_native))
+    zrhs_u_native = hpg_u_native
+    zrhs_v_native = hpg_v_native
 
-    # Stage-3-only wind and layer friction.  Stress is NEMO-native U/V and
-    # positive in the ocean momentum direction.  Drag uses Kbb, not stage K.
+    # Stage-3-only wind and layer friction.  Stress is positive in the ocean
+    # momentum direction; the positive wind source and negative drag sink use
+    # NEMO-native U/V. Drag uses whole-step Kbb, not stage K.  Preserve the
+    # compiled scalar association before adding zrhs once to the carried RHS
+    # (P3 stprk3.f90:319-331).
     if stage == 3:
-        half_r1_rho0 = sr(
-            jnp.asarray(0.5, dtype=dtype)
-            / jnp.asarray(config.constants.rho_0, dtype=dtype))
+        r1_rho0 = sr(one / jnp.asarray(config.constants.rho_0, dtype=dtype))
+        half_r1_rho0 = sr(jnp.asarray(0.5, dtype=dtype) * r1_rho0)
         tau_u = sr(jnp.asarray(entry.utau_before, dtype=dtype)
                    + jnp.asarray(entry.utau_now, dtype=dtype))
         tau_v = sr(jnp.asarray(entry.vtau_before, dtype=dtype)
@@ -230,10 +232,13 @@ def swe_rk3_stage(entry, before_entry, dt, stage, grid, z_coord, land_mask,
         wind_u = sr(sr(half_r1_rho0 * tau_u) / e3u_native[..., 0])
         wind_v = sr(sr(half_r1_rho0 * tau_v) / e3v_native[..., 0])
         drag = jnp.asarray(config.bottom_drag.bottom_drag_r, dtype=dtype)
-        rhs_u = sr(rhs_u + _native_to_u(sr(
-            wind_u - sr(drag * jnp.asarray(before_entry.u_k, dtype=dtype)))))
-        rhs_v = sr(rhs_v + _native_to_v(sr(
-            wind_v - sr(drag * jnp.asarray(before_entry.v_k, dtype=dtype)))))
+        drag_u = sr(drag * jnp.asarray(before_entry.u_k, dtype=dtype))
+        drag_v = sr(drag * jnp.asarray(before_entry.v_k, dtype=dtype))
+        zrhs_u_native = sr(sr(zrhs_u_native + wind_u) - drag_u)
+        zrhs_v_native = sr(sr(zrhs_v_native + wind_v) - drag_v)
+
+    rhs_u = sr(rhs_u + _native_to_u(zrhs_u_native))
+    rhs_v = sr(rhs_v + _native_to_v(zrhs_v_native))
 
     # ssh_nxt: div_hor(Kbb,Kbb), one live layer, emp=0 on this deck.
     u_native = u[:, 1:, :]
