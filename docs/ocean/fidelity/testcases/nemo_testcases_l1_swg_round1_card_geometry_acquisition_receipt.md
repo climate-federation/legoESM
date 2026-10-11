@@ -5,6 +5,7 @@ Preregistration commit: `31e9c2f9b678a4954ba778fd2ce922c7b8343bac`.
 Implementation commit: `b466d706b6fb32dbd528c3b8df9a06c5463387b4`.
 Review-fix implementation commit: `4b2feb297e910bb5b85008e5c11d5314a24cd0a7`.
 Fix-round-2 implementation commit: `d70660e2780b50acf692649cac323d109f82eeb7`.
+Fix-round-3 implementation commit: `8bd0633bf9b60a194d6103f03e4fb54a2fa49ef0`.
 Evidence directory:
 `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swg_rounds/round1`.
 
@@ -235,6 +236,17 @@ the fix-round-2 commit without invoking `makenemo` or `mpirun`.  All 17
 citation-gate tests pass; the clean gate admits 24 mapped citations with no
 failure, and shifting the new U/V-stress citation by two lines makes the plant
 fail and exit 1.
+
+Fix-round-3 post-commit results: all 163 focused SWG tests, 39 focused TSUNAMI
+tests, and 17 citation-gate tests pass.  The expanded receipt gate scans 50
+unique citations from this review section through the end, with zero unmapped
+or failing citations and an empty map audit; shifting the new chunk-consumer
+citation exits 1.  The inventory remains 13 groups and 131 unique fields and
+its removal plant exits 2.  Geometry remains 34/34 bit-identical and its three
+plants each exit 1.  Restart reader calibration remains at bar and
+bit-identical, its numerical plant exits 1, and the independent arm still
+refuses with all three unmeasured features.  Acquisition preflight ends
+`PREFLIGHT_OK` without invoking `makenemo` or `mpirun`.
 
 ## Frozen predictions and falsifiers
 
