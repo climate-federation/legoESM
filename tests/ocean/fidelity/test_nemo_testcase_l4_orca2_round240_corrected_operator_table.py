@@ -18,11 +18,7 @@ def _row(*, exact):
 
 
 def _report():
-    rows = {name: _row(exact=True) for name in gate.ORDER}
-    rows["after_ldf"] = _row(exact=False)
-    rows["after_vor"] = _row(exact=False)
-    rows["after_keg"] = _row(exact=False)
-    rows["after_zad"] = _row(exact=False)
+    rows = {name: _row(exact=False) for name in gate.ORDER}
     return {
         "claim_label": "independent hierarchy rung 0",
         "source_order": list(gate.ORDER),
@@ -33,12 +29,21 @@ def _report():
             "all_faces_at_floor": True, "same_over_floor_set": True,
         },
         "operator_rows": rows,
-        "first_operator": {"boundary": "after_ldf", **rows["after_ldf"]},
+        "first_operator": {"boundary": "after_hpg", **rows["after_hpg"]},
+        "raw_hpg": _row(exact=True),
+        "compact_mask": _row(exact=False),
+        "masked_hpg_to_stage_component": _row(exact=True),
+        "first_statement": {
+            "boundary": "extra_compact_vmask_after_hpg",
+            "candidate": "dv_dt = dv_dt * v_mask_3d",
+            "oracle": "pvv=zhpj+zvap then stp2d applies stored vmask in the depth sum",
+        },
     }
 
 
-def test_classifier_names_the_first_downstream_operator():
-    assert gate.classify(_report())["status"] == "HELD_R240_FIRST_OPERATOR_AFTER_LDF"
+def test_classifier_names_the_extra_compact_mask():
+    assert gate.classify(_report())["status"] == (
+        "HELD_R240_FIRST_STATEMENT_EXTRA_COMPACT_VMASK")
 
 
 @pytest.mark.parametrize("plant", gate.PLANTS[1:])

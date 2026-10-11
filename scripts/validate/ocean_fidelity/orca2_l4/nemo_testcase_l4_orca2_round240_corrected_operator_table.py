@@ -18,6 +18,9 @@ for package in (REPO_ROOT, REPO_ROOT / "packages/core", REPO_ROOT / "packages/oc
 
 from legoesm.ocean.fidelity.provenance import worktree_stamp  # noqa: E402
 from scripts.validate.ocean_fidelity.orca2_l4 import (  # noqa: E402
+    nemo_testcase_l4_orca2_round42_stage1_hpg_walk_gate as r42,
+)
+from scripts.validate.ocean_fidelity.orca2_l4 import (  # noqa: E402
     nemo_testcase_l4_orca2_round92_rung0_card_gate as rung0,
 )
 from scripts.validate.ocean_fidelity.orca2_l4 import (  # noqa: E402
@@ -43,7 +46,10 @@ from scripts.validate.ocean_fidelity.testcases import (  # noqa: E402
 )
 
 ORDER = ("after_hpg", "after_ldf", "after_vor", "after_keg", "after_zad")
-PLANTS = ("none", "source-order", "hpg", "first-owner", "calibration", "route")
+PLANTS = (
+    "none", "source-order", "raw-hpg", "mask-effect", "masked-replay",
+    "first-owner", "calibration", "route",
+)
 
 
 class GateError(RuntimeError):
@@ -67,8 +73,12 @@ def classify(report: dict[str, object], *, plant: str = "none") -> dict[str, obj
     report = copy.deepcopy(report)
     if plant == "source-order":
         report["source_order"][0:2] = reversed(report["source_order"][0:2])
-    elif plant == "hpg":
-        report["operator_rows"]["after_hpg"]["at_floor"] = False
+    elif plant == "raw-hpg":
+        report["raw_hpg"]["bit_exact"] = False
+    elif plant == "mask-effect":
+        report["compact_mask"]["bit_exact"] = True
+    elif plant == "masked-replay":
+        report["masked_hpg_to_stage_component"]["bit_exact"] = False
     elif plant == "first-owner":
         report["first_operator"] = {"boundary": "after_hpg"}
     elif plant == "calibration":
@@ -83,8 +93,12 @@ def classify(report: dict[str, object], *, plant: str = "none") -> dict[str, obj
             "operator table bypasses D114 production geometry")
     require(report["target"] == {"cells": 68, "row": 147},
             "fold-row target moved")
-    require(report["operator_rows"]["after_hpg"]["bit_exact"],
-            "direct round-240 HPG exoneration did not carry into the table")
+    require(report["raw_hpg"]["bit_exact"],
+            "direct round-240 raw HPG exoneration did not carry into the table")
+    require(not report["compact_mask"]["bit_exact"],
+            "compact V mask no longer differs on the fold support")
+    require(report["masked_hpg_to_stage_component"]["bit_exact"],
+            "extra compact mask does not reproduce the stage HPG component")
     require(report["candidate_calibration"]["all_faces_at_floor"],
             "offline after-ZAD endpoint does not reproduce the live endpoint")
     require(report["candidate_calibration"]["same_over_floor_set"],
@@ -92,9 +106,14 @@ def classify(report: dict[str, object], *, plant: str = "none") -> dict[str, obj
     require(all(report["trace_passivity"].values()), "passive trace moved state")
     first = _first(report["operator_rows"])
     require(first == report["first_operator"], "first operator selector moved")
-    require(first is not None and first["boundary"] != "after_hpg",
-            "corrected table did not move ownership downstream of exact HPG")
-    report["status"] = f"HELD_R240_FIRST_OPERATOR_{first['boundary'].upper()}"
+    require(first is not None and first["boundary"] == "after_hpg",
+            "masked stage component is no longer the first operator bucket")
+    require(report["first_statement"] == {
+        "boundary": "extra_compact_vmask_after_hpg",
+        "candidate": "dv_dt = dv_dt * v_mask_3d",
+        "oracle": "pvv=zhpj+zvap then stp2d applies stored vmask in the depth sum",
+    }, "first statement moved")
+    report["status"] = "HELD_R240_FIRST_STATEMENT_EXTRA_COMPACT_VMASK"
     return report
 
 
@@ -153,6 +172,7 @@ def measure(deck_root: Path, rhs_root: Path, static_root: Path,
 
     oracle_rhs, _ = r93.assemble_rhs(rhs_root)
     oracle_static, _ = r170.assemble_record(static_root)
+    oracle_hpg = r179._with_jpk_zero(oracle_rhs["after_hpg_v"])
     oracle_e3v = np.asarray(oracle_static["e3v"])
     oracle_vmask = np.asarray(oracle_static["vmask"])
     oracle_r1 = np.asarray(oracle_static["r1_hv0"])
@@ -187,6 +207,17 @@ def measure(deck_root: Path, rhs_root: Path, static_root: Path,
     rows = {name: r181._score(candidate_depths[name], oracle_depths[name], target)
             for name in ORDER}
 
+    hpg_inputs = r42._candidate_inputs(offline, state)
+    hpg_literal = r42._literal_from_inputs(
+        hpg_inputs, card.recipe.model_config.g, grid=card.recipe.grid)
+    raw_hpg = r179._with_jpk_zero(r83.native_v(hpg_literal["sum_v"]))
+    legacy = r170._candidate_reference_operands(card, state)
+    compact_vmask = np.asarray(legacy["mask_v"])
+    masked_hpg = raw_hpg * compact_vmask
+    stage_hpg = r179._with_jpk_zero(r83.native_v(accumulated["after_hpg_v"]))
+    contributing = np.broadcast_to(target[..., None], oracle_hpg.shape) & (
+        oracle_vmask != 0.0)
+
     live_final = r83.native_v(traced.slow_forcing_producer["post_wind_v"])
     offline_final = candidate_depths["after_zad"]
     live_delta = np.abs(offline_final - live_final)
@@ -211,9 +242,24 @@ def measure(deck_root: Path, rhs_root: Path, static_root: Path,
         "candidate_calibration": calibration,
         "operator_rows": rows,
         "first_operator": _first(rows),
+        "raw_hpg": r181._score(raw_hpg, oracle_hpg, contributing),
+        "compact_mask": r181._score(
+            compact_vmask, oracle_vmask,
+            np.broadcast_to(target[..., None], oracle_vmask.shape)),
+        "masked_hpg_to_stage_component": r181._score(
+            masked_hpg, stage_hpg, contributing),
+        "first_statement": {
+            "boundary": "extra_compact_vmask_after_hpg",
+            "candidate": "dv_dt = dv_dt * v_mask_3d",
+            "oracle": (
+                "pvv=zhpj+zvap then stp2d applies stored vmask in the depth sum"
+            ),
+        },
         "compiled_source": {
             "operator_order": "ORCA2_OMIP_L4_R92RHS/BLD/ppsrc/nemo/stp2d.f90:141-175",
             "depth_average": "ORCA2_OMIP_L4_R92RHS/BLD/ppsrc/nemo/stp2d.f90:203-215",
+            "hpg_write": "ORCA2_OMIP_L4_R182HPGFOLD/BLD/ppsrc/nemo/dynhpg.f90:425-427",
+            "candidate_mask": "ocean_pe_latlon_cgrid.py:5982-5983",
         },
     }
     return classify(report)
