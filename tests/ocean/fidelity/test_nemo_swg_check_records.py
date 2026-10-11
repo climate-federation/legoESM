@@ -50,6 +50,23 @@ def test_complete_ordered_record_set_is_admitted(evidence):
     assert len(out["records"]) == 30 and out["shape"] == [NJ, NI]
 
 
+def test_daily_stage_one_sequence_is_driven_by_requested_inventory(
+        tmp_path, monkeypatch):
+    run, ref = tmp_path / "run", tmp_path / "ref"
+    run.mkdir(); ref.mkdir()
+    (tmp_path / "manifest").mkdir()
+    (tmp_path / "manifest/legoesm_commit").write_text("b" * 40 + "\n")
+    for kt in (1, 25, 49):
+        _record(run / f"oracle_swgstage_kt{kt:08d}_s1.bin", kt, 1)
+    (run / "mesh_mask.nc").write_bytes(b"")
+    monkeypatch.setattr(cr, "compare_outputs", lambda a, b: {"stub": []})
+    out = cr.check(run, ref, record_kts=(1, 25, 49), stages=(1,))
+    assert len(out["records"]) == 3
+    (run / "oracle_swgstage_kt00000049_s1.bin").unlink()
+    with pytest.raises(cr.Refusal, match="stage sequence"):
+        cr.check(run, ref, record_kts=(1, 25, 49), stages=(1,))
+
+
 @pytest.mark.parametrize(
     "plant", ["missing", "header", "group", "magic", "nan", "halo_nan",
               "halo_sentinel"])
@@ -92,3 +109,19 @@ def test_output_passivity_refuses_one_changed_bit(tmp_path):
     assert cr.compare_outputs(run, run)
     with pytest.raises(cr.Refusal, match="instrument changed"):
         cr.compare_outputs(run, ref)
+
+
+def test_daily_restart_passivity_refuses_one_changed_bit(tmp_path):
+    netCDF4 = pytest.importorskip("netCDF4")
+    run, ref = tmp_path / "run", tmp_path / "ref"
+    run.mkdir(); ref.mkdir()
+    name = "SWG_00000024_restart.nc"
+    for directory, value in ((run, 1.0), (ref, 1.0)):
+        with netCDF4.Dataset(directory / name, "w") as ds:
+            ds.createDimension("x", 1)
+            ds.createVariable("sshn", "f8", ("x",))[:] = [value]
+    assert cr.compare_restarts(run, ref, (24,))
+    with netCDF4.Dataset(ref / name, "a") as ds:
+        ds["sshn"][:] = [np.nextafter(np.float64(1.0), np.float64(np.inf))]
+    with pytest.raises(cr.Refusal, match="instrument changed"):
+        cr.compare_restarts(run, ref, (24,))

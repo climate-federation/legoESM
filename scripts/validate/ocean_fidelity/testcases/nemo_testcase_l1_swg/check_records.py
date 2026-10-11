@@ -65,30 +65,52 @@ def parse(path: Path) -> tuple[list[int], dict[str, np.ndarray]]:
     return head, groups
 
 
+def _compare_dataset(a_path: Path, b_path: Path, label: str) -> list[str]:
+    """Require every stored variable in two netCDF datasets to match bits."""
+    import netCDF4
+    with netCDF4.Dataset(a_path) as a, netCDF4.Dataset(b_path) as b:
+        a.set_auto_mask(False); b.set_auto_mask(False)
+        if set(a.variables) != set(b.variables):
+            raise Refusal(f"{label}: variable sets differ")
+        seen = []
+        for name in sorted(a.variables):
+            av, bv = np.asarray(a[name][:]), np.asarray(b[name][:])
+            if (av.shape != bv.shape or av.dtype != bv.dtype
+                    or av.tobytes() != bv.tobytes()):
+                raise Refusal(f"{label}.{name}: instrument changed NEMO output")
+            seen.append(name)
+        return seen
+
+
 def compare_outputs(run: Path, reference: Path) -> dict:
     """Require every numeric field in NEMO's four grid outputs to match bits."""
-    import netCDF4
     result = {}
     for kind in GRID_KINDS:
         a_files = sorted(run.glob(f"*grid_{kind}*.nc"))
         b_files = sorted(reference.glob(f"*grid_{kind}*.nc"))
         if len(a_files) != 1 or len(b_files) != 1:
             raise Refusal(f"grid_{kind}: expected one run and reference file")
-        with netCDF4.Dataset(a_files[0]) as a, netCDF4.Dataset(b_files[0]) as b:
-            a.set_auto_mask(False); b.set_auto_mask(False)
-            if set(a.variables) != set(b.variables):
-                raise Refusal(f"grid_{kind}: variable sets differ")
-            seen = []
-            for name in sorted(a.variables):
-                av, bv = np.asarray(a[name][:]), np.asarray(b[name][:])
-                if av.shape != bv.shape or av.dtype != bv.dtype or av.tobytes() != bv.tobytes():
-                    raise Refusal(f"grid_{kind}.{name}: instrument changed NEMO output")
-                seen.append(name)
-            result[kind] = seen
+        result[kind] = _compare_dataset(
+            a_files[0], b_files[0], f"grid_{kind}")
     return result
 
 
-def check(evidence: Path, reference: Path) -> dict:
+def compare_restarts(run: Path, reference: Path, steps: tuple[int, ...]) -> dict:
+    """Require each requested daily restart to exist and match field bits."""
+    result = {}
+    for kt in steps:
+        name = f"SWG_{kt:08d}_restart.nc"
+        a_path, b_path = run / name, reference / name
+        if not a_path.is_file() or not b_path.is_file():
+            raise Refusal(f"restart kt={kt}: expected run and reference files")
+        result[str(kt)] = _compare_dataset(a_path, b_path, f"restart.{kt}")
+    return result
+
+
+def check(evidence: Path, reference: Path, *,
+          record_kts: tuple[int, ...] = tuple(range(1, STEPS + 1)),
+          stages: tuple[int, ...] = STAGES,
+          restart_kts: tuple[int, ...] = ()) -> dict:
     stamp = evidence.parent / "manifest/legoesm_commit"
     if not stamp.is_file():
         raise Refusal(f"missing commit stamp {stamp}")
@@ -96,7 +118,7 @@ def check(evidence: Path, reference: Path) -> dict:
     if len(commit) != 40 or any(c not in "0123456789abcdef" for c in commit):
         raise Refusal(f"invalid commit stamp {commit!r}")
     files = sorted(evidence.glob("oracle_swgstage_kt*_s*.bin"))
-    expected = [(kt, stage) for kt in range(1, STEPS + 1) for stage in STAGES]
+    expected = [(kt, stage) for kt in record_kts for stage in stages]
     found = []
     hashes = {}
     shape = None
@@ -115,10 +137,24 @@ def check(evidence: Path, reference: Path) -> dict:
         raise Refusal(f"stage sequence is {found}")
     if not list(evidence.glob("mesh_mask*.nc")):
         raise Refusal("missing mesh_mask")
-    return {
+    out = {
         "legoesm_git_sha": commit, "records": hashes, "shape": list(shape),
         "output_identity": compare_outputs(evidence, reference),
     }
+    if restart_kts:
+        out["restart_identity"] = compare_restarts(
+            evidence, reference, restart_kts)
+    return out
+
+
+def _int_csv(value: str) -> tuple[int, ...]:
+    try:
+        out = tuple(int(item) for item in value.split(",") if item)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("expected comma-separated integers") from exc
+    if not out or any(item < 1 for item in out) or len(set(out)) != len(out):
+        raise argparse.ArgumentTypeError("integers must be positive and unique")
+    return out
 
 
 def main(argv=None) -> int:
@@ -126,9 +162,14 @@ def main(argv=None) -> int:
     p.add_argument("--evidence", type=Path, required=True)
     p.add_argument("--reference", type=Path, required=True)
     p.add_argument("--json", type=Path, required=True)
+    p.add_argument("--record-kts", type=_int_csv,
+                   default=tuple(range(1, STEPS + 1)))
+    p.add_argument("--stages", type=_int_csv, default=STAGES)
+    p.add_argument("--restart-kts", type=_int_csv, default=())
     a = p.parse_args(argv)
     try:
-        out = check(a.evidence, a.reference)
+        out = check(a.evidence, a.reference, record_kts=a.record_kts,
+                    stages=a.stages, restart_kts=a.restart_kts)
     except (Refusal, OSError, ValueError) as exc:
         print(f"REFUSE: {exc}", file=sys.stderr)
         return 1

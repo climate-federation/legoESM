@@ -1,0 +1,35 @@
+--- stprk3.F90
++++ stprk3.F90
+@@ -16,6 +16,7 @@
+    USE domqco         ! quasi-eulerian coordinate
+    USE phycst         ! physical constants
+    USE usrdef_nam     ! user defined namelist parameters
++   USE swg_r1_stage_entry_record ! passive daily stage-one entries
+ 
+    IMPLICIT NONE
+    PRIVATE
+@@ -114,6 +115,24 @@
+       !
+       !                                 !==  RHS of the momentum Eq.  ==!
+       !
++      IF( MOD(kstp - nit000, 24) == 0 ) THEN
++         CALL swg_open( kstp, 1, Nbb, Nbb, Naa, Nrhs, jpi, jpj, jpk, Nis0, Njs0, Nie0, Nje0 )
++         CALL swg_w2( 'ssh_k', ssh(:,:,Nbb) )
++         CALL swg_w2( 'u_k', uu(:,:,1,Nbb) )
++         CALL swg_w2( 'v_k', vv(:,:,1,Nbb) )
++         CALL swg_w2( 'r3t_k', r3t(:,:,Nbb) )
++         CALL swg_w2( 'r3u_k', r3u(:,:,Nbb) )
++         CALL swg_w2( 'r3v_k', r3v(:,:,Nbb) )
++         CALL swg_w2( 'r3f', r3f(:,:) )
++         CALL swg_w2( 'u_before', uu(:,:,1,Nbb) )
++         CALL swg_w2( 'v_before', vv(:,:,1,Nbb) )
++         CALL swg_w2( 'utau_before', utau_b(:,:) )
++         CALL swg_w2( 'vtau_before', vtau_b(:,:) )
++         CALL swg_w2( 'utau_now', utauU(:,:) )
++         CALL swg_w2( 'vtau_now', vtauV(:,:) )
++         CALL swg_close( kstp, 1 )
++      ENDIF
++      !
+       uu(:,:,:,Nrhs) = 0._wp                        ! set dynamics trends to zero
+       vv(:,:,:,Nrhs) = 0._wp
+ 
