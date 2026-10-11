@@ -45,8 +45,8 @@ PAIR_PLANTS = (
 )
 PAIR_MEASUREMENT_COMMITS = {
     "baseline": "1ab039cb198c2f33bc7fe8a79dde75e1f55f68be",
-    "raw-mask arm": "4d8974d66d0ddad60016c52a5cfdb79e78a97f09",
-    "atomic pair": "a9d4e310ba7902b4d12479c1fa362625a581189d",
+    "raw-mask arm": "b028af3513c81617cac9875e7a0fe65758ca6ca7",
+    "atomic pair": "b028af3513c81617cac9875e7a0fe65758ca6ca7",
 }
 
 
@@ -456,9 +456,9 @@ def classify_pair(
         mask = raw_mask[label]
         joined = pair[label]
         for report, name, flags in (
-            (base, "baseline", (False, False)),
-            (mask, "raw-mask arm", (True, False)),
-            (joined, "atomic pair", (True, True)),
+            (base, "baseline", (False, False, False)),
+            (mask, "raw-mask arm", (False, True, False)),
+            (joined, "atomic pair", (False, True, True)),
         ):
             require(report["status"] == "PASS_R245_V_DEPTH_OPERAND_SPLIT",
                     f"{label} {name}: measurement status moved")
@@ -469,6 +469,7 @@ def classify_pair(
             # absence from a malformed current report.
             actual_flags = (
                 report.get("raw_surface_masks", False),
+                report.get("raw_v_surface_mask", False),
                 report.get("t_pivot_north_neighbor", False),
             )
             require(actual_flags == flags,
@@ -526,7 +527,7 @@ def classify_pair(
         "format": "nemo-testcase-l4-orca2-round245-pair-classification-v1",
         "status": "HELD_R245_MASK_T_HALO_CANCELLING_PAIR_NAMED",
         "source": pair["independent"]["source"],
-        "unit": ["raw_surface_ssvmask", "t_pivot_north_neighbor"],
+        "unit": ["raw_v_surface_ssvmask", "t_pivot_north_neighbor"],
         "result": (
             "raw mask alone exposes a north-neighbour debt; the atomic pair "
             "closes depth, midpoint V, and zhV through substep 6"),

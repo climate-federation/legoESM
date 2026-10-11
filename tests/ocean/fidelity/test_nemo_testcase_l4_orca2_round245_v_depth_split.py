@@ -28,6 +28,7 @@ def _report(label: str):
         "source": {"lines": "487-519"},
         "production_operand_route": "D114 raw hv_0; current compact area/mask",
         "raw_surface_masks": False,
+        "raw_v_surface_mask": False,
         "t_pivot_north_neighbor": False,
         "passivity": {"eta": True, "u": True},
         "substeps": list(gate.SUBSTEPS),
@@ -71,20 +72,20 @@ def test_atomic_pair_classification_and_every_pair_plant_fail_closed():
     pair = copy.deepcopy(baseline)
     for report in raw_mask:
         report["worktree"]["commit"] = gate.PAIR_MEASUREMENT_COMMITS["raw-mask arm"]
-        report["raw_surface_masks"] = True
+        report["raw_v_surface_mask"] = True
         report["operand_rows"]["ssvmask"] = _difference(0)
         for row in report["rows"]:
             row["pair"]["face_depth_v_mid"] = _difference(20)
     for report in pair:
         report["worktree"]["commit"] = gate.PAIR_MEASUREMENT_COMMITS["atomic pair"]
-        report["raw_surface_masks"] = True
+        report["raw_v_surface_mask"] = True
         report["t_pivot_north_neighbor"] = True
         for row in report["rows"]:
             for field in row["pair"].values():
                 field.update(_difference(0))
     result = gate.classify_pair(baseline, raw_mask, pair)
     assert result["status"] == "HELD_R245_MASK_T_HALO_CANCELLING_PAIR_NAMED"
-    assert result["unit"] == ["raw_surface_ssvmask", "t_pivot_north_neighbor"]
+    assert result["unit"] == ["raw_v_surface_ssvmask", "t_pivot_north_neighbor"]
     for plant in gate.PAIR_PLANTS[1:]:
         with pytest.raises(gate.GateError):
             gate.classify_pair(baseline, raw_mask, pair, plant=plant)
