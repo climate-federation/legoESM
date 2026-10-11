@@ -1820,10 +1820,18 @@ def _nemo_ws_qco_stage_faces(
     # domain.F90:145 (hu_0 = SUM(e3u_0*umask)) and the C-grid metrics: ONE
     # builder, shared with the PE lane's wzv arm, so the two lanes cannot
     # drift apart in how they reconstruct NEMO's mesh from a card's grid.
+    # A raw NEMO face geometry is explicitly attached as one complete EEN
+    # operand bundle.  Other cards may carry an initial T thickness for an
+    # unrelated consumer; that does not make them raw-face-mesh cards.  Keep
+    # those cards on the generic reconstructed source, as before D114.
+    raw_face_bundle = (
+        None if z_coord is None
+        else getattr(z_coord, "nemo_een_barotropic", None)
+    )
     ops = (
         nemo_qco_card_mesh_operands(
             h_ref, u_mask_3d, v_mask_3d, grid, dtype)
-        if z_coord is None
+        if raw_face_bundle is None
         else nemo_qco_resolved_mesh_operands(
             z_coord, grid, u_mask_3d, v_mask_3d, dtype,
             jnp.asarray(h_ref).shape[-1])
