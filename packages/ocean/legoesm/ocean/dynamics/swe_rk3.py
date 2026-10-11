@@ -184,9 +184,12 @@ def swe_rk3_stage(entry, before_entry, dt, stage, grid, z_coord, land_mask,
         e3v_before = jnp.concatenate(
             [jnp.zeros_like(e3v_before_native[:1]), e3v_before_native], axis=0)
         reference_e3f = nemo_ldf_reference_e3f(z_coord)
-        e3f_before = nemo_qco_live_vorticity_e3f_cgrid(
-            before_entry.ssh_k, z_coord, dtype, nn_e3f_typ=1, grid=grid,
-            reference_e3f=reference_e3f, r3f_override=before_entry.r3f)
+        # r3f has no time-level dimension. dom_qco_r3c overwrites it after
+        # every stage, so stage 3 reads the stage-2/current ratio while the
+        # divergence operands above remain at Kbb (dynldf_lev.f90:130-150).
+        e3f_current = nemo_qco_live_vorticity_e3f_cgrid(
+            entry.ssh_k, z_coord, dtype, nn_e3f_typ=1, grid=grid,
+            reference_e3f=reference_e3f, r3f_override=entry.r3f)
         if config.lateral_viscosity_coefficient_source == "nemo_constant":
             ahmt, ahmf = nemo_lateral_viscosity_constant_coefficients(
                 geom, jnp.asarray(config.lateral_viscosity.A_h, dtype=dtype))
@@ -204,7 +207,7 @@ def swe_rk3_stage(entry, before_entry, dt, stage, grid, z_coord, land_mask,
             mask=mask, u_mask=umask3, v_mask=vmask3,
             vertex_mask=compute_vertex_mask(mask, grid=grid),
             thickness_operands=(
-                e3t_before, e3u_before, e3v_before, e3f_before,
+                e3t_before, e3u_before, e3v_before, e3f_current,
                 h_u, h_v))
         rhs_u = sr(rhs_u + ldf_u)
         rhs_v = sr(rhs_v + ldf_v)

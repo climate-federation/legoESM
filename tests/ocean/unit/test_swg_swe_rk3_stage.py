@@ -245,6 +245,34 @@ def test_stage3_drag_uses_whole_step_before_velocity(card_and_model):
     assert np.asarray(out.u_k)[at] == expected
 
 
+def test_stage3_viscosity_reads_current_unindexed_r3f(card_and_model):
+    card, model = card_and_model
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import compute_face_masks
+
+    u_mask, v_mask = compute_face_masks(card.recipe.land_mask, card.recipe.grid)
+    jj, ii = np.indices((84, 84), dtype=np.float64)
+    before_u = np.asarray(u_mask[:, 1:]) * (1.0e-3 + 2.0e-6 * jj)
+    before_v = np.asarray(v_mask[1:, :]) * (-7.0e-4 + 3.0e-6 * ii)
+    base_entry = _entry()
+    base_before = _entry()._replace(
+        u_k=jnp.asarray(before_u), v_k=jnp.asarray(before_v))
+    r3f = np.zeros((84, 84), dtype=np.float64)
+    r3f[40, 40] = np.float64(0.125)
+
+    base = model.replay_swe_rk3_stage(
+        base_entry, card.dt_s, 3, base_before)
+    current = model.replay_swe_rk3_stage(
+        base_entry._replace(r3f=jnp.asarray(r3f)), card.dt_s, 3, base_before)
+    stale_before = model.replay_swe_rk3_stage(
+        base_entry, card.dt_s, 3,
+        base_before._replace(r3f=jnp.asarray(r3f)))
+
+    assert (np.any(np.asarray(current.u_k) != np.asarray(base.u_k))
+            or np.any(np.asarray(current.v_k) != np.asarray(base.v_k)))
+    np.testing.assert_array_equal(np.asarray(stale_before.u_k), np.asarray(base.u_k))
+    np.testing.assert_array_equal(np.asarray(stale_before.v_k), np.asarray(base.v_k))
+
+
 def test_stage_replay_refuses_a_non_swe_selector(card_and_model):
     card, _ = card_and_model
     bad = card.recipe.model_config._replace(

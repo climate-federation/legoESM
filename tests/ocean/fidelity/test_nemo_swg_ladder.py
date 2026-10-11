@@ -45,22 +45,18 @@ def test_stage_entry_reader_refuses_absent_acquisition(tmp_path):
 
 @pytest.mark.skipif(not lad.DEFAULT_STAGE_ROOT.is_dir(),
                     reason="admitted SWG stage records not mounted")
-def test_all_given_stages_execute_production_jit_and_report_honest_debt():
+def test_all_given_stages_execute_production_jit_and_are_bit_exact():
     clean = lad.ens_stage1(lad.DEFAULT_STAGE_ROOT, allow_dirty=True)
     assert clean["production_stage_executed"]
-    assert not clean["all_at_bar"] and not clean["all_bit_identical"]
+    assert clean["all_at_bar"] and clean["all_bit_identical"]
     assert clean["nondiscriminating"][0]["status"] == "NON-DISCRIMINATING"
     assert len(clean["per_kt"][0]["rows"]) == 13
     assert {row["status"] for row in clean["per_kt"][0]["rows"]} <= {
         "AT-BAR", "DEBT"}
     assert all("max_abs" in row for row in clean["per_kt"][0]["rows"])
-    # kt=2 stages 1 and 2 are exact; stage 3 first exposes the remaining LDF
-    # / forcing source-association debt.
     assert all(row["max_abs"] == 0.0
-               for step in clean["per_kt"][:2] for row in step["rows"])
-    assert any(row["status"] == "DEBT"
                for step in clean["per_kt"] for row in step["rows"])
-    assert lad._exit_code(clean) == 1
+    assert lad._exit_code(clean) == 0
 
 
 @pytest.mark.skipif(not lad.DEFAULT_STAGE_ROOT.is_dir(),
