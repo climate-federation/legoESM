@@ -180,13 +180,13 @@ def _pair_row(card, state, freshwater, surface, oracle_rhs) -> dict[str, object]
     }
 
 
-def measure(args: argparse.Namespace) -> dict[str, object]:
+def _policy_and_stamp(expect_commit: str) -> dict[str, object]:
     import jax
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
     from legoesm.ocean.fidelity.provenance import worktree_stamp
 
     stamp = worktree_stamp()
-    require(stamp["clean"] and stamp["commit"].lower() == args.expect_commit.lower(),
+    require(stamp["clean"] and stamp["commit"].lower() == expect_commit.lower(),
             "round-239 measurement requires its clean committed gate")
     policy = PrecisionPolicy.fp64(transcendentals="libm")
     set_policy(policy)
@@ -194,6 +194,11 @@ def measure(args: argparse.Namespace) -> dict[str, object]:
             "fp64/libm policy is not active")
     require(jax.default_backend() == "cpu" and not jax.config.jax_disable_jit,
             "round-239 measurement requires production JIT on CPU")
+    return stamp
+
+
+def measure_pair(args: argparse.Namespace) -> dict[str, object]:
+    stamp = _policy_and_stamp(args.expect_commit)
 
     slow_reports = {
         "independent": json.loads(args.independent_slow.read_text()),
@@ -220,6 +225,16 @@ def measure(args: argparse.Namespace) -> dict[str, object]:
         label: _pair_row(card, state, freshwater, surface, oracle_slow["krhs_v"])
         for label, state in states.items()
     }
+    return {
+        "format": "nemo-testcase-l4-orca2-round239-pair-v1",
+        "execution": "production-jit-cpu-fp64-x64-libm",
+        "worktree": stamp,
+        "pair_completed_rhs": pair,
+    }
+
+
+def measure_operator(args: argparse.Namespace) -> dict[str, object]:
+    stamp = _policy_and_stamp(args.expect_commit)
 
     original_classify = r179.classify
     try:
@@ -229,12 +244,10 @@ def measure(args: argparse.Namespace) -> dict[str, object]:
             args.static_root, args.spg_root, args.expect_commit)
     finally:
         r179.classify = original_classify
-
-    report = {
-        "format": "nemo-testcase-l4-orca2-round239-v-rhs-pair-v1",
+    return {
+        "format": "nemo-testcase-l4-orca2-round239-operator-v1",
         "execution": "production-jit-cpu-fp64-x64-libm",
         "worktree": stamp,
-        "pair_completed_rhs": pair,
         "operator_table": {
             key: table[key] for key in (
                 "source_order", "target", "operator_rows", "first_operator",
@@ -247,12 +260,29 @@ def measure(args: argparse.Namespace) -> dict[str, object]:
             "operator_order": table["compiled_source"]["operator_order"],
         },
     }
+
+
+def combine(pair: dict[str, object], operator: dict[str, object]) -> dict[str, object]:
+    require(pair["format"] == "nemo-testcase-l4-orca2-round239-pair-v1",
+            "pair report format moved")
+    require(operator["format"] == "nemo-testcase-l4-orca2-round239-operator-v1",
+            "operator report format moved")
+    report = {
+        "format": "nemo-testcase-l4-orca2-round239-v-rhs-pair-v1",
+        "execution": pair["execution"],
+        "pair_completed_rhs": pair["pair_completed_rhs"],
+        "operator_table": operator["operator_table"],
+        "compiled_source": operator["compiled_source"],
+        "worktrees": {"pair": pair["worktree"], "operator": operator["worktree"]},
+    }
     return classify(report)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", choices=("measure", "classify"), default="classify")
+    parser.add_argument(
+        "--mode", choices=("pair", "operator", "combine", "classify"),
+        default="classify")
     parser.add_argument("--omt4-root", type=Path)
     parser.add_argument("--rung0-root", type=Path)
     parser.add_argument("--rhs-root", type=Path)
@@ -263,17 +293,30 @@ def main() -> int:
     parser.add_argument("--given-slow", type=Path)
     parser.add_argument("--expect-commit")
     parser.add_argument("--report-in", type=Path)
+    parser.add_argument("--pair-in", type=Path)
+    parser.add_argument("--operator-in", type=Path)
     parser.add_argument("--plant", choices=PLANTS, default="none")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     try:
-        if args.mode == "measure":
-            required = (args.omt4_root, args.rung0_root, args.rhs_root,
-                        args.slow_root, args.static_root, args.spg_root,
-                        args.independent_slow, args.given_slow, args.expect_commit)
+        if args.mode == "pair":
+            required = (args.omt4_root, args.independent_slow,
+                        args.given_slow, args.expect_commit)
             require(all(value is not None for value in required),
-                    "measurement arguments incomplete")
-            result = measure(args)
+                    "pair measurement arguments incomplete")
+            result = measure_pair(args)
+        elif args.mode == "operator":
+            required = (args.rung0_root, args.rhs_root, args.slow_root,
+                        args.static_root, args.spg_root, args.expect_commit)
+            require(all(value is not None for value in required),
+                    "operator measurement arguments incomplete")
+            result = measure_operator(args)
+        elif args.mode == "combine":
+            require(args.pair_in is not None and args.operator_in is not None,
+                    "combine needs --pair-in and --operator-in")
+            result = combine(
+                json.loads(args.pair_in.read_text()),
+                json.loads(args.operator_in.read_text()))
         else:
             require(args.report_in is not None, "classification needs --report-in")
             result = classify(json.loads(args.report_in.read_text()), plant=args.plant)
