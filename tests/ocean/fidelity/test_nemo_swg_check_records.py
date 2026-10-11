@@ -50,7 +50,9 @@ def test_complete_ordered_record_set_is_admitted(evidence):
     assert len(out["records"]) == 30 and out["shape"] == [NJ, NI]
 
 
-@pytest.mark.parametrize("plant", ["missing", "header", "group", "magic", "nan"])
+@pytest.mark.parametrize(
+    "plant", ["missing", "header", "group", "magic", "nan", "halo_nan",
+              "halo_sentinel"])
 def test_record_plants_are_refused(evidence, plant):
     run, ref = evidence
     p = run / "oracle_swgstage_kt00000003_s2.bin"
@@ -62,10 +64,17 @@ def test_record_plants_are_refused(evidence, plant):
         _record(p, 3, 2, cr.GROUPS - {"r3f"})
     elif plant == "magic":
         raw = bytearray(p.read_bytes()); raw[0] = ord("X"); p.write_bytes(raw)
-    else:
+    elif plant == "nan":
         raw = bytearray(p.read_bytes())
         off = 16 + 4 * cr.NINT + 32
         raw[off + 8 * (3 * NI + 3):off + 8 * (3 * NI + 4)] = np.asarray(np.nan, dtype="<f8").tobytes()
+        p.write_bytes(raw)
+    else:
+        raw = bytearray(p.read_bytes())
+        off = 16 + 4 * cr.NINT + 32
+        # Row 0, column 0 lies outside the owned 1-based BOUNDS=(3,3,6,4).
+        value = np.nan if plant == "halo_nan" else cr.SENTINEL
+        raw[off:off + 8] = np.asarray(value, dtype="<f8").tobytes()
         p.write_bytes(raw)
     with pytest.raises(cr.Refusal):
         cr.check(run, ref)

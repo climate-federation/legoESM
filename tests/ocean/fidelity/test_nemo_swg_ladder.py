@@ -4,6 +4,7 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 _P = (Path(__file__).resolve().parents[3] / "scripts/validate/ocean_fidelity/"
@@ -38,3 +39,31 @@ def test_real_independent_ladder_refuses_unmeasured_physics():
 def test_stage_entry_reader_refuses_absent_acquisition(tmp_path):
     with pytest.raises(Exception, match="missing"):
         lad.read_stage_entries(tmp_path)
+
+
+def test_rows_use_card_t_u_v_masks_and_distinguish_wet_from_dry():
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import build_swg_card
+
+    masks = lad._card_masks(build_swg_card())
+    assert {name: mask.shape for name, mask in masks.items()} == {
+        "T": (84, 84), "U": (84, 84), "V": (84, 84)}
+    assert all(mask.any() and not mask.all() for mask in masks.values())
+    for kind, mask in masks.items():
+        ref = np.zeros(mask.shape, dtype=np.float64)
+        dry = ref.copy()
+        dry[tuple(np.argwhere(~mask)[0])] = 1.0
+        assert lad._row(f"plant.{kind}.dry", ref, dry, mask)["status"] == "AT-BAR"
+        wet = ref.copy()
+        wet[tuple(np.argwhere(mask)[0])] = 1.0
+        assert lad._row(f"plant.{kind}.wet", ref, wet, mask)["status"] == "DEBT"
+
+
+def test_numerical_debt_makes_the_ladder_gate_nonzero():
+    clean = {"per_kt": [{"kt": 1, "rows": [
+        {"status": "AT-BAR", "bit_identical": True}]}]}
+    debt = {"per_kt": [{"kt": 1, "rows": [
+        {"status": "DEBT", "bit_identical": False}]}]}
+    assert lad._exit_code(lad._gate_rows(clean)) == 0
+    gated = lad._gate_rows(debt)
+    assert gated["first_kt_over_bar"] == 1
+    assert lad._exit_code(gated) == 1

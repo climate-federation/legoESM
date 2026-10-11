@@ -24,6 +24,8 @@ RESTART_FIELDS = (
     "sshn", "un", "vn", "uu_n", "vv_n", "utau_b", "vtau_b",
     "emp_b", "qns_b", "sfx_b",
 )
+U_FIELDS = frozenset(("un", "uu_n"))
+V_FIELDS = frozenset(("vn", "vv_n"))
 
 
 def _stage_checker():
@@ -83,17 +85,50 @@ def read_stage_entries(root: Path) -> dict[tuple[int, int], dict[str, np.ndarray
     return out
 
 
-def _row(name, ref, cand):
+def _card_masks(card) -> dict[str, np.ndarray]:
+    """Return native NEMO T/U/V masks from the card and shared face builder."""
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import compute_face_masks
+
+    tmask = np.asarray(card.recipe.land_mask, dtype=bool)
+    u_full, v_full = compute_face_masks(card.recipe.land_mask, card.recipe.grid)
+    return {
+        "T": tmask,
+        "U": np.asarray(u_full[:, 1:], dtype=bool),
+        "V": np.asarray(v_full[1:, :], dtype=bool),
+    }
+
+
+def _field_mask(field: str, masks: dict[str, np.ndarray]) -> np.ndarray:
+    return masks["U" if field in U_FIELDS else "V" if field in V_FIELDS else "T"]
+
+
+def _row(name, ref, cand, mask):
     ref, cand = np.asarray(ref), np.asarray(cand)
-    result = score(name, ref, cand, np.ones(ref.shape, dtype=bool))
-    bad = np.argwhere(ref != cand)
+    use = np.asarray(mask, dtype=bool)
+    result = score(name, ref, cand, use)
+    delta = cand - ref
+    bad = np.argwhere((ref != cand) & use)
     result.update({
         "bit_identical": bool(bad.size == 0),
         "n_unequal": int(bad.shape[0]),
         "first_unequal_cell": bad[0].tolist() if bad.size else None,
-        "max_abs": float(np.max(np.abs(cand - ref))),
+        "max_abs": float(np.max(np.abs(delta[use]))),
     })
     return result
+
+
+def _gate_rows(out: dict) -> dict:
+    rows = [row for step in out.get("per_kt", ()) for row in step["rows"]]
+    out["all_at_bar"] = all(row["status"] == "AT-BAR" for row in rows)
+    out["all_bit_identical"] = all(row["bit_identical"] for row in rows)
+    out["first_kt_over_bar"] = next(
+        (step["kt"] for step in out.get("per_kt", ())
+         if any(row["status"] != "AT-BAR" for row in step["rows"])), None)
+    return out
+
+
+def _exit_code(out: dict) -> int:
+    return 0 if out.get("all_at_bar", True) else 1
 
 
 def self_check(root: Path, *, plant: bool = False, allow_dirty: bool = False) -> dict:
@@ -101,6 +136,8 @@ def self_check(root: Path, *, plant: bool = False, allow_dirty: bool = False) ->
     from legoesm.ocean.fidelity.provenance import allow_dirty_stamps, git_sha
     allow_dirty_stamps(allow_dirty)
     sha = git_sha(allow_dirty=allow_dirty)
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import build_swg_card
+    masks = _card_masks(build_swg_card())
     records = read_restarts(root)
     per_kt = []
     for kt, fields in records.items():
@@ -109,17 +146,14 @@ def self_check(root: Path, *, plant: bool = False, allow_dirty: bool = False) ->
             cand = ref.copy()
             if plant and kt == 1 and name == "sshn":
                 cand[42, 42] += 1.0e-3
-            rows.append(_row(f"self_check.kt{kt}.{name}", ref, cand))
+            rows.append(_row(f"self_check.kt{kt}.{name}", ref, cand,
+                             _field_mask(name, masks)))
         per_kt.append({"kt": kt, "rows": rows})
-    return {
+    return _gate_rows({
         "label": "RESTART-READER-SELF-CHECK (not fidelity)",
         "legoesm_git_sha": sha, "bar": BAR, "plant": plant,
         "per_kt": per_kt,
-        "all_at_bar": all(r["status"] == "AT-BAR"
-                          for k in per_kt for r in k["rows"]),
-        "all_bit_identical": all(r["bit_identical"]
-                                 for k in per_kt for r in k["rows"]),
-    }
+    })
 
 
 def independent(root: Path, *, allow_dirty: bool = False) -> dict:
@@ -133,6 +167,7 @@ def independent(root: Path, *, allow_dirty: bool = False) -> dict:
     require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
     require(jax.default_backend() == "cpu", "ladder must run on CPU")
     card = build_swg_card()
+    masks = _card_masks(card)
     validate_nemo_testcase_card_for_execution(card)
     records = read_restarts(root)
     model = LatLonCGridOceanModel(card.recipe.grid, card.recipe.z_coord,
@@ -148,10 +183,12 @@ def independent(root: Path, *, allow_dirty: bool = False) -> dict:
             "uu_n": np.asarray(state.uu_b.data)[:, 1:],
             "vv_n": np.asarray(state.vv_b.data)[1:, :],
         }
-        rows = [_row(f"independent.kt{kt}.{n}", records[kt][n], cand[n])
+        rows = [_row(f"independent.kt{kt}.{n}", records[kt][n], cand[n],
+                     _field_mask(n, masks))
                 for n in cand]
         per_kt.append({"kt": kt, "rows": rows})
-    return {"label": "INDEPENDENT", "bar": BAR, "per_kt": per_kt}
+    return _gate_rows({"label": "INDEPENDENT", "bar": BAR,
+                       "per_kt": per_kt})
 
 
 def main(argv=None) -> int:
@@ -181,7 +218,7 @@ def main(argv=None) -> int:
     print(out["label"])
     if "all_at_bar" in out:
         print(f"all_at_bar={out['all_at_bar']} bit_identical={out['all_bit_identical']}")
-        return 0 if out["all_at_bar"] else 1
+        return _exit_code(out)
     print(f"records={out.get('records', len(out.get('per_kt', [])))}")
     return 0
 

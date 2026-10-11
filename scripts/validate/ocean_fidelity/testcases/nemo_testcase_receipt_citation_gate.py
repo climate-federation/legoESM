@@ -102,6 +102,18 @@ FILES = {
         _SWG_COMPILED / "dynzad.f90"),
     "SWG_OMIP_L1/BLD/ppsrc/nemo/stprk3.f90": (
         _SWG_COMPILED / "stprk3.f90"),
+    "SWG_OMIP_L1/BLD/ppsrc/nemo/domain.f90": (
+        _SWG_COMPILED / "domain.f90"),
+    "SWG_OMIP_L1/BLD/ppsrc/nemo/sbcmod.f90": (
+        _SWG_COMPILED / "sbcmod.f90"),
+    "SWG_OMIP_L1/BLD/ppsrc/nemo/dommsk.f90": (
+        _SWG_COMPILED / "dommsk.f90"),
+    "SWG_OMIP_L1/BLD/ppsrc/nemo/domqco.f90": (
+        _SWG_COMPILED / "domqco.f90"),
+    "SWG_OMIP_L1/BLD/ppsrc/nemo/dynadv.f90": (
+        _SWG_COMPILED / "dynadv.f90"),
+    "SWG_OMIP_L1/BLD/ppsrc/nemo/ldfdyn.f90": (
+        _SWG_COMPILED / "ldfdyn.f90"),
     "stprk3_stg.F90": _OCE / "stprk3_stg.F90",
     # round 202: the PRODUCTION GYRE build, so a GYRE resolved statement
     # cannot bind to one of the _SM_ probe builds.
@@ -1417,6 +1429,25 @@ FILES = {
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
     # --- SWG lane round 1 (survey + card + geometry + acquisition) ---
+    'SWG_OMIP_L1/BLD/ppsrc/nemo/domain.f90:282-288': [
+        'NAMELIST/namrun/ cn_ocerst_indir',
+        'NAMELIST/namtile/ ln_tile, nn_ltile_i, nn_ltile_j', 7],
+    'SWG_OMIP_L1/BLD/ppsrc/nemo/sbcmod.f90:157-163': [
+        'NAMELIST/namsbc/ nn_fsbc',
+        '&             ln_wave  , nn_lsm', 7],
+    'SWG_OMIP_L1/BLD/ppsrc/nemo/dommsk.f90:149': (
+        'NAMELIST/namlbc/ rn_shlat, ln_vorlat'),
+    'SWG_OMIP_L1/BLD/ppsrc/nemo/domqco.f90:303-306': [
+        'NAMELIST/nam_vvl/ ln_vvl_zstar',
+        '&              nn_vvl_interp', 4],
+    'SWG_OMIP_L1/BLD/ppsrc/nemo/dynadv.f90:162': (
+        'NAMELIST/namdyn_adv/ ln_dynadv_OFF'),
+    'SWG_OMIP_L1/BLD/ppsrc/nemo/dynvor.f90:813-814': [
+        'NAMELIST/namdyn_vor/ ln_dynvor_ens',
+        '&                 ln_dynvor_een, nn_e3f_typ', 2],
+    'SWG_OMIP_L1/BLD/ppsrc/nemo/ldfdyn.f90:177-180': [
+        'NAMELIST/namdyn_ldf/ ln_dynldf_OFF',
+        '&                 rn_csmc      , rn_minfac    , rn_maxfac', 4],
     'SWG_OMIP_L1/BLD/ppsrc/nemo/usrdef_nam.f90:154-166': [
         'ze1 =  rn_dx / REAL(nn_SWG, wp)',
         'ldIperio = .FALSE.   ;   ldJperio = .FALSE.', 13],

@@ -7,11 +7,78 @@ import pytest
 from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
 from legoesm.ocean.fidelity import nemo_testcase_recipe as recipe
 from legoesm.ocean.fidelity.nemo_testcase_recipe import (
-    SWG_DEVIATIONS, SWG_NAMELIST, SWG_UNMEASURED,
+    SWG_COMPILED_NAMELIST_READS, SWG_DEVIATIONS, SWG_NAMELIST, SWG_UNMEASURED,
     SwgResolvedNamelist, build_swg_card, swg_horizontal_coordinates,
     swg_wet_mask, validate_nemo_testcase_card,
     validate_nemo_testcase_card_for_execution,
 )
+
+
+# Frozen independently from the object under test by reading the eight compiled
+# SWE namelist readers cited on each row of SWG_COMPILED_NAMELIST_READS.
+_COMPILED_READS = {
+    "namrun": ("ln_1st_euler", "nn_rstctl", "nn_stock", "ln_mskland"),
+    "namtile": ("ln_tile",),
+    "namsbc": (
+        "nn_fsbc", "ln_usr_sbc", "ln_flx", "ln_blk", "ln_abl", "ln_cpl",
+        "ln_mixcpl", "nn_components", "nn_ice", "ln_ice_embd", "ln_traqsr",
+        "ln_dm2dc", "ln_rnf", "nn_fwb", "ln_ssr", "ln_apr_dyn", "ln_wave",
+        "nn_lsm",
+    ),
+    "namlbc": ("rn_shlat", "ln_vorlat"),
+    "nam_vvl": (
+        "ln_vvl_zstar", "ln_vvl_ztilde", "ln_vvl_layer",
+        "ln_vvl_ztilde_as_zstar", "ln_vvl_zstar_at_eqtor", "rn_ahe3",
+        "rn_rst_e3t_days", "rn_lf_cutoff_days", "rn_zdef_max", "ln_vvl_dbg",
+        "nn_vvl_interp",
+    ),
+    "namdyn_adv": (
+        "ln_dynadv_OFF", "ln_dynadv_vec", "nn_dynkeg", "ln_dynadv_cen2",
+        "ln_dynadv_up3",
+    ),
+    "namdyn_vor": (
+        "ln_dynvor_ens", "ln_dynvor_ene", "ln_dynvor_enT", "ln_dynvor_een",
+        "nn_e3f_typ", "ln_dynvor_mix", "ln_dynvor_msk",
+    ),
+    "namdyn_ldf": (
+        "ln_dynldf_OFF", "nn_dynldf_typ", "ln_dynldf_lap", "ln_dynldf_blp",
+        "ln_dynldf_lev", "ln_dynldf_hor", "ln_dynldf_iso", "nn_ahm_ijk_t",
+        "rn_Uv_m_s", "rn_Lv_m", "rn_ahm_b_m2_s", "rn_csmc", "rn_minfac",
+        "rn_maxfac",
+    ),
+}
+
+_ALL_CARD_FIELDS = (
+    "nn_it000", "nn_itend", "nn_leapy", "nn_write", "nn_istate", "ln_rstart",
+    "ln_1st_euler", "nn_rstctl", "nn_stock", "ln_mskland", "rn_Dt_s",
+    "ln_meshmask", "ln_shuman", "ln_tile", "ln_read_cfg", "nn_SWG", "jpkglo",
+    "rn_theta_deg", "nn_gc", "rn_domsiz_m", "rn_dx_m", "rn_tau_pa",
+    "rn_modified_grav_m_s2", "rn_rfr_s", "rn_beta_m_s", "rn_f0_s",
+    "nn_dynldf_lap_typ", "ln_dynldf_lap_PM", "rn_abp", "nn_cnp", "rn_fsp_s",
+    "ln_Iperio", "ln_Jperio", "key_xios", "key_qco", "key_vco_3d", "key_RK3",
+    "nn_fsbc", "ln_usr_sbc", "ln_flx", "ln_blk", "ln_abl", "ln_cpl",
+    "ln_mixcpl", "nn_components", "nn_ice", "ln_ice_embd", "ln_traqsr",
+    "ln_dm2dc", "ln_rnf", "nn_fwb", "ln_ssr", "ln_apr_dyn", "ln_wave",
+    "nn_lsm", "rn_shlat", "ln_vorlat", "ln_drg_OFF", "ln_dynadv_OFF",
+    "ln_dynadv_vec", "nn_dynkeg", "ln_dynadv_cen2", "ln_dynadv_up3",
+    "ln_dynvor_ene", "ln_dynvor_ens", "ln_dynvor_enT", "ln_dynvor_een",
+    "ln_dynvor_mix", "nn_e3f_typ", "ln_dynvor_msk", "ln_vvl_zstar",
+    "ln_vvl_ztilde", "ln_vvl_layer", "ln_vvl_ztilde_as_zstar",
+    "ln_vvl_zstar_at_eqtor", "rn_ahe3", "rn_rst_e3t_days",
+    "rn_lf_cutoff_days", "rn_zdef_max", "ln_vvl_dbg", "nn_vvl_interp",
+    "ln_dynspg_exp", "nn_bt_flt", "rn_bt_alpha", "ln_dynldf_OFF",
+    "nn_dynldf_typ", "ln_dynldf_lap", "ln_dynldf_blp", "ln_dynldf_lev",
+    "ln_dynldf_hor", "ln_dynldf_iso", "nn_ahm_ijk_t", "rn_Uv_m_s", "rn_Lv_m",
+    "rn_ahm_b_m2_s", "rn_csmc", "rn_minfac", "rn_maxfac", "ln_zdftke",
+    "ln_zdfevd", "nn_evdm", "rn_evd_m2_s", "rn_avm0_m2_s", "rn_avt0_m2_s",
+    "nn_avb", "nn_havtb", "nn_etau",
+)
+
+
+def _assert_engine_inventory(fields):
+    expected = {field for group in _COMPILED_READS.values() for field in group}
+    missing = sorted(expected - set(fields))
+    assert not missing, f"missing compiled SWE namelist reads: {missing}"
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -59,11 +126,40 @@ def test_wet_mask_prediction_and_plant():
     assert planted.sum() == 6399
 
 
-def test_all_resolved_fields_are_explicit_namedtuple_values():
-    assert set(SwgResolvedNamelist._fields) == set(SWG_NAMELIST._asdict())
-    assert len(SwgResolvedNamelist._fields) >= 55
+def test_resolved_inventory_is_the_frozen_compiled_and_card_inventory():
+    assert SWG_COMPILED_NAMELIST_READS == _COMPILED_READS
+    assert SwgResolvedNamelist._fields == _ALL_CARD_FIELDS
+    _assert_engine_inventory(SwgResolvedNamelist._fields)
     assert SWG_DEVIATIONS == (("key_xios", True, False,
                                "conda-scalarmath reference toolchain"),)
+
+
+@pytest.mark.parametrize("field", ["ln_abl", "ln_tile"])
+def test_resolved_inventory_plant_reports_a_removed_compiled_field(field):
+    deficient = set(SwgResolvedNamelist._fields) - {field}
+    with pytest.raises(AssertionError, match=field):
+        _assert_engine_inventory(deficient)
+
+
+def test_engine_read_defaults_match_the_resolved_oracle_echo():
+    expected = {
+        "ln_1st_euler": False, "nn_rstctl": 0, "nn_stock": 0,
+        "ln_mskland": False, "ln_tile": False,
+        "ln_abl": False, "ln_mixcpl": False, "nn_components": 0,
+        "nn_ice": 0, "ln_ice_embd": False, "ln_dm2dc": False,
+        "nn_fwb": 0, "ln_ssr": False, "ln_wave": False, "nn_lsm": 0,
+        "ln_vorlat": False, "ln_dynvor_mix": False,
+        "ln_vvl_zstar": True, "ln_vvl_ztilde": False,
+        "ln_vvl_layer": False, "ln_vvl_ztilde_as_zstar": False,
+        "ln_vvl_zstar_at_eqtor": False, "rn_ahe3": 0.0,
+        "rn_rst_e3t_days": 30.0, "rn_lf_cutoff_days": 5.0,
+        "rn_zdef_max": 0.9, "ln_vvl_dbg": False, "nn_vvl_interp": 2,
+        "ln_dynldf_OFF": False, "nn_dynldf_typ": 0,
+        "ln_dynldf_blp": False, "ln_dynldf_hor": False,
+        "ln_dynldf_iso": False, "rn_ahm_b_m2_s": 0.0,
+        "rn_csmc": 3.5, "rn_minfac": 1.0, "rn_maxfac": 1.0,
+    }
+    assert {name: getattr(SWG_NAMELIST, name) for name in expected} == expected
 
 
 def test_execution_refuses_every_unbuilt_oracle_arm(card):

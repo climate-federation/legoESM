@@ -3838,9 +3838,17 @@ class SwgResolvedNamelist(NamedTuple):
     nn_write: int = 480
     nn_istate: int = 1
     ln_rstart: bool = False
+    # Compiled domain.f90:282-286 reads these namrun defaults even though the
+    # shipped cfg does not override them.
+    ln_1st_euler: bool = False
+    nn_rstctl: int = 0
+    nn_stock: int = 0
+    ln_mskland: bool = False
     rn_Dt_s: float = 3600.0
     ln_meshmask: bool = False
     ln_shuman: bool = False
+    # Compiled domain.f90:288 reads namtile before selecting the untiled path.
+    ln_tile: bool = False
     # namcfg / namusr_def; usrdef_nam.f90:138-167
     ln_read_cfg: bool = False
     nn_SWG: int = 4
@@ -3866,16 +3874,31 @@ class SwgResolvedNamelist(NamedTuple):
     key_qco: bool = True
     key_vco_3d: bool = True
     key_RK3: bool = True
-    # namsbc / namlbc / namdrg
+    # namsbc: every variable read by compiled sbcmod.f90:157-163.  Values not
+    # overridden by the shipped deck are resolved from namelist_ref and the
+    # operator probe's ocean.output:472-494.
     nn_fsbc: int = 1
     ln_usr_sbc: bool = True
     ln_flx: bool = False
     ln_blk: bool = False
+    ln_abl: bool = False
     ln_cpl: bool = False
+    ln_mixcpl: bool = False
+    nn_components: int = 0
+    nn_ice: int = 0
+    ln_ice_embd: bool = False
     ln_traqsr: bool = False
+    ln_dm2dc: bool = False
     ln_rnf: bool = False
+    nn_fwb: int = 0
+    ln_ssr: bool = False
     ln_apr_dyn: bool = False
+    ln_wave: bool = False
+    nn_lsm: int = 0
+    # namlbc: compiled dommsk.f90:149.
     rn_shlat: float = 0.0
+    ln_vorlat: bool = False
+    # namdrg is inert in SWE, but its shipped selection remains stated.
     ln_drg_OFF: bool = True
     # namdyn_adv / namdyn_vor
     ln_dynadv_OFF: bool = False
@@ -3887,19 +3910,42 @@ class SwgResolvedNamelist(NamedTuple):
     ln_dynvor_ens: bool = True
     ln_dynvor_enT: bool = False
     ln_dynvor_een: bool = False
+    ln_dynvor_mix: bool = False
     nn_e3f_typ: int = 1
     ln_dynvor_msk: bool = True
+    # nam_vvl: every variable read by compiled domqco.f90:303-306.
+    ln_vvl_zstar: bool = True
+    ln_vvl_ztilde: bool = False
+    ln_vvl_layer: bool = False
+    ln_vvl_ztilde_as_zstar: bool = False
+    ln_vvl_zstar_at_eqtor: bool = False
+    rn_ahe3: float = 0.0
+    rn_rst_e3t_days: float = 30.0
+    rn_lf_cutoff_days: float = 5.0
+    rn_zdef_max: float = 0.9
+    ln_vvl_dbg: bool = False
+    nn_vvl_interp: int = 2
     # The SWE engine never calls dyn_spg_init or zdf_phy_init, but these deck
     # values are stated so an inert namelist block cannot become a hidden
     # choice if that call graph changes (nemogcm.f90:285-316).
     ln_dynspg_exp: bool = True
     nn_bt_flt: int = 3
     rn_bt_alpha: float = 0.07
+    # namdyn_ldf: every variable read by compiled ldfdyn.f90:177-180.
+    ln_dynldf_OFF: bool = False
+    nn_dynldf_typ: int = 0
     ln_dynldf_lap: bool = True
+    ln_dynldf_blp: bool = False
     ln_dynldf_lev: bool = True
+    ln_dynldf_hor: bool = False
+    ln_dynldf_iso: bool = False
     nn_ahm_ijk_t: int = 0
     rn_Uv_m_s: float = 2.0
     rn_Lv_m: float = 500.0
+    rn_ahm_b_m2_s: float = 0.0
+    rn_csmc: float = 3.5
+    rn_minfac: float = 1.0
+    rn_maxfac: float = 1.0
     ln_zdftke: bool = True
     ln_zdfevd: bool = True
     nn_evdm: int = 1
@@ -3912,6 +3958,49 @@ class SwgResolvedNamelist(NamedTuple):
 
 
 SWG_NAMELIST = SwgResolvedNamelist()
+# Frozen transcription of the compiled SWE readers, expressed in card field
+# names.  This is intentionally independent of ``SwgResolvedNamelist._fields``
+# so the inventory test detects a removed field instead of deriving its own
+# expectation from the object under test.
+SWG_COMPILED_NAMELIST_READS: dict[str, tuple[str, ...]] = {
+    # tests/SWG_OMIP_L1/BLD/ppsrc/nemo/domain.f90:282-286
+    "namrun": ("ln_1st_euler", "nn_rstctl", "nn_stock", "ln_mskland"),
+    # tests/SWG_OMIP_L1/BLD/ppsrc/nemo/domain.f90:288
+    "namtile": ("ln_tile",),
+    # tests/SWG_OMIP_L1/BLD/ppsrc/nemo/sbcmod.f90:157-163
+    "namsbc": (
+        "nn_fsbc", "ln_usr_sbc", "ln_flx", "ln_blk", "ln_abl", "ln_cpl",
+        "ln_mixcpl", "nn_components", "nn_ice", "ln_ice_embd", "ln_traqsr",
+        "ln_dm2dc", "ln_rnf", "nn_fwb", "ln_ssr", "ln_apr_dyn", "ln_wave",
+        "nn_lsm",
+    ),
+    # tests/SWG_OMIP_L1/BLD/ppsrc/nemo/dommsk.f90:149
+    "namlbc": ("rn_shlat", "ln_vorlat"),
+    # tests/SWG_OMIP_L1/BLD/ppsrc/nemo/domqco.f90:303-306
+    "nam_vvl": (
+        "ln_vvl_zstar", "ln_vvl_ztilde", "ln_vvl_layer",
+        "ln_vvl_ztilde_as_zstar", "ln_vvl_zstar_at_eqtor", "rn_ahe3",
+        "rn_rst_e3t_days", "rn_lf_cutoff_days", "rn_zdef_max", "ln_vvl_dbg",
+        "nn_vvl_interp",
+    ),
+    # tests/SWG_OMIP_L1/BLD/ppsrc/nemo/dynadv.f90:162
+    "namdyn_adv": (
+        "ln_dynadv_OFF", "ln_dynadv_vec", "nn_dynkeg", "ln_dynadv_cen2",
+        "ln_dynadv_up3",
+    ),
+    # tests/SWG_OMIP_L1/BLD/ppsrc/nemo/dynvor.f90:813-814
+    "namdyn_vor": (
+        "ln_dynvor_ens", "ln_dynvor_ene", "ln_dynvor_enT", "ln_dynvor_een",
+        "nn_e3f_typ", "ln_dynvor_mix", "ln_dynvor_msk",
+    ),
+    # tests/SWG_OMIP_L1/BLD/ppsrc/nemo/ldfdyn.f90:177-180
+    "namdyn_ldf": (
+        "ln_dynldf_OFF", "nn_dynldf_typ", "ln_dynldf_lap", "ln_dynldf_blp",
+        "ln_dynldf_lev", "ln_dynldf_hor", "ln_dynldf_iso", "nn_ahm_ijk_t",
+        "rn_Uv_m_s", "rn_Lv_m", "rn_ahm_b_m2_s", "rn_csmc", "rn_minfac",
+        "rn_maxfac",
+    ),
+}
 SWG_DEVIATIONS: tuple[tuple[str, bool, bool, str], ...] = (
     ("key_xios", True, False, "conda-scalarmath reference toolchain"),
 )
@@ -3967,6 +4056,8 @@ def swg_wet_mask(source: dict[str, np.ndarray] | None = None) -> np.ndarray:
 
 def build_swg_card() -> NEMOTestcaseCard:
     """Shipped SWG deck as a fail-closed, currently non-executable card."""
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import compute_face_masks
+
     nl = SWG_NAMELIST
     src = swg_horizontal_coordinates()
     wet_np = swg_wet_mask(src)
@@ -3995,8 +4086,11 @@ def build_swg_card() -> NEMOTestcaseCard:
     native = (n, n, 1)
     thickness = np.full(native, 500.0)
     tmask = wet_np[..., None]
-    u_wet = wet_np * np.roll(wet_np, -1, axis=1); u_wet[:, -1] = 0.0
-    v_wet = wet_np * np.roll(wet_np, -1, axis=0); v_wet[-1, :] = 0.0
+    # The shared builder uses the model's west/south redundant-face layout.
+    # Its native NEMO U/V records are columns/rows 1..n respectively.
+    u_faces, v_faces = compute_face_masks(wet, grid)
+    u_wet = np.asarray(u_faces[:, 1:])
+    v_wet = np.asarray(v_faces[1:, :])
     umask = u_wet[..., None]
     vmask = v_wet[..., None]
     fe3mask = np.asarray(nemo_fe3mask_from_tmask(jnp.asarray(tmask)))

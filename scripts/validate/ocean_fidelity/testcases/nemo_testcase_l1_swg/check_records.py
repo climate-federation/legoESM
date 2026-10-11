@@ -55,8 +55,8 @@ def parse(path: Path) -> tuple[list[int], dict[str, np.ndarray]]:
         if name in groups:
             raise Refusal(f"{path.name}: duplicate group {name!r}")
         owned = data[js0 - 1:je0, is0 - 1:ie0]
-        if (owned.size == 0 or not np.all(np.isfinite(owned))
-                or np.any(np.abs(owned) >= SENTINEL)):
+        if (owned.size == 0 or not np.all(np.isfinite(data))
+                or np.any(np.abs(data) >= SENTINEL)):
             raise Refusal(f"{path.name}: {name!r} non-finite or sentinel")
         groups[name] = data
     if set(groups) != GROUPS:
