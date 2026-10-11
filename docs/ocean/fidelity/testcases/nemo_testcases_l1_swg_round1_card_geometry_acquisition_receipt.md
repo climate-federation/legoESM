@@ -80,9 +80,15 @@ Two repairs, and only these two, are in scope:
 
 ## Verdict
 
-**HELD.**  The operator's second independent review returned `DO NOT SHIP`.
-Its two remaining blockers are fixed and committed, but no acquisition should
-be run until the operator's next independent re-review returns `SHIP`.
+**HELD.**  The operator's third independent review returned `DO NOT SHIP`.
+Its remaining inert-citation blocker is fixed, but no acquisition should be
+run until the operator's next independent re-review returns `SHIP`.
+
+The third review's terminal verdict is quoted verbatim:
+
+```text
+DO NOT SHIP — The 131-field inventory and U/V masks are fixed, but blocker A remains partly open because several committed inertness citations do not prove the claimed compiled-engine guards.
+```
 
 The second review's terminal verdict is quoted verbatim:
 
@@ -153,6 +159,66 @@ evidence directory.  The authoritative external review is
    operator and take the native NEMO U/V record slices.  The geometry gate
    remains 34/34 bit-identical; signed-y, wet-cell, and thickness plants each
    exit 1.
+6. **Inert citations — third-review finding fixed.**  The review confirmed the
+   131-field inventory and U/V stagger repair, but returned the following
+   terminal verdict verbatim:
+
+   ```text
+   DO NOT SHIP — The 131-field inventory and U/V masks are fixed, but blocker A remains partly open because several committed inertness citations do not prove the claimed compiled-engine guards.
+   ```
+
+   The old citations to prints and unconditional assignments are withdrawn.
+   This table gives one compiled-source sentence for every one of the 45 card
+   values marked inert; control switches such as `ln_bdy` and `ln_nc4zip` are
+   active guards and therefore are not themselves called inert.
+
+   | Inert card value | Compiled-source proof |
+   |---|---|
+   | `cn_domcfg` | It is inert because `ln_read_cfg = F` selects the user-defined domain and guards every domain-file consumer, while also forcing `ln_closea = F` before its call guard: `SWG_OMIP_L1/BLD/ppsrc/nemo/nemogcm.f90:292-296`, `:402`, `SWG_OMIP_L1/BLD/ppsrc/nemo/domain.f90:196`, `SWG_OMIP_L1/BLD/ppsrc/nemo/domhgr.f90:101-117`, `SWG_OMIP_L1/BLD/ppsrc/nemo/domzgr.f90:111-117`, `SWG_OMIP_L1/BLD/ppsrc/nemo/dommsk.f90:286-303`, and `SWG_OMIP_L1/BLD/ppsrc/nemo/mppini.f90:204-205`. |
+   | `cn_domcfg_out` | It is inert because its sole writer call is guarded by `ln_write_cfg = F` at `SWG_OMIP_L1/BLD/ppsrc/nemo/domain.f90:253`. |
+   | `nn_stocklist` | It is inert because both functional reads require `ln_rst_list = T`, while this deck states false, at `SWG_OMIP_L1/BLD/ppsrc/nemo/restart.f90:103-110` and `:197-211`. |
+   | `ln_top` | It is inert because the complete compiled initialization and SWE step call lists contain no TOP caller and its only remaining executable occurrence merely resets it false in root control output at `SWG_OMIP_L1/BLD/ppsrc/nemo/nemogcm.f90:332-352`, `SWG_OMIP_L1/BLD/ppsrc/nemo/stprk3.f90:122-321`, and `SWG_OMIP_L1/BLD/ppsrc/nemo/domain.f90:371`. |
+   | `nn_ltile_i` | It is inert because both validation and tile construction consume it only under `ln_tile = T`, while this deck states false, at `SWG_OMIP_L1/BLD/ppsrc/nemo/domain.f90:446-472` and `SWG_OMIP_L1/BLD/ppsrc/nemo/domtile.f90:101-119`. |
+   | `nn_ltile_j` | It is inert because both validation and tile construction consume it only under `ln_tile = T`, while this deck states false, at `SWG_OMIP_L1/BLD/ppsrc/nemo/domain.f90:446-472` and `SWG_OMIP_L1/BLD/ppsrc/nemo/domtile.f90:101-119`. |
+   | `nn_nchunks_i` | It is inert because the chunk-size arithmetic is reached only when `snc4set%luse` is true, while `ln_nc4zip = F` stores false there, at `SWG_OMIP_L1/BLD/ppsrc/nemo/iom_nf90.f90:684-705`. |
+   | `nn_nchunks_j` | It is inert because the chunk-size arithmetic is reached only when `snc4set%luse` is true, while `ln_nc4zip = F` stores false there, at `SWG_OMIP_L1/BLD/ppsrc/nemo/iom_nf90.f90:684-705`. |
+   | `nn_nchunks_k` | It is inert because the chunk-size arithmetic is reached only when `snc4set%luse` is true, while `ln_nc4zip = F` stores false there, at `SWG_OMIP_L1/BLD/ppsrc/nemo/iom_nf90.f90:684-705`. |
+   | `nb_bdy` | It is inert because its only pre-guard use can force `ln_bdy` false but cannot turn this deck's false value true, after which the functional branch remains skipped, at `SWG_OMIP_L1/BLD/ppsrc/nemo/bdyini.f90:164-189`. |
+   | `ln_coords_file` | It is inert because every boundary initialization, file, mask, and SWE free-surface consumer is behind the deck's false `ln_bdy` guard at `SWG_OMIP_L1/BLD/ppsrc/nemo/mppini.f90:200-205`, `SWG_OMIP_L1/BLD/ppsrc/nemo/dommsk.f90:192-203`, `SWG_OMIP_L1/BLD/ppsrc/nemo/bdyini.f90:164-189`, `SWG_OMIP_L1/BLD/ppsrc/nemo/sshwzv.f90:152-156`, `:221-225`, and `:311-315`. |
+   | `cn_coords_file` | It is inert because every boundary initialization, file, mask, and SWE free-surface consumer is behind the deck's false `ln_bdy` guard at `SWG_OMIP_L1/BLD/ppsrc/nemo/mppini.f90:200-205`, `SWG_OMIP_L1/BLD/ppsrc/nemo/dommsk.f90:192-203`, `SWG_OMIP_L1/BLD/ppsrc/nemo/bdyini.f90:164-189`, `SWG_OMIP_L1/BLD/ppsrc/nemo/sshwzv.f90:152-156`, `:221-225`, and `:311-315`. |
+   | `ln_mask_file` | It is inert because both direct mask-file opens and all later boundary consumers require `ln_bdy = T`, while this deck states false, at `SWG_OMIP_L1/BLD/ppsrc/nemo/mppini.f90:200-205`, `SWG_OMIP_L1/BLD/ppsrc/nemo/dommsk.f90:192-203`, `SWG_OMIP_L1/BLD/ppsrc/nemo/bdyini.f90:164-189`, `SWG_OMIP_L1/BLD/ppsrc/nemo/sshwzv.f90:152-156`, `:221-225`, and `:311-315`. |
+   | `cn_mask_file` | It is inert because both direct mask-file opens and all later boundary consumers require `ln_bdy = T`, while this deck states false, at `SWG_OMIP_L1/BLD/ppsrc/nemo/mppini.f90:200-205`, `SWG_OMIP_L1/BLD/ppsrc/nemo/dommsk.f90:192-203`, `SWG_OMIP_L1/BLD/ppsrc/nemo/bdyini.f90:164-189`, `SWG_OMIP_L1/BLD/ppsrc/nemo/sshwzv.f90:152-156`, `:221-225`, and `:311-315`. |
+   | `cn_dyn2d` | It is inert because every boundary initialization and SWE boundary consumer is behind the deck's false `ln_bdy` guard at `SWG_OMIP_L1/BLD/ppsrc/nemo/mppini.f90:200-205`, `SWG_OMIP_L1/BLD/ppsrc/nemo/bdyini.f90:164-189`, and `SWG_OMIP_L1/BLD/ppsrc/nemo/sshwzv.f90:152-156`. |
+   | `nn_dyn2d_dta` | It is inert because every boundary initialization and SWE boundary consumer is behind the deck's false `ln_bdy` guard at `SWG_OMIP_L1/BLD/ppsrc/nemo/mppini.f90:200-205`, `SWG_OMIP_L1/BLD/ppsrc/nemo/bdyini.f90:164-189`, and `SWG_OMIP_L1/BLD/ppsrc/nemo/sshwzv.f90:152-156`. |
+   | `cn_dyn3d` | It is inert because every boundary initialization and SWE boundary consumer is behind the deck's false `ln_bdy` guard at `SWG_OMIP_L1/BLD/ppsrc/nemo/mppini.f90:200-205`, `SWG_OMIP_L1/BLD/ppsrc/nemo/bdyini.f90:164-189`, and `SWG_OMIP_L1/BLD/ppsrc/nemo/sshwzv.f90:152-156`. |
+   | `nn_dyn3d_dta` | It is inert because every boundary initialization and SWE boundary consumer is behind the deck's false `ln_bdy` guard at `SWG_OMIP_L1/BLD/ppsrc/nemo/mppini.f90:200-205`, `SWG_OMIP_L1/BLD/ppsrc/nemo/bdyini.f90:164-189`, and `SWG_OMIP_L1/BLD/ppsrc/nemo/sshwzv.f90:152-156`. |
+   | `cn_tra` | It is inert because every boundary initialization and SWE boundary consumer is behind the deck's false `ln_bdy` guard at `SWG_OMIP_L1/BLD/ppsrc/nemo/mppini.f90:200-205`, `SWG_OMIP_L1/BLD/ppsrc/nemo/bdyini.f90:164-189`, and `SWG_OMIP_L1/BLD/ppsrc/nemo/sshwzv.f90:152-156`. |
+   | `nn_tra_dta` | It is inert because every boundary initialization and SWE boundary consumer is behind the deck's false `ln_bdy` guard at `SWG_OMIP_L1/BLD/ppsrc/nemo/mppini.f90:200-205`, `SWG_OMIP_L1/BLD/ppsrc/nemo/bdyini.f90:164-189`, and `SWG_OMIP_L1/BLD/ppsrc/nemo/sshwzv.f90:152-156`. |
+   | `ln_tra_dmp` | It is inert because every boundary initialization and SWE boundary consumer is behind the deck's false `ln_bdy` guard at `SWG_OMIP_L1/BLD/ppsrc/nemo/mppini.f90:200-205`, `SWG_OMIP_L1/BLD/ppsrc/nemo/bdyini.f90:164-189`, and `SWG_OMIP_L1/BLD/ppsrc/nemo/sshwzv.f90:152-156`. |
+   | `ln_dyn3d_dmp` | It is inert because every boundary initialization and SWE boundary consumer is behind the deck's false `ln_bdy` guard at `SWG_OMIP_L1/BLD/ppsrc/nemo/mppini.f90:200-205`, `SWG_OMIP_L1/BLD/ppsrc/nemo/bdyini.f90:164-189`, and `SWG_OMIP_L1/BLD/ppsrc/nemo/sshwzv.f90:152-156`. |
+   | `rn_time_dmp_days` | It is inert because every boundary initialization and SWE boundary consumer is behind the deck's false `ln_bdy` guard at `SWG_OMIP_L1/BLD/ppsrc/nemo/mppini.f90:200-205`, `SWG_OMIP_L1/BLD/ppsrc/nemo/bdyini.f90:164-189`, and `SWG_OMIP_L1/BLD/ppsrc/nemo/sshwzv.f90:152-156`. |
+   | `rn_time_dmp_out_days` | It is inert because every boundary initialization and SWE boundary consumer is behind the deck's false `ln_bdy` guard at `SWG_OMIP_L1/BLD/ppsrc/nemo/mppini.f90:200-205`, `SWG_OMIP_L1/BLD/ppsrc/nemo/bdyini.f90:164-189`, and `SWG_OMIP_L1/BLD/ppsrc/nemo/sshwzv.f90:152-156`. |
+   | `cn_ice` | It is inert because every boundary initialization and SWE boundary consumer is behind the deck's false `ln_bdy` guard at `SWG_OMIP_L1/BLD/ppsrc/nemo/mppini.f90:200-205`, `SWG_OMIP_L1/BLD/ppsrc/nemo/bdyini.f90:164-189`, and `SWG_OMIP_L1/BLD/ppsrc/nemo/sshwzv.f90:152-156`. |
+   | `nn_ice_dta` | It is inert because every boundary initialization and SWE boundary consumer is behind the deck's false `ln_bdy` guard at `SWG_OMIP_L1/BLD/ppsrc/nemo/mppini.f90:200-205`, `SWG_OMIP_L1/BLD/ppsrc/nemo/bdyini.f90:164-189`, and `SWG_OMIP_L1/BLD/ppsrc/nemo/sshwzv.f90:152-156`. |
+   | `ln_vol` | It is inert because every boundary initialization and SWE boundary consumer is behind the deck's false `ln_bdy` guard at `SWG_OMIP_L1/BLD/ppsrc/nemo/mppini.f90:200-205`, `SWG_OMIP_L1/BLD/ppsrc/nemo/bdyini.f90:164-189`, and `SWG_OMIP_L1/BLD/ppsrc/nemo/sshwzv.f90:152-156`. |
+   | `nn_volctl` | It is inert because every boundary initialization and SWE boundary consumer is behind the deck's false `ln_bdy` guard at `SWG_OMIP_L1/BLD/ppsrc/nemo/mppini.f90:200-205`, `SWG_OMIP_L1/BLD/ppsrc/nemo/bdyini.f90:164-189`, and `SWG_OMIP_L1/BLD/ppsrc/nemo/sshwzv.f90:152-156`. |
+   | `nn_rimwidth` | It is inert because every boundary initialization and SWE boundary consumer is behind the deck's false `ln_bdy` guard at `SWG_OMIP_L1/BLD/ppsrc/nemo/mppini.f90:200-205`, `SWG_OMIP_L1/BLD/ppsrc/nemo/bdyini.f90:164-189`, and `SWG_OMIP_L1/BLD/ppsrc/nemo/sshwzv.f90:152-156`. |
+   | `ln_drg_OFF` | It is inert because the complete compiled initialization and SWE step call lists contain neither `zdf_phy_init` nor `zdf_phy`: `SWG_OMIP_L1/BLD/ppsrc/nemo/nemogcm.f90:332-352` and `SWG_OMIP_L1/BLD/ppsrc/nemo/stprk3.f90:122-321`. |
+   | `ln_dynspg_exp` | It is inert because the complete compiled initialization and SWE step call lists contain neither `dyn_spg_init` nor `dyn_spg`: `SWG_OMIP_L1/BLD/ppsrc/nemo/nemogcm.f90:332-352` and `SWG_OMIP_L1/BLD/ppsrc/nemo/stprk3.f90:122-321`. |
+   | `nn_bt_flt` | It is inert because the complete compiled initialization and SWE step call lists contain neither `dyn_spg_init` nor `dyn_spg`: `SWG_OMIP_L1/BLD/ppsrc/nemo/nemogcm.f90:332-352` and `SWG_OMIP_L1/BLD/ppsrc/nemo/stprk3.f90:122-321`. |
+   | `rn_bt_alpha` | It is inert because the complete compiled initialization and SWE step call lists contain neither `dyn_spg_init` nor `dyn_spg`: `SWG_OMIP_L1/BLD/ppsrc/nemo/nemogcm.f90:332-352` and `SWG_OMIP_L1/BLD/ppsrc/nemo/stprk3.f90:122-321`. |
+   | `ln_zdftke` | It is inert because the complete compiled initialization and SWE step call lists contain neither `zdf_phy_init` nor `zdf_phy`: `SWG_OMIP_L1/BLD/ppsrc/nemo/nemogcm.f90:332-352` and `SWG_OMIP_L1/BLD/ppsrc/nemo/stprk3.f90:122-321`. |
+   | `ln_zdfevd` | It is inert because the complete compiled initialization and SWE step call lists contain neither `zdf_phy_init` nor `zdf_phy`: `SWG_OMIP_L1/BLD/ppsrc/nemo/nemogcm.f90:332-352` and `SWG_OMIP_L1/BLD/ppsrc/nemo/stprk3.f90:122-321`. |
+   | `nn_evdm` | It is inert because the complete compiled initialization and SWE step call lists contain neither `zdf_phy_init` nor `zdf_phy`: `SWG_OMIP_L1/BLD/ppsrc/nemo/nemogcm.f90:332-352` and `SWG_OMIP_L1/BLD/ppsrc/nemo/stprk3.f90:122-321`. |
+   | `rn_evd_m2_s` | It is inert because the complete compiled initialization and SWE step call lists contain neither `zdf_phy_init` nor `zdf_phy`: `SWG_OMIP_L1/BLD/ppsrc/nemo/nemogcm.f90:332-352` and `SWG_OMIP_L1/BLD/ppsrc/nemo/stprk3.f90:122-321`. |
+   | `rn_avm0_m2_s` | It is inert because the complete compiled initialization and SWE step call lists contain neither `zdf_phy_init` nor `zdf_phy`: `SWG_OMIP_L1/BLD/ppsrc/nemo/nemogcm.f90:332-352` and `SWG_OMIP_L1/BLD/ppsrc/nemo/stprk3.f90:122-321`. |
+   | `rn_avt0_m2_s` | It is inert because the complete compiled initialization and SWE step call lists contain neither `zdf_phy_init` nor `zdf_phy`: `SWG_OMIP_L1/BLD/ppsrc/nemo/nemogcm.f90:332-352` and `SWG_OMIP_L1/BLD/ppsrc/nemo/stprk3.f90:122-321`. |
+   | `nn_avb` | It is inert because the complete compiled initialization and SWE step call lists contain neither `zdf_phy_init` nor `zdf_phy`: `SWG_OMIP_L1/BLD/ppsrc/nemo/nemogcm.f90:332-352` and `SWG_OMIP_L1/BLD/ppsrc/nemo/stprk3.f90:122-321`. |
+   | `nn_havtb` | It is inert because the complete compiled initialization and SWE step call lists contain neither `zdf_phy_init` nor `zdf_phy`: `SWG_OMIP_L1/BLD/ppsrc/nemo/nemogcm.f90:332-352` and `SWG_OMIP_L1/BLD/ppsrc/nemo/stprk3.f90:122-321`. |
+   | `nn_etau` | It is inert because the complete compiled initialization and SWE step call lists contain neither `zdf_phy_init` nor `zdf_phy`: `SWG_OMIP_L1/BLD/ppsrc/nemo/nemogcm.f90:332-352` and `SWG_OMIP_L1/BLD/ppsrc/nemo/stprk3.f90:122-321`. |
+   | `rn_abp` | It is inert because the compiled-tree census finds only its declaration and namelist read, with no consumer, at `SWG_OMIP_L1/BLD/ppsrc/nemo/usrdef_nam.f90:56,143`. |
+   | `nn_cnp` | It is inert because the compiled-tree census finds only its declaration and namelist read, with no consumer, at `SWG_OMIP_L1/BLD/ppsrc/nemo/usrdef_nam.f90:57,143`. |
+   | `rn_fsp_s` | It is inert because the compiled-tree census finds only source symbol `rn_fsp` at its declaration and namelist read, with no consumer, at `SWG_OMIP_L1/BLD/ppsrc/nemo/usrdef_nam.f90:58,143`. |
 
 Focused results at the fix-round-2 implementation commit: 163 SWG tests pass;
 the source inventory reports 13 groups, 131 total and 131 unique reads; its
@@ -321,8 +387,8 @@ the operator probe:
 
 ## OPEN
 
-1. The operator independently re-reviews fix-round-2 commit `d70660e27`; do not
-   run acquisition unless the terminal verdict is `SHIP`.
+1. The operator independently re-reviews the fix-round-3 commits; do not run
+   acquisition unless the terminal verdict is `SHIP`.
 2. After `SHIP`, the operator runs the committed acquisition runner and returns
    the admitted stage-entry record plus passivity report.
 3. Round 2 starts from that admitted record and implements the three declared

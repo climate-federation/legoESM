@@ -106,8 +106,22 @@ FILES = {
         _SWG_COMPILED / "nemogcm.f90"),
     "SWG_OMIP_L1/BLD/ppsrc/nemo/domain.f90": (
         _SWG_COMPILED / "domain.f90"),
+    "SWG_OMIP_L1/BLD/ppsrc/nemo/domhgr.f90": (
+        _SWG_COMPILED / "domhgr.f90"),
+    "SWG_OMIP_L1/BLD/ppsrc/nemo/domzgr.f90": (
+        _SWG_COMPILED / "domzgr.f90"),
+    "SWG_OMIP_L1/BLD/ppsrc/nemo/domtile.f90": (
+        _SWG_COMPILED / "domtile.f90"),
     "SWG_OMIP_L1/BLD/ppsrc/nemo/mppini.f90": (
         _SWG_COMPILED / "mppini.f90"),
+    "SWG_OMIP_L1/BLD/ppsrc/nemo/restart.f90": (
+        _SWG_COMPILED / "restart.f90"),
+    "SWG_OMIP_L1/BLD/ppsrc/nemo/iom_nf90.f90": (
+        _SWG_COMPILED / "iom_nf90.f90"),
+    "SWG_OMIP_L1/BLD/ppsrc/nemo/bdyini.f90": (
+        _SWG_COMPILED / "bdyini.f90"),
+    "SWG_OMIP_L1/BLD/ppsrc/nemo/sshwzv.f90": (
+        _SWG_COMPILED / "sshwzv.f90"),
     "SWG_OMIP_L1/BLD/ppsrc/nemo/sbc_oce.f90": (
         _SWG_COMPILED / "sbc_oce.f90"),
     "SWG_OMIP_L1/BLD/ppsrc/nemo/sbcmod.f90": (
@@ -1440,6 +1454,8 @@ CITATION_MAP = {
         'NAMELIST/namcfg/ ln_read_cfg', 3],
     'SWG_OMIP_L1/BLD/ppsrc/nemo/nemogcm.f90:292-296': [
         'IF( ln_read_cfg ) THEN', ('ENDIF', 6), 5],
+    'SWG_OMIP_L1/BLD/ppsrc/nemo/nemogcm.f90:402': (
+        'IF( .NOT.ln_read_cfg )   ln_closea = .false.'),
     'SWG_OMIP_L1/BLD/ppsrc/nemo/nemogcm.f90:332-352': [
         'CALL     dom_init( Nbb, Nnn, Naa )',
         'CALL dyn_ldf_init', 21],
@@ -1451,10 +1467,46 @@ CITATION_MAP = {
         'NAMELIST/namnc4/ nn_nchunks_i, nn_nchunks_j, nn_nchunks_k, ln_nc4zip', 8],
     'SWG_OMIP_L1/BLD/ppsrc/nemo/domain.f90:354-358': [
         'IF( ln_rst_list ) THEN', ('ENDIF', 10), 5],
+    'SWG_OMIP_L1/BLD/ppsrc/nemo/domain.f90:253': (
+        'IF( ln_write_cfg   )   CALL cfg_write'),
+    'SWG_OMIP_L1/BLD/ppsrc/nemo/domain.f90:196': (
+        'IF( ln_closea ) CALL dom_clo'),
+    'SWG_OMIP_L1/BLD/ppsrc/nemo/domain.f90:371': (
+        'IF( ln_top )    ln_top = .FALSE.'),
     'SWG_OMIP_L1/BLD/ppsrc/nemo/domain.f90:446-472': [
         'IF( ln_tile ) THEN', ('ENDIF', 24), 27],
     'SWG_OMIP_L1/BLD/ppsrc/nemo/domain.f90:493-496': [
         'snc4set%ni   = nn_nchunks_i', 'snc4set%luse = ln_nc4zip', 4],
+    'SWG_OMIP_L1/BLD/ppsrc/nemo/domhgr.f90:101-117': [
+        'IF( ln_read_cfg ) THEN        !==  read in domcfg file  ==!',
+        'CALL usr_def_hgr( glamt , glamu , glamv , glamf', 17],
+    'SWG_OMIP_L1/BLD/ppsrc/nemo/domzgr.f90:111-117': [
+        'IF( ln_read_cfg ) THEN        !==  read in domcfg.nc file  ==!',
+        'CALL iom_open( cn_domcfg, inum )    ! open domcfg file', 7],
+    'SWG_OMIP_L1/BLD/ppsrc/nemo/domtile.f90:101-119': [
+        'IF( ln_tile ) THEN            ! Calculate number of tiles',
+        'IF( ln_tile ) THEN            ! Calculate tile domain indices', 19],
+    'SWG_OMIP_L1/BLD/ppsrc/nemo/restart.f90:103-110': [
+        'IF( kt == nit000 ) THEN   ! default definitions', ('ENDIF', 1), 8],
+    'SWG_OMIP_L1/BLD/ppsrc/nemo/restart.f90:197-211': [
+        'IF( kt == nitrst ) THEN', ('ENDIF', 14), 15],
+    'SWG_OMIP_L1/BLD/ppsrc/nemo/iom_nf90.f90:684-705': [
+        'lchunk = .false.',
+        'CALL iom_nf90_check(SET_NF90_DEF_VAR_CHUNKING', 22],
+    'SWG_OMIP_L1/BLD/ppsrc/nemo/mppini.f90:200-205': [
+        '! do we need to take into account bdy_msk?',
+        'IF( ln_bdy .AND. ln_mask_file ) CALL iom_open( cn_mask_file, numbdy )', 6],
+    'SWG_OMIP_L1/BLD/ppsrc/nemo/mppini.f90:204-205': [
+        'IF(               ln_read_cfg ) CALL iom_open( cn_domcfg,    numbot )',
+        'IF( ln_bdy .AND. ln_mask_file ) CALL iom_open( cn_mask_file, numbdy )', 2],
+    'SWG_OMIP_L1/BLD/ppsrc/nemo/bdyini.f90:164-189': [
+        'IF( nb_bdy == 0 ) ln_bdy = .FALSE.', ('ENDIF', 1), 26],
+    'SWG_OMIP_L1/BLD/ppsrc/nemo/sshwzv.f90:152-156': [
+        'IF ( .NOT.ln_dynspg_ts ) THEN', ('ENDIF', 3), 5],
+    'SWG_OMIP_L1/BLD/ppsrc/nemo/sshwzv.f90:221-225': [
+        ('IF( ln_bdy ) THEN', 2), ('ENDIF', 7), 5],
+    'SWG_OMIP_L1/BLD/ppsrc/nemo/sshwzv.f90:311-315': [
+        ('IF( ln_bdy ) THEN', 3), ('ENDIF', 12), 5],
     'SWG_OMIP_L1/BLD/ppsrc/nemo/sbcmod.f90:157-163': [
         'NAMELIST/namsbc/ nn_fsbc',
         '&             ln_wave  , nn_lsm', 7],
@@ -1465,6 +1517,9 @@ CITATION_MAP = {
         '&             ln_vol, nn_volctl, nn_rimwidth', 7],
     'SWG_OMIP_L1/BLD/ppsrc/nemo/dommsk.f90:192-203': [
         '! Mask corrections for bdy (read in mppini2)', ('ENDIF', 4), 12],
+    'SWG_OMIP_L1/BLD/ppsrc/nemo/dommsk.f90:286-303': [
+        'IF( ln_read_cfg ) THEN        !==  read in domcfg file  ==!',
+        ("CALL lbc_lnk( 'dommsk', fmask, 'F', 1._wp )", 2), 18],
     'SWG_OMIP_L1/BLD/ppsrc/nemo/sbc_oce.f90:116-117': [
         'utauU  , utau_b', 'vtauV  , vtau_b', 2],
     'SWG_OMIP_L1/BLD/ppsrc/nemo/sbcmod.f90:567-568': [
@@ -1484,6 +1539,15 @@ CITATION_MAP = {
     'SWG_OMIP_L1/BLD/ppsrc/nemo/usrdef_nam.f90:154-166': [
         'ze1 =  rn_dx / REAL(nn_SWG, wp)',
         'ldIperio = .FALSE.   ;   ldJperio = .FALSE.', 13],
+    'SWG_OMIP_L1/BLD/ppsrc/nemo/usrdef_nam.f90:56,143': [
+        'REAL(wp), PUBLIC ::   rn_abp',
+        'rn_abp, nn_cnp, rn_fsp', 2],
+    'SWG_OMIP_L1/BLD/ppsrc/nemo/usrdef_nam.f90:57,143': [
+        'INTEGER , PUBLIC ::   nn_cnp',
+        'rn_abp, nn_cnp, rn_fsp', 2],
+    'SWG_OMIP_L1/BLD/ppsrc/nemo/usrdef_nam.f90:58,143': [
+        'REAL(wp), PUBLIC ::   rn_fsp',
+        'rn_abp, nn_cnp, rn_fsp', 2],
     'SWG_OMIP_L1/BLD/ppsrc/nemo/usrdef_hgr.f90:123-168': [
         'DO jj = 1, jpj',
         'pff_t(:,:) =  REAL( rn_f0, wp ) + REAL( rn_beta, wp ) * ABS( pphit(:,:) )', 46],
@@ -1514,6 +1578,9 @@ CITATION_MAP = {
     'SWG_OMIP_L1/BLD/ppsrc/nemo/stprk3.f90:281-283': [
         ('CALL ssh_nxt( kstp, Nbb, Nnn, ssh, Naa )', 2),
         ('CALL dom_qco_r3c( ssh(:,:,Naa), r3t(:,:,Naa), r3u(:,:,Naa), r3v(:,:,Naa), r3f(:,:) )', 3), 3],
+    'SWG_OMIP_L1/BLD/ppsrc/nemo/stprk3.f90:122-321': [
+        'CALL sbc     ( kstp, Nbb, Nnn )',
+        'CALL rst_write    ( kstp, Nbb, Nbb )', 200],
     # --- TSUNAMI lane round 1 (survey + card + acquisition) ---
     'tests/TSUNAMI/MY_SRC/usrdef_nam.F90:92-93': [
         'kpi = NINT( rn_domszx / rn_dx ) + 1',

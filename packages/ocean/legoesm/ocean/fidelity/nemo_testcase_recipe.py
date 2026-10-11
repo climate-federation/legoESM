@@ -3849,8 +3849,11 @@ class SwgResolvedNamelist(NamedTuple):
     nn_jctls: int = 0
     nn_jctle: int = 0
     # namcfg: every compiled nemogcm.f90:201 read.  With ln_read_cfg=False,
-    # cn_domcfg is inert and usr_def_nam runs (nemogcm.f90:292-296);
-    # ln_write_cfg=False makes cn_domcfg_out inert (domain.f90:253).
+    # cn_domcfg is inert: usr_def_nam is selected (nemogcm.f90:292-296),
+    # ln_closea is forced false (:402), and the remaining file consumers are
+    # guarded in mppini.f90:204-205, domhgr.f90:101-117,
+    # domzgr.f90:111-117, and dommsk.f90:286-303.  ln_write_cfg=False makes
+    # cn_domcfg_out inert at its functional consumer (domain.f90:253).
     ln_read_cfg: bool = False
     cn_domcfg: str = "domain_cfg"
     ln_closea: bool = False
@@ -3858,8 +3861,8 @@ class SwgResolvedNamelist(NamedTuple):
     cn_domcfg_out: str = "domain_cfg_out"
     # namrun: every compiled domain.f90:282-286 read.  Values are the shipped
     # EXPREF deck over namelist_ref; acquisition-only 10-step overrides are not
-    # card values.  nn_stocklist is inert because ln_rst_list=False
-    # (domain.f90:354-358,399-406).
+    # card values.  nn_stocklist is inert because both functional consumers
+    # are guarded by ln_rst_list=False (restart.f90:103-110,197-211).
     cn_ocerst_indir: str = "."
     cn_ocerst_outdir: str = "."
     nn_stocklist: tuple[int, ...] = (0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
@@ -3887,8 +3890,9 @@ class SwgResolvedNamelist(NamedTuple):
     ln_cfmeta: bool = False
     ln_xios_read: bool = False
     nn_wxios: int = 0
-    # key_top is absent, so this read is inert and reset false by the compiled
-    # no-TOP arm (domain.f90:364-371).
+    # key_top is absent, so this read is inert: the compiled init/step call
+    # lists contain no TOP caller, and the only remaining executable occurrence
+    # merely resets it false in root control output (domain.f90:371).
     ln_top: bool = True
     # namdom: every compiled domain.f90:287 read.
     rn_Dt_s: float = 3600.0
@@ -3897,12 +3901,14 @@ class SwgResolvedNamelist(NamedTuple):
     ln_meshmask: bool = False
     ln_shuman: bool = False
     # namtile: every compiled domain.f90:288 read.  The lengths are inert
-    # because ln_tile=False skips domain.f90:446-472.
+    # because ln_tile=False skips their functional uses in
+    # domtile.f90:101-119 as well as domain.f90:446-472.
     ln_tile: bool = False
     nn_ltile_i: int = 99999
     nn_ltile_j: int = 10
     # namnc4: every compiled domain.f90:289 read; the chunk counts are carried
-    # into snc4set but disabled by ln_nc4zip=False (domain.f90:491-496).
+    # into snc4set but their only functional consumer is guarded by
+    # snc4set%luse=False (iom_nf90.f90:684-705).
     nn_nchunks_i: int = 4
     nn_nchunks_j: int = 4
     nn_nchunks_k: int = 31
@@ -3921,6 +3927,9 @@ class SwgResolvedNamelist(NamedTuple):
     rn_f0_s: float = 0.7e-4
     nn_dynldf_lap_typ: int = 1
     ln_dynldf_lap_PM: bool = False
+    # These three values are inert: the compiled-tree census finds no consumers,
+    # only their declarations and namelist read remain
+    # (usrdef_nam.f90:56-58,143).
     rn_abp: float = 1.0e-2
     nn_cnp: int = 1
     rn_fsp_s: float = 0.0
@@ -3956,8 +3965,12 @@ class SwgResolvedNamelist(NamedTuple):
     rn_shlat: float = 0.0
     ln_vorlat: bool = False
     # nambdy: every compiled dommsk.f90:150-155 read.  ln_bdy=False makes the
-    # remaining controls inert; the only dom_msk consumer is guarded by
-    # ln_bdy AND ln_mask_file (dommsk.f90:192-203).
+    # remaining controls inert: nb_bdy can only force an already-false ln_bdy
+    # false (bdyini.f90:164), while the reread/open in mppini.f90:200-205 and the
+    # mask consumer in dommsk.f90:192-203 both require ln_bdy, bdy_init's
+    # functional branch requires it (bdyini.f90:164-189), and the compiled SWE
+    # free-surface boundary consumers require it (sshwzv.f90:152-156,221-225,
+    # 311-315).
     ln_bdy: bool = False
     nb_bdy: int = 0
     ln_coords_file: bool = True
@@ -3979,7 +3992,9 @@ class SwgResolvedNamelist(NamedTuple):
     ln_vol: bool = False
     nn_volctl: int = 1
     nn_rimwidth: int = 10
-    # namdrg is inert in SWE, but its shipped selection remains stated.
+    # namdrg is inert in SWE, but its shipped selection remains stated.  The
+    # complete compiled initialization and step call lists contain neither
+    # zdf_phy_init nor zdf_phy (nemogcm.f90:332-352; stprk3.f90:122-321).
     ln_drg_OFF: bool = True
     # namdyn_adv / namdyn_vor
     ln_dynadv_OFF: bool = False
@@ -4006,9 +4021,10 @@ class SwgResolvedNamelist(NamedTuple):
     rn_zdef_max: float = 0.9
     ln_vvl_dbg: bool = False
     nn_vvl_interp: int = 2
-    # The SWE engine never calls dyn_spg_init or zdf_phy_init, but these deck
-    # values are stated so an inert namelist block cannot become a hidden
-    # choice if that call graph changes (nemogcm.f90:285-316).
+    # These three namdyn_spg deck values are inert: the SWE engine never calls
+    # dyn_spg_init and its stepper never calls dyn_spg.  They remain stated so
+    # a call-graph change cannot become a hidden choice; the complete compiled
+    # call lists are nemogcm.f90:332-352 and stprk3.f90:122-321.
     ln_dynspg_exp: bool = True
     nn_bt_flt: int = 3
     rn_bt_alpha: float = 0.07
@@ -4027,6 +4043,8 @@ class SwgResolvedNamelist(NamedTuple):
     rn_csmc: float = 3.5
     rn_minfac: float = 1.0
     rn_maxfac: float = 1.0
+    # These nine namzdf/namzdf_tke deck values are inert: the SWE engine never
+    # calls zdf_phy_init and its stepper never calls zdf_phy (same call lists).
     ln_zdftke: bool = True
     ln_zdfevd: bool = True
     nn_evdm: int = 1
