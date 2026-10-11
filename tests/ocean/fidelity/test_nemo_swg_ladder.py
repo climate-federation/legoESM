@@ -35,7 +35,13 @@ def test_real_independent_ladder_executes_normal_production_step():
     out = lad.independent(ROOT, allow_dirty=True)
     assert len(out["per_kt"]) == 10
     assert all(len(step["rows"]) == 5 for step in out["per_kt"])
-    assert out["first_kt_over_bar"] is not None
+    assert out["first_kt_over_bar"] == 6
+    assert all(row["bit_identical"]
+               for step in out["per_kt"][:5] for row in step["rows"])
+    first = next(row for row in out["per_kt"][5]["rows"]
+                 if row["status"] == "DEBT")
+    assert first["name"] == "independent.kt6.un"
+    assert first["n_unequal"] == 1
 
 
 def test_stage_entry_reader_refuses_absent_acquisition(tmp_path):
@@ -54,6 +60,18 @@ def test_all_given_stages_execute_production_jit_and_are_bit_exact():
     assert {row["status"] for row in clean["per_kt"][0]["rows"]} <= {
         "AT-BAR", "DEBT"}
     assert all("max_abs" in row for row in clean["per_kt"][0]["rows"])
+    assert all(row["max_abs"] == 0.0
+               for step in clean["per_kt"] for row in step["rows"])
+    assert lad._exit_code(clean) == 0
+
+
+@pytest.mark.skipif(not lad.DEFAULT_STAGE_ROOT.is_dir(),
+                    reason="admitted SWG stage records not mounted")
+def test_chained_stages_stay_bit_exact_through_the_record():
+    clean = lad.swe_rk3_stages(
+        lad.DEFAULT_STAGE_ROOT, mode="chained", allow_dirty=True)
+    assert clean["all_at_bar"] and clean["all_bit_identical"]
+    assert len(clean["per_kt"]) == 26
     assert all(row["max_abs"] == 0.0
                for step in clean["per_kt"] for row in step["rows"])
     assert lad._exit_code(clean) == 0
