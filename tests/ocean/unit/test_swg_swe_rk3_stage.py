@@ -126,6 +126,10 @@ def test_normal_step_uses_the_jitted_three_stage_production_program(card_and_mod
     out = model.step(card.recipe.initial_state, card.dt_s,
                      surface_forcing=forcing)
     assert np.any(np.asarray(out.u.data) != 0.0)
+    assert np.array_equal(np.asarray(out.uu_b.data),
+                          np.asarray(card.recipe.initial_state.uu_b.data))
+    assert np.array_equal(np.asarray(out.vv_b.data),
+                          np.asarray(card.recipe.initial_state.vv_b.data))
     assert out.eta.data.dtype == jnp.float64
     # The first whole step is the shipped non-degenerate forcing transition;
     # reverse-mode must cross the same ordinary step() dispatch.

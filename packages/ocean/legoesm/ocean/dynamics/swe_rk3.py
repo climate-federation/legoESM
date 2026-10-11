@@ -333,6 +333,4 @@ def swe_rk3_step(state, dt, surface_forcing, grid, z_coord, config):
     return state._replace(
         eta=state.eta.replace(data=s3.ssh_k),
         u=state.u.replace(data=u), v=state.v.replace(data=v),
-        uu_b=state.uu_b.replace(data=u[..., 0]),
-        vv_b=state.vv_b.replace(data=v[..., 0]),
         tau_x_prev=now[0], tau_y_prev=now[1])
