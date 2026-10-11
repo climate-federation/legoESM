@@ -163,8 +163,11 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path, label: str,
              else rung0.bridge_entry(card, entry))
     oracle_state = rung0.bridge_entry(card, rung0.assemble_frame(frame_root, 1, 1))
     freshwater, surface = omt0.rung0_ladder._zero_forcing((148, 180))
-    slow_override, raw_surface_vmask = r229._slow_override(
-        card, state, freshwater, surface)
+    if production_geometry:
+        slow_override = raw_surface_vmask = None
+    else:
+        slow_override, raw_surface_vmask = r229._slow_override(
+            card, state, freshwater, surface)
     reconstructed = plant == "reconstructed-source"
     geometry_context = (
         contextlib.nullcontext()
