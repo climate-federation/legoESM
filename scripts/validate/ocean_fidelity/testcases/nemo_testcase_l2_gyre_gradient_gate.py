@@ -69,6 +69,7 @@ class GYREContext(NamedTuple):
     model: LatLonCGridOceanModel
     initial_state: object
     surface_forcings: object
+    checkpointed_step: object
 
 
 def require(condition: bool, message: str) -> None:
@@ -119,7 +120,15 @@ def build_context() -> GYREContext:
     require(initial.T.data.dtype == jnp.float64, "GYRE state is not float64")
     require(card.recipe.z_coord.dz_ref.dtype == jnp.float64,
             "GYRE geometry is not float64")
-    return GYREContext(card, model, initial, _load_surface_forcings())
+    def production_step(state, freshwater, surface):
+        return model._step_jitted(state, card.dt_s, freshwater, surface)
+
+    # Reuse Decision 49 from the GYRE gradient-twin lane: preserve a compiled
+    # boundary around every production step and rematerialize that whole step
+    # in reverse mode.  This remains a Python loop (never a scan).
+    checkpointed_step = jax.jit(jax.checkpoint(production_step))
+    return GYREContext(
+        card, model, initial, _load_surface_forcings(), checkpointed_step)
 
 
 def _score_state(state) -> ScoredState:
@@ -140,6 +149,17 @@ def production_rollout(context: GYREContext, d_t0, n_steps: int):
             freshwater,
             surface,
         )
+    return state
+
+
+def gradient_rollout(context: GYREContext, d_t0, n_steps: int):
+    """Twin-Decision-49 per-step remat around production ``_step_jitted``."""
+    state = context.initial_state._replace(
+        T=context.initial_state.T.replace(
+            data=context.initial_state.T.data + d_t0))
+    for kt in range(1, n_steps + 1):
+        freshwater, surface = context.surface_forcings(context.card, state, kt)
+        state = context.checkpointed_step(state, freshwater, surface)
     return state
 
 
@@ -253,7 +273,7 @@ def build_reference(context: GYREContext, truth_state) -> LossReference:
 def make_loss(context: GYREContext, reference: LossReference, n_steps: int,
               *, schedule: str | None = None):
     """Return the registered four-field normalized after-state loss."""
-    rollout = production_rollout if schedule is None else scheduled_rollout
+    rollout = gradient_rollout if schedule is None else scheduled_rollout
 
     def loss(d_t0):
         if schedule is None:
@@ -365,6 +385,10 @@ def measure_agreement(n_steps: int, *, plant=False):
     zero = jnp.zeros_like(context.initial_state.T.data)
     truth_state = production_rollout(context, zero, n_steps)
     jax.block_until_ready(truth_state)
+    gradient_truth = gradient_rollout(context, zero, n_steps)
+    jax.block_until_ready(gradient_truth)
+    require(states_bitwise_equal(truth_state, gradient_truth),
+            "checkpointed per-step primal differs from production")
     reference = build_reference(context, truth_state)
     loss = make_loss(context, reference, n_steps)
     base, direction = perturbations(context)
