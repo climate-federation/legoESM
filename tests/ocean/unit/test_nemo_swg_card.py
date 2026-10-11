@@ -99,6 +99,12 @@ def test_card_shape_constants_and_initial_state(card):
     assert card.recipe.model_config.een_e3f_scheme == "nemo_avg4"
     assert card.recipe.model_config.een_metric_weighting == "nemo"
     assert card.recipe.model_config.een_q_boundary == "nemo_live"
+    assert card.recipe.model_config.lateral_viscosity_operator == "nemo_div_curl"
+    assert card.recipe.model_config.lateral_viscosity_e3_weighting == "nemo_e3"
+    assert (card.recipe.model_config.lateral_viscosity_coefficient_source
+            == "nemo_constant")
+    assert card.recipe.model_config.lateral_viscosity.A_h == (
+        0.5 * SWG_NAMELIST.rn_Uv_m_s * SWG_NAMELIST.rn_Lv_m)
     for field in (state.T, state.S, state.u, state.v, state.eta, state.uu_b, state.vv_b):
         assert not np.any(np.asarray(field.data))
 
@@ -110,6 +116,18 @@ def test_swg_card_requires_explicit_boolean_ln_dynvor_msk(card, value):
     bad_config = card.recipe.model_config._replace(vorticity_scheme=bad_vor)
     bad = card._replace(recipe=card.recipe._replace(model_config=bad_config))
     with pytest.raises(ValueError, match="compiled vor_ens total vorticity"):
+        validate_nemo_testcase_card(bad)
+
+
+@pytest.mark.parametrize("field,value", (
+    ("lateral_viscosity_operator", "vector_laplacian"),
+    ("lateral_viscosity_e3_weighting", "off"),
+    ("lateral_viscosity_coefficient_source", "nemo_ldf_c2d"),
+))
+def test_swg_card_requires_the_explicit_constant_ldf_dispatch(card, field, value):
+    bad_config = card.recipe.model_config._replace(**{field: value})
+    bad = card._replace(recipe=card.recipe._replace(model_config=bad_config))
+    with pytest.raises(ValueError, match="constant LDF branch"):
         validate_nemo_testcase_card(bad)
 
 

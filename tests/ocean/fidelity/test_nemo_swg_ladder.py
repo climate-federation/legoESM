@@ -78,12 +78,14 @@ def test_stage_entry_one_ulp_input_plant_at_one_leaves_bar():
 
 @pytest.mark.skipif(not lad.DEFAULT_STAGE_ROOT.is_dir(),
                     reason="admitted SWG stage records not mounted")
-def test_zero_subnormal_control_is_reported_as_refuted_not_as_a_pass():
+def test_zero_normal_magnitude_input_plant_binds_and_leaves_bar():
     out = lad.ens_stage1(
         lad.DEFAULT_STAGE_ROOT, plant="zero", allow_dirty=True)
     row = out["controls"][0]
-    assert row["status"] == "REFUTED"
-    assert "subnormal" in row["reason"]
+    assert row["status"] == "DEBT"
+    assert row["n_unequal"] > 0
+    assert not row["bit_identical"]
+    assert lad._exit_code(out) == 1
 
 
 def test_rows_use_card_t_u_v_masks_and_distinguish_wet_from_dry():

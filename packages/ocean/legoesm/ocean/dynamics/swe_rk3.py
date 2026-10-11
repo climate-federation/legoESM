@@ -15,6 +15,7 @@ from legoesm.grids.latlon import ensure_geometry
 from legoesm.grids.operators_latlon_cgrid import compute_vertex_mask
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     compute_face_masks_3d,
+    nemo_lateral_viscosity_constant_coefficients,
     nemo_lateral_viscosity_coefficients,
     nemo_ldf_lap_viscosity_e3_cgrid,
     nemo_vor_ene_vorticity_cgrid,
@@ -90,6 +91,14 @@ def _validate_program(config, z_coord, stage):
         raise ValueError("SWE RK3 supports exactly one layer")
     if config.constants.g != config.g:
         raise ValueError("SWE RK3 requires one gravity value in config.constants.g")
+    if (config.lateral_viscosity_operator != "nemo_div_curl"
+            or config.lateral_viscosity_e3_weighting != "nemo_e3"):
+        raise ValueError(
+            "SWE RK3 requires NEMO's e3-weighted div-curl viscosity")
+    if config.lateral_viscosity_coefficient_source not in (
+            "nemo_ldf_c2d", "nemo_constant"):
+        raise ValueError(
+            "SWE RK3 requires a computed NEMO viscosity coefficient source")
 
 
 def swe_rk3_stage(entry, before_entry, dt, stage, grid, z_coord, land_mask,
@@ -178,10 +187,18 @@ def swe_rk3_stage(entry, before_entry, dt, stage, grid, z_coord, land_mask,
         e3f_before = nemo_qco_live_vorticity_e3f_cgrid(
             before_entry.ssh_k, z_coord, dtype, nn_e3f_typ=1, grid=grid,
             reference_e3f=reference_e3f, r3f_override=before_entry.r3f)
-        half_uv = (jnp.asarray(config.lateral_viscosity.A_h, dtype=dtype)
-                   / (jnp.asarray(geom.radius, dtype=dtype)
-                      * jnp.asarray(geom.dlon, dtype=dtype)))
-        ahmt, ahmf = nemo_lateral_viscosity_coefficients(geom, half_uv)
+        if config.lateral_viscosity_coefficient_source == "nemo_constant":
+            ahmt, ahmf = nemo_lateral_viscosity_constant_coefficients(
+                geom, jnp.asarray(config.lateral_viscosity.A_h, dtype=dtype))
+        elif config.lateral_viscosity_coefficient_source == "nemo_ldf_c2d":
+            half_uv = (jnp.asarray(config.lateral_viscosity.A_h, dtype=dtype)
+                       / (jnp.asarray(geom.radius, dtype=dtype)
+                          * jnp.asarray(geom.dlon, dtype=dtype)))
+            ahmt, ahmf = nemo_lateral_viscosity_coefficients(geom, half_uv)
+        else:  # defended by _validate_program; keep dispatch fail-closed here.
+            raise ValueError(
+                "unknown SWE RK3 viscosity coefficient source "
+                f"{config.lateral_viscosity_coefficient_source!r}")
         ldf_u, ldf_v = nemo_ldf_lap_viscosity_e3_cgrid(
             u_before, v_before, geom, ahmt, ahmf, e3t_before,
             mask=mask, u_mask=umask3, v_mask=vmask3,

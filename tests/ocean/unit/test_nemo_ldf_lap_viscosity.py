@@ -25,6 +25,7 @@ import pytest
 
 from legoesm.grids.latlon import create_latlon_grid, ensure_geometry
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+    nemo_lateral_viscosity_constant_coefficients,
     nemo_lateral_viscosity_coefficients,
     nemo_ldf_lap_viscosity_cgrid,
     vector_laplacian_cgrid,
@@ -51,6 +52,14 @@ def test_coefficient_is_half_UM_max_e1_e2():
         np.asarray(ahmf), half_UM * np.maximum(e1f, e2f), rtol=1e-12)
     assert ahmt.shape == (40,)
     assert ahmf.shape == (41,)
+
+
+def test_constant_coefficient_dispatch_assigns_the_scalar_at_t_and_f():
+    """nn_ahm_ijk_t=0 assigns zah0 directly on both coefficient grids."""
+    geo = _geo()
+    ahmt, ahmf = nemo_lateral_viscosity_constant_coefficients(geo, 500.0)
+    np.testing.assert_array_equal(np.asarray(ahmt), np.full((40,), 500.0))
+    np.testing.assert_array_equal(np.asarray(ahmf), np.full((41,), 500.0))
 
 
 def test_high_lat_does_not_shrink_with_cos_on_uniform_grid():
@@ -290,6 +299,17 @@ def test_file_source_uses_the_carried_coefficient_not_the_formula():
         geo, _ahm_source_config("nemo_ahm_3d_file"),
         _carried(geo, jnp.asarray(bumped), ahmf_3d))
     assert not np.array_equal(moved, read)
+
+
+def test_constant_source_uses_configured_ahm_not_the_metric_formula():
+    """The mode-0 dispatch reaches the shared operator and differs from mode 20."""
+    geo = _geo()
+    constant = _call_visc_z(
+        geo, _ahm_source_config("nemo_constant"), None)
+    metric = _call_visc_z(
+        geo, _ahm_source_config("nemo_ldf_c2d"), None)
+    assert np.max(np.abs(constant)) > 0.0
+    assert not np.array_equal(constant, metric)
 
 
 def test_file_source_does_not_apply_a_second_vertex_mask():

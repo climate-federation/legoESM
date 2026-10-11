@@ -206,7 +206,7 @@ def independent(root: Path, *, allow_dirty: bool = False) -> dict:
     # generated from the card, never read from an oracle stage/restart record.
     tau_u = (-np.float64(SWG_NAMELIST.rn_tau_pa)
              * np.cos(np.float64(np.pi) * src["gphit"]
-                      / np.float64(2_000_000.0)))
+                      / np.float64(SWG_NAMELIST.rn_domsiz_m)))
     tau_v = np.zeros_like(tau_u)
     forcing = OceanSurfaceForcing(
         tau_i_native=jax.numpy.asarray(tau_u, dtype=jax.numpy.float64),
@@ -319,29 +319,29 @@ def swe_rk3_stages(stage_root: Path, *, mode: str = "given",
         require(plant in ("zero", "one"),
                 f"unknown stage-entry plant {plant!r}")
         # A zero-dynamics admitted-shape entry isolates the consumed current-U
-        # -> continuity -> SSH path.  At zero, the one-ULP subnormal is
-        # amplified by Dt*e2u*e3u/area before it is added to a zero SSH; at one,
-        # the ordinary binary64 ULP takes the identical production path.
+        # -> continuity -> SSH path. At zero use one ULP at the admitted
+        # nonzero field's scale: both nextafter(0) and the smallest NORMAL
+        # binary64 input are flushed on the CPU path. At one, use the ordinary
+        # binary64 nextafter step.
         current = {name: value.copy() for name, value in entries[1, 1].items()}
         planted = {name: value.copy() for name, value in entries[1, 1].items()}
         at = tuple(np.argwhere(masks["U"])[len(np.argwhere(masks["U"])) // 2])
         current["u_k"][at] = 0.0 if plant == "zero" else 1.0
         baseline = replay(current, planted, 2)
-        current["u_k"][at] = np.nextafter(
-            current["u_k"][at], np.float64(np.inf))
+        if plant == "zero":
+            field_scale = np.max(np.abs(entries[2, 1]["u_k"][masks["U"]]))
+            require(field_scale > 0.0,
+                    "admitted kt=2 U field has no nonzero plant scale")
+            current["u_k"][at] = np.spacing(np.float64(field_scale))
+        else:
+            current["u_k"][at] = np.nextafter(
+                current["u_k"][at], np.float64(np.inf))
         moved = replay(current, planted, 2)
         control = _row(
-            f"production_consumed_u_nextafter_{plant}", baseline["u_k"],
-            moved["u_k"], masks["U"])
-        if plant == "zero" and control["bit_identical"]:
-            # The frozen prediction is honestly refuted: XLA's CPU arithmetic
-            # flushes the smallest binary64 subnormal once it enters the
-            # continuity multiply.  Never promote an ineffective plant to a
-            # green control merely because the physical replay also has debt.
-            control["status"] = "REFUTED"
-            control["reason"] = (
-                "smallest binary64 subnormal was consumed but flushed in "
-                "the production continuity arithmetic")
+            f"production_consumed_u_{plant}", baseline["ssh_k"],
+            moved["ssh_k"], masks["T"])
+        require(not control["bit_identical"],
+                f"{plant} stage-entry plant did not change production SSH")
         controls.append(control)
     return _gate_rows({
         "label": f"SWE-RK3-STAGES-{mode.upper()}", "legoesm_git_sha": sha,

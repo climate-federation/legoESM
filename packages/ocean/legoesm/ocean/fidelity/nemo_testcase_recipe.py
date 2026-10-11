@@ -4209,6 +4209,7 @@ def build_swg_card() -> NEMOTestcaseCard:
 
     native = (n, n, 1)
     thickness = np.full(native, 500.0)
+    layer_thickness = thickness[..., 0]
     tmask = wet_np[..., None]
     # The shared builder uses the model's west/south redundant-face layout.
     # Its native NEMO U/V records are columns/rows 1..n respectively.
@@ -4236,17 +4237,19 @@ def build_swg_card() -> NEMOTestcaseCard:
         ff_f=src["ff_f"], e3u_0=thickness, e3v_0=thickness,
         e3f_0=thickness, umask=umask, vmask=vmask,
         fmask=fe3mask, fe3mask=fe3mask,
-        hu_0=500.0 * u_wet, hv_0=500.0 * v_wet,
-        hf_0=500.0 * hf_base + 500.0 * fe3mask[..., 0],
+        hu_0=layer_thickness * u_wet, hv_0=layer_thickness * v_wet,
+        hf_0=layer_thickness * hf_base + layer_thickness * fe3mask[..., 0],
         e1t=metric, e2t=metric, e1u=metric, e2u=metric,
         e1v=metric, e2v=metric, e1f=metric, e2f=metric,
     )
     z_ref = create_z_star_from_thicknesses(
-        jnp.asarray([500.0]), t_depth_ref_m=np.asarray([250.0]),
-        nemo_gdept_0_m=np.full(native, 250.0),
+        jnp.asarray(thickness[0, 0]),
+        t_depth_ref_m=np.cumsum(thickness[0, 0]) - 0.5 * thickness[0, 0],
+        nemo_gdept_0_m=0.5 * thickness,
         nemo_gdepw_0_m=np.zeros(native),
         nemo_e3t_0_m=thickness, nemo_e3w_0_m=thickness,
-        nemo_hu_0_m=500.0 * u_wet, nemo_hv_0_m=500.0 * v_wet,
+        nemo_hu_0_m=layer_thickness * u_wet,
+        nemo_hv_0_m=layer_thickness * v_wet,
         nemo_e1e2t_m=area, nemo_e1e2u_m=area, nemo_e1e2v_m=area,
         nemo_e2u_m=metric, nemo_e1v_m=metric,
         nemo_een_barotropic_m=operands, allow_single_level=True,
@@ -4255,8 +4258,8 @@ def build_swg_card() -> NEMOTestcaseCard:
         z_ref, jnp.where(wet > 0.0, 0, -1))
     state = rest_state_latlon_cgrid_ocean(
         grid, z_coord, T_water_init_C=0.0, T_deep=0.0, S_uniform=0.0,
-        H_max=500.0, land_mask_override=wet,
-        H_bathy_override=500.0 * wet,
+        H_max=float(thickness[0, 0, 0]), land_mask_override=wet,
+        H_bathy_override=layer_thickness * wet,
         nemo_prognostic_barotropic_velocity=True,
     )
     base = _model_config(
@@ -4272,6 +4275,7 @@ def build_swg_card() -> NEMOTestcaseCard:
         vertical_mixing=base.physics.vertical_mixing._replace(scheme="none"),
         convection=base.physics.convection._replace(scheme="none"),
     )
+    constant_ahm = 0.5 * nl.rn_Uv_m_s * nl.rn_Lv_m
     config = base._replace(
         constants=cc, physics=physics, tracer_advection="none", K_h=0.0,
         implicit_vertical_mixing=False, A_v=0.0, K_v=0.0, gm_redi=None,
@@ -4282,7 +4286,10 @@ def build_swg_card() -> NEMOTestcaseCard:
         coriolis_scheme="explicit_ab2",
         een_e3f_scheme="nemo_avg4", een_metric_weighting="nemo",
         een_q_boundary="nemo_live",
-        lateral_viscosity=base.lateral_viscosity._replace(A_h=500.0),
+        lateral_viscosity_operator="nemo_div_curl",
+        lateral_viscosity_e3_weighting="nemo_e3",
+        lateral_viscosity_coefficient_source="nemo_constant",
+        lateral_viscosity=base.lateral_viscosity._replace(A_h=constant_ahm),
         # stprk3.f90:325-328 applies rn_rfr to the whole-step before velocity.
         bottom_drag=base.bottom_drag._replace(bottom_drag_r=nl.rn_rfr_s),
         meridionally_periodic=False,
@@ -4320,7 +4327,13 @@ def _validate_swg_card(card: NEMOTestcaseCard) -> None:
             or card.recipe.model_config.een_metric_weighting != "nemo"
             or card.recipe.model_config.een_q_boundary != "nemo_live"):
         raise ValueError("SWG-zco must select compiled vor_ens total vorticity")
-    if card.recipe.model_config.lateral_viscosity.A_h != 500.0:
+    if (card.recipe.model_config.lateral_viscosity_operator != "nemo_div_curl"
+            or card.recipe.model_config.lateral_viscosity_e3_weighting != "nemo_e3"
+            or card.recipe.model_config.lateral_viscosity_coefficient_source
+            != "nemo_constant"):
+        raise ValueError("SWG-zco must select the compiled constant LDF branch")
+    if card.recipe.model_config.lateral_viscosity.A_h != (
+            0.5 * nl.rn_Uv_m_s * nl.rn_Lv_m):
         raise ValueError("SWG-zco must state 0.5*rn_Uv*rn_Lv = 500 m2/s")
     if card.recipe.model_config.bottom_drag.bottom_drag_r != nl.rn_rfr_s:
         raise ValueError("SWG-zco must state the compiled rn_rfr layer drag")

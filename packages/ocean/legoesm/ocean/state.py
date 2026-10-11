@@ -2523,7 +2523,9 @@ class LatLonCGridOceanConfig(NamedTuple):
     # WHERE the "nemo_div_curl" operator's ahmt/ahmf coefficient comes from,
     # mirroring NEMO's namdyn_ldf nn_ahm_ijk_t.  "nemo_ldf_c2d" (default,
     # bit-identical) is nn_ahm_ijk_t=20: ldf_c2d builds 1/2*rn_Uv*MAX(e1,e2)
-    # from the grid metrics.  "nemo_ahm_3d_file" is nn_ahm_ijk_t=-30: the whole
+    # from the grid metrics. "nemo_constant" is nn_ahm_ijk_t=0: A_h is the
+    # resolved 1/2*rn_Uv*rn_Lv scalar assigned directly at every T/F point.
+    # "nemo_ahm_3d_file" is nn_ahm_ijk_t=-30: the whole
     # 3-D field is READ (ldfdyn.f90:348-353) and supplied by the card on
     # z_coord.nemo_ldf_ahmt / nemo_ldf_ahmf; A_h's MAGNITUDE is then unused by
     # this operator and only its positivity still selects it, exactly as rn_Uv

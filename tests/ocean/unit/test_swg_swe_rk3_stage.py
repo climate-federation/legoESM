@@ -218,3 +218,17 @@ def test_stage_replay_refuses_a_non_swe_selector(card_and_model):
     model = LatLonCGridOceanModel(card.recipe.grid, card.recipe.z_coord, bad)
     with pytest.raises(ValueError, match="requires outer_integrator"):
         model.replay_swe_rk3_stage(_entry(), card.dt_s, 1)
+
+
+@pytest.mark.parametrize("field,value", (
+    ("lateral_viscosity_operator", "vector_laplacian"),
+    ("lateral_viscosity_e3_weighting", "off"),
+    ("lateral_viscosity_coefficient_source", "typo"),
+))
+def test_stage_replay_refuses_wrong_or_unknown_ldf_dispatch(
+        card_and_model, field, value):
+    card, _ = card_and_model
+    bad = card.recipe.model_config._replace(**{field: value})
+    with pytest.raises(ValueError, match="viscosity|coefficient_source"):
+        model = LatLonCGridOceanModel(card.recipe.grid, card.recipe.z_coord, bad)
+        model.replay_swe_rk3_stage(_entry(), card.dt_s, 3, _entry())

@@ -1457,6 +1457,30 @@ def nemo_lateral_viscosity_coefficients(
     return ahmt, ahmf
 
 
+def nemo_lateral_viscosity_constant_coefficients(
+    grid: LatLonGrid, ahm: float,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    r"""NEMO constant ``ahmt``/``ahmf`` fields (``nn_ahm_ijk_t=0``).
+
+    NEMO 5.0.2 ``ldf_dyn_init`` forms ``zah0 = 1/2*rn_Uv*rn_Lv`` and assigns
+    that value directly at every T and F point (``ldfdyn.f90:311-322``).
+    The returned one-dimensional fields use the same T/F latitude layouts as
+    :func:`nemo_lateral_viscosity_coefficients` and broadcast through the
+    shared div-curl operator.
+    """
+    if not (hasattr(grid, "dx_u") and hasattr(grid, "dx_v")):
+        raise ValueError(
+            "nemo_lateral_viscosity_constant_coefficients requires a "
+            "LatLonCGridGeometry with dx_u/dx_v metric fields "
+            "(call ensure_geometry first)."
+        )
+    coefficient = jnp.asarray(ahm, dtype=jnp.asarray(grid.dx_u).dtype)
+    return (
+        jnp.full_like(jnp.asarray(grid.dx_u)[:, 0], coefficient),
+        jnp.full_like(jnp.asarray(grid.dx_v)[:, 0], coefficient),
+    )
+
+
 def nemo_ldf_lap_viscosity_cgrid(
     u: jnp.ndarray,
     v: jnp.ndarray,
