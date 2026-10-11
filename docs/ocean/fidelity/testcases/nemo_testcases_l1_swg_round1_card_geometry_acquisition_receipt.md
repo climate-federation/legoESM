@@ -106,7 +106,9 @@ Focused results at the review-fix commit: 30 SWG tests passed and 17 citation-
 gate tests passed.  The certified-card battery had 180 passes and the same
 three pre-existing stale digest assertions for GYRE, LOCK_EXCHANGE, and
 OVERFLOW already reproduced and recorded at the untouched round-1 base; no new
-card test failed.
+card test failed.  The clean-tree receipt gate admitted all 18 mapped citations
+with zero failures; shifting the surface-boundary citation by two lines made
+the planted gate fail and exit 1.
 
 ## Frozen predictions and falsifiers
 
