@@ -723,25 +723,32 @@ def nemo_qco_resolved_mesh_operands(
         raw_een = getattr(z_coord, "nemo_een_barotropic", None)
         e3u0 = None if raw_een is None else getattr(raw_een, "e3u_0", None)
         e3v0 = None if raw_een is None else getattr(raw_een, "e3v_0", None)
-        if e3u0 is None or e3v0 is None:
+        raw_umask = None if raw_een is None else getattr(raw_een, "umask", None)
+        raw_vmask = None if raw_een is None else getattr(raw_een, "vmask", None)
+        if (e3u0 is None or e3v0 is None
+                or raw_umask is None or raw_vmask is None):
             raise ValueError(
                 "a card carrying NEMO's raw qco mesh operands must also carry "
-                "NEMO's own reference face thicknesses e3u_0/e3v_0 on "
-                "z_coord.nemo_een_barotropic: they are the shallower "
-                "neighbour's thickness (usrdef_zgr.F90:225,228; DOMAINcfg "
-                "zgr_zps:1166-1167), not e3t_0, and re-deriving them here "
-                "would need NEMO's mask/halo conventions")
+                "NEMO's own reference face thicknesses e3u_0/e3v_0 and "
+                "associated umask/vmask on z_coord.nemo_een_barotropic: "
+                "the thicknesses are read by domzgr.f90:184-188 and the "
+                "masks are associated by dommsk.f90:228-232; re-deriving "
+                "either here would lose NEMO's fold conventions")
         e3u0 = jnp.asarray(e3u0, dtype=dtype)[..., :nlev]
         e3v0 = jnp.asarray(e3v0, dtype=dtype)[..., :nlev]
+        umask3 = jnp.asarray(raw_umask, dtype=dtype)[..., :nlev]
+        vmask3 = jnp.asarray(raw_vmask, dtype=dtype)[..., :nlev]
         # The bundle is NEMO-native (U/V hold the EAST/NORTH face of each T
         # cell), the same extent as e3t0 and the sliced masks.  A card that
         # attached a redundant west/south layout would BROADCAST silently
         # here rather than fail, so say the shape out loud.
-        if e3u0.shape != e3t0.shape or e3v0.shape != e3t0.shape:
+        if (e3u0.shape != e3t0.shape or e3v0.shape != e3t0.shape
+                or umask3.shape != e3t0.shape or vmask3.shape != e3t0.shape):
             raise ValueError(
-                "z_coord.nemo_een_barotropic.e3u_0/.e3v_0 must be on NEMO's "
+                "the raw e3u_0/e3v_0/umask/vmask must be on NEMO's "
                 f"native extent {e3t0.shape} (U/V on the east/north face of "
-                f"each T cell); got {e3u0.shape} and {e3v0.shape}")
+                "each T cell); got "
+                f"{e3u0.shape}, {e3v0.shape}, {umask3.shape}, {vmask3.shape}")
         return NemoQCOMeshOperands(
             e3t_0=e3t0, e3u_0=e3u0, e3v_0=e3v0, umask3=umask3, vmask3=vmask3,
             hu_0=hu0, hv_0=hv0, area_t=area_t, area_u=area_u, area_v=area_v,

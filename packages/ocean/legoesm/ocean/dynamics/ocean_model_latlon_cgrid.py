@@ -51,6 +51,7 @@ from legoesm.ocean.vertical import (
     nemo_qco_live_face_geometry_from_operands,
     nemo_qco_live_t_thickness,
     nemo_qco_card_mesh_operands,
+    nemo_qco_resolved_mesh_operands,
     nemo_qco_mesh_operands,
     nemo_up3_vertical_momentum_advection,
     nemo_wicker_aimp_partition_transport,
@@ -1778,7 +1779,8 @@ def rk3_stage_velocity_update(
 
 
 def _nemo_ws_qco_stage_faces(
-    eta, h_ref, u_mask_3d, v_mask_3d, grid, *, include_reciprocals=False,
+    eta, h_ref, u_mask_3d, v_mask_3d, grid, *, z_coord=None,
+    include_reciprocals=False,
 ):
     """NEMO ``e3u/e3v(Kmm)`` and ``1 + r3u/r3v`` for one WS-RK3 stage ssh.
 
@@ -1818,7 +1820,14 @@ def _nemo_ws_qco_stage_faces(
     # domain.F90:145 (hu_0 = SUM(e3u_0*umask)) and the C-grid metrics: ONE
     # builder, shared with the PE lane's wzv arm, so the two lanes cannot
     # drift apart in how they reconstruct NEMO's mesh from a card's grid.
-    ops = nemo_qco_card_mesh_operands(h_ref, u_mask_3d, v_mask_3d, grid, dtype)
+    ops = (
+        nemo_qco_card_mesh_operands(
+            h_ref, u_mask_3d, v_mask_3d, grid, dtype)
+        if z_coord is None
+        else nemo_qco_resolved_mesh_operands(
+            z_coord, grid, u_mask_3d, v_mask_3d, dtype,
+            jnp.asarray(h_ref).shape[-1])
+    )
     return nemo_qco_live_face_geometry_cgrid(
         jnp.asarray(eta, dtype=dtype), ops.e3u_0, ops.e3v_0, ops.umask3,
         ops.vmask3, ops.hu_0, ops.hv_0, ops.area_t, ops.area_u, ops.area_v,
@@ -1857,7 +1866,8 @@ def _nemo_dynzdf_drag_face_thickness(
     ).astype(dtype)
     um3, vm3 = compute_face_masks_3d(z_coord.is_active, grid)
     e3u, e3v, _, _ = _nemo_ws_qco_stage_faces(
-        eta_after, h_ref, um3.astype(dtype), vm3.astype(dtype), grid)
+        eta_after, h_ref, um3.astype(dtype), vm3.astype(dtype), grid,
+        z_coord=z_coord)
     return e3u.astype(dtype), e3v.astype(dtype)
 
 def _nemo_metric_stage_transport(metric, face_thickness, corrected_velocity):
@@ -2044,6 +2054,7 @@ def _nemo_ws_stage_transport(
         (hu_stage, hv_stage, _, _, r1_hu_stage,
          r1_hv_stage) = _nemo_ws_qco_stage_faces(
             eta_stage, h_ref, u_mask_3d, v_mask_3d, grid,
+            z_coord=z_coord,
             include_reciprocals=True)
     Hu_stage_depth = jnp.sum(hu_stage, axis=-1)
     Hv_stage_depth = jnp.sum(hv_stage, axis=-1)
@@ -6033,14 +6044,14 @@ class LatLonCGridOceanModel:
             if not self._nemo_ws_test_hooks.legacy_hadv_min_face_thickness:
                 _ws_face_thickness_kbb = _nemo_ws_qco_stage_faces(
                     state.eta.data, _ws_h_ref, _ws_u_live_mask,
-                    _ws_v_live_mask, _grid)[:2]
+                    _ws_v_live_mask, _grid, z_coord=_zc)[:2]
             if _ws_uses_nemo_ldf_e3:
                 _ws_ldf_face_thickness_kbb = (
                     _ws_face_thickness_kbb
                     if _ws_face_thickness_kbb is not None
                     else _nemo_ws_qco_stage_faces(
                         state.eta.data, _ws_h_ref, _ws_u_live_mask,
-                        _ws_v_live_mask, _grid)[:2])
+                        _ws_v_live_mask, _grid, z_coord=_zc)[:2])
                 from legoesm.ocean.vertical import (
                     nemo_ldf_reference_e3f,
                     nemo_qco_live_vorticity_e3f_cgrid,
@@ -7678,7 +7689,7 @@ class LatLonCGridOceanModel:
             # runs the WS-RK3 transport reconcile takes it.
             _qco_tr_faces = _nemo_ws_qco_stage_faces(
                 state.eta.data, _ws_h_ref, _ws_u_live_mask,
-                _ws_v_live_mask, _grid)
+                _ws_v_live_mask, _grid, z_coord=_zc)
             _H_u_transport = jnp.sum(_qco_tr_faces[0], axis=-1)
             _H_v_transport = jnp.sum(_qco_tr_faces[1], axis=-1)
             # Dry columns have a zero qco depth and carry no transport.
@@ -7827,7 +7838,8 @@ class LatLonCGridOceanModel:
                         jnp.ones_like(state.v_mask.data)[..., None],
                     )
                 _, _, _opu, _opv = _nemo_ws_qco_stage_faces(
-                    eta_stage, _h_ref_ws, _u_live_mask, _v_live_mask, _grid)
+                    eta_stage, _h_ref_ws, _u_live_mask, _v_live_mask, _grid,
+                    z_coord=_zc)
                 return _opu[..., None], _opv[..., None]
 
             _qu_b, _qv_b = _qco_ratios(state.eta.data)
@@ -8319,7 +8331,8 @@ class LatLonCGridOceanModel:
                 if _legacy_hadv_h:
                     return None
                 return _nemo_ws_qco_stage_faces(
-                    eta_stage, _h_ref_ws, _u_live_mask, _v_live_mask, _grid)[:2]
+                    eta_stage, _h_ref_ws, _u_live_mask, _v_live_mask, _grid,
+                    z_coord=_zc)[:2]
 
             def _stage_zad_operands(stage, live):
                 # Rounds 158/194.  Replace only the slots the private hook
@@ -12812,7 +12825,8 @@ class LatLonCGridOceanModel:
                         min_water_column_m=_cfg_b.min_water_column_m)
                     _um3, _vm3 = compute_face_masks_3d(_zc.is_active, _grid)
                     _, _, _r3u1, _r3v1 = _nemo_ws_qco_stage_faces(
-                        _eta_now, _h_ref_zdf, _um3, _vm3, _grid)
+                        _eta_now, _h_ref_zdf, _um3, _vm3, _grid,
+                        z_coord=_zc)
                     _raw1 = jnp.asarray(_raw_e3w0)[1:]
                     dz_half_u = (_r3u1[..., None] * _raw1).astype(dz_u.dtype)
                     dz_half_v = (_r3v1[..., None] * _raw1).astype(dz_v.dtype)

@@ -91,7 +91,7 @@ def _resolved_stage_geometry(card, *, reconstructed: bool = False):
     grid = card.recipe.grid
 
     def resolved(eta, h_ref, u_mask_3d, v_mask_3d, call_grid, *,
-                 include_reciprocals=False):
+                 z_coord=None, include_reciprocals=False):
         if reconstructed:
             return original(
                 eta, h_ref, u_mask_3d, v_mask_3d, call_grid,
@@ -129,7 +129,8 @@ def _rank0(values):
 
 
 def measure(deck_root: Path, frame_root: Path, record_root: Path, label: str,
-            expect_commit: str, *, plant: str = "none") -> dict[str, object]:
+            expect_commit: str, *, plant: str = "none",
+            production_geometry: bool = False) -> dict[str, object]:
     import jax
     import jax.numpy as jnp
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
@@ -163,7 +164,12 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path, label: str,
     slow_override, raw_surface_vmask = r229._slow_override(
         card, state, freshwater, surface)
     reconstructed = plant == "reconstructed-source"
-    with _resolved_stage_geometry(card, reconstructed=reconstructed):
+    geometry_context = (
+        contextlib.nullcontext()
+        if production_geometry
+        else _resolved_stage_geometry(card, reconstructed=reconstructed)
+    )
+    with geometry_context:
         ordinary_model = LatLonCGridOceanModel(
             card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
             _nemo_ws_test_hooks=_hooks(
@@ -264,6 +270,7 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path, label: str,
         "format": "nemo-testcase-l4-orca2-round233-geometry-unit-v1",
         "status": "PASS_R233_GEOMETRY_UNIT_BOUNDARY",
         "label": label,
+        "production_geometry": production_geometry,
         "worktree": stamp,
         "passivity": passivity,
         "geometry_registry": sorted(geometry_rows),
