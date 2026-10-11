@@ -29,6 +29,14 @@ resolved builder. A card carrying NEMO's raw mesh must carry all four of
 without the raw mesh retain the pre-existing reconstructed builder. There is
 one implementation of the face geometry and no new selector.
 
+The once-only full battery caught the first implementation routing generic
+and OVERFLOW coordinates that carried only an unrelated raw T thickness into
+the face-mesh resolver. Commit `06130089a` fixed the scope discriminator: a
+card takes the resolved source only when it carries the complete
+`nemo_een_barotropic` face bundle. The three affected generic/OVERFLOW tests
+then pass in isolation. Both ORCA2 claim labels were re-measured on the final
+committed tree (`88baca68c`) and retain the exact table below.
+
 ## Exact operand gate — both claim labels
 
 Every completed-state trace is passive. The raw T/U/V/F mask registry is
@@ -85,18 +93,33 @@ The pinned day-30/240/360 T RMS values therefore remain
 `2.3432419318363155e-06`, `6.5816987106668941e-05`, and
 `5.4077212586815052e-05 K`.
 
-The DINO month and preserved-card gates are recorded below after their final
-committed-tree runs. R238-P5 is **PENDING** only on those already-running
-checks; no ORCA2 or GYRE protection is red.
+The fresh DINO CPU/fp64 month completes all 960 steps. Its day-30 wet 3-D T
+RMS is unchanged at `2.056821682e-03 K`, below the fixed
+`2.244317642e-03 K` bar; the snapshot digest is the same
+`d2e254e5e9d3f9dbddc53c4c9676ea2d992af232fda58ac51cfc1710cbd46b55`.
+The final generic/OVERFLOW route rerun passes 3/3, and the complete card
+constructibility/recipe subset passes inside the focused battery. R238-P5 is
+**CONFIRMED**.
 
 ## Validation and controls
 
-The focused production-route and raw-operand tests pass. The production-route,
-face-thickness and fold-mask plants all refuse. The default citation gate
-passes with zero unmapped citations, failures or map-audit errors after the
-required mechanical re-anchoring. The final receipt gate, rigid-shift plant,
-full fidelity battery and independent read-only review are recorded below
-after the receipt is committed and those checks run.
+The final focused production-route, raw-operand, recipe and card battery
+passes 66/66. The production-route, face-thickness and fold-mask plants all
+refuse. The default citation gate passes with zero unmapped citations,
+failures or map-audit errors after the required SequenceMatcher re-anchoring.
+
+The once-only `tests/ocean/fidelity -n 12` battery reports 3,149 passed,
+seven skipped and ten failed. Six non-registered failures were repaired and
+pass in isolated reruns: the generic route, two OVERFLOW controls, two stale
+Decision-115 helper calls, and round 228's stale citation anchor. The four
+remaining failures are registered pre-existing reds: the GYRE round-129
+record stamp, allow-dirty escape-scope ratchet, worktree-stamp ratchet, and
+SI3 scalar-math provenance. No round-238 test is red.
+
+Independent review was attempted with `codex exec --sandbox read-only` and
+failed before reading the diff: `failed to initialize in-process app-server
+client: Read-only file system (os error 30)`. Independent review unavailable
+in-sandbox; the exact output is retained in `independent_review.log`.
 
 ## Preregistered predictions
 
@@ -106,8 +129,8 @@ after the receipt is committed and those checks run.
 | R238-P2 exact live `e3v` and `vmask` | **CONFIRMED**; external-mode closure claim **REFUTED** |
 | R238-P3 trajectory registration | **CONFIRMED**, zero numerical rows moved |
 | R238-P4 month boundaries | **CONFIRMED** |
-| R238-P5 preserved cards | **PENDING** DINO/tank completion; GYRE **CONFIRMED** |
-| R238-P6 implementation integrity | **PENDING** final battery/review/citation checks |
+| R238-P5 preserved cards | **CONFIRMED** |
+| R238-P6 implementation integrity | **CONFIRMED**, with four registered battery reds and review unavailable in-sandbox |
 
 ## OPEN
 
