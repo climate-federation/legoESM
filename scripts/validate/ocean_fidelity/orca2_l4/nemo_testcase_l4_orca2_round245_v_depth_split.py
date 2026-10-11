@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import copy
 import json
 import sys
@@ -68,7 +69,47 @@ def _raw_surface_vmask(card) -> np.ndarray:
     require(raw is not None, "ORCA2 card has no raw NEMO geometry bundle")
     mask = np.asarray(raw.vmask, np.float64)
     require(mask.ndim == 3, f"raw vmask rank moved: {mask.shape}")
-    return mask[..., 0]
+    return np.max(mask, axis=-1)
+
+
+def _raw_compact_face_masks(card):
+    """Map NEMO native east/north surface masks to compact west/south faces."""
+
+    raw = card.recipe.z_coord.nemo_een_barotropic
+    require(raw is not None, "ORCA2 card has no raw NEMO geometry bundle")
+    native_u = np.max(np.asarray(raw.umask, np.float64), axis=-1)
+    native_v = np.max(np.asarray(raw.vmask, np.float64), axis=-1)
+    compact_u = np.concatenate([native_u[:, -1:], native_u], axis=1)
+    compact_v = _compact_v(native_v)
+    return compact_u, compact_v
+
+
+@contextlib.contextmanager
+def _barotropic_surface_mask_arm(card, enabled: bool):
+    """Private causal arm: hand NEMO's raw ssumask/ssvmask to dynspg only."""
+
+    if not enabled:
+        yield
+        return
+    import jax.numpy as jnp
+    from legoesm.ocean.dynamics import ocean_model_latlon_cgrid as model_module
+
+    original = model_module.barotropic_substeps_latlon_cgrid
+    raw_u, raw_v = _raw_compact_face_masks(card)
+
+    def wrapped(state, *args, **kwargs):
+        dtype = state.eta.data.dtype
+        masked = state._replace(
+            u_mask=state.u_mask.replace(data=jnp.asarray(raw_u, dtype=dtype)),
+            v_mask=state.v_mask.replace(data=jnp.asarray(raw_v, dtype=dtype)),
+        )
+        return original(masked, *args, **kwargs)
+
+    model_module.barotropic_substeps_latlon_cgrid = wrapped
+    try:
+        yield
+    finally:
+        model_module.barotropic_substeps_latlon_cgrid = original
 
 
 def _v_depth_replay(
@@ -120,7 +161,7 @@ def _one_bit_control() -> dict[str, object]:
 
 def measure(
     deck_root: Path, frame_root: Path, twin_a: Path, twin_b: Path,
-    label: str, expect_commit: str,
+    label: str, expect_commit: str, *, raw_surface_masks: bool = False,
 ) -> dict[str, object]:
     import jax
     import jax.numpy as jnp
@@ -149,7 +190,9 @@ def measure(
     oracle_advmean = read_advmean(
         twin_a / "oracle_bt_advmean_operands_kt00000001.bin",
         expected_dims=(94, 152), expected_ncycle=65)
-    card, trace, passivity = r244._trace_run(deck_root, frame_root, label)
+    card = r244.omt4.build_omt4_card(deck_root)
+    with _barotropic_surface_mask_arm(card, raw_surface_masks):
+        card, trace, passivity = r244._trace_run(deck_root, frame_root, label)
 
     state = card.recipe.initial_state
     dtype = jnp.asarray(state.eta.data).dtype
@@ -163,7 +206,9 @@ def measure(
         prep, _nemo_literal_reference_face_depths(z_coord, dtype), dtype)
     hv_candidate = prep[1]
     r1_area_candidate = prep[3]
-    vmask_candidate = jnp.asarray(state.v_mask.data, dtype=dtype)
+    raw_compact_u, raw_compact_v = _raw_compact_face_masks(card)
+    vmask_candidate = jnp.asarray(
+        raw_compact_v if raw_surface_masks else state.v_mask.data, dtype=dtype)
 
     raw_hv = np.asarray(z_coord.nemo_hv_0, np.float64)
     raw_area_t = np.asarray(z_coord.nemo_e1e2t, np.float64)
@@ -216,6 +261,19 @@ def measure(
             "baseline_replay_vs_production": _difference(
                 _native_v(baseline), production_depth),
             "baseline_vs_nemo": _difference(production_depth, oracle_depth),
+            "pair": {
+                "v_mid": r244._regional(
+                    r244._native_full(trace["transport_velocity_v"][index], "V")[:, :90],
+                    np.asarray(oracle_advmean["velocity_v"][index], np.float64),
+                    support=np.asarray(oracle_advmean["r1_e1v"] != 0.0)),
+                "face_depth_v_mid": r244._regional(
+                    production_depth, oracle_depth,
+                    support=np.asarray(oracle_advmean["r1_e1v"] != 0.0)),
+                "metric_transport_v": r244._regional(
+                    r244._native_full(trace["transport_metric_v"][index], "V")[:, :90],
+                    np.asarray(oracle_advmean["metric_v"][index], np.float64),
+                    support=np.asarray(oracle_advmean["r1_e1v"] != 0.0)),
+            },
             "cumulative_substitution": variants,
         })
 
@@ -233,7 +291,11 @@ def measure(
                 "zhvp2_e=hv_0+0.5*r1_e1e2v*"
                 "(e1e2t(j)*zsshp2_e(j)+e1e2t(j+1)*zsshp2_e(j+1))*ssvmask"),
         },
-        "production_operand_route": "D114 raw hv_0; current compact area/mask",
+        "production_operand_route": (
+            "D114 raw hv_0; raw NEMO ssumask/ssvmask causal arm"
+            if raw_surface_masks
+            else "D114 raw hv_0; current compact area/mask"),
+        "raw_surface_masks": raw_surface_masks,
         "record_admission": admission,
         "passivity": passivity,
         "substeps": list(SUBSTEPS),
@@ -335,6 +397,7 @@ def main() -> int:
     parser.add_argument("--twin-b", type=Path)
     parser.add_argument("--label", choices=("independent", "given_nemo_entry"))
     parser.add_argument("--expect-commit")
+    parser.add_argument("--raw-surface-masks", action="store_true")
     parser.add_argument("--classify", nargs=2, type=Path,
                         metavar=("INDEPENDENT", "GIVEN"))
     parser.add_argument("--classify-plant", choices=CLASSIFY_PLANTS, default="none")
@@ -353,7 +416,8 @@ def main() -> int:
                 "measurement arguments are incomplete")
             result = measure(
                 args.deck_root, args.frame_root, args.twin_a, args.twin_b,
-                args.label, args.expect_commit)
+                args.label, args.expect_commit,
+                raw_surface_masks=args.raw_surface_masks)
     except (OSError, ValueError, KeyError, TypeError, GateError) as error:
         planted = args.classify is not None and args.classify_plant != "none"
         print(f"STATUS {'PLANT-FIRED' if planted else 'REFUSE'}: {error}")

@@ -87,3 +87,22 @@ def test_v_depth_replay_is_sensitive_to_each_live_operand():
         args[{"hv": "hv_0", "r1": "r1_e1e2v", "area": "area_t",
               "mask": "ssvmask"}[name]] = changed
         assert not np.array_equal(np.asarray(gate._v_depth_replay(**args)), baseline)
+
+
+def test_raw_mask_mapping_is_native_east_north_to_compact_west_south():
+    class Raw:
+        umask = np.asarray([[[1.0], [0.0]], [[0.0], [1.0]]])
+        vmask = np.asarray([[[0.0], [1.0]], [[1.0], [0.0]]])
+
+    class Z:
+        nemo_een_barotropic = Raw()
+
+    class Recipe:
+        z_coord = Z()
+
+    class Card:
+        recipe = Recipe()
+
+    u, v = gate._raw_compact_face_masks(Card())
+    np.testing.assert_array_equal(u, [[0.0, 1.0, 0.0], [1.0, 0.0, 1.0]])
+    np.testing.assert_array_equal(v, [[0.0, 0.0], [0.0, 1.0], [1.0, 0.0]])
