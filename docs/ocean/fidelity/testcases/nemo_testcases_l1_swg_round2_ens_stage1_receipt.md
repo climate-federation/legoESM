@@ -130,14 +130,14 @@ landed numerical statement.
 
 ## Gates
 
-The final focused run combines the ENS/operator, SWG card and ladder, and
-citation-gate suites: 177 tests pass.  The clean geometry rerun remains 34/34
+The round-2b final CPU battery collects 364 tests: 361 pass.  The only three
+failures are the same pre-existing stale digest pins for GYRE, LOCK_EXCHANGE,
+and OVERFLOW, whose actual hashes remain unchanged.  Geometry remains 34/34
 bit-identical; its signed-y Coriolis, wet-cell, and layer-thickness plants each
-exit 1 and identify respectively 84, one, and one changed values.  The receipt
-citation gate finds five mapped compiled-source citations, no failures, no
-unmapped citations, and an empty map audit.  Shifting the ENS citation by two
-lines exits 1 with `SYMBOL-NOT-AT-LINE`.  `git diff --check` passes and the
-tracked worktree is clean.
+exit 1 and identify respectively 84, one, and one changed values.  The amended
+receipt citation gate finds five mapped P3 citations, no failures, no unmapped
+citations, and an empty map audit.  The shifted P3 citation plant exits 1 with
+`SYMBOL-NOT-AT-LINE`.
 
 ## Review findings and fixes
 
@@ -169,10 +169,9 @@ Independent review run by the operator.
 
 ## OPEN
 
-1. The operator runs the independent review outside the sandbox.  This receipt
-   intentionally records “independent review run by the operator”; no
-   in-sandbox service retry was attempted.
-2. Round 3 implements the complete SWE three-stage explicit-free-surface
+1. The operator runs the independent re-review outside the sandbox.  This
+   receipt intentionally records “independent review run by the operator”.
+2. Only after a SHIP verdict, round 3 implements the complete SWE three-stage explicit-free-surface
    program as the next single source-order arm, including the `rn_Dt/3` stage-1
    SSH and QCO ratio updates, then replays kt=1/stage 1 against the admitted
    stage-2 entry.
