@@ -1,5 +1,24 @@
 # legoESM Claude Memory
 
+## RULE 0 — CONSERVATION OF MASS, ENERGY AND MOMENTUM. THE STRICTEST RULE.
+User directive 2026-10-11: *"Mass, energy and momentum conservations should be
+the strictest rules."* Outranks every other rule in this file, including speed,
+brevity and convergence.
+
+- **No change may create or destroy mass, energy or momentum** — no cap, clip,
+  floor, limiter, fallback or "hold" that removes or adds a quantity without
+  routing it to an explicit sink/source in the same budget. A capped water
+  amount goes somewhere (dew, runoff, store); its latent heat goes somewhere.
+- **Every physics/numerics change states its budget and proves it closes**:
+  name the conserved quantities it touches, and add a test asserting
+  `in - out - d(storage) = 0` to round-off (`JAX_ENABLE_X64=1`), shown to FAIL
+  when the fix is reverted.
+- **Exchanged fluxes carry the same value and sign at both ends of a coupling.**
+- **A known non-conserving path (fallback, held column, clamp) is a defect**:
+  report it with its measured size the moment it is found, never absorb it.
+- Speed or convergence fixes that touch a solver must show the conserved
+  totals are unchanged (to round-off) before and after.
+
 ## RULE 1 — CONCISE AND CLEAR. THE DEFAULT, EVERY REPLY.
 User directive 2026-08-21: *"Be concise and clear — make this a default."*
 Eleventh ask. Default, not mode.
