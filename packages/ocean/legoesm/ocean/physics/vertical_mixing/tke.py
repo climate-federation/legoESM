@@ -2783,6 +2783,7 @@ def tke_vertical_mixing(
     preclosure_dissl: jnp.ndarray | None = None,
     precomputed_p_sh2: jnp.ndarray | None = None,
     precomputed_n2_bundle: TKEEntryN2Bundle | None = None,
+    p_sh2_fn: Callable[[jnp.ndarray], jnp.ndarray] | None = None,
     return_statement_trace: bool = False,
     rhs_materialization: str = "",
     rhs_intermediate: str = "",
@@ -3290,10 +3291,28 @@ def tke_vertical_mixing(
         raise ValueError(
             "Unknown TKEConfig.tke_shear_avm_weighting: must be one of "
             f"('tpoint', 'nemo_face'), got {_avm_weighting!r}.")
+    if p_sh2_fn is not None and _avm_weighting != "nemo_face":
+        raise ValueError(
+            "p_sh2_fn was passed but TKEConfig.tke_shear_avm_weighting="
+            f"{_avm_weighting!r}; select 'nemo_face' to use it (silent-no-op "
+            "guard).")
     _p_sh2_face_fn = None
     if _shear_stage == "step_entry":
         def _p_sh2_face_fn(_kappaM_T):
             return precomputed_p_sh2
+    elif _avm_weighting == "nemo_face" and p_sh2_fn is not None:
+        # Unstructured lanes (MPAS edges, FESOM elements) build NEMO's
+        # zdf_sh2 on their own velocity points and hand it in as
+        # K_M(T-point) -> p_sh2; the cell shear_sq above stays the gradient-Ri
+        # operand.  The C-grid face arrays are the other route, never both.
+        if (_shear_disc != "squared_centered"
+                or any(x is not None for x in _face_native_inputs)
+                or _shear_stage != "implicit_solve_state"):
+            raise ValueError(
+                "p_sh2_fn supplies the lane's own zdf_sh2 geometry: it needs "
+                "tke_shear_production='squared_centered', no C-grid face "
+                "inputs and tke_shear_evaluation_stage='implicit_solve_state'.")
+        _p_sh2_face_fn = p_sh2_fn
     elif _avm_weighting == "nemo_face":
         # nemo_face_native_now2 (alias nbb2) is the key_RK3 arm: the same face
         # geometry with u_face_before IS u_face_now (k_profiles supplies it so).

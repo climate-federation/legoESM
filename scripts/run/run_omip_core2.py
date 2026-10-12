@@ -3042,6 +3042,7 @@ _FESOM_WIRED_DESTS = frozenset({
     "convection_n2_threshold", "convection_evd_composition",
     "tke_prognostic", "tke_n2_mode", "tke_n2_eos_form", "tke_kappa_convention",
     "tke_shear_production", "tke_lc", "tke_etau", "tke_langmuir_rhs_coupling",
+    "tke_prandtl_mode",
     "snapshot_every_days", "output", "smoke",
     # B2+B3 forcing selectors, wired through the fesom forced loop:
     "emp_freshwater", "dm2dc", "sw_rgb_chl", "chl_file", "forcing_path",
@@ -8349,7 +8350,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "('richardson': clamp(Ri/ri_cri,1,10) on the gradient "
                         "Ri = N2/shear^2). 'nemo_ri' is NEMO nn_pdl=1 "
                         "(zdftke.F90): zri = rn2b*avm/(p_sh2+rn_bshear) on the "
-                        "avm-weighted shear production. Tripole only.")
+                        "avm-weighted shear production. Tripole, MPAS (tke) "
+                        "and FESOM (legoesm_tke).")
     p.add_argument("--tke-shear-avm-weighting", type=str, default=None,
                    choices=["tpoint", "nemo_face"],
                    help="How K_M enters TKE shear production for --grid tripole "
@@ -8696,10 +8698,13 @@ def main() -> int:
             "wired ONLY for --grid tripole --tripole-vmix tke; got --grid "
             f"{args.grid!r} --tripole-vmix {args.tripole_vmix!r}.")
     if args.tke_prandtl_mode is not None and not (
-            args.grid == "tripole" and args.tripole_vmix == "tke"):
+            (args.grid == "tripole" and args.tripole_vmix == "tke")
+            or (args.grid == "mpas" and args.mpas_vmix == "tke")
+            or (args.grid == "fesom" and args.fesom_vmix == "legoesm_tke")):
         raise SystemExit(
-            "--tke-prandtl-mode is wired ONLY for --grid tripole --tripole-vmix "
-            f"tke; got --grid {args.grid!r} --tripole-vmix {args.tripole_vmix!r}.")
+            "--tke-prandtl-mode needs the TKE closure (--tripole-vmix tke, "
+            "--mpas-vmix tke or --fesom-vmix legoesm_tke); got --grid "
+            f"{args.grid!r}.")
     if args.vertical_momentum_scheme is not None and args.grid not in ("tripole", "mpas") and not (
             args.grid == "fesom" and args.vertical_momentum_scheme == "nemo_advective"):
         raise SystemExit("--vertical-momentum-scheme is wired on --grid tripole and mpas, and "
@@ -9531,7 +9536,8 @@ def main() -> int:
                     tke_shear_production=args.tke_shear_production,
                     tke_lc=args.tke_lc, tke_etau=args.tke_etau,
                     tke_kappah_min=args.tke_kappah_min,
-                    tke_langmuir_rhs_coupling=args.tke_langmuir_rhs_coupling)
+                    tke_langmuir_rhs_coupling=args.tke_langmuir_rhs_coupling,
+                    tke_prandtl_mode=args.tke_prandtl_mode)
                 if args.mpas_vmix == "tke"
                 else _kpp_vmix_override(args.kpp_ri_crit, args.kpp_cv,
                                         args.kpp_eice)),
@@ -9574,7 +9580,8 @@ def main() -> int:
                 tke_shear_production=args.tke_shear_production,
                 tke_lc=args.tke_lc, tke_etau=args.tke_etau,
                 tke_kappah_min=args.tke_kappah_min,
-                tke_langmuir_rhs_coupling=args.tke_langmuir_rhs_coupling)
+                tke_langmuir_rhs_coupling=args.tke_langmuir_rhs_coupling,
+                tke_prandtl_mode=args.tke_prandtl_mode)
                 if args.fesom_vmix == "legoesm_tke" else None))
         if args.fesom_unforced:
             run_fesom_b1_smoke(args, grid, z_coord, model, state)

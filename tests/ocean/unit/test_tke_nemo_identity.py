@@ -1268,6 +1268,37 @@ class TestAvmWeightingWiring:
             _run(cfg_tpoint, tke_uniform), _run(cfg_face, tke_uniform),
             rtol=1e-12, atol=0)
 
+    def test_lane_supplied_p_sh2_fn(self):
+        """Unstructured lanes hand in their own zdf_sh2 as K_M -> p_sh2.
+        Supplying K_M * (the kernel's own cell shear^2) must reproduce the
+        tpoint path; a different production must change the result; and the
+        hook refuses to be a silent no-op under tpoint weighting."""
+        from legoesm.ocean.physics.vertical_mixing._shared import (
+            vertical_shear_squared,
+        )
+        kwargs = _face_native_orchestrator_inputs()
+        base = {k: v for k, v in kwargs.items()
+                if k not in ("u_before_cell", "v_before_cell", "u_face_now",
+                             "v_face_now", "u_face_before", "v_face_before",
+                             "face_masks_3d")}
+        s2 = vertical_shear_squared(base["u_cell"], base["v_cell"],
+                                    base["dz_half"])
+        tke0 = jnp.full(base["dz_half"].shape, 1e-2)
+
+        def run(cfg, fn=None):
+            return np.asarray(tke_vertical_mixing(
+                cfg=cfg, tke_old=tke0, dt=3600.0, rho_0=_RHO0, n_iterations=2,
+                p_sh2_fn=fn, **base).tke_new)
+
+        face = TKEConfig(tke_shear_avm_weighting="nemo_face",
+                         prandtl_mode="nemo_ri")
+        tpoint = run(TKEConfig(prandtl_mode="nemo_ri"))
+        np.testing.assert_allclose(run(face, lambda K: K * s2), tpoint,
+                                   rtol=1e-12, atol=0)
+        assert not np.allclose(run(face, lambda K: 3.0 * K * s2), tpoint)
+        with pytest.raises(ValueError, match="silent-no-op"):
+            run(TKEConfig(prandtl_mode="nemo_ri"), lambda K: K * s2)
+
     def test_final_K_call_gets_face_weighted_override(self):
         """Regression (#1455 review B1): EVERY compute_K_from_tke call —
         including the post-loop one producing the RETURNED K_M/K_H — must

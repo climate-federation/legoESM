@@ -98,11 +98,17 @@ def test_prandtl_parser_and_builder_guard():
 
 
 @pytest.mark.parametrize("argv", [
-    ["--grid", "mpas", "--mpas-vmix", "tke"],
+    ["--grid", "mpas", "--mpas-vmix", "kpp"],
     ["--grid", "tripole", "--tripole-vmix", "kpp"],
 ])
-def test_main_refuses_prandtl_off_the_tripole_tke_lane(argv, monkeypatch):
+def test_main_refuses_prandtl_off_the_tke_closure(argv, monkeypatch):
     monkeypatch.setattr(sys, "argv", ["run_omip_core2.py", *argv,
                                       "--tke-prandtl-mode", "nemo_ri"])
     with pytest.raises(SystemExit, match="--tke-prandtl-mode"):
         _core2().main()
+
+
+def test_prandtl_flag_is_on_the_fesom_stage_allowlist():
+    """FESOM's stage gate hard-rejects unlisted args; the flag must be listed
+    or the fesom lane refuses it before the builder can receive it."""
+    assert "tke_prandtl_mode" in _core2()._FESOM_WIRED_DESTS
