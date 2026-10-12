@@ -205,8 +205,6 @@ def nemo_qco_live_face_geometry_from_operands(
     area_t,
     area_u,
     area_v,
-    *,
-    associate_v_ratio=None,
 ):
     """Build live native-face QCO geometry in NEMO source association.
 
@@ -248,12 +246,6 @@ def nemo_qco_live_face_geometry_from_operands(
     r1_area_v = b(one / area_v)
     r3u = b(b(num_u * r1_hu0) * r1_area_u)
     r3v = b(b(num_v * r1_hv0) * r1_area_v)
-    if associate_v_ratio is not None:
-        # stprk3_stg.f90:168-170 associates the just-built stage-1 r3va
-        # BEFORE domzgr_substitute materialises e3v(Kmm) and before the
-        # coupled live reciprocal is consumed.  One callback at this source
-        # boundary therefore moves those two cancelling consumers together.
-        r3v = associate_v_ratio(r3v)
     one_plus_r3u = b(one + r3u)
     one_plus_r3v = b(one + r3v)
     e3u = b(e3u_0 * b(one + r3u[..., None] * umask3))
@@ -797,7 +789,6 @@ def nemo_qco_live_face_geometry_cgrid(
     area_v,
     *,
     include_reciprocals=False,
-    associate_v_ratio=None,
 ):
     """NEMO ``e3u/e3v(Kmm)`` on legoESM's redundant west/south C-grid faces.
 
@@ -844,7 +835,6 @@ def nemo_qco_live_face_geometry_cgrid(
     geom = nemo_qco_live_face_geometry_from_operands(
         eta, e3u_0, e3v_0, umask3, vmask3,
         hu_0, hv_0, area_t, area_u, area_v,
-        associate_v_ratio=associate_v_ratio,
     )
     one = jnp.asarray(1.0, dtype=geom.e3u.dtype)
     result = (
