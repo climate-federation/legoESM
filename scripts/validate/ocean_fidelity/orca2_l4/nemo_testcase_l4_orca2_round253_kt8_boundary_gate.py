@@ -194,10 +194,13 @@ def _substep_rows(card, trace: dict[str, object], entry_state) -> tuple[list[dic
         rows.append({
             "substep": index + 1,
             "guards": guards,
-            "delta_from_kt8_entry": {
+            "eta_delta_and_external_velocity_magnitude": {
                 "ssh": _delta_row(eta, entry["ssh"]),
-                "u": _delta_row(u, entry["u"]),
-                "v": _delta_row(v, entry["v"]),
+                # The external-mode velocities are two-dimensional depth
+                # means; the prognostic entry velocities are three-dimensional.
+                # Keep their native statement shape and report magnitude.
+                "u": _delta_row(u, np.zeros_like(u)),
+                "v": _delta_row(v, np.zeros_like(v)),
             },
             "fold_identity": fold,
             "source_operands": {
