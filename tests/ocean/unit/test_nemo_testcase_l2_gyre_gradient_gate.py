@@ -139,6 +139,27 @@ def test_schedule_primal_contract_records_bits_and_refuses_large_drift():
         "u": 2.0e-12,
         "v": 3.0e-12,
     })
+    assert named["scored_field_max_abs"] == pytest.approx({
+        "ssh": 1.0e-12,
+        "u": 2.0e-12,
+        "v": 3.0e-12,
+    })
+    full_state = G.compare_scheduled_primal(
+        G.ScoredState(*(
+            jnp.asarray([value], dtype=jnp.float64)
+            for value in (4.0, 5.0, 2.0, 3.0, 1.0)
+        )),
+        G.ScoredState(*(
+            jnp.asarray([value], dtype=jnp.float64)
+            for value in (4.0, 5.0, 2.0 + 2.0e-12, 3.0 + 3.0e-12,
+                          1.0 + 1.0e-12)
+        )),
+    )
+    assert full_state["scored_field_max_abs"] == pytest.approx({
+        "ssh": 1.0e-12,
+        "u": 2.0e-12,
+        "v": 3.0e-12,
+    })
 
 
 def test_nemo_literal_dissl_guard_preserves_primal_bits_and_zero_vjp():

@@ -759,11 +759,31 @@ def compare_scheduled_primal(left, right) -> dict:
             rtol=SCHEDULE_RTOL,
             atol=SCHEDULE_ATOL,
         ))
+    scored_field_max_abs = {}
+    for output_name, candidate_names in (
+        ("ssh", ("ssh", "eta")),
+        ("u", ("u",)),
+        ("v", ("v",)),
+    ):
+        field_name = next(
+            (name for name in candidate_names if hasattr(left, name)), None)
+        if field_name is None or not hasattr(right, field_name):
+            continue
+        left_field = getattr(left, field_name)
+        right_field = getattr(right, field_name)
+        left_array = np.asarray(getattr(left_field, "data", left_field))
+        right_array = np.asarray(getattr(right_field, "data", right_field))
+        if left_array.shape != right_array.shape:
+            scored_field_max_abs[output_name] = None
+        else:
+            scored_field_max_abs[output_name] = float(np.max(
+                np.abs(left_array - right_array), initial=0.0))
     return {
         "within_contract": within_contract,
         "bitwise": bitwise,
         "max_abs": max_abs,
         "field_max_abs": field_max_abs,
+        "scored_field_max_abs": scored_field_max_abs,
         "rtol": SCHEDULE_RTOL,
         "atol": SCHEDULE_ATOL,
     }
