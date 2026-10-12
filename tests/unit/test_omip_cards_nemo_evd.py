@@ -60,3 +60,32 @@ def test_grids_that_do_not_consume_evd_refuse_it(grid, monkeypatch):
                                       "--convection", "enhanced_diffusion"])
     with pytest.raises(SystemExit, match="enhanced_diffusion"):
         run_omip_core2.main()
+
+
+def _sh2_tokens(name):
+    lines = [ln for ln in (CARDS / name).read_text().splitlines()
+             if "--tke-prandtl-mode" in ln and not ln.lstrip().startswith("#")]
+    assert len(lines) == 1, f"{name}: expected one zdf_sh2/Prandtl line, got {len(lines)}"
+    return shlex.split(re.sub(r"`#.*?`", "", lines[0]).rstrip(" \\"))
+
+
+@pytest.mark.parametrize("name,grid", zip(NAMES, ("tripole", "mpas", "fesom")))
+def test_every_card_runs_nemo_zdf_sh2_and_prandtl(name, grid):
+    """User decision 2026-10-12: NEMO's neighbour-summed avm shear production
+    and nn_pdl=1 Prandtl on all three grids; the tripole additionally needs its
+    face-native RK3 geometry, the unstructured lanes supply their own."""
+    from scripts.run.run_omip_core2 import build_tripole_vmix_config
+    toks = _sh2_tokens(name)
+    p = _build_arg_parser()
+    lane = (["--fesom-mesh-dir", "/f"] if grid == "fesom" else ["--mesh", "/m.nc"])
+    args = p.parse_args(["--grid", grid, "--output", "/o"] + lane + toks)
+    tke = build_tripole_vmix_config(
+        "tke", tke_shear_production=args.tke_shear_production,
+        tke_shear_avm_weighting=args.tke_shear_avm_weighting,
+        tke_prandtl_mode=args.tke_prandtl_mode).tke
+    assert tke.tke_shear_avm_weighting == "nemo_face"
+    assert tke.prandtl_mode == "nemo_ri"
+    assert tke.tke_shear_production == (
+        "nemo_face_native_nbb2" if grid == "tripole" else "squared_centered")
+    if grid == "fesom":
+        validate_fesom_stage(args, p)

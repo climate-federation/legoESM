@@ -120,6 +120,7 @@ JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid mpas --C-smag-lap 0
   --tke-surface-bc nemo_dirichlet --tke-surface-bc-level nemo_z0 --tke-mxl-choice 4 --tke-prognostic \
   --tke-kappa-convention veros_sqrte \
   --tke-langmuir-rhs-coupling nemo_pre_solve `# user 2026-10-06: NEMO Langmuir/dissipation RHS order (zdftke.F90:367,419)` \
+  --tke-shear-avm-weighting nemo_face --tke-prandtl-mode nemo_ri `# user 2026-10-12 (1): NEMO zdf_sh2 neighbour-summed avm (zdfsh2.F90:78-94) + nn_pdl=1 Prandtl on p_sh2 (zdftke.F90:381-400), all three grids` \
   --convection enhanced_diffusion --convection-K-conv 100 --convection-K-bg 0 --convection-n2-mode nemo_bn2 --convection-n2-eos teos10 --convection-trigger hard --convection-n2-threshold=-1e-12 --convection-evd-composition nemo_replace `# user 2026-10-12 (3b): NEMO zdfevd on every grid -- ln_zdfevd=T rn_evd=100 nn_evdm=0, zdfevd.F90:107-110` \
   --vertical-momentum-scheme nemo_advective `# user 2026-10-05: vertical advection as on the tripole (NEMO vector form)` \
   --dt 150 --nemo-vertical --partial-cell --pgf-scheme ${PGF:-smc03} \
