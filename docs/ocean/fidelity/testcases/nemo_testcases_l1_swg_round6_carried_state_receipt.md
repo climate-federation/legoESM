@@ -86,6 +86,7 @@ Preregistration commit: `863a4d77ca4ba32628163b61b8a9e342d7e0646e`.
 Committed carry instrument: `984c92d01d5d752f0af2b76a86052d4646305676`.
 Clean measured implementation: `84d44ab3840e18302eaf8897bcdcaf98c4b5eb65`.
 Thirty-day acquisition tool: `31b8305873efae632dbf7da11d658e9865b3184a`.
+Source-stable final dispatch: `6a42499a7ee1df19de52574431a8fcca0805914e`.
 
 1. **CONFIRMED: the whole-step boundary is complete and exact.** The
    independently initialized production run's step-5 SSH, U, V, zero external
@@ -131,11 +132,11 @@ Thirty-day acquisition tool: `31b8305873efae632dbf7da11d658e9865b3184a`.
 6. **CONFIRMED: the ten-step target is met.** The independent ladder improves
    from 37/50 to 50/50 bit-identical rows; `first_kt_over_bar` is now `None`.
    The final carry audit is 29/29 exact. Given-entry and chained controls remain
-   338/338 exact. Artifact SHA-256 values are respectively
-   `bef2df374379b32ea11a33e2a068d00bcfb3085571f965a26171a789acdcc0cf`,
-   `2bc714f07365a862172609948ad916b7783e57b4fb40e60aae6f1cda4b4ce1c1`,
-   `791b54b39c2baf86775f981656987d164f379ded9bcb0001a76d154d5a6aefd9`,
-   and `cd8aa01f6caa1b7baeecb4230827042ff68f5e646f182363dbc4b2099dfab11e`.
+   338/338 exact. Final-tip artifact SHA-256 values are respectively
+   `a6704ae7927810b751f67bd29fdce173cea6d1738fb20101054db3a25a23c5eb`,
+   `3a81c0504460df01f0bf358f956c94e75ca67fea1377116f349a3e73d351746a`,
+   `857fc5eb3e452e7ae04dccfd2a851f25bbebf35dcfabe434a732bb51b6db7b27`,
+   and `5a02d8c01b3d3959fd01844b935f34a639dc51e9f3a85f036488a338537d1058`.
 7. **CONFIRMED: controls bind.** The admitted nonzero-input one-ULP plant
    remains DEBT and exits 1; artifact SHA-256
    `0d70fcf521b71c65cde24cac0bb4eb76d013e22e82a0dee146b2ff233b5620f1`.
@@ -182,12 +183,13 @@ and OVERFLOW digests remain the round-5 values `f02d2f42a570f413`,
 
 The SWG card, stage, differentiability, ladder, geometry, and admission battery
 passes 194/194. Geometry remains 34/34 bit-identical; clean artifact SHA-256 is
-`ce334fcbf0111e01be356fe5441c2327017cbf4ca6da0af90a802f8638b47cfa`.
+`6f56eec09cc52a17bdca54cd3000f8b198d77efd67224360441b303fa2191154`.
 The three geometry plants exit 1. The given, chained, independent, and final
 carry gates exit 0; the one-ULP input plant exits 1.
 
-The citation gate and its shifted-citation plant are recorded after this
-receipt's measurement commit.
+The citation gate maps all seven compiled-source citations with zero unmapped
+citations, failures, or map-audit failures and exits 0. Shifting the first
+stage-materialization citation by two lines produces FAIL and exits 1.
 
 ## Choices this round
 
