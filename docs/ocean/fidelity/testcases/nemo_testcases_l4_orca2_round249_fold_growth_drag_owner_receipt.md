@@ -20,10 +20,10 @@ momentum RHS and then calls the drag and wind consumers at
 `ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/stp2d.f90:194-230`. The drag
 consumer forms the bottom residual and adds its live-depth-scaled correction
 at
-`ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:1404-1464`.
+`ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:1404-1463`.
 Only after that does the external solver copy the completed slow forcing and
 remove the two-dimensional Coriolis tendency at
-`ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:286-325`.
+`ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:286-324`.
 
 The committed round-249 gate reads passive completed stage states and the
 admitted self-describing slow-forcing/substep streams. It never feeds an

@@ -1590,14 +1590,14 @@ CITATION_MAP = {
         ('!*  vertical averaging  *!', 1),
         ('Ve_rhs(ji,jj) =  Ve_rhs(ji,jj) + r1_rho0', 1),
         37],
-    'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:286-325': [
-        ('!=  remove 2D Coriolis trend  =!', 1),
+    'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:286-324': [
+        ('! set values computed in RK3_ssh', 1),
         ('zv_frc(ji,jj) = zv_frc(ji,jj) - zv_trd', 1),
-        40],
-    'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:1404-1464': [
+        39],
+    'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:1404-1463': [
         ('SUBROUTINE dyn_drg_init', 1),
         ('pv_RHSi(ji,jj) = pv_RHSi(ji,jj) + (r1_hv_0', 1),
-        61],
+        60],
     # --- ORCA2 round 245: OMT-4 midpoint V-depth cancelling pair ---
     'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/dommsk.f90:206-249': [
         '!  Ocean/land mask at u-, v-, and f-points   (computed from tmask)',
