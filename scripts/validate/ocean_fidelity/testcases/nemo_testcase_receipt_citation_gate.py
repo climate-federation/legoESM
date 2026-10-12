@@ -86,6 +86,7 @@ _OVERFLOW_R56UP3_COMPILED = (
 _OVERFLOW_R62ZDF_COMPILED = (
     NEMO / "tests/OVERFLOW_OMIP_L1_P3_R62ZDF/BLD/ppsrc/nemo")
 _SWG_COMPILED = NEMO / "tests/SWG_OMIP_L1/BLD/ppsrc/nemo"
+_SWG_DG_COMPILED = NEMO / "tests/SWG_DG/BLD/ppsrc/nemo"
 _SWG_P3_COMPILED = NEMO / "tests/SWG_OMIP_L1_P3/BLD/ppsrc/nemo"
 _SWG_P3D_COMPILED = NEMO / "tests/SWG_OMIP_L1_P3D/BLD/ppsrc/nemo"
 FILES = {
@@ -96,6 +97,8 @@ FILES = {
         _SWG_COMPILED / "usrdef_hgr.f90"),
     "SWG_OMIP_L1/BLD/ppsrc/nemo/usrdef_zgr.f90": (
         _SWG_COMPILED / "usrdef_zgr.f90"),
+    "SWG_DG/BLD/ppsrc/nemo/usrdef_zgr.f90": (
+        _SWG_DG_COMPILED / "usrdef_zgr.f90"),
     "SWG_OMIP_L1/BLD/ppsrc/nemo/usrdef_sbc.f90": (
         _SWG_COMPILED / "usrdef_sbc.f90"),
     "SWG_OMIP_L1/BLD/ppsrc/nemo/dynvor.f90": (
@@ -1655,6 +1658,10 @@ CITATION_MAP = {
     'SWG_OMIP_L1/BLD/ppsrc/nemo/usrdef_zgr.f90:206-235': [
         'z2d(:,:) = REAL( jpkm1 , wp )',
         ('k_bot(ji,jj) = 0', 2), 30],
+    'SWG_DG/BLD/ppsrc/nemo/usrdef_zgr.f90:211-221': [
+        'zylim1 = rn_domsiz + 10000._wp',
+        'zxlim1 = rn_domsiz + 10000._wp',
+        'IF ( gphiv(ji,jj) > zylim0', 11],
     'SWG_OMIP_L1/BLD/ppsrc/nemo/usrdef_sbc.f90:84-87': [
         'emp (:,:) = 0._wp', 'qsr (:,:) = 0._wp', 4],
     'SWG_OMIP_L1/BLD/ppsrc/nemo/usrdef_sbc.f90:99-106': [
