@@ -2,7 +2,7 @@
 
 Date: 2026-10-12
 
-Status: **LANDED; MEASUREMENT SCOPE COMPLETE**. The historical wall-time
+Status: **HELD FOR ONE BAR DECISION; MEASUREMENTS COMPLETE**. The historical wall-time
 retraction is executable, the five-window CPU cost model has a binding suite
 and constant-time plant, and all operator GPU resource rows are classified
 without turning the preregistered schedule ordering into an acceptance gate.
@@ -12,11 +12,13 @@ schedule, configuration, stabilizer, clip, guard, or `stop_gradient` changed.
 ## Provenance and review blockers
 
 The incoming tip was `1d7fae76681ecd6e551bebca6892a1953d2e9c79`. The round-4
-instrument repair is `349eaad0e842951830636cbacbe1b435a96e62a1`. Its
-classifier artifacts are under
+instrument repair is `349eaad0e842951830636cbacbe1b435a96e62a1`. Classifier
+artifacts, including the rejected review experiment at clean `fc1a36478`, are under
 `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swggg_rounds/round4/`
-and stamp that clean commit. The GPU measurements remain operator-acquired
-artifacts from clean `1d7fae766`; they are classified, not re-derived.
+and stamp their producer commits. The final classifier retains only the
+preregistered T1/T2 checks described below. The GPU measurements remain
+operator-acquired artifacts from clean `1d7fae766`; they are classified, not
+re-derived.
 
 Both confirmed round-3 review blockers are closed. A resource row now returns
 RETRACTED unless it carries the exact repaired compiled-transform and timer-
@@ -25,15 +27,15 @@ returns RETRACTED for every row and for the suite. The round-1 and round-2
 receipt tables now label their timing and increment columns RETRACTED while
 retaining only the absolute peak-RSS observations.
 
-The new five-row CPU suite applies the frozen round-3 predictions: positive
-affine-fit slope, each adjacent interval's seconds-per-step within the stated
-instrument-coherence band `[0.5, 1.5]` times that fit, and direct 1440-step
-time greater than 720-step time for every schedule, plus the existing uniform
-1440/720 ratio band `[1.5, 2.5]`. The interval band is an instrument check, not
-a physics, agreement, or training bar. All three measured suites return
-CONFIRMED. Replacing all five times by the 24-step time makes every suite
-REFUTED, with zero slope and equal 720/1440 times; a flat four-point trace with
-one late jump is also REFUTED by the interval-to-fit check.
+The five-row CPU suite applies the preregistered round-3 predictions of positive
+affine-fit slope and direct 1440-step time greater than 720-step time for every
+schedule, plus the existing uniform 1440/720 ratio band `[1.5, 2.5]`. Round 4
+also reports every adjacent interval's seconds-per-step divided by the fitted
+slope, but does not classify those diagnostics: the round-3 preregistration
+explicitly says fit residuals are descriptive and no new timing bar may be
+introduced. All three measured suites return CONFIRMED. Replacing all five
+times by the 24-step time makes every suite REFUTED, with zero slope and equal
+720/1440 times.
 
 ## GPU resource prediction: retained refutations
 
@@ -132,7 +134,10 @@ The inherited stale GYRE/LOCK/OVERFLOW digest pins remain GYRE-lane debt.
 Expected values are `5850bbcfcd351c29` / `4ec82201f0fae7bf` /
 `7f1ec89b3e6578f5`; actual round-6 values are `f02d2f42a570f413` /
 `d5dfdf83b3a1e0ab` / `83de0010e1170032`. They are not re-pinned here. No SWG
-gradient measurement or operator acquisition remains open.
+gradient measurement or operator acquisition remains open. One gate-policy
+decision remains: either keep the preregistered T1/T2 scaling verdict, or
+authorize and preregister a numeric interval-to-fit acceptance band in a later
+round. This receipt does not invent that threshold post hoc.
 
 ## Source citations
 

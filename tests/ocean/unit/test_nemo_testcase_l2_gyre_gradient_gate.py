@@ -348,24 +348,10 @@ def test_cpu_scaling_suite_gates_frozen_predictions_and_constant_time_plant():
     assert control["checks"] == {
         "positive_fitted_seconds_per_step": True,
         "time_1440_exceeds_time_720": True,
-        "every_interval_cost_within_50pct_of_fit": True,
         "uniform_1440_to_720_ratio_in_preregistered_band": True,
     }
-    assert all(
-        0.5 <= ratio <= 1.5
-        for ratio in control["interval_to_fit_ratios"].values()
-    )
     assert planted["status"] == "REFUTED"
     assert not any(planted["checks"].values())
-
-    late_jump_rows = [
-        _cpu_scaling_row("none", steps, seconds)
-        for steps, seconds in zip(G.SWG_SCALING_STEPS, (1, 1, 1, 1, 2))
-    ]
-    late_jump = G.classify_scaling_suite(late_jump_rows)
-    assert late_jump["status"] == "REFUTED"
-    assert not late_jump["checks"][
-        "every_interval_cost_within_50pct_of_fit"]
     args = G.parse_args([
         "scaling-suite", "--card", "SWG", "--steps", "1440",
         "--schedule", "uniform", "--expect-commit", "deadbeef",

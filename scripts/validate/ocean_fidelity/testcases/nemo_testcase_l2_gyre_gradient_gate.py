@@ -61,7 +61,6 @@ WARM_REVERSE_TIMER_SPAN = (
     "start and stop/join excluded"
 )
 UNIFORM_SCALING_RATIO_BOUNDS = (1.5, 2.5)
-SCALING_INTERVAL_TO_FIT_BOUNDS = (0.5, 1.5)
 GYRE_FIELDS = ("T", "S", "u", "v")
 SWG_FIELDS = ("ssh", "u", "v")
 GPU_NATIVE_POLICY_LABEL = (
@@ -1121,10 +1120,6 @@ def classify_scaling_suite(rows: list[dict], *, plant: bool = False) -> dict:
             evaluated[upper] - evaluated[lower]) / (upper - lower)
         for lower, upper in zip(SWG_SCALING_STEPS[:-1], SWG_SCALING_STEPS[1:])
     }
-    # This is an instrument-coherence contract, not a physics or agreement
-    # bar.  A deliberately broad +/-50% band makes every registered
-    # interval demonstrate the fitted per-step cost instead of allowing a
-    # flat trace with one late jump to pass on a positive global slope alone.
     interval_to_fit_ratios = {
         interval: cost / slope if slope > 0.0 else 0.0
         for interval, cost in interval_seconds_per_step.items()
@@ -1132,14 +1127,6 @@ def classify_scaling_suite(rows: list[dict], *, plant: bool = False) -> dict:
     checks = {
         "positive_fitted_seconds_per_step": slope > 0.0,
         "time_1440_exceeds_time_720": evaluated[1440] > evaluated[720],
-        "every_interval_cost_within_50pct_of_fit": (
-            slope > 0.0
-            and all(
-                SCALING_INTERVAL_TO_FIT_BOUNDS[0]
-                <= ratio <= SCALING_INTERVAL_TO_FIT_BOUNDS[1]
-                for ratio in interval_to_fit_ratios.values()
-            )
-        ),
     }
     ratio = evaluated[1440] / evaluated[720]
     if schedule == "uniform":
@@ -1162,7 +1149,6 @@ def classify_scaling_suite(rows: list[dict], *, plant: bool = False) -> dict:
         "fit_r_squared": r_squared,
         "interval_seconds_per_step": interval_seconds_per_step,
         "interval_to_fit_ratios": interval_to_fit_ratios,
-        "interval_to_fit_bounds": list(SCALING_INTERVAL_TO_FIT_BOUNDS),
         "ratio_1440_to_720": ratio,
         "uniform_ratio_bounds": list(UNIFORM_SCALING_RATIO_BOUNDS),
         "checks": checks,

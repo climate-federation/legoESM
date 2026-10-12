@@ -30,42 +30,60 @@ accept_classified_exit() {
   esac
 }
 
-if [[ ${1:-} == --self-test ]]; then
-  observed=()
-  for status in REFUTED VACUOUS RETRACTED CONFIRMED; do
-    rc=1
-    [[ $status == CONFIRMED ]] && rc=0
-    accept_classified_exit "$status" "$rc" "self-test row"
-    observed+=("$status")
-  done
-  [[ ${observed[*]} == "REFUTED VACUOUS RETRACTED CONFIRMED" ]] || \
-    refuse "classified rows did not all continue" 66
-  printf 'SWG_GRADGATE_GPU_RUNNER_SELF_TEST statuses=%s\n' "${observed[*]}"
-  exit 0
-fi
+invoke_row_gate() {
+  local output=$1
+  shift
+  if [[ -n ${SWG_GRADGATE_SELF_TEST_STATUS:-} ]]; then
+    "$PYTHON" -c '
+import json
+import pathlib
+import sys
 
-[[ -x "$PYTHON" ]] || refuse "missing Python environment: $PYTHON"
-[[ -f "$GATE" ]] || refuse "run from the legoESM repository root; missing $GATE"
-[[ -d "$EVIDENCE_DIR" ]] || refuse "evidence directory does not exist: $EVIDENCE_DIR"
-[[ -z "$(git status --porcelain)" ]] || refuse "producer worktree is not clean"
-readonly COMMIT=$(git rev-parse HEAD)
+pathlib.Path(sys.argv[1]).write_text(json.dumps({
+    "status": sys.argv[2],
+    "measurement_policy_label": (
+        "GPU, XLA transcendentals — not the certified bit-exact policy"),
+    "precision_policy": "PrecisionPolicy.fp64(transcendentals=\x27native\x27)",
+}))
+' "$output" "$SWG_GRADGATE_SELF_TEST_STATUS"
+    [[ $SWG_GRADGATE_SELF_TEST_STATUS == CONFIRMED ]]
+    return
+  fi
+  CUDA_VISIBLE_DEVICES=1 JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 \
+    PYTHONPATH="$MODEL_PATH" XLA_PYTHON_CLIENT_PREALLOCATE=false \
+    env -u XLA_PYTHON_CLIENT_ALLOCATOR \
+    "$PYTHON" "$GATE" "$@" --transcendentals native \
+      --expect-commit "$COMMIT" --output "$output"
+}
 
-CUDA_VISIBLE_DEVICES=1 JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 \
-  XLA_PYTHON_CLIENT_PREALLOCATE=false \
-  env -u XLA_PYTHON_CLIENT_ALLOCATOR \
-  "$PYTHON" -c 'import jax; devices=jax.devices(); assert jax.default_backend() == "gpu", jax.default_backend(); assert len(devices) == 1, devices; print(devices[0])'
-nvidia-smi -i 1 --query-gpu=index,memory.used --format=csv,noheader
+invoke_suite_gate() {
+  local output=$1
+  local steps=$2
+  shift 2
+  if [[ -n ${SWG_GRADGATE_SELF_TEST_STATUS:-} ]]; then
+    "$PYTHON" -c '
+import json
+import pathlib
+import sys
+
+pathlib.Path(sys.argv[1]).write_text(json.dumps({"status": sys.argv[2]}))
+' "$output" "$SWG_GRADGATE_SELF_TEST_STATUS"
+    [[ $SWG_GRADGATE_SELF_TEST_STATUS == CONFIRMED ]]
+    return
+  fi
+  CUDA_VISIBLE_DEVICES=1 JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 \
+    PYTHONPATH="$MODEL_PATH" XLA_PYTHON_CLIENT_PREALLOCATE=false \
+    env -u XLA_PYTHON_CLIENT_ALLOCATOR \
+    "$PYTHON" "$GATE" resource-suite --card SWG --steps "$steps" \
+      --expect-commit "$COMMIT" --output "$output" "$@"
+}
 
 run_row() {
   local output=$1
   shift
   [[ ! -e "$output" ]] || refuse "refusing to overwrite evidence: $output" 65
   local rc=0
-  if CUDA_VISIBLE_DEVICES=1 JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 \
-      PYTHONPATH="$MODEL_PATH" XLA_PYTHON_CLIENT_PREALLOCATE=false \
-      env -u XLA_PYTHON_CLIENT_ALLOCATOR \
-      "$PYTHON" "$GATE" "$@" --transcendentals native \
-        --expect-commit "$COMMIT" --output "$output"; then
+  if invoke_row_gate "$output" "$@"; then
     rc=0
   else
     rc=$?
@@ -95,11 +113,7 @@ run_suite() {
   shift 2
   [[ ! -e "$output" ]] || refuse "refusing to overwrite evidence: $output" 65
   local rc=0
-  if CUDA_VISIBLE_DEVICES=1 JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 \
-      PYTHONPATH="$MODEL_PATH" XLA_PYTHON_CLIENT_PREALLOCATE=false \
-      env -u XLA_PYTHON_CLIENT_ALLOCATOR \
-      "$PYTHON" "$GATE" resource-suite --card SWG --steps "$steps" \
-        --expect-commit "$COMMIT" --output "$output" "$@"; then
+  if invoke_suite_gate "$output" "$steps" "$@"; then
     rc=0
   else
     rc=$?
@@ -120,6 +134,36 @@ print(status)
   printf 'SWG_GRADGATE_GPU_SUITE steps=%s status=%s output=%s\n' \
     "$steps" "$LAST_SUITE_STATUS" "$output"
 }
+
+if [[ ${1:-} == --self-test ]]; then
+  test_dir=$(mktemp -d)
+  trap 'rm -rf -- "$test_dir"' EXIT
+  observed=()
+  for status in REFUTED VACUOUS RETRACTED CONFIRMED; do
+    SWG_GRADGATE_SELF_TEST_STATUS=$status
+    run_row "$test_dir/row_${status}.json" self-test
+    [[ $LAST_ROW_STATUS == "$status" ]]
+    run_suite "$test_dir/suite_${status}.json" 24 self-test
+    [[ $LAST_SUITE_STATUS == "$status" ]]
+    observed+=("$status")
+  done
+  [[ ${observed[*]} == "REFUTED VACUOUS RETRACTED CONFIRMED" ]] || \
+    refuse "classified rows did not all continue" 66
+  printf 'SWG_GRADGATE_GPU_RUNNER_SELF_TEST statuses=%s\n' "${observed[*]}"
+  exit 0
+fi
+
+[[ -x "$PYTHON" ]] || refuse "missing Python environment: $PYTHON"
+[[ -f "$GATE" ]] || refuse "run from the legoESM repository root; missing $GATE"
+[[ -d "$EVIDENCE_DIR" ]] || refuse "evidence directory does not exist: $EVIDENCE_DIR"
+[[ -z "$(git status --porcelain)" ]] || refuse "producer worktree is not clean"
+readonly COMMIT=$(git rev-parse HEAD)
+
+CUDA_VISIBLE_DEVICES=1 JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 \
+  XLA_PYTHON_CLIENT_PREALLOCATE=false \
+  env -u XLA_PYTHON_CLIENT_ALLOCATOR \
+  "$PYTHON" -c 'import jax; devices=jax.devices(); assert jax.default_backend() == "gpu", jax.default_backend(); assert len(devices) == 1, devices; print(devices[0])'
+nvidia-smi -i 1 --query-gpu=index,memory.used --format=csv,noheader
 
 for steps in 1 24 720 1440; do
   run_row "$EVIDENCE_DIR/gpu1_agreement_${steps}step.json" \
