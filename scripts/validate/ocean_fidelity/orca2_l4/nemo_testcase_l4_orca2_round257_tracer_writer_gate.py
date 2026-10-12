@@ -139,9 +139,8 @@ def measure(deck_root: Path, frame_root: Path, operand_root: Path,
     ordinary_model = _model(card, base_hooks)
     live_model = _model(card, r249._hooks(card, True, live=True))
 
-    arm = r245._barotropic_surface_mask_arm(
-        card, True, v_only=True, t_pivot_north_neighbor=True)
-    with arm:
+    with r245._barotropic_surface_mask_arm(
+            card, True, v_only=True, t_pivot_north_neighbor=True):
         ordinary = jax.device_get(ordinary_model.step(
             state, card.dt_s, freshwater=forcing[0], surface_forcing=forcing[1]))
         traced = jax.device_get(live_model.step(
@@ -159,8 +158,10 @@ def measure(deck_root: Path, frame_root: Path, operand_root: Path,
     tracer = tracer_record.read_tracer(
         operand_root / tracer_record.TRACER_RECORD)
 
-    candidate_pu = np.asarray(traced.stage_geometry[0][7], np.float64)[:, 1:]
-    candidate_pv = np.asarray(traced.stage_geometry[0][8], np.float64)[1:]
+    candidate_pu_full = np.asarray(traced.stage_geometry[0][7], np.float64)
+    candidate_pv_full = np.asarray(traced.stage_geometry[0][8], np.float64)
+    candidate_pu = candidate_pu_full[:, 1:]
+    candidate_pv = candidate_pv_full[1:]
     candidate_pw = (
         np.asarray(traced.stage_geometry[0][2], np.float64)
         * np.asarray(card.recipe.grid.area_T, np.float64)[..., None]
@@ -171,6 +172,10 @@ def measure(deck_root: Path, frame_root: Path, operand_root: Path,
     recorded_pu[:, :90] = np.asarray(tracer["zFu"], np.float64)[..., :30]
     recorded_pv = np.asarray(record["zFv_after_trp"], np.float64)[..., :30]
     recorded_pw[:, :90] = np.asarray(tracer["zFw"], np.float64)
+    recorded_pu_full = np.concatenate(
+        [recorded_pu[:, -1:, :], recorded_pu], axis=1)
+    recorded_pv_full = np.concatenate(
+        [recorded_pv[-1:, :, :], recorded_pv], axis=0)
 
     entry_t = np.asarray(state.T.data, np.float64)
     entry_s = np.asarray(state.S.data, np.float64)
@@ -179,31 +184,31 @@ def measure(deck_root: Path, frame_root: Path, operand_root: Path,
     h_stage = np.asarray(traced.stage_geometry[0][3], np.float64)
 
     cand_t_fu, cand_t_fv = _face_rows(
-        entry_t, candidate_pu, candidate_pv, card.recipe.grid)
+        entry_t, candidate_pu_full, candidate_pv_full, card.recipe.grid)
     nemo_t_fu, nemo_t_fv = _face_rows(
-        nemo_entry_t, recorded_pu, recorded_pv, card.recipe.grid)
+        nemo_entry_t, recorded_pu_full, recorded_pv_full, card.recipe.grid)
     cand_s_fu, cand_s_fv = _face_rows(
-        entry_s, candidate_pu, candidate_pv, card.recipe.grid)
+        entry_s, candidate_pu_full, candidate_pv_full, card.recipe.grid)
     nemo_s_fu, nemo_s_fv = _face_rows(
-        nemo_entry_s, recorded_pu, recorded_pv, card.recipe.grid)
+        nemo_entry_s, recorded_pu_full, recorded_pv_full, card.recipe.grid)
 
     # The record stores metric W transport.  Rebuild the source-written CEN2
     # W face products, including the live masks, through the production helper.
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import _nemo_cen2_tracer_rhs
     tmask = np.asarray(card.recipe.z_coord.is_active, np.float64)
     candidate_t_rhs = np.asarray(_nemo_cen2_tracer_rhs(
-        entry_t, candidate_pu, candidate_pv, candidate_pw,
+        entry_t, candidate_pu_full, candidate_pv_full, candidate_pw,
         h_stage, tmask, card.recipe.grid), np.float64)
     recorded_t_rhs = np.asarray(_nemo_cen2_tracer_rhs(
-        nemo_entry_t, recorded_pu, recorded_pv, recorded_pw,
+        nemo_entry_t, recorded_pu_full, recorded_pv_full, recorded_pw,
         np.asarray(record["e3t_Kmm"], np.float64)[..., :30],
         np.asarray(record["tmask"], np.float64)[..., :30], card.recipe.grid),
         np.float64)
     candidate_s_rhs = np.asarray(_nemo_cen2_tracer_rhs(
-        entry_s, candidate_pu, candidate_pv, candidate_pw,
+        entry_s, candidate_pu_full, candidate_pv_full, candidate_pw,
         h_stage, tmask, card.recipe.grid), np.float64)
     recorded_s_rhs = np.asarray(_nemo_cen2_tracer_rhs(
-        nemo_entry_s, recorded_pu, recorded_pv, recorded_pw,
+        nemo_entry_s, recorded_pu_full, recorded_pv_full, recorded_pw,
         np.asarray(record["e3t_Kmm"], np.float64)[..., :30],
         np.asarray(record["tmask"], np.float64)[..., :30], card.recipe.grid),
         np.float64)
@@ -218,7 +223,8 @@ def measure(deck_root: Path, frame_root: Path, operand_root: Path,
     recorded_stage_hooks = base_hooks._replace(
         stage1_tracer_transport_override=(recorded_pu, recorded_pv, recorded_pw),
         expose_tracer_stage=1)
-    with arm:
+    with r245._barotropic_surface_mask_arm(
+            card, True, v_only=True, t_pivot_north_neighbor=True):
         after_adv = jax.device_get(_run(card, state, forcing, boundary_hooks))
         after_sbc = jax.device_get(_run(card, state, forcing, sbc_hooks))
         recorded_after_adv = jax.device_get(_run(
