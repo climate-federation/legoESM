@@ -187,6 +187,12 @@ _N_DPSI_ITER = 30   # outer bisection on dF/ddpsi
 _DPSI_MAX_MPA = 10.0  # [MPa] upper bracket of the draw-down search
 _RBD_FLOOR = 1e-10  # coeff-ok: Bonan A23 root-biomass-density floor [g/m3]
 _LAI_FLOOR = 1.0e-3  # [m2/m2] guards the per-leaf-area resistance on bare columns
+# Wettest soil matric potential a root can see: field capacity.  The Richards
+# lane can overshoot to POSITIVE potentials for a step when rain lands on dry
+# soil (a water-balance artefact); fed to the optimum that reverses the
+# soil-to-leaf gradient and yields negative conductance and capacities.
+_PSI_SOIL_CAP_MPA = -0.033
+_PSI_SOIL_CAP_WIDTH_MPA = 0.005  # softplus width of the cap (AD safety)
 _UMOL_PER_MOL = 1.0e6
 _LN2 = float(np.log(2.0))
 # Weibull argument guards: the ratio psi/psi50 is clipped so (ratio ** ck) and
@@ -283,7 +289,11 @@ def soil_root_supply(
     mpa_per_m = constants.rho_water * constants.g * 1e-6
     hk_mol = jnp.maximum(hk_ms, 0.0) * mol_per_m3 / mpa_per_m
 
-    smp_mpa = psi_soil_m * mpa_per_m  # matric potential [MPa], <= 0
+    # Matric potential [MPa], smoothly capped at field capacity: ~psi well
+    # below the cap, -> the cap from below above it (sign: psi <= 0, drier is
+    # more negative).
+    smp_mpa = _PSI_SOIL_CAP_MPA - _PSI_SOIL_CAP_WIDTH_MPA * jax.nn.softplus(
+        (_PSI_SOIL_CAP_MPA - psi_soil_m * mpa_per_m) / _PSI_SOIL_CAP_WIDTH_MPA)
 
     dz = jnp.broadcast_to(dz_m, psi_soil_m.shape)
     rbd = jnp.maximum(cfg.root_biomass_gm2 * root_frac / dz, _RBD_FLOOR)
