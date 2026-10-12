@@ -169,6 +169,12 @@ def test_nemo_provider_admits_window_and_refuses_shifted_clock_and_deck(
                                                       "rn_tau = 0.11"))
     with pytest.raises(Exception, match="differs at rn_tau"):
         climate.nemo_ioipsl_provider(tmp_path, 1, start_day=2)
+    resolved.write_text(resolved.read_text().replace("rn_tau = 0.11",
+                                                      "rn_tau = 0.10").replace(
+                                                          "nn_SWG = 16",
+                                                          "nn_SWG = 16.5"))
+    with pytest.raises(Exception, match="differs at nn_SWG"):
+        climate.nemo_ioipsl_provider(tmp_path, 1, start_day=2)
 
 
 def test_legoesm_provider_selects_later_window_and_gates_deck(tmp_path):

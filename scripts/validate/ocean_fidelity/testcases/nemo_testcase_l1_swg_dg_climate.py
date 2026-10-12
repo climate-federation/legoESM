@@ -91,8 +91,7 @@ def _require_nemo_deck(root: Path) -> dict:
     }
     for field, value in expected.items():
         require(field in resolved, f"resolved NEMO deck is missing {field}")
-        actual = int(float(resolved[field])) if isinstance(value, int) else float(
-            resolved[field])
+        actual = float(resolved[field])
         require(actual == value, f"resolved NEMO deck differs at {field}")
     return {
         "executable_sha256": NEMO_DG_EXECUTABLE_SHA256,
