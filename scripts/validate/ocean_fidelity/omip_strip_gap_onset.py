@@ -38,21 +38,21 @@ def cohort_gap_interface(K, zw, thr, zmax):
     return g, kg
 
 
-def face_vs_tpoint(U, V, A, dz, j, i, kint):
-    """avm-weighted shear production at T(j,i), interface kint, NEMO face form
-    (zdfsh2.F90:80-94, now-shear squared, wet interior) vs the T-point form:
-      face  = 0.25 * sum_f (A_nb + A_c) * s_f
-      tpnt  = A_c * 0.5 * sum_f s_f
-    with s_f = ((x_k - x_k+1)/dz)^2 at the four faces u(i-1), u(i), v(j-1), v(j)
+def face_nb(U, Ub, V, Vb, A, dz, j, i, kint):
+    """avm-weighted shear production at T(j,i), interface kint, NEMO zdfsh2
+    face form (zdfsh2.F90:76-95, now x before shear, uniform-metric
+    approximation, wet interior) and the same face shears with the T-point
+    avm only:  face = 0.25*sum_f (A_nb + A_c)*s_f ;  tp = A_c*0.5*sum_f s_f,
+    s_f = (x_k - x_k+1)(xb_k - xb_k+1)/dz^2 at faces u(i-1), u(i), v(j-1), v(j)
     (u(i) east of T(i), v(j) north of T(j)).  Grid arrays (..., ny, nx, k)."""
-    su = ((U[..., kint] - U[..., kint + 1]) / dz[kint]) ** 2
-    sv = ((V[..., kint] - V[..., kint + 1]) / dz[kint]) ** 2
+    su = (U[..., kint] - U[..., kint + 1]) * (Ub[..., kint] - Ub[..., kint + 1]) / dz[kint] ** 2
+    sv = (V[..., kint] - V[..., kint + 1]) * (Vb[..., kint] - Vb[..., kint + 1]) / dz[kint] ** 2
     Ak = A[..., kint]
     ac = Ak[..., j, i]
     face = 0.25 * ((Ak[..., j, i + 1] + ac) * su[..., j, i] + (ac + Ak[..., j, i - 1]) * su[..., j, i - 1]
                    + (Ak[..., j + 1, i] + ac) * sv[..., j, i] + (ac + Ak[..., j - 1, i]) * sv[..., j - 1, i])
-    tpnt = ac * 0.5 * (su[..., j, i] + su[..., j, i - 1] + sv[..., j, i] + sv[..., j - 1, i])
-    return face, tpnt
+    tp = ac * 0.5 * (su[..., j, i] + su[..., j, i - 1] + sv[..., j, i] + sv[..., j - 1, i])
+    return face, tp
 
 
 def _iq(x):
@@ -165,7 +165,7 @@ def main(argv):
     sref = href * 24
     ratio = le_end[sref:, cols, k] / ne_end[sref:, cols, k]
     hit = ratio < 0.9
-    has = np.any(hit, 0)
+    has = np.any(hit, 0) & (ratio[0] >= 0.9)          # already diverged at href: not an onset (codex)
     first = np.argmax(hit, 0)
     lead = {t: 0 for t in L.TERMS}
     contrib = {t: [] for t in L.TERMS}
@@ -176,7 +176,7 @@ def main(argv):
         for t in L.TERMS:
             contrib[t].append(dd[t] / max(abs(de), 1e-30))
         lead[min(dd, key=dd.get)] += 1
-    print(f"\nFirst divergence (e ours/NEMO < 0.9 at kg after h{href}): {has.sum()} of {cols.size} cols; "
+    print(f"\nFirst divergence (e ours/NEMO < 0.9 at kg after h{href}, >= 0.9 at h{href}): {has.sum()} of {cols.size} cols; "
           f"onset hour median {np.median(href + (first[has] + 1) / 24):.2f} [{np.percentile(href + (first[has] + 1) / 24, 25):.2f},"
           f"{np.percentile(href + (first[has] + 1) / 24, 75):.2f}]")
     print("  most-negative cumulative ours-NEMO term at onset (count): " + ", ".join(f"{t} {n}" for t, n in lead.items() if n))
@@ -187,22 +187,38 @@ def main(argv):
     avm_prev = np.concatenate([avmk[:1] * np.nan, avmk[:-1]])
     d_fl = L.nemo_diff_direct(ne_pfl, avm_prev, sj, si, nk, avm_floor=2e-5)
     d_nf = L.nemo_diff_direct(ne_pfl, avm_prev, sj, si, nk, avm_floor=0.0)
-    fl = []
+    fl, nbad = [], 0
     for c in np.where(has)[0]:
         s1c = sref + first[c] + 1
+        seg = d_fl[sref:s1c, cols[c], k[c]] - d_nf[sref:s1c, cols[c], k[c]]
+        if not np.all(np.isfinite(seg)):
+            nbad += 1
+            continue
         de = ne_end[s1c - 1, cols[c], k[c]] - ne_end[sref - 1, cols[c], k[c]]
-        fl.append(np.nansum(d_fl[sref:s1c, cols[c], k[c]] - d_nf[sref:s1c, cols[c], k[c]]) / max(abs(de), 1e-30))
-    print(f"\nNEMO TKE-diffusion floor contribution at kg, h{href} -> onset, / |NEMO de|: median {np.median(fl):+.3f} "
-          f"[{np.percentile(fl, 25):+.3f},{np.percentile(fl, 75):+.3f}]  (ours-NEMO total at onset = -0.1 by construction)")
-    # (2) face-summed vs T-point avm weighting of shear production, on the strip grid
+        fl.append(np.sum(seg) / max(abs(de), 1e-30))
+    fl = np.asarray(fl)
+    print(f"\nNEMO TKE-diffusion floor, LOCAL operator contribution on NEMO's own solution at kg, h{href} -> onset, / |NEMO de| "
+          f"(not a counterfactual solve): n={fl.size} (dropped {nbad} with non-finite samples)"
+          + (f" median {np.median(fl):+.3f} [{np.percentile(fl, 25):+.3f},{np.percentile(fl, 75):+.3f}]" if fl.size else ""))
+    # (2) avm weighting of shear production, on the strip grid.
     def grid(X, jj, ii):
         G = np.full((X.shape[0], 13, 31, X.shape[2]), np.nan)
         G[:, jj, ii, :] = X
         return G
     ja, ia = (a[0]["col_j"] - L.J0), (a[0]["col_i"] - L.I0)
-    uo_all, vo_all = g("col_u"), g("col_v")
-    A_all = np.maximum(g("col_A") - 2.0e-6, 1.4e-6)   # closure K_M ~ applied - (A_v 1.4e-6 + IWM ~0.6e-6), floored at kappaM_min
-    Uo, Vo, Ao_g = grid(uo_all, ja, ia), grid(vo_all, ja, ia), grid(A_all, ja, ia)
+    Uo, Vo = grid(g("col_u"), ja, ia), grid(g("col_v"), ja, ia)
+    SHo = grid(g("col_eshear"), ja, ia)
+    zt = np.asarray(nc.Dataset(L.MESH)["gdept_1d"][0], dtype=np.float64)
+    dzt = np.diff(zt)[:nk]
+    # ours 'squared_centered': centre-averaged velocities, then differenced; production
+    # at step s uses the state entering s = post-solve s-1 (codex).  Our effective
+    # production viscosity is READ from our own record: nu_o = eshear(s) / S2c(s-1),
+    # so no closure/background guess enters (codex).
+    uc = 0.5 * (Uo + np.roll(Uo, 1, axis=2)); vc = 0.5 * (Vo + np.roll(Vo, 1, axis=1))
+    S2c = ((uc[..., :-1] - uc[..., 1:]) ** 2 + (vc[..., :-1] - vc[..., 1:]) ** 2) / dzt ** 2   # (t, y, x, nk)
+    S2c_prev = np.concatenate([S2c[:1] * np.nan, S2c[:-1]])
+    with np.errstate(invalid="ignore", divide="ignore"):
+        NUo = np.where(S2c_prev > 1e-12, SHo / S2c_prev, np.nan)
     dN = nc.Dataset(f"{argv[1]}/{PREFIX}U.nc")
     Un = np.asarray(dN["uoce"][:, :nk + 1], dtype=np.float64).transpose(0, 2, 3, 1)
     Vn = np.asarray(nc.Dataset(f"{argv[1]}/{PREFIX}V.nc")["voce"][:, :nk + 1], dtype=np.float64).transpose(0, 2, 3, 1)
@@ -210,32 +226,53 @@ def main(argv):
     An = np.asarray(d["avm_k"][:, 1:nk + 1], dtype=np.float64).transpose(0, 2, 3, 1)
     An[np.abs(An) > 1e15] = np.nan
     shN = np.asarray(d["eshear_k"][:, 1:nk + 1], dtype=np.float64).transpose(0, 2, 3, 1)
-    zt = np.asarray(nc.Dataset(L.MESH)["gdept_1d"][0], dtype=np.float64)
-    dzt = np.diff(zt)
-    # instrument check on NEMO: face form with avm_k(s-1) and now-shear vs NEMO's own eshear_k(s)
+    shN[np.abs(shN) > 1e15] = np.nan
+
+    # instrument gate (NEMO): face form, now(s-1) x before(s-2), avm_k(s-1) vs eshear_k(s)
     ss = np.arange(sref, sref + 3 * 24)
-    fN, tN, aN = [], [], []
+    rr = []
     for c in range(cols.size):
         jj, ii = sj[cols[c]], si[cols[c]]
-        f_, t_ = face_vs_tpoint(Un[ss], Vn[ss], An[ss - 1], dzt, jj, ii, k[c])
-        fN.append(f_); tN.append(t_); aN.append(shN[ss, jj, ii, k[c]])
-    fN, tN, aN = map(np.concatenate, (fN, tN, aN))
-    ok = np.isfinite(fN) & np.isfinite(aN) & (aN > 0)
-    print(f"CHECK NEMO face form vs eshear_k (h{href}-h{href + 3}, cohort kg): corr(log) {np.corrcoef(np.log(fN[ok]), np.log(aN[ok]))[0, 1]:.3f} "
-          f"median ratio {np.median(fN[ok] / aN[ok]):.3f}; T-point form corr(log) {np.corrcoef(np.log(tN[ok] + 1e-30), np.log(aN[ok]))[0, 1]:.3f} "
-          f"median ratio {np.median(tN[ok] / aN[ok]):.3f}  n={ok.sum()}")
-    print("face/T-point production ratio at kg (window-end step), ours state | NEMO state; predicted ours P under face weighting / NEMO P (col median)")
-    for h in range(href, min(h1, 8)):
+        f_, _ = face_nb(Un[ss - 1], Un[ss - 2], Vn[ss - 1], Vn[ss - 2], An[ss - 1], dzt, jj, ii, k[c])
+        rr.append(f_ / shN[ss, jj, ii, k[c]])
+    rr = np.concatenate(rr); rr = rr[np.isfinite(rr) & (rr > 0)]
+    q = np.percentile(rr, [10, 25, 50, 75, 90])
+    gate = (q[1] > 0.9) and (q[3] < 1.1)
+    print(f"GATE NEMO face form (now x before) / eshear_k at cohort kg h{href}-h{href + 3}: p10..p90 "
+          + " ".join(f"{x:.3f}" for x in q) + f"  n={rr.size}  -> {'PASS' if gate else 'FAIL'} (IQR within 0.9-1.1)")
+    # our side: reconstructed centred production with our own nu reproduces eshear by
+    # construction; the substantive check is that nu_o is a smooth closure field:
+    # report nu_o vs applied A (must be <= A, ~ A - background where turbulent)
+    s = 8 * 24 - 1
+    nu_c = np.array([NUo[s, sj[c_], si[c_], k_] for c_, k_ in zip(cols, k)])
+    print(f"ours nu_eff = eshear/S2c(s-1) at kg, h8: median {np.nanmedian(nu_c):.2e}; applied A there {np.nanmedian(pick(Ao_app, s - 1)):.2e}")
+    print("Production at kg (window-end step), median over cohort, / NEMO eshear_k (col median):")
+    print("  h | ours recorded (centred, T-pt nu) | ours face-geometry, T-pt nu | ours face-geometry, face-summed nu || NEMO face/T-pt ratio")
+    for h in range(href, min(h1, 9)):
         s = (h + 1) * 24 - 1
-        ro, rn, pr = [], [], []
+        r_rec, r_tp, r_fc, r_n = [], [], [], []
         for c in range(cols.size):
             jj, ii = sj[cols[c]], si[cols[c]]
-            fo_, to_ = face_vs_tpoint(Uo[s], Vo[s], Ao_g[s - 1], dzt, jj, ii, k[c])
-            fn_, tn_ = face_vs_tpoint(Un[s], Vn[s], An[s - 1], dzt, jj, ii, k[c])
-            ro.append(fo_ / to_); rn.append(fn_ / tn_)
-            pr.append(sh_o[s, cols[c], k[c]] * fo_ / to_ / sh_n[s, cols[c], k[c]])
-        print(f"  h{h + 1:02d}: ours {np.nanmedian(ro):6.2f} | NEMO {np.nanmedian(rn):6.2f} | ours-face/NEMO P {np.nanmedian(pr):6.2f}  "
-              f"(ours-tpoint/NEMO P {np.nanmedian(pick(sh_o, s) / pick(sh_n, s)):6.2f})")
+            fo_, to_ = face_nb(Uo[s - 1], Uo[s - 2], Vo[s - 1], Vo[s - 2], NUo[s], dzt, jj, ii, k[c])
+            fn_, tn_ = face_nb(Un[s - 1], Un[s - 2], Vn[s - 1], Vn[s - 2], An[s - 1], dzt, jj, ii, k[c])
+            ref = shN[s, jj, ii, k[c]]
+            r_rec.append(SHo[s, jj, ii, k[c]] / ref); r_tp.append(to_ / ref); r_fc.append(fo_ / ref); r_n.append(fn_ / tn_)
+        print(f"  h{h + 1:02d} | {np.nanmedian(r_rec):6.2f} | {np.nanmedian(r_tp):6.2f} | {np.nanmedian(r_fc):6.2f} || {np.nanmedian(r_n):6.2f}")
+    # selection-bias control (GLM): unconditional face/T-pt ratio, all interior columns, interfaces 10-25 m
+    kk_rng = np.where((zw >= 10.0) & (zw <= 25.0))[0]
+    jin, iin = np.meshgrid(np.arange(L.BUF, 13 - L.BUF), np.arange(L.BUF, 31 - L.BUF), indexing="ij")
+    print("Unconditional face/T-pt production ratio, all interior columns, interfaces 10-25 m: ours | NEMO (median [p25,p75])")
+    for h in (4, 6, 8, 12, 18, 30):
+        s = h * 24 - 1
+        ro, rn_ = [], []
+        for kint in kk_rng:
+            f1, t1 = face_nb(Uo[s - 1], Uo[s - 2], Vo[s - 1], Vo[s - 2], NUo[s], dzt, jin, iin, kint)
+            f2, t2 = face_nb(Un[s - 1], Un[s - 2], Vn[s - 1], Vn[s - 2], An[s - 1], dzt, jin, iin, kint)
+            ro.append((f1 / t1).ravel()); rn_.append((f2 / t2).ravel())
+        ro, rn_ = np.concatenate(ro), np.concatenate(rn_)
+        ro, rn_ = ro[np.isfinite(ro) & (ro > 0)], rn_[np.isfinite(rn_) & (rn_ > 0)]
+        print(f"  h{h:02d}: ours {np.median(ro):6.2f} [{np.percentile(ro, 25):.2f},{np.percentile(ro, 75):.2f}] | "
+              f"NEMO {np.median(rn_):6.2f} [{np.percentile(rn_, 25):.2f},{np.percentile(rn_, 75):.2f}]")
 
     print(f"\nPer 1-h window at the gap interface: median [IQR] of ours-NEMO (cumulative, m2/s2); NEMO median in ()")
     for h in range(h0, h1):
