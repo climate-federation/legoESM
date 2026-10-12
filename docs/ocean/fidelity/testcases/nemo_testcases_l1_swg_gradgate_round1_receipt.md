@@ -2,10 +2,11 @@
 
 Date: 2026-10-12
 
-Status: **LANDED, GPU ROWS OPEN**. Reverse mode agrees with forward mode and
-central finite differences through the production SWG step for one hour, one
-day, and thirty days. All six CPU checkpoint-resource rows completed. No
-physics, card choice, stabilizer, clipping, guard, or `stop_gradient` changed.
+Status: **LANDED; GPU AGREEMENT CONFIRMED; GPU RESOURCE VERDICTS RETRACTED**.
+Reverse mode agrees with forward mode and central finite differences through
+the production SWG step for one hour, one day, and thirty days. All six CPU
+checkpoint-resource rows completed. No physics, card choice, stabilizer,
+clipping, guard, or `stop_gradient` changed.
 
 ## Provenance and gate import
 
@@ -123,6 +124,27 @@ none720, uniform720, binomial720)` order, are
 `f35bfffb357700f3256ef795b448840a7ebcdb7025cd308ca90252ac9201a228`,
 and `c5a04f37918f956e07d7827e1cb58f3b997c3f341884104d9d91279836d4cb78`.
 
+## GPU operator result and resource retraction
+
+The operator ran the committed script at `27603d95a` on physical GPU 1 under
+the fp64/native non-certified policy. The agreement rows are valid:
+
+| steps | reverse/forward relative | reverse/FD relative | verdict |
+|---:|---:|---:|---|
+| 1 | `2.27064171926424e-16` | `3.57798841572499e-07` | **CONFIRMED** |
+| 24 | `9.30692734647596e-16` | `2.1980290555407674e-06` | **CONFIRMED** |
+| 720 | `2.3070259307585205e-16` | `9.041792746430404e-07` | **CONFIRMED** |
+
+The six GPU resource verdicts printed by that revision are **RETRACTED AS
+VACUOUS**. The runner left XLA preallocation on while the gate sampled
+device-global `nvidia-smi memory.used`; baseline and peak therefore described
+the approximately 24.7-GiB XLA pool, not live adjoint allocations. The actual
+reported increments were `none=0`, `uniform=6`, and `binomial=4` MiB at both
+24 and 720 steps. The round-2 executable audit now classifies both old
+three-row suites VACUOUS because they contain no JAX allocator counters and
+the sampler did not resolve positive schedule memory. No GPU memory magnitude
+or ordering is claimed from round 1.
+
 ## Gate, tests, and operator work
 
 - Shared gate/direct schedule suite: **32 passed**.
@@ -132,11 +154,12 @@ and `c5a04f37918f956e07d7827e1cb58f3b997c3f341884104d9d91279836d4cb78`.
   `git diff --check`: PASS.
 - Citation gate and planted citation shift: PASS.
 
-The committed GPU entry point is
+The committed GPU entry point was
 `scripts/validate/ocean_fidelity/testcases/nemo_testcase_l2_gyre_gradgate_gpu_rows.sh`.
-It pins physical GPU 1, uses fp64/native, runs the same three agreement and six
-resource rows serially, refuses dirty state and overwrite, and validates the
-non-certified native-policy label. This sandbox cannot acquire those rows.
+It pinned physical GPU 1, used fp64/native, ran the same three agreement and six
+resource rows serially, refused dirty state and overwrite, and validated the
+non-certified native-policy label. The agreement rows stand; the resource
+instrument is retracted above.
 
 The lane is **UNREVIEWED**: independent reviewer agents were not invoked in
 this run. The numeric claims remain tied to committed probes and fail-closed
@@ -144,10 +167,14 @@ controls rather than reviewer judgment.
 
 ## OPEN
 
-1. The operator must run the committed GPU-1 script from a clean final tip and
-   retain all nine native-policy JSON rows in the round evidence directory.
-2. Complete the campaign's independent reviewer pair before citing this lane
-   outside the SWG gradient gate.
+1. Round 2 must reacquire GPU resource rows with preallocation disabled, JAX
+   allocator counters, and the cross-schedule non-vacuity gate; round 1 has no
+   usable GPU memory result.
+2. The inherited stale digest pins in
+   `tests/ocean/unit/test_nemo_vortex_card.py` remain GYRE-lane debt: expected
+   GYRE/LOCK/OVERFLOW values `5850bbcfcd351c29` / `4ec82201f0fae7bf` /
+   `7f1ec89b3e6578f5` versus actual round-6 values `f02d2f42a570f413` /
+   `d5dfdf83b3a1e0ab` / `83de0010e1170032`. They are not re-pinned here.
 
 ## Source citations
 

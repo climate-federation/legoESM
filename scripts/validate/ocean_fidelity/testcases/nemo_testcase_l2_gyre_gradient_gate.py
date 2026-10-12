@@ -42,8 +42,8 @@ from legoesm.training.checkpoint_schedule import checkpointed_loop
 
 GYRE_CARD = "GYRE-zco"
 SWG_CARD = "SWG"
-CARD_STEPS = {GYRE_CARD: (1, 6), SWG_CARD: (1, 24, 720)}
-RESOURCE_STEPS = {GYRE_CARD: (1, 6), SWG_CARD: (24, 720)}
+CARD_STEPS = {GYRE_CARD: (1, 6), SWG_CARD: (1, 24, 720, 1440)}
+RESOURCE_STEPS = {GYRE_CARD: (1, 6), SWG_CARD: (24, 720, 1440)}
 REVFWD_TOL = 1.0e-9
 FD_TOL = 0.05
 FD_STEP = 1.0e-3
@@ -777,6 +777,34 @@ class PeakMemorySampler:
         self.peak_mib = max(self.peak_mib, self._read())
 
 
+def device_memory_stats(device) -> dict[str, int]:
+    """Read the JAX allocator counters required by the GPU memory gate."""
+    stats = device.memory_stats()
+    require(stats is not None, "JAX device does not expose memory_stats()")
+    required = ("bytes_in_use", "peak_bytes_in_use")
+    missing = [name for name in required if name not in stats]
+    require(not missing, f"JAX device memory_stats missing {missing}")
+    result = {name: int(value) for name, value in stats.items()
+              if isinstance(value, (int, np.integer))}
+    for name in required:
+        require(result[name] >= 0, f"JAX device memory stat {name} is unavailable")
+    return result
+
+
+def require_gpu_allocator_instrument() -> None:
+    """Refuse GPU memory rows whose allocator hides live adjoint allocations."""
+    preallocate = os.environ.get("XLA_PYTHON_CLIENT_PREALLOCATE", "").lower()
+    allocator = os.environ.get("XLA_PYTHON_CLIENT_ALLOCATOR", "").lower()
+    require(
+        preallocate == "false",
+        "GPU resources require XLA_PYTHON_CLIENT_PREALLOCATE=false before JAX import",
+    )
+    require(
+        allocator == "platform",
+        "GPU resources require XLA_PYTHON_CLIENT_ALLOCATOR=platform before JAX import",
+    )
+
+
 def extrapolate_360(schedule: str, baseline_mib: float, peak6_mib: float) -> float:
     """Apply the preregistered schedule-complexity extrapolation."""
     incremental = max(0.0, peak6_mib - baseline_mib)
@@ -819,6 +847,14 @@ def classify_resources(
     samples: int,
 ) -> str:
     """Apply every preregistered resource-row acceptance condition."""
+    sampler_visible = (
+        math.isfinite(baseline_mib)
+        and math.isfinite(peak_mib)
+        and peak_mib > baseline_mib
+        and samples >= 2
+    )
+    if not sampler_visible:
+        return "VACUOUS"
     passed = (
         math.isfinite(loss)
         and gradient_finite
@@ -827,17 +863,106 @@ def classify_resources(
         and cold_wall_s > 0.0
         and math.isfinite(warm_wall_s)
         and warm_wall_s > 0.0
-        and math.isfinite(baseline_mib)
-        and math.isfinite(peak_mib)
-        and peak_mib >= baseline_mib
-        and samples >= 2
+        and sampler_visible
     )
     return "CONFIRMED" if passed else "REFUTED"
 
 
+def classify_resource_suite(rows: list[dict], *, plant: bool = False) -> dict:
+    """Require both GPU samplers to resolve the registered schedule ordering."""
+    by_schedule = {row.get("schedule"): row for row in rows}
+    required = set(SCHEDULES)
+    if set(by_schedule) != required or len(rows) != len(required):
+        return {
+            "status": "VACUOUS",
+            "reason": "resource suite requires exactly none, uniform, and binomial",
+        }
+
+    identity_fields = ("card_selector", "steps", "backend")
+    for name in identity_fields:
+        if len({row.get(name) for row in rows}) != 1:
+            return {
+                "status": "VACUOUS",
+                "reason": f"resource rows disagree on {name}",
+            }
+    if rows[0].get("backend") != "gpu":
+        return {
+            "status": "VACUOUS",
+            "reason": "dual-sampler ordering is a GPU-only resource verdict",
+        }
+    if any(row.get("status") != "CONFIRMED" for row in rows):
+        return {
+            "status": "VACUOUS",
+            "reason": "one or more resource rows is not individually measurable",
+        }
+
+    keys = {
+        "jax_allocator": "jax_device_memory_increment_mib",
+        "nvidia_smi": "nvidia_smi_memory_increment_mib",
+    }
+    increments: dict[str, dict[str, float]] = {}
+    for sampler, key in keys.items():
+        values: dict[str, float] = {}
+        for schedule, row in by_schedule.items():
+            value = row.get(key)
+            if not isinstance(value, (int, float)) or not math.isfinite(value):
+                return {
+                    "status": "VACUOUS",
+                    "reason": f"{sampler} did not report finite increments",
+                }
+            values[schedule] = float(value)
+        if any(value <= 0.0 for value in values.values()):
+            return {
+                "status": "VACUOUS",
+                "reason": f"{sampler} cannot see positive adjoint allocations",
+                "increments_mib": {sampler: values},
+            }
+        increments[sampler] = values
+
+    peak_growth = {
+        schedule: by_schedule[schedule].get("jax_device_peak_growth_mib")
+        for schedule in SCHEDULES
+    }
+    if any(
+        not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or value <= 0.0
+        for value in peak_growth.values()
+    ):
+        return {
+            "status": "VACUOUS",
+            "reason": "JAX process peak did not advance during every reverse pass",
+            "jax_device_peak_growth_mib": peak_growth,
+        }
+
+    evaluated = {
+        sampler: dict(values) for sampler, values in increments.items()
+    }
+    if plant:
+        for values in evaluated.values():
+            values["uniform"] = values["none"]
+    ordering = {
+        sampler: (
+            values["none"] > values["binomial"] > values["uniform"])
+        for sampler, values in evaluated.items()
+    }
+    return {
+        "status": "CONFIRMED" if all(ordering.values()) else "REFUTED",
+        "reason": (
+            "both samplers resolve none > binomial > uniform"
+            if all(ordering.values())
+            else "registered none > binomial > uniform ordering failed"
+        ),
+        "increments_mib": increments,
+        "evaluated_increments_mib": evaluated,
+        "ordering": ordering,
+        "plant": "uniform_label_uses_none_measurement" if plant else None,
+    }
+
+
 def measure_resources(card: str, n_steps: int, schedule: str, *,
                       transcendentals: str = "libm"):
-    """Warm once, then measure one blocked reverse execution and peak memory."""
+    """Measure a fresh-process GPU reverse or a blocked warm CPU reverse."""
     context = build_context(card, transcendentals=transcendentals)
     require(n_steps in RESOURCE_STEPS[card],
             f"{card} resource steps must be one of {RESOURCE_STEPS[card]}")
@@ -869,17 +994,34 @@ def measure_resources(card: str, n_steps: int, schedule: str, *,
     dtype = jax.tree_util.tree_leaves(base)[0].dtype
     zero_alpha = jnp.asarray(0.0, dtype=dtype)
 
-    cold_started = time.perf_counter()
-    cold_value, cold_gradient = reverse(zero_alpha)
-    jax.block_until_ready((cold_value, cold_gradient))
-    cold_wall_s = time.perf_counter() - cold_started
-
     backend = jax.default_backend()
     require(backend in ("cpu", "gpu"), f"unsupported backend {backend!r}")
     if backend == "gpu":
         require(os.environ.get("CUDA_VISIBLE_DEVICES") == "1",
                 "GPU measurements require CUDA_VISIBLE_DEVICES=1")
-    sampler = PeakMemorySampler(backend)
+        require_gpu_allocator_instrument()
+
+    # JAX exposes a process-lifetime allocator peak, but no peak-reset API.
+    # Each GPU row therefore uses its fresh process as the reset boundary and
+    # samples the first (cold) reverse.  CPU retains the round-1 warm-RSS
+    # protocol because procfs reports a current value that the sampler can
+    # reset locally after compilation.
+    device_stats_before = (
+        device_memory_stats(jax.devices()[0]) if backend == "gpu" else None)
+    sampler = PeakMemorySampler(backend) if backend == "gpu" else None
+    if sampler is not None:
+        sampler.start()
+    cold_started = time.perf_counter()
+    cold_value, cold_gradient = reverse(zero_alpha)
+    jax.block_until_ready((cold_value, cold_gradient))
+    cold_wall_s = time.perf_counter() - cold_started
+    if sampler is not None:
+        sampler.stop()
+    device_stats_after = (
+        device_memory_stats(jax.devices()[0]) if backend == "gpu" else None)
+
+    if backend == "cpu":
+        sampler = PeakMemorySampler(backend)
     sampler.start()
     started = time.perf_counter()
     value, gradient = reverse(zero_alpha)
@@ -890,6 +1032,16 @@ def measure_resources(card: str, n_steps: int, schedule: str, *,
     loss_value = float(np.asarray(value))
     gradient_finite = bool(np.all(np.isfinite(gradient_array)))
     gradient_nonzero = bool(np.any(gradient_array != 0.0))
+    if backend == "gpu":
+        assert device_stats_before is not None and device_stats_after is not None
+        memory_baseline_mib = device_stats_before["bytes_in_use"] / 2**20
+        memory_peak_mib = device_stats_after["peak_bytes_in_use"] / 2**20
+        memory_samples = 2
+    else:
+        memory_baseline_mib = sampler.baseline_mib
+        memory_peak_mib = sampler.peak_mib
+        memory_samples = sampler.samples
+
     row = {
         "card_selector": card,
         "case": context.card.case,
@@ -912,29 +1064,77 @@ def measure_resources(card: str, n_steps: int, schedule: str, *,
         "loss": loss_value,
         "gradient_finite": gradient_finite,
         "gradient_nonzero": gradient_nonzero,
-        "memory_kind": "host_rss" if backend == "cpu" else "gpu1_nvidia_smi",
-        "memory_baseline_mib": sampler.baseline_mib,
-        "memory_peak_mib": sampler.peak_mib,
-        "memory_increment_mib": sampler.peak_mib - sampler.baseline_mib,
-        "memory_samples": sampler.samples,
+        "memory_kind": (
+            "host_rss" if backend == "cpu"
+            else "jax_allocator_peak_with_gpu1_nvidia_smi_control"),
+        "memory_pass": (
+            "warm_reverse" if backend == "cpu"
+            else "fresh_process_cold_compile_and_reverse"),
+        "memory_baseline_mib": memory_baseline_mib,
+        "memory_peak_mib": memory_peak_mib,
+        "memory_increment_mib": memory_peak_mib - memory_baseline_mib,
+        "memory_samples": memory_samples,
         "status": classify_resources(
             loss_value,
             gradient_finite,
             gradient_nonzero,
             cold_wall_s=cold_wall_s,
             warm_wall_s=wall_s,
-            baseline_mib=sampler.baseline_mib,
-            peak_mib=sampler.peak_mib,
-            samples=sampler.samples,
+            baseline_mib=memory_baseline_mib,
+            peak_mib=memory_peak_mib,
+            samples=memory_samples,
         ),
         "initial_boundary": (
             "admitted kt=2 stage-1 entry" if card == SWG_CARD
             else "certified day-0 state"),
     }
-    if card == SWG_CARD and n_steps == 720:
-        row["memory_1440_step_estimate_mib"] = extrapolate_memory(
-            schedule, 720, 1440, sampler.baseline_mib, sampler.peak_mib)
-        row["warm_reverse_1440_step_estimate_seconds"] = 2.0 * wall_s
+    if backend == "gpu":
+        assert device_stats_before is not None and device_stats_after is not None
+        peak_growth_mib = (
+            device_stats_after["peak_bytes_in_use"]
+            - device_stats_before["peak_bytes_in_use"]
+        ) / 2**20
+        nvidia_increment_mib = sampler.peak_mib - sampler.baseline_mib
+        row.update({
+            "jax_device_memory_stats_before": device_stats_before,
+            "jax_device_memory_stats_after": device_stats_after,
+            "jax_device_memory_increment_mib": (
+                device_stats_after["peak_bytes_in_use"]
+                - device_stats_before["bytes_in_use"]
+            ) / 2**20,
+            "jax_device_peak_growth_mib": peak_growth_mib,
+            "jax_device_peak_scope": "fresh-process lifetime",
+            "nvidia_smi_memory_baseline_mib": sampler.baseline_mib,
+            "nvidia_smi_memory_peak_mib": sampler.peak_mib,
+            "nvidia_smi_memory_increment_mib": nvidia_increment_mib,
+            "nvidia_smi_memory_samples": sampler.samples,
+            "xla_python_client_preallocate": os.environ.get(
+                "XLA_PYTHON_CLIENT_PREALLOCATE"),
+            "xla_python_client_allocator": os.environ.get(
+                "XLA_PYTHON_CLIENT_ALLOCATOR"),
+        })
+        if peak_growth_mib <= 0.0 or nvidia_increment_mib <= 0.0:
+            row["status"] = "VACUOUS"
+            row["resource_vacuity_reason"] = (
+                "JAX peak and nvidia-smi must both advance during the reverse pass")
+    return row
+
+
+def measure_resource_suite(paths: list[Path], *, plant: bool = False) -> dict:
+    """Classify three already-written GPU resource rows without rerunning them."""
+    rows = [json.loads(path.read_text(encoding="utf-8")) for path in paths]
+    row = classify_resource_suite(rows, plant=plant)
+    row.update({
+        "card_selector": rows[0].get("card_selector") if rows else None,
+        "steps": rows[0].get("steps") if rows else None,
+        "backend": rows[0].get("backend") if rows else None,
+        "resource_rows": [str(path) for path in paths],
+        "input_provenance_commits": sorted({
+            commit for input_row in rows
+            if (commit := input_row.get("provenance", {}).get("commit"))
+            is not None
+        }),
+    })
     return row
 
 
@@ -961,11 +1161,14 @@ def write_result(path: Path, row: dict) -> None:
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("agreement", "resources"))
+    parser.add_argument(
+        "mode", choices=("agreement", "resources", "resource-suite"))
     parser.add_argument("--card", required=True)
     parser.add_argument("--steps", type=int, required=True)
     parser.add_argument("--schedule", choices=SCHEDULES)
-    parser.add_argument("--plant", choices=("broken_vjp",))
+    parser.add_argument(
+        "--plant", choices=("broken_vjp", "uniform_label_uses_none"))
+    parser.add_argument("--row", action="append", type=Path, default=[])
     parser.add_argument(
         "--transcendentals", choices=("libm", "native"), default="libm",
         help="libm is the certified CPU policy; GPU rows must select native",
@@ -975,10 +1178,20 @@ def parse_args(argv=None):
     args = parser.parse_args(argv)
     if args.mode == "resources" and args.schedule is None:
         parser.error("resources mode requires --schedule")
-    if args.mode == "agreement" and args.schedule is not None:
-        parser.error("agreement mode does not accept --schedule")
+    if args.mode != "resources" and args.schedule is not None:
+        parser.error(f"{args.mode} mode does not accept --schedule")
     if args.mode == "resources" and args.plant is not None:
         parser.error("resources mode does not accept --plant")
+    if args.mode == "agreement" and args.plant not in (None, "broken_vjp"):
+        parser.error("agreement mode accepts only --plant broken_vjp")
+    if args.mode == "resource-suite":
+        if len(args.row) != 3:
+            parser.error("resource-suite mode requires exactly three --row paths")
+        if args.plant not in (None, "uniform_label_uses_none"):
+            parser.error(
+                "resource-suite mode accepts only --plant uniform_label_uses_none")
+    elif args.row:
+        parser.error(f"{args.mode} mode does not accept --row")
     if args.steps <= 0:
         parser.error("--steps must be positive")
     return args
@@ -991,10 +1204,18 @@ def main(argv=None) -> int:
         row = measure_agreement(
             args.card, args.steps, plant=args.plant == "broken_vjp",
             transcendentals=args.transcendentals)
-    else:
+    elif args.mode == "resources":
         row = measure_resources(
             args.card, args.steps, args.schedule,
             transcendentals=args.transcendentals)
+    else:
+        row = measure_resource_suite(
+            args.row, plant=args.plant == "uniform_label_uses_none")
+        require(args.card in CARD_STEPS, f"unknown gradient card {args.card!r}")
+        require(
+            row["card_selector"] == args.card and row["steps"] == args.steps,
+            "resource-suite CLI card/steps do not match input rows",
+        )
     row["provenance"] = provenance
     row["argv"] = list(sys.argv if argv is None else argv)
     write_result(args.output, row)

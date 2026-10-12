@@ -18,6 +18,7 @@ _SCRIPT = (
     _REPO / "scripts/validate/ocean_fidelity/testcases/"
     "nemo_testcase_l2_gyre_gradient_gate.py"
 )
+_GPU_SCRIPT = _SCRIPT.with_name("nemo_testcase_l2_gyre_gradgate_gpu_rows.sh")
 _SPEC = importlib.util.spec_from_file_location("gyre_gradient_gate_tested", _SCRIPT)
 assert _SPEC is not None and _SPEC.loader is not None
 G = importlib.util.module_from_spec(_SPEC)
@@ -206,9 +207,111 @@ def test_resource_classifier_is_fail_closed():
     assert G.classify_resources(
         1.0, True, True, **{**valid, "warm_wall_s": 0.0}) == "REFUTED"
     assert G.classify_resources(
-        1.0, True, True, **{**valid, "peak_mib": 99.0}) == "REFUTED"
+        1.0, True, True, **{**valid, "peak_mib": 99.0}) == "VACUOUS"
     assert G.classify_resources(
-        1.0, True, True, **{**valid, "samples": 1}) == "REFUTED"
+        1.0, True, True, **{**valid, "peak_mib": 100.0}) == "VACUOUS"
+    assert G.classify_resources(
+        1.0, True, True, **{**valid, "samples": 1}) == "VACUOUS"
+
+
+def test_device_memory_stats_requires_allocator_peak_and_live_bytes():
+    class Device:
+        def memory_stats(self):
+            return {
+                "bytes_in_use": 2**20,
+                "peak_bytes_in_use": 3 * 2**20,
+                "num_allocs": np.int64(7),
+            }
+
+    assert G.device_memory_stats(Device()) == {
+        "bytes_in_use": 2**20,
+        "peak_bytes_in_use": 3 * 2**20,
+        "num_allocs": 7,
+    }
+
+    class MissingPeak:
+        def memory_stats(self):
+            return {"bytes_in_use": 2**20}
+
+    with pytest.raises(RuntimeError, match="peak_bytes_in_use"):
+        G.device_memory_stats(MissingPeak())
+
+
+def _gpu_resource_row(schedule, jax_increment, smi_increment):
+    return {
+        "card_selector": "SWG",
+        "steps": 24,
+        "backend": "gpu",
+        "schedule": schedule,
+        "status": "CONFIRMED",
+        "jax_device_memory_increment_mib": jax_increment,
+        "jax_device_peak_growth_mib": jax_increment,
+        "nvidia_smi_memory_increment_mib": smi_increment,
+        "provenance": {"commit": "deadbeef"},
+    }
+
+
+def test_gpu_resource_suite_requires_both_orderings_and_plant_flips():
+    rows = [
+        _gpu_resource_row("none", 900.0, 1000.0),
+        _gpu_resource_row("uniform", 200.0, 250.0),
+        _gpu_resource_row("binomial", 400.0, 500.0),
+    ]
+    control = G.classify_resource_suite(rows)
+    planted = G.classify_resource_suite(rows, plant=True)
+    assert control["status"] == "CONFIRMED"
+    assert control["ordering"] == {"jax_allocator": True, "nvidia_smi": True}
+    assert planted["status"] == "REFUTED"
+    assert planted["ordering"] == {
+        "jax_allocator": False,
+        "nvidia_smi": False,
+    }
+
+    rows[1]["jax_device_peak_growth_mib"] = 0.0
+    vacuous = G.classify_resource_suite(rows)
+    assert vacuous["status"] == "VACUOUS"
+    assert "peak did not advance" in vacuous["reason"]
+
+
+def test_gpu_resource_suite_marks_old_pool_rows_vacuous():
+    rows = [
+        {
+            "card_selector": "SWG",
+            "steps": 24,
+            "backend": "gpu",
+            "schedule": schedule,
+            "status": "CONFIRMED",
+            "memory_increment_mib": increment,
+        }
+        for schedule, increment in (
+            ("none", 0.0), ("uniform", 6.0), ("binomial", 4.0))
+    ]
+    row = G.classify_resource_suite(rows)
+    assert row["status"] == "VACUOUS"
+    assert "jax_allocator" in row["reason"]
+
+
+def test_swg_cli_admits_direct_1440_step_rows():
+    agreement = G.parse_args([
+        "agreement", "--card", "SWG", "--steps", "1440",
+        "--expect-commit", "deadbeef", "--output", "/tmp/unused-row.json",
+    ])
+    resources = G.parse_args([
+        "resources", "--card", "SWG", "--steps", "1440",
+        "--schedule", "uniform", "--expect-commit", "deadbeef",
+        "--output", "/tmp/unused-resource-row.json",
+    ])
+    assert agreement.steps == 1440
+    assert resources.steps == 1440
+
+
+def test_gpu_runner_disables_preallocation_and_covers_direct_1440_rows():
+    source = _GPU_SCRIPT.read_text(encoding="utf-8")
+    assert "XLA_PYTHON_CLIENT_PREALLOCATE=false" in source
+    assert "XLA_PYTHON_CLIENT_ALLOCATOR=platform" in source
+    assert "for steps in 1 24 720 1440" in source
+    assert "for steps in 24 720 1440" in source
+    assert "--plant uniform_label_uses_none" in source
 
 
 def test_measurement_policy_labels_refuse_cross_backend_combinations():
