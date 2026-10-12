@@ -1059,13 +1059,20 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         return result
 
     def _call_physics_raw(self, physics_fn, hs, phys_state=None, *,
-                          grid=None, sigma_coord=None):
+                          grid=None, sigma_coord=None, forcing=None):
         """As :meth:`_call_physics` but WITHOUT unwrapping the result —
         the carry-out evaluation needs ``result[1]``. ``grid`` / ``sigma_coord``
         default to ``self.*`` (serial / single-rank); the SPMD body passes the
-        BAND grid so per-band physics is correct."""
+        BAND grid so per-band physics is correct.
+
+        ``forcing`` (the column lane's per-step forcing pytree, TRACED
+        through the jit so a changing SST/solar never retraces the static
+        ``physics_fn``) is handed on as a fifth argument when given;
+        ``None`` (every other caller) is the unchanged 3/4-arg contract."""
         _grid = self.grid if grid is None else grid
         _sigma = self.sigma_coord if sigma_coord is None else sigma_coord
+        if forcing is not None:
+            return physics_fn(hs, _grid, _sigma, phys_state, forcing)
         if phys_state is not None:
             return physics_fn(hs, _grid, _sigma, phys_state)
         sig = inspect.signature(physics_fn)
@@ -1074,7 +1081,7 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
             return physics_fn(hs, _grid, _sigma)
         return physics_fn(hs)
 
-    @partial(jax.jit, static_argnums=(0, 4))
+    @partial(jax.jit, static_argnums=(0, 4, 7))
     def _step_cgrid(
         self,
         state: CGridLatLonHydrostaticState,
@@ -1082,6 +1089,8 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         target_mass: jax.Array | None = None,
         physics_fn=None,
         phys_state=None,
+        forcing=None,
+        return_phys_tend: bool = False,
     ) -> tuple:
         """Internal (JITTED): advance one step on C-grid state (raw arrays).
 
@@ -1089,9 +1098,15 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         sigma_coord / polar masks. The lat-band SPMD body calls
         ``_step_cgrid_impl`` directly with the BAND geometry (un-jitted, so the
         band grid stays a concrete value rather than a tracer).
+
+        ``forcing`` is traced (column lane); ``return_phys_tend`` (static)
+        adds the physics tendencies to the return so their surface
+        diagnostics leave the jit explicitly instead of as a traced side
+        effect.  Both default to the legacy two-value return.
         """
         return self._step_cgrid_impl(
             state, dt, target_mass, physics_fn, phys_state,
+            forcing=forcing, return_phys_tend=return_phys_tend,
         )
 
     def _step_cgrid_impl(
@@ -1108,6 +1123,8 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         polar_mask_v=None,
         pole_v_bc_masks=None,
         geom_pads=None,
+        forcing=None,
+        return_phys_tend: bool = False,
     ) -> tuple:
         """Advance one step on C-grid state (raw arrays). UN-jitted.
 
@@ -1245,10 +1262,12 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         # --- Operator-split physics: one evaluation on the post-dynamics
         # state, applied as an Euler increment (see the docstring). ---
         phys_state_out = phys_state
+        phys_tend = None
         if physics_fn is not None:
             _pr = self._call_physics_raw(
                 physics_fn, cgrid_to_hydrostatic(state_new, grid),
-                phys_state, grid=grid, sigma_coord=sigma_coord)
+                phys_state, grid=grid, sigma_coord=sigma_coord,
+                forcing=forcing)
             if type(_pr) is tuple:
                 phys_tend = _pr[0]
                 if len(_pr) > 1 and phys_state is not None:
@@ -1276,6 +1295,8 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         # The physics carry-out is the second return of the ONE physics
         # evaluation above (issue #413 semantics: prognostic fields and
         # the carry advance exactly once per dt, from the same state).
+        if return_phys_tend:
+            return state_out, phys_state_out, phys_tend
         return state_out, phys_state_out
 
     # ------------------------------------------------------------------
@@ -1504,8 +1525,17 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         target_mass: jax.Array | None = None,
         physics_fn=None,
         phys_state=None,
+        forcing=None,
+        return_phys_tend: bool = False,
     ):
         """Advance one time step.
+
+        ``forcing`` / ``return_phys_tend`` (the column lane, P3): the
+        per-step forcing pytree is traced into the jit and handed to
+        ``physics_fn`` as its fifth argument; with ``return_phys_tend`` the
+        native C-grid path returns ``(state, phys_tend)`` so the physics'
+        surface diagnostics leave the jit explicitly.  Defaults (None,
+        False) are the unchanged legacy contract, byte-identical.
 
         Pure with respect to the explicit state argument — always
         advances the supplied state, never a cached copy.
@@ -1567,9 +1597,19 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
             target_mass = self._target_mass
 
         if isinstance(state, CGridLatLonHydrostaticState):
+            if return_phys_tend:
+                state_new, self._phys_state, phys_tend = self._step_cgrid(
+                    state, dt, target_mass, physics_fn, phys_state, forcing,
+                    True)
+                return state_new, phys_tend
             state_new, self._phys_state = self._step_cgrid(
-                state, dt, target_mass, physics_fn, phys_state)
+                state, dt, target_mass, physics_fn, phys_state, forcing)
             return state_new
+        if forcing is not None or return_phys_tend:
+            raise NotImplementedError(
+                "lat-lon C-grid step(): forcing / return_phys_tend are the "
+                "column lane's, which steps the native C-grid state; the "
+                "HydrostaticState entry does not take them")
 
         # HydrostaticState input: use cached face-staggered winds from
         # the previous step to avoid lossy cell→face re-projection.

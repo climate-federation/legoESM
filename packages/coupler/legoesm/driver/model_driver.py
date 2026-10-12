@@ -2100,7 +2100,21 @@ class ModelDriver:
         # dy) rather than a single resolution.
         from legoesm.grids.factory import create_grid
 
-        if gc.grid_type == "latlon":
+        if gc.grid_type == "latlon" and self.config.dycore.column_lane:
+            # P3: the lat-lon column lane's grid IS the native grid's column
+            # mesh (cell centres row-major), built here so every setup-time
+            # regrid lands on the columns the model steps; the native grid
+            # is kept for the dycore factory (diffusion, polar masks, CFL)
+            # and the IC / terrain builders (``_column_native_grid``).
+            from legoesm.atmosphere.dynamics.gcm.latlon_column import (
+                build_latlon_column_mesh,
+            )
+            if self.config.distributed:
+                raise NotImplementedError(
+                    "latlon column lane is single-process (D6)")
+            self._column_native_grid = create_grid("latlon", gc.resolution)
+            self.grid = build_latlon_column_mesh(self._column_native_grid)
+        elif gc.grid_type == "latlon":
             global_grid = create_grid("latlon", gc.resolution)
             # Stage 3-B: under lat-lon band MPI, slice the global grid
             # to this rank's lat band.  The runtime bootstrap (Stage
@@ -2239,6 +2253,10 @@ class ModelDriver:
         topo = self.config.topography
         shape_2d = self.grid.grid_shape_2d
         self._phis_global = None    # the global terrain, Voronoi cell-partition MPI only
+        # a structured column lane (P3 lat-lon): the terrain product is the
+        # NATIVE lane's (its own binning + neighbour-table filter), then
+        # flattened onto the columns, so mesh phis == native phis bitwise
+        _terrain_grid = getattr(self, "_column_native_grid", None) or self.grid
 
         from legoesm.core.precision import get_policy
         _sd = get_policy().storage
@@ -2246,8 +2264,8 @@ class ModelDriver:
             self._phis_data = jnp.zeros(shape_2d, dtype=_sd)
             self._f_land = jnp.zeros(shape_2d, dtype=_sd)
         elif topo == "gaussian":
-            z_s = gaussian_mountain(self.grid)
-            self._phis_data = phis_from_topography(z_s)
+            z_s = gaussian_mountain(_terrain_grid)
+            self._phis_data = phis_from_topography(z_s).reshape(shape_2d)
             # An idealized mountain is a DYNAMICAL forcing, not a statement
             # about the surface, so this case is all ocean unless a real mask
             # is named below.  Deriving f_land from the elevation here labelled
@@ -2291,8 +2309,11 @@ class ModelDriver:
                 self._f_land = jnp.asarray(np.asarray(_fl_g)[_ids])
             else:
                 self._phis_data, self._f_land = load_real_topography(
-                    self.grid, config=topo_config
+                    _terrain_grid, config=topo_config
                 )
+                if _terrain_grid is not self.grid:
+                    self._phis_data = self._phis_data.reshape(shape_2d)
+                    self._f_land = self._f_land.reshape(shape_2d)
             if self.config.dycore.discretization == "spectral":
                 # the spectral dynamics feel the TRUNCATED field; the product
                 # (dynamics, CMOR orog, restart check) is that field, once
@@ -2331,9 +2352,11 @@ class ModelDriver:
         land_mask_path = getattr(self.config, "land_mask_path", "")
         if land_mask_path and topo in ("flat", "gaussian"):
             from legoesm.grids.topography import load_land_fraction
-            self._f_land = load_land_fraction(
-                self.grid, land_mask_path
-            ).astype(_sd)
+            self._f_land = jnp.asarray(load_land_fraction(
+                _terrain_grid, land_mask_path
+            )).astype(_sd)
+            if _terrain_grid is not self.grid:
+                self._f_land = self._f_land.reshape(shape_2d)
         if land_mask_path:
             logger.info(
                 f"  Land-sea mask: {land_mask_path} "
@@ -2527,8 +2550,14 @@ class ModelDriver:
         # nu_del2 on rank 0 of a 2-rank res-3 split), so each rank would run
         # a different viscosity.
         coeff_grid = self._coeff_grid()
+        # a structured column lane (P3 lat-lon): the dycore and its
+        # coefficients are built on the NATIVE grid, the factory wraps it,
+        # and the mesh assertion below checks the wrap against the driver's
+        _native = getattr(self, "_column_native_grid", None)
         self.model = create_atmosphere_dycore(
-            self.config, self.grid, self.sigma, coeff_grid=coeff_grid,
+            self.config, _native if _native is not None else self.grid,
+            self.sigma,
+            coeff_grid=_native if _native is not None else coeff_grid,
             fv3_duo_bundle=getattr(self, "_fv3_duo_bundle", None))
         if self._column_model() is not None:
             # the model's own mesh (same values as the grid built in
@@ -2878,9 +2907,19 @@ class ModelDriver:
         NLEV = cfg.grid.nlev
 
         _col = self._column_model()
-        if _col is not None:
+        _native = (getattr(_col, "native_grid", None)
+                   if _col is not None else None)
+        if _col is not None and _native is None:
             _col.init_state(self)
             return
+        if _native is not None:
+            # a structured column lane (P3 lat-lon): the IC is built by the
+            # NATIVE lane's own builders below (grid-shaped terrain / land
+            # fraction for their duration), then wrapped into the column
+            # view at the end of this method
+            self.grid = _native
+            self._phis_data = jnp.reshape(self._phis_data, _native.grid_shape_2d)
+            self._f_land = jnp.reshape(self._f_land, _native.grid_shape_2d)
 
         if cfg.grid.grid_type == "mpas":
             from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init_mpas
@@ -3049,9 +3088,10 @@ class ModelDriver:
         # Applied after the default moisture init so the Field metadata (dims,
         # units, names) from held_suarez_init is preserved as the template.
         if (cfg.ic == "era5" and cfg.ic_path
-                and not cfg.dycore.column_lane):
+                and (not cfg.dycore.column_lane or _native is not None)):
             # (the fv3_duo column lane builds its ERA5 IC on its own mesh
-            # in _run_column_lane; the driver grid is not the duo's)
+            # in _run_column_lane; the driver grid is not the duo's.  A
+            # structured column lane takes the native builder below.)
             from legoesm.training.era5_to_state import (
                 load_era5_ic,
                 era5_to_cubedsphere_carry,
@@ -3236,6 +3276,18 @@ class ModelDriver:
             # the dynamics run with the ERA5 orography that is consistent with
             # the ERA5 initial wind field.  Proper ETOPO-in-dynamics requires
             # building a balanced IC on ETOPO from the outset (future work).
+
+        if _native is not None:
+            # structured column lane: the native IC becomes the column view
+            # (winds re-staggered once by the dycore's own interpolator, the
+            # registered tracers attached), the driver's grid is the mesh
+            # again and terrain / land fraction are columns again
+            self.state = _col.from_native(self.state, self.tracers)
+            self.tracers = {nm: f.data for nm, f in self.state.tracers.items()}
+            self.grid = _col.mesh
+            self._phis_data = jnp.reshape(self._phis_data, (-1,))
+            self._f_land = jnp.reshape(self._f_land, (-1,))
+            self._state_template = self.state
 
     def _create_ensemble(self) -> None:
         """Create ensemble members if ensemble_size > 1.
@@ -6942,6 +6994,17 @@ class ModelDriver:
                 _save["fv3duo_hs6"] = self._fv3_duo_column_hs6(_col)
                 _save["fv3duo_tracer_names"] = np.asarray(
                     list(_col.tracer_names))
+            elif self._column_model() is not None:
+                # structured column lane (P3 lat-lon): the native FACE winds
+                # the column view (face->cell average) cannot rebuild; T /
+                # p_s / phis / tracers above ARE the cells (write-back of
+                # the driver's post-step edits included, to_bundle)
+                from legoesm.atmosphere.dynamics.gcm.latlon_column import (
+                    LATLON_CKPT_KEYS,
+                )
+                _nat = self._column_model().to_bundle(s)
+                _save[LATLON_CKPT_KEYS[0]] = np.asarray(_nat.u)
+                _save[LATLON_CKPT_KEYS[1]] = np.asarray(_nat.v)
             # multi-process SPMD (M7 column lane): every process holds the
             # same host payload; process 0 writes, the others rendezvous
             # on its success (a root-only exception must not leave them
@@ -7666,7 +7729,56 @@ class ModelDriver:
                         )
                 _u, _T, _ps, _phis = (jnp.asarray(d["u"]), jnp.asarray(d["T"]),
                                       jnp.asarray(d["p_s"]), jnp.asarray(d["phis"]))
-            if _col is None:
+            _col_native = (self._column_model() if _col is None else None)
+            if _col_native is not None:
+                # a structured column lane (P3 lat-lon): T / p_s / phis /
+                # tracers are the cells themselves; the native FACE winds
+                # cannot be rebuilt from the column view and ride under
+                # their own keys (save side).  A file without them is an
+                # MPAS / duo checkpoint: refused, never re-staggered.
+                from legoesm.atmosphere.dynamics.gcm.latlon_column import (
+                    LATLON_CKPT_KEYS,
+                )
+                for _need in LATLON_CKPT_KEYS:
+                    if _need not in d.files:
+                        raise ValueError(
+                            f"MPAS checkpoint {path.name} carries no lat-lon "
+                            f"face winds ({_need} absent): a checkpoint "
+                            "written by another lane cannot restart the "
+                            "latlon column lane")
+                _n2 = _col_native.native_grid.grid_shape_2d
+                _trc = {}
+                if "tracer_names" not in d.files:
+                    # the lane always carries its registered tracers: a file
+                    # without the metadata is not a dry restart but a
+                    # foreign / truncated one (codex P3 r2 #1)
+                    raise ValueError(
+                        f"MPAS checkpoint {path.name} carries no tracer_names; "
+                        "the latlon column lane needs its registered tracers "
+                        f"{sorted(_col_native.tracer_names)} in the file")
+                if True:
+                    _names = [str(n) for n in d["tracer_names"]]
+                    if sorted(_names) != sorted(_col_native.tracer_names):
+                        # never reduce / widen the slot set silently: a
+                        # dropped water species would become dry air under
+                        # the retained total p_s (codex P3 r1 #2)
+                        raise ValueError(
+                            f"MPAS checkpoint {path.name} tracer set "
+                            f"{sorted(_names)} != the latlon column model's "
+                            f"{sorted(_col_native.tracer_names)}; restart on "
+                            "the same microphysics deck")
+                    _validate_number_convention(d, _names)
+                    _trc = {_k: jnp.asarray(d[f"trc_{_k}"]).reshape(
+                                _n2 + tuple(d[f"trc_{_k}"].shape[1:]))
+                            for _k in _names}
+                self.state = _col_native.from_bundle(dict(
+                    u=jnp.asarray(d[LATLON_CKPT_KEYS[0]]),
+                    v=jnp.asarray(d[LATLON_CKPT_KEYS[1]]),
+                    T=_T.reshape(_n2 + tuple(_T.shape[1:])),
+                    p_s=_ps.reshape(_n2), phis=_phis.reshape(_n2),
+                    tracers=_trc))
+                self._fv3_duo_column_restored = True
+            elif _col is None:
                 self.state = HydrostaticState(
                     u=Field(data=_u, name="u",
                             dims=("nEdges", "nlev"), units="m/s"),
@@ -7680,7 +7792,7 @@ class ModelDriver:
             # Restore moisture tracers (moist MPAS runs); absent ⇒ dry restart.
             # (column lane: the tracers are the bundle's own q slots, already
             # in the view built above)
-            if "tracer_names" in d and _col is None:
+            if "tracer_names" in d and _col is None and _col_native is None:
                 _names = [str(n) for n in d["tracer_names"]]
                 _validate_number_convention(d, _names)
                 self.state = self.state._replace(tracers={
@@ -9159,17 +9271,19 @@ class ModelDriver:
                 "no vertical coordinate on the driver: publishing no wap, so "
                 "subsidence cannot be scored for this run")
         elif self._column_model() is not None:
-            # The duo column mesh has no edge topology for the divergence
-            # route, and the duo bundle's own ``omga`` is flagged
-            # ``omga_is_meaningless`` (fv3_native_dynamics): no wap, said
-            # once, rather than the whole CMOR interval lost to the
-            # AttributeError the edge route raised (dt ladder 2026-10-03).
+            # A column mesh has no edge topology for the divergence route
+            # (the duo bundle's own ``omga`` is flagged
+            # ``omga_is_meaningless``, fv3_native_dynamics; the lat-lon
+            # column lane's native continuity omega is NOT wired, open
+            # item P3): no wap, said once, rather than the whole CMOR
+            # interval lost to the AttributeError the edge route raised.
             if not getattr(self, "_fv3_duo_wap_warned", False):
                 self._fv3_duo_wap_warned = True
                 logger.warning(
-                    "fv3_duo column lane: publishing no wap (no edge "
-                    "divergence on the column mesh; the duo omga is not a "
-                    "hydrostatic omega) -- subsidence is not scored")
+                    "%s column lane: publishing no wap (no edge divergence "
+                    "on the column mesh; no native omega wired for this "
+                    "lane) -- subsidence is not scored",
+                    type(self.model).__name__)
         else:
             from legoesm.atmosphere.forcing.column_large_scale_extract import (
                 omega_from_divergence)

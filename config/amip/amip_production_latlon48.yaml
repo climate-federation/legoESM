@@ -1,0 +1,49 @@
+# =============================================================================
+# legoESM AMIP -- the CAM6 production deck on the LAT-LON COLUMN lane, 48x96 L32
+# =============================================================================
+# composable physics P3 (fv3_duo_gaps/fu/composable_physics_design.md): the
+# lat-lon C-grid dycore behind the shared column loop, so EVERY physics / land
+# / cadence / forcing row is the MPAS production deck's by inclusion.  Only the
+# grid / dycore rows below differ; `diff` against amip_production.yaml IS the
+# cross-grid configuration table (user rule 2026-10-01/10-09: same
+# configuration on every grid, no improvised deck values).
+include: amip_production.yaml
+
+# ---- grid / dycore -------------------------------------------------------------
+grid_type: latlon
+resolution: 48              # n_lat 48 (n_lon 96): 3.75 deg, ~417 km at the equator (C24 class, design row P3)
+discretization: latlon_cgrid
+column_lane: true           # the lat-lon dycore is the dynamics operator of the CAM6 column loop
+use_polar_filter: true      # Fourier polar filter: the dt below is set by the EQUATORIAL CFL (as
+                            # amip_sundqvist_latlon24.yaml); filter off, the pole-cell clamp is 36 s.
+                            # ASK: not inherited (the MPAS deck has no such row); the only setting
+                            # under which a C24-class dt exists on this grid
+dt: 450.0                   # decision A rule (MPAS / duo decks): 0.82 x the DRIVER's printed CFL clamp
+                            # (cfl_check_and_adjust, polar filter on: 0.8 * 417003 m / (390 m/s * sqrt 2)
+                            # = 604.9 s -> 496 s), rounded DOWN to a divisor of 1800 s -> 450 s.  The
+                            # factory's equatorial clamp alone (1112 s) is NOT the binding one: the
+                            # driver clamp would silently cut 900 s to 600 s and halve every cadence
+                            # (codex r1 #1).  ASK: value reported, not chosen
+physics_update_steps: 4     # CAM6: physics every 1800 s (4 x 450 s)
+rad_update_steps: 8         # CAM6 f09: radiation hourly (8 x 450 s); checkpoint_days 30 = 5760
+                            # steps, a multiple of 8 (D-REX-1: checkpoints on radiation boundaries)
+# ---- MPAS-dycore rows of the included deck: inert on this dycore, pinned OFF -------
+# (the MPAS deck's sponge / vertical-advection / del-4 divergence damping rows
+# are MPAS numerics; the lat-lon dycore has its own #836 Rayleigh lid sponge
+# and Laplacian A_h via a_h_scale, inherited).  Values below are the code
+# defaults, spelled out so no row rests on a default.  ASK: a lat-lon
+# counterpart of the MPAS top sponge / ldiv4 (B1 / B2 on the duo) was NOT
+# matched here; the native lane's a_h_scale 0.375 and sponge_coeff 0 stand.
+mpas_sponge_del2_top_layers: 0
+mpas_sponge_del2_top_factor: 1.0
+mpas_vert_advection_scheme: upwind
+mpas_div_damp4_scale: 0.0
+mpas_qv_smooth_del2_m2s: 0.0
+mpas_qv_smooth_del4_m4s: 0.0        # refused non-zero on the column lane (edge operator)
+# ---- land IC -------------------------------------------------------------------
+land_ic: data/lmip_soil_ic/soil_ic_latlon48_era5T_19790101.npz
+                            # the spun-up soil IC regridded to this grid (same recipe / source /
+                            # output dir as the MPAS res-6 and duo C24 files, regrid_land_ic.py);
+                            # being built in a separate session -- the lane smoke runs with
+                            # --land-ic "" until it exists and its gate is PENDING on the file.
+                            # ASK: row added per coordinator 2026-10-12

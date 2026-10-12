@@ -2158,10 +2158,20 @@ class ExperimentConfig(NamedTuple):
             errors.append(f"dycore.corner_fill must be one of {CORNER_FILL_MODES}, "
                           f"got {d.corner_fill!r}")
         if d.column_lane:
-            if d.discretization != "fv3_duo":
+            if d.discretization not in ("fv3_duo", "latlon_cgrid"):
                 errors.append(
                     "dycore.column_lane: no column adapter for "
-                    f"dycore.discretization={d.discretization!r} (fv3_duo only)")
+                    f"dycore.discretization={d.discretization!r} "
+                    "(fv3_duo or latlon_cgrid)")
+            if (d.discretization == "latlon_cgrid"
+                    and normalize_grid_type(self.grid.grid_type) != "latlon"):
+                errors.append(
+                    "dycore.column_lane with latlon_cgrid needs "
+                    f"grid.grid_type='latlon', got {self.grid.grid_type!r}")
+            if d.discretization == "latlon_cgrid" and self.distributed:
+                errors.append(
+                    "dycore.column_lane on latlon_cgrid is single-process "
+                    "(D6); distributed=True is the lat-band pipeline lane")
             # every column lane: the columns are a VIEW of the native
             # state and only the dycore's step may move the winds
             if self.sponge_enabled:
