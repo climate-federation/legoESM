@@ -102,6 +102,8 @@ This round changes no model, card, recipe, or configuration file, so no
 trajectory can move and the OMT/rung/GYRE/DINO/tank landing gates are not
 activated. The round-253 certified states remain the baseline; this receipt
 makes no new trajectory claim. Focused round-252/253/254/255 tests pass 51/51.
+The citation-gate unit suite passes 17/17; its log SHA-256 is
+`c6f27a3fbb310251447c72722453445c6a9f054ace9bbf4863f561ce9ac1428b`.
 
 The once-only `tests/ocean/fidelity -n 12` battery collected 3,320 tests,
 printed 3,288 passes and four failures, then stopped returning worker output
