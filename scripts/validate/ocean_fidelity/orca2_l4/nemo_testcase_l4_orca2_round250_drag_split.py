@@ -207,8 +207,10 @@ def measure(deck_root: Path, frame_root: Path, twin_a: Path, twin_b: Path,
         oracle["drag_coefficient"], oracle["bottom_velocity"],
         oracle["barotropic_velocity"],
     )
-    candidate.update(candidate_chain)
-    oracle.update(oracle_chain)
+    candidate["bottom_residual"] = candidate_chain["bottom_residual"]
+    candidate["drag_increment"] = candidate_chain["drag_increment"]
+    oracle["bottom_residual"] = oracle_chain["bottom_residual"]
+    oracle["drag_increment"] = oracle_chain["drag_increment"]
 
     owner = candidate["post_drag"] != oracle["post_drag"]
     require(int(np.count_nonzero(owner)) == 35,
