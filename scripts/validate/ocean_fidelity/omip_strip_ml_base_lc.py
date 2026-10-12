@@ -187,9 +187,11 @@ def main(argv):
         return x
     Tn, Sn = n("T", "votemper", slice(0, nlev)), n("T", "vosaline", slice(0, nlev))
     Kn = n("W", "avt", slice(1, nlev))                         # file w i+1 = our interface i
+    Kkn = n("W", "avt_k", slice(1, nlev))                      # NEMO closure only (no EVD, no IWM)
     EIn = n("W", "en_in_k", slice(1, nlev))
     LCn = n("W", "en_lc_k", slice(1, nlev)) - EIn
     utau = np.asarray(ds["2D"]["utau"][:], dtype=np.float64)[:, sj, si]
+    utau[np.abs(utau) > 1e15] = np.nan                        # EN2 writes utau as all-fill: check then reads n=0
     m = nc.Dataset(L.MESH)
     zt = np.asarray(m["gdept_1d"][0], dtype=np.float64)[:nlev]
     zw = np.asarray(m["gdepw_1d"][0], dtype=np.float64)[1:nlev]
@@ -217,6 +219,18 @@ def main(argv):
         print(f"h{h:02d} | {np.median(zo):6.2f} | {np.median(zn):6.2f} | {_q(zo - zn)} | "
               f"{np.mean(io == k12):.2f}/{np.mean(inn == k12):.2f} || "
               f"{np.nanmedian(to):6.2f} | {np.nanmedian(tn):6.2f} | {_q(to - tn)} | >{ZTURB:.0f}m o/N {cens}")
+    print(f"\nPart 1b  h | turbocline vs NEMO CLOSURE avt_k: ours | NEMO avt_k | o-N [IQR] || median K at 12.8 / 17.9 m: ours | avt_k | avt  [1e-4 m2/s]")
+    k128, k179 = int(np.argmin(np.abs(zw - 12.8))), int(np.argmin(np.abs(zw - 17.9)))
+    for h in range(0, 49, 2):
+        s = max(h * 24 - 1, 0)
+        if s >= nt:
+            break
+        to = turbocline(Ko[s, wet, :kw], zw[:kw], AVT_C)
+        tk = turbocline(Kkn[s, wet, :kw], zw[:kw], AVT_C)
+        to, tk = np.where(np.isinf(to), np.nan, to), np.where(np.isinf(tk), np.nan, tk)
+        km = lambda K, k: np.median(K[s, wet, k]) * 1e4
+        print(f"h{h:02d} | {np.nanmedian(to):6.2f} | {np.nanmedian(tk):6.2f} | {_q(to - tk)} || "
+              f"{km(Ko, k128):7.2f} {km(Kkn, k128):7.2f} {km(Kn, k128):7.2f} | {km(Ko, k179):7.2f} {km(Kkn, k179):7.2f} {km(Kn, k179):7.2f}")
     s0, s1 = h0 * 24, min(h1 * 24, nt)
     hlo, fo, sto = lc_depth(LCo[s0:s1, wet], zw)
     hln, fn, stn = lc_depth(LCn[s0:s1, wet], zw)
