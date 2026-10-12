@@ -35,8 +35,9 @@ Frozen predictions and falsifiers:
 3. **Exact output semantics.** NEMO passes the just-computed stage-3 state to
    diagnostics after the time-level swap at
    `SWG_OMIP_L1/BLD/ppsrc/nemo/stprk3.f90:308-321`. The compiled diagnostic is
-   called every step and declares averaged output at
-   `SWG_OMIP_L1/BLD/ppsrc/nemo/diawri.f90:123-126,156-160`; it writes SSH and
+   called every step and documents the cadence at
+   `SWG_OMIP_L1/BLD/ppsrc/nemo/diawri.f90:123-126`; it declares averaged output
+   at `SWG_OMIP_L1/BLD/ppsrc/nemo/diawri.f90:156-160` and writes SSH and
    native U/V from that state at
    `SWG_OMIP_L1/BLD/ppsrc/nemo/diawri.f90:457` and
    `SWG_OMIP_L1/BLD/ppsrc/nemo/diawri.f90:536-538`. The scorer will reproduce

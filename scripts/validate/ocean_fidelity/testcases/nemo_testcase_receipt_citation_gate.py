@@ -1564,11 +1564,11 @@ CITATION_MAP = {
         5],
     'SWG_OMIP_L1/BLD/ppsrc/nemo/diawri.f90:258-259': [
         'CALL histdef( nid_T, "sossheig"',
-        'jpi, jpj, nh_T, 1  , 1, 1  , -99 , 32, clop, zsto, zout )',
+        ('jpi, jpj, nh_T, 1  , 1, 1  , -99 , 32, clop, zsto, zout )', 3),
         2],
     'SWG_OMIP_L1/BLD/ppsrc/nemo/diawri.f90:363-374': [
         'CALL histdef( nid_U, "vozocrtx"',
-        'CALL histdef( nid_V, "vomecrty"',
+        'jpi, jpj, nh_V, jpk, 1, jpk, nz_V, 32, clop, zsto, zout )',
         12],
     'SWG_OMIP_L1/BLD/ppsrc/nemo/diawri.f90:457': (
         'CALL histwrite( nid_T, "sossheig", kt, ssh(:,:,Kmm)'),
@@ -1581,7 +1581,7 @@ CITATION_MAP = {
         'END SUBROUTINE moycum',
         34],
     'SWG_OMIP_L1/BLD/ppsrc/nemo/stprk3.f90:308-321': [
-        '!                                 !==  Swap time levels  ==!',
+        ('!                                 !==  Swap time levels  ==!', 3),
         'IF( lrst_oce   )   CALL rst_write',
         14],
     'SWG_OMIP_L1/BLD/ppsrc/nemo/restart.f90:103-129': [
