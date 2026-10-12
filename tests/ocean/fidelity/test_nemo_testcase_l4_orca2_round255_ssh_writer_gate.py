@@ -27,10 +27,11 @@ def _report(label: str) -> dict[str, object]:
         "boundary_rows": boundaries,
         "operand_rows": operands,
         "boundary_identity": {
-            "continuity_to_association": _score(),
+            "literal_to_candidate_clamp": _score(1),
+            "clamp_to_association": _score(),
             "association_to_rotation": _score(),
         },
-        "first_nonbit_boundary": "continuity_output",
+        "first_nonbit_boundary": "literal_continuity_output",
         "first_nonbit_operand": "sshn_e",
         "candidate_divergence_replay": _score(),
         "candidate_output_replay": _score(),
@@ -62,7 +63,7 @@ def test_literal_continuity_keeps_written_association():
 def test_classifier_names_incoming_ssh_without_blaming_rotation():
     result = gate.classify([_report(label) for label in gate.LABELS])
     assert result["status"] == "HELD_R255_INCOMING_SSH_OWNS_CONTINUITY"
-    assert result["first_nonbit_boundary"] == "continuity_output"
+    assert result["first_nonbit_boundary"] == "literal_continuity_output"
     assert result["first_nonbit_operand"] == "sshn_e"
 
 

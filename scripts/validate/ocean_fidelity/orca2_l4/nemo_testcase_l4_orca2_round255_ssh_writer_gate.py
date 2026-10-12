@@ -28,7 +28,10 @@ from scripts.validate.ocean_fidelity.orca2_l4 import (  # noqa: E402
 )
 
 LABELS = ("independent", "given_nemo_entry")
-BOUNDARIES = ("continuity_output", "post_association", "history_rotation")
+BOUNDARIES = (
+    "literal_continuity_output", "post_candidate_clamp", "post_association",
+    "history_rotation",
+)
 OPERANDS = (
     "sshn_e", "zhU", "zhV", "r1_e1e2t", "zhdiv", "ssh_frc",
     "rDt_e", "ssmask",
@@ -176,7 +179,9 @@ def measure(deck_root: Path, frame_root: Path, spg_root: Path,
         card.recipe.grid,
     ))
     boundary_values = {
-        "continuity_output": np.asarray(
+        "literal_continuity_output": np.asarray(
+            trace.substeps["eta_unfloored"][substep], np.float64),
+        "post_candidate_clamp": np.asarray(
             trace.substeps["eta_continuity"][substep], np.float64),
         "post_association": np.asarray(post[6], np.float64),
         "history_rotation": np.asarray(
@@ -186,8 +191,11 @@ def measure(deck_root: Path, frame_root: Path, spg_root: Path,
         name: _score(value, target) for name, value in boundary_values.items()
     }
     boundary_identity = {
-        "continuity_to_association": _score(
-            boundary_values["continuity_output"],
+        "literal_to_candidate_clamp": _score(
+            boundary_values["literal_continuity_output"],
+            boundary_values["post_candidate_clamp"]),
+        "clamp_to_association": _score(
+            boundary_values["post_candidate_clamp"],
             boundary_values["post_association"]),
         "association_to_rotation": _score(
             boundary_values["post_association"],
@@ -268,7 +276,8 @@ def measure(deck_root: Path, frame_root: Path, spg_root: Path,
         "candidate_divergence_replay": _score(
             candidate_terms["zhdiv"], candidate_inputs["zhdiv"]),
         "candidate_output_replay": _score(
-            candidate_terms["output"], boundary_values["continuity_output"]),
+            candidate_terms["output"],
+            boundary_values["literal_continuity_output"]),
         "nemo_output_replay": _score(reference_terms["output"], target),
         "one_variable_substitutions": substitutions,
         "one_bit_control": _score(one, np.nextafter(one, np.inf)),
@@ -330,10 +339,10 @@ def classify(reports: list[dict[str, object]], plant: str = "none") -> dict:
                 f"{label}: candidate output replay is not exact")
         require(report["nemo_output_replay"]["unequal"] == 0,
                 f"{label}: NEMO output replay is not exact")
-        require(all(row["unequal"] == 0
-                    for row in report["boundary_identity"].values()),
+        require(report["boundary_identity"]["clamp_to_association"]["unequal"] == 0
+                and report["boundary_identity"]["association_to_rotation"]["unequal"] == 0,
                 f"{label}: association or rotation changes current SSH")
-        require(report["first_nonbit_boundary"] == "continuity_output",
+        require(report["first_nonbit_boundary"] == "literal_continuity_output",
                 f"{label}: first non-bit boundary moved")
         require(report["first_nonbit_operand"] == "sshn_e",
                 f"{label}: first non-bit continuity operand moved")
@@ -347,7 +356,7 @@ def classify(reports: list[dict[str, object]], plant: str = "none") -> dict:
     return {
         "format": "nemo-testcase-l4-orca2-round255-classification-v1",
         "status": "HELD_R255_INCOMING_SSH_OWNS_CONTINUITY",
-        "first_nonbit_boundary": "continuity_output",
+        "first_nonbit_boundary": "literal_continuity_output",
         "first_nonbit_operand": "sshn_e",
         "summaries": summaries,
         "plant": plant,
