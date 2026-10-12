@@ -46,3 +46,17 @@ def test_the_flags_build_nemos_zdfevd(grid):
     assert cfg.evd_composition == "nemo_replace"
     if grid == "fesom":
         validate_fesom_stage(args, p)   # allowlist accepts every EVD flag
+
+
+
+@pytest.mark.parametrize("grid", ["cubed_sphere", "latlon_bathy"])
+def test_grids_that_do_not_consume_evd_refuse_it(grid, monkeypatch):
+    """cube / lat-lon builders never receive the convection config: main()
+    must refuse --convection enhanced_diffusion even without trigger flags
+    (it used to be accepted and silently dropped)."""
+    import sys
+    from scripts.run import run_omip_core2
+    monkeypatch.setattr(sys, "argv", ["run_omip_core2.py", "--grid", grid,
+                                      "--convection", "enhanced_diffusion"])
+    with pytest.raises(SystemExit, match="enhanced_diffusion"):
+        run_omip_core2.main()

@@ -81,3 +81,16 @@ def test_only_nemos_own_card_is_accepted(bad):
     K = jnp.full((2, NLEV - 1), K_CLOSURE)
     with pytest.raises(ValueError):
         apply_nemo_evd(K, _cfg(**bad), active=jnp.ones_like(K, bool), **c)
+
+
+def test_nemo_trigger_fires_at_exactly_the_threshold():
+    """zdfevd.F90:93 is ``<= -1.e-12``: an interface whose bn2 equals the
+    threshold fires.  Set the threshold to that interface's own bn2."""
+    c = _columns()
+    n2 = np.asarray(compute_buoyancy_frequency_nemo_bn2(
+        c["T"], c["S"], c["t_depth"], c["w_depth"], None, eos_form="teos10",
+        e3w_int=c["e3w_int"]))
+    K = jnp.full((2, NLEV - 1), K_CLOSURE)
+    out = np.asarray(apply_nemo_evd(K, _cfg(n2_threshold=float(n2[1, 2])),
+                                    active=jnp.ones_like(K, bool), **c))
+    assert out[1, 2] == RN_EVD

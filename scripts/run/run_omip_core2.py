@@ -8674,18 +8674,16 @@ def main() -> int:
     if args.sss_restore_regions is not None and not args.sss_restore:
         raise ValueError("--sss-restore-regions requires --sss-restore")
 
-    # EVD trigger flags: validated once here (raise under --convection none)
-    # and consumed by build_tripole, build_mpas_ocean and the FESOM TKE bridge
-    # (NEMO zdfevd via apply_nemo_evd) -- on any other grid they would be
-    # accepted and dropped, so refuse them there.
+    # Enhanced diffusion (and its trigger flags) is validated once here (raise
+    # under --convection none) and consumed only by build_tripole,
+    # build_mpas_ocean and the FESOM TKE bridge (NEMO zdfevd via
+    # apply_nemo_evd); the other grids' builders never receive it, so refuse
+    # --convection enhanced_diffusion there instead of dropping it.
     if (build_enhanced_diffusion_config(args) is not None
-            and args.grid not in ("tripole", "mpas", "fesom")
-            and any(_flag_set(getattr(args, d, None))
-                    for d in _EVD_TRIGGER_DESTS)):
+            and args.grid not in ("tripole", "mpas", "fesom")):
         raise SystemExit(
-            "--convection-n2-mode/--convection-n2-eos/--convection-trigger/"
-            "--convection-n2-threshold/--convection-two-level are wired for "
-            f"--grid tripole/mpas/fesom only, not {args.grid!r}")
+            "--convection enhanced_diffusion (and its --convection-* flags) is "
+            f"wired for --grid tripole/mpas/fesom only, not {args.grid!r}")
     if args.evd_occupancy_every_hours is not None:
         if args.grid != "tripole":
             raise SystemExit("--evd-occupancy-every-hours is wired for "
