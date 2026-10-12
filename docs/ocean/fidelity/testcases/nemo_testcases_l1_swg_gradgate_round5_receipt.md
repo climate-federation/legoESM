@@ -109,7 +109,10 @@ prediction remains REFUTED.
 Artifacts are under
 `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swggg_rounds/round5/`.
 The fifteen `cpu_resources_*` JSONs, three `cpu_scaling_*` JSONs, and four
-`*_plant.json` files stamp clean producer `cc594f691b`.
+original plant JSONs stamp clean producer `cc594f691b`; the original adjacent
+plant is the explicitly retracted artifact named above. The discriminating
+adjacent-ratio plant stamps clean producer `55a69ff730`, and the added
+strict-monotonicity isolation plant stamps clean producer `7217a95b1a`.
 
 - The shared gate direct tests pass **33/33**.
 - All three real scaling suites exit 0 CONFIRMED; all four required scaling
