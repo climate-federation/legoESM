@@ -175,6 +175,9 @@ def main(argv):
         de = (ne_end[s1c - 1, cols[c], k[c]] - ne_end[sref - 1, cols[c], k[c]])
         for t in L.TERMS:
             contrib[t].append(dd[t] / max(abs(de), 1e-30))
+        contrib.setdefault("D+diff", []).append((dd["D"] + dd["diff"]) / max(abs(de), 1e-30))
+        contrib.setdefault("P+B", []).append((dd["P"] + dd["B"]) / max(abs(de), 1e-30))
+        contrib.setdefault("total", []).append(sum(dd.values()) / max(abs(de), 1e-30))
         lead[min(dd, key=dd.get)] += 1
     print(f"\nFirst divergence (e ours/NEMO < 0.9 at kg after h{href}, >= 0.9 at h{href}): {has.sum()} of {cols.size} cols; "
           f"onset hour median {np.median(href + (first[has] + 1) / 24):.2f} [{np.percentile(href + (first[has] + 1) / 24, 25):.2f},"
@@ -290,12 +293,15 @@ def main(argv):
             ro = le_end[s, cols, ku] / ne_end[s, cols, ku]
             print(f"   e at kg-{up} ({np.median(zw[ku]):5.2f} m) col ratio o/N {np.median(ro):6.2f}  ours {np.median(le_end[s, cols, ku]):9.2e} NEMO {np.median(ne_end[s, cols, ku]):9.2e}")
         print(f"   l entry  ours {np.nanmedian(pick(l_o, s)):9.3f} NEMO {np.nanmedian(pick(l_n, s)):9.3f}  col ratio {np.nanmedian(pick(l_o, s) / pick(l_n, s)):6.2f}")
-        pro = pick(KH, s) / pick(KM, s)
-        prn = pick(avtk, s) / pick(avmk, s)
+        okm = ((pick(KM, s) > 1e-5) & (pick(KM, s - 1) > 1e-5) & (pick(avmk, s) > 1e-5) & (pick(avmk, s - 1) > 1e-5))
+        pro = np.where(okm, pick(KH, s) / pick(KM, s), np.nan)
+        prn = np.where(okm, pick(avtk, s) / pick(avmk, s), np.nan)
+        print(f"   [Pr/N2/S2/Ri on faces with K_M > 1e-5 both sides, s and s-1: n={okm.sum()} of {okm.size}]")
         print(f"   1/Pr     ours {np.nanmedian(pro):6.3f} NEMO {np.nanmedian(prn):6.3f}")
         s2o = pick(sh_o, s) / pick(KM, s - 1)
         s2n = pick(sh_n, s) / pick(avmk, s - 1)
-        no, nn = pick(n2_o, s), pick(n2_n, s)
+        no, nn = np.where(okm, pick(n2_o, s), np.nan), np.where(okm, pick(n2_n, s), np.nan)
+        s2o, s2n = np.where(okm, s2o, np.nan), np.where(okm, s2n, np.nan)
         print(f"   N2       ours {np.nanmedian(no):9.2e} NEMO {np.nanmedian(nn):9.2e}  col ratio {np.nanmedian(no / nn):6.2f}")
         print(f"   S2       ours {np.nanmedian(s2o):9.2e} NEMO {np.nanmedian(s2n):9.2e}  col ratio {np.nanmedian(s2o / s2n):6.2f}")
         print(f"   Ri       ours {np.nanmedian(no / s2o):6.3f} NEMO {np.nanmedian(nn / s2n):6.3f}  (ri_cri {PR.RI_CRI:.3f})")
