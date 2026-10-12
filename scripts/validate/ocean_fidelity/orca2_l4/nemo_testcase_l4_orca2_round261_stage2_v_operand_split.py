@@ -29,6 +29,7 @@ from scripts.validate.ocean_fidelity.orca2_l4 import (  # noqa: E402
     nemo_testcase_l4_orca2_round245_v_depth_split as r245,
     nemo_testcase_l4_orca2_round249_fold_growth_gate as r249,
     nemo_testcase_l4_orca2_round260_stage2_transport_split as r260,
+    nemo_testcase_l4_orca2_stage1_transport_gate as stage1_transport,
 )
 from scripts.validate.ocean_fidelity.testcases.nemo_testcase_prognostic_barotropic_state_gate import (  # noqa: E402
     read_bt_pair,
@@ -198,11 +199,13 @@ def measure(
         "candidate correction replay moved")
 
     composition_path = record_root / "oracle_rkstage2_operands_kt00000001.bin"
+    static_path = record_root / "oracle_rkstage1_transport_operands_kt00000001.bin"
     advmean_path = record_root / "oracle_bt_advmean_operands_kt00000001.bin"
     bt_path = record_root / "oracle_bt_frames_kt00000001.bin"
     tracer_path = record_root / "oracle_rktracer_operands_kt00000001_s2.bin"
     composition = read_stage2_composition(
         composition_path, expected_dims=(NX, NY, NZ))
+    static = stage1_transport.read_record(static_path)
     advmean = read_advmean(
         advmean_path, expected_dims=(NX, NY), expected_ncycle=65)
     bt = read_bt_pair(bt_path)
@@ -214,12 +217,11 @@ def measure(
         * jnp.asarray(expected_r1_hv)
         - jnp.asarray(bt["vv_b"][:, :90]))
     expected = {
-        "e1v": _native_v(jnp.concatenate(
-            [jnp.zeros_like(resolved.e1v[:1]), resolved.e1v], axis=0)),
+        "e1v": np.asarray(static["e1v"], np.float64),
         "e3v": _native_v(expected_e3v_full),
         "vv": _native_t(composition["Kmm_v"])[..., :30],
         "zvb": np.asarray(expected_zvb, np.float64),
-        "vmask": _native_v(resolved_v),
+        "vmask": np.asarray(static["vmask"], np.float64)[..., :30],
     }
     candidate = {
         "e1v": _native_v(grid.dx_v),
@@ -300,7 +302,8 @@ def measure(
         "one_bit_control": r249._score(one, np.nextafter(one, np.inf)),
         "records": {
             path.name: _sha256(path)
-            for path in (composition_path, advmean_path, bt_path, tracer_path)
+            for path in (composition_path, static_path, advmean_path, bt_path,
+                         tracer_path)
         },
         "compiled_source": {
             "correction": "ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/stprk3_stg.f90:269-279",
