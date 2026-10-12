@@ -68,6 +68,7 @@ def lc_depth(inc, zw):
     untouched), returned as zw[0] with status -1; positive down to the last
     saved interface -> h_lc beyond the dump, returned as +inf, status +1.
     An interior zero inside the positive run -> status 2 (cutoff unknown).
+    Any NaN in the profile (diagnostic unavailable) -> status -3, h NaN.
     Only status 0 is an exact depth.  Also returns the first positive index."""
     pos = inc > 0
     any_pos = np.any(pos, -1)
@@ -82,6 +83,9 @@ def lc_depth(inc, zw):
     # run (float32 drop-out): the cutoff is unknown -> status 2, never exact
     gap = has_stop & np.any(pos & (np.arange(inc.shape[-1]) > j[..., None]), -1)
     status = np.where(~any_pos, -1, np.where(gap, 2, np.where(has_stop, 0, 1)))
+    missing = np.any(np.isnan(inc), -1)                 # diagnostic unavailable -> status -3
+    status = np.where(missing, -3, status)
+    h = np.where(missing, np.nan, h)
     return h, first, status
 
 
@@ -124,6 +128,12 @@ def gap_share(inc):
     return np.mean(np.any(inside & ~pos, -1)[np.any(pos, -1)])
 
 
+def share(x, cond):
+    """mean of cond over samples where x is not NaN (+inf = censored deep counts)."""
+    ok = ~np.isnan(x)
+    return float(np.mean(cond[ok])) if ok.any() else float("nan")
+
+
 def _q(x):
     x = x[np.isfinite(x)]
     if x.size == 0:
@@ -161,7 +171,7 @@ def main(argv):
     nt = min(To.shape[0], Tn.shape[0])
     print(f"steps ours {To.shape[0]} NEMO {Tn.shape[0]} -> using {nt}; dtype {To.dtype}/{Tn.dtype}")
     ktop = int(np.searchsorted(zt, ZTOP)) + 2          # T-levels feeding interfaces above ZTOP
-    kw = int(np.searchsorted(zw, ZTURB)) + 1           # turbocline window = interfaces down to ZTURB
+    kw = int(np.searchsorted(zw, ZTURB, side="right"))  # turbocline window = interfaces with zw <= ZTURB
     wet = (np.all(np.isfinite(Tn[:nt, :, :ktop]) & np.isfinite(Sn[:nt, :, :ktop]), (0, 2))
            & np.all(np.isfinite(Kn[:nt, :, :kw]), (0, 2))
            & np.all((To[:nt, :, :ktop] != 0) & np.isfinite(To[:nt, :, :ktop]) & np.isfinite(So[:nt, :, :ktop]), (0, 2))
@@ -191,14 +201,14 @@ def main(argv):
     un = implied_us(LCn[s0:s1, wet], hx_n, fn, zw)
     print(f"\nPart 2  Langmuir, steps {s0}..{s1 - 1} (h{h0}-h{h1}), all wet col x step samples")
     for lab, st in (("ours", sto), ("NEMO", stn)):
-        print(f"  {lab} status share: <=first interface {np.mean(st == -1):.3f}  exact {np.mean(st == 0):.3f}  beyond dump {np.mean(st == 1):.3f}  gap {np.mean(st == 2):.3f}")
+        print(f"  {lab} status share: missing {np.mean(st == -3):.3f}  <=first interface {np.mean(st == -1):.3f}  exact {np.mean(st == 0):.3f}  beyond dump {np.mean(st == 1):.3f}  gap {np.mean(st == 2):.3f}")
     print(f"  h_lc [m] (exact only) ours {_q(hx_o)}")
     print(f"  h_lc [m] (exact only) NEMO {_q(hx_n)}")
     print(f"  h_lc ours-NEMO (paired, both exact) {_q(np.where(both, hlo - hln, np.nan))}")
     hlo = np.where(sto == 2, np.nan, hlo); hln = np.where(stn == 2, np.nan, hln)   # gap: cutoff unknown
-    print(f"  share h_lc <= 12.8 m (censored included, gaps excluded): ours {np.nanmean(hlo <= 12.8):.3f}  NEMO {np.nanmean(hln <= 12.8):.3f}")
+    print(f"  share h_lc <= 12.8 m (censored included, gaps/missing excluded): ours {share(hlo, hlo <= 12.8):.3f}  NEMO {share(hln, hln <= 12.8):.3f}")
     print(f"  share ours h_lc < 12.8 m among samples with NEMO h_lc > 12.8 m: "
-          f"{np.nanmean(np.where(np.isnan(hlo), np.nan, hlo < 12.8)[hln > 12.8]):.3f}  (n={np.sum(hln > 12.8)})")
+          f"{share(hlo[hln > 12.8], hlo[hln > 12.8] < 12.8):.3f}  (n={np.sum(~np.isnan(hlo) & (hln > 12.8))})")
     print("  NOTE: 'implied amplitude' = zus^2 from inverting each model's own increment with NEMO's formula;"
           " a z-independent port defect is degenerate with taum here (GLM 2026-10-12) -- not a measured stress.")
     print(f"  implied amplitude ratio ours/NEMO (zus^2, first active interface; monitor only) {_q((uo / un) ** 2)}")

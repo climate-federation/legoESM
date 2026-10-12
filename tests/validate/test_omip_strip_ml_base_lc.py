@@ -52,6 +52,13 @@ def test_lc_depth_and_zus_inversion_recover_nemo_formula_inputs():
     assert sd[0] == 1 and np.isinf(hd[0])
     drop = np.where(zw < zw[6], 1.0, 0.0); drop[2] = 0.0  # interior zero inside the run
     assert P.lc_depth(drop[None], zw)[2][0] == 2
+    hm, _, sm = P.lc_depth(np.full((1, 12), np.nan), zw)  # diagnostic unavailable
+    assert sm[0] == -3 and np.isnan(hm[0])
+
+
+def test_share_excludes_nan_and_keeps_censored_deep():
+    x = np.array([5.0, np.nan, np.inf])
+    assert P.share(x, x <= 12.8) == 0.5
 
 
 def test_nemo_check_constant_matches_zdftke_literals():
