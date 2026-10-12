@@ -41,6 +41,35 @@ def test_exact_row_gate_distinguishes_signed_zero_bits():
     assert row["status"] == "DEBT"
 
 
+def test_localized_comparison_separates_interior_wall_and_storage_debts():
+    wet = np.zeros((5, 5), dtype=bool)
+    wet[1:4, 1:4] = True
+    reference = np.zeros((5, 5), dtype=np.float64)
+    candidate = reference.copy()
+    candidate[2, 2] = 1.0
+    candidate[1, 1] = 2.0
+    candidate[0, 0] = 3.0
+    out = lad._localized_comparison(reference, candidate, wet)
+    assert out["wet_interior"]["bit_unequal"] == 1
+    assert out["wet_wall_adjacent"]["bit_unequal"] == 1
+    assert out["dry_or_storage_halo"]["bit_unequal"] == 1
+    signed = reference.copy()
+    signed[0, 1] = -0.0
+    zero = lad._localized_comparison(reference, signed, wet)
+    assert zero["dry_or_storage_halo"]["signed_zero_only"] == 1
+
+
+@pytest.mark.skipif(not lad.DG_STAGE_ROOT.is_dir(),
+                    reason="admitted SWG_DG stage records not mounted")
+def test_maddison_localization_runs_production_steps_and_keeps_bar_unchanged():
+    out = lad.localize_maddison_debts(
+        lad.DG_STAGE_ROOT, lad.DG_MONTH_ROOT, include_month=False,
+        allow_dirty=True)
+    assert out["bar_unchanged"] == "IEEE-word identity for every field"
+    assert len(out["stage"]["from_rest_boundaries"]) == 2
+    assert set(out["stage"]["forcing_representation"]) == {"utau", "vtau"}
+
+
 @pytest.mark.skipif(not lad.DG_STAGE_ROOT.is_dir(),
                     reason="admitted SWG_DG stage records not mounted")
 def test_maddison_admission_and_restart_reader_use_run_resolution():

@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 _PATH = (Path(__file__).resolve().parents[3]
          / "scripts/run/run_swg_double_gyre.py")
@@ -99,3 +100,64 @@ def test_scanned_program_matches_nontrivial_python_steps_on_tiny_grid():
     assert differences["within_atol"], json.dumps(differences, sort_keys=True)
     assert differences["atol"] == 1.0e-12
     assert np.any(np.asarray(python_state.u.data) != 0.0)
+
+
+def test_compiled_day_mean_matches_post_step_production_states_on_tiny_grid():
+    import jax
+    from legoesm.core.precision import PrecisionPolicy, set_policy
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        SWG_MADDISON_NAMELIST,
+        build_swg_card,
+        swg_surface_wind,
+    )
+    from legoesm.ocean.state import OceanSurfaceForcing
+
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    tiny = SWG_MADDISON_NAMELIST._replace(
+        nn_SWG=1, rn_Dt_s=50.0, nn_itend=3, nn_write=3, nn_stock=3,
+        rn_modified_grav_m_s2=1.0e-6)
+    card = build_swg_card(tiny)
+    model = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
+    tau_u, tau_v = swg_surface_wind(tiny)
+    forcing = OceanSurfaceForcing(
+        tau_i_native=jax.numpy.asarray(tau_u, dtype=jax.numpy.float64),
+        tau_j_native=jax.numpy.asarray(tau_v, dtype=jax.numpy.float64),
+    )
+    state = driver.seed_steady_forcing_carry(card.recipe.initial_state, forcing)
+    samples = []
+    reference = state
+    for count in range(1, 4):
+        reference = model.step(reference, card.dt_s, surface_forcing=forcing)
+        fields = (reference.eta.data, reference.u.data[:, 1:, 0],
+                  reference.v.data[1:, :, 0])
+        if not samples:
+            samples = [np.asarray(field) for field in fields]
+        else:
+            samples = [
+                (mean * np.float64(count - 1) + np.asarray(field))
+                / np.float64(count)
+                for mean, field in zip(samples, fields, strict=True)
+            ]
+    scanned = driver.build_scanned_day_mean_stepper(
+        model, card.dt_s, forcing, 3)
+    final, means = scanned(state)
+    jax.block_until_ready(final.eta.data)
+    assert driver.prognostic_differences(reference, final)["within_atol"]
+    for expected, actual in zip(samples, means, strict=True):
+        assert np.allclose(expected, np.asarray(actual), rtol=0.0, atol=1.0e-18)
+    # A final-state substitution cannot satisfy this daily-mean test.
+    assert np.any(np.asarray(means[1]) != np.asarray(final.u.data[:, 1:, 0]))
+
+
+def test_daily_mean_output_refuses_certified_cpu_mode(tmp_path):
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import SWG_MADDISON_NAMELIST
+
+    tiny = SWG_MADDISON_NAMELIST._replace(
+        nn_SWG=1, rn_Dt_s=43_200.0, nn_itend=2, nn_write=2, nn_stock=2,
+        rn_modified_grav_m_s2=1.0e-6, rn_tau_pa=0.0)
+    with pytest.raises(ValueError, match="non-certified gpu-native"):
+        driver.run_long(
+            tiny, tmp_path / "run", days=1, mode="cpu-certified",
+            commit="a" * 40, daily_means=True)

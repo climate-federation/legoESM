@@ -212,6 +212,14 @@ def nemo_ioipsl_provider(
                         f"{path.name}: missing {variable}")
                 require(ds[variable].dtype == np.dtype("float32"),
                         f"{path.name}.{variable}: not fp32")
+                require(getattr(ds[variable], "online_operation", None) == "ave(x)",
+                        f"{path.name}.{variable}: not a NEMO daily mean")
+                require(float(getattr(ds[variable], "interval_operation", -1.0))
+                        == 50.0,
+                        f"{path.name}.{variable}: averaging sample interval differs")
+                require(float(getattr(ds[variable], "interval_write", -1.0))
+                        == SECONDS_PER_DAY,
+                        f"{path.name}.{variable}: averaging window differs")
                 clock = np.asarray(ds["time_counter"][:], dtype=np.float64)
                 require(clock.size >= stop_day and np.array_equal(
                     clock[start_day - 1:stop_day], expected_time),
@@ -274,7 +282,9 @@ def legoesm_npz_provider(
             and manifest.get("completed_days") == total_days
             and total_days >= stop_day,
             "legoESM manifest does not contain the complete requested window")
-    require(manifest.get("schema") == "legoesm-swg-double-gyre-daily-v1",
+    require(manifest.get("schema") in {
+                "legoesm-swg-double-gyre-daily-v1",
+                "legoesm-swg-double-gyre-daily-v2"},
             "unknown legoESM daily schema")
     _require_legoesm_deck(manifest.get("namelist", {}))
     complete = [root / f"day{day:04d}.npz"
@@ -289,6 +299,12 @@ def legoesm_npz_provider(
         require(sha256(path) == pins[path.name],
                 f"legoESM daily digest mismatch: {path.name}")
     sampling = manifest.get("sampling", "daily_snapshot")
+    fields = (
+        ("ssh_daily_mean_m", "u_daily_mean_m_s", "v_daily_mean_m_s")
+        if sampling == "daily_mean" else ("ssh_m", "u_m_s", "v_m_s"))
+    if sampling == "daily_mean":
+        require(manifest.get("schema") == "legoesm-swg-double-gyre-daily-v2",
+                "daily-mean sampling requires the v2 legoESM schema")
 
     def iterate() -> Iterator[DailyFrame]:
         for local_day, path in enumerate(expected, 1):
@@ -298,13 +314,19 @@ def legoesm_npz_provider(
                         f"{path.name}: embedded day differs")
                 require(float(data["dt_s"]) == 50.0,
                         f"{path.name}: timestep differs")
-                fields = [np.asarray(data[name], dtype=np.float64)
-                          for name in ("ssh_m", "u_m_s", "v_m_s")]
-            require(all(field.shape == (644, 644) for field in fields),
+                if sampling == "daily_mean":
+                    require(data["daily_mean_sampling"].item() ==
+                            "arithmetic mean of every post-step state in model day",
+                            f"{path.name}: daily-mean sampling label differs")
+                    require(int(data["daily_mean_sample_count"]) == 1_728,
+                            f"{path.name}: daily-mean sample count differs")
+                values = [np.asarray(data[name], dtype=np.float64)
+                          for name in fields]
+            require(all(field.shape == (644, 644) for field in values),
                     f"{path.name}: field shape differs")
-            require(all(np.all(np.isfinite(field)) for field in fields),
+            require(all(np.all(np.isfinite(field)) for field in values),
                     f"{path.name}: non-finite field")
-            yield DailyFrame(local_day, *fields)
+            yield DailyFrame(local_day, *values)
 
     return DailyProvider(
         "legoESM", sampling,

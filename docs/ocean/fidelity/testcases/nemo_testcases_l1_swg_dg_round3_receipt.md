@@ -132,6 +132,12 @@ The instrumented compiled writer applies the cadence as
 
 ## Choices and unverified items
 
+The unrelated inherited GYRE/LOCK_EXCHANGE/OVERFLOW digest pins remain stale:
+the pinned values are `5850bbcfcd351c29` / `4ec82201f0fae7bf` /
+`7f1ec89b3e6578f5`, while the current round-6 values are
+`f02d2f42a570f413` / `d5dfdf83b3a1e0ab` / `83de0010e1170032`.
+This SWG_DG lane does not re-pin them.
+
 ASKED: exact fractional-timestep refusal, source-patch whitespace exemption,
 one compiled non-certified program per day, 100-step profile, two-day parity
 control, and conditional ladder execution.

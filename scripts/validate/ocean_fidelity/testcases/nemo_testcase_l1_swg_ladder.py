@@ -367,6 +367,43 @@ def _bit_unequal(ref, cand, mask):
     return np.argwhere((ref_bits != cand_bits) & use)
 
 
+def _localized_comparison(ref, cand, wet) -> dict:
+    """Classify bit differences as wet interior, wet wall, or dry storage."""
+    ref, cand = np.asarray(ref), np.asarray(cand)
+    wet = np.asarray(wet, dtype=bool)
+    require(ref.shape == cand.shape == wet.shape,
+            "localized comparison shapes differ")
+    padded = np.pad(wet, 1, constant_values=False)
+    surrounded = (
+        padded[:-2, 1:-1] & padded[2:, 1:-1]
+        & padded[1:-1, :-2] & padded[1:-1, 2:])
+    categories = {
+        "wet_interior": wet & surrounded,
+        "wet_wall_adjacent": wet & ~surrounded,
+        "dry_or_storage_halo": ~wet,
+    }
+    word = np.dtype(f"u{ref.dtype.itemsize}")
+    different_bits = (
+        np.ascontiguousarray(ref).view(word)
+        != np.ascontiguousarray(cand).view(word))
+    different_values = ref != cand
+    signed_zero = (ref == 0.0) & (cand == 0.0) & (
+        np.signbit(ref) != np.signbit(cand))
+    out = {}
+    for name, use in categories.items():
+        at = np.argwhere(different_bits & use)
+        delta = np.abs(cand - ref)
+        out[name] = {
+            "population": int(np.count_nonzero(use)),
+            "bit_unequal": int(at.shape[0]),
+            "numeric_unequal": int(np.count_nonzero(different_values & use)),
+            "signed_zero_only": int(np.count_nonzero(signed_zero & use)),
+            "first_unequal_cell": at[0].tolist() if at.size else None,
+            "max_abs": float(np.max(delta[use])) if np.any(use) else 0.0,
+        }
+    return out
+
+
 def _row(name, ref, cand, mask):
     ref, cand = np.asarray(ref), np.asarray(cand)
     use = np.asarray(mask, dtype=bool)
@@ -900,6 +937,113 @@ def month_control(root: Path, *, deck: str = "shipped",
     })
 
 
+def localize_maddison_debts(
+        stage_root: Path, month_root: Path, *, include_month: bool = True,
+        allow_dirty: bool = False,
+) -> dict:
+    """Localize the two SWG_DG ladder debts without changing either bar."""
+    import jax
+    from legoesm.ocean.dynamics.swe_rk3 import SWERK3StageEntry
+    from legoesm.ocean.fidelity.provenance import allow_dirty_stamps, git_sha
+
+    allow_dirty_stamps(allow_dirty)
+    sha = git_sha(allow_dirty=allow_dirty)
+    namelist = _deck_namelist("maddison")
+    entries = read_stage_entries(stage_root)
+    card, masks, model, forcing = _swg_production_case(
+        "Maddison debt localization", namelist=namelist)
+
+    def item(fields):
+        return SWERK3StageEntry(**{
+            name: jax.numpy.asarray(fields[name], dtype=jax.numpy.float64)
+            for name in SWERK3StageEntry._fields})
+
+    replayed = model.replay_swe_rk3_stage(
+        item(entries[2, 1]), card.dt_s, 1, item(entries[2, 1]))
+    replayed = {name: np.asarray(value)
+                for name, value in replayed._asdict().items()}
+    stage1 = {
+        name: _localized_comparison(
+            entries[2, 2][name], value, _field_mask(name, masks))
+        for name, value in replayed.items()
+    }
+
+    state = card.recipe.initial_state
+    boundaries = []
+    for step, target_kt in ((1, 2), (2, 3)):
+        state = model.step(state, card.dt_s, surface_forcing=forcing)
+        candidate = _stage_candidate(state, forcing, card)
+        boundaries.append({
+            "after_production_step": step,
+            "target_stage1_kt": target_kt,
+            "fields": {
+                name: _localized_comparison(
+                    entries[target_kt, 1][name], value,
+                    _field_mask(name, masks))
+                for name, value in candidate.items()
+            },
+        })
+    wind = {
+        "utau": _localized_comparison(
+            entries[1, 1]["utau_now"], forcing.tau_i_native, masks["U"]),
+        "vtau": _localized_comparison(
+            entries[1, 1]["vtau_now"], forcing.tau_j_native, masks["V"]),
+    }
+    result = {
+        "label": "SWG-DG-DEBT-LOCALIZATION",
+        "legoesm_git_sha": sha,
+        "bar_unchanged": "IEEE-word identity for every field",
+        "stage": {
+            "given_kt2_stage1_to_stage2": stage1,
+            "from_rest_boundaries": boundaries,
+            "forcing_representation": wind,
+        },
+        "month": None,
+    }
+    if not include_month:
+        return result
+
+    month_namelist = _deck_namelist("maddison", month=True)
+    instrumented = _month_admission(month_root, deck="maddison")
+    month_entries = read_stage_entries(
+        instrumented, record_kts=DG_MONTH_RECORD_KTS, stages=(1,))
+    month_restarts = read_restarts(
+        instrumented, kts=DG_MONTH_RESTART_KTS, namelist=month_namelist)
+    month_card, month_masks, month_model, month_forcing = _swg_production_case(
+        "Maddison month localization", namelist=month_namelist)
+    month_state = month_card.recipe.initial_state
+    steps_per_day = int(86_400 / month_namelist.rn_Dt_s)
+    require(steps_per_day * month_namelist.rn_Dt_s == 86_400,
+            "month localization timestep does not divide one day")
+    for _ in range(steps_per_day):
+        month_state = month_model.step(
+            month_state, month_card.dt_s, surface_forcing=month_forcing)
+    candidate_restart = _restart_candidate(month_state)
+    restart = month_restarts[steps_per_day]
+    restart_fields = {
+        name: _localized_comparison(
+            restart[name], value, _field_mask(name, month_masks))
+        for name, value in candidate_restart.items()
+    }
+    next_entry = month_entries[433, 1]
+    record_pairs = {
+        "ssh": (restart["sshn"], next_entry["ssh_k"], "T"),
+        "u": (restart["un"], next_entry["u_k"], "U"),
+        "v": (restart["vn"], next_entry["v_k"], "V"),
+        "utau": (restart["utau_b"], next_entry["utau_before"], "U"),
+        "vtau": (restart["vtau_b"], next_entry["vtau_before"], "V"),
+    }
+    result["month"] = {
+        "from_rest_day1_restart": restart_fields,
+        "nemo_restart_to_next_stage_entry": {
+            name: _localized_comparison(left, right, month_masks[kind])
+            for name, (left, right, kind) in record_pairs.items()
+        },
+        "full_thirty_day_report": "run the month arm; localization does not replay restarts",
+    }
+    return result
+
+
 def shipped(root: Path, *, statistics_npz: Path | None = None,
             progress: bool = False, allow_dirty: bool = False) -> dict:
     """Run and score all 172800 shipped production steps from rest."""
@@ -1340,7 +1484,7 @@ def main(argv=None) -> int:
     p.add_argument("--arm", choices=(
         "self-check", "independent", "stage-entry-read", "ens-stage1",
         "stages-given", "stages-chained", "carried-state", "month",
-        "shipped"),
+        "debt-localization", "shipped"),
                    required=True)
     p.add_argument("--deck", choices=("shipped", "maddison"),
                    default="shipped")
@@ -1372,6 +1516,12 @@ def main(argv=None) -> int:
                        a.month_root, deck=a.deck, allow_dirty=a.allow_dirty)
                    if a.plant else
                    month(a.month_root, deck=a.deck, allow_dirty=a.allow_dirty))
+        elif a.arm == "debt-localization":
+            require(a.deck == "maddison",
+                    "debt localization is registered only for the Maddison deck")
+            require(a.plant is None, "debt localization has no plant mode")
+            out = localize_maddison_debts(
+                a.stage_root, a.month_root, allow_dirty=a.allow_dirty)
         elif a.arm == "shipped":
             require(a.plant is None, "shipped arm has no post-computation plant")
             out = shipped(

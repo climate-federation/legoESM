@@ -169,7 +169,11 @@ def _write_nemo_fixture(root: Path, monkeypatch):
                 0.5 * climate.SECONDS_PER_DAY, 1.5 * climate.SECONDS_PER_DAY]
             ds.createVariable("nav_lon", "f8", ("y", "x"))[:] = ii
             ds.createVariable("nav_lat", "f8", ("y", "x"))[:] = jj
-            ds.createVariable(variable, "f4", ("time", "y", "x"))[:] = 0.0
+            field = ds.createVariable(variable, "f4", ("time", "y", "x"))
+            field[:] = 0.0
+            field.online_operation = "ave(x)"
+            field.interval_operation = 50.0
+            field.interval_write = climate.SECONDS_PER_DAY
 
 
 def test_nemo_provider_admits_window_and_refuses_shifted_clock_and_deck(
@@ -180,6 +184,12 @@ def test_nemo_provider_admits_window_and_refuses_shifted_clock_and_deck(
     assert [frame.day for frame in provider.iterate()] == [1]
     import netCDF4
     path = tmp_path / "SWG_test_grid_T_0000.nc"
+    with netCDF4.Dataset(path, "r+") as ds:
+        ds["sossheig"].online_operation = "inst(x)"
+    with pytest.raises(Exception, match="not a NEMO daily mean"):
+        climate.nemo_ioipsl_provider(tmp_path, 1, start_day=2)
+    with netCDF4.Dataset(path, "r+") as ds:
+        ds["sossheig"].online_operation = "ave(x)"
     with netCDF4.Dataset(path, "r+") as ds:
         ds["time_counter"][1] += 1.0
     with pytest.raises(Exception, match="daily clock/window differs"):
@@ -204,12 +214,17 @@ def test_legoesm_provider_selects_later_window_and_gates_deck(tmp_path):
     for day in range(1, 4):
         path = tmp_path / f"day{day:04d}.npz"
         field = np.full((644, 644), float(day))
-        np.savez_compressed(path, day=day, dt_s=50.0,
-                            ssh_m=field, u_m_s=field, v_m_s=field)
+        np.savez_compressed(
+            path, day=day, dt_s=50.0,
+            daily_mean_sampling=np.str_(
+                "arithmetic mean of every post-step state in model day"),
+            daily_mean_sample_count=np.int64(1_728),
+            ssh_daily_mean_m=field, u_daily_mean_m_s=field,
+            v_daily_mean_m_s=field)
         pins[path.name] = climate.sha256(path)
     manifest = {
         "status": "complete", "completed_days": 3, "days": 3,
-        "schema": "legoesm-swg-double-gyre-daily-v1",
+        "schema": "legoesm-swg-double-gyre-daily-v2",
         "sampling": "daily_mean", "daily_sha256": pins,
         "namelist": SWG_MADDISON_NAMELIST._asdict(),
     }

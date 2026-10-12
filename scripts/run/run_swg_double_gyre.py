@@ -75,6 +75,43 @@ def build_scanned_stepper(model, dt_s: float, forcing, n_steps: int):
     return scanned
 
 
+def build_scanned_day_mean_stepper(model, dt_s: float, forcing, n_steps: int):
+    """Return one JIT program for a day and its IOIPSL-order state means."""
+    import jax
+    import jax.numpy as jnp
+
+    if type(n_steps) is not int or n_steps <= 0:
+        raise ValueError("daily-mean scan n_steps must be a positive integer")
+
+    def scan_body(carry, count):
+        state, mean_ssh, mean_u, mean_v = carry
+        state = model.step(state, dt_s, surface_forcing=forcing)
+        ssh = state.eta.data
+        u = state.u.data[:, 1:, 0]
+        v = state.v.data[1:, :, 0]
+        # NEMO's executed dia_wri call sees the just-computed state, and
+        # IOIPSL moycum uses (old_mean * old_count + sample) / new_count.
+        old_count = count - jnp.asarray(1, dtype=count.dtype)
+        mean_ssh = (mean_ssh * old_count + ssh) / count
+        mean_u = (mean_u * old_count + u) / count
+        mean_v = (mean_v * old_count + v) / count
+        return (state, mean_ssh, mean_u, mean_v), None
+
+    @jax.jit
+    def scanned(state):
+        means = (
+            jnp.zeros_like(state.eta.data),
+            jnp.zeros_like(state.u.data[:, 1:, 0]),
+            jnp.zeros_like(state.v.data[1:, :, 0]),
+        )
+        counts = jnp.arange(1, n_steps + 1, dtype=state.eta.data.dtype)
+        (state, mean_ssh, mean_u, mean_v), _ = jax.lax.scan(
+            scan_body, (state, *means), counts)
+        return state, (mean_ssh, mean_u, mean_v)
+
+    return scanned
+
+
 def run_python_steps(model, state, dt_s: float, forcing, n_steps: int):
     """Run the retained certified per-step production dispatch."""
     if type(n_steps) is not int or n_steps <= 0:
@@ -160,6 +197,7 @@ def profile_step_modes(model, state, dt_s: float, forcing, n_steps: int) -> dict
 def run_long(
         namelist, output: Path, *, days: int, mode: str, commit: str,
         profile_steps: int = 0, compare_days: int = 0,
+        daily_means: bool = False,
 ) -> dict:
     """Integrate one resolved SWG deck and write one native state per day."""
     import jax
@@ -183,6 +221,8 @@ def run_long(
         raise ValueError("compare_days must be a non-negative integer")
     if mode != "gpu-native" and (profile_steps or compare_days):
         raise ValueError("profiling and scan comparison require gpu-native mode")
+    if daily_means and mode != "gpu-native":
+        raise ValueError("daily-mean output requires non-certified gpu-native mode")
     if len(commit) != 40 or any(char not in "0123456789abcdef" for char in commit):
         raise ValueError("commit must be a forty-character lowercase Git SHA")
     steps_per_day_f = SECONDS_PER_DAY / namelist.rn_Dt_s
@@ -226,6 +266,10 @@ def run_long(
         state = seed_steady_forcing_carry(state, forcing)
         day_stepper = build_scanned_stepper(
             model, card.dt_s, forcing, steps_per_day)
+        day_mean_stepper = (
+            build_scanned_day_mean_stepper(
+                model, card.dt_s, forcing, steps_per_day)
+            if daily_means else None)
         if profile_steps:
             profile = profile_step_modes(
                 model, state, card.dt_s, forcing, profile_steps)
@@ -247,9 +291,12 @@ def run_long(
             }
     else:
         day_stepper = None
+        day_mean_stepper = None
     output.mkdir(parents=True)
     manifest = {
-        "schema": "legoesm-swg-double-gyre-daily-v1",
+        "schema": (
+            "legoesm-swg-double-gyre-daily-v2"
+            if daily_means else "legoesm-swg-double-gyre-daily-v1"),
         "legoesm_git_sha": commit,
         "mode": mode,
         "certified_policy": certified_policy,
@@ -262,15 +309,25 @@ def run_long(
         "integration": (
             "one-jitted-scan-per-day" if mode == "gpu-native"
             else "production-python-step-loop"),
+        "sampling": "daily_mean" if daily_means else "daily_snapshot",
+        "available_sampling": (
+            ["daily_mean", "end_of_day_snapshot"]
+            if daily_means else ["end_of_day_snapshot"]),
         "profile": profile,
         "scan_vs_python": parity,
         "namelist": namelist._asdict(),
         "fields": {
-            "ssh_m": "T points",
-            "u_m_s": "native NEMO U record (west redundant face removed)",
-            "v_m_s": "native NEMO V record (south redundant face removed)",
+            "ssh_m": "end-of-day snapshot; T points",
+            "u_m_s": "end-of-day snapshot; native NEMO U record",
+            "v_m_s": "end-of-day snapshot; native NEMO V record",
         },
     }
+    if daily_means:
+        manifest["fields"].update({
+            "ssh_daily_mean_m": "daily mean of post-step T-point SSH",
+            "u_daily_mean_m_s": "daily mean of post-step native U velocity",
+            "v_daily_mean_m_s": "daily mean of post-step native V velocity",
+        })
     pending_path = output / "manifest.pending.json"
     day_hashes: dict[str, str] = {}
     _write_json_atomic(
@@ -279,9 +336,12 @@ def run_long(
                     "daily_sha256": day_hashes})
 
     for day in range(1, days + 1):
+        means = None
         if day_stepper is None:
             state = run_python_steps(
                 model, state, card.dt_s, forcing, steps_per_day)
+        elif day_mean_stepper is not None:
+            state, means = day_mean_stepper(state)
         else:
             state = day_stepper(state)
         jax.block_until_ready(state.eta.data)
@@ -297,6 +357,16 @@ def run_long(
             "u_m_s": np.asarray(state.u.data[:, 1:, 0], dtype=np.float64),
             "v_m_s": np.asarray(state.v.data[1:, :, 0], dtype=np.float64),
         }
+        if means is not None:
+            arrays.update({
+                "daily_mean_sampling": np.str_(
+                    "arithmetic mean of every post-step state in model day"),
+                "snapshot_sampling": np.str_("end-of-day instantaneous state"),
+                "daily_mean_sample_count": np.int64(steps_per_day),
+                "ssh_daily_mean_m": np.asarray(means[0], dtype=np.float64),
+                "u_daily_mean_m_s": np.asarray(means[1], dtype=np.float64),
+                "v_daily_mean_m_s": np.asarray(means[2], dtype=np.float64),
+            })
         name = f"day{day:04d}.npz"
         temporary = output / f".{name}.tmp"
         with temporary.open("wb") as stream:
@@ -330,6 +400,9 @@ def main(argv=None) -> int:
     parser.add_argument(
         "--compare-days", type=int, default=0,
         help="compare the daily scan with the Python loop from one state")
+    parser.add_argument(
+        "--daily-means", action="store_true",
+        help="also accumulate every post-step state inside the compiled day")
     args = parser.parse_args(argv)
     try:
         from legoesm.ocean.fidelity.provenance import git_sha
@@ -338,7 +411,7 @@ def main(argv=None) -> int:
         manifest = run_long(
             namelist, args.output, days=args.days, mode=args.mode,
             commit=git_sha(), profile_steps=args.profile_steps,
-            compare_days=args.compare_days)
+            compare_days=args.compare_days, daily_means=args.daily_means)
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"REFUSE: {exc}", file=sys.stderr)
         return 2
