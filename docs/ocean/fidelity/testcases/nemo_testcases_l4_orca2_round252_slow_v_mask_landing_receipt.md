@@ -97,8 +97,39 @@ is **REFUTED**.
 
 ## Gates, tests and review
 
-Final gate results are appended after the current-tip DINO run, citation
-gate, once-only fidelity battery, and independent read-only review attempt.
+The final current-tip DINO from-rest month completed 960 steps and passed:
+day-30 wet three-dimensional T RMS is `2.056821682e-03 K` against the
+`2.244317642e-03 K` bar.  Its snapshot is byte-identical to round 238
+(`d2e254e5e9d3f9dbddc53c4c9676ea2d992af232fda58ac51cfc1710cbd46b55`).
+The log SHA-256 is
+`b82812a42350d50c60667a31da41daedfbe0339da7052c210b3d36f12869419c`.
+
+The focused scientific battery passed 74/74.  The required once-only
+`tests/ocean/fidelity -n 12` battery collected 3,282 tests and reached 98%
+with 3,211 explicit PASS lines before its last xdist worker failed to return
+a terminal summary.  It printed exactly four red node IDs.  All four were
+re-run serially, in isolation, and reproduced their registered pre-existing
+conditions:
+
+1. SI3 scalar-math `MY_SRC` provenance;
+2. the GYRE round-129 certified-year harness stamp;
+3. the round-35 process-global allow-dirty scoping ratchet; and
+4. the report-emitter worktree-stamp ratchet.
+
+No round-252 test failed.  The once-only and isolated logs have SHA-256
+`7c4fdd11ec6202ab5104813ac843713227274fc94119e3a179deec3031482b4f`
+and `57e397c8bd4199ace73dd48b7c56b1a71ec9662e330895a2179bfdfbbc31ce29`,
+respectively.  Per the one-battery rule, the full parallel battery was not
+re-run.
+
+Both the round receipt and the cumulative default receipt pass the citation
+gate with no unmapped citation; the deliberate citation plant refuses.
+
+The required independent command was attempted as `codex exec --sandbox
+read-only`.  It exited before review because its in-process app-server client
+could not initialize on the read-only filesystem.  Therefore **independent
+review unavailable in-sandbox**.  The retained review-attempt log SHA-256 is
+`eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5`.
 
 ## OPEN
 
