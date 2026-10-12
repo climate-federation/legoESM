@@ -264,6 +264,23 @@ def main(argv):
                  f" log10 e there o/N {geo:5.2f}/{gen:5.2f} share e<1e-6 o/N {gfo:.2f}/{gfn:.2f}")
         print(f"h{h:02d} | {np.nanmedian(to):6.2f} | {np.nanmedian(tk):6.2f} | {_q(to - tk)} || "
               f"{km(Ko, k128):7.2f} {km(Kkn, k128):7.2f} {km(Kn, k128):7.2f} | {km(Ko, k179):7.2f} {km(Kkn, k179):7.2f} {km(Kn, k179):7.2f}" + extra)
+    print("\nPart 1c  threshold sweep (GLM): gap share o/N | share of gap cols with an ACTIVE layer above the gap o/N")
+    for h in (8, 12, 18, 30, 40):
+        s = h * 24 - 1
+        if s >= nt:
+            break
+        row = []
+        for thr in (1e-4, 5e-4, 1e-3):
+            out = []
+            for K in (Ko, Kkn):
+                kk = K[s, wet]
+                t = turbocline(kk[:, :kw], zw[:kw], thr)
+                da = deepest_active(kk, zw, thr, ZTOP)
+                g = ~np.isnan(da) & (t < da)
+                surf = np.any((kk >= thr) & (zw[None, :] < t[:, None]), -1)
+                out.append((np.mean(g), np.mean(surf[g]) if g.any() else np.nan))
+            row.append(f"thr {thr:.0e}: {out[0][0]:.2f}/{out[1][0]:.2f} | {out[0][1]:.2f}/{out[1][1]:.2f}")
+        print(f"  h{h:02d}  " + "   ".join(row))
     s0, s1 = h0 * 24, min(h1 * 24, nt)
     hlo, fo, sto = lc_depth(LCo[s0:s1, wet], zw)
     hln, fn, stn = lc_depth(LCn[s0:s1, wet], zw)
