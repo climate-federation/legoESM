@@ -129,11 +129,19 @@ waived.
 ## Tests, controls, and OPEN
 
 - The shared gate direct tests, including allocator refusal, one-sampler-per-
-  pass control flow, and one-trace compiled timing, pass.
+  pass control flow, and one-trace compiled timing, pass **25/25**. The isolated
+  SWG production gradient-matrix row passes **1/1**.
+- The independent, stages-given, stages-chained, carried-state, and thirty-day
+  SWG ladders remain respectively **50/50**, **338/338**, **338/338**,
+  **29/29**, and **690/690** bit-identical and AT-BAR. The stage one-ULP plant
+  and the one-step broken-VJP plant each exit 1.
+- Fresh fp64 card digests remain GYRE `f02d2f42a570f413`, TSUNAMI
+  `8bb5ed6c1bc031bd`, VORTEX `f7489467bc156303`, and VORTEX_VEC
+  `5041b91c67bd1443`.
 - The GPU shell script passes syntax checking and covers agreement at
   1/24/720/1440 plus resources and ordering plants at 24/720/1440.
-- The citation gate is run explicitly on this receipt; its shifted-citation
-  plant must exit nonzero.
+- The citation gate run explicitly on this receipt finds three citations, zero
+  failures, and exits 0; shifting the stage-3 citation by two lines exits 1.
 - The inherited stale GYRE/LOCK/OVERFLOW digest pins remain GYRE-lane debt.
   Expected values are `5850bbcfcd351c29` / `4ec82201f0fae7bf` /
   `7f1ec89b3e6578f5`; actual round-6 values are `f02d2f42a570f413` /
