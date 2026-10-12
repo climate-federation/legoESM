@@ -323,36 +323,35 @@ def main(argv):
                 fn_, tn_ = face_nb(Un[s - 1], Un[s - 1], Vn[s - 1], Vn[s - 1], An[s - 1], dzt, jj, ii, k[c])
                 ref = shN[s, jj, ii, k[c]]
                 r_rec.append(SHo[s, jj, ii, k[c]] / ref); r_tp.append(to_ / ref); r_fc.append(fo_ / ref)
-                r_fk.append(SHo[s, jj, ii, k[c]] * (fk_ / tk_) / ref); r_n.append(fn_ / tn_)
+                r_fk.append(fk_ / ref); r_n.append(fn_ / tn_)
             cv = lambda x: np.mean(np.isfinite(np.asarray(x)))
             print(f"  h{h + 1:02d} | {np.nanmedian(r_rec):6.2f} | {np.nanmedian(r_tp):6.2f} | {np.nanmedian(r_fc):6.2f} | {np.nanmedian(r_fk):6.2f} || {np.nanmedian(r_n):6.2f}"
                   f"   (coverage {cv(r_rec):.2f}/{cv(r_tp):.2f}/{cv(r_fc):.2f}/{cv(r_fk):.2f})")
-        print("  (closure-est column = recorded production x face/T-pt weighting ratio built from the closure estimate: no inferred viscosity)")
+        print("  (closure-est column = absolute face-geometry production weighted by the closure estimate max(A(s-1)-2e-6, kappaM_min): no inferred viscosity)")
     # selection-bias control (GLM): unconditional face/T-pt ratio, all interior columns,
     # interfaces 10-25 m; each hour gated on both instruments over the SAME samples
     kk_rng = np.where((zw >= 10.0) & (zw <= 25.0))[0]
     jin, iin = np.meshgrid(np.arange(L.BUF, 13 - L.BUF), np.arange(L.BUF, 31 - L.BUF), indexing="ij")
-    print("Unconditional face/T-pt production ratio, all interior columns, interfaces 10-25 m: ours | NEMO (median [p25,p75]), per-hour gated")
+    print("Unconditional face/T-pt production ratio, all interior columns, interfaces 10-25 m, ours weighted by the closure estimate: ours | NEMO (median [p25,p75]), per-hour gated")
     for h in (4, 6, 8, 12, 18, 30):
         s = h * 24 - 1
         ro, rn_, gN, gO = [], [], [], []
         for kint in kk_rng:
-            f1, t1 = face_nb(Uo[s - 1], Uo[s - 1], Vo[s - 1], Vo[s - 1], NUo[s], dzt, jin, iin, kint)
+            f1, t1 = face_nb(Uo[s - 1], Uo[s - 1], Vo[s - 1], Vo[s - 1], KMc_prev[s], dzt, jin, iin, kint)
             f2, t2 = face_nb(Un[s - 1], Un[s - 1], Vn[s - 1], Vn[s - 1], An[s - 1], dzt, jin, iin, kint)
             ro.append((f1 / t1).ravel()); rn_.append((f2 / t2).ravel())
             gN.append((f2 / shN[s, jin, iin, kint]).ravel())
-            gO.append(np.full(jin.size, min(nu_gate(s, (jin + dj).ravel(), (iin + di).ravel(), np.full(jin.size, kint))
-                                            for dj, di in ((0, 0), (0, 1), (0, -1), (1, 0), (-1, 0)))))
+            gO.append(np.full(jin.size, float(np.mean(np.isfinite(KMc_prev[s, jin, iin, kint])))))   # closure-estimate weights: finite coverage
         okN, covN, qN = ratio_gate(np.concatenate(gN))
         shareO = float(np.mean(np.concatenate(gO)))
         if not (okN and shareO >= 0.9):
-            print(f"  h{h:02d}: WITHHELD (NEMO gate {'PASS' if okN else 'FAIL'} cov {covN:.2f}; ours nu bounds {shareO:.2f})")
+            print(f"  h{h:02d}: WITHHELD (NEMO gate {'PASS' if okN else 'FAIL'} cov {covN:.2f}; ours weights finite {shareO:.2f})")
             continue
         ro, rn_ = np.concatenate(ro), np.concatenate(rn_)
         jok = np.isfinite(ro) & (ro > 0) & np.isfinite(rn_) & (rn_ > 0)      # same surviving samples on both sides
         ro, rn_ = ro[jok], rn_[jok]
         print(f"  h{h:02d}: ours {np.median(ro):6.2f} [{np.percentile(ro, 25):.2f},{np.percentile(ro, 75):.2f}] | "
-              f"NEMO {np.median(rn_):6.2f} [{np.percentile(rn_, 25):.2f},{np.percentile(rn_, 75):.2f}]  (gates: NEMO IQR {qN[0]:.3f}-{qN[2]:.3f}, ours nu {shareO:.2f})")
+              f"NEMO {np.median(rn_):6.2f} [{np.percentile(rn_, 25):.2f},{np.percentile(rn_, 75):.2f}]  (gates: NEMO IQR {qN[0]:.3f}-{qN[2]:.3f}, ours weights finite {shareO:.2f})")
 
     print(f"\nPer 1-h window at the gap interface: median [IQR] of ours-NEMO (cumulative, m2/s2); NEMO median in ()")
     for h in range(h0, h1):
