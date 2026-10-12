@@ -35,6 +35,7 @@ ALPHA, BETA, DT = 3.0e-4, 7.5e-4, 150.0   # coeff-ok: linear-EOS proxy shared wi
 RN_LC = 0.25                              # coeff-ok: ORCA1 namelist_cfg rn_lc (both cards)
 AVT_C = 5.0e-4                            # coeff-ok: NEMO zdfmxl avt_c turbocline threshold
 ZTOP = 40.0
+ZTURB = 100.0
 PREFIX = "ORCA1_1ts_20000101_20000102_eqs1ts_"
 
 
@@ -51,10 +52,12 @@ def step_depth(T, S, zt, ztop):
 
 
 def turbocline(K, zw, avt_c):
-    """first interface (top-down) with K < avt_c; deepest interface if none."""
+    """first interface (top-down) with K < avt_c among the interfaces given;
+    +inf (censored: deeper than the window) if none crosses.  Callers pass
+    only the validated window (codex 2026-10-12: searching dry rows turned
+    ours' zeros vs NEMO's NaNs into a fake 70 vs 100 m difference)."""
     below = K < avt_c
-    i = np.where(np.any(below, -1), np.argmax(below, -1), K.shape[-1] - 1)
-    return zw[i]
+    return np.where(np.any(below, -1), zw[np.argmax(below, -1)], np.inf)
 
 
 def lc_depth(inc, zw):
@@ -64,6 +67,7 @@ def lc_depth(inc, zw):
     -> h_lc <= zw[0] (NEMO's strict z < h test leaves every saved interface
     untouched), returned as zw[0] with status -1; positive down to the last
     saved interface -> h_lc beyond the dump, returned as +inf, status +1.
+    An interior zero inside the positive run -> status 2 (cutoff unknown).
     Only status 0 is an exact depth.  Also returns the first positive index."""
     pos = inc > 0
     any_pos = np.any(pos, -1)
@@ -74,7 +78,10 @@ def lc_depth(inc, zw):
     j = np.argmax(stop, -1)
     h = np.where(has_stop, zw[np.minimum(j, len(zw) - 1)], np.inf)
     h = np.where(any_pos, h, zw[0])
-    status = np.where(~any_pos, -1, np.where(has_stop, 0, 1))
+    # a positive increment BELOW the first stop = an interior zero inside the
+    # run (float32 drop-out): the cutoff is unknown -> status 2, never exact
+    gap = has_stop & np.any(pos & (np.arange(inc.shape[-1]) > j[..., None]), -1)
+    status = np.where(~any_pos, -1, np.where(gap, 2, np.where(has_stop, 0, 1)))
     return h, first, status
 
 
@@ -154,25 +161,27 @@ def main(argv):
     nt = min(To.shape[0], Tn.shape[0])
     print(f"steps ours {To.shape[0]} NEMO {Tn.shape[0]} -> using {nt}; dtype {To.dtype}/{Tn.dtype}")
     ktop = int(np.searchsorted(zt, ZTOP)) + 2          # T-levels feeding interfaces above ZTOP
-    kw = int(np.searchsorted(zw, ZTOP)) + 2
+    kw = int(np.searchsorted(zw, ZTURB)) + 1           # turbocline window = interfaces down to ZTURB
     wet = (np.all(np.isfinite(Tn[:nt, :, :ktop]) & np.isfinite(Sn[:nt, :, :ktop]), (0, 2))
            & np.all(np.isfinite(Kn[:nt, :, :kw]), (0, 2))
            & np.all((To[:nt, :, :ktop] != 0) & np.isfinite(To[:nt, :, :ktop]) & np.isfinite(So[:nt, :, :ktop]), (0, 2))
            & np.all(np.isfinite(Ko[:nt, :, :kw]), (0, 2)))
     k12 = int(np.argmin(np.abs(0.5 * (zt[:-1] + zt[1:]) - 12.8)))
     print(f"{wet.sum()} wet interior cols; K12 interface {k12} at {0.5 * (zt[k12] + zt[k12 + 1]):.2f} m")
-    print("\nPart 1  h | zstep ours | NEMO | o-N median [IQR] | share at K12 o/N || zturb ours | NEMO | o-N median [IQR]")
+    print("\nPart 1  h | zstep ours | NEMO | o-N median [IQR] | share at K12 o/N || zturb ours | NEMO | o-N median [IQR] | censored share")
     for h in range(0, 49):
         s = max(h * 24 - 1, 0)
         if s >= nt:
             break
         zo, io = step_depth(To[s, wet], So[s, wet], zt, ZTOP)
         zn, inn = step_depth(Tn[s, wet], Sn[s, wet], zt, ZTOP)
-        to = turbocline(Ko[s, wet], zw, AVT_C)
-        tn = turbocline(Kn[s, wet], zw, AVT_C)
+        to = turbocline(Ko[s, wet, :kw], zw[:kw], AVT_C)
+        tn = turbocline(Kn[s, wet, :kw], zw[:kw], AVT_C)
+        cens = f"{np.mean(np.isinf(to)):.2f}/{np.mean(np.isinf(tn)):.2f}"
+        to, tn = np.where(np.isinf(to), np.nan, to), np.where(np.isinf(tn), np.nan, tn)
         print(f"h{h:02d} | {np.median(zo):6.2f} | {np.median(zn):6.2f} | {_q(zo - zn)} | "
               f"{np.mean(io == k12):.2f}/{np.mean(inn == k12):.2f} || "
-              f"{np.median(to):6.2f} | {np.median(tn):6.2f} | {_q(to - tn)}")
+              f"{np.nanmedian(to):6.2f} | {np.nanmedian(tn):6.2f} | {_q(to - tn)} | >{ZTURB:.0f}m o/N {cens}")
     s0, s1 = h0 * 24, min(h1 * 24, nt)
     hlo, fo, sto = lc_depth(LCo[s0:s1, wet], zw)
     hln, fn, stn = lc_depth(LCn[s0:s1, wet], zw)
@@ -182,22 +191,33 @@ def main(argv):
     un = implied_us(LCn[s0:s1, wet], hx_n, fn, zw)
     print(f"\nPart 2  Langmuir, steps {s0}..{s1 - 1} (h{h0}-h{h1}), all wet col x step samples")
     for lab, st in (("ours", sto), ("NEMO", stn)):
-        print(f"  {lab} status share: <=first interface {np.mean(st == -1):.3f}  exact {np.mean(st == 0):.3f}  beyond dump {np.mean(st == 1):.3f}")
+        print(f"  {lab} status share: <=first interface {np.mean(st == -1):.3f}  exact {np.mean(st == 0):.3f}  beyond dump {np.mean(st == 1):.3f}  gap {np.mean(st == 2):.3f}")
     print(f"  h_lc [m] (exact only) ours {_q(hx_o)}")
     print(f"  h_lc [m] (exact only) NEMO {_q(hx_n)}")
     print(f"  h_lc ours-NEMO (paired, both exact) {_q(np.where(both, hlo - hln, np.nan))}")
-    print(f"  share h_lc <= 12.8 m (censored included): ours {np.mean(hlo <= 12.8):.3f}  NEMO {np.mean(hln <= 12.8):.3f}")
+    hlo = np.where(sto == 2, np.nan, hlo); hln = np.where(stn == 2, np.nan, hln)   # gap: cutoff unknown
+    print(f"  share h_lc <= 12.8 m (censored included, gaps excluded): ours {np.nanmean(hlo <= 12.8):.3f}  NEMO {np.nanmean(hln <= 12.8):.3f}")
     print(f"  share ours h_lc < 12.8 m among samples with NEMO h_lc > 12.8 m: "
-          f"{np.mean((hlo < 12.8)[hln > 12.8]):.3f}  (n={np.sum(hln > 12.8)})")
-    print(f"  implied taum ratio ours/NEMO (zus^2, first active interface) {_q((uo / un) ** 2)}")
+          f"{np.nanmean(np.where(np.isnan(hlo), np.nan, hlo < 12.8)[hln > 12.8]):.3f}  (n={np.sum(hln > 12.8)})")
+    print("  NOTE: 'implied amplitude' = zus^2 from inverting each model's own increment with NEMO's formula;"
+          " a z-independent port defect is degenerate with taum here (GLM 2026-10-12) -- not a measured stress.")
+    print(f"  implied amplitude ratio ours/NEMO (zus^2, first active interface; monitor only) {_q((uo / un) ** 2)}")
     po, spo = profile_us(LCo[s0:s1, wet], hx_o, zw)
     pn, spn = profile_us(LCn[s0:s1, wet], hx_n, zw)
-    print(f"  implied taum ratio ours/NEMO (zus^2, max-increment interface) {_q((po / pn) ** 2)}")
+    amp = (po / pn) ** 2
+    print(f"  implied amplitude ratio ours/NEMO (zus^2, max-increment interface, both exact) {_q(amp)}")
     print(f"  per-level zus spread max/min (1 = NEMO shape): ours {_q(spo)}  NEMO {_q(spn)}")
+    print(f"  share spread <= 1.01: ours {np.nanmean(spo[np.isfinite(spo)] <= 1.01):.3f}  NEMO {np.nanmean(spn[np.isfinite(spn)] <= 1.01):.3f}")
+    ok = np.isfinite(amp)
+    if ok.sum() > 30:
+        edges = np.percentile(hln[ok], [0, 33.3, 66.7, 100])
+        for lo, hi in zip(edges[:-1], edges[1:]):
+            b = ok & (hln >= lo) & (hln <= hi)
+            print(f"  amplitude ratio for NEMO h_lc in [{lo:5.1f},{hi:5.1f}] m: {_q(amp[b])}")
     print(f"  positive run with interior zero (float32 drop-out): ours {gap_share(LCo[s0:s1, wet]):.4f}  NEMO {gap_share(LCn[s0:s1, wet]):.4f}")
     tau_n = un ** 2 / (2.0 * L_CSD())
     print(f"  CHECK NEMO implied taum / |utau| (>=1, ~1 if vtau small) {_q(tau_n / np.abs(utau[s0:s1, wet]))}")
-    print(f"  NEMO implied taum [N/m2] {_q(tau_n)}  ours {_q(uo ** 2 / (2.0 * L_CSD()))}")
+    print(f"  NEMO implied taum [N/m2] {_q(tau_n)}  ours implied {_q(uo ** 2 / (2.0 * L_CSD()))}")
 
 
 def L_CSD():

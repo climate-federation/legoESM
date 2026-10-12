@@ -24,7 +24,7 @@ def test_turbocline_is_first_interface_below_threshold():
     zw = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
     K = np.array([1e-2, 3e-3, 4e-4, 1e-2, 1e-5])
     assert P.turbocline(K, zw, 5e-4) == 3.0
-    assert P.turbocline(np.full(5, 1e-2), zw, 5e-4) == 5.0
+    assert np.isinf(P.turbocline(np.full(5, 1e-2), zw, 5e-4))
 
 
 def test_lc_depth_and_zus_inversion_recover_nemo_formula_inputs():
@@ -50,6 +50,8 @@ def test_lc_depth_and_zus_inversion_recover_nemo_formula_inputs():
     assert s0[0] == -1 and h0[0] == zw[0]
     hd, _, sd = P.lc_depth(np.ones((1, 12)), zw)        # positive below the last saved interface
     assert sd[0] == 1 and np.isinf(hd[0])
+    drop = np.where(zw < zw[6], 1.0, 0.0); drop[2] = 0.0  # interior zero inside the run
+    assert P.lc_depth(drop[None], zw)[2][0] == 2
 
 
 def test_nemo_check_constant_matches_zdftke_literals():
