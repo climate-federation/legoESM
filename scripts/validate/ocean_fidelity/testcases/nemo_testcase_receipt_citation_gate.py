@@ -251,6 +251,10 @@ FILES = {
         _ORCA2_R230FOLDTRP / "ppsrc/nemo/domzgr.f90"),
     "ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/domqco.f90": (
         _ORCA2_R230FOLDTRP / "ppsrc/nemo/domqco.f90"),
+    "ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/domain.f90": (
+        _ORCA2_R230FOLDTRP / "ppsrc/nemo/domain.f90"),
+    "ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90": (
+        _ORCA2_R230FOLDTRP / "ppsrc/nemo/dynspg_ts.f90"),
     "ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dommsk.f90": (
         _ORCA2_R230FOLDTRP / "ppsrc/nemo/dommsk.f90"),
     "ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/lbcnfd.f90": (
@@ -2759,6 +2763,19 @@ CITATION_MAP = {
         ('!==  ratio at u-,v-point  ==!', 2),
         ('END DO   ;   END DO', 5),
         10],
+    # --- ORCA2 round 248: kt=5 land-support and exit-depth writer ------
+    'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/domain.f90:193-215': [
+        ('ht_0(:,:) = 0._wp', 1),
+        ('r1_hv_0(:,:) = ssvmask(:,:)', 1),
+        23],
+    'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/domqco.f90:207-218': [
+        ('pr3t(ji,jj) = pssh(ji,jj) * r1_ht_0', 1),
+        ('* r1_hv_0(ji,jj) * r1_e1e2v(ji,jj)', 1),
+        12],
+    'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:712-718': [
+        ('hu_e (ji,jj) =    hu_0(ji,jj) + zsshu_a(ji,jj)', 1),
+        ('hvr_e(ji,jj) = ssvmask(ji,jj)', 1),
+        7],
     # --- ORCA2 round 233: atomic stage-transport geometry unit -------
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dommsk.f90:206-213': [
         ('Ocean/land mask at u-, v-, and f-points', 1),
