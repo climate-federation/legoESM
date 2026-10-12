@@ -82,12 +82,19 @@ def _continuity_terms(inputs: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
     dv = np.subtract(zh_v, south)
     flux_sum = np.add(du, dv)
     divergence = np.multiply(flux_sum, inputs["r1_e1e2t"])
+    return {"du": du, "dv": dv, **_continuity_output_terms(inputs, divergence)}
+
+
+def _continuity_output_terms(
+    inputs: dict[str, np.ndarray], divergence: np.ndarray,
+) -> dict[str, np.ndarray]:
+    """Replay the SSH statement from its already-materialised divergence."""
     rhs = np.add(inputs["ssh_frc"], divergence)
     increment = np.multiply(inputs["rDt_e"], rhs)
     raw = np.subtract(inputs["sshn_e"], increment)
     output = np.multiply(raw, inputs["ssmask"])
     return {
-        "du": du, "dv": dv, "zhdiv": divergence, "rhs": rhs,
+        "zhdiv": divergence, "rhs": rhs,
         "increment": increment, "raw_output": raw, "output": output,
     }
 
@@ -211,11 +218,23 @@ def measure(deck_root: Path, frame_root: Path, spg_root: Path,
         "rDt_e": np.asarray(oracle["i000_entry_sc"][0], np.float64),
         "ssmask": mask,
     }
-    candidate_terms = _continuity_terms(candidate_inputs)
     reference_terms = _continuity_terms(reference_inputs)
     candidate_inputs["zhdiv"] = np.asarray(
         trace.substeps["continuity_divergence"][substep], np.float64)
     reference_inputs["zhdiv"] = reference_terms["zhdiv"]
+    # The compact U/V arrays carry one extra boundary face that their
+    # canonical NEMO-shaped images cannot reconstruct.  The passive trace
+    # exposes the exact two written differences used by the live divergence;
+    # replay from those rather than manufacturing a cyclic/south face.
+    candidate_divergence_replay = np.multiply(
+        np.add(
+            np.asarray(trace.substeps["continuity_du"][substep], np.float64),
+            np.asarray(trace.substeps["continuity_dv"][substep], np.float64),
+        ),
+        candidate_inputs["r1_e1e2t"],
+    )
+    candidate_terms = _continuity_output_terms(
+        candidate_inputs, candidate_divergence_replay)
     operand_rows = {
         name: _score(candidate_inputs[name], reference_inputs[name])
         for name in OPERANDS
