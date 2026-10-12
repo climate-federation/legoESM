@@ -15,7 +15,10 @@ The incoming tip was `402ba0c4b9bcf2bde0c384994bd4c45ae1f834de`.
 Preregistration is commit `037a73248`; ladder and climate-instrument
 implementation is commit `791b2810fe52576734a6c44ecfd73ff1f59acea9`;
 and the independent-review corrections are commit
-`a028d0c51af2d5383588512c03cd6324dadc3ea4`.
+`a028d0c51af2d5383588512c03cd6324dadc3ea4`.  Climate deck admission is
+completed by `877f03598` and `141942f8e`: integer fields cannot be truncated,
+legoESM must match the complete resolved deck apart from run length, and NEMO
+must match the pinned executable, full namelists, and SHA manifest.
 The admitted stage and month records remain content-pinned by their acquisition
 admissions.  Raw stage frames are 648 by 648 at 6.25 km (43.67 MB each) and 168
 by 168 at 25 km (2.94 MB each); the recorded production bounds supplied to the
@@ -129,8 +132,9 @@ transcendental numbers, not certified ladder results.
 
 ## Tests, preflights, and evidence
 
-The exact current-tip battery and terminal count are archived in
-`round4/direct_tests.log`: **212/212 passed** on CPU with x64 enabled.  It
+The exact final-implementation battery at `141942f8e` and terminal count are
+archived in `round4/direct_tests.log`: **212/212 passed** on CPU with x64
+enabled.  It
 includes the card, mounted ladder, geometry, acquisition-record, GPU-driver,
 and new climate-instrument tests.  `git diff --check` and focused Ruff checks
 pass.
@@ -151,8 +155,12 @@ were dispositioned before final review: the exact gate now compares raw IEEE
 words and has a signed-zero plant; the month control carries deck/acquisition
 provenance; the climate instrument admits the deck, supports arbitrary
 windows, emits cross-model scalars, and directly tests its clock and spectrum
-controls.  All ladder evidence and the direct battery were regenerated at the
-corrected commit; no pre-fix exact count is retained as evidence.
+controls.  A second review HOLD added full free-slip/structural deck admission:
+the legoESM manifest now matches every resolved field except run length, and
+NEMO's executable, complete cfg/ref namelists, SHA manifest, spacing, layer
+count, and `rn_shlat` are all binding.  All ladder evidence and the direct
+battery were regenerated at their corrected implementation commits; no
+pre-fix exact count is retained as evidence.
 
 ## Decision and acquisition boundary
 
