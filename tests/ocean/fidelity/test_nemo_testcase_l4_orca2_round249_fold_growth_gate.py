@@ -94,10 +94,11 @@ def _reports():
     return off, unit, substeps, slow
 
 
-def test_classifier_names_the_barotropic_drag_output():
+def test_classifier_retracts_the_barotropic_drag_output():
     result = gate.classify(*_reports())
-    assert result["status"] == "HELD_R249_BAROTROPIC_DRAG_OWNER_NAMED"
-    assert all(row["first_nonbit_output"] == "post_drag_v"
+    assert result["status"] == "RETRACTED_R249_DRAG_OWNER_BY_R250"
+    assert result["predictions"]["R249-P3"].startswith("RETRACTED")
+    assert all(row["retracted_non_source_exact_output"] == "post_drag_v"
                for row in result["slow_forcing"].values())
     assert all((row["kt"], row["stage"]) == (1, 1)
                for row in result["first_growth"].values())

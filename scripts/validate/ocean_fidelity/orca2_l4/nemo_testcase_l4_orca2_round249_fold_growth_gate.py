@@ -459,9 +459,13 @@ def classify(off: dict[str, dict], unit: dict[str, dict],
                 f"{label}: slow-V downstream source order moved")
         slow_summary[label] = {
             "last_exact_output": "depth_mean_v",
-            "first_nonbit_output": "post_drag_v",
+            "retracted_non_source_exact_output": "post_drag_v",
             "post_drag": slow_rows["post_drag_v"],
             "final_slow_v": slow_rows["final_slow_v"],
+            "retraction": (
+                "round 250 replays the literal drag correction exactly; "
+                "this field came from the private slow-forcing override"
+            ),
         }
 
     require((first_growth["independent"]["kt"],
@@ -474,7 +478,7 @@ def classify(off: dict[str, dict], unit: dict[str, dict],
          first_growth["independent"]["stage"]) == (1, 1)
         and all(fold_hits[label] for label in LABELS))
     require(kt1_stage1_growth, "kt=1 stage-1 growth boundary moved")
-    status = "HELD_R249_BAROTROPIC_DRAG_OWNER_NAMED"
+    status = "RETRACTED_R249_DRAG_OWNER_BY_R250"
     return {
         "format": "nemo-testcase-l4-orca2-round249-classification-v1",
         "status": status,
@@ -489,7 +493,7 @@ def classify(off: dict[str, dict], unit: dict[str, dict],
         "predictions": {
             "R249-P1": "CONFIRMED",
             "R249-P2": "REFUTED_TRACERS_EXACT_AT_KT1_STAGE1",
-            "R249-P3": "REFUTED_FIRST_OUTPUT_IS_BAROTROPIC_DRAG",
+            "R249-P3": "RETRACTED_BY_R250_NON_SOURCE_EXACT_ARM",
             "R249-P4": "CONFIRMED_MEASUREMENT_ONLY",
             "R249-P5": "CONFIRMED" if plant == "none" else "PLANT",
         },
