@@ -128,7 +128,8 @@ def main() -> int:
                     "measurement arguments are incomplete")
             result = r261.measure(
                 args.deck_root, args.frame_root, args.record_root,
-                args.prior_report, args.label, args.expect_commit)
+                args.prior_report, args.label, args.expect_commit,
+                associate_stage_v_ratio=True)
         else:
             require(args.classify is not None,
                     "classification reports are required")

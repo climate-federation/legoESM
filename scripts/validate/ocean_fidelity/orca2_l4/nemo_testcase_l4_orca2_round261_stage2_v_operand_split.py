@@ -110,7 +110,7 @@ def _run_model(card, state, forcing, hooks):
 
 def measure(
     deck_root: Path, frame_root: Path, record_root: Path, prior_report: Path,
-    label: str, expect_commit: str,
+    label: str, expect_commit: str, *, associate_stage_v_ratio: bool = False,
 ) -> dict[str, object]:
     import jax
     import jax.numpy as jnp
@@ -180,6 +180,7 @@ def measure(
         _nemo_ws_qco_stage_faces(
             eta_stage, h_ref, compact_u, compact_v, grid,
             z_coord=z_coord, include_reciprocals=True,
+            associate_v_ratio=associate_stage_v_ratio,
         ))
     geometry = traced.stage_geometry[1]
     candidate_v = jnp.asarray(traced.stage_states[1][1])
