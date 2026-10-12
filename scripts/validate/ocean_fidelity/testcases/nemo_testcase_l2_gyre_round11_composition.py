@@ -54,7 +54,9 @@ def _xy_interior(values: np.ndarray, nx: int, ny: int) -> np.ndarray:
     return values.reshape((nx - 4, ny - 4), order="F").T
 
 
-def read_stage2_composition(path: Path) -> dict:
+def read_stage2_composition(
+    path: Path, *, expected_dims: tuple[int, int, int] = DIMS,
+) -> dict:
     """Read the WRITE-only `NEMO_L2_RKSTG_1` stage-2 composition record."""
     with path.open("rb") as handle:
         magic = handle.read(16).decode("ascii").rstrip()
@@ -64,7 +66,7 @@ def read_stage2_composition(path: Path) -> dict:
     require(magic == "NEMO_L2_RKSTG_1", f"{path}: bad magic")
     require(
         (version, kt, stage, kbb, kmm, krhs, kaa, nx, ny, nz, bits)
-        == (1, 1, 2, 1, 3, 2, 2, *DIMS, 64),
+        == (1, 1, 2, 1, 3, 2, 2, *expected_dims, 64),
         f"{path}: bad header {header}",
     )
     n3 = nx * ny * nz

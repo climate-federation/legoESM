@@ -7871,6 +7871,21 @@ class LatLonCGridOceanModel:
                 _u_live_mask = state.u_mask.data[..., None]
                 _v_live_mask = state.v_mask.data[..., None]
                 _active_live = mask_3d
+            if self._nemo_ws_test_hooks.barotropic_atomic_fold_unit is True:
+                # stprk3_stg.f90:282-285 consumes the domain's associated
+                # three-dimensional face masks in the same indivisible stage
+                # transport as e3u/e3v and zub/zvb.  The compact partial-cell
+                # masks above lose ORCA2's wet V pivot row.  Reuse D114's one
+                # resolved raw-mesh source for the private complete-unit arm;
+                # no public selector can reach this candidate before its
+                # Decision-96 landing gate passes.
+                _resolved_stage_ops = nemo_qco_resolved_mesh_operands(
+                    _zc, _grid, _u_live_mask, _v_live_mask, h_k_old.dtype,
+                    h_k_old.shape[-1])
+                _v_live_mask = jnp.concatenate(
+                    [jnp.zeros_like(_resolved_stage_ops.vmask3[:1]),
+                     _resolved_stage_ops.vmask3],
+                    axis=0)
             # e3t_0: the reference (eta = 0) thickness ladder, so that
             # h_stage = e3t_0*(1 + eta/H) and sum_k e3t_0 = H_bathy.
             _h_ref_ws = compute_layer_thickness(
