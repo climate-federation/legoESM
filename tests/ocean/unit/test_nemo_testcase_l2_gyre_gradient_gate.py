@@ -380,6 +380,17 @@ def test_cpu_scaling_suite_gates_frozen_predictions_and_all_plants():
     ]
     assert len(outside) == 1
     assert almost_linear["ratio_1440_to_720"] == pytest.approx(2.0)
+    equality = plants["equal_adjacent_window"]
+    assert equality["checks"] == {
+        "positive_fitted_seconds_per_step": True,
+        "time_1440_exceeds_time_720": True,
+        "strictly_increasing_at_every_window": False,
+        "every_adjacent_ratio_in_preregistered_band": True,
+        "uniform_1440_to_720_ratio_in_preregistered_band": True,
+    }
+    assert equality["adjacent_normalized_ratios"]["360-720"] == pytest.approx(
+        0.5)
+    assert equality["ratio_1440_to_720"] == pytest.approx(2.0)
     args = G.parse_args([
         "scaling-suite", "--card", "SWG", "--steps", "1440",
         "--schedule", "uniform", "--expect-commit", "deadbeef",

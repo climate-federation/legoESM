@@ -75,6 +75,15 @@ decreasing 1440-step endpoint; and the strictly increasing near-linear series
 `[0.24, 0.96, 5.41, 7.2, 14.4]`, whose 96-360 normalized ratio is
 `1.502778`. The last plant keeps every window increasing and keeps the retained
 uniform 1440/720 ratio at `2.0`, so only the new adjacent-ratio check fires.
+The first version of this plant, `[0.24, 0.96, 3.6, 10.81, 14.4]`, also failed
+the retained uniform endpoint check and therefore did not isolate the new
+contract; that control is **RETRACTED** and its artifact is retained as
+`cpu_scaling_uniform_adjacent_ratio_outside_band_nondiscriminating_retracted.json`.
+An additional strict-monotonicity isolation control
+`[0.24, 0.96, 3.6, 3.6, 7.2]` keeps all four normalized ratios inside the
+band (the equality interval is exactly the inclusive lower bound `0.5`) and
+keeps every retained check passing; only strict monotonicity fails, so the
+suite returns **REFUTED**, exit 1.
 
 ## Retained agreement, GPU cost, and composition
 
@@ -103,8 +112,8 @@ The fifteen `cpu_resources_*` JSONs, three `cpu_scaling_*` JSONs, and four
 `*_plant.json` files stamp clean producer `cc594f691b`.
 
 - The shared gate direct tests pass **32/32**.
-- All three real scaling suites exit 0 CONFIRMED; all four scaling plants exit
-  1 REFUTED.
+- All three real scaling suites exit 0 CONFIRMED; all four required scaling
+  plants and the added monotonicity-isolation control exit 1 REFUTED.
 - The independent, given-stage, chained-stage, carried-state, and 30-day SWG
   ladders remain AT-BAR and bit-identical; the stage one-ULP plant exits 1.
 - Under an explicitly instantiated fp64 policy, fresh card hashes remain GYRE

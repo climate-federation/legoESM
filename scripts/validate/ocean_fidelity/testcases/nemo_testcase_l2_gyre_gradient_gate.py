@@ -67,6 +67,7 @@ SCALING_PLANTS = (
     "reviewer_nonmonotonic",
     "decreasing_endpoint",
     "adjacent_ratio_outside_band",
+    "equal_adjacent_window",
 )
 GYRE_FIELDS = ("T", "S", "u", "v")
 SWG_FIELDS = ("ssh", "u", "v")
@@ -1116,6 +1117,11 @@ def classify_scaling_suite(
         # The retained uniform 1440/720 endpoint ratio remains exactly 2.0.
         evaluated = dict(zip(
             SWG_SCALING_STEPS, (0.24, 0.96, 5.41, 7.2, 14.4)))
+    elif plant == "equal_adjacent_window":
+        # Only strict monotonicity fails: the equality makes its normalized
+        # ratio exactly the inclusive lower bound while all legacy checks pass.
+        evaluated = dict(zip(
+            SWG_SCALING_STEPS, (0.24, 0.96, 3.6, 3.6, 7.2)))
     elif plant is not None:
         raise ValueError(f"unknown scaling plant {plant!r}")
 
