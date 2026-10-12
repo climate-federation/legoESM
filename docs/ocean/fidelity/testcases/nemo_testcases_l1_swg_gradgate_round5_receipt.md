@@ -111,7 +111,7 @@ Artifacts are under
 The fifteen `cpu_resources_*` JSONs, three `cpu_scaling_*` JSONs, and four
 `*_plant.json` files stamp clean producer `cc594f691b`.
 
-- The shared gate direct tests pass **32/32**.
+- The shared gate direct tests pass **33/33**.
 - All three real scaling suites exit 0 CONFIRMED; all four required scaling
   plants and the added monotonicity-isolation control exit 1 REFUTED.
 - The independent, given-stage, chained-stage, carried-state, and 30-day SWG
