@@ -20,7 +20,8 @@ refuse() {
 readonly COMMIT=$(git rev-parse HEAD)
 
 CUDA_VISIBLE_DEVICES=1 JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 \
-  XLA_PYTHON_CLIENT_PREALLOCATE=false XLA_PYTHON_CLIENT_ALLOCATOR=platform \
+  XLA_PYTHON_CLIENT_PREALLOCATE=false \
+  env -u XLA_PYTHON_CLIENT_ALLOCATOR \
   "$PYTHON" -c 'import jax; devices=jax.devices(); assert jax.default_backend() == "gpu", jax.default_backend(); assert len(devices) == 1, devices; print(devices[0])'
 nvidia-smi -i 1 --query-gpu=index,memory.used --format=csv,noheader
 
@@ -29,7 +30,8 @@ run_row() {
   shift
   [[ ! -e "$output" ]] || refuse "refusing to overwrite evidence: $output" 65
   CUDA_VISIBLE_DEVICES=1 JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 PYTHONPATH="$MODEL_PATH" \
-    XLA_PYTHON_CLIENT_PREALLOCATE=false XLA_PYTHON_CLIENT_ALLOCATOR=platform \
+    XLA_PYTHON_CLIENT_PREALLOCATE=false \
+    env -u XLA_PYTHON_CLIENT_ALLOCATOR \
     "$PYTHON" "$GATE" "$@" --transcendentals native \
       --expect-commit "$COMMIT" --output "$output"
   "$PYTHON" -c '
@@ -50,7 +52,8 @@ run_suite() {
   shift 2
   [[ ! -e "$output" ]] || refuse "refusing to overwrite evidence: $output" 65
   CUDA_VISIBLE_DEVICES=1 JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 PYTHONPATH="$MODEL_PATH" \
-    XLA_PYTHON_CLIENT_PREALLOCATE=false XLA_PYTHON_CLIENT_ALLOCATOR=platform \
+    XLA_PYTHON_CLIENT_PREALLOCATE=false \
+    env -u XLA_PYTHON_CLIENT_ALLOCATOR \
     "$PYTHON" "$GATE" resource-suite --card SWG --steps "$steps" \
       --expect-commit "$COMMIT" --output "$output" "$@"
 }

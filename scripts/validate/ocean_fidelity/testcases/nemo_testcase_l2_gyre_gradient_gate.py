@@ -43,7 +43,10 @@ from legoesm.training.checkpoint_schedule import checkpointed_loop
 GYRE_CARD = "GYRE-zco"
 SWG_CARD = "SWG"
 CARD_STEPS = {GYRE_CARD: (1, 6), SWG_CARD: (1, 24, 720, 1440)}
-RESOURCE_STEPS = {GYRE_CARD: (1, 6), SWG_CARD: (24, 720, 1440)}
+RESOURCE_STEPS = {
+    GYRE_CARD: (1, 6),
+    SWG_CARD: (24, 96, 360, 720, 1440),
+}
 REVFWD_TOL = 1.0e-9
 FD_TOL = 0.05
 FD_STEP = 1.0e-3
@@ -108,6 +111,13 @@ class GateContext(NamedTuple):
     initial_state: object
     surface_forcings: object
     checkpointed_step: object
+
+
+class ReversePassMeasurement(NamedTuple):
+    value: jax.Array
+    gradient: jax.Array
+    wall_seconds: float
+    sampler: object
 
 
 def require(condition: bool, message: str) -> None:
@@ -800,9 +810,31 @@ def require_gpu_allocator_instrument() -> None:
         "GPU resources require XLA_PYTHON_CLIENT_PREALLOCATE=false before JAX import",
     )
     require(
-        allocator == "platform",
-        "GPU resources require XLA_PYTHON_CLIENT_ALLOCATOR=platform before JAX import",
+        allocator != "platform",
+        "GPU resources refuse XLA_PYTHON_CLIENT_ALLOCATOR=platform because "
+        "JAX device memory_stats() is unavailable",
     )
+
+
+def measure_blocked_reverse(reverse, zero_alpha, backend: str):
+    """Time one blocked reverse execution with a single-use memory sampler."""
+    sampler = PeakMemorySampler(backend)
+    sampler.start()
+    started = time.perf_counter()
+    try:
+        value, gradient = reverse(zero_alpha)
+        jax.block_until_ready((value, gradient))
+        wall_seconds = time.perf_counter() - started
+    finally:
+        sampler.stop()
+    return ReversePassMeasurement(value, gradient, wall_seconds, sampler)
+
+
+def measure_cold_and_warm_reverse(reverse, zero_alpha, backend: str):
+    """Use distinct sampler threads for the cold and warm reverse passes."""
+    cold = measure_blocked_reverse(reverse, zero_alpha, backend)
+    warm = measure_blocked_reverse(reverse, zero_alpha, backend)
+    return cold, warm
 
 
 def extrapolate_360(schedule: str, baseline_mib: float, peak6_mib: float) -> float:
@@ -963,9 +995,9 @@ def classify_resource_suite(rows: list[dict], *, plant: bool = False) -> dict:
 def measure_resources(card: str, n_steps: int, schedule: str, *,
                       transcendentals: str = "libm"):
     """Measure a fresh-process GPU reverse or a blocked warm CPU reverse."""
-    context = build_context(card, transcendentals=transcendentals)
     require(n_steps in RESOURCE_STEPS[card],
             f"{card} resource steps must be one of {RESOURCE_STEPS[card]}")
+    context = build_context(card, transcendentals=transcendentals)
     zero = zero_perturbation(context)
     truth_state = production_rollout(context, zero, n_steps)
     jax.block_until_ready(truth_state)
@@ -990,7 +1022,10 @@ def measure_resources(card: str, n_steps: int, schedule: str, *,
         )
         return loss(value)
 
-    reverse = jax.value_and_grad(line)
+    # The measured object is a compiled reverse executable.  Without this
+    # outer JIT, every invocation retraces the transformed Python function and
+    # the alleged warm-pass timer includes a step-independent trace/compile.
+    reverse = jax.jit(jax.value_and_grad(line))
     dtype = jax.tree_util.tree_leaves(base)[0].dtype
     zero_alpha = jnp.asarray(0.0, dtype=dtype)
 
@@ -1008,26 +1043,17 @@ def measure_resources(card: str, n_steps: int, schedule: str, *,
     # reset locally after compilation.
     device_stats_before = (
         device_memory_stats(jax.devices()[0]) if backend == "gpu" else None)
-    sampler = PeakMemorySampler(backend) if backend == "gpu" else None
-    if sampler is not None:
-        sampler.start()
-    cold_started = time.perf_counter()
-    cold_value, cold_gradient = reverse(zero_alpha)
-    jax.block_until_ready((cold_value, cold_gradient))
-    cold_wall_s = time.perf_counter() - cold_started
-    if sampler is not None:
-        sampler.stop()
+    cold, warm = measure_cold_and_warm_reverse(
+        reverse, zero_alpha, backend)
     device_stats_after = (
         device_memory_stats(jax.devices()[0]) if backend == "gpu" else None)
-
-    if backend == "cpu":
-        sampler = PeakMemorySampler(backend)
-    sampler.start()
-    started = time.perf_counter()
-    value, gradient = reverse(zero_alpha)
-    jax.block_until_ready((value, gradient))
-    wall_s = time.perf_counter() - started
-    sampler.stop()
+    cold_wall_s = cold.wall_seconds
+    value, gradient = warm.value, warm.gradient
+    wall_s = warm.wall_seconds
+    # GPU's process-lifetime allocator peak belongs to the first call in the
+    # fresh process, so pair it with the simultaneous cold nvidia-smi sample.
+    # CPU RSS has a resettable current value, so retain the warm-pass sample.
+    sampler = cold.sampler if backend == "gpu" else warm.sampler
     gradient_array = np.asarray(gradient)
     loss_value = float(np.asarray(value))
     gradient_finite = bool(np.all(np.isfinite(gradient_array)))
@@ -1061,6 +1087,11 @@ def measure_resources(card: str, n_steps: int, schedule: str, *,
         "schedule_primal_comparison": primal_comparison,
         "cold_compile_and_reverse_wall_seconds": cold_wall_s,
         "warm_reverse_wall_seconds": wall_s,
+        "warm_reverse_timer_span": (
+            "blocked execution of pre-jitted value_and_grad only; sampler "
+            "start and stop/join excluded"
+        ),
+        "reverse_transform": "jax.jit(jax.value_and_grad(scalar_line))",
         "loss": loss_value,
         "gradient_finite": gradient_finite,
         "gradient_nonzero": gradient_nonzero,

@@ -291,27 +291,89 @@ def test_gpu_resource_suite_marks_old_pool_rows_vacuous():
     assert "jax_allocator" in row["reason"]
 
 
-def test_swg_cli_admits_direct_1440_step_rows():
+def test_swg_cli_admits_registered_timing_rows_and_refuses_other_counts():
     agreement = G.parse_args([
         "agreement", "--card", "SWG", "--steps", "1440",
         "--expect-commit", "deadbeef", "--output", "/tmp/unused-row.json",
     ])
-    resources = G.parse_args([
-        "resources", "--card", "SWG", "--steps", "1440",
-        "--schedule", "uniform", "--expect-commit", "deadbeef",
-        "--output", "/tmp/unused-resource-row.json",
-    ])
     assert agreement.steps == 1440
-    assert resources.steps == 1440
+    for steps in (24, 96, 360, 720, 1440):
+        args = G.parse_args([
+            "resources", "--card", "SWG", "--steps", str(steps),
+            "--schedule", "uniform", "--expect-commit", "deadbeef",
+            "--output", "/tmp/unused-resource-row.json",
+        ])
+        assert args.steps == steps
+    with pytest.raises(RuntimeError, match="must be one of"):
+        G.measure_resources("SWG", 95, "uniform")
 
 
 def test_gpu_runner_disables_preallocation_and_covers_direct_1440_rows():
     source = _GPU_SCRIPT.read_text(encoding="utf-8")
     assert "XLA_PYTHON_CLIENT_PREALLOCATE=false" in source
-    assert "XLA_PYTHON_CLIENT_ALLOCATOR=platform" in source
+    assert "env -u XLA_PYTHON_CLIENT_ALLOCATOR" in source
+    assert "XLA_PYTHON_CLIENT_ALLOCATOR=platform" not in source
     assert "for steps in 1 24 720 1440" in source
     assert "for steps in 24 720 1440" in source
     assert "--plant uniform_label_uses_none" in source
+
+
+def test_gpu_allocator_contract_refuses_platform(monkeypatch):
+    monkeypatch.setenv("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+    monkeypatch.delenv("XLA_PYTHON_CLIENT_ALLOCATOR", raising=False)
+    G.require_gpu_allocator_instrument()
+    monkeypatch.setenv("XLA_PYTHON_CLIENT_ALLOCATOR", "platform")
+    with pytest.raises(RuntimeError, match="refuse.*platform"):
+        G.require_gpu_allocator_instrument()
+
+
+def test_gpu_resource_two_pass_control_uses_fresh_sampler_on_cpu(monkeypatch):
+    instances = []
+
+    class SingleUseCPUSampler:
+        def __init__(self, backend):
+            assert backend == "gpu"
+            self.started = 0
+            self.stopped = 0
+            self.baseline_mib = 1.0
+            self.peak_mib = 2.0
+            self.samples = 2
+            instances.append(self)
+
+        def start(self):
+            assert self.started == 0
+            self.started += 1
+
+        def stop(self):
+            assert self.started == 1
+            assert self.stopped == 0
+            self.stopped += 1
+
+    monkeypatch.setattr(G, "PeakMemorySampler", SingleUseCPUSampler)
+    reverse = jax.jit(jax.value_and_grad(lambda x: x**2))
+    cold, warm = G.measure_cold_and_warm_reverse(
+        reverse, jnp.asarray(3.0), "gpu")
+
+    assert len(instances) == 2
+    assert cold.sampler is instances[0]
+    assert warm.sampler is instances[1]
+    assert all(item.started == item.stopped == 1 for item in instances)
+    assert float(cold.gradient) == pytest.approx(6.0)
+    assert float(warm.gradient) == pytest.approx(6.0)
+
+
+def test_compiled_reverse_warm_call_does_not_retrace():
+    traces = 0
+
+    def loss(x):
+        nonlocal traces
+        traces += 1
+        return x**2
+
+    reverse = jax.jit(jax.value_and_grad(loss))
+    reverse(jnp.asarray(2.0))
+    reverse(jnp.asarray(3.0))
+    assert traces == 1
 
 
 def test_measurement_policy_labels_refuse_cross_backend_combinations():
