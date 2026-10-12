@@ -58,7 +58,8 @@ def band_budget(name, layers, vol_in, heat_in, band_vol, t_band, extra=None):
           f"{(tot_h - t_band * tot_v) / band_vol * 86400:+8.4f} K/day")
     if extra:
         print("  " + extra)
-    return {"adv_K_day": tot_h / band_vol * 86400, "T_band": t_band, "vol": band_vol}
+    # temperature (not heat) budget: subtract T_band x volume convergence (codex 2026-10-12)
+    return {"adv_K_day": (tot_h - t_band * tot_v) / band_vol * 86400, "T_band": t_band, "vol": band_vol}
 
 
 def ours(a):
