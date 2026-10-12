@@ -95,9 +95,34 @@ recorded closure, and disabled one-bit sensitivity. The classifier status is
 
 This round has no `packages/` diff, so no OMT, rung-0, rung-10, GYRE, DINO,
 or tank trajectory can move and their landing gates are not activated. The
-focused gate tests, once-only fidelity battery, citation gate, planted
-citation shift, cumulative citation check, and required read-only review are
-recorded below after execution.
+focused round-231/249/256/257 gate set passed `29/29`; the citation-gate unit
+set passed `17/17`. The round receipt citation gate passed all three compiled
+anchors with zero failures or unmapped citations, the cumulative default
+receipt passed with zero failures or unmapped citations, and a rigidly shifted
+`stprk3_stg.f90:282-285` plant refused with exit 1.
+
+The once-only `tests/ocean/fidelity -n 12` battery collected 3,337 tests and
+reached 99% before an xdist worker stopped producing output; the stale run was
+terminated once and was not repeated. Its preserved log SHA-256 is
+`84ba589d59044e7b74098f7719904bfa76ab5e7b5f7688c8a73ae8ac58d45b6f`.
+Four observed reds reproduced serially in isolation (`4 failed in 7.77 s`;
+isolated-log SHA-256
+`344ae50ac9fce34fcbf03c4a471b19c551a5981ac6f650199461a525ea1a3dd4`):
+
+- `test_nemo_si3_scalarmath_v2_gate.py::test_full_v2_gate_and_plants` — known
+  SI3 scalar-math provenance red (`A MY_SRC is not verbatim`);
+- `test_nemo_testcase_l2_gyre_round129_spread_floor_gate.py::test_record_backed_gate_passes`
+  — known registered-record/harness-stamp red;
+- `test_nemo_testcase_round35_stamp_scope.py::test_every_driver_that_arms_the_escape_scopes_it`
+  — known allow-dirty scope ratchet; and
+- `test_nemo_testcase_worktree_stamp.py::test_every_report_emitter_stamps_the_worktree`
+  — known worktree-stamp ratchet.
+
+The requested separate `codex exec --sandbox read-only` invocation failed
+before review with `failed to initialize in-process app-server client:
+Read-only file system`; **independent review unavailable in-sandbox**. Its
+preserved stderr/stdout SHA-256 is
+`eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5`.
 
 ## OPEN
 
