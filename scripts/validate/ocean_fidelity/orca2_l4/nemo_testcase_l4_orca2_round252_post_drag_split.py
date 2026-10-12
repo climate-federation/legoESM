@@ -332,7 +332,12 @@ def classify(reports: list[dict[str, object]], *, plant: str = "none") -> dict:
                 f"{label}: an override is active")
         require(tuple(item["source_order"]) == SOURCE_ORDER,
                 f"{label}: source order moved")
-        expected_observed = 35 if mode == "baseline" else 0
+        # The production candidate removes the 1.66e-6 physical residual but
+        # retains 15 last-bit differences (2.12e-22 maximum) under both claim
+        # labels.  Keep that failed exact-closure prediction in the gate: the
+        # Decision-96 bar class is accepted only with this frozen census and
+        # the ordinary at-floor predicate, never by relabelling it exact.
+        expected_observed = 35 if mode == "baseline" else 15
         require(item["support"] == {
             "registered_unequal": 35,
             "observed_post_drag_unequal": expected_observed,
@@ -362,14 +367,15 @@ def classify(reports: list[dict[str, object]], *, plant: str = "none") -> dict:
         require(replays["resolved_post_drag_to_oracle"]["bit_exact"]
                 and replays["resolved_final_to_oracle"]["bit_exact"],
                 f"{label}: resolved mask does not close the direct chain")
-        require(item["first_nonbit_output"]
-                == ("observed_post_drag" if mode == "baseline" else None),
+        require(item["first_nonbit_output"] == "observed_post_drag",
                 f"{label}: first non-bit output moved")
-        require(rows["observed_post_drag"]["bit_exact"]
-                == (mode == "resolved-mask-candidate")
-                and rows["observed_final_slow_v"]["bit_exact"]
-                == (mode == "resolved-mask-candidate"),
-                f"{label}: observed direct-chain closure moved")
+        require(not rows["observed_post_drag"]["bit_exact"]
+                and not rows["observed_final_slow_v"]["bit_exact"],
+                f"{label}: observed direct-chain bit census moved")
+        if mode == "resolved-mask-candidate":
+            require(rows["observed_post_drag"]["at_floor"]
+                    and rows["observed_final_slow_v"]["at_floor"],
+                    f"{label}: candidate direct chain left the fixed floor")
         summary[label] = {
             "rows": rows, "replays": replays, "support": item["support"],
             "first_nonbit_output": item["first_nonbit_output"],
@@ -380,7 +386,7 @@ def classify(reports: list[dict[str, object]], *, plant: str = "none") -> dict:
     return {
         "format": "nemo-testcase-l4-orca2-round252-classification-v1",
         "status": (
-            "PASS_R252_RESOLVED_MASK_CANDIDATE"
+            "AT_BAR_R252_RESOLVED_MASK_CANDIDATE"
             if mode == "resolved-mask-candidate"
             else "CONFIRMED_R252_COMPACT_DRAG_MASK_OWNER"),
         "source_order": list(SOURCE_ORDER),
@@ -389,7 +395,7 @@ def classify(reports: list[dict[str, object]], *, plant: str = "none") -> dict:
             "R252-P1": "CONFIRMED_ADMITTED_PASSIVE_NO_OVERRIDE",
             "R252-P2": "CONFIRMED_COMPACT_DRAG_MASK_FIRST_NONBIT_OUTPUT",
             "R252-P3": (
-                "CONFIRMED_PRODUCTION_RESOLVED_MASK_CLOSES_DIRECT_CHAIN"
+                "REFUTED_BIT_EXACT__AT_BAR_PRODUCTION_MASK_ASSOCIATION"
                 if mode == "resolved-mask-candidate"
                 else "CONFIRMED_OFFLINE_RESOLVED_MASK_CLOSES_DIRECT_CHAIN"),
             "R252-P4": "NOT_REACHED_PENDING_PRODUCTION_CANDIDATE",

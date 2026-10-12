@@ -21,7 +21,13 @@ def _report(label: str, *, candidate: bool = False) -> dict[str, object]:
     exact = {name: _row(True) for name in gate.SOURCE_ORDER}
     exact["live_reciprocal"] = _row(False)
     exact["compact_surface_mask"] = _row(False)
-    if not candidate:
+    if candidate:
+        for name in ("observed_post_drag", "observed_final_slow_v"):
+            exact[name] = {
+                **_row(False), "at_floor": True, "unequal": 15,
+                "max_abs": 2.117582368135751e-22,
+            }
+    else:
         exact["observed_post_drag"] = _row(False)
         exact["observed_final_slow_v"] = _row(False)
     return {
@@ -39,8 +45,8 @@ def _report(label: str, *, candidate: bool = False) -> dict[str, object]:
         "source_order": list(gate.SOURCE_ORDER),
         "support": {
             "registered_unequal": 35,
-            "observed_post_drag_unequal": 0 if candidate else 35,
-            "observed_final_unequal": 0 if candidate else 35,
+            "observed_post_drag_unequal": 15 if candidate else 35,
+            "observed_final_unequal": 15 if candidate else 35,
             "mask_unequal": 35, "changed_unequal": 35,
             "mask_outside_registered": 0, "changed_outside_registered": 0,
         },
@@ -51,7 +57,7 @@ def _report(label: str, *, candidate: bool = False) -> dict[str, object]:
             "resolved_post_drag_to_oracle": _row(True),
             "resolved_final_to_oracle": _row(True),
         },
-        "first_nonbit_output": None if candidate else "observed_post_drag",
+        "first_nonbit_output": "observed_post_drag",
     }
 
 
@@ -60,10 +66,10 @@ def test_classifier_names_compact_drag_mask_owner():
     assert result["status"] == "CONFIRMED_R252_COMPACT_DRAG_MASK_OWNER"
 
 
-def test_classifier_accepts_resolved_mask_candidate():
+def test_classifier_registers_at_bar_resolved_mask_candidate():
     result = gate.classify([
         _report(label, candidate=True) for label in gate.LABELS])
-    assert result["status"] == "PASS_R252_RESOLVED_MASK_CANDIDATE"
+    assert result["status"] == "AT_BAR_R252_RESOLVED_MASK_CANDIDATE"
 
 
 @pytest.mark.parametrize("plant", gate.PLANTS[1:])
