@@ -245,6 +245,34 @@ def measure(args: argparse.Namespace) -> dict[str, object]:
         entry_eta, hu0, oracle_u, area_t, ops.area_u, 1)
     live_oracle_v = _live_reciprocal(
         entry_eta, hv0, oracle_v, area_t, ops.area_v, 0)
+    r1_trace = np.asarray(
+        trace.substeps["r1_face_depth_u_exit"], np.float64)
+    first_bad = np.argwhere(~np.isfinite(r1_trace))
+    require(first_bad.size != 0,
+            "external-mode trace has no non-finite U exit reciprocal")
+    n, j, i = map(int, first_bad[0])
+    hu0_compact = np.concatenate([hu0[:, -1:], hu0], axis=1)
+    ssumask_compact = np.concatenate(
+        [oracle_u[:, -1:], oracle_u], axis=1)
+    first_writer_operands = {
+        "compiled_statement": (
+            "ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/"
+            "dynspg_ts.f90:712-718"),
+        "substep": n + 1,
+        "compact_ji": [j, i],
+        "hu_0_m": float(hu0_compact[j, i]),
+        "ssumask": float(ssumask_compact[j, i]),
+        "face_ssh_u_exit_m": float(np.asarray(
+            trace.substeps["face_ssh_u_exit"])[n, j, i]),
+        "face_depth_u_exit_m": float(np.asarray(
+            trace.substeps["face_depth_u_exit"])[n, j, i]),
+        "r1_face_depth_u_exit_per_m": float(r1_trace[n, j, i]),
+        "previous_face_depth_u_exit_m": float(np.asarray(
+            trace.substeps["face_depth_u_exit"])[n - 1, j, i]),
+        "previous_r1_face_depth_u_exit_per_m": float(r1_trace[n - 1, j, i]),
+        "eta_exit_m": float(np.asarray(
+            trace.substeps["eta_exit"])[n, j, i - 1]),
+    }
     for name, values in (
         ("hu_0", hu0), ("hv_0", hv0),
         ("candidate_r1_hu_0", ref_candidate_u),
@@ -285,6 +313,7 @@ def measure(args: argparse.Namespace) -> dict[str, object]:
         "state_after_barotropic": state_after_rows,
         "rows": rows,
         "guard_cell": point,
+        "first_writer_operands": first_writer_operands,
         "source_order": [
             "hu_0/hv_0", "ssumask/ssvmask", "r1_hu_0/r1_hv_0",
             "live r1_hu/r1_hv", "zub/zvb", "stage transport",
@@ -311,6 +340,8 @@ def classify(reports: dict[str, dict], *, plant: str = "none") -> dict[str, obje
         ):
             for row in reports["independent"][section].values():
                 row["nonfinite"] = 0
+        reports["independent"]["first_writer_operands"][
+            "r1_face_depth_u_exit_per_m"] = 0.0
 
     require(set(reports) == set(LABELS), "both claim labels are required")
     summary = {}
@@ -376,6 +407,18 @@ def classify(reports: dict[str, dict], *, plant: str = "none") -> dict[str, obje
              f"{first_substep[1]}" if first_substep is not None else
              f"state_after_barotropic.{first_state_nonfinite}")
         )
+        writer = report["first_writer_operands"]
+        require(first_writer == "barotropic_substep_2.r1_face_depth_u_exit",
+                f"{label}: first writer moved: {first_writer}")
+        require(writer["substep"] == 2
+                and writer["compact_ji"] == [7, 114]
+                and writer["ssumask"] == 1.0
+                and writer["face_depth_u_exit_m"] == 0.0
+                and not np.isfinite(
+                    writer["r1_face_depth_u_exit_per_m"])
+                and np.isfinite(
+                    writer["previous_r1_face_depth_u_exit_per_m"]),
+                f"{label}: exit-reciprocal operand signature moved")
         summary[label] = {
             "mask_source_unequal": mismatch,
             "reciprocal_nonfinite": nonfinite,
@@ -390,6 +433,7 @@ def classify(reports: dict[str, dict], *, plant: str = "none") -> dict[str, obje
                     "index": first_substep[2],
                 }),
             "state_after_barotropic": report["state_after_barotropic"],
+            "first_writer_operands": writer,
         }
     return {
         "format": "nemo-testcase-l4-orca2-round248-classification-v1",
@@ -397,7 +441,7 @@ def classify(reports: dict[str, dict], *, plant: str = "none") -> dict[str, obje
         "summary": summary,
         "predictions": {
             "R248-P1": "REFUTED_RECIPROCALS_FINITE_BOTH_LABELS",
-            "R248-P2": "NAMED_FIRST_EXTERNAL_MODE_NONFINITE_WRITER",
+            "R248-P2": "NAMED_SUBSTEP2_U_EXIT_RECIPROCAL_WRITER",
             "R248-P3": "NOT_ACTIVATED_PREREQUISITE_R248-P2",
             "R248-P4": "NOT_ACTIVATED_PREREQUISITE_R248-P3",
             "R248-P5": "CONFIRMED" if plant == "none" else "PLANT",
