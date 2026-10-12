@@ -223,6 +223,11 @@ round changes only the shared SWG validation script, its direct tests, citation
 map, and receipts.  TSUNAMI, VORTEX, VORTEX_VEC, GYRE, LOCK_EXCHANGE,
 OVERFLOW, DINO, and ORCA2 therefore execute no changed model, operator, card,
 or configuration statement; their certified inputs remain byte-identical.
+The cross-card battery is 119/122 green.  Its only failures are the inherited
+stale expected digests; actual GYRE, LOCK_EXCHANGE, and OVERFLOW digests remain
+the round-6 values `f02d2f42a570f413`, `d5dfdf83b3a1e0ab`, and
+`83de0010e1170032`.  TSUNAMI and both VORTEX card suites are wholly green.  Log
+SHA-256: `85cba368a50a9ca5f428a05625b9b2fdc219ea8bf8403511149017482d80ea3d`.
 
 ## Gates
 
