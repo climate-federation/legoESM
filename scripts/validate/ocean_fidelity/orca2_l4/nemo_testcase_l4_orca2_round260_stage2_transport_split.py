@@ -120,6 +120,10 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
     entry = rung0.assemble_frame(frame_root, 1, 0)
     stage1 = rung0.assemble_frame(frame_root, 1, 1)
     stage2 = rung0.assemble_frame(frame_root, 1, 2)
+    stage1_u_full = np.concatenate(
+        [stage1["u"][:, -1:, :], stage1["u"]], axis=1)
+    stage1_v_full = np.concatenate(
+        [stage1["v"][-1:, :, :], stage1["v"]], axis=0)
     state = (card.recipe.initial_state if label == "independent"
              else rung0.bridge_entry(card, entry))
     forcing = omt0.rung0_ladder._zero_forcing((148, 180))
@@ -132,7 +136,7 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
     )
     hooks = r249._hooks(card, True, live=True)._replace(
         stage_entry_override=(
-            2, stage1["u"], stage1["v"], stage1["T"], stage1["S"],
+            2, stage1_u_full, stage1_v_full, stage1["T"], stage1["S"],
             stage1["ssh"]),
         stage2_tracer_transport_override=recorded,
     )
@@ -166,7 +170,7 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
         for index, name in ((2, "T"), (3, "S"))
     }
     entry_rows = {
-        name: _score(_fold(value), _fold(stage1[name]))
+        name: _score(_fold(r249._native(name, value)), _fold(stage1[name]))
         for name, value in zip(("u", "v", "T", "S"), traced.stage_states[1][:4])
     }
     one = np.asarray([1.0], np.float64)
