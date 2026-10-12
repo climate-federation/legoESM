@@ -106,12 +106,92 @@ Independent review run by the operator.
 
 ## Measurement
 
-PENDING — preregistration only.
+Preregistration commit: `7a982cfbcf58190763ba0a0f6d76d985aad782ee`.
+Committed month instrument: `ef3945bc687cd91b2d46adb93e09abc8dceae67e`.
+Control erratum preregistration:
+`2c1129ac605b8ac2938243207242427d858bf75a`.
+Final measured control implementation:
+`fbafd24d87175f5e66eff4e5daabc4a500a5f2c8`.
+
+1. **CONFIRMED: the independent 30-day rung is bit-identical.** The card's
+   shipped rest state and analytic wind ran 720 ordinary one-hour production
+   steps. All 690 daily rows are exact: 390 rows from 30 complete 13-field
+   start-of-day stage entries and 300 rows from 30 ten-field end-of-day
+   restarts. `first_day_over_bar` and `first_kt_over_bar` are both `None`; the
+   worst maximum absolute difference is zero. Artifact `swg_month.json`,
+   SHA-256
+   `8e23f7d21e5bf466ebc01b2a9a0175032eb1207f5372b83540ef4ae338b09a5a`.
+2. **CONFIRMED: both record kinds are admitted and complete.** Before scoring,
+   the gate reruns the committed checker over the instrumented and independent
+   reference runs and requires exact equality with the saved admission. It
+   therefore rechecks all 30 record hashes, all 30 passive restart pairs, and
+   every ordinary T/U/V/W output variable. Saved admission SHA-256:
+   `94db6dfea297fe828c55dc6c26fa78702cbbf9df399aa8f6793d252f33efae8e`.
+   Missing files, unexpected files, wrong dtypes, nonfinite stored halos, or a
+   changed acquisition commit refuse the month before any fidelity score.
+3. **CONFIRMED: all native staggers and ratios remain exact.** Every T, U, V,
+   and F field is scored with the card's certified native mask. This includes
+   each daily `r3t/r3u/r3v/r3f`, current/before velocity, and current/before
+   stress. Every candidate and oracle array is float64 under the explicit
+   fp64/libm policy on CPU.
+4. **REFUTED: the smallest-magnitude one-ULP U control binds.** The first
+   committed control attempt changed one exact admitted nonzero wet day-one U
+   input by one ULP, but the next production step returned identical scored
+   SSH/U/V bits. It correctly printed `REFUSE` and exited 2. It is retained in
+   the control erratum above and makes no fidelity claim.
+5. **CONFIRMED: the corrected one-ULP control binds.** At admitted wet U cell
+   `[1,74]`, the largest-magnitude day-one input moves by exactly one fp64 ULP,
+   from `-0.027032120471695776` to `-0.027032120471695772` m/s. One normal
+   production step changes one wet SSH cell, with maximum absolute difference
+   `4.440892098500626e-16` m. The numerical relative score is below 1e-15, but
+   the bit-exact gate correctly classifies the non-identical row `DEBT` and
+   exits 1. Artifact `swg_month_ulp_plant.json`, SHA-256
+   `b71b9f9cdaf8afac1bdb321b8935673ebceb79544a7da27bfd10dc5a904c600b`.
+
+## First non-bit statement
+
+There is none through 30 days. No daily stage-entry or restart field differs,
+so the complete compiled three-stage program at
+`SWG_OMIP_L1_P3D/BLD/ppsrc/nemo/stprk3.f90:141-340` remains bit-identical at
+every admitted daily boundary. The planted row is a control, not a model-oracle
+fidelity difference.
+
+## Rule 12 disposition
+
+No established exact row moved: given-entry is 338/338, chained is 338/338,
+independent ten-step is 50/50, and carried-state is 29/29 bit-identical. Their
+final artifacts have SHA-256 values
+`1a87e47c468ba34bdad01658760ef3d451717af80e82e8c0e5ad483acc9393b9`,
+`c458efee25f33f0dd4451a9708e723a99a25233b5d08200108c64327fda30a28`,
+`fef9815261d71ca08e97e4376ab7302fa221d37cbc692a1625ce4fb0a19dd82c`,
+and `73dff4e7d10455885bb5743079343512195a0f5e3eba127205653a277a8b1736`.
+The established stage one-ULP plant still exits 1.
+
+The base-to-tip production diff under `packages/` and `src/` is empty. Only
+the shared fidelity ladder, its direct test, the citation map, and this receipt
+change, so TSUNAMI, VORTEX, VORTEX_VEC, GYRE, LOCK_EXCHANGE, OVERFLOW, DINO,
+and ORCA2 execute no changed model or card statement.
+
+## Gates
+
+The focused card, stage, differentiability, record, geometry, ladder, month,
+and control battery passes 197/197; log SHA-256
+`dc866d813a8f4361bdba76d3fcfd9455d9f163910fdc09e7cf2af358fb80a67c`.
+Geometry remains 34/34 exact, and its signed-y Coriolis, wet-cell, and layer-
+thickness plants each exit 1. The month control and established stage control
+each exit 1. The receipt citation gate and shifted P3D citation plant are run
+after this receipt is complete.
+
+## Choices this round
+
+No unasked physical, configuration, threshold, cadence, or carried-state
+choice was made. Selecting the largest-magnitude nonzero wet U value changes
+only the test control's ability to bind; the user required a one-ULP move of a
+recorded nonzero consumed field. The original nonbinding choice remains
+explicitly retracted.
 
 ## OPEN
 
-1. Extend and calibrate the shared SWG ladder against both admitted daily
-   record kinds, then run the clean and planted gates.
-2. If the month is bit-identical, proceed next to the shipped 172800-step
-   statistics; otherwise preregister the narrower acquisition required by the
-   first daily boundary.
+1. The operator runs the independent review of round 7.
+2. Preregister and score the shipped 172800-step statistics from the existing
+   `round0_probe/year10` oracle record. No statistics claim is made here.
