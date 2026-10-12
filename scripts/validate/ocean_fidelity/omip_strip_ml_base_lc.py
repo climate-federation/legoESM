@@ -105,8 +105,12 @@ def resolution_limited(inc, h, first, status, zw, e_in, eps):
     z1 = zw[jj + 1]
     pred = DT * us ** 3 * (RN_LC * np.sin(np.pi * z0 / z1)) ** 3 / z1
     e0 = np.take_along_axis(e_in, np.clip(j, 0, len(zw) - 1)[..., None], -1)[..., 0]
+    # every positive increment in the run must sit well above the dump's
+    # rounding of the entry TKE, or the run itself (and the zus inverted from
+    # it) may be rounding noise (codex round 6)
+    noisy = np.any((inc > 0) & (inc < 10.0 * eps * np.abs(e_in)), -1)
     with np.errstate(invalid="ignore"):
-        return (status == 0) & (last | (pred < 2.0 * eps * np.abs(e0)))
+        return (status == 0) & (last | noisy | (pred < 2.0 * eps * np.abs(e0)))
 
 
 def implied_us(inc, h, first, zw):

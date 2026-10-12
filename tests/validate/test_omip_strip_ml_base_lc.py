@@ -86,6 +86,14 @@ def test_cutoff_at_last_saved_interface_is_resolution_limited():
                                 np.finfo(np.float32).eps)[0]
 
 
+def test_rounding_level_run_is_resolution_limited():
+    zw = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+    inc = np.array([7.276e-12, 0.0, 0.0, 0.0, 0.0])    # codex round 6: a run made of rounding noise
+    h, f, st = P.lc_depth(inc[None], zw)
+    e_in = np.array([[1e-4, 1e-6, 1e-6, 1e-6, 1e-6]])
+    assert P.resolution_limited(inc[None], h, f, st, zw, e_in, np.finfo(np.float32).eps)[0]
+
+
 def test_share_excludes_nan_and_keeps_censored_deep():
     x = np.array([5.0, np.nan, np.inf])
     assert P.share(x, x <= 12.8) == 0.5
