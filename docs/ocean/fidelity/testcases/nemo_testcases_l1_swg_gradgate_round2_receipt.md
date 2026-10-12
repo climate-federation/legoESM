@@ -47,10 +47,12 @@ allocator, and uses the default JAX allocator whose memory statistics were
 demonstrated by the operator. The sampler-thread restart defect in the
 round-2 executable is also fixed in round 3 by creating one sampler per pass.
 
-Every operator resource row now runs in a fresh process with
+The retracted round-2 protocol would have run every resource row in a fresh
+process with
 `XLA_PYTHON_CLIENT_PREALLOCATE=false` and
 `XLA_PYTHON_CLIENT_ALLOCATOR=platform` set before JAX import. The process
-boundary resets the process-lifetime peak. The first reverse pass records JAX
+boundary would reset the process-lifetime peak. The first reverse pass was
+intended to record JAX
 `bytes_in_use` and `peak_bytes_in_use` before and after, plus concurrently
 sampled physical-GPU-1 `nvidia-smi memory.used`. The JSON retains both sets of
 baselines, peaks, increments, and sample counts.
@@ -142,9 +144,9 @@ prediction remains **REFUTED**; the last-bit gap is quoted rather than waived.
 
 ## OPEN
 
-1. The operator must run the committed GPU-1 script from a clean final tip;
-   the repaired 24/720/1440 GPU memory and 1440-step GPU agreement rows are
-   not acquired in this sandbox.
+1. The operator acquired the 1440-step GPU agreement row at the round-2 tip;
+   it is valid and is carried into the round-3 receipt. The repaired
+   24/720/1440 GPU resource rows remain unacquired at this round's tip.
 2. The inherited stale digest pins in
    `tests/ocean/unit/test_nemo_vortex_card.py` remain GYRE-lane debt and are not
    re-pinned here. Expected GYRE/LOCK/OVERFLOW values are

@@ -830,11 +830,19 @@ def measure_blocked_reverse(reverse, zero_alpha, backend: str):
     return ReversePassMeasurement(value, gradient, wall_seconds, sampler)
 
 
-def measure_cold_and_warm_reverse(reverse, zero_alpha, backend: str):
-    """Use distinct sampler threads for the cold and warm reverse passes."""
+def measure_cold_and_warm_reverse(
+    reverse, zero_alpha, backend: str, *, after_cold=None,
+):
+    """Use distinct samplers and observe the cold pass before running warm."""
     cold = measure_blocked_reverse(reverse, zero_alpha, backend)
+    cold_observation = after_cold() if after_cold is not None else None
     warm = measure_blocked_reverse(reverse, zero_alpha, backend)
-    return cold, warm
+    return cold, warm, cold_observation
+
+
+def build_compiled_reverse(line):
+    """Build the compiled reverse executable used by resource measurements."""
+    return jax.jit(jax.value_and_grad(line))
 
 
 def extrapolate_360(schedule: str, baseline_mib: float, peak6_mib: float) -> float:
@@ -995,6 +1003,10 @@ def classify_resource_suite(rows: list[dict], *, plant: bool = False) -> dict:
 def measure_resources(card: str, n_steps: int, schedule: str, *,
                       transcendentals: str = "libm"):
     """Measure a fresh-process GPU reverse or a blocked warm CPU reverse."""
+    if card not in CARD_STEPS:
+        raise ValueError(
+            f"unknown gradient card {card!r}; expected one of "
+            f"{sorted(CARD_STEPS)}")
     require(n_steps in RESOURCE_STEPS[card],
             f"{card} resource steps must be one of {RESOURCE_STEPS[card]}")
     context = build_context(card, transcendentals=transcendentals)
@@ -1025,7 +1037,7 @@ def measure_resources(card: str, n_steps: int, schedule: str, *,
     # The measured object is a compiled reverse executable.  Without this
     # outer JIT, every invocation retraces the transformed Python function and
     # the alleged warm-pass timer includes a step-independent trace/compile.
-    reverse = jax.jit(jax.value_and_grad(line))
+    reverse = build_compiled_reverse(line)
     dtype = jax.tree_util.tree_leaves(base)[0].dtype
     zero_alpha = jnp.asarray(0.0, dtype=dtype)
 
@@ -1043,10 +1055,11 @@ def measure_resources(card: str, n_steps: int, schedule: str, *,
     # reset locally after compilation.
     device_stats_before = (
         device_memory_stats(jax.devices()[0]) if backend == "gpu" else None)
-    cold, warm = measure_cold_and_warm_reverse(
-        reverse, zero_alpha, backend)
-    device_stats_after = (
-        device_memory_stats(jax.devices()[0]) if backend == "gpu" else None)
+    after_cold = (
+        (lambda: device_memory_stats(jax.devices()[0]))
+        if backend == "gpu" else None)
+    cold, warm, device_stats_after = measure_cold_and_warm_reverse(
+        reverse, zero_alpha, backend, after_cold=after_cold)
     cold_wall_s = cold.wall_seconds
     value, gradient = warm.value, warm.gradient
     wall_s = warm.wall_seconds

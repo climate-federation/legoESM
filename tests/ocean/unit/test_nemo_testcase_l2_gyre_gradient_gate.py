@@ -329,6 +329,7 @@ def test_gpu_allocator_contract_refuses_platform(monkeypatch):
 
 def test_gpu_resource_two_pass_control_uses_fresh_sampler_on_cpu(monkeypatch):
     instances = []
+    events = []
 
     class SingleUseCPUSampler:
         def __init__(self, backend):
@@ -343,21 +344,31 @@ def test_gpu_resource_two_pass_control_uses_fresh_sampler_on_cpu(monkeypatch):
         def start(self):
             assert self.started == 0
             self.started += 1
+            events.append(f"start-{len(instances) - 1}")
 
         def stop(self):
             assert self.started == 1
             assert self.stopped == 0
             self.stopped += 1
+            events.append(f"stop-{len(instances) - 1}")
 
     monkeypatch.setattr(G, "PeakMemorySampler", SingleUseCPUSampler)
     reverse = jax.jit(jax.value_and_grad(lambda x: x**2))
-    cold, warm = G.measure_cold_and_warm_reverse(
-        reverse, jnp.asarray(3.0), "gpu")
+
+    def after_cold():
+        events.append("stats-after-cold")
+        return {"peak_bytes_in_use": 123}
+
+    cold, warm, cold_stats = G.measure_cold_and_warm_reverse(
+        reverse, jnp.asarray(3.0), "gpu", after_cold=after_cold)
 
     assert len(instances) == 2
     assert cold.sampler is instances[0]
     assert warm.sampler is instances[1]
     assert all(item.started == item.stopped == 1 for item in instances)
+    assert events == [
+        "start-0", "stop-0", "stats-after-cold", "start-1", "stop-1"]
+    assert cold_stats == {"peak_bytes_in_use": 123}
     assert float(cold.gradient) == pytest.approx(6.0)
     assert float(warm.gradient) == pytest.approx(6.0)
 
@@ -370,10 +381,15 @@ def test_compiled_reverse_warm_call_does_not_retrace():
         traces += 1
         return x**2
 
-    reverse = jax.jit(jax.value_and_grad(loss))
+    reverse = G.build_compiled_reverse(loss)
     reverse(jnp.asarray(2.0))
     reverse(jnp.asarray(3.0))
     assert traces == 1
+
+
+def test_resource_dispatch_rejects_unknown_card_before_step_lookup():
+    with pytest.raises(ValueError, match="unknown gradient card"):
+        G.measure_resources("NOT-A-CARD", 24, "uniform")
 
 
 def test_measurement_policy_labels_refuse_cross_backend_combinations():
