@@ -68,7 +68,7 @@ def nemo_ledger(path, sj, si, nk):
     return led, e_end, e_pfl, e_lc, avm, depw
 
 
-def nemo_diff_direct(e_new, avm_prev, sj, si, nk):
+def nemo_diff_direct(e_new, avm_prev, sj, si, nk, avm_floor=2e-5):
     """-(zd_up (e_k+1 - e_k) + zd_lw (e_k-1 - e_k)), zdftke.F90 matrix rows,
     on our interface index k (NEMO w-level k+1); e3 from mesh e3*_0."""
     import netCDF4 as nc
@@ -80,8 +80,8 @@ def nemo_diff_direct(e_new, avm_prev, sj, si, nk):
     # the surface Dirichlet row (not in our arrays), so start at k=1.
     # Fortran e3t(jk) -> 0-based k+1, e3t(jk-1) -> k, e3w(jk) -> k+1.
     for k in range(1, nk - 1):
-        up = -0.5 * DT * np.maximum(avm_prev[:, :, k + 1] + avm_prev[:, :, k], 2e-5) / (e3t[:, k + 1] * e3w[:, k + 1])
-        lw = -0.5 * DT * np.maximum(avm_prev[:, :, k] + avm_prev[:, :, k - 1], 2e-5) / (e3t[:, k] * e3w[:, k + 1])
+        up = -0.5 * DT * np.maximum(avm_prev[:, :, k + 1] + avm_prev[:, :, k], avm_floor) / (e3t[:, k + 1] * e3w[:, k + 1])
+        lw = -0.5 * DT * np.maximum(avm_prev[:, :, k] + avm_prev[:, :, k - 1], avm_floor) / (e3t[:, k] * e3w[:, k + 1])
         out[:, :, k] = -(up * (e_new[:, :, k + 1] - e_new[:, :, k]) + lw * (e_new[:, :, k - 1] - e_new[:, :, k]))
     return out
 
