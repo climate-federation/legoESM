@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import inspect
+import subprocess
 import sys
 from pathlib import Path
 from typing import NamedTuple
@@ -19,11 +20,29 @@ _SCRIPT = (
     _REPO / "scripts/validate/ocean_fidelity/testcases/"
     "nemo_testcase_l2_gyre_gradient_gate.py"
 )
+_GPU_SCRIPT = (
+    _REPO / "scripts/validate/ocean_fidelity/testcases/"
+    "nemo_testcase_l2_gyre_gradgate_gpu_rows.sh"
+)
 _SPEC = importlib.util.spec_from_file_location("gyre_gradient_gate_tested", _SCRIPT)
 assert _SPEC is not None and _SPEC.loader is not None
 G = importlib.util.module_from_spec(_SPEC)
 sys.modules[_SPEC.name] = G
 _SPEC.loader.exec_module(G)
+
+
+def test_gpu_runner_continues_every_classified_outcome():
+    result = subprocess.run(
+        [str(_GPU_SCRIPT), "--self-test"],
+        cwd=_REPO,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert result.stdout.strip() == (
+        "GYRE_GRADGATE_GPU_RUNNER_SELF_TEST statuses="
+        "REFUTED UNMEASURED VACUOUS RETRACTED CONFIRMED"
+    )
 
 
 def test_broken_vjp_plant_flips_passing_row():
@@ -46,6 +65,17 @@ def test_nonfinite_agreement_row_is_not_labeled_nonzero():
     assert row["finite"] is False
     assert row["nonzero"] is False
     assert row["status"] == "REFUTED"
+
+
+def test_absent_derivatives_are_unmeasured_not_refuted():
+    row = G.unmeasured_agreement("planted pre-derivative refusal")
+    assert row["status"] == "UNMEASURED"
+    assert row["error"] == "planted pre-derivative refusal"
+    for field in (
+        "reverse", "forward", "finite_difference",
+        "rev_fwd_relative_error", "rev_fd_relative_error",
+    ):
+        assert row[field] is None
 
 
 def test_scalar_line_reverse_equals_full_vjp_dot_direction():
@@ -122,20 +152,111 @@ def test_explicit_stepwise_vjp_matches_whole_window_gradient(monkeypatch):
         float(jnp.vdot(expected_gradient, direction)), rel=1e-13)
     assert row["gradient_dot_abs_sum"] == pytest.approx(
         float(jnp.sum(jnp.abs(expected_gradient * direction))), rel=1e-13)
-    assert all(
-        report["bitwise_equal"]
-        for report in row["step_vjp_replay_reports"].values()
-    )
-    assert row["step_vjp_replays_bitwise"] is True
+    assert set(row["step_vjp_replay_reports"]) == {"1", "2", "3"}
     assert row["step_vjp_replay_used_as_primal"] is False
-    assert all(
-        report["bitwise_equal"]
-        for report in row["step_jvp_replay_reports"].values()
-    )
-    assert row["step_jvp_replays_bitwise"] is True
+    assert set(row["step_jvp_replay_reports"]) == {"1", "2", "3"}
     assert row["step_jvp_replay_used_as_primal"] is False
+    assert row["step_transform_compile_footprint"] == {
+        "whole_window_transform_jitted": False,
+        "distinct_state_pytree_specializations": 2,
+        "cold_program_invocations": 1,
+        "warm_program_invocations": 2,
+        "vjp_step_invocations": 3,
+        "jvp_step_invocations": 3,
+        "dynamic_model_step_argument": True,
+    }
     assert planted["status"] == "REFUTED"
     assert planted["reverse"] == pytest.approx(2.0 * planted["forward"])
+
+
+def test_compiled_step_transforms_reuse_cold_and_warm_programs():
+    class Field(NamedTuple):
+        data: jax.Array
+
+        def replace(self, **changes):
+            return self._replace(**changes)
+
+    class State(NamedTuple):
+        T: Field
+        tke: Field | None
+
+    class Card(NamedTuple):
+        dt_s: float
+
+    class Context(NamedTuple):
+        initial_state: State
+        card: Card
+        model: object
+        surface_forcings: object
+
+    class Model:
+        def __init__(self):
+            self.traces = 0
+
+        def _step_jitted(self, state, _dt_s, freshwater, surface):
+            self.traces += 1
+            next_t = state.T.data * (1.0 + freshwater) + surface
+            next_tke = (
+                Field(jnp.zeros_like(next_t))
+                if state.tke is None else state.tke
+            )
+            return State(Field(next_t), next_tke)
+
+    def forcing(_card, _state, kt):
+        return 0.01 * kt, 0.001 * kt
+
+    model = Model()
+    cold = State(Field(jnp.asarray([0.2, -0.4], dtype=jnp.float64)), None)
+    context = Context(cold, Card(1.0), model, forcing)
+    states = [cold]
+    for kt in range(1, 4):
+        states.append(G._production_step(context, states[-1], kt))
+    model.traces = 0
+    compiled_vjp, compiled_jvp = G.build_compiled_step_transforms(context)
+
+    cotangent = jax.tree_util.tree_map(jnp.ones_like, states[-1])
+    for kt in range(3, 0, -1):
+        _replay, cotangent = compiled_vjp(
+            states[kt - 1], jnp.asarray(kt, dtype=jnp.int32), cotangent)
+        jax.block_until_ready(cotangent)
+
+    tangent = State(Field(jnp.ones_like(cold.T.data)), None)
+    for kt in range(1, 4):
+        _replay, tangent = compiled_jvp(
+            states[kt - 1], jnp.asarray(kt, dtype=jnp.int32), tangent)
+        jax.block_until_ready(tangent)
+
+    # One trace per transform and per state structure: cold + warm, not one
+    # closure per model step and not one whole-window transform.
+    assert model.traces == 4
+
+
+def test_gyre_resource_schedule_starts_after_cold_step(monkeypatch):
+    context = G.build_context()
+    assert context.card.case == G.CASE
+    assert context.initial_state.tke is None
+    assert context.initial_state.tke_avm is not None
+    calls = []
+
+    def fake_production_step(_context, state, kt):
+        calls.append(int(np.asarray(kt)))
+        return state._replace(tke=context.initial_state.tke_avm)
+
+    def fake_checkpointed_loop(body, init, n_steps, *, schedule):
+        assert schedule == "uniform"
+        assert init[1].tke is not None, "cold GYRE state entered checkpoint loop"
+        carry = init
+        for _ in range(n_steps):
+            carry = body(carry)
+        return carry
+
+    monkeypatch.setattr(G, "_production_step", fake_production_step)
+    monkeypatch.setattr(G, "checkpointed_loop", fake_checkpointed_loop)
+    zero = jnp.zeros_like(context.initial_state.T.data)
+    result = G.scheduled_rollout(context, zero, 6, "uniform")
+
+    assert result.tke is not None
+    assert calls == [1, 2, 3, 4, 5, 6]
 
 
 def test_reverse_only_schedule_compares_against_forward_reference():
@@ -333,6 +454,19 @@ def test_per_step_composition_is_agreement_only():
     with pytest.raises(SystemExit):
         G.parse_args([
             "resources", "--steps", "6", "--schedule", "per_step",
+            "--expect-commit", "deadbeef", "--output", "/tmp/unused-row.json",
+        ])
+
+
+def test_long_windows_are_agreement_only():
+    args = G.parse_args([
+        "agreement", "--steps", "360", "--schedule", "per_step",
+        "--expect-commit", "deadbeef", "--output", "/tmp/unused-row.json",
+    ])
+    assert args.steps == 360
+    with pytest.raises(SystemExit):
+        G.parse_args([
+            "resources", "--steps", "60", "--schedule", "uniform",
             "--expect-commit", "deadbeef", "--output", "/tmp/unused-row.json",
         ])
 

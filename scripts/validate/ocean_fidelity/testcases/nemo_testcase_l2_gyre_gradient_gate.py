@@ -44,13 +44,16 @@ SCHEDULE_RTOL = 1.0e-9
 SCHEDULE_ATOL = 1.0e-11
 SCHEDULES = ("none", "uniform", "binomial")
 AGREEMENT_COMPOSITIONS = ("per_step", *SCHEDULES)
+AGREEMENT_STEPS = (1, 6, 60, 360)
+RESOURCE_STEPS = (1, 6)
 FIELDS = ("T", "S", "u", "v")
 GPU_NATIVE_POLICY_LABEL = (
     "GPU, XLA transcendentals — not the certified bit-exact policy"
 )
 CPU_LIBM_POLICY_LABEL = "CPU, certified fp64/libm bit-exact policy"
 SCHEDULE_SCOPE = (
-    "component-agnostic checkpoint schedule over production jitted steps"
+    "cold production step followed by a component-agnostic checkpoint "
+    "schedule over warm production jitted steps"
 )
 RESOURCE_SCHEMA = "gyre-gradgate-resource-v2-compiled-reverse"
 REVERSE_TRANSFORM = "jax.jit(jax.value_and_grad(scalar_line))"
@@ -220,25 +223,30 @@ def gradient_rollout(context: GYREContext, d_t0, n_steps: int):
 
 
 def scheduled_rollout(context: GYREContext, d_t0, n_steps: int, schedule: str):
-    """Run a shared checkpoint schedule whose body is the production step."""
+    """Segment the pytree-changing cold step from the warm scheduled loop."""
     if schedule == "per_step":
         return gradient_rollout(context, d_t0, n_steps)
-    state = context.initial_state._replace(
-        T=context.initial_state.T.replace(
-            data=context.initial_state.T.data + d_t0))
+    state = _apply_initial_perturbation(context, d_t0)
+    if n_steps <= 0:
+        return state
+
+    # GYRE's first production step materializes TKE, barotropic-history, and
+    # RK3 carry leaves.  A scan cannot change its carry treedef, so the cold
+    # step is its own adjoint segment and only the fixed-pytree warm loop is
+    # handed to the component-agnostic checkpoint scheduler.
+    state = _production_step(context, state, 1)
+    if n_steps == 1:
+        return state
 
     def body(carry):
         kt, step_state = carry
-        freshwater, surface = context.surface_forcings(
-            context.card, step_state, kt + 1)
-        step_state = context.model._step_jitted(
-            step_state, context.card.dt_s, freshwater, surface)
-        return kt + 1, step_state
+        next_kt = kt + 1
+        return next_kt, _production_step(context, step_state, next_kt)
 
     _, state = checkpointed_loop(
         body,
-        (jnp.asarray(0, dtype=jnp.int32), state),
-        n_steps,
+        (jnp.asarray(1, dtype=jnp.int32), state),
+        n_steps - 1,
         schedule=schedule,
     )
     return state
@@ -364,6 +372,46 @@ def loss_at_state(reference: LossReference, state):
     return jnp.mean(jnp.stack(scores))
 
 
+def build_compiled_step_transforms(context: GYREContext):
+    """Build reusable one-production-step VJP and JVP executables.
+
+    ``kt`` is a dynamic argument, so a multi-step rollout does not create one
+    transform closure per forcing time.  JAX specializes these functions only
+    for the cold and warm state pytrees.
+    """
+
+    def step_vjp(state, kt, cotangent):
+        replay, pullback = jax.vjp(
+            lambda step_state: _production_step(context, step_state, kt),
+            state,
+        )
+        return replay, pullback(cotangent)[0]
+
+    def step_jvp(state, kt, tangent):
+        return jax.jvp(
+            lambda step_state: _production_step(context, step_state, kt),
+            (state,),
+            (tangent,),
+        )
+
+    return jax.jit(step_vjp), jax.jit(step_jvp)
+
+
+def step_transform_footprint(n_steps: int) -> dict:
+    """Describe the structure-specialized programs used by explicit AD."""
+    require(n_steps >= 1, "agreement requires at least one production step")
+    warm_steps = max(0, n_steps - 1)
+    return {
+        "whole_window_transform_jitted": False,
+        "distinct_state_pytree_specializations": 1 + int(warm_steps > 0),
+        "cold_program_invocations": 1,
+        "warm_program_invocations": warm_steps,
+        "vjp_step_invocations": n_steps,
+        "jvp_step_invocations": n_steps,
+        "dynamic_model_step_argument": True,
+    }
+
+
 def explicit_stepwise_directional_derivatives(
         context: GYREContext, reference: LossReference, base, direction,
         n_steps: int, *, plant: bool = False):
@@ -376,16 +424,17 @@ def explicit_stepwise_directional_derivatives(
     value, objective_pullback = jax.vjp(
         lambda state: loss_at_state(reference, state), states[-1])
     cotangent = objective_pullback(jnp.ones_like(value))[0]
+    compiled_step_vjp, compiled_step_jvp = build_compiled_step_transforms(context)
     replay_reports = {}
     for kt in range(n_steps, 0, -1):
         previous = states[kt - 1]
-        replay, step_pullback = jax.vjp(
-            lambda state, step=kt: _production_step(context, state, step),
+        replay, cotangent = compiled_step_vjp(
             previous,
+            jnp.asarray(kt, dtype=jnp.int32),
+            cotangent,
         )
         jax.block_until_ready(replay)
         replay_reports[str(kt)] = state_bitwise_report(states[kt], replay)
-        cotangent = step_pullback(cotangent)[0]
         jax.block_until_ready(cotangent)
     gradient = cotangent.T.data
     if plant:
@@ -402,10 +451,10 @@ def explicit_stepwise_directional_derivatives(
     )
     forward_replay_reports = {}
     for kt in range(1, n_steps + 1):
-        replay, tangent = jax.jvp(
-            lambda state, step=kt: _production_step(context, state, step),
-            (states[kt - 1],),
-            (tangent,),
+        replay, tangent = compiled_step_jvp(
+            states[kt - 1],
+            jnp.asarray(kt, dtype=jnp.int32),
+            tangent,
         )
         jax.block_until_ready(replay)
         forward_replay_reports[str(kt)] = state_bitwise_report(
@@ -445,6 +494,7 @@ def explicit_stepwise_directional_derivatives(
         "step_jvp_replays_bitwise": all(
             report["bitwise_equal"]
             for report in forward_replay_reports.values()),
+        "step_transform_compile_footprint": step_transform_footprint(n_steps),
     })
     return row
 
@@ -514,6 +564,29 @@ def classify_agreement(reverse: float, forward: float, finite_difference: float)
     }
 
 
+def unmeasured_agreement(reason: str | None = None) -> dict:
+    """Represent a row refused before any derivative value exists."""
+    row = {
+        "status": "UNMEASURED",
+        "reverse": None,
+        "forward": None,
+        "finite_difference": None,
+        "rev_fwd_relative_error": None,
+        "rev_fd_relative_error": None,
+        "rev_fwd_bar": REVFWD_TOL,
+        "rev_fd_bar": FD_TOL,
+        "finite": None,
+        "nonzero": None,
+        "gradient_dot_abs_sum": None,
+        "gradient_direction_norm_product": None,
+        "rev_fwd_absolute_discrepancy": None,
+        "rev_fwd_scale_aware_error": None,
+    }
+    if reason is not None:
+        row["error"] = reason
+    return row
+
+
 def directional_derivatives(
         forward_loss, base, direction, *, reverse_loss=None, plant=False):
     """Measure one direction and its full-gradient cancellation scales.
@@ -572,14 +645,14 @@ def measure_agreement(n_steps: int, schedule: str, *, plant=False,
     primal_report = state_bitwise_report(truth_state, gradient_truth)
     forward_schedule = "per_step"
     forward_report = primal_report
-    row = classify_agreement(math.nan, math.nan, math.nan)
+    row = unmeasured_agreement()
     evaluation_reports = {}
     if not primal_report["bitwise_equal"]:
-        row["error"] = (
+        row = unmeasured_agreement(
             f"{schedule} segmented schedule primal differs bitwise from "
             "the production Python loop")
     elif not forward_report["bitwise_equal"]:
-        row["error"] = (
+        row = unmeasured_agreement(
             "uniform forward-reference primal differs bitwise from the "
             "production Python loop")
     else:
@@ -602,7 +675,7 @@ def measure_agreement(n_steps: int, schedule: str, *, plant=False,
             if not report["bitwise_equal"]
         ]
         if bad_evaluation_reports:
-            row["error"] = (
+            row = unmeasured_agreement(
                 "scheduled primal differs bitwise from production at "
                 + ", ".join(bad_evaluation_reports))
         else:
@@ -611,7 +684,8 @@ def measure_agreement(n_steps: int, schedule: str, *, plant=False,
                     context, reference, base, direction, n_steps,
                     plant=plant)
             except (TypeError, ValueError, RuntimeError) as error:
-                row["error"] = f"{type(error).__name__}: {error}"
+                row = unmeasured_agreement(
+                    f"{type(error).__name__}: {error}")
     identity = runtime_identity()
     row.update({
         "case": CASE,
@@ -631,6 +705,10 @@ def measure_agreement(n_steps: int, schedule: str, *, plant=False,
         "composition": "explicit per-production-step VJP/JVP composition",
         "schedule_scope": "Decision-49 per-step Python composition",
         "per_step_whole_step_rematerialization": True,
+        "step_transform_compile_footprint": row.get(
+            "step_transform_compile_footprint",
+            step_transform_footprint(n_steps),
+        ),
         "schedule_primal_vs_production": primal_report,
         "forward_primal_vs_production": forward_report,
         "evaluation_primal_vs_production": evaluation_reports,
@@ -954,6 +1032,9 @@ def measure_resources(n_steps: int, schedule: str, *,
         "geometry_dtype": str(context.card.recipe.z_coord.dz_ref.dtype),
         "production_entry": "LatLonCGridOceanModel._step_jitted",
         "schedule_scope": SCHEDULE_SCOPE,
+        "cold_first_step_segmented": n_steps >= 1,
+        "checkpointed_warm_steps": max(0, n_steps - 1),
+        "checkpoint_schedule_first_model_step": 2 if n_steps > 1 else None,
         "schedule_primal_bitwise_production": primal_comparison["bitwise"],
         "schedule_primal_comparison": primal_comparison,
         "cold_compile_and_reverse_wall_seconds": cold_wall_s,
@@ -1172,7 +1253,7 @@ def parse_args(argv=None):
             "agreement", "resources", "time-scaling-suite",
             "gpu-resource-suite",
         ))
-    parser.add_argument("--steps", type=int, choices=(1, 6, 60))
+    parser.add_argument("--steps", type=int, choices=AGREEMENT_STEPS)
     parser.add_argument(
         "--schedule", choices=AGREEMENT_COMPOSITIONS)
     parser.add_argument(
@@ -1195,6 +1276,9 @@ def parse_args(argv=None):
         parser.error("agreement accepts only the broken_vjp plant")
     if args.mode == "resources" and args.plant is not None:
         parser.error("resources mode does not accept --plant")
+    if args.mode == "resources" and args.steps not in RESOURCE_STEPS:
+        parser.error(
+            f"resources steps must be one of {RESOURCE_STEPS}; got {args.steps}")
     if args.mode == "resources" and args.schedule == "per_step":
         parser.error(
             "resources mode requires one of the registered checkpoint schedules")
