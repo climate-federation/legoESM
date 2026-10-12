@@ -6572,9 +6572,24 @@ class LatLonCGridOceanModel:
             F_slow_u = (F_slow_u
                         - _r_u_bt.astype(F_slow_u.dtype) / H_u_pre
                         * (_u_bot - _U_bar_now)) * _slow_surface_u_mask
-            F_slow_v = (F_slow_v
-                        - _r_v_bt.astype(F_slow_v.dtype) / H_v_pre
-                        * (_v_bot - _V_bar_now)) * _slow_surface_v_mask
+            _dragged_slow_v = (F_slow_v
+                               - _r_v_bt.astype(F_slow_v.dtype) / H_v_pre
+                               * (_v_bot - _V_bar_now))
+            F_slow_v = _dragged_slow_v * _slow_surface_v_mask
+            if _atomic_hpg_unit:
+                # dynspg_ts.f90:1461-1463 adds the drag correction without a
+                # mask multiplication.  Preserve that literal addition on the
+                # measured fold-unit faces; the later stp2d/dynspg association
+                # applies NEMO's resolved surface mask.  Besides restoring the
+                # wet faces hidden by the compact mask, keeping the addition
+                # outside the multiply prevents XLA from reassociating its last
+                # rounding step (round 252's first resolved-mask arm left 15
+                # sub-floor bit differences for exactly this reason).
+                F_slow_v = F_slow_v.at[1:, :].set(jnp.where(
+                    _fold_unit_v,
+                    _dragged_slow_v[1:, :],
+                    F_slow_v[1:, :],
+                ))
         _slow_drag_override = (
             self._nemo_ws_test_hooks.slow_forcing_drag_override)
         if _slow_drag_override is not None:
