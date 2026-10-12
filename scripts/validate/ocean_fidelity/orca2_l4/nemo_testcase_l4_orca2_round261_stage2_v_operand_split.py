@@ -75,7 +75,8 @@ def _native_v(values) -> np.ndarray:
 
 def _native_t(values) -> np.ndarray:
     values = np.asarray(values, np.float64)
-    require(values.shape[:2] == (148, 180), f"native T shape moved {values.shape}")
+    require(values.shape[0] == 148 and values.shape[1] in (90, 180),
+            f"native T shape moved {values.shape}")
     return values[:, :90, ...]
 
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 
+import numpy as np
 import pytest
 
 from scripts.validate.ocean_fidelity.orca2_l4 import (
@@ -58,6 +59,13 @@ def test_classifier_retains_a_refuted_first_owner_prediction():
     result = gate.classify(reports)
     assert result["first_valued_operand"] == "e3v"
     assert result["predictions"]["R261-P3"] == "REFUTED"
+
+
+def test_native_t_accepts_rank_local_and_redundant_x_layouts():
+    local = np.zeros((148, 90, 31))
+    redundant = np.zeros((148, 180, 31))
+    assert gate._native_t(local).shape == (148, 90, 31)
+    assert gate._native_t(redundant).shape == (148, 90, 31)
 
 
 @pytest.mark.parametrize("plant", gate.PLANTS[1:])
