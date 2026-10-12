@@ -4,7 +4,7 @@ set -Eeuo pipefail
 trap 'rc=$?; printf "REFUSE gyre-gradgate-gpu: command failed at line %s (exit %s)\n" "$LINENO" "$rc" >&2' ERR
 
 readonly PYTHON=/home/dbalwada/legoESM/.venv/bin/python
-readonly EVIDENCE_DIR=${1:-/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gradgate_rounds/round3}
+readonly EVIDENCE_DIR=${1:-/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gradgate_rounds/round5}
 readonly GATE=scripts/validate/ocean_fidelity/testcases/nemo_testcase_l2_gyre_gradient_gate.py
 readonly MODEL_PATH=packages/core:packages/ocean:packages/atmosphere:packages/coupler:packages/ice:packages/land:packages/ml:packages/tools:src
 
@@ -30,6 +30,16 @@ run_row() {
   CUDA_VISIBLE_DEVICES=1 JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 PYTHONPATH="$MODEL_PATH" \
     "$PYTHON" "$GATE" "$@" --transcendentals native \
       --expect-commit "$COMMIT" --output "$output"
+  "$PYTHON" -c '
+import json
+import pathlib
+import sys
+
+row = json.loads(pathlib.Path(sys.argv[1]).read_text())
+expected = "GPU, XLA transcendentals — not the certified bit-exact policy"
+assert row["measurement_policy_label"] == expected, row
+assert "transcendentals=\x27native\x27" in row["precision_policy"], row
+' "$output"
 }
 
 for steps in 1 6; do

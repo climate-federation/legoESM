@@ -129,3 +129,14 @@ def test_gpu_cli_can_select_native_transcendentals_explicitly():
         "--expect-commit", "deadbeef", "--output", "/tmp/unused-row.json",
     ])
     assert args.transcendentals == "native"
+
+
+def test_measurement_policy_labels_refuse_cross_backend_combinations():
+    assert G.measurement_policy_label("cpu", "libm") == (
+        "CPU, certified fp64/libm bit-exact policy")
+    assert G.measurement_policy_label("gpu", "native") == (
+        "GPU, XLA transcendentals — not the certified bit-exact policy")
+    with pytest.raises(ValueError, match="unsupported GYRE gradient"):
+        G.measurement_policy_label("gpu", "libm")
+    with pytest.raises(ValueError, match="unsupported GYRE gradient"):
+        G.measurement_policy_label("cpu", "native")

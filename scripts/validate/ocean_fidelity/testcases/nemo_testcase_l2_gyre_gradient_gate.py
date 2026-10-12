@@ -42,6 +42,10 @@ FD_STEP = 1.0e-3
 PERTURBATION_K = 1.0e-3
 SCHEDULES = ("none", "uniform", "binomial")
 FIELDS = ("T", "S", "u", "v")
+GPU_NATIVE_POLICY_LABEL = (
+    "GPU, XLA transcendentals — not the certified bit-exact policy"
+)
+CPU_LIBM_POLICY_LABEL = "CPU, certified fp64/libm bit-exact policy"
 
 
 class ScoredState(NamedTuple):
@@ -75,6 +79,18 @@ class GYREContext(NamedTuple):
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise RuntimeError(message)
+
+
+def measurement_policy_label(backend: str, transcendentals: str) -> str:
+    """Return a fail-closed human label for a measured execution policy."""
+    if backend == "gpu" and transcendentals == "native":
+        return GPU_NATIVE_POLICY_LABEL
+    if backend == "cpu" and transcendentals == "libm":
+        return CPU_LIBM_POLICY_LABEL
+    raise ValueError(
+        "unsupported GYRE gradient measurement policy: "
+        f"backend={backend!r}, transcendentals={transcendentals!r}"
+    )
 
 
 def configure_runtime(transcendentals: str = "libm") -> None:
@@ -407,6 +423,8 @@ def measure_agreement(n_steps: int, *, plant=False,
         "device": str(jax.devices()[0]),
         "jax_enable_x64": bool(jax.config.jax_enable_x64),
         "precision_policy": repr(get_policy()),
+        "measurement_policy_label": measurement_policy_label(
+            jax.default_backend(), transcendentals),
         "state_dtype": str(context.initial_state.T.data.dtype),
         "geometry_dtype": str(context.card.recipe.z_coord.dz_ref.dtype),
         "plant": "broken_vjp" if plant else None,
@@ -534,6 +552,8 @@ def measure_resources(n_steps: int, schedule: str, *,
         "device": str(jax.devices()[0]),
         "jax_enable_x64": bool(jax.config.jax_enable_x64),
         "precision_policy": repr(get_policy()),
+        "measurement_policy_label": measurement_policy_label(
+            backend, transcendentals),
         "state_dtype": str(context.initial_state.T.data.dtype),
         "geometry_dtype": str(context.card.recipe.z_coord.dz_ref.dtype),
         "production_entry": "LatLonCGridOceanModel._step_jitted",
