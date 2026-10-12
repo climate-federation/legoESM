@@ -241,7 +241,20 @@ def main(argv):
         dao, dak = deepest_active(Ko[s, wet], zw, AVT_C, ZTOP), deepest_active(Kkn[s, wet], zw, AVT_C, ZTOP)
         gapo = np.nanmean(np.where(np.isnan(dao), np.nan, to < dao))
         gapk = np.nanmean(np.where(np.isnan(dak), np.nan, tk < dak))
-        extra = f" || active base <=40m ours {np.nanmedian(dao):6.2f} avt_k {np.nanmedian(dak):6.2f} | low-K gap above active base o/N {gapo:.2f}/{gapk:.2f}"
+        def gap_stats(K, t, da):
+            """median depth of the gap (first crossing, gap columns only) and
+            median log10 of the smallest K above the active base there."""
+            g = ~np.isnan(da) & (t < da)
+            if not g.any():
+                return np.nan, np.nan
+            kk = K[s, wet][g]
+            above = zw[None, :] < da[g][:, None]
+            kmin = np.min(np.where(above, kk, np.inf), -1)
+            return np.median(t[g]), np.median(np.log10(np.maximum(kmin, 1e-30)))
+        gdo, gko = gap_stats(Ko, to, dao)
+        gdn, gkn = gap_stats(Kkn, tk, dak)
+        extra = (f" || active base <=40m ours {np.nanmedian(dao):6.2f} avt_k {np.nanmedian(dak):6.2f} | low-K gap above active base o/N {gapo:.2f}/{gapk:.2f}"
+                 f" | gap depth o/N {gdo:5.2f}/{gdn:5.2f} log10 Kmin o/N {gko:5.2f}/{gkn:5.2f}")
         print(f"h{h:02d} | {np.nanmedian(to):6.2f} | {np.nanmedian(tk):6.2f} | {_q(to - tk)} || "
               f"{km(Ko, k128):7.2f} {km(Kkn, k128):7.2f} {km(Kn, k128):7.2f} | {km(Ko, k179):7.2f} {km(Kkn, k179):7.2f} {km(Kn, k179):7.2f}" + extra)
     s0, s1 = h0 * 24, min(h1 * 24, nt)
