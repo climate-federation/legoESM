@@ -246,10 +246,9 @@ def classify(reports: list[dict[str, object]], plant: str = "none") -> dict:
     elif plant == "source-order":
         independent["source_order"].reverse()
     elif plant == "south-support":
-        independent["south_changed_fields"] = []
+        independent["south_changed_fields"] = ["depth_v"]
     elif plant == "old-behavior":
-        for name in independent["south_changed_fields"]:
-            independent["south_rows"][name]["on_vs_off_row0"]["unequal"] = 0
+        independent["south_rows"]["depth_v"]["on_vs_off_row0"]["unequal"] = 1
     elif plant == "north-nonvacuity":
         independent["north_changed_cells"] = 0
     elif plant == "one-bit":
@@ -268,10 +267,10 @@ def classify(reports: list[dict[str, object]], plant: str = "none") -> dict:
         require(report["source_order"] == expected_order,
                 f"{label}: association source order moved")
         changed = report["south_changed_fields"]
-        require(changed, f"{label}: old association did not touch the south row")
-        require(all(report["south_rows"][name]["on_vs_off_row0"]["unequal"]
-                    for name in changed),
-                f"{label}: old-behavior sentinel went vacuous")
+        measured = [name for name in expected_order
+                    if report["south_rows"][name]["on_vs_off_row0"]["unequal"]]
+        require(changed == measured,
+                f"{label}: south-row changed-field registry disagrees with data")
         require(report["north_changed_cells"] > 0,
                 f"{label}: association north-fold control went vacuous")
         require(report["one_bit_control"]["unequal"] == 1,
@@ -284,10 +283,12 @@ def classify(reports: list[dict[str, object]], plant: str = "none") -> dict:
         }
     require(len(signatures) == 1,
             "claim labels disagree on the south-row writer")
+    changed = list(next(iter(signatures)))
     return {
         "format": "nemo-testcase-l4-orca2-round254-south-classification-v1",
-        "status": "CONFIRMED_R254_SOUTH_ASSOCIATION_WRITER",
-        "first_changed_fields": list(next(iter(signatures))),
+        "status": ("CONFIRMED_R254_SOUTH_ASSOCIATION_WRITER" if changed
+                   else "REFUTED_R254_SOUTH_ASSOCIATION_HYPOTHESIS"),
+        "first_changed_fields": changed,
         "summaries": summaries,
         "plant": plant,
     }
