@@ -106,6 +106,31 @@ def main(argv):
         print(f"   NEMO " + " ".join(f"{t}={ln[t][s, cols[c], k[c]]:.3e}" for t in L.TERMS)
               + f" | e(s)-e(s-1)={ne_end[s, cols[c], k[c]] - ne_end[s - 1, cols[c], k[c]]:.3e}")
 
+    # Effective production viscosity: eshear / S2_face, S2_face from the
+    # C-grid face velocities at the column's own (j,i) faces, the SAME crude
+    # operator on both sides (ours col_u/col_v post-solve, NEMO uoce/voce);
+    # neither equals NEMO's avm-weighted p_sh2, only the ratio is meant.
+    uo, vo = g("col_u")[:, keep], g("col_v")[:, keep]
+    def nuv(f, v):
+        x = np.asarray(nc.Dataset(f"{argv[1]}/{PREFIX}{f}.nc")[v][:, :nk + 1], dtype=np.float64)
+        x = x[:, :, sj, si].transpose(0, 2, 1); x[np.abs(x) > 1e15] = np.nan
+        return x
+    un, vn = nuv("U", "uoce"), nuv("V", "voce")
+    zt = np.asarray(nc.Dataset(L.MESH)["gdept_1d"][0], dtype=np.float64)[:nk + 1]
+    dzt = np.diff(zt)
+    s2f = lambda U, V: ((U[..., :-1] - U[..., 1:]) ** 2 + (V[..., :-1] - V[..., 1:]) ** 2) / dzt ** 2
+    S2o_f, S2n_f = s2f(uo, vo), s2f(un, vn)
+    print("\nEffective production viscosity at the gap interface (window-end step): median")
+    print("  h | eshear ours NEMO | S2_face ours NEMO (col ratio) | nu_eff=eshear/S2_face ours NEMO (col ratio) | A_applied(s-1) ours | avm_k(s-1) NEMO | e col ratio")
+    for h in range(h0, h1):
+        s = (h + 1) * 24 - 1
+        po, pn = pick(sh_o, s), pick(sh_n, s)
+        so, sn = pick(S2o_f, s), pick(S2n_f, s)
+        nuo, nun = po / so, pn / sn
+        print(f"  h{h + 1:02d} | {np.nanmedian(po):9.2e} {np.nanmedian(pn):9.2e} | {np.nanmedian(so):9.2e} {np.nanmedian(sn):9.2e} "
+              f"({np.nanmedian(so / sn):5.2f}) | {np.nanmedian(nuo):9.2e} {np.nanmedian(nun):9.2e} ({np.nanmedian(nuo / nun):5.2f}) | "
+              f"{np.nanmedian(pick(Ao_app, s - 1)):9.2e} | {np.nanmedian(pick(avmk, s - 1)):9.2e} | {np.nanmedian(pick(le_end, s) / pick(ne_end, s)):5.2f}")
+
     print(f"\nPer 1-h window at the gap interface: median [IQR] of ours-NEMO (cumulative, m2/s2); NEMO median in ()")
     for h in range(h0, h1):
         a0, a1 = h * 24, (h + 1) * 24
