@@ -38,6 +38,12 @@ from legoesm.grids.polar_filter import (
     fourier_filter,
     fourier_filter_3d,
 )
+from legoesm.grids.operators_latlon_cgrid import (
+    apply_north_fold,
+    fold_is_local,
+    fold_row,
+    north_fold_mask,
+)
 from legoesm.ocean.vertical import (
     OceanZStarCoordinate,
     OceanPartialCellCoordinate,
@@ -1846,6 +1852,25 @@ def _nemo_ws_qco_stage_faces(
         ops.vmask3, ops.hu_0, ops.hv_0, ops.area_t, ops.area_u, ops.area_v,
         include_reciprocals=include_reciprocals,
     )
+
+
+def _nemo_associate_stage_v_ratio(v_ratio, grid):
+    """Apply NEMO's V-point north-fold association to one live ratio.
+
+    ``dom_qco_r3c_RK3`` first builds ``r3va`` from the stage-1 SSH and
+    ``stprk3_stg.f90:168-170`` immediately passes that scalar V field through
+    ``lbc_lnk``.  On the ORCA2 T pivot, the stored north V row is the mirrored
+    row immediately south of it with scalar sign ``+1``.  The input and output
+    use legoESM's redundant south/north V layout, so only the last row moves.
+    """
+    fold = getattr(grid, "fold", None)
+    north_mask = north_fold_mask(grid)
+    if fold_is_local(grid) or north_mask is not None:
+        north = fold_row(
+            v_ratio[-2:-1], fold.perm_v, 1.0, fold.perm_v.shape[0])
+        return apply_north_fold(
+            v_ratio, north, grid, north_mask=north_mask)
+    return v_ratio
 
 
 
@@ -7871,6 +7896,21 @@ class LatLonCGridOceanModel:
                 _u_live_mask = state.u_mask.data[..., None]
                 _v_live_mask = state.v_mask.data[..., None]
                 _active_live = mask_3d
+            if self._nemo_ws_test_hooks.barotropic_atomic_fold_unit is True:
+                # stprk3_stg.f90:282-285 consumes the domain's associated
+                # three-dimensional face masks in the same indivisible stage
+                # transport as e3u/e3v and zub/zvb.  The compact partial-cell
+                # masks above lose ORCA2's wet V pivot row.  Reuse D114's one
+                # resolved raw-mesh source for the private complete-unit arm;
+                # no public selector can reach this candidate before its
+                # Decision-96 landing gate passes.
+                _resolved_stage_ops = nemo_qco_resolved_mesh_operands(
+                    _zc, _grid, _u_live_mask, _v_live_mask, h_k_old.dtype,
+                    h_k_old.shape[-1])
+                _v_live_mask = jnp.concatenate(
+                    [jnp.zeros_like(_resolved_stage_ops.vmask3[:1]),
+                     _resolved_stage_ops.vmask3],
+                    axis=0)
             # e3t_0: the reference (eta = 0) thickness ladder, so that
             # h_stage = e3t_0*(1 + eta/H) and sum_k e3t_0 = H_bathy.
             _h_ref_ws = compute_layer_thickness(
@@ -7933,6 +7973,12 @@ class LatLonCGridOceanModel:
 
             _qu_b, _qv_b = _qco_ratios(state.eta.data)
             _qu_13, _qv_13 = _qco_ratios(_eta_live_one_third)
+            if self._nemo_ws_test_hooks.barotropic_atomic_fold_unit is True:
+                # stprk3_stg.f90:168-170 associates r3va after stage 1; the
+                # result is the Kmm live-depth operand carried into stage 2.
+                # Keep this inside the existing private atomic unit until its
+                # complete Decision-96 trajectory gate passes.
+                _qv_13 = _nemo_associate_stage_v_ratio(_qv_13, _grid)
             _qu_12, _qv_12 = _qco_ratios(_eta_live_one_half)
             _qu_aa, _qv_aa = _qco_ratios(state_new.eta.data)
             from legoesm.ocean.eos import (
