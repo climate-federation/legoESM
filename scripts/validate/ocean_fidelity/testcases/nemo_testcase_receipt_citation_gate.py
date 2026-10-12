@@ -1587,6 +1587,31 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 round 255: substep-2 SSH writer boundary split -------
+    'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:550-558': [
+        ('DO jj = ntsj-( 1), ntej+(  1 ) ; DO ji = ntsi-( 1), ntei+(  1)', 1),
+        ('END DO   ;   END DO', 9),
+        9],
+    'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:721-739': [
+        ('IF( .NOT.lk_linssh ) THEN   !* Update ocean depth (variable volume case only)', 1),
+        ('ENDIF', 15),
+        19],
+    'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:781-793': [
+        ('!* Swap', 1),
+        ('sshn_e (:,:) = ssha_e(:,:)', 1),
+        13],
+    'barotropic_latlon_cgrid.py:2050-2096': [
+        ('if _continuity_evaluation == "nemo_literal":', 1),
+        ('eta_new = _clamp_redistribute(eta_unfloored, eta_floor, mask, area)', 1),
+        47],
+    'barotropic_latlon_cgrid.py:2336-2374': [
+        ('association_post = None', 1),
+        ('V_bar_new = association_post[1]', 2),
+        39],
+    'barotropic_latlon_cgrid.py:2403-2408': [
+        ('if ab3_za is not None:', 1),
+        ('U_bar_c, Ub_c, V_bar_c, Vb_c, eta_c, etab_c)', 1),
+        6],
     # --- ORCA2 round 254: south-row audit and midpoint operand split ---
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:728-730': [
         ("CALL lbc_lnk( 'dynspg_ts', ua_e , 'U', -1._wp, va_e , 'V', -1._wp", 2),
