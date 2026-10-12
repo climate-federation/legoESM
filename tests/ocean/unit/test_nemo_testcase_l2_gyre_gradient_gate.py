@@ -416,6 +416,8 @@ def test_gpu_runner_disables_preallocation_and_covers_direct_1440_rows():
     assert "LAST_ROW_STATUS" in source
     assert "LAST_SUITE_STATUS" in source
     assert "SWG_GRADGATE_GPU_SUITE" in source
+    assert "readonly SELF_TEST_MODE" in source
+    assert "SWG_GRADGATE_SELF_TEST_STATUS" not in source
 
     self_test = subprocess.run(
         ["bash", str(_GPU_SCRIPT), "--self-test"],

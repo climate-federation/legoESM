@@ -7,6 +7,11 @@ readonly PYTHON=/home/dbalwada/legoESM/.venv/bin/python
 readonly EVIDENCE_DIR=${1:-/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swggg_rounds/round4}
 readonly GATE=scripts/validate/ocean_fidelity/testcases/nemo_testcase_l2_gyre_gradient_gate.py
 readonly MODEL_PATH=packages/core:packages/ocean:packages/atmosphere:packages/coupler:packages/ice:packages/land:packages/ml:packages/tools:src
+if [[ ${1:-} == --self-test ]]; then
+  readonly SELF_TEST_MODE=1
+else
+  readonly SELF_TEST_MODE=0
+fi
 
 refuse() {
   printf 'REFUSE ocean-gradgate-gpu: %s\n' "$1" >&2
@@ -33,7 +38,7 @@ accept_classified_exit() {
 invoke_row_gate() {
   local output=$1
   shift
-  if [[ -n ${SWG_GRADGATE_SELF_TEST_STATUS:-} ]]; then
+  if [[ $SELF_TEST_MODE -eq 1 ]]; then
     "$PYTHON" -c '
 import json
 import pathlib
@@ -45,8 +50,8 @@ pathlib.Path(sys.argv[1]).write_text(json.dumps({
         "GPU, XLA transcendentals — not the certified bit-exact policy"),
     "precision_policy": "PrecisionPolicy.fp64(transcendentals=\x27native\x27)",
 }))
-' "$output" "$SWG_GRADGATE_SELF_TEST_STATUS"
-    [[ $SWG_GRADGATE_SELF_TEST_STATUS == CONFIRMED ]]
+' "$output" "$SELF_TEST_STATUS"
+    [[ $SELF_TEST_STATUS == CONFIRMED ]]
     return
   fi
   CUDA_VISIBLE_DEVICES=1 JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 \
@@ -60,15 +65,15 @@ invoke_suite_gate() {
   local output=$1
   local steps=$2
   shift 2
-  if [[ -n ${SWG_GRADGATE_SELF_TEST_STATUS:-} ]]; then
+  if [[ $SELF_TEST_MODE -eq 1 ]]; then
     "$PYTHON" -c '
 import json
 import pathlib
 import sys
 
 pathlib.Path(sys.argv[1]).write_text(json.dumps({"status": sys.argv[2]}))
-' "$output" "$SWG_GRADGATE_SELF_TEST_STATUS"
-    [[ $SWG_GRADGATE_SELF_TEST_STATUS == CONFIRMED ]]
+' "$output" "$SELF_TEST_STATUS"
+    [[ $SELF_TEST_STATUS == CONFIRMED ]]
     return
   fi
   CUDA_VISIBLE_DEVICES=1 JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 \
@@ -140,7 +145,7 @@ if [[ ${1:-} == --self-test ]]; then
   trap 'rm -rf -- "$test_dir"' EXIT
   observed=()
   for status in REFUTED VACUOUS RETRACTED CONFIRMED; do
-    SWG_GRADGATE_SELF_TEST_STATUS=$status
+    SELF_TEST_STATUS=$status
     run_row "$test_dir/row_${status}.json" self-test
     [[ $LAST_ROW_STATUS == "$status" ]]
     run_suite "$test_dir/suite_${status}.json" 24 self-test
