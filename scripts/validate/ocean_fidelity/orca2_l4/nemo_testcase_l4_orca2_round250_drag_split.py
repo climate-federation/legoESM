@@ -22,11 +22,9 @@ if str(TESTCASES) not in sys.path:
 from legoesm.ocean.fidelity.provenance import worktree_stamp  # noqa: E402
 from scripts.validate.ocean_fidelity.orca2_l4 import (  # noqa: E402
     nemo_testcase_l4_orca2_round92_rung0_card_gate as rung0,
-    nemo_testcase_l4_orca2_round135_step36_fct_gate as passive,
     nemo_testcase_l4_orca2_round204_omt0_ladder_gate as omt0,
     nemo_testcase_l4_orca2_round223_omt4_ladder_gate as omt4,
     nemo_testcase_l4_orca2_round236_slow_v_split as r236,
-    nemo_testcase_l4_orca2_round245_v_depth_split as r245,
     nemo_testcase_l4_orca2_round249_fold_growth_gate as r249,
 )
 from nemo_testcase_l2_gyre_round14_advmean import read_ordered  # noqa: E402
@@ -108,10 +106,6 @@ def measure(deck_root: Path, frame_root: Path, twin_a: Path, twin_b: Path,
     import jax
     import jax.numpy as jnp
     from legoesm.ocean.dynamics.latlon_cgrid_operators import min_cell_to_vface
-    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
-        LatLonCGridOceanModel,
-        _NEMOWSLiveOperandTrace,
-    )
     from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
         nemo_bottom_drag_rate_faces,
     )
@@ -135,24 +129,11 @@ def measure(deck_root: Path, frame_root: Path, twin_a: Path, twin_b: Path,
     state = (card.recipe.initial_state if label == "independent"
              else rung0.bridge_entry(card, entry))
     freshwater, surface = omt0.rung0_ladder._zero_forcing((148, 180))
-    ordinary = LatLonCGridOceanModel(
-        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
-        _nemo_ws_test_hooks=r249._hooks(card, True),
-    )
-    traced_model = LatLonCGridOceanModel(
-        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
-        _nemo_ws_test_hooks=r249._hooks(card, True, live=True),
-    )
-    with r245._barotropic_surface_mask_arm(
-        card, True, v_only=True, t_pivot_north_neighbor=True,
-    ):
-        plain = jax.device_get(ordinary.step(
-            state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
-        traced = jax.device_get(traced_model.step(
-            state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
-    require(isinstance(traced, _NEMOWSLiveOperandTrace),
-            "live operand trace return type moved")
-    passivity = passive._ordinary_state_equal(traced.state_after, plain)
+    # Reuse the exact private slow-forcing arm which produced round 249's
+    # admitted 35-face boundary.  Reconstructing a similar-looking hook here
+    # would measure a different executable and made the first draft refuse on
+    # zero owner cells.
+    traced, passivity = r236._run_trace(card, state, freshwater, surface)
     require(all(passivity.values()), "live operand trace moved completed state")
     producer = traced.slow_forcing_producer
 
