@@ -51,7 +51,8 @@ ocean. UNASKED deviation, add-only, in the case's MY_SRC, never in NEMO `src/`.
 advection-OFF arms (commit 1fe1448df) are here. `build_tsunami_zco_card`, its
 one-level opt-in, its j-periodic option and its acquisition scripts live on
 branch fidelity/nemo-testcases-tsunami (PR #1920). This round ports only the
-one-level opt-in, with the identical signature. The one-level STEP is unproven
+one-level opt-in: the same keyword and default, laid out so that no previously
+cited line of that file moves (a small merge conflict is expected). The one-level STEP is unproven
 on this branch until that branch is merged here.
 
 ## 3. Survey
@@ -123,15 +124,19 @@ namelist parsers in packages/.
   (D114); required alpha `ocean_model_latlon_cgrid.py:4415` (D115); the
   advection-OFF arms; the RK3 identity "orca2_vector_een_c2" with the OMT-0
   five-OFF selections.
-- New: `nemo_testcase_recipe.py:2025` (builder), `:1937` deck reader, `:1974`
-  bump, `:2216` validator. A separate builder rather than a parameterised
+- New: `nemo_testcase_recipe.py:3650` (builder), `:3562` deck reader, `:3599`
+  bump, `:3857` validator. A separate builder rather than a parameterised
   ORCA2 card: the ORCA2 builder requires five input files G1 has no use for
   (T/S, viscosity, wave mixing) and builds ice and TKE state; the shared part
   is the geometry helpers, which are called, not copied.
+- The card is dispatched by the shared card factory but is NOT listed in the
+  shared validator's table: its validation is deck-bound and has its own pair
+  (the precedent is the ORCA2 rung-0 and OMT cards, validated beside their
+  gates). Listing it would also move lines that older receipts cite.
 - No namelist reader existed in packages/ (three exist under scripts/ and are
   not importable from the package); a 20-line one was added.
-- THE ONE new explicit selector: `vertical.py:1085` (one-level column), default
-  off, selected only by this card at `nemo_testcase_recipe.py:2088`. No second
+- THE ONE new explicit selector: `vertical.py:1084` (one-level column), default
+  off, selected only by this card at `nemo_testcase_recipe.py:3713`. No second
   builder, fold, mask or mesh machinery.
 
 ## 4. The G1 deck against its two parents
