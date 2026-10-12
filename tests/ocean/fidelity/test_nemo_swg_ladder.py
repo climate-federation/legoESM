@@ -232,6 +232,19 @@ def test_ioipsl_running_mean_preserves_source_association_at_storage():
         np.float32)[0]
 
 
+def test_stored_row_checks_fp32_bits_but_uses_the_fp64_numerical_gate():
+    reference = np.ones((2, 2), dtype=np.float32)
+    exact = lad._stored_row("stored.exact", reference, reference.copy(),
+                            np.ones((2, 2), dtype=bool))
+    moved = reference.copy()
+    moved[0, 0] = np.nextafter(moved[0, 0], np.float32(np.inf))
+    debt = lad._stored_row("stored.ulp", reference, moved,
+                           np.ones((2, 2), dtype=bool))
+    assert exact["status"] == "AT-BAR" and exact["bit_identical"]
+    assert debt["status"] == "DEBT" and not debt["bit_identical"]
+    assert debt["stored_dtype"] == "float32"
+
+
 def test_shared_shipped_statistics_are_deterministic_for_equal_series():
     from legoesm.core.precision import PrecisionPolicy, set_policy
     from legoesm.ocean.fidelity.nemo_testcase_recipe import build_swg_card

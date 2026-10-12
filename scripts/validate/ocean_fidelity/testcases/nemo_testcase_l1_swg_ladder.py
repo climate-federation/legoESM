@@ -285,6 +285,16 @@ def _row(name, ref, cand, mask):
     return result
 
 
+def _stored_row(name, ref, cand, mask):
+    """Score a native fp32 output record without weakening the fp64 bar gate."""
+    ref, cand = np.asarray(ref), np.asarray(cand)
+    require(ref.dtype == cand.dtype == np.dtype("float32"),
+            f"{name}: stored comparison is not float32")
+    result = _row(name, ref.astype(np.float64), cand.astype(np.float64), mask)
+    result["stored_dtype"] = "float32"
+    return result
+
+
 def _gate_rows(out: dict) -> dict:
     rows = [row for step in out.get("per_kt", ()) for row in step["rows"]]
     controls = list(out.get("controls", ()))
@@ -776,7 +786,7 @@ def shipped(root: Path, *, statistics_npz: Path | None = None,
         for kind in ("T", "U", "V"):
             stored = averages[kind].astype(np.float32)
             candidate[kind][output_index - 1] = stored
-            rows.append(_row(
+            rows.append(_stored_row(
                 f"shipped.output{output_index:04d}.kt{kt}.{kind}",
                 reference[kind][output_index - 1], stored, masks[kind]))
         per_output.append({
