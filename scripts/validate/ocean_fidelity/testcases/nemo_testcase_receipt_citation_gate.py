@@ -1588,10 +1588,10 @@ FILES = {
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
     # --- ORCA2 round 250: literal drag replay retracts round 249 -----
-    'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/zdfdrg.f90:215-249': [
+    'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/zdfdrg.f90:224-249': [
         ('REAL(wp), DIMENSION(Nis0-(2):Nie0+(2),Njs0-(2):Nje0+(2)), INTENT(inout) ::   pCdU', 1),
         ('pCdU(ji,jj) = - pCd0(ji,jj) * SQRT', 1),
-        35],
+        26],
     # --- ORCA2 round 249: first private-unit growth boundary ---------
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/stp2d.f90:194-230': [
         ('!*  vertical averaging  *!', 1),

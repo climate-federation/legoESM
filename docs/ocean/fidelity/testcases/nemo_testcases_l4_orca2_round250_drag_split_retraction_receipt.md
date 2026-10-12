@@ -16,7 +16,7 @@ operand row is identical between the two labels. No acquisition was needed.
 
 The executing R230 build constructs the signed T-point drag rate over its
 one-cell halo at
-`ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/zdfdrg.f90:215-249`. It then forms
+`ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/zdfdrg.f90:224-249`. It then forms
 the V-face coefficient, the NOW bottom-minus-barotropic residual, and the
 live-depth-scaled V correction at
 `ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:1404-1463`.
