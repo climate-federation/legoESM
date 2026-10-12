@@ -61,6 +61,13 @@ WARM_REVERSE_TIMER_SPAN = (
     "start and stop/join excluded"
 )
 UNIFORM_SCALING_RATIO_BOUNDS = (1.5, 2.5)
+ADJACENT_SCALING_RATIO_BOUNDS = (0.5, 1.5)
+SCALING_PLANTS = (
+    "constant_time",
+    "reviewer_nonmonotonic",
+    "decreasing_endpoint",
+    "adjacent_ratio_outside_band",
+)
 GYRE_FIELDS = ("T", "S", "u", "v")
 SWG_FIELDS = ("ssh", "u", "v")
 GPU_NATIVE_POLICY_LABEL = (
@@ -1051,7 +1058,8 @@ def classify_resource_suite(rows: list[dict], *, plant: bool = False) -> dict:
     }
 
 
-def classify_scaling_suite(rows: list[dict], *, plant: bool = False) -> dict:
+def classify_scaling_suite(
+        rows: list[dict], *, plant: str | None = None) -> dict:
     """Gate the frozen five-window CPU wall-time scaling predictions."""
     by_step = {row.get("steps"): row for row in rows}
     if set(by_step) != set(SWG_SCALING_STEPS) or len(rows) != len(SWG_SCALING_STEPS):
@@ -1096,8 +1104,19 @@ def classify_scaling_suite(rows: list[dict], *, plant: bool = False) -> dict:
         for step in SWG_SCALING_STEPS
     }
     evaluated = dict(times)
-    if plant:
+    if plant == "constant_time":
         evaluated = {step: times[SWG_SCALING_STEPS[0]] for step in SWG_SCALING_STEPS}
+    elif plant == "reviewer_nonmonotonic":
+        evaluated = dict(zip(SWG_SCALING_STEPS, (1.0, 100.0, 1.0, 1000.0, 2000.0)))
+    elif plant == "decreasing_endpoint":
+        evaluated[1440] = 0.5 * evaluated[720]
+    elif plant == "adjacent_ratio_outside_band":
+        # Linear at four windows; the 720-step point makes only the 360-720
+        # normalized adjacent ratio exceed the preregistered upper bound.
+        evaluated = dict(zip(
+            SWG_SCALING_STEPS, (0.24, 0.96, 3.6, 10.81, 14.4)))
+    elif plant is not None:
+        raise ValueError(f"unknown scaling plant {plant!r}")
 
     mean_steps = sum(SWG_SCALING_STEPS) / len(SWG_SCALING_STEPS)
     mean_time = sum(evaluated.values()) / len(evaluated)
@@ -1124,9 +1143,25 @@ def classify_scaling_suite(rows: list[dict], *, plant: bool = False) -> dict:
         interval: cost / slope if slope > 0.0 else 0.0
         for interval, cost in interval_seconds_per_step.items()
     }
+    adjacent_normalized_ratios = {
+        f"{lower}-{upper}": (
+            (evaluated[upper] / evaluated[lower]) / (upper / lower))
+        for lower, upper in zip(SWG_SCALING_STEPS[:-1], SWG_SCALING_STEPS[1:])
+    }
+    adjacent_pairs = tuple(zip(
+        SWG_SCALING_STEPS[:-1], SWG_SCALING_STEPS[1:]))
+    ratio_lower, ratio_upper = ADJACENT_SCALING_RATIO_BOUNDS
     checks = {
         "positive_fitted_seconds_per_step": slope > 0.0,
         "time_1440_exceeds_time_720": evaluated[1440] > evaluated[720],
+        "strictly_increasing_at_every_window": all(
+            evaluated[upper] > evaluated[lower]
+            for lower, upper in adjacent_pairs
+        ),
+        "every_adjacent_ratio_in_preregistered_band": all(
+            ratio_lower <= ratio <= ratio_upper
+            for ratio in adjacent_normalized_ratios.values()
+        ),
     }
     ratio = evaluated[1440] / evaluated[720]
     if schedule == "uniform":
@@ -1149,10 +1184,13 @@ def classify_scaling_suite(rows: list[dict], *, plant: bool = False) -> dict:
         "fit_r_squared": r_squared,
         "interval_seconds_per_step": interval_seconds_per_step,
         "interval_to_fit_ratios": interval_to_fit_ratios,
+        "adjacent_normalized_ratios": adjacent_normalized_ratios,
+        "adjacent_normalized_ratio_bounds": list(
+            ADJACENT_SCALING_RATIO_BOUNDS),
         "ratio_1440_to_720": ratio,
         "uniform_ratio_bounds": list(UNIFORM_SCALING_RATIO_BOUNDS),
         "checks": checks,
-        "plant": "constant_time_rows" if plant else None,
+        "plant": plant,
         "row_statuses": row_statuses,
     }
 
@@ -1338,7 +1376,8 @@ def measure_resource_suite(paths: list[Path], *, plant: bool = False) -> dict:
     return row
 
 
-def measure_scaling_suite(paths: list[Path], *, plant: bool = False) -> dict:
+def measure_scaling_suite(
+        paths: list[Path], *, plant: str | None = None) -> dict:
     """Classify the five stored CPU timing rows without rerunning them."""
     rows = [json.loads(path.read_text(encoding="utf-8")) for path in paths]
     row = classify_scaling_suite(rows, plant=plant)
@@ -1387,7 +1426,7 @@ def parse_args(argv=None):
     parser.add_argument("--schedule", choices=SCHEDULES)
     parser.add_argument(
         "--plant", choices=(
-            "broken_vjp", "uniform_label_uses_none", "constant_time"))
+            "broken_vjp", "uniform_label_uses_none", *SCALING_PLANTS))
     parser.add_argument("--row", action="append", type=Path, default=[])
     parser.add_argument(
         "--transcendentals", choices=("libm", "native"), default="libm",
@@ -1418,8 +1457,9 @@ def parse_args(argv=None):
             )
         if args.schedule is None:
             parser.error("scaling-suite mode requires --schedule")
-        if args.plant not in (None, "constant_time"):
-            parser.error("scaling-suite mode accepts only --plant constant_time")
+        if args.plant is not None and args.plant not in SCALING_PLANTS:
+            parser.error(
+                "scaling-suite mode accepts only registered scaling plants")
     elif args.row:
         parser.error(f"{args.mode} mode does not accept --row")
     if args.steps <= 0:
@@ -1447,8 +1487,7 @@ def main(argv=None) -> int:
             "resource-suite CLI card/steps do not match input rows",
         )
     else:
-        row = measure_scaling_suite(
-            args.row, plant=args.plant == "constant_time")
+        row = measure_scaling_suite(args.row, plant=args.plant)
         require(args.card == SWG_CARD, "scaling-suite is registered only for SWG")
         require(row["card_selector"] == args.card,
                 "scaling-suite CLI card does not match input rows")

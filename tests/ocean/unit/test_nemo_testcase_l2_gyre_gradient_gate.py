@@ -336,22 +336,45 @@ def _cpu_scaling_row(schedule, steps, seconds):
     }
 
 
-def test_cpu_scaling_suite_gates_frozen_predictions_and_constant_time_plant():
+def test_cpu_scaling_suite_gates_frozen_predictions_and_all_plants():
     rows = [
         _cpu_scaling_row("uniform", steps, 0.01 * steps + 0.1)
         for steps in G.SWG_SCALING_STEPS
     ]
     control = G.classify_scaling_suite(rows)
-    planted = G.classify_scaling_suite(rows, plant=True)
     assert control["status"] == "CONFIRMED"
     assert control["fit_seconds_per_step"] == pytest.approx(0.01)
     assert control["checks"] == {
         "positive_fitted_seconds_per_step": True,
         "time_1440_exceeds_time_720": True,
+        "strictly_increasing_at_every_window": True,
+        "every_adjacent_ratio_in_preregistered_band": True,
         "uniform_1440_to_720_ratio_in_preregistered_band": True,
     }
-    assert planted["status"] == "REFUTED"
-    assert not any(planted["checks"].values())
+    assert all(
+        0.5 <= ratio <= 1.5
+        for ratio in control["adjacent_normalized_ratios"].values()
+    )
+    plants = {
+        name: G.classify_scaling_suite(rows, plant=name)
+        for name in G.SCALING_PLANTS
+    }
+    assert {name: row["status"] for name, row in plants.items()} == {
+        name: "REFUTED" for name in G.SCALING_PLANTS
+    }
+    assert not plants["reviewer_nonmonotonic"]["checks"][
+        "strictly_increasing_at_every_window"]
+    assert not plants["decreasing_endpoint"]["checks"][
+        "strictly_increasing_at_every_window"]
+    almost_linear = plants["adjacent_ratio_outside_band"]
+    assert almost_linear["checks"]["strictly_increasing_at_every_window"]
+    assert not almost_linear["checks"][
+        "every_adjacent_ratio_in_preregistered_band"]
+    outside = [
+        ratio for ratio in almost_linear["adjacent_normalized_ratios"].values()
+        if not 0.5 <= ratio <= 1.5
+    ]
+    assert len(outside) == 1
     args = G.parse_args([
         "scaling-suite", "--card", "SWG", "--steps", "1440",
         "--schedule", "uniform", "--expect-commit", "deadbeef",
@@ -361,6 +384,19 @@ def test_cpu_scaling_suite_gates_frozen_predictions_and_constant_time_plant():
     ])
     assert args.plant is None
     assert len(args.row) == 5
+
+
+@pytest.mark.parametrize("plant", G.SCALING_PLANTS)
+def test_scaling_suite_cli_accepts_each_registered_plant(plant):
+    args = G.parse_args([
+        "scaling-suite", "--card", "SWG", "--steps", "1440",
+        "--schedule", "none", "--plant", plant,
+        "--expect-commit", "deadbeef", "--output", "/tmp/unused.json",
+        *sum(([
+            "--row", f"/tmp/{step}.json"
+        ] for step in G.SWG_SCALING_STEPS), []),
+    ])
+    assert args.plant == plant
 
 
 def test_resource_suite_executable_retracts_legacy_timing_rows(
