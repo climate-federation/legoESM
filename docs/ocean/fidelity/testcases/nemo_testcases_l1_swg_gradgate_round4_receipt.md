@@ -2,12 +2,19 @@
 
 Date: 2026-10-12
 
-Status: **HELD FOR ONE BAR DECISION; MEASUREMENTS COMPLETE**. The historical wall-time
+Status: **SUPERSEDED BY ROUND 5; MEASUREMENTS COMPLETE**. The historical wall-time
 retraction is executable, the five-window CPU cost model has a binding suite
 and constant-time plant, and all operator GPU resource rows are classified
 without turning the preregistered schedule ordering into an acceptance gate.
 No physics, card input, loss, random direction, agreement bar, checkpoint
 schedule, configuration, stabilizer, clip, guard, or `stop_gradient` changed.
+
+Round-5 amendment (2026-10-12): the scaling verdict in this receipt is retained
+as the historical round-4 result, but it is not the final gate. The authorized
+round-5 gate adds strict monotonic growth across all five windows and requires
+every adjacent `time ratio / step-count ratio` to lie in the preregistered
+`[0.5, 1.5]` band. The round-5 receipt records the fresh-process rerun and is
+the controlling scaling verdict. No round-4 measurement below is rewritten.
 
 ## Provenance and review blockers
 
@@ -134,10 +141,8 @@ The inherited stale GYRE/LOCK/OVERFLOW digest pins remain GYRE-lane debt.
 Expected values are `5850bbcfcd351c29` / `4ec82201f0fae7bf` /
 `7f1ec89b3e6578f5`; actual round-6 values are `f02d2f42a570f413` /
 `d5dfdf83b3a1e0ab` / `83de0010e1170032`. They are not re-pinned here. No SWG
-gradient measurement or operator acquisition remains open. One gate-policy
-decision remains: either keep the preregistered T1/T2 scaling verdict, or
-authorize and preregister a numeric interval-to-fit acceptance band in a later
-round. This receipt does not invent that threshold post hoc.
+gradient measurement or operator acquisition remains open. The former
+gate-policy decision is closed by the separately preregistered round-5 gate.
 
 ## Source citations
 
