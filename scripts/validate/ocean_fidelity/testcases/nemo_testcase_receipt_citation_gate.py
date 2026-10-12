@@ -6411,13 +6411,11 @@ CITATION_MAP = {
         4],
     'SWG_OMIP_L1_P3D/BLD/ppsrc/nemo/nemogcm.f90:147-160': [
         'istp = nit000',
-        'DO WHILE( istp <= nitend .AND. nstop == 0 )',
-        'istp = istp + 1',
+        'END DO',
         14],
     'SWG_OMIP_L1_P3D/BLD/ppsrc/nemo/restart.f90:103-129': [
         'IF( kt == nit000 ) THEN',
-        'ELSEIF  (MOD( kt - 1, nn_stock ) == 0 ) THEN',
-        'IF( kt == nitrst - 1 .OR. nn_stock == 1',
+        'IF( nitrst <= nitend .AND. nitrst > 0 ) THEN',
         27],
     'SWG_OMIP_L1_P3D/BLD/ppsrc/nemo/diawri.f90:146-160': [
         'IF( nn_write == -1 )   RETURN',
@@ -6425,8 +6423,11 @@ CITATION_MAP = {
         15],
     'SWG_OMIP_L1_P3D/BLD/ppsrc/nemo/stprk3.f90:141-142,215-216,271-272': [
         ('rDt   = rn_Dt / 3._wp', 1),
+        ('r1_Dt = 1._wp / rDt', 1),
         ('rDt   = rn_Dt / 2._wp', 1),
+        ('r1_Dt = 1._wp / rDt', 2),
         ('rDt   = rn_Dt', 3),
+        ('r1_Dt = 1._wp / rDt', 3),
         6],
     'sbcmod.f90:553-560': [
         "calculate utau and vtau on U,V-points",
