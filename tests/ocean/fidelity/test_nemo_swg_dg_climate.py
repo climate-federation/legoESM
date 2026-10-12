@@ -124,6 +124,26 @@ def _write_nemo_fixture(root: Path, monkeypatch):
     executable.write_bytes(b"synthetic SWG_DG executable")
     monkeypatch.setattr(
         climate, "NEMO_DG_EXECUTABLE_SHA256", climate.sha256(executable))
+    cfg = root / "namelist_cfg"
+    ref = root / "namelist_ref"
+    cfg.write_text("""\
+&namusr_def
+  rn_dx = 100000,
+  jpkglo = 2,
+/
+&namlbc
+  rn_shlat = 0.0,
+/
+""")
+    ref.write_text("synthetic reference namelist\n")
+    monkeypatch.setattr(
+        climate, "NEMO_DG_NAMELIST_CFG_SHA256", climate.sha256(cfg))
+    monkeypatch.setattr(
+        climate, "NEMO_DG_NAMELIST_REF_SHA256", climate.sha256(ref))
+    (root / "manifest.sha256").write_text(
+        f"{climate.sha256(executable)}  nemo\n"
+        f"{climate.sha256(cfg)}  namelist_cfg\n"
+        f"{climate.sha256(ref)}  namelist_ref\n")
     (root / "resolved_namelist_lines.txt").write_text("""\
 1: nn_SWG = 16
 2: rn_domsiz = 4000000
@@ -202,4 +222,9 @@ def test_legoesm_provider_selects_later_window_and_gates_deck(tmp_path):
     manifest["namelist"]["rn_tau_pa"] = 0.11
     manifest_path.write_text(json.dumps(manifest))
     with pytest.raises(Exception, match="differs at rn_tau_pa"):
+        climate.legoesm_npz_provider(tmp_path, 2, start_day=2)
+    manifest["namelist"]["rn_tau_pa"] = 0.10
+    manifest["namelist"]["rn_shlat"] = 2.0
+    manifest_path.write_text(json.dumps(manifest))
+    with pytest.raises(Exception, match="differs at rn_shlat"):
         climate.legoesm_npz_provider(tmp_path, 2, start_day=2)

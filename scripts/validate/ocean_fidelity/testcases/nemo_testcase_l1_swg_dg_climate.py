@@ -22,11 +22,10 @@ NEMO_FIELDS = {"T": "sossheig", "U": "vozocrtx", "V": "vomecrty"}
 SECONDS_PER_DAY = 86_400.0
 NEMO_DG_EXECUTABLE_SHA256 = (
     "0be0d4b0846c34b3540105a54eaa6de225e03a9d8927cf5dcc8d85198b88bf09")
-DECK_FIELDS = (
-    "nn_SWG", "rn_domsiz_m", "rn_dx_m", "rn_tau_pa",
-    "rn_modified_grav_m_s2", "rn_rfr_s", "rn_beta_m_s", "rn_f0_s",
-    "rn_Uv_m_s", "rn_Lv_m", "rn_Dt_s",
-)
+NEMO_DG_NAMELIST_CFG_SHA256 = (
+    "0f6fc303af68549c0c78dc1f22f9e29ed5a6feb3b4fafc88b6ee4281bb42e309")
+NEMO_DG_NAMELIST_REF_SHA256 = (
+    "b04f2ce4d12aa247ae3b707483d25cf2d38d0b3cf8817d71d33e66918fd81cfd")
 
 
 class DailyFrame(NamedTuple):
@@ -61,8 +60,13 @@ def _require_legoesm_deck(namelist: dict) -> None:
         SWG_MADDISON_NAMELIST,
     )
 
-    expected = SWG_MADDISON_NAMELIST._asdict()
-    for field in DECK_FIELDS:
+    # Normalize tuple-valued records through the same JSON representation the
+    # driver manifest uses before exact field comparison.
+    expected = json.loads(json.dumps(SWG_MADDISON_NAMELIST._asdict()))
+    # Run length is the only permitted difference between year 1 and the
+    # registered three-year window.  Everything physical -- including
+    # rn_shlat/free-slip and all dispatch switches -- must match the deck.
+    for field in expected.keys() - {"nn_itend", "nn_stock"}:
         require(field in namelist and namelist[field] == expected[field],
                 f"legoESM manifest deck differs at {field}")
 
@@ -73,10 +77,31 @@ def _require_nemo_deck(root: Path) -> dict:
     require(executable.is_file(), f"missing NEMO executable {executable}")
     require(sha256(executable) == NEMO_DG_EXECUTABLE_SHA256,
             "NEMO executable is not the registered SWG_DG build")
+    pins = {
+        "nemo": NEMO_DG_EXECUTABLE_SHA256,
+        "namelist_cfg": NEMO_DG_NAMELIST_CFG_SHA256,
+        "namelist_ref": NEMO_DG_NAMELIST_REF_SHA256,
+    }
+    manifest_path = root / "manifest.sha256"
+    require(manifest_path.is_file(), f"missing NEMO manifest {manifest_path}")
+    manifest = {}
+    for line in manifest_path.read_text().splitlines():
+        digest, name = line.split(maxsplit=1)
+        manifest[name] = digest
+    require(manifest == pins, "NEMO manifest does not describe the registered deck")
+    for name, digest in pins.items():
+        require((root / name).is_file() and sha256(root / name) == digest,
+                f"NEMO deck digest mismatch: {name}")
     resolved_path = root / "resolved_namelist_lines.txt"
     require(resolved_path.is_file(),
             f"missing resolved namelist inventory {resolved_path}")
     resolved = {}
+    for line in (root / "namelist_cfg").read_text().splitlines():
+        match = re.match(
+            r"^\s*([A-Za-z0-9_]+)\s*=\s*([^,!\s/]+)", line)
+        if match:
+            resolved[match.group(1)] = match.group(2).replace(
+                "D", "E").replace("d", "e")
     for line in resolved_path.read_text().splitlines():
         match = re.match(
             r"^\d+:\s*([A-Za-z0-9_]+)\s*=\s*([^!\s]+)", line)
@@ -88,6 +113,7 @@ def _require_nemo_deck(root: Path) -> dict:
         "rn_modified_grav": 9.80665, "rn_rfr": 1.0e-7,
         "rn_beta": 2.0e-11, "rn_f0": 0.7e-4, "rn_Uv": 2.0,
         "rn_Lv": 10.0, "rn_Dt": 50.0, "nn_write": 1_728,
+        "rn_dx": 100_000.0, "jpkglo": 2, "rn_shlat": 0.0,
     }
     for field, value in expected.items():
         require(field in resolved, f"resolved NEMO deck is missing {field}")
@@ -95,6 +121,9 @@ def _require_nemo_deck(root: Path) -> dict:
         require(actual == value, f"resolved NEMO deck differs at {field}")
     return {
         "executable_sha256": NEMO_DG_EXECUTABLE_SHA256,
+        "manifest_sha256": sha256(manifest_path),
+        "namelist_cfg_sha256": NEMO_DG_NAMELIST_CFG_SHA256,
+        "namelist_ref_sha256": NEMO_DG_NAMELIST_REF_SHA256,
         "resolved_namelist_sha256": sha256(resolved_path),
         "resolved_values": {field: resolved[field] for field in expected},
     }
