@@ -1598,11 +1598,11 @@ CITATION_MAP = {
         36],
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:546-558': [
         ('Compute Sea Level at step jit+1', 1),
-        ('END DO   ;   END DO', 8),
+        ('END DO   ;   END DO', 9),
         13],
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:655-718': [
         ('Set next velocities:', 1),
-        ('END DO   ;   END DO', 13),
+        ('END DO   ;   END DO', 20),
         64],
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/stprk3_stg.f90:138-178': [
         ('ssha(:,:) = ssh (:,:,Kaa)', 1),
