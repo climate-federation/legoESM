@@ -16,11 +16,11 @@ values. No NEMO acquisition was required.
 
 The executing record build constructs `hu_0`/`hv_0` from the associated
 three-dimensional masks and stores mask-safe reference reciprocals at
-`ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/domain.f90:193-215`. Its live QCO
+`ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/domain.f90:193-214`. Its live QCO
 ratios multiply the surface height by those stored reciprocals at
-`ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/domqco.f90:207-218`. The external
+`ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/domqco.f90:208-218`. The external
 substep then writes live face depths and their mask-safe reciprocals at
-`ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:712-718`.
+`ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:714-718`.
 
 The committed gate is
 `scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round248_land_support_gate.py`.
