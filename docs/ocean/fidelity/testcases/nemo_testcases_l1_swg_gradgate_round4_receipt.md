@@ -121,7 +121,8 @@ and 1440 steps
   and bit-identical; the stage one-ULP and broken-VJP plants exit 1.
 - Fresh card hashes remain GYRE `f02d2f42a570f413`, TSUNAMI
   `8bb5ed6c1bc031bd`, VORTEX `f7489467bc156303`, and VORTEX_VEC
-  `5041b91c67bd1443`.
+  `5041b91c67bd1443`; `round4/card_digests_final.json` identifies the
+  committed digest probe and stamps clean producer commit `fc1a36478`.
 - The citation gate is run explicitly on this receipt; its shifted-citation
   plant exits 1.
 
