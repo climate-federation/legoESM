@@ -126,7 +126,8 @@ def _source_replay(metric, e3v, vv, zvb, vmask):
 
 
 def measure(deck_root: Path, frame_root: Path, record_root: Path, label: str,
-            expect_commit: str, *, plant: str = "none") -> dict[str, object]:
+            expect_commit: str, *, plant: str = "none",
+            resolved_stage_masks: bool = False) -> dict[str, object]:
     import jax
     import jax.numpy as jnp
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
@@ -188,6 +189,17 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path, label: str,
     umask, vmask = compute_face_masks_3d(z_coord.is_active, grid)
     umask = jnp.asarray(umask, dtype=eta.dtype)
     vmask = jnp.asarray(vmask, dtype=eta.dtype)
+    if resolved_stage_masks:
+        # Round 247: the executable stage transport receives the SAME raw
+        # domain-associated masks as its resolved e3u_0/e3v_0 operands.  Map
+        # NEMO's native east/north faces once to legoESM's redundant layout.
+        resolved_masks = nemo_qco_resolved_mesh_operands(
+            z_coord, grid, umask, vmask, eta.dtype, h_ref.shape[-1])
+        umask = jnp.concatenate(
+            [resolved_masks.umask3[:, -1:, :], resolved_masks.umask3], axis=1)
+        vmask = jnp.concatenate(
+            [jnp.zeros_like(resolved_masks.vmask3[:1]), resolved_masks.vmask3],
+            axis=0)
     hv_avg = jnp.asarray(traced.barotropic_targets[3])
     vv_b = jnp.asarray(state.vv_b.data)
 
@@ -388,12 +400,14 @@ def main() -> int:
         "--label", choices=("independent", "given_nemo_entry"), required=True)
     parser.add_argument("--expect-commit", required=True)
     parser.add_argument("--plant", choices=PLANTS, default="none")
+    parser.add_argument("--resolved-stage-masks", action="store_true")
     parser.add_argument("--json-out", type=Path)
     args = parser.parse_args()
     try:
         result = measure(
             args.deck_root, args.frame_root, args.record_root, args.label,
-            args.expect_commit, plant=args.plant)
+            args.expect_commit, plant=args.plant,
+            resolved_stage_masks=args.resolved_stage_masks)
         require(args.plant == "none", f"{args.plant} plant stayed green")
     except (OSError, ValueError, KeyError, TypeError, GateError) as error:
         marker = "PLANT-FIRED" if args.plant != "none" else "REFUSE"
