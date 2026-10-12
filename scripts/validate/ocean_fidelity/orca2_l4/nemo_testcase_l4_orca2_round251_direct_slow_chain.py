@@ -177,7 +177,7 @@ def measure(deck_root: Path, frame_root: Path, twin_a: Path, twin_b: Path,
         "final_slow_v": _native_v(producer["final_v"]),
     }
     oracle_increment = _wind_increment(
-        slow["r1_rho0"], slow["tau_v"], slow["r1_hv0"])
+        slow["r1_rho0"], slow["vtau"], slow["r1_hv"])
     oracle = {
         "post_drag_v": slow["post_drag_v"],
         "wind_increment_v": oracle_increment,
