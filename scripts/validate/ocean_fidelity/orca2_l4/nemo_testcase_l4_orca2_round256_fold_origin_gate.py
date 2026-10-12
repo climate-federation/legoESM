@@ -180,7 +180,7 @@ def classify(reports: list[dict[str, object]], *,
             independent["stage_growth"]["boundaries"][1:3])
     elif plant == "nemo-fold":
         independent["stage_growth"]["boundaries"][1]["fields"]["v"][
-            "nemo_fold_identity"]["unequal"] = 1
+            "nemo_fold_identity"]["max_abs"] = 1.0
     elif plant == "growth-owner":
         for boundary in independent["stage_growth"]["boundaries"]:
             for field in FIELDS:
@@ -212,9 +212,9 @@ def classify(reports: list[dict[str, object]], *,
                 f"{label}: kt/stage boundary order moved")
         for boundary in stage["boundaries"]:
             for field in FIELDS:
-                require(boundary["fields"][field]["nemo_fold_identity"][
-                            "unequal"] == 0,
-                        f"{label}: NEMO {field} fold identity moved")
+                nemo_fold = boundary["fields"][field]["nemo_fold_identity"]
+                require(float(nemo_fold["max_abs"]) == 0.0,
+                        f"{label}: NEMO {field} fold identity moved in value")
 
         fold_growth = r249._growth_rows(stage["boundaries"], "fold_band")
         interior_growth = r249._growth_rows(stage["boundaries"], "interior")
