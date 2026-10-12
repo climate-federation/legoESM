@@ -14,11 +14,12 @@ bar, checkpoint schedule, stabilizer, clipping, guard, configuration, or
 The incoming tip was `9ae720dc7`. The frozen round-3 protocol and repaired
 timer are commit `9259e21f386a8c8b02bb4dbd91f9f9945b28bb35`; the final
 cold-pass sampler alignment and binding controls are commit
-`afd3350a6146cd09a0848f19e08a9af6cf32833f`. All CPU
-JSON files are under
+`afd3350a6146cd09a0848f19e08a9af6cf32833f`. All fifteen CPU resource JSON
+files are under
 `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swggg_rounds/round3/` and stamp
-that clean commit, CPU fp64/libm, float64 state and geometry, the admitted kt=2
-stage-1 boundary, and the production `_step_jitted` entry.
+the clean producer commit `9259e21f386a8c8b02bb4dbd91f9f9945b28bb35`,
+CPU fp64/libm, float64 state and geometry, the admitted kt=2 stage-1 boundary,
+and the production `_step_jitted` entry.
 
 Both confirmed review blockers are closed. The GPU runner now disables
 preallocation while leaving the default JAX allocator active; it refuses the
