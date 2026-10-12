@@ -378,3 +378,25 @@ def test_pmodel_switch_keys_default_and_validate():
     bad2["physics"]["canopy_g1_source"] = "xi"
     with pytest.raises(ValueError, match="canopy_g1_source"):
         validate_config(bad2)
+
+
+def test_pmodel_switches_that_would_be_dropped_are_refused():
+    """calibrated_land_physics replaces the surface scheme, and the slab +
+    simple_seb config carries no stomata block: either would run the baseline
+    under a P-model label, so the config is refused."""
+    import pytest
+    from legoesm.land.lmip_config import validate_config
+    base = {"grid": {"type": "latlon", "resolution": 4},
+            "forcing": {"source": "synthetic", "data_dir": "",
+                        "year_start": 2000, "year_end": 2000},
+            "surfdata": {"path": "sd.nc"},
+            "time": {"dt": 3600.0, "n_steps": 4, "start_doy": 0.0}}
+    pm = {"canopy_capacity_scheme": "p_model", "stomatal_model": "medlyn"}
+    with pytest.raises(ValueError, match="calibrated_land_physics"):
+        validate_config({**base, "physics": {
+            "land_mode": "multilayer", "surface_scheme": "two_leaf_canopy",
+            "bulk_scheme": "most", "calibrated_land_physics": True, **pm}})
+    with pytest.raises(ValueError, match="silently inert"):
+        validate_config({**base, "physics": {
+            "land_mode": "slab", "surface_scheme": "simple_seb",
+            "bulk_scheme": "most", **pm}})

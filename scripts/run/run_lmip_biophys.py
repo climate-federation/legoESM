@@ -68,6 +68,7 @@ from legoesm.land.multilayer_land import (
     step_multilayer_land,
     step_multilayer_land_with_diagnostics,
     init_multilayer_land_state,
+    two_leaf_capacity_diagnostics,
 )
 from legoesm.land.slab_land import step_land
 from legoesm.land.boundary_data import init_land_surface_data, make_step_land_params_updater
@@ -228,12 +229,33 @@ _VAR_META = {
                        "standard_name": "land_area_fraction"},
     "revert_count":   {"long_name": "count of steps the NaN-revert guard fired for this cell",
                        "units": "1"},
-    "pmodel_chi":     {"long_name": "P-model acclimated ci/ca ratio (leaf-top)",
+    "pmodel_chi":     {"long_name": "optimum ci/ca of the active optimality lane "
+                                    "(least-cost or P-hydro; NaN for prescribed capacities)",
                        "units": "1"},
-    "pmodel_vcmax25": {"long_name": "P-model acclimated leaf-top C3 Vcmax at 25C (per m2 leaf)",
+    "pmodel_vcmax25": {"long_name": "leaf-top C3 Vcmax at 25C fed to the canopy kernel, "
+                                    "after any water-stress factor (per m2 leaf)",
                        "units": "umol m-2 s-1"},
-    "pmodel_g1":      {"long_name": "P-model predicted Medlyn slope g1 (leaf-top acclimated)",
+    "pmodel_vcmax25_nostress": {
+        "long_name": "leaf-top C3 Vcmax at 25C before the empirical stress factor (per m2 leaf)",
+        "units": "umol m-2 s-1"},
+    "pmodel_g1":      {"long_name": "C3 stomatal slope fed to the canopy kernel, after any "
+                                    "water-stress factor (Medlyn g1 under stomatal_model=medlyn)",
                        "units": "kPa 0.5"},
+    "ci_ca_sun_day":  {"long_name": "sunlit-leaf solved Ci/Ca times the daytime flag; "
+                                    "daytime mean = mean(ci_ca_sun_day) / mean(day_frac)",
+                       "units": "1"},
+    "ci_ca_shade_day": {"long_name": "shaded-leaf solved Ci/Ca times the daytime flag; "
+                                     "daytime mean = mean(ci_ca_shade_day) / mean(day_frac)",
+                        "units": "1"},
+    "day_frac":       {"long_name": "daytime flag (cos zenith > 0); its mean is the "
+                                    "daytime fraction of the averaging window",
+                       "units": "1"},
+    "pmodel_wfrac":   {"long_name": "root-zone soil-moisture stress factor", "units": "1"},
+    "pmodel_psi_soil": {"long_name": "conductance-weighted soil water potential seen by the plant",
+                        "units": "MPa"},
+    "pmodel_psi_leaf": {"long_name": "P-hydro leaf water potential (NaN unless "
+                                     "transpiration_stress=phydro)",
+                        "units": "MPa"},
     "pmodel_n_rubisco_leaf": {
         "long_name": "implied nitrogen in Rubisco from the C3 leaf-top acclimated "
                      "Vcmax25 (LUNA NUE 294.2 umol CO2/s/gN; diagnostic only, "
@@ -786,13 +808,27 @@ def run(args) -> int:
             values["T_soil_top"] = _ZEROS
             values["theta_soil_top"] = _ZEROS
             values["snow_depth"] = _ZEROS
+        if is_multilayer and isinstance(config.surface_scheme, CanopyConfig):
+            # What THIS step's fluxes used (pre-step state), for every arm —
+            # prescribed, least-cost and P-hydro — so the arms can be compared.
+            _d = two_leaf_capacity_diagnostics(state, land_params_t, config)
+            values["pmodel_chi"] = _d["chi"]
+            values["pmodel_vcmax25"] = _d["vcmax25"]
+            values["pmodel_vcmax25_nostress"] = _d["vcmax25_nostress"]
+            values["pmodel_g1"] = _d["slope"]
+            values["pmodel_wfrac"] = _d["wfrac"]
+            values["pmodel_psi_soil"] = _d["psi_soil"]
+            values["pmodel_psi_leaf"] = _d["psi_leaf"]
+            # Solved Ci/Ca of every arm, daytime only: a tape mean of the
+            # product divided by the mean of the flag is the daytime mean.
+            _day = (forcing_t.cos_zenith > 0.0).astype(surf_out.ci_ca_sun.dtype)
+            values["ci_ca_sun_day"] = surf_out.ci_ca_sun * _day
+            values["ci_ca_shade_day"] = surf_out.ci_ca_sh * _day
+            values["day_frac"] = _day
         _pm_state = getattr(new_state, "pmodel_acclim", None)
         if _pm_state is not None:
             from legoesm.land.p_model import acclimated_capacities as _acc
             _caps_d = _acc(_pm_state, config.p_model)
-            values["pmodel_chi"] = _caps_d.chi
-            values["pmodel_vcmax25"] = _caps_d.vcmax25_leaf
-            values["pmodel_g1"] = _caps_d.g1_kpa
             from legoesm.land.p_model import nitrogen_diagnostics as _ndiag
             _n_rub, _n_etr = _ndiag(_caps_d.vcmax25_leaf,
                                     _caps_d.vcmax25_leaf * _caps_d.rjv25)

@@ -516,3 +516,61 @@ def test_calibrated_land_rejects_a_contradicting_config(tmp_path):
         broken["physics"][key] = bad
         with pytest.raises(ValueError, match="calibrated_land_physics"):
             validate_config(broken)
+
+
+@pytest.mark.parametrize("arm,extra", [
+    ("baseline", {}),
+    ("least_cost", {"canopy_capacity_scheme": "p_model", "canopy_g1_source": "p_model"}),
+    ("phydro", {"canopy_capacity_scheme": "p_model", "canopy_g1_source": "p_model",
+                "transpiration_stress": "phydro"}),
+])
+def test_optimality_arms_run_on_the_global_driver(tmp_path, arm, extra):
+    """The three arms of the global comparison (prescribed / least-cost /
+    P-hydro, Medlyn stomata) run on the LMIP driver and tape the SAME
+    capacity / slope / water-potential diagnostics, so the arms differ only
+    in the switch keys."""
+    import yaml
+    import xarray as xr
+    from legoesm.land.lmip_config import validate_config
+    mod = _load_driver()
+    sd = tmp_path / "sd.nc"; _write_surfdata(str(sd))
+    out = tmp_path / "out"
+    diag = ["pmodel_chi", "pmodel_vcmax25", "pmodel_vcmax25_nostress", "pmodel_g1",
+            "pmodel_wfrac", "pmodel_psi_soil", "pmodel_psi_leaf",
+            "ci_ca_sun_day", "ci_ca_shade_day", "day_frac"]
+    cfg = validate_config({
+        "grid": {"type": "latlon", "resolution": 4},
+        "physics": {"land_mode": "multilayer", "surface_scheme": "two_leaf_canopy",
+                    "bulk_scheme": "most", "stomatal_model": "medlyn", **extra},
+        "forcing": {"source": "synthetic", "data_dir": "",
+                    "year_start": 2000, "year_end": 2000},
+        "surfdata": {"path": str(sd)},
+        "time": {"dt": 3600.0, "n_steps": 48, "start_doy": 0.0},
+        "output": {"tapes": [{"name": "step", "freq": "step", "average": "inst",
+                              "vars": ["GPP", "lhflx"] + diag}]},
+    }).raw
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(yaml.safe_dump(cfg, sort_keys=False))
+    assert _run_config(mod, cfg_path, out) == 0
+    ds = xr.open_dataset(out / "lmip_biophys.step.nc")
+    gpp = np.asarray(ds["GPP"].values)
+    assert np.all(np.isfinite(gpp)) and (gpp >= 0.0).all() and gpp.max() > 0.0
+    for v in ("pmodel_vcmax25", "pmodel_g1", "pmodel_wfrac", "pmodel_psi_soil"):
+        assert np.all(np.isfinite(ds[v].values)), v
+    # Solved Ci/Ca is written by EVERY arm: inside the kernel's clip by day,
+    # exactly zero at night (flag off).
+    day = ds["day_frac"].values
+    assert day.min() == 0.0 and day.max() == 1.0
+    for v in ("ci_ca_sun_day", "ci_ca_shade_day"):
+        c = ds[v].values
+        assert np.all(c[day == 0.0] == 0.0)
+        assert np.all((c[day == 1.0] > 0.0) & (c[day == 1.0] <= 1.0))
+    chi, psil = ds["pmodel_chi"].values, ds["pmodel_psi_leaf"].values
+    if arm == "baseline":
+        assert np.all(np.isnan(chi)) and np.all(np.isnan(psil))
+    else:
+        assert np.all((chi > 0.0) & (chi <= 1.0))
+    if arm == "phydro":
+        assert np.all(psil <= ds["pmodel_psi_soil"].values + 1e-9)
+        np.testing.assert_allclose(ds["pmodel_vcmax25"].values,
+                                   ds["pmodel_vcmax25_nostress"].values)

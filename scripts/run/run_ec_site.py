@@ -38,9 +38,8 @@ from legoesm.land.boundary_data.ec_site import read_ec_site_driver, ECSiteDriver
 from legoesm.land.config import MultiLayerLandConfig
 from legoesm.land.multilayer_land import (
     init_multilayer_land_state,
-    resolve_plant_wilting_point,
-    root_zone_moisture_stress,
     step_multilayer_land_with_diagnostics,
+    two_leaf_capacity_diagnostics,
 )
 from legoesm.land.richards import RichardsConfig
 from legoesm.land.soil_grid import SoilGridConfig, make_soil_grid
@@ -516,60 +515,10 @@ def _scale_two_leaf_params(d: ECSiteDriver, vcmax_c3_scale: float,
 
 
 def _capacity_diag(state, params, land_config) -> dict:
-    """Per-step two-leaf capacity / stomatal / water-potential diagnostics.
-
-    Recomputed from a land state with the same functions the step calls, for
-    C3 leaves (all ``(ncol,)``):
-
-    ``diag_wfrac``           root-zone soil-moisture factor in [0, 1]
-    ``diag_psi_soil``        conductance-weighted soil water potential [MPa]
-    ``diag_vcmax25``         leaf-top Vcmax25 fed to the kernel, after stress
-    ``diag_vcmax25_nostress``  the same before the empirical stress factor
-    ``diag_slope``           stomatal slope fed to the kernel, after stress
-    ``diag_chi``             optimum ci/ca (NaN for prescribed capacities)
-    ``diag_psi_leaf``        P-hydro leaf water potential [MPa] (NaN otherwise)
-    """
-    from legoesm.land.p_model import acclimated_capacities, optimal_chi
-    from legoesm.land.phydro import (
-        phydro_optimum, slope_for_model, soil_root_supply)
-    cc = land_config.surface_scheme
-    theta = state.theta_soil
-    ncol = theta.shape[0]
-    grid = make_soil_grid(land_config.soil_grid)
-    pick = lambda name, default: (default if getattr(params, name, None) is None
-                                  else getattr(params, name))
-    _, root_frac, _, wfrac = root_zone_moisture_stress(
-        theta, land_config.beta_min, pick("root_depth", land_config.root_depth),
-        resolve_plant_wilting_point(params, land_config),
-        pick("theta_fc", land_config.theta_fc), grid.z_node, ncol)
-    supply = soil_root_supply(
-        state.psi_soil, theta, grid.dz, root_frac, params.LAI,
-        land_config.hydraulics, land_config.phydro)
-    nan = jnp.full((ncol,), jnp.nan)
-    phydro = land_config.transpiration_stress == "phydro"
-    vc, slope, chi, psi_leaf = params.Vcmax25_C3_leaf, params.m_C3, nan, nan
-    acc = state.pmodel_acclim
-    if acc is not None:
-        gstar = optimal_chi(acc.t_mean_K, acc.vpd_mean_pa, acc.co2_mean_ppm,
-                            acc.ps_ema, land_config.p_model)[3]
-        if phydro:
-            caps = phydro_optimum(acc, supply, land_config.phydro, land_config.p_model)
-            psi_leaf = caps.psi_leaf_mpa
-        else:
-            caps = acclimated_capacities(acc, land_config.p_model)
-        chi = caps.chi
-        if cc.capacity_scheme == "p_model":
-            vc = caps.vcmax25_leaf
-        if cc.g1_source == "p_model":
-            slope = slope_for_model(cc.stomatal_model, chi, acc, gstar,
-                                    d0_leuning_kpa=cc.d0_leuning_kpa)
-    stress = jnp.ones_like(wfrac) if phydro else wfrac
-    return {
-        "diag_wfrac": wfrac, "diag_psi_soil": supply.psi_s_mpa,
-        "diag_vcmax25": vc * stress, "diag_vcmax25_nostress": vc,
-        "diag_slope": slope * (1.0 if cc.g1_source == "p_model" else stress),
-        "diag_chi": chi, "diag_psi_leaf": psi_leaf,
-    }
+    """Per-step two-leaf diagnostics (``diag_*``), from the shared
+    :func:`legoesm.land.multilayer_land.two_leaf_capacity_diagnostics`."""
+    return {f"diag_{k}": v for k, v in
+            two_leaf_capacity_diagnostics(state, params, land_config).items()}
 
 
 def _prognostic_fluxes(d: ECSiteDriver,

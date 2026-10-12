@@ -1603,6 +1603,66 @@ def _hold_unsolved_columns(state, new_state, response, surface_out, forcing,
     return held_state, held_response, held_carbon, bad, n_held
 
 
+def two_leaf_capacity_diagnostics(state, land_params, config) -> dict:
+    """Capacity / stomatal / water-potential diagnostics of the two-leaf lane.
+
+    Recomputed from a land state with the same functions the step calls, for
+    C3 leaves (all ``(ncol,)``); pass the PRE-step state to get the values
+    that step's fluxes used.  Shared by the EC-site harness and the global
+    LMIP driver so both report the same quantities.
+
+    ``wfrac``             root-zone soil-moisture factor in [0, 1]
+    ``psi_soil``          conductance-weighted soil water potential [MPa]
+    ``vcmax25``           leaf-top Vcmax25 fed to the kernel, after stress
+    ``vcmax25_nostress``  the same before the empirical stress factor
+    ``slope``             stomatal slope fed to the kernel, after stress
+    ``chi``               optimum ci/ca (NaN for prescribed capacities)
+    ``psi_leaf``          P-hydro leaf water potential [MPa] (NaN otherwise)
+    """
+    from legoesm.land.p_model import acclimated_capacities, optimal_chi
+    from legoesm.land.phydro import (
+        phydro_optimum, slope_for_model, soil_root_supply)
+    cc = config.surface_scheme
+    lp = land_params
+    theta = state.theta_soil
+    ncol = theta.shape[0]
+    grid = make_soil_grid(config.soil_grid)
+    nan = jnp.full((ncol,), jnp.nan)
+    _, root_frac, _, wfrac = root_zone_moisture_stress(
+        theta, config.beta_min, _get(lp, "root_depth", config.root_depth),
+        resolve_plant_wilting_point(lp, config),
+        _get(lp, "theta_fc", config.theta_fc), grid.z_node, ncol)
+    supply = soil_root_supply(
+        state.psi_soil, theta, grid.dz, root_frac,
+        _get(lp, "LAI", jnp.full((ncol,), 1.5)),  # coeff-ok: canopy default LAI fallback
+        config.hydraulics, config.phydro)
+    phydro = config.transpiration_stress == "phydro"
+    vc, slope = _get(lp, "Vcmax25_C3_leaf", nan), _get(lp, "m_C3", nan)
+    chi, psi_leaf = nan, nan
+    acc = state.pmodel_acclim
+    if acc is not None:
+        gstar = optimal_chi(acc.t_mean_K, acc.vpd_mean_pa, acc.co2_mean_ppm,
+                            acc.ps_ema, config.p_model)[3]
+        if phydro:
+            caps = phydro_optimum(acc, supply, config.phydro, config.p_model)
+            psi_leaf = caps.psi_leaf_mpa
+        else:
+            caps = acclimated_capacities(acc, config.p_model)
+        chi = caps.chi
+        if cc.capacity_scheme == "p_model":
+            vc = caps.vcmax25_leaf
+        if cc.g1_source == "p_model":
+            slope = slope_for_model(cc.stomatal_model, chi, acc, gstar,
+                                    d0_leuning_kpa=cc.d0_leuning_kpa)
+    stress = jnp.ones_like(wfrac) if phydro else wfrac
+    return {
+        "wfrac": wfrac, "psi_soil": supply.psi_s_mpa,
+        "vcmax25": vc * stress, "vcmax25_nostress": vc,
+        "slope": slope * (1.0 if cc.g1_source == "p_model" else stress),
+        "chi": chi, "psi_leaf": psi_leaf,
+    }
+
+
 def init_multilayer_land_state(
     ncol: int,
     config: MultiLayerLandConfig,

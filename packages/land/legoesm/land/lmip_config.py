@@ -216,6 +216,24 @@ def validate_config(data: dict) -> LMIPConfig:
             "physics.transpiration_stress='phydro' needs a P-model switch on "
             "(canopy_capacity_scheme or canopy_g1_source = 'p_model'): the "
             "hydraulic optimum supplies the acclimated capacities/slope")
+    _pm_on = (physics["canopy_capacity_scheme"] == "p_model"
+              or physics["canopy_g1_source"] == "p_model")
+    if _pm_on and physics.get("calibrated_land_physics", False):
+        # apply_calibrated_multilayer REPLACES the surface scheme and stomata
+        # configs, so the P-model switches would vanish without a trace and
+        # the run would be the calibrated baseline under a P-model label.
+        raise ValueError(
+            "physics.calibrated_land_physics=true replaces the surface scheme "
+            "and would silently drop canopy_capacity_scheme / canopy_g1_source "
+            "= 'p_model'; set one or the other")
+    if (_pm_on and physics["land_mode"] == "slab"
+            and physics["surface_scheme"] == "simple_seb"):
+        # The slab LandConfig is built without the StomataConfig that carries
+        # the big-leaf P-model switches: they would be silently inert.
+        raise ValueError(
+            "P-model switches with land_mode='slab' + surface_scheme="
+            "'simple_seb' would be silently inert (the slab config carries no "
+            "stomata block); use land_mode='multilayer' or the two-leaf canopy")
     if (physics["canopy_vcmax_profile"] != "kn"
             and physics["surface_scheme"] != "two_leaf_canopy"):
         raise ValueError(
