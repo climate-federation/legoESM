@@ -241,8 +241,8 @@ def main(argv):
         to, tk = np.where(np.isinf(to), np.nan, to), np.where(np.isinf(tk), np.nan, tk)
         km = lambda K, k: np.median(K[s, wet, k]) * 1e4
         dao, dak = deepest_active(Ko[s, wet], zw, AVT_C, ZTOP), deepest_active(Kkn[s, wet], zw, AVT_C, ZTOP)
-        gapo = np.nanmean(np.where(np.isnan(dao), np.nan, to < dao))
-        gapk = np.nanmean(np.where(np.isnan(dak), np.nan, tk < dak))
+        gapo = share(dao, to < dao)
+        gapk = share(dak, tk < dak)
         def gap_stats(K, E, t, da):
             """median depth of the gap (first crossing, gap columns only),
             median log10 of the smallest K above the active base there, and
@@ -266,7 +266,8 @@ def main(argv):
         print(f"h{h:02d} | {np.nanmedian(to):6.2f} | {np.nanmedian(tk):6.2f} | {_q(to - tk)} || "
               f"{km(Ko, k128):7.2f} {km(Kkn, k128):7.2f} {km(Kn, k128):7.2f} | {km(Ko, k179):7.2f} {km(Kkn, k179):7.2f} {km(Kn, k179):7.2f}" + extra)
     print("\nPart 1c  threshold sweep (GLM): gap share ours/NEMO avt_k/NEMO avt | share of gap cols with an ACTIVE layer above the gap o/N(avt_k)")
-    print("  (one-sided: our K is the applied total, so our closure-only gap share is >= ours; NEMO avt >= avt_k, so NEMO-total gaps <= avt_k gaps)")
+    print("  (our K is the APPLIED total -- closure + IWM + background, not separable in the dump; NEMO avt_k = closure only, avt = total."
+          " Shares over columns with an active interface, as Part 1b.)")
     for h in (8, 12, 18, 30, 40):
         s = h * 24 - 1
         if s >= nt:
@@ -278,9 +279,11 @@ def main(argv):
                 kk = K[s, wet]
                 t = turbocline(kk[:, :kw], zw[:kw], thr)
                 da = deepest_active(kk, zw, thr, ZTOP)
-                g = ~np.isnan(da) & (t < da)
+                has = ~np.isnan(da)
+                g = has & (t < da)
                 surf = np.any((kk >= thr) & (zw[None, :] < t[:, None]), -1)
-                out.append((np.mean(g), np.mean(surf[g]) if g.any() else np.nan))
+                out.append((np.mean(g[has]) if has.any() else np.nan,
+                            np.mean(surf[g]) if g.any() else np.nan))
             row.append(f"thr {thr:.0e}: {out[0][0]:.2f}/{out[1][0]:.2f}/{out[2][0]:.2f} | {out[0][1]:.2f}/{out[1][1]:.2f}")
         print(f"  h{h:02d}  " + "   ".join(row))
     s0, s1 = h0 * 24, min(h1 * 24, nt)
