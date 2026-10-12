@@ -25,6 +25,8 @@ PLANTS = (
     "barotropic-correction", "stage-transport", "candidate-replay",
     "oracle-replay", "one-bit",
 )
+PREFIX_PLANTS = ("none", "prefix-labels", "prefix-passivity", "prefix-order",
+                 "prefix-one-bit")
 
 
 class GateError(RuntimeError):
@@ -108,9 +110,84 @@ def classify(reports: list[dict[str, object]], *, plant: str = "none") -> dict[s
     }
 
 
+def classify_prefix(reports: list[dict[str, object]], *, plant: str = "none") -> dict[str, object]:
+    """Admit the passive kt=1 prefix and report its first valued boundary."""
+
+    require(plant in PREFIX_PLANTS, f"unknown prefix plant {plant!r}")
+    reports = copy.deepcopy(reports)
+    if plant == "prefix-labels":
+        reports.pop()
+    by_label = {report["label"]: report for report in reports}
+    require(set(by_label) == set(LABELS), "both prefix labels are required")
+    independent = by_label["independent"]
+    if plant == "prefix-passivity":
+        independent["passivity"][0]["fields"]["T"] = False
+    elif plant == "prefix-order":
+        independent["boundaries"] = independent["boundaries"][:-1]
+
+    one = r249._score([1.0], [1.0 + 2.220446049250313e-16])
+    if plant == "prefix-one-bit":
+        one["unequal"] = 0
+    require(one["unequal"] == 1, "prefix one-bit control did not fire")
+
+    summaries = {}
+    first_boundaries = {}
+    expected_order = [(1, stage) for stage in range(4)]
+    for label in LABELS:
+        report = by_label[label]
+        require(report["status"] == "PASS_R249_STAGE_TABLE"
+                and report["unit"] is True
+                and report["operand_route"] == "resolved-candidate",
+                f"{label}: atomic prefix provenance moved")
+        require([(row["kt"], row["stage"]) for row in report["boundaries"]]
+                == expected_order, f"{label}: kt=1 boundary coverage moved")
+        require(len(report["passivity"]) == 1
+                and all(report["passivity"][0]["fields"].values()),
+                f"{label}: kt=1 observer moved the completed state")
+        first = None
+        for row in report["boundaries"]:
+            valued = {
+                field: row["fields"][field]["fold_band"]
+                for field in r249.FIELDS
+                if row["fields"][field]["fold_band"]["nonfinite"]
+                or row["fields"][field]["fold_band"]["max_abs"]
+                > float(r249.FLOOR)
+            }
+            if valued:
+                first = {"kt": row["kt"], "stage": row["stage"],
+                         "fields": valued}
+                break
+        require(first is not None, f"{label}: no valued kt=1 boundary")
+        first_boundaries[label] = (first["kt"], first["stage"])
+        summaries[label] = {
+            "first_valued_boundary": first,
+            "kt1_stage2": next(
+                row["fields"] for row in report["boundaries"]
+                if row["stage"] == 2),
+            "kt1_stage3": next(
+                row["fields"] for row in report["boundaries"]
+                if row["stage"] == 3),
+        }
+    require(len(set(first_boundaries.values())) == 1,
+            "claim labels disagree on the first valued boundary")
+    return {
+        "format": "nemo-testcase-l4-orca2-round262-atomic-prefix-v1",
+        "status": "PASS_R262_ATOMIC_PREFIX_MEASUREMENT",
+        "first_valued_boundary": list(first_boundaries.values())[0],
+        "labels": summaries,
+        "one_bit_control": one,
+        "predictions": {
+            "R262-P2": "MEASURED",
+            "R262-P3": "REFUTED_KT2_LIVE_THICKNESS",
+            "R262-P6": "CONFIRMED" if plant == "none" else "PLANT",
+        },
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--measure", action="store_true")
+    parser.add_argument("--measure-prefix", action="store_true")
     parser.add_argument("--deck-root", type=Path)
     parser.add_argument("--frame-root", type=Path)
     parser.add_argument("--record-root", type=Path)
@@ -118,11 +195,20 @@ def main() -> int:
     parser.add_argument("--label", choices=LABELS)
     parser.add_argument("--expect-commit")
     parser.add_argument("--classify", nargs=2, type=Path)
-    parser.add_argument("--plant", choices=PLANTS, default="none")
+    parser.add_argument("--classify-prefix", nargs=2, type=Path)
+    parser.add_argument("--plant", choices=PLANTS + PREFIX_PLANTS[1:], default="none")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     try:
-        if args.measure:
+        if args.measure_prefix:
+            require(args.plant == "none", "prefix measurement does not accept plants")
+            require(all((args.deck_root, args.frame_root, args.label,
+                         args.expect_commit)),
+                    "prefix measurement arguments are incomplete")
+            result = r249.measure_stages(
+                args.deck_root, args.frame_root, args.label, True,
+                "resolved-candidate", args.expect_commit, max_kt=1)
+        elif args.measure:
             require(args.plant == "none", "measurement does not accept plants")
             require(all((args.deck_root, args.frame_root, args.record_root,
                          args.prior_report, args.label, args.expect_commit)),
@@ -131,6 +217,11 @@ def main() -> int:
                 args.deck_root, args.frame_root, args.record_root,
                 args.prior_report, args.label, args.expect_commit,
                 associate_stage_v_ratio=True)
+        elif args.classify_prefix is not None:
+            result = classify_prefix([
+                json.loads(path.read_text(encoding="utf-8"))
+                for path in args.classify_prefix], plant=args.plant)
+            require(args.plant == "none", f"{args.plant} plant stayed green")
         else:
             require(args.classify is not None,
                     "classification reports are required")
