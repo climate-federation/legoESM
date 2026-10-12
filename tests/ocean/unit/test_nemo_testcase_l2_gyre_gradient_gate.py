@@ -124,6 +124,22 @@ def test_schedule_primal_contract_records_bits_and_refuses_large_drift():
     assert not drift["within_contract"]
     assert not drift["bitwise"]
 
+    named = G.compare_scheduled_primal(
+        G.SWGScoredState(*(
+            jnp.asarray([value], dtype=jnp.float64)
+            for value in (1.0, 2.0, 3.0)
+        )),
+        G.SWGScoredState(*(
+            jnp.asarray([value], dtype=jnp.float64)
+            for value in (1.0 + 1.0e-12, 2.0 + 2.0e-12, 3.0 + 3.0e-12)
+        )),
+    )
+    assert named["field_max_abs"] == pytest.approx({
+        "ssh": 1.0e-12,
+        "u": 2.0e-12,
+        "v": 3.0e-12,
+    })
+
 
 def test_nemo_literal_dissl_guard_preserves_primal_bits_and_zero_vjp():
     """The approved production guard changes only the zero-TKE transpose."""
@@ -346,15 +362,13 @@ def test_cpu_scaling_suite_gates_frozen_predictions_and_all_plants():
     assert control["fit_seconds_per_step"] == pytest.approx(0.01)
     assert control["checks"] == {
         "positive_fitted_seconds_per_step": True,
-        "time_1440_exceeds_time_720": True,
         "strictly_increasing_at_every_window": True,
-        "every_adjacent_ratio_in_preregistered_band": True,
-        "uniform_1440_to_720_ratio_in_preregistered_band": True,
+        "nonnegative_fitted_fixed_overhead": True,
+        "every_residual_within_timing_tolerance": True,
+        "every_incremental_cost_within_fit_band": True,
     }
-    assert all(
-        0.5 <= ratio <= 1.5
-        for ratio in control["adjacent_normalized_ratios"].values()
-    )
+    assert control["relative_timing_tolerance"] == pytest.approx(
+        0.29088412196201646)
     plants = {
         name: G.classify_scaling_suite(rows, plant=name)
         for name in G.SCALING_PLANTS
@@ -366,31 +380,19 @@ def test_cpu_scaling_suite_gates_frozen_predictions_and_all_plants():
         "strictly_increasing_at_every_window"]
     assert not plants["decreasing_endpoint"]["checks"][
         "strictly_increasing_at_every_window"]
-    almost_linear = plants["adjacent_ratio_outside_band"]
-    assert almost_linear["checks"] == {
-        "positive_fitted_seconds_per_step": True,
-        "time_1440_exceeds_time_720": True,
-        "strictly_increasing_at_every_window": True,
-        "every_adjacent_ratio_in_preregistered_band": False,
-        "uniform_1440_to_720_ratio_in_preregistered_band": True,
-    }
-    outside = [
-        ratio for ratio in almost_linear["adjacent_normalized_ratios"].values()
-        if not 0.5 <= ratio <= 1.5
-    ]
-    assert len(outside) == 1
-    assert almost_linear["ratio_1440_to_720"] == pytest.approx(2.0)
-    equality = plants["equal_adjacent_window"]
-    assert equality["checks"] == {
-        "positive_fitted_seconds_per_step": True,
-        "time_1440_exceeds_time_720": True,
-        "strictly_increasing_at_every_window": False,
-        "every_adjacent_ratio_in_preregistered_band": True,
-        "uniform_1440_to_720_ratio_in_preregistered_band": True,
-    }
-    assert equality["adjacent_normalized_ratios"]["360-720"] == pytest.approx(
-        0.5)
-    assert equality["ratio_1440_to_720"] == pytest.approx(2.0)
+    reviewer_series = [
+        1, 6, 11.2500000225, 11.250000045, 16.87500009]
+    reviewer = plants["reviewer_monotone_nonlinear"]
+    assert list(reviewer["evaluated_warm_reverse_wall_seconds"].values()) == (
+        reviewer_series)
+    assert reviewer["fit_r_squared"] == pytest.approx(0.8152955710691663)
+    assert not reviewer["checks"]["every_incremental_cost_within_fit_band"]
+    dead = plants["dead_interval"]
+    assert not dead["checks"]["strictly_increasing_at_every_window"]
+    assert not dead["checks"]["every_incremental_cost_within_fit_band"]
+    r_squared = plants["r_squared_095"]
+    assert r_squared["fit_r_squared"] == pytest.approx(0.95, abs=1.0e-8)
+    assert not r_squared["checks"]["every_residual_within_timing_tolerance"]
     args = G.parse_args([
         "scaling-suite", "--card", "SWG", "--steps", "1440",
         "--schedule", "uniform", "--expect-commit", "deadbeef",
@@ -400,6 +402,15 @@ def test_cpu_scaling_suite_gates_frozen_predictions_and_all_plants():
     ])
     assert args.plant is None
     assert len(args.row) == 5
+
+
+def test_scaling_tolerance_is_derived_from_three_fresh_process_repeats():
+    times = G.SWG_TIMING_NOISE_WARM_SECONDS
+    expected_spread = (max(times) - min(times)) / abs(sum(times) / len(times))
+    assert G.SWG_TIMING_NOISE_RELATIVE_SPREAD == pytest.approx(expected_spread)
+    assert expected_spread == pytest.approx(0.09696137398733883)
+    assert G.SCALING_RELATIVE_TOLERANCE == pytest.approx(3.0 * expected_spread)
+    assert G.SCALING_RELATIVE_TOLERANCE > 0.05
 
 
 @pytest.mark.parametrize("plant", G.SCALING_PLANTS)

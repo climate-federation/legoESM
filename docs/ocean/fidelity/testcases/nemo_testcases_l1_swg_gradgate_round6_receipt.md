@@ -26,8 +26,7 @@ squares over the frozen CPU windows `(24, 96, 360, 720, 1440)`. Require all of:
 
 1. `b > 0`: more model steps must have positive fitted marginal cost.
 2. Strict monotonicity at every adjacent window.
-3. `a >= -tolerance * mean(time)`: fixed overhead cannot be materially
-   negative; the tolerance admits timing noise around zero.
+3. `a >= 0`: fixed overhead cannot be negative.
 4. Every residual satisfies
    `abs(time_i - (a + b * steps_i)) <= tolerance * time_i`: each observed
    window must be consistent with the affine model, not merely raise a summary
@@ -49,7 +48,14 @@ dead interval; and a series with `R2 = 0.95`. All three fresh real suites must
 pass. The exact SSH, U, and V production-loop versus scan-composition gaps must
 also be written as separate JSON fields.
 
+The three preregistered 360-step uniform warm times, acquired from separate
+clean processes at producer `0bc492a1d`, are `4.091811742633581`,
+`4.501838743686676`, and `4.092648733407259` seconds. Their relative spread is
+`0.09696137398733883`; therefore the frozen tolerance is
+`0.29088412196201646`. The `0.05` floor does not bind. These are the only
+measurements made before freezing the gate.
+
 ## OPEN
 
-Pending the preregistered noise measurement, gate implementation, controls,
-five-window rerun, ladders, card digests, and explicit receipt citation gate.
+Pending the gate implementation, controls, five-window rerun, ladders, card
+digests, and explicit receipt citation gate.

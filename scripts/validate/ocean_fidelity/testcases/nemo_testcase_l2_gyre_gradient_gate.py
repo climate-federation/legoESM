@@ -60,14 +60,23 @@ WARM_REVERSE_TIMER_SPAN = (
     "blocked execution of pre-jitted value_and_grad only; sampler "
     "start and stop/join excluded"
 )
-UNIFORM_SCALING_RATIO_BOUNDS = (1.5, 2.5)
-ADJACENT_SCALING_RATIO_BOUNDS = (0.5, 1.5)
+SWG_TIMING_NOISE_WARM_SECONDS = (
+    4.091811742633581,
+    4.501838743686676,
+    4.092648733407259,
+)
+SWG_TIMING_NOISE_RELATIVE_SPREAD = (
+    max(SWG_TIMING_NOISE_WARM_SECONDS) - min(SWG_TIMING_NOISE_WARM_SECONDS)
+) / abs(sum(SWG_TIMING_NOISE_WARM_SECONDS) / len(SWG_TIMING_NOISE_WARM_SECONDS))
+SCALING_RELATIVE_TOLERANCE = max(
+    0.05, 3.0 * SWG_TIMING_NOISE_RELATIVE_SPREAD)
 SCALING_PLANTS = (
     "constant_time",
     "reviewer_nonmonotonic",
     "decreasing_endpoint",
-    "adjacent_ratio_outside_band",
-    "equal_adjacent_window",
+    "reviewer_monotone_nonlinear",
+    "dead_interval",
+    "r_squared_095",
 )
 GYRE_FIELDS = ("T", "S", "u", "v")
 SWG_FIELDS = ("ssh", "u", "v")
@@ -711,19 +720,28 @@ def compare_scheduled_primal(left, right) -> dict:
             "rtol": SCHEDULE_RTOL,
             "atol": SCHEDULE_ATOL,
         }
+    field_names = getattr(left, "_fields", ())
+    if len(field_names) != len(left_leaves):
+        field_names = tuple(f"leaf_{index}" for index in range(len(left_leaves)))
     bitwise = True
     within_contract = True
     max_abs = 0.0
-    for left_leaf, right_leaf in zip(
-            left_leaves, right_leaves, strict=True):
+    field_max_abs = {}
+    for field_name, left_leaf, right_leaf in zip(
+            field_names, left_leaves, right_leaves, strict=True):
         left_array = np.asarray(left_leaf)
         right_array = np.asarray(right_leaf)
         leaf_bitwise = np.array_equal(left_array, right_array)
         bitwise = bitwise and leaf_bitwise
-        if leaf_bitwise:
-            continue
         if left_array.shape != right_array.shape:
+            field_max_abs[field_name] = None
             within_contract = False
+            continue
+        leaf_max_abs = float(
+            np.max(np.abs(left_array - right_array), initial=0.0))
+        field_max_abs[field_name] = leaf_max_abs
+        max_abs = max(max_abs, leaf_max_abs)
+        if leaf_bitwise:
             continue
         if not (
             np.issubdtype(left_array.dtype, np.inexact)
@@ -735,10 +753,6 @@ def compare_scheduled_primal(left, right) -> dict:
         if not bool(np.all(finite)):
             within_contract = False
             continue
-        max_abs = max(
-            max_abs,
-            float(np.max(np.abs(left_array - right_array), initial=0.0)),
-        )
         within_contract = within_contract and bool(np.allclose(
             left_array,
             right_array,
@@ -749,6 +763,7 @@ def compare_scheduled_primal(left, right) -> dict:
         "within_contract": within_contract,
         "bitwise": bitwise,
         "max_abs": max_abs,
+        "field_max_abs": field_max_abs,
         "rtol": SCHEDULE_RTOL,
         "atol": SCHEDULE_ATOL,
     }
@@ -1111,17 +1126,19 @@ def classify_scaling_suite(
         evaluated = dict(zip(SWG_SCALING_STEPS, (1.0, 100.0, 1.0, 1000.0, 2000.0)))
     elif plant == "decreasing_endpoint":
         evaluated[1440] = 0.5 * evaluated[720]
-    elif plant == "adjacent_ratio_outside_band":
-        # Linear at four windows; the 360-step point makes only the 96-360
-        # normalized adjacent ratio exceed the preregistered upper bound.
-        # The retained uniform 1440/720 endpoint ratio remains exactly 2.0.
+    elif plant == "reviewer_monotone_nonlinear":
         evaluated = dict(zip(
-            SWG_SCALING_STEPS, (0.24, 0.96, 5.41, 7.2, 14.4)))
-    elif plant == "equal_adjacent_window":
-        # Only strict monotonicity fails: the equality makes its normalized
-        # ratio exactly the inclusive lower bound while all legacy checks pass.
+            SWG_SCALING_STEPS,
+            (1.0, 6.0, 11.2500000225, 11.250000045, 16.87500009),
+        ))
+    elif plant == "dead_interval":
         evaluated = dict(zip(
-            SWG_SCALING_STEPS, (0.24, 0.96, 3.6, 3.6, 7.2)))
+            SWG_SCALING_STEPS, (1.24, 1.96, 4.6, 4.6, 15.4)))
+    elif plant == "r_squared_095":
+        evaluated = dict(zip(
+            SWG_SCALING_STEPS,
+            (0.4484313, 1.19561963, 6.94156223, 7.67125179, 15.14313505),
+        ))
     elif plant is not None:
         raise ValueError(f"unknown scaling plant {plant!r}")
 
@@ -1150,32 +1167,40 @@ def classify_scaling_suite(
         interval: cost / slope if slope > 0.0 else 0.0
         for interval, cost in interval_seconds_per_step.items()
     }
-    adjacent_normalized_ratios = {
-        f"{lower}-{upper}": (
-            (evaluated[upper] / evaluated[lower]) / (upper / lower))
-        for lower, upper in zip(SWG_SCALING_STEPS[:-1], SWG_SCALING_STEPS[1:])
-    }
     adjacent_pairs = tuple(zip(
         SWG_SCALING_STEPS[:-1], SWG_SCALING_STEPS[1:]))
-    ratio_lower, ratio_upper = ADJACENT_SCALING_RATIO_BOUNDS
+    fitted_times = {
+        step: intercept + slope * step for step in SWG_SCALING_STEPS
+    }
+    absolute_residuals = {
+        step: abs(evaluated[step] - fitted_times[step])
+        for step in SWG_SCALING_STEPS
+    }
+    relative_residuals = {
+        step: absolute_residuals[step] / evaluated[step]
+        for step in SWG_SCALING_STEPS
+    }
+    incremental_cost_bounds = (
+        (1.0 - 2.0 * SCALING_RELATIVE_TOLERANCE) * slope,
+        (1.0 + 2.0 * SCALING_RELATIVE_TOLERANCE) * slope,
+    )
     checks = {
         "positive_fitted_seconds_per_step": slope > 0.0,
-        "time_1440_exceeds_time_720": evaluated[1440] > evaluated[720],
         "strictly_increasing_at_every_window": all(
             evaluated[upper] > evaluated[lower]
             for lower, upper in adjacent_pairs
         ),
-        "every_adjacent_ratio_in_preregistered_band": all(
-            ratio_lower <= ratio <= ratio_upper
-            for ratio in adjacent_normalized_ratios.values()
+        "nonnegative_fitted_fixed_overhead": intercept >= 0.0,
+        "every_residual_within_timing_tolerance": all(
+            absolute_residuals[step]
+            <= SCALING_RELATIVE_TOLERANCE * evaluated[step]
+            for step in SWG_SCALING_STEPS
+        ),
+        "every_incremental_cost_within_fit_band": all(
+            incremental_cost_bounds[0] <= cost <= incremental_cost_bounds[1]
+            for cost in interval_seconds_per_step.values()
         ),
     }
-    ratio = evaluated[1440] / evaluated[720]
-    if schedule == "uniform":
-        lower, upper = UNIFORM_SCALING_RATIO_BOUNDS
-        checks["uniform_1440_to_720_ratio_in_preregistered_band"] = (
-            lower <= ratio <= upper
-        )
     return {
         "status": "CONFIRMED" if all(checks.values()) else "REFUTED",
         "reason": (
@@ -1189,13 +1214,15 @@ def classify_scaling_suite(
         "fit_intercept_seconds": intercept,
         "fit_seconds_per_step": slope,
         "fit_r_squared": r_squared,
+        "fitted_warm_reverse_wall_seconds": fitted_times,
+        "absolute_fit_residual_seconds": absolute_residuals,
+        "relative_fit_residuals": relative_residuals,
+        "relative_timing_tolerance": SCALING_RELATIVE_TOLERANCE,
+        "timing_noise_relative_spread": SWG_TIMING_NOISE_RELATIVE_SPREAD,
         "interval_seconds_per_step": interval_seconds_per_step,
         "interval_to_fit_ratios": interval_to_fit_ratios,
-        "adjacent_normalized_ratios": adjacent_normalized_ratios,
-        "adjacent_normalized_ratio_bounds": list(
-            ADJACENT_SCALING_RATIO_BOUNDS),
-        "ratio_1440_to_720": ratio,
-        "uniform_ratio_bounds": list(UNIFORM_SCALING_RATIO_BOUNDS),
+        "incremental_cost_bounds_seconds_per_step": list(
+            incremental_cost_bounds),
         "checks": checks,
         "plant": plant,
         "row_statuses": row_statuses,
