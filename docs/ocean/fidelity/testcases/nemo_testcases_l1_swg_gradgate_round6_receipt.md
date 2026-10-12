@@ -9,6 +9,16 @@ this card. This round changes no physics, card input, loss, random direction,
 agreement bar, checkpoint schedule, configuration, stabilizer, clip, guard,
 or `stop_gradient`.
 
+Round-7 amendment (2026-10-12): the affine-linearity verdict is historical and
+is replaced by the repeated measurement with uncertainty in
+`nemo_testcases_l1_swg_gradgate_round7_receipt.md`; no number below is
+rewritten. The sentence below calling commit `ad02afb13`'s gate “identical” is
+**CORRECTED**: commit `0bc492a1d` preregistered
+`a >= -tolerance * mean(time)`, while `ad02afb13` changed it after measurement
+to `a >= 0`. That was an unauthorized **DEVIATION**, motivated by interpreting
+`a` as fixed overhead. It did not alter the held result because every schedule
+also failed the residual test. Round 7 removes the intercept acceptance rule.
+
 ## Preregistration and timing noise
 
 Commit `0bc492a1d` preregistered the noise protocol and gate formula before any

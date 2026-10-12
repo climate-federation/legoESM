@@ -8,6 +8,12 @@ review. No physics, card input, loss, random direction, agreement bar,
 checkpoint schedule, configuration, stabilizer, clip, guard, or
 `stop_gradient` changes.
 
+Round-7 amendment (2026-10-12): this scaling verdict is historical and does
+not certify a linear timing law. The final controlling statement is the
+repeated measurement with uncertainty in
+`nemo_testcases_l1_swg_gradgate_round7_receipt.md`; no number below is
+rewritten.
+
 ## Preregistered scaling contract
 
 The same contract applies to `none`, `uniform`, and `binomial` over the frozen

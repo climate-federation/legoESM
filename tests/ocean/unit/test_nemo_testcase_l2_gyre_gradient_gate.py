@@ -414,6 +414,12 @@ def test_cpu_timing_suite_reports_uncertainty_and_gates_only_trend():
     assert reviewer["fit_r_squared"] == pytest.approx(0.8152955710691663)
     assert reviewer["fit_diagnostic"].startswith("LARGE_RESIDUAL")
     strong = plants["reviewer_strongly_nonlinear"]
+    strong_series = [
+        0.2451153271, 1.4510041507, 4.6135624796,
+        6.2600150596, 16.3588091356,
+    ]
+    assert list(strong["mean_warm_reverse_wall_seconds"].values()) == (
+        pytest.approx(strong_series))
     assert strong["fit_r_squared"] == pytest.approx(0.9779244072690443)
     assert strong["fit_diagnostic"].startswith("LARGE_RESIDUAL")
     dead = plants["dead_interval"]
@@ -449,6 +455,41 @@ def test_scaling_measurement_requires_three_distinct_processes_per_window():
     duplicate_process = G.classify_scaling_suite(rows)
     assert duplicate_process["status"] == "VACUOUS"
     assert "distinct process" in duplicate_process["reason"]
+
+
+def test_scaling_suite_cli_exits_zero_for_measured_and_one_for_refuted(
+        tmp_path, monkeypatch):
+    paths = []
+    pid = 1000
+    for steps in G.SWG_SCALING_STEPS:
+        for repeat in range(1, G.SWG_SCALING_REPEATS + 1):
+            row = _cpu_scaling_row(
+                "uniform", steps, 0.01 * steps + 0.1, repeat, pid)
+            path = tmp_path / f"{steps}_{repeat}.json"
+            path.write_text(json.dumps(row), encoding="utf-8")
+            paths.append(path)
+            pid += 1
+    monkeypatch.setattr(
+        G, "require_measurement_stamp",
+        lambda _commit: {"commit": "deadbeef", "dirty": False},
+    )
+
+    def argv(output, *extra):
+        result = [
+            "scaling-suite", "--card", "SWG", "--steps", "1440",
+            "--schedule", "uniform", *extra,
+            "--expect-commit", "deadbeef", "--output", str(output),
+        ]
+        for path in paths:
+            result.extend(("--row", str(path)))
+        return result
+
+    measured_output = tmp_path / "measured.json"
+    assert G.main(argv(measured_output)) == 0
+    assert json.loads(measured_output.read_text())["status"] == "MEASURED"
+    refuted_output = tmp_path / "refuted.json"
+    assert G.main(argv(refuted_output, "--plant", "constant_time")) == 1
+    assert json.loads(refuted_output.read_text())["status"] == "REFUTED"
 
 
 @pytest.mark.parametrize("plant", G.SCALING_PLANTS)

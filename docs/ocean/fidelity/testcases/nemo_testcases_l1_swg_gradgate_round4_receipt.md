@@ -9,6 +9,12 @@ without turning the preregistered schedule ordering into an acceptance gate.
 No physics, card input, loss, random direction, agreement bar, checkpoint
 schedule, configuration, stabilizer, clip, guard, or `stop_gradient` changed.
 
+Round-7 amendment (2026-10-12): the round-4 scaling verdict is historical and
+does not certify a linear timing law. The final controlling statement is the
+repeated measurement with uncertainty in
+`nemo_testcases_l1_swg_gradgate_round7_receipt.md`; no number below is
+rewritten.
+
 Round-5 amendment (2026-10-12): the scaling verdict in this receipt is retained
 as the historical round-4 result, but it is not the final gate. The authorized
 round-5 gate adds strict monotonic growth across all five windows and requires
