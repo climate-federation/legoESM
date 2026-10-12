@@ -188,6 +188,69 @@ def test_content_pin_refuses_one_flipped_record_byte(tmp_path):
         lad._require_sha256(record, expected)
 
 
+def test_shipped_admission_pins_manifest_and_every_oracle_file(
+        tmp_path, monkeypatch):
+    payloads = {
+        "nemo": b"binary", "namelist_cfg": b"cfg", "namelist_ref": b"ref",
+        "T.nc": b"T", "U.nc": b"U", "V.nc": b"V", "W.nc": b"W",
+    }
+    for name, payload in payloads.items():
+        (tmp_path / name).write_bytes(payload)
+    manifest_pins = {
+        name: hashlib.sha256(payloads[name]).hexdigest()
+        for name in ("nemo", "namelist_cfg", "namelist_ref")
+    }
+    manifest = "".join(
+        f"{digest}  {name}\n" for name, digest in manifest_pins.items())
+    (tmp_path / "manifest.sha256").write_text(manifest)
+    file_pins = {"manifest.sha256": hashlib.sha256(
+        manifest.encode()).hexdigest()}
+    file_pins.update({
+        f"grid_{kind}_{kind}.nc": hashlib.sha256(kind.encode()).hexdigest()
+        for kind in "TUVW"
+    })
+    for kind in "TUVW":
+        (tmp_path / f"grid_{kind}_{kind}.nc").write_bytes(kind.encode())
+    monkeypatch.setattr(lad, "SHIPPED_MANIFEST", manifest_pins)
+    monkeypatch.setattr(lad, "SHIPPED_SHA256", file_pins)
+    admitted = lad._shipped_admission(tmp_path)
+    assert set(admitted) == set("TUVW")
+    (tmp_path / "grid_U_U.nc").write_bytes(b"u")
+    with pytest.raises(Exception, match="content SHA-256 mismatch"):
+        lad._shipped_admission(tmp_path)
+
+
+def test_ioipsl_running_mean_preserves_source_association_at_storage():
+    first = np.array([6100058474.907604], dtype=np.float64)
+    third = np.array([6276331050.18479], dtype=np.float64)
+    average = lad._ioipsl_moycum(None, first, 0)
+    average = lad._ioipsl_moycum(average, first, 1)
+    source_associated = lad._ioipsl_moycum(average, third, 2)
+    reassociated = average + (third - average) / np.float64(3)
+    assert source_associated[0] == np.float64(6158816000.0)
+    assert source_associated.astype(np.float32)[0] != reassociated.astype(
+        np.float32)[0]
+
+
+def test_shared_shipped_statistics_are_deterministic_for_equal_series():
+    from legoesm.core.precision import PrecisionPolicy, set_policy
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import build_swg_card
+
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    card = build_swg_card()
+    shape = (2, 84, 84)
+    zeros = np.zeros(shape, dtype=np.float32)
+    arrays1, summary1 = lad._shared_shipped_statistics(
+        zeros, zeros, zeros, card)
+    arrays2, summary2 = lad._shared_shipped_statistics(
+        zeros.copy(), zeros.copy(), zeros.copy(), card)
+    assert summary1 == summary2
+    assert all(np.array_equal(arrays1[name], arrays2[name])
+               for name in arrays1)
+    assert summary1["transport_streamfunction_sv"]["min"] == 0.0
+    assert summary1["kinetic_energy_m5_s-2"]["time_mean"] == 0.0
+
+
 @pytest.mark.skipif(not MONTH_ROOT.is_dir(),
                     reason="admitted SWG month record not mounted")
 def test_independent_thirty_day_rung_scores_every_daily_record():

@@ -24,6 +24,9 @@ DEFAULT_STAGE_ROOT = Path(
 DEFAULT_MONTH_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swg_rounds/"
     "round6/oracle_swg_r6_30d")
+DEFAULT_SHIPPED_ROOT = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swg_rounds/"
+    "round0_probe/year10")
 MONTH_RECORD_KTS = tuple(range(1, 698, 24))
 MONTH_RESTART_KTS = tuple(range(24, 721, 24))
 TEN_STEP_ADMISSION_SHA256 = (
@@ -92,6 +95,34 @@ MONTH_OUTPUT_SHA256 = {
     "reference/SWG_1d_00010101_00010130_grid_W_0000.nc":
         "5d700936098ed919cc726a9348d7766a400ac3ad2b93ddcb870075262beb976b",
 }
+SHIPPED_SHA256 = {
+    "manifest.sha256":
+        "22b46f1496c51da574203b0bbb67887351c22325806a184c30d643429dbc15b0",
+    "SWG_00172800_restart.nc":
+        "eb800fee0dfe0723fc7c33c1338142fbeaac1a1a9f6899a38e71e7850894abd8",
+    "SWG_20d_00010101_00201230_grid_T_0000.nc":
+        "42263cf6e6a63d770112eb90bea73bd52eb64546d862c5635d77cf706022d948",
+    "SWG_20d_00010101_00201230_grid_U_0000.nc":
+        "5b2d38e00234027e89a60bc1d3045ec9389c8da58dad40c61ffc7bc7e5d6e0f0",
+    "SWG_20d_00010101_00201230_grid_V_0000.nc":
+        "ee9e8dc4ed39574cbce4df5627d59fc42efc72ffc7da565830f844f141fccc0e",
+    "SWG_20d_00010101_00201230_grid_W_0000.nc":
+        "25e3a3f4972571e908fc98984602f6f6f9d606616b2222cbcbd64eff5b979dcb",
+    "mesh_mask.nc":
+        "4e03dbf1211dbb299d2f6411106dd7a4ff491f8c25101491eb215845058d819b",
+    "output.init.nc":
+        "19e12d4fb9aaed96a24488d026a3738ad4b2dbfd766ba0771c7f2d6bda8b4a19",
+    "ocean.output":
+        "af7c4272dece97042aab67beaa81ca4d702f9c516703e24586c4468ace6cbd26",
+}
+SHIPPED_MANIFEST = {
+    "nemo": "a5b312b8b8fccadd67152d446811c7d2bc9d0e1cd55dce0d3148c8b5c6817eb9",
+    "namelist_cfg":
+        "43c81e7ad7b92bf491aa74f56636800a5a0b3d2fda7c61ba03f4ff6942a1893b",
+    "namelist_ref":
+        "b04f2ce4d12aa247ae3b707483d25cf2d38d0b3cf8817d71d33e66918fd81cfd",
+}
+SHIPPED_RESTART_SHA256 = {172800: SHIPPED_SHA256["SWG_00172800_restart.nc"]}
 RESTART_FIELDS = (
     "sshn", "un", "vn", "uu_n", "vv_n", "utau_b", "vtau_b",
     "emp_b", "qns_b", "sfx_b",
@@ -142,6 +173,8 @@ def _restart_hashes(root: Path) -> dict[int, str]:
         return TEN_STEP_RESTART_SHA256
     if root.resolve() == (DEFAULT_MONTH_ROOT / "instrumented").resolve():
         return MONTH_RESTART_SHA256
+    if root.resolve() == DEFAULT_SHIPPED_ROOT.resolve():
+        return SHIPPED_RESTART_SHA256
     raise RuntimeError(f"unregistered restart-record root {root}")
 
 
@@ -380,6 +413,161 @@ def _month_admission(root: Path) -> Path:
     return instrumented
 
 
+def _shipped_admission(root: Path) -> dict[str, Path]:
+    """Content-pin the operator's uninstrumented shipped reference run."""
+    for relative, expected in SHIPPED_SHA256.items():
+        _require_sha256(root / relative, expected)
+    manifest = {}
+    for line in (root / "manifest.sha256").read_text().splitlines():
+        digest, name = line.split(maxsplit=1)
+        manifest[name] = digest
+    require(manifest == SHIPPED_MANIFEST,
+            f"shipped manifest contents differ: {manifest}")
+    for name, expected in SHIPPED_MANIFEST.items():
+        _require_sha256(root / name, expected)
+    return {
+        kind: root / next(name for name in SHIPPED_SHA256
+                          if f"grid_{kind}_" in name)
+        for kind in ("T", "U", "V", "W")
+    }
+
+
+def _read_shipped_outputs(root: Path, block_steps: int, dt_s: float):
+    """Read the three 32-bit averaged fields after immutable admission."""
+    import netCDF4
+
+    paths = _shipped_admission(root)
+    fields = {"T": "sossheig", "U": "vozocrtx", "V": "vomecrty"}
+    out = {}
+    expected_time = ((np.arange(360, dtype=np.float64) + 0.5)
+                     * np.float64(block_steps) * np.float64(dt_s))
+    for kind, variable in fields.items():
+        with netCDF4.Dataset(paths[kind]) as ds:
+            ds.set_auto_mask(False)
+            require(variable in ds.variables, f"{paths[kind].name}: missing {variable}")
+            var = ds[variable]
+            require(var.dtype == np.dtype("float32"),
+                    f"{paths[kind].name}.{variable}: dtype {var.dtype}")
+            values = np.asarray(var[:])
+            if kind in ("U", "V"):
+                require(values.shape == (360, 2, 84, 84),
+                        f"{variable}: shape {values.shape}")
+                require(np.all(values[:, 1] == 0.0),
+                        f"{variable}: dummy bottom record is nonzero")
+                values = values[:, 0]
+            require(values.shape == (360, 84, 84)
+                    and np.all(np.isfinite(values)),
+                    f"{variable}: bad shape/non-finite stored value")
+            times = np.asarray(ds["time_counter"][:], dtype=np.float64)
+            require(np.array_equal(times, expected_time),
+                    f"{paths[kind].name}: output clock differs")
+            out[kind] = values
+    return out
+
+
+def _ioipsl_moycum(previous: np.ndarray | None, sample: np.ndarray,
+                   previous_count: int) -> np.ndarray:
+    """IOIPSL ``moycum`` average with its exact source association."""
+    value = np.asarray(sample)
+    require(value.dtype == np.dtype("float64"), "moycum sample is not fp64")
+    if previous_count == 0:
+        require(previous is None, "moycum first sample has a prior accumulator")
+        return value.copy()
+    require(previous is not None and previous.dtype == np.dtype("float64"),
+            "moycum accumulator is not fp64")
+    return ((previous * np.float64(previous_count) + value)
+            / np.float64(previous_count + 1))
+
+
+def _array_sha256(value: np.ndarray) -> str:
+    array = np.ascontiguousarray(value)
+    return hashlib.sha256(array.tobytes()).hexdigest()
+
+
+def _shared_shipped_statistics(ssh, u_native, v_native, card):
+    """Apply only repository-shared diagnostics to one masked output series."""
+    import jax
+    import jax.numpy as jnp
+    from legoesm.ocean.diagnostics import (
+        domain_kinetic_energy, eddy_kinetic_energy,
+        isotropic_energy_spectrum, velocity_to_cell_centre)
+    from legoesm.ocean.diagnostics_streamfunction import barotropic_streamfunction
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import swg_horizontal_coordinates
+
+    masks = _card_masks(card)
+    ssh = np.where(masks["T"][None], np.asarray(ssh, dtype=np.float64), 0.0)
+    u_native = np.where(
+        masks["U"][None], np.asarray(u_native, dtype=np.float64), 0.0)
+    v_native = np.where(
+        masks["V"][None], np.asarray(v_native, dtype=np.float64), 0.0)
+    u = np.concatenate([np.zeros_like(u_native[:, :, :1]), u_native], axis=2)
+    v = np.concatenate([np.zeros_like(v_native[:, :1, :]), v_native], axis=1)
+    u_h, v_h = jax.vmap(velocity_to_cell_centre)(jnp.asarray(u), jnp.asarray(v))
+    base_h = np.asarray(card.recipe.z_coord.h_partial, dtype=np.float64)
+    h = np.where(masks["T"][None, ..., None],
+                 base_h[None] + ssh[..., None], 0.0)
+    area = jnp.asarray(card.recipe.grid.area, dtype=jnp.float64)
+    ke = np.asarray(jax.vmap(
+        lambda ui, vi, hi: domain_kinetic_energy(ui, vi, area, hi))(
+            u_h[..., None], v_h[..., None], jnp.asarray(h)))
+    eke = np.asarray(jax.vmap(
+        lambda ui, vi, hi: eddy_kinetic_energy(ui, vi, area, hi))(
+            u_h[..., None], v_h[..., None], jnp.asarray(h)))
+    mean_ssh = np.mean(ssh, axis=0, dtype=np.float64)
+    mean_u = np.mean(u, axis=0, dtype=np.float64)
+    mean_v = np.mean(v, axis=0, dtype=np.float64)
+    mean_h = np.where(masks["T"][..., None],
+                      base_h + mean_ssh[..., None], 0.0)
+    psi = np.asarray(barotropic_streamfunction(
+        mean_u[..., None], mean_h, masks["T"], card.recipe.grid))
+    mean_u_h, mean_v_h = velocity_to_cell_centre(
+        jnp.asarray(mean_u), jnp.asarray(mean_v))
+    wet = np.argwhere(masks["T"])
+    j0, i0 = wet.min(axis=0); j1, i1 = wet.max(axis=0) + 1
+    require((int(j1 - j0), int(i1 - i0)) == (80, 80),
+            "SWG wet spectral basin is not 80 by 80")
+    spacing = np.float64(swg_horizontal_coordinates()["spacing_m"])
+    wavenumber, spectrum = isotropic_energy_spectrum(
+        mean_u_h[j0:j1, i0:i1], mean_v_h[j0:j1, i0:i1], spacing)
+    arrays = {
+        "mean_ssh": mean_ssh,
+        "transport_streamfunction_sv": psi,
+        "kinetic_energy_series": ke,
+        "eddy_kinetic_energy_series": eke,
+        "spectrum_wavenumber_m-1": np.asarray(wavenumber),
+        "kinetic_energy_spectrum": np.asarray(spectrum),
+    }
+    wet_ssh = mean_ssh[masks["T"]]
+    summary = {
+        "mean_ssh_m": {
+            "wet_mean": float(np.mean(wet_ssh, dtype=np.float64)),
+            "wet_min": float(np.min(wet_ssh)),
+            "wet_max": float(np.max(wet_ssh)),
+            "sha256": _array_sha256(mean_ssh),
+        },
+        "transport_streamfunction_sv": {
+            "min": float(np.min(psi)), "max": float(np.max(psi)),
+            "sha256": _array_sha256(psi),
+        },
+        "kinetic_energy_m5_s-2": {
+            "time_mean": float(np.mean(ke, dtype=np.float64)),
+            "min": float(np.min(ke)), "max": float(np.max(ke)),
+            "sha256": _array_sha256(ke),
+        },
+        "eddy_kinetic_energy_m5_s-2": {
+            "time_mean": float(np.mean(eke, dtype=np.float64)),
+            "min": float(np.min(eke)), "max": float(np.max(eke)),
+            "sha256": _array_sha256(eke),
+        },
+        "basin_ke_spectrum": {
+            "bins": int(np.asarray(spectrum).size),
+            "sha256": _array_sha256(np.asarray(spectrum)),
+            "wavenumber_sha256": _array_sha256(np.asarray(wavenumber)),
+        },
+    }
+    return arrays, summary
+
+
 def _stage_candidate(state, forcing, card) -> dict[str, np.ndarray]:
     """Reconstruct the production entry represented by a public whole-step state."""
     from legoesm.ocean.dynamics.swe_rk3 import _entry_from_state
@@ -530,6 +718,157 @@ def month_control(root: Path, *, allow_dirty: bool = False) -> dict:
         "controls": [changed],
         "per_kt": [{"day": 1, "kt": 24, "rows": clean_rows}],
     })
+
+
+def shipped(root: Path, *, statistics_npz: Path | None = None,
+            progress: bool = False, allow_dirty: bool = False) -> dict:
+    """Run and score all 172800 shipped production steps from rest."""
+    import resource
+    import time
+    from legoesm.ocean.fidelity.provenance import allow_dirty_stamps, git_sha
+
+    allow_dirty_stamps(allow_dirty)
+    sha = git_sha(allow_dirty=allow_dirty)
+    card, masks, model, forcing = _swg_production_case("shipped ladder")
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import SWG_NAMELIST
+    # The shared model does not own output cadence; this scorer consumes the
+    # REQUIRED resolved deck choice rather than supplying a local default.
+    block_steps = int(SWG_NAMELIST.nn_write)
+    require(block_steps == 480, f"shipped output block is {block_steps} steps")
+    require(card.n_steps == 172800 and card.n_steps % block_steps == 0,
+            f"shipped step count is {card.n_steps}")
+    n_outputs = card.n_steps // block_steps
+    reference = _read_shipped_outputs(root, block_steps, card.dt_s)
+    final_restart = read_restarts(root, kts=(card.n_steps,))[card.n_steps]
+
+    # Compile all three production stages before starting the wall clock, then
+    # discard the warm-up state so the certified trajectory still starts from
+    # the card's independent rest state.
+    warm = model.step(
+        card.recipe.initial_state, card.dt_s, surface_forcing=forcing)
+    warm.eta.data.block_until_ready()
+    state = card.recipe.initial_state
+    candidate = {
+        kind: np.empty((n_outputs, 84, 84), dtype=np.float32)
+        for kind in ("T", "U", "V")
+    }
+    per_output = []
+    rss_start_kib = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+    started = time.perf_counter()
+    averages = {kind: None for kind in candidate}
+    previous_count = 0
+    for kt in range(1, card.n_steps + 1):
+        state = model.step(state, card.dt_s, surface_forcing=forcing)
+        samples = {
+            "T": np.asarray(state.eta.data),
+            "U": np.asarray(state.u.data)[:, 1:, 0],
+            "V": np.asarray(state.v.data)[1:, :, 0],
+        }
+        averages = {
+            kind: _ioipsl_moycum(averages[kind], value, previous_count)
+            for kind, value in samples.items()
+        }
+        previous_count += 1
+        if kt % block_steps:
+            continue
+        output_index = kt // block_steps
+        rows = []
+        for kind in ("T", "U", "V"):
+            stored = averages[kind].astype(np.float32)
+            candidate[kind][output_index - 1] = stored
+            rows.append(_row(
+                f"shipped.output{output_index:04d}.kt{kt}.{kind}",
+                reference[kind][output_index - 1], stored, masks[kind]))
+        per_output.append({
+            "kind": "output", "output_index": output_index,
+            "kt": kt, "model_day": kt * card.dt_s / 86400.0,
+            "rows": rows,
+        })
+        averages = {kind: None for kind in candidate}
+        previous_count = 0
+        if progress and output_index % 18 == 0:
+            elapsed = time.perf_counter() - started
+            print(
+                f"PROGRESS model_year={output_index // 18}/20 "
+                f"steps={kt}/{card.n_steps} wall_s={elapsed:.1f}",
+                file=sys.stderr, flush=True)
+
+    state.eta.data.block_until_ready()
+    wall_s = time.perf_counter() - started
+    restart_candidate = _restart_candidate(state)
+    restart_rows = [
+        _row(f"shipped.restart.kt{card.n_steps}.{name}",
+             final_restart[name], value, _field_mask(name, masks))
+        for name, value in restart_candidate.items()
+    ]
+    per_output.append({
+        "kind": "restart", "kt": card.n_steps, "rows": restart_rows})
+    out = _gate_rows({
+        "label": "INDEPENDENT-SHIPPED-MULTIYEAR",
+        "legoesm_git_sha": sha, "bar": BAR,
+        "record_counts": {
+            "output_times": n_outputs,
+            "output_rows": n_outputs * 3,
+            "restart_rows": len(restart_rows),
+        },
+        "oracle_content_sha256": SHIPPED_SHA256,
+        "per_kt": per_output,
+    })
+    output_steps = [step for step in per_output if step["kind"] == "output"]
+    out["first_output_over_bar"] = next((
+        {"output_index": step["output_index"], "kt": step["kt"],
+         "model_day": step["model_day"],
+         "field": next(row["name"].rsplit(".", 1)[-1]
+                       for row in step["rows"] if row["status"] == "DEBT")}
+        for step in output_steps
+        if any(row["status"] == "DEBT" for row in step["rows"])), None)
+    out["first_restart_over_bar"] = next((
+        row["name"].rsplit(".", 1)[-1]
+        for row in restart_rows if row["status"] == "DEBT"), None)
+    out["growth_curve"] = [{
+        "output_index": step["output_index"], "kt": step["kt"],
+        "max_abs": {
+            row["name"].rsplit(".", 1)[-1]: row["max_abs"]
+            for row in step["rows"]},
+    } for step in output_steps]
+    peak_kib = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+    out["performance"] = {
+        "wall_seconds_excluding_jit_warmup": wall_s,
+        "seconds_per_360_day_model_year": wall_s / 20.0,
+        "model_steps_per_second": card.n_steps / wall_s,
+        "rss_high_water_mib": peak_kib / 1024.0,
+        "rss_high_water_at_timing_start_mib": rss_start_kib / 1024.0,
+    }
+    if out["all_bit_identical"]:
+        nemo_arrays, nemo_summary = _shared_shipped_statistics(
+            reference["T"], reference["U"], reference["V"], card)
+        lego_arrays, lego_summary = _shared_shipped_statistics(
+            candidate["T"], candidate["U"], candidate["V"], card)
+        require(nemo_summary == lego_summary,
+                "identical stored series produced different statistics summaries")
+        require(nemo_arrays.keys() == lego_arrays.keys()
+                and all(np.array_equal(nemo_arrays[name], lego_arrays[name])
+                        for name in nemo_arrays),
+                "identical stored series produced different statistics arrays")
+        out["statistics"] = {
+            "inputs": "separately computed from masked NEMO and legoESM series",
+            "bit_identical": True,
+            "nemo": nemo_summary,
+            "legoesm": lego_summary,
+        }
+        if statistics_npz is not None:
+            statistics_npz.parent.mkdir(parents=True, exist_ok=True)
+            np.savez_compressed(statistics_npz, **lego_arrays)
+            out["statistics"]["artifact"] = {
+                "path": str(statistics_npz.resolve()),
+                "sha256": _sha256(statistics_npz),
+            }
+    else:
+        out["statistics"] = {
+            "status": "WITHHELD",
+            "reason": "the shipped trajectory is not bit-identical",
+        }
+    return out
 
 
 def independent(root: Path, *, allow_dirty: bool = False) -> dict:
@@ -817,11 +1156,14 @@ def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--arm", choices=(
         "self-check", "independent", "stage-entry-read", "ens-stage1",
-        "stages-given", "stages-chained", "carried-state", "month"),
+        "stages-given", "stages-chained", "carried-state", "month",
+        "shipped"),
                    required=True)
     p.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     p.add_argument("--stage-root", type=Path, default=DEFAULT_STAGE_ROOT)
     p.add_argument("--month-root", type=Path, default=DEFAULT_MONTH_ROOT)
+    p.add_argument("--shipped-root", type=Path, default=DEFAULT_SHIPPED_ROOT)
+    p.add_argument("--statistics-npz", type=Path)
     p.add_argument("--plant", nargs="?", const="ulp", choices=("ulp",))
     p.add_argument("--allow-dirty", action="store_true")
     p.add_argument("--json", type=Path)
@@ -839,6 +1181,11 @@ def main(argv=None) -> int:
             out = (month_control(a.month_root, allow_dirty=a.allow_dirty)
                    if a.plant else
                    month(a.month_root, allow_dirty=a.allow_dirty))
+        elif a.arm == "shipped":
+            require(a.plant is None, "shipped arm has no post-computation plant")
+            out = shipped(
+                a.shipped_root, statistics_npz=a.statistics_npz,
+                progress=True, allow_dirty=a.allow_dirty)
         elif a.arm == "stage-entry-read":
             entries = read_stage_entries(a.stage_root)
             out = {"label": "STAGE-ENTRY-READ", "records": len(entries),
