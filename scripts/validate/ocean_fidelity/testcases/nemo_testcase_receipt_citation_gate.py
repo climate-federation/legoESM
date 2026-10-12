@@ -101,6 +101,10 @@ FILES = {
         _SWG_COMPILED / "usrdef_zgr.f90"),
     "SWG_DG/BLD/ppsrc/nemo/usrdef_zgr.f90": (
         _SWG_DG_COMPILED / "usrdef_zgr.f90"),
+    "SWG_DG/BLD/ppsrc/nemo/stprk3.f90": (
+        _SWG_DG_COMPILED / "stprk3.f90"),
+    "SWG_DG/BLD/ppsrc/nemo/diawri.f90": (
+        _SWG_DG_COMPILED / "diawri.f90"),
     "SWG_OMIP_L1/BLD/ppsrc/nemo/usrdef_sbc.f90": (
         _SWG_COMPILED / "usrdef_sbc.f90"),
     "SWG_OMIP_L1/BLD/ppsrc/nemo/dynvor.f90": (
@@ -1668,6 +1672,15 @@ CITATION_MAP = {
         'zxlim1 = rn_domsiz + 10000._wp',
         'IF ( gphiv(ji,jj) > zylim0',
         '& glamu(ji,jj) > zxlim0', 4],
+    'SWG_DG/BLD/ppsrc/nemo/stprk3.f90:308-321': [
+        ('!                                 !==  Swap time levels  ==!', 3),
+        'IF( lrst_oce   )   CALL rst_write',
+        14],
+    'SWG_DG/BLD/ppsrc/nemo/diawri.f90:457,536-538': [
+        'CALL histwrite( nid_T, "sossheig", kt, ssh(:,:,Kmm)',
+        'CALL histwrite( nid_U, "vozocrtx", kt, uu(:,:,:,Kmm)',
+        'CALL histwrite( nid_V, "vomecrty", kt, vv(:,:,:,Kmm)',
+        4],
     'SWG_OMIP_L1/BLD/ppsrc/nemo/usrdef_sbc.f90:84-87': [
         'emp (:,:) = 0._wp', 'qsr (:,:) = 0._wp', 4],
     'SWG_OMIP_L1/BLD/ppsrc/nemo/usrdef_sbc.f90:99-106': [
