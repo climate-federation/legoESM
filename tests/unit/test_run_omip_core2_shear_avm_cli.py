@@ -74,7 +74,7 @@ def test_parser_exposes_both_choices_and_defaults_to_none():
 
 @pytest.mark.parametrize("argv", [
     ["--grid", "mpas", "--mpas-vmix", "kpp"],
-    ["--grid", "fesom", "--fesom-vmix", "legoesm_tke"],
+    ["--grid", "fesom", "--fesom-vmix", "fesom"],
     ["--grid", "tripole", "--tripole-vmix", "kpp"],
 ])
 def test_main_refuses_it_off_the_tke_lanes_that_wire_it(argv, monkeypatch):
@@ -130,3 +130,7 @@ def test_mpas_builder_carries_nemo_face_on_the_cell_shear():
         "tke", tke_shear_avm_weighting="nemo_face", tke_prandtl_mode="nemo_ri")
     assert vm.tke.tke_shear_avm_weighting == "nemo_face"
     assert vm.tke.prandtl_mode == "nemo_ri"
+
+
+def test_avm_flag_is_on_the_fesom_stage_allowlist():
+    assert "tke_shear_avm_weighting" in _core2()._FESOM_WIRED_DESTS

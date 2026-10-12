@@ -3034,7 +3034,7 @@ _FESOM_WIRED_DESTS = frozenset({
     "convection_n2_threshold", "convection_evd_composition",
     "tke_prognostic", "tke_n2_mode", "tke_n2_eos_form", "tke_kappa_convention",
     "tke_shear_production", "tke_lc", "tke_etau", "tke_langmuir_rhs_coupling",
-    "tke_prandtl_mode",
+    "tke_prandtl_mode", "tke_shear_avm_weighting",
     "snapshot_every_days", "output", "smoke",
     # B2+B3 forcing selectors, wired through the fesom forced loop:
     "emp_freshwater", "dm2dc", "sw_rgb_chl", "chl_file", "forcing_path",
@@ -8356,7 +8356,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "face-native --tke-shear-production "
                         "(nemo_face_native_nbb2 on the key_RK3 ORCA1 card). "
                         "MPAS (--mpas-vmix tke): the same sum on the Voronoi "
-                        "edges.")
+                        "edges; FESOM (--fesom-vmix legoesm_tke): on the "
+                        "triangle elements, node = area-weighted mean.")
     p.add_argument("--tke-shear-production", type=str, default=None,
                    choices=["squared_centered", "nemo_face_native",
                             "nemo_face_native_now2",
@@ -8687,11 +8688,13 @@ def main() -> int:
     args = p.parse_args()
     if args.tke_shear_avm_weighting is not None and not (
             (args.grid == "tripole" and args.tripole_vmix == "tke")
-            or (args.grid == "mpas" and args.mpas_vmix == "tke")):
+            or (args.grid == "mpas" and args.mpas_vmix == "tke")
+            or (args.grid == "fesom" and args.fesom_vmix == "legoesm_tke")):
         raise SystemExit(
             "--tke-shear-avm-weighting is wired for --grid tripole "
-            "--tripole-vmix tke (C-grid faces) and --grid mpas --mpas-vmix tke "
-            f"(Voronoi edges); got --grid {args.grid!r}.")
+            "--tripole-vmix tke (C-grid faces), --grid mpas --mpas-vmix tke "
+            "(Voronoi edges) and --grid fesom --fesom-vmix legoesm_tke "
+            f"(triangle elements); got --grid {args.grid!r}.")
     # The tripole builds zdf_sh2 from its C-grid face arrays, which only the
     # face-native shear geometries supply; MPAS builds it from its own edges.
     if (args.grid == "tripole" and args.tke_shear_avm_weighting == "nemo_face"
@@ -9587,7 +9590,8 @@ def main() -> int:
                 tke_lc=args.tke_lc, tke_etau=args.tke_etau,
                 tke_kappah_min=args.tke_kappah_min,
                 tke_langmuir_rhs_coupling=args.tke_langmuir_rhs_coupling,
-                tke_prandtl_mode=args.tke_prandtl_mode)
+                tke_prandtl_mode=args.tke_prandtl_mode,
+                tke_shear_avm_weighting=args.tke_shear_avm_weighting)
                 if args.fesom_vmix == "legoesm_tke" else None))
         if args.fesom_unforced:
             run_fesom_b1_smoke(args, grid, z_coord, model, state)
