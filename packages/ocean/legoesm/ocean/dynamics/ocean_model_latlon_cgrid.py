@@ -1792,6 +1792,7 @@ def rk3_stage_velocity_update(
 def _nemo_ws_qco_stage_faces(
     eta, h_ref, u_mask_3d, v_mask_3d, grid, *, z_coord=None,
     include_reciprocals=False,
+    associate_v_ratio=False,
 ):
     """NEMO ``e3u/e3v(Kmm)`` and ``1 + r3u/r3v`` for one WS-RK3 stage ssh.
 
@@ -1851,6 +1852,9 @@ def _nemo_ws_qco_stage_faces(
         jnp.asarray(eta, dtype=dtype), ops.e3u_0, ops.e3v_0, ops.umask3,
         ops.vmask3, ops.hu_0, ops.hv_0, ops.area_t, ops.area_u, ops.area_v,
         include_reciprocals=include_reciprocals,
+        associate_v_ratio=(
+            (lambda ratio: _nemo_associate_stage_v_ratio(ratio, grid))
+            if associate_v_ratio else None),
     )
 
 
@@ -2054,6 +2058,7 @@ def _nemo_ws_stage_transport(
     momentum_velocity_form_w=False, momentum_wzv_clock=None,
     legacy_wzv_rederived_transport=False,
     legacy_aimp_midpoint_w_metric=False, runoff_mass_flux=None,
+    associate_stage_v_ratio=False,
 ):
     """NEMO ``stprk3_stg.F90:257-304`` Kmm stage transport triplet.
 
@@ -2093,7 +2098,8 @@ def _nemo_ws_stage_transport(
          r1_hv_stage) = _nemo_ws_qco_stage_faces(
             eta_stage, h_ref, u_mask_3d, v_mask_3d, grid,
             z_coord=z_coord,
-            include_reciprocals=True)
+            include_reciprocals=True,
+            associate_v_ratio=(associate_stage_v_ratio and stage_index == 1))
     Hu_stage_depth = jnp.sum(hu_stage, axis=-1)
     Hv_stage_depth = jnp.sum(hv_stage, axis=-1)
     if barotropic_velocity is None:
@@ -7947,6 +7953,9 @@ class LatLonCGridOceanModel:
                 legacy_wzv_rederived_transport=(
                     self._nemo_ws_test_hooks
                     .legacy_wzv_rederived_transport),
+                associate_stage_v_ratio=(
+                    self._nemo_ws_test_hooks.barotropic_atomic_fold_unit
+                    is True),
                 legacy_aimp_midpoint_w_metric=(
                     self._nemo_ws_test_hooks.legacy_aimp_midpoint_w_metric))
             # stprk3_stg.F90:365-388 has two live scheme arms.  The resolved

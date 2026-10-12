@@ -10,6 +10,7 @@ import pytest
 from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
     _nemo_associate_stage_v_ratio,
 )
+from legoesm.ocean.vertical import nemo_qco_live_face_geometry_from_operands
 from scripts.validate.ocean_fidelity.orca2_l4 import (
     nemo_testcase_l4_orca2_round262_v_ratio_fold_gate as gate,
 )
@@ -46,6 +47,32 @@ def test_v_ratio_fold_copies_the_mirrored_southern_row():
     actual = np.asarray(_nemo_associate_stage_v_ratio(ratio, grid))
     np.testing.assert_array_equal(actual[:-1], np.asarray(ratio[:-1]))
     np.testing.assert_array_equal(actual[-1], np.asarray([6.0, 5.0, 4.0]))
+
+
+def test_v_ratio_fold_moves_thickness_and_reciprocal_together():
+    perm = jnp.asarray([2, 1, 0])
+    fold = SimpleNamespace(
+        is_active=True, fold_j=2, perm_v=perm, vector_sign_v=-1.0)
+    grid = SimpleNamespace(fold=fold)
+    eta = jnp.asarray([[0.0, 0.0, 0.0],
+                       [1.0, 2.0, 3.0],
+                       [4.0, 5.0, 6.0]])
+    shape3 = eta.shape + (1,)
+    geometry = nemo_qco_live_face_geometry_from_operands(
+        eta,
+        jnp.ones(shape3), jnp.ones(shape3),
+        jnp.ones(shape3), jnp.ones(shape3),
+        jnp.ones(eta.shape), jnp.ones(eta.shape),
+        jnp.ones(eta.shape), jnp.ones(eta.shape), jnp.ones(eta.shape),
+        associate_v_ratio=(
+            lambda ratio: _nemo_associate_stage_v_ratio(ratio, grid)),
+    )
+    expected = np.asarray(geometry.r3v[-2])[::-1]
+    np.testing.assert_array_equal(np.asarray(geometry.r3v[-1]), expected)
+    np.testing.assert_array_equal(
+        np.asarray(geometry.e3v[-1, :, 0]), 1.0 + expected)
+    np.testing.assert_array_equal(
+        np.asarray(geometry.r1_hv[-1]), 1.0 / (1.0 + expected))
 
 
 def test_round262_classifier_accepts_exact_source_replay():
