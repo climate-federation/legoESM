@@ -68,4 +68,3 @@ already-passive completed-stage trace. An in-executable observer is forbidden.
 No NEMO acquisition is planned. Missing passive operands are
 `STOPPED_FOR_RECORD`; a surviving numerical boundary is `HELD`. No partial
 association, mask, floor, clip, damping, or alternative configuration lands.
-
