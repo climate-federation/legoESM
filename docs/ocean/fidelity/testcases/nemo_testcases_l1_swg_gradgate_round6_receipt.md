@@ -30,9 +30,12 @@ convention `(max - min) / abs(mean)` and measured
 five-window rerun as
 `max(0.05, 3 * spread) = 0.29088412196201646`; the floor did not bind.
 
-Commit `ad02afb13` then encoded the identical gate for `none`, `uniform`, and
-`binomial`. For an ordinary least-squares fit `time = a + b * steps`, it
-requires:
+Commit `ad02afb13` then encoded the gate for `none`, `uniform`, and
+`binomial`, but changed the preregistered intercept rule after measurement
+from `a >= -tolerance * mean(time)` to `a >= 0`. This unauthorized deviation
+was motivated by interpreting `a` as fixed overhead; it did not change the
+held verdict because every schedule also failed the residual rule. For an
+ordinary least-squares fit `time = a + b * steps`, the changed gate requires:
 
 1. `b > 0`, because more steps must have positive fitted marginal cost.
 2. Strict monotonicity at all five windows.

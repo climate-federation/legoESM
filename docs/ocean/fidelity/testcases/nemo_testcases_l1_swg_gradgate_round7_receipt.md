@@ -106,6 +106,28 @@ The requested true 60-day uniform CPU cost is therefore
 `33.5857 ± 11.3658 s`, with observed range `20.8479..42.6920 s` and maximum
 peak host RSS `2189.617 MiB`. Linearity is not certifiable on this shared node.
 
+### Round-8 GPU-repeat amendment (2026-10-12)
+
+After the Round-7 review, the operator acquired three fresh-process native-
+policy GPU repeats at both 720 and 1440 steps for every schedule. The evidence
+is under `round7/operator_rows/gpu_repeats/`; all 18 JSONs have distinct
+process IDs, clean commit `859c56935`, preallocation disabled, the default
+allocator, and JAX allocator memory statistics. Time below is mean ± one
+sample standard deviation; the range exposes the observed spread. This
+supersedes the single-observation GPU timing column above without rewriting
+that historical observation.
+
+| schedule | 720-step GPU mean ± SD (s), range | 1440-step GPU mean ± SD (s), range | 1440-step device peak growth (MiB) |
+|---|---:|---:|---:|
+| none | `2.1109 ± 0.0027`, `2.1086..2.1139` | `4.2269 ± 0.0030`, `4.2238..4.2298` | `15483.843` |
+| uniform | `1.2272 ± 0.0022`, `1.2257..1.2297` | `2.4520 ± 0.0007`, `2.4514..2.4527` | `510.466` |
+| binomial | `3.0159 ± 0.0138`, `3.0067..3.0317` | `6.2294 ± 0.0181`, `6.2125..6.2486` | `366.080` |
+
+The GPU 60-day costs are therefore measured, not projected: none
+`4.2269 ± 0.0030 s`, uniform `2.4520 ± 0.0007 s`, and binomial
+`6.2294 ± 0.0181 s`. They remain non-certified native-policy measurements
+and are not CPU/GPU speedup claims.
+
 ## Retained directional agreement and composition
 
 The native-policy operator GPU agreement rows remain CONFIRMED:
