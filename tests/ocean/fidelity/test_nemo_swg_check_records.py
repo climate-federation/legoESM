@@ -205,6 +205,33 @@ def test_daily_writer_derives_cadence_from_resolved_timestep():
     assert "MOD(kstp - nit000, 24)" not in patch
 
 
+def test_daily_clock_refuses_fractional_nint_cadence(tmp_path):
+    deck = TOOLS / "deck.sh"
+
+    def check(dt):
+        namelist = tmp_path / "namelist_cfg"
+        namelist.write_text(
+            f" rn_Dt = {dt}\n nn_itend = 12960\n"
+            " nn_stock = 432\n nn_write = 432\n")
+        return subprocess.run(
+            ["bash", "-c",
+             f'. "{deck}"; swg_require_daily_clock "$1" || exit $?; '
+             'printf "STEPS_PER_DAY=%s\\n" "$STEPS_PER_DAY"',
+             "clock", str(namelist)],
+            capture_output=True, text=True)
+
+    accepted = check("200.")
+    assert accepted.returncode == 0
+    assert accepted.stdout == "STEPS_PER_DAY=432\n"
+
+    # Non-vacuity: the removed integer-truncation guard accepted this plant as
+    # 86400 / int(50.5) = 1728, while NEMO NINT gives 1711.
+    assert 86_400 % int(50.5) == 0
+    refused = check("50.5")
+    assert refused.returncode == 68
+    assert "NINT cadence=1711; exact integer required" in refused.stderr
+
+
 def test_makenemo_source_guard_accepts_only_the_shipped_test_case(tmp_path):
     tests = tmp_path / "tests"
     (tests / "SWG").mkdir(parents=True)

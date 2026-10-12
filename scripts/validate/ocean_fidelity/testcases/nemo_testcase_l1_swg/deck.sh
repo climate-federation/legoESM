@@ -138,15 +138,34 @@ swg_verify_source_case() {
 
 swg_require_daily_clock() {
   local namelist=$1
-  local dt_raw dt_int itend stock write
+  local dt_raw clock nint exact ratio itend stock write
   dt_raw=$(swg_namelist_value "$namelist" rn_Dt)
-  dt_int=${dt_raw%%.*}
-  [[ "$dt_int" =~ ^[0-9]+$ && "$dt_int" -gt 0 \
-        && $((86400 % dt_int)) -eq 0 ]] || {
-    printf 'REFUSE_DAILY_CLOCK: rn_Dt=%s does not divide 86400 s\n' "$dt_raw" >&2
+  clock=$(python3 -I -c '
+import math
+import sys
+
+try:
+    dt = float(sys.argv[1].replace("D", "e").replace("d", "e"))
+except ValueError:
+    raise SystemExit(2)
+if not math.isfinite(dt) or dt <= 0.0:
+    raise SystemExit(2)
+ratio = 86400.0 / dt
+# For this positive quotient, Fortran NINT is floor(x + 0.5).
+nint = math.floor(ratio + 0.5)
+print(nint, int(ratio == float(nint)), format(ratio, ".17g"))
+' "$dt_raw") || {
+    printf 'REFUSE_DAILY_CLOCK: rn_Dt=%s is not positive finite real\n' \
+      "$dt_raw" >&2
     return 68
   }
-  STEPS_PER_DAY=$((86400 / dt_int))
+  read -r nint exact ratio <<<"$clock"
+  [[ "$exact" == 1 ]] || {
+    printf 'REFUSE_DAILY_CLOCK: rn_Dt=%s gives 86400/rn_Dt=%s; NINT cadence=%s; exact integer required\n' \
+      "$dt_raw" "$ratio" "$nint" >&2
+    return 68
+  }
+  STEPS_PER_DAY=$nint
   itend=$(swg_namelist_value "$namelist" nn_itend)
   stock=$(swg_namelist_value "$namelist" nn_stock)
   write=$(swg_namelist_value "$namelist" nn_write)

@@ -1,1 +1,7 @@
 tests/validation/scm_oracle/*.nc binary
+
+# These acquisition patches retain source-file whitespace so patch(1) verifies
+# the operator/oracle inputs byte-exactly. Exempt only their embedded context.
+scripts/validate/ocean_fidelity/testcases/nemo_testcase_l1_swg/namelist_cfg_maddison_30d.patch whitespace=-blank-at-eol
+scripts/validate/ocean_fidelity/testcases/nemo_testcase_l1_swg/namelist_cfg_maddison_kt10.patch whitespace=-blank-at-eol
+scripts/validate/ocean_fidelity/testcases/nemo_testcase_l1_swg/usrdef_zgr_domsiz.patch whitespace=-blank-at-eol

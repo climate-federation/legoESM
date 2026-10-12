@@ -37,6 +37,9 @@ def test_tiny_cpu_driver_writes_daily_native_state_with_provenance(tmp_path):
     assert manifest["status"] == "complete"
     assert manifest["completed_days"] == 1
     assert manifest["transcendentals"] == "libm"
+    assert manifest["integration"] == "production-python-step-loop"
+    assert manifest["profile"] is None
+    assert manifest["scan_vs_python"] is None
     saved_manifest = json.loads((output / "manifest.json").read_text())
     assert saved_manifest["steps_per_day"] == 2
     assert not (output / "manifest.pending.json").exists()
@@ -50,3 +53,42 @@ def test_tiny_cpu_driver_writes_daily_native_state_with_provenance(tmp_path):
         assert saved["certified_policy"].item()
         assert all(np.all(np.isfinite(saved[name]))
                    for name in ("ssh_m", "u_m_s", "v_m_s"))
+
+
+def test_scanned_program_matches_nontrivial_python_steps_on_tiny_grid():
+    import jax
+    from legoesm.core.precision import PrecisionPolicy, set_policy
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        SWG_MADDISON_NAMELIST,
+        build_swg_card,
+        swg_surface_wind,
+    )
+    from legoesm.ocean.state import OceanSurfaceForcing
+
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    tiny = SWG_MADDISON_NAMELIST._replace(
+        nn_SWG=1, rn_Dt_s=50.0, nn_itend=3_456,
+        nn_write=1_728, nn_stock=1_728,
+        rn_modified_grav_m_s2=1.0e-6)
+    card = build_swg_card(tiny)
+    model = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
+    tau_u, tau_v = swg_surface_wind(tiny)
+    forcing = OceanSurfaceForcing(
+        tau_i_native=jax.numpy.asarray(tau_u, dtype=jax.numpy.float64),
+        tau_j_native=jax.numpy.asarray(tau_v, dtype=jax.numpy.float64),
+    )
+    state = driver.seed_steady_forcing_carry(
+        card.recipe.initial_state, forcing)
+    python_state = driver.run_python_steps(
+        model, state, card.dt_s, forcing, 3_456)
+    scanned_day = driver.build_scanned_stepper(
+        model, card.dt_s, forcing, 1_728)
+    scan_state = scanned_day(scanned_day(state))
+    jax.block_until_ready(scan_state.eta.data)
+
+    differences = driver.prognostic_differences(python_state, scan_state)
+    assert differences["within_atol"], json.dumps(differences, sort_keys=True)
+    assert differences["atol"] == 1.0e-12
+    assert np.any(np.asarray(python_state.u.data) != 0.0)
