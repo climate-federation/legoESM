@@ -1627,16 +1627,16 @@ CITATION_MAP = {
         3],
     # --- ORCA2 round 256: completed-stage fold association ----------
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/stprk3_stg.f90:779-802': [
-        ('! Set boundary conditions', 1),
-        ('ENDIF', 6),
+        ('!>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>', 4),
+        'ENDIF            ',
         24],
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/lbcnfd.f90:639-683': [
-        ("CASE ( 'U' )                               ! U-point", 1),
-        ('END DO   ;   END DO', 2),
+        ("CASE ( 'U' )                               ! U-point", 5),
+        ('END DO   ;   END DO', 5),
         45],
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/lbcnfd.f90:684-721': [
-        ("CASE ( 'V' )                               ! V-point", 1),
-        ('END DO   ;   END DO', 1),
+        ("CASE ( 'V' )                               ! V-point", 5),
+        ('END DO   ;   END DO', 6),
         38],
     # --- ORCA2 round 253: kt=8 midpoint-SSH failure boundary -------
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:489-493': [

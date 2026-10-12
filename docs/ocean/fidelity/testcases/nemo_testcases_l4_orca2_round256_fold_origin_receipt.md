@@ -83,8 +83,9 @@ updates at
 `ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/stprk3_stg.f90:779-802`.
 The compiled compact north-fold rules update the stored T pivot's right half
 at `ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/lbcnfd.f90:584-638`, the U
-pivot at `lbcnfd.f90:639-683`, and the reflected V row at
-`lbcnfd.f90:684-721`. The replay uses those compact rules rather than
+pivot at `ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/lbcnfd.f90:639-683`, and
+the reflected V row at
+`ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/lbcnfd.f90:684-721`. The replay uses those compact rules rather than
 replacing the complete stored north row from its southern neighbour.
 
 | field | raw fold-identity unequal | after compiled association | associated fold-band max vs NEMO |
