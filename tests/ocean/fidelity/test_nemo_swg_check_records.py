@@ -208,11 +208,12 @@ def test_daily_writer_derives_cadence_from_resolved_timestep():
 def test_daily_clock_refuses_fractional_nint_cadence(tmp_path):
     deck = TOOLS / "deck.sh"
 
-    def check(dt):
+    def check(dt, *, steps_per_day=432):
         namelist = tmp_path / "namelist_cfg"
         namelist.write_text(
-            f" rn_Dt = {dt}\n nn_itend = 12960\n"
-            " nn_stock = 432\n nn_write = 432\n")
+            f" rn_Dt = {dt}\n nn_itend = {30 * steps_per_day}\n"
+            f" nn_stock = {steps_per_day}\n"
+            f" nn_write = {steps_per_day}\n")
         return subprocess.run(
             ["bash", "-c",
              f'. "{deck}"; swg_require_daily_clock "$1" || exit $?; '
@@ -227,7 +228,7 @@ def test_daily_clock_refuses_fractional_nint_cadence(tmp_path):
     # Non-vacuity: the removed integer-truncation guard accepted this plant as
     # 86400 / int(50.5) = 1728, while NEMO NINT gives 1711.
     assert 86_400 % int(50.5) == 0
-    refused = check("50.5")
+    refused = check("50.5", steps_per_day=1_728)
     assert refused.returncode == 68
     assert "NINT cadence=1711; exact integer required" in refused.stderr
 
