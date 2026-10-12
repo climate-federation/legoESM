@@ -12,7 +12,9 @@ bar, checkpoint schedule, stabilizer, clipping, guard, configuration, or
 ## Provenance and review disposition
 
 The incoming tip was `9ae720dc7`. The frozen round-3 protocol and repaired
-instrument are commit `9259e21f386a8c8b02bb4dbd91f9f9945b28bb35`. All CPU
+timer are commit `9259e21f386a8c8b02bb4dbd91f9f9945b28bb35`; the final
+cold-pass sampler alignment and binding controls are commit
+`afd3350a6146cd09a0848f19e08a9af6cf32833f`. All CPU
 JSON files are under
 `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swggg_rounds/round3/` and stamp
 that clean commit, CPU fp64/libm, float64 state and geometry, the admitted kt=2
@@ -24,6 +26,14 @@ platform allocator because that allocator returned no memory statistics on
 the operator GPU. Cold and warm passes use distinct sampler objects, and a
 CPU-backed direct test executes that two-pass GPU control flow. The round-1
 GPU resource retraction remains unchanged.
+
+Two independent adversarial reviews were dispositioned. The instrument review
+confirmed the final JAX and `nvidia-smi` observations cover the same blocked
+cold pass, the distinct sampler lifecycle is binding, the production compiled
+reverse constructor is directly trace-tested, and unknown-card dispatch still
+fails explicitly. The evidence review independently reproduced all fifteen
+artifact hashes and table values, the timing-fit arithmetic, and the direct
+test suite; its two receipt inconsistencies were corrected before closure.
 
 ## GPU result carried into round 3
 
@@ -129,7 +139,7 @@ waived.
 ## Tests, controls, and OPEN
 
 - The shared gate direct tests, including allocator refusal, one-sampler-per-
-  pass control flow, and one-trace compiled timing, pass **25/25**. The isolated
+  pass control flow, and one-trace compiled timing, pass **26/26**. The isolated
   SWG production gradient-matrix row passes **1/1**.
 - The independent, stages-given, stages-chained, carried-state, and thirty-day
   SWG ladders remain respectively **50/50**, **338/338**, **338/338**,
