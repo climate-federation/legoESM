@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 import struct
 from pathlib import Path
 
@@ -12,6 +13,13 @@ _P = (Path(__file__).resolve().parents[3] / "scripts/validate/ocean_fidelity/"
       "testcases/nemo_testcase_l1_swg/check_records.py")
 _S = importlib.util.spec_from_file_location("swg_check_records", _P)
 cr = importlib.util.module_from_spec(_S); _S.loader.exec_module(cr)
+TOOLS = _P.parent
+SHIPPED_NAMELIST = Path(
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/tests/SWG/"
+    "EXPREF/namelist_cfg")
+SHIPPED_ZGR = Path(
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/tests/SWG/"
+    "MY_SRC/usrdef_zgr.F90")
 
 NI, NJ = 8, 6
 BOUNDS = (3, 3, 6, 4)
@@ -125,3 +133,73 @@ def test_daily_restart_passivity_refuses_one_changed_bit(tmp_path):
         ds["sshn"][:] = [np.nextafter(np.float64(1.0), np.float64(np.inf))]
     with pytest.raises(cr.Refusal, match="instrument changed"):
         cr.compare_restarts(run, ref, (24,))
+
+
+@pytest.mark.skipif(not SHIPPED_NAMELIST.is_file(),
+                    reason="shipped SWG deck not mounted")
+@pytest.mark.parametrize("name,expected", (
+    ("namelist_cfg_maddison_kt10.patch", {
+        "nn_SWG": "16", "rn_domsiz": "4000000", "rn_tau": "0.10",
+        "rn_modified_grav": "9.80665", "rn_rfr": "1.e-7",
+        "rn_beta": "2.e-11", "rn_f0": "0.7e-4", "rn_Uv": "2.0",
+        "rn_Lv": "10", "rn_Dt": "50.", "nn_itend": "10",
+        "nn_stock": "1", "nn_write": "1", "ln_meshmask": ".true.",
+        "sn_cfctl%l_runstat": ".TRUE.", "sn_cfctl%ptimincr": "1",
+    }),
+    ("namelist_cfg_maddison_30d.patch", {
+        "nn_SWG": "4", "rn_domsiz": "4000000", "rn_tau": "0.10",
+        "rn_modified_grav": "9.80665", "rn_rfr": "1.e-7",
+        "rn_beta": "2.e-11", "rn_f0": "0.7e-4", "rn_Uv": "2.0",
+        "rn_Lv": "10", "rn_Dt": "200.", "nn_itend": "12960",
+        "nn_stock": "432", "nn_write": "432", "ln_meshmask": ".true.",
+        "sn_cfctl%l_runstat": ".TRUE.", "sn_cfctl%ptimincr": "1",
+    }),
+))
+def test_maddison_patches_resolve_exact_operator_decks(tmp_path, name, expected):
+    target = tmp_path / "namelist_cfg"
+    target.write_bytes(SHIPPED_NAMELIST.read_bytes())
+    subprocess.run(
+        ["patch", "-s", "--fuzz=0", str(target)],
+        input=(TOOLS / name).read_bytes(), check=True)
+    subprocess.run(
+        ["patch", "-s", "--fuzz=0", str(target)],
+        input=(TOOLS / "namelist_meshmask.patch").read_bytes(), check=True)
+    values = {}
+    for raw in target.read_text().splitlines():
+        code = raw.split("!", 1)[0]
+        if "=" not in code:
+            continue
+        key, value = (part.strip() for part in code.split("=", 1))
+        if key in expected:
+            values[key] = value
+    assert values == expected
+
+
+@pytest.mark.skipif(not SHIPPED_ZGR.is_file(),
+                    reason="shipped SWG source not mounted")
+def test_source_case_patch_changes_only_the_two_upper_mask_limits(tmp_path):
+    target = tmp_path / "usrdef_zgr.F90"
+    target.write_bytes(SHIPPED_ZGR.read_bytes())
+    before = target.read_text().splitlines()
+    patch = TOOLS / "usrdef_zgr_domsiz.patch"
+    subprocess.run(
+        ["patch", "-s", "--fuzz=0", str(target)],
+        input=patch.read_bytes(), check=True)
+    after = target.read_text().splitlines()
+    changed = [(left.strip(), right.strip())
+               for left, right in zip(before, after, strict=True)
+               if left != right]
+    assert changed == [
+        ("zylim1 = 2010000._wp    ! 2010km",
+         "zylim1 = rn_domsiz + 10000._wp    ! SWG_DG: wet extent follows "
+         "rn_domsiz (+10 km)"),
+        ("zxlim1 = 2010000._wp    ! 2010km",
+         "zxlim1 = rn_domsiz + 10000._wp    ! SWG_DG: wet extent follows "
+         "rn_domsiz (+10 km)"),
+    ]
+
+
+def test_daily_writer_derives_cadence_from_resolved_timestep():
+    patch = (TOOLS / "stprk3_daily_entry_record.patch").read_text()
+    assert "NINT(rday / rn_Dt)" in patch
+    assert "MOD(kstp - nit000, 24)" not in patch

@@ -375,7 +375,7 @@ def _swg_production_case(label: str):
     from legoesm.core.precision import PrecisionPolicy, set_policy
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
     from legoesm.ocean.fidelity.nemo_testcase_recipe import (
-        SWG_NAMELIST, build_swg_card, swg_horizontal_coordinates,
+        build_swg_card, swg_surface_wind,
         validate_nemo_testcase_card_for_execution)
     from legoesm.ocean.state import OceanSurfaceForcing
 
@@ -387,13 +387,9 @@ def _swg_production_case(label: str):
     masks = _card_masks(card)
     model = LatLonCGridOceanModel(card.recipe.grid, card.recipe.z_coord,
                                   card.recipe.model_config)
-    src = swg_horizontal_coordinates()
-    # Compiled usrdef_sbc.f90:99-106, with the shipped theta=0 deck.  This is
-    # generated from the card, never read from an oracle stage/restart record.
-    tau_u = (-np.float64(SWG_NAMELIST.rn_tau_pa)
-             * np.cos(np.float64(np.pi) * src["gphit"]
-                      / np.float64(SWG_NAMELIST.rn_domsiz_m)))
-    tau_v = np.zeros_like(tau_u)
+    # Compiled usrdef_sbc.F90:84-91 fixes the cosine divisor at 2000 km.
+    # This is generated from the card, never read from an oracle record.
+    tau_u, tau_v = swg_surface_wind()
     forcing = OceanSurfaceForcing(
         tau_i_native=jax.numpy.asarray(tau_u, dtype=jax.numpy.float64),
         tau_j_native=jax.numpy.asarray(tau_v, dtype=jax.numpy.float64))

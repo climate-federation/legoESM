@@ -1657,6 +1657,10 @@ CITATION_MAP = {
         ('k_bot(ji,jj) = 0', 2), 30],
     'SWG_OMIP_L1/BLD/ppsrc/nemo/usrdef_sbc.f90:84-87': [
         'emp (:,:) = 0._wp', 'qsr (:,:) = 0._wp', 4],
+    'SWG_OMIP_L1/BLD/ppsrc/nemo/usrdef_sbc.f90:99-106': [
+        'ztauu =   REAL( rn_tau, wp ) * COS( rn_theta * rad )',
+        'vtau(ji,jj) = - ztauv * COS( rpi * gphit(ji,jj) / 2000000._wp)',
+        8],
     'SWG_OMIP_L1/BLD/ppsrc/nemo/dynvor.f90:250-251': [
         ('CASE( np_ENS )', 2),
         'CALL vor_ens( kt, Kmm, ntot, puu(:,:,:,Kmm)', 2],

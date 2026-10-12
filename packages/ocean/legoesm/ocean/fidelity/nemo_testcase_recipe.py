@@ -77,6 +77,9 @@ class NEMOTestcaseCard(NamedTuple):
     # that value; the step's j-neighbour statements read it there
     # (lbclnk.f90:2028-2034).
     j_periodic: bool = False
+    # Exact resolved input for parameterised cards.  Legacy cards leave this
+    # unset; SWG requires it at its public validation boundary.
+    resolved_namelist: object | None = None
 
 
 class GYRESurfaceBoundaryCondition(NamedTuple):
@@ -4057,6 +4060,20 @@ class SwgResolvedNamelist(NamedTuple):
 
 
 SWG_NAMELIST = SwgResolvedNamelist()
+# Maddison et al. double-gyre protocol selected by the user on 2026-10-12.
+# It is a second resolved namelist for the same card, not a second card.
+SWG_MADDISON_NAMELIST = SWG_NAMELIST._replace(
+    nn_SWG=16,
+    nn_itend=1_866_240,
+    nn_write=1_728,
+    nn_stock=1_866_240,
+    rn_Dt_s=50.0,
+    ln_meshmask=True,
+    rn_domsiz_m=4_000_000.0,
+    rn_tau_pa=0.10,
+    rn_modified_grav_m_s2=9.80665,
+    rn_Lv_m=10.0,
+)
 # Frozen transcription of the compiled SWE readers, expressed in card field
 # names.  This is intentionally independent of ``SwgResolvedNamelist._fields``
 # so the inventory test detects a removed field instead of deriving its own
@@ -4135,9 +4152,51 @@ SWG_DEVIATIONS: tuple[tuple[str, bool, bool, str], ...] = (
 SWG_UNMEASURED: tuple[str, ...] = ()
 
 
-def swg_horizontal_coordinates() -> dict[str, np.ndarray]:
-    """Transcribe compiled ``usrdef_nam/hgr`` for the shipped zero rotation."""
-    nl = SWG_NAMELIST
+_SWG_PARAMETERISED_FIELDS = frozenset({
+    "nn_SWG", "nn_itend", "nn_write", "nn_stock", "rn_Dt_s",
+    "ln_meshmask", "rn_domsiz_m", "rn_dx_m", "rn_tau_pa",
+    "rn_modified_grav_m_s2", "rn_rfr_s", "rn_beta_m_s", "rn_f0_s",
+    "rn_Uv_m_s", "rn_Lv_m",
+})
+_SWG_WIND_COSINE_SCALE_M = 2_000_000.0
+
+
+def validate_swg_namelist(namelist: SwgResolvedNamelist) -> None:
+    """Reject any resolved SWE selection outside the transcribed SWG program."""
+    unsupported = {
+        name: (getattr(SWG_NAMELIST, name), getattr(namelist, name))
+        for name in SwgResolvedNamelist._fields
+        if name not in _SWG_PARAMETERISED_FIELDS
+        and getattr(namelist, name) != getattr(SWG_NAMELIST, name)
+    }
+    if unsupported:
+        raise ValueError(f"unsupported SWG namelist values: {unsupported}")
+    positive_ints = ("nn_SWG", "nn_itend", "nn_write")
+    if any(type(getattr(namelist, name)) is not int
+           or getattr(namelist, name) <= 0 for name in positive_ints):
+        raise ValueError("SWG nn_SWG, nn_itend, and nn_write must be positive integers")
+    if type(namelist.nn_stock) is not int or namelist.nn_stock < 0:
+        raise ValueError("SWG nn_stock must be a non-negative integer")
+    positive_floats = (
+        "rn_Dt_s", "rn_domsiz_m", "rn_dx_m", "rn_modified_grav_m_s2",
+        "rn_Uv_m_s", "rn_Lv_m",
+    )
+    if any(not math.isfinite(float(getattr(namelist, name)))
+           or float(getattr(namelist, name)) <= 0.0 for name in positive_floats):
+        raise ValueError(f"SWG positive finite values required for {positive_floats}")
+    finite_nonnegative = ("rn_tau_pa", "rn_rfr_s", "rn_beta_m_s", "rn_f0_s")
+    if any(not math.isfinite(float(getattr(namelist, name)))
+           or float(getattr(namelist, name)) < 0.0 for name in finite_nonnegative):
+        raise ValueError(
+            f"SWG finite non-negative values required for {finite_nonnegative}")
+
+
+def swg_horizontal_coordinates(
+        namelist: SwgResolvedNamelist | None = None,
+) -> dict[str, np.ndarray]:
+    """Transcribe compiled ``usrdef_nam/hgr`` for a resolved SWG namelist."""
+    nl = SWG_NAMELIST if namelist is None else namelist
+    validate_swg_namelist(nl)
     if nl.rn_theta_deg != 0.0:
         raise ValueError("SWG round-1 card transcribes rn_theta = 0 only")
     spacing = nl.rn_dx_m / float(nl.nn_SWG)       # usrdef_nam.f90:154
@@ -4168,23 +4227,64 @@ def swg_horizontal_coordinates() -> dict[str, np.ndarray]:
     }
 
 
-def swg_wet_mask(source: dict[str, np.ndarray] | None = None) -> np.ndarray:
-    """Transcribe ``usrdef_zgr.f90:206-235`` for the shipped rectangle."""
-    src = source or swg_horizontal_coordinates()
-    wet = ((src["gphiv"] > 10_000.0) & (src["gphiv"] < 2_010_000.0)
-           & (src["glamu"] > 10_000.0) & (src["glamu"] < 2_010_000.0))
+def swg_wet_mask(
+        source: dict[str, np.ndarray] | None = None, *,
+        namelist: SwgResolvedNamelist | None = None,
+) -> np.ndarray:
+    """Transcribe SWG_DG ``usrdef_zgr.F90:195-206`` basin limits."""
+    nl = SWG_NAMELIST if namelist is None else namelist
+    validate_swg_namelist(nl)
+    src = source or swg_horizontal_coordinates(nl)
+    lower_m = 10_000.0
+    upper_m = nl.rn_domsiz_m + lower_m
+    wet = ((src["gphiv"] > lower_m) & (src["gphiv"] < upper_m)
+           & (src["glamu"] > lower_m) & (src["glamu"] < upper_m))
     neighbours = (np.roll(wet, 1, 0).astype(int) + np.roll(wet, -1, 0)
                   + np.roll(wet, 1, 1) + np.roll(wet, -1, 1))
     return (wet & (neighbours > 1)).astype(np.float64)
 
 
-def build_swg_card() -> NEMOTestcaseCard:
-    """Shipped SWG deck on the shared three-stage SWE RK3 program."""
+def swg_surface_wind(
+        namelist: SwgResolvedNamelist | None = None,
+        source: dict[str, np.ndarray] | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return compiled ``usrdef_sbc.F90:84-91`` U/V stresses."""
+    nl = SWG_NAMELIST if namelist is None else namelist
+    validate_swg_namelist(nl)
+    src = source or swg_horizontal_coordinates(nl)
+    theta_rad = np.deg2rad(np.float64(nl.rn_theta_deg))
+    cosine = np.cos(
+        np.float64(np.pi) * src["gphit"]
+        / np.float64(_SWG_WIND_COSINE_SCALE_M))
+    tau_u = (-np.float64(nl.rn_tau_pa) * np.cos(theta_rad) * cosine)
+    tau_v = (np.float64(nl.rn_tau_pa) * np.sin(theta_rad) * cosine)
+    return tau_u, tau_v
+
+
+def _swg_coriolis_arrays(
+        nl: SwgResolvedNamelist, src: dict[str, np.ndarray],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return model-layout U/V arrays from NEMO's native T/F statements."""
+    n, spacing = src["ni"], src["spacing_m"]
+    south_y = float(src["gphiv"][0, 0]) - spacing
+    f_v = np.concatenate([
+        np.full((1, n), nl.rn_f0_s + nl.rn_beta_m_s * abs(south_y)),
+        src["ff_f"],
+    ], axis=0)
+    f_u = np.concatenate([src["ff_t"], src["ff_t"][:, -1:]], axis=1)
+    return f_u, f_v
+
+
+def build_swg_card(
+        namelist: SwgResolvedNamelist | None = None,
+) -> NEMOTestcaseCard:
+    """One SWG card parameterised by its resolved namelist."""
     from legoesm.ocean.dynamics.latlon_cgrid_operators import compute_face_masks
 
-    nl = SWG_NAMELIST
-    src = swg_horizontal_coordinates()
-    wet_np = swg_wet_mask(src)
+    nl = SWG_NAMELIST if namelist is None else namelist
+    validate_swg_namelist(nl)
+    src = swg_horizontal_coordinates(nl)
+    wet_np = swg_wet_mask(src, namelist=nl)
     wet = jnp.asarray(wet_np, dtype=jnp.float64)
     n, spacing = src["ni"], src["spacing_m"]
     grid = create_beta_plane_cgrid_geometry(
@@ -4196,12 +4296,7 @@ def build_swg_card() -> NEMOTestcaseCard:
     )
     # Native NEMO V/F rows map to model v rows 1..n.  The extra south face is
     # a model-layout record, evaluated from the same |y| statement.
-    south_y = float(src["gphiv"][0, 0]) - spacing
-    f_v = np.concatenate([
-        np.full((1, n), nl.rn_f0_s + nl.rn_beta_m_s * abs(south_y)),
-        src["ff_f"],
-    ], axis=0)
-    f_u = np.concatenate([src["ff_t"], src["ff_t"][:, -1:]], axis=1)
+    f_u, f_v = _swg_coriolis_arrays(nl, src)
     grid = grid._replace(
         f_T=jnp.asarray(src["ff_t"]), f_u=jnp.asarray(f_u),
         f_v=jnp.asarray(f_v), ff_f=jnp.asarray(src["ff_f"]),
@@ -4300,22 +4395,37 @@ def build_swg_card() -> NEMOTestcaseCard:
         surface_boundary_condition="swg_analytic_wind",
         surface_input_operator="swe_stage3",
         unmeasured_features=SWG_UNMEASURED,
+        resolved_namelist=nl,
     )
-    validate_nemo_testcase_card(card)
+    _validate_swg_card(card, nl)
     return card
 
 
-def _validate_swg_card(card: NEMOTestcaseCard) -> None:
-    nl = SWG_NAMELIST
+def _validate_swg_card(
+        card: NEMOTestcaseCard,
+        namelist: SwgResolvedNamelist | None = None,
+) -> None:
+    nl = card.resolved_namelist if namelist is None else namelist
+    if not isinstance(nl, SwgResolvedNamelist):
+        raise ValueError("SWG-zco must retain its resolved namelist")
+    if card.resolved_namelist != nl:
+        raise ValueError("SWG-zco resolved namelist provenance drifted")
+    validate_swg_namelist(nl)
     if card.unmeasured_features != SWG_UNMEASURED:
         raise ValueError("SWG-zco must declare exactly SWG_UNMEASURED")
-    if (card.dt_s, card.n_steps, card.dummy_bottom_records) != (
-            nl.rn_Dt_s, nl.nn_itend, 1):
+    if card.dt_s <= 0.0 or card.n_steps <= 0 or card.dummy_bottom_records != 1:
         raise ValueError("SWG-zco run length or vertical record count drifted")
+    if (card.dt_s, card.n_steps) != (nl.rn_Dt_s, nl.nn_itend):
+        raise ValueError("SWG-zco does not carry its resolved namelist clock")
     if card.j_periodic or card.recipe.model_config.meridionally_periodic:
         raise ValueError("SWG-zco is closed in both horizontal directions")
-    if card.recipe.model_config.constants.g != nl.rn_modified_grav_m_s2:
+    if (card.recipe.model_config.constants.g != nl.rn_modified_grav_m_s2
+            or card.recipe.model_config.physics.constants.g
+            != nl.rn_modified_grav_m_s2):
         raise ValueError("SWG-zco must carry rn_modified_grav as model g")
+    if (card.recipe.model_config.constants.g
+            != card.recipe.model_config.physics.constants.g):
+        raise ValueError("SWG-zco dynamics and physics gravity constants differ")
     if card.recipe.model_config.outer_integrator != "swe_rk3":
         raise ValueError("SWG-zco must select the SWE RK3 stage dispatcher")
     vor = card.recipe.model_config.vorticity_scheme
@@ -4334,12 +4444,30 @@ def _validate_swg_card(card: NEMOTestcaseCard) -> None:
         raise ValueError("SWG-zco must select the compiled constant LDF branch")
     if card.recipe.model_config.lateral_viscosity.A_h != (
             0.5 * nl.rn_Uv_m_s * nl.rn_Lv_m):
-        raise ValueError("SWG-zco must state 0.5*rn_Uv*rn_Lv = 500 m2/s")
+        raise ValueError("SWG-zco must state 0.5*rn_Uv*rn_Lv")
     if card.recipe.model_config.bottom_drag.bottom_drag_r != nl.rn_rfr_s:
         raise ValueError("SWG-zco must state the compiled rn_rfr layer drag")
     wet = np.asarray(card.recipe.land_mask)
-    if wet.shape != (84, 84) or int(np.count_nonzero(wet)) != 6400:
-        raise ValueError("SWG-zco must carry the compiled 84x84 / 6400-wet mesh")
+    if wet.ndim != 2 or not np.any(wet) or np.all(wet):
+        raise ValueError("SWG-zco must carry a nonempty closed two-dimensional basin")
+    src = swg_horizontal_coordinates(nl)
+    expected = swg_wet_mask(src, namelist=nl)
+    if wet.shape != expected.shape or not np.array_equal(wet, expected):
+        raise ValueError("SWG-zco wet mask differs from its resolved rn_domsiz")
+    grid = card.recipe.grid
+    spacing = src["spacing_m"]
+    f_u, f_v = _swg_coriolis_arrays(nl, src)
+    if (not np.array_equal(np.asarray(grid.f_T), src["ff_t"])
+            or not np.array_equal(np.asarray(grid.ff_f), src["ff_f"])
+            or not np.array_equal(np.asarray(grid.f_u), f_u)
+            or not np.array_equal(np.asarray(grid.f_v), f_v)
+            or (grid.n_lat, grid.n_lon) != (src["nj"], src["ni"])
+            or any(not np.all(np.asarray(getattr(grid, name)) == spacing)
+                   for name in ("dx_T", "dy_T", "dx_u", "dy_u",
+                                "dx_v", "dy_v"))
+            or not np.all(np.asarray(grid.area_T) == spacing * spacing)
+            or not np.all(np.asarray(grid.area_q) == spacing * spacing)):
+        raise ValueError("SWG-zco grid differs from resolved dx/beta/f0 geometry")
     if int(card.recipe.z_coord.n_levels) != 1:
         raise ValueError("SWG-zco must carry one executed 500 m layer")
 
@@ -4376,8 +4504,11 @@ __all__ = (
     "TSUNAMI_DEVIATIONS",
     "TSUNAMI_UNMEASURED",
     "swg_horizontal_coordinates",
+    "swg_surface_wind",
     "swg_wet_mask",
     "SWG_NAMELIST",
+    "SWG_MADDISON_NAMELIST",
+    "validate_swg_namelist",
     "SWG_DEVIATIONS",
     "SWG_UNMEASURED",
     "vortex_smt_bathymetry",

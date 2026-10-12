@@ -10,10 +10,12 @@ import pytest
 from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
 from legoesm.ocean.fidelity import nemo_testcase_recipe as recipe
 from legoesm.ocean.fidelity.nemo_testcase_recipe import (
-    SWG_COMPILED_NAMELIST_READS, SWG_DEVIATIONS, SWG_NAMELIST, SWG_UNMEASURED,
+    SWG_COMPILED_NAMELIST_READS, SWG_DEVIATIONS, SWG_MADDISON_NAMELIST,
+    SWG_NAMELIST, SWG_UNMEASURED,
     SwgResolvedNamelist, build_swg_card, swg_horizontal_coordinates,
-    swg_wet_mask, validate_nemo_testcase_card,
+    swg_surface_wind, swg_wet_mask, validate_nemo_testcase_card,
     validate_nemo_testcase_card_for_execution,
+    validate_swg_namelist,
 )
 
 
@@ -155,6 +157,104 @@ def test_wet_mask_prediction_and_plant():
     assert (wet.sum(), jj.min(), jj.max(), ii.min(), ii.max()) == (6400, 1, 80, 1, 80)
     planted = wet.copy(); planted[1, 1] = 0.0
     assert planted.sum() == 6399
+
+
+def _card_digest(card):
+    """Apply the repository's certified-card digest contract to SWG."""
+    import hashlib
+
+    handle = hashlib.sha256()
+    handle.update(repr(card.recipe.model_config).encode())
+    state = card.recipe.initial_state
+    for name in ("T", "S", "u", "v", "eta", "uu_b", "vv_b", "land_mask",
+                 "u_mask", "v_mask"):
+        field = getattr(state, name, None)
+        handle.update(b"none" if field is None else np.asarray(
+            field.data, dtype=np.float64).tobytes())
+    grid = card.recipe.grid
+    for name in ("f_T", "f_u", "f_v", "ff_f", "dx_T", "dy_T"):
+        value = getattr(grid, name, None)
+        handle.update(b"none" if value is None else np.asarray(
+            value, dtype=np.float64).tobytes())
+    z_coord = card.recipe.z_coord
+    for name in ("dz_ref", "z_half_ref", "h_partial", "is_active",
+                 "bottom_level", "nemo_e3t_0"):
+        value = getattr(z_coord, name, None)
+        handle.update(b"none" if value is None else np.asarray(
+            value, dtype=np.float64).tobytes())
+    handle.update(np.asarray(card.recipe.land_mask, dtype=np.float64).tobytes())
+    handle.update(repr((
+        card.dt_s, card.n_steps, card.dummy_bottom_records,
+        card.bbl_adv_option, card.bbl_gamma_s, card.bbl_diffusive_option,
+        card.bbl_aht_m2_s, card.surface_boundary_condition,
+        card.surface_input_operator, card.transcendentals, card.precision_policy,
+        card.unmeasured_features, card.icebergs_enabled, card.iceberg_inputs,
+    )).encode())
+    return handle.hexdigest()[:16]
+
+
+def test_parameterisation_keeps_shipped_card_digest_byte_identical(card):
+    assert _card_digest(card) == "f9d46bfd08f23702"
+
+
+def test_maddison_geometry_honours_domsiz_and_fixed_wind_period():
+    src = swg_horizontal_coordinates(SWG_MADDISON_NAMELIST)
+    wet = swg_wet_mask(src, namelist=SWG_MADDISON_NAMELIST)
+    jj, ii = np.where(wet > 0.5)
+    assert (src["ni"], src["nj"], src["spacing_m"]) == (644, 644, 6250.0)
+    assert (wet.sum(), jj.min(), jj.max(), ii.min(), ii.max()) == (
+        409600, 2, 641, 2, 641)
+    synthetic = {"gphit": np.array([[0.0, 1_000_000.0, 2_000_000.0,
+                                      3_000_000.0, 4_000_000.0]])}
+    tau_u, tau_v = swg_surface_wind(SWG_MADDISON_NAMELIST, synthetic)
+    assert np.allclose(tau_u[0], [-0.1, 0.0, 0.1, 0.0, -0.1], atol=1.0e-16)
+    assert np.array_equal(tau_v, np.zeros_like(tau_v))
+
+
+def test_maddison_namelist_values_reach_one_parameterised_card():
+    tiny = SWG_MADDISON_NAMELIST._replace(
+        nn_SWG=1, nn_itend=2, nn_write=1, nn_stock=1, rn_Dt_s=200.0,
+        rn_dx_m=200_000.0, rn_Uv_m_s=3.0, rn_Lv_m=8.0,
+        rn_rfr_s=2.0e-7, rn_beta_m_s=3.0e-11, rn_f0_s=8.0e-5)
+    card = build_swg_card(tiny)
+    cfg = card.recipe.model_config
+    assert (card.dt_s, card.n_steps) == (200.0, 2)
+    assert card.recipe.land_mask.shape == (24, 24)
+    assert int(np.count_nonzero(card.recipe.land_mask)) == 400
+    assert cfg.constants.g == cfg.physics.constants.g == 9.80665
+    assert np.all(np.asarray(card.recipe.grid.dx_T) == 200_000.0)
+    assert cfg.lateral_viscosity.A_h == 12.0
+    assert cfg.bottom_drag.bottom_drag_r == 2.0e-7
+    assert np.asarray(card.recipe.grid.f_T)[0, 0] == (
+        tiny.rn_f0_s + tiny.rn_beta_m_s
+        * abs(swg_horizontal_coordinates(tiny)["gphit"][0, 0]))
+
+
+def test_public_validator_refuses_derived_swg_drift():
+    card = build_swg_card(SWG_MADDISON_NAMELIST._replace(nn_SWG=1))
+    cfg = card.recipe.model_config
+    bad_cfg = cfg._replace(
+        lateral_viscosity=cfg.lateral_viscosity._replace(A_h=11.0))
+    with pytest.raises(ValueError, match=r"rn_Uv\*rn_Lv"):
+        validate_nemo_testcase_card(
+            card._replace(recipe=card.recipe._replace(model_config=bad_cfg)))
+    wet = np.asarray(card.recipe.land_mask).copy()
+    wet[2, 2] = 0.0
+    with pytest.raises(ValueError, match="wet mask"):
+        validate_nemo_testcase_card(
+            card._replace(recipe=card.recipe._replace(land_mask=wet)))
+    f_u = np.asarray(card.recipe.grid.f_u).copy()
+    f_u[0, 0] = np.nextafter(f_u[0, 0], np.inf)
+    with pytest.raises(ValueError, match="dx/beta/f0"):
+        validate_nemo_testcase_card(card._replace(
+            recipe=card.recipe._replace(grid=card.recipe.grid._replace(f_u=f_u))))
+
+
+def test_swg_namelist_dispatch_refuses_unsupported_values():
+    with pytest.raises(ValueError, match="unsupported SWG namelist values"):
+        validate_swg_namelist(SWG_NAMELIST._replace(rn_theta_deg=1.0))
+    with pytest.raises(ValueError, match="positive finite"):
+        validate_swg_namelist(SWG_NAMELIST._replace(rn_Dt_s=0.0))
 
 
 def test_resolved_inventory_is_the_frozen_compiled_and_card_inventory():

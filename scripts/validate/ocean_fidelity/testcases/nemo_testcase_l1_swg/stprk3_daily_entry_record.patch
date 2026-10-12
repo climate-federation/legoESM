@@ -12,7 +12,7 @@
        !
        !                                 !==  RHS of the momentum Eq.  ==!
        !
-+      IF( MOD(kstp - nit000, 24) == 0 ) THEN
++      IF( MOD(kstp - nit000, NINT(rday / rn_Dt)) == 0 ) THEN
 +         CALL swg_open( kstp, 1, Nbb, Nbb, Naa, Nrhs, jpi, jpj, jpk, Nis0, Njs0, Nie0, Nje0 )
 +         CALL swg_w2( 'ssh_k', ssh(:,:,Nbb) )
 +         CALL swg_w2( 'u_k', uu(:,:,1,Nbb) )
