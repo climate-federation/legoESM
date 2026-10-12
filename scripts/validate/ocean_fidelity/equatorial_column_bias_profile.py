@@ -93,7 +93,10 @@ def load_nemo(gridt, mesh, rec, lon_lo, lon_hi, hw):
     for (oj, oi) in ((0, 0), (0, 1)):
         g = gphit[oj:oj + ny, oi:oi + nx]
         wet = tm0[oj:oj + ny, oi:oi + nx] == 1
-        if g.shape == lat.shape and np.max(np.abs(g - lat)[wet & (np.abs(lat) < 60)]) < 1e-3:
+        gl = np.asarray(m.variables["glamt"][0])[oj:oj + ny, oi:oi + nx]
+        dlon = np.abs(((gl - lon) + 180.0) % 360.0 - 180.0)
+        sel = wet & (np.abs(lat) < 60)
+        if g.shape == lat.shape and np.max(np.abs(g - lat)[sel]) < 1e-3 and np.max(dlon[sel]) < 1e-3:
             break
     else:
         raise SystemExit("NEMO file is not a recognised window of the mesh; refusing")
