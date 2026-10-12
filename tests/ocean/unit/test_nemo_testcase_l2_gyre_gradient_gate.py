@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import inspect
+import json
 import sys
 from pathlib import Path
 
@@ -198,6 +199,8 @@ def test_resource_classifier_is_fail_closed():
         "baseline_mib": 100.0,
         "peak_mib": 101.0,
         "samples": 2,
+        "reverse_transform": G.COMPILED_REVERSE_TRANSFORM,
+        "warm_reverse_timer_span": G.WARM_REVERSE_TIMER_SPAN,
     }
     assert G.classify_resources(1.0, True, True, **valid) == "CONFIRMED"
     assert G.classify_resources(
@@ -212,6 +215,16 @@ def test_resource_classifier_is_fail_closed():
         1.0, True, True, **{**valid, "peak_mib": 100.0}) == "VACUOUS"
     assert G.classify_resources(
         1.0, True, True, **{**valid, "samples": 1}) == "VACUOUS"
+    assert G.classify_resources(
+        1.0,
+        True,
+        True,
+        **{
+            **valid,
+            "reverse_transform": None,
+            "warm_reverse_timer_span": None,
+        },
+    ) == "RETRACTED"
 
 
 def test_device_memory_stats_requires_allocator_peak_and_live_bytes():
@@ -244,6 +257,16 @@ def _gpu_resource_row(schedule, jax_increment, smi_increment):
         "backend": "gpu",
         "schedule": schedule,
         "status": "CONFIRMED",
+        "loss": 1.0,
+        "gradient_finite": True,
+        "gradient_nonzero": True,
+        "cold_compile_and_reverse_wall_seconds": 2.0,
+        "warm_reverse_wall_seconds": 1.0,
+        "warm_reverse_timer_span": G.WARM_REVERSE_TIMER_SPAN,
+        "reverse_transform": G.COMPILED_REVERSE_TRANSFORM,
+        "memory_baseline_mib": 100.0,
+        "memory_peak_mib": 100.0 + jax_increment,
+        "memory_samples": 2,
         "jax_device_memory_increment_mib": jax_increment,
         "jax_device_peak_growth_mib": jax_increment,
         "nvidia_smi_memory_increment_mib": smi_increment,
@@ -273,7 +296,7 @@ def test_gpu_resource_suite_requires_both_orderings_and_plant_flips():
     assert "peak did not advance" in vacuous["reason"]
 
 
-def test_gpu_resource_suite_marks_old_pool_rows_vacuous():
+def test_gpu_resource_suite_retracts_rows_without_timer_stamps():
     rows = [
         {
             "card_selector": "SWG",
@@ -287,8 +310,81 @@ def test_gpu_resource_suite_marks_old_pool_rows_vacuous():
             ("none", 0.0), ("uniform", 6.0), ("binomial", 4.0))
     ]
     row = G.classify_resource_suite(rows)
-    assert row["status"] == "VACUOUS"
-    assert "jax_allocator" in row["reason"]
+    assert row["status"] == "RETRACTED"
+    assert "compiled-transform timer contract" in row["reason"]
+
+
+def _cpu_scaling_row(schedule, steps, seconds):
+    return {
+        "card_selector": "SWG",
+        "steps": steps,
+        "backend": "cpu",
+        "schedule": schedule,
+        "status": "CONFIRMED",
+        "loss": 1.0,
+        "gradient_finite": True,
+        "gradient_nonzero": True,
+        "cold_compile_and_reverse_wall_seconds": seconds + 1.0,
+        "warm_reverse_wall_seconds": seconds,
+        "warm_reverse_timer_span": G.WARM_REVERSE_TIMER_SPAN,
+        "reverse_transform": G.COMPILED_REVERSE_TRANSFORM,
+        "memory_baseline_mib": 100.0,
+        "memory_peak_mib": 101.0,
+        "memory_samples": 2,
+        "provenance": {"commit": "deadbeef"},
+    }
+
+
+def test_cpu_scaling_suite_gates_frozen_predictions_and_constant_time_plant():
+    rows = [
+        _cpu_scaling_row("uniform", steps, 0.01 * steps + 0.1)
+        for steps in G.SWG_SCALING_STEPS
+    ]
+    control = G.classify_scaling_suite(rows)
+    planted = G.classify_scaling_suite(rows, plant=True)
+    assert control["status"] == "CONFIRMED"
+    assert control["fit_seconds_per_step"] == pytest.approx(0.01)
+    assert control["checks"] == {
+        "positive_fitted_seconds_per_step": True,
+        "time_1440_exceeds_time_720": True,
+        "uniform_1440_to_720_ratio_in_preregistered_band": True,
+    }
+    assert planted["status"] == "REFUTED"
+    assert not any(planted["checks"].values())
+    args = G.parse_args([
+        "scaling-suite", "--card", "SWG", "--steps", "1440",
+        "--schedule", "uniform", "--expect-commit", "deadbeef",
+        "--output", "/tmp/unused-scaling-suite.json",
+        *sum((["--row", f"/tmp/{step}.json"]
+              for step in G.SWG_SCALING_STEPS), []),
+    ])
+    assert args.plant is None
+    assert len(args.row) == 5
+
+
+def test_resource_suite_executable_retracts_legacy_timing_rows(
+        tmp_path, monkeypatch):
+    paths = []
+    for schedule in G.SCHEDULES:
+        row = _gpu_resource_row(schedule, 10.0, 10.0)
+        row.pop("reverse_transform")
+        row.pop("warm_reverse_timer_span")
+        path = tmp_path / f"legacy_{schedule}.json"
+        path.write_text(json.dumps(row), encoding="utf-8")
+        paths.append(path)
+    output = tmp_path / "legacy_suite.json"
+    monkeypatch.setattr(
+        G, "require_measurement_stamp",
+        lambda _commit: {"commit": "deadbeef", "dirty": False},
+    )
+    argv = [
+        "resource-suite", "--card", "SWG", "--steps", "24",
+        "--expect-commit", "deadbeef", "--output", str(output),
+    ]
+    for path in paths:
+        argv.extend(("--row", str(path)))
+    assert G.main(argv) == 1
+    assert json.loads(output.read_text(encoding="utf-8"))["status"] == "RETRACTED"
 
 
 def test_swg_cli_admits_registered_timing_rows_and_refuses_other_counts():
@@ -316,6 +412,8 @@ def test_gpu_runner_disables_preallocation_and_covers_direct_1440_rows():
     assert "for steps in 1 24 720 1440" in source
     assert "for steps in 24 720 1440" in source
     assert "--plant uniform_label_uses_none" in source
+    assert "LAST_SUITE_STATUS" in source
+    assert "SWG_GRADGATE_GPU_SUITE" in source
 
 
 def test_gpu_allocator_contract_refuses_platform(monkeypatch):

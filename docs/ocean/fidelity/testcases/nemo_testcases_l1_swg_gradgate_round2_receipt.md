@@ -106,9 +106,9 @@ per-step production state is `1.2789769243681803e-13`.
 
 | schedule | cold whole-call (s; retracted as execution cost) | second whole-call (s; retracted) | baseline (MiB) | peak RSS footprint (MiB) | increment (MiB; diagnostic only) | samples | verdict |
 |---|---:|---:|---:|---:|---:|---:|---|
-| none | `46.8561` | `51.5346` | `25597.848` | `33868.055` | `8270.207` | 917 | **CONFIRMED** |
-| uniform | `26.7938` | `25.2765` | `2133.180` | `2422.047` | `288.867` | 496 | **CONFIRMED** |
-| binomial | `63.7616` | `57.9683` | `2072.852` | `2558.863` | `486.012` | 1142 | **CONFIRMED** |
+| none | `46.8561` | `51.5346` | `25597.848` | `33868.055` | `8270.207` | 917 | **TIMING/INCREMENT RETRACTED; PEAK RSS RETAINED** |
+| uniform | `26.7938` | `25.2765` | `2133.180` | `2422.047` | `288.867` | 496 | **TIMING/INCREMENT RETRACTED; PEAK RSS RETAINED** |
+| binomial | `63.7616` | `57.9683` | `2072.852` | `2558.863` | `486.012` | 1142 | **TIMING/INCREMENT RETRACTED; PEAK RSS RETAINED** |
 
 The resource JSON SHA-256 values are `08a38f338fbed5d5b6b21dc44baa00133fc4b71a784c9d224d6e2abfe04465b6`
 (none), `a8a7bd6edf793a93e3867c282b0bdbb76298593d4729317a7aa9176b59290b4c`
@@ -116,6 +116,10 @@ The resource JSON SHA-256 values are `08a38f338fbed5d5b6b21dc44baa00133fc4b71a78
 `1677eccc4cf51556f9131be67873db807433db34994db1e1c95c4735b382ec06`
 (binomial). These direct values replace the round-1 estimates; they do not
 alter or retroactively validate the extrapolation formulas.
+
+The round-4 executable audit now returns RETRACTED for this three-row suite:
+all three files predate the required compiled-transform and timer-span stamps.
+This makes the round-3 prose retraction binding in the shared tool.
 
 Relative to the round-1 peak-RSS extrapolations, the direct 1440-step values
 moved by `+4062.594 MiB` (`+13.63%`) for none, `+215.313 MiB` (`+9.76%`)

@@ -54,6 +54,13 @@ PERTURBATION_K = 1.0e-3
 SCHEDULE_RTOL = 1.0e-9
 SCHEDULE_ATOL = 1.0e-11
 SCHEDULES = ("none", "uniform", "binomial")
+SWG_SCALING_STEPS = (24, 96, 360, 720, 1440)
+COMPILED_REVERSE_TRANSFORM = "jax.jit(jax.value_and_grad(scalar_line))"
+WARM_REVERSE_TIMER_SPAN = (
+    "blocked execution of pre-jitted value_and_grad only; sampler "
+    "start and stop/join excluded"
+)
+UNIFORM_SCALING_RATIO_BOUNDS = (1.5, 2.5)
 GYRE_FIELDS = ("T", "S", "u", "v")
 SWG_FIELDS = ("ssh", "u", "v")
 GPU_NATIVE_POLICY_LABEL = (
@@ -885,27 +892,55 @@ def classify_resources(
     baseline_mib: float,
     peak_mib: float,
     samples: int,
+    reverse_transform: str | None = None,
+    warm_reverse_timer_span: str | None = None,
 ) -> str:
     """Apply every preregistered resource-row acceptance condition."""
+    if (
+        reverse_transform != COMPILED_REVERSE_TRANSFORM
+        or warm_reverse_timer_span != WARM_REVERSE_TIMER_SPAN
+    ):
+        return "RETRACTED"
+
+    def finite_number(value) -> bool:
+        return isinstance(value, (int, float)) and math.isfinite(value)
+
     sampler_visible = (
-        math.isfinite(baseline_mib)
-        and math.isfinite(peak_mib)
+        finite_number(baseline_mib)
+        and finite_number(peak_mib)
         and peak_mib > baseline_mib
+        and isinstance(samples, int)
         and samples >= 2
     )
     if not sampler_visible:
         return "VACUOUS"
     passed = (
-        math.isfinite(loss)
+        finite_number(loss)
         and gradient_finite
         and gradient_nonzero
-        and math.isfinite(cold_wall_s)
+        and finite_number(cold_wall_s)
         and cold_wall_s > 0.0
-        and math.isfinite(warm_wall_s)
+        and finite_number(warm_wall_s)
         and warm_wall_s > 0.0
         and sampler_visible
     )
     return "CONFIRMED" if passed else "REFUTED"
+
+
+def classify_resource_row(row: dict) -> str:
+    """Reclassify a stored row under the current fail-closed contract."""
+    return classify_resources(
+        row.get("loss"),
+        row.get("gradient_finite") is True,
+        row.get("gradient_nonzero") is True,
+        cold_wall_s=row.get("cold_compile_and_reverse_wall_seconds"),
+        warm_wall_s=row.get("warm_reverse_wall_seconds"),
+        baseline_mib=row.get("memory_baseline_mib"),
+        peak_mib=row.get("memory_peak_mib"),
+        samples=row.get("memory_samples"),
+        reverse_transform=row.get("reverse_transform"),
+        warm_reverse_timer_span=row.get("warm_reverse_timer_span"),
+    )
 
 
 def classify_resource_suite(rows: list[dict], *, plant: bool = False) -> dict:
@@ -916,6 +951,20 @@ def classify_resource_suite(rows: list[dict], *, plant: bool = False) -> dict:
         return {
             "status": "VACUOUS",
             "reason": "resource suite requires exactly none, uniform, and binomial",
+        }
+
+    row_statuses = {
+        schedule: classify_resource_row(row)
+        for schedule, row in by_schedule.items()
+    }
+    if any(status == "RETRACTED" for status in row_statuses.values()):
+        return {
+            "status": "RETRACTED",
+            "reason": (
+                "one or more resource rows predates the compiled-transform "
+                "timer contract"
+            ),
+            "row_statuses": row_statuses,
         }
 
     identity_fields = ("card_selector", "steps", "backend")
@@ -930,10 +979,11 @@ def classify_resource_suite(rows: list[dict], *, plant: bool = False) -> dict:
             "status": "VACUOUS",
             "reason": "dual-sampler ordering is a GPU-only resource verdict",
         }
-    if any(row.get("status") != "CONFIRMED" for row in rows):
+    if any(status != "CONFIRMED" for status in row_statuses.values()):
         return {
             "status": "VACUOUS",
             "reason": "one or more resource rows is not individually measurable",
+            "row_statuses": row_statuses,
         }
 
     keys = {
@@ -997,6 +1047,102 @@ def classify_resource_suite(rows: list[dict], *, plant: bool = False) -> dict:
         "evaluated_increments_mib": evaluated,
         "ordering": ordering,
         "plant": "uniform_label_uses_none_measurement" if plant else None,
+        "row_statuses": row_statuses,
+    }
+
+
+def classify_scaling_suite(rows: list[dict], *, plant: bool = False) -> dict:
+    """Gate the frozen five-window CPU wall-time scaling predictions."""
+    by_step = {row.get("steps"): row for row in rows}
+    if set(by_step) != set(SWG_SCALING_STEPS) or len(rows) != len(SWG_SCALING_STEPS):
+        return {
+            "status": "VACUOUS",
+            "reason": f"scaling suite requires exactly {SWG_SCALING_STEPS}",
+        }
+    identity_fields = ("card_selector", "schedule", "backend")
+    for name in identity_fields:
+        if len({row.get(name) for row in rows}) != 1:
+            return {
+                "status": "VACUOUS",
+                "reason": f"scaling rows disagree on {name}",
+            }
+    schedule = rows[0].get("schedule")
+    if rows[0].get("card_selector") != SWG_CARD or rows[0].get("backend") != "cpu":
+        return {
+            "status": "VACUOUS",
+            "reason": "scaling verdict requires the SWG CPU resource rows",
+        }
+    if schedule not in SCHEDULES:
+        return {"status": "VACUOUS", "reason": "unknown checkpoint schedule"}
+
+    row_statuses = {
+        str(step): classify_resource_row(row) for step, row in by_step.items()
+    }
+    if any(status == "RETRACTED" for status in row_statuses.values()):
+        return {
+            "status": "RETRACTED",
+            "reason": "one or more timing rows predates the repaired timer",
+            "row_statuses": row_statuses,
+        }
+    if any(status != "CONFIRMED" for status in row_statuses.values()):
+        return {
+            "status": "VACUOUS",
+            "reason": "one or more timing rows is not individually measurable",
+            "row_statuses": row_statuses,
+        }
+
+    times = {
+        step: float(by_step[step]["warm_reverse_wall_seconds"])
+        for step in SWG_SCALING_STEPS
+    }
+    evaluated = dict(times)
+    if plant:
+        evaluated = {step: times[SWG_SCALING_STEPS[0]] for step in SWG_SCALING_STEPS}
+
+    mean_steps = sum(SWG_SCALING_STEPS) / len(SWG_SCALING_STEPS)
+    mean_time = sum(evaluated.values()) / len(evaluated)
+    denominator = sum((step - mean_steps) ** 2 for step in SWG_SCALING_STEPS)
+    slope = sum(
+        (step - mean_steps) * (evaluated[step] - mean_time)
+        for step in SWG_SCALING_STEPS
+    ) / denominator
+    intercept = mean_time - slope * mean_steps
+    residual_sum = sum(
+        (evaluated[step] - (intercept + slope * step)) ** 2
+        for step in SWG_SCALING_STEPS
+    )
+    total_sum = sum(
+        (evaluated[step] - mean_time) ** 2 for step in SWG_SCALING_STEPS
+    )
+    r_squared = 1.0 - residual_sum / total_sum if total_sum > 0.0 else 0.0
+    checks = {
+        "positive_fitted_seconds_per_step": slope > 0.0,
+        "time_1440_exceeds_time_720": evaluated[1440] > evaluated[720],
+    }
+    ratio = evaluated[1440] / evaluated[720]
+    if schedule == "uniform":
+        lower, upper = UNIFORM_SCALING_RATIO_BOUNDS
+        checks["uniform_1440_to_720_ratio_in_preregistered_band"] = (
+            lower <= ratio <= upper
+        )
+    return {
+        "status": "CONFIRMED" if all(checks.values()) else "REFUTED",
+        "reason": (
+            "all preregistered wall-time scaling predictions passed"
+            if all(checks.values())
+            else "one or more preregistered wall-time scaling predictions failed"
+        ),
+        "schedule": schedule,
+        "warm_reverse_wall_seconds": times,
+        "evaluated_warm_reverse_wall_seconds": evaluated,
+        "fit_intercept_seconds": intercept,
+        "fit_seconds_per_step": slope,
+        "fit_r_squared": r_squared,
+        "ratio_1440_to_720": ratio,
+        "uniform_ratio_bounds": list(UNIFORM_SCALING_RATIO_BOUNDS),
+        "checks": checks,
+        "plant": "constant_time_rows" if plant else None,
+        "row_statuses": row_statuses,
     }
 
 
@@ -1100,11 +1246,8 @@ def measure_resources(card: str, n_steps: int, schedule: str, *,
         "schedule_primal_comparison": primal_comparison,
         "cold_compile_and_reverse_wall_seconds": cold_wall_s,
         "warm_reverse_wall_seconds": wall_s,
-        "warm_reverse_timer_span": (
-            "blocked execution of pre-jitted value_and_grad only; sampler "
-            "start and stop/join excluded"
-        ),
-        "reverse_transform": "jax.jit(jax.value_and_grad(scalar_line))",
+        "warm_reverse_timer_span": WARM_REVERSE_TIMER_SPAN,
+        "reverse_transform": COMPILED_REVERSE_TRANSFORM,
         "loss": loss_value,
         "gradient_finite": gradient_finite,
         "gradient_nonzero": gradient_nonzero,
@@ -1127,6 +1270,8 @@ def measure_resources(card: str, n_steps: int, schedule: str, *,
             baseline_mib=memory_baseline_mib,
             peak_mib=memory_peak_mib,
             samples=memory_samples,
+            reverse_transform=COMPILED_REVERSE_TRANSFORM,
+            warm_reverse_timer_span=WARM_REVERSE_TIMER_SPAN,
         ),
         "initial_boundary": (
             "admitted kt=2 stage-1 entry" if card == SWG_CARD
@@ -1182,6 +1327,24 @@ def measure_resource_suite(paths: list[Path], *, plant: bool = False) -> dict:
     return row
 
 
+def measure_scaling_suite(paths: list[Path], *, plant: bool = False) -> dict:
+    """Classify the five stored CPU timing rows without rerunning them."""
+    rows = [json.loads(path.read_text(encoding="utf-8")) for path in paths]
+    row = classify_scaling_suite(rows, plant=plant)
+    row.update({
+        "card_selector": rows[0].get("card_selector") if rows else None,
+        "steps": sorted(input_row.get("steps") for input_row in rows),
+        "backend": rows[0].get("backend") if rows else None,
+        "resource_rows": [str(path) for path in paths],
+        "input_provenance_commits": sorted({
+            commit for input_row in rows
+            if (commit := input_row.get("provenance", {}).get("commit"))
+            is not None
+        }),
+    })
+    return row
+
+
 def _git_output(*args: str) -> str:
     return subprocess.check_output(
         ["git", *args], cwd=_repo_root(), text=True).strip()
@@ -1206,12 +1369,14 @@ def write_result(path: Path, row: dict) -> None:
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "mode", choices=("agreement", "resources", "resource-suite"))
+        "mode", choices=(
+            "agreement", "resources", "resource-suite", "scaling-suite"))
     parser.add_argument("--card", required=True)
     parser.add_argument("--steps", type=int, required=True)
     parser.add_argument("--schedule", choices=SCHEDULES)
     parser.add_argument(
-        "--plant", choices=("broken_vjp", "uniform_label_uses_none"))
+        "--plant", choices=(
+            "broken_vjp", "uniform_label_uses_none", "constant_time"))
     parser.add_argument("--row", action="append", type=Path, default=[])
     parser.add_argument(
         "--transcendentals", choices=("libm", "native"), default="libm",
@@ -1222,7 +1387,7 @@ def parse_args(argv=None):
     args = parser.parse_args(argv)
     if args.mode == "resources" and args.schedule is None:
         parser.error("resources mode requires --schedule")
-    if args.mode != "resources" and args.schedule is not None:
+    if args.mode not in ("resources", "scaling-suite") and args.schedule is not None:
         parser.error(f"{args.mode} mode does not accept --schedule")
     if args.mode == "resources" and args.plant is not None:
         parser.error("resources mode does not accept --plant")
@@ -1234,6 +1399,16 @@ def parse_args(argv=None):
         if args.plant not in (None, "uniform_label_uses_none"):
             parser.error(
                 "resource-suite mode accepts only --plant uniform_label_uses_none")
+    elif args.mode == "scaling-suite":
+        if len(args.row) != len(SWG_SCALING_STEPS):
+            parser.error(
+                f"scaling-suite mode requires exactly {len(SWG_SCALING_STEPS)} "
+                "--row paths"
+            )
+        if args.schedule is None:
+            parser.error("scaling-suite mode requires --schedule")
+        if args.plant not in (None, "constant_time"):
+            parser.error("scaling-suite mode accepts only --plant constant_time")
     elif args.row:
         parser.error(f"{args.mode} mode does not accept --row")
     if args.steps <= 0:
@@ -1252,7 +1427,7 @@ def main(argv=None) -> int:
         row = measure_resources(
             args.card, args.steps, args.schedule,
             transcendentals=args.transcendentals)
-    else:
+    elif args.mode == "resource-suite":
         row = measure_resource_suite(
             args.row, plant=args.plant == "uniform_label_uses_none")
         require(args.card in CARD_STEPS, f"unknown gradient card {args.card!r}")
@@ -1260,6 +1435,14 @@ def main(argv=None) -> int:
             row["card_selector"] == args.card and row["steps"] == args.steps,
             "resource-suite CLI card/steps do not match input rows",
         )
+    else:
+        row = measure_scaling_suite(
+            args.row, plant=args.plant == "constant_time")
+        require(args.card == SWG_CARD, "scaling-suite is registered only for SWG")
+        require(row["card_selector"] == args.card,
+                "scaling-suite CLI card does not match input rows")
+        require(row["schedule"] == args.schedule,
+                "scaling-suite CLI schedule does not match input rows")
     row["provenance"] = provenance
     row["argv"] = list(sys.argv if argv is None else argv)
     write_result(args.output, row)

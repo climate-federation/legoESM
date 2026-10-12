@@ -109,12 +109,12 @@ blocked warm reverse pass while host RSS was sampled every 0.05 seconds.
 
 | schedule | steps | cold whole-call (s; retracted as execution cost) | second whole-call (s; retracted) | baseline (MiB) | peak RSS footprint (MiB) | increment (MiB; diagnostic only) | samples | schedule primal | verdict |
 |---|---:|---:|---:|---:|---:|---:|---:|---|---|
-| none | 24 | `26.1809` | `24.9504` | `2512.875` | `3486.109` | `973.234` | 462 | within contract, max `8.88e-16` | **CONFIRMED** |
-| uniform | 24 | `13.7324` | `10.5710` | `1739.145` | `1973.242` | `234.098` | 205 | within contract, max `8.88e-16` | **CONFIRMED** |
-| binomial | 24 | `23.6142` | `17.4020` | `2005.582` | `2466.270` | `460.688` | 335 | bitwise | **CONFIRMED** |
-| none | 720 | `52.7089` | `52.3562` | `14004.328` | `21904.895` | `7900.566` | 979 | within contract, max `7.82e-14` | **CONFIRMED** |
-| uniform | 720 | `33.8951` | `27.5407` | `1935.355` | `2206.734` | `271.379` | 535 | within contract, max `7.82e-14` | **CONFIRMED** |
-| binomial | 720 | `72.1908` | `59.3202` | `2104.953` | `2485.801` | `380.848` | 1154 | bitwise | **CONFIRMED** |
+| none | 24 | `26.1809` | `24.9504` | `2512.875` | `3486.109` | `973.234` | 462 | within contract, max `8.88e-16` | **TIMING/INCREMENT RETRACTED; PEAK RSS RETAINED** |
+| uniform | 24 | `13.7324` | `10.5710` | `1739.145` | `1973.242` | `234.098` | 205 | within contract, max `8.88e-16` | **TIMING/INCREMENT RETRACTED; PEAK RSS RETAINED** |
+| binomial | 24 | `23.6142` | `17.4020` | `2005.582` | `2466.270` | `460.688` | 335 | bitwise | **TIMING/INCREMENT RETRACTED; PEAK RSS RETAINED** |
+| none | 720 | `52.7089` | `52.3562` | `14004.328` | `21904.895` | `7900.566` | 979 | within contract, max `7.82e-14` | **TIMING/INCREMENT RETRACTED; PEAK RSS RETAINED** |
+| uniform | 720 | `33.8951` | `27.5407` | `1935.355` | `2206.734` | `271.379` | 535 | within contract, max `7.82e-14` | **TIMING/INCREMENT RETRACTED; PEAK RSS RETAINED** |
+| binomial | 720 | `72.1908` | `59.3202` | `2104.953` | `2485.801` | `380.848` | 1154 | bitwise | **TIMING/INCREMENT RETRACTED; PEAK RSS RETAINED** |
 
 The preregistered 1440-step estimates below are also **RETRACTED**: their wall
 times extrapolated a contaminated timer and their memory values extrapolated a
@@ -152,10 +152,11 @@ VACUOUS**. The runner left XLA preallocation on while the gate sampled
 device-global `nvidia-smi memory.used`; baseline and peak therefore described
 the approximately 24.7-GiB XLA pool, not live adjoint allocations. The actual
 reported increments were `none=0`, `uniform=6`, and `binomial=4` MiB at both
-24 and 720 steps. The round-2 executable audit now classifies both old
-three-row suites VACUOUS because they contain no JAX allocator counters and
-the sampler did not resolve positive schedule memory. No GPU memory magnitude
-or ordering is claimed from round 1.
+24 and 720 steps. The round-4 executable audit classifies both old three-row
+suites RETRACTED because they also lack the repaired compiled-transform and
+timer-span stamps; the round-2 audit already classified their memory
+instrument VACUOUS because they contain no JAX allocator counters. No GPU
+memory magnitude or ordering is claimed from round 1.
 
 ## Gate, tests, and operator work
 
