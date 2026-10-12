@@ -85,6 +85,7 @@ FALLBACK_MAX_FLUX_W_M2 = 1000.0
 from legoesm.land.canopy.config import CLMMLCanopyConfig
 from legoesm.land.canopy.interception import (
     intercept_rain,
+    max_canopy_water,
     wetted_fraction as interception_wetted_fraction,
 )
 from legoesm.land.surface_scheme import (
@@ -1172,12 +1173,28 @@ def _step_multilayer_land_impl(
     # ``transp_to_snow`` is the (traced) canopy-dew-over-snow mask.
     rho_w = constants.rho_water
     scheme_is_seb = isinstance(config.surface_scheme, SimpleSEBConfig)
+    # Canopy-air condensation (dew limit, two-leaf): the scheme netted L_soil * C
+    # out of lhflx, with L_soil = (1-w) L_v + w L_s.  The snow-covered share
+    # w * C frosts the pack (stays in lhflx, booked by the snow stream below and
+    # kept out of the leaf stream);
+    # the liquid share is added back so the evaporation streams see the gross
+    # surface latent flux, then deposited in the canopy-water store (overflow
+    # to the soil) and removed again from the latent flux the atmosphere gets.
+    _cond = surface_out.condensation
+    if _cond is None:
+        _cond_ice = _cond_liq = jnp.zeros_like(lhflx)
+    else:
+        _cond_ice = _w_ground_snow * _cond
+        _cond_liq = _cond - _cond_ice
+    lhflx = lhflx + _cond_liq * charged_latent_heat("two_leaf", T_surface)
     if scheme_is_seb:
         lhflx_ground = lhflx
         lhflx_transp = jnp.zeros_like(lhflx)
     elif surface_out.LE_soil is not None:
         lhflx_ground = surface_out.LE_soil
-        lhflx_transp = lhflx - lhflx_ground
+        # The leaf (transpiration / leaf dew) stream excludes the frost share
+        # of the canopy-air condensation, which the snow stream books itself.
+        lhflx_transp = lhflx + _cond_ice * _L_s_T - lhflx_ground
     else:  # canopy scheme without an exposed ground component (CLM-ML)
         lhflx_ground = jnp.zeros_like(lhflx)
         lhflx_transp = lhflx
@@ -1241,8 +1258,8 @@ def _step_multilayer_land_impl(
         else:
             _E_snow_ground = jnp.where(has_snow, _E_ground, 0.0)
             _dew_to_snow = jnp.where(transp_to_snow, lhflx_transp, 0.0)
-        snow_latent = _E_snow_ground * _L_s_T + _dew_to_snow
-        sublim_demand = _E_snow_ground + _dew_to_snow / _L_v_T
+        snow_latent = _E_snow_ground * _L_s_T + _dew_to_snow - _cond_ice * _L_s_T
+        sublim_demand = _E_snow_ground + _dew_to_snow / _L_v_T - _cond_ice
     soil_latent = lhflx - snow_latent
 
     # --- Snowpack sublimation / frost (L_s), pack-limited ---
@@ -1315,6 +1332,14 @@ def _step_multilayer_land_impl(
         # negative "rain" (numerical / refreeze deficit) so the column budget is
         # unchanged in that edge case.
         infil_rain = _throughfall + jnp.minimum(precip_rain, 0.0)
+        # Canopy-air dew condenses on the leaves: into the store, excess drips.
+        _W_dew = _W_int + _cond_liq * dt
+        _cap = max_canopy_water(_pai, config.interception)
+        infil_rain = infil_rain + jnp.maximum(_W_dew - _cap, 0.0) / dt
+        _W_int = jnp.minimum(_W_dew, _cap)
+    else:
+        # No canopy-water store: the dew drips straight to the soil.
+        infil_rain = infil_rain + _cond_liq
     if layered:
         # Rain-on-snow: the snow-covered fraction of the throughfall enters the
         # pack top as liquid at max(T_air, T_freeze), carrying its enthalpy
@@ -1865,7 +1890,7 @@ def _step_multilayer_land_impl(
         # Latent heat to the atmosphere = the evaporative/sublimation demand PLUS the
         # blowing-snow sublimation (gap 5): its L_s was charged to the surface energy
         # budget, so it must reach the atmosphere as latent heat (0 when bands off).
-        lhflx=lhflx_actual + blow_subl * _L_s_T,
+        lhflx=lhflx_actual + blow_subl * _L_s_T - _cond_liq * _L_v_T,
         tau_x=tau_x,
         tau_y=tau_y,
         lw_up=response_lw_up,
@@ -1883,7 +1908,7 @@ def _step_multilayer_land_impl(
         # L_s) + soil / plant-water evaporation (``soil_evap``, L_v) + the blowing-
         # snow sublimated SWE that left as vapor (gap 5) — so the vapor mass
         # balances the reported latent heat across BOTH phases.
-        surface_mass_flux=sublim_actual + soil_evap + blow_subl,
+        surface_mass_flux=sublim_actual + soil_evap + blow_subl - _cond_liq,
         # Land tile does not exchange salt with the ocean directly.
         salt_flux=jnp.zeros(ncol),
     )

@@ -330,6 +330,10 @@ def CanopyEvaporation(
             evleaf_sha_v > 0.0, evleaf_sha_v * (1.0 - fracsun_v) * factor_v, 0.0
         )
 
+        # Canopy-air condensation of the implicit air solve (dew limit, legoESM
+        # deviation) settles on the layer's leaves.
+        h2o_v = h2o_v + mlcanopy_inst.cond_profile[p, 1:] * mmh2o * dtime
+
         # Preserve unchanged values for inactive layers
         h2o_v = jnp.where(has_pai, h2o_v, h2ocan[p, 1:])
         h2ocan = h2ocan.at[p, 1:].set(h2o_v)

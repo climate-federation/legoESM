@@ -351,23 +351,47 @@ def _implicit_fps_jit(
         d2 = d2.at[ic].set(d2_ic)
 
     # ------------------------------------------------------------------
-    # Tridiagonal solve for tair and eair (mol/mol) — Fortran lines 327-329
+    # Tridiagonal solve for tair and eair (mol/mol) — Fortran lines 327-329,
+    # with a dew limit (legoESM deviation, not in CLM-ML): canopy air may not
+    # exceed saturation at its own temperature.  Each layer gets a condensation
+    # sink cond[i] [mol m-2 s-1] (water out of the air, latent heat lambda_*cond
+    # into it) sized so a supersaturated layer ends exactly on the saturation
+    # curve (linearised at the current tair).  The system is linear in cond, so
+    # the solution is the base solve plus cond times unit-source responses: the
+    # layer balances (air storage = fluxes in - out + sources) stay exact.
+    # Layers at or below saturation get none.
     # ------------------------------------------------------------------
-    tair_p, eair_p = tridiag_2eq(
-        a1[1 : n + 1],
-        b11[1 : n + 1],
-        b12[1 : n + 1],
-        c1[1 : n + 1],
-        d1[1 : n + 1],
-        a2[1 : n + 1],
-        b21[1 : n + 1],
-        b22[1 : n + 1],
-        c2[1 : n + 1],
-        d2[1 : n + 1],
-        n,
-    )
-    tair = tair.at[p, 1 : n + 1].set(jnp.stack(tair_p))
-    eair = eair.at[p, 1 : n + 1].set(jnp.stack(eair_p))
+    def _solve(r1, r2):
+        t, q = tridiag_2eq(a1[1 : n + 1], b11[1 : n + 1], b12[1 : n + 1], c1[1 : n + 1], r1,
+                           a2[1 : n + 1], b21[1 : n + 1], b22[1 : n + 1], c2[1 : n + 1], r2, n)
+        return jnp.stack(t), jnp.stack(q)
+
+    t_base, q_base = _solve(d1[1 : n + 1], d2[1 : n + 1])
+    _eye = jnp.eye(n)
+    # [j, i]: response of layer i to a unit condensation sink in layer j.
+    t_unit, q_unit = jax.vmap(_solve)(lambda_ / _cpair_p * _eye, -_eye)
+    cond = jnp.zeros(n)
+    flag = jnp.zeros(n, dtype=bool)
+    t_cur, q_cur = t_base, q_base
+    # Active-set passes: each re-linearises saturation at the current tair,
+    # drops layers whose condensation went negative and adds newly
+    # supersaturated ones, for n + 1 passes (a fixed, trace-time count).  Not
+    # proven to reach the consistent set (cond >= 0 where flagged, no other
+    # layer supersaturated); the dew-limit test checks that it does.
+    for _ in range(n + 1):
+        es_c, des_c = SatVap(t_cur)
+        qs_c, dqs_c = es_c / _pref_p, des_c / _pref_p
+        flag = (flag & (cond > 0.0)) | (q_cur > qs_c)
+        # Flagged row i: q_i - dqs_i * T_i = qs_i - dqs_i * t_cur_i.
+        m_rows = q_unit.T - dqs_c[:, None] * t_unit.T
+        r_rows = (qs_c - dqs_c * t_cur) - (q_base - dqs_c * t_base)
+        cond = jnp.linalg.solve(jnp.where(flag[:, None], m_rows, _eye),
+                                jnp.where(flag, r_rows, 0.0))
+        t_cur = t_base + t_unit.T @ cond
+        q_cur = q_base + q_unit.T @ cond
+    tair = tair.at[p, 1 : n + 1].set(t_cur)
+    eair = eair.at[p, 1 : n + 1].set(q_cur)
+    cond_layer = jnp.zeros(nlevmlcan + 1).at[1 : n + 1].set(cond)
 
     # ------------------------------------------------------------------
     # Soil surface temperature and vapor pressure — Fortran lines 332-333
@@ -541,6 +565,7 @@ def _implicit_fps_jit(
         shair_profile=shair.at[p, _sl].set(_shair_new[_sl]),
         etair_profile=etair.at[p, _sl].set(_etair_new[_sl]),
         stair_profile=stair.at[p, _sl].set(_stair_new[_sl]),
+        cond_profile=mlcanopy_inst.cond_profile.at[p].set(cond_layer),
     )
 
     # ------------------------------------------------------------------
@@ -591,6 +616,7 @@ def _implicit_fps_jit(
         avail_energy,
         storage_sh,
         storage_et,
+        cond_layer,
     )
     return mlcanopy_inst, aux
 
@@ -635,6 +661,7 @@ def ImplicitFluxProfileSolution(
             avail_energy,
             storage_sh,
             storage_et,
+            cond_layer,
         ) = aux
         mlcanopy_inst = ErrorCheck01(
             p,
@@ -663,6 +690,7 @@ def ImplicitFluxProfileSolution(
             et0,
             g0,
             mlcanopy_inst,
+            cond=cond_layer,
         )
     return mlcanopy_inst
 
@@ -797,6 +825,7 @@ def ErrorCheck02(
     et0: float,
     g0: float,
     mlcanopy_inst: mlcanopy_type,
+    cond: Array | None = None,
 ) -> mlcanopy_type:
     """
     Conservation error checks for the implicit flux-profile solution.
@@ -820,12 +849,18 @@ def ErrorCheck02(
         et0: Ground ET flux (mol H2O/m2/s).
         g0: Soil heat flux (W/m2).
         mlcanopy_inst: Multilayer canopy state container.
+        cond: Canopy-air condensation per layer (mol H2O/m2/s), the dew-limit
+            sink (legoESM deviation); its heat ``lambda_ * cond`` is an air
+            source.  None = zero.
 
     Returns:
         Unchanged ``mlcanopy_inst`` (or aborts on error).
     """
     n = int(mlcanopy_inst.ncan_canopy[p])
     ntop_p = int(mlcanopy_inst.ntop_canopy[p])
+    cond = np.zeros(len(shsrc)) if cond is None else np.asarray(cond)
+    shsrc = np.asarray(shsrc) + lambda_ * cond   # air sources: leaves + condensation
+    etsrc_air = np.asarray(etsrc) - cond
 
     # Pre-extract shair/etair as numpy — 2 syncs vs 4n in the loops below
     _shair = np.asarray(mlcanopy_inst.shair_profile[p])
@@ -836,7 +871,7 @@ def ErrorCheck02(
         err = (
             avail_energy[ic, isun]
             + avail_energy[ic, isha]
-            - shsrc[ic]
+            - (shsrc[ic] - lambda_ * cond[ic])
             - lambda_ * etsrc[ic]
             - stveg[ic]
         )
@@ -855,9 +890,9 @@ def ErrorCheck02(
             )
 
         if ic == 1:
-            err = storage_et[ic] - (et0 + etsrc[ic] - float(_etair[ic]))
+            err = storage_et[ic] - (et0 + etsrc_air[ic] - float(_etair[ic]))
         else:
-            err = storage_et[ic] - (float(_etair[ic - 1]) + etsrc[ic] - float(_etair[ic]))
+            err = storage_et[ic] - (float(_etair[ic - 1]) + etsrc_air[ic] - float(_etair[ic]))
         err = err * lambda_
         if abs(err) > 0.001:
             endrun(msg=" ERROR: ImplicitFluxProfileSolution: Latent heat layer conservation error")
@@ -870,7 +905,7 @@ def ErrorCheck02(
         endrun(msg=" ERROR: ImplicitFluxProfileSolution: Sensible heat canopy conservation error")
 
     # Canopy latent heat conservation — Fortran lines 468-475
-    sum_src_et = float(np.sum(etsrc[1 : ntop_p + 1]))
+    sum_src_et = float(np.sum(etsrc_air[1 : ntop_p + 1]))
     sum_storage_et = float(np.sum(storage_et[1 : ntop_p + 1]))
     err = ((et0 + sum_src_et - sum_storage_et) - float(_etair[ntop_p])) * lambda_
     if abs(err) > 0.001:

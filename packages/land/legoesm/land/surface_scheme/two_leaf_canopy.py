@@ -591,9 +591,16 @@ def compute_two_leaf_canopy_fluxes(
     Rn_Sh_d   = fluxes_per_col["Rn_Sh"]
     Rn_Soil_d = fluxes_per_col["Rn_Soil"]
 
-    LE_tot = LE_Sun + LE_Sh + LE_Soil
+    # Canopy-air condensation (dew limit): its vapour never reaches the
+    # atmosphere and its latent heat warms the canopy air, so the top-of-canopy
+    # fluxes are the surface sums shifted by L_c*C in opposite directions.  L_c
+    # is the snow-weighted ground charge, the phase the land step stores it in
+    # (``SurfaceFluxOutput.condensation``).
+    condensation = fluxes_per_col["condensation"]
+    L_cond = _bcast(lam if ground_latent_heat is None else ground_latent_heat)
+    LE_tot = LE_Sun + LE_Sh + LE_Soil - L_cond * condensation
     # Positive UPWARD: leaf/soil heat warms air; land loses H_tot in Rn-H-LE.
-    H_tot  = H_Sun  + H_Sh  + H_Soil
+    H_tot  = H_Sun  + H_Sh  + H_Soil + L_cond * condensation
     # GPP is GROSS carbon uptake (BEFORE leaf dark respiration).  The carbon
     # model (carbon_cycle.step_carbon) re-charges foliar MAINTENANCE
     # respiration r_maint_fol*C_fol separately, so exporting NET An here would
@@ -735,5 +742,6 @@ def compute_two_leaf_canopy_fluxes(
         residual_ext=residual_ext_d,
         stomatal_ratio=jnp.ones_like(T_soil_top),
         tau_mag=tau_mag,
-        L_soil=_bcast(lam if ground_latent_heat is None else ground_latent_heat),
+        L_soil=L_cond,
+        condensation=condensation,
     )

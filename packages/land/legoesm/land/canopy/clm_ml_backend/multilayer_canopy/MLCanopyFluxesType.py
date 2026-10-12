@@ -318,6 +318,9 @@ class mlcanopy_type(NamedTuple):
     shair_profile: jnp.ndarray  # Layer air sensible heat flux (W/m2)
     etair_profile: jnp.ndarray  # Layer air water vapor flux (mol H2O/m2/s)
     stair_profile: jnp.ndarray  # Layer air storage heat flux (W/m2)
+    # Layer canopy-air condensation (mol H2O/m2/s, >= 0): dew-limit sink of the
+    # implicit air solve (legoESM deviation), deposited on the layer's leaves.
+    cond_profile: jnp.ndarray
     mflx_profile: jnp.ndarray  # Layer momentum flux (m2/s2)
     gac_profile: jnp.ndarray  # Layer aerodynamic conductance (mol/m2/s)
     kc_eddy_profile: jnp.ndarray  # Layer eddy diffusivity, HF (m2/s)
@@ -676,6 +679,7 @@ def create_mlcanopy(begp: int, endp: int) -> mlcanopy_type:
         shair_profile=_r(np_, nl),
         etair_profile=_r(np_, nl),
         stair_profile=_r(np_, nl),
+        cond_profile=_r(np_, nl),
         mflx_profile=_r(np_, nl),
         gac_profile=_r(np_, nl),
         kc_eddy_profile=_r(np_, nl),

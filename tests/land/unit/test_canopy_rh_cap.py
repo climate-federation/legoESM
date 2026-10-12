@@ -73,14 +73,17 @@ _B = {'LAI': 0.40749812420560283, 'SZA': 76.43014401553582, 'La': 310.8468627929
       'd_leaf': 0.025, 'r_soil_surface': 469.3715799953223, 'fwet': 0.0}
 
 
-def test_saturated_canopy_column_converges_only_with_the_smooth_cap():
+def test_saturated_canopy_column_converges_with_a_smooth_or_hard_cap():
+    """This column used to converge only with the smooth cap: its canopy air
+    went supersaturated, where a hard RH cap is non-smooth.  The dew limit now
+    holds the air at saturation, so it converges with a near-hard cap too."""
     b = CanopyForcingBundle(**{k: jnp.asarray(v) for k, v in _B.items()})
     x0 = jnp.asarray(_X0)
     _, n, conv = solve_canopy_closure(x0, b, CanopyConfig())
     assert bool(conv) and int(n) < CanopyConfig().max_iters
     _, _, conv_hard = solve_canopy_closure(
         x0, b, CanopyConfig(rh_cap_smoothing_width=1e-7))
-    assert not bool(conv_hard)
+    assert bool(conv_hard)
 
 
 def test_width_reaches_both_the_solve_and_the_reported_fluxes():
