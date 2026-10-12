@@ -2,7 +2,8 @@
 
 Date: 2026-10-12
 
-Status: **LANDED; DIRECT 60-DAY CPU ROWS CONFIRMED; GPU OPERATOR ROWS OPEN**.
+Status: **LANDED; DIRECT 60-DAY CPU MEMORY FOOTPRINT CONFIRMED; WALL-TIME
+RETRACTED; GPU OPERATOR ROWS OPEN**.
 The round-1 GPU resource result is retracted in the executable and receipt,
 the replacement dual-sampler GPU instrument is fail-closed, and the sixty-day
 CPU agreement and three schedule-resource rows were measured directly. No
@@ -35,7 +36,16 @@ are `round1_gpu_resources_24step_retraction.json` and
 | 24 | `9.30692734647596e-16` | `2.1980290555407674e-06` | **CONFIRMED** | **VACUOUS, RETRACTED** |
 | 720 | `2.3070259307585205e-16` | `9.041792746430404e-07` | **CONFIRMED** | **VACUOUS, RETRACTED** |
 
-## Repaired GPU memory instrument
+## Repaired GPU memory instrument — allocator requirement retracted
+
+**ROUND-3 RETRACTION:** the round-2 requirement below that forced
+`XLA_PYTHON_CLIENT_ALLOCATOR=platform` is wrong. On the operator GPU that
+allocator makes `jax.devices()[0].memory_stats()` return `None`, so every
+resource row was correctly refused and no round-2 GPU memory result exists.
+Round 3 retains `XLA_PYTHON_CLIENT_PREALLOCATE=false`, refuses the platform
+allocator, and uses the default JAX allocator whose memory statistics were
+demonstrated by the operator. The sampler-thread restart defect in the
+round-2 executable is also fixed in round 3 by creating one sampler per pass.
 
 Every operator resource row now runs in a fresh process with
 `XLA_PYTHON_CLIENT_PREALLOCATE=false` and
@@ -77,7 +87,14 @@ SHA-256 is
 `bc6ad0ce85cb92559fcc0e081f95e4878ac1988f0eb007cf828bd3c985498f33`.
 The round-1 broken-VJP plant remains binding and unchanged.
 
-## Direct sixty-day resource rows
+## Direct sixty-day resource rows — wall-time retraction
+
+**ROUND-3 RETRACTION:** both wall-time columns below include retracing and
+compilation of an un-jitted `value_and_grad` transformation and are not reverse
+execution costs. The absolute peak RSS values remain valid total process
+footprints. The increments are retained only as diagnostics because their
+post-cold baselines already include retained compiler and allocator memory.
+Round 3 directly replaces the execution timings with a pre-jitted timer.
 
 Each 1440-step row ran in its own process. CPU host RSS was sampled during one
 blocked warm reverse after a cold compile and reverse. All losses and gradients
@@ -85,7 +102,7 @@ are finite and nonzero. The schedule primal is bitwise for binomial and within
 the frozen contract for none/uniform; their maximum difference from the
 per-step production state is `1.2789769243681803e-13`.
 
-| schedule | cold compile + reverse (s) | warm reverse (s) | baseline (MiB) | peak (MiB) | increment (MiB) | samples | verdict |
+| schedule | cold whole-call (s; retracted as execution cost) | second whole-call (s; retracted) | baseline (MiB) | peak RSS footprint (MiB) | increment (MiB; diagnostic only) | samples | verdict |
 |---|---:|---:|---:|---:|---:|---:|---|
 | none | `46.8561` | `51.5346` | `25597.848` | `33868.055` | `8270.207` | 917 | **CONFIRMED** |
 | uniform | `26.7938` | `25.2765` | `2133.180` | `2422.047` | `288.867` | 496 | **CONFIRMED** |
@@ -97,6 +114,12 @@ The resource JSON SHA-256 values are `08a38f338fbed5d5b6b21dc44baa00133fc4b71a78
 `1677eccc4cf51556f9131be67873db807433db34994db1e1c95c4735b382ec06`
 (binomial). These direct values replace the round-1 estimates; they do not
 alter or retroactively validate the extrapolation formulas.
+
+Relative to the round-1 peak-RSS extrapolations, the direct 1440-step values
+moved by `+4062.594 MiB` (`+13.63%`) for none, `+215.313 MiB` (`+9.76%`)
+for uniform, and `-82.098 MiB` (`-3.11%`) for binomial. These deltas compare
+total peak-RSS predictions with direct total peak-RSS observations; they do
+not rehabilitate the retracted increment interpretation.
 
 ## Training composition
 

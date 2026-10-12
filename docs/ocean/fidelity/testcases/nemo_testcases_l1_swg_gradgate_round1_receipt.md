@@ -92,12 +92,22 @@ use its pre-existing value contract (`rtol=1e-9`, `atol=1e-11`) while recording
 bit identity and maximum absolute difference. No derivative bar, physical
 input, objective, perturbation, or FD step was changed.
 
-## Host memory and wall time
+## Host memory and wall time — wall-time retraction
+
+**ROUND-3 RETRACTION:** both wall-time columns below are retained only as the
+historical duration of an un-jitted `value_and_grad` call. The supposed warm
+call retraced and compiled the transformed program, so neither column measures
+standalone reverse-executable cost. Round 3 replaces them with a pre-jitted
+blocked-execution timer. The absolute peak RSS columns remain valid total
+process-footprint observations. The baseline-subtracted increments are not
+adjoint-tape measurements because the cold call left compiler and allocator
+memory resident before the baseline. No wall-time or incremental-memory claim
+is carried forward from this table.
 
 Each row ran in a fresh process. A cold compiled reverse pass preceded one
 blocked warm reverse pass while host RSS was sampled every 0.05 seconds.
 
-| schedule | steps | cold compile + reverse (s) | warm reverse (s) | baseline (MiB) | peak (MiB) | increment (MiB) | samples | schedule primal | verdict |
+| schedule | steps | cold whole-call (s; retracted as execution cost) | second whole-call (s; retracted) | baseline (MiB) | peak RSS footprint (MiB) | increment (MiB; diagnostic only) | samples | schedule primal | verdict |
 |---|---:|---:|---:|---:|---:|---:|---:|---|---|
 | none | 24 | `26.1809` | `24.9504` | `2512.875` | `3486.109` | `973.234` | 462 | within contract, max `8.88e-16` | **CONFIRMED** |
 | uniform | 24 | `13.7324` | `10.5710` | `1739.145` | `1973.242` | `234.098` | 205 | within contract, max `8.88e-16` | **CONFIRMED** |
@@ -106,8 +116,10 @@ blocked warm reverse pass while host RSS was sampled every 0.05 seconds.
 | uniform | 720 | `33.8951` | `27.5407` | `1935.355` | `2206.734` | `271.379` | 535 | within contract, max `7.82e-14` | **CONFIRMED** |
 | binomial | 720 | `72.1908` | `59.3202` | `2104.953` | `2485.801` | `380.848` | 1154 | bitwise | **CONFIRMED** |
 
-The preregistered 1440-step estimates derived only from successful 720-step
-rows are:
+The preregistered 1440-step estimates below are also **RETRACTED**: their wall
+times extrapolated a contaminated timer and their memory values extrapolated a
+baseline-dependent increment. They remain as the failed prediction that the
+direct round-2 rows replaced.
 
 | schedule | estimated peak RSS (MiB) | estimated warm reverse (s) |
 |---|---:|---:|
