@@ -107,6 +107,41 @@ def fesom_zgeom(mesh) -> SimpleNamespace:
     )
 
 
+def fesom_avm_weighted_shear_production(uv_elem, dz_half_nod, elem_nodes,
+                                        elem_area, elem_wet_iface, kappaM_nod):
+    """NEMO ``zdf_sh2`` (zdfsh2.F90:78-94) on FESOM's element velocities.
+
+    NEMO forms the shear at its velocity points (u/v faces) with the viscosity
+    of the two T-points that face touches summed INSIDE the product, then
+    averages the face terms to the T-point over wet faces only (the
+    ``2 - umask*umask`` coast factor keeps a land face from diluting the
+    mean).  FESOM's velocity points are elements, so per element and
+    interface: ``avm_el * |du_el|^2 / dz_el^2`` with ``avm_el`` the mean of
+    the three vertex ``K_M`` and ``dz_el`` the mean vertex interface spacing;
+    the node value is the area-weighted mean over the node's elements that
+    are wet on both sides of the interface (the weights ``compute_vel_nodes``
+    uses for ``uv_node``).  Uniform ``K_M`` gives ``K_M`` times the node mean
+    of the element shear^2, the counterpart of NEMO's ``avm*(mi(S_u)+mj(S_v))``.
+
+    Shapes: ``uv_elem`` (elem, nlev, 2); ``dz_half_nod``/``kappaM_nod``
+    (nod, nlev-1); ``elem_nodes`` (elem, 3); ``elem_area`` (elem,);
+    ``elem_wet_iface`` (elem, nlev-1) bool.  Returns (nod, nlev-1).
+    """
+    # A node's level count is the MAX over its elements (fesom mesh
+    # nlevels_nod2D), so every vertex of an element wet at both layers is
+    # itself wet there: the plain vertex means never mix in dry K_M or dz.
+    dz_el = jnp.mean(dz_half_nod[elem_nodes], axis=1)
+    du = uv_elem[:, :-1, :] - uv_elem[:, 1:, :]
+    s2_el = jnp.sum(du * du, axis=-1) / (dz_el * dz_el)
+    w = jnp.where(elem_wet_iface, elem_area[:, None], 0.0)
+    avm_el = jnp.mean(kappaM_nod[elem_nodes], axis=1)
+    shape3 = (elem_nodes.shape[0], 3, w.shape[1])
+    zero = jnp.zeros(kappaM_nod.shape, dtype=kappaM_nod.dtype)
+    num = zero.at[elem_nodes].add(jnp.broadcast_to((w * avm_el * s2_el)[:, None, :], shape3))
+    den = zero.at[elem_nodes].add(jnp.broadcast_to(w[:, None, :], shape3))
+    return jnp.where(den > 0.0, num / jnp.where(den > 0.0, den, 1.0), 0.0)
+
+
 def make_tke_profiles_fesom(config: VerticalMixingConfig, eos_fn=None,
                             constants_config: ConstantsConfig = ConstantsConfig(),
                             iwm_fields=None, evd_config=None) -> Callable:
@@ -148,6 +183,7 @@ def make_tke_profiles_fesom(config: VerticalMixingConfig, eos_fn=None,
             "FESOM (no node-cloud TKE advection operator).")
     _iwm_cfg = (config.iwm if (getattr(config, "iwm", None) is not None
                                and config.iwm.enabled) else None)
+    _avm_face = getattr(cfg, "tke_shear_avm_weighting", "tpoint") == "nemo_face"
     _eice = int(getattr(cfg, "eice", 0))
     if _eice not in (0, 1, 2, 3):
         raise ValueError(
@@ -204,6 +240,20 @@ def make_tke_profiles_fesom(config: VerticalMixingConfig, eos_fn=None,
         tke_prev = jnp.asarray(inner.tke, dtype=jnp.float64)[:, 1:nlev]  # (nod, nlev-1)
         tke_seed = jnp.where(half_mask, jnp.maximum(tke_prev, cfg.tke_background),
                              cfg.tke_background)
+        p_sh2_fn = None
+        if _avm_face:
+            # Step-entry element velocities: the same level uv_node (the cell
+            # shear) is built from, as NEMO key_RK3 calls zdf_sh2(Nbb, Nbb).
+            uv_elem = jnp.asarray(inner.uv, dtype=jnp.float64)[:, :nlev]
+            e_mask = jnp.asarray(mesh.elem_layer_mask)[:, :nlev]
+            e_wet = e_mask[:, :-1] & e_mask[:, 1:]
+            uv_elem = jnp.where(e_mask[..., None], uv_elem, 0.0)
+            elem_nodes = jnp.asarray(mesh.elem_nodes)
+            elem_area = jnp.asarray(mesh.elem_area, dtype=jnp.float64)
+
+            def p_sh2_fn(kappaM):
+                return fesom_avm_weighted_shear_production(
+                    uv_elem, dz_half, elem_nodes, elem_area, e_wet, kappaM)
         eta_state = SimpleNamespace(eta=SimpleNamespace(data=state.eta.data),
                                     H_bathy=SimpleNamespace(data=state.H_bathy.data))
         out = tke_vertical_mixing(
@@ -218,6 +268,7 @@ def make_tke_profiles_fesom(config: VerticalMixingConfig, eos_fn=None,
             ice_frac=ice_frac,
             dz_ref=zgeom.dz_ref,
             jacobian=J,
+            p_sh2_fn=p_sh2_fn,
             **bn2_ladder_kwargs(cfg, zgeom, eta_state),
         )
         K_M = out.K_M
