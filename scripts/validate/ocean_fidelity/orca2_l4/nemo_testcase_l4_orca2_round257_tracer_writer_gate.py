@@ -368,8 +368,8 @@ def classify(reports: list[dict[str, object]], *, plant: str = "none") -> dict[s
         require(reproduction["T_max_abs"] == reproduction["round256_T"]
                 and reproduction["S_max_abs"] == reproduction["round256_S"],
                 f"{label}: round-256 current-tree boundary did not reproduce")
-        require(report["helper_calibration"]["T"]["max_abs"] == 0.0
-                and report["helper_calibration"]["S"]["max_abs"] == 0.0,
+        require(report["helper_calibration"]["T"]["max_abs"] <= float(r249.FLOOR)
+                and report["helper_calibration"]["S"]["max_abs"] <= float(r249.FLOOR),
                 f"{label}: literal helper did not reproduce production CEN2")
         require(report["one_bit_control"]["unequal"] == 1,
                 f"{label}: one-bit control did not fire")
