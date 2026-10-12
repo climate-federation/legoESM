@@ -119,10 +119,17 @@ def measure(deck_root: Path, frame_root: Path, spg_root: Path,
     complete = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
         _nemo_ws_test_hooks=r253._hooks(card))
+    # The boundary-association hook continues through the kt=8 stage and hits
+    # the already-registered live-W guard.  Reuse round 254's passive pattern:
+    # return the association-off substep trace, then replay the one seven-array
+    # statement offline below.
+    off_hooks = r253._hooks(card, substeps=True)._replace(
+        barotropic_atomic_fold_unit=False,
+        barotropic_external_mode_association=False,
+    )
     observer = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
-        _nemo_ws_test_hooks=r253._hooks(
-            card, substeps=True, boundary_trace=True))
+        _nemo_ws_test_hooks=off_hooks)
     arm = r245._barotropic_surface_mask_arm(
         card, True, v_only=True, t_pivot_north_neighbor=True)
     with arm:
@@ -140,11 +147,30 @@ def measure(deck_root: Path, frame_root: Path, spg_root: Path,
 
     substep = 1  # zero-based substep 2; its exit is substep 3's sshn_e.
     target = np.asarray(oracle["j002_ssha_e"], np.float64)
+    before_association = {
+        name: np.asarray(trace.substeps[trace_name][substep], np.float64)
+        for name, trace_name in (
+            ("u", "u_exit"), ("v", "v_exit"),
+            ("depth_u", "face_depth_u_exit"),
+            ("depth_v", "face_depth_v_exit"),
+            ("inverse_u", "r1_face_depth_u_exit"),
+            ("inverse_v", "r1_face_depth_v_exit"),
+            ("eta", "eta_continuity"),
+        )
+    }
+    from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
+        _nemo_external_mode_boundary_association,
+    )
+    post = jax.device_get(_nemo_external_mode_boundary_association(
+        *(before_association[name] for name in (
+            "u", "v", "depth_u", "depth_v", "inverse_u", "inverse_v",
+            "eta")),
+        card.recipe.grid,
+    ))
     boundary_values = {
         "continuity_output": np.asarray(
             trace.substeps["eta_continuity"][substep], np.float64),
-        "post_association": np.asarray(
-            trace.substeps["boundary_post_eta"][substep], np.float64),
+        "post_association": np.asarray(post[6], np.float64),
         "history_rotation": np.asarray(
             trace.substeps["eta_entry"][substep + 1], np.float64),
     }
