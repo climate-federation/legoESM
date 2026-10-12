@@ -1587,6 +1587,31 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 round 253: kt=8 midpoint-SSH failure boundary -------
+    'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:489-493': [
+        ('Extrapolate Sea Level at step jit+0.5', 1),
+        ('zsshp2_e(:,:) = za1 * sshn_e(:,:)', 1),
+        5],
+    'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:1496-1531': [
+        ('SUBROUTINE ts_bck_interp', 1),
+        ('END SUBROUTINE ts_bck_interp', 1),
+        36],
+    'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:546-558': [
+        ('Compute Sea Level at step jit+1', 1),
+        ('END DO   ;   END DO', 8),
+        13],
+    'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:655-718': [
+        ('Set next velocities:', 1),
+        ('END DO   ;   END DO', 13),
+        64],
+    'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/stprk3_stg.f90:138-178': [
+        ('ssha(:,:) = ssh (:,:,Kaa)', 1),
+        ('r3t(:,:,Kaa) = r2_3 * r3t(:,:,Kbb)', 1),
+        41],
+    'barotropic_latlon_cgrid.py:2006-2025': [
+        ('eta_mid = eta_c', 1),
+        ('za_i, eta_c, etab_c, etabb_c)', 1),
+        20],
     # --- ORCA2 round 252: direct post-drag surface-mask boundary ----
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/stp2d.f90:198-230': [
         ('Ue_rhs(ji,jj) = SUM( e3u_3d', 1),
