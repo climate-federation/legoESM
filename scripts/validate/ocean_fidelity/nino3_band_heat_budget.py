@@ -98,9 +98,11 @@ def main() -> int:
             ks = [kk for kk in range(zc.size) if zlo <= zc[kk] < zhi]
             num = 0.0; den = 0.0
             for kk in ks:
-                e3 = np.nan_to_num(np.asarray(trd["e3t"][k, kk], dtype=np.float64)[jo0:jo1 + 1, io0:io1 + 1])
-                tt = sum(np.nan_to_num(np.asarray(trd[v][k, kk], dtype=np.float64)[jo0:jo1 + 1, io0:io1 + 1])
-                         for v in ("ttrd_zdf", "ttrd_ldf"))
+                def rd(v):  # NEMO writes land as 1e20 fill, not NaN: drop both (ebw.nemo's guard)
+                    x = np.asarray(trd[v][k, kk], dtype=np.float64)[jo0:jo1 + 1, io0:io1 + 1]
+                    return np.where(np.isfinite(x) & (np.abs(x) < 1e15), x, 0.0)
+                e3 = rd("e3t")
+                tt = rd("ttrd_zdf") + rd("ttrd_ldf")
                 num += (tt * e3 * Ao).sum(); den += (e3 * Ao).sum()
             r["nemo"]["mix_trd"] = num / den * 86400.0
             for mod in ("ours", "nemo"):
