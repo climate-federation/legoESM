@@ -255,6 +255,8 @@ FILES = {
         _ORCA2_R230FOLDTRP / "ppsrc/nemo/domain.f90"),
     "ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90": (
         _ORCA2_R230FOLDTRP / "ppsrc/nemo/dynspg_ts.f90"),
+    "ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/stp2d.f90": (
+        _ORCA2_R230FOLDTRP / "ppsrc/nemo/stp2d.f90"),
     "ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dommsk.f90": (
         _ORCA2_R230FOLDTRP / "ppsrc/nemo/dommsk.f90"),
     "ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/lbcnfd.f90": (
@@ -1583,6 +1585,19 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 round 249: first private-unit growth boundary ---------
+    'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/stp2d.f90:194-230': [
+        ('!*  vertical averaging  *!', 1),
+        ('Ve_rhs(ji,jj) =  Ve_rhs(ji,jj) + r1_rho0', 1),
+        37],
+    'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:286-325': [
+        ('!*  remove 2D Coriolis trend  *!', 1),
+        ('zv_frc(ji,jj) = zv_frc(ji,jj) - zv_trd', 1),
+        40],
+    'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:1404-1464': [
+        ('SUBROUTINE dyn_drg_init', 2),
+        ('pv_RHSi(ji,jj) = pv_RHSi(ji,jj) + (r1_hv_0', 1),
+        61],
     # --- ORCA2 round 245: OMT-4 midpoint V-depth cancelling pair ---
     'ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/dommsk.f90:206-249': [
         '!  Ocean/land mask at u-, v-, and f-points   (computed from tmask)',
