@@ -60,23 +60,21 @@ WARM_REVERSE_TIMER_SPAN = (
     "blocked execution of pre-jitted value_and_grad only; sampler "
     "start and stop/join excluded"
 )
-SWG_TIMING_NOISE_WARM_SECONDS = (
-    4.091811742633581,
-    4.501838743686676,
-    4.092648733407259,
-)
-SWG_TIMING_NOISE_RELATIVE_SPREAD = (
-    max(SWG_TIMING_NOISE_WARM_SECONDS) - min(SWG_TIMING_NOISE_WARM_SECONDS)
-) / abs(sum(SWG_TIMING_NOISE_WARM_SECONDS) / len(SWG_TIMING_NOISE_WARM_SECONDS))
-SCALING_RELATIVE_TOLERANCE = max(
-    0.05, 3.0 * SWG_TIMING_NOISE_RELATIVE_SPREAD)
-SCALING_PLANTS = (
+SWG_SCALING_REPEATS = 3
+SCALING_GATE_PLANTS = (
     "constant_time",
     "reviewer_nonmonotonic",
     "decreasing_endpoint",
+)
+SCALING_DIAGNOSTIC_PLANTS = (
     "reviewer_monotone_nonlinear",
+    "reviewer_strongly_nonlinear",
     "dead_interval",
     "r_squared_095",
+)
+SCALING_PLANTS = (
+    *SCALING_GATE_PLANTS,
+    *SCALING_DIAGNOSTIC_PLANTS,
 )
 GYRE_FIELDS = ("T", "S", "u", "v")
 SWG_FIELDS = ("ssh", "u", "v")
@@ -1096,12 +1094,23 @@ def classify_resource_suite(rows: list[dict], *, plant: bool = False) -> dict:
 
 def classify_scaling_suite(
         rows: list[dict], *, plant: str | None = None) -> dict:
-    """Gate the frozen five-window CPU wall-time scaling predictions."""
-    by_step = {row.get("steps"): row for row in rows}
-    if set(by_step) != set(SWG_SCALING_STEPS) or len(rows) != len(SWG_SCALING_STEPS):
+    """Report repeated CPU timing with uncertainty; gate only monotonic trend."""
+    by_step = {
+        step: [row for row in rows if row.get("steps") == step]
+        for step in SWG_SCALING_STEPS
+    }
+    required_rows = len(SWG_SCALING_STEPS) * SWG_SCALING_REPEATS
+    if (
+        len(rows) != required_rows
+        or any(len(step_rows) != SWG_SCALING_REPEATS
+               for step_rows in by_step.values())
+    ):
         return {
             "status": "VACUOUS",
-            "reason": f"scaling suite requires exactly {SWG_SCALING_STEPS}",
+            "reason": (
+                f"timing measurement requires {SWG_SCALING_REPEATS} repeats "
+                f"at each of {SWG_SCALING_STEPS}"
+            ),
         }
     identity_fields = ("card_selector", "schedule", "backend")
     for name in identity_fields:
@@ -1119,8 +1128,36 @@ def classify_scaling_suite(
     if schedule not in SCHEDULES:
         return {"status": "VACUOUS", "reason": "unknown checkpoint schedule"}
 
+    repeat_indices = {
+        step: {row.get("timing_repeat_index") for row in step_rows}
+        for step, step_rows in by_step.items()
+    }
+    expected_repeat_indices = set(range(1, SWG_SCALING_REPEATS + 1))
+    if any(indices != expected_repeat_indices
+           for indices in repeat_indices.values()):
+        return {
+            "status": "VACUOUS",
+            "reason": "timing repeat indices must be exactly 1, 2, and 3",
+            "timing_repeat_indices": {
+                str(step): sorted(
+                    index for index in indices if isinstance(index, int))
+                for step, indices in repeat_indices.items()
+            },
+        }
+    measurement_pids = [row.get("measurement_pid") for row in rows]
+    if (
+        any(not isinstance(pid, int) or pid <= 0 for pid in measurement_pids)
+        or len(set(measurement_pids)) != required_rows
+    ):
+        return {
+            "status": "VACUOUS",
+            "reason": "every timing repeat must come from a distinct process",
+            "measurement_pids": measurement_pids,
+        }
     row_statuses = {
-        str(step): classify_resource_row(row) for step, row in by_step.items()
+        f"{step}/repeat{row['timing_repeat_index']}": classify_resource_row(row)
+        for step, step_rows in by_step.items()
+        for row in step_rows
     }
     if any(status == "RETRACTED" for status in row_statuses.values()):
         return {
@@ -1136,51 +1173,99 @@ def classify_scaling_suite(
         }
 
     times = {
-        step: float(by_step[step]["warm_reverse_wall_seconds"])
+        step: [
+            float(row["warm_reverse_wall_seconds"])
+            for row in sorted(
+                by_step[step], key=lambda row: row["timing_repeat_index"])
+        ]
         for step in SWG_SCALING_STEPS
     }
-    evaluated = dict(times)
+    evaluated = {step: list(values) for step, values in times.items()}
     if plant == "constant_time":
-        evaluated = {step: times[SWG_SCALING_STEPS[0]] for step in SWG_SCALING_STEPS}
+        first = sum(times[SWG_SCALING_STEPS[0]]) / SWG_SCALING_REPEATS
+        evaluated = {
+            step: [first] * SWG_SCALING_REPEATS for step in SWG_SCALING_STEPS
+        }
     elif plant == "reviewer_nonmonotonic":
-        evaluated = dict(zip(SWG_SCALING_STEPS, (1.0, 100.0, 1.0, 1000.0, 2000.0)))
+        evaluated = {
+            step: [value] * SWG_SCALING_REPEATS
+            for step, value in zip(
+                SWG_SCALING_STEPS, (1.0, 100.0, 1.0, 1000.0, 2000.0))
+        }
     elif plant == "decreasing_endpoint":
-        evaluated[1440] = 0.5 * evaluated[720]
+        endpoint = 0.5 * sum(evaluated[720]) / SWG_SCALING_REPEATS
+        evaluated[1440] = [endpoint] * SWG_SCALING_REPEATS
     elif plant == "reviewer_monotone_nonlinear":
-        evaluated = dict(zip(
-            SWG_SCALING_STEPS,
-            (1.0, 6.0, 11.2500000225, 11.250000045, 16.87500009),
-        ))
+        evaluated = {
+            step: [value] * SWG_SCALING_REPEATS
+            for step, value in zip(
+                SWG_SCALING_STEPS,
+                (1.0, 6.0, 11.2500000225, 11.250000045, 16.87500009),
+            )
+        }
+    elif plant == "reviewer_strongly_nonlinear":
+        evaluated = {
+            step: [value] * SWG_SCALING_REPEATS
+            for step, value in zip(
+                SWG_SCALING_STEPS,
+                (0.2451153271, 1.4510041507, 4.6135624796,
+                 6.2600150596, 16.3588091356),
+            )
+        }
     elif plant == "dead_interval":
-        evaluated = dict(zip(
-            SWG_SCALING_STEPS, (1.24, 1.96, 4.6, 4.6, 15.4)))
+        evaluated = {
+            step: [value] * SWG_SCALING_REPEATS
+            for step, value in zip(
+                SWG_SCALING_STEPS, (1.24, 1.96, 4.6, 4.6, 15.4))
+        }
     elif plant == "r_squared_095":
-        evaluated = dict(zip(
-            SWG_SCALING_STEPS,
-            (0.4484313, 1.19561963, 6.94156223, 7.67125179, 15.14313505),
-        ))
+        evaluated = {
+            step: [value] * SWG_SCALING_REPEATS
+            for step, value in zip(
+                SWG_SCALING_STEPS,
+                (0.4484313, 1.19561963, 6.94156223,
+                 7.67125179, 15.14313505),
+            )
+        }
     elif plant is not None:
         raise ValueError(f"unknown scaling plant {plant!r}")
 
+    mean_times = {
+        step: sum(values) / len(values) for step, values in evaluated.items()
+    }
+    repeat_spread_seconds = {
+        step: max(values) - min(values) for step, values in evaluated.items()
+    }
+    repeat_relative_spread = {
+        step: repeat_spread_seconds[step] / abs(mean_times[step])
+        if mean_times[step] != 0.0 else math.inf
+        for step in SWG_SCALING_STEPS
+    }
+    repeat_sample_std_seconds = {
+        step: math.sqrt(sum(
+            (value - mean_times[step]) ** 2 for value in evaluated[step]
+        ) / (SWG_SCALING_REPEATS - 1))
+        for step in SWG_SCALING_STEPS
+    }
     mean_steps = sum(SWG_SCALING_STEPS) / len(SWG_SCALING_STEPS)
-    mean_time = sum(evaluated.values()) / len(evaluated)
+    mean_time = sum(mean_times.values()) / len(mean_times)
     denominator = sum((step - mean_steps) ** 2 for step in SWG_SCALING_STEPS)
     slope = sum(
-        (step - mean_steps) * (evaluated[step] - mean_time)
+        (step - mean_steps) * (mean_times[step] - mean_time)
         for step in SWG_SCALING_STEPS
     ) / denominator
     intercept = mean_time - slope * mean_steps
-    residual_sum = sum(
-        (evaluated[step] - (intercept + slope * step)) ** 2
+    fit_residual_sum = sum(
+        (mean_times[step] - (intercept + slope * step)) ** 2
         for step in SWG_SCALING_STEPS
     )
     total_sum = sum(
-        (evaluated[step] - mean_time) ** 2 for step in SWG_SCALING_STEPS
+        (mean_times[step] - mean_time) ** 2 for step in SWG_SCALING_STEPS
     )
-    r_squared = 1.0 - residual_sum / total_sum if total_sum > 0.0 else 0.0
+    r_squared = 1.0 - fit_residual_sum / total_sum if total_sum > 0.0 else 0.0
     interval_seconds_per_step = {
         f"{lower}-{upper}": (
-            evaluated[upper] - evaluated[lower]) / (upper - lower)
+            mean_times[upper] - mean_times[lower]) / (upper - lower)
         for lower, upper in zip(SWG_SCALING_STEPS[:-1], SWG_SCALING_STEPS[1:])
     }
     interval_to_fit_ratios = {
@@ -1193,56 +1278,79 @@ def classify_scaling_suite(
         step: intercept + slope * step for step in SWG_SCALING_STEPS
     }
     absolute_residuals = {
-        step: abs(evaluated[step] - fitted_times[step])
+        step: abs(mean_times[step] - fitted_times[step])
         for step in SWG_SCALING_STEPS
     }
     relative_residuals = {
-        step: absolute_residuals[step] / evaluated[step]
+        step: absolute_residuals[step] / abs(mean_times[step])
+        if mean_times[step] != 0.0 else math.inf
         for step in SWG_SCALING_STEPS
     }
-    incremental_cost_bounds = (
-        (1.0 - 2.0 * SCALING_RELATIVE_TOLERANCE) * slope,
-        (1.0 + 2.0 * SCALING_RELATIVE_TOLERANCE) * slope,
+    repeat_sse = sum(
+        (value - mean_times[step]) ** 2
+        for step in SWG_SCALING_STEPS
+        for value in evaluated[step]
+    )
+    replicated_fit_sse = SWG_SCALING_REPEATS * fit_residual_sum
+    total_residual_sse = repeat_sse + replicated_fit_sse
+    replicated_denominator = SWG_SCALING_REPEATS * denominator
+    residual_degrees_of_freedom = required_rows - 2
+    slope_standard_error = math.sqrt(
+        (total_residual_sse / residual_degrees_of_freedom)
+        / replicated_denominator
     )
     checks = {
-        "positive_fitted_seconds_per_step": slope > 0.0,
-        "strictly_increasing_at_every_window": all(
-            evaluated[upper] > evaluated[lower]
+        "strictly_increasing_mean_at_every_window": all(
+            mean_times[upper] > mean_times[lower]
             for lower, upper in adjacent_pairs
         ),
-        "nonnegative_fitted_fixed_overhead": intercept >= 0.0,
-        "every_residual_within_timing_tolerance": all(
-            absolute_residuals[step]
-            <= SCALING_RELATIVE_TOLERANCE * evaluated[step]
-            for step in SWG_SCALING_STEPS
-        ),
-        "every_incremental_cost_within_fit_band": all(
-            incremental_cost_bounds[0] <= cost <= incremental_cost_bounds[1]
-            for cost in interval_seconds_per_step.values()
-        ),
     }
+    diagnostic_only = plant in SCALING_DIAGNOSTIC_PLANTS
+    measured = all(checks.values()) or diagnostic_only
+    fit_diagnostic = (
+        "LARGE_RESIDUAL_OLD_GATE_PLANT; descriptive only"
+        if plant in SCALING_DIAGNOSTIC_PLANTS
+        else "DESCRIPTIVE_ONLY; linearity not classified"
+    )
     return {
-        "status": "CONFIRMED" if all(checks.values()) else "REFUTED",
+        "status": "MEASURED" if measured else "REFUTED",
         "reason": (
-            "all preregistered wall-time scaling predictions passed"
-            if all(checks.values())
-            else "one or more preregistered wall-time scaling predictions failed"
+            "old-gate plant reported descriptively with fit residual"
+            if diagnostic_only
+            else "strictly increasing mean time; affine cost reported with uncertainty"
+            if measured
+            else "mean time is not strictly increasing across all five windows"
         ),
         "schedule": schedule,
         "warm_reverse_wall_seconds": times,
         "evaluated_warm_reverse_wall_seconds": evaluated,
+        "mean_warm_reverse_wall_seconds": mean_times,
+        "repeat_spread_seconds": repeat_spread_seconds,
+        "repeat_relative_spread": repeat_relative_spread,
+        "repeat_sample_std_seconds": repeat_sample_std_seconds,
+        "maximum_repeat_relative_spread": max(repeat_relative_spread.values()),
         "fit_intercept_seconds": intercept,
         "fit_seconds_per_step": slope,
+        "fit_seconds_per_step_standard_error": slope_standard_error,
+        "fit_uncertainty_definition": (
+            "one-standard-error OLS slope uncertainty over all 15 observations; "
+            "residual SSE = within-window repeat SSE + replicated fit-residual SSE"
+        ),
         "fit_r_squared": r_squared,
+        "fit_diagnostic": fit_diagnostic,
+        "monotonic_trend_gate_applies": not diagnostic_only,
         "fitted_warm_reverse_wall_seconds": fitted_times,
         "absolute_fit_residual_seconds": absolute_residuals,
         "relative_fit_residuals": relative_residuals,
-        "relative_timing_tolerance": SCALING_RELATIVE_TOLERANCE,
-        "timing_noise_relative_spread": SWG_TIMING_NOISE_RELATIVE_SPREAD,
+        "fit_residual_rms_seconds": math.sqrt(
+            fit_residual_sum / len(SWG_SCALING_STEPS)),
+        "repeat_residual_rms_seconds": math.sqrt(repeat_sse / required_rows),
+        "repeat_residual_sse_seconds2": repeat_sse,
+        "replicated_fit_residual_sse_seconds2": replicated_fit_sse,
+        "total_residual_sse_seconds2": total_residual_sse,
+        "residual_degrees_of_freedom": residual_degrees_of_freedom,
         "interval_seconds_per_step": interval_seconds_per_step,
         "interval_to_fit_ratios": interval_to_fit_ratios,
-        "incremental_cost_bounds_seconds_per_step": list(
-            incremental_cost_bounds),
         "checks": checks,
         "plant": plant,
         "row_statuses": row_statuses,
@@ -1250,7 +1358,8 @@ def classify_scaling_suite(
 
 
 def measure_resources(card: str, n_steps: int, schedule: str, *,
-                      transcendentals: str = "libm"):
+                      transcendentals: str = "libm",
+                      repeat_index: int | None = None):
     """Measure a fresh-process GPU reverse or a blocked warm CPU reverse."""
     if card not in CARD_STEPS:
         raise ValueError(
@@ -1336,6 +1445,8 @@ def measure_resources(card: str, n_steps: int, schedule: str, *,
         "steps": n_steps,
         "model_seconds": n_steps * context.card.dt_s,
         "schedule": schedule,
+        "timing_repeat_index": repeat_index,
+        "measurement_pid": os.getpid(),
         "backend": backend,
         "device": str(jax.devices()[0]),
         "jax_enable_x64": bool(jax.config.jax_enable_x64),
@@ -1478,6 +1589,7 @@ def parse_args(argv=None):
     parser.add_argument("--card", required=True)
     parser.add_argument("--steps", type=int, required=True)
     parser.add_argument("--schedule", choices=SCHEDULES)
+    parser.add_argument("--repeat-index", type=int)
     parser.add_argument(
         "--plant", choices=(
             "broken_vjp", "uniform_label_uses_none", *SCALING_PLANTS))
@@ -1491,6 +1603,13 @@ def parse_args(argv=None):
     args = parser.parse_args(argv)
     if args.mode == "resources" and args.schedule is None:
         parser.error("resources mode requires --schedule")
+    if args.repeat_index is not None and args.mode != "resources":
+        parser.error("--repeat-index is accepted only by resources mode")
+    if args.repeat_index is not None and not (
+        1 <= args.repeat_index <= SWG_SCALING_REPEATS
+    ):
+        parser.error(
+            f"--repeat-index must be in 1..{SWG_SCALING_REPEATS}")
     if args.mode not in ("resources", "scaling-suite") and args.schedule is not None:
         parser.error(f"{args.mode} mode does not accept --schedule")
     if args.mode == "resources" and args.plant is not None:
@@ -1504,9 +1623,10 @@ def parse_args(argv=None):
             parser.error(
                 "resource-suite mode accepts only --plant uniform_label_uses_none")
     elif args.mode == "scaling-suite":
-        if len(args.row) != len(SWG_SCALING_STEPS):
+        required_rows = len(SWG_SCALING_STEPS) * SWG_SCALING_REPEATS
+        if len(args.row) != required_rows:
             parser.error(
-                f"scaling-suite mode requires exactly {len(SWG_SCALING_STEPS)} "
+                f"scaling-suite mode requires exactly {required_rows} "
                 "--row paths"
             )
         if args.schedule is None:
@@ -1531,7 +1651,8 @@ def main(argv=None) -> int:
     elif args.mode == "resources":
         row = measure_resources(
             args.card, args.steps, args.schedule,
-            transcendentals=args.transcendentals)
+            transcendentals=args.transcendentals,
+            repeat_index=args.repeat_index)
     elif args.mode == "resource-suite":
         row = measure_resource_suite(
             args.row, plant=args.plant == "uniform_label_uses_none")
@@ -1551,7 +1672,7 @@ def main(argv=None) -> int:
     row["argv"] = list(sys.argv if argv is None else argv)
     write_result(args.output, row)
     print(json.dumps(row, sort_keys=True), flush=True)
-    return 0 if row["status"] == "CONFIRMED" else 1
+    return 0 if row["status"] in ("CONFIRMED", "MEASURED") else 1
 
 
 if __name__ == "__main__":

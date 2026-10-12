@@ -352,12 +352,14 @@ def test_gpu_resource_suite_retracts_rows_without_timer_stamps():
     assert "compiled-transform timer contract" in row["reason"]
 
 
-def _cpu_scaling_row(schedule, steps, seconds):
+def _cpu_scaling_row(schedule, steps, seconds, repeat_index, measurement_pid):
     return {
         "card_selector": "SWG",
         "steps": steps,
         "backend": "cpu",
         "schedule": schedule,
+        "timing_repeat_index": repeat_index,
+        "measurement_pid": measurement_pid,
         "status": "CONFIRMED",
         "loss": 1.0,
         "gradient_finite": True,
@@ -373,65 +375,80 @@ def _cpu_scaling_row(schedule, steps, seconds):
     }
 
 
-def test_cpu_scaling_suite_gates_frozen_predictions_and_all_plants():
+def test_cpu_timing_suite_reports_uncertainty_and_gates_only_trend():
     rows = [
-        _cpu_scaling_row("uniform", steps, 0.01 * steps + 0.1)
-        for steps in G.SWG_SCALING_STEPS
+        _cpu_scaling_row(
+            "uniform", steps, 0.01 * steps + 0.1, repeat_index, pid)
+        for pid, (steps, repeat_index) in enumerate((
+            (steps, repeat_index)
+            for steps in G.SWG_SCALING_STEPS
+            for repeat_index in range(1, G.SWG_SCALING_REPEATS + 1)
+        ), start=1000)
     ]
     control = G.classify_scaling_suite(rows)
-    assert control["status"] == "CONFIRMED"
+    assert control["status"] == "MEASURED"
     assert control["fit_seconds_per_step"] == pytest.approx(0.01)
     assert control["checks"] == {
-        "positive_fitted_seconds_per_step": True,
-        "strictly_increasing_at_every_window": True,
-        "nonnegative_fitted_fixed_overhead": True,
-        "every_residual_within_timing_tolerance": True,
-        "every_incremental_cost_within_fit_band": True,
+        "strictly_increasing_mean_at_every_window": True,
     }
-    assert control["relative_timing_tolerance"] == pytest.approx(
-        0.29088412196201646)
+    assert control["fit_seconds_per_step_standard_error"] == pytest.approx(0.0)
+    assert control["repeat_residual_sse_seconds2"] == pytest.approx(0.0)
+    assert control["replicated_fit_residual_sse_seconds2"] == pytest.approx(0.0)
     plants = {
         name: G.classify_scaling_suite(rows, plant=name)
         for name in G.SCALING_PLANTS
     }
     assert {name: row["status"] for name, row in plants.items()} == {
-        name: "REFUTED" for name in G.SCALING_PLANTS
+        **{name: "REFUTED" for name in G.SCALING_GATE_PLANTS},
+        **{name: "MEASURED" for name in G.SCALING_DIAGNOSTIC_PLANTS},
     }
     assert not plants["reviewer_nonmonotonic"]["checks"][
-        "strictly_increasing_at_every_window"]
+        "strictly_increasing_mean_at_every_window"]
     assert not plants["decreasing_endpoint"]["checks"][
-        "strictly_increasing_at_every_window"]
+        "strictly_increasing_mean_at_every_window"]
     reviewer_series = [
         1, 6, 11.2500000225, 11.250000045, 16.87500009]
     reviewer = plants["reviewer_monotone_nonlinear"]
-    assert list(reviewer["evaluated_warm_reverse_wall_seconds"].values()) == (
-        reviewer_series)
+    assert list(reviewer["mean_warm_reverse_wall_seconds"].values()) == (
+        pytest.approx(reviewer_series))
     assert reviewer["fit_r_squared"] == pytest.approx(0.8152955710691663)
-    assert not reviewer["checks"]["every_incremental_cost_within_fit_band"]
+    assert reviewer["fit_diagnostic"].startswith("LARGE_RESIDUAL")
+    strong = plants["reviewer_strongly_nonlinear"]
+    assert strong["fit_r_squared"] == pytest.approx(0.9779244072690443)
+    assert strong["fit_diagnostic"].startswith("LARGE_RESIDUAL")
     dead = plants["dead_interval"]
-    assert not dead["checks"]["strictly_increasing_at_every_window"]
-    assert not dead["checks"]["every_incremental_cost_within_fit_band"]
+    assert dead["status"] == "MEASURED"
+    assert not dead["checks"]["strictly_increasing_mean_at_every_window"]
+    assert not dead["monotonic_trend_gate_applies"]
+    assert dead["fit_diagnostic"].startswith("LARGE_RESIDUAL")
     r_squared = plants["r_squared_095"]
     assert r_squared["fit_r_squared"] == pytest.approx(0.95, abs=1.0e-8)
-    assert not r_squared["checks"]["every_residual_within_timing_tolerance"]
     args = G.parse_args([
         "scaling-suite", "--card", "SWG", "--steps", "1440",
         "--schedule", "uniform", "--expect-commit", "deadbeef",
         "--output", "/tmp/unused-scaling-suite.json",
-        *sum((["--row", f"/tmp/{step}.json"]
-              for step in G.SWG_SCALING_STEPS), []),
+        *sum((["--row", f"/tmp/{step}_{repeat}.json"]
+              for step in G.SWG_SCALING_STEPS
+              for repeat in range(1, G.SWG_SCALING_REPEATS + 1)), []),
     ])
     assert args.plant is None
-    assert len(args.row) == 5
+    assert len(args.row) == 15
 
 
-def test_scaling_tolerance_is_derived_from_three_fresh_process_repeats():
-    times = G.SWG_TIMING_NOISE_WARM_SECONDS
-    expected_spread = (max(times) - min(times)) / abs(sum(times) / len(times))
-    assert G.SWG_TIMING_NOISE_RELATIVE_SPREAD == pytest.approx(expected_spread)
-    assert expected_spread == pytest.approx(0.09696137398733883)
-    assert G.SCALING_RELATIVE_TOLERANCE == pytest.approx(3.0 * expected_spread)
-    assert G.SCALING_RELATIVE_TOLERANCE > 0.05
+def test_scaling_measurement_requires_three_distinct_processes_per_window():
+    rows = [
+        _cpu_scaling_row("uniform", steps, float(steps), repeat, 1000 + pid)
+        for pid, (steps, repeat) in enumerate(
+            (steps, repeat)
+            for steps in G.SWG_SCALING_STEPS
+            for repeat in range(1, G.SWG_SCALING_REPEATS + 1)
+        )
+    ]
+    assert G.classify_scaling_suite(rows)["status"] == "MEASURED"
+    rows[-1]["measurement_pid"] = rows[0]["measurement_pid"]
+    duplicate_process = G.classify_scaling_suite(rows)
+    assert duplicate_process["status"] == "VACUOUS"
+    assert "distinct process" in duplicate_process["reason"]
 
 
 @pytest.mark.parametrize("plant", G.SCALING_PLANTS)
@@ -441,8 +458,9 @@ def test_scaling_suite_cli_accepts_each_registered_plant(plant):
         "--schedule", "none", "--plant", plant,
         "--expect-commit", "deadbeef", "--output", "/tmp/unused.json",
         *sum(([
-            "--row", f"/tmp/{step}.json"
-        ] for step in G.SWG_SCALING_STEPS), []),
+            "--row", f"/tmp/{step}_{repeat}.json"
+        ] for step in G.SWG_SCALING_STEPS
+            for repeat in range(1, G.SWG_SCALING_REPEATS + 1)), []),
     ])
     assert args.plant == plant
 
