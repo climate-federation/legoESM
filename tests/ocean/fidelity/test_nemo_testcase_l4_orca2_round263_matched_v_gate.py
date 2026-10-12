@@ -23,10 +23,13 @@ def _report(label: str):
         "passivity": {name: True for name in ("T", "S", "u", "v", "eta")},
         "baseline_stage1": {"v": {"fold_band": _score(0.027227136128767482, 6091)}},
         "associated_stage1": {"v": {"fold_band": _score(3.469446951953614e-18, 1718)}},
-        "baseline_stage2": {"S": {"fold_band": _score(6.817836451535307, 100)}},
+        "baseline_stage2": {
+            "T": {"fold_band": _score(0.27211560747403896, 100)},
+            "S": {"fold_band": _score(5.037097791516988, 100)},
+        },
         "arm_stage2": {
-            "T": {"fold_band": _score(1.0e-15, 2)},
-            "S": {"fold_band": _score(1.0e-15, 2)},
+            "T": {"fold_band": _score(0.09829516579631314, 100)},
+            "S": {"fold_band": _score(1.8200702777361712, 100)},
         },
     }
     ratio = {

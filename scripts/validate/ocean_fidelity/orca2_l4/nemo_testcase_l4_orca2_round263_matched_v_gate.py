@@ -223,12 +223,19 @@ def classify(reports: list[dict[str, object]], *, plant: str = "none") -> dict[s
         require(after_v["max_abs"] <= float(r249.FLOOR),
                 f"{label}: matched post-association V is above the floor")
         require(matched["baseline_stage2"]["S"]["fold_band"]["max_abs"]
-                == 6.817836451535307,
+                == 5.037097791516988,
                 f"{label}: next stage-2 salinity boundary moved")
-        for field in ("T", "S"):
-            require(matched["arm_stage2"][field]["fold_band"]["max_abs"]
-                    <= float(r249.FLOOR),
-                    f"{label}: causal post-stage association did not close {field}")
+        frozen_stage2 = {
+            "T": (0.27211560747403896, 0.09829516579631314),
+            "S": (5.037097791516988, 1.8200702777361712),
+        }
+        for field, (before, after) in frozen_stage2.items():
+            observed_before = matched["baseline_stage2"][field]["fold_band"]["max_abs"]
+            observed_after = matched["arm_stage2"][field]["fold_band"]["max_abs"]
+            require(observed_before == before and observed_after == after,
+                    f"{label}: current-tree stage-2 {field} fingerprint moved")
+            require(observed_after < observed_before and observed_after > float(r249.FLOOR),
+                    f"{label}: post-stage association reduction class moved for {field}")
         require(row["one_bit_control"]["unequal"] == 1,
                 f"{label}: one-bit control did not fire")
         summary[label] = {
@@ -236,7 +243,7 @@ def classify(reports: list[dict[str, object]], *, plant: str = "none") -> dict[s
             "raw_pre_association_v": raw_v,
             "matched_post_association_v": after_v,
             "next_stage2_salinity": matched["baseline_stage2"]["S"]["fold_band"],
-            "causal_stage2_salinity": matched["arm_stage2"]["S"]["fold_band"],
+            "association_arm_stage2_salinity": matched["arm_stage2"]["S"]["fold_band"],
         }
     return {
         "format": "nemo-testcase-l4-orca2-round263-classification-v1",
@@ -245,7 +252,7 @@ def classify(reports: list[dict[str, object]], *, plant: str = "none") -> dict[s
         "predictions": {
             "R263-P1": "CONFIRMED_SCALAR_V_PLUS_ONE",
             "R263-P2": "CONFIRMED_PROGRAM_POINT_MISMATCH_RETRACT_RAW_BOUNDARY",
-            "R263-P3": "CONFIRMED_POST_STAGE_ASSOCIATION_IS_NEXT_CAUSAL_BOUNDARY",
+            "R263-P3": "REFUTED_ASSOCIATION_REDUCES_BUT_DOES_NOT_CLOSE_STAGE2",
             "R263-P4": "CONFIRMED" if plant == "none" else "PLANT",
         },
     }
