@@ -179,8 +179,9 @@ and control battery passes 197/197; log SHA-256
 `dc866d813a8f4361bdba76d3fcfd9455d9f163910fdc09e7cf2af358fb80a67c`.
 Geometry remains 34/34 exact, and its signed-y Coriolis, wet-cell, and layer-
 thickness plants each exit 1. The month control and established stage control
-each exit 1. The receipt citation gate and shifted P3D citation plant are run
-after this receipt is complete.
+each exit 1. The receipt citation gate maps all five P3D citations with zero
+unmapped citations, failures, or map-audit failures and exits 0. Shifting the
+daily-writer citation by two lines makes the gate fail and exit 1.
 
 ## Choices this round
 
