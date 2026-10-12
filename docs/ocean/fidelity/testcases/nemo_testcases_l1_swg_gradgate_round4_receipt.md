@@ -26,11 +26,14 @@ receipt tables now label their timing and increment columns RETRACTED while
 retaining only the absolute peak-RSS observations.
 
 The new five-row CPU suite applies the frozen round-3 predictions: positive
-affine-fit slope and direct 1440-step time greater than 720-step time for every
-schedule, plus the existing uniform 1440/720 ratio band `[1.5, 2.5]`. No bar
-was added or changed. All three measured suites return CONFIRMED. Replacing all
-five times by the 24-step time makes every suite REFUTED, with zero slope and
-equal 720/1440 times.
+affine-fit slope, each adjacent interval's seconds-per-step within the stated
+instrument-coherence band `[0.5, 1.5]` times that fit, and direct 1440-step
+time greater than 720-step time for every schedule, plus the existing uniform
+1440/720 ratio band `[1.5, 2.5]`. The interval band is an instrument check, not
+a physics, agreement, or training bar. All three measured suites return
+CONFIRMED. Replacing all five times by the 24-step time makes every suite
+REFUTED, with zero slope and equal 720/1440 times; a flat four-point trace with
+one late jump is also REFUTED by the interval-to-fit check.
 
 ## GPU resource prediction: retained refutations
 
@@ -112,8 +115,8 @@ and 1440 steps
   retraction, the cost-model suite and constant-time plant, allocator refusal,
   and one-sampler-per-pass GPU control flow.
 - The isolated SWG production gradient-matrix row passes **1/1**.
-- The GPU runner passes shell syntax checking and records every suite status
-  before continuing through 24, 720, and 1440 steps.
+- The GPU runner passes shell syntax checking; its executable self-test walks
+  REFUTED, VACUOUS, RETRACTED, then CONFIRMED rows without premature exit.
 - The independent, stage, carried-state, and 30-day SWG ladders remain AT-BAR
   and bit-identical; the stage one-ULP and broken-VJP plants exit 1.
 - Fresh card hashes remain GYRE `f02d2f42a570f413`, TSUNAMI

@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import inspect
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -347,10 +348,24 @@ def test_cpu_scaling_suite_gates_frozen_predictions_and_constant_time_plant():
     assert control["checks"] == {
         "positive_fitted_seconds_per_step": True,
         "time_1440_exceeds_time_720": True,
+        "every_interval_cost_within_50pct_of_fit": True,
         "uniform_1440_to_720_ratio_in_preregistered_band": True,
     }
+    assert all(
+        0.5 <= ratio <= 1.5
+        for ratio in control["interval_to_fit_ratios"].values()
+    )
     assert planted["status"] == "REFUTED"
     assert not any(planted["checks"].values())
+
+    late_jump_rows = [
+        _cpu_scaling_row("none", steps, seconds)
+        for steps, seconds in zip(G.SWG_SCALING_STEPS, (1, 1, 1, 1, 2))
+    ]
+    late_jump = G.classify_scaling_suite(late_jump_rows)
+    assert late_jump["status"] == "REFUTED"
+    assert not late_jump["checks"][
+        "every_interval_cost_within_50pct_of_fit"]
     args = G.parse_args([
         "scaling-suite", "--card", "SWG", "--steps", "1440",
         "--schedule", "uniform", "--expect-commit", "deadbeef",
@@ -415,6 +430,18 @@ def test_gpu_runner_disables_preallocation_and_covers_direct_1440_rows():
     assert "LAST_ROW_STATUS" in source
     assert "LAST_SUITE_STATUS" in source
     assert "SWG_GRADGATE_GPU_SUITE" in source
+
+    self_test = subprocess.run(
+        ["bash", str(_GPU_SCRIPT), "--self-test"],
+        cwd=_REPO,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert self_test.returncode == 0, self_test.stderr
+    assert (
+        "statuses=REFUTED VACUOUS RETRACTED CONFIRMED" in self_test.stdout
+    )
 
 
 def test_gpu_allocator_contract_refuses_platform(monkeypatch):

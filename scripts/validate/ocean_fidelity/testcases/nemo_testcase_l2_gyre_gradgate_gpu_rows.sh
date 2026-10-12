@@ -13,6 +13,37 @@ refuse() {
   exit "${2:-64}"
 }
 
+accept_classified_exit() {
+  local status=$1
+  local rc=$2
+  local label=$3
+  case "$status" in
+    CONFIRMED)
+      [[ $rc -eq 0 ]] || refuse "CONFIRMED $label exited $rc" "$rc"
+      ;;
+    REFUTED|VACUOUS|RETRACTED)
+      [[ $rc -eq 1 ]] || refuse "$status $label exited $rc" "$rc"
+      ;;
+    *)
+      refuse "unknown $label status: $status" 66
+      ;;
+  esac
+}
+
+if [[ ${1:-} == --self-test ]]; then
+  observed=()
+  for status in REFUTED VACUOUS RETRACTED CONFIRMED; do
+    rc=1
+    [[ $status == CONFIRMED ]] && rc=0
+    accept_classified_exit "$status" "$rc" "self-test row"
+    observed+=("$status")
+  done
+  [[ ${observed[*]} == "REFUTED VACUOUS RETRACTED CONFIRMED" ]] || \
+    refuse "classified rows did not all continue" 66
+  printf 'SWG_GRADGATE_GPU_RUNNER_SELF_TEST statuses=%s\n' "${observed[*]}"
+  exit 0
+fi
+
 [[ -x "$PYTHON" ]] || refuse "missing Python environment: $PYTHON"
 [[ -f "$GATE" ]] || refuse "run from the legoESM repository root; missing $GATE"
 [[ -d "$EVIDENCE_DIR" ]] || refuse "evidence directory does not exist: $EVIDENCE_DIR"
@@ -53,11 +84,7 @@ status = row.get("status")
 assert status in {"CONFIRMED", "REFUTED", "VACUOUS", "RETRACTED"}, row
 print(status)
 ' "$output")
-  if [[ $LAST_ROW_STATUS == CONFIRMED ]]; then
-    [[ $rc -eq 0 ]] || refuse "CONFIRMED row exited $rc" "$rc"
-  else
-    [[ $rc -eq 1 ]] || refuse "$LAST_ROW_STATUS row exited $rc" "$rc"
-  fi
+  accept_classified_exit "$LAST_ROW_STATUS" "$rc" row
   printf 'SWG_GRADGATE_GPU_ROW status=%s output=%s\n' \
     "$LAST_ROW_STATUS" "$output"
 }
@@ -89,11 +116,7 @@ status = row.get("status")
 assert status in {"CONFIRMED", "REFUTED", "VACUOUS", "RETRACTED"}, row
 print(status)
 ' "$output")
-  if [[ $LAST_SUITE_STATUS == CONFIRMED ]]; then
-    [[ $rc -eq 0 ]] || refuse "CONFIRMED suite exited $rc" "$rc"
-  else
-    [[ $rc -eq 1 ]] || refuse "$LAST_SUITE_STATUS suite exited $rc" "$rc"
-  fi
+  accept_classified_exit "$LAST_SUITE_STATUS" "$rc" suite
   printf 'SWG_GRADGATE_GPU_SUITE steps=%s status=%s output=%s\n' \
     "$steps" "$LAST_SUITE_STATUS" "$output"
 }
