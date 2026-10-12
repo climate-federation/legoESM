@@ -143,3 +143,5 @@ splits substep 3's midpoint statement in compiled order: `sshn_e`, `sshb_e`,
 `sshbb_e`, then `za1/za2/za3`. The first non-bit operand owns the upstream
 walk. The complete fold/transport unit and both associations remain private;
 no stabilizer, floor, clip, or configuration change is authorized.
+
+Round disposition: **STOPPED_FOR_RECORD**.
