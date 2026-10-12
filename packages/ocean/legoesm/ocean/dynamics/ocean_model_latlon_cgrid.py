@@ -6301,6 +6301,11 @@ class LatLonCGridOceanModel:
         F_slow_v = _v_pair[..., 1] / H_v_pre * state.v_mask.data
         _slow_surface_u_mask = state.u_mask.data
         _slow_surface_v_mask = state.v_mask.data
+        # Only the NEMO literal-depth branch below can select the raw ORCA
+        # fold operands.  Keep every other card (DINO, GYRE and the tanks)
+        # explicitly on its existing analytic/compact route; the drag block
+        # is shared and must never observe an unbound ORCA-only selector.
+        _atomic_hpg_unit = False
         # NEMO's own depth average of the slow forcing (stp2d.F90:177-186 of
         # the VORTEX_SMT builds): the REFERENCE face thickness and the STORED
         # reciprocal, with no ssh stretching anywhere in the statement --
