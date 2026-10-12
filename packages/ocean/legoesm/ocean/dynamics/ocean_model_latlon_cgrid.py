@@ -6054,8 +6054,6 @@ class LatLonCGridOceanModel:
                 state.v_mask.data[..., jnp.newaxis]
                 if self._nemo_ws_test_hooks.legacy_2d_stage_face_mask
                 else _ws_v_live_mask)
-            _ws_transport_u_mask = _ws_stage_u_mask
-            _ws_transport_v_mask = _ws_stage_v_mask
             _ws_h_ref = compute_layer_thickness(
                 jnp.zeros_like(state.eta.data), state.H_bathy.data, _zc,
                 min_water_column_m=_cfg_b.min_water_column_m)
@@ -6092,18 +6090,9 @@ class LatLonCGridOceanModel:
                         _zc, _grid, _ws_u_live_mask, _ws_v_live_mask,
                         state.eta.data.dtype, state.T.data.shape[-1])
                 )
-                # stprk3_stg.F90:273-278 multiplies the stage correction by
-                # the SAME domain-associated umask/vmask that accompanies
-                # NEMO's stored e3u_0/e3v_0.  Keep the native east/north masks
-                # from the one resolved operand builder and map them once to
-                # legoESM's redundant west/south face layout.  The generic
-                # analytic-mesh route maps back to its original masks exactly.
-                _ws_transport_u_mask = jnp.concatenate(
-                    [_raw_ops.umask3[:, -1:, :], _raw_ops.umask3], axis=1)
-                _ws_transport_v_mask = jnp.concatenate(
-                    [jnp.zeros_like(_raw_ops.vmask3[:1]), _raw_ops.vmask3],
-                    axis=0)
-                _ws_literal_hpg_vmask = _ws_transport_v_mask
+                _ws_literal_hpg_vmask = jnp.zeros_like(_card_v_mask)
+                _ws_literal_hpg_vmask = _ws_literal_hpg_vmask.at[1:].set(
+                    _raw_ops.vmask3)
             if not self._nemo_ws_test_hooks.legacy_hadv_min_face_thickness:
                 _ws_face_thickness_kbb = _nemo_ws_qco_stage_faces(
                     state.eta.data, _ws_h_ref, _ws_u_live_mask,
@@ -7860,8 +7849,8 @@ class LatLonCGridOceanModel:
                 .legacy_reduced_stage_transport_mean_arm)
             _stage_transport_kw = dict(
                 h_ref=_h_ref_ws, Hu_avg=Hu_avg, Hv_avg=Hv_avg,
-                u_mask_3d=_ws_transport_u_mask,
-                v_mask_3d=_ws_transport_v_mask, grid=_grid, z_coord=_zc,
+                u_mask_3d=_u_live_mask,
+                v_mask_3d=_v_live_mask, grid=_grid, z_coord=_zc,
                 H_bathy=state.H_bathy.data, config=_cfg_b,
                 # RK3 div_hor applies the instantaneous river mass flux to
                 # hdiv independently of the same runoff's external-mode SSH
