@@ -30,9 +30,20 @@ def test_flag_reaches_the_closure_config_on_the_rk3_face_geometry():
     assert cfg.tke_shear_production == "nemo_face_native_nbb2"
 
 
-def test_nemo_face_without_face_native_geometry_raises():
-    with pytest.raises(ValueError, match="face-native"):
-        _core2().orca1_zdftke_config(shear_avm_weighting="nemo_face")
+def test_nemo_face_on_cell_shear_is_a_valid_config():
+    """MPAS builds zdf_sh2 on its own edges, so the shared card builder no
+    longer demands a face-native geometry; the tripole check lives in main()."""
+    cfg = _core2().orca1_zdftke_config(shear_avm_weighting="nemo_face")
+    assert cfg.tke_shear_avm_weighting == "nemo_face"
+    assert cfg.tke_shear_production == "squared_centered"
+
+
+def test_main_refuses_nemo_face_on_tripole_without_face_geometry(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["run_omip_core2.py", "--grid", "tripole",
+                                      "--tripole-vmix", "tke",
+                                      "--tke-shear-avm-weighting", "nemo_face"])
+    with pytest.raises(SystemExit, match="face-native"):
+        _core2().main()
 
 
 def test_unknown_value_raises():
@@ -62,11 +73,11 @@ def test_parser_exposes_both_choices_and_defaults_to_none():
 
 
 @pytest.mark.parametrize("argv", [
-    ["--grid", "mpas", "--mpas-vmix", "tke"],
+    ["--grid", "mpas", "--mpas-vmix", "kpp"],
     ["--grid", "fesom", "--fesom-vmix", "legoesm_tke"],
     ["--grid", "tripole", "--tripole-vmix", "kpp"],
 ])
-def test_main_refuses_it_off_the_tripole_tke_lane(argv, monkeypatch):
+def test_main_refuses_it_off_the_tke_lanes_that_wire_it(argv, monkeypatch):
     monkeypatch.setattr(sys, "argv", ["run_omip_core2.py", *argv,
                                       "--tke-shear-avm-weighting", "nemo_face"])
     with pytest.raises(SystemExit, match="--tke-shear-avm-weighting"):
@@ -112,3 +123,10 @@ def test_prandtl_flag_is_on_the_fesom_stage_allowlist():
     """FESOM's stage gate hard-rejects unlisted args; the flag must be listed
     or the fesom lane refuses it before the builder can receive it."""
     assert "tke_prandtl_mode" in _core2()._FESOM_WIRED_DESTS
+
+
+def test_mpas_builder_carries_nemo_face_on_the_cell_shear():
+    vm = _core2().build_tripole_vmix_config(
+        "tke", tke_shear_avm_weighting="nemo_face", tke_prandtl_mode="nemo_ri")
+    assert vm.tke.tke_shear_avm_weighting == "nemo_face"
+    assert vm.tke.prandtl_mode == "nemo_ri"

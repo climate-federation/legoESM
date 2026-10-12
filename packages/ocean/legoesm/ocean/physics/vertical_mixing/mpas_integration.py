@@ -786,6 +786,14 @@ def make_tke_profiles_mpas(config: VerticalMixingConfig, eos_fn=None,
             "zdfiwm itself — MPASOceanModel applies it additively at the "
             "model level (pass iwm_applied_by_model=True from there); a "
             "standalone caller would silently drop the wave-driven mixing.")
+    # NEMO zdf_sh2 on the Voronoi edges (tke_shear_avm_weighting="nemo_face"):
+    # the kernel takes the edge production through its p_sh2_fn hook; the
+    # cell-reconstructed shear stays the gradient-Ri operand.
+    _avm_weighting = getattr(cfg, "tke_shear_avm_weighting", "tpoint")
+    if _avm_weighting not in ("tpoint", "nemo_face"):
+        raise ValueError(
+            "Unknown TKEConfig.tke_shear_avm_weighting on MPAS: expected "
+            f"'tpoint' or 'nemo_face', got {_avm_weighting!r}.")
 
     def profiles_fn(
         state: MPASOceanState,
@@ -818,6 +826,22 @@ def make_tke_profiles_mpas(config: VerticalMixingConfig, eos_fn=None,
         # kappaH floor (only read on the opt-in Prandtl path; harmless on the
         # default 'unit' path).  z_half_ref is negative-down; drop surface+bottom.
         z_interface = z_coord.z_half_ref[1:-1]
+
+        p_sh2_fn = None
+        if _avm_weighting == "nemo_face":
+            from legoesm.ocean.physics.vertical_mixing._shared import (
+                edge_avm_weighted_shear_production,
+            )
+            _wet_col = jnp.broadcast_to((mask > 0.5)[:, None],
+                                        state.T.data.shape)
+            _active = (_wet_col & jnp.asarray(_is_active, dtype=bool)
+                       if _is_active is not None else _wet_col)
+            _u_edge = state.u.data
+
+            def p_sh2_fn(kappaM):
+                return edge_avm_weighted_shear_production(
+                    _u_edge, dz_half, kappaM, _active, mesh.cellsOnEdge,
+                    mesh.edgesOnCell, mesh.dcEdge, mesh.dvEdge, mesh.areaCell)
 
         # Surface wind stress → TKE surface flux (|tau|/rho_0)^{3/2}; None ⇒
         # unforced (the closure zeroes the surface flux).
@@ -927,6 +951,7 @@ def make_tke_profiles_mpas(config: VerticalMixingConfig, eos_fn=None,
             # gdept_0*(1+eta/ht_0) stretch the C-grid path applies, so both
             # grids run the SAME stratification.
             **bn2_ladder_kwargs(cfg, z_coord, state),
+            p_sh2_fn=p_sh2_fn,
         )
         A_v_cells = tke_out.K_M   # (nCells, nlev-1) momentum viscosity >= 0
         K_v_cells = tke_out.K_H   # (nCells, nlev-1) tracer diffusivity >= 0
