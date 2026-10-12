@@ -125,8 +125,35 @@ provenance, the GYRE round-129 certified-year harness stamp, round-35
 process-global allow-dirty scoping, and the report-emitter worktree-stamp
 ratchet. The full battery was not rerun.
 
-Citation and independent-review results and all evidence SHA-256 values are
-recorded in the final receipt commit after those gates run.
+The receipt citation gate passes all four extracted citations with no failure
+or unmapped entry. Shifting the compiled `stprk3_stg` citation by two lines
+makes it fail exactly one source anchor. The cumulative default receipt also
+passes 274 citations with no unmapped entry; the citation-gate unit suite
+passes 17/17. The round, plant, cumulative, and citation-test SHA-256 values
+are `ef52241cbd0f69b48b68028e69a36ca2229c0350fba87014dd95aae38a172aef`,
+`d3c67f2b43f20ad7ce05a04feddf198965e70e17bdcf7af88e1abc82fab34ada`,
+`73dacc574b2ef86f9c7de9f678737281473a26d6b57c396e84d229093cff2351`,
+and `82d31e4cb045ddda725712add136a5df606b8bad2112c8a16e06a9ad71ec728a`.
+
+The required `codex exec --sandbox read-only` review was attempted. Its
+in-process app-server client could not initialize on the read-only filesystem,
+so **independent review unavailable in-sandbox**. The retained attempt has
+SHA-256
+`8e3330eeb312ddb37b9da73c3ece4a8aa7e2ade4b7bb255573aa487bc89f0f58`.
+
+The independent/given growth JSON SHA-256 values are
+`41af05e21b5d5236e5c6875ccab3dc3e141042d145732e221a995f9894143004` /
+`8cb66140f17adc9032b40e6ffa078290f4c31b531767cfac7a07b56a08ac49b5`;
+the corresponding association replays are
+`405c30adc14794d7f79364453e793caaba5965044f2da9630b4a7e2926270c07` /
+`117afb624207e7700f93d51d5e4008a4a5eeee2343e8e1877e3fc24408f3d605`.
+The classification and plant log are
+`9bc51ed6a2e91a02f073310bf37d0e3cf55afa5434baabf29979f3adec23c777` /
+`5fda737a01066348f84d53195367219bddb5b6249fc26e850dc8aef49bb010bf`.
+The focused, full-battery, and isolated-red logs are
+`a2fdb82feb3e596e912c19b5272370bf0d2b778097ad846b8772736f1116282b`,
+`b7a8ddab028a82c7acb0e35b0b4c91d5e846a3e338321aa72b1808394147d322`,
+and `8c44c01e15203d422a7486b8043ea972f62c48e894cbcdce78495a45eef78e33`.
 
 ## OPEN
 
