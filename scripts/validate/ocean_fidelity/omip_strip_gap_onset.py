@@ -131,6 +131,40 @@ def main(argv):
               f"({np.nanmedian(so / sn):5.2f}) | {np.nanmedian(nuo):9.2e} {np.nanmedian(nun):9.2e} ({np.nanmedian(nuo / nun):5.2f}) | "
               f"{np.nanmedian(pick(Ao_app, s - 1)):9.2e} | {np.nanmedian(pick(avmk, s - 1)):9.2e} | {np.nanmedian(pick(le_end, s) / pick(ne_end, s)):5.2f}")
 
+    # NEMO's TKE-diffusion floor MAX(avm(k)+avm(k+-1), 2e-5) (zdftke.F90:407-409)
+    # with p_avm = avm_k entering the step: share of cohort samples where it binds
+    print("\nNEMO TKE-diffusion floor binding at the gap interface (p_avm = avm_k(s-1)):")
+    for h in range(h0, min(h1, 8)):
+        a0, a1 = h * 24, (h + 1) * 24
+        am = avmk[a0 - 1:a1 - 1, cols]                     # (steps, cohort, k)
+        kk = k[None, :]
+        up = np.take_along_axis(am, np.minimum(kk + 1, nk - 1)[..., None], -1)[..., 0] + np.take_along_axis(am, kk[..., None], -1)[..., 0]
+        lw = np.take_along_axis(am, np.maximum(kk - 1, 0)[..., None], -1)[..., 0] + np.take_along_axis(am, kk[..., None], -1)[..., 0]
+        print(f"  h{h}-h{h + 1}: upper-face sum < 2e-5 in {np.nanmean(up < 2e-5):.2f}, lower-face in {np.nanmean(lw < 2e-5):.2f}; "
+              f"median sums {np.nanmedian(up):.2e} / {np.nanmedian(lw):.2e}")
+    # First divergence per column: first step after the reference hour HREF where
+    # e_ours/e_NEMO < 0.9 at kg; cumulative ours-NEMO per term from HREF to that step.
+    href = 2
+    sref = href * 24
+    ratio = le_end[sref:, cols, k] / ne_end[sref:, cols, k]
+    hit = ratio < 0.9
+    has = np.any(hit, 0)
+    first = np.argmax(hit, 0)
+    lead = {t: 0 for t in L.TERMS}
+    contrib = {t: [] for t in L.TERMS}
+    for c in np.where(has)[0]:
+        s1c = sref + first[c] + 1
+        dd = {t: np.nansum(lo[t][sref:s1c, cols[c], k[c]]) - np.nansum(ln[t][sref:s1c, cols[c], k[c]]) for t in L.TERMS}
+        de = (ne_end[s1c - 1, cols[c], k[c]] - ne_end[sref - 1, cols[c], k[c]])
+        for t in L.TERMS:
+            contrib[t].append(dd[t] / max(abs(de), 1e-30))
+        lead[min(dd, key=dd.get)] += 1
+    print(f"\nFirst divergence (e ours/NEMO < 0.9 at kg after h{href}): {has.sum()} of {cols.size} cols; "
+          f"onset hour median {np.median(href + (first[has] + 1) / 24):.2f} [{np.percentile(href + (first[has] + 1) / 24, 25):.2f},"
+          f"{np.percentile(href + (first[has] + 1) / 24, 75):.2f}]")
+    print("  most-negative cumulative ours-NEMO term at onset (count): " + ", ".join(f"{t} {n}" for t, n in lead.items() if n))
+    print("  median contribution / |NEMO de| since h2: " + ", ".join(f"{t} {np.median(v):+.2f}" for t, v in contrib.items() if v and np.any(np.asarray(v) != 0)))
+
     print(f"\nPer 1-h window at the gap interface: median [IQR] of ours-NEMO (cumulative, m2/s2); NEMO median in ()")
     for h in range(h0, h1):
         a0, a1 = h * 24, (h + 1) * 24
