@@ -682,7 +682,8 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
                         preclosure_coeff_source: str | None = None,
                         buoyancy_sink: str | None = None,
                         step_evaluation: str | None = None,
-                        langmuir_rhs_coupling: str | None = None):
+                        langmuir_rhs_coupling: str | None = None,
+                        shear_avm_weighting: str | None = None):
     """NEMO ORCA1 ``&namzdf_tke`` mapped onto :class:`TKEConfig`, value by value.
 
     Source of truth: ``cfgs/ORCA1/EXP00/RUN_REF/namelist_cfg`` overrides on top
@@ -1152,6 +1153,25 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
                 "or its legacy alias 'nemo_face_native_now2', or "
                 "'nemo_burchard'.")
         _cfg = _cfg._replace(tke_shear_production=shear_production)
+    # avm inside the zdf_sh2 face sum (``--tke-shear-avm-weighting``).  DEFAULT
+    # keeps the card value ("tpoint": one T-point K_M times the T-collapsed
+    # shear).  "nemo_face" is zdfsh2.F90:80-94: avm(i+1)+avm(i) summed on each
+    # u/v face, times that face's shear, then the 0.25 coast-doubled T combine.
+    # Only meaningful on the face-native geometry, so it is refused otherwise.
+    if shear_avm_weighting is not None:
+        if shear_avm_weighting not in ("tpoint", "nemo_face"):
+            raise ValueError(
+                f"orca1_zdftke_config shear_avm_weighting {shear_avm_weighting!r} "
+                "invalid; expected 'tpoint' or 'nemo_face'.")
+        if shear_avm_weighting == "nemo_face" and _cfg.tke_shear_production not in (
+                "nemo_face_native", "nemo_face_native_now2",
+                "nemo_face_native_nbb2"):
+            raise ValueError(
+                "shear_avm_weighting='nemo_face' needs a face-native shear "
+                "geometry (--tke-shear-production nemo_face_native_nbb2 on the "
+                "key_RK3 ORCA1 card); got tke_shear_production="
+                f"{_cfg.tke_shear_production!r}.")
+        _cfg = _cfg._replace(tke_shear_avm_weighting=shear_avm_weighting)
     # Coefficient lifetime (``--tke-preclosure-coeff-source``).  DEFAULT keeps
     # the card value ("current_subiteration").  NEMO's zdf_tke consumes the
     # SAVE'd avm_k/avt_k pair in zdf_sh2, the Prandtl ratio, the TKE matrix and
@@ -1795,7 +1815,7 @@ def build_tripole_vmix_config(tripole_vmix: str, iwm=None, tke_eice=None,
                               tke_n2_mode=None, tke_n2_eos_form=None,
                               tke_prognostic=None, tke_kappa_convention=None,
                               tke_shear_production=None, tke_lc=None,
-                              tke_etau=None,
+                              tke_etau=None, tke_shear_avm_weighting=None,
                               tke_preclosure_coeff_source=None,
                               tke_kappah_min=None, tke_buoyancy_sink=None,
                               tke_step_evaluation=None,
@@ -1836,6 +1856,7 @@ def build_tripole_vmix_config(tripole_vmix: str, iwm=None, tke_eice=None,
                     ("--tke-prognostic", tke_prognostic),
                     ("--tke-kappa-convention", tke_kappa_convention),
                     ("--tke-shear-production", tke_shear_production),
+                    ("--tke-shear-avm-weighting", tke_shear_avm_weighting),
                     ("--tke-preclosure-coeff-source",
                      tke_preclosure_coeff_source),
                     ("--tke-kappah-min", tke_kappah_min),
@@ -1858,12 +1879,15 @@ def build_tripole_vmix_config(tripole_vmix: str, iwm=None, tke_eice=None,
                                    prognostic=tke_prognostic,
                                    kappa_convention=tke_kappa_convention,
                                    shear_production=tke_shear_production,
+                                   shear_avm_weighting=tke_shear_avm_weighting,
                                    lc=tke_lc, etau_mode=tke_etau,
                                    preclosure_coeff_source=(
                                        tke_preclosure_coeff_source),
                                    buoyancy_sink=tke_buoyancy_sink,
                                    step_evaluation=tke_step_evaluation,
                                    langmuir_rhs_coupling=tke_langmuir_rhs_coupling)
+        print(f"[setup] TKE shear production: {_tke.tke_shear_production}, "
+              f"avm weighting: {_tke.tke_shear_avm_weighting}", flush=True)
         if tke_eice is not None:
             if int(tke_eice) not in (0, 1, 2, 3):
                 raise ValueError(
@@ -1930,6 +1954,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   tke_mxl_choice=None, tke_prognostic=None,
                   tke_n2_mode=None, tke_n2_eos_form=None,
                   tke_kappa_convention=None, tke_shear_production=None,
+                  tke_shear_avm_weighting=None,
                   tke_lc=None, tke_etau=None,
                   tke_preclosure_coeff_source=None,
                   tke_kappah_min=None, tke_buoyancy_sink=None,
@@ -2235,6 +2260,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
             tke_n2_mode=tke_n2_mode, tke_n2_eos_form=tke_n2_eos_form,
             tke_kappa_convention=tke_kappa_convention,
             tke_shear_production=tke_shear_production,
+            tke_shear_avm_weighting=tke_shear_avm_weighting,
             tke_lc=tke_lc, tke_etau=tke_etau,
             tke_preclosure_coeff_source=tke_preclosure_coeff_source,
             tke_buoyancy_sink=tke_buoyancy_sink,
@@ -8391,6 +8417,17 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                    help="Surface-TKE penetration mode (NEMO nn_etau). None "
                         "keeps the ORCA1 card (below_ml). 'none' for the "
                         "fesom-mimic card (fesom-jax has no etau term).")
+    p.add_argument("--tke-shear-avm-weighting", type=str, default=None,
+                   choices=["tpoint", "nemo_face"],
+                   help="How K_M enters TKE shear production for --grid tripole "
+                        "--tripole-vmix tke. None (default) keeps the card "
+                        "value ('tpoint': one T-point K_M times the "
+                        "T-collapsed shear). 'nemo_face' is NEMO zdf_sh2 "
+                        "(zdfsh2.F90:80-94): avm(i+1)+avm(i) summed on each "
+                        "u/v face, times that face's shear, then the 0.25 "
+                        "coast-doubled T combine. Requires a face-native "
+                        "--tke-shear-production (nemo_face_native_nbb2 on the "
+                        "key_RK3 ORCA1 card). Tripole only.")
     p.add_argument("--tke-shear-production", type=str, default=None,
                    choices=["squared_centered", "nemo_face_native",
                             "nemo_face_native_now2",
@@ -8719,6 +8756,12 @@ def main() -> int:
     # preserving for existing callers.
     p = _build_arg_parser()
     args = p.parse_args()
+    if args.tke_shear_avm_weighting is not None and not (
+            args.grid == "tripole" and args.tripole_vmix == "tke"):
+        raise SystemExit(
+            "--tke-shear-avm-weighting needs the raw C-grid u/v faces and is "
+            "wired ONLY for --grid tripole --tripole-vmix tke; got --grid "
+            f"{args.grid!r} --tripole-vmix {args.tripole_vmix!r}.")
     if args.vertical_momentum_scheme is not None and args.grid not in ("tripole", "mpas") and not (
             args.grid == "fesom" and args.vertical_momentum_scheme == "nemo_advective"):
         raise SystemExit("--vertical-momentum-scheme is wired on --grid tripole and mpas, and "
@@ -9447,6 +9490,7 @@ def main() -> int:
             tke_prognostic=args.tke_prognostic,
             tke_kappa_convention=args.tke_kappa_convention,
             tke_shear_production=args.tke_shear_production,
+            tke_shear_avm_weighting=args.tke_shear_avm_weighting,
             tke_lc=(None if args.tke_lc is None else args.tke_lc == "on"),
             tke_etau=args.tke_etau,
             tke_preclosure_coeff_source=args.tke_preclosure_coeff_source,

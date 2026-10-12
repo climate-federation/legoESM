@@ -3301,10 +3301,13 @@ def tke_vertical_mixing(
         def _p_sh2_face_fn(_kappaM_T):
             return precomputed_p_sh2
     elif _avm_weighting == "nemo_face":
-        if _shear_disc != "nemo_face_native":
+        # nemo_face_native_now2 (alias nbb2) is the key_RK3 arm: the same face
+        # geometry with u_face_before IS u_face_now (k_profiles supplies it so).
+        if _shear_disc not in ("nemo_face_native", "nemo_face_native_now2"):
             raise ValueError(
-                "TKEConfig.tke_shear_avm_weighting='nemo_face' requires "
-                "tke_shear_production='nemo_face_native' (the avm "
+                "TKEConfig.tke_shear_avm_weighting='nemo_face' requires a "
+                "face-native tke_shear_production ('nemo_face_native' or "
+                "'nemo_face_native_nbb2'/'nemo_face_native_now2'; the avm "
                 f"face-averaging is only meaningful with the matching "
                 f"face-native shear geometry), got tke_shear_production="
                 f"{_shear_disc!r}.")
