@@ -79,8 +79,15 @@ def test_scanned_program_matches_nontrivial_python_steps_on_tiny_grid():
         tau_i_native=jax.numpy.asarray(tau_u, dtype=jax.numpy.float64),
         tau_j_native=jax.numpy.asarray(tau_v, dtype=jax.numpy.float64),
     )
-    state = driver.seed_steady_forcing_carry(
-        card.recipe.initial_state, forcing)
+    raw_state = card.recipe.initial_state
+    state = driver.seed_steady_forcing_carry(raw_state, forcing)
+    raw_first = model.step(raw_state, card.dt_s, surface_forcing=forcing)
+    seeded_first = model.step(state, card.dt_s, surface_forcing=forcing)
+    first_differences = driver.prognostic_differences(
+        raw_first, seeded_first)
+    assert first_differences["all_finite"]
+    assert all(first_differences[f"{name}_unequal"] == 0
+               for name in ("ssh_m", "u_m_s", "v_m_s"))
     python_state = driver.run_python_steps(
         model, state, card.dt_s, forcing, 3_456)
     scanned_day = driver.build_scanned_stepper(
