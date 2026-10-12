@@ -381,7 +381,7 @@ def month_control(root: Path, *, allow_dirty: bool = False) -> dict:
     wet_nonzero = np.argwhere(masks["U"] & (native_u != 0.0))
     require(wet_nonzero.size > 0,
             "admitted day-one U field has no nonzero wet value")
-    at = tuple(wet_nonzero[np.argmin(
+    at = tuple(wet_nonzero[np.argmax(
         np.abs(native_u[tuple(wet_nonzero.T)]))])
     original = np.float64(native_u[at])
     planted = np.nextafter(original, np.float64(np.inf))
@@ -409,6 +409,7 @@ def month_control(root: Path, *, allow_dirty: bool = False) -> dict:
         "input_before": float(original),
         "input_after": float(planted),
         "input_ulp_delta": 1,
+        "input_selection": "largest_absolute_nonzero_wet_u",
         "input_matches_admitted_boundary": True,
     })
     return _gate_rows({

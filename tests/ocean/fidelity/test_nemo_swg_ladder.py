@@ -202,5 +202,6 @@ def test_month_recorded_nonzero_input_one_ulp_plant_leaves_bar():
     assert row["input_after"] == np.nextafter(
         row["input_before"], np.float64(np.inf))
     assert row["input_ulp_delta"] == 1
+    assert row["input_selection"] == "largest_absolute_nonzero_wet_u"
     assert row["input_matches_admitted_boundary"] is True
     assert lad._exit_code(out) == 1
