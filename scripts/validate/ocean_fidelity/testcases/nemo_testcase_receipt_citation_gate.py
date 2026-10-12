@@ -1568,7 +1568,7 @@ CITATION_MAP = {
         2],
     'SWG_OMIP_L1/BLD/ppsrc/nemo/diawri.f90:363-374': [
         'CALL histdef( nid_U, "vozocrtx"',
-        'jpi, jpj, nh_V, jpk, 1, jpk, nz_V, 32, clop, zsto, zout )',
+        ('jpi, jpj, nh_V, jpk, 1, jpk, nz_V, 32, clop, zsto, zout )', 1),
         12],
     'SWG_OMIP_L1/BLD/ppsrc/nemo/diawri.f90:457': (
         'CALL histwrite( nid_T, "sossheig", kt, ssh(:,:,Kmm)'),
