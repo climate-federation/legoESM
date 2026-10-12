@@ -1548,6 +1548,27 @@ def main(argv=None) -> int:
     if "all_at_bar" in out:
         print(f"all_at_bar={out['all_at_bar']} bit_identical={out['all_bit_identical']}")
         return _exit_code(out)
+    if out["label"] == "SWG-DG-DEBT-LOCALIZATION":
+        replay = out["stage"]["given_kt2_stage1_to_stage2"]
+        for field, regions in replay.items():
+            bit_unequal = sum(row["bit_unequal"] for row in regions.values())
+            if bit_unequal:
+                print(f"stage_replay field={field} bit_unequal={bit_unequal}")
+        for boundary in out["stage"]["from_rest_boundaries"]:
+            fields = boundary["fields"]
+            dynamic = ("ssh_k", "u_k", "v_k", "r3t_k", "r3u_k",
+                       "r3v_k", "r3f", "u_before", "v_before")
+            bit_unequal = sum(
+                row["bit_unequal"] for name in dynamic
+                for row in fields[name].values())
+            print(
+                f"from_rest step={boundary['after_production_step']} "
+                f"dynamic_bit_unequal={bit_unequal}")
+        continuity = out["month"]["nemo_restart_to_next_stage_entry"]
+        print("month_nemo_restart_to_entry_bit_unequal=" + str(sum(
+            row["bit_unequal"] for regions in continuity.values()
+            for row in regions.values())))
+        return 0
     print(f"records={out.get('records', len(out.get('per_kt', [])))}")
     return 0
 
