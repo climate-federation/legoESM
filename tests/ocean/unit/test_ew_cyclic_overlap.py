@@ -115,6 +115,37 @@ def test_leaf_projection_slaves_u_face_halos():
     assert u_out.shape == u_in.shape
 
 
+
+@pytest.mark.parametrize("prescribed", [False, True])
+def test_leaf_projection_slaves_carried_tke_halos(prescribed):
+    """All five TKE carry fields (en, avm_k, avt_k, dissl: 3-D; surface avm:
+    2-D) are slaved like every other prognostic field, also under
+    prescribed_flow, where u/v/eta must stay untouched."""
+    from legoesm.core.field import Field
+    state, model = _model(ew_cyclic_overlap=True,
+                          **({"prescribed_flow": "frozen"} if prescribed else {}))
+    s = _distinct_seam_state(state)
+    nlev = np.asarray(s.T.data).shape[-1]
+    shape3 = np.asarray(s.T.data).shape[:-1] + (nlev - 1,)
+    nx = shape3[1]
+    rng = np.random.default_rng(7)
+    mk = lambda n, shp: Field(jnp.asarray(_perturb_cols(rng.random(shp), nx)),
+                              name=n, dims=("lat", "lon", "level")[:len(shp)],
+                              units="")
+    names3 = ("tke", "tke_avm", "tke_avt", "tke_dissl")
+    s = s._replace(**{n: mk(n, shape3) for n in names3},
+                   tke_avm_surface=mk("tke_avm_surface", shape3[:2]))
+    out = model._apply_ew_cyclic_overlap(s)
+    for name in names3 + ("tke_avm_surface",):
+        a = np.asarray(getattr(out, name).data); b = np.asarray(getattr(s, name).data)
+        assert np.array_equal(a[:, 0], b[:, nx - 2]), name
+        assert np.array_equal(a[:, nx - 1], b[:, 1]), name
+        assert np.array_equal(a[:, 1:nx - 1], b[:, 1:nx - 1]), name
+    if prescribed:
+        for name in ("u", "v", "eta"):
+            assert np.array_equal(np.asarray(getattr(out, name).data),
+                                  np.asarray(getattr(s, name).data)), name
+
 def test_gating_default_off_is_bit_identical():
     """config.ew_cyclic_overlap=False -> step bit-identical to no projection."""
     s0, m_off = _model(ew_cyclic_overlap=False)

@@ -13679,13 +13679,26 @@ class LatLonCGridOceanModel:
         # "frozen" still crosses the seam.  Chosen over re-pinning after the
         # call because the pin values are locals of _step_impl — recomputing
         # them at the _step_jitted call site would duplicate the pin logic.
+        # The TKE closure's carried state (en, avm_k/avt_k, dissl, surface avm)
+        # is column-local, but the seam face u[:,1] and the face-summed avm of
+        # zdf_sh2 read the halo column, so an unslaved halo carries its own
+        # TKE history into the physical seam column (measured: halo-vs-twin
+        # en differed by up to 7e-2 m2/s2 after 2 days).
+        tke_fields = {
+            name: f.replace(data=_ovl_cell(f.data))
+            for name in ("tke", "tke_avm", "tke_avt", "tke_dissl",
+                         "tke_avm_surface")
+            if (f := getattr(state, name, None)) is not None
+        }
         if getattr(self.config, "prescribed_flow", None) is not None:
             return state._replace(
                 T=state.T.replace(data=_ovl_cell(state.T.data)),
                 S=state.S.replace(data=_ovl_cell(state.S.data)),
+                **tke_fields,
             )
 
         return state._replace(
+            **tke_fields,
             T=state.T.replace(data=_ovl_cell(state.T.data)),
             S=state.S.replace(data=_ovl_cell(state.S.data)),
             eta=state.eta.replace(data=_ovl_cell(state.eta.data)),
