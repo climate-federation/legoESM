@@ -98,13 +98,15 @@ def resolution_limited(inc, h, first, status, zw, e_in, eps):
     when that is below 2 ulp of the stored entry TKE (eps*e_in, NEMO writes
     float32) the dump cannot tell a zero from it (codex 2026-10-12)."""
     j = np.searchsorted(zw, np.where(status == 0, h, zw[0]))
-    j = np.clip(j, 0, len(zw) - 2)
+    last = j >= len(zw) - 1           # cutoff at the last saved interface: no deeper one to test
+    jj = np.clip(j, 0, len(zw) - 2)
     us = implied_us(inc, np.where(status == 0, h, np.nan), first, zw)
-    z0, z1 = zw[j], zw[j + 1]
+    z0 = zw[np.clip(j, 0, len(zw) - 1)]
+    z1 = zw[jj + 1]
     pred = DT * us ** 3 * (RN_LC * np.sin(np.pi * z0 / z1)) ** 3 / z1
-    e0 = np.take_along_axis(e_in, j[..., None], -1)[..., 0]
+    e0 = np.take_along_axis(e_in, np.clip(j, 0, len(zw) - 1)[..., None], -1)[..., 0]
     with np.errstate(invalid="ignore"):
-        return (status == 0) & (pred < 2.0 * eps * np.abs(e0))
+        return (status == 0) & (last | (pred < 2.0 * eps * np.abs(e0)))
 
 
 def implied_us(inc, h, first, zw):

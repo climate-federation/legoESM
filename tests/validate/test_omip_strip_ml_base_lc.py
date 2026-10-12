@@ -68,11 +68,22 @@ def test_resolution_limited_flags_a_float32_dropout_and_not_a_resolved_cutoff():
     lim = P.resolution_limited(inc32[None], hl, first, st, zw, e_in[None].astype(np.float64),
                                np.finfo(np.float32).eps)
     assert lim[0]                                       # ... and is flagged
-    big = np.where(zw < h, P.DT * 0.08 ** 3 * w ** 3 / h, 0.0)
+    hi = zw[9]                                          # resolved cutoff at an interior interface
+    wi = P.RN_LC * np.sin(np.pi * zw / hi)
+    big = np.where(zw < hi, P.DT * 0.08 ** 3 * wi ** 3 / hi, 0.0)
     hb, fb, sb = P.lc_depth(big[None], zw)
-    assert sb[0] == 0 and np.isclose(hb[0], h)
+    assert sb[0] == 0 and np.isclose(hb[0], hi)
     assert not P.resolution_limited(big[None], hb, fb, sb, zw, np.full((1, 12), e),
                                     np.finfo(np.float32).eps)[0]
+
+
+def test_cutoff_at_last_saved_interface_is_resolution_limited():
+    zw = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+    inc = np.array([1e-6, 1e-6, 1e-6, 1e-6, 0.0])     # positive to 4 m, zero at the last saved level
+    h, f, st = P.lc_depth(inc[None], zw)
+    assert st[0] == 0 and h[0] == 5.0
+    assert P.resolution_limited(inc[None], h, f, st, zw, np.full((1, 5), 1e-3),
+                                np.finfo(np.float32).eps)[0]
 
 
 def test_share_excludes_nan_and_keeps_censored_deep():
