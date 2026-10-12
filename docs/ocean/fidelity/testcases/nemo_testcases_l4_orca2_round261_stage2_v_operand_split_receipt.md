@@ -127,8 +127,8 @@ The default cumulative receipt citation gate and this receipt's citation gate
 both pass with zero unmapped citations. Their JSON SHA-256 values are
 `aac1f66260e56a57771fb77efc9289333f87344c5333c528ee9a06a78e030a0c`
 and `ae86aa717f7bddbba151717863a67ec0d2e3cb1ac75816411dafcfb3bd7c4f69`.
-The planted one-line shift of `stprk3_stg.f90:168-170` turns the receipt gate
-red; the plant log SHA-256 is
+The planted one-line shift of the compiled stage-1 V-fold citation turns the
+receipt gate red; the plant log SHA-256 is
 `107aacee4cd7ba7c9ab9a997f597d6a338ed0f7a8cb259c57210a96b31c045a4`.
 
 ## OPEN
