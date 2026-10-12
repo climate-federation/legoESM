@@ -216,6 +216,15 @@ def measure_boundary(args: argparse.Namespace) -> dict[str, object]:
         kt4_final = jax.device_get(final_model.step(
             kt4_entry, card.dt_s, freshwater=freshwater,
             surface_forcing=surface))
+        kt5_stages = {}
+        kt5_errors = {}
+        for stage, model in zip((1, 2), stage_models, strict=True):
+            try:
+                kt5_stages[stage] = jax.device_get(model.step(
+                    kt4_final, card.dt_s, freshwater=freshwater,
+                    surface_forcing=surface))
+            except Exception as error:  # JAX wraps the fail-closed e3w guard.
+                kt5_errors[str(stage)] = str(error)
 
     candidate = {
         name: _live_w_row(card, stage_state)
@@ -230,6 +239,19 @@ def measure_boundary(args: argparse.Namespace) -> dict[str, object]:
     first_bad = next(
         (name for name in ("entry", "stage1", "stage2", "stage3")
          if candidate[name]["invalid_e3w_count"]), None)
+    candidate_kt5 = {"entry": _live_w_row(card, kt4_final)}
+    candidate_kt5.update({
+        f"stage{stage}": _live_w_row(card, stage_state)
+        for stage, stage_state in kt5_stages.items()
+    })
+    oracle_kt5 = {
+        name: _live_w_row(card, rung0.assemble_frame(args.frame_root, 5, stage))
+        for stage, name in enumerate(("entry", "stage1", "stage2"))
+    }
+    first_bad_kt5 = next(
+        (name for name in ("entry", "stage1", "stage2")
+         if name in candidate_kt5
+         and candidate_kt5[name]["invalid_e3w_count"]), None)
     return {
         "format": "nemo-testcase-l4-orca2-round247-live-w-boundary-v1",
         "status": "PASS_R247_LIVE_W_BOUNDARY_LOCATED",
@@ -239,6 +261,10 @@ def measure_boundary(args: argparse.Namespace) -> dict[str, object]:
         "candidate_kt4": candidate,
         "nemo_kt4": oracle,
         "first_bad_completed_boundary": first_bad,
+        "candidate_kt5": candidate_kt5,
+        "nemo_kt5": oracle_kt5,
+        "kt5_exposed_stage_errors": kt5_errors,
+        "first_bad_kt5_completed_boundary": first_bad_kt5,
         "kt5_guard": "raw-mesh e3w_int must contain only finite values > 0",
         "worktree": stamp,
     }
