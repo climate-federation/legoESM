@@ -11,8 +11,9 @@ between, lc, P, B, D, diff, floor, etau; the window sum telescopes to the e
 change), and at the window end: e, step-entry length l = sqrt(e_in)/dissl_in
 (omip_strip_mixing_length), inverse Prandtl K_H/K_M, N2 = -estrat/K_H,
 S2 = eshear/K_M(s-1), Ri = N2/S2 (omip_strip_prandtl_offline conventions).
-Ours closure K = applied - below-ML background (BG_A/BG_K, as the Prandtl
-probe).  Median and IQR of ours-NEMO over the cohort.  No verdict printed.
+Ours closure K = applied - below-ML background (BG_A/BG_K = the Prandtl
+probe's convention, whose NEMO-formula reproduction of our K/A was validated
+2026-10-10); used for 1/Pr, N2, S2, Ri only, on faces with K_M > 1e-5.  Median and IQR of ours-NEMO over the cohort.  No verdict printed.
 usage: omip_strip_gap_onset.py OUR_RUN NEMO_EN2_DIR [HG THR H0 H1]
 """
 import sys
@@ -162,28 +163,35 @@ def main(argv):
     # First divergence per column: first step after the reference hour HREF where
     # e_ours/e_NEMO < 0.9 at kg; cumulative ours-NEMO per term from HREF to that step.
     href = 2
-    sref = href * 24
-    ratio = le_end[sref:, cols, k] / ne_end[sref:, cols, k]
-    hit = ratio < 0.9
-    has = np.any(hit, 0) & (ratio[0] >= 0.9)          # already diverged at href: not an onset (codex)
-    first = np.argmax(hit, 0)
-    lead = {t: 0 for t in L.TERMS}
-    contrib = {t: [] for t in L.TERMS}
+    sref = href * 24                                     # first step after h2; end-of-h2 record = sref-1
+    ratio = le_end[sref - 1:, cols, k] / ne_end[sref - 1:, cols, k]   # ratio[0] = end of h2
+    hit = ratio[1:] < 0.9
+    has = np.any(hit, 0) & (ratio[0] >= 0.9)             # already diverged at end of h2: not an onset
+    first = np.argmax(hit, 0)                            # onset step = sref + first
+    groups = {"P+B": ("P", "B"), "D+diff": ("D", "diff"), "lc": ("lc",), "between+floor+etau": ("between", "floor", "etau")}
+    lead = {gname: 0 for gname in groups}
+    contrib = {gname: [] for gname in list(groups) + ["total"]}
+    incomplete = 0
+    onset_cols = []
     for c in np.where(has)[0]:
         s1c = sref + first[c] + 1
-        dd = {t: np.nansum(lo[t][sref:s1c, cols[c], k[c]]) - np.nansum(ln[t][sref:s1c, cols[c], k[c]]) for t in L.TERMS}
-        de = (ne_end[s1c - 1, cols[c], k[c]] - ne_end[sref - 1, cols[c], k[c]])
-        for t in L.TERMS:
-            contrib[t].append(dd[t] / max(abs(de), 1e-30))
-        contrib.setdefault("D+diff", []).append((dd["D"] + dd["diff"]) / max(abs(de), 1e-30))
-        contrib.setdefault("P+B", []).append((dd["P"] + dd["B"]) / max(abs(de), 1e-30))
-        contrib.setdefault("total", []).append(sum(dd.values()) / max(abs(de), 1e-30))
-        lead[min(dd, key=dd.get)] += 1
-    print(f"\nFirst divergence (e ours/NEMO < 0.9 at kg after h{href}, >= 0.9 at h{href}): {has.sum()} of {cols.size} cols; "
-          f"onset hour median {np.median(href + (first[has] + 1) / 24):.2f} [{np.percentile(href + (first[has] + 1) / 24, 25):.2f},"
-          f"{np.percentile(href + (first[has] + 1) / 24, 75):.2f}]")
-    print("  most-negative cumulative ours-NEMO term at onset (count): " + ", ".join(f"{t} {n}" for t, n in lead.items() if n))
-    print("  median contribution / |NEMO de| since h2: " + ", ".join(f"{t} {np.median(v):+.2f}" for t, v in contrib.items() if v and np.any(np.asarray(v) != 0)))
+        segs = {t: (lo[t][sref:s1c, cols[c], k[c]], ln[t][sref:s1c, cols[c], k[c]]) for t in L.TERMS}
+        if not all(np.all(np.isfinite(o)) and np.all(np.isfinite(n_)) for o, n_ in segs.values()):
+            incomplete += 1
+            continue
+        dd = {t: np.sum(o) - np.sum(n_) for t, (o, n_) in segs.items()}
+        de = abs(ne_end[s1c - 1, cols[c], k[c]] - ne_end[sref - 1, cols[c], k[c]])
+        gd = {gname: sum(dd[t] for t in ts) for gname, ts in groups.items()}
+        for gname, v in gd.items():
+            contrib[gname].append(v / max(de, 1e-30))
+        contrib["total"].append(sum(dd.values()) / max(de, 1e-30))
+        lead[min(gd, key=gd.get)] += 1
+        onset_cols.append(c)
+    oh = href + (first[has] + 1) / 24
+    print(f"\nFirst divergence (e ours/NEMO < 0.9 at kg after h{href}, >= 0.9 at end of h{href}): {has.sum()} of {cols.size} cols "
+          f"({incomplete} dropped for incomplete windows); onset hour median {np.median(oh):.2f} [{np.percentile(oh, 25):.2f},{np.percentile(oh, 75):.2f}]")
+    print("  most-negative cumulative ours-NEMO term GROUP at onset (count): " + ", ".join(f"{t} {n}" for t, n in lead.items()))
+    print("  median group contribution / |NEMO de| since end of h2: " + ", ".join(f"{t} {np.median(v):+.2f}" for t, v in contrib.items() if v))
 
     # (1) NEMO's 2e-5 TKE-diffusion floor, measured on NEMO's own operator:
     # cumulative floor part = direct(2e-5) - direct(0) at kg, h2 -> each column's onset
@@ -191,7 +199,7 @@ def main(argv):
     d_fl = L.nemo_diff_direct(ne_pfl, avm_prev, sj, si, nk, avm_floor=2e-5)
     d_nf = L.nemo_diff_direct(ne_pfl, avm_prev, sj, si, nk, avm_floor=0.0)
     fl, nbad = [], 0
-    for c in np.where(has)[0]:
+    for c in onset_cols:
         s1c = sref + first[c] + 1
         seg = d_fl[sref:s1c, cols[c], k[c]] - d_nf[sref:s1c, cols[c], k[c]]
         if not np.all(np.isfinite(seg)):
@@ -231,36 +239,44 @@ def main(argv):
     shN = np.asarray(d["eshear_k"][:, 1:nk + 1], dtype=np.float64).transpose(0, 2, 3, 1)
     shN[np.abs(shN) > 1e15] = np.nan
 
-    # instrument gate (NEMO): face form, now(s-1) x before(s-2), avm_k(s-1) vs eshear_k(s)
+    # instrument gate (NEMO): face form with step-entry shear squared -- ORCA1EN2 is an
+    # RK3 build, stprk3.f90:155 zdf_phy(Nbb,Nbb), so NEMO's now and before coincide --
+    # avm_k(s-1) vs eshear_k(s); coverage >= 90% finite-positive or FAIL, and the
+    # dependent production comparison is withheld on FAIL (codex)
     ss = np.arange(sref, sref + 3 * 24)
     rr = []
     for c in range(cols.size):
         jj, ii = sj[cols[c]], si[cols[c]]
-        f_, _ = face_nb(Un[ss - 1], Un[ss - 2], Vn[ss - 1], Vn[ss - 2], An[ss - 1], dzt, jj, ii, k[c])
+        f_, _ = face_nb(Un[ss - 1], Un[ss - 1], Vn[ss - 1], Vn[ss - 1], An[ss - 1], dzt, jj, ii, k[c])
         rr.append(f_ / shN[ss, jj, ii, k[c]])
-    rr = np.concatenate(rr); rr = rr[np.isfinite(rr) & (rr > 0)]
-    q = np.percentile(rr, [10, 25, 50, 75, 90])
-    gate = (q[1] > 0.9) and (q[3] < 1.1)
-    print(f"GATE NEMO face form (now x before) / eshear_k at cohort kg h{href}-h{href + 3}: p10..p90 "
-          + " ".join(f"{x:.3f}" for x in q) + f"  n={rr.size}  -> {'PASS' if gate else 'FAIL'} (IQR within 0.9-1.1)")
+    rr = np.concatenate(rr)
+    good = np.isfinite(rr) & (rr > 0)
+    cover = good.mean()
+    q = np.percentile(rr[good], [10, 25, 50, 75, 90]) if good.any() else np.full(5, np.nan)
+    gate = bool(cover >= 0.9 and q[1] > 0.9 and q[3] < 1.1)
+    print(f"GATE NEMO face form (step-entry shear^2) / eshear_k at cohort kg h{href}-h{href + 3}: coverage {cover:.3f}, p10..p90 "
+          + " ".join(f"{x:.3f}" for x in q) + f"  n={rr.size}  -> {'PASS' if gate else 'FAIL'} (coverage >= 0.9, IQR within 0.9-1.1)")
+    if not gate:
+        print("  production comparison WITHHELD (instrument gate failed)")
     # our side: reconstructed centred production with our own nu reproduces eshear by
     # construction; the substantive check is that nu_o is a smooth closure field:
     # report nu_o vs applied A (must be <= A, ~ A - background where turbulent)
     s = 8 * 24 - 1
     nu_c = np.array([NUo[s, sj[c_], si[c_], k_] for c_, k_ in zip(cols, k)])
     print(f"ours nu_eff = eshear/S2c(s-1) at kg, h8: median {np.nanmedian(nu_c):.2e}; applied A there {np.nanmedian(pick(Ao_app, s - 1)):.2e}")
-    print("Production at kg (window-end step), median over cohort, / NEMO eshear_k (col median):")
-    print("  h | ours recorded (centred, T-pt nu) | ours face-geometry, T-pt nu | ours face-geometry, face-summed nu || NEMO face/T-pt ratio")
-    for h in range(href, min(h1, 9)):
-        s = (h + 1) * 24 - 1
-        r_rec, r_tp, r_fc, r_n = [], [], [], []
-        for c in range(cols.size):
-            jj, ii = sj[cols[c]], si[cols[c]]
-            fo_, to_ = face_nb(Uo[s - 1], Uo[s - 2], Vo[s - 1], Vo[s - 2], NUo[s], dzt, jj, ii, k[c])
-            fn_, tn_ = face_nb(Un[s - 1], Un[s - 2], Vn[s - 1], Vn[s - 2], An[s - 1], dzt, jj, ii, k[c])
-            ref = shN[s, jj, ii, k[c]]
-            r_rec.append(SHo[s, jj, ii, k[c]] / ref); r_tp.append(to_ / ref); r_fc.append(fo_ / ref); r_n.append(fn_ / tn_)
-        print(f"  h{h + 1:02d} | {np.nanmedian(r_rec):6.2f} | {np.nanmedian(r_tp):6.2f} | {np.nanmedian(r_fc):6.2f} || {np.nanmedian(r_n):6.2f}")
+    if gate:
+        print("Production at kg (window-end step), median over cohort, / NEMO eshear_k (col median):")
+        print("  h | ours recorded (centred, T-pt nu) | ours face-geometry, T-pt nu | ours face-geometry, face-summed nu || NEMO face/T-pt ratio")
+        for h in range(href, min(h1, 9)):
+            s = (h + 1) * 24 - 1
+            r_rec, r_tp, r_fc, r_n = [], [], [], []
+            for c in range(cols.size):
+                jj, ii = sj[cols[c]], si[cols[c]]
+                fo_, to_ = face_nb(Uo[s - 1], Uo[s - 1], Vo[s - 1], Vo[s - 1], NUo[s], dzt, jj, ii, k[c])
+                fn_, tn_ = face_nb(Un[s - 1], Un[s - 1], Vn[s - 1], Vn[s - 1], An[s - 1], dzt, jj, ii, k[c])
+                ref = shN[s, jj, ii, k[c]]
+                r_rec.append(SHo[s, jj, ii, k[c]] / ref); r_tp.append(to_ / ref); r_fc.append(fo_ / ref); r_n.append(fn_ / tn_)
+            print(f"  h{h + 1:02d} | {np.nanmedian(r_rec):6.2f} | {np.nanmedian(r_tp):6.2f} | {np.nanmedian(r_fc):6.2f} || {np.nanmedian(r_n):6.2f}")
     # selection-bias control (GLM): unconditional face/T-pt ratio, all interior columns, interfaces 10-25 m
     kk_rng = np.where((zw >= 10.0) & (zw <= 25.0))[0]
     jin, iin = np.meshgrid(np.arange(L.BUF, 13 - L.BUF), np.arange(L.BUF, 31 - L.BUF), indexing="ij")
@@ -269,8 +285,8 @@ def main(argv):
         s = h * 24 - 1
         ro, rn_ = [], []
         for kint in kk_rng:
-            f1, t1 = face_nb(Uo[s - 1], Uo[s - 2], Vo[s - 1], Vo[s - 2], NUo[s], dzt, jin, iin, kint)
-            f2, t2 = face_nb(Un[s - 1], Un[s - 2], Vn[s - 1], Vn[s - 2], An[s - 1], dzt, jin, iin, kint)
+            f1, t1 = face_nb(Uo[s - 1], Uo[s - 1], Vo[s - 1], Vo[s - 1], NUo[s], dzt, jin, iin, kint)
+            f2, t2 = face_nb(Un[s - 1], Un[s - 1], Vn[s - 1], Vn[s - 1], An[s - 1], dzt, jin, iin, kint)
             ro.append((f1 / t1).ravel()); rn_.append((f2 / t2).ravel())
         ro, rn_ = np.concatenate(ro), np.concatenate(rn_)
         ro, rn_ = ro[np.isfinite(ro) & (ro > 0)], rn_[np.isfinite(rn_) & (rn_ > 0)]
