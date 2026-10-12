@@ -6299,6 +6299,8 @@ class LatLonCGridOceanModel:
         _v_pair = jnp.sum(jnp.stack([h_v_pre, dv_dt * h_v_pre], axis=-1), axis=-2)
         H_v_pre = jnp.maximum(_v_pair[..., 0], 1e-10)
         F_slow_v = _v_pair[..., 1] / H_v_pre * state.v_mask.data
+        _slow_surface_u_mask = state.u_mask.data
+        _slow_surface_v_mask = state.v_mask.data
         # NEMO's own depth average of the slow forcing (stp2d.F90:177-186 of
         # the VORTEX_SMT builds): the REFERENCE face thickness and the STORED
         # reciprocal, with no ssh stretching anywhere in the statement --
@@ -6365,6 +6367,18 @@ class LatLonCGridOceanModel:
                 and _fold0 is not None
                 and bool(getattr(_fold0, "is_active", False)))
             if _atomic_hpg_unit:
+                # stp2d.f90:198-230 and dynspg_ts.f90:1461-1463 use NEMO's
+                # mesh surface masks, not the compact masks reconstructed by
+                # the generic state.  Reuse D114's one resolved operand source
+                # for every later slow-forcing association; the redundant
+                # west/south halo remains unchanged.
+                _resolved_ops0 = nemo_qco_resolved_mesh_operands(
+                    _zc, _grid, _um3, _vm3, du_dt.dtype,
+                    state.T.data.shape[-1])
+                _slow_surface_u_mask = _slow_surface_u_mask.at[:, 1:].set(
+                    jnp.max(_resolved_ops0.umask3, axis=-1))
+                _slow_surface_v_mask = _slow_surface_v_mask.at[1:, :].set(
+                    jnp.max(_resolved_ops0.vmask3, axis=-1))
                 _raw_e3v0 = jnp.asarray(
                     _raw0.e3v_0, dtype=du_dt.dtype)[..., :du_dt.shape[-1]]
                 _raw_vmask0 = jnp.asarray(
@@ -6402,9 +6416,9 @@ class LatLonCGridOceanModel:
                 _slow_v_native = jnp.where(
                     _fold_unit_v, _raw_slow_v, _slow_v_native)
             F_slow_u = (F_slow_u.at[:, 1:].set(_slow_u_native)
-                        * state.u_mask.data)
+                        * _slow_surface_u_mask)
             F_slow_v = F_slow_v.at[1:, :].set(_slow_v_native)
-            F_slow_v_masked = F_slow_v * state.v_mask.data
+            F_slow_v_masked = F_slow_v * _slow_surface_v_mask
             if _atomic_hpg_unit:
                 F_slow_v = F_slow_v_masked.at[1:, :].set(
                     jnp.where(
@@ -6496,9 +6510,9 @@ class LatLonCGridOceanModel:
                         nemo_source_round(_wind_r1_rho0 * _wind_tau_j_v)
                         * _wind_r1_hv)
                     F_slow_u = nemo_source_round(
-                        F_slow_u + _wind_increment_u) * state.u_mask.data
+                        F_slow_u + _wind_increment_u) * _slow_surface_u_mask
                     F_slow_v = nemo_source_round(
-                        F_slow_v + _wind_increment_v) * state.v_mask.data
+                        F_slow_v + _wind_increment_v) * _slow_surface_v_mask
                 else:
                     _wind_increment_u = _tau_i_u / (_r0 * H_u_pre) \
                         * state.u_mask.data
@@ -6557,10 +6571,10 @@ class LatLonCGridOceanModel:
             _V_bar_now = jnp.sum(_v_src * h_v_pre, axis=-1) / H_v_pre
             F_slow_u = (F_slow_u
                         - _r_u_bt.astype(F_slow_u.dtype) / H_u_pre
-                        * (_u_bot - _U_bar_now)) * state.u_mask.data
+                        * (_u_bot - _U_bar_now)) * _slow_surface_u_mask
             F_slow_v = (F_slow_v
                         - _r_v_bt.astype(F_slow_v.dtype) / H_v_pre
-                        * (_v_bot - _V_bar_now)) * state.v_mask.data
+                        * (_v_bot - _V_bar_now)) * _slow_surface_v_mask
         _slow_drag_override = (
             self._nemo_ws_test_hooks.slow_forcing_drag_override)
         if _slow_drag_override is not None:
@@ -6570,9 +6584,9 @@ class LatLonCGridOceanModel:
             _F_slow_drag_u = F_slow_u
             _F_slow_drag_v = F_slow_v
             F_slow_u = nemo_source_round(
-                F_slow_u + _wind_increment_u) * state.u_mask.data
+                F_slow_u + _wind_increment_u) * _slow_surface_u_mask
             F_slow_v = nemo_source_round(
-                F_slow_v + _wind_increment_v) * state.v_mask.data
+                F_slow_v + _wind_increment_v) * _slow_surface_v_mask
             _F_slow_wind_u = F_slow_u
             _F_slow_wind_v = F_slow_v
         else:
@@ -6614,8 +6628,8 @@ class LatLonCGridOceanModel:
             scale_v_b = scale_v.astype(F_slow_v.dtype)[:, None]
             F_slow_u = F_slow_u - nu4 * scale_u_b * bilap_U.astype(F_slow_u.dtype)
             F_slow_v = F_slow_v - nu4 * scale_v_b * bilap_V.astype(F_slow_v.dtype)
-            F_slow_u = F_slow_u * state.u_mask.data
-            F_slow_v = F_slow_v * state.v_mask.data
+            F_slow_u = F_slow_u * _slow_surface_u_mask
+            F_slow_v = F_slow_v * _slow_surface_v_mask
 
         # AB2 time-centering of the barotropic slow forcing (matches the
         # Oceananigans split-explicit Gᵁ = AB2-extrapolated depth-integral).
@@ -6650,8 +6664,8 @@ class LatLonCGridOceanModel:
                     "them as in build_silvestri_baroclinic_jet_setup.")
             _eps = _cfg_b.ab2_epsilon
             _an, _ap = 1.5 + _eps, 0.5 + _eps
-            F_slow_u = (_an * F_slow_u - _ap * _fpu.data) * state.u_mask.data
-            F_slow_v = (_an * F_slow_v - _ap * _fpv.data) * state.v_mask.data
+            F_slow_u = (_an * F_slow_u - _ap * _fpu.data) * _slow_surface_u_mask
+            F_slow_v = (_an * F_slow_v - _ap * _fpv.data) * _slow_surface_v_mask
 
         # Outer baroclinic momentum integrator (NEMO-mirror, #RK3).  The
         # cold-start amplifiers (pressure gradient + KE gradient + relative
@@ -7284,8 +7298,8 @@ class LatLonCGridOceanModel:
                         entry_barotropic_velocity=_nemo_carried_baro)
                     if _een_eval == "nemo_literal":
                         _een_pre_shared = _een_pre_built
-                    F_slow_u = (F_slow_u - _cor_u_sub) * state.u_mask.data
-                    F_slow_v = (F_slow_v - _cor_v_sub) * state.v_mask.data
+                    F_slow_u = (F_slow_u - _cor_u_sub) * _slow_surface_u_mask
+                    F_slow_v = (F_slow_v - _cor_v_sub) * _slow_surface_v_mask
                     _slow_final_override = self._nemo_ws_test_hooks.barotropic_slow_forcing_override
                     if callable(_slow_final_override):
                         jax.debug.callback(
@@ -7331,8 +7345,8 @@ class LatLonCGridOceanModel:
                                       + _V_w[:-1] + _V_w[1:])
                     _V_at_u = jnp.concatenate([_V_at_u, _V_at_u[:, 0:1]], axis=1)
                     _U_at_v = interp_u_to_vface_4pt(_U_pre, _grid)
-                    F_slow_u = (F_slow_u - _f_u2 * _V_at_u) * state.u_mask.data
-                    F_slow_v = (F_slow_v + _f_v2 * _U_at_v) * state.v_mask.data
+                    F_slow_u = (F_slow_u - _f_u2 * _V_at_u) * _slow_surface_u_mask
+                    F_slow_v = (F_slow_v + _f_v2 * _U_at_v) * _slow_surface_v_mask
                     _add_bt_cor = True
             if _cfg_b.barotropic.barotropic_wide_halo:
                 # Opt-in wide-halo subcycle: one fused wide exchange per

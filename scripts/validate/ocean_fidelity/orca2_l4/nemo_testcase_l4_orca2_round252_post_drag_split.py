@@ -41,7 +41,7 @@ SOURCE_ORDER = (
     "bottom_velocity", "barotropic_velocity", "bottom_residual",
     "drag_increment", "unmasked_post_drag", "compact_surface_mask",
     "observed_post_drag", "resolved_surface_mask", "resolved_post_drag",
-    "resolved_final_slow_v",
+    "observed_final_slow_v", "resolved_final_slow_v",
 )
 PLANTS = (
     "none", "label-coverage", "production-route", "admission", "passivity",
@@ -86,7 +86,8 @@ def _mask_product(value, mask) -> np.ndarray:
 
 
 def measure(deck_root: Path, frame_root: Path, twin_a: Path, twin_b: Path,
-            label: str, expect_commit: str) -> dict[str, object]:
+            label: str, expect_commit: str, *, candidate: bool = False,
+            ) -> dict[str, object]:
     import jax
     import jax.numpy as jnp
     from legoesm.ocean.dynamics.latlon_cgrid_operators import min_cell_to_vface
@@ -203,6 +204,9 @@ def measure(deck_root: Path, frame_root: Path, twin_a: Path, twin_b: Path,
         candidate["unmasked_post_drag"], resolved_surface_mask)
     candidate["resolved_post_drag"] = resolved_post_drag
     oracle["resolved_post_drag"] = oracle["observed_post_drag"]
+    candidate["observed_final_slow_v"] = _native_v(producer["final_v"])
+    oracle["observed_final_slow_v"] = np.asarray(
+        substeps["slow_v"][0], np.float64)
 
     wind_increment = r251._wind_increment(
         producer["wind_r1_rho0"], _native_v(producer["wind_tau_v"]),
@@ -218,31 +222,38 @@ def measure(deck_root: Path, frame_root: Path, twin_a: Path, twin_b: Path,
     oracle["resolved_final_slow_v"] = np.asarray(
         substeps["slow_v"][0], np.float64)
 
-    owner = candidate["observed_post_drag"] != oracle["observed_post_drag"]
-    require(int(np.count_nonzero(owner)) == 35,
-            f"post-drag support moved: {np.count_nonzero(owner)} != 35")
-    require(int(np.count_nonzero(owner[:-3])) == 0,
-            "post-drag support escaped the fold band")
-    rows = {name: r236._row(candidate[name], oracle[name], owner)
+    support_mask = compact_surface_mask != resolved_surface_mask
+    require(int(np.count_nonzero(support_mask)) == 35,
+            f"registered mask support moved: {np.count_nonzero(support_mask)} != 35")
+    require(int(np.count_nonzero(support_mask[:-3])) == 0,
+            "registered mask support escaped the fold band")
+    rows = {name: r236._row(candidate[name], oracle[name], support_mask)
             for name in SOURCE_ORDER}
     replays = {
         "compact_mask_to_observed": r236._row(
-            compact_replay, candidate["observed_post_drag"], owner),
+            compact_replay, candidate["observed_post_drag"], support_mask),
         "unmasked_to_oracle": r236._row(
-            candidate["unmasked_post_drag"], oracle["observed_post_drag"], owner),
+            candidate["unmasked_post_drag"], oracle["observed_post_drag"], support_mask),
         "resolved_post_drag_to_oracle": r236._row(
-            resolved_post_drag, oracle["observed_post_drag"], owner),
+            resolved_post_drag, oracle["observed_post_drag"], support_mask),
         "resolved_final_to_oracle": r236._row(
-            resolved_final, oracle["resolved_final_slow_v"], owner),
+            resolved_final, oracle["resolved_final_slow_v"], support_mask),
     }
     mask_delta = compact_surface_mask != resolved_surface_mask
     changed = compact_replay != resolved_post_drag
     support = {
-        "owner_unequal": int(np.count_nonzero(owner)),
+        "registered_unequal": int(np.count_nonzero(support_mask)),
+        "observed_post_drag_unequal": int(np.count_nonzero(
+            candidate["observed_post_drag"] != oracle["observed_post_drag"])),
+        "observed_final_unequal": int(np.count_nonzero(
+            candidate["observed_final_slow_v"]
+            != oracle["observed_final_slow_v"])),
         "mask_unequal": int(np.count_nonzero(mask_delta)),
         "changed_unequal": int(np.count_nonzero(changed)),
-        "mask_outside_owner": int(np.count_nonzero(mask_delta & ~owner)),
-        "changed_outside_owner": int(np.count_nonzero(changed & ~owner)),
+        "mask_outside_registered": int(np.count_nonzero(
+            mask_delta & ~support_mask)),
+        "changed_outside_registered": int(np.count_nonzero(
+            changed & ~support_mask)),
     }
     first_output = next((name for name in (
         "depth_mean_v", "drag_increment", "unmasked_post_drag",
@@ -251,6 +262,7 @@ def measure(deck_root: Path, frame_root: Path, twin_a: Path, twin_b: Path,
         "format": "nemo-testcase-l4-orca2-round252-post-drag-split-v1",
         "status": "PASS_R252_POST_DRAG_SPLIT",
         "label": label,
+        "claim_mode": "resolved-mask-candidate" if candidate else "baseline",
         "operand_route": "production-d114-resolved",
         "execution": "production-jit-cpu-fp64-x64-libm",
         "worktree": stamp,
@@ -293,7 +305,7 @@ def classify(reports: list[dict[str, object]], *, plant: str = "none") -> dict:
     elif plant == "source-order":
         report["source_order"][0:2] = reversed(report["source_order"][0:2])
     elif plant == "owner-support":
-        report["support"]["owner_unequal"] = 34
+        report["support"]["registered_unequal"] = 34
     elif plant == "unmasked-replay":
         report["replays"]["unmasked_to_oracle"]["bit_exact"] = False
     elif plant == "compact-replay":
@@ -301,6 +313,11 @@ def classify(reports: list[dict[str, object]], *, plant: str = "none") -> dict:
     elif plant == "resolved-closure":
         report["replays"]["resolved_final_to_oracle"]["bit_exact"] = False
 
+    modes = {item.get("claim_mode", "baseline") for item in by_label.values()}
+    require(len(modes) == 1, "claim labels disagree on baseline/candidate mode")
+    mode = next(iter(modes))
+    require(mode in ("baseline", "resolved-mask-candidate"),
+            f"unknown claim mode {mode!r}")
     summary = {}
     for label, item in by_label.items():
         require(item["status"] == "PASS_R252_POST_DRAG_SPLIT",
@@ -315,10 +332,14 @@ def classify(reports: list[dict[str, object]], *, plant: str = "none") -> dict:
                 f"{label}: an override is active")
         require(tuple(item["source_order"]) == SOURCE_ORDER,
                 f"{label}: source order moved")
+        expected_observed = 35 if mode == "baseline" else 0
         require(item["support"] == {
-            "owner_unequal": 35, "mask_unequal": 35, "changed_unequal": 35,
-            "mask_outside_owner": 0, "changed_outside_owner": 0,
-        }, f"{label}: owner/mask support moved")
+            "registered_unequal": 35,
+            "observed_post_drag_unequal": expected_observed,
+            "observed_final_unequal": expected_observed,
+            "mask_unequal": 35, "changed_unequal": 35,
+            "mask_outside_registered": 0, "changed_outside_registered": 0,
+        }, f"{label}: registered/mask support moved")
         rows = item["rows"]
         require(rows["depth_mean_v"]["bit_exact"],
                 f"{label}: pre-drag depth mean is not exact")
@@ -326,23 +347,29 @@ def classify(reports: list[dict[str, object]], *, plant: str = "none") -> dict:
                 f"{label}: literal drag increment is not exact")
         require(rows["unmasked_post_drag"]["bit_exact"],
                 f"{label}: unmasked drag addition is not exact")
-        require(not rows["compact_surface_mask"]["bit_exact"]
-                and not rows["observed_post_drag"]["at_floor"],
-                f"{label}: compact-mask owner signature moved")
+        require(not rows["compact_surface_mask"]["bit_exact"],
+                f"{label}: compact-mask discriminator moved")
         require(rows["resolved_surface_mask"]["bit_exact"]
                 and rows["resolved_post_drag"]["bit_exact"]
                 and rows["resolved_final_slow_v"]["bit_exact"],
                 f"{label}: resolved-mask closure moved")
         replays = item["replays"]
-        require(replays["compact_mask_to_observed"]["bit_exact"],
-                f"{label}: compact mask does not replay observed post-drag")
+        require((replays["compact_mask_to_observed"]["bit_exact"])
+                == (mode == "baseline"),
+                f"{label}: compact-mask baseline/candidate discriminator moved")
         require(replays["unmasked_to_oracle"]["bit_exact"],
                 f"{label}: unmasked addition does not replay NEMO")
         require(replays["resolved_post_drag_to_oracle"]["bit_exact"]
                 and replays["resolved_final_to_oracle"]["bit_exact"],
                 f"{label}: resolved mask does not close the direct chain")
-        require(item["first_nonbit_output"] == "observed_post_drag",
+        require(item["first_nonbit_output"]
+                == ("observed_post_drag" if mode == "baseline" else None),
                 f"{label}: first non-bit output moved")
+        require(rows["observed_post_drag"]["bit_exact"]
+                == (mode == "resolved-mask-candidate")
+                and rows["observed_final_slow_v"]["bit_exact"]
+                == (mode == "resolved-mask-candidate"),
+                f"{label}: observed direct-chain closure moved")
         summary[label] = {
             "rows": rows, "replays": replays, "support": item["support"],
             "first_nonbit_output": item["first_nonbit_output"],
@@ -352,13 +379,19 @@ def classify(reports: list[dict[str, object]], *, plant: str = "none") -> dict:
     require(plant == "none", f"{plant} plant stayed green")
     return {
         "format": "nemo-testcase-l4-orca2-round252-classification-v1",
-        "status": "CONFIRMED_R252_COMPACT_DRAG_MASK_OWNER",
+        "status": (
+            "PASS_R252_RESOLVED_MASK_CANDIDATE"
+            if mode == "resolved-mask-candidate"
+            else "CONFIRMED_R252_COMPACT_DRAG_MASK_OWNER"),
         "source_order": list(SOURCE_ORDER),
         "labels": summary,
         "predictions": {
             "R252-P1": "CONFIRMED_ADMITTED_PASSIVE_NO_OVERRIDE",
             "R252-P2": "CONFIRMED_COMPACT_DRAG_MASK_FIRST_NONBIT_OUTPUT",
-            "R252-P3": "CONFIRMED_RESOLVED_MASK_CLOSES_DIRECT_CHAIN",
+            "R252-P3": (
+                "CONFIRMED_PRODUCTION_RESOLVED_MASK_CLOSES_DIRECT_CHAIN"
+                if mode == "resolved-mask-candidate"
+                else "CONFIRMED_OFFLINE_RESOLVED_MASK_CLOSES_DIRECT_CHAIN"),
             "R252-P4": "NOT_REACHED_PENDING_PRODUCTION_CANDIDATE",
             "R252-P5": "NOT_REACHED",
             "R252-P6": "CONFIRMED" if plant == "none" else "PLANT",
@@ -375,6 +408,7 @@ def main() -> int:
     parser.add_argument("--twin-b", type=Path)
     parser.add_argument("--label", choices=LABELS)
     parser.add_argument("--expect-commit")
+    parser.add_argument("--candidate", action="store_true")
     parser.add_argument("--reports", nargs=2, type=Path)
     parser.add_argument("--plant", choices=PLANTS, default="none")
     parser.add_argument("--output", type=Path)
@@ -387,7 +421,7 @@ def main() -> int:
             require(args.plant == "none", "plants apply only to classification")
             result = measure(
                 args.deck_root, args.frame_root, args.twin_a, args.twin_b,
-                args.label, args.expect_commit,
+                args.label, args.expect_commit, candidate=args.candidate,
             )
         else:
             require(args.reports is not None, "classification reports missing")
