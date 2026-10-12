@@ -110,13 +110,10 @@ clean-review claim is made.
 
 ## Acquisition needed
 
-The operator's 30-day acquisition command was already in progress when this
-round began. Await its admission at:
-
-```text
-bash scripts/validate/ocean_fidelity/testcases/nemo_testcase_l1_swg/run_30d.sh --deck maddison --run
-  -> /data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgdg_rounds/round1/oracle_swg_dg_r1_30d/swg_dg_round1_30d_admission.json
-```
+The 30-day admission appeared after the frozen conditional decision point at
+`round1/oracle_swg_dg_r1_30d/swg_dg_round1_30d_admission.json`. It is not
+reopened post hoc here; the ladders remain Round 4 work as preregistered. No
+further NEMO acquisition is requested by this receipt.
 
 Run the committed GPU profile and full-resolution parity check on physical
 GPU 1 in an environment that exposes CUDA:
