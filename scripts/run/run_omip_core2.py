@@ -1164,14 +1164,6 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
             raise ValueError(
                 f"orca1_zdftke_config shear_avm_weighting {shear_avm_weighting!r} "
                 "invalid; expected 'tpoint' or 'nemo_face'.")
-        if shear_avm_weighting == "nemo_face" and _cfg.tke_shear_production not in (
-                "nemo_face_native", "nemo_face_native_now2",
-                "nemo_face_native_nbb2"):
-            raise ValueError(
-                "shear_avm_weighting='nemo_face' needs a face-native shear "
-                "geometry (--tke-shear-production nemo_face_native_nbb2 on the "
-                "key_RK3 ORCA1 card); got tke_shear_production="
-                f"{_cfg.tke_shear_production!r}.")
         _cfg = _cfg._replace(tke_shear_avm_weighting=shear_avm_weighting)
     # Prandtl number (``--tke-prandtl-mode``).  DEFAULT keeps the card value
     # ("richardson": Pr = clamp(Ri/ri_cri, 1, 10) on the gradient Ri =
@@ -8360,9 +8352,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "T-collapsed shear). 'nemo_face' is NEMO zdf_sh2 "
                         "(zdfsh2.F90:80-94): avm(i+1)+avm(i) summed on each "
                         "u/v face, times that face's shear, then the 0.25 "
-                        "coast-doubled T combine. Requires a face-native "
-                        "--tke-shear-production (nemo_face_native_nbb2 on the "
-                        "key_RK3 ORCA1 card). Tripole only.")
+                        "coast-doubled T combine. Tripole: requires a "
+                        "face-native --tke-shear-production "
+                        "(nemo_face_native_nbb2 on the key_RK3 ORCA1 card). "
+                        "MPAS (--mpas-vmix tke): the same sum on the Voronoi "
+                        "edges.")
     p.add_argument("--tke-shear-production", type=str, default=None,
                    choices=["squared_centered", "nemo_face_native",
                             "nemo_face_native_now2",
@@ -8692,11 +8686,22 @@ def main() -> int:
     p = _build_arg_parser()
     args = p.parse_args()
     if args.tke_shear_avm_weighting is not None and not (
-            args.grid == "tripole" and args.tripole_vmix == "tke"):
+            (args.grid == "tripole" and args.tripole_vmix == "tke")
+            or (args.grid == "mpas" and args.mpas_vmix == "tke")):
         raise SystemExit(
-            "--tke-shear-avm-weighting needs the raw C-grid u/v faces and is "
-            "wired ONLY for --grid tripole --tripole-vmix tke; got --grid "
-            f"{args.grid!r} --tripole-vmix {args.tripole_vmix!r}.")
+            "--tke-shear-avm-weighting is wired for --grid tripole "
+            "--tripole-vmix tke (C-grid faces) and --grid mpas --mpas-vmix tke "
+            f"(Voronoi edges); got --grid {args.grid!r}.")
+    # The tripole builds zdf_sh2 from its C-grid face arrays, which only the
+    # face-native shear geometries supply; MPAS builds it from its own edges.
+    if (args.grid == "tripole" and args.tke_shear_avm_weighting == "nemo_face"
+            and args.tke_shear_production not in (
+                "nemo_face_native", "nemo_face_native_now2",
+                "nemo_face_native_nbb2")):
+        raise SystemExit(
+            "--tke-shear-avm-weighting nemo_face on the tripole needs a "
+            "face-native --tke-shear-production (nemo_face_native_nbb2 on the "
+            f"key_RK3 ORCA1 card); got {args.tke_shear_production!r}.")
     if args.tke_prandtl_mode is not None and not (
             (args.grid == "tripole" and args.tripole_vmix == "tke")
             or (args.grid == "mpas" and args.mpas_vmix == "tke")
@@ -9537,7 +9542,8 @@ def main() -> int:
                     tke_lc=args.tke_lc, tke_etau=args.tke_etau,
                     tke_kappah_min=args.tke_kappah_min,
                     tke_langmuir_rhs_coupling=args.tke_langmuir_rhs_coupling,
-                    tke_prandtl_mode=args.tke_prandtl_mode)
+                    tke_prandtl_mode=args.tke_prandtl_mode,
+                    tke_shear_avm_weighting=args.tke_shear_avm_weighting)
                 if args.mpas_vmix == "tke"
                 else _kpp_vmix_override(args.kpp_ri_crit, args.kpp_cv,
                                         args.kpp_eice)),

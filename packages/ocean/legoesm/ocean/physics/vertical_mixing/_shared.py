@@ -456,6 +456,82 @@ def avm_weighted_shear_production(
     return p_sh2
 
 
+def edge_avm_weighted_shear_production(
+    u_edge: jnp.ndarray,
+    dz_half: jnp.ndarray,
+    kappaM: jnp.ndarray,
+    active: jnp.ndarray,
+    cells_on_edge: jnp.ndarray,
+    edges_on_cell: jnp.ndarray,
+    dc_edge: jnp.ndarray,
+    dv_edge: jnp.ndarray,
+    area_cell: jnp.ndarray,
+) -> jnp.ndarray:
+    r"""NEMO ``zdf_sh2`` (``zdfsh2.F90:78-94``) on a Voronoi C-grid (MPAS).
+
+    NEMO forms, per C-grid face and w-level, ``zsh2 = (avm(i+1)+avm(i)) *
+    du_Kmm * du_Kbb / (e3uw_Kmm e3uw_Kbb) * wumask`` and then
+    ``p_sh2 = 0.25 * [(zsh2u(i-1)+zsh2u(i)) * (2-umask(i-1)umask(i)) +
+    (zsh2v(j-1)+zsh2v(j)) * (2-vmask(j-1)vmask(j))]``.  On the Voronoi grid
+    the faces are the edges of the cell and ``u_edge`` is the edge-normal
+    velocity, so per edge ``e`` = (c1, c2) and interface ``k``::
+
+        zsh2_e = (avm[c1] + avm[c2]) * (u_e[k] - u_e[k+1])**2 / dz_e**2 * wet_e
+        p_sh2[c] = sum_e w_e * zsh2_e * coast_e,   w_e = dc_e dv_e / (4 A_c)
+
+    Weights.  ``w_e`` is the MPAS energy-conserving kinetic-energy weight
+    (KE_c = sum_e w_e u_e**2).  On a rectangle every edge has dc_e dv_e = A_c,
+    so w_e = 1/4: NEMO's 0.25 term for term.  For uniform ``avm`` the sum is
+    ``avm * sum_e (dc_e dv_e / (2 A_c)) S_e``, which equals ``avm |du/dz|**2``
+    for a horizontally uniform shear because ``sum_e (dc_e dv_e/(2A_c)) n_e
+    n_e^T = I`` (the identity that makes the Perot reconstruction exact).
+
+    Coast rule.  NEMO's ``2 - umask(i-1)*umask(i)`` doubles the wet face of an
+    opposite-face pair when its partner is dry (umask at the lower T-level jk),
+    so each direction is averaged over its wet faces and a uniform shear is not
+    halved at the coast.  On a cell with an even number of edges (quads,
+    hexagons) the pair is edge slot k and slot k + nE/2 of ``edges_on_cell``
+    (edges ordered around the cell), and ``coast_e = 2 - wet_e * wet_opp(e)``
+    exactly as NEMO.  A cell with an odd number of edges (the pentagons of an
+    icosahedral mesh) has no opposite edge; there the wet-weight
+    renormalisation ``coast = W_all / W_wet`` is used.  ``wet_e`` at interface
+    k (between layers k and k+1) is both cells active at layer k+1, the lower
+    level as NEMO's umask(jk); it implies the upper one.  Cells with no wet
+    edge get 0.
+
+    Time levels: the MPAS lane is RK3-like, so both velocity factors are the
+    same level (NEMO key_RK3 passes Kbb = Kmm = Nbb).  ``dz_e`` is the mean
+    of the two cells' interface spacings (NEMO e3uw).
+
+    Shapes: u_edge (nEdges, nlev); dz_half, kappaM (nCells, nlev-1); active
+    (nCells, nlev) bool; cells_on_edge (2, nEdges); edges_on_cell (maxEdges,
+    nCells), -1 padded, edges in order around the cell; dc_edge, dv_edge
+    (nEdges,); area_cell (nCells,).  Returns p_sh2 (nCells, nlev-1) [m^2/s^3].
+    """
+    c1, c2 = cells_on_edge[0], cells_on_edge[1]
+    pair = (c1 >= 0) & (c2 >= 0)
+    c1s, c2s = jnp.maximum(c1, 0), jnp.maximum(c2, 0)
+    du = u_edge[:, :-1] - u_edge[:, 1:]
+    dz_e = jnp.maximum(0.5 * (dz_half[c1s] + dz_half[c2s]), _EPS)
+    wet_e = (active[c1s, 1:] & active[c2s, 1:] & pair[:, None]).astype(du.dtype)
+    zsh2 = (kappaM[c1s] + kappaM[c2s]) * du * du / (dz_e * dz_e) * wet_e
+
+    eoc_ok = edges_on_cell >= 0
+    eoc = jnp.maximum(edges_on_cell, 0)
+    w = jnp.where(eoc_ok, dc_edge[eoc] * dv_edge[eoc], 0.0) / (
+        4.0 * area_cell[None, :])                          # (maxEdges, nCells)
+    wet_s = wet_e[eoc] * eoc_ok[..., None]                 # (maxEdges, nCells, L)
+    n_e = jnp.sum(eoc_ok, axis=0)                          # (nCells,)
+    slot = jnp.arange(edges_on_cell.shape[0])[:, None]
+    opp = (slot + n_e[None, :] // 2) % jnp.maximum(n_e[None, :], 1)
+    wet_opp = jnp.take_along_axis(wet_s, opp[..., None], axis=0)
+    w_wet = jnp.sum(w[..., None] * wet_s, axis=0)
+    w_all = jnp.sum(w, axis=0)[:, None]
+    iso = jnp.where(w_wet > 0.0, w_all / jnp.where(w_wet > 0.0, w_wet, 1.0), 0.0)
+    coast = jnp.where((n_e % 2 == 0)[None, :, None], 2.0 - wet_s * wet_opp,
+                      iso[None])
+    return jnp.sum(w[..., None] * zsh2[eoc] * coast, axis=0)
+
 def richardson_number(
     N2: jnp.ndarray,
     u_cell: jnp.ndarray,
