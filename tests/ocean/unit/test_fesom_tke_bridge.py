@@ -226,3 +226,40 @@ def test_iwm_n2_mode_is_consumed_on_fesom(flat_mesh, z_shim):
         enabled=True, n2_mode="potential", power_nsq_wm2=1.0e-3)))
     with pytest.raises(ValueError, match="unknown on the FESOM lane"):
         bad(state, flat_mesh, zg, _wind(flat_mesh), dt_tke=DT)
+
+
+def test_nemo_evd_replaces_the_closure_before_iwm(flat_mesh, z_shim):
+    """NEMO zdfphy order on the FESOM bridge: closure, then zdf_evd REPLACES
+    avt with rn_evd where bn2 fires (zdfevd.F90:107-110), then zdf_iwm ADDS.
+    A warm layer planted under a cold one at every node must read exactly
+    rn_evd + K_iwm there, and the evd card must change nothing elsewhere."""
+    import dataclasses
+    from legoesm.ocean.physics.convection.config import EnhancedDiffusionConfig
+    from legoesm.ocean.physics.vertical_mixing.config import IWMConfig
+    state = create_rest_state(flat_mesh, z_shim, stratified=True,
+                              vertical_coordinate="zstar")
+    T = np.array(state.inner.T, dtype=np.float64)
+    T[:, 2] = T[:, 1] + 3.0                      # warm below cold: iface 1 unstable
+    state = dataclasses.replace(
+        state, inner=dataclasses.replace(state.inner, T=jnp.asarray(T)))
+    evd = EnhancedDiffusionConfig(
+        K_conv=100.0, K_bg=0.0, nu_conv=0.0, nu_bg=0.0, n2_mode="nemo_bn2",
+        n2_eos_form="teos10", smooth_transition=False, n2_threshold=-1e-12,
+        evd_composition="nemo_replace")
+    zg = fesom_zgeom(flat_mesh)
+    base = _vmix()._replace(iwm=IWMConfig(enabled=True))
+    f = _wind(flat_mesh)
+    Kv_off, Av_off, _ = make_tke_profiles_fesom(base)(state, flat_mesh, zg, f, dt_tke=DT)
+    Kv_on, Av_on, _ = make_tke_profiles_fesom(base, evd_config=evd)(
+        state, flat_mesh, zg, f, dt_tke=DT)
+    noiwm = _vmix()
+    Kv_cl, _, _ = make_tke_profiles_fesom(noiwm)(state, flat_mesh, zg, f, dt_tke=DT)
+    k_iwm = np.asarray(Kv_off - Kv_cl)
+    on, off = np.asarray(Kv_on), np.asarray(Kv_off)
+    fired = np.abs(on - off) > 0.0
+    # Kv slot j is legoESM interface j-1 (surface slot 0): iface 1 -> slot 2
+    expected = np.zeros_like(fired)
+    expected[:, 2] = True
+    np.testing.assert_array_equal(fired, expected)   # only the planted interface
+    np.testing.assert_allclose(on[:, 2], 100.0 + k_iwm[:, 2], rtol=0, atol=1e-12)
+    np.testing.assert_array_equal(np.asarray(Av_on), np.asarray(Av_off))  # nn_evdm=0

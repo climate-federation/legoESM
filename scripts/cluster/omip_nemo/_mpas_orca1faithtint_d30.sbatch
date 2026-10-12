@@ -116,10 +116,11 @@ rc=${PIPESTATUS[0]}; [ $rc -eq 0 ] || { echo "FATAL: gate rc=$rc"; exit 1; }
 JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid mpas --C-smag-lap 0 `# user 2026-09-27: no Smagorinsky, as in NEMO` \
   --A-h 0 --B-h 0 --nemo-ldf-file $NEMOIN/orca1_inputs/data_repository/input_fields/eddy_viscosity_3D.nc --lateral-side-bc no_slip `# NEMO 3-D viscosity + no-slip walls, as every MPAS comparison since 2026-09-22 ran` ${EXTRA:-} \
   --state-accumulate --mld-accumulate `# 5-day window means, as NEMO writes and the tripole card scores` \
-  --mpas-level 7 --mpas-lloyd 20 --mpas-vmix tke --K-zeta-bih 0 \
+  --mpas-level 7 --mpas-lloyd 50 `# user 2026-10-12 (1a): state the 50 iterations the mesh builder actually uses (the flag is not forwarded)` --mpas-vmix tke --K-zeta-bih 0 \
   --tke-surface-bc nemo_dirichlet --tke-surface-bc-level nemo_z0 --tke-mxl-choice 4 --tke-prognostic \
   --tke-kappa-convention veros_sqrte \
   --tke-langmuir-rhs-coupling nemo_pre_solve `# user 2026-10-06: NEMO Langmuir/dissipation RHS order (zdftke.F90:367,419)` \
+  --convection enhanced_diffusion --convection-K-conv 100 --convection-K-bg 0 --convection-n2-mode nemo_bn2 --convection-n2-eos teos10 --convection-trigger hard --convection-n2-threshold=-1e-12 --convection-evd-composition nemo_replace `# user 2026-10-12 (3b): NEMO zdfevd on every grid -- ln_zdfevd=T rn_evd=100 nn_evdm=0, zdfevd.F90:107-110` \
   --vertical-momentum-scheme nemo_advective `# user 2026-10-05: vertical advection as on the tripole (NEMO vector form)` \
   --dt 150 --nemo-vertical --partial-cell --pgf-scheme ${PGF:-smc03} \
   --ew-cyclic-overlap \

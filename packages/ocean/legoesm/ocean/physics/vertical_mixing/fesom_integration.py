@@ -109,7 +109,7 @@ def fesom_zgeom(mesh) -> SimpleNamespace:
 
 def make_tke_profiles_fesom(config: VerticalMixingConfig, eos_fn=None,
                             constants_config: ConstantsConfig = ConstantsConfig(),
-                            iwm_fields=None) -> Callable:
+                            iwm_fields=None, evd_config=None) -> Callable:
     """Build ``profiles_fn(state, mesh, zgeom, surface_forcing, dt_tke)``
     returning ``(Kv_nod, Av_elem, tke_new_nl)`` for ``fesom_jax.step``.
 
@@ -222,6 +222,16 @@ def make_tke_profiles_fesom(config: VerticalMixingConfig, eos_fn=None,
         )
         K_M = out.K_M
         K_H = out.K_H
+        if evd_config is not None:
+            # NEMO zdfevd between the closure and zdf_iwm (zdfphy.F90:323,336).
+            from legoesm.ocean.physics.convection.enhanced_diffusion import (
+                apply_nemo_evd,
+            )
+            K_H = apply_nemo_evd(
+                K_H, evd_config, T=T, S=S, dz_ref=zgeom.dz_ref, jacobian=J,
+                active=half_mask, g=constants_config.g,
+                rho_ref=constants_config.rho_0,
+                **bn2_ladder_kwargs(evd_config, zgeom, eta_state))
         if _iwm_cfg is not None:
             # NEMO zdfiwm: internal-wave-driven mixing, ADDITIVE on top of the
             # closure (zdfphy order: closure first, zdf_iwm adds onto avt/avm)

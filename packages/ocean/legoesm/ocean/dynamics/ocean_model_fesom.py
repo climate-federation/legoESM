@@ -1497,7 +1497,8 @@ class FesomOceanModel:
     """
 
     def __init__(self, mesh: "Mesh", z_coord: Any, config: FesomOceanConfig,
-                 *, vmix_config=None, iwm_forcing=None, visc_nemo=None):
+                 *, vmix_config=None, iwm_forcing=None, visc_nemo=None,
+                 evd_config=None):
         require_fesom_jax()
         # (ahm_node, rn_shlat): NEMO's viscosity values on the element edges replace
         # fesom's own viscosity (fesom_jax.momentum.visc_nemo_elem).
@@ -1582,7 +1583,7 @@ class FesomOceanModel:
                 fesom_zgeom, make_tke_profiles_fesom,
             )
             self._tke_profiles_fn = make_tke_profiles_fesom(
-                vmix_config, iwm_fields=iwm_forcing)
+                vmix_config, iwm_fields=iwm_forcing, evd_config=evd_config)
             self._zgeom = fesom_zgeom(mesh)
         elif iwm_forcing is not None:
             raise ValueError(
@@ -1598,6 +1599,10 @@ class FesomOceanModel:
                 "vmix_config given but FesomOceanConfig.vertical_mixing='fesom' "
                 "— the legoESM closure would be silently ignored; select "
                 "vertical_mixing='legoesm_tke' or drop vmix_config.")
+        if evd_config is not None and self._tke_profiles_fn is None:
+            raise ValueError(
+                "evd_config (NEMO zdfevd) is applied on the legoESM TKE bridge "
+                "only; select vertical_mixing='legoesm_tke'.")
 
     def step(self, state: FesomOceanState, dt: float, *,
              surface_forcing=None, freshwater=None,

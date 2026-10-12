@@ -500,3 +500,45 @@ def compose_evd_coefficient(other, evd, mode: str, *, convective: float):
     if _static_float(convective) == 0.0:
         return other
     return jnp.where(evd >= convective, convective, other)
+
+
+def apply_nemo_evd(K_closure, cfg: EnhancedDiffusionConfig, *, T, S,
+                   dz_ref, jacobian, t_depth, w_depth, e3w_int, active,
+                   seos_cfg=None, g: float = constants.g,
+                   rho_ref: float = _RHO_0_DEFAULT):
+    """NEMO's zdfevd slot on a closure tracer diffusivity (unstructured lanes).
+
+    zdfphy.F90:323 calls ``zdf_evd`` on the assembled ``avt`` AFTER the closure
+    and BEFORE ``zdf_iwm`` adds the wave-driven part (:336); zdfevd.F90:107-110
+    overwrites ``avt`` with ``rn_evd`` where ``MIN(rn2, rn2b) <= -1e-12`` (now-only
+    under key_RK3, the ORCA1 build).  This helper is that statement for a lane
+    that assembles its own closure K: the trigger is the shared
+    :func:`convective_K_A_flag` on NEMO's bn2, the composition the shared
+    :func:`compose_evd_coefficient`.  The caller adds IWM afterwards.
+
+    Only NEMO's own card is accepted: ``n2_mode="nemo_bn2"``,
+    ``evd_composition="nemo_replace"``, ``nu_conv=0`` (nn_evdm=0 -- the
+    momentum arm is not wired on these lanes).  ``active`` is the lane's wet
+    interface mask (NEMO's ``wmask``); fired sub-seafloor interfaces are
+    dropped before composing.  Returns the composed tracer diffusivity.
+    """
+    if getattr(cfg, "n2_mode", "insitu") != "nemo_bn2":
+        raise ValueError(
+            "apply_nemo_evd transcribes NEMO's zdfevd and needs its trigger: "
+            f"EnhancedDiffusionConfig.n2_mode='nemo_bn2', got {cfg.n2_mode!r}.")
+    if resolve_evd_composition(cfg) != "nemo_replace":
+        raise ValueError(
+            "apply_nemo_evd needs evd_composition='nemo_replace' (zdfevd "
+            "overwrites avt); the additive composition is not NEMO's.")
+    if _static_float(cfg.nu_conv) != 0.0:
+        raise ValueError(
+            "apply_nemo_evd returns the tracer coefficient only: nu_conv must "
+            "be 0.0 (NEMO nn_evdm=0); the momentum arm is not wired here.")
+    # rho is read only by the in-situ trigger branches, never by nemo_bn2.
+    K_evd, _, _ = convective_K_A_flag(
+        None, dz_ref, jacobian, cfg, T=T, S=S, t_depth=t_depth,
+        w_depth=w_depth, e3w_int=e3w_int, seos_cfg=seos_cfg, g=g,
+        rho_ref=rho_ref)
+    K_evd = jnp.where(active, K_evd, 0.0)
+    return compose_evd_coefficient(K_closure, K_evd, "nemo_replace",
+                                   convective=cfg.K_conv)

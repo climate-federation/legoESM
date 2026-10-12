@@ -100,6 +100,7 @@ JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid fesom \
   --fesom-vmix legoesm_tke --tke-surface-bc nemo_dirichlet --tke-surface-bc-level nemo_z0 --tke-mxl-choice 4 \
   --tke-prognostic --tke-kappa-convention veros_sqrte \
   --tke-langmuir-rhs-coupling nemo_pre_solve `# user 2026-10-06: NEMO Langmuir/dissipation RHS order (zdftke.F90:367,419)` \
+  --convection enhanced_diffusion --convection-K-conv 100 --convection-K-bg 0 --convection-n2-mode nemo_bn2 --convection-n2-eos teos10 --convection-trigger hard --convection-n2-threshold=-1e-12 --convection-evd-composition nemo_replace `# user 2026-10-12 (3b): NEMO zdfevd on every grid -- ln_zdfevd=T rn_evd=100 nn_evdm=0, zdfevd.F90:107-110` \
   --vertical-momentum-scheme nemo_advective `# user 2026-10-06: NEMO vertical momentum advection (dynzad.F90), as tripole and MPAS` \
   --ice-init $NEMOIN/Ice_initialization.nc --ice-ocean-heat-scheme nemo_ustar \
   --nemo-ldf-file $NEMOIN/orca1_inputs/data_repository/input_fields/eddy_viscosity_3D.nc --lateral-side-bc no_slip \

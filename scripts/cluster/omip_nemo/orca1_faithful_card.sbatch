@@ -102,6 +102,7 @@ JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid tripole \
   --tke-surface-bc nemo_dirichlet --tke-surface-bc-level nemo_z0 --tke-mxl-choice 4 --tke-prognostic \
   --tke-kappa-convention veros_sqrte --sw-rgb-chl --ice-ocean-heat-scheme nemo_ustar \
   --tke-langmuir-rhs-coupling nemo_pre_solve `# user 2026-10-06: NEMO Langmuir/dissipation RHS order (zdftke.F90:367,419)` \
+  --convection enhanced_diffusion --convection-K-conv 100 --convection-K-bg 0 --convection-n2-mode nemo_bn2 --convection-n2-eos teos10 --convection-trigger hard --convection-n2-threshold=-1e-12 --convection-evd-composition nemo_replace `# user 2026-10-12 (3b): NEMO zdfevd on every grid -- ln_zdfevd=T rn_evd=100 nn_evdm=0, zdfevd.F90:107-110` \
   --gateway-transports --mle --mle-ce 0.06 --kprofile-snapshots \
   `# ---- THE FOUR ADOPTED SETS, and nothing else, appended ----` \
   --ice-freeze-scheme unesco \

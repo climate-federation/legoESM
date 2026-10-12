@@ -2993,6 +2993,10 @@ _FESOM_WIRED_DESTS = frozenset({
     # vertical-mixing closure + the zdftke card knobs it consumes (same set
     # the MPAS lane threads; _validate_tke_card_grid gates them):
     "fesom_vmix", "tke_eice", "tke_surface_bc", "tke_surface_bc_level", "tke_mxl_choice",
+    # NEMO zdfevd on the legoesm_tke bridge (apply_nemo_evd)
+    "convection", "convection_K_conv", "convection_K_bg",
+    "convection_n2_mode", "convection_n2_eos", "convection_trigger",
+    "convection_n2_threshold", "convection_evd_composition",
     "tke_prognostic", "tke_n2_mode", "tke_n2_eos_form", "tke_kappa_convention",
     "tke_shear_production", "tke_lc", "tke_etau", "tke_langmuir_rhs_coupling",
     "snapshot_every_days", "output", "smoke",
@@ -3136,7 +3140,8 @@ def build_fesom_ocean(mesh_dir: str, dt: float, ic_dir: str | None = None, *,
                       nemo_ldf_file: str | None = None,
                       nemo_domain_cfg: str | None = None,
                       lateral_side_bc: str | None = None,
-                      vertical_momentum_scheme: str | None = None):
+                      vertical_momentum_scheme: str | None = None,
+                      evd_config=None):
     """FESOM core in the OMIP driver (three-grid unification B1; IC B4).
 
     Loads the REAL-bathymetry fesom_jax mesh (NOT the idealized
@@ -3199,7 +3204,8 @@ def build_fesom_ocean(mesh_dir: str, dt: float, ic_dir: str | None = None, *,
         rn_shlat={"no_slip": 2.0, "free_slip": 0.0}[lateral_side_bc])
         if nemo_ldf_file else None)
     model = FesomOceanModel(mesh, z_coord, config, vmix_config=vmix_config,
-                            iwm_forcing=_iwm_maps, visc_nemo=_visc_nemo)
+                            iwm_forcing=_iwm_maps, visc_nemo=_visc_nemo,
+                            evd_config=evd_config)
     if ic_dir:
         from fesom_jax.phc_ic import cold_start_state
         # seed_sea_ice=False: the PHC cold start would seed a static
@@ -3861,7 +3867,8 @@ def build_mpas_ocean(nlev: int, H_max: float, mesh_path: str, level: int = 6,
                      no_gm_redi=False, K_zeta_bih=None,
                      gm_treguier=False, gm_aei0=_GM_AEI0_DEFAULT,
                      gm_kappa_min=0.0, nemo_ldf_file=None,
-                     lateral_side_bc=None, vertical_momentum_scheme=None):
+                     lateral_side_bc=None, vertical_momentum_scheme=None,
+                     convection_cfg=None):
     """Build an MPAS (icosahedral Voronoi) ocean for the faithful CORE-II NEMO
     comparison — the 4th grid.  Reuses ``run_omip._create_setup('mpas', ...)``
     (the wired MPASOceanModel: KPP + GM/Redi + smc03 PGF + implicit-CN
@@ -3921,9 +3928,23 @@ def build_mpas_ocean(nlev: int, H_max: float, mesh_path: str, level: int = 6,
         from legoesm.ocean.physics.convection.config import (
             OceanConvectionConfig,
         )
-        phys_tke = config.physics._replace(
-            convection=OceanConvectionConfig(scheme="none"),
-        )
+        # NEMO's zdfevd (ln_zdfevd=T on ORCA1) is the one convective mixer the
+        # card may add back: it REPLACES the closure K where bn2 fires
+        # (evd_composition="nemo_replace", ocean_model_mpas -> apply_nemo_evd).
+        if convection_cfg is None:
+            _conv = OceanConvectionConfig(scheme="none")
+        else:
+            from legoesm.ocean.physics.convection.enhanced_diffusion import (
+                resolve_evd_composition,
+            )
+            if resolve_evd_composition(convection_cfg) != "nemo_replace":
+                raise SystemExit(
+                    "MPAS TKE card: --convection enhanced_diffusion is wired "
+                    "only as NEMO's zdfevd (--convection-evd-composition "
+                    "nemo_replace --convection-n2-mode nemo_bn2).")
+            _conv = OceanConvectionConfig(scheme="enhanced_diffusion",
+                                          enhanced_diffusion=convection_cfg)
+        phys_tke = config.physics._replace(convection=_conv)
         config = config._replace(
             physics=phys_tke,
             A_v=_const.nu_ocean_molecular,   # same pair the tripole forces
@@ -3931,7 +3952,11 @@ def build_mpas_ocean(nlev: int, H_max: float, mesh_path: str, level: int = 6,
 
         print("[setup] mpas TKE card: molecular backgrounds "
               "(A_v=1.4e-6, K_v=1e-10) + preset convection stripped "
-              "(tripole-equivalent closure environment)")
+              "(tripole-equivalent closure environment); convection="
+              f"{_conv.scheme}")
+    elif convection_cfg is not None:
+        raise SystemExit("MPAS: --convection enhanced_diffusion is wired only "
+                         "with --mpas-vmix tke (NEMO zdfevd on the TKE card).")
     if ddm is not None and ddm.enabled:
         raise SystemExit(
             "--double-diffusion is not wired on the MPAS vertical-mixing "
@@ -8650,16 +8675,17 @@ def main() -> int:
         raise ValueError("--sss-restore-regions requires --sss-restore")
 
     # EVD trigger flags: validated once here (raise under --convection none)
-    # and consumed by build_tripole only -- on any other grid they would be
+    # and consumed by build_tripole, build_mpas_ocean and the FESOM TKE bridge
+    # (NEMO zdfevd via apply_nemo_evd) -- on any other grid they would be
     # accepted and dropped, so refuse them there.
     if (build_enhanced_diffusion_config(args) is not None
-            and args.grid != "tripole"
+            and args.grid not in ("tripole", "mpas", "fesom")
             and any(_flag_set(getattr(args, d, None))
                     for d in _EVD_TRIGGER_DESTS)):
         raise SystemExit(
             "--convection-n2-mode/--convection-n2-eos/--convection-trigger/"
             "--convection-n2-threshold/--convection-two-level are wired for "
-            f"--grid tripole only, not {args.grid!r}")
+            f"--grid tripole/mpas/fesom only, not {args.grid!r}")
     if args.evd_occupancy_every_hours is not None:
         if args.grid != "tripole":
             raise SystemExit("--evd-occupancy-every-hours is wired for "
@@ -9377,6 +9403,7 @@ def main() -> int:
             barotropic_pcg_variant=args.barotropic_pcg_variant,
             gm_treguier=args.gm_treguier, gm_aei0=args.gm_aei0,
             gm_kappa_min=args.gm_kappa_min,
+            convection_cfg=build_enhanced_diffusion_config(args),
             # Cross-grid parity (2026-07-18 manifest audit): these two flags
             # were silently IGNORED on MPAS — the call site never passed
             # them, so mpas8_corr ran tvd + adcroft while the tripole ran
@@ -9460,6 +9487,7 @@ def main() -> int:
             nemo_domain_cfg=args.nemo_domain_cfg or _NEMO_DOMAIN_CFG,
             lateral_side_bc=args.lateral_side_bc,
             vertical_momentum_scheme=args.vertical_momentum_scheme,
+            evd_config=build_enhanced_diffusion_config(args),
             vmix_config=(build_tripole_vmix_config(
                 "tke", iwm=_iwm_cfg,
                 tke_eice=args.tke_eice,
