@@ -128,6 +128,10 @@ FILES = {
         _SWG_COMPILED / "sbc_oce.f90"),
     "SWG_OMIP_L1/BLD/ppsrc/nemo/sbcmod.f90": (
         _SWG_COMPILED / "sbcmod.f90"),
+    "SWG_OMIP_L1/BLD/ppsrc/nemo/diawri.f90": (
+        _SWG_COMPILED / "diawri.f90"),
+    "ext/IOIPSL/src/mathelp.f90": (
+        NEMO / "ext/IOIPSL/src/mathelp.f90"),
     "SWG_OMIP_L1/BLD/ppsrc/nemo/dommsk.f90": (
         _SWG_COMPILED / "dommsk.f90"),
     "SWG_OMIP_L1/BLD/ppsrc/nemo/domqco.f90": (
@@ -1533,6 +1537,57 @@ CITATION_MAP = {
         'IF( kt == nit000 ) THEN   ! default definitions', ('ENDIF', 1), 8],
     'SWG_OMIP_L1/BLD/ppsrc/nemo/restart.f90:197-211': [
         'IF( kt == nitrst ) THEN', ('ENDIF', 14), 15],
+    # --- SWG round 8: shipped multi-year output and terminal restart ---
+    'SWG_OMIP_L1/BLD/ppsrc/nemo/domain.f90:332-333': [
+        'READ(numnam_ref(MAX(INDEX(numnam_ref,"&namrun ")',
+        'READ(numnam_cfg(MAX(INDEX(numnam_cfg,"&namrun ")',
+        2],
+    'SWG_OMIP_L1/BLD/ppsrc/nemo/domain.f90:374-377': [
+        'cexper = cn_exp',
+        'nitend = nn_itend',
+        4],
+    'SWG_OMIP_L1/BLD/ppsrc/nemo/domain.f90:416-426': [
+        'SELECT CASE ( nleapy )',
+        'END SELECT',
+        11],
+    'SWG_OMIP_L1/BLD/ppsrc/nemo/nemogcm.f90:147-160': [
+        'istp = nit000',
+        'END DO',
+        14],
+    'SWG_OMIP_L1/BLD/ppsrc/nemo/diawri.f90:123-126': [
+        '!! ** Method  :   At the beginning of the first time step',
+        '!!      Each nn_write time step, output the instantaneous or mean fields',
+        4],
+    'SWG_OMIP_L1/BLD/ppsrc/nemo/diawri.f90:156-160': [
+        '! Define frequency of output and means',
+        'zout = REAL( nn_write, wp ) * rn_Dt',
+        5],
+    'SWG_OMIP_L1/BLD/ppsrc/nemo/diawri.f90:258-259': [
+        'CALL histdef( nid_T, "sossheig"',
+        'jpi, jpj, nh_T, 1  , 1, 1  , -99 , 32, clop, zsto, zout )',
+        2],
+    'SWG_OMIP_L1/BLD/ppsrc/nemo/diawri.f90:363-374': [
+        'CALL histdef( nid_U, "vozocrtx"',
+        'CALL histdef( nid_V, "vomecrty"',
+        12],
+    'SWG_OMIP_L1/BLD/ppsrc/nemo/diawri.f90:457': (
+        'CALL histwrite( nid_T, "sossheig", kt, ssh(:,:,Kmm)'),
+    'SWG_OMIP_L1/BLD/ppsrc/nemo/diawri.f90:536-538': [
+        'CALL histwrite( nid_U, "vozocrtx", kt, uu(:,:,:,Kmm)',
+        'CALL histwrite( nid_V, "vomecrty", kt, vv(:,:,:,Kmm)',
+        3],
+    'ext/IOIPSL/src/mathelp.f90:3086-3119': [
+        'SUBROUTINE moycum (opp,np,px,py,pwx)',
+        'END SUBROUTINE moycum',
+        34],
+    'SWG_OMIP_L1/BLD/ppsrc/nemo/stprk3.f90:308-321': [
+        '!                                 !==  Swap time levels  ==!',
+        'IF( lrst_oce   )   CALL rst_write',
+        14],
+    'SWG_OMIP_L1/BLD/ppsrc/nemo/restart.f90:103-129': [
+        'IF( kt == nit000 ) THEN',
+        'IF( nitrst <= nitend .AND. nitrst > 0 ) THEN',
+        27],
     'SWG_OMIP_L1/BLD/ppsrc/nemo/iom_nf90.f90:684-705': [
         'lchunk = .false.',
         'CALL iom_nf90_check(SET_NF90_DEF_VAR_CHUNKING', 22],
