@@ -102,6 +102,35 @@ read-only filesystem. **Independent review unavailable in-sandbox.** Its log
 SHA-256 is
 `eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5`.
 
+The focused round-260/261 plus citation-gate battery passes 37/37; its log
+SHA-256 is
+`0e9e14357940735437e50166d367620d061dd632d87de749fc886e1664bca51c`.
+The once-only `tests/ocean/fidelity -n 12` battery reached 98% and then
+stopped emitting output in the known late-worker hang class; it was not
+re-run. Before termination it emitted four failures. All four reproduce
+serially in isolation:
+
+- the GYRE round-129 record gate refuses because its certified-year harness
+  pin moved;
+- the round-35 stamp-scope ratchet lists 13 pre-existing VORTEX drivers;
+- the known worktree-stamp ratchet lists 13 pre-existing report emitters;
+- the known SI3 scalar-math provenance gate refuses its non-verbatim `MY_SRC`.
+
+None of the offender lists names the round-261 driver, and the final tree has
+no production-model diff from `0aee6bedb`. The interrupted full-battery log
+has SHA-256
+`2920c46d37eaa7cd03049d95bfcc210eddd3d67be2460da3f20adae5fce71ccf`;
+the four-test serial disposition log has SHA-256
+`3a75a5a4143f068dcc633acbef5dc51c79e843bf320a831701d52d5fbf35cced`.
+
+The default cumulative receipt citation gate and this receipt's citation gate
+both pass with zero unmapped citations. Their JSON SHA-256 values are
+`aac1f66260e56a57771fb77efc9289333f87344c5333c528ee9a06a78e030a0c`
+and `ae86aa717f7bddbba151717863a67ec0d2e3cb1ac75816411dafcfb3bd7c4f69`.
+The planted one-line shift of `stprk3_stg.f90:168-170` turns the receipt gate
+red; the plant log SHA-256 is
+`107aacee4cd7ba7c9ab9a997f597d6a338ed0f7a8cb259c57210a96b31c045a4`.
+
 ## OPEN
 
 Integrate NEMO's stage-1 V-point fold association of `r3va` at the compiled
