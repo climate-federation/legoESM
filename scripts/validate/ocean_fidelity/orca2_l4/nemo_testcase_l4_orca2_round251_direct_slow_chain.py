@@ -36,8 +36,8 @@ from nemo_testcase_l2_gyre_round16_slow_forcing import read_slow_forcing  # noqa
 
 LABELS = ("independent", "given_nemo_entry")
 SOURCE_ORDER = (
-    "pre_drag_v", "post_drag_v", "wind_increment_v", "post_wind_v",
-    "incoming_copy_v", "coriolis_v", "surface_v_mask", "final_slow_v",
+    "post_drag_v", "wind_increment_v", "post_wind_v", "incoming_copy_v",
+    "coriolis_v", "surface_v_mask", "final_slow_v",
 )
 PLANTS = (
     "none", "label-coverage", "admission", "passivity", "override",
@@ -168,10 +168,6 @@ def measure(deck_root: Path, frame_root: Path, twin_a: Path, twin_b: Path,
     candidate_post_wind = np.asarray(candidate_post_drag + candidate_increment,
                                      dtype=np.float64)
     candidate = {
-        # legoESM applies its (zero on OMT-4) wind term before drag.  This is
-        # therefore the executing input to its drag statement, and may be
-        # compared with NEMO's recorded pre-drag depth mean on this deck.
-        "pre_drag_v": _native_v(producer["post_wind_v"]),
         "post_drag_v": candidate_post_drag,
         "wind_increment_v": candidate_increment,
         "post_wind_v": candidate_post_wind,
@@ -183,7 +179,6 @@ def measure(deck_root: Path, frame_root: Path, twin_a: Path, twin_b: Path,
     oracle_increment = _wind_increment(
         slow["r1_rho0"], slow["vtau"], slow["r1_hv"])
     oracle = {
-        "pre_drag_v": slow["depth_v"],
         "post_drag_v": slow["post_drag_v"],
         "wind_increment_v": oracle_increment,
         "post_wind_v": slow["post_wind_v"],
