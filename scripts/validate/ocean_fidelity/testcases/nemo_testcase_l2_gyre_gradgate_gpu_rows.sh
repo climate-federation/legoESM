@@ -29,12 +29,18 @@ run_row() {
   local output=$1
   shift
   [[ ! -e "$output" ]] || refuse "refusing to overwrite evidence: $output" 65
-  CUDA_VISIBLE_DEVICES=1 JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 PYTHONPATH="$MODEL_PATH" \
-    XLA_PYTHON_CLIENT_PREALLOCATE=false \
-    env -u XLA_PYTHON_CLIENT_ALLOCATOR \
-    "$PYTHON" "$GATE" "$@" --transcendentals native \
-      --expect-commit "$COMMIT" --output "$output"
-  "$PYTHON" -c '
+  local rc=0
+  if CUDA_VISIBLE_DEVICES=1 JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 \
+      PYTHONPATH="$MODEL_PATH" XLA_PYTHON_CLIENT_PREALLOCATE=false \
+      env -u XLA_PYTHON_CLIENT_ALLOCATOR \
+      "$PYTHON" "$GATE" "$@" --transcendentals native \
+        --expect-commit "$COMMIT" --output "$output"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  [[ -f "$output" ]] || refuse "row produced no classified result: $output" 66
+  LAST_ROW_STATUS=$("$PYTHON" -c '
 import json
 import pathlib
 import sys
@@ -43,7 +49,17 @@ row = json.loads(pathlib.Path(sys.argv[1]).read_text())
 expected = "GPU, XLA transcendentals — not the certified bit-exact policy"
 assert row["measurement_policy_label"] == expected, row
 assert "transcendentals=\x27native\x27" in row["precision_policy"], row
-' "$output"
+status = row.get("status")
+assert status in {"CONFIRMED", "REFUTED", "VACUOUS", "RETRACTED"}, row
+print(status)
+' "$output")
+  if [[ $LAST_ROW_STATUS == CONFIRMED ]]; then
+    [[ $rc -eq 0 ]] || refuse "CONFIRMED row exited $rc" "$rc"
+  else
+    [[ $rc -eq 1 ]] || refuse "$LAST_ROW_STATUS row exited $rc" "$rc"
+  fi
+  printf 'SWG_GRADGATE_GPU_ROW status=%s output=%s\n' \
+    "$LAST_ROW_STATUS" "$output"
 }
 
 run_suite() {

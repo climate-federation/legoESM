@@ -412,6 +412,7 @@ def test_gpu_runner_disables_preallocation_and_covers_direct_1440_rows():
     assert "for steps in 1 24 720 1440" in source
     assert "for steps in 24 720 1440" in source
     assert "--plant uniform_label_uses_none" in source
+    assert "LAST_ROW_STATUS" in source
     assert "LAST_SUITE_STATUS" in source
     assert "SWG_GRADGATE_GPU_SUITE" in source
 
