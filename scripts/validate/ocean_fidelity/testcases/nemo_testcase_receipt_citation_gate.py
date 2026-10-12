@@ -6329,20 +6329,20 @@ CITATION_MAP = {
         11],
     # --- SWG round 6: whole-step carry and explicit RK3 materialization ---
     'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/domqco.f90:218-229': [
-        ("IF( PRESENT( pr3f ) ) THEN", 1),
-        ("pr3f(ji,jj) = 0.25_wp", 1),
+        ("END DO   ;   END DO", 2),
+        ("&                    ) * r1_hf_0", 1),
         12],
     'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:336-338': [
-        ("CALL ssh_nxt( kstp, Nbb, Nnn, ssh, Naa )", 1),
+        ("CALL ssh_nxt( kstp, Nbb, Nnn, ssh, Naa )", 2),
         ("CALL dom_qco_r3c( ssh(:,:,Naa)", 3),
         3],
     'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:358-366': [
-        ("CALL lbc_lnk( 'stp_RK3'", 5),
+        ("ENDIF", 7),
         ("Nbb = Naa", 1),
         9],
     'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:147-159': [
         ("CALL swg_open( kstp, 1", 1),
-        ("CALL swg_w2( 'r3f', r3f(:,:) )", 1),
+        ("CALL swg_w2( 'utau_now'", 1),
         13],
     'SWG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:204-210': [
         ("CALL lbc_lnk( 'stp_RK3'", 1),
