@@ -104,7 +104,7 @@ def _stage_association_measure(deck_root: Path, record_root: Path, label: str,
         "S": np.asarray(jax.device_get(pad_ns_scalar(
             jnp.asarray(raw["S"][1:-1]), card.recipe.grid)), np.float64),
     }
-    oracle = r249._state_fields(rung0.assemble_frame(record_root, 1, 1))
+    oracle = rung0.assemble_frame(record_root, 1, 1)
     rows = {}
     for name in ("u", "v", "T", "S"):
         raw_native = r249._native(name, raw[name])
