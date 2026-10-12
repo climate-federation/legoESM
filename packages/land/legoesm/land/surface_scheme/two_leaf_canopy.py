@@ -84,6 +84,15 @@ _CANOPY_SOLVE_GROUP = 64
 # is 1.5-2.2 K colder, past the ridge.  Measured on 266 such recorded columns:
 # cold start converged 34, 1/2/3 K colder 259/260/260; daytime unchanged.
 _RETRY_COOLING_K = 1.0
+# The retry seed's canopy-air humidity is also capped at this fraction of
+# saturation at its temperature.  The cold-start humidity (qsat(T_soil) + q_atm)/2
+# at Tc = Ta is supersaturated whenever the soil is warmer than the air (measured
+# 117-140% on sunny recorded columns); the dew limit then holds the first
+# iterates at saturation, the canopy-humidity row loses its leaf and soil
+# dependence, and the solve stalls past the iteration cap.  Only the starting
+# guess changes; the equations are unchanged, though a different start may
+# converge where the old one did not.
+_RETRY_RH_CAP = 0.95
 
 # Time constant of the growth-temperature exponential moving average [s].
 # 30 days * 86400 s/day = 2.592e6 s.  At dt = 1800 s, ~76 days reach 95 %
@@ -446,8 +455,9 @@ def compute_two_leaf_canopy_fluxes(
     cold_state = jnp.stack(
         [Ta, Ta, Ci_init, Ci_init, Ta, q_c_init], axis=-1)  # (ncol, 6)
     _Ta_retry = Ta - _RETRY_COOLING_K
+    q_c_retry = jnp.minimum(q_c_init, _RETRY_RH_CAP * sat_specific_humidity(_Ta_retry, Ps))
     retry_state = jnp.stack(
-        [_Ta_retry, _Ta_retry, Ci_init, Ci_init, _Ta_retry, q_c_init], axis=-1)
+        [_Ta_retry, _Ta_retry, Ci_init, Ci_init, _Ta_retry, q_c_retry], axis=-1)
 
     # ---- Warm start (numerical cache) ----
     # ``canopy_seed`` is the previous timestep's LAST CONVERGED solution, carried
