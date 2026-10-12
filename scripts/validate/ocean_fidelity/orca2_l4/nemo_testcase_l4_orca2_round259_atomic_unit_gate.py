@@ -33,6 +33,11 @@ PLANTS = (
     "mask-closure", "transport-closure", "kt1-floor", "growth",
     "completion", "one-bit",
 )
+HELD_PLANTS = (
+    "none", "label-coverage", "production-route", "passivity",
+    "kt1-floor", "growth-boundary", "finite-prefix", "refusal",
+    "one-bit",
+)
 
 
 class GateError(RuntimeError):
@@ -252,6 +257,118 @@ def classify(reports: list[dict[str, object]], *,
     }
 
 
+def classify_held(reports: list[dict[str, object]], refusal: str, *,
+                  plant: str = "none") -> dict[str, object]:
+    """Gate the finite prefix and the first surviving growth boundary."""
+
+    require(plant in HELD_PLANTS, f"unknown held plant {plant!r}")
+    reports = copy.deepcopy(reports)
+    if plant == "label-coverage":
+        reports.pop()
+    by_label = {report["label"]: report for report in reports}
+    require(set(by_label) == set(LABELS), "both claim labels are required")
+    independent = by_label["independent"]
+    if plant == "production-route":
+        independent["operand_route"] = "production"
+    elif plant == "passivity":
+        independent["passivity"][0]["fields"]["T"] = False
+    elif plant == "kt1-floor":
+        _first_boundary(independent, 1, 1)["fields"]["S"][
+            "fold_band"]["max_abs"] = 1.0
+    elif plant == "growth-boundary":
+        _first_boundary(independent, 1, 2)["fields"]["S"][
+            "fold_band"]["max_abs"] = 1.0e-3
+    elif plant == "finite-prefix":
+        independent["boundaries"] = independent["boundaries"][:-1]
+    elif plant == "refusal":
+        refusal = refusal.replace(
+            "raw-mesh e3w_int must contain only finite values > 0",
+            "planted different refusal")
+
+    one_bit = _score(np.asarray([1.0]), np.nextafter(
+        np.asarray([1.0]), np.asarray([np.inf])), np.asarray([True]))
+    if plant == "one-bit":
+        one_bit["unequal"] = 0
+    require(one_bit["unequal"] == 1, "one-bit control did not fire")
+
+    expected_order = [(kt, stage) for kt in range(1, 5)
+                      for stage in range(4)]
+    summaries = {}
+    for label in LABELS:
+        report = by_label[label]
+        require(report["status"] == "PASS_R249_STAGE_TABLE"
+                and report["unit"] is True
+                and report["operand_route"] == "resolved-candidate",
+                f"{label}: finite-prefix route moved")
+        actual_order = [(row["kt"], row["stage"])
+                        for row in report["boundaries"]]
+        require(actual_order == expected_order,
+                f"{label}: kt=1..4 finite-prefix coverage moved")
+        require(len(report["passivity"]) == 4
+                and all(all(row["fields"].values())
+                        for row in report["passivity"]),
+                f"{label}: completed-state passivity moved")
+        for boundary in report["boundaries"]:
+            for field in r249.FIELDS:
+                require(boundary["fields"][field]["complete"]["nonfinite"] == 0,
+                        f"{label}: finite prefix contains non-finite {field}")
+
+        kt1 = _first_boundary(report, 1, 1)
+        for field in ("T", "S"):
+            require(kt1["fields"][field]["fold_band"]["max_abs"]
+                    <= float(r249.FLOOR),
+                    f"{label}: kt=1 stage-1 {field} is above the floor")
+        growth = r249._growth_rows(report["boundaries"], "fold_band")
+        offenders = [row for row in growth
+                     if row["previous_max_abs"] > float(r249.FLOOR)
+                     and row["over_10x"]]
+        require(offenders, f"{label}: no post-floor growth boundary")
+        first = offenders[0]
+        require((first["kt"], first["stage"]) == (1, 2),
+                f"{label}: first post-floor growth boundary moved")
+        boundary = _first_boundary(report, 1, 2)
+        require(boundary["fields"]["S"]["fold_band"]["max_abs"]
+                == 6.817836451535307,
+                f"{label}: kt=1 stage-2 salinity magnitude moved")
+        summaries[label] = {
+            "kt1_stage1": {
+                field: kt1["fields"][field]["fold_band"]
+                for field in ("T", "S")},
+            "first_post_floor_growth": first,
+            "kt1_stage2": {
+                field: boundary["fields"][field]["fold_band"]
+                for field in r249.FIELDS},
+            "kt4_stage3": {
+                field: _first_boundary(report, 4, 3)["fields"][field][
+                    "fold_band"] for field in r249.FIELDS},
+        }
+
+    require("PROGRESS round249 independent unit=1 kt=4" in refusal,
+            "refusal lacks the last completed kt=4 boundary")
+    require("raw-mesh e3w_int must contain only finite values > 0" in refusal,
+            "historical live-thickness refusal did not reproduce")
+    return {
+        "format": "nemo-testcase-l4-orca2-round259-held-v1",
+        "status": "HELD_R259_KT1_STAGE2_GROWTH",
+        "labels": summaries,
+        "refusal": {
+            "last_completed_kt": 4,
+            "next_step": 5,
+            "message": "raw-mesh e3w_int must contain only finite values > 0",
+        },
+        "one_bit_control": one_bit,
+        "predictions": {
+            "R259-P1": "CONFIRMED_PREFIX_PASSIVITY",
+            "R259-P2": "CONFIRMED_KT1_STAGE1_FLOOR",
+            "R259-P3": "REFUTED_KT1_STAGE2_POST_FLOOR_GROWTH",
+            "R259-P4": "REFUTED_LIVE_THICKNESS_AT_KT5",
+            "R259-P5": "NOT_REACHED",
+            "R259-P6": "NOT_REACHED",
+            "R259-P7": "CONFIRMED" if plant == "none" else "PLANT",
+        },
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--measure", action="store_true")
@@ -262,7 +379,11 @@ def main() -> int:
     parser.add_argument("--expect-commit")
     parser.add_argument("--classify", nargs=2, type=Path,
                         metavar=("INDEPENDENT", "GIVEN"))
-    parser.add_argument("--plant", choices=PLANTS, default="none")
+    parser.add_argument("--classify-held", nargs=2, type=Path,
+                        metavar=("INDEPENDENT", "GIVEN"))
+    parser.add_argument("--refusal-log", type=Path)
+    parser.add_argument("--plant", choices=tuple(sorted(set(PLANTS + HELD_PLANTS))),
+                        default="none")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     try:
@@ -275,6 +396,15 @@ def main() -> int:
             result = measure(
                 args.deck_root, args.frame_root, args.record_root,
                 args.label, args.expect_commit)
+        elif args.classify_held is not None:
+            require(args.refusal_log is not None,
+                    "held classification requires its refusal log")
+            result = classify_held([
+                json.loads(path.read_text(encoding="utf-8"))
+                for path in args.classify_held],
+                args.refusal_log.read_text(encoding="utf-8"),
+                plant=args.plant)
+            require(args.plant == "none", f"{args.plant} plant stayed green")
         else:
             require(args.classify is not None,
                     "classification JSONs are required")
