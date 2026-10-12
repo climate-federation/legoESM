@@ -30,7 +30,7 @@ from scripts.validate.ocean_fidelity.orca2_l4 import (  # noqa: E402
 LABELS = r249.LABELS
 PLANTS = (
     "none", "label-coverage", "provenance", "entry", "transport-record",
-    "transport-replay", "causal-closure", "one-bit",
+    "transport-replay", "transport-boundary", "one-bit",
 )
 NX, NY, NZ = 94, 152, 31
 
@@ -129,7 +129,7 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
     forcing = omt0.rung0_ladder._zero_forcing((148, 180))
     tracer_path = record_root / "oracle_rktracer_operands_kt00000001_s2.bin"
     tracer = _read_tracer(tracer_path)
-    recorded = (
+    recorded_rank0 = (
         np.asarray(tracer["zFu"][..., :30], np.float64),
         np.asarray(tracer["zFv"][..., :30], np.float64),
         np.asarray(tracer["zFw"], np.float64),
@@ -138,7 +138,6 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
         stage_entry_override=(
             2, stage1_u_full, stage1_v_full, stage1["T"], stage1["S"],
             stage1["ssh"]),
-        stage2_tracer_transport_override=recorded,
     )
     model = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
@@ -151,21 +150,25 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
             "continuation did not return the passive live trace")
 
     geometry = traced.stage_geometry[1]
-    candidate = (
-        np.asarray(geometry[7][:, 1:], np.float64),
-        np.asarray(geometry[8][1:], np.float64),
+    candidate_rank0 = (
+        np.asarray(geometry[7][:, 1:91], np.float64),
+        np.asarray(geometry[8][1:, :90], np.float64),
         np.asarray(geometry[2], np.float64)
         * np.asarray(card.recipe.grid.area_T, np.float64)[..., None],
     )
+    candidate_rank0 = (*candidate_rank0[:2], candidate_rank0[2][:, :90])
     transport_rows = {
         name: _score(_fold(value), _fold(expected))
-        for name, value, expected in zip(("zFu", "zFv", "zFw"), candidate, recorded)
+        for name, value, expected in zip(
+            ("zFu", "zFv", "zFw"), candidate_rank0, recorded_rank0)
     }
     transport_replay = {
-        "candidate_zFv_vs_geometry": _score(candidate[1], geometry[8][1:]),
-        "oracle_zFv_self": _score(recorded[1], tracer["zFv"][..., :30]),
+        "candidate_zFv_vs_geometry": _score(
+            candidate_rank0[1], geometry[8][1:, :90]),
+        "oracle_zFv_self": _score(
+            recorded_rank0[1], tracer["zFv"][..., :30]),
     }
-    arm_stage2 = {
+    candidate_stage2 = {
         name: _score(_fold(traced.stage_outputs[1][index]), _fold(stage2[name]))
         for index, name in ((2, "T"), (3, "S"))
     }
@@ -184,7 +187,7 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
         "entry_rows": entry_rows,
         "transport_rows": transport_rows,
         "transport_replay": transport_replay,
-        "recorded_transport_stage2": arm_stage2,
+        "candidate_stage2": candidate_stage2,
         "prior_stage2": {
             name: prior["arm_stage2"][name]["fold_band"] for name in ("T", "S")
         },
@@ -213,8 +216,10 @@ def classify(reports: list[dict[str, object]], *, plant: str = "none") -> dict[s
         independent["record"]["sha256"] = "0" * 64
     elif plant == "transport-replay":
         independent["transport_replay"]["oracle_zFv_self"]["unequal"] = 1
-    elif plant == "causal-closure":
-        independent["recorded_transport_stage2"]["S"]["max_abs"] = 1.0
+    elif plant == "transport-boundary":
+        for report in reports:
+            for row in report["transport_rows"].values():
+                row["max_abs"] = 0.0
     elif plant == "one-bit":
         independent["one_bit_control"]["unequal"] = 0
 
@@ -238,14 +243,11 @@ def classify(reports: list[dict[str, object]], *, plant: str = "none") -> dict[s
         require(report["prior_stage2"]["S"]["max_abs"]
                 == 1.3842782919937235e-08,
                 f"{label}: residual stage-2 boundary moved")
-        require(all(report["recorded_transport_stage2"][name]["max_abs"]
-                    <= float(r249.FLOOR) for name in ("T", "S")),
-                f"{label}: NEMO transport did not close stage 2")
         require(report["one_bit_control"]["unequal"] == 1,
                 f"{label}: one-bit control did not fire")
         labels[label] = {
             "transport_rows": report["transport_rows"],
-            "recorded_transport_stage2": report["recorded_transport_stage2"],
+            "candidate_stage2": report["candidate_stage2"],
         }
     first = next((name for name in ("zFu", "zFv", "zFw")
                   if any(labels[label]["transport_rows"][name]["max_abs"]
