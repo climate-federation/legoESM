@@ -3296,6 +3296,11 @@ def tke_vertical_mixing(
             "p_sh2_fn was passed but TKEConfig.tke_shear_avm_weighting="
             f"{_avm_weighting!r}; select 'nemo_face' to use it (silent-no-op "
             "guard).")
+    if p_sh2_fn is not None and _shear_stage == "step_entry":
+        raise ValueError(
+            "p_sh2_fn cannot be combined with tke_shear_evaluation_stage="
+            "'step_entry' (the frozen precomputed_p_sh2 would replace it "
+            "silently).")
     _p_sh2_face_fn = None
     if _shear_stage == "step_entry":
         def _p_sh2_face_fn(_kappaM_T):

@@ -1298,6 +1298,11 @@ class TestAvmWeightingWiring:
         assert not np.allclose(run(face, lambda K: 3.0 * K * s2), tpoint)
         with pytest.raises(ValueError, match="silent-no-op"):
             run(TKEConfig(prandtl_mode="nemo_ri"), lambda K: K * s2)
+        with pytest.raises(ValueError, match="step_entry"):
+            tke_vertical_mixing(
+                cfg=face._replace(tke_shear_evaluation_stage="step_entry"),
+                tke_old=tke0, dt=3600.0, rho_0=_RHO0, n_iterations=1,
+                p_sh2_fn=lambda K: K * s2, precomputed_p_sh2=s2, **base)
 
     def test_final_K_call_gets_face_weighted_override(self):
         """Regression (#1455 review B1): EVERY compute_K_from_tke call —
