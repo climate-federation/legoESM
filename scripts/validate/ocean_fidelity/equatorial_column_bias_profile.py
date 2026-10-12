@@ -71,7 +71,8 @@ def load_ours(path, lon_lo, lon_hi, hw):
     # carry exactly 0).  Re-checked here on every file so a convention change fails loudly.
     wet2d = np.asarray(z["land_mask"]) == 1
     sst = T[..., 0]
-    if np.mean(sst[wet2d] == 0.0) > 0.01 or np.mean(sst[~wet2d] != 0.0) > 0.01:
+    # (MPAS land cells keep a nonzero T, so only the ocean side is checkable)
+    if np.mean(sst[wet2d] == 0.0) > 0.01 or not 0.4 < wet2d.mean() < 0.8:
         raise SystemExit(f"{path}: land_mask is not the ocean flag this probe assumes; refusing")
     box = _box_mask(lat, lon, lon_lo, lon_hi, hw) & wet2d
     area = np.asarray(z["cell_area"], np.float64) if "cell_area" in z.files else None
