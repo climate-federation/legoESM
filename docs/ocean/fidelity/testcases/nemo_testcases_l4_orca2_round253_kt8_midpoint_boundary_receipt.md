@@ -113,16 +113,28 @@ content plant must fire. `--preflight-only` reports
 ## Gates, tests, and review
 
 The round classifier is `HELD_R253_FIRST_INVALID_WRITER_NAMED`. All nine
-measurement plants fire. Focused round-252/253 tests pass. The once-only
+measurement plants fire. Focused round-252/253 tests pass 24/24. The once-only
 `tests/ocean/fidelity -n 12` battery reached 99% with 3,266 explicit passes,
 the same four registered pre-existing reds as round 252, and no round-253
-failure before an xdist worker stopped returning output. The two printed
-in-flight tests were rerun serially; their disposition is recorded in the
-evidence log. The full parallel battery was not rerun.
+failure before an xdist worker stopped returning output. The last two printed
+in-flight IDs were rerun serially: the round-237 SMT-4 header plant passed;
+`test_prediction_plant_is_fail_closed` itself stopped returning output for
+more than twenty minutes and the isolated run was terminated. The four red
+IDs were then rerun serially and reproduced their registered conditions:
+SI3 scalar-math `MY_SRC` provenance, the GYRE round-129 certified-year harness
+stamp, the round-35 process-global allow-dirty scoping ratchet, and the report-
+emitter worktree-stamp ratchet. The full parallel battery was not rerun. The
+full, isolated-inflight, isolated-red, and focused log SHA-256 values are
+`bd27848cf0c2c986d603c40b61397e9cf5e572a3e668fdde3f261dc3e70842f3`,
+`da1e08745db65fc1a84b378a5ccbb7eb00d977eb205e95c3e2a8c7b2c284b046`,
+`29356654acb7d90f2a27d6161883ef4e02e3af7584b849af96d5ed84ef9f685f`,
+and `31ff17b5790a72fac1eb72dea6404260b4c0785aff048abfd5831b11a4b1a6c0`.
 
 The required `codex exec --sandbox read-only` review was attempted. Its
 in-process app-server client could not initialize on the read-only filesystem,
 so **independent review unavailable in-sandbox**.
+The retained attempt has SHA-256
+`eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5`.
 
 ## OPEN
 
