@@ -55,8 +55,11 @@ The direct regression tests execute the new source guard, accept `SWG`, reject
 `SWG_DG` with exit 68, execute the target cpp guard against accepted and
 XIOS-contaminated key sets, inspect both actual operator scripts for the exact
 creation command and overlay order, and prove the command assertion fails when
-the Round 1 invocation is planted. The focused card, acquisition, and long-run
-driver battery passes **174/174**. Shell syntax and `git diff --check` pass.
+the Round 1 invocation is planted. Round 3 correction (2026-10-12): the exact
+`174/174` count is withdrawn because its command output was not archived under
+the evidence root. The current-tip replacement battery and its exact count are
+recorded in the Round 3 receipt and evidence log. Shell syntax and
+`git diff --check` were rerun in Round 3.
 
 The Round 1 review log at
 `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swg_rounds/reviews/codex_review_swgdg_r1.log`

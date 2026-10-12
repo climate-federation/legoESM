@@ -127,10 +127,13 @@ a dirty tree and pins `CUDA_VISIBLE_DEVICES=1`. CPU mode requires the CPU
 backend and the certified fp64/libm policy for ladder comparison; this names
 the policy, not an acquired deck certification.
 
-The direct card/acquisition/driver battery passes 170/170. The driver test runs
-two real production steps on a tiny grid and verifies daily SSH/U/V shapes,
-float64 storage, provenance, pending-to-complete promotion, and the daily hash.
-Shell syntax, new-file lint, and diff checks pass. No GPU run was attempted.
+Round 3 correction (2026-10-12): the exact `170/170` count is withdrawn because
+its command output was not archived under the evidence root. The current-tip
+replacement battery and its exact count are recorded in the Round 3 receipt
+and evidence log. The Round 1 driver test did run two real production steps on
+a tiny grid and checked daily SSH/U/V shape, float64 storage, provenance,
+pending-to-complete promotion, and the daily hash, but this receipt no longer
+claims an unsupported aggregate count.
 
 ## Oracle citations
 
