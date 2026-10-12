@@ -768,6 +768,8 @@ def compute_two_leaf_canopy_fluxes(
         T_canopy_air=Tc_cvg,
         gs_Sun=gs_Sun,
         gs_Sh=gs_Sh,
+        ci_ca_sun=x_final[:, 2] / Ca,
+        ci_ca_sh=x_final[:, 3] / Ca,
         n_iters=n_iters,
         # Whether the Newton closure actually reached a root on this column.
         # False means the fluxes above are a stopped iterate, not a solution —

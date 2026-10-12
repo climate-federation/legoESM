@@ -708,7 +708,9 @@ def _prognostic_fluxes(d: ECSiteDriver,
                 masked(u_star))
         if _want_diag:
             # From the PRE-step state: the values this step's fluxes used.
-            emit = emit + (_capacity_diag(state, params_t, land_config),)
+            emit = emit + ({**_capacity_diag(state, params_t, land_config),
+                            "diag_ci_ca_sun": masked(out.ci_ca_sun),
+                            "diag_ci_ca_sh": masked(out.ci_ca_sh)},)
         return safe_state, emit
 
     params = (_clmml_land_params(d.canopy_params, clmml_sai) if is_clmml

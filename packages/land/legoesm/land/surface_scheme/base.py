@@ -75,6 +75,10 @@ class SurfaceFluxOutput(NamedTuple):
     T_canopy_air: jax.Array | None = None
     gs_Sun: jax.Array | None = None        # sunlit stomatal conductance [m/s]
     gs_Sh: jax.Array | None = None         # shaded stomatal conductance [m/s]
+    # Solved leaf-internal to ambient CO2 ratio Ci/Ca [-] (the Newton unknowns,
+    # every capacity/slope source).  Not meaningful at night (no assimilation).
+    ci_ca_sun: jax.Array | None = None
+    ci_ca_sh: jax.Array | None = None
     n_iters: jax.Array | None = None       # canopy Newton iteration count
     # Per-column flag: did the canopy Newton closure reach a root?  ``False``
     # means the accompanying fluxes come from a stopped iterate (iteration cap
