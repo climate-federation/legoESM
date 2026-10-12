@@ -30,3 +30,32 @@ def test_face_nb_equal_for_uniform_avm_and_face_larger_next_to_turbulent_neighbo
     assert np.isclose(t2, t) and f2 > 2 * f
     Ub = U.copy(); Ub[..., 1] = U[..., 0] + (U[..., 0] - U[..., 1])   # reversed before-shear
     assert G.face_nb(U, Ub, V, V, A, dz, 2, 2, 0)[0] != f
+
+
+def test_west_to_east_matches_production_centring():
+    # legoESM: u[j, i] = west face of cell i; production centre = 0.5*(u[i] + u[i+1])
+    uw = np.array([[0.0, 1.0, 4.0, 9.0, 16.0]])
+    ue = G.west_to_east(uw, axis=1)
+    assert np.allclose(ue[0, :-1], uw[0, 1:]) and np.isnan(ue[0, -1])
+    centre_probe = 0.5 * (ue + np.roll(ue, 1, axis=1))
+    centre_prod = 0.5 * (uw[:, :-1] + uw[:, 1:])
+    assert np.allclose(centre_probe[0, 1:4], centre_prod[0, 1:4])
+    centre_raw = 0.5 * (uw + np.roll(uw, 1, axis=1))          # the misaligned form codex caught
+    assert not np.allclose(centre_raw[0, 1:4], centre_prod[0, 1:4])
+
+
+def test_onset_steps_requires_agreement_at_reference():
+    ratio = np.array([[1.0, 0.8, 1.0],      # reference record
+                      [1.0, 0.8, 0.95],
+                      [0.85, 0.8, 0.95],
+                      [0.5, 0.95, 0.85]])
+    has, first = G.onset_steps(ratio)
+    assert has.tolist() == [True, False, True]
+    assert first[0] == 1 and first[2] == 2
+
+
+def test_ratio_gate_coverage_and_iqr():
+    assert G.ratio_gate(np.ones(100))[0]
+    bad = np.concatenate([-np.ones(90), np.ones(10)])          # wrong sign mostly: coverage fails
+    assert not G.ratio_gate(bad)[0]
+    assert not G.ratio_gate(np.linspace(0.5, 1.5, 100))[0]      # IQR too wide
