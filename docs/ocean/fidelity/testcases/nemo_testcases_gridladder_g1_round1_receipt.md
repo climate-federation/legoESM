@@ -36,6 +36,10 @@ first). Branch fidelity/nemo-testcases-orca2-gridladder from b65a32ff0.
 4. The TSUNAMI card, its one-level step support and its acquisition scripts
    are not on this branch (PR #1920's branch).
 
+The citation gate passes on the preregistration (40 citations, 0 unmapped,
+whole-map audit clean; its shifted-citation plant exits 1). This receipt
+itself carries no line citations, so its own gate pass is empty.
+
 ## What was checked, and by what
 
 | claim | gate | result |
@@ -44,7 +48,7 @@ first). Branch fidelity/nemo-testcases-orca2-gridladder from b65a32ff0.
 | writer and user routines are valid Fortran against NEMO's modules | `gfortran -fsyntax-only` with the TSUNAMI RK3 build's module directory | 3 of 3 clean |
 | the committed deck is the 100-step deck and renders to the 2- and 10-step decks by 3 lines | run.sh preflight | pass |
 | deck values; every one of the 54 required switches refused when moved | pytest, parametrised | pass |
-| card builds, is fp64, one level, 201-cell bump; thirteen planted disagreements refused | pytest on a stand-in domain synthesised from ORCA2's shipped file | pass |
+| card builds, is fp64, one level, 201-cell bump; fifteen planted disagreements refused | pytest on a stand-in domain synthesised from ORCA2's shipped file | pass |
 | the one-level opt-in is non-vacuous | reverting it turns 2 tests red | shown |
 | record checker: clean record admitted; five plants exit nonzero | pytest | pass |
 | geometry identity against NEMO's mesh | pytest | SKIPPED: no record yet |
@@ -81,7 +85,23 @@ citations were re-pointed after the move; nothing else in it changed.
 
 ## Review
 
-Single review (codex): see the end of this file.
+Single review (codex): **INCOMPLETE, no verdict.** The one `codex exec` review
+of `git diff b65a32ff0..HEAD` was ended by its own 590 s limit (exit 124)
+while still reading sources; it was not re-run. Log:
+/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/round1/codex_review_r1.log.
+Its two interim notes, verbatim: "The source-level formula and DOMAINcfg path
+are holding up so far." and "I'm now narrowing the review to failure-path
+behavior in the acquisition script and selectors the card claims to
+bind—those are where the substantive contradictions appear."
+
+Acted on the second note with an own dump of the card's resolved
+configuration. ONE confirmed defect: the card inherited ORCA2's enhanced
+vertical diffusion (scheme "enhanced_diffusion", 100 m2/s) although the G1
+deck states `ln_zdfevd = .false.`; nothing in the validator saw it. Fixed (the
+card now selects no convection scheme), with a validator row and a planted
+refusal; rows for the vorticity thickness option and lateral mixing were added
+at the same time. The acquisition script's failure paths were NOT reviewed by
+anyone but the author. Treat run.sh as unreviewed.
 
 ## OPEN for round 2
 

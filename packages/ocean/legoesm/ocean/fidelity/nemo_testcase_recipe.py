@@ -3762,6 +3762,9 @@ def build_orca2g1_flat_card(deck_root: str | Path) -> NEMOTestcaseCard:
         vertical_mixing=vertical,
         shortwave_penetration=None,                     # ln_traqsr = F
         mle=None,                                       # ln_mle = F
+        # ln_zdfevd = F: the ORCA2 identity carries ORCA2's enhanced
+        # vertical diffusion, which this deck switches off.
+        convection=base.physics.convection._replace(scheme="none"),
     )
     model_config = base._replace(
         A_v=0.0, K_v=0.0, physics=physics,
@@ -3838,6 +3841,9 @@ def _orca2g1_selector_failures(card: NEMOTestcaseCard) -> list[str]:
         "ln_zdfcst": (vm.scheme == "constant" and not vm.constant.lat_dependent
                       and not vm.iwm.enabled and not vm.ddm.enabled),
         "ln_zad_Aimp=F": not cfg.adaptive_implicit_vertadv,
+        "ln_zdfevd=F": cfg.physics.convection.scheme == "none",
+        "nn_e3f_typ=0": cfg.een_e3f_scheme == "nemo_avg4",
+        "lateral_mixing_none": cfg.physics.lateral_mixing.scheme == "none",
         "ln_trabbl=F": (cfg.bbl_adv_option, cfg.bbl_diffusive_option) == (0, 0),
         "no_forcing": (card.surface_boundary_condition == "none"
                        and card.surface_input_operator == "none"

@@ -175,6 +175,7 @@ def test_standin_card_builds_and_states_every_selector(standin_root):
     assert (cfg.momentum_flux_scheme, cfg.vertical_momentum_scheme,
             cfg.tracer_advection) == ("none", "none", "none")
     assert np.count_nonzero(np.asarray(state.eta.data)) == 201
+    assert cfg.physics.convection.scheme == "none"
     recipe.validate_orca2g1_flat_card(card, standin_root)
     with pytest.raises(ValueError, match="not execution-ready"):
         recipe.validate_orca2g1_flat_card_for_execution(card, standin_root)
@@ -192,6 +193,10 @@ def test_standin_card_builds_and_states_every_selector(standin_root):
         "ln_dynvor_een": moved(vorticity_scheme="een"),
         "ln_traldf_OFF": moved(K_h=1.0),
         "ln_hpg_sco": moved(pgf_scheme="adcroft"),
+        "ln_zdfevd=F": moved(physics=cfg.physics._replace(
+            convection=cfg.physics.convection._replace(
+                scheme="enhanced_diffusion"))),
+        "nn_e3f_typ=0": moved(een_e3f_scheme="nemo_sum"),
         "ln_eos80": moved(eos="nemo_seos"),
         "barotropic_identity": moved(barotropic=cfg.barotropic._replace(
             barotropic_pgf_evaluation="vectorized")),
