@@ -184,7 +184,7 @@ def main(argv):
     sj, si = cj - L.J0, ci - L.I0
     keep = (sj >= L.BUF) & (sj < 13 - L.BUF) & (si >= L.BUF) & (si < 31 - L.BUF)
     To, So, Ko = g("col_T")[:, keep], g("col_S")[:, keep], g("col_K")[:, keep]
-    LCo, EIo = g("col_e_lc")[:, keep], g("col_e_in")[:, keep]
+    LCo, EIo, Eo = g("col_e_lc")[:, keep], g("col_e_in")[:, keep], g("col_e")[:, keep]
     sj, si = sj[keep], si[keep]
     nlev = To.shape[2]
     ds = {f: nc.Dataset(f"{argv[1]}/{PREFIX}{f}.nc") for f in ("T", "W", "2D")}
@@ -197,6 +197,7 @@ def main(argv):
     Tn, Sn = n("T", "votemper", slice(0, nlev)), n("T", "vosaline", slice(0, nlev))
     Kn = n("W", "avt", slice(1, nlev))                         # file w i+1 = our interface i
     Kkn = n("W", "avt_k", slice(1, nlev))                      # NEMO closure only (no EVD, no IWM)
+    En = n("W", "en_k", slice(1, nlev))
     EIn = n("W", "en_in_k", slice(1, nlev))
     LCn = n("W", "en_lc_k", slice(1, nlev)) - EIn
     utau = np.asarray(ds["2D"]["utau"][:], dtype=np.float64)[:, sj, si]
@@ -241,20 +242,26 @@ def main(argv):
         dao, dak = deepest_active(Ko[s, wet], zw, AVT_C, ZTOP), deepest_active(Kkn[s, wet], zw, AVT_C, ZTOP)
         gapo = np.nanmean(np.where(np.isnan(dao), np.nan, to < dao))
         gapk = np.nanmean(np.where(np.isnan(dak), np.nan, tk < dak))
-        def gap_stats(K, t, da):
-            """median depth of the gap (first crossing, gap columns only) and
-            median log10 of the smallest K above the active base there."""
+        def gap_stats(K, E, t, da):
+            """median depth of the gap (first crossing, gap columns only),
+            median log10 of the smallest K above the active base there, and
+            median log10 TKE at that interface + share with e < 1e-6
+            (NEMO rn_emin)."""
             g = ~np.isnan(da) & (t < da)
             if not g.any():
-                return np.nan, np.nan
-            kk = K[s, wet][g]
+                return np.nan, np.nan, np.nan, np.nan
+            kk, ee = K[s, wet][g], E[s, wet][g]
             above = zw[None, :] < da[g][:, None]
-            kmin = np.min(np.where(above, kk, np.inf), -1)
-            return np.median(t[g]), np.median(np.log10(np.maximum(kmin, 1e-30)))
-        gdo, gko = gap_stats(Ko, to, dao)
-        gdn, gkn = gap_stats(Kkn, tk, dak)
+            ki = np.argmin(np.where(above, kk, np.inf), -1)
+            kmin = np.take_along_axis(kk, ki[:, None], -1)[:, 0]
+            emin_at = np.take_along_axis(ee, ki[:, None], -1)[:, 0]
+            return (np.median(t[g]), np.median(np.log10(np.maximum(kmin, 1e-30))),
+                    np.median(np.log10(np.maximum(emin_at, 1e-30))), np.mean(emin_at < 1e-6))
+        gdo, gko, geo, gfo = gap_stats(Ko, Eo, to, dao)
+        gdn, gkn, gen, gfn = gap_stats(Kkn, En, tk, dak)
         extra = (f" || active base <=40m ours {np.nanmedian(dao):6.2f} avt_k {np.nanmedian(dak):6.2f} | low-K gap above active base o/N {gapo:.2f}/{gapk:.2f}"
-                 f" | gap depth o/N {gdo:5.2f}/{gdn:5.2f} log10 Kmin o/N {gko:5.2f}/{gkn:5.2f}")
+                 f" | gap depth o/N {gdo:5.2f}/{gdn:5.2f} log10 Kmin o/N {gko:5.2f}/{gkn:5.2f}"
+                 f" log10 e there o/N {geo:5.2f}/{gen:5.2f} share e<1e-6 o/N {gfo:.2f}/{gfn:.2f}")
         print(f"h{h:02d} | {np.nanmedian(to):6.2f} | {np.nanmedian(tk):6.2f} | {_q(to - tk)} || "
               f"{km(Ko, k128):7.2f} {km(Kkn, k128):7.2f} {km(Kn, k128):7.2f} | {km(Ko, k179):7.2f} {km(Kkn, k179):7.2f} {km(Kn, k179):7.2f}" + extra)
     s0, s1 = h0 * 24, min(h1 * 24, nt)
