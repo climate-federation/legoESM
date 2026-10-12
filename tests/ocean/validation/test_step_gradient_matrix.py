@@ -35,7 +35,9 @@ cache pre-built eagerly — required for cold models traced under jit).
 
 from __future__ import annotations
 
-import importlib.util
+import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -58,12 +60,39 @@ _GYRE_GATE_PATH = (
     _REPO / "scripts/validate/ocean_fidelity/testcases/"
     "nemo_testcase_l2_gyre_gradient_gate.py"
 )
-_GYRE_SPEC = importlib.util.spec_from_file_location(
-    "gyre_gradient_gate_matrix", _GYRE_GATE_PATH)
-assert _GYRE_SPEC is not None and _GYRE_SPEC.loader is not None
-GYRE_GATE = importlib.util.module_from_spec(_GYRE_SPEC)
-sys.modules[_GYRE_SPEC.name] = GYRE_GATE
-_GYRE_SPEC.loader.exec_module(GYRE_GATE)
+
+
+def _measure_gyre_one_step_in_subprocess(output: Path) -> dict:
+    """Compile the large certified-card row outside the legacy matrix process."""
+    commit = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=_REPO, text=True).strip()
+    env = dict(os.environ)
+    env["JAX_PLATFORMS"] = "cpu"
+    env["JAX_ENABLE_X64"] = "1"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(_GYRE_GATE_PATH),
+            "agreement",
+            "--steps", "1",
+            "--expect-commit", commit,
+            "--output", str(output),
+        ],
+        cwd=_REPO,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=3600,
+    )
+    assert result.returncode == 0, (
+        "isolated gyre_nemo_card_1step child failed:\n"
+        f"--- stdout ---\n{result.stdout[-4000:]}\n"
+        f"--- stderr ---\n{result.stderr[-4000:]}"
+    )
+    assert output.is_file(), "isolated GYRE child wrote no strict JSON receipt"
+    row = json.loads(output.read_text(encoding="utf-8"))
+    assert row["provenance"] == {"commit": commit, "dirty": False}
+    return row
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -189,19 +218,25 @@ def _variants():
     "conv_enhanced", "flux_feedback", "gm_eke_geometric", "rigid_lid_ab2",
     "gyre_nemo_card_1step", "gyre_nemo_card_6step",
 ])
-def test_step_gradient_health(name):
+def test_step_gradient_health(name, tmp_path):
     if name == "gyre_nemo_card_6step":
         pytest.skip(
             "six-step CPU GYRE row: LLVM ERROR: Unable to allocate section "
             "memory! during the XLA large-function compile; tracked in OPEN")
     if name == "gyre_nemo_card_1step":
-        row = GYRE_GATE.measure_agreement(1)
+        row = _measure_gyre_one_step_in_subprocess(
+            tmp_path / "gyre_nemo_card_1step.json")
         assert row["status"] == "CONFIRMED", (
             "gyre_nemo_card_1step gradient agreement failed after the "
             "active-cell CEN2 e3t(Kmm) denominator treatment "
             "(traadv_cen.F90:146-148,208-216); "
             f"measured={row}"
         )
+        assert row["case"] == "GYRE-zco"
+        assert row["steps"] == 1
+        assert row["backend"] == "cpu"
+        assert "transcendentals='libm'" in row["precision_policy"]
+        assert row["production_entry"] == "LatLonCGridOceanModel._step_jitted"
         return
     config, opts = _variants()[name]
     model, state = _build(
