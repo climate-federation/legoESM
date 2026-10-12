@@ -144,10 +144,12 @@ def main(argv):
     # instrument: telescoping identity on the cohort, both sides, over the whole window
     s0, s1 = h0 * 24, h1 * 24
     for lab, led, e in (("ours", lo, le_end), ("NEMO", ln, ne_end)):
-        tot = sum(np.nansum(led[t][s0:s1, cols, k], axis=0) for t in L.TERMS if t != "between") \
+        tot = sum(np.sum(led[t][s0:s1, cols, k], axis=0) for t in L.TERMS if t != "between") \
             + np.sum(led["between"][max(s0, 1):s1, cols, k], axis=0)   # 'between' is NaN only at step 0
+        print(f"identity {lab}: non-finite column windows {int(np.sum(~np.isfinite(tot)))} of {tot.size}")
         de = e[s1 - 1, cols, k] - e[s0 - 1, cols, k]
-        print(f"identity {lab}: max |sum(terms) - de| / max|de| = {np.nanmax(np.abs(tot - de)) / np.nanmax(np.abs(de)):.2e}")
+        okt = np.isfinite(tot) & np.isfinite(de)
+        print(f"identity {lab}: max |sum(terms) - de| / max|de| = {np.max(np.abs(tot - de)[okt]) / np.max(np.abs(de)[okt]):.2e} over {okt.sum()} complete columns")
     for c in (0, cols.size // 2):          # two rows printed for a hand check
         s = 8 * 24 - 1
         print(f"hand-check col {cols[c]} k {k[c]} ({zw[k[c]]:.2f} m) step {s}: ours "
@@ -155,31 +157,6 @@ def main(argv):
               + f" | e(s)-e(s-1)={le_end[s, cols[c], k[c]] - le_end[s - 1, cols[c], k[c]]:.3e}")
         print(f"   NEMO " + " ".join(f"{t}={ln[t][s, cols[c], k[c]]:.3e}" for t in L.TERMS)
               + f" | e(s)-e(s-1)={ne_end[s, cols[c], k[c]] - ne_end[s - 1, cols[c], k[c]]:.3e}")
-
-    # Effective production viscosity: eshear / S2_face, S2_face from the
-    # C-grid face velocities at the column's own (j,i) faces, the SAME crude
-    # operator on both sides (ours col_u/col_v post-solve, NEMO uoce/voce);
-    # neither equals NEMO's avm-weighted p_sh2, only the ratio is meant.
-    uo, vo = g("col_u")[:, keep], g("col_v")[:, keep]
-    def nuv(f, v):
-        x = np.asarray(nc.Dataset(f"{argv[1]}/{PREFIX}{f}.nc")[v][:, :nk + 1], dtype=np.float64)
-        x = x[:, :, sj, si].transpose(0, 2, 1); x[np.abs(x) > 1e15] = np.nan
-        return x
-    un, vn = nuv("U", "uoce"), nuv("V", "voce")
-    zt = np.asarray(nc.Dataset(L.MESH)["gdept_1d"][0], dtype=np.float64)[:nk + 1]
-    dzt = np.diff(zt)
-    s2f = lambda U, V: ((U[..., :-1] - U[..., 1:]) ** 2 + (V[..., :-1] - V[..., 1:]) ** 2) / dzt ** 2
-    S2o_f, S2n_f = s2f(uo, vo), s2f(un, vn)
-    print("\nEffective production viscosity at the gap interface (window-end step): median")
-    print("  h | eshear ours NEMO | S2_face ours NEMO (col ratio) | nu_eff=eshear/S2_face ours NEMO (col ratio) | A_applied(s-1) ours | avm_k(s-1) NEMO | e col ratio")
-    for h in range(h0, h1):
-        s = (h + 1) * 24 - 1
-        po, pn = pick(sh_o, s), pick(sh_n, s)
-        so, sn = pick(S2o_f, s), pick(S2n_f, s)
-        nuo, nun = po / so, pn / sn
-        print(f"  h{h + 1:02d} | {np.nanmedian(po):9.2e} {np.nanmedian(pn):9.2e} | {np.nanmedian(so):9.2e} {np.nanmedian(sn):9.2e} "
-              f"({np.nanmedian(so / sn):5.2f}) | {np.nanmedian(nuo):9.2e} {np.nanmedian(nun):9.2e} ({np.nanmedian(nuo / nun):5.2f}) | "
-              f"{np.nanmedian(pick(Ao_app, s - 1)):9.2e} | {np.nanmedian(pick(avmk, s - 1)):9.2e} | {np.nanmedian(pick(le_end, s) / pick(ne_end, s)):5.2f}")
 
     # NEMO's TKE-diffusion floor MAX(avm(k)+avm(k+-1), 2e-5) (zdftke.F90:407-409)
     # with p_avm = avm_k entering the step: share of cohort samples where it binds
@@ -293,18 +270,19 @@ def main(argv):
     # background + IWM), per sample, over the reported hours and the cohort's
     # face neighbours (codex: a misaligned reconstruction lands outside)
     hrs = range(href, min(h1, 9))
-    nus, Aas = [], []
+
+    def nu_gate(sx, jj_, ii_, kk_):
+        """share of samples with nu_eff in [kappaM_min, A_applied] (5% tol)."""
+        nu = NUo[sx, jj_, ii_, kk_]; aa = Ao_app_g[sx - 1, jj_, ii_, kk_]
+        return float(np.mean(np.isfinite(nu) & (nu >= 1.4e-6 * 0.95) & (nu <= aa * 1.05)))
+    nu_pass = True
     for h in hrs:
         s = (h + 1) * 24 - 1
-        for c in range(cols.size):
-            jj, ii = sj[cols[c]], si[cols[c]]
-            for dj, di in ((0, 0), (0, 1), (0, -1), (1, 0), (-1, 0)):
-                nus.append(NUo[s, jj + dj, ii + di, k[c]]); Aas.append(Ao_app_g[s - 1, jj + dj, ii + di, k[c]])
-    nus, Aas = np.asarray(nus), np.asarray(Aas)
-    okb = np.isfinite(nus) & (nus >= 1.4e-6 * 0.95) & (nus <= Aas * 1.05)
-    nu_pass = okb.mean() >= 0.9
-    print(f"GATE ours nu_eff = eshear/S2c(s-1) within [1.4e-6, A_applied] (5% tol), cohort + face neighbours, h{href + 1}-h{max(hrs) + 1}: "
-          f"{okb.mean():.3f} of {nus.size} -> {'PASS' if nu_pass else 'FAIL'} (>= 0.9)")
+        cen = nu_gate(s, sj[cols], si[cols], k)
+        nb = np.mean([nu_gate(s, sj[cols] + dj, si[cols] + di, k) for dj, di in ((0, 1), (0, -1), (1, 0), (-1, 0))])
+        ok_h = cen >= 0.9 and nb >= 0.9
+        nu_pass &= ok_h
+        print(f"GATE ours nu_eff in [1.4e-6, A_applied] h{h + 1:02d}: centres {cen:.3f} neighbours {nb:.3f} -> {'PASS' if ok_h else 'FAIL'} (each >= 0.9)")
     gates = []
     for h in hrs:
         s = (h + 1) * 24 - 1
@@ -331,21 +309,29 @@ def main(argv):
             cv = lambda x: np.mean(np.isfinite(np.asarray(x)))
             print(f"  h{h + 1:02d} | {np.nanmedian(r_rec):6.2f} | {np.nanmedian(r_tp):6.2f} | {np.nanmedian(r_fc):6.2f} || {np.nanmedian(r_n):6.2f}"
                   f"   (coverage {cv(r_rec):.2f}/{cv(r_tp):.2f}/{cv(r_fc):.2f})")
-    # selection-bias control (GLM): unconditional face/T-pt ratio, all interior columns, interfaces 10-25 m
+    # selection-bias control (GLM): unconditional face/T-pt ratio, all interior columns,
+    # interfaces 10-25 m; each hour gated on both instruments over the SAME samples
     kk_rng = np.where((zw >= 10.0) & (zw <= 25.0))[0]
     jin, iin = np.meshgrid(np.arange(L.BUF, 13 - L.BUF), np.arange(L.BUF, 31 - L.BUF), indexing="ij")
-    print("Unconditional face/T-pt production ratio, all interior columns, interfaces 10-25 m: ours | NEMO (median [p25,p75])")
+    print("Unconditional face/T-pt production ratio, all interior columns, interfaces 10-25 m: ours | NEMO (median [p25,p75]), per-hour gated")
     for h in (4, 6, 8, 12, 18, 30):
         s = h * 24 - 1
-        ro, rn_ = [], []
+        ro, rn_, gN, gO = [], [], [], []
         for kint in kk_rng:
             f1, t1 = face_nb(Uo[s - 1], Uo[s - 1], Vo[s - 1], Vo[s - 1], NUo[s], dzt, jin, iin, kint)
             f2, t2 = face_nb(Un[s - 1], Un[s - 1], Vn[s - 1], Vn[s - 1], An[s - 1], dzt, jin, iin, kint)
             ro.append((f1 / t1).ravel()); rn_.append((f2 / t2).ravel())
+            gN.append((f2 / shN[s, jin, iin, kint]).ravel())
+            gO.append(np.full(jin.size, nu_gate(s, jin.ravel(), iin.ravel(), np.full(jin.size, kint))))
+        okN, covN, qN = ratio_gate(np.concatenate(gN))
+        shareO = float(np.mean(np.concatenate(gO)))
+        if not (okN and shareO >= 0.9):
+            print(f"  h{h:02d}: WITHHELD (NEMO gate {'PASS' if okN else 'FAIL'} cov {covN:.2f}; ours nu bounds {shareO:.2f})")
+            continue
         ro, rn_ = np.concatenate(ro), np.concatenate(rn_)
         ro, rn_ = ro[np.isfinite(ro) & (ro > 0)], rn_[np.isfinite(rn_) & (rn_ > 0)]
         print(f"  h{h:02d}: ours {np.median(ro):6.2f} [{np.percentile(ro, 25):.2f},{np.percentile(ro, 75):.2f}] | "
-              f"NEMO {np.median(rn_):6.2f} [{np.percentile(rn_, 25):.2f},{np.percentile(rn_, 75):.2f}]")
+              f"NEMO {np.median(rn_):6.2f} [{np.percentile(rn_, 25):.2f},{np.percentile(rn_, 75):.2f}]  (gates: NEMO IQR {qN[0]:.3f}-{qN[2]:.3f}, ours nu {shareO:.2f})")
 
     print(f"\nPer 1-h window at the gap interface: median [IQR] of ours-NEMO (cumulative, m2/s2); NEMO median in ()")
     for h in range(h0, h1):
