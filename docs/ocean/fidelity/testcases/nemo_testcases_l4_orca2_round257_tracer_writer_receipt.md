@@ -99,7 +99,7 @@ focused round-231/249/256/257 gate set passed `29/29`; the citation-gate unit
 set passed `17/17`. The round receipt citation gate passed all three compiled
 anchors with zero failures or unmapped citations, the cumulative default
 receipt passed with zero failures or unmapped citations, and a rigidly shifted
-`stprk3_stg.f90:282-285` plant refused with exit 1.
+transport-line plant refused with exit 1.
 
 The once-only `tests/ocean/fidelity -n 12` battery collected 3,337 tests and
 reached 99% before an xdist worker stopped producing output; the stale run was
