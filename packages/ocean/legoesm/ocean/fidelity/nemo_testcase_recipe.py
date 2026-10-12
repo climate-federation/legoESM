@@ -71,11 +71,8 @@ class NEMOTestcaseCard(NamedTuple):
     # must spell this out so no caller can inherit an implicit iceberg choice.
     icebergs_enabled: bool | None = None
     iceberg_inputs: tuple[str, ...] | None = None
-    # NEMO ln_Jperio as card data; False is the walled N/S boundary every
-    # other card runs.  The card's model config carries it
-    # (``meridionally_periodic``), and the model scopes every entry point to
-    # that value; the step's j-neighbour statements read it there
-    # (lbclnk.f90:2028-2034).
+    # NEMO ln_Jperio; False is walled N/S.  Model config scopes each step's
+    # neighbour statements to this card value (lbclnk.f90:2028-2034).
     j_periodic: bool = False
     # Exact resolved input for parameterised cards.  Legacy cards leave this
     # unset; SWG requires it at its public validation boundary.

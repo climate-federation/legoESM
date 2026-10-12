@@ -138,7 +138,7 @@ The compiled domain size, spacing, and stored dimensions derive from
 `rn_domsiz`, `rn_dx`, and `nn_SWG` at
 `SWG_OMIP_L1/BLD/ppsrc/nemo/usrdef_nam.f90:154-166`. The replacement mask's
 upper limits and executed U/V-point inequalities are at
-`SWG_DG/BLD/ppsrc/nemo/usrdef_zgr.f90:211-221`. The single 500 m layer is
+`SWG_DG/BLD/ppsrc/nemo/usrdef_zgr.f90:211,213,220-221`. The single 500 m layer is
 constructed at `SWG_OMIP_L1/BLD/ppsrc/nemo/usrdef_zgr.f90:158-168`. The
 unchanged stress uses `rn_tau` and the fixed 2,000 km divisor at
 `SWG_OMIP_L1/BLD/ppsrc/nemo/usrdef_sbc.f90:99-106`.

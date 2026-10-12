@@ -1658,10 +1658,11 @@ CITATION_MAP = {
     'SWG_OMIP_L1/BLD/ppsrc/nemo/usrdef_zgr.f90:206-235': [
         'z2d(:,:) = REAL( jpkm1 , wp )',
         ('k_bot(ji,jj) = 0', 2), 30],
-    'SWG_DG/BLD/ppsrc/nemo/usrdef_zgr.f90:211-221': [
+    'SWG_DG/BLD/ppsrc/nemo/usrdef_zgr.f90:211,213,220-221': [
         'zylim1 = rn_domsiz + 10000._wp',
         'zxlim1 = rn_domsiz + 10000._wp',
-        'IF ( gphiv(ji,jj) > zylim0', 11],
+        'IF ( gphiv(ji,jj) > zylim0',
+        '& glamu(ji,jj) > zxlim0', 4],
     'SWG_OMIP_L1/BLD/ppsrc/nemo/usrdef_sbc.f90:84-87': [
         'emp (:,:) = 0._wp', 'qsr (:,:) = 0._wp', 4],
     'SWG_OMIP_L1/BLD/ppsrc/nemo/usrdef_sbc.f90:99-106': [
