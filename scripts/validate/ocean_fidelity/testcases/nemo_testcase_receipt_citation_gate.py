@@ -1659,6 +1659,15 @@ CITATION_MAP = {
         ('ssha(:,:) = ssh (:,:,Kaa)', 1),
         ('r3t(:,:,Kaa) = r2_3 * r3t(:,:,Kbb)', 1),
         41],
+    # --- ORCA2 round 261: stage-2 V-transport operand split ---------
+    'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/stprk3_stg.f90:168-170': [
+        ('CALL dom_qco_r3c_RK3( ssha, r3ta, r3ua, r3va, r3fa )', 1),
+        ("r3va, 'V', 1._wp", 1),
+        3],
+    'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/domqco.f90:213-217': [
+        ('DO jj = ntsj-( nn_hls), ntej+(  nn_hls-1 )', 1),
+        ('* r1_hv_0(ji,jj) * r1_e1e2v(ji,jj)', 1),
+        5],
     'barotropic_latlon_cgrid.py:2006-2025': [
         ('eta_mid = eta_c', 1),
         ('za_i, eta_c, etab_c, etabb_c)', 1),
