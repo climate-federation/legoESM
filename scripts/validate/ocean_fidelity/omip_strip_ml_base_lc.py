@@ -60,6 +60,15 @@ def turbocline(K, zw, avt_c):
     return np.where(np.any(below, -1), zw[np.argmax(below, -1)], np.inf)
 
 
+def deepest_active(K, zw, avt_c, zmax):
+    """deepest interface above zmax with K >= avt_c (NaN if none): the base
+    of active mixing, insensitive to a low-K gap higher in the column."""
+    act = (K >= avt_c) & (zw <= zmax)
+    any_a = np.any(act, -1)
+    i = K.shape[-1] - 1 - np.argmax(act[..., ::-1], -1)
+    return np.where(any_a, zw[i], np.nan)
+
+
 def lc_depth(inc, zw):
     """h_lc from a Langmuir increment profile (..., nk) on interface depths
     zw: depth of the first zero-increment interface after the positive run
@@ -229,8 +238,12 @@ def main(argv):
         tk = turbocline(Kkn[s, wet, :kw], zw[:kw], AVT_C)
         to, tk = np.where(np.isinf(to), np.nan, to), np.where(np.isinf(tk), np.nan, tk)
         km = lambda K, k: np.median(K[s, wet, k]) * 1e4
+        dao, dak = deepest_active(Ko[s, wet], zw, AVT_C, ZTOP), deepest_active(Kkn[s, wet], zw, AVT_C, ZTOP)
+        gapo = np.nanmean(np.where(np.isnan(dao), np.nan, to < dao))
+        gapk = np.nanmean(np.where(np.isnan(dak), np.nan, tk < dak))
+        extra = f" || active base <=40m ours {np.nanmedian(dao):6.2f} avt_k {np.nanmedian(dak):6.2f} | low-K gap above active base o/N {gapo:.2f}/{gapk:.2f}"
         print(f"h{h:02d} | {np.nanmedian(to):6.2f} | {np.nanmedian(tk):6.2f} | {_q(to - tk)} || "
-              f"{km(Ko, k128):7.2f} {km(Kkn, k128):7.2f} {km(Kn, k128):7.2f} | {km(Ko, k179):7.2f} {km(Kkn, k179):7.2f} {km(Kn, k179):7.2f}")
+              f"{km(Ko, k128):7.2f} {km(Kkn, k128):7.2f} {km(Kn, k128):7.2f} | {km(Ko, k179):7.2f} {km(Kkn, k179):7.2f} {km(Kn, k179):7.2f}" + extra)
     s0, s1 = h0 * 24, min(h1 * 24, nt)
     hlo, fo, sto = lc_depth(LCo[s0:s1, wet], zw)
     hln, fn, stn = lc_depth(LCn[s0:s1, wet], zw)

@@ -27,6 +27,15 @@ def test_turbocline_is_first_interface_below_threshold():
     assert np.isinf(P.turbocline(np.full(5, 1e-2), zw, 5e-4))
 
 
+def test_deepest_active_sees_through_a_low_k_gap():
+    zw = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+    K = np.array([1e-2, 1e-5, 1e-2, 1e-2, 1e-5])         # gap at 2 m, active again to 4 m
+    assert P.turbocline(K, zw, 5e-4) == 2.0
+    assert P.deepest_active(K, zw, 5e-4, 40.0) == 4.0
+    assert P.deepest_active(K, zw, 5e-4, 3.5) == 3.0
+    assert np.isnan(P.deepest_active(np.full(5, 1e-6), zw, 5e-4, 40.0))
+
+
 def test_lc_depth_and_zus_inversion_recover_nemo_formula_inputs():
     zw = np.array([1.0, 2.1, 3.3, 4.6, 6.0, 7.6, 9.4, 11.5, 13.9, 16.6, 19.6, 23.0])
     for imlc, zus in ((6, 0.05), (9, 0.11), (11, 0.02)):
