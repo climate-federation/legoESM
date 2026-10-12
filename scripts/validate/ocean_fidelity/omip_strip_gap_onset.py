@@ -117,6 +117,10 @@ def main(argv):
         s = a1 - 1
         eo, en_ = pick(le_end, s), pick(ne_end, s)
         print(f"   e end    ours {np.median(eo):9.2e} NEMO {np.median(en_):9.2e}  col ratio {np.median(eo / en_):6.2f}")
+        for up in (1, 2, 3):
+            ku = np.maximum(k - up, 0)
+            ro = le_end[s, cols, ku] / ne_end[s, cols, ku]
+            print(f"   e at kg-{up} ({np.median(zw[ku]):5.2f} m) col ratio o/N {np.median(ro):6.2f}  ours {np.median(le_end[s, cols, ku]):9.2e} NEMO {np.median(ne_end[s, cols, ku]):9.2e}")
         print(f"   l entry  ours {np.nanmedian(pick(l_o, s)):9.3f} NEMO {np.nanmedian(pick(l_n, s)):9.3f}  col ratio {np.nanmedian(pick(l_o, s) / pick(l_n, s)):6.2f}")
         pro = pick(KH, s) / pick(KM, s)
         prn = pick(avtk, s) / pick(avmk, s)
