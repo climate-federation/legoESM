@@ -64,8 +64,16 @@ def load_ours(path, lon_lo, lon_hi, hw):
     z = np.load(path)
     lat = np.asarray(z["lat_T"], np.float64); lon = np.asarray(z["lon_T"], np.float64)
     T = np.asarray(z["T_mean"], np.float64); h = np.asarray(z["h_mean"], np.float64)
-    land = np.asarray(z["land_mask"]) != 0
-    box = _box_mask(lat, lon, lon_lo, lon_hi, hw) & ~land
+    if np.nanmax(np.abs(lat)) <= 0.5 * np.pi + 1e-6:  # MPAS stores radians
+        lat = np.degrees(lat); lon = np.degrees(lon)
+    # The snapshot's ``land_mask`` is 1 over OCEAN (despite its name): verified on the
+    # base1006 tripole (1736 of 1740 nino3 cells flagged 1 carry ~27.5 C, the 4 flagged 0
+    # carry exactly 0).  Re-checked here on every file so a convention change fails loudly.
+    wet2d = np.asarray(z["land_mask"]) == 1
+    sst = T[..., 0]
+    if np.mean(sst[wet2d] == 0.0) > 0.01 or np.mean(sst[~wet2d] != 0.0) > 0.01:
+        raise SystemExit(f"{path}: land_mask is not the ocean flag this probe assumes; refusing")
+    box = _box_mask(lat, lon, lon_lo, lon_hi, hw) & wet2d
     area = np.asarray(z["cell_area"], np.float64) if "cell_area" in z.files else None
     zc = np.abs(np.asarray(z["z_center_ref"], np.float64))
     Tc = T[box]; hc = h[box]
@@ -80,9 +88,11 @@ def load_nemo(gridt, mesh, rec, lon_lo, lon_hi, hw):
     ny, nx = lat.shape
     gphit = np.asarray(m.variables["gphit"][0])
     # locate the file's window in the mesh (5-day files may be the full or the trimmed domain)
+    tm0 = np.asarray(m.variables["tmask"][0, 0])
     for (oj, oi) in ((0, 0), (0, 1)):
         g = gphit[oj:oj + ny, oi:oi + nx]
-        if g.shape == lat.shape and np.nanmax(np.abs(g - lat)[np.abs(lat) < 60]) < 1e-3:
+        wet = tm0[oj:oj + ny, oi:oi + nx] == 1
+        if g.shape == lat.shape and np.max(np.abs(g - lat)[wet & (np.abs(lat) < 60)]) < 1e-3:
             break
     else:
         raise SystemExit("NEMO file is not a recognised window of the mesh; refusing")

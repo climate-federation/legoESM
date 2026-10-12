@@ -130,7 +130,7 @@ def ours(a):
         print(f"    face lat {0.5 * (lat[gg - 1, i0] + lat[gg, i0]):+6.2f}  {rowv[gg] / n / 1e6:+7.3f}   | T-row lat {lat[gg, i0]:+6.2f} zonal-mean u (thickness-weighted, m/s) {rowu[gg] / rowh[gg]:+8.4f}")
     band_budget(f"legoESM {a.snapshot_dir.rstrip('/').split('/')[-1]} hours {a.hours} ({n} windows)",
                 [f"{zc[k]:.1f}" for k in ks], acc_v, acc_h, vol, tb / vol,
-                box_area=float(A[j0:j1 + 1, i0:i1 + 1][z0["land_mask"][j0:j1 + 1, i0:i1 + 1] == 0].sum()))
+                box_area=float(A[j0:j1 + 1, i0:i1 + 1][z0["land_mask"][j0:j1 + 1, i0:i1 + 1] == 1].sum()))  # land_mask==1 is OCEAN
 
 
 def nemo(a):
