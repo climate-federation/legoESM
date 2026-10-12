@@ -324,6 +324,8 @@ def measure(deck_root: Path, frame_root: Path, label: str,
         "first_invalid": first_invalid,
         "one_bit_control": _one_bit_control(),
         "compiled_source": {
+            "midpoint_ssh": "ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:489-493",
+            "interpolation_coefficients": "ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:1496-1531",
             "continuity": "ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:546-558",
             "external_update": "ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:655-718",
             "stage_install": "ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/stprk3_stg.f90:138-178",
