@@ -352,12 +352,27 @@ def _field_mask(field: str, masks: dict[str, np.ndarray]) -> np.ndarray:
         else "F" if field in STAGE_F_FIELDS else "T"]
 
 
+def _bit_unequal(ref, cand, mask):
+    """Return per-element IEEE word inequality under a field mask."""
+    ref, cand = np.asarray(ref), np.asarray(cand)
+    require(ref.dtype == cand.dtype and ref.dtype.kind == "f",
+            "exact comparison requires matching float dtypes")
+    use = np.asarray(mask, dtype=bool)
+    # Numeric equality is not bit identity: IEEE +0.0 and -0.0 compare equal.
+    # Compare one unsigned word per float so signed zero and NaN payloads
+    # cannot pass the exact SWG gate.
+    word = np.dtype(f"u{ref.dtype.itemsize}")
+    ref_bits = np.ascontiguousarray(ref).view(word)
+    cand_bits = np.ascontiguousarray(cand).view(word)
+    return np.argwhere((ref_bits != cand_bits) & use)
+
+
 def _row(name, ref, cand, mask):
     ref, cand = np.asarray(ref), np.asarray(cand)
     use = np.asarray(mask, dtype=bool)
     result = score(name, ref, cand, use)
     delta = cand - ref
-    bad = np.argwhere((ref != cand) & use)
+    bad = _bit_unequal(ref, cand, use)
     result.update({
         "bit_identical": bool(bad.size == 0),
         "n_unequal": int(bad.shape[0]),
@@ -379,6 +394,16 @@ def _stored_row(name, ref, cand, mask):
     require(ref.dtype == cand.dtype == np.dtype("float32"),
             f"{name}: stored comparison is not float32")
     result = _row(name, ref.astype(np.float64), cand.astype(np.float64), mask)
+    bad = _bit_unequal(ref, cand, mask)
+    result.update({
+        "bit_identical": bool(bad.size == 0),
+        "n_unequal": int(bad.shape[0]),
+        "first_unequal_cell": bad[0].tolist() if bad.size else None,
+    })
+    if bad.size and result["status"] == "AT-BAR":
+        result["numerical_status"] = "AT-BAR"
+        result["status"] = "DEBT"
+        result["reason"] = "bit-for-bit SWG ladder: non-identical value"
     result["stored_dtype"] = "float32"
     return result
 
@@ -863,6 +888,11 @@ def month_control(root: Path, *, deck: str = "shipped",
     return _gate_rows({
         "label": "INDEPENDENT-THIRTY-DAY-CONTROL",
         "legoesm_git_sha": sha,
+        "oracle_acquisition_git_sha": (
+            "011ba6c48c2243467097af35a66a041cdee3f565"
+            if deck == "shipped"
+            else "129fa0f9ca173a3ff284a8265041b6ae57564d9e"),
+        "deck": deck,
         "bar": BAR,
         "plant": "ulp",
         "controls": [changed],

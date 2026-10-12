@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 
 import numpy as np
@@ -78,6 +79,20 @@ def test_synthetic_metrics_have_known_answer():
     assert np.all(np.isfinite(out["mean_kinetic_energy_spectrum_m3_s2"]))
 
 
+def test_identical_inputs_have_identical_spectra_and_zero_comparisons():
+    providers = (_synthetic_provider("NEMO"),
+                 _synthetic_provider("legoESM"))
+    diagnosed = {provider.name: climate.diagnose(
+        provider, days=2, geometry=_geometry()) for provider in providers}
+    assert np.array_equal(
+        diagnosed["NEMO"]["mean_kinetic_energy_spectrum_m3_s2"],
+        diagnosed["legoESM"]["mean_kinetic_energy_spectrum_m3_s2"])
+    comparisons = climate._comparison_summary(
+        diagnosed["NEMO"], diagnosed["legoESM"])
+    assert all(row["max_absolute_difference"] == 0.0
+               for row in comparisons.values())
+
+
 def test_comparison_refuses_different_daily_sampling():
     left = _synthetic_provider("NEMO", "daily_mean")
     right = _synthetic_provider("legoESM", "daily_snapshot")
@@ -91,9 +106,94 @@ def test_instrument_writes_json_arrays_and_side_by_side_figure(tmp_path):
     diagnosed = {provider.name: climate.diagnose(
         provider, days=2, geometry=_geometry()) for provider in providers}
     report = climate.write_outputs(
-        tmp_path / "result", diagnosed, providers, days=2)
-    assert report["window_days"] == [1, 2]
+        tmp_path / "result", diagnosed, providers, days=2, start_day=2)
+    assert report["window_days"] == [2, 3]
     assert set(report["metrics"]) == {"NEMO", "legoESM"}
+    assert report["comparison"]["left"] == "NEMO"
+    assert all(row["root_mean_square_difference"] == 0.0
+               for row in report["comparison"]["metrics"].values())
     assert (tmp_path / "result/swg_dg_climate_report.json").is_file()
     assert (tmp_path / "result/swg_dg_climate_arrays.npz").is_file()
     assert (tmp_path / "result/swg_dg_climate_side_by_side.png").is_file()
+
+
+def _write_nemo_fixture(root: Path, monkeypatch):
+    import netCDF4
+
+    executable = root / "nemo"
+    executable.write_bytes(b"synthetic SWG_DG executable")
+    monkeypatch.setattr(
+        climate, "NEMO_DG_EXECUTABLE_SHA256", climate.sha256(executable))
+    (root / "resolved_namelist_lines.txt").write_text("""\
+1: nn_SWG = 16
+2: rn_domsiz = 4000000
+3: rn_tau = 0.10
+4: rn_modified_grav = 9.80665
+5: rn_rfr = 1.e-7
+6: rn_beta = 2.e-11
+7: rn_f0 = 0.7e-4
+8: rn_Uv = 2.0
+9: rn_Lv = 10
+10: rn_Dt = 50.
+11: nn_write = 1728
+""")
+    jj, ii = np.indices((2, 2), dtype=np.float64)
+    monkeypatch.setattr(climate, "_expected_coordinates", lambda: {
+        kind: (ii, jj) for kind in "TUV"})
+    for kind, variable in climate.NEMO_FIELDS.items():
+        with netCDF4.Dataset(root / f"SWG_test_grid_{kind}_0000.nc", "w") as ds:
+            ds.createDimension("time", 2)
+            ds.createDimension("y", 2)
+            ds.createDimension("x", 2)
+            ds.createVariable("time_counter", "f8", ("time",))[:] = [
+                0.5 * climate.SECONDS_PER_DAY, 1.5 * climate.SECONDS_PER_DAY]
+            ds.createVariable("nav_lon", "f8", ("y", "x"))[:] = ii
+            ds.createVariable("nav_lat", "f8", ("y", "x"))[:] = jj
+            ds.createVariable(variable, "f4", ("time", "y", "x"))[:] = 0.0
+
+
+def test_nemo_provider_admits_window_and_refuses_shifted_clock_and_deck(
+        tmp_path, monkeypatch):
+    _write_nemo_fixture(tmp_path, monkeypatch)
+    provider = climate.nemo_ioipsl_provider(tmp_path, 1, start_day=2)
+    assert provider.provenance["window_days"] == [2, 2]
+    assert [frame.day for frame in provider.iterate()] == [1]
+    import netCDF4
+    path = tmp_path / "SWG_test_grid_T_0000.nc"
+    with netCDF4.Dataset(path, "r+") as ds:
+        ds["time_counter"][1] += 1.0
+    with pytest.raises(Exception, match="daily clock/window differs"):
+        climate.nemo_ioipsl_provider(tmp_path, 1, start_day=2)
+    resolved = tmp_path / "resolved_namelist_lines.txt"
+    resolved.write_text(resolved.read_text().replace("rn_tau = 0.10",
+                                                      "rn_tau = 0.11"))
+    with pytest.raises(Exception, match="differs at rn_tau"):
+        climate.nemo_ioipsl_provider(tmp_path, 1, start_day=2)
+
+
+def test_legoesm_provider_selects_later_window_and_gates_deck(tmp_path):
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import SWG_MADDISON_NAMELIST
+
+    pins = {}
+    for day in range(1, 4):
+        path = tmp_path / f"day{day:04d}.npz"
+        field = np.full((644, 644), float(day))
+        np.savez_compressed(path, day=day, dt_s=50.0,
+                            ssh_m=field, u_m_s=field, v_m_s=field)
+        pins[path.name] = climate.sha256(path)
+    manifest = {
+        "status": "complete", "completed_days": 3, "days": 3,
+        "schema": "legoesm-swg-double-gyre-daily-v1",
+        "sampling": "daily_mean", "daily_sha256": pins,
+        "namelist": SWG_MADDISON_NAMELIST._asdict(),
+    }
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest))
+    provider = climate.legoesm_npz_provider(tmp_path, 2, start_day=2)
+    frames = list(provider.iterate())
+    assert [frame.day for frame in frames] == [1, 2]
+    assert [frame.ssh[0, 0] for frame in frames] == [2.0, 3.0]
+    manifest["namelist"]["rn_tau_pa"] = 0.11
+    manifest_path.write_text(json.dumps(manifest))
+    with pytest.raises(Exception, match="differs at rn_tau_pa"):
+        climate.legoesm_npz_provider(tmp_path, 2, start_day=2)

@@ -29,6 +29,18 @@ def test_maddison_deck_selects_admitted_card_clocks_and_roots():
         lad._deck_namelist("typo")
 
 
+def test_exact_row_gate_distinguishes_signed_zero_bits():
+    reference = np.array([0.0, 1.0], dtype=np.float64)
+    candidate = np.array([-0.0, 1.0], dtype=np.float64)
+    row = lad._row("signed-zero-plant", reference, candidate,
+                   np.ones(2, dtype=bool))
+    assert not row["bit_identical"]
+    assert row["n_unequal"] == 1
+    assert row["first_unequal_cell"] == [0]
+    assert row["max_abs"] == 0.0
+    assert row["status"] == "DEBT"
+
+
 @pytest.mark.skipif(not lad.DG_STAGE_ROOT.is_dir(),
                     reason="admitted SWG_DG stage records not mounted")
 def test_maddison_admission_and_restart_reader_use_run_resolution():

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import sys
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import ExitStack
@@ -19,6 +20,13 @@ from nemo_testcase_phase3_trajectory_gate import require  # noqa: E402
 
 NEMO_FIELDS = {"T": "sossheig", "U": "vozocrtx", "V": "vomecrty"}
 SECONDS_PER_DAY = 86_400.0
+NEMO_DG_EXECUTABLE_SHA256 = (
+    "0be0d4b0846c34b3540105a54eaa6de225e03a9d8927cf5dcc8d85198b88bf09")
+DECK_FIELDS = (
+    "nn_SWG", "rn_domsiz_m", "rn_dx_m", "rn_tau_pa",
+    "rn_modified_grav_m_s2", "rn_rfr_s", "rn_beta_m_s", "rn_f0_s",
+    "rn_Uv_m_s", "rn_Lv_m", "rn_Dt_s",
+)
 
 
 class DailyFrame(NamedTuple):
@@ -45,6 +53,52 @@ def sha256(path: Path) -> str:
 
 def array_digest(value: np.ndarray) -> str:
     return hashlib.sha256(np.ascontiguousarray(value).tobytes()).hexdigest()
+
+
+def _require_legoesm_deck(namelist: dict) -> None:
+    """Bind a legoESM manifest to the registered Maddison deck."""
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        SWG_MADDISON_NAMELIST,
+    )
+
+    expected = SWG_MADDISON_NAMELIST._asdict()
+    for field in DECK_FIELDS:
+        require(field in namelist and namelist[field] == expected[field],
+                f"legoESM manifest deck differs at {field}")
+
+
+def _require_nemo_deck(root: Path) -> dict:
+    """Bind an IOIPSL directory to the operator's resolved SWG_DG deck."""
+    executable = root / "nemo"
+    require(executable.is_file(), f"missing NEMO executable {executable}")
+    require(sha256(executable) == NEMO_DG_EXECUTABLE_SHA256,
+            "NEMO executable is not the registered SWG_DG build")
+    resolved_path = root / "resolved_namelist_lines.txt"
+    require(resolved_path.is_file(),
+            f"missing resolved namelist inventory {resolved_path}")
+    resolved = {}
+    for line in resolved_path.read_text().splitlines():
+        match = re.match(
+            r"^\d+:\s*([A-Za-z0-9_]+)\s*=\s*([^!\s]+)", line)
+        if match:
+            resolved[match.group(1)] = match.group(2).replace("D", "E").replace(
+                "d", "e")
+    expected = {
+        "nn_SWG": 16, "rn_domsiz": 4_000_000.0, "rn_tau": 0.10,
+        "rn_modified_grav": 9.80665, "rn_rfr": 1.0e-7,
+        "rn_beta": 2.0e-11, "rn_f0": 0.7e-4, "rn_Uv": 2.0,
+        "rn_Lv": 10.0, "rn_Dt": 50.0, "nn_write": 1_728,
+    }
+    for field, value in expected.items():
+        require(field in resolved, f"resolved NEMO deck is missing {field}")
+        actual = int(float(resolved[field])) if isinstance(value, int) else float(
+            resolved[field])
+        require(actual == value, f"resolved NEMO deck differs at {field}")
+    return {
+        "executable_sha256": NEMO_DG_EXECUTABLE_SHA256,
+        "resolved_namelist_sha256": sha256(resolved_path),
+        "resolved_values": {field: resolved[field] for field in expected},
+    }
 
 
 def assemble_coordinate_tiles(
@@ -101,10 +155,14 @@ def _expected_coordinates() -> dict[str, tuple[np.ndarray, np.ndarray]]:
     }
 
 
-def nemo_ioipsl_provider(root: Path, days: int) -> DailyProvider:
+def nemo_ioipsl_provider(
+        root: Path, days: int, *, start_day: int = 1,
+) -> DailyProvider:
     """Build a repeatable provider over per-rank NEMO IOIPSL daily means."""
     import netCDF4
 
+    require(start_day > 0 and days > 0, "NEMO window must be positive")
+    deck_provenance = _require_nemo_deck(root)
     coordinates = _expected_coordinates()
     paths = {
         kind: sorted(root.glob(f"SWG_*_grid_{kind}_*.nc"))
@@ -113,7 +171,10 @@ def nemo_ioipsl_provider(root: Path, days: int) -> DailyProvider:
     counts = {kind: len(found) for kind, found in paths.items()}
     require(len(set(counts.values())) == 1 and next(iter(counts.values())) > 0,
             f"NEMO rank-file counts differ: {counts}")
-    expected_time = (np.arange(days, dtype=np.float64) + 0.5) * SECONDS_PER_DAY
+    stop_day = start_day + days - 1
+    expected_time = (
+        np.arange(start_day - 1, stop_day, dtype=np.float64) + 0.5
+    ) * SECONDS_PER_DAY
     for kind, found in paths.items():
         variable = NEMO_FIELDS[kind]
         for path in found:
@@ -124,8 +185,8 @@ def nemo_ioipsl_provider(root: Path, days: int) -> DailyProvider:
                 require(ds[variable].dtype == np.dtype("float32"),
                         f"{path.name}.{variable}: not fp32")
                 clock = np.asarray(ds["time_counter"][:], dtype=np.float64)
-                require(clock.size >= days
-                        and np.array_equal(clock[:days], expected_time),
+                require(clock.size >= stop_day and np.array_equal(
+                    clock[start_day - 1:stop_day], expected_time),
                         f"{path.name}: daily clock/window differs")
     file_digests = {
         path.name: sha256(path) for found in paths.values() for path in found
@@ -141,7 +202,8 @@ def nemo_ioipsl_provider(root: Path, days: int) -> DailyProvider:
             for group in datasets.values():
                 for ds in group:
                     ds.set_auto_mask(False)
-            for index in range(days):
+            for local_index, index in enumerate(
+                    range(start_day - 1, stop_day), 1):
                 fields = {}
                 for kind, variable in NEMO_FIELDS.items():
                     tiles = []
@@ -158,32 +220,42 @@ def nemo_ioipsl_provider(root: Path, days: int) -> DailyProvider:
                                       np.asarray(ds["nav_lat"][:]), values))
                     fields[kind] = assemble_coordinate_tiles(
                         tiles, *coordinates[kind])
-                yield DailyFrame(index + 1, fields["T"], fields["U"], fields["V"])
+                yield DailyFrame(
+                    local_index, fields["T"], fields["U"], fields["V"])
 
     return DailyProvider(
         "NEMO", "daily_mean",
         {"root": str(root.resolve()), "days": days,
+         "window_days": [start_day, stop_day],
          "rank_files_per_field": next(iter(counts.values())),
-         "files_sha256": file_digests},
+         "files_sha256": file_digests, "deck": deck_provenance},
         iterate)
 
 
-def legoesm_npz_provider(root: Path, days: int) -> DailyProvider:
+def legoesm_npz_provider(
+        root: Path, days: int, *, start_day: int = 1,
+) -> DailyProvider:
     """Build a repeatable provider over content-pinned legoESM daily states."""
+    require(start_day > 0 and days > 0, "legoESM window must be positive")
     manifest_path = root / "manifest.json"
     require(manifest_path.is_file(), f"missing complete manifest {manifest_path}")
     manifest = json.loads(manifest_path.read_text())
-    require(manifest.get("status") == "complete"
-            and manifest.get("completed_days") == days
-            and manifest.get("days") == days,
+    total_days = manifest.get("days")
+    stop_day = start_day + days - 1
+    require(isinstance(total_days, int) and manifest.get("status") == "complete"
+            and manifest.get("completed_days") == total_days
+            and total_days >= stop_day,
             "legoESM manifest does not contain the complete requested window")
     require(manifest.get("schema") == "legoesm-swg-double-gyre-daily-v1",
             "unknown legoESM daily schema")
-    expected = [root / f"day{day:04d}.npz" for day in range(1, days + 1)]
-    require(sorted(root.glob("day????.npz")) == expected,
+    _require_legoesm_deck(manifest.get("namelist", {}))
+    complete = [root / f"day{day:04d}.npz"
+                for day in range(1, total_days + 1)]
+    require(sorted(root.glob("day????.npz")) == complete,
             "legoESM daily file sequence differs")
+    expected = complete[start_day - 1:stop_day]
     pins = manifest.get("daily_sha256", {})
-    require(set(pins) == {path.name for path in expected},
+    require(set(pins) == {path.name for path in complete},
             "legoESM manifest does not pin every daily file")
     for path in expected:
         require(sha256(path) == pins[path.name],
@@ -191,9 +263,10 @@ def legoesm_npz_provider(root: Path, days: int) -> DailyProvider:
     sampling = manifest.get("sampling", "daily_snapshot")
 
     def iterate() -> Iterator[DailyFrame]:
-        for day, path in enumerate(expected, 1):
+        for local_day, path in enumerate(expected, 1):
+            absolute_day = start_day + local_day - 1
             with np.load(path, allow_pickle=False) as data:
-                require(int(data["day"]) == day,
+                require(int(data["day"]) == absolute_day,
                         f"{path.name}: embedded day differs")
                 require(float(data["dt_s"]) == 50.0,
                         f"{path.name}: timestep differs")
@@ -203,11 +276,12 @@ def legoesm_npz_provider(root: Path, days: int) -> DailyProvider:
                     f"{path.name}: field shape differs")
             require(all(np.all(np.isfinite(field)) for field in fields),
                     f"{path.name}: non-finite field")
-            yield DailyFrame(day, *fields)
+            yield DailyFrame(local_day, *fields)
 
     return DailyProvider(
         "legoESM", sampling,
         {"root": str(root.resolve()), "days": days,
+         "window_days": [start_day, stop_day],
          "manifest_sha256": sha256(manifest_path),
          "legoesm_git_sha": manifest.get("legoesm_git_sha"),
          "mode": manifest.get("mode"),
@@ -356,9 +430,35 @@ def _summary(arrays: dict[str, np.ndarray]) -> dict:
     return out
 
 
+def _comparison_summary(
+        left: dict[str, np.ndarray], right: dict[str, np.ndarray],
+) -> dict:
+    """Return explicit right-minus-left scalar comparisons for every metric."""
+    out = {}
+    require(left.keys() == right.keys(), "model metric sets differ")
+    for name in left:
+        a, b = np.asarray(left[name]), np.asarray(right[name])
+        require(a.shape == b.shape, f"comparison shape differs for {name}")
+        paired = np.isfinite(a) & np.isfinite(b)
+        require(np.any(paired), f"comparison has no finite pairs for {name}")
+        delta = b[paired] - a[paired]
+        out[name] = {
+            "orientation": "right_minus_left",
+            "paired_values": int(delta.size),
+            "bias": float(np.mean(delta, dtype=np.float64)),
+            "mean_absolute_difference": float(
+                np.mean(np.abs(delta), dtype=np.float64)),
+            "root_mean_square_difference": float(np.sqrt(
+                np.mean(delta * delta, dtype=np.float64))),
+            "max_absolute_difference": float(np.max(np.abs(delta))),
+        }
+    return out
+
+
 def write_outputs(
         output: Path, diagnosed: dict[str, dict[str, np.ndarray]],
         providers: tuple[DailyProvider, DailyProvider], *, days: int,
+        start_day: int = 1,
 ) -> dict:
     """Write the JSON, compressed arrays, and common-scale comparison figure."""
     import matplotlib
@@ -410,10 +510,17 @@ def write_outputs(
     plt.close(fig)
     report = {
         "schema": "swg-dg-climate-comparison-v1",
-        "label": "year 1, spin-up" if days == 365 else f"days 1-{days}",
-        "window_days": [1, days], "sampling": providers[0].sampling,
+        "label": ("year 1, spin-up" if start_day == 1 and days == 365
+                  else "years 2-3" if start_day == 366 and days == 730
+                  else f"days {start_day}-{start_day + days - 1}"),
+        "window_days": [start_day, start_day + days - 1],
+        "sampling": providers[0].sampling,
         "provenance": {provider.name: provider.provenance for provider in providers},
         "metrics": {model: _summary(arrays) for model, arrays in diagnosed.items()},
+        "comparison": {
+            "left": names[0], "right": names[1],
+            "metrics": _comparison_summary(left, right),
+        },
         "artifacts": {
             arrays_path.name: sha256(arrays_path),
             figure_path.name: sha256(figure_path),
@@ -428,15 +535,22 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--nemo-root", type=Path, required=True)
     parser.add_argument("--legoesm-root", type=Path, required=True)
+    parser.add_argument("--start-day", type=int, default=1)
     parser.add_argument("--days", type=int, default=365)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
-        require(args.days > 0, "days must be positive")
-        providers = (nemo_ioipsl_provider(args.nemo_root, args.days),
-                     legoesm_npz_provider(args.legoesm_root, args.days))
+        require(args.start_day > 0 and args.days > 0,
+                "window must be positive")
+        providers = (nemo_ioipsl_provider(
+                         args.nemo_root, args.days, start_day=args.start_day),
+                     legoesm_npz_provider(
+                         args.legoesm_root, args.days,
+                         start_day=args.start_day))
         diagnosed = compare(providers, days=args.days)
-        report = write_outputs(args.output, diagnosed, providers, days=args.days)
+        report = write_outputs(
+            args.output, diagnosed, providers, days=args.days,
+            start_day=args.start_day)
     except Exception as exc:  # noqa: BLE001 - fail-closed instrument boundary
         print(f"REFUSE: {exc}", file=sys.stderr)
         return 2
