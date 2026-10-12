@@ -1587,6 +1587,15 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 round 252: direct post-drag surface-mask boundary ----
+    'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/stp2d.f90:198-230': [
+        ('Ue_rhs(ji,jj) = SUM( e3u_3d', 1),
+        ('Ve_rhs(ji,jj) =  Ve_rhs(ji,jj) + r1_rho0', 1),
+        33],
+    'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:1461-1463': [
+        ('DO jj = ntsj-( 0), ntej+(  0 )', 1),
+        ('pv_RHSi(ji,jj) = pv_RHSi(ji,jj) + (r1_hv_0', 1),
+        3],
     # --- ORCA2 round 250: literal drag replay retracts round 249 -----
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/zdfdrg.f90:224-249': [
         ('REAL(wp), DIMENSION(Nis0-(2):Nie0+(2),Njs0-(2):Nje0+(2)), INTENT(inout) ::   pCdU', 1),
