@@ -22,9 +22,7 @@ def _row(exact: bool) -> dict[str, object]:
 
 def _report(label: str) -> dict[str, object]:
     rows = {name: _row(True) for name in gate.OPERAND_ORDER}
-    rows["drag_coefficient"] = _row(False)
-    rows["bottom_residual"] = _row(False)
-    rows["drag_increment"] = _row(False)
+    rows["live_reciprocal"] = _row(False)
     rows["post_drag"] = _row(False)
     return {
         "status": "PASS_R250_DRAG_SPLIT",
@@ -35,9 +33,9 @@ def _report(label: str) -> dict[str, object]:
         "source_order": list(gate.OPERAND_ORDER),
         "owner_support": {"unequal": 35},
         "rows": rows,
-        "first_unequal": "drag_coefficient",
-        "self_replay": {"candidate": _row(True), "oracle": _row(True)},
-        "substitutions": {"through_drag_coefficient": _row(True)},
+        "first_unequal": "live_reciprocal",
+        "self_replay": {"candidate": _row(False), "oracle": _row(True)},
+        "substitutions": {"through_live_reciprocal": _row(True)},
     }
 
 
@@ -45,10 +43,10 @@ def _reports() -> list[dict[str, object]]:
     return [_report(label) for label in gate.LABELS]
 
 
-def test_classifier_names_drag_coefficient_owner():
+def test_classifier_retracts_non_source_exact_drag_owner():
     result = gate.classify(_reports())
-    assert result["status"] == "CONFIRMED_R250_DRAG_COEFFICIENT_OWNER"
-    assert result["predictions"]["R250-P2"] == "CONFIRMED"
+    assert result["status"] == "REFUTED_R250_DRAG_OWNER_NON_SOURCE_EXACT_ARM"
+    assert result["predictions"]["R250-P2"].startswith("REFUTED")
 
 
 @pytest.mark.parametrize("plant", gate.PLANTS[1:])

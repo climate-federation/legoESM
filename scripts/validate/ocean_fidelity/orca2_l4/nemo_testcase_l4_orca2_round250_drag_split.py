@@ -283,14 +283,16 @@ def classify(reports: list[dict[str, object]], *, plant: str = "none") -> dict:
     elif plant == "record-admission":
         by_label["independent"]["record_admission"][0]["status"] = "MOVED"
     elif plant == "self-replay":
-        by_label["independent"]["self_replay"]["oracle"]["bit_exact"] = False
+        replay = by_label["independent"]["self_replay"]["candidate"]
+        replay["bit_exact"] = True
+        replay["at_floor"] = True
     elif plant == "owner-support":
         by_label["independent"]["owner_support"]["unequal"] = 34
     elif plant == "source-order":
         by_label["independent"]["source_order"][0:2] = reversed(
             by_label["independent"]["source_order"][0:2])
     elif plant == "coefficient-owner":
-        by_label["independent"]["rows"]["drag_coefficient"]["bit_exact"] = True
+        by_label["independent"]["rows"]["drag_coefficient"]["bit_exact"] = False
 
     summary = {}
     for label, report in by_label.items():
@@ -307,38 +309,45 @@ def classify(reports: list[dict[str, object]], *, plant: str = "none") -> dict:
                 f"{label}: source order moved")
         require(report["owner_support"]["unequal"] == 35,
                 f"{label}: 35-face owner support moved")
-        require(report["self_replay"]["candidate"]["at_floor"]
+        require(not report["self_replay"]["candidate"]["at_floor"]
                 and report["self_replay"]["oracle"]["bit_exact"],
-                f"{label}: source statement does not replay itself")
+                f"{label}: retracted arm replay signature moved")
         rows = report["rows"]
         require(rows["stored_reciprocal"]["bit_exact"]
-                and rows["live_reciprocal"]["bit_exact"],
-                f"{label}: reciprocal precedes the coefficient")
-        require(not rows["drag_coefficient"]["bit_exact"],
-                f"{label}: drag coefficient is not the first debt")
-        require(report["first_unequal"] == "drag_coefficient",
+                and not rows["live_reciprocal"]["bit_exact"],
+                f"{label}: live reciprocal refutation moved")
+        require(rows["drag_coefficient"]["bit_exact"]
+                and rows["bottom_velocity"]["bit_exact"]
+                and rows["barotropic_velocity"]["bit_exact"]
+                and rows["bottom_residual"]["bit_exact"]
+                and rows["drag_increment"]["bit_exact"],
+                f"{label}: literal drag statement stopped closing")
+        require(not rows["post_drag"]["at_floor"],
+                f"{label}: private override no longer carries the mismatch")
+        require(report["first_unequal"] == "live_reciprocal",
                 f"{label}: first unequal operand moved")
-        coefficient = report["substitutions"]["through_drag_coefficient"]
-        require(coefficient["at_floor"],
-                f"{label}: coefficient substitution does not close post-drag")
+        closure = report["substitutions"]["through_live_reciprocal"]
+        require(closure["at_floor"],
+                f"{label}: literal replay no longer closes post-drag")
         summary[label] = {
             "first_unequal": report["first_unequal"],
             "rows": rows,
-            "coefficient_substitution": coefficient,
+            "literal_replay": report["self_replay"],
+            "closure": closure,
         }
     require(summary["independent"] == summary["given_nemo_entry"],
             "claim labels disagree on drag split")
     return {
         "format": "nemo-testcase-l4-orca2-round250-classification-v1",
-        "status": "CONFIRMED_R250_DRAG_COEFFICIENT_OWNER",
+        "status": "REFUTED_R250_DRAG_OWNER_NON_SOURCE_EXACT_ARM",
         "floor": float(FLOOR),
         "source_order": list(OPERAND_ORDER),
         "labels": summary,
         "predictions": {
-            "R250-P1": "CONFIRMED",
-            "R250-P2": "CONFIRMED",
-            "R250-P3": "PENDING_ATOMIC_SCORE",
-            "R250-P4": "PENDING",
+            "R250-P1": "REFUTED_CANDIDATE_SELF_REPLAY",
+            "R250-P2": "REFUTED_LIVE_RECIPROCAL_EARLIER_COEFFICIENT_EXACT",
+            "R250-P3": "NOT_REACHED",
+            "R250-P4": "CONFIRMED_NO_LANDING",
             "R250-P5": "CONFIRMED" if plant == "none" else "PLANT",
         },
     }
