@@ -98,10 +98,36 @@ wrong refusal text, and one-bit blindness. Evidence SHA-256 values are:
 - held classification: `20024fbdc8316bcd81170edb78b14fbe7ce768f26674fc4b4cdd0c60c2c487d6`;
 - eight plants: `e12709b21fb5dd1e8824268358202a49feb9b5272485ff13a81836005fd55b20`.
 
-The focused round-259 classifier set passes 11/11. The package candidate was
-removed before final validation, so the round tip has no model diff and cannot
-move OMT, rung-0, rung-10, GYRE, DINO or tank trajectories. Decision-96 and
-the full landing gates are consequently not activated.
+The focused round-258/259 and citation-gate set passes 39/39; its log SHA-256
+is `7800ad17558f7121a5abc460c4fdd744668978775bcb2ecc6ef7145df1553fad`.
+The package candidate was removed before final validation, so the round tip
+has no model diff and cannot move OMT, rung-0, rung-10, GYRE, DINO or tank
+trajectories. Decision-96 and the full landing gates are consequently not
+activated.
+
+The once-only `tests/ocean/fidelity -n 12` battery collected 3,359 tests and
+reached 99% before an xdist worker stopped producing output; it was terminated
+once and not repeated. Its preserved log SHA-256 is
+`cf61f259c02b80d037a1bd96ebb3147e5a0b26b31fbd6b52899025f824464a85`.
+The four visible reds all reproduce serially and are the registered
+pre-existing failures: the SI3 scalar-math provenance gate, the GYRE
+round-129 registered-harness stamp, the allow-dirty scope ratchet, and the
+worktree-stamp emitter ratchet. The two isolation-log SHA-256 values are
+`46212dd974b77f4af1feab822da737891586036f2ae447a9c7f982ce4017e55b`
+and `6152a5cda74f7244fc425c0cae946743f1ccda1ef479d50db78c1d3883b712d7`.
+
+The round receipt and cumulative default citation gates pass with no failures
+or unmapped citations; the rigid two-line transport-product citation plant
+fails. Their SHA-256 values are
+`1b7db3921f575e8ffd9d33d892a98e7fc976c7cac8ef6a2c3cd8879e35951571`,
+`c6e52d55dba84e6dd4a2fd7bab22d4a77c455c4a7d350f8dd58f51fcf17ce503`,
+and `5d3fbb460b76ff7d32da6aab215e818cb1eb06fbe5a54ac763d02f309484b8cd`.
+
+The requested separate `codex exec --sandbox read-only` invocation failed
+before review because its in-process app-server could not initialize on the
+read-only filesystem. **Independent review unavailable in-sandbox.** The log
+SHA-256 is
+`eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5`.
 
 ## OPEN
 
