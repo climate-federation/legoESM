@@ -122,6 +122,29 @@ def _one_bit_control() -> dict[str, object]:
     return _score(value, np.nextafter(value, np.inf))
 
 
+def _ratio_signature(candidate, oracle) -> dict[str, object]:
+    """Sign and ratio fingerprint on finite, value-unequal operands."""
+
+    candidate = np.asarray(candidate, np.float64)
+    oracle = np.asarray(oracle, np.float64)
+    require(candidate.shape == oracle.shape, "ratio signature shape moved")
+    support = (np.isfinite(candidate) & np.isfinite(oracle)
+               & (candidate.view(np.uint64) != oracle.view(np.uint64)))
+    require(np.any(support), "ratio signature has no unequal finite values")
+    nonzero = support & (oracle != 0.0)
+    require(np.any(nonzero), "ratio signature has no nonzero oracle values")
+    ratio = candidate[nonzero] / oracle[nonzero]
+    return {
+        "unequal": int(np.count_nonzero(support)),
+        "nonzero_ratio_count": int(ratio.size),
+        "ratio_min": float(np.min(ratio)),
+        "ratio_max": float(np.max(ratio)),
+        "ratio_median": float(np.median(ratio)),
+        "sign_mismatch": int(np.count_nonzero(
+            np.signbit(candidate[support]) != np.signbit(oracle[support]))),
+    }
+
+
 def measure(deck_root: Path, frame_root: Path, operand_root: Path,
             label: str, expect_commit: str) -> dict[str, object]:
     import jax
@@ -289,6 +312,8 @@ def measure(deck_root: Path, frame_root: Path, operand_root: Path,
         "support": "T-pivot physical half, j=147, i=0..89, k=0..29",
         "source_order": list(ORDER),
         "rows": rows,
+        "zfv_signature": _ratio_signature(
+            candidate_pv[-1, :90], recorded_pv[-1, :90]),
         "helper_calibration": {
             "T": _score(_physical(candidate_t_rhs), _physical(after_adv.T.data)),
             "S": _score(_physical(candidate_s_rhs), _physical(after_adv.S.data)),
@@ -373,6 +398,10 @@ def classify(reports: list[dict[str, object]], *, plant: str = "none") -> dict[s
                 f"{label}: literal helper did not reproduce production CEN2")
         require(report["one_bit_control"]["unequal"] == 1,
                 f"{label}: one-bit control did not fire")
+        signature = report["zfv_signature"]
+        require(signature["unequal"] == report["rows"]["zFv"]["unequal"]
+                and signature["nonzero_ratio_count"] > 0,
+                f"{label}: zFv sign/ratio signature moved")
 
         measured_order = [name for name in ORDER
                           if not report["rows"][name].get("unmeasured", False)]
@@ -394,6 +423,7 @@ def classify(reports: list[dict[str, object]], *, plant: str = "none") -> dict[s
                 "S": report["rows"]["qco_stage_S"],
             },
             "recorded_transport_closure": closure,
+            "zfv_signature": signature,
         }
     require(labels["independent"]["first_numerical_statement"] ==
             labels["given_nemo_entry"]["first_numerical_statement"],

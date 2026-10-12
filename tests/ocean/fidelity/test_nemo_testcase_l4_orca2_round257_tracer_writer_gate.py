@@ -29,6 +29,11 @@ def _report(label):
         "support": "T-pivot physical half, j=147, i=0..89, k=0..29",
         "source_order": list(gate.ORDER),
         "rows": rows,
+        "zfv_signature": {
+            "unequal": 1, "nonzero_ratio_count": 1,
+            "ratio_min": 2.0, "ratio_max": 2.0, "ratio_median": 2.0,
+            "sign_mismatch": 0,
+        },
         "helper_calibration": {"T": _row(), "S": _row()},
         "recorded_transport_closure": {
             "after_advection_T": _row(1.0e-5),
