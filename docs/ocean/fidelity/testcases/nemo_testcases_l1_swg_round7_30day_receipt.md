@@ -82,6 +82,24 @@ No physical, configuration, threshold, cadence, or carried-state choice is
 introduced. The user selected the shipped 720-step month and daily admitted
 boundaries; the existing bit-for-bit bar, record fields, and masks are reused.
 
+## Control erratum preregistration
+
+This section was committed after the clean month measurement and the first
+control attempt, but before changing or running the replacement control. The
+original preregistration above remains frozen.
+
+The first control selected the smallest-magnitude nonzero wet U value at the
+exact admitted day-one boundary, moved it by one fp64 ULP, and ran one normal
+production step. **REFUTED:** all scored SSH/U/V output bits were unchanged, so
+the CLI correctly printed `REFUSE` and exited 2; that attempt is not a control.
+
+The replacement keeps the preregistered field, boundary, one-ULP operation,
+production path, masks, and scored outputs fixed. It selects the admitted wet
+U value with the largest absolute magnitude, whose one-ULP displacement is the
+largest absolute one-ULP U input available without changing the stipulated
+perturbation. Prediction: at least one next-step wet SSH/U/V output changes and
+the control exits 1 as `DEBT`. Unchanged output **REFUTES** the replacement too.
+
 ## Independent review
 
 Independent review run by the operator.
