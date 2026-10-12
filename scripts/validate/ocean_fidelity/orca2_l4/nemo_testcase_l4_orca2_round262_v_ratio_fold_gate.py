@@ -53,7 +53,7 @@ def classify(reports: list[dict[str, object]], *, plant: str = "none") -> dict[s
     elif plant == "barotropic-correction":
         independent["operand_rows"]["zvb"]["unequal"] = 1
     elif plant == "stage-transport":
-        independent["zFv"]["unequal"] = 1
+        independent["zFv"]["unequal"] = 182
     elif plant == "candidate-replay":
         independent["replay"]["candidate"]["unequal"] = 1
     elif plant == "oracle-replay":
@@ -81,8 +81,9 @@ def classify(reports: list[dict[str, object]], *, plant: str = "none") -> dict[s
         for name, row in report["correction_input_rows"].items():
             require(row["unequal"] == 0,
                     f"{label}: barotropic correction input {name} is non-bit")
-        require(report["zFv"]["unequal"] == 0,
-                f"{label}: stage-two V transport is non-bit")
+        require(report["zFv"]["unequal"] == 181
+                and report["zFv"]["max_abs"] == 0.0,
+                f"{label}: registered signed-zero V-transport census moved")
         require(report["replay"]["candidate"]["unequal"] == 0,
                 f"{label}: candidate replay is not exact")
         require(report["replay"]["oracle"]["unequal"] == 0,
@@ -98,10 +99,10 @@ def classify(reports: list[dict[str, object]], *, plant: str = "none") -> dict[s
         }
     return {
         "format": "nemo-testcase-l4-orca2-round262-v-ratio-fold-v1",
-        "status": "PASS_R262_V_RATIO_FOLD_SOURCE_REPLAY",
+        "status": "PASS_R262_V_RATIO_FOLD_D96_RATCHET",
         "labels": summaries,
         "predictions": {
-            "R262-P1": "CONFIRMED",
+            "R262-P1": "REFUTED_SIGNED_ZERO_ONLY_D96_REGISTERED",
             "R262-P6": "CONFIRMED" if plant == "none" else "PLANT",
         },
     }

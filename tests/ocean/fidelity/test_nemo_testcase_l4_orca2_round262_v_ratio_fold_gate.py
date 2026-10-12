@@ -30,7 +30,7 @@ def _report(label):
         "records": {"record.bin": "abc"},
         "operand_rows": {name: _row() for name in ("e1v", "e3v", "vv", "zvb", "vmask")},
         "correction_input_rows": {name: _row() for name in ("vn_adv", "r1_hv", "vv_b")},
-        "zFv": _row(),
+        "zFv": _row(181),
         "replay": {"candidate": _row(), "oracle": _row()},
         "one_bit_control": _row(1),
     }
@@ -77,7 +77,7 @@ def test_v_ratio_fold_moves_thickness_and_reciprocal_together():
 
 def test_round262_classifier_accepts_exact_source_replay():
     result = gate.classify([_report(label) for label in gate.LABELS])
-    assert result["status"] == "PASS_R262_V_RATIO_FOLD_SOURCE_REPLAY"
+    assert result["status"] == "PASS_R262_V_RATIO_FOLD_D96_RATCHET"
 
 
 @pytest.mark.parametrize("plant", gate.PLANTS[1:])
