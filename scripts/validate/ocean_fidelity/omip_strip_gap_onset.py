@@ -11,9 +11,9 @@ between, lc, P, B, D, diff, floor, etau; the window sum telescopes to the e
 change), and at the window end: e, step-entry length l = sqrt(e_in)/dissl_in
 (omip_strip_mixing_length), inverse Prandtl K_H/K_M, N2 = -estrat/K_H,
 S2 = eshear/K_M(s-1), Ri = N2/S2 (omip_strip_prandtl_offline conventions).
-Ours closure K = applied - below-ML background (BG_A/BG_K = the Prandtl
-probe's convention, whose NEMO-formula reproduction of our K/A was validated
-2026-10-10); used for 1/Pr, N2, S2, Ri only, on faces with K_M > 1e-5.  Median and IQR of ours-NEMO over the cohort.  No verdict printed.
+Ours closure K_H = applied - 6.04e-7 (IWM + K_v), closure K_M = max(applied -
+2.0e-6 (A_v + IWM), kappaM_min); used for 1/Pr, N2, S2, Ri only, on faces
+with K_M > 1e-5 (as the Prandtl probe).  Median and IQR of ours-NEMO over the cohort.  No verdict printed.
 usage: omip_strip_gap_onset.py OUR_RUN NEMO_EN2_DIR [HG THR H0 H1]
 """
 import sys
@@ -26,6 +26,8 @@ import omip_strip_prandtl_offline as PR     # noqa: E402
 
 PREFIX = "ORCA1_1ts_20000101_20000102_eqs1ts_"
 C_EPS, E_BG = 0.7, 1.0e-10
+BG_A_NONCLOSURE = 2.0e-6     # coeff-ok: A_v 1.4e-6 + below-ML IWM viscosity ~0.6e-6 (2026-10-10 strip measurement, 3.40e-6 total)
+KAPPA_M_MIN = 1.4e-6         # coeff-ok: resolved TKEConfig.kappaM_min of the run
 
 
 def cohort_gap_interface(K, zw, thr, zmax):
@@ -124,8 +126,8 @@ def main(argv):
     en_in, dl_in = n("en_in_k"), n("dissl_in_k")
     zw = np.asarray(d["depthw"][1:nk + 1], dtype=np.float64)
 
-    KH = Ko_app - PR.BG_K
-    KM = Ao_app - PR.BG_A
+    KH = Ko_app - PR.BG_K                                   # K below ML 6.04e-7 = IWM + K_v (closure floor 1e-10)
+    KM = np.maximum(Ao_app - BG_A_NONCLOSURE, KAPPA_M_MIN)   # A below ML 3.4e-6 = closure floor 1.4e-6 + A_v 1.4e-6 + IWM ~0.6e-6
     dissl_o = 2.0 * ediss_o / (C_EPS * np.where(lo_sol > 0, lo_sol, np.nan))
     l_o = np.sqrt(np.maximum(e_in_o, E_BG)) / dissl_o
     l_n = np.sqrt(en_in) / np.where(dl_in > 0, dl_in, np.nan)
@@ -294,21 +296,38 @@ def main(argv):
     gate = gate and nu_pass and all(gates)
     if not gate:
         print("  production comparison WITHHELD (an instrument gate failed)")
+    # second viscosity source, independent of the shear time level (codex round 5:
+    # production evaluates shear on the in-solve working state, not dumped)
+    KMc = np.maximum(Ao_app_g - BG_A_NONCLOSURE, KAPPA_M_MIN)           # (t, y, x, k), closure estimate
+    KMc_prev = np.concatenate([KMc[:1] * np.nan, KMc[:-1]])
+    agree = []
+    for h in hrs:
+        s = (h + 1) * 24 - 1
+        nu = NUo[s, sj[cols], si[cols], k]; km = KMc_prev[s, sj[cols], si[cols], k]
+        big = km > 2e-5
+        if big.any():
+            agree.append(nu[big] / km[big])
+    agree = np.concatenate(agree) if agree else np.array([np.nan])
+    print(f"consistency nu_eff(record) / closure estimate where K_M > 2e-5, h{href + 1}-h{max(hrs) + 1}: median {np.nanmedian(agree):.2f} "
+          f"[{np.nanpercentile(agree, 25):.2f},{np.nanpercentile(agree, 75):.2f}] n={np.isfinite(agree).sum()}")
     if gate:
         print("Production at kg (window-end step), median over cohort, / NEMO eshear_k (col median):")
-        print("  h | ours recorded (centred, T-pt nu) | ours face-geometry, T-pt nu | ours face-geometry, face-summed nu || NEMO face/T-pt ratio")
+        print("  h | ours recorded (centred, T-pt nu) | ours face-geometry, T-pt nu | face-summed nu=record | face-summed nu=closure est || NEMO face/T-pt ratio")
         for h in range(href, min(h1, 9)):
             s = (h + 1) * 24 - 1
-            r_rec, r_tp, r_fc, r_n = [], [], [], []
+            r_rec, r_tp, r_fc, r_fk, r_n = [], [], [], [], []
             for c in range(cols.size):
                 jj, ii = sj[cols[c]], si[cols[c]]
                 fo_, to_ = face_nb(Uo[s - 1], Uo[s - 1], Vo[s - 1], Vo[s - 1], NUo[s], dzt, jj, ii, k[c])
+                fk_, tk_ = face_nb(Uo[s - 1], Uo[s - 1], Vo[s - 1], Vo[s - 1], KMc_prev[s], dzt, jj, ii, k[c])
                 fn_, tn_ = face_nb(Un[s - 1], Un[s - 1], Vn[s - 1], Vn[s - 1], An[s - 1], dzt, jj, ii, k[c])
                 ref = shN[s, jj, ii, k[c]]
-                r_rec.append(SHo[s, jj, ii, k[c]] / ref); r_tp.append(to_ / ref); r_fc.append(fo_ / ref); r_n.append(fn_ / tn_)
+                r_rec.append(SHo[s, jj, ii, k[c]] / ref); r_tp.append(to_ / ref); r_fc.append(fo_ / ref)
+                r_fk.append(SHo[s, jj, ii, k[c]] * (fk_ / tk_) / ref); r_n.append(fn_ / tn_)
             cv = lambda x: np.mean(np.isfinite(np.asarray(x)))
-            print(f"  h{h + 1:02d} | {np.nanmedian(r_rec):6.2f} | {np.nanmedian(r_tp):6.2f} | {np.nanmedian(r_fc):6.2f} || {np.nanmedian(r_n):6.2f}"
-                  f"   (coverage {cv(r_rec):.2f}/{cv(r_tp):.2f}/{cv(r_fc):.2f})")
+            print(f"  h{h + 1:02d} | {np.nanmedian(r_rec):6.2f} | {np.nanmedian(r_tp):6.2f} | {np.nanmedian(r_fc):6.2f} | {np.nanmedian(r_fk):6.2f} || {np.nanmedian(r_n):6.2f}"
+                  f"   (coverage {cv(r_rec):.2f}/{cv(r_tp):.2f}/{cv(r_fc):.2f}/{cv(r_fk):.2f})")
+        print("  (closure-est column = recorded production x face/T-pt weighting ratio built from the closure estimate: no inferred viscosity)")
     # selection-bias control (GLM): unconditional face/T-pt ratio, all interior columns,
     # interfaces 10-25 m; each hour gated on both instruments over the SAME samples
     kk_rng = np.where((zw >= 10.0) & (zw <= 25.0))[0]
@@ -322,14 +341,16 @@ def main(argv):
             f2, t2 = face_nb(Un[s - 1], Un[s - 1], Vn[s - 1], Vn[s - 1], An[s - 1], dzt, jin, iin, kint)
             ro.append((f1 / t1).ravel()); rn_.append((f2 / t2).ravel())
             gN.append((f2 / shN[s, jin, iin, kint]).ravel())
-            gO.append(np.full(jin.size, nu_gate(s, jin.ravel(), iin.ravel(), np.full(jin.size, kint))))
+            gO.append(np.full(jin.size, min(nu_gate(s, (jin + dj).ravel(), (iin + di).ravel(), np.full(jin.size, kint))
+                                            for dj, di in ((0, 0), (0, 1), (0, -1), (1, 0), (-1, 0)))))
         okN, covN, qN = ratio_gate(np.concatenate(gN))
         shareO = float(np.mean(np.concatenate(gO)))
         if not (okN and shareO >= 0.9):
             print(f"  h{h:02d}: WITHHELD (NEMO gate {'PASS' if okN else 'FAIL'} cov {covN:.2f}; ours nu bounds {shareO:.2f})")
             continue
         ro, rn_ = np.concatenate(ro), np.concatenate(rn_)
-        ro, rn_ = ro[np.isfinite(ro) & (ro > 0)], rn_[np.isfinite(rn_) & (rn_ > 0)]
+        jok = np.isfinite(ro) & (ro > 0) & np.isfinite(rn_) & (rn_ > 0)      # same surviving samples on both sides
+        ro, rn_ = ro[jok], rn_[jok]
         print(f"  h{h:02d}: ours {np.median(ro):6.2f} [{np.percentile(ro, 25):.2f},{np.percentile(ro, 75):.2f}] | "
               f"NEMO {np.median(rn_):6.2f} [{np.percentile(rn_, 25):.2f},{np.percentile(rn_, 75):.2f}]  (gates: NEMO IQR {qN[0]:.3f}-{qN[2]:.3f}, ours nu {shareO:.2f})")
 
