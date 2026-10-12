@@ -131,6 +131,9 @@ def measure(args: argparse.Namespace) -> dict[str, object]:
     import jax
     import jax.numpy as jnp
     from legoesm.ocean.dynamics.latlon_cgrid_operators import compute_face_masks_3d
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+        compute_frozen_geom_density,
+    )
     from legoesm.ocean.vertical import (
         compute_layer_thickness,
         nemo_qco_resolved_mesh_operands,
@@ -145,6 +148,20 @@ def measure(args: argparse.Namespace) -> dict[str, object]:
     }
     require(all(row["nonfinite"] == 0 for row in fields.values()),
             "kt=5 entry is not finite")
+    # The RK3 stage program evaluates this pure bundle first and freezes it
+    # across all three momentum stages.  Reading the returned arrays is an
+    # offline replay, not an executable observer.
+    geometry = jax.device_get(compute_frozen_geom_density(
+        state, card.recipe.grid, card.recipe.z_coord,
+        card.recipe.model_config))
+    geometry_names = (
+        "jacobian", "live_t_thickness", "rho_prime",
+        "pressure_prime", "nemo_hpg_rhd",
+    )
+    geometry_rows = {
+        name: _field_row(value)
+        for name, value in zip(geometry_names, geometry, strict=True)
+    }
 
     eta = jnp.asarray(state.eta.data)
     h_ref = compute_layer_thickness(
@@ -215,6 +232,7 @@ def measure(args: argparse.Namespace) -> dict[str, object]:
         "observer": "offline from ordinary completed kt=5 entry",
         "worktree": stamp,
         "entry_fields": fields,
+        "geometry_density": geometry_rows,
         "rows": rows,
         "guard_cell": point,
         "source_order": [
@@ -237,7 +255,8 @@ def classify(reports: dict[str, dict], *, plant: str = "none") -> dict[str, obje
     elif plant == "source-order":
         reports["independent"]["source_order"][0] = "ssvmask"
     elif plant == "writer":
-        reports["independent"]["rows"]["candidate_r1_hv_0"]["nonfinite"] = 1
+        for row in reports["independent"]["geometry_density"].values():
+            row["nonfinite"] = 0
 
     require(set(reports) == set(LABELS), "both claim labels are required")
     summary = {}
@@ -269,11 +288,21 @@ def classify(reports: dict[str, dict], *, plant: str = "none") -> dict[str, obje
         nonfinite = sum(row["nonfinite"] for row in reciprocal_rows)
         require(nonfinite == 0,
                 f"{label}: a reciprocal is the first non-finite writer")
+        geometry = report["geometry_density"]
+        first_geometry_nonfinite = next(
+            (name for name in (
+                "jacobian", "live_t_thickness", "rho_prime",
+                "pressure_prime", "nemo_hpg_rhd",
+            ) if geometry[name]["nonfinite"]), None)
+        require(first_geometry_nonfinite is not None,
+                f"{label}: frozen geometry/EOS bundle has no non-finite writer")
         summary[label] = {
             "mask_source_unequal": mismatch,
             "reciprocal_nonfinite": nonfinite,
             "guard_cell": report["guard_cell"],
             "entry_fields": report["entry_fields"],
+            "geometry_density": geometry,
+            "first_nonfinite_writer": first_geometry_nonfinite,
         }
     return {
         "format": "nemo-testcase-l4-orca2-round248-classification-v1",
@@ -281,14 +310,15 @@ def classify(reports: dict[str, dict], *, plant: str = "none") -> dict[str, obje
         "summary": summary,
         "predictions": {
             "R248-P1": "REFUTED_RECIPROCALS_FINITE_BOTH_LABELS",
-            "R248-P2": "OPEN_FIRST_WRITER_AFTER_LIVE_RECIPROCAL",
+            "R248-P2": "NAMED_FIRST_GEOMETRY_OR_EOS_NONFINITE_WRITER",
             "R248-P3": "NOT_ACTIVATED_PREREQUISITE_R248-P2",
             "R248-P4": "NOT_ACTIVATED_PREREQUISITE_R248-P3",
             "R248-P5": "CONFIRMED" if plant == "none" else "PLANT",
         },
         "open": (
-            "The mask-source hypothesis is not the non-finite writer; continue "
-            "offline from zub/zvb and the exact stage transport."),
+            "The mask-source hypothesis is refuted; the finite explosive "
+            "entry first becomes non-finite in the frozen geometry/EOS "
+            "bundle before any stage transport or reciprocal consumer."),
     }
 
 
