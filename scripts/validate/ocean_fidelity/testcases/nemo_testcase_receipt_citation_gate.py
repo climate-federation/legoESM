@@ -1594,7 +1594,7 @@ CITATION_MAP = {
         9],
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:721-739': [
         ('IF( .NOT.lk_linssh ) THEN   !* Update ocean depth (variable volume case only)', 1),
-        ('ENDIF', 15),
+        ('ENDIF', 32),
         19],
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:781-793': [
         ('!* Swap', 1),
@@ -1609,7 +1609,7 @@ CITATION_MAP = {
         ('V_bar_new = association_post[1]', 2),
         39],
     'barotropic_latlon_cgrid.py:2403-2408': [
-        ('if ab3_za is not None:', 1),
+        ('if ab3_za is not None:', 5),
         ('U_bar_c, Ub_c, V_bar_c, Vb_c, eta_c, etab_c)', 1),
         6],
     # --- ORCA2 round 254: south-row audit and midpoint operand split ---
