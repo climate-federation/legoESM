@@ -102,6 +102,13 @@ before final validation. The final model file is byte-identical to the base,
 so this HELD round cannot move OMT, rung-0, rung-10, GYRE, DINO, or tank
 trajectories.
 
+The cumulative default citation gate and this receipt's citation gate pass
+with no failures or unmapped citations; the planted two-line shift of the
+`zFv` statement fails. Their SHA-256 values are
+`0ae376908534c8ee4991453e887b51d78d9522ca3f99aba112553e19b37b6d86`,
+`6b263762e4efc7ea2a9e62f00e74bbc57c10f96926c7e95553938ca20a8ea30f`,
+and `7c7470893f59ed7234640618333a57f833d2b3b581a9beae287fe2162e4c8a91`.
+
 The requested separate `codex exec --sandbox read-only` review failed before
 review because its in-process app-server could not initialize on the
 read-only filesystem. **Independent review unavailable in-sandbox.** Its log
