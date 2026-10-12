@@ -683,7 +683,8 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
                         buoyancy_sink: str | None = None,
                         step_evaluation: str | None = None,
                         langmuir_rhs_coupling: str | None = None,
-                        shear_avm_weighting: str | None = None):
+                        shear_avm_weighting: str | None = None,
+                        prandtl_mode: str | None = None):
     """NEMO ORCA1 ``&namzdf_tke`` mapped onto :class:`TKEConfig`, value by value.
 
     Source of truth: ``cfgs/ORCA1/EXP00/RUN_REF/namelist_cfg`` overrides on top
@@ -1172,6 +1173,17 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
                 "key_RK3 ORCA1 card); got tke_shear_production="
                 f"{_cfg.tke_shear_production!r}.")
         _cfg = _cfg._replace(tke_shear_avm_weighting=shear_avm_weighting)
+    # Prandtl number (``--tke-prandtl-mode``).  DEFAULT keeps the card value
+    # ("richardson": Pr = clamp(Ri/ri_cri, 1, 10) on the gradient Ri =
+    # N2/shear^2).  "nemo_ri" is NEMO nn_pdl=1 as zdftke.F90 writes it:
+    # zri = rn2b*avm/(p_sh2 + rn_bshear) on the avm-weighted shear production
+    # (the face-summed p_sh2 when --tke-shear-avm-weighting nemo_face).
+    if prandtl_mode is not None:
+        if prandtl_mode not in ("richardson", "nemo_ri"):
+            raise ValueError(
+                f"orca1_zdftke_config prandtl_mode {prandtl_mode!r} invalid; "
+                "expected 'richardson' or 'nemo_ri'.")
+        _cfg = _cfg._replace(prandtl_mode=prandtl_mode)
     # Coefficient lifetime (``--tke-preclosure-coeff-source``).  DEFAULT keeps
     # the card value ("current_subiteration").  NEMO's zdf_tke consumes the
     # SAVE'd avm_k/avt_k pair in zdf_sh2, the Prandtl ratio, the TKE matrix and
@@ -1816,6 +1828,7 @@ def build_tripole_vmix_config(tripole_vmix: str, iwm=None, tke_eice=None,
                               tke_prognostic=None, tke_kappa_convention=None,
                               tke_shear_production=None, tke_lc=None,
                               tke_etau=None, tke_shear_avm_weighting=None,
+                              tke_prandtl_mode=None,
                               tke_preclosure_coeff_source=None,
                               tke_kappah_min=None, tke_buoyancy_sink=None,
                               tke_step_evaluation=None,
@@ -1857,6 +1870,7 @@ def build_tripole_vmix_config(tripole_vmix: str, iwm=None, tke_eice=None,
                     ("--tke-kappa-convention", tke_kappa_convention),
                     ("--tke-shear-production", tke_shear_production),
                     ("--tke-shear-avm-weighting", tke_shear_avm_weighting),
+                    ("--tke-prandtl-mode", tke_prandtl_mode),
                     ("--tke-preclosure-coeff-source",
                      tke_preclosure_coeff_source),
                     ("--tke-kappah-min", tke_kappah_min),
@@ -1880,6 +1894,7 @@ def build_tripole_vmix_config(tripole_vmix: str, iwm=None, tke_eice=None,
                                    kappa_convention=tke_kappa_convention,
                                    shear_production=tke_shear_production,
                                    shear_avm_weighting=tke_shear_avm_weighting,
+                                   prandtl_mode=tke_prandtl_mode,
                                    lc=tke_lc, etau_mode=tke_etau,
                                    preclosure_coeff_source=(
                                        tke_preclosure_coeff_source),
@@ -1887,7 +1902,8 @@ def build_tripole_vmix_config(tripole_vmix: str, iwm=None, tke_eice=None,
                                    step_evaluation=tke_step_evaluation,
                                    langmuir_rhs_coupling=tke_langmuir_rhs_coupling)
         print(f"[setup] TKE shear production: {_tke.tke_shear_production}, "
-              f"avm weighting: {_tke.tke_shear_avm_weighting}", flush=True)
+              f"avm weighting: {_tke.tke_shear_avm_weighting}, "
+              f"Prandtl: {_tke.prandtl_mode}", flush=True)
         if tke_eice is not None:
             if int(tke_eice) not in (0, 1, 2, 3):
                 raise ValueError(
@@ -1954,7 +1970,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   tke_mxl_choice=None, tke_prognostic=None,
                   tke_n2_mode=None, tke_n2_eos_form=None,
                   tke_kappa_convention=None, tke_shear_production=None,
-                  tke_shear_avm_weighting=None,
+                  tke_shear_avm_weighting=None, tke_prandtl_mode=None,
                   tke_lc=None, tke_etau=None,
                   tke_preclosure_coeff_source=None,
                   tke_kappah_min=None, tke_buoyancy_sink=None,
@@ -2261,6 +2277,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
             tke_kappa_convention=tke_kappa_convention,
             tke_shear_production=tke_shear_production,
             tke_shear_avm_weighting=tke_shear_avm_weighting,
+            tke_prandtl_mode=tke_prandtl_mode,
             tke_lc=tke_lc, tke_etau=tke_etau,
             tke_preclosure_coeff_source=tke_preclosure_coeff_source,
             tke_buoyancy_sink=tke_buoyancy_sink,
@@ -8417,6 +8434,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                    help="Surface-TKE penetration mode (NEMO nn_etau). None "
                         "keeps the ORCA1 card (below_ml). 'none' for the "
                         "fesom-mimic card (fesom-jax has no etau term).")
+    p.add_argument("--tke-prandtl-mode", type=str, default=None,
+                   choices=["richardson", "nemo_ri"],
+                   help="TKE Prandtl number for --grid tripole --tripole-vmix "
+                        "tke. None (default) keeps the card value "
+                        "('richardson': clamp(Ri/ri_cri,1,10) on the gradient "
+                        "Ri = N2/shear^2). 'nemo_ri' is NEMO nn_pdl=1 "
+                        "(zdftke.F90): zri = rn2b*avm/(p_sh2+rn_bshear) on the "
+                        "avm-weighted shear production. Tripole only.")
     p.add_argument("--tke-shear-avm-weighting", type=str, default=None,
                    choices=["tpoint", "nemo_face"],
                    help="How K_M enters TKE shear production for --grid tripole "
@@ -8762,6 +8787,11 @@ def main() -> int:
             "--tke-shear-avm-weighting needs the raw C-grid u/v faces and is "
             "wired ONLY for --grid tripole --tripole-vmix tke; got --grid "
             f"{args.grid!r} --tripole-vmix {args.tripole_vmix!r}.")
+    if args.tke_prandtl_mode is not None and not (
+            args.grid == "tripole" and args.tripole_vmix == "tke"):
+        raise SystemExit(
+            "--tke-prandtl-mode is wired ONLY for --grid tripole --tripole-vmix "
+            f"tke; got --grid {args.grid!r} --tripole-vmix {args.tripole_vmix!r}.")
     if args.vertical_momentum_scheme is not None and args.grid not in ("tripole", "mpas") and not (
             args.grid == "fesom" and args.vertical_momentum_scheme == "nemo_advective"):
         raise SystemExit("--vertical-momentum-scheme is wired on --grid tripole and mpas, and "
@@ -9491,6 +9521,7 @@ def main() -> int:
             tke_kappa_convention=args.tke_kappa_convention,
             tke_shear_production=args.tke_shear_production,
             tke_shear_avm_weighting=args.tke_shear_avm_weighting,
+            tke_prandtl_mode=args.tke_prandtl_mode,
             tke_lc=(None if args.tke_lc is None else args.tke_lc == "on"),
             tke_etau=args.tke_etau,
             tke_preclosure_coeff_source=args.tke_preclosure_coeff_source,

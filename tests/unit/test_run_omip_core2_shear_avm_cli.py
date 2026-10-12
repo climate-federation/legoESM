@@ -71,3 +71,38 @@ def test_main_refuses_it_off_the_tripole_tke_lane(argv, monkeypatch):
                                       "--tke-shear-avm-weighting", "nemo_face"])
     with pytest.raises(SystemExit, match="--tke-shear-avm-weighting"):
         _core2().main()
+
+
+# --tke-prandtl-mode: NEMO nn_pdl=1 Prandtl on the avm-weighted p_sh2.
+
+def test_prandtl_default_is_unchanged_without_the_flag():
+    assert _core2().orca1_zdftke_config().prandtl_mode == "richardson"
+
+
+def test_prandtl_flag_reaches_the_closure_config():
+    vm = _core2().build_tripole_vmix_config("tke", tke_prandtl_mode="nemo_ri")
+    assert vm.tke.prandtl_mode == "nemo_ri"
+
+
+def test_prandtl_unknown_value_raises():
+    with pytest.raises(ValueError, match="prandtl_mode"):
+        _core2().orca1_zdftke_config(prandtl_mode="constant")
+
+
+def test_prandtl_parser_and_builder_guard():
+    p = _core2()._build_arg_parser()
+    assert p.parse_args(["--tke-prandtl-mode", "nemo_ri"]).tke_prandtl_mode == "nemo_ri"
+    assert p.parse_args([]).tke_prandtl_mode is None
+    with pytest.raises(ValueError, match="--tke-prandtl-mode"):
+        _core2().build_tripole_vmix_config("kpp", tke_prandtl_mode="nemo_ri")
+
+
+@pytest.mark.parametrize("argv", [
+    ["--grid", "mpas", "--mpas-vmix", "tke"],
+    ["--grid", "tripole", "--tripole-vmix", "kpp"],
+])
+def test_main_refuses_prandtl_off_the_tripole_tke_lane(argv, monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["run_omip_core2.py", *argv,
+                                      "--tke-prandtl-mode", "nemo_ri"])
+    with pytest.raises(SystemExit, match="--tke-prandtl-mode"):
+        _core2().main()
