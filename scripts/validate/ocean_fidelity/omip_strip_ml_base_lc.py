@@ -212,7 +212,8 @@ def main(argv):
     wet = (np.all(np.isfinite(Tn[:nt, :, :ktop]) & np.isfinite(Sn[:nt, :, :ktop]), (0, 2))
            & np.all(np.isfinite(Kn[:nt, :, :kw]), (0, 2))
            & np.all((To[:nt, :, :ktop] != 0) & np.isfinite(To[:nt, :, :ktop]) & np.isfinite(So[:nt, :, :ktop]), (0, 2))
-           & np.all(np.isfinite(Ko[:nt, :, :kw]), (0, 2)))
+           & np.all(np.isfinite(Ko[:nt, :, :kw]), (0, 2))
+           & np.all(np.isfinite(Kkn[:nt, :, :kw]) & np.isfinite(En[:nt, :, :kw]) & np.isfinite(Eo[:nt, :, :kw]), (0, 2)))
     k12 = int(np.argmin(np.abs(0.5 * (zt[:-1] + zt[1:]) - 12.8)))
     print(f"{wet.sum()} wet interior cols; K12 interface {k12} at {0.5 * (zt[k12] + zt[k12 + 1]):.2f} m")
     print("\nPart 1  h | zstep ours | NEMO | o-N median [IQR] | share at K12 o/N || zturb ours | NEMO | o-N median [IQR] | censored share")
@@ -264,7 +265,8 @@ def main(argv):
                  f" log10 e there o/N {geo:5.2f}/{gen:5.2f} share e<1e-6 o/N {gfo:.2f}/{gfn:.2f}")
         print(f"h{h:02d} | {np.nanmedian(to):6.2f} | {np.nanmedian(tk):6.2f} | {_q(to - tk)} || "
               f"{km(Ko, k128):7.2f} {km(Kkn, k128):7.2f} {km(Kn, k128):7.2f} | {km(Ko, k179):7.2f} {km(Kkn, k179):7.2f} {km(Kn, k179):7.2f}" + extra)
-    print("\nPart 1c  threshold sweep (GLM): gap share o/N | share of gap cols with an ACTIVE layer above the gap o/N")
+    print("\nPart 1c  threshold sweep (GLM): gap share ours/NEMO avt_k/NEMO avt | share of gap cols with an ACTIVE layer above the gap o/N(avt_k)")
+    print("  (one-sided: our K is the applied total, so our closure-only gap share is >= ours; NEMO avt >= avt_k, so NEMO-total gaps <= avt_k gaps)")
     for h in (8, 12, 18, 30, 40):
         s = h * 24 - 1
         if s >= nt:
@@ -272,14 +274,14 @@ def main(argv):
         row = []
         for thr in (1e-4, 5e-4, 1e-3):
             out = []
-            for K in (Ko, Kkn):
+            for K in (Ko, Kkn, Kn):
                 kk = K[s, wet]
                 t = turbocline(kk[:, :kw], zw[:kw], thr)
                 da = deepest_active(kk, zw, thr, ZTOP)
                 g = ~np.isnan(da) & (t < da)
                 surf = np.any((kk >= thr) & (zw[None, :] < t[:, None]), -1)
                 out.append((np.mean(g), np.mean(surf[g]) if g.any() else np.nan))
-            row.append(f"thr {thr:.0e}: {out[0][0]:.2f}/{out[1][0]:.2f} | {out[0][1]:.2f}/{out[1][1]:.2f}")
+            row.append(f"thr {thr:.0e}: {out[0][0]:.2f}/{out[1][0]:.2f}/{out[2][0]:.2f} | {out[0][1]:.2f}/{out[1][1]:.2f}")
         print(f"  h{h:02d}  " + "   ".join(row))
     s0, s1 = h0 * 24, min(h1 * 24, nt)
     hlo, fo, sto = lc_depth(LCo[s0:s1, wet], zw)
