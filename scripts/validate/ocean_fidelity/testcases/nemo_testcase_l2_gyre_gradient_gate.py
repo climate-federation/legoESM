@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Reverse/forward/FD and adjoint-resource gate for certified GYRE-zco.
+"""Reverse/forward/FD and adjoint-resource gate for certified ocean cards.
 
-The numerical protocol is frozen in
-``nemo_testcases_l2_gyre_gradgate_round1_prereg.md``.  This module deliberately
-contains no physics repair: a poisoned adjoint is an exit-1 measurement.
+The GYRE protocol is frozen in its round-1 preregistration; the SWG extension
+is frozen in ``nemo_testcases_l1_swg_gradgate_round1_prereg.md``.  This module
+deliberately contains no physics repair: a poisoned adjoint is an exit-1
+measurement.
 """
 
 from __future__ import annotations
@@ -26,7 +27,12 @@ import numpy as np
 from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
 from legoesm.ocean.dynamics.latlon_cgrid_operators import compute_face_masks_3d
 from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
-from legoesm.ocean.fidelity.nemo_testcase_recipe import build_nemo_testcase_card
+from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+    build_nemo_testcase_card,
+    build_swg_card,
+    validate_nemo_testcase_card_for_execution,
+)
+from legoesm.ocean.state import OceanSurfaceForcing
 from legoesm.ocean.vertical import (
     nemo_qco_live_face_geometry_cgrid,
     nemo_qco_live_t_thickness,
@@ -34,14 +40,17 @@ from legoesm.ocean.vertical import (
 )
 from legoesm.training.checkpoint_schedule import checkpointed_loop
 
-CASE = "GYRE-zco"
-DT_S = 14400.0
+GYRE_CARD = "GYRE-zco"
+SWG_CARD = "SWG"
+CARD_STEPS = {GYRE_CARD: (1, 6), SWG_CARD: (1, 24, 720)}
+RESOURCE_STEPS = {GYRE_CARD: (1, 6), SWG_CARD: (24, 720)}
 REVFWD_TOL = 1.0e-9
 FD_TOL = 0.05
 FD_STEP = 1.0e-3
 PERTURBATION_K = 1.0e-3
 SCHEDULES = ("none", "uniform", "binomial")
-FIELDS = ("T", "S", "u", "v")
+GYRE_FIELDS = ("T", "S", "u", "v")
+SWG_FIELDS = ("ssh", "u", "v")
 GPU_NATIVE_POLICY_LABEL = (
     "GPU, XLA transcendentals — not the certified bit-exact policy"
 )
@@ -68,7 +77,30 @@ class LossReference(NamedTuple):
     v_variance: jax.Array
 
 
-class GYREContext(NamedTuple):
+class SWGScoredState(NamedTuple):
+    ssh: jax.Array
+    u: jax.Array
+    v: jax.Array
+
+
+class SWGLossReference(NamedTuple):
+    state: SWGScoredState
+    ssh_volume: jax.Array
+    u_volume: jax.Array
+    v_volume: jax.Array
+    ssh_variance: jax.Array
+    u_variance: jax.Array
+    v_variance: jax.Array
+
+
+class SWGPerturbation(NamedTuple):
+    ssh: jax.Array
+    u: jax.Array
+    v: jax.Array
+
+
+class GateContext(NamedTuple):
+    selector: str
     card: object
     model: LatLonCGridOceanModel
     initial_state: object
@@ -88,7 +120,7 @@ def measurement_policy_label(backend: str, transcendentals: str) -> str:
     if backend == "cpu" and transcendentals == "libm":
         return CPU_LIBM_POLICY_LABEL
     raise ValueError(
-        "unsupported GYRE gradient measurement policy: "
+        "unsupported gradient measurement policy: "
         f"backend={backend!r}, transcendentals={transcendentals!r}"
     )
 
@@ -118,11 +150,26 @@ def _load_surface_forcings():
     return module._surface_forcings
 
 
-def build_context(*, transcendentals: str = "libm") -> GYREContext:
-    """Build the certified card and prime only production step caches."""
-    configure_runtime(transcendentals)
-    card = build_nemo_testcase_card(CASE)
-    require(card.dt_s == DT_S, f"card dt changed: {card.dt_s}")
+def _load_swg_ladder():
+    """Reuse SWG's admitted-record reader and entry reconstruction."""
+    path = Path(__file__).with_name("nemo_testcase_l1_swg_ladder.py")
+    spec = importlib.util.spec_from_file_location("swg_gradient_entry", path)
+    require(spec is not None and spec.loader is not None, f"cannot load {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _checkpointed_production_step(model, card):
+    def production_step(state, freshwater, surface):
+        return model._step_jitted(state, card.dt_s, freshwater, surface)
+
+    return jax.jit(jax.checkpoint(production_step))
+
+
+def _build_gyre_context() -> GateContext:
+    card = build_nemo_testcase_card(GYRE_CARD)
+    require(card.dt_s == 14400.0, f"card dt changed: {card.dt_s}")
     cfg = card.recipe.model_config
     require(cfg.outer_integrator == "forward_euler", "GYRE outer dispatch changed")
     require(cfg.barotropic.n_barotropic_substeps == 50, "GYRE substeps changed")
@@ -137,15 +184,74 @@ def build_context(*, transcendentals: str = "libm") -> GYREContext:
     require(initial.T.data.dtype == jnp.float64, "GYRE state is not float64")
     require(card.recipe.z_coord.dz_ref.dtype == jnp.float64,
             "GYRE geometry is not float64")
-    def production_step(state, freshwater, surface):
-        return model._step_jitted(state, card.dt_s, freshwater, surface)
-
     # Reuse Decision 49 from the GYRE gradient-twin lane: preserve a compiled
     # boundary around every production step and rematerialize that whole step
     # in reverse mode.  This remains a Python loop (never a scan).
-    checkpointed_step = jax.jit(jax.checkpoint(production_step))
-    return GYREContext(
-        card, model, initial, _load_surface_forcings(), checkpointed_step)
+    return GateContext(
+        GYRE_CARD, card, model, initial, _load_surface_forcings(),
+        _checkpointed_production_step(model, card))
+
+
+def _build_swg_context() -> GateContext:
+    """Rebuild the admitted kt=2 stage-1 boundary as a public SWG state."""
+    ladder = _load_swg_ladder()
+    card = build_swg_card()
+    validate_nemo_testcase_card_for_execution(card)
+    require(card.dt_s == 3600.0, f"SWG card dt changed: {card.dt_s}")
+    cfg = card.recipe.model_config
+    require(cfg.outer_integrator == "swe_rk3", "SWG outer dispatch changed")
+    require(cfg.vorticity_scheme.scheme == "ens_total", "SWG ENS changed")
+    require(cfg.tracer_advection == "none", "SWG acquired tracers")
+    require(cfg.physics.vertical_mixing.scheme == "none", "SWG acquired TKE")
+    entries = ladder.read_stage_entries(
+        ladder.DEFAULT_STAGE_ROOT, record_kts=(2,), stages=(1,))
+    entry = entries[2, 1]
+    dtype = jnp.float64
+    initial = card.recipe.initial_state
+    u_native = jnp.asarray(entry["u_k"], dtype=dtype)
+    v_native = jnp.asarray(entry["v_k"], dtype=dtype)
+    u = jnp.concatenate([jnp.zeros_like(u_native[:, :1]), u_native], axis=1)
+    v = jnp.concatenate([jnp.zeros_like(v_native[:1]), v_native], axis=0)
+    state = initial._replace(
+        eta=initial.eta.replace(data=jnp.asarray(entry["ssh_k"], dtype=dtype)),
+        u=initial.u.replace(data=u[..., None]),
+        v=initial.v.replace(data=v[..., None]),
+        tau_x_prev=jnp.asarray(entry["utau_before"], dtype=dtype),
+        tau_y_prev=jnp.asarray(entry["vtau_before"], dtype=dtype),
+    )
+    forcing = OceanSurfaceForcing(
+        tau_i_native=jnp.asarray(entry["utau_now"], dtype=dtype),
+        tau_j_native=jnp.asarray(entry["vtau_now"], dtype=dtype),
+    )
+    rebuilt = ladder._stage_candidate(state, forcing, card)
+    require(
+        set(rebuilt) == set(entry)
+        and all(np.array_equal(rebuilt[name], entry[name]) for name in entry),
+        "SWG public state does not rebuild admitted kt=2 stage-1 entry",
+    )
+    model = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
+    require(state.eta.data.dtype == dtype, "SWG state is not float64")
+    require(card.recipe.z_coord.dz_ref.dtype == dtype,
+            "SWG geometry is not float64")
+
+    def surface_forcings(_card, _state, _kt):
+        return None, forcing
+
+    return GateContext(
+        SWG_CARD, card, model, state, surface_forcings,
+        _checkpointed_production_step(model, card))
+
+
+def build_context(card: str, *, transcendentals: str = "libm") -> GateContext:
+    """Dispatch a certified card without a silent fallback."""
+    configure_runtime(transcendentals)
+    if card == GYRE_CARD:
+        return _build_gyre_context()
+    if card == SWG_CARD:
+        return _build_swg_context()
+    raise ValueError(
+        f"unknown gradient card {card!r}; expected one of {sorted(CARD_STEPS)}")
 
 
 def _score_state(state) -> ScoredState:
@@ -153,11 +259,38 @@ def _score_state(state) -> ScoredState:
         state.T.data, state.S.data, state.u.data, state.v.data, state.eta.data)
 
 
-def production_rollout(context: GYREContext, d_t0, n_steps: int):
+def _apply_perturbation(context: GateContext, perturbation):
+    if context.selector == GYRE_CARD:
+        return context.initial_state._replace(
+            T=context.initial_state.T.replace(
+                data=context.initial_state.T.data + perturbation))
+    if context.selector == SWG_CARD:
+        return context.initial_state._replace(
+            eta=context.initial_state.eta.replace(
+                data=context.initial_state.eta.data + perturbation.ssh),
+            u=context.initial_state.u.replace(
+                data=context.initial_state.u.data + perturbation.u),
+            v=context.initial_state.v.replace(
+                data=context.initial_state.v.data + perturbation.v),
+        )
+    raise ValueError(f"unknown gradient card {context.selector!r}")
+
+
+def zero_perturbation(context: GateContext):
+    if context.selector == GYRE_CARD:
+        return jnp.zeros_like(context.initial_state.T.data)
+    if context.selector == SWG_CARD:
+        return SWGPerturbation(
+            jnp.zeros_like(context.initial_state.eta.data),
+            jnp.zeros_like(context.initial_state.u.data),
+            jnp.zeros_like(context.initial_state.v.data),
+        )
+    raise ValueError(f"unknown gradient card {context.selector!r}")
+
+
+def production_rollout(context: GateContext, perturbation, n_steps: int):
     """Campaign-order Python loop; every step calls production ``_step_jitted``."""
-    state = context.initial_state._replace(
-        T=context.initial_state.T.replace(
-            data=context.initial_state.T.data + d_t0))
+    state = _apply_perturbation(context, perturbation)
     for kt in range(1, n_steps + 1):
         freshwater, surface = context.surface_forcings(context.card, state, kt)
         state = context.model._step_jitted(
@@ -169,22 +302,19 @@ def production_rollout(context: GYREContext, d_t0, n_steps: int):
     return state
 
 
-def gradient_rollout(context: GYREContext, d_t0, n_steps: int):
+def gradient_rollout(context: GateContext, perturbation, n_steps: int):
     """Twin-Decision-49 per-step remat around production ``_step_jitted``."""
-    state = context.initial_state._replace(
-        T=context.initial_state.T.replace(
-            data=context.initial_state.T.data + d_t0))
+    state = _apply_perturbation(context, perturbation)
     for kt in range(1, n_steps + 1):
         freshwater, surface = context.surface_forcings(context.card, state, kt)
         state = context.checkpointed_step(state, freshwater, surface)
     return state
 
 
-def scheduled_rollout(context: GYREContext, d_t0, n_steps: int, schedule: str):
+def scheduled_rollout(context: GateContext, perturbation, n_steps: int,
+                      schedule: str):
     """Run the shared component-agnostic checkpoint schedule over production steps."""
-    state = context.initial_state._replace(
-        T=context.initial_state.T.replace(
-            data=context.initial_state.T.data + d_t0))
+    state = _apply_perturbation(context, perturbation)
 
     def body(carry):
         kt, step_state = carry
@@ -207,7 +337,7 @@ def scheduled_rollout(context: GYREContext, d_t0, n_steps: int, schedule: str):
     return state
 
 
-def _live_volumes(context: GYREContext, truth: ScoredState):
+def _live_volumes(context: GateContext, truth: ScoredState):
     """Twin-branch live T/U/V control volumes at the scored after-state."""
     card = context.card
     state = context.initial_state
@@ -259,17 +389,46 @@ def volume_weighted_mse(pred, target, volume):
     return jnp.sum(volume * (pred - target) ** 2) / denominator
 
 
-def build_reference(context: GYREContext, truth_state) -> LossReference:
-    """Freeze the after-state truth, live volumes, and four normalizers."""
+def _masked_variance(field, weight):
+    mean = jnp.sum(field * weight) / jnp.sum(weight)
+    return volume_weighted_mse(field, mean, weight)
+
+
+def build_reference(context: GateContext, truth_state):
+    """Freeze the selected card's truth, wet weights, and normalizers."""
+    if context.selector == SWG_CARD:
+        truth = SWGScoredState(
+            truth_state.eta.data, truth_state.u.data, truth_state.v.data)
+        dtype = truth.ssh.dtype
+        volumes = {
+            "ssh": jnp.asarray(
+                truth_state.land_mask.data, dtype=dtype),
+            "u": jnp.asarray(
+                truth_state.u_mask.data[..., None], dtype=dtype),
+            "v": jnp.asarray(
+                truth_state.v_mask.data[..., None], dtype=dtype),
+        }
+        variances = {
+            name: _masked_variance(getattr(truth, name), volumes[name])
+            for name in SWG_FIELDS
+        }
+        for name, variance in variances.items():
+            value = float(np.asarray(variance))
+            require(math.isfinite(value) and value > 0.0,
+                    f"{name} truth variance is not positive and finite: {value}")
+        return SWGLossReference(
+            truth, volumes["ssh"], volumes["u"], volumes["v"],
+            variances["ssh"], variances["u"], variances["v"])
+    if context.selector != GYRE_CARD:
+        raise ValueError(f"unknown gradient card {context.selector!r}")
     truth = _score_state(truth_state)
     t_volume, u_volume, v_volume = _live_volumes(context, truth)
     volumes = {"T": t_volume, "S": t_volume, "u": u_volume, "v": v_volume}
     variances = {}
-    for name in FIELDS:
+    for name in GYRE_FIELDS:
         field = getattr(truth, name)
         weight = volumes[name]
-        mean = jnp.sum(field * weight) / jnp.sum(weight)
-        variance = volume_weighted_mse(field, mean, weight)
+        variance = _masked_variance(field, weight)
         value = float(np.asarray(variance))
         require(math.isfinite(value) and value > 0.0,
                 f"{name} truth variance is not positive and finite: {value}")
@@ -287,19 +446,32 @@ def build_reference(context: GYREContext, truth_state) -> LossReference:
     )
 
 
-def make_loss(context: GYREContext, reference: LossReference, n_steps: int,
+def make_loss(context: GateContext, reference, n_steps: int,
               *, schedule: str | None = None):
-    """Return the registered four-field normalized after-state loss."""
+    """Return the registered normalized after-state loss."""
     rollout = gradient_rollout if schedule is None else scheduled_rollout
 
-    def loss(d_t0):
+    def loss(perturbation):
         if schedule is None:
-            state = rollout(context, d_t0, n_steps)
+            state = rollout(context, perturbation, n_steps)
         else:
-            state = rollout(context, d_t0, n_steps, schedule)
+            state = rollout(context, perturbation, n_steps, schedule)
+        if context.selector == SWG_CARD:
+            candidate = SWGScoredState(
+                state.eta.data, state.u.data, state.v.data)
+            scores = [
+                volume_weighted_mse(
+                    getattr(candidate, name), getattr(reference.state, name),
+                    getattr(reference, f"{name}_volume"),
+                ) / getattr(reference, f"{name}_variance")
+                for name in SWG_FIELDS
+            ]
+            return jnp.mean(jnp.stack(scores))
+        if context.selector != GYRE_CARD:
+            raise ValueError(f"unknown gradient card {context.selector!r}")
         candidate = _score_state(state)
         scores = []
-        for name in FIELDS:
+        for name in GYRE_FIELDS:
             scores.append(
                 volume_weighted_mse(
                     getattr(candidate, name),
@@ -313,12 +485,47 @@ def make_loss(context: GYREContext, reference: LossReference, n_steps: int,
     return loss
 
 
-def perturbations(context: GYREContext):
+def _normalize_pytree(tree, scale=1.0):
+    leaves = jax.tree_util.tree_leaves(tree)
+    norm = jnp.sqrt(sum(jnp.vdot(leaf, leaf) for leaf in leaves))
+    return jax.tree_util.tree_map(lambda leaf: scale * leaf / norm, tree)
+
+
+def perturbations(context: GateContext):
     """Return the registered evaluation point and independent unit direction."""
-    wet = (
-        jnp.asarray(context.card.recipe.z_coord.is_active, dtype=jnp.float64)
-        * context.initial_state.land_mask.data[..., None]
-    )
+    if context.selector == SWG_CARD:
+        keys = jax.random.split(jax.random.PRNGKey(0), 3)
+        direction_keys = jax.random.split(jax.random.PRNGKey(42), 3)
+        masks = SWGPerturbation(
+            jnp.asarray(context.initial_state.land_mask.data, dtype=jnp.float64),
+            jnp.asarray(
+                context.initial_state.u_mask.data[..., None], dtype=jnp.float64),
+            jnp.asarray(
+                context.initial_state.v_mask.data[..., None], dtype=jnp.float64),
+        )
+        shapes = (
+            context.initial_state.eta.data.shape,
+            context.initial_state.u.data.shape,
+            context.initial_state.v.data.shape,
+        )
+        base = SWGPerturbation(*(
+            jax.random.normal(key, shape, dtype=jnp.float64) * mask
+            for key, shape, mask in zip(keys, shapes, masks, strict=True)
+        ))
+        direction = SWGPerturbation(*(
+            jax.random.normal(key, shape, dtype=jnp.float64) * mask
+            for key, shape, mask in zip(
+                direction_keys, shapes, masks, strict=True)
+        ))
+        return (
+            _normalize_pytree(base, PERTURBATION_K),
+            _normalize_pytree(direction),
+        )
+    if context.selector != GYRE_CARD:
+        raise ValueError(f"unknown gradient card {context.selector!r}")
+    wet = (jnp.asarray(
+        context.card.recipe.z_coord.is_active, dtype=jnp.float64)
+        * context.initial_state.land_mask.data[..., None])
     base = jax.random.normal(
         jax.random.PRNGKey(0), context.initial_state.T.data.shape,
         dtype=jnp.float64) * wet
@@ -380,35 +587,50 @@ def directional_derivatives(loss, base, direction, *, plant=False):
     direct unit test pins this equality and prevents this representation from
     silently changing the requested directional derivative.
     """
-    zero = jnp.asarray(0.0, dtype=base.dtype)
+    dtype = jax.tree_util.tree_leaves(base)[0].dtype
+    zero = jnp.asarray(0.0, dtype=dtype)
 
     def line(alpha):
-        return loss(base + alpha * direction)
+        value = jax.tree_util.tree_map(
+            lambda base_leaf, direction_leaf: (
+                base_leaf + alpha * direction_leaf),
+            base,
+            direction,
+        )
+        return loss(value)
 
     reverse_line = (
         (lambda alpha: line(broken_vjp_identity(alpha))) if plant else line)
     reverse = float(np.asarray(jax.grad(reverse_line)(zero)))
-    _, forward_value = jax.jvp(line, (zero,), (jnp.asarray(1.0, base.dtype),))
+    _, forward_value = jax.jvp(line, (zero,), (jnp.asarray(1.0, dtype),))
     forward = float(np.asarray(forward_value))
-    plus = float(np.asarray(line(jnp.asarray(FD_STEP, base.dtype))))
-    minus = float(np.asarray(line(jnp.asarray(-FD_STEP, base.dtype))))
+    plus = float(np.asarray(line(jnp.asarray(FD_STEP, dtype))))
+    minus = float(np.asarray(line(jnp.asarray(-FD_STEP, dtype))))
     finite_difference = (plus - minus) / (2.0 * FD_STEP)
     return classify_agreement(reverse, forward, finite_difference)
 
 
-def measure_agreement(n_steps: int, *, plant=False,
+def measure_agreement(card: str, n_steps: int, *, plant=False,
                       transcendentals: str = "libm"):
     """Build and evaluate one certified-card agreement row."""
-    context = build_context(transcendentals=transcendentals)
-    zero = jnp.zeros_like(context.initial_state.T.data)
+    context = build_context(card, transcendentals=transcendentals)
+    require(n_steps in CARD_STEPS[card],
+            f"{card} agreement steps must be one of {CARD_STEPS[card]}")
+    zero = zero_perturbation(context)
     truth_state = production_rollout(context, zero, n_steps)
     jax.block_until_ready(truth_state)
-    gradient_truth = gradient_rollout(context, zero, n_steps)
+    agreement_schedule = "uniform" if card == SWG_CARD else None
+    gradient_truth = (
+        gradient_rollout(context, zero, n_steps)
+        if agreement_schedule is None else
+        scheduled_rollout(context, zero, n_steps, agreement_schedule)
+    )
     jax.block_until_ready(gradient_truth)
     require(states_bitwise_equal(truth_state, gradient_truth),
             "checkpointed per-step primal differs from production")
     reference = build_reference(context, truth_state)
-    loss = make_loss(context, reference, n_steps)
+    loss = make_loss(
+        context, reference, n_steps, schedule=agreement_schedule)
     base, direction = perturbations(context)
     row = classify_agreement(math.nan, math.nan, math.nan)
     try:
@@ -416,9 +638,10 @@ def measure_agreement(n_steps: int, *, plant=False,
     except (TypeError, ValueError, RuntimeError) as error:
         row["error"] = f"{type(error).__name__}: {error}"
     row.update({
-        "case": CASE,
+        "card_selector": card,
+        "case": context.card.case,
         "steps": n_steps,
-        "model_seconds": n_steps * DT_S,
+        "model_seconds": n_steps * context.card.dt_s,
         "backend": jax.default_backend(),
         "device": str(jax.devices()[0]),
         "jax_enable_x64": bool(jax.config.jax_enable_x64),
@@ -429,7 +652,13 @@ def measure_agreement(n_steps: int, *, plant=False,
         "geometry_dtype": str(context.card.recipe.z_coord.dz_ref.dtype),
         "plant": "broken_vjp" if plant else None,
         "production_entry": "LatLonCGridOceanModel._step_jitted",
-        "composition": "per-step Python loop",
+        "composition": (
+            "per-step Python loop" if agreement_schedule is None
+            else f"checkpointed_loop:{agreement_schedule}"),
+        "initial_boundary": (
+            "admitted kt=2 stage-1 entry" if card == SWG_CARD
+            else "certified day-0 state"),
+        "loss_fields": list(SWG_FIELDS if card == SWG_CARD else GYRE_FIELDS),
     })
     return row
 
@@ -504,11 +733,59 @@ def extrapolate_360(schedule: str, baseline_mib: float, peak6_mib: float) -> flo
     raise ValueError(f"unknown schedule {schedule!r}")
 
 
-def measure_resources(n_steps: int, schedule: str, *,
+def extrapolate_memory(schedule: str, source_steps: int, target_steps: int,
+                       baseline_mib: float, peak_mib: float) -> float:
+    """Scale measured incremental tape memory by schedule complexity."""
+    if source_steps <= 0 or target_steps < source_steps:
+        raise ValueError("memory extrapolation requires target >= positive source")
+    incremental = max(0.0, peak_mib - baseline_mib)
+    if schedule == "none":
+        scale = target_steps / source_steps
+    elif schedule == "uniform":
+        scale = 1.0
+    elif schedule == "binomial":
+        scale = (math.isqrt(target_steps - 1) + 1) / (
+            math.isqrt(source_steps - 1) + 1)
+    else:
+        raise ValueError(f"unknown schedule {schedule!r}")
+    return baseline_mib + scale * incremental
+
+
+def classify_resources(
+    loss: float,
+    gradient_finite: bool,
+    gradient_nonzero: bool,
+    *,
+    cold_wall_s: float,
+    warm_wall_s: float,
+    baseline_mib: float,
+    peak_mib: float,
+    samples: int,
+) -> str:
+    """Apply every preregistered resource-row acceptance condition."""
+    passed = (
+        math.isfinite(loss)
+        and gradient_finite
+        and gradient_nonzero
+        and math.isfinite(cold_wall_s)
+        and cold_wall_s > 0.0
+        and math.isfinite(warm_wall_s)
+        and warm_wall_s > 0.0
+        and math.isfinite(baseline_mib)
+        and math.isfinite(peak_mib)
+        and peak_mib >= baseline_mib
+        and samples >= 2
+    )
+    return "CONFIRMED" if passed else "REFUTED"
+
+
+def measure_resources(card: str, n_steps: int, schedule: str, *,
                       transcendentals: str = "libm"):
     """Warm once, then measure one blocked reverse execution and peak memory."""
-    context = build_context(transcendentals=transcendentals)
-    zero = jnp.zeros_like(context.initial_state.T.data)
+    context = build_context(card, transcendentals=transcendentals)
+    require(n_steps in RESOURCE_STEPS[card],
+            f"{card} resource steps must be one of {RESOURCE_STEPS[card]}")
+    zero = zero_perturbation(context)
     truth_state = production_rollout(context, zero, n_steps)
     jax.block_until_ready(truth_state)
     reference = build_reference(context, truth_state)
@@ -520,10 +797,17 @@ def measure_resources(n_steps: int, schedule: str, *,
     base, direction = perturbations(context)
 
     def line(alpha):
-        return loss(base + alpha * direction)
+        value = jax.tree_util.tree_map(
+            lambda base_leaf, direction_leaf: (
+                base_leaf + alpha * direction_leaf),
+            base,
+            direction,
+        )
+        return loss(value)
 
     reverse = jax.value_and_grad(line)
-    zero_alpha = jnp.asarray(0.0, dtype=base.dtype)
+    dtype = jax.tree_util.tree_leaves(base)[0].dtype
+    zero_alpha = jnp.asarray(0.0, dtype=dtype)
 
     cold_started = time.perf_counter()
     cold_value, cold_gradient = reverse(zero_alpha)
@@ -543,10 +827,14 @@ def measure_resources(n_steps: int, schedule: str, *,
     wall_s = time.perf_counter() - started
     sampler.stop()
     gradient_array = np.asarray(gradient)
-    return {
-        "case": CASE,
+    loss_value = float(np.asarray(value))
+    gradient_finite = bool(np.all(np.isfinite(gradient_array)))
+    gradient_nonzero = bool(np.any(gradient_array != 0.0))
+    row = {
+        "card_selector": card,
+        "case": context.card.case,
         "steps": n_steps,
-        "model_seconds": n_steps * DT_S,
+        "model_seconds": n_steps * context.card.dt_s,
         "schedule": schedule,
         "backend": backend,
         "device": str(jax.devices()[0]),
@@ -560,15 +848,33 @@ def measure_resources(n_steps: int, schedule: str, *,
         "schedule_primal_bitwise_production": True,
         "cold_compile_and_reverse_wall_seconds": cold_wall_s,
         "warm_reverse_wall_seconds": wall_s,
-        "loss": float(np.asarray(value)),
-        "gradient_finite": bool(np.all(np.isfinite(gradient_array))),
-        "gradient_nonzero": bool(np.any(gradient_array != 0.0)),
+        "loss": loss_value,
+        "gradient_finite": gradient_finite,
+        "gradient_nonzero": gradient_nonzero,
         "memory_kind": "host_rss" if backend == "cpu" else "gpu1_nvidia_smi",
         "memory_baseline_mib": sampler.baseline_mib,
         "memory_peak_mib": sampler.peak_mib,
         "memory_increment_mib": sampler.peak_mib - sampler.baseline_mib,
         "memory_samples": sampler.samples,
+        "status": classify_resources(
+            loss_value,
+            gradient_finite,
+            gradient_nonzero,
+            cold_wall_s=cold_wall_s,
+            warm_wall_s=wall_s,
+            baseline_mib=sampler.baseline_mib,
+            peak_mib=sampler.peak_mib,
+            samples=sampler.samples,
+        ),
+        "initial_boundary": (
+            "admitted kt=2 stage-1 entry" if card == SWG_CARD
+            else "certified day-0 state"),
     }
+    if card == SWG_CARD and n_steps == 720:
+        row["memory_1440_step_estimate_mib"] = extrapolate_memory(
+            schedule, 720, 1440, sampler.baseline_mib, sampler.peak_mib)
+        row["warm_reverse_1440_step_estimate_seconds"] = 2.0 * wall_s
+    return row
 
 
 def _git_output(*args: str) -> str:
@@ -595,7 +901,8 @@ def write_result(path: Path, row: dict) -> None:
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=("agreement", "resources"))
-    parser.add_argument("--steps", type=int, choices=(1, 6), required=True)
+    parser.add_argument("--card", required=True)
+    parser.add_argument("--steps", type=int, required=True)
     parser.add_argument("--schedule", choices=SCHEDULES)
     parser.add_argument("--plant", choices=("broken_vjp",))
     parser.add_argument(
@@ -611,6 +918,8 @@ def parse_args(argv=None):
         parser.error("agreement mode does not accept --schedule")
     if args.mode == "resources" and args.plant is not None:
         parser.error("resources mode does not accept --plant")
+    if args.steps <= 0:
+        parser.error("--steps must be positive")
     return args
 
 
@@ -619,19 +928,17 @@ def main(argv=None) -> int:
     provenance = require_measurement_stamp(args.expect_commit)
     if args.mode == "agreement":
         row = measure_agreement(
-            args.steps, plant=args.plant == "broken_vjp",
+            args.card, args.steps, plant=args.plant == "broken_vjp",
             transcendentals=args.transcendentals)
     else:
         row = measure_resources(
-            args.steps, args.schedule,
+            args.card, args.steps, args.schedule,
             transcendentals=args.transcendentals)
     row["provenance"] = provenance
     row["argv"] = list(sys.argv if argv is None else argv)
     write_result(args.output, row)
     print(json.dumps(row, sort_keys=True), flush=True)
-    if args.mode == "agreement":
-        return 0 if row["status"] == "CONFIRMED" else 1
-    return 0
+    return 0 if row["status"] == "CONFIRMED" else 1
 
 
 if __name__ == "__main__":

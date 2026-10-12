@@ -1,4 +1,4 @@
-"""Direct controls for the certified GYRE gradient-gate instrument."""
+"""Direct controls for the shared certified-card gradient gate."""
 
 from __future__ import annotations
 
@@ -53,6 +53,26 @@ def test_scalar_line_reverse_equals_full_vjp_dot_direction():
     assert row["reverse"] == pytest.approx(expected, rel=1.0e-13)
 
 
+def test_scalar_line_supports_swg_three_field_pytree_and_plant():
+    base = G.SWGPerturbation(*(
+        jnp.asarray([value], dtype=jnp.float64)
+        for value in (0.2, -0.4, 0.7)
+    ))
+    direction = G.SWGPerturbation(*(
+        jnp.asarray([value], dtype=jnp.float64)
+        for value in (0.5, -0.1, 0.3)
+    ))
+
+    def loss(value):
+        return sum(jnp.sum(leaf**2) for leaf in value)
+
+    control = G.directional_derivatives(loss, base, direction)
+    planted = G.directional_derivatives(loss, base, direction, plant=True)
+    assert control["status"] == "CONFIRMED"
+    assert planted["status"] == "REFUTED"
+    assert planted["reverse"] == pytest.approx(2.0 * planted["forward"])
+
+
 @pytest.mark.parametrize(
     ("schedule", "expected"),
     [
@@ -63,6 +83,19 @@ def test_scalar_line_reverse_equals_full_vjp_dot_direction():
 )
 def test_registered_360_step_memory_extrapolation(schedule, expected):
     assert G.extrapolate_360(schedule, 100.0, 110.0) == pytest.approx(expected)
+
+
+@pytest.mark.parametrize(
+    ("schedule", "expected"),
+    [
+        ("none", 120.0),
+        ("uniform", 110.0),
+        ("binomial", 100.0 + 10.0 * 38.0 / 27.0),
+    ],
+)
+def test_registered_swg_1440_step_memory_extrapolation(schedule, expected):
+    assert G.extrapolate_memory(
+        schedule, 720, 1440, 100.0, 110.0) == pytest.approx(expected)
 
 
 def test_volume_weighted_mse_ignores_zero_volume_cells():
@@ -118,17 +151,47 @@ def test_nemo_literal_dissl_guard_preserves_primal_bits_and_zero_vjp():
 def test_resource_cli_requires_a_schedule():
     with pytest.raises(SystemExit):
         G.parse_args([
-            "resources", "--steps", "1", "--expect-commit", "deadbeef",
+            "resources", "--card", "GYRE-zco", "--steps", "1",
+            "--expect-commit", "deadbeef",
             "--output", "/tmp/unused-gyre-gradient-row.json",
         ])
 
 
 def test_gpu_cli_can_select_native_transcendentals_explicitly():
     args = G.parse_args([
-        "agreement", "--steps", "1", "--transcendentals", "native",
+        "agreement", "--card", "SWG", "--steps", "1",
+        "--transcendentals", "native",
         "--expect-commit", "deadbeef", "--output", "/tmp/unused-row.json",
     ])
     assert args.transcendentals == "native"
+    assert args.card == "SWG"
+
+
+def test_card_dispatch_raises_on_unknown_before_building(monkeypatch):
+    monkeypatch.setattr(G, "configure_runtime", lambda _policy: None)
+    with pytest.raises(ValueError, match="unknown gradient card"):
+        G.build_context("not-a-card")
+
+
+def test_resource_classifier_is_fail_closed():
+    valid = {
+        "cold_wall_s": 2.0,
+        "warm_wall_s": 1.0,
+        "baseline_mib": 100.0,
+        "peak_mib": 101.0,
+        "samples": 2,
+    }
+    assert G.classify_resources(1.0, True, True, **valid) == "CONFIRMED"
+    assert G.classify_resources(
+        float("nan"), True, True, **valid) == "REFUTED"
+    assert G.classify_resources(1.0, False, True, **valid) == "REFUTED"
+    assert G.classify_resources(1.0, True, False, **valid) == "REFUTED"
+    assert G.classify_resources(
+        1.0, True, True, **{**valid, "warm_wall_s": 0.0}) == "REFUTED"
+    assert G.classify_resources(
+        1.0, True, True, **{**valid, "peak_mib": 99.0}) == "REFUTED"
+    assert G.classify_resources(
+        1.0, True, True, **{**valid, "samples": 1}) == "REFUTED"
 
 
 def test_measurement_policy_labels_refuse_cross_backend_combinations():
@@ -136,7 +199,7 @@ def test_measurement_policy_labels_refuse_cross_backend_combinations():
         "CPU, certified fp64/libm bit-exact policy")
     assert G.measurement_policy_label("gpu", "native") == (
         "GPU, XLA transcendentals — not the certified bit-exact policy")
-    with pytest.raises(ValueError, match="unsupported GYRE gradient"):
+    with pytest.raises(ValueError, match="unsupported gradient"):
         G.measurement_policy_label("gpu", "libm")
-    with pytest.raises(ValueError, match="unsupported GYRE gradient"):
+    with pytest.raises(ValueError, match="unsupported gradient"):
         G.measurement_policy_label("cpu", "native")
