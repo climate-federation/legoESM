@@ -92,11 +92,27 @@ def _live_reciprocal(eta, depth, wet, area_t, area_face, axis) -> np.ndarray:
         return reference / (np.float64(1.0) + ratio)
 
 
+def _candidate_hooks(card, *, trace: bool = False):
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        _NEMOWSRK3TestHooks,
+    )
+
+    reference_depth = rung0.ladder.build_reference_depth_override(card)
+    return _NEMOWSRK3TestHooks(
+        expose_barotropic_substeps=trace,
+        barotropic_external_mode_association=True,
+        barotropic_reference_face_depth_override=reference_depth,
+        barotropic_unmasked_v_transport=True,
+        barotropic_materialize_v_transport=True,
+        barotropic_atomic_fold_unit=True,
+        preserve_literal_hpg_vmask=True,
+    )
+
+
 def _candidate_kt5_entry(deck_root: Path, frame_root: Path, label: str):
     import jax
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         LatLonCGridOceanModel,
-        _NEMOWSRK3TestHooks,
     )
 
     card = omt4.build_omt4_card(deck_root)
@@ -105,18 +121,9 @@ def _candidate_kt5_entry(deck_root: Path, frame_root: Path, label: str):
     state = (card.recipe.initial_state if label == "independent"
              else rung0.bridge_entry(card, entry))
     freshwater, surface = r241.omt0.rung0_ladder._zero_forcing((148, 180))
-    reference_depth = rung0.ladder.build_reference_depth_override(card)
-    hooks = _NEMOWSRK3TestHooks(
-        barotropic_external_mode_association=True,
-        barotropic_reference_face_depth_override=reference_depth,
-        barotropic_unmasked_v_transport=True,
-        barotropic_materialize_v_transport=True,
-        barotropic_atomic_fold_unit=True,
-        preserve_literal_hpg_vmask=True,
-    )
     model = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
-        _nemo_ws_test_hooks=hooks)
+        _nemo_ws_test_hooks=_candidate_hooks(card))
     with r245._barotropic_surface_mask_arm(
         card, True, v_only=True, t_pivot_north_neighbor=True,
     ):
@@ -124,7 +131,7 @@ def _candidate_kt5_entry(deck_root: Path, frame_root: Path, label: str):
             state = jax.device_get(model.step(
                 state, card.dt_s, freshwater=freshwater,
                 surface_forcing=surface))
-    return card, state
+    return card, state, freshwater, surface
 
 
 def measure(args: argparse.Namespace) -> dict[str, object]:
@@ -141,7 +148,8 @@ def measure(args: argparse.Namespace) -> dict[str, object]:
 
     require(args.label in LABELS, f"bad label {args.label!r}")
     stamp = r241._policy_and_stamp(args.expect_commit)
-    card, state = _candidate_kt5_entry(args.deck_root, args.frame_root, args.label)
+    card, state, freshwater, surface = _candidate_kt5_entry(
+        args.deck_root, args.frame_root, args.label)
     fields = {
         name: _field_row(np.asarray(getattr(state, name).data, np.float64))
         for name in ("T", "S", "u", "v", "eta", "uu_b", "vv_b")
@@ -161,6 +169,45 @@ def measure(args: argparse.Namespace) -> dict[str, object]:
     geometry_rows = {
         name: _field_row(value)
         for name, value in zip(geometry_names, geometry, strict=True)
+    }
+    # Reuse the campaign's established barotropic trace.  It materialises the
+    # existing scan recurrence and stops at the external-mode boundary; no new
+    # callback or arithmetic is inserted.  The trace is read only after the
+    # same ordinary candidate has produced the finite kt=5 entry above.
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+        _NEMOWSBarotropicTrace,
+    )
+    trace_model = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+        _nemo_ws_test_hooks=_candidate_hooks(card, trace=True))
+    with r245._barotropic_surface_mask_arm(
+        card, True, v_only=True, t_pivot_north_neighbor=True,
+    ):
+        trace = jax.device_get(trace_model.step(
+            state, card.dt_s, freshwater=freshwater,
+            surface_forcing=surface))
+    require(isinstance(trace, _NEMOWSBarotropicTrace),
+            "barotropic trace has the wrong return type")
+    slow_rows = {
+        name: _field_row(
+            value.data
+            if hasattr(value, "dims") and hasattr(value, "data") else value)
+        for name, value in trace.slow_forcing_operands.items()
+    }
+    slow_rows.update({
+        name: _field_row(value)
+        for name, value in zip(
+            ("slow_eta", "slow_u", "slow_v"),
+            trace.slow_forcing, strict=True)
+    })
+    substep_rows = {
+        name: _field_row(value)
+        for name, value in trace.substeps.items()
+    }
+    state_after_rows = {
+        name: _field_row(np.asarray(getattr(trace.state_after_barotropic, name).data))
+        for name in ("T", "S", "u", "v", "eta", "uu_b", "vv_b")
     }
 
     eta = jnp.asarray(state.eta.data)
@@ -233,6 +280,9 @@ def measure(args: argparse.Namespace) -> dict[str, object]:
         "worktree": stamp,
         "entry_fields": fields,
         "geometry_density": geometry_rows,
+        "slow_forcing": slow_rows,
+        "barotropic_substeps": substep_rows,
+        "state_after_barotropic": state_after_rows,
         "rows": rows,
         "guard_cell": point,
         "source_order": [
@@ -255,8 +305,12 @@ def classify(reports: dict[str, dict], *, plant: str = "none") -> dict[str, obje
     elif plant == "source-order":
         reports["independent"]["source_order"][0] = "ssvmask"
     elif plant == "writer":
-        for row in reports["independent"]["geometry_density"].values():
-            row["nonfinite"] = 0
+        for section in (
+            "geometry_density", "slow_forcing", "barotropic_substeps",
+            "state_after_barotropic",
+        ):
+            for row in reports["independent"][section].values():
+                row["nonfinite"] = 0
 
     require(set(reports) == set(LABELS), "both claim labels are required")
     summary = {}
@@ -289,20 +343,53 @@ def classify(reports: dict[str, dict], *, plant: str = "none") -> dict[str, obje
         require(nonfinite == 0,
                 f"{label}: a reciprocal is the first non-finite writer")
         geometry = report["geometry_density"]
-        first_geometry_nonfinite = next(
-            (name for name in (
-                "jacobian", "live_t_thickness", "rho_prime",
-                "pressure_prime", "nemo_hpg_rhd",
-            ) if geometry[name]["nonfinite"]), None)
-        require(first_geometry_nonfinite is not None,
-                f"{label}: frozen geometry/EOS bundle has no non-finite writer")
+        require(all(row["nonfinite"] == 0 for row in geometry.values()),
+                f"{label}: frozen geometry/EOS unexpectedly became non-finite")
+        slow_order = (
+            "du_dt", "dv_dt", "depth_u", "depth_v", "post_wind_u",
+            "post_wind_v", "post_drag_u", "post_drag_v", "pre_external_u",
+            "pre_external_v", "slow_eta", "slow_u", "slow_v",
+        )
+        first_slow_nonfinite = next(
+            (name for name in slow_order
+             if name in report["slow_forcing"]
+             and report["slow_forcing"][name]["nonfinite"]), None)
+        substep_order = tuple(report["barotropic_substeps"])
+        first_substep = None
+        for name in substep_order:
+            row = report["barotropic_substeps"][name]
+            if row["nonfinite"]:
+                index = row["first_nonfinite"]
+                key = (index[0] if index else 10**9, substep_order.index(name))
+                if first_substep is None or key < first_substep[0]:
+                    first_substep = (key, name, index)
+        first_state_nonfinite = next(
+            (name for name, row in report["state_after_barotropic"].items()
+             if row["nonfinite"]), None)
+        require(first_slow_nonfinite is not None or first_substep is not None
+                or first_state_nonfinite is not None,
+                f"{label}: no non-finite writer found through external mode")
+        first_writer = (
+            f"slow_forcing.{first_slow_nonfinite}"
+            if first_slow_nonfinite is not None else
+            (f"barotropic_substep_{first_substep[2][0] + 1}."
+             f"{first_substep[1]}" if first_substep is not None else
+             f"state_after_barotropic.{first_state_nonfinite}")
+        )
         summary[label] = {
             "mask_source_unequal": mismatch,
             "reciprocal_nonfinite": nonfinite,
             "guard_cell": report["guard_cell"],
             "entry_fields": report["entry_fields"],
             "geometry_density": geometry,
-            "first_nonfinite_writer": first_geometry_nonfinite,
+            "first_nonfinite_writer": first_writer,
+            "first_slow_nonfinite": first_slow_nonfinite,
+            "first_substep_nonfinite": (
+                None if first_substep is None else {
+                    "field": first_substep[1],
+                    "index": first_substep[2],
+                }),
+            "state_after_barotropic": report["state_after_barotropic"],
         }
     return {
         "format": "nemo-testcase-l4-orca2-round248-classification-v1",
@@ -310,15 +397,16 @@ def classify(reports: dict[str, dict], *, plant: str = "none") -> dict[str, obje
         "summary": summary,
         "predictions": {
             "R248-P1": "REFUTED_RECIPROCALS_FINITE_BOTH_LABELS",
-            "R248-P2": "NAMED_FIRST_GEOMETRY_OR_EOS_NONFINITE_WRITER",
+            "R248-P2": "NAMED_FIRST_EXTERNAL_MODE_NONFINITE_WRITER",
             "R248-P3": "NOT_ACTIVATED_PREREQUISITE_R248-P2",
             "R248-P4": "NOT_ACTIVATED_PREREQUISITE_R248-P3",
             "R248-P5": "CONFIRMED" if plant == "none" else "PLANT",
         },
         "open": (
             "The mask-source hypothesis is refuted; the finite explosive "
-            "entry first becomes non-finite in the frozen geometry/EOS "
-            "bundle before any stage transport or reciprocal consumer."),
+            "entry and frozen geometry/EOS stay finite; the first non-finite "
+            "writer is named from the existing source-ordered external-mode "
+            "substep trace."),
     }
 
 
