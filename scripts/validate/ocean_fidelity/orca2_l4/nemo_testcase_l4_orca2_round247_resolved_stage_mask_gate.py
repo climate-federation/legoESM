@@ -40,6 +40,10 @@ PLANTS = (
     "none", "label-coverage", "direct-closure", "completion", "vmask",
     "zfv", "correction-input",
 )
+HELD_PLANTS = (
+    "none", "label-coverage", "direct-closure", "terminal", "nemo-guard",
+    "boundary-stage", "vmask", "zfv",
+)
 
 
 class GateError(RuntimeError):
@@ -93,6 +97,125 @@ def classify(report: dict[str, object], *, plant: str = "none") -> dict[str, obj
         "R247-P5": "CONFIRMED" if plant == "none" else "PLANT",
     }
     return base
+
+
+def classify_held(report: dict[str, object], *, plant: str = "none") -> dict[str, object]:
+    """Gate the exact-transport / kt=5-stage-1 downstream refusal."""
+
+    require(plant in HELD_PLANTS, f"unknown held plant {plant!r}")
+    report = copy.deepcopy(report)
+    if plant == "label-coverage":
+        report["boundaries"].pop("given_nemo_entry")
+    elif plant == "direct-closure":
+        report["direct"]["independent"]["rows"][0]["pair"][
+            "metric_transport_v"]["complete"]["unequal"] = 1
+    elif plant == "terminal":
+        report["atomic_logs"]["independent"] = report["atomic_logs"][
+            "independent"].replace("PROGRESS round241 independent kt=4", "")
+    elif plant == "nemo-guard":
+        report["boundaries"]["independent"]["nemo_kt5"]["stage1"][
+            "invalid_e3w_count"] = 1
+    elif plant == "boundary-stage":
+        report["boundaries"]["independent"][
+            "first_bad_kt5_completed_boundary"] = "stage2"
+    elif plant == "vmask":
+        report["operands"]["independent"]["operand_rows"]["vmask"][
+            "unequal"] = 1
+    elif plant == "zfv":
+        report["operands"]["independent"]["zFv_signature"]["unequal"] = 1
+
+    for name in ("direct", "atomic_logs", "operands", "boundaries"):
+        require(set(report[name]) == set(LABELS),
+                f"{name}: both claim labels are required")
+    refusal = "raw-mesh e3w_int must contain only finite values > 0"
+    summary = {}
+    for label in LABELS:
+        direct = report["direct"][label]
+        require(direct["status"] == "PASS_R245_V_DEPTH_OPERAND_SPLIT",
+                f"{label}: direct status moved")
+        require(all(
+            value.get("complete", value)["unequal"] == 0
+            for row in direct["rows"] for value in row["pair"].values()
+        ), f"{label}: direct substep pair is non-bit")
+
+        operands = report["operands"][label]
+        require(operands["status"] == "PASS_R232_V_TRANSPORT_OPERAND_SPLIT",
+                f"{label}: operand status moved")
+        require(all(row["unequal"] == 0
+                    for row in operands["operand_rows"].values()),
+                f"{label}: a stage-transport operand is non-bit")
+        require(all(row["unequal"] == 0
+                    for row in operands["correction_input_rows"].values()),
+                f"{label}: a correction input is non-bit")
+        require(operands["zFv_signature"]["unequal"] == 0,
+                f"{label}: completed zFv is non-bit")
+
+        log = report["atomic_logs"][label]
+        require(all(f"PROGRESS round241 {label} kt={kt}" in log
+                    for kt in range(1, 5)),
+                f"{label}: kt=1..4 completion coverage moved")
+        require(f"PROGRESS round241 {label} kt=5" not in log
+                and refusal in log and "STATUS REFUSE none:" in log,
+                f"{label}: kt=5 live-W terminal moved")
+
+        boundary = report["boundaries"][label]
+        require(boundary["status"] == "PASS_R247_LIVE_W_BOUNDARY_LOCATED"
+                and boundary["label"] == label,
+                f"{label}: boundary provenance moved")
+        require(boundary["observer"] == "offline completed-stage reconstruction",
+                f"{label}: boundary observer is not offline")
+        require(all(row["invalid_e3w_count"] == 0
+                    for row in boundary["candidate_kt4"].values()),
+                f"{label}: invalid geometry was already present at kt=4")
+        require(all(row["invalid_e3w_count"] == 0
+                    for section in ("nemo_kt4", "nemo_kt5")
+                    for row in boundary[section].values()),
+                f"{label}: NEMO guard is not clean")
+        require(boundary["candidate_kt5"]["entry"]["invalid_e3w_count"] == 0,
+                f"{label}: kt=5 entry is already invalid")
+        require(boundary["first_bad_kt5_completed_boundary"] == "stage1",
+                f"{label}: first invalid completed stage moved")
+        stage1 = boundary["candidate_kt5"]["stage1"]
+        require(stage1["invalid_e3w_count"] == 476557,
+                f"{label}: invalid live-W census moved")
+        require(stage1["first_invalid_jik"] == [1, 49, 0],
+                f"{label}: first invalid live-W cell moved")
+        require(stage1["field_nonfinite_counts"] == {
+            "S": 430552, "T": 430552, "eta": 26640,
+            "u": 803640, "v": 799200,
+        }, f"{label}: kt=5 stage-1 non-finite census moved")
+        first = stage1["first_invalid"]
+        require(first["ht0_m"] == 729.0
+                and first["raw_e3w0_m"] == 10.00035061113249
+                and not np.isfinite(first["ssh_m"])
+                and not np.isfinite(first["live_e3w_m"]),
+                f"{label}: guard-cell operands moved")
+        summary[label] = {
+            "last_completed_kt": 4,
+            "first_refusing_kt": 5,
+            "first_bad_boundary": "stage1",
+            "first_invalid_jik": [1, 49, 0],
+            "invalid_e3w_count": 476557,
+            "field_nonfinite_counts": stage1["field_nonfinite_counts"],
+            "first_invalid": first,
+        }
+
+    return {
+        "format": "nemo-testcase-l4-orca2-round247-held-v1",
+        "status": "HELD_R247_EXACT_ZFV_KT5_STAGE1_BLOWUP",
+        "summary": summary,
+        "predictions": {
+            "R247-P1": "CONFIRMED_STAGE_MASK_AND_ZFV_EXACT_BOTH_LABELS",
+            "R247-P2": "CONFIRMED_DIRECT_0_0_0_BOTH_LABELS",
+            "R247-P3": "REFUTED_KT5_STAGE1_NONFINITE_BOTH_LABELS",
+            "R247-P4": "NOT_ACTIVATED_PREREQUISITE_R247-P3",
+            "R247-P5": "CONFIRMED" if plant == "none" else "PLANT",
+        },
+        "open": (
+            "The resolved stage transport is exact, but the complete unit "
+            "makes the kt=5 stage-1 state non-finite; walk that stage from "
+            "the finite kt=5 entry before any atomic landing."),
+    }
 
 
 def measure_direct(args: argparse.Namespace) -> dict[str, object]:
@@ -280,7 +403,8 @@ def _load(paths: list[Path]) -> dict[str, dict]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--mode", choices=("direct", "atomic", "operands", "boundary", "classify"),
+        "--mode", choices=("direct", "atomic", "operands", "boundary",
+                           "classify", "classify-held"),
         default="classify")
     parser.add_argument("--deck-root", type=Path)
     parser.add_argument("--frame-root", type=Path)
@@ -292,7 +416,10 @@ def main() -> int:
     parser.add_argument("--direct-in", nargs=2, type=Path)
     parser.add_argument("--atomic-in", nargs=2, type=Path)
     parser.add_argument("--operands-in", nargs=2, type=Path)
-    parser.add_argument("--plant", choices=PLANTS, default="none")
+    parser.add_argument("--boundary-in", nargs=2, type=Path)
+    parser.add_argument("--atomic-log-in", nargs=2, type=Path)
+    parser.add_argument("--plant", choices=tuple(dict.fromkeys(
+        (*PLANTS, *HELD_PLANTS))), default="none")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     try:
@@ -316,7 +443,7 @@ def main() -> int:
                          args.expect_commit)),
                     "boundary measurement arguments are incomplete")
             result = measure_boundary(args)
-        else:
+        elif args.mode == "classify":
             require(all((args.direct_in, args.atomic_in, args.operands_in)),
                     "classification needs all six section reports")
             result = classify({
@@ -325,6 +452,20 @@ def main() -> int:
                 "direct": _load(args.direct_in),
                 "ladders": _load(args.atomic_in),
                 "operands": _load(args.operands_in),
+            }, plant=args.plant)
+        else:
+            require(all((args.direct_in, args.atomic_log_in,
+                         args.operands_in, args.boundary_in)),
+                    "held classification needs all eight section inputs")
+            result = classify_held({
+                "direct": _load(args.direct_in),
+                "atomic_logs": {
+                    label: path.read_text(encoding="utf-8")
+                    for label, path in zip(
+                        LABELS, args.atomic_log_in, strict=True)
+                },
+                "operands": _load(args.operands_in),
+                "boundaries": _load(args.boundary_in),
             }, plant=args.plant)
         require(args.plant == "none", f"{args.plant} plant stayed green")
     except (OSError, KeyError, TypeError, ValueError, GateError,
