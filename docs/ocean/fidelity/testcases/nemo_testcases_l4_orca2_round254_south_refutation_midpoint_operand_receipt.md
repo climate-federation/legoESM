@@ -23,20 +23,24 @@ D114 resolved-mesh route, and both claim labels.
 
 The compiled OMT-4 oracle associates `ua_e`, `va_e`, `hu_e`, `hv_e`,
 `hur_e`, `hvr_e`, and `ssha_e` in one `lbc_lnk` call at
-`ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:730-741`.
+`ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:728-730`.
 The T-pivot implementation writes the northern fold rows at
-`lbcnfd.f90:584-700`; it does not rewrite the southern closed boundary.
+`ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/lbcnfd.f90:584-638`; it does not
+rewrite the southern closed boundary.
 legoESM's private complete-unit image enters its V association at
-`barotropic_latlon_cgrid.py:688-767` and uses the tripolar padding helpers at
-`operators_latlon_cgrid.py:178-208,304-323`.
+`barotropic_latlon_cgrid.py:688-742`.
 
 After each external substep, NEMO rotates the current and two before SSH
-histories at `dynspg_ts.f90:780-792`. At the next substep it evaluates
+histories at
+`ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:791-793`. At the
+next substep it evaluates
 
 `zsshp2_e = za1*sshn_e + za2*sshb_e + za3*sshbb_e`
 
-at `dynspg_ts.f90:489-493`; `ts_bck_interp` supplies the coefficients at
-`dynspg_ts.f90:1496-1531`. legoESM's corresponding literal interpolation is
+at `ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:489-493`;
+`ts_bck_interp` supplies the coefficients at
+`ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:1496-1531`.
+legoESM's corresponding literal interpolation is
 `barotropic_latlon_cgrid.py:2006-2025`.
 
 ## The suspected south-row writer is refuted
