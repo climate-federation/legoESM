@@ -13,7 +13,9 @@ run was launched in this round.
 
 The incoming tip was `402ba0c4b9bcf2bde0c384994bd4c45ae1f834de`.
 Preregistration is commit `037a73248`; ladder and climate-instrument
-implementation is commit `791b2810fe52576734a6c44ecfd73ff1f59acea9`.
+implementation is commit `791b2810fe52576734a6c44ecfd73ff1f59acea9`;
+and the independent-review corrections are commit
+`a028d0c51af2d5383588512c03cd6324dadc3ea4`.
 The admitted stage and month records remain content-pinned by their acquisition
 admissions.  Raw stage frames are 648 by 648 at 6.25 km (43.67 MB each) and 168
 by 168 at 25 km (2.94 MB each); the recorded production bounds supplied to the
@@ -54,15 +56,19 @@ change `1.3234889800848443e-23` m.  Its complete result is
 
 ## Thirty-day honesty ladder
 
-The canonical `round4/month.json` reports all 690 preregistered rows: 339
-AT-BAR and 351 exact-bit DEBT.  The first difference is the day-1 restart at
-kt 432: SSH differs at 22,487 wet cells with maximum absolute residual
+The canonical `round4/month.json` reports all 690 preregistered rows: 249
+AT-BAR and 441 exact-bit DEBT.  The first difference is day-1 entry
+`vtau_before`: NEMO and legoESM have opposite zero signs at 160 wet cells and
+therefore zero numerical residual but different IEEE words.  The same signed-
+zero difference appears in `vtau_before`, `vtau_now`, and restart `vtau_b` on
+all 30 days, accounting for 90 rows.  The first nonzero difference is day-1
+restart SSH at kt 432: 22,487 unequal wet cells and maximum absolute residual
 `9.367506770274758e-17` m.  The first row beyond the separate normalized
 `1e-15` numerical bar is day-7 restart SSH at
 `1.2281842209915794e-15` m.  The largest absolute residual at day 30 is
 `1.6431300764452317e-14` m/s in `un` (normalized residual
-`9.20175294902847e-15`).  The report contains 390 daily-entry rows (129 AT-BAR,
-261 DEBT) and 300 restart rows (210 AT-BAR, 90 DEBT).
+`9.20175294902847e-15`).  The report contains 390 daily-entry rows (69 AT-BAR,
+321 DEBT) and 300 restart rows (180 AT-BAR, 120 DEBT).
 
 For the month plant, all ten fields reconstructed from the admitted day-1
 restart are bit-identical before perturbation.  Advancing the largest-magnitude
@@ -74,24 +80,30 @@ row.
 
 These results refute the preregistered claim that the new deck would be
 bit-identical at every row.  They do not authorize a physics change: the next
-fidelity action is to localise the kt-2 stage-1 transition before considering
-any correction.
+fidelity action is to localise the signed-zero wind path and the independent
+kt-2 stage-1 transition before considering any correction.
 
 ## Climate-comparison instrument and year-1 refusal
 
 The committed streaming instrument assembles overlapping per-rank IOIPSL tiles
-by their T/U/V coordinates and refuses missing or conflicting coverage.  For
-identically sampled windows it computes time-mean SSH, U, V, and speed; an EKE
-map; basin-area-weighted KE and EKE time series; the mean eastward jet-core
-latitude and maximum-eastward-speed profile at every longitude; and the shared
-isotropic KE spectrum.  It writes content-digested arrays, a JSON summary, and
-a common-scale side-by-side figure.
+by their T/U/V coordinates and refuses missing or conflicting coverage.  It
+pins the NEMO executable and resolved deck and checks the legoESM manifest's
+physical namelist.  An explicit start day plus length selects year 1 or days
+366-1095 for the registered years 2-3 window.  For identically sampled windows
+it computes time-mean SSH, U, V, and speed; an EKE map; basin-area-weighted KE
+and EKE time series; the mean eastward jet-core latitude and maximum-eastward-
+speed profile at every longitude; and the shared isotropic KE spectrum.  It
+writes content-digested arrays, a JSON summary with per-metric right-minus-left
+bias, mean absolute difference, RMS difference, and maximum absolute
+difference, and a common-scale side-by-side figure.
 
-Four direct synthetic tests cover a known analytic mean/EKE/KE/jet answer,
-coordinate-halo deduplication, missing and conflicting tile plants, an explicit
-daily-mean-versus-snapshot refusal, and all three output artifact kinds.  The
-year-1 run is registered as **year 1, spin-up**; years 2-3 remain the real
-climate window.
+Seven direct synthetic tests cover a known analytic mean/EKE/KE/jet answer,
+identical-input spectral equality and zero cross-model statistics,
+coordinate-halo deduplication, missing and conflicting tile plants, direct
+later-window selection in both readers, a wrong-deck plant, a shifted NEMO
+clock plant, an explicit daily-mean-versus-snapshot refusal, and all three
+output artifact kinds.  The year-1 run is registered as **year 1, spin-up**;
+years 2-3 remain the real climate window.
 
 No year-1 climate result is reported.  At the measurement point the legoESM
 365-day non-certified GPU run was complete, while the active NEMO run's 32
@@ -118,7 +130,7 @@ transcendental numbers, not certified ladder results.
 ## Tests, preflights, and evidence
 
 The exact current-tip battery and terminal count are archived in
-`round4/direct_tests.log`: **208/208 passed** on CPU with x64 enabled.  It
+`round4/direct_tests.log`: **212/212 passed** on CPU with x64 enabled.  It
 includes the card, mounted ladder, geometry, acquisition-record, GPU-driver,
 and new climate-instrument tests.  `git diff --check` and focused Ruff checks
 pass.
@@ -134,14 +146,23 @@ The evidence root is
 `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgdg_rounds/round4/`.
 `evidence_sha256.txt` pins the structured ladder reports and direct-test log.
 
+Both independent reviews initially returned HOLD.  Their confirmed findings
+were dispositioned before final review: the exact gate now compares raw IEEE
+words and has a signed-zero plant; the month control carries deck/acquisition
+provenance; the climate instrument admits the deck, supports arbitrary
+windows, emits cross-model scalars, and directly tests its clock and spectrum
+controls.  All ladder evidence and the direct battery were regenerated at the
+corrected commit; no pre-fix exact count is retained as evidence.
+
 ## Decision and acquisition boundary
 
 Recommended next round: retain the exact-bit result as fidelity debt, localise
-the kt-2 stage-1 transition without changing physics, add a daily-mean output
-mode to the non-certified GPU driver, and reacquire the legoESM year-1 window
-before running the climate instrument.  The existing snapshot year must not be
-relabelled as a mean.  No immediately valid acquisition command exists until
-that driver mode is implemented, so acquisition is NONE pending this decision.
+both the signed-zero wind path and kt-2 stage-1 transition without changing
+physics, add a daily-mean output mode to the non-certified GPU driver, and
+reacquire the legoESM year-1 window before running the climate instrument.  The
+existing snapshot year must not be relabelled as a mean.  No immediately valid
+acquisition command exists until that driver mode is implemented, so
+acquisition is NONE pending this decision.
 
 ## Oracle citations
 
