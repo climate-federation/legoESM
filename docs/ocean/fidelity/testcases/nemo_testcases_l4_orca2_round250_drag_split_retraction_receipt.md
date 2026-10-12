@@ -90,8 +90,29 @@ measurement arm.
 ## Controls, tests, citations, and review
 
 The round-249 and round-250 focused tests pass 18/18. All seven round-250
-plants exit 2 with `PLANT-FIRED`. The citation gate, full fidelity battery,
-and independent diff review are recorded below after their final runs.
+plants exit 2 with `PLANT-FIRED`. The round receipt and cumulative citation
+gates both pass with zero failures and zero unmapped citations. Shifting the
+new drag-rate citation by two lines exits 1 with `FAIL`, proving the citation
+control fires.
+
+The one mandatory `tests/ocean/fidelity -n 12` invocation reached 99% and
+then stopped reporting with one worker outstanding, the same registered
+worker-hang class as round 249. Before the hang it printed exactly four reds.
+All four reproduced serially with `-p no:xdist` and are the registered
+pre-existing failures: SI3 `A MY_SRC is not verbatim`, the moved GYRE
+certified-year harness stamp, 13 unscoped allow-dirty drivers, and 13
+unstamped report emitters. The isolated result was 4 failed in 7.21 s. No
+round-249 or round-250 test failed.
+
+A separate `codex exec --sandbox read-only` review was attempted. Its
+in-process app-server could not initialise on the read-only filesystem before
+reading the diff. Verdict: **independent review unavailable in-sandbox**.
+
+Two preliminary measurement refusals drove the instrument correction: without
+the private round-249 arm there are zero post-drag owner faces, and an initial
+gate implementation accidentally overwrote the observed field with its
+literal replay. The committed gate keeps those arrays distinct; that
+distinction makes the non-source-exact arm mechanically visible.
 
 ## OPEN
 
