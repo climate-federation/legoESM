@@ -43,7 +43,7 @@ GROWTH = np.float64(10.0)
 PLANTS = (
     "none", "label-coverage", "production-route", "passivity",
     "boundary-order", "finite-coverage", "growth-owner", "fold-sign",
-    "nemo-fold",
+    "nemo-fold", "slow-owner",
 )
 
 
@@ -341,7 +341,8 @@ def _load_by_label(paths: list[Path]) -> dict[str, dict]:
 
 
 def classify(off: dict[str, dict], unit: dict[str, dict],
-             substeps: dict[str, dict], *, plant: str = "none") -> dict[str, object]:
+             substeps: dict[str, dict], slow: dict[str, dict], *,
+             plant: str = "none") -> dict[str, object]:
     require(plant in PLANTS, f"unknown plant {plant!r}")
     off, unit, substeps = copy.deepcopy((off, unit, substeps))
     if plant == "label-coverage":
@@ -362,8 +363,10 @@ def classify(off: dict[str, dict], unit: dict[str, dict],
         unit["independent"]["boundaries"][1]["fields"]["v"]["fold_identity"]["sign"] = 1.0
     elif plant == "nemo-fold":
         unit["independent"]["boundaries"][1]["fields"]["S"]["nemo_fold_identity"]["unequal"] = 1
+    elif plant == "slow-owner":
+        slow["independent"]["rows"]["post_drag_v"]["bit_exact"] = True
 
-    require(set(off) == set(unit) == set(substeps) == set(LABELS),
+    require(set(off) == set(unit) == set(substeps) == set(slow) == set(LABELS),
             "both claim labels are required in every table")
     expected_order = [(kt, stage) for kt in range(1, 5) for stage in range(4)]
     growth = {}
@@ -371,6 +374,7 @@ def classify(off: dict[str, dict], unit: dict[str, dict],
     fold_hits = {}
     kt1_stage1 = {}
     substep_summary = {}
+    slow_summary = {}
     for label in LABELS:
         for report, expected_unit, route in (
             (off[label], False, "production"),
@@ -438,18 +442,39 @@ def classify(off: dict[str, dict], unit: dict[str, dict],
             "first_fold_band": trace["first_fold_band"],
         }
 
+        slow_report = slow[label]
+        require(slow_report["status"] == "PASS_R236_SLOW_V_SPLIT"
+                and all(slow_report["passivity"].values()),
+                f"{label}: slow-forcing replay is not passive/admitted")
+        slow_rows = slow_report["rows"]
+        require(slow_report["owner_support"]["unequal"] == 35,
+                f"{label}: slow-V fold support moved")
+        require(slow_rows["depth_mean_v"]["bit_exact"],
+                f"{label}: depth mean is not the last exact output")
+        require(not slow_rows["post_drag_v"]["bit_exact"],
+                f"{label}: bottom-drag correction did not introduce debt")
+        require(not slow_rows["post_wind_incoming_v"]["bit_exact"]
+                and slow_rows["coriolis_v"]["bit_exact"]
+                and slow_rows["ssvmask"]["bit_exact"],
+                f"{label}: slow-V downstream source order moved")
+        slow_summary[label] = {
+            "last_exact_output": "depth_mean_v",
+            "first_nonbit_output": "post_drag_v",
+            "post_drag": slow_rows["post_drag_v"],
+            "final_slow_v": slow_rows["final_slow_v"],
+        }
+
     require((first_growth["independent"]["kt"],
              first_growth["independent"]["stage"])
             == (first_growth["given_nemo_entry"]["kt"],
                 first_growth["given_nemo_entry"]["stage"]),
             "labels disagree on first growth boundary")
-    association_signature = (
+    kt1_stage1_growth = (
         (first_growth["independent"]["kt"],
          first_growth["independent"]["stage"]) == (1, 1)
-        and all(fold_hits[label] for label in LABELS)
-    )
-    status = ("HELD_R249_FOLD_ASSOCIATION_OWNER_CANDIDATE"
-              if association_signature else "HELD_R249_GROWTH_OWNER_REFUTED")
+        and all(fold_hits[label] for label in LABELS))
+    require(kt1_stage1_growth, "kt=1 stage-1 growth boundary moved")
+    status = "HELD_R249_BAROTROPIC_DRAG_OWNER_NAMED"
     return {
         "format": "nemo-testcase-l4-orca2-round249-classification-v1",
         "status": status,
@@ -460,12 +485,11 @@ def classify(off: dict[str, dict], unit: dict[str, dict],
         "kt1_stage1": kt1_stage1,
         "growth": growth,
         "substeps": substep_summary,
+        "slow_forcing": slow_summary,
         "predictions": {
             "R249-P1": "CONFIRMED",
-            "R249-P2": ("CONFIRMED_KT1_STAGE1" if association_signature
-                         else "REFUTED"),
-            "R249-P3": ("CONFIRMED_OWNER_CANDIDATE" if association_signature
-                         else "REFUTED"),
+            "R249-P2": "REFUTED_TRACERS_EXACT_AT_KT1_STAGE1",
+            "R249-P3": "REFUTED_FIRST_OUTPUT_IS_BAROTROPIC_DRAG",
             "R249-P4": "CONFIRMED_MEASUREMENT_ONLY",
             "R249-P5": "CONFIRMED" if plant == "none" else "PLANT",
         },
@@ -487,6 +511,7 @@ def main() -> int:
     parser.add_argument("--off", nargs=2, type=Path)
     parser.add_argument("--on", nargs=2, type=Path)
     parser.add_argument("--substep", nargs=2, type=Path)
+    parser.add_argument("--slow", nargs=2, type=Path)
     parser.add_argument("--plant", choices=PLANTS, default="none")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
@@ -506,11 +531,12 @@ def main() -> int:
                 args.deck_root, args.record_root, args.twin_a, args.twin_b,
                 args.label, args.expect_commit)
         else:
-            require(all((args.off, args.on, args.substep)),
+            require(all((args.off, args.on, args.substep, args.slow)),
                     "classification inputs are incomplete")
             result = classify(
                 _load_by_label(args.off), _load_by_label(args.on),
-                _load_by_label(args.substep), plant=args.plant)
+                _load_by_label(args.substep), _load_by_label(args.slow),
+                plant=args.plant)
             require(args.plant == "none", f"{args.plant} plant stayed green")
     except (OSError, KeyError, TypeError, ValueError, GateError,
             r228.GateError, r235.GateError, rung0.GateError) as error:

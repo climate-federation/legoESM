@@ -68,16 +68,37 @@ def _substep_report(label):
     }
 
 
+def _slow_report(label):
+    def row(exact):
+        return {
+            "bit_exact": exact, "at_floor": exact, "unequal": 0 if exact else 35,
+            "max_abs": 0.0 if exact else 1.0, "argmax": [147, 0], "scored": 35,
+        }
+    return {
+        "status": "PASS_R236_SLOW_V_SPLIT", "label": label,
+        "passivity": {"T": True, "S": True, "u": True, "v": True},
+        "owner_support": {"unequal": 35},
+        "rows": {
+            "depth_mean_v": row(True), "post_drag_v": row(False),
+            "post_wind_incoming_v": row(False), "coriolis_v": row(True),
+            "ssvmask": row(True), "final_slow_v": row(False),
+        },
+    }
+
+
 def _reports():
     off = {label: _stage_report(label, False) for label in gate.LABELS}
     unit = {label: _stage_report(label, True) for label in gate.LABELS}
     substeps = {label: _substep_report(label) for label in gate.LABELS}
-    return off, unit, substeps
+    slow = {label: _slow_report(label) for label in gate.LABELS}
+    return off, unit, substeps, slow
 
 
-def test_classifier_names_the_first_stage_fold_owner_candidate():
+def test_classifier_names_the_barotropic_drag_output():
     result = gate.classify(*_reports())
-    assert result["status"] == "HELD_R249_FOLD_ASSOCIATION_OWNER_CANDIDATE"
+    assert result["status"] == "HELD_R249_BAROTROPIC_DRAG_OWNER_NAMED"
+    assert all(row["first_nonbit_output"] == "post_drag_v"
+               for row in result["slow_forcing"].values())
     assert all((row["kt"], row["stage"]) == (1, 1)
                for row in result["first_growth"].values())
 
