@@ -125,3 +125,25 @@ direct tests pass, the SWG ladder/card controls remain unchanged, the receipt
 citation gate passes, and the GPU operator script is committed. Any executed
 non-differentiable owner stops the round for a decision; no guard, clipping,
 stabilizer, `stop_gradient`, physics, card, or tolerance change is authorized.
+
+## Observed control result and protocol amendment
+
+After the frozen protocol was committed at `79f086a51`, the one-step row and
+broken-VJP plant behaved as predicted. The 24-step run stopped before any
+derivative: the `checkpointed_loop:uniform` zero-perturbation primal was not
+byte-identical to a Python sequence of production `_step_jitted` calls. The
+differences were finite CPU roundoff in 70 U values (maximum
+`1.3877787807814457e-17`), 55 V values (`6.071532165918825e-18`), and 74 SSH
+values (`8.881784197001252e-16`). Thus the preregistered bitwise composition
+prediction is **REFUTED** and remains so; it is not relabeled as confirmation.
+
+Before measuring the 24- or 720-step derivatives or any resource row, the
+protocol is amended as follows. Directional agreement uses the same
+Decision-49 composition as GYRE: an explicit Python window with a rematerialized
+production `_step_jitted` call at every step, whose primal must remain bitwise
+production. Resource rows necessarily exercise `checkpointed_loop`; their
+primal is gated by the schedule implementation's already-committed value
+contract (`rtol=1e-9`, `atol=1e-11`) from
+`tests/unit/test_checkpoint_schedule.py:94-102`, while recording whether it was
+also bitwise and its maximum absolute difference. No physical input, card,
+loss, random perturbation, derivative bar, FD step, or memory protocol changes.

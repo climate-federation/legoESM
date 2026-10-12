@@ -105,6 +105,23 @@ def test_volume_weighted_mse_ignores_zero_volume_cells():
     assert float(G.volume_weighted_mse(pred, target, volume)) == pytest.approx(3.25)
 
 
+def test_schedule_primal_contract_records_bits_and_refuses_large_drift():
+    exact = G.compare_scheduled_primal(
+        (jnp.asarray([1.0]),), (jnp.asarray([1.0]),))
+    assert exact["within_contract"]
+    assert exact["bitwise"]
+
+    roundoff = G.compare_scheduled_primal(
+        (jnp.asarray([1.0]),), (jnp.asarray([1.0 + 1.0e-12]),))
+    assert roundoff["within_contract"]
+    assert not roundoff["bitwise"]
+
+    drift = G.compare_scheduled_primal(
+        (jnp.asarray([1.0]),), (jnp.asarray([1.0 + 1.0e-6]),))
+    assert not drift["within_contract"]
+    assert not drift["bitwise"]
+
+
 def test_nemo_literal_dissl_guard_preserves_primal_bits_and_zero_vjp():
     """The approved production guard changes only the zero-TKE transpose."""
     values = jnp.asarray(
