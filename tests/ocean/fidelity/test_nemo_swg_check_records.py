@@ -203,3 +203,61 @@ def test_daily_writer_derives_cadence_from_resolved_timestep():
     patch = (TOOLS / "stprk3_daily_entry_record.patch").read_text()
     assert "NINT(rday / rn_Dt)" in patch
     assert "MOD(kstp - nit000, 24)" not in patch
+
+
+def test_makenemo_source_guard_accepts_only_the_shipped_test_case(tmp_path):
+    tests = tmp_path / "tests"
+    (tests / "SWG").mkdir(parents=True)
+    (tests / "demo_cfgs.txt").write_text("SWG OCE SWE\n")
+    deck = TOOLS / "deck.sh"
+
+    def guard(candidate):
+        return subprocess.run(
+            ["bash", "-c",
+             f'. "{deck}"; swg_verify_makenemo_source_case "$1" "$2"',
+             "guard", str(tmp_path), candidate],
+            capture_output=True, text=True)
+
+    assert guard("SWG").returncode == 0
+    refused = guard("SWG_DG")
+    assert refused.returncode == 68
+    assert "-a must name shipped test case SWG" in refused.stderr
+
+
+def test_target_cpp_key_guard_reads_the_created_target(tmp_path):
+    run_name = "SWG_DG_OMIP_L1_P3"
+    cpp = tmp_path / f"cpp_{run_name}.fcm"
+    cpp.write_text("bld::tool::fppkeys key_qco key_vco_3d key_RK3\n")
+    deck = TOOLS / "deck.sh"
+
+    def guard():
+        return subprocess.run(
+            ["bash", "-c",
+             f'. "{deck}"; swg_verify_target_cpp_keys "$1" "$2"',
+             "guard", str(tmp_path), run_name],
+            capture_output=True, text=True)
+
+    assert guard().returncode == 0
+    cpp.write_text("bld::tool::fppkeys key_xios key_qco key_vco_3d key_RK3\n")
+    refused = guard()
+    assert refused.returncode == 70
+    assert str(cpp) in refused.stderr
+
+
+@pytest.mark.parametrize("name", ("run.sh", "run_30d.sh"))
+def test_writer_target_is_created_from_shipped_swg_before_deck_overlay(name):
+    script = (TOOLS / name).read_text()
+    invocation = (
+        './makenemo -a "$MAKENEMO_SOURCE_CASE" -n "$RUN_NAME" '
+        '-m conda-scalarmath del_key key_xios')
+    assert script.count(invocation) == 1
+    assert './makenemo -a "$SOURCE_CASE_NAME"' not in script
+    assert (script.index(invocation)
+            < script.index('swg_verify_target_cpp_keys "$cfg" "$RUN_NAME"')
+            < script.index('cp -r "$SRC_CASE/MY_SRC/." "$cfg/MY_SRC/"')
+            < script.index('patch "$cfg/MY_SRC/stprk3.F90" <"$STEP_PATCH"'))
+
+    # Non-vacuity: the exact Round-1 regression is rejected by this assertion.
+    regressed = script.replace(invocation, invocation.replace(
+        '"$MAKENEMO_SOURCE_CASE"', '"$SOURCE_CASE_NAME"'), 1)
+    assert invocation not in regressed

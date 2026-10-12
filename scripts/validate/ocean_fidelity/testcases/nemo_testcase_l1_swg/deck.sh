@@ -2,6 +2,7 @@
 
 swg_select_deck() {
   local mode=$1 deck=$2 here=$3
+  MAKENEMO_SOURCE_CASE=SWG
   SOURCE_PATCH=$here/usrdef_zgr_domsiz.patch
   SOURCE_PATCH_SHA256=5021a71143943a34943497f40b72e86a43073ab7ff089646fdb3418cb029ba9e
   case "$deck:$mode" in
@@ -34,6 +35,40 @@ swg_select_deck() {
       return 64
       ;;
   esac
+}
+
+swg_verify_makenemo_source_case() {
+  local nemo_root=$1 source_case=$2
+  local registry=$nemo_root/tests/demo_cfgs.txt
+  [[ "$source_case" == SWG ]] || {
+    printf 'REFUSE_MAKENEMO_SOURCE: -a must name shipped test case SWG, not %s\n' \
+      "$source_case" >&2
+    return 68
+  }
+  [[ -d "$nemo_root/tests/SWG" && -f "$registry" ]] || {
+    printf 'REFUSE_MAKENEMO_SOURCE: shipped SWG or demo_cfgs.txt is missing\n' >&2
+    return 68
+  }
+  grep -qE '^SWG[[:space:]]' "$registry" || {
+    printf 'REFUSE_MAKENEMO_SOURCE: SWG is not registered in %s\n' \
+      "$registry" >&2
+    return 68
+  }
+}
+
+swg_verify_target_cpp_keys() {
+  local cfg=$1 run_name=$2
+  local cpp=$cfg/cpp_${run_name}.fcm
+  [[ -f "$cpp" ]] || {
+    printf 'REFUSE_TARGET_KEYS: missing %s\n' "$cpp" >&2
+    return 70
+  }
+  local keys
+  keys=$(sed -E 's/.*fppkeys *//' "$cpp" | xargs)
+  [[ "$keys" == 'key_qco key_vco_3d key_RK3' ]] || {
+    printf 'REFUSE_TARGET_KEYS: found "%s" in %s\n' "$keys" "$cpp" >&2
+    return 70
+  }
 }
 
 swg_namelist_value() {

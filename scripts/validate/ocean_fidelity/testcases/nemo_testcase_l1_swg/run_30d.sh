@@ -34,7 +34,7 @@ done
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 . "$here/deck.sh"
 swg_select_deck month "$deck" "$here"
-readonly SOURCE_CASE_NAME RUN_NAME DECK_PATCH DEFAULT_EVIDENCE SOURCE_PATCH
+readonly MAKENEMO_SOURCE_CASE SOURCE_CASE_NAME RUN_NAME DECK_PATCH DEFAULT_EVIDENCE SOURCE_PATCH
 readonly SOURCE_PATCH_SHA256
 readonly EVIDENCE=${EVIDENCE:-$DEFAULT_EVIDENCE}
 repo_root=$(git -C "$here" rev-parse --show-toplevel 2>/dev/null) || {
@@ -77,6 +77,7 @@ if [[ "$deck" == shipped ]]; then
 fi
 
 dry=$(mktemp -d)
+swg_verify_makenemo_source_case "$NEMO_ROOT" "$MAKENEMO_SOURCE_CASE"
 swg_verify_source_case "$NEMO_ROOT" "$deck" "$dry"
 cp "$STPRK3" "$BASE_DECK/namelist_cfg" "$dry/"
 patch -s --fuzz=0 "$dry/stprk3.F90" <"$STEP_PATCH"
@@ -91,8 +92,8 @@ printf 'PREFLIGHT: deck %s source %s reference sha256 %s; %s steps/day; additive
   "$deck" "$SOURCE_CASE_NAME" "$actual" "$STEPS_PER_DAY" "$COMMIT"
 
 if [[ "$do_run" -ne 1 ]]; then
-  printf 'WOULD_BUILD: makenemo -a %s -n %s -m conda-scalarmath\n' \
-    "$SOURCE_CASE_NAME" "$RUN_NAME"
+  printf 'WOULD_BUILD: makenemo -a %s -n %s -m conda-scalarmath del_key key_xios\n' \
+    "$MAKENEMO_SOURCE_CASE" "$RUN_NAME"
   printf 'WOULD_RUN: reference and instrumented binaries for %s steps; admit %s daily entries and restarts\n' \
     "$((30 * STEPS_PER_DAY))" 30
   printf 'PREFLIGHT_OK\n'
@@ -120,12 +121,9 @@ patch "$EVIDENCE/reference/namelist_cfg" <"$MESH_PATCH"
 )
 
 cd "$NEMO_ROOT"
-if [[ "$deck" == shipped ]]; then
-  ./makenemo -a "$SOURCE_CASE_NAME" -n "$RUN_NAME" -m conda-scalarmath del_key key_xios
-else
-  ./makenemo -a "$SOURCE_CASE_NAME" -n "$RUN_NAME" -m conda-scalarmath
-fi
 cfg=$NEMO_ROOT/tests/$RUN_NAME
+./makenemo -a "$MAKENEMO_SOURCE_CASE" -n "$RUN_NAME" -m conda-scalarmath del_key key_xios
+swg_verify_target_cpp_keys "$cfg" "$RUN_NAME"
 cp -r "$BASE_DECK/." "$cfg/EXP00/"
 cp -r "$SRC_CASE/MY_SRC/." "$cfg/MY_SRC/"
 cp -f "$STPRK3" "$MODULE" "$cfg/MY_SRC/"
@@ -134,6 +132,7 @@ patch "$cfg/EXP00/namelist_cfg" <"$MESH_PATCH"
 patch "$cfg/MY_SRC/stprk3.F90" <"$STEP_PATCH"
 touch "$cfg/MY_SRC/"*.F90
 ./makenemo -n "$RUN_NAME" -m conda-scalarmath
+swg_verify_target_cpp_keys "$cfg" "$RUN_NAME"
 [[ -x "$cfg/BLD/bin/nemo.exe" ]] || {
   printf 'REFUSE_BUILD_BINARY: instrumented executable missing\n' >&2; exit 70; }
 grep -q 'MOD(kstp - nit000, NINT(rday / rn_Dt))' \
