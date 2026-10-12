@@ -89,9 +89,27 @@ construction; no claim is made from an unrun landing gate.
 
 ## Controls, tests, citations, and review
 
-The round-248 focused gate tests pass 6/6. The classifier passes on both
-labelled reports and all five named plants fire. The mandatory fidelity
-battery and citation/review results are recorded in the final amendment below.
+The round-248 focused gate tests pass 6/6. The same six tests passed inside
+the one mandatory `tests/ocean/fidelity -n 12` invocation. The classifier
+passes on both labelled reports and all five named plants fire.
+
+The mandatory battery reached 98% and its process disappeared without a
+pytest summary or the wrapper's exit marker, the established parallel-worker
+resource-failure class. Before disappearing it reported exactly four reds.
+All four reproduced serially with `-p no:xdist` and are the registered
+pre-existing failures: the moved GYRE certified-year harness stamp, SI3
+`A MY_SRC is not verbatim`, 13 unscoped allow-dirty drivers, and 13 unstamped
+report emitters. The isolated run was 4 failed in 15.32 s. No round-248 test
+failed.
+
+The round receipt citation gate passes 3/3 with zero failures and zero
+unmapped citations; the cumulative default receipt passes 274/274 with zero
+failures and zero unmapped citations. Shifting the external-depth citation by
+two lines makes the gate exit 1 with `FAIL`, proving the citation control
+fires. A separate `codex exec --sandbox read-only` review was attempted, but
+the client failed before reading the diff because its in-process app-server
+could not initialise on a read-only filesystem. Verdict: **independent review
+unavailable in-sandbox**.
 
 ## OPEN
 
