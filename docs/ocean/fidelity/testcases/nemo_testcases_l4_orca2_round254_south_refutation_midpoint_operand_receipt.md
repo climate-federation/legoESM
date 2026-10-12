@@ -118,16 +118,28 @@ conditions: SI3 scalar-math `MY_SRC` provenance, the GYRE round-129 certified-
 year harness stamp, the round-35 process-global allow-dirty scoping ratchet,
 and the report-emitter worktree-stamp ratchet. The fifth, the GYRE round-179
 source-layout plant, refused only because the round's receipt and test were
-then uncommitted; it is rerun from the clean committed tree below. The full,
+then uncommitted; from the clean committed tree it passes 1/1. The clean
+isolation log SHA-256 is
+`156fd0ba5d2a31fdce64a6641e9d4a749df7bde69ba0573017016c57028862ba`.
+The full,
 focused, and first isolated log SHA-256 values are
 `1565d5b706a08d0c9b729c787ed1570f79a5a9180b8608b9d83ae2aca325aea7`,
 `1e0f8fc3db2c7e2bf5bc62b7880a7d4a5245f110b46888d468b65d68543f546a`,
 and `aaba6078db14c6c7b9a4217a27ea6115ad263c3be2ea6dafdfd6c307de569022`.
 
-The receipt citation gate, its planted stale-line control, the default-receipt
-unmapped-citation check, the clean-tree round-179 disposition, the required
-read-only review, and retained evidence hashes are reported here after
-completion: **FINAL_GATE_PLACEHOLDER**.
+The receipt citation gate passes all seven extracted citations with no
+failure or unmapped entry. Shifting the compiled `lbc_lnk` citation by two
+lines makes it fail `SYMBOL-NOT-AT-LINE`. The cumulative default receipt also
+passes with 274 citations and no unmapped entry. Their JSON SHA-256 values are
+`c2c352dbc3e67d10ba30d0db75e91afcb837786dae4d9f82b38ce9895885a2fe`,
+`ccb44ebed2b533f3714ba64673b87d23724339c724bff69d536ab80b3f11cb4e`,
+and `35b6eb4a3147fe56b2022815e6ca956dd41d08c6461464a8fcd32e703541dd54`.
+
+The required `codex exec --sandbox read-only` review was attempted. Its
+in-process app-server client could not initialize on the read-only filesystem,
+so **independent review unavailable in-sandbox**. The retained attempt has
+SHA-256
+`eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5`.
 
 The south-classification and midpoint-classification JSON SHA-256 values are
 `da33c9320e592bd49e8a2944d42769298db6af0e75680891fc0713832ef06ee5`
