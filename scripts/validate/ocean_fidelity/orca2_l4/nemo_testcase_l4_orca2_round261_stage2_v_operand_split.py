@@ -29,7 +29,6 @@ from scripts.validate.ocean_fidelity.orca2_l4 import (  # noqa: E402
     nemo_testcase_l4_orca2_round245_v_depth_split as r245,
     nemo_testcase_l4_orca2_round249_fold_growth_gate as r249,
     nemo_testcase_l4_orca2_round260_stage2_transport_split as r260,
-    nemo_testcase_l4_orca2_stage1_transport_gate as stage1_transport,
 )
 from scripts.validate.ocean_fidelity.testcases.nemo_testcase_prognostic_barotropic_state_gate import (  # noqa: E402
     read_bt_pair,
@@ -177,7 +176,7 @@ def measure(
         [jnp.zeros_like(resolved.vmask3[:1]), resolved.vmask3], axis=0)
 
     eta_stage = jnp.asarray(stage1["ssh"])
-    _, expected_e3v_full, _, _, _, expected_r1_hv_full = (
+    _, _, _, _, _, candidate_r1_hv_full = (
         _nemo_ws_qco_stage_faces(
             eta_stage, h_ref, compact_u, compact_v, grid,
             z_coord=z_coord, include_reciprocals=True,
@@ -190,7 +189,7 @@ def measure(
     )(
         candidate_v,
         jnp.asarray(traced.barotropic_targets[3]),
-        expected_r1_hv_full,
+        candidate_r1_hv_full,
         jnp.asarray(traced.barotropic_targets[1]),
         resolved_v,
     ))
@@ -199,29 +198,59 @@ def measure(
         "candidate correction replay moved")
 
     composition_path = record_root / "oracle_rkstage2_operands_kt00000001.bin"
-    static_path = record_root / "oracle_rkstage1_transport_operands_kt00000001.bin"
     advmean_path = record_root / "oracle_bt_advmean_operands_kt00000001.bin"
     bt_path = record_root / "oracle_bt_frames_kt00000001.bin"
     tracer_path = record_root / "oracle_rktracer_operands_kt00000001_s2.bin"
     composition = read_stage2_composition(
         composition_path, expected_dims=(NX, NY, NZ))
-    static = stage1_transport.read_record(static_path)
     advmean = read_advmean(
         advmean_path, expected_dims=(NX, NY), expected_ncycle=65)
     bt = read_bt_pair(bt_path)
     tracer = r260._read_tracer(tracer_path)
 
-    expected_r1_hv = _native_v(expected_r1_hv_full)
-    expected_zvb = nemo_source_round(
-        jnp.asarray(advmean["post_lbc_v"][:, :90])
-        * jnp.asarray(expected_r1_hv)
-        - jnp.asarray(bt["vv_b"][:, :90]))
+    # domqco.f90:213-217 computes r3v at the stage-1 SSH, then
+    # stprk3_stg.f90:168-170 associates that V-point scalar across the fold.
+    # Replaying without the association compares the candidate to itself on
+    # the pivot row and cannot split live e3v from the downstream zvb.
+    raw = z_coord.nemo_een_barotropic
+    require(raw is not None and grid.fold is not None,
+            "ORCA2 raw face geometry or north-fold descriptor is missing")
+    area_t = jnp.asarray(z_coord.nemo_e1e2t, dtype=dtype)
+    area_v = jnp.asarray(raw.e1v * raw.e2v, dtype=dtype)
+    raw_vmask = jnp.asarray(raw.vmask, dtype=dtype)
+    surface_vmask = jnp.max(raw_vmask, axis=-1)
+    raw_hv = jnp.asarray(raw.hv_0, dtype=dtype)
+    r1_hv0 = surface_vmask / (raw_hv + 1.0 - surface_vmask)
+    r1_area_v = jnp.where(area_v > 0.0, 1.0 / area_v, 0.0)
+    eta_native = jnp.asarray(stage1["ssh"], dtype=dtype)
+    north_eta = jnp.concatenate(
+        [eta_native[1:], jnp.zeros_like(eta_native[:1])], axis=0)
+    north_area = jnp.concatenate(
+        [area_t[1:], jnp.zeros_like(area_t[:1])], axis=0)
+    r3v = nemo_source_round(
+        nemo_source_round(
+            nemo_source_round(
+                jnp.float64(0.5) * nemo_source_round(
+                    nemo_source_round(area_t * eta_native)
+                    + nemo_source_round(north_area * north_eta)))
+            * r1_hv0)
+        * r1_area_v)
+    r3v = r3v.at[-1].set(r3v[-2, jnp.asarray(grid.fold.perm_v)])
+    one_plus_r3v = nemo_source_round(1.0 + r3v[..., None] * raw_vmask)
+    expected_e3v = nemo_source_round(
+        jnp.asarray(raw.e3v_0, dtype=dtype) * one_plus_r3v)
+    expected_r1_hv = np.asarray(
+        nemo_source_round(r1_hv0 / (1.0 + r3v))[:, :90], np.float64)
+    expected_zvb = np.asarray(nemo_source_round(
+        nemo_source_round(jnp.asarray(advmean["post_lbc_v"][:, :90])
+                          * jnp.asarray(expected_r1_hv))
+        - jnp.asarray(bt["vv_b"][:, :90])), np.float64)
     expected = {
-        "e1v": np.asarray(static["e1v"], np.float64),
-        "e3v": _native_v(expected_e3v_full),
+        "e1v": np.asarray(raw.e1v[:, :90], np.float64),
+        "e3v": np.asarray(expected_e3v[:, :90, :30], np.float64),
         "vv": _native_t(composition["Kmm_v"])[..., :30],
-        "zvb": np.asarray(expected_zvb, np.float64),
-        "vmask": np.asarray(static["vmask"], np.float64)[..., :30],
+        "zvb": expected_zvb,
+        "vmask": np.asarray(raw.vmask[:, :90, :30], np.float64),
     }
     candidate = {
         "e1v": _native_v(grid.dx_v),
@@ -268,7 +297,7 @@ def measure(
 
     candidate_inputs = {
         "vn_adv": _native_v(traced.barotropic_targets[3]),
-        "r1_hv": expected_r1_hv,
+        "r1_hv": _native_v(candidate_r1_hv_full),
         "vv_b": _native_v(traced.barotropic_targets[1]),
     }
     expected_inputs = {
@@ -302,13 +331,13 @@ def measure(
         "one_bit_control": r249._score(one, np.nextafter(one, np.inf)),
         "records": {
             path.name: _sha256(path)
-            for path in (composition_path, static_path, advmean_path, bt_path,
-                         tracer_path)
+            for path in (composition_path, advmean_path, bt_path, tracer_path)
         },
         "compiled_source": {
             "correction": "ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/stprk3_stg.f90:269-279",
             "transport": "ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/stprk3_stg.f90:282-285",
             "live_geometry": "ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/domqco.f90:207-217",
+            "stage_ratio_fold": "ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/stprk3_stg.f90:168-170",
         },
     }
 
