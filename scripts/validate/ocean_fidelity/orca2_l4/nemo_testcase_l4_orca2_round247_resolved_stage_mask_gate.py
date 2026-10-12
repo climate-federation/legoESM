@@ -119,8 +119,21 @@ def measure_operands(args: argparse.Namespace) -> dict[str, object]:
 def _live_w_row(card, state) -> dict[str, object]:
     """Rebuild the guarded entry geometry from a completed passive state."""
 
-    eta = np.asarray(state.eta.data, np.float64)
-    depth = np.asarray(state.H_bathy.data, np.float64)
+    if isinstance(state, dict):
+        eta = np.asarray(state["ssh"], np.float64)
+        depth = np.asarray(
+            card.recipe.initial_state.H_bathy.data, np.float64)
+        fields = {
+            name: np.asarray(state["ssh" if name == "eta" else name], np.float64)
+            for name in ("T", "S", "u", "v", "eta")
+        }
+    else:
+        eta = np.asarray(state.eta.data, np.float64)
+        depth = np.asarray(state.H_bathy.data, np.float64)
+        fields = {
+            name: np.asarray(getattr(state, name).data, np.float64)
+            for name in ("T", "S", "u", "v", "eta")
+        }
     raw = np.asarray(card.recipe.z_coord.nemo_e3w_0, np.float64)[..., 1:]
     safe_depth = np.where(depth > 0.0, depth, 1.0)
     reciprocal = np.float64(1.0) / safe_depth
@@ -130,10 +143,6 @@ def _live_w_row(card, state) -> dict[str, object]:
     bad = ~(np.isfinite(e3w) & (e3w > 0.0))
     indices = np.argwhere(bad)
     index = tuple(map(int, indices[0])) if indices.size else None
-    fields = {
-        name: np.asarray(getattr(state, name).data, np.float64)
-        for name in ("T", "S", "u", "v", "eta")
-    }
     result: dict[str, object] = {
         "invalid_e3w_count": int(np.count_nonzero(bad)),
         "first_invalid_jik": list(index) if index is not None else None,
