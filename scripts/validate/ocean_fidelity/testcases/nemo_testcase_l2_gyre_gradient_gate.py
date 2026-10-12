@@ -1111,10 +1111,11 @@ def classify_scaling_suite(
     elif plant == "decreasing_endpoint":
         evaluated[1440] = 0.5 * evaluated[720]
     elif plant == "adjacent_ratio_outside_band":
-        # Linear at four windows; the 720-step point makes only the 360-720
+        # Linear at four windows; the 360-step point makes only the 96-360
         # normalized adjacent ratio exceed the preregistered upper bound.
+        # The retained uniform 1440/720 endpoint ratio remains exactly 2.0.
         evaluated = dict(zip(
-            SWG_SCALING_STEPS, (0.24, 0.96, 3.6, 10.81, 14.4)))
+            SWG_SCALING_STEPS, (0.24, 0.96, 5.41, 7.2, 14.4)))
     elif plant is not None:
         raise ValueError(f"unknown scaling plant {plant!r}")
 

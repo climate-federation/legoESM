@@ -72,9 +72,9 @@ preregistered bound.
 The same executable classifier returns **REFUTED**, exit 1, for all four
 plants: constant time; the reviewer's `[1, 100, 1, 1000, 2000]` series; a
 decreasing 1440-step endpoint; and the strictly increasing near-linear series
-`[0.24, 0.96, 3.6, 10.81, 14.4]`, whose 360-720 normalized ratio is
-`1.501389`. The last plant keeps every window increasing, so the adjacent-ratio
-check, not monotonicity, is what fires.
+`[0.24, 0.96, 5.41, 7.2, 14.4]`, whose 96-360 normalized ratio is
+`1.502778`. The last plant keeps every window increasing and keeps the retained
+uniform 1440/720 ratio at `2.0`, so only the new adjacent-ratio check fires.
 
 ## Retained agreement, GPU cost, and composition
 

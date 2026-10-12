@@ -367,14 +367,19 @@ def test_cpu_scaling_suite_gates_frozen_predictions_and_all_plants():
     assert not plants["decreasing_endpoint"]["checks"][
         "strictly_increasing_at_every_window"]
     almost_linear = plants["adjacent_ratio_outside_band"]
-    assert almost_linear["checks"]["strictly_increasing_at_every_window"]
-    assert not almost_linear["checks"][
-        "every_adjacent_ratio_in_preregistered_band"]
+    assert almost_linear["checks"] == {
+        "positive_fitted_seconds_per_step": True,
+        "time_1440_exceeds_time_720": True,
+        "strictly_increasing_at_every_window": True,
+        "every_adjacent_ratio_in_preregistered_band": False,
+        "uniform_1440_to_720_ratio_in_preregistered_band": True,
+    }
     outside = [
         ratio for ratio in almost_linear["adjacent_normalized_ratios"].values()
         if not 0.5 <= ratio <= 1.5
     ]
     assert len(outside) == 1
+    assert almost_linear["ratio_1440_to_720"] == pytest.approx(2.0)
     args = G.parse_args([
         "scaling-suite", "--card", "SWG", "--steps", "1440",
         "--schedule", "uniform", "--expect-commit", "deadbeef",
