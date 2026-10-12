@@ -119,6 +119,23 @@ _OVERFLOW_R56UP3_COMPILED = (
 _OVERFLOW_R62ZDF_COMPILED = (
     NEMO / "tests/OVERFLOW_OMIP_L1_P3_R62ZDF/BLD/ppsrc/nemo")
 FILES = {
+    # --- GRIDLADDER round 1 (G1 survey) BEGIN ---
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynspg_ts.f90': NEMO / "cfgs/ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynspg_ts.f90",
+    'cfgs/ORCA2_OMIP_L4/EXP00/namelist_cfg': NEMO / "cfgs/ORCA2_OMIP_L4/EXP00/namelist_cfg",
+    'cfgs/SHARED/namelist_ref': NEMO / "cfgs/SHARED/namelist_ref",
+    'src/OCE/IOM/restart.F90': NEMO / "src/OCE/IOM/restart.F90",
+    'cfgs/ORCA2_OMIP_L4/cpp_ORCA2_OMIP_L4.fcm': NEMO / "cfgs/ORCA2_OMIP_L4/cpp_ORCA2_OMIP_L4.fcm",
+    'tests/TSUNAMI/MY_SRC/usrdef_istate.F90': NEMO / "tests/TSUNAMI/MY_SRC/usrdef_istate.F90",
+    'tests/TSUNAMI/MY_SRC/usrdef_sbc.F90': NEMO / "tests/TSUNAMI/MY_SRC/usrdef_sbc.F90",
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/istate.f90': NEMO / "cfgs/ORCA2_OMIP_L4/BLD/ppsrc/nemo/istate.f90",
+    'tools/DOMAINcfg/src/domhgr.F90': NEMO / "tools/DOMAINcfg/src/domhgr.F90",
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/domhgr.f90': NEMO / "cfgs/ORCA2_OMIP_L4/BLD/ppsrc/nemo/domhgr.f90",
+    'tools/DOMAINcfg/src/domzgr.F90': NEMO / "tools/DOMAINcfg/src/domzgr.F90",
+    'tools/DOMAINcfg/src/domain.F90': NEMO / "tools/DOMAINcfg/src/domain.F90",
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dommsk.f90': NEMO / "cfgs/ORCA2_OMIP_L4/BLD/ppsrc/nemo/dommsk.f90",
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/domzgr.f90': NEMO / "cfgs/ORCA2_OMIP_L4/BLD/ppsrc/nemo/domzgr.f90",
+    'tripole.py': REPO / "packages/core/legoesm/grids/tripole.py",
+    # --- GRIDLADDER round 1 (G1 survey) END ---
     "stprk3.F90": _OCE / "stprk3.F90",
     "stprk3_stg.F90": _OCE / "stprk3_stg.F90",
     "ORCA2_R96SPG/ocean.output": _ORCA2_R96SPG_OUTPUT,
@@ -1587,6 +1604,108 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- GRIDLADDER round 1 (G1 survey) BEGIN ---
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynspg_ts.f90:1056-1080': [
+        ('zcmax = MAXVAL( zcu(Nis0:Nie0,Njs0:Nje0) )', 1),
+        ("IF( zcmax>0.9_wp )   CALL ctl_stop( 'dynspg_ts ERROR: Maximum Courant number is greater than 0.9 => increase nn_e' )", 1),
+        25],
+    'cfgs/ORCA2_OMIP_L4/EXP00/namelist_cfg:28': ('rn_Dt       = 10800.     !  time step for the dynamics and tracer', 1),
+    'cfgs/SHARED/namelist_ref:72': ('rn_Dt       = 5400.     !  time step for the dynamics and tracer', 1),
+    'cfgs/SHARED/namelist_ref:1099-1101': [
+        ('ln_bt_auto    = .true.     ! Number of sub-step defined from:', 1),
+        ('nn_e         =  30         ! =F : the number of sub-step in rn_Dt seconds', 1),
+        3],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/restart.f90:395-400': [
+        ('ELSE                                  !* no wet and dry', 1),
+        ('CALL usr_def_istate_ssh( tmask, ssh(:,:,Kbb) )', 2),
+        6],
+    'src/OCE/IOM/restart.F90:457-461': [
+        ('IF( ln_read_cfg ) THEN                 ! read configuration : ssh is set to 0', 1),
+        ('CALL usr_def_istate_ssh( tmask, ssh(:,:,Kbb) )', 2),
+        5],
+    'cfgs/ORCA2_OMIP_L4/cpp_ORCA2_OMIP_L4.fcm:1': ('bld::tool::fppkeys   key_si3   key_qco key_vco_1d3d key_RK3', 1),
+    'cfgs/ORCA2_OMIP_L4/EXP00/namelist_cfg:365-366': [
+        ('nn_bt_flt     = 3          ! Time filtering with dissipative Forward Backward', 1),
+        ('rn_bt_alpha   = 0.09       ! Dissipative Forward Backward parameter', 1),
+        2],
+    'tests/TSUNAMI/MY_SRC/usrdef_istate.F90:65-68': [
+        ('pts(:,:,:,jp_tem) = 20._wp', 1),
+        ('pv( :,:,:       ) =  0._wp', 1),
+        4],
+    'tests/TSUNAMI/MY_SRC/usrdef_istate.F90:94-102': [
+        ('zdist(ji,jj) = SQRT( glamt(ji,jj)**2 + gphit(ji,jj)**2 )', 1),
+        ('END_2D', 2),
+        9],
+    'tests/TSUNAMI/MY_SRC/usrdef_sbc.F90:60-68': [
+        ('utau(:,:) = 0._wp', 1),
+        ('qsr (:,:) = 0._wp', 1),
+        9],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynadv.f90:185': ('IF( ln_dynadv_OFF  ) THEN   ;   ioptio = ioptio + 1   ;   n_dynadv = np_LIN_dyn   ;   ENDIF', 1),
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traadv.f90:626': ('IF( ln_traadv_OFF ) THEN   ;   ioptio = ioptio + 1   ;   nadv = np_NO_adv   ;   ENDIF', 1),
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/istate.f90:129-133': [
+        ('IF( .NOT. ln_tsd_init .AND. .NOT. ln_uvd_init ) THEN', 1),
+        ('CALL usr_def_istate( zgdept, tmask, ts(:,:,:,:,Kbb), uu(:,:,:,Kbb), vv(:,:,:,Kbb) )', 1),
+        5],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcmod.f90:442': ('CASE( jp_usr     )   ;   CALL usrdef_sbc_oce( kt, Kbb )                        ! user defined formulation', 1),
+    'tools/DOMAINcfg/src/domhgr.F90:484-502': [
+        ("CALL iom_get( inum, jpdom_global, 'glamt', glamt, cd_type = 'T', psgn = 1._wp )", 1),
+        ("CALL iom_get( inum, jpdom_global, 'e2f'  , e2f , cd_type = 'F', psgn = 1._wp, kfill = jpfillcopy )", 1),
+        19],
+    'tools/DOMAINcfg/src/domhgr.F90:383-384': [
+        ('ff_f(:,:) = 2. * omega * SIN( rad * gphif(:,:) )', 1),
+        ('ff_t(:,:) = 2. * omega * SIN( rad * gphit(:,:) )     !    -        -       - at t-point', 1),
+        2],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/domhgr.f90:233-237': [
+        ("IF(  iom_varid( inum, 'ff_f', ldstop = .FALSE. ) > 0  .AND.  &", 1),
+        ("CALL iom_get( inum, jpdom_global, 'ff_t', pff_t, cd_type = 'T', psgn = 1._wp, kfill = jpfillcopy )", 1),
+        5],
+    'tools/DOMAINcfg/src/domzgr.F90:425-437': [
+        ('IF( ppkth == 0._wp ) THEN            !  uniform vertical grid', 1),
+        ('e3t_1d  (jk) =  za1', 1),
+        13],
+    'tools/DOMAINcfg/src/domzgr.F90:961-984': [
+        ('SUBROUTINE zgr_zco', 1),
+        ('END SUBROUTINE zgr_zco', 1),
+        24],
+    'tools/DOMAINcfg/src/domzgr.F90:625-629': [
+        ('IF( ln_zco )   THEN                          ! zco : read level bathymetry', 1),
+        ('mbathy(:,:) = INT( bathy(:,:) )', 1),
+        5],
+    'tools/DOMAINcfg/src/domzgr.F90:633-652': [
+        ('IF( cp_cfg == "orca" .AND. jp_cfg == 2 ) THEN    ! ORCA R2 configuration', 1),
+        ('END DO', 22),
+        20],
+    'tools/DOMAINcfg/src/domzgr.F90:728-733': [
+        ('IF( rn_hmin < 0._wp ) THEN    ;   ik = - INT( rn_hmin )                                      ! from a nb of level', 1),
+        ('ELSE WHERE ( risfdep == 0._wp );   bathy(:,:) = MAX(  zhmin , bathy(:,:)  )   ! min=zhmin over the oceans', 1),
+        6],
+    'tools/DOMAINcfg/src/domain.F90:417': ("CALL iom_rstput( 0, 0, inum, 'jperio', REAL( jperio, wp), ktype = jp_i4 )", 1),
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/domain.f90:595-604': [
+        ("IF( iatt == -999 .AND. catt == 'UNKNOWN' .AND. iom_varid( inum, 'jperio', ldstop = .FALSE. ) > 0 ) THEN", 1),
+        ('ENDIF', 32),
+        10],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dommsk.f90:289-291': [
+        ("IF( iom_varid( inum, 'strait_shlat', ldstop = .FALSE. ) > 0 ) THEN", 1),
+        ("CALL iom_get( inum, jpdom_global, 'strait_shlat', zstrshlat, cd_type = 'F', psgn = 1._wp, pval = -1._wp )", 1),
+        3],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/domzgr.f90:179-188': [
+        ('ELSEIF( lk_vco_1d3d ) THEN       !--  z-partial cells  --!   use 3D t-level e3', 1),
+        ("CALL iom_get( inum, jpdom_global, 'e3f_0'  , e3f_3d, cd_type = 'F', psgn = 1._wp, kfill = jpfillcopy )", 1),
+        10],
+    'tripole.py:453': ('def create_tripole_grid(', 1),
+    'nemo_testcase_recipe.py:1290': ('def _orca2_masks(bottom_level: np.ndarray, strait_shlat: np.ndarray):', 1),
+    'nemo_testcase_recipe.py:1271': ('def _orca2_depth_ladder(e3t_1d: np.ndarray, e3w_1d: np.ndarray):', 1),
+    'vertical.py:281': ('def nemo_fe3mask_from_tmask(tmask, *, grid=None):', 1),
+    'vertical.py:883': ('class NemoEENBarotropicOperands(NamedTuple):', 1),
+    'vertical.py:673': ('def nemo_qco_resolved_mesh_operands(', 1),
+    'ocean_model_latlon_cgrid.py:4415': ('_nemo_filter_alpha = config.barotropic.nemo_barotropic_filter_alpha', 1),
+    'nemo_testcase_recipe.py:2025': ('def build_orca2g1_flat_card(deck_root: str | Path) -> NEMOTestcaseCard:', 1),
+    'nemo_testcase_recipe.py:1937': ('def read_orca2g1_deck(deck_root: str | Path) -> ORCA2G1Deck:', 1),
+    'nemo_testcase_recipe.py:1974': ('def orca2g1_initial_ssh(glamt_deg, gphit_deg, surface_tmask) -> np.ndarray:', 1),
+    'nemo_testcase_recipe.py:2216': ('def validate_orca2g1_flat_card(card: NEMOTestcaseCard, deck_root: str | Path) -> None:', 1),
+    'vertical.py:1085': ('allow_single_level: bool = False,', 1),
+    'nemo_testcase_recipe.py:2088': ('allow_single_level=True,               # jpk = 2: one wet level', 1),
+    # --- GRIDLADDER round 1 (G1 survey) END ---
     # --- ORCA2 round 253: kt=8 midpoint-SSH failure boundary -------
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:489-493': [
         ('Extrapolate Sea Level at step jit+0.5', 1),

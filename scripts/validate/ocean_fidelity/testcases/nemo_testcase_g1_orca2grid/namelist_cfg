@@ -1,0 +1,261 @@
+!!>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+!! NEMO/OCE  ORCA2G1_OMIP_L1  -- grid ladder rung G1 (DECISION 117)
+!!
+!! The TSUNAMI program (uniform T/S, ssh bump, no forcing, advection /
+!! lateral mixing / drag OFF, split-explicit free surface, EEN, constant
+!! vertical mixing) on ORCA2's horizontal grid: T-pivot north fold,
+!! cyclic east-west, ORCA2's coast, FLAT 100 m bottom, ONE wet level.
+!!
+!! EVERY scientific switch is stated here; nothing scientific is left to
+!! namelist_ref.  "ORCA2" = cfgs/ORCA2_OMIP_L4/EXP00/namelist_cfg,
+!! "TSUNAMI" = tests/TSUNAMI/EXPREF/namelist_cfg.
+!!>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+!-----------------------------------------------------------------------
+&namrun        !   parameters of the run
+!-----------------------------------------------------------------------
+   nn_no       =       0
+   cn_exp      = "ORCA2G1"
+   nn_it000    =       1
+   nn_itend    =     100
+   nn_date0    =  010101
+   nn_time0    =       0
+   nn_leapy    =       0
+   ln_rstart   = .false.
+   ln_1st_euler = .false.
+   nn_istate   =       0
+   ln_rst_list = .true.    !  restarts at nn_stocklist; nn_itend and every entry are multiples of nn_fsbc
+   nn_stock    =     100
+   nn_stocklist = 10,20,30,40,50,60,70,80,90,100
+   nn_write    =     100
+   ln_mskland  = .false.
+   ln_cfmeta   = .false.
+   ln_clobber  = .true.
+   nn_chunksz  =       0
+   ln_xios_read = .false.
+   nn_wxios    =       0
+   ln_top      = .false.   !  no passive tracers (key_top is not compiled)
+/
+!-----------------------------------------------------------------------
+&namdom        !   time and space domain
+!-----------------------------------------------------------------------
+   rn_Dt       =   5400.   !  operator pick (D117); ORCA2's RK3 deck runs 10800.
+   rn_atfp     =      0.1  !  unused under key_RK3
+   ln_c1d      = .false.
+   ln_meshmask = .true.    !  geometry receipt
+   ln_shuman   = .false.
+/
+!-----------------------------------------------------------------------
+&namcfg        !   parameters of the configuration
+!-----------------------------------------------------------------------
+   ln_read_cfg = .true.            !  the DOMAINcfg-produced file
+      cn_domcfg = "domain_cfg"
+      ln_closea    = .false.       !  ORCA2
+   ln_write_cfg = .false.
+/
+!-----------------------------------------------------------------------
+&namtile       !   parameters of the tiling
+!-----------------------------------------------------------------------
+   ln_tile = .false.
+/
+!-----------------------------------------------------------------------
+&namtsd        !    Temperature & Salinity Data
+!-----------------------------------------------------------------------
+   ln_tsd_init = .false.   !  uniform T/S from MY_SRC/usrdef_istate.F90
+   ln_tsd_dmp  = .false.
+/
+!-----------------------------------------------------------------------
+&namwad        !   Wetting and Drying
+!-----------------------------------------------------------------------
+   ln_wd_dl    = .false.
+/
+!-----------------------------------------------------------------------
+&namc1d        !   1D configuration options
+!-----------------------------------------------------------------------
+   ln_uvd_init = .false.
+/
+!-----------------------------------------------------------------------
+&namsbc        !   Surface Boundary Condition manager
+!-----------------------------------------------------------------------
+   nn_fsbc     = 2         !  ORCA2
+   ln_usr      = .true.    !  zero fluxes from MY_SRC/usrdef_sbc.F90 (TSUNAMI)
+   ln_flx      = .false.
+   ln_blk      = .false.
+   ln_abl      = .false.
+   ln_cpl      = .false.
+   ln_mixcpl   = .false.
+   nn_components = 0
+   nn_ice      = 0         !  no sea ice (key_si3 is not compiled)
+   ln_ice_embd = .false.
+   ln_traqsr   = .false.
+   ln_dm2dc    = .false.
+   ln_ssr      = .false.
+   nn_fwb      = 0
+   ln_rnf      = .false.
+   ln_apr_dyn  = .false.
+   ln_wave     = .false.
+   nn_lsm      = 0
+/
+!-----------------------------------------------------------------------
+&namberg       !   iceberg parameters
+!-----------------------------------------------------------------------
+   ln_icebergs = .false.
+/
+!-----------------------------------------------------------------------
+&namisf        !   ice shelf
+!-----------------------------------------------------------------------
+   ln_isf      = .false.
+/
+!-----------------------------------------------------------------------
+&namlbc        !   lateral momentum boundary condition
+!-----------------------------------------------------------------------
+   rn_shlat    =    2.     !  ORCA2 (no slip); TSUNAMI's 0. has no coast to act on
+   ln_vorlat   = .false.
+/
+!-----------------------------------------------------------------------
+&namdrg        !   top/bottom drag coefficient
+!-----------------------------------------------------------------------
+   ln_drg_OFF  = .true.    !  TSUNAMI
+   ln_lin      = .false.
+   ln_non_lin  = .false.
+   ln_loglayer = .false.
+/
+!-----------------------------------------------------------------------
+&nambbc        !   bottom temperature boundary condition
+!-----------------------------------------------------------------------
+   ln_trabbc   = .false.
+/
+!-----------------------------------------------------------------------
+&nambbl        !   bottom boundary layer scheme
+!-----------------------------------------------------------------------
+   ln_trabbl   = .false.
+/
+!-----------------------------------------------------------------------
+&nameos        !   ocean Equation Of State
+!-----------------------------------------------------------------------
+   ln_teos10   = .false.
+   ln_eos80    = .true.    !  ORCA2 (TSUNAMI runs ln_seos)
+   ln_seos     = .false.
+/
+!-----------------------------------------------------------------------
+&namtra_adv    !   advection scheme for tracer
+!-----------------------------------------------------------------------
+   ln_traadv_OFF = .true.  !  TSUNAMI
+   ln_traadv_cen = .false.
+   ln_traadv_fct = .false.
+   ln_traadv_mus = .false.
+   ln_traadv_ubs = .false.
+   ln_traadv_qck = .false.
+/
+!-----------------------------------------------------------------------
+&namtra_ldf    !   lateral diffusion scheme for tracers
+!-----------------------------------------------------------------------
+   ln_traldf_OFF   = .true.   !  TSUNAMI
+   ln_traldf_lap   = .false.
+   ln_traldf_blp   = .false.
+   ln_traldf_iso   = .false.
+   ln_traldf_triad = .false.
+   ln_traldf_msc   = .false.
+/
+!-----------------------------------------------------------------------
+&namtra_mle    !   mixed layer eddy parametrisation
+!-----------------------------------------------------------------------
+   ln_mle      = .false.
+/
+!-----------------------------------------------------------------------
+&namtra_eiv    !   eddy induced velocity param.
+!-----------------------------------------------------------------------
+   ln_ldfeiv   = .false.
+/
+!-----------------------------------------------------------------------
+&namtra_dmp    !   tracer: T & S newtonian damping
+!-----------------------------------------------------------------------
+   ln_tradmp   = .false.
+/
+!-----------------------------------------------------------------------
+&namdyn_adv    !   formulation of the momentum advection
+!-----------------------------------------------------------------------
+   ln_dynadv_OFF  = .true.    !  TSUNAMI
+   ln_dynadv_vec  = .false.
+   ln_dynadv_cen2 = .false.
+   ln_dynadv_up3  = .false.
+/
+!-----------------------------------------------------------------------
+&namdyn_vor    !   Vorticity / Coriolis scheme
+!-----------------------------------------------------------------------
+   ln_dynvor_ene = .false.
+   ln_dynvor_ens = .false.
+   ln_dynvor_mix = .false.
+   ln_dynvor_enT = .false.
+   ln_dynvor_een = .true.     !  ORCA2 and TSUNAMI
+   ln_dynvor_msk = .false.
+   nn_e3f_typ    = 0
+/
+!-----------------------------------------------------------------------
+&namdyn_hpg    !   Hydrostatic pressure gradient option
+!-----------------------------------------------------------------------
+   ln_hpg_zco  = .false.
+   ln_hpg_sco  = .true.       !  ORCA2 and TSUNAMI
+   ln_hpg_isf  = .false.
+   ln_hpg_djc  = .false.
+   ln_hpg_prj  = .false.
+/
+!-----------------------------------------------------------------------
+&namdyn_spg    !   surface pressure gradient
+!-----------------------------------------------------------------------
+   ln_dynspg_exp = .false.
+   ln_dynspg_ts  = .true.     !  ORCA2 and TSUNAMI
+      ln_bt_fw      = .true.
+      nn_bt_flt     = 3          !  ORCA2
+      rn_bt_alpha   = 0.09       !  ORCA2
+      ln_bt_auto    = .false.    !  nn_e stated, not resolved from the mesh
+         rn_bt_cmax   =  0.8        !  unused (ln_bt_auto = F)
+         nn_e         =  65         !  the value ORCA2's ln_bt_auto resolves
+/
+!-----------------------------------------------------------------------
+&namdyn_ldf    !   lateral diffusion on momentum
+!-----------------------------------------------------------------------
+   ln_dynldf_OFF = .true.     !  TSUNAMI
+   ln_dynldf_lap = .false.
+   ln_dynldf_blp = .false.
+/
+!-----------------------------------------------------------------------
+&namzdf        !   vertical physics manager
+!-----------------------------------------------------------------------
+   ln_zad_Aimp = .false.
+   ln_zdfcst   = .true.       !  TSUNAMI
+   ln_zdfric   = .false.
+   ln_zdftke   = .false.
+   ln_zdfgls   = .false.
+   ln_zdfosm   = .false.
+   ln_zdfevd   = .false.
+   ln_zdfnpc   = .false.
+   ln_zdfmfc   = .false.
+   ln_zdfddm   = .false.
+   ln_zdfiwm   = .false.
+   ln_zdfswm   = .false.
+   rn_avm0     =   1.2e-4     !  ORCA2 and TSUNAMI (namelist_ref value)
+   rn_avt0     =   1.2e-5     !  ORCA2 and TSUNAMI (namelist_ref value)
+   nn_avb      =    0
+   nn_havtb    =    0
+/
+!-----------------------------------------------------------------------
+&namtrd        !   trend diagnostics
+!-----------------------------------------------------------------------
+   ln_glo_trd  = .false.
+/
+!-----------------------------------------------------------------------
+&namsto        !   Stochastic parametrization of EOS
+!-----------------------------------------------------------------------
+   ln_sto_eos  = .false.
+/
+!-----------------------------------------------------------------------
+&nammpp        !   Massively Parallel Processing
+!-----------------------------------------------------------------------
+   nn_hls      =   2          !  ORCA2 (namelist_ref value)
+/
+!-----------------------------------------------------------------------
+&namctl        !   Control prints
+!-----------------------------------------------------------------------
+   ln_timing   = .false.
+   ln_diacfl   = .false.
+/
