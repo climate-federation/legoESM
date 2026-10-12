@@ -1592,10 +1592,10 @@ CITATION_MAP = {
         ('Ue_rhs(ji,jj) = SUM( e3u_3d', 1),
         ('Ve_rhs(ji,jj) =  Ve_rhs(ji,jj) + r1_rho0', 1),
         33],
-    'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:1461-1463': [
-        ('DO jj = ntsj-( 0), ntej+(  0 )', 1),
+    'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:1462-1463': [
+        ('pu_RHSi(ji,jj) = pu_RHSi(ji,jj) + (r1_hu_0', 1),
         ('pv_RHSi(ji,jj) = pv_RHSi(ji,jj) + (r1_hv_0', 1),
-        3],
+        2],
     # --- ORCA2 round 250: literal drag replay retracts round 249 -----
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/zdfdrg.f90:224-249': [
         ('REAL(wp), DIMENSION(Nis0-(2):Nie0+(2),Njs0-(2):Nje0+(2)), INTENT(inout) ::   pCdU', 1),
@@ -6496,7 +6496,7 @@ CITATION_MAP = {
         ('_ws_v_live_mask, _grid, z_coord=_zc)[:2])', 1), 100],
     'ocean_model_latlon_cgrid.py:6479-6520': [
         ('if _sfx is not None:', 1),
-        ('F_slow_v + _wind_increment_v) * state.v_mask.data', 1), 42],
+        ('F_slow_v + _wind_increment_v) * _slow_surface_v_mask', 1), 42],
     # --- round 186: admitted pre-day-180 process stream and qsr promotion ---
     'GYRE_OMIP_L2_P3_SM_R185PREPROC/BLD/ppsrc/nemo/stprk3_stg.f90:818-830': [
         'lr123_write = lwp .AND. .NOT.ln_tile .AND. kstg == 3 .AND.',

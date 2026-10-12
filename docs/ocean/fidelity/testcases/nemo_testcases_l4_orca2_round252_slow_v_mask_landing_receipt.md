@@ -17,7 +17,7 @@ NEMO first forms the reference-thickness depth mean, calls the bottom-drag
 correction, and adds wind in
 `ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/stp2d.f90:198-230`.  The compiled
 drag routine adds the V correction without a surface-mask multiply in
-`ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:1461-1463`.  The
+`ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:1462-1463`.  The
 record is the admitted OMT-4 round-222 pair; both ranks and both twins carry
 exact defined bytes.
 
