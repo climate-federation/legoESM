@@ -27,9 +27,9 @@ In the compiled OMT-4 source, NEMO first forms the half-step SSH as
 `zsshp2_e = za1*sshn_e + za2*sshb_e + za3*sshbb_e` at
 `ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:489-493`.
 `ts_bck_interp` supplies the startup and AB3-AM4 coefficients in the same
-compiled file at `dynspg_ts.f90:1496-1531`. The downstream continuity write
-is `dynspg_ts.f90:546-558`, and the external velocity/depth update follows at
-`dynspg_ts.f90:655-718`. The external result is installed into the RK3 stage
+compiled file at `:1496-1531`. The downstream continuity write is
+`:546-558`, and the external velocity/depth update follows at `:655-718`.
+The external result is installed into the RK3 stage
 at
 `ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/stprk3_stg.f90:138-178`.
 
