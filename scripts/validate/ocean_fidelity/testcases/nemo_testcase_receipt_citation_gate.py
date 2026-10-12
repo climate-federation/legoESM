@@ -1625,6 +1625,19 @@ CITATION_MAP = {
         ('sshbb_e(:,:) = sshb_e(:,:)', 1),
         ('sshn_e (:,:) = ssha_e(:,:)', 1),
         3],
+    # --- ORCA2 round 256: completed-stage fold association ----------
+    'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/stprk3_stg.f90:779-802': [
+        ('! Set boundary conditions', 1),
+        ('ENDIF', 6),
+        24],
+    'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/lbcnfd.f90:639-683': [
+        ("CASE ( 'U' )                               ! U-point", 1),
+        ('END DO   ;   END DO', 2),
+        45],
+    'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/lbcnfd.f90:684-721': [
+        ("CASE ( 'V' )                               ! V-point", 1),
+        ('END DO   ;   END DO', 1),
+        38],
     # --- ORCA2 round 253: kt=8 midpoint-SSH failure boundary -------
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:489-493': [
         ('Extrapolate Sea Level at step jit+0.5', 1),
