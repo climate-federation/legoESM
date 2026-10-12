@@ -87,6 +87,7 @@ _OVERFLOW_R62ZDF_COMPILED = (
     NEMO / "tests/OVERFLOW_OMIP_L1_P3_R62ZDF/BLD/ppsrc/nemo")
 _SWG_COMPILED = NEMO / "tests/SWG_OMIP_L1/BLD/ppsrc/nemo"
 _SWG_P3_COMPILED = NEMO / "tests/SWG_OMIP_L1_P3/BLD/ppsrc/nemo"
+_SWG_P3D_COMPILED = NEMO / "tests/SWG_OMIP_L1_P3D/BLD/ppsrc/nemo"
 FILES = {
     "stprk3.F90": _OCE / "stprk3.F90",
     "SWG_OMIP_L1/BLD/ppsrc/nemo/usrdef_nam.f90": (
@@ -153,6 +154,12 @@ FILES = {
         _SWG_P3_COMPILED / "dynldf.f90"),
     "SWG_OMIP_L1_P3/BLD/ppsrc/nemo/sbcmod.f90": (
         _SWG_P3_COMPILED / "sbcmod.f90"),
+    "SWG_OMIP_L1_P3D/BLD/ppsrc/nemo/stprk3.f90": (
+        _SWG_P3D_COMPILED / "stprk3.f90"),
+    "SWG_OMIP_L1_P3D/BLD/ppsrc/nemo/usrdef_istate.f90": (
+        _SWG_P3D_COMPILED / "usrdef_istate.f90"),
+    "SWG_OMIP_L1_P3D/BLD/ppsrc/nemo/sbcmod.f90": (
+        _SWG_P3D_COMPILED / "sbcmod.f90"),
     # The frozen round-3 preregistration used these shortened names.  Pin
     # them to the admitted P3 build rather than silently resolving another
     # same-basename source tree.
@@ -6356,6 +6363,28 @@ CITATION_MAP = {
         ("CALL lbc_lnk( 'stp_RK3'", 5),
         ("Nbb = Naa", 1),
         7],
+    # --- SWG round 7: admitted daily P3D boundaries ---
+    'SWG_OMIP_L1_P3D/BLD/ppsrc/nemo/usrdef_istate.f90:70-72,96': [
+        'pu  (:,:,:)   = 0._wp',
+        'pts (:,:,:,:) = 0._wp',
+        'pssh(:,:)   = 0._wp',
+        4],
+    'SWG_OMIP_L1_P3D/BLD/ppsrc/nemo/stprk3.f90:146-161': [
+        'IF( MOD(kstp - nit000, 24) == 0 ) THEN',
+        'CALL swg_close( kstp, 1 )',
+        16],
+    'SWG_OMIP_L1_P3D/BLD/ppsrc/nemo/stprk3.f90:324-340': [
+        ("CALL lbc_lnk( 'stp_RK3'", 5),
+        'IF( lrst_oce   )   CALL rst_write',
+        17],
+    'SWG_OMIP_L1_P3D/BLD/ppsrc/nemo/sbcmod.f90:590-603': [
+        'IF( lrst_oce .AND. lk_SWE ) THEN',
+        "CALL iom_rstput( kt, nitrst, numrow, 'sfx_b'",
+        14],
+    'SWG_OMIP_L1_P3D/BLD/ppsrc/nemo/stprk3.f90:141-340': [
+        'rDt   = rn_Dt / 3._wp',
+        'IF( lrst_oce   )   CALL rst_write',
+        200],
     'sbcmod.f90:553-560': [
         "calculate utau and vtau on U,V-points",
         ("vmask(ji,jj,1) ) * MAX( tmask(ji,jj,1), tmask(ji,jj+1,1) )", 2),

@@ -12,6 +12,7 @@ _P = (Path(__file__).resolve().parents[3] / "scripts/validate/ocean_fidelity/"
 _S = importlib.util.spec_from_file_location("swg_ladder", _P)
 lad = importlib.util.module_from_spec(_S); _S.loader.exec_module(lad)
 ROOT = lad.DEFAULT_ROOT
+MONTH_ROOT = lad.DEFAULT_MONTH_ROOT
 
 
 @pytest.mark.skipif(not ROOT.is_dir(), reason="SWG probe not mounted")
@@ -166,3 +167,40 @@ def test_numerical_debt_makes_the_ladder_gate_nonzero():
     gated = lad._gate_rows(debt)
     assert gated["first_kt_over_bar"] == 1
     assert lad._exit_code(gated) == 1
+
+
+def test_month_reader_refuses_absent_admission(tmp_path):
+    with pytest.raises(Exception, match="missing month admission"):
+        lad._month_admission(tmp_path)
+
+
+@pytest.mark.skipif(not MONTH_ROOT.is_dir(),
+                    reason="admitted SWG month record not mounted")
+def test_independent_thirty_day_rung_scores_every_daily_record():
+    out = lad.month(MONTH_ROOT, allow_dirty=True)
+    assert out["record_counts"] == {"stage_entries": 30, "restarts": 30}
+    assert len(out["per_kt"]) == 30
+    assert all(len(day["rows"]) == 23 for day in out["per_kt"])
+    assert sum(len(day["rows"]) for day in out["per_kt"]) == 690
+    assert out["first_day_over_bar"] is None
+    assert out["first_kt_over_bar"] is None
+    assert out["all_at_bar"] and out["all_bit_identical"]
+    assert all(row["max_abs"] == 0.0
+               for day in out["per_kt"] for row in day["rows"])
+
+
+@pytest.mark.skipif(not MONTH_ROOT.is_dir(),
+                    reason="admitted SWG month record not mounted")
+def test_month_recorded_nonzero_input_one_ulp_plant_leaves_bar():
+    out = lad.month_control(MONTH_ROOT, allow_dirty=True)
+    assert all(row["bit_identical"] for row in out["per_kt"][0]["rows"])
+    assert len(out["controls"]) == 1
+    row = out["controls"][0]
+    assert row["status"] == "DEBT"
+    assert row["n_unequal"] > 0
+    assert row["input_before"] != 0.0
+    assert row["input_after"] == np.nextafter(
+        row["input_before"], np.float64(np.inf))
+    assert row["input_ulp_delta"] == 1
+    assert row["input_matches_admitted_boundary"] is True
+    assert lad._exit_code(out) == 1

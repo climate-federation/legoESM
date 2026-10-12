@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""SWG kt=1..10 ladder: restart after-states now, stage entries when acquired."""
+"""SWG bit-exact ladder: ten-step stages and the admitted thirty-day rung."""
 from __future__ import annotations
 
 import argparse
@@ -20,6 +20,11 @@ DEFAULT_ROOT = Path(
 DEFAULT_STAGE_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swg_rounds/"
     "round1/oracle_swg_r1/run")
+DEFAULT_MONTH_ROOT = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swg_rounds/"
+    "round6/oracle_swg_r6_30d")
+MONTH_RECORD_KTS = tuple(range(1, 698, 24))
+MONTH_RESTART_KTS = tuple(range(24, 721, 24))
 RESTART_FIELDS = (
     "sshn", "un", "vn", "uu_n", "vv_n", "utau_b", "vtau_b",
     "emp_b", "qns_b", "sfx_b",
@@ -42,14 +47,17 @@ def _stage_checker():
     return mod
 
 
-def read_restarts(root: Path) -> dict[int, dict[str, np.ndarray]]:
-    """Read the ten restart AFTER states, refusing omissions or hidden casts."""
+def read_restarts(
+        root: Path,
+        kts: tuple[int, ...] = tuple(range(1, 11)),
+) -> dict[int, dict[str, np.ndarray]]:
+    """Read requested restart AFTER states, refusing omissions or casts."""
     import netCDF4
     files = sorted(root.glob("SWG_????????_restart.nc"))
-    expected = [root / f"SWG_{kt:08d}_restart.nc" for kt in range(1, 11)]
+    expected = [root / f"SWG_{kt:08d}_restart.nc" for kt in kts]
     require(files == expected, f"restart sequence is {[p.name for p in files]}")
     out = {}
-    for kt, path in enumerate(files, 1):
+    for kt, path in zip(kts, files, strict=True):
         with netCDF4.Dataset(path) as ds:
             ds.set_auto_mask(False)
             file_kt = int(np.asarray(ds["kt"][:]).item())
@@ -73,12 +81,16 @@ def read_restarts(root: Path) -> dict[int, dict[str, np.ndarray]]:
     return out
 
 
-def read_stage_entries(root: Path) -> dict[tuple[int, int], dict[str, np.ndarray]]:
+def read_stage_entries(
+        root: Path,
+        record_kts: tuple[int, ...] = tuple(range(1, 11)),
+        stages: tuple[int, ...] = (1, 2, 3),
+) -> dict[tuple[int, int], dict[str, np.ndarray]]:
     """Read all acquired stage entries through the admission parser."""
     cr = _stage_checker()
     out = {}
-    for kt in range(1, 11):
-        for stage in (1, 2, 3):
+    for kt in record_kts:
+        for stage in stages:
             path = root / f"oracle_swgstage_kt{kt:08d}_s{stage}.bin"
             require(path.is_file(), f"missing {path}")
             head, groups = cr.parse(path)
@@ -147,6 +159,9 @@ def _gate_rows(out: dict) -> dict:
     out["first_kt_over_bar"] = next(
         (step["kt"] for step in out.get("per_kt", ())
          if any(row["status"] == "DEBT" for row in step["rows"])), None)
+    out["first_day_over_bar"] = next(
+        (step["day"] for step in out.get("per_kt", ()) if "day" in step
+         and any(row["status"] == "DEBT" for row in step["rows"])), None)
     return out
 
 
@@ -207,8 +222,8 @@ def self_check(root: Path, *, plant: bool = False, allow_dirty: bool = False) ->
     })
 
 
-def independent(root: Path, *, allow_dirty: bool = False) -> dict:
-    """Run the independently initialized, production ``step()`` ladder."""
+def _swg_production_case(label: str):
+    """Build the one independently forced production case used by all rungs."""
     import jax
     from legoesm.core.precision import PrecisionPolicy, set_policy
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
@@ -216,16 +231,13 @@ def independent(root: Path, *, allow_dirty: bool = False) -> dict:
         SWG_NAMELIST, build_swg_card, swg_horizontal_coordinates,
         validate_nemo_testcase_card_for_execution)
     from legoesm.ocean.state import OceanSurfaceForcing
-    from legoesm.ocean.fidelity.provenance import allow_dirty_stamps, git_sha
-    allow_dirty_stamps(allow_dirty)
-    sha = git_sha(allow_dirty=allow_dirty)
+
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
     require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
-    require(jax.default_backend() == "cpu", "ladder must run on CPU")
+    require(jax.default_backend() == "cpu", f"{label} must run on CPU")
     card = build_swg_card()
-    masks = _card_masks(card)
     validate_nemo_testcase_card_for_execution(card)
-    records = read_restarts(root)
+    masks = _card_masks(card)
     model = LatLonCGridOceanModel(card.recipe.grid, card.recipe.z_coord,
                                   card.recipe.model_config)
     src = swg_horizontal_coordinates()
@@ -238,6 +250,184 @@ def independent(root: Path, *, allow_dirty: bool = False) -> dict:
     forcing = OceanSurfaceForcing(
         tau_i_native=jax.numpy.asarray(tau_u, dtype=jax.numpy.float64),
         tau_j_native=jax.numpy.asarray(tau_v, dtype=jax.numpy.float64))
+    return card, masks, model, forcing
+
+
+def _month_admission(root: Path) -> Path:
+    """Reproduce the saved passive-record admission before scoring the month."""
+    admission_path = root / "swg_round6_30d_admission.json"
+    instrumented = root / "instrumented"
+    reference = root / "reference"
+    require(admission_path.is_file(), f"missing month admission {admission_path}")
+    saved = json.loads(admission_path.read_text())
+    live = _stage_checker().check(
+        instrumented, reference, record_kts=MONTH_RECORD_KTS, stages=(1,),
+        restart_kts=MONTH_RESTART_KTS)
+    require(live == saved, "live month admission differs from its saved verdict")
+    require(saved["legoesm_git_sha"]
+            == "011ba6c48c2243467097af35a66a041cdee3f565",
+            "month acquisition commit is not the admitted round-6 tip")
+    return instrumented
+
+
+def _stage_candidate(state, forcing, card) -> dict[str, np.ndarray]:
+    """Reconstruct the production entry represented by a public whole-step state."""
+    from legoesm.ocean.dynamics.swe_rk3 import _entry_from_state
+
+    now = (forcing.tau_i_native, forcing.tau_j_native)
+    before = (
+        now[0] if state.tau_x_prev is None else state.tau_x_prev,
+        now[1] if state.tau_y_prev is None else state.tau_y_prev,
+    )
+    entry = _entry_from_state(
+        state, before, now, card.recipe.grid, card.recipe.z_coord,
+        card.recipe.model_config)
+    return {name: np.asarray(value) for name, value in entry._asdict().items()}
+
+
+def _restart_candidate(state) -> dict[str, np.ndarray]:
+    """Map the public SWG state to the ten admitted restart arrays."""
+    eta = np.asarray(state.eta.data)
+    require(state.tau_x_prev is not None and state.tau_y_prev is not None,
+            "restart boundary lacks the before stress")
+    zero = np.zeros_like(eta)
+    return {
+        "sshn": eta,
+        "un": np.asarray(state.u.data)[:, 1:, 0],
+        "vn": np.asarray(state.v.data)[1:, :, 0],
+        "uu_n": np.asarray(state.uu_b.data)[:, 1:],
+        "vv_n": np.asarray(state.vv_b.data)[1:, :],
+        "utau_b": np.asarray(state.tau_x_prev),
+        "vtau_b": np.asarray(state.tau_y_prev),
+        "emp_b": zero,
+        "qns_b": zero,
+        "sfx_b": zero,
+    }
+
+
+def month(root: Path, *, allow_dirty: bool = False) -> dict:
+    """Run 720 independent production steps and score both daily record kinds."""
+    from legoesm.ocean.fidelity.provenance import allow_dirty_stamps, git_sha
+
+    allow_dirty_stamps(allow_dirty)
+    sha = git_sha(allow_dirty=allow_dirty)
+    instrumented = _month_admission(root)
+    entries = read_stage_entries(
+        instrumented, record_kts=MONTH_RECORD_KTS, stages=(1,))
+    restarts = read_restarts(instrumented, kts=MONTH_RESTART_KTS)
+    card, masks, model, forcing = _swg_production_case("month ladder")
+    state = card.recipe.initial_state
+    per_day = []
+    for day, (entry_kt, restart_kt) in enumerate(
+            zip(MONTH_RECORD_KTS, MONTH_RESTART_KTS, strict=True), 1):
+        candidate_entry = _stage_candidate(state, forcing, card)
+        require(all(value.dtype == np.dtype("float64")
+                    for value in candidate_entry.values()),
+                "month stage candidate is not fp64")
+        rows = [
+            _row(f"month.day{day:02d}.entry.kt{entry_kt}.{name}",
+                 entries[entry_kt, 1][name], value,
+                 _field_mask(name, masks))
+            for name, value in candidate_entry.items()
+        ]
+        for _ in range(24):
+            state = model.step(state, card.dt_s, surface_forcing=forcing)
+        candidate_restart = _restart_candidate(state)
+        require(all(value.dtype == np.dtype("float64")
+                    for value in candidate_restart.values()),
+                "month restart candidate is not fp64")
+        rows.extend(
+            _row(f"month.day{day:02d}.restart.kt{restart_kt}.{name}",
+                 restarts[restart_kt][name], value,
+                 _field_mask(name, masks))
+            for name, value in candidate_restart.items()
+        )
+        per_day.append({"day": day, "kt": restart_kt, "rows": rows})
+    return _gate_rows({
+        "label": "INDEPENDENT-THIRTY-DAY",
+        "legoesm_git_sha": sha,
+        "oracle_acquisition_git_sha": (
+            "011ba6c48c2243467097af35a66a041cdee3f565"),
+        "bar": BAR,
+        "record_counts": {"stage_entries": len(entries),
+                          "restarts": len(restarts)},
+        "per_kt": per_day,
+    })
+
+
+def month_control(root: Path, *, allow_dirty: bool = False) -> dict:
+    """Prove one ULP at an exact daily U input changes production output."""
+    import jax.numpy as jnp
+    from legoesm.ocean.fidelity.provenance import allow_dirty_stamps, git_sha
+
+    allow_dirty_stamps(allow_dirty)
+    sha = git_sha(allow_dirty=allow_dirty)
+    instrumented = _month_admission(root)
+    restarts = read_restarts(instrumented, kts=MONTH_RESTART_KTS)
+    card, masks, model, forcing = _swg_production_case("month control")
+    state = card.recipe.initial_state
+    for _ in range(24):
+        state = model.step(state, card.dt_s, surface_forcing=forcing)
+    clean = _restart_candidate(state)
+    clean_rows = [
+        _row(f"month_control.day01.clean.{name}", restarts[24][name], value,
+             _field_mask(name, masks))
+        for name, value in clean.items()
+    ]
+    require(all(row["bit_identical"] for row in clean_rows),
+            "month control input is not the admitted day-one boundary")
+
+    native_u = np.asarray(state.u.data)[:, 1:, 0]
+    wet_nonzero = np.argwhere(masks["U"] & (native_u != 0.0))
+    require(wet_nonzero.size > 0,
+            "admitted day-one U field has no nonzero wet value")
+    at = tuple(wet_nonzero[np.argmin(
+        np.abs(native_u[tuple(wet_nonzero.T)]))])
+    original = np.float64(native_u[at])
+    planted = np.nextafter(original, np.float64(np.inf))
+    require(original != 0.0 and planted != original,
+            "month nextafter plant is not one binding ULP")
+    planted_u = state.u.data.at[at[0], at[1] + 1, 0].set(
+        jnp.asarray(planted, dtype=state.u.data.dtype))
+    moved_state = state._replace(u=state.u.replace(data=planted_u))
+    baseline = model.step(state, card.dt_s, surface_forcing=forcing)
+    moved = model.step(moved_state, card.dt_s, surface_forcing=forcing)
+    output_rows = [
+        _row("month_control.output.ssh", baseline.eta.data, moved.eta.data,
+             masks["T"]),
+        _row("month_control.output.u", baseline.u.data[:, 1:, 0],
+             moved.u.data[:, 1:, 0], masks["U"]),
+        _row("month_control.output.v", baseline.v.data[1:, :, 0],
+             moved.v.data[1:, :, 0], masks["V"]),
+    ]
+    changed = next((row for row in output_rows if not row["bit_identical"]), None)
+    require(changed is not None,
+            "one-ULP daily input plant did not change a production output")
+    changed.update({
+        "input_field": "u",
+        "input_cell": [int(at[0]), int(at[1])],
+        "input_before": float(original),
+        "input_after": float(planted),
+        "input_ulp_delta": 1,
+        "input_matches_admitted_boundary": True,
+    })
+    return _gate_rows({
+        "label": "INDEPENDENT-THIRTY-DAY-CONTROL",
+        "legoesm_git_sha": sha,
+        "bar": BAR,
+        "plant": "ulp",
+        "controls": [changed],
+        "per_kt": [{"day": 1, "kt": 24, "rows": clean_rows}],
+    })
+
+
+def independent(root: Path, *, allow_dirty: bool = False) -> dict:
+    """Run the independently initialized, production ``step()`` ladder."""
+    from legoesm.ocean.fidelity.provenance import allow_dirty_stamps, git_sha
+    allow_dirty_stamps(allow_dirty)
+    sha = git_sha(allow_dirty=allow_dirty)
+    card, masks, model, forcing = _swg_production_case("ladder")
+    records = read_restarts(root)
     state = card.recipe.initial_state
     per_kt = []
     for kt in range(1, 11):
@@ -260,36 +450,14 @@ def independent(root: Path, *, allow_dirty: bool = False) -> dict:
 
 def carried_state_audit(stage_root: Path, *, allow_dirty: bool = False) -> dict:
     """Compare the fifth production step and rebuilt sixth-step boundary."""
-    import jax
-    from legoesm.core.precision import PrecisionPolicy, set_policy
-    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
     from legoesm.ocean.dynamics.swe_rk3 import _entry_from_state
-    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
-        SWG_NAMELIST, build_swg_card, swg_horizontal_coordinates,
-        validate_nemo_testcase_card_for_execution)
     from legoesm.ocean.fidelity.provenance import allow_dirty_stamps, git_sha
-    from legoesm.ocean.state import OceanSurfaceForcing
 
     allow_dirty_stamps(allow_dirty)
     sha = git_sha(allow_dirty=allow_dirty)
-    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
-    require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
-    require(jax.default_backend() == "cpu", "carry audit must run on CPU")
-    card = build_swg_card()
-    validate_nemo_testcase_card_for_execution(card)
-    masks = _card_masks(card)
+    card, masks, model, forcing = _swg_production_case("carry audit")
     entries = read_stage_entries(stage_root)
     target = entries[6, 1]
-    model = LatLonCGridOceanModel(card.recipe.grid, card.recipe.z_coord,
-                                  card.recipe.model_config)
-    src = swg_horizontal_coordinates()
-    tau_u = (-np.float64(SWG_NAMELIST.rn_tau_pa)
-             * np.cos(np.float64(np.pi) * src["gphit"]
-                      / np.float64(SWG_NAMELIST.rn_domsiz_m)))
-    tau_v = np.zeros_like(tau_u)
-    forcing = OceanSurfaceForcing(
-        tau_i_native=jax.numpy.asarray(tau_u, dtype=jax.numpy.float64),
-        tau_j_native=jax.numpy.asarray(tau_v, dtype=jax.numpy.float64))
 
     initial = card.recipe.initial_state
     state = initial
@@ -538,10 +706,11 @@ def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--arm", choices=(
         "self-check", "independent", "stage-entry-read", "ens-stage1",
-        "stages-given", "stages-chained", "carried-state"),
+        "stages-given", "stages-chained", "carried-state", "month"),
                    required=True)
     p.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     p.add_argument("--stage-root", type=Path, default=DEFAULT_STAGE_ROOT)
+    p.add_argument("--month-root", type=Path, default=DEFAULT_MONTH_ROOT)
     p.add_argument("--plant", nargs="?", const="ulp", choices=("ulp",))
     p.add_argument("--allow-dirty", action="store_true")
     p.add_argument("--json", type=Path)
@@ -555,6 +724,10 @@ def main(argv=None) -> int:
         elif a.arm == "carried-state":
             out = carried_state_audit(
                 a.stage_root, allow_dirty=a.allow_dirty)
+        elif a.arm == "month":
+            out = (month_control(a.month_root, allow_dirty=a.allow_dirty)
+                   if a.plant else
+                   month(a.month_root, allow_dirty=a.allow_dirty))
         elif a.arm == "stage-entry-read":
             entries = read_stage_entries(a.stage_root)
             out = {"label": "STAGE-ENTRY-READ", "records": len(entries),
