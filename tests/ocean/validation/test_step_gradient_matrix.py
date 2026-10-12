@@ -20,8 +20,9 @@ float32 these gates measure precision floors instead of correctness
 The certified ``gyre_nemo_card`` row is deliberately separate from the
 small-grid variants: it starts from the card's day-0 state, enters every step
 through production ``_step_jitted``, and gates one step in an isolated child.
-The six-step campaign row stays visibly skipped until its isolated explicit
-forward transform completes inside the registered CPU budget.
+The six-step CPU row stays visibly skipped because its isolated explicit
+reverse aborted after 3837 seconds with XLA:CPU's LLVM section-memory failure;
+the campaign protocol forbids another multi-step CPU reverse attempt.
 Its four-field normalized objective and per-step composition reuse the GYRE
 gradient twin at ``origin/feat/gyre-gradient-twin-2`` commit ``901cfe0d8``.
 
@@ -228,9 +229,10 @@ def _variants():
 def test_step_gradient_health(name, tmp_path):
     if name == "gyre_nemo_card_6step":
         pytest.skip(
-            "six-step CPU GYRE row: explicit per-step reverse compiled, but "
-            "the isolated forward transform produced no JSON within the "
-            "registered 65-minute attempt; tracked in round 7 OPEN")
+            "six-step CPU GYRE row: isolated per-step composition aborted "
+            "after 3837 s with execution_engine.cc:54 LLVM compilation "
+            "error: Cannot allocate memory / Unable to allocate section "
+            "memory; protocol moves multi-step rows to GPU")
     if name == "gyre_nemo_card_1step":
         row = _measure_gyre_one_step_in_subprocess(
             tmp_path / "gyre_nemo_card_1step.json")
@@ -246,6 +248,15 @@ def test_step_gradient_health(name, tmp_path):
         assert row["backend"] == "cpu"
         assert "transcendentals='libm'" in row["precision_policy"]
         assert row["production_entry"] == "LatLonCGridOceanModel._step_jitted"
+        assert row["step_transform_compile_footprint"] == {
+            "whole_window_transform_jitted": False,
+            "distinct_state_pytree_specializations": 1,
+            "cold_program_invocations": 1,
+            "warm_program_invocations": 0,
+            "vjp_step_invocations": 1,
+            "jvp_step_invocations": 1,
+            "dynamic_model_step_argument": True,
+        }
         return
     config, opts = _variants()[name]
     model, state = _build(
