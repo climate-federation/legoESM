@@ -160,6 +160,14 @@ FILES = {
         _SWG_P3D_COMPILED / "usrdef_istate.f90"),
     "SWG_OMIP_L1_P3D/BLD/ppsrc/nemo/sbcmod.f90": (
         _SWG_P3D_COMPILED / "sbcmod.f90"),
+    "SWG_OMIP_L1_P3D/BLD/ppsrc/nemo/domain.f90": (
+        _SWG_P3D_COMPILED / "domain.f90"),
+    "SWG_OMIP_L1_P3D/BLD/ppsrc/nemo/nemogcm.f90": (
+        _SWG_P3D_COMPILED / "nemogcm.f90"),
+    "SWG_OMIP_L1_P3D/BLD/ppsrc/nemo/restart.f90": (
+        _SWG_P3D_COMPILED / "restart.f90"),
+    "SWG_OMIP_L1_P3D/BLD/ppsrc/nemo/diawri.f90": (
+        _SWG_P3D_COMPILED / "diawri.f90"),
     # The frozen round-3 preregistration used these shortened names.  Pin
     # them to the admitted P3 build rather than silently resolving another
     # same-basename source tree.
@@ -6385,6 +6393,41 @@ CITATION_MAP = {
         'rDt   = rn_Dt / 3._wp',
         'IF( lrst_oce   )   CALL rst_write',
         200],
+    'SWG_OMIP_L1_P3D/BLD/ppsrc/nemo/domain.f90:282-287': [
+        'NAMELIST/namrun/',
+        'NAMELIST/namdom/ rn_Dt',
+        6],
+    'SWG_OMIP_L1_P3D/BLD/ppsrc/nemo/domain.f90:302-303': [
+        'READ(numnam_ref(MAX(INDEX(numnam_ref,"&namdom ")',
+        'READ(numnam_cfg(MAX(INDEX(numnam_cfg,"&namdom ")',
+        2],
+    'SWG_OMIP_L1_P3D/BLD/ppsrc/nemo/domain.f90:332-333': [
+        'READ(numnam_ref(MAX(INDEX(numnam_ref,"&namrun ")',
+        'READ(numnam_cfg(MAX(INDEX(numnam_cfg,"&namrun ")',
+        2],
+    'SWG_OMIP_L1_P3D/BLD/ppsrc/nemo/domain.f90:374-377': [
+        'cexper = cn_exp',
+        'nitend = nn_itend',
+        4],
+    'SWG_OMIP_L1_P3D/BLD/ppsrc/nemo/nemogcm.f90:147-160': [
+        'istp = nit000',
+        'DO WHILE( istp <= nitend .AND. nstop == 0 )',
+        'istp = istp + 1',
+        14],
+    'SWG_OMIP_L1_P3D/BLD/ppsrc/nemo/restart.f90:103-129': [
+        'IF( kt == nit000 ) THEN',
+        'ELSEIF  (MOD( kt - 1, nn_stock ) == 0 ) THEN',
+        'IF( kt == nitrst - 1 .OR. nn_stock == 1',
+        27],
+    'SWG_OMIP_L1_P3D/BLD/ppsrc/nemo/diawri.f90:146-160': [
+        'IF( nn_write == -1 )   RETURN',
+        'zout = REAL( nn_write, wp ) * rn_Dt',
+        15],
+    'SWG_OMIP_L1_P3D/BLD/ppsrc/nemo/stprk3.f90:141-142,215-216,271-272': [
+        ('rDt   = rn_Dt / 3._wp', 1),
+        ('rDt   = rn_Dt / 2._wp', 1),
+        ('rDt   = rn_Dt', 3),
+        6],
     'sbcmod.f90:553-560': [
         "calculate utau and vtau on U,V-points",
         ("vmask(ji,jj,1) ) * MAX( tmask(ji,jj,1), tmask(ji,jj+1,1) )", 2),

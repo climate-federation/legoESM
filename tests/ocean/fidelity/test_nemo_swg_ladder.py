@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 from pathlib import Path
 
 import numpy as np
@@ -172,6 +173,19 @@ def test_numerical_debt_makes_the_ladder_gate_nonzero():
 def test_month_reader_refuses_absent_admission(tmp_path):
     with pytest.raises(Exception, match="missing month admission"):
         lad._month_admission(tmp_path)
+
+
+def test_content_pin_refuses_one_flipped_record_byte(tmp_path):
+    record = tmp_path / "oracle_swgstage_kt00000001_s1.bin"
+    original = b"admitted-stage-record"
+    record.write_bytes(original)
+    expected = hashlib.sha256(original).hexdigest()
+    lad._require_sha256(record, expected)
+    planted = bytearray(original)
+    planted[-1] ^= 1
+    record.write_bytes(planted)
+    with pytest.raises(Exception, match="content SHA-256 mismatch"):
+        lad._require_sha256(record, expected)
 
 
 @pytest.mark.skipif(not MONTH_ROOT.is_dir(),

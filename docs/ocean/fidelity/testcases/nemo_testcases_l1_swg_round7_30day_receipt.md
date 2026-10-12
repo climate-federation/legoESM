@@ -104,6 +104,42 @@ the control exits 1 as `DEBT`. Unchanged output **REFUTES** the replacement too.
 
 Independent review run by the operator.
 
+## Review findings and fixes
+
+The operator's independent review at tip `11dd296bf` reproduced every
+numerical row and control, then returned this verdict verbatim:
+
+> DO NOT SHIP — The month oracle is not immutably admitted, so its exactness
+> claim can drift without the gate firing.
+
+Both instrument findings are fixed without changing model arithmetic or the
+frozen measurement protocol:
+
+1. The ladder now enforces the saved month-admission SHA-256 before use.  That
+   pinned admission owns all 30 stage-record hashes.  It also enforces content
+   hashes for all 30 instrumented and 30 reference restart files and all eight
+   passive T/U/V/W output files.  The ten-step ladder likewise enforces the
+   round-1 admission SHA-256 and its 30 stage hashes, plus direct pins for all
+   ten restart records.  A direct plant flips one byte of a record and the pin
+   refuses it.
+2. The 30-day deck values are now tied to the compiled consumers.  The engine
+   declares `nn_itend`, `nn_stock`, `nn_write`, and `rn_Dt` in the compiled
+   namelists at
+   `SWG_OMIP_L1_P3D/BLD/ppsrc/nemo/domain.f90:282-287`, reads `rn_Dt` at
+   `SWG_OMIP_L1_P3D/BLD/ppsrc/nemo/domain.f90:302-303`, and reads the run
+   controls at `SWG_OMIP_L1_P3D/BLD/ppsrc/nemo/domain.f90:332-333`.  It copies
+   `nn_itend=720` into the executed limit at
+   `SWG_OMIP_L1_P3D/BLD/ppsrc/nemo/domain.f90:374-377` and executes that limit
+   at `SWG_OMIP_L1_P3D/BLD/ppsrc/nemo/nemogcm.f90:147-160`.  With the shipped
+   `rn_Dt=3600`, the three RK stages consume one third, one half, and the full
+   step at
+   `SWG_OMIP_L1_P3D/BLD/ppsrc/nemo/stprk3.f90:141-142,215-216,271-272`.
+   With list scheduling disabled on the stated card, `nn_stock=24` drives the
+   daily restart schedule at
+   `SWG_OMIP_L1_P3D/BLD/ppsrc/nemo/restart.f90:103-129`; `nn_write=24` is the
+   matching diagnostic interval consumed at
+   `SWG_OMIP_L1_P3D/BLD/ppsrc/nemo/diawri.f90:146-160`.
+
 ## Measurement
 
 Preregistration commit: `7a982cfbcf58190763ba0a0f6d76d985aad782ee`.

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import sys
@@ -25,6 +26,72 @@ DEFAULT_MONTH_ROOT = Path(
     "round6/oracle_swg_r6_30d")
 MONTH_RECORD_KTS = tuple(range(1, 698, 24))
 MONTH_RESTART_KTS = tuple(range(24, 721, 24))
+TEN_STEP_ADMISSION_SHA256 = (
+    "cdf8afc272c962635564110111b10386b79d8afdc2373fdf0df3c5860dbd3937")
+MONTH_ADMISSION_SHA256 = (
+    "94db6dfea297fe828c55dc6c26fa78702cbbf9df399aa8f6793d252f33efae8e")
+TEN_STEP_RESTART_SHA256 = dict(zip(range(1, 11), (
+    "bdadad749f29e868a1910cac7e0d98458cd0f40300d60d92c9bda0e992d8fd37",
+    "122be763d83d2ec800038b84ac4db5d86b6a66dfd3970a3eae9a902141a69346",
+    "d4341ef17879fe61045ac99e47f535b8002a02ac75c9b856837f5ab2ceac7634",
+    "093c6eb7475e8874018c16af644247c29c03e4c7d1d7c844b603efa776cfff72",
+    "008e49e294db2a32f14fbee87f00beb7e6be47f0f7877d1b06aea62dc211cfb4",
+    "7f067d0f720b70b687c66d59f51ee6bd62450105e4380acf77a024ef754e8921",
+    "c49ca7d7f9d6df89862e3a984d630c312bae405742bac8fe5bb88104164c6c25",
+    "27f4fe2ea827fcf0ff28546f558b2628eb3c8604e8c1f3744bbaed26edb07419",
+    "a7f51a31a7bf95f004c9bda18e12668428b14e28d2910aedebc58f73b64dc8c0",
+    "bf6b1bbbc0ccd70bcedc6daf80458b2ee9f0f1566d5ef1bdcdf19aa0bc21fb8e",
+), strict=True))
+MONTH_RESTART_SHA256 = dict(zip(MONTH_RESTART_KTS, (
+    "4ff9482e27e6e95783f1b1d9d2a6de1b8d2cffc8066dbfd32b5598d191526a89",
+    "0755328132ee122110b9d249f6e4cfc860bafaa342750aae19521c4cad3aa9ea",
+    "bbc00865241a25057e810a1d8e5832798dc6986cb9b0b88f1d6c6845f78be208",
+    "3987f42de0379166c4fd2af0c5968f98a6867e1664fca76aaea0fe6d19c68527",
+    "2a88db60696c3c5c79516846296bb22272eff4ddaee558a935f327bf5d43c2f6",
+    "6b62e347425619d477ea182d54fc1f73ce8c85ff8ecec649362c7fc5be95d511",
+    "1898d8126ef54df6abdf734da8038b541cb33fef1d1bafb6e20839ba9ad4ccba",
+    "28bc61309a18e2b68edb13be29648db8cc9593c4b6eaf65b89b88a24d9f9e366",
+    "c3171be6dfab5519cded6db40efc051f23160ddd3cbf5c63052801bbf5862651",
+    "5a46dc1ca5c9335a759a1f41028dc77054468cf8d788ae6d641fa2988d7afe35",
+    "ab90eb34f4b974fc9d54cddc92af757fd39d30457aacfd07700f7abac7a2b507",
+    "6f0ed77151b44ed7e66f01c0e429f774487991af088bf9e518bf03e8a9fa3997",
+    "b9d26d33a22150da0debf5d6d58cdd125da6a68284c5db9bf1d6feaacf623530",
+    "d5e89f4b2ac81ec4dc7762c42d23a8509d2ec1b0ab388d203a4ed67ce0204419",
+    "88bd2952602d4ad1991d168721a8c2ae3c90f240b8ba1ac044273205a79bf078",
+    "c97eafaa044e34681432e1e6f13ad30834de0c5e8a2233f112e4180b7a531cdd",
+    "e636772fd5faf8d7ed06ce7edc73d830bc852bee822e6bb4d5ef93a5e521d3d9",
+    "cdbd6e508cd42c9e88b48f0d7f27a47242d779ea9b0214874dde36361c5e0e16",
+    "e546c861884cf91988de93a49c9ff9ad0963b62f517e948193bffca56f7227dd",
+    "45472792038f21637a57312181abeb4b566da28274184e713017d535a177837a",
+    "e63b6e69ca7292fba96d96d0de76921733255b9d337eaaf05329ec49c61e8c73",
+    "d64d901ba8bbd743b538e8f19d27e54bcf8d09f91cd1f73f7bfd5915b86e71c3",
+    "971b9db699f8406b79bc9ff363b6f7c2002b480683a5a0f4b9aa7d9a88c456b1",
+    "e07e570b3cfa9add7a2bd1e1f397348309560875733cdd065422ecc4b95d6440",
+    "bd3a264169fd0ceac9052b3753d07e5b7d0d84184122667552f620daa6546812",
+    "2ee72e51f5ec197c782a766d54cb38a2eda479a7c8b1539f751646d162d34d7b",
+    "b5ea123a4e3dbe87c5bed3b84e7efb284217c6c7da224827862ca93cfef3079d",
+    "23191678cc881d8e711456953c23499554dd624e1fd7389e9ba397dbc7757ebb",
+    "0db212ecee876aa2fb93791184e1962c2c484d5bd47b59cc127ecfb77b4c23bc",
+    "350c3644181bd4b75cabc3ebbab64c66eb05d3fbe107ca709561a08f4f465deb",
+), strict=True))
+MONTH_OUTPUT_SHA256 = {
+    "instrumented/SWG_1d_00010101_00010130_grid_T_0000.nc":
+        "f30b644d44304d607d0f1e139a573d7d4b748c88f67e3139161bfac73ef759d4",
+    "instrumented/SWG_1d_00010101_00010130_grid_U_0000.nc":
+        "0353fa985a2e309966cd32801597cf859c0de5b9355154a58e511847bc3225a8",
+    "instrumented/SWG_1d_00010101_00010130_grid_V_0000.nc":
+        "0d1594b9c68edb5029addc09e9a8d544fbd777abdc582d396a18fd04dccef8d7",
+    "instrumented/SWG_1d_00010101_00010130_grid_W_0000.nc":
+        "f1e84e5af46a5d1064e002b7e30390e0dafa37c8d4883175191bfea24fc03a19",
+    "reference/SWG_1d_00010101_00010130_grid_T_0000.nc":
+        "355ef4c3e877a1796b511e49848e350a1f5ce125897721265bd7d64315d74b7a",
+    "reference/SWG_1d_00010101_00010130_grid_U_0000.nc":
+        "26d8c73a09f9f414c5184407803c778d73e26b3e2002111d3264b9e18efd5672",
+    "reference/SWG_1d_00010101_00010130_grid_V_0000.nc":
+        "612666a199c7396134e3f1878755bcefc99fbaabbc4993ddda83fb10140e7e15",
+    "reference/SWG_1d_00010101_00010130_grid_W_0000.nc":
+        "5d700936098ed919cc726a9348d7766a400ac3ad2b93ddcb870075262beb976b",
+}
 RESTART_FIELDS = (
     "sshn", "un", "vn", "uu_n", "vv_n", "utau_b", "vtau_b",
     "emp_b", "qns_b", "sfx_b",
@@ -47,6 +114,37 @@ def _stage_checker():
     return mod
 
 
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _require_sha256(path: Path, expected: str) -> None:
+    require(path.is_file(), f"missing content-pinned record {path}")
+    require(_sha256(path) == expected, f"content SHA-256 mismatch: {path}")
+
+
+def _pinned_stage_hashes(root: Path) -> dict[str, str]:
+    """Load the immutable admission that owns one known stage-record root."""
+    if root.resolve() == DEFAULT_STAGE_ROOT.resolve():
+        path = root.parent / "swg_round1_admission.json"
+        expected = TEN_STEP_ADMISSION_SHA256
+    elif root.resolve() == (DEFAULT_MONTH_ROOT / "instrumented").resolve():
+        path = root.parent / "swg_round6_30d_admission.json"
+        expected = MONTH_ADMISSION_SHA256
+    else:
+        raise RuntimeError(f"missing admission for unregistered stage-record root {root}")
+    _require_sha256(path, expected)
+    return json.loads(path.read_text())["records"]
+
+
+def _restart_hashes(root: Path) -> dict[int, str]:
+    if root.resolve() == DEFAULT_ROOT.resolve():
+        return TEN_STEP_RESTART_SHA256
+    if root.resolve() == (DEFAULT_MONTH_ROOT / "instrumented").resolve():
+        return MONTH_RESTART_SHA256
+    raise RuntimeError(f"unregistered restart-record root {root}")
+
+
 def read_restarts(
         root: Path,
         kts: tuple[int, ...] = tuple(range(1, 11)),
@@ -56,8 +154,11 @@ def read_restarts(
     files = sorted(root.glob("SWG_????????_restart.nc"))
     expected = [root / f"SWG_{kt:08d}_restart.nc" for kt in kts]
     require(files == expected, f"restart sequence is {[p.name for p in files]}")
+    pins = _restart_hashes(root)
     out = {}
     for kt, path in zip(kts, files, strict=True):
+        require(kt in pins, f"no content pin for restart kt={kt}")
+        _require_sha256(path, pins[kt])
         with netCDF4.Dataset(path) as ds:
             ds.set_auto_mask(False)
             file_kt = int(np.asarray(ds["kt"][:]).item())
@@ -88,11 +189,14 @@ def read_stage_entries(
 ) -> dict[tuple[int, int], dict[str, np.ndarray]]:
     """Read all acquired stage entries through the admission parser."""
     cr = _stage_checker()
+    pins = _pinned_stage_hashes(root)
     out = {}
     for kt in record_kts:
         for stage in stages:
             path = root / f"oracle_swgstage_kt{kt:08d}_s{stage}.bin"
             require(path.is_file(), f"missing {path}")
+            require(path.name in pins, f"no content pin for {path.name}")
+            _require_sha256(path, pins[path.name])
             head, groups = cr.parse(path)
             require((head[1], head[2]) == (kt, stage),
                     f"{path.name}: header {(head[1], head[2])}")
@@ -259,6 +363,7 @@ def _month_admission(root: Path) -> Path:
     instrumented = root / "instrumented"
     reference = root / "reference"
     require(admission_path.is_file(), f"missing month admission {admission_path}")
+    _require_sha256(admission_path, MONTH_ADMISSION_SHA256)
     saved = json.loads(admission_path.read_text())
     live = _stage_checker().check(
         instrumented, reference, record_kts=MONTH_RECORD_KTS, stages=(1,),
@@ -267,6 +372,11 @@ def _month_admission(root: Path) -> Path:
     require(saved["legoesm_git_sha"]
             == "011ba6c48c2243467097af35a66a041cdee3f565",
             "month acquisition commit is not the admitted round-6 tip")
+    for side in (instrumented, reference):
+        for kt, expected in MONTH_RESTART_SHA256.items():
+            _require_sha256(side / f"SWG_{kt:08d}_restart.nc", expected)
+    for relative, expected in MONTH_OUTPUT_SHA256.items():
+        _require_sha256(root / relative, expected)
     return instrumented
 
 
