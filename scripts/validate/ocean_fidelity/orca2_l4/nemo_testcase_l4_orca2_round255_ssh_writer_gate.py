@@ -95,6 +95,7 @@ def _continuity_terms(inputs: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
 def measure(deck_root: Path, frame_root: Path, spg_root: Path,
             midpoint_report: Path, label: str, expect_commit: str) -> dict:
     import jax
+    import jax.numpy as jnp
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         LatLonCGridOceanModel, _NEMOWSBarotropicTrace,
     )
@@ -162,7 +163,7 @@ def measure(deck_root: Path, frame_root: Path, spg_root: Path,
         _nemo_external_mode_boundary_association,
     )
     post = jax.device_get(_nemo_external_mode_boundary_association(
-        *(before_association[name] for name in (
+        *(jnp.asarray(before_association[name], dtype=jnp.float64) for name in (
             "u", "v", "depth_u", "depth_v", "inverse_u", "inverse_v",
             "eta")),
         card.recipe.grid,
