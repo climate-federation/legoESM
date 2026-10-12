@@ -27,12 +27,24 @@ DEFAULT_MONTH_ROOT = Path(
 DEFAULT_SHIPPED_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swg_rounds/"
     "round0_probe/year10")
+DG_STAGE_ROOT = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgdg_rounds/"
+    "round1/oracle_swg_dg_r1/instrumented")
+DG_MONTH_ROOT = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgdg_rounds/"
+    "round1/oracle_swg_dg_r1_30d")
 MONTH_RECORD_KTS = tuple(range(1, 698, 24))
 MONTH_RESTART_KTS = tuple(range(24, 721, 24))
+DG_MONTH_RECORD_KTS = tuple(range(1, 12_530, 432))
+DG_MONTH_RESTART_KTS = tuple(range(432, 12_961, 432))
 TEN_STEP_ADMISSION_SHA256 = (
     "cdf8afc272c962635564110111b10386b79d8afdc2373fdf0df3c5860dbd3937")
 MONTH_ADMISSION_SHA256 = (
     "94db6dfea297fe828c55dc6c26fa78702cbbf9df399aa8f6793d252f33efae8e")
+DG_STAGE_ADMISSION_SHA256 = (
+    "f40f5eab7b3b4530ca995cfe36d9e8d3fc43dd02792311afd53f2f9d508d51e2")
+DG_MONTH_ADMISSION_SHA256 = (
+    "1fa9cb3a27c05fc380baebea2fa1b741d2edea8273923226acae9dce378de726")
 TEN_STEP_RESTART_SHA256 = dict(zip(range(1, 11), (
     "bdadad749f29e868a1910cac7e0d98458cd0f40300d60d92c9bda0e992d8fd37",
     "122be763d83d2ec800038b84ac4db5d86b6a66dfd3970a3eae9a902141a69346",
@@ -76,6 +88,50 @@ MONTH_RESTART_SHA256 = dict(zip(MONTH_RESTART_KTS, (
     "23191678cc881d8e711456953c23499554dd624e1fd7389e9ba397dbc7757ebb",
     "0db212ecee876aa2fb93791184e1962c2c484d5bd47b59cc127ecfb77b4c23bc",
     "350c3644181bd4b75cabc3ebbab64c66eb05d3fbe107ca709561a08f4f465deb",
+), strict=True))
+DG_STAGE_RESTART_SHA256 = dict(zip(range(1, 11), (
+    "cfe92a859a1fb0f68f10938263e51e8e5f3ac328416997c3aa2209e0f963a2aa",
+    "b2f426866eda05828ed1298b3d787464bb0f1d02fd611a68529d270cd6936ee0",
+    "82ffb400302412d583367b97e311a57402fbba2bd7e5237b8f5a1fd82b6fd545",
+    "1feb43dfd5db77bebac4082e2b49fff56a088ba4aa3936e0adba14a206a1c222",
+    "d512c329c4ff96390d0834c6394ad8927c436662ffab6553ab1306b1d3307df9",
+    "70ae3ee495a67c9ee619bb334254569c94f8492b8d2be4720aab6d03e02655a9",
+    "d766fb1532735630c25710a5fa5d222139fa736f4941d253cbec878504d26e71",
+    "48637b87829e542b64bc38ad64262d043b53af7dfafa729d42d0211ac067c4ea",
+    "bdf6a27f855f6a9ed7ccad145c9fa4f36c7fa9f52d5fc29ddc7cdbbc425f7fc9",
+    "94b021ed88f02718bcc83e877825a9b7689eec10b23fd24f76fe593f5f363fb8",
+), strict=True))
+DG_MONTH_RESTART_SHA256 = dict(zip(DG_MONTH_RESTART_KTS, (
+    "64e7c76921e9f1a2918e3da2633bee2ead3baaa314ffc68937a0730452ff6976",
+    "6d27febd8665dd7e99c4b0d4b0e1ae6bcefab62175c75236b83387c5fdded783",
+    "91de7326dea2b002df37cb244c50560c1c5a0b0fa353a0b2b8aacc101d2eefb1",
+    "e4b222292aa152d8362d4f87282c0dbaffbd3f7abf9eba81915fff6abf29e36c",
+    "021af2fa9d99b90c70bfa0db5356db15f988a1812734fdd3a7ed0f7156053145",
+    "66ec7fbeb64e2c9b8990d407bcfe99a56a9ef37c04a012bbecbf145d795ddd33",
+    "27938cde84fd5052c69374665983c4e7fa5f866a53923d9e6621a054c01409a6",
+    "2a6a58869bf0d7954c110390c2fe0099fefc6cd92497ee61284a46d003af52b8",
+    "007ed6d410c572e74537de28c585918afb1e6aeccd63bea3f6f8543f9a8e5899",
+    "1755359a4c11cc5fef8b39b5def7d6a778f2a628ee2a34ff682cbcf3e877803e",
+    "650c9cd4a6642d44d43264ebe2d58167ec1707007138142ea6a06fcc2790c983",
+    "33cd0cd2b17d0cf869625a953fdb807a27a06762bc7ea3b6ed3b7e448f650c93",
+    "30076eec5e71a98ba0b4da17b78f92d3c11e2cb29db030e82718a4247b2ae3d6",
+    "bdfc23e8d533bfc290ff647a8a3b284c969a3e5981f1e34617ffd54f9afae932",
+    "d29e8623ee7bb6e48dd3480fa0686f5e3af4c67d7e1219f76eb4d50562d3ff25",
+    "5390d7eb7e072453ed77cf7117ee652e748a350d07eef7cdbbb3a004cc4fb7d8",
+    "2b37a948610dc033fa61a545dc8087e88a8474fbd6ec73ef26140e2268c8bfeb",
+    "ca333e54be9e56edc311bfa86757662976c049f4636bfcd69e5e008a748c1044",
+    "6ceb64eebca43a0bde044011fde7993b5223f1bc2cdefe921029ea93c360829a",
+    "029e055d7fec4970528371fee4dedd567c92a8a2dc957304eb4468ce2a96dfa5",
+    "5900ac28ed5ebb2021763d590c8a7ceae412fd9ba3aa2e71535bc5ff434a7188",
+    "5f7134dc62c6c2d619b1acb33d225a6691269f414721dee8b19dbf7c1d2d6bc7",
+    "ddc8d9fb48fb3eeed333f78b877d3c8469b57eb3a0f15c20bd33921ed5e2f12f",
+    "2ab9da36a01e753ad6a85c90d5038567173d719dcee04aa23aced928e17634ab",
+    "9b0d5b51e88a2f9c39f3b809b1cb13df71e311b712219af137a2a0a7e89e900e",
+    "be2bb4d7cddf0d6419ecc312b6aba25367dd2cb0a7d230ff613d52f01372f1aa",
+    "084187ddaeb6916f09130be987d29acdd3534e53c431feb8500df7acbde2018c",
+    "4f2b0c8ac004d99f81432162053b4743240ca8054055a3b54ef10af899f78d1c",
+    "3e21ef49201b64b23397e0ccaf15ac72c8c7ba7332b236714d0fd98bc4bc3fa3",
+    "78d4fd00e53185c65e826990d962c22409fe266a467d3b03d230b8fb1050b107",
 ), strict=True))
 MONTH_OUTPUT_SHA256 = {
     "instrumented/SWG_1d_00010101_00010130_grid_T_0000.nc":
@@ -162,6 +218,12 @@ def _pinned_stage_hashes(root: Path) -> dict[str, str]:
     elif root.resolve() == (DEFAULT_MONTH_ROOT / "instrumented").resolve():
         path = root.parent / "swg_round6_30d_admission.json"
         expected = MONTH_ADMISSION_SHA256
+    elif root.resolve() == DG_STAGE_ROOT.resolve():
+        path = root.parent / "swg_dg_round1_stage_admission.json"
+        expected = DG_STAGE_ADMISSION_SHA256
+    elif root.resolve() == (DG_MONTH_ROOT / "instrumented").resolve():
+        path = root.parent / "swg_dg_round1_30d_admission.json"
+        expected = DG_MONTH_ADMISSION_SHA256
     else:
         raise RuntimeError(f"missing admission for unregistered stage-record root {root}")
     _require_sha256(path, expected)
@@ -175,15 +237,41 @@ def _restart_hashes(root: Path) -> dict[int, str]:
         return MONTH_RESTART_SHA256
     if root.resolve() == DEFAULT_SHIPPED_ROOT.resolve():
         return SHIPPED_RESTART_SHA256
+    if root.resolve() == DG_STAGE_ROOT.resolve():
+        return DG_STAGE_RESTART_SHA256
+    if root.resolve() == (DG_MONTH_ROOT / "instrumented").resolve():
+        return DG_MONTH_RESTART_SHA256
     raise RuntimeError(f"unregistered restart-record root {root}")
+
+
+def _deck_namelist(deck: str, *, month: bool = False):
+    """Return the exact resolved deck selected for this admitted ladder."""
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        SWG_MADDISON_NAMELIST, SWG_NAMELIST)
+
+    require(deck in ("shipped", "maddison"), f"unknown SWG deck {deck!r}")
+    if deck == "shipped":
+        return SWG_NAMELIST
+    if month:
+        return SWG_MADDISON_NAMELIST._replace(
+            nn_SWG=4, nn_itend=12_960, nn_stock=432, nn_write=432,
+            rn_Dt_s=200.0)
+    return SWG_MADDISON_NAMELIST._replace(
+        nn_itend=10, nn_stock=1, nn_write=1)
 
 
 def read_restarts(
         root: Path,
         kts: tuple[int, ...] = tuple(range(1, 11)),
+        *, namelist=None,
 ) -> dict[int, dict[str, np.ndarray]]:
     """Read requested restart AFTER states, refusing omissions or casts."""
     import netCDF4
+    if namelist is None:
+        namelist = _deck_namelist("shipped")
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import build_swg_card
+    card = build_swg_card(namelist)
+    expected_shape = tuple(card.recipe.land_mask.shape)
     files = sorted(root.glob("SWG_????????_restart.nc"))
     expected = [root / f"SWG_{kt:08d}_restart.nc" for kt in kts]
     require(files == expected, f"restart sequence is {[p.name for p in files]}")
@@ -196,8 +284,8 @@ def read_restarts(
             ds.set_auto_mask(False)
             file_kt = int(np.asarray(ds["kt"][:]).item())
             require(file_kt == kt, f"{path.name}: kt={file_kt}")
-            require(float(np.asarray(ds["rdt"][:]).item()) == 3600.0,
-                    f"{path.name}: rdt is not 3600 s")
+            require(float(np.asarray(ds["rdt"][:]).item()) == card.dt_s,
+                    f"{path.name}: rdt is not {card.dt_s:g} s")
             row = {}
             for name in RESTART_FIELDS:
                 require(name in ds.variables, f"{path.name}: missing {name}")
@@ -208,7 +296,7 @@ def read_restarts(
                 if name in ("un", "vn"):
                     require(a.shape[0] == 2, f"{path.name}.{name}: no dummy record")
                     a = a[0]                 # executed level; crop dummy bottom
-                require(a.shape == (84, 84) and np.all(np.isfinite(a)),
+                require(a.shape == expected_shape and np.all(np.isfinite(a)),
                         f"{path.name}.{name}: bad shape/non-finite")
                 row[name] = a
             out[kt] = row
@@ -369,53 +457,68 @@ def self_check(root: Path, *, plant: bool = False, allow_dirty: bool = False) ->
     })
 
 
-def _swg_production_case(label: str):
+def _swg_production_case(label: str, *, namelist=None):
     """Build the one independently forced production case used by all rungs."""
     import jax
     from legoesm.core.precision import PrecisionPolicy, set_policy
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
     from legoesm.ocean.fidelity.nemo_testcase_recipe import (
-        build_swg_card, swg_surface_wind,
+        SWG_NAMELIST, build_swg_card, swg_surface_wind,
         validate_nemo_testcase_card_for_execution)
     from legoesm.ocean.state import OceanSurfaceForcing
 
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
     require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
     require(jax.default_backend() == "cpu", f"{label} must run on CPU")
-    card = build_swg_card()
+    namelist = SWG_NAMELIST if namelist is None else namelist
+    card = build_swg_card(namelist)
     validate_nemo_testcase_card_for_execution(card)
     masks = _card_masks(card)
     model = LatLonCGridOceanModel(card.recipe.grid, card.recipe.z_coord,
                                   card.recipe.model_config)
     # Compiled usrdef_sbc.F90:84-91 fixes the cosine divisor at 2000 km.
     # This is generated from the card, never read from an oracle record.
-    tau_u, tau_v = swg_surface_wind()
+    tau_u, tau_v = swg_surface_wind(namelist)
     forcing = OceanSurfaceForcing(
         tau_i_native=jax.numpy.asarray(tau_u, dtype=jax.numpy.float64),
         tau_j_native=jax.numpy.asarray(tau_v, dtype=jax.numpy.float64))
     return card, masks, model, forcing
 
 
-def _month_admission(root: Path) -> Path:
+def _month_admission(root: Path, *, deck: str = "shipped") -> Path:
     """Reproduce the saved passive-record admission before scoring the month."""
-    admission_path = root / "swg_round6_30d_admission.json"
+    if deck == "shipped":
+        admission_path = root / "swg_round6_30d_admission.json"
+        admission_sha = MONTH_ADMISSION_SHA256
+        record_kts = MONTH_RECORD_KTS
+        restart_kts = MONTH_RESTART_KTS
+        restart_hashes = MONTH_RESTART_SHA256
+        acquisition_sha = "011ba6c48c2243467097af35a66a041cdee3f565"
+    else:
+        require(deck == "maddison", f"unknown SWG deck {deck!r}")
+        admission_path = root / "swg_dg_round1_30d_admission.json"
+        admission_sha = DG_MONTH_ADMISSION_SHA256
+        record_kts = DG_MONTH_RECORD_KTS
+        restart_kts = DG_MONTH_RESTART_KTS
+        restart_hashes = DG_MONTH_RESTART_SHA256
+        acquisition_sha = "129fa0f9ca173a3ff284a8265041b6ae57564d9e"
     instrumented = root / "instrumented"
     reference = root / "reference"
     require(admission_path.is_file(), f"missing month admission {admission_path}")
-    _require_sha256(admission_path, MONTH_ADMISSION_SHA256)
+    _require_sha256(admission_path, admission_sha)
     saved = json.loads(admission_path.read_text())
     live = _stage_checker().check(
-        instrumented, reference, record_kts=MONTH_RECORD_KTS, stages=(1,),
-        restart_kts=MONTH_RESTART_KTS)
+        instrumented, reference, record_kts=record_kts, stages=(1,),
+        restart_kts=restart_kts)
     require(live == saved, "live month admission differs from its saved verdict")
-    require(saved["legoesm_git_sha"]
-            == "011ba6c48c2243467097af35a66a041cdee3f565",
-            "month acquisition commit is not the admitted round-6 tip")
+    require(saved["legoesm_git_sha"] == acquisition_sha,
+            "month acquisition commit is not the admitted tip")
     for side in (instrumented, reference):
-        for kt, expected in MONTH_RESTART_SHA256.items():
+        for kt, expected in restart_hashes.items():
             _require_sha256(side / f"SWG_{kt:08d}_restart.nc", expected)
-    for relative, expected in MONTH_OUTPUT_SHA256.items():
-        _require_sha256(root / relative, expected)
+    if deck == "shipped":
+        for relative, expected in MONTH_OUTPUT_SHA256.items():
+            _require_sha256(root / relative, expected)
     return instrumented
 
 
@@ -609,21 +712,50 @@ def _restart_candidate(state) -> dict[str, np.ndarray]:
     }
 
 
-def month(root: Path, *, allow_dirty: bool = False) -> dict:
-    """Run 720 independent production steps and score both daily record kinds."""
+def _state_from_restart(state, restart):
+    """Replace every prognostic SWG restart leaf from one admitted boundary."""
+    import jax.numpy as jnp
+
+    u = state.u.data.at[:, 1:, 0].set(jnp.asarray(restart["un"]))
+    v = state.v.data.at[1:, :, 0].set(jnp.asarray(restart["vn"]))
+    uu_b = state.uu_b.data.at[:, 1:].set(jnp.asarray(restart["uu_n"]))
+    vv_b = state.vv_b.data.at[1:, :].set(jnp.asarray(restart["vv_n"]))
+    return state._replace(
+        eta=state.eta.replace(data=jnp.asarray(restart["sshn"])),
+        u=state.u.replace(data=u), v=state.v.replace(data=v),
+        uu_b=state.uu_b.replace(data=uu_b),
+        vv_b=state.vv_b.replace(data=vv_b),
+        tau_x_prev=jnp.asarray(restart["utau_b"]),
+        tau_y_prev=jnp.asarray(restart["vtau_b"]),
+    )
+
+
+def month(root: Path, *, deck: str = "shipped",
+          allow_dirty: bool = False) -> dict:
+    """Run 30 model days and score both daily record kinds."""
     from legoesm.ocean.fidelity.provenance import allow_dirty_stamps, git_sha
 
     allow_dirty_stamps(allow_dirty)
     sha = git_sha(allow_dirty=allow_dirty)
-    instrumented = _month_admission(root)
+    namelist = _deck_namelist(deck, month=True)
+    steps_per_day = int(86_400 / namelist.rn_Dt_s)
+    require(steps_per_day * namelist.rn_Dt_s == 86_400,
+            "month timestep does not divide one day exactly")
+    record_kts = (MONTH_RECORD_KTS if deck == "shipped"
+                  else DG_MONTH_RECORD_KTS)
+    restart_kts = (MONTH_RESTART_KTS if deck == "shipped"
+                   else DG_MONTH_RESTART_KTS)
+    instrumented = _month_admission(root, deck=deck)
     entries = read_stage_entries(
-        instrumented, record_kts=MONTH_RECORD_KTS, stages=(1,))
-    restarts = read_restarts(instrumented, kts=MONTH_RESTART_KTS)
-    card, masks, model, forcing = _swg_production_case("month ladder")
+        instrumented, record_kts=record_kts, stages=(1,))
+    restarts = read_restarts(
+        instrumented, kts=restart_kts, namelist=namelist)
+    card, masks, model, forcing = _swg_production_case(
+        "month ladder", namelist=namelist)
     state = card.recipe.initial_state
     per_day = []
     for day, (entry_kt, restart_kt) in enumerate(
-            zip(MONTH_RECORD_KTS, MONTH_RESTART_KTS, strict=True), 1):
+            zip(record_kts, restart_kts, strict=True), 1):
         candidate_entry = _stage_candidate(state, forcing, card)
         require(all(value.dtype == np.dtype("float64")
                     for value in candidate_entry.values()),
@@ -634,7 +766,7 @@ def month(root: Path, *, allow_dirty: bool = False) -> dict:
                  _field_mask(name, masks))
             for name, value in candidate_entry.items()
         ]
-        for _ in range(24):
+        for _ in range(steps_per_day):
             state = model.step(state, card.dt_s, surface_forcing=forcing)
         candidate_restart = _restart_candidate(state)
         require(all(value.dtype == np.dtype("float64")
@@ -651,7 +783,10 @@ def month(root: Path, *, allow_dirty: bool = False) -> dict:
         "label": "INDEPENDENT-THIRTY-DAY",
         "legoesm_git_sha": sha,
         "oracle_acquisition_git_sha": (
-            "011ba6c48c2243467097af35a66a041cdee3f565"),
+            "011ba6c48c2243467097af35a66a041cdee3f565"
+            if deck == "shipped"
+            else "129fa0f9ca173a3ff284a8265041b6ae57564d9e"),
+        "deck": deck,
         "bar": BAR,
         "record_counts": {"stage_entries": len(entries),
                           "restarts": len(restarts)},
@@ -659,27 +794,36 @@ def month(root: Path, *, allow_dirty: bool = False) -> dict:
     })
 
 
-def month_control(root: Path, *, allow_dirty: bool = False) -> dict:
+def month_control(root: Path, *, deck: str = "shipped",
+                  allow_dirty: bool = False) -> dict:
     """Prove one ULP at an exact daily U input changes production output."""
     import jax.numpy as jnp
     from legoesm.ocean.fidelity.provenance import allow_dirty_stamps, git_sha
 
     allow_dirty_stamps(allow_dirty)
     sha = git_sha(allow_dirty=allow_dirty)
-    instrumented = _month_admission(root)
-    restarts = read_restarts(instrumented, kts=MONTH_RESTART_KTS)
-    card, masks, model, forcing = _swg_production_case("month control")
+    namelist = _deck_namelist(deck, month=True)
+    steps_per_day = int(86_400 / namelist.rn_Dt_s)
+    restart_kts = (MONTH_RESTART_KTS if deck == "shipped"
+                   else DG_MONTH_RESTART_KTS)
+    instrumented = _month_admission(root, deck=deck)
+    restarts = read_restarts(
+        instrumented, kts=restart_kts, namelist=namelist)
+    card, masks, model, forcing = _swg_production_case(
+        "month control", namelist=namelist)
     state = card.recipe.initial_state
-    for _ in range(24):
+    for _ in range(steps_per_day):
         state = model.step(state, card.dt_s, surface_forcing=forcing)
+    state = _state_from_restart(state, restarts[steps_per_day])
     clean = _restart_candidate(state)
     clean_rows = [
-        _row(f"month_control.day01.clean.{name}", restarts[24][name], value,
+        _row(f"month_control.day01.clean.{name}",
+             restarts[steps_per_day][name], value,
              _field_mask(name, masks))
         for name, value in clean.items()
     ]
     require(all(row["bit_identical"] for row in clean_rows),
-            "month control input is not the admitted day-one boundary")
+            "rebuilt month control input is not the admitted day-one boundary")
 
     native_u = np.asarray(state.u.data)[:, 1:, 0]
     wet_nonzero = np.argwhere(masks["U"] & (native_u != 0.0))
@@ -722,7 +866,7 @@ def month_control(root: Path, *, allow_dirty: bool = False) -> dict:
         "bar": BAR,
         "plant": "ulp",
         "controls": [changed],
-        "per_kt": [{"day": 1, "kt": 24, "rows": clean_rows}],
+        "per_kt": [{"day": 1, "kt": steps_per_day, "rows": clean_rows}],
     })
 
 
@@ -1026,7 +1170,7 @@ def carried_state_audit(stage_root: Path, *, allow_dirty: bool = False) -> dict:
 
 
 def swe_rk3_stages(stage_root: Path, *, mode: str = "given",
-                   plant: str | None = None,
+                   plant: str | None = None, deck: str = "shipped",
                    allow_dirty: bool = False) -> dict:
     """Drive the JIT production stages on non-degenerate given/chained rows."""
     import jax
@@ -1042,7 +1186,8 @@ def swe_rk3_stages(stage_root: Path, *, mode: str = "given",
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
     require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
     require(jax.default_backend() == "cpu", "ladder must run on CPU")
-    card = build_swg_card()
+    namelist = _deck_namelist(deck)
+    card = build_swg_card(namelist)
     vor = card.recipe.model_config.vorticity_scheme
     require(vor.scheme == "ens_total",
             "SWG card does not select ens_total")
@@ -1144,7 +1289,8 @@ def swe_rk3_stages(stage_root: Path, *, mode: str = "given",
         controls.append(control)
     return _gate_rows({
         "label": f"SWE-RK3-STAGES-{mode.upper()}", "legoesm_git_sha": sha,
-        "bar": BAR, "plant": plant, "production_stage_executed": True,
+        "bar": BAR, "plant": plant, "deck": deck,
+        "production_stage_executed": True,
         "stage3_input_audit": _stage3_input_audit(entries, masks),
         "nondiscriminating": [nondiscriminating], "controls": controls,
         "per_kt": per_kt,
@@ -1152,10 +1298,11 @@ def swe_rk3_stages(stage_root: Path, *, mode: str = "given",
 
 
 def ens_stage1(stage_root: Path, *, plant: str | None = None,
-               allow_dirty: bool = False) -> dict:
+               deck: str = "shipped", allow_dirty: bool = False) -> dict:
     """Compatibility name for the complete given-entry production stage arm."""
     return swe_rk3_stages(
-        stage_root, mode="given", plant=plant, allow_dirty=allow_dirty)
+        stage_root, mode="given", plant=plant, deck=deck,
+        allow_dirty=allow_dirty)
 
 
 def main(argv=None) -> int:
@@ -1165,6 +1312,8 @@ def main(argv=None) -> int:
         "stages-given", "stages-chained", "carried-state", "month",
         "shipped"),
                    required=True)
+    p.add_argument("--deck", choices=("shipped", "maddison"),
+                   default="shipped")
     p.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     p.add_argument("--stage-root", type=Path, default=DEFAULT_STAGE_ROOT)
     p.add_argument("--month-root", type=Path, default=DEFAULT_MONTH_ROOT)
@@ -1174,6 +1323,11 @@ def main(argv=None) -> int:
     p.add_argument("--allow-dirty", action="store_true")
     p.add_argument("--json", type=Path)
     a = p.parse_args(argv)
+    if a.deck == "maddison":
+        if a.stage_root == DEFAULT_STAGE_ROOT:
+            a.stage_root = DG_STAGE_ROOT
+        if a.month_root == DEFAULT_MONTH_ROOT:
+            a.month_root = DG_MONTH_ROOT
     try:
         if a.arm == "self-check":
             out = self_check(a.root, plant=a.plant is not None,
@@ -1184,9 +1338,10 @@ def main(argv=None) -> int:
             out = carried_state_audit(
                 a.stage_root, allow_dirty=a.allow_dirty)
         elif a.arm == "month":
-            out = (month_control(a.month_root, allow_dirty=a.allow_dirty)
+            out = (month_control(
+                       a.month_root, deck=a.deck, allow_dirty=a.allow_dirty)
                    if a.plant else
-                   month(a.month_root, allow_dirty=a.allow_dirty))
+                   month(a.month_root, deck=a.deck, allow_dirty=a.allow_dirty))
         elif a.arm == "shipped":
             require(a.plant is None, "shipped arm has no post-computation plant")
             out = shipped(
@@ -1197,13 +1352,13 @@ def main(argv=None) -> int:
             out = {"label": "STAGE-ENTRY-READ", "records": len(entries),
                    "keys": [list(k) for k in entries]}
         elif a.arm == "ens-stage1":
-            out = ens_stage1(a.stage_root, plant=a.plant,
+            out = ens_stage1(a.stage_root, plant=a.plant, deck=a.deck,
                              allow_dirty=a.allow_dirty)
         else:
             out = swe_rk3_stages(
                 a.stage_root,
                 mode="given" if a.arm == "stages-given" else "chained",
-                plant=a.plant, allow_dirty=a.allow_dirty)
+                plant=a.plant, deck=a.deck, allow_dirty=a.allow_dirty)
     except Exception as exc:  # noqa: BLE001 - fail-closed CLI boundary
         print(f"REFUSE: {exc}", file=sys.stderr)
         return 2

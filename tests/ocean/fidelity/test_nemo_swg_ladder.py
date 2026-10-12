@@ -16,6 +16,40 @@ ROOT = lad.DEFAULT_ROOT
 MONTH_ROOT = lad.DEFAULT_MONTH_ROOT
 
 
+def test_maddison_deck_selects_admitted_card_clocks_and_roots():
+    stage = lad._deck_namelist("maddison")
+    month = lad._deck_namelist("maddison", month=True)
+    assert (stage.nn_SWG, stage.rn_Dt_s, stage.nn_itend,
+            stage.nn_stock, stage.nn_write) == (16, 50.0, 10, 1, 1)
+    assert (month.nn_SWG, month.rn_Dt_s, month.nn_itend,
+            month.nn_stock, month.nn_write) == (4, 200.0, 12960, 432, 432)
+    assert lad.DG_MONTH_RECORD_KTS == tuple(range(1, 12530, 432))
+    assert lad.DG_MONTH_RESTART_KTS == tuple(range(432, 12961, 432))
+    with pytest.raises(Exception, match="unknown SWG deck"):
+        lad._deck_namelist("typo")
+
+
+@pytest.mark.skipif(not lad.DG_STAGE_ROOT.is_dir(),
+                    reason="admitted SWG_DG stage records not mounted")
+def test_maddison_admission_and_restart_reader_use_run_resolution():
+    pins = lad._pinned_stage_hashes(lad.DG_STAGE_ROOT)
+    assert len(pins) == 30
+    records = lad.read_restarts(
+        lad.DG_STAGE_ROOT, kts=tuple(range(1, 11)),
+        namelist=lad._deck_namelist("maddison"))
+    assert set(records[1]) == set(lad.RESTART_FIELDS)
+    assert all(value.shape == (644, 644) for value in records[1].values())
+    from legoesm.core.precision import PrecisionPolicy, set_policy
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import build_swg_card
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    state = lad._state_from_restart(
+        build_swg_card(lad._deck_namelist("maddison")).recipe.initial_state,
+        records[1])
+    rebuilt = lad._restart_candidate(state)
+    assert all(np.array_equal(rebuilt[name], records[1][name])
+               for name in lad.RESTART_FIELDS)
+
+
 @pytest.mark.skipif(not ROOT.is_dir(), reason="SWG probe not mounted")
 def test_restart_reader_admits_exactly_ten_after_states():
     out = lad.read_restarts(ROOT)
