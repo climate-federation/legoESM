@@ -65,10 +65,12 @@ def lc_depth(inc, zw):
     zw: depth of the first zero-increment interface after the positive run
     from the top.  Censored cases (codex 2026-10-12): no positive increment
     -> h_lc <= zw[0] (NEMO's strict z < h test leaves every saved interface
-    untouched), returned as zw[0] with status -1; positive down to the last
+    untouched) OR zus3 = 0 (zero stress, zdftke.F90:359-362): returned as
+    zw[0] with status -1 and excluded from depth shares by the caller; positive down to the last
     saved interface -> h_lc beyond the dump, returned as +inf, status +1.
     An interior zero inside the positive run -> status 2 (cutoff unknown).
     Any NaN in the profile (diagnostic unavailable) -> status -3, h NaN.
+    Resolution-limited cutoffs (see resolution_limited) are status 3.
     Only status 0 is an exact depth.  Also returns the first positive index."""
     pos = inc > 0
     any_pos = np.any(pos, -1)
@@ -87,6 +89,22 @@ def lc_depth(inc, zw):
     status = np.where(missing, -3, status)
     h = np.where(missing, np.nan, h)
     return h, first, status
+
+
+def resolution_limited(inc, h, first, status, zw, e_in, eps):
+    """True where an exact-looking cutoff could be a rounding drop-out: if
+    the true h_lc were the NEXT interface, the increment at the observed
+    first-zero interface would be dt*zus^3*(rn_lc sin(pi z0/z1))^3/z1;
+    when that is below 2 ulp of the stored entry TKE (eps*e_in, NEMO writes
+    float32) the dump cannot tell a zero from it (codex 2026-10-12)."""
+    j = np.searchsorted(zw, np.where(status == 0, h, zw[0]))
+    j = np.clip(j, 0, len(zw) - 2)
+    us = implied_us(inc, np.where(status == 0, h, np.nan), first, zw)
+    z0, z1 = zw[j], zw[j + 1]
+    pred = DT * us ** 3 * (RN_LC * np.sin(np.pi * z0 / z1)) ** 3 / z1
+    e0 = np.take_along_axis(e_in, j[..., None], -1)[..., 0]
+    with np.errstate(invalid="ignore"):
+        return (status == 0) & (pred < 2.0 * eps * np.abs(e0))
 
 
 def implied_us(inc, h, first, zw):
@@ -151,7 +169,7 @@ def main(argv):
     sj, si = cj - L.J0, ci - L.I0
     keep = (sj >= L.BUF) & (sj < 13 - L.BUF) & (si >= L.BUF) & (si < 31 - L.BUF)
     To, So, Ko = g("col_T")[:, keep], g("col_S")[:, keep], g("col_K")[:, keep]
-    LCo = g("col_e_lc")[:, keep]
+    LCo, EIo = g("col_e_lc")[:, keep], g("col_e_in")[:, keep]
     sj, si = sj[keep], si[keep]
     nlev = To.shape[2]
     ds = {f: nc.Dataset(f"{argv[1]}/{PREFIX}{f}.nc") for f in ("T", "W", "2D")}
@@ -163,7 +181,8 @@ def main(argv):
         return x
     Tn, Sn = n("T", "votemper", slice(0, nlev)), n("T", "vosaline", slice(0, nlev))
     Kn = n("W", "avt", slice(1, nlev))                         # file w i+1 = our interface i
-    LCn = n("W", "en_lc_k", slice(1, nlev)) - n("W", "en_in_k", slice(1, nlev))
+    EIn = n("W", "en_in_k", slice(1, nlev))
+    LCn = n("W", "en_lc_k", slice(1, nlev)) - EIn
     utau = np.asarray(ds["2D"]["utau"][:], dtype=np.float64)[:, sj, si]
     m = nc.Dataset(L.MESH)
     zt = np.asarray(m["gdept_1d"][0], dtype=np.float64)[:nlev]
@@ -195,17 +214,22 @@ def main(argv):
     s0, s1 = h0 * 24, min(h1 * 24, nt)
     hlo, fo, sto = lc_depth(LCo[s0:s1, wet], zw)
     hln, fn, stn = lc_depth(LCn[s0:s1, wet], zw)
+    sto = np.where(resolution_limited(LCo[s0:s1, wet], hlo, fo, sto, zw, EIo[s0:s1, wet],
+                                      np.finfo(np.float64).eps), 3, sto)
+    stn = np.where(resolution_limited(LCn[s0:s1, wet], hln, fn, stn, zw, EIn[s0:s1, wet],
+                                      np.finfo(np.float32).eps), 3, stn)
+    hlo = np.where(sto == -1, np.nan, hlo); hln = np.where(stn == -1, np.nan, hln)   # no increment: h unknown
     both = (sto == 0) & (stn == 0)
     hx_o = np.where(sto == 0, hlo, np.nan); hx_n = np.where(stn == 0, hln, np.nan)
     uo = implied_us(LCo[s0:s1, wet], hx_o, fo, zw)
     un = implied_us(LCn[s0:s1, wet], hx_n, fn, zw)
     print(f"\nPart 2  Langmuir, steps {s0}..{s1 - 1} (h{h0}-h{h1}), all wet col x step samples")
     for lab, st in (("ours", sto), ("NEMO", stn)):
-        print(f"  {lab} status share: missing {np.mean(st == -3):.3f}  <=first interface {np.mean(st == -1):.3f}  exact {np.mean(st == 0):.3f}  beyond dump {np.mean(st == 1):.3f}  gap {np.mean(st == 2):.3f}")
+        print(f"  {lab} status share: missing {np.mean(st == -3):.3f}  no increment (h<=first iface or zero stress) {np.mean(st == -1):.3f}  exact {np.mean(st == 0):.3f}  beyond dump {np.mean(st == 1):.3f}  gap {np.mean(st == 2):.3f}  resolution-limited {np.mean(st == 3):.3f}")
     print(f"  h_lc [m] (exact only) ours {_q(hx_o)}")
     print(f"  h_lc [m] (exact only) NEMO {_q(hx_n)}")
     print(f"  h_lc ours-NEMO (paired, both exact) {_q(np.where(both, hlo - hln, np.nan))}")
-    hlo = np.where(sto == 2, np.nan, hlo); hln = np.where(stn == 2, np.nan, hln)   # gap: cutoff unknown
+    hlo = np.where(np.isin(sto, (2, 3)), np.nan, hlo); hln = np.where(np.isin(stn, (2, 3)), np.nan, hln)   # cutoff unknown
     print(f"  share h_lc <= 12.8 m (censored included, gaps/missing excluded): ours {share(hlo, hlo <= 12.8):.3f}  NEMO {share(hln, hln <= 12.8):.3f}")
     print(f"  share ours h_lc < 12.8 m among samples with NEMO h_lc > 12.8 m: "
           f"{share(hlo[hln > 12.8], hlo[hln > 12.8] < 12.8):.3f}  (n={np.sum(~np.isnan(hlo) & (hln > 12.8))})")

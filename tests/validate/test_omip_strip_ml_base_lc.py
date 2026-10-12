@@ -56,6 +56,25 @@ def test_lc_depth_and_zus_inversion_recover_nemo_formula_inputs():
     assert sm[0] == -3 and np.isnan(hm[0])
 
 
+def test_resolution_limited_flags_a_float32_dropout_and_not_a_resolved_cutoff():
+    zw = np.array([1.0, 2.1, 3.3, 4.6, 6.0, 7.6, 9.4, 11.5, 13.9, 16.6, 19.6, 23.0])
+    h, zus, e = zw[11], 0.0005, 1e-4
+    w = P.RN_LC * np.sin(np.pi * zw / h)
+    exact = np.where(zw < h, P.DT * zus ** 3 * w ** 3 / h, 0.0)
+    e_in = np.full(12, e, dtype=np.float32)
+    inc32 = (e_in + exact.astype(np.float32)).astype(np.float64) - e_in.astype(np.float64)
+    hl, first, st = P.lc_depth(inc32[None], zw)
+    assert st[0] == 0 and hl[0] < h                     # drop-out reads too shallow ...
+    lim = P.resolution_limited(inc32[None], hl, first, st, zw, e_in[None].astype(np.float64),
+                               np.finfo(np.float32).eps)
+    assert lim[0]                                       # ... and is flagged
+    big = np.where(zw < h, P.DT * 0.08 ** 3 * w ** 3 / h, 0.0)
+    hb, fb, sb = P.lc_depth(big[None], zw)
+    assert sb[0] == 0 and np.isclose(hb[0], h)
+    assert not P.resolution_limited(big[None], hb, fb, sb, zw, np.full((1, 12), e),
+                                    np.finfo(np.float32).eps)[0]
+
+
 def test_share_excludes_nan_and_keeps_censored_deep():
     x = np.array([5.0, np.nan, np.inf])
     assert P.share(x, x <= 12.8) == 0.5
