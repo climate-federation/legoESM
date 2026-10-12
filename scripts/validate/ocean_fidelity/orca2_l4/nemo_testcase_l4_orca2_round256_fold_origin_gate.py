@@ -54,10 +54,7 @@ def _stage_association_measure(deck_root: Path, record_root: Path, label: str,
     """Replay NEMO's post-stage U/V/T/S lbc_lnk on passive stage 1."""
     import jax
     import jax.numpy as jnp
-    from legoesm.grids.operators_latlon_cgrid import (
-        pad_ns_scalar, pad_ns_vector_v,
-    )
-    from legoesm.ocean.dynamics.latlon_cgrid_operators import pad_ns_vector_u
+    from legoesm.grids.operators_latlon_cgrid import pad_ns_vector_v
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         LatLonCGridOceanModel, _NEMOWSLiveOperandTrace,
     )
@@ -94,30 +91,45 @@ def _stage_association_measure(deck_root: Path, record_root: Path, label: str,
         "T": np.asarray(raw_values[2], np.float64),
         "S": np.asarray(raw_values[3], np.float64),
     }
-    associated = {
-        "u": np.asarray(jax.device_get(pad_ns_vector_u(
-            jnp.asarray(raw["u"][1:-1]), card.recipe.grid)), np.float64),
-        "v": np.asarray(jax.device_get(pad_ns_vector_v(
-            jnp.asarray(raw["v"][1:-1]), card.recipe.grid)), np.float64),
-        "T": np.asarray(jax.device_get(pad_ns_scalar(
-            jnp.asarray(raw["T"][1:-1]), card.recipe.grid)), np.float64),
-        "S": np.asarray(jax.device_get(pad_ns_scalar(
-            jnp.asarray(raw["S"][1:-1]), card.recipe.grid)), np.float64),
+    # Compact ORCA2 stores the T pivot itself, not NEMO's duplicated halo.
+    # lbc_nfd therefore overwrites only the pivot row's right half for T/U;
+    # pad_ns_scalar would instead replace the whole row from the row below and
+    # is not this compiled statement's compact image (lbcnfd.f90:584-683).
+    fold = card.recipe.grid.fold
+    half = int(np.asarray(fold.perm_T).size) // 2
+    raw_native = {name: r249._native(name, values) for name, values in raw.items()}
+    associated_native = {
+        name: np.array(values, copy=True) for name, values in raw_native.items()
     }
+    perm_t = np.asarray(fold.perm_T)
+    perm_u = np.asarray(fold.perm_u)
+    associated_native["u"][-1, half:] = (
+        fold.vector_sign_u * raw_native["u"][-1, perm_u[half:]])
+    for name in ("T", "S"):
+        associated_native[name][-1, half:] = raw_native[name][
+            -1, perm_t[half:]]
+    associated_v = jax.device_get(pad_ns_vector_v(
+        jnp.asarray(raw["v"][1:-1]), card.recipe.grid))
+    associated_native["v"] = r249._native("v", np.asarray(
+        associated_v, np.float64))
     oracle = rung0.assemble_frame(record_root, 1, 1)
     rows = {}
     for name in ("u", "v", "T", "S"):
-        raw_native = r249._native(name, raw[name])
-        associated_native = r249._native(name, associated[name])
+        before = raw_native[name]
+        after = associated_native[name]
         rows[name] = {
-            "raw_vs_nemo": r249._score(raw_native, oracle[name]),
-            "associated_vs_nemo": r249._score(associated_native, oracle[name]),
-            "association_delta": r249._score(associated_native, raw_native),
+            "raw_vs_nemo": r249._score(before, oracle[name]),
+            "associated_vs_nemo": r249._score(after, oracle[name]),
+            "raw_fold_band_vs_nemo": r249._score(
+                before[-3:], oracle[name][-3:]),
+            "associated_fold_band_vs_nemo": r249._score(
+                after[-3:], oracle[name][-3:]),
+            "association_delta": r249._score(after, before),
             "raw_fold_identity": r228.fold_residual(
-                raw_native, r249.POINT_TYPES[name], card.recipe.grid.fold,
+                before, r249.POINT_TYPES[name], card.recipe.grid.fold,
                 r249.SIGNS[name]),
             "associated_fold_identity": r228.fold_residual(
-                associated_native, r249.POINT_TYPES[name], card.recipe.grid.fold,
+                after, r249.POINT_TYPES[name], card.recipe.grid.fold,
                 r249.SIGNS[name]),
             "nemo_fold_identity": r228.fold_residual(
                 oracle[name], r249.POINT_TYPES[name], card.recipe.grid.fold,
@@ -163,6 +175,7 @@ def _first(rows: list[dict[str, object]], key: str) -> dict[str, object] | None:
 
 
 def classify(reports: list[dict[str, object]], *,
+             associations: list[dict[str, object]] | None = None,
              plant: str = "none") -> dict[str, object]:
     require(plant in PLANTS, f"unknown plant {plant!r}")
     reports = copy.deepcopy(reports)
@@ -170,6 +183,12 @@ def classify(reports: list[dict[str, object]], *,
         reports.pop()
     by_label = {report["label"]: report for report in reports}
     require(set(by_label) == set(LABELS), "both claim labels are required")
+    if associations is not None:
+        by_association = {report["label"]: report for report in associations}
+        require(set(by_association) == set(LABELS),
+                "both corrected association labels are required")
+        for label in LABELS:
+            by_label[label]["stage_association"] = by_association[label]
     independent = by_label["independent"]
     if plant == "production-route":
         independent["stage_growth"]["operand_route"] = "retired-route"
@@ -232,15 +251,14 @@ def classify(reports: list[dict[str, object]], *,
         require(assoc["source_order"]
                 == ["raw_stage_update", "post_stage_lbc_lnk"],
                 f"{label}: source order moved")
-        vrow = assoc["rows"]["v"]
-        require(vrow["nemo_fold_identity"]["unequal"] == 0,
-                f"{label}: NEMO V fold identity is not exact")
-        raw_real = float(vrow["raw_fold_identity"]["max_abs"]) > 0.0
-        associated_exact = (
-            vrow["associated_fold_identity"]["unequal"] == 0)
-        require(raw_real, f"{label}: raw stage V did not break fold identity")
-        require(associated_exact,
-                f"{label}: post-stage association did not close V identity")
+        owner_rows = {name: assoc["rows"][name] for name in ("T", "S", "v")}
+        for name, owner_row in owner_rows.items():
+            require(owner_row["nemo_fold_identity"]["unequal"] == 0,
+                    f"{label}: NEMO {name} fold identity is not exact")
+            require(float(owner_row["raw_fold_identity"]["max_abs"]) > 0.0,
+                    f"{label}: raw stage {name} did not break fold identity")
+            require(owner_row["associated_fold_identity"]["unequal"] == 0,
+                    f"{label}: post-stage association did not close {name}")
         require(report["one_bit_control"]["unequal"] == 1,
                 f"{label}: one-bit control did not fire")
         summaries[label] = {
@@ -255,11 +273,18 @@ def classify(reports: list[dict[str, object]], *,
             "first_growth": {
                 "fold_band": first_fold, "interior": first_interior},
             "source_owner": {
-                "statement": "post_stage_lbc_lnk_u_v_T_S",
-                "raw_v": vrow["raw_fold_identity"],
-                "associated_v": vrow["associated_fold_identity"],
-                "association_delta": vrow["association_delta"],
-                "associated_vs_nemo": vrow["associated_vs_nemo"],
+                "statement": "post_stage_lbc_lnk_T_S_v",
+                "rows": {
+                    name: {
+                        "raw_fold_identity": row["raw_fold_identity"],
+                        "associated_fold_identity": row[
+                            "associated_fold_identity"],
+                        "association_delta": row["association_delta"],
+                        "associated_fold_band_vs_nemo": row[
+                            "associated_fold_band_vs_nemo"],
+                    }
+                    for name, row in owner_rows.items()
+                },
             },
         }
     require(summaries["independent"]["first_growth"]
@@ -267,7 +292,7 @@ def classify(reports: list[dict[str, object]], *,
             "claim labels disagree on the first growth boundary")
     return {
         "format": "nemo-testcase-l4-orca2-round256-classification-v1",
-        "status": "HELD_R256_POST_STAGE_ASSOCIATION_NAMED",
+        "status": "HELD_R256_POST_STAGE_T_S_V_ASSOCIATION_NAMED",
         "floor": float(r249.FLOOR),
         "growth_threshold": float(r249.GROWTH),
         "labels": summaries,
@@ -275,7 +300,7 @@ def classify(reports: list[dict[str, object]], *,
             "R256-P1": "CONFIRMED",
             "R256-P2": "CONFIRMED",
             "R256-P3": "CONFIRMED_KT1_STAGE1_V_IDENTITY_BREAK",
-            "R256-P4": "CONFIRMED_POST_STAGE_LBC_LNK",
+            "R256-P4": "CONFIRMED_POST_STAGE_LBC_LNK_T_S_V",
             "R256-P5": "CONFIRMED_HELD",
             "R256-P6": "CONFIRMED" if plant == "none" else "PLANT",
         },
@@ -285,17 +310,29 @@ def classify(reports: list[dict[str, object]], *,
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--measure", action="store_true")
+    parser.add_argument("--association-only", action="store_true")
     parser.add_argument("--deck-root", type=Path)
     parser.add_argument("--record-root", type=Path)
     parser.add_argument("--label", choices=LABELS)
     parser.add_argument("--expect-commit")
     parser.add_argument("--classify", nargs=2, type=Path,
                         metavar=("INDEPENDENT", "GIVEN"))
+    parser.add_argument("--associations", nargs=2, type=Path,
+                        metavar=("INDEPENDENT", "GIVEN"))
     parser.add_argument("--plant", choices=PLANTS, default="none")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     try:
-        if args.measure:
+        if args.association_only:
+            require(all((args.deck_root, args.record_root, args.label,
+                         args.expect_commit)),
+                    "association measurement arguments are incomplete")
+            require(not args.measure and args.classify is None,
+                    "association-only mode is exclusive")
+            result = _stage_association_measure(
+                args.deck_root, args.record_root, args.label,
+                args.expect_commit)
+        elif args.measure:
             require(all((args.deck_root, args.record_root, args.label,
                          args.expect_commit)),
                     "measurement arguments are incomplete")
@@ -307,7 +344,12 @@ def main() -> int:
                     "classification requires both labelled reports")
             reports = [json.loads(path.read_text(encoding="utf-8"))
                        for path in args.classify]
-            result = classify(reports, plant=args.plant)
+            associations = (
+                [json.loads(path.read_text(encoding="utf-8"))
+                 for path in args.associations]
+                if args.associations else None)
+            result = classify(
+                reports, associations=associations, plant=args.plant)
             require(args.plant == "none", f"{args.plant} plant stayed green")
     except (OSError, KeyError, TypeError, ValueError, GateError,
             r228.GateError, r249.GateError, rung0.GateError) as error:

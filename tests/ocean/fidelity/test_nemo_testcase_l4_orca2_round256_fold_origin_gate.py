@@ -48,14 +48,19 @@ def _measurement(label):
         "raw_vs_nemo": _metric(1.0),
         "associated_vs_nemo": _metric(0.0),
         "association_delta": _metric(1.0),
+        "raw_fold_band_vs_nemo": _metric(1.0),
+        "associated_fold_band_vs_nemo": _metric(0.0),
         "raw_fold_identity": _fold("v", 1.0),
         "associated_fold_identity": _fold("v"),
         "nemo_fold_identity": _fold("v"),
     }
     rows = {name: copy.deepcopy(row) for name in ("u", "v", "T", "S")}
-    for name in ("u", "T", "S"):
-        rows[name]["raw_fold_identity"] = _fold(name)
-        rows[name]["association_delta"] = _metric(0.0)
+    for name in rows:
+        rows[name]["raw_fold_identity"] = _fold(
+            name, 0.0 if name == "u" else 1.0)
+        rows[name]["associated_fold_identity"] = _fold(name)
+        rows[name]["nemo_fold_identity"] = _fold(name)
+    rows["u"]["association_delta"] = _metric(0.0)
     return {
         "status": "PASS_R256_MEASUREMENT", "label": label,
         "stage_growth": {
@@ -84,9 +89,9 @@ def _reports():
 
 def test_round256_names_post_stage_association() -> None:
     result = gate.classify(_reports())
-    assert result["status"] == "HELD_R256_POST_STAGE_ASSOCIATION_NAMED"
+    assert result["status"] == "HELD_R256_POST_STAGE_T_S_V_ASSOCIATION_NAMED"
     assert all(row["source_owner"]["statement"]
-               == "post_stage_lbc_lnk_u_v_T_S"
+               == "post_stage_lbc_lnk_T_S_v"
                for row in result["labels"].values())
 
 
