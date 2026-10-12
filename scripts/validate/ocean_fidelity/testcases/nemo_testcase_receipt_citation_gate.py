@@ -2768,14 +2768,14 @@ CITATION_MAP = {
         ('ht_0(:,:) = 0._wp', 1),
         ('r1_hv_0(:,:) = ssvmask(:,:)', 1),
         22],
-    'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/domqco.f90:208-218': [
+    'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/domqco.f90:208-217': [
         ('pr3t(ji,jj) = pssh(ji,jj) * r1_ht_0', 1),
         ('* r1_hv_0(ji,jj) * r1_e1e2v(ji,jj)', 1),
-        11],
-    'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:714-718': [
+        10],
+    'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:714-717': [
         ('hu_e (ji,jj) =    hu_0(ji,jj) + zsshu_a(ji,jj)', 1),
         ('hvr_e(ji,jj) = ssvmask(ji,jj)', 1),
-        5],
+        4],
     # --- ORCA2 round 233: atomic stage-transport geometry unit -------
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dommsk.f90:206-213': [
         ('Ocean/land mask at u-, v-, and f-points', 1),
