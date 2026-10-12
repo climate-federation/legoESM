@@ -58,6 +58,7 @@ def band_budget(name, layers, vol_in, heat_in, band_vol, t_band, extra=None):
           f"{(tot_h - t_band * tot_v) / band_vol * 86400:+8.4f} K/day")
     if extra:
         print("  " + extra)
+    return {"adv_K_day": tot_h / band_vol * 86400, "T_band": t_band, "vol": band_vol}
 
 
 def ours(a):
@@ -120,7 +121,7 @@ def ours(a):
     print(f"  [v-rows] northward transport through each v-face row, band {a.z_lo:.0f}-{a.z_hi:.0f} m, zonal sum {a.lon_lo:.0f}-{a.lon_hi:.0f}E (Sv):")
     for gg in rows:
         print(f"    face lat {0.5 * (lat[gg - 1, i0] + lat[gg, i0]):+6.2f}  {rowv[gg] / n / 1e6:+7.3f}   | T-row lat {lat[gg, i0]:+6.2f} zonal-mean u (thickness-weighted, m/s) {rowu[gg] / rowh[gg]:+8.4f}")
-    band_budget(f"legoESM {a.snapshot_dir.rstrip('/').split('/')[-1]} hours {a.hours} ({n} windows)",
+    return band_budget(f"legoESM {a.snapshot_dir.rstrip('/').split('/')[-1]} hours {a.hours} ({n} windows)",
                 [f"{zc[k]:.1f}" for k in ks], acc_v, acc_h, vol, tb / vol)
 
 
@@ -193,9 +194,10 @@ def nemo(a):
     print(f"  [v-rows] northward transport through each v-face row, band {a.z_lo:.0f}-{a.z_hi:.0f} m, zonal sum {a.lon_lo:.0f}-{a.lon_hi:.0f}E (Sv):")
     for gg in rows:
         print(f"    face lat {0.5 * (lat[gg - 1, i0] + lat[gg, i0]):+6.2f}  {rowv[gg] / n / 1e6:+7.3f}   | T-row lat {lat[gg, i0]:+6.2f} zonal-mean u (thickness-weighted, m/s) {rowu[gg] / rowh[gg]:+8.4f}")
-    band_budget(f"NEMO {a.nemo_t.split('/')[-2]} recs {a.recs} ({n} hourly means)", [f"{zc[k]:.1f}" for k in ks],
+    out = band_budget(f"NEMO {a.nemo_t.split('/')[-2]} recs {a.recs} ({n} hourly means)", [f"{zc[k]:.1f}" for k in ks],
                 acc_v, acc_h, vol, tb / vol,
                 extra=(f"CONTROL NEMO's own ttrd_totad band mean: {trd / vol * 86400:+8.4f} K/day" if d is not None else None))
+    return out
 
 
 def main():
