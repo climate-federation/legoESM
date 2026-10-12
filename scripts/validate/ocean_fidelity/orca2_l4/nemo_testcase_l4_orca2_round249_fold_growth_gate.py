@@ -169,7 +169,8 @@ def _policy_stamp(expect_commit: str) -> dict[str, object]:
 
 
 def measure_stages(deck_root: Path, record_root: Path, label: str, unit: bool,
-                   route: str, expect_commit: str) -> dict[str, object]:
+                   route: str, expect_commit: str, *,
+                   max_kt: int = 4) -> dict[str, object]:
     import jax
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         LatLonCGridOceanModel,
@@ -181,6 +182,7 @@ def measure_stages(deck_root: Path, record_root: Path, label: str, unit: bool,
     require((unit and route == "resolved-candidate")
             or (not unit and route == "production"),
             "unit/route pairing moved")
+    require(1 <= max_kt <= 10, "stage-growth range must stay within kt=1..10")
     stamp = _policy_stamp(expect_commit)
     card = omt4.build_omt4_card(deck_root)
     omt4.validate_omt4_card(deck_root, card)
@@ -201,7 +203,7 @@ def measure_stages(deck_root: Path, record_root: Path, label: str, unit: bool,
         card, True, v_only=True, t_pivot_north_neighbor=True)
         if unit else contextlib.nullcontext())
     with arm:
-        for kt in range(1, 5):
+        for kt in range(1, max_kt + 1):
             boundaries.append(_boundary(
                 card, state, rung0.assemble_frame(record_root, kt, 0), kt, 0))
             ordinary_after = jax.device_get(ordinary.step(
@@ -512,6 +514,7 @@ def main() -> int:
     parser.add_argument("--unit", action="store_true")
     parser.add_argument("--route", choices=("production", "resolved-candidate"))
     parser.add_argument("--expect-commit")
+    parser.add_argument("--max-kt", type=int, default=4)
     parser.add_argument("--off", nargs=2, type=Path)
     parser.add_argument("--on", nargs=2, type=Path)
     parser.add_argument("--substep", nargs=2, type=Path)
@@ -526,7 +529,7 @@ def main() -> int:
                     "stage measurement arguments are incomplete")
             result = measure_stages(
                 args.deck_root, args.record_root, args.label, args.unit,
-                args.route, args.expect_commit)
+                args.route, args.expect_commit, max_kt=args.max_kt)
         elif args.mode == "substeps":
             require(all((args.deck_root, args.record_root, args.twin_a,
                          args.twin_b, args.label, args.expect_commit)),
