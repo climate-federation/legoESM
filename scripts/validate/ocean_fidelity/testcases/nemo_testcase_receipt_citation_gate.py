@@ -1591,11 +1591,11 @@ CITATION_MAP = {
         ('Ve_rhs(ji,jj) =  Ve_rhs(ji,jj) + r1_rho0', 1),
         37],
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:286-325': [
-        ('!*  remove 2D Coriolis trend  *!', 1),
+        ('!=  remove 2D Coriolis trend  =!', 1),
         ('zv_frc(ji,jj) = zv_frc(ji,jj) - zv_trd', 1),
         40],
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:1404-1464': [
-        ('SUBROUTINE dyn_drg_init', 2),
+        ('SUBROUTINE dyn_drg_init', 1),
         ('pv_RHSi(ji,jj) = pv_RHSi(ji,jj) + (r1_hv_0', 1),
         61],
     # --- ORCA2 round 245: OMT-4 midpoint V-depth cancelling pair ---
