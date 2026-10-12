@@ -33,12 +33,23 @@ def test_lc_depth_and_zus_inversion_recover_nemo_formula_inputs():
         h = zw[imlc]
         w = P.RN_LC * np.sin(np.pi * zw / h)
         inc = np.where(zw < h, P.DT * zus ** 3 * w ** 3 / h, 0.0)
-        hl, first = P.lc_depth(inc[None], zw)
+        hl, first, st = P.lc_depth(inc[None], zw)
+        assert st[0] == 0
         assert np.isclose(hl[0], h) and first[0] == 0
         assert np.isclose(P.implied_us(inc[None], hl, first, zw)[0], zus, rtol=1e-12)
         # perturbation: a doubled source must double zus^3, i.e. move zus
         assert not np.isclose(P.implied_us(2 * inc[None], hl, first, zw)[0], zus, rtol=1e-3)
-    assert np.isnan(P.lc_depth(np.zeros((1, 12)), zw)[0][0])
+        top, spread = P.profile_us(inc[None], hl, zw)
+        assert np.isclose(top[0], zus, rtol=1e-12) and np.isclose(spread[0], 1.0, rtol=1e-12)
+        bad = inc * np.where(zw < h / 2, 1.0, 1.5)       # a shape defect must show as spread > 1
+        assert P.profile_us(bad[None], hl, zw)[1][0] > 1.1
+        assert P.gap_share(inc[None]) == 0.0
+        holed = inc.copy(); holed[1] = 0.0
+        assert P.gap_share(holed[None]) == 1.0
+    h0, _, s0 = P.lc_depth(np.zeros((1, 12)), zw)       # cutoff above the first interface
+    assert s0[0] == -1 and h0[0] == zw[0]
+    hd, _, sd = P.lc_depth(np.ones((1, 12)), zw)        # positive below the last saved interface
+    assert sd[0] == 1 and np.isinf(hd[0])
 
 
 def test_nemo_check_constant_matches_zdftke_literals():

@@ -15,7 +15,8 @@ Part 2 (Langmuir, window H0-H1): from each model's own Langmuir increment
   (ours col_e_lc; NEMO en_lc_k - en_in_k), zdftke.F90:358-370 applies
   dt*zus3*(rn_lc*sin(pi z/h_lc))**3/h_lc on interfaces with z < h_lc, so
   h_lc = depth of the first interface below a positive run whose increment
-  is zero (exact on the w-ladder).  Inverting the increment at the
+  is zero (exact on the w-ladder; censored above the first / below the last
+  saved interface are reported separately and never inverted).  Inverting the increment at the
   shallowest active interface gives zus3, and taum_implied ~ zus**2 (the
   zcsd constant cancels in the ours/NEMO ratio).  Instrument check (NEMO):
   implied taum/|utau| must be >= 1 and close to 1 where |vtau| is small.
@@ -59,9 +60,11 @@ def turbocline(K, zw, avt_c):
 def lc_depth(inc, zw):
     """h_lc from a Langmuir increment profile (..., nk) on interface depths
     zw: depth of the first zero-increment interface after the positive run
-    from the top.  NaN when no positive increment (zus3 = 0 or h_lc above
-    the first interface); deepest interface + one spacing if positive all
-    the way down.  Also returns the index of the first positive interface."""
+    from the top.  Censored cases (codex 2026-10-12): no positive increment
+    -> h_lc <= zw[0] (NEMO's strict z < h test leaves every saved interface
+    untouched), returned as zw[0] with status -1; positive down to the last
+    saved interface -> h_lc beyond the dump, returned as +inf, status +1.
+    Only status 0 is an exact depth.  Also returns the first positive index."""
     pos = inc > 0
     any_pos = np.any(pos, -1)
     first = np.argmax(pos, -1)
@@ -69,9 +72,10 @@ def lc_depth(inc, zw):
     stop = ~after
     has_stop = np.any(stop, -1)
     j = np.argmax(stop, -1)
-    deep = zw[-1] + (zw[-1] - zw[-2])
-    h = np.where(has_stop, zw[np.minimum(j, len(zw) - 1)], deep)
-    return np.where(any_pos, h, np.nan), first
+    h = np.where(has_stop, zw[np.minimum(j, len(zw) - 1)], np.inf)
+    h = np.where(any_pos, h, zw[0])
+    status = np.where(~any_pos, -1, np.where(has_stop, 0, 1))
+    return h, first, status
 
 
 def implied_us(inc, h, first, zw):
@@ -82,6 +86,35 @@ def implied_us(inc, h, first, zw):
     w = RN_LC * np.sin(np.pi * z / h)
     with np.errstate(invalid="ignore", divide="ignore"):
         return np.cbrt(a * h / (DT * w ** 3))
+
+
+def profile_us(inc, h, zw, sin_min=0.3):
+    """zus inverted at EVERY active interface (sin(pi z/h) >= sin_min):
+    returns (zus at the max-increment interface, max/min ratio of the
+    per-level zus).  The ratio is 1 for an increment with NEMO's shape;
+    >1 flags a shape/level mismatch (GLM 2026-10-12: a scalar or level port
+    defect is degenerate with taum in a one-level inversion)."""
+    s = np.sin(np.pi * zw / h[..., None])
+    act = (inc > 0) & (zw < h[..., None]) & (s >= sin_min)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        us = np.cbrt(inc * h[..., None] / (DT * (RN_LC * s) ** 3))
+    us = np.where(act, us, np.nan)
+    with np.errstate(invalid="ignore"):
+        spread = np.nanmax(us, -1) / np.nanmin(us, -1)
+    k = np.argmax(np.where(act, inc, -np.inf), -1)
+    top = np.take_along_axis(us, k[..., None], -1)[..., 0]
+    return top, spread
+
+
+def gap_share(inc):
+    """share of profiles whose positive run has an interior zero (a float32
+    drop-out inside the run would make lc_depth read h_lc too shallow)."""
+    pos = inc > 0
+    last = inc.shape[-1] - 1 - np.argmax(pos[..., ::-1], -1)
+    first = np.argmax(pos, -1)
+    k = np.arange(inc.shape[-1])
+    inside = (k >= first[..., None]) & (k <= last[..., None])
+    return np.mean(np.any(inside & ~pos, -1)[np.any(pos, -1)])
 
 
 def _q(x):
@@ -120,7 +153,12 @@ def main(argv):
     zw = np.asarray(m["gdepw_1d"][0], dtype=np.float64)[1:nlev]
     nt = min(To.shape[0], Tn.shape[0])
     print(f"steps ours {To.shape[0]} NEMO {Tn.shape[0]} -> using {nt}; dtype {To.dtype}/{Tn.dtype}")
-    wet = np.all(np.isfinite(Tn[0, :, :12]), 1) & np.all(To[0, :, :12] != 0, 1)
+    ktop = int(np.searchsorted(zt, ZTOP)) + 2          # T-levels feeding interfaces above ZTOP
+    kw = int(np.searchsorted(zw, ZTOP)) + 2
+    wet = (np.all(np.isfinite(Tn[:nt, :, :ktop]) & np.isfinite(Sn[:nt, :, :ktop]), (0, 2))
+           & np.all(np.isfinite(Kn[:nt, :, :kw]), (0, 2))
+           & np.all((To[:nt, :, :ktop] != 0) & np.isfinite(To[:nt, :, :ktop]) & np.isfinite(So[:nt, :, :ktop]), (0, 2))
+           & np.all(np.isfinite(Ko[:nt, :, :kw]), (0, 2)))
     k12 = int(np.argmin(np.abs(0.5 * (zt[:-1] + zt[1:]) - 12.8)))
     print(f"{wet.sum()} wet interior cols; K12 interface {k12} at {0.5 * (zt[k12] + zt[k12 + 1]):.2f} m")
     print("\nPart 1  h | zstep ours | NEMO | o-N median [IQR] | share at K12 o/N || zturb ours | NEMO | o-N median [IQR]")
@@ -136,19 +174,27 @@ def main(argv):
               f"{np.mean(io == k12):.2f}/{np.mean(inn == k12):.2f} || "
               f"{np.median(to):6.2f} | {np.median(tn):6.2f} | {_q(to - tn)}")
     s0, s1 = h0 * 24, min(h1 * 24, nt)
-    hlo, fo = lc_depth(LCo[s0:s1, wet], zw)
-    hln, fn = lc_depth(LCn[s0:s1, wet], zw)
-    uo = implied_us(LCo[s0:s1, wet], hlo, fo, zw)
-    un = implied_us(LCn[s0:s1, wet], hln, fn, zw)
+    hlo, fo, sto = lc_depth(LCo[s0:s1, wet], zw)
+    hln, fn, stn = lc_depth(LCn[s0:s1, wet], zw)
+    both = (sto == 0) & (stn == 0)
+    hx_o = np.where(sto == 0, hlo, np.nan); hx_n = np.where(stn == 0, hln, np.nan)
+    uo = implied_us(LCo[s0:s1, wet], hx_o, fo, zw)
+    un = implied_us(LCn[s0:s1, wet], hx_n, fn, zw)
     print(f"\nPart 2  Langmuir, steps {s0}..{s1 - 1} (h{h0}-h{h1}), all wet col x step samples")
-    print(f"  samples with a positive increment: ours {np.mean(np.isfinite(hlo)):.3f}  NEMO {np.mean(np.isfinite(hln)):.3f}")
-    print(f"  h_lc [m] ours {_q(hlo)}")
-    print(f"  h_lc [m] NEMO {_q(hln)}")
-    print(f"  h_lc ours-NEMO (paired) {_q(hlo - hln)}")
-    print(f"  share h_lc <= 12.8 m: ours {np.nanmean(hlo <= 12.8):.3f}  NEMO {np.nanmean(hln <= 12.8):.3f}")
-    print(f"  share (ours h_lc < 12.8 m AND NEMO h_lc > 12.8 m) among NEMO>12.8: "
-          f"{np.nanmean((hlo < 12.8)[hln > 12.8]):.3f}")
-    print(f"  implied taum ratio ours/NEMO (zus^2) {_q((uo / un) ** 2)}")
+    for lab, st in (("ours", sto), ("NEMO", stn)):
+        print(f"  {lab} status share: <=first interface {np.mean(st == -1):.3f}  exact {np.mean(st == 0):.3f}  beyond dump {np.mean(st == 1):.3f}")
+    print(f"  h_lc [m] (exact only) ours {_q(hx_o)}")
+    print(f"  h_lc [m] (exact only) NEMO {_q(hx_n)}")
+    print(f"  h_lc ours-NEMO (paired, both exact) {_q(np.where(both, hlo - hln, np.nan))}")
+    print(f"  share h_lc <= 12.8 m (censored included): ours {np.mean(hlo <= 12.8):.3f}  NEMO {np.mean(hln <= 12.8):.3f}")
+    print(f"  share ours h_lc < 12.8 m among samples with NEMO h_lc > 12.8 m: "
+          f"{np.mean((hlo < 12.8)[hln > 12.8]):.3f}  (n={np.sum(hln > 12.8)})")
+    print(f"  implied taum ratio ours/NEMO (zus^2, first active interface) {_q((uo / un) ** 2)}")
+    po, spo = profile_us(LCo[s0:s1, wet], hx_o, zw)
+    pn, spn = profile_us(LCn[s0:s1, wet], hx_n, zw)
+    print(f"  implied taum ratio ours/NEMO (zus^2, max-increment interface) {_q((po / pn) ** 2)}")
+    print(f"  per-level zus spread max/min (1 = NEMO shape): ours {_q(spo)}  NEMO {_q(spn)}")
+    print(f"  positive run with interior zero (float32 drop-out): ours {gap_share(LCo[s0:s1, wet]):.4f}  NEMO {gap_share(LCn[s0:s1, wet]):.4f}")
     tau_n = un ** 2 / (2.0 * L_CSD())
     print(f"  CHECK NEMO implied taum / |utau| (>=1, ~1 if vtau small) {_q(tau_n / np.abs(utau[s0:s1, wet]))}")
     print(f"  NEMO implied taum [N/m2] {_q(tau_n)}  ours {_q(uo ** 2 / (2.0 * L_CSD()))}")
