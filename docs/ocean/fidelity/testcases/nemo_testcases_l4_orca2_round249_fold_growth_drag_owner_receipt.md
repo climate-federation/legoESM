@@ -133,8 +133,23 @@ pending with the user and is not re-emitted.
 ## Controls, tests, citations, and review
 
 The focused round-249 tests pass 10/10. The classifier passes both labels and
-all nine plants exit 2 with `PLANT-FIRED`. Citation and full fidelity-battery
-results are recorded in the final validation commit below.
+all nine plants exit 2 with `PLANT-FIRED`. The round receipt citation gate
+passes 3/3 with zero failures and zero unmapped citations; the cumulative
+default receipt gate also passes with zero failures, zero failing map entries,
+and zero unmapped citations. Shifting the drag citation by two lines makes the
+gate exit 1 with `FAIL`, proving the citation control fires.
+
+The one mandatory `tests/ocean/fidelity -n 12` invocation reached 99% with
+3,229 passes and 7 skips, then stopped reporting with one worker outstanding.
+Before the hang it printed exactly four reds. Each reproduced serially with
+`-p no:xdist`; they are the registered pre-existing failures: the moved GYRE
+certified-year harness stamp, SI3 `A MY_SRC is not verbatim`, 13 unscoped
+allow-dirty drivers, and 13 unstamped report emitters. The isolated result was
+4 failed in 7.59 s. No round-249 test failed.
+
+A separate `codex exec --sandbox read-only` review was attempted. Its
+in-process app-server could not initialise on the read-only filesystem, before
+it read the diff. Verdict: **independent review unavailable in-sandbox**.
 
 ## OPEN
 
