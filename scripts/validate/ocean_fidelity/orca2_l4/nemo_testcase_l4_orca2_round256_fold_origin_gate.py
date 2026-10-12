@@ -49,12 +49,42 @@ def _one_bit_control() -> dict[str, object]:
     return r249._score(one, np.nextafter(one, np.inf))
 
 
+def _associated_stage_values(card, raw_values):
+    """Apply the compiled T-pivot U/V/T/S association to one stage."""
+
+    import jax
+    import jax.numpy as jnp
+    from legoesm.grids.operators_latlon_cgrid import pad_ns_vector_v
+
+    raw = tuple(np.asarray(value, np.float64) for value in raw_values[:4])
+    native = {
+        "u": r249._native("u", raw[0]),
+        "v": r249._native("v", raw[1]),
+        "T": raw[2],
+        "S": raw[3],
+    }
+    fold = card.recipe.grid.fold
+    half = int(np.asarray(fold.perm_T).size) // 2
+    associated = {name: np.array(value, copy=True)
+                  for name, value in native.items()}
+    perm_t = np.asarray(fold.perm_T)
+    perm_u = np.asarray(fold.perm_u)
+    associated["u"][-1, half:] = (
+        fold.vector_sign_u * native["u"][-1, perm_u[half:]])
+    for name in ("T", "S"):
+        associated[name][-1, half:] = native[name][-1, perm_t[half:]]
+    v_full = np.asarray(jax.device_get(pad_ns_vector_v(
+        jnp.asarray(raw[1][1:-1]), card.recipe.grid)), np.float64)
+    associated["v"] = r249._native("v", v_full)
+    u_full = np.array(raw[0], copy=True)
+    u_full[:, 1:] = associated["u"]
+    return (u_full, v_full, associated["T"], associated["S"])
+
+
 def _stage_association_measure(deck_root: Path, record_root: Path, label: str,
                                expect_commit: str) -> dict[str, object]:
     """Replay NEMO's post-stage U/V/T/S lbc_lnk on passive stage 1."""
     import jax
-    import jax.numpy as jnp
-    from legoesm.grids.operators_latlon_cgrid import pad_ns_vector_v
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         LatLonCGridOceanModel, _NEMOWSLiveOperandTrace,
     )
@@ -91,27 +121,12 @@ def _stage_association_measure(deck_root: Path, record_root: Path, label: str,
         "T": np.asarray(raw_values[2], np.float64),
         "S": np.asarray(raw_values[3], np.float64),
     }
-    # Compact ORCA2 stores the T pivot itself, not NEMO's duplicated halo.
-    # lbc_nfd therefore overwrites only the pivot row's right half for T/U;
-    # pad_ns_scalar would instead replace the whole row from the row below and
-    # is not this compiled statement's compact image (lbcnfd.f90:584-683).
-    fold = card.recipe.grid.fold
-    half = int(np.asarray(fold.perm_T).size) // 2
     raw_native = {name: r249._native(name, values) for name, values in raw.items()}
+    associated_values = _associated_stage_values(card, raw_values)
     associated_native = {
-        name: np.array(values, copy=True) for name, values in raw_native.items()
+        name: r249._native(name, values)
+        for name, values in zip(("u", "v", "T", "S"), associated_values)
     }
-    perm_t = np.asarray(fold.perm_T)
-    perm_u = np.asarray(fold.perm_u)
-    associated_native["u"][-1, half:] = (
-        fold.vector_sign_u * raw_native["u"][-1, perm_u[half:]])
-    for name in ("T", "S"):
-        associated_native[name][-1, half:] = raw_native[name][
-            -1, perm_t[half:]]
-    associated_v = jax.device_get(pad_ns_vector_v(
-        jnp.asarray(raw["v"][1:-1]), card.recipe.grid))
-    associated_native["v"] = r249._native("v", np.asarray(
-        associated_v, np.float64))
     oracle = rung0.assemble_frame(record_root, 1, 1)
     rows = {}
     for name in ("u", "v", "T", "S"):
