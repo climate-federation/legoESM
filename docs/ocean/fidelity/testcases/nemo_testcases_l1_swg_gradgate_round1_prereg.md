@@ -147,3 +147,12 @@ contract (`rtol=1e-9`, `atol=1e-11`) from
 `tests/unit/test_checkpoint_schedule.py:94-102`, while recording whether it was
 also bitwise and its maximum absolute difference. No physical input, card,
 loss, random perturbation, derivative bar, FD step, or memory protocol changes.
+
+## Erratum — GYRE control digest
+
+The imported-control section transcribed the GYRE digest as `3b2b358145ced147`.
+That value is withdrawn. A clean replay of the committed `_card_digest` helper
+at both the incoming `292504bc1` tip and the final lane tip prints
+`f02d2f42a570f413`; the two values are equal across the import. The stated
+TSUNAMI and VORTEX-family digests were correct. This reporting correction does
+not change a card, measurement, prediction, or acceptance bar.

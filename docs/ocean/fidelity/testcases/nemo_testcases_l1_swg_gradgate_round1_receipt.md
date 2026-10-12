@@ -34,10 +34,15 @@ The committed card digest helper also returned the same values on both sides:
 
 | card | digest before | digest after |
 |---|---|---|
-| GYRE-zco | `3b2b358145ced147` | `3b2b358145ced147` |
+| GYRE-zco | `f02d2f42a570f413` | `f02d2f42a570f413` |
 | TSUNAMI-zco | `8bb5ed6c1bc031bd` | `8bb5ed6c1bc031bd` |
 | VORTEX-zco | `f7489467bc156303` | `f7489467bc156303` |
 | VORTEX_VEC-zco | `5041b91c67bd1443` | `5041b91c67bd1443` |
+
+The frozen preregistration's `3b2b358145ced147` GYRE value was a transcription
+error and is explicitly withdrawn in its appended erratum. The table above is
+the clean helper output replayed independently at incoming `292504bc1` and at
+the final lane tip.
 
 The controls are retained as `before_*.json` and `after_import_*.json` in the
 round evidence directory. No NEMO executable or source was changed or run.
