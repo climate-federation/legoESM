@@ -327,9 +327,10 @@ def carried_state_audit(stage_root: Path, *, allow_dirty: bool = False) -> dict:
         for name, value in rebuilt6._asdict().items()
     ]
     # The carried boundary is now fully specified.  Execute the next ordinary
-    # production step as one compiled whole-step graph and compare its public
-    # result with the admitted next entry.  The separately compiled stage
-    # chain remains the source-order control for the same transition.
+    # production step through its three materialized, separately JIT-compiled
+    # stage calls and compare its public result with the admitted next entry.
+    # The explicit stage chain above is the source-order control for the same
+    # transition.
     state6 = model.step(state, card.dt_s, surface_forcing=forcing)
     target7 = entries[7, 1]
     whole_step6_rows = [

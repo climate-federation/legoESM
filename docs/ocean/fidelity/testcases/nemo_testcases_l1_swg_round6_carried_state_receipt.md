@@ -80,6 +80,24 @@ boundary rather than adding a state leaf.
 
 Independent review run by the operator.
 
+## Review findings and fixes
+
+The operator's independent review at tip `011ba6c48` reproduced every
+round-6 number and gate, then returned this verdict verbatim:
+
+> DO NOT SHIP — Correct the two false source statements before landing; the
+> numerical results themselves reproduced.
+
+Both blocking source statements are corrected without changing numerics:
+
+1. The production-dispatch comment now states the three compiled swaps
+   exactly: stage 1 `Naa -> Nnn` at compiled
+   `SWG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:204-210`, stage 2
+   `Naa -> Nnn` at `:278-284`, and stage 3 `Naa -> Nbb` at `:360-366`.
+2. The carry-audit comment now states that public `step()` crosses three
+   materialized, separately JIT-compiled stage calls. It no longer calls that
+   path one compiled whole-step graph.
+
 ## Measurement
 
 Preregistration commit: `863a4d77ca4ba32628163b61b8a9e342d7e0646e`.

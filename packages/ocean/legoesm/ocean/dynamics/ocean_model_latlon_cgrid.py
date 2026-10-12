@@ -13229,9 +13229,10 @@ class LatLonCGridOceanModel:
                     _nemo_stage1_zad_eta_after_override)):
                 raise ValueError(
                     "SWE RK3 accepts only its grid-native surface stress input")
-            # NEMO materializes Naa and then swaps it into Nnn between each
-            # stage (compiled stprk3.f90:204-210,278-284,360-366). Preserve
-            # those boundaries through the certified JIT stage kernel.
+            # NEMO materializes Naa, swaps it into Nnn after stages 1 and 2,
+            # then swaps it into Nbb after stage 3 (compiled stprk3.f90:
+            # 204-210,278-284,360-366). Preserve those boundaries through the
+            # certified JIT stage kernel.
             from legoesm.ocean.dynamics.swe_rk3 import swe_rk3_step
             return swe_rk3_step(
                 state, dt, surface_forcing, self.grid, self.z_coord,
