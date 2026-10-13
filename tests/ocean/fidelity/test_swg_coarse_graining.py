@@ -444,3 +444,49 @@ def test_real_day1095_continuity_commutes_interior_and_walls():
     assert report["status"] == "PASS"
     assert report["regions"]["interior"]["max_abs_m_s"] <= 1.0e-15
     assert report["regions"]["outer_four_cells"]["max_abs_m_s"] <= 1.0e-15
+
+
+@pytest.mark.skipif(not (_REAL_FINE_ROOT / "manifest.json").is_file(),
+                    reason="complete three-year fine run not mounted")
+def test_real_day1095_filtered_continuity_commutes_on_coarse_walls():
+    manifest = json.loads((_REAL_FINE_ROOT / "manifest.json").read_text())
+    path = _REAL_FINE_ROOT / "day1095.npz"
+    assert manifest["daily_sha256"][path.name] == coarse.sha256(path)
+    with np.load(path, allow_pickle=False) as saved:
+        fields = {kind: np.asarray(saved[name], dtype=np.float64)
+                  for kind, name in (("T", "ssh_m"), ("U", "u_m_s"),
+                                     ("V", "v_m_s"))}
+    source = coarse.cgrid_geometry(SWG_MADDISON_NAMELIST)
+    target = coarse.cgrid_geometry(SWG_DG50_NAMELIST)
+    layout = coarse._restriction_layout(source, target)
+    volume, u, v = coarse._local_closed_extensives(fields, source, layout)
+    divergence = u[:, 1:] - u[:, :-1] + v[1:] - v[:-1]
+    filtered_divergence, _, _ = coarse.filter_closed_cgrid_extensives(
+        divergence, np.zeros_like(u), np.zeros_like(v), sigma_cells=8.0)
+    _, filtered_u, filtered_v = coarse.filter_closed_cgrid_extensives(
+        volume, u, v, sigma_cells=8.0)
+    sj0, sj1 = layout["source_j0"], layout["source_j1"]
+    si0, si1 = layout["source_i0"], layout["source_i1"]
+    embedded_divergence = np.zeros_like(source["area"]["T"])
+    embedded_divergence[sj0:sj1 + 1, si0:si1 + 1] = filtered_divergence
+    embedded_transport = {
+        "U": np.zeros_like(embedded_divergence),
+        "V": np.zeros_like(embedded_divergence),
+    }
+    embedded_transport["U"][sj0:sj1 + 1, si0:si1 + 1] = filtered_u[:, 1:]
+    embedded_transport["V"][sj0:sj1 + 1, si0:si1 + 1] = filtered_v[1:, :]
+    restricted_divergence = coarse._restrict_t_cell_sum(
+        embedded_divergence, source, target, layout) / target["area"]["T"]
+    coarse_transport = coarse.restrict_native_transports(
+        embedded_transport, source, target, layout)
+    residual = coarse.transport_divergence(coarse_transport, target) \
+        - restricted_divergence
+    wet = target["mask"]["T"]
+    jj, ii = np.where(wet)
+    wall = np.zeros_like(wet)
+    wall[jj.min(), ii.min():ii.max() + 1] = True
+    wall[jj.max(), ii.min():ii.max() + 1] = True
+    wall[jj.min():jj.max() + 1, ii.min()] = True
+    wall[jj.min():jj.max() + 1, ii.max()] = True
+    assert np.max(np.abs(residual[wet & ~wall])) < 1.0e-15
+    assert np.max(np.abs(residual[wall])) < 1.0e-15
