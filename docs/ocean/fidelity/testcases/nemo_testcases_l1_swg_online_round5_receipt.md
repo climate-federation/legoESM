@@ -137,7 +137,7 @@ All reversion logs are under
 Every test added in this round was exercised against a scratch mutation:
 optimizer default/schedule/epsilon (3), objective and batch reduction (2),
 dataset and v1 labelling (2), sampler/wrapper (3 including the modified parity
-test), filtered restriction (5 synthetic plus 1 real), the 8/10 decision (1),
+test), filtered restriction (4 synthetic plus 1 real), the 8/10 decision (1),
 physical/native gates (2), and rotational adequacy (1). Each named violation
 produced a pytest failure; no source tree used for the landed commits was
 mutated for this exercise.
@@ -196,10 +196,20 @@ PYTHONPATH=packages/core:packages/ocean:packages/atmosphere:packages/coupler:pac
 
 ## Validation and commits
 
-Implementation commits are `a01d68f4f`, `92c359ab2`, and `fdf1ff100`; the
-design and this receipt are in the final Round-5 documentation commit. Final
-focused-suite, Ruff, whitespace, shell, compilation, and citation-gate outputs
-are recorded in the landing message after the clean-tree run.
+Implementation commits are `a01d68f4f`, `92c359ab2`, and `fdf1ff100`; design
+and the initial receipt are `fa08b259e`. The final affected CPU battery is
+`93 passed`: coarse-graining/driver `36 passed in 199.03s`, ML optimizer/loss/
+dataset `23 passed in 204.85s`, and balanced-start/evaluation/adequacy/RK3-stage
+`34 passed in 39.88s`. Targeted Ruff reports `All checks passed!`.
+`compileall -q`, `git diff --check`, and shell syntax checks emit no output and
+exit zero.
+
+The clean-tree oracle citation gate at `fa08b259e` reports `PASS`, three
+citations, zero failures, and all internal self-plants fired. Shifting the
+registered first RK3 citation by two lines exits 1 with
+`SYMBOL-NOT-AT-LINE`. Evidence is
+`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgonl_rounds/round5/citation_gate.json`
+and `citation_gate_plant.json` beside it.
 
 No training driver, stochastic rollout, or optimization experiment was added.
 Stochastic readiness remains interface-only, and the energy-score definition
