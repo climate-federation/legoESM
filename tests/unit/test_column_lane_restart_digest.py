@@ -337,6 +337,38 @@ def test_mpas_mid_day_end_without_daily_forcing_still_checkpoints(
     assert "NOT checkpointed" not in capsys.readouterr().err
 
 
+def test_duo_daily_forcing_setup_refuses_a_mid_day_cadence(
+        tmp_path, monkeypatch):
+    """D-REX-5, FV3-duo column lane: with the daily external-ozone cache on,
+    setup refuses a dt that does not divide a day (500 s) and a fractional
+    checkpoint cadence (1.5 d at 600 s), each by name, while a whole-day
+    cadence at 600 s sets up; with daily forcing off neither is refused."""
+    from legoesm.driver.model_driver import ModelDriver
+
+    def drv(name, dt, ck_days, **over):
+        d = tmp_path / name
+        d.mkdir()
+        c = _land_stress_cfg(d, monkeypatch, stress=None, days=1, dt=dt,
+                             rad_update_steps=1, **over)
+        return ModelDriver(
+            c._replace(output=c.output._replace(checkpoint_days=ck_days)),
+            output_dir=d)
+    on = dict(ozone_forcing="external")
+    with pytest.raises(ValueError, match=r"dt=500 s does not divide 86400 s"):
+        drv("dt_on", 500.0, 0, **on).setup()
+    with pytest.raises(ValueError,
+                       match=r"checkpoint_days=1\.5 is not a whole number"):
+        drv("ck_on", 600.0, 1.5, **on).setup()
+    ok = drv("ok_on", 600.0, 1, **on)
+    ok.setup()
+    _require(ok._column_daily_forcing_active(), "daily forcing not on")
+    for name, dt, ck in (("dt_off", 500.0, 0), ("ck_off", 600.0, 1.5)):
+        off = drv(name, dt, ck)
+        off.setup()
+        _require(off.config.dycore.dt == dt, off.config.dycore.dt)
+        _require(not off._column_daily_forcing_active(), "forcing on")
+
+
 @pytest.mark.slow
 @pytest.mark.usefixtures("allow_version_drift")  # hand-built checkpoints, no manifest beside them
 def test_duo_daily_external_forcing_restart_needs_a_day_boundary(
@@ -404,3 +436,60 @@ def test_duo_daily_external_forcing_restart_needs_a_day_boundary(
     with pytest.raises(ValueError, match="restart at step 148 .* not on a "
                        "day boundary while daily external forcing"):
         dN.run(start_step=step, start_day=day)
+
+
+@pytest.mark.slow
+def test_duo_mid_day_end_under_daily_forcing_leaves_cmor_to_the_resumed_run(
+        tmp_path, monkeypatch, capsys):
+    """D-REX-3 with CMOR output, FV3-duo column lane, daily external ozone on
+    (600 s, one-day checkpoints and diagnostics).  A 148-step run ends
+    mid-day: besides its final checkpoint it writes NO CMOR NetCDF and keeps
+    the step-144 checkpoint's CMOR accumulator sidecar (the finalizer would
+    retire it under the same day name).  Resumed from that checkpoint and
+    sidecar to step 288, the CMOR files equal a continuous 288-step run's:
+    the span after step 144 is accumulated and written exactly once."""
+    import xarray as xr
+    from legoesm.driver.model_driver import ModelDriver
+
+    def build(name, n_steps):
+        d = tmp_path / name
+        d.mkdir()
+        cfg = _land_stress_cfg(d, monkeypatch, stress=None,
+                               days=(n_steps * 600.0 + 1.0) / 86400.0,
+                               dt=600.0, rad_update_steps=4,
+                               ozone_forcing="external")
+        cfg = cfg._replace(output=cfg.output._replace(
+            checkpoint_days=1, diag_days=1, cmip_output=True))
+        drv = ModelDriver(cfg, output_dir=d)
+        _drive(drv.setup)
+        _require(drv._ozone_ext_active, "external ozone not active")
+        return drv, d
+
+    dC, c = build("c", 148)
+    capsys.readouterr()
+    _require(_drive(dC.run) == "COMPLETED", "c")
+    _require(dC._mpas_cmip_feed_on, "CMOR feed off")
+    _require(sorted(c.glob("checkpoint_day_*.npz"))
+             == [c / "checkpoint_day_0001.npz"], "checkpoints")
+    sidecar = c / "cmor_accum_day_0001.npz"
+    assert sidecar.exists()
+    assert sorted(c.rglob("*.nc")) == []
+    assert "The CMOR NetCDF was NOT written either" in capsys.readouterr().err
+    dR, r = build("r", 144)
+    step, day = _drive(dR.load_checkpoint, c / "checkpoint_day_0001.npz")
+    _require(step == 144, step)
+    assert dR.diagnostics.load_cmor_accumulators(sidecar)
+    _require(_drive(dR.run, start_step=step, start_day=day) == "COMPLETED",
+             "r")
+    dK, k = build("k", 288)
+    _require(_drive(dK.run) == "COMPLETED", "k")
+    files = sorted(p.relative_to(k) for p in k.rglob("*.nc"))
+    _require(any("_day_" in p.name for p in files), files)
+    assert sorted(p.relative_to(r) for p in r.rglob("*.nc")) == files
+    for rel in files:
+        with xr.open_dataset(k / rel, decode_times=False) as a, \
+                xr.open_dataset(r / rel, decode_times=False) as b:
+            assert sorted(b.variables) == sorted(a.variables), rel
+            for v in a.variables:
+                np.testing.assert_array_equal(
+                    b[v].values, a[v].values, err_msg=f"{rel}: {v}")

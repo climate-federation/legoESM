@@ -2276,6 +2276,30 @@ class ModelDriver:
         # while MPAS/spectral, built later from self.config, ran the
         # experiment's value; gridaudit 2026-10-09).
         self._setup_external_forcing()
+        # D-REX-5 (user 2026-10-13): with daily external forcing on, the
+        # column loop resumes only from a checkpoint on a forcing-day boundary
+        # (D-REX-3), so every checkpoint must land on one: dt divides a day
+        # and the checkpoint cadence is whole days.  On the EFFECTIVE dt (the
+        # clamp above); config-only, so every rank raises alike, before any
+        # step.  Forcing off: nothing new is refused.
+        if (self.config.column_loop_lane
+                and self._column_daily_forcing_active()):
+            _dt = float(self.config.dycore.dt)
+            _ck_days = self.config.output.checkpoint_days
+            if 86400.0 % _dt != 0.0:
+                raise ValueError(
+                    f"dt={_dt:g} s does not divide 86400 s exactly while "
+                    "daily external forcing (ozone/aerosol/GHG) is active on "
+                    "the column loop: no step would end on a day boundary, "
+                    "so no checkpoint could be resumed bitwise (D-REX-3).  "
+                    "Use a dt that divides 86400 s.")
+            if _ck_days > 0 and not float(_ck_days).is_integer():
+                raise ValueError(
+                    f"checkpoint_days={_ck_days!r} is not a whole number of "
+                    "days while daily external forcing (ozone/aerosol/GHG) "
+                    "is active on the column loop: checkpoints would land "
+                    "mid-day, where a restart is refused (D-REX-3).  Use a "
+                    "whole number of days.")
         self._create_physics()
         self._create_diagnostics()
         self._create_friction()
@@ -11515,6 +11539,25 @@ class ModelDriver:
                 "its first step (zero-length run?)")
         return out
 
+    def _column_daily_forcing_active(self) -> bool:
+        """Whether the column loop threads daily external forcing (ozone /
+        aerosol / GHG / CMIP experiment) -- the ``_ext_forcing`` gate of
+        :meth:`_run_column`, and the forcing half of its D-REX-3 predicate.
+        Valid after ``_setup_external_forcing``.
+
+        Aerosol-CCN specified-Nc fill needs ``forcing["aerosol_od"]`` in the
+        MICROPHYSICS step regardless of the radiation scheme (the second
+        indirect / KK2000 ``Nc^-1.79`` effect is independent of how radiation
+        is solved).  Without it an --aerosol-ccn run on gray radiation would
+        never thread aerosol_od and the microphysics fill would raise its
+        (then-misleading) fail-fast.  Requires a real aerosol source."""
+        cfg = self.config
+        return bool(_external_forcing_active(
+            cfg.radiation in ("rrtmg", "rrtmgp"),
+            self._ozone_ext_active, self._aerosol_active,
+            self._aerosol_lw_active, self._ghg_active, bool(self._experiment),
+        ) or (cfg.nc_from_aerosol and self._aerosol_active))
+
     def _run_column(self, start_step: int = 0, start_day: float | None = None) -> str:
         """Run MPAS model with the unified physics pipeline.
 
@@ -13315,12 +13358,10 @@ class ModelDriver:
         # ``ghg_vmr`` values are wrapped in jnp.asarray so a monthly
         # value change stays a traced-value change (no retrace); the
         # dict KEY STRUCTURE is decided once here and never changes
-        # mid-run (pytree stability for the JIT'd step).
-        _ext_forcing = _external_forcing_active(
-            cfg.radiation in ("rrtmg", "rrtmgp"),
-            self._ozone_ext_active, self._aerosol_active,
-            self._aerosol_lw_active, self._ghg_active, bool(self._experiment),
-        )
+        # mid-run (pytree stability for the JIT'd step).  The gate (incl.
+        # the aerosol-CCN case) is ``_column_daily_forcing_active``, shared
+        # with the setup-time D-REX-5 refusal.
+        _ext_forcing = self._column_daily_forcing_active()
         # Transient solar file (CMIP6 TSI + optional 14-band spectral):
         # sampled DAILY like SST/ozone, threaded as traced
         # ``forcing["tsi"]``/["solar_spectral_fraction"] into the radiation
@@ -13333,15 +13374,6 @@ class ModelDriver:
         _solar_spectral = (_solar_ext
                            and cfg.solar_source == "spectral_file"
                            and cfg.radiation in ("rrtmg", "rrtmgp"))
-        # Aerosol-CCN specified-Nc fill needs ``forcing["aerosol_od"]`` in the
-        # MICROPHYSICS step regardless of the radiation scheme (the second
-        # indirect / KK2000 ``Nc^-1.79`` effect is independent of how
-        # radiation is solved).  Without this an --aerosol-ccn run on gray
-        # radiation would never thread aerosol_od and the microphysics fill
-        # would raise its (then-misleading) fail-fast.  Requires a real
-        # aerosol source.
-        if cfg.nc_from_aerosol and self._aerosol_active:
-            _ext_forcing = True
         # D-REX-3 (user 2026-10-13): the daily ozone/aerosol cache is rebuilt
         # from the CURRENT surface pressure whenever the forcing day bucket
         # changes, and a resumed link always rebuilds on its first step
@@ -15000,7 +15032,17 @@ class ModelDriver:
                 None, int(_sed_cap_effective), n_steps_total,
                 running=_sed_req_window)
 
-        if run_status == "COMPLETED" and self._mpas_cmip_feed_on:
+        # The final checkpoint below is skipped when daily external forcing is
+        # on and the run ends mid-day (user 2026-10-13, case (c) there).  The
+        # CMOR write is skipped with it (user 2026-10-13): the chain resumes
+        # from the last whole-day checkpoint, whose CMOR sidecar must survive
+        # (the finalizer would retire it under the same day name) so the
+        # resumed run re-accumulates the span after it and writes it once.
+        _skip_final = (CHECKPOINT_INTERVAL > 0 and run_status == "COMPLETED"
+                       and n_steps_total % CHECKPOINT_INTERVAL != 0
+                       and _mid_forcing_day(start_step + n_steps_total))
+        if (run_status == "COMPLETED" and self._mpas_cmip_feed_on
+                and not _skip_final):
             self._finalize_mpas_cmip(
                 START_DAY + n_steps_total * DT / 86400.0)
 
@@ -15016,7 +15058,7 @@ class ModelDriver:
         if (CHECKPOINT_INTERVAL > 0 and run_status == "COMPLETED"
                 and n_steps_total % CHECKPOINT_INTERVAL != 0):
             _final_day = START_DAY + n_steps_total * DT / 86400.0
-            if _mid_forcing_day(start_step + n_steps_total):
+            if _skip_final:
                 _msg = (
                     f"run ended mid-day (step {start_step + n_steps_total}, "
                     f"day {_final_day!r}) with daily external forcing "
@@ -15025,6 +15067,11 @@ class ModelDriver:
                     "whole-day checkpoint (this run wrote none if it was "
                     "shorter than one checkpoint interval, "
                     f"{CHECKPOINT_INTERVAL} steps).")
+                if self._mpas_cmip_feed_on:
+                    _msg += (
+                        "  The CMOR NetCDF was NOT written either: the "
+                        "resumed run writes this span from that checkpoint's "
+                        "CMOR accumulator sidecar (kept).")
                 logger.warning(_msg)
                 print(f"WARNING: {_msg}", file=sys.stderr)
             else:
