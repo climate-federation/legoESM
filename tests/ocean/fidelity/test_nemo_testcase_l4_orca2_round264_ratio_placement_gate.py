@@ -74,8 +74,11 @@ def _prefix(label: str):
         "label": label,
         "mode": "round262-coupled-source-placement",
         "record_identity": {"frame.bin": "a" * 64},
-        "completed": [{"kt": 1, "arrays": 3, "nonfinite": 0}],
-        "refusal": {"kt": 2, "message": "live thickness refused"},
+        "completed": [
+            {"kt": 1, "arrays": 3, "nonfinite": 0},
+            {"kt": 2, "arrays": 3, "nonfinite": 0},
+        ],
+        "refusal": None,
         "one_bit_control": _score(2.220446049250313e-16, 1, 1),
     }
 

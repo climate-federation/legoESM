@@ -241,10 +241,11 @@ def classify_prefix(reports: list[dict[str, object]], *,
                 f"{label}: prefix provenance moved")
         require(report["record_identity"] == reference_records,
                 f"{label}: prefix record identity moved")
-        require(report["completed"]
-                and report["completed"][0]["kt"] == 1
-                and report["completed"][0]["nonfinite"] == 0,
-                f"{label}: source-exact candidate did not complete finite kt=1")
+        require([row["kt"] for row in report["completed"]] == [1, 2]
+                and all(row["nonfinite"] == 0 for row in report["completed"]),
+                f"{label}: source-exact candidate did not complete finite kt=1..2")
+        require(report["refusal"] is None,
+                f"{label}: pre-kt2 live-thickness refusal persists")
         require(report["one_bit_control"]["unequal"] == 1,
                 f"{label}: prefix one-bit control did not fire")
         summaries[label] = {
@@ -256,7 +257,7 @@ def classify_prefix(reports: list[dict[str, object]], *,
         "status": "PASS_R264_PREFIX_RECONCILIATION",
         "labels": summaries,
         "predictions": {
-            "R264-P4": "MEASURED",
+            "R264-P4": "CONFIRMED_KT1_KT2_FINITE",
             "R264-P5": "CONFIRMED" if plant == "none" else "PLANT",
         },
     }
