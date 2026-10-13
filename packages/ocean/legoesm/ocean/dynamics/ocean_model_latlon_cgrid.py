@@ -8571,7 +8571,7 @@ class LatLonCGridOceanModel:
             if self._nemo_ws_test_hooks.expose_stage1_raw_momentum:
                 _nemo_ws_exposed_stage1_raw = (u1_raw, v1_raw)
             u1_corr, v1_corr = _replace_stage_mean(
-                u1_raw, v1_raw, target_u, target_v)
+                u1_raw, v1_raw, target_u, target_v); v1_corr = _rk3_fold_exchange_top_v(v1_corr, _grid, _ws_stage_v_mask) if _cfg_b.rk3_fold_exchange_top_v_row else v1_corr  # noqa: E702,E501
             _g0_tracer = _tracer_transport_geometry_override(
                 _g0,
                 self._nemo_ws_test_hooks.stage1_tracer_transport_override)
@@ -8649,7 +8649,7 @@ class LatLonCGridOceanModel:
             if self._nemo_ws_test_hooks.expose_stage2_raw_momentum:
                 _nemo_ws_exposed_stage2_raw = (u2_raw, v2_raw)
             u2_corr, v2_corr = _replace_stage_mean(
-                u2_raw, v2_raw, target_u, target_v)
+                u2_raw, v2_raw, target_u, target_v); v2_corr = _rk3_fold_exchange_top_v(v2_corr, _grid, _ws_stage_v_mask) if _cfg_b.rk3_fold_exchange_top_v_row else v2_corr  # noqa: E702,E501
             _g1_tracer = _tracer_transport_geometry_override(
                 _g1,
                 self._nemo_ws_test_hooks.stage2_tracer_transport_override)
@@ -10602,10 +10602,10 @@ class LatLonCGridOceanModel:
             # was deferred; re-apply it here so a periodic card keeps the
             # invariant the stage used to leave behind.  Inert on all four
             # closed-basin cards, where both columns are masked to zero.
-            _u_after = _u_after.at[:, -1].set(_u_after[:, 0])
+            _u_after = _u_after.at[:, -1].set(_u_after[:, 0]); _v_after = _rk3_fold_exchange_top_v(_v_after, _grid, _ws_stage_v_mask) if _cfg_b.rk3_fold_exchange_top_v_row else _v_after  # noqa: E702,E501
             state_new = state_new._replace(
                 u=state_new.u.replace(data=_u_after),
-                v=state_new.v.replace(data=(_rk3_fold_exchange_top_v(_v_after, _grid, _ws_stage_v_mask) if _cfg_b.rk3_fold_exchange_top_v_row else _v_after)),  # noqa: E501
+                v=state_new.v.replace(data=_v_after),
             )
         elif _impose_mean:
             # NEMO stprk3_stg.F90:440: uu += (uu_b(Kaa) − Σ e3u_0·uu·r1_hu_0)
@@ -16617,7 +16617,9 @@ def _rk3_fold_exchange_top_v(v, grid, v_mask_3d):
     """NEMO's end-of-stage exchange of the 3-D V velocity on a T-pivot fold.
 
     ``lbc_lnk( 'stp_RK3_stg', uu(Kaa), 'U', -1., vv(Kaa), 'V', -1., ... )``
-    (stprk3_stg.f90:572-573) leaves the top V row as the fold image of the
+    (stprk3_stg.f90:572-573) runs after EVERY stage, and the model applies
+    this after each stage's barotropic correction.  It leaves the top V row
+    as the fold image of the
     row below it: the mirrored velocity with the fold sign, on the faces that
     are wet there.  legoESM's compact V mask keeps that row dry, so the
     stored row is zero where NEMO's is the image.  Same permutation, sign and

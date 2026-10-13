@@ -879,3 +879,22 @@ def test_step_2_stages_are_nemos_and_each_stage_3_option_is_needed(off, stage, k
     if floor:
         rows = out["per_kt"][0]["stages"][stage - 1]["stage_replay"]["rows"]
         assert max(r[key]["n_unequal"] for r in rows) >= floor
+
+
+@needs_record5
+@pytest.mark.parametrize("off, want", [((), 0), (("without_fold_exchange_v",), 5)])
+def test_every_stage_frame_holds_nemos_top_v_row_only_with_the_exchange(off, want):
+    """The PRODUCTION call (review finding): at step 5 the sea-level signal
+    has reached the fold, and NEMO's stage frames hold the fold image on the
+    top V row after every stage (stprk3_stg.f90:572-573).  The card's stage
+    velocities equal them on the whole domain; with the option off (the
+    plant) the wet top-row faces that carry signal, five or six, are unequal
+    and nothing else is."""
+    out = ladder.run(RECORD5, arm="stages", kt_min=5, kt_max=5, allow_dirty=True,
+                     **{k: True for k in off})
+    for st in out["per_kt"][0]["stages"]:
+        v = next(r for r in st["rows"] if r["name"].endswith(".v"))
+        got = (v["n_unequal"], v["regions"]["fold_pivot_row"]["n_unequal"])
+        # off: 5 faces at stages 1 and 2, 6 at stage 3, all on the top row
+        assert (got == (0, 0)) if not want else (got[0] == got[1] >= want), (
+            st["stage"], got)
