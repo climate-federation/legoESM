@@ -38,6 +38,12 @@ from legoesm.grids.polar_filter import (
     fourier_filter,
     fourier_filter_3d,
 )
+from legoesm.grids.operators_latlon_cgrid import (
+    apply_north_fold,
+    fold_is_local,
+    fold_row,
+    north_fold_mask,
+)
 from legoesm.ocean.vertical import (
     OceanZStarCoordinate,
     OceanPartialCellCoordinate,
@@ -1173,11 +1179,18 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # fold unit. None selects the production config predicate; False restores
     # the legacy four-statement path and True selects the complete unit.
     barotropic_atomic_fold_unit: object = None
+    # Private source-placement arm for NEMO's scalar V-point ratio
+    # association. False leaves production unchanged; True applies the one
+    # compiled association before both live-geometry and carried consumers.
+    stage_v_ratio_association: bool = False
     # Private round-241 arm: preserve literal HPG through legoESM's compact
     # V-mask boundary wherever NEMO's recorded raw mask stays wet. None takes
     # the production NEMO predicate; False is the private legacy control and
     # True forces the arm. No public config can select any of these values.
     preserve_literal_hpg_vmask: object = None
+    # Private source-order measurement arm. NEMO assigns the already-computed
+    # literal HPG sum directly into Krhs at stages 2/3.
+    stage_hpg_literal_accumulator: bool = False
     # WRITE-only developed-state observer for the completed three-dimensional
     # momentum RHS before its depth reduction.  Kept separate from the final
     # slow-forcing callback so the round-141 gate can prove this minimum
@@ -1786,6 +1799,7 @@ def rk3_stage_velocity_update(
 def _nemo_ws_qco_stage_faces(
     eta, h_ref, u_mask_3d, v_mask_3d, grid, *, z_coord=None,
     include_reciprocals=False,
+    associate_v_ratio=False,
 ):
     """NEMO ``e3u/e3v(Kmm)`` and ``1 + r3u/r3v`` for one WS-RK3 stage ssh.
 
@@ -1845,7 +1859,23 @@ def _nemo_ws_qco_stage_faces(
         jnp.asarray(eta, dtype=dtype), ops.e3u_0, ops.e3v_0, ops.umask3,
         ops.vmask3, ops.hu_0, ops.hv_0, ops.area_t, ops.area_u, ops.area_v,
         include_reciprocals=include_reciprocals,
+        associate_v_ratio=(
+            (lambda ratio: _nemo_associate_stage_v_ratio(ratio, grid))
+            if associate_v_ratio else None),
     )
+
+
+def _nemo_associate_stage_v_ratio(v_ratio, grid):
+    """Apply NEMO's scalar V-point north-fold association to a live ratio."""
+
+    fold = getattr(grid, "fold", None)
+    north_mask = north_fold_mask(grid)
+    if fold_is_local(grid) or north_mask is not None:
+        north = fold_row(
+            v_ratio[-2:-1], fold.perm_v, 1.0, fold.perm_v.shape[0])
+        return apply_north_fold(
+            v_ratio, north, grid, north_mask=north_mask)
+    return v_ratio
 
 
 
@@ -2029,6 +2059,7 @@ def _nemo_ws_stage_transport(
     momentum_velocity_form_w=False, momentum_wzv_clock=None,
     legacy_wzv_rederived_transport=False,
     legacy_aimp_midpoint_w_metric=False, runoff_mass_flux=None,
+    associate_stage_v_ratio=False,
 ):
     """NEMO ``stprk3_stg.F90:257-304`` Kmm stage transport triplet.
 
@@ -2068,7 +2099,8 @@ def _nemo_ws_stage_transport(
          r1_hv_stage) = _nemo_ws_qco_stage_faces(
             eta_stage, h_ref, u_mask_3d, v_mask_3d, grid,
             z_coord=z_coord,
-            include_reciprocals=True)
+            include_reciprocals=True,
+            associate_v_ratio=(associate_stage_v_ratio and stage_index == 1))
     Hu_stage_depth = jnp.sum(hu_stage, axis=-1)
     Hv_stage_depth = jnp.sum(hv_stage, axis=-1)
     if barotropic_velocity is None:
@@ -7881,6 +7913,16 @@ class LatLonCGridOceanModel:
                 _u_live_mask = state.u_mask.data[..., None]
                 _v_live_mask = state.v_mask.data[..., None]
                 _active_live = mask_3d
+            if (self._nemo_ws_test_hooks.stage_v_ratio_association
+                    and self._nemo_ws_test_hooks
+                    .barotropic_atomic_fold_unit is True):
+                _resolved_stage_ops = nemo_qco_resolved_mesh_operands(
+                    _zc, _grid, _u_live_mask, _v_live_mask, h_k_old.dtype,
+                    h_k_old.shape[-1])
+                _v_live_mask = jnp.concatenate(
+                    [jnp.zeros_like(_resolved_stage_ops.vmask3[:1]),
+                     _resolved_stage_ops.vmask3],
+                    axis=0)
             # e3t_0: the reference (eta = 0) thickness ladder, so that
             # h_stage = e3t_0*(1 + eta/H) and sum_k e3t_0 = H_bathy.
             _h_ref_ws = compute_layer_thickness(
@@ -7917,6 +7959,8 @@ class LatLonCGridOceanModel:
                 legacy_wzv_rederived_transport=(
                     self._nemo_ws_test_hooks
                     .legacy_wzv_rederived_transport),
+                associate_stage_v_ratio=(
+                    self._nemo_ws_test_hooks.stage_v_ratio_association),
                 legacy_aimp_midpoint_w_metric=(
                     self._nemo_ws_test_hooks.legacy_aimp_midpoint_w_metric))
             # stprk3_stg.F90:365-388 has two live scheme arms.  The resolved
@@ -7943,6 +7987,8 @@ class LatLonCGridOceanModel:
 
             _qu_b, _qv_b = _qco_ratios(state.eta.data)
             _qu_13, _qv_13 = _qco_ratios(_eta_live_one_third)
+            if self._nemo_ws_test_hooks.stage_v_ratio_association:
+                _qv_13 = _nemo_associate_stage_v_ratio(_qv_13, _grid)
             _qu_12, _qv_12 = _qco_ratios(_eta_live_one_half)
             _qu_aa, _qv_aa = _qco_ratios(state_new.eta.data)
             from legoesm.ocean.eos import (

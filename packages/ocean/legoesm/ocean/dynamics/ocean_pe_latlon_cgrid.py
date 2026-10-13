@@ -5335,8 +5335,12 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         # dyn_adv calls dyn_keg before dyn_zad.  Keep those routine boundaries
         # visible to XLA so the shared Krhs accumulator has NEMO's association.
         # Diagnostics retain their historical combined KE_PGF bucket below.
-        du_dt = jax.lax.optimization_barrier(hpg_tendency_u)
-        dv_dt = jax.lax.optimization_barrier(hpg_tendency_v)
+        if nemo_literal_hpg_accumulator:
+            du_dt = hpg_tendency_u
+            dv_dt = hpg_tendency_v
+        else:
+            du_dt = jax.lax.optimization_barrier(hpg_tendency_u)
+            dv_dt = jax.lax.optimization_barrier(hpg_tendency_v)
         _nemo_after_hpg_u = du_dt
         _nemo_after_hpg_v = dv_dt
     else:
