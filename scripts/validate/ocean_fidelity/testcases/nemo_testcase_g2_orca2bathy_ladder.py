@@ -53,12 +53,15 @@ EXPOSURES = {
             {"u": "b_uu_rhs_k1", "v": "b_vv_rhs_k1"}),
     "stage1": ({"expose_momentum_stage": 1, "expose_tracer_stage": 1},
                {"u": "1_uu_k1_aa", "v": "1_vv_k1_aa", "T": "1_tn_k1_aa",
-                "S": "1_sn_k1_aa", "ssh": "1_ssh_aa"}),
+                "S": "1_sn_k1_aa", "ssh": "1_ssh_aa",
+                "uu_b": "1_uu_b_aa", "vv_b": "1_vv_b_aa"}),
     "stage2": ({"expose_momentum_stage": 2, "expose_tracer_stage": 2},
                {"u": "2_uu_k1_aa", "v": "2_vv_k1_aa", "T": "2_tn_k1_aa",
-                "S": "2_sn_k1_aa", "ssh": "2_ssh_aa"}),
+                "S": "2_sn_k1_aa", "ssh": "2_ssh_aa",
+                "uu_b": "2_uu_b_aa", "vv_b": "2_vv_b_aa"}),
     "stage3": ({}, {"u": "3_uu_k1_aa", "v": "3_vv_k1_aa", "T": "3_tn_k1_aa",
-                    "S": "3_sn_k1_aa", "ssh": "3_ssh_aa"}),
+                    "S": "3_sn_k1_aa", "ssh": "3_ssh_aa",
+                    "uu_b": "3_uu_b_aa", "vv_b": "3_vv_b_aa"}),
 }
 FRAME = {"ssh": "f_ssh_bb", "uu_b": "f_uu_b_bb", "vv_b": "f_vv_b_bb",
          "u": "f_uu_k1_bb", "v": "f_vv_k1_bb"}
@@ -375,9 +378,17 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
         # is the card's initial state (kt = 1) or NEMO's restart (other kt)
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import _NEMOWSRK3TestHooks
         kt = kt_from
-        out["label"] = ("INDEPENDENT (kt = 1, stage-local)" if kt == 1 else
+        out["label"] = ("INDEPENDENT (the card's own chain; stage-local)"
+                        if kt == 1 or state_in is not None else
                         "GIVEN-NEMO-ENTRY (NEMO's restart; stage-local)")
-        g, entry = g1.read_step(root, kt), s0 if kt == 1 else nemo_entry(kt)
+        g = g1.read_step(root, kt)
+        if state_in is not None:
+            saved = pickle.loads(Path(state_in).read_bytes())
+            require(saved["after_kt"] == kt - 1 and saved["packages"] == packages,
+                    "--state-in is not this model code's chain after step kt - 1")
+            entry = saved["state"]
+        else:
+            entry = s0 if kt == 1 else nemo_entry(kt)
         for name in exposures:
             hooks, frame = EXPOSURES[name]
             st = jax.device_get(LatLonCGridOceanModel(
