@@ -22,6 +22,10 @@ HEADER_NAMES = ("version", "step", "Nbb", "Nnn", "Naa", "Nrhs", "jpi", "jpj",
 STAGE_FRAMES = ("e", "b", "1", "2", "3", "f")
 PLANTS = ("none", "truncation", "nonfinite", "missing-frame", "twin-ulp",
           "missing-step")
+SUB_PLANTS = ("missing-substep",)       # needs --substep-steps
+SUB_MAGIC = b"NEMO_G1_SPGTS1  "
+SUB_HEADER = ("version", "step", "Nbb", "Nmm", "Naa", "Nrhs", "jpi", "jpj", "jpk",
+              "icycle", "Nis0", "Njs0", "Nie0", "Nje0", "word_bits")
 
 
 class Refuse(RuntimeError):
@@ -54,6 +58,68 @@ def read_stream(blob: bytes, label: str):
         fields[name] = data
         offset += 8 * count
     return header, fields
+
+
+def substep_path(root: Path, step: int) -> Path:
+    return root / f"oracle_g1spgts_kt{step:08d}.bin"
+
+
+def read_substeps(blob: bytes, label: str):
+    """One solver substep stream (g1_spgts_record.F90): header and every
+    named array, sized by its own record header (arrays differ in extent)."""
+    require(blob[:16] == SUB_MAGIC, f"{label}: bad magic {blob[:16]!r}")
+    header = dict(zip(SUB_HEADER, struct.unpack("<15i", blob[16:76])))
+    require(header["word_bits"] == 64, f"{label}: word size is not 64 bits")
+    offset, fields = 76, {}
+    while offset < len(blob):
+        require(offset + 32 <= len(blob), f"{label}: truncated record header")
+        name = blob[offset:offset + 16].decode("ascii").strip()
+        rank, n1, n2, n3 = struct.unpack("<4i", blob[offset + 16:offset + 32])
+        count = n1 * n2 * n3
+        offset += 32
+        require(rank in (1, 2) and count > 0, f"{label}: {name} has rank {rank}")
+        require(offset + 8 * count <= len(blob),
+                f"{label}: truncated payload of {name}")
+        require(name not in fields, f"{label}: duplicate field {name}")
+        data = np.frombuffer(blob, "<f8", count, offset)
+        fields[name] = data.reshape((n2, n1)) if rank == 2 else data
+        offset += 8 * count
+    return header, fields
+
+
+def check_substeps(evidence: Path, twin: Path | None, steps: list[int],
+                   plant: str = "none") -> dict:
+    """The substep streams exist at exactly the listed steps, are finite,
+    hold the entry frame, one frame per substep of their own header's count
+    and the exit frame, and equal the twin run's byte for byte."""
+    out = {}
+    wanted = list(steps) + ([max(steps) + 1] if plant == "missing-substep" else [])
+    for step in wanted:
+        path = substep_path(evidence, step)
+        require(path.is_file(), f"missing substep record {path.name}")
+        blob = path.read_bytes()
+        header, fields = read_substeps(blob, path.name)
+        require(header["step"] == step, f"{path.name}: header step {header['step']}")
+        frames = {name.split("_", 1)[0] for name in fields}
+        want = {"i000", "o000"} | {f"j{n:03d}" for n in range(1, header["icycle"] + 1)}
+        require(frames == want, f"{path.name}: frames {sorted(frames)[:4]}.. != "
+                                f"entry, {header['icycle']} substeps, exit")
+        first = sorted(n.split("_", 1)[1] for n in fields if n.startswith("j001_"))
+        for jn in range(2, header["icycle"] + 1):
+            names = sorted(n.split("_", 1)[1] for n in fields
+                           if n.startswith(f"j{jn:03d}_"))
+            require(names == first, f"{path.name}: substep {jn} field list moved")
+        for name, data in fields.items():
+            require(bool(np.all(np.isfinite(data))), f"{path.name}: {name} non-finite")
+        if twin is not None and substep_path(twin, step).is_file():
+            require(substep_path(twin, step).read_bytes() == blob,
+                    f"{path.name}: twin run differs")
+        out[step] = {"icycle": header["icycle"], "n_fields": len(fields),
+                     "substep_fields": first}
+    stray = sorted(p.name for p in evidence.glob("oracle_g1spgts_kt*.bin")
+                   if p not in {substep_path(evidence, s) for s in steps})
+    require(not stray, f"substep records at unlisted steps: {stray[:3]}")
+    return out
 
 
 def step_path(root: Path, step: int) -> Path:
@@ -135,12 +201,20 @@ def main() -> int:
     parser.add_argument("--steps", type=int, required=True)
     parser.add_argument("--stage-steps", type=int, default=10)
     parser.add_argument("--restart-steps", default="")
-    parser.add_argument("--plant", default="none", choices=PLANTS)
+    parser.add_argument("--substep-steps", default="",
+                        help="steps that must hold a solver substep stream")
+    parser.add_argument("--plant", default="none", choices=PLANTS + SUB_PLANTS)
     parser.add_argument("--json", type=Path)
     args = parser.parse_args()
     try:
         result = check(args.evidence, args.twin, args.steps, args.stage_steps,
-                       args.plant)
+                       "none" if args.plant == "missing-substep" else args.plant)
+        if args.substep_steps:
+            result["substeps"] = check_substeps(
+                args.evidence, args.twin,
+                [int(s) for s in args.substep_steps.split(",") if s], args.plant)
+        require(args.plant != "missing-substep" or bool(args.substep_steps),
+                "the missing-substep plant needs --substep-steps")
         if args.reference is not None:
             result["passive_restarts"] = restarts_identical(
                 args.reference, args.evidence,
