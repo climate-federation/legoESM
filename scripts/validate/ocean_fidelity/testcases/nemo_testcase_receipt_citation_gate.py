@@ -1690,11 +1690,11 @@ CITATION_MAP = {
         15],
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynhpg.f90:395-406': [
         ('zuap = -zcoef0', 1),
-        ('puu(ji,jj,1,Krhs) = zhpi(ji,jj) + zuap', 1),
+        ('l2_sum_u (ji,jj,1) = zhpi(ji,jj) + zuap', 1),
         12],
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynhpg.f90:411-432': [
         ('DO jk= 2, jpkm1', 1),
-        ('puu(ji,jj,jk,Krhs) = zhpi(ji,jj) + zuap', 1),
+        ('l2_sum_u (ji,jj,jk) = zhpi(ji,jj) + zuap', 1),
         22],
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynhpg.f90:401-402': [
         ('puu(ji,jj,1,Krhs) = zhpi(ji,jj) + zuap', 1),
