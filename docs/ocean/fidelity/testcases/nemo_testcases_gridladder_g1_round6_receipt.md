@@ -445,6 +445,8 @@ UNVERIFIED:
 
 final/: citation_plant.json=6c0b7995e093cb0e, citation_receipt.json=d240708ecf9fb166, geometry.json=7a554d44c0f3fa5a, given_entry_10.json=2628d457f0043283, interior_events_24.json=4e5e4803be2764a5, kt23_given_entry_chainTS.json=b589b8a731794390, kt23_given_entry.json=8b09c180c88ce7c3, leaf_kt31.json=1dfed74e111b4d5a, leaf_kt41.json=2e5920e616866713, plant_score.json=389bbb26091bdb0f, recheck_record100_3_card.json=39fc18715117c06b, record100_0_before.json=4b0310fa5fda3571, record100_1_fold.json=bf30ac34f728c8fe, record100_2b_fold_order.json=81d93679e1bd36c2, record100_2_fold_rhs.json=2782a7001b3a3a1f, record100_3_card_fold_fill_v.json=187be6e84802accc, record100_3_card.json=ee46c2f00d7d6c89, record100_3_card_without_entry_depth.json=62135ace366b6597, stages_kt1_3_card.json=d52e49f00fbbed1b, stages_kt1_3_neither.json=e5695bc19f0916b1, stages_kt1_3_without_stage1_rhs.json=885eeb6584580fe5, stages_kt1_3_without_written_order.json=1ab72a13940e0f2a, sub_kt31.json=135e81013702d5a0, sub_kt41_before.json=d90024d6c15e2243, sub_kt41.json=98a7b32ee40f6d0a.
 One level up: codex_review_r6.log=66abe3011ad47f2f, tests_g1_a.log=5a5c75bbb618b377, tests_g1_b.log=497c82cc1959cb17, tests_g1_c.log=8fc092944bae9c9c, tests_g1_d.log=22a4b61366d7b6a3, tests_ratchets.log=82ae2701c3588786, kt1_3_stages_nemo_rhs_dirty.json=34b647aa0d3dcb4e, leaf_kt31_dirty.json=f094d25f7304aa16, leaf_kt41_dirty.json=017ea5e899ce7218.
+citation_receipt.json was regenerated on the final receipt (PASS, 12
+citations) after this list was written; its hash above is the earlier run's.
 
 ## OPEN for round 7
 
