@@ -153,7 +153,7 @@ domain_cfg_admit() {   # $1 = directory for the logs; refuses unless complete
     || { printf 'REFUSE: %s is not a complete G1 domain file\n' "$DOMDIR/domain_cfg.nc" >&2; exit 70; }
   # Facts the receipt quotes (reported, not judged).
   grep -n 'close file: domain_cfg.nc ok' "$DOMDIR/ocean.output" | sed 's/^/G1_DOMAINCFG_CLOSE_LINE ocean.output:/' || true
-  printf 'G1_DOMAINCFG_NOT_FINALISED_LINES %s\n' "$(grep -c 'exiting improperly' "$DOMDIR/run.user.log" || true)"
+  printf 'G1_DOMAINCFG_NOT_FINALISED_LINES %s\n' "$(grep -c 'exited without calling "finalize"' "$DOMDIR/run.user.log" || true)"
   printf 'G1_DOMAIN_CFG_SHA256 %s\n' "$(sha256sum "$DOMDIR/domain_cfg.nc" | awk '{print $1}')"
 }
 
