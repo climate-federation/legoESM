@@ -184,14 +184,15 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
             jnp.asarray(card.recipe.grid.dy_u),
             jnp.asarray(card.recipe.grid.dy_v),
         )))
+    current_u = np.asarray(current_replay[0]) * call["u_mask"]
     replay_reference = call["output_u"].copy()
     if plant == "replay-bit":
         replay_reference.view(np.uint64).flat[0] ^= np.uint64(1)
-    current_replay_row = _score(current_replay[0], replay_reference)
+    current_replay_row = _score(current_u, replay_reference)
     require(current_replay_row["max_abs"] <= FLOOR,
-            "candidate-side source replay does not reproduce the live output")
+            f"candidate-side source replay moved: {current_replay_row}")
     target_replay = _score(
-        hpg + r266._native_u(current_replay[0]), after)
+        hpg + r266._native_u(current_u), after)
     require(target_replay["max_abs"] <= FLOOR,
             "offline source replay does not reproduce the live accumulator")
 
@@ -213,9 +214,10 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
         )))
 
     zeta_row = _score(call["zeta"], literal_zeta)
-    literal_output_row = _score(literal_output[0], call["output_u"])
+    literal_u = np.asarray(literal_output[0]) * call["u_mask"]
+    literal_output_row = _score(literal_u, call["output_u"])
     literal_boundary_row = _score(
-        hpg + r266._native_u(literal_output[0]),
+        hpg + r266._native_u(literal_u),
         oracle_rows["after_vorticity_u"])
     residual = after - oracle_rows["after_vorticity_u"]
     topology = _topology_rows(
@@ -247,7 +249,7 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
         candidate_zeta=call["zeta"],
         literal_zeta=literal_zeta,
         candidate_vorticity_u=call["output_u"],
-        literal_vorticity_u=np.asarray(literal_output[0]),
+        literal_vorticity_u=literal_u,
         u_mask=call["u_mask"],
         v_mask=call["v_mask"],
     )
