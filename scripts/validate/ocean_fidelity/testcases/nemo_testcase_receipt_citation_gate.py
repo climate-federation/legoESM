@@ -1840,10 +1840,7 @@ CITATION_MAP = {
         ('hu_e  (:,:) =    (hu_0(:,:) *(1._wp+r3u(:,:,Kmm)))', 1),
         ('hv_e  (:,:) =    (hv_0(:,:) *(1._wp+r3v(:,:,Kmm)))', 1),
         2],
-    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/domqco.f90:281-285': [
-        ('pr3f(ji,jj) = 0.25_wp * (   (  e1e2t(ji  ,jj  ) * pssh(ji  ,jj  )', 2),
-        (') * r1_hf_0(ji,jj) * r1_e1e2f(ji,jj)', 2),
-        5],
+    # domqco.f90:281-285 (the F-point ratio) is mapped once, in the round 3 block.
     # --- GRIDLADDER round 5 END ---
     # --- ORCA2 round 253: kt=8 midpoint-SSH failure boundary -------
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:489-493': [
