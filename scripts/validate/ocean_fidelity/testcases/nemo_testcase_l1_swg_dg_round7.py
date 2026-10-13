@@ -236,7 +236,10 @@ def run(root: Path = DG_ROOT, *, plant: bool = True) -> dict:
             name="control.one_ulp_u_changes_stage1_ssh", ladder=ladder)
         require(not control["bit_identical"],
                 "one-ULP control did not change stage-1 SSH")
-        control.update({"input_field": "u_k", "input_cell": list(at)})
+        control.update({
+            "input_field": "u_k",
+            "input_cell": [int(index) for index in at],
+        })
 
     comparisons = {
         "record_next_stage1_vs_restart": record_vs_restart,
@@ -294,7 +297,13 @@ def run(root: Path = DG_ROOT, *, plant: bool = True) -> dict:
 def _write_json(path: Path, payload: dict) -> None:
     require(not path.exists(), f"refusing to overwrite {path}")
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    def encode(value):
+        if isinstance(value, np.generic):
+            return value.item()
+        raise TypeError(f"unsupported JSON value {type(value).__name__}")
+
+    path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True, default=encode) + "\n")
 
 
 def main(argv=None) -> int:

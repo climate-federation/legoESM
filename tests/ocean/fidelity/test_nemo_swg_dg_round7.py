@@ -83,7 +83,7 @@ def test_restart_specs_cover_every_field_once():
 
 def test_json_writer_refuses_overwrite(tmp_path):
     path = tmp_path / "round7.json"
-    round7._write_json(path, {"answer": 7})
+    round7._write_json(path, {"answer": np.int64(7)})
     assert path.read_text() == '{\n  "answer": 7\n}\n'
     with pytest.raises(RuntimeError, match="refusing to overwrite"):
         round7._write_json(path, {"answer": 8})
