@@ -1484,7 +1484,7 @@ class OceanPartialCellCoordinate(NamedTuple):
     # lateral_viscosity_coefficient_source="nemo_ahm_3d_file" arm reads them;
     # every other card leaves them None and is bit-identical.
     nemo_ldf_ahmt: jnp.ndarray | None = None
-    nemo_ldf_ahmf: jnp.ndarray | None = None
+    nemo_ldf_ahmf: jnp.ndarray | None = None; nemo_r3t_stored_product: bool = False  # card-selected, see _nemo_r3t_product  # noqa: E501,E702
 
 
 def create_partial_cell_coordinate(
@@ -1688,7 +1688,7 @@ def create_partial_cell_coordinate(
         nemo_e2u=getattr(z_coord, "nemo_e2u", None),
         nemo_e1v=getattr(z_coord, "nemo_e1v", None),
         nemo_een_barotropic=getattr(
-            z_coord, "nemo_een_barotropic", None),
+            z_coord, "nemo_een_barotropic", None), nemo_r3t_stored_product=getattr(z_coord, "nemo_r3t_stored_product", False) is True,  # noqa: E501
     )
 
 
@@ -1770,7 +1770,7 @@ def create_full_step_coordinate(
         nemo_e2u=getattr(z_coord, "nemo_e2u", None),
         nemo_e1v=getattr(z_coord, "nemo_e1v", None),
         nemo_een_barotropic=getattr(
-            z_coord, "nemo_een_barotropic", None),
+            z_coord, "nemo_een_barotropic", None), nemo_r3t_stored_product=getattr(z_coord, "nemo_r3t_stored_product", False) is True,  # noqa: E501
     )
 
 
@@ -2004,7 +2004,7 @@ def compute_ocean_jacobian(
         r1_h = jnp.where(H_bathy > 0.0,
                          jnp.asarray(1.0, _dt) / jnp.asarray(H_safe, _dt),
                          jnp.asarray(0.0, _dt))
-        jac = 1.0 + jnp.asarray(eta, _dt) * r1_h
+        jac = 1.0 + _nemo_r3t_product(jnp.asarray(eta, _dt) * r1_h, z_coord)
         if min_water_column_m is not None:
             # legoESM's own floor; NEMO has none, so there is no faithful form
             # to match and this keeps every clipped cell at its pre-round-40
@@ -3078,3 +3078,19 @@ def flux_form_vertical_tracer_advection_tvd(
     vert_flux_div = F[..., :-1] - F[..., 1:]
 
     return vert_flux_div
+
+
+def _nemo_r3t_product(product, z_coord):
+    """NEMO's T-point thickness ratio as the STORED product it is.
+
+    ``domqco.f90:257`` writes ``r3t = ssh * r1_ht_0`` into an array; every
+    thickness then reads ``e3t_0 * (1 + r3t)`` (``trazdf.f90:233``, ``:284``).
+    The product is rounded before the one is added.  Left bare, the compiled
+    ``1 + eta * r1_h`` may be contracted into one fused operation, which
+    rounds differently on rare cells (one T cell at step 19 of the G1
+    record).  ``OceanPartialCellCoordinate.nemo_r3t_stored_product`` selects
+    the rounded product; otherwise ``product`` is returned unchanged.
+    """
+    if getattr(z_coord, "nemo_r3t_stored_product", False) is not True:
+        return product      # identity test: a traced flag reads as off, never raises
+    return nemo_source_round(product)

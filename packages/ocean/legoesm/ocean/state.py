@@ -1628,6 +1628,11 @@ class BarotropicConfig(NamedTuple):
     # the halo row's source, two rows below.  One fold unit with the option
     # above: the solver refuses one without the other.
     barotropic_een_fe3mask_pivot_row: bool = False
+    # NEMO's written order for the U-, V- and F-point thickness ratios the
+    # solver's EEN coefficients are stretched with (domqco.f90:266-269,
+    # :281-285): times the stored reciprocal face area, not divided by the
+    # area.  False keeps the division.  e1 * e2 face areas only.
+    barotropic_een_ratio_written_order: bool = False
 
 
 class RuntimeChecksConfig(NamedTuple):

@@ -7308,7 +7308,7 @@ class LatLonCGridOceanModel:
                         dz_ref=getattr(_zc, "dz_ref", None),
                         coefficient_evaluation=_een_eval,
                         eta=state.eta.data,
-                        z_coord=_zc, fold_pivot_row=nemo_een_fold_pivot_row(_cfg_b),
+                        z_coord=_zc, fold_pivot_row=nemo_een_fold_pivot_row(_cfg_b) + (_cfg_b.barotropic.barotropic_een_ratio_written_order,),  # noqa: E501
                         return_pre=True,
                         scheme=_bt_pv_scheme,
                         # dyn_cor_2D, CALLED at dynspg_ts.f90:289 and

@@ -83,6 +83,18 @@ Arms (``--arm``):
                fe3mask pivot row alone (dommsk.f90:232, :258), both; no
                model step
 
+  ratio_order_replay  OFFLINE, kt = kt-min..kt-max, from NEMO's record and
+               the card's mesh arrays: the U-, V- and F-point thickness
+               ratios from NEMO's entry sea level in NEMO's written order
+               (domqco.f90:266-269, :281-285; must be 0 unequal against
+               NEMO's recorded entry ratios off the top row) and divided by
+               the face area; the solver's four V-face Coriolis coefficients
+               (dynspg_ts.f90:987-1008) replayed from NEMO's recorded ratios
+               on open faces (0 unequal against NEMO's recorded coefficients
+               where the step holds a substep record) against the PRODUCTION
+               builder run on NEMO's entry sea level with the written-order
+               option on and off; no model step
+
 Every scored row is split into the preregistered regions (fold band, seam,
 south, interior; interior again into coast-adjacent and open).  The scorer
 and its 1e-15 bar are the shared trajectory gate's; the record reader is the
@@ -111,7 +123,7 @@ DEFAULT_ROOT = Path(
 ARMS = ("geometry", "independent", "given_entry", "rhs", "handoff", "stages",
         "vor_fold_replay", "restart_entry", "fold_v_depth", "rhs_terms",
         "interior_events", "stage_replay", "substeps", "substeps_independent",
-        "flux_update_replay", "ratio_fold_replay")
+        "flux_update_replay", "ratio_fold_replay", "ratio_order_replay")
 PLANTS = ("score", "entry")
 STAGE_STEPS = 10          # round 1's record: stage frames at kt = 1..10
 FOLD_ROWS, SEAM_COLS, SOUTH_ROWS = 3, 2, 3
@@ -968,6 +980,73 @@ def ratio_fold_rows(root: Path, kt: int, card, reg) -> dict:
     return out
 
 
+def ratio_order_rows(root: Path, kt: int, card, plant: str | None = None) -> dict:
+    """The solver's thickness ratios and V-face Coriolis coefficients at one
+    step: NEMO's statements replayed in numpy against NEMO's record (the
+    controls) and against the production coefficient builder."""
+    import jax.numpy as jnp
+    from legoesm.ocean.dynamics import barotropic_latlon_cgrid as bt
+    g = read_step(root, kt)
+    raw, grid = card.recipe.z_coord.nemo_een_barotropic, card.recipe.grid
+    a = lambda n: np.asarray(getattr(raw, n), dtype=np.float64)  # noqa: E731
+    ssh = np.array(g["e_ssh_bb"])
+    area_ssh = (a("e1t") * a("e2t")) * ssh
+    north = np.roll(area_ssh, -1, axis=0)        # the top row is not scored
+    nemo = (g["e_r3u_bb"], g["e_r3v_bb"], g["e_r3f"])
+    written = ratio_stencil(area_ssh, north, a, True)
+    divided = ratio_stencil(area_ssh, north, a, False)
+    below = np.s_[:-1]
+    ratios = [{"ratio": name,
+               "written_order_vs_nemo": int(np.count_nonzero((w != ref)[below])),
+               "divided_vs_nemo": int(np.count_nonzero((d != ref)[below])),
+               "one_plus_ratio_divided_vs_nemo": int(np.count_nonzero(
+                   ((1.0 + d) != (1.0 + ref))[below])),
+               "n": int(ref[below].size)}
+              for name, w, d, ref in zip(("r3u", "r3v", "r3f"), written, divided, nemo)]
+    # dyn_cor_2D_init, V faces (dynspg_ts.f90:987-1008), one level, from
+    # NEMO's recorded ratios; open faces only: every T cell within two cells
+    # wet, three rows off the south wall and the fold, so that e3f_0vor is
+    # e3f_0, fe3mask is 1 and no neighbour is a halo
+    um, vm = (a(n)[..., 0] for n in ("umask", "vmask"))
+    tm = np.asarray(card.recipe.z_coord.is_active, dtype=np.float64)[..., 0]
+    w_, s_, n_ = (lambda x: np.roll(x, 1, 1)), (lambda x: np.roll(x, 1, 0)), (
+        lambda x: np.roll(x, -1, 0))
+    open_faces = np.ones(tm.shape, dtype=bool)
+    for dj in range(-2, 3):
+        for di in range(-2, 3):
+            open_faces &= np.roll(np.roll(tm, dj, 0), di, 1) > 0
+    open_faces[:3] = open_faces[-3:] = False
+    q = a("ff_f") / (a("e3f_0")[..., 0] * (1.0 + nemo[2]))
+    e3u = a("e3u_0")[..., 0] * (1.0 + nemo[0] * um)
+    e3v = a("e3v_0")[..., 0] * (1.0 + nemo[1] * vm)
+    lead = (1.0 / 12.0) * (1.0 / a("e2v")) * (_inverse_depth(a("hv_0")) / (1.0 + nemo[1]))
+    triads = {"ffv_nw": (q + w_(q)) + n_(w_(q)), "ffv_ne": (n_(q) + q) + w_(q),
+              "ffv_sw": (s_(w_(q)) + w_(q)) + q, "ffv_se": (w_(q) + q) + s_(q)}
+    at = {"ffv_nw": lambda x: n_(w_(x)), "ffv_ne": n_, "ffv_sw": w_, "ffv_se": lambda x: x}
+    replay = {k: lead * at[k](a("e2u")) * (e3v * at[k](e3u) * at[k](um) * z)
+              for k, z in triads.items()}
+    if plant == "score":
+        j, i = np.argwhere(open_faces)[0]
+        replay["ffv_nw"][j, i] *= 2.0
+    recorded = (read_substep_record(root, kt)[1]
+                if _checker().substep_path(root, kt).is_file() else None)
+    coefficients = []
+    for selected in (False, True):
+        built = bt._nemo_literal_een_coefficients(
+            jnp.asarray(ssh), card.recipe.z_coord, jnp.float64, scheme="een",
+            grid=grid, fold_pivot_row=(True, True, selected))
+        for k, ref in replay.items():
+            d = (np.asarray(built[k]) != ref) & open_faces
+            coefficients.append({
+                "written_order_option": selected, "operand": k,
+                "builder_vs_replay": int(d.sum()),
+                "cells": [[int(x) for x in c] for c in np.argwhere(d)[:8]],
+                "replay_vs_nemo_recorded": None if recorded is None else int(
+                    np.count_nonzero((recorded["i000_" + k] != ref) & open_faces))})
+    return {"kt": kt, "ratio_rows": ratios, "n_open_faces": int(open_faces.sum()),
+            "coefficient_rows": coefficients}
+
+
 SUB_REGIONS = ("fold", "seam", "south", "interior")
 
 
@@ -1101,7 +1180,9 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
         without_vor_order: bool = False,
         without_zdf_residual: bool = False,
         without_fold_exchange_v: bool = False,
-        without_stage_r3f: bool = False) -> dict:
+        without_stage_r3f: bool = False,
+        without_ratio_order: bool = False,
+        without_r3t_product: bool = False) -> dict:
     if vor_fold_image:
         from legoesm.ocean.fidelity import nemo_testcase_recipe as _recipe
         calls: list = []
@@ -1123,7 +1204,9 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
                       without_vor_order=without_vor_order,
                       without_zdf_residual=without_zdf_residual,
                       without_fold_exchange_v=without_fold_exchange_v,
-                      without_stage_r3f=without_stage_r3f)
+                      without_stage_r3f=without_stage_r3f,
+                      without_ratio_order=without_ratio_order,
+                      without_r3t_product=without_r3t_product)
         require(len(calls) > 0, "the vorticity fold-image arm was never traced")
         out["vor_fold_image_measurement_arm"] = {"traces": len(calls)}
         out["label"] = f"{out['label']} + MEASUREMENT ARM (fold-image V row "\
@@ -1150,6 +1233,11 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
     from legoesm.ocean.fidelity import nemo_testcase_recipe as recipe
 
     card = recipe.build_nemo_testcase_card("ORCA2G1-flat", deck_root=root)
+    if without_r3t_product:   # ROUND-8 BEFORE ARM / plant: the bare product
+        require(card.recipe.z_coord.nemo_r3t_stored_product is True,
+                "the card no longer selects the stored T-point ratio")
+        card = card._replace(recipe=card.recipe._replace(
+            z_coord=card.recipe.z_coord._replace(nemo_r3t_stored_product=False)))
     cfg = card.recipe.model_config
     if before_arm:      # BEFORE ARM / plant: the card without its fold-image row
         require(cfg.een_fold_image_v_row is True, "the card no longer selects the row")
@@ -1190,6 +1278,11 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
         if off:               # ROUND-6 BEFORE ARMS / plants, one option each
             require(getattr(cfg, name) is True, f"the card no longer selects {name}")
             cfg = cfg._replace(**{name: False})
+    if without_ratio_order:   # ROUND-8 BEFORE ARM / plant: divide by the area
+        require(cfg.barotropic.barotropic_een_ratio_written_order is True,
+                "the card no longer selects the written-order ratios")
+        cfg = cfg._replace(barotropic=cfg.barotropic._replace(
+            barotropic_een_ratio_written_order=False))
     if without_ratio_fold:    # ROUND-6 BEFORE ARM / plant: the bare stencil
         require(cfg.barotropic.barotropic_een_ratio_fold_exchange is True,
                 "the card no longer selects the ratio fold exchange")
@@ -1228,6 +1321,13 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
                 "totals": {name: {"n_unequal": sum(r[name]["n_unequal"] for r in rows),
                                   "max_abs": max(r[name]["max_abs"] for r in rows)}
                            for name in REPLAY_ORDERS}}
+    if arm == "ratio_order_replay":
+        require(1 <= kt_min <= kt_max <= n_stage, f"steps must lie in 1..{n_stage}")
+        return {"arm": arm, "legoesm_git_sha": sha, "root": str(root), "plant": plant,
+                "label": "NEMO's record only (offline replay of the solver's "
+                         "thickness ratios and V-face coefficients; no model step)",
+                "per_kt": [ratio_order_rows(root, kt, card, plant)
+                           for kt in range(kt_min, kt_max + 1)]}
     if arm == "ratio_fold_replay":
         require(1 <= kt_min == kt_max <= n_stage, "one step holding stage frames")
         reg = regions(np.asarray(card.recipe.z_coord.is_active)[..., 0])
@@ -1375,6 +1475,10 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
                cfg.zdf_barotropic_removal_nemo_literal),
            "rk3_fold_exchange_top_v_row": bool(cfg.rk3_fold_exchange_top_v_row),
            "rk3_stage_r3f_nemo_literal": bool(cfg.rk3_stage_r3f_nemo_literal),
+           "barotropic_een_ratio_written_order": bool(
+               cfg.barotropic.barotropic_een_ratio_written_order),
+           "nemo_r3t_stored_product": bool(
+               card.recipe.z_coord.nemo_r3t_stored_product),
            "per_kt": []}
     records = {kt: read_step(root, kt) for kt in scored if kt <= n_stage}
     before = {}             # the card's own chain: the state entering step kt
@@ -1757,6 +1861,18 @@ def _print(out: dict) -> None:
                           + " ".join(f"{n}={v['n_unequal']}"
                                      for n, v in x["regions"].items()))
         return
+    if out["arm"] == "ratio_order_replay":
+        print(out["label"])
+        for k in out["per_kt"]:
+            print(f"kt {k['kt']}: " + "; ".join(
+                f"{r['ratio']} written {r['written_order_vs_nemo']} divided "
+                f"{r['divided_vs_nemo']} (1+r {r['one_plus_ratio_divided_vs_nemo']})"
+                f" of {r['n']}" for r in k["ratio_rows"]))
+            for r in k["coefficient_rows"]:
+                print(f"   option {str(r['written_order_option']):5s} {r['operand']} "
+                      f"builder vs replay {r['builder_vs_replay']} {r['cells']} | "
+                      f"replay vs NEMO {r['replay_vs_nemo_recorded']}")
+        return
     if out["arm"] == "ratio_fold_replay":
         print("NEMO halo ssh == mirrored row below:",
               out["nemo_halo_ssh_equals_mirrored_row_below"],
@@ -1914,6 +2030,12 @@ def main(argv=None) -> int:
     ap.add_argument("--without-fold-exchange-v", action="store_true",
                     help="BEFORE ARM: the stored top V row left at the "
                          "compact mask's zero (round 6's card)")
+    ap.add_argument("--without-r3t-product", action="store_true",
+                    help="the card's coordinate with nemo_r3t_stored_product "
+                         "off (round 8's before arm / plant)")
+    ap.add_argument("--without-ratio-order", action="store_true",
+                    help="the card with barotropic_een_ratio_written_order "
+                         "off (round 8's before arm / plant)")
     ap.add_argument("--without-stage-r3f", action="store_true",
                     help="BEFORE ARM: the stage F ratio taken from the "
                          "stage's interpolated sea level")
@@ -1948,7 +2070,9 @@ def main(argv=None) -> int:
                   without_vor_order=a.without_vor_order,
                   without_zdf_residual=a.without_zdf_residual,
                   without_fold_exchange_v=a.without_fold_exchange_v,
-                  without_stage_r3f=a.without_stage_r3f)
+                  without_stage_r3f=a.without_stage_r3f,
+                  without_ratio_order=a.without_ratio_order,
+                  without_r3t_product=a.without_r3t_product)
     except Exception as e:      # noqa: BLE001 -- refusals print and exit 2
         print(f"REFUSE: {type(e).__name__}: {e}", file=sys.stderr)
         return 2
@@ -1957,6 +2081,13 @@ def main(argv=None) -> int:
     _print(out)
     if a.arm == "geometry":
         return 0 if out["all_bit_identical"] else 1
+    if a.arm == "ratio_order_replay":   # the two controls gate the arm
+        bad = [k["kt"] for k in out["per_kt"] if any(
+            r["written_order_vs_nemo"] for r in k["ratio_rows"]) or any(
+            r["replay_vs_nemo_recorded"] for r in k["coefficient_rows"])]
+        if bad:
+            print(f"STATUS CONTROL-FAILED at kt {bad}", file=sys.stderr)
+        return 1 if bad else 0
     if a.plant:     # a plant must move a row that is AT-BAR when unplanted
         # (kt = 1 only: all five rows are at the bar there in both labels;
         # T and S are excluded, NEMO's kt = 1 entry holds T, S on land)
