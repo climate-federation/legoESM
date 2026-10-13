@@ -352,3 +352,11 @@ One level up: codex_review_r8.log=2bfaa259b273634e, tests_g1_r8_a.log=b8eaf3714f
    (a user question only if a bit-identical record is wanted; the bar does
    not need it).
 5. ORCA2 import of statement F needs the domain file's U and V face areas.
+
+## Citation gate (run after the receipt's first commit, 7 of this round)
+
+PASS: 10 citations, 0 unmapped, whole-map audit clean
+(final/citation_receipt.json); the shifted-citation plant exits 1
+(final/citation_plant.json). Three map entries are new this round (the U and
+V ratio statement, the reciprocal areas, the solver's exit assignment); the
+other seven were mapped by earlier rounds.
