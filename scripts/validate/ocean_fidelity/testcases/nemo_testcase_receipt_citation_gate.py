@@ -1670,12 +1670,12 @@ CITATION_MAP = {
         5],
     # --- ORCA2 round 265: matched stage-2 U RHS boundary -----------
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/stprk3_stg.f90:360-424': [
-        ('SELECT CASE( kstg )', 1),
-        ('CALL dyn_adv( kstp, Kmm, Kmm, uu, vv, Krhs)', 2),
+        ('SELECT CASE( kstg )', 2),
+        ('END SELECT', 6),
         65],
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/stprk3_stg.f90:443-455': [
-        ('Krhs aliases Kaa at', 1),
-        ("l4_canon_3d(uu(:,:,:,Krhs),'U')", 1),
+        ('Round-11 L2 WRITE-only composition boundary', 1),
+        ('L2_RK_STAGE2_PREUPDATE_DUMP', 1),
         13],
     'barotropic_latlon_cgrid.py:2006-2025': [
         ('eta_mid = eta_c', 1),
