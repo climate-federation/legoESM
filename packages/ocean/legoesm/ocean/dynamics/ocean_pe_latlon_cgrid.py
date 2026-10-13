@@ -2603,6 +2603,7 @@ def _bc_pv_flux(
     vorticity_scheme="al81",
     een_q_boundary="neumann_fill",
     een_fold_image_v=False,
+    een_written_order=False,
     een_e3f_scheme="min",
     een_metric_weighting="off",
     dz_ref=None,
@@ -2923,6 +2924,7 @@ def _bc_pv_flux(
                 zeta, h_vtx, *_een_fold_image_v_row(
                     een_fold_image_v, grid, h_v, v, h_u, u,
                     u_mask_3d, v_mask_3d), vtx_mask_va,
+                written_order=een_written_order,
                 f_vtx=_f_vtx_al,
                 q_boundary=een_q_boundary,
                 metric_widths=_mw,
@@ -5450,6 +5452,8 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
                                        "neumann_fill"),
                 een_fold_image_v=getattr(
                     config, "een_fold_image_v_row", False),
+                een_written_order=getattr(
+                    config, "een_vorticity_written_order", False),
                 een_e3f_scheme=config.een_e3f_scheme,
                 een_metric_weighting=getattr(
                     config, "een_metric_weighting", "off"),
@@ -5496,6 +5500,8 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             een_q_boundary=getattr(config, "een_q_boundary", "neumann_fill"),
             een_fold_image_v=getattr(
                 config, "een_fold_image_v_row", False),
+            een_written_order=getattr(
+                config, "een_vorticity_written_order", False),
             een_e3f_scheme=config.een_e3f_scheme,
             een_metric_weighting=getattr(
                 config, "een_metric_weighting", "off"),
