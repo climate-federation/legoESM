@@ -156,6 +156,8 @@ FILES = {
         _ORCA2G1_P3 / "ppsrc/nemo/dynzdf.f90"),
     "ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/domqco.f90": (
         _ORCA2G1_P3 / "ppsrc/nemo/domqco.f90"),
+    "ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/domhgr.f90": (
+        _ORCA2G1_P3 / "ppsrc/nemo/domhgr.f90"),
     "ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90": (
         _ORCA2G1_P3 / "ppsrc/nemo/stprk3_stg.f90"),
     "ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/trazdf.f90": (
@@ -1897,6 +1899,21 @@ CITATION_MAP = {
         ("ts(:,:,:,jp_tem,Kaa), 'T',  1._wp, ts(:,:,:,jp_sal,Kaa), 'T',  1._wp, ldfull=.TRUE. )", 2),
         2],
     # --- GRIDLADDER round 7 END ---
+    # --- GRIDLADDER round 8 (solver ratio order, stored T-point ratio) ---
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/domqco.f90:266-269': [
+        ('pr3u(ji,jj) = 0.5_wp * (  e1e2t(ji  ,jj) * pssh(ji  ,jj)', 2),
+        ('+ e1e2t(ji,jj+1) * pssh(ji,jj+1)  ) * r1_hv_0(ji,jj) * r1_e1e2v(ji,jj)', 2),
+        4],
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/domhgr.f90:156': ('r1_e1e2f(:,:) = 1._wp / e1e2f(:,:)', 1),
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/domhgr.f90:170-171': [
+        ('r1_e1e2u(:,:) = 1._wp / e1e2u(:,:)', 1),
+        ('r1_e1e2v(:,:) = 1._wp / e1e2v(:,:)', 1),
+        2],
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:667-669': [
+        ('puu_b(:,:,Kaa) = ua_e  (:,:)', 1),
+        ('pssh (:,:,Kaa) = ssha_e(:,:)', 1),
+        3],
+    # --- GRIDLADDER round 8 END ---
     # --- ORCA2 round 253: kt=8 midpoint-SSH failure boundary -------
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:489-493': [
         ('Extrapolate Sea Level at step jit+0.5', 1),
