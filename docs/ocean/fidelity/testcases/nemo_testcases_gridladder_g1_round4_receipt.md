@@ -9,10 +9,11 @@ split-explicit substep loop, and the acquisition that records it is written
 Preregistration: docs/ocean/fidelity/PREREG_nemo_testcases_gridladder_g1_round4.md
 (commit 98b405b9f, before any measurement). Code commits 5204bad9d (option,
 instrument, tests), 2c602e127 (acquisition), aa0f7ee8f (review fixes, line
-numbers). Evidence: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/round4/final/
-(json stamped 5204bad9d; the replay and the step-6 stage pair stamped
-aa0f7ee8f; the commits between them change comments, row labels and the
-record checker, no model expression).
+numbers), 6ee16fc0f (the option's arithmetic moved inline). Evidence: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/round4/final/
+(json stamped 5204bad9d; the replay stamped aa0f7ee8f; the 100-step record
+and the step-6 stage row re-run at 6ee16fc0f, the final code: 0 of 598 record
+rows differ from the 5204bad9d run in maximum, RMS or count, and the stage-1
+row still has 0 unequal cells).
 Record: the operator's round-3 acquisition,
 .../gridladder_rounds/round3/oracle_g1_r3/p3_a_100step (stage frames at
 steps 1 to 50). Baseline: the round-3 receipt's tables.
@@ -319,7 +320,7 @@ only at those steps; the patch is that round's patch on NEMO's shipped solver
 file with eight added writes of the Coriolis coefficients at loop entry (76
 added lines, 0 removed; every added line is a writer call). The checker
 admits the streams and refuses a missing, truncated, non-finite, stray,
-schema-short or twin-divergent one. Preflight at aa0f7ee8f: patch applies,
+schema-short or twin-divergent one. Preflight at 6ee16fc0f: patch applies,
 PREFLIGHT_OK. About 1.7 GB. Not compiled by me (UNVERIFIED): the eight added
 calls pass allocated module arrays of the inner-domain extent.
 
@@ -362,6 +363,9 @@ Focused tests, synchronous, final tree:
 - The three G1 files: **107 passed** (24 ladder, 21 tools, 62 card), including each new option's plant: the stage-1 row has 0 unequal
   cells with the option and over 500 without; step 17 is at the bar with
   NEMO's T, S and over it at the cell with the card's.
+- The inline-import budget test, run because the option first added one:
+  23 failed, 43 passed, and the same 23 fail without this round (the model
+  file holds 112 such imports at the branch base and now, budget 55).
 - Six ratchets: 6153 passed, 2 skipped, 4 failed. None is in a file this
   round touched (git diff 43f4f070c is empty for each): the slab-land
   dispatch guard, the jra55 literal, the inline coefficients in the land
@@ -370,6 +374,11 @@ Focused tests, synchronous, final tree:
 - NOT RUN: any closed-card ladder (GYRE, VORTEX, TSUNAMI, ORCA2) and the
   wider RK3 unit selection. The option is default-off and the legacy
   expression is untouched, but no closed card was re-scored.
+
+Citation gate on this receipt: PASS, 13 citations, 0 unmapped, whole-map
+audit clean (it was not clean with the helper version: 39 earlier citations
+had shifted, which is why the arithmetic moved inline); the shifted-citation
+plant exits 1 (citation_receipt.json, citation_plant.json under final/).
 
 Compliance, stated because no gate enforces it: search-before-build (section
 3; the acquisition reuses the existing writer and patch); one variable per
@@ -389,8 +398,8 @@ UNVERIFIED:
 
 ## 11. Evidence hashes (SHA-256 prefixes, final/)
 
-fold_kt31_given_entry.json=561fe14a851f2fd5, fold_kt31_handoff.json=c7e09578c9b70df0, fold_kt31_rhs.json=19ab38903ff81355, fold_kt31_stages.json=3de932ca036ce085, fold_kt41_given_entry.json=c2004f7c41c26640, fold_kt41_handoff.json=eb362b7a2ce84820, fold_kt41_rhs.json=736f5a498bc9a24c, fold_kt41_stages.json=dc84b87774990ebc, geometry.json=0ba8a9d2dc93b609, given_entry_49_after.json=79eb860136c0c4e6, kt17_given_entry_chainTS.json=66fbb202e811687b, kt17_given_entry.json=4190cccf05e16513, kt17_handoff_chainTS.json=75de5977399df375, kt17_handoff.json=789195bd715b6630, kt17_rhs_chainTS.json=795f4cef06ba3106, kt17_rhs.json=7a256139364d6bcf, kt17_stages_chainTS.json=15f63977eaccce96, kt17_stages.json=832b7b1d530697e2, record100_after.json=9d1e9cb1434d9333, record100_before.json=4a94b9172e9745e8, restart_entry_after.json=f7779c570ab53ffe, stage_replay.json=dd3793caab169bc3, stages_kt6_after.json=022031bffa7d9e3d, stages_kt6_before.json=e1e2b4e9c2d4dd01.
-One level up: codex_review_r4.log=960e72d3c161cd37, preflight_r4.log=42c7c63018ea2a10, admission_r4.json=b07e282effabd67e.
+fold_kt31_given_entry.json=561fe14a851f2fd5, fold_kt31_handoff.json=c7e09578c9b70df0, fold_kt31_rhs.json=19ab38903ff81355, fold_kt31_stages.json=3de932ca036ce085, fold_kt41_given_entry.json=c2004f7c41c26640, fold_kt41_handoff.json=eb362b7a2ce84820, fold_kt41_rhs.json=736f5a498bc9a24c, fold_kt41_stages.json=dc84b87774990ebc, geometry.json=0ba8a9d2dc93b609, given_entry_49_after.json=79eb860136c0c4e6, kt17_given_entry_chainTS.json=66fbb202e811687b, kt17_given_entry.json=4190cccf05e16513, kt17_handoff_chainTS.json=75de5977399df375, kt17_handoff.json=789195bd715b6630, kt17_rhs_chainTS.json=795f4cef06ba3106, kt17_rhs.json=7a256139364d6bcf, kt17_stages_chainTS.json=15f63977eaccce96, kt17_stages.json=832b7b1d530697e2, record100_after.json=9d1e9cb1434d9333, record100_after_final.json=f6b0d31ca4a91f50, record100_before.json=4a94b9172e9745e8, restart_entry_after.json=f7779c570ab53ffe, stage_replay.json=dd3793caab169bc3, stages_kt6_after.json=f91e2f70058f8b19 (re-run at 6ee16fc0f), stages_kt6_before.json=e1e2b4e9c2d4dd01.
+One level up: codex_review_r4.log=960e72d3c161cd37, admission_r4.json=b07e282effabd67e.
 
 ## OPEN for round 5
 
