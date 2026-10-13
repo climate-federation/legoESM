@@ -717,12 +717,27 @@ def write_outputs(
     return report
 
 
+def online_control_namelist(name: str):
+    """Resolve one explicitly named no-closure experiment control."""
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import SWG_DG50_NAMELIST
+    from legoesm.ocean.fidelity.swg_online_decks import SWG_DG50_NU80_NAMELIST
+
+    controls = {
+        "dg50": SWG_DG50_NAMELIST,
+        "dg50-nu80": SWG_DG50_NU80_NAMELIST,
+    }
+    require(name in controls, f"unsupported online control {name}")
+    return controls[name]
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--nemo-root", type=Path)
     parser.add_argument("--legoesm-root", type=Path)
     parser.add_argument("--filtered-root", type=Path)
     parser.add_argument("--coarse-root", type=Path)
+    parser.add_argument(
+        "--coarse-deck", choices=("dg50", "dg50-nu80"), default="dg50")
     parser.add_argument("--start-day", type=int, default=1)
     parser.add_argument("--days", type=int, default=365)
     parser.add_argument("--output", type=Path, required=True)
@@ -747,19 +762,19 @@ def main(argv=None) -> int:
         else:
             require(args.filtered_root is not None and args.coarse_root is not None,
                     "filtered/coarse pair is incomplete")
-            from legoesm.ocean.fidelity.nemo_testcase_recipe import (
-                SWG_DG50_NAMELIST,
-                build_swg_card,
-            )
+            from legoesm.ocean.fidelity.nemo_testcase_recipe import build_swg_card
+
+            namelist = online_control_namelist(args.coarse_deck)
+            coarse_name = ("dg50 no closure" if args.coarse_deck == "dg50"
+                           else "dg50 nu80 no closure")
             providers = (filtered_npz_provider(
                              args.filtered_root, args.days,
                              start_day=args.start_day),
                          legoesm_npz_provider(
                              args.coarse_root, args.days,
-                             start_day=args.start_day, name="dg50 no closure",
-                             expected_namelist=SWG_DG50_NAMELIST))
-            card = build_swg_card(SWG_DG50_NAMELIST)
-            namelist = SWG_DG50_NAMELIST
+                             start_day=args.start_day, name=coarse_name,
+                             expected_namelist=namelist))
+            card = build_swg_card(namelist)
         diagnosed = compare(
             providers, days=args.days, card=card, namelist=namelist)
         report = write_outputs(

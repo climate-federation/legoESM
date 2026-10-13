@@ -291,3 +291,10 @@ def test_filtered_provider_reads_target_stagger_and_refuses_bad_digest(tmp_path)
     (tmp_path / "day0002.npz").write_bytes(b"plant")
     with pytest.raises(Exception, match="digest mismatch"):
         list(provider.iterate())
+
+
+def test_online_control_namelist_selects_viscosity_and_refuses_unknown():
+    assert climate.online_control_namelist("dg50").rn_Lv_m == 10.0
+    assert climate.online_control_namelist("dg50-nu80").rn_Lv_m == 80.0
+    with pytest.raises(Exception, match="unsupported online control"):
+        climate.online_control_namelist("post-hoc")

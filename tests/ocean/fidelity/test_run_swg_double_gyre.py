@@ -223,6 +223,46 @@ def test_compiled_hourly_sampler_retains_right_endpoints_only():
     assert np.asarray(hourly[2]).shape == (24, 2, 2)
 
 
+def test_zero_closure_truth_day_scan_matches_flat_training_segments_at_4_and_8d():
+    import jax
+    from legoesm.core.precision import PrecisionPolicy, set_policy
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        SWG_DG50_NAMELIST,
+        build_swg_card,
+        swg_surface_wind,
+    )
+    from legoesm.ocean.state import OceanSurfaceForcing
+
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    card = build_swg_card(SWG_DG50_NAMELIST)
+    model = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
+    tau_u, tau_v = swg_surface_wind(SWG_DG50_NAMELIST)
+    forcing = OceanSurfaceForcing(
+        tau_i_native=jax.numpy.asarray(tau_u, dtype=jax.numpy.float64),
+        tau_j_native=jax.numpy.asarray(tau_v, dtype=jax.numpy.float64))
+    initial = driver.seed_steady_forcing_carry(card.recipe.initial_state, forcing)
+    steps_per_day = 216
+    truth_day = driver.build_scanned_stepper(
+        model, card.dt_s, forcing, steps_per_day)
+    truth = initial
+    truth_states = {}
+    for day in range(1, 9):
+        truth = truth_day(truth)
+        if day in (4, 8):
+            truth_states[day] = truth
+    for days in (4, 8):
+        training_segment = driver.build_scanned_stepper(
+            model, card.dt_s, forcing, days * steps_per_day)
+        trained = training_segment(initial)
+        jax.block_until_ready(trained.eta.data)
+        differences = driver.prognostic_differences(
+            truth_states[days], trained)
+        assert all(differences[f"{name}_unequal"] == 0
+                   for name in ("ssh_m", "u_m_s", "v_m_s"))
+
+
 def test_operator_device_is_explicit_and_matches_visibility():
     driver.validate_operator_device(
         "gpu-native", 0, environ={"CUDA_VISIBLE_DEVICES": "0"})
