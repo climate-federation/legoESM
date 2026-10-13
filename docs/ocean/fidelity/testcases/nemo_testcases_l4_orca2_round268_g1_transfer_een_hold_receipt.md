@@ -15,7 +15,7 @@ re-derivation for measurement:
 1. the EEN trend reads the fold-image V transport row; NEMO constructs the
    live V transport at `ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynvor.f90:784-785`
    and consumes its north/south triads at
-   `ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynvor.f90:790-803`;
+   `ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynvor.f90:790-802`;
 2. the split-explicit face-depth statement reads NEMO's wet fold-image V row
    and T-point north neighbour, as cited and gated by geometry-ladder round 3.
 
@@ -31,9 +31,9 @@ The compiled ORCA2 `np_CRV` branch forms absolute vorticity at
 `ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynvor.f90:762-770`, the live U/V
 transports at `ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynvor.f90:784-785`,
 the four EEN triads at
-`ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynvor.f90:790-803`, and adds the
+`ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynvor.f90:790-802`, and adds the
 U/V trends to the stage accumulators at
-`ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynvor.f90:797-803`. This is the
+`ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynvor.f90:797-802`. This is the
 branch executed by OMT-4.
 
 At the matched stage-2 entry, every carried field is below the campaign's

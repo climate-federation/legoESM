@@ -1593,21 +1593,21 @@ FILES = {
 CITATION_MAP = {
     # --- ORCA2 round 268: transferred G1 EEN statement and remaining row ---
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynvor.f90:762-770': [
-        'CASE ( np_CRV )                           !* Coriolis + relative vorticity',
-        ('zwz(ji,jj) = ( zwz(ji,jj) - ff_f(ji,jj) ) * fmask(ji,jj,jk) + ff_f(ji,jj)', 1),
+        ('CASE ( np_CRV )                           !* Coriolis + relative vorticity', 4),
+        ('zwz(ji,jj) = ( zwz(ji,jj) - ff_f(ji,jj) ) * fmask(ji,jj,jk) + ff_f(ji,jj)', 3),
         9],
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynvor.f90:784-785': [
-        ('zwx(ji,jj) = e2u(ji,jj) * (e3u_3d(ji,jj,jk)', 1),
-        ('zwy(ji,jj) = e1v(ji,jj) * (e3v_3d(ji,jj,jk)', 1),
+        ('zwx(ji,jj) = e2u(ji,jj) * (e3u_3d(ji,jj,jk)', 3),
+        ('zwy(ji,jj) = e1v(ji,jj) * (e3v_3d(ji,jj,jk)', 3),
         2],
-    'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynvor.f90:790-803': [
+    'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynvor.f90:790-802': [
         ('ztne(ji,jj) = zwz(ji-1,jj  ) + zwz(ji  ,jj  ) + zwz(ji  ,jj-1)', 1),
-        ('pv_rhs(ji,jj,jk) = pv_rhs(ji,jj,jk) + zva', 1),
-        14],
-    'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynvor.f90:797-803': [
+        ('pv_rhs(ji,jj,jk) = pv_rhs(ji,jj,jk) + zva', 2),
+        13],
+    'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynvor.f90:797-802': [
         ('zua = + r1_12 * r1_e1u(ji,jj)', 1),
-        ('pv_rhs(ji,jj,jk) = pv_rhs(ji,jj,jk) + zva', 1),
-        7],
+        ('pv_rhs(ji,jj,jk) = pv_rhs(ji,jj,jk) + zva', 2),
+        6],
     # --- ORCA2 round 255: substep-2 SSH writer boundary split -------
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:550-558': [
         ('DO jj = ntsj-( 1), ntej+(  1 ) ; DO ji = ntsi-( 1), ntei+(  1)', 1),
