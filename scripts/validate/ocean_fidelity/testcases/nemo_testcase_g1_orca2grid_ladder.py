@@ -1181,7 +1181,8 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
         without_zdf_residual: bool = False,
         without_fold_exchange_v: bool = False,
         without_stage_r3f: bool = False,
-        without_ratio_order: bool = False) -> dict:
+        without_ratio_order: bool = False,
+        without_r3t_product: bool = False) -> dict:
     if vor_fold_image:
         from legoesm.ocean.fidelity import nemo_testcase_recipe as _recipe
         calls: list = []
@@ -1204,7 +1205,8 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
                       without_zdf_residual=without_zdf_residual,
                       without_fold_exchange_v=without_fold_exchange_v,
                       without_stage_r3f=without_stage_r3f,
-                      without_ratio_order=without_ratio_order)
+                      without_ratio_order=without_ratio_order,
+                      without_r3t_product=without_r3t_product)
         require(len(calls) > 0, "the vorticity fold-image arm was never traced")
         out["vor_fold_image_measurement_arm"] = {"traces": len(calls)}
         out["label"] = f"{out['label']} + MEASUREMENT ARM (fold-image V row "\
@@ -1231,6 +1233,11 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
     from legoesm.ocean.fidelity import nemo_testcase_recipe as recipe
 
     card = recipe.build_nemo_testcase_card("ORCA2G1-flat", deck_root=root)
+    if without_r3t_product:   # ROUND-8 BEFORE ARM / plant: the bare product
+        require(card.recipe.z_coord.nemo_r3t_stored_product is True,
+                "the card no longer selects the stored T-point ratio")
+        card = card._replace(recipe=card.recipe._replace(
+            z_coord=card.recipe.z_coord._replace(nemo_r3t_stored_product=False)))
     cfg = card.recipe.model_config
     if before_arm:      # BEFORE ARM / plant: the card without its fold-image row
         require(cfg.een_fold_image_v_row is True, "the card no longer selects the row")
@@ -1470,6 +1477,8 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
            "rk3_stage_r3f_nemo_literal": bool(cfg.rk3_stage_r3f_nemo_literal),
            "barotropic_een_ratio_written_order": bool(
                cfg.barotropic.barotropic_een_ratio_written_order),
+           "nemo_r3t_stored_product": bool(
+               card.recipe.z_coord.nemo_r3t_stored_product),
            "per_kt": []}
     records = {kt: read_step(root, kt) for kt in scored if kt <= n_stage}
     before = {}             # the card's own chain: the state entering step kt
@@ -2021,6 +2030,9 @@ def main(argv=None) -> int:
     ap.add_argument("--without-fold-exchange-v", action="store_true",
                     help="BEFORE ARM: the stored top V row left at the "
                          "compact mask's zero (round 6's card)")
+    ap.add_argument("--without-r3t-product", action="store_true",
+                    help="the card's coordinate with nemo_r3t_stored_product "
+                         "off (round 8's before arm / plant)")
     ap.add_argument("--without-ratio-order", action="store_true",
                     help="the card with barotropic_een_ratio_written_order "
                          "off (round 8's before arm / plant)")
@@ -2059,7 +2071,8 @@ def main(argv=None) -> int:
                   without_zdf_residual=a.without_zdf_residual,
                   without_fold_exchange_v=a.without_fold_exchange_v,
                   without_stage_r3f=a.without_stage_r3f,
-                  without_ratio_order=a.without_ratio_order)
+                  without_ratio_order=a.without_ratio_order,
+                  without_r3t_product=a.without_r3t_product)
     except Exception as e:      # noqa: BLE001 -- refusals print and exit 2
         print(f"REFUSE: {type(e).__name__}: {e}", file=sys.stderr)
         return 2

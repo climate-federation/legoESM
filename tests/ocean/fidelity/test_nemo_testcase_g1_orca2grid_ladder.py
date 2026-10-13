@@ -191,7 +191,7 @@ def test_only_the_g1_card_selects_the_fold_row_v_face_depth():
     from legoesm.ocean.fidelity import nemo_testcase_recipe as recipe
     from legoesm.ocean.state import BarotropicConfig
     assert BarotropicConfig._field_defaults["barotropic_fold_top_v_face_ssh"] is False
-    assert BarotropicConfig._fields[-6] == "barotropic_fold_top_v_face_ssh"
+    assert BarotropicConfig._fields[-7] == "barotropic_fold_top_v_face_ssh"   # round 8 appended one
     src = Path(recipe.__file__).read_text()
     assert src.count("barotropic_fold_top_v_face_ssh=True") == 1
     start = src.index("def build_orca2g1_flat_card")
@@ -249,27 +249,18 @@ def test_land_distance_counts_cells_to_the_nearest_dry_cell():
 
 
 @needs_record
-def test_first_interior_event_is_far_from_any_boundary():
-    """Census facts of the first sea-level cell over the bar.  Plant: a cell
-    counted as over the bar must really differ (the bar itself is the gate).
-    This arm's one-step re-run keeps the card's own T and S, which is what
-    carries the event (round 4: see the tracer-carry test below).  Round 5's
-    three solver statements moved the event from cell (72, 70), 2 cells, to
-    cell (94, 41), 1 cell: which cell flips is a last-place lottery.  Round
-    6's stage-1 velocity statements removed the step-17 event; the first one
-    was then at step 23, 2 cells, largest at (74, 84).  Round 7's stage
-    statements made steps 1 to 3 bit-identical and the first event is at
-    step 21, 1 cell, (76, 34): earlier, and registered in the receipt."""
+@pytest.mark.parametrize("off, first", [((), None), (("without_ratio_order",), 21)])
+def test_no_interior_event_through_step_30_with_the_round8_statements(off, first):
+    """Census of sea-level cells over the bar.  Rounds 4 to 7 had a first
+    event at step 17, 23, then 21 (cell (76, 34), carried by the chain's T
+    and S).  With round 8's two statements there is none through step 30
+    (the first is at step 57 of the 100-step record).  Plant: with the
+    solver's ratios divided by the face area the step-21 event is back."""
     pytest.importorskip("netCDF4")
-    out = ladder.run(RECORD, arm="interior_events", kt_max=21, allow_dirty=True)
-    assert all(k["n_over_bar"] == 0 for k in out["per_kt"][:20])
-    ev = out["per_kt"][20]
-    assert ev["kt"] == 21 and ev["n_over_bar"] == 1 and ev["cell"] == [76, 34]
-    assert ev["region"] == "interior_open" and ev["cells_to_land"] > 5
-    assert ev["rows_to_fold"] > 50 and abs(ev["entry_error_at_cell"]) < 1.0e-16
-    assert abs(ev["error"]) > 5.0e-15
-    # NEMO's dynamic entry with the card's own T, S reproduces it
-    assert abs(ev["one_step_from_nemo_entry_error_at_cell"]) > 0.9 * abs(ev["error"])
+    out = ladder.run(RECORD, arm="interior_events", kt_max=30, allow_dirty=True,
+                     **{k: True for k in off})
+    over = [k["kt"] for k in out["per_kt"] if k["n_over_bar"]]
+    assert (over == []) if first is None else (over[0] == first)
 
 
 
@@ -333,24 +324,17 @@ def test_stage1_sea_level_is_nemos_bit_for_bit_only_when_selected(selected):
 
 @needs_record4
 @pytest.mark.parametrize("ts_from_chain", [False, True])
-def test_first_interior_event_is_carried_by_the_entry_tracers(ts_from_chain):
-    """One step from NEMO's entry of the first event's step (21 since round
-    7; 23 and 17 before): at the bar with NEMO's T and S, over it at the
-    event cell with the card's own.  Each arm is the other's plant."""
+def test_step_21_is_at_the_bar_with_the_chains_own_tracers(ts_from_chain):
+    """One step from NEMO's entry of step 21.  Through round 7 the card's own
+    T and S put one cell over the bar there (the tracer carrier).  Round 8's
+    stored T-point ratio makes the chain's T and S NEMO's bit for bit, so
+    both arms are at the bar.  The option's own plant is the step-19 test."""
     pytest.importorskip("netCDF4")
-    ladder.CELL[:] = [76, 34]
-    try:
-        out = ladder.run(RECORD4, arm="given_entry", kt_min=21, kt_max=21,
-                         allow_dirty=True, ts_from_chain=ts_from_chain)
-    finally:
-        ladder.CELL[:] = []
+    out = ladder.run(RECORD4, arm="given_entry", kt_min=21, kt_max=21,
+                     allow_dirty=True, ts_from_chain=ts_from_chain)
     assert out["ts_from_chain_measurement_arm"] is ts_from_chain
     ssh = next(r for r in out["per_kt"][0]["rows"] if r["name"].endswith(".ssh"))
-    if ts_from_chain:
-        assert ssh["status"] != "AT-BAR" and abs(ssh["at_cell"]["error"]) > 5.0e-15
-        assert ssh["max_abs_cell"] == [76, 34]
-    else:
-        assert ssh["status"] == "AT-BAR" and ssh["max_abs"] < 1.0e-16
+    assert ssh["status"] == "AT-BAR" and ssh["max_abs"] < 1.0e-16
 
 
 # --- round 5: the solver's substep loop --------------------------------------
@@ -368,7 +352,7 @@ ROUND5_OPTIONS = ("barotropic_flux_update_nemo_literal",
 def test_only_the_g1_card_selects_the_three_solver_statements():
     from legoesm.ocean.fidelity import nemo_testcase_recipe as recipe
     from legoesm.ocean.state import BarotropicConfig
-    assert BarotropicConfig._fields[-5:-2] == ROUND5_OPTIONS
+    assert BarotropicConfig._fields[-6:-3] == ROUND5_OPTIONS
     src = Path(recipe.__file__).read_text()
     start = src.index("def build_orca2g1_flat_card")
     for name in ROUND5_OPTIONS:
@@ -533,7 +517,7 @@ ROUND6_STAGE = ("rk3_stage1_rhs_nemo_literal", "rk3_stage_velocity_written_order
 def test_only_the_g1_card_selects_the_round6_statements():
     from legoesm.ocean.fidelity import nemo_testcase_recipe as recipe
     from legoesm.ocean.state import BarotropicConfig, LatLonCGridOceanConfig
-    assert BarotropicConfig._fields[-2:] == ROUND6_SOLVER
+    assert BarotropicConfig._fields[-3:-1] == ROUND6_SOLVER
     assert LatLonCGridOceanConfig._fields[-6:-4] == ROUND6_STAGE   # round 7 appended four
     src = Path(recipe.__file__).read_text()
     start = src.index("def build_orca2g1_flat_card")
@@ -898,3 +882,127 @@ def test_every_stage_frame_holds_nemos_top_v_row_only_with_the_exchange(off, wan
         # off: 5 faces at stages 1 and 2, 6 at stage 3, all on the top row
         assert (got == (0, 0)) if not want else (got[0] == got[1] >= want), (
             st["stage"], got)
+
+
+# --- round 8: the solver's ratio order; the stored T-point ratio --------------
+
+ROUND8_SOLVER = "barotropic_een_ratio_written_order"
+ROUND8_COORDINATE = "nemo_r3t_stored_product"
+
+
+def test_only_the_g1_card_selects_the_round8_statements():
+    from legoesm.ocean.fidelity import nemo_testcase_recipe as recipe
+    from legoesm.ocean.state import BarotropicConfig
+    from legoesm.ocean.vertical import OceanPartialCellCoordinate
+    assert BarotropicConfig._fields[-1] == ROUND8_SOLVER
+    assert OceanPartialCellCoordinate._fields[-1] == ROUND8_COORDINATE
+    assert BarotropicConfig._field_defaults[ROUND8_SOLVER] is False
+    assert OceanPartialCellCoordinate._field_defaults[ROUND8_COORDINATE] is False
+    src = Path(recipe.__file__).read_text()
+    start = src.index("def build_orca2g1_flat_card")
+    for name in (ROUND8_SOLVER, ROUND8_COORDINATE):
+        assert src.count(f"{name}=True") == 1
+        assert src.index(f"{name}=True") > start
+    if RECORD5.is_dir():
+        card = recipe.build_nemo_testcase_card("ORCA2G1-flat", deck_root=RECORD5)
+        assert card.recipe.model_config.barotropic.barotropic_een_ratio_written_order is True
+        assert card.recipe.z_coord.nemo_r3t_stored_product is True
+
+
+def test_ratio_written_order_multiplies_by_the_reciprocal_area():
+    """domqco.f90:266-269, :281-285: (lead * inverse depth) * (1 / area).
+    Off, the caller's divided ratios come back untouched; on, the two orders
+    differ somewhere (or the option would be vacuous)."""
+    from legoesm.ocean.dynamics import barotropic_latlon_cgrid as B
+    rng = np.random.default_rng(8)
+    lead, r1_h, area = (rng.uniform(0.5, 2.0, size=(3, 40, 50)) * scale
+                        for scale in (1.0e7, 1.0e-2, 1.0e10))
+    divided = tuple(jnp.asarray(lead[k] * r1_h[k] / area[k]) for k in range(3))
+    args = (divided, tuple(jnp.asarray(x) for x in lead),
+            tuple(jnp.asarray(x) for x in r1_h), tuple(jnp.asarray(x) for x in area))
+    for selected in ((), (False,)):
+        assert B._nemo_een_ratio_written_order(*args, selected) is divided
+    written = B._nemo_een_ratio_written_order(*args, (True,))
+    for k in range(3):
+        assert np.array_equal(np.asarray(written[k]), (lead[k] * r1_h[k]) * (1.0 / area[k]))
+    assert any(np.any(np.asarray(written[k]) != np.asarray(divided[k])) for k in range(3))
+
+
+def test_stored_r3t_product_is_rounded_before_one_is_added():
+    """domqco.f90:257 stores ssh * r1_ht_0; 1 + r3t then reads the stored
+    value.  Operands are chosen where a fused multiply-add of the same three
+    numbers rounds differently, so a contracted sum cannot pass."""
+    import jax
+    from legoesm.ocean import eos, vertical
+    rng = np.random.default_rng(88)
+    eta = rng.uniform(-0.5, 0.5, size=20000)
+    r1 = np.full_like(eta, 0.01)
+    written = 1.0 + eta * r1
+    fused = ladder.fused_multiply_add(eta, r1, 1.0)
+    pick = np.nonzero(written != fused)[0][:8]
+    assert pick.size >= 1                       # the operands discriminate
+    eta = jnp.asarray(eta[pick].reshape(-1, 1))
+    depth = jnp.full(eta.shape, 100.0)
+
+    zc = vertical.OceanPartialCellCoordinate(*([None] * 9), nemo_r3t_stored_product=True)
+    assert vertical._nemo_r3t_product(eta, zc._replace(nemo_r3t_stored_product=False)) is eta
+    jac = jax.jit(lambda e: vertical.compute_ocean_jacobian(e, depth, zc))(eta)
+    assert np.array_equal(np.asarray(jac).ravel(), written[pick])
+    stretch = jax.jit(lambda e: eos.nemo_r3t_stretch(
+        zc, e, depth, evaluation="nemo_reciprocal"))(eta)
+    assert np.array_equal(np.asarray(stretch).ravel(), written[pick])
+
+
+@needs_record5
+def test_ratio_order_replay_controls_and_the_step_3_coefficients():
+    """Offline.  NEMO's ratios in the written order: 0 unequal against its
+    record.  The V-face coefficients replayed from NEMO's recorded ratios:
+    0 unequal against NEMO's recorded coefficients (step 2).  At step 3 the
+    production builder differs on three entries with the option off and on
+    none with it on.  The score plant turns the step-2 control red."""
+    pytest.importorskip("netCDF4")
+    out = ladder.run(RECORD5, arm="ratio_order_replay", kt_min=2, kt_max=3,
+                     allow_dirty=True)
+    for k in out["per_kt"]:
+        assert all(r["written_order_vs_nemo"] == 0 for r in k["ratio_rows"])
+        assert any(r["divided_vs_nemo"] > 100 for r in k["ratio_rows"])
+    step2, step3 = (k["coefficient_rows"] for k in out["per_kt"])
+    assert all(r["replay_vs_nemo_recorded"] == 0 for r in step2)
+    assert sum(r["builder_vs_replay"] for r in step3 if not r["written_order_option"]) == 3
+    assert sum(r["builder_vs_replay"] for r in step3 if r["written_order_option"]) == 0
+    assert ladder.main(["--arm", "ratio_order_replay", "--root", str(RECORD5),
+                        "--kt-min", "2", "--kt-max", "2", "--plant", "score",
+                        "--allow-dirty"]) == 1
+
+
+@needs_record5
+@pytest.mark.parametrize("off, want", [((), 0), (("without_ratio_order",), 1)])
+def test_the_chain_is_nemos_through_step_4_only_with_the_ratio_order(off, want):
+    """INDEPENDENT chain: every scored field bit-identical through step 4;
+    with the option off (the plant) one barotropic V face after step 3."""
+    out = ladder.run(RECORD5, arm="independent", kt_max=4, allow_dirty=True,
+                     **{k: True for k in off})
+    unequal = {(k["kt"], r["name"].split(".")[-1]): r["n_unequal"]
+               for k in out["per_kt"] for r in k["rows"]}
+    assert unequal[(3, "vv_b")] == want
+    if not want:
+        assert not any(unequal.values())
+
+
+@needs_record5
+@pytest.mark.parametrize("off, want", [((), 0), (("without_r3t_product",), 1)])
+def test_the_step_19_tracer_cell_needs_the_stored_ratio(off, want):
+    """INDEPENDENT chain to step 20: T and S are NEMO's bit for bit, and
+    step 20 is bit-identical on every field; with the coordinate flag off
+    (the plant) one T cell and one S cell differ after step 19, at
+    inner-domain (58, 60)."""
+    out = ladder.run(RECORD5, arm="independent", kt_max=20, allow_dirty=True,
+                     **{k: True for k in off})
+    rows = {(k["kt"], r["name"].split(".")[-1]): r
+            for k in out["per_kt"] for r in k["rows"]}
+    for f in ("T", "S"):
+        assert rows[(19, f)]["n_unequal"] == want
+        if want:
+            assert rows[(19, f)]["max_abs_cell"] == [58, 60]
+    if not want:
+        assert not any(r["n_unequal"] for (kt, _), r in rows.items() if kt >= 12)
