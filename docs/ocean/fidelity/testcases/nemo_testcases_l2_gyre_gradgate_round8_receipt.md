@@ -216,9 +216,11 @@ from the operator's valid measured six-step rows; this receipt fabricates none.
 - The pre-review exact three-file battery was **52 passed, 1 skipped in
   1837.09 s** with log SHA-256
   `24ee9653dc6b1fc8f141a616914a5aac308f13c7fa11090eb5879d7186aca3dd`.
-  The post-review battery asserts the named one-step UNMEASURED debt rather
-  than accepting the diagnostic agreement triplet; its result is recorded in
-  the final clean commit.
+  The post-review battery is **52 passed, 1 skipped in 1985.01 s**. It asserts
+  the named one-step UNMEASURED debt rather than accepting the diagnostic
+  agreement triplet; the parent process exited normally after the isolated
+  child returned its expected nonzero classified refusal. The only skip is the
+  named six-step CPU compiler limit.
 - GPU-runner self-test: all five classified outcomes were recognized and the
   script completed.
 - Receipt-specific citation gate and shifted-citation plant are run from the
@@ -236,8 +238,10 @@ SHA, provenance stamp, and citation control, and agreed that HELD is the only
 admissible campaign status while resource rows remain absent. It noted one
 non-blocking hygiene gap—direct-control and runner-self-test logs were not
 retained—and independently reproduced 42 pre-repair controls and the runner
-self-test. The executable reviewer must re-review the repair before this round
-can claim two SHIP verdicts.
+self-test. After the repair, the executable reviewer returned SHIP: it verified
+the live refusal artifact, the planted mismatch, the matrix's expected exit-1
+assertion, and the explicit receipt retraction. Both reviewers agree that SHIP
+applies to the fail-closed repair while the measurement campaign remains HELD.
 
 ## OPEN, retractions, and decision
 
@@ -255,8 +259,6 @@ OPEN:
 4. Resolve the production-step transformed-primal byte mismatch before using
    any GYRE gradient for training. The binding CPU row is UNMEASURED even
    though its refused reverse/forward/FD diagnostic is numerically on-bar.
-5. Obtain a SHIP re-review of the byte-gate repair. Reviewer refusals are not
-   verdicts.
 
 RETRACTED: the Round 7 receipt's wording that the six-step reverse had compiled
 and only the forward transform timed out is superseded by the operator's
