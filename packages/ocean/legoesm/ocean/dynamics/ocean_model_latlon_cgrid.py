@@ -12684,6 +12684,12 @@ class LatLonCGridOceanModel:
             == "nemo_literal")
         _zdf_legacy_w = bool(
             self._nemo_ws_test_hooks.legacy_zdf_midpoint_w_metric)
+        _zdf_nemo_faces = bool(getattr(
+            _cfg_b, "zdf_momentum_nemo_face_thickness", False))
+        if _zdf_nemo_faces and (not _zdf_literal or _zdf_legacy_w or _dzw_slot):
+            raise ValueError(
+                "zdf_momentum_nemo_face_thickness requires "
+                "zdf_implicit_solver_evaluation='nemo_literal'")
         # Cell-centered NOW thickness and NOW (1+r3t) (only computed / used
         # under the NEMO identity; both feed the u/v-face divisor below so the
         # tracer and momentum solves share one NOW-eta evaluation).
@@ -12904,6 +12910,18 @@ class LatLonCGridOceanModel:
                 # hu_0 (domqco.F90:164-167) — while this face map averages the
                 # already-stretched T-point field.  That is a separate row.
                 _raw_e3w0 = getattr(_zc, "nemo_e3w_0", None)
+                if (_zdf_nemo_faces and _raw_e3w0 is not None
+                        and np.ndim(_raw_e3w0) == 3):
+                    # dynzdf.f90:193 reads ``e3w_1d(jk)``: the card's 3-D
+                    # copy must BE that ladder in every column, or refuse.
+                    _lad3 = np.asarray(_raw_e3w0)
+                    if not np.array_equal(
+                            _lad3, np.broadcast_to(_lad3[0, 0], _lad3.shape)):
+                        raise ValueError(
+                            "zdf_momentum_nemo_face_thickness needs the 1-D "
+                            "interface ladder (e3w_1d) in every column of "
+                            "z_coord.nemo_e3w_0")
+                    _raw_e3w0 = _lad3[0, 0]
                 if (not _zdf_legacy_w and _raw_e3w0 is not None
                         and jnp.asarray(_raw_e3w0).ndim == 1):
                     # OVERFLOW usrdef_zgr.F90:166-168 leaves e3uw_0/e3vw_0
@@ -12964,6 +12982,13 @@ class LatLonCGridOceanModel:
                 # choice -- but the repo must not carry two.
                 dz_u = dz_u * _act_u3.astype(dz_u.dtype)
                 dz_v = dz_v * _act_v3.astype(dz_v.dtype)
+            if _zdf_nemo_faces:
+                # dynzdf.f90:193 / :362: the matrix divides by
+                # ``e3u_3d*(1 + r3u(Kaa)*umask)`` -- the drag block's divisor,
+                # from the same shared assembler.
+                dz_u, dz_v = _nemo_dynzdf_drag_face_thickness(
+                    state.eta.data, state.H_bathy.data, _zc, _cfg_b, _grid,
+                    dz_u.dtype)
             u_mask_3d = state.u_mask.data[..., jnp.newaxis]
             v_mask_3d = state.v_mask.data[..., jnp.newaxis]
 

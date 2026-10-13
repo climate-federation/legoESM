@@ -3149,6 +3149,13 @@ class LatLonCGridOceanConfig(NamedTuple):
     # residual, as NEMO does.  False re-adds it after the solve, which is
     # real-equal and differs in the last place.
     zdf_barotropic_removal_nemo_literal: bool = False
+    # NEMO's dyn_zdf matrix divisors on a multi-level card with partial cells
+    # (dynzdf.f90:191-205 for U, :360-374 for V): the diagonal thickness is
+    # ``e3u_3d*(1 + r3u(Kaa)*umask)`` -- the mesh's min-rule face thickness,
+    # not the mean of the two T cells -- and the interface thickness is
+    # ``e3w_1d(jk)*(1 + r3u(Kmm))``.  False keeps the two-cell mean and the
+    # face-mapped T-point interface thickness (every card before rung G2).
+    zdf_momentum_nemo_face_thickness: bool = False
     # The stored top V row of the 3-D velocity is NEMO's fold image of the
     # row below it, as the exchange that ends each stage leaves it
     # (stprk3_stg.f90:572-573).  False keeps the row at the compact mask's
