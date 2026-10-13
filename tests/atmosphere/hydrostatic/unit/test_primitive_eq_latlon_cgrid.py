@@ -802,11 +802,19 @@ class TestTracerTransport:
         assert jnp.allclose(state.tracers["q_v"], 0.01, atol=1e-8)
 
     def test_physics_tracer_tendency_applied(self, grid, sigma):
-        """Physics dq_v/dt = +1 s^-1 for one step must change q_v by exactly dt."""
+        """Physics dq_v/dt = +1 s^-1 for one step adds dt * dp_k of water to
+        every layer, and that water carries its mass (tracers are specific on
+        total air mass, user decision 2026-09-28): the column gains
+        dt * sum_k dp_k of water and p_s rises by exactly that weight.  (The
+        old ``q_v == dt`` expectation was the retired fixed-p_s semantics,
+        where the added water displaced dry air; the per-layer q_v value is
+        not pinned here, only the two column identities.)  Mass fixer OFF:
+        with it on, the retired semantics also lands within 2.5e-8 of this
+        p_s, because the fixer refills the displaced dry air."""
         from legoesm.core.state import HydrostaticState, HydrostaticTendencies
         from legoesm.core.field import Field
 
-        config = CGridLatLonPrimitiveEquationConfig(fix_mass=True)
+        config = CGridLatLonPrimitiveEquationConfig(fix_mass=False)
         model = CGridLatLonPrimitiveEquationModel(grid, sigma, config)
         state = _make_rest_state(grid, sigma)
         n_lat, n_lon, nlev = grid.n_lat, grid.n_lon, sigma.n_levels
@@ -835,11 +843,18 @@ class TestTracerTransport:
         dt = 1.0
         state_new = model.step(state, dt, physics_fn=dummy_physics)
 
-        expected = dt * 1.0  # dq_v/dt = 1, applied for dt seconds
         assert "q_v" in state_new.tracers
-        assert jnp.allclose(state_new.tracers["q_v"], expected, atol=1e-10), (
-            f"q_v should be {expected}, got {float(jnp.mean(state_new.tracers['q_v']))}"
-        )
+        # weight of the water added [Pa]: dt * dq_v * sum_k dp_k(p_s before)
+        # (cast: uncast, dsigma * this p_s came out fp32, 2e-9 relative off)
+        added = dt * 1.0 * jnp.sum(
+            sigma.layer_thickness_dp(state.p_s.astype(jnp.float64)), axis=-1)
+        water = jnp.sum(state_new.tracers["q_v"]
+                        * sigma.layer_thickness_dp(state_new.p_s), axis=-1)
+        assert jnp.allclose(water, added, rtol=1e-10, atol=0.0), (
+            float(jnp.mean(water)), float(jnp.mean(added)))
+        assert jnp.allclose(state_new.p_s - state.p_s, added,
+                            rtol=1e-10, atol=0.0), (
+            float(jnp.mean(state_new.p_s - state.p_s)), float(jnp.mean(added)))
 
 
 # ==============================================================================
@@ -1423,6 +1438,90 @@ class TestDivergenceDamping4:
             grid, sigma, CGridLatLonPrimitiveEquationConfig(
                 nu_div4_scale=1.0, use_polar_filter=True,
                 polar_filter_cutoff_deg=35.9041), dt=self.DT)
+
+    def test_refuses_filter_cutoff_above_60(self, grid, sigma):
+        """Stability under the filter was measured only for filter starts of
+        35.9041 and 60 deg: a higher start is refused with the damping on,
+        60 itself is accepted, and scale 0 adds no refusal."""
+        with pytest.raises(ValueError, match="polar_filter_cutoff_deg"):
+            CGridLatLonPrimitiveEquationModel(
+                grid, sigma, CGridLatLonPrimitiveEquationConfig(
+                    nu_div4_scale=1.0, use_polar_filter=True,
+                    polar_filter_cutoff_deg=60.5), dt=self.DT)
+        for scale, cutoff in ((1.0, 60.0), (0.0, 75.0)):
+            CGridLatLonPrimitiveEquationModel(
+                grid, sigma, CGridLatLonPrimitiveEquationConfig(
+                    nu_div4_scale=scale, use_polar_filter=True,
+                    polar_filter_cutoff_deg=cutoff), dt=self.DT)
+
+    def test_filtered_spectrum_inside_rk3_region(self):
+        """Per-wavenumber stability on the production deck's grid (96x48,
+        dt 450 s, scale 1): eigenvalues of dt * F_k B_k, with B_k the zonal
+        wavenumber-k block of the REAL tendency's div-4 part (impulse
+        responses, Fourier-transformed in longitude; one level, poles walled)
+        and F_k the model's own polar-filter masks.  The most negative
+        Re(eig*dt) stays above -2.0 (SSP-RK3 real-axis limit ~-2.51) for
+        filter starts 35.9041 and 60 deg, and every eigenvalue's SSP-RK3
+        amplification |1 + z + z^2/2 + z^3/6| is <= 1.  Control: unfiltered
+        it is far past the limit, so the check can fail."""
+        import numpy as np
+        g = create_latlon_grid(n_lat=48, radius=constants.R_earth,
+                               omega=constants.Omega, dtype=jnp.float64)
+        sig = create_sigma_coordinate(n_levels=2)
+        n_lat, n_lon = g.n_lat, g.n_lon
+        assert n_lon == 96
+        rest = _make_rest_state(g, sig)
+        n_u = n_lat                     # u rows (interior lon faces)
+        n = n_u + n_lat - 1             # + interior v faces
+
+        def incr(x):                    # x: (n, n_lon), same on every level
+            u = jnp.concatenate([x[:n_u], x[:n_u, :1]], axis=1)  # closure col
+            v = jnp.zeros((n_lat + 1, n_lon)).at[1:-1].set(x[n_u:])
+            st = rest._replace(u=rest.u + u[..., None], v=rest.v + v[..., None])
+            du, dv = self._div4_part(st, g, sig)[:2]
+            return jnp.concatenate([du[:, :-1, 0], dv[1:-1, :, 0]], axis=0)
+
+        imp = jnp.zeros((n, n, n_lon)).at[jnp.arange(n), jnp.arange(n), 0].set(1.0)
+        resp = np.asarray(jax.vmap(incr)(imp))                 # (in, out, lon)
+        B = np.fft.rfft(resp, axis=-1).transpose(2, 1, 0)      # (k, out, in)
+        # instrument check: the blocks reproduce the operator on a random field
+        x = np.random.default_rng(0).standard_normal((n, n_lon))
+        pred = np.fft.irfft(np.einsum("koi,ik->ok", B, np.fft.rfft(x, axis=-1)),
+                            n=n_lon, axis=-1)
+        got = np.asarray(incr(jnp.asarray(x)))
+        assert np.max(np.abs(pred - got)) <= 1e-9 * np.max(np.abs(got))
+
+        def spectrum(masks):
+            """(most negative Re z, largest SSP-RK3 amplification |R3(z)|)."""
+            zmin, amp = 0.0, 0.0
+            for k in range(n_lon // 2 + 1):
+                M = self.DT * B[k]
+                if masks is not None:
+                    mu, mv = masks
+                    f = np.concatenate([mu[:, k], mv[1:-1, k]])
+                    M = f[:, None] * M          # filter acts on the increment
+                z = np.linalg.eigvals(M)
+                zmin = min(zmin, float(z.real.min()))
+                amp = max(amp, float(np.abs(1 + z + z**2 / 2 + z**3 / 6).max()))
+            return zmin, amp
+
+        for cutoff in (35.9041, 60.0):
+            m = CGridLatLonPrimitiveEquationModel(
+                g, sig, CGridLatLonPrimitiveEquationConfig(
+                    nu_div4_scale=1.0, use_polar_filter=True,
+                    polar_filter_cutoff_deg=cutoff), dt=self.DT)
+            z, amp = spectrum((np.asarray(m._polar_mask),
+                               np.asarray(m._polar_mask_v)))
+            print("cutoff %.4f: most negative Re(eig*dt) %.4f, max|R3| %.12f"
+                  % (cutoff, z, amp))
+            assert -2.0 < z < 0.0, (cutoff, z)
+            # every eigenvalue, complex or growing, inside the RK3 region
+            assert amp <= 1.0 + 1e-9, (cutoff, amp)
+        z_off, amp_off = spectrum(None)
+        print("no filter: most negative Re(eig*dt) %.4f, max|R3| %.4g"
+              % (z_off, amp_off))
+        assert z_off < -2.51 * 10.0, z_off
+        assert amp_off > 2.0, amp_off
 
     def test_filtered_rk3_steps_damp_the_divergence(self, grid, sigma):
         """Through the real step (SSP-RK3, polar filter from 35.9 deg, dt

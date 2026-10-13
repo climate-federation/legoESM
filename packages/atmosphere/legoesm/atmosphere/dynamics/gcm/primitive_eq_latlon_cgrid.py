@@ -240,6 +240,12 @@ class CGridLatLonPrimitiveEquationConfig(NamedTuple):
 # CAM-FV ldiv4 nondimensional rate tau4*dt (cd_core.F90:620-684); the same
 # 0.01 as the MPAS lane's ``nu_div4_cam`` in driver.component_factory.
 CAM_DIV4_RATE = 0.01
+# Highest polar-filter start latitude [deg] at which the div-4 damping's
+# stability was measured (Fourier-block eigen check, 96x48, dt 450 s:
+# worst eig*dt -0.67 at 35.9041 deg, -0.83 at 60 deg, RK3 limit ~-2.51).
+# Above it the filter covers fewer rows and nothing was measured, so the
+# model refuses it (user decision 2026-10-13).
+DIV4_MAX_POLAR_FILTER_CUTOFF_DEG = 60.0
 
 
 def _zero_v_at_pole(v, *, south: bool, north: bool, offset: int = 0):
@@ -998,6 +1004,15 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
                 "div-4 coefficient 0.01*area^2/dt is unstable on the pole rows "
                 "without the polar filter (measured at scale 1; a smaller dt "
                 "does not help).")
+        if (self.config.nu_div4_scale > 0.0
+                and self.config.polar_filter_cutoff_deg
+                > DIV4_MAX_POLAR_FILTER_CUTOFF_DEG):
+            raise ValueError(
+                "nu_div4_scale > 0 needs polar_filter_cutoff_deg <= "
+                f"{DIV4_MAX_POLAR_FILTER_CUTOFF_DEG} (got "
+                f"{self.config.polar_filter_cutoff_deg}): the div-4 damping's "
+                "stability under the polar filter was measured only for a "
+                "filter starting at 35.9041 and 60 deg.")
 
         # Stash the constructor ``dt`` so callers downstream (notably
         # ``make_latlon_mpi_step`` rebuilding an MPI-aware model) can
