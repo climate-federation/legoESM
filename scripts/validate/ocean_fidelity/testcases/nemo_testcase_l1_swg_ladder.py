@@ -247,11 +247,18 @@ def _restart_hashes(root: Path) -> dict[int, str]:
 def _deck_namelist(deck: str, *, month: bool = False):
     """Return the exact resolved deck selected for this admitted ladder."""
     from legoesm.ocean.fidelity.nemo_testcase_recipe import (
-        SWG_MADDISON_NAMELIST, SWG_NAMELIST)
+        SWG_DG50_NAMELIST, SWG_MADDISON_NAMELIST, SWG_NAMELIST)
 
-    require(deck in ("shipped", "maddison"), f"unknown SWG deck {deck!r}")
+    require(deck in ("shipped", "maddison", "dg50"),
+            f"unknown SWG deck {deck!r}")
     if deck == "shipped":
         return SWG_NAMELIST
+    if deck == "dg50":
+        if month:
+            return SWG_DG50_NAMELIST._replace(
+                nn_itend=6_480, nn_stock=216, nn_write=216)
+        return SWG_DG50_NAMELIST._replace(
+            nn_itend=10, nn_stock=1, nn_write=1)
     if month:
         return SWG_MADDISON_NAMELIST._replace(
             nn_SWG=4, nn_itend=12_960, nn_stock=432, nn_write=432,
@@ -1486,7 +1493,7 @@ def main(argv=None) -> int:
         "stages-given", "stages-chained", "carried-state", "month",
         "debt-localization", "shipped"),
                    required=True)
-    p.add_argument("--deck", choices=("shipped", "maddison"),
+    p.add_argument("--deck", choices=("shipped", "maddison", "dg50"),
                    default="shipped")
     p.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     p.add_argument("--stage-root", type=Path, default=DEFAULT_STAGE_ROOT)

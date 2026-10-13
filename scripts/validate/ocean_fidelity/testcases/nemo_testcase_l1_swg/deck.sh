@@ -30,8 +30,20 @@ swg_select_deck() {
       DECK_PATCH=$here/namelist_cfg_maddison_30d.patch
       DEFAULT_EVIDENCE=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgdg_rounds/round1/oracle_swg_dg_r1_30d
       ;;
+    dg50:stage)
+      SOURCE_CASE_NAME=SWG_DG
+      RUN_NAME=SWG_DG50_OMIP_L1_P3
+      DECK_PATCH=$here/namelist_cfg_dg50_kt10.patch
+      DEFAULT_EVIDENCE=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgonl_rounds/round1/oracle_swg_dg50_r1
+      ;;
+    dg50:month)
+      SOURCE_CASE_NAME=SWG_DG
+      RUN_NAME=SWG_DG50_OMIP_L1_P3D
+      DECK_PATCH=$here/namelist_cfg_dg50_30d.patch
+      DEFAULT_EVIDENCE=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgonl_rounds/round1/oracle_swg_dg50_r1_30d
+      ;;
     *)
-      printf 'REFUSE_DECK: expected shipped or maddison\n' >&2
+      printf 'REFUSE_DECK: expected shipped, maddison, or dg50\n' >&2
       return 64
       ;;
   esac

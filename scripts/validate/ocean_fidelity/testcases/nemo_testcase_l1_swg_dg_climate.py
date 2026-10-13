@@ -54,15 +54,17 @@ def array_digest(value: np.ndarray) -> str:
     return hashlib.sha256(np.ascontiguousarray(value).tobytes()).hexdigest()
 
 
-def _require_legoesm_deck(namelist: dict) -> None:
-    """Bind a legoESM manifest to the registered Maddison deck."""
-    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
-        SWG_MADDISON_NAMELIST,
-    )
+def _require_legoesm_deck(namelist: dict, expected_namelist=None) -> None:
+    """Bind a legoESM manifest to one explicitly selected resolved deck."""
+    if expected_namelist is None:
+        from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+            SWG_MADDISON_NAMELIST,
+        )
+        expected_namelist = SWG_MADDISON_NAMELIST
 
     # Normalize tuple-valued records through the same JSON representation the
     # driver manifest uses before exact field comparison.
-    expected = json.loads(json.dumps(SWG_MADDISON_NAMELIST._asdict()))
+    expected = json.loads(json.dumps(expected_namelist._asdict()))
     # Run length is the only permitted difference between year 1 and the
     # registered three-year window.  Everything physical -- including
     # rn_shlat/free-slip and all dispatch switches -- must match the deck.
@@ -270,6 +272,7 @@ def nemo_ioipsl_provider(
 
 def legoesm_npz_provider(
         root: Path, days: int, *, start_day: int = 1,
+        name: str = "legoESM", expected_namelist=None,
 ) -> DailyProvider:
     """Build a repeatable provider over content-pinned legoESM daily states."""
     require(start_day > 0 and days > 0, "legoESM window must be positive")
@@ -286,7 +289,12 @@ def legoesm_npz_provider(
                 "legoesm-swg-double-gyre-daily-v1",
                 "legoesm-swg-double-gyre-daily-v2"},
             "unknown legoESM daily schema")
-    _require_legoesm_deck(manifest.get("namelist", {}))
+    if expected_namelist is None:
+        from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+            SWG_MADDISON_NAMELIST,
+        )
+        expected_namelist = SWG_MADDISON_NAMELIST
+    _require_legoesm_deck(manifest.get("namelist", {}), expected_namelist)
     complete = [root / f"day{day:04d}.npz"
                 for day in range(1, total_days + 1)]
     require(sorted(root.glob("day????.npz")) == complete,
@@ -302,6 +310,9 @@ def legoesm_npz_provider(
     fields = (
         ("ssh_daily_mean_m", "u_daily_mean_m_s", "v_daily_mean_m_s")
         if sampling == "daily_mean" else ("ssh_m", "u_m_s", "v_m_s"))
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import build_swg_card
+    expected_shape = tuple(
+        build_swg_card(expected_namelist).recipe.land_mask.shape)
     if sampling == "daily_mean":
         require(manifest.get("schema") == "legoesm-swg-double-gyre-daily-v2",
                 "daily-mean sampling requires the v2 legoESM schema")
@@ -312,7 +323,7 @@ def legoesm_npz_provider(
             with np.load(path, allow_pickle=False) as data:
                 require(int(data["day"]) == absolute_day,
                         f"{path.name}: embedded day differs")
-                require(float(data["dt_s"]) == 50.0,
+                require(float(data["dt_s"]) == expected_namelist.rn_Dt_s,
                         f"{path.name}: timestep differs")
                 if sampling == "daily_mean":
                     require(data["daily_mean_sampling"].item() ==
@@ -322,20 +333,82 @@ def legoesm_npz_provider(
                             f"{path.name}: daily-mean sample count differs")
                 values = [np.asarray(data[name], dtype=np.float64)
                           for name in fields]
-            require(all(field.shape == (644, 644) for field in values),
+            require(all(field.shape == expected_shape for field in values),
                     f"{path.name}: field shape differs")
             require(all(np.all(np.isfinite(field)) for field in values),
                     f"{path.name}: non-finite field")
             yield DailyFrame(local_day, *values)
 
     return DailyProvider(
-        "legoESM", sampling,
+        name, sampling,
         {"root": str(root.resolve()), "days": days,
          "window_days": [start_day, stop_day],
          "manifest_sha256": sha256(manifest_path),
          "legoesm_git_sha": manifest.get("legoesm_git_sha"),
          "mode": manifest.get("mode"),
          "certified_policy": manifest.get("certified_policy")},
+        iterate)
+
+
+def filtered_npz_provider(
+        root: Path, days: int, *, start_day: int = 1,
+        name: str = "filtered truth",
+) -> DailyProvider:
+    """Build a provider over content-pinned dg50-filtered fine truth."""
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        SWG_DG50_NAMELIST,
+        build_swg_card,
+    )
+
+    require(start_day > 0 and days > 0, "filtered window must be positive")
+    manifest_path = root / "manifest.json"
+    require(manifest_path.is_file(), f"missing complete manifest {manifest_path}")
+    manifest = json.loads(manifest_path.read_text())
+    total_days = manifest.get("days")
+    stop_day = start_day + days - 1
+    require(manifest.get("schema") == "legoesm-swg-filtered-truth-v1"
+            and manifest.get("status") == "complete"
+            and manifest.get("completed_days") == total_days
+            and isinstance(total_days, int) and total_days >= stop_day,
+            "filtered manifest does not contain the complete requested window")
+    _require_legoesm_deck(
+        manifest.get("target_namelist", {}), SWG_DG50_NAMELIST)
+    sampling = manifest.get("sampling")
+    require(sampling in ("daily_snapshot", "daily_mean"),
+            "filtered sampling is unsupported")
+    pins = manifest.get("output_daily_sha256", {})
+    complete = [root / f"day{day:04d}.npz" for day in range(1, total_days + 1)]
+    require(sorted(root.glob("day????.npz")) == complete,
+            "filtered daily file sequence differs")
+    require(set(pins) == {path.name for path in complete},
+            "filtered manifest does not pin every output")
+    expected = complete[start_day - 1:stop_day]
+    shape = tuple(build_swg_card(SWG_DG50_NAMELIST).recipe.land_mask.shape)
+    fields = (("ssh_daily_mean_m", "u_daily_mean_m_s", "v_daily_mean_m_s")
+              if sampling == "daily_mean" else ("ssh_m", "u_m_s", "v_m_s"))
+
+    def iterate() -> Iterator[DailyFrame]:
+        for local_day, path in enumerate(expected, 1):
+            require(sha256(path) == pins[path.name],
+                    f"filtered output digest mismatch: {path.name}")
+            with np.load(path, allow_pickle=False) as data:
+                require(int(data["day"]) == start_day + local_day - 1,
+                        f"{path.name}: embedded day differs")
+                values = [np.asarray(data[field], dtype=np.float64)
+                          for field in fields]
+            require(all(value.shape == shape for value in values),
+                    f"{path.name}: filtered field shape differs")
+            require(all(np.all(np.isfinite(value)) for value in values),
+                    f"{path.name}: filtered field is non-finite")
+            yield DailyFrame(local_day, *values)
+
+    return DailyProvider(
+        name, sampling,
+        {"root": str(root.resolve()), "days": days,
+         "window_days": [start_day, stop_day],
+         "manifest_sha256": sha256(manifest_path),
+         "legoesm_git_sha": manifest.get("legoesm_git_sha"),
+         "filter": manifest.get("filter")},
         iterate)
 
 
@@ -353,7 +426,7 @@ def _cell_centred(frame: DailyFrame, masks) -> DailyFrame:
         np.asarray(u_c), np.asarray(v_c))
 
 
-def diagnose(provider: DailyProvider, *, days: int, card=None,
+def diagnose(provider: DailyProvider, *, days: int, card=None, namelist=None,
              geometry: dict | None = None) -> dict[str, np.ndarray]:
     """Compute the frozen Round-4 metrics in two streaming passes."""
     import jax.numpy as jnp
@@ -367,8 +440,11 @@ def diagnose(provider: DailyProvider, *, days: int, card=None,
     if geometry is None:
         if card is None:
             card = build_swg_card(SWG_MADDISON_NAMELIST)
+            namelist = SWG_MADDISON_NAMELIST
+        require(namelist is not None,
+                "a supplied card requires its resolved namelist")
         from nemo_testcase_l1_swg_ladder import _card_masks
-        source = swg_horizontal_coordinates(SWG_MADDISON_NAMELIST)
+        source = swg_horizontal_coordinates(namelist)
         geometry = {
             "masks": _card_masks(card),
             "area": np.asarray(card.recipe.grid.area),
@@ -395,10 +471,23 @@ def diagnose(provider: DailyProvider, *, days: int, card=None,
     ke_series = np.empty(days, dtype=np.float64)
     spectrum_sum = None
     wavenumber = None
+    min_thickness = np.empty(days, dtype=np.float64) if card is not None else None
+    max_u_courant = np.empty(days, dtype=np.float64) if namelist is not None else None
+    max_v_courant = np.empty(days, dtype=np.float64) if namelist is not None else None
+    bathymetry = (np.asarray(card.recipe.initial_state.H_bathy.data)
+                  if card is not None else None)
     for index, raw in enumerate(provider.iterate()):
         require(index < days and raw.day == index + 1,
                 f"{provider.name}: daily sequence differs")
         frame = _cell_centred(raw, masks)
+        if card is not None:
+            min_thickness[index] = np.min(
+                (bathymetry + raw.ssh)[wet])
+        if namelist is not None:
+            max_u_courant[index] = (
+                np.max(np.abs(raw.u[masks["U"]])) * namelist.rn_Dt_s / spacing)
+            max_v_courant[index] = (
+                np.max(np.abs(raw.v[masks["V"]])) * namelist.rn_Dt_s / spacing)
         speed2 = frame.u * frame.u + frame.v * frame.v
         sum_ssh += frame.ssh
         sum_u += frame.u
@@ -441,7 +530,7 @@ def diagnose(provider: DailyProvider, *, days: int, card=None,
             jet_x[i] = x[j, i]
             jet_y[i] = y[j, i]
             jet_speed[i] = mean_u[j, i]
-    return {
+    result = {
         "mean_ssh_m": mean_ssh,
         "mean_u_m_s": mean_u,
         "mean_v_m_s": mean_v,
@@ -455,16 +544,24 @@ def diagnose(provider: DailyProvider, *, days: int, card=None,
         "spectrum_wavenumber_m-1": wavenumber,
         "mean_kinetic_energy_spectrum_m3_s2": spectrum_sum / days,
     }
+    if card is not None:
+        result.update({
+            "minimum_total_layer_thickness_m": min_thickness,
+            "maximum_u_courant": max_u_courant,
+            "maximum_v_courant": max_v_courant,
+        })
+    return result
 
 
-def compare(providers: tuple[DailyProvider, DailyProvider], *, days: int) -> dict:
+def compare(providers: tuple[DailyProvider, DailyProvider], *, days: int,
+            card=None, namelist=None) -> dict:
     """Require controlled sampling and diagnose both models independently."""
     left, right = providers
     require(left.sampling == right.sampling,
             f"sampling mismatch: {left.name}={left.sampling}, "
             f"{right.name}={right.sampling}")
-    return {left.name: diagnose(left, days=days),
-            right.name: diagnose(right, days=days)}
+    return {left.name: diagnose(left, days=days, card=card, namelist=namelist),
+            right.name: diagnose(right, days=days, card=card, namelist=namelist)}
 
 
 def _summary(arrays: dict[str, np.ndarray]) -> dict:
@@ -583,8 +680,10 @@ def write_outputs(
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--nemo-root", type=Path, required=True)
-    parser.add_argument("--legoesm-root", type=Path, required=True)
+    parser.add_argument("--nemo-root", type=Path)
+    parser.add_argument("--legoesm-root", type=Path)
+    parser.add_argument("--filtered-root", type=Path)
+    parser.add_argument("--coarse-root", type=Path)
     parser.add_argument("--start-day", type=int, default=1)
     parser.add_argument("--days", type=int, default=365)
     parser.add_argument("--output", type=Path, required=True)
@@ -592,12 +691,38 @@ def main(argv=None) -> int:
     try:
         require(args.start_day > 0 and args.days > 0,
                 "window must be positive")
-        providers = (nemo_ioipsl_provider(
-                         args.nemo_root, args.days, start_day=args.start_day),
-                     legoesm_npz_provider(
-                         args.legoesm_root, args.days,
-                         start_day=args.start_day))
-        diagnosed = compare(providers, days=args.days)
+        oracle_pair = args.nemo_root is not None or args.legoesm_root is not None
+        online_pair = args.filtered_root is not None or args.coarse_root is not None
+        require(oracle_pair != online_pair,
+                "select exactly one complete NEMO/legoESM or filtered/coarse pair")
+        if oracle_pair:
+            require(args.nemo_root is not None and args.legoesm_root is not None,
+                    "NEMO/legoESM pair is incomplete")
+            providers = (nemo_ioipsl_provider(
+                             args.nemo_root, args.days, start_day=args.start_day),
+                         legoesm_npz_provider(
+                             args.legoesm_root, args.days,
+                             start_day=args.start_day))
+            card = None
+            namelist = None
+        else:
+            require(args.filtered_root is not None and args.coarse_root is not None,
+                    "filtered/coarse pair is incomplete")
+            from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+                SWG_DG50_NAMELIST,
+                build_swg_card,
+            )
+            providers = (filtered_npz_provider(
+                             args.filtered_root, args.days,
+                             start_day=args.start_day),
+                         legoesm_npz_provider(
+                             args.coarse_root, args.days,
+                             start_day=args.start_day, name="dg50 no closure",
+                             expected_namelist=SWG_DG50_NAMELIST))
+            card = build_swg_card(SWG_DG50_NAMELIST)
+            namelist = SWG_DG50_NAMELIST
+        diagnosed = compare(
+            providers, days=args.days, card=card, namelist=namelist)
         report = write_outputs(
             args.output, diagnosed, providers, days=args.days,
             start_day=args.start_day)

@@ -22,6 +22,17 @@ def test_resolved_maddison_clock_is_exactly_daily():
     assert namelist.nn_write == namelist.nn_stock == 1728
 
 
+def test_resolved_dg50_clock_and_unknown_dispatch():
+    namelist = driver.resolved_daily_namelist(20, deck="dg50")
+    assert namelist.nn_SWG == 2
+    assert namelist.rn_Dt_s == 400.0
+    assert namelist.nn_itend == 20 * 216
+    assert namelist.nn_write == namelist.nn_stock == 216
+    assert namelist.rn_Lv_m == 10.0
+    with pytest.raises(ValueError, match="unsupported double-gyre deck"):
+        driver.resolved_daily_namelist(1, deck="typo")
+
+
 def test_tiny_cpu_driver_writes_daily_native_state_with_provenance(tmp_path):
     from legoesm.ocean.fidelity.nemo_testcase_recipe import SWG_MADDISON_NAMELIST
 
@@ -41,6 +52,10 @@ def test_tiny_cpu_driver_writes_daily_native_state_with_provenance(tmp_path):
     assert manifest["integration"] == "production-python-step-loop"
     assert manifest["profile"] is None
     assert manifest["scan_vs_python"] is None
+    assert manifest["numerical_health"]["all_finite"]
+    assert manifest["numerical_health"]["minimum_total_layer_thickness_m"] > 0.0
+    assert manifest["numerical_health"]["maximum_u_courant"] >= 0.0
+    assert manifest["numerical_health"]["maximum_v_courant"] >= 0.0
     saved_manifest = json.loads((output / "manifest.json").read_text())
     assert saved_manifest["steps_per_day"] == 2
     assert not (output / "manifest.pending.json").exists()
@@ -161,3 +176,56 @@ def test_daily_mean_output_refuses_certified_cpu_mode(tmp_path):
         driver.run_long(
             tiny, tmp_path / "run", days=1, mode="cpu-certified",
             commit="a" * 40, daily_means=True)
+
+
+def test_cpu_profile_records_production_step_cost(tmp_path):
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import SWG_MADDISON_NAMELIST
+
+    tiny = SWG_MADDISON_NAMELIST._replace(
+        nn_SWG=1, rn_Dt_s=43_200.0, nn_itend=2, nn_write=2, nn_stock=2,
+        rn_modified_grav_m_s2=1.0e-6, rn_tau_pa=0.0)
+    manifest = driver.run_long(
+        tiny, tmp_path / "run", days=1, mode="cpu-certified",
+        commit="a" * 40, profile_steps=2)
+    assert manifest["profile"]["program"] == "production-python-step-loop"
+    assert manifest["profile"]["steps"] == 2
+    assert manifest["profile"]["python_ms_per_step"] > 0.0
+
+
+def test_restart_restores_native_stagger_and_fixed_seed_perturbation(tmp_path):
+    import jax
+    from legoesm.core.precision import PrecisionPolicy, set_policy
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        SWG_MADDISON_NAMELIST,
+        build_swg_card,
+        swg_surface_wind,
+    )
+    from legoesm.ocean.state import OceanSurfaceForcing
+
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    tiny = SWG_MADDISON_NAMELIST._replace(nn_SWG=1, rn_Dt_s=400.0)
+    card = build_swg_card(tiny)
+    tau_u, tau_v = swg_surface_wind(tiny)
+    forcing = OceanSurfaceForcing(
+        tau_i_native=jax.numpy.asarray(tau_u, dtype=jax.numpy.float64),
+        tau_j_native=jax.numpy.asarray(tau_v, dtype=jax.numpy.float64))
+    shape = card.recipe.initial_state.eta.data.shape
+    path = tmp_path / "restart.npz"
+    np.savez(path, ssh_m=np.ones(shape), u_m_s=np.full(shape, 2.0),
+             v_m_s=np.full(shape, 3.0), day=1095, step=1234, dt_s=400.0)
+    left, provenance = driver.restart_state_from_npz(
+        card.recipe.initial_state, forcing, path, dt_s=400.0,
+        perturb_amplitude_m=1.0e-6)
+    right, _ = driver.restart_state_from_npz(
+        card.recipe.initial_state, forcing, path, dt_s=400.0,
+        perturb_amplitude_m=1.0e-6)
+    assert np.array_equal(left.eta.data, right.eta.data)
+    assert np.any(np.asarray(left.eta.data) != 1.0)
+    assert np.array_equal(np.asarray(left.u.data[:, 1:, 0]), np.full(shape, 2.0))
+    assert np.array_equal(np.asarray(left.v.data[1:, :, 0]), np.full(shape, 3.0))
+    assert np.all(np.asarray(left.u.data[:, :1, :]) == 0.0)
+    assert np.all(np.asarray(left.v.data[:1, :, :]) == 0.0)
+    assert provenance["source_day"] == 1095
+    with pytest.raises(ValueError, match="timestep differs"):
+        driver.restart_state_from_npz(
+            card.recipe.initial_state, forcing, path, dt_s=50.0)

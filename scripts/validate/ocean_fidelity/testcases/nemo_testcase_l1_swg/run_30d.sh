@@ -26,7 +26,7 @@ while [[ $# -gt 0 ]]; do
       deck=$2
       shift
       ;;
-    *) printf 'REFUSE_USAGE: expected [--deck shipped|maddison] [--run]\n' >&2; exit 64 ;;
+    *) printf 'REFUSE_USAGE: expected [--deck shipped|maddison|dg50] [--run]\n' >&2; exit 64 ;;
   esac
   shift
 done

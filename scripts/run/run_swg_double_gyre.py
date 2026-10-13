@@ -30,19 +30,85 @@ def _write_hashes_atomic(path: Path, hashes: dict[str, str]) -> None:
     temporary.replace(path)
 
 
-def resolved_daily_namelist(days: int):
-    """Return the user-selected Maddison deck resolved for a number of days."""
-    from legoesm.ocean.fidelity.nemo_testcase_recipe import SWG_MADDISON_NAMELIST
+def resolved_daily_namelist(days: int, *, deck: str = "maddison"):
+    """Return a supported double-gyre deck resolved for a number of days."""
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        SWG_DG50_NAMELIST,
+        SWG_MADDISON_NAMELIST,
+    )
 
     if type(days) is not int or days <= 0:
         raise ValueError("days must be a positive integer")
-    dt_s = SWG_MADDISON_NAMELIST.rn_Dt_s
+    decks = {"maddison": SWG_MADDISON_NAMELIST, "dg50": SWG_DG50_NAMELIST}
+    if deck not in decks:
+        raise ValueError(f"unsupported double-gyre deck {deck!r}")
+    selected = decks[deck]
+    dt_s = selected.rn_Dt_s
     steps_per_day = SECONDS_PER_DAY / dt_s
     if not float(steps_per_day).is_integer():
         raise ValueError(f"rn_Dt={dt_s} does not divide one model day")
     cadence = int(steps_per_day)
-    return SWG_MADDISON_NAMELIST._replace(
+    return selected._replace(
         nn_itend=days * cadence, nn_write=cadence, nn_stock=cadence)
+
+
+def restart_state_from_npz(state, forcing, path: Path, *, dt_s: float,
+                           perturb_amplitude_m: float | None = None,
+                           perturb_seed: int = 0):
+    """Restore native SWG prognostics and optional fixed-seed wet SSH noise."""
+    import jax.numpy as jnp
+
+    if perturb_amplitude_m is not None and (
+            not np.isfinite(perturb_amplitude_m) or perturb_amplitude_m < 0.0):
+        raise ValueError("perturb amplitude must be finite and non-negative")
+    if type(perturb_seed) is not int or perturb_seed < 0:
+        raise ValueError("perturb seed must be a non-negative integer")
+    with np.load(path, allow_pickle=False) as saved:
+        required = {"ssh_m", "u_m_s", "v_m_s", "day", "step", "dt_s"}
+        missing = required - set(saved.files)
+        if missing:
+            raise ValueError(f"restart is missing keys {sorted(missing)}")
+        if float(saved["dt_s"]) != float(dt_s):
+            raise ValueError("restart timestep differs from resolved deck")
+        ssh = np.asarray(saved["ssh_m"], dtype=np.float64).copy()
+        u_native = np.asarray(saved["u_m_s"], dtype=np.float64)
+        v_native = np.asarray(saved["v_m_s"], dtype=np.float64)
+        source_day = int(saved["day"])
+        source_step = int(saved["step"])
+    expected = tuple(state.eta.data.shape)
+    if ssh.shape != expected or u_native.shape != expected or v_native.shape != expected:
+        raise ValueError(
+            f"restart native shapes must all be {expected}, got "
+            f"{ssh.shape}, {u_native.shape}, {v_native.shape}")
+    if not all(np.all(np.isfinite(value)) for value in (ssh, u_native, v_native)):
+        raise ValueError("restart contains non-finite prognostics")
+    wet = np.asarray(state.land_mask.data) > 0.5
+    if perturb_amplitude_m is not None and perturb_amplitude_m > 0.0:
+        noise = np.random.default_rng(perturb_seed).standard_normal(ssh.shape)
+        ssh[wet] += perturb_amplitude_m * noise[wet]
+    u = np.zeros(state.u.data.shape, dtype=np.float64)
+    v = np.zeros(state.v.data.shape, dtype=np.float64)
+    u[:, 1:, 0] = u_native
+    v[1:, :, 0] = v_native
+    restored = state._replace(
+        eta=state.eta.replace(data=jnp.asarray(ssh)),
+        u=state.u.replace(data=jnp.asarray(u)),
+        v=state.v.replace(data=jnp.asarray(v)),
+        tau_x_prev=jnp.asarray(forcing.tau_i_native, dtype=state.eta.data.dtype),
+        tau_y_prev=jnp.asarray(forcing.tau_j_native, dtype=state.eta.data.dtype),
+    )
+    return restored, {
+        "path": str(path.resolve()),
+        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        "source_day": source_day,
+        "source_step": source_step,
+        "perturb_amplitude_m": (
+            None if perturb_amplitude_m is None else float(perturb_amplitude_m)),
+        "perturb_seed": perturb_seed if perturb_amplitude_m is not None else None,
+        "perturb_distribution": (
+            "numpy.default_rng.standard_normal on wet T points"
+            if perturb_amplitude_m is not None else None),
+    }
 
 
 def seed_steady_forcing_carry(state, forcing):
@@ -194,10 +260,58 @@ def profile_step_modes(model, state, dt_s: float, forcing, n_steps: int) -> dict
     }
 
 
+def profile_python_steps(model, state, dt_s: float, forcing, n_steps: int) -> dict:
+    """Time a warm certified production-step burst on the CPU."""
+    import jax
+
+    if type(n_steps) is not int or n_steps <= 0:
+        raise ValueError("profile n_steps must be a positive integer")
+    model.prime_step_caches(state)
+    started = time.perf_counter()
+    warmed = model.step(state, dt_s, surface_forcing=forcing)
+    jax.block_until_ready(warmed.eta.data)
+    compile_s = time.perf_counter() - started
+    started = time.perf_counter()
+    profiled = run_python_steps(model, state, dt_s, forcing, n_steps)
+    jax.block_until_ready(profiled.eta.data)
+    wall_s = time.perf_counter() - started
+    return {
+        "program": "production-python-step-loop",
+        "steps": n_steps,
+        "python_compile_s": compile_s,
+        "python_wall_s": wall_s,
+        "python_ms_per_step": 1_000.0 * wall_s / n_steps,
+    }
+
+
+def numerical_health(state, namelist) -> dict[str, float | bool]:
+    """Daily finite/thickness/Courant checks on native prognostics."""
+    eta = np.asarray(state.eta.data, dtype=np.float64)
+    u = np.asarray(state.u.data[:, 1:, 0], dtype=np.float64)
+    v = np.asarray(state.v.data[1:, :, 0], dtype=np.float64)
+    wet = np.asarray(state.land_mask.data) > 0.5
+    u_wet = np.asarray(state.u_mask.data[:, 1:]) > 0.5
+    v_wet = np.asarray(state.v_mask.data[1:, :]) > 0.5
+    bathymetry = np.asarray(state.H_bathy.data, dtype=np.float64)
+    spacing_m = namelist.rn_dx_m / namelist.nn_SWG
+    return {
+        "all_finite": bool(all(np.all(np.isfinite(field))
+                               for field in (eta, u, v))),
+        "minimum_total_layer_thickness_m": float(
+            np.min((bathymetry + eta)[wet])),
+        "maximum_u_courant": float(
+            np.max(np.abs(u[u_wet])) * namelist.rn_Dt_s / spacing_m),
+        "maximum_v_courant": float(
+            np.max(np.abs(v[v_wet])) * namelist.rn_Dt_s / spacing_m),
+    }
+
+
 def run_long(
         namelist, output: Path, *, days: int, mode: str, commit: str,
         profile_steps: int = 0, compare_days: int = 0,
         daily_means: bool = False,
+        restart: Path | None = None,
+        perturb_amplitude_m: float | None = None,
 ) -> dict:
     """Integrate one resolved SWG deck and write one native state per day."""
     import jax
@@ -219,8 +333,8 @@ def run_long(
         raise ValueError("profile_steps must be a non-negative integer")
     if type(compare_days) is not int or compare_days < 0:
         raise ValueError("compare_days must be a non-negative integer")
-    if mode != "gpu-native" and (profile_steps or compare_days):
-        raise ValueError("profiling and scan comparison require gpu-native mode")
+    if mode != "gpu-native" and compare_days:
+        raise ValueError("scan comparison requires gpu-native mode")
     if daily_means and mode != "gpu-native":
         raise ValueError("daily-mean output requires non-certified gpu-native mode")
     if len(commit) != 40 or any(char not in "0123456789abcdef" for char in commit):
@@ -260,10 +374,18 @@ def run_long(
         tau_j_native=jax.numpy.asarray(tau_v, dtype=jax.numpy.float64),
     )
     state = card.recipe.initial_state
+    restart_provenance = None
+    if perturb_amplitude_m is not None and restart is None:
+        raise ValueError("--perturb requires --restart")
+    if restart is not None:
+        state, restart_provenance = restart_state_from_npz(
+            state, forcing, restart, dt_s=card.dt_s,
+            perturb_amplitude_m=perturb_amplitude_m)
     profile = None
     parity = None
     if mode == "gpu-native":
-        state = seed_steady_forcing_carry(state, forcing)
+        if restart is None:
+            state = seed_steady_forcing_carry(state, forcing)
         day_stepper = build_scanned_stepper(
             model, card.dt_s, forcing, steps_per_day)
         day_mean_stepper = (
@@ -292,6 +414,9 @@ def run_long(
     else:
         day_stepper = None
         day_mean_stepper = None
+        if profile_steps:
+            profile = profile_python_steps(
+                model, state, card.dt_s, forcing, profile_steps)
     output.mkdir(parents=True)
     manifest = {
         "schema": (
@@ -315,6 +440,8 @@ def run_long(
             if daily_means else ["end_of_day_snapshot"]),
         "profile": profile,
         "scan_vs_python": parity,
+        "restart": restart_provenance,
+        "numerical_health": None,
         "namelist": namelist._asdict(),
         "fields": {
             "ssh_m": "end-of-day snapshot; T points",
@@ -351,11 +478,33 @@ def run_long(
             "mode": np.str_(mode),
             "certified_policy": np.bool_(certified_policy),
             "day": np.int64(day),
-            "step": np.int64(day * steps_per_day),
+            "step": np.int64(
+                day * steps_per_day + (
+                    0 if restart_provenance is None
+                    else restart_provenance["source_step"])),
             "dt_s": np.float64(card.dt_s),
             "ssh_m": np.asarray(state.eta.data, dtype=np.float64),
             "u_m_s": np.asarray(state.u.data[:, 1:, 0], dtype=np.float64),
             "v_m_s": np.asarray(state.v.data[1:, :, 0], dtype=np.float64),
+        }
+        daily_health = numerical_health(state, namelist)
+        previous_health = manifest["numerical_health"]
+        manifest["numerical_health"] = {
+            "all_finite": bool(
+                daily_health["all_finite"] and
+                (previous_health is None or previous_health["all_finite"])),
+            "minimum_total_layer_thickness_m": min(
+                daily_health["minimum_total_layer_thickness_m"],
+                float("inf") if previous_health is None else
+                previous_health["minimum_total_layer_thickness_m"]),
+            "maximum_u_courant": max(
+                daily_health["maximum_u_courant"],
+                float("-inf") if previous_health is None else
+                previous_health["maximum_u_courant"]),
+            "maximum_v_courant": max(
+                daily_health["maximum_v_courant"],
+                float("-inf") if previous_health is None else
+                previous_health["maximum_v_courant"]),
         }
         if means is not None:
             arrays.update({
@@ -391,6 +540,11 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--days", type=int, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--deck", choices=("maddison", "dg50"),
+                        default="maddison")
+    parser.add_argument("--restart", type=Path)
+    parser.add_argument("--perturb", type=float,
+                        help="fixed-seed wet T-point SSH noise amplitude [m]")
     parser.add_argument(
         "--mode", choices=("gpu-native", "cpu-certified"),
         default="gpu-native")
@@ -407,11 +561,12 @@ def main(argv=None) -> int:
     try:
         from legoesm.ocean.fidelity.provenance import git_sha
 
-        namelist = resolved_daily_namelist(args.days)
+        namelist = resolved_daily_namelist(args.days, deck=args.deck)
         manifest = run_long(
             namelist, args.output, days=args.days, mode=args.mode,
             commit=git_sha(), profile_steps=args.profile_steps,
-            compare_days=args.compare_days, daily_means=args.daily_means)
+            compare_days=args.compare_days, daily_means=args.daily_means,
+            restart=args.restart, perturb_amplitude_m=args.perturb)
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"REFUSE: {exc}", file=sys.stderr)
         return 2
@@ -421,11 +576,14 @@ def main(argv=None) -> int:
         f"deck_certification=pending output={args.output.resolve()}")
     if manifest["profile"] is not None:
         profile = manifest["profile"]
-        print(
+        message = (
             f"PROFILE steps={profile['steps']} "
-            f"python_ms_per_step={profile['python_ms_per_step']:.6f} "
-            f"scan_ms_per_step={profile['scan_ms_per_step']:.6f} "
-            f"target_met={profile['target_met']}")
+            f"python_ms_per_step={profile['python_ms_per_step']:.6f}")
+        if "scan_ms_per_step" in profile:
+            message += (
+                f" scan_ms_per_step={profile['scan_ms_per_step']:.6f} "
+                f"target_met={profile['target_met']}")
+        print(message)
     if manifest["scan_vs_python"] is not None:
         parity = manifest["scan_vs_python"]
         print(

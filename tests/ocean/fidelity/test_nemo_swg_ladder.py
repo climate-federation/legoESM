@@ -29,6 +29,19 @@ def test_maddison_deck_selects_admitted_card_clocks_and_roots():
         lad._deck_namelist("typo")
 
 
+def test_dg50_deck_selects_preregistered_stage_and_month_clocks():
+    stage = lad._deck_namelist("dg50")
+    month = lad._deck_namelist("dg50", month=True)
+    assert (stage.nn_SWG, stage.rn_Dt_s, stage.nn_itend,
+            stage.nn_stock, stage.nn_write) == (2, 400.0, 10, 1, 1)
+    assert (month.nn_SWG, month.rn_Dt_s, month.nn_itend,
+            month.nn_stock, month.nn_write) == (2, 400.0, 6480, 216, 216)
+    physical = set(stage._fields) - {"nn_itend", "nn_stock", "nn_write"}
+    fine = lad._deck_namelist("maddison")
+    differing = {name for name in physical if getattr(stage, name) != getattr(fine, name)}
+    assert differing == {"nn_SWG", "rn_Dt_s"}
+
+
 def test_exact_row_gate_distinguishes_signed_zero_bits():
     reference = np.array([0.0, 1.0], dtype=np.float64)
     candidate = np.array([-0.0, 1.0], dtype=np.float64)

@@ -104,6 +104,8 @@ FILES = {
         _SWG_DG_COMPILED / "usrdef_zgr.f90"),
     "SWG_DG/BLD/ppsrc/nemo/stprk3.f90": (
         _SWG_DG_COMPILED / "stprk3.f90"),
+    "SWG_DG/BLD/ppsrc/nemo/diacfl.f90": (
+        _SWG_DG_COMPILED / "diacfl.f90"),
     "SWG_DG/BLD/ppsrc/nemo/divhor.f90": (
         _SWG_DG_COMPILED / "divhor.f90"),
     "SWG_DG/BLD/ppsrc/nemo/sshwzv.f90": (
@@ -1687,6 +1689,17 @@ CITATION_MAP = {
         'rDt   = rn_Dt / 3._wp',
         ('vv(ji,jj,jk,Naa) = vv(ji,jj,jk,Nbb) + rDt * vv(ji,jj,jk,Nrhs)', 1),
         32],
+    'SWG_DG/BLD/ppsrc/nemo/stprk3.f90:196-227': [
+        'rDt   = rn_Dt / 2._wp',
+        ('vv(ji,jj,jk,Naa) = vv(ji,jj,jk,Nbb) + rDt * vv(ji,jj,jk,Nrhs)', 2),
+        32],
+    'SWG_DG/BLD/ppsrc/nemo/stprk3.f90:252-290': [
+        ('rDt   = rn_Dt', 3),
+        ('vv(ji,jj,jk,Naa) = vv(ji,jj,jk,Nbb) + rDt * vv(ji,jj,jk,Nrhs)', 3),
+        39],
+    'SWG_DG/BLD/ppsrc/nemo/diacfl.f90:74-97': [
+        'Compute the Courant numbers Cu=u*dt/dx and Cv=v*dt/dy',
+        'zCw_cfl(ji,jj,jk) = ABS( ww(ji,jj,jk) ) * rDt', 24],
     'SWG_DG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:204-210': [
         ("CALL lbc_lnk( 'stp_RK3', uu (:,:,:,Naa)", 1),
         ('Naa = Nrhs', 1),

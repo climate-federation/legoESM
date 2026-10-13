@@ -100,6 +100,18 @@ def test_comparison_refuses_different_daily_sampling():
         climate.compare((left, right), days=2)
 
 
+def test_supplied_card_requires_its_resolved_namelist():
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        SWG_DG50_NAMELIST,
+        build_swg_card,
+    )
+
+    with pytest.raises(Exception, match="requires its resolved namelist"):
+        climate.diagnose(
+            _synthetic_provider(), days=2,
+            card=build_swg_card(SWG_DG50_NAMELIST))
+
+
 def test_instrument_writes_json_arrays_and_side_by_side_figure(tmp_path):
     providers = (_synthetic_provider("NEMO"),
                  _synthetic_provider("legoESM"))
@@ -243,3 +255,28 @@ def test_legoesm_provider_selects_later_window_and_gates_deck(tmp_path):
     manifest_path.write_text(json.dumps(manifest))
     with pytest.raises(Exception, match="differs at rn_shlat"):
         climate.legoesm_npz_provider(tmp_path, 2, start_day=2)
+
+
+def test_filtered_provider_reads_target_stagger_and_refuses_bad_digest(tmp_path):
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import SWG_DG50_NAMELIST
+
+    pins = {}
+    shape = (84, 84)
+    for day in range(1, 3):
+        path = tmp_path / f"day{day:04d}.npz"
+        field = np.full(shape, float(day))
+        np.savez(path, day=day, ssh_m=field, u_m_s=field, v_m_s=field)
+        pins[path.name] = climate.sha256(path)
+    manifest = {
+        "schema": "legoesm-swg-filtered-truth-v1", "status": "complete",
+        "completed_days": 2, "days": 2, "sampling": "daily_snapshot",
+        "output_daily_sha256": pins,
+        "target_namelist": SWG_DG50_NAMELIST._asdict(),
+    }
+    (tmp_path / "manifest.json").write_text(json.dumps(manifest))
+    provider = climate.filtered_npz_provider(tmp_path, 1, start_day=2)
+    frames = list(provider.iterate())
+    assert len(frames) == 1 and frames[0].ssh[0, 0] == 2.0
+    (tmp_path / "day0002.npz").write_bytes(b"plant")
+    with pytest.raises(Exception, match="digest mismatch"):
+        list(provider.iterate())

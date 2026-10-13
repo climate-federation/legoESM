@@ -1,0 +1,44 @@
+--- namelist_cfg
++++ namelist_cfg
+@@ -16,12 +16,13 @@
+ !-----------------------------------------------------------------------
+ &namrun        !   parameters of the run
+ !-----------------------------------------------------------------------
++   nn_stock    =       1   ! acquisition: restart every step
+    cn_exp      =  "SWG"    !  experience name
+    nn_it000    =       1   !  first time step
+-   nn_itend    =   172800  !  10 ans  - 30 min - SWG 1/4deg
++   nn_itend    =       10  !  acquisition: ten-step dg50 ladder
+ !   nn_itend    =    86400  !  10 ans  - 1h
+    nn_leapy    =      30   !  Leap year calendar (1) or not (0)
+-   nn_write    =     480   !  frequency of write in the output file   (modulo referenced to nn_it000)
++   nn_write    =       1   !  acquisition: output every step
+    nn_istate   =       1   !  output the initial state (1) or not (0)
+ /
+ !-----------------------------------------------------------------------
+@@ -39 +40 @@
+-   nn_SWG      =     4     !  SWG resolution [1/nn_SWG]
++   nn_SWG      =     2     !  dg50: 50 km
+@@ -44 +45 @@
+-   rn_domsiz   =  2000000        ! size of the domain (default 2000km)  [m]
++   rn_domsiz   =  4000000        ! Maddison deck: 4000 km basin [m]
+@@ -47,2 +48,2 @@
+-   rn_tau           = 0.20    ! wind stress on the surface    [N/m2]
+-   rn_modified_grav = 0.02    ! modified gravity              [m/s2] 
++   rn_tau           = 0.10    ! Maddison deck wind stress     [N/m2]
++   rn_modified_grav = 9.80665 ! Maddison deck rigid-surface g [m/s2]
+@@ -69 +70 @@
+-   rn_Dt       = 3600.     !  1h    - SWG 1/4deg
++   rn_Dt       = 400.      !  dg50 gravity-wave Courant matched to 6.25 km/50 s
+@@ -180 +181 @@
+-      rn_Lv      = 500         !  lateral viscous length   [m]  - at 1/4deg 
++      rn_Lv      = 10          !  Maddison ahm=rn_Uv*rn_Lv/2=10 m2/s
+@@ -237,6 +238,8 @@
+ /
+ !-----------------------------------------------------------------------
+ &namctl        !   Control prints                                       (default: OFF)
++   sn_cfctl%l_runstat = .TRUE.
++   sn_cfctl%ptimincr = 1
+ !-----------------------------------------------------------------------
+ /
+ !-----------------------------------------------------------------------
