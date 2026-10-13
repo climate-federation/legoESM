@@ -63,7 +63,7 @@ property of the older integration context, not of the scalar association.
 
 R264-P5 is **CONFIRMED**. Both-label and three-mode coverage, record identity,
 passivity, matched program points, source order, the next-boundary census,
-and one-bit sensitivity are mechanically gated; all sixteen plants refuse.
+and one-bit sensitivity are mechanically gated; all fifteen plants refuse.
 The first combined-process measurement aborted with LLVM's compiler-memory
 limit, so every citable arm was rerun in an isolated process. No number from
 the aborted process is used.
