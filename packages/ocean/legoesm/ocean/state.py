@@ -3138,6 +3138,17 @@ class LatLonCGridOceanConfig(NamedTuple):
     # F thickness, 1/12 inside each triad, the four products summed left to
     # right), which is real-equal and differs in the last place.
     een_vorticity_written_order: bool = False
+    # The barotropic velocity dyn_zdf removes before its implicit solve
+    # (dynzdf.f90:158-162) is NOT added back after it; the WS-RK3 stage
+    # correction (stprk3_stg.f90:407-418) restores the depth mean from the
+    # residual, as NEMO does.  False re-adds it after the solve, which is
+    # real-equal and differs in the last place.
+    zdf_barotropic_removal_nemo_literal: bool = False
+    # The stored top V row of the 3-D velocity is NEMO's fold image of the
+    # row below it, as the exchange that ends each stage leaves it
+    # (stprk3_stg.f90:572-573).  False keeps the row at the compact mask's
+    # zero.  T-pivot fold grids only.
+    rk3_fold_exchange_top_v_row: bool = False
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":

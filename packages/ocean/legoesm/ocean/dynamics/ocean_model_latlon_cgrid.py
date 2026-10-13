@@ -10595,7 +10595,7 @@ class LatLonCGridOceanModel:
             _u_after = _u_after.at[:, -1].set(_u_after[:, 0])
             state_new = state_new._replace(
                 u=state_new.u.replace(data=_u_after),
-                v=state_new.v.replace(data=_v_after),
+                v=state_new.v.replace(data=(_rk3_fold_exchange_top_v(_v_after, _grid, _ws_stage_v_mask) if _cfg_b.rk3_fold_exchange_top_v_row else _v_after)),  # noqa: E501
             )
         elif _impose_mean:
             # NEMO stprk3_stg.F90:440: uu += (uu_b(Kaa) − Σ e3u_0·uu·r1_hu_0)
@@ -13375,7 +13375,7 @@ class LatLonCGridOceanModel:
                     u_new, v_new,
                     ordered=True,
                 )
-            if _zdf_baroclinic_only:
+            if _zdf_baroclinic_only and not _zdf_residual_nemo_literal(_cfg_b):
                 # Re-add the SAME depth mean that was subtracted before the
                 # solve (dynzdf.F90's barotropic component re-enters via
                 # mlf_baro_corr AFTER dyn_zdf) — exactly conservative at
@@ -16576,3 +16576,50 @@ def _rk3_stage_update_written_order(velocity_before, rhs, dt_stage, qco_before,
     r = nemo_source_round
     return r(r(r(qco_before * velocity_before)
                + r(r(dt_stage * qco_now) * rhs)) / qco_after) * face_mask
+
+
+def _zdf_residual_nemo_literal(cfg) -> bool:
+    """Whether the implicit vertical solve hands on the baroclinic residual.
+
+    NEMO's ``dyn_zdf`` removes the barotropic velocity before its solve under
+    ``ln_drgimp .AND. ln_dynspg_ts`` (dynzdf.f90:158-162) and never adds it
+    back: the stage correction that follows (stprk3_stg.f90:407-418) restores
+    the depth mean from the residual.  ``zdf_barotropic_removal_nemo_literal``
+    selects that; False re-adds the removed velocity after the solve, which
+    is equal as real numbers and differs in the last place.  The option
+    needs the stage correction, so it is refused without the WS-RK3 stage
+    mean imposition that supplies it.
+    """
+    if not getattr(cfg, "zdf_barotropic_removal_nemo_literal", False):
+        return False
+    if not (getattr(cfg, "momentum_time_integrator", "euler") == "rk3_ws"
+            and getattr(cfg.barotropic, "nemo_stage_mean_imposition", False)
+            and getattr(cfg, "zdf_baroclinic_only", False)):
+        raise ValueError(
+            "zdf_barotropic_removal_nemo_literal=True needs "
+            "momentum_time_integrator='rk3_ws', zdf_baroclinic_only=True and "
+            "barotropic.nemo_stage_mean_imposition=True: without the stage "
+            "correction nothing restores the removed barotropic velocity")
+    return True
+
+
+def _rk3_fold_exchange_top_v(v, grid, v_mask_3d):
+    """NEMO's end-of-stage exchange of the 3-D V velocity on a T-pivot fold.
+
+    ``lbc_lnk( 'stp_RK3_stg', uu(Kaa), 'U', -1., vv(Kaa), 'V', -1., ... )``
+    (stprk3_stg.f90:572-573) leaves the top V row as the fold image of the
+    row below it: the mirrored velocity with the fold sign, on the faces that
+    are wet there.  legoESM's compact V mask keeps that row dry, so the
+    stored row is zero where NEMO's is the image.  Same permutation, sign and
+    wet rule as the image the vorticity trend already reads
+    (``een_fold_image_v_row``); ``rk3_fold_exchange_top_v_row`` selects it for
+    the stored velocity.
+    """
+    fold = getattr(grid, "fold", None)
+    if fold is None or not bool(fold.is_active):
+        raise ValueError(
+            "rk3_fold_exchange_top_v_row=True needs a grid with an active "
+            "north fold")
+    perm = fold.perm_v
+    return v.at[-1].set(
+        fold.vector_sign_v * v[-2][perm] * v_mask_3d[-2][perm].astype(v.dtype))
