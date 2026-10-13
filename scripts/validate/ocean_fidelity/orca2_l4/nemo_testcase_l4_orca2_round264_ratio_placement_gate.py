@@ -115,12 +115,15 @@ def _run_mode(card, state, forcing, oracle_stage1, oracle_stage2,
             f"{mode}: matched-entry trace return type moved")
 
     associated_stage1 = (*associated, eta1)
+    stage2 = arm.stage_outputs[1]
+    associated2 = r256._associated_stage_values(card, stage2)
+    associated_stage2 = (*associated2, stage2[4])
     return {
         "mode": mode,
         "passivity": passivity,
         "raw_stage1": r260._rows(card, stage1, oracle_stage1),
         "matched_stage1": r260._rows(card, associated_stage1, oracle_stage1),
-        "matched_stage2": r260._rows(card, arm.stage_outputs[1], oracle_stage2),
+        "matched_stage2": r260._rows(card, associated_stage2, oracle_stage2),
         "stage1_zFv": np.asarray(traced.stage_geometry[0][8], np.float64),
     }
 
