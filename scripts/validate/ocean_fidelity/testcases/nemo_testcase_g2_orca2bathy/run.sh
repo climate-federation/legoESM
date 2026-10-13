@@ -152,7 +152,8 @@ admit() {
            <(assignments "$DECK" | grep -Ev 'nn_itend|nn_stock') \
       || { printf 'REFUSE: %s ran a deck that is not the committed one\n' "$dir" >&2; exit 73; }
   done
-  for plant in truncation nonfinite missing-frame twin-ulp missing-step missing-substep; do
+  for plant in truncation nonfinite missing-frame twin-ulp missing-step missing-substep \
+               twin-substep-inner; do
     if python3 -I "$CHECKER" --evidence "$TWIN_A" --twin "$TWIN_B" \
          --steps "$STEPS" --stage-steps "$STAGE_STEPS" --plant "$plant" \
          --substep-steps "$SPGTS_STEPS" >"$EVIDENCE/manifest/plant_${plant}.log" 2>&1; then

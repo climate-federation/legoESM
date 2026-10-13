@@ -297,3 +297,40 @@ def test_round4_patch_writes_every_field_the_admission_requires():
              "dynspg_ts_g1_substep_record.patch").read_text()
     for name in cr.SUB_ENTRY + cr.SUB_STEP + cr.SUB_EXIT:
         assert f"'{name}'" in patch, name
+
+
+def test_substep_twin_check_compares_the_consumed_support_only(tmp_path):
+    """G2 round 2: the writer dumps work arrays whose halo NEMO never sets,
+    so twins may differ there.  A halo word is counted, not refused; an
+    inner-domain word, a short array or the plant refuses."""
+    cr = _records_checker()
+    a, b = tmp_path / "a", tmp_path / "b"
+    a.mkdir(), b.mkdir()
+    blob = _substep_blob(1)
+    cr.substep_path(a, 1).write_bytes(blob)
+    cr.step_path(b, 1).write_bytes(b"the twin ran step 1")
+    head, fields = cr.read_substeps(blob, "x")
+    name = "j001_ssha_e"                       # a full (jpj, jpi) = (5, 6) plane
+    start = blob.index(name.ljust(16).encode()) + 32
+
+    def twin_with_word(j, i):
+        at = start + 8 * (j * head["jpi"] + i)
+        return blob[:at] + np.float64(7.0e-310).tobytes() + blob[at + 8:]
+
+    cr.substep_path(b, 1).write_bytes(blob)
+    assert cr.check_substeps(a, b, [1])[1]["twin_halo_words_differing"] == 0
+    cr.substep_path(b, 1).write_bytes(twin_with_word(0, 0))            # halo
+    assert cr.check_substeps(a, b, [1])[1]["twin_halo_words_differing"] == 1
+    j, i = head["Njs0"] - 1, head["Nis0"] - 1                          # inner
+    cr.substep_path(b, 1).write_bytes(twin_with_word(j, i))
+    with pytest.raises(cr.Refuse, match="on the inner domain"):
+        cr.check_substeps(a, b, [1])
+    cr.substep_path(b, 1).write_bytes(blob)
+    with pytest.raises(cr.Refuse, match="on the inner domain"):
+        cr.check_substeps(a, b, [1], plant="twin-substep-inner")
+    # an array that is not a full plane is compared whole
+    short = blob.index(b"j001_ext_coef".ljust(16)) + 32
+    cr.substep_path(b, 1).write_bytes(
+        blob[:short] + np.float64(2.0).tobytes() + blob[short + 8:])
+    with pytest.raises(cr.Refuse, match="twin run differs in j001_ext_coef"):
+        cr.check_substeps(a, b, [1])

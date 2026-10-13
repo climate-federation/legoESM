@@ -22,7 +22,7 @@ HEADER_NAMES = ("version", "step", "Nbb", "Nnn", "Naa", "Nrhs", "jpi", "jpj",
 STAGE_FRAMES = ("e", "b", "1", "2", "3", "f")
 PLANTS = ("none", "truncation", "nonfinite", "missing-frame", "twin-ulp",
           "missing-step")
-SUB_PLANTS = ("missing-substep",)       # needs --substep-steps
+SUB_PLANTS = ("missing-substep", "twin-substep-inner")   # need --substep-steps
 # the least each frame must hold for the round-4 walk (more is recorded)
 SUB_ENTRY = ("sshn_e", "un_e", "vn_e", "zu_frc", "zv_frc", "ffu_nw", "ffu_ne",
              "ffu_sw", "ffu_se", "ffv_nw", "ffv_ne", "ffv_sw", "ffv_se")
@@ -93,11 +93,39 @@ def read_substeps(blob: bytes, label: str):
     return header, fields
 
 
+def twin_halo_words(header: dict, fields: dict, other_blob: bytes, label: str,
+                    plant: bool = False) -> int:
+    """The twin's stream equals this one on the CONSUMED support: the inner
+    domain of every full (jpj, jpi) plane (all the reader keeps) and every
+    other array whole.  Returns the number of differing HALO words: the
+    writer dumps work arrays whose halo NEMO never sets, so that storage is
+    whatever the process held (G2 round 2: 3,384 words at kt = 2)."""
+    other_header, other = read_substeps(other_blob, f"{label} (twin)")
+    require(other_header == header and list(other) == list(fields),
+            f"{label}: twin run differs (header or field list)")
+    js, je = header["Njs0"] - 1, header["Nje0"]
+    i_s, ie = header["Nis0"] - 1, header["Nie0"]
+    full, halo, planted = (header["jpj"], header["jpi"]), 0, not plant
+    for name, mine in fields.items():
+        unequal = mine.view("<u8") != other[name].view("<u8")
+        if mine.shape != full:
+            require(not unequal.any(), f"{label}: twin run differs in {name}")
+            continue
+        inner = unequal[js:je, i_s:ie].copy()
+        if not planted:             # the plant: one unequal inner-domain word
+            inner[inner.shape[0] // 2, inner.shape[1] // 2] = planted = True
+        require(not inner.any(), f"{label}: twin run differs in {name} on "
+                f"the inner domain ({int(inner.sum())} words)")
+        halo += int(unequal.sum())
+    require(planted, f"{label}: no full plane to plant in")
+    return halo
+
+
 def check_substeps(evidence: Path, twin: Path | None, steps: list[int],
                    plant: str = "none") -> dict:
     """The substep streams exist at exactly the listed steps, are finite,
     hold the entry frame, one frame per substep of their own header's count
-    and the exit frame, and equal the twin run's byte for byte."""
+    and the exit frame, and equal the twin run's on the consumed support."""
     out = {}
     wanted = list(steps) + ([max(steps) + 1] if plant == "missing-substep" else [])
     for step in wanted:
@@ -128,10 +156,14 @@ def check_substeps(evidence: Path, twin: Path | None, steps: list[int],
             # the twin ran this step: its substep stream must exist and agree
             require(substep_path(twin, step).is_file(),
                     f"{path.name}: the twin run has no substep record")
-            require(substep_path(twin, step).read_bytes() == blob,
-                    f"{path.name}: twin run differs")
+            halo_words = twin_halo_words(
+                header, fields, substep_path(twin, step).read_bytes(), path.name,
+                plant=plant == "twin-substep-inner" and step == steps[0])
+        else:
+            halo_words = None       # the twin did not run this step
         out[step] = {"icycle": header["icycle"], "n_fields": len(fields),
-                     "substep_fields": first}
+                     "substep_fields": first,
+                     "twin_halo_words_differing": halo_words}
     stray = sorted(p.name for p in evidence.glob("oracle_g1spgts_kt*.bin")
                    if p not in {substep_path(evidence, s) for s in steps})
     require(not stray, f"substep records at unlisted steps: {stray[:3]}")
@@ -224,13 +256,13 @@ def main() -> int:
     args = parser.parse_args()
     try:
         result = check(args.evidence, args.twin, args.steps, args.stage_steps,
-                       "none" if args.plant == "missing-substep" else args.plant)
+                       "none" if args.plant in SUB_PLANTS else args.plant)
         if args.substep_steps:
             result["substeps"] = check_substeps(
                 args.evidence, args.twin,
                 [int(s) for s in args.substep_steps.split(",") if s], args.plant)
-        require(args.plant != "missing-substep" or bool(args.substep_steps),
-                "the missing-substep plant needs --substep-steps")
+        require(args.plant not in SUB_PLANTS or bool(args.substep_steps),
+                f"the {args.plant} plant needs --substep-steps")
         if args.reference is not None:
             result["passive_restarts"] = restarts_identical(
                 args.reference, args.evidence,
