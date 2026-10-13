@@ -164,7 +164,8 @@ def carriers(g, zN, zi, w_maps, mld=None):
     k1 = int(np.argmin(np.abs(zN - Z_UPW))); k0 = k1 - 1
     dtdz = (g["T"][k0] - g["T"][k1 + 1]) / (zN[k1 + 1] - zN[k0])       # K/m, >0 stratified
     bw = band_weights(zi, 0.0, 20.0)[: zN.size]
-    sec = float(np.nansum(np.nanmean(g["u"][:, eq][:, :, nl], axis=(1, 2)) * bw) / bw.sum())
+    ul = np.nanmean(g["u"][:, eq][:, :, nl], axis=(1, 2)); ok = np.isfinite(ul) & (bw > 0)
+    sec = float(np.sum(ul[ok] * bw[ok]) / np.sum(bw[ok])) if ok.any() else float("nan")
     w_px = w_maps["proxy"]
     dTdx_s = np.full(GLON.size, np.nan)
     Ts = np.nanmean(g["T"][0][eq], axis=0)
@@ -312,7 +313,9 @@ def main(argv=None):
     r_mesh = float(np.sqrt(np.sum(np.asarray(mesh.areaCell)) / (4.0 * np.pi)))
     div_m = np.asarray(divergence_cell_3d(jnp.asarray(m["u_mean"][:, :kz]), mesh)) * r_mesh / _radius()
     div_m = np.where(wm, div_m, np.nan)
-    WD["MPAS"] = remap(w_from_divergence(div_m.T, zi), m["lat_T"], m["lon_T"], m["land_mask"] > 0.5)
+    # same target depth as the stored w (NEMO's W level nearest Z_UPW)
+    WD["MPAS"] = remap(w_from_divergence(div_m.T, zi, float(zW[kw])), m["lat_T"], m["lon_T"],
+                       m["land_mask"] > 0.5)
     rep["provenance"]["mpas_mesh_radius"] = r_mesh
 
     fz = snap(a.fesom, 30); zf = np.abs(fz["z_center_ref"])
@@ -375,8 +378,8 @@ def main(argv=None):
     # (MPAS TRiSK), and the 1-degree proxy for every source and velocity set -- all
     # on ONE footprint (finite in every map) so differences are not footprint.
     R = _radius()
-    PX = {lab: w_from_divergence(horizontal_divergence(g["u"], g["v"], R), zi) for lab, g in G.items()}
-    PXI = {lab: w_from_divergence(horizontal_divergence(g["u"], g["v"], R), zi) for lab, g in GI.items()}
+    PX = {lab: w_from_divergence(horizontal_divergence(g["u"], g["v"], R), zi, float(zW[kw])) for lab, g in G.items()}
+    PXI = {lab: w_from_divergence(horizontal_divergence(g["u"], g["v"], R), zi, float(zW[kw])) for lab, g in GI.items()}
     cw = np.all([np.isfinite(x) for x in list(PX.values()) + list(PXI.values()) + list(WD.values())], axis=0)
     msk = lambda x: np.where(cw, x, np.nan)
     rep["provenance"]["w_kinds"] = {lab: ("direct" if lab in ("NEMO", "tripole") else "native")
