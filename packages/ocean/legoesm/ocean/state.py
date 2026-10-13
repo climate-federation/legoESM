@@ -3116,6 +3116,10 @@ class LatLonCGridOceanConfig(NamedTuple):
     # F thickness, 1/12 inside each triad, the four products summed left to
     # right), which is real-equal and differs in the last place.
     een_vorticity_written_order: bool = False
+    # The F-point thickness ratio read by the stage-2 and stage-3 vorticity
+    # terms is NEMO's interpolation of the entry and after ratios
+    # (stprk3_stg.f90:218, :239). False uses the ratio of stage SSH.
+    rk3_stage_r3f_nemo_literal: bool = False
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":
