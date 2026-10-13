@@ -4140,7 +4140,7 @@ def _nemo_entry_face_depths(config, summed, prep, entry):
 def _nemo_een_ratio_fold_exchange(r3u, r3v, r3f, grid, selected):
     """NEMO's north-fold exchange of the U-, V- and F-point thickness ratios.
 
-    ``stprk3_stg.f90:163`` (``domqco.f90:183`` at start-up) passes the ratios
+    ``stprk3_stg.f90:163`` (``domqco.f90:182-183`` at start-up) passes the ratios
     ``dom_qco_r3c_RK3`` has just computed through ``lbc_lnk`` with sign +1
     before ``dyn_cor_2D_init`` stretches the EEN triads with them.  On the
     T-pivot fold (``lbcnfd.f90:639-749``) that replaces the whole pivot row of
@@ -4167,7 +4167,7 @@ def nemo_een_fold_pivot_row(config):
     """(ratio exchange, mesh ``fe3mask`` pivot row): the two halves of NEMO's
     T-pivot pivot row in the solver's EEN coefficient operands.
 
-    The second half: ``dommsk.f90:233`` exchanges ``fmask`` (F point, sign
+    The second half: ``dommsk.f90:232`` exchanges ``fmask`` (F point, sign
     +1) and ``:258`` freezes it as ``fe3mask``, so its pivot row is the
     mirrored row below (``lbcnfd.f90:722-749``), which the card's mesh array
     already holds.  ``BarotropicConfig.barotropic_een_fe3mask_pivot_row``

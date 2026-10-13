@@ -74,7 +74,7 @@ Arms (``--arm``):
                coefficient builder is also run offline on NEMO's entry sea
                level against NEMO's eight recorded coefficient sets, four
                ways: neither half, the ratio exchange alone, the mesh
-               fe3mask pivot row alone (dommsk.f90:233, :258), both; no
+               fe3mask pivot row alone (dommsk.f90:232, :258), both; no
                model step
 
 Every scored row is split into the preregistered regions (fold band, seam,
