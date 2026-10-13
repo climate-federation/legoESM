@@ -125,8 +125,32 @@ The preregistered `nu=80 m2 s-1` 30-day control passes its numerical preflight:
 all finite, minimum thickness `498.90918 m`, maximum U/V Courants
 `0.0115257/0.0111759`. Its manifest SHA-256 is
 `eab59bc0614afc2b753f261009571291d2a7de1de324102c957d84e577fcb1fe`.
-The 20-year CPU run and yearly spectral report are recorded below after their
-final clean completion.
+Its 30-day top-octave KE/enstrophy fractions are `0.18699/0.71778`, close to
+the same-window conservative truth's `0.17734/0.70057`; the wet checkerboard
+index is `2.16e-18`. The spectral preflight report SHA-256 is
+`705fd650afd7951868b75eb50408c041c3df7ab93670749ab15e87137855dc25`.
+The 20-year CPU run completed under the certified CPU fp64/libm policy. Its
+manifest SHA-256 is
+`cbee1f9f2268cec353c99bd3922b86a08a645f57cea81f9950791cbe35895f26`:
+all finite, minimum thickness `498.02678 m`, maximum U/V Courants
+`0.0155439/0.0116772`. The 20 yearly rows have SHA-256
+`9c98bc7f26802d6d81d1d2306807780d43e2f69bfca074b22c58a21300f898fb`.
+Across years 2–20, top-octave KE stays in `0.14663–0.15615` and enstrophy in
+`0.71996–0.73197`; the control is stable and less grid-noisy than `nu=10`.
+
+| Year | KE, nu80 / truth (`m2 s-2`) | EKE, nu80 / truth (`m2 s-2`) | Top-octave KE, nu80 / truth | Top-octave enstrophy, nu80 / truth | Wet SSH RMSE (`m`) | Wet EKE-map RMSE (`m2 s-2`) |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | `0.0163543 / 0.0169408` | `0.00576331 / 0.0110588` | `0.16860 / 0.10124` | `0.73783 / 0.56855` | `0.0831481` | `0.0171225` |
+| 2 | `0.0202063 / 0.0210643` | `0.00556563 / 0.0135839` | `0.15128 / 0.08826` | `0.73195 / 0.55305` | `0.155649` | `0.0231066` |
+| 3 | `0.0202482 / 0.0208713` | `0.00508157 / 0.0132631` | `0.15072 / 0.08654` | `0.72690 / 0.54671` | `0.134199` | `0.0263795` |
+
+The matched reports have SHA-256
+`c09c95f31460434b0e4a430c12c133c80ff2c961b5f49dc2f273b3c6160e7399`,
+`f1d96647ac7aa745c5e0b345854bf99794c0f0d34eda560bfd6fe722f52ef0d3`,
+and `129c94fefed477ac7504f935f4fa3d4e919cb287332cc9ca1112389b5428ab81`.
+The `nu=80` control reduces high-wavenumber fractions, but year-3 EKE is only
+38.3% of truth versus 70.2% for `nu=10`; it is the deliberately more
+dissipative control, not a replacement training model.
 
 ## Hourly targets and balanced starts
 
@@ -153,7 +177,9 @@ instrument is committed for days 731, 771, ..., 1091. It reports hourly
 divergent KE, SSH-tendency RMS, and relative-vorticity error, with the deciding
 shock/closure ratio at 6, 24, and 48 hours. Actual hourly caches and balanced
 start ratios were **not acquired in this CPU-only round**; exact GPU commands
-are in OPEN.
+are in OPEN. A third rotational/geostrophically adjusted initialization was not
+constructed; it is required only if the conservative start fails the registered
+shock admission after those targets exist.
 
 ## Predictability and reference adequacy
 
@@ -182,9 +208,10 @@ SHA-256 is
 The explicit `dg3125` sensitivity deck uses `nn_SWG=32`, `dx=3.125 km`, and
 `dt=25 s`, preserving gravity-wave Courant and every other fine-deck parameter.
 Scaling the measured 45 minutes/model-year at 6.25 km by four times as many
-cells and two times as many steps estimates 6 GPU-hours/model-year: about 18
-hours for the first three comparable years or 120 hours for 20 years. The
-preregistered gate compares each common year after restriction to 50 km:
+cells and two times as many steps gives a measured fine cost of `4.28 ms/step`,
+an estimated sensitivity cost of `17.1 ms/step`, and 6 GPU-hours/model-year:
+about 18 hours for the first three comparable years or 120 hours for 20 years.
+The preregistered gate compares each common year after restriction to 50 km:
 relative KE, relative EKE, jet-position RMSE divided by basin width, and
 KE-spectrum relative L1 error must each be at most 10%. Any failure makes
 6.25 km truth adequacy a user decision.
