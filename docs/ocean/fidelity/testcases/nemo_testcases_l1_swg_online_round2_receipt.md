@@ -257,13 +257,17 @@ this round.
 
 ## Hygiene and commits
 
-Every new Python module has a direct test. The final affected CPU suite, Ruff,
-diff, compilation, shell syntax, and oracle citation gate commands and their
-actual outputs are recorded here after the final clean run.
+Every new Python module has a direct test. The final affected CPU suite reports
+`91 passed in 209.65s`. Ruff over every changed Python file reports `All checks
+passed!`. `compileall`, `bash -n` on the wrapper, `git diff --check
+8f8551c87..HEAD`, and the final uncommitted-diff check all exit zero without
+output. The receipt citation gate passes all six oracle citations. Shifting the
+first RK3 citation by two lines exits 1 with `SYMBOL-NOT-AT-LINE`.
 
-Round commits before this receipt are `840d5930b`, `39a61da7a`, `f44690f0b`,
-`65d598ad0`, `66d7115c4`, `9503820fa`, `fe9596c60`, `f65ee16a8`, `68646355a`,
-`18862d4cf`, and `5e8bce04b`.
+Round commits before the final receipt update are `840d5930b`, `39a61da7a`,
+`f44690f0b`, `65d598ad0`, `66d7115c4`, `9503820fa`, `fe9596c60`, `f65ee16a8`,
+`68646355a`, `18862d4cf`, `5e8bce04b`, `761c3eb38`, `69ad2a2ff`,
+`52d2f0e4c`, and `f4178231b`.
 
 ## OPEN
 
