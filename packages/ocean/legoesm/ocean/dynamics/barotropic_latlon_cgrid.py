@@ -1203,7 +1203,7 @@ def _nemo_literal_een_coefficients(eta, z_coord, dtype, scheme="een",
     r3u = b(b(half * b(area_eta + east)) * r1_hu0 / b(e1u * e2u))
     r3v = b(b(half * b(area_eta + north)) * r1_hv0 / b(e1v * e2v))
     quad = b(b(area_eta + east) + b(north + northeast))
-    r3u, r3v, r3f = _nemo_een_ratio_fold_exchange(r3u, r3v, b(b(quarter * quad) * r1_hf0 / b(e1f * e2f)), grid, fold_pivot_row[0])  # noqa: E501
+    r3u, r3v, r3f = _nemo_een_ratio_fold_exchange(*_nemo_een_ratio_written_order((r3u, r3v, b(b(quarter * quad) * r1_hf0 / b(e1f * e2f))), (b(half * b(area_eta + east)), b(half * b(area_eta + north)), b(quarter * quad)), (r1_hu0, r1_hv0, r1_hf0), (b(e1u * e2u), b(e1v * e2v), b(e1f * e2f)), fold_pivot_row[2:]), grid, fold_pivot_row[0])  # noqa: E501
     # dynspg_ts.f90:1339-1348 leaves the local and neighbouring live face
     # thicknesses unmasked, then applies the one written neighbouring U mask.
     e3u = b(e3u0 * b(one + r3u[..., None] * umask))
@@ -3225,7 +3225,7 @@ def barotropic_substeps_latlon_cgrid(
                 dz_ref=getattr(z_coord, "dz_ref", None),
                 coefficient_evaluation=_een_eval,
                 eta=_eta_een,
-                z_coord=z_coord, fold_pivot_row=nemo_een_fold_pivot_row(config),
+                z_coord=z_coord, fold_pivot_row=nemo_een_fold_pivot_row(config) + (config.barotropic.barotropic_een_ratio_written_order,),  # noqa: E501
                 scheme=(
                     "ene"
                     if _bt_cor.startswith("ene")
@@ -4183,3 +4183,23 @@ def nemo_een_fold_pivot_row(config):
             "barotropic_een_fe3mask_pivot_row are one fold unit: select "
             "both or neither")
     return pair
+
+
+def _nemo_een_ratio_written_order(divided, leads, inverse_depths, areas, selected):
+    """The U-, V- and F-point thickness ratios in NEMO's written order.
+
+    ``domqco.f90:266-269`` and ``:281-285`` multiply the halved (quartered)
+    area-weighted sea-level sum by the inverse rest depth and then by the
+    STORED reciprocal face area (``domhgr.f90:156``, ``:170-171``); they do
+    not divide by the area.  The two orders are one last place apart on about
+    a tenth of the points, and ``1 + ratio`` (``dynspg_ts.f90:960-1008``)
+    hides all but a few of those per step.  ``BarotropicConfig.
+    barotropic_een_ratio_written_order`` selects it; otherwise ``divided``
+    is returned unchanged.  ``areas`` are the e1 * e2 products: a mesh whose
+    U/V face areas are read from file (``domhgr.f90:164-166``) is not served.
+    """
+    if not (selected and selected[0]):
+        return divided
+    r = nemo_source_round
+    return tuple(r(r(lead * r1_h) * r(1.0 / area))
+                 for lead, r1_h, area in zip(leads, inverse_depths, areas))
