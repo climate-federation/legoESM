@@ -411,8 +411,8 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
             e3w = np.asarray(h.variables["e3w_1d"][0], np.float64)
             wmask_t = tmask.copy()
             wmask_t[..., 1:] = tmask[..., 1:] * tmask[..., :-1]
-            avm = 1.2e-4 * wmask_t        # coeff-ok: the deck's rn_avm0, checked below
-            require(float(cfg.A_v) == 1.2e-4, "the card's viscosity is not the deck's")
+            # zdfphy.f90:228,350 with nn_avb = 0: avm = rn_avm0 * wmask
+            avm = float(recipe.read_orca2g1_deck(root).rn_avm0_m2_s) * wmask_t
             rows = {}
             for f, col, e3n, mn, pair in (
                     ("u", 0, "e3u_0", "umask", avm + np.roll(avm, -1, axis=1)),
@@ -420,10 +420,8 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
                      avm + np.concatenate([avm[1:], avm[-1:]], axis=0))):
                 cut = (lambda a: a[:, 1:]) if f == "u" else (lambda a: a[1:])
                 explicit, solved = cut(seen[0][col]), cut(seen[0][6 + col])
-                e3_0, mask = (levels_last(np.asarray(h.variables[e3n][0]) * 1.0, nk + 0)
-                              if False else np.ascontiguousarray(np.moveaxis(
-                                  np.asarray(h.variables[e3n][0], np.float64)[:nk], 0, -1)),
-                              lev(mn))
+                e3_0, mask = np.ascontiguousarray(np.moveaxis(np.asarray(
+                    h.variables[e3n][0], np.float64)[:nk], 0, -1)), lev(mn)
                 h0 = np.zeros(mask.shape[:2])
                 for k in range(nk):                     # domain.f90:199
                     h0 = h0 + e3_0[..., k] * mask[..., k]
