@@ -631,8 +631,7 @@ def _nemo_ssh_avg_apply(eta_dyn, u_mask, v_mask, grid, area, prep, *,
         nemo_source_round(r3_u_half_sum * r1_u0[:, :-1])
         * _r1_e1e2u[:, :-1])
     r3_u = jnp.concatenate([r3_u, r3_u[:, 0:1]], axis=1)
-    r1_u_entry = nemo_source_round(
-        r1_u0 / nemo_source_round(1.0 + r3_u))
+    r1_u_entry = nemo_source_round(r1_u0 / nemo_source_round(1.0 + r3_u))
 
     area_pad = pad_ns_zero(area)
     eta_pad = pad_ns_zero(eta_dyn)
@@ -674,10 +673,11 @@ def _nemo_ssh_avg_apply(eta_dyn, u_mask, v_mask, grid, area, prep, *,
     r3_v_half_sum = nemo_source_round(0.5 * ssh_v_sum)
     r3_v = _zero_polar_lat_ends(nemo_source_round(
         nemo_source_round(r3_v_half_sum * r1_v0) * _r1_e1e2v))
-    r1_v_entry = nemo_source_round(
-        r1_v0 / nemo_source_round(1.0 + r3_v))
+    r1_v_entry = nemo_source_round(r1_v0 / nemo_source_round(1.0 + r3_v))
+    if return_entry_inverse == "with_ratio":
+        return (H_u, H_v, r1_u_entry, r1_v_entry, r3_u, r3_v)
     if return_entry_inverse:
-        return (H_u, H_v, r1_u_entry, r1_v_entry) + ((r3_u, r3_v) if return_entry_inverse == "with_ratio" else ())  # noqa: E501
+        return H_u, H_v, r1_u_entry, r1_v_entry
     if return_literal_inverse:
         if return_ssh_average:
             return H_u, H_v, r1_u, r1_v, ssh_avg_u, ssh_avg_v
