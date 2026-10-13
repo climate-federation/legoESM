@@ -88,8 +88,15 @@ stopped making progress at
 `test_nemo_testcase_phase3_stage_sweep_gate.py::test_prediction_plant_is_fail_closed`.
 That exact ID also failed to terminate in a 15-minute serial isolation; both
 runs were interrupted and are registered as an unrelated pre-existing hang.
-No round-272 test failed. Citation gate: **PENDING**. Separate read-only
-review: **PENDING**.
+No round-272 test failed. The receipt citation gate passes all three compiled
+anchors with zero failures or unmapped citations; shifting the `np_CRV` span
+by two lines makes it fail. The default cumulative citation audit also passes
+with zero failures and zero unmapped citations.
+
+The separate `codex exec --sandbox read-only` review was attempted against
+the complete diff. It failed before reading the diff because its in-process
+app-server could not initialize on the read-only filesystem. Verdict:
+**independent review unavailable in-sandbox**.
 
 ## OPEN
 
