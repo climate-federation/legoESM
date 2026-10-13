@@ -235,7 +235,7 @@ def geometry(root: Path, plant: str | None = None) -> dict:
             a = np.asarray(h.variables[var][0], dtype=np.float64)
             if a.ndim == 3:
                 # NEMO writes the strait value into fmask on every level,
-                # the dry level 31 included (dommsk.f90:292-294): counted
+                # the dry level 31 included (dommsk.f90:293): counted
                 below[var] = int(np.count_nonzero(a[nk:]))
                 require(var == "fmask" or not var.endswith("mask") or not below[var],
                         f"NEMO's {var} is wet below level {nk}")

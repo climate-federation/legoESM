@@ -1952,22 +1952,20 @@ CITATION_MAP = {
     'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/stp2d.f90:178': ('Ue_rhs(ji,jj) = SUM( e3u_3d(ji,jj,1:jpkm1)*uu(ji,jj,1:jpkm1,Krhs)*umask(ji,jj,1:jpkm1) ) * r1_hu_0(ji,jj)', 1),
     # --- GRIDLADDER round 10 END ---
     # --- GRIDLADDER round 11 (G2 round 2: dyn_zdf divisors) ---
-    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/dynzdf.f90:191-199': [
-        ('/ ( (e3u_3d(ji  ,jj,jk  ) *(1._wp+r3u(ji  ,jj,Kaa)*umask(ji  ,jj,jk  ))) * (e3w_1d(jk  ) *(1._wp+r3u(ji,jj,Kmm))) ) * wumask(ji,jj,jk  )', 1),
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/dynzdf.f90:192-198': [
+        ('zzwi = - zDt_2 * ( avm(ji+1,jj,jk  )     +  avm(ji,jj,jk  )     ) &', 1),
         ('zwd(ji,jk) = 1._wp - zzwi - zzws', 1),
-        9],
-    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/dynzdf.f90:360-368': [
-        ('/ ( (e3v_3d(ji,jj  ,jk  ) *(1._wp+r3v(ji,jj  ,Kaa)*vmask(ji,jj  ,jk  ))) * (e3w_1d(jk  ) *(1._wp+r3v(ji,jj,Kmm))) ) * wvmask(ji,jj,jk  )', 1),
+        7],
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/dynzdf.f90:361-367': [
+        ('zzwi = - zDt_2 * ( avm(ji,jj+1,jk  )     +  avm(ji,jj,jk  )     ) &', 1),
         ('zwd(ji,jk) = 1._wp - zwi(ji,jk) - zws(ji,jk)', 1),
-        9],
-    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/dynzdf.f90:332-349': [
+        7],
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/dynzdf.f90:333-349': [
         ('zwd(ji,jk) = zwd(ji,jk) - zwi(ji,jk) * zws(ji,jk-1) / zwd(ji,jk-1)', 1),
         ('puu(ji,jj,jk,Kaa) = ( puu(ji,jj,jk,Kaa) - zws(ji,jk) * puu(ji,jj,jk+1,Kaa) ) / zwd(ji,jk)', 1),
-        18],
-    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/dommsk.f90:292-294': [
-        ('DO jk = 1,jpk', 1),
-        ('WHERE( zstrshlat(:,:) >= 0._wp )   fmask(:,:,jk) = zstrshlat(:,:)', 1),
-        3],
+        17],
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/dommsk.f90:293': (
+        'WHERE( zstrshlat(:,:) >= 0._wp )   fmask(:,:,jk) = zstrshlat(:,:)', 1),
     # --- GRIDLADDER round 11 END ---
     # --- ORCA2 round 253: kt=8 midpoint-SSH failure boundary -------
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:489-493': [
