@@ -34,6 +34,8 @@ def _mode(name: str):
     stage2 = copy.deepcopy(stage1)
     stage2["T"]["fold_band"] = _score(t_max, 10)
     stage2["S"]["fold_band"] = _score(s_max, 10)
+    stage2["u"]["fold_band"] = _score(0.003382014663707235, 10)
+    stage2["v"]["fold_band"] = _score(3.199915622040597e-06, 10)
     return {
         "mode": name,
         "passivity": {field: True for field in ("T", "S", "u", "v", "eta")},

@@ -34,6 +34,7 @@ PLANTS = (
     "none", "label-coverage", "mode-coverage", "record-identity",
     "passivity", "off-reproduction", "retired-closure",
     "transport-digest", "store-only-inertness", "matched-point",
+    "next-boundary",
     "source-order", "one-bit",
 )
 PREFIX_PLANTS = ("none", "prefix-labels", "prefix-order", "prefix-one-bit")
@@ -294,6 +295,8 @@ def classify(reports: list[dict[str, object]], *,
         by_key[("independent", "nemo")]["result"]["matched_stage2"]["S"]["fold_band"]["max_abs"] = 2.0
     elif plant == "matched-point":
         by_key[("independent", "nemo")]["result"]["matched_stage1"]["v"]["fold_band"]["max_abs"] = 1.0
+    elif plant == "next-boundary":
+        by_key[("independent", "round262")]["result"]["matched_stage2"]["u"]["fold_band"]["max_abs"] = 0.0
     elif plant == "source-order":
         independent["compiled_order"][1:3] = reversed(independent["compiled_order"][1:3])
     elif plant == "one-bit":
@@ -339,6 +342,13 @@ def classify(reports: list[dict[str, object]], *,
             closed = retired["matched_stage2"][name]["fold_band"]["max_abs"]
             require(closed <= float(r249.FLOOR),
                     f"{label}: coupled round-262 placement did not close stage-2 {name}")
+        require(retired["matched_stage2"]["u"]["fold_band"]["max_abs"]
+                == 0.003382014663707235
+                and retired["matched_stage2"]["v"]["fold_band"]["max_abs"]
+                == 3.199915622040597e-06
+                and retired["matched_stage2"]["ssh"]["fold_band"]["max_abs"]
+                == 0.0,
+                f"{label}: next matched stage-2 velocity boundary moved")
         for mode in ("round262", "nemo"):
             require(by_key[(label, mode)]["result"]["stage1_zFv_sha256"]
                     == off["stage1_zFv_sha256"],
@@ -355,6 +365,9 @@ def classify(reports: list[dict[str, object]], *,
                 "stage1_zFv_sha256": by_key[(label, mode)]["result"]["stage1_zFv_sha256"],
                 "stage2_T": by_key[(label, mode)]["result"]["matched_stage2"]["T"]["fold_band"],
                 "stage2_S": by_key[(label, mode)]["result"]["matched_stage2"]["S"]["fold_band"],
+                "stage2_u": by_key[(label, mode)]["result"]["matched_stage2"]["u"]["fold_band"],
+                "stage2_v": by_key[(label, mode)]["result"]["matched_stage2"]["v"]["fold_band"],
+                "stage2_ssh": by_key[(label, mode)]["result"]["matched_stage2"]["ssh"]["fold_band"],
             }
             for mode in MODES
         }
@@ -368,6 +381,7 @@ def classify(reports: list[dict[str, object]], *,
             "R264-P3": "REFUTED_STORE_ONLY_IS_INERT",
             "R264-P4": "PENDING_PREFIX_MEASUREMENT",
             "R264-P5": "CONFIRMED" if plant == "none" else "PLANT",
+            "next_boundary": "KT1_STAGE2_MATCHED_U",
         },
     }
 
