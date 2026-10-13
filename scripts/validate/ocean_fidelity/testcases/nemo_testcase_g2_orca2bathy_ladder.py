@@ -1,0 +1,382 @@
+#!/usr/bin/env python3
+"""Grid ladder rung G2: the ORCA2G2-zps card against NEMO's record, by level.
+
+The G1 ladder (nemo_testcase_g1_orca2grid_ladder.py) is written for one
+level; this script reuses its readers, regions and row scorer and adds what
+30 levels need:
+
+  geometry     every mesh array the card carries against NEMO's mesh_mask.nc
+               on ALL levels (NEMO's level 31 must be dry).
+  independent  the card's own chain from its own initial state.  Level 1 and
+               the 2-D fields are scored at every step from NEMO's step
+               frames; all levels where NEMO wrote a restart.  The chain is
+               resumable (--state-in/--state-out): one step costs about a
+               minute, so 100 steps are run in chunks.
+  given_entry  NEMO's restart of step kt - 1 as the entry of step kt (all
+               prognostics on all levels and the six barotropic histories),
+               then one step (level 1 and 2-D rows) and a second step
+               (all-level rows against NEMO's next restart: TWO-STEP rows).
+
+All-level rows are split by level and by DEPTH CLASS, read from NEMO's own
+mesh file: FULL = wet cell whose rest thickness equals the 1-D ladder's,
+PARTIAL = wet cell whose rest thickness differs (a bottom cell or a face
+beside one).  Labels are never mixed (D52).
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import pickle
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+import numpy as np
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+
+import nemo_testcase_g1_orca2grid_ladder as g1  # noqa: E402
+from nemo_testcase_g1_orca2grid_ladder import BAR, require  # noqa: E402
+
+CASE = "ORCA2G2-zps"
+DEFAULT_ROOT = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/round10/"
+    "oracle_g2_r10/p3_a_100step")
+ARMS = ("geometry", "independent", "given_entry")
+FRAME = {"ssh": "f_ssh_bb", "uu_b": "f_uu_b_bb", "vv_b": "f_vv_b_bb",
+         "u": "f_uu_k1_bb", "v": "f_vv_k1_bb"}
+RESTART = {"u": "un", "v": "vn", "T": "tn", "S": "sn"}
+POINT = {"u": "u", "v": "v", "T": "t", "S": "t"}
+
+
+def restart_path(roots, kt: int):
+    for root in roots:
+        path = Path(root) / f"ORCA2G1_{kt:08d}_restart.nc"
+        if path.is_file():
+            return path
+    return None
+
+
+def levels_last(a, nk: int) -> np.ndarray:
+    """NEMO's (jpk, y, x) as the card's (y, x, nk); the dropped levels must
+    hold nothing."""
+    a = np.asarray(a, dtype=np.float64)
+    require(not np.any(a[nk:]), "NEMO holds a value below the card's last level")
+    return np.ascontiguousarray(np.moveaxis(a[:nk], 0, -1))
+
+
+def depth_classes(mesh_path: Path, nk: int) -> dict:
+    """{point: {"full": mask, "partial": mask}} on (y, x, nk), from NEMO's
+    mesh file alone."""
+    import netCDF4
+    out = {}
+    with netCDF4.Dataset(mesh_path) as h:
+        ladder = np.asarray(h.variables["e3t_1d"][0], dtype=np.float64)[:nk]
+        for p in "tuv":
+            wet = levels_last(h.variables[f"{p}mask"][0], nk) > 0.5
+            e3 = levels_last(h.variables[f"e3{p}_0"][0] * h.variables[f"{p}mask"][0], nk)
+            same = e3 == ladder[None, None, :]
+            out[p] = {"full": wet & same, "partial": wet & ~same}
+    return out
+
+
+def level_rows(ref, cand, cls: dict, *, plant=False) -> list[dict]:
+    """One row per level: the wet cells split into the two depth classes.
+    ``relative`` divides by NEMO's own maximum over the whole field."""
+    ref, cand = np.asarray(ref, np.float64), np.asarray(cand, np.float64)
+    require(ref.shape == cand.shape == cls["full"].shape, "level rows: shape mismatch")
+    if plant:
+        cand = cand.copy()
+        cand[tuple(np.argwhere(cls["partial"])[0])] += 1.0
+    d, scale = np.abs(cand - ref), max(float(np.max(np.abs(ref))), 1.0)
+    rows = []
+    for k in range(ref.shape[-1]):
+        r = {"level": k + 1}
+        for name, mask in cls.items():
+            m = mask[..., k]
+            n = int(m.sum())
+            r[name] = {"n_cells": n,
+                       "n_unequal": int(np.count_nonzero(d[..., k][m])),
+                       "max_abs": float(d[..., k][m].max()) if n else 0.0,
+                       "relative": (float(d[..., k][m].max()) / scale) if n else 0.0,
+                       "ref_max_abs": float(np.abs(ref[..., k][m]).max()) if n else 0.0}
+        dry = ~(cls["full"][..., k] | cls["partial"][..., k])
+        r["dry_n_unequal"] = int(np.count_nonzero(d[..., k][dry]))
+        rows.append(r)
+    return rows
+
+
+def class_summary(rows: list[dict]) -> dict:
+    out = {}
+    for name in ("full", "partial"):
+        out[name] = {
+            "n_cells": sum(r[name]["n_cells"] for r in rows),
+            "n_unequal": sum(r[name]["n_unequal"] for r in rows),
+            "max_abs": max(r[name]["max_abs"] for r in rows),
+            "relative": max(r[name]["relative"] for r in rows),
+            "worst_level": max(rows, key=lambda r: r[name]["max_abs"])["level"]}
+    out["dry_n_unequal"] = sum(r["dry_n_unequal"] for r in rows)
+    out["levels_partial_worse"] = sum(
+        r["partial"]["relative"] > r["full"]["relative"] for r in rows
+        if r["partial"]["n_cells"] and r["full"]["n_cells"])
+    out["levels_full_worse"] = sum(
+        r["full"]["relative"] > r["partial"]["relative"] for r in rows
+        if r["partial"]["n_cells"] and r["full"]["n_cells"])
+    out["status"] = "AT-BAR" if max(out["full"]["relative"],
+                                    out["partial"]["relative"]) <= BAR else "DEBT"
+    return out
+
+
+def card_levels(state) -> dict[str, np.ndarray]:
+    return {"u": np.asarray(state.u.data)[:, 1:], "v": np.asarray(state.v.data)[1:],
+            "T": np.asarray(state.T.data), "S": np.asarray(state.S.data)}
+
+
+def card_surface(state) -> dict[str, np.ndarray]:
+    lev = card_levels(state)
+    return {"ssh": np.asarray(state.eta.data),
+            "uu_b": np.asarray(state.uu_b.data)[:, 1:],
+            "vv_b": np.asarray(state.vv_b.data)[1:, :],
+            "u": lev["u"][..., 0], "v": lev["v"][..., 0],
+            "T": lev["T"][..., 0], "S": lev["S"][..., 0]}
+
+
+def geometry(root: Path, plant: str | None = None) -> dict:
+    import netCDF4
+    from legoesm.ocean.fidelity import nemo_testcase_recipe as recipe
+    card = recipe.build_nemo_testcase_card(CASE, deck_root=root)
+    nk = int(card.recipe.z_coord.n_levels)
+    dom = recipe._orca2g1_domain(root / "domain_cfg.nc", nk + 1)
+    rows_in = g1.card_geometry_rows(card, dom, all_levels=True)
+    names = [r[0] for r in rows_in]
+    require(plant is None or plant in names, f"unknown geometry plant {plant!r}")
+    out, below = [], {}
+    with netCDF4.Dataset(root / "mesh_mask.nc") as h:
+        def nemo(var, shape):
+            if var == "e3t_0*tmask":
+                return nemo("e3t_0", shape) * nemo("tmask", shape)
+            a = np.asarray(h.variables[var][0], dtype=np.float64)
+            if a.ndim == 3:
+                # NEMO writes the strait value into fmask on every level,
+                # the dry level 31 included (dommsk.f90:289-295): counted
+                below[var] = int(np.count_nonzero(a[nk:]))
+                require(var == "fmask" or not var.endswith("mask") or not below[var],
+                        f"NEMO's {var} is wet below level {nk}")
+                return np.ascontiguousarray(np.moveaxis(a[:nk], 0, -1))
+            if a.ndim == 1:                      # the 1-d ladder, every column
+                return np.broadcast_to(a[:nk], shape).copy()
+            return a
+        for name, lego, var in rows_in:
+            lego = np.array(lego, dtype=np.float64)
+            ref = nemo(var, lego.shape)
+            if plant == name:
+                lego.flat[lego.size // 2] += 1.0
+            require(lego.shape == ref.shape,
+                    f"{name}: card {lego.shape} vs NEMO {var} {ref.shape}")
+            bad = np.argwhere(lego != ref)
+            out.append({
+                "row": name, "nemo_variable": var, "shape": list(lego.shape),
+                "bit_identical": bool(bad.shape[0] == 0),
+                "n_differing": int(bad.shape[0]),
+                "first_unequal_index": bad[0].tolist() if bad.size else None,
+                "levels_touched": (sorted({int(b[2]) + 1 for b in bad})
+                                   if bad.size and lego.ndim == 3 else []),
+                "max_abs_difference": float(np.max(np.abs(lego - ref))),
+                "planted": plant == name})
+    return {"arm": "geometry", "case": CASE, "mesh_mask": str(root / "mesh_mask.nc"),
+            "card_levels": nk, "rows": out, "n_rows": len(out),
+            "nemo_nonzero_below_card_levels": below,
+            "n_bit_identical": sum(r["bit_identical"] for r in out),
+            "all_bit_identical": all(r["bit_identical"] for r in out)}
+
+
+def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
+        restart_roots=(), state_in: Path | None = None,
+        state_out: Path | None = None, plant: str | None = None,
+        geometry_plant: str | None = None, allow_dirty: bool = False,
+        entries=(1, 3, 5, 7, 9)) -> dict:
+    require(arm in ARMS, f"unknown arm {arm!r}")
+    require(plant in (None, "score", "level"), f"unknown plant {plant!r}")
+    from legoesm.ocean.fidelity.provenance import allow_dirty_stamps, git_sha
+    allow_dirty_stamps(allow_dirty)
+    sha = git_sha(allow_dirty=allow_dirty)
+    # the model code's own identity: a resumed chain may cross commits that
+    # touch documents, tests or scripts, never one that touches packages/
+    packages = subprocess.run(
+        ["git", "-C", str(HERE), "rev-parse", "HEAD:packages"], check=True,
+        capture_output=True, text=True).stdout.strip()
+    g1._fp64()
+    if arm == "geometry":
+        return {**geometry(root, geometry_plant), "legoesm_git_sha": sha}
+
+    import jax
+    import jax.numpy as jnp
+    import netCDF4
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
+    from legoesm.ocean.fidelity import nemo_testcase_recipe as recipe
+
+    card = recipe.build_nemo_testcase_card(CASE, deck_root=root)
+    cfg, z, s0 = card.recipe.model_config, card.recipe.z_coord, card.recipe.initial_state
+    nk = int(z.n_levels)
+    roots = (root, *restart_roots)
+    reg = g1.regions(np.asarray(z.is_active)[..., 0])
+    cls = depth_classes(root / "mesh_mask.nc", nk)
+    n_stage = g1.stage_steps(root)
+    model = LatLonCGridOceanModel(card.recipe.grid, z, cfg)
+    require(s0.eta_rk3_after is None, "the card carries an after-ssh slot")
+    out = {"arm": arm, "case": CASE, "legoesm_git_sha": sha, "root": str(root),
+           "restart_roots": [str(r) for r in restart_roots], "bar": BAR,
+           "plant": plant, "card_levels": nk, "packages_tree": packages,
+           "n_barotropic_substeps": int(cfg.barotropic.n_barotropic_substeps),
+           "region_cells": {k: int(m.sum()) for k, m in reg.items()},
+           "depth_class_cells": {p: {k: int(m.sum()) for k, m in c.items()}
+                                 for p, c in cls.items()},
+           "per_kt": []}
+
+    def surface_rows(tag, kt, state):
+        g = g1.read_step(root, kt)
+        ref = {f: g[n] for f, n in FRAME.items()}
+        if kt < n_stage:           # T, S after the step = the next step's entry
+            nxt = g1.read_step(root, kt + 1)
+            ref["T"], ref["S"] = nxt["e_tn_k1_bb"], nxt["e_sn_k1_bb"]
+            for f, n in (("ssh", "e_ssh_bb"), ("u", "e_uu_k1_bb"), ("v", "e_vv_k1_bb")):
+                require(np.array_equal(ref[f], nxt[n]),
+                        f"kt {kt}: after-step {f} != entry of kt {kt + 1}")
+        cand = card_surface(state)
+        return [g1.row(f"{tag}.kt{kt}.{f}", ref[f], cand[f], reg,
+                       plant=(plant == "score" and f == "ssh"))
+                for f in ("ssh", "uu_b", "vv_b", "u", "v", "T", "S") if f in ref]
+
+    def all_level_rows(kt, state):
+        path = restart_path(roots, kt)
+        if path is None:
+            return None
+        cand, rows = card_levels(state), {}
+        with netCDF4.Dataset(path) as h:
+            frame = g1.read_step(root, kt)
+            require(np.array_equal(np.asarray(h.variables["sshn"][0], np.float64),
+                                   frame["f_ssh_bb"]),
+                    f"kt {kt}: the restart is not the recorded after-step state")
+            for f, var in RESTART.items():
+                ref = levels_last(h.variables[var][0], nk)
+                by_level = level_rows(ref, cand[f], cls[POINT[f]],
+                                      plant=(plant == "level" and f == "u"))
+                rows[f] = {"summary": class_summary(by_level), "levels": by_level,
+                           "ref_max_abs": float(np.max(np.abs(ref))),
+                           "restart": str(path)}
+        return rows
+
+    def nemo_entry(kt):
+        """NEMO's state entering step kt: the restart written after kt - 1."""
+        path = restart_path(roots, kt - 1)
+        require(path is not None, f"no NEMO restart of step {kt - 1}")
+        with netCDF4.Dataset(path) as h:
+            var = lambda n: np.asarray(h.variables[n][0], np.float64)  # noqa: E731
+            lev = lambda n: levels_last(var(n), nk)                     # noqa: E731
+            return s0._replace(
+                T=s0.T.replace(data=jnp.asarray(lev("tn"))),
+                S=s0.S.replace(data=jnp.asarray(lev("sn"))),
+                u=s0.u.replace(data=jnp.asarray(g1.pad_u(lev("un")))),
+                v=s0.v.replace(data=jnp.asarray(g1.pad_v(lev("vn")))),
+                eta=s0.eta.replace(data=jnp.asarray(var("sshn"))),
+                uu_b=s0.uu_b.replace(data=jnp.asarray(g1.pad_u(var("uu_n")))),
+                vv_b=s0.vv_b.replace(data=jnp.asarray(g1.pad_v(var("vv_n")))),
+                bt_hist=g1.nemo_histories(path.parent, kt))
+
+    def step(state):
+        t0 = time.time()
+        new = jax.device_get(model.step(state, dt=card.dt_s))
+        return new, round(time.time() - t0, 1)
+
+    if arm == "independent":
+        out["label"] = "INDEPENDENT"
+        require(1 <= kt_from <= kt_to <= 100, "steps must lie in 1..100")
+        require((kt_from == 1) == (state_in is None),
+                "a chain starts at step 1 or resumes from --state-in")
+        state = s0
+        if state_in is not None:
+            saved = pickle.loads(Path(state_in).read_bytes())
+            require(saved["after_kt"] == kt_from - 1 and saved["packages"] == packages,
+                    "--state-in is not this model code's chain after step kt_from - 1")
+            state = saved["state"]
+        for kt in range(kt_from, kt_to + 1):
+            state, seconds = step(state)
+            rows = surface_rows("independent", kt, state)
+            out["per_kt"].append({"kt": kt, "seconds": seconds, "rows": rows,
+                                  "first_unequal": g1.first_unequal(rows),
+                                  "all_levels": all_level_rows(kt, state)})
+            if kt % 10 == 0:
+                at = restart_path(roots, kt)
+                if at is not None:
+                    out.setdefault("history_rows", []).extend(
+                        g1.history_rows(at.parent, kt, state, reg))
+        if state_out is not None:
+            Path(state_out).write_bytes(pickle.dumps(
+                {"after_kt": kt_to, "packages": packages, "state": state}))
+    else:
+        out["label"] = ("GIVEN-NEMO-ENTRY (NEMO's restart of step kt - 1: all "
+                        "prognostics on all levels and the six barotropic "
+                        "histories; w is the card's rest value)")
+        for kt in entries:
+            first, s1 = step(s0 if kt == 1 else nemo_entry(kt))
+            rows = surface_rows("given_entry", kt, first)
+            second, s2 = step(first)
+            out["per_kt"].append({
+                "kt": kt, "seconds": [s1, s2], "rows": rows,
+                "first_unequal": g1.first_unequal(rows),
+                "two_step_kt": kt + 1,
+                "two_step_rows": surface_rows("given_entry_two_step", kt + 1, second),
+                "two_step_all_levels": all_level_rows(kt + 1, second)})
+    return out
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap.add_argument("--root", type=Path, default=DEFAULT_ROOT)
+    ap.add_argument("--restart-root", type=Path, action="append", default=[])
+    ap.add_argument("--arm", required=True, choices=ARMS)
+    ap.add_argument("--kt-from", type=int, default=1)
+    ap.add_argument("--kt-to", type=int, default=10)
+    ap.add_argument("--entries", default="1,3,5,7,9")
+    ap.add_argument("--state-in", type=Path)
+    ap.add_argument("--state-out", type=Path)
+    ap.add_argument("--plant", choices=("score", "level"))
+    ap.add_argument("--geometry-plant")
+    ap.add_argument("--allow-dirty", action="store_true")
+    ap.add_argument("--output", type=Path, required=True)
+    a = ap.parse_args(argv)
+    out = run(a.root, arm=a.arm, kt_from=a.kt_from, kt_to=a.kt_to,
+              restart_roots=tuple(a.restart_root), state_in=a.state_in,
+              state_out=a.state_out, plant=a.plant,
+              geometry_plant=a.geometry_plant, allow_dirty=a.allow_dirty,
+              entries=tuple(int(k) for k in a.entries.split(",")))
+    a.output.write_text(json.dumps(out, indent=1) + "\n")
+    if a.arm == "geometry":
+        print(f"GEOMETRY {out['n_bit_identical']} of {out['n_rows']} rows bit-identical")
+        for r in out["rows"]:
+            if not r["bit_identical"]:
+                print("  UNEQUAL", r["row"], r["n_differing"], r["max_abs_difference"],
+                      r["first_unequal_index"], r["levels_touched"][:8])
+        return 0 if out["all_bit_identical"] else 1
+    bad = False
+    for p in out["per_kt"]:
+        for r in p["rows"] + p.get("two_step_rows", []):
+            bad |= r["status"] != "AT-BAR"
+            print(f"{r['name']:34s} {r['status']:6s} max {r['max_abs']:.3e} "
+                  f"rms {r['rms']:.3e} unequal {r['n_unequal']}")
+        lv = p.get("all_levels") or p.get("two_step_all_levels")
+        for f, t in (lv or {}).items():
+            s = t["summary"]
+            bad |= s["status"] != "AT-BAR"
+            print(f"  levels kt{p.get('two_step_kt', p['kt'])} {f}: {s['status']} "
+                  f"full {s['full']['relative']:.2e} ({s['full']['n_unequal']}) "
+                  f"partial {s['partial']['relative']:.2e} ({s['partial']['n_unequal']}) "
+                  f"dry unequal {s['dry_n_unequal']}")
+    return 1 if bad else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

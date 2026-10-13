@@ -337,12 +337,12 @@ def nemo_histories(root: Path, kt: int):
 
 
 # ----------------------------------------------------------------- geometry
-def card_geometry_rows(card, dom) -> list[tuple[str, np.ndarray, str]]:
+def card_geometry_rows(card, dom, all_levels=False) -> list[tuple[str, np.ndarray, str]]:
     """(row, the card's array, the mesh_mask variable it must equal)."""
     g, z = card.recipe.grid, card.recipe.z_coord
     ops = z.nemo_een_barotropic
     f64 = lambda a: np.asarray(a, dtype=np.float64)       # noqa: E731
-    lev = lambda a: f64(a)[..., 0]                         # noqa: E731
+    lev = lambda a: f64(a) if all_levels else f64(a)[..., 0]   # noqa: E731
     rows = [(f"operand {n}", f64(getattr(ops, n)), n) for n in
             ("e1t", "e2t", "e1u", "e2u", "e1v", "e2v", "e1f", "e2f")]
     rows += [
