@@ -237,3 +237,29 @@ def test_one_step_from_nemos_restart_needs_the_fold_row_v_face_depth(
     else:
         assert rel > 1.0e-13
 
+
+
+def test_land_distance_counts_cells_to_the_nearest_dry_cell():
+    wet = _mask() > 0.5
+    dist = ladder.land_distance(wet)
+    assert dist[5, 7] == 0 and dist[0, 3] == 0          # island, south wall
+    assert dist[4, 7] == 1 and dist[3, 7] == 2 and dist[1, 0] == 1
+    assert dist[11, 0] == 6                 # island corner (6, 6): 5 rows, 6 columns
+    assert dist.max() < 40
+
+
+@needs_record
+def test_interior_event_at_step_17_is_made_in_one_step_far_from_any_boundary():
+    """Census facts of the first sea-level cell over the bar.  Plant: a cell
+    counted as over the bar must really differ (the bar itself is the gate)."""
+    pytest.importorskip("netCDF4")
+    out = ladder.run(RECORD, arm="interior_events", kt_max=17, allow_dirty=True)
+    assert all(k["n_over_bar"] == 0 for k in out["per_kt"][:16])
+    ev = out["per_kt"][16]
+    assert ev["kt"] == 17 and ev["n_over_bar"] == 2 and ev["cell"] == [72, 70]
+    assert ev["region"] == "interior_open" and ev["cells_to_land"] > 10
+    assert ev["rows_to_fold"] > 50 and abs(ev["entry_error_at_cell"]) < 1.0e-16
+    assert abs(ev["error"]) > 5.0e-15
+    # made inside the step: NEMO's own entry reproduces it
+    assert abs(ev["one_step_from_nemo_entry_error_at_cell"]) > 0.9 * abs(ev["error"])
+

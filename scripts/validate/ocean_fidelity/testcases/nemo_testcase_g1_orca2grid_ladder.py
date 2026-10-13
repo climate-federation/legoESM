@@ -36,6 +36,12 @@ Arms (``--arm``):
                to NEMO's entry ssh, on the fold-image V row and the row below,
                against NEMO's own stored weighted mean (r3v, domqco.f90:268-269,
                times hv_0); no model step
+  interior_events  census of sea-level cells over the bar in the INDEPENDENT
+               chain, kt = 1..kt-max (up to 30): count, largest cell, its
+               distance to land and to the fold, whether NEMO's sea level
+               changes sign there during the step (with the base rate over
+               all wet cells), and the same cell after ONE card step from
+               NEMO's previous after-frame (T, S from the card's chain)
 
 Every scored row is split into the preregistered regions (fold band, seam,
 south, interior; interior again into coast-adjacent and open).  The scorer
@@ -63,7 +69,8 @@ DEFAULT_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/round1/"
     "oracle_g1_r1/p3_a_100step")
 ARMS = ("geometry", "independent", "given_entry", "rhs", "handoff", "stages",
-        "vor_fold_replay", "restart_entry", "fold_v_depth")
+        "vor_fold_replay", "restart_entry", "fold_v_depth",
+        "interior_events")
 PLANTS = ("score", "entry")
 STAGE_STEPS = 10          # stage frames exist for kt = 1..10
 FOLD_ROWS, SEAM_COLS, SOUTH_ROWS = 3, 2, 3
@@ -368,6 +375,27 @@ def vor_een_u_replay(root: Path, kt: int, fe3mask, *, zero_image_row: bool) -> d
     return out
 
 
+def land_distance(wet: np.ndarray, cap: int = 40) -> np.ndarray:
+    """Cells (Chebyshev, cyclic east-west, closed north-south) to the nearest
+    dry cell; ``cap`` where none lies within ``cap - 1``."""
+    land = ~np.asarray(wet, dtype=bool)
+    dist = np.where(land, 0, cap)
+    reach = land.copy()
+    for d in range(1, cap):
+        grown = reach.copy()
+        for dj, di in ((1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1),
+                       (-1, 1), (-1, -1)):
+            sh = np.roll(reach, (dj, di), axis=(0, 1))
+            if dj == 1:
+                sh[0] = False
+            if dj == -1:
+                sh[-1] = False
+            grown |= sh
+        dist = np.where((dist == cap) & grown, d, dist)
+        reach = grown
+    return dist
+
+
 def fold_v_depth_rows(root: Path, kt: int, card, cfg) -> list[dict]:
     """The ssh term of ``zhvp2_e`` on the two top V rows, card vs NEMO.
 
@@ -498,6 +526,62 @@ def run(root: Path, *, arm: str, kt_max: int = 10, plant: str | None = None,
                     cfg.barotropic.barotropic_fold_top_v_face_ssh),
                 "per_kt": [{"kt": kt, "operand_rows": fold_v_depth_rows(
                     root, kt, card, cfg)} for kt in range(1, kt_max + 1)]}
+    if arm == "interior_events":
+        require(2 <= kt_max <= 30, "kt_max must lie in 2..30")
+        wet = np.asarray(card.recipe.z_coord.is_active)[..., 0] > 0.5
+        dist, nj = land_distance(wet), wet.shape[0]
+        reg = regions(wet.astype(float))
+        m, st, events = LatLonCGridOceanModel(
+            card.recipe.grid, card.recipe.z_coord, cfg), s0, []
+        prev = None
+        for kt in range(1, kt_max + 1):
+            entry = st
+            st = jax.device_get(m.step(st, dt=card.dt_s))
+            g = read_step(root, kt)
+            nemo, mine = g["f_ssh_bb"], np.asarray(st.eta.data)
+            err = np.where(wet, mine - nemo, 0.0)
+            over = np.abs(err) > BAR
+            ev = {"kt": kt, "n_over_bar": int(over.sum()),
+                  "max_abs": float(np.max(np.abs(err)))}
+            if over.any() and prev is not None:
+                j, i = (int(x) for x in np.unravel_index(
+                    int(np.argmax(np.abs(err))), err.shape))
+                flip = np.sign(nemo) != np.sign(prev["f_ssh_bb"])
+                seeded = entry._replace(
+                    u=s0.u.replace(data=jnp.asarray(pad_u(prev["f_uu_k1_bb"])[..., None])),
+                    v=s0.v.replace(data=jnp.asarray(pad_v(prev["f_vv_k1_bb"])[..., None])),
+                    eta=s0.eta.replace(data=jnp.asarray(prev["f_ssh_bb"])),
+                    uu_b=s0.uu_b.replace(data=jnp.asarray(pad_u(prev["f_uu_b_bb"]))),
+                    vv_b=s0.vv_b.replace(data=jnp.asarray(pad_v(prev["f_vv_b_bb"]))))
+                one = np.asarray(jax.device_get(
+                    m.step(seeded, dt=card.dt_s)).eta.data) - nemo
+                e0 = np.asarray(entry.eta.data) - prev["f_ssh_bb"]
+                ev.update({
+                    "cell": [j, i], "error": float(err[j, i]),
+                    "nemo_ssh": float(nemo[j, i]),
+                    "entry_error_at_cell": float(e0[j, i]),
+                    "cells_to_land": int(dist[j, i]),
+                    "rows_to_fold": nj - 1 - j,
+                    "region": next(k for k in ("fold", "seam", "south",
+                                               "interior_coast", "interior_open")
+                                   if reg[k][j, i]),
+                    "one_step_from_nemo_entry_error_at_cell": float(one[j, i]),
+                    "over_bar_with_sign_change": int((over & flip).sum()),
+                    "wet_cells_with_sign_change": int((wet & flip).sum()),
+                    "n_wet": int(wet.sum()),
+                    "over_bar_by_region": {k: int((over & reg[k]).sum()) for k in (
+                        "fold", "seam", "south", "interior_coast", "interior_open")},
+                    "min_cells_to_land_over_bar": int(dist[over].min())})
+            events.append(ev)
+            prev = g
+        return {"arm": arm, "legoesm_git_sha": sha, "root": str(root), "bar": BAR,
+                "label": "INDEPENDENT (census of sea-level cells over the bar; "
+                         "one-step re-run from NEMO's previous after-frame at "
+                         "the largest cell)",
+                "een_fold_image_v_row": bool(cfg.een_fold_image_v_row),
+                "barotropic_fold_top_v_face_ssh": bool(
+                    cfg.barotropic.barotropic_fold_top_v_face_ssh),
+                "per_kt": events}
     cap = 100 if arm in ("independent", "restart_entry") else STAGE_STEPS
     require(1 <= kt_max <= cap, f"kt_max must lie in 1..{cap}")
     kts = range(1, kt_max + 1)
@@ -792,6 +876,10 @@ def _print(out: dict) -> None:
             print(f"kt{k['kt']} {r['row']:17s} NEMO max={r['nemo_max_abs']:.3e} "
                   f"({r['n_nemo_nonzero']} nonzero) card max={r['card_max_abs']:.3e} "
                   f"relative={r['relative']}")
+    for k in out["per_kt"]:
+        if "n_over_bar" in k and k["n_over_bar"]:
+            print({a: b for a, b in k.items() if a != "over_bar_by_region"},
+                  k.get("over_bar_by_region"))
     for r in out.get("history_rows", []):
         print(f"{r['name']:24s} {r['status']:6s} max={r['max_abs']:.3e} "
               f"n_unequal={r['n_unequal']}")
