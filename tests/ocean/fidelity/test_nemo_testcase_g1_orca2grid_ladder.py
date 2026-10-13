@@ -732,7 +732,7 @@ def _triad_inputs(seed=7, ny=6, nx=8):
 
 
 def test_written_order_vorticity_is_nemos_statement_and_real_equal_to_the_default():
-    """dynvor.f90:720, :727, :767-768, :772-775, :779-783 transcribed in numpy
+    """dynvor.f90:720, :727, :766-767, :772-775, :779-784 transcribed in numpy
     at one interior U face and one interior V face; the default order is the
     same real number and not the same bits everywhere."""
     from legoesm.ocean.dynamics.latlon_cgrid_operators import pv_flux_al81_partial_cell
@@ -840,7 +840,7 @@ def _terms(out, key):
 @needs_record5
 @pytest.mark.parametrize("off, floor", [((), 0), (("without_vor_order",), 300)])
 def test_step_2_right_hand_side_is_nemos_only_in_the_written_order(off, floor):
-    """The offline replay of dynhpg.f90:379-394 and vor_een against NEMO's
+    """The offline replay of dynhpg.f90:380-394 and vor_een against NEMO's
     recorded right-hand side is the control (0 unequal).  The card's pressure
     gradient is bit-equal either way; its vorticity term only in NEMO's
     order.  Plant: the option off leaves hundreds of unequal faces."""

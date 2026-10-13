@@ -3133,7 +3133,7 @@ class LatLonCGridOceanConfig(NamedTuple):
     # compiler, which may fuse a product into the following sum.
     rk3_stage_velocity_written_order: bool = False
     # The EEN vorticity trend in the operation order NEMO's vor_een writes
-    # (dynvor.f90:720, :727, :767-768, :772-775, :779-783), every product and
+    # (dynvor.f90:720, :727, :766-767, :772-775, :779-784), every product and
     # sum rounded once.  False keeps the operator's own order (divide by the
     # F thickness, 1/12 inside each triad, the four products summed left to
     # right), which is real-equal and differs in the last place.

@@ -32,7 +32,7 @@ Arms (``--arm``):
                (rhs_term_replay); the replay's sum against NEMO's recorded
                right-hand side is the control and must be 0 unequal
   vor_fold_replay  OFFLINE numpy replay of NEMO's vor_een Coriolis statement
-               (dynvor.f90:720, :727, :767, :772-775, :779-783) on the U faces
+               (dynvor.f90:720, :727, :767, :772-775, :779-784) on the U faces
                of the pivot row and the row below, from NEMO's recorded entry
                fields with their halos: once as compiled, once with the
                fold-image V row's transport set to zero
@@ -399,9 +399,9 @@ def rhs_term_replay(root: Path, kt: int, fe3mask, *, stage: int = 1,
                     zero_image_row: bool = False, rhd=None) -> dict:
     """NEMO's 3-D momentum right-hand side of one stage, term by term, offline.
 
-    The pressure gradient on the one level (dynhpg.f90:379-394) and the
-    planetary vor_een trend (dynvor.f90:720 z1_e3f, :727 zwz, :767-768 the
-    transports, :772-776 the triads, :779-785 zua and zva), each in NEMO's
+    The pressure gradient on the one level (dynhpg.f90:380-394) and the
+    planetary vor_een trend (dynvor.f90:720 z1_e3f, :727 zwz, :766-767 the
+    transports, :772-775 the triads, :779-784 zua and zva), each in NEMO's
     literal operand order, on the whole inner domain.  Everything is NEMO's:
     the frame the stage reads WITH its halos (stage 1: the step entry; stage
     2 and 3: the previous stage's frame, with the F ratio the stage reads),
@@ -852,7 +852,7 @@ def stage_momentum_replay(root: Path, kt: int, card, stage: int, g: dict,
     The stage's right-hand side is ``rhs_term_replay`` (the pressure gradient
     and the vorticity term from the frame the stage reads); the update is the
     thickness-weighted statement (stprk3_stg.f90:373-378 at stages 1 and 2,
-    dynzdf.f90:144-149 at stage 3, followed there by the removal of the
+    dynzdf.f90:145-150 at stage 3, followed there by the removal of the
     barotropic velocity, :160-161, which the deck's resolved ln_drgimp = T
     switches on; the one-level implicit solve after it is the identity on
     this deck: no stress, no drag, and the interface below the only level is

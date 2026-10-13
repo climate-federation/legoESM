@@ -4950,9 +4950,9 @@ def pv_flux_al81_partial_cell(
         stencil in the operation order NEMO's ``vor_een`` writes, every
         product and sum rounded once (it needs ``metric_widths``): the
         vorticity times the RECIPROCAL of the F thickness (``dynvor.f90:720``,
-        ``:727``), the transport as ``(e1v*e3v)*v`` (``:767-768``), the four
+        ``:727``), the transport as ``(e1v*e3v)*v`` (``:766-767``), the four
         unweighted triads in NEMO's summation order (``:772-775``), and the
-        trend as ``(r1_12*r1_e1u)*((a+b)+(c+d))`` (``:779-783``).  The default
+        trend as ``(r1_12*r1_e1u)*((a+b)+(c+d))`` (``:779-784``).  The default
         divides by the thickness, weights each triad by 1/12, multiplies the
         transport by the width last and sums the four products left to
         right, which is equal as real numbers and differs in the last place.
