@@ -112,9 +112,24 @@ def test_orca2_and_omt_cards_select_executed_transferred_statements():
     assert LatLonCGridOceanConfig._field_defaults[
         "rk3_stage1_ssh_nemo_literal"] is False
     for name in (
+        "rk3_stage1_rhs_nemo_literal",
+        "rk3_stage_velocity_written_order",
+        "een_vorticity_written_order",
+        "zdf_barotropic_removal_nemo_literal",
+        "rk3_fold_exchange_top_v_row",
+        "rk3_stage_r3f_nemo_literal",
+        "rk3_stage_r3t_nemo_literal",
+        "nemo_eos_gdept_rounded_product",
+        "rk3_stage_r3uv_nemo_literal",
+    ):
+        assert LatLonCGridOceanConfig._field_defaults[name] is False
+    for name in (
         "barotropic_flux_update_nemo_literal",
         "barotropic_substep_dt_nemo_literal",
         "barotropic_entry_depth_nemo_literal",
+        "barotropic_een_ratio_fold_exchange",
+        "barotropic_een_fe3mask_pivot_row",
+        "barotropic_een_ratio_written_order",
     ):
         assert BarotropicConfig._field_defaults[name] is False
 
@@ -133,6 +148,25 @@ def test_orca2_and_omt_cards_select_executed_transferred_statements():
         assert config.barotropic.barotropic_fold_top_v_face_ssh is True
         assert config.rk3_stage1_ssh_nemo_literal is True
         assert config.barotropic.barotropic_substep_dt_nemo_literal is True
+        assert card.recipe.z_coord.nemo_r3t_stored_product is True
+        for name in (
+            "rk3_stage1_rhs_nemo_literal",
+            "rk3_stage_velocity_written_order",
+            "een_vorticity_written_order",
+            "zdf_barotropic_removal_nemo_literal",
+            "rk3_fold_exchange_top_v_row",
+            "rk3_stage_r3f_nemo_literal",
+            "rk3_stage_r3t_nemo_literal",
+            "nemo_eos_gdept_rounded_product",
+            "rk3_stage_r3uv_nemo_literal",
+        ):
+            assert getattr(config, name) is True
+        for name in (
+            "barotropic_een_ratio_fold_exchange",
+            "barotropic_een_fe3mask_pivot_row",
+            "barotropic_een_ratio_written_order",
+        ):
+            assert getattr(config.barotropic, name) is True
     assert omt0_card.recipe.model_config.barotropic.barotropic_flux_update_nemo_literal
     assert omt0_card.recipe.model_config.barotropic.barotropic_entry_depth_nemo_literal
     for card in (shipped, omt1_card, omt4_card):
