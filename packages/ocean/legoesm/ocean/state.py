@@ -3099,23 +3099,6 @@ class LatLonCGridOceanConfig(NamedTuple):
     # products and one rounded sum. False keeps the algebraically equal
     # increment-over-three expression.
     rk3_stage1_ssh_nemo_literal: bool = False
-    # Flux-form RK3 stage 1 consumes the three-dimensional right-hand side
-    # stp_2D left in uu(Krhs) (stp2d.f90:138, :144), whole, as NEMO does
-    # (stprk3_stg.f90:373-378). False keeps that right-hand side with the
-    # slow barotropic forcing subtracted, which the stage's barotropic
-    # correction makes real-equal and not bit-equal.
-    rk3_stage1_rhs_nemo_literal: bool = False
-    # The stage velocity update and barotropic correction
-    # (stprk3_stg.f90:373-378, :413-418) with every product and sum rounded
-    # once, in the written order. False leaves the expressions to the
-    # compiler, which may fuse a product into the following sum.
-    rk3_stage_velocity_written_order: bool = False
-    # The EEN vorticity trend in the operation order NEMO's vor_een writes
-    # (dynvor.f90:720, :727, :767-768, :772-775, :779-783), every product and
-    # sum rounded once. False keeps the operator's own order (divide by the
-    # F thickness, 1/12 inside each triad, the four products summed left to
-    # right), which is real-equal and differs in the last place.
-    een_vorticity_written_order: bool = False
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":

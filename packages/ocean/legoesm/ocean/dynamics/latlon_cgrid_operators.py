@@ -4777,7 +4777,6 @@ def pv_flux_al81_partial_cell(
     eps_h: float = 1.0e-10,
     q_boundary: str = "neumann_fill",
     metric_widths: tuple | None = None,
-    written_order: bool = False,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Arakawa-Lamb 1981 (AL81) energy-and-enstrophy-conserving PV flux.
 
@@ -4945,17 +4944,6 @@ def pv_flux_al81_partial_cell(
         vorticity tendency, 3.10e-10 -> 4.1e-12 m/s2.
 
         Each factor is a per-column 2-D face array broadcast over levels.
-    written_order : bool
-        ``False`` (default) is bit-identical.  ``True`` evaluates the SAME
-        stencil in the operation order NEMO's ``vor_een`` writes, every
-        product and sum rounded once (it needs ``metric_widths``): the
-        vorticity times the RECIPROCAL of the F thickness (``dynvor.f90:720``,
-        ``:727``), the transport as ``(e1v*e3v)*v`` (``:767-768``), the four
-        unweighted triads in NEMO's summation order (``:772-775``), and the
-        trend as ``(r1_12*r1_e1u)*((a+b)+(c+d))`` (``:779-783``).  The default
-        divides by the thickness, weights each triad by 1/12, multiplies the
-        transport by the width last and sums the four products left to
-        right, which is equal as real numbers and differs in the last place.
 
     Returns
     -------
@@ -5003,13 +4991,7 @@ def pv_flux_al81_partial_cell(
     # ``h_vtx`` already carries the BIG_H sentinel at fully-dry vertices
     # (set by the caller) so q ≈ 0 there; eps_h guards floating-point edges.
     zeta_abs = zeta if f_vtx is None else zeta + f_vtx[..., jnp.newaxis]
-    if written_order and metric_widths is None:
-        raise ValueError(
-            "pv_flux_al81_partial_cell: written_order=True is NEMO's vor_een "
-            "statement and needs metric_widths")
-    sr = nemo_source_round
-    q = (sr(zeta_abs * sr(1.0 / jnp.maximum(h_vtx, eps_h))) if written_order
-         else zeta_abs / jnp.maximum(h_vtx, eps_h))
+    q = zeta_abs / jnp.maximum(h_vtx, eps_h)
 
     # Boundary-q convention at land-adjacent vertices:
     #   "neumann_fill" (default, bit-identical legacy): replace q by a smooth
@@ -5050,9 +5032,6 @@ def pv_flux_al81_partial_cell(
         _e1u, _e1v, _e2u, _e2v = metric_widths
         F_u = F_u * _e2u[..., jnp.newaxis]
         F_v = F_v * _e1v[..., jnp.newaxis]
-        if written_order:           # zwx = e2u*e3u*pu, zwy = e1v*e3v*pv
-            F_u = sr(sr(_e2u[..., jnp.newaxis] * h_u) * u) * u_mask_3d
-            F_v = sr(sr(_e1v[..., jnp.newaxis] * h_v) * v) * v_mask_3d
 
     # --- 3. Corner triads at every cell ----------------------------
     # Each triad lives at a corner of a cell.  We index triads by the
@@ -5080,11 +5059,6 @@ def pv_flux_al81_partial_cell(
     t_SE = inv12 * (q_SE + q_SW + q_NE)
     t_NW = inv12 * (q_NW + q_SW + q_NE)
     t_NE = inv12 * (q_NE + q_SE + q_NW)
-    if written_order:   # ztne, ztnw, ztse, ztsw: unweighted, NEMO's order
-        t_NE = sr(sr(q_NW + q_NE) + q_SE)
-        t_NW = sr(sr(q_SW + q_NW) + q_NE)
-        t_SE = sr(sr(q_NE + q_SE) + q_SW)
-        t_SW = sr(sr(q_SE + q_SW) + q_NW)
 
     # --- 4. AL81 PV flux at u-faces --------------------------------
     # u-face u[j, i] is between west cell (j, i-1) and east cell
@@ -5160,10 +5134,6 @@ def pv_flux_al81_partial_cell(
         + t_SE_W * F_v_S_W     # west-cell SE × SW V   (NEMO ztse(ji  ,jj)·zwy(ji  ,jj-1))
         + t_SW_E * F_v_S_E     # east-cell SW × SE V   (NEMO ztsw(ji+1,jj)·zwy(ji+1,jj-1))
     )
-    if written_order:
-        diag_vortcor_u = sr(
-            sr(sr(t_NE_W * F_v_N_W) + sr(t_NW_E * F_v_N_E))
-            + sr(sr(t_SE_W * F_v_S_W) + sr(t_SW_E * F_v_S_E)))
 
     # --- 5. AL81 PV flux at v-faces --------------------------------
     # v-face v[j, i] is between south cell (j-1, i) and north cell
@@ -5249,17 +5219,8 @@ def pv_flux_al81_partial_cell(
         + t_SW_N * F_u_N_W     # north-cell SW × NW U  (NEMO ztsw(ji,jj+1)·zwx(ji-1,jj+1))
         + t_SE_N * F_u_N_E     # north-cell SE × NE U  (NEMO ztse(ji,jj+1)·zwx(ji  ,jj+1))
     )
-    if written_order:
-        diag_vortcor_v = -sr(
-            sr(sr(t_SW_N * F_u_N_W) + sr(t_SE_N * F_u_N_E))
-            + sr(sr(t_NW_S * F_u_S_W) + sr(t_NE_S * F_u_S_E)))
 
-    if written_order:       # r1_12 * r1_e1u * ( ... ), r1_12 * r1_e2v * ( ... )
-        diag_vortcor_u = sr(sr(inv12 * sr(1.0 / jnp.maximum(
-            _e1u[..., jnp.newaxis], eps_h))) * diag_vortcor_u)
-        diag_vortcor_v = sr(sr(inv12 * sr(1.0 / jnp.maximum(
-            _e2v[..., jnp.newaxis], eps_h))) * diag_vortcor_v)
-    elif metric_widths is not None:
+    if metric_widths is not None:
         # NEMO r1_e1u (dynvor.F90:804) and r1_e2v (:806).  The eps floor mirrors
         # the h_vtx guard: e1u = R*cos(phi)*dlambda vanishes only on a
         # pole-covering row, e2v is always positive.
