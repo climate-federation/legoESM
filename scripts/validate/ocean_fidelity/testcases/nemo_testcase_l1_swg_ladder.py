@@ -499,6 +499,25 @@ def _bit_unequal(ref, cand, mask):
     return np.argwhere((ref_bits != cand_bits) & use)
 
 
+def _ulp_distance(left, right) -> int:
+    """Return the ordered IEEE-word distance for two scalar floats."""
+    left = np.asarray(left)
+    right = np.asarray(right)
+    require(left.shape == right.shape == () and left.dtype == right.dtype
+            and left.dtype.kind == "f",
+            "ULP distance requires matching scalar floats")
+    nbits = left.dtype.itemsize * 8
+    sign = 1 << (nbits - 1)
+    all_bits = (1 << nbits) - 1
+    word_dtype = np.dtype(f"u{left.dtype.itemsize}")
+
+    def ordered(value):
+        bits = int(np.asarray(value).view(word_dtype).item())
+        return (all_bits ^ bits) if bits & sign else sign | bits
+
+    return abs(ordered(left) - ordered(right))
+
+
 def _localized_comparison(ref, cand, wet) -> dict:
     """Classify bit differences as wet interior, wet wall, or dry storage."""
     ref, cand = np.asarray(ref), np.asarray(cand)
@@ -542,10 +561,15 @@ def _row(name, ref, cand, mask):
     result = score(name, ref, cand, use)
     delta = cand - ref
     bad = _bit_unequal(ref, cand, use)
+    first = tuple(bad[0]) if bad.size else None
     result.update({
         "bit_identical": bool(bad.size == 0),
         "n_unequal": int(bad.shape[0]),
         "first_unequal_cell": bad[0].tolist() if bad.size else None,
+        "first_reference": float(ref[first]) if first is not None else None,
+        "first_candidate": float(cand[first]) if first is not None else None,
+        "first_ulp_distance": (
+            _ulp_distance(ref[first], cand[first]) if first is not None else None),
         "max_abs": float(np.max(np.abs(delta[use]))),
     })
     # This campaign's requested endpoint is bit-for-bit.  Retain the TSUNAMI

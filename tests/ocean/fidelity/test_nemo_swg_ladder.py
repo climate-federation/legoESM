@@ -320,6 +320,15 @@ def test_composition_summary_keeps_exact_and_numerical_counts_separate():
                               allow_dirty=True)
 
 
+def test_ulp_distance_orders_signed_zero_and_adjacent_floats():
+    assert lad._ulp_distance(np.float64(-0.0), np.float64(0.0)) == 1
+    one = np.float64(1.0)
+    assert lad._ulp_distance(one, np.nextafter(one, np.inf)) == 1
+    minus_one = np.float32(-1.0)
+    assert lad._ulp_distance(
+        minus_one, np.nextafter(minus_one, np.float32(-np.inf))) == 1
+
+
 def test_month_reader_refuses_absent_admission(tmp_path):
     with pytest.raises(Exception, match="missing month admission"):
         lad._month_admission(tmp_path)
