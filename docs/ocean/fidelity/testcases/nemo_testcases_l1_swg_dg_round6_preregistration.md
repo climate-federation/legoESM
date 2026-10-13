@@ -139,3 +139,21 @@ carried 29/29, and month 690/690.  The acquisition preflights remain unchanged.
 The unrelated inherited GYRE/LOCK_EXCHANGE/OVERFLOW digit pins remain stale:
 expected `5850bbcfcd351c29` / `4ec82201f0fae7bf` / `7f1ec89b3e6578f5`, current
 `f02d2f42a570f413` / `d5dfdf83b3a1e0ab` / `83de0010e1170032`.
+
+## Preregistered instrument amendment — rejected trace shape
+
+Before any campaign replay, the direct tiny-grid control rejected the proposed
+multi-output statement trace: asking XLA to materialise the intermediate arrays
+changed `ssh_k` in 1,600 of 1,936 cells, with maximum absolute difference
+`3.3881317890172014e-21` m.  Compiling each intermediate as a separate root did
+not restore the production result.  These are instrument-control results, not
+campaign measurements; no admitted record was measured by the rejected trace.
+
+The replacement statement bisect preserves the full production stage and its
+ordinary outputs.  Each arm inserts one identity source-rounding barrier after
+exactly one continuity statement; a baseline arm inserts none.  The baseline
+must reproduce the ordinary production stage word for word or the bisect is
+invalid.  An inserted boundary can identify the first rounding-sensitive
+statement only if that control passes and the arm moves the replay toward the
+admitted NEMO words.  H1, H2, H3, their frozen verdicts, and the exact bar are
+otherwise unchanged.
