@@ -1654,7 +1654,6 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
         nemo_e3t_0=jnp.asarray(raw_e3["e3t_0"], dtype=jnp.float64),
         nemo_bbl_e3u_0=jnp.asarray(raw_e3["e3u_0"], dtype=jnp.float64),
         nemo_bbl_e3v_0=jnp.asarray(raw_e3["e3v_0"], dtype=jnp.float64),
-        nemo_r3t_stored_product=True,
     )
 
     temperature, salinity = build_orca2_initial_ts(
@@ -1728,21 +1727,9 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
     model_config = model_config._replace(
         een_fold_image_v_row=True,
         rk3_stage1_ssh_nemo_literal=True,
-        rk3_stage1_rhs_nemo_literal=True,
-        rk3_stage_velocity_written_order=True,
-        een_vorticity_written_order=True,
-        zdf_barotropic_removal_nemo_literal=True,
-        rk3_fold_exchange_top_v_row=True,
-        rk3_stage_r3f_nemo_literal=True,
-        rk3_stage_r3t_nemo_literal=True,
-        nemo_eos_gdept_rounded_product=True,
-        rk3_stage_r3uv_nemo_literal=True,
         barotropic=model_config.barotropic._replace(
             barotropic_fold_top_v_face_ssh=True,
             barotropic_substep_dt_nemo_literal=True,
-            barotropic_een_ratio_fold_exchange=True,
-            barotropic_een_fe3mask_pivot_row=True,
-            barotropic_een_ratio_written_order=True,
         ),
     )
     # zdfphy.F90:146-173 initializes the pre-closure coefficient memory

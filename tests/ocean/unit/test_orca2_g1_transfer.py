@@ -151,7 +151,7 @@ def test_orca2_and_omt_cards_select_executed_transferred_statements():
         assert config.barotropic.barotropic_fold_top_v_face_ssh is True
         assert config.rk3_stage1_ssh_nemo_literal is True
         assert config.barotropic.barotropic_substep_dt_nemo_literal is True
-        assert card.recipe.z_coord.nemo_r3t_stored_product is True
+        assert card.recipe.z_coord.nemo_r3t_stored_product is False
         for name in (
             "rk3_stage1_rhs_nemo_literal",
             "rk3_stage_velocity_written_order",
@@ -163,23 +163,29 @@ def test_orca2_and_omt_cards_select_executed_transferred_statements():
             "nemo_eos_gdept_rounded_product",
             "rk3_stage_r3uv_nemo_literal",
         ):
-            assert getattr(config, name) is True
+            assert getattr(config, name) is False
         for name in (
             "barotropic_een_ratio_fold_exchange",
             "barotropic_een_fe3mask_pivot_row",
             "barotropic_een_ratio_written_order",
         ):
-            assert getattr(config.barotropic, name) is True
+            assert getattr(config.barotropic, name) is False
     assert omt0_card.recipe.model_config.barotropic.barotropic_flux_update_nemo_literal
     assert omt0_card.recipe.model_config.barotropic.barotropic_entry_depth_nemo_literal
     for card in (shipped, omt1_card, omt4_card):
         assert not card.recipe.model_config.barotropic.barotropic_flux_update_nemo_literal
         assert not card.recipe.model_config.barotropic.barotropic_entry_depth_nemo_literal
-    control = round274.legacy_card(omt4_card)
+    selected = round274.selected_card(omt4_card)
+    assert selected.recipe.z_coord.nemo_r3t_stored_product
+    assert all(getattr(selected.recipe.model_config, name)
+               for name in round274.MODEL_SELECTORS)
+    assert all(getattr(selected.recipe.model_config.barotropic, name)
+               for name in round274.BAROTROPIC_SELECTORS)
+    control = round274.legacy_card(selected)
     assert not control.recipe.z_coord.nemo_r3t_stored_product
     assert not any(getattr(control.recipe.model_config, name)
                    for name in round274.MODEL_SELECTORS)
     assert not any(getattr(control.recipe.model_config.barotropic, name)
                    for name in round274.BAROTROPIC_SELECTORS)
     with pytest.raises(round274.GateError, match="retained selectors"):
-        round274.legacy_card(omt4_card, plant="retained-selector")
+        round274.legacy_card(selected, plant="retained-selector")

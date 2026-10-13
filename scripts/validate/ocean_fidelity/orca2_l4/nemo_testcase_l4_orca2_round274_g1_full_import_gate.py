@@ -43,6 +43,19 @@ BAROTROPIC_SELECTORS = (
 )
 
 
+def selected_card(card):
+    """Private arm selecting all thirteen certified G1 statements."""
+
+    cfg = card.recipe.model_config._replace(
+        **{name: True for name in MODEL_SELECTORS},
+        barotropic=card.recipe.model_config.barotropic._replace(
+            **{name: True for name in BAROTROPIC_SELECTORS}),
+    )
+    z_coord = card.recipe.z_coord._replace(nemo_r3t_stored_product=True)
+    return card._replace(recipe=card.recipe._replace(
+        model_config=cfg, z_coord=z_coord))
+
+
 def legacy_card(card, *, plant: str = "none"):
     """Disable only the thirteen round-274 statements on the current tree."""
 
@@ -90,7 +103,7 @@ def measure(rung: str, deck_root: Path, twin_a: Path, label: str,
     require(jax.default_backend() == "cpu" and not jax.config.jax_disable_jit,
             "round-274 measurement requires production JIT on CPU")
 
-    selected = prior._selected_card(rung, deck_root)
+    selected = selected_card(prior._selected_card(rung, deck_root))
     card = legacy_card(selected, plant=plant)
     entry = rung0.assemble_frame(twin_a, 1, 0)
     state = (rung0.bridge_entry(card, entry)
