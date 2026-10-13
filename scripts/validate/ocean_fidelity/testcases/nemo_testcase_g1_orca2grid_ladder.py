@@ -949,11 +949,11 @@ def stage_momentum_replay(root: Path, kt: int, card, stage: int, g: dict,
             if card_rhs is not None:
                 row["control_card_terms_sum_vs_card_rhs"] = substep_row(
                     "rhs", card_rhs[face], hpg + vor, wet, reg)
-            row["unequal_faces"] = {
-                n: [[int(j), int(i)] for j, i in np.argwhere(
-                    (np.where(wet, a, 0.0) != np.where(wet, b, 0.0)))[:8]]
-                for n, a, b in (("hpg", rep["hpg_" + face], hpg),
-                                ("vor", rep["vor_" + face], vor))}
+            for n, mine, got in (("hpg", rep["hpg_" + face], hpg),
+                                 ("vor", rep["vor_" + face], vor)):
+                # lists, not dicts: every dict in a row is a score row
+                row["unequal_faces_" + n] = [[int(j), int(i)] for j, i in np.argwhere(
+                    np.where(wet, mine, 0.0) != np.where(wet, got, 0.0))[:8]]
         out["rows"].append(row)
     return out
 
