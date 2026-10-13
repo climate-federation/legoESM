@@ -1714,7 +1714,7 @@ def rk3_stage_velocity_update(
     vector_form: bool,
     qco_before=None,
     qco_now=None,
-    qco_after=None,
+    qco_after=None, written_order=False,
 ):
     """NEMO's RK3 momentum stage time step, both arms, one implementation.
 
@@ -1779,8 +1779,8 @@ def rk3_stage_velocity_update(
                 f"{velocity_before.shape} or be its level-broadcast form")
         return (velocity_before + dt_stage * rhs) * face_mask
     # dynzdf.F90:127-132 and stprk3_stg.F90:373-378, key_qco form.
-    return (qco_before * velocity_before
-            + dt_stage * qco_now * rhs) / qco_after
+    return (_rk3_stage_update_written_order(velocity_before, rhs, dt_stage, qco_before, qco_now, qco_after) if written_order  # noqa: E501
+            else (qco_before * velocity_before + dt_stage * qco_now * rhs) / qco_after)
 
 
 def _nemo_ws_qco_stage_faces(
@@ -7258,7 +7258,7 @@ class LatLonCGridOceanModel:
                     # builds them from the Nbb seed thickness under the MLF
                     # before-level seed — an operator mismatch NEMO doesn't have).
                     from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
-                        barotropic_coriolis_een_pre_step,
+                        barotropic_coriolis_een_pre_step, _nemo_een_fold_pivot_row,
                     )
                     _min_wc = jnp.asarray(
                         _cfg_b.min_water_column_m, dtype=F_slow_u.dtype)
@@ -7304,7 +7304,7 @@ class LatLonCGridOceanModel:
                         dz_ref=getattr(_zc, "dz_ref", None),
                         coefficient_evaluation=_een_eval,
                         eta=state.eta.data,
-                        z_coord=_zc,
+                        z_coord=_zc, fold_pivot_row=_nemo_een_fold_pivot_row(_cfg_b),
                         return_pre=True,
                         scheme=_bt_pv_scheme,
                         # dyn_cor_2D, CALLED at dynspg_ts.f90:289 and
@@ -7712,12 +7712,12 @@ class LatLonCGridOceanModel:
                         u_in, target_u, _mean_h_u,
                         nemo_reference_depth_reciprocal(
                             _mean_H_u, state.u_mask.data),
-                        _ws_stage_u_mask),
+                        _ws_stage_u_mask, _cfg_b.rk3_stage_velocity_written_order),
                     rk3_stage_barotropic_correction(
                         v_in, target_v, _mean_h_v,
                         nemo_reference_depth_reciprocal(
                             _mean_H_v, state.v_mask.data),
-                        _ws_stage_v_mask),
+                        _ws_stage_v_mask, _cfg_b.rk3_stage_velocity_written_order),
                 )
 
             # NEMO's TARGET is not reconstructed from the 3-D velocity.  The
@@ -8403,7 +8403,7 @@ class LatLonCGridOceanModel:
             _vert0 = (None if _vector_velocity_stage_update else
                       _stage_vertical_up3(u0, v0, _g0))
             _du1_rhs, _dv1_rhs = (
-                (du_dt, dv_dt) if _vector_velocity_stage_update
+                (du_dt, dv_dt) if _vector_velocity_stage_update or _cfg_b.rk3_stage1_rhs_nemo_literal  # noqa: E501
                 else (du_dt_pert, dv_dt_pert))
             _nemo_ws_live_stage1_full_rhs = (du_dt, dv_dt)
             _stage1_rhs_base = (_du1_rhs, _dv1_rhs)
@@ -8553,11 +8553,11 @@ class LatLonCGridOceanModel:
             u1_raw = rk3_stage_velocity_update(
                 u0, _u1_rhs, dt_mom / 3.0, _ws_stage_u_mask,
                 vector_form=_vector_velocity_stage_update,
-                qco_before=_qu_b, qco_now=_qu_b, qco_after=_qu_13)
+                qco_before=_qu_b, qco_now=_qu_b, qco_after=_qu_13, written_order=_cfg_b.rk3_stage_velocity_written_order)
             v1_raw = rk3_stage_velocity_update(
                 v0, _v1_rhs, dt_mom / 3.0, _ws_stage_v_mask,
                 vector_form=_vector_velocity_stage_update,
-                qco_before=_qv_b, qco_now=_qv_b, qco_after=_qv_13)
+                qco_before=_qv_b, qco_now=_qv_b, qco_after=_qv_13, written_order=_cfg_b.rk3_stage_velocity_written_order)
             if self._nemo_ws_test_hooks.expose_stage1_raw_momentum:
                 _nemo_ws_exposed_stage1_raw = (u1_raw, v1_raw)
             u1_corr, v1_corr = _replace_stage_mean(
@@ -8631,11 +8631,11 @@ class LatLonCGridOceanModel:
             u2_raw = rk3_stage_velocity_update(
                 u0, p1u_corr, dt_mom / 2.0, _ws_stage_u_mask,
                 vector_form=_vector_velocity_stage_update,
-                qco_before=_qu_b, qco_now=_qu_13, qco_after=_qu_12)
+                qco_before=_qu_b, qco_now=_qu_13, qco_after=_qu_12, written_order=_cfg_b.rk3_stage_velocity_written_order)
             v2_raw = rk3_stage_velocity_update(
                 v0, p1v_corr, dt_mom / 2.0, _ws_stage_v_mask,
                 vector_form=_vector_velocity_stage_update,
-                qco_before=_qv_b, qco_now=_qv_13, qco_after=_qv_12)
+                qco_before=_qv_b, qco_now=_qv_13, qco_after=_qv_12, written_order=_cfg_b.rk3_stage_velocity_written_order)
             if self._nemo_ws_test_hooks.expose_stage2_raw_momentum:
                 _nemo_ws_exposed_stage2_raw = (u2_raw, v2_raw)
             u2_corr, v2_corr = _replace_stage_mean(
@@ -8715,11 +8715,11 @@ class LatLonCGridOceanModel:
             u3_raw = rk3_stage_velocity_update(
                 u0, p2u_corr, dt_mom, _ws_stage_u_mask,
                 vector_form=_vector_velocity_stage_update,
-                qco_before=_qu_b, qco_now=_qu_12, qco_after=_qu_aa)
+                qco_before=_qu_b, qco_now=_qu_12, qco_after=_qu_aa, written_order=_cfg_b.rk3_stage_velocity_written_order)
             v3_raw = rk3_stage_velocity_update(
                 v0, p2v_corr, dt_mom, _ws_stage_v_mask,
                 vector_form=_vector_velocity_stage_update,
-                qco_before=_qv_b, qco_now=_qv_12, qco_after=_qv_aa)
+                qco_before=_qv_b, qco_now=_qv_12, qco_after=_qv_aa, written_order=_cfg_b.rk3_stage_velocity_written_order)
             # ORDER.  The barotropic correction (stprk3_stg.F90:437-446) sits
             # BELOW the CALL dyn_zdf at stprk3_stg.F90:430, so at stage 3 it
             # runs AFTER the implicit vertical solve, never before it.  Stage
@@ -16560,3 +16560,18 @@ class _NEMOWSLdfDiagnosticTrace(NamedTuple):
 
     state_after: object
     ldf_diagnostics: object
+
+
+def _rk3_stage_update_written_order(velocity_before, rhs, dt_stage, qco_before,
+                                    qco_now, qco_after):
+    """The thickness-weighted stage update with every product and sum of
+    ``stprk3_stg.f90:373-378`` rounded once, in the written order.
+
+    NEMO's binary evaluates the statement that way (its numpy replay in that
+    order reproduces NEMO's stage-1 frame bit for bit); the compiled default
+    expression may fuse a product into the sum that follows it.
+    ``LatLonCGridOceanConfig.rk3_stage_velocity_written_order`` selects it.
+    """
+    r = nemo_source_round
+    return r(r(r(qco_before * velocity_before)
+               + r(r(dt_stage * qco_now) * rhs)) / qco_after)

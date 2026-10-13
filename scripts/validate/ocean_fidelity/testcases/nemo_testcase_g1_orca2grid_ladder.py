@@ -63,6 +63,19 @@ Arms (``--arm``):
                (dynspg_ts.f90:557-568) at every substep of one step: once as
                compiled (times the inverse exit depth; must be 0 unequal) and
                once dividing by the exit depth; no model step
+  ratio_fold_replay  OFFLINE leaf table at one step (--kt-min = --kt-max), from
+               NEMO's record alone: the U-, V- and F-point thickness ratios
+               on the pivot row and the row below (domqco.f90:268-269,
+               :281-285) against NEMO's recorded entry ratios, as L0 the
+               bare stencil with the cyclic wrap, L1 with the fold halo read
+               as the north neighbour of the top row, L2 = L1 passed through
+               the fold exchange (stprk3_stg.f90:163), L3 = L0 passed through
+               it.  Where the step holds a substep record, the PRODUCTION
+               coefficient builder is also run offline on NEMO's entry sea
+               level against NEMO's eight recorded coefficient sets, four
+               ways: neither half, the ratio exchange alone, the mesh
+               fe3mask pivot row alone (dommsk.f90:233, :258), both; no
+               model step
 
 Every scored row is split into the preregistered regions (fold band, seam,
 south, interior; interior again into coast-adjacent and open).  The scorer
@@ -92,7 +105,7 @@ DEFAULT_ROOT = Path(
 ARMS = ("geometry", "independent", "given_entry", "rhs", "handoff", "stages",
         "vor_fold_replay", "restart_entry", "fold_v_depth",
         "interior_events", "stage_replay", "substeps", "substeps_independent",
-        "flux_update_replay")
+        "flux_update_replay", "ratio_fold_replay")
 PLANTS = ("score", "entry")
 STAGE_STEPS = 10          # round 1's record: stage frames at kt = 1..10
 FOLD_ROWS, SEAM_COLS, SOUTH_ROWS = 3, 2, 3
@@ -637,6 +650,201 @@ def flux_update_replay_rows(root: Path, kt: int, reg) -> list[dict]:
     return rows
 
 
+RATIO_VARIANTS = ("L0_stencil_cyclic_wrap", "L1_fold_halo_read",
+                  "L2_halo_read_then_exchange", "L3_exchange_only",
+                  "L4_exchange_only_times_inverse_area")
+
+
+def _inverse_depth(h):
+    """r1_hu_0 and its siblings: ssumask / (hu_0 + 1 - ssumask), domain.f90:213."""
+    wet = (h > 0.0).astype(np.float64)
+    return wet / (h + 1.0 - wet)
+
+
+def ratio_stencil(area_ssh, north, a, nemo_order):
+    """dom_qco_r3c_RK3's three face ratios (domqco.f90:266-269, :281-285) from
+    the area-weighted sea level and its north neighbour.  ``nemo_order``
+    multiplies by the inverse face area as NEMO writes it; otherwise the
+    product is divided by the face area (the solver coefficient builder's
+    order, one last place apart on about a quarter of the points)."""
+    east, north_east = np.roll(area_ssh, -1, axis=1), np.roll(north, -1, axis=1)
+    return tuple(lead * _inverse_depth(a(h)) * (1.0 / (a(e1) * a(e2))) if nemo_order
+                 else lead * _inverse_depth(a(h)) / (a(e1) * a(e2))
+                 for lead, h, e1, e2 in (
+                     (0.5 * (area_ssh + east), "hu_0", "e1u", "e2u"),
+                     (0.5 * (area_ssh + north), "hv_0", "e1v", "e2v"),
+                     (0.25 * ((area_ssh + east) + (north + north_east)),
+                      "hf_0", "e1f", "e2f")))
+
+
+STAGE1_RATIOS = ("nemo_recorded_ratio", "ratios_interpolated",
+                 "ratio_of_interpolated_ssh")
+# how the two statements are evaluated: as written (every product and sum
+# rounded once), or with ONE product fused into the sum that follows it
+STAGE1_ORDERS = ("written", "fused_rhs_product", "fused_before_product",
+                 "fused_correction", "fused_rhs_product_and_correction")
+
+
+def fused_multiply_add(x, y, z):
+    """x * y + z rounded ONCE (exact rational arithmetic, then one rounding
+    to binary64): what a fused multiply-add instruction returns."""
+    from fractions import Fraction
+    x, y, z = np.broadcast_arrays(*(np.asarray(v, dtype=np.float64) for v in (x, y, z)))
+    out = np.zeros(x.shape)
+    for idx in zip(*np.nonzero(np.isfinite(x) & np.isfinite(y) & np.isfinite(z)
+                               & ((x != 0) & (y != 0) | (z != 0)))):
+        out[idx] = float(Fraction(x[idx]) * Fraction(y[idx]) + Fraction(z[idx]))
+    return out
+
+
+def stage1_momentum_replay(g: dict, card, card_fields: dict, reg,
+                           card_rhs=None, card_raw=None) -> dict:
+    """NEMO's stage-1 velocity from NEMO's own recorded operands, offline.
+
+    The thickness-weighted update (stprk3_stg.f90:373-378) and the barotropic
+    correction (:413-414, :417-418), with the after ratio taken three ways:
+    NEMO's recorded one; two thirds of the before ratio plus one third of the
+    ratio of the solver's sea level (:171-173); the ratio of the stage's
+    interpolated sea level.  Each is scored against NEMO's stage-1 frame and
+    against the card's own stage-1 velocity from the same entry.  Stage 1
+    only: the later stages' right-hand sides are not in the record.  The top
+    V row is not replayed (its north neighbour is the fold)."""
+    raw = card.recipe.z_coord.nemo_een_barotropic
+    a = lambda n: np.asarray(getattr(raw, n), dtype=np.float64)  # noqa: E731
+    area = a("e1t") * a("e2t")
+    rdt = (1.0 / 3.0) * float(card.dt_s)             # rDt = r1_3 * rn_Dt
+
+    def ratios(ssh):
+        x = area * ssh
+        return ratio_stencil(x, np.roll(x, -1, axis=0), a, True)[:2]
+
+    out = {"rDt": rdt, "rows": []}
+    for k, face in enumerate("uv"):
+        mask, e3 = a(f"{face}mask")[..., 0], a(f"e3{face}_0")[..., 0]
+        wet = mask > 0
+        if face == "v":
+            wet[-1] = False
+        r3b, r3a = g[f"e_r3{face}_bb"], g[f"1_r3{face}_aa"]
+        after = dict(zip(STAGE1_RATIOS, (
+            r3a,
+            (2.0 / 3.0) * r3b + (1.0 / 3.0) * ratios(g["b_ssh_aa"])[k],
+            ratios(g["1_ssh_aa"])[k])))
+        ref, mine = g[f"1_{face}{face}_k1_aa"], card_fields[face]
+        before, rhs = g[f"e_{face}{face}_k1_bb"], g[f"b_{face}{face}_rhs_k1"]
+        target, r1 = g[f"1_{face}{face}_b_aa"], _inverse_depth(a(f"h{face}_0"))
+        for name, order in ((n, o) for n in after for o in STAGE1_ORDERS):
+            ratio = after[name]
+            if order in ("fused_rhs_product", "fused_rhs_product_and_correction"):
+                top = fused_multiply_add(rdt * (1.0 + r3b), rhs, (1.0 + r3b) * before)
+            elif order == "fused_before_product":
+                top = fused_multiply_add(1.0 + r3b, before, rdt * (1.0 + r3b) * rhs)
+            else:
+                top = (1.0 + r3b) * before + rdt * (1.0 + r3b) * rhs
+            with np.errstate(divide="ignore", invalid="ignore"):
+                vel = np.where(wet, top / (1.0 + ratio) * mask, 0.0)
+            if order in ("fused_correction", "fused_rhs_product_and_correction"):
+                vel = vel + fused_multiply_add(-(e3 * vel), r1, target) * mask
+            else:
+                vel = vel + (target - (e3 * vel) * r1) * mask
+            out["rows"].append({
+                "face": face, "after_ratio": name, "order": order,
+                "ratio_vs_nemo_unequal": int(np.count_nonzero((ratio != r3a) & wet)),
+                "ratio_vs_nemo_max_abs": float(np.max(np.abs((ratio - r3a)[wet]))),
+                "vs_nemo": substep_row(f"stage1.{face}.{name}", ref, vel, wet, reg),
+                "vs_card": substep_row(f"stage1.{face}.{name}", mine, vel, wet, reg)})
+        out["rows"].append({"face": face, "after_ratio": "card_live_row",
+                            "vs_nemo": substep_row(f"stage1.{face}.card", ref, mine,
+                                                   wet, reg)})
+        if card_rhs is None:
+            continue
+        # the card's OWN stage-1 operands (write-only exposures of the same
+        # entry): its right-hand side against NEMO's, and the written
+        # statements re-run in numpy on that right-hand side
+        mine_rhs, mine_raw = card_rhs[face], card_raw[face]
+        with np.errstate(divide="ignore", invalid="ignore"):
+            raw_nemo, raw_card = (np.where(wet, (
+                (1.0 + r3b) * before + rdt * (1.0 + r3b) * x) / (1.0 + r3a) * mask, 0.0)
+                for x in (rhs, mine_rhs))
+        done = raw_card + (target - (e3 * raw_card) * r1) * mask
+        done_from_raw = mine_raw + (target - (e3 * mine_raw) * r1) * mask
+        out.setdefault("card_operand_rows", []).append({
+            "face": face,
+            "card_rhs_vs_nemo_rhs": substep_row("rhs", rhs, mine_rhs, wet, reg),
+            "card_raw_vs_written_update_of_nemo_rhs": substep_row(
+                "raw", raw_nemo, mine_raw, wet, reg),
+            "card_raw_vs_written_update_of_card_rhs": substep_row(
+                "raw", raw_card, mine_raw, wet, reg),
+            "card_final_vs_written_statements_on_card_rhs": substep_row(
+                "final", done, mine, wet, reg),
+            "card_final_vs_written_correction_of_card_raw": substep_row(
+                "final", done_from_raw, mine, wet, reg)})
+    return out
+
+
+def ratio_fold_rows(root: Path, kt: int, card, reg) -> dict:
+    """The thickness ratios on the fold rows, four ways, against NEMO's own
+    recorded entry ratios; and the production coefficient builder offline."""
+    import jax.numpy as jnp
+    from legoesm.ocean.dynamics import barotropic_latlon_cgrid as bt
+    cr = _checker()
+    path = cr.step_path(root, kt)
+    head, full = cr.read_stream(path.read_bytes(), path.name)
+    js, je, i_s, ie = head["Njs0"] - 1, head["Nje0"], head["Nis0"] - 1, head["Nie0"]
+    raw, grid = card.recipe.z_coord.nemo_een_barotropic, card.recipe.grid
+    fold = grid.fold
+    a = lambda n: np.asarray(getattr(raw, n), dtype=np.float64)  # noqa: E731
+    ssh = np.array(full["e_ssh_bb"][js:je, i_s:ie])
+    area_ssh = (a("e1t") * a("e2t")) * ssh
+    perm_t = np.asarray(fold.perm_T)
+
+    def stencil(north, nemo_order=False):
+        return ratio_stencil(area_ssh, north, a, nemo_order)
+
+    def exchange(r3):
+        return tuple(np.asarray(x) for x in bt._nemo_een_ratio_fold_exchange(
+            *(jnp.asarray(x) for x in r3), grid, True))
+
+    wrap = np.roll(area_ssh, -1, axis=0)
+    halo = wrap.copy()
+    halo[-1] = area_ssh[-2][perm_t]
+    variants = dict(zip(RATIO_VARIANTS, (
+        stencil(wrap), stencil(halo), exchange(stencil(halo)), exchange(stencil(wrap)),
+        exchange(stencil(wrap, nemo_order=True)))))
+    nemo = {n: np.array(full[f"e_{k}"][js:je, i_s:ie])
+            for n, k in (("r3u", "r3u_bb"), ("r3v", "r3v_bb"), ("r3f", "r3f"))}
+    bands = {"pivot_row": np.s_[-1], "row_below": np.s_[-2], "all_rows_below": np.s_[:-2]}
+    rows = []
+    for name, r3 in variants.items():
+        for (ratio, ref), cand in zip(nemo.items(), r3):
+            d = cand - ref
+            rows.append({"variant": name, "ratio": ratio, **{
+                band: {"n_unequal": int(np.count_nonzero(d[sl])),
+                       "max_abs": float(np.max(np.abs(d[sl]))),
+                       "nemo_max_abs": float(np.max(np.abs(ref[sl]))),
+                       "n_nemo_nonzero": int(np.count_nonzero(ref[sl]))}
+                for band, sl in bands.items()}})
+    out = {"kt": kt, "ratio_rows": rows,
+           "nemo_halo_ssh_equals_mirrored_row_below": bool(np.array_equal(
+               full["e_ssh_bb"][je, i_s:ie], ssh[-2][perm_t])),
+           "L3_equals_L2_bitwise": all(np.array_equal(x, y) for x, y in zip(
+               variants[RATIO_VARIANTS[2]], variants[RATIO_VARIANTS[3]]))}
+    if cr.substep_path(root, kt).is_file():
+        _, sub = read_substep_record(root, kt)
+        wet = {"u": a("umask")[..., 0] > 0, "v": a("vmask")[..., 0] > 0}
+        out["coefficient_rows"] = []
+        for pair in ((False, False), (True, False), (False, True), (True, True)):
+            built = bt._nemo_literal_een_coefficients(
+                jnp.asarray(ssh), card.recipe.z_coord, jnp.float64, scheme="een",
+                grid=grid, fold_pivot_row=pair)
+            out["coefficient_rows"] += [dict(substep_row(
+                f"i000.{n}", sub["i000_" + n], np.asarray(built[n]), wet[n[2]], reg),
+                ratio_exchange=pair[0], fe3mask_pivot_row=pair[1],
+                operand=n) for n in (
+                "ffu_nw", "ffu_ne", "ffu_sw", "ffu_se",
+                "ffv_nw", "ffv_ne", "ffv_sw", "ffv_se")]
+    return out
+
+
 SUB_REGIONS = ("fold", "seam", "south", "interior")
 
 
@@ -762,7 +970,11 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
         ts_from_chain: bool = False, without_stage1_ssh: bool = False,
         without_flux_literal: bool = False,
         without_substep_dt: bool = False,
-        without_entry_depth: bool = False) -> dict:
+        without_entry_depth: bool = False,
+        without_ratio_fold: bool = False,
+        stage1_rhs_from_nemo: bool = False,
+        without_stage1_rhs: bool = False,
+        without_written_order: bool = False) -> dict:
     if vor_fold_image:
         from legoesm.ocean.fidelity import nemo_testcase_recipe as _recipe
         calls: list = []
@@ -777,13 +989,18 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
                       without_stage1_ssh=without_stage1_ssh,
                       without_flux_literal=without_flux_literal,
                       without_substep_dt=without_substep_dt,
-                      without_entry_depth=without_entry_depth)
+                      without_entry_depth=without_entry_depth,
+                      without_ratio_fold=without_ratio_fold,
+                      without_stage1_rhs=without_stage1_rhs,
+                      without_written_order=without_written_order)
         require(len(calls) > 0, "the vorticity fold-image arm was never traced")
         out["vor_fold_image_measurement_arm"] = {"traces": len(calls)}
         out["label"] = f"{out['label']} + MEASUREMENT ARM (fold-image V row "\
                        "in the 3-D vorticity trend; not the card)"
         return out
     require(arm in ARMS, f"unknown arm {arm!r}; expected one of {ARMS}")
+    require(not stage1_rhs_from_nemo or arm == "stages",
+            "--stage1-rhs-from-nemo is a measurement arm of the stages table")
     require(plant is None or plant in PLANTS, f"unknown plant {plant!r}")
     import jax
     import jax.numpy as jnp
@@ -833,6 +1050,17 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
                 "the card no longer selects NEMO's substep length")
         cfg = cfg._replace(barotropic=cfg.barotropic._replace(
             barotropic_substep_dt_nemo_literal=False))
+    for off, name in ((without_stage1_rhs, "rk3_stage1_rhs_nemo_literal"),
+                      (without_written_order, "rk3_stage_velocity_written_order")):
+        if off:               # ROUND-6 BEFORE ARMS / plants, one option each
+            require(getattr(cfg, name) is True, f"the card no longer selects {name}")
+            cfg = cfg._replace(**{name: False})
+    if without_ratio_fold:    # ROUND-6 BEFORE ARM / plant: the bare stencil
+        require(cfg.barotropic.barotropic_een_ratio_fold_exchange is True,
+                "the card no longer selects the ratio fold exchange")
+        cfg = cfg._replace(barotropic=cfg.barotropic._replace(
+            barotropic_een_ratio_fold_exchange=False,
+            barotropic_een_fe3mask_pivot_row=False))
     s0 = card.recipe.initial_state
     require(int(card.recipe.z_coord.n_levels) == 1, "the G1 card executes one level")
     n_stage = stage_steps(root)
@@ -865,6 +1093,13 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
                 "totals": {name: {"n_unequal": sum(r[name]["n_unequal"] for r in rows),
                                   "max_abs": max(r[name]["max_abs"] for r in rows)}
                            for name in REPLAY_ORDERS}}
+    if arm == "ratio_fold_replay":
+        require(1 <= kt_min == kt_max <= n_stage, "one step holding stage frames")
+        reg = regions(np.asarray(card.recipe.z_coord.is_active)[..., 0])
+        return {"arm": arm, "legoesm_git_sha": sha, "root": str(root),
+                "label": "NEMO's record only (offline leaf table of the "
+                         "thickness ratios on the fold rows; no model step)",
+                **ratio_fold_rows(root, kt_max, card, reg)}
     if arm == "interior_events":
         require(2 <= kt_max <= 30, "kt_max must lie in 2..30")
         wet = np.asarray(card.recipe.z_coord.is_active)[..., 0] > 0.5
@@ -994,6 +1229,12 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
                cfg.barotropic.barotropic_substep_dt_nemo_literal),
            "barotropic_entry_depth_nemo_literal": bool(
                cfg.barotropic.barotropic_entry_depth_nemo_literal),
+           "barotropic_een_ratio_fold_exchange": bool(
+               cfg.barotropic.barotropic_een_ratio_fold_exchange),
+           "stage1_rhs_from_nemo_measurement_arm": stage1_rhs_from_nemo,
+           "rk3_stage1_rhs_nemo_literal": bool(cfg.rk3_stage1_rhs_nemo_literal),
+           "rk3_stage_velocity_written_order": bool(
+               cfg.rk3_stage_velocity_written_order),
            "per_kt": []}
     records = {kt: read_step(root, kt) for kt in scored if kt <= n_stage}
     before = {}             # the card's own chain: the state entering step kt
@@ -1266,6 +1507,10 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
                            jnp.asarray(g[p + "ssh_aa"]))
                 last = stage == 3
                 h = _NEMOWSRK3TestHooks(
+                    **({"stage1_momentum_rhs_override": (
+                        jnp.asarray(pad_u(g["b_uu_rhs_k1"])[..., None]),
+                        jnp.asarray(pad_v(g["b_vv_rhs_k1"])[..., None]))}
+                       if stage1_rhs_from_nemo and stage == 1 else {}),
                     stage_barotropic_output_override=ext,
                     stage_entry_override=ent,
                     expose_momentum_stage=0 if last else stage,
@@ -1279,6 +1524,15 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
                                       ("S", "sn_k1_aa"))]
                 stages.append({"stage": stage, "rows": rows,
                                "first_unequal": first_unequal(rows)})
+                if stage == 1:
+                    exposed = [state_fields(jax.device_get(model(_NEMOWSRK3TestHooks(
+                        stage_barotropic_output_override=ext,
+                        **{flag: True})).step(seed(g, before[kt], kt), dt=card.dt_s)))
+                        for flag in ("expose_stage1_momentum_rhs",
+                                     "expose_stage1_raw_momentum")] \
+                        if not stage1_rhs_from_nemo else [None, None]
+                    stages[-1]["momentum_replay"] = stage1_momentum_replay(
+                        g, card, cand, reg, *exposed)
             out["per_kt"].append({"kt": kt, "stages": stages})
     return out
 
@@ -1293,6 +1547,23 @@ def _print(out: dict) -> None:
         return
     print(out["label"], "| een_fold_image_v_row =", out.get("een_fold_image_v_row"),
           "| T,S FROM THE CARD'S CHAIN" if out.get("ts_from_chain_measurement_arm") else "")
+    if out["arm"] == "ratio_fold_replay":
+        print("NEMO halo ssh == mirrored row below:",
+              out["nemo_halo_ssh_equals_mirrored_row_below"],
+              "| L3 == L2 bitwise:", out["L3_equals_L2_bitwise"])
+        for r in out["ratio_rows"]:
+            print(f"{r['variant']:27s} {r['ratio']} " + " | ".join(
+                f"{b}: {r[b]['n_unequal']} max={r[b]['max_abs']:.1e} "
+                f"nemo={r[b]['nemo_max_abs']:.1e}"
+                for b in ("pivot_row", "row_below", "all_rows_below")))
+        for r in out.get("coefficient_rows", []):
+            print(f"exchange={r['ratio_exchange']!s:5s} "
+                  f"fe3mask={r['fe3mask_pivot_row']!s:5s} {r['operand']} "
+                  f"unequal={r['n_unequal']}/{r['n_wet']} max={r['max_abs']:.1e} "
+                  f"nemo={r['ref_max_abs']:.1e} " + " ".join(
+                      f"{n}={v['n_unequal']}/{v['max_abs']:.1e}"
+                      for n, v in r["regions"].items()))
+        return
     if out["arm"] == "flux_update_replay":
         for r in out["replay_rows"]:
             print(f"j{r['substep']:03d} {r['face']}a " + " | ".join(
@@ -1340,6 +1611,21 @@ def _print(out: dict) -> None:
     for r in out.get("history_rows", []):
         print(f"{r['name']:24s} {r['status']:6s} max={r['max_abs']:.3e} "
               f"n_unequal={r['n_unequal']}")
+    for k in out["per_kt"]:
+        for grp in k.get("stages", []):
+            for r in grp.get("momentum_replay", {}).get("rows", []):
+                print(f"kt{k['kt']} stage1 replay {r['face']} {r['after_ratio']:26s} "
+                      f"{r.get('order', ''):33s}"
+                      + (f"ratio!=nemo {r['ratio_vs_nemo_unequal']:5d} "
+                         f"({r['ratio_vs_nemo_max_abs']:.1e}) " if "vs_card" in r else "")
+                      + f"vs NEMO {r['vs_nemo']['n_unequal']:5d} "
+                      f"max={r['vs_nemo']['max_abs']:.1e}"
+                      + (f" | vs card {r['vs_card']['n_unequal']:5d} "
+                         f"max={r['vs_card']['max_abs']:.1e}" if "vs_card" in r else ""))
+            for r in grp.get("momentum_replay", {}).get("card_operand_rows", []):
+                print(f"kt{k['kt']} stage1 card operands {r['face']}: " + " | ".join(
+                    f"{n}: {v['n_unequal']} ({v['max_abs']:.1e} of {v['ref_max_abs']:.1e})"
+                    for n, v in r.items() if n != "face"))
     for k in out["per_kt"]:
         groups = k["stages"] if "stages" in k else [k] if "rows" in k else []
         for grp in groups:
@@ -1403,6 +1689,19 @@ def main(argv=None) -> int:
                     help="the card with barotropic_flux_update_nemo_literal "
                          "switched off (the round-5 before arm; also the "
                          "option's plant)")
+    ap.add_argument("--stage1-rhs-from-nemo", action="store_true",
+                    help="measurement arm (stages only), not the card: stage "
+                         "1's momentum right-hand side is NEMO's recorded one")
+    ap.add_argument("--without-stage1-rhs", action="store_true",
+                    help="the card with rk3_stage1_rhs_nemo_literal switched "
+                         "off (a round-6 before arm; also the option's plant)")
+    ap.add_argument("--without-written-order", action="store_true",
+                    help="the card with rk3_stage_velocity_written_order "
+                         "switched off (a round-6 before arm; also its plant)")
+    ap.add_argument("--without-ratio-fold", action="store_true",
+                    help="the card with barotropic_een_ratio_fold_exchange "
+                         "switched off (the round-6 before arm; also the "
+                         "option's plant)")
     ap.add_argument("--without-fold-v-depth", action="store_true",
                     help="the card with barotropic_fold_top_v_face_ssh switched "
                          "off (the round-3 before arm; also the option's plant)")
@@ -1419,7 +1718,11 @@ def main(argv=None) -> int:
                   without_stage1_ssh=a.without_stage1_ssh,
                   without_flux_literal=a.without_flux_literal,
                   without_substep_dt=a.without_substep_dt,
-                  without_entry_depth=a.without_entry_depth)
+                  without_entry_depth=a.without_entry_depth,
+                  without_ratio_fold=a.without_ratio_fold,
+                  stage1_rhs_from_nemo=a.stage1_rhs_from_nemo,
+                  without_stage1_rhs=a.without_stage1_rhs,
+                  without_written_order=a.without_written_order)
     except Exception as e:      # noqa: BLE001 -- refusals print and exit 2
         print(f"REFUSE: {type(e).__name__}: {e}", file=sys.stderr)
         return 2
