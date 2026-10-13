@@ -3151,6 +3151,21 @@ class LatLonCGridOceanConfig(NamedTuple):
     # interpolated sea level, which is real-equal and differs in the last
     # place on rare points.
     rk3_stage_r3f_nemo_literal: bool = False
+    # The T-point thickness ratio at N+1/2 is NEMO's mean of the entry and
+    # after ratios (stprk3_stg.f90:215), read by stage 2's tracer weight and
+    # by stage 3's pressure gradient.  False takes the ratio of the mean sea
+    # level, real-equal and different in the last place on rare cells.
+    rk3_stage_r3t_nemo_literal: bool = False
+    # The depth the density reads is the rounded product
+    # ``gdept_0 * (1 + r3t)`` before it is scaled (eosbn2.f90:324, :559).
+    # False leaves the product bare; compiled, its constant factor is folded
+    # into the scale, real-equal and different in the last place.
+    nemo_eos_gdept_rounded_product: bool = False
+    # The U and V thickness ratios at N+1/3 and N+1/2 are NEMO's
+    # interpolation of the entry and after ratios (stprk3_stg.f90:172-173,
+    # :216-217), read by the stage velocity weights and the stage's face
+    # thickness.  False takes the ratio of the interpolated sea level.
+    rk3_stage_r3uv_nemo_literal: bool = False
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":

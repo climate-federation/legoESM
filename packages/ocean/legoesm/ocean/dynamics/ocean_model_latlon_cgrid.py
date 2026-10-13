@@ -1785,7 +1785,7 @@ def rk3_stage_velocity_update(
 
 def _nemo_ws_qco_stage_faces(
     eta, h_ref, u_mask_3d, v_mask_3d, grid, *, z_coord=None,
-    include_reciprocals=False,
+    include_reciprocals=False, nemo_stage_pair=None,
 ):
     """NEMO ``e3u/e3v(Kmm)`` and ``1 + r3u/r3v`` for one WS-RK3 stage ssh.
 
@@ -1844,7 +1844,7 @@ def _nemo_ws_qco_stage_faces(
     return nemo_qco_live_face_geometry_cgrid(
         jnp.asarray(eta, dtype=dtype), ops.e3u_0, ops.e3v_0, ops.umask3,
         ops.vmask3, ops.hu_0, ops.hv_0, ops.area_t, ops.area_u, ops.area_v,
-        include_reciprocals=include_reciprocals,
+        include_reciprocals=include_reciprocals, r3_native=_nemo_ws_stage_r3uv(nemo_stage_pair, ops, dtype),
     )
 
 
@@ -5662,7 +5662,7 @@ class LatLonCGridOceanModel:
                    nemo_stage_zad_operands=None,
                    nemo_stage_zad_operand_observer=None,
                    nemo_stage_zad_eta_after_override=None,
-                   nemo_literal_hpg_vmask=None, nemo_stage_r3f=None):
+                   nemo_literal_hpg_vmask=None, nemo_stage_r3f=None, nemo_stage_r3t_stretch=None):
         """Compute baroclinic tendencies.
 
         ``momentum_only=True`` skips the (T/S-frozen) tracer-diffusion
@@ -5725,7 +5725,7 @@ class LatLonCGridOceanModel:
             nemo_stage_zad_operand_observer=nemo_stage_zad_operand_observer,
             nemo_stage_zad_eta_after_override=(
                 nemo_stage_zad_eta_after_override),
-            nemo_literal_hpg_vmask=nemo_literal_hpg_vmask, nemo_stage_r3f=nemo_stage_r3f,
+            nemo_literal_hpg_vmask=nemo_literal_hpg_vmask, nemo_stage_r3f=nemo_stage_r3f, nemo_stage_r3t_stretch=nemo_stage_r3t_stretch,  # noqa: E501
             diagnose_momentum=return_nemo_operator_components,
             return_nemo_operator_components=return_nemo_operator_components,
         )
@@ -6808,7 +6808,7 @@ class LatLonCGridOceanModel:
                         eta=state.eta.replace(data=stage_eta),
                     )
                     stage_geom_density = compute_frozen_geom_density(
-                        st, _grid, _zc, _cfg_b)
+                        st, _grid, _zc, _cfg_b, _nemo_ws_stage_r3t_stretch(_cfg_b, stage_index, lambda: _ws_eta_pair, _zc, state.H_bathy.data))  # noqa: E501
                 transport_velocity = None
                 if transport_mean is not None:
                     transport_u_mean, transport_v_mean = transport_mean
@@ -6952,7 +6952,7 @@ class LatLonCGridOceanModel:
                                      nemo_stage_zad_operand_observer=(
                                          _zad_observers[stage_index - 1]),
                                      nemo_literal_hpg_vmask=(
-                                         _ws_literal_hpg_vmask), nemo_stage_r3f=_nemo_ws_stage_r3f(_cfg_b, stage_index, lambda: _ws_eta_pair, _zc, _grid),  # noqa: E501
+                                         _ws_literal_hpg_vmask), nemo_stage_r3f=_nemo_ws_stage_r3f(_cfg_b, stage_index, lambda: _ws_eta_pair, _zc, _grid), nemo_stage_r3t_stretch=_nemo_ws_stage_r3t_stretch(_cfg_b, stage_index, lambda: _ws_eta_pair, _zc, state.H_bathy.data),  # noqa: E501
                                      return_nemo_operator_components=(
                                          _return_components))
                 if _return_components:
@@ -7930,7 +7930,7 @@ class LatLonCGridOceanModel:
             # momentum program"; that was the transcription defect round 33
             # fixed, and all three stages now route through
             # rk3_stage_velocity_update.)
-            def _qco_ratios(eta_stage):
+            def _qco_ratios(eta_stage, kmm=0):
                 if self._nemo_ws_test_hooks.omit_stage_qco_factor:
                     return (
                         jnp.ones_like(state.u_mask.data)[..., None],
@@ -7938,12 +7938,12 @@ class LatLonCGridOceanModel:
                     )
                 _, _, _opu, _opv = _nemo_ws_qco_stage_faces(
                     eta_stage, _h_ref_ws, _u_live_mask, _v_live_mask, _grid,
-                    z_coord=_zc)
+                    z_coord=_zc, nemo_stage_pair=_nemo_ws_stage_pair(_cfg_b, kmm, _ws_eta_pair))
                 return _opu[..., None], _opv[..., None]
 
             _qu_b, _qv_b = _qco_ratios(state.eta.data)
-            _qu_13, _qv_13 = _qco_ratios(_eta_live_one_third)
-            _qu_12, _qv_12 = _qco_ratios(_eta_live_one_half)
+            _qu_13, _qv_13 = _qco_ratios(_eta_live_one_third, 1)
+            _qu_12, _qv_12 = _qco_ratios(_eta_live_one_half, 2)
             _qu_aa, _qv_aa = _qco_ratios(state_new.eta.data)
             from legoesm.ocean.eos import (
                 nemo_r3t_rk3_stage1_stretch,
@@ -7959,7 +7959,7 @@ class LatLonCGridOceanModel:
             _qt_13 = nemo_r3t_rk3_stage1_stretch(
                 _zc, state.eta.data, state_new.eta.data,
                 state.H_bathy.data)
-            _qt_12 = _qco_t_ratio(_eta_live_one_half)
+            _qt_12 = _nemo_ws_stage_r3t_stretch(_cfg_b, 3, lambda: _ws_eta_pair, _zc, state.H_bathy.data); _qt_12 = _qco_t_ratio(_eta_live_one_half) if _qt_12 is None else _qt_12  # noqa: E501,E702
             _qt_aa = _qco_t_ratio(state_new.eta.data)
             _tracer_qco_weights = (
                 None
@@ -8426,12 +8426,12 @@ class LatLonCGridOceanModel:
             _legacy_hadv_h = (
                 self._nemo_ws_test_hooks.legacy_hadv_min_face_thickness)
 
-            def _stage_face_thickness(eta_stage):
+            def _stage_face_thickness(eta_stage, kmm=0):
                 if _legacy_hadv_h:
                     return None
                 return _nemo_ws_qco_stage_faces(
                     eta_stage, _h_ref_ws, _u_live_mask, _v_live_mask, _grid,
-                    z_coord=_zc)[:2]
+                    z_coord=_zc, nemo_stage_pair=_nemo_ws_stage_pair(_cfg_b, kmm, _ws_eta_pair))[:2]
 
             def _stage_zad_operands(stage, live):
                 # Rounds 158/194.  Replace only the slots the private hook
@@ -8628,7 +8628,7 @@ class LatLonCGridOceanModel:
                 _stage2_hpg_operands(
                     _T_stage1, _S_stage1, _eta_live_one_third),
                 _stage_vertical_up3(u1_corr, v1_corr, _g1),
-                stage_face_thickness=_stage_face_thickness(_eta_live_one_third),
+                stage_face_thickness=_stage_face_thickness(_eta_live_one_third, 1),
                 stage_zad_operands=_stage_zad_operands(2,
                     (_momentum_stage_w(_g1), _g1[4], _g1[5])),
                 stage_index=2)
@@ -8687,7 +8687,7 @@ class LatLonCGridOceanModel:
             _stage3_hpg_operands = _stage_hpg_operands(
                 _T_stage2, _S_stage2, _eta_live_one_half)
             _stage3_vertical_up3 = _stage_vertical_up3(u2_corr, v2_corr, _g2)
-            _stage3_face_thickness = _stage_face_thickness(_eta_live_one_half)
+            _stage3_face_thickness = _stage_face_thickness(_eta_live_one_half, 2)
             p2u_corr, p2v_corr = _mom_pert_ws(
                 u2_corr, v2_corr, False, _transport_target,
                 _stage3_hpg_operands,
@@ -16658,7 +16658,76 @@ def _nemo_ws_stage_r3f(cfg, stage_index, eta_pair, z_coord, grid):
     r3fb, r3fa = (nemo_qco_live_vorticity_e3f_cgrid(
         eta, z_coord, eta.dtype, nn_e3f_typ=0, grid=grid, return_r3f=True)
         for eta in eta_pair())
+    return _nemo_stage_ratio(stage_index - 1, r3fb, r3fa)
+
+
+def _nemo_ws_stage_r3t_stretch(cfg, stage_index, eta_pair, z_coord, H_bathy):
+    """NEMO's ``1 + r3t`` at N+1/2: one plus the mean of two stored ratios.
+
+    NEMO does not rebuild the stage-2 T-point ratio from the stage's sea
+    level: ``r3t(Kaa) = r1_2 * ( r3t(Kbb) + r3ta )`` (stprk3_stg.f90:215).
+    Stage 2's tracer update reads it as the after weight (:503-505) and stage
+    3 reads it as ``Kmm``, in the pressure gradient's stretched depth.  The
+    ratio of the mean sea level is equal as a real number and differs in the
+    last place on rare cells (one T cell at step 40 of the G1 record).
+    Stage 2 reads the N+1/3 twin (:171) the same way.
+    ``rk3_stage_r3t_nemo_literal`` selects NEMO's form; None (the option off,
+    or stage 1) leaves the caller's own sea-level ratio in place.
+    ``eta_pair`` is a thunk for (sea level before, after).
+    """
+    if not getattr(cfg, "rk3_stage_r3t_nemo_literal", False) or stage_index not in (2, 3):
+        return None
+    if getattr(cfg, "pgf_scheme", None) != "nemo_sco":
+        raise ValueError(
+            "rk3_stage_r3t_nemo_literal=True needs pgf_scheme='nemo_sco': no "
+            "other pressure gradient reads the handed stage stretch")
+    from legoesm.ocean.eos import nemo_r3t_rk3_stage1_stretch
+    return nemo_r3t_rk3_stage1_stretch(
+        z_coord, *eta_pair(), H_bathy, half=stage_index == 3)
+
+
+def _nemo_stage_ratio(kmm, before, after):
+    """NEMO's stored thickness ratio at N+1/3 (``kmm`` 1) or N+1/2 (2).
+
+    ``r2_3 * r3(Kbb) + r1_3 * r3a`` (stprk3_stg.f90:171-173, :218) and
+    ``r1_2 * ( r3(Kbb) + r3a )`` (:215-217, :239): each product and sum
+    rounded once, in the written order.
+    """
     sr = nemo_source_round
-    if stage_index == 2:
-        return sr(sr((2.0 / 3.0) * r3fb) + sr((1.0 / 3.0) * r3fa))
-    return sr(0.5 * sr(r3fb + r3fa))
+    if kmm == 1:
+        return sr(sr((2.0 / 3.0) * before) + sr((1.0 / 3.0) * after))
+    if kmm == 2:
+        return sr(0.5 * sr(before + after))
+    raise ValueError(f"stage ratio level must be 1 or 2, got {kmm!r}")
+
+
+def _nemo_ws_stage_pair(cfg, kmm, eta_pair):
+    """(level, sea level before, after) for the face ratios, or None.
+
+    None with ``rk3_stage_r3uv_nemo_literal`` off or at the entry and after
+    levels (``kmm`` 0), whose ratio is the sea level's own.
+    """
+    if kmm == 0 or not getattr(cfg, "rk3_stage_r3uv_nemo_literal", False):
+        return None
+    return (kmm, *eta_pair)
+
+
+def _nemo_ws_stage_r3uv(stage_pair, ops, dtype):
+    """NEMO's U and V ratios at N+1/3 or N+1/2 on its native faces.
+
+    NEMO interpolates the two ratios it holds (stprk3_stg.f90:172-173,
+    :216-217) instead of taking the ratio of the interpolated sea level; the
+    two differ in the last place of ``1 + r3`` on rare faces (one U face at
+    step 5 and one V face at step 21 of the G1 record, each moving two faces
+    of the stage-3 vorticity trend).  None without a pair.
+    """
+    if stage_pair is None:
+        return None
+    from legoesm.ocean.vertical import nemo_qco_live_face_geometry_from_operands
+    kmm, before, after = stage_pair
+    gb, ga = (nemo_qco_live_face_geometry_from_operands(
+        jnp.asarray(eta, dtype=dtype), ops.e3u_0, ops.e3v_0, ops.umask3,
+        ops.vmask3, ops.hu_0, ops.hv_0, ops.area_t, ops.area_u, ops.area_v)
+        for eta in (before, after))
+    return (_nemo_stage_ratio(kmm, gb.r3u, ga.r3u),
+            _nemo_stage_ratio(kmm, gb.r3v, ga.r3v))

@@ -1290,7 +1290,7 @@ def laplacian_smag_cfl_cap(grid, dt: float, safety: float):
 
 
 def _bc_geometry_and_density(
-    eta_safe, H_bathy, z_coord, config, T, S, mask, grid, rho_0, g_val,
+    eta_safe, H_bathy, z_coord, config, T, S, mask, grid, rho_0, g_val, nemo_stage_r3t_stretch=None,
 ):
     """Stages 1-3 of the baroclinic tendencies: layer thickness + Jacobian,
     density from the EOS, and the baroclinic pressure anomaly (filled).
@@ -1356,7 +1356,7 @@ def _bc_geometry_and_density(
     _eos_geometric_depth = (
         (jnp.abs(z_coord.z_full_ref)
          if getattr(z_coord, "t_depth_ref", None) is None
-         else nemo_bn2_live_ladders(z_coord, eta_safe, H_bathy)[0])
+         else _nemo_eos_gdept(config, z_coord, eta_safe, H_bathy, nemo_stage_r3t_stretch))
         if _eos_depth == "geometric" else None
     )
     _nemo_tmask3 = (
@@ -1427,7 +1427,7 @@ def _bc_geometry_and_density(
     return J, h_k, rho_prime, p_prime_filled, nemo_hpg_rhd
 
 
-def compute_frozen_geom_density(state, grid, z_coord, config):
+def compute_frozen_geom_density(state, grid, z_coord, config, nemo_stage_r3t_stretch=None):
     """``(J, h_k, rho_prime, p_prime_filled, nemo_hpg_rhd)`` from eta/T/S.
 
     The eta_safe derivation (mirrors :func:`latlon_cgrid_ocean_baroclinic_
@@ -1450,7 +1450,7 @@ def compute_frozen_geom_density(state, grid, z_coord, config):
     eta_floor = min_water_col - H_bathy
     eta_safe = _jnp.maximum(eta, eta_floor) * mask
     return _bc_geometry_and_density(
-        eta_safe, H_bathy, z_coord, config, T, S, mask, grid, rho_0, g_val,
+        eta_safe, H_bathy, z_coord, config, T, S, mask, grid, rho_0, g_val, nemo_stage_r3t_stretch,
     )
 
 
@@ -1871,7 +1871,7 @@ def _nemo_qco_gdept_z0(t_depth, stretch, eta):
 def _bc_ke_and_pressure_gradients(
     u, v, p_prime_filled, rho_prime, grid, config, z_coord,
     eta_safe, H_bathy, g_val, mask, legacy_hpg_algebraic=False,
-    nemo_hpg_rhd=None,
+    nemo_hpg_rhd=None, nemo_stage_r3t_stretch=None,
 ):
     """Stages 6 / 6-7 / 6b: kinetic-energy gradient (centered, Hollingsworth,
     or WENO), baroclinic pressure gradient (batched with KE), and the
@@ -2161,12 +2161,12 @@ def _bc_ke_and_pressure_gradients(
             # domqco.F90:160 multiplies ssh by the reciprocal column depth
             # stored at domain.F90:158.  The helper returns the complete
             # ``1+r3t`` stretch, not r3t itself.
-            stretch = nemo_r3t_stretch(
+            stretch = (nemo_r3t_stretch(
                 z_coord,
                 eta_safe,
                 H_bathy,
-                evaluation="nemo_reciprocal",
-            )[..., jnp.newaxis]
+                evaluation="nemo_reciprocal",  # a handed stretch is NEMO's stored stage ratio (stprk3_stg.f90:215)
+            ) if nemo_stage_r3t_stretch is None else nemo_stage_r3t_stretch)[..., jnp.newaxis]
             # domzgr_substitute.h90:145 (key_qco): the gdept_z0 operand read
             # by dynhpg is formed as two source statements' operations,
             # ``gdept_0 * (1+r3t) - ssh``.  Materialise the multiply before
@@ -5113,7 +5113,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     nemo_stage_zad_operands=None,
     nemo_stage_zad_operand_observer=None,
     nemo_stage_zad_eta_after_override=None,
-    nemo_literal_hpg_vmask=None, nemo_stage_r3f=None,
+    nemo_literal_hpg_vmask=None, nemo_stage_r3f=None, nemo_stage_r3t_stretch=None,
 ):
     """Compute 3D baroclinic tendencies on a C-grid lat-lon grid.
 
@@ -5213,7 +5213,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         J, h_k, rho_prime, p_prime_filled, nemo_hpg_rhd = (
             _bc_geometry_and_density(
                 eta_safe, H_bathy, z_coord, config, T, S, mask, grid,
-                rho_0, g_val,
+                rho_0, g_val, nemo_stage_r3t_stretch,
             ))
 
     # --- Stages 4-4b: vertical velocity (w), face thicknesses (h_u, h_v),
@@ -5297,7 +5297,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         u, v, p_prime_filled, rho_prime, grid, config, z_coord,
         eta_safe, H_bathy, g_val, mask,
         legacy_hpg_algebraic=legacy_hpg_algebraic,
-        nemo_hpg_rhd=nemo_hpg_rhd,
+        nemo_hpg_rhd=nemo_hpg_rhd, nemo_stage_r3t_stretch=nemo_stage_r3t_stretch,
     )
     # Flux-form momentum advection (stage 7b below) provides the FULL horizontal
     # advection -div(transport(x)u), which already includes the kinetic-energy
@@ -6284,3 +6284,26 @@ def _een_fold_image_v_row(
     h_v = h_v.at[-1].set(h_v[-2][perm])
     v_mask_3d = v_mask_3d.at[-1].set(wet)
     return h_v, v, h_u, u, u_mask_3d, v_mask_3d
+
+
+def _nemo_eos_gdept(config, z_coord, eta, H_bathy, stage_stretch=None):
+    """NEMO's ``gdept(Kmm)`` as the density reads it: a rounded product.
+
+    ``zh = ((gdept_1d(jk))*(1._wp+r3t(ji,jj,Knn))) * r1_Z0`` (eosbn2.f90:324,
+    :559): the stretched depth is formed first, then scaled.  Left bare, the
+    compiled graph folds the two constant factors into one and scales the
+    stretch by it, which rounds differently (3,474 cells of 15,000 at one
+    stage of the G1 record, one of which changes the density anomaly).
+    ``nemo_eos_gdept_rounded_product`` keeps the first product.
+    ``stage_stretch`` is NEMO's stored ``1 + r3t`` for the stage when the
+    caller holds it (``rk3_stage_r3t_nemo_literal``); None takes the ratio of
+    the sea level passed in.
+    """
+    if stage_stretch is None or getattr(z_coord, "linear_free_surface", False):
+        depth = nemo_bn2_live_ladders(z_coord, eta, H_bathy)[0]
+    else:
+        from legoesm.ocean.eos import nemo_bn2_depth_ladders
+        depth = nemo_bn2_depth_ladders(z_coord)[0] * stage_stretch[..., jnp.newaxis]
+    if getattr(config, "nemo_eos_gdept_rounded_product", False):
+        depth = nemo_source_round(depth)
+    return depth
