@@ -7835,6 +7835,10 @@ class LatLonCGridOceanModel:
             _eta_live_one_third = (
                 state.eta.data
                 + (state_new.eta.data - state.eta.data) / 3.0)
+            if getattr(_cfg_b, "rk3_stage1_ssh_nemo_literal", False):
+                from legoesm.ocean.eos import nemo_ssh_rk3_stage1
+                _eta_live_one_third = nemo_ssh_rk3_stage1(
+                    state.eta.data, state_new.eta.data)
             _eta_live_one_half = 0.5 * (
                 state.eta.data + state_new.eta.data)
             _stage_entry_override = self._nemo_ws_test_hooks.stage_entry_override

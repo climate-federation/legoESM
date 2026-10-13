@@ -1006,6 +1006,23 @@ def nemo_r3t_rk3_stage1_stretch(
     return jnp.where(wet, nemo_source_round(one + r3_stage), one)
 
 
+def nemo_ssh_rk3_stage1(eta_before: jnp.ndarray, eta_after: jnp.ndarray) -> jnp.ndarray:
+    """NEMO RK3 stage-1 sea level, ``r2_3*ssh(Kbb) + r1_3*ssha``.
+
+    ``stprk3_stg.f90:147`` (np_HYB, resolved at ``:48``) with the constants
+    of ``:52-53``: each product is rounded before the sum, as compiled.
+    """
+    eta_before = jnp.asarray(eta_before)
+    eta_after = jnp.asarray(eta_after, dtype=eta_before.dtype)
+    one = jnp.asarray(1.0, dtype=eta_before.dtype)
+    three = jnp.asarray(3.0, dtype=eta_before.dtype)
+    one_third = nemo_source_round(one / three)
+    two_thirds = nemo_source_round((one + one) / three)
+    return nemo_source_round(
+        nemo_source_round(two_thirds * eta_before)
+        + nemo_source_round(one_third * eta_after))
+
+
 def nemo_bn2_live_ladders(
     z_coord, eta: jnp.ndarray, H_bathy: jnp.ndarray,
     *, r3t_evaluation: str = "quotient",

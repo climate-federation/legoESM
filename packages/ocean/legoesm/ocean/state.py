@@ -3086,6 +3086,12 @@ class LatLonCGridOceanConfig(NamedTuple):
     # (default) is the bit-identical legacy path whose compact V mask leaves
     # the row dry.  Selected explicitly by a card; needs an active fold.
     een_fold_image_v_row: bool = False
+    # NEMO RK3 stage-1 sea level (stprk3_stg.f90:147, the np_HYB arm the
+    # module resolves at :48): ``r2_3*ssh(Kbb) + r1_3*ssha``, two rounded
+    # products and one sum.  False (default) is the bit-identical legacy
+    # ``ssh(Kbb) + (ssha - ssh(Kbb))/3``, real-equal but rounded differently
+    # in the last place.  Selected explicitly by a card.
+    rk3_stage1_ssh_nemo_literal: bool = False
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":

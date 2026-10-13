@@ -36,6 +36,13 @@ Arms (``--arm``):
                to NEMO's entry ssh, on the fold-image V row and the row below,
                against NEMO's own stored weighted mean (r3v, domqco.f90:268-269,
                times hv_0); no model step
+  stage_replay  OFFLINE numpy replay, from NEMO's recorded frames alone, of
+               the RK3 stage statements that carry no solver arithmetic: the
+               stage sea level and thickness ratios (stprk3_stg.f90:147,
+               :173-175, :214-217, domqco.f90:257) and the stage tracer
+               update (stprk3_stg.f90:503-505; trazdf.f90:284-294 at stage 3; trend zero on this
+               deck), each in NEMO's order (must be 0 unequal) and in the
+               order the card uses; no model step
   interior_events  census of sea-level cells over the bar in the INDEPENDENT
                chain, kt = 1..kt-max (up to 30): count, largest cell, its
                distance to land and to the fold, whether NEMO's sea level
@@ -70,9 +77,9 @@ DEFAULT_ROOT = Path(
     "oracle_g1_r1/p3_a_100step")
 ARMS = ("geometry", "independent", "given_entry", "rhs", "handoff", "stages",
         "vor_fold_replay", "restart_entry", "fold_v_depth",
-        "interior_events")
+        "interior_events", "stage_replay")
 PLANTS = ("score", "entry")
-STAGE_STEPS = 10          # stage frames exist for kt = 1..10
+STAGE_STEPS = 10          # round 1's record: stage frames at kt = 1..10
 FOLD_ROWS, SEAM_COLS, SOUTH_ROWS = 3, 2, 3
 FIELDS = ("ssh", "uu_b", "vv_b", "u", "v")
 FOLD_ROW_NAMES = (("fold_pivot_row", -1), ("fold_row_below", -2), ("fold_third_row", -3))
@@ -84,6 +91,18 @@ def _checker():
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
+
+
+def stage_steps(root: Path) -> int:
+    """How many leading steps of this record hold stage frames (the step
+    files with stage frames are the size of the first one)."""
+    cr = _checker()
+    size = cr.step_path(root, 1).stat().st_size
+    n = 1
+    while cr.step_path(root, n + 1).is_file() and \
+            cr.step_path(root, n + 1).stat().st_size == size:
+        n += 1
+    return n
 
 
 def read_step(root: Path, kt: int) -> dict[str, np.ndarray]:
@@ -137,9 +156,22 @@ def regions(tmask: np.ndarray) -> dict[str, np.ndarray]:
     return out
 
 
+CELL: list = []            # --cell j,i: every row also reports this cell
+
+
 def row(name, ref, cand, reg, *, plant=False) -> dict:
     ref = np.asarray(ref, dtype=np.float64)
     cand = np.asarray(cand, dtype=np.float64)
+    at_cell = None
+    if CELL:
+        j, i = CELL
+        d0 = cand - ref
+        near = d0[j - 1:j + 2, i - 1:i + 2]
+        at_cell = {"cell": [j, i], "error": float(d0[j, i]),
+                   "nemo": float(ref[j, i]),
+                   "ulps": float(d0[j, i] / np.spacing(abs(ref[j, i]))),
+                   "neighbourhood_max_abs": float(np.max(np.abs(near))),
+                   "neighbourhood_errors": near.tolist()}
     r = score(name, ref, cand, np.ones(ref.shape, dtype=bool), plant=plant)
     if plant:
         cand = cand.copy()
@@ -156,6 +188,7 @@ def row(name, ref, cand, reg, *, plant=False) -> dict:
         "rms": float(np.sqrt(np.mean(d * d))),
         "ref_max_abs": float(np.max(np.abs(ref))),
         "bit_identical": bool(bad.shape[0] == 0),
+        "at_cell": at_cell,
         "regions": {
             k: {"n_cells": int(m.sum()),
                 "n_unequal": int(np.count_nonzero(d[m])),
@@ -212,6 +245,22 @@ def history_rows(root: Path, kt: int, state, reg) -> list[dict]:
         return [row(f"history.kt{kt}.{n}",
                     np.asarray(h.variables[n][0], dtype=np.float64), a, reg)
                 for n, a in mine.items()]
+
+
+def nemo_histories(root: Path, kt: int):
+    """NEMO's six barotropic histories entering step ``kt`` (the restart
+    written after step kt - 1), padded to the card's layout; None where no
+    restart exists."""
+    path = root / f"ORCA2G1_{kt - 1:08d}_restart.nc"
+    if not path.is_file():
+        return None
+    import jax.numpy as jnp
+    import netCDF4
+    with netCDF4.Dataset(path) as h:
+        var = lambda n: np.asarray(h.variables[n][0], dtype=np.float64)  # noqa: E731
+        return tuple(jnp.asarray(a) for a in (
+            pad_u(var("ub_e")), pad_u(var("ubb_e")), pad_v(var("vb_e")),
+            pad_v(var("vbb_e")), var("sshb_e"), var("sshbb_e")))
 
 
 # ----------------------------------------------------------------- geometry
@@ -434,6 +483,66 @@ def fold_v_depth_rows(root: Path, kt: int, card, cfg) -> list[dict]:
     return rows
 
 
+def stage_replay_rows(root: Path, kt: int, tmask) -> dict:
+    """NEMO's stage statements replayed from its own frames (inner domain).
+
+    ``nemo``: the statement in NEMO's order against NEMO's record (a
+    transliteration check: 0 unequal or the replay is wrong).  ``card_order``:
+    the same operands combined the way the card combines them, against NEMO's
+    record (cells where the two orders round differently)."""
+    g = read_step(root, kt)
+    wet = np.asarray(tmask) > 0.5
+    r1_3, r2_3, r1_2 = 1.0 / 3.0, 2.0 / 3.0, 1.0 / 2.0   # stprk3_stg.f90:51-53
+    r1_ht_0 = wet / (100.0 * wet + 1.0 - wet)   # one 100 m level (geometry gate)
+    sb, sa = g["e_ssh_bb"], g["3_ssh_aa"]
+
+    def cmp(mine, ref):
+        d = (mine - ref)[wet]
+        return {"n_unequal": int(np.count_nonzero(d)),
+                "max_abs": float(np.max(np.abs(d))),
+                "ref_max_abs": float(np.max(np.abs(ref[wet])))}
+    rows = {
+        "stage1 ssh (:147)": {
+            "nemo": cmp(r2_3 * sb + r1_3 * sa, g["1_ssh_aa"]),
+            "card_order": cmp(sb + (sa - sb) / 3.0, g["1_ssh_aa"])},
+        "stage2 ssh (:211)": {
+            "nemo": cmp(r1_2 * (sb + sa), g["2_ssh_aa"]),
+            "card_order": cmp(0.5 * (sb + sa), g["2_ssh_aa"])},
+        "after r3t (domqco:257)": {
+            "nemo": cmp(sa * r1_ht_0, g["3_r3t_aa"]),
+            "card_order": cmp(sa * r1_ht_0, g["3_r3t_aa"])},
+    }
+    for f in ("t", "u", "v"):
+        b, a = g[f"e_r3{f}_bb"], g[f"3_r3{f}_aa"]
+        m = wet if f == "t" else np.ones_like(wet)
+        for name, mine, ref in (
+                (f"stage1 r3{f} (:173-175)", r2_3 * b + r1_3 * a, g[f"1_r3{f}_aa"]),
+                (f"stage2 r3{f} (:214-216)", r1_2 * (b + a), g[f"2_r3{f}_aa"])):
+            d = (mine - ref)[m]
+            rows[name] = {"nemo": {"n_unequal": int(np.count_nonzero(d)),
+                                   "max_abs": float(np.max(np.abs(d))),
+                                   "ref_max_abs": float(np.max(np.abs(ref[m])))}}
+    # the card forms the stage-2 T ratio from the interpolated sea level
+    q2_card = 1.0 + (0.5 * (sb + sa)) * r1_ht_0
+    q2_nemo = 1.0 + g["2_r3t_aa"]
+    rows["stage2 1+r3t"] = {"card_order": cmp(q2_card, q2_nemo)}
+    qb = 1.0 + g["e_r3t_bb"]
+    for trc in ("tn", "sn"):
+        tb = g[f"e_{trc}_k1_bb"]
+        for st, q_card in ((1, 1.0 + g["1_r3t_aa"]), (2, q2_card)):
+            ref = g[f"{st}_{trc}_k1_aa"]
+            rows[f"stage{st} {trc} (:503-505)"] = {
+                "nemo": cmp((qb * tb) / (1.0 + g[f"{st}_r3t_aa"]), ref),
+                "card_order": cmp((qb * tb) / q_card, ref)}
+        # stage 3 is tra_zdf's one-level solve (trazdf.f90:284-285, :294, with
+        # the diagonal of :233 and no mixing across the single level): the
+        # same quotient with the 100 m reference thickness on both sides
+        rows[f"stage3 {trc} (trazdf:284-294)"] = {"nemo": cmp(
+            ((100.0 * qb) * tb) / (100.0 * (1.0 + g["3_r3t_aa"])),
+            g[f"3_{trc}_k1_aa"])}
+    return rows
+
+
 @contextlib.contextmanager
 def vor_fold_image_arm(card, calls: list):
     """MEASUREMENT ARM, not the card.  Inside the 3-D vorticity trend only,
@@ -465,21 +574,25 @@ def vor_fold_image_arm(card, calls: list):
 
 
 # ------------------------------------------------------------------ ladders
-def run(root: Path, *, arm: str, kt_max: int = 10, plant: str | None = None,
+def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
+        plant: str | None = None,
         allow_dirty: bool = False, geometry_plant: str | None = None,
         fold_fill_v: bool = False, vor_fold_image: bool = False,
         before_arm: bool = False,
-        hook_arm: tuple = (), without_fold_v_depth: bool = False) -> dict:
+        hook_arm: tuple = (), without_fold_v_depth: bool = False,
+        ts_from_chain: bool = False, without_stage1_ssh: bool = False) -> dict:
     if vor_fold_image:
         from legoesm.ocean.fidelity import nemo_testcase_recipe as _recipe
         calls: list = []
         with vor_fold_image_arm(_recipe.build_nemo_testcase_card(
                 "ORCA2G1-flat", deck_root=root), calls):
-            out = run(root, arm=arm, kt_max=kt_max, plant=plant,
+            out = run(root, arm=arm, kt_max=kt_max, kt_min=kt_min, plant=plant,
                       allow_dirty=allow_dirty, geometry_plant=geometry_plant,
                       fold_fill_v=fold_fill_v, before_arm=before_arm,
                       hook_arm=hook_arm,
-                      without_fold_v_depth=without_fold_v_depth)
+                      without_fold_v_depth=without_fold_v_depth,
+                      ts_from_chain=ts_from_chain,
+                      without_stage1_ssh=without_stage1_ssh)
         require(len(calls) > 0, "the vorticity fold-image arm was never traced")
         out["vor_fold_image_measurement_arm"] = {"traces": len(calls)}
         out["label"] = f"{out['label']} + MEASUREMENT ARM (fold-image V row "\
@@ -514,10 +627,15 @@ def run(root: Path, *, arm: str, kt_max: int = 10, plant: str | None = None,
                 "the card no longer selects the fold-row V face depth")
         cfg = cfg._replace(barotropic=cfg.barotropic._replace(
             barotropic_fold_top_v_face_ssh=False))
+    if without_stage1_ssh:    # ROUND-4 BEFORE ARM / plant: the legacy order
+        require(cfg.rk3_stage1_ssh_nemo_literal is True,
+                "the card no longer selects NEMO's stage-1 sea level")
+        cfg = cfg._replace(rk3_stage1_ssh_nemo_literal=False)
     s0 = card.recipe.initial_state
     require(int(card.recipe.z_coord.n_levels) == 1, "the G1 card executes one level")
+    n_stage = stage_steps(root)
     if arm == "fold_v_depth":
-        require(1 <= kt_max <= STAGE_STEPS, f"kt_max must lie in 1..{STAGE_STEPS}")
+        require(1 <= kt_max <= n_stage, f"kt_max must lie in 1..{n_stage}")
         return {"arm": arm, "legoesm_git_sha": sha, "root": str(root),
                 "label": "GIVEN-NEMO-ENTRY (offline operand: ssh term of the "
                          "solver's V face depth; no model step)",
@@ -526,6 +644,14 @@ def run(root: Path, *, arm: str, kt_max: int = 10, plant: str | None = None,
                     cfg.barotropic.barotropic_fold_top_v_face_ssh),
                 "per_kt": [{"kt": kt, "operand_rows": fold_v_depth_rows(
                     root, kt, card, cfg)} for kt in range(1, kt_max + 1)]}
+    if arm == "stage_replay":
+        require(1 <= kt_min <= kt_max <= n_stage, f"steps must lie in 1..{n_stage}")
+        tm = np.asarray(card.recipe.z_coord.is_active)[..., 0]
+        return {"arm": arm, "legoesm_git_sha": sha, "root": str(root),
+                "label": "NEMO's record only (offline replay of the stage "
+                         "statements; no model step)",
+                "per_kt": [{"kt": kt, "replay": stage_replay_rows(root, kt, tm)}
+                           for kt in range(kt_min, kt_max + 1)]}
     if arm == "interior_events":
         require(2 <= kt_max <= 30, "kt_max must lie in 2..30")
         wet = np.asarray(card.recipe.z_coord.is_active)[..., 0] > 0.5
@@ -582,9 +708,13 @@ def run(root: Path, *, arm: str, kt_max: int = 10, plant: str | None = None,
                 "barotropic_fold_top_v_face_ssh": bool(
                     cfg.barotropic.barotropic_fold_top_v_face_ssh),
                 "per_kt": events}
-    cap = 100 if arm in ("independent", "restart_entry") else STAGE_STEPS
+    cap = 100 if arm in ("independent", "restart_entry") else n_stage
     require(1 <= kt_max <= cap, f"kt_max must lie in 1..{cap}")
+    require(1 <= kt_min <= kt_max, "kt_min must lie in 1..kt_max")
+    require(kt_min == 1 or arm not in ("independent", "restart_entry"),
+            "--kt-min is for the stage-frame arms (the chain always starts at 1)")
     kts = range(1, kt_max + 1)
+    scored = range(kt_min, kt_max + 1)   # the chain runs over kts; rows over scored
     reg = regions(np.asarray(card.recipe.z_coord.is_active)[..., 0])
     raw = card.recipe.z_coord.nemo_een_barotropic
     wet_face = {"u": np.asarray(raw.umask)[..., 0] > 0,
@@ -612,14 +742,21 @@ def run(root: Path, *, arm: str, kt_max: int = 10, plant: str | None = None,
             card.recipe.grid, card.recipe.z_coord, cfg,
             **({} if hooks is None else {"_nemo_ws_test_hooks": hooks}))
 
-    def seed(g, base):
+    def seed(g, base, kt=None):
+        hist = None if kt is None else nemo_histories(root, kt)
+        if hist is not None:        # NEMO's own histories where a restart exists
+            base = base._replace(bt_hist=hist)
+            if kt not in out.setdefault("nemo_histories_at_kt", []):
+                out["nemo_histories_at_kt"].append(kt)
         eta = np.array(g["e_ssh_bb"])
         if plant == "entry":
             j, i = np.unravel_index(int(np.argmax(np.abs(eta))), eta.shape)
             eta[j, i] += 1.0e-3
+        if not ts_from_chain:
+            base = base._replace(
+                T=s0.T.replace(data=jnp.asarray(g["e_tn_k1_bb"][..., None])),
+                S=s0.S.replace(data=jnp.asarray(g["e_sn_k1_bb"][..., None])))
         return base._replace(
-            T=s0.T.replace(data=jnp.asarray(g["e_tn_k1_bb"][..., None])),
-            S=s0.S.replace(data=jnp.asarray(g["e_sn_k1_bb"][..., None])),
             u=s0.u.replace(data=jnp.asarray(pad_u(g["e_uu_k1_bb"])[..., None])),
             v=s0.v.replace(data=jnp.asarray(pad_v(g["e_vv_k1_bb"])[..., None])),
             eta=s0.eta.replace(data=jnp.asarray(eta)),
@@ -627,7 +764,8 @@ def run(root: Path, *, arm: str, kt_max: int = 10, plant: str | None = None,
             vv_b=s0.vv_b.replace(data=jnp.asarray(pad_v(g["e_vv_b_bb"]))))
 
     out = {"arm": arm, "label": None, "legoesm_git_sha": sha, "plant": plant,
-           "bar": BAR, "root": str(root), "kts": list(kts),
+           "bar": BAR, "root": str(root), "kts": list(scored),
+           "stage_steps": n_stage,
            "fold_fill_v_measurement_arm": fold_fill_v,
            "een_fold_image_v_row": bool(cfg.een_fold_image_v_row),
            "barotropic_fold_top_v_face_ssh": bool(
@@ -635,8 +773,10 @@ def run(root: Path, *, arm: str, kt_max: int = 10, plant: str | None = None,
            "n_barotropic_substeps": int(cfg.barotropic.n_barotropic_substeps),
            "region_cells": {k: int(m.sum()) for k, m in reg.items()},
            "hook_measurement_arm": list(hook_arm),
+           "ts_from_chain_measurement_arm": ts_from_chain,
+           "rk3_stage1_ssh_nemo_literal": bool(cfg.rk3_stage1_ssh_nemo_literal),
            "per_kt": []}
-    records = {kt: read_step(root, kt) for kt in kts if kt <= STAGE_STEPS}
+    records = {kt: read_step(root, kt) for kt in scored if kt <= n_stage}
     before = {}             # the card's own chain: the state entering step kt
     if arm == "restart_entry":
         import netCDF4
@@ -672,10 +812,7 @@ def run(root: Path, *, arm: str, kt_max: int = 10, plant: str | None = None,
                         eta=s0.eta.replace(data=jnp.asarray(var("sshn"))),
                         uu_b=s0.uu_b.replace(data=jnp.asarray(pad_u(var("uu_n")))),
                         vv_b=s0.vv_b.replace(data=jnp.asarray(pad_v(var("vv_n")))),
-                        bt_hist=tuple(jnp.asarray(a) for a in (
-                            pad_u(var("ub_e")), pad_u(var("ubb_e")),
-                            pad_v(var("vb_e")), pad_v(var("vbb_e")),
-                            var("sshb_e"), var("sshbb_e"))))
+                        bt_hist=nemo_histories(root, kt))
                 g = read_step(root, kt)
                 cand = state_fields(jax.device_get(m.step(entry, dt=card.dt_s)))
                 rows = [row(f"restart_entry.kt{kt}.{f}", g[nm], cand[f], reg)
@@ -693,7 +830,8 @@ def run(root: Path, *, arm: str, kt_max: int = 10, plant: str | None = None,
             before[kt] = st
             st = jax.device_get(m0.step(st, dt=card.dt_s))
         out["unrecorded_carry"] = (
-            "bt_hist (six barotropic histories), w and the after-ssh slot "
+            "bt_hist (six barotropic histories; NEMO's own at the steps "
+            "listed in nemo_histories_at_kt), w and the after-ssh slot "
             "come from the card's own chain at each kt")
 
     if arm in ("independent", "given_entry"):
@@ -704,12 +842,12 @@ def run(root: Path, *, arm: str, kt_max: int = 10, plant: str | None = None,
         m = model()
         state = s0
         pads = {}
-        for kt in kts:
+        for kt in (kts if arm == "independent" else scored):
             g = records.get(kt) or read_step(root, kt)
             ref = {"ssh": g["f_ssh_bb"], "uu_b": g["f_uu_b_bb"],
                    "vv_b": g["f_vv_b_bb"], "u": g["f_uu_k1_bb"],
                    "v": g["f_vv_k1_bb"]}
-            if kt < STAGE_STEPS:
+            if kt < n_stage:
                 nxt = records.get(kt + 1) or read_step(root, kt + 1)
                 ref["T"], ref["S"] = nxt["e_tn_k1_bb"], nxt["e_sn_k1_bb"]
                 # the reference is the entry of the next step, bit for bit
@@ -722,7 +860,7 @@ def run(root: Path, *, arm: str, kt_max: int = 10, plant: str | None = None,
             require(np.array_equal(top[-1], -top[-2][fold_perm]),
                     f"kt {kt}: NEMO's top V row is not the fold image")
             state = jax.device_get(m.step(
-                state if arm == "independent" else seed(g, before[kt]),
+                state if arm == "independent" else seed(g, before[kt], kt),
                 dt=card.dt_s))
             if fold_fill_v:
                 state = fill_top_v(state)
@@ -753,12 +891,12 @@ def run(root: Path, *, arm: str, kt_max: int = 10, plant: str | None = None,
             slow_forcing_rhs_observer=(
                 lambda v, face=face: seen.__setitem__(face, np.asarray(v))),
             slow_forcing_rhs_observer_face=face)) for face in ("u", "v")}
-        for kt in kts:
+        for kt in scored:
             g = records[kt]
             seen.clear()
             for face in ("u", "v"):
                 jax.block_until_ready(
-                    observed[face].step(seed(g, before[kt]), dt=card.dt_s))
+                    observed[face].step(seed(g, before[kt], kt), dt=card.dt_s))
                 jax.effects_barrier()       # the observer is an async callback
             require(set(seen) == {"u", "v"}, "the right-hand-side observer never fired")
             # scored on NEMO's wet faces; land faces are reported apart
@@ -777,10 +915,10 @@ def run(root: Path, *, arm: str, kt_max: int = 10, plant: str | None = None,
         observed = model(_NEMOWSRK3TestHooks(
             slow_forcing_rhs_observer=lambda v: seen.__setitem__("u", np.asarray(v)),
             slow_forcing_rhs_observer_face="u"))
-        for kt in kts:
+        for kt in scored:
             g = records[kt]
             seen.clear()
-            jax.block_until_ready(observed.step(seed(g, before[kt]), dt=card.dt_s))
+            jax.block_until_ready(observed.step(seed(g, before[kt], kt), dt=card.dt_s))
             jax.effects_barrier()
             require("u" in seen, "the right-hand-side observer never fired")
             card_u = seen["u"][:, 1:, 0]
@@ -810,10 +948,10 @@ def run(root: Path, *, arm: str, kt_max: int = 10, plant: str | None = None,
         out["label"] = "GIVEN-NEMO-ENTRY (external handoff read at stage 1)"
         m = model(_NEMOWSRK3TestHooks(expose_momentum_stage=1,
                                       expose_tracer_stage=1))
-        for kt in kts:
+        for kt in scored:
             g = records[kt]
             cand = state_fields(jax.device_get(
-                m.step(seed(g, before[kt]), dt=card.dt_s)))
+                m.step(seed(g, before[kt], kt), dt=card.dt_s)))
             rows = [row(f"handoff.kt{kt}.{f}", g[nm], cand[f], reg)
                     for f, nm in (("uu_b", "1_uu_b_aa"), ("vv_b", "1_vv_b_aa"),
                                   ("ssh", "1_ssh_aa"))]
@@ -822,7 +960,7 @@ def run(root: Path, *, arm: str, kt_max: int = 10, plant: str | None = None,
     else:   # stages
         out["label"] = ("GIVEN-NEMO-ENTRY (stage-local: NEMO's external "
                         "handoff and NEMO's stage entry)")
-        for kt in kts:
+        for kt in scored:
             g = records[kt]
             ext = (jnp.asarray(g["b_ssh_aa"]), jnp.asarray(pad_u(g["b_uu_b_aa"])),
                    jnp.asarray(pad_v(g["b_vv_b_aa"])),
@@ -845,7 +983,7 @@ def run(root: Path, *, arm: str, kt_max: int = 10, plant: str | None = None,
                     expose_momentum_stage=0 if last else stage,
                     expose_tracer_stage=0 if last else stage)
                 cand = state_fields(jax.device_get(
-                    model(h).step(seed(g, before[kt]), dt=card.dt_s)))
+                    model(h).step(seed(g, before[kt], kt), dt=card.dt_s)))
                 p = f"{stage}_"
                 rows = [row(f"stage{stage}.kt{kt}.{f}", g[p + nm], cand[f], reg)
                         for f, nm in (("ssh", "ssh_aa"), ("u", "uu_k1_aa"),
@@ -865,7 +1003,13 @@ def _print(out: dict) -> None:
                   f"n_diff={r['n_differing']:6d} max={r['max_abs_difference']:.3e}")
         print(f"GEOMETRY {out['n_bit_identical']}/{out['n_rows']} bit-identical")
         return
-    print(out["label"], "| een_fold_image_v_row =", out.get("een_fold_image_v_row"))
+    print(out["label"], "| een_fold_image_v_row =", out.get("een_fold_image_v_row"),
+          "| T,S FROM THE CARD'S CHAIN" if out.get("ts_from_chain_measurement_arm") else "")
+    for k in out["per_kt"]:
+        for name, r in k.get("replay", {}).items():
+            print(f"kt{k['kt']} {name:26s} " + " | ".join(
+                f"{n}: {v['n_unequal']} unequal max={v['max_abs']:.1e}"
+                for n, v in r.items()))
     for k in out["per_kt"]:
         for r in k.get("replay_rows", []):
             print(f"kt{k['kt']} {r['row']:9s} " + " | ".join(
@@ -888,6 +1032,11 @@ def _print(out: dict) -> None:
         for grp in groups:
             for r in grp["rows"]:
                 reg = r["regions"]
+                if r.get("at_cell"):
+                    c = r["at_cell"]
+                    print(f"{r['name']:24s} cell {c['cell']} error={c['error']:.3e} "
+                          f"nemo={c['nemo']:.3e} ulps={c['ulps']:.1f} "
+                          f"near={c['neighbourhood_max_abs']:.2e}")
                 print(f"{r['name']:24s} {r['status']:6s} max={r['max_abs']:.3e} "
                       f"norm={r['normalized_max_abs']:.3e} rms={r['rms']:.3e} "
                       "n_unequal " + " ".join(
@@ -902,6 +1051,10 @@ def main(argv=None) -> int:
     ap.add_argument("--arm", choices=ARMS, required=True)
     ap.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     ap.add_argument("--kt-max", type=int, default=10)
+    ap.add_argument("--kt-min", type=int, default=1,
+                    help="first scored step of a stage-frame arm")
+    ap.add_argument("--cell", help="j,i (inner domain, 0-based): every row "
+                    "also reports the error at this cell and its neighbours")
     ap.add_argument("--json", type=Path)
     ap.add_argument("--plant", choices=PLANTS)
     ap.add_argument("--geometry-plant", help="the geometry row to perturb")
@@ -918,17 +1071,27 @@ def main(argv=None) -> int:
     ap.add_argument("--hook", action="append", default=[],
                     help="measurement arm, not the card: a private boolean "
                          "model test hook switched on (repeatable)")
+    ap.add_argument("--ts-from-chain", action="store_true",
+                    help="measurement arm, not GIVEN-NEMO-ENTRY proper: the "
+                         "entry T and S stay the card's own chain's; every "
+                         "other entry field is NEMO's")
+    ap.add_argument("--without-stage1-ssh", action="store_true",
+                    help="the card with rk3_stage1_ssh_nemo_literal switched "
+                         "off (the round-4 before arm; also the option's plant)")
     ap.add_argument("--without-fold-v-depth", action="store_true",
                     help="the card with barotropic_fold_top_v_face_ssh switched "
                          "off (the round-3 before arm; also the option's plant)")
     a = ap.parse_args(argv)
+    CELL[:] = [int(x) for x in a.cell.split(",")] if a.cell else []
     try:
-        out = run(a.root, arm=a.arm, kt_max=a.kt_max, plant=a.plant,
+        out = run(a.root, arm=a.arm, kt_max=a.kt_max, kt_min=a.kt_min, plant=a.plant,
                   allow_dirty=a.allow_dirty, geometry_plant=a.geometry_plant,
                   fold_fill_v=a.fold_fill_v, vor_fold_image=a.vor_fold_image,
                   before_arm=a.before_arm,
                   hook_arm=tuple(a.hook),
-                  without_fold_v_depth=a.without_fold_v_depth)
+                  without_fold_v_depth=a.without_fold_v_depth,
+                  ts_from_chain=a.ts_from_chain,
+                  without_stage1_ssh=a.without_stage1_ssh)
     except Exception as e:      # noqa: BLE001 -- refusals print and exit 2
         print(f"REFUSE: {type(e).__name__}: {e}", file=sys.stderr)
         return 2

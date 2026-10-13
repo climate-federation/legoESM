@@ -249,9 +249,11 @@ def test_land_distance_counts_cells_to_the_nearest_dry_cell():
 
 
 @needs_record
-def test_interior_event_at_step_17_is_made_in_one_step_far_from_any_boundary():
+def test_interior_event_at_step_17_is_far_from_any_boundary():
     """Census facts of the first sea-level cell over the bar.  Plant: a cell
-    counted as over the bar must really differ (the bar itself is the gate)."""
+    counted as over the bar must really differ (the bar itself is the gate).
+    This arm's one-step re-run keeps the card's own T and S, which is what
+    carries the event (round 4: see the tracer-carry test below)."""
     pytest.importorskip("netCDF4")
     out = ladder.run(RECORD, arm="interior_events", kt_max=17, allow_dirty=True)
     assert all(k["n_over_bar"] == 0 for k in out["per_kt"][:16])
@@ -260,6 +262,99 @@ def test_interior_event_at_step_17_is_made_in_one_step_far_from_any_boundary():
     assert ev["region"] == "interior_open" and ev["cells_to_land"] > 10
     assert ev["rows_to_fold"] > 50 and abs(ev["entry_error_at_cell"]) < 1.0e-16
     assert abs(ev["error"]) > 5.0e-15
-    # made inside the step: NEMO's own entry reproduces it
+    # NEMO's dynamic entry with the card's own T, S reproduces it
     assert abs(ev["one_step_from_nemo_entry_error_at_cell"]) > 0.9 * abs(ev["error"])
 
+
+
+# ------------------------------------------------------------------ round 4
+RECORD4 = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/"
+               "round3/oracle_g1_r3/p3_a_100step")
+needs_record4 = pytest.mark.skipif(
+    not (RECORD4 / "oracle_g1step_kt00000050.bin").is_file(),
+    reason="the 50-stage-step G1 record is not admitted on this machine")
+
+
+def test_stage1_sea_level_helper_is_nemos_order_bit_for_bit():
+    """stprk3_stg.f90:147.  Plant: the legacy order must differ somewhere, or
+    the comparison could not tell the two apart."""
+    from legoesm.ocean.eos import nemo_ssh_rk3_stage1
+    rng = np.random.default_rng(4)
+    b, a = rng.normal(size=(40, 50)) * 0.05, rng.normal(size=(40, 50)) * 0.05
+    nemo = (2.0 / 3.0) * b + (1.0 / 3.0) * a
+    assert np.array_equal(np.asarray(nemo_ssh_rk3_stage1(jnp.asarray(b), jnp.asarray(a))), nemo)
+    legacy = b + (a - b) / 3.0
+    assert np.count_nonzero(legacy != nemo) > 100
+    assert np.max(np.abs(legacy - nemo)) < 1.0e-16
+
+
+def test_only_the_g1_card_selects_nemos_stage1_sea_level():
+    from legoesm.ocean.fidelity import nemo_testcase_recipe as recipe
+    from legoesm.ocean.state import LatLonCGridOceanConfig
+    assert LatLonCGridOceanConfig._field_defaults["rk3_stage1_ssh_nemo_literal"] is False
+    assert LatLonCGridOceanConfig._fields[-1] == "rk3_stage1_ssh_nemo_literal"
+    src = Path(recipe.__file__).read_text()
+    assert src.count("rk3_stage1_ssh_nemo_literal=True") == 1
+    assert src.index("rk3_stage1_ssh_nemo_literal=True") > src.index(
+        "def build_orca2g1_flat_card")
+
+
+def test_stage_steps_are_read_off_the_record(tmp_path):
+    cr = ladder._checker()
+    for kt, size in ((1, 64), (2, 64), (3, 64), (4, 8), (5, 8)):
+        cr.step_path(tmp_path, kt).write_bytes(b"x" * size)
+    assert ladder.stage_steps(tmp_path) == 3
+
+
+@needs_record4
+def test_offline_stage_replay_reproduces_nemo_and_separates_the_two_orders():
+    """NEMO's stage statements from its own frames: 0 unequal in NEMO's order
+    (the replay is a transliteration check), and the legacy stage-1 order
+    differs from NEMO's record in the last place at thousands of cells."""
+    pytest.importorskip("netCDF4")
+    out = ladder.run(RECORD4, arm="stage_replay", kt_min=17, kt_max=17, allow_dirty=True)
+    rows = out["per_kt"][0]["replay"]
+    for name, r in rows.items():
+        if "nemo" in r:
+            assert r["nemo"]["n_unequal"] == 0, name
+            assert r["nemo"]["ref_max_abs"] > 0.0, name
+    legacy = rows["stage1 ssh (:147)"]["card_order"]
+    assert legacy["n_unequal"] > 1000 and legacy["max_abs"] < 1.0e-16
+
+
+@needs_record4
+@pytest.mark.parametrize("selected", [True, False])
+def test_stage1_sea_level_is_nemos_bit_for_bit_only_when_selected(selected):
+    """The landed statement and its plant: given NEMO's handoff, the card's
+    stage-1 sea level has no unequal cell with the option and thousands
+    without it."""
+    pytest.importorskip("netCDF4")
+    out = ladder.run(RECORD4, arm="stages", kt_min=3, kt_max=3, allow_dirty=True,
+                     without_stage1_ssh=not selected)
+    assert out["rk3_stage1_ssh_nemo_literal"] is selected
+    ssh = next(r for r in out["per_kt"][0]["stages"][0]["rows"]
+               if r["name"].endswith(".ssh"))
+    assert ssh["ref_max_abs"] > 0.0
+    assert (ssh["n_unequal"] == 0) if selected else (ssh["n_unequal"] > 500)
+
+
+@needs_record4
+@pytest.mark.parametrize("ts_from_chain", [False, True])
+def test_step_17_event_is_carried_by_the_entry_tracers(ts_from_chain):
+    """One step from NEMO's step-17 entry: at the bar with NEMO's T and S,
+    over it at the event cell with the card's own (2 and 3 last-place units
+    off there).  Each arm is the other's plant."""
+    pytest.importorskip("netCDF4")
+    ladder.CELL[:] = [72, 70]
+    try:
+        out = ladder.run(RECORD4, arm="given_entry", kt_min=17, kt_max=17,
+                         allow_dirty=True, ts_from_chain=ts_from_chain)
+    finally:
+        ladder.CELL[:] = []
+    assert out["ts_from_chain_measurement_arm"] is ts_from_chain
+    ssh = next(r for r in out["per_kt"][0]["rows"] if r["name"].endswith(".ssh"))
+    if ts_from_chain:
+        assert ssh["status"] != "AT-BAR" and abs(ssh["at_cell"]["error"]) > 5.0e-15
+        assert ssh["max_abs_cell"] == [72, 70]
+    else:
+        assert ssh["status"] == "AT-BAR" and ssh["max_abs"] < 1.0e-16
