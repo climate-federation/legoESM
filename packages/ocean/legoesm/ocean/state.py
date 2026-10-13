@@ -1605,6 +1605,22 @@ class BarotropicConfig(NamedTuple):
     # neighbour.  False keeps the model's dry top V row (depth = hv_0 there).
     # Needs ``barotropic_face_depth = 'nemo_ssh_avg'`` and the raw NEMO masks.
     barotropic_fold_top_v_face_ssh: bool = False
+    # NEMO's flux-form external velocity update in the written order
+    # (dynspg_ts.f90:550-562): the bracket times the inverse exit depth
+    # z1_hu / z1_hv, each product and sum rounded once.  False keeps the
+    # division by the exit depth.  Needs NEMO's flux-form external update.
+    barotropic_flux_update_nemo_literal: bool = False
+    # NEMO's substep length as the true quotient rDt_e = rn_Dt / nn_e
+    # (dynspg_ts.f90:886).  Under JIT a division by the constant substep
+    # count is compiled as a product with its reciprocal, which is one unit
+    # in the last place away for some (rn_Dt, nn_e), e.g. 10800 s / 13.
+    # False keeps the compiled product.
+    barotropic_substep_dt_nemo_literal: bool = False
+    # NEMO's solver entry face depth hu_e = hu_0 * (1 + r3u(Kmm))
+    # (dynspg_ts.f90:329-330; the same macro in the forcing product, :559,
+    # :562), read by the literal flux-form update above.  False keeps the
+    # rest depth plus the face-mean sea level there.
+    barotropic_entry_depth_nemo_literal: bool = False
 
 
 class RuntimeChecksConfig(NamedTuple):

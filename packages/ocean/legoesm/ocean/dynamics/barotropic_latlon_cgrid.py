@@ -677,7 +677,7 @@ def _nemo_ssh_avg_apply(eta_dyn, u_mask, v_mask, grid, area, prep, *,
     r1_v_entry = nemo_source_round(
         r1_v0 / nemo_source_round(1.0 + r3_v))
     if return_entry_inverse:
-        return H_u, H_v, r1_u_entry, r1_v_entry
+        return (H_u, H_v, r1_u_entry, r1_v_entry) + ((r3_u, r3_v) if return_entry_inverse == "with_ratio" else ())  # noqa: E501
     if return_literal_inverse:
         if return_ssh_average:
             return H_u, H_v, r1_u, r1_v, ssh_avg_u, ssh_avg_v
@@ -1706,13 +1706,13 @@ def _nemo_flux_form_external_velocity_update(
     dt_s,
     wet_mask,
     min_water_col,
+    config=None, substep_index=0,
 ):
-    """NEMO key_qcoTest_FluxForm external-mode transport update.
-
-    This is the literal ``ua_e``/``va_e`` numerator and exit-depth division
-    from NEMO 5.0.2 ``dynspg_ts.F90:731-761``.  It is deliberately not a
-    selector: NEMO's WS-RK3 flux-form identity has no alternate composition.
-    """
+    """NEMO flux-form external velocity update (``dynspg_ts.F90:731-761``)."""
+    if config is not None and config.barotropic.barotropic_flux_update_nemo_literal:
+        return _nemo_flux_form_literal_velocity_update(
+            velocity_entry, depth_entry, depth_pgf, depth_midpoint, depth_kmm, depth_exit,
+            pgf, transport_tendency, slow_forcing, dt_s, wet_mask, config, substep_index)
     return (
         depth_entry * velocity_entry
         + dt_s * (
@@ -1854,7 +1854,7 @@ def _run_substep_loop(
     def _ssh_avg_entry_inverse(eta_dyn):
         return _nemo_ssh_avg_apply(
             eta_dyn, u_mask, v_mask, grid, area, _ssh_avg_prep,
-            return_entry_inverse=True,
+            return_entry_inverse="with_ratio",
             nemo_t_pivot_north_neighbor=(
                 nemo_t_pivot_north_neighbor_test_override), fold_top_v_wet=nemo_fold_top_v_wet)[2:]  # noqa: E501
 
@@ -1869,9 +1869,9 @@ def _run_substep_loop(
             raise ValueError(
                 "NEMO WS-RK3 flux-form external update requires "
                 "barotropic_face_depth='nemo_ssh_avg'")
-        H_u_kmm, H_v_kmm = _ssh_avg_face_depths(eta)
+        H_u_kmm, H_v_kmm = _nemo_entry_face_depths(config, _ssh_avg_face_depths(eta), _ssh_avg_prep, _ssh_avg_entry_inverse(eta))  # noqa: E501
     if _face_depth_mode == "nemo_ssh_avg":
-        r1_H_u_entry, r1_H_v_entry = _ssh_avg_entry_inverse(eta)
+        r1_H_u_entry, r1_H_v_entry = _ssh_avg_entry_inverse(eta)[:2]
 
     def substep_body(wts_i, carry):
         """Single barotropic substep with BEBT, slow forcing, MAXVEL, and cosine filter.
@@ -2211,7 +2211,7 @@ def _run_substep_loop(
             U_bar_new = _nemo_flux_form_external_velocity_update(
                 U_bar_c, H_u, H_u_pgf, H_u_flux, H_u_kmm, H_u_exit,
                 _pgf_u, _cor_u + _drag_u, F_slow_u_i, dt_s, u_mask,
-                min_water_col)
+                min_water_col, config, substep_index)
         else:
             if _continuity_evaluation == "nemo_literal":
                 _trd_u = nemo_source_round(
@@ -2263,7 +2263,7 @@ def _run_substep_loop(
             V_bar_new = _nemo_flux_form_external_velocity_update(
                 V_bar_c, H_v, H_v_pgf, H_v_flux, H_v_kmm, H_v_exit,
                 _pgf_v, _cor_v + _drag_v, F_slow_v_i, dt_s, v_mask,
-                min_water_col)
+                min_water_col, config, substep_index)
         else:
             if _continuity_evaluation == "nemo_literal":
                 _trd_v = nemo_source_round(
@@ -4062,6 +4062,17 @@ def _nemo_fold_top_v_wet(config, z_coord, dtype):
     is the surface level of the card's raw NEMO ``vmask``
     (``dommsk.f90:249``: ``ssvmask = MAXVAL(vmask, DIM=3)``).
     """
+    if (config.barotropic.barotropic_flux_update_nemo_literal
+            and not nemo_flux_form_update_active(config)):
+        # checked here because this is the solver's one per-call option gate
+        raise ValueError(
+            "barotropic_flux_update_nemo_literal=True needs NEMO's flux-form "
+            "external update (nemo_flux_form_update_active)")
+    if (config.barotropic.barotropic_entry_depth_nemo_literal
+            and not config.barotropic.barotropic_flux_update_nemo_literal):
+        raise ValueError(
+            "barotropic_entry_depth_nemo_literal=True is read only by the "
+            "literal flux-form update (barotropic_flux_update_nemo_literal)")
     if not config.barotropic.barotropic_fold_top_v_face_ssh:
         return None
     raw = getattr(z_coord, "nemo_een_barotropic", None)
@@ -4086,3 +4097,41 @@ def _nemo_fold_top_v_operands(v_mask, t_pivot_north_neighbor, fold_top_v_wet):
     if fold_top_v_wet is None:
         return v_mask, t_pivot_north_neighbor
     return v_mask.at[-1].set(fold_top_v_wet.astype(v_mask.dtype)), True
+
+
+def _nemo_flux_form_literal_velocity_update(
+        velocity_entry, depth_entry, depth_pgf, depth_midpoint, depth_kmm,
+        depth_exit, pgf, transport_tendency, slow_forcing, dt_s, wet_mask,
+        config, substep_index):
+    """NEMO's flux-form ``ua_e``/``va_e`` in the written order.
+
+    ``dynspg_ts.f90:550-562``: the bracket is MULTIPLIED by the inverse exit
+    depth ``z1_hu = ssumask / (hu_0 + zsshu_a + 1 - ssumask)`` (``:550-551``),
+    not divided by the exit depth, and every product and sum is one rounded
+    operation.  ``BarotropicConfig.barotropic_flux_update_nemo_literal``
+    selects it.  No depth floor: NEMO has none, and a dry face gives 0 / 1.
+    """
+    r = nemo_source_round
+    if config.barotropic.barotropic_entry_depth_nemo_literal:
+        # the first substep reads the loop-entry hu_e = hu(Kmm) (:329-330)
+        depth_entry = jnp.where(substep_index == 0, depth_kmm, depth_entry)
+    inverse_exit = r(wet_mask / r(r(depth_exit + 1.0) - wet_mask))
+    forced = r(r(r(depth_pgf * pgf) + r(depth_midpoint * transport_tendency))
+               + r(depth_kmm * slow_forcing))
+    return r(r(r(depth_entry * velocity_entry) + r(dt_s * forced)) * inverse_exit)
+
+
+def _nemo_entry_face_depths(config, summed, prep, entry):
+    """The solver's entry face depths ``hu(Kmm)``, ``hv(Kmm)``.
+
+    ``dynspg_ts.f90:329-330`` (and the same macro in the forcing product,
+    ``:559``, ``:562``): ``hu_0 * (1 + r3u(Kmm))``, the ratio being
+    ``domqco.f90:266-269``'s.  ``BarotropicConfig.
+    barotropic_entry_depth_nemo_literal`` selects it; otherwise the rest depth
+    plus the face-mean sea level (``summed``) is returned unchanged.
+    ``entry`` is ``(r1_u, r1_v, r3_u, r3_v)`` from ``_nemo_ssh_avg_apply``.
+    """
+    if not config.barotropic.barotropic_entry_depth_nemo_literal:
+        return summed
+    r = nemo_source_round
+    return r(prep[0] * r(1.0 + entry[2])), r(prep[1] * r(1.0 + entry[3]))

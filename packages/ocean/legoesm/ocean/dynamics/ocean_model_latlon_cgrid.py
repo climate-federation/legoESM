@@ -7200,7 +7200,7 @@ class LatLonCGridOceanModel:
             # identical to the FE path. Default 1 ⇒ every other caller unchanged.
             _nbaro = (_cfg_b.barotropic.n_barotropic_substeps
                       * _barotropic_substep_scale)
-            dt_s = dt_mom / _nbaro
+            dt_s = dt_mom / (nemo_source_round(jnp.asarray(float(_nbaro))) if _cfg_b.barotropic.barotropic_substep_dt_nemo_literal else _nbaro)  # noqa: E501
             # Under coriolis_scheme="explicit_ab2" the planetary Coriolis already
             # reaches the barotropic mode via F_slow (its depth-mean came through
             # du_dt), so the substep must NOT add its own f×U_bt — this is the

@@ -191,7 +191,7 @@ def test_only_the_g1_card_selects_the_fold_row_v_face_depth():
     from legoesm.ocean.fidelity import nemo_testcase_recipe as recipe
     from legoesm.ocean.state import BarotropicConfig
     assert BarotropicConfig._field_defaults["barotropic_fold_top_v_face_ssh"] is False
-    assert BarotropicConfig._fields[-1] == "barotropic_fold_top_v_face_ssh"
+    assert BarotropicConfig._fields[-4] == "barotropic_fold_top_v_face_ssh"
     src = Path(recipe.__file__).read_text()
     assert src.count("barotropic_fold_top_v_face_ssh=True") == 1
     start = src.index("def build_orca2g1_flat_card")
@@ -345,3 +345,173 @@ def test_step_17_event_is_carried_by_the_entry_tracers(ts_from_chain):
         assert ssh["max_abs_cell"] == [72, 70]
     else:
         assert ssh["status"] == "AT-BAR" and ssh["max_abs"] < 1.0e-16
+
+
+# --- round 5: the solver's substep loop --------------------------------------
+
+RECORD5 = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/"
+               "round4/oracle_g1_r4/p3_a_100step")
+needs_record5 = pytest.mark.skipif(
+    not (RECORD5 / "oracle_g1spgts_kt00000017.bin").is_file(),
+    reason="the G1 substep record is not admitted on this machine")
+ROUND5_OPTIONS = ("barotropic_flux_update_nemo_literal",
+                  "barotropic_substep_dt_nemo_literal",
+                  "barotropic_entry_depth_nemo_literal")
+
+
+def test_only_the_g1_card_selects_the_three_solver_statements():
+    from legoesm.ocean.fidelity import nemo_testcase_recipe as recipe
+    from legoesm.ocean.state import BarotropicConfig
+    assert BarotropicConfig._fields[-3:] == ROUND5_OPTIONS
+    src = Path(recipe.__file__).read_text()
+    start = src.index("def build_orca2g1_flat_card")
+    for name in ROUND5_OPTIONS:
+        assert BarotropicConfig._field_defaults[name] is False
+        assert src.count(f"{name}=True") == 1
+        assert src.index(f"{name}=True") > start
+    if RECORD.is_dir():      # the built card carries them, validator included
+        cfg = recipe.build_nemo_testcase_card(
+            "ORCA2G1-flat", deck_root=RECORD).recipe.model_config
+        assert all(getattr(cfg.barotropic, name) is True for name in ROUND5_OPTIONS)
+
+
+def _solver_options(**on):
+    from types import SimpleNamespace
+
+    from legoesm.ocean.state import BarotropicConfig
+    return SimpleNamespace(barotropic=BarotropicConfig()._replace(**on))
+
+
+def test_literal_flux_update_is_the_written_order_and_dry_faces_are_zero():
+    """dynspg_ts.f90:550-562 against the same arithmetic in numpy, one
+    operation at a time; a dry face is 0 / 1, never a division by zero."""
+    from legoesm.ocean.dynamics import barotropic_latlon_cgrid as B
+    rng = np.random.default_rng(5)
+    shape = (6, 9)
+    vel, pgf, trd, frc = (rng.normal(scale=1e-3, size=shape) for _ in range(4))
+    h_in, h_pgf, h_mid, h_kmm, h_exit = (100.0 + rng.normal(scale=1e-2, size=shape)
+                                         for _ in range(5))
+    wet = np.ones(shape)
+    wet[2, 3] = 0.0
+    h_exit[2, 3] = 0.0
+    dt = 10800.0 / 13
+    args = [jnp.asarray(a) for a in (vel, h_in, h_pgf, h_mid, h_kmm, h_exit, pgf, trd, frc)]
+    cfg = _solver_options(barotropic_flux_update_nemo_literal=True)
+    got = np.asarray(B._nemo_flux_form_literal_velocity_update(
+        *args, dt, jnp.asarray(wet), cfg, 0))
+    want = (h_in * vel + dt * (h_pgf * pgf + h_mid * trd + h_kmm * frc)) * (
+        wet / (h_exit + 1.0 - wet))
+    assert np.array_equal(got, want) and got[2, 3] == 0.0
+    divided = (h_in * vel + dt * (h_pgf * pgf + h_mid * trd + h_kmm * frc)) / np.where(
+        wet > 0, h_exit, 1.0) * wet
+    assert np.count_nonzero(divided != want) > 0        # the other order differs
+    # the entry depth is read at the first substep only, and only when selected
+    both = _solver_options(barotropic_flux_update_nemo_literal=True,
+                           barotropic_entry_depth_nemo_literal=True)
+    first = np.asarray(B._nemo_flux_form_literal_velocity_update(
+        *args, dt, jnp.asarray(wet), both, 0))
+    later = np.asarray(B._nemo_flux_form_literal_velocity_update(
+        *args, dt, jnp.asarray(wet), both, 1))
+    assert np.array_equal(later, want)
+    want_first = (h_kmm * vel + dt * (h_pgf * pgf + h_mid * trd + h_kmm * frc)) * (
+        wet / (h_exit + 1.0 - wet))
+    assert np.array_equal(first, want_first) and not np.array_equal(first, want)
+
+
+def test_entry_face_depth_is_rest_depth_times_one_plus_ratio_only_when_selected():
+    from legoesm.ocean.dynamics import barotropic_latlon_cgrid as B
+    h0u, h0v = jnp.asarray([[100.0, 0.0]]), jnp.asarray([[100.0], [50.0]])
+    r3u, r3v = jnp.asarray([[3.0e-5, 0.0]]), jnp.asarray([[1.0e-5], [-2.0e-5]])
+    summed = ("sum_u", "sum_v")
+    off = B._nemo_entry_face_depths(_solver_options(), summed, (h0u, h0v), (None, None, r3u, r3v))
+    assert off is summed
+    hu, hv = B._nemo_entry_face_depths(
+        _solver_options(barotropic_flux_update_nemo_literal=True,
+                        barotropic_entry_depth_nemo_literal=True),
+        summed, (h0u, h0v), (None, None, r3u, r3v))
+    assert np.array_equal(np.asarray(hu), np.asarray(h0u) * (1.0 + np.asarray(r3u)))
+    assert np.array_equal(np.asarray(hv), np.asarray(h0v) * (1.0 + np.asarray(r3v)))
+
+
+def test_solver_statement_options_refuse_a_path_that_does_not_read_them():
+    from legoesm.ocean.dynamics import barotropic_latlon_cgrid as B
+    from legoesm.ocean.state import LatLonCGridOceanConfig
+    base = LatLonCGridOceanConfig()
+    assert not B.nemo_flux_form_update_active(base)
+    for on in ({"barotropic_flux_update_nemo_literal": True},
+               {"barotropic_entry_depth_nemo_literal": True}):
+        cfg = base._replace(barotropic=base.barotropic._replace(**on))
+        with pytest.raises(ValueError, match="nemo_literal=True"):
+            B._nemo_fold_top_v_wet(cfg, None, jnp.float64)
+    assert B._nemo_fold_top_v_wet(base, None, jnp.float64) is None
+
+
+def test_guarded_divisor_gives_the_true_quotient_under_jit():
+    """rDt_e = rn_Dt / nn_e (dynspg_ts.f90:886): with the shared rounding
+    guard on the divisor the compiled quotient is Python's, for G1's pair."""
+    import jax
+    from legoesm.core.source_rounding import nemo_source_round
+    if not jax.config.jax_enable_x64:
+        pytest.skip("needs x64")
+    guarded = jax.jit(lambda dt: dt / nemo_source_round(jnp.asarray(13.0)))
+    assert float(guarded(jnp.asarray(10800.0))) == 10800.0 / 13
+
+
+def test_substep_row_scores_wet_points_by_region_and_its_plant_fires():
+    wet = _mask() > 0
+    reg = ladder.regions(_mask())
+    ref = np.linspace(1.0, 2.0, wet.size).reshape(wet.shape)
+    cand = ref.copy()
+    cand[0, 5] += 1.0                       # a dry cell: not scored
+    r = ladder.substep_row("x", ref, cand, wet, reg)
+    assert r["bit_identical"] and r["n_unequal"] == 0 and r["n_wet"] == int(wet.sum())
+    cand[11, 4] += 1.0e-9                   # the pivot row
+    r = ladder.substep_row("x", ref, cand, wet, reg)
+    assert not r["bit_identical"] and r["max_abs_cell"] == [11, 4]
+    assert r["regions"]["fold_pivot_row"]["n_unequal"] == 1
+    assert r["regions"]["interior"]["n_unequal"] == 0
+    planted = ladder.substep_row("x", ref, ref, wet, reg, plant=True)
+    assert planted["regions"]["interior"]["n_unequal"] == 1
+
+
+@needs_record5
+def test_offline_flux_update_replay_reproduces_nemo_and_separates_the_orders():
+    """NEMO's velocity update from NEMO's substep record alone: 0 unequal as
+    compiled at all 13 substeps (the instrument's own control); dividing by
+    the exit depth, or the entry depth as a sum, do not reproduce it."""
+    pytest.importorskip("netCDF4")
+    out = ladder.run(RECORD5, arm="flux_update_replay", kt_min=17, kt_max=17,
+                     allow_dirty=True)
+    assert len(out["replay_rows"]) == 26
+    assert all(r["nemo_order"]["ref_max_abs"] > 0.0 for r in out["replay_rows"])
+    assert out["totals"]["nemo_order"]["n_unequal"] == 0
+    assert out["totals"]["divide_by_exit_depth"]["n_unequal"] > 10000
+    assert out["totals"]["entry_depth_as_sum"]["n_unequal"] > 1000
+
+
+@needs_record5
+@pytest.mark.parametrize("off, floor", [
+    (None, 0), ("without_entry_depth", 1), ("without_flux_literal", 30),
+    ("without_substep_dt", 30)])
+def test_step_1_substep_loop_is_nemos_bit_for_bit_only_with_all_three(off, floor):
+    """The three landed statements and their plants: from NEMO's step-1
+    entry every velocity-update row of the 13 substeps and the loop's exit
+    are bit-identical with the card; each option switched off alone leaves
+    unequal faces in the first substep's update."""
+    pytest.importorskip("netCDF4")
+    out = ladder.run(RECORD5, arm="substeps", kt_min=1, kt_max=1, allow_dirty=True,
+                     **({off: True} if off else {}))
+    assert out["n_substeps"] == 13 and not out["scalars_unequal"]
+    assert out["trace_passive"]["uu_b"] and out["trace_passive"]["vv_b"]
+    update = [r for r in out["rows"] if r["operand"] in ("new.u", "new.v")]
+    assert len(update) == 26 and all(r["ref_max_abs"] > 0.0 for r in update)
+    first = sum(r["n_unequal"] for r in update if r["substep"] == 1)
+    if off is None:
+        assert all(r["bit_identical"] for r in update)
+        assert all(r["bit_identical"] for r in out["exit_rows"])
+        # the one unequal row is the cold-start history frame, which the first
+        # substep's weights (1, 0, 0) and the compiled swap never read
+        assert out["first_unequal"]["name"] == "i000.entry.sshb"
+        assert out["record_scalars"]["i000_entry_sc"][4] == 1.0
+    else:
+        assert first >= floor and first > 0

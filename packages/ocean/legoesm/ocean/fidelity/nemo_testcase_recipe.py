@@ -3785,7 +3785,7 @@ def build_orca2g1_flat_card(deck_root: str | Path) -> NEMOTestcaseCard:
         momentum_advection="flux_form",
         momentum_flux_scheme="none", vertical_momentum_scheme="none",
         adaptive_implicit_vertadv=False,
-        vorticity_scheme="een_planetary", een_fold_image_v_row=True, rk3_stage1_ssh_nemo_literal=True, barotropic=base.barotropic._replace(barotropic_fold_top_v_face_ssh=True),  # noqa: E501
+        vorticity_scheme="een_planetary", een_fold_image_v_row=True, rk3_stage1_ssh_nemo_literal=True, barotropic=base.barotropic._replace(barotropic_fold_top_v_face_ssh=True, barotropic_flux_update_nemo_literal=True, barotropic_substep_dt_nemo_literal=True, barotropic_entry_depth_nemo_literal=True),  # noqa: E501
         tracer_advection="none",                        # traadv.f90:444
         lateral_viscosity=base.lateral_viscosity._replace(A_h=0.0),
         K_h=0.0, K_bih=0.0,                             # ln_traldf_OFF
@@ -3842,7 +3842,7 @@ def _orca2g1_selector_failures(card: NEMOTestcaseCard) -> list[str]:
         "nn_bt_flt=3": cfg.barotropic.barotropic_time_filter == "nemo_ab3am4",
         "ln_dynadv_OFF": (cfg.momentum_advection, cfg.momentum_flux_scheme,
                           cfg.vertical_momentum_scheme) == ("flux_form", "none", "none"),
-        "ln_dynvor_een": (cfg.vorticity_scheme, cfg.een_fold_image_v_row) == ("een_planetary", True), "zhvp2_e fold row": cfg.barotropic.barotropic_fold_top_v_face_ssh is True, "stage-1 ssh": cfg.rk3_stage1_ssh_nemo_literal is True,  # noqa: E501
+        "ln_dynvor_een": (cfg.vorticity_scheme, cfg.een_fold_image_v_row) == ("een_planetary", True), "zhvp2_e fold row": cfg.barotropic.barotropic_fold_top_v_face_ssh is True, "ua_e flux form": cfg.barotropic.barotropic_flux_update_nemo_literal is True, "rDt_e": cfg.barotropic.barotropic_substep_dt_nemo_literal is True, "hu_e entry": cfg.barotropic.barotropic_entry_depth_nemo_literal is True, "stage-1 ssh": cfg.rk3_stage1_ssh_nemo_literal is True,  # noqa: E501
         "ln_traadv_OFF": cfg.tracer_advection == "none",
         "ln_dynldf_OFF": all(getattr(lv, name) == 0.0 for name in (
             "A_h", "B_h", "C_smag", "C_smag_lap", "C_leith")),

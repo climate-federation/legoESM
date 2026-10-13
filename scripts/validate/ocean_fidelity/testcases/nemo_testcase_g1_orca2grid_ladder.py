@@ -50,6 +50,20 @@ Arms (``--arm``):
                all wet cells), and the same cell after ONE card step from
                NEMO's previous after-frame (T, S from the card's chain)
 
+  substeps     the split-explicit solver's substep loop at one step holding a
+               substep record (--kt-min = --kt-max = that step), every
+               operand in compiled order (the VORTEX round-196 walk's table)
+               against the model's own WRITE-only substep trace, on wet
+               points, split by region.  GIVEN-NEMO-ENTRY: NEMO's entry state
+               and, past step 1, NEMO's six histories from the record's own
+               loop-entry frame
+  substeps_independent  the same table from the card's own chain state
+  flux_update_replay  OFFLINE numpy replay, from NEMO's substep record and
+               mesh file alone, of the flux-form velocity update
+               (dynspg_ts.f90:544-562) at every substep of one step: once as
+               compiled (times the inverse exit depth; must be 0 unequal) and
+               once dividing by the exit depth; no model step
+
 Every scored row is split into the preregistered regions (fold band, seam,
 south, interior; interior again into coast-adjacent and open).  The scorer
 and its 1e-15 bar are the shared trajectory gate's; the record reader is the
@@ -77,7 +91,8 @@ DEFAULT_ROOT = Path(
     "oracle_g1_r1/p3_a_100step")
 ARMS = ("geometry", "independent", "given_entry", "rhs", "handoff", "stages",
         "vor_fold_replay", "restart_entry", "fold_v_depth",
-        "interior_events", "stage_replay")
+        "interior_events", "stage_replay", "substeps", "substeps_independent",
+        "flux_update_replay")
 PLANTS = ("score", "entry")
 STAGE_STEPS = 10          # round 1's record: stage frames at kt = 1..10
 FOLD_ROWS, SEAM_COLS, SOUTH_ROWS = 3, 2, 3
@@ -543,6 +558,170 @@ def stage_replay_rows(root: Path, kt: int, tmask) -> dict:
     return rows
 
 
+def read_substep_record(root: Path, kt: int):
+    """One solver substep stream, every plane cut to the inner domain."""
+    cr = _checker()
+    path = cr.substep_path(root, kt)
+    require(path.is_file(), f"missing {path}")
+    head, fields = cr.read_substeps(path.read_bytes(), path.name)
+    require(head["step"] == kt, f"{path.name}: header step {head['step']}")
+    js, je, i_s, ie = head["Njs0"] - 1, head["Nje0"], head["Nis0"] - 1, head["Nie0"]
+    full, inner = (head["jpj"], head["jpi"]), (je - js, ie - i_s)
+    out = {}
+    for name, a in fields.items():
+        require(a.ndim == 1 or a.shape in (full, inner),
+                f"{path.name}: {name} has extent {a.shape}")
+        out[name] = np.array(a[js:je, i_s:ie] if a.shape == full else a)
+    return head, out
+
+
+REPLAY_ORDERS = ("nemo_order", "divide_by_exit_depth", "entry_depth_as_sum")
+
+
+def flux_update_replay_rows(root: Path, kt: int, reg) -> list[dict]:
+    """NEMO's flux-form external velocity update replayed from NEMO's own
+    recorded operands (dynspg_ts.f90:544-562), U and V, every substep.  The
+    one difference between the two orders is the last operation: NEMO
+    multiplies the bracket by the inverse exit depth z1_hu (:550-551), the
+    other order divides the bracket by the exit depth.  The top V row and
+    the fold are not replayed (their north neighbour is outside the mesh
+    file's inner domain)."""
+    import netCDF4
+    head, g = read_substep_record(root, kt)
+    with netCDF4.Dataset(root / "mesh_mask.nc") as h:
+        var = lambda n: np.asarray(h.variables[n][0], dtype=np.float64)  # noqa: E731
+        e1e2t = var("e1t") * var("e2t")
+        mesh = {"u": (var("umask")[0], var("e3u_0")[0], var("e1u") * var("e2u"),
+                      np.roll(e1e2t, -1, axis=1)),
+                "v": (var("vmask")[0], var("e3v_0")[0], var("e1v") * var("e2v"),
+                      np.roll(e1e2t, -1, axis=0))}
+    rdt = float(g["i000_entry_sc"][0])
+    rows = []
+    for jn in range(1, head["icycle"] + 1):
+        now, prev = f"j{jn:03d}_", f"j{jn - 1:03d}_"
+        ssh = g[now + "sshp2_bck"]
+        for face, axis in (("u", 1), ("v", 0)):
+            mask, e3, e1e2, e1e2t_next = mesh[face]
+            wet = mask > 0
+            if face == "v":
+                wet[-1] = False                 # north neighbour not in the file
+            h0 = e3 * mask
+            vel = g[f"i000_{face}n_e"] if jn == 1 else g[prev + f"{face}a_new"]
+            h_in = g[f"i000_h{face}_e"] if jn == 1 else g[prev + f"h{face}_e"]
+            h_bck = h0 + 0.5 * (1.0 / e1e2) * (
+                e1e2t * ssh + e1e2t_next * np.roll(ssh, -1, axis=axis)) * mask
+            bracket = h_in * vel + rdt * (
+                h_bck * g[now + f"z{face}_spg"]
+                + g[now + f"h{face}p2_e"] * g[now + f"trd_{face}"]
+                + g[f"i000_h{face}_e"] * g[f"i000_z{face}_frc"])
+            h_exit = h0 + g[now + f"ssh{face}_a"]
+            inverse = mask / (h_exit + 1.0 - mask)
+            # the other entry depth: rest depth PLUS the face-mean entry sea
+            # level, where NEMO's hu_e / hu(Kmm) is hu_0 * (1 + r3u) (:329)
+            ssh0 = g["i000_sshn_e"]
+            h_sum = h0 + 0.5 * (1.0 / e1e2) * (
+                e1e2t * ssh0 + e1e2t_next * np.roll(ssh0, -1, axis=axis)) * mask
+            bracket_sum = (h_sum if jn == 1 else h_in) * vel + rdt * (
+                h_bck * g[now + f"z{face}_spg"]
+                + g[now + f"h{face}p2_e"] * g[now + f"trd_{face}"]
+                + h_sum * g[f"i000_z{face}_frc"])
+            with np.errstate(divide="ignore", invalid="ignore"):
+                orders = {"nemo_order": bracket * inverse,
+                          "divide_by_exit_depth": np.where(
+                              wet, bracket / h_exit * mask, 0.0),
+                          "entry_depth_as_sum": bracket_sum * inverse}
+            ref = g[now + f"{face}a_new"]
+            rows.append({"substep": jn, "face": face, **{
+                name: substep_row(f"j{jn:03d}.{face}a.{name}", ref, cand, wet, reg)
+                for name, cand in orders.items()}})
+    return rows
+
+
+SUB_REGIONS = ("fold", "seam", "south", "interior")
+
+
+def substep_row(name, ref, cand, wet, reg, *, plant=False) -> dict:
+    """One operand on its own wet points: unequal count and largest error,
+    whole domain and per region (the fold band also row by row)."""
+    ref = np.asarray(ref, dtype=np.float64)
+    cand = np.array(cand, dtype=np.float64)
+    require(ref.shape == cand.shape == wet.shape,
+            f"{name}: extents {ref.shape} / {cand.shape} / {wet.shape}")
+    if plant:
+        j, i = np.argwhere(wet & reg["interior"])[0]
+        cand[j, i] += 1.0
+    d = np.where(wet, cand - ref, 0.0)
+    worst = np.unravel_index(int(np.argmax(np.abs(d))), d.shape)
+
+    def part(m):
+        return {"n_unequal": int(np.count_nonzero(d[m])),
+                "max_abs": float(np.max(np.abs(d[m]))),
+                "ref_max_abs": float(np.max(np.abs(ref[m & wet]), initial=0.0))}
+    return {"name": name, "n_wet": int(wet.sum()),
+            "n_unequal": int(np.count_nonzero(d)),
+            "max_abs": float(np.max(np.abs(d))),
+            "max_abs_cell": [int(x) for x in worst],
+            "ref_max_abs": float(np.max(np.abs(ref[wet]))),
+            "bit_identical": not np.any(d),
+            "regions": {k: part(reg[k]) for k in (
+                *SUB_REGIONS, *(n for n, _ in FOLD_ROW_NAMES))}}
+
+
+def substep_table(g: dict, trace: dict, n_sub: int, wet: dict, reg,
+                  plant: str | None = None) -> dict:
+    """Every recorded operand of the loop against the model's trace, in
+    NEMO's compiled order (dynspg_ts.f90:359 on); the order and the trace
+    keys are the VORTEX walk's."""
+    from nemo_testcase_l1_vortex_round196_spgts_walk import (
+        ENTRY_ORDER, SCALAR_ORDER, SUBSTEP_ORDER, _lego_plane)
+    g = dict(g)
+    for jn in range(1, n_sub + 1):      # the compiled swap, dynspg_ts.f90:817-822
+        prev = f"j{jn - 1:03d}_"
+        for eff, at_entry, later in (("sshn_e_eff", "sshn_e", "ssha_e"),
+                                     ("un_e_eff", "un_e", "ua_new"),
+                                     ("vn_e_eff", "vn_e", "va_new")):
+            g[f"j{jn:03d}_{eff}"] = g["i000_" + at_entry] if jn == 1 else g[prev + later]
+    rows = []
+
+    def add(name, group, key, stagger, jn):
+        rows.append(dict(substep_row(
+            f"j{jn:03d}.{name}", g[group],
+            _lego_plane(trace[key][max(jn, 1) - 1], stagger), wet[stagger], reg,
+            plant=(plant == "score" and jn == 1 and name == "mid.eta")),
+            substep=jn, operand=name))
+
+    for name, group, key, stagger in (
+            *ENTRY_ORDER,
+            ("entry.sshb", "sshb_e", "eta_history_b", "t"),
+            ("entry.sshbb", "sshbb_e", "eta_history_bb", "t"),
+            ("entry.ub", "ub_e", "u_history_b", "u"),
+            ("entry.ubb", "ubb_e", "u_history_bb", "u"),
+            ("entry.vb", "vb_e", "v_history_b", "v"),
+            ("entry.vbb", "vbb_e", "v_history_bb", "v"),
+            # the EEN triads: U-point sets on U faces, V-point sets on V faces
+            *((f"entry.{n}", n, n, "t") for n in (
+                "ffu_nw", "ffu_ne", "ffu_sw", "ffu_se",
+                "ffv_nw", "ffv_ne", "ffv_sw", "ffv_se"))):
+        mask_key = {"ffu": "u", "ffv": "v"}.get(name[6:9], stagger)
+        rows.append(dict(substep_row(
+            f"i000.{name}", g["i000_" + group],
+            _lego_plane(trace[key][0], stagger), wet[mask_key], reg),
+            substep=0, operand=name))
+    scalars = []
+    for jn in range(1, n_sub + 1):
+        for name, group, index, key in SCALAR_ORDER:
+            a, b = float(g[f"j{jn:03d}_{group}"][index]), float(trace[key][jn - 1])
+            scalars.append({"substep": jn, "name": name, "nemo": a, "card": b,
+                            "bit_identical": a == b})
+        for name, group, key, stagger in SUBSTEP_ORDER:
+            add(name, f"j{jn:03d}_{group}", key, stagger, jn)
+    first = next((r for r in rows if not r["bit_identical"]), None)
+    return {"rows": rows, "scalars_unequal": [x for x in scalars if not x["bit_identical"]],
+            "n_scalars": len(scalars),
+            "first_unequal": first and {k: first[k] for k in (
+                "name", "n_unequal", "max_abs", "max_abs_cell", "ref_max_abs", "regions")}}
+
+
 @contextlib.contextmanager
 def vor_fold_image_arm(card, calls: list):
     """MEASUREMENT ARM, not the card.  Inside the 3-D vorticity trend only,
@@ -580,7 +759,10 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
         fold_fill_v: bool = False, vor_fold_image: bool = False,
         before_arm: bool = False,
         hook_arm: tuple = (), without_fold_v_depth: bool = False,
-        ts_from_chain: bool = False, without_stage1_ssh: bool = False) -> dict:
+        ts_from_chain: bool = False, without_stage1_ssh: bool = False,
+        without_flux_literal: bool = False,
+        without_substep_dt: bool = False,
+        without_entry_depth: bool = False) -> dict:
     if vor_fold_image:
         from legoesm.ocean.fidelity import nemo_testcase_recipe as _recipe
         calls: list = []
@@ -592,7 +774,10 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
                       hook_arm=hook_arm,
                       without_fold_v_depth=without_fold_v_depth,
                       ts_from_chain=ts_from_chain,
-                      without_stage1_ssh=without_stage1_ssh)
+                      without_stage1_ssh=without_stage1_ssh,
+                      without_flux_literal=without_flux_literal,
+                      without_substep_dt=without_substep_dt,
+                      without_entry_depth=without_entry_depth)
         require(len(calls) > 0, "the vorticity fold-image arm was never traced")
         out["vor_fold_image_measurement_arm"] = {"traces": len(calls)}
         out["label"] = f"{out['label']} + MEASUREMENT ARM (fold-image V row "\
@@ -631,6 +816,23 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
         require(cfg.rk3_stage1_ssh_nemo_literal is True,
                 "the card no longer selects NEMO's stage-1 sea level")
         cfg = cfg._replace(rk3_stage1_ssh_nemo_literal=False)
+    if without_entry_depth or without_flux_literal:
+        # ROUND-5 BEFORE ARM / plant: rest depth plus face-mean sea level
+        # (the update's own before arm drops it too: only the update reads it)
+        require(cfg.barotropic.barotropic_entry_depth_nemo_literal is True,
+                "the card no longer selects NEMO's solver entry depth")
+        cfg = cfg._replace(barotropic=cfg.barotropic._replace(
+            barotropic_entry_depth_nemo_literal=False))
+    if without_flux_literal:  # ROUND-5 BEFORE ARM / plant: divide by the depth
+        require(cfg.barotropic.barotropic_flux_update_nemo_literal is True,
+                "the card no longer selects NEMO's flux-form velocity update")
+        cfg = cfg._replace(barotropic=cfg.barotropic._replace(
+            barotropic_flux_update_nemo_literal=False))
+    if without_substep_dt:    # ROUND-5 BEFORE ARM / plant: the compiled product
+        require(cfg.barotropic.barotropic_substep_dt_nemo_literal is True,
+                "the card no longer selects NEMO's substep length")
+        cfg = cfg._replace(barotropic=cfg.barotropic._replace(
+            barotropic_substep_dt_nemo_literal=False))
     s0 = card.recipe.initial_state
     require(int(card.recipe.z_coord.n_levels) == 1, "the G1 card executes one level")
     n_stage = stage_steps(root)
@@ -652,6 +854,17 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
                          "statements; no model step)",
                 "per_kt": [{"kt": kt, "replay": stage_replay_rows(root, kt, tm)}
                            for kt in range(kt_min, kt_max + 1)]}
+    if arm == "flux_update_replay":
+        require(kt_min == kt_max, "one step: --kt-min equal to --kt-max")
+        reg = regions(np.asarray(card.recipe.z_coord.is_active)[..., 0])
+        rows = flux_update_replay_rows(root, kt_max, reg)
+        return {"arm": arm, "legoesm_git_sha": sha, "root": str(root), "kt": kt_max,
+                "label": "NEMO's record only (offline replay of the flux-form "
+                         "velocity update; no model step)",
+                "replay_rows": rows,
+                "totals": {name: {"n_unequal": sum(r[name]["n_unequal"] for r in rows),
+                                  "max_abs": max(r[name]["max_abs"] for r in rows)}
+                           for name in REPLAY_ORDERS}}
     if arm == "interior_events":
         require(2 <= kt_max <= 30, "kt_max must lie in 2..30")
         wet = np.asarray(card.recipe.z_coord.is_active)[..., 0] > 0.5
@@ -775,6 +988,12 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
            "hook_measurement_arm": list(hook_arm),
            "ts_from_chain_measurement_arm": ts_from_chain,
            "rk3_stage1_ssh_nemo_literal": bool(cfg.rk3_stage1_ssh_nemo_literal),
+           "barotropic_flux_update_nemo_literal": bool(
+               cfg.barotropic.barotropic_flux_update_nemo_literal),
+           "barotropic_substep_dt_nemo_literal": bool(
+               cfg.barotropic.barotropic_substep_dt_nemo_literal),
+           "barotropic_entry_depth_nemo_literal": bool(
+               cfg.barotropic.barotropic_entry_depth_nemo_literal),
            "per_kt": []}
     records = {kt: read_step(root, kt) for kt in scored if kt <= n_stage}
     before = {}             # the card's own chain: the state entering step kt
@@ -823,6 +1042,75 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
                                       "first_unequal": first_unequal(rows)})
             chain = jax.device_get(m.step(chain, dt=card.dt_s))
         out["unrecorded_carry"] = "w only (3.7e-21 at kt 2); layout from the card's chain"
+        return out
+    if arm in ("substeps", "substeps_independent"):
+        require(kt_min == kt_max, "one step: --kt-min equal to --kt-max")
+        kt = kt_max
+        head, sub = read_substep_record(root, kt)
+        n_sub = head["icycle"]
+        require(n_sub == int(cfg.barotropic.n_barotropic_substeps),
+                f"NEMO ran {n_sub} substeps, the card "
+                f"{cfg.barotropic.n_barotropic_substeps}")
+        plain, st = model(), s0
+        for _ in range(1, kt):
+            st = jax.device_get(plain.step(st, dt=card.dt_s))
+        g = read_step(root, kt)
+        if arm == "substeps":
+            out["label"] = ("GIVEN-NEMO-ENTRY (solver substep loop; past step "
+                            "1 the six histories are the record's own)")
+            base = st
+            if kt > 1:      # NEMO's histories as the loop was handed them
+                require(not sub["i000_entry_sc"][4], "NEMO restarted its histories here")
+                base = st._replace(bt_hist=tuple(jnp.asarray(a) for a in (
+                    pad_u(sub["i000_ub_e"]), pad_u(sub["i000_ubb_e"]),
+                    pad_v(sub["i000_vb_e"]), pad_v(sub["i000_vbb_e"]),
+                    sub["i000_sshb_e"], sub["i000_sshbb_e"])))
+                rst = nemo_histories(root, kt)
+                if rst is not None:   # the record's frame IS the restart's
+                    require(all(np.array_equal(a, b) for a, b in zip(rst, base.bt_hist)),
+                            f"kt {kt}: loop-entry histories != restart histories")
+                    out["histories_equal_restart"] = True
+            entry = seed(g, base)
+        else:
+            out["label"] = "INDEPENDENT (solver substep loop, the card's own chain)"
+            entry = st
+        res = jax.device_get(model(_NEMOWSRK3TestHooks(
+            expose_barotropic_substeps=True)).step(entry, dt=card.dt_s))
+        trace = {k: np.asarray(v) for k, v in res.substeps.items()}
+        require(next(iter(trace.values())).shape[0] == n_sub, "trace length")
+        tmask = np.asarray(card.recipe.z_coord.is_active)[..., 0] > 0.5
+        wet = {"t": tmask, "u": wet_face["u"], "v": wet_face["v"]}
+        table = substep_table(sub, trace, n_sub, wet, reg, plant)
+        # the trace must be passive: the ordinary step from the same entry
+        # gives the same handoff the traced step returned, bit for bit
+        ref_state = state_fields(jax.device_get(model(_NEMOWSRK3TestHooks(
+            expose_momentum_stage=1, expose_tracer_stage=1)).step(entry, dt=card.dt_s)))
+        traced = state_fields(res.state_after_barotropic)
+        out["trace_passive"] = {f: bool(np.array_equal(ref_state[f], traced[f]))
+                                for f in ("ssh", "uu_b", "vv_b")}
+        # the same control against NEMO: the ordinary step's handoff and the
+        # traced step's exit must sit at the same distance from NEMO's frames
+        # (which are one array: the stage-1 handoff IS the loop's exit)
+        out["trace_passive_detail"] = {f: {
+            "nemo_handoff_equals_exit_frame": bool(np.array_equal(
+                g["1_" + nm], sub["o000_" + nm])) if "1_" + nm in g else None,
+            "ordinary_vs_traced_unequal": int(np.count_nonzero(ref_state[f] != traced[f])),
+            "ordinary_vs_traced_max_abs": float(np.max(np.abs(ref_state[f] - traced[f]))),
+            "ordinary_vs_nemo_unequal": int(np.count_nonzero(
+                (ref_state[f] != sub["o000_" + nm]) & wet[sg])),
+            "traced_vs_nemo_unequal": int(np.count_nonzero(
+                (traced[f] != sub["o000_" + nm]) & wet[sg]))}
+            for f, nm, sg in (("ssh", "ssh_aa", "t"), ("uu_b", "uu_b_aa", "u"),
+                              ("vv_b", "vv_b_aa", "v"))}
+        out["exit_rows"] = [substep_row(f"o000.{f}", sub["o000_" + nm], traced[f],
+                                        wet[sg], reg)
+                            for f, nm, sg in (("ssh", "ssh_aa", "t"),
+                                              ("uu_b", "uu_b_aa", "u"),
+                                              ("vv_b", "vv_b_aa", "v"))]
+        out.update({"kt": kt, "n_substeps": n_sub,
+                    "record_scalars": {k: sub[k].tolist() for k in (
+                        "i000_entry_sc", "j003_ext_coef", "j003_bck_coef")},
+                    **table})
         return out
     if arm != "independent":
         m0, st = model(), s0
@@ -1005,6 +1293,31 @@ def _print(out: dict) -> None:
         return
     print(out["label"], "| een_fold_image_v_row =", out.get("een_fold_image_v_row"),
           "| T,S FROM THE CARD'S CHAIN" if out.get("ts_from_chain_measurement_arm") else "")
+    if out["arm"] == "flux_update_replay":
+        for r in out["replay_rows"]:
+            print(f"j{r['substep']:03d} {r['face']}a " + " | ".join(
+                f"{n}: {r[n]['n_unequal']}/{r[n]['n_wet']} max={r[n]['max_abs']:.1e}"
+                for n in REPLAY_ORDERS))
+        print("TOTALS", out["totals"])
+        return
+    if "rows" in out:       # the substep table: first unequal row per operand
+        for f, d in out["trace_passive_detail"].items():
+            print("passivity", f, d)
+        print("trace passive:", out["trace_passive"], "| scalars unequal:",
+              len(out["scalars_unequal"]), "of", out["n_scalars"])
+        seen = set()
+        for r in (*out["rows"], *out["exit_rows"]):
+            op = r.get("operand", r["name"])
+            if r["bit_identical"] or op in seen:
+                continue
+            seen.add(op)
+            print(f"{r['name']:22s} unequal={r['n_unequal']:5d}/{r['n_wet']} "
+                  f"max={r['max_abs']:.2e} nemo={r['ref_max_abs']:.2e} "
+                  f"at {r['max_abs_cell']} " + " ".join(
+                      f"{n}={v['n_unequal']}/{v['max_abs']:.1e}"
+                      for n, v in r["regions"].items()))
+        print("FIRST UNEQUAL:", out["first_unequal"] and out["first_unequal"]["name"])
+        return
     for k in out["per_kt"]:
         for name, r in k.get("replay", {}).items():
             print(f"kt{k['kt']} {name:26s} " + " | ".join(
@@ -1078,6 +1391,18 @@ def main(argv=None) -> int:
     ap.add_argument("--without-stage1-ssh", action="store_true",
                     help="the card with rk3_stage1_ssh_nemo_literal switched "
                          "off (the round-4 before arm; also the option's plant)")
+    ap.add_argument("--without-entry-depth", action="store_true",
+                    help="the card with barotropic_entry_depth_nemo_literal "
+                         "switched off (a round-5 before arm; also the "
+                         "option's plant)")
+    ap.add_argument("--without-substep-dt", action="store_true",
+                    help="the card with barotropic_substep_dt_nemo_literal "
+                         "switched off (a round-5 before arm; also the "
+                         "option's plant)")
+    ap.add_argument("--without-flux-literal", action="store_true",
+                    help="the card with barotropic_flux_update_nemo_literal "
+                         "switched off (the round-5 before arm; also the "
+                         "option's plant)")
     ap.add_argument("--without-fold-v-depth", action="store_true",
                     help="the card with barotropic_fold_top_v_face_ssh switched "
                          "off (the round-3 before arm; also the option's plant)")
@@ -1091,7 +1416,10 @@ def main(argv=None) -> int:
                   hook_arm=tuple(a.hook),
                   without_fold_v_depth=a.without_fold_v_depth,
                   ts_from_chain=a.ts_from_chain,
-                  without_stage1_ssh=a.without_stage1_ssh)
+                  without_stage1_ssh=a.without_stage1_ssh,
+                  without_flux_literal=a.without_flux_literal,
+                  without_substep_dt=a.without_substep_dt,
+                  without_entry_depth=a.without_entry_depth)
     except Exception as e:      # noqa: BLE001 -- refusals print and exit 2
         print(f"REFUSE: {type(e).__name__}: {e}", file=sys.stderr)
         return 2
@@ -1103,6 +1431,11 @@ def main(argv=None) -> int:
     if a.plant:     # a plant must move a row that is AT-BAR when unplanted
         # (kt = 1 only: all five rows are at the bar there in both labels;
         # T and S are excluded, NEMO's kt = 1 entry holds T, S on land)
+        if a.arm == "substeps":     # the table's own plant: one interior cell
+            fired = (out["first_unequal"] or {}).get("name") == "j001.mid.eta"
+            print("STATUS PLANT-FIRED" if fired else "REFUSE: plant stayed green",
+                  file=sys.stderr)
+            return 1 if fired else 3
         if a.kt_max != 1 or a.arm not in ("independent", "given_entry"):
             print("REFUSE: plants run at --kt-max 1 on the two whole-step arms",
                   file=sys.stderr)
