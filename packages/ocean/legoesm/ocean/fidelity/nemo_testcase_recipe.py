@@ -3792,8 +3792,8 @@ def build_orca2g1_flat_card(deck_root: str | Path, case: str = "ORCA2G1-flat") -
         bottom_drag=base.bottom_drag._replace(          # ln_drg_OFF
             bottom_drag_scheme="legacy", bottom_drag_r=0.0,
             bottom_drag_bg_velocity=0.0, bottom_drag_bbl_thickness=0.0),
-        zdf_drag_in_matrix=False, barotropic_drag_substep=False,
-        gm_redi=None, zdf_momentum_nemo_face_thickness=_ORCA2G_ZDF_FACES[case])
+        zdf_drag_in_matrix=False, barotropic_drag_substep=False, zdf_momentum_nemo_face_thickness=_ORCA2G_ZDF_FACES[case],  # noqa: E501
+        gm_redi=None)
     recipe = NEMORecipe(
         model_config=model_config,
         physics_config=physics,
