@@ -24,12 +24,10 @@ def _arm_report(active):
         "after_hpg_u", "after_vorticity_u", "after_keg_u",
         "after_advection_u")}
     if active:
-        replay["after_keg_u"] = _score(1.0e-7, 2)
-        boundary["after_vorticity_u"]["complete"] = _score(1.0e-12, 2)
+        boundary["after_vorticity_u"]["complete"] = _score(1.0e-6, 2)
         boundary["after_advection_u"]["complete"] = _score(1.0e-6, 2)
     else:
-        replay["after_keg_u"] = _score(1.0e-7, 2)
-        boundary["after_vorticity_u"]["complete"] = _score(1.0e-12, 2)
+        boundary["after_vorticity_u"]["complete"] = _score(1.0e-6, 2)
         boundary["after_advection_u"]["complete"] = _score(1.0e-6, 2)
     return {
         "literal_hpg_accumulator": active,
@@ -53,9 +51,9 @@ def _report(label):
     }
 
 
-def test_classification_closes_hpg_and_names_keg():
+def test_classification_retracts_hpg_and_names_vorticity():
     result = gate.classify([_report(label) for label in gate.LABELS])
-    assert result["first_next_boundary"] == "after_keg_u"
+    assert result["first_next_boundary"] == "after_vorticity_u"
     assert result["completed_rhs_closes"] is False
     assert result["predictions"]["R267-P2"] == "REFUTED_ARM_UNNEEDED_BASELINE_CLOSES"
 

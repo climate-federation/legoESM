@@ -23,7 +23,7 @@ from scripts.validate.ocean_fidelity.orca2_l4 import (  # noqa: E402
 
 LABELS = r266.LABELS
 FLOOR = r266.FLOOR
-NEXT_ORDER = ("after_vorticity_u", "after_keg_u", "after_advection_u")
+NEXT_ORDER = ("after_vorticity_u", "after_advection_u")
 PLANTS = (
     "none", "label-coverage", "record-identity", "baseline-reproduction",
     "passivity", "source-order", "hpg-carry", "next-boundary",
@@ -60,8 +60,9 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
 
 
 def _first_next(report: dict[str, object]) -> str | None:
-    rows = report["accumulator_self_replay"]
-    return next((name for name in NEXT_ORDER if rows[name]["max_abs"] > FLOOR), None)
+    rows = report["boundary_rows"]
+    return next((name for name in NEXT_ORDER
+                 if rows[name]["complete"]["max_abs"] > FLOOR), None)
 
 
 def classify(reports: list[dict[str, object]], *, plant: str = "none") -> dict[str, object]:
@@ -84,7 +85,7 @@ def classify(reports: list[dict[str, object]], *, plant: str = "none") -> dict[s
     elif plant == "hpg-carry":
         independent["candidate"]["boundary_rows"]["after_hpg_u"]["complete"]["max_abs"] = 1.0
     elif plant == "next-boundary":
-        independent["candidate"]["accumulator_self_replay"]["after_keg_u"]["max_abs"] = 0.0
+        independent["candidate"]["boundary_rows"]["after_vorticity_u"]["complete"]["max_abs"] = 0.0
     elif plant == "completed-rhs":
         independent["candidate"]["boundary_rows"]["after_advection_u"]["complete"]["max_abs"] = 0.0
     elif plant == "one-bit":
@@ -135,6 +136,7 @@ def classify(reports: list[dict[str, object]], *, plant: str = "none") -> dict[s
             "baseline_hpg": baseline_hpg,
             "candidate_hpg": hpg_complete,
             "first_next_boundary": first,
+            "next_boundary": candidate["boundary_rows"][first]["complete"],
             "next_self_replay": candidate["accumulator_self_replay"][first],
             "completed_rhs": completed,
             "matched_stage2": candidate["matched_stage2"],
@@ -158,7 +160,7 @@ def classify(reports: list[dict[str, object]], *, plant: str = "none") -> dict[s
         "predictions": {
             "R267-P1": "REFUTED_ROUND266_SOURCE_ORDER_INSTRUMENT",
             "R267-P2": "REFUTED_ARM_UNNEEDED_BASELINE_CLOSES",
-            "R267-P3": "CONFIRMED_KEG" if first == "after_keg_u" else "REFUTED",
+            "R267-P3": "REFUTED_FIRST_VORTICITY" if first == "after_vorticity_u" else "REFUTED",
             "R267-P4": "READY_FOR_TRAJECTORY" if completed_closes else "HELD_NEXT_BOUNDARY",
             "R267-P5": "CONFIRMED" if plant == "none" else "PLANT",
         },
