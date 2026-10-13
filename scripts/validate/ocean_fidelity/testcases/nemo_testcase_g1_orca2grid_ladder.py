@@ -25,6 +25,12 @@ Arms (``--arm``):
                NOT seeded: NEMO's after-ssh slot (restart.f90:184, :362-370);
                the card's ``nemo_first_wzv_after_ssh`` selection does not read
                the carried slot, and the arm refuses a card that does
+  rhs_terms    kt = 1..10, the stp_2D right-hand side term by term: the
+               card's pressure-gradient and vorticity terms (the model's own
+               WRITE-only per-term observer) against the OFFLINE replay of
+               NEMO's two statements from NEMO's entry frame
+               (rhs_term_replay); the replay's sum against NEMO's recorded
+               right-hand side is the control and must be 0 unequal
   vor_fold_replay  OFFLINE numpy replay of NEMO's vor_een Coriolis statement
                (dynvor.f90:720, :727, :767, :772-775, :779-783) on the U faces
                of the pivot row and the row below, from NEMO's recorded entry
@@ -103,7 +109,7 @@ DEFAULT_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/round1/"
     "oracle_g1_r1/p3_a_100step")
 ARMS = ("geometry", "independent", "given_entry", "rhs", "handoff", "stages",
-        "vor_fold_replay", "restart_entry", "fold_v_depth",
+        "vor_fold_replay", "restart_entry", "fold_v_depth", "rhs_terms",
         "interior_events", "stage_replay", "substeps", "substeps_independent",
         "flux_update_replay", "ratio_fold_replay")
 PLANTS = ("score", "entry")
@@ -389,21 +395,35 @@ def geometry(root: Path, plant: str | None = None) -> dict:
             "all_bit_identical": all(r["bit_identical"] for r in out)}
 
 
-def vor_een_u_replay(root: Path, kt: int, fe3mask, *, zero_image_row: bool) -> dict:
-    """NEMO's planetary vor_een trend on U, rows jj = Nje0-1 and Nje0.
+def rhs_term_replay(root: Path, kt: int, fe3mask, *, stage: int = 1,
+                    zero_image_row: bool = False, rhd=None) -> dict:
+    """NEMO's 3-D momentum right-hand side of one stage, term by term, offline.
 
-    Literal operand order of dynvor.f90:720 (z1_e3f), :727 (zwz), :767 (zwy),
-    :772-775 (triads), :779-783 (zua).  Everything is NEMO's: the entry frame
-    WITH halos, the mesh file, and the T fold image read off NEMO's own halo
-    row.  ``fe3mask`` is the card's (the mesh file does not carry it).
+    The pressure gradient on the one level (dynhpg.f90:379-394) and the
+    planetary vor_een trend (dynvor.f90:720 z1_e3f, :727 zwz, :767-768 the
+    transports, :772-776 the triads, :779-785 zua and zva), each in NEMO's
+    literal operand order, on the whole inner domain.  Everything is NEMO's:
+    the frame the stage reads WITH its halos (stage 1: the step entry; stage
+    2 and 3: the previous stage's frame, with the F ratio that stage set),
+    the mesh file, and the T fold image read off NEMO's own halo row.
+    ``fe3mask`` is the card's (the mesh file does not carry it).  ``rhd`` is
+    the density anomaly on the haloed grid; None runs the pressure gradient
+    with the shared library function on NEMO's recorded T and S at NEMO's
+    stretched depth (eosbn2.f90 reads gdept at Kmm).  The top V row is not
+    replayed: its north operands are fold halos the mesh file does not hold.
     """
     import netCDF4
     cr = _checker()
     path = cr.step_path(root, kt)
     head, f = cr.read_stream(path.read_bytes(), path.name)
     require(head["Njs0"] == 3 and head["Nis0"] == 3, "two halo points expected")
+    require(stage in (1, 2, 3), "stage must be 1, 2 or 3")
     nj, ni = head["jpj"], head["jpi"]
     jp = head["Nje0"] - 1                       # 0-based halo row of the pivot
+    pre, suf = ("e_", "_bb") if stage == 1 else (f"{stage - 1}_", "_aa")
+    ssh, r3t, r3u, r3v, u, v, tn, sn = (f[pre + n + suf] for n in (
+        "ssh", "r3t", "r3u", "r3v", "uu_k1", "vv_k1", "tn_k1", "sn_k1"))
+    r3f = f["e_r3f"] if stage == 1 else f[f"{stage}_r3f"]
 
     def halo(a):                                # cyclic east-west halo
         out = np.zeros((nj, ni))
@@ -412,16 +432,17 @@ def vor_een_u_replay(root: Path, kt: int, fe3mask, *, zero_image_row: bool) -> d
         return out
     with netCDF4.Dataset(root / "mesh_mask.nc") as h:
         lev = lambda n: np.asarray(h.variables[n][0], dtype=np.float64)  # noqa: E731
-        m2 = {n: halo(lev(n)) for n in ("ff_f", "e1v", "e1u")}
+        m2 = {n: halo(lev(n)) for n in ("ff_f", "e1v", "e1u", "e2u", "e2v")}
         m3 = {n: halo(lev(n)[0]) for n in (
-            "tmask", "vmask", "umask", "e3t_0", "e3v_0", "e3f_0")}
+            "tmask", "vmask", "umask", "e3t_0", "e3u_0", "e3v_0", "e3f_0")}
+        gdept, e3w = (float(lev(n)[0]) for n in ("gdept_1d", "e3w_1d"))
     # T fold image of the first halo row, read off NEMO's own sea level at
     # the last stage step (the first steps have no signal on the fold)
     last = cr.step_path(root, STAGE_STEPS)
-    ssh = cr.read_stream(last.read_bytes(), last.name)[1]["e_ssh_bb"]
-    require(bool(np.any(ssh[jp + 1, 2:-2])), "no sea-level signal on the fold halo row")
+    ssh_l = cr.read_stream(last.read_bytes(), last.name)[1]["e_ssh_bb"]
+    require(bool(np.any(ssh_l[jp + 1, 2:-2])), "no sea-level signal on the fold halo row")
     cand = [s for s in range(-4, 5) if np.array_equal(
-        ssh[jp + 1, 2:-2], ssh[jp - 1, (ni - np.arange(2, ni - 2) + s) % ni])]
+        ssh_l[jp + 1, 2:-2], ssh_l[jp - 1, (ni - np.arange(2, ni - 2) + s) % ni])]
     require(len(cand) == 1, f"T fold image not unique: shifts {cand}")
     perm = (ni - np.arange(ni) + cand[0]) % ni
     te3 = m3["e3t_0"] * m3["tmask"]
@@ -430,26 +451,63 @@ def vor_een_u_replay(root: Path, kt: int, fe3mask, *, zero_image_row: bool) -> d
     e3f0[:-1, :-1] = ((te3[1:, :-1] + te3[1:, 1:]) + (te3[:-1, :-1] + te3[:-1, 1:])) * 0.25
     e3f0 = np.where(e3f0 == 0.0, m3["e3f_0"], e3f0)      # dynvor.f90:919
     fe3 = halo(np.asarray(fe3mask, dtype=np.float64))
+    at = lambda a, dj, di: np.roll(a, (-dj, -di), (0, 1))  # noqa: E731  a(ji+di, jj+dj)
     with np.errstate(divide="ignore", invalid="ignore"):
-        zwz = m2["ff_f"] * (1.0 / (e3f0 * (1.0 + f["e_r3f"] * fe3)))
-    zwy = m2["e1v"] * (m3["e3v_0"] * (1.0 + f["e_r3v_bb"] * m3["vmask"])) * f["e_vv_k1_bb"]
+        zwz = m2["ff_f"] * (1.0 / (e3f0 * (1.0 + r3f * fe3)))
+        r1_e1u, r1_e2v = 1.0 / m2["e1u"], 1.0 / m2["e2v"]
+    zwx = m2["e2u"] * (m3["e3u_0"] * (1.0 + r3u * m3["umask"])) * u
+    zwy = m2["e1v"] * (m3["e3v_0"] * (1.0 + r3v * m3["vmask"])) * v
     if zero_image_row:
         zwy[jp] = 0.0
-    out = {}
-    i = np.arange(2, ni - 2)
-    for name, j in (("pivot_row", jp), ("row_below", jp - 1)):
-        ztne = zwz[j, i - 1] + zwz[j, i] + zwz[j - 1, i]
-        ztnw1 = zwz[j - 1, i] + zwz[j, i] + zwz[j, i + 1]
-        ztse = zwz[j, i] + zwz[j - 1, i] + zwz[j - 1, i - 1]
-        ztsw1 = zwz[j - 1, i + 1] + zwz[j - 1, i] + zwz[j, i]
-        with np.errstate(invalid="ignore"):
-            out[name] = (1.0 / 12.0) * (1.0 / m2["e1u"][j, i]) * (
-                (ztne * zwy[j, i] + ztnw1 * zwy[j, i + 1])
-                + (ztse * zwy[j - 1, i] + ztsw1 * zwy[j - 1, i + 1]))
-    out["wet"] = {"pivot_row": m3["umask"][jp, 2:-2] > 0,
-                  "row_below": m3["umask"][jp - 1, 2:-2] > 0}
-    out["t_fold_shift"] = cand[0]
+    with np.errstate(invalid="ignore"):
+        ztne = at(zwz, 0, -1) + zwz + at(zwz, -1, 0)
+        ztnw = at(zwz, -1, -1) + at(zwz, 0, -1) + zwz
+        ztse = zwz + at(zwz, -1, 0) + at(zwz, -1, -1)
+        ztsw = at(zwz, -1, 0) + at(zwz, -1, -1) + at(zwz, 0, -1)
+        vor_u = (1.0 / 12.0) * r1_e1u * (
+            (ztne * zwy + at(ztnw, 0, 1) * at(zwy, 0, 1))
+            + (ztse * at(zwy, -1, 0) + at(ztsw, 0, 1) * at(zwy, -1, 1)))
+        vor_v = -((1.0 / 12.0) * r1_e2v * (
+            (at(ztsw, 1, 0) * at(zwx, 1, -1) + at(ztse, 1, 0) * at(zwx, 1, 0))
+            + (ztnw * at(zwx, 0, -1) + ztne * zwx)))
+    from legoesm.ocean.constants_config import NEMO_CONSTANTS_CONFIG as C
+    if rhd is None:
+        from legoesm.ocean.eos import nemo_roquet_density_anomaly_ratio
+        depth = (gdept * (1.0 + r3t))[..., None]
+        rhd = np.asarray(nemo_roquet_density_anomaly_ratio(
+            tn[..., None], sn[..., None], depth, rho0=float(C.rho_0),
+            geometric_depth_m=depth, tmask=m3["tmask"][..., None]))[..., 0]
+    zcoef0 = -float(C.g) * 0.5
+    col = e3w * (1.0 + r3t)                    # e3w(Kmm), one level
+    dep = gdept * (1.0 + r3t) - ssh            # gde3w(Kmm)
+    with np.errstate(invalid="ignore"):
+        hpg_u = zcoef0 * r1_e1u * (at(col, 0, 1) * at(rhd, 0, 1) - col * rhd) \
+            + -zcoef0 * (at(rhd, 0, 1) + rhd) * (at(dep, 0, 1) - dep) * r1_e1u
+        hpg_v = zcoef0 * r1_e2v * (at(col, 1, 0) * at(rhd, 1, 0) - col * rhd) \
+            + -zcoef0 * (at(rhd, 1, 0) + rhd) * (at(dep, 1, 0) - dep) * r1_e2v
+    cut = lambda a: np.array(a[2:jp + 1, 2:-2])  # noqa: E731
+    wet_u, wet_v = cut(m3["umask"]) > 0, cut(m3["vmask"]) > 0
+    wet_v[-1] = False
+    clean = lambda a, w: np.where(w, cut(a), 0.0)  # noqa: E731
+    out = {"hpg_u": clean(hpg_u, wet_u), "hpg_v": clean(hpg_v, wet_v),
+           "vor_u": clean(vor_u, wet_u), "vor_v": clean(vor_v, wet_v),
+           "wet_u": wet_u, "wet_v": wet_v, "t_fold_shift": cand[0],
+           "rhd": cut(rhd), "r3t": cut(r3t), "r3u": cut(r3u), "r3v": cut(r3v),
+           "r3f": cut(r3f), "ssh": cut(ssh), "u": cut(u), "v": cut(v),
+           "zwz": cut(zwz), "e3f": cut(e3f0 * (1.0 + r3f * fe3)),
+           "ff_f": cut(m2["ff_f"]), "depth": cut(gdept * (1.0 + r3t))}
+    out["rhs_u"] = out["hpg_u"] + out["vor_u"]
+    out["rhs_v"] = out["hpg_v"] + out["vor_v"]
     return out
+
+
+def vor_een_u_replay(root: Path, kt: int, fe3mask, *, zero_image_row: bool) -> dict:
+    """NEMO's planetary vor_een trend on U, rows jj = Nje0-1 and Nje0: the two
+    top rows of ``rhs_term_replay``'s vorticity term at the step entry."""
+    full = rhs_term_replay(root, kt, fe3mask, zero_image_row=zero_image_row)
+    return {"pivot_row": full["vor_u"][-1], "row_below": full["vor_u"][-2],
+            "wet": {"pivot_row": full["wet_u"][-1], "row_below": full["wet_u"][-2]},
+            "t_fold_shift": full["t_fold_shift"]}
 
 
 def land_distance(wet: np.ndarray, cap: int = 40) -> np.ndarray:
@@ -975,7 +1033,8 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
         without_ratio_fold: bool = False,
         stage1_rhs_from_nemo: bool = False,
         without_stage1_rhs: bool = False,
-        without_written_order: bool = False) -> dict:
+        without_written_order: bool = False,
+        without_vor_order: bool = False) -> dict:
     if vor_fold_image:
         from legoesm.ocean.fidelity import nemo_testcase_recipe as _recipe
         calls: list = []
@@ -993,7 +1052,8 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
                       without_entry_depth=without_entry_depth,
                       without_ratio_fold=without_ratio_fold,
                       without_stage1_rhs=without_stage1_rhs,
-                      without_written_order=without_written_order)
+                      without_written_order=without_written_order,
+                      without_vor_order=without_vor_order)
         require(len(calls) > 0, "the vorticity fold-image arm was never traced")
         out["vor_fold_image_measurement_arm"] = {"traces": len(calls)}
         out["label"] = f"{out['label']} + MEASUREMENT ARM (fold-image V row "\
@@ -1052,7 +1112,8 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
         cfg = cfg._replace(barotropic=cfg.barotropic._replace(
             barotropic_substep_dt_nemo_literal=False))
     for off, name in ((without_stage1_rhs, "rk3_stage1_rhs_nemo_literal"),
-                      (without_written_order, "rk3_stage_velocity_written_order")):
+                      (without_written_order, "rk3_stage_velocity_written_order"),
+                      (without_vor_order, "een_vorticity_written_order")):
         if off:               # ROUND-6 BEFORE ARMS / plants, one option each
             require(getattr(cfg, name) is True, f"the card no longer selects {name}")
             cfg = cfg._replace(**{name: False})
@@ -1236,6 +1297,7 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
            "rk3_stage1_rhs_nemo_literal": bool(cfg.rk3_stage1_rhs_nemo_literal),
            "rk3_stage_velocity_written_order": bool(
                cfg.rk3_stage_velocity_written_order),
+           "een_vorticity_written_order": bool(cfg.een_vorticity_written_order),
            "per_kt": []}
     records = {kt: read_step(root, kt) for kt in scored if kt <= n_stage}
     before = {}             # the card's own chain: the state entering step kt
@@ -1437,6 +1499,48 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
                                     ("v", seen["v"][1:, :, 0]))]
             out["per_kt"].append({"kt": kt, "rows": rows,
                                   "first_unequal": first_unequal(rows)})
+    elif arm == "rhs_terms":
+        out["label"] = ("GIVEN-NEMO-ENTRY (stp_2D right-hand side, term by term, "
+                        "against the offline replay of NEMO's statements)")
+        fe3 = np.asarray(raw.fe3mask)[..., 0]
+        seen = {}
+        observed = model(_NEMOWSRK3TestHooks(
+            slow_forcing_rhs_term_observer=lambda d: seen.update(
+                {k: np.asarray(v) for k, v in d.items()})))
+        cut = {"u": lambda a: a[:, 1:, 0], "v": lambda a: a[1:, :, 0]}
+        for kt in scored:
+            g = records[kt]
+            seen.clear()
+            jax.block_until_ready(observed.step(seed(g, before[kt], kt), dt=card.dt_s))
+            jax.effects_barrier()           # the observer is an async callback
+            require(bool(seen), "the right-hand-side term observer never fired")
+            rep = rhs_term_replay(root, kt, fe3)
+            rows = []
+            for f in "uv":
+                wet = rep["wet_" + f]
+                terms = {k[:-2]: cut[f](v) for k, v in seen.items()
+                         if k.endswith("_" + f)}
+                total = terms["total"]
+                others = sum(v for k, v in terms.items()
+                             if k not in ("KE_PGF", "vortcor", "total"))
+                rows.append({
+                    "face": f,
+                    "card_term_max_abs": {k: float(np.max(np.abs(v[wet])))
+                                          for k, v in terms.items()},
+                    "other_terms_max_abs": float(np.max(np.abs(others[wet]))),
+                    "control_replay_vs_nemo": substep_row(
+                        f"rhs.{f}", g[f"b_{f}{f}_rhs_k1"], rep["rhs_" + f], wet, reg,
+                        plant=plant == "score"),
+                    "card_total_vs_nemo": substep_row(
+                        f"rhs.{f}", g[f"b_{f}{f}_rhs_k1"], total, wet, reg),
+                    "card_pressure_gradient_vs_replay": substep_row(
+                        f"hpg.{f}", rep["hpg_" + f], terms["KE_PGF"], wet, reg),
+                    "card_vorticity_vs_replay": substep_row(
+                        f"vor.{f}", rep["vor_" + f], terms["vortcor"], wet, reg),
+                    "replay_sum_of_card_terms_vs_nemo": substep_row(
+                        f"rhs.{f}", g[f"b_{f}{f}_rhs_k1"],
+                        terms["KE_PGF"] + terms["vortcor"], wet, reg)})
+            out["per_kt"].append({"kt": kt, "rows": rows})
     elif arm == "vor_fold_replay":
         out["label"] = ("GIVEN-NEMO-ENTRY (offline replay of vor_een on the "
                         "two top U rows; no model step enters the NEMO side)")
@@ -1548,6 +1652,21 @@ def _print(out: dict) -> None:
         return
     print(out["label"], "| een_fold_image_v_row =", out.get("een_fold_image_v_row"),
           "| T,S FROM THE CARD'S CHAIN" if out.get("ts_from_chain_measurement_arm") else "")
+    if out["arm"] == "rhs_terms":
+        for e in out["per_kt"]:
+            for r in e["rows"]:
+                print(f"kt{e['kt']} {r['face']} card terms (max abs):",
+                      {k: f"{v:.2e}" for k, v in r["card_term_max_abs"].items() if v})
+                for k in ("control_replay_vs_nemo", "card_total_vs_nemo",
+                          "card_pressure_gradient_vs_replay",
+                          "card_vorticity_vs_replay",
+                          "replay_sum_of_card_terms_vs_nemo"):
+                    x = r[k]
+                    print(f"   {k:36s} unequal {x['n_unequal']:5d} of {x['n_wet']} "
+                          f"max {x['max_abs']:.2e} (ref {x['ref_max_abs']:.2e}) "
+                          + " ".join(f"{n}={v['n_unequal']}"
+                                     for n, v in x["regions"].items()))
+        return
     if out["arm"] == "ratio_fold_replay":
         print("NEMO halo ssh == mirrored row below:",
               out["nemo_halo_ssh_equals_mirrored_row_below"],
@@ -1696,6 +1815,9 @@ def main(argv=None) -> int:
     ap.add_argument("--without-stage1-rhs", action="store_true",
                     help="the card with rk3_stage1_rhs_nemo_literal switched "
                          "off (a round-6 before arm; also the option's plant)")
+    ap.add_argument("--without-vor-order", action="store_true",
+                    help="BEFORE ARM: the vorticity trend in the operator's "
+                         "own operation order (round 6's card)")
     ap.add_argument("--without-written-order", action="store_true",
                     help="the card with rk3_stage_velocity_written_order "
                          "switched off (a round-6 before arm; also its plant)")
@@ -1723,7 +1845,8 @@ def main(argv=None) -> int:
                   without_ratio_fold=a.without_ratio_fold,
                   stage1_rhs_from_nemo=a.stage1_rhs_from_nemo,
                   without_stage1_rhs=a.without_stage1_rhs,
-                  without_written_order=a.without_written_order)
+                  without_written_order=a.without_written_order,
+                  without_vor_order=a.without_vor_order)
     except Exception as e:      # noqa: BLE001 -- refusals print and exit 2
         print(f"REFUSE: {type(e).__name__}: {e}", file=sys.stderr)
         return 2

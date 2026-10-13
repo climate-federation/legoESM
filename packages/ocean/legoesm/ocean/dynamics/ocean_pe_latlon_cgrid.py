@@ -2601,7 +2601,7 @@ def _bc_pv_flux(
     enstrophy_metric=False,
     reconstruct_zeta=False,
     vorticity_scheme="al81",
-    een_q_boundary="neumann_fill", een_fold_image_v=False,
+    een_q_boundary="neumann_fill", een_fold_image_v=False, een_written_order=False,
     een_e3f_scheme="min",
     een_metric_weighting="off",
     dz_ref=None,
@@ -2918,9 +2918,9 @@ def _bc_pv_flux(
             # under barotropic_coriolis="een_metric"
             # (barotropic_latlon_cgrid.een_barotropic_coriolis); this is the
             # baroclinic path's selector for it. "off" is bit-identical.
-            diag_vortcor_u, diag_vortcor_v = pv_flux_al81_partial_cell(
+            diag_vortcor_u, diag_vortcor_v = pv_flux_al81_partial_cell(written_order=een_written_order, *(  # noqa: E501
                 zeta, h_vtx, *_een_fold_image_v_row(
-                    een_fold_image_v, grid, h_v, v, h_u, u, u_mask_3d, v_mask_3d), vtx_mask_va,
+                    een_fold_image_v, grid, h_v, v, h_u, u, u_mask_3d, v_mask_3d), vtx_mask_va),
                 f_vtx=_f_vtx_al,
                 q_boundary=een_q_boundary,
                 metric_widths=_mw,
@@ -5445,7 +5445,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
                 reconstruct_zeta=config.vortcor_reconstruct_zeta,
                 vorticity_scheme="een_planetary",
                 een_q_boundary=getattr(config, "een_q_boundary", "neumann_fill"),
-                een_fold_image_v=getattr(config, "een_fold_image_v_row", False),
+                een_fold_image_v=getattr(config, "een_fold_image_v_row", False), een_written_order=getattr(config, "een_vorticity_written_order", False),  # noqa: E501
                 een_e3f_scheme=config.een_e3f_scheme,
                 een_metric_weighting=getattr(
                     config, "een_metric_weighting", "off"),
@@ -5489,7 +5489,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             enstrophy_metric=config.vortcor_enstrophy_metric,
             reconstruct_zeta=config.vortcor_reconstruct_zeta,
             vorticity_scheme=getattr(config, "vorticity_scheme", "al81"),
-            een_q_boundary=getattr(config, "een_q_boundary", "neumann_fill"), een_fold_image_v=getattr(config, "een_fold_image_v_row", False),  # noqa: E501
+            een_q_boundary=getattr(config, "een_q_boundary", "neumann_fill"), een_fold_image_v=getattr(config, "een_fold_image_v_row", False), een_written_order=getattr(config, "een_vorticity_written_order", False),  # noqa: E501
             een_e3f_scheme=config.een_e3f_scheme,
             een_metric_weighting=getattr(
                 config, "een_metric_weighting", "off"),
