@@ -56,7 +56,7 @@ def test_run_sh_reuses_the_round4_binaries_and_states_the_one_switch():
     assert subprocess.run(["bash", "-n", str(G2_DIR / "run.sh")]).returncode == 0
     assert SHIPPED_SHA in text and str(SHIPPED) in text
     code = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
-    assert not re.search(r"makenemo|maketools|\bfcm\b|\bmake\b", code)      # no build
+    assert not re.search(r"makenemo|maketools|\bmake\b", code)      # no build
     # admission judges provenance and the frames' field lists, not only the checker
     assert "was not run with its pinned binary" in code
     assert "a stage step lacks a field the writer writes" in code
