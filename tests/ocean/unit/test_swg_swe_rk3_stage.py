@@ -87,6 +87,30 @@ def test_rotated_potential_force_is_closed_wall_nondivergent_and_zero_integral()
     assert abs(np.sum(transport_v)) < 2.0e-14
 
 
+def test_rotated_potential_orientation_signs_and_all_four_corners():
+    potential = np.zeros((7, 8), dtype=np.float64)
+    potential[3, 4] = 2.0
+    vertex = np.ones_like(potential, dtype=bool)
+    vertex[[0, -1], :] = False
+    vertex[:, [0, -1]] = False
+    mask = np.ones_like(potential)
+    one = np.ones_like(potential)
+    force_u, force_v = swe_rotated_potential_forcing(
+        potential, one, one, one, one, mask, mask, vertex)
+    force_u, force_v = np.asarray(force_u), np.asarray(force_v)
+    assert force_u[3, 4] == 2.0 and force_u[4, 4] == -2.0
+    assert force_v[3, 4] == -2.0 and force_v[3, 5] == 2.0
+    for corner in ((0, 0), (0, -1), (-1, 0), (-1, -1)):
+        assert force_u[corner] == force_v[corner] == 0.0
+    # Flipping only V is a plausible rotated-gradient sign error; it must
+    # destroy the matched divergence cancellation by a large margin.
+    wrong_divergence = (force_u - np.roll(force_u, 1, axis=1)
+                        - force_v
+                        + np.concatenate([np.zeros_like(force_v[:1]),
+                                          force_v[:-1]], axis=0))
+    assert np.max(np.abs(wrong_divergence)) >= 4.0
+
+
 def test_absent_potential_is_bit_identical_to_certified_stage(card_and_model):
     card, model = card_and_model
     entry = _entry()

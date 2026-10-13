@@ -201,6 +201,30 @@ def test_compiled_day_mean_matches_post_step_production_states_on_tiny_grid():
     # A final-state substitution cannot satisfy this daily-mean test.
     assert np.any(np.asarray(means[1]) != np.asarray(final.u.data[:, 1:, 0]))
 
+    # A live nonlinear transport diagnostic is averaged at each post-step;
+    # it must not be reconstructed as h(mean eta) * mean velocity.
+    scanned_transport = driver.build_scanned_day_mean_stepper(
+        model, card.dt_s, forcing, 3,
+        transport_diagnostic=lambda eta, u, v: (
+            (1.0 + eta) * u, (1.0 + eta) * v))
+    _, exact = scanned_transport(state)
+    jax.block_until_ready(exact[3])
+    transport_samples = []
+    reference = state
+    for _ in range(3):
+        reference = model.step(reference, card.dt_s, surface_forcing=forcing)
+        eta = np.asarray(reference.eta.data)
+        u = np.asarray(reference.u.data[:, 1:, 0])
+        v = np.asarray(reference.v.data[1:, :, 0])
+        transport_samples.append(((1.0 + eta) * u, (1.0 + eta) * v))
+    expected_transport = tuple(np.mean(np.stack([
+        sample[index] for sample in transport_samples]), axis=0)
+        for index in (0, 1))
+    np.testing.assert_allclose(np.asarray(exact[3]), expected_transport[0],
+                               rtol=0.0, atol=1.0e-18)
+    np.testing.assert_allclose(np.asarray(exact[4]), expected_transport[1],
+                               rtol=0.0, atol=1.0e-18)
+
 
 def test_compiled_hourly_sampler_retains_right_endpoints_only():
     import jax
@@ -311,6 +335,15 @@ def test_snapshot_admission_and_bitwise_comparison_have_live_plants(tmp_path):
     result = driver.compare_native_state_bitwise(planted, path)
     assert not result["all_equal"]
     assert result["ssh_m_unequal"] > 0
+    # IEEE-word equality must distinguish signed zero even though numeric
+    # equality and an absolute-difference comparator cannot.
+    signed_zero = arrays["ssh_m"].copy()
+    signed_zero[0, 0] = -0.0
+    signed_zero_state = state._replace(eta=_Field(signed_zero))
+    signed = driver.compare_native_state_bitwise(signed_zero_state, path)
+    assert signed["ssh_m_max_abs"] == 0.0
+    assert signed["ssh_m_unequal"] == 1
+    assert not signed["all_equal"]
     np.savez(path, **(arrays | {"ssh_m": arrays["ssh_m"] + 1.0}))
     with pytest.raises(ValueError, match="hash differs"):
         driver.admit_listed_snapshot(path)

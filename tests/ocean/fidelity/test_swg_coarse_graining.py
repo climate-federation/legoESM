@@ -151,6 +151,72 @@ def test_jax_restrictor_matches_numpy_eager_jit_and_has_a_tangent():
     assert any(np.any(np.asarray(value) != 0.0) for value in tangent)
 
 
+def test_daily_mean_restricts_mean_transport_not_product_of_means():
+    source = coarse.cgrid_geometry(SWG_MADDISON_NAMELIST)
+    target = coarse.cgrid_geometry(SWG_DG50_NAMELIST)
+    first = _synthetic_state(source, seed=31)
+    second = _synthetic_state(source, seed=32)
+    # Amplify eta/velocity covariance so the forbidden product of means is
+    # decisively different from mean(h*u).
+    first["T"] += 2.0
+    first["U"] += 1.0
+    first["V"] -= 1.0
+    second["T"] -= 2.0
+    second["U"] -= 1.0
+    second["V"] += 1.0
+    transports = [coarse.native_face_transports(state, source)
+                  for state in (first, second)]
+    mean_transport = {
+        kind: 0.5 * (transports[0][kind] + transports[1][kind])
+        for kind in ("U", "V")
+    }
+    mean_fields = {kind: 0.5 * (first[kind] + second[kind])
+                   for kind in ("T", "U", "V")}
+    exact = coarse.conservative_restrict_daily_mean(
+        mean_fields["T"], mean_transport, source, target)
+    forbidden = coarse.conservative_restrict_cgrid(mean_fields, source, target)
+    assert np.max(np.abs(exact["U"] - forbidden["U"])) > 1.0e-4
+    assert np.max(np.abs(exact["V"] - forbidden["V"])) > 1.0e-4
+
+
+def test_temporal_continuity_detects_wrong_ssh_restriction():
+    geometry = coarse.cgrid_geometry(SWG_DG50_NAMELIST)
+    rng = np.random.default_rng(84)
+    transports = {
+        kind: np.where(geometry["mask"][kind],
+                       rng.normal(size=geometry["mask"][kind].shape), 0.0)
+        for kind in ("U", "V")
+    }
+    interval = 86_400.0
+    start = np.zeros_like(geometry["mask"]["T"], dtype=np.float64)
+    divergence = coarse.transport_divergence(transports, geometry)
+    end = start - interval * divergence
+    residual = coarse.temporal_continuity_residual(
+        start, end, transports, geometry, interval)
+    assert np.max(np.abs(residual)) <= 2.0e-22
+    wrong = end.copy()
+    wrong[geometry["mask"]["T"]] += 1.0
+    planted = coarse.temporal_continuity_residual(
+        start, wrong, transports, geometry, interval)
+    assert np.max(np.abs(planted)) >= 1.0 / interval
+
+
+def test_jax_live_transport_diagnostic_matches_numpy():
+    import jax
+    import jax.numpy as jnp
+
+    geometry = coarse.cgrid_geometry(SWG_DG50_NAMELIST)
+    fields = _synthetic_state(geometry, seed=45)
+    expected = coarse.native_face_transports(fields, geometry)
+    diagnostic = jax.jit(coarse.build_jax_native_transport_diagnostic(
+        SWG_DG50_NAMELIST))
+    actual = diagnostic(*(jnp.asarray(fields[kind])
+                          for kind in ("T", "U", "V")))
+    for kind, value in zip(("U", "V"), actual, strict=True):
+        np.testing.assert_allclose(
+            np.asarray(value), expected[kind], rtol=2.0e-15, atol=2.0e-15)
+
+
 def test_truth_source_decks_are_explicit_and_nested_at_dg50():
     fine = coarse.truth_source_namelist("dg625")
     sensitivity = coarse.truth_source_namelist("dg3125")

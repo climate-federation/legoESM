@@ -80,8 +80,9 @@ def run_profile(window_days: int, mode: str) -> dict:
     # Construct through the shared factory and initialize state, but take no
     # update: this round proves plumbing and gradient reachability, not fit.
     optimizer = create_swg_optimizer(TrainingConfig(
-        lr=1.0e-4, warmup_steps=10, total_steps=100,
-        weight_decay=0.0, grad_clip_norm=1.0, optimizer="adam"))
+        lr=1.0e-3, warmup_steps=0, total_steps=100,
+        weight_decay=4.0e-3, grad_clip_norm=1.0e30,
+        optimizer="adamw"))
     optimizer.init(eqx.filter(network, eqx.is_inexact_array))
     normalizers = BalancedNormalizers(1.0, 1.0, 1.0)
 
@@ -94,7 +95,9 @@ def run_profile(window_days: int, mode: str) -> dict:
         predicted = jax.tree.map(lambda value: value[None], balanced)
         target = jax.tree.map(jnp.zeros_like, balanced)
         return balanced_trajectory_loss(
-            predicted, target, geometry, normalizers, kind="point")
+            predicted, target, geometry, normalizers, kind="point",
+            beta_m1_s1=card.resolved_namelist.rn_beta_m_s,
+            basin_length_m=card.resolved_namelist.rn_domsiz_m)
 
     if mode == "forward":
         measured = eqx.filter_jit(objective)

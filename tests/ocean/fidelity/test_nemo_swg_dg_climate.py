@@ -75,19 +75,35 @@ def test_synthetic_metrics_have_known_answer():
     assert np.array_equal(out["basin_mean_ke_m2_s2"], expected_ke)
     assert np.array_equal(out["jet_y_m"], np.full(4, 2.0))
     assert np.array_equal(out["jet_eastward_speed_m_s"], expected_mean_u[2])
-    assert out["spectrum_wavenumber_m-1"].shape == (2,)
+    assert out["spectrum_wavenumber_m-1"].ndim == 1
+    assert out["spectrum_wavenumber_m-1"].size > 2
     assert np.all(np.isfinite(out["mean_kinetic_energy_spectrum_m3_s2"]))
     assert 0.0 <= out["top_octave_ke_fraction"][0] <= 1.0
     assert 0.0 <= out["top_octave_enstrophy_fraction"][0] <= 1.0
-    assert np.all(out["native_checkerboard_index"] >= 0.0)
+    assert np.all(out["native_grid_noise_index"] >= 0.0)
 
 
-def test_checkerboard_index_has_a_live_grid_noise_plant():
+def test_local_grid_noise_index_catches_phase_reversed_checkerboard():
     jj, ii = np.indices((8, 8))
     plant = np.where((ii + jj) % 2 == 0, 1.0, -1.0)
-    assert climate.checkerboard_index(plant, np.zeros_like(plant)) == 1.0
+    first = climate.grid_noise_index(plant, np.zeros_like(plant))
+    second = climate.grid_noise_index(-plant, np.zeros_like(plant))
+    assert first > 2.8 and second == first
     smooth = np.broadcast_to(np.linspace(-1.0, 1.0, 8), (8, 8))
-    assert climate.checkerboard_index(smooth, np.zeros_like(smooth)) < 0.2
+    assert climate.grid_noise_index(smooth, np.zeros_like(smooth)) < 1.0e-12
+
+
+def test_dst_streamfunction_spectrum_resolves_a_closed_basin_mode():
+    n = 24
+    y = np.arange(1, n + 1)[:, None]
+    x = np.arange(1, n + 1)[None, :]
+    psi = np.sin(2 * np.pi * y / (n + 1)) * np.sin(3 * np.pi * x / (n + 1))
+    u = -np.gradient(psi, axis=0, edge_order=2)
+    v = np.gradient(psi, axis=1, edge_order=2)
+    _, ke, enstrophy = climate.closed_basin_spectra(u, v, 1.0)
+    expected_shell = int(round(np.sqrt(2**2 + 3**2)))
+    assert np.argmax(ke) + 1 == expected_shell
+    assert np.argmax(enstrophy) + 1 == expected_shell
 
 
 def test_identical_inputs_have_identical_spectra_and_zero_comparisons():

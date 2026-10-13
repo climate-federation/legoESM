@@ -33,3 +33,32 @@ def test_reference_adequacy_gate_passes_identity_and_fails_ten_percent_plant():
     assert not planted["adequate"]
     assert not planted["passes"]["kinetic_energy_relative_error"]
     assert not planted["passes"]["eddy_kinetic_energy_relative_error"]
+
+
+def test_early_common_path_reports_crossings_and_correlation_failure():
+    wet = np.ones((4, 4), dtype=bool)
+    y, x = np.mgrid[:4, :4]
+    base = np.stack([np.sin(x + day) + np.cos(y - day)
+                     for day in range(8)])
+    truth = {
+        "ssh": base,
+        "relative_vorticity": 2.0 * base,
+        "velocity": np.stack((base, -base), axis=1),
+    }
+    identity = adequacy.early_path_metrics(truth, truth, wet)
+    assert identity["adequate"]
+    planted = {name: value.copy() for name, value in truth.items()}
+    planted["ssh"][2:] *= -1.0
+    failed = adequacy.early_path_metrics(planted, truth, wet)
+    assert not failed["adequate"]
+    assert failed["fields"]["ssh"]["first_day_above"]["0.1"] == 3
+
+
+def test_reference_cli_exits_nonzero_on_inadequacy(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        adequacy, "compare_references",
+        lambda *args, **kwargs: {"adequate": False})
+    assert adequacy.main([
+        "--candidate-root", str(tmp_path / "a"),
+        "--sensitivity-root", str(tmp_path / "b"),
+        "--years", "1", "--json", str(tmp_path / "report.json")]) == 1

@@ -13,6 +13,8 @@ from scipy.fft import dctn, idctn
 HOURS_PER_DAY = 24
 SECONDS_PER_HOUR = 3_600.0
 DEFAULT_START_DAYS = tuple(range(731, 1092, 40))
+NO_JUMP_FACTOR = 2.0
+FAST_ENERGY_TRANSIENT_FACTOR = 2.0
 
 
 def sha256(path: Path) -> str:
@@ -118,6 +120,101 @@ def initialization_ratios(
                 float(shock / closure) if closure > 0.0 else float("inf")),
         }
     return result
+
+
+def _state_admission(record: dict, label: str) -> dict:
+    """Apply the pre-registered per-start gate to one initialized state."""
+    error = np.asarray(
+        record[f"{label}_relative_vorticity_error_rms_s-1"],
+        dtype=np.float64)
+    fast = np.asarray(
+        record[f"{label}_fast_divergent_ke_m2_s-2"], dtype=np.float64)
+    ssh = np.asarray(record[f"{label}_ssh_tendency_rms_m_s"], dtype=np.float64)
+    if error.shape != (48,) or fast.shape != (48,) or ssh.shape != (48,) \
+            or not all(np.all(np.isfinite(x)) for x in (error, fast, ssh)):
+        raise ValueError(f"{label} admission requires 48 finite hourly values")
+    jump_limit = NO_JUMP_FACTOR * error[23] / HOURS_PER_DAY
+    late_fast = float(np.mean(fast[24:48], dtype=np.float64))
+    fast_limit = FAST_ENERGY_TRANSIENT_FACTOR * late_fast
+    no_jump = bool(error[0] <= jump_limit)
+    fast_bounded = bool(np.max(fast[:6]) <= fast_limit)
+    return {
+        "no_jump": no_jump,
+        "zeta_error_hour1_s-1": float(error[0]),
+        "zeta_error_hour24_s-1": float(error[23]),
+        "zeta_error_hour1_limit_s-1": float(jump_limit),
+        "fast_energy_bounded": fast_bounded,
+        "fast_energy_max_hours1_6_m2_s-2": float(np.max(fast[:6])),
+        "fast_energy_mean_hours25_48_m2_s-2": late_fast,
+        "fast_energy_limit_m2_s-2": fast_limit,
+        "ssh_tendency_rms_m_s": {
+            str(hour): float(ssh[hour - 1]) for hour in (1, 6, 24, 48)
+        },
+        "admitted": bool(no_jump and fast_bounded),
+    }
+
+
+def apply_registered_admission(report: dict, hourly_root: Path) -> dict:
+    """Augment a completed ten-start report with fail-closed admissions."""
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import SWG_DG50_NAMELIST
+    from legoesm.ocean.fidelity.swg_coarse_graining import (
+        cgrid_geometry,
+        restricted_relative_vorticity,
+    )
+
+    records = report.get("records", [])
+    if len(records) != 10:
+        raise ValueError("balanced admission requires exactly ten start records")
+    geometry = cgrid_geometry(SWG_DG50_NAMELIST)
+    wet = np.asarray(geometry["mask"]["T"], dtype=bool)
+    spacing = float(geometry["spacing_m"])
+    for record in records:
+        target, provenance = _load_hourly_target(
+            hourly_root / f"start_day{int(record['start_day']):04d}")
+        target_zeta = np.stack([
+            restricted_relative_vorticity(
+                {kind: target[kind][hour] for kind in ("T", "U", "V")},
+                geometry)
+            for hour in range(48)
+        ])
+        truth_fast = np.asarray([
+            fast_divergent_energy(
+                target["U"][hour], target["V"][hour], wet, spacing)
+            for hour in range(48)
+        ])
+        truth_rms = np.sqrt(np.mean(
+            target_zeta[:, wet] ** 2, axis=1, dtype=np.float64))
+        record["hourly_target"] = provenance
+        record["truth_relative_vorticity_rms_s-1"] = {
+            str(hour): float(truth_rms[hour - 1]) for hour in (1, 6, 24, 48)
+        }
+        record["truth_fast_divergent_ke_m2_s-2"] = {
+            "max_hours1_6": float(np.max(truth_fast[:6])),
+            "mean_hours25_48": float(np.mean(truth_fast[24:48])),
+        }
+        record["admission"] = {
+            label: _state_admission(record, label)
+            for label in ("conservative", "raw")
+        }
+    conservative = [
+        record["admission"]["conservative"]["admitted"] for record in records
+    ]
+    raw = [record["admission"]["raw"]["admitted"] for record in records]
+    report["admission_rule"] = {
+        "pre_registered_manifest": (
+            "manifests/nemo_testcases_l1_swg_online_round4_preregister.json"),
+        "no_jump": "error_h1 <= 2 * error_h24 / 24",
+        "fast_energy": "max_h1_6 <= 2 * mean_h25_48",
+        "per_start": True,
+        "all_ten_required": True,
+    }
+    report["admission_summary"] = {
+        "conservative_pass_count": int(sum(conservative)),
+        "raw_pass_count": int(sum(raw)),
+        "conservative_admitted_for_training": bool(all(conservative)),
+        "raw_admitted_for_training": bool(all(raw)),
+    }
+    return report
 
 
 def _load_coarse_state(state, forcing, path: Path):
@@ -329,26 +426,37 @@ def run_experiment(raw_root: Path, conservative_root: Path,
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--raw-root", type=Path, required=True)
-    parser.add_argument("--conservative-root", type=Path, required=True)
+    parser.add_argument("--raw-root", type=Path)
+    parser.add_argument("--conservative-root", type=Path)
     parser.add_argument("--hourly-root", type=Path, required=True)
+    parser.add_argument("--existing-json", type=Path)
     parser.add_argument("--json", type=Path, required=True)
     parser.add_argument("--start-days", type=int, nargs="+",
                         default=DEFAULT_START_DAYS)
     args = parser.parse_args(argv)
     try:
-        report = run_experiment(
-            args.raw_root, args.conservative_root, args.hourly_root,
-            tuple(args.start_days))
+        if args.existing_json is None:
+            if args.raw_root is None or args.conservative_root is None:
+                raise ValueError("raw and conservative roots are required")
+            report = run_experiment(
+                args.raw_root, args.conservative_root, args.hourly_root,
+                tuple(args.start_days))
+        else:
+            if args.raw_root is not None or args.conservative_root is not None:
+                raise ValueError("existing-json cannot be combined with run roots")
+            report = json.loads(args.existing_json.read_text())
+        report = apply_registered_admission(report, args.hourly_root)
         args.json.parent.mkdir(parents=True, exist_ok=True)
         args.json.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"REFUSE: {exc}")
         return 2
-    print("PASS " + " ".join(
-        f"h{lead}={values['median_shock_to_closure_ratio']:.6g}"
-        for lead, values in report["summary"].items()))
-    return 0
+    summary = report["admission_summary"]
+    print(
+        f"{'PASS' if summary['conservative_admitted_for_training'] else 'FAIL'} "
+        f"conservative={summary['conservative_pass_count']}/10 "
+        f"raw={summary['raw_pass_count']}/10")
+    return 0 if summary["conservative_admitted_for_training"] else 1
 
 
 if __name__ == "__main__":

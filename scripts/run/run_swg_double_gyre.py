@@ -166,7 +166,11 @@ def compare_native_state_bitwise(state, path: Path) -> dict:
     for name in actual:
         if actual[name].shape != expected[name].shape:
             raise ValueError(f"comparison shape differs for {name}")
-        unequal = int(np.count_nonzero(actual[name] != expected[name]))
+        if actual[name].dtype != np.dtype("float64") \
+                or expected[name].dtype != np.dtype("float64"):
+            raise ValueError(f"bitwise comparison requires float64 {name}")
+        unequal = int(np.count_nonzero(
+            actual[name].view(np.uint64) != expected[name].view(np.uint64)))
         result[f"{name}_unequal"] = unequal
         result[f"{name}_max_abs"] = float(
             np.max(np.abs(actual[name] - expected[name])))
@@ -204,8 +208,9 @@ def build_scanned_stepper(model, dt_s: float, forcing, n_steps: int):
     return scanned
 
 
-def build_scanned_day_mean_stepper(model, dt_s: float, forcing, n_steps: int):
-    """Return one JIT program for a day and its IOIPSL-order state means."""
+def build_scanned_day_mean_stepper(model, dt_s: float, forcing, n_steps: int,
+                                   transport_diagnostic=None):
+    """Return one JIT program for exact state and live-transport means."""
     import jax
     import jax.numpy as jnp
 
@@ -213,7 +218,7 @@ def build_scanned_day_mean_stepper(model, dt_s: float, forcing, n_steps: int):
         raise ValueError("daily-mean scan n_steps must be a positive integer")
 
     def scan_body(carry, count):
-        state, mean_ssh, mean_u, mean_v = carry
+        state, mean_ssh, mean_u, mean_v, mean_qu, mean_qv = carry
         state = model.step(state, dt_s, surface_forcing=forcing)
         ssh = state.eta.data
         u = state.u.data[:, 1:, 0]
@@ -224,7 +229,11 @@ def build_scanned_day_mean_stepper(model, dt_s: float, forcing, n_steps: int):
         mean_ssh = (mean_ssh * old_count + ssh) / count
         mean_u = (mean_u * old_count + u) / count
         mean_v = (mean_v * old_count + v) / count
-        return (state, mean_ssh, mean_u, mean_v), None
+        if transport_diagnostic is not None:
+            qu, qv = transport_diagnostic(ssh, u, v)
+            mean_qu = (mean_qu * old_count + qu) / count
+            mean_qv = (mean_qv * old_count + qv) / count
+        return (state, mean_ssh, mean_u, mean_v, mean_qu, mean_qv), None
 
     @jax.jit
     def scanned(state):
@@ -232,11 +241,15 @@ def build_scanned_day_mean_stepper(model, dt_s: float, forcing, n_steps: int):
             jnp.zeros_like(state.eta.data),
             jnp.zeros_like(state.u.data[:, 1:, 0]),
             jnp.zeros_like(state.v.data[1:, :, 0]),
+            jnp.zeros_like(state.u.data[:, 1:, 0]),
+            jnp.zeros_like(state.v.data[1:, :, 0]),
         )
         counts = jnp.arange(1, n_steps + 1, dtype=state.eta.data.dtype)
-        (state, mean_ssh, mean_u, mean_v), _ = jax.lax.scan(
+        (state, mean_ssh, mean_u, mean_v, mean_qu, mean_qv), _ = jax.lax.scan(
             scan_body, (state, *means), counts)
-        return state, (mean_ssh, mean_u, mean_v)
+        if transport_diagnostic is None:
+            return state, (mean_ssh, mean_u, mean_v)
+        return state, (mean_ssh, mean_u, mean_v, mean_qu, mean_qv)
 
     return scanned
 
@@ -606,10 +619,16 @@ def run_long(
             state = seed_steady_forcing_carry(state, forcing)
         day_stepper = build_scanned_stepper(
             model, card.dt_s, forcing, steps_per_day)
-        day_mean_stepper = (
-            build_scanned_day_mean_stepper(
-                model, card.dt_s, forcing, steps_per_day)
-            if daily_means else None)
+        if daily_means:
+            from legoesm.ocean.fidelity.swg_coarse_graining import (
+                build_jax_native_transport_diagnostic,
+            )
+            transport_diagnostic = build_jax_native_transport_diagnostic(namelist)
+            day_mean_stepper = build_scanned_day_mean_stepper(
+                model, card.dt_s, forcing, steps_per_day,
+                transport_diagnostic=transport_diagnostic)
+        else:
+            day_mean_stepper = None
         if hourly_targets:
             from legoesm.ocean.fidelity.nemo_testcase_recipe import (
                 SWG_DG50_NAMELIST,
@@ -792,6 +811,10 @@ def run_long(
                 "ssh_daily_mean_m": np.asarray(means[0], dtype=np.float64),
                 "u_daily_mean_m_s": np.asarray(means[1], dtype=np.float64),
                 "v_daily_mean_m_s": np.asarray(means[2], dtype=np.float64),
+                "u_daily_mean_transport_m3_s": np.asarray(
+                    means[3], dtype=np.float64),
+                "v_daily_mean_transport_m3_s": np.asarray(
+                    means[4], dtype=np.float64),
             })
         if hourly is not None:
             source_day = (0 if restart_provenance is None else

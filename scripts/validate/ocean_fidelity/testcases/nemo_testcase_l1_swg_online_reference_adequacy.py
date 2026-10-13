@@ -18,12 +18,15 @@ from nemo_testcase_l1_swg_dg_climate import (  # noqa: E402
 )
 
 ADEQUACY_RELATIVE_BAR = 0.10
+EARLY_PATTERN_CORRELATION_BAR = 0.99
+EARLY_DAYS = 8
 DAYS_PER_YEAR = 365
 
 
 def adequacy_metrics(candidate: dict[str, np.ndarray],
                      sensitivity: dict[str, np.ndarray],
-                     *, basin_width_m: float) -> dict:
+                     *, basin_width_m: float,
+                     uncertainty: dict[str, float] | None = None) -> dict:
     """Return the four pre-registered candidate-versus-sensitivity scores."""
     if not np.isfinite(basin_width_m) or basin_width_m <= 0.0:
         raise ValueError("basin width must be positive finite")
@@ -55,49 +58,142 @@ def adequacy_metrics(candidate: dict[str, np.ndarray],
             spectrum_candidate - spectrum_sensitivity), dtype=np.float64)
             / spectrum_denominator),
     }
+    bars = {name: max(ADEQUACY_RELATIVE_BAR,
+                      0.0 if uncertainty is None else uncertainty[name])
+            for name in scores}
     return {
         "scores": scores,
-        "bar": ADEQUACY_RELATIVE_BAR,
-        "passes": {name: value <= ADEQUACY_RELATIVE_BAR
+        "bars": bars,
+        "sampling_uncertainty": uncertainty,
+        "passes": {name: value <= bars[name]
                    for name, value in scores.items()},
-        "adequate": all(value <= ADEQUACY_RELATIVE_BAR
-                        for value in scores.values()),
+        "adequate": all(value <= bars[name]
+                        for name, value in scores.items()),
     }
+
+
+def early_path_metrics(candidate: dict[str, np.ndarray],
+                       sensitivity: dict[str, np.ndarray],
+                       wet: np.ndarray) -> dict:
+    """Compare common-path truncation error through the first eight days."""
+    wet = np.asarray(wet, dtype=bool)
+    records = {}
+    for name in ("ssh", "relative_vorticity", "velocity"):
+        left = np.asarray(candidate[name], dtype=np.float64)
+        right = np.asarray(sensitivity[name], dtype=np.float64)
+        if left.shape != right.shape or left.shape[0] < EARLY_DAYS:
+            raise ValueError(f"early {name} arrays are incomplete")
+        if name == "velocity":
+            left_flat = left[:EARLY_DAYS, :, wet]
+            right_flat = right[:EARLY_DAYS, :, wet]
+        else:
+            left_flat = left[:EARLY_DAYS, wet]
+            right_flat = right[:EARLY_DAYS, wet]
+        rms = np.sqrt(np.mean((left_flat - right_flat) ** 2, axis=1))
+        denominator = np.sqrt(np.mean(right_flat**2, axis=1))
+        if np.any(denominator <= 0.0):
+            raise ValueError(f"early {name} normalization is zero")
+        nrms = rms / denominator
+        correlation = np.asarray([
+            np.corrcoef(left_flat[day].ravel(), right_flat[day].ravel())[0, 1]
+            for day in range(EARLY_DAYS)])
+        if not np.all(np.isfinite(correlation)):
+            raise ValueError(f"early {name} pattern correlation is undefined")
+        crossings = {}
+        for bar in (0.01, 0.10):
+            hit = np.flatnonzero(nrms > bar)
+            crossings[str(bar)] = None if hit.size == 0 else int(hit[0] + 1)
+        records[name] = {
+            "normalized_rms_by_day": nrms.tolist(),
+            "pattern_correlation_by_day": correlation.tolist(),
+            "first_day_above": crossings,
+            "passes": bool(np.all(nrms <= ADEQUACY_RELATIVE_BAR)
+                           and np.all(correlation >= EARLY_PATTERN_CORRELATION_BAR)),
+        }
+    return {
+        "days": EARLY_DAYS,
+        "normalized_rms_bar": ADEQUACY_RELATIVE_BAR,
+        "pattern_correlation_bar": EARLY_PATTERN_CORRELATION_BAR,
+        "fields": records,
+        "adequate": all(item["passes"] for item in records.values()),
+    }
+
+
+def _load_early_fields(root: Path) -> dict[str, np.ndarray]:
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import SWG_DG50_NAMELIST
+    from legoesm.ocean.fidelity.swg_coarse_graining import (
+        cgrid_geometry,
+        restricted_relative_vorticity,
+    )
+
+    manifest = json.loads((root / "manifest.json").read_text())
+    pins = manifest.get("output_daily_sha256", manifest.get("daily_sha256", {}))
+    geometry = cgrid_geometry(SWG_DG50_NAMELIST)
+    fields = {name: [] for name in ("ssh", "relative_vorticity", "velocity")}
+    for day in range(1, EARLY_DAYS + 1):
+        path = root / f"day{day:04d}.npz"
+        if sha256(path) != pins.get(path.name):
+            raise ValueError(f"early-path digest differs: {path}")
+        with np.load(path, allow_pickle=False) as saved:
+            native = {"T": np.asarray(saved["ssh_m"]),
+                      "U": np.asarray(saved["u_m_s"]),
+                      "V": np.asarray(saved["v_m_s"])}
+        fields["ssh"].append(native["T"])
+        fields["relative_vorticity"].append(
+            restricted_relative_vorticity(native, geometry))
+        fields["velocity"].append(np.stack((native["U"], native["V"])))
+    return {name: np.stack(value) for name, value in fields.items()}
+
+
+def _year_to_year_uncertainty(years: list[dict[str, np.ndarray]],
+                              basin_width_m: float) -> dict[str, float]:
+    """Maximum adjacent 6.25-km annual difference in each gate metric."""
+    pairs = [adequacy_metrics(years[index], years[index + 1],
+                              basin_width_m=basin_width_m)["scores"]
+             for index in range(len(years) - 1)]
+    return {name: max(pair[name] for pair in pairs) for name in pairs[0]}
 
 
 def compare_references(candidate_root: Path, sensitivity_root: Path,
                        *, years: int) -> dict:
-    """Compare identical complete years from rest on the common dg50 grid."""
+    """Compare the early common path and one-year statistics with uncertainty."""
     from legoesm.ocean.fidelity.nemo_testcase_recipe import (
         SWG_DG50_NAMELIST,
         build_swg_card,
     )
 
-    if type(years) is not int or years <= 0:
-        raise ValueError("years must be a positive integer")
-    records = []
-    for year in range(1, years + 1):
+    if years != 1:
+        raise ValueError("the registered sensitivity acquisition is exactly one year")
+    candidate_years = []
+    sensitivity_year = None
+    for year in range(1, 4):
         start_day = (year - 1) * DAYS_PER_YEAR + 1
-        providers = (
-            filtered_npz_provider(
-                candidate_root, DAYS_PER_YEAR, start_day=start_day,
-                name="6.25 km truth"),
-            filtered_npz_provider(
-                sensitivity_root, DAYS_PER_YEAR, start_day=start_day,
-                name="3.125 km sensitivity"),
-        )
-        diagnosed = [diagnose(
+        provider = filtered_npz_provider(
+            candidate_root, DAYS_PER_YEAR, start_day=start_day,
+            name=f"6.25 km truth year {year}")
+        candidate_years.append(diagnose(
             provider, days=DAYS_PER_YEAR,
             card=build_swg_card(SWG_DG50_NAMELIST),
-            namelist=SWG_DG50_NAMELIST) for provider in providers]
-        records.append({
-            "year": year,
-            "days": [start_day, start_day + DAYS_PER_YEAR - 1],
-            **adequacy_metrics(
-                diagnosed[0], diagnosed[1],
-                basin_width_m=SWG_DG50_NAMELIST.rn_domsiz_m),
-        })
-    adequate = all(record["adequate"] for record in records)
+            namelist=SWG_DG50_NAMELIST))
+        if year == 1:
+            sensitivity_year = diagnose(
+                filtered_npz_provider(
+                    sensitivity_root, DAYS_PER_YEAR, start_day=1,
+                    name="3.125 km sensitivity year 1"),
+                days=DAYS_PER_YEAR, card=build_swg_card(SWG_DG50_NAMELIST),
+                namelist=SWG_DG50_NAMELIST)
+    uncertainty = _year_to_year_uncertainty(
+        candidate_years, SWG_DG50_NAMELIST.rn_domsiz_m)
+    annual = adequacy_metrics(
+        candidate_years[0], sensitivity_year,
+        basin_width_m=SWG_DG50_NAMELIST.rn_domsiz_m,
+        uncertainty=uncertainty)
+    wet = np.asarray(build_swg_card(SWG_DG50_NAMELIST).recipe.land_mask,
+                     dtype=bool)
+    early = early_path_metrics(
+        _load_early_fields(candidate_root),
+        _load_early_fields(sensitivity_root), wet)
+    adequate = bool(early["adequate"] and annual["adequate"])
     return {
         "schema": "swg-online-reference-adequacy-v1",
         "candidate_root": str(candidate_root.resolve()),
@@ -105,10 +201,13 @@ def compare_references(candidate_root: Path, sensitivity_root: Path,
         "candidate_manifest_sha256": sha256(candidate_root / "manifest.json"),
         "sensitivity_manifest_sha256": sha256(
             sensitivity_root / "manifest.json"),
-        "years": records,
+        "early_common_path": early,
+        "year1_statistics": annual,
         "rule": (
-            "6.25 km is adequate only when all yearly dg50-restricted KE, EKE, "
-            "jet-position, and KE-spectrum scores are <=10%"),
+            "6.25 km is adequate only when days 1-8 have NRMS<=10% and "
+            "correlation>=0.99 for SSH/vorticity/velocity, and year-1 KE, EKE, "
+            "jet and DST-spectrum differences are <=max(10%, measured 6.25-km "
+            "year-to-year variability)"),
         "adequate": adequate,
         "decision_needed": not adequate,
     }
@@ -129,8 +228,10 @@ def main(argv=None) -> int:
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"REFUSE: {exc}")
         return 2
-    print(f"PASS measured={args.years} adequate={report['adequate']}")
-    return 0
+    print(
+        f"{'PASS' if report['adequate'] else 'FAIL'} "
+        f"measured={args.years} adequate={report['adequate']}")
+    return 0 if report["adequate"] else 1
 
 
 if __name__ == "__main__":

@@ -232,13 +232,19 @@ def measure_twins(control_root: Path, perturbed_root: Path) -> dict:
         rotational_velocity_rms[day] = np.sqrt(np.mean(
             rotational_u[tmask] ** 2 + rotational_v[tmask] ** 2,
             dtype=np.float64))
-    crossing = first_efold_crossing(lead, ssh_rms, initial_ssh_rms)
-    if crossing is None:
-        fit_efold = None
+    if perturb_kind == "white-ssh":
+        crossing = first_efold_crossing(lead, ssh_rms, initial_ssh_rms)
+        if crossing is None:
+            fit_efold = None
+        else:
+            fit_stop = max(2, int(np.ceil(crossing)) + 1)
+            slope = np.polyfit(lead[:fit_stop], np.log(ssh_rms[:fit_stop]), 1)[0]
+            fit_efold = float(1.0 / slope) if slope > 0.0 else None
     else:
-        fit_stop = max(2, int(np.ceil(crossing)) + 1)
-        slope = np.polyfit(lead[:fit_stop], np.log(ssh_rms[:fit_stop]), 1)[0]
-        fit_efold = float(1.0 / slope) if slope > 0.0 else None
+        # A balanced-vorticity perturbation has exactly zero initial SSH by
+        # construction; an SSH e-folding time is undefined, not an error.
+        crossing = None
+        fit_efold = None
     fit = balanced_fit(lead[1:], zeta_rms[1:], divergence_rms[1:])
     return {
         "schema": "swg-online-predictability-v2",
@@ -373,12 +379,13 @@ def main(argv=None) -> int:
         return 2
     if tangent_mode:
         print(f"PASS tangent_steps={report['steps']} nonzero={report['tangent_nonzero']}")
+        return 0 if report["tangent_nonzero"] else 1
     else:
         print(
             f"PASS leads={len(report['lead_days']) - 1} "
             f"balanced_efold_days="
             f"{report['balanced_exponential_fit']['efolding_days']}")
-    return 0
+        return 0
 
 
 if __name__ == "__main__":

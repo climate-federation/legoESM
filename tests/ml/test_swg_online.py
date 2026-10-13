@@ -1,12 +1,15 @@
 """Direct tests for the SWG online-learning network, loss, and segment seam."""
 from __future__ import annotations
 
+from pathlib import Path
+
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
 from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+from legoesm.ml.training import TrainingConfig
 from legoesm.ocean.dynamics.swe_rk3 import _entry_from_state, swe_rk3_step
 from legoesm.ocean.fidelity.nemo_testcase_recipe import (
     SWG_DG50_NAMELIST,
@@ -20,9 +23,15 @@ from legoesm.training.swg_online import (
     SWGNetworkSpec,
     SWGScalarPotentialCNN,
     assert_network_gradients_live,
+    balanced_normalizers_from_training,
     balanced_trajectory_loss,
     build_closure_geometry,
     build_segment_fn,
+    create_swg_optimizer,
+    diagnose_native_trajectory,
+    initial_closure_acceleration_ratio,
+    load_content_pinned_hourly_segment,
+    load_content_pinned_initial_state,
     network_parameter_count,
 )
 
@@ -106,7 +115,8 @@ def test_point_and_energy_losses_share_interface_and_plants_fail(online_case):
     target = BalancedTrajectory(target_field, target_field, target_field)
     normalizers = BalancedNormalizers(1.0, 1.0, 1.0)
     point = balanced_trajectory_loss(
-        predicted, target, geometry, normalizers, kind="point")
+        predicted, target, geometry, normalizers, kind="point",
+        beta_m1_s1=2.0e-11, basin_length_m=4.0e6)
     energy = balanced_trajectory_loss(
         predicted, target, geometry, normalizers, kind="energy_score")
     assert float(point) > 0.0
@@ -118,6 +128,45 @@ def test_point_and_energy_losses_share_interface_and_plants_fail(online_case):
     with pytest.raises(ValueError, match="unknown"):
         balanced_trajectory_loss(
             predicted, target, geometry, normalizers, kind="spectral")
+
+
+def test_energy_score_uses_unbiased_per_lead_pair_term(online_case):
+    """Brolly's {truth, truth+1} counterexample has exactly zero score."""
+    _, geometry, _, _, _ = online_case
+    target_shape = (3,) + tuple(geometry.tmask.shape)
+    truth = jnp.zeros(target_shape)
+    shifted = jnp.ones(target_shape)
+    members = jnp.stack((truth, shifted))
+    predicted = BalancedTrajectory(members, members, members)
+    target = BalancedTrajectory(truth, truth, truth)
+    score = balanced_trajectory_loss(
+        predicted, target, geometry, BalancedNormalizers(1.0, 1.0, 1.0),
+        kind="energy_score")
+    assert float(score) == pytest.approx(0.0, abs=2.0e-15)
+
+
+def test_maddison_point_loss_scaling_and_default_ignores_velocity(online_case):
+    _, geometry, _, _, _ = online_case
+    shape = (2,) + tuple(geometry.tmask.shape)
+    zeta = jnp.zeros(shape).at[:, 20, 20].set(3.0e-7)
+    zero = jnp.zeros(shape)
+    velocity_plant = jnp.ones(shape) * 1.0e3
+    target = BalancedTrajectory(zero, zero, zero)
+    normalizers = BalancedNormalizers(1.0, 1.0, 1.0)
+    beta, length = 2.0e-11, 4.0e6
+    baseline = balanced_trajectory_loss(
+        BalancedTrajectory(zeta[None], zero[None], zero[None]), target,
+        geometry, normalizers, kind="point", beta_m1_s1=beta,
+        basin_length_m=length)
+    velocity_changed = balanced_trajectory_loss(
+        BalancedTrajectory(zeta[None], velocity_plant[None],
+                           velocity_plant[None]), target,
+        geometry, normalizers, kind="point", beta_m1_s1=beta,
+        basin_length_m=length)
+    expected = (1.0e4 / (beta**2 * length**2) / (4.0 * length**2)
+                * float(geometry.area_t_m2[20, 20]) * (3.0e-7)**2)
+    assert float(baseline) == pytest.approx(expected, rel=2.0e-15)
+    assert float(velocity_changed) == float(baseline)
 
 
 def test_one_step_jvp_matches_finite_difference_and_all_stages_act(online_case):
@@ -216,3 +265,73 @@ def test_zero_closure_four_and_eight_day_compositions_match(online_case):
         None, card.recipe.initial_state, noise8, key, jnp.asarray(0.0))
     for short, long in zip(hourly4, hourly8, strict=True):
         assert np.array_equal(np.asarray(short), np.asarray(long[:96]))
+
+
+_ROUND2 = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgonl_rounds/round2")
+_REAL_TARGET = _ROUND2 / "hourly_targets/start_day0731"
+_REAL_T0 = _ROUND2 / "conservative_truth_dg50_1095d/snapshots"
+
+
+@pytest.mark.skipif(not (_REAL_TARGET / "manifest.json").is_file(),
+                    reason="Round-2 hourly targets are not mounted")
+def test_real_data_one_optimizer_step_has_no_inert_leaf():
+    """Exercise the actual t0 -> rollout -> loss -> AdamW update seam."""
+    card = build_swg_card(SWG_DG50_NAMELIST)
+    geometry = build_closure_geometry(card)
+    initial = load_content_pinned_initial_state(
+        card, _REAL_T0 / "day0731.npz",
+        manifest_path=_REAL_T0 / "manifest.json",
+        expected_manifest_sha256=(
+            "aaec7f829d7530a275c07a263cd96185a4fa6245be411c63626156e35fa65d2c"))
+    native = load_content_pinned_hourly_segment(
+        _REAL_TARGET,
+        expected_manifest_sha256=(
+            "f5526f50c9061abe498f0088b45b8d64f1895d46c2c1958e50b032acef721f99"))
+    native = tuple(jnp.asarray(value) for value in native)
+    target_all = diagnose_native_trajectory(native, geometry)
+    normalizers = balanced_normalizers_from_training((target_all,), geometry)
+    target = jax.tree.map(lambda value: value[:24], target_all)
+    spec = SWGNetworkSpec(
+        hidden_channels=16, hidden_layers=4, kernel_size=3,
+        ssh_scale_m=1.0, velocity_scale_m_s=1.0,
+        potential_scale_m3_s2=1.0)
+    network = SWGScalarPotentialCNN(spec, key=jax.random.PRNGKey(20261013))
+    initialization = initial_closure_acceleration_ratio(
+        network, (initial,), card, geometry, key=jax.random.PRNGKey(20261013))
+    assert initialization["passes"], initialization
+    _, segment = build_segment_fn(card, geometry, window_days=1)
+    n_steps = 24 * int(3_600 / card.dt_s)
+    noise = jnp.zeros((n_steps, 3) + geometry.tmask.shape, dtype=jnp.float64)
+
+    def objective(net):
+        _, predicted_native = segment(
+            net, initial, noise, jax.random.PRNGKey(41), jnp.asarray(0.0))
+        predicted = diagnose_native_trajectory(predicted_native, geometry)
+        return balanced_trajectory_loss(
+            jax.tree.map(lambda value: value[None], predicted), target,
+            geometry, normalizers, kind="point",
+            beta_m1_s1=card.resolved_namelist.rn_beta_m_s,
+            basin_length_m=card.resolved_namelist.rn_domsiz_m)
+
+    loss, grads = eqx.filter_value_and_grad(objective)(network)
+    jax.block_until_ready(loss)
+    assert np.isfinite(float(loss)) and float(loss) > 0.0
+    assert_network_gradients_live(grads)
+    # Maddison used Keras AdamW defaults: lr=1e-3, wd=0.004, beta1=.9,
+    # beta2=.999, eps=1e-7.  The repository factory expresses AdamW/lr/wd and
+    # Optax's .9/.999 defaults; it necessarily retains its cosine schedule,
+    # clipping, and eps=1e-8.  No hidden optimizer is substituted.
+    optimizer = create_swg_optimizer(TrainingConfig(
+        lr=1.0e-3, warmup_steps=0, total_steps=100,
+        weight_decay=4.0e-3, grad_clip_norm=1.0e30,
+        optimizer="adamw"))
+    params = eqx.filter(network, eqx.is_inexact_array)
+    opt_state = optimizer.init(params)
+    updates, _ = optimizer.update(grads, opt_state, params)
+    updated = eqx.apply_updates(network, updates)
+    before = jax.tree.leaves(params)
+    after = jax.tree.leaves(eqx.filter(updated, eqx.is_inexact_array))
+    assert all(np.all(np.isfinite(np.asarray(value))) for value in after)
+    assert any(np.any(np.asarray(left) != np.asarray(right))
+               for left, right in zip(before, after, strict=True))

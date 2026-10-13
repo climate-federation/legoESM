@@ -61,3 +61,12 @@ def test_rotational_velocity_inversion_is_linear_and_wall_bounded():
     np.testing.assert_allclose(v2, 2.0 * v, rtol=1.0e-14, atol=0.0)
     assert np.all(u[~wet] == 0.0) and np.all(v[~wet] == 0.0)
     assert np.any(u[wet] != 0.0) and np.any(v[wet] != 0.0)
+
+
+def test_tangent_decision_exits_nonzero_when_probe_is_inert(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        predictability, "forward_tangent_probe",
+        lambda *args, **kwargs: {"steps": 1, "tangent_nonzero": False})
+    assert predictability.main([
+        "--tangent-restart", str(tmp_path / "restart.npz"),
+        "--json", str(tmp_path / "out.json")]) == 1

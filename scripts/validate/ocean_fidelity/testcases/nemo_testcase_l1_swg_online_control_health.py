@@ -22,7 +22,7 @@ def summarize_year(arrays: dict[str, np.ndarray]) -> dict[str, float]:
     required = {
         "basin_mean_ke_m2_s2", "basin_mean_eke_m2_s2",
         "top_octave_ke_fraction", "top_octave_enstrophy_fraction",
-        "native_checkerboard_index", "minimum_total_layer_thickness_m",
+        "native_grid_noise_index", "minimum_total_layer_thickness_m",
         "maximum_u_courant", "maximum_v_courant",
     }
     require(required <= arrays.keys(), "health diagnosis is incomplete")
@@ -34,10 +34,10 @@ def summarize_year(arrays: dict[str, np.ndarray]) -> dict[str, float]:
         "top_octave_ke_fraction": float(arrays["top_octave_ke_fraction"][0]),
         "top_octave_enstrophy_fraction": float(
             arrays["top_octave_enstrophy_fraction"][0]),
-        "checkerboard_index_mean": float(
-            np.mean(arrays["native_checkerboard_index"])),
-        "checkerboard_index_max": float(
-            np.max(arrays["native_checkerboard_index"])),
+        "grid_noise_index_mean": float(
+            np.mean(arrays["native_grid_noise_index"])),
+        "grid_noise_index_max": float(
+            np.max(arrays["native_grid_noise_index"])),
         "minimum_total_layer_thickness_m": float(
             np.min(arrays["minimum_total_layer_thickness_m"])),
         "maximum_u_courant": float(np.max(arrays["maximum_u_courant"])),

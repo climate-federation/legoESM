@@ -7,6 +7,9 @@ losses share one ensemble-shaped balanced-field interface.
 """
 from __future__ import annotations
 
+import hashlib
+import json
+from pathlib import Path
 from typing import NamedTuple
 
 import equinox as eqx
@@ -17,7 +20,11 @@ from legoesm.grids.operators_latlon_cgrid import compute_vertex_mask
 from legoesm.ml.training import TrainingConfig, create_optimizer
 from legoesm.ocean.diagnostics import relative_vorticity_cell_centre
 from legoesm.ocean.dynamics.latlon_cgrid_operators import compute_face_masks
-from legoesm.ocean.dynamics.swe_rk3 import swe_rk3_step
+from legoesm.ocean.dynamics.swe_rk3 import (
+    _entry_from_state,
+    swe_rk3_step,
+    swe_rotated_potential_forcing,
+)
 from legoesm.ocean.fidelity.nemo_testcase_recipe import swg_surface_wind
 from legoesm.ocean.state import OceanSurfaceForcing
 from legoesm.training.inert_params import assert_no_inert
@@ -226,16 +233,165 @@ def balanced_fields_from_native(u_native, v_native,
         zeta * geometry.tmask, rot_u * geometry.tmask, rot_v * geometry.tmask)
 
 
+def diagnose_native_trajectory(hourly_native,
+                               geometry: SWGClosureGeometry):
+    """Apply one shared balanced diagnostic to model or truth native arrays."""
+    _, u, v = hourly_native
+    return jax.vmap(
+        lambda u_hour, v_hour: balanced_fields_from_native(
+            u_hour, v_hour, geometry))(u, v)
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def load_content_pinned_hourly_segment(
+        root: Path, *, expected_manifest_sha256: str,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Load one complete four-day target only when every digest is admitted."""
+    manifest_path = root / "manifest.json"
+    if _sha256(manifest_path) != expected_manifest_sha256:
+        raise ValueError("hourly target manifest differs from registered split")
+    manifest = json.loads(manifest_path.read_text())
+    if manifest.get("status") != "complete" or manifest.get("completed_days") != 4:
+        raise ValueError("hourly target segment is not a complete four-day run")
+    arrays = {name: [] for name in (
+        "ssh_hourly_m", "u_hourly_m_s", "v_hourly_m_s")}
+    for day in range(1, 5):
+        path = root / f"day{day:04d}.npz"
+        if _sha256(path) != manifest.get("daily_sha256", {}).get(path.name):
+            raise ValueError(f"hourly target digest differs: {path.name}")
+        with np.load(path, allow_pickle=False) as saved:
+            if int(np.asarray(saved["absolute_hour"])[0]) != (
+                    int(manifest["restart"]["source_day"]) + day - 1) * 24 + 1:
+                raise ValueError("hourly target has wrong absolute-time lineage")
+            for name in arrays:
+                arrays[name].append(np.asarray(saved[name], dtype=np.float64))
+    return tuple(np.concatenate(arrays[name], axis=0) for name in arrays)
+
+
+def load_content_pinned_initial_state(
+        card, path: Path, *, manifest_path: Path,
+        expected_manifest_sha256: str):
+    """Restore the conservative state at t0 from its pinned snapshot stream."""
+    if _sha256(manifest_path) != expected_manifest_sha256:
+        raise ValueError("conservative-state manifest differs from registered split")
+    manifest = json.loads(manifest_path.read_text())
+    if manifest.get("status") != "complete" \
+            or manifest.get("sampling") != "daily_snapshot":
+        raise ValueError("conservative initial-state stream is incomplete")
+    if _sha256(path) != manifest.get("output_daily_sha256", {}).get(path.name):
+        raise ValueError("conservative initial-state digest differs")
+    with np.load(path, allow_pickle=False) as saved:
+        ssh = np.asarray(saved["ssh_m"], dtype=np.float64)
+        u_native = np.asarray(saved["u_m_s"], dtype=np.float64)
+        v_native = np.asarray(saved["v_m_s"], dtype=np.float64)
+        if int(saved["day"]) != int(path.stem[3:]):
+            raise ValueError("conservative t0 day differs from its file name")
+    state = card.recipe.initial_state
+    if ssh.shape != tuple(state.eta.data.shape):
+        raise ValueError("conservative t0 shape differs from coarse card")
+    u = np.zeros(state.u.data.shape, dtype=np.float64)
+    v = np.zeros(state.v.data.shape, dtype=np.float64)
+    u[:, 1:, 0] = u_native
+    v[1:, :, 0] = v_native
+    return state._replace(
+        eta=state.eta.replace(data=jnp.asarray(ssh)),
+        u=state.u.replace(data=jnp.asarray(u)),
+        v=state.v.replace(data=jnp.asarray(v)))
+
+
+def balanced_normalizers_from_training(
+        trajectories: tuple[BalancedTrajectory, ...],
+        geometry: SWGClosureGeometry) -> BalancedNormalizers:
+    """Compute area-weighted variances from training trajectories only."""
+    if not trajectories:
+        raise ValueError("normalizers require at least one training trajectory")
+    weights = np.asarray(
+        geometry.area_t_m2 * geometry.tmask, dtype=np.float64).copy()
+    weights /= np.sum(weights, dtype=np.float64)
+
+    def variance(name):
+        values = np.concatenate([
+            np.asarray(getattr(item, name), dtype=np.float64)
+            for item in trajectories], axis=0)
+        mean = np.sum(values * weights, axis=(-2, -1), dtype=np.float64).mean()
+        result = np.mean(np.sum(
+            (values - mean) ** 2 * weights, axis=(-2, -1), dtype=np.float64))
+        if not np.isfinite(result) or result <= 0.0:
+            raise ValueError(f"training variance for {name} is not positive")
+        return float(result)
+
+    return BalancedNormalizers(
+        variance("relative_vorticity_s1"),
+        variance("rotational_u_m_s"), variance("rotational_v_m_s"))
+
+
+def initial_closure_acceleration_ratio(
+        network: SWGScalarPotentialCNN, states: tuple,
+        card, geometry: SWGClosureGeometry, *, key) -> dict:
+    """Measure initialized closure acceleration against ``tau0/(rho0 H)``."""
+    from legoesm.ocean.fidelity.swg_coarse_graining import (
+        cgrid_geometry,
+        live_face_thickness,
+    )
+
+    native_geometry = cgrid_geometry(card.resolved_namelist)
+    tau = swg_surface_wind(card.resolved_namelist)
+    ratios = []
+    accelerations = []
+    for index, state in enumerate(states):
+        entry = _entry_from_state(
+            state, tau, tau, card.recipe.grid, card.recipe.z_coord,
+            card.recipe.model_config)
+        potential = network(
+            entry, geometry, key=jax.random.fold_in(key, index),
+            noise=jnp.zeros_like(entry.ssh_k), noise_scale=jnp.asarray(0.0))
+        eta = np.asarray(entry.ssh_k, dtype=np.float64)
+        h_u = jnp.asarray(live_face_thickness(eta, native_geometry, "U"))
+        h_v = jnp.asarray(live_face_thickness(eta, native_geometry, "V"))
+        force_u, force_v = swe_rotated_potential_forcing(
+            potential, geometry.metric_u_m, geometry.metric_v_m,
+            h_u, h_v, geometry.umask, geometry.vmask,
+            geometry.vertex_interior)
+        acceleration = float(max(
+            jnp.max(jnp.abs(force_u)), jnp.max(jnp.abs(force_v))))
+        reference_depth = float(np.median(
+            np.asarray(card.recipe.z_coord.nemo_e3t_0)[
+                np.asarray(card.recipe.land_mask, dtype=bool)]))
+        wind_acceleration = (
+            card.resolved_namelist.rn_tau_pa
+            / card.recipe.model_config.constants.rho_0 / reference_depth)
+        ratios.append(acceleration / wind_acceleration)
+        accelerations.append(acceleration)
+    return {
+        "per_state_ratio": ratios,
+        "per_state_max_acceleration_m_s2": accelerations,
+        "maximum_ratio": max(ratios),
+        "bar": 0.01,
+        "passes": max(ratios) <= 0.01,
+    }
+
+
 def balanced_trajectory_loss(predicted: BalancedTrajectory,
                              target: BalancedTrajectory,
                              geometry: SWGClosureGeometry,
                              normalizers: BalancedNormalizers, *,
-                             kind: str):
-    """Area-weighted point loss or multivariate energy score.
+                             kind: str,
+                             beta_m1_s1: float | None = None,
+                             basin_length_m: float | None = None,
+                             rotational_velocity_weight: float = 0.0):
+    """Maddison point loss or Brolly per-lead energy score.
 
     Every predicted array has shape ``(members, hours, y, x)``; targets omit
     the member axis.  The energy score is the proper multivariate score over
     all three normalized, area-weighted balanced fields and requires S >= 2.
+    Its pair term uses the unbiased ``2 S (S-1)`` denominator.
     """
     pred = jnp.stack((
         predicted.relative_vorticity_s1
@@ -254,23 +410,50 @@ def balanced_trajectory_loss(predicted: BalancedTrajectory,
     weight = geometry.area_t_m2 * geometry.tmask
     weight = weight / jnp.sum(weight)
 
-    def member_distance(left, right):
-        return jnp.sqrt(jnp.mean(jnp.sum(
-            (left - right) ** 2 * weight[None, :, :, None], axis=(-3, -2, -1))))
-
     if kind == "point":
-        squared = (pred[0] - obs) ** 2 * weight[None, :, :, None]
-        return jnp.mean(jnp.sum(squared, axis=(-3, -2)))
+        if beta_m1_s1 is None or basin_length_m is None:
+            raise ValueError("Maddison point loss requires beta and basin length")
+        if not np.isfinite(beta_m1_s1) or beta_m1_s1 <= 0.0 \
+                or not np.isfinite(basin_length_m) or basin_length_m <= 0.0:
+            raise ValueError("Maddison beta and basin length must be positive")
+        if rotational_velocity_weight < 0.0:
+            raise ValueError("rotational velocity weight cannot be negative")
+        j0, j1, i0, i1 = geometry.wet_bounds
+        interior = jnp.zeros_like(geometry.tmask, dtype=bool).at[
+            j0 + 1:j1, i0 + 1:i1].set(True)
+        zeta_error = (predicted.relative_vorticity_s1[0]
+                      - target.relative_vorticity_s1)
+        weighted_sum = jnp.sum(
+            zeta_error**2 * geometry.area_t_m2 * interior, axis=(-2, -1))
+        scale = (1.0e4 / (beta_m1_s1**2 * basin_length_m**2)
+                 / (4.0 * basin_length_m**2))
+        loss = scale * jnp.mean(weighted_sum)
+        if rotational_velocity_weight > 0.0:
+            rot_error = (
+                (predicted.rotational_u_m_s[0] - target.rotational_u_m_s)**2
+                / normalizers.rotational_u_variance_m2_s2
+                + (predicted.rotational_v_m_s[0] - target.rotational_v_m_s)**2
+                / normalizers.rotational_v_variance_m2_s2)
+            loss = loss + rotational_velocity_weight * jnp.mean(jnp.sum(
+                rot_error * weight, axis=(-2, -1)))
+        return loss
     if kind != "energy_score":
         raise ValueError(f"unknown SWG balanced loss {kind!r}")
     members = pred.shape[0]
     if members < 2:
         raise ValueError("energy_score requires at least two ensemble members")
-    observation_term = jnp.mean(jax.vmap(lambda member: member_distance(
-        member, obs))(pred))
+    def lead_distance(left, right):
+        return jnp.sqrt(jnp.sum(
+            (left - right) ** 2 * weight[:, :, None], axis=(-3, -2, -1)))
+
+    observation_distance = jax.vmap(
+        lambda member: jax.vmap(lead_distance)(member, obs))(pred)
     pairwise = jax.vmap(lambda left: jax.vmap(
-        lambda right: member_distance(left, right))(pred))(pred)
-    return observation_term - 0.5 * jnp.mean(pairwise)
+        lambda right: jax.vmap(lead_distance)(left, right))(pred))(pred)
+    score_by_lead = (jnp.mean(observation_distance, axis=0)
+                     - jnp.sum(pairwise, axis=(0, 1))
+                     / (2.0 * members * (members - 1)))
+    return jnp.mean(score_by_lead)
 
 
 def build_segment_fn(card, geometry: SWGClosureGeometry, *,

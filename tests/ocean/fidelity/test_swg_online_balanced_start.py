@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 
 import numpy as np
@@ -56,3 +57,40 @@ def test_initialization_ratio_uses_distinct_shock_and_closure_errors():
     planted = balanced.initialization_ratios(
         conservative, conservative, target, wet)
     assert planted["24"]["shock_to_closure_ratio"] == 0.0
+
+
+def test_registered_admission_detects_jump_and_fast_energy_transient():
+    record = {
+        "conservative_relative_vorticity_error_rms_s-1": np.linspace(
+            1.0, 48.0, 48).tolist(),
+        "conservative_fast_divergent_ke_m2_s-2": np.ones(48).tolist(),
+        "conservative_ssh_tendency_rms_m_s": np.ones(48).tolist(),
+    }
+    admitted = balanced._state_admission(record, "conservative")
+    assert admitted["admitted"]
+    jump = dict(record)
+    jump["conservative_relative_vorticity_error_rms_s-1"] = (
+        np.linspace(1.0, 48.0, 48) * 1.0e-8).tolist()
+    jump["conservative_relative_vorticity_error_rms_s-1"][0] = 3.0e-8
+    assert not balanced._state_admission(jump, "conservative")["no_jump"]
+    fast = dict(record)
+    fast["conservative_fast_divergent_ke_m2_s-2"] = np.ones(48).tolist()
+    fast["conservative_fast_divergent_ke_m2_s-2"][0] = 2.1
+    assert not balanced._state_admission(
+        fast, "conservative")["fast_energy_bounded"]
+
+
+def test_balanced_start_cli_exits_nonzero_on_failed_admission(
+        monkeypatch, tmp_path):
+    existing = tmp_path / "existing.json"
+    existing.write_text(json.dumps({"records": []}))
+    monkeypatch.setattr(
+        balanced, "apply_registered_admission",
+        lambda report, root: report | {"admission_summary": {
+            "conservative_admitted_for_training": False,
+            "conservative_pass_count": 9,
+            "raw_pass_count": 0,
+        }})
+    assert balanced.main([
+        "--existing-json", str(existing), "--hourly-root", str(tmp_path),
+        "--json", str(tmp_path / "out.json")]) == 1

@@ -286,6 +286,36 @@ def native_face_transports(fields: dict[str, np.ndarray], geometry: dict,
     return transports
 
 
+def build_jax_native_transport_diagnostic(namelist):
+    """Return a JAX diagnostic for instantaneous native QCO face transports."""
+    import jax.numpy as jnp
+
+    geometry = cgrid_geometry(namelist)
+    tmask = jnp.asarray(geometry["mask"]["T"])
+    area_t = jnp.asarray(geometry["area"]["T"])
+    constants = {
+        kind: tuple(jnp.asarray(geometry[name][kind]) for name in (
+            "mask", "reference_transport_depth", "area",
+            "reference_thickness", "face_length"))
+        for kind in ("U", "V")
+    }
+
+    def diagnostic(eta, u, v):
+        weighted_eta = area_t * jnp.where(tmask, eta, 0.0)
+        transports = []
+        for kind, velocity, axis in (("U", u, 1), ("V", v, 0)):
+            mask, depth, area, reference_h, face_length = constants[kind]
+            numerator = 0.5 * (
+                weighted_eta + jnp.roll(weighted_eta, -1, axis=axis))
+            ratio = jnp.where(mask, numerator / depth / area, 0.0)
+            thickness = reference_h * (1.0 + ratio * mask)
+            transports.append(jnp.where(
+                mask, velocity * thickness * face_length, 0.0))
+        return tuple(transports)
+
+    return diagnostic
+
+
 def _restrict_t_cell_sum(values: np.ndarray, source: dict, target: dict,
                          layout: dict[str, int]) -> np.ndarray:
     """Sum fine T-cell extensive values into the nested coarse cells."""
@@ -372,6 +402,57 @@ def conservative_restrict_cgrid(fields: dict[str, np.ndarray], source: dict,
         velocity[mask] = coarse_transports[kind][mask] / denominator[mask]
         output[kind] = velocity
     return output
+
+
+def conservative_restrict_daily_mean(
+        mean_eta: np.ndarray, mean_transports: dict[str, np.ndarray],
+        source: dict, target: dict) -> dict[str, np.ndarray]:
+    """Restrict ``mean(h*u)`` and ``mean(h*v)``, never products of means."""
+    if set(mean_transports) != {"U", "V"}:
+        raise ValueError("mean transports must be exactly U and V")
+    layout = _restriction_layout(source, target)
+    eta = np.asarray(mean_eta, dtype=np.float64)
+    source_mask = np.asarray(source["mask"]["T"], dtype=bool)
+    if eta.shape != source_mask.shape or not np.all(np.isfinite(eta)):
+        raise ValueError("mean SSH must be finite and have the source shape")
+    volume = (np.asarray(source["area"]["T"], dtype=np.float64)
+              * (np.asarray(source["reference_thickness"]["T"])
+                 + np.where(source_mask, eta, 0.0)) * source_mask)
+    coarse_volume = _restrict_t_cell_sum(volume, source, target, layout)
+    target_mask = np.asarray(target["mask"]["T"], dtype=bool)
+    coarse_eta = np.zeros_like(coarse_volume)
+    coarse_eta[target_mask] = (
+        coarse_volume[target_mask] / np.asarray(target["area"]["T"])[target_mask]
+        - np.asarray(target["reference_thickness"]["T"])[target_mask])
+    coarse_transports = restrict_native_transports(
+        mean_transports, source, target, layout)
+    output = {"T": coarse_eta, "transport_U": coarse_transports["U"],
+              "transport_V": coarse_transports["V"]}
+    for kind in ("U", "V"):
+        mask = np.asarray(target["mask"][kind], dtype=bool)
+        denominator = (np.asarray(target["face_length"][kind])
+                       * _live_face_thickness(coarse_eta, target, kind))
+        velocity = np.zeros_like(coarse_eta)
+        velocity[mask] = coarse_transports[kind][mask] / denominator[mask]
+        output[kind] = velocity
+    return output
+
+
+def temporal_continuity_residual(
+        eta_start: np.ndarray, eta_end: np.ndarray,
+        mean_transports: dict[str, np.ndarray], geometry: dict,
+        interval_s: float) -> np.ndarray:
+    """Return ``d eta/dt + div(mean transport)`` on the native T grid."""
+    if not np.isfinite(interval_s) or interval_s <= 0.0:
+        raise ValueError("continuity interval must be positive finite")
+    start = np.asarray(eta_start, dtype=np.float64)
+    end = np.asarray(eta_end, dtype=np.float64)
+    mask = np.asarray(geometry["mask"]["T"], dtype=bool)
+    if start.shape != mask.shape or end.shape != mask.shape:
+        raise ValueError("continuity SSH shapes differ from the T grid")
+    residual = (end - start) / interval_s + _transport_divergence(
+        mean_transports, geometry)
+    return np.where(mask, residual, 0.0)
 
 
 def build_jax_conservative_restrictor(source: dict, target: dict):
@@ -749,9 +830,9 @@ def filter_truth_directory(input_root: Path, output_root: Path, *,
                 "optional after restriction; reflecting closed walls; sigma is "
                 "a standard deviation in coarse cells"),
             "mean_conservation": "finite-volume construction; no mean restoration",
-            "daily_mean_caveat": (
-                "restriction of archived mean SSH/U/V; exact mean face transport "
-                "is unavailable because mean thickness-times-velocity was not archived"),
+            "daily_mean_transport": (
+                "exact arithmetic mean of instantaneous h*u and h*v, then "
+                "face-transport restriction"),
             "staggering": {"ssh_m": "T", "u_m_s": "U", "v_m_s": "V"},
         },
     }
@@ -766,10 +847,18 @@ def filter_truth_directory(input_root: Path, output_root: Path, *,
             snapshot = conservative_restrict_cgrid(
                 {"T": saved["ssh_m"], "U": saved["u_m_s"],
                  "V": saved["v_m_s"]}, source, target)
-            daily_mean = conservative_restrict_cgrid(
-                {"T": saved["ssh_daily_mean_m"],
-                 "U": saved["u_daily_mean_m_s"],
-                 "V": saved["v_daily_mean_m_s"]}, source, target)
+            required_mean = {
+                "u_daily_mean_transport_m3_s",
+                "v_daily_mean_transport_m3_s",
+            }
+            if not required_mean <= set(saved.files):
+                raise ValueError(
+                    "daily mean restriction requires archived mean(h*u) and "
+                    "mean(h*v); product-of-means input is refused")
+            daily_mean = conservative_restrict_daily_mean(
+                saved["ssh_daily_mean_m"],
+                {"U": saved["u_daily_mean_transport_m3_s"],
+                 "V": saved["v_daily_mean_transport_m3_s"]}, source, target)
             metadata = {
                 "schema": np.str_("legoesm-swg-conservative-truth-v2"),
                 "source_day": np.int64(saved["day"]),
@@ -785,12 +874,14 @@ def filter_truth_directory(input_root: Path, output_root: Path, *,
                                       "v_m_s": snapshot["V"]},
             "daily_means": metadata | {
                 "daily_mean_sampling": np.str_(
-                    "restricted archived fine arithmetic-mean state; not mean transport"),
+                    "restricted exact fine arithmetic-mean volume and face transport"),
                 "daily_mean_sample_count": np.int64(
                     86_400 / resolved_source.rn_Dt_s),
                 "ssh_daily_mean_m": daily_mean["T"],
                 "u_daily_mean_m_s": daily_mean["U"],
-                "v_daily_mean_m_s": daily_mean["V"]},
+                "v_daily_mean_m_s": daily_mean["V"],
+                "u_daily_mean_transport_m3_s": daily_mean["transport_U"],
+                "v_daily_mean_transport_m3_s": daily_mean["transport_V"]},
         }
         for sampling, arrays in records.items():
             temporary = roots[sampling] / f".{name}.tmp"

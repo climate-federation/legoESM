@@ -428,24 +428,64 @@ def _cell_centred(frame: DailyFrame, masks) -> DailyFrame:
         np.asarray(u_c), np.asarray(v_c))
 
 
-def checkerboard_index(u: np.ndarray, v: np.ndarray) -> float:
-    """Normalized native velocity projection onto the two-cell grid mode."""
+def grid_noise_index(u: np.ndarray, v: np.ndarray) -> float:
+    """Local two-dimensional second-difference RMS divided by velocity RMS."""
     u = np.asarray(u, dtype=np.float64)
     v = np.asarray(v, dtype=np.float64)
     if u.shape != v.shape or u.ndim != 2:
-        raise ValueError("checkerboard fields must be conformable 2-D arrays")
-    jj, ii = np.indices(u.shape)
-    pattern = np.where((ii + jj) % 2 == 0, 1.0, -1.0)
-    projection2 = np.mean(u * pattern) ** 2 + np.mean(v * pattern) ** 2
-    energy2 = np.mean(u * u + v * v, dtype=np.float64)
-    return float(np.sqrt(projection2 / energy2)) if energy2 > 0.0 else 0.0
+        raise ValueError("grid-noise fields must be conformable 2-D arrays")
+    if min(u.shape) < 3:
+        raise ValueError("grid-noise fields need at least three cells per axis")
+    differences = []
+    for field in (u, v):
+        differences.extend((
+            field[:, 2:] - 2.0 * field[:, 1:-1] + field[:, :-2],
+            field[2:, :] - 2.0 * field[1:-1, :] + field[:-2, :],
+        ))
+    numerator = np.mean(np.concatenate([
+        value.ravel() ** 2 for value in differences]), dtype=np.float64)
+    denominator = np.mean(u * u + v * v, dtype=np.float64)
+    return float(np.sqrt(numerator / denominator)) if denominator > 0.0 else 0.0
+
+
+def closed_basin_spectra(u: np.ndarray, v: np.ndarray,
+                         spacing_m: float) -> tuple[np.ndarray, ...]:
+    """DST-I streamfunction KE and direct-vorticity enstrophy spectra."""
+    from scipy.fft import dstn
+
+    u = np.asarray(u, dtype=np.float64)
+    v = np.asarray(v, dtype=np.float64)
+    if u.shape != v.shape or u.ndim != 2 or min(u.shape) < 3:
+        raise ValueError("closed-basin spectra require conformable 2-D fields")
+    if not np.isfinite(spacing_m) or spacing_m <= 0.0:
+        raise ValueError("spectral spacing must be positive finite")
+    zeta = (np.gradient(v, spacing_m, axis=1, edge_order=2)
+            - np.gradient(u, spacing_m, axis=0, edge_order=2))
+    zeta_hat = dstn(zeta, type=1, norm="ortho")
+    ny, nx = zeta.shape
+    my = np.arange(1, ny + 1, dtype=np.float64)[:, None]
+    mx = np.arange(1, nx + 1, dtype=np.float64)[None, :]
+    ky = np.pi * my / ((ny + 1) * spacing_m)
+    kx = np.pi * mx / ((nx + 1) * spacing_m)
+    k2 = kx**2 + ky**2
+    psi_hat = -zeta_hat / k2
+    ke_mode = 0.5 * k2 * psi_hat**2
+    enstrophy_mode = 0.5 * zeta_hat**2
+    shell = np.rint(np.sqrt(mx**2 + my**2)).astype(int)
+    bins = np.arange(1, int(shell.max()) + 1)
+    ke = np.bincount(shell.ravel(), weights=ke_mode.ravel(),
+                     minlength=bins[-1] + 1)[1:]
+    enstrophy = np.bincount(
+        shell.ravel(), weights=enstrophy_mode.ravel(),
+        minlength=bins[-1] + 1)[1:]
+    wavenumber = bins * np.pi / (
+        max(nx + 1, ny + 1) * spacing_m)
+    return wavenumber, ke, enstrophy
 
 
 def diagnose(provider: DailyProvider, *, days: int, card=None, namelist=None,
              geometry: dict | None = None) -> dict[str, np.ndarray]:
     """Compute the frozen Round-4 metrics in two streaming passes."""
-    import jax.numpy as jnp
-    from legoesm.ocean.diagnostics import isotropic_energy_spectrum
     from legoesm.ocean.fidelity.nemo_testcase_recipe import (
         SWG_MADDISON_NAMELIST,
         build_swg_card,
@@ -485,8 +525,9 @@ def diagnose(provider: DailyProvider, *, days: int, card=None, namelist=None,
     sum_speed = np.zeros(wet.shape, dtype=np.float64)
     ke_series = np.empty(days, dtype=np.float64)
     spectrum_sum = None
+    enstrophy_spectrum_sum = None
     wavenumber = None
-    checkerboard = np.empty(days, dtype=np.float64)
+    grid_noise = np.empty(days, dtype=np.float64)
     min_thickness = np.empty(days, dtype=np.float64) if card is not None else None
     max_u_courant = np.empty(days, dtype=np.float64) if namelist is not None else None
     max_v_courant = np.empty(days, dtype=np.float64) if namelist is not None else None
@@ -510,29 +551,26 @@ def diagnose(provider: DailyProvider, *, days: int, card=None, namelist=None,
         sum_v += frame.v
         sum_speed += np.sqrt(speed2)
         ke_series[index] = np.sum(0.5 * speed2 * area) / area_sum
-        k, spectrum = isotropic_energy_spectrum(
-            jnp.asarray(frame.u[j0:j1, i0:i1]),
-            jnp.asarray(frame.v[j0:j1, i0:i1]), spacing)
-        k, spectrum = np.asarray(k), np.asarray(spectrum)
+        u_box = frame.u[j0:j1, i0:i1]
+        v_box = frame.v[j0:j1, i0:i1]
+        k, spectrum, enstrophy_spectrum = closed_basin_spectra(
+            u_box, v_box, spacing)
         if spectrum_sum is None:
             wavenumber, spectrum_sum = k, np.zeros_like(spectrum)
+            enstrophy_spectrum_sum = np.zeros_like(enstrophy_spectrum)
         else:
             require(np.array_equal(k, wavenumber),
                     "spectrum wavenumbers changed across days")
         spectrum_sum += spectrum
-        u_box = frame.u[j0:j1, i0:i1]
-        v_box = frame.v[j0:j1, i0:i1]
-        checkerboard[index] = checkerboard_index(u_box, v_box)
+        enstrophy_spectrum_sum += enstrophy_spectrum
+        grid_noise[index] = grid_noise_index(u_box, v_box)
     require(index + 1 == days, f"{provider.name}: daily sequence ended early")
     mean_ssh = sum_ssh / days
     mean_u = sum_u / days
     mean_v = sum_v / days
     mean_speed = sum_speed / days
     mean_ke_spectrum = spectrum_sum / days
-    # For a 2-D rotational flow, shell enstrophy is k^2 times shell KE.  This
-    # is the radial diagnostic used by the round-1 review (rather than a second
-    # FFT of a boundary-sensitive finite-difference vorticity).
-    mean_enstrophy_spectrum = wavenumber ** 2 * mean_ke_spectrum
+    mean_enstrophy_spectrum = enstrophy_spectrum_sum / days
     top_octave = wavenumber >= 0.5 * np.max(wavenumber)
     resolved = wavenumber > 0.0
     ke_spectral_total = np.sum(mean_ke_spectrum[resolved], dtype=np.float64)
@@ -581,7 +619,7 @@ def diagnose(provider: DailyProvider, *, days: int, card=None, namelist=None,
         "top_octave_enstrophy_fraction": np.asarray([
             np.sum(mean_enstrophy_spectrum[top_octave], dtype=np.float64)
             / enstrophy_spectral_total]),
-        "native_checkerboard_index": checkerboard,
+        "native_grid_noise_index": grid_noise,
     }
     if card is not None:
         result.update({
