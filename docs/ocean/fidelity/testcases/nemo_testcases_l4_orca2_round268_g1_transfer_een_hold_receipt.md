@@ -13,8 +13,9 @@ The preregistration is `PREREG_nemo_testcases_l4_orca2_round268.md` at
 re-derivation for measurement:
 
 1. the EEN trend reads the fold-image V transport row; NEMO constructs the
-   live V transport at `dynvor.f90:783-785` and consumes its north/south
-   triads at `dynvor.f90:789-803`;
+   live V transport at `ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynvor.f90:784-785`
+   and consumes its north/south triads at
+   `ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynvor.f90:790-803`;
 2. the split-explicit face-depth statement reads NEMO's wet fold-image V row
    and T-point north neighbour, as cited and gated by geometry-ladder round 3.
 
@@ -27,9 +28,13 @@ selectors and the ORCA2 card's `unmeasured_features` tuple never changed.
 ## 2. Source order and first non-bit statement
 
 The compiled ORCA2 `np_CRV` branch forms absolute vorticity at
-`dynvor.f90:762-771`, the live U/V transports at `dynvor.f90:782-786`, the
-four EEN triads at `dynvor.f90:788-794`, and adds the U/V trends to the stage
-accumulators at `dynvor.f90:796-803`. This is the branch executed by OMT-4.
+`ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynvor.f90:762-770`, the live U/V
+transports at `ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynvor.f90:784-785`,
+the four EEN triads at
+`ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynvor.f90:790-803`, and adds the
+U/V trends to the stage accumulators at
+`ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynvor.f90:797-803`. This is the
+branch executed by OMT-4.
 
 At the matched stage-2 entry, every carried field is below the campaign's
 `2e-10` floor under both labels. The first valued boundary is therefore the
@@ -63,7 +68,8 @@ change in the lane.
 
 A one-variable diagnostic replaced the EEN relative curl by legoESM's
 existing source-ordered circulation helper, corresponding to NEMO's written
-metric products at `dynvor.f90:762-770`. It was a null at the headline
+metric products at
+`ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynvor.f90:762-770`. It was a null at the headline
 maximum (`1.2863307536456779e-08` before and after) and worsened the fold-band
 maximum from `2.038267000190315e-09` to `3.313017496944205e-09`. The arm was
 therefore **REFUTED and retracted**; it is not a landing.
@@ -108,8 +114,19 @@ additional files were isolated:
   planted control; `test_prediction_plant_is_fail_closed` then exhausted the
   bounded process after cumulative compilation and is re-run alone below.
 
-Clean-tree isolated re-runs, citation audit, and independent read-only review
-are recorded in the final paragraph below.
+On the clean committed tree, the year-owner plant passed alone (1 passed in
+0.38 s). The stage-sweep prediction plant reproduced alone as a resource red:
+the captured control first printed the expected fail-closed message, then JAX
+compilation exceeded the explicit 600 s pytest timeout. The unrelated stale
+GYRE round-129 record red remains.
+
+The required independent `codex exec --sandbox read-only` review was attempted
+against `ec14bd3d8..HEAD`, but the in-sandbox client could not initialize:
+`failed to initialize in-process app-server client: Read-only file system`.
+Verdict quoted as required: **independent review unavailable in-sandbox**.
+
+Citation audit and its shifted-line plant are recorded after the citation-map
+commit below.
 
 ## OPEN
 
