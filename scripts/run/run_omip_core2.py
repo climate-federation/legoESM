@@ -3024,6 +3024,9 @@ _FESOM_WIRED_DESTS = frozenset({
     # non-default dest that is not listed here, so omitting them made both
     # flags UNREACHABLE on this lane while looking wired (codex, gap 12).
     "ice_exchange", "forcing_time_interp", "chl_remap",
+    # threaded into the fesom loop's surface, ice and freshwater samplers;
+    # nemo_scrip still dies in the sampler's tripole-shape guard.
+    "forcing_remap",
     "grid", "fesom_mesh_dir", "fesom_ic_dir", "fesom_unforced", "dt", "years",
     # vertical-mixing closure + the zdftke card knobs it consumes (same set
     # the MPAS lane threads; _validate_tke_card_grid gates them):
@@ -3720,6 +3723,7 @@ def run_fesom_forced_loop(args, grid, z_coord, model, state) -> None:
             state, forcing=forcing, idx_t=it,
             grid=grid, grid_type="fesom",
             dm2dc_window=_dm2dc_win,
+            forcing_remap=args.forcing_remap,
         )
         if ramp < 1.0:
             sf = sf._replace(tau_x=sf.tau_x * ramp, tau_y=sf.tau_y * ramp,
@@ -3730,7 +3734,8 @@ def run_fesom_forced_loop(args, grid, z_coord, model, state) -> None:
         # --- prognostic ice step (B4; mirrors the host loop's block) ------
         ice_resp = None
         if ice_config is not None:
-            forc_ice = sample_omip2_forcing(forcing, it, grid, "fesom")
+            forc_ice = sample_omip2_forcing(forcing, it, grid, "fesom",
+                                            forcing_remap=args.forcing_remap)
             if _dm2dc_win is not None:
                 # SAME diurnal SW modulation the ocean forcing gets — the
                 # ice tile must not integrate the raw daily-mean SW while
@@ -3769,7 +3774,8 @@ def run_fesom_forced_loop(args, grid, z_coord, model, state) -> None:
             fw = compute_omip2_freshwater_forcing(
                 state, forcing=forcing, idx_t=it, grid=grid,
                 grid_type="fesom", runoff_R=_R,
-                emp=args.emp_freshwater, ramp=ramp)
+                emp=args.emp_freshwater, ramp=ramp,
+                forcing_remap=args.forcing_remap)
         if ice_resp is not None:
             # ONE shared, mask-aware partition (coupler.ocean_forcing):
             # open-water stress/evap/heat/SW x f_open=(1-A); ice basal
@@ -7638,7 +7644,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "The 6-hourly winds and the radiation fields are "
                         "ln_tint=.FALSE. in the oracle, so they are HELD by "
                         "both models and this flag does not touch them.")
-    p.add_argument("--forcing-remap", choices=("bilinear", "nemo_scrip"),
+    p.add_argument("--forcing-remap",
+                   choices=("bilinear", "nemo_scrip", "nemo_weights"),
                    default="bilinear",
                    help="How the CORE-II/JRA55 atmospheric fields are remapped "
                         "onto the model grid. 'bilinear' (default, unchanged) "
@@ -7648,7 +7655,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "for u10/v10 and bilinear for the rest, which is what "
                         "namsbc_blk selects. Tripole only: the weights encode "
                         "one destination grid and the sampler refuses any "
-                        "other.")
+                        "other. 'nemo_weights' is the same split (bicubic "
+                        "winds, bilinear rest) computed at the cell centres "
+                        "of ANY point grid (tripole, MPAS, FESOM, cube); on "
+                        "the tripole it equals 'nemo_scrip' to <1e-6. Applies "
+                        "to the heat/momentum, freshwater and sea-ice "
+                        "forcing alike.")
     p.add_argument("--chl-remap", choices=("idw", "nemo_scrip"),
                    default="idw",
                    help="How the ESACCI chlorophyll climatology is remapped. "
@@ -11133,6 +11145,12 @@ def main() -> int:
         raise SystemExit(
             "--state-accumulate is not wired into the --scan-block lane; "
             "drop --scan-block or drop --state-accumulate.")
+    if args.forcing_remap == "nemo_weights" and use_scan:
+        # The scan body samples its own device forcing stack bilinearly, so
+        # the flag would be silently inert there.
+        raise SystemExit(
+            "--forcing-remap nemo_weights is not wired into the --scan-block "
+            "lane; drop --scan-block.")
     if _evd_occ_every is not None and use_scan:
         raise SystemExit(
             "--evd-occupancy-every-hours samples inside the per-step loop; "
@@ -11672,7 +11690,8 @@ def main() -> int:
         ice_resp = None
         if ice_config is not None:
             from legoesm.ocean.coupler import sample_omip2_forcing
-            forc_ice = sample_omip2_forcing(forcing, it, grid, app_grid_type)
+            forc_ice = sample_omip2_forcing(forcing, it, grid, app_grid_type,
+                                            forcing_remap=args.forcing_remap)
             if _dm2dc_win is not None:
                 # SAME diurnal SW modulation the ocean forcing gets (codex r1
                 # #2): the ice tile must not integrate the raw daily-mean SW
@@ -11744,7 +11763,8 @@ def main() -> int:
                     grid_type=app_grid_type, runoff_R=_R,
                     emp=args.emp_freshwater, ramp=ramp,
                     u_oce=_u_oce, v_oce=_v_oce,
-                    wind_current_feedback_vfac=_wind_vfac)
+                    wind_current_feedback_vfac=_wind_vfac,
+                    forcing_remap=args.forcing_remap)
                 sf = sf._replace(freshwater=net_freshwater_flux(fw))
             state = model.step(state, dt, surface_forcing=sf,
                                t_seconds=_t_sec)
@@ -11759,7 +11779,8 @@ def main() -> int:
                     grid_type=app_grid_type, runoff_R=_R,
                     emp=args.emp_freshwater, ramp=ramp,
                     u_oce=_u_oce, v_oce=_v_oce,
-                    wind_current_feedback_vfac=_wind_vfac)
+                    wind_current_feedback_vfac=_wind_vfac,
+                    forcing_remap=args.forcing_remap)
             if ice_resp is not None:
                 # ONE shared, mask-aware partition (coupler.ocean_forcing):
                 # open-water stress/evap/heat/SW x f_open=(1-A) at the SINGLE

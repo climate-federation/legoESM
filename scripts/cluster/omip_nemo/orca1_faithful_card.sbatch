@@ -113,6 +113,7 @@ JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid tripole \
   --redi-coefficient nemo21 --redi-aht0 900 \
   --ice-exchange nemo_si3 --ice-snow bulk --ice-snow-flooding on \
   --forcing-time-interp linear --chl-remap nemo_scrip \
+  --forcing-remap nemo_weights `# user 2026-10-13 "1": NEMO wind remap (bicubic u10/v10, bilinear rest), same point method on every grid` \
   `# ---- wet domain = the oracle's: the Great Lakes, Caspian and Lake Victoria` \
   `# (207 cells wet in mesh_mask.nc, land in NEMO's domain_cfg) become land ----` \
   --nemo-domain-mask \

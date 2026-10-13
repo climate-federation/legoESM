@@ -151,6 +151,7 @@ JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid mpas --C-smag-lap 0
   --ice-freeze-scheme unesco \
   --ice-exchange nemo_si3 --ice-snow bulk --ice-snow-flooding on \
   --forcing-time-interp linear \
+  --forcing-remap nemo_weights `# user 2026-10-13 "1": NEMO wind remap (bicubic u10/v10, bilinear rest), same point method on every grid` \
   --nemo-domain-mask \
   --output $OUT 2>&1 | tail -30
 run_rc=${PIPESTATUS[0]}

@@ -1037,15 +1037,22 @@ def _sample_omip2_forcing(forcing, idx_t, grid, grid_type,
     area integral of precip / sw_down after either point sampling is within
     0.4% of the first-order conservative integral, so no renormalisation.
     """
-    if forcing_remap not in ("bilinear", "nemo_scrip"):
+    if forcing_remap not in ("bilinear", "nemo_scrip", "nemo_weights"):
         raise ValueError(
-            f"unknown forcing_remap {forcing_remap!r}; expected 'bilinear' "
-            f"or 'nemo_scrip'")
+            f"unknown forcing_remap {forcing_remap!r}; expected 'bilinear', "
+            f"'nemo_scrip' or 'nemo_weights'")
     if forcing_remap == "nemo_scrip" and grid_type != "tripole":
         raise ValueError(
             f"forcing_remap='nemo_scrip' is wired for the tripole only; the "
             f"oracle's weights target that grid. Got grid_type={grid_type!r}.")
+    # "nemo_weights" = the oracle's per-channel split (bicubic winds, bilinear
+    # rest) computed at any grid's points, so every point grid can get it.
+    pt_method = "nemo_weights" if forcing_remap == "nemo_weights" else "bilinear"
     if grid_type in ("latlon", "latlon_regional"):
+        if forcing_remap != "bilinear":
+            raise ValueError(
+                f"forcing_remap={forcing_remap!r} is a point sampler; the "
+                f"{grid_type!r} grid uses the conservative regrid.")
         lat_deg = np.degrees(np.asarray(grid.lat))
         lon_deg = np.degrees(np.asarray(grid.lon))
         return _sample_forcing_latlon(forcing, idx_t, lat_deg, lon_deg)
@@ -1062,7 +1069,7 @@ def _sample_omip2_forcing(forcing, idx_t, grid, grid_type,
                     f"would give a plausible wrong field, not an error.")
             return sample_forcing_tripole_scrip(forcing, idx_t)
         forc = _sample_forcing_points(
-            forcing, idx_t, lat_pts.reshape(-1), lon_pts.reshape(-1), method="bilinear",
+            forcing, idx_t, lat_pts.reshape(-1), lon_pts.reshape(-1), method=pt_method,
         )
         return {k: v.reshape(shp) for k, v in forc.items()}
     if grid_type == "cubed_sphere":
@@ -1071,14 +1078,14 @@ def _sample_omip2_forcing(forcing, idx_t, grid, grid_type,
         shp = lat_pts.shape
         forc = _sample_forcing_points(
             forcing, idx_t, lat_pts.reshape(-1), lon_pts.reshape(-1),
-            method="bilinear",
+            method=pt_method,
         )
         return {k: v.reshape(shp) for k, v in forc.items()}
     if grid_type in ("mpas", "mpas_regional"):
         lat_pts = np.degrees(np.asarray(grid.latCell))
         lon_pts = np.degrees(np.asarray(grid.lonCell))
         return _sample_forcing_points(forcing, idx_t, lat_pts, lon_pts,
-                                      method="bilinear")
+                                      method=pt_method)
     if grid_type == "fesom":
         # FESOM triangular mesh: 1-D PAIRED node (lat, lon) points (radians
         # on the FesomOceanGrid facade) — same bilinear treatment as the
@@ -1086,13 +1093,14 @@ def _sample_omip2_forcing(forcing, idx_t, grid, grid_type,
         lat_pts = np.degrees(np.asarray(grid.lat))
         lon_pts = np.degrees(np.asarray(grid.lon))
         return _sample_forcing_points(forcing, idx_t, lat_pts, lon_pts,
-                                      method="bilinear")
+                                      method=pt_method)
     raise NotImplementedError(
         f"_sample_omip2_forcing does not support grid_type={grid_type!r}"
     )
 
 
-def sample_omip2_forcing(forcing, idx_t, grid, grid_type):
+def sample_omip2_forcing(forcing, idx_t, grid, grid_type,
+                         forcing_remap="bilinear"):
     """Public wrapper for :func:`_sample_omip2_forcing`.
 
     Returns the CORE-II / JRA forcing channels (``u10``, ``v10``, ``T_air`` [K],
@@ -1104,7 +1112,8 @@ def sample_omip2_forcing(forcing, idx_t, grid, grid_type):
     ``scripts/run/run_omip_core2.py``) can populate an ``AtmToSurface`` from the
     identical sampled fields rather than re-deriving the regrid (cross-module
     callers must not import the private ``_sample_omip2_forcing``)."""
-    return _sample_omip2_forcing(forcing, idx_t, grid, grid_type)
+    return _sample_omip2_forcing(forcing, idx_t, grid, grid_type,
+                                 forcing_remap=forcing_remap)
 
 
 def compute_omip2_freshwater_forcing(state, *, forcing, idx_t: int,
@@ -1114,7 +1123,8 @@ def compute_omip2_freshwater_forcing(state, *, forcing, idx_t: int,
                                      ramp: float = 1.0,
                                      rho_air: float = constants.rho_air,
                                      u_oce=None, v_oce=None,
-                                     wind_current_feedback_vfac: float = 0.0):
+                                     wind_current_feedback_vfac: float = 0.0,
+                                     forcing_remap: str = "bilinear"):
     """Build a :class:`FreshwaterForcing` (P, E, runoff) for the OMIP-2 run.
 
     Delivered to the ocean via the in-core channel
@@ -1154,10 +1164,14 @@ def compute_omip2_freshwater_forcing(state, *, forcing, idx_t: int,
         flux ``E`` (P - E salinity) stays the SAME physical flux as the latent
         HEAT flux in ``q_net`` (``E = -lhflx / L_vap``).  ``vfac == 0.0``
         (default) is byte-identical.
+    forcing_remap :
+        MUST match the heat/momentum call, for the same reason: the winds set
+        the evaporation here and the latent heat there.
     """
     from legoesm.ocean.freshwater import FreshwaterForcing
 
-    forc = _sample_omip2_forcing(forcing, idx_t, grid, grid_type)
+    forc = _sample_omip2_forcing(forcing, idx_t, grid, grid_type,
+                                 forcing_remap=forcing_remap)
     # MPAS state is (nCells,) at the surface; cube/latlon/tripole are (..., 0).
     # Slice FIRST (device-side), THEN convert: np.asarray on the full leaf
     # would assemble the entire 3-D (possibly lat-band-sharded) T field on
@@ -1423,7 +1437,8 @@ def compute_omip2_surface_forcing(state, *, forcing, idx_t: int,
     ``"bilinear"`` (default, unchanged) or ``"nemo_scrip"``, which reads NEMO's
     own SCRIP weight files so the winds arrive through the oracle's exact
     interpolation -- bicubic for u10/v10, bilinear for the rest, as ORCA1's
-    namsbc_blk specifies. Tripole only; the sampler raises otherwise.
+    namsbc_blk specifies (tripole only; the sampler raises otherwise), or
+    ``"nemo_weights"``, the same split computed at any point grid's centres.
     """
     from legoesm.ocean.state import OceanSurfaceForcing
     sigma_sb = float(constants.sigma_sb)
