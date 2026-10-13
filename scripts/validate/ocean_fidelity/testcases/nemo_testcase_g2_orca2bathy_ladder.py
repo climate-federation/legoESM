@@ -217,6 +217,7 @@ def card_surface(state) -> dict[str, np.ndarray]:
 def geometry(root: Path, plant: str | None = None) -> dict:
     import netCDF4
     from legoesm.ocean.fidelity import nemo_testcase_recipe as recipe
+    g1._fp64()                 # a direct caller must not get the f32 default
     card = recipe.build_nemo_testcase_card(CASE, deck_root=root)
     nk = int(card.recipe.z_coord.n_levels)
     dom = recipe._orca2g1_domain(root / "domain_cfg.nc", nk + 1)
@@ -268,7 +269,7 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
         state_out: Path | None = None, plant: str | None = None,
         geometry_plant: str | None = None, allow_dirty: bool = False,
         entries=(1, 3, 5, 7, 9), exposures=tuple(EXPOSURES),
-        dump: Path | None = None) -> dict:
+        dump: Path | None = None, without_zdf_faces: bool = False) -> dict:
     require(arm in ARMS, f"unknown arm {arm!r}")
     require(plant in (None, "score", "level"), f"unknown plant {plant!r}")
     from legoesm.ocean.fidelity.provenance import allow_dirty_stamps, git_sha
@@ -292,6 +293,10 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
 
     card = recipe.build_nemo_testcase_card(CASE, deck_root=root)
     cfg, z, s0 = card.recipe.model_config, card.recipe.z_coord, card.recipe.initial_state
+    require(cfg.zdf_momentum_nemo_face_thickness is True,
+            "the G2 card no longer selects NEMO's dyn_zdf divisors")
+    if without_zdf_faces:      # ROUND-2 BEFORE ARM / plant: the two-cell mean
+        cfg = cfg._replace(zdf_momentum_nemo_face_thickness=False)
     nk = int(z.n_levels)
     roots = (root, *restart_roots)
     reg = g1.regions(np.asarray(z.is_active)[..., 0])
@@ -302,6 +307,8 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
     out = {"arm": arm, "case": CASE, "legoesm_git_sha": sha, "root": str(root),
            "restart_roots": [str(r) for r in restart_roots], "bar": BAR,
            "plant": plant, "card_levels": nk, "packages_tree": packages,
+           "zdf_momentum_nemo_face_thickness": bool(
+               cfg.zdf_momentum_nemo_face_thickness),
            "n_barotropic_substeps": int(cfg.barotropic.n_barotropic_substeps),
            "region_cells": {k: int(m.sum()) for k, m in reg.items()},
            "depth_class_cells": {p: {k: int(m.sum()) for k, m in c.items()}
@@ -513,6 +520,8 @@ def main(argv=None) -> int:
     ap.add_argument("--state-out", type=Path)
     ap.add_argument("--plant", choices=("score", "level"))
     ap.add_argument("--geometry-plant")
+    ap.add_argument("--without-zdf-faces", action="store_true",
+                    help="BEFORE ARM: the card without NEMO's dyn_zdf divisors")
     ap.add_argument("--allow-dirty", action="store_true")
     ap.add_argument("--output", type=Path, required=True)
     a = ap.parse_args(argv)
@@ -521,7 +530,8 @@ def main(argv=None) -> int:
               state_out=a.state_out, plant=a.plant,
               geometry_plant=a.geometry_plant, allow_dirty=a.allow_dirty,
               entries=tuple(int(k) for k in a.entries.split(",")),
-              exposures=tuple(a.exposures.split(",")), dump=a.dump)
+              exposures=tuple(a.exposures.split(",")), dump=a.dump,
+              without_zdf_faces=a.without_zdf_faces)
     a.output.write_text(json.dumps(out, indent=1) + "\n")
     if a.arm == "geometry":
         print(f"GEOMETRY {out['n_bit_identical']} of {out['n_rows']} rows bit-identical")

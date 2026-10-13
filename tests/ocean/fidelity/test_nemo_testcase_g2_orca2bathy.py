@@ -170,7 +170,10 @@ def test_each_rung_refuses_the_other_rungs_domain(g2_root):
 def test_g2_differs_from_g1_only_by_what_the_domain_resolves(g2_card):
     g1 = recipe.build_nemo_testcase_card("ORCA2G1-flat", deck_root=G1_RECORD)
     a, b = g2_card.recipe.model_config, g1.recipe.model_config
-    assert [f for f in a._fields if repr(getattr(a, f)) != repr(getattr(b, f))] == ["barotropic"]
+    assert [f for f in a._fields if repr(getattr(a, f)) != repr(getattr(b, f))] == [
+        "barotropic", "zdf_momentum_nemo_face_thickness"]   # round 2: dyn_zdf divisors
+    assert (a.zdf_momentum_nemo_face_thickness, b.zdf_momentum_nemo_face_thickness) in (
+        (False, True), (True, False))
     assert [f for f in a.barotropic._fields
             if getattr(a.barotropic, f) != getattr(b.barotropic, f)] == ["n_barotropic_substeps"]
     assert b.barotropic.n_barotropic_substeps == 13            # G1 unchanged
