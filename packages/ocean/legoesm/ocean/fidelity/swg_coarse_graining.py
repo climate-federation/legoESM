@@ -18,6 +18,7 @@ import numpy as np
 from scipy.ndimage import gaussian_filter
 
 FILTER_TRUNCATE = 6.0
+CONTINUITY_BAR_M_S = 1.0e-15
 
 
 def sha256(path: Path) -> str:
@@ -488,6 +489,63 @@ def restricted_relative_vorticity(fields: dict[str, np.ndarray], geometry: dict,
     return zeta
 
 
+def audit_snapshot(path: Path, source_manifest_path: Path, *, commit: str,
+                   plant_round1: bool = False) -> dict:
+    """Content-pin and audit one real fine snapshot against the continuity bar."""
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        SWG_DG50_NAMELIST,
+        SWG_MADDISON_NAMELIST,
+    )
+
+    if len(commit) != 40 or any(char not in "0123456789abcdef" for char in commit):
+        raise ValueError("commit must be a forty-character lowercase Git SHA")
+    manifest = json.loads(source_manifest_path.read_text())
+    if manifest.get("status") != "complete":
+        raise ValueError("source manifest must be complete")
+    expected = manifest.get("daily_sha256", {}).get(path.name)
+    digest = sha256(path)
+    if expected != digest:
+        raise ValueError(f"source manifest does not admit {path.name}")
+    with np.load(path, allow_pickle=False) as saved:
+        fields = {
+            "T": np.asarray(saved["ssh_m"], dtype=np.float64),
+            "U": np.asarray(saved["u_m_s"], dtype=np.float64),
+            "V": np.asarray(saved["v_m_s"], dtype=np.float64),
+        }
+        source_day = int(saved["day"])
+        source_step = int(saved["step"])
+    source = cgrid_geometry(SWG_MADDISON_NAMELIST)
+    target = cgrid_geometry(SWG_DG50_NAMELIST)
+    coarse_fields = None
+    if plant_round1:
+        coarse_fields = coarse_grain_cgrid(
+            fields, source, target,
+            gaussian_length_m=float(target["spacing_m"]))
+    result = require_continuity_commutes(
+        fields, source, target, atol_m_s=CONTINUITY_BAR_M_S,
+        coarse_fields=coarse_fields)
+    return {
+        "schema": "legoesm-swg-conservative-continuity-audit-v1",
+        "status": "PASS",
+        "legoesm_git_sha": commit,
+        "source_path": str(path.resolve()),
+        "source_sha256": digest,
+        "source_manifest_path": str(source_manifest_path.resolve()),
+        "source_manifest_sha256": sha256(source_manifest_path),
+        "source_day": source_day,
+        "source_step": source_step,
+        "plant_round1": plant_round1,
+        "continuity_bar_m_s": CONTINUITY_BAR_M_S,
+        "regions": {
+            name: result[name]
+            for name in ("wet", "interior", "outer_four_cells")
+        },
+        "convention": (
+            "sum fine T-cell volumes and native e2*h*u/e1*h*v face transports; "
+            "no state Gaussian and no a-posteriori mean restoration"),
+    }
+
+
 def coarse_grain_cgrid(fields: dict[str, np.ndarray], source: dict,
                        target: dict, *, gaussian_length_m: float) -> dict[str, np.ndarray]:
     """Round-1 non-conservative Gaussian diagnostic; not a training target."""
@@ -595,6 +653,8 @@ def filter_truth_directory(input_root: Path, output_root: Path, *,
                 "source_step": np.int64(saved["step"]),
                 "source_dt_s": np.float64(saved["dt_s"]),
                 "day": np.int64(day),
+                "step": np.int64(day * int(86_400 / SWG_DG50_NAMELIST.rn_Dt_s)),
+                "dt_s": np.float64(SWG_DG50_NAMELIST.rn_Dt_s),
             }
         records = {
             "snapshots": metadata | {"ssh_m": snapshot["T"],
@@ -633,14 +693,39 @@ def filter_truth_directory(input_root: Path, output_root: Path, *,
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input", type=Path, required=True)
-    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--input", type=Path)
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--audit-snapshot", type=Path)
+    parser.add_argument("--source-manifest", type=Path)
+    parser.add_argument("--json", type=Path)
+    parser.add_argument("--plant-round1", action="store_true")
     args = parser.parse_args(argv)
     try:
         from legoesm.ocean.fidelity.provenance import git_sha
 
+        commit = git_sha()
+        if args.audit_snapshot is not None:
+            if args.source_manifest is None or args.json is None:
+                raise ValueError("audit requires --source-manifest and --json")
+            if args.input is not None or args.output is not None:
+                raise ValueError("audit excludes --input and --output")
+            report = audit_snapshot(
+                args.audit_snapshot, args.source_manifest, commit=commit,
+                plant_round1=args.plant_round1)
+            _write_json_atomic(args.json, report)
+            print(
+                "PASS continuity "
+                f"interior_max={report['regions']['interior']['max_abs_m_s']:.3e} "
+                "wall_max="
+                f"{report['regions']['outer_four_cells']['max_abs_m_s']:.3e}")
+            return 0
+        if args.input is None or args.output is None:
+            raise ValueError("conversion requires --input and --output")
+        if args.source_manifest is not None or args.json is not None \
+                or args.plant_round1:
+            raise ValueError("conversion excludes audit-only arguments")
         manifests = filter_truth_directory(
-            args.input, args.output, commit=git_sha())
+            args.input, args.output, commit=commit)
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"REFUSE: {exc}")
         return 2

@@ -142,10 +142,13 @@ def test_gaussian_vorticity_path_spreads_impulse_without_mean_patch():
     assert np.count_nonzero(smoothed[wet]) > 1
     assert np.isclose(np.sum(smoothed[wet]), 1.0, rtol=0.0, atol=2.0e-15)
     fields = {"T": field, "U": np.zeros_like(field), "V": np.zeros_like(field)}
+    u_at = tuple(np.argwhere(target["mask"]["U"])[100])
+    fields["U"][u_at] = 1.0
     raw = coarse.restricted_relative_vorticity(fields, target)
     filtered = coarse.restricted_relative_vorticity(
         fields, target, gaussian_sigma_cells=1.0)
     assert raw.shape == filtered.shape == wet.shape
+    assert not np.array_equal(raw, filtered)
 
 
 def test_planted_round1_nonconservative_state_is_refused():
@@ -175,11 +178,8 @@ def test_real_day1095_continuity_commutes_interior_and_walls():
     path = _REAL_FINE_ROOT / name
     assert manifest["status"] == "complete"
     assert manifest["daily_sha256"][name] == coarse.sha256(path)
-    with np.load(path, allow_pickle=False) as saved:
-        fields = {"T": saved["ssh_m"], "U": saved["u_m_s"],
-                  "V": saved["v_m_s"]}
-    result = coarse.require_continuity_commutes(
-        fields, coarse.cgrid_geometry(SWG_MADDISON_NAMELIST),
-        coarse.cgrid_geometry(SWG_DG50_NAMELIST), atol_m_s=1.0e-15)
-    assert result["interior"]["max_abs_m_s"] <= 1.0e-15
-    assert result["outer_four_cells"]["max_abs_m_s"] <= 1.0e-15
+    report = coarse.audit_snapshot(
+        path, manifest_path, commit="a" * 40)
+    assert report["status"] == "PASS"
+    assert report["regions"]["interior"]["max_abs_m_s"] <= 1.0e-15
+    assert report["regions"]["outer_four_cells"]["max_abs_m_s"] <= 1.0e-15
