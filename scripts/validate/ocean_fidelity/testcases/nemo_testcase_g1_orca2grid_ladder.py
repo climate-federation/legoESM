@@ -404,7 +404,7 @@ def rhs_term_replay(root: Path, kt: int, fe3mask, *, stage: int = 1,
     transports, :772-776 the triads, :779-785 zua and zva), each in NEMO's
     literal operand order, on the whole inner domain.  Everything is NEMO's:
     the frame the stage reads WITH its halos (stage 1: the step entry; stage
-    2 and 3: the previous stage's frame, with the F ratio that stage set),
+    2 and 3: the previous stage's frame, with the F ratio the stage reads),
     the mesh file, and the T fold image read off NEMO's own halo row.
     ``fe3mask`` is the card's (the mesh file does not carry it).  ``rhd`` is
     the density anomaly on the haloed grid; None runs the pressure gradient
@@ -423,7 +423,11 @@ def rhs_term_replay(root: Path, kt: int, fe3mask, *, stage: int = 1,
     pre, suf = ("e_", "_bb") if stage == 1 else (f"{stage - 1}_", "_aa")
     ssh, r3t, r3u, r3v, u, v, tn, sn = (f[pre + n + suf] for n in (
         "ssh", "r3t", "r3u", "r3v", "uu_k1", "vv_k1", "tn_k1", "sn_k1"))
-    r3f = f["e_r3f"] if stage == 1 else f[f"{stage}_r3f"]
+    # the F ratio the stage's vorticity term reads: the step-entry one at
+    # stage 1; the one stage 2 set (stprk3_stg.f90:218), which its frame
+    # holds; at stage 3 the mean of the entry and after ratios (:239) -- the
+    # stage-3 frame holds the after ratio, written back at :546
+    r3f = (f["e_r3f"], f["2_r3f"], 0.5 * (f["e_r3f"] + f["3_r3f"]))[stage - 1]
 
     def halo(a):                                # cyclic east-west halo
         out = np.zeros((nj, ni))
@@ -840,6 +844,66 @@ def stage1_momentum_replay(g: dict, card, card_fields: dict, reg,
     return out
 
 
+def stage_momentum_replay(root: Path, kt: int, card, stage: int, g: dict,
+                          card_fields: dict, reg, card_rhs=None,
+                          card_raw=None) -> dict:
+    """NEMO's stage velocity from NEMO's own recorded frames, offline.
+
+    The stage's right-hand side is ``rhs_term_replay`` (the pressure gradient
+    and the vorticity term from the frame the stage reads); the update is the
+    thickness-weighted statement (stprk3_stg.f90:373-378 at stages 1 and 2,
+    dynzdf.f90:144-149 at stage 3, followed there by the removal of the
+    barotropic velocity, :160-161, which the deck's resolved ln_drgimp = T
+    switches on; the one-level implicit solve after it is the identity on
+    this deck: no stress, no drag, and the interface below the only level is
+    masked) and the barotropic correction
+    (stprk3_stg.f90:413-414, :417-418).  The replay against NEMO's stage
+    frame is the control: the stage's right-hand side is not in the record,
+    so 0 unequal there is what makes the replayed right-hand side NEMO's.
+    The top V row is not replayed."""
+    raw = card.recipe.z_coord.nemo_een_barotropic
+    a = lambda n: np.asarray(getattr(raw, n), dtype=np.float64)  # noqa: E731
+    rep = rhs_term_replay(root, kt, a("fe3mask")[..., 0], stage=stage)
+    rdt = {1: 1.0 / 3.0, 2: 0.5, 3: 1.0}[stage] * float(card.dt_s)
+    pre, suf = ("e_", "_bb") if stage == 1 else (f"{stage - 1}_", "_aa")
+    out = {"stage": stage, "rDt": rdt, "rows": []}
+    for face in "uv":
+        mask, e3 = a(f"{face}mask")[..., 0], a(f"e3{face}_0")[..., 0]
+        wet = rep["wet_" + face]
+        r3b, r3m = g[f"e_r3{face}_bb"], g[f"{pre}r3{face}{suf}"]
+        r3a = g[f"{stage}_r3{face}_aa"]
+        before, rhs = g[f"e_{face}{face}_k1_bb"], rep["rhs_" + face]
+        target, r1 = g[f"{stage}_{face}{face}_b_aa"], _inverse_depth(a(f"h{face}_0"))
+        with np.errstate(divide="ignore", invalid="ignore"):
+            vel_raw = np.where(wet, (
+                (1.0 + r3b) * before + rdt * (1.0 + r3m) * rhs) / (1.0 + r3a) * mask, 0.0)
+        if stage == 3:      # dynzdf.f90:160-161 (ln_drgimp and ln_dynspg_ts)
+            vel_raw = (vel_raw - target) * mask
+        vel = vel_raw + (target - (e3 * vel_raw) * r1) * mask
+        row = {"face": face,
+               "control_replay_vs_nemo": substep_row(
+                   f"stage{stage}.{face}", g[f"{stage}_{face}{face}_k1_aa"], vel, wet, reg),
+               "card_vs_replay": substep_row(
+                   f"stage{stage}.{face}", vel, card_fields[face], wet, reg)}
+        if card_rhs is not None:
+            row["card_rhs_vs_replay_rhs"] = substep_row(
+                "rhs", rhs, card_rhs[face], wet, reg)
+            row["card_raw_vs_replay_raw"] = substep_row(
+                "raw", vel_raw, card_raw[face], wet, reg)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                own = np.where(wet, ((1.0 + r3b) * before + rdt * (1.0 + r3m)
+                                     * card_rhs[face]) / (1.0 + r3a) * mask, 0.0)
+            if stage == 3:
+                own = (own - target) * mask
+            row["card_raw_vs_written_update_of_card_rhs"] = substep_row(
+                "raw", own, card_raw[face], wet, reg)
+            row["card_final_vs_written_correction_of_card_raw"] = substep_row(
+                "final", card_raw[face] + (target - (e3 * card_raw[face]) * r1) * mask,
+                card_fields[face], wet, reg)
+        out["rows"].append(row)
+    return out
+
+
 def ratio_fold_rows(root: Path, kt: int, card, reg) -> dict:
     """The thickness ratios on the fold rows, four ways, against NEMO's own
     recorded entry ratios; and the production coefficient builder offline."""
@@ -1034,7 +1098,10 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
         stage1_rhs_from_nemo: bool = False,
         without_stage1_rhs: bool = False,
         without_written_order: bool = False,
-        without_vor_order: bool = False) -> dict:
+        without_vor_order: bool = False,
+        without_zdf_residual: bool = False,
+        without_fold_exchange_v: bool = False,
+        without_stage_r3f: bool = False) -> dict:
     if vor_fold_image:
         from legoesm.ocean.fidelity import nemo_testcase_recipe as _recipe
         calls: list = []
@@ -1053,7 +1120,10 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
                       without_ratio_fold=without_ratio_fold,
                       without_stage1_rhs=without_stage1_rhs,
                       without_written_order=without_written_order,
-                      without_vor_order=without_vor_order)
+                      without_vor_order=without_vor_order,
+                      without_zdf_residual=without_zdf_residual,
+                      without_fold_exchange_v=without_fold_exchange_v,
+                      without_stage_r3f=without_stage_r3f)
         require(len(calls) > 0, "the vorticity fold-image arm was never traced")
         out["vor_fold_image_measurement_arm"] = {"traces": len(calls)}
         out["label"] = f"{out['label']} + MEASUREMENT ARM (fold-image V row "\
@@ -1113,7 +1183,10 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
             barotropic_substep_dt_nemo_literal=False))
     for off, name in ((without_stage1_rhs, "rk3_stage1_rhs_nemo_literal"),
                       (without_written_order, "rk3_stage_velocity_written_order"),
-                      (without_vor_order, "een_vorticity_written_order")):
+                      (without_vor_order, "een_vorticity_written_order"),
+                      (without_zdf_residual, "zdf_barotropic_removal_nemo_literal"),
+                      (without_fold_exchange_v, "rk3_fold_exchange_top_v_row"),
+                      (without_stage_r3f, "rk3_stage_r3f_nemo_literal")):
         if off:               # ROUND-6 BEFORE ARMS / plants, one option each
             require(getattr(cfg, name) is True, f"the card no longer selects {name}")
             cfg = cfg._replace(**{name: False})
@@ -1298,6 +1371,10 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
            "rk3_stage_velocity_written_order": bool(
                cfg.rk3_stage_velocity_written_order),
            "een_vorticity_written_order": bool(cfg.een_vorticity_written_order),
+           "zdf_barotropic_removal_nemo_literal": bool(
+               cfg.zdf_barotropic_removal_nemo_literal),
+           "rk3_fold_exchange_top_v_row": bool(cfg.rk3_fold_exchange_top_v_row),
+           "rk3_stage_r3f_nemo_literal": bool(cfg.rk3_stage_r3f_nemo_literal),
            "per_kt": []}
     records = {kt: read_step(root, kt) for kt in scored if kt <= n_stage}
     before = {}             # the card's own chain: the state entering step kt
@@ -1638,6 +1715,19 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
                         if not stage1_rhs_from_nemo else [None, None]
                     stages[-1]["momentum_replay"] = stage1_momentum_replay(
                         g, card, cand, reg, *exposed)
+                else:
+                    exposed = [None, None]
+                    if last and not stage1_rhs_from_nemo:
+                        exposed = [state_fields(jax.device_get(model(
+                            _NEMOWSRK3TestHooks(
+                                stage_barotropic_output_override=ext,
+                                stage_entry_override=ent, **flag)).step(
+                                    seed(g, before[kt], kt), dt=card.dt_s)))
+                            for flag in (
+                                {"expose_stage3_momentum_rhs": "post_ldf"},
+                                {"expose_stage3_raw_momentum": True})]
+                    stages[-1]["stage_replay"] = stage_momentum_replay(
+                        root, kt, card, stage, g, cand, reg, *exposed)
             out["per_kt"].append({"kt": kt, "stages": stages})
     return out
 
@@ -1818,6 +1908,15 @@ def main(argv=None) -> int:
     ap.add_argument("--without-vor-order", action="store_true",
                     help="BEFORE ARM: the vorticity trend in the operator's "
                          "own operation order (round 6's card)")
+    ap.add_argument("--without-zdf-residual", action="store_true",
+                    help="BEFORE ARM: the barotropic velocity re-added after "
+                         "the implicit vertical solve (round 6's card)")
+    ap.add_argument("--without-fold-exchange-v", action="store_true",
+                    help="BEFORE ARM: the stored top V row left at the "
+                         "compact mask's zero (round 6's card)")
+    ap.add_argument("--without-stage-r3f", action="store_true",
+                    help="BEFORE ARM: the stage F ratio taken from the "
+                         "stage's interpolated sea level")
     ap.add_argument("--without-written-order", action="store_true",
                     help="the card with rk3_stage_velocity_written_order "
                          "switched off (a round-6 before arm; also its plant)")
@@ -1846,7 +1945,10 @@ def main(argv=None) -> int:
                   stage1_rhs_from_nemo=a.stage1_rhs_from_nemo,
                   without_stage1_rhs=a.without_stage1_rhs,
                   without_written_order=a.without_written_order,
-                  without_vor_order=a.without_vor_order)
+                  without_vor_order=a.without_vor_order,
+                  without_zdf_residual=a.without_zdf_residual,
+                  without_fold_exchange_v=a.without_fold_exchange_v,
+                  without_stage_r3f=a.without_stage_r3f)
     except Exception as e:      # noqa: BLE001 -- refusals print and exit 2
         print(f"REFUSE: {type(e).__name__}: {e}", file=sys.stderr)
         return 2
