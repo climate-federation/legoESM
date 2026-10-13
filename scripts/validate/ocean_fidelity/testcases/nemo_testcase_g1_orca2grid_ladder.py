@@ -30,6 +30,12 @@ Arms (``--arm``):
                of the pivot row and the row below, from NEMO's recorded entry
                fields with their halos: once as compiled, once with the
                fold-image V row's transport set to zero
+  fold_v_depth  OFFLINE operand table, kt = 1..10: the split-explicit solver's
+               sea level on V faces (the ssh term of zhvp2_e,
+               dynspg_ts.f90:419-421) from the card's production helper applied
+               to NEMO's entry ssh, on the fold-image V row and the row below,
+               against NEMO's own stored weighted mean (r3v, domqco.f90:268-269,
+               times hv_0); no model step
 
 Every scored row is split into the preregistered regions (fold band, seam,
 south, interior; interior again into coast-adjacent and open).  The scorer
@@ -57,11 +63,12 @@ DEFAULT_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/round1/"
     "oracle_g1_r1/p3_a_100step")
 ARMS = ("geometry", "independent", "given_entry", "rhs", "handoff", "stages",
-        "vor_fold_replay", "restart_entry")
+        "vor_fold_replay", "restart_entry", "fold_v_depth")
 PLANTS = ("score", "entry")
 STAGE_STEPS = 10          # stage frames exist for kt = 1..10
 FOLD_ROWS, SEAM_COLS, SOUTH_ROWS = 3, 2, 3
 FIELDS = ("ssh", "uu_b", "vv_b", "u", "v")
+FOLD_ROW_NAMES = (("fold_pivot_row", -1), ("fold_row_below", -2), ("fold_third_row", -3))
 
 
 def _checker():
@@ -113,8 +120,14 @@ def regions(tmask: np.ndarray) -> dict[str, np.ndarray]:
             if dj == -1:
                 shifted[-1] = False
             coast |= shifted & ~wet
-    return {"fold": fold, "seam": seam, "south": south, "interior": interior,
-            "interior_coast": interior & coast, "interior_open": interior & ~coast}
+    out = {"fold": fold, "seam": seam, "south": south, "interior": interior,
+           "interior_coast": interior & coast, "interior_open": interior & ~coast}
+    # the fold band row by row: each row is scored against NEMO's OWN row
+    # maximum (the signal falls ~100-fold per row towards the pivot, so a
+    # band-wide maximum hides the pivot row)
+    for name, j in FOLD_ROW_NAMES:
+        out[name] = jj == nj + j
+    return out
 
 
 def row(name, ref, cand, reg, *, plant=False) -> dict:
@@ -355,6 +368,44 @@ def vor_een_u_replay(root: Path, kt: int, fe3mask, *, zero_image_row: bool) -> d
     return out
 
 
+def fold_v_depth_rows(root: Path, kt: int, card, cfg) -> list[dict]:
+    """The ssh term of ``zhvp2_e`` on the two top V rows, card vs NEMO.
+
+    NEMO side: ``r3v`` as recorded at step entry times ``hv_0`` -- the same
+    ``e1e2t``-weighted two-cell mean (``domqco.f90:268-269``) that
+    ``dynspg_ts.f90:419-421`` adds to ``hv_0``; on the fold-image row it reads
+    the T fold halo.  Card side: the solver's own helper on NEMO's entry ssh,
+    with the reference depths and the fold operands ``cfg`` selects.  The two
+    differ by the rounding of one multiply-divide pair where they agree.
+    """
+    import jax.numpy as jnp
+    from legoesm.grids.latlon import ensure_geometry
+    from legoesm.ocean.dynamics import barotropic_latlon_cgrid as bt
+    zc, grid, s0 = card.recipe.z_coord, card.recipe.grid, card.recipe.initial_state
+    g = read_step(root, kt)
+    f64 = jnp.float64
+    prep = bt._nemo_ssh_avg_reference_depth_override(
+        bt._nemo_ssh_avg_prep(s0.H_bathy.data, jnp.asarray(card.recipe.land_mask),
+                              grid, f64),
+        bt._nemo_literal_reference_face_depths(zc, f64), f64)
+    out = bt._nemo_ssh_avg_apply(
+        jnp.asarray(g["e_ssh_bb"]), s0.u_mask.data, s0.v_mask.data, grid,
+        ensure_geometry(grid).area_T, prep, return_literal_inverse=True,
+        return_ssh_average=True,
+        fold_top_v_wet=bt._nemo_fold_top_v_wet(cfg, zc, f64))
+    card_v = np.asarray(out[5])[1:]
+    nemo_v = g["e_r3v_bb"] * np.asarray(zc.nemo_een_barotropic.hv_0)
+    rows = []
+    for name, j in (("fold_image_v_row", -1), ("row_below", -2)):
+        ref = float(np.max(np.abs(nemo_v[j])))
+        err = float(np.max(np.abs(card_v[j] - nemo_v[j])))
+        rows.append({"row": name, "nemo_max_abs": ref,
+                     "n_nemo_nonzero": int(np.count_nonzero(nemo_v[j])),
+                     "card_max_abs": float(np.max(np.abs(card_v[j]))),
+                     "max_abs": err, "relative": err / ref if ref else None})
+    return rows
+
+
 @contextlib.contextmanager
 def vor_fold_image_arm(card, calls: list):
     """MEASUREMENT ARM, not the card.  Inside the 3-D vorticity trend only,
@@ -389,7 +440,8 @@ def vor_fold_image_arm(card, calls: list):
 def run(root: Path, *, arm: str, kt_max: int = 10, plant: str | None = None,
         allow_dirty: bool = False, geometry_plant: str | None = None,
         fold_fill_v: bool = False, vor_fold_image: bool = False,
-        before_arm: bool = False) -> dict:
+        before_arm: bool = False,
+        hook_arm: tuple = (), without_fold_v_depth: bool = False) -> dict:
     if vor_fold_image:
         from legoesm.ocean.fidelity import nemo_testcase_recipe as _recipe
         calls: list = []
@@ -397,7 +449,9 @@ def run(root: Path, *, arm: str, kt_max: int = 10, plant: str | None = None,
                 "ORCA2G1-flat", deck_root=root), calls):
             out = run(root, arm=arm, kt_max=kt_max, plant=plant,
                       allow_dirty=allow_dirty, geometry_plant=geometry_plant,
-                      fold_fill_v=fold_fill_v, before_arm=before_arm)
+                      fold_fill_v=fold_fill_v, before_arm=before_arm,
+                      hook_arm=hook_arm,
+                      without_fold_v_depth=without_fold_v_depth)
         require(len(calls) > 0, "the vorticity fold-image arm was never traced")
         out["vor_fold_image_measurement_arm"] = {"traces": len(calls)}
         out["label"] = f"{out['label']} + MEASUREMENT ARM (fold-image V row "\
@@ -426,8 +480,24 @@ def run(root: Path, *, arm: str, kt_max: int = 10, plant: str | None = None,
     if before_arm:      # BEFORE ARM / plant: the card without its fold-image row
         require(cfg.een_fold_image_v_row is True, "the card no longer selects the row")
         cfg = cfg._replace(een_fold_image_v_row=False)
+    if without_fold_v_depth:  # ROUND-3 BEFORE ARM / plant: the solver's face
+        # depth on the fold-image V row without sea level (hv_0 only)
+        require(cfg.barotropic.barotropic_fold_top_v_face_ssh is True,
+                "the card no longer selects the fold-row V face depth")
+        cfg = cfg._replace(barotropic=cfg.barotropic._replace(
+            barotropic_fold_top_v_face_ssh=False))
     s0 = card.recipe.initial_state
     require(int(card.recipe.z_coord.n_levels) == 1, "the G1 card executes one level")
+    if arm == "fold_v_depth":
+        require(1 <= kt_max <= STAGE_STEPS, f"kt_max must lie in 1..{STAGE_STEPS}")
+        return {"arm": arm, "legoesm_git_sha": sha, "root": str(root),
+                "label": "GIVEN-NEMO-ENTRY (offline operand: ssh term of the "
+                         "solver's V face depth; no model step)",
+                "een_fold_image_v_row": bool(cfg.een_fold_image_v_row),
+                "barotropic_fold_top_v_face_ssh": bool(
+                    cfg.barotropic.barotropic_fold_top_v_face_ssh),
+                "per_kt": [{"kt": kt, "operand_rows": fold_v_depth_rows(
+                    root, kt, card, cfg)} for kt in range(1, kt_max + 1)]}
     cap = 100 if arm in ("independent", "restart_entry") else STAGE_STEPS
     require(1 <= kt_max <= cap, f"kt_max must lie in 1..{cap}")
     kts = range(1, kt_max + 1)
@@ -450,6 +520,10 @@ def run(root: Path, *, arm: str, kt_max: int = 10, plant: str | None = None,
         return st._replace(v=st.v.replace(data=jnp.asarray(v)))
 
     def model(hooks=None):
+        if hooks is None and hook_arm:
+            # MEASUREMENT ARM, not the card: private boolean test hooks of the
+            # model switched on for every step of this arm
+            hooks = _NEMOWSRK3TestHooks(**{n: True for n in hook_arm})
         return LatLonCGridOceanModel(
             card.recipe.grid, card.recipe.z_coord, cfg,
             **({} if hooks is None else {"_nemo_ws_test_hooks": hooks}))
@@ -472,8 +546,11 @@ def run(root: Path, *, arm: str, kt_max: int = 10, plant: str | None = None,
            "bar": BAR, "root": str(root), "kts": list(kts),
            "fold_fill_v_measurement_arm": fold_fill_v,
            "een_fold_image_v_row": bool(cfg.een_fold_image_v_row),
+           "barotropic_fold_top_v_face_ssh": bool(
+               cfg.barotropic.barotropic_fold_top_v_face_ssh),
            "n_barotropic_substeps": int(cfg.barotropic.n_barotropic_substeps),
            "region_cells": {k: int(m.sum()) for k, m in reg.items()},
+           "hook_measurement_arm": list(hook_arm),
            "per_kt": []}
     records = {kt: read_step(root, kt) for kt in kts if kt <= STAGE_STEPS}
     before = {}             # the card's own chain: the state entering step kt
@@ -710,6 +787,11 @@ def _print(out: dict) -> None:
             print(f"kt{k['kt']} {r['row']:9s} " + " | ".join(
                 f"{n}: {v['n_unequal']}/{v['n_wet']} rel={v['relative']:.1e}"
                 for n, v in r.items() if n != "row"))
+    for k in out["per_kt"]:
+        for r in k.get("operand_rows", []):
+            print(f"kt{k['kt']} {r['row']:17s} NEMO max={r['nemo_max_abs']:.3e} "
+                  f"({r['n_nemo_nonzero']} nonzero) card max={r['card_max_abs']:.3e} "
+                  f"relative={r['relative']}")
     for r in out.get("history_rows", []):
         print(f"{r['name']:24s} {r['status']:6s} max={r['max_abs']:.3e} "
               f"n_unequal={r['n_unequal']}")
@@ -745,12 +827,20 @@ def main(argv=None) -> int:
     ap.add_argument("--fold-fill-v", action="store_true",
                     help="measurement arm (independent only): write the fold "
                          "image into the top V row between steps")
+    ap.add_argument("--hook", action="append", default=[],
+                    help="measurement arm, not the card: a private boolean "
+                         "model test hook switched on (repeatable)")
+    ap.add_argument("--without-fold-v-depth", action="store_true",
+                    help="the card with barotropic_fold_top_v_face_ssh switched "
+                         "off (the round-3 before arm; also the option's plant)")
     a = ap.parse_args(argv)
     try:
         out = run(a.root, arm=a.arm, kt_max=a.kt_max, plant=a.plant,
                   allow_dirty=a.allow_dirty, geometry_plant=a.geometry_plant,
                   fold_fill_v=a.fold_fill_v, vor_fold_image=a.vor_fold_image,
-                  before_arm=a.before_arm)
+                  before_arm=a.before_arm,
+                  hook_arm=tuple(a.hook),
+                  without_fold_v_depth=a.without_fold_v_depth)
     except Exception as e:      # noqa: BLE001 -- refusals print and exit 2
         print(f"REFUSE: {type(e).__name__}: {e}", file=sys.stderr)
         return 2

@@ -1599,6 +1599,12 @@ class BarotropicConfig(NamedTuple):
     # ``barotropic_implicit_preconditioner = 'chebyshev'``); higher = stronger
     # smoothing per solve at more A-op applies. A count, not a trainable float.
     barotropic_chebyshev_degree: int = 4
+    # NEMO's split-explicit face depth on the fold-image V row
+    # (dynspg_ts.f90:419-421, consumed at :437; same form at :480): NEMO's
+    # wet surface V mask on that row and the T fold halo as the north
+    # neighbour.  False keeps the model's dry top V row (depth = hv_0 there).
+    # Needs ``barotropic_face_depth = 'nemo_ssh_avg'`` and the raw NEMO masks.
+    barotropic_fold_top_v_face_ssh: bool = False
 
 
 class RuntimeChecksConfig(NamedTuple):

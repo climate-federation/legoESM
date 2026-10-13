@@ -1,0 +1,207 @@
+HELD (grid ladder G1 round 3): NEMO's T fold halo in the thickness ratios that dyn_cor_2D_init reads on the pivot row
+(domqco.f90:268-269, :281-285; consumer dynspg_ts.f90:960-981, :987-1008). The operand is NEMO's bit for bit, but with
+the round-3 landing in place the one-step fold error is 1.7 to 2.4 times LARGER with it (receipt section 4).
+Apply on the round-3 tree with: patch -p0 < this file (paths relative to the repository root).
+
+--- packages/ocean/legoesm/ocean/dynamics/barotropic_latlon_cgrid.py
++++ packages/ocean/legoesm/ocean/dynamics/barotropic_latlon_cgrid.py
+@@ -1117,7 +1117,7 @@
+ 
+ 
+ def _nemo_literal_een_coefficients(eta, z_coord, dtype, scheme="een",
+-                                   *, grid=None):
++                                   *, grid=None, fold_image_ssh=False):
+     """Materialize NEMO's eight frozen EEN or ENE coefficients.
+ 
+     ``scheme="een"`` transcribes ``dyn_cor_2D_init``'s 12-point triads;
+@@ -1198,7 +1198,7 @@
+     e2f = jnp.asarray(raw.e2f, dtype=dtype)
+     area_eta = b(b(e1t * e2t) * eta)
+     east = jnp.roll(area_eta, -1, axis=1)
+-    north = jnp.roll(area_eta, -1, axis=0)
++    north = _nemo_een_north_t(area_eta, grid, fold_image_ssh)
+     northeast = jnp.roll(north, -1, axis=1)
+     r3u = b(b(half * b(area_eta + east)) * r1_hu0 / b(e1u * e2u))
+     r3v = b(b(half * b(area_eta + north)) * r1_hv0 / b(e1v * e2v))
+@@ -1373,7 +1373,7 @@
+                                  coefficient_evaluation="generic",
+                                  eta=None,
+                                  z_coord=None,
+-                                 scheme="een"):
++                                 scheme="een", fold_image_ssh=False):
+     """Precompute the geometry inputs for the EEN barotropic Coriolis (node 16).
+ 
+     NEMO ``dyn_spg_ts::dyn_cor_2D`` applies an ENSTROPHY-conserving EEN
+@@ -1468,7 +1468,7 @@
+                    e2u=geom.dy_u.astype(dtype), e2v=geom.dy_v.astype(dtype))
+     if coefficient_evaluation == "nemo_literal":
+         out["literal_coefficients"] = _nemo_literal_een_coefficients(
+-            eta, z_coord, dtype, scheme=scheme, grid=grid)
++            eta, z_coord, dtype, scheme=scheme, grid=grid, fold_image_ssh=fold_image_ssh)  # noqa: E501
+     out["coefficient_evaluation"] = coefficient_evaluation
+     return out
+ 
+@@ -1628,7 +1628,7 @@
+                                      dz_ref=None,
+                                      coefficient_evaluation="generic",
+                                      eta=None,
+-                                     z_coord=None,
++                                     z_coord=None, fold_image_ssh=False,
+                                      pre=None,
+                                      return_pre=False,
+                                      scheme="een",
+@@ -1661,7 +1661,7 @@
+             coefficient_evaluation=coefficient_evaluation,
+             eta=eta,
+             z_coord=z_coord,
+-            scheme=scheme)
++            scheme=scheme, fold_image_ssh=fold_image_ssh)
+     if entry_barotropic_velocity is not None:
+         # NEMO hands dyn_cor_2D the CARRIED external mode, puu_b(:,:,Kmm)
+         # (called at dynspg_ts.f90:289, subtracted at :292) -- the very
+@@ -3224,7 +3224,7 @@
+                 # (ocean_pe_latlon_cgrid _bc_pv_flux).
+                 dz_ref=getattr(z_coord, "dz_ref", None),
+                 coefficient_evaluation=_een_eval,
+-                eta=_eta_een,
++                eta=_eta_een, fold_image_ssh=config.barotropic.barotropic_een_fold_image_ssh,  # noqa: E501
+                 z_coord=z_coord,
+                 scheme=(
+                     "ene"
+@@ -4055,6 +4055,31 @@
+     return nemo_source_round(value + third)
+ 
+ 
++def _nemo_een_north_t(field, grid, fold_image):
++    """North T neighbour of every row for ``dom_qco_r3c_RK3``'s ``jj+1`` read.
++
++    ``domqco.f90:268-269`` (``pr3v``) and ``:281-285`` (``pr3f``) read
++    ``e1e2t*pssh`` on row ``jj+1``.  On the stored pivot row that is NEMO's
++    T fold halo: the T-permuted image of the row below the pivot, sign +1.
++    ``stprk3_stg.f90:163`` then exchanges the results, and
++    ``dynspg_ts.f90:960-981`` and ``:987-1008`` consume them on the pivot
++    row.  ``fold_image=False`` is the legacy cyclic roll, which hands the
++    pivot row the SOUTH row instead (inert on a closed box; first order
++    wrong in ssh on a fold).  Selected by
++    ``BarotropicConfig.barotropic_een_fold_image_ssh``.
++    """
++    north = jnp.roll(field, -1, axis=0)
++    if not fold_image:
++        return north
++    fold = getattr(grid, "fold", None)
++    if not (fold_is_local(grid)
++            and bool(getattr(fold, "pivot_row_stored", False))):
++        raise ValueError(
++            "barotropic_een_fold_image_ssh=True needs a local T-pivot north "
++            "fold whose pivot row is the stored top row")
++    return north.at[-1].set(fold_ghost_source_T(field, fold)[0][fold.perm_T])
++
++
+ def _nemo_fold_top_v_wet(config, z_coord, dtype):
+     """NEMO's ``ssvmask`` on the fold-image V row, or None when not selected.
+ 
+--- packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py
++++ packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py
+@@ -7303,7 +7303,7 @@
+                         # differs from the live substep term this cancels.
+                         dz_ref=getattr(_zc, "dz_ref", None),
+                         coefficient_evaluation=_een_eval,
+-                        eta=state.eta.data,
++                        eta=state.eta.data, fold_image_ssh=_cfg_b.barotropic.barotropic_een_fold_image_ssh,  # noqa: E501
+                         z_coord=_zc,
+                         return_pre=True,
+                         scheme=_bt_pv_scheme,
+--- packages/ocean/legoesm/ocean/state.py
++++ packages/ocean/legoesm/ocean/state.py
+@@ -1599,6 +1599,13 @@
+     # ``barotropic_implicit_preconditioner = 'chebyshev'``); higher = stronger
+     # smoothing per solve at more A-op applies. A count, not a trainable float.
+     barotropic_chebyshev_degree: int = 4
++    # NEMO's split-explicit Coriolis coefficients (dyn_cor_2D_init,
++    # dynspg_ts.f90:960-981, :987-1008) read r3v and r3f on the pivot row of
++    # a north fold; domqco.f90:268-269 and :281-285 build both from the T
++    # row above it, which is the fold image of the row below.  False keeps
++    # the legacy cyclic north neighbour.  Only meaningful with
++    # ``barotropic_een_coefficient_evaluation = 'nemo_literal'``.
++    barotropic_een_fold_image_ssh: bool = False
+     # NEMO's split-explicit face depth on the fold-image V row
+     # (dynspg_ts.f90:419-421, consumed at :437; same form at :480): NEMO's
+     # wet surface V mask on that row and the T fold halo as the north
+--- packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py
++++ packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py
+@@ -3786,7 +3786,7 @@
+         momentum_flux_scheme="none", vertical_momentum_scheme="none",
+         adaptive_implicit_vertadv=False,
+         vorticity_scheme="een_planetary", een_fold_image_v_row=True,
+-        barotropic=base.barotropic._replace(barotropic_fold_top_v_face_ssh=True),
++        barotropic=base.barotropic._replace(barotropic_een_fold_image_ssh=True, barotropic_fold_top_v_face_ssh=True),  # noqa: E501
+         tracer_advection="none",                        # traadv.f90:444
+         lateral_viscosity=base.lateral_viscosity._replace(A_h=0.0),
+         K_h=0.0, K_bih=0.0,                             # ln_traldf_OFF
+@@ -3844,6 +3844,7 @@
+         "ln_dynadv_OFF": (cfg.momentum_advection, cfg.momentum_flux_scheme,
+                           cfg.vertical_momentum_scheme) == ("flux_form", "none", "none"),
+         "ln_dynvor_een": (cfg.vorticity_scheme, cfg.een_fold_image_v_row) == ("een_planetary", True),
++        "dyn_cor_2D_init fold ssh": cfg.barotropic.barotropic_een_fold_image_ssh is True,
+         "zhvp2_e fold row": cfg.barotropic.barotropic_fold_top_v_face_ssh is True,
+         "ln_traadv_OFF": cfg.tracer_advection == "none",
+         "ln_dynldf_OFF": all(getattr(lv, name) == 0.0 for name in (
+--- scripts/validate/ocean_fidelity/testcases/nemo_testcase_g1_orca2grid_ladder.py
++++ scripts/validate/ocean_fidelity/testcases/nemo_testcase_g1_orca2grid_ladder.py
+@@ -396,7 +396,7 @@
+ def run(root: Path, *, arm: str, kt_max: int = 10, plant: str | None = None,
+         allow_dirty: bool = False, geometry_plant: str | None = None,
+         fold_fill_v: bool = False, vor_fold_image: bool = False,
+-        before_arm: bool = False,
++        before_arm: bool = False, without_fold_ssh: bool = False,
+         hook_arm: tuple = (), without_fold_v_depth: bool = False) -> dict:
+     if vor_fold_image:
+         from legoesm.ocean.fidelity import nemo_testcase_recipe as _recipe
+@@ -406,7 +406,7 @@
+             out = run(root, arm=arm, kt_max=kt_max, plant=plant,
+                       allow_dirty=allow_dirty, geometry_plant=geometry_plant,
+                       fold_fill_v=fold_fill_v, before_arm=before_arm,
+-                      hook_arm=hook_arm,
++                      without_fold_ssh=without_fold_ssh, hook_arm=hook_arm,
+                       without_fold_v_depth=without_fold_v_depth)
+         require(len(calls) > 0, "the vorticity fold-image arm was never traced")
+         out["vor_fold_image_measurement_arm"] = {"traces": len(calls)}
+@@ -436,6 +436,12 @@
+     if before_arm:      # BEFORE ARM / plant: the card without its fold-image row
+         require(cfg.een_fold_image_v_row is True, "the card no longer selects the row")
+         cfg = cfg._replace(een_fold_image_v_row=False)
++    if without_fold_ssh:  # ROUND-3 BEFORE ARM / plant: the solver's Coriolis
++        # coefficients without the fold image of sea level above the pivot row
++        require(cfg.barotropic.barotropic_een_fold_image_ssh is True,
++                "the card no longer selects the fold image of sea level")
++        cfg = cfg._replace(barotropic=cfg.barotropic._replace(
++            barotropic_een_fold_image_ssh=False))
+     if without_fold_v_depth:  # ROUND-3 BEFORE ARM / plant: the solver's face
+         # depth on the fold-image V row without sea level (hv_0 only)
+         require(cfg.barotropic.barotropic_fold_top_v_face_ssh is True,
+@@ -492,6 +498,8 @@
+            "bar": BAR, "root": str(root), "kts": list(kts),
+            "fold_fill_v_measurement_arm": fold_fill_v,
+            "een_fold_image_v_row": bool(cfg.een_fold_image_v_row),
++           "barotropic_een_fold_image_ssh": bool(
++               cfg.barotropic.barotropic_een_fold_image_ssh),
+            "barotropic_fold_top_v_face_ssh": bool(
+                cfg.barotropic.barotropic_fold_top_v_face_ssh),
+            "n_barotropic_substeps": int(cfg.barotropic.n_barotropic_substeps),
+@@ -774,12 +782,15 @@
+     ap.add_argument("--without-fold-v-depth", action="store_true",
+                     help="the card with barotropic_fold_top_v_face_ssh switched "
+                          "off (the round-3 before arm; also the option's plant)")
++    ap.add_argument("--without-fold-ssh", action="store_true",
++                    help="the card with barotropic_een_fold_image_ssh switched "
++                         "off (the round-3 before arm; also the option's plant)")
+     a = ap.parse_args(argv)
+     try:
+         out = run(a.root, arm=a.arm, kt_max=a.kt_max, plant=a.plant,
+                   allow_dirty=a.allow_dirty, geometry_plant=a.geometry_plant,
+                   fold_fill_v=a.fold_fill_v, vor_fold_image=a.vor_fold_image,
+-                  before_arm=a.before_arm,
++                  before_arm=a.before_arm, without_fold_ssh=a.without_fold_ssh,
+                   hook_arm=tuple(a.hook),
+                   without_fold_v_depth=a.without_fold_v_depth)
+     except Exception as e:      # noqa: BLE001 -- refusals print and exit 2

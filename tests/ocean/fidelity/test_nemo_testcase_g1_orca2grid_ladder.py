@@ -173,3 +173,67 @@ def test_card_pivot_row_coriolis_matches_nemo_only_with_the_image_row(
         assert pivot["relative"] < 1.0e-15
     else:
         assert pivot["relative"] > 0.5
+
+
+def test_fold_top_v_operands_are_untouched_unless_a_row_is_given():
+    from legoesm.ocean.dynamics import barotropic_latlon_cgrid as bt
+    v_mask = jnp.asarray(np.arange(12.0).reshape(4, 3))
+    same, flag = bt._nemo_fold_top_v_operands(v_mask, False, None)
+    assert same is v_mask and flag is False
+    top = jnp.asarray([1.0, 0.0, 1.0])
+    moved, flag = bt._nemo_fold_top_v_operands(v_mask, False, top)
+    assert flag is True
+    assert np.array_equal(np.asarray(moved)[-1], [1.0, 0.0, 1.0])
+    assert np.array_equal(np.asarray(moved)[:-1], np.asarray(v_mask)[:-1])
+
+
+def test_only_the_g1_card_selects_the_fold_row_v_face_depth():
+    from legoesm.ocean.fidelity import nemo_testcase_recipe as recipe
+    from legoesm.ocean.state import BarotropicConfig
+    assert BarotropicConfig._field_defaults["barotropic_fold_top_v_face_ssh"] is False
+    assert BarotropicConfig._fields[-1] == "barotropic_fold_top_v_face_ssh"
+    src = Path(recipe.__file__).read_text()
+    assert src.count("barotropic_fold_top_v_face_ssh=True") == 1
+    start = src.index("def build_orca2g1_flat_card")
+    assert src.index("barotropic_fold_top_v_face_ssh=True") > start
+
+
+@needs_record
+@pytest.mark.parametrize("selected", [True, False])
+def test_solver_v_face_sea_level_on_the_fold_row_is_nemos_only_when_selected(
+        selected):
+    """The landed statement and its plant, at the operand: NEMO's row is
+    NONZERO; the card equals it to rounding with the option and holds zero
+    without it.  The row below is exact to rounding in both arms."""
+    pytest.importorskip("netCDF4")
+    out = ladder.run(RECORD, arm="fold_v_depth", kt_max=10, allow_dirty=True,
+                     without_fold_v_depth=not selected)
+    assert out["barotropic_fold_top_v_face_ssh"] is selected
+    rows = {r["row"]: r for r in out["per_kt"][-1]["operand_rows"]}
+    top, below = rows["fold_image_v_row"], rows["row_below"]
+    assert top["n_nemo_nonzero"] > 60 and top["nemo_max_abs"] > 0.0
+    assert below["relative"] < 1.0e-15
+    if selected:
+        assert top["relative"] < 1.0e-15
+    else:
+        assert top["card_max_abs"] == 0.0 and top["relative"] == 1.0
+
+
+@needs_record
+@pytest.mark.parametrize("selected, bound", [(True, 1.0e-13), (False, None)])
+def test_one_step_from_nemos_restart_needs_the_fold_row_v_face_depth(
+        selected, bound):
+    """Whole-step effect and plant: one step from NEMO's restart at kt 20,
+    fold-band sea level relative to the band's own maximum."""
+    pytest.importorskip("netCDF4")
+    out = ladder.run(RECORD, arm="restart_entry", kt_max=21, allow_dirty=True,
+                     without_fold_v_depth=not selected)
+    ssh = next(r for r in out["per_kt"][-1]["rows"] if r["name"].endswith(".ssh"))
+    fold = ssh["regions"]["fold"]
+    assert out["per_kt"][-1]["kt"] == 21 and fold["ref_max_abs"] > 0.0
+    rel = fold["max_abs"] / fold["ref_max_abs"]
+    if selected:
+        assert rel < 1.0e-14
+    else:
+        assert rel > 1.0e-13
+

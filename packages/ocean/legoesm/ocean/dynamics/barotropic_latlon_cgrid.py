@@ -602,12 +602,12 @@ def _nemo_ssh_avg_apply(eta_dyn, u_mask, v_mask, grid, area, prep, *,
                         return_literal_inverse=False,
                         return_ssh_average=False,
                         return_entry_inverse=False,
-                        nemo_t_pivot_north_neighbor=False):
+                        nemo_t_pivot_north_neighbor=False, fold_top_v_wet=None):
     """Apply the NEMO ssh-average face-depth formula at one ``eta`` snapshot,
     given the loop-invariant ``prep = _nemo_ssh_avg_prep(...)`` tuple.  See
     :func:`nemo_ssh_avg_face_depth` for the full formula docstring."""
     H_u_ref, H_v_ref, _r1_e1e2u, _r1_e1e2v, _nfold_mask = prep
-
+    v_mask, nemo_t_pivot_north_neighbor = _nemo_fold_top_v_operands(v_mask, nemo_t_pivot_north_neighbor, fold_top_v_wet)  # noqa: E501
     area_w = jnp.roll(area, 1, axis=1)
     eta_w = jnp.roll(eta_dyn, 1, axis=1)
     # dynspg_ts.F90:663-666, in the written gfortran association.  These are
@@ -1752,7 +1752,7 @@ def _run_substep_loop(
     nemo_external_mode_association_test_override=False,
     nemo_external_mode_association_field_test_override="",
     nemo_external_mode_association_component_test_override="",
-    nemo_t_pivot_north_neighbor_test_override=False,
+    nemo_t_pivot_north_neighbor_test_override=False, nemo_fold_top_v_wet=None,
     return_boundary_association_trace=False,
 ):
     """The forward-backward substep loop (verbatim extraction).
@@ -1849,14 +1849,14 @@ def _run_substep_loop(
         return _nemo_ssh_avg_apply(
             eta_dyn, u_mask, v_mask, grid, area, _ssh_avg_prep,
             nemo_t_pivot_north_neighbor=(
-                nemo_t_pivot_north_neighbor_test_override))
+                nemo_t_pivot_north_neighbor_test_override), fold_top_v_wet=nemo_fold_top_v_wet)  # noqa: E501
 
     def _ssh_avg_entry_inverse(eta_dyn):
         return _nemo_ssh_avg_apply(
             eta_dyn, u_mask, v_mask, grid, area, _ssh_avg_prep,
             return_entry_inverse=True,
             nemo_t_pivot_north_neighbor=(
-                nemo_t_pivot_north_neighbor_test_override))[2:]
+                nemo_t_pivot_north_neighbor_test_override), fold_top_v_wet=nemo_fold_top_v_wet)[2:]  # noqa: E501
 
     _nemo_flux_form_update = nemo_flux_form_update_active(config)
     # Harness-only causal arm.  This is deliberately absent from public
@@ -1940,7 +1940,7 @@ def _run_substep_loop(
                 eta_c, u_mask, v_mask, grid, area, _ssh_avg_prep,
                 return_literal_inverse=True,
                 nemo_t_pivot_north_neighbor=(
-                    nemo_t_pivot_north_neighbor_test_override))
+                    nemo_t_pivot_north_neighbor_test_override), fold_top_v_wet=nemo_fold_top_v_wet)  # noqa: E501
             r1_H_u = jnp.where(substep_index == 0, r1_H_u_entry, r1_H_u)
             r1_H_v = jnp.where(substep_index == 0, r1_H_v_entry, r1_H_v)
             if (nemo_external_mode_association_test_override
@@ -2343,7 +2343,7 @@ def _run_substep_loop(
                     eta_new, u_mask, v_mask, grid, area, _ssh_avg_prep,
                     return_literal_inverse=True,
                     nemo_t_pivot_north_neighbor=(
-                        nemo_t_pivot_north_neighbor_test_override))
+                        nemo_t_pivot_north_neighbor_test_override), fold_top_v_wet=nemo_fold_top_v_wet)  # noqa: E501
             else:
                 association_depths = _face_depths(
                     jnp.maximum(eta_new + H_bathy, min_water_col) * mask)
@@ -2440,7 +2440,7 @@ def _run_substep_loop(
                     eta_new, u_mask, v_mask, grid, area, _ssh_avg_prep,
                     return_literal_inverse=True, return_ssh_average=True,
                     nemo_t_pivot_north_neighbor=(
-                        nemo_t_pivot_north_neighbor_test_override))
+                        nemo_t_pivot_north_neighbor_test_override), fold_top_v_wet=nemo_fold_top_v_wet)  # noqa: E501
             else:
                 trace_depth_u_exit, trace_depth_v_exit = _face_depths(
                     jnp.maximum(eta_new + H_bathy, min_water_col) * mask)
@@ -3484,7 +3484,7 @@ def barotropic_substeps_latlon_cgrid(
         nemo_external_mode_association_component_test_override=(
             _nemo_external_mode_association_component_test_override),
         nemo_t_pivot_north_neighbor_test_override=(
-            _nemo_t_pivot_north_neighbor_test_override),
+            _nemo_t_pivot_north_neighbor_test_override), nemo_fold_top_v_wet=_nemo_fold_top_v_wet(config, z_coord, eta.dtype),  # noqa: E501
         return_boundary_association_trace=(
             _nemo_boundary_association_trace_test_hook),
     )
@@ -4053,3 +4053,36 @@ def nemo_literal_midpoint_extrapolation(
         coefficients[2] * nemo_source_round(before_before))
     value = nemo_source_round(first + second)
     return nemo_source_round(value + third)
+
+
+def _nemo_fold_top_v_wet(config, z_coord, dtype):
+    """NEMO's ``ssvmask`` on the fold-image V row, or None when not selected.
+
+    ``BarotropicConfig.barotropic_fold_top_v_face_ssh`` selects it.  The row
+    is the surface level of the card's raw NEMO ``vmask``
+    (``dommsk.f90:249``: ``ssvmask = MAXVAL(vmask, DIM=3)``).
+    """
+    if not config.barotropic.barotropic_fold_top_v_face_ssh:
+        return None
+    raw = getattr(z_coord, "nemo_een_barotropic", None)
+    if raw is None:
+        raise ValueError(
+            "barotropic_fold_top_v_face_ssh=True needs the card's raw NEMO "
+            "vmask (z_coord.nemo_een_barotropic)")
+    return jnp.max(jnp.asarray(raw.vmask, dtype=dtype)[-1], axis=-1)
+
+
+def _nemo_fold_top_v_operands(v_mask, t_pivot_north_neighbor, fold_top_v_wet):
+    """The two fold operands of ``zhvp2_e`` / ``zsshv_a`` on the top V row.
+
+    ``dynspg_ts.f90:419-421`` (and the same form at ``:480``) evaluates, on
+    the fold-image V row ``jj = Nje0`` too, ``hv_0 + r1_2*r1_e1e2v*(
+    e1e2t(ji,jj)*ssh(ji,jj) + e1e2t(ji,jj+1)*ssh(ji,jj+1)) * ssvmask(ji,jj)``.
+    There ``ssvmask`` is NEMO's wet image row (the model's own V mask keeps
+    that row dry) and ``jj+1`` is the T fold halo, the image of the row below
+    the pivot.  ``:437`` multiplies the result into ``zhV``.  With
+    ``fold_top_v_wet=None`` both operands are returned unchanged.
+    """
+    if fold_top_v_wet is None:
+        return v_mask, t_pivot_north_neighbor
+    return v_mask.at[-1].set(fold_top_v_wet.astype(v_mask.dtype)), True
