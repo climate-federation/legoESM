@@ -1472,4 +1472,5 @@ def _rk3_stage_correction_written_order(field, target_mean, h_face_ref,
     contraction guard); selected by its ``written_order`` argument."""
     from legoesm.core.source_rounding import nemo_source_round as r
     own_mean = r(r(_ascending_level_sum(r(field * h_face_ref))) * r1_depth_ref)
-    return r(field + r(target_mean - own_mean)[..., jnp.newaxis]) * stage_mask
+    # :417-418 as written: uu + zub*umask, not (uu + zub)*umask
+    return r(field + r(r(target_mean - own_mean)[..., jnp.newaxis] * stage_mask))
