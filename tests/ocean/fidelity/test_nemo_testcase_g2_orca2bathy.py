@@ -69,6 +69,21 @@ def test_run_sh_reuses_the_round4_binaries_and_states_the_one_switch():
         assert pinned == recorded
 
 
+def test_round2_acquisition_is_one_run_of_the_pinned_binary_with_no_build():
+    text = (G2_DIR / "run_r2.sh").read_text()
+    assert subprocess.run(["bash", "-n", str(G2_DIR / "run_r2.sh")]).returncode == 0
+    code = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
+    assert not re.search(r"makenemo|maketools|\bmake\b", code)
+    assert code.count("mpirun") == 2                      # one run, one dry-run line
+    round1 = (G2_DIR / "run.sh").read_text()
+    for pin in ("RUN_SHA", "SHIPPED_DOMCFG_SHA"):          # the round-1 pins, unchanged
+        value = re.search(rf"readonly {pin}=([0-9a-f]{{64}})", text).group(1)
+        assert f"{pin}={value}" in round1
+    assert "nn_stocklist = ).*/\\11,2,3,4,5,6,7,8,9,10/" in text
+    assert "restarts_identical(b, c, [2, 4, 6, 8, 10])" in text
+    assert "PLANT=twin-ulp admit" in code                  # the plant must refuse
+
+
 def _strait_free_copy(tmp_path: Path) -> Path:
     import netCDF4
     path = tmp_path / "no_strait.nc"
