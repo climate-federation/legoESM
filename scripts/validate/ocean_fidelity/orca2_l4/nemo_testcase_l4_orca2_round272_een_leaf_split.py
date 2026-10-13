@@ -182,13 +182,20 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
         "f_vtx": np.asarray(nemo_een_ene_vertex_coriolis(card.recipe.grid)),
         "output_u": np.asarray(parts["vorticity_u"].data),
     }
-    folded = pe._een_fold_image_v_row(
-        card.recipe.model_config.een_fold_image_v_row, card.recipe.grid,
-        *map(jnp.asarray, (
-            call["h_v"], call["v"], call["h_u"], call["u"],
-            call["u_mask"], call["v_mask"])))
-    (call["h_v"], call["v"], call["h_u"], call["u"],
-     call["u_mask"], call["v_mask"]) = map(np.asarray, folded)
+    if card.recipe.model_config.een_fold_image_v_row:
+        # Offline transcription of ``_een_fold_image_v_row``.  Keep this in
+        # NumPy: staging another scatter after the completed passive model run
+        # changes no science and has triggered an XLA CPU scatter crash.
+        perm = np.asarray(card.recipe.grid.fold.perm_v)
+        wet = call["v_mask"][-2][perm]
+        call["v"] = call["v"].copy()
+        call["h_v"] = call["h_v"].copy()
+        call["v_mask"] = call["v_mask"].copy()
+        call["v"][-1] = (card.recipe.grid.fold.vector_sign_v
+                          * call["v"][-2][perm]
+                          * wet.astype(call["v"].dtype))
+        call["h_v"][-1] = call["h_v"][-2][perm]
+        call["v_mask"][-1] = wet
     call["zeta"] = np.asarray(jax.device_get(jax.jit(
         lambda uu, vv: nemo_vor_ene_vorticity_cgrid(
             uu, vv, card.recipe.grid))(
