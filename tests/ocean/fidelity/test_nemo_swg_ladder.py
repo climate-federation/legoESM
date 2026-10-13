@@ -294,6 +294,32 @@ def test_numerical_debt_makes_the_ladder_gate_nonzero():
     assert lad._exit_code(gated) == 1
 
 
+def test_composition_summary_keeps_exact_and_numerical_counts_separate():
+    out = lad._gate_rows({"per_kt": [
+        {"day": 1, "kt": 216, "rows": [
+            {"status": "AT-BAR", "bit_identical": True, "max_abs": 0.0},
+            {"status": "DEBT", "numerical_status": "AT-BAR",
+             "bit_identical": False, "max_abs": 5.0e-16},
+        ]},
+        {"day": 2, "kt": 432, "rows": [
+            {"status": "DEBT", "bit_identical": False,
+             "max_abs": 2.0e-15},
+        ]},
+    ]})
+    summary = lad._composition_summary(out)
+    assert summary == {
+        "rows": 3,
+        "exact_rows": 1,
+        "rows_within_1e-15": 2,
+        "maximum_absolute_difference": 2.0e-15,
+        "first_day_not_bit_identical": 1,
+        "first_day_over_1e-15": 1,
+    }
+    with pytest.raises(ValueError, match="unknown month composition"):
+        lad.month_composition(Path("unused"), composition="nested",
+                              allow_dirty=True)
+
+
 def test_month_reader_refuses_absent_admission(tmp_path):
     with pytest.raises(Exception, match="missing month admission"):
         lad._month_admission(tmp_path)

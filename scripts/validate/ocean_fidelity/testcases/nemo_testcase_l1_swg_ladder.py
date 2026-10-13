@@ -294,6 +294,15 @@ def _stage_checker():
     return mod
 
 
+def _double_gyre_driver():
+    """Load the production double-gyre driver without copying its steppers."""
+    path = HERE.parents[2] / "run/run_swg_double_gyre.py"
+    spec = importlib.util.spec_from_file_location("run_swg_double_gyre", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -1001,6 +1010,107 @@ def month(root: Path, *, deck: str = "shipped",
     })
 
 
+def _composition_summary(out: dict) -> dict:
+    """Count exact and numerical rows without conflating the two bars."""
+    rows = [row for day in out["per_kt"] for row in day["rows"]]
+    first_day_off = next(
+        (day["day"] for day in out["per_kt"]
+         if any(not row["bit_identical"] for row in day["rows"])), None)
+    return {
+        "rows": len(rows),
+        "exact_rows": sum(row["bit_identical"] for row in rows),
+        "rows_within_1e-15": sum(
+            row["status"] == "AT-BAR"
+            or row.get("numerical_status") == "AT-BAR"
+            for row in rows),
+        "maximum_absolute_difference": max(row["max_abs"] for row in rows),
+        "first_day_not_bit_identical": first_day_off,
+        "first_day_over_1e-15": out["first_day_over_bar"],
+    }
+
+
+def month_composition(root: Path, *, composition: str,
+                      deck: str = "dg50",
+                      allow_dirty: bool = False) -> dict:
+    """Score one whole-month execution composition against NEMO boundaries.
+
+    ``per-step`` is the retained ladder program. ``compiled-day`` is the
+    production one-scan-per-day driver. ``flat-segment`` recompiles one flat
+    scan from the identical initial state to each daily boundary; this is the
+    composition the training runner uses, rather than a nested day scan.
+    """
+    from legoesm.ocean.fidelity.provenance import allow_dirty_stamps, git_sha
+
+    if composition not in ("per-step", "compiled-day", "flat-segment"):
+        raise ValueError(f"unknown month composition {composition!r}")
+    if deck != "dg50":
+        raise ValueError("composition certification is registered only for dg50")
+    if composition == "per-step":
+        out = month(root, deck=deck, allow_dirty=allow_dirty)
+        out["composition"] = composition
+        out["composition_summary"] = _composition_summary(out)
+        return out
+
+    allow_dirty_stamps(allow_dirty)
+    sha = git_sha(allow_dirty=allow_dirty)
+    namelist = _deck_namelist(deck, month=True)
+    steps_per_day = int(86_400 / namelist.rn_Dt_s)
+    require(steps_per_day * namelist.rn_Dt_s == 86_400,
+            "month timestep does not divide one day exactly")
+    instrumented = _month_admission(root, deck=deck)
+    entries = read_stage_entries(
+        instrumented, record_kts=DG50_MONTH_RECORD_KTS, stages=(1,))
+    restarts = read_restarts(
+        instrumented, kts=DG50_MONTH_RESTART_KTS, namelist=namelist)
+    card, masks, model, forcing = _swg_production_case(
+        f"{composition} month ladder", namelist=namelist)
+    driver = _double_gyre_driver()
+    initial = driver.seed_steady_forcing_carry(
+        card.recipe.initial_state, forcing)
+    state = initial
+    day_stepper = (
+        driver.build_scanned_stepper(model, card.dt_s, forcing, steps_per_day)
+        if composition == "compiled-day" else None)
+    per_day = []
+    for day, (entry_kt, restart_kt) in enumerate(
+            zip(DG50_MONTH_RECORD_KTS, DG50_MONTH_RESTART_KTS, strict=True), 1):
+        candidate_entry = _stage_candidate(state, forcing, card)
+        rows = [
+            _row(f"{composition}.day{day:02d}.entry.kt{entry_kt}.{name}",
+                 entries[entry_kt, 1][name], value,
+                 _field_mask(name, masks))
+            for name, value in candidate_entry.items()
+        ]
+        if composition == "compiled-day":
+            state = day_stepper(state)
+        else:
+            flat_stepper = driver.build_scanned_stepper(
+                model, card.dt_s, forcing, day * steps_per_day)
+            state = flat_stepper(initial)
+        candidate_restart = _restart_candidate(state)
+        rows.extend(
+            _row(f"{composition}.day{day:02d}.restart.kt{restart_kt}.{name}",
+                 restarts[restart_kt][name], value,
+                 _field_mask(name, masks))
+            for name, value in candidate_restart.items()
+        )
+        per_day.append({"day": day, "kt": restart_kt, "rows": rows})
+    out = _gate_rows({
+        "label": "DG50-THIRTY-DAY-COMPOSITION",
+        "legoesm_git_sha": sha,
+        "oracle_acquisition_git_sha": (
+            "e49a84492831597866e41f806e726aa8c1646477"),
+        "deck": deck,
+        "bar": BAR,
+        "composition": composition,
+        "record_counts": {"stage_entries": len(entries),
+                          "restarts": len(restarts)},
+        "per_kt": per_day,
+    })
+    out["composition_summary"] = _composition_summary(out)
+    return out
+
+
 def month_control(root: Path, *, deck: str = "shipped",
                   allow_dirty: bool = False) -> dict:
     """Prove one ULP at an exact daily U input changes production output."""
@@ -1632,7 +1742,7 @@ def main(argv=None) -> int:
     p.add_argument("--arm", choices=(
         "self-check", "independent", "stage-entry-read", "ens-stage1",
         "stages-given", "stages-chained", "carried-state", "month",
-        "debt-localization", "shipped"),
+        "month-composition", "debt-localization", "shipped"),
                    required=True)
     p.add_argument("--deck", choices=("shipped", "maddison", "dg50"),
                    default="shipped")
@@ -1641,6 +1751,8 @@ def main(argv=None) -> int:
     p.add_argument("--month-root", type=Path, default=DEFAULT_MONTH_ROOT)
     p.add_argument("--shipped-root", type=Path, default=DEFAULT_SHIPPED_ROOT)
     p.add_argument("--statistics-npz", type=Path)
+    p.add_argument("--composition", choices=(
+        "per-step", "compiled-day", "flat-segment"))
     p.add_argument("--plant", nargs="?", const="ulp", choices=("ulp",))
     p.add_argument("--allow-dirty", action="store_true")
     p.add_argument("--json", type=Path)
@@ -1669,6 +1781,14 @@ def main(argv=None) -> int:
                        a.month_root, deck=a.deck, allow_dirty=a.allow_dirty)
                    if a.plant else
                    month(a.month_root, deck=a.deck, allow_dirty=a.allow_dirty))
+        elif a.arm == "month-composition":
+            require(a.composition is not None,
+                    "month-composition requires --composition")
+            require(a.plant is None,
+                    "month-composition has no post-computation plant")
+            out = month_composition(
+                a.month_root, composition=a.composition,
+                deck=a.deck, allow_dirty=a.allow_dirty)
         elif a.arm == "debt-localization":
             require(a.deck == "maddison",
                     "debt localization is registered only for the Maddison deck")
