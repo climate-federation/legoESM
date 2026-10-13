@@ -101,3 +101,64 @@ def test_bathy_level_is_the_source_mask(tmp_path):
         level = np.asarray(ds["Bathy_level"][:])
     assert level.dtype == np.float64
     assert np.array_equal(level, [[0, 1, 1], [1, 0, 1]])
+
+
+@pytest.fixture
+def domain_cfg(tmp_path):
+    netCDF4 = pytest.importorskip("netCDF4")
+    domcheck = _load("check_domain_cfg")
+    path = tmp_path / "domain_cfg.nc"
+    with netCDF4.Dataset(path, "w") as ds:
+        for name, size in {**domcheck.DIMS, "time_counter": 1}.items():
+            ds.createDimension(name, size)
+        for name in domcheck.REQUIRED:
+            if name in ("bottom_level", "top_level"):
+                var = ds.createVariable(name, "i4", ("time_counter", "y", "x"))
+                var[:] = 1
+                var[0, 0, :] = 0
+            elif name.startswith(("jp", "ln_")):
+                ds.createVariable(name, "i4", ())[...] = domcheck.SCALARS.get(name, 0)
+            elif name.endswith("_0"):
+                ds.createVariable(name, "f8", ("time_counter", "nav_lev", "y", "x"))[:] = 100.0
+            elif name.endswith("_1d"):
+                ds.createVariable(name, "f8", ("time_counter", "nav_lev"))[:] = 100.0
+            else:
+                ds.createVariable(name, "f8", ("time_counter", "y", "x"))[:] = 1.0
+    return domcheck, path
+
+
+def test_complete_domain_cfg_is_admitted_with_its_hash(domain_cfg):
+    import hashlib
+
+    domcheck, path = domain_cfg
+    result = domcheck.check(path, shipped=path)
+    assert result["status"] == "PASS_G1_DOMAIN_CFG"
+    assert result["sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
+    assert result["wet_cells"] == 147 * 180
+    assert result["vs_shipped"]["mesh_fields_differing"] == []
+    with pytest.raises(domcheck.Refuse, match="absent"):
+        domcheck.check(path.with_name("none.nc"))
+    path.with_name("junk.nc").write_bytes(b"not netcdf")
+    with pytest.raises(domcheck.Refuse, match="not a readable"):
+        domcheck.check(path.with_name("junk.nc"))
+
+
+@pytest.mark.parametrize("plant", ["missing-variable", "bad-level", "thin-cell",
+                                   "wrong-jperio", "wrong-dims", "nonfinite"])
+def test_every_domain_plant_exits_nonzero(domain_cfg, plant):
+    domcheck, path = domain_cfg
+    assert set(domcheck.PLANTS) - {"none"} == {
+        "missing-variable", "bad-level", "thin-cell", "wrong-jperio", "wrong-dims", "nonfinite"}
+    with pytest.raises(domcheck.Refuse):
+        domcheck.check(path, plant=plant)
+    done = subprocess.run(
+        [sys.executable, str(CASE / "check_domain_cfg.py"), "--domain-cfg", str(path),
+         "--plant", plant], capture_output=True, text=True)
+    assert done.returncode == 1 and "STATUS PLANT-FIRED" in done.stderr
+
+
+def test_run_sh_judges_the_domain_file_not_the_mpirun_status():
+    text = (CASE / "run.sh").read_text()
+    assert "./make_domain_cfg.exe >run.user.log 2>&1 || dom_status=$?" in text
+    assert text.count("domain_cfg_admit ") == 2  # preflight of a resume, and --run
+    assert text.index('domain_cfg_admit "$EVIDENCE/manifest"') < text.index("build_one \"$REF_NAME\" 0")
