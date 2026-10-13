@@ -118,7 +118,9 @@ shipped and Maddison stage/month, with every target created from shipped
 `SWG` and the selected case overlaid afterward.  The daily cadences remain 24
 and 432 steps/day.  No `makenemo`, `mpirun`, or NEMO engine command ran.
 Focused citation-gate tests record 17/17 passed.  Focused Ruff and
-`git diff --check` pass.
+`git diff --check` pass.  The receipt-specific citation gate passes all four
+Oracle citations, and shifting the stage-2 writer citation by two lines makes
+the planted gate fail as required.
 
 ## Decision needed
 
