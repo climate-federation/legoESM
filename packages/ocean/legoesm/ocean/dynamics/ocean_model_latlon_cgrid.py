@@ -7900,6 +7900,20 @@ class LatLonCGridOceanModel:
                 _u_live_mask = state.u_mask.data[..., None]
                 _v_live_mask = state.v_mask.data[..., None]
                 _active_live = mask_3d
+            # The private source-complete arm must route the same resolved
+            # V mask to both live-ratio consumers.  Round 264 measured that
+            # coupling together; associating r3v while retaining the compact
+            # mask recreates the retired, incomplete context.
+            if (self._nemo_ws_test_hooks.stage_v_ratio_association
+                    and self._nemo_ws_test_hooks
+                    .barotropic_atomic_fold_unit is True):
+                _resolved_stage_ops = nemo_qco_resolved_mesh_operands(
+                    _zc, _grid, _u_live_mask, _v_live_mask, h_k_old.dtype,
+                    h_k_old.shape[-1])
+                _v_live_mask = jnp.concatenate(
+                    [jnp.zeros_like(_resolved_stage_ops.vmask3[:1]),
+                     _resolved_stage_ops.vmask3],
+                    axis=0)
             # e3t_0: the reference (eta = 0) thickness ladder, so that
             # h_stage = e3t_0*(1 + eta/H) and sum_k e3t_0 = H_bathy.
             _h_ref_ws = compute_layer_thickness(
