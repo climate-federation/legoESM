@@ -171,7 +171,8 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
         lambda uu, vv: nemo_vor_ene_vorticity_cgrid(
             uu, vv, card.recipe.grid))(
                 jnp.asarray(call["u"]), jnp.asarray(call["v"]))))
-    current_replay = jax.device_get(jax.jit(original_flux)(
+    flux_replay = jax.jit(original_flux, static_argnames=("q_boundary",))
+    current_replay = jax.device_get(flux_replay(
         *map(jnp.asarray, (
             call["zeta"], call["h_vtx"], call["h_v"], call["v"],
             call["h_u"], call["u"], call["u_mask"], call["v_mask"],
@@ -198,7 +199,7 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
         lambda uu, vv: nemo_vor_ene_vorticity_cgrid(
             uu, vv, card.recipe.grid))(
                 jnp.asarray(call["u"]), jnp.asarray(call["v"]))))
-    literal_output = jax.device_get(jax.jit(original_flux)(
+    literal_output = jax.device_get(flux_replay(
         jnp.asarray(literal_zeta),
         *map(jnp.asarray, (
             call["h_vtx"], call["h_v"], call["v"], call["h_u"],
