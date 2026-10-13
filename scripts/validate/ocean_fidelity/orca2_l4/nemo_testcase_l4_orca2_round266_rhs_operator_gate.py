@@ -33,6 +33,9 @@ from scripts.validate.ocean_fidelity.orca2_l4 import (  # noqa: E402
     nemo_testcase_l4_orca2_round265_stage2_u_gate as r265,
 )
 from nemo_testcase_l2_gyre_phase3_gate import read_stage2_terms  # noqa: E402
+from scripts.validate.ocean_fidelity.testcases import (  # noqa: E402
+    nemo_testcase_l2_gyre_phase3_gate as phase3_gate,
+)
 
 LABELS = r249.LABELS
 FLOOR = np.float64(2.0e-10)
@@ -65,6 +68,16 @@ def _sha256(path: Path) -> str:
 
 def _score(candidate, oracle) -> dict[str, object]:
     return r249._score(np.asarray(candidate, np.float64), np.asarray(oracle, np.float64))
+
+
+def _masked_score(candidate, oracle, active) -> dict[str, object]:
+    candidate = np.asarray(candidate, np.float64)
+    oracle = np.asarray(oracle, np.float64)
+    active = np.asarray(active, bool)
+    require(candidate.shape == oracle.shape == active.shape,
+            f"masked score shape moved: {candidate.shape} {oracle.shape} {active.shape}")
+    require(bool(np.any(active)), "masked score support is empty")
+    return _score(candidate[active], oracle[active])
 
 
 def _native_u(value) -> np.ndarray:
@@ -172,23 +185,33 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
     offline = _model(card, _hooks(card, live=False))
     inputs = r42._candidate_inputs(offline, stage2_state)
     literal = r42._literal_from_inputs(inputs, card.recipe.model_config.g, grid=card.recipe.grid)
+    masks = phase3_gate.expected_masks(card)
+    tmask = np.asarray(masks["T"], bool)[:, :90, :30]
+    umask = np.asarray(masks["u"], bool)[:, :90, :30]
+    umask2 = np.any(umask, axis=-1)
     hpg_input_rows = {
-        "rhd": _score(_candidate_owned(inputs["rhd"]), _owned_hpg(hpg_operands["rhd"])),
-        "e3w": _score(_candidate_owned(inputs["e3w"]), _owned_hpg(hpg_operands["e3w"])),
-        "gdept_z0": _score(_candidate_owned(inputs["gdept_z0"]), _owned_hpg(hpg_operands["gdept_z0"])),
-        "r1_e1u": _score(_candidate_owned(inputs["r1_e1u"], three_d=False),
-                           _owned_hpg(hpg_literal["r1_e1u"], three_d=False)),
+        "rhd": _masked_score(_candidate_owned(inputs["rhd"]),
+                             _owned_hpg(hpg_operands["rhd"]), tmask),
+        "e3w": _masked_score(_candidate_owned(inputs["e3w"]),
+                             _owned_hpg(hpg_operands["e3w"]), tmask),
+        "gdept_z0": _masked_score(_candidate_owned(inputs["gdept_z0"]),
+                                  _owned_hpg(hpg_operands["gdept_z0"]), tmask),
+        "r1_e1u": _masked_score(
+            _candidate_owned(inputs["r1_e1u"], three_d=False),
+            _owned_hpg(hpg_literal["r1_e1u"], three_d=False), umask2),
     }
     hpg_statement_rows = {
-        name: _score(
+        name: _masked_score(
             _candidate_owned(_native_u(literal[name])),
             _owned_hpg(hpg_literal[name]),
+            umask,
         )
         for name in HPG_STATEMENT_ORDER
     }
-    hpg_live_calibration = _score(
+    hpg_live_calibration = _masked_score(
         _candidate_owned(_native_u(literal["sum_u"])),
         _candidate_owned(_native_u(parts["hpg_u"].data)),
+        umask,
     )
     hpg_self_replay = hpg_gate.validate(record_root, plant=False)
     stage2_associated = _associated_stage(card, traced.stage_outputs[1])
