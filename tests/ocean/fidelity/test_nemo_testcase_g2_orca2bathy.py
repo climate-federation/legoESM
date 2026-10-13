@@ -55,7 +55,11 @@ def test_run_sh_reuses_the_round4_binaries_and_states_the_one_switch():
     text = (G2_DIR / "run.sh").read_text()
     assert subprocess.run(["bash", "-n", str(G2_DIR / "run.sh")]).returncode == 0
     assert SHIPPED_SHA in text and str(SHIPPED) in text
-    assert "makenemo -" not in text and "maketools" not in text      # no build
+    code = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
+    assert not re.search(r"makenemo|maketools|\bfcm\b|\bmake\b", code)      # no build
+    # admission judges provenance and the frames' field lists, not only the checker
+    assert "was not run with its pinned binary" in code
+    assert "a stage step lacks a field the writer writes" in code
     assert "cmp -s <(assignments \"$DECK\") <(assignments \"$G1_DECK\")" in text
     manifest = G1_RECORD.parent / "manifest/binaries.sha256"
     if manifest.is_file():      # the pinned binaries are the certified record's

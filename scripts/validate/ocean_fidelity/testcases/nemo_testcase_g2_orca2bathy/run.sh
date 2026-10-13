@@ -71,10 +71,11 @@ readonly COMMIT=$(git -C "$repo_root" rev-parse HEAD)
 readonly DECK=$here/namelist_cfg
 readonly G1_DIR=$here/../nemo_testcase_g1_orca2grid
 readonly G1_DECK=$G1_DIR/namelist_cfg CHECKER=$G1_DIR/check_records.py
+readonly STEP_PATCH=$G1_DIR/stprk3_g1_step_record_stage50.patch   # the record binary's writer
 readonly REF_BIN=$NEMO_ROOT/cfgs/$REF_NAME/BLD/bin/nemo.exe
 readonly RUN_BIN=$NEMO_ROOT/cfgs/$RUN_NAME/BLD/bin/nemo.exe
 
-for f in "$DECK" "$G1_DECK" "$CHECKER" "$SHIPPED_DOMCFG" "$REF_BIN" "$RUN_BIN" \
+for f in "$DECK" "$G1_DECK" "$CHECKER" "$STEP_PATCH" "$SHIPPED_DOMCFG" "$REF_BIN" "$RUN_BIN" \
          "$NEMO_ROOT/cfgs/SHARED/namelist_ref"; do
   [[ -f "$f" ]] || { printf 'REFUSE: missing input %s\n' "$f" >&2; exit 67; }
 done
@@ -134,7 +135,23 @@ readonly SMOKE=$EVIDENCE/smoke_2step REF=$EVIDENCE/ref_100step
 readonly TWIN_A=$EVIDENCE/p3_a_100step TWIN_B=$EVIDENCE/p3_b_10step
 
 admit() {
-  local plant
+  local plant dir bin steps
+  # Provenance of what is admitted (a fresh --run and --admit-existing alike):
+  # every run directory holds the pinned domain file and its pinned binary,
+  # finished, at its own length; the smoke is one of them.
+  for dir in "$SMOKE:$REF_SHA:2" "$REF:$REF_SHA:100" "$TWIN_A:$RUN_SHA:100" "$TWIN_B:$RUN_SHA:10"; do
+    IFS=: read -r dir bin steps <<<"$dir"
+    [[ -f "$dir/domain_cfg.nc" && "$(sha_of "$dir/domain_cfg.nc")" == "$SHIPPED_DOMCFG_SHA" ]] \
+      || { printf 'REFUSE: %s does not hold the shipped ORCA2 domain file\n' "$dir" >&2; exit 73; }
+    [[ -f "$dir/nemo" && "$(sha_of "$dir/nemo")" == "$bin" ]] \
+      || { printf 'REFUSE: %s was not run with its pinned binary\n' "$dir" >&2; exit 73; }
+    grep -qx 'RUN_DONE' "$dir/run.user.log" && [[ "$(tr -d ' \n' <"$dir/time.step")" == "$steps" ]] \
+      && grep -Eq 'jpkglo *= *31' "$dir/ocean.output" && ! grep -q 'E R R O R' "$dir/ocean.output" \
+      || { printf 'REFUSE: %s is not a finished %s-step 31-level run\n' "$dir" "$steps" >&2; exit 73; }
+    cmp -s <(assignments "$dir/namelist_cfg" | grep -Ev 'nn_itend|nn_stock') \
+           <(assignments "$DECK" | grep -Ev 'nn_itend|nn_stock') \
+      || { printf 'REFUSE: %s ran a deck that is not the committed one\n' "$dir" >&2; exit 73; }
+  done
   for plant in truncation nonfinite missing-frame twin-ulp missing-step missing-substep; do
     if python3 -I "$CHECKER" --evidence "$TWIN_A" --twin "$TWIN_B" \
          --steps "$STEPS" --stage-steps "$STAGE_STEPS" --plant "$plant" \
@@ -149,12 +166,33 @@ admit() {
     --substep-steps "$SPGTS_STEPS" --json "$EVIDENCE/g2_round10_admission.json"
   # Twin b writes restarts at every second step; that it changes nothing is
   # judged here: its step-10 restart is twin a's, variable by variable.
-  python3 -I - "$G1_DIR" "$TWIN_A" "$TWIN_B" <<'PY'
+  # The checker does not know which fields a frame must hold; the committed
+  # writer patch (what the record binary was built from) does.
+  python3 -I - "$G1_DIR" "$TWIN_A" "$TWIN_B" "$STEP_PATCH" "$EVIDENCE/g2_round10_admission.json" <<'PY'
+import json
+import re
 import sys
 from pathlib import Path
 sys.path.insert(0, sys.argv[1])
 import check_records
 try:
+    frame, stage, last = None, set(), set()
+    for line in Path(sys.argv[4]).read_text().splitlines():
+        if not line.startswith("+"):
+            continue
+        hit = re.search(r"CALL g1r_frame\( '(.)' \)", line)
+        frame = hit.group(1) if hit else frame
+        hit = re.search(r"CALL g1r_w2\( '(\w+)'", line)
+        if hit:
+            stage.add(f"{frame}_{hit.group(1)}")
+            if frame == "f":
+                last.add(f"f_{hit.group(1)}")
+    admitted = json.loads(Path(sys.argv[5]).read_text())
+    check_records.require(len(stage) > 40 and len(last) > 5, "the writer patch was not parsed")
+    check_records.require(admitted["fields_stage"] == sorted(stage),
+                          "a stage step lacks a field the writer writes")
+    check_records.require(admitted["fields_final_only"] == sorted(last),
+                          "a final-only step lacks a field the writer writes")
     check_records.restarts_identical(Path(sys.argv[2]), Path(sys.argv[3]), [10])
     for step in (2, 4, 6, 8):
         check_records.require(
@@ -162,6 +200,7 @@ try:
             f"twin b has no restart at step {step}")
 except check_records.Refuse as exc:
     sys.exit(f"REFUSE: {exc}")
+print("G2_FRAME_FIELDS_COMPLETE", len(stage), "per stage step,", len(last), "per final-only step")
 print("G2_TWIN_B_RESTARTS_PASSIVE step 10 equals twin a; steps 2,4,6,8 present")
 PY
   ( cd "$EVIDENCE" && sha256sum g2_round10_admission.json p3_a_100step/domain_cfg.nc \
@@ -172,7 +211,7 @@ PY
 }
 
 if [[ "$mode" == --admit-existing ]]; then
-  for target in "$REF" "$TWIN_A" "$TWIN_B"; do
+  for target in "$SMOKE" "$REF" "$TWIN_A" "$TWIN_B"; do
     [[ -e "$target" ]] || { printf 'REFUSE: nothing to admit, %s is absent\n' "$target" >&2; exit 69; }
   done
   mkdir -p "$EVIDENCE/manifest"
