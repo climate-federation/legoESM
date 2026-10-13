@@ -1,4 +1,11 @@
-"""Mask-normalized Gaussian coarse-graining for the SWG native C-grid."""
+"""Conservative fine-to-coarse restriction for the SWG native C-grid.
+
+The training target is a finite-volume restriction: T-cell volumes and the
+native U/V face volume transports are summed over each nested coarse control
+volume.  That construction commutes with the discrete continuity divergence.
+The round-1 independent Gaussian/area-average operator remains below under
+explicit ``diagnostic_*`` names; it is not a closure-ready state target.
+"""
 from __future__ import annotations
 
 import argparse
@@ -61,9 +68,6 @@ def masked_gaussian_filter(field: np.ndarray, mask: np.ndarray, *,
     if area.shape != field.shape or not np.all(np.isfinite(area)) \
             or np.any(area <= 0.0):
         raise ValueError("area must be positive finite with field shape")
-    first = field[mask][0]
-    if np.all(field[mask] == first):
-        return np.where(mask, first, 0.0)
     boundary_mode = "wrap" if np.all(mask) else "constant"
     numerator = gaussian_filter(
         np.where(mask, field, 0.0), sigma_cells, mode=boundary_mode, cval=0.0,
@@ -153,8 +157,11 @@ def cgrid_geometry(namelist) -> dict[str, dict[str, np.ndarray] | float]:
         "U": np.asarray(u_full[:, 1:], dtype=bool),
         "V": np.asarray(v_full[1:, :], dtype=bool),
     }
+    z_coord = card.recipe.z_coord
+    barotropic = z_coord.nemo_een_barotropic
     return {
         "spacing_m": float(coordinates["spacing_m"]),
+        "grid": card.recipe.grid,
         "mask": masks,
         "x": {"T": np.asarray(coordinates["glamt"]),
               "U": np.asarray(coordinates["glamu"]),
@@ -162,12 +169,328 @@ def cgrid_geometry(namelist) -> dict[str, dict[str, np.ndarray] | float]:
         "y": {"T": np.asarray(coordinates["gphit"]),
               "U": np.asarray(coordinates["gphiu"]),
               "V": np.asarray(coordinates["gphiv"])},
+        "area": {
+            "T": np.asarray(z_coord.nemo_e1e2t, dtype=np.float64),
+            "U": np.asarray(z_coord.nemo_e1e2u, dtype=np.float64),
+            "V": np.asarray(z_coord.nemo_e1e2v, dtype=np.float64),
+        },
+        "face_length": {
+            "U": np.asarray(z_coord.nemo_e2u, dtype=np.float64),
+            "V": np.asarray(z_coord.nemo_e1v, dtype=np.float64),
+        },
+        "reference_thickness": {
+            "T": np.asarray(z_coord.nemo_e3t_0[..., 0], dtype=np.float64),
+            "U": np.asarray(barotropic.e3u_0[..., 0], dtype=np.float64),
+            "V": np.asarray(barotropic.e3v_0[..., 0], dtype=np.float64),
+        },
+        "reference_transport_depth": {
+            "U": np.asarray(z_coord.nemo_hu_0, dtype=np.float64),
+            "V": np.asarray(z_coord.nemo_hv_0, dtype=np.float64),
+        },
     }
+
+
+def _wet_rectangle(mask: np.ndarray, *, label: str) -> tuple[int, int, int, int]:
+    """Return inclusive wet bounds, refusing a non-rectangular SWG basin."""
+    wet = np.asarray(mask, dtype=bool)
+    if wet.ndim != 2 or not np.any(wet):
+        raise ValueError(f"{label} mask must be a nonempty 2-D array")
+    jj, ii = np.where(wet)
+    bounds = int(jj.min()), int(jj.max()), int(ii.min()), int(ii.max())
+    expected = np.zeros_like(wet)
+    expected[bounds[0]:bounds[1] + 1, bounds[2]:bounds[3] + 1] = True
+    if not np.array_equal(wet, expected):
+        raise ValueError(f"{label} wet mask is not one closed rectangle")
+    return bounds
+
+
+def _restriction_layout(source: dict, target: dict) -> dict[str, int]:
+    """Validate the integer nesting and return the two wet rectangles."""
+    source_bounds = _wet_rectangle(source["mask"]["T"], label="source T")
+    target_bounds = _wet_rectangle(target["mask"]["T"], label="target T")
+    source_ny = source_bounds[1] - source_bounds[0] + 1
+    source_nx = source_bounds[3] - source_bounds[2] + 1
+    target_ny = target_bounds[1] - target_bounds[0] + 1
+    target_nx = target_bounds[3] - target_bounds[2] + 1
+    ratio = float(target["spacing_m"]) / float(source["spacing_m"])
+    factor = int(round(ratio))
+    if factor <= 0 or ratio != float(factor):
+        raise ValueError("source and target spacings must have an integer ratio")
+    if (source_ny, source_nx) != (factor * target_ny, factor * target_nx):
+        raise ValueError("source and target wet rectangles do not tile exactly")
+    return {
+        "factor": factor,
+        "source_j0": source_bounds[0], "source_j1": source_bounds[1],
+        "source_i0": source_bounds[2], "source_i1": source_bounds[3],
+        "target_j0": target_bounds[0], "target_j1": target_bounds[1],
+        "target_i0": target_bounds[2], "target_i1": target_bounds[3],
+        "target_ny": target_ny, "target_nx": target_nx,
+    }
+
+
+def _live_face_thickness(eta: np.ndarray, geometry: dict,
+                         kind: str) -> np.ndarray:
+    """NEMO QCO live U/V thickness for this uniform one-layer card."""
+    if kind not in ("U", "V"):
+        raise ValueError(f"face kind must be U or V, got {kind!r}")
+    eta = np.asarray(eta, dtype=np.float64)
+    tmask = np.asarray(geometry["mask"]["T"], dtype=bool)
+    if eta.shape != tmask.shape or not np.all(np.isfinite(eta)):
+        raise ValueError("SSH must be finite and have the T-mask shape")
+    area_t = np.asarray(geometry["area"]["T"], dtype=np.float64)
+    weighted_eta = area_t * np.where(tmask, eta, 0.0)
+    axis = 1 if kind == "U" else 0
+    numerator = 0.5 * (weighted_eta + np.roll(weighted_eta, -1, axis=axis))
+    reference_depth = np.asarray(
+        geometry["reference_transport_depth"][kind], dtype=np.float64)
+    area_face = np.asarray(geometry["area"][kind], dtype=np.float64)
+    reference_thickness = np.asarray(
+        geometry["reference_thickness"][kind], dtype=np.float64)
+    face_mask = np.asarray(geometry["mask"][kind], dtype=bool)
+    ratio = np.zeros_like(eta)
+    ratio[face_mask] = (
+        numerator[face_mask]
+        / reference_depth[face_mask]
+        / area_face[face_mask]
+    )
+    return reference_thickness * (1.0 + ratio * face_mask)
+
+
+def native_face_transports(fields: dict[str, np.ndarray], geometry: dict,
+                           ) -> dict[str, np.ndarray]:
+    """Return native east/north volume transports [m3/s]."""
+    if set(fields) != {"T", "U", "V"}:
+        raise ValueError("fields must be exactly T, U, and V")
+    eta = np.asarray(fields["T"], dtype=np.float64)
+    transports = {}
+    for kind in ("U", "V"):
+        velocity = np.asarray(fields[kind], dtype=np.float64)
+        mask = np.asarray(geometry["mask"][kind], dtype=bool)
+        if velocity.shape != mask.shape or not np.all(np.isfinite(velocity)):
+            raise ValueError(f"{kind} must be finite and have its mask shape")
+        transports[kind] = np.where(
+            mask,
+            np.asarray(geometry["face_length"][kind], dtype=np.float64)
+            * _live_face_thickness(eta, geometry, kind) * velocity,
+            0.0,
+        )
+    return transports
+
+
+def _restrict_t_cell_sum(values: np.ndarray, source: dict, target: dict,
+                         layout: dict[str, int]) -> np.ndarray:
+    """Sum fine T-cell extensive values into the nested coarse cells."""
+    f = layout["factor"]
+    sj0, sj1 = layout["source_j0"], layout["source_j1"]
+    si0, si1 = layout["source_i0"], layout["source_i1"]
+    tj0, tj1 = layout["target_j0"], layout["target_j1"]
+    ti0, ti1 = layout["target_i0"], layout["target_i1"]
+    block = np.asarray(values, dtype=np.float64)[sj0:sj1 + 1, si0:si1 + 1]
+    summed = block.reshape(
+        layout["target_ny"], f, layout["target_nx"], f).sum(axis=(1, 3))
+    out = np.zeros(np.asarray(target["mask"]["T"]).shape, dtype=np.float64)
+    out[tj0:tj1 + 1, ti0:ti1 + 1] = summed
+    return out
+
+
+def restrict_native_transports(transports: dict[str, np.ndarray], source: dict,
+                               target: dict, layout: dict[str, int] | None = None,
+                               ) -> dict[str, np.ndarray]:
+    """Sum the fine faces that tile every wet coarse U/V face."""
+    if set(transports) != {"U", "V"}:
+        raise ValueError("transports must be exactly U and V")
+    layout = _restriction_layout(source, target) if layout is None else layout
+    f = layout["factor"]
+    sj0, sj1 = layout["source_j0"], layout["source_j1"]
+    si0, si1 = layout["source_i0"], layout["source_i1"]
+    tj0, tj1 = layout["target_j0"], layout["target_j1"]
+    ti0, ti1 = layout["target_i0"], layout["target_i1"]
+    ny, nx = layout["target_ny"], layout["target_nx"]
+
+    fine_u = np.asarray(transports["U"], dtype=np.float64)
+    source_u_columns = si0 + f * np.arange(1, nx, dtype=int) - 1
+    restricted_u = fine_u[sj0:sj1 + 1, source_u_columns]
+    restricted_u = restricted_u.reshape(ny, f, nx - 1).sum(axis=1)
+    coarse_u = np.zeros(np.asarray(target["mask"]["U"]).shape, dtype=np.float64)
+    coarse_u[tj0:tj1 + 1, ti0:ti1] = restricted_u
+
+    fine_v = np.asarray(transports["V"], dtype=np.float64)
+    source_v_rows = sj0 + f * np.arange(1, ny, dtype=int) - 1
+    restricted_v = fine_v[source_v_rows, si0:si1 + 1]
+    restricted_v = restricted_v.reshape(ny - 1, nx, f).sum(axis=2)
+    coarse_v = np.zeros(np.asarray(target["mask"]["V"]).shape, dtype=np.float64)
+    coarse_v[tj0:tj1, ti0:ti1 + 1] = restricted_v
+    return {"U": coarse_u, "V": coarse_v}
+
+
+def conservative_restrict_cgrid(fields: dict[str, np.ndarray], source: dict,
+                                target: dict) -> dict[str, np.ndarray]:
+    """Restrict cell volume and face transport without mean restoration."""
+    if set(fields) != {"T", "U", "V"}:
+        raise ValueError("fields must be exactly T, U, and V")
+    layout = _restriction_layout(source, target)
+    eta = np.asarray(fields["T"], dtype=np.float64)
+    source_tmask = np.asarray(source["mask"]["T"], dtype=bool)
+    if eta.shape != source_tmask.shape or not np.all(np.isfinite(eta)):
+        raise ValueError("T must be finite and have the source T-mask shape")
+    source_volume = (
+        np.asarray(source["area"]["T"], dtype=np.float64)
+        * (np.asarray(source["reference_thickness"]["T"], dtype=np.float64)
+           + np.where(source_tmask, eta, 0.0))
+        * source_tmask
+    )
+    coarse_volume = _restrict_t_cell_sum(source_volume, source, target, layout)
+    target_tmask = np.asarray(target["mask"]["T"], dtype=bool)
+    coarse_eta = np.zeros_like(coarse_volume)
+    coarse_eta[target_tmask] = (
+        coarse_volume[target_tmask]
+        / np.asarray(target["area"]["T"], dtype=np.float64)[target_tmask]
+        - np.asarray(target["reference_thickness"]["T"],
+                     dtype=np.float64)[target_tmask]
+    )
+
+    fine_transports = native_face_transports(fields, source)
+    coarse_transports = restrict_native_transports(
+        fine_transports, source, target, layout)
+    output = {"T": coarse_eta}
+    for kind in ("U", "V"):
+        mask = np.asarray(target["mask"][kind], dtype=bool)
+        denominator = (
+            np.asarray(target["face_length"][kind], dtype=np.float64)
+            * _live_face_thickness(coarse_eta, target, kind)
+        )
+        velocity = np.zeros_like(coarse_eta)
+        velocity[mask] = coarse_transports[kind][mask] / denominator[mask]
+        output[kind] = velocity
+    return output
+
+
+def _transport_divergence(transports: dict[str, np.ndarray], geometry: dict,
+                          ) -> np.ndarray:
+    """Finite-volume divergence from native east/north transport records."""
+    u = np.asarray(transports["U"], dtype=np.float64)
+    v = np.asarray(transports["V"], dtype=np.float64)
+    net = u - np.roll(u, 1, axis=1) + v - np.roll(v, 1, axis=0)
+    mask = np.asarray(geometry["mask"]["T"], dtype=bool)
+    out = np.zeros_like(net)
+    out[mask] = net[mask] / np.asarray(
+        geometry["area"]["T"], dtype=np.float64)[mask]
+    return out
+
+
+def continuity_commutator(fields: dict[str, np.ndarray], source: dict,
+                           target: dict, *, coarse_fields=None) -> dict:
+    """Compare restricted fine and coarse finite-volume continuity [m/s]."""
+    layout = _restriction_layout(source, target)
+    fine_transports = native_face_transports(fields, source)
+    fine_divergence = _transport_divergence(fine_transports, source)
+    restricted_fine_divergence = _restrict_t_cell_sum(
+        fine_divergence * np.asarray(source["area"]["T"], dtype=np.float64),
+        source, target, layout,
+    ) / np.asarray(target["area"]["T"], dtype=np.float64)
+    if coarse_fields is None:
+        coarse_fields = conservative_restrict_cgrid(fields, source, target)
+    coarse_divergence = _transport_divergence(
+        native_face_transports(coarse_fields, target), target)
+    residual = coarse_divergence - restricted_fine_divergence
+    wet = np.asarray(target["mask"]["T"], dtype=bool)
+    tj0, tj1 = layout["target_j0"], layout["target_j1"]
+    ti0, ti1 = layout["target_i0"], layout["target_i1"]
+    wall = np.zeros_like(wet)
+    width = min(4, layout["target_ny"] // 2, layout["target_nx"] // 2)
+    wall[tj0:tj0 + width, ti0:ti1 + 1] = True
+    wall[tj1 - width + 1:tj1 + 1, ti0:ti1 + 1] = True
+    wall[tj0:tj1 + 1, ti0:ti0 + width] = True
+    wall[tj0:tj1 + 1, ti1 - width + 1:ti1 + 1] = True
+    wall &= wet
+    interior = wet & ~wall
+
+    def summary(mask):
+        values = residual[mask]
+        return {
+            "count": int(values.size),
+            "rms_m_s": float(np.sqrt(np.mean(values * values))),
+            "max_abs_m_s": float(np.max(np.abs(values))),
+        }
+
+    return {
+        "residual_m_s": residual,
+        "restricted_fine_divergence_m_s": restricted_fine_divergence,
+        "coarse_divergence_m_s": coarse_divergence,
+        "wet": summary(wet),
+        "interior": summary(interior),
+        "outer_four_cells": summary(wall),
+    }
+
+
+def require_continuity_commutes(fields: dict[str, np.ndarray], source: dict,
+                                target: dict, *, atol_m_s: float,
+                                coarse_fields=None) -> dict:
+    """Fail closed when interior or wall continuity exceeds the declared bar."""
+    if not np.isfinite(atol_m_s) or atol_m_s <= 0.0:
+        raise ValueError("continuity tolerance must be positive finite")
+    result = continuity_commutator(
+        fields, source, target, coarse_fields=coarse_fields)
+    for region in ("interior", "outer_four_cells"):
+        if result[region]["max_abs_m_s"] > atol_m_s:
+            raise ValueError(
+                f"non-conservative restriction in {region}: "
+                f"{result[region]['max_abs_m_s']:.17g} m/s exceeds "
+                f"{atol_m_s:.17g} m/s")
+    return result
+
+
+def gaussian_smooth_restricted_scalar(field: np.ndarray, mask: np.ndarray, *,
+                                      sigma_cells: float,
+                                      truncate: float = FILTER_TRUNCATE,
+                                      ) -> np.ndarray:
+    """Gaussian-smooth one restricted scalar with reflecting closed walls.
+
+    This is for derived relative-vorticity targets, never for the conservative
+    T/U/V state.  Reflection makes the rectangular closed wall a no-flux
+    boundary; there is no mask normalization or a-posteriori mean correction.
+    ``sigma_cells`` is the Gaussian standard deviation in coarse cells.
+    """
+    values = np.asarray(field, dtype=np.float64)
+    wet = np.asarray(mask, dtype=bool)
+    if values.shape != wet.shape or not np.all(np.isfinite(values)):
+        raise ValueError("Gaussian scalar must be finite and match its mask")
+    if not np.isfinite(sigma_cells) or sigma_cells <= 0.0:
+        raise ValueError("sigma_cells must be positive finite")
+    j0, j1, i0, i1 = _wet_rectangle(wet, label="Gaussian")
+    filtered = gaussian_filter(
+        values[j0:j1 + 1, i0:i1 + 1], sigma_cells,
+        mode="reflect", truncate=truncate)
+    out = np.zeros_like(values)
+    out[j0:j1 + 1, i0:i1 + 1] = filtered
+    return out
+
+
+def restricted_relative_vorticity(fields: dict[str, np.ndarray], geometry: dict,
+                                   *, gaussian_sigma_cells: float | None = None,
+                                   ) -> np.ndarray:
+    """Shared C-grid relative vorticity, optionally Gaussian-smoothed."""
+    import jax.numpy as jnp
+    from legoesm.ocean.diagnostics import relative_vorticity_cell_centre
+
+    shape = np.asarray(geometry["mask"]["T"]).shape
+    u = np.zeros((shape[0], shape[1] + 1), dtype=np.float64)
+    v = np.zeros((shape[0] + 1, shape[1]), dtype=np.float64)
+    u[:, 1:] = np.asarray(fields["U"], dtype=np.float64)
+    v[1:, :] = np.asarray(fields["V"], dtype=np.float64)
+    zeta = np.asarray(relative_vorticity_cell_centre(
+        jnp.asarray(u), jnp.asarray(v), geometry["grid"]), dtype=np.float64)
+    wet = np.asarray(geometry["mask"]["T"], dtype=bool)
+    zeta = np.where(wet, zeta, 0.0)
+    if gaussian_sigma_cells is not None:
+        zeta = gaussian_smooth_restricted_scalar(
+            zeta, wet, sigma_cells=gaussian_sigma_cells)
+    return zeta
 
 
 def coarse_grain_cgrid(fields: dict[str, np.ndarray], source: dict,
                        target: dict, *, gaussian_length_m: float) -> dict[str, np.ndarray]:
-    """Filter and area-average SSH/U/V on their native C-grid staggers."""
+    """Round-1 non-conservative Gaussian diagnostic; not a training target."""
     expected = {"T", "U", "V"}
     if set(fields) != expected:
         raise ValueError(f"fields must be exactly {sorted(expected)}")
@@ -193,7 +516,7 @@ def _write_json_atomic(path: Path, payload: dict) -> None:
 
 def filter_truth_directory(input_root: Path, output_root: Path, *,
                            commit: str) -> dict:
-    """Write coarse daily snapshots and means from a complete fine v2 run."""
+    """Write conservatively restricted snapshots and diagnostic daily means."""
     from legoesm.ocean.fidelity.nemo_testcase_recipe import (
         SWG_DG50_NAMELIST,
         SWG_MADDISON_NAMELIST,
@@ -225,7 +548,7 @@ def filter_truth_directory(input_root: Path, output_root: Path, *,
     output_hashes = {name: {} for name in roots}
     days = int(manifest["days"])
     base = {
-        "schema": "legoesm-swg-filtered-truth-v1",
+        "schema": "legoesm-swg-conservative-truth-v2",
         "status": "pending",
         "completed_days": 0,
         "days": days,
@@ -236,11 +559,18 @@ def filter_truth_directory(input_root: Path, output_root: Path, *,
         "source_namelist": source_namelist,
         "target_namelist": SWG_DG50_NAMELIST._asdict(),
         "filter": {
-            "name": "mask-normalized Gaussian then overlap-area average",
+            "name": "exact nested T-volume and native face-transport restriction",
             "gaussian_length_m": gaussian_length_m,
             "sigma_fine_cells": gaussian_length_m / float(source["spacing_m"]),
             "truncate_sigma": FILTER_TRUNCATE,
-            "mean_conservation": "float64 wet-stagger integral correction",
+            "state_gaussian": "none",
+            "derived_vorticity_gaussian": (
+                "optional after restriction; reflecting closed walls; sigma is "
+                "a standard deviation in coarse cells"),
+            "mean_conservation": "finite-volume construction; no mean restoration",
+            "daily_mean_caveat": (
+                "restriction of archived mean SSH/U/V; exact mean face transport "
+                "is unavailable because mean thickness-times-velocity was not archived"),
             "staggering": {"ssh_m": "T", "u_m_s": "U", "v_m_s": "V"},
         },
     }
@@ -252,17 +582,15 @@ def filter_truth_directory(input_root: Path, output_root: Path, *,
         if source_hashes.get(name) != digest:
             raise ValueError(f"input digest mismatch: {name}")
         with np.load(io.BytesIO(payload), allow_pickle=False) as saved:
-            snapshot = coarse_grain_cgrid(
+            snapshot = conservative_restrict_cgrid(
                 {"T": saved["ssh_m"], "U": saved["u_m_s"],
-                 "V": saved["v_m_s"]}, source, target,
-                gaussian_length_m=gaussian_length_m)
-            daily_mean = coarse_grain_cgrid(
+                 "V": saved["v_m_s"]}, source, target)
+            daily_mean = conservative_restrict_cgrid(
                 {"T": saved["ssh_daily_mean_m"],
                  "U": saved["u_daily_mean_m_s"],
-                 "V": saved["v_daily_mean_m_s"]}, source, target,
-                gaussian_length_m=gaussian_length_m)
+                 "V": saved["v_daily_mean_m_s"]}, source, target)
             metadata = {
-                "schema": np.str_("legoesm-swg-filtered-truth-v1"),
+                "schema": np.str_("legoesm-swg-conservative-truth-v2"),
                 "source_day": np.int64(saved["day"]),
                 "source_step": np.int64(saved["step"]),
                 "source_dt_s": np.float64(saved["dt_s"]),
@@ -274,7 +602,7 @@ def filter_truth_directory(input_root: Path, output_root: Path, *,
                                       "v_m_s": snapshot["V"]},
             "daily_means": metadata | {
                 "daily_mean_sampling": np.str_(
-                    "filtered fine arithmetic mean of every post-step state"),
+                    "restricted archived fine arithmetic-mean state; not mean transport"),
                 "daily_mean_sample_count": np.int64(1_728),
                 "ssh_daily_mean_m": daily_mean["T"],
                 "u_daily_mean_m_s": daily_mean["U"],

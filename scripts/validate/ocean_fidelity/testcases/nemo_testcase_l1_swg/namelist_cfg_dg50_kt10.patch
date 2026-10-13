@@ -24,14 +24,14 @@
 +   rn_domsiz   =  4000000        ! Maddison deck: 4000 km basin [m]
 @@ -47,2 +48,2 @@
 -   rn_tau           = 0.20    ! wind stress on the surface    [N/m2]
--   rn_modified_grav = 0.02    ! modified gravity              [m/s2] 
+-   rn_modified_grav = 0.02    ! modified gravity              [m/s2]
 +   rn_tau           = 0.10    ! Maddison deck wind stress     [N/m2]
 +   rn_modified_grav = 9.80665 ! Maddison deck rigid-surface g [m/s2]
 @@ -69 +70 @@
 -   rn_Dt       = 3600.     !  1h    - SWG 1/4deg
 +   rn_Dt       = 400.      !  dg50 gravity-wave Courant matched to 6.25 km/50 s
 @@ -180 +181 @@
--      rn_Lv      = 500         !  lateral viscous length   [m]  - at 1/4deg 
+-      rn_Lv      = 500         !  lateral viscous length   [m]  - at 1/4deg
 +      rn_Lv      = 10          !  Maddison ahm=rn_Uv*rn_Lv/2=10 m2/s
 @@ -237,6 +238,8 @@
  /

@@ -1,8 +1,8 @@
 """SWG restart/stage reader and fail-closed ladder tests."""
 from __future__ import annotations
 
-import importlib.util
 import hashlib
+import importlib.util
 from pathlib import Path
 
 import numpy as np
@@ -11,9 +11,12 @@ import pytest
 _P = (Path(__file__).resolve().parents[3] / "scripts/validate/ocean_fidelity/"
       "testcases/nemo_testcase_l1_swg_ladder.py")
 _S = importlib.util.spec_from_file_location("swg_ladder", _P)
-lad = importlib.util.module_from_spec(_S); _S.loader.exec_module(lad)
+lad = importlib.util.module_from_spec(_S)
+_S.loader.exec_module(lad)
 ROOT = lad.DEFAULT_ROOT
 MONTH_ROOT = lad.DEFAULT_MONTH_ROOT
+DG50_STAGE_ROOT = lad.DG50_STAGE_ROOT
+DG50_MONTH_ROOT = lad.DG50_MONTH_ROOT
 
 
 def test_maddison_deck_selects_admitted_card_clocks_and_roots():
@@ -40,6 +43,27 @@ def test_dg50_deck_selects_preregistered_stage_and_month_clocks():
     fine = lad._deck_namelist("maddison")
     differing = {name for name in physical if getattr(stage, name) != getattr(fine, name)}
     assert differing == {"nn_SWG", "rn_Dt_s"}
+
+
+@pytest.mark.skipif(not DG50_STAGE_ROOT.is_dir(),
+                    reason="admitted dg50 stage records not mounted")
+def test_dg50_stage_admission_pins_records_restarts_and_outputs():
+    pins = lad._pinned_stage_hashes(DG50_STAGE_ROOT)
+    assert len(pins) == 30
+    records = lad.read_restarts(
+        DG50_STAGE_ROOT, namelist=lad._deck_namelist("dg50"))
+    assert list(records) == list(range(1, 11))
+    assert all(value.shape == (84, 84) for value in records[1].values())
+
+
+@pytest.mark.skipif(not DG50_MONTH_ROOT.is_dir(),
+                    reason="admitted dg50 month records not mounted")
+def test_dg50_month_admission_scores_all_daily_records():
+    out = lad.month(DG50_MONTH_ROOT, deck="dg50", allow_dirty=True)
+    assert out["record_counts"] == {"stage_entries": 30, "restarts": 30}
+    assert len(out["per_kt"]) == 30
+    assert sum(len(day["rows"]) for day in out["per_kt"]) == 690
+    assert out["all_at_bar"] and out["all_bit_identical"]
 
 
 def test_exact_row_gate_distinguishes_signed_zero_bits():

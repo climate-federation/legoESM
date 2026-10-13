@@ -33,10 +33,18 @@ DG_STAGE_ROOT = Path(
 DG_MONTH_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgdg_rounds/"
     "round1/oracle_swg_dg_r1_30d")
+DG50_STAGE_ROOT = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgonl_rounds/"
+    "round1/oracle_swg_dg50_r1/instrumented")
+DG50_MONTH_ROOT = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgonl_rounds/"
+    "round1/oracle_swg_dg50_r1_30d")
 MONTH_RECORD_KTS = tuple(range(1, 698, 24))
 MONTH_RESTART_KTS = tuple(range(24, 721, 24))
 DG_MONTH_RECORD_KTS = tuple(range(1, 12_530, 432))
 DG_MONTH_RESTART_KTS = tuple(range(432, 12_961, 432))
+DG50_MONTH_RECORD_KTS = tuple(range(1, 6_266, 216))
+DG50_MONTH_RESTART_KTS = tuple(range(216, 6_481, 216))
 TEN_STEP_ADMISSION_SHA256 = (
     "cdf8afc272c962635564110111b10386b79d8afdc2373fdf0df3c5860dbd3937")
 MONTH_ADMISSION_SHA256 = (
@@ -45,6 +53,10 @@ DG_STAGE_ADMISSION_SHA256 = (
     "f40f5eab7b3b4530ca995cfe36d9e8d3fc43dd02792311afd53f2f9d508d51e2")
 DG_MONTH_ADMISSION_SHA256 = (
     "1fa9cb3a27c05fc380baebea2fa1b741d2edea8273923226acae9dce378de726")
+DG50_STAGE_ADMISSION_SHA256 = (
+    "066f407b11f6d2d63bc9d1f38ffc0f830d255f8a27aa17a3550449a18a3c1fe1")
+DG50_MONTH_ADMISSION_SHA256 = (
+    "de3b218ad34d1cfdb2c2de4cf6c9440cc576bc63d1e0f462acbda72b1a0513f6")
 TEN_STEP_RESTART_SHA256 = dict(zip(range(1, 11), (
     "bdadad749f29e868a1910cac7e0d98458cd0f40300d60d92c9bda0e992d8fd37",
     "122be763d83d2ec800038b84ac4db5d86b6a66dfd3970a3eae9a902141a69346",
@@ -101,6 +113,18 @@ DG_STAGE_RESTART_SHA256 = dict(zip(range(1, 11), (
     "bdf6a27f855f6a9ed7ccad145c9fa4f36c7fa9f52d5fc29ddc7cdbbc425f7fc9",
     "94b021ed88f02718bcc83e877825a9b7689eec10b23fd24f76fe593f5f363fb8",
 ), strict=True))
+DG50_STAGE_RESTART_SHA256 = dict(zip(range(1, 11), (
+    "727ae38e60cb321cb13824f3751562b6c387ca42259d72e964a30a21b816114b",
+    "8d7407fc70353d17eb643efe822a9e02acc95bdc3d52d9808fa1e2051cee43a0",
+    "f6ccfe5467cffb4240fb4f2750b8da8cf597f58bc21ec356307e1c44c3f60e4e",
+    "6dee273d2557cfffc211f7e5bb17650dec4ae048b17a0b7e65d56756d9df1269",
+    "96ccd3c9a042ab5b9703cb1bf7b0a5f6fe9619541f2ba4ef238cdbbd3c66a032",
+    "96b0dddc2908985950220e65e0d54aa967b8cdd0684a425b15a6cf09bfc83fb6",
+    "835f83107146ca5d9fb313acbdfc0e306e6ebdb0428a1e0059a4cff11770e4a3",
+    "16dd9b45afd5fed5c64acb816acf299d157e4065b9ce0158449f2cc993db5f63",
+    "915a61251a1d5fbf624c7d9c9f3940db721c03ad77593e803547f638b672ab7b",
+    "36ce14672f9675f9d3a0c31933b336e5e43f7faf4f1103baa46a5b802bfa5e0c",
+), strict=True))
 DG_MONTH_RESTART_SHA256 = dict(zip(DG_MONTH_RESTART_KTS, (
     "64e7c76921e9f1a2918e3da2633bee2ead3baaa314ffc68937a0730452ff6976",
     "6d27febd8665dd7e99c4b0d4b0e1ae6bcefab62175c75236b83387c5fdded783",
@@ -133,6 +157,38 @@ DG_MONTH_RESTART_SHA256 = dict(zip(DG_MONTH_RESTART_KTS, (
     "3e21ef49201b64b23397e0ccaf15ac72c8c7ba7332b236714d0fd98bc4bc3fa3",
     "78d4fd00e53185c65e826990d962c22409fe266a467d3b03d230b8fb1050b107",
 ), strict=True))
+DG50_MONTH_RESTART_SHA256 = dict(zip(DG50_MONTH_RESTART_KTS, (
+    "2c673df36526dc8cf6d70fd73ac39d61bbe4065b6b9a76da420fbc2472d94512",
+    "bda748073fa54b286c842c6e5dadf785db301a837343073fe5fe3e1826279332",
+    "a9e4bca8de2937dca047831c98e07d8de6c6fd515b403b88c3b55b0a9044c182",
+    "640a37120bc8e29c473a833b5e5442b2389b0b912a334a5795a3d1e343d3b55b",
+    "f9f7e6c14fbe4825a520d5c472f1d2e991682d32dfcebac8f991cdc6289a8c02",
+    "e92324ed620deb052927c3088d68b700ecce36fcdd921efe1acfae301b7d8024",
+    "3e3b95b7c1aeacf6d0df57f7af9119675e36aea83db19754e6397e98e6d066b9",
+    "ebe2d293782da974fec758db861e4ee1eab32f1b0bbc47dc32481238b74ff193",
+    "9be012215356a1cac63b0cc02eeb0eeea11922d1535c3a15f45081fef344f22d",
+    "c82d5ea9fe1e2d312b07ca34103a3b7f0dcd82d85bcf25ab9af0aa63d1eea41f",
+    "b47916a2c1309d52c6a8210c1914251c2eee983a5f67057f852287b2666c7fa2",
+    "a4209b3cb496cfc10759e77ef66f323ddf3b6d372442650255b29176298a261c",
+    "b4c1da4db2c6f16c399e857e1ca652edc627924c06cf98a5bc37701be4b7c6c0",
+    "37cbb078937d31d763a1b2461bdeaea2f4b146b388c6824870bdb10c11bc454f",
+    "164f8020d9284f0d62ec0348a6a4625cbdb20d60039a49ef32a88d58c0186146",
+    "c60ce66a2dadfc33094cf779861c181662c34ddb29983dcb84c0e52df7d7c3d4",
+    "97dd255e0feaf6ef87e3ebea411cc2f921ed8c137e037977ca67d1881cf4a5e8",
+    "89ceb431504e8ee7ee32c88264fff488a8a3030fd69b1d19fb60ba2e250e25bc",
+    "9806b2af583f238536e639ccf01d3d0236b4d1918cf8d06218d9810f8d1c3db1",
+    "7353a92741fa50fae16274596f76585599784acb579f92329596d53df6a931fc",
+    "94b4e144ce0965ed42a579288487421a6a12e50959f4a5fe64f8f092f3ddbb88",
+    "91ce0e47f0a70d1cb72d30127143df56f265ecf5c5cbb8fc831e5f0f94c2c060",
+    "8bfc2592a61f55b03b01f7e09dbe7a5abdaa7d1e1ff290b84d8f858b641e5507",
+    "2028aebb56b2887d5678fdf9e0e05ec3d9963a1ebc88bd391d8a4ce665263a69",
+    "e119b7d00724b98cb04583ded1b00a2ce31f4dde8396913e96313a88d534b791",
+    "d96580a3de53877a5793ea562d37294fa59e4dabc8bcd862aa47ab4a32a53cd4",
+    "d6a16f076578aafe5eb992ef1b437a78061f9cbeca1d86a4e12f6137be411ae1",
+    "736d0a724c94a7a8ec262d2bfceebc0d3f9b116c03a6d0e83a969ec43cede385",
+    "df685ea2023b6a3333958e028a3cf7214560c26614f3bef327fbf8b006cad55f",
+    "e19ac47dfc43df1d361a95a2ae381826cb7d3492c14bbf1da3008cab245eff85",
+), strict=True))
 MONTH_OUTPUT_SHA256 = {
     "instrumented/SWG_1d_00010101_00010130_grid_T_0000.nc":
         "f30b644d44304d607d0f1e139a573d7d4b748c88f67e3139161bfac73ef759d4",
@@ -150,6 +206,42 @@ MONTH_OUTPUT_SHA256 = {
         "612666a199c7396134e3f1878755bcefc99fbaabbc4993ddda83fb10140e7e15",
     "reference/SWG_1d_00010101_00010130_grid_W_0000.nc":
         "5d700936098ed919cc726a9348d7766a400ac3ad2b93ddcb870075262beb976b",
+}
+DG50_STAGE_OUTPUT_SHA256 = {
+    "instrumented/SWG_400s_00010101_00010101_grid_T_0000.nc":
+        "13ca083d6a9f8b31bde742a989b3245c6952e100c6424f778cb55327a537927f",
+    "instrumented/SWG_400s_00010101_00010101_grid_U_0000.nc":
+        "d00ff306ee2ce6d99c80f2b31e24e7a9ec178cfde206e5d133a4fd03394b9062",
+    "instrumented/SWG_400s_00010101_00010101_grid_V_0000.nc":
+        "8ce64754481f8c629e09420df922c14382ade15d7b22ff79d975d1a24751e41d",
+    "instrumented/SWG_400s_00010101_00010101_grid_W_0000.nc":
+        "40ff4d109d3a6831ec7129f0dbb387a19824f919e46390f89dea84ebc416733a",
+    "reference/SWG_400s_00010101_00010101_grid_T_0000.nc":
+        "4e4100fb09f428fd1551c2166fac89c1a2cf659580acec7a0a8c38fe5a3645e5",
+    "reference/SWG_400s_00010101_00010101_grid_U_0000.nc":
+        "4240c02d136ecd695a1f327ebce5f035b04120c4fb163781a9da3464c622a0b6",
+    "reference/SWG_400s_00010101_00010101_grid_V_0000.nc":
+        "b9fc96f4049abc50614dbfc41409fa0a3357620c1c2f2f82db209197172918a7",
+    "reference/SWG_400s_00010101_00010101_grid_W_0000.nc":
+        "73dcc360e9af2a3ffc2c9b925907a70b1d1dffc3777b45f68f8a4529f864bcd4",
+}
+DG50_MONTH_OUTPUT_SHA256 = {
+    "instrumented/SWG_1d_00010101_00010130_grid_T_0000.nc":
+        "b1c6261b16c02ffb3e8beb2f66a2067071c0693d1dc3346cf637e3a36e981bb3",
+    "instrumented/SWG_1d_00010101_00010130_grid_U_0000.nc":
+        "dc9ebfe53cf57bc1de2d540ec35c350e1ff11e1e0fe4fe542e26fbeda86f54e3",
+    "instrumented/SWG_1d_00010101_00010130_grid_V_0000.nc":
+        "396040c31f51ebde719a5cb5e81ea078fc4199b45a722fb3ad021be82094cf27",
+    "instrumented/SWG_1d_00010101_00010130_grid_W_0000.nc":
+        "0965596e0e34e4158b1b99cfa4903128792b86bc76b31f5ab6f8efd34520e26a",
+    "reference/SWG_1d_00010101_00010130_grid_T_0000.nc":
+        "36e901eb2f3c5c5923594b86d95ef5ea26a530e4a9fc0f441eb37336f002328b",
+    "reference/SWG_1d_00010101_00010130_grid_U_0000.nc":
+        "3f884e81b1061d10be647d41b7cdb44112535770b0eada873cfc8b0faccb2de8",
+    "reference/SWG_1d_00010101_00010130_grid_V_0000.nc":
+        "1c2a8701ab37aedc9c1d681c2ed76ddac9c24c6291601313c0b22c6801d87a99",
+    "reference/SWG_1d_00010101_00010130_grid_W_0000.nc":
+        "281551e692029722fffafac980342088dcca157cbb7d416811dbb0ac9e57f312",
 }
 SHIPPED_SHA256 = {
     "manifest.sha256":
@@ -197,7 +289,8 @@ STAGE_F_FIELDS = frozenset(("r3f",))
 def _stage_checker():
     path = HERE / "nemo_testcase_l1_swg/check_records.py"
     spec = importlib.util.spec_from_file_location("swg_check_records", path)
-    mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
     return mod
 
 
@@ -212,6 +305,7 @@ def _require_sha256(path: Path, expected: str) -> None:
 
 def _pinned_stage_hashes(root: Path) -> dict[str, str]:
     """Load the immutable admission that owns one known stage-record root."""
+    output_hashes = None
     if root.resolve() == DEFAULT_STAGE_ROOT.resolve():
         path = root.parent / "swg_round1_admission.json"
         expected = TEN_STEP_ADMISSION_SHA256
@@ -224,10 +318,25 @@ def _pinned_stage_hashes(root: Path) -> dict[str, str]:
     elif root.resolve() == (DG_MONTH_ROOT / "instrumented").resolve():
         path = root.parent / "swg_dg_round1_30d_admission.json"
         expected = DG_MONTH_ADMISSION_SHA256
+    elif root.resolve() == DG50_STAGE_ROOT.resolve():
+        path = root.parent / "swg_dg50_round1_stage_admission.json"
+        expected = DG50_STAGE_ADMISSION_SHA256
+        output_hashes = DG50_STAGE_OUTPUT_SHA256
+    elif root.resolve() == (DG50_MONTH_ROOT / "instrumented").resolve():
+        path = root.parent / "swg_dg_round1_30d_admission.json"
+        expected = DG50_MONTH_ADMISSION_SHA256
     else:
         raise RuntimeError(f"missing admission for unregistered stage-record root {root}")
     _require_sha256(path, expected)
-    return json.loads(path.read_text())["records"]
+    saved = json.loads(path.read_text())
+    if root.resolve() == DG50_STAGE_ROOT.resolve():
+        require(saved["legoesm_git_sha"] ==
+                "e49a84492831597866e41f806e726aa8c1646477",
+                "dg50 stage acquisition commit is not the admitted tip")
+    if output_hashes is not None:
+        for relative, digest in output_hashes.items():
+            _require_sha256(root.parent / relative, digest)
+    return saved["records"]
 
 
 def _restart_hashes(root: Path) -> dict[int, str]:
@@ -241,13 +350,20 @@ def _restart_hashes(root: Path) -> dict[int, str]:
         return DG_STAGE_RESTART_SHA256
     if root.resolve() == (DG_MONTH_ROOT / "instrumented").resolve():
         return DG_MONTH_RESTART_SHA256
+    if root.resolve() == DG50_STAGE_ROOT.resolve():
+        return DG50_STAGE_RESTART_SHA256
+    if root.resolve() == (DG50_MONTH_ROOT / "instrumented").resolve():
+        return DG50_MONTH_RESTART_SHA256
     raise RuntimeError(f"unregistered restart-record root {root}")
 
 
 def _deck_namelist(deck: str, *, month: bool = False):
     """Return the exact resolved deck selected for this admitted ladder."""
     from legoesm.ocean.fidelity.nemo_testcase_recipe import (
-        SWG_DG50_NAMELIST, SWG_MADDISON_NAMELIST, SWG_NAMELIST)
+        SWG_DG50_NAMELIST,
+        SWG_MADDISON_NAMELIST,
+        SWG_NAMELIST,
+    )
 
     require(deck in ("shipped", "maddison", "dg50"),
             f"unknown SWG deck {deck!r}")
@@ -532,8 +648,11 @@ def _swg_production_case(label: str, *, namelist=None):
     from legoesm.core.precision import PrecisionPolicy, set_policy
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
     from legoesm.ocean.fidelity.nemo_testcase_recipe import (
-        SWG_NAMELIST, build_swg_card, swg_surface_wind,
-        validate_nemo_testcase_card_for_execution)
+        SWG_NAMELIST,
+        build_swg_card,
+        swg_surface_wind,
+        validate_nemo_testcase_card_for_execution,
+    )
     from legoesm.ocean.state import OceanSurfaceForcing
 
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
@@ -563,14 +682,25 @@ def _month_admission(root: Path, *, deck: str = "shipped") -> Path:
         restart_kts = MONTH_RESTART_KTS
         restart_hashes = MONTH_RESTART_SHA256
         acquisition_sha = "011ba6c48c2243467097af35a66a041cdee3f565"
-    else:
-        require(deck == "maddison", f"unknown SWG deck {deck!r}")
+    elif deck == "maddison":
         admission_path = root / "swg_dg_round1_30d_admission.json"
         admission_sha = DG_MONTH_ADMISSION_SHA256
         record_kts = DG_MONTH_RECORD_KTS
         restart_kts = DG_MONTH_RESTART_KTS
         restart_hashes = DG_MONTH_RESTART_SHA256
         acquisition_sha = "129fa0f9ca173a3ff284a8265041b6ae57564d9e"
+        output_hashes = None
+    else:
+        require(deck == "dg50", f"unknown SWG deck {deck!r}")
+        admission_path = root / "swg_dg_round1_30d_admission.json"
+        admission_sha = DG50_MONTH_ADMISSION_SHA256
+        record_kts = DG50_MONTH_RECORD_KTS
+        restart_kts = DG50_MONTH_RESTART_KTS
+        restart_hashes = DG50_MONTH_RESTART_SHA256
+        acquisition_sha = "e49a84492831597866e41f806e726aa8c1646477"
+        output_hashes = DG50_MONTH_OUTPUT_SHA256
+    if deck == "shipped":
+        output_hashes = MONTH_OUTPUT_SHA256
     instrumented = root / "instrumented"
     reference = root / "reference"
     require(admission_path.is_file(), f"missing month admission {admission_path}")
@@ -585,8 +715,8 @@ def _month_admission(root: Path, *, deck: str = "shipped") -> Path:
     for side in (instrumented, reference):
         for kt, expected in restart_hashes.items():
             _require_sha256(side / f"SWG_{kt:08d}_restart.nc", expected)
-    if deck == "shipped":
-        for relative, expected in MONTH_OUTPUT_SHA256.items():
+    if output_hashes is not None:
+        for relative, expected in output_hashes.items():
             _require_sha256(root / relative, expected)
     return instrumented
 
@@ -667,8 +797,11 @@ def _shared_shipped_statistics(ssh, u_native, v_native, card):
     import jax
     import jax.numpy as jnp
     from legoesm.ocean.diagnostics import (
-        domain_kinetic_energy, eddy_kinetic_energy,
-        isotropic_energy_spectrum, velocity_to_cell_centre)
+        domain_kinetic_energy,
+        eddy_kinetic_energy,
+        isotropic_energy_spectrum,
+        velocity_to_cell_centre,
+    )
     from legoesm.ocean.diagnostics_streamfunction import barotropic_streamfunction
     from legoesm.ocean.fidelity.nemo_testcase_recipe import swg_horizontal_coordinates
 
@@ -701,7 +834,8 @@ def _shared_shipped_statistics(ssh, u_native, v_native, card):
     mean_u_h, mean_v_h = velocity_to_cell_centre(
         jnp.asarray(mean_u), jnp.asarray(mean_v))
     wet = np.argwhere(masks["T"])
-    j0, i0 = wet.min(axis=0); j1, i1 = wet.max(axis=0) + 1
+    j0, i0 = wet.min(axis=0)
+    j1, i1 = wet.max(axis=0) + 1
     require((int(j1 - j0), int(i1 - i0)) == (80, 80),
             "SWG wet spectral basin is not 80 by 80")
     spacing = np.float64(swg_horizontal_coordinates()["spacing_m"])
@@ -810,10 +944,12 @@ def month(root: Path, *, deck: str = "shipped",
     steps_per_day = int(86_400 / namelist.rn_Dt_s)
     require(steps_per_day * namelist.rn_Dt_s == 86_400,
             "month timestep does not divide one day exactly")
-    record_kts = (MONTH_RECORD_KTS if deck == "shipped"
-                  else DG_MONTH_RECORD_KTS)
-    restart_kts = (MONTH_RESTART_KTS if deck == "shipped"
-                   else DG_MONTH_RESTART_KTS)
+    record_kts = (MONTH_RECORD_KTS if deck == "shipped" else
+                  DG_MONTH_RECORD_KTS if deck == "maddison" else
+                  DG50_MONTH_RECORD_KTS)
+    restart_kts = (MONTH_RESTART_KTS if deck == "shipped" else
+                   DG_MONTH_RESTART_KTS if deck == "maddison" else
+                   DG50_MONTH_RESTART_KTS)
     instrumented = _month_admission(root, deck=deck)
     entries = read_stage_entries(
         instrumented, record_kts=record_kts, stages=(1,))
@@ -854,7 +990,9 @@ def month(root: Path, *, deck: str = "shipped",
         "oracle_acquisition_git_sha": (
             "011ba6c48c2243467097af35a66a041cdee3f565"
             if deck == "shipped"
-            else "129fa0f9ca173a3ff284a8265041b6ae57564d9e"),
+            else ("129fa0f9ca173a3ff284a8265041b6ae57564d9e"
+                  if deck == "maddison"
+                  else "e49a84492831597866e41f806e726aa8c1646477")),
         "deck": deck,
         "bar": BAR,
         "record_counts": {"stage_entries": len(entries),
@@ -873,8 +1011,9 @@ def month_control(root: Path, *, deck: str = "shipped",
     sha = git_sha(allow_dirty=allow_dirty)
     namelist = _deck_namelist(deck, month=True)
     steps_per_day = int(86_400 / namelist.rn_Dt_s)
-    restart_kts = (MONTH_RESTART_KTS if deck == "shipped"
-                   else DG_MONTH_RESTART_KTS)
+    restart_kts = (MONTH_RESTART_KTS if deck == "shipped" else
+                   DG_MONTH_RESTART_KTS if deck == "maddison" else
+                   DG50_MONTH_RESTART_KTS)
     instrumented = _month_admission(root, deck=deck)
     restarts = read_restarts(
         instrumented, kts=restart_kts, namelist=namelist)
@@ -935,7 +1074,9 @@ def month_control(root: Path, *, deck: str = "shipped",
         "oracle_acquisition_git_sha": (
             "011ba6c48c2243467097af35a66a041cdee3f565"
             if deck == "shipped"
-            else "129fa0f9ca173a3ff284a8265041b6ae57564d9e"),
+            else ("129fa0f9ca173a3ff284a8265041b6ae57564d9e"
+                  if deck == "maddison"
+                  else "e49a84492831597866e41f806e726aa8c1646477")),
         "deck": deck,
         "bar": BAR,
         "plant": "ulp",
@@ -1056,6 +1197,7 @@ def shipped(root: Path, *, statistics_npz: Path | None = None,
     """Run and score all 172800 shipped production steps from rest."""
     import resource
     import time
+
     from legoesm.ocean.fidelity.provenance import allow_dirty_stamps, git_sha
 
     allow_dirty_stamps(allow_dirty)
@@ -1356,11 +1498,10 @@ def swe_rk3_stages(stage_root: Path, *, mode: str = "given",
     """Drive the JIT production stages on non-degenerate given/chained rows."""
     import jax
     from legoesm.core.precision import PrecisionPolicy, set_policy
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
+    from legoesm.ocean.dynamics.swe_rk3 import SWERK3StageEntry
     from legoesm.ocean.fidelity.nemo_testcase_recipe import build_swg_card
     from legoesm.ocean.fidelity.provenance import allow_dirty_stamps, git_sha
-    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
-        LatLonCGridOceanModel)
-    from legoesm.ocean.dynamics.swe_rk3 import SWERK3StageEntry
 
     allow_dirty_stamps(allow_dirty)
     sha = git_sha(allow_dirty=allow_dirty)
@@ -1509,6 +1650,11 @@ def main(argv=None) -> int:
             a.stage_root = DG_STAGE_ROOT
         if a.month_root == DEFAULT_MONTH_ROOT:
             a.month_root = DG_MONTH_ROOT
+    elif a.deck == "dg50":
+        if a.stage_root == DEFAULT_STAGE_ROOT:
+            a.stage_root = DG50_STAGE_ROOT
+        if a.month_root == DEFAULT_MONTH_ROOT:
+            a.month_root = DG50_MONTH_ROOT
     try:
         if a.arm == "self-check":
             out = self_check(a.root, plant=a.plant is not None,
