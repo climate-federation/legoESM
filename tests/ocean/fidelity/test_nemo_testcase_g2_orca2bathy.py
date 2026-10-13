@@ -81,7 +81,8 @@ def test_round2_acquisition_is_one_run_of_the_pinned_binary_with_no_build():
         assert f"{pin}={value}" in round1
     assert "nn_stocklist = ).*/\\11,2,3,4,5,6,7,8,9,10/" in text
     assert "restarts_identical(b, c, [2, 4, 6, 8, 10])" in text
-    assert "PLANT=twin-ulp admit" in code                  # the plant must refuse
+    assert code.count("for plant in twin-ulp restart; do") == 2   # both plants must refuse
+    assert "is not the recorded after-step state" in text  # odd restarts are judged
 
 
 def _strait_free_copy(tmp_path: Path) -> Path:

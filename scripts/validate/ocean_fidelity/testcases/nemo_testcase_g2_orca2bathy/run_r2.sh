@@ -79,9 +79,30 @@ try:
     result = cr.check(c, a, 10, 10, "twin-ulp" if plant == "twin-ulp" else "none")
     result["substeps"] = cr.check_substeps(c, a, [1, 2])
     result["restarts_equal_twin_b"] = cr.restarts_identical(b, c, [2, 4, 6, 8, 10])
+    # EVERY restart, odd steps included, is the after-step state of the step
+    # stream just verified against twin a: sea level, both barotropic
+    # velocities and level 1 of u, v bit for bit.  Levels 2..30 of the odd
+    # restarts are new evidence that nothing else holds; the even ones equal
+    # twin b's above.
+    import netCDF4
+    import numpy as np
     for step in range(1, 11):
-        cr.require((c / f"ORCA2G1_{step:08d}_restart.nc").is_file(),
-                   f"twin c has no restart at step {step}")
+        path = c / f"ORCA2G1_{step:08d}_restart.nc"
+        cr.require(path.is_file(), f"twin c has no restart at step {step}")
+        head, frame = cr.read_stream(cr.step_path(c, step).read_bytes(), path.name)
+        js, je, i_s, ie = head["Njs0"] - 1, head["Nje0"], head["Nis0"] - 1, head["Nie0"]
+        with netCDF4.Dataset(path) as h:
+            for var, name, lev in (("sshn", "f_ssh_bb", None), ("uu_n", "f_uu_b_bb", None),
+                                   ("vv_n", "f_vv_b_bb", None), ("un", "f_uu_k1_bb", 0),
+                                   ("vn", "f_vv_k1_bb", 0)):
+                got = np.asarray(h.variables[var][0], dtype=np.float64)
+                got = got if lev is None else got[lev]
+                if plant == "restart" and step == 1 and var == "un":
+                    got = got.copy()
+                    got.flat[got.size // 2] += 1.0
+                cr.require(np.array_equal(got, frame[name][js:je, i_s:ie]),
+                           f"{path.name}: {var} is not the recorded after-step state")
+    result["restarts_equal_step_streams"] = list(range(1, 11))
 except cr.Refuse as exc:
     sys.exit(f"REFUSE: {exc}")
 if plant != "none":
@@ -93,7 +114,9 @@ PY
 
 if [[ "$mode" == --admit-existing ]]; then
   [[ -d "$TWIN_C" ]] || { printf 'REFUSE: nothing to admit, %s is absent\n' "$TWIN_C" >&2; exit 69; }
-  if PLANT=twin-ulp admit >/dev/null 2>&1; then printf 'REFUSE: the twin plant stayed green\n' >&2; exit 72; fi
+  for plant in twin-ulp restart; do
+  if PLANT=$plant admit >/dev/null 2>&1; then printf 'REFUSE: the %s plant stayed green\n' "$plant" >&2; exit 72; fi
+done
   admit; printf 'ACQUISITION_DONE %s\n' "$EVIDENCE"; exit 0
 fi
 [[ ! -e "$EVIDENCE" ]] || { printf 'REFUSE: %s exists; use --admit-existing\n' "$EVIDENCE" >&2; exit 69; }
@@ -112,6 +135,8 @@ git -C "$repo_root" rev-parse HEAD >"$EVIDENCE/legoesm_commit"
   mpirun -np 1 --oversubscribe ./nemo >>run.user.log 2>&1
   printf 'RUN_FINISHED_UTC=%s\nRUN_DONE\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>run.user.log
 )
-if PLANT=twin-ulp admit >/dev/null 2>&1; then printf 'REFUSE: the twin plant stayed green\n' >&2; exit 72; fi
+for plant in twin-ulp restart; do
+  if PLANT=$plant admit >/dev/null 2>&1; then printf 'REFUSE: the %s plant stayed green\n' "$plant" >&2; exit 72; fi
+done
 admit
 printf 'ACQUISITION_DONE %s\n' "$EVIDENCE"

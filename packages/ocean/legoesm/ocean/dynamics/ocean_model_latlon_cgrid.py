@@ -13023,6 +13023,12 @@ class LatLonCGridOceanModel:
                 _v_bt_mean = _vv_b_zdf.data[..., jnp.newaxis].astype(
                     v_solve_in.dtype)
             elif _uu_b_zdf is None and _vv_b_zdf is None:
+                if _zdf_nemo_faces:
+                    # the faces below are the solve's divisors, not the
+                    # control volumes this fallback's mean would need
+                    raise ValueError(
+                        "zdf_momentum_nemo_face_thickness needs the carried "
+                        "barotropic pair uu_b/vv_b")
                 _u_bt_mean = depth_mean(
                     u_solve_in, dz_u, _cfg_b.min_water_column_m,
                     keepdims=True)

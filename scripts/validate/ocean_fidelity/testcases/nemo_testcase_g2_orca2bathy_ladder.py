@@ -142,8 +142,9 @@ def class_summary(rows: list[dict]) -> dict:
     out["levels_full_worse"] = sum(
         r["full"]["relative"] > r["partial"]["relative"] for r in rows
         if r["partial"]["n_cells"] and r["full"]["n_cells"])
-    out["status"] = "AT-BAR" if max(out["full"]["relative"],
-                                    out["partial"]["relative"]) <= BAR else "DEBT"
+    out["status"] = "AT-BAR" if (max(out["full"]["relative"],
+                                     out["partial"]["relative"]) <= BAR
+                                 and not out["dry_n_unequal"]) else "DEBT"
     return out
 
 

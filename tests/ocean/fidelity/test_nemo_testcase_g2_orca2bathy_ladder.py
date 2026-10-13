@@ -53,6 +53,11 @@ def test_level_rows_split_wet_cells_by_depth_class(ladder):
     assert summary["status"] == "DEBT" and summary["dry_n_unequal"] == 1
     assert summary["partial"]["worst_level"] == 3 and summary["full"]["n_cells"] == 12
     assert ladder.class_summary(ladder.level_rows(ref, ref, cls))["status"] == "AT-BAR"
+    # a dry cell alone is DEBT too: NEMO holds zero there and so must the card
+    dry = ref.copy()
+    dry[1, 1, 3] += 9.0
+    only_dry = ladder.class_summary(ladder.level_rows(ref, dry, cls))
+    assert only_dry["status"] == "DEBT" and only_dry["full"]["n_unequal"] == 0
     # the plant moves one partial cell and must turn the summary red
     planted = ladder.class_summary(ladder.level_rows(ref, ref, cls, plant=True))
     assert planted["status"] == "DEBT" and planted["partial"]["n_unequal"] == 1
@@ -119,6 +124,16 @@ def test_the_option_is_off_by_default_and_selected_by_g2_only():
         "zdf_momentum_nemo_face_thickness"] is False
     assert recipe._ORCA2G_ZDF_FACES == {"ORCA2G1-flat": False, "ORCA2G2-zps": True}
     assert recipe.ORCA2G2_UNMEASURED == ("multi_level_partial_cell_step",)
+    # no other builder assigns it: one assignment in the whole package, the
+    # shared G1/G2 builder's, keyed by the rung table (the resolved pair of
+    # cards is asserted in test_nemo_testcase_g2_orca2bathy.py)
+    hits = [(path.name, n) for path in (CASES.parents[3] / "packages").rglob("*.py")
+            for n, line in enumerate(path.read_text().splitlines(), 1)
+            if "zdf_momentum_nemo_face_thickness=" in line]
+    assert [name for name, _ in hits] == ["nemo_testcase_recipe.py"]
+    assert "_ORCA2G_ZDF_FACES[case]" in (
+        CASES.parents[3] / "packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py"
+    ).read_text().splitlines()[hits[0][1] - 1]
 
 
 @needs_record
@@ -145,15 +160,30 @@ def test_depth_classes_come_from_nemos_mesh(ladder):
 
 @needs_record
 @pytest.mark.slow
-def test_step_one_velocity_is_at_the_bar_only_with_nemos_dyn_zdf_divisors(ladder, tmp_path):
-    """The round-2 landing and its before arm (non-vacuity): one step from the
-    card's initial state against NEMO's level-1 record."""
-    after = ladder.run(RECORD, arm="independent", kt_from=1, kt_to=1, allow_dirty=True)
+def test_two_steps_are_near_the_bar_only_with_nemos_dyn_zdf_divisors(ladder):
+    """The round-2 landing and its before arm (non-vacuity).  Step 1 against
+    NEMO's level-1 record; step 2 against NEMO's restart on ALL levels, split
+    by depth class, so the partial-cell faces at depth are scored too."""
+    twin_b = RECORD.parent / "p3_b_10step"
+    after = ladder.run(RECORD, arm="independent", kt_from=1, kt_to=2,
+                       restart_roots=(twin_b,), allow_dirty=True)
     rows = {r["name"].rsplit(".", 1)[1]: r for r in after["per_kt"][0]["rows"]}
     assert all(r["status"] == "AT-BAR" for r in rows.values())
     assert rows["u"]["max_abs"] < 1e-17 and rows["v"]["max_abs"] < 1e-17
-    before = ladder.run(RECORD, arm="independent", kt_from=1, kt_to=1,
-                        allow_dirty=True, without_zdf_faces=True)
+    deep = after["per_kt"][1]["all_levels"]
+    assert deep["u"]["summary"]["partial"]["n_cells"] > 10000
+    for f in ("u", "v"):
+        assert deep[f]["summary"]["partial"]["max_abs"] < 1e-12
+        assert deep[f]["summary"]["full"]["max_abs"] < 1e-12
+        assert deep[f]["summary"]["dry_n_unequal"] == 0
+    before = ladder.run(RECORD, arm="independent", kt_from=1, kt_to=2,
+                        restart_roots=(twin_b,), allow_dirty=True,
+                        without_zdf_faces=True)
     rows = {r["name"].rsplit(".", 1)[1]: r for r in before["per_kt"][0]["rows"]}
     assert rows["u"]["status"] == "DEBT" and rows["u"]["max_abs"] > 1e-10
     assert rows["v"]["status"] == "DEBT" and rows["ssh"]["status"] == "AT-BAR"
+    deep = before["per_kt"][1]["all_levels"]
+    for f in ("u", "v"):        # the partial-cell faces carry the largest error
+        assert deep[f]["summary"]["partial"]["max_abs"] > 1e-7
+        assert (deep[f]["summary"]["partial"]["max_abs"]
+                > 10 * deep[f]["summary"]["full"]["max_abs"])
