@@ -49,6 +49,14 @@ def test_resolved_dg50_clock_and_unknown_dispatch():
     assert namelist.nn_itend == 20 * 216
     assert namelist.nn_write == namelist.nn_stock == 216
     assert namelist.rn_Lv_m == 10.0
+    control = driver.resolved_daily_namelist(30, deck="dg50-nu80")
+    assert control.nn_SWG == 2 and control.rn_Dt_s == 400.0
+    assert control.rn_Lv_m == 80.0
+    sensitivity = driver.resolved_daily_namelist(3, deck="dg3125")
+    assert sensitivity.nn_SWG == 32 and sensitivity.rn_Dt_s == 25.0
+    assert sensitivity.nn_itend == 3 * 3_456
+    assert (sensitivity.rn_Dt_s / (sensitivity.rn_dx_m / sensitivity.nn_SWG)
+            == namelist.rn_Dt_s / (namelist.rn_dx_m / namelist.nn_SWG))
     with pytest.raises(ValueError, match="unsupported double-gyre deck"):
         driver.resolved_daily_namelist(1, deck="typo")
 

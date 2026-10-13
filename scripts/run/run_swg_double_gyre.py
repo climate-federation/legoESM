@@ -39,10 +39,19 @@ def resolved_daily_namelist(days: int, *, deck: str = "maddison"):
         SWG_DG50_NAMELIST,
         SWG_MADDISON_NAMELIST,
     )
+    from legoesm.ocean.fidelity.swg_online_decks import (
+        SWG_DG50_NU80_NAMELIST,
+        SWG_DG3125_NAMELIST,
+    )
 
     if type(days) is not int or days <= 0:
         raise ValueError("days must be a positive integer")
-    decks = {"maddison": SWG_MADDISON_NAMELIST, "dg50": SWG_DG50_NAMELIST}
+    decks = {
+        "maddison": SWG_MADDISON_NAMELIST,
+        "dg50": SWG_DG50_NAMELIST,
+        "dg50-nu80": SWG_DG50_NU80_NAMELIST,
+        "dg3125": SWG_DG3125_NAMELIST,
+    }
     if deck not in decks:
         raise ValueError(f"unsupported double-gyre deck {deck!r}")
     selected = decks[deck]
@@ -833,7 +842,8 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--days", type=int, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--deck", choices=("maddison", "dg50"),
+    parser.add_argument(
+        "--deck", choices=("maddison", "dg50", "dg50-nu80", "dg3125"),
                         default="maddison")
     parser.add_argument("--restart", type=Path)
     parser.add_argument("--perturb", type=float,
