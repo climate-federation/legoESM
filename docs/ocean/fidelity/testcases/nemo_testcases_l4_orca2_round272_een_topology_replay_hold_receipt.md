@@ -20,14 +20,14 @@ landed-tree baseline (`1.2863307536456779e-8 m/s2`). P1 is **REFUTED**, not
 silently edited; the post-measurement disposition is appended below the
 frozen text. The argmax remains `[19,33,3]` under both labels.
 
-The compiled build executes `np_CRV`: reciprocal live F thickness at
-`ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynvor.f90:737-739`, combined
-planetary and relative circulation at `dynvor.f90:762-770`, transports at
-`dynvor.f90:782-786`, and triads plus accumulator at `dynvor.f90:788-803`.
+The compiled build executes `np_CRV`: combined planetary and relative
+circulation at
+`ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynvor.f90:762-770`, transports at
+`dynvor.f90:784-785`, and triads plus accumulator at `dynvor.f90:790-802`.
 The deck resolves `ln_dynvor_msk=.false.`; consequently the `fmask` product
-at `dynvor.f90:768-771` is dead on this card. Although `rn_shlat=2` modifies
-the stored mask at `dommsk.f90:267-277`, that inactive multiplication cannot
-own the executing residual.
+inside the first cited branch is dead on this card. Although `rn_shlat=2`
+modifies the stored mask, that inactive multiplication cannot own the
+executing residual.
 
 ## 2. Passive measurement
 
