@@ -13,7 +13,6 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
-
 from legoesm.grids.operators_latlon_cgrid import compute_vertex_mask
 from legoesm.ml.training import TrainingConfig, create_optimizer
 from legoesm.ocean.diagnostics import relative_vorticity_cell_centre
@@ -262,7 +261,8 @@ def balanced_trajectory_loss(predicted: BalancedTrajectory,
             (left - right) ** 2 * weight[None, :, :, None], axis=(-3, -2, -1))))
 
     if kind == "point":
-        return member_distance(pred[0], obs)
+        squared = (pred[0] - obs) ** 2 * weight[None, :, :, None]
+        return jnp.mean(jnp.sum(squared, axis=(-3, -2)))
     if kind != "energy_score":
         raise ValueError(f"unknown SWG balanced loss {kind!r}")
     members = pred.shape[0]

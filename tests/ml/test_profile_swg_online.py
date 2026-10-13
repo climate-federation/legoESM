@@ -4,7 +4,6 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
-
 SCRIPT = Path(__file__).parents[2] / "scripts" / "bench" / "profile_swg_online.py"
 SPEC = importlib.util.spec_from_file_location("profile_swg_online", SCRIPT)
 profile = importlib.util.module_from_spec(SPEC)

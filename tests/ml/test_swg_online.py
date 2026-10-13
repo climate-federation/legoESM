@@ -6,7 +6,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-
 from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
 from legoesm.ocean.dynamics.swe_rk3 import _entry_from_state, swe_rk3_step
 from legoesm.ocean.fidelity.nemo_testcase_recipe import (
@@ -201,3 +200,19 @@ def test_segment_builder_rejects_unregistered_windows_and_has_live_gradients(
 
     grads = eqx.filter_grad(objective)(network)
     assert_network_gradients_live(grads)
+
+
+def test_zero_closure_four_and_eight_day_compositions_match(online_case):
+    card, geometry, _, _, _ = online_case
+    _, four_day = build_segment_fn(card, geometry, window_days=4)
+    _, eight_day = build_segment_fn(card, geometry, window_days=8)
+    steps_per_day = 24 * int(3_600 / card.dt_s)
+    noise4 = jnp.zeros((4 * steps_per_day, 3) + geometry.tmask.shape)
+    noise8 = jnp.zeros((8 * steps_per_day, 3) + geometry.tmask.shape)
+    key = jax.random.PRNGKey(922)
+    _, hourly4 = four_day(
+        None, card.recipe.initial_state, noise4, key, jnp.asarray(0.0))
+    _, hourly8 = eight_day(
+        None, card.recipe.initial_state, noise8, key, jnp.asarray(0.0))
+    for short, long in zip(hourly4, hourly8, strict=True):
+        assert np.array_equal(np.asarray(short), np.asarray(long[:96]))

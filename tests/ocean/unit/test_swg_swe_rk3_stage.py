@@ -5,7 +5,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-
 from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
 from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
 from legoesm.ocean.dynamics.swe_rk3 import (
@@ -14,7 +13,10 @@ from legoesm.ocean.dynamics.swe_rk3 import (
 )
 from legoesm.ocean.eos import nemo_qco_r3t_ratio
 from legoesm.ocean.fidelity.nemo_testcase_recipe import (
-    SWG_NAMELIST, build_swg_card, swg_horizontal_coordinates)
+    SWG_NAMELIST,
+    build_swg_card,
+    swg_horizontal_coordinates,
+)
 from legoesm.ocean.state import OceanSurfaceForcing
 
 

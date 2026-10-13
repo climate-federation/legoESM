@@ -6,7 +6,6 @@ from pathlib import Path
 
 import pytest
 
-
 SCRIPT = (Path(__file__).parents[3] / "scripts" / "validate" / "ocean_fidelity"
           / "testcases" / "nemo_testcase_l1_swg_online_evaluation.py")
 SPEC = importlib.util.spec_from_file_location("swg_online_evaluation", SCRIPT)

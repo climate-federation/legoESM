@@ -8,7 +8,6 @@ import json
 from pathlib import Path
 
 import numpy as np
-
 from legoesm.ocean.fidelity.nemo_testcase_recipe import (
     SWG_DG50_NAMELIST,
     build_swg_card,

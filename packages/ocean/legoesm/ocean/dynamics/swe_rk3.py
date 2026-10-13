@@ -9,14 +9,13 @@ from __future__ import annotations
 from typing import NamedTuple
 
 import jax.numpy as jnp
-
 from legoesm.core.source_rounding import nemo_source_round
 from legoesm.grids.latlon import ensure_geometry
 from legoesm.grids.operators_latlon_cgrid import compute_vertex_mask
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     compute_face_masks_3d,
-    nemo_lateral_viscosity_constant_coefficients,
     nemo_lateral_viscosity_coefficients,
+    nemo_lateral_viscosity_constant_coefficients,
     nemo_ldf_lap_viscosity_e3_cgrid,
     nemo_vor_ene_vorticity_cgrid,
     pv_flux_ens,

@@ -11,7 +11,6 @@ from pathlib import Path
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-
 from legoesm.core.precision import PrecisionPolicy, set_policy
 from legoesm.ml.training import TrainingConfig
 from legoesm.ocean.fidelity.nemo_testcase_recipe import (
@@ -91,7 +90,9 @@ def run_profile(window_days: int, mode: str) -> dict:
 
     if mode == "forward":
         measured = eqx.filter_jit(objective)
-        result_getter = lambda result: result
+
+        def result_getter(result):
+            return result
     elif mode == "reverse":
         measured = eqx.filter_jit(eqx.filter_value_and_grad(objective))
 
