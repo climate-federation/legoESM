@@ -1,0 +1,69 @@
+{
+  "schema": "swg-online-round4-preregister-v1",
+  "registered_utc_date": "2026-10-13",
+  "purpose": "Freeze Round 4 admissions, splits, and held-out gates before recomputing any verdict.",
+  "balanced_start": {
+    "admitted_state": "conservative exact face-transport restriction at t0",
+    "per_start_required": true,
+    "all_ten_starts_must_pass": true,
+    "no_jump": "zeta_error_hour_1 <= 2 * zeta_error_hour_24 / 24",
+    "fast_energy": "max(divergent_KE_hours_1_to_6) <= 2 * mean(divergent_KE_hours_25_to_48)",
+    "truth_fast_energy": "report max hours 1-6 and mean hours 25-48 from the matching coarse-grained truth",
+    "ssh_tendency": "report hours 1, 6, 24, and 48; no admission threshold"
+  },
+  "training_data": {
+    "hourly_targets_root": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgonl_rounds/round2/hourly_targets",
+    "conservative_t0_root": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgonl_rounds/round2/conservative_truth_dg50_1095d/snapshots",
+    "conservative_t0_manifest_sha256": "aaec7f829d7530a275c07a263cd96185a4fa6245be411c63626156e35fa65d2c",
+    "split": {
+      "train": [731, 771, 811, 851, 891, 931],
+      "validation": [971, 1011],
+      "test": [1051, 1091]
+    },
+    "hourly_target_manifest_sha256": {
+      "731": "f5526f50c9061abe498f0088b45b8d64f1895d46c2c1958e50b032acef721f99",
+      "771": "554fb3324658ffbf6c06551729b84f28792d7675bd257ccb18439e18def9a167",
+      "811": "9b9af20b20a32a08eed6dfb169a39e0bd69792f60e6b220ff5b030bdaf0e080b",
+      "851": "b04723c8f318f8ef90025c6a3a39ff0a8601b2c8b7a3ab0ffdfd983ffa6cd82c",
+      "891": "29ca2fa375beeb8a95a8709d6e3c34c4b0da110a0e6a99fa52cf624ed090e85b",
+      "931": "7b677f52a3b6d8620456c01e99120468f9f6c38375eff7780ad78b566d04d41e",
+      "971": "bca3a3b6efa01ba6f2a9628bce681ae1fcc37924c47ccd142abed3e16b745baf",
+      "1011": "e5949943638394936609f8b43093644ddac2269a1663c55ad50d1068044b480f",
+      "1051": "e129727621357581338c6ca027196018108f1dcfa46e286d42231ace76701d0a",
+      "1091": "580c57860d0392e31ae9d3445e3533c8cce7734e4091f7072029140d835fccca"
+    },
+    "normalizers": "computed from train split only",
+    "lineage": "t0 is conservative snapshot day N; targets are right endpoints hours 1..96 of start_day N"
+  },
+  "deterministic_loss": {
+    "primary": "Maddison 2026 Eq. 7: 1e4/(beta^2 L^2)/(4 L^2)/M times sum over hourly squared Gaussian-filtered relative-vorticity error weighted by dx^2; boundary weight zero",
+    "gaussian_sigma_cells": 1.0,
+    "rotational_velocity_terms": "optional and disabled for experiment one"
+  },
+  "energy_score": "Brolly 2026 Eqs. 9-10: per-lead Euclidean energy score, pair denominator 2*S*(S-1), uniform lead average, S>=2",
+  "network_initialization": {
+    "seed": 20261013,
+    "maximum_closure_acceleration_over_wind_acceleration": 0.01,
+    "states": [731, 771, 811, 851, 891, 931, 971, 1011, 1051, 1091]
+  },
+  "reference_adequacy": {
+    "early_days": 8,
+    "fields": ["ssh", "relative_vorticity", "rotational_velocity"],
+    "early_pass": "every field on every day 1..8 has normalized RMS <=0.10 and pattern correlation >=0.99",
+    "crossings_reported": [0.01, 0.10],
+    "year1_statistics": ["kinetic_energy", "eddy_kinetic_energy", "jet_position", "dst_streamfunction_ke_spectrum"],
+    "annual_pass": "each year-1 relative difference <= max(0.10, 6.25-km year-to-year fractional variability)",
+    "fail_closed": true
+  },
+  "evaluation": {
+    "controls": {
+      "nu10_manifest_sha256": "cdbdf5607a4185275ba794d63be152eb643a03579350e0bf8c2758dcb924cd6a",
+      "nu80_manifest_sha256": "cbee1f9f2268cec353c99bd3922b86a08a645f57cea81f9950791cbe35895f26"
+    },
+    "spectra": "DST-I streamfunction KE spectrum and direct vorticity enstrophy spectrum",
+    "grid_noise": "RMS two-dimensional second difference divided by field RMS",
+    "plants_that_must_fail": ["collapsed variance", "phase-reversed checkerboard", "noise removal without EKE recovery", "EKE recovery without noise removal"],
+    "physical_health": ["finite", "positive total thickness", "Courant number < 1"]
+  },
+  "stochastic_readiness": "interface only; no stochastic rollout or stochastic claim in Round 4"
+}
