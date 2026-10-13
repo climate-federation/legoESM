@@ -25,8 +25,11 @@ from scripts.validate.ocean_fidelity.orca2_l4 import (
     nemo_testcase_l4_orca2_round215_decision96_gate as decision96,
 )
 
-MODULES = {"omt1": omt1, "omt2": omt2, "omt3": omt3, "omt4": omt4}
+MODULES = {
+    "rung0": rung0, "omt1": omt1, "omt2": omt2, "omt3": omt3, "omt4": omt4,
+}
 STATUSES = {
+    "rung0": "PASS_RUNG0_TEN_STEP_LADDER",
     "omt1": "PASS_R211_OMT1_CARD_AND_LADDERS",
     "omt2": "PASS_R219_OMT2_CARD_AND_LADDERS",
     "omt3": "PASS_R221_OMT3_CARD_AND_LADDERS",
@@ -52,7 +55,10 @@ def _selected_card(rung: str, deck_root: Path):
     module = MODULES[rung]
     card = getattr(module, f"build_{rung}_card")(deck_root)
     validator = getattr(module, f"validate_{rung}_card")
-    validator(card) if rung == "omt1" else validator(deck_root, card)
+    if rung in ("rung0", "omt1"):
+        validator(card)
+    else:
+        validator(deck_root, card)
     return card
 
 
@@ -92,7 +98,8 @@ def measure(rung: str, deck_root: Path, twin_a: Path, label: str,
     require(label in LABELS, f"unknown label {label}")
     report = json.loads(candidate_report.read_text(encoding="utf-8"))
     require(report.get("status") == STATUSES[rung], "candidate ladder is not admitted")
-    require(label in report, "candidate ladder label is absent")
+    candidate_ladder = report if rung == "rung0" else report.get(label)
+    require(candidate_ladder is not None, "candidate ladder label is absent")
     stamp = worktree_stamp()
     require(stamp["clean"] and stamp["commit"].lower() == expect_commit.lower(),
             "round-269 measurement requires its clean committed tree")
@@ -105,9 +112,12 @@ def measure(rung: str, deck_root: Path, twin_a: Path, label: str,
     selected = _selected_card(rung, deck_root)
     card = _legacy_card(selected, plant=plant)
     entry = rung0.assemble_frame(twin_a, 1, 0)
-    state = (card.recipe.initial_state if label == "independent"
-             else rung0.bridge_entry(card, entry))
-    row_count = int(report[label]["row_count"])
+    state = (
+        rung0.bridge_entry(card, entry)
+        if rung == "rung0" or label == "given_nemo_entry"
+        else card.recipe.initial_state
+    )
+    row_count = int(candidate_ladder["row_count"])
     require(row_count % 20 == 0, "candidate row count is not a complete ladder")
     steps = tuple(range(1, row_count // 20 + 1))
     ladder = omt1._run_ladder(card, twin_a, state, label, steps=steps)
@@ -148,7 +158,8 @@ def classify(baseline_path: Path, candidate_path: Path, *, plant: str) -> dict:
     label = baseline_doc["label"]
     require(candidate.get("status") == STATUSES[baseline_doc["rung"]],
             "candidate status moved")
-    require(label in candidate, "candidate label moved")
+    require(baseline_doc["rung"] == "rung0" or label in candidate,
+            "candidate label moved")
     baseline = {label: copy.deepcopy(baseline_doc["baseline"])}
     if plant == "exact-loss":
         base_rows, _ = decision96._rows(baseline)
@@ -166,7 +177,8 @@ def classify(baseline_path: Path, candidate_path: Path, *, plant: str) -> dict:
         counts[metric] = {name: int(census[name]) for name in ("toward", "away", "equal")}
     votes = counts["rms"]["toward"] + counts["rms"]["away"]
     majority = counts["rms"]["toward"] * 2 > votes
-    first_key = candidate[label]["first_non_bit_checkpoint"]
+    candidate_ladder = candidate if baseline_doc["rung"] == "rung0" else candidate[label]
+    first_key = candidate_ladder["first_non_bit_checkpoint"]
     require(first_key is not None, "candidate has no first non-bit checkpoint")
     first_target = (first_key["kt"], first_key["checkpoint"], first_key["field"])
     first_before = _row(baseline, first_target)
