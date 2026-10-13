@@ -411,6 +411,7 @@ def test_driver_column_lane_refusals(tmp_path):
             drv.setup()
 
 
+@pytest.mark.usefixtures("allow_version_drift")  # hand-built checkpoints, no manifest beside them
 def test_checkpoint_carries_the_face_winds_and_refuses_a_file_without_them(tmp_path):
     """The column view's cell winds cannot rebuild the C-grid faces: the
     checkpoint carries them, a fresh driver restores the native state
