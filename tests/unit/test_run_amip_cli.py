@@ -2455,6 +2455,10 @@ def test_sundqvist_l36_deck_still_round_trips():
     # what makes this deck the neither-lever baseline.
     assert cfg.dycore.mpas_div_damp4_scale == 0.0
     assert cfg.convection == "bechtold"
+    # F22: the default turned CMT ON everywhere; this deck pins the OFF its
+    # results were produced with (resolved, not just the deck key).
+    from legoesm.driver.physics_pipeline import convection_config_for
+    assert convection_config_for(cfg).bechtold.enable_cmt is False
     assert cfg.cloud_scheme == "sundqvist"
     assert cfg.gravity_wave_drag == "mcfarlane+e3sm_cam"
     assert cfg.surface_bulk_scheme == "coare3"
@@ -4579,12 +4583,11 @@ def test_bechtold_M_b_max_threads_and_validates():
         ExperimentConfig(bechtold_M_b_max=0.5).validate_strict()
 
 
-def test_bechtold_enable_cmt_round_trips_and_default_preserves_each_lane():
+def test_bechtold_enable_cmt_round_trips_and_default_is_one_value_on_every_lane():
     """--bechtold-enable-cmt reaches the BechtoldConfig leaf on both resolvers.
-    The None default keeps every lane where it was before the MPAS wiring:
-    OFF on MPAS (the bridge handed the scheme zero winds), ON elsewhere
-    (BechtoldConfig.enable_cmt); codex review of 2bfdf5413 caught the first
-    version silently switching the spectral lane's CMT off."""
+    The None default is the scheme's own (ON) on EVERY lane (review 2026-10-10
+    F22: it used to resolve OFF on MPAS only, so one deck ran different
+    physics per grid)."""
     from legoesm.driver.physics_pipeline import _resolve_convection, convection_config_for
 
     parser = build_arg_parser()
@@ -4599,8 +4602,9 @@ def test_bechtold_enable_cmt_round_trips_and_default_preserves_each_lane():
     dflt = build_config_from_args(_postprocess_args(parser.parse_args([
         "--dataset", "analytical", "--convection", "bechtold"]), parser))
     assert dflt.bechtold_enable_cmt is None
-    assert convection_config_for(dflt._replace(grid=dflt.grid._replace(grid_type="mpas"))).bechtold.enable_cmt is False
-    assert convection_config_for(dflt._replace(grid=dflt.grid._replace(grid_type="gaussian"))).bechtold.enable_cmt is True
+    for gt in ("mpas", "gaussian", "cubed_sphere"):
+        assert convection_config_for(dflt._replace(
+            grid=dflt.grid._replace(grid_type=gt))).bechtold.enable_cmt is True
 
 
 def test_persistent_dgrid_flag_flows_to_config_1028():
@@ -4823,7 +4827,8 @@ def test_fv3_duo_kessler_reaches_the_config_and_the_wall():
     assert cfg.microphysics == "kessler"
     cfg.validate_strict()
     _refuse_fv3_duo_non_default(cfg)
-    cfg = _fv3_duo_cfg(["--microphysics", "kessler", "--turbulence", "louis"])
+    cfg = _fv3_duo_cfg(["--microphysics", "kessler", "--turbulence", "louis",
+                       "--no-energy-fixer"])   # closed lane: opt out (F15)
     _refuse_fv3_duo_non_default(cfg)          # the wall allows the field...
     from legoesm.driver.component_factory import create_atmosphere_dycore
     from legoesm.grids.cubed_sphere import create_cubed_sphere
@@ -4906,6 +4911,72 @@ def test_cam6_duo_deck_passes_the_lane_guards_on_the_column_lane_only():
                    "land_update_seconds", "land_calibrated_physics",
                    "land_beta", "land_beta_soil", "ice_skin_prognostic"):
         assert needle in msg, needle
+
+
+# The ONLY resolved-config fields the FV3 duo C24 deck may hold differently from
+# the MPAS production deck (review 2026-10-10 F32: six physics rows had drifted
+# under a "byte-identical" header).  Every other row is physics/land/forcing and
+# must resolve to the MPAS value.
+_DUO_DECK_OWN_ROWS = frozenset({
+    # grid and dycore (deck ledger A, B1-B5): the MPAS-only dycore rows are
+    # switched off because the duo's own sponge / damping replace them
+    "grid.grid_type", "grid.resolution",
+    "dycore.discretization", "dycore.dt", "dycore.column_lane",
+    "dycore.fv3_duo_sponge_layers", "dycore.fv3_duo_sponge_factor",
+    "dycore.fv3_duo_sponge_d2_top", "dycore.fv3_duo_nord",
+    "dycore.fv3_duo_d4_bg", "dycore.fv3_duo_fill",
+    "dycore.mpas_sponge_del2_top_layers", "dycore.mpas_sponge_del2_top_factor",
+    "dycore.mpas_div_damp4_scale", "dycore.mpas_vert_advection_scheme",
+    "mpas_qv_smooth_del4_m4s",
+    # step COUNTS at this dt; the cadence in seconds is asserted equal below
+    "physics_update_steps", "rad_update_steps",
+    # the same land IC recipe on this grid's own columns (a per-grid file)
+    "land_ic_path",
+    # hardware, not physics: GPU g-point batch (fluxes differ by summation order)
+    "rrtmgp_gpoint_batch_size",
+})
+
+
+def _resolved_deck_fields(deck):
+    """Flattened ExperimentConfig a deck resolves to through the run_amip
+    --config route (dummy machine paths), keyed like amip_config_diff."""
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    from scripts.validate.amip_config_diff import _as_plain, _flatten
+    parser = build_arg_parser()
+    keys = load_yaml_config(str(deck), parser)
+    parser.set_defaults(**keys, _config_keys=frozenset(keys))
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args(
+        _AMIP_DUMMY_PATHS + ["--clm-surfdata-path", "/dummy/surfdata.nc"]), parser))
+    cfg.validate_strict()
+    return _flatten(_as_plain(cfg))
+
+
+def test_cam6_duo_deck_resolves_to_the_mpas_deck_outside_grid_intrinsic_rows():
+    import yaml
+    from legoesm.driver.config import migrate_renamed_keys
+    amip = _repo_root() / "config" / "amip"
+    # the deck file itself sets nothing but the MPAS include and its own rows
+    # (closes what the resolved config cannot see: --params, machine paths);
+    # an old key spelling (RENAMED_CONFIG_KEYS alias) counts as its new name
+    own = migrate_renamed_keys(yaml.safe_load(
+        (amip / "amip_production_fv3duo_c24.yaml").read_text()))
+    assert own.get("include") == "amip_production.yaml"
+    own_dests = ({k.split(".")[-1] for k in _DUO_DECK_OWN_ROWS} - {"land_ic_path"}
+                 | {"land_ic"})
+    extra = set(own) - {"include"} - own_dests
+    assert not extra, f"duo deck sets rows that are not its own: {sorted(extra)}"
+    mpas = _resolved_deck_fields(amip / "amip_production.yaml")
+    duo = _resolved_deck_fields(amip / "amip_production_fv3duo_c24.yaml")
+    differ = {k for k in mpas.keys() | duo.keys()
+              if repr(mpas.get(k, "<absent>")) != repr(duo.get(k, "<absent>"))}
+    stray = {k: (mpas.get(k, "<absent>"), duo.get(k, "<absent>"))
+             for k in sorted(differ - _DUO_DECK_OWN_ROWS)}
+    assert not stray, f"duo deck differs from MPAS outside its own rows: {stray}"
+    # the comparison is live: the grid itself does differ
+    assert {"grid.grid_type", "dycore.discretization", "land_ic_path"} <= differ
+    # physics and radiation run on the same clock (1800 s / 3600 s) on both
+    for k in ("physics_update_steps", "rad_update_steps"):
+        assert mpas[k] * mpas["dycore.dt"] == duo[k] * duo["dycore.dt"], k
 
 
 def test_argv_distributed_mode_matches_the_parser_and_config_default():
@@ -5204,3 +5275,16 @@ def test_land_canopy_most_n_iters_round_trip_and_validate():
                        (cfg._replace(land_surface_scheme="simple_seb"), "inert")):
         with pytest.raises(ValueError, match=match):
             bad.validate_strict()
+
+
+def test_forcing_hold_outside_file_years_round_trips_and_defaults_off():
+    """F37 (review 2026-10-10): a date outside a multi-year forcing file
+    raises unless --forcing-hold-outside-file-years opts in; the flag reaches
+    ExperimentConfig and the driver's ozone / aerosol forcing configs."""
+    parser = build_arg_parser()
+    base = ["--dataset", "analytical"]
+    off = build_config_from_args(_postprocess_args(parser.parse_args(base), parser))
+    on = build_config_from_args(_postprocess_args(parser.parse_args(
+        base + ["--forcing-hold-outside-file-years"]), parser))
+    assert off.forcing_hold_outside_file_years is False
+    assert on.forcing_hold_outside_file_years is True

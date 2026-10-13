@@ -235,15 +235,15 @@ class EarthSystemDriver:
         lw_up_sfc = eps_sfc * constants.sigma_sb * T_sfc ** 4
         lw_down = (lw_net_sfc + lw_up_sfc) / jnp.maximum(eps_sfc, 0.01)
 
-        # Snow fraction: smooth Wigmosta 1994 / Dai 2008 ramp (shared helper).
-        # The prior hard step ``where(T_low < T_freeze, 1, 0)`` killed
-        # d(snow)/d(T_low) on training/DA paths and miscounted mixed-phase
-        # precip in the 0–4 °C band; the helper matches the coupled driver so
-        # the two cannot diverge.
-        from legoesm.forcing.surface_utils import snow_fraction
+        # Snowfall = the atmosphere's OWN segment-mean frozen surface flux
+        # (review 2026-10-10 F29, the MPAS land's rule), bounded by the total:
+        # no temperature re-split, so the fusion heat the atmosphere booked is
+        # the one the surface receives.  require_surface_radiation_aux above
+        # refuses a lane that does not publish it while precip is active.
         precip_total = jnp.maximum(seg_precip, 0.0)
-        snow_frac = snow_fraction(T_low, constants.T_freeze)
-        precip_snow = precip_total * snow_frac
+        _frozen = aux.get("seg_precip_frozen")
+        precip_snow = (jnp.zeros_like(precip_total) if _frozen is None
+                       else jnp.clip(_frozen, 0.0, precip_total))
 
         # Cosine zenith: daily-mean approximation cos_zen = Q / S_0.  Route the day-of-year
         # through the atmosphere's seasonal insolation seam (iter 449/462) so the surface
@@ -272,7 +272,9 @@ class EarthSystemDriver:
         else:
             cos_zen = jnp.full_like(p_s, 0.5)
 
-        from legoesm.core.coupling_fields import lowest_level_height
+        from legoesm.core.coupling_fields import (
+            land_co2_ppmv, lowest_level_height,
+        )
         return AtmToSurface(
             z_lowest=lowest_level_height(
                 T_low, self._atm.sigma.pressure_at_half(p_s),
@@ -289,7 +291,9 @@ class EarthSystemDriver:
             p_surface=p_s,
             rho_lowest=rho_low,
             cos_zenith=cos_zen,
-            co2_ppmv=jnp.full_like(p_s, self.config.co2_ppmv),
+            # Radiation's CO2 (GHG file / experiment trajectory, else config).
+            co2_ppmv=jnp.full_like(p_s, land_co2_ppmv(
+                self._atm.radiation_ghg_vmr(day), self.config.co2_ppmv)),
             has_radiation=jnp.ones_like(p_s),
             has_precipitation=jnp.where(precip_total > 0, 1.0, 0.0),
         )

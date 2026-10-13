@@ -323,6 +323,9 @@ def _driver_cfg(out_dir, *, windows, **over):
     dyc = dict(model_type="hydrostatic", discretization="fv3_duo",
                dt=over.pop("dt", DDT),
                column_lane=over.pop("column_lane", True))
+    # the energy fixer (F15) runs on the column lane; the closed lane does not
+    # run it and refuses True, so its reference runs opt out explicitly
+    dyc["energy_fixer"] = over.pop("energy_fixer", dyc["column_lane"])
     if windows:
         dyc.update(fv3_duo_windows=2, fv3_duo_window_pad=4)
     base = dict(
@@ -463,4 +466,7 @@ def test_driver_terrain_rewrap_keeps_the_layout_and_the_knobs(tmp_path):
     assert new.conservative_tracer_clamp == old.conservative_tracer_clamp
     assert (new.energy_consistent_moisture_clip
             == old.energy_consistent_moisture_clip)
+    # the energy fixer (F15): on by the driver default, off on the raw model,
+    # so a dropped carry reads False
+    assert old.energy_fixer is True and new.energy_fixer is True
     assert drv.grid is new.mesh

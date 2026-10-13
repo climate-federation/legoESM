@@ -79,6 +79,12 @@ def main():
         "--output", "-o", type=str, default=None,
         help="Output directory for the rerun (default: a fresh temp dir)",
     )
+    repro_parser.add_argument(
+        "--allow-version-drift", action="store_true",
+        help="Rerun even when the imported legoESM code may differ from the "
+             "code that wrote the manifest (other commit, uncommitted changes, "
+             "or patches). Default: refuse.",
+    )
 
     # --- wizard command ---
     subparsers.add_parser(
@@ -184,6 +190,22 @@ def cmd_run(args):
         sys.exit(1)
 
 
+_MISSING = "<absent>"
+
+
+def _config_drift_rows(stored: dict, rebuilt: dict, prefix: str = "") -> list:
+    """(dotted_field, stored, rebuilt) for every field that differs;
+    ``<absent>`` marks a field dropped by, or newly filled from, today's code."""
+    rows = []
+    for k in sorted(set(stored) | set(rebuilt)):
+        a, b = stored.get(k, _MISSING), rebuilt.get(k, _MISSING)
+        if isinstance(a, dict) and isinstance(b, dict):
+            rows += _config_drift_rows(a, b, f"{prefix}{k}.")
+        elif a != b:
+            rows.append((f"{prefix}{k}", a, b))
+    return rows
+
+
 def cmd_reproduce(args):
     """Re-run from a run manifest and optionally bit-check reproducibility."""
     import tempfile
@@ -197,9 +219,12 @@ def cmd_reproduce(args):
     try:
         from legoesm.driver.config import experiment_config_from_dict
         from legoesm.driver.restart import (
+            manifest_version_drift,
             read_run_manifest,
             recorded_state_digest,
+            resolved_config_record,
             validate_run_manifest,
+            version_drift_allowed,
         )
 
         manifest = read_run_manifest(args.manifest)
@@ -236,7 +261,27 @@ def cmd_reproduce(args):
                 sys.exit(2)
             return
 
-        config = experiment_config_from_dict(manifest["config"]["resolved_config"])
+        stored = manifest["config"]["resolved_config"]
+        config = experiment_config_from_dict(stored)
+
+        drift = manifest_version_drift(manifest)
+        if drift:
+            rows = _config_drift_rows(stored, resolved_config_record(config))
+            lines = [f"  {k}: stored={a!r} -> rebuilt={b!r}" for k, a, b in rows]
+            logger.warning(
+                "Version drift: " + "; ".join(drift) + "\n"
+                f"Resolved-config fields that differ after rebuilding with "
+                f"today's code ({len(rows)}):\n" + ("\n".join(lines) or "  (none)")
+                + "\nAn empty table does NOT mean the same science: code that "
+                "is not a config field may have changed."
+            )
+            if not (getattr(args, "allow_version_drift", False)
+                    or version_drift_allowed()):
+                logger.error("Refusing to reproduce across version drift; "
+                             "check out the recorded commit, or pass "
+                             "--allow-version-drift (or set "
+                             "LEGOESM_ALLOW_VERSION_DRIFT=1).")
+                sys.exit(2)
 
         logger.info(f"legoESM v{__version__} | Reproducing run from {args.manifest}")
         logger.info(

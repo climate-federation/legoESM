@@ -107,9 +107,13 @@ JAX_ENABLE_X64=1 .venv/bin/python -m pytest tests/atmosphere/dycore/regression/ 
 
 Layered on legoESM's **existing** reproducibility core (do not reinvent it):
 `legoesm run <config.yaml>` writes `run_manifest.json` (resolved config +
-`state_digest` + `git_hash` + jax/numpy versions + platform), and `legoesm
-reproduce <manifest> --check` does a **bit-identical** re-run. That manifest is a
-superset of the lesommer `experiment.tag`.
+`state_digest` + legoESM commit + jax/numpy versions + platform), and `legoesm
+reproduce <manifest> --check` re-runs it and compares the final-state digest
+(a bitwise match can only be expected on the same software, hardware and
+device layout). Known
+gaps — physics-scheme parameters not recorded, drivers without a manifest, no
+commit check on replay, no input checksums — are listed in
+`docs/architecture/reproducibility.md`.
 
 The harness adds the *intent/ergonomics* layer:
 

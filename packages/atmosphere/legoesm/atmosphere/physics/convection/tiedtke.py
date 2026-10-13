@@ -619,5 +619,6 @@ def tiedtke_convection(
         du_dt_conv=du_dt_conv,
         dv_dt_conv=dv_dt_conv,
         dq_r_conv_dt=dq_r_conv_dt,
+        precip_frozen_sfc=jnp.zeros_like(cape),  # L_v-only: liquid at sfc (F29)
     )
     return out, M_u_new

@@ -297,6 +297,45 @@ def has_spatial_surface_leaves(model) -> bool:
     )
 
 
+def freeze_spatial_updates(optimizer, model):
+    """Zero every optimizer update of the spatial-surface fields ``model``
+    froze as unread (``AIMIPSpatialSurfaceParams.frozen``), AdamW's decoupled
+    weight decay included: their gradient is already cut, this keeps their
+    VALUES fixed too.  ``optimizer`` unchanged when nothing is frozen."""
+    sp = getattr(model, "spatial_surface", None)
+    if sp is None:
+        sp = getattr(getattr(model, "classical", None), "spatial_surface", None)
+    names = frozenset(getattr(sp, "frozen", ()) or ())
+    if not names:
+        return optimizer
+
+    def _mask(tree):
+        def _m(path, _leaf):
+            k = jax.tree_util.keystr(path)
+            return "spatial_surface" in k and any(f"['{n}']" in k for n in names)
+        return jax.tree_util.tree_map_with_path(_m, tree)
+    return optax.chain(optimizer, optax.masked(optax.set_to_zero(), _mask))
+
+
+def _trainable_raw_values(grads) -> dict:
+    """``{name: grad}`` of the trainable leaves the no-inert gate judges: the
+    ``raw_values`` of a bare physics-params model or of an
+    ``AIMIPTrainableBundle`` (classical + spec-driven scheme halves), plus the
+    AIMIP spatial-surface coefficients not frozen as unread.  Frozen
+    (non-array) knobs carry no gradient (``None``) and are not judged."""
+    parts = ([("", grads.raw_values)] if hasattr(grads, "raw_values") else
+             [("classical.", grads.classical.raw_values),
+              ("schemes.", grads.schemes.raw_values)])
+    out = {p + k: v for p, rv in parts for k, v in rv.items() if v is not None}
+    # AIMIP spatial-surface coefficients, minus the fields frozen as unread
+    sp = getattr(grads if hasattr(grads, "raw_values") else grads.classical,
+                 "spatial_surface", None)
+    if sp is not None:
+        out.update({f"spatial.{n}": f.coeffs for n, f in sp.fields.items()
+                    if n not in sp.frozen})
+    return out
+
+
 def maybe_resume_model(model_template, resume_from_dir):
     """Load latest epoch checkpoint from ``resume_from_dir`` into ``model_template``.
 
@@ -3530,6 +3569,7 @@ def _train_spectral_loop(
     else:
         optimizer = base_optimizer
 
+    optimizer = freeze_spatial_updates(optimizer, model)
     opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
 
     # --- mid-epoch (per-chunk) resume (#942) ---------------------------------
@@ -3964,7 +4004,7 @@ def _train_spectral_loop(
                         ic = _stage_tree(ic, _compute_dev)
                         tgt = _stage_tree(tgt, _compute_dev)
                         fb = None if fb is None else _stage_tree(fb, _compute_dev)
-                    yield _gate_step(model, ic, tgt, fb)[2].raw_values
+                    yield _trainable_raw_values(_gate_step(model, ic, tgt, fb)[2])
 
         assert_no_inert_over(_gate_grads())
 

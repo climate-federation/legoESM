@@ -131,7 +131,7 @@ def _spy_lane(monkeypatch, d, lane):
 def _build(tmp_path, lane, **over):
     g, dy = LANES[lane]
     cfg = ExperimentConfig(
-        grid=GridConfig(**g), dycore=DycoreConfig(**dy),
+        grid=GridConfig(**g), dycore=DycoreConfig(energy_fixer=False, **dy),
         output=OutputConfig(output_dir="", diag_days=1, checkpoint_days=0),
         days=1.0, dataset="analytical", radiation="rrtmg", convection="none",
         turbulence="none", microphysics="none", precision="fp64",
@@ -204,7 +204,7 @@ def test_every_lane_samples_the_same_forcing_days(monkeypatch, tmp_path, lane):
         days.append(float(day)) or {"tsi": 1361.0, "solar_fraction_by_gpt": None}))
     g, dy = LANES[lane.split("-")[0]]
     cfg = ExperimentConfig(
-        grid=GridConfig(**g), dycore=DycoreConfig(**dy),
+        grid=GridConfig(**g), dycore=DycoreConfig(energy_fixer=False, **dy),
         output=OutputConfig(output_dir="", diag_days=1, checkpoint_days=0),
         days=2.0, dataset="analytical", radiation="gray", convection="none",
         # louis: spectral full-physics (forcing dict); spectral-dry: legacy gray

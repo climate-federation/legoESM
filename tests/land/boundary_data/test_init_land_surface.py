@@ -47,7 +47,8 @@ def _write_surfdata(path, nlat=8, nlon=16, nlev=7):
 @pytest.mark.parametrize("land_cfg, param_type, is_multilayer", [
     (MultiLayerLandConfig(surface_scheme=TwoLeafCanopyConfig()), CanopyLandParams, True),
     (MultiLayerLandConfig(surface_scheme=SimpleSEBConfig()), LandSurfaceParams, True),
-    (LandConfig(), LandSurfaceParams, False),
+    (LandConfig(), CanopyLandParams, False),
+    (LandConfig(surface_scheme=SimpleSEBConfig()), LandSurfaceParams, False),
 ])
 def test_init_land_surface_data_per_scheme(tmp_path, land_cfg, param_type, is_multilayer):
     p = str(tmp_path / "sd.nc"); _write_surfdata(p)

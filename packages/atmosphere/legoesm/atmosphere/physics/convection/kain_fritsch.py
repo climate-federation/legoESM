@@ -1414,6 +1414,7 @@ def kain_fritsch_convection(
         du_dt_conv=None,
         dv_dt_conv=None,
         dq_r_conv_dt=dq_r_conv_dt,
+        precip_frozen_sfc=jnp.zeros_like(cape),  # L_v-only: liquid at sfc (F29)
     )
 
     # Diagnostic carry: pack the (uncapped) closure cloud-base mass flux at

@@ -244,11 +244,12 @@ def main() -> int:
     import jax.numpy as jnp
 
     # The tripole's coordinates are 2-D curvilinear, so the POINTS sampler
-    # (nearest-neighbour, the cube/MPAS path) is the applicable one; the
+    # is the applicable one, with the SAME bilinear method the model's tripole
+    # path uses (F20: nearest here scored a field the run never saw); the
     # lat-lon conservative sampler needs 1-D destination axes.
     _shape = lat_o.shape
     forc = _sample_forcing_points(forcing, idx, lat_o.reshape(-1),
-                                  lon_o.reshape(-1))
+                                  lon_o.reshape(-1), method="bilinear")
     forc = {k: np.asarray(v).reshape(_shape) for k, v in forc.items()}
     T_sfc_K = np.asarray(z["T"], dtype=np.float64)[..., 0] + constants.T_freeze
     _, _, _, lh, evap = air_sea_fluxes(

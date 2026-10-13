@@ -7,7 +7,7 @@ PhysicsPipeline is decomposition-invariant per column, so the mock pins the
 LAYOUT/composition contract; the real-pipeline end-to-end is the driver
 integration follow-up).  The serial reference composes the SAME serial
 primitives the compiled cube ``_single_step`` uses: cc->D-grid ->
-base-cut SSP-RK3 dynamics -> corner->cc -> ``fix_ps_mass_target`` ->
+base-cut SSP-RK3 dynamics -> corner->cc -> ``fix_segment_dry_mass`` ->
 ``split_physics_single_rank`` -> ``finalize_split_step``.
 
 Also gates: pack/unpack round-trip of the flattened per-column carry
@@ -33,7 +33,6 @@ import pytest
 
 from legoesm.core.field import Field
 from legoesm.core.state import FV3HydrostaticState
-from legoesm.core.conservation import fix_ps_mass_target, global_area_sum
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
 from legoesm.grids.halo import set_halo_backend
@@ -46,8 +45,9 @@ from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
 from legoesm.core.operators_cdgrid import (
     center_to_dgrid_vector, interp_corner_to_center)
 from legoesm.driver.compiled_segments import (
-    SegmentCarry, SegmentForcing, build_operator_split_statics,
-    split_physics_single_rank, finalize_split_step, pack_carry)
+    SegmentCarry, SegmentForcing, build_operator_split_statics, carry_moist,
+    fix_segment_dry_mass, segment_dry_mass, split_physics_single_rank,
+    finalize_split_step, pack_carry)
 from legoesm.driver.sharded_operator_split_step import need_rad_and_time
 from legoesm.driver.tiled_operator_split_step import (
     make_tiled_operator_split_step, pack_carry_tiled,
@@ -108,9 +108,10 @@ def _mock_step_unified(need_rad, T, p_s, q_v, q_c, q_r, conv_prog, u, v,
         conv_prog=0.9 * conv_prog,
         precip=1e-3 * jnp.abs(q_r[..., -1]),
         shflx=1e-2 * (T[..., -1] - 288.0),
-        lhflx=None,
+        lhflx=None, evap_sfc=None,
         w_land=None, snow=None,
         tke=None, qke=None, gwd_spectrum=None,
+        cloud_fraction=None, budget_ledger=None,
     )
     # Held refresh only when need_rad fires (mirrors step_unified's cond).
     held_new = tuple(
@@ -167,7 +168,8 @@ def _build(seed=3):
         held_lw_up_toa=jnp.zeros_like(p_s),
         held_sw_down_toa=jnp.zeros_like(p_s),
         step_index=0,
-        target_mass=global_area_sum(p_s, grid),
+        target_mass=segment_dry_mass(
+            p_s, {"q_v": q_v, "q_c": q_c, "q_r": q_r}, grid, coord.dsigma),
         target_moisture=_global_moisture(q_v, p_s, coord, grid))
 
     # FLAT (ncol,) sst — the driver's per-column forcing layout; the tiled
@@ -224,8 +226,10 @@ def _serial_split_step(carry, model, cdgrid, coord, cfg, statics):
     T_new = stepped.T.data
     u_new = interp_corner_to_center(stepped.u_d.data)
     v_new = interp_corner_to_center(stepped.v_d.data)
-    p_s_new = fix_ps_mass_target(
-        stepped.p_s.data, carry.target_mass, cdgrid.base)
+    p_s_new, _fxm = fix_segment_dry_mass(
+        stepped.p_s.data, carry_moist(carry), carry.target_mass,
+        cdgrid.base, coord.dsigma)
+    carry = carry._replace(**{k: v for k, v in _fxm.items() if v is not None})
     need_rad, doy, sod = need_rad_and_time(
         carry.step_index, START_DAY, DT, RAD_UPDATE_STEPS)
     lz = split_physics_single_rank(
@@ -303,7 +307,9 @@ def test_tiled_operator_split_matches_serial():
         assert _abs(nm) < 1e-12, nm
     assert int(got.step_index) == int(ref.step_index) == N_STEPS
     # Accumulators (precip from q_r; flux from T) stay in the same classes.
-    assert _abs("precip_accum") < 1e-12
+    # precip_accum carries the saturation adjustment's rain-out (F13):
+    # q-level roundoff scaled by p_s/g ~ 1e4 kg/m2.
+    assert _abs("precip_accum") < 1e-10
     assert _abs("shflx_accum") < 1e-6
 
     # Conservation: the tiled moisture fixer (tile-psum global_area_sum)
@@ -314,6 +320,15 @@ def test_tiled_operator_split_matches_serial():
     m_s = float(compute_global_moisture(
         ref.q_v, ref.p_s, coord.dsigma, cdgrid.base))
     assert abs(m_t - m_s) / abs(m_s) < 1e-9
+    # The dry-mass anchor survives on both layouts (F13).  The fixer's
+    # divisor is the grid's storage-dtype area sum while the integral sums
+    # fp64 areas (pre-existing; see test_segment_dry_mass), so the anchor
+    # holds to that mismatch times the per-step correction: measured 2.2e-12.
+    for c in (got, ref):
+        d = float(segment_dry_mass(c.p_s, carry_moist(c), cdgrid.base,
+                                   coord.dsigma))
+        assert abs(d - float(carry0.target_mass)) / float(carry0.target_mass) \
+            < 1e-11, d
 
 
 def test_tiled_psum_branch_requires_explicit_scope():

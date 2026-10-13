@@ -391,16 +391,19 @@ def _mpas_cadence_driver(tmpdir, days, n_steps=2):
     return d
 
 
-def test_validate_strict_refuses_a_checkpoint_cadence_off_the_radiation_cadence():
+def test_checkpoint_cadence_off_the_radiation_cadence_is_refused():
     """D-REX-1: the held radiation fluxes are not checkpointed, so the
     checkpoint cadence must be an integer multiple of the radiation cadence.
     288 steps/day at dt=300: rad every 5 steps is refused, naming both
-    values; rad every 4 steps passes."""
+    values; rad every 4 steps passes.  validate_strict does NOT judge it:
+    the driver may clamp dt after validation, so setup checks the effective
+    dt (see the duo clamp test in test_fv3_duo_column)."""
     from legoesm.driver.config import (
         DycoreConfig,
         ExperimentConfig,
         GridConfig,
         OutputConfig,
+        checkpoint_radiation_cadence_error,
     )
 
     def cfg(rad):
@@ -413,15 +416,25 @@ def test_validate_strict_refuses_a_checkpoint_cadence_off_the_radiation_cadence(
             convection="none", turbulence="tke", precision="fp64",
             distributed=False, rad_update_steps=rad,
         )
-    with pytest.raises(ValueError) as exc:
-        cfg(5).validate_strict()
-    msg = str(exc.value)
+    msg = checkpoint_radiation_cadence_error(cfg(5))
+    assert msg is not None
     assert "checkpoint_days=1" in msg and "288 steps" in msg
     assert "rad_update_steps=5" in msg
-    cfg(4).validate_strict()
+    assert checkpoint_radiation_cadence_error(cfg(4)) is None
+    # a numpy-typed cadence is judged too (the loop coerces with int())
+    assert checkpoint_radiation_cadence_error(cfg(np.int64(5))) is not None
+    # the run loop's predicate: no radiation, nothing to align; the
+    # interval is the loop's int(checkpoint_days*86400/dt) (599 s -> 144)
+    assert checkpoint_radiation_cadence_error(
+        cfg(5)._replace(radiation="none")) is None
+    assert checkpoint_radiation_cadence_error(cfg(4)._replace(
+        dycore=DycoreConfig(discretization="mpas", dt=599.0))) is None
+    # requested-dt validation leaves it to setup
+    cfg(5).validate_strict()
     # no checkpoints: nothing to align
-    cfg(5)._replace(output=OutputConfig(
-        output_dir="", diag_days=0, checkpoint_days=0)).validate_strict()
+    assert checkpoint_radiation_cadence_error(cfg(5)._replace(
+        output=OutputConfig(output_dir="", diag_days=0,
+                            checkpoint_days=0))) is None
 
 
 def test_mpas_run_refuses_a_restart_inside_a_physics_window(tmp_path):

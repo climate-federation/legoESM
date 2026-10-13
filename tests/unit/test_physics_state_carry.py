@@ -393,7 +393,7 @@ def _stateful_driver_config(**overrides):
     # MPAS memory test), which would mask a dropped carry.
     kwargs = dict(
         grid=GridConfig(resolution=8, nlev=5),
-        dycore=DycoreConfig(dt=1.0),
+        dycore=DycoreConfig(energy_fixer=False, dt=1.0),
         output=OutputConfig(diag_days=1),
         days=6.0 / 86400.0,             # 6 steps at dt=1
         dataset="analytical",
@@ -846,6 +846,7 @@ def test_mpas_step_refuses_stateful_physics_without_carry():
         model.step(state, 1.0, physics_fn=fn)
 
 
+@pytest.mark.usefixtures("allow_version_drift")
 def test_mpas_repeated_load_clears_stale_physstate(tmp_path):
     """Codex adversarial (#413 stale-persistence class): reusing a driver
     to load a checkpoint WITHOUT physstate_* must drop the carry from a
@@ -945,6 +946,7 @@ def test_mpas_load_then_save_without_run_refuses_and_drops_stale(tmp_path):
         driver_b.save_checkpoint(0, 7.0)
 
 
+@pytest.mark.usefixtures("allow_version_drift")
 def test_mpas_partial_physstate_checkpoint_rejected(tmp_path):
     """Codex adversarial round 2 (#413): a checkpoint carrying only a
     SUBSET of the physstate_* fields must be REJECTED loudly at restart —
@@ -973,6 +975,7 @@ def test_mpas_partial_physstate_checkpoint_rejected(tmp_path):
         driver_b.run()
 
 
+@pytest.mark.usefixtures("allow_version_drift")
 def test_mpas_meta_only_physstate_checkpoint_rejected(tmp_path):
     """Codex adversarial round 3 (#413): a checkpoint left with only the
     physstate_meta_* scheme tag and NO carry fields is a corrupted
@@ -1006,6 +1009,7 @@ def test_mpas_meta_only_physstate_checkpoint_rejected(tmp_path):
         driver_b.run()
 
 
+@pytest.mark.usefixtures("allow_version_drift")
 def test_mpas_bad_carry_load_then_save_refused(tmp_path):
     """Codex adversarial round 5 (#413): a load-then-save with no
     intervening run must NOT launder a bad MPAS restart.  A partial,
@@ -1055,6 +1059,7 @@ def test_mpas_bad_carry_load_then_save_refused(tmp_path):
     )
 
 
+@pytest.mark.usefixtures("allow_version_drift")
 def test_mpas_unknown_physstate_field_rejected(tmp_path):
     """Codex adversarial round 6 (#413): a checkpoint carrying a
     physstate_* field absent from this build's PhysicsState schema
@@ -1288,6 +1293,7 @@ def test_dyn_tendency_inputs_are_consumed_not_carried_forward():
     assert nxt2.dyn_tendency_qv is None  # the un-supplied one still resets
 
 
+@pytest.mark.usefixtures("allow_version_drift")
 def test_mpas_legacy_dyn_tendency_checkpoint_entry_is_dropped_on_load(tmp_path):
     """Codex r2 finding-2: a legacy / hand-edited MPAS checkpoint that carries
     a ``physstate_dyn_tendency_*`` entry — including a None-derived OBJECT array

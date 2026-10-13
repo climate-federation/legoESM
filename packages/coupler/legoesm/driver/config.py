@@ -377,6 +377,17 @@ class DycoreConfig(NamedTuple):
     # damp balanced flow together with the divergent mode; this term does not.
     # Appended at the tuple END: preserves POSITIONAL CONSTRUCTION.
     mpas_div_damp4_scale: float = 0.0
+    # CAM-style dycore total-energy fixer (check_energy_fix, review 2026-10-10
+    # F15, choice by vote): every step the energy the dynamics window loses --
+    # the KE the del2 sponge / del4 / div4 (MPAS) and the d_con=0 damping
+    # (duo) remove, plus numerical dissipation -- is returned as a uniform
+    # heating dT = (E_before - E_after) / (c_pd * M), E = sum((c_pd*T + KE)
+    # dp/g) + phis*p_s/g, before physics.  Default True = the fix.  Wired on
+    # the MPAS (serial + MPI), FV3-duo column, lat-lon C-grid and cube C-D
+    # grid hydrostatic lanes (F15b); the other lanes (spectral, the
+    # non-hydrostatic cores, FV3-duo non-column, sub-face-tiled cube) do not
+    # run it (the driver refuses True there, never silently).
+    energy_fixer: bool = True
 
 
 class EvaluationConfig(NamedTuple):
@@ -720,6 +731,11 @@ class ExperimentConfig(NamedTuple):
     aerosol_reference_aod: float = 0.03
     volcanic_aerosol_file: str = ""
     volcanic_aerosol_scale: float = 1.0
+    # A run date outside a multi-year (non-cyclic) ozone / aerosol / CCN /
+    # volcanic file RAISES; True opts in to holding the file's end record
+    # there instead (review 2026-10-10 F37, majority vote: an 1850 coupled run
+    # silently read the January-1979 aerosol record for 129 years).
+    forcing_hold_outside_file_years: bool = False
     # Volcanic stratospheric LONGWAVE aerosol (gap #9): when True, ALSO
     # load the ``ext_earth`` LW band from ``volcanic_aerosol_file`` and
     # thread it into RRTMGP as the LW absorption optical depth.  Default
@@ -1177,7 +1193,17 @@ class ExperimentConfig(NamedTuple):
     # Issue #323: make the per-step ``max(q_v, 0)`` floor on the physics
     # tracer update moist-static-energy-conserving (remove the latent heat
     # of the clipped vapour sink).  Opt-in for the kessler+sbm wind blow-up;
-    # default off => bit-identical.
+    # default off => bit-identical.  LANE-DEPENDENT (review 2026-10-10 F10):
+    # on the cube / lat-lon pipeline lanes (per-step, compiled, tiled, SPMD,
+    # training segments) True replaces the column-conserving vapour borrow
+    # with a hard floor that ADDS the clipped vapour (sum max(-q,0) dp/g per
+    # column, every step; nothing later removes it unless fix_moisture
+    # rescales globally).  In the dycores' own positivity stage (MPAS, duo
+    # column, cube C-D, lat-lon C-grid) the conserving borrow (dycore
+    # mpas_conservative_tracer_clamp, default True) takes precedence in
+    # core.conservation.apply_water_positivity, so the key does not create
+    # water there.  "True on all lanes" is therefore NOT the MPAS behaviour;
+    # False is the MPAS-equivalent setting on the pipeline lanes.
     energy_consistent_moisture_clip: bool = False
     # Resolved-wind moisture advection (issue #771): attach q_v/q_c/q_r/q_i/
     # q_s/q_g (+ the per-mass ice number N_i) to the dycore state each step so
@@ -1531,10 +1557,9 @@ class ExperimentConfig(NamedTuple):
     # 0.05/0.10 were stable with small effects (cover -2/-5 pts).
     bechtold_M_b_max: float = 0.05   # BechtoldConfig.M_b_max [kg/m^2/s]
     # Gregory-1997 convective momentum transport, applied to MPAS edge winds
-    # through the shared cell->edge projection (2026-09-15).  None preserves
-    # each lane's earlier behaviour: OFF on MPAS (where the bridge handed the
-    # scheme zero winds, so CMT was inert) and the scheme's own default (ON)
-    # elsewhere.  The MPAS production default is a pending user decision.
+    # through the shared cell->edge projection (2026-09-15).  None = the
+    # scheme's own default (BechtoldConfig.enable_cmt, ON) on every lane
+    # (review 2026-10-10 F22, majority vote; it used to be OFF on MPAS only).
     bechtold_enable_cmt: bool | None = None
     bechtold_dnoprc: float = 3.0e-4   # BechtoldConfig.dnoprc [kg/kg]
     # Deep-plume entrainment / detrainment base rates (IFS cuascn), exposed
@@ -1753,20 +1778,16 @@ class ExperimentConfig(NamedTuple):
     # lanes smooth q_v every step in their step factories) — the confirmed
     # missing third suspect behind the cell-scale CWV recharge/discharge
     # speckle (2026-07-23).  Applied post-step as an UNWEIGHTED SCVT del2 (∇²)
-    # + a q>=0 floor: monotone / positivity-preserving under the setup-time
-    # CFL guard (the floor is then a no-op, to roundoff), and it conserves the per-level
-    # mixing-ratio area integral sum_c A_c q_c (exact in exact arithmetic; to
-    # floating-point roundoff — ~1e-7 relative in fp32).  It is NOT column-
-    # water-vapour (CWV = sum_c A_c dp_c q_c/g) conserving: across a surface-
-    # pressure gradient an unweighted del2 redistributes a little water mass
-    # (bias set by the humidity–terrain correlation), so this is an explicitly
-    # NON-conservative grid-scale filter — monitor the water budget if used in
-    # long runs.  Unweighted (not dp-weighted) is REQUIRED: the default hybrid
+    # (monotone under the setup-time CFL guard), followed by a floor that
+    # restores each level's WATER MASS sum_c A_c max(dp_c,0) q_c to its
+    # pre-smoothing value (review 2026-10-10 F12: the unweighted operator
+    # alone conserves only sum_c A_c q_c, so across a surface-pressure gradient
+    # it created/destroyed water after the step's fixers had run).  The
+    # operator stays unweighted (not dp-weighted): the default hybrid
     # coordinate's surface-layer dp goes <= 0 for p_s below ~2/3 p_ref over
-    # high terrain, which a dp-weighted form would divide by (Inf/NaN).  It is
-    # a del2 (∇²), not the FV lanes' scale-selective del4 (∇⁴): del2 is
-    # monotone under the explicit guard (hence the exact per-level integral)
-    # but damps resolved gradients more broadly — use a gentle coefficient.
+    # high terrain, which a dp-weighted operator would divide by (Inf/NaN).  It is
+    # a del2 (∇²), not the FV lanes' scale-selective del4 (∇⁴): del2 damps
+    # resolved gradients more broadly — use a gentle coefficient.
     # MPAS-only: refused on other discretizations (validate_strict).
     mpas_qv_smooth_del2_m2s: float = 0.0   # del2 diffusivity [m^2/s]; ~1e5-1e6 typical at 240 km
     # Scale-SELECTIVE companion to the del2 above, added 2026-09-11 after the
@@ -1779,10 +1800,10 @@ class ExperimentConfig(NamedTuple):
     # on every mesh mode, so its damping ratio between any two scales is the
     # del2's squared: measured on the subdivision-6 mesh, 2.47x between 240 and
     # 479 km becomes 6.08x.  (The continuum figures 4 and 16 do not apply to
-    # the discrete operator.)  It is NOT monotone, so the q>=0 floor is
-    # load-bearing when it is on and the per-level integral is conserved only
-    # up to what that floor clips; the driver enforces nu4*dt*g_max^2 <= 0.5 at
-    # setup.  MPAS-only, same as the del2.  Default 0.0 pending the controlled
+    # the discrete operator.)  It is NOT monotone, so the floor's clip is
+    # load-bearing when it is on; the same water-mass-restoring floor as the
+    # del2 (F12) removes what the clip creates.  The driver enforces
+    # nu4*dt*g_max^2 <= 0.5 at setup.  MPAS-only, same as the del2.  Default 0.0 pending the controlled
     # pair that picks the coefficient — see the arm before changing it.
     mpas_qv_smooth_del4_m4s: float = 0.0   # del4 diffusivity [m^4/s]
     # Prognostic sea-ice skin temperature on the MPAS lane (Semtner 1976
@@ -3162,22 +3183,10 @@ class ExperimentConfig(NamedTuple):
                     f"physics_update_steps={_pus} (>= it) so radiation is "
                     "recomputed on physics steps; a held-physics step cannot "
                     "solve radiation")
-        # R-ex (D-REX-1): the column loop does not checkpoint the held
-        # radiation fluxes, so every checkpoint must sit on a radiation
-        # boundary -- the checkpoint cadence is an integer multiple of the
-        # radiation cadence (the run loop refuses a restart anywhere else).
-        _rus_ck = self.rad_update_steps
-        _ck_days = self.output.checkpoint_days
-        if (_is_mpas and isinstance(_rus_ck, int) and _rus_ck > 1
-                and _ck_days and _ck_days > 0 and self.dycore.dt > 0):
-            _ck_steps = _ck_days * 86400.0 / self.dycore.dt
-            if _ck_steps % _rus_ck != 0:
-                errors.append(
-                    f"checkpoint_days={_ck_days} ({_ck_steps:g} steps at "
-                    f"dt={self.dycore.dt:g} s) is not an integer multiple of "
-                    f"rad_update_steps={_rus_ck}: the held radiation fluxes "
-                    "are not checkpointed, so every checkpoint must sit on a "
-                    "radiation boundary")
+        # R-ex (D-REX-1) checkpoint/radiation alignment is NOT checked here:
+        # it depends on the EFFECTIVE timestep, which the driver may clamp
+        # (CFL) after this validation -- see
+        # checkpoint_radiation_cadence_error, called by ModelDriver.setup.
         _nmm = self.cld_macmic_num_steps
         if not isinstance(_nmm, int) or isinstance(_nmm, bool) or _nmm < 1:
             errors.append(
@@ -3260,6 +3269,29 @@ class ExperimentConfig(NamedTuple):
                         "opaque twice. Set them to 0 explicitly (None means "
                         "the scheme's non-zero default, not 'off')")
         if _is_mpas:
+            # Grid operators the column-loop meshes (MPAS Voronoi, FV3-duo
+            # columns) do not provide: column moisture convergence and the
+            # resolved w (review 2026-10-10 F23/F24, majority vote).  A scheme
+            # whose SOURCE or trigger is one of them is refused; Tiedtke /
+            # Bechtold close on their documented saturation proxy -> named.
+            if self.convection != "none":
+                from legoesm.atmosphere.physics.convection.integration import (
+                    convection_scheme_traits)
+                _ctr = convection_scheme_traits(self.convection)
+                if _ctr.is_simple_mc_consumer or _ctr.is_w_grid_consumer:
+                    errors.append(
+                        f"convection={self.convection!r} reads a grid operator "
+                        "(moisture convergence / resolved w) the column-loop "
+                        "lane (MPAS / FV3-duo column) does not provide: Kuo "
+                        "would run inert, Kain-Fritsch on a CAPE-only trigger. "
+                        "Use a lat-lon / cube / spectral lane or another scheme.")
+                elif _ctr.is_mc_consumer:
+                    _wlog.warning(
+                        "SILENT DROP: convection=%r closes on its saturation "
+                        "proxy on the column-loop lane (no moisture-convergence "
+                        "operator there), not on the resolved moisture "
+                        "convergence it uses on lat-lon / cube / spectral.",
+                        self.convection)
             for _flag in ("slab_land_active", "land_soil_bucket",
                           "surface_tiled"):
                 if getattr(self, _flag):
@@ -5161,6 +5193,39 @@ def land_stress_eligibility(cfg) -> tuple[bool, str]:
         return False, (f"land_surface_scheme={cfg.land_surface_scheme!r} is not "
                        f"one of {_LAND_STRESS_SCHEMES} on this lane")
     return True, ""
+
+
+def checkpoint_radiation_cadence_error(cfg) -> str | None:
+    """R-ex (D-REX-1): the column loop does not checkpoint the held radiation
+    fluxes, so every checkpoint must sit on a radiation boundary -- the
+    checkpoint cadence is an integer multiple of the radiation cadence (the
+    run loop also refuses a restart anywhere else).  ``None`` when aligned.
+
+    Call with the config holding the EFFECTIVE timestep (after the driver's
+    CFL / factory clamp): the alignment is a property of the steps the run
+    actually takes, and a requested dt the clamp reduces (C12 duo: 1920 s ->
+    600 s) can misalign where the effective one aligns, or vice versa.
+    """
+    # The run loop's own coercion, so a numpy / YAML-float cadence is
+    # judged here too instead of failing only once the loop starts.
+    rus = max(1, int(cfg.rad_update_steps))
+    ck_days = cfg.output.checkpoint_days
+    dt = cfg.dycore.dt
+    # Same predicate as the run loop's guard: radiation sub-cycles only when
+    # it runs at all, and the checkpoint interval is the loop's integer
+    # step count, int(checkpoint_days * 86400 / dt).
+    if not (cfg.column_loop_lane and rus > 1
+            and cfg.radiation != "none"
+            and ck_days and ck_days > 0 and dt > 0):
+        return None
+    ck_steps = int(ck_days * 86400.0 / dt)
+    if ck_steps % rus == 0:
+        return None
+    return (f"checkpoint_days={ck_days} ({ck_steps} steps at "
+            f"dt={dt:g} s) is not an integer multiple of "
+            f"rad_update_steps={rus}: the held radiation fluxes "
+            "are not checkpointed, so every checkpoint must sit on a "
+            "radiation boundary")
 
 
 def resolve_land_stress_from_land(cfg) -> bool:

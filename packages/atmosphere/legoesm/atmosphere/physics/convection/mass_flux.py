@@ -804,6 +804,7 @@ def mass_flux_convection_from_closure(
         cape=cape,
         convective_mask=convective_mask,
         dq_r_conv_dt=dq_r_conv_dt,
+        precip_frozen_sfc=jnp.zeros_like(cape),  # L_v-only: liquid at sfc (F29)
     )
 
 
@@ -1023,6 +1024,7 @@ def edmf_convection(
         cape=cape,
         convective_mask=convective_mask,
         dq_r_conv_dt=dq_r_conv_dt,
+        precip_frozen_sfc=jnp.zeros_like(cape),  # L_v-only: liquid at sfc (F29)
     )
     return conv_out, a_u_new
 

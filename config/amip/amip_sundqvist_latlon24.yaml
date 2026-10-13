@@ -37,6 +37,7 @@
 include: amip_sundqvist_l36.yaml
 grid_type: latlon
 discretization: latlon_cgrid
+energy_fixer: true                   # dycore energy fixer, now wired on this lane (review 2026-10-10 F15, vote F15b-V6)
 # The base deck's van_leer vertical advection is wired into the MPAS sigma lane
 # only (validate_strict refuses it elsewhere); this lane keeps upwind.
 mpas_vert_advection_scheme: upwind

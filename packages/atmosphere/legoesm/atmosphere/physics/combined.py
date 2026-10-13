@@ -511,6 +511,25 @@ _STATE_TENDENCY_FIELDS = ("du_dt", "dv_dt", "dT_dt", "dp_s_dt", "dphis_dt",
                           "tracer_tendencies")
 
 
+# The frozen part of the surface precip is SUMMED across modules like
+# ``precip`` (microphysics ice+snow+graupel + convective snow, F29).  A module
+# that precipitates without publishing its frozen part makes the sum unknown:
+# this sentinel (never a number) marks it, so the land refuses instead of
+# taking a partial frozen flux for the whole.
+_FROZEN_UNKNOWN = "precip_frozen: a precipitating module did not publish it"
+
+
+def _frozen_add(acc, t):
+    """``acc`` plus module tendency ``t``'s ``precip_frozen`` (raw array),
+    ``_FROZEN_UNKNOWN`` once any precipitating module lacks it."""
+    if getattr(t, "precip", None) is None:
+        return acc
+    f = getattr(t, "precip_frozen", None)
+    if acc is _FROZEN_UNKNOWN or f is None:
+        return _FROZEN_UNKNOWN
+    return f.data if acc is None else acc + f.data
+
+
 def _scale_state_tendencies(tend, factor):
     """``tend`` with the state-changing tendencies times ``factor`` (a static
     Python number; ``0`` gives exact zeros, never ``0 * NaN``) and every
@@ -914,6 +933,7 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
         # diagnostic (not a tendency) so the lean MPAS loop can export it.
         precip_accum = (first.precip.data
                         if getattr(first, "precip", None) is not None else None)
+        frozen_accum = _frozen_add(None, first)
         # Per-module surface/TOA diagnostic fields for the lean-loop CMOR
         # feed: each comes from exactly ONE module (TOA trio + clear-sky TOA
         # pair from radiation, shflx/lhflx from turbulence), so
@@ -1002,11 +1022,16 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
             if getattr(t, "precip", None) is not None:
                 precip_accum = (t.precip.data if precip_accum is None
                                 else precip_accum + t.precip.data)
+            frozen_accum = _frozen_add(frozen_accum, t)
 
             for _k in _DIAG_FIELDS:
                 if sfc_diag_extras[_k] is None:
                     sfc_diag_extras[_k] = getattr(t, _k, None)
 
+        sfc_diag_extras["precip_frozen"] = (
+            frozen_accum if frozen_accum is None or frozen_accum is _FROZEN_UNKNOWN
+            else Field(data=frozen_accum, name="precip_frozen",
+                       dims=first.dp_s_dt.dims, units="kg/m^2/s"))
         return (du_dt, dv_dt, dT_dt, dp_s_dt, dphis_dt,
                 combined_tracer_tends, phys_updates, first, precip_accum,
                 sfc_diag_extras, _led)
@@ -1048,7 +1073,8 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
         radiation, shflx/lhflx from turbulence) on the combined tendency —
         _build_combined constructs a fresh tendency that drops them. No-op /
         byte-identical when every extra is None (radiation+turbulence off)."""
-        _set = {k: v for k, v in extras.items() if v is not None}
+        _set = {k: v for k, v in extras.items()
+                if v is not None and v is not _FROZEN_UNKNOWN}
         return combined._replace(**_set) if _set else combined
 
     # Diagnostic extras that are COUNTS (int): combined across macmic
@@ -1102,6 +1128,9 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
         ex = dict(ex)
         for k, v in ex_r.items():
             if v is None:
+                continue
+            if v is _FROZEN_UNKNOWN or ex.get(k) is _FROZEN_UNKNOWN:
+                ex[k] = _FROZEN_UNKNOWN      # sticky: the window sum is unknown
                 continue
             if k in _COUNT_DIAG_FIELDS:
                 # a COUNT: the window's worst sub-step, not an average

@@ -23,6 +23,7 @@ import pytest
 from legoesm import constants
 from legoesm.core.coupling_fields import AtmToSurface
 from legoesm.land.config import MultiLayerLandConfig, RichardsConfig
+from legoesm.land.surface_scheme import SimpleSEBConfig
 from legoesm.land.soil_grid import SoilGridConfig, make_soil_grid
 from legoesm.land.soil_hydraulics import (
     SoilHydraulicsConfig, psi_from_theta, theta_from_psi, hydraulic_conductivity)
@@ -295,7 +296,10 @@ def test_surface_resistance_throttles_dry_soil_evaporation():
     (``compute_simple_seb_fluxes`` -> ``solve_soil_thermal(surface_conductance=...)``, a
     Robin BC) damps that feedback, so the run now stays finite and the resistance-
     throttling physics is directly testable — this doubles as the regression guard."""
-    base = MultiLayerLandConfig(soil_grid=SoilGridConfig(n_layers=8, total_depth=3.0))
+    # The exponent is the SimpleSEB crust; the default two-leaf scheme uses the
+    # series surface resistance instead and never reads it.
+    base = MultiLayerLandConfig(soil_grid=SoilGridConfig(n_layers=8, total_depth=3.0),
+                                surface_scheme=SimpleSEBConfig())
     f = _forcing(4, T_air=305.0, q_air=0.002, precip=0.0)
     dry = 0.10
     _, _, et_resist, _ = _full_step_budget(base._replace(soil_evap_resistance_exp=2.0),

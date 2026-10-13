@@ -25,6 +25,7 @@ import numpy as np
 from legoesm.core.precision import get_policy
 from legoesm.core.source_rounding import nemo_source_round
 from legoesm.timestepping.tridiagonal import thomas_solve
+from legoesm.grids.halo_latlon import lat_faces_from_north, lat_north
 
 # Shchepetkin (2015) adaptive-implicit vertical-advection Courant
 # thresholds (NEMO ``ln_zad_Aimp`` PARAMETERs).  Below ``CU_MIN`` the
@@ -287,7 +288,7 @@ def nemo_fe3mask_from_tmask(tmask, *, grid=None):
     """
     active = jnp.asarray(tmask)
     east = jnp.roll(active, -1, axis=1)
-    north = jnp.concatenate([active[1:], jnp.zeros_like(active[:1])], axis=0)
+    north = lat_north(active)
     northeast = jnp.roll(north, -1, axis=1)
     fe3mask = active * east * north * northeast
     return nemo_t_fold_f_owned(fe3mask, grid)
@@ -326,7 +327,7 @@ def nemo_dynvor_e3f_0vor(e3t_0, tmask, *, grid, dtype, nn_e3f_typ=0,
         return jnp.roll(value, -1, axis=1)
 
     def north(value):
-        return jnp.concatenate([value[1:], jnp.zeros_like(value[:1])], axis=0)
+        return lat_north(value)
 
     masked = b(e3t0 * tmask)
     masked_n = north(masked)
@@ -436,7 +437,7 @@ def nemo_e3f_0vor_from_tmask(e3t_0, tmask, dry_vertex_fill, *,
 
     def north(value):
         # Closed north wall; an ORCA T fold is applied below instead.
-        return jnp.concatenate([value[1:], jnp.zeros_like(value[:1])], axis=0)
+        return lat_north(value)
 
     masked = b(e3t0 * active)
     masked_n = north(masked)
@@ -509,7 +510,7 @@ def nemo_qco_live_vorticity_e3f_cgrid(
 
     def north(value):
         # The certified GYRE use is a closed beta-plane box.
-        return jnp.concatenate([value[1:], jnp.zeros_like(value[:1])], axis=0)
+        return lat_north(value)
 
     raw = getattr(z_coord, "nemo_een_barotropic", None)
     mesh_e3f = None if raw is None else getattr(raw, "e3f_0", None)
@@ -550,7 +551,7 @@ def nemo_qco_live_vorticity_e3f_cgrid(
 
     # NEMO native F(i,j) maps to legoESM vertex [j+1,i+1].  The added
     # south/west rows are inert walls for this closed-box identity.
-    with_south = jnp.concatenate([e3f_native[:1], e3f_native], axis=0)
+    with_south = lat_faces_from_north(e3f_native, south=e3f_native[:1])
     return jnp.concatenate([with_south[:, -1:], with_south], axis=1)
 
 
@@ -832,10 +833,10 @@ def nemo_qco_live_face_geometry_cgrid(
     one = jnp.asarray(1.0, dtype=geom.e3u.dtype)
     result = (
         jnp.concatenate([geom.e3u[:, -1:, :], geom.e3u], axis=1),
-        jnp.concatenate([jnp.zeros_like(geom.e3v[:1]), geom.e3v], axis=0),
+        lat_faces_from_north(geom.e3v),
         jnp.concatenate([one + geom.r3u[:, -1:], one + geom.r3u], axis=1),
-        jnp.concatenate(
-            [jnp.ones_like(geom.r3v[:1]), one + geom.r3v], axis=0),
+        lat_faces_from_north(
+            one + geom.r3v, south=jnp.ones_like(geom.r3v[:1])),
     )
     if not include_reciprocals:
         return result
@@ -845,7 +846,7 @@ def nemo_qco_live_face_geometry_cgrid(
     # source-identical on ORCA2's non-uniform, partial-cell mesh.
     return result + (
         jnp.concatenate([geom.r1_hu[:, -1:], geom.r1_hu], axis=1),
-        jnp.concatenate([jnp.zeros_like(geom.r1_hv[:1]), geom.r1_hv], axis=0),
+        lat_faces_from_north(geom.r1_hv),
     )
 
 
@@ -1075,6 +1076,7 @@ def create_z_star_from_thicknesses(
     dz_ref_m, t_depth_ref_m=None, *, nemo_gdept_0_m=None,
     nemo_gdepw_0_m=None, nemo_e3t_0_m=None, nemo_e3w_0_m=None,
     nemo_e3w_source="mesh_reference",
+    allow_single_level: bool = False,
     nemo_hu_0_m=None, nemo_hv_0_m=None, nemo_e1e2t_m=None,
     nemo_e1e2u_m=None, nemo_e1e2v_m=None,
     nemo_e2u_m=None, nemo_e1v_m=None,
@@ -1118,10 +1120,13 @@ def create_z_star_from_thicknesses(
     # Check ndim on the ORIGINAL array BEFORE any ravel -- a 2-D array would
     # otherwise be silently flattened and accepted as 1-D (codex HIGH).
     dz_np = np.asarray(dz_ref_m, dtype=np.float64)
-    if dz_np.ndim != 1 or dz_np.size < 2:
+    # NEMO's TSUNAMI runs ONE wet level (jpk = 2); only a card that states
+    # it may build a one-level column, every other caller keeps the guard.
+    min_levels = 1 if allow_single_level else 2
+    if dz_np.ndim != 1 or dz_np.size < min_levels:
         raise ValueError(
-            f"dz_ref_m must be a 1-D array of >= 2 thicknesses, got shape "
-            f"{dz_np.shape}")
+            f"dz_ref_m must be a 1-D array of >= {min_levels} thicknesses, "
+            f"got shape {dz_np.shape}")
     if not np.all(dz_np > 0.0):
         raise ValueError("dz_ref_m thicknesses must all be > 0")
     n_levels = int(dz_np.size)

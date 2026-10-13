@@ -231,6 +231,74 @@ AIMIP_CLASSICAL_CONSTRAINTS: list[ParamConstraint] = (
 )
 
 
+# Turbulence schemes whose sub-config carries the trained ``surface`` member
+# (make_aimip_classical_spectral_physics: louis via to_louis_config, the rest
+# via _spatial_surface_override); "none" has no surface to train.
+_SURFACE_CARRYING_TURBULENCE = frozenset({
+    "louis", "tke", "smagorinsky", "mynn25", "clubb_lite", "clubb",
+    "holtslag_boville", "ysu", "edmf"})
+# Surface knobs each bulk scheme reads (core/bulk_flux.py via
+# turbulence/surface_layer.py compute_surface_fluxes), pinned against measured
+# gradients by test_aimip_classical_inert_knobs: the constant law reads only
+# Cd/Ch; "most" reads z0, the Businger-Dyer pair and z0h/z0; coare3 has its own
+# stability functions and scalar roughness (z0 only seeds its iteration);
+# large_yeager keeps the Businger-Dyer pair but not z0h/z0; large_yeager_cesm
+# reads none.
+_SURFACE_KNOBS_BY_BULK = {
+    "constant": ("surface_Cd_neutral", "surface_Ch_neutral"),
+    "most": ("surface_z0", "surface_most_unstable_gamma",
+             "surface_most_stable_beta", "surface_z0h_z0_ratio"),
+    "coare3": ("surface_z0",),
+    "large_yeager": ("surface_z0", "surface_most_unstable_gamma",
+                     "surface_most_stable_beta"),
+    "large_yeager_cesm": (),
+}
+# falls through to the constant-coefficient branch of compute_surface_fluxes
+_SURFACE_KNOBS_BY_BULK["nemo_si3_constant"] = _SURFACE_KNOBS_BY_BULK["constant"]
+
+
+# Spatial surface fields read through the same surface sub-config as these
+# scalar knobs (make_aimip_classical_spectral_physics._spatial_surface_override),
+# so each is live exactly when its scalar is; sfc_emissivity / sfc_albedo are
+# read by both radiation backends (review F5, vote B).
+_SPATIAL_FIELD_READ_WITH = {"Cd_neutral": "surface_Cd_neutral",
+                            "Ch_neutral": "surface_Ch_neutral",
+                            "z0": "surface_z0"}
+
+
+def aimip_classical_trainable_names(*, convection, turbulence, gwd,
+                                    microphysics, cloud, radiation,
+                                    surface_bulk_scheme) -> frozenset:
+    """Knobs of ``AIMIP_CLASSICAL_CONSTRAINTS`` the RESOLVED schemes read.
+
+    Mirrors the scheme-conditional ``to_*_config`` calls in
+    :func:`make_aimip_classical_spectral_physics`; a knob of an unselected
+    family has no gradient path and must not be trained (review F5).  The
+    run's first-step no-inert gate then checks the remaining set by measurement.
+    """
+    if surface_bulk_scheme not in _SURFACE_KNOBS_BY_BULK:
+        raise ValueError(
+            f"unknown surface bulk scheme {surface_bulk_scheme!r}; expected "
+            f"one of {sorted(_SURFACE_KNOBS_BY_BULK)}")
+    fams = {"tiedtke": _TIEDTKE_TRAINABLE, "sbm": _SBM_TRAINABLE}.get(
+        convection, [])
+    fams = list(fams)
+    if turbulence == "louis":
+        fams += _LOUIS_TRAINABLE
+    if gwd == "mcfarlane":
+        fams += _MCFARLANE_TRAINABLE
+    if microphysics == "sundqvist":
+        fams += _SUNDQVIST_TRAINABLE
+    if cloud == "xu_randall" and radiation == "rrtmgp":   # gray drops clouds
+        fams += _XU_RANDALL_TRAINABLE
+    if radiation == "rrtmgp":
+        fams += _RRTMGP_TRAINABLE
+    names = {c.name for c in fams}
+    if turbulence in _SURFACE_CARRYING_TURBULENCE:
+        names |= set(_SURFACE_KNOBS_BY_BULK[surface_bulk_scheme])
+    return frozenset(names)
+
+
 # ----------------------------------------------------------------------
 # Equinox container for the AIMIP classical variant
 # ----------------------------------------------------------------------
@@ -264,6 +332,7 @@ class AIMIPClassicalParams(eqx.Module):
         spatial_surface: bool = False,
         spatial_init_std: float = 0.0,
         spatial_seed: int = 0,
+        trainable=None,
     ) -> "AIMIPClassicalParams":
         """Initialize all knobs at (or just inside) their canonical defaults.
 
@@ -294,7 +363,20 @@ class AIMIPClassicalParams(eqx.Module):
             PRNG seed for the spatial-coefficient initialization.
             Only used when ``spatial_surface=True`` and
             ``spatial_init_std > 0``.
+        trainable : iterable of str or None
+            Knob names that are TRAINABLE (``aimip_classical_trainable_names``
+            for the run's resolved schemes).  Every other knob is stored as a
+            plain Python float: same value, same checkpoint leaf, but not an
+            array, so ``eqx.filter_value_and_grad`` and the optimizer skip it
+            (frozen out of the trainable set; no-inert-parameters rule).
+            ``None`` keeps every knob an array (checkpoint templates).
         """
+        names = {c.name for c in AIMIP_CLASSICAL_CONSTRAINTS}
+        if trainable is not None:
+            trainable = frozenset(trainable)
+            unknown = sorted(trainable - names)
+            if unknown:
+                raise ValueError(f"unknown AIMIP classical knob(s): {unknown}")
         scheme_defaults = _canonical_scheme_defaults()
         try:
             from legoesm.core.precision import get_policy
@@ -319,16 +401,20 @@ class AIMIPClassicalParams(eqx.Module):
             default_clamped = min(
                 c.max_val - margin, max(c.min_val + margin, default),
             )
-            raw[c.name] = jnp.asarray(
+            raw_c = jnp.asarray(
                 range_to_sigmoid(default_clamped, c.min_val, c.max_val),
-                dtype=param_dtype,
-            )
+                dtype=param_dtype)
+            raw[c.name] = (raw_c if trainable is None or c.name in trainable
+                           else float(raw_c))
         spatial = None
         if spatial_surface:
             spatial = AIMIPSpatialSurfaceParams.from_defaults(
                 dtype=param_dtype,
                 init_std=spatial_init_std,
                 key=jax.random.PRNGKey(int(spatial_seed)),
+                frozen=({f for f, k in _SPATIAL_FIELD_READ_WITH.items()
+                         if k not in trainable}
+                        if trainable is not None else ()),
             )
         return AIMIPClassicalParams(
             raw_values=raw,
@@ -336,10 +422,29 @@ class AIMIPClassicalParams(eqx.Module):
             spatial_surface=spatial,
         )
 
+    def for_checkpoint(self) -> "AIMIPClassicalParams":
+        """On-disk view: frozen (Python-float) knobs as arrays of the trainable
+        knobs' dtype, so a checkpoint loads into an all-array template
+        (``from_defaults()``) without an equinox dtype mismatch, and back into
+        a frozen template as the same float (``ml.training.save_checkpoint``)."""
+        # Only Python-float knobs change; optimizer-moment copies of this
+        # module (None / MaskedNode at frozen or masked slots) pass through.
+        if not any(type(v) is float for v in self.raw_values.values()):
+            return self
+        dt = next((v.dtype for v in self.raw_values.values()
+                   if hasattr(v, "dtype")), None)
+        if dt is None:   # every knob frozen: the dtype from_defaults uses
+            from legoesm.core.precision import get_policy
+            dt = get_policy().compute
+        raw = {k: (jnp.asarray(v, dtype=dt) if type(v) is float else v)
+               for k, v in self.raw_values.items()}
+        return eqx.tree_at(lambda m: m.raw_values, self, raw)
+
     def as_dict(self) -> dict[str, jax.Array]:
         """Return constrained physical values for every knob."""
         return {
-            c.name: sigmoid_to_range(self.raw_values[c.name], c.min_val, c.max_val)
+            c.name: sigmoid_to_range(jnp.asarray(self.raw_values[c.name]),
+                                     c.min_val, c.max_val)
             for c in self.constraints
         }
 
@@ -1012,6 +1117,32 @@ def aimip_inactive_fields(*, cloud_scheme: str) -> frozenset:
     :func:`aimip_legacy_owned_fields` at every bundle build, so a trained
     checkpoint and its evaluation skeleton share one tree."""
     return _INACTIVE_FIELDS_BY_CLOUD_SCHEME.get(cloud_scheme, frozenset())
+
+
+def resolved_inactive_fields(physics_config, *,
+                             subgrid_orography: bool) -> frozenset:
+    """Spec parameters of an ACTIVE scheme that a resolved OPTION of it never
+    reads, from the BUILT config (the ``_inactive_keys`` pattern; the
+    ``assert_no_inert`` gate on the first gradient catches the rest).
+
+    * Morrison ``k_au``/``k_ac``/``x_star``: read only by the
+      ``warm_rain_scheme == "seifert_beheng"`` branch (morrison.py); the
+      kk2000 laws carry their own knobs (``autocon_fact``, ``accre_enhan_fact``).
+    * McFarlane ``h_topo``: the scalar fallback height, read only when no
+      per-column subgrid-orography field is wired (mcfarlane.py).
+      ``subgrid_orography`` = the driver wired one (production: SSO file).
+    """
+    out = set()
+    micro = getattr(physics_config, "microphysics", None)
+    if (getattr(micro, "scheme", None) == "morrison"
+            and micro.morrison.warm_rain_scheme != "seifert_beheng"):
+        out |= {f"atm.micro.MorrisonConfig.{f}"
+                for f in ("k_au", "k_ac", "x_star")}
+    gwd = getattr(physics_config, "gravity_wave_drag", None)
+    if subgrid_orography and "mcfarlane" in str(
+            getattr(gwd, "scheme", "")).split("+"):
+        out.add("atm.gwd.McFarlaneConfig.h_topo")
+    return frozenset(out)
 
 
 class AIMIPTrainableBundle(eqx.Module):

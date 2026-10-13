@@ -327,6 +327,10 @@ _FV3_DUO_ALLOWED_NONDEFAULT: frozenset[str] = frozenset({
     # Pinned to 'fp64' by the specific guard (the ExperimentConfig default
     # is 'fp32', so every valid duo config differs here).
     "precision",
+    # The energy fixer (F15) is not wired on this closed lane, so True is
+    # refused (refuse_unwired_energy_fixer): every valid config here sets
+    # the explicit opt-out False, which differs from the default.
+    "dycore.energy_fixer",
     # The five scheme selectors are pinned to 'none' by the specific guard.
     "radiation", "convection", "microphysics", "turbulence",
     "gravity_wave_drag",
@@ -592,7 +596,8 @@ def _create_fv3_duo_column_model(config: ExperimentConfig, gc, model_type,
     return FV3DuoColumnModel(
         dyn, tracer_names=registry.names,
         conservative_tracer_clamp=config.dycore.mpas_conservative_tracer_clamp,
-        energy_consistent_moisture_clip=config.energy_consistent_moisture_clip)
+        energy_consistent_moisture_clip=config.energy_consistent_moisture_clip,
+        energy_fixer=config.dycore.energy_fixer)
 
 
 def _create_latlon_column_model(config: ExperimentConfig, model):
@@ -735,6 +740,42 @@ def fv3_duo_dynamics_for_layout(config: ExperimentConfig, bundle, cfg):
     return FV3DuoDynamicsModel(bundle, cfg)
 
 
+def energy_fixer_wired(config: ExperimentConfig, solver_name: str) -> bool:
+    """Whether the dycore ``solver_name`` runs ``DycoreConfig.energy_fixer``
+    (the CAM-style global total-energy fixer, review 2026-10-10 F15): the
+    MPAS hydrostatic core (serial ``_step_jit`` + MPI ``voronoi_mpi._step``),
+    the FV3-duo COLUMN lane, the lat-lon C-grid hydrostatic core (every lane
+    runs ``_step_cgrid_impl``) and the cube C-D grid hydrostatic core
+    (``_step_fv3``; the sub-face-TILED dynamics lanes do not run it and are
+    refused at their driver entry).  Every other solver does not run it."""
+    return (solver_name in _ENERGY_FIXER_SOLVERS
+            or (solver_name == "fv3_duo_primitive_equations"
+                and bool(config.dycore.column_lane)))
+
+
+_ENERGY_FIXER_SOLVERS = frozenset({
+    "mpas_primitive_equations",
+    "latlon_cgrid_primitive_equations",
+    "cdgrid_primitive_equations",
+})
+
+
+def refuse_unwired_energy_fixer(config: ExperimentConfig,
+                                solver_name: str) -> None:
+    """``energy_fixer=True`` on a lane that does not run it is an ERROR,
+    never a silently open energy sink (vote 2026-10-10, F15 V8-A): the run
+    must opt out explicitly with ``energy_fixer=False``."""
+    if config.dycore.energy_fixer and not energy_fixer_wired(config,
+                                                             solver_name):
+        raise ValueError(
+            f"DycoreConfig.energy_fixer=True, but the dycore total-energy "
+            f"fixer is wired only on the MPAS, lat-lon C-grid and cube C-D grid "
+            f"hydrostatic and FV3-duo column lanes; {solver_name!r} would run WITHOUT it and leave the "
+            f"damping/numerical energy sink open.  Set energy_fixer=False "
+            f"(run_amip/run_coupled --no-energy-fixer) to accept that sink "
+            f"explicitly on this lane.")
+
+
 def create_atmosphere_dycore(
     config: ExperimentConfig,
     grid,
@@ -794,6 +835,7 @@ def create_atmosphere_dycore(
         _fail_unsupported(model_type, discretization, grid_type)
 
     solver_name = _DRIVER_SUPPORTED[key]
+    refuse_unwired_energy_fixer(config, solver_name)
     if coeff_grid is None:
         coeff_grid = grid
     diff = compute_diffusion(coeff_grid, dc)
@@ -905,6 +947,8 @@ def create_atmosphere_dycore(
             # #771: flux-form moisture transport (needs moisture attached via
             # ExperimentConfig.moisture_advection; default off = advective).
             moisture_flux_form=getattr(dc, "moisture_flux_form", False),
+            # CAM-style dycore total-energy fixer (F15; DycoreConfig).
+            energy_fixer=dc.energy_fixer,
         )
         return CDGridPrimitiveEquationModel(grid, sigma, cfg)
 
@@ -1067,6 +1111,8 @@ def create_atmosphere_dycore(
             # alike; this one is the piece CAM applies at every level and we
             # had computed (``div_damp``) but never handed to this core.
             nu_div4=diff.div_damp4,
+            # CAM-style dycore total-energy fixer (F15; DycoreConfig).
+            energy_fixer=dc.energy_fixer,
             # Budget-ledger vertical band. The dycore owns the SNAPSHOT-derived
             # dynamics and clips rows, so it needs the SAME weight the physics
             # rows use; without it those two rows stay full-column while the
@@ -1469,6 +1515,8 @@ def create_atmosphere_dycore(
             time_integrator=(CGridLatLonPrimitiveEquationConfig().time_integrator
                              if dc.time_integrator == "auto"
                              else dc.time_integrator),
+            # CAM-style dycore total-energy fixer (F15; DycoreConfig).
+            energy_fixer=dc.energy_fixer,
         )
         model = CGridLatLonPrimitiveEquationModel(
             grid, sigma, cfg, dt=_effective_dt)

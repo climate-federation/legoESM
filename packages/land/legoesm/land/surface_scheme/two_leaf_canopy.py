@@ -474,7 +474,7 @@ def compute_two_leaf_canopy_fluxes(
             Vcmax25_C4Sun=sw_rt.Vcmax25_C4Sun, Vcmax25_C4Sh=sw_rt.Vcmax25_C4Sh,
             ASW_Sun=sw_rt.ASW_Sun, ASW_Sh=sw_rt.ASW_Sh, ASW_Soil=sw_rt.ASW_Soil,
             Ts_bc=Ts_bc,
-            Ca=Ca, Ps=Ps, Ta=Ta,
+            Ca=_bcast(Ca), Ps=Ps, Ta=Ta,
             lam=_bcast(lam), Cp=_bcast(Cp), rhoa=rhoa, Tv_atm=Tv_atm, q_atm=q_atm,
             m=m_mix, b0=b0_mix, alf=alf, TgC=TgC,
             fC4=fC4, fStress_soil=fStress_soil,

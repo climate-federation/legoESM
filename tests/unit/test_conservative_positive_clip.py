@@ -594,70 +594,6 @@ def test_mpi_floor_iterates_tracers_sorted():
     assert "sorted(tracers)" in inspect.getsource(apply_water_positivity)
 
 
-class TestPerStepDriverConservingFloor:
-    """Owner decision 2026-08-16: conserving form ALWAYS. The per-step
-    lat-lon/cube driver's plain ``max(q, 0)`` species floors move to the
-    column-conserving borrow, weighted by the TRUE layer mass dp
-    (hybrid-correct; reduces to dsigma*p_s on pure sigma)."""
-
-    def test_conserving_floor_conserves_the_dp_integral(self):
-        """REAL execution of the driver method on a minimal fake self: a
-        mixed-sign column keeps its dp-weighted integral (borrow), and a
-        plain clip would inflate it (non-vacuity)."""
-        from types import SimpleNamespace
-
-        from legoesm.driver.model_driver import ModelDriver
-        from legoesm.grids.vertical import create_sigma_coordinate
-
-        sigma = create_sigma_coordinate(4)
-        p_s = jnp.full((2, 3), 1.0e5)
-        fake = SimpleNamespace(
-            sigma=sigma,
-            state=SimpleNamespace(p_s=SimpleNamespace(data=p_s)),
-        )
-        q = jnp.broadcast_to(
-            jnp.asarray([3.0e-4, -1.0e-4, 2.0e-4, 1.0e-4]), (2, 3, 4))
-        out = ModelDriver._conserving_floor(fake, q)
-        _ph = sigma.pressure_at_half(p_s)
-        dp = _ph[..., 1:] - _ph[..., :-1]
-        np.testing.assert_allclose(
-            np.asarray(jnp.sum(out * dp, axis=-1)),
-            np.asarray(jnp.sum(q * dp, axis=-1)), rtol=1e-12)
-        assert float(jnp.min(out)) >= 0.0
-        # non-vacuity: the plain clip changes the integral on this input
-        assert not np.allclose(
-            np.asarray(jnp.sum(jnp.maximum(q, 0.0) * dp, axis=-1)),
-            np.asarray(jnp.sum(q * dp, axis=-1)))
-
-    def test_per_step_lanes_route_through_the_conserving_floor(self):
-        """Source pin on the symbols that RUN (_run_per_step and the
-        double-moment integrator): the conserving floor must be called and
-        the old plain clamp must be gone from the species updates. Fails if
-        either lane's floor is reverted to ``jnp.maximum``."""
-        import inspect
-
-        from legoesm.driver.model_driver import ModelDriver
-
-        src_step = inspect.getsource(ModelDriver._run_per_step)
-        assert src_step.count("self._conserving_floor(_qv_raw)") == 2
-        assert src_step.count(
-            "self._conserving_floor(self.q_c + DT * phys_out.dq_c_dt)") == 2
-        assert src_step.count(
-            "self._conserving_floor(self.q_r + DT * phys_out.dq_r_dt)") == 2
-        assert "jnp.maximum(_qv_raw, 0.0)" not in src_step
-        assert "jnp.maximum(self.q_c" not in src_step
-        assert "jnp.maximum(self.q_r" not in src_step
-
-        src_dm = inspect.getsource(
-            ModelDriver._apply_double_moment_tendencies)
-        assert "self._conserving_floor(" in src_dm
-        assert "jnp.maximum(self.tracers[k]" not in src_dm
-
-        src_floor = inspect.getsource(ModelDriver._conserving_floor)
-        assert "conservative_positive_clip" in src_floor
-        assert "pressure_at_half" in src_floor   # hybrid-correct dp weight
-
-
 def test_mpas_conserving_clamp_is_the_default_now():
     """Owner decision 2026-08-16: conserving form always — the MPAS floors
     default flips ON (the OFF assertions live in the CLI test above, via
@@ -693,56 +629,6 @@ class TestConservingFormAlways:
         assert "jnp.maximum(moist[\"q_r\"]" not in src
         assert "jnp.maximum(fld + statics.dt * tend, 0.0)" not in src
         assert "jnp.maximum(fld[_ofi] + _dt * tend, 0.0)" not in src
-
-    def test_per_step_hyperdiffusion_floor_is_conserving(self):
-        """The q_v smoothing tail is non-monotone; its floor is the same
-        clamp class. Both per-step sites must route through the conserving
-        floor."""
-        import inspect
-
-        from legoesm.driver.model_driver import ModelDriver
-
-        src = inspect.getsource(ModelDriver._run_per_step)
-        assert "jnp.maximum(\n            self.q_v + DT * hyperdiffusion_3d" \
-            not in src
-        assert src.count(
-            "self._conserving_floor(\n"
-            "            self.q_v + DT * hyperdiffusion_3d") == 1
-        assert src.count(
-            "self._conserving_floor(\n"
-            "                self.q_v + DT * hyperdiffusion_3d") == 1
-
-    def test_conserving_floor_is_hybrid_correct_by_execution(self):
-        """REAL execution with a hybrid coordinate: the dp-weighted column
-        integral is conserved, and the flat-dsigma integral of the same
-        output is NOT (non-vacuity — the two weights genuinely differ)."""
-        from types import SimpleNamespace
-
-        from legoesm.driver.model_driver import ModelDriver
-        from legoesm.grids.vertical import create_hybrid_coordinate
-
-        k = jnp.linspace(0.0, 1.0, 9)
-        hybrid = create_hybrid_coordinate(
-            8, A_half=2.0e4 * (1.0 - k) * k, B_half=k**2)
-        p_s = jnp.asarray([[6.0e4, 1.03e5]])   # strong per-column variation
-        fake = SimpleNamespace(
-            sigma=hybrid,
-            state=SimpleNamespace(p_s=SimpleNamespace(data=p_s)),
-        )
-        q = jnp.broadcast_to(
-            jnp.asarray([3e-4, -1e-4, 2e-4, 1e-4, 5e-5, -2e-5, 4e-5, 6e-5]),
-            (1, 2, 8))
-        out = ModelDriver._conserving_floor(fake, q)
-        _ph = hybrid.pressure_at_half(p_s)
-        dp = jnp.maximum(_ph[..., 1:] - _ph[..., :-1], 0.0)
-        np.testing.assert_allclose(
-            np.asarray(jnp.sum(out * dp, axis=-1)),
-            np.asarray(jnp.sum(q * dp, axis=-1)), rtol=1e-12)
-        assert float(jnp.min(out)) >= 0.0
-        dsig = jnp.asarray(hybrid.dsigma)
-        assert not np.allclose(
-            np.asarray(jnp.sum(out * dsig, axis=-1)),
-            np.asarray(jnp.sum(q * dsig, axis=-1)))
 
 
 class TestNonConservingFormsWarn:

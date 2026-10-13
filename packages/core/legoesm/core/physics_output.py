@@ -80,3 +80,9 @@ class PhysicsOutput(NamedTuple):
     # reports absence rather than a stale pair).  Appended LAST (positional
     # ABI).
     evap_sfc: jax.Array | None = None
+    # FROZEN part of ``precip`` [kg/m2/s, +down] (review 2026-10-10 F29):
+    # microphysics ice+snow+graupel plus convective snow, the atmosphere's own
+    # phase partition (the MPAS lane's ``precip_frozen`` slot).  The land
+    # takes its snowfall from it.  None when a precipitating scheme does not
+    # publish it (a consumer then refuses).  Appended LAST (positional ABI).
+    precip_frozen: jax.Array | None = None

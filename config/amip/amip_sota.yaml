@@ -33,6 +33,7 @@ grid_type: cubed_sphere
 resolution: 48
 nlev: 40
 discretization: cdgrid
+energy_fixer: true                   # dycore energy fixer, now wired on this lane (review 2026-10-10 F15, vote F15b-V6)
 dt: 150.0
 
 # --- Atmospheric physics (validated realism stack) ----------------------------

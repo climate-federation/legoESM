@@ -45,7 +45,11 @@
 
 # --- Machine-specific paths (Levante defaults; override via the environment) ---
 : "${ICON_ROOT:=/pool/data/ICON/grids/public/mpim}"
-: "${ERA5_IC:=/scratch/b/b309178/era5_ic_1979-01-01.zarr}"
+# ERA5 IC with the analysis's 1..30 hPa levels added (scripts/data/
+# add_era5_upper_levels.py): the plain 13-level file stops at 50 hPa and the
+# L32 top layers start ~40/20 K cold.  SAME product as the Ginsburg twin
+# (review 2026-10-10 F33; stage the Ginsburg-built zarr here before a launch).
+: "${ERA5_IC:=/scratch/b/b309178/era5_ic_1979-01-01_gproxy_L21.zarr}"
 : "${ETOPO:=/work/bd1083/b309178/diffESM/legoesm_ap/data/bathymetry/etopo_1deg_clean.nc}"
 # SST/SIC: PCMDI CMIP7 AMIP boundary conditions (the protocol-standard tosbcs/
 # siconcbcs mid-month files, 1870-2022) — the dataset every proven MPAS-lane
@@ -70,7 +74,12 @@
 # sensitivity runs.
 : "${FORCING_1979_2014:=/work/bd1083/b309178/diffESM/legoesm_ap/data/forcing/cmip6_1979-2014}"
 : "${OZONE:=${FORCING_1979_2014}/vmro3_input4MIPs_ozone_CMIP_UReading-CCMI-1-0_gn_197901-201412.nc}"
-: "${AEROSOL:=${FORCING_1979_2014}/aeropt_kinne_sw_b14_fin_1979-2014_rast.nc}"
+# MACv2-SP anthropogenic plumes on the Kinne MACv1 pre-industrial background,
+# 1850-2014: fine+coarse for radiation, fine mode for the droplet-number (CCN)
+# path (review 2026-10-10 F33/F37).  Same basenames on both machines; build
+# them here with scripts/data/adapt_cmip6_aerosol.py (see the Ginsburg twin).
+: "${AEROSOL:=${FORCING_1979_2014}/aeropt_macv2sp_sw_b14_tot_1850-2014_MACv1bg.nc}"
+: "${AEROSOL_CCN:=${FORCING_1979_2014}/aeropt_macv2sp_sw_b14_fin_1850-2014_MACv1bg.nc}"
 : "${VOLCANIC:=${FORCING_1979_2014}/bc_aeropt_cmip6_volc_lw_b16_sw_b14_1979-2014.nc}"
 # CLM surfdata for the multilayer Richards land model (use_multilayer_land): the
 # PFT/texture/glacier surface map. Compute nodes have NO internet, so the auto-
@@ -121,6 +130,7 @@ AMIP_PATH_FLAGS=(
   --ozone-file "${OZONE}"
   --ghg-file "${GHG}"
   --aerosol-file "${AEROSOL}"
+  --aerosol-ccn-file "${AEROSOL_CCN}"
   --volcanic-aerosol-file "${VOLCANIC}"
   --topography "${ETOPO}"
   --clm-surfdata-path "${CLM_SURFDATA}"

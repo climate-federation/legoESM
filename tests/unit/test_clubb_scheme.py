@@ -126,7 +126,13 @@ def test_diagnostic_clubb_conserves_column_with_no_sfc_flux():
     mass = np.asarray(kw["rho"]) * dz
     exner = (np.asarray(kw["p_full"]) / constants.p_ref) ** constants.kappa
     dq = np.asarray(out.dq_v_dt)
-    dth = np.asarray(out.dT_dt) / exner
+    # theta TRANSPORT invariant: the KE-dissipation heating (F14, a separate
+    # closure pinned in test_clubb_ke_heating.py) is a genuine source, so it
+    # is taken out before testing that the diffusion only redistributes.
+    from legoesm.atmosphere.physics._shared import ke_dissipation_heating
+    ke_heat = np.asarray(ke_dissipation_heating(
+        kw["u"], kw["v"], out.du_dt, out.dv_dt, dt))
+    dth = (np.asarray(out.dT_dt) - ke_heat) / exner
     col_dq = np.sum(mass * dq, axis=1)
     col_q = np.sum(mass * np.asarray(kw["q_v"]), axis=1)
     col_dth = np.sum(mass * dth, axis=1)
@@ -546,15 +552,24 @@ def test_prognostic_clubb_conserves_column_moisture_no_sfc_flux():
     dq = np.asarray(out.dq_v_dt)
     col_dq = np.sum(mass * dq, axis=1)                   # kg/m^2/s
     col_q = np.sum(mass * np.asarray(q_f), axis=1)       # kg/m^2
-    # (a) Nontrivial redistribution: the per-step moisture change somewhere in the
-    # column is >=1e-8 kg/kg (the spun-up case is ~1e-6; the rest state is ~1e-11,
-    # so this floor cleanly separates "real transport" from "vacuously quiescent").
-    assert float(np.max(np.abs(dq) * 150.0)) > 1e-8
+    # (a) Nontrivial redistribution, measured against the SAME call from the
+    # rest/floor moments (the vacuous case this guard exists for).  The spun-up
+    # change is ~1e-8 kg/kg per step (1.3e-8 before the CAM-tree PDF-closure
+    # port #1733, 1.0e-8 after); the old fixed 1e-8 floor sat on that value, and
+    # the docstring's "~1e-6" was never this fixture's number (review
+    # 2026-10-11, clubbres).
+    out_rest, _ = clubb_turbulence_prognostic(
+        u_f, v_f, T_f, q_f, pack_clubb_moments(init_clubb_moments(*T_f.shape, cfg)),
+        kw["p_full"], kw["p_half"], kw["z_full"], kw["z_half"], T_f[:, -1],
+        q_f[:, -1], rho, 150.0, cfg)
+    rest = float(np.max(np.abs(np.asarray(out_rest.dq_v_dt)) * 150.0))
+    spun = float(np.max(np.abs(dq) * 150.0))
+    assert spun > 1e-9 and spun > 100.0 * rest, (spun, rest)
     # (b) Yet the mass-weighted column total drifts only at flux-form round-off.
     assert np.all(np.abs(col_dq) * 150.0 / col_q < 1e-12)
 
 
-def test_prognostic_clubb_conserves_column_heat_no_sfc_flux():
+def test_prognostic_clubb_conserves_column_heat_no_sfc_flux(monkeypatch):
     """Heat counterpart of the moisture-conservation invariant (NON-VACUOUS).
 
     CLUBB transports liquid-water potential temperature ``θl`` (the prognostic
@@ -578,6 +593,10 @@ def test_prognostic_clubb_conserves_column_heat_no_sfc_flux():
     via the stable SCM driver first, then assert BOTH a nontrivial-redistribution
     floor AND conservation. ``q_sfc`` also tracks ``q_v`` so ``lhflx == 0`` too —
     a purely internal redistribution with all surface fluxes off."""
+    # theta-l TRANSPORT pin: the wrapper's column energy fixer is a separate
+    # closure (test_clubb_column_budget.py), zeroed so it cannot mask a
+    # transport defect.
+    _zero_energy_fixer(monkeypatch)
     from legoesm.atmosphere.physics._shared import (
         exner_function,
         virtual_temperature,
@@ -601,7 +620,13 @@ def test_prognostic_clubb_conserves_column_heat_no_sfc_flux():
     dz = np.abs(np.asarray(kw["z_half"])[:, :-1] - np.asarray(kw["z_half"])[:, 1:])
     mass = np.asarray(rho) * dz
     exner = np.asarray(exner_function(kw["p_full"]))
-    dthl = np.asarray(out.dT_dt) / exner                 # dθl/dt [K/s]
+    # θl TRANSPORT invariant: remove the KE-dissipation heating (F14; its own
+    # closure is pinned in test_clubb_ke_heating.py).  dt=150 < clubb_dt, so
+    # one sub-step and the heating is exactly this expression.
+    from legoesm.atmosphere.physics._shared import ke_dissipation_heating
+    ke_heat = np.asarray(ke_dissipation_heating(
+        u_f, v_f, out.du_dt, out.dv_dt, 150.0))
+    dthl = (np.asarray(out.dT_dt) - ke_heat) / exner     # dθl/dt [K/s]
     col_dthl = np.sum(mass * dthl, axis=1)               # (kg/m^2) K/s
     col_thl = np.sum(mass * np.asarray(T_f) / exner, axis=1)
     # (a) Nontrivial heat redistribution (~3e-4 K/step here; rest state ~1e-9 K).
@@ -979,11 +1004,23 @@ def test_clubb_turbulence_prognostic_carry_roundtrip_multistep():
     assert float(np.max(wp2_final)) > CLUBBConfig().tke_min
 
 
-def test_prognostic_clubb_subcycling():
+def _zero_energy_fixer(monkeypatch):
+    """Zero the prognostic wrapper's column energy fixer (CAM clubb_do_energyfix;
+    pinned in test_clubb_column_budget.py), for tests that compare against the
+    raw clubb_step or pin CLUBB's own theta-l transport."""
+    from legoesm.atmosphere.physics.turbulence import clubb as clubb_mod
+    monkeypatch.setattr(clubb_mod, "column_energy_fixer_heating",
+                        lambda r, m, w: jnp.zeros_like(w * r[..., None]))
+    jax.clear_caches()
+
+
+def test_prognostic_clubb_subcycling(monkeypatch):
     """CAM runs CLUBB at clubb_timestep, sub-cycling it within the host dt.
-    n_sub=1 (dt<=clubb_dt) is bit-identical to a single clubb_step; n_sub>1
-    (dt>clubb_dt) runs n_sub sub-steps and returns the NET tendency + sub-cycled
-    moments — finite, and the moments evolve."""
+    n_sub=1 (dt<=clubb_dt) is bit-identical to a single clubb_step (the
+    wrapper's column energy fixer zeroed); n_sub>1 (dt>clubb_dt) runs n_sub
+    sub-steps and returns the NET tendency + sub-cycled moments — finite, and
+    the moments evolve."""
+    _zero_energy_fixer(monkeypatch)
     from legoesm.atmosphere.physics.turbulence.clubb import (
         init_clubb_moments,
         pack_clubb_moments,
@@ -1023,7 +1060,6 @@ def test_prognostic_clubb_subcycling_raw_moisture_contract():
     q_initial)/dt where q evolves by the unclipped CLUBB tendency — the SAME
     coupling contract as n_sub=1. Forced with a near-dry column + large dt so any
     clip would show up as a contract divergence (positivity is the host's job)."""
-    from legoesm.atmosphere.physics._shared import virtual_temperature
     from legoesm.atmosphere.physics.turbulence.clubb import (
         init_clubb_moments,
         pack_clubb_moments,
@@ -1048,11 +1084,10 @@ def test_prognostic_clubb_subcycling_raw_moisture_contract():
     u_c, v_c, T_c, q_c, m_c = (kw["u"], kw["v"], kw["T"], kw["q_v"],
                                unpack_clubb_moments(carry))
     for _ in range(n_sub):
-        tv = jnp.maximum(virtual_temperature(T_c, q_c), cfg.T0 * 0.5)
-        rho_c = kw["p_full"] / (constants.R_d * tv)
+        # Host density held through the sub-cycle (CAM rho_ds once, before nadv).
         du, dv, dT, dq, m_c, _ = clubb_step(
             u_c, v_c, T_c, q_c, m_c, kw["p_full"], kw["p_half"], kw["z_full"],
-            kw["z_half"], kw["T_sfc"], kw["q_sfc"], rho_c, dt_sub, cfg)
+            kw["z_half"], kw["T_sfc"], kw["q_sfc"], kw["rho"], dt_sub, cfg)
         u_c, v_c, T_c, q_c = (u_c + dt_sub * du, v_c + dt_sub * dv,
                               T_c + dt_sub * dT, q_c + dt_sub * dq)   # NO clip
     np.testing.assert_allclose(np.asarray(out.dq_v_dt),
@@ -1320,10 +1355,20 @@ def test_prognostic_clubb_convective_bl_physics():
         return tke_above_sfc, np.asarray(diags["wpthvp"])   # (nsteps, ncol, nzm)
 
     tke_heated, wpthvp_heated = run(6.0)     # strong surface heating
-    tke_calm, _ = run(0.0)                    # no surface heating
+    tke_calm, wpthvp_calm = run(0.0)          # no surface heating
 
-    # Convective forcing develops more TKE aloft than the unheated column...
-    assert tke_heated > 1.2 * tke_calm
+    # The direct response to the surface heating is the lower-BL buoyancy flux
+    # (6.2x the unheated arm before the CAM-tree PDF-closure port #1733, 6.0x
+    # after) ...
+    half = wpthvp_heated.shape[2] // 2
+    assert (np.max(wpthvp_heated[-1][:, :half])
+            > 3.0 * np.max(wpthvp_calm[-1][:, :half]))
+    # ... and it develops more TKE aloft than the unheated column.  Aloft the
+    # shear both arms share dominates wp2, so the margin is modest: 1.34x before
+    # #1733, 1.17x after, when the momentum-level closure raised the buoyancy
+    # flux of BOTH arms (the old 1.2x bound was set on the interpolated closure;
+    # review 2026-10-11, clubbres).
+    assert tke_heated > 1.1 * tke_calm
     # ...and BOTH arms keep a real amount of it. Every other bound in this test
     # is an upper one, so without this a regression that collapsed the closure
     # to zero turbulence would pass everything.
@@ -1802,7 +1847,7 @@ def test_prognostic_clubb_accepts_prescribed_surface_fluxes():
     assert np.array_equal(np.asarray(mom_base), np.asarray(mom_expl))
 
 
-def test_prognostic_clubb_prescribed_heat_flux_closes_column_budget():
+def test_prognostic_clubb_prescribed_heat_flux_closes_column_budget(monkeypatch):
     """A prescribed surface heat flux is applied as an EXACT flux-form Neumann
     lower-BC: the mass-weighted column potential-temperature tendency equals the
     prescribed surface kinematic heat flux to round-off.
@@ -1818,6 +1863,10 @@ def test_prognostic_clubb_prescribed_heat_flux_closes_column_budget():
     ``tau=-rho C_d |V| u`` → an O(Δt) semi-implicit residual), a *prescribed*
     surface flux is a fixed Neumann BC independent of the evolving state, so the
     closure is EXACT (round-off), with no Δt dependence — a sharper contract."""
+    # theta-l TRANSPORT pin: the wrapper's column energy fixer is a separate
+    # closure (test_clubb_column_budget.py), zeroed so it cannot mask a
+    # transport defect.
+    _zero_energy_fixer(monkeypatch)
     from legoesm.atmosphere.physics._shared import virtual_temperature
     from legoesm.atmosphere.physics.turbulence.clubb import integrate_clubb_column
     from legoesm.atmosphere.physics.turbulence.clubb import pack_clubb_moments
@@ -1843,8 +1892,12 @@ def test_prognostic_clubb_prescribed_heat_flux_closes_column_budget():
         u_f, v_f, T_f, q_f, carry, kw["p_full"], kw["p_half"], kw["z_full"],
         kw["z_half"], T_f[:, -1], q_f[:, -1], rho, 150.0, cfg, whl, zero, None, None)
 
-    # Mass-weighted column potential-temperature tendency (dT_dt/Pi = d(thlm)/dt).
-    col_dtheta = np.sum(mass * (np.asarray(out.dT_dt) / exner), axis=1)
+    # Mass-weighted column potential-temperature tendency (dT_dt/Pi = d(thlm)/dt),
+    # TRANSPORT part only: the KE-dissipation heating (F14) is a separate source.
+    from legoesm.atmosphere.physics._shared import ke_dissipation_heating
+    dT_tr = np.asarray(out.dT_dt - ke_dissipation_heating(
+        u_f, v_f, out.du_dt, out.dv_dt, 150.0))
+    col_dtheta = np.sum(mass * (dT_tr / exner), axis=1)
     expected = np.asarray(rho)[:, -1] * W                       # rho_sfc * w'thl'_sfc
     # (1) Non-vacuous: the prescribed flux genuinely warms the column.
     assert np.all(col_dtheta > 1e-3) and np.all(expected > 1e-3)
@@ -1898,7 +1951,7 @@ def test_prognostic_clubb_prescribed_moisture_flux_closes_column_budget():
     assert np.all(rel < 1e-9), f"prescribed-moisture-flux budget not closed: rel={rel}"
 
 
-def test_prognostic_clubb_prescribed_heat_flux_applied_through_subcycling():
+def test_prognostic_clubb_prescribed_heat_flux_applied_through_subcycling(monkeypatch):
     """The prescribed surface heat flux is applied on EVERY CLUBB sub-step, so the
     realistic coupled regime ``dt > clubb_dt`` (``n_sub > 1``) still closes the
     column θl budget for a well-conditioned column.
@@ -1907,9 +1960,11 @@ def test_prognostic_clubb_prescribed_heat_flux_applied_through_subcycling():
     coupled host step is larger (``clubb_dt`` ~300 s, host ``dt`` ~1800 s →
     ``n_sub=6``), driving the ``lax.scan`` sub-cycle in
     :func:`clubb_turbulence_prognostic`, which holds the prescribed flux constant
-    and applies it each sub-step. Closure is then APPROXIMATE: the surface density
-    ``ρ_sfc(t)`` is recomputed from the evolving column, so the net heating is
-    ``W·Σ_sub ρ_sfc(t)·dt_sub`` not the ``n_sub=1`` idealisation ``ρ_sfc·W·dt``.
+    and applies it each sub-step. Closure is EXACT since the sub-cycle holds the
+    host density (CAM rho_ds once, before nadv; review 2026-10-11 clubbres --
+    it used to be ~6e-4 off because ``ρ_sfc(t)`` was re-derived per sub-step).
+    theta-l TRANSPORT pin: the KE heating and the wrapper's column energy fixer
+    are separate closures, removed / zeroed here.
 
     IMPORTANT — column conditioning: the sub-cycle advances a LOCAL mean by
     forward-Euler WITHOUT the host numerical diffusion (the coupled dycore supplies
@@ -1924,6 +1979,8 @@ def test_prognostic_clubb_prescribed_heat_flux_applied_through_subcycling():
     from legoesm.atmosphere.physics._shared import virtual_temperature
     from legoesm.atmosphere.physics.turbulence.clubb import integrate_clubb_column
     from legoesm.atmosphere.physics.turbulence.clubb import pack_clubb_moments
+    from legoesm.atmosphere.physics._shared import ke_dissipation_heating
+    _zero_energy_fixer(monkeypatch)
 
     # Low-shear, weakly-stratified column → the bare forward-Euler sub-cycle stays
     # stable over a long dt (see docstring). Built inline (not _scm_column, whose
@@ -1959,15 +2016,18 @@ def test_prognostic_clubb_prescribed_heat_flux_applied_through_subcycling():
         u_f, v_f, T_f, q_f, carry, p_full, p_half, z_full, z_half,
         T_f[:, -1], q_f[:, -1], rho, dt, cfg, whl, zero, None, None)
 
-    col_dtheta = np.sum(mass * (np.asarray(out.dT_dt) / exner), axis=1)
+    # The sub-steps' KE heating telescopes to the net-tendency expression.
+    dT_tr = np.asarray(out.dT_dt - ke_dissipation_heating(
+        u_f, v_f, out.du_dt, out.dv_dt, dt))
+    col_dtheta = np.sum(mass * (dT_tr / exner), axis=1)
     expected = np.asarray(rho)[:, -1] * W
     assert np.all(np.isfinite(np.asarray(out.dT_dt)))
     # (1) Non-vacuous: the prescribed flux genuinely warms the column.
     assert np.all(col_dtheta > 1e-3) and np.all(expected > 1e-3)
-    # (2) Sub-cycled closure is approximate but well-bounded (<1%) — the flux is
-    # applied each sub-step; the small residual is the expected ρ_sfc(t) drift.
+    # (2) Exact sub-cycled closure: the flux is applied on each of the 6 sub-steps
+    # at the held host density (a dropped/double-counted flux is O(1) off).
     rel = np.abs(col_dtheta - expected) / np.abs(expected)
-    assert np.all(rel < 5e-3), f"sub-cycled prescribed-flux budget off: rel={rel}"
+    assert np.all(rel < 1e-9), f"sub-cycled prescribed-flux budget off: rel={rel}"
 
 
 def test_prognostic_clubb_prescribed_momentum_flux_is_applied_as_a_vector():
@@ -2111,9 +2171,19 @@ def test_clubb_prognostic_injected_flux_equals_kinematic_prescription():
     """Prognostic clubb converts the injected DYNAMIC surface_flux to the
     kinematic sfc_* BC EXACTLY (the inverse of clubb_step's bulk->kinematic map),
     so passing surface_flux is bit-identical to passing the equivalent
-    sfc_wpthlp/sfc_wprtp/sfc_upwp/sfc_vpwp directly."""
+    sfc_wpthlp/sfc_wprtp/sfc_upwp/sfc_vpwp directly.
+
+    That map is the one-latent-heat surface interface (user decision
+    2026-09-28, 4a): the water leaves at the latent heat the surface law
+    charged (``surface_moisture_flux`` = lhflx / L(T_sfc)), and the heat BC
+    carries the enthalpy the water itself brings
+    (``latent_enthalpy_correction``).  The expectation used to invert with the
+    constant L_v and no correction -- the convention that decision replaced."""
     from legoesm.atmosphere.physics.turbulence.clubb import (
         exner_function, init_clubb_moments, pack_clubb_moments,
+    )
+    from legoesm.atmosphere.physics.turbulence.surface_layer import (
+        latent_enthalpy_correction, surface_moisture_flux,
     )
     kw = _column(ncol=3, nlev=18)
     kw.pop("tke")
@@ -2125,8 +2195,10 @@ def test_clubb_prognostic_injected_flux_equals_kinematic_prescription():
     rho_sfc = kw["rho"][:, -1]
     exner_sfc = exner_function(kw["p_full"][:, -1])
     # The exact inverse map clubb_turbulence_prognostic applies internally.
-    sfc_wpthlp = shflx / (rho_sfc * constants.c_pd * exner_sfc)
-    sfc_wprtp = lhflx / (rho_sfc * constants.L_v)
+    evap = surface_moisture_flux(cfg.surface, lhflx, kw["T_sfc"])
+    sfc_wpthlp = ((shflx + latent_enthalpy_correction(lhflx, evap))
+                  / (rho_sfc * constants.c_pd * exner_sfc))
+    sfc_wprtp = evap / rho_sfc
     sfc_upwp = tau_x / rho_sfc
     sfc_vpwp = tau_y / rho_sfc
     base = (kw["u"], kw["v"], kw["T"], kw["q_v"], carry, kw["p_full"],
@@ -2148,24 +2220,32 @@ def test_clubb_prognostic_injected_flux_equals_kinematic_prescription():
 
 
 def test_clubb_prognostic_injected_dynamic_flux_conserved():
-    """Prognostic clubb applies EXACTLY the injected DYNAMIC surface flux, at the
-    correct (sub-)step density — the coupler energy-budget contract.
+    """Prognostic clubb applies EXACTLY the injected DYNAMIC surface flux -- the
+    coupler energy-budget contract -- on one step and sub-cycled.
 
-    (1) Single step: the exner-corrected potential-temperature column budget — the
-        true flux-form invariant ``c_pd*Π_sfc*∫ rho*(dT_dt/Π) dz`` — closes to the
-        injected ``shflx`` to round-off, proving the dynamic->kinematic conversion
-        imposes exactly ``shflx`` W/m^2 at that density (the raw T-energy budget
-        does NOT close — heating lands at heights with Π != Π_sfc).
-    (2) Sub-cycled: converting the dynamic flux at EACH sub-step's evolving density
-        (the fix) gives a DIFFERENT result from converting ONCE with the host
-        density and holding the kinematic BC constant (the pre-fix behaviour),
-        proving the per-sub-step re-conversion that keeps the applied W/m^2 flux on
-        target as the column density drifts. The reported shflx/lhflx/ustar are the
-        injected dynamic values directly (Louis-equivalent)."""
+    Across the host update ``x += dt*dx_dt`` the column total energy
+    ``sum(dp/g (c_pd T + KE + L_v q_v))`` changes by exactly the injected
+    ``(shflx + lhflx)*dt``, and the column water by exactly the evaporation the
+    surface law charged for ``lhflx``, at n_sub=1 and n_sub=5.
+
+    History (review 2026-10-11, clubbres): this test used to pin the theta-l
+    budget to ``shflx`` alone, which stopped holding when the heat BC took the
+    latent-enthalpy correction (user decision 2026-09-28) and the KE heating
+    (F14); with the CAM6 column energy fixer the contract is the total energy.
+    Its sub-cycled half asserted that converting the flux per sub-step at an
+    evolving density differs from converting once; the sub-cycle now holds the
+    host density (CAM computes rho_ds once before its nadv loop), so the two
+    coincide and the contract is pinned by the closures at n_sub=5 instead.
+    The fixture's heights are not hydrostatic, so the water is measured with
+    CLUBB's own mass rho*dz (on the lane rho*dz == dp/g)."""
     from legoesm.atmosphere.physics._shared import virtual_temperature
     from legoesm.atmosphere.physics.turbulence.clubb import (
         integrate_clubb_column, pack_clubb_moments,
     )
+    from legoesm.atmosphere.physics.turbulence.surface_layer import (
+        surface_moisture_flux,
+    )
+    from legoesm.diagnostics.process_ledger import column_total_energy
     kw = _scm_column(ncol=2, nlev=24, dtheta_dz=4e-3)
     cfg = CLUBBConfig(prognostic=True, clubb_dt=300.0)
     # Spin up a stable moment state (same recipe as the moisture-conservation test).
@@ -2175,36 +2255,32 @@ def test_clubb_prognostic_injected_dynamic_flux_conserved():
     rho = kw["p_full"] / (constants.R_d * tv)
     carry = pack_clubb_moments(m_f)
     sf = _injected_surface_flux(2, T_f.dtype)
-    shflx_inj, ustar_inj = np.asarray(sf[2]), np.asarray(sf[4])
+    shflx_inj, lhflx_inj, ustar_inj = (np.asarray(sf[i]) for i in (2, 3, 4))
+    T_sfc = T_f[:, -1]
     base = (u_f, v_f, T_f, q_f, carry, kw["p_full"], kw["p_half"],
-            kw["z_full"], kw["z_half"], T_f[:, -1], q_f[:, -1], rho)
+            kw["z_full"], kw["z_half"], T_sfc, q_f[:, -1], rho)
+    p_s = kw["p_half"][:, -1]
+    dp = kw["p_half"][:, 1:] - kw["p_half"][:, :-1]
     dz = np.abs(np.asarray(kw["z_half"])[:, :-1] - np.asarray(kw["z_half"])[:, 1:])
-    mass = np.asarray(rho) * dz
-    exner = (np.asarray(kw["p_full"]) / constants.p_ref) ** constants.kappa
-    exner_sfc = exner[:, -1]
+    mass_clubb = np.asarray(rho) * dz
+    evap = np.asarray(surface_moisture_flux(cfg.surface, sf[3], T_sfc))
 
-    # (1) Single step (n_sub=1): exact flux-form theta-budget closure.
-    out1, _ = clubb_turbulence_prognostic(*base, 300.0, cfg, surface_flux=sf)
-    col_theta = constants.c_pd * exner_sfc * np.sum(
-        mass * np.asarray(out1.dT_dt) / exner, axis=1)
-    assert np.all(np.abs(col_theta - shflx_inj) / shflx_inj < 1e-6), (
-        f"theta-budget {col_theta} W/m^2 != injected shflx {shflx_inj}")
+    def energy(T, u, v, q):
+        return np.asarray(column_total_energy(
+            p_s, dp / p_s[:, None], T, u=u, v=v, q_v=q, dp=dp))
 
-    # (2) Sub-cycled (dt=1500 -> n_sub=5): per-sub-step re-conversion differs from
-    # the once-host-converted constant kinematic BC (the pre-fix path).
-    out5p, _ = clubb_turbulence_prognostic(*base, 1500.0, cfg, surface_flux=sf)
-    rho_s = rho[:, -1]
-    once = (sf[2] / (rho_s * constants.c_pd * exner_sfc),
-            sf[3] / (rho_s * constants.L_v), sf[0] / rho_s, sf[1] / rho_s)
-    out5o, _ = clubb_turbulence_prognostic(
-        *base, 1500.0, cfg, sfc_wpthlp=once[0], sfc_wprtp=once[1],
-        sfc_upwp=once[2], sfc_vpwp=once[3])
-    assert not np.allclose(np.asarray(out5p.dT_dt), np.asarray(out5o.dT_dt)), (
-        "per-sub-step conversion did not change the result vs the once-converted "
-        "constant BC — the density-tracking fix is inert")
-    # Fix 2: reported diagnostics are the injected dynamic values (Louis-equivalent).
-    np.testing.assert_allclose(np.asarray(out5p.shflx), shflx_inj)
-    np.testing.assert_allclose(np.asarray(out5p.ustar), ustar_inj)
+    for dt in (300.0, 1500.0):          # n_sub = 1 and 5
+        out, _ = clubb_turbulence_prognostic(*base, dt, cfg, surface_flux=sf)
+        de = (energy(T_f + dt * out.dT_dt, u_f + dt * out.du_dt,
+                     v_f + dt * out.dv_dt, q_f + dt * out.dq_v_dt)
+              - energy(T_f, u_f, v_f, q_f)) / dt
+        assert np.all(np.abs(de - (shflx_inj + lhflx_inj))
+                      / (shflx_inj + lhflx_inj) < 1e-9), (dt, de)
+        dw = np.sum(mass_clubb * np.asarray(out.dq_v_dt), axis=1)
+        np.testing.assert_allclose(dw, evap, rtol=1e-9, atol=0.0)
+        # The reported diagnostics are the injected dynamic values (Louis-equivalent).
+        np.testing.assert_allclose(np.asarray(out.shflx), shflx_inj)
+        np.testing.assert_allclose(np.asarray(out.ustar), ustar_inj)
 
 
 def test_clubb_prognostic_wind_antiparallel_stress_conserved_componentwise():

@@ -1817,6 +1817,7 @@ def morrison_microphysics(
         dN_r_dt=dN_r_dt,
         dN_i_dt=dN_i_dt,
         precipitation=precipitation,
+        precip_frozen=precip_i + precip_s + precip_g,
         dN_s_dt=dN_s_dt,
         dN_g_dt=dN_g_dt,
         sed_substeps_required=sed_substeps_required,

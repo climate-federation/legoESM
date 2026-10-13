@@ -35,7 +35,7 @@ def _build_driver(tmpdir: str, solar_source: str,
                   turbulence: str = "louis", S_0: float = 1361.0) -> ModelDriver:
     cfg = ExperimentConfig(
         grid=GridConfig(grid_type="gaussian", resolution=RES, nlev=NLEV),
-        dycore=DycoreConfig(model_type="hydrostatic", discretization="spectral",
+        dycore=DycoreConfig(energy_fixer=False, model_type="hydrostatic", discretization="spectral",
                             dt=DT),
         output=OutputConfig(output_dir="", diag_days=0, checkpoint_days=0),
         days=FOUR_STEPS_DAYS, dataset="analytical", radiation="gray",

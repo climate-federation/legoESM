@@ -609,6 +609,21 @@ def test_compute_skw_fnc_formula_and_degenerate():
                                rtol=1e-12, atol=1e-14)
 
 
+def test_compute_skw_fnc_gradient_at_c_equal_cb():
+    """CAM defaults C1 == C1b == 1.0: the function is smooth there, so
+    d/dC = exp(-Skw^2/(2 Cc^2)) and d/dCb = 1 - that.  The Fortran collapse
+    branch as a jnp.where gave d/dC = 0 (production C1: AD 0 vs FD -19.4)."""
+    rng = np.random.default_rng(17)
+    Skw = jnp.asarray(rng.standard_normal((2, 7)))
+    Cb = jnp.asarray([1.0, 0.5])
+    Cc = jnp.asarray([1.0, 1.3])
+    e = np.exp(-0.5 * (np.asarray(Skw) / np.asarray(Cc)[:, None]) ** 2)
+    gC, gCb = jax.grad(lambda c, cb: jnp.sum(W.compute_skw_fnc(c, cb, Cc, Skw)),
+                       argnums=(0, 1))(Cb, Cb)
+    np.testing.assert_allclose(np.asarray(gC), e.sum(axis=1), rtol=1e-12)
+    np.testing.assert_allclose(np.asarray(gCb), (1.0 - e).sum(axis=1), rtol=1e-12)
+
+
 # --------------------------------------------------------------------------
 # clip_skewness (CAM l_use_wp3_lim_with_smth_Heaviside=False branch)
 # --------------------------------------------------------------------------

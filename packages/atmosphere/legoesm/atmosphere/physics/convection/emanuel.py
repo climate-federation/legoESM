@@ -725,6 +725,7 @@ def emanuel_convection(
         dq_v_dt=dq_v_dt,
         dq_c_conv_dt=dq_c_conv_dt,
         dq_r_conv_dt=dq_r_conv_dt,
+        precip_frozen_sfc=jnp.zeros_like(cape),  # L_v-only: liquid at sfc (F29)
         cape=cape,
         convective_mask=cape_weight,
         du_dt_conv=None,

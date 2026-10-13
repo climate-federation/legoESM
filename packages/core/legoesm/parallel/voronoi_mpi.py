@@ -1150,6 +1150,17 @@ def make_voronoi_mpi_step(
         state_new = dispatch_integrator(
             state, _mpi_tendency_fn, dt, config.time_integrator,
         )
+        if getattr(config, "energy_fixer", False):
+            # Dycore energy fixer, mirroring the serial ``_step_jit`` (F15):
+            # owned cells + one allreduce-SUM (AD-safe).  The cell KE reads
+            # every edge of an owned cell, so both states get a fresh halo.
+            from legoesm.core.conservation import voronoi_energy_fixer_dT
+            _dT_fix = voronoi_energy_fixer_dT(
+                _exchange_mpas_state(state), _exchange_mpas_state(state_new),
+                local_mesh, sigma_coord, _owned_area, sum_fn=global_sum_mpi)
+            state_new = state_new._replace(T=state_new.T.replace(
+                data=state_new.T.data
+                + _dT_fix.astype(state_new.T.data.dtype)))
 
         # Operator-split physics: evaluate ONCE on the post-dynamics state and
         # apply forward over dt (state += dt * tendency).  Mirrors the serial

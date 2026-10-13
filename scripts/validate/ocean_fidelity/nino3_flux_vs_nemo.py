@@ -137,7 +137,9 @@ def main() -> int:
     # a .get() fallback would have fed ZERO radiation in silently and produced
     # a confidently wrong net heat flux. Missing channels now raise.
     shp = lat_o.shape
-    f = _sample_forcing_points(forcing, idx, lat_o.reshape(-1), lon_o.reshape(-1))
+    # Same bilinear sampling the model's tripole path uses (F20).
+    f = _sample_forcing_points(forcing, idx, lat_o.reshape(-1), lon_o.reshape(-1),
+                               method="bilinear")
     f = {k: np.asarray(v).reshape(shp) for k, v in f.items()}
     for need in ("sw_down", "lw_down", "u10", "v10", "T_air", "q_air"):
         if need not in f:

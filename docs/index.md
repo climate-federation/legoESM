@@ -140,6 +140,7 @@ performance/REAL_HARDWARE_SCALING
 :caption: Architecture & development
 
 architecture/DISTRIBUTED_ARCHITECTURE
+architecture/reproducibility
 user-guide/developers
 user-guide/api
 ```

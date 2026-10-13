@@ -357,7 +357,7 @@ class TestOzoneInterannual:
 
 
 class TestDeckChecker:
-    """Regression tests for ``run_amip_cmip6_deck.py:_check_forcing_files``.
+    """Regression tests for ``run_amip_smoke_deck.py:_check_forcing_files``.
 
     The deck checker must:
     1. Reject decks missing one or more of the 6 canonical files.
@@ -388,7 +388,7 @@ class TestDeckChecker:
                            nlat=18)
 
     def test_missing_files_reported(self, tmp_path):
-        from scripts.run.run_amip_cmip6_deck import _check_forcing_files
+        from scripts.run.run_amip_smoke_deck import _check_forcing_files
         files = _check_forcing_files(tmp_path, 1979, 1980)
         assert "_missing" in files
         # All six channels should be reported missing
@@ -398,7 +398,7 @@ class TestDeckChecker:
 
     def test_interannual_ozone_accepted(self, tmp_path):
         """Interannual ozone file alone is sufficient; clim is optional."""
-        from scripts.run.run_amip_cmip6_deck import _check_forcing_files
+        from scripts.run.run_amip_smoke_deck import _check_forcing_files
         self._make_deck(tmp_path, with_interannual_o3=True,
                         with_clim_o3=False)
         files = _check_forcing_files(tmp_path, 1979, 1980)
@@ -410,7 +410,7 @@ class TestDeckChecker:
 
     def test_climatology_ozone_accepted(self, tmp_path):
         """Climatology ozone file alone is sufficient (legacy default)."""
-        from scripts.run.run_amip_cmip6_deck import _check_forcing_files
+        from scripts.run.run_amip_smoke_deck import _check_forcing_files
         self._make_deck(tmp_path, with_interannual_o3=False,
                         with_clim_o3=True)
         files = _check_forcing_files(tmp_path, 1979, 1980)
@@ -420,7 +420,7 @@ class TestDeckChecker:
     def test_interannual_preferred_over_clim(self, tmp_path):
         """When both files exist, the interannual one wins (it's what
         real CMIP6 ozone is and exercises the non-cyclic loader)."""
-        from scripts.run.run_amip_cmip6_deck import _check_forcing_files
+        from scripts.run.run_amip_smoke_deck import _check_forcing_files
         self._make_deck(tmp_path, with_interannual_o3=True,
                         with_clim_o3=True)
         files = _check_forcing_files(tmp_path, 1979, 1980)
@@ -984,7 +984,7 @@ class TestCMIPBandOrderRemap:
         rrtmg_sw to run_amip (issue #322)."""
         from pathlib import Path
         deck = (Path(__file__).resolve().parents[2]
-                / "scripts" / "run" / "run_amip_cmip6_deck.py").read_text()
+                / "scripts" / "run" / "run_amip_smoke_deck.py").read_text()
         assert '"--solar-spectral-band-order", "rrtmg_sw"' in deck, (
             "CMIP6 deck must forward --solar-spectral-band-order rrtmg_sw "
             "for the MPI-M SSI_frac file"
@@ -1218,7 +1218,7 @@ class TestNoAerosolNoVolcanicFlags:
                                sy, ey, nlat=18)
 
     def test_check_files_skips_aerosol_when_disabled(self, tmp_path):
-        from scripts.run.run_amip_cmip6_deck import _check_forcing_files
+        from scripts.run.run_amip_smoke_deck import _check_forcing_files
         self._make_partial_deck(tmp_path,
                                  include_aerosol=False,
                                  include_volcanic=False)
@@ -1239,7 +1239,7 @@ class TestNoAerosolNoVolcanicFlags:
         assert "volcanic" in files_required["_missing"]
 
     def test_check_files_skips_volcanic_only(self, tmp_path):
-        from scripts.run.run_amip_cmip6_deck import _check_forcing_files
+        from scripts.run.run_amip_smoke_deck import _check_forcing_files
         self._make_partial_deck(tmp_path,
                                  include_aerosol=True,
                                  include_volcanic=False)
@@ -1255,7 +1255,7 @@ class TestNoAerosolNoVolcanicFlags:
         self._make_partial_deck(tmp_path,
                                  include_aerosol=True,
                                  include_volcanic=True)
-        deck_script = _REPO_ROOT / "scripts" / "run" / "run_amip_cmip6_deck.py"
+        deck_script = _REPO_ROOT / "scripts" / "run" / "run_amip_smoke_deck.py"
         cmd = [
             sys.executable, str(deck_script),
             "--forcing-dir", str(tmp_path),
@@ -1392,7 +1392,7 @@ class TestSpectralMpasForcingActive:
     def _run(self, tmp_path, grid_type, disc, res):
         import subprocess
         sy, ey = self._make_deck(tmp_path)
-        deck_script = _REPO_ROOT / "scripts" / "run" / "run_amip_cmip6_deck.py"
+        deck_script = _REPO_ROOT / "scripts" / "run" / "run_amip_smoke_deck.py"
         cmd = [
             sys.executable, str(deck_script),
             "--forcing-dir", str(tmp_path),
@@ -1419,6 +1419,19 @@ class TestSpectralMpasForcingActive:
             assert line is not None, f"Missing {label} report line"
             assert "ACTIVE" in line, (
                 f"{label!r} should be ACTIVE (forcing now consumed): {line!r}")
+
+    def test_energy_fixer_opt_out_only_on_spectral(self, tmp_path):
+        """On the spectral lane the deck opts out of the dycore energy fixer
+        explicitly (review F15: run_amip refuses it on unwired lanes); the
+        wired MPAS and lat-lon lanes keep it (F15b)."""
+        for d in ("g", "v", "l"):
+            (tmp_path / d).mkdir()
+        assert "--no-energy-fixer" in self._run(
+            tmp_path / "g", "gaussian", "spectral", 21)
+        assert "--no-energy-fixer" not in self._run(
+            tmp_path / "v", "voronoi", "mpas", 4)
+        assert "--no-energy-fixer" not in self._run(
+            tmp_path / "l", "latlon", "latlon_cgrid", 24)
 
     def test_gaussian_spectral_rrtmg_forcing_active(self, tmp_path):
         out = self._run(tmp_path, "gaussian", "spectral", 21)
@@ -1467,12 +1480,14 @@ class TestVolcanicNonCyclic:
 
     @pytest.fixture(scope="class")
     def volcanic_path(self, tmp_path_factory):
-        """Generate a multi-year volcanic file (1979–1992) so the
+        """Generate a multi-year volcanic file (1979–1996) so the
         Pinatubo 1991 spike is in the file but at a calendar location
-        that gets erased by cyclic interpolation."""
+        that gets erased by cyclic interpolation.  It reaches 1996 because
+        the 1995 sample below must lie inside the file: a day outside a
+        non-cyclic file raises (F37) instead of holding the last record."""
         out = tmp_path_factory.mktemp("volc")
-        path = out / "volcanic_1979_1992.nc"
-        gaf.make_volcanic(path, 1979, 1992, nlat=18)
+        path = out / "volcanic_1979_1996.nc"
+        gaf.make_volcanic(path, 1979, 1996, nlat=18)
         return path
 
     def test_multiyear_volcanic_dispatch_through_noncyclic(self,
@@ -1734,7 +1749,7 @@ class TestClearSkyDiagToggle:
 
     _DECK = (
         Path(__file__).resolve().parents[2]
-        / "scripts" / "run" / "run_amip_cmip6_deck.py"
+        / "scripts" / "run" / "run_amip_smoke_deck.py"
     )
 
     def test_no_clear_sky_diag_argument_declared(self):
@@ -1784,7 +1799,7 @@ class TestDeckPhysicsDefaultsDrift:
 
         deck_path = (
             Path(__file__).resolve().parents[2]
-            / "scripts" / "run" / "run_amip_cmip6_deck.py"
+            / "scripts" / "run" / "run_amip_smoke_deck.py"
         )
         tree = ast.parse(deck_path.read_text())
         found = {}

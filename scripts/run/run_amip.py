@@ -127,7 +127,7 @@ _EVALUATION_DEFAULTS = EvaluationConfig()
 def _print_forcing_activity(args) -> None:
     """Print a forcing-channel activity summary (call on rank-0 only).
 
-    Mirrors the table in ``run_amip_cmip6_deck.py`` for the direct AMIP
+    Mirrors the table in ``run_amip_smoke_deck.py`` for the direct AMIP
     path.  GHG/ozone/aerosol/volcanic are gated on rrtmg/rrtmgp radiation;
     SST/SIC is always active; solar file threading is active when
     ``--solar-source`` is file-based.
@@ -519,6 +519,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "coefficient, so treat this as a calibration knob. "
                              "Unlike --div-damp-scale / the del2+del4 viscosities, this "
                              "damps only the curl-free mode and leaves balanced flow alone.")
+    parser.add_argument("--energy-fixer",
+                        action=argparse.BooleanOptionalAction,
+                        default=_DYCORE_DEFAULTS.energy_fixer,
+                        help="CAM-style dycore total-energy fixer: return the "
+                             "energy each dynamics step loses (damping KE, "
+                             "numerics) as a uniform heating before physics. "
+                             "ON by default; wired on the MPAS, FV3-duo "
+                             "column, lat-lon C-grid and cube C-D grid "
+                             "hydrostatic lanes, refused on every other lane "
+                             "(--no-energy-fixer there = an explicit open "
+                             "energy sink).")
     parser.add_argument("--div-damp-scale", type=float,
                         default=_DYCORE_DEFAULTS.div_damp_scale,
                         help="Dycore divergence-damping multiplier")
@@ -560,7 +571,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--restart-from", type=str, default=None)
     parser.add_argument("--restart-start-day", type=float, default=None,
                         help="Override start_day after loading checkpoint. "
-                             "Pass 0.0 at year boundaries to reset the day counter.")
+                             "Pass 0.0 at year boundaries to reset the day counter. "
+                             "Refused on the column lane when the checkpoint "
+                             "records its forcing-clock origin and this day "
+                             "disagrees with the day that origin implies.")
     parser.add_argument("--checkpoint-format", type=str,
                         default=_OUTPUT_DEFAULTS.checkpoint_format,
                         choices=["npz", "zarr"],
@@ -795,6 +809,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--volcanic-aerosol-lw", action="store_true",
                         default=False,
                         help="Load and apply volcanic longwave aerosol optical depth")
+    parser.add_argument(
+        "--forcing-hold-outside-file-years", action="store_true", default=False,
+        help="Hold a multi-year ozone/aerosol/volcanic file's end record for "
+             "run dates outside its years (default: raise).")
 
     # Subgrid physics
     parser.add_argument("--convection", type=str, default="tiedtke",
@@ -2581,6 +2599,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
                                      if args.mpas_sponge_del2_top_factor is not None else 1.0),
         mpas_div_damp4_scale=(args.mpas_div_damp4_scale
                               if args.mpas_div_damp4_scale is not None else 0.0),
+        energy_fixer=args.energy_fixer,
         conservation_fixer=args.conservation_fixer,
         fix_mass=args.fix_mass,
         implicit_grav_wave_use_pcg=args.implicit_grav_wave_use_pcg,
@@ -2696,6 +2715,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         volcanic_aerosol_file=args.volcanic_aerosol_file,
         volcanic_aerosol_scale=args.volcanic_aerosol_scale,
         volcanic_aerosol_lw=args.volcanic_aerosol_lw,
+        forcing_hold_outside_file_years=args.forcing_hold_outside_file_years,
         cloud_scheme=args.clouds,
         use_clubb_cloud_fraction=args.use_clubb_cloud_fraction,
         clubb_prognostic=args.clubb_prognostic,

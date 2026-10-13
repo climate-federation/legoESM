@@ -675,7 +675,7 @@ def bin_latlon_to_cells(lat_src_deg, lon_src_deg, fields, cell_lat_rad, cell_lon
                         minlength=n) / denom for f in fields]
 
 
-def _neighbour_table(grid):
+def neighbour_table(grid):
     """``(nb, area)`` -- ``nb`` ``(K, n_cells)`` int neighbour indices (``-1``
     unused), ``area`` ``(n_cells,)`` -- for a cubed-sphere ``(6, n, n)`` grid
     (cross-face halo), a structured lat-lon ``(n_lat, n_lon)`` grid
@@ -697,12 +697,12 @@ def _neighbour_table(grid):
         # at a cube corner); the relation must be symmetric (conservation
         # rests on it) and each cell must have 4 distinct neighbours
         if not np.all(nb == np.rint(nb)):
-            raise ValueError("_neighbour_table: the cube halo pad interpolated cell ids")
+            raise ValueError("neighbour_table: the cube halo pad interpolated cell ids")
         nb = nb.astype(np.int64)
         n_cells = six * n * n
         pairs = {(i, int(j)) for i in range(n_cells) for j in nb[:, i]}
         if len(pairs) != 4 * n_cells or any((j, i) not in pairs for i, j in pairs):
-            raise ValueError("_neighbour_table: cube neighbour relation is not "
+            raise ValueError("neighbour_table: cube neighbour relation is not "
                              "symmetric / 4-regular")
         return nb, np.asarray(grid.area, dtype=np.float64).reshape(-1)
     if lat.ndim == 2:
@@ -799,7 +799,7 @@ def grid_terrain_product(grid, lat_src_deg, lon_src_deg, elev_m, *,
     if f_land_override is not None:
         f_land = np.clip(np.asarray(f_land_override, dtype=np.float64).ravel(), 0.0, 1.0)
     z_s = np.where(f_land > 0.0, z_mean, 0.0)
-    table = _neighbour_table(grid)
+    table = neighbour_table(grid)
     if table is not None and smoothing_passes > 0:
         z_s = masked_diffusion(z_s, f_land, table[0], table[1], passes=smoothing_passes)
     return z_s, f_land

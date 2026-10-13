@@ -86,6 +86,8 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     vertex_coriolis,
 )
 from legoesm.grids.halo_latlon import zero_polar_lat_ends as _zero_polar_lat_ends
+from legoesm.grids.halo_latlon import (
+    get_meridionally_periodic, lat_faces_from_north, lat_north, lat_south)
 from legoesm.ocean.dynamics.eta_floor import clamp_and_redistribute as _clamp_redistribute
 from legoesm.ocean.dynamics.barotropic_common import (
     bebt_blend,
@@ -224,8 +226,7 @@ def _nemo_literal_seed_from_reference_mesh(
     wet_t = h_k[..., :nlev] > 0.0
     wet_u = (wet_t & jnp.roll(wet_t, -1, axis=1)
              & (u_mask[:, 1:, None] > 0.5))
-    wet_t_north = jnp.concatenate(
-        [wet_t[1:], jnp.zeros_like(wet_t[:1])], axis=0)
+    wet_t_north = lat_north(wet_t)
     wet_v = (wet_t & wet_t_north & (v_mask[1:, :, None] > 0.5))
     wet2_u = wet_u[..., 0]
     wet2_v = wet_v[..., 0]
@@ -235,8 +236,7 @@ def _nemo_literal_seed_from_reference_mesh(
     area_v_safe = jnp.where(wet2_v, area_v, 1.0)
     area_eta = area_t * eta_dyn
     area_eta_east = jnp.roll(area_eta, -1, axis=1)
-    area_eta_north = jnp.concatenate(
-        [area_eta[1:], jnp.zeros_like(area_eta[:1])], axis=0)
+    area_eta_north = lat_north(area_eta)
     r3u = (0.5 * (area_eta + area_eta_east) / hu_safe / area_u_safe)
     r3v = (0.5 * (area_eta + area_eta_north) / hv_safe / area_v_safe)
     mask_u3 = wet_u.astype(eta_dyn.dtype)
@@ -250,7 +250,7 @@ def _nemo_literal_seed_from_reference_mesh(
     vn_native = _nemo_literal_seed_depth_mean(
         v_3d[1:, :, :], live_v, wet2_v, r1v)
     un = jnp.concatenate([un_native[:, -1:], un_native], axis=1)
-    vn = jnp.concatenate([jnp.zeros_like(vn_native[:1]), vn_native], axis=0)
+    vn = lat_faces_from_north(vn_native)
     return un, vn
 
 
@@ -260,12 +260,17 @@ def _nemo_literal_barotropic_pressure_gradient(eta_pgf, grid, g, u_mask, v_mask)
     east_delta = jnp.roll(eta_pgf, -1, axis=1) - eta_pgf
     pgf_u_native = ((-g * east_delta) * (1.0 / geom.dx_u[:, 1:]))
     pgf_u = jnp.concatenate([pgf_u_native[:, -1:], pgf_u_native], axis=1)
-    north_delta = eta_pgf[1:] - eta_pgf[:-1]
-    pgf_v = jnp.concatenate([
-        jnp.zeros_like(eta_pgf[:1]),
-        ((-g * north_delta) * (1.0 / geom.dy_v[1:-1])),
-        jnp.zeros_like(eta_pgf[:1]),
-    ], axis=0)
+    if get_meridionally_periodic():
+        # lbclnk.f90:2028-2034: the seam V face is a periodic copy.
+        north_delta = lat_north(eta_pgf) - eta_pgf
+        pgf_v = lat_faces_from_north((-g * north_delta) * (1.0 / geom.dy_v[1:]))
+    else:
+        north_delta = eta_pgf[1:] - eta_pgf[:-1]
+        pgf_v = jnp.concatenate([
+            jnp.zeros_like(eta_pgf[:1]),
+            ((-g * north_delta) * (1.0 / geom.dy_v[1:-1])),
+            jnp.zeros_like(eta_pgf[:1]),
+        ], axis=0)
     return pgf_u * u_mask, pgf_v * v_mask
 
 
@@ -333,7 +338,7 @@ def _nemo_literal_seed_from_card_mesh(
         jnp.asarray(v_3d, dtype=dtype)[1:, :, :], geom.e3v * ops.vmask3,
         wet2_v, geom.r1_hv)
     un = jnp.concatenate([un_native[:, -1:], un_native], axis=1)
-    vn = jnp.concatenate([jnp.zeros_like(vn_native[:1]), vn_native], axis=0)
+    vn = lat_faces_from_north(vn_native)
     return un, vn
 
 
@@ -903,6 +908,8 @@ def _dissipation_coeffs(config, grid, area, dt_s, dtype, mask):
 
 def _nemo_een_south_ff_copy(ff):
     """NEMO ``jpfillcopy`` association for the southern F-grid halo."""
+    if get_meridionally_periodic():
+        return lat_south(ff)          # jpfillperio (lbclnk.f90:2028)
     return jnp.concatenate([ff[:1], ff[:-1]], axis=0)
 
 
@@ -1237,9 +1244,9 @@ def _nemo_literal_barotropic_coriolis(U_bar, V_bar, coefficients,
     ua = U_bar[:, 1:]
     va = V_bar[1:, :]
     east_v = jnp.roll(va, -1, axis=1)
-    south_v = jnp.concatenate([jnp.zeros_like(va[:1]), va[:-1]], axis=0)
+    south_v = lat_south(va)
     southeast_v = jnp.roll(south_v, -1, axis=1)
-    north_u = jnp.concatenate([ua[1:], jnp.zeros_like(ua[:1])], axis=0)
+    north_u = lat_north(ua)
     west_u = jnp.roll(ua, 1, axis=1)
     northwest_u = jnp.roll(north_u, 1, axis=1)
     products = {
@@ -1265,8 +1272,7 @@ def _nemo_literal_barotropic_coriolis(U_bar, V_bar, coefficients,
     products["v_total"] = -nemo_source_round(
         products["v_south_pair"] + products["v_north_pair"])
     cor_u = jnp.concatenate([products["u_total"][:, -1:], products["u_total"]], axis=1)
-    cor_v = jnp.concatenate(
-        [jnp.zeros_like(products["v_total"][:1]), products["v_total"]], axis=0)
+    cor_v = lat_faces_from_north(products["v_total"])
     if return_terms:
         return cor_u, cor_v, products
     return cor_u, cor_v

@@ -15,6 +15,7 @@ writing only ``MLclm_varctl`` is a silent no-op.  These tests need no
 
 from __future__ import annotations
 
+import importlib
 import sys
 import types
 
@@ -22,6 +23,8 @@ import pytest
 
 from legoesm.land.canopy.clm_ml_interface import _apply_canopy_layering
 from legoesm.land.canopy.config import CLMMLCanopyConfig
+
+_BACKEND = "legoesm.land.canopy.clm_ml_backend.multilayer_canopy"
 
 
 @pytest.fixture
@@ -33,10 +36,9 @@ def fake_backend(monkeypatch):
     vert = types.ModuleType("multilayer_canopy.MLinitVerticalMod")
     vert.nlayer_within = 0       # by-value copies of the same defaults
     vert.nlayer_above = 0
-    pkg = sys.modules.get("multilayer_canopy") or types.ModuleType("multilayer_canopy")
-    monkeypatch.setitem(sys.modules, "multilayer_canopy", pkg)
-    monkeypatch.setitem(sys.modules, "multilayer_canopy.MLclm_varctl", ctl)
-    monkeypatch.setitem(sys.modules, "multilayer_canopy.MLinitVerticalMod", vert)
+    pkg = importlib.import_module(_BACKEND)
+    monkeypatch.setitem(sys.modules, f"{_BACKEND}.MLclm_varctl", ctl)
+    monkeypatch.setitem(sys.modules, f"{_BACKEND}.MLinitVerticalMod", vert)
     monkeypatch.setattr(pkg, "MLclm_varctl", ctl, raising=False)
     monkeypatch.setattr(pkg, "MLinitVerticalMod", vert, raising=False)
     return ctl, vert

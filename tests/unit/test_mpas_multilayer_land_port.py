@@ -405,6 +405,7 @@ def test_restart_after_a_held_solve_counts_the_reuse(monkeypatch, tmp_path):
     assert dB._land_stress_reused_total == unbroken
 
 
+@pytest.mark.usefixtures("allow_version_drift")
 def test_old_checkpoint_without_land_stress_reseeds_loudly(monkeypatch,
                                                           tmp_path, caplog):
     """A checkpoint written before the land stress was persisted still loads:
@@ -546,3 +547,144 @@ def test_ocean_surface_key_reaches_turbulence_from_the_first_step(
     assert np.max(np.abs(u[True][1] - u[False][1])) > 0.0, (
         "the flag left the run bit-identical: T_sfc_ocean is not reaching "
         "the non-land surface fluxes")
+
+
+# --- review 2026-10-10 F28 / F31 -------------------------------------------
+
+def test_mpas_land_forcing_uses_moist_lowest_level_density(monkeypatch,
+                                                           tmp_path):
+    """F28: the MPAS column loop forces the land with the canonical
+    extractor's air -- the coordinate's lowest FULL-level pressure and the
+    moist density there, ``p_lowest / (R_d T_v)`` -- not ``p_s / (R_d T)`` with
+    ``p_lowest = 0.99 p_s`` (~1-2 % denser; a revert fails at 1e-12)."""
+    import legoesm.land.multilayer_land as _mll
+    _patch_land_loaders(monkeypatch)
+    seen = []
+    real = _mll.step_multilayer_land_with_diagnostics
+
+    def _capture(state, forcing, *a, **k):
+        jax.debug.callback(
+            lambda *xs: seen.append([np.asarray(x) for x in xs]),
+            forcing.rho_lowest, forcing.p_lowest, forcing.p_surface,
+            forcing.T_lowest, forcing.q_lowest)
+        return real(state, forcing, *a, **k)
+
+    monkeypatch.setattr(_mll, "step_multilayer_land_with_diagnostics",
+                        _capture)
+    d = _build_driver(str(tmp_path), TWO_STEPS_DAYS, **_LS_KW)
+    assert d.run() == "COMPLETED"
+    assert seen, "the land step never ran"
+    rho, p_low, p_s, T, q = seen[-1]
+    want_p = np.asarray(d.sigma.pressure_at_full(jnp.asarray(p_s)))[..., -1]
+    np.testing.assert_allclose(p_low, want_p, rtol=1e-12)
+    T_v = T * (1.0 + (1.0 / constants.epsilon - 1.0) * q)
+    np.testing.assert_allclose(rho, want_p / (constants.R_d * T_v),
+                               rtol=1e-12)
+    assert float(np.max(q)) > 0.0
+
+
+#: land stepped every 3 atmosphere steps: a 2-step link ends with ONE
+#: pending sample (step 0 is the bootstrap call), which a restart used to drop
+_WIN_KW = dict(_LS_KW, land_update_seconds=3 * DT)
+
+
+def _land_leaves(d):
+    return [np.asarray(x) for x in jax.tree_util.tree_leaves(d._land_ml_state)]
+
+
+@pytest.mark.usefixtures("allow_version_drift")
+def test_land_window_restart_matches_an_unbroken_run(monkeypatch, tmp_path,
+                                                     caplog):
+    """F31: the pending land-cadence window and the held land outputs ride
+    the checkpoint, so 2 steps + checkpoint + 2 resumed steps leave the land
+    BIT-identical to 4 unbroken steps.  Non-vacuous: the same checkpoint with
+    the window keys stripped (what every checkpoint was before) resumes with
+    the pending sample dropped and a bootstrap call, and the land differs."""
+    import logging
+    _patch_land_loaders(monkeypatch)
+    dA = _build_driver(str(tmp_path / "a"), TWO_STEPS_DAYS, **_WIN_KW)
+    assert dA.run() == "COMPLETED"
+    ckpt = sorted(glob.glob(os.path.join(str(tmp_path / "a"),
+                                         "checkpoint_day_*.npz")))[-1]
+    with np.load(ckpt) as z:
+        assert int(z["land_win_n"]) == 1, "one sample pending at the checkpoint"
+        assert "land_win_sum_precip_total" in z.files
+        assert "land_held_T_skin" in z.files
+        stripped = {k: z[k] for k in z.files
+                    if not k.startswith(("land_win_", "land_held_"))}
+    old = str(tmp_path / "old_checkpoint_day_0000.npz")
+    np.savez(old, **stripped)
+
+    dC = _build_driver(str(tmp_path / "c"), FOUR_STEPS_DAYS, **_WIN_KW)
+    assert dC.run() == "COMPLETED"
+
+    dB = _build_driver(str(tmp_path / "b"), TWO_STEPS_DAYS, **_WIN_KW)
+    step, day = dB.load_checkpoint(ckpt)
+    assert step == 2
+    with caplog.at_level(logging.INFO):
+        assert dB.run(start_step=step, start_day=day) == "COMPLETED"
+    assert any("land window: resumed" in r.getMessage()
+               for r in caplog.records)
+    for a, b in zip(_land_leaves(dB), _land_leaves(dC)):
+        np.testing.assert_array_equal(a, b)
+
+    dO = _build_driver(str(tmp_path / "o"), TWO_STEPS_DAYS, **_WIN_KW)
+    step, day = dO.load_checkpoint(old)
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        assert dO.run(start_step=step, start_day=day) == "COMPLETED"
+    assert any("carries no land cadence state" in r.getMessage()
+               for r in caplog.records)
+    diff = max(float(np.max(np.abs(a - b))) for a, b in
+               zip(_land_leaves(dO), _land_leaves(dC))
+               if a.dtype.kind == "f")
+    assert diff > 0.0, "dropping the window changed nothing: test is vacuous"
+
+
+def test_land_window_payload_roundtrip():
+    """The checkpoint payload pair is an exact inverse through an npz, and a
+    window the current cadence cannot close is refused."""
+    import io
+    from legoesm.core.coupling_fields import AtmToSurface
+    from legoesm.driver.model_driver import (
+        land_window_checkpoint_payload, land_window_from_checkpoint,
+    )
+    n_cells = 5
+    rng = np.random.default_rng(3)
+    a2s = AtmToSurface(*[jnp.asarray(rng.normal(size=n_cells))
+                         for _ in AtmToSurface._fields])
+    # all eight held outputs (T_skin, albedo, qsfc_last, qsfc, shflx, lhflx,
+    # evap, beta): a shorter tuple would zip-truncate beta off the trip
+    held = tuple(jnp.asarray(rng.normal(size=n_cells)) for _ in range(8))
+    cz, w = jnp.asarray(rng.normal(size=n_cells)), jnp.ones(n_cells)
+    pay = land_window_checkpoint_payload(a2s, 2, cz, w, held)
+    buf = io.BytesIO()
+    np.savez(buf, **{k: np.asarray(v) for k, v in pay.items()})
+    buf.seek(0)
+    with np.load(buf) as z:
+        back = {k: z[k] for k in z.files}
+    assert "land_held_beta" in back
+    a2s_b, n_b, cz_b, w_b, held_b = land_window_from_checkpoint(back, 3, n_cells)
+    assert n_b == 2 and len(held_b) == len(held)
+    for x, y in zip(a2s, a2s_b):
+        np.testing.assert_array_equal(np.asarray(x), np.asarray(y))
+    np.testing.assert_array_equal(np.asarray(cz_b), np.asarray(cz))
+    for x, y in zip(held, held_b):
+        np.testing.assert_array_equal(np.asarray(x), np.asarray(y))
+    with pytest.raises(ValueError, match="land interval changed"):
+        land_window_from_checkpoint(back, 2, n_cells)
+    with pytest.raises(ValueError, match="mesh mismatch"):
+        land_window_from_checkpoint(back, 3, n_cells + 1)
+    partial = {k: v for k, v in back.items() if k != "land_held_T_skin"}
+    with pytest.raises(ValueError, match="incomplete land cadence state"):
+        land_window_from_checkpoint(partial, 3, n_cells)
+    # R-ex partial held sets, with NO pending samples (so only the
+    # held-set check can refuse): one flux of the quartet missing, and a
+    # held output without the skin T it was solved with.
+    empty = {k: v for k, v in back.items() if not k.startswith("land_win_")}
+    empty["land_win_n"] = np.asarray(0, dtype=np.int64)
+    land_window_from_checkpoint(empty, 3, n_cells)
+    for drop in ("land_held_evap", "land_held_T_skin"):
+        bad = {k: v for k, v in empty.items() if k != drop}
+        with pytest.raises(ValueError, match="partial held land-output set"):
+            land_window_from_checkpoint(bad, 3, n_cells)

@@ -100,7 +100,7 @@ def test_init_ocean_rejects_unknown_mode():
     from legoesm.driver.config import ExperimentConfig, GridConfig, DycoreConfig
     atm = ExperimentConfig(
         grid=GridConfig(grid_type="latlon", resolution=8, nlev=4),
-        dycore=DycoreConfig(dt=60.0, model_type="hydrostatic",
+        dycore=DycoreConfig(energy_fixer=False, dt=60.0, model_type="hydrostatic",
                             discretization="latlon_cgrid"),
         radiation="gray", convection="none", days=1,
     )
@@ -119,7 +119,7 @@ def test_dynamic_ocean_requires_latlon_grid():
     from legoesm.driver.config import ExperimentConfig, GridConfig, DycoreConfig
     atm = ExperimentConfig(
         grid=GridConfig(grid_type="cubed_sphere", resolution=8, nlev=4),
-        dycore=DycoreConfig(dt=60.0, model_type="hydrostatic"),
+        dycore=DycoreConfig(energy_fixer=False, dt=60.0, model_type="hydrostatic"),
         radiation="gray", convection="none", days=1,
     )
     drv = CoupledESMDriver(
@@ -156,7 +156,7 @@ def test_woa_ic_requires_paths():
     from legoesm.driver.config import ExperimentConfig, GridConfig, DycoreConfig
     atm = ExperimentConfig(
         grid=GridConfig(grid_type="latlon", resolution=8, nlev=4),
-        dycore=DycoreConfig(dt=60.0, model_type="hydrostatic",
+        dycore=DycoreConfig(energy_fixer=False, dt=60.0, model_type="hydrostatic",
                             discretization="latlon_cgrid"),
         radiation="gray", convection="none", days=1,
     )
@@ -176,7 +176,7 @@ def test_init_dynamic_ocean_rejects_unknown_ic():
     from legoesm.driver.config import ExperimentConfig, GridConfig, DycoreConfig
     atm = ExperimentConfig(
         grid=GridConfig(grid_type="latlon", resolution=8, nlev=4),
-        dycore=DycoreConfig(dt=60.0, model_type="hydrostatic",
+        dycore=DycoreConfig(energy_fixer=False, dt=60.0, model_type="hydrostatic",
                             discretization="latlon_cgrid"),
         radiation="gray", convection="none", days=1,
     )
@@ -226,7 +226,7 @@ def _make_dynamic_driver(output_dir, nlev=4):
     from legoesm.driver.config import ExperimentConfig, GridConfig, DycoreConfig
     atm = ExperimentConfig(
         grid=GridConfig(grid_type="latlon", resolution=8, nlev=4),
-        dycore=DycoreConfig(dt=60.0, model_type="hydrostatic",
+        dycore=DycoreConfig(energy_fixer=False, dt=60.0, model_type="hydrostatic",
                             discretization="latlon_cgrid"),
         radiation="gray", convection="none", days=1,
     )
@@ -365,3 +365,8 @@ def test_dynamic_ocean_config_wires_smag_cap_and_implicit_barotropic(tmp_path):
     assert ocfg.lateral_viscosity.smag_cfl_safety == 0.125
     # Implicit Crank-Nicolson barotropic solver (BarotropicConfig).
     assert ocfg.barotropic.barotropic_solver == "implicit_cn"
+    # Decision 90: the RK3 card states its slow-forcing depth average (the
+    # step raises when unset), and the model runs the driver's own card.
+    assert (ocfg.barotropic.barotropic_slow_forcing_depth_evaluation
+            == "min_rule_live")
+    assert ocfg == drv._build_latlon_ocean_config()

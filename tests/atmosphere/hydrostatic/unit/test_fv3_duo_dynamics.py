@@ -448,7 +448,10 @@ def _fv3_duo_config(**over):
     grid = GridConfig(grid_type="cubed_sphere", resolution=N, nlev=KM)
     dycore = DycoreConfig(model_type=over.pop("model_type", "hydrostatic"),
                           discretization="fv3_duo",
-                          dt=over.pop("dt", 1920.0))
+                          dt=over.pop("dt", 1920.0),
+                          # closed lane: the energy fixer is not wired here,
+                          # so the deck opts out explicitly (F15 V8-A)
+                          energy_fixer=over.pop("energy_fixer", False))
     base = dict(
         grid=grid, dycore=dycore, days=1,
         radiation="none", convection="none", microphysics="none",
@@ -1288,7 +1291,29 @@ def test_wall_default_surface_is_frozen():
 #   hines_launch_p 0.0 -> 70000.0: read only when gravity_wave_drag selects
 #     Hines; both duo decks run mcfarlane and already pin 70000.0.
 # The allow-list is unchanged.
-_WALL_SURFACE_SHA256 = "079cecd3d8ff8ece17c4d675b28493e1754b416137cc2f1da03bd3fc3bfacf15"
+#
+# 2026-10-11 (main 294495454): the surface minus ONE path hashes to the old
+# literal (job 10330697): forcing_hold_outside_file_years=False ADDED by the
+# F37 fix (#1936).  An added default cannot trip the wall, and the field is
+# not allow-listed, so a non-default value stays refused on the duo lane.
+# The allow-list is unchanged.
+#
+# 2026-10-12, merging cf/main (207686288) into fu/composable-p2 (#1933): the
+# surface was dumped on both trees (job 10342193, fv3_duo_gaps/fu/p2/
+# merge1012/tests_r1/wall_*.txt). Same 385 paths; the ONLY differences are
+# P2's nine renames (commit 54e21adec), every default identical:
+#   dycore.fv3_duo_column_lane -> dycore.column_lane (False)
+#   mpas_ice_skin_prognostic -> ice_skin_prognostic (False)
+#   mpas_ice_thickness_m -> ice_thickness_m (2.0)
+#   mpas_land_beta -> land_beta (1.0)
+#   mpas_land_beta_soil -> land_beta_soil (False)
+#   mpas_land_lapse_K_per_km -> land_lapse_K_per_km (0.0)
+#   mpas_land_params_refresh -> land_params_refresh (True)
+#   mpas_land_stress_from_land -> land_stress_from_land (None)
+#   mpas_ocean_flux_on_ocean_surface -> ocean_flux_on_ocean_surface (False)
+# No default moved. None of the old or new names is allow-listed, so a
+# non-default value stays refused on the duo lane; the allow-list is unchanged.
+_WALL_SURFACE_SHA256 = "6d5dc520a853031fedfb86a244afb0a422682b7d46f133ac94dbe02a181d757e"
 
 
 def test_wall_leaf_types_are_scalar():

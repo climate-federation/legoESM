@@ -429,4 +429,5 @@ def fast_sbm_microphysics(
         dN_r_dt=(nr1 - nr0) * inv_dt,
         dN_i_dt=zeros,
         precipitation=precip,
+        precip_frozen=precip_s + precip_g,             # the ice-phase bins (F29)
     )

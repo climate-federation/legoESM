@@ -302,6 +302,10 @@ class AIMIPSpatialSurfaceParams(eqx.Module):
     """
 
     fields: dict[str, SpatialField]
+    # Fields the resolved schemes never read (no-inert rule, review F5): their
+    # gradient is cut in ``evaluate`` and the first-step gate skips them.
+    # Static, so the checkpoint leaf layout is unchanged.
+    frozen: frozenset = eqx.field(static=True, default=frozenset())
 
     @staticmethod
     def from_defaults(
@@ -310,6 +314,7 @@ class AIMIPSpatialSurfaceParams(eqx.Module):
         dtype: jnp.dtype = jnp.float32,
         init_std: float = 0.0,
         key: jax.Array | None = None,
+        frozen=(),
     ) -> "AIMIPSpatialSurfaceParams":
         """Build the AIMIP spatial-surface bundle.
 
@@ -337,7 +342,8 @@ class AIMIPSpatialSurfaceParams(eqx.Module):
                     key=keys[i],
                 )
                 for i, (name, spec) in enumerate(_FIELD_SPECS.items())
-            }
+            },
+            frozen=frozenset(frozen),
         )
 
     def evaluate(
@@ -357,7 +363,9 @@ class AIMIPSpatialSurfaceParams(eqx.Module):
         """
         baselines = baselines or {}
         return {
-            name: field.evaluate(
+            name: (eqx.tree_at(lambda f: f.coeffs, field,
+                               jax.lax.stop_gradient(field.coeffs))
+                   if name in self.frozen else field).evaluate(
                 grid, land_mask=land_mask,
                 f_0_override=baselines.get(name),
             )

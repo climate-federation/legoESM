@@ -63,6 +63,7 @@ def _cfg(**physics) -> ExperimentConfig:
     config = ExperimentConfig(
         grid=GridConfig(grid_type="cubed_sphere", resolution=4, nlev=5),
         dycore=DycoreConfig(
+            energy_fixer=False,  # explicit opt-out: pins pre-fixer numerics (F15b vote V5)
             model_type="hydrostatic", discretization="cdgrid",
         ),
         **physics,
@@ -178,7 +179,7 @@ class TestDataDrivenRowsBuildable:
         nlev = 8
         config = ExperimentConfig(
             grid=GridConfig(grid_type="gaussian", resolution=8, nlev=nlev),
-            dycore=DycoreConfig(model_type=model_type, discretization=disc),
+            dycore=DycoreConfig(energy_fixer=False, model_type=model_type, discretization=disc),
         )
         grid, sigma = _gaussian_grid_and_sigma(nlev)
         model = create_atmosphere_dycore(config, grid, sigma)
@@ -196,6 +197,7 @@ class TestDataDrivenRowsBuildable:
         config = ExperimentConfig(
             grid=GridConfig(grid_type="gaussian", resolution=8, nlev=nlev),
             dycore=DycoreConfig(
+                energy_fixer=False,  # explicit opt-out: pins pre-fixer numerics (F15b vote V5)
                 model_type="hydrostatic", discretization="u_cast",
             ),
         )

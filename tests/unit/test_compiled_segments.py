@@ -157,7 +157,7 @@ def _mock_step_unified_rad_counting(*args, **kwargs):
 _OPTIONAL_CARRY_FIELDS = (
     "q_i", "q_s", "q_g", "N_c", "N_r", "N_i",
     "tke", "qke", "gwd_spectrum", "cloud_fraction", "land_ml", "w_land", "snow",
-    "budget_ledger_accum",
+    "budget_ledger_accum", "precip_frozen_prev", "precip_frozen_accum",
 )
 
 
@@ -598,8 +598,11 @@ class TestBuildSegmentFn:
         # both floor q_v to zero (q_v_raw = -q_v0 < 0)
         np.testing.assert_allclose(np.asarray(r_on.q_v), 0.0, atol=1e-6)
         np.testing.assert_allclose(np.asarray(r_off.q_v), 0.0, atol=1e-6)
-        # flag ON is cooler by (L_v/c_pd) * deficit, deficit = q_v0
-        expected = (constants.L_v / constants.c_pd) * q_v0
+        # flag ON is cooler by (L_v/c_pd) * deficit.  The sink carries its
+        # mass (F13): the column loses 2*q_v0 of its layer mass (sum(dsigma)
+        # = 1), so the raw -q_v0 sits on 1 - 2*q_v0 of the old layer mass
+        # and the deficit is q_v0 / (1 - 2*q_v0).
+        expected = (constants.L_v / constants.c_pd) * q_v0 / (1.0 - 2.0 * q_v0)
         dT_diff = np.asarray(r_off.T) - np.asarray(r_on.T)
         np.testing.assert_allclose(dT_diff, expected, rtol=2e-3)
 
@@ -792,11 +795,19 @@ def _run_per_step_python(model, step_unified, n_steps, carry_init, args,
             **_phys_carry_in,
         )
 
-        # State update
+        # State update.  Physics water carries its MASS (review 2026-10-10
+        # F13, dry-mass convention), restated independently of
+        # apply_physics_water_mass for p_s*dsigma layers (sum dsigma = 1):
+        #   p_s' = p_s * (1 + sum_k dsigma_k D_k),  q' = (q + dt dq) p_s/p_s'
+        dsigma = jnp.asarray(args["dsigma"])
         T_upd = T_new + dt * phys_out.dT_dt
-        q_v_upd = jnp.maximum(carry.q_v + dt * phys_out.dq_v_dt, 0.0)
-        q_c_upd = jnp.maximum(carry.q_c + dt * phys_out.dq_c_dt, 0.0)
-        q_r_upd = jnp.maximum(carry.q_r + dt * phys_out.dq_r_dt, 0.0)
+        _D = dt * (phys_out.dq_v_dt + phys_out.dq_c_dt + phys_out.dq_r_dt)
+        _p_s_phys = p_s_new * (1.0 + jnp.sum(dsigma * _D, axis=-1))
+        _r = (p_s_new / _p_s_phys)[..., None]
+        p_s_new = _p_s_phys
+        q_v_upd = jnp.maximum((carry.q_v + dt * phys_out.dq_v_dt) * _r, 0.0)
+        q_c_upd = jnp.maximum((carry.q_c + dt * phys_out.dq_c_dt) * _r, 0.0)
+        q_r_upd = jnp.maximum((carry.q_r + dt * phys_out.dq_r_dt) * _r, 0.0)
 
         # Time-integrate radiative fluxes + lowest-level T (uses the
         # PRE-sat-adjust T_upd, matching _single_step's accumulation point).
@@ -815,12 +826,22 @@ def _run_per_step_python(model, step_unified, n_steps, carry_init, args,
             carry.lw_up_toa_clr_accum + carry.held_lw_up_toa_clr * dt)
 
         # Saturation adjustment
+        _sat_rain = 0.0
         if do_sat_adjust:
             p_full = p_s_new[..., None] * sigma_full
             q_sat = saturation_mixing_ratio(T_upd, p_full)
             excess = jnp.maximum(q_v_upd - q_sat, 0.0)
-            q_v_upd = q_v_upd - excess
             T_upd = T_upd + constants.L_v * excess / constants.c_pd
+            # the condensate rains out WITH its mass (F13): p_s falls by the
+            # column excess, every moisture field is re-weighted
+            _sat_rain = (p_s_new * jnp.sum(dsigma * excess, axis=-1)
+                         / constants.g)
+            _p_s_sat = p_s_new * (1.0 - jnp.sum(dsigma * excess, axis=-1))
+            _r = (p_s_new / _p_s_sat)[..., None]
+            p_s_new = _p_s_sat
+            q_v_upd = (q_v_upd - excess) * _r
+            q_c_upd = q_c_upd * _r
+            q_r_upd = q_r_upd * _r
 
         # Moisture smoothing
         q_v_upd = jnp.maximum(
@@ -837,7 +858,7 @@ def _run_per_step_python(model, step_unified, n_steps, carry_init, args,
 
         # Accumulate precipitation
         precip_step = phys_out.precip if hasattr(phys_out, 'precip') else jnp.zeros_like(p_s_new)
-        precip_accum = carry.precip_accum + precip_step * dt
+        precip_accum = carry.precip_accum + precip_step * dt + _sat_rain
 
         carry = SegmentCarry(
             u=u_upd, v=v_upd, T=T_upd,
@@ -1954,6 +1975,9 @@ class TestDoubleMomentCarry:
         seen = {}
         args = _make_segment_fn_args()
         args["step_unified"] = self._dm_mock(seen)
+        # isolate the carry threading from the warm-rain tail's saturation
+        # adjustment (its rain-out re-weights every field, F13)
+        args["microphysics"] = "kessler"
         run_segment = build_segment_fn(**args)
 
         state = _make_hydrostatic_state()
@@ -1981,14 +2005,21 @@ class TestDoubleMomentCarry:
         # (a) physics received ALL hydrometeor/number columns by keyword.
         for _k in ("q_i", "q_s", "q_g", "N_c", "N_r", "N_i"):
             assert seen[_k] is not None, _k
-        # (b) every field evolved by n_steps * dt * its tendency (clipped >= 0).
-        nd = n_steps * DT
-        np.testing.assert_allclose(np.asarray(result.q_i), qi0 + nd * 1.0e-7, rtol=1e-5)
-        np.testing.assert_allclose(np.asarray(result.q_s), qs0 + nd * 2.0e-7, rtol=1e-5)
-        np.testing.assert_allclose(np.asarray(result.q_g), qg0 + nd * 3.0e-7, rtol=1e-5)
-        np.testing.assert_allclose(np.asarray(result.N_c), nc0 + nd * 2.0, rtol=1e-5)
-        np.testing.assert_allclose(np.asarray(result.N_r), nr0 + nd * 4.0, rtol=1e-5)
-        np.testing.assert_allclose(np.asarray(result.N_i), ni0 + nd * 3.0, rtol=1e-5)
+        # (b) every field evolved by its tendency WITH the column's mass
+        # change (review 2026-10-10 F13): the water tendencies (6e-7/s summed,
+        # uniform, sum(dsigma)=1) grow p_s by the factor (1 + dt*6e-7) each
+        # step and every field is re-weighted onto the new layer masses,
+        # x' = (x + dt*r) / (1 + dt*6e-7).
+        def _carried(x0, r):
+            for _ in range(n_steps):
+                x0 = (x0 + DT * r) / (1.0 + DT * 6.0e-7)
+            return x0
+        np.testing.assert_allclose(np.asarray(result.q_i), _carried(qi0, 1.0e-7), rtol=1e-5)
+        np.testing.assert_allclose(np.asarray(result.q_s), _carried(qs0, 2.0e-7), rtol=1e-5)
+        np.testing.assert_allclose(np.asarray(result.q_g), _carried(qg0, 3.0e-7), rtol=1e-5)
+        np.testing.assert_allclose(np.asarray(result.N_c), _carried(nc0, 2.0), rtol=1e-5)
+        np.testing.assert_allclose(np.asarray(result.N_r), _carried(nr0, 4.0), rtol=1e-5)
+        np.testing.assert_allclose(np.asarray(result.N_i), _carried(ni0, 3.0), rtol=1e-5)
 
     def test_warm_rain_carry_keeps_number_fields_none(self):
         """Without q_i/N_c/N_i in pack_carry, the carry fields stay None

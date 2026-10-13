@@ -938,10 +938,12 @@ def _cgrid_fct_fluxes_2d(q, u_c, v_c, cdgrid):
     room_dn = q_td - q_min
 
     # alpha ∈ [0,1]: ad>0 → room_up/ad, ad<0 → room_dn/|ad|, ad≈0 → 1
-    # Safe denominators (eps) for grad-safety: jnp.where evaluates both branches
+    # Double-where safe denominators: jnp.where evaluates both branches, and a
+    # discarded room/eps with eps=1e-30 can overflow the reverse pass in fp32
+    # (y**-2 -> inf, 0*inf = NaN).  Selected-branch values are unchanged.
     eps = 1.0e-30
-    safe_ad_pos = jnp.maximum(ad, eps)    # always > 0 — safe for branch ad > eps
-    safe_ad_neg = jnp.minimum(ad, -eps)   # always < 0 — safe for branch ad < -eps
+    safe_ad_pos = jnp.where(ad > eps, ad, 1.0)
+    safe_ad_neg = jnp.where(ad < -eps, ad, -1.0)
     alpha = jnp.where(
         ad > eps,
         jnp.minimum(1.0, room_up / safe_ad_pos),
@@ -959,32 +961,15 @@ def _cgrid_fct_fluxes_2d(q, u_c, v_c, cdgrid):
     return result
 
 
-def _make_fct_2d_differentiable(cdgrid):
-    """Differentiable FCT closure: forward uses FCT limiter; JVP linearizes through unlimited PPM."""
-
-    @jax.custom_jvp
-    def _fct(q, u_c, v_c):
-        return _cgrid_fct_fluxes_2d(q, u_c, v_c, cdgrid)
-
-    @_fct.defjvp
-    def _fct_jvp(primals, tangents):
-        q, u_c, v_c = primals
-        dq, du_c, dv_c = tangents
-        primal_out = _cgrid_fct_fluxes_2d(q, u_c, v_c, cdgrid)
-        _, tangent_out = jax.jvp(
-            lambda q_, u_, v_: cgrid_mass_flux_divergence(q_, u_, v_, cdgrid),
-            (q, u_c, v_c),
-            (dq, du_c, dv_c),
-        )
-        return primal_out, tangent_out
-
-    return _fct
-
-
 def cgrid_tracer_advection_fct(q, u_c, v_c, cdgrid):
-    """Monotone PPM tracer advection with local-bounds face clipping. 2D/3D, conservative, differentiable."""
-    fct_fn = _make_fct_2d_differentiable(cdgrid)
-    return fct_fn(q, u_c, v_c)
+    """Monotone PPM tracer advection with local-bounds face clipping. 2D/3D, conservative.
+
+    Differentiated by plain AD of the limited operator that runs (review F6:
+    the former custom JVP linearised the UNLIMITED PPM divergence, with a
+    duogrid flux sync the forward never applies).  Where the clip or the
+    Zalesak blend binds the derivative is the a.e. derivative of the limiter.
+    """
+    return _cgrid_fct_fluxes_2d(q, u_c, v_c, cdgrid)
 
 
 # ==============================================================================

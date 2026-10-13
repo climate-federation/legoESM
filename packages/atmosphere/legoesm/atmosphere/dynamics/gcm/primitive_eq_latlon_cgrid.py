@@ -93,6 +93,7 @@ from legoesm.core.conservation import (
     zero_mean_tendency,
     batch_global_area_sums,
     conservation_accumulator,
+    gridded_energy_fixer_dT,
 )
 from legoesm.core.precision import cast_pytree, finalize_to_storage
 from legoesm.core.operators_fv_latlon import (
@@ -216,6 +217,14 @@ class CGridLatLonPrimitiveEquationConfig(NamedTuple):
     nu_del4: float = 0.0
     # Numerics safety fraction of the del-4 diffusive CFL; not a tunable.
     nu_del4_cfl_frac: float = 0.25
+    # CAM-style dycore total-energy fixer (check_energy_fix, review
+    # 2026-10-10 F15): the energy the dynamics window loses (del-4 / sponge
+    # damping, polar filter, numerics) comes back as a uniform heating
+    # (``core.conservation.gridded_energy_fixer_dT``) BEFORE the physics.
+    # False on the raw dycore (idealized dycore tests unchanged); the driver
+    # sets it from ``DycoreConfig.energy_fixer`` (default True).  Appended at
+    # the tuple END: preserves positional construction.
+    energy_fixer: bool = False
 
 
 def _zero_v_at_pole(v, *, south: bool, north: bool, offset: int = 0):
@@ -1081,7 +1090,7 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
             return physics_fn(hs, _grid, _sigma)
         return physics_fn(hs)
 
-    @partial(jax.jit, static_argnums=(0, 4, 7))
+    @partial(jax.jit, static_argnums=(0, 4, 8))
     def _step_cgrid(
         self,
         state: CGridLatLonHydrostaticState,
@@ -1089,6 +1098,7 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         target_mass: jax.Array | None = None,
         physics_fn=None,
         phys_state=None,
+        energy_pre=None,
         forcing=None,
         return_phys_tend: bool = False,
     ) -> tuple:
@@ -1106,7 +1116,8 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         """
         return self._step_cgrid_impl(
             state, dt, target_mass, physics_fn, phys_state,
-            forcing=forcing, return_phys_tend=return_phys_tend,
+            energy_pre=energy_pre, forcing=forcing,
+            return_phys_tend=return_phys_tend,
         )
 
     def _step_cgrid_impl(
@@ -1123,10 +1134,16 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         polar_mask_v=None,
         pole_v_bc_masks=None,
         geom_pads=None,
+        energy_pre=None,
         forcing=None,
         return_phys_tend: bool = False,
     ) -> tuple:
         """Advance one step on C-grid state (raw arrays). UN-jitted.
+
+        ``energy_pre``: the energy fixer's window START as cell-centre
+        ``(T, u, v, p_s, phis)`` -- a cell-centre caller's own state, so its
+        cell -> face projection is inside the closed window; ``None`` = the
+        cell-centre view of ``state``.
 
         ``geom_pads``: optional ``(lat_pad, lat_pad_pole, cos_lat_pad)``
         precomputed stage-invariant geometry pads for the band grid,
@@ -1258,6 +1275,20 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
                 offset=self.config.pole_v_bc_offset,
             )
         state_new = state_new._replace(v=v_new)
+
+        if self.config.energy_fixer:
+            # --- Dycore energy fixer (CAM check_energy_fix, F15): the energy
+            # the dynamics window lost comes back as a uniform heating
+            # [K, +warming] BEFORE physics.  ``grid`` is the band / tile /
+            # rank-local geometry; the helper's reduction is global.
+            def _cc(s):
+                return (s.T, _face_to_cell_u(s.u), _face_to_cell_v(s.v),
+                        s.p_s, s.phis)
+            _dT_fix = gridded_energy_fixer_dT(
+                _cc(state_c) if energy_pre is None else energy_pre,
+                _cc(state_new), grid, sigma_coord)
+            state_new = state_new._replace(
+                T=state_new.T + _dT_fix.astype(state_new.T.dtype))
 
         # --- Operator-split physics: one evaluation on the post-dynamics
         # state, applied as an Euler increment (see the docstring). ---
@@ -1599,11 +1630,11 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         if isinstance(state, CGridLatLonHydrostaticState):
             if return_phys_tend:
                 state_new, self._phys_state, phys_tend = self._step_cgrid(
-                    state, dt, target_mass, physics_fn, phys_state, forcing,
-                    True)
+                    state, dt, target_mass, physics_fn, phys_state, None,
+                    forcing, True)
                 return state_new, phys_tend
             state_new, self._phys_state = self._step_cgrid(
-                state, dt, target_mass, physics_fn, phys_state, forcing)
+                state, dt, target_mass, physics_fn, phys_state, None, forcing)
             return state_new
         if forcing is not None or return_phys_tend:
             raise NotImplementedError(
@@ -1623,7 +1654,10 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
             cgrid_in = hydrostatic_to_cgrid(state, self.grid)
 
         cgrid_out, self._phys_state = self._step_cgrid(
-            cgrid_in, dt, target_mass, physics_fn, phys_state)
+            cgrid_in, dt, target_mass, physics_fn, phys_state,
+            # the fixer's window starts at THIS cell-centre state (F15b)
+            (state.T.data, state.u.data, state.v.data, state.p_s.data,
+             state.phis.data) if self.config.energy_fixer else None)
 
         # Cache the output and convert to HydrostaticState
         hs_out = cgrid_to_hydrostatic(cgrid_out, self.grid)

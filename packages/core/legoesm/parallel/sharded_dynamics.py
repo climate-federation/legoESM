@@ -3721,6 +3721,14 @@ def make_voronoi_sharded_step(
                 "ModelDriver loop, which threads the carry."
             )
         return model.step
+    if getattr(model.config, "energy_fixer", False):
+        # The global energy fixer (review 2026-10-10 F15) runs in the serial
+        # step and the MPI cell-partition step only; this SPMD step would
+        # drop it silently.
+        raise ValueError(
+            "make_voronoi_sharded_step: config.energy_fixer=True is not wired "
+            "on the multi-device SPMD Voronoi step; use the MPI cell-partition "
+            "step or energy_fixer=False.")
 
     from legoesm.core.precision import cast_pytree, finalize_to_storage
     from legoesm.core.state import MPASHydrostaticState

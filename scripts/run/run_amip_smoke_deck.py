@@ -1,18 +1,22 @@
 #!/usr/bin/env python
-"""End-to-end CMIP6 AMIP deck driver for legoESM.
+"""AMIP forcing-pipeline SMOKE deck (synthetic forcing) -- NOT production.
 
-This wraps :mod:`scripts.run_amip` and orchestrates the full forcing
-suite (SST/SIC + transient GHG + ozone + solar + aerosol + volcanic).
-Forcing files can either be pre-generated (e.g. by
-:mod:`scripts.generate_amip_forcing`) or auto-generated on the fly.
+This is NOT the production AMIP configuration.  Production AMIP is
+``scripts/run/run_amip.py --config config/amip/amip_production.yaml`` plus the
+machine paths of ``config/amip/amip_production{,.ginsburg}.sh``.  This script
+(formerly ``run_amip_cmip6_deck.py``; renamed by review 2026-10-10 F34) runs a
+historical C16/L30 smoke stack -- RRTMG + Sundqvist clouds + Morrison + SBM +
+Louis + McFarlane -- with FLAT topography (no land anywhere), no sub-grid
+orography file and, by default, the SYNTHETIC ``data/forcing_amip`` deck.  It
+exercises the forcing plumbing end to end; its climate means nothing.
 
-Why this script
----------------
-``run_amip.py`` is a low-level CLI that takes ~30 flags. The CMIP6 AMIP
-protocol fixes most of those flags to specific values. This wrapper:
+It wraps :mod:`scripts.run_amip` and orchestrates the forcing suite (SST/SIC +
+transient GHG + ozone + solar + aerosol + volcanic).  Forcing files can either
+be pre-generated (e.g. by :mod:`scripts.generate_amip_forcing`) or
+auto-generated on the fly:
 
 1. Generates synthetic CMIP6-shape forcing files when missing.
-2. Sets the canonical RRTMG + Sundqvist clouds + Kessler + SBM stack.
+2. Sets the smoke RRTMG + Sundqvist clouds + Morrison + SBM stack.
 3. Forces ``--ghg-forcing external`` and ``--ozone-forcing external``.
 4. Sets ``--solar-source spectral_file`` with the canonical
    ``--solar-tsi-var TSI --solar-spectral-var SSI_frac`` flags so the
@@ -22,13 +26,13 @@ protocol fixes most of those flags to specific values. This wrapper:
 
 Usage::
 
-    JAX_ENABLE_X64=1 python scripts/run_amip_cmip6_deck.py \\
+    JAX_ENABLE_X64=1 python scripts/run/run_amip_smoke_deck.py \\
         --resolution 16 --days 30 \\
         --output results/amip_deck_test
 
 To run without forcing files (the script will generate them)::
 
-    JAX_ENABLE_X64=1 python scripts/run_amip_cmip6_deck.py \\
+    JAX_ENABLE_X64=1 python scripts/run/run_amip_smoke_deck.py \\
         --auto-generate --resolution 16 --days 30
 
 To target a specific grid type::
@@ -546,6 +550,17 @@ def main(argv: list[str] | None = None) -> int:
               f"(radiation={args.radiation!r}, "
               f"grid={args.grid_type}/{args.discretization}; needs "
               "rrtmg + cubed_sphere/latlon).")
+    # The dycore energy fixer runs on every lane here but spectral (F15b);
+    # there the open sink is accepted explicitly, as in run_rce.py.
+    # An --extra that picks the lane or the fixer decides it instead (the
+    # FV3-duo column lane runs the fixer; run_amip refuses unwired lanes).
+    _extra_keys = {a.split("=")[0] for a in (args.extra or [])}
+    _spectral = (args.grid_type == "gaussian"
+                 or args.discretization == "spectral")
+    if _spectral and not _extra_keys & {
+            "--discretization", "--column-lane", "--fv3-duo-column-lane",
+            "--energy-fixer", "--no-energy-fixer"}:
+        cmd.append("--no-energy-fixer")
     # ``volcanic_active`` requires ``aerosol_active`` (see top of main()
     # for the rationale): ModelDriver gates volcanic on
     # ``aerosol_forcing == "external"``, so passing

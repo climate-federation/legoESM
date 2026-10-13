@@ -32,7 +32,7 @@ class TestRCESetup:
 
         config = ExperimentConfig(
             grid=GridConfig(grid_type="cubed_sphere", resolution=N, nlev=NLEV),
-            dycore=DycoreConfig(discretization="cdgrid", dt=DT),
+            dycore=DycoreConfig(energy_fixer=False, discretization="cdgrid", dt=DT),
         )
         model = create_atmosphere_dycore(config, grid, sigma)
 

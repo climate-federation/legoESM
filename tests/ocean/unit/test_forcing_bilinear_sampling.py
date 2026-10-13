@@ -115,3 +115,44 @@ def test_tripole_dispatch_uses_bilinear():
     du = np.abs(np.diff(np.asarray(out["u10"]), axis=0))
     assert np.sum(du < 1e-12) == 0, (
         "tripole forcing sample duplicates rows: nearest-neighbour is back")
+
+
+@pytest.mark.parametrize("grid_type", ["mpas", "fesom", "cubed_sphere"])
+def test_every_point_grid_uses_the_tripole_bilinear_sample(grid_type):
+    """F20 (review 2026-10-10): MPAS / FESOM / cube were sampled
+    nearest-neighbour while the tripole was bilinear, so the cross-grid OMIP
+    comparison mixed forcing remap with grid.  Every point-sampled grid must
+    now return EXACTLY the bilinear sample at its points.  Non-vacuity: the
+    assertion that nearest differs at these points guards the geometry, and
+    reverting any of the three dispatch branches to nearest goes red."""
+    import types
+
+    import jax.numpy as jnp
+
+    from legoesm.ocean.coupler.omip2_applicator import sample_omip2_forcing
+
+    lat, lon = _t62ish_axes()
+    n_rec = 2
+    rng = np.random.default_rng(1)
+    chans = {name: rng.uniform(0.0, 1.0, (n_rec, lat.size, lon.size))
+             for name in ("u10", "v10", "T_air", "q_air", "sw_down",
+                          "lw_down", "precip")}
+    forc = types.SimpleNamespace(lat=lat, lon=lon, **chans)
+    p_lat = rng.uniform(-85.0, 85.0, 64)
+    p_lon = rng.uniform(-180.0, 180.0, 64)   # FESOM-style signed lon
+    rlat, rlon = jnp.asarray(np.deg2rad(p_lat)), jnp.asarray(np.deg2rad(p_lon))
+    if grid_type == "mpas":
+        grid = types.SimpleNamespace(latCell=rlat, lonCell=rlon)
+    elif grid_type == "fesom":
+        grid = types.SimpleNamespace(lat=rlat, lon=rlon)
+    else:
+        grid = types.SimpleNamespace(lat=rlat.reshape(4, 16),
+                                     lon=rlon.reshape(4, 16))
+    out = sample_omip2_forcing(forc, 1, grid, grid_type)
+    for name, f in chans.items():
+        got = np.asarray(out[name]).reshape(-1)
+        want = _bilinear_interp_to_points(f[1], lat, lon, p_lat, p_lon)
+        nn = _nn_interp_to_points(f[1], lat, lon, p_lat, p_lon)
+        assert not np.allclose(nn, want), "geometry lost its teeth"
+        np.testing.assert_allclose(got, want, rtol=0, atol=1e-12,
+                                   err_msg=f"{grid_type} {name}")

@@ -53,14 +53,14 @@ from legoesm.parallel.latlon_spmd import (
     cell_to_cgrid_winds_spmd, spmd_pole_end_masks, activate_latlon_spmd_halo)
 from legoesm.parallel.shard_map_compat import shard_map
 from legoesm.forcing.time_utils import day_to_calendar
-from legoesm.core.conservation import fix_ps_mass_target
 from legoesm.atmosphere.dynamics.gcm.sharded_atm_latlon_step import (
     build_band_grids_atm, atm_grid_array_field_names, lat_spec)
 from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
     CGridLatLonHydrostaticState, cgrid_to_hydrostatic)
 from legoesm.driver.compiled_segments import (
-    SegmentCarry, SegmentForcing, GRID_SHAPED_FORCING_FIELDS,
-    split_physics_single_rank, finalize_split_step, ghg_array_to_dict)
+    SegmentCarry, SegmentForcing, GRID_SHAPED_FORCING_FIELDS, carry_moist,
+    fix_segment_dry_mass, split_physics_single_rank, finalize_split_step,
+    ghg_array_to_dict)
 
 
 # Carry fields that are per-column state sharded on their leading axis under the
@@ -379,15 +379,22 @@ def make_sharded_operator_split_step(
             grid=band_geom, sigma_coord=sigma_coord,
             polar_mask=polar_mask, polar_mask_v=polar_mask_v,
             pole_v_bc_masks=spmd_pole_end_masks(),
+            # energy fixer window starts at the cell-centre carry (F15b)
+            energy_pre=(carry.T, carry.u, carry.v, carry.p_s, carry.phis),
         )
         hs_out = cgrid_to_hydrostatic(out_cgrid, band_geom)
         T_new, u_new = hs_out.T.data, hs_out.u.data
         v_new, p_s_new = hs_out.v.data, hs_out.p_s.data
 
-        # --- Dry mass fixer (global_area_sum is lat-band-psum-aware) ---
+        # --- Dry mass fixer (global_area_sum is lat-band-psum-aware): the
+        # DRY integral, moisture re-weighted so the correction is dry air
+        # (F13; same shared fixer as the compiled segment) ---
         if fix_mass:
-            p_s_new = fix_ps_mass_target(
-                p_s_new, carry.target_mass, band_geom, owned_mask=None)
+            p_s_new, _fxm = fix_segment_dry_mass(
+                p_s_new, carry_moist(carry),
+                carry.target_mass, band_geom, statics.dsigma)
+            carry = carry._replace(
+                **{_nm: v for _nm, v in _fxm.items() if v is not None})
 
         # --- Physics (column-local) + shared finalize tail ---
         need_rad, doy, sod = _need_rad_and_time(

@@ -119,6 +119,14 @@ class MicrophysicsOutput(NamedTuple):
     # species fell slower than its terminal speed).  None when the sub-
     # stepping is off.
     sed_substeps_required: jax.Array | None = None
+    # FROZEN part of ``precipitation`` [kg/m^2/s, +into surface, (ncol,)]: the
+    # ice + snow + graupel surface fluxes.  The land must receive the
+    # atmosphere's OWN phase partition, or the latent heat of fusion the
+    # scheme released (or did not) is not matched at the surface (review
+    # 2026-10-10 F29).  Zeros for schemes whose latent heating is L_v-only
+    # (no ice phase: all their precipitation is liquid energetically); None =
+    # the scheme does not publish it (an interactive land then refuses).
+    precip_frozen: jax.Array | None = None
 
 
 def make_zero_hydrometeors(
@@ -153,7 +161,7 @@ def make_zero_output(
         dT_dt=z2, dq_v_dt=z2, dq_c_dt=z2, dq_r_dt=z2,
         dq_i_dt=z2, dq_s_dt=z2, dq_g_dt=z2,
         dN_c_dt=z2, dN_r_dt=z2, dN_i_dt=z2,
-        precipitation=z1,
+        precipitation=z1, precip_frozen=z1,
     )
 
 

@@ -582,6 +582,10 @@ def build_parser():
     parser.add_argument("--volcanic-aerosol-scale", type=float, default=1.0)
     parser.add_argument("--volcanic-aerosol-lw", action="store_true",
                         default=False)
+    parser.add_argument(
+        "--forcing-hold-outside-file-years", action="store_true", default=False,
+        help="Hold a multi-year ozone/aerosol/volcanic file's end record for "
+             "run dates outside its years (default: raise).")
     # Diurnal (instantaneous-zenith) radiation, as run_amip.py; every AMIP deck
     # sets diurnal_cycle: true (gridaudit 2026-10-09).
     parser.add_argument("--diurnal-cycle", action=argparse.BooleanOptionalAction,
@@ -594,6 +598,30 @@ def build_parser():
              "eccentricity asymmetry (~+/-3.4%%). Default off = circular "
              "orbit. Recommended for CMIP historical/abrupt-4xCO2/1pctCO2.",
     )
+    # Terrain / land-sea mask / subgrid orography (F36): the SAME flags, dests
+    # and defaults as run_amip.py (tests/unit/test_run_coupled_forcing_cli.py
+    # pins them).  Without them the coupled atmosphere was always flat and the
+    # slab deck's land the analytic 50%-poleward-of-25-deg band.  In a coupled
+    # run the land fraction feeds the coupler's land tile (the atmosphere's own
+    # slab land is not activated: the coupler owns land).
+    # Vertical coordinate (F36): the same dests/defaults as run_amip.py.  The
+    # default hybrid table (transition exponent 3) carries NEGATIVE layer mass
+    # below ~658 hPa, i.e. over real Tibet; exponent 2 holds all of ETOPO.
+    parser.add_argument("--vertical-coord", type=str, default="hybrid",
+                        choices=["sigma", "hybrid", "cam_l32"],
+                        help="cam_l32 = CAM6's 32-level hybrid table (nlev must be 32)")
+    parser.add_argument("--transition-exponent", type=int, default=None,
+                        choices=[2, 3],
+                        help="hybrid B(eta)=eta**n exponent; 2 holds all of "
+                             "ETOPO, 3 (default) inverts below ~658 hPa (#1029).")
+    parser.add_argument("--topography", type=str, default="flat")
+    parser.add_argument("--topo-smoothing", type=int, default=4)
+    parser.add_argument("--land-mask-file", type=str, default="",
+                        help="Land-sea-mask NetCDF (CMIP6 sftlf / ERA5 lsm); "
+                             "replaces the terrain product's land fraction.")
+    parser.add_argument("--subgrid-orography-file", type=str, default="",
+                        help="Subgrid orographic stddev NetCDF (SSO_STDH) for "
+                             "an orographic GWD launch; see run_amip.py.")
     # RRTMGP g-point compile/runtime tuning (forward CMIP runs only — these are
     # ANSWER-IDENTITY for a non-AD forward integration).  ``--rrtmgp-gpoint-
     # batch-size N>0`` processes the two-stream g-points in vmap blocks of N
@@ -1046,6 +1074,13 @@ def build_parser():
                              "hybrid lat-lon C-grid lane (#1029; no effect on "
                              "other grids/coordinates). Default ON; "
                              "--no-sb81-omega-conversion = legacy form.")
+    parser.add_argument("--energy-fixer",
+                        action=argparse.BooleanOptionalAction, default=True,
+                        help="CAM-style dycore total-energy fixer (DycoreConfig."
+                             "energy_fixer). ON by default; wired on the "
+                             "voronoi, lat-lon and cube atmospheres, refused "
+                             "on gaussian (spectral): pass --no-energy-fixer "
+                             "there to accept the open energy sink explicitly.")
     parser.add_argument("--ocean-nlev", type=int, default=20,
                         help="3D ocean vertical levels (--ocean dynamic)")
     parser.add_argument("--ocean-dt", type=float, default=300.0,
@@ -1246,18 +1281,21 @@ def require_forcing_files(args) -> None:
         raise SystemExit("--aerosol-file is required with --aerosol-forcing external")
 
 
-def main():
+def main(argv=None, *, build_only=False):
+    """Run a coupled experiment.  ``build_only`` stops after the driver is
+    constructed and returns it (deck tests build every committed deck this way
+    without integrating)."""
     parser = build_parser()
 
     # Two-pass parse so a --config file supplies defaults that explicit CLI
     # flags still override (precedence: CLI > config file > parser default).
-    pre, _ = parser.parse_known_args()
+    pre, _ = parser.parse_known_args(argv)
     if pre.config is not None:
         from legoesm.driver.run_config_yaml import load_yaml_config
         parser.set_defaults(**load_yaml_config(
             pre.config, parser, example_keys=_COUPLED_EXAMPLE_KEYS))
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     # --minimal-physics: collapse the full-physics defaults to a cheap
     # idealized atmosphere (gray radiation + SBM convection only).  Applied
@@ -1382,6 +1420,9 @@ def main():
             grid_type=args.grid,
             resolution=args.resolution,
             nlev=args.nlev,
+            vertical_coord=args.vertical_coord,
+            transition_exponent=(args.transition_exponent
+                                 if args.transition_exponent is not None else 3),
         ),
         dycore=DycoreConfig(
             dt=args.dt, model_type="hydrostatic",
@@ -1400,6 +1441,7 @@ def main():
             # #1029 ω-side SB81 conversion (hybrid latlon lane only; the
             # factory threads it, other dycores ignore it). Default OFF.
             sb81_omega_conversion=args.sb81_omega_conversion,
+            energy_fixer=args.energy_fixer,
         ),
         output=OutputConfig(
             diag_days=args.diag_days,
@@ -1439,6 +1481,11 @@ def main():
         volcanic_aerosol_file=args.volcanic_aerosol_file,
         volcanic_aerosol_scale=args.volcanic_aerosol_scale,
         volcanic_aerosol_lw=args.volcanic_aerosol_lw,
+        forcing_hold_outside_file_years=args.forcing_hold_outside_file_years,
+        topography=args.topography,
+        topo_smoothing=args.topo_smoothing,
+        land_mask_path=args.land_mask_file,
+        subgrid_orography_path=args.subgrid_orography_file,
         ic=args.ic,
         ic_path=args.ic_path,
         convection=args.convection,
@@ -1743,6 +1790,23 @@ def main():
         atm_config, coupled_cfg, coupler_config=coupler_config,
         ice_config=ice_config, lake_config=lake_config,
         ocean_grid=ocean_grid_obj, output_dir=args.output,
+    )
+    if build_only:
+        return driver
+
+    # Coupled run manifest: every component config this driver was built from
+    # (the atmosphere's own manifest, written by its ModelDriver at setup, sits
+    # at the output root and covers the atmosphere only).  A failed write
+    # aborts the run.
+    from legoesm.driver.restart import write_run_manifest_on_root
+    write_run_manifest_on_root(
+        driver.output_dir / "coupled",
+        {"runner": "run_coupled", "atmosphere": atm_config,
+         "coupled": coupled_cfg, "coupler": coupler_config,
+         "sea_ice": ice_config, "lake": lake_config, "cli_args": vars(args)},
+        config_kind="coupled",
+        runner_tag="run_coupled",
+        rng_seeds={"master": int(atm_config.seed)},
     )
 
     t0 = time.time()

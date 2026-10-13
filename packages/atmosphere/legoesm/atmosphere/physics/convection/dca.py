@@ -415,6 +415,7 @@ def _manabe_dca_convection(
         dq_c_conv_dt=dq_c_conv_dt,
         cape=cape,
         convective_mask=convective_mask,
+        precip_frozen_sfc=jnp.zeros_like(cape),  # L_v-only: liquid at sfc (F29)
     )
 
 
@@ -784,6 +785,7 @@ def ahmed_neelin_dca(
         dq_c_conv_dt=dq_c_conv_dt,
         cape=BL,                                     # B_L [m/s²] diagnostic
         convective_mask=convective_mask,
+        precip_frozen_sfc=jnp.zeros_like(BL),  # L_v-only: liquid at sfc (F29)
     )
 
 
