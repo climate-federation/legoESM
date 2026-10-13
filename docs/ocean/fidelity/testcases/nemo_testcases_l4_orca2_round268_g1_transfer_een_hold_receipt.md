@@ -125,8 +125,11 @@ against `ec14bd3d8..HEAD`, but the in-sandbox client could not initialize:
 `failed to initialize in-process app-server client: Read-only file system`.
 Verdict quoted as required: **independent review unavailable in-sandbox**.
 
-Citation audit and its shifted-line plant are recorded after the citation-map
-commit below.
+Citation audit: **PASS**, four citations, zero unmapped citations, zero anchor
+failures, and zero whole-map audit failures. Shifting the compiled `np_CRV`
+citation by two lines makes the gate fail on the first endpoint. The default
+cumulative receipt audit also passes with zero unmapped/failed anchors; its
+shifted-line plant fails as required.
 
 ## OPEN
 
