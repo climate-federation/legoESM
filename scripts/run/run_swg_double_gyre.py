@@ -312,6 +312,7 @@ def run_long(
         daily_means: bool = False,
         restart: Path | None = None,
         perturb_amplitude_m: float | None = None,
+        profile_only: bool = False,
 ) -> dict:
     """Integrate one resolved SWG deck and write one native state per day."""
     import jax
@@ -325,16 +326,21 @@ def run_long(
     from legoesm.ocean.state import OceanSurfaceForcing
 
     validate_swg_namelist(namelist)
-    if mode not in ("gpu-native", "cpu-certified"):
-        raise ValueError("mode must be 'gpu-native' or 'cpu-certified'")
+    if mode not in ("gpu-native", "cpu-certified", "cpu-scanned"):
+        raise ValueError(
+            "mode must be 'gpu-native', 'cpu-certified', or 'cpu-scanned'")
     if type(days) is not int or days <= 0:
         raise ValueError("days must be a positive integer")
     if type(profile_steps) is not int or profile_steps < 0:
         raise ValueError("profile_steps must be a non-negative integer")
     if type(compare_days) is not int or compare_days < 0:
         raise ValueError("compare_days must be a non-negative integer")
-    if mode != "gpu-native" and compare_days:
-        raise ValueError("scan comparison requires gpu-native mode")
+    if profile_only and profile_steps <= 0:
+        raise ValueError("profile_only requires positive profile_steps")
+    if profile_only and (compare_days or daily_means):
+        raise ValueError("profile_only excludes comparison and daily means")
+    if mode == "cpu-certified" and compare_days:
+        raise ValueError("scan comparison requires a scanned mode")
     if daily_means and mode != "gpu-native":
         raise ValueError("daily-mean output requires non-certified gpu-native mode")
     if len(commit) != 40 or any(char not in "0123456789abcdef" for char in commit):
@@ -383,7 +389,7 @@ def run_long(
             perturb_amplitude_m=perturb_amplitude_m)
     profile = None
     parity = None
-    if mode == "gpu-native":
+    if mode in ("gpu-native", "cpu-scanned"):
         if restart is None:
             state = seed_steady_forcing_carry(state, forcing)
         day_stepper = build_scanned_stepper(
@@ -432,7 +438,7 @@ def run_long(
         "days": days,
         "steps_per_day": steps_per_day,
         "integration": (
-            "one-jitted-scan-per-day" if mode == "gpu-native"
+            "one-jitted-scan-per-day" if mode in ("gpu-native", "cpu-scanned")
             else "production-python-step-loop"),
         "sampling": "daily_mean" if daily_means else "daily_snapshot",
         "available_sampling": (
@@ -455,6 +461,16 @@ def run_long(
             "u_daily_mean_m_s": "daily mean of post-step native U velocity",
             "v_daily_mean_m_s": "daily mean of post-step native V velocity",
         })
+    if profile_only:
+        completed = manifest | {
+            "schema": "legoesm-swg-double-gyre-step-profile-v1",
+            "profile_only": True,
+            "status": "complete",
+            "completed_days": 0,
+            "daily_sha256": {},
+        }
+        _write_json_atomic(output / "manifest.json", completed)
+        return completed
     pending_path = output / "manifest.pending.json"
     day_hashes: dict[str, str] = {}
     _write_json_atomic(
@@ -546,11 +562,14 @@ def main(argv=None) -> int:
     parser.add_argument("--perturb", type=float,
                         help="fixed-seed wet T-point SSH noise amplitude [m]")
     parser.add_argument(
-        "--mode", choices=("gpu-native", "cpu-certified"),
+        "--mode", choices=("gpu-native", "cpu-certified", "cpu-scanned"),
         default="gpu-native")
     parser.add_argument(
         "--profile-steps", type=int, default=0,
         help="warm wall-clock profile of Python and scan programs")
+    parser.add_argument(
+        "--profile-only", action="store_true",
+        help="write the warm step profile without integrating a model day")
     parser.add_argument(
         "--compare-days", type=int, default=0,
         help="compare the daily scan with the Python loop from one state")
@@ -566,7 +585,8 @@ def main(argv=None) -> int:
             namelist, args.output, days=args.days, mode=args.mode,
             commit=git_sha(), profile_steps=args.profile_steps,
             compare_days=args.compare_days, daily_means=args.daily_means,
-            restart=args.restart, perturb_amplitude_m=args.perturb)
+            restart=args.restart, perturb_amplitude_m=args.perturb,
+            profile_only=args.profile_only)
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"REFUSE: {exc}", file=sys.stderr)
         return 2

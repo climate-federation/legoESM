@@ -192,6 +192,39 @@ def test_cpu_profile_records_production_step_cost(tmp_path):
     assert manifest["profile"]["python_ms_per_step"] > 0.0
 
 
+def test_profile_only_writes_no_trajectory(tmp_path):
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import SWG_MADDISON_NAMELIST
+
+    tiny = SWG_MADDISON_NAMELIST._replace(
+        nn_SWG=1, rn_Dt_s=43_200.0, nn_itend=2, nn_write=2, nn_stock=2,
+        rn_modified_grav_m_s2=1.0e-6, rn_tau_pa=0.0)
+    output = tmp_path / "profile"
+    manifest = driver.run_long(
+        tiny, output, days=1, mode="cpu-certified", commit="a" * 40,
+        profile_steps=2, profile_only=True)
+    assert manifest["profile_only"] is True
+    assert manifest["completed_days"] == 0
+    assert list(output.iterdir()) == [output / "manifest.json"]
+    with pytest.raises(ValueError, match="positive profile_steps"):
+        driver.run_long(
+            tiny, tmp_path / "invalid", days=1, mode="cpu-certified",
+            commit="a" * 40, profile_only=True)
+
+
+def test_cpu_scanned_mode_uses_certified_policy_and_day_program(tmp_path):
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import SWG_MADDISON_NAMELIST
+
+    tiny = SWG_MADDISON_NAMELIST._replace(
+        nn_SWG=1, rn_Dt_s=43_200.0, nn_itend=2, nn_write=2, nn_stock=2,
+        rn_modified_grav_m_s2=1.0e-6, rn_tau_pa=0.0)
+    manifest = driver.run_long(
+        tiny, tmp_path / "run", days=1, mode="cpu-scanned",
+        commit="a" * 40)
+    assert manifest["certified_policy"] is True
+    assert manifest["transcendentals"] == "libm"
+    assert manifest["integration"] == "one-jitted-scan-per-day"
+
+
 def test_restart_restores_native_stagger_and_fixed_seed_perturbation(tmp_path):
     import jax
     from legoesm.core.precision import PrecisionPolicy, set_policy
