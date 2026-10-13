@@ -394,6 +394,30 @@ UNVERIFIED:
   uncommitted);
 - what makes the barotropic V face after step 3 unequal.
 
+## 11. Final tree, citation gate and evidence hashes
+
+- Final code commit: c3619b1a0 (two earlier-cited lines restored after the
+  citation gate's whole-map audit went red on them; no arithmetic change).
+  The 100-step record re-run there differs from fa218f555's in 0 of 598
+  rows (record100_7_card.json): 21 / 54 / 54 / 54 / 54.
+- The card's stage table at a2254e960, steps 1 to 3, sea level / U / V:
+  0 unequal at every stage of every step (stages_kt1_3_card.json).
+- Citation gate on this receipt: PASS, 15 citations, 0 unmapped, whole-map
+  audit clean; the shifted-citation plant exits 1 (citation_receipt.json,
+  citation_plant.json). It first FAILED: four new entries named the wrong
+  occurrence of a repeated line, and two earlier anchors were the lines my
+  edits had rewritten. Fixed in c3619b1a0.
+- After c3619b1a0 the fold, F-ratio and selection tests were re-run (10
+  passed, tests_g1_r7_i.log). The stage-table fold test was NOT re-run; the
+  record above covers the stage-3 site it exercises.
+- The given-entry ladder and the event census are stamped 9852cfd5d, before
+  the review fix, which moved no record row.
+
+SHA-256 prefixes. final/: citation_plant.json=3a087a6793ee7b85, citation_receipt.json=6bf1c8ae02bd4407, given_entry_10.json=bf0248d29fc2b25e, interior_events_24.json=de15bebef27d2677, plant_score.json=aadbe3f2a8645597, record100_0_before.json=100386c702051c6d, record100_1b_zdf_only.json=0074890fc2992499, record100_1c_foldv_only.json=fa3df1e2de8e1e06, record100_1_vor.json=2da86fdd485230e0, record100_2_vor_zdf.json=445c79299a928542, record100_4_card.json=2813efac5522e1f7, record100_4_card_without_entry_depth.json=19f87ca42b867b79, record100_5_card.json=f10d9f62f1ac3e90, record100_5_card_without_entry_depth.json=21df235edc6f36cf, record100_5_without_fold_exchange_v.json=acd1fd22b0ea2a45, record100_5_without_stage_r3f.json=f364fdff0526a199, record100_5_without_vor_order.json=5b041e26b7f59e6c, record100_5_without_zdf_residual.json=ca8743bff7e40d30, record100_6_card.json=dcca2ae7b90a1f8b, record100_6_card_without_entry_depth.json=9bde8c7752c3882c, record100_7_card.json=7596e0e601838e5a, rhs_terms_kt1_3_card.json=5f4e72156d7640b3, rhs_terms_kt1_3_without_vor_order.json=3e9af015a0e288e0, stages_kt1_3_card.json=c3e0acd91b0627eb.
+One level up: codex_review_r7.log=c60677ba92f3120a, tests_g1_r7_a.log=958d01bfff86cf38, tests_g1_r7_b.log=7226de3438542715, tests_g1_r7_c.log=46ecb7f460b4d3a5, tests_g1_r7_d.log=80f41ff7c56824be, tests_g1_r7_e.log=f6cdfdbda954e873, tests_g1_r7_f.log=3a153a7f7862c48a, tests_g1_r7_g.log=2744e59ae903435a, tests_g1_r7_h.log=1371f8477838d526, tests_g1_r7_i.log=a5ca6718d82f7381, tests_ratchets.log=aab7ae637ce849a1, stages_kt1_2_zdf_dirty.json=292120329bfdefd9, stages_kt4_5_dirty.json=850bd24a2842526c, stages_kt5_dirty.json=340fd17f6f4f6c2e, rhs_terms_kt4_5_dirty.json=399689e754af7157.
+This list was written before the receipt's last commit; citation_receipt.json
+is regenerated on the final receipt and its hash above is the earlier run's.
+
 ## OPEN for round 8
 
 1. The one barotropic V face after step 3 and the 7 sea-level cells after
