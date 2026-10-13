@@ -3225,7 +3225,7 @@ def barotropic_substeps_latlon_cgrid(
                 dz_ref=getattr(z_coord, "dz_ref", None),
                 coefficient_evaluation=_een_eval,
                 eta=_eta_een,
-                z_coord=z_coord, fold_pivot_row=_nemo_een_fold_pivot_row(config),
+                z_coord=z_coord, fold_pivot_row=nemo_een_fold_pivot_row(config),
                 scheme=(
                     "ene"
                     if _bt_cor.startswith("ene")
@@ -4163,7 +4163,7 @@ def _nemo_een_ratio_fold_exchange(r3u, r3v, r3f, grid, selected):
             r3f.at[-1].set(r3f[-2][fold_perm_f(fold)]))
 
 
-def _nemo_een_fold_pivot_row(config):
+def nemo_een_fold_pivot_row(config):
     """(ratio exchange, mesh ``fe3mask`` pivot row): the two halves of NEMO's
     T-pivot pivot row in the solver's EEN coefficient operands.
 

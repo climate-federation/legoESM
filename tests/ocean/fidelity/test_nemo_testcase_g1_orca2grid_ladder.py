@@ -549,12 +549,12 @@ def test_only_the_g1_card_selects_the_round6_statements():
 
 def test_fold_pivot_row_halves_are_refused_one_without_the_other():
     from legoesm.ocean.dynamics import barotropic_latlon_cgrid as B
-    assert B._nemo_een_fold_pivot_row(_solver_options()) == (False, False)
-    assert B._nemo_een_fold_pivot_row(_solver_options(
+    assert B.nemo_een_fold_pivot_row(_solver_options()) == (False, False)
+    assert B.nemo_een_fold_pivot_row(_solver_options(
         **{n: True for n in ROUND6_SOLVER})) == (True, True)
     for name in ROUND6_SOLVER:
         with pytest.raises(ValueError, match="one fold unit"):
-            B._nemo_een_fold_pivot_row(_solver_options(**{name: True}))
+            B.nemo_een_fold_pivot_row(_solver_options(**{name: True}))
 
 
 def test_ratio_fold_exchange_refuses_a_grid_without_a_stored_pivot_row():

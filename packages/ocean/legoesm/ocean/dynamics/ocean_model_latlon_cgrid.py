@@ -7258,7 +7258,7 @@ class LatLonCGridOceanModel:
                     # builds them from the Nbb seed thickness under the MLF
                     # before-level seed — an operator mismatch NEMO doesn't have).
                     from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
-                        barotropic_coriolis_een_pre_step, _nemo_een_fold_pivot_row,
+                        barotropic_coriolis_een_pre_step, nemo_een_fold_pivot_row,
                     )
                     _min_wc = jnp.asarray(
                         _cfg_b.min_water_column_m, dtype=F_slow_u.dtype)
@@ -7304,7 +7304,7 @@ class LatLonCGridOceanModel:
                         dz_ref=getattr(_zc, "dz_ref", None),
                         coefficient_evaluation=_een_eval,
                         eta=state.eta.data,
-                        z_coord=_zc, fold_pivot_row=_nemo_een_fold_pivot_row(_cfg_b),
+                        z_coord=_zc, fold_pivot_row=nemo_een_fold_pivot_row(_cfg_b),
                         return_pre=True,
                         scheme=_bt_pv_scheme,
                         # dyn_cor_2D, CALLED at dynspg_ts.f90:289 and
