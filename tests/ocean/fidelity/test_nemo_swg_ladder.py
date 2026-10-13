@@ -58,12 +58,24 @@ def test_dg50_stage_admission_pins_records_restarts_and_outputs():
 
 @pytest.mark.skipif(not DG50_MONTH_ROOT.is_dir(),
                     reason="admitted dg50 month records not mounted")
-def test_dg50_month_admission_scores_all_daily_records():
+def test_dg50_month_admission_reports_registered_numerical_debt():
     out = lad.month(DG50_MONTH_ROOT, deck="dg50", allow_dirty=True)
     assert out["record_counts"] == {"stage_entries": 30, "restarts": 30}
     assert len(out["per_kt"]) == 30
-    assert sum(len(day["rows"]) for day in out["per_kt"]) == 690
-    assert out["all_at_bar"] and out["all_bit_identical"]
+    rows = [row for day in out["per_kt"] for row in day["rows"]]
+    assert len(rows) == 690
+    assert sum(row["exact"] for row in rows) == 339
+    assert sum(row["exact"] or row.get("numerical_status") == "AT-BAR"
+               for row in rows) == 561
+    first_numerical_debt = next(
+        day["day"] for day in out["per_kt"]
+        if any(not row["exact"]
+               and row.get("numerical_status") != "AT-BAR"
+               for row in day["rows"]))
+    assert first_numerical_debt == 9
+    assert max(row["max_abs"] for row in rows) == pytest.approx(
+        9.478529072737274e-15)
+    assert not out["all_at_bar"] and not out["all_bit_identical"]
 
 
 def test_exact_row_gate_distinguishes_signed_zero_bits():
