@@ -116,8 +116,10 @@ def build_closure_geometry(card) -> SWGClosureGeometry:
 class SWGScalarPotentialCNN(eqx.Module):
     """Small residual-free CNN producing one boundary-zero F potential.
 
-    Six input channels are SSH plus the explicit noise input, T-centred U/V,
-    wet mask, and the two normalized face metrics.  Noise has no separate
+    Four input channels are SSH plus the explicit noise input, T-centred U/V,
+    and wet mask. Metrics remain non-trainable geometry in the conservative
+    potential-to-face transform rather than redundant uniform CNN channels.
+    Noise has no separate
     trainable projection: it enters the SSH channel, so deterministic mode
     cannot leave a noise-only parameter leaf inert.  The final convolution has
     no bias because a spatially constant potential is annihilated by the
@@ -138,7 +140,7 @@ class SWGScalarPotentialCNN(eqx.Module):
         keys = jax.random.split(key, spec.hidden_layers + 1)
         padding = spec.kernel_size // 2
         layers = [eqx.nn.Conv2d(
-            6, spec.hidden_channels, spec.kernel_size, padding=padding,
+            4, spec.hidden_channels, spec.kernel_size, padding=padding,
             key=keys[0], dtype=jnp.float64)]
         for layer_key in keys[1:-1]:
             layers.append(eqx.nn.Conv2d(
@@ -162,10 +164,6 @@ class SWGScalarPotentialCNN(eqx.Module):
         v_south = jnp.concatenate([jnp.zeros_like(v[:1]), v[:-1]], axis=0)
         u_t = 0.5 * (u + u_west)
         v_t = 0.5 * (v + v_south)
-        metric_u = geometry.metric_u_m / jnp.mean(
-            geometry.metric_u_m[geometry.umask])
-        metric_v = geometry.metric_v_m / jnp.mean(
-            geometry.metric_v_m[geometry.vmask])
         # The key is structurally live from phase 3 onward.  A caller-provided
         # noise realization remains reparameterizable and reproducible.
         keyed_noise = noise + noise_scale * jax.random.normal(
@@ -174,7 +172,7 @@ class SWGScalarPotentialCNN(eqx.Module):
             jnp.asarray(entry.ssh_k) / self.spec.ssh_scale_m + keyed_noise,
             u_t / self.spec.velocity_scale_m_s,
             v_t / self.spec.velocity_scale_m_s,
-            geometry.tmask.astype(u.dtype), metric_u, metric_v), axis=0)
+            geometry.tmask.astype(u.dtype)), axis=0)
         value = channels
         for layer in self.layers[:-1]:
             value = jax.nn.elu(layer(value))

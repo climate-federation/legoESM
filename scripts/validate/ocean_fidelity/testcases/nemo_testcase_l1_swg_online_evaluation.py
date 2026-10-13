@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -12,6 +13,10 @@ from legoesm.ocean.fidelity.nemo_testcase_recipe import (
     SWG_DG50_NAMELIST,
     build_swg_card,
 )
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+from nemo_testcase_l1_swg_dg_climate import checkerboard_index  # noqa: E402
 
 DEFAULT_ROUND2 = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgonl_rounds/round2")
@@ -137,8 +142,25 @@ def held_out_gate(seed_scores: list[dict], controls: dict[str, dict]) -> dict:
     }
 
 
+def _physical_fail_plants() -> dict:
+    """Measure collapse and grid-mode plants before injecting their scores."""
+    jj, ii = np.indices((80, 80))
+    checkerboard = np.where((ii + jj) % 2 == 0, 1.0, -1.0)
+    anomaly = np.stack((-checkerboard, checkerboard))
+    collapsed = np.broadcast_to(np.mean(anomaly, axis=0), anomaly.shape)
+    source_energy = np.mean(anomaly * anomaly, dtype=np.float64)
+    collapsed_energy = np.mean(collapsed * collapsed, dtype=np.float64)
+    return {
+        "collapsed_eke_ratio": float(collapsed_energy / source_energy),
+        "checkerboard_index": checkerboard_index(
+            checkerboard, np.zeros_like(checkerboard)),
+        "top_octave_fraction": 1.0,
+    }
+
+
 def adversarial_plants(controls: dict[str, dict]) -> dict:
     """Prove collapsed variance and two-cell noise cannot pass the gate."""
+    measured = _physical_fail_plants()
     best = min(controls.values(), key=lambda value: sum((
         value["mean_transport_rmse_m2_s"], value["ke_spectrum_relative_l1"],
         value["wet_eke_map_nrmse"])))
@@ -146,19 +168,18 @@ def adversarial_plants(controls: dict[str, dict]) -> dict:
     for metric in ("mean_transport_rmse_m2_s", "ke_spectrum_relative_l1",
                    "wet_eke_map_nrmse"):
         ideal[metric] = 0.0
-    collapsed = dict(ideal, basin_eke_ratio=0.0)
+    collapsed = dict(ideal, basin_eke_ratio=measured["collapsed_eke_ratio"])
     collapsed_gate = held_out_gate([collapsed] * 3, controls)
     noisy = dict(ideal, basin_eke_ratio=1.0)
-    for metric in ("top_octave_ke_fraction", "top_octave_enstrophy_fraction",
-                   "native_checkerboard_index"):
-        noisy[metric] = 2.0 * max(
-            control[metric] for control in controls.values()) + np.finfo(float).eps
+    noisy["top_octave_ke_fraction"] = measured["top_octave_fraction"]
+    noisy["top_octave_enstrophy_fraction"] = measured["top_octave_fraction"]
+    noisy["native_checkerboard_index"] = measured["checkerboard_index"]
     noise_gate = held_out_gate([noisy] * 3, controls)
     if collapsed_gate["pass"] or noise_gate["pass"]:
         raise AssertionError("an adversarial closure passed the held-out gate")
     return {
-        "collapsed_variance": collapsed_gate,
-        "two_cell_grid_noise": noise_gate,
+        "collapsed_variance": {**collapsed_gate, "plant": measured},
+        "two_cell_grid_noise": {**noise_gate, "plant": measured},
     }
 
 

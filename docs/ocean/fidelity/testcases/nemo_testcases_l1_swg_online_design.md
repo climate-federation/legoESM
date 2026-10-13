@@ -91,9 +91,11 @@ inside the certified step. If the closure argument is absent, no addition or
 reassociation occurs, preserving the certified card byte-for-byte.
 
 Inputs are coarse SSH, native U/V velocity averaged to T, wet mask, normalized
-`e2u/e1v` metrics, an explicit RNG key, and a fixed-shape noise pytree. The
+non-trainable C-grid metrics, an explicit RNG key, and a fixed-shape noise
+pytree. Uniform metrics act only in the potential-to-face transform and are
+not duplicated as indistinguishable CNN channels. The
 phase-3 Equinox model has five width-3 convolutions, 16 hidden channels, ELU,
-an 11-cell (550 km) receptive field, and 7,984 parameters. Its output is the
+an 11-cell (550 km) receptive field, and 7,696 parameters. Its output is the
 native F-point potential; U/V acceleration is derived, never independently
 predicted. The final convolution has no bias because a constant-potential bias
 would be annihilated by the curl and become inert. Noise enters the SSH channel
@@ -146,17 +148,17 @@ compositions. With zero closure, 4-day and 8-day runs from the same coarse state
 must match bit-for-bit in native T/U/V at every common hourly endpoint. A
 failure blocks training rather than widening a tolerance.
 
-The phase-3 CPU profile used the real 7,984-parameter network, one sample, and
+The phase-3 CPU profile used the real 7,696-parameter network, one sample, and
 uniform production-step rematerialization. These are execution-only profiles;
 the temporary unit-valued field scales are not admitted training
 normalizations and no optimizer update was taken.
 
 | Window | Steps / observations | Forward execution / peak RSS | Reverse execution / peak RSS |
 |---:|---:|---:|---:|
-| 1 day | 216 / 24 | 2.15 s / 1.16 GiB | 7.20 s / 1.96 GiB |
-| 2 days | 432 / 48 | 4.45 s / 1.24 GiB | 14.35 s / 2.13 GiB |
-| 4 days | 864 / 96 | 8.56 s / 1.39 GiB | 28.36 s / 2.50 GiB |
-| 8 days | 1,728 / 192 | 17.45 s / 1.69 GiB | 58.87 s / 3.23 GiB |
+| 1 day | 216 / 24 | 2.15 s / 1.10 GiB | 10.58 s / 1.86 GiB |
+| 2 days | 432 / 48 | 4.71 s / 1.18 GiB | 14.12 s / 2.05 GiB |
+| 4 days | 864 / 96 | 8.50 s / 1.33 GiB | 30.24 s / 2.39 GiB |
+| 8 days | 1,728 / 192 | 17.38 s / 1.62 GiB | 62.67 s / 3.10 GiB |
 
 ## Controls and held-out gates
 

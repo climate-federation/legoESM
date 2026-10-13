@@ -18,9 +18,12 @@ from legoesm.ocean.fidelity.nemo_testcase_recipe import (
     build_swg_card,
 )
 from legoesm.training.swg_online import (
+    BalancedNormalizers,
     SWGNetworkSpec,
     SWGScalarPotentialCNN,
     assert_network_gradients_live,
+    balanced_fields_from_native,
+    balanced_trajectory_loss,
     build_closure_geometry,
     build_segment_fn,
     create_swg_optimizer,
@@ -45,8 +48,7 @@ def profile_metadata() -> dict:
         "network": {
             **PROFILE_NETWORK_SPEC._asdict(),
             "input_channels": [
-                "ssh_plus_noise", "u_at_t", "v_at_t", "wet_mask",
-                "e2u_normalized", "e1v_normalized"],
+                "ssh_plus_noise", "u_at_t", "v_at_t", "wet_mask"],
             "output": "boundary-zero native F-point potential",
             "convolution_count": PROFILE_NETWORK_SPEC.hidden_layers + 1,
             "receptive_field_cells": (
@@ -81,12 +83,18 @@ def run_profile(window_days: int, mode: str) -> dict:
         lr=1.0e-4, warmup_steps=10, total_steps=100,
         weight_decay=0.0, grad_clip_norm=1.0, optimizer="adam"))
     optimizer.init(eqx.filter(network, eqx.is_inexact_array))
+    normalizers = BalancedNormalizers(1.0, 1.0, 1.0)
 
     def objective(net):
         _, hourly = segment(net, initial, noise, key, jnp.asarray(0.0))
-        ssh, u, v = hourly
-        return (jnp.mean(ssh[-1] ** 2) + jnp.mean(u[-1] ** 2)
-                + jnp.mean(v[-1] ** 2))
+        _, u, v = hourly
+        balanced = jax.vmap(
+            lambda u_hour, v_hour: balanced_fields_from_native(
+                u_hour, v_hour, geometry))(u, v)
+        predicted = jax.tree.map(lambda value: value[None], balanced)
+        target = jax.tree.map(jnp.zeros_like, balanced)
+        return balanced_trajectory_loss(
+            predicted, target, geometry, normalizers, kind="point")
 
     if mode == "forward":
         measured = eqx.filter_jit(objective)

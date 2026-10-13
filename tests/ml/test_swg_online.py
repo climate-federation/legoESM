@@ -67,7 +67,7 @@ def test_network_manifest_shape_parameter_count_and_noise_hook(online_case):
         entry, geometry, key=jax.random.PRNGKey(2), noise=zero,
         noise_scale=jnp.asarray(1.0e-3))
     assert first.shape == entry.ssh_k.shape
-    assert network_parameter_count(network) == 1096
+    assert network_parameter_count(network) == 952
     assert np.array_equal(np.asarray(first), np.asarray(second))
     assert np.any(np.asarray(second) != np.asarray(stochastic))
     assert np.all(np.asarray(first)[~np.asarray(

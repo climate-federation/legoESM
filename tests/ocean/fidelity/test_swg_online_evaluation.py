@@ -63,3 +63,5 @@ def test_registered_adversarial_plants_both_fail():
     planted = evaluation.adversarial_plants(_controls())
     assert not planted["collapsed_variance"]["pass"]
     assert not planted["two_cell_grid_noise"]["pass"]
+    assert planted["collapsed_variance"]["plant"]["collapsed_eke_ratio"] == 0.0
+    assert planted["two_cell_grid_noise"]["plant"]["checkerboard_index"] == 1.0

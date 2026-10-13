@@ -14,7 +14,7 @@ SPEC.loader.exec_module(profile)
 def test_profile_metadata_is_real_network_and_no_training():
     metadata = profile.profile_metadata()
     network = metadata["network"]
-    assert network["parameter_count"] == 7984
+    assert network["parameter_count"] == 7696
     assert network["receptive_field_cells"] == 11
     assert network["output"] == "boundary-zero native F-point potential"
     assert metadata["optimizer_factory"] == "legoesm.ml.training.create_optimizer"

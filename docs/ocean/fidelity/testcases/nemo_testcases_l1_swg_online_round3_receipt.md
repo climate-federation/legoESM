@@ -61,10 +61,12 @@ components telescope to zero. Random-field tests cover all four claims; a
 stage-level absence test proves the certified branch is unchanged.
 
 The Equinox model has five width-3 convolutions, 16 hidden channels, ELU, an
-11-cell/550 km receptive field, and 7,984 parameters. Inputs are SSH plus the
-explicit noise realization, T-centred native U/V, wet mask, and normalized U/V
-metrics. Output is one boundary-zero native F potential. The output layer has
-no bias: a constant-potential bias would be annihilated and violate the
+11-cell/550 km receptive field, and 7,696 parameters. Inputs are SSH plus the
+explicit noise realization, T-centred native U/V, and wet mask. Uniform U/V
+metrics remain static geometry in the potential-to-face transform rather than
+indistinguishable CNN channels. Output is one boundary-zero native F
+potential. The output layer has no bias: a constant-potential bias would be
+annihilated and violate the
 no-inert-parameter rule. Noise shares the SSH weights rather than owning an
 inactive deterministic-only branch. Maddison's comparison architecture has
 seven width-5, 32-filter residual convolutions and 154,857 weights (local paper
@@ -102,20 +104,24 @@ eight-day build are bit-identical at all 96 common hourly T/U/V endpoints.
 The optimizer is constructed and initialized through the shared factory, but
 is never updated.
 
-The real-network CPU profiles are:
+The real-network CPU profiles include the actual hourly balanced loss:
 
 | Window | Steps | Forward execution / peak RSS | Reverse execution / peak RSS |
 |---:|---:|---:|---:|
-| 1 day | 216 | 2.151 s / 1,159,256 KiB | 7.200 s / 1,955,484 KiB |
-| 2 days | 432 | 4.453 s / 1,235,116 KiB | 14.349 s / 2,134,924 KiB |
-| 4 days | 864 | 8.565 s / 1,387,052 KiB | 28.355 s / 2,497,056 KiB |
-| 8 days | 1,728 | 17.453 s / 1,691,312 KiB | 58.867 s / 3,227,360 KiB |
+| 1 day | 216 | 2.154 s / 1,151,968 KiB | 10.584 s / 1,948,928 KiB |
+| 2 days | 432 | 4.707 s / 1,232,552 KiB | 14.118 s / 2,152,584 KiB |
+| 4 days | 864 | 8.501 s / 1,397,204 KiB | 30.242 s / 2,503,016 KiB |
+| 8 days | 1,728 | 17.380 s / 1,700,180 KiB | 62.673 s / 3,248,708 KiB |
 
 The eight profile JSON hashes, in forward 1/2/4/8 then reverse 1/2/4/8 order,
-are `9b5f3750...f645e`, `1029498a...67f2`, `ebb6e4c8...6df`,
-`da433be1...6440`, `65560633...862`, `9d546065...ed3b`,
-`687f7338...4b5c`, and `2038b6fd...b0e1`. Full hashes live beside the files
-under `round3/profile/`.
+are `98e0ca4870d5785c41fc8f673335a711356fcda0ddae13571d81af165f483474`,
+`1681cbeeadd0a8744efac1d0ff00be57a8982f6ee546500b284e9f350da5ba2f`,
+`36dd2b5efa11d9bda4f11d95aa5a8698f2651dcfe7c30c3672e3e1d74775751a`,
+`e9466bd9455aa5d9ce6480779a832758b38641b4b617640e40c280694d4d2612`,
+`dde6bd5c5f63b35618a7dcc85e97ebfcc8e0ae69eb00d1dfb4a13dbfb2910795`,
+`17db63ce78979dad6eeb23da4e32ccb63ffc2e0a9659246f2baa183ca8ab8287`,
+`f3860bc857de81dea2645904c11c7cc2a7329cb39862f7a75b5b797d852f246d`,
+and `fa5c1c601cc0be2171fe401173eab9b715bea058090fc125d19ad4ff5477d89b`.
 
 ## Held-out controls and fail plants
 
@@ -133,7 +139,7 @@ noisier than the worse control. A candidate with perfect skill scores but zero
 variance fails only the EKE gate; a perfect-skill candidate with a two-cell
 noise metric above both controls fails only spectral health. The scorecard is
 `round3/evaluation/controls_years2_3.json`, SHA-256
-`5bbb251ef44f43a8e3d391e93d5d53e95fe16644d444f3bb93ea81e7ddab2099`.
+`162686e7052ce95dfe9f9ce34793bf48515a0fa94a4393e5ff157907486cc686`.
 
 ## Scope disposition
 
@@ -141,7 +147,7 @@ noise metric above both controls fails only spectral health. The scorecard is
 |---|---|---|
 | Three dg50 compositions | Complete; hypothesis refuted | 30-day table and ULP-localized JSONs |
 | F-potential every stage | Complete | Divergence, wall, integral, absence and per-stage tests |
-| Equinox CNN with stochastic hook | Complete | Explicit manifest/spec, RNG/noise, 7,984 live parameters |
+| Equinox CNN with stochastic hook | Complete | Explicit manifest/spec, RNG/noise, 7,696 live parameters |
 | Balanced swappable loss | Complete | Point/energy shared API; `S=1` refusal |
 | 1/2/4/8 segment runner | Complete | Hourly scan, uniform checkpoint, zero-closure A/B |
 | CPU/GPU profile | CPU complete; GPU acquisition open | Eight CPU JSONs and exact command below |
@@ -152,15 +158,25 @@ noise metric above both controls fails only spectral health. The scorecard is
 
 ## Validation and commits
 
-Every new Python module has a direct test. The final commands and outputs are
-recorded after the final receipt commit. The citation gate is run from
-`## Coarse execution compositions` so every new oracle citation above must be
-mapped to a real compiled source symbol. Ruff covers every Python file changed
-since `acadd2dee`; `git diff --check acadd2dee..HEAD`, `compileall`, the
-targeted tests, and the relevant SWG ladder/card regression suite are binding.
+Every new Python module has a direct test. The final focused suite (network,
+profile, evaluation, RK3 stage, and ladder) reports `60 passed in 201.33s`.
+The complete SWG-online suite reports `20 passed in 46.32s`. Ruff reports
+`All checks passed!`; `compileall -q` and `git diff --check` emit no output.
+The citation gate is run from `## Coarse execution compositions` so every new
+oracle citation above must be mapped to a real compiled source symbol.
+
+External adversarial review is **UNREVIEWED in this round**. The required
+`codex exec` fallback failed before review with `failed to initialize
+in-process app-server client: Read-only file system`; the independent Claude
+fallback produced no review output and was stopped after six minutes. This is
+not claimed as a waiver or a PASS. The operator already assigned the round-2
+independent review to round 4; round 4 must also disposition this round-3 diff
+before any optimization. Two self-audit findings were fixed meanwhile: the
+profile now includes the actual hourly balanced loss, and two exactly
+redundant uniform metric CNN channels were removed.
 
 Round commits before the final receipt update are `be6919d4f`, `a63b076d4`,
-and `78a04b23c`.
+`78a04b23c`, and `7fb26fe4`.
 
 ## OPEN
 
