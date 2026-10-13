@@ -163,7 +163,8 @@ profile, evaluation, RK3 stage, and ladder) reports `60 passed in 201.33s`.
 The complete SWG-online suite reports `20 passed in 46.32s`. Ruff reports
 `All checks passed!`; `compileall -q` and `git diff --check` emit no output.
 The citation gate is run from `## Coarse execution compositions` so every new
-oracle citation above must be mapped to a real compiled source symbol.
+oracle citation above must be mapped to a real compiled source symbol; it
+reports `PASS`, three citations, zero failures, and every internal plant fired.
 
 External adversarial review is **UNREVIEWED in this round**. The required
 `codex exec` fallback failed before review with `failed to initialize
@@ -176,7 +177,7 @@ profile now includes the actual hourly balanced loss, and two exactly
 redundant uniform metric CNN channels were removed.
 
 Round commits before the final receipt update are `be6919d4f`, `a63b076d4`,
-`78a04b23c`, and `7fb26fe4`.
+`78a04b23c`, `7fb26fe4`, and `924bb6e25`.
 
 ## OPEN
 
