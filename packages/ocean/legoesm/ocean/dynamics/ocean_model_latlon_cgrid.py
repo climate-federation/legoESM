@@ -1178,6 +1178,11 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # the production NEMO predicate; False is the private legacy control and
     # True forces the arm. No public config can select any of these values.
     preserve_literal_hpg_vmask: object = None
+    # Private round-267 source-order arm. NEMO assigns the already-computed
+    # literal HPG sum directly into Krhs at stages 2/3; True carries that same
+    # production value without inserting legoESM's extra materialisation.
+    # No constructible model configuration can select this value.
+    stage_hpg_literal_accumulator: bool = False
     # WRITE-only developed-state observer for the completed three-dimensional
     # momentum RHS before its depth reduction.  Kept separate from the final
     # slow-forcing callback so the round-141 gate can prove this minimum
@@ -5662,7 +5667,8 @@ class LatLonCGridOceanModel:
                    nemo_stage_zad_operands=None,
                    nemo_stage_zad_operand_observer=None,
                    nemo_stage_zad_eta_after_override=None,
-                   nemo_literal_hpg_vmask=None):
+                   nemo_literal_hpg_vmask=None,
+                   nemo_literal_hpg_accumulator=False):
         """Compute baroclinic tendencies.
 
         ``momentum_only=True`` skips the (T/S-frozen) tracer-diffusion
@@ -5726,6 +5732,7 @@ class LatLonCGridOceanModel:
             nemo_stage_zad_eta_after_override=(
                 nemo_stage_zad_eta_after_override),
             nemo_literal_hpg_vmask=nemo_literal_hpg_vmask,
+            nemo_literal_hpg_accumulator=nemo_literal_hpg_accumulator,
             diagnose_momentum=return_nemo_operator_components,
             return_nemo_operator_components=return_nemo_operator_components,
         )
@@ -6953,6 +6960,10 @@ class LatLonCGridOceanModel:
                                          _zad_observers[stage_index - 1]),
                                      nemo_literal_hpg_vmask=(
                                          _ws_literal_hpg_vmask),
+                                     nemo_literal_hpg_accumulator=(
+                                         stage_index in (2, 3)
+                                         and self._nemo_ws_test_hooks
+                                         .stage_hpg_literal_accumulator),
                                      return_nemo_operator_components=(
                                          _return_components))
                 if _return_components:

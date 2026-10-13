@@ -110,9 +110,11 @@ def _model(card, hooks):
         _nemo_ws_test_hooks=hooks)
 
 
-def _hooks(card, *, live: bool, stage_entry=None):
+def _hooks(card, *, live: bool, stage_entry=None,
+           literal_hpg_accumulator: bool = False):
     hooks = r265._hooks(card, live=live, stage_entry=stage_entry)
-    return hooks
+    return hooks._replace(
+        stage_hpg_literal_accumulator=literal_hpg_accumulator)
 
 
 def _associated_stage(card, values):
@@ -120,7 +122,8 @@ def _associated_stage(card, values):
 
 
 def measure(deck_root: Path, frame_root: Path, record_root: Path,
-            label: str, expect_commit: str) -> dict[str, object]:
+            label: str, expect_commit: str, *,
+            literal_hpg_accumulator: bool = False) -> dict[str, object]:
     import jax
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import _NEMOWSLiveOperandTrace
 
@@ -152,10 +155,14 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
     with r245._barotropic_surface_mask_arm(
             card, True, v_only=True, t_pivot_north_neighbor=True):
         ordinary = jax.device_get(_model(
-            card, _hooks(card, live=False, stage_entry=stage_entry)).step(
+            card, _hooks(
+                card, live=False, stage_entry=stage_entry,
+                literal_hpg_accumulator=literal_hpg_accumulator)).step(
                 state, card.dt_s, freshwater=forcing[0], surface_forcing=forcing[1]))
         traced = jax.device_get(_model(
-            card, _hooks(card, live=True, stage_entry=stage_entry)).step(
+            card, _hooks(
+                card, live=True, stage_entry=stage_entry,
+                literal_hpg_accumulator=literal_hpg_accumulator)).step(
                 state, card.dt_s, freshwater=forcing[0], surface_forcing=forcing[1]))
     require(isinstance(traced, _NEMOWSLiveOperandTrace), "matched trace type moved")
     passivity = passive._ordinary_state_equal(traced.state_after, ordinary)
@@ -248,6 +255,7 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
         "worktree": stamp,
         "execution": "production-jit-cpu-fp64-x64-libm",
         "operand_route": "production-d114-resolved-complete-private-unit",
+        "literal_hpg_accumulator": literal_hpg_accumulator,
         "passivity": passivity,
         "boundary_order": list(BOUNDARY_ORDER),
         "boundary_rows": boundary_rows,
