@@ -46,7 +46,7 @@ export PATH=/home/dbalwada/legoESM/.venv/bin:/home/dbalwada/miniconda3/envs/nemo
 export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
 
 readonly NEMO_ROOT=${NEMO_ROOT:-/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2}
-readonly REF_NAME=ORCA2G1_OMIP_L1
+readonly REF_NAME=${REF_NAME:-ORCA2G1_OMIP_L1}
 readonly RUN_NAME=${RUN_NAME:-ORCA2G1_OMIP_L1_P3}      # run_r3.sh: a NEW target name
 readonly STEPS=100
 readonly STAGE_STEPS=${STAGE_STEPS:-10}             # must equal the patch gate
