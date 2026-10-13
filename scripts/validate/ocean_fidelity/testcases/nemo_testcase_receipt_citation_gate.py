@@ -140,6 +140,10 @@ FILES = {
     # --- GRIDLADDER round 2 (compiled G1 record build) ---
     "ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/dynvor.f90": (
         _ORCA2G1_P3 / "ppsrc/nemo/dynvor.f90"),
+    "ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/dynhpg.f90": (
+        _ORCA2G1_P3 / "ppsrc/nemo/dynhpg.f90"),
+    "ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/dynzdf.f90": (
+        _ORCA2G1_P3 / "ppsrc/nemo/dynzdf.f90"),
     "ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/domzgr.f90": (
         _ORCA2G1_P3 / "ppsrc/nemo/domzgr.f90"),
     "ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/domwri.f90": (
@@ -2609,7 +2613,7 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4_R92RHS/BLD/ppsrc/nemo/stp2d.f90:203-215': [
         '!*  vertical averaging  *!',
         ('END SELECT', 2), 13],
-    'ocean_pe_latlon_cgrid.py:5989-6002': [
+    'ocean_pe_latlon_cgrid.py:5995-6008': [
         ('du_dt = du_dt * u_mask_3d', 1),
         'dv_dt = jnp.where(_restore_hpg, hpg_tendency_v, dv_dt * v_mask_3d)',
         14],
@@ -3124,8 +3128,8 @@ CITATION_MAP = {
     'overflow_kt1_10/namelist_cfg:92': 'ln_dynvor_ens = .true.',
     'nemo_testcase_recipe.py:3043':
         'if (cfg.momentum_advection != "vector_invariant"',
-    'ocean_pe_latlon_cgrid.py:5385': ('if _mom_adv == "flux_form":', 2),
-    'ocean_pe_latlon_cgrid.py:5403': (
+    'ocean_pe_latlon_cgrid.py:5387': ('if _mom_adv == "flux_form":', 2),
+    'ocean_pe_latlon_cgrid.py:5405': (
         '_bc_horizontal_momentum_advection_flux_form(', 2),
     'nemo_testcase_recipe.py:3046':
         'requires ln_dynadv_vec=.true. with nn_dynkeg=0',
@@ -5636,10 +5640,10 @@ CITATION_MAP = {
         ('IF( ln_sdw ) THEN', 1), 'wsd   (:,:,:) = 0._wp', 9],
     'ocean_pe_latlon_cgrid.py:2040-2074': [
         'elif config.ke_gradient_scheme == "c2":', 'dp_dy = _dKp_dy[..., 1]', 35],
-    'ocean_pe_latlon_cgrid.py:3271-3297': [
+    'ocean_pe_latlon_cgrid.py:3273-3299': [
         'area_w = jax.lax.optimization_barrier(',
         'diag_vertadv_v = jax.lax.optimization_barrier(diag_vertadv_v)', 27],
-    'ocean_pe_latlon_cgrid.py:5224-5262': [
+    'ocean_pe_latlon_cgrid.py:5226-5264': [
         'zad_w, zad_h_u, zad_h_v = w, h_u, h_v',
         ('zad_h_v = jax.lax.optimization_barrier(zad_h_v)', 1), 39],
     'ocean_model_latlon_cgrid.py:7823-7833': [
@@ -6355,7 +6359,7 @@ CITATION_MAP = {
     'nemo_testcase_l1_overflow_round63_dynzdf_walk_gate.py:280-292': [
         'planted = None',
         'R60.require(after == before + 1, "plant did not add one refusal")', 13],
-    'ocean_pe_latlon_cgrid.py:3563-3566': [
+    'ocean_pe_latlon_cgrid.py:3565-3568': [
         ('if not (getattr(grid, "dlon", 0.0) and grid.dlon > 0.0):', 1),
         ('"with a scalar dlon (got dlon<=0; tripolar unsupported)."', 1),
         4],
@@ -6422,8 +6426,8 @@ CITATION_MAP = {
     'ocean.output:875': 'Barotropic time filter => nn_bt_flt',
     'lock_kt1_10/ocean.output:615': 'no explicit diffusion                ln_dynldf_OFF',
     'overflow_kt1_10/ocean.output:727': 'no explicit diffusion                ln_dynldf_OFF',
-    'ocean_pe_latlon_cgrid.py:5673': 'rho_prime=rho_prime, h_k=h_k,',
-    'ocean_pe_latlon_cgrid.py:5650-5651': [
+    'ocean_pe_latlon_cgrid.py:5679': 'rho_prime=rho_prime, h_k=h_k,',
+    'ocean_pe_latlon_cgrid.py:5656-5657': [
         '_u_ldf_local = u if ldf_state is None else ldf_state[2]',
         '_v_ldf_local = v if ldf_state is None else ldf_state[3]',
         2],
