@@ -77,6 +77,17 @@ def test_synthetic_metrics_have_known_answer():
     assert np.array_equal(out["jet_eastward_speed_m_s"], expected_mean_u[2])
     assert out["spectrum_wavenumber_m-1"].shape == (2,)
     assert np.all(np.isfinite(out["mean_kinetic_energy_spectrum_m3_s2"]))
+    assert 0.0 <= out["top_octave_ke_fraction"][0] <= 1.0
+    assert 0.0 <= out["top_octave_enstrophy_fraction"][0] <= 1.0
+    assert np.all(out["native_checkerboard_index"] >= 0.0)
+
+
+def test_checkerboard_index_has_a_live_grid_noise_plant():
+    jj, ii = np.indices((8, 8))
+    plant = np.where((ii + jj) % 2 == 0, 1.0, -1.0)
+    assert climate.checkerboard_index(plant, np.zeros_like(plant)) == 1.0
+    smooth = np.broadcast_to(np.linspace(-1.0, 1.0, 8), (8, 8))
+    assert climate.checkerboard_index(smooth, np.zeros_like(smooth)) < 0.2
 
 
 def test_identical_inputs_have_identical_spectra_and_zero_comparisons():
@@ -268,7 +279,7 @@ def test_filtered_provider_reads_target_stagger_and_refuses_bad_digest(tmp_path)
         np.savez(path, day=day, ssh_m=field, u_m_s=field, v_m_s=field)
         pins[path.name] = climate.sha256(path)
     manifest = {
-        "schema": "legoesm-swg-filtered-truth-v1", "status": "complete",
+        "schema": "legoesm-swg-conservative-truth-v2", "status": "complete",
         "completed_days": 2, "days": 2, "sampling": "daily_snapshot",
         "output_daily_sha256": pins,
         "target_namelist": SWG_DG50_NAMELIST._asdict(),

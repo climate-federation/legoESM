@@ -366,7 +366,9 @@ def filtered_npz_provider(
     manifest = json.loads(manifest_path.read_text())
     total_days = manifest.get("days")
     stop_day = start_day + days - 1
-    require(manifest.get("schema") == "legoesm-swg-filtered-truth-v1"
+    require(manifest.get("schema") in {
+                "legoesm-swg-filtered-truth-v1",
+                "legoesm-swg-conservative-truth-v2"}
             and manifest.get("status") == "complete"
             and manifest.get("completed_days") == total_days
             and isinstance(total_days, int) and total_days >= stop_day,
@@ -426,11 +428,27 @@ def _cell_centred(frame: DailyFrame, masks) -> DailyFrame:
         np.asarray(u_c), np.asarray(v_c))
 
 
+def checkerboard_index(u: np.ndarray, v: np.ndarray) -> float:
+    """Normalized native velocity projection onto the two-cell grid mode."""
+    u = np.asarray(u, dtype=np.float64)
+    v = np.asarray(v, dtype=np.float64)
+    if u.shape != v.shape or u.ndim != 2:
+        raise ValueError("checkerboard fields must be conformable 2-D arrays")
+    jj, ii = np.indices(u.shape)
+    pattern = np.where((ii + jj) % 2 == 0, 1.0, -1.0)
+    projection2 = np.mean(u * pattern) ** 2 + np.mean(v * pattern) ** 2
+    energy2 = np.mean(u * u + v * v, dtype=np.float64)
+    return float(np.sqrt(projection2 / energy2)) if energy2 > 0.0 else 0.0
+
+
 def diagnose(provider: DailyProvider, *, days: int, card=None, namelist=None,
              geometry: dict | None = None) -> dict[str, np.ndarray]:
     """Compute the frozen Round-4 metrics in two streaming passes."""
     import jax.numpy as jnp
-    from legoesm.ocean.diagnostics import isotropic_energy_spectrum
+    from legoesm.ocean.diagnostics import (
+        isotropic_energy_spectrum,
+        isotropic_enstrophy_spectrum,
+    )
     from legoesm.ocean.fidelity.nemo_testcase_recipe import (
         SWG_MADDISON_NAMELIST,
         build_swg_card,
@@ -470,7 +488,9 @@ def diagnose(provider: DailyProvider, *, days: int, card=None, namelist=None,
     sum_speed = np.zeros(wet.shape, dtype=np.float64)
     ke_series = np.empty(days, dtype=np.float64)
     spectrum_sum = None
+    enstrophy_spectrum_sum = None
     wavenumber = None
+    checkerboard = np.empty(days, dtype=np.float64)
     min_thickness = np.empty(days, dtype=np.float64) if card is not None else None
     max_u_courant = np.empty(days, dtype=np.float64) if namelist is not None else None
     max_v_courant = np.empty(days, dtype=np.float64) if namelist is not None else None
@@ -504,11 +524,34 @@ def diagnose(provider: DailyProvider, *, days: int, card=None, namelist=None,
             require(np.array_equal(k, wavenumber),
                     "spectrum wavenumbers changed across days")
         spectrum_sum += spectrum
+        u_box = frame.u[j0:j1, i0:i1]
+        v_box = frame.v[j0:j1, i0:i1]
+        zeta = (np.gradient(v_box, spacing, axis=1)
+                - np.gradient(u_box, spacing, axis=0))
+        k_zeta, enstrophy_spectrum = isotropic_enstrophy_spectrum(
+            jnp.asarray(zeta), spacing)
+        k_zeta = np.asarray(k_zeta)
+        enstrophy_spectrum = np.asarray(enstrophy_spectrum)
+        require(np.array_equal(k_zeta, wavenumber),
+                "KE and enstrophy wavenumbers differ")
+        if enstrophy_spectrum_sum is None:
+            enstrophy_spectrum_sum = np.zeros_like(enstrophy_spectrum)
+        enstrophy_spectrum_sum += enstrophy_spectrum
+        checkerboard[index] = checkerboard_index(u_box, v_box)
     require(index + 1 == days, f"{provider.name}: daily sequence ended early")
     mean_ssh = sum_ssh / days
     mean_u = sum_u / days
     mean_v = sum_v / days
     mean_speed = sum_speed / days
+    mean_ke_spectrum = spectrum_sum / days
+    mean_enstrophy_spectrum = enstrophy_spectrum_sum / days
+    top_octave = wavenumber >= 0.5 * np.max(wavenumber)
+    resolved = wavenumber > 0.0
+    ke_spectral_total = np.sum(mean_ke_spectrum[resolved], dtype=np.float64)
+    enstrophy_spectral_total = np.sum(
+        mean_enstrophy_spectrum[resolved], dtype=np.float64)
+    require(ke_spectral_total > 0.0 and enstrophy_spectral_total > 0.0,
+            "spectral health denominator is zero")
 
     eke_map_sum = np.zeros(wet.shape, dtype=np.float64)
     eke_series = np.empty(days, dtype=np.float64)
@@ -531,18 +574,26 @@ def diagnose(provider: DailyProvider, *, days: int, card=None, namelist=None,
             jet_y[i] = y[j, i]
             jet_speed[i] = mean_u[j, i]
     result = {
-        "mean_ssh_m": mean_ssh,
-        "mean_u_m_s": mean_u,
-        "mean_v_m_s": mean_v,
-        "mean_speed_m_s": mean_speed,
-        "eke_map_m2_s2": eke_map_sum / days,
+        "mean_ssh_m": np.where(wet, mean_ssh, np.nan),
+        "mean_u_m_s": np.where(wet, mean_u, np.nan),
+        "mean_v_m_s": np.where(wet, mean_v, np.nan),
+        "mean_speed_m_s": np.where(wet, mean_speed, np.nan),
+        "eke_map_m2_s2": np.where(wet, eke_map_sum / days, np.nan),
         "basin_mean_ke_m2_s2": ke_series,
         "basin_mean_eke_m2_s2": eke_series,
         "jet_x_m": jet_x,
         "jet_y_m": jet_y,
         "jet_eastward_speed_m_s": jet_speed,
         "spectrum_wavenumber_m-1": wavenumber,
-        "mean_kinetic_energy_spectrum_m3_s2": spectrum_sum / days,
+        "mean_kinetic_energy_spectrum_m3_s2": mean_ke_spectrum,
+        "mean_enstrophy_spectrum_m_s2": mean_enstrophy_spectrum,
+        "top_octave_ke_fraction": np.asarray([
+            np.sum(mean_ke_spectrum[top_octave], dtype=np.float64)
+            / ke_spectral_total]),
+        "top_octave_enstrophy_fraction": np.asarray([
+            np.sum(mean_enstrophy_spectrum[top_octave], dtype=np.float64)
+            / enstrophy_spectral_total]),
+        "native_checkerboard_index": checkerboard,
     }
     if card is not None:
         result.update({

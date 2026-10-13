@@ -895,7 +895,8 @@ def main(argv=None) -> int:
     print(
         f"COMPLETED days={manifest['days']} backend={manifest['backend']} "
         f"certified_policy={manifest['certified_policy']} "
-        f"deck_certification=pending output={args.output.resolve()}")
+        f"deck_certification={manifest['deck_certification']} "
+        f"output={args.output.resolve()}")
     if manifest["profile"] is not None:
         profile = manifest["profile"]
         message = (
