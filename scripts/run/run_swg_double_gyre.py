@@ -385,6 +385,85 @@ def numerical_health(state, namelist) -> dict[str, float | bool]:
     }
 
 
+def balanced_vorticity_direction(state, namelist):
+    """Build a unit-RMS-vorticity, zero-transport-divergence perturbation."""
+    import jax.numpy as jnp
+    from legoesm.ocean.diagnostics import relative_vorticity_cell_centre
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+        recover_velocity_from_streamfunction,
+    )
+    from legoesm.ocean.fidelity.swg_coarse_graining import (
+        cgrid_geometry,
+        live_face_thickness,
+        native_face_transports,
+        transport_divergence,
+    )
+
+    geometry = cgrid_geometry(namelist)
+    wet = np.asarray(geometry["mask"]["T"], dtype=bool)
+    jj, ii = np.where(wet)
+    j0, j1 = int(jj.min()), int(jj.max())
+    i0, i1 = int(ii.min()), int(ii.max())
+    psi = np.zeros((wet.shape[0] + 1, wet.shape[1] + 1), dtype=np.float64)
+    y = np.linspace(0.0, np.pi, j1 - j0 + 2)
+    x = np.linspace(0.0, np.pi, i1 - i0 + 2)
+    psi[j0:j1 + 2, i0:i1 + 2] = np.sin(y)[:, None] * np.sin(x)[None, :]
+
+    eta = np.asarray(state.eta.data, dtype=np.float64)
+    h_u_native = live_face_thickness(eta, geometry, "U")
+    h_v_native = live_face_thickness(eta, geometry, "V")
+    h_u = np.ones(state.u.data.shape[:2], dtype=np.float64)
+    h_v = np.ones(state.v.data.shape[:2], dtype=np.float64)
+    h_u[:, 1:] = h_u_native
+    h_v[1:, :] = h_v_native
+    u_mask = np.zeros_like(h_u)
+    v_mask = np.zeros_like(h_v)
+    u_mask[:, 1:] = np.asarray(geometry["mask"]["U"], dtype=np.float64)
+    v_mask[1:, :] = np.asarray(geometry["mask"]["V"], dtype=np.float64)
+    du, dv = recover_velocity_from_streamfunction(
+        jnp.asarray(psi), jnp.asarray(1.0 / h_u), jnp.asarray(1.0 / h_v),
+        geometry["grid"], u_mask=jnp.asarray(u_mask), v_mask=jnp.asarray(v_mask))
+    zeta = np.asarray(relative_vorticity_cell_centre(
+        du, dv, geometry["grid"]), dtype=np.float64)
+    rms = float(np.sqrt(np.mean(zeta[wet] ** 2, dtype=np.float64)))
+    if not np.isfinite(rms) or rms <= 0.0:
+        raise RuntimeError("balanced perturbation has zero/non-finite vorticity")
+    du = np.asarray(du, dtype=np.float64) / rms
+    dv = np.asarray(dv, dtype=np.float64) / rms
+    native = {"T": eta, "U": du[:, 1:], "V": dv[1:, :]}
+    divergence = transport_divergence(
+        native_face_transports(native, geometry), geometry)
+    max_divergence_per_amplitude = float(np.max(np.abs(divergence[wet])))
+    if max_divergence_per_amplitude > 1.0e-8:
+        raise RuntimeError(
+            "balanced perturbation transport divergence is not roundoff-small")
+    return du, dv, {
+        "pattern": "closed-wall sin(pi*x)*sin(pi*y) F-point streamfunction",
+        "normalization": "unit wet-T RMS relative vorticity",
+        "transport_divergence_max_per_s-1_amplitude_m_s": (
+            max_divergence_per_amplitude),
+    }
+
+
+def apply_balanced_vorticity_perturbation(state, namelist, amplitude_s_1: float):
+    """Add a smooth non-divergent velocity perturbation at fixed SSH."""
+    import jax.numpy as jnp
+
+    if not np.isfinite(amplitude_s_1) or amplitude_s_1 <= 0.0:
+        raise ValueError("balanced vorticity amplitude must be positive finite")
+    du, dv, provenance = balanced_vorticity_direction(state, namelist)
+    perturbed = state._replace(
+        u=state.u.replace(data=state.u.data + jnp.asarray(
+            amplitude_s_1 * du[..., None])),
+        v=state.v.replace(data=state.v.data + jnp.asarray(
+            amplitude_s_1 * dv[..., None])),
+    )
+    return perturbed, provenance | {
+        "amplitude_s-1": float(amplitude_s_1),
+        "ssh_perturbation_m": 0.0,
+    }
+
+
 def validate_operator_device(mode: str, physical_gpu: int | None, *, environ=None):
     """Require the operator to name the physical GPU selected for GPU mode."""
     environment = os.environ if environ is None else environ
@@ -407,6 +486,7 @@ def run_long(
         daily_means: bool = False,
         restart: Path | None = None,
         perturb_amplitude_m: float | None = None,
+        perturb_kind: str = "white-ssh",
         profile_only: bool = False,
         hourly_targets: bool = False,
         verify_next: Path | None = None,
@@ -488,6 +568,10 @@ def run_long(
     restart_provenance = None
     if perturb_amplitude_m is not None and restart is None:
         raise ValueError("--perturb requires --restart")
+    if perturb_kind not in ("white-ssh", "balanced-vorticity"):
+        raise ValueError("unknown perturbation kind")
+    if perturb_kind != "white-ssh" and perturb_amplitude_m is None:
+        raise ValueError("non-default perturbation kind requires --perturb")
     if restart is not None:
         if hourly_targets:
             restart_admission = admit_listed_snapshot(restart)
@@ -495,8 +579,14 @@ def run_long(
             restart_admission = None
         state, restart_provenance = restart_state_from_npz(
             state, forcing, restart, dt_s=card.dt_s,
-            perturb_amplitude_m=perturb_amplitude_m)
+            perturb_amplitude_m=(
+                perturb_amplitude_m if perturb_kind == "white-ssh" else None))
         restart_provenance["manifest_admission"] = restart_admission
+        restart_provenance["perturb_kind"] = perturb_kind
+        if perturb_kind == "balanced-vorticity":
+            state, balanced_provenance = apply_balanced_vorticity_perturbation(
+                state, namelist, perturb_amplitude_m)
+            restart_provenance["balanced_perturbation"] = balanced_provenance
     next_admission = (
         admit_listed_snapshot(verify_next) if verify_next is not None else None)
     profile = None
@@ -747,7 +837,10 @@ def main(argv=None) -> int:
                         default="maddison")
     parser.add_argument("--restart", type=Path)
     parser.add_argument("--perturb", type=float,
-                        help="fixed-seed wet T-point SSH noise amplitude [m]")
+                        help="perturbation amplitude: m for white SSH, s^-1 for balanced")
+    parser.add_argument(
+        "--perturb-kind", choices=("white-ssh", "balanced-vorticity"),
+        default="white-ssh")
     parser.add_argument(
         "--mode", choices=("gpu-native", "cpu-certified", "cpu-scanned"),
         default="gpu-native")
@@ -783,6 +876,7 @@ def main(argv=None) -> int:
             profile_steps=args.profile_steps,
             compare_days=args.compare_days, daily_means=args.daily_means,
             restart=args.restart, perturb_amplitude_m=args.perturb,
+            perturb_kind=args.perturb_kind,
             profile_only=args.profile_only, hourly_targets=args.hourly_targets,
             verify_next=args.verify_next)
     except (OSError, RuntimeError, ValueError) as exc:

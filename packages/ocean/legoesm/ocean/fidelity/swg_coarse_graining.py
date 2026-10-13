@@ -257,6 +257,14 @@ def _live_face_thickness(eta: np.ndarray, geometry: dict,
     return reference_thickness * (1.0 + ratio * face_mask)
 
 
+def live_face_thickness(eta: np.ndarray, geometry: dict,
+                        kind: str) -> np.ndarray:
+    """Public QCO live thickness used by conservative perturbation tools."""
+    if kind not in ("U", "V"):
+        raise ValueError("live face thickness kind must be U or V")
+    return _live_face_thickness(eta, geometry, kind)
+
+
 def native_face_transports(fields: dict[str, np.ndarray], geometry: dict,
                            ) -> dict[str, np.ndarray]:
     """Return native east/north volume transports [m3/s]."""
@@ -474,6 +482,12 @@ def _transport_divergence(transports: dict[str, np.ndarray], geometry: dict,
     out[mask] = net[mask] / np.asarray(
         geometry["area"]["T"], dtype=np.float64)[mask]
     return out
+
+
+def transport_divergence(transports: dict[str, np.ndarray], geometry: dict,
+                         ) -> np.ndarray:
+    """Public finite-volume divergence for conservative diagnostics."""
+    return _transport_divergence(transports, geometry)
 
 
 def continuity_commutator(fields: dict[str, np.ndarray], source: dict,

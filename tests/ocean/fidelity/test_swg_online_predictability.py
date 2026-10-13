@@ -30,3 +30,34 @@ def test_first_efold_crossing_refuses_nonpositive_curve():
     with pytest.raises(ValueError, match="positive finite"):
         predictability.first_efold_crossing(
             np.array([0.0, 1.0]), np.array([1.0, 0.0]), 1.0)
+
+
+def test_balanced_fit_selects_first_persistently_balanced_lead():
+    days = np.arange(1.0, 51.0)
+    zeta = np.exp(days / 10.0)
+    ratio = np.full(days.shape, 0.05)
+    ratio[:17] = 0.5
+    fit = predictability.balanced_fit(days, zeta, ratio * zeta)
+    assert fit["start_day"] == 18.0
+    assert fit["stop_day"] == 50.0
+    assert fit["efolding_days"] == pytest.approx(10.0)
+    assert fit["r_squared"] == pytest.approx(1.0)
+    # A late fast-mode relapse must move/refuse the window, not be ignored.
+    ratio[-1] = 0.5
+    with pytest.raises(ValueError, match="no balanced fit window"):
+        predictability.balanced_fit(days, zeta, ratio * zeta)
+
+
+def test_rotational_velocity_inversion_is_linear_and_wall_bounded():
+    wet = np.zeros((10, 10), dtype=bool)
+    wet[1:-1, 1:-1] = True
+    y, x = np.mgrid[:10, :10]
+    zeta = np.where(wet, np.sin(x) * np.cos(y), 0.0)
+    u, v = predictability.rotational_velocity_from_vorticity(
+        zeta, wet, 50_000.0)
+    u2, v2 = predictability.rotational_velocity_from_vorticity(
+        2.0 * zeta, wet, 50_000.0)
+    np.testing.assert_allclose(u2, 2.0 * u, rtol=1.0e-14, atol=0.0)
+    np.testing.assert_allclose(v2, 2.0 * v, rtol=1.0e-14, atol=0.0)
+    assert np.all(u[~wet] == 0.0) and np.all(v[~wet] == 0.0)
+    assert np.any(u[wet] != 0.0) and np.any(v[wet] != 0.0)

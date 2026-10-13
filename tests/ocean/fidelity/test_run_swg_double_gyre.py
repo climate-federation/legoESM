@@ -358,3 +358,47 @@ def test_restart_restores_native_stagger_and_fixed_seed_perturbation(tmp_path):
     with pytest.raises(ValueError, match="timestep differs"):
         driver.restart_state_from_npz(
             card.recipe.initial_state, forcing, path, dt_s=50.0)
+
+
+def test_balanced_vorticity_perturbation_is_smooth_and_nondivergent():
+    from legoesm.ocean.diagnostics import relative_vorticity_cell_centre
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        SWG_MADDISON_NAMELIST,
+        build_swg_card,
+    )
+    from legoesm.ocean.fidelity.swg_coarse_graining import (
+        cgrid_geometry,
+        native_face_transports,
+        transport_divergence,
+    )
+
+    tiny = SWG_MADDISON_NAMELIST._replace(nn_SWG=1)
+    card = build_swg_card(tiny)
+    amplitude = 1.0e-10
+    perturbed, provenance = driver.apply_balanced_vorticity_perturbation(
+        card.recipe.initial_state, tiny, amplitude)
+    geometry = cgrid_geometry(tiny)
+    wet = geometry["mask"]["T"]
+    zeta = np.asarray(relative_vorticity_cell_centre(
+        perturbed.u.data[..., 0], perturbed.v.data[..., 0],
+        geometry["grid"]))
+    assert np.sqrt(np.mean(zeta[wet] ** 2)) == pytest.approx(
+        amplitude, rel=2.0e-14)
+    assert np.array_equal(
+        np.asarray(perturbed.eta.data),
+        np.asarray(card.recipe.initial_state.eta.data))
+    fields = {
+        "T": np.asarray(perturbed.eta.data),
+        "U": np.asarray(perturbed.u.data[:, 1:, 0]),
+        "V": np.asarray(perturbed.v.data[1:, :, 0]),
+    }
+    divergence = transport_divergence(
+        native_face_transports(fields, geometry), geometry)
+    assert np.max(np.abs(divergence[wet])) <= 1.0e-15
+    assert provenance["amplitude_s-1"] == amplitude
+    # A native-face plant must violate the same physical control.
+    fields["U"] = fields["U"].copy()
+    fields["U"][wet] += 1.0e-3
+    planted = transport_divergence(
+        native_face_transports(fields, geometry), geometry)
+    assert np.max(np.abs(planted[wet])) > 1.0e-15
