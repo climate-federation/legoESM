@@ -119,9 +119,30 @@ Decision-96 `b807432cd697b1a5` / `ae82de309c637aa7`; OMT-2
 
 ## 5. Validation, review and citation audit
 
-Focused transfer tests on the candidate: **5 passed**. Final-tree tests,
-citation audit and independent read-only review are recorded in the final
-validation commit for this receipt.
+Focused transfer tests on the candidate: **5 passed**. On the final tree the
+receipt-citation tests plus the five GYRE recipe regressions that caught the
+round-241 shared-path defect pass **22/22** serially in `488.91 s`.
+
+The required `tests/ocean/fidelity -n 12` battery was run once. It reached
+**98% with no reported failure**, after which every pytest worker had exited
+but the parent `tee`/waiter emitted no summary; the orphaned waiter was
+interrupted (exit 130). This is the campaign's documented xdist tail-hang
+class, not a test failure, and the one-battery rule forbids a parallel or full
+rerun. The complete 6,840-line log is
+`round269/fidelity_battery.log` (SHA-256
+`0285fb94a150c526ba9cc6088c5aed81138bf569ff2caea7e6fdc94d1f5d1ddb`).
+
+The round receipt citation gate passes **7/7** citations with zero failures,
+zero unmapped citations and a clean map audit. Its shifted
+`dynspg_ts.f90:1077` plant fires. The cumulative default receipt passes
+**274/274** with the same zero-failure/zero-unmapped result.
+
+The required separate `codex exec --sandbox read-only` review was attempted,
+but the client failed before reading the diff with `failed to initialize
+in-process app-server client: Read-only file system`; therefore **independent
+review unavailable in-sandbox**. The three-line failure log is
+`round269/independent_review.log` (SHA-256
+`eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5`).
 
 ## OPEN
 
