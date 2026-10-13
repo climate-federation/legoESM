@@ -58,6 +58,7 @@ from equatorial_thermocline import z20_from_column  # noqa: E402
 
 NINO3 = (-5.0, 5.0, 210.0, 270.0)
 WEST = (-5.0, 5.0, 160.0, 200.0)
+CONTROL = {"off_eq_N_5_10": (5.0, 10.0, 210.0, 270.0), "off_eq_S_10_5": (-10.0, -5.0, 210.0, 270.0)}
 GLAT = np.arange(-9.5, 10.0, 1.0)
 GLON = np.arange(130.5, 290.0, 1.0)
 ZMAX = 300.0
@@ -104,12 +105,19 @@ def wet3_from(H, z, shape):
     return (np.asarray(H)[..., None] > np.abs(z)) & np.ones(shape, bool)
 
 
-def level_thickness(z_c):
-    """Layer thicknesses [m] from level-centre depths (>0, increasing): interfaces
-    at the midpoints, top interface at 0."""
-    z_c = np.asarray(z_c, dtype=np.float64)
-    zi = np.concatenate([[0.0], 0.5 * (z_c[1:] + z_c[:-1]), [z_c[-1] + 0.5 * (z_c[-1] - z_c[-2])]])
-    return np.diff(zi), zi
+def to_levels(F, zf, zN):
+    """(nzf, ...) on depths ``zf`` -> (len(zN), ...) on ``zN``, linear in depth.
+    Above the first source centre the source's top-layer value is held (the
+    top layer is well mixed and FESOM's first centre sits ~6 mm below NEMO's);
+    below the last source centre -> NaN."""
+    return np.apply_along_axis(
+        lambda c: np.interp(zN, zf, c, left=c[0], right=np.nan), 0, F)
+
+
+def band_weights(zi, z0, z1):
+    """Thickness [m] of each layer (interfaces ``zi``, len nz+1) inside [z0, z1)."""
+    zi = np.asarray(zi, dtype=np.float64)
+    return np.clip(np.minimum(zi[1:], z1) - np.maximum(zi[:-1], z0), 0.0, None)
 
 
 def horizontal_divergence(u, v, radius):
@@ -124,14 +132,17 @@ def horizontal_divergence(u, v, radius):
     return (du + dv) / (radius * np.cos(phi))
 
 
-def w_from_divergence(div, z_c, z_w=Z_UPW):
+def w_from_divergence(div, zi, z_w=Z_UPW):
     """Upward w [m/s] at depth ``z_w`` from continuity with a rigid lid:
     dw/dz' = -div_h with z' up, w(0) = 0  =>  w(-z_w) = integral_{-z_w}^0 div_h dz.
-    Partial bottom layer counted by its fraction above ``z_w``."""
-    dz, zi = level_thickness(z_c)
-    frac = np.clip((z_w - zi[:-1]) / dz, 0.0, 1.0)[: div.shape[0]]
-    return np.nansum(div * (dz[: div.shape[0]] * frac)[:, None, None], axis=0) \
-        + np.where(np.all(np.isfinite(div[frac > 0]), axis=0), 0.0, np.nan)
+    ``div`` is (nz, ...); ``zi`` the nz+1 layer interfaces [m, >0, zi[0] = 0].
+    NaN where any layer above ``z_w`` is missing.  Rigid lid: the 5-day-mean
+    free-surface tendency (~cm per window) is <1% of a ~1 m/day equatorial w."""
+    wgt = band_weights(np.asarray(zi)[: div.shape[0] + 1], 0.0, z_w)
+    wgt = wgt.reshape((-1,) + (1,) * (div.ndim - 1))
+    used = (wgt > 0).ravel()
+    return np.sum(np.where(wgt > 0, div, 0.0) * wgt, axis=0) \
+        + np.where(np.all(np.isfinite(div[used]), axis=0), 0.0, np.nan)
 
 
 def z20_map(T, z):
@@ -144,15 +155,17 @@ def z20_map(T, z):
     return out
 
 
-def carriers(g, zN, mld=None, w_direct=None):
-    """Box-mean candidate carriers for one source on the common grid."""
+def carriers(g, zN, zi, w_maps, mld=None):
+    """Box-mean candidate carriers for one source on the common grid.  ``w_maps``
+    {name: (GLAT, GLON) upward w at Z_UPW [m/s]}, already on a shared mask."""
     eq = np.abs(GLAT) <= 1.0
     nl = (GLON >= NINO3[2]) & (GLON <= NINO3[3])
     z20 = z20_map(g["T"], zN)
     k1 = int(np.argmin(np.abs(zN - Z_UPW))); k0 = k1 - 1
     dtdz = (g["T"][k0] - g["T"][k1 + 1]) / (zN[k1 + 1] - zN[k0])       # K/m, >0 stratified
-    sec = np.nanmean(g["u"][(zN < 20.0)][:, eq][:, :, nl])
-    w_px = w_from_divergence(horizontal_divergence(g["u"], g["v"], _radius()), zN)
+    bw = band_weights(zi, 0.0, 20.0)[: zN.size]
+    sec = float(np.nansum(np.nanmean(g["u"][:, eq][:, :, nl], axis=(1, 2)) * bw) / bw.sum())
+    w_px = w_maps["proxy"]
     dTdx_s = np.full(GLON.size, np.nan)
     Ts = np.nanmean(g["T"][0][eq], axis=0)
     dTdx_s[1:-1] = (Ts[2:] - Ts[:-2]) / (2.0 * np.deg2rad(1.0) * _radius())
@@ -160,18 +173,19 @@ def carriers(g, zN, mld=None, w_direct=None):
            "z20_nan_frac_nino3": float(np.mean(~np.isfinite(z20[np.ix_(np.abs(GLAT) <= 5, nl)]))),
            "dTdz_50m_K_per_m": box_mean(dtdz),
            "u_sec_0_20m_eq_nino3": float(sec),
-           "w50_proxy_m_per_day": box_mean(w_px) * 86400.0,
-           "w50_proxy_eq_m_per_day": box_mean(w_px, (-1.0, 1.0, NINO3[2], NINO3[3])) * 86400.0,
+           **{f"w50_{k}_m_per_day": box_mean(wm) * 86400.0 for k, wm in w_maps.items()},
+           **{f"w50_{k}_eq_m_per_day": box_mean(wm, (-1.0, 1.0, NINO3[2], NINO3[3])) * 86400.0
+              for k, wm in w_maps.items()},
            # PLAUSIBLE rough advective cooling rates [K/day], nino3: w*dT/dz and u*dT/dx (eq)
            "vert_adv_rate_K_per_day": -box_mean(w_px) * box_mean(dtdz) * 86400.0,
            "zonal_adv_rate_eq_K_per_day": -float(sec) * float(np.nanmean(dTdx_s[nl])) * 86400.0}
     out["z20_tilt_m"] = out["z20_west_m"] - out["z20_nino3_m"]
+    if "model" in w_maps:
+        out["vert_adv_rate_model_w_K_per_day"] = -box_mean(w_maps["model"]) * box_mean(dtdz) * 86400.0
     if mld is not None:
         out["mld_m"] = box_mean(mld)
-    if w_direct is not None:
-        out["w50_direct_m_per_day"] = box_mean(w_direct) * 86400.0
-        out["w50_direct_eq_m_per_day"] = box_mean(w_direct, (-1.0, 1.0, NINO3[2], NINO3[3])) * 86400.0
-    return out, {"z20": z20, "w": w_px}
+    return out, {"z20": z20, "w": w_maps.get("model", w_px),
+                 "w_kind": "model" if "model" in w_maps else "proxy"}
 
 
 def _radius():
@@ -214,19 +228,25 @@ def main(argv=None):
     ts = {k: [] for k in ("NEMO",) + labs}; ts50 = {k: [] for k in ts}; z50 = {}
     for d in DAYS:
         rec = d // 5 - 1
-        toN = _f(T["to"][rec, 0]); ts["NEMO"].append(box_mean(remap(toN, nlat, nlon, np.isfinite(toN))))
-        toN = _f(T["to"][rec, k50]); ts50["NEMO"].append(box_mean(remap(toN, nlat, nlon, np.isfinite(toN))))
+        top, t50 = {}, {}
+        toN = _f(T["to"][rec, 0]); top["NEMO"] = remap(toN, nlat, nlon, np.isfinite(toN))
+        toN = _f(T["to"][rec, k50]); t50["NEMO"] = remap(toN, nlat, nlon, np.isfinite(toN))
         z50["NEMO"] = float(zN[k50])
         for lab, lane in zip(labs, (a.trp, a.mpas, a.fesom)):
             try:
                 s = snap(lane, d)
             except FileNotFoundError:
-                ts[lab].append(float("nan")); ts50[lab].append(float("nan")); continue
+                continue
             zl = np.abs(s["z_center_ref"]); kl = int(np.argmin(np.abs(zl - Z_UPW))); z50[lab] = float(zl[kl])
             wet = s["land_mask"] > 0.5
-            ts[lab].append(box_mean(remap(s[TF][..., 0], s["lat_T"], s["lon_T"], wet)))
-            ts50[lab].append(box_mean(remap(s[TF][..., kl], s["lat_T"], s["lon_T"],
-                                            wet & (np.asarray(s["H_bathy"]) > zl[kl]))))
+            top[lab] = remap(s[TF][..., 0], s["lat_T"], s["lon_T"], wet)
+            t50[lab] = remap(s[TF][..., kl], s["lat_T"], s["lon_T"],
+                             wet & (np.asarray(s["H_bathy"]) > zl[kl]))
+        # one footprint per day: finite in every source present that day
+        for src, dst in ((top, ts), (t50, ts50)):
+            cm = np.all([np.isfinite(x) for x in src.values()], axis=0)
+            for k in dst:
+                dst[k].append(box_mean(np.where(cm, src[k], np.nan)) if k in src else float("nan"))
     rep["nino3_top_T_by_day"] = {"days": list(DAYS), **ts}
     rep["nino3_T50_by_day"] = {"days": list(DAYS), "level_depth_m": z50, **ts50}
 
@@ -237,6 +257,8 @@ def main(argv=None):
     uN = 0.5 * (uoN + np.roll(uoN, 1, axis=1)); vN = 0.5 * (voN + np.roll(voN, 1, axis=0))
     wetN = np.isfinite(toN3)
     zW = _f(W["depthw"][:]); kw = int(np.argmin(np.abs(zW - Z_UPW)))
+    zi = zW[: kz + 1]                          # NEMO W levels = layer interfaces, zi[0] = 0
+    assert abs(zi[0]) < 1e-6 and np.all(np.diff(zi) > 0), zi[:3]
     woN = _f(W["wo"][5, kw])
     G = {"NEMO": {"T": remap3(toN3, nlat, nlon, wetN), "u": remap3(uN, nlat, nlon, wetN),
                   "v": remap3(vN, nlat, nlon, wetN)}}
@@ -254,9 +276,12 @@ def main(argv=None):
                     (("T", t[TF][..., :kz]), ("u", uT), ("v", vT))}
     uI, vI = c2t(t["u"][..., :kz], t["v"][..., :kz])
     GI["tripole"] = {"u": remap3(uI, t["lat_T"], t["lon_T"], wt), "v": remap3(vI, t["lat_T"], t["lon_T"], wt)}
+    # z_interface_ref holds the INTERIOR interfaces only; mass_flux_w_mean carries
+    # surface + interior + bottom (nlev+1), so interior interface k is w index k+1.
     zit = np.abs(t["z_interface_ref"]); kwt = int(np.argmin(np.abs(zit - Z_UPW)))
+    assert t["mass_flux_w_mean"].shape[-1] == zit.size + 2, (t["mass_flux_w_mean"].shape, zit.size)
     rep["provenance"]["w_direct_depth_m"]["tripole"] = float(zit[kwt])
-    WD["tripole"] = remap(t["mass_flux_w_mean"][..., kwt], t["lat_T"], t["lon_T"], t["land_mask"] > 0.5)
+    WD["tripole"] = remap(t["mass_flux_w_mean"][..., kwt + 1], t["lat_T"], t["lon_T"], t["land_mask"] > 0.5)
     MLD["tripole"] = remap(t["mld_mean"], t["lat_T"], t["lon_T"], t["land_mask"] > 0.5)
 
     m = np.load(a.results / a.mpas / "snapshot_final.npz")
@@ -282,13 +307,19 @@ def main(argv=None):
     GI["MPAS"] = {k: remap3(m[f][:, :kz], m["lat_T"], m["lon_T"], wm) for k, f in
                   (("u", "u_east"), ("v", "v_north"))}
     MLD["MPAS"] = remap(m["mld_mean"], m["lat_T"], m["lon_T"], m["land_mask"] > 0.5)
+    # native continuity on the Voronoi mesh (TRiSK divergence), then remap the scalar w
+    from legoesm.core.operators_voronoi import divergence_cell_3d
+    r_mesh = float(np.sqrt(np.sum(np.asarray(mesh.areaCell)) / (4.0 * np.pi)))
+    div_m = np.asarray(divergence_cell_3d(jnp.asarray(m["u_mean"][:, :kz]), mesh)) * r_mesh / _radius()
+    div_m = np.where(wm, div_m, np.nan)
+    WD["MPAS"] = remap(w_from_divergence(div_m.T, zi), m["lat_T"], m["lon_T"], m["land_mask"] > 0.5)
+    rep["provenance"]["mpas_mesh_radius"] = r_mesh
 
     fz = snap(a.fesom, 30); zf = np.abs(fz["z_center_ref"])
     nf = zf.size                       # FESOM arrays may carry a pad slot past the last level
     wf = wet3_from(fz["H_bathy"], zf, fz[TF][..., :nf].shape) & (fz["land_mask"] > 0.5)[..., None]
     # FESOM levels -> NEMO level centres (linear in depth, per column)
-    interp = lambda F: np.apply_along_axis(lambda c: np.interp(zN, zf, c, left=np.nan, right=np.nan), 0, F)
-    rf = lambda f: interp(remap3(f[..., :nf], fz["lat_T"], fz["lon_T"], wf))
+    rf = lambda f: to_levels(remap3(f[..., :nf], fz["lat_T"], fz["lon_T"], wf), zf, zN)
     G["FESOM"] = {"T": rf(fz[TF]), "u": rf(fz["u_east"]), "v": rf(fz["v_north"])}
     GI["FESOM"] = {"u": G["FESOM"]["u"], "v": G["FESOM"]["v"]}
     MLD["FESOM"] = remap(fz["mld_mean"], fz["lat_T"], fz["lon_T"], fz["land_mask"] > 0.5)
@@ -311,17 +342,24 @@ def main(argv=None):
     nl = (GLON >= NINO3[2]) & (GLON <= NINO3[3])
     sec = {lab: {k: np.nanmean(g[k][:, eq, :], axis=1) for k in ("T", "u")} for lab, g in G.items()}
 
-    def band_means(d):
-        return {f"{z0}-{z1}m": float(np.nanmean(d[(zN >= z0) & (zN < z1)][:, nl])) for z0, z1 in BANDS}
+    def _wavg(vals, z0, z1):
+        bw = band_weights(zi, z0, z1)[: kz]
+        vals = np.asarray(vals, dtype=np.float64); ok = np.isfinite(vals) & (bw > 0)
+        return float(np.sum(vals[ok] * bw[ok]) / np.sum(bw[ok])) if ok.any() else float("nan")
 
-    def box_bands(d3):
-        return {f"{z0}-{z1}m": float(np.nanmean([box_mean(d3[k]) for k in np.nonzero((zN >= z0) & (zN < z1))[0]]))
-                for z0, z1 in BANDS}
+    def band_means(d):            # equatorial section, nino3 longitudes, thickness-weighted
+        return {f"{z0}-{z1}m": _wavg(np.nanmean(d[:, nl], axis=1), z0, z1) for z0, z1 in BANDS}
+
+    def box_bands(d3, box=NINO3):
+        prof = [box_mean(d3[k], box) for k in range(kz)]
+        return {f"{z0}-{z1}m": _wavg(prof, z0, z1) for z0, z1 in BANDS}
     for lab in ("MPAS", "FESOM"):
         rep[f"{lab}_minus_tripole"] = {
             "eq_T_bands": band_means(sec[lab]["T"] - sec["tripole"]["T"]),
             "eq_u_bands": band_means(sec[lab]["u"] - sec["tripole"]["u"]),
-            "nino3_box_T_bands": box_bands(G[lab]["T"] - G["tripole"]["T"])}
+            "nino3_box_T_bands": box_bands(G[lab]["T"] - G["tripole"]["T"]),
+            # off-equator controls: a shared column-mixing difference would show here too
+            **{f"{cn}_T_bands": box_bands(G[lab]["T"] - G["tripole"]["T"], cb) for cn, cb in CONTROL.items()}}
     for lab in labs:
         rep[f"{lab}_minus_NEMO"] = {
             "eq_T_bands": band_means(sec[lab]["T"] - sec["NEMO"]["T"]),
@@ -330,17 +368,31 @@ def main(argv=None):
     rep["euc_core"] = {}
     for lab, s in sec.items():
         u = np.where(zN[:, None] > 30, s["u"], -9)
-        i = np.nanargmax(u); zi, li = np.unravel_index(i, u.shape)
-        rep["euc_core"][lab] = {"u": float(u[zi, li]), "z_m": float(zN[zi]), "lon_E": float(GLON[li])}
+        i = np.nanargmax(u); zk, li = np.unravel_index(i, u.shape)
+        rep["euc_core"][lab] = {"u": float(u[zk, li]), "z_m": float(zN[zk]), "lon_E": float(GLON[li])}
+
+    # upwelling at Z_UPW: direct (NEMO wo, tripole mass_flux_w_mean), native continuity
+    # (MPAS TRiSK), and the 1-degree proxy for every source and velocity set -- all
+    # on ONE footprint (finite in every map) so differences are not footprint.
+    R = _radius()
+    PX = {lab: w_from_divergence(horizontal_divergence(g["u"], g["v"], R), zi) for lab, g in G.items()}
+    PXI = {lab: w_from_divergence(horizontal_divergence(g["u"], g["v"], R), zi) for lab, g in GI.items()}
+    cw = np.all([np.isfinite(x) for x in list(PX.values()) + list(PXI.values()) + list(WD.values())], axis=0)
+    msk = lambda x: np.where(cw, x, np.nan)
+    rep["provenance"]["w_kinds"] = {lab: ("direct" if lab in ("NEMO", "tripole") else "native")
+                                    for lab in WD}
 
     rep["carriers_mean_velocity"] = {}; maps = {}
     for lab, g in G.items():
-        rep["carriers_mean_velocity"][lab], maps[lab] = carriers(g, zN, MLD[lab], WD.get(lab))
+        wm = {"proxy": msk(PX[lab])}
+        if lab in WD:
+            wm["model"] = msk(WD[lab])
+        rep["carriers_mean_velocity"][lab], maps[lab] = carriers(g, zN, zi, wm, MLD[lab])
     rep["carriers_instantaneous_velocity"] = {}
     for lab, g in GI.items():
         gi = {"T": G[lab]["T"], **g}
         rep["carriers_instantaneous_velocity"][lab] = {
-            k: v for k, v in carriers(gi, zN)[0].items()
+            k: v for k, v in carriers(gi, zN, zi, {"proxy": msk(PXI[lab])})[0].items()
             if k.startswith(("w50", "u_sec", "vert_adv", "zonal_adv"))}
 
     (a.out / "pacbias_grids.json").write_text(json.dumps(rep, indent=1))
@@ -363,7 +415,12 @@ def main(argv=None):
         elif fld == "z20":
             d = maps[lab]["z20"] - maps["tripole"]["z20"]; unit = "m"
         else:
-            d = (maps[lab]["w"] - maps["tripole"]["w"]) * 86400.0; unit = "m/day, proxy"
+            if maps[lab]["w_kind"] == "model":
+                d = (maps[lab]["w"] - maps["tripole"]["w"]) * 86400.0
+                unit = "m/day at 50 m, native - tripole direct"
+            else:      # FESOM: no window-mean velocity -> instantaneous proxy on both sides
+                d = msk(PXI[lab] - PXI["tripole"]) * 86400.0
+                unit = "m/day at 50 m, instantaneous proxy both"
         v = np.nanmax(np.abs(d)) or 1.0
         pc = axi.pcolormesh(GLON, GLAT, d, cmap="RdBu_r", vmin=-v, vmax=v)
         axi.add_patch(plt.Rectangle((210, -5), 60, 10, fill=False, ec="k", lw=0.8))

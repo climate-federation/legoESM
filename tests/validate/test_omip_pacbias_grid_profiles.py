@@ -31,12 +31,33 @@ def test_dry_points_never_leak():
 
 
 def test_w_from_divergence_partial_layer_and_sign():
-    z_c = np.array([5.0, 15.0, 30.0, 50.0, 70.0])      # interfaces 0,10,22.5,40,60,80
-    div = np.full((z_c.size, P.GLAT.size, P.GLON.size), 1.0e-6)
-    w = P.w_from_divergence(div, z_c, 50.0)
-    # 10 + 12.5 + 17.5 + half of the 40-60 m layer = 50 m of divergence; surface
-    # divergence must give UPWARD (positive) w
-    assert np.allclose(w, 50.0e-6, rtol=1e-12)
+    zi = np.array([0.0, 10.0, 22.5, 40.0, 60.0, 80.0])
+    shape = (zi.size - 1, P.GLAT.size, P.GLON.size)
+    div = np.full(shape, 1.0e-6)
+    # 10 + 12.5 + 17.5 + half of the 40-60 m layer = 50 m; surface divergence -> UPWARD w
+    assert np.allclose(P.w_from_divergence(div, zi, 50.0), 50.0e-6, rtol=1e-12)
+    # depth-varying divergence: each layer's own thickness must weight it
+    dl = np.array([1.0, 2.0, 3.0, 4.0, 5.0])[:, None, None] * np.ones(shape) * 1e-6
+    expect = (10 * 1 + 12.5 * 2 + 17.5 * 3 + 10 * 4) * 1e-6
+    assert np.allclose(P.w_from_divergence(dl, zi, 50.0), expect, rtol=1e-12)
+    dl[4] = np.nan                                    # below 50 m: must not matter
+    assert np.isfinite(P.w_from_divergence(dl, zi, 50.0)).all()
+    dl[1, 3, 4] = np.nan                              # above 50 m: column must go NaN
+    w = P.w_from_divergence(dl, zi, 50.0)
+    assert np.isnan(w[3, 4]) and np.isfinite(w[3, 5])
+
+
+def test_to_levels_holds_top_layer_and_cuts_bottom():
+    zf = np.array([0.512, 1.56, 2.68])
+    F = np.array([[20.0, 30.0], [19.0, 29.0], [18.0, 28.0]])
+    out = P.to_levels(F, zf, np.array([0.5058, 1.56, 3.0]))
+    assert np.allclose(out[0], F[0]) and np.allclose(out[1], F[1])   # NEMO's shallower top centre
+    assert np.isnan(out[2]).all()                                    # below the source column
+
+
+def test_band_weights_partial_overlap():
+    w = P.band_weights(np.array([0.0, 10.0, 25.0, 60.0]), 20.0, 50.0)
+    assert np.allclose(w, [0.0, 5.0, 25.0])
 
 
 def test_divergence_of_zonally_linear_flow():
