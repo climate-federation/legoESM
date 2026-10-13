@@ -245,6 +245,8 @@ FILES = {
         _ORCA2_R229FOLDTRP / "ppsrc/nemo/traadv_fct.f90"),
     "ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/stprk3_stg.f90": (
         _ORCA2_R230FOLDTRP / "ppsrc/nemo/stprk3_stg.f90"),
+    "ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynhpg.f90": (
+        _ORCA2_R230FOLDTRP / "ppsrc/nemo/dynhpg.f90"),
     "ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/traadv_cen.f90": (
         _ORCA2_R230FOLDTRP / "ppsrc/nemo/traadv_cen.f90"),
     "ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/domzgr.f90": (
@@ -1677,6 +1679,31 @@ CITATION_MAP = {
         ('Round-11 L2 WRITE-only composition boundary', 1),
         ('L2_RK_STAGE2_PREUPDATE_DUMP', 1),
         13],
+    # --- ORCA2 round 266: stage-2 HPG accumulator assignment ------
+    'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/stprk3_stg.f90:372-405': [
+        ('CALL    eos', 1),
+        ('CALL    dyn_hpg', 1),
+        34],
+    'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/stprk3_stg.f90:407-421': [
+        ('CALL    dyn_vor', 1),
+        ('CALL dyn_adv', 2),
+        15],
+    'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynhpg.f90:395-406': [
+        ('zuap = -zcoef0', 1),
+        ('puu(ji,jj,1,Krhs) = zhpi(ji,jj) + zuap', 1),
+        12],
+    'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynhpg.f90:411-432': [
+        ('DO jk= 2, jpkm1', 1),
+        ('puu(ji,jj,jk,Krhs) = zhpi(ji,jj) + zuap', 1),
+        22],
+    'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynhpg.f90:401-402': [
+        ('puu(ji,jj,1,Krhs) = zhpi(ji,jj) + zuap', 1),
+        ('pvv(ji,jj,1,Krhs) = zhpj(ji,jj) + zvap', 1),
+        2],
+    'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynhpg.f90:426-427': [
+        ('puu(ji,jj,jk,Krhs) = zhpi(ji,jj) + zuap', 1),
+        ('pvv(ji,jj,jk,Krhs) = zhpj(ji,jj) + zvap', 1),
+        2],
     'barotropic_latlon_cgrid.py:2006-2025': [
         ('eta_mid = eta_c', 1),
         ('za_i, eta_c, etab_c, etabb_c)', 1),
