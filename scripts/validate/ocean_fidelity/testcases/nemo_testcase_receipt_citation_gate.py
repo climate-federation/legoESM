@@ -1615,7 +1615,7 @@ CITATION_MAP = {
         4],
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:509-520': [
         ('ocean u- and v-depth at mid-step', 1),
-        ('END DO   ;   END DO', 5),
+        ('END DO   ;   END DO', 6),
         12],
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:1077': [
         'rDt_e = rn_Dt / REAL( nn_e , wp )'],
