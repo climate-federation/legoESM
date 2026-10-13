@@ -19,10 +19,12 @@ Arms (``--arm``):
   rhs          kt = 1..10, the stp_2D right-hand side
   handoff      kt = 1..10, the external handoff read at stage 1
   stages       kt = 1..10, each stage from NEMO's handoff and stage entry
-  restart_entry  ONE step from NEMO's COMPLETE state at kt = 10, 20, .., 90:
-               the restart file holds every prognostic field and the six
-               barotropic histories, so nothing comes from the card's chain
-               but its array layout (GIVEN-NEMO-ENTRY, complete)
+  restart_entry  ONE step from NEMO's restart state at kt = 10, 20, .., 90:
+               every prognostic field and the six barotropic histories are
+               NEMO's, so no evolving field comes from the card's chain.
+               NOT seeded: NEMO's after-ssh slot (restart.f90:184, :362-370);
+               the card's ``nemo_first_wzv_after_ssh`` selection does not read
+               the carried slot, and the arm refuses a card that does
   vor_fold_replay  OFFLINE numpy replay of NEMO's vor_een Coriolis statement
                (dynvor.f90:720, :727, :767, :772-775, :779-783) on the U faces
                of the pivot row and the row below, from NEMO's recorded entry
@@ -56,7 +58,7 @@ DEFAULT_ROOT = Path(
     "oracle_g1_r1/p3_a_100step")
 ARMS = ("geometry", "independent", "given_entry", "rhs", "handoff", "stages",
         "vor_fold_replay", "restart_entry")
-PLANTS = ("score", "entry", "geometry")
+PLANTS = ("score", "entry")
 STAGE_STEPS = 10          # stage frames exist for kt = 1..10
 FOLD_ROWS, SEAM_COLS, SOUTH_ROWS = 3, 2, 3
 FIELDS = ("ssh", "uu_b", "vv_b", "u", "v")
@@ -477,8 +479,11 @@ def run(root: Path, *, arm: str, kt_max: int = 10, plant: str | None = None,
     before = {}             # the card's own chain: the state entering step kt
     if arm == "restart_entry":
         import netCDF4
-        out["label"] = ("GIVEN-NEMO-ENTRY, COMPLETE (one step from NEMO's restart: "
-                        "all prognostics and the six barotropic histories)")
+        out["label"] = ("GIVEN-NEMO-ENTRY from NEMO's restart (one step: all "
+                        "prognostics and the six barotropic histories; the "
+                        "after-ssh slot is not seeded and not read by this card)")
+        require(getattr(cfg, "nemo_first_wzv_after_ssh", "") != "rk3_extrapolated_carried",
+                "this card reads the carried after-ssh slot; seed NEMO's ssha first")
         m, chain = model(), s0
         for kt in kts:
             if kt % 10 == 1 and kt > 1:
@@ -754,9 +759,15 @@ def main(argv=None) -> int:
     _print(out)
     if a.arm == "geometry":
         return 0 if out["all_bit_identical"] else 1
-    if a.plant:                 # a plant must move a row off the bar
+    if a.plant:     # a plant must move a row that is AT-BAR when unplanted
+        # (kt = 1 only: all five rows are at the bar there in both labels;
+        # T and S are excluded, NEMO's kt = 1 entry holds T, S on land)
+        if a.kt_max != 1 or a.arm not in ("independent", "given_entry"):
+            print("REFUSE: plants run at --kt-max 1 on the two whole-step arms",
+                  file=sys.stderr)
+            return 2
         fired = any(r["status"] != "AT-BAR" for k in out["per_kt"]
-                    for r in k.get("rows", []))
+                    for r in k["rows"] if r["name"].split(".")[-1] in FIELDS)
         print("STATUS PLANT-FIRED" if fired else "REFUSE: plant stayed green",
               file=sys.stderr)
         return 1 if fired else 3

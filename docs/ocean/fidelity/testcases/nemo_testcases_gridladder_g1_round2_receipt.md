@@ -12,7 +12,7 @@ Record: .../gridladder_rounds/round1/oracle_g1_r1 (domain file SHA-256
 ## Take-aways
 
 1. **The seam and the south wall are exact to rounding; the fold is not.**
-   One step from NEMO's complete state at kt 31: fold-band sea level off by
+   One step from NEMO's restart state at kt 31: fold-band sea level off by
    8.9e-8 m (6e-3 of the band's maximum); seam 4e-16, south wall 9e-16.
 2. **First non-rounding statement: NEMO's EEN Coriolis trend on the pivot row.**
    It reads the V transport on the fold-image row above the pivot T row; the
@@ -139,11 +139,12 @@ By the 1e-15 bar itself nothing leaves the bar inside kt 1..10 in either arm,
 so L-P3 HOLDS as worded; the regional measure is what names the fold. Round-1
 P4 (fold statements exact on G1) is REFUTED.
 
-### One step from NEMO's complete state (restart files)
+### One step from NEMO's restart state
 
 The restart files hold every prognostic field and the six histories, and equal
-the step frames bit for bit, so this arm has no carry from the card. Sea
-level, metres (and relative to the region's maximum):
+the step frames bit for bit, so no evolving field comes from the card's chain.
+NEMO's after-ssh slot is not seeded; this card does not read it (section 11).
+Sea level, metres (and relative to the region's maximum):
 
 | kt | fold before | fold after | seam after | south after | coast after | open after | whole-domain normalised before -> after |
 |---|---|---|---|---|---|---|---|
@@ -326,7 +327,56 @@ a card selects it); (4) round 1's geometry test replaced by the 36-row gate;
 
 ## 11. Tests and review
 
-REVIEW_AND_TESTS_PLACEHOLDER
+Single review (codex): **findings**, three CONFIRMED, all acted on. Log:
+/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/round2/codex_review_r2.log.
+Verbatim:
+- "CONFIRMED — `restart_entry` is not "COMPLETE": it omits NEMO's live `ssha`
+  restart field, retaining `eta_rk3_after=None` from the card chain".
+  Acted on: relabelled (the arm now says the after-ssh slot is not seeded and
+  refuses a card that reads the carried slot; this card's selection does not).
+  Section 3's wording "complete state" above means: every prognostic field and
+  the six histories, NOT that slot.
+- "CONFIRMED — plants are unsound: `--plant geometry` is accepted but never
+  applied, while generic plant success merely detects any pre-existing DEBT".
+  Acted on: the dead name is removed; a plant now runs only at kt = 1 on the
+  two whole-step arms and must move one of the five rows that are at the bar
+  unplanted (T and S excluded). Re-run: both exit 1; unplanted exits 0; a
+  plant on any other arm exits 2. The geometry plant was always the separate
+  `--geometry-plant` and did fire.
+- "CONFIRMED — the new config field was inserted mid-`NamedTuple`, shifting
+  every later positional argument despite the class contract requiring
+  chronological append-only fields". Acted on: the field is now the LAST field
+  of the class; the base commit's field list is an exact prefix of the new one
+  (checked by parsing both).
+"VERDICT: findings". The review raised nothing against the sign, index or
+staggering of the image row, the starred call, the replay, or the tests of
+the landed statement. The fixes after the review were not re-reviewed. No
+second (GLM) reviewer was available: a single review, not a dual one.
+
+Evidence stamp: the json files carry commit 6613a0982. The later commits move
+one config field to the end of its class, relabel the restart arm and tighten
+the plants; none changes arithmetic. The focused tests below re-measure the
+pivot row with and without the option at the final tree.
+
+Focused tests at the final tree (one synchronous run): **6541 passed, 8
+skipped, 1 failed**, with two known reds deselected (the slab-land dispatch
+guard and the jra55 literal, both recorded in round 1). The one failure is
+`tests/test_no_inline_physics_coeffs.py` on packages/land/legoesm/land/restart.py,
+a file this branch's round did not touch (`git diff acdb00b92 -- packages/land`
+is empty). The new file tests/ocean/fidelity/test_nemo_testcase_g1_orca2grid_ladder.py:
+9 passed, including the option's plant. NO GATE ran for: any closed-card
+ladder (GYRE, VORTEX, ORCA2); the option is default-off behind a Python-level
+branch, which the identity test covers, but no closed card was re-scored.
+
+Citation gate on this receipt: PASS, 11 citations, 0 unmapped, whole-map audit
+clean; the shifted-citation plant exits 1 (citation_receipt.json,
+citation_plant.json under final/).
+
+Compliance, stated because no gate enforces it: search-before-build (stated
+in sections 6 and the preregistration); one variable per arm (before / after
+differ in the one option); instruments validated before quoting (section 7);
+non-vacuity (option plant, geometry plant, score and entry plants, citation
+plant shown red). Dual review: NOT met (single).
 
 ## 12. Evidence hashes (SHA-256 prefixes, final/)
 
