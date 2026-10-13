@@ -247,6 +247,8 @@ FILES = {
         _ORCA2_R230FOLDTRP / "ppsrc/nemo/stprk3_stg.f90"),
     "ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynhpg.f90": (
         _ORCA2_R230FOLDTRP / "ppsrc/nemo/dynhpg.f90"),
+    "ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynvor.f90": (
+        _ORCA2_R230FOLDTRP / "ppsrc/nemo/dynvor.f90"),
     "ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/traadv_cen.f90": (
         _ORCA2_R230FOLDTRP / "ppsrc/nemo/traadv_cen.f90"),
     "ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/domzgr.f90": (
