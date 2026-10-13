@@ -2,16 +2,19 @@
 
 Date: 2026-10-12
 
-Status: **HELD** pending the operator's GPU multi-step and resource acquisition;
-the CPU-certified deliverable and operator acquisition instrument are landed.
-The one-step CPU fp64/libm reverse, forward, and finite-difference
-row remains CONFIRMED; the certified ten-step production trajectory is
-scientifically byte-identical to Round 7; the live broken-VJP plant is REFUTED;
-and the exact three-file push battery exits normally. CPU multi-step reverse
-passes remain UNMEASURED because the operator prohibited another attempt after
-the isolated six-step XLA:CPU section-memory abort. GPU six/60/360-step and
-resource rows remain OPEN for the committed GPU-1 operator runner. No physics,
-card setting, timestep, objective, tolerance, stabilizer, clipping, guard, or
+Status: **HELD** on the production-step transform byte gate and pending the
+operator's GPU multi-step and resource acquisition; the CPU and GPU acquisition
+instruments are landed fail-closed.
+An independent review found that the one-step transformed VJP and JVP replay
+primals were not byte-identical even though their derivatives agreed. The byte
+gate is now executable: the CPU one-step row is **UNMEASURED**, its top-level
+derivative fields are null, and the agreeing triplet is retained only as
+refused diagnostic evidence. The certified ten-step production trajectory is
+scientifically byte-identical to Round 7. CPU multi-step reverse passes remain
+UNMEASURED because the operator prohibited another attempt after the isolated
+six-step XLA:CPU section-memory abort. GPU six/60/360-step and resource rows
+remain OPEN for the committed GPU-1 operator runner. No physics, card setting,
+timestep, objective, tolerance, stabilizer, clipping, guard, or
 `stop_gradient` changed.
 
 ## Provenance and frozen protocol
@@ -21,8 +24,11 @@ The incoming lane tip was
 commit `307100d112892d244ea8300e24c21fb214a92760`; its external copy has SHA-256
 `f94962bf44740d97c7cd256aef87a487e4fc287a69270d1b5b2babce329a9855`.
 Implementation commit `575f4d276be3d5583daa101508c85306cd0b8f1a` produced both
-CPU agreement artifacts from a clean tree and rechecked that commit after each
-measurement. Evidence is under
+pre-review CPU diagnostic artifacts from a clean tree and rechecked that commit
+after each measurement. Review-repair commit
+`730909660e96e0a5f8f690dbf13c254f05d64428` produced the binding UNMEASURED
+one-step JSON from a clean tree with `verified_after_measurement=true`.
+Evidence is under
 `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gradgate_rounds/round8/`.
 
 The only card remains the fail-closed GYRE dispatch at
@@ -37,10 +43,18 @@ PRNG keys, perturbation, direction, and FD step remain unchanged.
 
 The Round 6 review blocker is closed in executable code. A row refused before
 derivatives exist now starts from an explicit UNMEASURED record at
-`nemo_testcase_l2_gyre_gradient_gate.py:567`: reverse, forward, FD, and their
+`nemo_testcase_l2_gyre_gradient_gate.py:598`: reverse, forward, FD, and their
 errors are null. A derivative that was actually evaluated as NaN still goes
 through the ordinary agreement classifier and remains REFUTED. Direct controls
 exercise both cases, and the CLI exits nonzero for either non-CONFIRMED status.
+
+Review then exposed a second fail-closed gap. The transformed production-step
+primal checks were recorded but did not affect the verdict. The gate at
+`nemo_testcase_l2_gyre_gradient_gate.py:415` now requires every VJP and JVP
+replay leaf to be byte-identical. A planted mismatch flips a nominally
+CONFIRMED row to UNMEASURED, nulls every top-level derivative field, preserves
+the values under `refused_derivative_evidence`, and produces a nonzero CLI
+exit. The live CPU row exercises that refusal.
 
 R8-P1 is **CONFIRMED**. The GPU runner's self-test also proves that CONFIRMED,
 REFUTED, UNMEASURED, VACUOUS, and RETRACTED rows are all recognized and that a
@@ -75,7 +89,7 @@ specializations.
 Round 8 constructs one dynamic-time step VJP and one dynamic-time step JVP at
 `nemo_testcase_l2_gyre_gradient_gate.py:375`, then reuses them in the explicit
 production-boundary loop at
-`nemo_testcase_l2_gyre_gradient_gate.py:415`. The one-step JSON records one
+`nemo_testcase_l2_gyre_gradient_gate.py:454`. The one-step JSON records one
 cold-state specialization, one VJP invocation, one JVP invocation, and
 `whole_window_transform_jitted=false`. A direct synthetic trace control over
 three steps observes four traces total: cold plus warm for the VJP and cold
@@ -114,21 +128,25 @@ REFUTED as owners. The confirmed boundary is XLA:CPU's LLVM section-memory
 manager for the large compiled transform. No XLA flag, stage split, or smaller
 objective was selected in this measurement lane.
 
-## Certified CPU agreement and plant
+## Certified CPU byte-gate refusal and diagnostic agreement
 
 | CPU fp64/libm row | reverse | forward | central FD | rev/fwd relative | rev/FD relative | sum(abs(g*d)) | scale-aware | verdict |
 |---|---:|---:|---:|---:|---:|---:|---:|---|
-| 1 step | `-3.884979632703884e-06` | `-3.884979632703880e-06` | `-3.884977393501259e-06` | `1.090138208349858e-15` | `5.763743536804898e-07` | `1.8130019301617077e-04` | `2.3359957128637767e-17` | **CONFIRMED** |
-| 1-step doubled-VJP plant | `-7.769959265407769e-06` | `-3.884979632703880e-06` | `-3.884977393501259e-06` | `0.5000000000000006` | `0.5000002881871768` | `3.6260038603234154e-04` | `0.010714218137532193` | **REFUTED** |
+| 1 step, binding row | null | null | null | null | null | null | null | **UNMEASURED** |
+| refused derivative diagnostic | `-3.884979632703884e-06` | `-3.884979632703880e-06` | `-3.884977393501259e-06` | `1.090138208349858e-15` | `5.763743536804898e-07` | `1.8130019301617077e-04` | `2.3359957128637767e-17` | not a verdict |
+| pre-review doubled-VJP diagnostic | `-7.769959265407769e-06` | `-3.884979632703880e-06` | `-3.884977393501259e-06` | `0.5000000000000006` | `0.5000002881871768` | `3.6260038603234154e-04` | `0.010714218137532193` | **REFUTED before byte gate** |
 | 6 steps | UNMEASURED | UNMEASURED | UNMEASURED | UNMEASURED | UNMEASURED | UNMEASURED | UNMEASURED | **CPU COMPILER LIMIT** |
 
-The clean one-step JSON and plant JSON have SHA-256 respectively
-`ac65cbb13494e0b90925fb816af15c2b27707796fb5f527fb74c150a8f634bd9`
-and
-`d5463f5eabdfb95f9d4048530fcdfe0f8278153df122d2b6422e5ba419c2fef4`.
-The plant doubles reverse and its cancellation scales while leaving forward and
-FD byte-for-byte unchanged. R8-P4's CPU agreement and live plant predictions
-are **CONFIRMED**.
+The binding clean-producer JSON has SHA-256
+`a13e1639fa9d24fce37a5a4e77ad1ae2d38f124f42e94495b31bfd8ea8205dbf`.
+The VJP replay differs on 18 leaves and the JVP replay on 7; both have maximum
+absolute difference `1.4210854715202004e-14` in salinity. The direct
+base/FD production primals remain byte-identical, but that does not satisfy the
+registered transformed-primal byte gate. The earlier one-step and plant JSONs
+remain evidence of derivative agreement and plant sensitivity before the gate
+was made binding; they are not current verdict artifacts. R8-P4's trajectory
+prediction is CONFIRMED, but its one-step agreement prediction is
+**REFUTED** by the byte gate.
 
 ## Production trajectory identity
 
@@ -183,27 +201,43 @@ and no 60-step or 360-step projection is admissible:
 | `binomial` | UNMEASURED | UNMEASURED | UNMEASURED |
 
 The resource producer and fail-closed classifier remain at
-`nemo_testcase_l2_gyre_gradient_gate.py:966` and
-`nemo_testcase_l2_gyre_gradient_gate.py:1091`. Projections will be written only
+`nemo_testcase_l2_gyre_gradient_gate.py:997` and
+`nemo_testcase_l2_gyre_gradient_gate.py:1122`. Projections will be written only
 from the operator's valid measured six-step rows; this receipt fabricates none.
 
 ## Tests and gates
 
-- Direct instrument controls: **42 passed in 16.23 s**. They include computed
-  NaN versus absent-derivative classification, the real-card cold-step segment
+- Direct instrument controls: **43 passed in 7.22 s** after the review repair.
+  They include the planted transformed-primal byte mismatch, computed NaN
+  versus absent-derivative classification, the real-card cold-step segment
   plant, reusable cold/warm transform tracing, doubled-VJP behavior, policy and
   allocator refusal, timer classification, memory projections, sampler
   failures, and GPU-runner classified-outcome continuation.
-- Exact three-file push battery: **52 passed, 1 skipped in 1837.09 s**. All 17
-  citation tests, 25 certified recipe tests, nine legacy gradient variants,
-  and the isolated one-step GYRE row passed. The only skip is the named
-  six-step CPU compiler limit. The parent process exited normally. Log SHA-256:
+- The pre-review exact three-file battery was **52 passed, 1 skipped in
+  1837.09 s** with log SHA-256
   `24ee9653dc6b1fc8f141a616914a5aac308f13c7fa11090eb5879d7186aca3dd`.
+  The post-review battery asserts the named one-step UNMEASURED debt rather
+  than accepting the diagnostic agreement triplet; its result is recorded in
+  the final clean commit.
 - GPU-runner self-test: all five classified outcomes were recognized and the
   script completed.
 - Receipt-specific citation gate and shifted-citation plant are run from the
   clean committed receipt producer; their JSON artifacts live beside the
   other Round 8 evidence.
+
+## Independent adversarial review
+
+The executable review returned HOLD because the prior clean JSON recorded
+`step_vjp_replays_bitwise=false` and `step_jvp_replays_bitwise=false` while the
+top-level row remained CONFIRMED. That finding is dispositioned by the binding
+byte gate and planted mismatch control above. The evidence review returned
+SHIP: it independently reproduced every CPU/GPU number, trajectory comparison,
+SHA, provenance stamp, and citation control, and agreed that HELD is the only
+admissible campaign status while resource rows remain absent. It noted one
+non-blocking hygiene gap—direct-control and runner-self-test logs were not
+retained—and independently reproduced 42 pre-repair controls and the runner
+self-test. The executable reviewer must re-review the repair before this round
+can claim two SHIP verdicts.
 
 ## OPEN, retractions, and decision
 
@@ -218,8 +252,11 @@ OPEN:
    do not describe the projection as a certified linear law.
 3. Keep CPU multi-step GYRE agreement OPEN at the XLA:CPU LLVM section-memory
    boundary. Do not retry it without a new operator protocol decision.
-4. Obtain two independent adversarial review verdicts for the measurement
-   instrument and receipt. Reviewer refusals are not verdicts.
+4. Resolve the production-step transformed-primal byte mismatch before using
+   any GYRE gradient for training. The binding CPU row is UNMEASURED even
+   though its refused reverse/forward/FD diagnostic is numerically on-bar.
+5. Obtain a SHIP re-review of the byte-gate repair. Reviewer refusals are not
+   verdicts.
 
 RETRACTED: the Round 7 receipt's wording that the six-step reverse had compiled
 and only the forward transform timed out is superseded by the operator's
@@ -227,11 +264,16 @@ isolated 3837-second reproduction: the agreement process itself aborted in
 LLVM compilation and wrote no JSON. The executable matrix skip now quotes that
 failure. This round also retracts any implication that `per_step` meant one
 reused compiled transform; before Round 8 it meant one newly-created transform
-closure per model step.
+closure per model step. Finally, the first Round 8 receipt commit's one-step
+CONFIRMED verdict is retracted: its own replay diagnostics showed the VJP and
+JVP transformed primals were not byte-identical, so the executable now reports
+that row as UNMEASURED.
 
-DECISION_NEEDED: **NONE**. The user already moved multi-step acquisition to GPU
-under the explicitly non-certified native-transcendental policy; the registered
-agreement bars remain unchanged.
+DECISION_NEEDED: **Should the next round add a primal-preserving local AD
+boundary that returns the separately executed production `_step_jitted` primal
+while deriving its pullback/JVP from the unchanged step program? Pick: YES,
+with the current byte gate retained and a direct equivalence plant; do not
+relax the byte gate or any agreement bar.**
 
 ## Choice audit
 
