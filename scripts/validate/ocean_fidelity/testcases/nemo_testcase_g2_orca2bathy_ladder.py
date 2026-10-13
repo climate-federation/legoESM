@@ -45,7 +45,7 @@ CASE = "ORCA2G2-zps"
 DEFAULT_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/round10/"
     "oracle_g2_r10/p3_a_100step")
-ARMS = ("geometry", "independent", "given_entry", "stages")
+ARMS = ("geometry", "independent", "given_entry", "stages", "zdf_replay")
 # stage exposures of one step: the private hook that returns it, and the
 # level-1 NEMO frame fields (u, v, T, S, ssh) it must equal
 EXPOSURES = {
@@ -144,6 +144,62 @@ def class_summary(rows: list[dict]) -> dict:
     return out
 
 
+def _pickle_fields() -> None:
+    """Field forbids attribute assignment, so pickle rebuilds it through its
+    constructor (the chain's saved state holds numpy data only)."""
+    import copyreg
+    from legoesm.core.field import Field
+    copyreg.pickle(Field, lambda f: (Field, (
+        np.asarray(f.data), f.name, f.dims, f.units, f.long_name, f.staggering)))
+
+
+def nemo_dynzdf_replay(explicit, barotropic, *, e3_0, mask, avm_pair, r3_aa,
+                       r3_mm, r1_h0, e3w_1d, dt, interface="r3_mm"):
+    """NEMO's dyn_zdf and the stage's barotropic replacement, statement by
+    statement in the written operand order, for one velocity component on
+    (y, x, k) arrays (drag and wind stress zero, as on this rung):
+
+      dynzdf.f90:160       remove the barotropic velocity
+      dynzdf.f90:191-205   the matrix: (avm + avm) * dt/2 over
+                           e3(Kaa) * (e3w_1d * (1 + r3(Kmm))), closed by wmask
+      dynzdf.f90:332-349   the three recurrences
+      stprk3_stg.f90:413-417  put the barotropic velocity back
+
+    ``interface`` names the stretch of the interface thickness: NEMO's
+    "r3_mm"; "r3_aa" and "none" are measurement variants.  Returns
+    (after the solve, after the replacement)."""
+    nk = explicit.shape[-1]
+    u = (explicit - barotropic[..., None]) * mask
+    half = dt * 0.5
+    e3a = e3_0 * (1.0 + r3_aa[..., None] * mask)
+    stretch = {"r3_mm": 1.0 + r3_mm, "r3_aa": 1.0 + r3_aa,
+               "none": np.ones_like(r3_mm)}[interface]
+    wmask = mask.copy()
+    wmask[..., 1:] = mask[..., 1:] * mask[..., :-1]
+    zwi, zws, zwd = (np.zeros_like(u) for _ in range(3))
+    for k in range(nk):
+        if k + 1 < nk:
+            zws[..., k] = -half * avm_pair[..., k + 1] / (
+                e3a[..., k] * (e3w_1d[k + 1] * stretch)) * wmask[..., k + 1]
+        # below the card's last level NEMO's level jpk is dry: zws = 0
+        if k > 0:
+            zwi[..., k] = -half * avm_pair[..., k] / (
+                e3a[..., k] * (e3w_1d[k] * stretch)) * wmask[..., k]
+        zwd[..., k] = 1.0 - zwi[..., k] - zws[..., k] if k > 0 else 1.0 - zws[..., k]
+    for k in range(1, nk):
+        zwd[..., k] = zwd[..., k] - zwi[..., k] * zws[..., k - 1] / zwd[..., k - 1]
+    for k in range(1, nk):
+        u[..., k] = u[..., k] - zwi[..., k] / zwd[..., k - 1] * u[..., k - 1]
+    u[..., nk - 1] = u[..., nk - 1] / zwd[..., nk - 1]
+    for k in range(nk - 2, -1, -1):
+        u[..., k] = (u[..., k] - zws[..., k] * u[..., k + 1]) / zwd[..., k]
+    total = np.zeros_like(barotropic)
+    for k in range(nk):                       # SUM( e3_3d * uu ), level order
+        total = total + e3_0[..., k] * u[..., k]
+    zub = barotropic - total * r1_h0
+    return u, u + zub[..., None] * mask
+
+
 def card_levels(state) -> dict[str, np.ndarray]:
     return {"u": np.asarray(state.u.data)[:, 1:], "v": np.asarray(state.v.data)[1:],
             "T": np.asarray(state.T.data), "S": np.asarray(state.S.data)}
@@ -224,6 +280,7 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
         ["git", "-C", str(HERE), "rev-parse", "HEAD:packages"], check=True,
         capture_output=True, text=True).stdout.strip()
     g1._fp64()
+    _pickle_fields()
     if arm == "geometry":
         return {**geometry(root, geometry_plant), "legoesm_git_sha": sha}
 
@@ -329,6 +386,78 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
                 np.savez(Path(dump) / f"card_kt{kt}_{name}.npz", **card_levels(st),
                          ssh=np.asarray(st.eta.data))
         return out
+    if arm == "zdf_replay":
+        # OFFLINE replay (rule 5): the card's own passive stage-3 arrays, from
+        # its write-only observer, are pushed through NEMO's statements.
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import _NEMOWSRK3TestHooks
+        kt, seen = kt_from, []
+        out["label"] = ("OFFLINE replay of NEMO's dyn_zdf from the card's own "
+                        "stage-3 inputs; " + ("INDEPENDENT entry" if kt == 1
+                                              else "GIVEN-NEMO-ENTRY"))
+        g, entry = g1.read_step(root, kt), s0 if kt == 1 else nemo_entry(kt)
+        st = jax.device_get(LatLonCGridOceanModel(
+            card.recipe.grid, z, cfg, _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+                zdf_momentum_observer=lambda *a: seen.append(
+                    [np.array(x) for x in a]))).step(entry, dt=card.dt_s))
+        require(len(seen) == 1, f"the observer fired {len(seen)} times, not once")
+        plain = jax.device_get(model.step(entry, dt=card.dt_s))
+        final = card_levels(st)
+        out["observer_is_passive"] = all(
+            np.array_equal(final[f], card_levels(plain)[f]) for f in final)
+        require(out["observer_is_passive"], "the observer moved the result")
+        with netCDF4.Dataset(root / "mesh_mask.nc") as h:
+            lev = lambda n: levels_last(h.variables[n][0], nk)   # noqa: E731
+            tmask = lev("tmask")
+            e3w = np.asarray(h.variables["e3w_1d"][0], np.float64)
+            wmask_t = tmask.copy()
+            wmask_t[..., 1:] = tmask[..., 1:] * tmask[..., :-1]
+            avm = 1.2e-4 * wmask_t        # coeff-ok: the deck's rn_avm0, checked below
+            require(float(cfg.A_v) == 1.2e-4, "the card's viscosity is not the deck's")
+            rows = {}
+            for f, col, e3n, mn, pair in (
+                    ("u", 0, "e3u_0", "umask", avm + np.roll(avm, -1, axis=1)),
+                    ("v", 1, "e3v_0", "vmask",
+                     avm + np.concatenate([avm[1:], avm[-1:]], axis=0))):
+                cut = (lambda a: a[:, 1:]) if f == "u" else (lambda a: a[1:])
+                explicit, solved = cut(seen[0][col]), cut(seen[0][6 + col])
+                e3_0, mask = (levels_last(np.asarray(h.variables[e3n][0]) * 1.0, nk + 0)
+                              if False else np.ascontiguousarray(np.moveaxis(
+                                  np.asarray(h.variables[e3n][0], np.float64)[:nk], 0, -1)),
+                              lev(mn))
+                h0 = np.zeros(mask.shape[:2])
+                for k in range(nk):                     # domain.f90:199
+                    h0 = h0 + e3_0[..., k] * mask[..., k]
+                ss = mask[..., 0]
+                r1_h0 = ss / (h0 + 1.0 - ss)            # domain.f90:213
+                keep = np.ones(mask.shape[:2], bool)
+                if f == "v":
+                    keep[-1] = False     # the top V row's north T row is a fold halo
+                per = {}
+                for variant in ("r3_mm", "r3_aa", "none"):
+                    after_solve, after = nemo_dynzdf_replay(
+                        explicit, g[f"3_{f}{f}_b_aa"], e3_0=e3_0, mask=mask,
+                        avm_pair=pair, r3_aa=g[f"3_r3{f}_aa"], r3_mm=g[f"2_r3{f}_aa"],
+                        r1_h0=r1_h0, e3w_1d=e3w, dt=card.dt_s, interface=variant)
+                    ref1 = np.where(keep, g[f"3_{f}{f}_k1_aa"], 0.0)
+                    per[variant] = {
+                        "level1_replay_vs_nemo": g1.row(
+                            f"zdf_replay.{variant}.kt{kt}.{f}", ref1,
+                            np.where(keep, after[..., 0], 0.0), reg),
+                        "all_levels_card_vs_replay": class_summary(level_rows(
+                            after * keep[..., None], final[f] * keep[..., None],
+                            cls[f])),
+                        "all_levels_card_solve_vs_replay_solve": class_summary(
+                            level_rows(after_solve * keep[..., None],
+                                       solved * keep[..., None], cls[f]))}
+                per["level1_card_vs_nemo"] = g1.row(
+                    f"zdf_replay.card.kt{kt}.{f}", g[f"3_{f}{f}_k1_aa"],
+                    final[f][..., 0], reg)
+                rows[f] = per
+        out["per_kt"].append({"kt": kt, "zdf_replay": rows})
+        if dump is not None:
+            np.savez(Path(dump) / f"card_kt{kt}_zdf_observer.npz",
+                     **{f"a{i}": a for i, a in enumerate(seen[0])})
+        return out
     if arm == "independent":
         out["label"] = "INDEPENDENT"
         require(1 <= kt_from <= kt_to <= 100, "steps must lie in 1..100")
@@ -403,6 +532,20 @@ def main(argv=None) -> int:
                 print("  UNEQUAL", r["row"], r["n_differing"], r["max_abs_difference"],
                       r["first_unequal_index"], r["levels_touched"][:8])
         return 0 if out["all_bit_identical"] else 1
+    if a.arm == "zdf_replay":
+        for f, per in out["per_kt"][0]["zdf_replay"].items():
+            c = per["level1_card_vs_nemo"]
+            print(f"{f} card vs NEMO level 1: {c['status']} max {c['max_abs']:.3e} "
+                  f"unequal {c['n_unequal']}")
+            for v in ("r3_mm", "r3_aa", "none"):
+                r, s2 = per[v]["level1_replay_vs_nemo"], per[v]["all_levels_card_vs_replay"]
+                s3 = per[v]["all_levels_card_solve_vs_replay_solve"]
+                print(f"  replay[{v}] vs NEMO level 1: {r['status']} max {r['max_abs']:.3e} "
+                      f"unequal {r['n_unequal']} | card vs replay all levels: full "
+                      f"{s2['full']['max_abs']:.2e} partial {s2['partial']['max_abs']:.2e}"
+                      f" | solve only: full {s3['full']['max_abs']:.2e} partial "
+                      f"{s3['partial']['max_abs']:.2e}")
+        return 0
     bad = False
     for p in out["per_kt"]:
         for r in p["rows"] + p.get("two_step_rows", []):
