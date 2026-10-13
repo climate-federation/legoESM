@@ -3785,7 +3785,7 @@ def build_orca2g1_flat_card(deck_root: str | Path) -> NEMOTestcaseCard:
         momentum_advection="flux_form",
         momentum_flux_scheme="none", vertical_momentum_scheme="none",
         adaptive_implicit_vertadv=False,
-        vorticity_scheme="een_planetary",
+        vorticity_scheme="een_planetary", een_fold_image_v_row=True,
         tracer_advection="none",                        # traadv.f90:444
         lateral_viscosity=base.lateral_viscosity._replace(A_h=0.0),
         K_h=0.0, K_bih=0.0,                             # ln_traldf_OFF
@@ -3842,7 +3842,7 @@ def _orca2g1_selector_failures(card: NEMOTestcaseCard) -> list[str]:
         "nn_bt_flt=3": cfg.barotropic.barotropic_time_filter == "nemo_ab3am4",
         "ln_dynadv_OFF": (cfg.momentum_advection, cfg.momentum_flux_scheme,
                           cfg.vertical_momentum_scheme) == ("flux_form", "none", "none"),
-        "ln_dynvor_een": cfg.vorticity_scheme == "een_planetary",
+        "ln_dynvor_een": (cfg.vorticity_scheme, cfg.een_fold_image_v_row) == ("een_planetary", True),
         "ln_traadv_OFF": cfg.tracer_advection == "none",
         "ln_dynldf_OFF": all(getattr(lv, name) == 0.0 for name in (
             "A_h", "B_h", "C_smag", "C_smag_lap", "C_leith")),

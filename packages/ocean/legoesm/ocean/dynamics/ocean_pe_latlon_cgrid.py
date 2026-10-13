@@ -2601,7 +2601,7 @@ def _bc_pv_flux(
     enstrophy_metric=False,
     reconstruct_zeta=False,
     vorticity_scheme="al81",
-    een_q_boundary="neumann_fill",
+    een_q_boundary="neumann_fill", een_fold_image_v=False,
     een_e3f_scheme="min",
     een_metric_weighting="off",
     dz_ref=None,
@@ -2919,8 +2919,8 @@ def _bc_pv_flux(
             # (barotropic_latlon_cgrid.een_barotropic_coriolis); this is the
             # baroclinic path's selector for it. "off" is bit-identical.
             diag_vortcor_u, diag_vortcor_v = pv_flux_al81_partial_cell(
-                zeta, h_vtx, h_v, v, h_u, u,
-                u_mask_3d, v_mask_3d, vtx_mask_va,
+                zeta, h_vtx, *_een_fold_image_v_row(
+                    een_fold_image_v, grid, h_v, v, h_u, u, u_mask_3d, v_mask_3d), vtx_mask_va,
                 f_vtx=_f_vtx_al,
                 q_boundary=een_q_boundary,
                 metric_widths=_mw,
@@ -5444,8 +5444,8 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
                 enstrophy_metric=config.vortcor_enstrophy_metric,
                 reconstruct_zeta=config.vortcor_reconstruct_zeta,
                 vorticity_scheme="een_planetary",
-                een_q_boundary=getattr(config, "een_q_boundary",
-                                       "neumann_fill"),
+                een_q_boundary=getattr(config, "een_q_boundary", "neumann_fill"),
+                een_fold_image_v=getattr(config, "een_fold_image_v_row", False),
                 een_e3f_scheme=config.een_e3f_scheme,
                 een_metric_weighting=getattr(
                     config, "een_metric_weighting", "off"),
@@ -5489,7 +5489,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             enstrophy_metric=config.vortcor_enstrophy_metric,
             reconstruct_zeta=config.vortcor_reconstruct_zeta,
             vorticity_scheme=getattr(config, "vorticity_scheme", "al81"),
-            een_q_boundary=getattr(config, "een_q_boundary", "neumann_fill"),
+            een_q_boundary=getattr(config, "een_q_boundary", "neumann_fill"), een_fold_image_v=getattr(config, "een_fold_image_v_row", False),  # noqa: E501
             een_e3f_scheme=config.een_e3f_scheme,
             een_metric_weighting=getattr(
                 config, "een_metric_weighting", "off"),
@@ -6248,3 +6248,29 @@ def _nemo_c2_kinetic_energy(u, v):
     zu = nemo_source_round(u_w_sq + u_e_sq)
     zv = nemo_source_round(v_s_sq + v_n_sq)
     return nemo_source_round(0.25 * nemo_source_round(zv + zu))
+
+
+def _een_fold_image_v_row(enabled, grid, h_v, v, h_u, u, u_mask_3d, v_mask_3d):
+    """NEMO ``vor_een`` on a T-pivot north fold: the fold-image V row.
+
+    The u trend on the pivot T row multiplies its two northern triads by
+    ``zwy(ji,jj)`` and ``zwy(ji+1,jj)`` (dynvor.f90:779-780), and ``zwy`` is
+    built from ``vv``, ``e3v`` and ``vmask`` on that row (dynvor.f90:767).
+    The row is the ``lbc_lnk`` image of the V row below it: velocity with the
+    fold sign, thickness and wet mask without.  legoESM's compact V mask keeps
+    the row dry, which drops both products.  ``enabled`` (the card's
+    ``een_fold_image_v_row``) hands the triad operator the image; False returns
+    every operand untouched, so the legacy path is bit-identical.
+    """
+    if not enabled:
+        return h_v, v, h_u, u, u_mask_3d, v_mask_3d
+    fold = getattr(grid, "fold", None)
+    if fold is None or not bool(fold.is_active):
+        raise ValueError(
+            "een_fold_image_v_row=True needs a grid with an active north fold")
+    perm = fold.perm_v
+    wet = v_mask_3d[-2][perm]
+    v = v.at[-1].set(fold.vector_sign_v * v[-2][perm] * wet.astype(v.dtype))
+    h_v = h_v.at[-1].set(h_v[-2][perm])
+    v_mask_3d = v_mask_3d.at[-1].set(wet)
+    return h_v, v, h_u, u, u_mask_3d, v_mask_3d
