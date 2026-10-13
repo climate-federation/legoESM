@@ -1668,6 +1668,15 @@ CITATION_MAP = {
         ('DO jj = ntsj-( nn_hls), ntej+(  nn_hls-1 )', 1),
         ('* r1_hv_0(ji,jj) * r1_e1e2v(ji,jj)', 1),
         5],
+    # --- ORCA2 round 265: matched stage-2 U RHS boundary -----------
+    'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/stprk3_stg.f90:360-424': [
+        ('SELECT CASE( kstg )', 1),
+        ('CALL dyn_adv( kstp, Kmm, Kmm, uu, vv, Krhs)', 2),
+        65],
+    'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/stprk3_stg.f90:443-455': [
+        ('Krhs aliases Kaa at', 1),
+        ("l4_canon_3d(uu(:,:,:,Krhs),'U')", 1),
+        13],
     'barotropic_latlon_cgrid.py:2006-2025': [
         ('eta_mid = eta_c', 1),
         ('za_i, eta_c, etab_c, etabb_c)', 1),
