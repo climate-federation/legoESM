@@ -1731,7 +1731,7 @@ CITATION_MAP = {
         ('ztse(ji,jj  ) * zwy(ji  ,jj-1) + ztsw(ji+1,jj) * zwy(ji+1,jj-1)', 1),
         2],
     'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/dynvor.f90:767': (
-        'zwy(ji,jj) = e1v(ji,jj) * (e3v_3d(ji,jj,jk) *(1._wp+r3v(ji,jj,Kmm)*vmask(ji,jj,jk))) * pv(ji,jj,jk)', 1),
+        'zwy(ji,jj) = e1v(ji,jj) * (e3v_3d(ji,jj,jk) *(1._wp+r3v(ji,jj,Kmm)*vmask(ji,jj,jk))) * pv(ji,jj,jk)', 3),
     'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/dynvor.f90:720': (
         'z1_e3f(ji,jj) = 1._wp / (e3f_0vor(ji,jj,jk) *(1._wp+r3f(ji,jj)*fe3mask(ji,jj,jk)))', 1),
     'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/dynvor.f90:727': ('zwz(ji,jj) = ff_f(ji,jj) * z1_e3f(ji,jj)', 1),
