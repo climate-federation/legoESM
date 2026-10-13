@@ -16626,23 +16626,3 @@ class _NEMOWSLdfDiagnosticTrace(NamedTuple):
 
     state_after: object
     ldf_diagnostics: object
-
-
-def _nemo_ws_stage_r3f(cfg, stage_index, eta_pair, z_coord, grid):
-    """NEMO's F-point thickness ratio for vorticity at stage 2 or 3.
-
-    NEMO interpolates the entry and after ratios at ``stprk3_stg.f90:218``
-    and ``:239``. ``eta_pair`` is a thunk because those sea levels exist only
-    after the external mode has run.
-    """
-    if (not getattr(cfg, "rk3_stage_r3f_nemo_literal", False)
-            or stage_index not in (2, 3)):
-        return None
-    from legoesm.ocean.vertical import nemo_qco_live_vorticity_e3f_cgrid
-    r3fb, r3fa = (nemo_qco_live_vorticity_e3f_cgrid(
-        eta, z_coord, eta.dtype, nn_e3f_typ=0, grid=grid, return_r3f=True)
-        for eta in eta_pair())
-    sr = nemo_source_round
-    if stage_index == 2:
-        return sr(sr((2.0 / 3.0) * r3fb) + sr((1.0 / 3.0) * r3fa))
-    return sr(0.5 * sr(r3fb + r3fa))
