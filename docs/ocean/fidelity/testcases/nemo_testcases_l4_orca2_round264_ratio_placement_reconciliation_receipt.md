@@ -108,8 +108,24 @@ The planted two-line shift of the compiled association citation refuses; its
 JSON SHA-256 is
 `7f89de512395921e23a3b3a08654598f0d63b2a0285a686e0c293272acc21d15`.
 
-Focused tests, the once-only fidelity battery, and independent review are
-reported after they run on the committed receipt.
+The focused round-260 through round-264 and citation-gate set passes 90/90;
+its log SHA-256 is
+`0b10fad0a6d95886f98ff61022f0f0b3ae44e94580d3f98aef86a7b4b6dbac00`.
+The once-only `tests/ocean/fidelity -n 12` battery collected 3,432 tests and
+reached 99%. Every round-264 test passed. It emitted the four registered
+pre-existing reds—GYRE round-129 harness pin, SI3 scalar-math provenance,
+allow-dirty scope, and worktree-stamp—and then stopped emitting output on
+`test_prediction_plant_is_fail_closed`; the bounded run was terminated. All
+four reds reproduce serially with the same offender sets. Battery and serial
+disposition log SHA-256 values are
+`e44cc5d4e8f5b2a03160860b5dee47134b360d7ea611e906b4e1b9af9199c506`
+and `f1e97784efc97180830b2b6d944a6d09d6df7364c62457be09706d6545f69a4a`.
+
+The requested separate `codex exec --sandbox read-only` review failed before
+review because its in-process app-server could not initialize on the
+read-only filesystem. **Independent review unavailable in-sandbox.** Its log
+SHA-256 is
+`eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5`.
 
 ## OPEN
 
