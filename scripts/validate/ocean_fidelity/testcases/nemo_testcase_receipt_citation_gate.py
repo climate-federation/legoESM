@@ -1681,12 +1681,12 @@ CITATION_MAP = {
         13],
     # --- ORCA2 round 266: stage-2 HPG accumulator assignment ------
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/stprk3_stg.f90:372-405': [
-        ('CALL    eos', 1),
-        ('CALL    dyn_hpg', 1),
+        ('hydrostatic pressure gradient (HPG))', 1),
+        ("l4_canon_3d(uu(:,:,:,Krhs),'U')", 4),
         34],
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/stprk3_stg.f90:407-421': [
-        ('CALL    dyn_vor', 1),
-        ('CALL dyn_adv', 2),
+        ('Coriolis / vorticity', 1),
+        ('L2_RK_STAGE2_TERM_DUMP', 1),
         15],
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynhpg.f90:395-406': [
         ('zuap = -zcoef0', 1),
@@ -1694,7 +1694,7 @@ CITATION_MAP = {
         12],
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynhpg.f90:411-432': [
         ('DO jk= 2, jpkm1', 1),
-        ('l2_sum_u (ji,jj,jk) = zhpi(ji,jj) + zuap', 1),
+        ('l2_sum_v (ji,jj,jk) = zhpj(ji,jj) + zvap', 1),
         22],
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynhpg.f90:401-402': [
         ('puu(ji,jj,1,Krhs) = zhpi(ji,jj) + zuap', 1),
