@@ -155,6 +155,13 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
         "f_vtx": np.asarray(nemo_een_ene_vertex_coriolis(card.recipe.grid)),
         "output_u": np.asarray(parts["vorticity_u"].data),
     }
+    # Source order matters: ``_bc_pv_flux`` forms relative circulation from
+    # the incoming velocity first, then supplies the separate fold-image V row
+    # only to the EEN transport triads.
+    call["zeta"] = np.asarray(jax.device_get(jax.jit(
+        lambda uu, vv: nemo_vor_ene_vorticity_cgrid(
+            uu, vv, card.recipe.grid))(
+                jnp.asarray(call["u"]), jnp.asarray(call["v"]))))
     if card.recipe.model_config.een_fold_image_v_row:
         # Offline transcription of ``_een_fold_image_v_row``.  Keep this in
         # NumPy: staging another scatter after the completed passive model run
@@ -169,10 +176,6 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
                           * wet.astype(call["v"].dtype))
         call["h_v"][-1] = call["h_v"][-2][perm]
         call["v_mask"][-1] = wet
-    call["zeta"] = np.asarray(jax.device_get(jax.jit(
-        lambda uu, vv: nemo_vor_ene_vorticity_cgrid(
-            uu, vv, card.recipe.grid))(
-                jnp.asarray(call["u"]), jnp.asarray(call["v"]))))
     flux_replay = jax.jit(original_flux, static_argnames=("q_boundary",))
     current_replay = jax.device_get(flux_replay(
         *map(jnp.asarray, (
@@ -198,10 +201,11 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
     require(target_replay["max_abs"] <= FLOOR,
             "offline source replay does not reproduce the live accumulator")
 
-    literal_zeta = np.asarray(jax.device_get(jax.jit(
-        lambda uu, vv: nemo_vor_ene_vorticity_cgrid(
-            uu, vv, card.recipe.grid))(
-                jnp.asarray(call["u"]), jnp.asarray(call["v"]))))
+    # The executed ORCA2 branch already calls the cited NEMO circulation
+    # helper.  With no independent NEMO zwz stream in the admitted record,
+    # this round can exonerate the candidate-side construction but cannot
+    # substitute a second circulation value post hoc.
+    literal_zeta = call["zeta"].copy()
     literal_output = jax.device_get(flux_replay(
         jnp.asarray(literal_zeta),
         *map(jnp.asarray, (
