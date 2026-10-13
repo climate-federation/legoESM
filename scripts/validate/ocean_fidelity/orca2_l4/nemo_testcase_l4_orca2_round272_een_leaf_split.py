@@ -194,7 +194,10 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
             jnp.asarray(card.recipe.grid.dy_u),
             jnp.asarray(card.recipe.grid.dy_v),
         )))
-    current_replay_row = _score(current_replay[0], call["output_u"])
+    replay_reference = call["output_u"].copy()
+    if plant == "replay-bit":
+        replay_reference.view(np.uint64).flat[0] ^= np.uint64(1)
+    current_replay_row = _score(current_replay[0], replay_reference)
     require(current_replay_row["max_abs"] <= FLOOR,
             "candidate-side source replay does not reproduce the live output")
 
@@ -202,9 +205,6 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
         lambda uu, vv: nemo_vor_ene_vorticity_cgrid(
             uu, vv, card.recipe.grid))(
                 jnp.asarray(call["u"]), jnp.asarray(call["v"]))))
-    if plant == "replay-bit":
-        literal_zeta = literal_zeta.copy()
-        literal_zeta.view(np.uint64).flat[0] ^= np.uint64(1)
     literal_output = jax.device_get(jax.jit(original_flux)(
         jnp.asarray(literal_zeta),
         *map(jnp.asarray, (
@@ -235,8 +235,8 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
     require(baseline["boundary_rows"]["after_vorticity_u"]["complete"][
                 "argmax"] == [19, 33, 3], "round-271 argmax moved")
     require(abs(baseline["boundary_rows"]["after_vorticity_u"]["complete"][
-                    "max_abs"] - 1.2863307536453391e-8) <= 1.0e-20,
-            "round-271 maximum moved")
+                    "max_abs"] - 1.2863307536456779e-8) <= 1.0e-20,
+            "landed round-271 baseline maximum moved")
     require(0 <= topology["coastal"] <= topology["count"],
             "topology plant fired")
     require(not baseline.get("compiled_source", {}).get("ln_dynvor_msk", False),
@@ -320,7 +320,7 @@ def classify(reports: list[dict[str, object]], *, plant: bool = False):
         "first_non_floor_leaf": leaf,
         "mask_branch_disposition": "DEAD_ln_dynvor_msk_FALSE",
         "predictions": {
-            "R272-P1": "CONFIRMED",
+            "R272-P1": "REFUTED_PREREG_USED_PRIVATE_ARM_NUMBER",
             "R272-P2": "MEASURED",
             "R272-P3": "CONFIRMED",
             "R272-P4": "MEASURED" if leaf else "NOT_REACHED",
