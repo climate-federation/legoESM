@@ -65,3 +65,13 @@ split.
    trajectory census before landing.
 
 No configuration choice is made.
+
+## Post-measurement disposition (predictions above remain frozen)
+
+R272-P1 used round 271's **private-arm** maximum rather than this round's
+landed-tree baseline. It is **REFUTED**: the landed value is
+`1.2863307536456779e-8 m/s2` (the argmax is unchanged). R272-P2 measured
+78 coastal and 22 open points, refuting the coast-only hypothesis. R272-P3 is
+**REFUTED**: the passive-operand offline replay differs from its own live
+output by `2.5331686726199837e-9 m/s2`, above the floor. R272-P4 is therefore
+not reached. R272-P5 is confirmed.
