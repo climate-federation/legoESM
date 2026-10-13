@@ -124,9 +124,10 @@ def _run_mode(card, state, forcing, oracle_stage1, oracle_stage2,
     }
 
 
-def measure(deck_root: Path, frame_root: Path, label: str,
+def measure(deck_root: Path, frame_root: Path, label: str, mode: str,
             expect_commit: str) -> dict[str, object]:
     require(label in LABELS, f"bad label {label!r}")
+    require(mode in MODES, f"bad placement mode {mode!r}")
     stamp = r249._policy_stamp(expect_commit)
     card = omt4.build_omt4_card(deck_root)
     omt4.validate_omt4_card(deck_root, card)
@@ -136,25 +137,22 @@ def measure(deck_root: Path, frame_root: Path, label: str,
     forcing = omt0.rung0_ladder._zero_forcing((148, 180))
     oracle_stage1 = rung0.assemble_frame(frame_root, 1, 1)
     oracle_stage2 = rung0.assemble_frame(frame_root, 1, 2)
-    modes = {
-        mode: _run_mode(
-            card, state, forcing, oracle_stage1, oracle_stage2, mode)
-        for mode in MODES
-    }
-    off_zfv = modes["off"].pop("stage1_zFv")
-    for mode in MODES:
-        current = off_zfv if mode == "off" else modes[mode].pop("stage1_zFv")
-        modes[mode]["stage1_zFv_vs_off"] = r249._score(current, off_zfv)
+    result = _run_mode(
+        card, state, forcing, oracle_stage1, oracle_stage2, mode)
+    stage1_zfv = result.pop("stage1_zFv")
+    result["stage1_zFv_sha256"] = hashlib.sha256(
+        np.ascontiguousarray(stage1_zfv).tobytes()).hexdigest()
     one = np.asarray([1.0], np.float64)
     return {
         "format": "nemo-testcase-l4-orca2-round264-ratio-placement-v1",
         "status": "PASS_R264_MEASUREMENT",
         "label": label,
+        "mode": mode,
         "worktree": stamp,
         "execution": "production-jit-cpu-fp64-x64-libm",
         "operand_route": "production-d114-resolved-complete-private-unit",
         "record_identity": _record_identity(frame_root),
-        "modes": modes,
+        "result": result,
         "compiled_order": [
             "dom_qco_r3c_RK3", "scalar_v_fold", "store_stage_ratio",
             "stage2_zvb", "stage2_zFv", "stage2_tracer",
@@ -175,61 +173,64 @@ def classify(reports: list[dict[str, object]], *,
     reports = copy.deepcopy(reports)
     if plant == "label-coverage":
         reports.pop()
-    by_label = {report["label"]: report for report in reports}
-    require(set(by_label) == set(LABELS), "both claim labels are required")
-    independent = by_label["independent"]
+    by_key = {(report["label"], report["mode"]): report for report in reports}
+    expected_keys = {(label, mode) for label in LABELS for mode in MODES}
+    require(set(by_key) == expected_keys,
+            "both labels and all three placement modes are required")
+    independent = by_key[("independent", "off")]
     if plant == "mode-coverage":
-        independent["modes"].pop("nemo")
+        reports.pop()
+        by_key = {(report["label"], report["mode"]): report for report in reports}
     elif plant == "record-identity":
         independent["record_identity"][next(iter(independent["record_identity"]))] = "0" * 64
     elif plant == "passivity":
-        independent["modes"]["off"]["passivity"]["T"] = False
+        independent["result"]["passivity"]["T"] = False
     elif plant == "off-reproduction":
-        independent["modes"]["off"]["matched_stage2"]["S"]["fold_band"]["max_abs"] = 1.0
+        independent["result"]["matched_stage2"]["S"]["fold_band"]["max_abs"] = 1.0
     elif plant == "retired-regression":
-        independent["modes"]["round262"]["matched_stage2"]["S"]["fold_band"]["max_abs"] = 0.0
+        by_key[("independent", "round262")]["result"]["matched_stage2"]["S"]["fold_band"]["max_abs"] = 0.0
     elif plant == "compiled-transport-isolation":
-        independent["modes"]["nemo"]["stage1_zFv_vs_off"]["unequal"] = 1
+        by_key[("independent", "nemo")]["result"]["stage1_zFv_sha256"] = "0" * 64
     elif plant == "compiled-recovery":
-        independent["modes"]["nemo"]["matched_stage2"]["S"]["fold_band"]["max_abs"] = 2.0
+        by_key[("independent", "nemo")]["result"]["matched_stage2"]["S"]["fold_band"]["max_abs"] = 2.0
     elif plant == "matched-point":
-        independent["modes"]["nemo"]["matched_stage1"]["v"]["fold_band"]["max_abs"] = 1.0
+        by_key[("independent", "nemo")]["result"]["matched_stage1"]["v"]["fold_band"]["max_abs"] = 1.0
     elif plant == "source-order":
         independent["compiled_order"][1:3] = reversed(independent["compiled_order"][1:3])
     elif plant == "one-bit":
         independent["one_bit_control"]["unequal"] = 0
 
-    reference_records = by_label[LABELS[0]]["record_identity"]
+    require(set(by_key) == expected_keys,
+            "both labels and all three placement modes are required")
+    reference_records = by_key[(LABELS[0], MODES[0])]["record_identity"]
     expected_order = [
         "dom_qco_r3c_RK3", "scalar_v_fold", "store_stage_ratio",
         "stage2_zvb", "stage2_zFv", "stage2_tracer",
     ]
     summaries = {}
     for label in LABELS:
-        report = by_label[label]
-        require(report["status"] == "PASS_R264_MEASUREMENT",
-                f"{label}: measurement status moved")
-        require(report["execution"] == "production-jit-cpu-fp64-x64-libm"
-                and report["operand_route"] ==
-                "production-d114-resolved-complete-private-unit",
-                f"{label}: execution provenance moved")
-        require(report["record_identity"] == reference_records,
-                f"{label}: admitted record identity moved")
-        require(set(report["modes"]) == set(MODES),
-                f"{label}: mode coverage moved")
-        require(report["compiled_order"] == expected_order,
-                f"{label}: compiled source order moved")
         for mode in MODES:
-            row = report["modes"][mode]
+            report = by_key[(label, mode)]
+            require(report["status"] == "PASS_R264_MEASUREMENT",
+                    f"{label}/{mode}: measurement status moved")
+            require(report["execution"] == "production-jit-cpu-fp64-x64-libm"
+                    and report["operand_route"] ==
+                    "production-d114-resolved-complete-private-unit",
+                    f"{label}/{mode}: execution provenance moved")
+            require(report["record_identity"] == reference_records,
+                    f"{label}/{mode}: admitted record identity moved")
+            require(report["compiled_order"] == expected_order,
+                    f"{label}/{mode}: compiled source order moved")
+            row = report["result"]
             require(all(row["passivity"].values()),
                     f"{label}/{mode}: observer moved completed state")
             require(row["matched_stage1"]["v"]["fold_band"]["max_abs"]
                     <= float(r249.FLOOR),
                     f"{label}/{mode}: stage-1 program point is unmatched")
 
-        off = report["modes"]["off"]
-        retired = report["modes"]["round262"]
-        nemo = report["modes"]["nemo"]
+        off = by_key[(label, "off")]["result"]
+        retired = by_key[(label, "round262")]["result"]
+        nemo = by_key[(label, "nemo")]["result"]
         off_t = off["matched_stage2"]["T"]["fold_band"]["max_abs"]
         off_s = off["matched_stage2"]["S"]["fold_band"]["max_abs"]
         require(off_t == 6.435500132795369e-09
@@ -238,21 +239,22 @@ def classify(reports: list[dict[str, object]], *,
         retired_s = retired["matched_stage2"]["S"]["fold_band"]["max_abs"]
         require(retired_s > 1.0 and retired_s > off_s * 1.0e6,
                 f"{label}: retired placement did not reproduce O(1) regression")
-        require(retired["stage1_zFv_vs_off"]["unequal"] > 0,
+        require(retired["stage1_zFv_sha256"] != off["stage1_zFv_sha256"],
                 f"{label}: retired placement no longer changes stage-1 transport")
-        require(nemo["stage1_zFv_vs_off"]["unequal"] == 0,
+        require(nemo["stage1_zFv_sha256"] == off["stage1_zFv_sha256"],
                 f"{label}: compiled placement changed stage-1 transport")
         for name, off_value in (("T", off_t), ("S", off_s)):
             recovered = nemo["matched_stage2"][name]["fold_band"]["max_abs"]
             require(recovered <= off_value,
                     f"{label}: compiled placement worsened stage-2 {name}")
-        require(report["one_bit_control"]["unequal"] == 1,
-                f"{label}: one-bit control did not fire")
+        for mode in MODES:
+            require(by_key[(label, mode)]["one_bit_control"]["unequal"] == 1,
+                    f"{label}/{mode}: one-bit control did not fire")
         summaries[label] = {
             mode: {
-                "stage1_zFv_vs_off": report["modes"][mode]["stage1_zFv_vs_off"],
-                "stage2_T": report["modes"][mode]["matched_stage2"]["T"]["fold_band"],
-                "stage2_S": report["modes"][mode]["matched_stage2"]["S"]["fold_band"],
+                "stage1_zFv_sha256": by_key[(label, mode)]["result"]["stage1_zFv_sha256"],
+                "stage2_T": by_key[(label, mode)]["result"]["matched_stage2"]["T"]["fold_band"],
+                "stage2_S": by_key[(label, mode)]["result"]["matched_stage2"]["S"]["fold_band"],
             }
             for mode in MODES
         }
@@ -276,19 +278,21 @@ def main() -> int:
     parser.add_argument("--deck-root", type=Path)
     parser.add_argument("--frame-root", type=Path)
     parser.add_argument("--label", choices=LABELS)
+    parser.add_argument("--mode", choices=MODES)
     parser.add_argument("--expect-commit")
-    parser.add_argument("--classify", nargs=2, type=Path)
+    parser.add_argument("--classify", nargs=6, type=Path)
     parser.add_argument("--plant", choices=PLANTS, default="none")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     try:
         if args.measure:
             require(args.plant == "none", "measurement does not accept plants")
-            require(all((args.deck_root, args.frame_root, args.label,
+            require(all((args.deck_root, args.frame_root, args.label, args.mode,
                          args.expect_commit)),
                     "measurement arguments are incomplete")
             result = measure(
-                args.deck_root, args.frame_root, args.label, args.expect_commit)
+                args.deck_root, args.frame_root, args.label, args.mode,
+                args.expect_commit)
         else:
             require(args.classify is not None,
                     "classification JSONs are required")

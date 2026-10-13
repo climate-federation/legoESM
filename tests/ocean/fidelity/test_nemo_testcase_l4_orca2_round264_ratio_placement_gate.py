@@ -26,12 +26,11 @@ def _mode(name: str):
         for field in ("u", "v", "T", "S", "ssh")
     }
     if name == "off":
-        t_max, s_max, transport = (
-            6.435500132795369e-09, 1.3842782919937235e-08, _score())
+        t_max, s_max = 6.435500132795369e-09, 1.3842782919937235e-08
     elif name == "round262":
-        t_max, s_max, transport = (0.27, 5.03, _score(1.0, 10))
+        t_max, s_max = 0.27, 5.03
     else:
-        t_max, s_max, transport = (1.0e-09, 2.0e-09, _score())
+        t_max, s_max = 1.0e-09, 2.0e-09
     stage2 = copy.deepcopy(stage1)
     stage2["T"]["fold_band"] = _score(t_max, 10)
     stage2["S"]["fold_band"] = _score(s_max, 10)
@@ -41,18 +40,20 @@ def _mode(name: str):
         "raw_stage1": copy.deepcopy(stage1),
         "matched_stage1": stage1,
         "matched_stage2": stage2,
-        "stage1_zFv_vs_off": transport,
+        "stage1_zFv_sha256": (
+            "b" * 64 if name == "round262" else "a" * 64),
     }
 
 
-def _report(label: str):
+def _report(label: str, mode: str):
     return {
         "status": "PASS_R264_MEASUREMENT",
         "label": label,
+        "mode": mode,
         "execution": "production-jit-cpu-fp64-x64-libm",
         "operand_route": "production-d114-resolved-complete-private-unit",
         "record_identity": {"frame.bin": "a" * 64},
-        "modes": {mode: _mode(mode) for mode in gate.MODES},
+        "result": _mode(mode),
         "compiled_order": [
             "dom_qco_r3c_RK3", "scalar_v_fold", "store_stage_ratio",
             "stage2_zvb", "stage2_zFv", "stage2_tracer",
@@ -62,13 +63,15 @@ def _report(label: str):
 
 
 def test_round264_accepts_controlled_placement_reconciliation():
-    result = gate.classify([_report(label) for label in gate.LABELS])
+    result = gate.classify([
+        _report(label, mode) for label in gate.LABELS for mode in gate.MODES])
     assert result["status"] == "PASS_R264_RATIO_PLACEMENT_RECONCILIATION"
     assert result["predictions"]["R264-P2"].startswith("CONFIRMED")
 
 
 @pytest.mark.parametrize("plant", gate.PLANTS[1:])
 def test_round264_plants_fire(plant):
-    reports = [_report(label) for label in gate.LABELS]
+    reports = [
+        _report(label, mode) for label in gate.LABELS for mode in gate.MODES]
     with pytest.raises(gate.GateError):
         gate.classify(copy.deepcopy(reports), plant=plant)
