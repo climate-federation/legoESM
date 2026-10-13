@@ -108,6 +108,18 @@ Arms (``--arm``):
                that frame's sea level (domqco.f90:266-269), the form the
                card's stage faces take; no model step
 
+  subnormal_environment  no record, no model: how this process's arithmetic
+               treats numbers below the smallest normal double.  A product of
+               two normal numbers whose exact value is subnormal, and a
+               subnormal operand times 1e10 (a normal result, so only the
+               operand's treatment can zero it), in numpy before any compiled
+               call, in a compiled XLA function (4 and 1,000,000 elements),
+               in uncompiled jax.numpy, and in numpy again afterwards
+
+Every scored row of the whole-step arms also carries ``unequal_census``: the
+unequal cells split into those where NEMO holds a nonzero number below the
+smallest normal double and the card holds exactly zero, and all others.
+
 Every scored row is split into the preregistered regions (fold band, seam,
 south, interior; interior again into coast-adjacent and open).  The scorer
 and its 1e-15 bar are the shared trajectory gate's; the record reader is the
@@ -137,7 +149,7 @@ ARMS = ("geometry", "independent", "given_entry", "rhs", "handoff", "stages",
         "vor_fold_replay", "restart_entry", "fold_v_depth", "rhs_terms",
         "interior_events", "stage_replay", "substeps", "substeps_independent",
         "flux_update_replay", "ratio_fold_replay", "ratio_order_replay",
-        "stage_operand_replay")
+        "stage_operand_replay", "subnormal_environment")
 PLANTS = ("score", "entry")
 STAGE_STEPS = 10          # round 1's record: stage frames at kt = 1..10
 FOLD_ROWS, SEAM_COLS, SOUTH_ROWS = 3, 2, 3
@@ -248,6 +260,7 @@ def row(name, ref, cand, reg, *, plant=False) -> dict:
         "rms": float(np.sqrt(np.mean(d * d))),
         "ref_max_abs": float(np.max(np.abs(ref))),
         "bit_identical": bool(bad.shape[0] == 0),
+        "unequal_census": unequal_census(ref, cand),
         "at_cell": at_cell,
         "regions": {
             k: {"n_cells": int(m.sum()),
@@ -1018,6 +1031,53 @@ def stage_face_ratio_rows(root: Path, kt: int, card) -> list[dict]:
     return rows
 
 
+TINY = float(np.finfo(np.float64).tiny)     # smallest normal double
+
+
+def unequal_census(ref, cand) -> dict:
+    """The unequal cells of one row, split by the tiny-number class."""
+    ref, cand = np.asarray(ref, dtype=np.float64), np.asarray(cand, dtype=np.float64)
+    bad = ref != cand
+    sub_ref = (np.abs(ref) < TINY) & (ref != 0.0)
+    flushed = bad & sub_ref & (cand == 0.0)
+    mag = np.abs(ref[bad])
+    return {"n_unequal": int(bad.sum()),
+            "nemo_subnormal_card_zero": int(flushed.sum()),
+            "other": int(bad.sum() - flushed.sum()),
+            "nemo_subnormal_anywhere": int(sub_ref.sum()),
+            "card_subnormal_anywhere": int(((np.abs(cand) < TINY) & (cand != 0.0)).sum()),
+            "unequal_nemo_abs_min": float(mag.min()) if mag.size else None,
+            "unequal_nemo_abs_max": float(mag.max()) if mag.size else None,
+            "unequal_card_abs_max": float(np.abs(cand[bad]).max()) if mag.size else None}
+
+
+def subnormal_environment() -> dict:
+    """How numpy and XLA on this host treat subnormal results and operands."""
+    import jax
+    import jax.numpy as jnp
+    a, b, s = 1.0e-200, 1.0e-110, 5.0e-310        # a * b = 1e-310 exactly-ish
+    out = {"smallest_normal": TINY, "product_operands": [a, b],
+           "subnormal_operand": s}
+
+    def numpy_pair(n):
+        return [float((np.full(n, a) * np.full(n, b))[0]),
+                float((np.full(n, s) * np.full(n, 1.0e10))[0])]
+    out["numpy_before_xla"] = numpy_pair(4)
+    mul = jax.jit(lambda x, y: x * y)
+    for n in (4, 1_000_000):
+        out[f"xla_compiled_n{n}"] = [
+            float(mul(jnp.full(n, a), jnp.full(n, b))[0]),
+            float(mul(jnp.full(n, s), jnp.full(n, 1.0e10))[0])]
+    out["jax_numpy_uncompiled_n4"] = [
+        float((jnp.full(4, a) * jnp.full(4, b))[0]),
+        float((jnp.full(4, s) * jnp.full(4, 1.0e10))[0])]
+    out["numpy_after_xla"] = numpy_pair(4)
+    out["xla_flushes_result"] = out["xla_compiled_n1000000"][0] == 0.0
+    out["xla_flushes_operand"] = out["xla_compiled_n1000000"][1] == 0.0
+    out["numpy_keeps"] = all(v != 0.0 for v in out["numpy_before_xla"] + out["numpy_after_xla"])
+    return out
+
+
 def ratio_fold_rows(root: Path, kt: int, card, reg) -> dict:
     """The thickness ratios on the fold rows, four ways, against NEMO's own
     recorded entry ratios; and the production coefficient builder offline."""
@@ -1318,6 +1378,10 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
                        "in the 3-D vorticity trend; not the card)"
         return out
     require(arm in ARMS, f"unknown arm {arm!r}; expected one of {ARMS}")
+    if arm == "subnormal_environment":
+        _fp64()
+        return {"arm": arm, "label": "this process's arithmetic (no record, "
+                "no model step)", **subnormal_environment()}
     require(not stage1_rhs_from_nemo or arm == "stages",
             "--stage1-rhs-from-nemo is a measurement arm of the stages table")
     require(plant is None or plant in PLANTS, f"unknown plant {plant!r}")
@@ -1977,6 +2041,10 @@ def _print(out: dict) -> None:
         return
     print(out["label"], "| een_fold_image_v_row =", out.get("een_fold_image_v_row"),
           "| T,S FROM THE CARD'S CHAIN" if out.get("ts_from_chain_measurement_arm") else "")
+    if out["arm"] == "subnormal_environment":
+        for k, v in out.items():
+            print(f"{k}: {v}")
+        return
     if out["arm"] == "stage_operand_replay":
         for e in out["per_kt"]:
             for r in e["rows"]:
