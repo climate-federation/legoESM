@@ -88,8 +88,9 @@ def _measure_gyre_one_step_in_subprocess(output: Path) -> dict:
         text=True,
         timeout=3600,
     )
-    assert result.returncode == 0, (
-        "isolated gyre_nemo_card_1step child failed:\n"
+    assert result.returncode == 1, (
+        "isolated gyre_nemo_card_1step must refuse its transformed-primal "
+        "byte mismatch:\n"
         f"--- stdout ---\n{result.stdout[-4000:]}\n"
         f"--- stderr ---\n{result.stderr[-4000:]}"
     )
@@ -236,12 +237,19 @@ def test_step_gradient_health(name, tmp_path):
     if name == "gyre_nemo_card_1step":
         row = _measure_gyre_one_step_in_subprocess(
             tmp_path / "gyre_nemo_card_1step.json")
-        assert row["status"] == "CONFIRMED", (
-            "gyre_nemo_card_1step gradient agreement failed after the "
-            "active-cell CEN2 e3t(Kmm) denominator treatment "
-            "(traadv_cen.F90:146-148,208-216); "
+        assert row["status"] == "UNMEASURED", (
+            "gyre_nemo_card_1step must stay refused until the production-step "
+            "VJP and JVP replays are byte-identical; "
             f"measured={row}"
         )
+        assert row["reverse"] is None
+        assert row["forward"] is None
+        assert row["finite_difference"] is None
+        assert row["error"] == (
+            "production-step transform replay is not bitwise identical")
+        assert row["step_vjp_replays_bitwise"] is False
+        assert row["step_jvp_replays_bitwise"] is False
+        assert row["refused_derivative_evidence"]["status"] == "CONFIRMED"
         assert row["case"] == "GYRE-zco"
         assert row["steps"] == 1
         assert row["schedule"] == "uniform"

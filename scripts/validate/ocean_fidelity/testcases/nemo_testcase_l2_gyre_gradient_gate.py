@@ -412,6 +412,45 @@ def step_transform_footprint(n_steps: int) -> dict:
     }
 
 
+def enforce_step_replay_byte_gate(
+        row: dict, vjp_reports: dict, jvp_reports: dict) -> dict:
+    """Refuse derivatives whose transformed step primal changed any bit."""
+    vjp_bitwise = all(
+        report["bitwise_equal"] for report in vjp_reports.values())
+    jvp_bitwise = all(
+        report["bitwise_equal"] for report in jvp_reports.values())
+    diagnostics = {
+        "step_vjp_replay_reports": vjp_reports,
+        "step_vjp_replay_used_as_primal": False,
+        "step_vjp_replays_bitwise": vjp_bitwise,
+        "step_jvp_replay_reports": jvp_reports,
+        "step_jvp_replay_used_as_primal": False,
+        "step_jvp_replays_bitwise": jvp_bitwise,
+    }
+    if vjp_bitwise and jvp_bitwise:
+        row.update(diagnostics)
+        return row
+    refused = unmeasured_agreement(
+        "production-step transform replay is not bitwise identical")
+    refused["refused_derivative_evidence"] = {
+        key: row.get(key)
+        for key in (
+            "status",
+            "reverse",
+            "forward",
+            "finite_difference",
+            "rev_fwd_relative_error",
+            "rev_fd_relative_error",
+            "gradient_dot_abs_sum",
+            "gradient_direction_norm_product",
+            "rev_fwd_absolute_discrepancy",
+            "rev_fwd_scale_aware_error",
+        )
+    }
+    refused.update(diagnostics)
+    return refused
+
+
 def explicit_stepwise_directional_derivatives(
         context: GYREContext, reference: LossReference, base, direction,
         n_steps: int, *, plant: bool = False):
@@ -485,18 +524,10 @@ def explicit_stepwise_directional_derivatives(
         "rev_fwd_absolute_discrepancy": discrepancy,
         "rev_fwd_scale_aware_error": (
             discrepancy / max(dot_abs_sum, 1.0e-300)),
-        "step_vjp_replay_reports": replay_reports,
-        "step_vjp_replay_used_as_primal": False,
-        "step_vjp_replays_bitwise": all(
-            report["bitwise_equal"] for report in replay_reports.values()),
-        "step_jvp_replay_reports": forward_replay_reports,
-        "step_jvp_replay_used_as_primal": False,
-        "step_jvp_replays_bitwise": all(
-            report["bitwise_equal"]
-            for report in forward_replay_reports.values()),
         "step_transform_compile_footprint": step_transform_footprint(n_steps),
     })
-    return row
+    return enforce_step_replay_byte_gate(
+        row, replay_reports, forward_replay_reports)
 
 
 def perturbations(context: GYREContext):

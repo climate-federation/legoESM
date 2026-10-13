@@ -97,6 +97,16 @@ def test_scalar_line_reverse_equals_full_vjp_dot_direction():
 
 
 def test_explicit_stepwise_vjp_matches_whole_window_gradient(monkeypatch):
+    monkeypatch.setattr(
+        G,
+        "state_bitwise_report",
+        lambda _expected, _actual: {
+            "bitwise_equal": True,
+            "mismatch_count": 0,
+            "mismatches": [],
+        },
+    )
+
     class Field(NamedTuple):
         data: jax.Array
 
@@ -229,6 +239,33 @@ def test_compiled_step_transforms_reuse_cold_and_warm_programs():
     # One trace per transform and per state structure: cold + warm, not one
     # closure per model step and not one whole-window transform.
     assert model.traces == 4
+
+
+def test_transform_replay_byte_gate_refuses_a_planted_mismatch():
+    measured = G.classify_agreement(1.0, 1.0, 1.0)
+    measured.update({
+        "gradient_dot_abs_sum": 2.0,
+        "gradient_direction_norm_product": 3.0,
+        "rev_fwd_absolute_discrepancy": 0.0,
+        "rev_fwd_scale_aware_error": 0.0,
+    })
+    good = {"1": {"bitwise_equal": True, "mismatch_count": 0}}
+    planted = {"1": {"bitwise_equal": False, "mismatch_count": 1}}
+
+    accepted = G.enforce_step_replay_byte_gate(measured.copy(), good, good)
+    refused = G.enforce_step_replay_byte_gate(measured.copy(), planted, good)
+
+    assert accepted["status"] == "CONFIRMED"
+    assert refused["status"] == "UNMEASURED"
+    assert refused["reverse"] is None
+    assert refused["forward"] is None
+    assert refused["finite_difference"] is None
+    assert refused["error"] == (
+        "production-step transform replay is not bitwise identical")
+    assert refused["refused_derivative_evidence"]["status"] == "CONFIRMED"
+    assert refused["refused_derivative_evidence"]["reverse"] == 1.0
+    assert refused["step_vjp_replays_bitwise"] is False
+    assert refused["step_jvp_replays_bitwise"] is True
 
 
 def test_gyre_resource_schedule_starts_after_cold_step(monkeypatch):
