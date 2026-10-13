@@ -1639,7 +1639,7 @@ CITATION_MAP = {
     'barotropic_latlon_cgrid.py:2359-2398': [
         ('association_post = None', 1),
         ('V_bar_new = association_post[1]', 2),
-        39],
+        40],
     'barotropic_latlon_cgrid.py:2427-2432': [
         ('if ab3_za is not None:', 5),
         ('U_bar_c, Ub_c, V_bar_c, Vb_c, eta_c, etab_c)', 1),
@@ -2180,7 +2180,7 @@ CITATION_MAP = {
         32],
     'barotropic_latlon_cgrid.py:601-685': [
         'def _nemo_ssh_avg_apply(eta_dyn, u_mask, v_mask, grid, area, prep, *,',
-        'return H_u, H_v, r1_u_entry, r1_v_entry', 80],
+        'return H_u, H_v, r1_u_entry, r1_v_entry', 85],
     # --- ORCA2 round 149: carried V reciprocal retraction ---------------
     'barotropic_latlon_cgrid.py:2583-2587': [
         '# Preserve associated halo operands in the private trace.',
