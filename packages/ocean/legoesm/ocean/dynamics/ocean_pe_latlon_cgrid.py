@@ -5113,7 +5113,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     nemo_stage_zad_operands=None,
     nemo_stage_zad_operand_observer=None,
     nemo_stage_zad_eta_after_override=None,
-    nemo_literal_hpg_vmask=None, nemo_stage_r3f=None,
+    nemo_literal_hpg_vmask=None,
 ):
     """Compute 3D baroclinic tendencies on a C-grid lat-lon grid.
 
@@ -5434,7 +5434,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
                     nemo_qco_live_vorticity_e3f_cgrid,
                 )
                 _h_vtx_ov = nemo_qco_live_vorticity_e3f_cgrid(
-                    state.eta.data, z_coord, h_k.dtype, nn_e3f_typ=0, grid=grid, r3f_native=nemo_stage_r3f)
+                    state.eta.data, z_coord, h_k.dtype, nn_e3f_typ=0, grid=grid)
                 _f_vtx_ov = (
                     vertex_coriolis(grid) if ene_generic_f_vtx
                     else nemo_een_ene_vertex_coriolis(grid)
@@ -5483,7 +5483,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             )
             from legoesm.ocean.vertical import nemo_qco_live_vorticity_e3f_cgrid
             _h_vtx_override = nemo_qco_live_vorticity_e3f_cgrid(
-                state.eta.data, z_coord, h_k.dtype, nn_e3f_typ=0, grid=grid, r3f_native=nemo_stage_r3f)
+                state.eta.data, z_coord, h_k.dtype, nn_e3f_typ=0, grid=grid)
             _f_vtx_override = (
                 vertex_coriolis(grid) if ene_generic_f_vtx
                 else nemo_een_ene_vertex_coriolis(grid)

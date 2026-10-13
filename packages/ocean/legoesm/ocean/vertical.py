@@ -455,7 +455,7 @@ def nemo_e3f_0vor_from_tmask(e3t_0, tmask, dry_vertex_fill, *,
 
 def nemo_qco_live_vorticity_e3f_cgrid(
     eta, z_coord, dtype, nn_e3f_typ=0, *, grid=None, e3t_0=None, tmask=None,
-    reference_e3f=None, r3f_native=None, return_r3f=False,  # r3f_native: NEMO's stage-interpolated F ratio (stprk3_stg.f90:218, :239) in place of this sea level's; return_r3f: hand back the exchanged native ratio  # noqa: E501
+    reference_e3f=None,
 ):
     """Build literal NEMO ``e3f_vor(Kmm)`` from the card's own mesh.
 
@@ -532,7 +532,7 @@ def nemo_qco_live_vorticity_e3f_cgrid(
     # dom_qco_zgr applies the F-point lateral boundary condition to r3f
     # (domqco.F90:124-135) before domzgr_substitute.h90:130 consumes it.
     # On ORCA's T fold this is the same F-origin permutation as e3f_0vor.
-    r3f = nemo_t_fold_f_owned(r3f, grid) if r3f_native is None else jnp.asarray(r3f_native, dtype=dtype)  # noqa: E501
+    r3f = nemo_t_fold_f_owned(r3f, grid)
     # dommsk.F90:146-198 freezes fe3mask from the four-T-cell free-slip
     # mask.  The later lateral-slip/strait changes at :207-243 affect fmask
     # only.  domzgr_substitute.h90:48,130 therefore consumes fe3mask here;
@@ -551,7 +551,7 @@ def nemo_qco_live_vorticity_e3f_cgrid(
     # NEMO native F(i,j) maps to legoESM vertex [j+1,i+1].  The added
     # south/west rows are inert walls for this closed-box identity.
     with_south = jnp.concatenate([e3f_native[:1], e3f_native], axis=0)
-    return r3f if return_r3f else jnp.concatenate([with_south[:, -1:], with_south], axis=1)
+    return jnp.concatenate([with_south[:, -1:], with_south], axis=1)
 
 
 def _nemo_qco_hf0(raw, e3f0vor, fe3mask, dtype):
