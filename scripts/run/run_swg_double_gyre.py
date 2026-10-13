@@ -15,6 +15,7 @@ import numpy as np
 SECONDS_PER_DAY = 86_400
 SCAN_PARITY_ATOL = 1.0e-12
 GPU_TARGET_MS_PER_STEP = 5.0
+METADATA_CHECKPOINT_DAYS = 25
 
 
 def _write_json_atomic(path: Path, payload: dict) -> None:
@@ -538,11 +539,12 @@ def run_long(
             np.savez(stream, **arrays)
         temporary.replace(output / name)
         day_hashes[name] = hashlib.sha256((output / name).read_bytes()).hexdigest()
-        _write_hashes_atomic(output / "daily.sha256", day_hashes)
-        _write_json_atomic(
-            pending_path,
-            manifest | {"status": "pending", "completed_days": day,
-                        "daily_sha256": day_hashes})
+        if day % METADATA_CHECKPOINT_DAYS == 0 or day == days:
+            _write_hashes_atomic(output / "daily.sha256", day_hashes)
+            _write_json_atomic(
+                pending_path,
+                manifest | {"status": "pending", "completed_days": day,
+                            "daily_sha256": day_hashes})
     completed = manifest | {
         "status": "complete", "completed_days": days,
         "daily_sha256": day_hashes,
