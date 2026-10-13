@@ -41,6 +41,14 @@ def test_coordinate_assembly_is_exact_and_rejects_conflicting_overlap():
             (left, bad_overlap, right), lon, lat)
 
 
+def test_json_writer_handles_numpy_scalars_and_refuses_overwrite(tmp_path):
+    path = tmp_path / "receipt.json"
+    round6._write_json(path, {"count": np.int64(3)})
+    assert path.read_text() == '{\n  "count": 3\n}\n'
+    with pytest.raises(RuntimeError, match="refusing to overwrite"):
+        round6._write_json(path, {"count": np.int64(4)})
+
+
 def test_tiny_statement_bisect_reproduces_production_stage_word_for_word():
     from legoesm.core.precision import PrecisionPolicy, set_policy
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel

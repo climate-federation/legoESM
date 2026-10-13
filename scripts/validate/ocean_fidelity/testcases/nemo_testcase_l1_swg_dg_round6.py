@@ -422,7 +422,16 @@ def compare_rank_restarts(root: Path) -> dict:
 def _write_json(path: Path, payload: dict) -> None:
     require(not path.exists(), f"refusing to overwrite {path}")
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    def encode(value):
+        if isinstance(value, np.generic):
+            return value.item()
+        if isinstance(value, Path):
+            return str(value)
+        raise TypeError(f"unsupported JSON value {type(value).__name__}")
+
+    rendered = json.dumps(
+        payload, indent=2, sort_keys=True, default=encode) + "\n"
+    path.write_text(rendered)
 
 
 def main(argv=None) -> int:
