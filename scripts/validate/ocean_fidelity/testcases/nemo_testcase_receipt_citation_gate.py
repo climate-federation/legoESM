@@ -1687,6 +1687,10 @@ CITATION_MAP = {
         'rDt   = rn_Dt / 3._wp',
         ('vv(ji,jj,jk,Naa) = vv(ji,jj,jk,Nbb) + rDt * vv(ji,jj,jk,Nrhs)', 1),
         32],
+    'SWG_DG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:204-210': [
+        ("CALL lbc_lnk( 'stp_RK3', uu (:,:,:,Naa)", 1),
+        ('Naa = Nrhs', 1),
+        7],
     'SWG_DG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:220-235': [
         ("IF( kstp <= nit000 + 9 ) THEN", 2),
         ('CALL swg_close( kstp, 2 )', 1),
