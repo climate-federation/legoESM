@@ -273,8 +273,13 @@ T / S cells that differ after the step, before -> card: step 11: 1/1 -> 3/3;
 724/608 -> 49/17; 49: 1771/1454 -> 151/64. The tracer flip is still there;
 it is the same carrier as rounds 4 and 5.
 
-The step-23 event: one cell, inner-domain (74, 84), 5.7e-15 (NEMO's largest
-3.3e-02). The step-17 cell (94, 41) is at the bar.
+The step-23 event (interior_events_24.json): 2 cells over the bar, the
+largest at inner-domain (74, 84), -5.73e-15 (NEMO 3.14e-02 there), 13 cells
+from land, 73 rows from the fold; its entry error is 1.0e-17. Same carrier
+as rounds 4 and 5, re-measured at the new cell: one step from NEMO's step-23
+entry with NEMO's T and S is at the bar (largest 1.39e-17, 0 at the cell);
+with the card's own T and S it is -5.72e-15 at the cell. The step-17 cell
+(94, 41) is at the bar. Step 24 has 1 cell over the bar, (77, 84), 1.1e-15.
 
 Ladders, steps 1 to 10, the card (max abs / RMS / cells; all AT-BAR, and no
 field leaves the bar in either label):
@@ -362,6 +367,8 @@ UNASKED, each offered for revert:
 4. Three older tests pinned option positions in the config; re-pinned.
 5. A measurement arm that hands stage 1 NEMO's right-hand side; the
    fold-image arm run for the V row.
+6. Two older tests pinned the first interior event to step 17; re-pinned to
+   step 23, cell (74, 84), the re-measured fact, and renamed.
 
 Left alone on purpose: the production ratio's divide-by-area order (it
 reaches no measured row); the stored top V row; the fold-image V row's
@@ -387,9 +394,28 @@ Single review (codex): **findings**, two CONFIRMED, both acted on. Log:
 Claim review before code: NOT done (the lane's rule is one review of the
 diff).
 
-Focused tests and the citation gate: counts are in the final commit message
-of this round and in tests_g1.log, tests_ratchets.log, citation_receipt.json
-under the evidence directory.
+Focused tests, synchronous, in chunks (the machine's load average was about
+100, so no single battery fits ten minutes):
+- The three G1 files: **129 passed** (tests_g1_a.log 83; tests_g1_b.log 41
+  passed and 2 failed, the two step-17 pins of item 6 above;
+  tests_g1_c.log, those re-pinned, 3 passed; tests_g1_d.log, the stage-1
+  record tests with their two plants, 3 passed). The b chunk ran before the
+  re-pin and was not re-run whole.
+- Seven ratchet files: 6,287 passed, 2 skipped, 4 failed
+  (tests_ratchets.log plus the parameter-spec file). The same four as rounds
+  1 to 5, none in a file this round touched: the slab-land dispatch guard,
+  the jra55 literal, the land restart coefficients, the shortwave parameter
+  spec.
+- NOT RUN: any closed-card ladder (GYRE, VORTEX, TSUNAMI, ORCA2), the wider
+  barotropic and stage unit selections, the inline-import budget test.
+
+Citation gate on this receipt: PASS, 12 citations, 0 unmapped, whole-map
+audit clean; the shifted-citation plant exits 1 (citation_receipt.json,
+citation_plant.json). The gate first FAILED twice: the G1 build's fold file
+was not registered, and my edit had rewritten a line an earlier round's
+citation is anchored on (the mask pivot-row assignment). Fixed in 25e455c2d by
+re-ordering the conditional so the line's text stands; no arithmetic
+change, and the fold-pair and stage-1 record tests ran after it.
 
 Compliance, stated because no gate enforces it: search-before-build (section
 4); one variable per arm (four-way coefficient table; nested record arms;
@@ -399,9 +425,13 @@ failed its own control and was corrected); non-vacuity (each half and each
 stage option off turns its record test red; score plant exits 1).
 
 Stamps: the record arms are stamped 3f5198b53, the fold and stage tables
-dc5c03769, the recheck 4af3a4e4a. dc5c03769 is comment-only. The stage
-tables were NOT re-run after the review fix; the record recheck and the
-stage-1 record test (run on the final tree) cover it.
+dc5c03769, the recheck 4af3a4e4a; the step-23 census and the "neither"
+stage table are stamped later still (their json names the commit).
+dc5c03769 is comment-only. The card's stage tables were NOT re-run after
+the review fix; the record recheck and the stage-1 record tests (run on the
+final tree) cover it. The right-hand-side substitution arm and the fused
+candidates of section 2.3 are uncommitted-tree runs, kept one level above
+final/ with a dirty stamp.
 
 UNVERIFIED:
 - that no closed card moves (default paths argued, not run);
