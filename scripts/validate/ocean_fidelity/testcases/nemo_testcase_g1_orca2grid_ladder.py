@@ -95,6 +95,19 @@ Arms (``--arm``):
                builder run on NEMO's entry sea level with the written-order
                option on and off; no model step
 
+  stage_operand_replay  OFFLINE, kt = kt-min..kt-max, from NEMO's stage frames:
+               the density anomaly each stage's pressure gradient reads
+               (eosbn2.f90 at gdept(Kmm) = gdept_0 * (1 + r3t)), from the
+               shared library function on NEMO's T and S, at NEMO's stored
+               ratio (the reference; stage_momentum_replay's control is what
+               makes it NEMO's) against the PRODUCTION live depth ladder on
+               the stage's sea level, as the card calls it (quotient) and
+               with the reciprocal product; and one plus the U and V face
+               ratio the stage reads as Kmm (stprk3_stg.f90:172-173,
+               :216-217, NEMO's recorded one) against one plus the ratio of
+               that frame's sea level (domqco.f90:266-269), the form the
+               card's stage faces take; no model step
+
 Every scored row is split into the preregistered regions (fold band, seam,
 south, interior; interior again into coast-adjacent and open).  The scorer
 and its 1e-15 bar are the shared trajectory gate's; the record reader is the
@@ -123,7 +136,8 @@ DEFAULT_ROOT = Path(
 ARMS = ("geometry", "independent", "given_entry", "rhs", "handoff", "stages",
         "vor_fold_replay", "restart_entry", "fold_v_depth", "rhs_terms",
         "interior_events", "stage_replay", "substeps", "substeps_independent",
-        "flux_update_replay", "ratio_fold_replay", "ratio_order_replay")
+        "flux_update_replay", "ratio_fold_replay", "ratio_order_replay",
+        "stage_operand_replay")
 PLANTS = ("score", "entry")
 STAGE_STEPS = 10          # round 1's record: stage frames at kt = 1..10
 FOLD_ROWS, SEAM_COLS, SOUTH_ROWS = 3, 2, 3
@@ -858,7 +872,7 @@ def stage1_momentum_replay(g: dict, card, card_fields: dict, reg,
 
 def stage_momentum_replay(root: Path, kt: int, card, stage: int, g: dict,
                           card_fields: dict, reg, card_rhs=None,
-                          card_raw=None) -> dict:
+                          card_raw=None, card_terms=None) -> dict:
     """NEMO's stage velocity from NEMO's own recorded frames, offline.
 
     The stage's right-hand side is ``rhs_term_replay`` (the pressure gradient
@@ -912,8 +926,96 @@ def stage_momentum_replay(root: Path, kt: int, card, stage: int, g: dict,
             row["card_final_vs_written_correction_of_card_raw"] = substep_row(
                 "final", card_raw[face] + (target - (e3 * card_raw[face]) * r1) * mask,
                 card_fields[face], wet, reg)
+        if card_terms is not None:      # round 9: the term split (model hook
+            # expose_momentum_operator); the sum row is the split's control
+            hpg, vor = card_terms["hpg"][face], card_terms["vorticity"][face]
+            row["card_pressure_gradient_vs_replay"] = substep_row(
+                "hpg", rep["hpg_" + face], hpg, wet, reg)
+            row["card_vorticity_vs_replay"] = substep_row(
+                "vor", rep["vor_" + face], vor, wet, reg)
+            if card_rhs is not None:
+                row["control_card_terms_sum_vs_card_rhs"] = substep_row(
+                    "rhs", card_rhs[face], hpg + vor, wet, reg)
+            row["unequal_faces"] = {
+                n: [[int(j), int(i)] for j, i in np.argwhere(
+                    (np.where(wet, a, 0.0) != np.where(wet, b, 0.0)))[:8]]
+                for n, a, b in (("hpg", rep["hpg_" + face], hpg),
+                                ("vor", rep["vor_" + face], vor))}
         out["rows"].append(row)
     return out
+
+
+def eos_depth_rows(root: Path, kt: int, card) -> list[dict]:
+    """The density anomaly of each stage at three depths, offline.
+
+    Reference: the library density function at ``gdept_0 * (1 + r3t)`` with
+    NEMO's recorded ratio of the frame the stage reads.  Candidates: the same
+    function at the production ladder ``nemo_bn2_live_ladders`` evaluated on
+    that frame's sea level, in its two evaluations.  T, S and the function
+    are identical on both sides, so an unequal cell is the depth operand's."""
+    import jax.numpy as jnp
+    from legoesm.ocean.constants_config import NEMO_CONSTANTS_CONFIG as C
+    from legoesm.ocean.eos import (
+        nemo_bn2_depth_ladders, nemo_bn2_live_ladders,
+        nemo_roquet_density_anomaly_ratio)
+    zc, g = card.recipe.z_coord, read_step(root, kt)
+    H = card.recipe.initial_state.H_bathy.data
+    tm = np.asarray(zc.is_active, dtype=np.float64)
+    wet = tm[..., 0] > 0.5
+    gdept = np.asarray(nemo_bn2_depth_ladders(zc)[0], dtype=np.float64)
+    rows = []
+    for stage in (1, 2, 3):
+        pre, suf = ("e_", "_bb") if stage == 1 else (f"{stage - 1}_", "_aa")
+        ssh, r3t, tn, sn = (g[pre + n + suf] for n in ("ssh", "r3t", "tn_k1", "sn_k1"))
+
+        def rhd(depth):
+            return np.asarray(nemo_roquet_density_anomaly_ratio(
+                jnp.asarray(tn[..., None]), jnp.asarray(sn[..., None]),
+                jnp.asarray(depth), rho0=float(C.rho_0),
+                geometric_depth_m=jnp.asarray(depth), tmask=jnp.asarray(tm)))[..., 0]
+        ref_depth = gdept * (1.0 + r3t)[..., None]
+        ref = rhd(ref_depth)
+        row = {"stage": stage, "n_wet": int(wet.sum()),
+               "rhd_max_abs": float(np.max(np.abs(ref[wet])))}
+        for name, ev in (("card_ladder", "quotient"),
+                         ("reciprocal_of_stage_ssh", "nemo_reciprocal")):
+            depth = np.asarray(nemo_bn2_live_ladders(
+                zc, jnp.asarray(ssh), H, r3t_evaluation=ev)[0])
+            dd, dr = (depth - ref_depth)[..., 0], rhd(depth) - ref
+            bad = np.argwhere((dr != 0.0) & wet)
+            row[name] = {
+                "depth_n_unequal": int(np.count_nonzero(dd[wet])),
+                "rhd_n_unequal": int(len(bad)),
+                "rhd_max_abs": float(np.max(np.abs(dr[wet]))),
+                "rhd_cells": [[int(j), int(i)] for j, i in bad[:8]]}
+        rows.append(row)
+    return rows
+
+
+def stage_face_ratio_rows(root: Path, kt: int, card) -> list[dict]:
+    """One plus the U and V ratio stages 2 and 3 read as Kmm, two ways.
+
+    NEMO's recorded ratio (the interpolation of two stored ratios) against
+    the ratio of the same frame's sea level in NEMO's written stencil order.
+    The top V row is not scored (its north neighbour is the fold)."""
+    raw = card.recipe.z_coord.nemo_een_barotropic
+    a = lambda n: np.asarray(getattr(raw, n), dtype=np.float64)  # noqa: E731
+    area, g, rows = a("e1t") * a("e2t"), read_step(root, kt), []
+    for stage in (2, 3):
+        x = area * g[f"{stage - 1}_ssh_aa"]
+        mine = ratio_stencil(x, np.roll(x, -1, axis=0), a, True)[:2]
+        row = {"stage": stage}
+        for k, face in enumerate("uv"):
+            wet = a(f"{face}mask")[..., 0] > 0
+            if face == "v":
+                wet[-1] = False
+            ref = g[f"{stage - 1}_r3{face}_aa"]
+            bad = np.argwhere(((1.0 + mine[k]) != (1.0 + ref)) & wet)
+            row[face] = {"ratio_n_unequal": int(np.count_nonzero((mine[k] - ref)[wet])),
+                         "one_plus_n_unequal": int(len(bad)),
+                         "faces": [[int(j), int(i)] for j, i in bad[:8]]}
+        rows.append(row)
+    return rows
 
 
 def ratio_fold_rows(root: Path, kt: int, card, reg) -> dict:
@@ -1180,7 +1282,8 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
         without_vor_order: bool = False,
         without_zdf_residual: bool = False,
         without_fold_exchange_v: bool = False,
-        without_stage_r3f: bool = False,
+        without_stage_r3f: bool = False, without_stage_r3t: bool = False,
+        without_eos_gdept: bool = False, without_stage_r3uv: bool = False,
         without_ratio_order: bool = False,
         without_r3t_product: bool = False) -> dict:
     if vor_fold_image:
@@ -1204,7 +1307,9 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
                       without_vor_order=without_vor_order,
                       without_zdf_residual=without_zdf_residual,
                       without_fold_exchange_v=without_fold_exchange_v,
-                      without_stage_r3f=without_stage_r3f,
+                      without_stage_r3f=without_stage_r3f, without_stage_r3t=without_stage_r3t,
+                      without_eos_gdept=without_eos_gdept,
+                      without_stage_r3uv=without_stage_r3uv,
                       without_ratio_order=without_ratio_order,
                       without_r3t_product=without_r3t_product)
         require(len(calls) > 0, "the vorticity fold-image arm was never traced")
@@ -1274,7 +1379,10 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
                       (without_vor_order, "een_vorticity_written_order"),
                       (without_zdf_residual, "zdf_barotropic_removal_nemo_literal"),
                       (without_fold_exchange_v, "rk3_fold_exchange_top_v_row"),
-                      (without_stage_r3f, "rk3_stage_r3f_nemo_literal")):
+                      (without_stage_r3f, "rk3_stage_r3f_nemo_literal"),
+                      (without_stage_r3t, "rk3_stage_r3t_nemo_literal"),  # round 9
+                      (without_eos_gdept, "nemo_eos_gdept_rounded_product"),
+                      (without_stage_r3uv, "rk3_stage_r3uv_nemo_literal")):
         if off:               # ROUND-6 BEFORE ARMS / plants, one option each
             require(getattr(cfg, name) is True, f"the card no longer selects {name}")
             cfg = cfg._replace(**{name: False})
@@ -1309,6 +1417,15 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
                 "label": "NEMO's record only (offline replay of the stage "
                          "statements; no model step)",
                 "per_kt": [{"kt": kt, "replay": stage_replay_rows(root, kt, tm)}
+                           for kt in range(kt_min, kt_max + 1)]}
+    if arm == "stage_operand_replay":
+        require(1 <= kt_min <= kt_max <= n_stage, f"steps must lie in 1..{n_stage}")
+        return {"arm": arm, "legoesm_git_sha": sha, "root": str(root),
+                "label": "NEMO's record only (offline: the stage density "
+                         "anomaly at NEMO's stored-ratio depth against the "
+                         "production depth ladder; no model step)",
+                "per_kt": [{"kt": kt, "rows": eos_depth_rows(root, kt, card),
+                            "face_ratio_rows": stage_face_ratio_rows(root, kt, card)}
                            for kt in range(kt_min, kt_max + 1)]}
     if arm == "flux_update_replay":
         require(kt_min == kt_max, "one step: --kt-min equal to --kt-max")
@@ -1475,6 +1592,10 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
                cfg.zdf_barotropic_removal_nemo_literal),
            "rk3_fold_exchange_top_v_row": bool(cfg.rk3_fold_exchange_top_v_row),
            "rk3_stage_r3f_nemo_literal": bool(cfg.rk3_stage_r3f_nemo_literal),
+           "rk3_stage_r3t_nemo_literal": bool(cfg.rk3_stage_r3t_nemo_literal),
+           "nemo_eos_gdept_rounded_product": bool(
+               cfg.nemo_eos_gdept_rounded_product),
+           "rk3_stage_r3uv_nemo_literal": bool(cfg.rk3_stage_r3uv_nemo_literal),
            "barotropic_een_ratio_written_order": bool(
                cfg.barotropic.barotropic_een_ratio_written_order),
            "nemo_r3t_stored_product": bool(
@@ -1830,8 +1951,18 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
                             for flag in (
                                 {"expose_stage3_momentum_rhs": "post_ldf"},
                                 {"expose_stage3_raw_momentum": True})]
+                    terms = None if stage1_rhs_from_nemo else {
+                        name: state_fields(jax.device_get(model(
+                            _NEMOWSRK3TestHooks(
+                                stage_barotropic_output_override=ext,
+                                stage_entry_override=ent,
+                                expose_momentum_operator=name,
+                                expose_momentum_operator_stage=stage)).step(
+                                    seed(g, before[kt], kt), dt=card.dt_s)))
+                        for name in ("hpg", "vorticity")}
                     stages[-1]["stage_replay"] = stage_momentum_replay(
-                        root, kt, card, stage, g, cand, reg, *exposed)
+                        root, kt, card, stage, g, cand, reg, *exposed,
+                        card_terms=terms)
             out["per_kt"].append({"kt": kt, "stages": stages})
     return out
 
@@ -1846,6 +1977,20 @@ def _print(out: dict) -> None:
         return
     print(out["label"], "| een_fold_image_v_row =", out.get("een_fold_image_v_row"),
           "| T,S FROM THE CARD'S CHAIN" if out.get("ts_from_chain_measurement_arm") else "")
+    if out["arm"] == "stage_operand_replay":
+        for e in out["per_kt"]:
+            for r in e["rows"]:
+                print(f"kt{e['kt']} stage{r['stage']} rhd " + " | ".join(
+                    f"{n}: depth {r[n]['depth_n_unequal']} rhd "
+                    f"{r[n]['rhd_n_unequal']} max={r[n]['rhd_max_abs']:.1e} "
+                    f"{r[n]['rhd_cells']}"
+                    for n in ("card_ladder", "reciprocal_of_stage_ssh")))
+            for r in e["face_ratio_rows"]:
+                print(f"kt{e['kt']} stage{r['stage']} 1+r3(Kmm) of the frame's "
+                      "sea level vs recorded: " + " | ".join(
+                          f"{f}: ratio {r[f]['ratio_n_unequal']} one_plus "
+                          f"{r[f]['one_plus_n_unequal']} {r[f]['faces']}" for f in "uv"))
+        return
     if out["arm"] == "rhs_terms":
         for e in out["per_kt"]:
             for r in e["rows"]:
@@ -2039,6 +2184,15 @@ def main(argv=None) -> int:
     ap.add_argument("--without-stage-r3f", action="store_true",
                     help="BEFORE ARM: the stage F ratio taken from the "
                          "stage's interpolated sea level")
+    ap.add_argument("--without-stage-r3t", action="store_true",
+                    help="the card with rk3_stage_r3t_nemo_literal off "
+                         "(round 9's before arm / plant)")
+    ap.add_argument("--without-eos-gdept", action="store_true",
+                    help="the card with nemo_eos_gdept_rounded_product off "
+                         "(round 9's before arm / plant)")
+    ap.add_argument("--without-stage-r3uv", action="store_true",
+                    help="the card with rk3_stage_r3uv_nemo_literal off "
+                         "(round 9's before arm / plant)")
     ap.add_argument("--without-written-order", action="store_true",
                     help="the card with rk3_stage_velocity_written_order "
                          "switched off (a round-6 before arm; also its plant)")
@@ -2070,7 +2224,9 @@ def main(argv=None) -> int:
                   without_vor_order=a.without_vor_order,
                   without_zdf_residual=a.without_zdf_residual,
                   without_fold_exchange_v=a.without_fold_exchange_v,
-                  without_stage_r3f=a.without_stage_r3f,
+                  without_stage_r3f=a.without_stage_r3f, without_stage_r3t=a.without_stage_r3t,
+                  without_eos_gdept=a.without_eos_gdept,
+                  without_stage_r3uv=a.without_stage_r3uv,
                   without_ratio_order=a.without_ratio_order,
                   without_r3t_product=a.without_r3t_product)
     except Exception as e:      # noqa: BLE001 -- refusals print and exit 2

@@ -204,7 +204,7 @@ def nemo_qco_live_face_geometry_from_operands(
     hv_0,
     area_t,
     area_u,
-    area_v,
+    area_v, r3_native=None,  # (r3u, r3v) handed in place of the sea-level ratios (stprk3_stg.f90:172-173, :216-217)
 ):
     """Build live native-face QCO geometry in NEMO source association.
 
@@ -244,8 +244,8 @@ def nemo_qco_live_face_geometry_from_operands(
     r1_hv0 = b(wet_v / (hv_0 + one - wet_v))
     r1_area_u = b(one / area_u)
     r1_area_v = b(one / area_v)
-    r3u = b(b(num_u * r1_hu0) * r1_area_u)
-    r3v = b(b(num_v * r1_hv0) * r1_area_v)
+    r3u = b(b(num_u * r1_hu0) * r1_area_u) if r3_native is None else r3_native[0]
+    r3v = b(b(num_v * r1_hv0) * r1_area_v) if r3_native is None else r3_native[1]
     one_plus_r3u = b(one + r3u)
     one_plus_r3v = b(one + r3v)
     e3u = b(e3u_0 * b(one + r3u[..., None] * umask3))
@@ -788,7 +788,7 @@ def nemo_qco_live_face_geometry_cgrid(
     area_u,
     area_v,
     *,
-    include_reciprocals=False,
+    include_reciprocals=False, r3_native=None,
 ):
     """NEMO ``e3u/e3v(Kmm)`` on legoESM's redundant west/south C-grid faces.
 
@@ -834,7 +834,7 @@ def nemo_qco_live_face_geometry_cgrid(
     """
     geom = nemo_qco_live_face_geometry_from_operands(
         eta, e3u_0, e3v_0, umask3, vmask3,
-        hu_0, hv_0, area_t, area_u, area_v,
+        hu_0, hv_0, area_t, area_u, area_v, r3_native,
     )
     one = jnp.asarray(1.0, dtype=geom.e3u.dtype)
     result = (
