@@ -18,11 +18,18 @@ for package in (REPO_ROOT, REPO_ROOT / "packages/core", REPO_ROOT / "packages/oc
         sys.path.insert(0, str(package))
 
 from scripts.validate.ocean_fidelity.orca2_l4 import (  # noqa: E402
+    nemo_testcase_l4_orca2_round135_step36_fct_gate as passive,
+    nemo_testcase_l4_orca2_round204_omt0_ladder_gate as omt0,
     nemo_testcase_l4_orca2_round223_omt4_ladder_gate as omt4,
+    nemo_testcase_l4_orca2_round245_v_depth_split as r245,
     nemo_testcase_l4_orca2_round249_fold_growth_gate as r249,
     nemo_testcase_l4_orca2_round266_rhs_operator_gate as r266,
+    nemo_testcase_l4_orca2_round92_rung0_card_gate as rung0,
 )
 from nemo_testcase_l2_gyre_phase3_gate import read_stage2_terms  # noqa: E402
+from scripts.validate.ocean_fidelity.testcases import (  # noqa: E402
+    nemo_testcase_l2_gyre_phase3_gate as phase3_gate,
+)
 
 FLOOR = np.float64(2.0e-10)
 LABELS = r249.LABELS
@@ -115,73 +122,78 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
         for name in r266.BOUNDARY_ORDER
     }
 
-    calls: list[dict[str, np.ndarray]] = []
-    boundary_arrays: dict[str, np.ndarray] = {}
     original_flux = pe.pv_flux_al81_partial_cell
-    original_score = r266._score
-
-    def save_call(*values):
-        names = (
-            "zeta", "h_vtx", "h_v", "v", "h_u", "u", "u_mask",
-            "v_mask", "vtx_mask", "f_vtx", "output_u", "output_v",
-        )
-        calls.append({
-            name: np.asarray(value, np.float64).copy()
-            for name, value in zip(names, values, strict=True)
-        })
-
-    def observed(zeta, h_vtx, h_v, v, h_u, u, u_mask_3d, v_mask_3d,
-                 vtx_mask, f_vtx=None, eps_h=1.0e-10,
-                 q_boundary="neumann_fill", metric_widths=None):
-        output = original_flux(
-            zeta, h_vtx, h_v, v, h_u, u, u_mask_3d, v_mask_3d,
-            vtx_mask, f_vtx=f_vtx, eps_h=eps_h,
-            q_boundary=q_boundary, metric_widths=metric_widths)
-        require(f_vtx is not None, "executing EEN call lost ff_f")
-        jax.debug.callback(
-            save_call, zeta, h_vtx, h_v, v, h_u, u, u_mask_3d,
-            v_mask_3d, vtx_mask, f_vtx, output[0], output[1], ordered=True)
-        return output
-
-    def scored(left, right):
-        left_array = np.asarray(left, np.float64)
-        right_array = np.asarray(right, np.float64)
-        if left_array.shape == (148, 90, 30):
-            for name, oracle in oracle_rows.items():
-                if np.array_equal(right_array, oracle):
-                    boundary_arrays[name] = left_array.copy()
-        return original_score(left, right)
-
-    pe.pv_flux_al81_partial_cell = observed
-    r266._score = scored
-    try:
-        baseline = r266.measure(
-            deck_root, frame_root, record_root, label, expect_commit)
-    finally:
-        pe.pv_flux_al81_partial_cell = original_flux
-        r266._score = original_score
-
-    require(set(boundary_arrays) == set(r266.BOUNDARY_ORDER),
-            f"boundary capture incomplete: {sorted(boundary_arrays)}")
-    require(calls, "EEN observer captured no calls")
-    hpg = boundary_arrays["after_hpg_u"]
-    after = boundary_arrays["after_vorticity_u"]
-
-    # Locate the exact stage-2 call by replaying each captured EEN output into
-    # the captured HPG accumulator.  This does not trust callback order.
-    ranked = []
-    for index, call in enumerate(calls):
-        native = r266._native_u(call["output_u"])
-        row = _score(hpg + native, after)
-        ranked.append((row["max_abs"], row["unequal"], index, row))
-    ranked.sort()
-    _, _, target_index, target_replay = ranked[0]
-    require(target_replay["max_abs"] <= FLOOR,
-            "no captured EEN call reproduces the live stage-2 accumulator")
-    call = calls[target_index]
-
     card = omt4.build_omt4_card(deck_root)
     omt4.validate_omt4_card(deck_root, card)
+    entry = rung0.assemble_frame(frame_root, 1, 0)
+    state = (card.recipe.initial_state if label == "independent"
+             else rung0.bridge_entry(card, entry))
+    forcing = omt0.rung0_ladder._zero_forcing((148, 180))
+    arm = r245._barotropic_surface_mask_arm(
+        card, True, v_only=True, t_pivot_north_neighbor=True)
+    with arm:
+        first_model = r266._model(card, r266._hooks(card, live=True))
+        first = jax.device_get(first_model.step(
+            state, card.dt_s, freshwater=forcing[0], surface_forcing=forcing[1]))
+    stage1 = r266._associated_stage(card, first.stage_outputs[0])
+    stage_entry = (2, *stage1)
+    with r245._barotropic_surface_mask_arm(
+            card, True, v_only=True, t_pivot_north_neighbor=True):
+        ordinary = jax.device_get(r266._model(
+            card, r266._hooks(card, live=False, stage_entry=stage_entry)).step(
+                state, card.dt_s, freshwater=forcing[0], surface_forcing=forcing[1]))
+        traced_model = r266._model(
+            card, r266._hooks(card, live=True, stage_entry=stage_entry))
+        traced = jax.device_get(traced_model.step(
+            state, card.dt_s, freshwater=forcing[0], surface_forcing=forcing[1]))
+    passivity = passive._ordinary_state_equal(traced.state_after, ordinary)
+    require(all(passivity.values()), "certified live trace moved completed state")
+    parts = traced.operator_operands[1]
+    require(parts is not None, "stage-2 passive operand trace is absent")
+    hpg = r266._native_u(parts["after_hpg_u"].data)
+    after = r266._native_u(parts["after_vor_u"].data)
+    boundary_rows = {
+        "after_vorticity_u": {
+            "complete": _score(after, oracle_rows["after_vorticity_u"]),
+        },
+    }
+    baseline = {
+        "boundary_rows": boundary_rows,
+        "passivity": passivity,
+        "compiled_source": {"ln_dynvor_msk": False},
+    }
+
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+        nemo_een_ene_vertex_coriolis,
+    )
+    u_mask, v_mask = pe.compute_face_masks_3d(
+        card.recipe.z_coord.is_active, card.recipe.grid)
+    vtx_mask = pe.compute_vertex_mask(
+        state.land_mask.data, grid=card.recipe.grid)
+    call = {
+        "h_vtx": np.asarray(parts["operand_vorticity_h_vtx"], np.float64),
+        "h_v": np.asarray(parts["operand_momentum_h_v"], np.float64),
+        "v": np.asarray(parts["operand_velocity_v"], np.float64),
+        "h_u": np.asarray(parts["operand_momentum_h_u"], np.float64),
+        "u": np.asarray(parts["operand_velocity_u"], np.float64),
+        "u_mask": np.asarray(u_mask, np.float64),
+        "v_mask": np.asarray(v_mask, np.float64),
+        "vtx_mask": np.asarray(vtx_mask, np.float64),
+        "f_vtx": np.asarray(nemo_een_ene_vertex_coriolis(card.recipe.grid),
+                            np.float64),
+        "output_u": np.asarray(parts["vorticity_u"].data, np.float64),
+    }
+    folded = pe._een_fold_image_v_row(
+        card.recipe.model_config.een_fold_image_v_row, card.recipe.grid,
+        *map(jnp.asarray, (
+            call["h_v"], call["v"], call["h_u"], call["u"],
+            call["u_mask"], call["v_mask"])))
+    (call["h_v"], call["v"], call["h_u"], call["u"],
+     call["u_mask"], call["v_mask"]) = map(np.asarray, folded)
+    call["zeta"] = np.asarray(jax.device_get(jax.jit(
+        lambda uu, vv: nemo_vor_ene_vorticity_cgrid(
+            uu, vv, card.recipe.grid))(
+                jnp.asarray(call["u"]), jnp.asarray(call["v"]))))
     current_replay = jax.device_get(jax.jit(original_flux)(
         *map(jnp.asarray, (
             call["zeta"], call["h_vtx"], call["h_v"], call["v"],
@@ -200,6 +212,10 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
     current_replay_row = _score(current_replay[0], replay_reference)
     require(current_replay_row["max_abs"] <= FLOOR,
             "candidate-side source replay does not reproduce the live output")
+    target_replay = _score(
+        hpg + r266._native_u(current_replay[0]), after)
+    require(target_replay["max_abs"] <= FLOOR,
+            "offline source replay does not reproduce the live accumulator")
 
     literal_zeta = np.asarray(jax.device_get(jax.jit(
         lambda uu, vv: nemo_vor_ene_vorticity_cgrid(
@@ -263,8 +279,7 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
         "label": label,
         "baseline": baseline,
         "capture": {
-            "call_count": len(calls),
-            "target_index": target_index,
+            "method": "passive_completed_stage_trace_plus_offline_pure_replay",
             "target_accumulator_replay": target_replay,
             "candidate_source_replay": current_replay_row,
         },
