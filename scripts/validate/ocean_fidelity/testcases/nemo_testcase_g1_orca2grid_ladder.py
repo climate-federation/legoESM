@@ -60,7 +60,7 @@ Arms (``--arm``):
   substeps_independent  the same table from the card's own chain state
   flux_update_replay  OFFLINE numpy replay, from NEMO's substep record and
                mesh file alone, of the flux-form velocity update
-               (dynspg_ts.f90:544-562) at every substep of one step: once as
+               (dynspg_ts.f90:557-568) at every substep of one step: once as
                compiled (times the inverse exit depth; must be 0 unequal) and
                once dividing by the exit depth; no model step
 
@@ -580,9 +580,9 @@ REPLAY_ORDERS = ("nemo_order", "divide_by_exit_depth", "entry_depth_as_sum")
 
 def flux_update_replay_rows(root: Path, kt: int, reg) -> list[dict]:
     """NEMO's flux-form external velocity update replayed from NEMO's own
-    recorded operands (dynspg_ts.f90:544-562), U and V, every substep.  The
+    recorded operands (dynspg_ts.f90:557-568), U and V, every substep.  The
     one difference between the two orders is the last operation: NEMO
-    multiplies the bracket by the inverse exit depth z1_hu (:550-551), the
+    multiplies the bracket by the inverse exit depth z1_hu (:557-558), the
     other order divides the bracket by the exit depth.  The top V row and
     the fold are not replayed (their north neighbour is outside the mesh
     file's inner domain)."""
@@ -1432,7 +1432,8 @@ def main(argv=None) -> int:
         # (kt = 1 only: all five rows are at the bar there in both labels;
         # T and S are excluded, NEMO's kt = 1 entry holds T, S on land)
         if a.arm == "substeps":     # the table's own plant: one interior cell
-            fired = (out["first_unequal"] or {}).get("name") == "j001.mid.eta"
+            fired = any(r["name"] == "j001.mid.eta" and r["n_unequal"] == 1
+                        for r in out["rows"])   # bit-identical when unplanted
             print("STATUS PLANT-FIRED" if fired else "REFUSE: plant stayed green",
                   file=sys.stderr)
             return 1 if fired else 3

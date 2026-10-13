@@ -253,12 +253,14 @@ def test_interior_event_at_step_17_is_far_from_any_boundary():
     """Census facts of the first sea-level cell over the bar.  Plant: a cell
     counted as over the bar must really differ (the bar itself is the gate).
     This arm's one-step re-run keeps the card's own T and S, which is what
-    carries the event (round 4: see the tracer-carry test below)."""
+    carries the event (round 4: see the tracer-carry test below).  Round 5's
+    three solver statements moved the event from cell (72, 70), 2 cells, to
+    cell (94, 41), 1 cell: which cell flips is a last-place lottery."""
     pytest.importorskip("netCDF4")
     out = ladder.run(RECORD, arm="interior_events", kt_max=17, allow_dirty=True)
     assert all(k["n_over_bar"] == 0 for k in out["per_kt"][:16])
     ev = out["per_kt"][16]
-    assert ev["kt"] == 17 and ev["n_over_bar"] == 2 and ev["cell"] == [72, 70]
+    assert ev["kt"] == 17 and ev["n_over_bar"] == 1 and ev["cell"] == [94, 41]
     assert ev["region"] == "interior_open" and ev["cells_to_land"] > 10
     assert ev["rows_to_fold"] > 50 and abs(ev["entry_error_at_cell"]) < 1.0e-16
     assert abs(ev["error"]) > 5.0e-15
@@ -332,7 +334,7 @@ def test_step_17_event_is_carried_by_the_entry_tracers(ts_from_chain):
     over it at the event cell with the card's own (2 and 3 last-place units
     off there).  Each arm is the other's plant."""
     pytest.importorskip("netCDF4")
-    ladder.CELL[:] = [72, 70]
+    ladder.CELL[:] = [94, 41]
     try:
         out = ladder.run(RECORD4, arm="given_entry", kt_min=17, kt_max=17,
                          allow_dirty=True, ts_from_chain=ts_from_chain)
@@ -342,7 +344,7 @@ def test_step_17_event_is_carried_by_the_entry_tracers(ts_from_chain):
     ssh = next(r for r in out["per_kt"][0]["rows"] if r["name"].endswith(".ssh"))
     if ts_from_chain:
         assert ssh["status"] != "AT-BAR" and abs(ssh["at_cell"]["error"]) > 5.0e-15
-        assert ssh["max_abs_cell"] == [72, 70]
+        assert ssh["max_abs_cell"] == [94, 41]
     else:
         assert ssh["status"] == "AT-BAR" and ssh["max_abs"] < 1.0e-16
 
@@ -383,7 +385,7 @@ def _solver_options(**on):
 
 
 def test_literal_flux_update_is_the_written_order_and_dry_faces_are_zero():
-    """dynspg_ts.f90:550-562 against the same arithmetic in numpy, one
+    """dynspg_ts.f90:557-568 against the same arithmetic in numpy, one
     operation at a time; a dry face is 0 / 1, never a division by zero."""
     from legoesm.ocean.dynamics import barotropic_latlon_cgrid as B
     rng = np.random.default_rng(5)

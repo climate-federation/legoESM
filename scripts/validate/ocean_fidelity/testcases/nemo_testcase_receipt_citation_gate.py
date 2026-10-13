@@ -1826,6 +1826,25 @@ CITATION_MAP = {
     'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/stp2d.f90:144': ('CALL dyn_vor( kt,      Kbb, uu, vv, Krhs )', 1),
     'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:359': ('DO jn = 1, icycle', 1),
     # --- GRIDLADDER round 4 END ---
+    # --- GRIDLADDER round 5 (the solver's substep loop) ---
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:886': ('rDt_e = rn_Dt / REAL( nn_e , wp )', 1),
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:557-558': [
+        ('z1_hu = ssumask(ji,jj) / ( hu_0(ji,jj) + zsshu_a(ji,jj) + 1._wp - ssumask(ji,jj) )', 1),
+        ('z1_hv = ssvmask(ji,jj) / ( hv_0(ji,jj) + zsshv_a(ji,jj) + 1._wp - ssvmask(ji,jj) )', 1),
+        2],
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:560-568': [
+        ('ua_e(ji,jj) = (               hu_e  (ji,jj) *   un_e (ji,jj)', 1),
+        ('+  (hv_0(ji,jj) *(1._wp+r3v(ji,jj,Kmm))) * zv_frc (ji,jj)  )   ) * z1_hv', 1),
+        9],
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:329-330': [
+        ('hu_e  (:,:) =    (hu_0(:,:) *(1._wp+r3u(:,:,Kmm)))', 1),
+        ('hv_e  (:,:) =    (hv_0(:,:) *(1._wp+r3v(:,:,Kmm)))', 1),
+        2],
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/domqco.f90:281-285': [
+        ('pr3f(ji,jj) = 0.25_wp * (   (  e1e2t(ji  ,jj  ) * pssh(ji  ,jj  )', 2),
+        (') * r1_hf_0(ji,jj) * r1_e1e2f(ji,jj)', 2),
+        5],
+    # --- GRIDLADDER round 5 END ---
     # --- ORCA2 round 253: kt=8 midpoint-SSH failure boundary -------
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:489-493': [
         ('Extrapolate Sea Level at step jit+0.5', 1),

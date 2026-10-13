@@ -53,3 +53,9 @@ selected by the G1 card only.
 | F-P11 | landing the named fold statement takes the kt = 31 handoff pivot row below 1e-13 and the step-100 sea level error down 100-fold | either not met (then HELD, operand named, nothing landed) |
 
 One cited statement per landing; the 100-step record re-scored after each.
+
+## Erratum (added after the freeze; no prediction changed)
+
+The statement's line numbers above are wrong: I read them off a listing that
+started at line 505. In `ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90` the
+inverse exit depths are at 557 and 558 and the two assignments run from 560 to 568.

@@ -4105,8 +4105,8 @@ def _nemo_flux_form_literal_velocity_update(
         config, substep_index):
     """NEMO's flux-form ``ua_e``/``va_e`` in the written order.
 
-    ``dynspg_ts.f90:550-562``: the bracket is MULTIPLIED by the inverse exit
-    depth ``z1_hu = ssumask / (hu_0 + zsshu_a + 1 - ssumask)`` (``:550-551``),
+    ``dynspg_ts.f90:557-568``: the bracket is MULTIPLIED by the inverse exit
+    depth ``z1_hu = ssumask / (hu_0 + zsshu_a + 1 - ssumask)`` (``:557-558``),
     not divided by the exit depth, and every product and sum is one rounded
     operation.  ``BarotropicConfig.barotropic_flux_update_nemo_literal``
     selects it.  No depth floor: NEMO has none, and a dry face gives 0 / 1.
@@ -4125,7 +4125,7 @@ def _nemo_entry_face_depths(config, summed, prep, entry):
     """The solver's entry face depths ``hu(Kmm)``, ``hv(Kmm)``.
 
     ``dynspg_ts.f90:329-330`` (and the same macro in the forcing product,
-    ``:559``, ``:562``): ``hu_0 * (1 + r3u(Kmm))``, the ratio being
+    ``:563``, ``:568``): ``hu_0 * (1 + r3u(Kmm))``, the ratio being
     ``domqco.f90:266-269``'s.  ``BarotropicConfig.
     barotropic_entry_depth_nemo_literal`` selects it; otherwise the rest depth
     plus the face-mean sea level (``summed``) is returned unchanged.
