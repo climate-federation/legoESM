@@ -1,9 +1,12 @@
 """Direct tests for the SWG double-gyre long-run driver."""
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
+import subprocess
 from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 import pytest
@@ -13,6 +16,23 @@ _PATH = (Path(__file__).resolve().parents[3]
 _SPEC = importlib.util.spec_from_file_location("run_swg_double_gyre", _PATH)
 driver = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(driver)
+
+
+class _Field(NamedTuple):
+    data: object
+
+
+class _ScanState(NamedTuple):
+    eta: _Field
+    u: _Field
+    v: _Field
+
+
+class _IncrementModel:
+    def step(self, state, dt_s, *, surface_forcing):
+        del dt_s, surface_forcing
+        return _ScanState(*(
+            _Field(field.data + 1.0) for field in state))
 
 
 def test_resolved_maddison_clock_is_exactly_daily():
@@ -43,9 +63,11 @@ def test_tiny_cpu_driver_writes_daily_native_state_with_provenance(tmp_path):
         rn_modified_grav_m_s2=1.0e-6, rn_tau_pa=0.0)
     output = tmp_path / "run"
     manifest = driver.run_long(
-        tiny, output, days=1, mode="cpu-certified", commit="a" * 40)
+        tiny, output, days=1, mode="cpu-certified", commit="a" * 40,
+        physical_gpu=None)
     assert manifest["certified_policy"] is True
-    assert manifest["deck_certification"] == "pending NEMO ladder acquisition"
+    assert manifest["deck_certification"] == (
+        "NEMO ladder measured; see fidelity receipts")
     assert manifest["status"] == "complete"
     assert manifest["completed_days"] == 1
     assert manifest["transcendentals"] == "libm"
@@ -166,6 +188,80 @@ def test_compiled_day_mean_matches_post_step_production_states_on_tiny_grid():
     assert np.any(np.asarray(means[1]) != np.asarray(final.u.data[:, 1:, 0]))
 
 
+def test_compiled_hourly_sampler_retains_right_endpoints_only():
+    import jax
+    import jax.numpy as jnp
+
+    state = _ScanState(
+        _Field(jnp.zeros((2, 2), dtype=jnp.float64)),
+        _Field(jnp.zeros((2, 3, 1), dtype=jnp.float64)),
+        _Field(jnp.zeros((3, 2, 1), dtype=jnp.float64)),
+    )
+    scanned = driver.build_scanned_hourly_target_stepper(
+        _IncrementModel(), 1.0, None, 1,
+        lambda eta, u, v: (eta, u, v))
+    final, hourly = scanned(state)
+    jax.block_until_ready(final.eta.data)
+    assert np.array_equal(
+        np.asarray(hourly[0])[:, 0, 0], np.arange(1.0, 25.0))
+    assert float(np.asarray(final.eta.data)[0, 0]) == 24.0
+    assert np.asarray(hourly[1]).shape == (24, 2, 2)
+    assert np.asarray(hourly[2]).shape == (24, 2, 2)
+
+
+def test_operator_device_is_explicit_and_matches_visibility():
+    driver.validate_operator_device(
+        "gpu-native", 0, environ={"CUDA_VISIBLE_DEVICES": "0"})
+    driver.validate_operator_device(
+        "gpu-native", 1, environ={"CUDA_VISIBLE_DEVICES": "1"})
+    driver.validate_operator_device("cpu-certified", None, environ={})
+    with pytest.raises(ValueError, match="explicit"):
+        driver.validate_operator_device(
+            "gpu-native", None, environ={"CUDA_VISIBLE_DEVICES": "0"})
+    with pytest.raises(RuntimeError, match="does not match"):
+        driver.validate_operator_device(
+            "gpu-native", 0, environ={"CUDA_VISIBLE_DEVICES": "1"})
+    with pytest.raises(ValueError, match="only valid"):
+        driver.validate_operator_device("cpu-scanned", 0, environ={})
+
+
+def test_gpu_wrapper_requires_a_physical_device_argument():
+    wrapper = _PATH.with_name("run_swg_double_gyre_gpu.sh")
+    result = subprocess.run(
+        ["bash", str(wrapper)], capture_output=True, text=True, check=False)
+    assert result.returncode == 64
+    assert "PHYSICAL_GPU" in result.stderr
+
+
+def test_snapshot_admission_and_bitwise_comparison_have_live_plants(tmp_path):
+    path = tmp_path / "day0732.npz"
+    arrays = {
+        "ssh_m": np.arange(4.0).reshape(2, 2),
+        "u_m_s": np.arange(4.0).reshape(2, 2) + 10.0,
+        "v_m_s": np.arange(4.0).reshape(2, 2) + 20.0,
+    }
+    np.savez(path, **arrays)
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    (tmp_path / "manifest.json").write_text(json.dumps({
+        "status": "complete", "daily_sha256": {path.name: digest},
+    }))
+    admission = driver.admit_listed_snapshot(path)
+    assert admission["snapshot_sha256"] == digest
+    state = _ScanState(
+        _Field(arrays["ssh_m"]),
+        _Field(np.pad(arrays["u_m_s"][:, :, None], ((0, 0), (1, 0), (0, 0)))),
+        _Field(np.pad(arrays["v_m_s"][:, :, None], ((1, 0), (0, 0), (0, 0)))),
+    )
+    assert driver.compare_native_state_bitwise(state, path)["all_equal"]
+    planted = state._replace(eta=_Field(arrays["ssh_m"] + 1.0e-15))
+    result = driver.compare_native_state_bitwise(planted, path)
+    assert not result["all_equal"]
+    assert result["ssh_m_unequal"] > 0
+    np.savez(path, **(arrays | {"ssh_m": arrays["ssh_m"] + 1.0}))
+    with pytest.raises(ValueError, match="hash differs"):
+        driver.admit_listed_snapshot(path)
+
+
 def test_daily_mean_output_refuses_certified_cpu_mode(tmp_path):
     from legoesm.ocean.fidelity.nemo_testcase_recipe import SWG_MADDISON_NAMELIST
 
@@ -175,7 +271,7 @@ def test_daily_mean_output_refuses_certified_cpu_mode(tmp_path):
     with pytest.raises(ValueError, match="non-certified gpu-native"):
         driver.run_long(
             tiny, tmp_path / "run", days=1, mode="cpu-certified",
-            commit="a" * 40, daily_means=True)
+            commit="a" * 40, physical_gpu=None, daily_means=True)
 
 
 def test_cpu_profile_records_production_step_cost(tmp_path):
@@ -186,7 +282,7 @@ def test_cpu_profile_records_production_step_cost(tmp_path):
         rn_modified_grav_m_s2=1.0e-6, rn_tau_pa=0.0)
     manifest = driver.run_long(
         tiny, tmp_path / "run", days=1, mode="cpu-certified",
-        commit="a" * 40, profile_steps=2)
+        commit="a" * 40, physical_gpu=None, profile_steps=2)
     assert manifest["profile"]["program"] == "production-python-step-loop"
     assert manifest["profile"]["steps"] == 2
     assert manifest["profile"]["python_ms_per_step"] > 0.0
@@ -201,14 +297,14 @@ def test_profile_only_writes_no_trajectory(tmp_path):
     output = tmp_path / "profile"
     manifest = driver.run_long(
         tiny, output, days=1, mode="cpu-certified", commit="a" * 40,
-        profile_steps=2, profile_only=True)
+        physical_gpu=None, profile_steps=2, profile_only=True)
     assert manifest["profile_only"] is True
     assert manifest["completed_days"] == 0
     assert list(output.iterdir()) == [output / "manifest.json"]
     with pytest.raises(ValueError, match="positive profile_steps"):
         driver.run_long(
             tiny, tmp_path / "invalid", days=1, mode="cpu-certified",
-            commit="a" * 40, profile_only=True)
+            commit="a" * 40, physical_gpu=None, profile_only=True)
 
 
 def test_cpu_scanned_mode_uses_certified_policy_and_day_program(tmp_path):
@@ -219,7 +315,7 @@ def test_cpu_scanned_mode_uses_certified_policy_and_day_program(tmp_path):
         rn_modified_grav_m_s2=1.0e-6, rn_tau_pa=0.0)
     manifest = driver.run_long(
         tiny, tmp_path / "run", days=1, mode="cpu-scanned",
-        commit="a" * 40)
+        commit="a" * 40, physical_gpu=None)
     assert manifest["certified_policy"] is True
     assert manifest["transcendentals"] == "libm"
     assert manifest["integration"] == "one-jitted-scan-per-day"

@@ -13,6 +13,8 @@ from pathlib import Path
 import numpy as np
 
 SECONDS_PER_DAY = 86_400
+SECONDS_PER_HOUR = 3_600
+HOURS_PER_DAY = 24
 SCAN_PARITY_ATOL = 1.0e-12
 GPU_TARGET_MS_PER_STEP = 5.0
 METADATA_CHECKPOINT_DAYS = 25
@@ -112,6 +114,57 @@ def restart_state_from_npz(state, forcing, path: Path, *, dt_s: float,
     }
 
 
+def admit_listed_snapshot(path: Path) -> dict:
+    """Refuse a trajectory file not content-pinned by its run manifest."""
+    candidates = (path.parent / "manifest.json",
+                  path.parent / "manifest.pending.json")
+    manifest_path = next((item for item in candidates if item.is_file()), None)
+    if manifest_path is None:
+        raise ValueError(f"snapshot has no run manifest: {path}")
+    manifest = json.loads(manifest_path.read_text())
+    expected = manifest.get("daily_sha256", {}).get(path.name)
+    if expected is None:
+        raise ValueError(f"snapshot is not listed by manifest: {path.name}")
+    actual = hashlib.sha256(path.read_bytes()).hexdigest()
+    if actual != expected:
+        raise ValueError(
+            f"snapshot hash differs from manifest: {actual} != {expected}")
+    return {
+        "manifest_path": str(manifest_path.resolve()),
+        "manifest_sha256": hashlib.sha256(
+            manifest_path.read_bytes()).hexdigest(),
+        "snapshot_sha256": actual,
+        "manifest_status": manifest.get("status"),
+    }
+
+
+def compare_native_state_bitwise(state, path: Path) -> dict:
+    """Compare a stepped fine state with an admitted uninterrupted snapshot."""
+    with np.load(path, allow_pickle=False) as saved:
+        required = {"ssh_m", "u_m_s", "v_m_s"}
+        missing = required - set(saved.files)
+        if missing:
+            raise ValueError(f"comparison snapshot is missing {sorted(missing)}")
+        expected = {name: np.asarray(saved[key]) for name, key in (
+            ("ssh_m", "ssh_m"), ("u_m_s", "u_m_s"),
+            ("v_m_s", "v_m_s"))}
+    actual = {
+        "ssh_m": np.asarray(state.eta.data),
+        "u_m_s": np.asarray(state.u.data[:, 1:, 0]),
+        "v_m_s": np.asarray(state.v.data[1:, :, 0]),
+    }
+    result = {"all_equal": True}
+    for name in actual:
+        if actual[name].shape != expected[name].shape:
+            raise ValueError(f"comparison shape differs for {name}")
+        unequal = int(np.count_nonzero(actual[name] != expected[name]))
+        result[f"{name}_unequal"] = unequal
+        result[f"{name}_max_abs"] = float(
+            np.max(np.abs(actual[name] - expected[name])))
+        result["all_equal"] = bool(result["all_equal"] and unequal == 0)
+    return result
+
+
 def seed_steady_forcing_carry(state, forcing):
     """Seed the fixed-stress history so a scan carry has one pytree shape."""
     import jax.numpy as jnp
@@ -175,6 +228,31 @@ def build_scanned_day_mean_stepper(model, dt_s: float, forcing, n_steps: int):
         (state, mean_ssh, mean_u, mean_v), _ = jax.lax.scan(
             scan_body, (state, *means), counts)
         return state, (mean_ssh, mean_u, mean_v)
+
+    return scanned
+
+
+def build_scanned_hourly_target_stepper(
+        model, dt_s: float, forcing, steps_per_hour: int, restrictor):
+    """Compile one day while retaining only 24 restricted hourly states."""
+    import jax
+
+    if type(steps_per_hour) is not int or steps_per_hour <= 0:
+        raise ValueError("hourly target steps must be a positive integer")
+
+    def step_body(state, _):
+        return model.step(state, dt_s, surface_forcing=forcing), None
+
+    def hour_body(state, _):
+        state, _ = jax.lax.scan(
+            step_body, state, None, length=steps_per_hour)
+        coarse = restrictor(
+            state.eta.data, state.u.data[:, 1:, 0], state.v.data[1:, :, 0])
+        return state, coarse
+
+    @jax.jit
+    def scanned(state):
+        return jax.lax.scan(hour_body, state, None, length=HOURS_PER_DAY)
 
     return scanned
 
@@ -307,13 +385,31 @@ def numerical_health(state, namelist) -> dict[str, float | bool]:
     }
 
 
+def validate_operator_device(mode: str, physical_gpu: int | None, *, environ=None):
+    """Require the operator to name the physical GPU selected for GPU mode."""
+    environment = os.environ if environ is None else environ
+    if mode == "gpu-native":
+        if type(physical_gpu) is not int or physical_gpu < 0:
+            raise ValueError("gpu-native mode requires explicit non-negative physical_gpu")
+        visible = environment.get("CUDA_VISIBLE_DEVICES")
+        if visible != str(physical_gpu):
+            raise RuntimeError(
+                "gpu-native physical_gpu does not match CUDA_VISIBLE_DEVICES: "
+                f"{physical_gpu} != {visible!r}")
+    elif physical_gpu is not None:
+        raise ValueError("physical_gpu is only valid in gpu-native mode")
+
+
 def run_long(
         namelist, output: Path, *, days: int, mode: str, commit: str,
+        physical_gpu: int | None,
         profile_steps: int = 0, compare_days: int = 0,
         daily_means: bool = False,
         restart: Path | None = None,
         perturb_amplitude_m: float | None = None,
         profile_only: bool = False,
+        hourly_targets: bool = False,
+        verify_next: Path | None = None,
 ) -> dict:
     """Integrate one resolved SWG deck and write one native state per day."""
     import jax
@@ -338,12 +434,21 @@ def run_long(
         raise ValueError("compare_days must be a non-negative integer")
     if profile_only and profile_steps <= 0:
         raise ValueError("profile_only requires positive profile_steps")
-    if profile_only and (compare_days or daily_means):
-        raise ValueError("profile_only excludes comparison and daily means")
+    if profile_only and (compare_days or daily_means or hourly_targets):
+        raise ValueError(
+            "profile_only excludes comparison, daily means, and hourly targets")
     if mode == "cpu-certified" and compare_days:
         raise ValueError("scan comparison requires a scanned mode")
     if daily_means and mode != "gpu-native":
         raise ValueError("daily-mean output requires non-certified gpu-native mode")
+    if hourly_targets and daily_means:
+        raise ValueError("hourly targets and daily means are separate sampling modes")
+    if hourly_targets and mode == "cpu-certified":
+        raise ValueError("hourly targets require a scanned mode")
+    if hourly_targets and namelist.nn_SWG != 16:
+        raise ValueError("hourly coarse targets require the 6.25 km fine deck")
+    if verify_next is not None and (not hourly_targets or restart is None):
+        raise ValueError("verify_next requires hourly_targets and restart")
     if len(commit) != 40 or any(char not in "0123456789abcdef" for char in commit):
         raise ValueError("commit must be a forty-character lowercase Git SHA")
     steps_per_day_f = SECONDS_PER_DAY / namelist.rn_Dt_s
@@ -353,9 +458,8 @@ def run_long(
     if namelist.nn_itend != days * steps_per_day:
         raise ValueError("resolved nn_itend does not equal days times steps/day")
 
+    validate_operator_device(mode, physical_gpu)
     if mode == "gpu-native":
-        if os.environ.get("CUDA_VISIBLE_DEVICES") != "1":
-            raise RuntimeError("gpu-native mode requires CUDA_VISIBLE_DEVICES=1")
         set_policy(PrecisionPolicy.fp64(transcendentals="native"))
         certified_policy = False
         expected_backend = "gpu"
@@ -385,11 +489,19 @@ def run_long(
     if perturb_amplitude_m is not None and restart is None:
         raise ValueError("--perturb requires --restart")
     if restart is not None:
+        if hourly_targets:
+            restart_admission = admit_listed_snapshot(restart)
+        else:
+            restart_admission = None
         state, restart_provenance = restart_state_from_npz(
             state, forcing, restart, dt_s=card.dt_s,
             perturb_amplitude_m=perturb_amplitude_m)
+        restart_provenance["manifest_admission"] = restart_admission
+    next_admission = (
+        admit_listed_snapshot(verify_next) if verify_next is not None else None)
     profile = None
     parity = None
+    hourly_stepper = None
     if mode in ("gpu-native", "cpu-scanned"):
         if restart is None:
             state = seed_steady_forcing_carry(state, forcing)
@@ -399,6 +511,24 @@ def run_long(
             build_scanned_day_mean_stepper(
                 model, card.dt_s, forcing, steps_per_day)
             if daily_means else None)
+        if hourly_targets:
+            from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+                SWG_DG50_NAMELIST,
+                SWG_MADDISON_NAMELIST,
+            )
+            from legoesm.ocean.fidelity.swg_coarse_graining import (
+                build_jax_conservative_restrictor,
+                cgrid_geometry,
+            )
+
+            steps_per_hour_f = SECONDS_PER_HOUR / card.dt_s
+            if not float(steps_per_hour_f).is_integer():
+                raise ValueError("fine timestep must divide one hour")
+            restrictor = build_jax_conservative_restrictor(
+                cgrid_geometry(SWG_MADDISON_NAMELIST),
+                cgrid_geometry(SWG_DG50_NAMELIST))
+            hourly_stepper = build_scanned_hourly_target_stepper(
+                model, card.dt_s, forcing, int(steps_per_hour_f), restrictor)
         if profile_steps:
             profile = profile_step_modes(
                 model, state, card.dt_s, forcing, profile_steps)
@@ -427,13 +557,16 @@ def run_long(
     output.mkdir(parents=True)
     manifest = {
         "schema": (
+            "legoesm-swg-double-gyre-hourly-target-v1"
+            if hourly_targets else
             "legoesm-swg-double-gyre-daily-v2"
             if daily_means else "legoesm-swg-double-gyre-daily-v1"),
         "legoesm_git_sha": commit,
         "mode": mode,
         "certified_policy": certified_policy,
-        "deck_certification": "pending NEMO ladder acquisition",
+        "deck_certification": "NEMO ladder measured; see fidelity receipts",
         "backend": jax.default_backend(),
+        "physical_gpu": physical_gpu,
         "precision_policy": "fp64",
         "transcendentals": "native" if mode == "gpu-native" else "libm",
         "days": days,
@@ -441,26 +574,45 @@ def run_long(
         "integration": (
             "one-jitted-scan-per-day" if mode in ("gpu-native", "cpu-scanned")
             else "production-python-step-loop"),
-        "sampling": "daily_mean" if daily_means else "daily_snapshot",
+        "sampling": ("hourly_conservative_coarse_target" if hourly_targets else
+                     "daily_mean" if daily_means else "daily_snapshot"),
         "available_sampling": (
+            ["hourly_conservative_coarse_target"]
+            if hourly_targets else
             ["daily_mean", "end_of_day_snapshot"]
             if daily_means else ["end_of_day_snapshot"]),
         "profile": profile,
         "scan_vs_python": parity,
         "restart": restart_provenance,
+        "restart_next_verification": (
+            None if verify_next is None else {
+                "path": str(verify_next.resolve()),
+                "admission": next_admission,
+                "result": None,
+            }),
         "numerical_health": None,
         "namelist": namelist._asdict(),
-        "fields": {
+        "fields": ({} if hourly_targets else {
             "ssh_m": "end-of-day snapshot; T points",
             "u_m_s": "end-of-day snapshot; native NEMO U record",
             "v_m_s": "end-of-day snapshot; native NEMO V record",
-        },
+        }),
     }
     if daily_means:
         manifest["fields"].update({
             "ssh_daily_mean_m": "daily mean of post-step T-point SSH",
             "u_daily_mean_m_s": "daily mean of post-step native U velocity",
             "v_daily_mean_m_s": "daily mean of post-step native V velocity",
+        })
+    if hourly_targets:
+        manifest["hourly_samples_per_day"] = HOURS_PER_DAY
+        manifest["hourly_sampling"] = (
+            "right-endpoint instantaneous state, restricted inside compiled scan")
+        manifest["hourly_target_deck"] = "dg50"
+        manifest["fields"].update({
+            "ssh_hourly_m": "24 restricted hourly T-point SSH states",
+            "u_hourly_m_s": "24 restricted hourly native U velocities",
+            "v_hourly_m_s": "24 restricted hourly native V velocities",
         })
     if profile_only:
         completed = manifest | {
@@ -481,9 +633,12 @@ def run_long(
 
     for day in range(1, days + 1):
         means = None
+        hourly = None
         if day_stepper is None:
             state = run_python_steps(
                 model, state, card.dt_s, forcing, steps_per_day)
+        elif hourly_stepper is not None:
+            state, hourly = hourly_stepper(state)
         elif day_mean_stepper is not None:
             state, means = day_mean_stepper(state)
         else:
@@ -495,15 +650,21 @@ def run_long(
             "mode": np.str_(mode),
             "certified_policy": np.bool_(certified_policy),
             "day": np.int64(day),
+            "absolute_day": np.int64(
+                day + (0 if restart_provenance is None else
+                       restart_provenance["source_day"])),
             "step": np.int64(
                 day * steps_per_day + (
                     0 if restart_provenance is None
                     else restart_provenance["source_step"])),
             "dt_s": np.float64(card.dt_s),
-            "ssh_m": np.asarray(state.eta.data, dtype=np.float64),
-            "u_m_s": np.asarray(state.u.data[:, 1:, 0], dtype=np.float64),
-            "v_m_s": np.asarray(state.v.data[1:, :, 0], dtype=np.float64),
         }
+        if hourly is None:
+            arrays.update({
+                "ssh_m": np.asarray(state.eta.data, dtype=np.float64),
+                "u_m_s": np.asarray(state.u.data[:, 1:, 0], dtype=np.float64),
+                "v_m_s": np.asarray(state.v.data[1:, :, 0], dtype=np.float64),
+            })
         daily_health = numerical_health(state, namelist)
         previous_health = manifest["numerical_health"]
         manifest["numerical_health"] = {
@@ -533,6 +694,30 @@ def run_long(
                 "u_daily_mean_m_s": np.asarray(means[1], dtype=np.float64),
                 "v_daily_mean_m_s": np.asarray(means[2], dtype=np.float64),
             })
+        if hourly is not None:
+            source_day = (0 if restart_provenance is None else
+                          restart_provenance["source_day"])
+            arrays.update({
+                "hourly_sampling": np.str_(manifest["hourly_sampling"]),
+                "hourly_offset_hours": np.arange(
+                    1, HOURS_PER_DAY + 1, dtype=np.int64),
+                "absolute_hour": (
+                    (source_day + day - 1) * HOURS_PER_DAY
+                    + np.arange(1, HOURS_PER_DAY + 1, dtype=np.int64)),
+                "ssh_hourly_m": np.asarray(hourly[0], dtype=np.float64),
+                "u_hourly_m_s": np.asarray(hourly[1], dtype=np.float64),
+                "v_hourly_m_s": np.asarray(hourly[2], dtype=np.float64),
+            })
+        if day == 1 and verify_next is not None:
+            comparison = compare_native_state_bitwise(state, verify_next)
+            manifest["restart_next_verification"]["result"] = comparison
+            if not comparison["all_equal"]:
+                _write_json_atomic(
+                    pending_path,
+                    manifest | {"status": "refused", "completed_days": 0,
+                                "daily_sha256": day_hashes})
+                raise RuntimeError(
+                    "restarted segment does not reproduce uninterrupted next day")
         name = f"day{day:04d}.npz"
         temporary = output / f".{name}.tmp"
         with temporary.open("wb") as stream:
@@ -567,6 +752,9 @@ def main(argv=None) -> int:
         "--mode", choices=("gpu-native", "cpu-certified", "cpu-scanned"),
         default="gpu-native")
     parser.add_argument(
+        "--physical-gpu", type=int,
+        help="required physical CUDA device for --mode gpu-native; no default")
+    parser.add_argument(
         "--profile-steps", type=int, default=0,
         help="warm wall-clock profile of Python and scan programs")
     parser.add_argument(
@@ -578,6 +766,12 @@ def main(argv=None) -> int:
     parser.add_argument(
         "--daily-means", action="store_true",
         help="also accumulate every post-step state inside the compiled day")
+    parser.add_argument(
+        "--hourly-targets", action="store_true",
+        help="retain only conservative dg50 targets at each fine-model hour")
+    parser.add_argument(
+        "--verify-next", type=Path,
+        help="admitted uninterrupted next-day snapshot required to match bitwise")
     args = parser.parse_args(argv)
     try:
         from legoesm.ocean.fidelity.provenance import git_sha
@@ -585,10 +779,12 @@ def main(argv=None) -> int:
         namelist = resolved_daily_namelist(args.days, deck=args.deck)
         manifest = run_long(
             namelist, args.output, days=args.days, mode=args.mode,
-            commit=git_sha(), profile_steps=args.profile_steps,
+            commit=git_sha(), physical_gpu=args.physical_gpu,
+            profile_steps=args.profile_steps,
             compare_days=args.compare_days, daily_means=args.daily_means,
             restart=args.restart, perturb_amplitude_m=args.perturb,
-            profile_only=args.profile_only)
+            profile_only=args.profile_only, hourly_targets=args.hourly_targets,
+            verify_next=args.verify_next)
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"REFUSE: {exc}", file=sys.stderr)
         return 2

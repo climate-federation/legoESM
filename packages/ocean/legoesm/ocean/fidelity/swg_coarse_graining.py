@@ -366,6 +366,103 @@ def conservative_restrict_cgrid(fields: dict[str, np.ndarray], source: dict,
     return output
 
 
+def build_jax_conservative_restrictor(source: dict, target: dict):
+    """Build the same conservative restriction for an in-scan JAX target."""
+    import jax.numpy as jnp
+
+    layout = _restriction_layout(source, target)
+    f = layout["factor"]
+    sj0, sj1 = layout["source_j0"], layout["source_j1"]
+    si0, si1 = layout["source_i0"], layout["source_i1"]
+    tj0, tj1 = layout["target_j0"], layout["target_j1"]
+    ti0, ti1 = layout["target_i0"], layout["target_i1"]
+    ny, nx = layout["target_ny"], layout["target_nx"]
+    source_u_columns = jnp.asarray(
+        si0 + f * np.arange(1, nx, dtype=int) - 1)
+    source_v_rows = jnp.asarray(
+        sj0 + f * np.arange(1, ny, dtype=int) - 1)
+
+    source_tmask = jnp.asarray(source["mask"]["T"], dtype=jnp.float64)
+    target_masks = {
+        kind: jnp.asarray(target["mask"][kind], dtype=jnp.float64)
+        for kind in ("T", "U", "V")
+    }
+    source_area_t = jnp.asarray(source["area"]["T"], dtype=jnp.float64)
+    target_area_t = jnp.asarray(target["area"]["T"], dtype=jnp.float64)
+    source_reference_t = jnp.asarray(
+        source["reference_thickness"]["T"], dtype=jnp.float64)
+    target_reference_t = jnp.asarray(
+        target["reference_thickness"]["T"], dtype=jnp.float64)
+
+    def live_face_thickness(eta, geometry, kind, face_mask):
+        area_t = jnp.asarray(geometry["area"]["T"], dtype=jnp.float64)
+        weighted_eta = area_t * eta * jnp.asarray(
+            geometry["mask"]["T"], dtype=jnp.float64)
+        axis = 1 if kind == "U" else 0
+        numerator = 0.5 * (weighted_eta + jnp.roll(
+            weighted_eta, -1, axis=axis))
+        reference_depth = jnp.asarray(
+            geometry["reference_transport_depth"][kind], dtype=jnp.float64)
+        area_face = jnp.asarray(
+            geometry["area"][kind], dtype=jnp.float64)
+        reference_thickness = jnp.asarray(
+            geometry["reference_thickness"][kind], dtype=jnp.float64)
+        safe = jnp.where(face_mask > 0.0, reference_depth * area_face, 1.0)
+        ratio = numerator / safe * face_mask
+        return reference_thickness * (1.0 + ratio)
+
+    def restrict(eta, u_native, v_native):
+        source_volume = source_area_t * (
+            source_reference_t + eta * source_tmask) * source_tmask
+        volume_block = source_volume[sj0:sj1 + 1, si0:si1 + 1]
+        coarse_volume = volume_block.reshape(ny, f, nx, f).sum(axis=(1, 3))
+        coarse_eta_block = (
+            coarse_volume / target_area_t[tj0:tj1 + 1, ti0:ti1 + 1]
+            - target_reference_t[tj0:tj1 + 1, ti0:ti1 + 1]
+        )
+        coarse_eta = jnp.zeros_like(target_area_t).at[
+            tj0:tj1 + 1, ti0:ti1 + 1].set(coarse_eta_block)
+
+        source_umask = jnp.asarray(source["mask"]["U"], dtype=jnp.float64)
+        source_vmask = jnp.asarray(source["mask"]["V"], dtype=jnp.float64)
+        fine_u_transport = (
+            jnp.asarray(source["face_length"]["U"], dtype=jnp.float64)
+            * live_face_thickness(eta, source, "U", source_umask)
+            * u_native * source_umask
+        )
+        fine_v_transport = (
+            jnp.asarray(source["face_length"]["V"], dtype=jnp.float64)
+            * live_face_thickness(eta, source, "V", source_vmask)
+            * v_native * source_vmask
+        )
+        u_block = fine_u_transport[
+            sj0:sj1 + 1, source_u_columns].reshape(ny, f, nx - 1).sum(axis=1)
+        v_block = fine_v_transport[
+            source_v_rows, si0:si1 + 1].reshape(ny - 1, nx, f).sum(axis=2)
+        coarse_u_transport = jnp.zeros_like(target_area_t).at[
+            tj0:tj1 + 1, ti0:ti1].set(u_block)
+        coarse_v_transport = jnp.zeros_like(target_area_t).at[
+            tj0:tj1, ti0:ti1 + 1].set(v_block)
+
+        target_umask = target_masks["U"]
+        target_vmask = target_masks["V"]
+        u_denominator = (
+            jnp.asarray(target["face_length"]["U"], dtype=jnp.float64)
+            * live_face_thickness(coarse_eta, target, "U", target_umask)
+        )
+        v_denominator = (
+            jnp.asarray(target["face_length"]["V"], dtype=jnp.float64)
+            * live_face_thickness(coarse_eta, target, "V", target_vmask)
+        )
+        coarse_u = coarse_u_transport / jnp.where(
+            target_umask > 0.0, u_denominator, 1.0) * target_umask
+        coarse_v = coarse_v_transport / jnp.where(
+            target_vmask > 0.0, v_denominator, 1.0) * target_vmask
+        return coarse_eta * target_masks["T"], coarse_u, coarse_v
+
+    return restrict
+
+
 def _transport_divergence(transports: dict[str, np.ndarray], geometry: dict,
                           ) -> np.ndarray:
     """Finite-volume divergence from native east/north transport records."""

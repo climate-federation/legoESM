@@ -109,6 +109,39 @@ def test_conservative_restriction_preserves_volume_and_continuity_at_walls():
     assert result["outer_four_cells"]["max_abs_m_s"] <= 1.0e-15
 
 
+def test_jax_restrictor_matches_numpy_eager_jit_and_has_a_tangent():
+    import jax
+    import jax.numpy as jnp
+
+    source = coarse.cgrid_geometry(SWG_MADDISON_NAMELIST)
+    target = coarse.cgrid_geometry(SWG_DG50_NAMELIST)
+    fields = _synthetic_state(source, seed=10)
+    expected = coarse.conservative_restrict_cgrid(fields, source, target)
+    restrict = coarse.build_jax_conservative_restrictor(source, target)
+    arguments = tuple(jnp.asarray(fields[kind]) for kind in ("T", "U", "V"))
+    eager = restrict(*arguments)
+    compiled = jax.jit(restrict)(*arguments)
+    for kind, eager_value, compiled_value in zip(
+            ("T", "U", "V"), eager, compiled, strict=True):
+        # T subtracts the 500 m reference depth after a differently ordered
+        # block sum in NumPy and XLA; the measured roundoff is 5.12e-13 m.
+        atol = 6.0e-13 if kind == "T" else 2.0e-15
+        np.testing.assert_allclose(
+            np.asarray(eager_value), expected[kind], rtol=2.0e-15, atol=atol)
+        np.testing.assert_allclose(
+            np.asarray(compiled_value), expected[kind],
+            rtol=2.0e-15, atol=atol)
+        planted = np.asarray(eager_value).copy()
+        planted[target["mask"][kind]] += 2.0e-12
+        with pytest.raises(AssertionError):
+            np.testing.assert_allclose(
+                planted, expected[kind], rtol=2.0e-15, atol=atol)
+    tangents = tuple(jnp.ones_like(value) for value in arguments)
+    _, tangent = jax.jvp(restrict, arguments, tangents)
+    assert all(np.all(np.isfinite(np.asarray(value))) for value in tangent)
+    assert any(np.any(np.asarray(value) != 0.0) for value in tangent)
+
+
 def test_analytic_cgrid_face_staggering_selects_tiling_faces():
     source = coarse.cgrid_geometry(SWG_MADDISON_NAMELIST)
     target = coarse.cgrid_geometry(SWG_DG50_NAMELIST)
