@@ -82,9 +82,32 @@ Principal SHA-256 values are:
   `865ffac33de658d611c8b62bd63d87cc364f725f5ed6ff9250d0e9a6339ab1c3` /
   `69808a031a5c30b4af12f4c7c94446b703ec986740fd5c7c807937d5e480e797`.
 
-The focused round-265 test set passes 14/14. Citation, independent review,
-and the once-only fidelity battery are recorded by the final validation
-commit.
+The focused round-260 through round-265 plus citation set passes 104/104; its
+log SHA-256 is
+`86c26f0ed92de6f817ce3122744fa1b07358f63291d587681f1289b732329b48`.
+The once-only `tests/ocean/fidelity -n 12` battery collected 3,446 tests and
+reached 99%. All fourteen round-265 tests passed. It emitted the four
+registered pre-existing reds—GYRE round-129 record-backed harness pin,
+allow-dirty scope, worktree stamp, and SI3 scalar-math provenance—then waited
+indefinitely on the LOCK planted-stage end-to-end node and was terminated.
+That exact hung node passed serially in 607.87 s; the worktree-stamp ratchet
+reproduced with the existing 13-file offender set. Battery and serial
+disposition SHA-256 values are
+`59b4de63ca7c5d00c7027e59db4506b7bd44d95258b3a95b4637b2b9bee1038d`
+and `255264955b907cef22b316aaea1a46b76d2b693a916920ff4067184042d998f7`.
+
+The default cumulative citation gate and this receipt's gate pass with zero
+failures and no unmapped citations; the planted two-line shift of the
+pre-update citation fails. Their JSON SHA-256 values are
+`befc59c7c4628b332206f16060ad5968dc374991179466433506e3e727f9829b`,
+`18f675c23339e71e25f9b62000926cd33e9570b2db99dca6b1227f670d840d27`,
+and `94c3490bbac1d1adfc8592e2bcb7e0d0e4a79b5ea336b59292b17f9dc3905abb`.
+
+The requested separate `codex exec --sandbox read-only` review failed before
+review because its in-process app server could not initialize on the
+read-only filesystem. **Independent review unavailable in-sandbox.** Its log
+SHA-256 is
+`eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5`.
 
 ## OPEN
 
