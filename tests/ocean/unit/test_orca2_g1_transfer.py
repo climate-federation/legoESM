@@ -105,6 +105,9 @@ def test_orca2_and_omt_cards_select_executed_transferred_statements():
     from scripts.validate.ocean_fidelity.orca2_l4 import (
         nemo_testcase_l4_orca2_round223_omt4_ladder_gate as omt4,
     )
+    from scripts.validate.ocean_fidelity.orca2_l4 import (
+        nemo_testcase_l4_orca2_round274_g1_full_import_gate as round274,
+    )
 
     assert LatLonCGridOceanConfig._field_defaults["een_fold_image_v_row"] is False
     assert BarotropicConfig._field_defaults[
@@ -172,3 +175,11 @@ def test_orca2_and_omt_cards_select_executed_transferred_statements():
     for card in (shipped, omt1_card, omt4_card):
         assert not card.recipe.model_config.barotropic.barotropic_flux_update_nemo_literal
         assert not card.recipe.model_config.barotropic.barotropic_entry_depth_nemo_literal
+    control = round274.legacy_card(omt4_card)
+    assert not control.recipe.z_coord.nemo_r3t_stored_product
+    assert not any(getattr(control.recipe.model_config, name)
+                   for name in round274.MODEL_SELECTORS)
+    assert not any(getattr(control.recipe.model_config.barotropic, name)
+                   for name in round274.BAROTROPIC_SELECTORS)
+    with pytest.raises(round274.GateError, match="retained selectors"):
+        round274.legacy_card(omt4_card, plant="retained-selector")
