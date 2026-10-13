@@ -139,6 +139,14 @@ operator argument, has no default, and is recorded in the run manifest. The
 wrapper no longer assumes GPU 1. Direct tests cover both physical devices,
 missing/mismatched device refusal, coarse-only storage, and restart admission.
 
+A CPU/libm attempt from the GPU/native day-731 archive was correctly refused by
+that gate: at day 732 it found 397,082/398,758/397,621 unequal T/U/V cells and
+maxima `1.02696e-14`, `6.21725e-15`, and `6.77236e-15`. The refused manifest
+SHA-256 is
+`3f7ba42b84dbfb3e95b2036163606d04e0eb0b7de7c485f4dc378f775b986b01`.
+This proves the segments must be acquired on a GPU under the source archive's
+native-transcendental policy; a CPU-produced cache cannot be relabelled.
+
 A zero-closure 4/8-day A/B test from one dg50 state passes bit-for-bit between
 the day-scan composition and flat training-segment composition. The ten-start
 instrument is committed for days 731, 771, ..., 1091. It reports hourly
