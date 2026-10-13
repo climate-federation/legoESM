@@ -95,8 +95,29 @@ Principal SHA-256 values are:
 - independent measurement: `899122f6752885e9c60179e09b2a33a64555e5b2990dd14c67fcdc0d007c77e3`;
 - given-entry measurement: `213e9258135556cb29fb9eda57b016082445b6cde2eccb1becba02fe1cafbf6d`.
 
-The focused gate controls, citation gate, separate read-only review, and the
-once-only fidelity battery are recorded below after their final runs.
+The clean focused battery passed `41/41`: round 265 compatibility, all round
+266 controls, and the citation-gate unit tests.  The cumulative default
+citation audit and this receipt's six-citation audit both pass with no
+unmapped citations or failed map audits; the planted two-line shift refuses
+with exit 1.
+
+The required separate review was attempted with `codex exec --sandbox
+read-only`.  It could not initialize its in-process app-server client because
+the read-only sandbox denied the required write, so **independent review
+unavailable in-sandbox**; the full diagnostic is retained as
+`codex_readonly_review.log`.
+
+The once-only `tests/ocean/fidelity -n 12` battery reached 99% before two
+workers stopped producing output.  It recorded 3,416 passed, seven skipped,
+and four reds, all reproduced serially and all pre-existing on this tree:
+the registered GYRE-year harness-hash ratchet, thirteen legacy unscoped
+allow-dirty drivers, thirteen legacy unstamped report emitters, and the known
+SI3 scalar-math `MY_SRC` provenance red.  Neither Round 266 file appears in
+any red.  The two unfinished nodes were the known long-running planted stage
+control and the VORTEX round-205 default-hook check; each also stalled in
+isolation and was terminated rather than starting a second full-tree battery.
+The parallel log, serial four-red disposition, and isolated-node logs are
+retained beside the measurement evidence.
 
 ## OPEN
 
