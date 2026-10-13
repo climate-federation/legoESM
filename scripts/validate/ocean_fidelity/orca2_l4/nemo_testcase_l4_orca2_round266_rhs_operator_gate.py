@@ -124,7 +124,8 @@ def _associated_stage(card, values):
 
 def measure(deck_root: Path, frame_root: Path, record_root: Path,
             label: str, expect_commit: str, *,
-            literal_hpg_accumulator: bool = False) -> dict[str, object]:
+            literal_hpg_accumulator: bool = False,
+            passive_trace_callback=None) -> dict[str, object]:
     import jax
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import _NEMOWSLiveOperandTrace
 
@@ -184,6 +185,11 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
 
     parts = traced.operator_operands[1]
     require(parts is not None, "stage-2 operator trace is absent")
+    if passive_trace_callback is not None:
+        # Validation-only handoff after the passivity assertion.  Consumers
+        # may replay these completed operands offline; they cannot feed the
+        # executing model or alter its compiled graph.
+        passive_trace_callback(card, parts, state, passivity)
     candidate = {
         "before_u": np.zeros_like(terms["before_u"][..., :30]),
         "after_hpg_u": _native_u(parts["after_hpg_u"].data),

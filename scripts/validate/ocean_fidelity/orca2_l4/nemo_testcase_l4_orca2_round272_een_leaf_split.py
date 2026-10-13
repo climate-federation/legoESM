@@ -18,18 +18,11 @@ for package in (REPO_ROOT, REPO_ROOT / "packages/core", REPO_ROOT / "packages/oc
         sys.path.insert(0, str(package))
 
 from scripts.validate.ocean_fidelity.orca2_l4 import (  # noqa: E402
-    nemo_testcase_l4_orca2_round135_step36_fct_gate as passive,
-    nemo_testcase_l4_orca2_round204_omt0_ladder_gate as omt0,
     nemo_testcase_l4_orca2_round223_omt4_ladder_gate as omt4,
-    nemo_testcase_l4_orca2_round245_v_depth_split as r245,
     nemo_testcase_l4_orca2_round249_fold_growth_gate as r249,
     nemo_testcase_l4_orca2_round266_rhs_operator_gate as r266,
-    nemo_testcase_l4_orca2_round92_rung0_card_gate as rung0,
 )
 from nemo_testcase_l2_gyre_phase3_gate import read_stage2_terms  # noqa: E402
-from scripts.validate.ocean_fidelity.testcases import (  # noqa: E402
-    nemo_testcase_l2_gyre_phase3_gate as phase3_gate,
-)
 
 FLOOR = np.float64(2.0e-10)
 LABELS = r249.LABELS
@@ -123,45 +116,23 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
     }
 
     original_flux = pe.pv_flux_al81_partial_cell
-    card = omt4.build_omt4_card(deck_root)
-    omt4.validate_omt4_card(deck_root, card)
-    entry = rung0.assemble_frame(frame_root, 1, 0)
-    state = (card.recipe.initial_state if label == "independent"
-             else rung0.bridge_entry(card, entry))
-    forcing = omt0.rung0_ladder._zero_forcing((148, 180))
-    arm = r245._barotropic_surface_mask_arm(
-        card, True, v_only=True, t_pivot_north_neighbor=True)
-    with arm:
-        first_model = r266._model(card, r266._hooks(card, live=True))
-        first = jax.device_get(first_model.step(
-            state, card.dt_s, freshwater=forcing[0], surface_forcing=forcing[1]))
-    stage1 = r266._associated_stage(card, first.stage_outputs[0])
-    stage_entry = (2, *stage1)
-    with r245._barotropic_surface_mask_arm(
-            card, True, v_only=True, t_pivot_north_neighbor=True):
-        ordinary = jax.device_get(r266._model(
-            card, r266._hooks(card, live=False, stage_entry=stage_entry)).step(
-                state, card.dt_s, freshwater=forcing[0], surface_forcing=forcing[1]))
-        traced_model = r266._model(
-            card, r266._hooks(card, live=True, stage_entry=stage_entry))
-        traced = jax.device_get(traced_model.step(
-            state, card.dt_s, freshwater=forcing[0], surface_forcing=forcing[1]))
-    passivity = passive._ordinary_state_equal(traced.state_after, ordinary)
+    captured: dict[str, object] = {}
+
+    def capture(card, parts, state, passivity):
+        captured.update(card=card, parts=parts, state=state, passivity=passivity)
+
+    baseline = r266.measure(
+        deck_root, frame_root, record_root, label, expect_commit,
+        passive_trace_callback=capture)
+    require(set(captured) == {"card", "parts", "state", "passivity"},
+            "passive stage-2 handoff is incomplete")
+    card = captured["card"]
+    parts = captured["parts"]
+    state = captured["state"]
+    passivity = captured["passivity"]
     require(all(passivity.values()), "certified live trace moved completed state")
-    parts = traced.operator_operands[1]
-    require(parts is not None, "stage-2 passive operand trace is absent")
     hpg = r266._native_u(parts["after_hpg_u"].data)
     after = r266._native_u(parts["after_vor_u"].data)
-    boundary_rows = {
-        "after_vorticity_u": {
-            "complete": _score(after, oracle_rows["after_vorticity_u"]),
-        },
-    }
-    baseline = {
-        "boundary_rows": boundary_rows,
-        "passivity": passivity,
-        "compiled_source": {"ln_dynvor_msk": False},
-    }
 
     from legoesm.ocean.dynamics.latlon_cgrid_operators import (
         nemo_een_ene_vertex_coriolis,
