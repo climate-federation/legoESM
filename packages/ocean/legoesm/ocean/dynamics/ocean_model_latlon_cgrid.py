@@ -5694,7 +5694,8 @@ class LatLonCGridOceanModel:
                    nemo_stage_zad_operands=None,
                    nemo_stage_zad_operand_observer=None,
                    nemo_stage_zad_eta_after_override=None,
-                   nemo_literal_hpg_vmask=None):
+                   nemo_literal_hpg_vmask=None, nemo_stage_r3f=None,
+                   nemo_literal_hpg_accumulator=False):
         """Compute baroclinic tendencies.
 
         ``momentum_only=True`` skips the (T/S-frozen) tracer-diffusion
@@ -5758,6 +5759,8 @@ class LatLonCGridOceanModel:
             nemo_stage_zad_eta_after_override=(
                 nemo_stage_zad_eta_after_override),
             nemo_literal_hpg_vmask=nemo_literal_hpg_vmask,
+            nemo_stage_r3f=nemo_stage_r3f,
+            nemo_literal_hpg_accumulator=nemo_literal_hpg_accumulator,
             diagnose_momentum=return_nemo_operator_components,
             return_nemo_operator_components=return_nemo_operator_components,
         )
@@ -6985,6 +6988,13 @@ class LatLonCGridOceanModel:
                                          _zad_observers[stage_index - 1]),
                                      nemo_literal_hpg_vmask=(
                                          _ws_literal_hpg_vmask),
+                                     nemo_stage_r3f=_nemo_ws_stage_r3f(
+                                         _cfg_b, stage_index,
+                                         lambda: _ws_eta_pair, _zc, _grid),
+                                     nemo_literal_hpg_accumulator=(
+                                         stage_index in (2, 3)
+                                         and self._nemo_ws_test_hooks
+                                         .stage_hpg_literal_accumulator),
                                      return_nemo_operator_components=(
                                          _return_components))
                 if _return_components:

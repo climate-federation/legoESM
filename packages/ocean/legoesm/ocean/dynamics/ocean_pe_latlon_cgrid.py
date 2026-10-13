@@ -5112,6 +5112,8 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     nemo_stage_zad_operand_observer=None,
     nemo_stage_zad_eta_after_override=None,
     nemo_literal_hpg_vmask=None,
+    nemo_stage_r3f=None,
+    nemo_literal_hpg_accumulator: bool = False,
 ):
     """Compute 3D baroclinic tendencies on a C-grid lat-lon grid.
 
