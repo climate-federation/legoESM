@@ -339,3 +339,19 @@ single review.
    each reads. Needs a deck with more than one level (G2).
 2. The 50-step limit of the given-entry arm (the record's entry frames).
 3. ORCA2 import of this round's three options and of statement F.
+
+## Citation gate and final tree (run after the receipt's first commit)
+
+PASS: 11 citations, 0 unmapped, whole-map audit clean
+(final/citation_receipt.json); the shifted-citation plant exits 1
+(final/citation_plant.json). Four map entries are new this round (the two
+density depth statements, the stage's density call, the face-area branch);
+the other seven were mapped by earlier rounds.
+
+Final tree d4ba35fa0 (everything after it is this receipt's text):
+record100_3_card.json has no row over the bar and differs from the first
+run in 0 of 598 rows; the stage statements replayed in NEMO's order at step
+40 are 0 unequal on all 15 rows.
+
+SHA-256 prefixes, final/: citation_plant.json=7a701ee4c1c5ca84, citation_receipt.json=2d88ee871c4e27bd, given_entry_50.json=b4866f0c55570f37, plant_score.json=c73ac0d39d3ee629, record100_1_card.json=6fc8622b49ad4c51, record100_1_without_eos_gdept.json=ad9dfeaaa58ba257, record100_1_without_stage_r3t.json=2112d844dc7d6d53, record100_1_without_stage_r3uv.json=60c7e1e4a3786666, record100_2_card.json=d7a6586f82eb2f8c, record100_3_card.json=c5c17bd56bef4fc7, stage_replay_kt40.json=905ed006fb917141, stages_kt8.json=b3c468a0f984b133, subnormal_environment.json=e3e3eea45cbed332.
+One level up: codex_review_r9.log=c9a27ddb1f8a2380, tests_g1_r9_new.log=962d6ff4032c162c, tests_g1_r9_rest.log=26ab5516fba877a7, tests_g1_r9_fix.log=3e8ab0f6a7a71ac3, tests_ratchets.log=5479270827244b00, tests_builder_callers.log=99a08c462722fa0c, stages_kt40_before_dirty.json=3fd2ce324d52e8a5, stages_kt40_card_dirty.json=404ef94f27ffeeb1, stages_kt40_card2_dirty.json=3c44af389decd334, stages_kt5_card2_dirty.json=b4d7cea7d8fafcc4, stages_kt21_card2_dirty.json=79b695f190e2c1e7, stages_kt5_card3_dirty.json=20a0bfdc1cbb0d5e, stages_kt21_card3_dirty.json=b3adb66709ef4eb7, stage_operand_1_50_dirty.json=4bd49c709fcb5736.
