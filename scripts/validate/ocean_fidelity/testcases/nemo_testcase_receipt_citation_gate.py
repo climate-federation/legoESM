@@ -103,6 +103,10 @@ FILES = {
         _SWG_DG_COMPILED / "usrdef_zgr.f90"),
     "SWG_DG/BLD/ppsrc/nemo/stprk3.f90": (
         _SWG_DG_COMPILED / "stprk3.f90"),
+    "SWG_DG/BLD/ppsrc/nemo/divhor.f90": (
+        _SWG_DG_COMPILED / "divhor.f90"),
+    "SWG_DG/BLD/ppsrc/nemo/sshwzv.f90": (
+        _SWG_DG_COMPILED / "sshwzv.f90"),
     "SWG_DG/BLD/ppsrc/nemo/diawri.f90": (
         _SWG_DG_COMPILED / "diawri.f90"),
     "SWG_OMIP_L1/BLD/ppsrc/nemo/usrdef_sbc.f90": (
@@ -1676,6 +1680,18 @@ CITATION_MAP = {
         ('!                                 !==  Swap time levels  ==!', 3),
         'IF( lrst_oce   )   CALL rst_write',
         14],
+    'SWG_DG/BLD/ppsrc/nemo/stprk3.f90:140-171': [
+        'rDt   = rn_Dt / 3._wp',
+        ('vv(ji,jj,jk,Naa) = vv(ji,jj,jk,Nbb) + rDt * vv(ji,jj,jk,Nrhs)', 1),
+        32],
+    'SWG_DG/BLD/ppsrc/nemo/divhor.f90:134-140': [
+        ('DO jk =  1,  jpkm1', 1),
+        ('END DO   ;   END DO   ;   END DO', 1),
+        7],
+    'SWG_DG/BLD/ppsrc/nemo/sshwzv.f90:135-149': [
+        'CALL div_hor( kt, Kbb, Kmm )',
+        "CALL lbc_lnk( 'sshwzv', pssh(:,:,Kaa)",
+        15],
     'SWG_DG/BLD/ppsrc/nemo/diawri.f90:457,536-538': [
         'CALL histwrite( nid_T, "sossheig", kt, ssh(:,:,Kmm)',
         'CALL histwrite( nid_U, "vozocrtx", kt, uu(:,:,:,Kmm)',
