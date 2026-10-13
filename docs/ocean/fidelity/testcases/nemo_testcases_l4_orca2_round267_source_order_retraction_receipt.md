@@ -87,11 +87,11 @@ Principal SHA-256 values are:
 - refuted independent run: `b7c1706bbaed158dd5e1219de260a6b430c9bf83e2325ba0c089e00938180d60`;
 - refuted given-entry run: `2ea93ab09de7e0b70320e19d0c095012f69c81581bd4d77061495219073126ca`.
 
-The round-266/267 focused gate battery passes `20/20`. The private HPG and
-matched-stage-ratio hooks were used only for measurement and then retired;
-the final production package files are byte-identical to base. Because no
-production statement lands, ORCA2 trajectory and shared GYRE/DINO/tank gates
-are not invoked as landing evidence.
+The round-266/267 gates plus the citation-gate unit suite pass `37/37`. The
+private HPG and matched-stage-ratio hooks were used only for measurement and
+then retired; the final production package files are byte-identical to base.
+Because no production statement lands, ORCA2 trajectory and shared
+GYRE/DINO/tank gates are not invoked as landing evidence.
 
 The cumulative default citation audit and this receipt's four-citation audit
 both pass with zero unmapped citations, map-audit failures, or receipt
@@ -104,13 +104,11 @@ in-sandbox**. The diagnostics are retained in `citation_gate*.json` and
 
 The required once-only `tests/ocean/fidelity -n 12` battery reached 91%
 before the pytest controller vanished without a summary, with 3,166 passed,
-seven skipped, and four named reds. All four reproduce serially: the known
-GYRE-year harness-hash ratchet; a source-layout plant preflight that sees the
-round receipt as an uncommitted path; thirteen legacy unscoped allow-dirty
-drivers; and thirteen legacy unstamped report emitters. The latter three
-classes are tree/process ratchets rather than round-267 scientific failures;
-the source-layout plant is rechecked from the committed receipt tip below.
-No round-267 test is red.
+seven skipped, and four named reds. Serial disposition reproduces the three
+known tree ratchets: the GYRE-year harness hash, thirteen legacy unscoped
+allow-dirty drivers, and thirteen legacy unstamped report emitters. The
+fourth red was a clean-tree preflight observing the then-uncommitted receipt;
+it passes from the committed receipt tip (`1/1`). No round-267 test is red.
 
 ## OPEN
 
