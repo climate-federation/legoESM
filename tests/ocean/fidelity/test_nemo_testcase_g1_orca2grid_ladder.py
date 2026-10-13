@@ -275,19 +275,6 @@ needs_record4 = pytest.mark.skipif(
     reason="the 50-stage-step G1 record is not admitted on this machine")
 
 
-def test_stage1_sea_level_helper_is_nemos_order_bit_for_bit():
-    """stprk3_stg.f90:148.  Plant: the legacy order must differ somewhere, or
-    the comparison could not tell the two apart."""
-    from legoesm.ocean.eos import nemo_ssh_rk3_stage1
-    rng = np.random.default_rng(4)
-    b, a = rng.normal(size=(40, 50)) * 0.05, rng.normal(size=(40, 50)) * 0.05
-    nemo = (2.0 / 3.0) * b + (1.0 / 3.0) * a
-    assert np.array_equal(np.asarray(nemo_ssh_rk3_stage1(jnp.asarray(b), jnp.asarray(a))), nemo)
-    legacy = b + (a - b) / 3.0
-    assert np.count_nonzero(legacy != nemo) > 100
-    assert np.max(np.abs(legacy - nemo)) < 1.0e-16
-
-
 def test_only_the_g1_card_selects_nemos_stage1_sea_level():
     from legoesm.ocean.fidelity import nemo_testcase_recipe as recipe
     from legoesm.ocean.state import LatLonCGridOceanConfig

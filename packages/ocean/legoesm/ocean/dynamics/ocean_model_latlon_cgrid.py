@@ -7832,13 +7832,9 @@ class LatLonCGridOceanModel:
                 min_water_column_m=_cfg_b.min_water_column_m)
             _h_live_one_third = h_k_old + (_h_live_new - h_k_old) / 3.0
             _h_live_one_half = 0.5 * (h_k_old + _h_live_new)
-            _eta_live_one_third = (
-                state.eta.data
-                + (state_new.eta.data - state.eta.data) / 3.0)
-            if getattr(_cfg_b, "rk3_stage1_ssh_nemo_literal", False):
-                from legoesm.ocean.eos import nemo_ssh_rk3_stage1
-                _eta_live_one_third = nemo_ssh_rk3_stage1(
-                    state.eta.data, state_new.eta.data)
+            _eta_live_one_third = (  # card-selected: NEMO's order, stprk3_stg.f90:148 (two rounded products, one sum)
+                nemo_source_round(nemo_source_round((2.0 / 3.0) * state.eta.data) + nemo_source_round((1.0 / 3.0) * state_new.eta.data))  # noqa: E501
+                if getattr(_cfg_b, "rk3_stage1_ssh_nemo_literal", False) else state.eta.data + (state_new.eta.data - state.eta.data) / 3.0)  # noqa: E501
             _eta_live_one_half = 0.5 * (
                 state.eta.data + state_new.eta.data)
             _stage_entry_override = self._nemo_ws_test_hooks.stage_entry_override

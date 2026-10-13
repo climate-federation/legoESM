@@ -161,8 +161,10 @@ NEMO: two rounded products and one sum,
 `ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:148`. The shared RK3 path
 formed the level as the before value plus a third of the increment.
 New option LatLonCGridOceanConfig.rk3_stage1_ssh_nemo_literal, default False,
-the LAST field of its class; helper nemo_ssh_rk3_stage1 beside the existing
-stage-1 ratio helper. Searched first: grep for the stage-1 level and for
+the LAST field of its class; the statement sits inline at the one site,
+on the three lines the old expression occupied (no line of the model file
+moves, so earlier rounds' citations stay anchored), using the shared
+rounding guard. Searched first: grep for the stage-1 level and for
 citations of this block in packages/ocean (found the ratio helper
 nemo_r3t_rk3_stage1_stretch, which already does this for the T ratio; no
 sea-level twin). Caller grep afterwards (grep -rn rk3_stage1_ssh_nemo_literal
@@ -348,11 +350,16 @@ Single review (codex): **findings**, four CONFIRMED, two acted on. Log:
 - "no positive-icycle, header-geometry, expected-field-schema ... checks".
   Fixed: substep count, a minimum field list per frame, and field extent;
   tests added.
-"VERDICT: findings". The fixes were not re-reviewed. No second reviewer: a
+"VERDICT: findings". The fixes were not re-reviewed. After the review the
+landed statement was moved from a small helper to the same arithmetic inline
+(the citation gate showed the helper's four lines had shifted 39 earlier
+citations); that re-expression was not re-reviewed either. Its check is
+the test against NEMO's record (0 unequal cells) and the re-run in section
+11. No second reviewer: a
 single review, not a dual one.
 
 Focused tests, synchronous, final tree:
-- The three G1 files: **108 passed** (25 ladder, 21 tools, 62 card), including each new option's plant: the stage-1 row has 0 unequal
+- The three G1 files: **107 passed** (24 ladder, 21 tools, 62 card), including each new option's plant: the stage-1 row has 0 unequal
   cells with the option and over 500 without; step 17 is at the bar with
   NEMO's T, S and over it at the cell with the card's.
 - Six ratchets: 6153 passed, 2 skipped, 4 failed. None is in a file this
