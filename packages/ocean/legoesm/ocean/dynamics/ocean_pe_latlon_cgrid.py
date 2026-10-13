@@ -2674,10 +2674,17 @@ def _bc_pv_flux(
         # no relative vorticity is dropped silently here.
         zeta = jnp.zeros_like(curl_vertex_cgrid(u, v, grid))
     elif (een_metric_weighting == "nemo"
-            and vorticity_scheme in ("ene", "ene_total")):
+            and vorticity_scheme in ("ene", "ene_total", "een_total")):
         from legoesm.ocean.dynamics.latlon_cgrid_operators import (
             nemo_vor_ene_vorticity_cgrid,
         )
+        # NEMO uses the same written relative-vorticity circulation in ENE
+        # and EEN. dynvor.f90:755-770 forms the e2v*v east-minus-west and
+        # e1u*u north-minus-south products, then multiplies by r1_e1e2f.
+        # The shared tripolar curl is algebraically equivalent but reads a
+        # different metric association and does not preserve those statement
+        # boundaries. ``een_metric_weighting='nemo'`` already selects the
+        # corresponding literal transport metrics below.
         zeta = nemo_vor_ene_vorticity_cgrid(u, v, grid)
     else:
         zeta = curl_vertex_cgrid(u, v, grid)  # (n_lat+1, n_lon+1, nlev)
