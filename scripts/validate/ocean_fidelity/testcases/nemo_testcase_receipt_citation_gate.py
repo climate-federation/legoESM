@@ -1608,6 +1608,17 @@ CITATION_MAP = {
         ('zua = + r1_12 * r1_e1u(ji,jj)', 1),
         ('pv_rhs(ji,jj,jk) = pv_rhs(ji,jj,jk) + zva', 2),
         6],
+    # --- ORCA2 round 269: remaining transferred G1 statements -------
+    'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:361-364': [
+        ('hu_e  (:,:) =    (hu_0(:,:) *(1._wp+r3u(:,:,Kmm)))', 1),
+        ('hvr_e (:,:) = (r1_hv_0(:,:) /(1._wp+r3v(:,:,Kmm)))', 1),
+        4],
+    'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:509-520': [
+        ('ocean u- and v-depth at mid-step', 1),
+        ('END DO   ;   END DO', 5),
+        12],
+    'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:1077': [
+        'rDt_e = rn_Dt / REAL( nn_e , wp )'],
     # --- ORCA2 round 255: substep-2 SSH writer boundary split -------
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:550-558': [
         ('DO jj = ntsj-( 1), ntej+(  1 ) ; DO ji = ntsi-( 1), ntei+(  1)', 1),
