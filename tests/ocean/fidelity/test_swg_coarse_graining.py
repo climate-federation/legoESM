@@ -142,6 +142,16 @@ def test_jax_restrictor_matches_numpy_eager_jit_and_has_a_tangent():
     assert any(np.any(np.asarray(value) != 0.0) for value in tangent)
 
 
+def test_truth_source_decks_are_explicit_and_nested_at_dg50():
+    fine = coarse.truth_source_namelist("dg625")
+    sensitivity = coarse.truth_source_namelist("dg3125")
+    assert fine.nn_SWG == 16 and sensitivity.nn_SWG == 32
+    assert fine.rn_Dt_s == 50.0 and sensitivity.rn_Dt_s == 25.0
+    assert (fine.nn_SWG // 2, sensitivity.nn_SWG // 2) == (8, 16)
+    with pytest.raises(ValueError, match="unsupported truth source"):
+        coarse.truth_source_namelist("typo")
+
+
 def test_analytic_cgrid_face_staggering_selects_tiling_faces():
     source = coarse.cgrid_geometry(SWG_MADDISON_NAMELIST)
     target = coarse.cgrid_geometry(SWG_DG50_NAMELIST)

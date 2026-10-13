@@ -683,12 +683,22 @@ def _write_json_atomic(path: Path, payload: dict) -> None:
     temporary.replace(path)
 
 
+def truth_source_namelist(source_deck: str):
+    """Resolve one pre-registered truth resolution for dg50 restriction."""
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import SWG_MADDISON_NAMELIST
+    from legoesm.ocean.fidelity.swg_online_decks import SWG_DG3125_NAMELIST
+
+    decks = {"dg625": SWG_MADDISON_NAMELIST, "dg3125": SWG_DG3125_NAMELIST}
+    if source_deck not in decks:
+        raise ValueError(f"unsupported truth source deck {source_deck!r}")
+    return decks[source_deck]
+
+
 def filter_truth_directory(input_root: Path, output_root: Path, *,
-                           commit: str) -> dict:
+                           commit: str, source_deck: str = "dg625") -> dict:
     """Write conservatively restricted snapshots and diagnostic daily means."""
     from legoesm.ocean.fidelity.nemo_testcase_recipe import (
         SWG_DG50_NAMELIST,
-        SWG_MADDISON_NAMELIST,
     )
 
     if output_root.exists():
@@ -701,12 +711,13 @@ def filter_truth_directory(input_root: Path, output_root: Path, *,
             or manifest.get("sampling") != "daily_mean" \
             or manifest.get("completed_days") != manifest.get("days"):
         raise ValueError("input must be a complete daily-mean fine run")
-    expected_source = json.loads(json.dumps(SWG_MADDISON_NAMELIST._asdict()))
+    resolved_source = truth_source_namelist(source_deck)
+    expected_source = json.loads(json.dumps(resolved_source._asdict()))
     source_namelist = manifest.get("namelist", {})
     for field in expected_source.keys() - {"nn_itend", "nn_stock"}:
         if source_namelist.get(field) != expected_source[field]:
             raise ValueError(f"input fine deck differs at {field}")
-    source = cgrid_geometry(SWG_MADDISON_NAMELIST)
+    source = cgrid_geometry(resolved_source)
     target = cgrid_geometry(SWG_DG50_NAMELIST)
     gaussian_length_m = float(target["spacing_m"])
     output_root.mkdir(parents=True)
@@ -726,6 +737,7 @@ def filter_truth_directory(input_root: Path, output_root: Path, *,
         "source_manifest_sha256": sha256(manifest_path),
         "source_daily_sha256": source_hashes,
         "source_namelist": source_namelist,
+        "source_deck": source_deck,
         "target_namelist": SWG_DG50_NAMELIST._asdict(),
         "filter": {
             "name": "exact nested T-volume and native face-transport restriction",
@@ -774,7 +786,8 @@ def filter_truth_directory(input_root: Path, output_root: Path, *,
             "daily_means": metadata | {
                 "daily_mean_sampling": np.str_(
                     "restricted archived fine arithmetic-mean state; not mean transport"),
-                "daily_mean_sample_count": np.int64(1_728),
+                "daily_mean_sample_count": np.int64(
+                    86_400 / resolved_source.rn_Dt_s),
                 "ssh_daily_mean_m": daily_mean["T"],
                 "u_daily_mean_m_s": daily_mean["U"],
                 "v_daily_mean_m_s": daily_mean["V"]},
@@ -808,6 +821,8 @@ def main(argv=None) -> int:
     parser.add_argument("--output", type=Path)
     parser.add_argument("--audit-snapshot", type=Path)
     parser.add_argument("--source-manifest", type=Path)
+    parser.add_argument("--source-deck", choices=("dg625", "dg3125"),
+                        default="dg625")
     parser.add_argument("--json", type=Path)
     parser.add_argument("--plant-round1", action="store_true")
     args = parser.parse_args(argv)
@@ -820,6 +835,8 @@ def main(argv=None) -> int:
                 raise ValueError("audit requires --source-manifest and --json")
             if args.input is not None or args.output is not None:
                 raise ValueError("audit excludes --input and --output")
+            if args.source_deck != "dg625":
+                raise ValueError("audit currently admits only source deck dg625")
             report = audit_snapshot(
                 args.audit_snapshot, args.source_manifest, commit=commit,
                 plant_round1=args.plant_round1)
@@ -836,7 +853,8 @@ def main(argv=None) -> int:
                 or args.plant_round1:
             raise ValueError("conversion excludes audit-only arguments")
         manifests = filter_truth_directory(
-            args.input, args.output, commit=commit)
+            args.input, args.output, commit=commit,
+            source_deck=args.source_deck)
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"REFUSE: {exc}")
         return 2
