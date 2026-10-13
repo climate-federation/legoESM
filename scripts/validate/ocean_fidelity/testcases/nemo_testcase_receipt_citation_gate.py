@@ -148,6 +148,8 @@ FILES = {
         _ORCA2G1_P3 / "ppsrc/nemo/dynspg_ts.f90"),
     "ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/dommsk.f90": (
         _ORCA2G1_P3 / "ppsrc/nemo/dommsk.f90"),
+    "ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/lbcnfd.f90": (
+        _ORCA2G1_P3 / "ppsrc/nemo/lbcnfd.f90"),
     "ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/domqco.f90": (
         _ORCA2G1_P3 / "ppsrc/nemo/domqco.f90"),
     "ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90": (

@@ -1177,7 +1177,7 @@ def _nemo_literal_een_coefficients(eta, z_coord, dtype, scheme="een",
     # rather than relying on its multiplication by a recorded-zero r3f to hide
     # the difference (ORCA2 rounds 125-126).
     fmask = jnp.asarray(raw.fe3mask, dtype=dtype)
-    fmask = fmask if fold_pivot_row[1] else fmask.at[-1].set(_nemo_een_north_f(fmask, grid)[-1])  # noqa: E501
+    fmask = fmask.at[-1].set(_nemo_een_north_f(fmask, grid)[-1]) if not fold_pivot_row[1] else fmask  # noqa: E501
 
     def recip(depth, wet):
         return b(wet / b(depth + one - wet))
