@@ -148,7 +148,8 @@ def main() -> int:
             if args.measure else classify(args.control, args.candidate, args.plant)
         )
         require(args.plant == "none", f"{args.plant} plant stayed green")
-    except (OSError, KeyError, TypeError, ValueError, GateError) as error:
+    except (OSError, KeyError, TypeError, ValueError, GateError,
+            decision96.GateError) as error:
         marker = "PLANT-FIRED" if args.plant != "none" else "REFUSE"
         print(f"STATUS {marker} {args.plant}: {error}")
         return 2
