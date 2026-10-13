@@ -5360,3 +5360,28 @@ def test_mpas_vert4_flux_form_tracers_flag_flows_to_dycore_config():
             mpas_vert4_flux_form_tracers=typo))
         with pytest.raises(ValueError, match="mpas_vert4_flux_form_tracers"):
             bad.validate_strict()
+
+
+def test_mpas_vert4_log_form_tracers_flag_flows_to_dycore_config():
+    """--mpas-vert4-log-form-tracers reaches DycoreConfig as a tuple; absent
+    means none (production unchanged); typos and an overlap with the flux-form
+    list are refused at validation."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.dycore.mpas_vert4_log_form_tracers == ()
+    cfg_set = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--mpas-vert4-flux-form-tracers",
+        "--mpas-vert4-log-form-tracers", "q_v"]), parser))
+    assert cfg_set.dycore.mpas_vert4_log_form_tracers == ("q_v",)
+    assert cfg_set.dycore.mpas_vert4_flux_form_tracers == ()
+    cfg_set.validate_strict()
+    for typo in (("qv",), "q_v", ""):
+        bad = cfg_set._replace(dycore=cfg_set.dycore._replace(
+            mpas_vert4_log_form_tracers=typo))
+        with pytest.raises(ValueError, match="mpas_vert4_log_form_tracers"):
+            bad.validate_strict()
+    both = cfg_set._replace(dycore=cfg_set.dycore._replace(
+        mpas_vert4_flux_form_tracers=("q_v",)))
+    with pytest.raises(ValueError, match="each tracer takes one filter form"):
+        both.validate_strict()

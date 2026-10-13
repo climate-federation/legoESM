@@ -402,6 +402,13 @@ class DycoreConfig(NamedTuple):
     # 45-70N 70-150 hPa vapour 0.64 -> 4.05 ppmv, 100-200 hPa T -2.3 K).
     # Empty = every tracer projected (the pre-2026-10 form, for bit-comparison).
     mpas_vert4_flux_form_tracers: tuple = ("q_v",)
+    # Tracer names whose vertical del4 filter acts on ln(q + 1e-7) with a
+    # water-weighted, mass-conserving flux (``vertical_del4_tracer_tendency_log``):
+    # the flux form's fourth difference of q removes 4.5-8.8 %/day of
+    # upper-tropospheric water from ERA5 profiles; the log form does not drift
+    # an exponential-in-level profile.  Must not overlap the flux-form list.
+    # Default empty: production unchanged pending the 30-day pair (2026-10-13).
+    mpas_vert4_log_form_tracers: tuple = ()
 
 
 class EvaluationConfig(NamedTuple):
@@ -3792,6 +3799,20 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 f"dycore.mpas_vert4_flux_form_tracers: unknown tracer names {_bad} "
                 "(expected per-mass water/number tracers such as q_v)")
+        _v4l = getattr(d, "mpas_vert4_log_form_tracers", ())
+        if isinstance(_v4l, str):
+            errors.append(
+                "dycore.mpas_vert4_log_form_tracers must be a list of tracer "
+                f"names, got the string {_v4l!r}")
+        elif _bad := [n for n in (_v4l or ()) if n not in BORROW_ELIGIBLE_TRACERS]:
+            errors.append(
+                f"dycore.mpas_vert4_log_form_tracers: unknown tracer names {_bad} "
+                "(expected per-mass water/number tracers such as q_v)")
+        elif not isinstance(_v4f, str) and (
+                _both := sorted(set(_v4f or ()) & set(_v4l or ()))):
+            errors.append(
+                f"dycore: tracers {_both} are in both mpas_vert4_flux_form_tracers "
+                "and mpas_vert4_log_form_tracers; each tracer takes one filter form")
         if d.mpas_vert_advection_scheme not in _vert_adv_options:
             errors.append(
                 f"dycore.mpas_vert_advection_scheme must be one of "
