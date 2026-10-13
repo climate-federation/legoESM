@@ -28,7 +28,7 @@ REQUIRED = MESH + (
 SCALARS = {"jperio": 4, "jpkglo": 2, "ln_zco": 1, "ln_zps": 0}
 DEPTH_M = 100.0
 PLANTS = ("none", "missing-variable", "bad-level", "thin-cell", "wrong-jperio",
-          "wrong-dims", "nonfinite")
+          "wrong-dims", "nonfinite", "flat-e3t")
 
 
 class Refuse(RuntimeError):
@@ -67,6 +67,8 @@ def apply_plant(dims: dict, fields: dict, plant: str) -> None:
         dims["x"] -= 1
     elif plant == "nonfinite":
         fields["e1t"].flat[0] = np.nan
+    elif plant == "flat-e3t":
+        fields["e3t_0"] = fields["e3t_0"].reshape(DIMS["nav_lev"], DIMS["y"], DIMS["x"])[:1]
 
 
 def check(path: Path, shipped: Path | None = None, plant: str = "none") -> dict:
@@ -85,7 +87,11 @@ def check(path: Path, shipped: Path | None = None, plant: str = "none") -> dict:
     require(bottom.shape == (DIMS["y"], DIMS["x"]), f"bottom_level has shape {bottom.shape}")
     require(set(np.unique(bottom).tolist()) == {0, 1}, "bottom_level is not exactly {0, 1}")
     wet = bottom == 1
-    top_e3t = np.squeeze(fields["e3t_0"])[0]
+    e3t = fields["e3t_0"]
+    require(e3t.shape[-3:] == (DIMS["nav_lev"], DIMS["y"], DIMS["x"])
+            and e3t.size == wet.size * DIMS["nav_lev"],
+            f"e3t_0 has shape {e3t.shape}, not (nav_lev, y, x)")
+    top_e3t = e3t.reshape(DIMS["nav_lev"], DIMS["y"], DIMS["x"])[0]
     require(bool((top_e3t[wet] == DEPTH_M).all()), "e3t_0 is not 100 m on every wet cell")
     result = {
         "status": "PASS_G1_DOMAIN_CFG",

@@ -140,7 +140,7 @@ readonly DOMDIR=$EVIDENCE/domaincfg
 
 domain_cfg_admit() {   # $1 = directory for the logs; refuses unless complete
   local plant
-  for plant in missing-variable bad-level thin-cell wrong-jperio wrong-dims nonfinite; do
+  for plant in missing-variable bad-level thin-cell wrong-jperio wrong-dims nonfinite flat-e3t; do
     if python3 -I "$DOMCHECK" --domain-cfg "$DOMDIR/domain_cfg.nc" --plant "$plant" \
          >"$1/domain_plant_${plant}.log" 2>&1; then
       printf 'REFUSE: domain plant %s stayed green\n' "$plant" >&2; exit 72
@@ -170,6 +170,9 @@ domain_cfg_same_inputs() {
     && cmp -s "$DOMDIR/make_domain_cfg.exe" "$DOMTOOL/BLD/bin/make_domain_cfg.exe" \
     && [[ "$DOMDIR/coordinates.nc" -ef "$SHIPPED_DOMCFG" && -f "$DOMDIR/bathy_level.nc" ]] \
     || { printf 'REFUSE: %s was not built from the committed DOMAINcfg inputs\n' "$DOMDIR" >&2; exit 69; }
+  # An earlier admission's checksums, when present, must still hold.
+  [[ ! -f "$DOMDIR/domaincfg.sha256" ]] || ( cd "$DOMDIR" && sha256sum --quiet -c domaincfg.sha256 >&2 ) \
+    || { printf 'REFUSE: %s no longer matches its recorded checksums\n' "$DOMDIR" >&2; exit 69; }
   printf '%s\n' "$dom_commit"
 }
 
@@ -199,6 +202,7 @@ if [[ "$mode" == --admit-existing ]]; then
     [[ -e "$target" ]] || { printf 'REFUSE: nothing to admit, %s is absent\n' "$target" >&2; exit 69; }
   done
   mkdir -p "$EVIDENCE/manifest"
+  domain_cfg_admit "$EVIDENCE/manifest"
   admit
   exit 0
 fi
