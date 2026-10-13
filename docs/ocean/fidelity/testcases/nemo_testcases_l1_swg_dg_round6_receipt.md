@@ -1,9 +1,9 @@
 # NEMO testcase L1 SWG_DG round 6 receipt
 
 **Date:** 2026-10-12  
-**Status:** HELD — H1 and H3 are refuted; the frozen same-entry GPU replay for
-H2 is acquisition-blocked because this sandbox exposes no CUDA device.  No
-physics, configuration, production arithmetic, or fidelity bar changed.
+**Status:** LANDED — H1, H2, and H3 are refuted.  The operator completed the
+frozen same-entry GPU replay after this sandboxed round ended.  No physics,
+configuration, production arithmetic, or fidelity bar changed.
 
 ## Frozen question and instrument control
 
@@ -58,26 +58,22 @@ and `-fno-tree-vectorize`, with no explicit FP-contraction option.  Therefore
 the preregistered fast-math and FMA-instruction ownership criteria are both
 refuted; this does not prove that every possible CPU reassociation is absent.
 
-## H2 verdict — UNMEASURED, acquisition required
+## H2 verdict — REFUTED by the operator replay
 
-The committed launcher pins physical GPU 1 and the native-transcendental
-policy.  It reached JAX initialization but refused with
-`CUDA_ERROR_NO_DEVICE`; no GPU evidence file was created.  The operator's
-already accepted three-year native-GPU integrations remain strong supporting
-evidence—yearly instantaneous restarts are word-identical to NEMO through
-1,892,160 steps—but they do not satisfy this round's frozen same-admitted-entry
-test and are not substituted for it.
+The operator ran the committed launcher on physical GPU 1 under the native-
+transcendental policy.  The GPU replay retains exactly the CPU debt: SSH has
+1,278 unequal words with maximum residual
+`3.3881317890172014e-21` m, at the same cells; V has 408,318 unequal words,
+and the same four ratio fields differ.  The CPU and GPU saved inputs, all nine
+statement-probe arrays, and all 13 output arrays are word-identical;
+`first_probe_difference` is `NONE`.  Backend choice therefore does not own the
+stage debt, and the probe names no arithmetic owner.
 
-The exact operator command is:
-
-```text
-bash /data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/autopilot-swgdg-2423021149/scripts/run/run_swg_double_gyre_round6_gpu.sh
-```
-
-It will write `gpu_replay.npz`, `gpu_replay.json`, and
-`cpu_gpu_trace_comparison.json` under the round-6 evidence root.  H2 remains
-UNMEASURED until those products exist.  No backend or arithmetic owner is
-claimed.
+The admitted operator products are `gpu_replay.npz`, `gpu_replay.json`, and
+`cpu_gpu_trace_comparison.json` under the round-6 evidence root.  The two JSON
+SHA-256 digests are
+`e81ef24b4a0ec1ba846159effe93d2f2d14ecaaeff5b199ae41dba5980ab26e7`
+and `b7e274073f11f89526e60e7512e5706d53800792d873d92a1bde7d9c652b22f1`.
 
 ## H3 verdict — REFUTED
 
@@ -142,8 +138,8 @@ The failed pre-JSON payload is retained explicitly as
 
 ## Open and inherited items
 
-- H2 needs the operator GPU replay above.  Until then this round is HELD and
-  there is no arithmetic/backend owner for a decision.
+- H1, H2, and H3 are all refuted.  There is no CPU-fast-math, backend, or
+  NEMO-rank owner for the stage debt.
 - The inherited forcing signed-zero question remains open: compare forcing
   `+0.0` and `-0.0` numerically equal while keeping prognostic rows word-exact?
   The operator's pick remains yes for forcing-only rows; this round does not

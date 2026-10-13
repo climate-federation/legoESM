@@ -89,6 +89,7 @@ _SWG_COMPILED = NEMO / "tests/SWG_OMIP_L1/BLD/ppsrc/nemo"
 _SWG_DG_COMPILED = NEMO / "tests/SWG_DG/BLD/ppsrc/nemo"
 _SWG_P3_COMPILED = NEMO / "tests/SWG_OMIP_L1_P3/BLD/ppsrc/nemo"
 _SWG_P3D_COMPILED = NEMO / "tests/SWG_OMIP_L1_P3D/BLD/ppsrc/nemo"
+_SWG_DG_P3_COMPILED = NEMO / "tests/SWG_DG_OMIP_L1_P3/BLD/ppsrc/nemo"
 _SWG_DG_P3D_COMPILED = NEMO / "tests/SWG_DG_OMIP_L1_P3D/BLD/ppsrc/nemo"
 FILES = {
     "stprk3.F90": _OCE / "stprk3.F90",
@@ -185,6 +186,8 @@ FILES = {
         _SWG_P3D_COMPILED / "restart.f90"),
     "SWG_OMIP_L1_P3D/BLD/ppsrc/nemo/diawri.f90": (
         _SWG_P3D_COMPILED / "diawri.f90"),
+    "SWG_DG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90": (
+        _SWG_DG_P3_COMPILED / "stprk3.f90"),
     "SWG_DG_OMIP_L1_P3D/BLD/ppsrc/nemo/stprk3.f90": (
         _SWG_DG_P3D_COMPILED / "stprk3.f90"),
     # The frozen round-3 preregistration used these shortened names.  Pin
@@ -1684,6 +1687,19 @@ CITATION_MAP = {
         'rDt   = rn_Dt / 3._wp',
         ('vv(ji,jj,jk,Naa) = vv(ji,jj,jk,Nbb) + rDt * vv(ji,jj,jk,Nrhs)', 1),
         32],
+    'SWG_DG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:220-235': [
+        ("IF( kstp <= nit000 + 9 ) THEN", 2),
+        ('CALL swg_close( kstp, 2 )', 1),
+        16],
+    'SWG_DG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:238-255': [
+        ('uu(:,:,:,Nrhs) = 0._wp', 2),
+        ('CALL ssh_nxt( kstp, Nbb, Nnn, ssh, Naa )', 1),
+        18],
+    'SWG_DG_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:360,366,376': [
+        ("CALL lbc_lnk( 'stp_RK3', uu (:,:,:,Naa)", 3),
+        'Nbb = Naa',
+        'CALL rst_write    ( kstp, Nbb, Nbb )',
+        3],
     'SWG_DG/BLD/ppsrc/nemo/divhor.f90:134-140': [
         ('DO jk =  1,  jpkm1', 1),
         ('END DO   ;   END DO   ;   END DO', 1),
