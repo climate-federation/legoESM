@@ -1605,6 +1605,16 @@ class BarotropicConfig(NamedTuple):
     # neighbour. False keeps the model's dry top V row (depth = hv_0 there).
     # Needs ``barotropic_face_depth = "nemo_ssh_avg"`` and raw NEMO masks.
     barotropic_fold_top_v_face_ssh: bool = False
+    # NEMO's flux-form external velocity update in the written order
+    # (dynspg_ts.f90:557-568): the bracket times the inverse exit depth.
+    # False keeps the compiled division form. Requires the flux-form branch.
+    barotropic_flux_update_nemo_literal: bool = False
+    # NEMO forms rDt_e as the true quotient rn_Dt / REAL(nn_e, wp)
+    # (dynspg_ts.f90:886). False keeps the compiler-folded reciprocal product.
+    barotropic_substep_dt_nemo_literal: bool = False
+    # NEMO's loop-entry hu_e/hv_e is h0 * (1 + r3(Kmm))
+    # (dynspg_ts.f90:329-330). Read only by the literal flux-form update.
+    barotropic_entry_depth_nemo_literal: bool = False
 
 
 class RuntimeChecksConfig(NamedTuple):
@@ -3085,6 +3095,10 @@ class LatLonCGridOceanConfig(NamedTuple):
     # row below. True hands the 3-D vorticity trend that image row; False
     # keeps the legacy compact-grid dry row. Needs an active north fold.
     een_fold_image_v_row: bool = False
+    # NEMO's np_HYB stage-1 sea level (stprk3_stg.f90:148): two rounded
+    # products and one rounded sum. False keeps the algebraically equal
+    # increment-over-three expression.
+    rk3_stage1_ssh_nemo_literal: bool = False
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":

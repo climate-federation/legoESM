@@ -1726,8 +1726,11 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
     # and OMT card derived from this ORCA2 identity carries them explicitly.
     model_config = model_config._replace(
         een_fold_image_v_row=True,
+        rk3_stage1_ssh_nemo_literal=True,
         barotropic=model_config.barotropic._replace(
-            barotropic_fold_top_v_face_ssh=True),
+            barotropic_fold_top_v_face_ssh=True,
+            barotropic_substep_dt_nemo_literal=True,
+        ),
     )
     # zdfphy.F90:146-173 initializes the pre-closure coefficient memory
     # before zdf_tke_init.  This deck resolves nn_avb=0, nn_havtb=1, so avm_k

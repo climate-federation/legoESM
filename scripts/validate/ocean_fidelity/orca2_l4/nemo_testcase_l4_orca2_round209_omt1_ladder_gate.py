@@ -54,6 +54,10 @@ def build_omt1_card(deck_root: Path, *, plant: str = "none"):
         momentum_flux_scheme=rung_cfg.momentum_flux_scheme,
         vertical_momentum_scheme=rung_cfg.vertical_momentum_scheme,
         vorticity_scheme=rung_cfg.vorticity_scheme,
+        barotropic=cfg.barotropic._replace(
+            barotropic_flux_update_nemo_literal=False,
+            barotropic_entry_depth_nemo_literal=False,
+        ),
     )
     recipe = card.recipe._replace(model_config=cfg)
     return card._replace(
@@ -84,6 +88,10 @@ def validate_omt1_card(card) -> dict[str, object]:
             and cfg.bottom_drag.bottom_drag_bbl_thickness == 0.0
             and not cfg.zdf_drag_in_matrix
             and not cfg.barotropic_drag_substep
+        ),
+        "flux_only_statements_off": (
+            not cfg.barotropic.barotropic_flux_update_nemo_literal
+            and not cfg.barotropic.barotropic_entry_depth_nemo_literal
         ),
         "no_unmeasured": tuple(card.unmeasured_features) == (),
     }
