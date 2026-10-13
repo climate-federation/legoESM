@@ -257,13 +257,15 @@ def test_first_interior_event_is_far_from_any_boundary():
     three solver statements moved the event from cell (72, 70), 2 cells, to
     cell (94, 41), 1 cell: which cell flips is a last-place lottery.  Round
     6's stage-1 velocity statements removed the step-17 event; the first one
-    is now at step 23, 2 cells, largest at (74, 84)."""
+    was then at step 23, 2 cells, largest at (74, 84).  Round 7's stage
+    statements made steps 1 to 3 bit-identical and the first event is at
+    step 21, 1 cell, (76, 34): earlier, and registered in the receipt."""
     pytest.importorskip("netCDF4")
-    out = ladder.run(RECORD, arm="interior_events", kt_max=23, allow_dirty=True)
-    assert all(k["n_over_bar"] == 0 for k in out["per_kt"][:22])
-    ev = out["per_kt"][22]
-    assert ev["kt"] == 23 and ev["n_over_bar"] == 2 and ev["cell"] == [74, 84]
-    assert ev["region"] == "interior_open" and ev["cells_to_land"] > 10
+    out = ladder.run(RECORD, arm="interior_events", kt_max=21, allow_dirty=True)
+    assert all(k["n_over_bar"] == 0 for k in out["per_kt"][:20])
+    ev = out["per_kt"][20]
+    assert ev["kt"] == 21 and ev["n_over_bar"] == 1 and ev["cell"] == [76, 34]
+    assert ev["region"] == "interior_open" and ev["cells_to_land"] > 5
     assert ev["rows_to_fold"] > 50 and abs(ev["entry_error_at_cell"]) < 1.0e-16
     assert abs(ev["error"]) > 5.0e-15
     # NEMO's dynamic entry with the card's own T, S reproduces it
@@ -283,7 +285,7 @@ def test_only_the_g1_card_selects_nemos_stage1_sea_level():
     from legoesm.ocean.fidelity import nemo_testcase_recipe as recipe
     from legoesm.ocean.state import LatLonCGridOceanConfig
     assert LatLonCGridOceanConfig._field_defaults["rk3_stage1_ssh_nemo_literal"] is False
-    assert LatLonCGridOceanConfig._fields[-3] == "rk3_stage1_ssh_nemo_literal"
+    assert LatLonCGridOceanConfig._fields[-7] == "rk3_stage1_ssh_nemo_literal"
     src = Path(recipe.__file__).read_text()
     assert src.count("rk3_stage1_ssh_nemo_literal=True") == 1
     assert src.index("rk3_stage1_ssh_nemo_literal=True") > src.index(
@@ -332,13 +334,13 @@ def test_stage1_sea_level_is_nemos_bit_for_bit_only_when_selected(selected):
 @needs_record4
 @pytest.mark.parametrize("ts_from_chain", [False, True])
 def test_first_interior_event_is_carried_by_the_entry_tracers(ts_from_chain):
-    """One step from NEMO's entry of the first event's step (23 since round
-    6; 17 before): at the bar with NEMO's T and S, over it at the event cell
-    with the card's own.  Each arm is the other's plant."""
+    """One step from NEMO's entry of the first event's step (21 since round
+    7; 23 and 17 before): at the bar with NEMO's T and S, over it at the
+    event cell with the card's own.  Each arm is the other's plant."""
     pytest.importorskip("netCDF4")
-    ladder.CELL[:] = [74, 84]
+    ladder.CELL[:] = [76, 34]
     try:
-        out = ladder.run(RECORD4, arm="given_entry", kt_min=23, kt_max=23,
+        out = ladder.run(RECORD4, arm="given_entry", kt_min=21, kt_max=21,
                          allow_dirty=True, ts_from_chain=ts_from_chain)
     finally:
         ladder.CELL[:] = []
@@ -346,7 +348,7 @@ def test_first_interior_event_is_carried_by_the_entry_tracers(ts_from_chain):
     ssh = next(r for r in out["per_kt"][0]["rows"] if r["name"].endswith(".ssh"))
     if ts_from_chain:
         assert ssh["status"] != "AT-BAR" and abs(ssh["at_cell"]["error"]) > 5.0e-15
-        assert ssh["max_abs_cell"] == [74, 84]
+        assert ssh["max_abs_cell"] == [76, 34]
     else:
         assert ssh["status"] == "AT-BAR" and ssh["max_abs"] < 1.0e-16
 
