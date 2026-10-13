@@ -404,6 +404,190 @@ def conservative_restrict_cgrid(fields: dict[str, np.ndarray], source: dict,
     return output
 
 
+def gaussian_kernel_1d(*, sigma_cells: float,
+                       truncate: float = FILTER_TRUNCATE) -> np.ndarray:
+    """Return the normalized discrete Gaussian used by filtered restriction."""
+    if not np.isfinite(sigma_cells) or sigma_cells <= 0.0:
+        raise ValueError("Gaussian sigma must be positive finite")
+    if not np.isfinite(truncate) or truncate <= 0.0:
+        raise ValueError("Gaussian truncate must be positive finite")
+    radius = int(truncate * sigma_cells + 0.5)
+    offsets = np.arange(-radius, radius + 1, dtype=np.float64)
+    kernel = np.exp(-0.5 * (offsets / sigma_cells) ** 2)
+    return kernel / np.sum(kernel, dtype=np.float64)
+
+
+def _pad_even_cell_centres(values: np.ndarray, radius: int,
+                           axis: int) -> np.ndarray:
+    padding = [(0, 0)] * values.ndim
+    padding[axis] = (radius, radius)
+    return np.pad(values, padding, mode="symmetric")
+
+
+def _pad_odd_boundary_faces(values: np.ndarray, radius: int,
+                            axis: int) -> np.ndarray:
+    """Odd-extend a face field about its two zero-valued wall faces."""
+    if values.shape[axis] <= radius:
+        raise ValueError("Gaussian support exceeds the closed-basin face axis")
+    if np.any(np.take(values, (0, -1), axis=axis) != 0.0):
+        raise ValueError("normal transport on a closed wall must be exactly zero")
+    interior = np.arange(1, radius + 1)
+    left = -np.take(values, interior[::-1], axis=axis)
+    right = -np.take(values, values.shape[axis] - 1 - interior, axis=axis)
+    return np.concatenate((left, values, right), axis=axis)
+
+
+def _convolve_valid_axis(values: np.ndarray, kernel: np.ndarray,
+                         axis: int) -> np.ndarray:
+    return np.apply_along_axis(
+        lambda row: np.convolve(row, kernel, mode="valid"), axis, values)
+
+
+def filter_closed_cgrid_extensives(
+        cell_volume: np.ndarray, u_transport: np.ndarray,
+        v_transport: np.ndarray, *, sigma_cells: float,
+        truncate: float = FILTER_TRUNCATE,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Filter closed-basin cell volumes and staggered face transports.
+
+    Cell volumes are even about every wall.  A transport is odd about the wall
+    normal to its own direction and even about walls tangent to it.  These
+    parities make the extended-grid finite-volume divergence commute with the
+    same separable Gaussian while retaining exactly zero normal wall transport.
+    Arrays use the local closed-grid shapes ``T=(ny,nx)``,
+    ``U=(ny,nx+1)``, and ``V=(ny+1,nx)``.
+    """
+    volume = np.asarray(cell_volume, dtype=np.float64)
+    u = np.asarray(u_transport, dtype=np.float64)
+    v = np.asarray(v_transport, dtype=np.float64)
+    if volume.ndim != 2 or u.shape != (volume.shape[0], volume.shape[1] + 1) \
+            or v.shape != (volume.shape[0] + 1, volume.shape[1]):
+        raise ValueError("filtered C-grid extensives have incompatible shapes")
+    if not all(np.all(np.isfinite(value)) for value in (volume, u, v)):
+        raise ValueError("filtered C-grid extensives must be finite")
+    kernel = gaussian_kernel_1d(
+        sigma_cells=sigma_cells, truncate=truncate)
+    radius = kernel.size // 2
+
+    def convolve(values, parities):
+        result = values
+        for axis, parity in enumerate(parities):
+            padded = (_pad_even_cell_centres(result, radius, axis)
+                      if parity == "even" else
+                      _pad_odd_boundary_faces(result, radius, axis))
+            result = _convolve_valid_axis(padded, kernel, axis)
+        return result
+
+    filtered_volume = convolve(volume, ("even", "even"))
+    filtered_u = convolve(u, ("even", "odd"))
+    filtered_v = convolve(v, ("odd", "even"))
+    # The odd extension fixes both wall faces analytically.  Re-impose their
+    # exact floating-point representation after convolution roundoff.
+    filtered_u[:, (0, -1)] = 0.0
+    filtered_v[(0, -1), :] = 0.0
+    return filtered_volume, filtered_u, filtered_v
+
+
+def _local_closed_extensives(fields: dict[str, np.ndarray], geometry: dict,
+                              layout: dict[str, int]):
+    """Extract one rectangular SWG basin in closed T/U/V local convention."""
+    eta = np.asarray(fields["T"], dtype=np.float64)
+    sj0, sj1 = layout["source_j0"], layout["source_j1"]
+    si0, si1 = layout["source_i0"], layout["source_i1"]
+    mask = np.asarray(geometry["mask"]["T"], dtype=bool)
+    volume = (np.asarray(geometry["area"]["T"], dtype=np.float64)
+              * (np.asarray(geometry["reference_thickness"]["T"],
+                            dtype=np.float64)
+                 + np.where(mask, eta, 0.0)) * mask)
+    transports = native_face_transports(fields, geometry)
+    local_volume = volume[sj0:sj1 + 1, si0:si1 + 1]
+    local_u = np.zeros((local_volume.shape[0], local_volume.shape[1] + 1),
+                       dtype=np.float64)
+    local_v = np.zeros((local_volume.shape[0] + 1, local_volume.shape[1]),
+                       dtype=np.float64)
+    local_u[:, 1:] = transports["U"][sj0:sj1 + 1, si0:si1 + 1]
+    local_v[1:, :] = transports["V"][sj0:sj1 + 1, si0:si1 + 1]
+    return local_volume, local_u, local_v
+
+
+def _state_from_restricted_extensives(
+        coarse_volume: np.ndarray, coarse_transports: dict[str, np.ndarray],
+        target: dict) -> dict[str, np.ndarray]:
+    target_mask = np.asarray(target["mask"]["T"], dtype=bool)
+    eta = np.zeros_like(coarse_volume)
+    eta[target_mask] = (
+        coarse_volume[target_mask]
+        / np.asarray(target["area"]["T"], dtype=np.float64)[target_mask]
+        - np.asarray(target["reference_thickness"]["T"],
+                     dtype=np.float64)[target_mask])
+    output = {"T": eta}
+    for kind in ("U", "V"):
+        mask = np.asarray(target["mask"][kind], dtype=bool)
+        cross_section = (
+            np.asarray(target["face_length"][kind], dtype=np.float64)
+            * _live_face_thickness(eta, target, kind))
+        velocity = np.zeros_like(eta)
+        velocity[mask] = coarse_transports[kind][mask] / cross_section[mask]
+        output[kind] = velocity
+    return output
+
+
+def filtered_restrict_cgrid(
+        fields: dict[str, np.ndarray], source: dict, target: dict, *,
+        sigma_source_cells: float, truncate: float = FILTER_TRUNCATE,
+) -> dict[str, np.ndarray]:
+    """Gaussian-filter fine extensives, then restrict them conservatively."""
+    if set(fields) != {"T", "U", "V"}:
+        raise ValueError("fields must be exactly T, U, and V")
+    layout = _restriction_layout(source, target)
+    local = _local_closed_extensives(fields, source, layout)
+    volume, u_faces, v_faces = filter_closed_cgrid_extensives(
+        *local, sigma_cells=sigma_source_cells, truncate=truncate)
+
+    filtered_volume = np.zeros_like(np.asarray(source["area"]["T"]))
+    sj0, sj1 = layout["source_j0"], layout["source_j1"]
+    si0, si1 = layout["source_i0"], layout["source_i1"]
+    filtered_volume[sj0:sj1 + 1, si0:si1 + 1] = volume
+    filtered_transports = {
+        "U": np.zeros_like(filtered_volume), "V": np.zeros_like(filtered_volume)}
+    filtered_transports["U"][sj0:sj1 + 1, si0:si1 + 1] = u_faces[:, 1:]
+    filtered_transports["V"][sj0:sj1 + 1, si0:si1 + 1] = v_faces[1:, :]
+    coarse_volume = _restrict_t_cell_sum(
+        filtered_volume, source, target, layout)
+    coarse_transports = restrict_native_transports(
+        filtered_transports, source, target, layout)
+    return _state_from_restricted_extensives(
+        coarse_volume, coarse_transports, target)
+
+
+def filtered_restrict_transports(
+        transports: dict[str, np.ndarray], source: dict, target: dict, *,
+        sigma_source_cells: float, truncate: float = FILTER_TRUNCATE,
+) -> dict[str, np.ndarray]:
+    """Filter and restrict native face transports for temporal budgets."""
+    if set(transports) != {"U", "V"}:
+        raise ValueError("transports must be exactly U and V")
+    layout = _restriction_layout(source, target)
+    sj0, sj1 = layout["source_j0"], layout["source_j1"]
+    si0, si1 = layout["source_i0"], layout["source_i1"]
+    ny = sj1 - sj0 + 1
+    nx = si1 - si0 + 1
+    local_u = np.zeros((ny, nx + 1), dtype=np.float64)
+    local_v = np.zeros((ny + 1, nx), dtype=np.float64)
+    local_u[:, 1:] = np.asarray(
+        transports["U"], dtype=np.float64)[sj0:sj1 + 1, si0:si1 + 1]
+    local_v[1:, :] = np.asarray(
+        transports["V"], dtype=np.float64)[sj0:sj1 + 1, si0:si1 + 1]
+    _, filtered_u, filtered_v = filter_closed_cgrid_extensives(
+        np.zeros((ny, nx), dtype=np.float64), local_u, local_v,
+        sigma_cells=sigma_source_cells, truncate=truncate)
+    embedded = {"U": np.zeros_like(np.asarray(source["area"]["T"])),
+                "V": np.zeros_like(np.asarray(source["area"]["T"]))}
+    embedded["U"][sj0:sj1 + 1, si0:si1 + 1] = filtered_u[:, 1:]
+    embedded["V"][sj0:sj1 + 1, si0:si1 + 1] = filtered_v[1:, :]
+    return restrict_native_transports(embedded, source, target, layout)
+
+
 def conservative_restrict_daily_mean(
         mean_eta: np.ndarray, mean_transports: dict[str, np.ndarray],
         source: dict, target: dict) -> dict[str, np.ndarray]:
@@ -547,6 +731,121 @@ def build_jax_conservative_restrictor(source: dict, target: dict):
             target_umask > 0.0, u_denominator, 1.0) * target_umask
         coarse_v = coarse_v_transport / jnp.where(
             target_vmask > 0.0, v_denominator, 1.0) * target_vmask
+        return coarse_eta * target_masks["T"], coarse_u, coarse_v
+
+    return restrict
+
+
+def build_jax_filtered_restrictor(
+        source: dict, target: dict, *, sigma_source_cells: float,
+        truncate: float = FILTER_TRUNCATE):
+    """Build the closed-wall filtered restriction for an in-scan sampler."""
+    import jax
+    import jax.numpy as jnp
+
+    layout = _restriction_layout(source, target)
+    f = layout["factor"]
+    sj0, sj1 = layout["source_j0"], layout["source_j1"]
+    si0, si1 = layout["source_i0"], layout["source_i1"]
+    tj0, tj1 = layout["target_j0"], layout["target_j1"]
+    ti0, ti1 = layout["target_i0"], layout["target_i1"]
+    ny, nx = layout["target_ny"], layout["target_nx"]
+    fine_ny, fine_nx = f * ny, f * nx
+    kernel = jnp.asarray(gaussian_kernel_1d(
+        sigma_cells=sigma_source_cells, truncate=truncate))
+    radius = int(kernel.shape[0] // 2)
+    kernel2 = (kernel[:, None] * kernel[None, :])[None, None]
+
+    source_tmask = jnp.asarray(source["mask"]["T"], dtype=jnp.float64)
+    source_umask = jnp.asarray(source["mask"]["U"], dtype=jnp.float64)
+    source_vmask = jnp.asarray(source["mask"]["V"], dtype=jnp.float64)
+    source_area_t = jnp.asarray(source["area"]["T"], dtype=jnp.float64)
+    source_reference_t = jnp.asarray(
+        source["reference_thickness"]["T"], dtype=jnp.float64)
+    target_area_t = jnp.asarray(target["area"]["T"], dtype=jnp.float64)
+    target_reference_t = jnp.asarray(
+        target["reference_thickness"]["T"], dtype=jnp.float64)
+    target_masks = {
+        kind: jnp.asarray(target["mask"][kind], dtype=jnp.float64)
+        for kind in ("T", "U", "V")}
+
+    def live_h(eta, geometry, kind, mask):
+        area_t = jnp.asarray(geometry["area"]["T"], dtype=jnp.float64)
+        weighted = area_t * eta * jnp.asarray(
+            geometry["mask"]["T"], dtype=jnp.float64)
+        axis = 1 if kind == "U" else 0
+        numerator = 0.5 * (weighted + jnp.roll(weighted, -1, axis=axis))
+        denominator = (jnp.asarray(
+            geometry["reference_transport_depth"][kind], dtype=jnp.float64)
+            * jnp.asarray(geometry["area"][kind], dtype=jnp.float64))
+        ratio = numerator / jnp.where(mask > 0.0, denominator, 1.0) * mask
+        return jnp.asarray(
+            geometry["reference_thickness"][kind], dtype=jnp.float64) * (
+                1.0 + ratio)
+
+    def pad_even(values, axis):
+        pads = [(0, 0), (0, 0)]
+        pads[axis] = (radius, radius)
+        return jnp.pad(values, pads, mode="symmetric")
+
+    def pad_odd(values, axis):
+        indices = jnp.arange(1, radius + 1)
+        left = -jnp.take(values, indices[::-1], axis=axis)
+        right = -jnp.take(values, values.shape[axis] - 1 - indices, axis=axis)
+        return jnp.concatenate((left, values, right), axis=axis)
+
+    def convolve(values, parities):
+        padded = values
+        for axis, parity in enumerate(parities):
+            padded = pad_even(padded, axis) if parity == "even" \
+                else pad_odd(padded, axis)
+        return jax.lax.conv_general_dilated(
+            padded[None, None], kernel2, (1, 1), "VALID",
+            dimension_numbers=("NCHW", "OIHW", "NCHW"))[0, 0]
+
+    def restrict(eta, u_native, v_native):
+        volume = source_area_t * (
+            source_reference_t + eta * source_tmask) * source_tmask
+        transport_u = (jnp.asarray(source["face_length"]["U"])
+                       * live_h(eta, source, "U", source_umask)
+                       * u_native * source_umask)
+        transport_v = (jnp.asarray(source["face_length"]["V"])
+                       * live_h(eta, source, "V", source_vmask)
+                       * v_native * source_vmask)
+        local_volume = volume[sj0:sj1 + 1, si0:si1 + 1]
+        local_u = jnp.zeros((fine_ny, fine_nx + 1), dtype=eta.dtype).at[
+            :, 1:].set(transport_u[sj0:sj1 + 1, si0:si1 + 1])
+        local_v = jnp.zeros((fine_ny + 1, fine_nx), dtype=eta.dtype).at[
+            1:, :].set(transport_v[sj0:sj1 + 1, si0:si1 + 1])
+        filtered_volume = convolve(local_volume, ("even", "even"))
+        filtered_u = convolve(local_u, ("even", "odd")).at[:, (0, -1)].set(0.0)
+        filtered_v = convolve(local_v, ("odd", "even")).at[(0, -1), :].set(0.0)
+
+        coarse_volume_block = filtered_volume.reshape(
+            ny, f, nx, f).sum(axis=(1, 3))
+        coarse_eta_block = (
+            coarse_volume_block / target_area_t[tj0:tj1 + 1, ti0:ti1 + 1]
+            - target_reference_t[tj0:tj1 + 1, ti0:ti1 + 1])
+        coarse_eta = jnp.zeros_like(target_area_t).at[
+            tj0:tj1 + 1, ti0:ti1 + 1].set(coarse_eta_block)
+
+        selected_u = filtered_u[:, f * jnp.arange(1, nx)].reshape(
+            ny, f, nx - 1).sum(axis=1)
+        selected_v = filtered_v[f * jnp.arange(1, ny), :].reshape(
+            ny - 1, nx, f).sum(axis=2)
+        coarse_q_u = jnp.zeros_like(target_area_t).at[
+            tj0:tj1 + 1, ti0:ti1].set(selected_u)
+        coarse_q_v = jnp.zeros_like(target_area_t).at[
+            tj0:tj1, ti0:ti1 + 1].set(selected_v)
+        target_umask, target_vmask = target_masks["U"], target_masks["V"]
+        cross_u = (jnp.asarray(target["face_length"]["U"])
+                   * live_h(coarse_eta, target, "U", target_umask))
+        cross_v = (jnp.asarray(target["face_length"]["V"])
+                   * live_h(coarse_eta, target, "V", target_vmask))
+        coarse_u = coarse_q_u / jnp.where(
+            target_umask > 0.0, cross_u, 1.0) * target_umask
+        coarse_v = coarse_q_v / jnp.where(
+            target_vmask > 0.0, cross_v, 1.0) * target_vmask
         return coarse_eta * target_masks["T"], coarse_u, coarse_v
 
     return restrict

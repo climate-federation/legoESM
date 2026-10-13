@@ -151,6 +151,149 @@ def test_jax_restrictor_matches_numpy_eager_jit_and_has_a_tangent():
     assert any(np.any(np.asarray(value) != 0.0) for value in tangent)
 
 
+def test_filtered_extensives_commute_with_continuity_at_walls_and_corners():
+    rng = np.random.default_rng(904)
+    ny, nx = 73, 79
+    volume = rng.normal(size=(ny, nx))
+    u = np.zeros((ny, nx + 1), dtype=np.float64)
+    v = np.zeros((ny + 1, nx), dtype=np.float64)
+    u[:, 1:-1] = rng.normal(size=(ny, nx - 1))
+    v[1:-1, :] = rng.normal(size=(ny - 1, nx))
+    divergence = u[:, 1:] - u[:, :-1] + v[1:] - v[:-1]
+    filtered_divergence, _, _ = coarse.filter_closed_cgrid_extensives(
+        divergence, np.zeros_like(u), np.zeros_like(v), sigma_cells=4.0)
+    filtered_volume, filtered_u, filtered_v = (
+        coarse.filter_closed_cgrid_extensives(
+            volume, u, v, sigma_cells=4.0))
+    diagnosed = (filtered_u[:, 1:] - filtered_u[:, :-1]
+                 + filtered_v[1:] - filtered_v[:-1])
+    residual = diagnosed - filtered_divergence
+    wall = np.zeros_like(volume, dtype=bool)
+    wall[[0, -1], :] = True
+    wall[:, [0, -1]] = True
+    assert np.max(np.abs(residual[~wall])) < 2.0e-15
+    assert np.max(np.abs(residual[wall])) < 2.0e-15
+    assert np.all(filtered_u[:, (0, -1)] == 0.0)
+    assert np.all(filtered_v[(0, -1), :] == 0.0)
+    assert np.isclose(np.sum(filtered_volume), np.sum(volume),
+                      rtol=0.0, atol=2.0e-13)
+
+    # Plant the tempting even-reflection treatment on a normal transport.
+    kernel = coarse.gaussian_kernel_1d(sigma_cells=4.0)
+    radius = kernel.size // 2
+    wrong_u = coarse._convolve_valid_axis(
+        coarse._pad_even_cell_centres(u, radius, 1), kernel, 1)
+    wrong = wrong_u[:, 1:] - wrong_u[:, :-1]
+    assert np.max(np.abs(wrong[:, (0, -1)]
+                         - filtered_divergence[:, (0, -1)])) > 1.0e-3
+
+
+def test_filtered_extensive_transfer_function_and_temporal_continuity_plant():
+    n = 256
+    sigma = 8.0
+    wavelength = 64.0
+    x = np.arange(n, dtype=np.float64)
+    volume = np.cos(2.0 * np.pi * x / wavelength)[None, :] * np.ones((n, 1))
+    u = np.zeros((n, n + 1), dtype=np.float64)
+    v = np.zeros((n + 1, n), dtype=np.float64)
+    filtered, _, _ = coarse.filter_closed_cgrid_extensives(
+        volume, u, v, sigma_cells=sigma)
+    interior = np.s_[64:-64, 64:-64]
+    measured = np.sum(filtered[interior] * volume[interior]) / np.sum(
+        volume[interior] ** 2)
+    analytic = np.exp(-2.0 * np.pi**2 * sigma**2 / wavelength**2)
+    assert measured == pytest.approx(analytic, rel=3.0e-5)
+
+    rng = np.random.default_rng(611)
+    u[:, 1:-1] = rng.normal(size=(n, n - 1))
+    v[1:-1] = rng.normal(size=(n - 1, n))
+    divergence = u[:, 1:] - u[:, :-1] + v[1:] - v[:-1]
+    end = volume - divergence
+    start_f, _, _ = coarse.filter_closed_cgrid_extensives(
+        volume, np.zeros_like(u), np.zeros_like(v), sigma_cells=sigma)
+    end_f, u_f, v_f = coarse.filter_closed_cgrid_extensives(
+        end, u, v, sigma_cells=sigma)
+    residual = end_f - start_f + u_f[:, 1:] - u_f[:, :-1] \
+        + v_f[1:] - v_f[:-1]
+    assert np.max(np.abs(residual)) < 2.0e-15
+    wrong_end = end_f + 1.0
+    planted = wrong_end - start_f + u_f[:, 1:] - u_f[:, :-1] \
+        + v_f[1:] - v_f[:-1]
+    assert np.min(np.abs(planted)) > 0.99
+
+
+def test_filtered_restriction_jax_matches_numpy_and_uses_native_staggering():
+    import jax
+    import jax.numpy as jnp
+
+    source = coarse.cgrid_geometry(SWG_MADDISON_NAMELIST)
+    target = coarse.cgrid_geometry(SWG_DG50_NAMELIST)
+    fields = _synthetic_state(source, seed=505)
+    expected = coarse.filtered_restrict_cgrid(
+        fields, source, target, sigma_source_cells=8.0)
+    restrict = coarse.build_jax_filtered_restrictor(
+        source, target, sigma_source_cells=8.0)
+    arguments = tuple(jnp.asarray(fields[kind]) for kind in ("T", "U", "V"))
+    actual = jax.jit(restrict)(*arguments)
+    jax.block_until_ready(actual[0])
+    for kind, value in zip(("T", "U", "V"), actual, strict=True):
+        tolerance = 8.0e-13 if kind == "T" else 3.0e-15
+        np.testing.assert_allclose(
+            np.asarray(value), expected[kind], rtol=3.0e-15, atol=tolerance)
+    # Swapping native face components is a staggering violation, not a
+    # symmetry of this anisotropic manufactured state.
+    swapped = coarse.filtered_restrict_cgrid(
+        {"T": fields["T"], "U": fields["V"], "V": fields["U"]},
+        source, target, sigma_source_cells=8.0)
+    assert np.max(np.abs(swapped["U"] - expected["U"])) > 1.0e-5
+
+
+def test_filtered_restriction_temporal_continuity_including_coarse_walls():
+    source = coarse.cgrid_geometry(SWG_MADDISON_NAMELIST)
+    target = coarse.cgrid_geometry(SWG_DG50_NAMELIST)
+    rng = np.random.default_rng(606)
+    transports = {
+        kind: np.where(source["mask"][kind],
+                       rng.normal(scale=2.0e3,
+                                  size=source["mask"][kind].shape), 0.0)
+        for kind in ("U", "V")}
+    interval = 3_600.0
+    eta0 = np.zeros_like(source["mask"]["T"], dtype=np.float64)
+    eta1 = eta0 - interval * coarse.transport_divergence(transports, source)
+
+    def state(eta):
+        result = {"T": eta}
+        for kind in ("U", "V"):
+            cross = (source["face_length"][kind]
+                     * coarse.live_face_thickness(eta, source, kind))
+            result[kind] = np.where(
+                source["mask"][kind], transports[kind] / cross, 0.0)
+        return result
+
+    restricted0 = coarse.filtered_restrict_cgrid(
+        state(eta0), source, target, sigma_source_cells=8.0)
+    restricted1 = coarse.filtered_restrict_cgrid(
+        state(eta1), source, target, sigma_source_cells=8.0)
+    restricted_q = coarse.filtered_restrict_transports(
+        transports, source, target, sigma_source_cells=8.0)
+    residual = coarse.temporal_continuity_residual(
+        restricted0["T"], restricted1["T"], restricted_q, target, interval)
+    wet = target["mask"]["T"]
+    jj, ii = np.where(wet)
+    wall = np.zeros_like(wet)
+    wall[jj.min(), ii.min():ii.max() + 1] = True
+    wall[jj.max(), ii.min():ii.max() + 1] = True
+    wall[jj.min():jj.max() + 1, ii.min()] = True
+    wall[jj.min():jj.max() + 1, ii.max()] = True
+    assert np.max(np.abs(residual[wet & ~wall])) < 2.0e-16
+    assert np.max(np.abs(residual[wall])) < 2.0e-16
+    planted = restricted1["T"].copy()
+    planted[wet] += 1.0
+    wrong = coarse.temporal_continuity_residual(
+        restricted0["T"], planted, restricted_q, target, interval)
+    assert np.max(np.abs(wrong[wet])) >= 1.0 / interval
+
+
 def test_daily_mean_restricts_mean_transport_not_product_of_means():
     source = coarse.cgrid_geometry(SWG_MADDISON_NAMELIST)
     target = coarse.cgrid_geometry(SWG_DG50_NAMELIST)

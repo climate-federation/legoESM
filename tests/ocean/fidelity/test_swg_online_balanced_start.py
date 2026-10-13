@@ -94,3 +94,16 @@ def test_balanced_start_cli_exits_nonzero_on_failed_admission(
     assert balanced.main([
         "--existing-json", str(existing), "--hourly-root", str(tmp_path),
         "--json", str(tmp_path / "out.json")]) == 1
+
+
+@pytest.mark.parametrize("count,expected", [(8, 0), (7, 1)])
+def test_dual_operator_cli_applies_eight_of_ten_rule(
+        monkeypatch, tmp_path, count, expected):
+    monkeypatch.setattr(
+        balanced, "run_dual_operator_experiment",
+        lambda *args, **kwargs: {"summary": {
+            "filtered_pass_count": count, "box_pass_count": 10,
+            "selected_objective": "template" if count >= 8 else "symmetric"}})
+    assert balanced.main([
+        "--dual-operator", "--hourly-root", str(tmp_path),
+        "--json", str(tmp_path / f"out{count}.json")]) == expected

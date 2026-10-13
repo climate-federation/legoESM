@@ -4,6 +4,8 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import os
+import shutil
 import subprocess
 from pathlib import Path
 from typing import NamedTuple
@@ -237,14 +239,29 @@ def test_compiled_hourly_sampler_retains_right_endpoints_only():
     )
     scanned = driver.build_scanned_hourly_target_stepper(
         _IncrementModel(), 1.0, None, 1,
-        lambda eta, u, v: (eta, u, v))
+        {"box": lambda eta, u, v: (eta, u, v),
+         "filtered": lambda eta, u, v: (2.0 * eta, 2.0 * u, 2.0 * v)})
     final, hourly = scanned(state)
     jax.block_until_ready(final.eta.data)
     assert np.array_equal(
-        np.asarray(hourly[0])[:, 0, 0], np.arange(1.0, 25.0))
+        np.asarray(hourly[0][0])[:, 0, 0], np.arange(1.0, 25.0))
+    assert np.array_equal(
+        np.asarray(hourly[1][0])[:, 0, 0], 2.0 * np.arange(1.0, 25.0))
     assert float(np.asarray(final.eta.data)[0, 0]) == 24.0
-    assert np.asarray(hourly[1]).shape == (24, 2, 2)
-    assert np.asarray(hourly[2]).shape == (24, 2, 2)
+    assert np.asarray(hourly[0][1]).shape == (24, 2, 2)
+    assert np.asarray(hourly[1][2]).shape == (24, 2, 2)
+
+    without_sampler = driver.build_scanned_stepper(
+        _IncrementModel(), 1.0, None, 24)(state)
+    jax.block_until_ready(without_sampler.eta.data)
+    assert driver.prognostic_differences(final, without_sampler)["within_atol"]
+
+
+def test_hourly_sampler_refuses_missing_operator():
+    with pytest.raises(ValueError, match="box and filtered"):
+        driver.build_scanned_hourly_target_stepper(
+            _IncrementModel(), 1.0, None, 1,
+            {"box": lambda eta, u, v: (eta, u, v)})
 
 
 def test_zero_closure_truth_day_scan_matches_flat_training_segments_at_4_and_8d():
@@ -309,6 +326,42 @@ def test_gpu_wrapper_requires_a_physical_device_argument():
         ["bash", str(wrapper)], capture_output=True, text=True, check=False)
     assert result.returncode == 64
     assert "PHYSICAL_GPU" in result.stderr
+
+
+def test_hourly_chunk_wrapper_requires_range_and_preserves_memory_fraction(
+        tmp_path):
+    wrapper = _PATH.with_name("run_swg_online_hourly_chunks.sh")
+    result = subprocess.run(
+        ["bash", str(wrapper)], capture_output=True, text=True, check=False)
+    assert result.returncode == 64
+    assert "FIRST_RESTART_DAY" in result.stderr
+    local_wrapper = tmp_path / wrapper.name
+    shutil.copy2(wrapper, local_wrapper)
+    fake_driver = tmp_path / "run_swg_double_gyre_gpu.sh"
+    fake_driver.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -eu\n"
+        "out=${!#}\n"
+        "mkdir -p \"$out\"\n"
+        "printf '{\"status\": \"complete\"}\\n' > \"$out/manifest.json\"\n"
+        "printf '%s\\n' \"${XLA_PYTHON_CLIENT_MEM_FRACTION-UNSET}\" "
+        "> \"$out/memory_fraction.txt\"\n")
+    fake_driver.chmod(0o755)
+    output_root = tmp_path / "output"
+    incomplete = output_root / "sample_day0000_to_day0001"
+    incomplete.mkdir(parents=True)
+    (incomplete / "manifest.pending.json").write_text(
+        '{"status": "pending"}\n')
+    env = dict(os.environ, XLA_PYTHON_CLIENT_MEM_FRACTION=".37")
+    resumed = subprocess.run([
+        "bash", str(local_wrapper), "0", "0", "1", "1",
+        str(tmp_path / "truth"), str(output_root), "sample",
+    ], capture_output=True, text=True, check=False, env=env)
+    assert resumed.returncode == 0, resumed.stderr
+    assert "ARCHIVED_INCOMPLETE_CHUNK" in resumed.stderr
+    assert (Path(f"{incomplete}.interrupted")
+            / "manifest.pending.json").is_file()
+    assert (incomplete / "memory_fraction.txt").read_text().strip() == ".37"
 
 
 def test_snapshot_admission_and_bitwise_comparison_have_live_plants(tmp_path):

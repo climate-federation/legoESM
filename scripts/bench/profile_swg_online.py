@@ -22,11 +22,10 @@ from legoesm.training.swg_online import (
     SWGNetworkSpec,
     SWGScalarPotentialCNN,
     assert_network_gradients_live,
-    balanced_fields_from_native,
-    balanced_trajectory_loss,
     build_closure_geometry,
     build_segment_fn,
     create_swg_optimizer,
+    deterministic_trajectory_loss,
     network_parameter_count,
 )
 
@@ -62,7 +61,7 @@ def profile_metadata() -> dict:
     }
 
 
-def run_profile(window_days: int, mode: str) -> dict:
+def run_profile(window_days: int, mode: str, objective_operator: str) -> dict:
     """Compile and time one real-network sample; never update parameters."""
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
     if not jax.config.jax_enable_x64:
@@ -81,21 +80,18 @@ def run_profile(window_days: int, mode: str) -> dict:
     # update: this round proves plumbing and gradient reachability, not fit.
     optimizer = create_swg_optimizer(TrainingConfig(
         lr=1.0e-3, warmup_steps=0, total_steps=100,
-        weight_decay=4.0e-3, grad_clip_norm=1.0e30,
-        optimizer="adamw"))
+        weight_decay=4.0e-3, optimizer="adamw", schedule="constant",
+        clip_gradients=False, adam_epsilon=1.0e-7))
     optimizer.init(eqx.filter(network, eqx.is_inexact_array))
     normalizers = BalancedNormalizers(1.0, 1.0, 1.0)
 
     def objective(net):
         _, hourly = segment(net, initial, noise, key, jnp.asarray(0.0))
-        _, u, v = hourly
-        balanced = jax.vmap(
-            lambda u_hour, v_hour: balanced_fields_from_native(
-                u_hour, v_hour, geometry))(u, v)
-        predicted = jax.tree.map(lambda value: value[None], balanced)
-        target = jax.tree.map(jnp.zeros_like, balanced)
-        return balanced_trajectory_loss(
-            predicted, target, geometry, normalizers, kind="point",
+        predicted = tuple(value[None] for value in hourly)
+        target = tuple(jnp.zeros_like(value) for value in predicted)
+        return deterministic_trajectory_loss(
+            predicted, target, geometry, objective=objective_operator,
+            normalizers=normalizers,
             beta_m1_s1=card.resolved_namelist.rn_beta_m_s,
             basin_length_m=card.resolved_namelist.rn_domsiz_m)
 
@@ -128,6 +124,7 @@ def run_profile(window_days: int, mode: str) -> dict:
         **profile_metadata(),
         "window_days": window_days,
         "mode": mode,
+        "objective_operator": objective_operator,
         "coarse_steps": n_steps,
         "hourly_observations": window_days * 24,
         "backend": jax.default_backend(),
@@ -143,9 +140,11 @@ def main():
     parser.add_argument("--window-days", type=int, choices=(1, 2, 4, 8),
                         required=True)
     parser.add_argument("--mode", choices=("forward", "reverse"), required=True)
+    parser.add_argument("--objective", choices=("symmetric", "template"),
+                        required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
-    report = run_profile(args.window_days, args.mode)
+    report = run_profile(args.window_days, args.mode, args.objective)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
     print(json.dumps(report, indent=2, sort_keys=True))

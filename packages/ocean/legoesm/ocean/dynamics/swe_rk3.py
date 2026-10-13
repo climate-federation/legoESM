@@ -80,12 +80,20 @@ def swe_rotated_potential_forcing(
     the native C-grid continuity stencil.  Multiplying by ``vertex_mask``
     imposes zero potential on boundary vertices; this gives zero wall-normal
     force and makes the basin-integrated transport force telescope to zero.
+
+    Coordinates and signs are native NEMO C-grid: positive U is east and
+    positive V is north.  A positive northward potential difference produces
+    positive (eastward) U force; a positive eastward difference produces
+    negative (southward) V force.  Thus the map is the clockwise rotated
+    gradient ``(d potential/dy, -d potential/dx)``.
     """
     potential = jnp.asarray(potential_f) * (jnp.asarray(vertex_mask) != 0)
     south = jnp.concatenate(
         [jnp.zeros_like(potential[:1]), potential[:-1]], axis=0)
     west = jnp.concatenate(
         [jnp.zeros_like(potential[:, :1]), potential[:, :-1]], axis=1)
+    # East/north convention: +d_y(potential) -> +east U and
+    # +d_x(potential) -> -north V (clockwise rotated gradient).
     transport_u = (potential - south) * jnp.asarray(umask)
     transport_v = -(potential - west) * jnp.asarray(vmask)
     wet_u = jnp.asarray(umask) != 0

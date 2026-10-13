@@ -48,16 +48,26 @@ def test_gate_requires_three_seeds_and_all_distinct_constraints():
         "top_octave_ke_fraction": 0.004,
         "top_octave_enstrophy_fraction": 0.05,
         "native_grid_noise_index": 0.4,
+        "physical_health": {"passes": True},
     }
     assert evaluation.held_out_gate([good] * 3, controls)["pass"]
     with pytest.raises(ValueError, match="three"):
         evaluation.held_out_gate([good] * 2, controls)
     for key, bad_value in (
             ("basin_eke_ratio", 0.79),
-            ("top_octave_ke_fraction", 0.006),
+            ("top_octave_ke_fraction",
+             1.01 * evaluation.HELD_OUT_THRESHOLDS[
+                 "top_octave_ke_fraction"]),
             ("mean_face_transport_rmse_m3_s", 1.5e6)):
         planted = dict(good, **{key: bad_value})
         assert not evaluation.held_out_gate([planted] * 3, controls)["pass"]
+
+    physically_failed = dict(good, physical_health={
+        "passes": False, "all_finite": False,
+        "minimum_total_layer_thickness_m": -1.0, "maximum_courant": 2.0})
+    result = evaluation.held_out_gate([physically_failed] * 3, controls)
+    assert not result["pass"]
+    assert not result["physical_health_pass"]
 
 
 def test_registered_adversarial_plants_both_fail():
@@ -83,3 +93,24 @@ def test_arbitrary_native_arrays_use_same_score_and_health_path():
     assert score["wet_eke_map_nrmse"] == 0.0
     assert score["basin_eke_ratio"] == 1.0
     assert score["physical_health"]["passes"]
+
+
+def test_native_face_phase_flipped_checkerboard_fails_real_scorer():
+    card = evaluation.build_swg_card(evaluation.SWG_DG50_NAMELIST)
+    shape = tuple(card.recipe.land_mask.shape)
+    rng = np.random.default_rng(2026)
+    truth = (
+        rng.normal(scale=1.0e-3, size=(4,) + shape),
+        rng.normal(scale=1.0e-2, size=(4,) + shape),
+        rng.normal(scale=1.0e-2, size=(4,) + shape),
+    )
+    jj, ii = np.indices(shape)
+    checker = 0.1 * np.where((ii + jj) % 2, -1.0, 1.0)
+    phases = np.asarray([1.0, -1.0, 1.0, -1.0])[:, None, None]
+    candidate = (truth[0], truth[1] + phases * checker,
+                 truth[2] - phases * checker)
+    score = evaluation.score_native_trajectory(candidate, truth)
+    assert score["native_grid_noise_index"] \
+        > evaluation.HELD_OUT_THRESHOLDS["native_grid_noise_index"]
+    assert not evaluation.held_out_gate(
+        [score, score, score], _controls())["pass"]

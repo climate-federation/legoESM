@@ -255,12 +255,15 @@ def build_scanned_day_mean_stepper(model, dt_s: float, forcing, n_steps: int,
 
 
 def build_scanned_hourly_target_stepper(
-        model, dt_s: float, forcing, steps_per_hour: int, restrictor):
-    """Compile one day while retaining only 24 restricted hourly states."""
+        model, dt_s: float, forcing, steps_per_hour: int, restrictors):
+    """Compile one day while retaining two restricted hourly state streams."""
     import jax
 
     if type(steps_per_hour) is not int or steps_per_hour <= 0:
         raise ValueError("hourly target steps must be a positive integer")
+
+    if set(restrictors) != {"box", "filtered"}:
+        raise ValueError("hourly sampler requires box and filtered restrictors")
 
     def step_body(state, _):
         return model.step(state, dt_s, surface_forcing=forcing), None
@@ -268,8 +271,10 @@ def build_scanned_hourly_target_stepper(
     def hour_body(state, _):
         state, _ = jax.lax.scan(
             step_body, state, None, length=steps_per_hour)
-        coarse = restrictor(
+        arguments = (
             state.eta.data, state.u.data[:, 1:, 0], state.v.data[1:, :, 0])
+        coarse = tuple(restrictors[name](*arguments)
+                       for name in ("box", "filtered"))
         return state, coarse
 
     @jax.jit
@@ -614,6 +619,7 @@ def run_long(
     profile = None
     parity = None
     hourly_stepper = None
+    hourly_restrictors = None
     if mode in ("gpu-native", "cpu-scanned"):
         if restart is None:
             state = seed_steady_forcing_carry(state, forcing)
@@ -636,17 +642,28 @@ def run_long(
             )
             from legoesm.ocean.fidelity.swg_coarse_graining import (
                 build_jax_conservative_restrictor,
+                build_jax_filtered_restrictor,
                 cgrid_geometry,
             )
 
             steps_per_hour_f = SECONDS_PER_HOUR / card.dt_s
             if not float(steps_per_hour_f).is_integer():
                 raise ValueError("fine timestep must divide one hour")
-            restrictor = build_jax_conservative_restrictor(
-                cgrid_geometry(SWG_MADDISON_NAMELIST),
-                cgrid_geometry(SWG_DG50_NAMELIST))
+            source_geometry = cgrid_geometry(SWG_MADDISON_NAMELIST)
+            target_geometry = cgrid_geometry(SWG_DG50_NAMELIST)
+            sigma_source_cells = (
+                float(target_geometry["spacing_m"])
+                / float(source_geometry["spacing_m"]))
+            hourly_restrictors = {
+                "box": build_jax_conservative_restrictor(
+                    source_geometry, target_geometry),
+                "filtered": build_jax_filtered_restrictor(
+                    source_geometry, target_geometry,
+                    sigma_source_cells=sigma_source_cells),
+            }
             hourly_stepper = build_scanned_hourly_target_stepper(
-                model, card.dt_s, forcing, int(steps_per_hour_f), restrictor)
+                model, card.dt_s, forcing, int(steps_per_hour_f),
+                hourly_restrictors)
         if profile_steps:
             profile = profile_step_modes(
                 model, state, card.dt_s, forcing, profile_steps)
@@ -675,7 +692,7 @@ def run_long(
     output.mkdir(parents=True)
     manifest = {
         "schema": (
-            "legoesm-swg-double-gyre-hourly-target-v1"
+            "legoesm-swg-double-gyre-hourly-target-v2"
             if hourly_targets else
             "legoesm-swg-double-gyre-daily-v2"
             if daily_means else "legoesm-swg-double-gyre-daily-v1"),
@@ -692,10 +709,10 @@ def run_long(
         "integration": (
             "one-jitted-scan-per-day" if mode in ("gpu-native", "cpu-scanned")
             else "production-python-step-loop"),
-        "sampling": ("hourly_conservative_coarse_target" if hourly_targets else
+        "sampling": ("hourly_dual_coarse_target" if hourly_targets else
                      "daily_mean" if daily_means else "daily_snapshot"),
         "available_sampling": (
-            ["hourly_conservative_coarse_target"]
+            ["hourly_box_coarse_state", "hourly_filtered_coarse_state"]
             if hourly_targets else
             ["daily_mean", "end_of_day_snapshot"]
             if daily_means else ["end_of_day_snapshot"]),
@@ -727,10 +744,21 @@ def run_long(
         manifest["hourly_sampling"] = (
             "right-endpoint instantaneous state, restricted inside compiled scan")
         manifest["hourly_target_deck"] = "dg50"
+        manifest["hourly_operators"] = {
+            "box": (
+                "exact nested T-volume and native face-transport restriction"),
+            "filtered": (
+                "fine cell-volume and face-transport Gaussian, sigma=8 fine "
+                "cells, even scalar/tangential and odd normal wall parity, "
+                "then exact nested restriction"),
+        }
         manifest["fields"].update({
-            "ssh_hourly_m": "24 restricted hourly T-point SSH states",
-            "u_hourly_m_s": "24 restricted hourly native U velocities",
-            "v_hourly_m_s": "24 restricted hourly native V velocities",
+            "{operator}_ssh_initial_m": "coarse T-point state at segment t0",
+            "{operator}_u_initial_m_s": "coarse native U state at segment t0",
+            "{operator}_v_initial_m_s": "coarse native V state at segment t0",
+            "{operator}_ssh_hourly_m": "24 coarse hourly T-point states",
+            "{operator}_u_hourly_m_s": "24 coarse hourly native U states",
+            "{operator}_v_hourly_m_s": "24 coarse hourly native V states",
         })
     if profile_only:
         completed = manifest | {
@@ -748,6 +776,13 @@ def run_long(
         pending_path,
         manifest | {"status": "pending", "completed_days": 0,
                     "daily_sha256": day_hashes})
+
+    hourly_initial = None
+    if hourly_restrictors is not None:
+        initial_arguments = (
+            state.eta.data, state.u.data[:, 1:, 0], state.v.data[1:, :, 0])
+        hourly_initial = tuple(hourly_restrictors[name](*initial_arguments)
+                               for name in ("box", "filtered"))
 
     for day in range(1, days + 1):
         means = None
@@ -826,10 +861,17 @@ def run_long(
                 "absolute_hour": (
                     (source_day + day - 1) * HOURS_PER_DAY
                     + np.arange(1, HOURS_PER_DAY + 1, dtype=np.int64)),
-                "ssh_hourly_m": np.asarray(hourly[0], dtype=np.float64),
-                "u_hourly_m_s": np.asarray(hourly[1], dtype=np.float64),
-                "v_hourly_m_s": np.asarray(hourly[2], dtype=np.float64),
             })
+            for operator_index, operator in enumerate(("box", "filtered")):
+                operator_hourly = hourly[operator_index]
+                for field_index, (field, unit) in enumerate((
+                        ("ssh", "m"), ("u", "m_s"), ("v", "m_s"))):
+                    arrays[f"{operator}_{field}_hourly_{unit}"] = np.asarray(
+                        operator_hourly[field_index], dtype=np.float64)
+                    if day == 1:
+                        arrays[f"{operator}_{field}_initial_{unit}"] = np.asarray(
+                            hourly_initial[operator_index][field_index],
+                            dtype=np.float64)
         if day == 1 and verify_next is not None:
             comparison = compare_native_state_bitwise(state, verify_next)
             manifest["restart_next_verification"]["result"] = comparison

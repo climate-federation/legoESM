@@ -13,9 +13,11 @@ fraction of a second.
 """
 from __future__ import annotations
 
+import jax
+import jax.numpy as jnp
+import numpy as np
 import optax
 import pytest
-
 from legoesm.ml.training import TrainingConfig, create_optimizer
 
 
@@ -58,3 +60,46 @@ def test_normal_schedule_still_builds():
     opt = create_optimizer(
         TrainingConfig(lr=5e-4, warmup_steps=10, total_steps=100, optimizer="adam"))
     assert isinstance(opt, optax.GradientTransformation)
+
+
+def test_historical_defaults_match_previous_transform_bit_for_bit():
+    config = TrainingConfig()
+    factory = create_optimizer(config)
+    schedule = optax.warmup_cosine_decay_schedule(
+        init_value=0.0, peak_value=config.lr,
+        warmup_steps=config.warmup_steps, decay_steps=config.total_steps,
+        end_value=0.0)
+    previous = optax.chain(
+        optax.clip_by_global_norm(config.grad_clip_norm),
+        optax.adamw(learning_rate=schedule,
+                    weight_decay=config.weight_decay))
+    params = {"w": jnp.asarray([1.0, -2.0]), "b": jnp.asarray([0.5])}
+    grads = {"w": jnp.asarray([0.2, -0.3]), "b": jnp.asarray([0.1])}
+    factory_update, factory_state = factory.update(
+        grads, factory.init(params), params)
+    previous_update, previous_state = previous.update(
+        grads, previous.init(params), params)
+    for left, right in zip(
+            jax.tree.leaves((factory_update, factory_state)),
+            jax.tree.leaves((previous_update, previous_state)), strict=True):
+        assert np.array_equal(np.asarray(left), np.asarray(right))
+
+
+def test_constant_unclipped_adamw_matches_hand_computed_first_step():
+    config = TrainingConfig(
+        lr=1.0e-3, weight_decay=0.004, optimizer="adamw",
+        schedule="constant", clip_gradients=False, adam_epsilon=1.0e-7)
+    optimizer = create_optimizer(config)
+    params = {"w": jnp.asarray([2.0])}
+    grads = {"w": jnp.asarray([3.0])}
+    updates, _ = optimizer.update(grads, optimizer.init(params), params)
+    expected = -config.lr * (
+        3.0 / (3.0 + config.adam_epsilon) + config.weight_decay * 2.0)
+    assert float(updates["w"][0]) == pytest.approx(expected, rel=2.0e-7)
+
+
+def test_optimizer_explicit_options_fail_closed():
+    with pytest.raises(ValueError, match="Unknown schedule"):
+        create_optimizer(TrainingConfig(schedule="typo"))
+    with pytest.raises(ValueError, match="epsilon"):
+        create_optimizer(TrainingConfig(adam_epsilon=0.0))

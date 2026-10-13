@@ -29,11 +29,11 @@ EXPECTED_CONTROL_MANIFEST_SHA256 = {
 }
 HELD_OUT_THRESHOLDS = {
     "mean_face_transport_rmse_m3_s": 1_439_733.0572095357,
-    "ke_spectrum_relative_l1": 0.24850875740434986,
+    "ke_spectrum_relative_l1": 0.22300407134605818,
     "wet_eke_map_nrmse": 0.3936729545472666,
-    "top_octave_ke_fraction": 0.005639566984841285,
-    "top_octave_enstrophy_fraction": 0.06344752878701657,
-    "native_grid_noise_index": 0.5644431624632231,
+    "top_octave_ke_fraction": 0.05386245208452097,
+    "top_octave_enstrophy_fraction": 0.43591781489231474,
+    "native_grid_noise_index": 0.9317922221566435,
 }
 
 
@@ -233,8 +233,12 @@ def held_out_gate(seed_scores: list[dict], controls: dict[str, dict]) -> dict:
     noise_pass = all(
         seed[metric] <= worse[metric]
         for seed in seed_scores for metric in noise)
+    physical_health_pass = all(
+        seed.get("physical_health", {}).get("passes") is True
+        for seed in seed_scores)
     return {
-        "pass": bool(skill_pass and variability_pass and noise_pass),
+        "pass": bool(skill_pass and variability_pass and noise_pass
+                     and physical_health_pass),
         "raw_seed_scores": seed_scores,
         "seed_uncertainty_half_range": {
             metric: 0.5 * (max(seed[metric] for seed in seed_scores)
@@ -246,6 +250,7 @@ def held_out_gate(seed_scores: list[dict], controls: dict[str, dict]) -> dict:
         "skill_pass": bool(skill_pass),
         "variability_pass": bool(variability_pass),
         "spectral_health_pass": bool(noise_pass),
+        "physical_health_pass": bool(physical_health_pass),
     }
 
 
@@ -276,6 +281,7 @@ def adversarial_plants(controls: dict[str, dict]) -> dict:
         "wet_eke_map_nrmse", "basin_eke_ratio", "top_octave_ke_fraction",
         "top_octave_enstrophy_fraction", "native_grid_noise_index")
     ideal = {name: best[name] for name in metric_names}
+    ideal["physical_health"] = {"passes": True}
     for metric in metric_names[:3]:
         ideal[metric] = 0.0
     collapsed = dict(ideal, basin_eke_ratio=measured["collapsed_eke_ratio"])
@@ -288,9 +294,11 @@ def adversarial_plants(controls: dict[str, dict]) -> dict:
     if collapsed_gate["pass"] or noise_gate["pass"]:
         raise AssertionError("an adversarial closure passed the held-out gate")
     removes_noise_only = {name: best[name] for name in metric_names}
+    removes_noise_only["physical_health"] = {"passes": True}
     for metric in metric_names[4:]:
         removes_noise_only[metric] = 0.0
     adds_eke_only = {name: best[name] for name in metric_names}
+    adds_eke_only["physical_health"] = {"passes": True}
     adds_eke_only["basin_eke_ratio"] = 1.0
     removes_noise_gate = held_out_gate([removes_noise_only] * 3, controls)
     adds_eke_gate = held_out_gate([adds_eke_only] * 3, controls)

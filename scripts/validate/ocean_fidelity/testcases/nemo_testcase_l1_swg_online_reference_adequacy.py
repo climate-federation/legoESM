@@ -16,6 +16,9 @@ from nemo_testcase_l1_swg_dg_climate import (  # noqa: E402
     filtered_npz_provider,
     sha256,
 )
+from nemo_testcase_l1_swg_online_predictability import (  # noqa: E402
+    rotational_velocity_from_vorticity,
+)
 
 ADEQUACY_RELATIVE_BAR = 0.10
 EARLY_PATTERN_CORRELATION_BAR = 0.99
@@ -78,12 +81,12 @@ def early_path_metrics(candidate: dict[str, np.ndarray],
     """Compare common-path truncation error through the first eight days."""
     wet = np.asarray(wet, dtype=bool)
     records = {}
-    for name in ("ssh", "relative_vorticity", "velocity"):
+    for name in ("ssh", "relative_vorticity", "rotational_velocity"):
         left = np.asarray(candidate[name], dtype=np.float64)
         right = np.asarray(sensitivity[name], dtype=np.float64)
         if left.shape != right.shape or left.shape[0] < EARLY_DAYS:
             raise ValueError(f"early {name} arrays are incomplete")
-        if name == "velocity":
+        if name == "rotational_velocity":
             left_flat = left[:EARLY_DAYS, :, wet]
             right_flat = right[:EARLY_DAYS, :, wet]
         else:
@@ -129,7 +132,8 @@ def _load_early_fields(root: Path) -> dict[str, np.ndarray]:
     manifest = json.loads((root / "manifest.json").read_text())
     pins = manifest.get("output_daily_sha256", manifest.get("daily_sha256", {}))
     geometry = cgrid_geometry(SWG_DG50_NAMELIST)
-    fields = {name: [] for name in ("ssh", "relative_vorticity", "velocity")}
+    fields = {name: [] for name in (
+        "ssh", "relative_vorticity", "rotational_velocity")}
     for day in range(1, EARLY_DAYS + 1):
         path = root / f"day{day:04d}.npz"
         if sha256(path) != pins.get(path.name):
@@ -139,9 +143,12 @@ def _load_early_fields(root: Path) -> dict[str, np.ndarray]:
                       "U": np.asarray(saved["u_m_s"]),
                       "V": np.asarray(saved["v_m_s"])}
         fields["ssh"].append(native["T"])
-        fields["relative_vorticity"].append(
-            restricted_relative_vorticity(native, geometry))
-        fields["velocity"].append(np.stack((native["U"], native["V"])))
+        zeta = restricted_relative_vorticity(native, geometry)
+        fields["relative_vorticity"].append(zeta)
+        fields["rotational_velocity"].append(np.stack(
+            rotational_velocity_from_vorticity(
+                zeta, geometry["mask"]["T"],
+                float(geometry["spacing_m"]))))
     return {name: np.stack(value) for name, value in fields.items()}
 
 
@@ -205,7 +212,8 @@ def compare_references(candidate_root: Path, sensitivity_root: Path,
         "year1_statistics": annual,
         "rule": (
             "6.25 km is adequate only when days 1-8 have NRMS<=10% and "
-            "correlation>=0.99 for SSH/vorticity/velocity, and year-1 KE, EKE, "
+            "correlation>=0.99 for SSH/vorticity/rotational velocity, and "
+            "year-1 KE, EKE, "
             "jet and DST-spectrum differences are <=max(10%, measured 6.25-km "
             "year-to-year variability)"),
         "adequate": adequate,

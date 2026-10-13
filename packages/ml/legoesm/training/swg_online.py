@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple
 
@@ -16,9 +17,11 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
-from legoesm.grids.operators_latlon_cgrid import compute_vertex_mask
+from legoesm.grids.operators_latlon_cgrid import (
+    compute_vertex_mask,
+    curl_vertex_cgrid,
+)
 from legoesm.ml.training import TrainingConfig, create_optimizer
-from legoesm.ocean.diagnostics import relative_vorticity_cell_centre
 from legoesm.ocean.dynamics.latlon_cgrid_operators import compute_face_masks
 from legoesm.ocean.dynamics.swe_rk3 import (
     _entry_from_state,
@@ -31,6 +34,9 @@ from legoesm.training.inert_params import assert_no_inert
 
 SECONDS_PER_HOUR = 3_600
 ADMITTED_WINDOWS_DAYS = (1, 2, 4, 8)
+OBJECTIVE_OPERATORS = ("symmetric", "template")
+DATASET_GAP_HOURS = 30 * 24
+TEMPLATE_BATCH_SIZE = 10
 
 
 class SWGNetworkSpec(NamedTuple):
@@ -76,6 +82,38 @@ class BalancedNormalizers(NamedTuple):
     relative_vorticity_variance_s2: float
     rotational_u_variance_m2_s2: float
     rotational_v_variance_m2_s2: float
+
+
+class HourlyStateRecord(NamedTuple):
+    """One content-pinned coarse hourly state stream."""
+
+    ssh_m: np.ndarray
+    u_m_s: np.ndarray
+    v_m_s: np.ndarray
+    absolute_hour: np.ndarray
+    operator: str
+    source_root: str
+    manifest_sha256: str
+    includes_initial_state: bool
+
+
+class WindowBatch(NamedTuple):
+    """A batch of T0 states and hourly right-endpoint targets."""
+
+    initial: tuple[np.ndarray, np.ndarray, np.ndarray]
+    target: tuple[np.ndarray, np.ndarray, np.ndarray]
+    start_absolute_hour: np.ndarray
+    split: str
+    window_days: int
+
+
+class PinnedHourlySource(NamedTuple):
+    """Immutable membership and time coverage of one hourly chunk."""
+
+    root: str
+    manifest_sha256: str
+    first_absolute_hour: int
+    last_absolute_hour: int
 
 
 def build_closure_geometry(card) -> SWGClosureGeometry:
@@ -210,12 +248,26 @@ def _gaussian_smooth_wet(field, geometry: SWGClosureGeometry):
 
 
 def balanced_fields_from_native(u_native, v_native,
-                                geometry: SWGClosureGeometry):
-    """Diagnose smoothed vorticity and Dirichlet rotational velocity."""
+                                geometry: SWGClosureGeometry, *,
+                                objective: str):
+    """Diagnose objective-specific vorticity and rotational velocity.
+
+    ``symmetric`` applies the coarse-grid Gaussian to the model and target.
+    ``template`` leaves the model diagnostic unfiltered; its target state was
+    already filtered on the fine grid before restriction.
+    """
+    if objective not in OBJECTIVE_OPERATORS:
+        raise ValueError(
+            f"objective must be explicitly selected from {OBJECTIVE_OPERATORS}")
     u_full = jnp.concatenate([jnp.zeros_like(u_native[:, :1]), u_native], axis=1)
     v_full = jnp.concatenate([jnp.zeros_like(v_native[:1]), v_native], axis=0)
-    zeta = relative_vorticity_cell_centre(u_full, v_full, geometry.grid)
-    zeta = _gaussian_smooth_wet(zeta * geometry.tmask, geometry)
+    # The SWG vorticity degree of freedom lives at F points.  Do not average
+    # four vertices to T here: that average annihilates the native face-grid
+    # Nyquist mode which the template objective is specifically meant to see.
+    zeta = curl_vertex_cgrid(u_full, v_full, geometry.grid)[1:, 1:]
+    zeta = zeta * geometry.vertex_interior
+    if objective == "symmetric":
+        zeta = _gaussian_smooth_wet(zeta, geometry)
     j0, j1, i0, i1 = geometry.wet_bounds
     wet_zeta = zeta[j0:j1 + 1, i0:i1 + 1]
     spectral = geometry.sine_y.T @ wet_zeta @ geometry.sine_x
@@ -234,12 +286,13 @@ def balanced_fields_from_native(u_native, v_native,
 
 
 def diagnose_native_trajectory(hourly_native,
-                               geometry: SWGClosureGeometry):
-    """Apply one shared balanced diagnostic to model or truth native arrays."""
+                               geometry: SWGClosureGeometry, *,
+                               objective: str):
+    """Apply the selected shared diagnostic to model or truth native arrays."""
     _, u, v = hourly_native
     return jax.vmap(
         lambda u_hour, v_hour: balanced_fields_from_native(
-            u_hour, v_hour, geometry))(u, v)
+            u_hour, v_hour, geometry, objective=objective))(u, v)
 
 
 def _sha256(path: Path) -> str:
@@ -251,28 +304,320 @@ def _sha256(path: Path) -> str:
 
 
 def load_content_pinned_hourly_segment(
-        root: Path, *, expected_manifest_sha256: str,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Load one complete four-day target only when every digest is admitted."""
+        root: Path, *, expected_manifest_sha256: str, operator: str,
+) -> HourlyStateRecord:
+    """Load one complete v1/v2 hourly stream with exact content membership."""
+    if operator not in OBJECTIVE_OPERATORS:
+        raise ValueError(
+            f"operator must be explicitly selected from {OBJECTIVE_OPERATORS}")
     manifest_path = root / "manifest.json"
     if _sha256(manifest_path) != expected_manifest_sha256:
         raise ValueError("hourly target manifest differs from registered split")
     manifest = json.loads(manifest_path.read_text())
-    if manifest.get("status") != "complete" or manifest.get("completed_days") != 4:
-        raise ValueError("hourly target segment is not a complete four-day run")
-    arrays = {name: [] for name in (
-        "ssh_hourly_m", "u_hourly_m_s", "v_hourly_m_s")}
-    for day in range(1, 5):
+    days = manifest.get("days")
+    if manifest.get("status") != "complete" \
+            or manifest.get("completed_days") != days \
+            or not isinstance(days, int) or days <= 0:
+        raise ValueError("hourly target segment is not a complete run")
+    schema = manifest.get("schema")
+    if schema == "legoesm-swg-double-gyre-hourly-target-v1":
+        if operator != "symmetric":
+            raise ValueError("v1 hourly targets contain only the box operator")
+        prefix = ""
+        includes_initial = False
+    elif schema == "legoesm-swg-double-gyre-hourly-target-v2":
+        prefix = "box_" if operator == "symmetric" else "filtered_"
+        includes_initial = True
+    else:
+        raise ValueError(f"unsupported hourly target schema {schema!r}")
+    keys = tuple(f"{prefix}{name}" for name in (
+        "ssh_hourly_m", "u_hourly_m_s", "v_hourly_m_s"))
+    arrays = {name: [] for name in keys}
+    absolute_hours = []
+    initial = None
+    pins = manifest.get("daily_sha256", {})
+    if set(pins) != {f"day{day:04d}.npz" for day in range(1, days + 1)}:
+        raise ValueError("hourly manifest does not pin the exact daily membership")
+    for day in range(1, days + 1):
         path = root / f"day{day:04d}.npz"
-        if _sha256(path) != manifest.get("daily_sha256", {}).get(path.name):
+        if _sha256(path) != pins.get(path.name):
             raise ValueError(f"hourly target digest differs: {path.name}")
         with np.load(path, allow_pickle=False) as saved:
-            if int(np.asarray(saved["absolute_hour"])[0]) != (
-                    int(manifest["restart"]["source_day"]) + day - 1) * 24 + 1:
+            hours = np.asarray(saved["absolute_hour"], dtype=np.int64)
+            expected_first = (
+                int(manifest["restart"]["source_day"]) + day - 1) * 24 + 1
+            if hours.shape != (24,) or int(hours[0]) != expected_first \
+                    or not np.array_equal(hours, np.arange(
+                        expected_first, expected_first + 24, dtype=np.int64)):
                 raise ValueError("hourly target has wrong absolute-time lineage")
+            absolute_hours.append(hours)
             for name in arrays:
                 arrays[name].append(np.asarray(saved[name], dtype=np.float64))
-    return tuple(np.concatenate(arrays[name], axis=0) for name in arrays)
+            if day == 1 and includes_initial:
+                initial_keys = tuple(f"{prefix}{name}" for name in (
+                    "ssh_initial_m", "u_initial_m_s", "v_initial_m_s"))
+                initial = tuple(np.asarray(saved[name], dtype=np.float64)
+                                for name in initial_keys)
+    fields = tuple(np.concatenate(arrays[name], axis=0) for name in keys)
+    hours = np.concatenate(absolute_hours)
+    if includes_initial:
+        if initial is None:
+            raise ValueError("v2 hourly stream is missing its initial state")
+        fields = tuple(np.concatenate((value[None], field), axis=0)
+                       for value, field in zip(initial, fields, strict=True))
+        hours = np.concatenate((np.asarray([hours[0] - 1]), hours))
+    if not all(np.all(np.isfinite(value)) for value in fields):
+        raise ValueError("hourly target contains a non-finite state")
+    return HourlyStateRecord(
+        *fields, hours, operator, str(root.resolve()),
+        expected_manifest_sha256, includes_initial)
+
+
+@dataclass(frozen=True)
+class SWGDatasetContract:
+    """Validated, split-safe view of content-pinned hourly state records."""
+
+    objective: str
+    splits: dict[str, tuple[int, int]]
+    sources: tuple[PinnedHourlySource, ...]
+    contract_path: str
+    contract_sha256: str
+    batch_size: int
+
+    @staticmethod
+    def from_json(path: Path) -> SWGDatasetContract:
+        payload = json.loads(path.read_text())
+        if payload.get("schema") != "legoesm-swg-online-dataset-v1":
+            raise ValueError("unsupported SWG dataset contract schema")
+        objective = payload.get("objective")
+        if objective not in OBJECTIVE_OPERATORS:
+            raise ValueError("dataset objective must be symmetric or template")
+        if payload.get("batch_size") != TEMPLATE_BATCH_SIZE:
+            raise ValueError("dataset contract must use batch size 10")
+        if tuple(payload.get("window_days", ())) != ADMITTED_WINDOWS_DAYS:
+            raise ValueError("dataset contract must register 1/2/4/8-day windows")
+        raw_splits = payload.get("splits", {})
+        if set(raw_splits) != {"train", "validation", "test"}:
+            raise ValueError("dataset requires train, validation, and test splits")
+        splits = {}
+        for name, bounds in raw_splits.items():
+            if not isinstance(bounds, list) or len(bounds) != 2 \
+                    or not all(isinstance(value, int) for value in bounds) \
+                    or bounds[0] >= bounds[1]:
+                raise ValueError(f"invalid {name} split bounds")
+            splits[name] = (bounds[0], bounds[1])
+        ordered = [splits[name] for name in ("train", "validation", "test")]
+        for left, right in zip(ordered[:-1], ordered[1:], strict=True):
+            if right[0] - left[1] < DATASET_GAP_HOURS:
+                raise ValueError("dataset splits require a gap of at least 30 days")
+        sources = payload.get("sources")
+        if not isinstance(sources, list) or not sources:
+            raise ValueError("dataset contract has no content-pinned sources")
+        pins = []
+        memberships = set()
+        for source in sources:
+            if set(source) != {"root", "manifest_sha256"}:
+                raise ValueError("dataset source membership is ambiguous")
+            membership = (source["root"], source["manifest_sha256"])
+            if membership in memberships:
+                raise ValueError("dataset source membership is duplicated")
+            memberships.add(membership)
+            root = Path(source["root"])
+            manifest_path = root / "manifest.json"
+            if _sha256(manifest_path) != source["manifest_sha256"]:
+                raise ValueError("dataset source manifest differs from contract")
+            manifest = json.loads(manifest_path.read_text())
+            days = manifest.get("days")
+            if manifest.get("schema") \
+                    != "legoesm-swg-double-gyre-hourly-target-v2" \
+                    or manifest.get("status") != "complete" \
+                    or manifest.get("completed_days") != days:
+                raise ValueError(
+                    "training dataset sources require v2 stored initial states")
+            source_day = int(manifest["restart"]["source_day"])
+            pins.append(PinnedHourlySource(
+                str(root.resolve()), source["manifest_sha256"],
+                source_day * 24, (source_day + int(days)) * 24))
+        contract = SWGDatasetContract(
+            objective=objective, splits=splits, sources=tuple(pins),
+            contract_path=str(path.resolve()), contract_sha256=_sha256(path),
+            batch_size=TEMPLATE_BATCH_SIZE)
+        contract._validate_coverage()
+        return contract
+
+    def _validate_coverage(self) -> None:
+        ordered = sorted(self.sources, key=lambda source: source.first_absolute_hour)
+        for left, right in zip(ordered[:-1], ordered[1:], strict=True):
+            if right.first_absolute_hour < left.last_absolute_hour:
+                raise ValueError("content-pinned hourly sources overlap ambiguously")
+            if right.first_absolute_hour == left.last_absolute_hour:
+                left_state = self._endpoint_state(left, final=True)
+                right_state = self._endpoint_state(right, final=False)
+                if not all(np.array_equal(a, b) for a, b in zip(
+                        left_state, right_state, strict=True)):
+                    raise ValueError(
+                        "adjacent hourly chunks disagree at restart hour")
+        for split, (start, end) in self.splits.items():
+            covered_through = start
+            for source in ordered:
+                if source.last_absolute_hour < covered_through:
+                    continue
+                if source.first_absolute_hour > covered_through:
+                    break
+                covered_through = max(
+                    covered_through, source.last_absolute_hour)
+                if covered_through >= end:
+                    break
+            if covered_through < end:
+                raise ValueError(
+                    f"{split} split is not a contiguous pinned hourly record")
+
+    def _endpoint_state(self, source: PinnedHourlySource, *, final: bool):
+        root = Path(source.root)
+        manifest = json.loads((root / "manifest.json").read_text())
+        day = int(manifest["days"]) if final else 1
+        path = root / f"day{day:04d}.npz"
+        if _sha256(path) != manifest["daily_sha256"].get(path.name):
+            raise ValueError("hourly chunk endpoint differs from its manifest")
+        prefix = "box_" if self.objective == "symmetric" else "filtered_"
+        with np.load(path, allow_pickle=False) as saved:
+            if final:
+                return tuple(np.asarray(saved[f"{prefix}{name}_hourly_{unit}"])[-1]
+                             for name, unit in (("ssh", "m"), ("u", "m_s"),
+                                                ("v", "m_s")))
+            return tuple(np.asarray(saved[f"{prefix}{name}_initial_{unit}"])
+                         for name, unit in (("ssh", "m"), ("u", "m_s"),
+                                            ("v", "m_s")))
+
+    def _load_source(self, source: PinnedHourlySource) -> HourlyStateRecord:
+        return load_content_pinned_hourly_segment(
+            Path(source.root), expected_manifest_sha256=source.manifest_sha256,
+            operator=self.objective)
+
+    def _source_for_hour(self, hour: int) -> PinnedHourlySource:
+        matches = [source for source in self.sources
+                   if source.first_absolute_hour <= hour
+                   <= source.last_absolute_hour]
+        if not matches:
+            raise ValueError(f"dataset source gap at absolute hour {hour}")
+        if len(matches) > 1:
+            # Adjacent chunks share only the restart/end-point hour.  Either
+            # byte-identical copy is admissible; the per-batch loader checks it.
+            return sorted(matches, key=lambda source: source.root)[0]
+        return matches[0]
+
+    def _require_split(self, split: str) -> tuple[int, int]:
+        if split not in self.splits:
+            raise ValueError(f"unknown or leaked dataset split {split!r}")
+        return self.splits[split]
+
+    def batches(self, *, split: str, window_days: int,
+                epoch: int, seed: int):
+        """Build seeded, shuffled, non-overlapping template batches."""
+        start_bound, end_bound = self._require_split(split)
+        if window_days not in ADMITTED_WINDOWS_DAYS:
+            raise ValueError("window must be one of 1, 2, 4, or 8 days")
+        if type(epoch) is not int or epoch < 0 or type(seed) is not int:
+            raise ValueError("dataset epoch and seed must be integers")
+        window_hours = 24 * window_days
+        rng = np.random.default_rng(np.random.SeedSequence((seed, epoch)))
+        offset = int(rng.integers(0, window_hours))
+        starts = np.arange(
+            start_bound + offset, end_bound - window_hours + 1,
+            window_hours, dtype=np.int64)
+        rng.shuffle(starts)
+        usable = (starts.size // self.batch_size) * self.batch_size
+        starts = starts[:usable]
+        for first in range(0, starts.size, self.batch_size):
+            batch_starts = starts[first:first + self.batch_size]
+            cache = {}
+
+            def state(hour):
+                source = self._source_for_hour(int(hour))
+                if source not in cache:
+                    cache[source] = self._load_source(source)
+                record = cache[source]
+                indices = np.flatnonzero(record.absolute_hour == hour)
+                if indices.size != 1:
+                    raise ValueError(
+                        f"hour {hour} is not unique in its content-pinned source")
+                index = int(indices[0])
+                return record.ssh_m[index], record.u_m_s[index], record.v_m_s[index]
+
+            initial = tuple(np.stack([
+                state(int(start))[field] for start in batch_starts])
+                for field in range(3))
+            target = tuple(np.stack([
+                np.stack([state(int(start) + lead)[field]
+                          for lead in range(1, window_hours + 1)])
+                for start in batch_starts]) for field in range(3))
+            batch = WindowBatch(
+                initial, target, batch_starts, split, window_days)
+            self.validate_batch_membership(batch)
+            yield batch
+
+    def training_normalizers(
+            self, geometry: SWGClosureGeometry) -> tuple[BalancedNormalizers, dict]:
+        """Compute normalizers structurally from train hours and provenance."""
+        start, end = self.splits["train"]
+        weights = np.asarray(
+            geometry.area_t_m2 * geometry.tmask, dtype=np.float64)
+        weights /= np.sum(weights, dtype=np.float64)
+        sums = np.zeros(3, dtype=np.float64)
+        squares = np.zeros(3, dtype=np.float64)
+        count = 0
+        for source in sorted(
+                self.sources, key=lambda item: item.first_absolute_hour):
+            if source.last_absolute_hour < start \
+                    or source.first_absolute_hour > end:
+                continue
+            record = self._load_source(source)
+            selected = ((record.absolute_hour >= start)
+                        & (record.absolute_hour <= end))
+            if not np.any(selected):
+                continue
+            native = tuple(jnp.asarray(value[selected]) for value in (
+                record.ssh_m, record.u_m_s, record.v_m_s))
+            diagnosed = diagnose_native_trajectory(
+                native, geometry, objective=self.objective)
+            for index, value in enumerate(diagnosed):
+                array = np.asarray(value, dtype=np.float64)
+                sums[index] += np.sum(array * weights, dtype=np.float64)
+                squares[index] += np.sum(array * array * weights,
+                                         dtype=np.float64)
+            count += int(np.count_nonzero(selected))
+        if count != end - start + 1:
+            raise ValueError("training split is not a contiguous pinned record")
+        variances = squares / count - (sums / count) ** 2
+        if np.any(~np.isfinite(variances)) or np.any(variances <= 0.0):
+            raise ValueError("training split variance is not positive finite")
+        normalizers = BalancedNormalizers(*map(float, variances))
+        provenance = {
+            "contract_path": self.contract_path,
+            "contract_sha256": self.contract_sha256,
+            "training_absolute_hours": [int(start), int(end)],
+            "source_manifests": {
+                source.root: source.manifest_sha256
+                for source in self.sources},
+        }
+        return normalizers, provenance
+
+    def normalizers_for_split(
+            self, split: str, geometry: SWGClosureGeometry):
+        """Fail closed if a caller tries to normalize from held-out data."""
+        if split != "train":
+            raise ValueError("normalizers may consume the training split only")
+        return self.training_normalizers(geometry)
+
+    def validate_batch_membership(self, batch: WindowBatch) -> None:
+        """Refuse a held-out hour or split-crossing window in a batch."""
+        start_bound, end_bound = self._require_split(batch.split)
+        window_hours = 24 * batch.window_days
+        starts = np.asarray(batch.start_absolute_hour, dtype=np.int64)
+        if starts.shape != (self.batch_size,):
+            raise ValueError("dataset batch does not contain exactly ten windows")
+        if np.any(starts < start_bound) or np.any(starts + window_hours > end_bound):
+            raise ValueError("dataset batch contains a leaked or crossing hour")
 
 
 def load_content_pinned_initial_state(
@@ -421,7 +766,12 @@ def balanced_trajectory_loss(predicted: BalancedTrajectory,
         j0, j1, i0, i1 = geometry.wet_bounds
         interior = jnp.zeros_like(geometry.tmask, dtype=bool).at[
             j0 + 1:j1, i0 + 1:i1].set(True)
-        zeta_error = (predicted.relative_vorticity_s1[0]
+        if predicted.relative_vorticity_s1.shape \
+                != target.relative_vorticity_s1.shape \
+                or predicted.relative_vorticity_s1.ndim != 4:
+            raise ValueError(
+                "point loss requires matching (windows,hours,y,x) arrays")
+        zeta_error = (predicted.relative_vorticity_s1
                       - target.relative_vorticity_s1)
         weighted_sum = jnp.sum(
             zeta_error**2 * geometry.area_t_m2 * interior, axis=(-2, -1))
@@ -430,9 +780,9 @@ def balanced_trajectory_loss(predicted: BalancedTrajectory,
         loss = scale * jnp.mean(weighted_sum)
         if rotational_velocity_weight > 0.0:
             rot_error = (
-                (predicted.rotational_u_m_s[0] - target.rotational_u_m_s)**2
+                (predicted.rotational_u_m_s - target.rotational_u_m_s)**2
                 / normalizers.rotational_u_variance_m2_s2
-                + (predicted.rotational_v_m_s[0] - target.rotational_v_m_s)**2
+                + (predicted.rotational_v_m_s - target.rotational_v_m_s)**2
                 / normalizers.rotational_v_variance_m2_s2)
             loss = loss + rotational_velocity_weight * jnp.mean(jnp.sum(
                 rot_error * weight, axis=(-2, -1)))
@@ -454,6 +804,37 @@ def balanced_trajectory_loss(predicted: BalancedTrajectory,
                      - jnp.sum(pairwise, axis=(0, 1))
                      / (2.0 * members * (members - 1)))
     return jnp.mean(score_by_lead)
+
+
+def deterministic_trajectory_loss(
+        predicted_native, target_native, geometry: SWGClosureGeometry, *,
+        objective: str, beta_m1_s1: float, basin_length_m: float,
+        normalizers: BalancedNormalizers,
+        rotational_velocity_weight: float = 0.0):
+    """Exact Eq. 7 batch/hour reduction for one explicitly selected objective."""
+    if objective not in OBJECTIVE_OPERATORS:
+        raise ValueError(
+            f"objective must be explicitly selected from {OBJECTIVE_OPERATORS}")
+    if len(predicted_native) != 3 or len(target_native) != 3:
+        raise ValueError("deterministic loss requires native T/U/V tuples")
+    if predicted_native[0].ndim != 4 \
+            or any(value.shape != predicted_native[0].shape
+                   for value in predicted_native) \
+            or any(value.shape != predicted_native[0].shape
+                   for value in target_native):
+        raise ValueError(
+            "deterministic native arrays must share (windows,hours,y,x)")
+
+    def diagnose_one(ssh, u, v):
+        return diagnose_native_trajectory(
+            (ssh, u, v), geometry, objective=objective)
+
+    predicted = jax.vmap(diagnose_one)(*predicted_native)
+    target = jax.vmap(diagnose_one)(*target_native)
+    return balanced_trajectory_loss(
+        predicted, target, geometry, normalizers, kind="point",
+        beta_m1_s1=beta_m1_s1, basin_length_m=basin_length_m,
+        rotational_velocity_weight=rotational_velocity_weight)
 
 
 def build_segment_fn(card, geometry: SWGClosureGeometry, *,

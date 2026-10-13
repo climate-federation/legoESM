@@ -1,6 +1,8 @@
 """Direct tests for the SWG online-learning network, loss, and segment seam."""
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 
 import equinox as eqx
@@ -20,6 +22,7 @@ from legoesm.ocean.state import OceanSurfaceForcing
 from legoesm.training.swg_online import (
     BalancedNormalizers,
     BalancedTrajectory,
+    SWGDatasetContract,
     SWGNetworkSpec,
     SWGScalarPotentialCNN,
     assert_network_gradients_live,
@@ -28,6 +31,7 @@ from legoesm.training.swg_online import (
     build_closure_geometry,
     build_segment_fn,
     create_swg_optimizer,
+    deterministic_trajectory_loss,
     diagnose_native_trajectory,
     initial_closure_acceleration_ratio,
     load_content_pinned_hourly_segment,
@@ -113,9 +117,11 @@ def test_point_and_energy_losses_share_interface_and_plants_fail(online_case):
     target_field = jnp.zeros(target_shape).at[:, 20:30, 20:30].set(1.0)
     predicted = BalancedTrajectory(base, base, base)
     target = BalancedTrajectory(target_field, target_field, target_field)
+    point_target = jax.tree.map(
+        lambda value: jnp.broadcast_to(value, base.shape), target)
     normalizers = BalancedNormalizers(1.0, 1.0, 1.0)
     point = balanced_trajectory_loss(
-        predicted, target, geometry, normalizers, kind="point",
+        predicted, point_target, geometry, normalizers, kind="point",
         beta_m1_s1=2.0e-11, basin_length_m=4.0e6)
     energy = balanced_trajectory_loss(
         predicted, target, geometry, normalizers, kind="energy_score")
@@ -151,7 +157,7 @@ def test_maddison_point_loss_scaling_and_default_ignores_velocity(online_case):
     zeta = jnp.zeros(shape).at[:, 20, 20].set(3.0e-7)
     zero = jnp.zeros(shape)
     velocity_plant = jnp.ones(shape) * 1.0e3
-    target = BalancedTrajectory(zero, zero, zero)
+    target = BalancedTrajectory(zero[None], zero[None], zero[None])
     normalizers = BalancedNormalizers(1.0, 1.0, 1.0)
     beta, length = 2.0e-11, 4.0e6
     baseline = balanced_trajectory_loss(
@@ -167,6 +173,156 @@ def test_maddison_point_loss_scaling_and_default_ignores_velocity(online_case):
                 * float(geometry.area_t_m2[20, 20]) * (3.0e-7)**2)
     assert float(baseline) == pytest.approx(expected, rel=2.0e-15)
     assert float(velocity_changed) == float(baseline)
+
+
+def test_named_objectives_are_zero_at_t0_and_see_checkerboard_differently(
+        online_case):
+    _, geometry, _, _, _ = online_case
+    shape = tuple(geometry.tmask.shape)
+    jj, ii = np.indices(shape)
+    checkerboard = jnp.asarray(0.1 * np.where((ii + jj) % 2, -1.0, 1.0))
+    zero = jnp.zeros(shape, dtype=jnp.float64)
+    target = tuple(value[None, None] for value in (zero, zero, zero))
+    model = tuple(value[None, None] for value in (zero, checkerboard, zero))
+    normalizers = BalancedNormalizers(1.0, 1.0, 1.0)
+    losses = {}
+    for objective in ("symmetric", "template"):
+        identical = deterministic_trajectory_loss(
+            target, target, geometry, objective=objective,
+            beta_m1_s1=2.0e-11, basin_length_m=4.0e6,
+            normalizers=normalizers)
+        assert float(identical) == 0.0
+        losses[objective] = float(deterministic_trajectory_loss(
+            model, target, geometry, objective=objective,
+            beta_m1_s1=2.0e-11, basin_length_m=4.0e6,
+            normalizers=normalizers))
+    assert losses["template"] > 100.0 * losses["symmetric"] > 0.0
+    with pytest.raises(ValueError, match="explicitly selected"):
+        deterministic_trajectory_loss(
+            target, target, geometry, objective="typo",
+            beta_m1_s1=2.0e-11, basin_length_m=4.0e6,
+            normalizers=normalizers)
+
+
+def test_point_loss_owns_batch_reduction(online_case):
+    _, geometry, _, _, _ = online_case
+    shape = (1, 2) + tuple(geometry.tmask.shape)
+    error = jnp.zeros(shape).at[:, :, 20, 20].set(2.0e-7)
+    zero = jnp.zeros(shape)
+    normalizers = BalancedNormalizers(1.0, 1.0, 1.0)
+    one = balanced_trajectory_loss(
+        BalancedTrajectory(error, zero, zero),
+        BalancedTrajectory(zero, zero, zero), geometry, normalizers,
+        kind="point", beta_m1_s1=2.0e-11, basin_length_m=4.0e6)
+    two_error = jnp.concatenate((error, jnp.zeros_like(error)), axis=0)
+    two_zero = jnp.zeros_like(two_error)
+    mixed = balanced_trajectory_loss(
+        BalancedTrajectory(two_error, two_zero, two_zero),
+        BalancedTrajectory(two_zero, two_zero, two_zero), geometry,
+        normalizers, kind="point", beta_m1_s1=2.0e-11,
+        basin_length_m=4.0e6)
+    assert float(mixed) == pytest.approx(0.5 * float(one), rel=2.0e-15)
+
+
+def _write_v2_hourly(root: Path, *, days: int, source_day: int = 0) -> str:
+    root.mkdir()
+    hashes = {}
+    shape = (4, 4)
+    for day in range(1, days + 1):
+        first = (source_day + day - 1) * 24 + 1
+        hours = np.arange(first, first + 24, dtype=np.int64)
+        values = np.broadcast_to(hours[:, None, None], (24,) + shape).astype(float)
+        arrays = {
+            "absolute_hour": hours,
+            "box_ssh_hourly_m": values,
+            "box_u_hourly_m_s": values + 1.0,
+            "box_v_hourly_m_s": values + 2.0,
+            "filtered_ssh_hourly_m": values * 2.0,
+            "filtered_u_hourly_m_s": values * 2.0 + 1.0,
+            "filtered_v_hourly_m_s": values * 2.0 + 2.0,
+        }
+        if day == 1:
+            for prefix, scale in (("box_", 1.0), ("filtered_", 2.0)):
+                value = float(source_day * 24)
+                arrays[f"{prefix}ssh_initial_m"] = np.full(shape, scale * value)
+                arrays[f"{prefix}u_initial_m_s"] = np.full(
+                    shape, scale * value + 1.0)
+                arrays[f"{prefix}v_initial_m_s"] = np.full(
+                    shape, scale * value + 2.0)
+        path = root / f"day{day:04d}.npz"
+        np.savez(path, **arrays)
+        hashes[path.name] = hashlib.sha256(path.read_bytes()).hexdigest()
+    manifest = {
+        "schema": "legoesm-swg-double-gyre-hourly-target-v2",
+        "status": "complete", "days": days, "completed_days": days,
+        "restart": {"source_day": source_day}, "daily_sha256": hashes,
+    }
+    path = root / "manifest.json"
+    path.write_text(json.dumps(manifest, sort_keys=True))
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_dataset_contract_builds_split_safe_seeded_batches_and_leakage_fails(
+        tmp_path):
+    sources = []
+    for label, source_day in (("train", 0), ("validation", 43), ("test", 86)):
+        source = tmp_path / label
+        digest = _write_v2_hourly(source, days=13, source_day=source_day)
+        sources.append({"root": str(source), "manifest_sha256": digest})
+    contract_path = tmp_path / "contract.json"
+    contract_path.write_text(json.dumps({
+        "schema": "legoesm-swg-online-dataset-v1",
+        "objective": "template", "batch_size": 10,
+        "window_days": [1, 2, 4, 8],
+        "splits": {"train": [0, 311], "validation": [1032, 1343],
+                   "test": [2064, 2375]},
+        "sources": sources,
+    }, sort_keys=True))
+    contract = SWGDatasetContract.from_json(contract_path)
+    first = next(contract.batches(
+        split="train", window_days=1, epoch=0, seed=12))
+    repeated = next(contract.batches(
+        split="train", window_days=1, epoch=0, seed=12))
+    assert np.array_equal(first.start_absolute_hour,
+                          repeated.start_absolute_hour)
+    assert first.initial[0].shape == (10, 4, 4)
+    assert first.target[0].shape == (10, 24, 4, 4)
+    # Each T0 is the stored state immediately preceding its right endpoints.
+    assert np.array_equal(first.target[0][:, 0, 0, 0],
+                          2 * (first.start_absolute_hour + 1))
+    leaked = first._replace(
+        start_absolute_hour=first.start_absolute_hour.at[0].set(1032)
+        if hasattr(first.start_absolute_hour, "at") else
+        np.concatenate(([1032], first.start_absolute_hour[1:])))
+    with pytest.raises(ValueError, match="leaked or crossing"):
+        contract.validate_batch_membership(leaked)
+    crossing = first._replace(start_absolute_hour=np.full(10, 300))
+    with pytest.raises(ValueError, match="leaked or crossing"):
+        contract.validate_batch_membership(crossing)
+    with pytest.raises(ValueError, match="training split only"):
+        contract.normalizers_for_split("test", None)
+
+
+_REAL_EIGHT_DAY = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgonl_rounds/round4/"
+    "hourly_targets_8d/start_day0731")
+
+
+@pytest.mark.skipif(not (_REAL_EIGHT_DAY / "manifest.json").is_file(),
+                    reason="complete eight-day cache is not mounted")
+def test_real_v1_eight_day_loader_is_content_pinned_and_labelled_box_only():
+    manifest = _REAL_EIGHT_DAY / "manifest.json"
+    record = load_content_pinned_hourly_segment(
+        _REAL_EIGHT_DAY,
+        expected_manifest_sha256=hashlib.sha256(manifest.read_bytes()).hexdigest(),
+        operator="symmetric")
+    assert record.ssh_m.shape[0] == 192
+    assert not record.includes_initial_state
+    with pytest.raises(ValueError, match="only the box operator"):
+        load_content_pinned_hourly_segment(
+            _REAL_EIGHT_DAY,
+            expected_manifest_sha256=hashlib.sha256(
+                manifest.read_bytes()).hexdigest(), operator="template")
 
 
 def test_one_step_jvp_matches_finite_difference_and_all_stages_act(online_case):
@@ -287,9 +443,12 @@ def test_real_data_one_optimizer_step_has_no_inert_leaf():
     native = load_content_pinned_hourly_segment(
         _REAL_TARGET,
         expected_manifest_sha256=(
-            "f5526f50c9061abe498f0088b45b8d64f1895d46c2c1958e50b032acef721f99"))
-    native = tuple(jnp.asarray(value) for value in native)
-    target_all = diagnose_native_trajectory(native, geometry)
+            "f5526f50c9061abe498f0088b45b8d64f1895d46c2c1958e50b032acef721f99"),
+        operator="symmetric")
+    native = tuple(jnp.asarray(value) for value in (
+        native.ssh_m, native.u_m_s, native.v_m_s))
+    target_all = diagnose_native_trajectory(
+        native, geometry, objective="symmetric")
     normalizers = balanced_normalizers_from_training((target_all,), geometry)
     target = jax.tree.map(lambda value: value[:24], target_all)
     spec = SWGNetworkSpec(
@@ -307,9 +466,11 @@ def test_real_data_one_optimizer_step_has_no_inert_leaf():
     def objective(net):
         _, predicted_native = segment(
             net, initial, noise, jax.random.PRNGKey(41), jnp.asarray(0.0))
-        predicted = diagnose_native_trajectory(predicted_native, geometry)
+        predicted = diagnose_native_trajectory(
+            predicted_native, geometry, objective="symmetric")
         return balanced_trajectory_loss(
-            jax.tree.map(lambda value: value[None], predicted), target,
+            jax.tree.map(lambda value: value[None], predicted),
+            jax.tree.map(lambda value: value[None], target),
             geometry, normalizers, kind="point",
             beta_m1_s1=card.resolved_namelist.rn_beta_m_s,
             basin_length_m=card.resolved_namelist.rn_domsiz_m)
@@ -318,14 +479,12 @@ def test_real_data_one_optimizer_step_has_no_inert_leaf():
     jax.block_until_ready(loss)
     assert np.isfinite(float(loss)) and float(loss) > 0.0
     assert_network_gradients_live(grads)
-    # Maddison used Keras AdamW defaults: lr=1e-3, wd=0.004, beta1=.9,
-    # beta2=.999, eps=1e-7.  The repository factory expresses AdamW/lr/wd and
-    # Optax's .9/.999 defaults; it necessarily retains its cosine schedule,
-    # clipping, and eps=1e-8.  No hidden optimizer is substituted.
+    # Maddison/Keras AdamW: constant lr=1e-3, wd=.004, beta1=.9,
+    # beta2=.999, eps=1e-7, with no separate clipping transform.
     optimizer = create_swg_optimizer(TrainingConfig(
         lr=1.0e-3, warmup_steps=0, total_steps=100,
-        weight_decay=4.0e-3, grad_clip_norm=1.0e30,
-        optimizer="adamw"))
+        weight_decay=4.0e-3, optimizer="adamw", schedule="constant",
+        clip_gradients=False, adam_epsilon=1.0e-7))
     params = eqx.filter(network, eqx.is_inexact_array)
     opt_state = optimizer.init(params)
     updates, _ = optimizer.update(grads, opt_state, params)

@@ -448,6 +448,33 @@ def grid_noise_index(u: np.ndarray, v: np.ndarray) -> float:
     return float(np.sqrt(numerator / denominator)) if denominator > 0.0 else 0.0
 
 
+def native_face_grid_noise_index(u: np.ndarray, v: np.ndarray,
+                                 masks: dict[str, np.ndarray]) -> float:
+    """Phase-safe second-difference index on native U and V wet rectangles."""
+    differences = []
+    energy_sum = 0.0
+    energy_count = 0
+    for field, kind in ((u, "U"), (v, "V")):
+        values = np.asarray(field, dtype=np.float64)
+        mask = np.asarray(masks[kind], dtype=bool)
+        if values.shape != mask.shape or not np.any(mask):
+            raise ValueError(f"native {kind} noise field differs from its mask")
+        jj, ii = np.where(mask)
+        box = values[jj.min():jj.max() + 1, ii.min():ii.max() + 1]
+        if min(box.shape) < 3:
+            raise ValueError("native face noise field needs three faces per axis")
+        differences.extend((
+            box[:, 2:] - 2.0 * box[:, 1:-1] + box[:, :-2],
+            box[2:, :] - 2.0 * box[1:-1, :] + box[:-2, :]))
+        energy_sum += float(np.sum(box * box, dtype=np.float64))
+        energy_count += box.size
+    numerator = np.sum([np.sum(value * value, dtype=np.float64)
+                        for value in differences], dtype=np.float64) / sum(
+                            value.size for value in differences)
+    denominator = energy_sum / energy_count
+    return float(np.sqrt(numerator / denominator)) if denominator > 0.0 else 0.0
+
+
 def closed_basin_spectra(u: np.ndarray, v: np.ndarray,
                          spacing_m: float) -> tuple[np.ndarray, ...]:
     """DST-I streamfunction KE and direct-vorticity enstrophy spectra."""
@@ -480,6 +507,51 @@ def closed_basin_spectra(u: np.ndarray, v: np.ndarray,
         minlength=bins[-1] + 1)[1:]
     wavenumber = bins * np.pi / (
         max(nx + 1, ny + 1) * spacing_m)
+    return wavenumber, ke, enstrophy
+
+
+def closed_basin_native_face_spectra(
+        u_native: np.ndarray, v_native: np.ndarray, masks,
+        grid, spacing_m: float) -> tuple[np.ndarray, ...]:
+    """DST streamfunction spectra from native-face F-point vorticity."""
+    import jax.numpy as jnp
+    from legoesm.grids.operators_latlon_cgrid import (
+        compute_vertex_mask,
+        curl_vertex_cgrid,
+    )
+
+    u = np.where(masks["U"], u_native, 0.0)
+    v = np.where(masks["V"], v_native, 0.0)
+    u_full = np.concatenate([np.zeros_like(u[:, :1]), u], axis=1)
+    v_full = np.concatenate([np.zeros_like(v[:1]), v], axis=0)
+    zeta = np.asarray(curl_vertex_cgrid(
+        jnp.asarray(u_full), jnp.asarray(v_full), grid))[1:, 1:]
+    fmask = np.asarray(compute_vertex_mask(masks["T"], grid=grid),
+                       dtype=bool)[1:, 1:]
+    jj, ii = np.where(fmask)
+    box = zeta[jj.min():jj.max() + 1, ii.min():ii.max() + 1]
+    if not np.all(fmask[jj.min():jj.max() + 1, ii.min():ii.max() + 1]):
+        raise ValueError("native spectral F-point basin is not rectangular")
+    from scipy.fft import dstn
+
+    zeta_hat = dstn(box, type=1, norm="ortho")
+    ny, nx = box.shape
+    my = np.arange(1, ny + 1, dtype=np.float64)[:, None]
+    mx = np.arange(1, nx + 1, dtype=np.float64)[None, :]
+    ky = np.pi * my / ((ny + 1) * spacing_m)
+    kx = np.pi * mx / ((nx + 1) * spacing_m)
+    k2 = kx**2 + ky**2
+    psi_hat = -zeta_hat / k2
+    ke_mode = 0.5 * k2 * psi_hat**2
+    enstrophy_mode = 0.5 * zeta_hat**2
+    shell = np.rint(np.sqrt(mx**2 + my**2)).astype(int)
+    bins = np.arange(1, int(shell.max()) + 1)
+    ke = np.bincount(shell.ravel(), weights=ke_mode.ravel(),
+                     minlength=bins[-1] + 1)[1:]
+    enstrophy = np.bincount(
+        shell.ravel(), weights=enstrophy_mode.ravel(),
+        minlength=bins[-1] + 1)[1:]
+    wavenumber = bins * np.pi / (max(nx + 1, ny + 1) * spacing_m)
     return wavenumber, ke, enstrophy
 
 
@@ -551,10 +623,8 @@ def diagnose(provider: DailyProvider, *, days: int, card=None, namelist=None,
         sum_v += frame.v
         sum_speed += np.sqrt(speed2)
         ke_series[index] = np.sum(0.5 * speed2 * area) / area_sum
-        u_box = frame.u[j0:j1, i0:i1]
-        v_box = frame.v[j0:j1, i0:i1]
-        k, spectrum, enstrophy_spectrum = closed_basin_spectra(
-            u_box, v_box, spacing)
+        k, spectrum, enstrophy_spectrum = closed_basin_native_face_spectra(
+            raw.u, raw.v, masks, card.recipe.grid, spacing)
         if spectrum_sum is None:
             wavenumber, spectrum_sum = k, np.zeros_like(spectrum)
             enstrophy_spectrum_sum = np.zeros_like(enstrophy_spectrum)
@@ -563,7 +633,8 @@ def diagnose(provider: DailyProvider, *, days: int, card=None, namelist=None,
                     "spectrum wavenumbers changed across days")
         spectrum_sum += spectrum
         enstrophy_spectrum_sum += enstrophy_spectrum
-        grid_noise[index] = grid_noise_index(u_box, v_box)
+        grid_noise[index] = native_face_grid_noise_index(
+            raw.u, raw.v, masks)
     require(index + 1 == days, f"{provider.name}: daily sequence ended early")
     mean_ssh = sum_ssh / days
     mean_u = sum_u / days

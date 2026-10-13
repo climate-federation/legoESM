@@ -43,7 +43,7 @@ def test_early_common_path_reports_crossings_and_correlation_failure():
     truth = {
         "ssh": base,
         "relative_vorticity": 2.0 * base,
-        "velocity": np.stack((base, -base), axis=1),
+        "rotational_velocity": np.stack((base, -base), axis=1),
     }
     identity = adequacy.early_path_metrics(truth, truth, wet)
     assert identity["adequate"]
