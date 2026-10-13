@@ -1610,6 +1610,7 @@ CITATION_MAP = {
         ("IF( zcmax>0.9_wp )   CALL ctl_stop( 'dynspg_ts ERROR: Maximum Courant number is greater than 0.9 => increase nn_e' )", 1),
         25],
     'cfgs/ORCA2_OMIP_L4/EXP00/namelist_cfg:28': ('rn_Dt       = 10800.     !  time step for the dynamics and tracer', 1),
+    'cfgs/ORCA2_OMIP_L4/EXP00/namelist_cfg:80': ('nn_fsbc     = 2         !  frequency of SBC module call', 1),
     'cfgs/SHARED/namelist_ref:72': ('rn_Dt       = 5400.     !  time step for the dynamics and tracer', 1),
     'cfgs/SHARED/namelist_ref:1099-1101': [
         ('ln_bt_auto    = .true.     ! Number of sub-step defined from:', 1),
@@ -1699,12 +1700,13 @@ CITATION_MAP = {
     'vertical.py:883': ('class NemoEENBarotropicOperands(NamedTuple):', 1),
     'vertical.py:673': ('def nemo_qco_resolved_mesh_operands(', 1),
     'ocean_model_latlon_cgrid.py:4415': ('_nemo_filter_alpha = config.barotropic.nemo_barotropic_filter_alpha', 1),
-    'nemo_testcase_recipe.py:3650': ('def build_orca2g1_flat_card(deck_root: str | Path) -> NEMOTestcaseCard:', 1),
+    'nemo_testcase_recipe.py:3662': ('def build_orca2g1_flat_card(deck_root: str | Path) -> NEMOTestcaseCard:', 1),
     'nemo_testcase_recipe.py:3562': ('def read_orca2g1_deck(deck_root: str | Path) -> ORCA2G1Deck:', 1),
-    'nemo_testcase_recipe.py:3599': ('def orca2g1_initial_ssh(glamt_deg, gphit_deg, surface_tmask) -> np.ndarray:', 1),
-    'nemo_testcase_recipe.py:3863': ('def validate_orca2g1_flat_card(card: NEMOTestcaseCard, deck_root: str | Path) -> None:', 1),
+    'nemo_testcase_recipe.py:3611': ('def orca2g1_initial_ssh(glamt_deg, gphit_deg, surface_tmask) -> np.ndarray:', 1),
+    'nemo_testcase_recipe.py:3599': ('def _orca2g1_auto_substeps(dom: dict[str, np.ndarray], deck: ORCA2G1Deck) -> int:', 1),
+    'nemo_testcase_recipe.py:3875': ('def validate_orca2g1_flat_card(card: NEMOTestcaseCard, deck_root: str | Path) -> None:', 1),
     'vertical.py:1084': ('nemo_e3w_source="mesh_reference", allow_single_level: bool = False,', 1),
-    'nemo_testcase_recipe.py:3713': ('allow_single_level=True,               # jpk = 2: one wet level', 1),
+    'nemo_testcase_recipe.py:3725': ('allow_single_level=True,               # jpk = 2: one wet level', 1),
     # --- GRIDLADDER round 1 (G1 survey) END ---
     # --- ORCA2 round 253: kt=8 midpoint-SSH failure boundary -------
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:489-493': [

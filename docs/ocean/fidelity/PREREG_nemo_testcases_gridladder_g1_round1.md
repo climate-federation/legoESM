@@ -241,16 +241,17 @@ else changes.
 | deck line | SUPERSEDED | in force | where ORCA2's deck resolves it |
 |---|---|---|---|
 | rn_Dt | 5400 | 10800 | `cfgs/ORCA2_OMIP_L4/EXP00/namelist_cfg:28` |
-| ln_bt_auto | false | true | `cfgs/SHARED/namelist_ref:1099` (ORCA2's deck does not restate it) |
-| rn_bt_cmax | 0.8, unused | 0.8, used | `cfgs/SHARED/namelist_ref:1100` |
-| nn_e | 65, stated | 30 stated and unused; NEMO resolves 13 | `cfgs/SHARED/namelist_ref:1101` |
+| ln_bt_auto | false | true | first line of `cfgs/SHARED/namelist_ref:1099-1101` (ORCA2's deck does not restate it) |
+| rn_bt_cmax | 0.8, unused | 0.8, used | second line of the same block |
+| nn_e | 65, stated | 30 stated and unused; NEMO resolves 13 | third line of the same block |
 | forcing call period | 2 | 2 (unchanged) | `cfgs/ORCA2_OMIP_L4/EXP00/namelist_cfg:80` |
 | run lengths | 2 / 10 / 100 steps | 2 / 10 / 100 steps (unchanged, all even) | — |
 | restart list | every 10 steps | every 10 steps (unchanged, all even) | — |
 
 External Courant number re-checked at 100 m and 10800 s (offline, from the
 shipped domain file's cell sizes with ORCA2's mask; NOT NEMO output), by
-`ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynspg_ts.f90:1049-1080`:
+`ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynspg_ts.f90:1056-1080` (and the per-cell loop
+just above it):
 
 - Largest wave rate 9.4035e-4 per second, at (ji,jj) = (50,2), where
   `e1t = e2t = 47,096 m` (Antarctic coast); gravity 9.80665.
