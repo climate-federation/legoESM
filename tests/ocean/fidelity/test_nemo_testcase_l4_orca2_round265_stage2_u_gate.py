@@ -55,12 +55,23 @@ def _prefix(label):
     }
 
 
-def test_round265_accepts_source_ordered_rhs_owner():
+def test_round265_accepts_source_ordered_rhs_boundary():
     result = gate.classify(
         [_report(label) for label in gate.LABELS],
         [_prefix(label) for label in gate.LABELS])
-    assert result["status"] == "PASS_R265_STAGE2_U_OWNER"
+    assert result["status"] == "PASS_R265_STAGE2_U_BOUNDARY"
     assert result["predictions"]["R265-P3"] == "REFUTED_CANCELLING_UNIT_REMAINS"
+
+
+def test_closing_rhs_boundary_does_not_claim_a_leaf_statement():
+    reports = [_report(label) for label in gate.LABELS]
+    for report in reports:
+        report["rhs_closure"]["post_lbc_Kaa_u"] = _score()
+    result = gate.classify(reports, [_prefix(label) for label in gate.LABELS])
+    assert result["predictions"]["R265-P3"] == (
+        "PENDING_RHS_OPERATOR_SPLIT_BOUNDARY_CLOSES")
+    assert result["predictions"]["R265-P4"] == (
+        "NOT_REACHED_RHS_OPERATOR_SPLIT_REQUIRED")
 
 
 @pytest.mark.parametrize("plant", gate.PLANTS[1:])

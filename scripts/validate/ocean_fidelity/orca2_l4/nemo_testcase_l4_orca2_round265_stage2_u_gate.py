@@ -327,16 +327,18 @@ def classify(reports: list[dict[str, object]], prefixes: list[dict[str, object]]
     closed = all(value <= FLOOR for value in rhs_final)
     return {
         "format": "nemo-testcase-l4-orca2-round265-stage2-u-classification-v1",
-        "status": "PASS_R265_STAGE2_U_OWNER",
+        "status": "PASS_R265_STAGE2_U_BOUNDARY",
         "first_non_floor": firsts[LABELS[0]],
         "labels": summaries,
         "predictions": {
             "R265-P1": "CONFIRMED",
-            "R265-P2": "CONFIRMED_COMPLETED_RHS",
-            "R265-P3": ("CONFIRMED_RHS_CLOSES_COMPLETED_U" if closed
-                         else "REFUTED_CANCELLING_UNIT_REMAINS"),
-            "R265-P4": ("PENDING_KT1_10" if closed
-                         else "NOT_REACHED_CANCELLING_UNIT"),
+            "R265-P2": "CONFIRMED_COMPLETED_RHS_BOUNDARY",
+            "R265-P3": (
+                "PENDING_RHS_OPERATOR_SPLIT_BOUNDARY_CLOSES"
+                if closed else "REFUTED_CANCELLING_UNIT_REMAINS"),
+            "R265-P4": (
+                "NOT_REACHED_RHS_OPERATOR_SPLIT_REQUIRED"
+                if closed else "NOT_REACHED_CANCELLING_UNIT"),
             "R265-P5": "CONFIRMED" if plant == "none" else "PLANT",
         },
     }
