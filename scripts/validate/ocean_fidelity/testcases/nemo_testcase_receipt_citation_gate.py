@@ -1842,6 +1842,26 @@ CITATION_MAP = {
         2],
     # domqco.f90:281-285 (the F-point ratio) is mapped once, in the round 3 block.
     # --- GRIDLADDER round 5 END ---
+    # --- GRIDLADDER round 6 (fold pivot row of the coefficients; stage velocity) ---
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/lbcnfd.f90:639-748': [
+        ("CASE ( 'U' )", 5),
+        ('END SELECT   ! cd_nat(jf)', 3),
+        110],
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/dommsk.f90:232': ("CALL lbc_lnk( 'dommsk', umask, 'U', 1.0_wp, vmask, 'V', 1.0_wp, fmask, 'F', 1.0_wp )", 1),
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:373-378': [
+        ('uu(ji,jj,jk,Kaa) = (         ( 1._wp + r3u(ji,jj,Kbb) ) * uu(ji,jj,jk,Kbb )', 1),
+        ('/           ( 1._wp + r3v(ji,jj,Kaa) ) * vmask(ji,jj,jk)', 1),
+        6],
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:413-414': [
+        ('zub(ji,jj) = uu_b(ji,jj,Kaa) - SUM( e3u_3d(ji,jj,:)*uu(ji,jj,:,Kaa) ) * r1_hu_0(ji,jj)', 1),
+        ('zvb(ji,jj) = vv_b(ji,jj,Kaa) - SUM( e3v_3d(ji,jj,:)*vv(ji,jj,:,Kaa) ) * r1_hv_0(ji,jj)', 1),
+        2],
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:417-418': [
+        ('uu(ji,jj,jk,Kaa) = uu(ji,jj,jk,Kaa) + zub(ji,jj)*umask(ji,jj,jk)', 1),
+        ('vv(ji,jj,jk,Kaa) = vv(ji,jj,jk,Kaa) + zvb(ji,jj)*vmask(ji,jj,jk)', 1),
+        2],
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/stp2d.f90:138': ('CALL dyn_hpg( kt, Kbb     , uu, vv, Krhs )', 1),
+    # --- GRIDLADDER round 6 END ---
     # --- ORCA2 round 253: kt=8 midpoint-SSH failure boundary -------
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:489-493': [
         ('Extrapolate Sea Level at step jit+0.5', 1),

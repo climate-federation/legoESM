@@ -4143,7 +4143,7 @@ def _nemo_een_ratio_fold_exchange(r3u, r3v, r3f, grid, selected):
     ``stprk3_stg.f90:163`` (``domqco.f90:182-183`` at start-up) passes the ratios
     ``dom_qco_r3c_RK3`` has just computed through ``lbc_lnk`` with sign +1
     before ``dyn_cor_2D_init`` stretches the EEN triads with them.  On the
-    T-pivot fold (``lbcnfd.f90:639-749``) that replaces the whole pivot row of
+    T-pivot fold (``lbcnfd.f90:639-748``) that replaces the whole pivot row of
     the V and F ratios by the mirrored row below, and the second half of the
     U ratio's pivot row by its mirrored first half; the stencil values there
     do not survive.  ``BarotropicConfig.barotropic_een_ratio_fold_exchange``

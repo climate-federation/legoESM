@@ -569,7 +569,7 @@ def test_ratio_fold_exchange_refuses_a_grid_without_a_stored_pivot_row():
 
 @needs_record5
 def test_ratio_fold_exchange_writes_nemos_three_rules_and_nothing_else():
-    """lbcnfd.f90:639-749 at T pivot, sign +1: V and F pivot rows are the
+    """lbcnfd.f90:639-748 at T pivot, sign +1: V and F pivot rows are the
     mirrored row below; the U pivot row's second half its mirrored first."""
     from legoesm.ocean.dynamics import barotropic_latlon_cgrid as B
     from legoesm.ocean.fidelity import nemo_testcase_recipe as recipe

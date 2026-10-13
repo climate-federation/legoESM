@@ -1623,7 +1623,7 @@ class BarotropicConfig(NamedTuple):
     barotropic_entry_depth_nemo_literal: bool = False
     # NEMO's north-fold exchange (sign +1) of the U-, V- and F-point thickness
     # ratios the solver's EEN coefficients are stretched with
-    # (stprk3_stg.f90:163; T-pivot rules lbcnfd.f90:639-749): the pivot row of
+    # (stprk3_stg.f90:163; T-pivot rules lbcnfd.f90:639-748): the pivot row of
     # the V and F ratios is the mirrored row below, the second half of the U
     # ratio's pivot row its mirrored first half.  False keeps the bare
     # stencil values there.  T-pivot fold, pivot row stored.
