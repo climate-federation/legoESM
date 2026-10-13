@@ -32,8 +32,8 @@ LABELS = r249.LABELS
 MODES = ("off", "round262", "nemo")
 PLANTS = (
     "none", "label-coverage", "mode-coverage", "record-identity",
-    "passivity", "off-reproduction", "retired-regression",
-    "compiled-transport-isolation", "compiled-recovery", "matched-point",
+    "passivity", "off-reproduction", "retired-closure",
+    "transport-digest", "store-only-inertness", "matched-point",
     "source-order", "one-bit",
 )
 
@@ -187,11 +187,11 @@ def classify(reports: list[dict[str, object]], *,
         independent["result"]["passivity"]["T"] = False
     elif plant == "off-reproduction":
         independent["result"]["matched_stage2"]["S"]["fold_band"]["max_abs"] = 1.0
-    elif plant == "retired-regression":
-        by_key[("independent", "round262")]["result"]["matched_stage2"]["S"]["fold_band"]["max_abs"] = 0.0
-    elif plant == "compiled-transport-isolation":
-        by_key[("independent", "nemo")]["result"]["stage1_zFv_sha256"] = "0" * 64
-    elif plant == "compiled-recovery":
+    elif plant == "retired-closure":
+        by_key[("independent", "round262")]["result"]["matched_stage2"]["S"]["fold_band"]["max_abs"] = 1.0
+    elif plant == "transport-digest":
+        by_key[("independent", "round262")]["result"]["stage1_zFv_sha256"] = "0" * 64
+    elif plant == "store-only-inertness":
         by_key[("independent", "nemo")]["result"]["matched_stage2"]["S"]["fold_band"]["max_abs"] = 2.0
     elif plant == "matched-point":
         by_key[("independent", "nemo")]["result"]["matched_stage1"]["v"]["fold_band"]["max_abs"] = 1.0
@@ -236,17 +236,18 @@ def classify(reports: list[dict[str, object]], *,
         require(off_t == 6.435500132795369e-09
                 and off_s == 1.3842782919937235e-08,
                 f"{label}: round-260 OFF fingerprint did not reproduce")
-        retired_s = retired["matched_stage2"]["S"]["fold_band"]["max_abs"]
-        require(retired_s > 1.0 and retired_s > off_s * 1.0e6,
-                f"{label}: retired placement did not reproduce O(1) regression")
-        require(retired["stage1_zFv_sha256"] != off["stage1_zFv_sha256"],
-                f"{label}: retired placement no longer changes stage-1 transport")
-        require(nemo["stage1_zFv_sha256"] == off["stage1_zFv_sha256"],
-                f"{label}: compiled placement changed stage-1 transport")
-        for name, off_value in (("T", off_t), ("S", off_s)):
-            recovered = nemo["matched_stage2"][name]["fold_band"]["max_abs"]
-            require(recovered <= off_value,
-                    f"{label}: compiled placement worsened stage-2 {name}")
+        for name in ("T", "S"):
+            closed = retired["matched_stage2"][name]["fold_band"]["max_abs"]
+            require(closed <= float(r249.FLOOR),
+                    f"{label}: coupled round-262 placement did not close stage-2 {name}")
+        for mode in ("round262", "nemo"):
+            require(by_key[(label, mode)]["result"]["stage1_zFv_sha256"]
+                    == off["stage1_zFv_sha256"],
+                    f"{label}/{mode}: stage-1 transport digest moved")
+        for name in ("T", "S"):
+            store_only = nemo["matched_stage2"][name]["fold_band"]["max_abs"]
+            require(store_only == off["matched_stage2"][name]["fold_band"]["max_abs"],
+                    f"{label}: carry-store-only arm is no longer inert for stage-2 {name}")
         for mode in MODES:
             require(by_key[(label, mode)]["one_bit_control"]["unequal"] == 1,
                     f"{label}/{mode}: one-bit control did not fire")
@@ -264,8 +265,8 @@ def classify(reports: list[dict[str, object]], *,
         "labels": summaries,
         "predictions": {
             "R264-P1": "CONFIRMED_ROUND260_OFF_REPRODUCED",
-            "R264-P2": "CONFIRMED_RETIRED_PLACEMENT_REGRESSION",
-            "R264-P3": "CONFIRMED_COMPILED_PLACEMENT_RECOVERY",
+            "R264-P2": "REFUTED_COUPLED_PLACEMENT_CLOSES_STAGE2",
+            "R264-P3": "REFUTED_STORE_ONLY_IS_INERT",
             "R264-P4": "PENDING_PREFIX_MEASUREMENT",
             "R264-P5": "CONFIRMED" if plant == "none" else "PLANT",
         },

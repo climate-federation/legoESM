@@ -28,9 +28,9 @@ def _mode(name: str):
     if name == "off":
         t_max, s_max = 6.435500132795369e-09, 1.3842782919937235e-08
     elif name == "round262":
-        t_max, s_max = 0.27, 5.03
+        t_max, s_max = 2.220446049250313e-16, 7.105427357601002e-15
     else:
-        t_max, s_max = 1.0e-09, 2.0e-09
+        t_max, s_max = 6.435500132795369e-09, 1.3842782919937235e-08
     stage2 = copy.deepcopy(stage1)
     stage2["T"]["fold_band"] = _score(t_max, 10)
     stage2["S"]["fold_band"] = _score(s_max, 10)
@@ -40,8 +40,7 @@ def _mode(name: str):
         "raw_stage1": copy.deepcopy(stage1),
         "matched_stage1": stage1,
         "matched_stage2": stage2,
-        "stage1_zFv_sha256": (
-            "b" * 64 if name == "round262" else "a" * 64),
+        "stage1_zFv_sha256": "a" * 64,
     }
 
 
@@ -66,7 +65,7 @@ def test_round264_accepts_controlled_placement_reconciliation():
     result = gate.classify([
         _report(label, mode) for label in gate.LABELS for mode in gate.MODES])
     assert result["status"] == "PASS_R264_RATIO_PLACEMENT_RECONCILIATION"
-    assert result["predictions"]["R264-P2"].startswith("CONFIRMED")
+    assert result["predictions"]["R264-P2"].startswith("REFUTED")
 
 
 @pytest.mark.parametrize("plant", gate.PLANTS[1:])
