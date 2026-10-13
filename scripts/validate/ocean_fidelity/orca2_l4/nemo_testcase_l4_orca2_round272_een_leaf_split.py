@@ -118,13 +118,16 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
     original_flux = pe.pv_flux_al81_partial_cell
     captured: dict[str, object] = {}
 
-    def capture(card, parts, state, passivity):
-        captured.update(card=card, parts=parts, state=state, passivity=passivity)
+    def capture(card, parts, state, passivity, vertex_mask):
+        captured.update(
+            card=card, parts=parts, state=state, passivity=passivity,
+            vertex_mask=vertex_mask)
 
     baseline = r266.measure(
         deck_root, frame_root, record_root, label, expect_commit,
         passive_trace_callback=capture)
-    require(set(captured) == {"card", "parts", "state", "passivity"},
+    require(set(captured) == {
+        "card", "parts", "state", "passivity", "vertex_mask"},
             "passive stage-2 handoff is incomplete")
     card = captured["card"]
     parts = captured["parts"]
@@ -139,8 +142,7 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
     )
     u_mask, v_mask = pe.compute_face_masks_3d(
         card.recipe.z_coord.is_active, card.recipe.grid)
-    vtx_mask = pe.compute_vertex_mask(
-        state.land_mask.data, grid=card.recipe.grid)
+    vtx_mask = captured["vertex_mask"]
     call = {
         "h_vtx": np.asarray(parts["operand_vorticity_h_vtx"]),
         "h_v": np.asarray(parts["operand_momentum_h_v"]),

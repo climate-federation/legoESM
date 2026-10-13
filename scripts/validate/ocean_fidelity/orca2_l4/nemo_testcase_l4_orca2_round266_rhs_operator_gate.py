@@ -174,11 +174,12 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
                 card, live=False, stage_entry=stage_entry,
                 literal_hpg_accumulator=literal_hpg_accumulator)).step(
                 state, card.dt_s, freshwater=forcing[0], surface_forcing=forcing[1]))
-        traced = jax.device_get(_model(
+        traced_model = _model(
             card, _hooks(
                 card, live=True, stage_entry=stage_entry,
-                literal_hpg_accumulator=literal_hpg_accumulator)).step(
-                state, card.dt_s, freshwater=forcing[0], surface_forcing=forcing[1]))
+                literal_hpg_accumulator=literal_hpg_accumulator))
+        traced = jax.device_get(traced_model.step(
+            state, card.dt_s, freshwater=forcing[0], surface_forcing=forcing[1]))
     require(isinstance(traced, _NEMOWSLiveOperandTrace), "matched trace type moved")
     passivity = passive._ordinary_state_equal(traced.state_after, ordinary)
     require(all(passivity.values()), "live trace moved completed state")
@@ -189,7 +190,9 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
         # Validation-only handoff after the passivity assertion.  Consumers
         # may replay these completed operands offline; they cannot feed the
         # executing model or alter its compiled graph.
-        passive_trace_callback(card, parts, state, passivity)
+        passive_trace_callback(
+            card, parts, state, passivity,
+            jax.device_get(traced_model._vertex_mask))
     candidate = {
         "before_u": np.zeros_like(terms["before_u"][..., :30]),
         "after_hpg_u": _native_u(parts["after_hpg_u"].data),
