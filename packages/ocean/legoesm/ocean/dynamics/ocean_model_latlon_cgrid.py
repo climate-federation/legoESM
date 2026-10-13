@@ -5662,7 +5662,7 @@ class LatLonCGridOceanModel:
                    nemo_stage_zad_operands=None,
                    nemo_stage_zad_operand_observer=None,
                    nemo_stage_zad_eta_after_override=None,
-                   nemo_literal_hpg_vmask=None):
+                   nemo_literal_hpg_vmask=None, nemo_stage_r3f=None):
         """Compute baroclinic tendencies.
 
         ``momentum_only=True`` skips the (T/S-frozen) tracer-diffusion
@@ -5725,7 +5725,7 @@ class LatLonCGridOceanModel:
             nemo_stage_zad_operand_observer=nemo_stage_zad_operand_observer,
             nemo_stage_zad_eta_after_override=(
                 nemo_stage_zad_eta_after_override),
-            nemo_literal_hpg_vmask=nemo_literal_hpg_vmask,
+            nemo_literal_hpg_vmask=nemo_literal_hpg_vmask, nemo_stage_r3f=nemo_stage_r3f,
             diagnose_momentum=return_nemo_operator_components,
             return_nemo_operator_components=return_nemo_operator_components,
         )
@@ -6952,7 +6952,7 @@ class LatLonCGridOceanModel:
                                      nemo_stage_zad_operand_observer=(
                                          _zad_observers[stage_index - 1]),
                                      nemo_literal_hpg_vmask=(
-                                         _ws_literal_hpg_vmask),
+                                         _ws_literal_hpg_vmask), nemo_stage_r3f=_nemo_ws_stage_r3f(_cfg_b, stage_index, lambda: _ws_eta_pair, _zc, _grid),  # noqa: E501
                                      return_nemo_operator_components=(
                                          _return_components))
                 if _return_components:
@@ -7836,7 +7836,7 @@ class LatLonCGridOceanModel:
                 nemo_source_round(nemo_source_round((2.0 / 3.0) * state.eta.data) + nemo_source_round((1.0 / 3.0) * state_new.eta.data))  # noqa: E501
                 if getattr(_cfg_b, "rk3_stage1_ssh_nemo_literal", False) else state.eta.data + (state_new.eta.data - state.eta.data) / 3.0)  # noqa: E501
             _eta_live_one_half = 0.5 * (
-                state.eta.data + state_new.eta.data)
+                state.eta.data + state_new.eta.data); _ws_eta_pair = (state.eta.data, state_new.eta.data)  # noqa: E702
             _stage_entry_override = self._nemo_ws_test_hooks.stage_entry_override
             if _stage_entry_override is not None:
                 _override_stage = _stage_entry_override[0]
@@ -16623,3 +16623,30 @@ def _rk3_fold_exchange_top_v(v, grid, v_mask_3d):
     perm = fold.perm_v
     return v.at[-1].set(
         fold.vector_sign_v * v[-2][perm] * v_mask_3d[-2][perm].astype(v.dtype))
+
+
+def _nemo_ws_stage_r3f(cfg, stage_index, eta_pair, z_coord, grid):
+    """NEMO's F-point thickness ratio for the vorticity term of stage 2 or 3.
+
+    NEMO does not rebuild ``r3f`` from the stage's sea level: it interpolates
+    the two ratios it already holds, ``r2_3*r3fb + r1_3*r3fa`` at stage 2
+    (stprk3_stg.f90:218) and ``r1_2*(r3fb + r3fa)`` at stage 3 (:239), where
+    ``r3fb`` is the step-entry ratio (:160) and ``r3fa`` the exchanged ratio
+    of the solver's after sea level (:161, :163).  The ratio of the
+    interpolated sea level is equal as a real number and differs in the last
+    place on rare points.  ``rk3_stage_r3f_nemo_literal`` selects NEMO's
+    form; None (the option off, or stage 1, which reads the entry ratio)
+    leaves the caller's own sea-level ratio in place.  ``eta_pair`` is a
+    thunk for (sea level before, after): the pair exists only once the
+    external mode has run.
+    """
+    if not getattr(cfg, "rk3_stage_r3f_nemo_literal", False) or stage_index not in (2, 3):
+        return None
+    from legoesm.ocean.vertical import nemo_qco_live_vorticity_e3f_cgrid
+    r3fb, r3fa = (nemo_qco_live_vorticity_e3f_cgrid(
+        eta, z_coord, eta.dtype, nn_e3f_typ=0, grid=grid, return_r3f=True)
+        for eta in eta_pair())
+    sr = nemo_source_round
+    if stage_index == 2:
+        return sr(sr((2.0 / 3.0) * r3fb) + sr((1.0 / 3.0) * r3fa))
+    return sr(0.5 * sr(r3fb + r3fa))

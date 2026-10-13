@@ -1100,7 +1100,8 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
         without_written_order: bool = False,
         without_vor_order: bool = False,
         without_zdf_residual: bool = False,
-        without_fold_exchange_v: bool = False) -> dict:
+        without_fold_exchange_v: bool = False,
+        without_stage_r3f: bool = False) -> dict:
     if vor_fold_image:
         from legoesm.ocean.fidelity import nemo_testcase_recipe as _recipe
         calls: list = []
@@ -1121,7 +1122,8 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
                       without_written_order=without_written_order,
                       without_vor_order=without_vor_order,
                       without_zdf_residual=without_zdf_residual,
-                      without_fold_exchange_v=without_fold_exchange_v)
+                      without_fold_exchange_v=without_fold_exchange_v,
+                      without_stage_r3f=without_stage_r3f)
         require(len(calls) > 0, "the vorticity fold-image arm was never traced")
         out["vor_fold_image_measurement_arm"] = {"traces": len(calls)}
         out["label"] = f"{out['label']} + MEASUREMENT ARM (fold-image V row "\
@@ -1183,7 +1185,8 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
                       (without_written_order, "rk3_stage_velocity_written_order"),
                       (without_vor_order, "een_vorticity_written_order"),
                       (without_zdf_residual, "zdf_barotropic_removal_nemo_literal"),
-                      (without_fold_exchange_v, "rk3_fold_exchange_top_v_row")):
+                      (without_fold_exchange_v, "rk3_fold_exchange_top_v_row"),
+                      (without_stage_r3f, "rk3_stage_r3f_nemo_literal")):
         if off:               # ROUND-6 BEFORE ARMS / plants, one option each
             require(getattr(cfg, name) is True, f"the card no longer selects {name}")
             cfg = cfg._replace(**{name: False})
@@ -1371,6 +1374,7 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
            "zdf_barotropic_removal_nemo_literal": bool(
                cfg.zdf_barotropic_removal_nemo_literal),
            "rk3_fold_exchange_top_v_row": bool(cfg.rk3_fold_exchange_top_v_row),
+           "rk3_stage_r3f_nemo_literal": bool(cfg.rk3_stage_r3f_nemo_literal),
            "per_kt": []}
     records = {kt: read_step(root, kt) for kt in scored if kt <= n_stage}
     before = {}             # the card's own chain: the state entering step kt
@@ -1910,6 +1914,9 @@ def main(argv=None) -> int:
     ap.add_argument("--without-fold-exchange-v", action="store_true",
                     help="BEFORE ARM: the stored top V row left at the "
                          "compact mask's zero (round 6's card)")
+    ap.add_argument("--without-stage-r3f", action="store_true",
+                    help="BEFORE ARM: the stage F ratio taken from the "
+                         "stage's interpolated sea level")
     ap.add_argument("--without-written-order", action="store_true",
                     help="the card with rk3_stage_velocity_written_order "
                          "switched off (a round-6 before arm; also its plant)")
@@ -1940,7 +1947,8 @@ def main(argv=None) -> int:
                   without_written_order=a.without_written_order,
                   without_vor_order=a.without_vor_order,
                   without_zdf_residual=a.without_zdf_residual,
-                  without_fold_exchange_v=a.without_fold_exchange_v)
+                  without_fold_exchange_v=a.without_fold_exchange_v,
+                  without_stage_r3f=a.without_stage_r3f)
     except Exception as e:      # noqa: BLE001 -- refusals print and exit 2
         print(f"REFUSE: {type(e).__name__}: {e}", file=sys.stderr)
         return 2

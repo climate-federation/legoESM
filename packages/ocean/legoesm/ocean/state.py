@@ -3149,6 +3149,12 @@ class LatLonCGridOceanConfig(NamedTuple):
     # (stprk3_stg.f90:572-573).  False keeps the row at the compact mask's
     # zero.  T-pivot fold grids only.
     rk3_fold_exchange_top_v_row: bool = False
+    # The F-point thickness ratio the vorticity term of stages 2 and 3
+    # reads is NEMO's interpolation of the entry and after ratios
+    # (stprk3_stg.f90:218, :239).  False takes the ratio of the stage's
+    # interpolated sea level, which is real-equal and differs in the last
+    # place on rare points.
+    rk3_stage_r3f_nemo_literal: bool = False
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":
