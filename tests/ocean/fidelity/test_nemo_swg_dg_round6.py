@@ -49,6 +49,21 @@ def test_json_writer_handles_numpy_scalars_and_refuses_overwrite(tmp_path):
         round6._write_json(path, {"count": np.int64(4)})
 
 
+def test_exposure_classifier_distinguishes_zero_from_magnitude():
+    names = (
+        "zonal_difference", "numerator", "area_product",
+        "transport_divergence", "hdiv", "e3_hdiv_product",
+        "e3_hdiv", "zhdiv", "ssh_increment",
+    )
+    nonzero = {name: {"nonzero": True} for name in names}
+    assert round6._classify_exposure(nonzero, nonzero) == (
+        "same_nonzero_chain_different_magnitude")
+    zero = {name: {"nonzero": True} for name in names}
+    zero["numerator"] = {"nonzero": False}
+    assert round6._classify_exposure(zero, nonzero) == (
+        "zero_on_shipped_nonzero_on_maddison")
+
+
 def test_tiny_statement_bisect_reproduces_production_stage_word_for_word():
     from legoesm.core.precision import PrecisionPolicy, set_policy
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel

@@ -87,6 +87,154 @@ def bit_summary(reference, candidate) -> dict:
     }
 
 
+def _scalar_metadata(value) -> dict:
+    value = np.float64(value)
+    return {
+        "value": float(value),
+        "hex": value.item().hex(),
+        "uint64": int(value.view(np.uint64)),
+        "nonzero": bool(value != 0.0),
+    }
+
+
+def _classify_exposure(shipped: dict, maddison: dict) -> str:
+    chain = (
+        "zonal_difference", "numerator", "area_product",
+        "transport_divergence", "hdiv", "e3_hdiv_product",
+        "e3_hdiv", "zhdiv", "ssh_increment",
+    )
+    if any(
+        not shipped[name]["nonzero"] and maddison[name]["nonzero"]
+        for name in chain
+    ):
+        return "zero_on_shipped_nonzero_on_maddison"
+    if all(shipped[name]["nonzero"] and maddison[name]["nonzero"]
+           for name in chain):
+        return "same_nonzero_chain_different_magnitude"
+    return "unresolved"
+
+
+def continuity_exposure(npz_path: Path, deck: str) -> dict:
+    """Observe every continuity operand at the first active west-wall cell."""
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import compute_face_masks_3d
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import build_swg_card
+    from legoesm.ocean.vertical import nemo_qco_resolved_mesh_operands
+
+    ladder = _load_sibling(
+        "nemo_testcase_l1_swg_ladder_exposure", "nemo_testcase_l1_swg_ladder.py")
+    card = build_swg_card(ladder._deck_namelist(deck))  # noqa: SLF001
+    with np.load(npz_path) as saved:
+        entry = {
+            key.removeprefix("input__"): np.asarray(saved[key])
+            for key in saved.files if key.startswith("input__")
+        }
+        production_ssh = np.asarray(saved["output__ssh_k"])
+    dtype = np.float64
+    tmask3 = np.asarray(card.recipe.z_coord.is_active, dtype=dtype)
+    umask3, vmask3 = compute_face_masks_3d(
+        card.recipe.z_coord.is_active, card.recipe.grid)
+    ops = nemo_qco_resolved_mesh_operands(
+        card.recipe.z_coord, card.recipe.grid, umask3, vmask3,
+        np.dtype(dtype), 1)
+    umask = np.asarray(ops.umask3, dtype=dtype)
+    vmask = np.asarray(ops.vmask3, dtype=dtype)
+    e3u = np.asarray(ops.e3u_0, dtype=dtype) * (
+        1.0 + entry["r3u_k"][..., None] * umask)
+    e3v = np.asarray(ops.e3v_0, dtype=dtype) * (
+        1.0 + entry["r3v_k"][..., None] * vmask)
+    flux_u = (np.asarray(ops.e2u, dtype=dtype)[..., None] * e3u
+              * entry["u_k"][..., None])
+    flux_v = (np.asarray(ops.e1v, dtype=dtype)[..., None] * e3v
+              * entry["v_k"][..., None])
+    flux_u_west = np.roll(flux_u, 1, axis=1)
+    flux_v_south = np.concatenate(
+        [np.zeros_like(flux_v[:1]), flux_v[:-1]], axis=0)
+    zonal = flux_u - flux_u_west
+    meridional = flux_v - flux_v_south
+    numerator = zonal + meridional
+    r1_area = (1.0 / np.asarray(ops.area_t, dtype=dtype))[..., None]
+    area_product = numerator * r1_area
+    transport = area_product * tmask3
+    live_e3t = np.asarray(ops.e3t_0, dtype=dtype) * (
+        1.0 + entry["r3t_k"][..., None])
+    safe_e3t = np.where(tmask3 > 0.5, live_e3t, 1.0)
+    hdiv = transport / safe_e3t
+    e3_hdiv_product = live_e3t * hdiv
+    e3_hdiv = e3_hdiv_product * tmask3
+    zhdiv = np.sum(e3_hdiv, axis=-1)
+    stage_dt = np.float64(card.dt_s) / np.float64(3.0)
+    ssh_increment = stage_dt * zhdiv
+    ssh_after = (entry["ssh_k"] - ssh_increment) * np.asarray(
+        card.recipe.land_mask, dtype=dtype)
+    west_wall = (
+        (tmask3[..., 0] > 0.5)
+        & (flux_u[..., 0] != 0.0)
+        & (flux_u_west[..., 0] == 0.0)
+        & (production_ssh != 0.0)
+    )
+    cells = np.argwhere(west_wall)
+    require(cells.size > 0, f"{deck}: no active west-wall continuity cell")
+    at = tuple(cells[0])
+    at3 = (*at, 0)
+    values = {
+        "u": entry["u_k"][at],
+        "v": entry["v_k"][at],
+        "r3t": entry["r3t_k"][at],
+        "r3u": entry["r3u_k"][at],
+        "r3v": entry["r3v_k"][at],
+        "e3u": e3u[at3],
+        "e3v": e3v[at3],
+        "flux_u": flux_u[at3],
+        "flux_u_west": flux_u_west[at3],
+        "flux_v": flux_v[at3],
+        "flux_v_south": flux_v_south[at3],
+        "zonal_difference": zonal[at3],
+        "meridional_difference": meridional[at3],
+        "numerator": numerator[at3],
+        "r1_area": r1_area[at3],
+        "area_product": area_product[at3],
+        "transport_divergence": transport[at3],
+        "live_e3t": live_e3t[at3],
+        "hdiv": hdiv[at3],
+        "e3_hdiv_product": e3_hdiv_product[at3],
+        "e3_hdiv": e3_hdiv[at3],
+        "zhdiv": zhdiv[at],
+        "stage_dt": stage_dt,
+        "ssh_increment": ssh_increment[at],
+        "ssh_before": entry["ssh_k"][at],
+        "ssh_after_formula": ssh_after[at],
+        "production_ssh": production_ssh[at],
+    }
+    return {
+        "deck": deck,
+        "replay_npz": str(npz_path.resolve()),
+        "cell": list(at),
+        "operands": {
+            name: _scalar_metadata(value) for name, value in values.items()
+        },
+    }
+
+
+def compare_deck_exposure(shipped_path: Path, maddison_path: Path) -> dict:
+    shipped = continuity_exposure(shipped_path, "shipped")
+    maddison = continuity_exposure(maddison_path, "maddison")
+    classification = _classify_exposure(
+        shipped["operands"], maddison["operands"])
+    ratios = {}
+    for name, row in shipped["operands"].items():
+        denominator = abs(row["value"])
+        ratios[name] = (
+            None if denominator == 0.0
+            else abs(maddison["operands"][name]["value"]) / denominator)
+    return {
+        "label": "SWG-DG-ROUND6-DECK-EXPOSURE",
+        "classification": classification,
+        "shipped": shipped,
+        "maddison": maddison,
+        "absolute_magnitude_ratio_maddison_over_shipped": ratios,
+    }
+
+
 def _divergence_probe(probe_at: str):
     """Return the production divergence with one diagnostic identity boundary."""
     import jax
@@ -451,6 +599,10 @@ def main(argv=None) -> int:
     rank = sub.add_parser("rank-check")
     rank.add_argument("--root", type=Path, default=RANKCHECK_ROOT)
     rank.add_argument("--json", type=Path, required=True)
+    exposure = sub.add_parser("exposure")
+    exposure.add_argument("shipped", type=Path)
+    exposure.add_argument("maddison", type=Path)
+    exposure.add_argument("--json", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
         if args.command == "replay":
@@ -459,6 +611,8 @@ def main(argv=None) -> int:
             payload = run_replay(root, args.deck, args.npz, plant=args.plant)
         elif args.command == "compare":
             payload = compare_replays(args.left, args.right)
+        elif args.command == "exposure":
+            payload = compare_deck_exposure(args.shipped, args.maddison)
         else:
             payload = compare_rank_restarts(args.root)
         _write_json(args.json, payload)
@@ -474,9 +628,11 @@ def main(argv=None) -> int:
         first = payload["first_probe_difference"]
         print("first_probe_difference="
               + ("NONE" if first is None else first["statement"]))
-    else:
+    elif args.command == "rank-check":
         print(f"all_bit_identical={payload['all_bit_identical']} "
               f"variables={len(payload['rows'])}")
+    else:
+        print(f"classification={payload['classification']}")
     return 0
 
 
