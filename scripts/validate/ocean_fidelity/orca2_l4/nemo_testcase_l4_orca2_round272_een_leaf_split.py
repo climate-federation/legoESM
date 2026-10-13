@@ -171,17 +171,16 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
     vtx_mask = pe.compute_vertex_mask(
         state.land_mask.data, grid=card.recipe.grid)
     call = {
-        "h_vtx": np.asarray(parts["operand_vorticity_h_vtx"], np.float64),
-        "h_v": np.asarray(parts["operand_momentum_h_v"], np.float64),
-        "v": np.asarray(parts["operand_velocity_v"], np.float64),
-        "h_u": np.asarray(parts["operand_momentum_h_u"], np.float64),
-        "u": np.asarray(parts["operand_velocity_u"], np.float64),
-        "u_mask": np.asarray(u_mask, np.float64),
-        "v_mask": np.asarray(v_mask, np.float64),
-        "vtx_mask": np.asarray(vtx_mask, np.float64),
-        "f_vtx": np.asarray(nemo_een_ene_vertex_coriolis(card.recipe.grid),
-                            np.float64),
-        "output_u": np.asarray(parts["vorticity_u"].data, np.float64),
+        "h_vtx": np.asarray(parts["operand_vorticity_h_vtx"]),
+        "h_v": np.asarray(parts["operand_momentum_h_v"]),
+        "v": np.asarray(parts["operand_velocity_v"]),
+        "h_u": np.asarray(parts["operand_momentum_h_u"]),
+        "u": np.asarray(parts["operand_velocity_u"]),
+        "u_mask": np.asarray(u_mask, bool),
+        "v_mask": np.asarray(v_mask, bool),
+        "vtx_mask": np.asarray(vtx_mask, bool),
+        "f_vtx": np.asarray(nemo_een_ene_vertex_coriolis(card.recipe.grid)),
+        "output_u": np.asarray(parts["vorticity_u"].data),
     }
     folded = pe._een_fold_image_v_row(
         card.recipe.model_config.een_fold_image_v_row, card.recipe.grid,
