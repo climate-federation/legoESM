@@ -45,7 +45,21 @@ CASE = "ORCA2G2-zps"
 DEFAULT_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/round10/"
     "oracle_g2_r10/p3_a_100step")
-ARMS = ("geometry", "independent", "given_entry")
+ARMS = ("geometry", "independent", "given_entry", "stages")
+# stage exposures of one step: the private hook that returns it, and the
+# level-1 NEMO frame fields (u, v, T, S, ssh) it must equal
+EXPOSURES = {
+    "rhs": ({"expose_stage1_momentum_rhs": True},
+            {"u": "b_uu_rhs_k1", "v": "b_vv_rhs_k1"}),
+    "stage1": ({"expose_momentum_stage": 1, "expose_tracer_stage": 1},
+               {"u": "1_uu_k1_aa", "v": "1_vv_k1_aa", "T": "1_tn_k1_aa",
+                "S": "1_sn_k1_aa", "ssh": "1_ssh_aa"}),
+    "stage2": ({"expose_momentum_stage": 2, "expose_tracer_stage": 2},
+               {"u": "2_uu_k1_aa", "v": "2_vv_k1_aa", "T": "2_tn_k1_aa",
+                "S": "2_sn_k1_aa", "ssh": "2_ssh_aa"}),
+    "stage3": ({}, {"u": "3_uu_k1_aa", "v": "3_vv_k1_aa", "T": "3_tn_k1_aa",
+                    "S": "3_sn_k1_aa", "ssh": "3_ssh_aa"}),
+}
 FRAME = {"ssh": "f_ssh_bb", "uu_b": "f_uu_b_bb", "vv_b": "f_vv_b_bb",
          "u": "f_uu_k1_bb", "v": "f_vv_k1_bb"}
 RESTART = {"u": "un", "v": "vn", "T": "tn", "S": "sn"}
@@ -197,7 +211,8 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
         restart_roots=(), state_in: Path | None = None,
         state_out: Path | None = None, plant: str | None = None,
         geometry_plant: str | None = None, allow_dirty: bool = False,
-        entries=(1, 3, 5, 7, 9)) -> dict:
+        entries=(1, 3, 5, 7, 9), exposures=tuple(EXPOSURES),
+        dump: Path | None = None) -> dict:
     require(arm in ARMS, f"unknown arm {arm!r}")
     require(plant in (None, "score", "level"), f"unknown plant {plant!r}")
     from legoesm.ocean.fidelity.provenance import allow_dirty_stamps, git_sha
@@ -291,6 +306,29 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
         new = jax.device_get(model.step(state, dt=card.dt_s))
         return new, round(time.time() - t0, 1)
 
+    if arm == "stages":
+        # one step, each stage exposed by the model's private hook; the entry
+        # is the card's initial state (kt = 1) or NEMO's restart (other kt)
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import _NEMOWSRK3TestHooks
+        kt = kt_from
+        out["label"] = ("INDEPENDENT (kt = 1, stage-local)" if kt == 1 else
+                        "GIVEN-NEMO-ENTRY (NEMO's restart; stage-local)")
+        g, entry = g1.read_step(root, kt), s0 if kt == 1 else nemo_entry(kt)
+        for name in exposures:
+            hooks, frame = EXPOSURES[name]
+            st = jax.device_get(LatLonCGridOceanModel(
+                card.recipe.grid, z, cfg,
+                _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(**hooks)).step(
+                    entry, dt=card.dt_s))
+            cand = card_surface(st)
+            rows = [g1.row(f"{name}.kt{kt}.{f}", g[n], cand[f], reg)
+                    for f, n in frame.items()]
+            out["per_kt"].append({"kt": kt, "exposure": name, "rows": rows,
+                                  "first_unequal": g1.first_unequal(rows)})
+            if dump is not None:
+                np.savez(Path(dump) / f"card_kt{kt}_{name}.npz", **card_levels(st),
+                         ssh=np.asarray(st.eta.data))
+        return out
     if arm == "independent":
         out["label"] = "INDEPENDENT"
         require(1 <= kt_from <= kt_to <= 100, "steps must lie in 1..100")
@@ -341,6 +379,9 @@ def main(argv=None) -> int:
     ap.add_argument("--kt-from", type=int, default=1)
     ap.add_argument("--kt-to", type=int, default=10)
     ap.add_argument("--entries", default="1,3,5,7,9")
+    ap.add_argument("--exposures", default=",".join(EXPOSURES))
+    ap.add_argument("--dump", type=Path, help="directory for the card's "
+                    "all-level stage arrays (evidence, never git)")
     ap.add_argument("--state-in", type=Path)
     ap.add_argument("--state-out", type=Path)
     ap.add_argument("--plant", choices=("score", "level"))
@@ -352,7 +393,8 @@ def main(argv=None) -> int:
               restart_roots=tuple(a.restart_root), state_in=a.state_in,
               state_out=a.state_out, plant=a.plant,
               geometry_plant=a.geometry_plant, allow_dirty=a.allow_dirty,
-              entries=tuple(int(k) for k in a.entries.split(",")))
+              entries=tuple(int(k) for k in a.entries.split(",")),
+              exposures=tuple(a.exposures.split(",")), dump=a.dump)
     a.output.write_text(json.dumps(out, indent=1) + "\n")
     if a.arm == "geometry":
         print(f"GEOMETRY {out['n_bit_identical']} of {out['n_rows']} rows bit-identical")
