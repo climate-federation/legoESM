@@ -163,7 +163,7 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
         "S": _score(r249._native("S", stage1_associated[3]),
                     np.asarray(oracle_stage1["S"], np.float64)),
         "eta": _score(r249._native("eta", stage1_associated[4]),
-                      np.asarray(oracle_stage1["eta"], np.float64)),
+                      np.asarray(oracle_stage1["ssh"], np.float64)),
     }
 
     with r245._barotropic_surface_mask_arm(
