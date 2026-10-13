@@ -1599,6 +1599,12 @@ class BarotropicConfig(NamedTuple):
     # ``barotropic_implicit_preconditioner = 'chebyshev'``); higher = stronger
     # smoothing per solve at more A-op applies. A count, not a trainable float.
     barotropic_chebyshev_degree: int = 4
+    # NEMO's split-explicit face depth on the fold-image V row
+    # (dynspg_ts.f90:419-421, consumed at :437; same form at :480): NEMO's
+    # wet surface V mask on that row and the T fold halo as the north
+    # neighbour. False keeps the model's dry top V row (depth = hv_0 there).
+    # Needs ``barotropic_face_depth = "nemo_ssh_avg"`` and raw NEMO masks.
+    barotropic_fold_top_v_face_ssh: bool = False
 
 
 class RuntimeChecksConfig(NamedTuple):
@@ -3073,6 +3079,12 @@ class LatLonCGridOceanConfig(NamedTuple):
     # matrices and their three separate ordered recurrences.  Appended to keep
     # every positional constructor byte-compatible.
     zdf_implicit_solver_evaluation: str = "shared_thomas"
+    # NEMO vor_een on a T-pivot north fold: the u trend on the pivot T row
+    # reads vv, e3v and vmask on the fold-image V row above it
+    # (dynvor.f90:767, :779-780), where NEMO holds the lbc_lnk image of the
+    # row below. True hands the 3-D vorticity trend that image row; False
+    # keeps the legacy compact-grid dry row. Needs an active north fold.
+    een_fold_image_v_row: bool = False
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":

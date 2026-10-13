@@ -2602,6 +2602,7 @@ def _bc_pv_flux(
     reconstruct_zeta=False,
     vorticity_scheme="al81",
     een_q_boundary="neumann_fill",
+    een_fold_image_v=False,
     een_e3f_scheme="min",
     een_metric_weighting="off",
     dz_ref=None,
@@ -2919,8 +2920,9 @@ def _bc_pv_flux(
             # (barotropic_latlon_cgrid.een_barotropic_coriolis); this is the
             # baroclinic path's selector for it. "off" is bit-identical.
             diag_vortcor_u, diag_vortcor_v = pv_flux_al81_partial_cell(
-                zeta, h_vtx, h_v, v, h_u, u,
-                u_mask_3d, v_mask_3d, vtx_mask_va,
+                zeta, h_vtx, *_een_fold_image_v_row(
+                    een_fold_image_v, grid, h_v, v, h_u, u,
+                    u_mask_3d, v_mask_3d), vtx_mask_va,
                 f_vtx=_f_vtx_al,
                 q_boundary=een_q_boundary,
                 metric_widths=_mw,
@@ -5446,6 +5448,8 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
                 vorticity_scheme="een_planetary",
                 een_q_boundary=getattr(config, "een_q_boundary",
                                        "neumann_fill"),
+                een_fold_image_v=getattr(
+                    config, "een_fold_image_v_row", False),
                 een_e3f_scheme=config.een_e3f_scheme,
                 een_metric_weighting=getattr(
                     config, "een_metric_weighting", "off"),
@@ -5490,6 +5494,8 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             reconstruct_zeta=config.vortcor_reconstruct_zeta,
             vorticity_scheme=getattr(config, "vorticity_scheme", "al81"),
             een_q_boundary=getattr(config, "een_q_boundary", "neumann_fill"),
+            een_fold_image_v=getattr(
+                config, "een_fold_image_v_row", False),
             een_e3f_scheme=config.een_e3f_scheme,
             een_metric_weighting=getattr(
                 config, "een_metric_weighting", "off"),
@@ -6248,3 +6254,27 @@ def _nemo_c2_kinetic_energy(u, v):
     zu = nemo_source_round(u_w_sq + u_e_sq)
     zv = nemo_source_round(v_s_sq + v_n_sq)
     return nemo_source_round(0.25 * nemo_source_round(zv + zu))
+
+
+def _een_fold_image_v_row(
+    enabled, grid, h_v, v, h_u, u, u_mask_3d, v_mask_3d,
+):
+    """Give NEMO ``vor_een`` its T-pivot fold-image V row.
+
+    ``zwy`` is built from ``vv``, ``e3v`` and ``vmask`` on that row
+    (dynvor.f90:767) and is consumed by the two northern triads on the pivot
+    T row (dynvor.f90:779-780). The image carries the V-vector fold sign;
+    thickness and wet mask do not. Disabled is the unchanged legacy path.
+    """
+    if not enabled:
+        return h_v, v, h_u, u, u_mask_3d, v_mask_3d
+    fold = getattr(grid, "fold", None)
+    if fold is None or not bool(fold.is_active):
+        raise ValueError(
+            "een_fold_image_v_row=True needs an active north fold")
+    perm = fold.perm_v
+    wet = v_mask_3d[-2][perm]
+    v = v.at[-1].set(fold.vector_sign_v * v[-2][perm] * wet.astype(v.dtype))
+    h_v = h_v.at[-1].set(h_v[-2][perm])
+    v_mask_3d = v_mask_3d.at[-1].set(wet)
+    return h_v, v, h_u, u, u_mask_3d, v_mask_3d
