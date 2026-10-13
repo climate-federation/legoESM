@@ -42,6 +42,8 @@ FLOOR = np.float64(2.0e-10)
 BOUNDARY_ORDER = ("before_u", "after_hpg_u", "after_vorticity_u", "after_advection_u")
 HPG_INPUT_ORDER = ("rhd", "e3w", "gdept_z0", "r1_e1u")
 HPG_STATEMENT_ORDER = ("zhpi_u", "zuap_u", "sum_u")
+HPG_LEAF_ORDER = HPG_INPUT_ORDER + HPG_STATEMENT_ORDER + (
+    "hpg_accumulator_assignment",)
 PLANTS = (
     "none", "label-coverage", "record-identity", "passivity", "source-order",
     "round265-reproduction", "first-boundary", "self-replay", "leaf",
@@ -296,7 +298,7 @@ def classify(reports: list[dict[str, object]], *, plant: str = "none") -> dict[s
     elif plant == "self-replay":
         independent["hpg_record_self_replay"]["result"] = "DEBT"
     elif plant == "leaf":
-        independent["hpg_input_rows"]["rhd"]["max_abs"] = 0.0
+        independent["accumulator_self_replay"]["after_hpg_u"]["max_abs"] = 0.0
     elif plant == "one-bit":
         independent["one_bit_control"]["unequal"] = 0
 
@@ -316,9 +318,9 @@ def classify(reports: list[dict[str, object]], *, plant: str = "none") -> dict[s
                 f"{label}: round-265 matched state moved")
         require(report["hpg_live_calibration"]["max_abs"] <= FLOOR,
                 f"{label}: offline HPG does not reproduce the live component")
-        require(all(row["max_abs"] <= FLOOR
-                    for row in report["accumulator_self_replay"].values()),
-                f"{label}: live accumulator boundaries do not self-replay")
+        require(report["accumulator_self_replay"]["after_vorticity_u"]["max_abs"] <= FLOOR
+                and report["accumulator_self_replay"]["after_advection_u"]["max_abs"] <= FLOOR,
+                f"{label}: downstream accumulator additions do not self-replay")
         require(report["hpg_record_self_replay"]["result"] == "AT_BAR",
                 f"{label}: recorded HPG does not self-replay")
         require(report["one_bit_control"]["unequal"] == 1,
@@ -327,9 +329,12 @@ def classify(reports: list[dict[str, object]], *, plant: str = "none") -> dict[s
         first = _first(complete, BOUNDARY_ORDER)
         require(first is not None, f"{label}: no RHS boundary")
         firsts[label] = first
-        leaf_order = HPG_INPUT_ORDER + HPG_STATEMENT_ORDER
-        leaf_rows = {**report["hpg_input_rows"], **report["hpg_statement_rows"]}
-        leaf = _first(leaf_rows, leaf_order) if first == "after_hpg_u" else None
+        leaf_rows = {
+            **report["hpg_input_rows"], **report["hpg_statement_rows"],
+            "hpg_accumulator_assignment":
+                report["accumulator_self_replay"]["after_hpg_u"],
+        }
+        leaf = _first(leaf_rows, HPG_LEAF_ORDER) if first == "after_hpg_u" else None
         require(first != "after_hpg_u" or leaf is not None,
                 f"{label}: HPG moved but no HPG leaf moved")
         summaries[label] = {
@@ -338,6 +343,7 @@ def classify(reports: list[dict[str, object]], *, plant: str = "none") -> dict[s
             "boundary_rows": report["boundary_rows"],
             "hpg_input_rows": report["hpg_input_rows"],
             "hpg_statement_rows": report["hpg_statement_rows"],
+            "accumulator_self_replay": report["accumulator_self_replay"],
         }
     require(len(set(firsts.values())) == 1, "labels disagree on first boundary")
     leafs = {summaries[label]["first_hpg_leaf"] for label in LABELS}

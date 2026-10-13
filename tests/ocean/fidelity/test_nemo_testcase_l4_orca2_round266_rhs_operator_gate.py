@@ -25,8 +25,7 @@ def _report(label):
     boundary["after_vorticity_u"]["complete"] = _score(1.0e-6, 2)
     boundary["after_advection_u"]["complete"] = _score(1.0e-6, 2)
     inputs = {name: _score() for name in gate.HPG_INPUT_ORDER}
-    inputs["rhd"] = _score(1.0e-7, 1)
-    statements = {name: _score(1.0e-7, 1) for name in gate.HPG_STATEMENT_ORDER}
+    statements = {name: _score() for name in gate.HPG_STATEMENT_ORDER}
     return {
         "status": "PASS_R266_MEASUREMENT",
         "label": label,
@@ -50,13 +49,18 @@ def _report(label):
 
 
 def test_classification_names_first_hpg_leaf():
-    result = gate.classify([_report(label) for label in gate.LABELS])
+    reports = [_report(label) for label in gate.LABELS]
+    for report in reports:
+        report["accumulator_self_replay"]["after_hpg_u"] = _score(1.0e-7, 1)
+    result = gate.classify(reports)
     assert result["first_non_floor"] == "after_hpg_u"
-    assert result["first_hpg_leaf"] == "rhd"
+    assert result["first_hpg_leaf"] == "hpg_accumulator_assignment"
 
 
 @pytest.mark.parametrize("plant", [name for name in gate.PLANTS if name != "none"])
 def test_every_plant_refuses(plant):
     reports = [_report(label) for label in gate.LABELS]
+    for report in reports:
+        report["accumulator_self_replay"]["after_hpg_u"] = _score(1.0e-7, 1)
     with pytest.raises(gate.GateError):
         gate.classify(copy.deepcopy(reports), plant=plant)
