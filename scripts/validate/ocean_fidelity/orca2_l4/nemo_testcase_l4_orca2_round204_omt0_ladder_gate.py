@@ -68,10 +68,6 @@ def build_omt0_card(deck_root: Path, *, plant: str = "none"):
             bottom_drag_r=0.0, bottom_drag_bbl_thickness=0.0),
         zdf_drag_in_matrix=False,
         barotropic_drag_substep=False,
-        barotropic=cfg.barotropic._replace(
-            barotropic_flux_update_nemo_literal=True,
-            barotropic_entry_depth_nemo_literal=True,
-        ),
     )
     recipe = card.recipe._replace(model_config=cfg)
     return card._replace(
@@ -102,10 +98,6 @@ def validate_omt0_card(card) -> dict[str, object]:
             and cfg.bottom_drag.bottom_drag_bbl_thickness == 0.0
             and not cfg.zdf_drag_in_matrix
             and not cfg.barotropic_drag_substep
-        ),
-        "g1_flux_form_statements": (
-            cfg.barotropic.barotropic_flux_update_nemo_literal
-            and cfg.barotropic.barotropic_entry_depth_nemo_literal
         ),
         "no_unmeasured": tuple(card.unmeasured_features) == (),
     }

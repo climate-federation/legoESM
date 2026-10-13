@@ -1,4 +1,4 @@
-"""Round-269 controls for the G1 statements transferred to ORCA2."""
+"""Round-268 controls for the two G1 fold-image-row statements."""
 
 from pathlib import Path
 
@@ -66,42 +66,9 @@ def test_fold_top_v_operands_and_disabled_plant():
     assert np.array_equal(np.asarray(moved)[:-1], np.asarray(mask)[:-1])
 
 
-def test_literal_flux_update_matches_written_order_and_legacy_plant_moves():
-    from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
-        _nemo_flux_form_external_velocity_update,
-    )
-    from legoesm.ocean.state import LatLonCGridOceanConfig
-
-    base = LatLonCGridOceanConfig()
-    literal = base._replace(barotropic=base.barotropic._replace(
-        barotropic_flux_update_nemo_literal=True,
-        barotropic_entry_depth_nemo_literal=True,
-    ))
-    args = tuple(jnp.asarray(value, dtype=jnp.float64) for value in (
-        0.125, 7.0, 7.25, 7.5, 8.0, 8.5, 0.03125, -0.0625, 0.015625,
-        830.7692307692307, 1.0, 1.0e-6,
-    ))
-    actual = _nemo_flux_form_external_velocity_update(
-        *args, config=literal, substep_index=0)
-    legacy = _nemo_flux_form_external_velocity_update(*args)
-    r = np.float64
-    forced = r(r(r(args[2] * args[6]) + r(args[3] * args[7]))
-               + r(args[4] * args[8]))
-    expected = r(r(r(args[4] * args[0]) + r(args[9] * forced))
-                 * r(args[10] / r(r(args[5] + 1.0) - args[10])))
-    assert np.array_equal(np.asarray(actual), np.asarray(expected))
-    assert not np.array_equal(np.asarray(actual), np.asarray(legacy))
-
-
-def test_orca2_and_omt_cards_select_executed_transferred_statements():
+def test_orca2_and_omt_cards_select_both_transferred_statements():
     from legoesm.ocean.fidelity import nemo_testcase_recipe as recipe
     from legoesm.ocean.state import BarotropicConfig, LatLonCGridOceanConfig
-    from scripts.validate.ocean_fidelity.orca2_l4 import (
-        nemo_testcase_l4_orca2_round204_omt0_ladder_gate as omt0,
-    )
-    from scripts.validate.ocean_fidelity.orca2_l4 import (
-        nemo_testcase_l4_orca2_round209_omt1_ladder_gate as omt1,
-    )
     from scripts.validate.ocean_fidelity.orca2_l4 import (
         nemo_testcase_l4_orca2_round223_omt4_ladder_gate as omt4,
     )
@@ -109,14 +76,8 @@ def test_orca2_and_omt_cards_select_executed_transferred_statements():
     assert LatLonCGridOceanConfig._field_defaults["een_fold_image_v_row"] is False
     assert BarotropicConfig._field_defaults[
         "barotropic_fold_top_v_face_ssh"] is False
-    assert LatLonCGridOceanConfig._field_defaults[
-        "rk3_stage1_ssh_nemo_literal"] is False
-    for name in (
-        "barotropic_flux_update_nemo_literal",
-        "barotropic_substep_dt_nemo_literal",
-        "barotropic_entry_depth_nemo_literal",
-    ):
-        assert BarotropicConfig._field_defaults[name] is False
+    assert LatLonCGridOceanConfig._fields[-1] == "een_fold_image_v_row"
+    assert BarotropicConfig._fields[-1] == "barotropic_fold_top_v_face_ssh"
 
     deck = Path(
         "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/"
@@ -124,17 +85,8 @@ def test_orca2_and_omt_cards_select_executed_transferred_statements():
     if not (deck / "namelist_cfg").is_file():
         pytest.skip("admitted OMT-4 deck is not present")
     shipped = recipe.build_nemo_testcase_card("ORCA2-zps", deck_root=deck)
-    omt0_card = omt0.build_omt0_card(deck)
-    omt1_card = omt1.build_omt1_card(deck)
-    omt4_card = omt4.build_omt4_card(deck)
-    for card in (shipped, omt0_card, omt1_card, omt4_card):
+    omt = omt4.build_omt4_card(deck)
+    for card in (shipped, omt):
         config = card.recipe.model_config
         assert config.een_fold_image_v_row is True
         assert config.barotropic.barotropic_fold_top_v_face_ssh is True
-        assert config.rk3_stage1_ssh_nemo_literal is True
-        assert config.barotropic.barotropic_substep_dt_nemo_literal is True
-    assert omt0_card.recipe.model_config.barotropic.barotropic_flux_update_nemo_literal
-    assert omt0_card.recipe.model_config.barotropic.barotropic_entry_depth_nemo_literal
-    for card in (shipped, omt1_card, omt4_card):
-        assert not card.recipe.model_config.barotropic.barotropic_flux_update_nemo_literal
-        assert not card.recipe.model_config.barotropic.barotropic_entry_depth_nemo_literal
