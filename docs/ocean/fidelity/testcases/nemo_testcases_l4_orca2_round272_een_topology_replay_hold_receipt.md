@@ -23,7 +23,7 @@ frozen text. The argmax remains `[19,33,3]` under both labels.
 The compiled build executes `np_CRV`: combined planetary and relative
 circulation at
 `ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynvor.f90:762-770`, transports at
-`dynvor.f90:784-785`, and triads plus accumulator at `dynvor.f90:790-802`.
+`:784-785`, and triads plus accumulator at `:790-802`.
 The deck resolves `ln_dynvor_msk=.false.`; consequently the `fmask` product
 inside the first cited branch is dead on this card. Although `rn_shlat=2`
 modifies the stored mask, that inactive multiplication cannot own the
