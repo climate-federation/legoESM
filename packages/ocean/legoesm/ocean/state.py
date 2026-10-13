@@ -3174,6 +3174,9 @@ class LatLonCGridOceanConfig(NamedTuple):
     # interpolation of the entry and after ratios (stprk3_stg.f90:172-173,
     # :216-217), read by the stage velocity weights and the stage's face
     # thickness.  False takes the ratio of the interpolated sea level.
+    # NOT handed (round-9 review, open): the stage transport geometry and
+    # the implicit vertical solve's interface thickness still take the sea
+    # level's ratio; neither reaches a scored field on a one-level deck.
     rk3_stage_r3uv_nemo_literal: bool = False
 
     @classmethod

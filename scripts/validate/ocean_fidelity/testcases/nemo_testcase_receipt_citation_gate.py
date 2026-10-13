@@ -158,6 +158,8 @@ FILES = {
         _ORCA2G1_P3 / "ppsrc/nemo/domqco.f90"),
     "ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/domhgr.f90": (
         _ORCA2G1_P3 / "ppsrc/nemo/domhgr.f90"),
+    "ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/eosbn2.f90": (
+        _ORCA2G1_P3 / "ppsrc/nemo/eosbn2.f90"),
     "ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90": (
         _ORCA2G1_P3 / "ppsrc/nemo/stprk3_stg.f90"),
     "ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/trazdf.f90": (
@@ -1914,6 +1916,18 @@ CITATION_MAP = {
         ('pssh (:,:,Kaa) = ssha_e(:,:)', 1),
         3],
     # --- GRIDLADDER round 8 END ---
+    # --- GRIDLADDER round 9 (stage ratios handed to their readers, density depth) ---
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/eosbn2.f90:324': (
+        'zh  = ((gdept_1d(jk) ) *(1._wp+r3t(ji,jj,Knn))) * r1_Z0', 1),
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/eosbn2.f90:559': (
+        'zh  = ((gdept_1d(jk) ) *(1._wp+r3t(ji,jj,Knn))) * r1_Z0', 2),
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:323': (
+        'CALL    eos    (        ts, Kmm, rhd, rhop )', 1),
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/domhgr.f90:157-160': [
+        ('IF( ie1e2u_v == 0 ) THEN', 1),
+        ('e1e2v (:,:) = e1v(:,:) * e2v(:,:)', 1),
+        4],
+    # --- GRIDLADDER round 9 END ---
     # --- ORCA2 round 253: kt=8 midpoint-SSH failure boundary -------
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:489-493': [
         ('Extrapolate Sea Level at step jit+0.5', 1),
