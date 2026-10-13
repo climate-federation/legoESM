@@ -68,9 +68,33 @@ def test_round264_accepts_controlled_placement_reconciliation():
     assert result["predictions"]["R264-P2"].startswith("REFUTED")
 
 
+def _prefix(label: str):
+    return {
+        "status": "PASS_R264_PREFIX_MEASUREMENT",
+        "label": label,
+        "mode": "round262-coupled-source-placement",
+        "record_identity": {"frame.bin": "a" * 64},
+        "completed": [{"kt": 1, "arrays": 3, "nonfinite": 0}],
+        "refusal": {"kt": 2, "message": "live thickness refused"},
+        "one_bit_control": _score(2.220446049250313e-16, 1, 1),
+    }
+
+
+def test_round264_accepts_two_label_prefix_measurement():
+    result = gate.classify_prefix([_prefix(label) for label in gate.LABELS])
+    assert result["status"] == "PASS_R264_PREFIX_RECONCILIATION"
+
+
 @pytest.mark.parametrize("plant", gate.PLANTS[1:])
 def test_round264_plants_fire(plant):
     reports = [
         _report(label, mode) for label in gate.LABELS for mode in gate.MODES]
     with pytest.raises(gate.GateError):
         gate.classify(copy.deepcopy(reports), plant=plant)
+
+
+@pytest.mark.parametrize("plant", gate.PREFIX_PLANTS[1:])
+def test_round264_prefix_plants_fire(plant):
+    reports = [_prefix(label) for label in gate.LABELS]
+    with pytest.raises(gate.GateError):
+        gate.classify_prefix(copy.deepcopy(reports), plant=plant)

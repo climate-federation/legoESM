@@ -36,6 +36,7 @@ PLANTS = (
     "transport-digest", "store-only-inertness", "matched-point",
     "source-order", "one-bit",
 )
+PREFIX_PLANTS = ("none", "prefix-labels", "prefix-order", "prefix-one-bit")
 
 
 class GateError(RuntimeError):
@@ -167,6 +168,100 @@ def measure(deck_root: Path, frame_root: Path, label: str, mode: str,
     }
 
 
+def measure_prefix(deck_root: Path, frame_root: Path, label: str,
+                   expect_commit: str) -> dict[str, object]:
+    """Run the source-exact coupled placement without a materialising observer."""
+
+    import jax
+
+    require(label in LABELS, f"bad label {label!r}")
+    stamp = r249._policy_stamp(expect_commit)
+    card = omt4.build_omt4_card(deck_root)
+    omt4.validate_omt4_card(deck_root, card)
+    entry = rung0.assemble_frame(frame_root, 1, 0)
+    state = (card.recipe.initial_state if label == "independent"
+             else rung0.bridge_entry(card, entry))
+    forcing = omt0.rung0_ladder._zero_forcing((148, 180))
+    model = _model(card, _hooks(card, live=False, mode="round262"))
+    completed = []
+    refusal = None
+    with r245._barotropic_surface_mask_arm(
+            card, True, v_only=True, t_pivot_north_neighbor=True):
+        for kt in (1, 2):
+            try:
+                state = jax.device_get(model.step(
+                    state, card.dt_s, freshwater=forcing[0],
+                    surface_forcing=forcing[1]))
+            except ValueError as error:
+                refusal = {"kt": kt, "message": str(error)}
+                break
+            leaves = [np.asarray(leaf) for leaf in jax.tree_util.tree_leaves(state)]
+            completed.append({
+                "kt": kt,
+                "arrays": len(leaves),
+                "nonfinite": int(sum(
+                    np.count_nonzero(~np.isfinite(leaf))
+                    for leaf in leaves if np.issubdtype(leaf.dtype, np.inexact))),
+            })
+    return {
+        "format": "nemo-testcase-l4-orca2-round264-prefix-v1",
+        "status": "PASS_R264_PREFIX_MEASUREMENT",
+        "label": label,
+        "mode": "round262-coupled-source-placement",
+        "worktree": stamp,
+        "execution": "production-jit-cpu-fp64-x64-libm-no-observer",
+        "operand_route": "production-d114-resolved-complete-private-unit",
+        "record_identity": _record_identity(frame_root),
+        "completed": completed,
+        "refusal": refusal,
+        "one_bit_control": r249._score(
+            np.asarray([1.0]), np.nextafter(np.asarray([1.0]), np.inf)),
+    }
+
+
+def classify_prefix(reports: list[dict[str, object]], *,
+                    plant: str = "none") -> dict[str, object]:
+    require(plant in PREFIX_PLANTS, f"unknown prefix plant {plant!r}")
+    reports = copy.deepcopy(reports)
+    if plant == "prefix-labels":
+        reports.pop()
+    by_label = {report["label"]: report for report in reports}
+    require(set(by_label) == set(LABELS), "both prefix labels are required")
+    independent = by_label["independent"]
+    if plant == "prefix-order":
+        independent["completed"] = []
+    elif plant == "prefix-one-bit":
+        independent["one_bit_control"]["unequal"] = 0
+    summaries = {}
+    reference_records = by_label[LABELS[0]]["record_identity"]
+    for label in LABELS:
+        report = by_label[label]
+        require(report["status"] == "PASS_R264_PREFIX_MEASUREMENT"
+                and report["mode"] == "round262-coupled-source-placement",
+                f"{label}: prefix provenance moved")
+        require(report["record_identity"] == reference_records,
+                f"{label}: prefix record identity moved")
+        require(report["completed"]
+                and report["completed"][0]["kt"] == 1
+                and report["completed"][0]["nonfinite"] == 0,
+                f"{label}: source-exact candidate did not complete finite kt=1")
+        require(report["one_bit_control"]["unequal"] == 1,
+                f"{label}: prefix one-bit control did not fire")
+        summaries[label] = {
+            "completed": report["completed"],
+            "refusal": report["refusal"],
+        }
+    return {
+        "format": "nemo-testcase-l4-orca2-round264-prefix-classification-v1",
+        "status": "PASS_R264_PREFIX_RECONCILIATION",
+        "labels": summaries,
+        "predictions": {
+            "R264-P4": "MEASURED",
+            "R264-P5": "CONFIRMED" if plant == "none" else "PLANT",
+        },
+    }
+
+
 def classify(reports: list[dict[str, object]], *,
              plant: str = "none") -> dict[str, object]:
     require(plant in PLANTS, f"unknown plant {plant!r}")
@@ -276,17 +371,27 @@ def classify(reports: list[dict[str, object]], *,
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--measure", action="store_true")
+    parser.add_argument("--measure-prefix", action="store_true")
     parser.add_argument("--deck-root", type=Path)
     parser.add_argument("--frame-root", type=Path)
     parser.add_argument("--label", choices=LABELS)
     parser.add_argument("--mode", choices=MODES)
     parser.add_argument("--expect-commit")
     parser.add_argument("--classify", nargs=6, type=Path)
-    parser.add_argument("--plant", choices=PLANTS, default="none")
+    parser.add_argument("--classify-prefix", nargs=2, type=Path)
+    parser.add_argument("--plant", choices=PLANTS + PREFIX_PLANTS[1:], default="none")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     try:
-        if args.measure:
+        if args.measure_prefix:
+            require(args.plant == "none", "prefix measurement does not accept plants")
+            require(all((args.deck_root, args.frame_root, args.label,
+                         args.expect_commit)),
+                    "prefix measurement arguments are incomplete")
+            result = measure_prefix(
+                args.deck_root, args.frame_root, args.label,
+                args.expect_commit)
+        elif args.measure:
             require(args.plant == "none", "measurement does not accept plants")
             require(all((args.deck_root, args.frame_root, args.label, args.mode,
                          args.expect_commit)),
@@ -294,6 +399,11 @@ def main() -> int:
             result = measure(
                 args.deck_root, args.frame_root, args.label, args.mode,
                 args.expect_commit)
+        elif args.classify_prefix is not None:
+            result = classify_prefix([
+                json.loads(path.read_text(encoding="utf-8"))
+                for path in args.classify_prefix], plant=args.plant)
+            require(args.plant == "none", f"{args.plant} plant stayed green")
         else:
             require(args.classify is not None,
                     "classification JSONs are required")
