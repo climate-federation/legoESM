@@ -3472,6 +3472,472 @@ def with_first_wzv_after_ssh(model_config, form):
     return model_config._replace(nemo_first_wzv_after_ssh=form)
 
 
+# ---------------------------------------------------------------------------
+# ORCA2G1 (grid ladder rung G1, DECISION 117): the TSUNAMI program on ORCA2's
+# horizontal grid -- T-pivot north fold, cyclic east-west, ORCA2's coast --
+# over a FLAT 100 m bottom with ONE wet level.  The geometry is read from the
+# tools/DOMAINcfg-produced ``domain_cfg.nc`` and every program selector from
+# the deck's ``namelist_cfg``; nothing here is a default.
+#
+# The bump centre is the Fortran PARAMETER pair of the case's
+# ``usrdef_istate.F90`` (np_g1_ji0, np_g1_jj0), inner-global one-based.
+_ORCA2G1_BUMP_JI = 51
+_ORCA2G1_BUMP_JJ = 74
+_ORCA2G1_T_C = 20.0            # usrdef_istate.F90: pts(:,:,:,jp_tem)
+_ORCA2G1_S_PSU = 30.0          # usrdef_istate.F90: pts(:,:,:,jp_sal)
+# The card is transcribed, not measured: no NEMO record is admitted yet and
+# the one-level step is unproven on this branch.
+ORCA2G1_UNMEASURED: tuple[str, ...] = (
+    "g1_record_not_admitted",
+    "one_wet_level_step",
+)
+# The ONE program this card transcribes.  A deck that states anything else is
+# refused: the card has no arm for it.
+_ORCA2G1_REQUIRED_SWITCHES: dict[str, object] = {
+    "namcfg.ln_read_cfg": True,
+    "namtsd.ln_tsd_init": False, "namtsd.ln_tsd_dmp": False,
+    "namsbc.ln_usr": True, "namsbc.ln_flx": False, "namsbc.ln_blk": False,
+    "namsbc.ln_abl": False, "namsbc.ln_cpl": False, "namsbc.nn_ice": 0,
+    "namsbc.ln_traqsr": False, "namsbc.ln_ssr": False, "namsbc.ln_rnf": False,
+    "namsbc.nn_fwb": 0, "namsbc.ln_apr_dyn": False, "namsbc.ln_wave": False,
+    "namberg.ln_icebergs": False, "namisf.ln_isf": False,
+    "namlbc.rn_shlat": 2.0,
+    "namdrg.ln_drg_off": True,
+    "nambbc.ln_trabbc": False, "nambbl.ln_trabbl": False,
+    "nameos.ln_eos80": True, "nameos.ln_teos10": False, "nameos.ln_seos": False,
+    "namtra_adv.ln_traadv_off": True, "namtra_adv.ln_traadv_fct": False,
+    "namtra_adv.ln_traadv_cen": False, "namtra_adv.ln_traadv_mus": False,
+    "namtra_adv.ln_traadv_ubs": False, "namtra_adv.ln_traadv_qck": False,
+    "namtra_ldf.ln_traldf_off": True, "namtra_mle.ln_mle": False,
+    "namtra_eiv.ln_ldfeiv": False, "namtra_dmp.ln_tradmp": False,
+    "namdyn_adv.ln_dynadv_off": True, "namdyn_adv.ln_dynadv_vec": False,
+    "namdyn_adv.ln_dynadv_cen2": False, "namdyn_adv.ln_dynadv_up3": False,
+    "namdyn_vor.ln_dynvor_een": True, "namdyn_vor.nn_e3f_typ": 0,
+    "namdyn_hpg.ln_hpg_sco": True,
+    "namdyn_spg.ln_dynspg_ts": True, "namdyn_spg.ln_bt_fw": True,
+    "namdyn_spg.nn_bt_flt": 3, "namdyn_spg.ln_bt_auto": True,
+    "namdyn_ldf.ln_dynldf_off": True,
+    "namzdf.ln_zdfcst": True, "namzdf.ln_zdftke": False,
+    "namzdf.ln_zdfevd": False, "namzdf.ln_zdfddm": False,
+    "namzdf.ln_zdfiwm": False, "namzdf.ln_zad_aimp": False,
+    "namzdf.nn_avb": 0, "namzdf.nn_havtb": 0,
+}
+
+
+class ORCA2G1Deck(NamedTuple):
+    """The G1 deck's data values; its switches are checked on read."""
+
+    rn_Dt_s: float
+    nn_itend: int
+    nn_fsbc: int
+    rn_bt_cmax: float
+    rn_bt_alpha: float
+    rn_avm0_m2_s: float
+    rn_avt0_m2_s: float
+
+
+def _orca2g1_namelist_values(path: Path) -> dict[str, object]:
+    """``group.key`` -> typed value of every assignment in a namelist."""
+
+    def typed(text: str) -> object:
+        low = text.lower()
+        if low in (".true.", ".false."):
+            return low == ".true."
+        for cast in (int, float):
+            try:
+                return cast(low.replace("d", "e"))
+            except ValueError:
+                continue
+        return text
+
+    found: dict[str, object] = {}
+    group = None
+    for raw in Path(path).read_text().splitlines():
+        line = raw.split("!", 1)[0].strip()
+        if line.startswith("&"):
+            group = line[1:].split()[0].lower()
+        elif line == "/":
+            group = None
+        elif group and "=" in line:
+            key, value = line.split("=", 1)
+            name = f"{group}.{key.strip().lower()}"
+            if name in found:
+                raise ValueError(f"{path}: {name} is assigned twice")
+            found[name] = typed(value.strip().rstrip(",").strip())
+    return found
+
+
+def read_orca2g1_deck(deck_root: str | Path) -> ORCA2G1Deck:
+    """Read ``namelist_cfg`` and refuse any switch the card has no arm for."""
+
+    path = Path(deck_root) / "namelist_cfg"
+    values = _orca2g1_namelist_values(path)
+    for name, want in _ORCA2G1_REQUIRED_SWITCHES.items():
+        if name not in values:
+            raise ValueError(f"ORCA2G1 deck does not state {name}")
+        if values[name] != want or type(values[name]) is not type(want):
+            raise ValueError(
+                f"ORCA2G1 deck states {name} = {values[name]!r}; the card "
+                f"transcribes only {want!r}")
+    data = {
+        "rn_Dt_s": ("namdom.rn_dt", float),
+        "nn_itend": ("namrun.nn_itend", int),
+        "nn_fsbc": ("namsbc.nn_fsbc", int),
+        "rn_bt_cmax": ("namdyn_spg.rn_bt_cmax", float),
+        "rn_bt_alpha": ("namdyn_spg.rn_bt_alpha", float),
+        "rn_avm0_m2_s": ("namzdf.rn_avm0", float),
+        "rn_avt0_m2_s": ("namzdf.rn_avt0", float),
+    }
+    fields = {}
+    for field, (name, kind) in data.items():
+        if name not in values:
+            raise ValueError(f"ORCA2G1 deck does not state {name}")
+        value = values[name]
+        if kind is int and type(value) is not int:
+            raise ValueError(f"ORCA2G1 deck {name} = {value!r} is not an integer")
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"ORCA2G1 deck {name} = {value!r} is not a number")
+        fields[field] = kind(value)
+    deck = ORCA2G1Deck(**fields)
+    if deck.nn_itend % deck.nn_fsbc:
+        raise ValueError("ORCA2G1 nn_itend must be a multiple of nn_fsbc")
+    return deck
+
+
+def _orca2g1_auto_substeps(dom: dict[str, np.ndarray], deck: ORCA2G1Deck) -> int:
+    """``ln_bt_auto``: nn_e on the file's own ht_0, e1t, e2t
+    (dynspg_ts.f90:1049-1062)."""
+
+    wet = dom["bottom_level"] > 0
+    ht_0 = np.sum(dom["e3t_0"] * wet[..., None], axis=-1)
+    zcu2 = ht_0 * (dom["e1t"] ** -2 + dom["e2t"] ** -2)
+    return nemo_auto_substeps(
+        deck.rn_Dt_s, 1.0, float(np.max(zcu2)),
+        float(NEMO_CONSTANTS_CONFIG.g), cmax=deck.rn_bt_cmax)
+
+
+def orca2g1_initial_ssh(glamt_deg, gphit_deg, surface_tmask) -> np.ndarray:
+    """The case's ``usr_def_istate_ssh``: TSUNAMI's bump at (ji,jj) = (51,74).
+
+    ``zdist`` is the degree distance to the centre T point with the longitude
+    difference wrapped by Fortran ``ANINT``; ``zmax = MAXVAL(zdist)/20`` and
+    ``ssh = 0.1*COS(zdist/zmax*rpi*0.5)*tmask`` inside it are TSUNAMI's
+    statements (tests/TSUNAMI/MY_SRC/usrdef_istate.F90:94-102).
+    """
+
+    glamt = np.asarray(glamt_deg, dtype=np.float64)
+    gphit = np.asarray(gphit_deg, dtype=np.float64)
+    j0, i0 = _ORCA2G1_BUMP_JJ - 1, _ORCA2G1_BUMP_JI - 1
+    dlam = glamt - glamt[j0, i0]
+    turns = dlam / 360.0
+    dlam = dlam - 360.0 * np.trunc(turns + np.copysign(0.5, turns))   # ANINT
+    zdist = np.sqrt(dlam ** 2 + (gphit - gphit[j0, i0]) ** 2)
+    zmax = np.max(zdist) / 20.0
+    ssh = np.zeros_like(zdist)
+    inside = zdist <= zmax
+    ssh[inside] = 0.1 * np.cos(zdist[inside] / zmax * math.pi * 0.5)
+    return ssh * np.asarray(surface_tmask, dtype=np.float64)
+
+
+def _orca2g1_domain(domain_path: Path) -> dict[str, np.ndarray]:
+    """Read the G1 domain file; refuse anything but one wet level."""
+
+    try:
+        import netCDF4  # noqa: N813
+    except ImportError as exc:
+        raise ImportError("netCDF4 is required to build the ORCA2G1 card") from exc
+    names2d = ("e1t", "e2t", "e1u", "e2u", "e1v", "e2v", "e1f", "e2f",
+               "ff_f", "gphit", "glamt")
+    with netCDF4.Dataset(domain_path, "r") as ds:
+        def read(name):
+            return np.squeeze(np.asarray(ds.variables[name][:], dtype=np.float64))
+        out = {name: read(name) for name in names2d}
+        e3t_1d, e3w_1d = read("e3t_1d"), read("e3w_1d")
+        bottom = np.squeeze(np.asarray(ds.variables["bottom_level"][:])).astype(np.int32)
+        raw = {name: read(name) for name in ("e3t_0", "e3u_0", "e3v_0", "e3f_0")}
+    if e3t_1d.shape != (2,) or raw["e3t_0"].shape[0] != 2:
+        raise ValueError(
+            f"ORCA2G1 domain must have jpk = 2 (one wet level), got e3t_1d "
+            f"shape {e3t_1d.shape}")
+    if bottom.max() != 1 or bottom.min() < 0:
+        raise ValueError("ORCA2G1 bottom_level must be 0 (land) or 1 (wet)")
+    # Record level jpk is NEMO's masked dummy bottom; the card carries jpkm1.
+    out.update(e3t_1d=e3t_1d[:1], e3w_1d=e3w_1d[:1], bottom_level=bottom)
+    out.update({name: np.moveaxis(value[:1], 0, -1) for name, value in raw.items()})
+    return out
+
+
+def build_orca2g1_flat_card(deck_root: str | Path) -> NEMOTestcaseCard:
+    """ORCA2G1: ORCA2's fold/seam/coast geometry builders on a one-level
+    flat domain, running the TSUNAMI program.
+
+    ``deck_root`` holds the case's ``namelist_cfg`` and the DOMAINcfg-produced
+    ``domain_cfg.nc``.  Geometry reuses the ORCA2 card's path unchanged
+    (``create_tripole_grid``, ``_orca2_masks``, ``nemo_fe3mask_from_tmask``,
+    the raw-mesh ``NemoEENBarotropicOperands``); the program is ORCA2's RK3
+    identity with the five OFF selections of the admitted OMT-0 rung.
+    """
+
+    root = Path(deck_root)
+    deck = read_orca2g1_deck(root)
+    domain_path = root / "domain_cfg.nc"
+    if not domain_path.is_file():
+        raise FileNotFoundError(f"missing ORCA2G1 domain file: {domain_path}")
+    dom = _orca2g1_domain(domain_path)
+
+    grid = create_tripole_grid(
+        domain_path,
+        radius=float(NEMO_CONSTANTS_CONFIG.R_earth),
+        omega=float(NEMO_CONSTANTS_CONFIG.Omega),
+        dtype=jnp.float64,
+        min_dx_m=0.0,
+        fold_convention="(n_lon-i)%n_lon",     # jperio = 4: T-pivot fold
+        use_mesh_coriolis=True,                # ff_f/ff_t are in the file
+    )
+    # DOMAINcfg writes no strait_shlat, so dommsk.f90:289 skips the override.
+    no_strait = np.full(dom["bottom_level"].shape, -1.0)
+    tmask, umask, vmask, fmask = _orca2_masks(dom["bottom_level"], no_strait)
+    fe3mask = np.asarray(
+        nemo_fe3mask_from_tmask(tmask.astype(np.float64), grid=grid),
+        dtype=np.float64,
+    )
+    gdept, gdepw = _orca2_depth_ladder(dom["e3t_1d"], dom["e3w_1d"])
+    h_partial = dom["e3t_0"] * tmask
+    bathymetry = np.sum(h_partial, axis=-1)
+    hu = np.sum(dom["e3u_0"] * umask, axis=-1)
+    hv = np.sum(dom["e3v_0"] * vmask, axis=-1)
+    hf = np.sum(dom["e3f_0"] * vmask * np.roll(vmask, -1, axis=1), axis=-1)
+    hf[-1] = hf[-2, (grid.n_lon - np.arange(grid.n_lon) - 1) % grid.n_lon]
+    operands = NemoEENBarotropicOperands(
+        ff_f=dom["ff_f"],
+        e3u_0=dom["e3u_0"], e3v_0=dom["e3v_0"], e3f_0=dom["e3f_0"],
+        umask=umask.astype(np.float64), vmask=vmask.astype(np.float64),
+        fmask=fmask, fe3mask=fe3mask,
+        hu_0=hu, hv_0=hv, hf_0=hf,
+        e1t=dom["e1t"], e2t=dom["e2t"], e1u=dom["e1u"], e2u=dom["e2u"],
+        e1v=dom["e1v"], e2v=dom["e2v"], e1f=dom["e1f"], e2f=dom["e2f"],
+    )
+    z_ref = create_z_star_from_thicknesses(
+        dom["e3t_1d"],
+        t_depth_ref_m=gdept,
+        nemo_gdept_0_m=np.broadcast_to(gdept, h_partial.shape),
+        nemo_gdepw_0_m=np.broadcast_to(gdepw, h_partial.shape),
+        nemo_e3t_0_m=dom["e3t_0"],
+        nemo_e3w_0_m=np.broadcast_to(dom["e3w_1d"], h_partial.shape),
+        nemo_hu_0_m=hu, nemo_hv_0_m=hv,
+        nemo_e1e2t_m=dom["e1t"] * dom["e2t"],
+        nemo_e1e2u_m=dom["e1u"] * dom["e2u"],
+        nemo_e1e2v_m=dom["e1v"] * dom["e2v"],
+        nemo_e2u_m=dom["e2u"], nemo_e1v_m=dom["e1v"],
+        nemo_een_barotropic_m=operands,
+        allow_single_level=True,               # jpk = 2: one wet level
+    )
+    z_coord = create_partial_cell_coordinate(
+        z_ref, bathymetry, bottom_index_rule="nemo_tpoint"
+    )._replace(
+        h_partial=jnp.asarray(h_partial, dtype=jnp.float64),
+        bottom_level=jnp.asarray(dom["bottom_level"] - 1, dtype=jnp.int32),
+        is_active=jnp.asarray(tmask),
+        nemo_e3t_0=jnp.asarray(dom["e3t_0"], dtype=jnp.float64),
+        nemo_bbl_e3u_0=jnp.asarray(dom["e3u_0"], dtype=jnp.float64),
+        nemo_bbl_e3v_0=jnp.asarray(dom["e3v_0"], dtype=jnp.float64),
+    )
+
+    surface_wet = tmask[..., 0]
+    ssh = orca2g1_initial_ssh(dom["glamt"], dom["gphit"], surface_wet)
+    state = rest_state_latlon_cgrid_ocean(
+        grid, z_coord,
+        T_water_init_C=0.0, T_deep=0.0, S_uniform=0.0,
+        H_max=float(np.max(bathymetry)),
+        land_mask_override=surface_wet,
+        H_bathy_override=bathymetry,
+        nemo_prognostic_barotropic_velocity=True,
+    )
+    wet3 = tmask.astype(np.float64)
+    state = state._replace(
+        T=state.T.replace(data=jnp.asarray(_ORCA2G1_T_C * wet3, dtype=jnp.float64)),
+        S=state.S.replace(data=jnp.asarray(_ORCA2G1_S_PSU * wet3, dtype=jnp.float64)),
+        eta=state.eta.replace(data=jnp.asarray(ssh, dtype=jnp.float64)),
+    )
+
+    base = _model_config(
+        barotropic_time_filter="nemo_ab3am4",          # nn_bt_flt = 3
+        nemo_barotropic_filter_alpha=deck.rn_bt_alpha,  # required card field
+        n_barotropic_substeps=_orca2g1_auto_substeps(dom, deck),  # ln_bt_auto = T
+        bbl_adv_option=0, bbl_gamma_s=0.0,
+        bbl_diffusive_option=0, bbl_aht_m2_s=0.0,       # ln_trabbl = F
+        whole_step_identity="orca2_vector_een_c2",
+        tke_langmuir_evaluation="vectorized",
+    )
+    vertical = base.physics.vertical_mixing
+    vertical = vertical._replace(
+        scheme="constant",                              # ln_zdfcst
+        constant=vertical.constant._replace(
+            A_v=deck.rn_avm0_m2_s, K_v=deck.rn_avt0_m2_s, lat_dependent=False),
+        iwm=vertical.iwm._replace(enabled=False, require_forcing_maps=False),
+        ddm=vertical.ddm._replace(enabled=False),
+        vmix_background_mode="additive",
+    )
+    physics = base.physics._replace(
+        vertical_mixing=vertical,
+        shortwave_penetration=None,                     # ln_traqsr = F
+        mle=None,                                       # ln_mle = F
+        # ln_zdfevd = F: the ORCA2 identity carries ORCA2's enhanced
+        # vertical diffusion, which this deck switches off.
+        convection=base.physics.convection._replace(scheme="none"),
+    )
+    model_config = base._replace(
+        A_v=0.0, K_v=0.0, physics=physics,
+        runoff_depth_spread_m=0.0, runoff_depth_spread_map=None,
+        # ln_dynadv_OFF -> np_LIN_dyn (dynadv.f90:185).
+        momentum_advection="flux_form",
+        momentum_flux_scheme="none", vertical_momentum_scheme="none",
+        adaptive_implicit_vertadv=False,
+        vorticity_scheme="een_planetary", een_fold_image_v_row=True, rk3_stage1_ssh_nemo_literal=True, rk3_stage1_rhs_nemo_literal=True, rk3_stage_velocity_written_order=True, barotropic=base.barotropic._replace(barotropic_fold_top_v_face_ssh=True, barotropic_flux_update_nemo_literal=True, barotropic_substep_dt_nemo_literal=True, barotropic_entry_depth_nemo_literal=True, barotropic_een_ratio_fold_exchange=True, barotropic_een_fe3mask_pivot_row=True),  # noqa: E501
+        tracer_advection="none",                        # traadv.f90:444
+        lateral_viscosity=base.lateral_viscosity._replace(A_h=0.0),
+        K_h=0.0, K_bih=0.0,                             # ln_traldf_OFF
+        bottom_drag=base.bottom_drag._replace(          # ln_drg_OFF
+            bottom_drag_scheme="legacy", bottom_drag_r=0.0,
+            bottom_drag_bg_velocity=0.0, bottom_drag_bbl_thickness=0.0),
+        zdf_drag_in_matrix=False, barotropic_drag_substep=False,
+        gm_redi=None)
+    recipe = NEMORecipe(
+        model_config=model_config,
+        physics_config=physics,
+        grid=grid,
+        z_coord=z_coord,
+        land_mask=jnp.asarray(surface_wet, dtype=jnp.float64),
+        initial_state=state,
+    )
+    card = NEMOTestcaseCard(
+        "ORCA2G1-flat", recipe, deck.rn_Dt_s, deck.nn_itend, 1, 0, 0, 0.0, 0.0,
+        surface_boundary_condition="none",
+        surface_input_operator="none",
+        unmeasured_features=ORCA2G1_UNMEASURED,
+        icebergs_enabled=False,
+        iceberg_inputs=(),
+    )
+    validate_orca2g1_flat_card(card, root)
+    return card
+
+
+def _orca2g1_selector_failures(card: NEMOTestcaseCard) -> list[str]:
+    """The G1 program selectors that need no deck: which ones moved."""
+
+    cfg = card.recipe.model_config
+    lv = cfg.lateral_viscosity
+    vm = cfg.physics.vertical_mixing
+    state = card.recipe.initial_state
+    bt = cfg.barotropic
+    checks = {
+        "unmeasured": card.unmeasured_features == ORCA2G1_UNMEASURED,
+        "transcendentals": card.transcendentals == "libm",
+        # The NEMO-literal split-explicit identity every certified card holds
+        # (the shared validator's own rows; it does not know this card yet).
+        "barotropic_identity": (
+            bt.barotropic_face_depth, bt.barotropic_continuity_evaluation,
+            bt.barotropic_transport_accumulation_evaluation,
+            bt.barotropic_seed_face_depth, bt.barotropic_seed_evaluation,
+            bt.barotropic_pgf_evaluation, bt.nemo_prognostic_barotropic_state,
+            bt.barotropic_diffusion_alpha, bt.barotropic_reconcile_target,
+        ) == ("nemo_ssh_avg", "nemo_literal", "nemo_literal", "nemo_ssh_avg",
+              "nemo_literal", "nemo_literal", True, 0.0, "velocity_avg"),
+        "ln_hpg_sco": cfg.pgf_scheme == "nemo_sco",
+        "zdf_literal": cfg.zdf_implicit_solver_evaluation == "nemo_literal",
+        "wall_fill": bool(cfg.tracer_wall_neumann_fill),
+        "ln_eos80": cfg.eos == "nemo_eos80",
+        "nn_bt_flt=3": cfg.barotropic.barotropic_time_filter == "nemo_ab3am4",
+        "ln_dynadv_OFF": (cfg.momentum_advection, cfg.momentum_flux_scheme,
+                          cfg.vertical_momentum_scheme) == ("flux_form", "none", "none"),
+        "ln_dynvor_een": (cfg.vorticity_scheme, cfg.een_fold_image_v_row) == ("een_planetary", True), "zhvp2_e fold row": cfg.barotropic.barotropic_fold_top_v_face_ssh is True, "ua_e flux form": cfg.barotropic.barotropic_flux_update_nemo_literal is True, "rDt_e": cfg.barotropic.barotropic_substep_dt_nemo_literal is True, "hu_e entry": cfg.barotropic.barotropic_entry_depth_nemo_literal is True, "r3 fold exchange": cfg.barotropic.barotropic_een_ratio_fold_exchange is True, "fe3mask pivot row": cfg.barotropic.barotropic_een_fe3mask_pivot_row is True, "stage-1 ssh": cfg.rk3_stage1_ssh_nemo_literal is True, "stage-1 Krhs": cfg.rk3_stage1_rhs_nemo_literal is True, "stage velocity order": cfg.rk3_stage_velocity_written_order is True,  # noqa: E501
+        "ln_traadv_OFF": cfg.tracer_advection == "none",
+        "ln_dynldf_OFF": all(getattr(lv, name) == 0.0 for name in (
+            "A_h", "B_h", "C_smag", "C_smag_lap", "C_leith")),
+        "ln_traldf_OFF": cfg.K_h == 0.0 and cfg.K_bih == 0.0 and cfg.gm_redi is None,
+        "ln_drg_OFF": (cfg.bottom_drag.bottom_drag_r == 0.0
+                       and not cfg.zdf_drag_in_matrix
+                       and not cfg.barotropic_drag_substep),
+        "ln_zdfcst": (vm.scheme == "constant" and not vm.constant.lat_dependent
+                      and not vm.iwm.enabled and not vm.ddm.enabled),
+        "ln_zad_Aimp=F": not cfg.adaptive_implicit_vertadv,
+        "ln_zdfevd=F": cfg.physics.convection.scheme == "none",
+        "nn_e3f_typ=0": cfg.een_e3f_scheme == "nemo_avg4",
+        "lateral_mixing_none": cfg.physics.lateral_mixing.scheme == "none",
+        "ln_trabbl=F": (cfg.bbl_adv_option, cfg.bbl_diffusive_option) == (0, 0),
+        "no_forcing": (card.surface_boundary_condition == "none"
+                       and card.surface_input_operator == "none"
+                       and cfg.physics.shortwave_penetration is None
+                       and cfg.physics.mle is None),
+        "no_ice": card.icebergs_enabled is False and card.iceberg_inputs == (),
+        "one_wet_level": (np.shape(state.T.data)[-1] == 1
+                          and card.dummy_bottom_records == 1),
+        "rest": (not np.any(np.asarray(state.u.data))
+                 and not np.any(np.asarray(state.v.data))
+                 and not np.any(np.asarray(state.uu_b.data))
+                 and not np.any(np.asarray(state.vv_b.data))),
+    }
+    return sorted(name for name, ok in checks.items() if not ok)
+
+
+def validate_orca2g1_flat_card(card: NEMOTestcaseCard, deck_root: str | Path) -> None:
+    """Refuse a G1 card whose selectors or state disagree with its deck."""
+
+    deck = read_orca2g1_deck(deck_root)
+    dom = _orca2g1_domain(Path(deck_root) / "domain_cfg.nc")
+    cfg = card.recipe.model_config
+    vm = cfg.physics.vertical_mixing
+    wet = dom["bottom_level"] > 0
+    state = card.recipe.initial_state
+    grid = card.recipe.grid
+    perm_t = (grid.n_lon - np.arange(grid.n_lon)) % grid.n_lon
+    checks = {
+        "case": card.case == "ORCA2G1-flat",
+        "rn_Dt": card.dt_s == deck.rn_Dt_s,
+        "nn_itend": card.n_steps == deck.nn_itend,
+        "rn_bt_alpha": cfg.barotropic.nemo_barotropic_filter_alpha == deck.rn_bt_alpha,
+        "nn_e": cfg.barotropic.n_barotropic_substeps == _orca2g1_auto_substeps(
+            dom, deck),
+        "rn_avm0/rn_avt0": (vm.constant.A_v, vm.constant.K_v) == (
+            deck.rn_avm0_m2_s, deck.rn_avt0_m2_s),
+        "domain_shape": np.shape(state.eta.data) == wet.shape,
+        "coast": np.array_equal(np.asarray(card.recipe.land_mask) > 0.5, wet),
+        "flat_one_level": np.array_equal(
+            np.asarray(card.recipe.z_coord.h_partial)[..., 0],
+            dom["e3t_0"][..., 0] * wet),
+        # jperio = 4 on the de-haloed file: the last T row is the pivot row
+        # and is its own image under i -> (n_lon - i) % n_lon.
+        "t_fold_mask": np.array_equal(wet[-1], wet[-1][perm_t]),
+        "uniform_T": np.array_equal(np.asarray(state.T.data)[..., 0],
+                                    _ORCA2G1_T_C * wet),
+        "uniform_S": np.array_equal(np.asarray(state.S.data)[..., 0],
+                                    _ORCA2G1_S_PSU * wet),
+        "bump": np.array_equal(
+            np.asarray(state.eta.data),
+            orca2g1_initial_ssh(dom["glamt"], dom["gphit"], wet)),
+        "bump_centre": float(np.asarray(state.eta.data)[
+            _ORCA2G1_BUMP_JJ - 1, _ORCA2G1_BUMP_JI - 1]) == 0.1,
+    }
+    failed = sorted(name for name, ok in checks.items() if not ok)
+    failed += _orca2g1_selector_failures(card)
+    if failed:
+        raise ValueError(f"ORCA2G1-flat disagrees with its deck: {failed}")
+
+
+def validate_orca2g1_flat_card_for_execution(
+        card: NEMOTestcaseCard, deck_root: str | Path) -> None:
+    """Refuse the G1 card until every selected arm is measured.
+
+    G1's validation is deck-bound, so it has its own pair; the shared
+    ``validate_nemo_testcase_card`` table does not list this card.
+    """
+    validate_orca2g1_flat_card(card, deck_root)
+    if card.unmeasured_features:
+        raise ValueError(
+            "ORCA2G1-flat is not execution-ready; unresolved selected arms: "
+            + ", ".join(card.unmeasured_features))
+
+
 __all__ = (
     "NEMOTestcaseCard",
     "GYRESurfaceBoundaryCondition",

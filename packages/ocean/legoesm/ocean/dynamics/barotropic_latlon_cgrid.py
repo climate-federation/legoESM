@@ -1122,7 +1122,7 @@ def _nemo_ieee_add(acc, addend):
 
 
 def _nemo_literal_een_coefficients(eta, z_coord, dtype, scheme="een",
-                                   *, grid=None):
+                                   *, grid=None, fold_pivot_row=(False, False)):
     """Materialize NEMO's eight frozen EEN or ENE coefficients.
 
     ``scheme="een"`` transcribes ``dyn_cor_2D_init``'s 12-point triads;
@@ -1182,7 +1182,7 @@ def _nemo_literal_een_coefficients(eta, z_coord, dtype, scheme="een",
     # rather than relying on its multiplication by a recorded-zero r3f to hide
     # the difference (ORCA2 rounds 125-126).
     fmask = jnp.asarray(raw.fe3mask, dtype=dtype)
-    fmask = fmask.at[-1].set(_nemo_een_north_f(fmask, grid)[-1])
+    fmask = fmask if fold_pivot_row[1] else fmask.at[-1].set(_nemo_een_north_f(fmask, grid)[-1])  # noqa: E501
 
     def recip(depth, wet):
         return b(wet / b(depth + one - wet))
@@ -1208,7 +1208,7 @@ def _nemo_literal_een_coefficients(eta, z_coord, dtype, scheme="een",
     r3u = b(b(half * b(area_eta + east)) * r1_hu0 / b(e1u * e2u))
     r3v = b(b(half * b(area_eta + north)) * r1_hv0 / b(e1v * e2v))
     quad = b(b(area_eta + east) + b(north + northeast))
-    r3f = b(b(quarter * quad) * r1_hf0 / b(e1f * e2f))
+    r3u, r3v, r3f = _nemo_een_ratio_fold_exchange(r3u, r3v, b(b(quarter * quad) * r1_hf0 / b(e1f * e2f)), grid, fold_pivot_row[0])  # noqa: E501
     # dynspg_ts.f90:1339-1348 leaves the local and neighbouring live face
     # thicknesses unmasked, then applies the one written neighbouring U mask.
     e3u = b(e3u0 * b(one + r3u[..., None] * umask))
@@ -1377,7 +1377,7 @@ def _build_een_barotropic_inputs(h_k, grid, mask, u_mask, v_mask, dtype,
                                  dz_ref=None,
                                  coefficient_evaluation="generic",
                                  eta=None,
-                                 z_coord=None,
+                                 z_coord=None, fold_pivot_row=(False, False),
                                  scheme="een"):
     """Precompute the geometry inputs for the EEN barotropic Coriolis (node 16).
 
@@ -1473,7 +1473,7 @@ def _build_een_barotropic_inputs(h_k, grid, mask, u_mask, v_mask, dtype,
                    e2u=geom.dy_u.astype(dtype), e2v=geom.dy_v.astype(dtype))
     if coefficient_evaluation == "nemo_literal":
         out["literal_coefficients"] = _nemo_literal_een_coefficients(
-            eta, z_coord, dtype, scheme=scheme, grid=grid)
+            eta, z_coord, dtype, scheme=scheme, grid=grid, fold_pivot_row=fold_pivot_row)
     out["coefficient_evaluation"] = coefficient_evaluation
     return out
 
@@ -1633,7 +1633,7 @@ def barotropic_coriolis_een_pre_step(u_3d, v_3d, h_k, grid, mask, u_mask,
                                      dz_ref=None,
                                      coefficient_evaluation="generic",
                                      eta=None,
-                                     z_coord=None,
+                                     z_coord=None, fold_pivot_row=(False, False),
                                      pre=None,
                                      return_pre=False,
                                      scheme="een",
@@ -1665,7 +1665,7 @@ def barotropic_coriolis_een_pre_step(u_3d, v_3d, h_k, grid, mask, u_mask,
             dz_ref=dz_ref,
             coefficient_evaluation=coefficient_evaluation,
             eta=eta,
-            z_coord=z_coord,
+            z_coord=z_coord, fold_pivot_row=fold_pivot_row,
             scheme=scheme)
     if entry_barotropic_velocity is not None:
         # NEMO hands dyn_cor_2D the CARRIED external mode, puu_b(:,:,Kmm)
@@ -3250,7 +3250,7 @@ def barotropic_substeps_latlon_cgrid(
                 dz_ref=getattr(z_coord, "dz_ref", None),
                 coefficient_evaluation=_een_eval,
                 eta=_eta_een,
-                z_coord=z_coord,
+                z_coord=z_coord, fold_pivot_row=_nemo_een_fold_pivot_row(config),
                 scheme=(
                     "ene"
                     if _bt_cor.startswith("ene")
@@ -4162,3 +4162,51 @@ def _nemo_entry_face_depths(config, summed, prep, entry):
         r(prep[0] * r(1.0 + entry[2])),
         r(prep[1] * r(1.0 + entry[3])),
     )
+
+
+def _nemo_een_ratio_fold_exchange(r3u, r3v, r3f, grid, selected):
+    """NEMO's north-fold exchange of the U-, V- and F-point thickness ratios.
+
+    ``stprk3_stg.f90:163`` (``domqco.f90:183`` at start-up) passes the ratios
+    ``dom_qco_r3c_RK3`` has just computed through ``lbc_lnk`` with sign +1
+    before ``dyn_cor_2D_init`` stretches the EEN triads with them.  On the
+    T-pivot fold (``lbcnfd.f90:639-749``) that replaces the whole pivot row of
+    the V and F ratios by the mirrored row below, and the second half of the
+    U ratio's pivot row by its mirrored first half; the stencil values there
+    do not survive.  ``BarotropicConfig.barotropic_een_ratio_fold_exchange``
+    selects it.  Non-fold grids are refused: the option names a fold statement.
+    """
+    if not selected:
+        return r3u, r3v, r3f
+    fold = getattr(grid, "fold", None)
+    if not fold_is_local(grid) or not bool(getattr(fold, "pivot_row_stored", False)):
+        raise ValueError(
+            "barotropic_een_ratio_fold_exchange=True needs a local T-pivot "
+            "north fold with its pivot row stored")
+    n = r3u.shape[1]
+    second_half = jnp.arange(n) >= n // 2
+    return (r3u.at[-1].set(jnp.where(second_half, r3u[-1][fold_perm_u(fold)], r3u[-1])),
+            r3v.at[-1].set(r3v[-2][fold.perm_v]),
+            r3f.at[-1].set(r3f[-2][fold_perm_f(fold)]))
+
+
+def _nemo_een_fold_pivot_row(config):
+    """(ratio exchange, mesh ``fe3mask`` pivot row): the two halves of NEMO's
+    T-pivot pivot row in the solver's EEN coefficient operands.
+
+    The second half: ``dommsk.f90:233`` exchanges ``fmask`` (F point, sign
+    +1) and ``:258`` freezes it as ``fe3mask``, so its pivot row is the
+    mirrored row below (``lbcnfd.f90:722-749``), which the card's mesh array
+    already holds.  ``BarotropicConfig.barotropic_een_fe3mask_pivot_row``
+    keeps that row; otherwise the row is overwritten with the halo row's
+    source, two rows below.  The halves cancel in part, so one without the
+    other is refused.
+    """
+    pair = (config.barotropic.barotropic_een_ratio_fold_exchange,
+            config.barotropic.barotropic_een_fe3mask_pivot_row)
+    if pair[0] != pair[1]:
+        raise ValueError(
+            "barotropic_een_ratio_fold_exchange and "
+            "barotropic_een_fe3mask_pivot_row are one fold unit: select "
+            "both or neither")
+    return pair

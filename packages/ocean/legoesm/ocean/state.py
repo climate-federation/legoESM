@@ -1615,6 +1615,19 @@ class BarotropicConfig(NamedTuple):
     # NEMO's loop-entry hu_e/hv_e is h0 * (1 + r3(Kmm))
     # (dynspg_ts.f90:329-330). Read only by the literal flux-form update.
     barotropic_entry_depth_nemo_literal: bool = False
+    # NEMO's north-fold exchange (sign +1) of the U-, V- and F-point thickness
+    # ratios the solver's EEN coefficients are stretched with
+    # (stprk3_stg.f90:163; T-pivot rules lbcnfd.f90:639-749): the pivot row of
+    # the V and F ratios is the mirrored row below, the second half of the U
+    # ratio's pivot row its mirrored first half.  False keeps the bare
+    # stencil values there.  T-pivot fold, pivot row stored.
+    barotropic_een_ratio_fold_exchange: bool = False
+    # The solver's EEN coefficients read the mesh's own pivot row of fe3mask
+    # (dommsk.f90:233 exchanges fmask, :258 freezes it; the T-pivot F rule
+    # makes that row the mirrored row below).  False overwrites the row with
+    # the halo row's source, two rows below.  One fold unit with the option
+    # above: the solver refuses one without the other.
+    barotropic_een_fe3mask_pivot_row: bool = False
 
 
 class RuntimeChecksConfig(NamedTuple):
@@ -3099,6 +3112,17 @@ class LatLonCGridOceanConfig(NamedTuple):
     # products and one rounded sum. False keeps the algebraically equal
     # increment-over-three expression.
     rk3_stage1_ssh_nemo_literal: bool = False
+    # Flux-form RK3 stage 1 consumes the three-dimensional right-hand side
+    # stp_2D left in uu(Krhs) (stp2d.f90:138, :144), whole, as NEMO does
+    # (stprk3_stg.f90:373-378).  False keeps that right-hand side with the
+    # slow barotropic forcing subtracted, which the stage's barotropic
+    # correction makes real-equal and not bit-equal.
+    rk3_stage1_rhs_nemo_literal: bool = False
+    # The stage velocity update and barotropic correction
+    # (stprk3_stg.f90:373-378, :413-418) with every product and sum rounded
+    # once, in the written order.  False leaves the expressions to the
+    # compiler, which may fuse a product into the following sum.
+    rk3_stage_velocity_written_order: bool = False
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":
