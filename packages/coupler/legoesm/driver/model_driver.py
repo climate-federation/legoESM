@@ -733,8 +733,9 @@ def make_mpas_qv_smooth_fn(mesh, nu, dt, sigma_coord, nu4=0.0,
     return smooth
 
 
-def _spectral_micro_config(cfg):
-    """MicrophysicsConfig for the spectral standalone lane: the experiment
+def _spectral_micro_config(cfg, lane: str = "spectral"):
+    """MicrophysicsConfig for a standalone lane (spectral, FV3-duo Kessler,
+    simple tiled-cube Kessler): the experiment
     switches (sub-grid autoconversion, cirrus homogeneous nucleation, hard
     saturation adjustment IN-SCHEME as on the lat-lon / cube pipeline) through
     the shared helper the other lanes use, then the flat ``morrison_*`` scalars
@@ -749,6 +750,11 @@ def _spectral_micro_config(cfg):
     leaf = getattr(mc, cfg.microphysics, None)
     if leaf is None:   # 'none': no scheme leaf; validate_strict refuses morrison_* there
         return mc
+    if cfg.nc_from_aerosol and lane != "spectral":
+        raise ValueError(
+            f"nc_from_aerosol (--aerosol-ccn) is not supported on the {lane} "
+            "lane: it runs Kessler, which has no aerosol droplet-number mode; "
+            "drop --aerosol-ccn.")
     if cfg.nc_from_aerosol:
         raise ValueError(
             "nc_from_aerosol (--aerosol-ccn) is not wired on the spectral lane: "
@@ -3562,7 +3568,9 @@ class ModelDriver:
 
     def _create_physics(self) -> None:
         """Build the physics pipeline."""
-        self.physics = build_physics_pipeline(self.grid, self.sigma, self.config)
+        self.physics = build_physics_pipeline(
+            self.grid, self.sigma, self.config,
+            spacing_grid=self._coeff_grid())
         rad_str = self.config.radiation or "none"
         conv_str = self.config.convection or "none"
         logger.info(f"  Physics: radiation={rad_str}, convection={conv_str}")
@@ -10583,7 +10591,9 @@ class ModelDriver:
             ptop = self.model._ptop
             sh = self.model.step_out_shardings
             lay = self.model.window_layout
-            kw = dict(n=n, ng=ng, km=km, ptop=ptop, akap=FV3_KAPPA)
+            kw = dict(n=n, ng=ng, km=km, ptop=ptop, akap=FV3_KAPPA,
+                      config=_spectral_micro_config(
+                          self.config, lane="FV3-duo Kessler").kessler)
 
             def _kessler(state, press, q, dt):
                 if lay is not None:
@@ -16167,7 +16177,9 @@ class ModelDriver:
                 make_kessler_column_physics_fn,
             )
             return make_kessler_column_physics_fn(
-                self.sigma, float(cfg.dycore.dt))
+                self.sigma, float(cfg.dycore.dt),
+                config=_spectral_micro_config(
+                    cfg, lane="tiled-cube Kessler").kessler)
         raise NotImplementedError(
             "tiled cube SPMD (6*kt^2 devices): this SIMPLE lane supports "
             "dynamics-only (all parameterizations 'none') or Kessler "
@@ -16822,7 +16834,8 @@ class ModelDriver:
         # its ColumnAdapter bakes the band ncol (bands are uniform, so one build
         # serves every band — the make_sharded_operator_split_step CONTRACT). ---
         band_grid = build_band_grids_atm(self.grid, n_dev)[0]
-        band_physics = build_physics_pipeline(band_grid, self.sigma, cfg)
+        band_physics = build_physics_pipeline(
+            band_grid, self.sigma, cfg, spacing_grid=self.grid)
         # Radiation cadence.  ``make_sharded_operator_split_step`` computes the
         # serial prologue's predicate per step (``_need_rad_and_time``,
         # sharded_operator_split_step.py:202) and passes it in as ``need_rad``,

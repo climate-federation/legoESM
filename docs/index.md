@@ -69,7 +69,7 @@ mpas = create_grid("mpas", 4, density_fn=lambda lat, lon: 1.0 + 5.0 * np.exp(-(l
 From the command line:
 
 ```bash
-legoesm run    config/williamson_test2.yaml        # run a simulation from a config
+legoesm run    config/templates/3d_idealized/held_suarez.yaml  # run a simulation from a config
 legoesm test   williamson --case 2                 # standard validation cases
 legoesm reproduce <manifest> --check               # bit-identical reproducibility gate
 ```

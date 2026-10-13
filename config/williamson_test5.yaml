@@ -1,33 +1,22 @@
-# legoESM Configuration: Williamson Test Case 5
-# Zonal flow over an isolated mountain
-
+# legoESM configuration: Williamson Test Case 5 (shallow water).
+# Same matrix-case form as config/templates/2d/williamson5_sw.yaml; run it with
+#   scripts/experiment/init_experiment.py 2d/williamson5_sw --name w5 --output-dir ./runs/w5
+experiment:
+  tier: tier1
+  complexity: shallow_water
+  extent: global
+  maturity: run_tested
+  description: >
+    Williamson (1992) Test Case 5 — zonal flow impinging on an isolated
+    mountain; exercises orographic forcing + gravity-wave generation in the
+    shallow-water dycore. No external data needed.
+  data: []
+  conservation_gates: [mass, energy]
 model:
   name: "Williamson Test Case 5"
   type: atmosphere_only
-
-grid:
-  type: cubed_sphere
-  resolution: 48              # C48 ~ 200 km
-  n_levels: 1
-  vertical_coord: none
-
-atmosphere:
-  dynamics: shallow_water      # canonical axis (was the legacy 'equations' key)
-  time_integrator: ssp_rk3
-  dt_seconds: 600             # 10 minutes
-  hyperdiff_scale: 0.0
-
-conservation:
-  fix_mass: true
-
-time:
-  duration_hours: 360          # 15 days
-  output_interval_hours: 6
-
+setup:
+  name: williamson5
+  grid: cubed_sphere
 output:
   path: output/williamson_test5/
-
-hardware:
-  precision:
-    dynamics: float32
-  devices: auto

@@ -266,6 +266,7 @@ def test_latlon_column_lane_restart_matches_the_continuous_digest(
     assert not bad, _mismatch(tmp_path / "c", d, bad[0])
 
 
+@pytest.mark.usefixtures("allow_version_drift")  # hand-built checkpoints, no manifest beside them
 def test_mpas_restart_refuses_a_start_day_the_saved_origin_does_not_imply(
         tmp_path, monkeypatch):
     """D-REX-4: resuming the step-2 checkpoint with a start day one day off
@@ -323,6 +324,7 @@ def test_mpas_restart_refuses_a_start_day_the_saved_origin_does_not_imply(
 
 
 @pytest.mark.slow
+@pytest.mark.usefixtures("allow_version_drift")  # hand-built checkpoints, no manifest beside them
 def test_duo_daily_external_forcing_restart_needs_a_day_boundary(
         tmp_path, monkeypatch):
     """D-REX-3, FV3-duo column lane, RRTMGP every 4 steps, the daily

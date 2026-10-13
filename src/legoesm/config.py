@@ -199,7 +199,7 @@ DEFAULT_CONFIG = {
         "type": "cubed_sphere",
         "resolution": 48,          # N cells per face edge (C48 ~ 200km)
         "n_levels": 1,             # 1 for shallow water
-        "vertical_coord": "none",  # "none" for shallow water
+        "vertical_coord": "hybrid",
     },
     "atmosphere": {
         # --- Two-axis solver selection ---

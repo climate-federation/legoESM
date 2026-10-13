@@ -4967,7 +4967,7 @@ def refuse_cap_floor_on_fv(config) -> None:
             "and refuses rather than silently running without it.")
 
 
-def build_physics_pipeline(grid, sigma, config):
+def build_physics_pipeline(grid, sigma, config, spacing_grid=None):
     """Build a PhysicsPipeline from an ExperimentConfig.
 
     All scheme selection happens here via registries; the resulting
@@ -4980,6 +4980,10 @@ def build_physics_pipeline(grid, sigma, config):
         Any grid satisfying ``GridProtocol``.
     sigma : SigmaCoordinate or HybridSigmaPressureCoordinate
     config : ExperimentConfig
+    spacing_grid : grid, optional
+        The GLOBAL grid Bechtold's ``dx_m`` is filled from when ``grid`` is
+        only this process's piece (MPI band, lat-band shard, cube tile), so
+        every piece runs the single-process spacing.  Defaults to ``grid``.
 
     Returns
     -------
@@ -5004,7 +5008,8 @@ def build_physics_pipeline(grid, sigma, config):
     # column lanes (a single column has no horizontal spacing).
     if not isinstance(grid, SingleColumnGrid):
         convection_config = _fill_bechtold_dx(
-            config.convection, convection_config, mean_grid_spacing_m(grid))
+            config.convection, convection_config, mean_grid_spacing_m(
+                grid if spacing_grid is None else spacing_grid))
 
     # Resolve microphysics via registry
     micro_fn, micro_config = _resolve_microphysics(config)

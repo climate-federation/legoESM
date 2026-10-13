@@ -230,8 +230,7 @@ More things to try:
   see which fields exist: grid, dycore, physics switches, time, output.
 - **List every template** and whether it validates:
   `python scripts/experiment/validate_templates.py`. Prints one PASS/FAIL line
-  per template; 26 of 29 passed on 2026-10-12, see
-  [Known issues](#known-issues-in-the-getting-started-path).
+  per template; all 29 pass.
 - **Other entry points:** the single-column model
   ([docs/user-guide/scm.md](docs/user-guide/scm.md)), AMIP
   ([docs/user-guide/amip.md](docs/user-guide/amip.md)), and
@@ -254,7 +253,7 @@ More things to try:
 | `Could not find a version that satisfies the requirement legoesm-core~=1.0.0` | Plain `pip install` cannot resolve the unpublished workspace members. Use `uv sync`, or the pip-only helper in [Installing](#installing). |
 | Run killed: `Out Of Memory` / exit 137 | Not enough RAM. Run one experiment at a time, reduce `grid.resolution`, or ask for more memory in your allocation. |
 | `ERROR: --output-dir runs/... exists and is not empty` | `init_experiment` never overwrites. Pick a new `--output-dir` or remove the old one. |
-| `ERROR: resolved config is invalid: ... grid.vertical_coord must be one of ('sigma', 'hybrid', 'cam_l32'); got 'none'` | You used one of the two broken `2d/` templates; see [Known issues](#known-issues-in-the-getting-started-path). |
+| `ERROR: resolved config is invalid: ... grid.vertical_coord must be one of ('sigma', 'hybrid', 'cam_l32'); got 'none'` | `none` is not a vertical coordinate. Shallow water does not run through `legoesm run`: launch a `2d/` template with `init_experiment.py` and `bash run.sh`, which call the matrix runner; see [Known issues](#known-issues-in-the-getting-started-path). |
 | Spectral solver fails on Apple Silicon | Metal has no `float64`; run with `JAX_PLATFORMS=cpu`. Not re-verified here; see [Apple Silicon](#apple-silicon-metalmps-backend). |
 | Run seems to hang at the start | The first segment includes JIT compilation (39–69 s for Held–Suarez C36 on 2 cores). On the CPU backend the compile cache is **off** by default, so every run compiles again; see the log's first line and [Performance & Compile-Cache](#performance--compile-cache). |
 
@@ -263,15 +262,13 @@ More things to try:
 Found while writing this walkthrough on 2026-10-12. None blocks the path
 above.
 
-- **`2d/williamson2_sw` and `2d/williamson5_sw` templates fail validation**
-  (`vertical_coord: none` is no longer accepted), although
-  `project_status.md` lists `williamson2_sw` as run-tested. Use
-  `legoesm test williamson` (step 3) for shallow water until the templates
-  are fixed.
-- **`ocean/bench` template fails validation** (`maturity='experimental'` is
-  not an allowed value).
-- `config/templates/README.md` lists `1d/` and `coupled/` template folders that
-  do not exist.
+- **Shallow water does not run through `legoesm run`.** The
+  `2d/williamson2_sw` and `2d/williamson5_sw` templates therefore name the
+  matrix cases (`init_experiment.py 2d/williamson2_sw ...` writes a `run.sh`
+  that calls the matrix runner). Besides choosing the case (`setup.name`,
+  `setup.grid`) and `output.path`, only `setup.duration_days`,
+  `setup.resolution` and `setup.quick` can be set; the rest is the matrix
+  case's. There is no `run_manifest.json` / `legoesm reproduce` for them.
 - **Held–Suarez ran at dt=200 s** although its template says
   `dt_seconds: 600`. The driver's generic time-step check reduced it, with a
   `WARNING` in the log. The first line of `results.txt` reads

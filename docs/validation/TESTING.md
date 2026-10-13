@@ -129,7 +129,8 @@ The harness adds the *intent/ergonomics* layer:
   intent). Strict-validates *before* writing (bad override fails fast).
 - **`scripts/experiment/validate_templates.py [--write-status]`** — loads every
   template through the same `Config.from_yaml(...).to_experiment_config().validate_strict()`
-  path `legoesm run` uses; regenerates `project_status.md`.
+  path `legoesm run` uses (a `setup:` template goes through the shared matrix-case
+  selector instead); regenerates `project_status.md`.
 - **`scripts/experiment/fetch_data.py check|fetch <template>`** — resolves a
   template's `experiment.data` against `config/data_catalog.yaml` + the machine
   `data_root`; idealized templates need nothing.
@@ -140,10 +141,16 @@ The harness adds the *intent/ergonomics* layer:
 # idealized (no data)
 python scripts/experiment/fetch_data.py check 2d/williamson2_sw
 python scripts/experiment/init_experiment.py 2d/williamson2_sw --name w2 --output-dir ./runs/w2
-cd ./runs/w2 && bash run.sh
+(cd ./runs/w2 && bash run.sh)
 
-# higher resolution + longer
-python scripts/experiment/init_experiment.py 2d/williamson2_sw --name w2hi --output-dir ./runs/w2hi \
+# longer (shallow-water templates run the matrix case: besides setup.name/grid and
+# output.path, only setup.duration_days, setup.resolution and setup.quick can be set,
+# and no run_manifest.json is written)
+python scripts/experiment/init_experiment.py 2d/williamson2_sw --name w2long --output-dir ./runs/w2long \
+    -o setup.duration_days=10
+
+# higher resolution + longer (a `legoesm run` template: any config field is overridable)
+python scripts/experiment/init_experiment.py 3d_idealized/held_suarez --name hshi --output-dir ./runs/hshi \
     -o grid.resolution=96 -o time.duration_hours=240
 
 # data-gated template (the one template with a data list; the run itself is
@@ -151,8 +158,9 @@ python scripts/experiment/init_experiment.py 2d/williamson2_sw --name w2hi --out
 python scripts/experiment/fetch_data.py fetch 3d_idealized/hydrostatic_gray_1yr
 python scripts/experiment/init_experiment.py 3d_idealized/hydrostatic_gray_1yr --name hs1 --output-dir ./runs/hs1
 
-# reproduce any past run from its manifest
-legoesm reproduce ./runs/w2/<output>/run_manifest.json --check
+# reproduce a past `legoesm run` run from its manifest (not the matrix-case templates)
+(cd ./runs/hshi && bash run.sh)
+legoesm reproduce ./runs/hshi/output/held_suarez/run_manifest.json --check
 ```
 
 ## 5. Source-guardrail harness (AI-assisted-dev tripwires)

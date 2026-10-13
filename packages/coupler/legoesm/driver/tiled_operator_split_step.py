@@ -286,7 +286,8 @@ def build_tile_step_unified(grid, sigma, config, kt: int):
             "the column decomposition here; disable "
             "shard_radiation_columns for the tiled lane.")
     nl = int(grid.n) // kt
-    pipeline = build_physics_pipeline(_TilePhysicsGrid(nl), sigma, config)
+    pipeline = build_physics_pipeline(
+        _TilePhysicsGrid(nl), sigma, config, spacing_grid=grid)
     if pipeline.f_land is not None:
         raise NotImplementedError(
             "build_tile_step_unified: land-active pipeline (f_land is a "
