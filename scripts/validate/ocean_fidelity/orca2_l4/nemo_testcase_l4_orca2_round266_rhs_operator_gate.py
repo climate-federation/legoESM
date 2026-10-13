@@ -133,6 +133,7 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
     card = omt4.build_omt4_card(deck_root)
     omt4.validate_omt4_card(deck_root, card)
     entry = rung0.assemble_frame(frame_root, 1, 0)
+    oracle_stage1 = rung0.assemble_frame(frame_root, 1, 1)
     oracle_stage2 = rung0.assemble_frame(frame_root, 1, 2)
     state = card.recipe.initial_state if label == "independent" else rung0.bridge_entry(card, entry)
     forcing = omt0.rung0_ladder._zero_forcing((148, 180))
@@ -152,6 +153,18 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
     require(isinstance(first, _NEMOWSLiveOperandTrace), "source trace type moved")
     stage1_associated = _associated_stage(card, first.stage_outputs[0])
     stage_entry = (2, *stage1_associated)
+    matched_stage1 = {
+        "u": _score(r249._native("u", stage1_associated[0]),
+                    np.asarray(oracle_stage1["u"], np.float64)),
+        "v": _score(r249._native("v", stage1_associated[1]),
+                    np.asarray(oracle_stage1["v"], np.float64)),
+        "T": _score(r249._native("T", stage1_associated[2]),
+                    np.asarray(oracle_stage1["T"], np.float64)),
+        "S": _score(r249._native("S", stage1_associated[3]),
+                    np.asarray(oracle_stage1["S"], np.float64)),
+        "eta": _score(r249._native("eta", stage1_associated[4]),
+                      np.asarray(oracle_stage1["eta"], np.float64)),
+    }
 
     with r245._barotropic_surface_mask_arm(
             card, True, v_only=True, t_pivot_north_neighbor=True):
@@ -259,6 +272,7 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
         "literal_hpg_accumulator": literal_hpg_accumulator,
         "source_order_arm": True,
         "passivity": passivity,
+        "matched_stage1": matched_stage1,
         "boundary_order": list(BOUNDARY_ORDER),
         "boundary_rows": boundary_rows,
         "accumulator_self_replay": accumulator_self_replay,
