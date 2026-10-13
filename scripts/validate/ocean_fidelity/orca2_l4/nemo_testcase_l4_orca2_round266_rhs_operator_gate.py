@@ -167,6 +167,23 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
         "after_vorticity_u": _native_u(parts["after_vor_u"].data),
         "after_advection_u": _native_u(parts["after_adv_u"].data),
     }
+    accumulator_self_replay = {
+        "after_hpg_u": _score(
+            _native_u(parts["after_hpg_u"].data),
+            _native_u(parts["hpg_u"].data)),
+        "after_vorticity_u": _score(
+            _native_u(parts["after_vor_u"].data),
+            _native_u(parts["after_hpg_u"].data)
+            + _native_u(parts["vorticity_u"].data)),
+        "after_keg_u": _score(
+            _native_u(parts["after_keg_u"].data),
+            _native_u(parts["after_vor_u"].data)
+            + _native_u(parts["keg_u"].data)),
+        "after_advection_u": _score(
+            _native_u(parts["after_adv_u"].data),
+            _native_u(parts["after_keg_u"].data)
+            + _native_u(parts["zad_u"].data)),
+    }
     boundary_rows = {
         name: {
             "complete": _score(candidate[name], terms[name][..., :30]),
@@ -232,6 +249,7 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
         "passivity": passivity,
         "boundary_order": list(BOUNDARY_ORDER),
         "boundary_rows": boundary_rows,
+        "accumulator_self_replay": accumulator_self_replay,
         "hpg_input_order": list(HPG_INPUT_ORDER),
         "hpg_statement_order": list(HPG_STATEMENT_ORDER),
         "hpg_input_rows": hpg_input_rows,
@@ -298,6 +316,9 @@ def classify(reports: list[dict[str, object]], *, plant: str = "none") -> dict[s
                 f"{label}: round-265 matched state moved")
         require(report["hpg_live_calibration"]["max_abs"] <= FLOOR,
                 f"{label}: offline HPG does not reproduce the live component")
+        require(all(row["max_abs"] <= FLOOR
+                    for row in report["accumulator_self_replay"].values()),
+                f"{label}: live accumulator boundaries do not self-replay")
         require(report["hpg_record_self_replay"]["result"] == "AT_BAR",
                 f"{label}: recorded HPG does not self-replay")
         require(report["one_bit_control"]["unequal"] == 1,

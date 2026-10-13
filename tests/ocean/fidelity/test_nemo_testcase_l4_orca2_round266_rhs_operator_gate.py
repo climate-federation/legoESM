@@ -36,6 +36,10 @@ def _report(label):
         "hpg_input_order": list(gate.HPG_INPUT_ORDER),
         "hpg_statement_order": list(gate.HPG_STATEMENT_ORDER),
         "boundary_rows": boundary,
+        "accumulator_self_replay": {
+            name: _score() for name in (
+                "after_hpg_u", "after_vorticity_u", "after_keg_u",
+                "after_advection_u")},
         "hpg_input_rows": inputs,
         "hpg_statement_rows": statements,
         "hpg_live_calibration": _score(),
