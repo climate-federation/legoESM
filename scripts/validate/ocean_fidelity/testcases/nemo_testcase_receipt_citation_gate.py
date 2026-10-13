@@ -1389,6 +1389,10 @@ CITATION_MAP = {
         3],
     'nemo_testcase_l2_gyre_gradient_gate.py:415': (
         'def explicit_stepwise_directional_derivatives('),
+    'nemo_testcase_l2_gyre_gradient_gate.py:375': (
+        'def build_compiled_step_transforms(context: GYREContext):'),
+    'nemo_testcase_l2_gyre_gradient_gate.py:567': (
+        'def unmeasured_agreement(reason: str | None = None) -> dict:'),
     'nemo_testcase_l2_gyre_gradient_gate.py:966': (
         'def measure_resources(n_steps: int, schedule: str, *,'),
     'nemo_testcase_l2_gyre_gradient_gate.py:1091': (
