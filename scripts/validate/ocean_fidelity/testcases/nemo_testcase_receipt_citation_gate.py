@@ -166,6 +166,8 @@ FILES = {
         _ORCA2G1_P3 / "ppsrc/nemo/trazdf.f90"),
     "ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/stp2d.f90": (
         _ORCA2G1_P3 / "ppsrc/nemo/stp2d.f90"),
+    "ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/domain.f90": (
+        _ORCA2G1_P3 / "ppsrc/nemo/domain.f90"),
     "stprk3.F90": _OCE / "stprk3.F90",
     "stprk3_stg.F90": _OCE / "stprk3_stg.F90",
     "ORCA2_R96SPG/ocean.output": _ORCA2_R96SPG_OUTPUT,
@@ -1730,13 +1732,13 @@ CITATION_MAP = {
     'vertical.py:883': ('class NemoEENBarotropicOperands(NamedTuple):', 1),
     'vertical.py:673': ('def nemo_qco_resolved_mesh_operands(', 1),
     'ocean_model_latlon_cgrid.py:4415': ('_nemo_filter_alpha = config.barotropic.nemo_barotropic_filter_alpha', 1),
-    'nemo_testcase_recipe.py:3662': ('def build_orca2g1_flat_card(deck_root: str | Path) -> NEMOTestcaseCard:', 1),
+    'nemo_testcase_recipe.py:3662': ('def build_orca2g1_flat_card(deck_root: str | Path, case: str = "ORCA2G1-flat") -> NEMOTestcaseCard:', 1),
     'nemo_testcase_recipe.py:3562': ('def read_orca2g1_deck(deck_root: str | Path) -> ORCA2G1Deck:', 1),
     'nemo_testcase_recipe.py:3611': ('def orca2g1_initial_ssh(glamt_deg, gphit_deg, surface_tmask) -> np.ndarray:', 1),
     'nemo_testcase_recipe.py:3599': ('def _orca2g1_auto_substeps(dom: dict[str, np.ndarray], deck: ORCA2G1Deck) -> int:', 1),
     'nemo_testcase_recipe.py:3875': ('def validate_orca2g1_flat_card(card: NEMOTestcaseCard, deck_root: str | Path) -> None:', 1),
     'vertical.py:1084': ('nemo_e3w_source="mesh_reference", allow_single_level: bool = False,', 1),
-    'nemo_testcase_recipe.py:3725': ('allow_single_level=True,               # jpk = 2: one wet level', 1),
+    'nemo_testcase_recipe.py:3725': ('allow_single_level=_ORCA2G_JPK[case] == 2,   # jpk = 2: one wet level', 1),
     # --- GRIDLADDER round 1 (G1 survey) END ---
     # --- GRIDLADDER round 2 (G1 ladders, pivot-row vor_een) ---
     'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/domzgr.f90:575': ('mbkt(:,:) = MAX( k_bot(:,:) , 1 )', 1),
@@ -1928,6 +1930,27 @@ CITATION_MAP = {
         ('e1e2v (:,:) = e1v(:,:) * e2v(:,:)', 1),
         4],
     # --- GRIDLADDER round 9 END ---
+    # --- GRIDLADDER round 10 (G2 survey: ORCA2's shipped domain) ---
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/domain.f90:581': ("idvar = iom_varid( inum, 'e3t_0', kdimsz = idimsz )", 1),
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/domzgr.f90:130-132': [
+        ("CALL iom_getatt( inum, 'VertCoord', catt )", 1),
+        ("l_zps = catt == 'zps'", 1),
+        3],
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/domzgr.f90:185-188': [
+        ("CALL iom_get( inum, jpdom_global, 'e3t_0'  , e3t_3d, cd_type = 'T'", 1),
+        ("CALL iom_get( inum, jpdom_global, 'e3f_0'  , e3f_3d, cd_type = 'F'", 1),
+        4],
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/domzgr.f90:588-589': [
+        ('mbku(ji,jj) = MIN(  mbkt(ji+1,jj  ) , mbkt(ji,jj)  )', 1),
+        ('mbkv(ji,jj) = MIN(  mbkt(ji  ,jj+1) , mbkt(ji,jj)  )', 1),
+        2],
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/dommsk.f90:289': ("IF( iom_varid( inum, 'strait_shlat', ldstop = .FALSE. ) > 0 ) THEN", 1),
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/dynhpg.f90:397-413': [
+        ('DO jk= 2, jpkm1', 1),
+        ('pvv(ji,jj,jk,Krhs) = zhpj(ji,jj) + zvap', 1),
+        17],
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/stp2d.f90:178': ('Ue_rhs(ji,jj) = SUM( e3u_3d(ji,jj,1:jpkm1)*uu(ji,jj,1:jpkm1,Krhs)*umask(ji,jj,1:jpkm1) ) * r1_hu_0(ji,jj)', 1),
+    # --- GRIDLADDER round 10 END ---
     # --- ORCA2 round 253: kt=8 midpoint-SSH failure boundary -------
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:489-493': [
         ('Extrapolate Sea Level at step jit+0.5', 1),

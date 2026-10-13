@@ -3423,10 +3423,10 @@ def build_nemo_testcase_card(
         if deck_root is None:
             raise ValueError("ORCA2-zps requires an explicit deck_root")
         return build_orca2_zps_card(deck_root)
-    if case == "ORCA2G1-flat":
+    if case in _ORCA2G_JPK:           # the grid ladder's rungs (G1, G2)
         if deck_root is None:
-            raise ValueError("ORCA2G1-flat requires an explicit deck_root")
-        return build_orca2g1_flat_card(deck_root)
+            raise ValueError(f"{case} requires an explicit deck_root")
+        return build_orca2g1_flat_card(deck_root, case)
     if case not in builders:
         raise ValueError(
             f"unknown NEMO testcase {case!r}; expected one of {sorted(builders)}"
@@ -3600,8 +3600,8 @@ def _orca2g1_auto_substeps(dom: dict[str, np.ndarray], deck: ORCA2G1Deck) -> int
     """``ln_bt_auto``: nn_e on the file's own ht_0, e1t, e2t
     (dynspg_ts.f90:1049-1062)."""
 
-    wet = dom["bottom_level"] > 0
-    ht_0 = np.sum(dom["e3t_0"] * wet[..., None], axis=-1)
+    wet = np.arange(dom["e3t_0"].shape[-1]) < dom["bottom_level"][..., None]
+    ht_0 = np.sum(dom["e3t_0"] * wet, axis=-1)
     zcu2 = ht_0 * (dom["e1t"] ** -2 + dom["e2t"] ** -2)
     return nemo_auto_substeps(
         deck.rn_Dt_s, 1.0, float(np.max(zcu2)),
@@ -3631,8 +3631,8 @@ def orca2g1_initial_ssh(glamt_deg, gphit_deg, surface_tmask) -> np.ndarray:
     return ssh * np.asarray(surface_tmask, dtype=np.float64)
 
 
-def _orca2g1_domain(domain_path: Path) -> dict[str, np.ndarray]:
-    """Read the G1 domain file; refuse anything but one wet level."""
+def _orca2g1_domain(domain_path: Path, jpk: int = 2) -> dict[str, np.ndarray]:
+    """Read a rung's domain file; refuse anything but ``jpk - 1`` wet levels."""
 
     try:
         import netCDF4  # noqa: N813
@@ -3647,19 +3647,19 @@ def _orca2g1_domain(domain_path: Path) -> dict[str, np.ndarray]:
         e3t_1d, e3w_1d = read("e3t_1d"), read("e3w_1d")
         bottom = np.squeeze(np.asarray(ds.variables["bottom_level"][:])).astype(np.int32)
         raw = {name: read(name) for name in ("e3t_0", "e3u_0", "e3v_0", "e3f_0")}
-    if e3t_1d.shape != (2,) or raw["e3t_0"].shape[0] != 2:
+    if e3t_1d.shape != (jpk,) or raw["e3t_0"].shape[0] != jpk:
         raise ValueError(
-            f"ORCA2G1 domain must have jpk = 2 (one wet level), got e3t_1d "
-            f"shape {e3t_1d.shape}")
-    if bottom.max() != 1 or bottom.min() < 0:
-        raise ValueError("ORCA2G1 bottom_level must be 0 (land) or 1 (wet)")
+            f"ORCA2G domain must have jpk = {jpk} ({jpk - 1} wet level(s)), got "
+            f"e3t_1d shape {e3t_1d.shape}")
+    if bottom.max() != jpk - 1 or bottom.min() < 0:
+        raise ValueError(f"ORCA2G bottom_level must span 0 (land) to {jpk - 1}")
     # Record level jpk is NEMO's masked dummy bottom; the card carries jpkm1.
-    out.update(e3t_1d=e3t_1d[:1], e3w_1d=e3w_1d[:1], bottom_level=bottom)
-    out.update({name: np.moveaxis(value[:1], 0, -1) for name, value in raw.items()})
+    out.update(e3t_1d=e3t_1d[:-1], e3w_1d=e3w_1d[:-1], bottom_level=bottom)
+    out.update({name: np.moveaxis(value[:-1], 0, -1) for name, value in raw.items()})
     return out
 
 
-def build_orca2g1_flat_card(deck_root: str | Path) -> NEMOTestcaseCard:
+def build_orca2g1_flat_card(deck_root: str | Path, case: str = "ORCA2G1-flat") -> NEMOTestcaseCard:  # noqa: E501
     """ORCA2G1: ORCA2's fold/seam/coast geometry builders on a one-level
     flat domain, running the TSUNAMI program.
 
@@ -3675,7 +3675,7 @@ def build_orca2g1_flat_card(deck_root: str | Path) -> NEMOTestcaseCard:
     domain_path = root / "domain_cfg.nc"
     if not domain_path.is_file():
         raise FileNotFoundError(f"missing ORCA2G1 domain file: {domain_path}")
-    dom = _orca2g1_domain(domain_path)
+    dom = _orca2g1_domain(domain_path, _ORCA2G_JPK[case])
 
     grid = create_tripole_grid(
         domain_path,
@@ -3686,8 +3686,8 @@ def build_orca2g1_flat_card(deck_root: str | Path) -> NEMOTestcaseCard:
         fold_convention="(n_lon-i)%n_lon",     # jperio = 4: T-pivot fold
         use_mesh_coriolis=True,                # ff_f/ff_t are in the file
     )
-    # DOMAINcfg writes no strait_shlat, so dommsk.f90:289 skips the override.
-    no_strait = np.full(dom["bottom_level"].shape, -1.0)
+    # dommsk.f90:289 applies strait_shlat only when the file holds it (G1's: none).
+    no_strait = _orca2g_strait_shlat(domain_path, dom["bottom_level"].shape)
     tmask, umask, vmask, fmask = _orca2_masks(dom["bottom_level"], no_strait)
     fe3mask = np.asarray(
         nemo_fe3mask_from_tmask(tmask.astype(np.float64), grid=grid),
@@ -3722,7 +3722,7 @@ def build_orca2g1_flat_card(deck_root: str | Path) -> NEMOTestcaseCard:
         nemo_e1e2v_m=dom["e1v"] * dom["e2v"],
         nemo_e2u_m=dom["e2u"], nemo_e1v_m=dom["e1v"],
         nemo_een_barotropic_m=operands,
-        allow_single_level=True,               # jpk = 2: one wet level
+        allow_single_level=_ORCA2G_JPK[case] == 2,   # jpk = 2: one wet level
     )
     z_coord = create_partial_cell_coordinate(
         z_ref, bathymetry, bottom_index_rule="nemo_tpoint"
@@ -3803,10 +3803,10 @@ def build_orca2g1_flat_card(deck_root: str | Path) -> NEMOTestcaseCard:
         initial_state=state,
     )
     card = NEMOTestcaseCard(
-        "ORCA2G1-flat", recipe, deck.rn_Dt_s, deck.nn_itend, 1, 0, 0, 0.0, 0.0,
+        case, recipe, deck.rn_Dt_s, deck.nn_itend, 1, 0, 0, 0.0, 0.0,
         surface_boundary_condition="none",
         surface_input_operator="none",
-        unmeasured_features=ORCA2G1_UNMEASURED,
+        unmeasured_features=_ORCA2G_UNMEASURED[case],
         icebergs_enabled=False,
         iceberg_inputs=(),
     )
@@ -3823,7 +3823,7 @@ def _orca2g1_selector_failures(card: NEMOTestcaseCard) -> list[str]:
     state = card.recipe.initial_state
     bt = cfg.barotropic
     checks = {
-        "unmeasured": card.unmeasured_features == ORCA2G1_UNMEASURED,
+        "unmeasured": card.unmeasured_features == _ORCA2G_UNMEASURED.get(card.case),
         "transcendentals": card.transcendentals == "libm",
         # The NEMO-literal split-explicit identity every certified card holds
         # (the shared validator's own rows; it does not know this card yet).
@@ -3862,7 +3862,7 @@ def _orca2g1_selector_failures(card: NEMOTestcaseCard) -> list[str]:
                        and cfg.physics.shortwave_penetration is None
                        and cfg.physics.mle is None),
         "no_ice": card.icebergs_enabled is False and card.iceberg_inputs == (),
-        "one_wet_level": (np.shape(state.T.data)[-1] == 1
+        "wet_levels": (np.shape(state.T.data)[-1] == _ORCA2G_JPK.get(card.case, 0) - 1
                           and card.dummy_bottom_records == 1),
         "rest": (not np.any(np.asarray(state.u.data))
                  and not np.any(np.asarray(state.v.data))
@@ -3876,15 +3876,15 @@ def validate_orca2g1_flat_card(card: NEMOTestcaseCard, deck_root: str | Path) ->
     """Refuse a G1 card whose selectors or state disagree with its deck."""
 
     deck = read_orca2g1_deck(deck_root)
-    dom = _orca2g1_domain(Path(deck_root) / "domain_cfg.nc")
+    dom = _orca2g1_domain(Path(deck_root) / "domain_cfg.nc", _ORCA2G_JPK.get(card.case, 2))
     cfg = card.recipe.model_config
     vm = cfg.physics.vertical_mixing
-    wet = dom["bottom_level"] > 0
+    wet, wet3 = dom["bottom_level"] > 0, np.arange(dom["e3t_0"].shape[-1]) < dom["bottom_level"][..., None]  # noqa: E501
     state = card.recipe.initial_state
     grid = card.recipe.grid
     perm_t = (grid.n_lon - np.arange(grid.n_lon)) % grid.n_lon
     checks = {
-        "case": card.case == "ORCA2G1-flat",
+        "case": card.case in _ORCA2G_JPK,
         "rn_Dt": card.dt_s == deck.rn_Dt_s,
         "nn_itend": card.n_steps == deck.nn_itend,
         "rn_bt_alpha": cfg.barotropic.nemo_barotropic_filter_alpha == deck.rn_bt_alpha,
@@ -3894,16 +3894,16 @@ def validate_orca2g1_flat_card(card: NEMOTestcaseCard, deck_root: str | Path) ->
             deck.rn_avm0_m2_s, deck.rn_avt0_m2_s),
         "domain_shape": np.shape(state.eta.data) == wet.shape,
         "coast": np.array_equal(np.asarray(card.recipe.land_mask) > 0.5, wet),
-        "flat_one_level": np.array_equal(
-            np.asarray(card.recipe.z_coord.h_partial)[..., 0],
-            dom["e3t_0"][..., 0] * wet),
+        "cell_thickness": np.array_equal(     # every level, partial cells included
+            np.asarray(card.recipe.z_coord.h_partial),
+            dom["e3t_0"] * wet3),
         # jperio = 4 on the de-haloed file: the last T row is the pivot row
         # and is its own image under i -> (n_lon - i) % n_lon.
         "t_fold_mask": np.array_equal(wet[-1], wet[-1][perm_t]),
-        "uniform_T": np.array_equal(np.asarray(state.T.data)[..., 0],
-                                    _ORCA2G1_T_C * wet),
-        "uniform_S": np.array_equal(np.asarray(state.S.data)[..., 0],
-                                    _ORCA2G1_S_PSU * wet),
+        "uniform_T": np.array_equal(np.asarray(state.T.data),
+                                    _ORCA2G1_T_C * wet3),
+        "uniform_S": np.array_equal(np.asarray(state.S.data),
+                                    _ORCA2G1_S_PSU * wet3),
         "bump": np.array_equal(
             np.asarray(state.eta.data),
             orca2g1_initial_ssh(dom["glamt"], dom["gphit"], wet)),
@@ -3913,7 +3913,7 @@ def validate_orca2g1_flat_card(card: NEMOTestcaseCard, deck_root: str | Path) ->
     failed = sorted(name for name, ok in checks.items() if not ok)
     failed += _orca2g1_selector_failures(card)
     if failed:
-        raise ValueError(f"ORCA2G1-flat disagrees with its deck: {failed}")
+        raise ValueError(f"{card.case} disagrees with its deck: {failed}")
 
 
 def validate_orca2g1_flat_card_for_execution(
@@ -3926,8 +3926,39 @@ def validate_orca2g1_flat_card_for_execution(
     validate_orca2g1_flat_card(card, deck_root)
     if card.unmeasured_features:
         raise ValueError(
-            "ORCA2G1-flat is not execution-ready; unresolved selected arms: "
+            f"{card.case} is not execution-ready; unresolved selected arms: "
             + ", ".join(card.unmeasured_features))
+
+
+# ---------------------------------------------------------------------------
+# ORCA2G2 (grid ladder rung G2, DECISION 117): G1 with ONE switch, the domain.
+# The deck root holds G1's namelist assignments and ORCA2's SHIPPED domain file
+# (31 levels, partial bottom cells, ``strait_shlat``) under the name
+# ``domain_cfg.nc``.  The builder, the deck reader, the bump and every selector
+# are G1's; only the entries below differ by rung.
+_ORCA2G_JPK: dict[str, int] = {"ORCA2G1-flat": 2, "ORCA2G2-zps": 31}
+ORCA2G2_UNMEASURED: tuple[str, ...] = (
+    "g2_record_not_admitted",
+    "multi_level_partial_cell_step",
+)
+_ORCA2G_UNMEASURED = {"ORCA2G1-flat": ORCA2G1_UNMEASURED,
+                      "ORCA2G2-zps": ORCA2G2_UNMEASURED}
+
+
+def _orca2g_strait_shlat(domain_path: Path, shape) -> np.ndarray:
+    """The file's ``strait_shlat``; -1 everywhere (no override) when absent."""
+
+    import netCDF4  # noqa: N813
+    with netCDF4.Dataset(domain_path, "r") as ds:
+        if "strait_shlat" not in ds.variables:
+            return np.full(shape, -1.0)
+        return np.squeeze(np.asarray(ds.variables["strait_shlat"][:], dtype=np.float64))
+
+
+def build_orca2g2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
+    """ORCA2G2: the G1 card on ORCA2's shipped bathymetry and partial cells."""
+
+    return build_orca2g1_flat_card(deck_root, "ORCA2G2-zps")
 
 
 __all__ = (
@@ -3940,6 +3971,8 @@ __all__ = (
     "build_orca2_initial_ts",
     "build_orca2_zps_card",
     "build_orca2g1_flat_card",
+    "build_orca2g2_zps_card",
+    "ORCA2G2_UNMEASURED",
     "read_orca2g1_deck",
     "orca2g1_initial_ssh",
     "validate_orca2g1_flat_card",
