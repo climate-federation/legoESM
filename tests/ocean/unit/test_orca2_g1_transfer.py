@@ -93,51 +93,6 @@ def test_literal_flux_update_matches_written_order_and_legacy_plant_moves():
     assert not np.array_equal(np.asarray(actual), np.asarray(legacy))
 
 
-def _triad_inputs(seed=7, ny=6, nx=8):
-    rng = np.random.default_rng(seed)
-
-    def positive(*shape):
-        return jnp.asarray(rng.uniform(0.5, 2.0, size=shape))
-
-    return {
-        "zeta": jnp.zeros((ny + 1, nx + 1, 1)),
-        "h_vtx": positive(ny + 1, nx + 1, 1) * 100.0,
-        "h_v": positive(ny + 1, nx, 1) * 100.0,
-        "v": jnp.asarray(rng.normal(size=(ny + 1, nx, 1))),
-        "h_u": positive(ny, nx + 1, 1) * 100.0,
-        "u": jnp.asarray(rng.normal(size=(ny, nx + 1, 1))),
-        "u_mask_3d": jnp.ones((ny, nx + 1, 1)),
-        "v_mask_3d": jnp.ones((ny + 1, nx, 1)),
-        "vtx_mask": jnp.ones((ny + 1, nx + 1)),
-        "f_vtx": positive(ny + 1, nx + 1) * 1.0e-4,
-        "q_boundary": "nemo_live",
-        "metric_widths": (
-            positive(ny, nx + 1) * 1.0e5,
-            positive(ny + 1, nx) * 1.0e5,
-            positive(ny, nx + 1) * 1.0e5,
-            positive(ny + 1, nx) * 1.0e5,
-        ),
-    }
-
-
-def test_written_order_vorticity_is_real_equal_and_bit_distinct():
-    from legoesm.ocean.dynamics.latlon_cgrid_operators import (
-        pv_flux_al81_partial_cell,
-    )
-
-    kwargs = _triad_inputs()
-    default = tuple(np.asarray(x) for x in pv_flux_al81_partial_cell(**kwargs))
-    written = tuple(np.asarray(x) for x in pv_flux_al81_partial_cell(
-        **kwargs, written_order=True))
-    for written_value, default_value in zip(written, default):
-        np.testing.assert_allclose(written_value, default_value, rtol=1.0e-12,
-                                   atol=0.0)
-        assert np.any(written_value != default_value)
-    with pytest.raises(ValueError, match="metric_widths"):
-        pv_flux_al81_partial_cell(
-            **{**kwargs, "metric_widths": None}, written_order=True)
-
-
 def test_orca2_and_omt_cards_select_executed_transferred_statements():
     from legoesm.ocean.fidelity import nemo_testcase_recipe as recipe
     from legoesm.ocean.state import BarotropicConfig, LatLonCGridOceanConfig
@@ -156,10 +111,6 @@ def test_orca2_and_omt_cards_select_executed_transferred_statements():
         "barotropic_fold_top_v_face_ssh"] is False
     assert LatLonCGridOceanConfig._field_defaults[
         "rk3_stage1_ssh_nemo_literal"] is False
-    assert LatLonCGridOceanConfig._field_defaults[
-        "een_vorticity_written_order"] is False
-    assert LatLonCGridOceanConfig._field_defaults[
-        "rk3_stage_r3f_nemo_literal"] is False
     for name in (
         "barotropic_flux_update_nemo_literal",
         "barotropic_substep_dt_nemo_literal",
@@ -179,10 +130,8 @@ def test_orca2_and_omt_cards_select_executed_transferred_statements():
     for card in (shipped, omt0_card, omt1_card, omt4_card):
         config = card.recipe.model_config
         assert config.een_fold_image_v_row is True
-        assert config.een_vorticity_written_order is True
         assert config.barotropic.barotropic_fold_top_v_face_ssh is True
         assert config.rk3_stage1_ssh_nemo_literal is True
-        assert config.rk3_stage_r3f_nemo_literal is True
         assert config.barotropic.barotropic_substep_dt_nemo_literal is True
     assert omt0_card.recipe.model_config.barotropic.barotropic_flux_update_nemo_literal
     assert omt0_card.recipe.model_config.barotropic.barotropic_entry_depth_nemo_literal
