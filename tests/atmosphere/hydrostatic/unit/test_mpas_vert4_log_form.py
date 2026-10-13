@@ -151,3 +151,7 @@ def test_dycore_routes_log_tracers_and_refuses_overlap():
     with pytest.raises(ValueError, match="unknown tracer names"):
         mpas_hydrostatic_tendencies(state, mesh, coord, cfg._replace(
             vert4_log_form_tracers=("qv",)), None, 0.0)
+    with pytest.raises(ValueError, match="each tracer takes one filter form"):     # filter off
+        mpas_hydrostatic_tendencies(state, mesh, coord, cfg._replace(
+            nu_vert4_T=0.0, vert4_flux_form_tracers=("q_v",),
+            vert4_log_form_tracers=("q_v",)), None, 0.0)
