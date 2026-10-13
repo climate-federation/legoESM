@@ -109,9 +109,9 @@ A 120-day GPU twin remains an acquisition.
 
 ## Gates and review
 
-The focused committed suite passes 49/49 for the driver, coarse-graining,
-paired climate, predictability, dg50 ladder dispatch, and citation gate; after
-the CPU acquisition additions the driver suite passes 10/10. The citation
+The final clean-tree affected suite passes 204/204 for the complete SWG card,
+driver, coarse-graining, paired climate, predictability, dg50 ladder dispatch,
+and citation gate. The citation
 gate passes all four design-note oracle citations, while the shifted `diacfl`
 plant exits nonzero with `SYMBOL-NOT-AT-LINE`. Python compilation, shell
 syntax, `git diff --check`, and Ruff on the new/locally clean Python files pass.
