@@ -96,7 +96,9 @@ def read_stage2_composition(
     return out
 
 
-def read_stage2_preupdate(path: Path) -> dict[str, np.ndarray]:
+def read_stage2_preupdate(
+    path: Path, *, expected_dims: tuple[int, int, int] = DIMS,
+) -> dict[str, np.ndarray]:
     """Read the pre-update record made before the stage-2 Krhs/Kaa alias."""
     with path.open("rb") as handle:
         magic = handle.read(16).decode("ascii").rstrip()
@@ -106,7 +108,7 @@ def read_stage2_preupdate(path: Path) -> dict[str, np.ndarray]:
     require(magic == "NEMO_L2_RKPRE_1", f"{path}: bad magic")
     require(
         (version, kt, stage, kbb, kmm, krhs, kaa, nx, ny, nz, bits)
-        == (1, 1, 2, 1, 3, 2, 2, *DIMS, 64),
+        == (1, 1, 2, 1, 3, 2, 2, *expected_dims, 64),
         f"{path}: bad header {header}",
     )
     n3 = nx * ny * nz

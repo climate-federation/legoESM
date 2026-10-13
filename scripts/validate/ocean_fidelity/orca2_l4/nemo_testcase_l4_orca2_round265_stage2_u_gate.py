@@ -31,6 +31,7 @@ from scripts.validate.ocean_fidelity.orca2_l4 import (  # noqa: E402
 )
 from nemo_testcase_l2_gyre_round11_composition import (  # noqa: E402
     read_stage2_composition,
+    read_stage2_preupdate,
 )
 
 LABELS = r249.LABELS
@@ -131,8 +132,11 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
     forcing = omt0.rung0_ladder._zero_forcing((148, 180))
 
     composition_path = record_root / "oracle_rkstage2_operands_kt00000001.bin"
+    preupdate_path = record_root / "oracle_rkstage2_preupdate_kt00000001.bin"
     oracle = read_stage2_composition(
         composition_path, expected_dims=(94, 152, 31))
+    preupdate = read_stage2_preupdate(
+        preupdate_path, expected_dims=(94, 152, 31))
 
     arm = r245._barotropic_surface_mask_arm(
         card, True, v_only=True, t_pivot_north_neighbor=True)
@@ -169,13 +173,14 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
         "post_lbc_Kaa_u": _native_u(stage2_associated[0]),
     }
     oracle_rows = {
-        **oracle,
+        **oracle, **preupdate,
         "post_lbc_Kaa_u": np.asarray(oracle_stage2["u"], np.float64)[:, :90],
     }
     rows = _rows(candidate, oracle_rows)
 
     rhs_u = jnp.asarray(traced.stage_rhs[1][0])
-    rhs_u = rhs_u.at[:, 1:91, :].set(jnp.asarray(oracle["Krhs_u"][..., :30]))
+    rhs_u = rhs_u.at[:, 1:91, :].set(
+        jnp.asarray(preupdate["Krhs_u"][..., :30]))
     rhs_override = (rhs_u, jnp.asarray(traced.stage_rhs[1][1]))
     with r245._barotropic_surface_mask_arm(
             card, True, v_only=True, t_pivot_north_neighbor=True):
@@ -218,6 +223,7 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
         "matched_stage2": {"T": matched_t, "S": matched_s},
         "record_identity": {
             str(composition_path): _sha256(composition_path),
+            str(preupdate_path): _sha256(preupdate_path),
             "stage1": hashlib.sha256(np.ascontiguousarray(
                 oracle_stage1["u"]).tobytes()).hexdigest(),
             "stage2": hashlib.sha256(np.ascontiguousarray(

@@ -1,5 +1,7 @@
 import copy
+import struct
 
+import numpy as np
 import pytest
 
 from scripts.validate.ocean_fidelity.orca2_l4 import (
@@ -68,3 +70,16 @@ def test_round265_plants_fire(plant):
             [copy.deepcopy(_report(label)) for label in gate.LABELS],
             [copy.deepcopy(_prefix(label)) for label in gate.LABELS],
             plant=plant)
+
+
+def test_preupdate_reader_accepts_explicit_dimensions(tmp_path):
+    from nemo_testcase_l2_gyre_round11_composition import read_stage2_preupdate
+
+    path = tmp_path / "preupdate.bin"
+    dims = (6, 6, 1)
+    header = struct.pack("=11i", 1, 1, 2, 1, 3, 2, 2, *dims, 64)
+    payload = np.arange(2 * np.prod(dims), dtype=np.float64).tobytes()
+    path.write_bytes(b"NEMO_L2_RKPRE_1 " + header + payload)
+    result = read_stage2_preupdate(path, expected_dims=dims)
+    assert result["Krhs_u"].shape == (2, 2, 1)
+    assert result["Krhs_v"].shape == (2, 2, 1)
