@@ -1,0 +1,153 @@
+--- dynvor.F90
++++ dynvor.F90
+@@ -712,14 +712,26 @@
+       !
+       INTEGER  ::   ji, jj, jk   ! dummy loop indices
+       INTEGER  ::   ierr         ! local integer
++      INTEGER  ::   r273_unit, r273_ios
++      CHARACTER(LEN=16) :: r273_magic, r273_name
++      CHARACTER(LEN=256) :: r273_filename
+       REAL(wp) ::   zua, zva     ! local scalars
+       REAL(wp) ::   zmsk, ze3f   ! local scalars
+       REAL(wp), DIMENSION(T2D(1)) ::   z1_e3f
+       REAL(wp), DIMENSION(T2D(1)) ::   zwx , zwy
+       REAL(wp), DIMENSION(T2D(1)) ::   ztnw, ztne, ztsw, ztse
+       REAL(wp), DIMENSION(T2D(1)) ::   zwz   ! 3D workspace, jpkm1 -> jpkm1 -> avoid lbc_lnk on jpk that is not defined
++      REAL(wp), DIMENSION(jpi,jpj,jpk) :: r273_rhs_u0, r273_rhs_v0, r273_z1, r273_zwz, r273_zwx, r273_zwy
++      REAL(wp), DIMENSION(jpi,jpj,jpk) :: r273_ztne, r273_ztnw, r273_ztse, r273_ztsw, r273_zua, r273_zva
++      REAL(wp), DIMENSION(jpi,jpj,jpk) :: r273_e3u, r273_e3v
+       !!----------------------------------------------------------------------
+       !
++      IF( kt == nit000 .AND. Kmm == 3 .AND. kvor == ntot ) THEN
++         r273_rhs_u0 = pu_rhs ; r273_rhs_v0 = pv_rhs
++         r273_z1 = 0._wp ; r273_zwz = 0._wp ; r273_zwx = 0._wp ; r273_zwy = 0._wp
++         r273_ztne = 0._wp ; r273_ztnw = 0._wp ; r273_ztse = 0._wp ; r273_ztsw = 0._wp
++         r273_zua = 0._wp ; r273_zva = 0._wp ; r273_e3u = 0._wp ; r273_e3v = 0._wp
++      ENDIF
+       IF( .NOT. l_istiled .OR. ntile == 1 )  THEN                       ! Do only on the first tile
+          IF( kt == nit000 ) THEN
+             IF(lwp) WRITE(numout,*)
+@@ -762,6 +774,11 @@
+             END_2D
+          END SELECT
+ #endif
++         IF( kt == nit000 .AND. Kmm == 3 .AND. kvor == ntot ) THEN
++            DO_2D( 1, 1, 1, 1 )
++               r273_z1(ji,jj,jk) = z1_e3f(ji,jj)
++            END_2D
++         ENDIF
+          !
+          SELECT CASE( kvor )                 !==  vorticity considered  ==!
+          !
+@@ -803,11 +820,21 @@
+          CASE DEFAULT                                             ! error
+             CALL ctl_stop('STOP','dyn_vor: wrong value for kvor'  )
+          END SELECT
++         IF( kt == nit000 .AND. Kmm == 3 .AND. kvor == ntot ) THEN
++            DO_2D( 1, 1, 1, 1 )
++               r273_zwz(ji,jj,jk) = zwz(ji,jj)
++            END_2D
++         ENDIF
+          !
+          !                                   !==  horizontal fluxes  ==!
+          DO_2D( 1, 1, 1, 1 )
+             zwx(ji,jj) = e2u(ji,jj) * e3u(ji,jj,jk,Kmm) * pu(ji,jj,jk)
+             zwy(ji,jj) = e1v(ji,jj) * e3v(ji,jj,jk,Kmm) * pv(ji,jj,jk)
++            IF( kt == nit000 .AND. Kmm == 3 .AND. kvor == ntot ) THEN
++               r273_zwx(ji,jj,jk) = zwx(ji,jj) ; r273_zwy(ji,jj,jk) = zwy(ji,jj)
++               r273_e3u(ji,jj,jk) = e3u(ji,jj,jk,Kmm)
++               r273_e3v(ji,jj,jk) = e3v(ji,jj,jk,Kmm)
++            ENDIF
+          END_2D
+          !
+          !                                   !==  compute and add the vorticity term trend  =!
+@@ -816,6 +843,10 @@
+             ztnw(ji,jj) = zwz(ji-1,jj-1) + zwz(ji-1,jj  ) + zwz(ji  ,jj  )
+             ztse(ji,jj) = zwz(ji  ,jj  ) + zwz(ji  ,jj-1) + zwz(ji-1,jj-1)
+             ztsw(ji,jj) = zwz(ji  ,jj-1) + zwz(ji-1,jj-1) + zwz(ji-1,jj  )
++            IF( kt == nit000 .AND. Kmm == 3 .AND. kvor == ntot ) THEN
++               r273_ztne(ji,jj,jk) = ztne(ji,jj) ; r273_ztnw(ji,jj,jk) = ztnw(ji,jj)
++               r273_ztse(ji,jj,jk) = ztse(ji,jj) ; r273_ztsw(ji,jj,jk) = ztsw(ji,jj)
++            ENDIF
+          END_2D
+          !
+          DO_2D( 0, 0, 0, 0 )   ! add () for NP repro
+@@ -825,8 +856,78 @@
+                &                             + ( ztnw(ji,jj  ) * zwx(ji-1,jj  ) + ztne(ji,jj  ) * zwx(ji  ,jj  ) ) )
+             pu_rhs(ji,jj,jk) = pu_rhs(ji,jj,jk) + zua
+             pv_rhs(ji,jj,jk) = pv_rhs(ji,jj,jk) + zva
++            IF( kt == nit000 .AND. Kmm == 3 .AND. kvor == ntot ) THEN
++               r273_zua(ji,jj,jk) = zua ; r273_zva(ji,jj,jk) = zva
++            ENDIF
+          END_2D
+       END DO
++      IF( kt == nit000 .AND. Kmm == 3 .AND. kvor == ntot ) THEN
++         WRITE(r273_filename,'("oracle_r273_een_rank",I4.4,"_kt",I8.8,".bin")') narea - 1, kt
++         OPEN( NEWUNIT=r273_unit, FILE=TRIM(r273_filename), ACCESS='STREAM', FORM='UNFORMATTED', &
++            & STATUS='REPLACE', ACTION='WRITE', IOSTAT=r273_ios )
++         IF( r273_ios /= 0 ) CALL ctl_stop( 'vor_een: cannot open round-273 leaf record' )
++         r273_magic = 'NEMO_L4_R273EEN'
++         WRITE(r273_unit) r273_magic, 1, kt, Kmm, kvor, narea - 1, jpi, jpj, jpk, &
++            & nimpp, njmpp, ntsi, ntsj, ntei, ntej, STORAGE_SIZE(1._wp), 28
++         r273_name = 'pu'
++         WRITE(r273_unit) r273_name, 3, jpi, jpj, jpk ; WRITE(r273_unit) pu
++         r273_name = 'pv'
++         WRITE(r273_unit) r273_name, 3, jpi, jpj, jpk ; WRITE(r273_unit) pv
++         r273_name = 'rhs_u_before'
++         WRITE(r273_unit) r273_name, 3, jpi, jpj, jpk ; WRITE(r273_unit) r273_rhs_u0
++         r273_name = 'rhs_v_before'
++         WRITE(r273_unit) r273_name, 3, jpi, jpj, jpk ; WRITE(r273_unit) r273_rhs_v0
++         r273_name = 'z1_e3f'
++         WRITE(r273_unit) r273_name, 3, jpi, jpj, jpk ; WRITE(r273_unit) r273_z1
++         r273_name = 'zwz'
++         WRITE(r273_unit) r273_name, 3, jpi, jpj, jpk ; WRITE(r273_unit) r273_zwz
++         r273_name = 'e3u_live'
++         WRITE(r273_unit) r273_name, 3, jpi, jpj, jpk ; WRITE(r273_unit) r273_e3u
++         r273_name = 'e3v_live'
++         WRITE(r273_unit) r273_name, 3, jpi, jpj, jpk ; WRITE(r273_unit) r273_e3v
++         r273_name = 'zwx'
++         WRITE(r273_unit) r273_name, 3, jpi, jpj, jpk ; WRITE(r273_unit) r273_zwx
++         r273_name = 'zwy'
++         WRITE(r273_unit) r273_name, 3, jpi, jpj, jpk ; WRITE(r273_unit) r273_zwy
++         r273_name = 'ztne'
++         WRITE(r273_unit) r273_name, 3, jpi, jpj,jpk ; WRITE(r273_unit) r273_ztne
++         r273_name = 'ztnw'
++         WRITE(r273_unit) r273_name, 3, jpi, jpj,jpk ; WRITE(r273_unit) r273_ztnw
++         r273_name = 'ztse'
++         WRITE(r273_unit) r273_name, 3, jpi, jpj,jpk ; WRITE(r273_unit) r273_ztse
++         r273_name = 'ztsw'
++         WRITE(r273_unit) r273_name, 3, jpi, jpj,jpk ; WRITE(r273_unit) r273_ztsw
++         r273_name = 'zua'
++         WRITE(r273_unit) r273_name, 3, jpi, jpj,jpk ; WRITE(r273_unit) r273_zua
++         r273_name = 'zva'
++         WRITE(r273_unit) r273_name, 3, jpi, jpj,jpk ; WRITE(r273_unit) r273_zva
++         r273_name = 'rhs_u_after'
++         WRITE(r273_unit) r273_name, 3, jpi, jpj,jpk ; WRITE(r273_unit) pu_rhs
++         r273_name = 'rhs_v_after'
++         WRITE(r273_unit) r273_name, 3, jpi, jpj,jpk ; WRITE(r273_unit) pv_rhs
++         r273_name = 'ff_f'
++         WRITE(r273_unit) r273_name, 2, jpi, jpj,1 ; WRITE(r273_unit) ff_f
++         r273_name = 'r1_e1e2f'
++         WRITE(r273_unit) r273_name, 2, jpi, jpj,1 ; WRITE(r273_unit) r1_e1e2f
++         r273_name = 'e2v'
++         WRITE(r273_unit) r273_name, 2, jpi, jpj,1 ; WRITE(r273_unit) e2v
++         r273_name = 'e1u'
++         WRITE(r273_unit) r273_name, 2, jpi, jpj,1 ; WRITE(r273_unit) e1u
++         r273_name = 'e2u'
++         WRITE(r273_unit) r273_name, 2, jpi, jpj,1 ; WRITE(r273_unit) e2u
++         r273_name = 'e1v'
++         WRITE(r273_unit) r273_name, 2, jpi, jpj,1 ; WRITE(r273_unit) e1v
++         r273_name = 'r1_e1u'
++         WRITE(r273_unit) r273_name, 2, jpi, jpj,1 ; WRITE(r273_unit) r1_e1u
++         r273_name = 'r1_e2v'
++         WRITE(r273_unit) r273_name, 2, jpi, jpj,1 ; WRITE(r273_unit) r1_e2v
++         r273_name = 'umask'
++         WRITE(r273_unit) r273_name, 3, jpi, jpj,jpk ; WRITE(r273_unit) umask
++         r273_name = 'vmask'
++         WRITE(r273_unit) r273_name, 3, jpi, jpj,jpk ; WRITE(r273_unit) vmask
++         CLOSE(r273_unit)
++         WRITE(numout,*) 'ORCA2_R273_EEN_LEAF_DUMP ', kt, Kmm, kvor, narea - 1, TRIM(r273_filename)
++      ENDIF
+       !                                                ! ===============
+       !                                                !   End of slab
+       !                                                ! ===============
