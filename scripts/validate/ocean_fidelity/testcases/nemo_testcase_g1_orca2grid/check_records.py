@@ -23,6 +23,12 @@ STAGE_FRAMES = ("e", "b", "1", "2", "3", "f")
 PLANTS = ("none", "truncation", "nonfinite", "missing-frame", "twin-ulp",
           "missing-step")
 SUB_PLANTS = ("missing-substep",)       # needs --substep-steps
+# the least each frame must hold for the round-4 walk (more is recorded)
+SUB_ENTRY = ("sshn_e", "un_e", "vn_e", "zu_frc", "zv_frc", "ffu_nw", "ffu_ne",
+             "ffu_sw", "ffu_se", "ffv_nw", "ffv_ne", "ffv_sw", "ffv_se")
+SUB_STEP = ("ssha_e", "ua_new", "va_new", "zhU", "zhV", "hup2_e", "hvp2_e",
+            "cor_u", "cor_v")
+SUB_EXIT = ("ssh_aa", "uu_b_aa", "vv_b_aa", "un_adv", "vn_adv")
 SUB_MAGIC = b"NEMO_G1_SPGTS1  "
 SUB_HEADER = ("version", "step", "Nbb", "Nmm", "Naa", "Nrhs", "jpi", "jpj", "jpk",
               "icycle", "Nis0", "Njs0", "Nie0", "Nje0", "word_bits")
@@ -100,6 +106,13 @@ def check_substeps(evidence: Path, twin: Path | None, steps: list[int],
         blob = path.read_bytes()
         header, fields = read_substeps(blob, path.name)
         require(header["step"] == step, f"{path.name}: header step {header['step']}")
+        require(header["icycle"] >= 1, f"{path.name}: no substep ({header['icycle']})")
+        for frame, need in (("i000", SUB_ENTRY), ("j001", SUB_STEP), ("o000", SUB_EXIT)):
+            lacking = [n for n in need if f"{frame}_{n}" not in fields]
+            require(not lacking, f"{path.name}: frame {frame} lacks {lacking}")
+        for n in ("i000_sshn_e", "j001_ssha_e", "o000_ssh_aa"):
+            require(fields[n].shape == (header["jpj"], header["jpi"]),
+                    f"{path.name}: {n} is not a (jpj, jpi) field of its own header")
         frames = {name.split("_", 1)[0] for name in fields}
         want = {"i000", "o000"} | {f"j{n:03d}" for n in range(1, header["icycle"] + 1)}
         require(frames == want, f"{path.name}: frames {sorted(frames)[:4]}.. != "
@@ -111,7 +124,10 @@ def check_substeps(evidence: Path, twin: Path | None, steps: list[int],
             require(names == first, f"{path.name}: substep {jn} field list moved")
         for name, data in fields.items():
             require(bool(np.all(np.isfinite(data))), f"{path.name}: {name} non-finite")
-        if twin is not None and substep_path(twin, step).is_file():
+        if twin is not None and step_path(twin, step).is_file():
+            # the twin ran this step: its substep stream must exist and agree
+            require(substep_path(twin, step).is_file(),
+                    f"{path.name}: the twin run has no substep record")
             require(substep_path(twin, step).read_bytes() == blob,
                     f"{path.name}: twin run differs")
         out[step] = {"icycle": header["icycle"], "n_fields": len(fields),

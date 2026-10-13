@@ -38,8 +38,8 @@ Arms (``--arm``):
                times hv_0); no model step
   stage_replay  OFFLINE numpy replay, from NEMO's recorded frames alone, of
                the RK3 stage statements that carry no solver arithmetic: the
-               stage sea level and thickness ratios (stprk3_stg.f90:147,
-               :173-175, :214-217, domqco.f90:257) and the stage tracer
+               stage sea level and thickness ratios (stprk3_stg.f90:148,
+               :171-173, :211, :215-217, domqco.f90:257) and the stage tracer
                update (stprk3_stg.f90:503-505; trazdf.f90:284-294 at stage 3; trend zero on this
                deck), each in NEMO's order (must be 0 unequal) and in the
                order the card uses; no model step
@@ -502,7 +502,7 @@ def stage_replay_rows(root: Path, kt: int, tmask) -> dict:
                 "max_abs": float(np.max(np.abs(d))),
                 "ref_max_abs": float(np.max(np.abs(ref[wet])))}
     rows = {
-        "stage1 ssh (:147)": {
+        "stage1 ssh (:148)": {
             "nemo": cmp(r2_3 * sb + r1_3 * sa, g["1_ssh_aa"]),
             "card_order": cmp(sb + (sa - sb) / 3.0, g["1_ssh_aa"])},
         "stage2 ssh (:211)": {
@@ -516,8 +516,8 @@ def stage_replay_rows(root: Path, kt: int, tmask) -> dict:
         b, a = g[f"e_r3{f}_bb"], g[f"3_r3{f}_aa"]
         m = wet if f == "t" else np.ones_like(wet)
         for name, mine, ref in (
-                (f"stage1 r3{f} (:173-175)", r2_3 * b + r1_3 * a, g[f"1_r3{f}_aa"]),
-                (f"stage2 r3{f} (:214-216)", r1_2 * (b + a), g[f"2_r3{f}_aa"])):
+                (f"stage1 r3{f} (:171-173)", r2_3 * b + r1_3 * a, g[f"1_r3{f}_aa"]),
+                (f"stage2 r3{f} (:215-217)", r1_2 * (b + a), g[f"2_r3{f}_aa"])):
             d = (mine - ref)[m]
             rows[name] = {"nemo": {"n_unequal": int(np.count_nonzero(d)),
                                    "max_abs": float(np.max(np.abs(d))),

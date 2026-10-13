@@ -276,7 +276,7 @@ needs_record4 = pytest.mark.skipif(
 
 
 def test_stage1_sea_level_helper_is_nemos_order_bit_for_bit():
-    """stprk3_stg.f90:147.  Plant: the legacy order must differ somewhere, or
+    """stprk3_stg.f90:148.  Plant: the legacy order must differ somewhere, or
     the comparison could not tell the two apart."""
     from legoesm.ocean.eos import nemo_ssh_rk3_stage1
     rng = np.random.default_rng(4)
@@ -318,7 +318,7 @@ def test_offline_stage_replay_reproduces_nemo_and_separates_the_two_orders():
         if "nemo" in r:
             assert r["nemo"]["n_unequal"] == 0, name
             assert r["nemo"]["ref_max_abs"] > 0.0, name
-    legacy = rows["stage1 ssh (:147)"]["card_order"]
+    legacy = rows["stage1 ssh (:148)"]["card_order"]
     assert legacy["n_unequal"] > 1000 and legacy["max_abs"] < 1.0e-16
 
 

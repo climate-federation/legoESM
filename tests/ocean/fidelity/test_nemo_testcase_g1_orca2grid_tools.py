@@ -203,13 +203,20 @@ def _substep_blob(step, icycle=2, bad=None):
         shape = (a.shape[1], a.shape[0], 1) if a.ndim == 2 else (a.size, 1, 1)
         return (name.ljust(16).encode() + struct.pack("<4i", a.ndim, *shape)
                 + a.tobytes())
-    blob += rec("i000_sshn_e", np.ones((5, 6))) + rec("i000_ffu_nw", np.ones((1, 2)))
+    cr = _records_checker()
+    for n in cr.SUB_ENTRY:
+        if n != "ffv_se" or bad != "schema":
+            blob += rec(f"i000_{n}", np.ones((1, 2) if n.startswith("ff") else (5, 6)))
     for jn in range(1, icycle + 1):
         ssh = np.full((5, 6), float(jn))
         if bad == "nonfinite" and jn == icycle:
             ssh[0, 0] = np.nan
-        blob += rec(f"j{jn:03d}_ssha_e", ssh) + rec(f"j{jn:03d}_ext_coef", np.ones(3))
-    return blob + rec("o000_ssh_aa", np.zeros((5, 6)))
+        for n in cr.SUB_STEP:
+            blob += rec(f"j{jn:03d}_{n}", ssh)
+        blob += rec(f"j{jn:03d}_ext_coef", np.ones(3))
+    for n in cr.SUB_EXIT:
+        blob += rec(f"o000_{n}", np.zeros((5, 6)))
+    return blob
 
 
 def _records_checker():
@@ -229,9 +236,9 @@ def test_substep_streams_are_admitted_at_exactly_the_listed_steps(tmp_path):
     for step in (1, 17):
         cr.substep_path(a, step).write_bytes(_substep_blob(step))
     cr.substep_path(b, 1).write_bytes(_substep_blob(1))
+    cr.step_path(b, 1).write_bytes(b"the twin ran step 1")
     out = cr.check_substeps(a, b, [1, 17])
-    assert out[17] == {"icycle": 2, "n_fields": 7,
-                       "substep_fields": ["ext_coef", "ssha_e"]}
+    assert out[17]["icycle"] == 2 and "ssha_e" in out[17]["substep_fields"]
     head, fields = cr.read_substeps(cr.substep_path(a, 1).read_bytes(), "x")
     assert head["icycle"] == 2 and fields["i000_ffu_nw"].shape == (1, 2)
     assert fields["j002_ext_coef"].shape == (3,)
@@ -244,6 +251,15 @@ def test_substep_streams_are_admitted_at_exactly_the_listed_steps(tmp_path):
     with pytest.raises(cr.Refuse, match="twin run differs"):
         cr.check_substeps(a, b, [1, 17])
     cr.substep_path(b, 1).unlink()
+    with pytest.raises(cr.Refuse, match="twin run has no substep record"):
+        cr.check_substeps(a, b, [1, 17])
+    cr.step_path(b, 1).unlink()
+    cr.substep_path(a, 17).write_bytes(_substep_blob(17, icycle=0))
+    with pytest.raises(cr.Refuse, match="no substep"):
+        cr.check_substeps(a, b, [1, 17])
+    cr.substep_path(a, 17).write_bytes(_substep_blob(17, bad="schema"))
+    with pytest.raises(cr.Refuse, match="lacks \\['ffv_se'\\]"):
+        cr.check_substeps(a, b, [1, 17])
     cr.substep_path(a, 17).write_bytes(_substep_blob(17, bad="nonfinite"))
     with pytest.raises(cr.Refuse, match="non-finite"):
         cr.check_substeps(a, b, [1, 17])
@@ -251,8 +267,9 @@ def test_substep_streams_are_admitted_at_exactly_the_listed_steps(tmp_path):
     with pytest.raises(cr.Refuse, match="truncated payload"):
         cr.check_substeps(a, b, [1, 17])
     blob = _substep_blob(17, icycle=3)
-    cut = blob.index(b"j003_ssha_e")
-    cr.substep_path(a, 17).write_bytes(blob[:cut] + blob[blob.index(b"o000_ssh_aa"):])
+    cut = blob.index(b"j003_" + cr.SUB_STEP[0].encode())
+    cr.substep_path(a, 17).write_bytes(
+        blob[:cut] + blob[blob.index(b"o000_" + cr.SUB_EXIT[0].encode()):])
     with pytest.raises(cr.Refuse, match="frames"):
         cr.check_substeps(a, b, [1, 17])
 
@@ -271,3 +288,12 @@ def test_round4_substep_patch_only_adds_writer_calls_and_matches_its_gate():
     assert re.findall(r"kstp /= (\d+)", module) == ["1", "2", "17", "31", "41"]
     wrapper = (here / "run_r4.sh").read_text()
     assert "SPGTS_STEPS=1,2,17,31,41" in wrapper and "ORCA2G1_OMIP_L1_P5" in wrapper
+
+
+def test_round4_patch_writes_every_field_the_admission_requires():
+    cr = _records_checker()
+    patch = (Path(__file__).resolve().parents[3] / "scripts/validate/ocean_fidelity/"
+             "testcases/nemo_testcase_g1_orca2grid/"
+             "dynspg_ts_g1_substep_record.patch").read_text()
+    for name in cr.SUB_ENTRY + cr.SUB_STEP + cr.SUB_EXIT:
+        assert f"'{name}'" in patch, name

@@ -1009,7 +1009,7 @@ def nemo_r3t_rk3_stage1_stretch(
 def nemo_ssh_rk3_stage1(eta_before: jnp.ndarray, eta_after: jnp.ndarray) -> jnp.ndarray:
     """NEMO RK3 stage-1 sea level, ``r2_3*ssh(Kbb) + r1_3*ssha``.
 
-    ``stprk3_stg.f90:147`` (np_HYB, resolved at ``:48``) with the constants
+    ``stprk3_stg.f90:148`` (np_HYB, resolved at ``:48``) with the constants
     of ``:52-53``: each product is rounded before the sum, as compiled.
     """
     eta_before = jnp.asarray(eta_before)
