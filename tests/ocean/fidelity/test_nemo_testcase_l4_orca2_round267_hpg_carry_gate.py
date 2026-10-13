@@ -28,12 +28,12 @@ def _arm_report(active):
         boundary["after_vorticity_u"]["complete"] = _score(1.0e-12, 2)
         boundary["after_advection_u"]["complete"] = _score(1.0e-6, 2)
     else:
-        replay["after_hpg_u"] = _score(1.0e-7, 2)
-        boundary["after_hpg_u"]["complete"] = _score(1.0e-6, 2)
-        boundary["after_vorticity_u"]["complete"] = _score(1.0e-6, 2)
+        replay["after_keg_u"] = _score(1.0e-7, 2)
+        boundary["after_vorticity_u"]["complete"] = _score(1.0e-12, 2)
         boundary["after_advection_u"]["complete"] = _score(1.0e-6, 2)
     return {
         "literal_hpg_accumulator": active,
+        "source_order_arm": True,
         "record_identity": {"record": "a" * 64},
         "passivity": {"T": True},
         "boundary_order": list(gate.r266.BOUNDARY_ORDER),
@@ -57,7 +57,7 @@ def test_classification_closes_hpg_and_names_keg():
     result = gate.classify([_report(label) for label in gate.LABELS])
     assert result["first_next_boundary"] == "after_keg_u"
     assert result["completed_rhs_closes"] is False
-    assert result["predictions"]["R267-P2"] == "CONFIRMED"
+    assert result["predictions"]["R267-P2"] == "REFUTED_ARM_UNNEEDED_BASELINE_CLOSES"
 
 
 @pytest.mark.parametrize("plant", [name for name in gate.PLANTS if name != "none"])

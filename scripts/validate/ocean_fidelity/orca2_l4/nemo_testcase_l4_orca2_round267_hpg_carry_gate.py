@@ -75,7 +75,7 @@ def classify(reports: list[dict[str, object]], *, plant: str = "none") -> dict[s
     if plant == "record-identity":
         independent["candidate"]["record_identity"] = {"record": "0" * 64}
     elif plant == "baseline-reproduction":
-        independent["baseline"]["accumulator_self_replay"]["after_hpg_u"]["max_abs"] = 0.0
+        independent["baseline"]["boundary_rows"]["after_hpg_u"]["complete"]["max_abs"] = 1.0
     elif plant == "passivity":
         independent["candidate"]["passivity"][next(iter(independent["candidate"]["passivity"]))] = False
     elif plant == "source-order":
@@ -102,6 +102,9 @@ def classify(reports: list[dict[str, object]], *, plant: str = "none") -> dict[s
                 f"{label}: baseline arm moved")
         require(candidate["literal_hpg_accumulator"] is True,
                 f"{label}: candidate arm moved")
+        require(baseline["source_order_arm"] is True
+                and candidate["source_order_arm"] is True,
+                f"{label}: NEMO source-order arm is not active")
         require(baseline["record_identity"] == identity
                 and candidate["record_identity"] == identity,
                 f"{label}: record identity moved")
@@ -113,20 +116,23 @@ def classify(reports: list[dict[str, object]], *, plant: str = "none") -> dict[s
         require(all(candidate["matched_stage2"][name]["max_abs"] <= FLOOR
                     for name in ("T", "S")),
                 f"{label}: matched stage-2 state moved")
-        require(baseline["accumulator_self_replay"]["after_hpg_u"]["max_abs"]
-                > FLOOR, f"{label}: round-266 baseline did not reproduce")
+        baseline_hpg = baseline["boundary_rows"]["after_hpg_u"]["complete"]
+        require(baseline_hpg["max_abs"] <= FLOOR,
+                f"{label}: corrected source-order HPG did not close")
         hpg_complete = candidate["boundary_rows"]["after_hpg_u"]["complete"]
         hpg_carry = candidate["accumulator_self_replay"]["after_hpg_u"]
         require(hpg_complete["max_abs"] <= FLOOR and hpg_carry["max_abs"] <= FLOOR,
                 f"{label}: literal HPG carry did not close")
         first = _first_next(candidate)
         require(first is not None, f"{label}: no registered next boundary")
+        require(_first_next(baseline) == first,
+                f"{label}: HPG carry arm changed the next boundary")
         next_rows[label] = first
         completed = candidate["boundary_rows"]["after_advection_u"]["complete"]
         require(report["one_bit_control"]["unequal"] == 1,
                 f"{label}: one-bit control did not fire")
         summaries[label] = {
-            "baseline_hpg": baseline["boundary_rows"]["after_hpg_u"]["complete"],
+            "baseline_hpg": baseline_hpg,
             "candidate_hpg": hpg_complete,
             "first_next_boundary": first,
             "next_self_replay": candidate["accumulator_self_replay"][first],
@@ -150,8 +156,8 @@ def classify(reports: list[dict[str, object]], *, plant: str = "none") -> dict[s
         "completed_rhs_closes": completed_closes,
         "labels": summaries,
         "predictions": {
-            "R267-P1": "CONFIRMED",
-            "R267-P2": "CONFIRMED",
+            "R267-P1": "REFUTED_ROUND266_SOURCE_ORDER_INSTRUMENT",
+            "R267-P2": "REFUTED_ARM_UNNEEDED_BASELINE_CLOSES",
             "R267-P3": "CONFIRMED_KEG" if first == "after_keg_u" else "REFUTED",
             "R267-P4": "READY_FOR_TRAJECTORY" if completed_closes else "HELD_NEXT_BOUNDARY",
             "R267-P5": "CONFIRMED" if plant == "none" else "PLANT",

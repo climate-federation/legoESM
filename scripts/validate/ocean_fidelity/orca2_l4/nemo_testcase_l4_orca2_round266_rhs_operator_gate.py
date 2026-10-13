@@ -114,6 +114,7 @@ def _hooks(card, *, live: bool, stage_entry=None,
            literal_hpg_accumulator: bool = False):
     hooks = r265._hooks(card, live=live, stage_entry=stage_entry)
     return hooks._replace(
+        nemo_stage_rhs_accumulation_order_arm=True,
         stage_hpg_literal_accumulator=literal_hpg_accumulator)
 
 
@@ -256,6 +257,7 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
         "execution": "production-jit-cpu-fp64-x64-libm",
         "operand_route": "production-d114-resolved-complete-private-unit",
         "literal_hpg_accumulator": literal_hpg_accumulator,
+        "source_order_arm": True,
         "passivity": passivity,
         "boundary_order": list(BOUNDARY_ORDER),
         "boundary_rows": boundary_rows,
