@@ -16,12 +16,14 @@ EOS, then HPG first, and records the accumulator immediately after that call
 at
 `ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/stprk3_stg.f90:372-405`.
 The same compiled branch then calls VOR and ADV and records their cumulative
-boundaries at `stprk3_stg.f90:407-421`.
+boundaries at
+`ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/stprk3_stg.f90:407-421`.
 
 Inside the executed `hpg_sco`, NEMO writes the surface U accumulator as the
 literal `zhpi + zuap` at
 `ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynhpg.f90:395-406` and repeats
-that assignment at every interior level at `dynhpg.f90:411-432`. The admitted
+that assignment at every interior level at
+`ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynhpg.f90:411-432`. The admitted
 literal stream records those same operands and sums. The gate parses its own
 dimensions, lengths and finite payloads; the generic stage-term reader now
 accepts explicit ORCA2 dimensions rather than assuming GYRE.
@@ -57,7 +59,9 @@ HPG term gives `226,231/399,600` bit differences, maximum
 identical. The following VOR addition self-replays within
 `3.3881317890172014e-21 m/s2`, proving the HPG displacement is carried
 forward rather than created by VOR. This boundary corresponds to NEMO's
-literal assignments at `dynhpg.f90:401-402` and `dynhpg.f90:426-427`.
+literal assignments at
+`ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynhpg.f90:401-402` and
+`ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynhpg.f90:426-427`.
 
 R266-P4 is **NOT REACHED**. No source-exact candidate arm was scored this
 round, so the complete RHS, OMT-4 trajectory, and Decision-96 vote were not
