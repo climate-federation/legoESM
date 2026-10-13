@@ -19,9 +19,9 @@ def _score(value=0.0, unequal=0):
 def _report(label):
     topology = {"count": 100, "coastal": 4, "open": 96, "rows": []}
     return {
-        "status": "PASS_R272_EEN_LEAF_MEASUREMENT",
+        "status": "PASS_R272_MEASURED_REPLAY_REFUSAL",
         "label": label,
-        "capture": {"candidate_source_replay": _score()},
+        "capture": {"candidate_source_replay": _score(2.0e-9, 10)},
         "compiled_source": {"ln_dynvor_msk": False},
         "topology": topology,
         "relative_circulation": {
@@ -29,13 +29,14 @@ def _report(label):
             "output_vs_candidate_output": _score(1.0e-8, 2),
             "after_vorticity_vs_nemo": _score(0.0, 0),
         },
-        "first_non_floor_leaf": "relative_circulation",
+        "first_non_floor_leaf": None,
     }
 
 
-def test_classification_names_relative_circulation_and_dead_mask():
+def test_classification_holds_uncalibrated_replay_and_dead_mask():
     result = gate.classify([_report(label) for label in gate.LABELS])
-    assert result["first_non_floor_leaf"] == "relative_circulation"
+    assert result["first_non_floor_leaf"] is None
+    assert result["status"] == "PASS_R272_HELD_REPLAY_UNCALIBRATED"
     assert result["mask_branch_disposition"] == "DEAD_ln_dynvor_msk_FALSE"
 
 

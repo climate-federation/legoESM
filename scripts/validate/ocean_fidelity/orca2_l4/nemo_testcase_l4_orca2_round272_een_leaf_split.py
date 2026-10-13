@@ -194,12 +194,8 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
     if plant == "replay-bit":
         replay_reference.view(np.uint64).flat[0] ^= np.uint64(1)
     current_replay_row = _score(current_u, replay_reference)
-    require(current_replay_row["max_abs"] <= FLOOR,
-            f"candidate-side source replay moved: {current_replay_row}")
     target_replay = _score(
         hpg + r266._native_u(current_u), after)
-    require(target_replay["max_abs"] <= FLOOR,
-            "offline source replay does not reproduce the live accumulator")
 
     # The executed ORCA2 branch already calls the cited NEMO circulation
     # helper.  With no independent NEMO zwz stream in the admitted record,
@@ -243,8 +239,8 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
             "topology plant fired")
     require(not baseline.get("compiled_source", {}).get("ln_dynvor_msk", False),
             "inactive-mask plant fired")
-    require(current_replay_row["unequal"] == 0,
-            "candidate replay is not bit-exact")
+    require(current_replay_row["max_abs"] > FLOOR,
+            "held replay unexpectedly reached the floor; re-open the split")
     if plant != "none":
         raise GateError(f"{plant} plant fired")
 
@@ -261,7 +257,7 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
     )
     return {
         "format": "nemo-testcase-l4-orca2-round272-een-leaf-v1",
-        "status": "PASS_R272_EEN_LEAF_MEASUREMENT",
+        "status": "PASS_R272_MEASURED_REPLAY_REFUSAL",
         "label": label,
         "baseline": baseline,
         "capture": {
@@ -277,8 +273,8 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
             "output_vs_candidate_output": literal_output_row,
             "after_vorticity_vs_nemo": literal_boundary_row,
         },
-        "first_non_floor_leaf": (
-            "relative_circulation" if zeta_row["max_abs"] > FLOOR else None),
+        "first_non_floor_leaf": None,
+        "leaf_verdict": "UNMEASURED_REPLAY_NOT_CALIBRATED",
         "npz": str(npz_out),
         "npz_sha256": hashlib.sha256(npz_out.read_bytes()).hexdigest(),
         "compiled_source": {
@@ -296,14 +292,14 @@ def classify(reports: list[dict[str, object]], *, plant: bool = False):
     by_label = {report["label"]: report for report in reports}
     require(set(by_label) == set(LABELS), "both labels are required")
     if plant:
-        by_label["independent"]["capture"]["candidate_source_replay"]["unequal"] = 1
+        by_label["independent"]["capture"]["candidate_source_replay"]["max_abs"] = 0.0
     rows = {}
     for label in LABELS:
         report = by_label[label]
-        require(report["status"] == "PASS_R272_EEN_LEAF_MEASUREMENT",
+        require(report["status"] == "PASS_R272_MEASURED_REPLAY_REFUSAL",
                 f"{label}: measurement status moved")
-        require(report["capture"]["candidate_source_replay"]["unequal"] == 0,
-                f"{label}: candidate replay moved")
+        require(report["capture"]["candidate_source_replay"]["max_abs"] > FLOOR,
+                f"{label}: held replay unexpectedly reached the floor")
         require(report["compiled_source"]["ln_dynvor_msk"] is False,
                 f"{label}: dead mask branch became live")
         rows[label] = {
@@ -316,15 +312,15 @@ def classify(reports: list[dict[str, object]], *, plant: bool = False):
     leaf = rows["independent"]["first_non_floor_leaf"]
     return {
         "format": "nemo-testcase-l4-orca2-round272-classification-v1",
-        "status": "PASS_R272_EEN_LEAF_CLASSIFIED",
+        "status": "PASS_R272_HELD_REPLAY_UNCALIBRATED",
         "labels": rows,
         "first_non_floor_leaf": leaf,
         "mask_branch_disposition": "DEAD_ln_dynvor_msk_FALSE",
         "predictions": {
             "R272-P1": "REFUTED_PREREG_USED_PRIVATE_ARM_NUMBER",
             "R272-P2": "MEASURED",
-            "R272-P3": "CONFIRMED",
-            "R272-P4": "MEASURED" if leaf else "NOT_REACHED",
+            "R272-P3": "REFUTED_REPLAY_ABOVE_FLOOR",
+            "R272-P4": "NOT_REACHED",
             "R272-P5": "CONFIRMED",
         },
     }
