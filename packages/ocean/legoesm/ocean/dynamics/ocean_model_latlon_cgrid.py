@@ -1779,7 +1779,7 @@ def rk3_stage_velocity_update(
                 f"{velocity_before.shape} or be its level-broadcast form")
         return (velocity_before + dt_stage * rhs) * face_mask
     # dynzdf.F90:127-132 and stprk3_stg.F90:373-378, key_qco form.
-    return (_rk3_stage_update_written_order(velocity_before, rhs, dt_stage, qco_before, qco_now, qco_after) if written_order  # noqa: E501
+    return (_rk3_stage_update_written_order(velocity_before, rhs, dt_stage, qco_before, qco_now, qco_after, face_mask) if written_order  # noqa: E501
             else (qco_before * velocity_before + dt_stage * qco_now * rhs) / qco_after)
 
 
@@ -7262,7 +7262,7 @@ class LatLonCGridOceanModel:
                     # builds them from the Nbb seed thickness under the MLF
                     # before-level seed — an operator mismatch NEMO doesn't have).
                     from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
-                        barotropic_coriolis_een_pre_step, _nemo_een_fold_pivot_row,
+                        barotropic_coriolis_een_pre_step, nemo_een_fold_pivot_row,
                     )
                     _min_wc = jnp.asarray(
                         _cfg_b.min_water_column_m, dtype=F_slow_u.dtype)
@@ -7308,7 +7308,7 @@ class LatLonCGridOceanModel:
                         dz_ref=getattr(_zc, "dz_ref", None),
                         coefficient_evaluation=_een_eval,
                         eta=state.eta.data,
-                        z_coord=_zc, fold_pivot_row=_nemo_een_fold_pivot_row(_cfg_b),
+                        z_coord=_zc, fold_pivot_row=nemo_een_fold_pivot_row(_cfg_b),
                         return_pre=True,
                         scheme=_bt_pv_scheme,
                         # dyn_cor_2D, CALLED at dynspg_ts.f90:289 and
@@ -16573,15 +16573,16 @@ class _NEMOWSLdfDiagnosticTrace(NamedTuple):
 
 
 def _rk3_stage_update_written_order(velocity_before, rhs, dt_stage, qco_before,
-                                    qco_now, qco_after):
+                                    qco_now, qco_after, face_mask):
     """The thickness-weighted stage update with every product and sum of
     ``stprk3_stg.f90:373-378`` rounded once, in the written order.
 
     NEMO's binary evaluates the statement that way (its numpy replay in that
     order reproduces NEMO's stage-1 frame bit for bit); the compiled default
-    expression may fuse a product into the sum that follows it.
+    expression may fuse a product into the sum that follows it.  The quotient
+    is masked here, as the statement writes it (``* umask``).
     ``LatLonCGridOceanConfig.rk3_stage_velocity_written_order`` selects it.
     """
     r = nemo_source_round
     return r(r(r(qco_before * velocity_before)
-               + r(r(dt_stage * qco_now) * rhs)) / qco_after)
+               + r(r(dt_stage * qco_now) * rhs)) / qco_after) * face_mask

@@ -96,6 +96,7 @@ _ORCA2_R214VECPREV3_COMPILED = (
     NEMO / "cfgs/ORCA2_OMIP_L4_R214VECPREV3/BLD/ppsrc/nemo")
 _ORCA2_R229FOLDTRP = NEMO / "cfgs/ORCA2_OMIP_L4_R229FOLDTRP/BLD"
 _ORCA2_R230FOLDTRP = NEMO / "cfgs/ORCA2_OMIP_L4_R230FOLDTRP/BLD"
+_ORCA2G1_P3 = NEMO / "cfgs/ORCA2G1_OMIP_L1_P3/BLD"
 _ORCA2_R104EENACC_COMPILED = (
     NEMO / "cfgs/ORCA2_OMIP_L4_R104EENACC/BLD/ppsrc/nemo")
 _ORCA2_R105EENACC_COMPILED = (
@@ -119,6 +120,44 @@ _OVERFLOW_R56UP3_COMPILED = (
 _OVERFLOW_R62ZDF_COMPILED = (
     NEMO / "tests/OVERFLOW_OMIP_L1_P3_R62ZDF/BLD/ppsrc/nemo")
 FILES = {
+    # --- GRIDLADDER round 1 (G1 survey) BEGIN ---
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynspg_ts.f90': NEMO / "cfgs/ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynspg_ts.f90",
+    'cfgs/ORCA2_OMIP_L4/EXP00/namelist_cfg': NEMO / "cfgs/ORCA2_OMIP_L4/EXP00/namelist_cfg",
+    'cfgs/SHARED/namelist_ref': NEMO / "cfgs/SHARED/namelist_ref",
+    'src/OCE/IOM/restart.F90': NEMO / "src/OCE/IOM/restart.F90",
+    'cfgs/ORCA2_OMIP_L4/cpp_ORCA2_OMIP_L4.fcm': NEMO / "cfgs/ORCA2_OMIP_L4/cpp_ORCA2_OMIP_L4.fcm",
+    'tests/TSUNAMI/MY_SRC/usrdef_istate.F90': NEMO / "tests/TSUNAMI/MY_SRC/usrdef_istate.F90",
+    'tests/TSUNAMI/MY_SRC/usrdef_sbc.F90': NEMO / "tests/TSUNAMI/MY_SRC/usrdef_sbc.F90",
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/istate.f90': NEMO / "cfgs/ORCA2_OMIP_L4/BLD/ppsrc/nemo/istate.f90",
+    'tools/DOMAINcfg/src/domhgr.F90': NEMO / "tools/DOMAINcfg/src/domhgr.F90",
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/domhgr.f90': NEMO / "cfgs/ORCA2_OMIP_L4/BLD/ppsrc/nemo/domhgr.f90",
+    'tools/DOMAINcfg/src/domzgr.F90': NEMO / "tools/DOMAINcfg/src/domzgr.F90",
+    'tools/DOMAINcfg/src/domain.F90': NEMO / "tools/DOMAINcfg/src/domain.F90",
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dommsk.f90': NEMO / "cfgs/ORCA2_OMIP_L4/BLD/ppsrc/nemo/dommsk.f90",
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/domzgr.f90': NEMO / "cfgs/ORCA2_OMIP_L4/BLD/ppsrc/nemo/domzgr.f90",
+    'tripole.py': REPO / "packages/core/legoesm/grids/tripole.py",
+    # --- GRIDLADDER round 1 (G1 survey) END ---
+    # --- GRIDLADDER round 2 (compiled G1 record build) ---
+    "ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/dynvor.f90": (
+        _ORCA2G1_P3 / "ppsrc/nemo/dynvor.f90"),
+    "ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/domzgr.f90": (
+        _ORCA2G1_P3 / "ppsrc/nemo/domzgr.f90"),
+    "ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/domwri.f90": (
+        _ORCA2G1_P3 / "ppsrc/nemo/domwri.f90"),
+    "ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90": (
+        _ORCA2G1_P3 / "ppsrc/nemo/dynspg_ts.f90"),
+    "ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/dommsk.f90": (
+        _ORCA2G1_P3 / "ppsrc/nemo/dommsk.f90"),
+    "ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/lbcnfd.f90": (
+        _ORCA2G1_P3 / "ppsrc/nemo/lbcnfd.f90"),
+    "ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/domqco.f90": (
+        _ORCA2G1_P3 / "ppsrc/nemo/domqco.f90"),
+    "ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90": (
+        _ORCA2G1_P3 / "ppsrc/nemo/stprk3_stg.f90"),
+    "ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/trazdf.f90": (
+        _ORCA2G1_P3 / "ppsrc/nemo/trazdf.f90"),
+    "ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/stp2d.f90": (
+        _ORCA2G1_P3 / "ppsrc/nemo/stp2d.f90"),
     "stprk3.F90": _OCE / "stprk3.F90",
     "stprk3_stg.F90": _OCE / "stprk3_stg.F90",
     "ORCA2_R96SPG/ocean.output": _ORCA2_R96SPG_OUTPUT,

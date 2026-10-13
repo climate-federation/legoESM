@@ -74,7 +74,7 @@ Arms (``--arm``):
                coefficient builder is also run offline on NEMO's entry sea
                level against NEMO's eight recorded coefficient sets, four
                ways: neither half, the ratio exchange alone, the mesh
-               fe3mask pivot row alone (dommsk.f90:233, :258), both; no
+               fe3mask pivot row alone (dommsk.f90:232, :258), both; no
                model step
 
 Every scored row is split into the preregistered regions (fold band, seam,
@@ -690,9 +690,10 @@ def fused_multiply_add(x, y, z):
     to binary64): what a fused multiply-add instruction returns."""
     from fractions import Fraction
     x, y, z = np.broadcast_arrays(*(np.asarray(v, dtype=np.float64) for v in (x, y, z)))
+    require(bool(np.all(np.isfinite(x) & np.isfinite(y) & np.isfinite(z))),
+            "fused_multiply_add: a non-finite operand (the replay has none)")
     out = np.zeros(x.shape)
-    for idx in zip(*np.nonzero(np.isfinite(x) & np.isfinite(y) & np.isfinite(z)
-                               & ((x != 0) & (y != 0) | (z != 0)))):
+    for idx in zip(*np.nonzero((x != 0) & (y != 0) | (z != 0))):
         out[idx] = float(Fraction(x[idx]) * Fraction(y[idx]) + Fraction(z[idx]))
     return out
 

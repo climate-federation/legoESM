@@ -1623,7 +1623,7 @@ class BarotropicConfig(NamedTuple):
     # stencil values there.  T-pivot fold, pivot row stored.
     barotropic_een_ratio_fold_exchange: bool = False
     # The solver's EEN coefficients read the mesh's own pivot row of fe3mask
-    # (dommsk.f90:233 exchanges fmask, :258 freezes it; the T-pivot F rule
+    # (dommsk.f90:232 exchanges fmask, :258 freezes it; the T-pivot F rule
     # makes that row the mirrored row below).  False overwrites the row with
     # the halo row's source, two rows below.  One fold unit with the option
     # above: the solver refuses one without the other.

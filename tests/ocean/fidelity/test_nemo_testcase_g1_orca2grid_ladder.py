@@ -549,12 +549,12 @@ def test_only_the_g1_card_selects_the_round6_statements():
 
 def test_fold_pivot_row_halves_are_refused_one_without_the_other():
     from legoesm.ocean.dynamics import barotropic_latlon_cgrid as B
-    assert B._nemo_een_fold_pivot_row(_solver_options()) == (False, False)
-    assert B._nemo_een_fold_pivot_row(_solver_options(
+    assert B.nemo_een_fold_pivot_row(_solver_options()) == (False, False)
+    assert B.nemo_een_fold_pivot_row(_solver_options(
         **{n: True for n in ROUND6_SOLVER})) == (True, True)
     for name in ROUND6_SOLVER:
         with pytest.raises(ValueError, match="one fold unit"):
-            B._nemo_een_fold_pivot_row(_solver_options(**{name: True}))
+            B.nemo_een_fold_pivot_row(_solver_options(**{name: True}))
 
 
 def test_ratio_fold_exchange_refuses_a_grid_without_a_stored_pivot_row():
@@ -618,6 +618,8 @@ def test_fused_multiply_add_rounds_once():
     got = ladder.fused_multiply_add(np.array([x, 0.0]), np.array([x, 3.0]),
                                     np.array([-1.0, 0.0]))
     assert got[0] == 2.0 ** -29 + 2.0 ** -60 and got[1] == 0.0
+    with pytest.raises(Exception, match="non-finite"):
+        ladder.fused_multiply_add(np.array([0.0]), np.array([np.inf]), np.array([1.0]))
 
 
 def test_written_order_stage_update_and_correction_match_numpy_under_jit():
@@ -632,25 +634,34 @@ def test_written_order_stage_update_and_correction_match_numpy_under_jit():
     ub, rhs = rng.normal(scale=1e-2, size=shape), rng.normal(scale=1e-7, size=shape)
     qb, qn, qa = (1.0 + rng.normal(scale=1e-4, size=shape) for _ in range(3))
     dt = 3600.0
+    mask = np.ones(shape)
+    mask[3, 4] = 0.0
     raw = np.asarray(jax.jit(M._rk3_stage_update_written_order)(
-        *(jnp.asarray(a) for a in (ub, rhs)), dt, *(jnp.asarray(a) for a in (qb, qn, qa))))
-    want_raw = ((qb * ub) + ((dt * qn) * rhs)) / qa
-    assert np.array_equal(raw, want_raw)
+        *(jnp.asarray(a) for a in (ub, rhs)), dt,
+        *(jnp.asarray(a) for a in (qb, qn, qa, mask))))
+    want_raw = ((qb * ub) + ((dt * qn) * rhs)) / qa * mask
+    assert np.array_equal(raw, want_raw) and raw[3, 4, 0] == 0.0
     same = np.asarray(M.rk3_stage_velocity_update(
-        jnp.asarray(ub), jnp.asarray(rhs), dt, None, vector_form=False,
+        jnp.asarray(ub), jnp.asarray(rhs), dt, jnp.asarray(mask), vector_form=False,
         qco_before=jnp.asarray(qb), qco_now=jnp.asarray(qn), qco_after=jnp.asarray(qa),
         written_order=True))
     assert np.array_equal(same, want_raw)
     h = 100.0 + rng.normal(scale=1e-2, size=shape)
-    mask = np.ones(shape)
-    mask[3, 4] = 0.0
     r1 = (1.0 / h[..., 0]) * mask[..., 0]
     target = rng.normal(scale=1e-2, size=shape[:2])
     args = [jnp.asarray(a) for a in (want_raw, target, h * mask, r1, mask)]
     got = np.asarray(jax.jit(lambda *a: rk3_stage_barotropic_correction(
         *a, written_order=True))(*args))
-    want = (want_raw + (target - (want_raw * (h * mask))[..., 0] * r1)[..., None]) * mask
+    zub = target - (want_raw * (h * mask))[..., 0] * r1
+    want = want_raw + zub[..., None] * mask              # :417-418 as written
     assert np.array_equal(got, want) and got[3, 4, 0] == 0.0
+    # the association is the statement's: an unmasked dry input stays as it is
+    # (uu + zub*0), where (uu + zub)*0 would return zero
+    dry = np.array(want_raw)
+    dry[3, 4, 0] = 7.0
+    kept = np.asarray(rk3_stage_barotropic_correction(
+        jnp.asarray(dry), *args[1:], written_order=True))
+    assert kept[3, 4, 0] == 7.0
     loose = np.asarray(rk3_stage_barotropic_correction(*args))     # default path runs
     assert np.allclose(loose, want, rtol=0, atol=1e-17)
 
