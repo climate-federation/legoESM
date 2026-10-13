@@ -225,6 +225,21 @@ class CGridLatLonPrimitiveEquationConfig(NamedTuple):
     # sets it from ``DycoreConfig.energy_fixer`` (default True).  Appended at
     # the tuple END: preserves positional construction.
     energy_fixer: bool = False
+    # Divergence-SELECTIVE biharmonic damping (CAM-FV ``ldiv4``), as a
+    # multiple of CAM's nondimensional rate: per latitude row
+    # nu_row = nu_div4_scale * 0.01 * area_row**2 / dt [m^4/s], applied
+    # inside the final gradient as CAM does (sw_core.F90 ~1098).  The
+    # driver fills it from ``DycoreConfig.mpas_div_damp4_scale`` (one
+    # meaning, one value on every grid).  Per row, not one global value:
+    # built from the equatorial cell a global value is RK3-unstable near
+    # the poles, built from the pole cell it is ~1000x too weak.  0.0
+    # (default) is OFF and byte-identical; needs ``dt`` in the tendency.
+    nu_div4_scale: float = 0.0
+
+
+# CAM-FV ldiv4 nondimensional rate tau4*dt (cd_core.F90:620-684); the same
+# 0.01 as the MPAS lane's ``nu_div4_cam`` in driver.component_factory.
+CAM_DIV4_RATE = 0.01
 
 
 def _zero_v_at_pole(v, *, south: bool, north: bool, offset: int = 0):
@@ -379,7 +394,8 @@ def cgrid_latlon_hydrostatic_tendencies(
         byte-identical.
     dt : float, optional
         Step length [s]; required only when ``config.nu_del4 > 0`` (sizes the
-        per-row pole stability cap of the hyperdiffusion).
+        per-row pole stability cap of the hyperdiffusion) or
+        ``config.nu_div4_scale > 0`` (the div-4 rate 0.01*area^2/dt).
 
     Returns
     -------
@@ -862,6 +878,26 @@ def cgrid_latlon_hydrostatic_tendencies(
         flux_T = dp_T * nu_u[..., None] * laplacian_cgrid(T, grid)
         dT_dt = dT_dt - laplacian_cgrid(flux_T, grid) / dp_T
 
+    # --- 13a'. Divergence-selective del-4 damping (CAM-FV ldiv4) ---
+    # SIGN: (du, dv) -= grad(nu * lap(D)), D = div(u, v).  The divergence of
+    # that increment is -lap(nu lap D); for constant nu a Fourier mode of D
+    # (lap -> -k^2) decays at nu k^4.  Non-divergent flow (D = 0) gets
+    # exactly zero.  nu is per latitude ROW (cell area squared), inside the
+    # final gradient as in CAM.  It runs at every RK stage, so the polar
+    # filter of du/dv covers it (without the filter the pole rows are
+    # unstable).  Off (0.0) adds nothing: byte-identical.
+    if config.nu_div4_scale > 0.0:
+        if dt is None:
+            raise ValueError(
+                "cgrid_latlon_hydrostatic_tendencies: nu_div4_scale > 0 "
+                "requires the dt argument (the coefficient is 0.01*area^2/dt).")
+        D = divergence_cgrid(u, v, grid, lat_pad=_lat_pad)
+        nu_row = (config.nu_div4_scale * CAM_DIV4_RATE
+                  * grid.area[:, 0] ** 2 / dt).astype(D.dtype)   # (n_lat,)
+        psi = nu_row[:, None, None] * laplacian_cgrid(D, grid)
+        du_dt = du_dt - gradient_x_cgrid(psi, grid)
+        dv_dt = dv_dt - gradient_y_cgrid(psi, grid)
+
     # --- 13b. Top sponge (Rayleigh damping increasing toward the lid, #836) ---
     # Absorb upward-propagating gravity-wave / convective energy that would else
     # reflect off the rigid model lid and contaminate the upper levels.  Gated on
@@ -951,6 +987,17 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         self.grid = grid
         self.sigma_coord = sigma_coord
         self.config = config or CGridLatLonPrimitiveEquationConfig()
+        if self.config.nu_div4_scale > 0.0 and not self.config.use_polar_filter:
+            # Measured (Fourier-block eigen check of the damping on the 96x48
+            # grid): worst eigenvalue x dt -149.6 with no filter, against the
+            # SSP-RK3 real-axis limit ~-2.51; -0.67 / -0.83 with the filter
+            # starting at 35.9 / 60 deg.  A smaller dt does not help: the
+            # coefficient scales as 1/dt, so the per-step damping is fixed.
+            raise ValueError(
+                "nu_div4_scale > 0 needs use_polar_filter=True: the per-row "
+                "div-4 coefficient 0.01*area^2/dt is unstable on the pole rows "
+                "without the polar filter (measured at scale 1; a smaller dt "
+                "does not help).")
 
         # Stash the constructor ``dt`` so callers downstream (notably
         # ``make_latlon_mpi_step`` rebuilding an MPI-aware model) can

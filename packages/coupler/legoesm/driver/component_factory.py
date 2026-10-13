@@ -1517,6 +1517,10 @@ def create_atmosphere_dycore(
                              else dc.time_integrator),
             # CAM-style dycore total-energy fixer (F15; DycoreConfig).
             energy_fixer=dc.energy_fixer,
+            # CAM-FV ldiv4 on this grid: the SCALE only; the dycore builds its
+            # own per-row 0.01*area_row^2/dt (NOT diff.div_damp4, whose
+            # smallest-cell / dx_min^2 value is wrong on a lat-lon grid).
+            nu_div4_scale=dc.mpas_div_damp4_scale,
         )
         model = CGridLatLonPrimitiveEquationModel(
             grid, sigma, cfg, dt=_effective_dt)
