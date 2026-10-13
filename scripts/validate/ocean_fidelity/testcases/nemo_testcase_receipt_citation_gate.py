@@ -1682,7 +1682,7 @@ CITATION_MAP = {
     # --- ORCA2 round 266: stage-2 HPG accumulator assignment ------
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/stprk3_stg.f90:372-405': [
         ('hydrostatic pressure gradient (HPG))', 1),
-        ("l4_canon_3d(uu(:,:,:,Krhs),'U')", 4),
+        ("l4_canon_3d(uu(:,:,:,Krhs),'U')", 2),
         34],
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/stprk3_stg.f90:407-421': [
         ('Coriolis / vorticity', 1),
