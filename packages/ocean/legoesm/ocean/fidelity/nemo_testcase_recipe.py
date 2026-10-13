@@ -3507,7 +3507,7 @@ _ORCA2G1_REQUIRED_SWITCHES: dict[str, object] = {
     "namdyn_vor.ln_dynvor_een": True, "namdyn_vor.nn_e3f_typ": 0,
     "namdyn_hpg.ln_hpg_sco": True,
     "namdyn_spg.ln_dynspg_ts": True, "namdyn_spg.ln_bt_fw": True,
-    "namdyn_spg.nn_bt_flt": 3, "namdyn_spg.ln_bt_auto": False,
+    "namdyn_spg.nn_bt_flt": 3, "namdyn_spg.ln_bt_auto": True,
     "namdyn_ldf.ln_dynldf_off": True,
     "namzdf.ln_zdfcst": True, "namzdf.ln_zdftke": False,
     "namzdf.ln_zdfevd": False, "namzdf.ln_zdfddm": False,
@@ -3522,7 +3522,7 @@ class ORCA2G1Deck(NamedTuple):
     rn_Dt_s: float
     nn_itend: int
     nn_fsbc: int
-    nn_e: int
+    rn_bt_cmax: float
     rn_bt_alpha: float
     rn_avm0_m2_s: float
     rn_avt0_m2_s: float
@@ -3575,7 +3575,7 @@ def read_orca2g1_deck(deck_root: str | Path) -> ORCA2G1Deck:
         "rn_Dt_s": ("namdom.rn_dt", float),
         "nn_itend": ("namrun.nn_itend", int),
         "nn_fsbc": ("namsbc.nn_fsbc", int),
-        "nn_e": ("namdyn_spg.nn_e", int),
+        "rn_bt_cmax": ("namdyn_spg.rn_bt_cmax", float),
         "rn_bt_alpha": ("namdyn_spg.rn_bt_alpha", float),
         "rn_avm0_m2_s": ("namzdf.rn_avm0", float),
         "rn_avt0_m2_s": ("namzdf.rn_avt0", float),
@@ -3594,6 +3594,18 @@ def read_orca2g1_deck(deck_root: str | Path) -> ORCA2G1Deck:
     if deck.nn_itend % deck.nn_fsbc:
         raise ValueError("ORCA2G1 nn_itend must be a multiple of nn_fsbc")
     return deck
+
+
+def _orca2g1_auto_substeps(dom: dict[str, np.ndarray], deck: ORCA2G1Deck) -> int:
+    """``ln_bt_auto``: nn_e on the file's own ht_0, e1t, e2t
+    (dynspg_ts.f90:1049-1062)."""
+
+    wet = dom["bottom_level"] > 0
+    ht_0 = np.sum(dom["e3t_0"] * wet[..., None], axis=-1)
+    zcu2 = ht_0 * (dom["e1t"] ** -2 + dom["e2t"] ** -2)
+    return nemo_auto_substeps(
+        deck.rn_Dt_s, 1.0, float(np.max(zcu2)),
+        float(NEMO_CONSTANTS_CONFIG.g), cmax=deck.rn_bt_cmax)
 
 
 def orca2g1_initial_ssh(glamt_deg, gphit_deg, surface_tmask) -> np.ndarray:
@@ -3743,7 +3755,7 @@ def build_orca2g1_flat_card(deck_root: str | Path) -> NEMOTestcaseCard:
     base = _model_config(
         barotropic_time_filter="nemo_ab3am4",          # nn_bt_flt = 3
         nemo_barotropic_filter_alpha=deck.rn_bt_alpha,  # required card field
-        n_barotropic_substeps=deck.nn_e,                # ln_bt_auto = F
+        n_barotropic_substeps=_orca2g1_auto_substeps(dom, deck),  # ln_bt_auto = T
         bbl_adv_option=0, bbl_gamma_s=0.0,
         bbl_diffusive_option=0, bbl_aht_m2_s=0.0,       # ln_trabbl = F
         whole_step_identity="orca2_vector_een_c2",
@@ -3876,7 +3888,8 @@ def validate_orca2g1_flat_card(card: NEMOTestcaseCard, deck_root: str | Path) ->
         "rn_Dt": card.dt_s == deck.rn_Dt_s,
         "nn_itend": card.n_steps == deck.nn_itend,
         "rn_bt_alpha": cfg.barotropic.nemo_barotropic_filter_alpha == deck.rn_bt_alpha,
-        "nn_e": cfg.barotropic.n_barotropic_substeps == deck.nn_e,
+        "nn_e": cfg.barotropic.n_barotropic_substeps == _orca2g1_auto_substeps(
+            dom, deck),
         "rn_avm0/rn_avt0": (vm.constant.A_v, vm.constant.K_v) == (
             deck.rn_avm0_m2_s, deck.rn_avt0_m2_s),
         "domain_shape": np.shape(state.eta.data) == wet.shape,
