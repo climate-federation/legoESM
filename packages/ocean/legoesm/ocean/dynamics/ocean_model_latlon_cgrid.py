@@ -7200,7 +7200,11 @@ class LatLonCGridOceanModel:
             # identical to the FE path. Default 1 ⇒ every other caller unchanged.
             _nbaro = (_cfg_b.barotropic.n_barotropic_substeps
                       * _barotropic_substep_scale)
-            dt_s = dt_mom / _nbaro
+            dt_s = dt_mom / (
+                nemo_source_round(jnp.asarray(float(_nbaro)))
+                if _cfg_b.barotropic.barotropic_substep_dt_nemo_literal
+                else _nbaro
+            )
             # Under coriolis_scheme="explicit_ab2" the planetary Coriolis already
             # reaches the barotropic mode via F_slow (its depth-mean came through
             # du_dt), so the substep must NOT add its own f×U_bt — this is the
@@ -7833,8 +7837,14 @@ class LatLonCGridOceanModel:
             _h_live_one_third = h_k_old + (_h_live_new - h_k_old) / 3.0
             _h_live_one_half = 0.5 * (h_k_old + _h_live_new)
             _eta_live_one_third = (
-                state.eta.data
-                + (state_new.eta.data - state.eta.data) / 3.0)
+                nemo_source_round(
+                    nemo_source_round((2.0 / 3.0) * state.eta.data)
+                    + nemo_source_round((1.0 / 3.0) * state_new.eta.data)
+                )
+                if _cfg_b.rk3_stage1_ssh_nemo_literal
+                else state.eta.data
+                + (state_new.eta.data - state.eta.data) / 3.0
+            )
             _eta_live_one_half = 0.5 * (
                 state.eta.data + state_new.eta.data)
             _stage_entry_override = self._nemo_ws_test_hooks.stage_entry_override

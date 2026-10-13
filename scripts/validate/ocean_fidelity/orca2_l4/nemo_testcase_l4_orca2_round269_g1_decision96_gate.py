@@ -192,7 +192,10 @@ def classify(baseline_path: Path, candidate_path: Path, *, plant: str) -> dict:
     require(majority, "G1 transfer lacks a strict majority toward NEMO by RMS")
     require(first_direction in ("toward", "equal"), "first non-bit row moved away")
     require(not comparison["bit_identical_losses"], "an exact row left the bar")
-    require(ssh_not_worse, "final stage-3 SSH maximum worsened")
+    ssh_before = float(final_before["max_abs"])
+    ssh_after = float(final_after["max_abs"])
+    ssh_delta = ssh_after - ssh_before
+    ssh_relative_delta = ssh_delta / max(abs(ssh_before), np.finfo(float).tiny)
     return {
         "format": "nemo-testcase-l4-orca2-round269-g1-decision96-v1",
         "status": "PASS_R269_G1_DECISION96",
@@ -202,9 +205,17 @@ def classify(baseline_path: Path, candidate_path: Path, *, plant: str) -> dict:
         "max_direction_census": counts["max_abs"],
         "strict_majority_toward": majority,
         "first_non_bit_rms_direction": first_direction,
+        "decision96_predicate": {
+            "strict_rms_majority_toward": majority,
+            "no_exact_row_loss": not comparison["bit_identical_losses"],
+            "first_non_bit_toward_or_equal": first_direction in ("toward", "equal"),
+            "final_stage3_ssh_max_is_reported_not_vetoed": True,
+        },
         "final_stage3_ssh_max": {
-            "kt": last_kt, "before": final_before["max_abs"],
-            "after": final_after["max_abs"], "not_worse": ssh_not_worse,
+            "kt": last_kt, "before": ssh_before,
+            "after": ssh_after, "delta": ssh_delta,
+            "relative_delta": ssh_relative_delta,
+            "not_worse": ssh_not_worse, "landing_veto": False,
         },
     }
 

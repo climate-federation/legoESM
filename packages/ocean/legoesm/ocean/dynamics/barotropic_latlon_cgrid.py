@@ -602,11 +602,14 @@ def _nemo_ssh_avg_apply(eta_dyn, u_mask, v_mask, grid, area, prep, *,
                         return_literal_inverse=False,
                         return_ssh_average=False,
                         return_entry_inverse=False,
-                        nemo_t_pivot_north_neighbor=False):
+                        nemo_t_pivot_north_neighbor=False,
+                        fold_top_v_wet=None):
     """Apply the NEMO ssh-average face-depth formula at one ``eta`` snapshot,
     given the loop-invariant ``prep = _nemo_ssh_avg_prep(...)`` tuple.  See
     :func:`nemo_ssh_avg_face_depth` for the full formula docstring."""
     H_u_ref, H_v_ref, _r1_e1e2u, _r1_e1e2v, _nfold_mask = prep
+    v_mask, nemo_t_pivot_north_neighbor = _nemo_fold_top_v_operands(
+        v_mask, nemo_t_pivot_north_neighbor, fold_top_v_wet)
 
     area_w = jnp.roll(area, 1, axis=1)
     eta_w = jnp.roll(eta_dyn, 1, axis=1)
@@ -676,6 +679,8 @@ def _nemo_ssh_avg_apply(eta_dyn, u_mask, v_mask, grid, area, prep, *,
         nemo_source_round(r3_v_half_sum * r1_v0) * _r1_e1e2v))
     r1_v_entry = nemo_source_round(
         r1_v0 / nemo_source_round(1.0 + r3_v))
+    if return_entry_inverse == "with_ratio":
+        return H_u, H_v, r1_u_entry, r1_v_entry, r3_u, r3_v
     if return_entry_inverse:
         return H_u, H_v, r1_u_entry, r1_v_entry
     if return_literal_inverse:
@@ -1706,6 +1711,8 @@ def _nemo_flux_form_external_velocity_update(
     dt_s,
     wet_mask,
     min_water_col,
+    config=None,
+    substep_index=0,
 ):
     """NEMO key_qcoTest_FluxForm external-mode transport update.
 
@@ -1713,6 +1720,13 @@ def _nemo_flux_form_external_velocity_update(
     from NEMO 5.0.2 ``dynspg_ts.F90:731-761``.  It is deliberately not a
     selector: NEMO's WS-RK3 flux-form identity has no alternate composition.
     """
+    if (config is not None
+            and config.barotropic.barotropic_flux_update_nemo_literal):
+        return _nemo_flux_form_literal_velocity_update(
+            velocity_entry, depth_entry, depth_pgf, depth_midpoint,
+            depth_kmm, depth_exit, pgf, transport_tendency, slow_forcing,
+            dt_s, wet_mask, config, substep_index,
+        )
     return (
         depth_entry * velocity_entry
         + dt_s * (
@@ -1753,6 +1767,7 @@ def _run_substep_loop(
     nemo_external_mode_association_field_test_override="",
     nemo_external_mode_association_component_test_override="",
     nemo_t_pivot_north_neighbor_test_override=False,
+    nemo_fold_top_v_wet=None,
     return_boundary_association_trace=False,
 ):
     """The forward-backward substep loop (verbatim extraction).
@@ -1849,14 +1864,16 @@ def _run_substep_loop(
         return _nemo_ssh_avg_apply(
             eta_dyn, u_mask, v_mask, grid, area, _ssh_avg_prep,
             nemo_t_pivot_north_neighbor=(
-                nemo_t_pivot_north_neighbor_test_override))
+                nemo_t_pivot_north_neighbor_test_override),
+            fold_top_v_wet=nemo_fold_top_v_wet)
 
     def _ssh_avg_entry_inverse(eta_dyn):
         return _nemo_ssh_avg_apply(
             eta_dyn, u_mask, v_mask, grid, area, _ssh_avg_prep,
-            return_entry_inverse=True,
+            return_entry_inverse="with_ratio",
             nemo_t_pivot_north_neighbor=(
-                nemo_t_pivot_north_neighbor_test_override))[2:]
+                nemo_t_pivot_north_neighbor_test_override),
+            fold_top_v_wet=nemo_fold_top_v_wet)[2:]
 
     _nemo_flux_form_update = nemo_flux_form_update_active(config)
     # Harness-only causal arm.  This is deliberately absent from public
@@ -1869,9 +1886,14 @@ def _run_substep_loop(
             raise ValueError(
                 "NEMO WS-RK3 flux-form external update requires "
                 "barotropic_face_depth='nemo_ssh_avg'")
-        H_u_kmm, H_v_kmm = _ssh_avg_face_depths(eta)
+        H_u_kmm, H_v_kmm = _nemo_entry_face_depths(
+            config,
+            _ssh_avg_face_depths(eta),
+            _ssh_avg_prep,
+            _ssh_avg_entry_inverse(eta),
+        )
     if _face_depth_mode == "nemo_ssh_avg":
-        r1_H_u_entry, r1_H_v_entry = _ssh_avg_entry_inverse(eta)
+        r1_H_u_entry, r1_H_v_entry = _ssh_avg_entry_inverse(eta)[:2]
 
     def substep_body(wts_i, carry):
         """Single barotropic substep with BEBT, slow forcing, MAXVEL, and cosine filter.
@@ -1940,7 +1962,8 @@ def _run_substep_loop(
                 eta_c, u_mask, v_mask, grid, area, _ssh_avg_prep,
                 return_literal_inverse=True,
                 nemo_t_pivot_north_neighbor=(
-                    nemo_t_pivot_north_neighbor_test_override))
+                    nemo_t_pivot_north_neighbor_test_override),
+                fold_top_v_wet=nemo_fold_top_v_wet)
             r1_H_u = jnp.where(substep_index == 0, r1_H_u_entry, r1_H_u)
             r1_H_v = jnp.where(substep_index == 0, r1_H_v_entry, r1_H_v)
             if (nemo_external_mode_association_test_override
@@ -2211,7 +2234,7 @@ def _run_substep_loop(
             U_bar_new = _nemo_flux_form_external_velocity_update(
                 U_bar_c, H_u, H_u_pgf, H_u_flux, H_u_kmm, H_u_exit,
                 _pgf_u, _cor_u + _drag_u, F_slow_u_i, dt_s, u_mask,
-                min_water_col)
+                min_water_col, config, substep_index)
         else:
             if _continuity_evaluation == "nemo_literal":
                 _trd_u = nemo_source_round(
@@ -2263,7 +2286,7 @@ def _run_substep_loop(
             V_bar_new = _nemo_flux_form_external_velocity_update(
                 V_bar_c, H_v, H_v_pgf, H_v_flux, H_v_kmm, H_v_exit,
                 _pgf_v, _cor_v + _drag_v, F_slow_v_i, dt_s, v_mask,
-                min_water_col)
+                min_water_col, config, substep_index)
         else:
             if _continuity_evaluation == "nemo_literal":
                 _trd_v = nemo_source_round(
@@ -2343,7 +2366,8 @@ def _run_substep_loop(
                     eta_new, u_mask, v_mask, grid, area, _ssh_avg_prep,
                     return_literal_inverse=True,
                     nemo_t_pivot_north_neighbor=(
-                        nemo_t_pivot_north_neighbor_test_override))
+                        nemo_t_pivot_north_neighbor_test_override),
+                    fold_top_v_wet=nemo_fold_top_v_wet)
             else:
                 association_depths = _face_depths(
                     jnp.maximum(eta_new + H_bathy, min_water_col) * mask)
@@ -2440,7 +2464,8 @@ def _run_substep_loop(
                     eta_new, u_mask, v_mask, grid, area, _ssh_avg_prep,
                     return_literal_inverse=True, return_ssh_average=True,
                     nemo_t_pivot_north_neighbor=(
-                        nemo_t_pivot_north_neighbor_test_override))
+                        nemo_t_pivot_north_neighbor_test_override),
+                    fold_top_v_wet=nemo_fold_top_v_wet)
             else:
                 trace_depth_u_exit, trace_depth_v_exit = _face_depths(
                     jnp.maximum(eta_new + H_bathy, min_water_col) * mask)
@@ -3485,6 +3510,8 @@ def barotropic_substeps_latlon_cgrid(
             _nemo_external_mode_association_component_test_override),
         nemo_t_pivot_north_neighbor_test_override=(
             _nemo_t_pivot_north_neighbor_test_override),
+        nemo_fold_top_v_wet=_nemo_fold_top_v_wet(
+            config, z_coord, eta.dtype),
         return_boundary_association_trace=(
             _nemo_boundary_association_trace_test_hook),
     )
@@ -3527,7 +3554,9 @@ def barotropic_substeps_latlon_cgrid(
                 _H_u_primary, _H_v_primary = _nemo_ssh_avg_apply(
                     eta_avg, u_mask, v_mask, grid, _area,
                     _nemo_ssh_avg_prep(H_bathy, mask, grid, _dt,
-                                       north_fold_mask(grid)))
+                                       north_fold_mask(grid)),
+                    fold_top_v_wet=_nemo_fold_top_v_wet(
+                        config, z_coord, eta.dtype))
             else:
                 _H_primary = jnp.maximum(
                     eta_avg + H_bathy, min_water_col) * mask
@@ -4053,3 +4082,83 @@ def nemo_literal_midpoint_extrapolation(
         coefficients[2] * nemo_source_round(before_before))
     value = nemo_source_round(first + second)
     return nemo_source_round(value + third)
+
+
+def _nemo_fold_top_v_wet(config, z_coord, dtype):
+    """Return NEMO's wet surface mask on the fold-image V row when selected."""
+    if (config.barotropic.barotropic_flux_update_nemo_literal
+            and not nemo_flux_form_update_active(config)):
+        raise ValueError(
+            "barotropic_flux_update_nemo_literal=True needs NEMO's "
+            "flux-form external update")
+    if (config.barotropic.barotropic_entry_depth_nemo_literal
+            and not config.barotropic.barotropic_flux_update_nemo_literal):
+        raise ValueError(
+            "barotropic_entry_depth_nemo_literal=True is read only by the "
+            "literal flux-form update")
+    if not config.barotropic.barotropic_fold_top_v_face_ssh:
+        return None
+    raw = getattr(z_coord, "nemo_een_barotropic", None)
+    if raw is None:
+        raise ValueError(
+            "barotropic_fold_top_v_face_ssh=True needs raw NEMO vmask "
+            "in z_coord.nemo_een_barotropic")
+    return jnp.max(jnp.asarray(raw.vmask, dtype=dtype)[-1], axis=-1)
+
+
+def _nemo_fold_top_v_operands(
+    v_mask, t_pivot_north_neighbor, fold_top_v_wet,
+):
+    """Select the two fold operands of NEMO ``zhvp2_e`` / ``zsshv_a``.
+
+    On the fold-image V row, dynspg_ts.f90:419-421 evaluates the live face
+    depth with NEMO's wet ``ssvmask`` and the T fold halo as its north
+    neighbour. Disabled returns the legacy operands unchanged.
+    """
+    if fold_top_v_wet is None:
+        return v_mask, t_pivot_north_neighbor
+    return v_mask.at[-1].set(fold_top_v_wet.astype(v_mask.dtype)), True
+
+
+def _nemo_flux_form_literal_velocity_update(
+    velocity_entry,
+    depth_entry,
+    depth_pgf,
+    depth_midpoint,
+    depth_kmm,
+    depth_exit,
+    pgf,
+    transport_tendency,
+    slow_forcing,
+    dt_s,
+    wet_mask,
+    config,
+    substep_index,
+):
+    """NEMO's flux-form velocity update in written source order.
+
+    ``dynspg_ts.f90:557-568`` multiplies the bracket by the mask-safe inverse
+    exit depth. The first substep reads ``hu_e/hv_e`` at Kmm (:329-330).
+    """
+    r = nemo_source_round
+    if config.barotropic.barotropic_entry_depth_nemo_literal:
+        depth_entry = jnp.where(substep_index == 0, depth_kmm, depth_entry)
+    inverse_exit = r(wet_mask / r(r(depth_exit + 1.0) - wet_mask))
+    forced = r(
+        r(r(depth_pgf * pgf) + r(depth_midpoint * transport_tendency))
+        + r(depth_kmm * slow_forcing)
+    )
+    return r(
+        r(r(depth_entry * velocity_entry) + r(dt_s * forced)) * inverse_exit
+    )
+
+
+def _nemo_entry_face_depths(config, summed, prep, entry):
+    """Select NEMO's loop-entry ``hu_0/hv_0 * (1 + r3(Kmm))``."""
+    if not config.barotropic.barotropic_entry_depth_nemo_literal:
+        return summed
+    r = nemo_source_round
+    return (
+        r(prep[0] * r(1.0 + entry[2])),
+        r(prep[1] * r(1.0 + entry[3])),
+    )
