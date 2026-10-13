@@ -133,8 +133,8 @@ rerun. The complete 6,840-line log is
 `0285fb94a150c526ba9cc6088c5aed81138bf569ff2caea7e6fdc94d1f5d1ddb`).
 
 The round receipt citation gate passes **7/7** citations with zero failures,
-zero unmapped citations and a clean map audit. Its shifted
-`dynspg_ts.f90:1077` plant fires. The cumulative default receipt passes
+zero unmapped citations and a clean map audit. Its shifted line-1077
+`dynspg_ts.f90` plant fires. The cumulative default receipt passes
 **274/274** with the same zero-failure/zero-unmapped result.
 
 The required separate `codex exec --sandbox read-only` review was attempted,
