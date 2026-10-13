@@ -2,91 +2,170 @@
 
 Date: 2026-10-13
 
-Status: round-1 data/model interface frozen; neural implementation begins in
-round 2. The learned term closes only the 6.25-to-50 km resolution gap. It does
-not compensate a legoESM/NEMO mismatch.
+Status: **reference and target definition only**. No network, optimizer, or
+closure implementation is authorized until the balanced-start acquisition,
+stationarity assessment, and 3.125 km reference-adequacy gate close. The learned
+term closes only the resolution gap. It may not compensate a legoESM/NEMO gap.
 
-## Resolved model and forcing seam
+## Fixed physical model and target convention
 
-The coarse deck is the parameterized NEMO-faithful SWG card with `nn_SWG=2`,
-50 km spacing, `rn_Dt=400 s`, and all fine-deck physics unchanged. The fine
-and coarse gravity-wave Courant number is
-`sqrt(9.80665 * 500) * dt / dx = 0.56019` per axis. NEMO's executed SWE RK3
-uses `rn_Dt/3`, `rn_Dt/2`, and `rn_Dt` and the live pressure-gradient
-acceleration `-grav * delta(ssh) / e1,e2`
-(`SWG_DG/BLD/ppsrc/nemo/stprk3.f90:140-171`,
-`SWG_DG/BLD/ppsrc/nemo/stprk3.f90:196-227`, and
-`SWG_DG/BLD/ppsrc/nemo/stprk3.f90:252-290`),
-so scaling `dt` with `dx` preserves its explicit gravity-wave stability
-number. NEMO's velocity-Courant diagnostic independently defines
-`Cu=abs(u)*rDt/e1u`, `Cv=abs(v)*rDt/e2v`
-(`SWG_DG/BLD/ppsrc/nemo/diacfl.f90:74-97`).
+The training model is the NEMO-certified `dg50` card: 50 km, 400 s,
+500 m, full gravity `g=9.80665 m s-2`, and an explicit free surface. The
+per-axis gravity-wave Courant number is 0.560190, and the two-dimensional RK3
+imaginary argument is 1.58446, below `sqrt(3)`. The training model remains
+`nu=10 m2 s-1`; `nu=80 m2 s-1` is a separate grid-Reynolds control, never a
+silent replacement.
 
-Round 2 will add an optional pure-pytree momentum-acceleration argument to the
-certified `swe_rk3_step`/stage path. Native U acceleration is added to the U
-RHS and native V acceleration to the V RHS at every RK stage, after the
-resolved physical terms and before the velocity update. `None` selects the
-current expression without adding or reassociating any operation; the
-unchanged-card digest and complete NEMO ladder must therefore remain
-bit-identical. The closure is passed as an explicit per-window argument, not
-captured in a JIT closure, following the repository's `SegmentForcing`
-doctrine. The steady analytic wind remains a separate explicit forcing input.
+The state target is the conservative restriction in `swg_coarse_graining.py`:
+sum fine T-cell volumes into each coarse T cell and sum `e2*h*u` or `e1*h*v`
+over the fine faces tiling each coarse face, then diagnose coarse SSH and face
+velocity using the coarse live QCO thickness. There is no component-mean
+restoration. The real day-1095 continuity residual is `4.520e-18 m s-1`
+interior and `2.887e-18 m s-1` in the outer four cells. The round-1
+independent-state Gaussian remains a labelled diagnostic and is forbidden as a
+training target.
 
-## Closure pytree
+Gaussian smoothing is optional only for the derived, already restricted
+relative-vorticity target. It uses reflecting closed walls and `sigma=1`
+coarse cell; `sigma` is the standard deviation, not an unspecified “width.”
+This matches Maddison's convention, which says “width (specifically a standard
+deviation) of 62.5 km,” while changing the state restriction to the
+continuity-conserving operator required by this free-surface C grid. Maddison
+filtered instantaneous relative vorticity, then subsampled; he did not
+independently filter face velocities. See
+[Maddison (2026), sections 2.3 and 2.4](https://agupubs.onlinelibrary.wiley.com/doi/full/10.1029/2024MS004883).
 
-The deterministic closure is an Equinox module. Inputs are coarse native
-T-point SSH, U-face velocity, V-face velocity, their wet masks, fixed metric
-coordinates, and an optional fixed-shape noise field. Outputs are U- and
-V-face accelerations in m s-2, multiplied by their native masks. Deterministic
-training supplies a zero noise field; the same call signature admits sampled
-noise in phase 6 without changing the solver seam. Static masks/metrics are not
-trainable leaves. Every trainable leaf must have a finite, nonzero loss
-gradient under `legoesm.training.inert_params.assert_no_inert_over`; an inert
-leaf aborts before optimization.
+The reference is not yet adequate or stationary. At 6.25 km the Munk width has
+1.27 cells; restricted daily-mean truth gives consecutive annual mean-velocity
+differences of 0.04765 and 0.04203 m s-1 for years 1-to-2 and 2-to-3. A 3.125 km
+sensitivity is therefore mandatory. On the common 50 km grid, each common year
+must agree within 10% in basin KE, basin EKE, jet-position RMSE divided by basin
+width, and KE-spectrum relative L1 error. Any failed yearly score makes
+reference adequacy a user decision. Train/validation/test dates are frozen only
+after adequate, stationary years exist; splits are chronological and no start
+window may cross a split boundary.
 
-## Swappable objective and curriculum
+## Initialization and hourly observations
 
-The deterministic objective is the equal mean of three variance-normalized,
-native-stagger, wet-area MSEs for SSH, U, and V. Targets are filtered daily
-snapshots; the loss scores every daily endpoint within the trajectory window,
-including the final endpoint. Normalization variances come only from the
-training split and are frozen in the run manifest. The loss is a callable
-argument, so phase 6 can replace it with an ensemble energy score without
-changing closure or rollout APIs.
+Ten starts are fixed at fine days 731, 771, ..., 1091. Each supplies a four-day
+hourly segment restricted inside the compiled fine-model scan, retaining only
+coarse T/U/V arrays. A restarted segment must reproduce the uninterrupted next
+fine daily state bit-for-bit under the same fp64/native policy. Maddison's loss
+has “`M=24w` hourly outputs”; this lane likewise scores 24, 48, 96, or 192
+right-endpoint observations for 1, 2, 4, or 8 days.
 
-The fixed curriculum is 1, 2, 4, 8, 16, 32, and 60 days. Each stage begins
-from the preceding stage's selected checkpoint; validation selects by the same
-trajectory loss on held-out start dates. Optimizer construction must use
-`legoesm.ml.training.create_optimizer`; learning rate, warmup, batch/start-date
-sampling, and split dates remain round-2 preregistration items rather than
-hidden defaults.
+Before training, every start receives paired 48-hour no-network dg50 forecasts
+from the old raw-filtered state and the conservative state. At hours 6, 24, and
+48 the deciding statistic is
 
-Uniform per-production-step checkpointing is the default: the gradient gate
-measured a 1440-step GPU reverse pass at 2.45 s and about 0.5 GB, versus 4.2 s
-/ 15.5 GB without checkpointing and 6.2 s / 0.37 GB binomial. The training
-rollout must preserve the production step boundary used by that gate and may
-not substitute the last-bit-different compiled-day scan.
+`RMS(zeta_raw - zeta_conservative) / RMS(zeta_conservative - zeta_target)`.
 
-## Pre-registered phase-5 gates
+The instrument also reports divergent kinetic energy, hourly SSH-tendency RMS,
+and vorticity error. The conservative start is admitted only if this ratio is
+at most 0.1 at all three leads for at least 8 of 10 starts and it does not have
+larger median divergent energy than the raw start. Otherwise training remains
+blocked while a rotational/geostrophic adjustment is designed and measured.
+Raw-filtered initialization is never an allowed fallback.
 
-Each trained window gets a 20-year free run from the same initial state and
-steady wind. Stability requires every saved field finite, positive total layer
-thickness, and native advective `Cu,Cv < 1` at every daily save. A failed run is
-reported as failed, never clipped, damped, or shortened.
+## Closure seam and pytree contract
 
-Climate scoring uses identical windows and the round-1 instrument. For mean
-transport, the learned run must lie within the closed interval joining the
-no-closure result and filtered truth. For the basin kinetic-energy spectrum,
-its area under absolute log-spectrum error over mutually resolved nonzero
-wavenumbers must be smaller than the no-closure error. EKE maps, basin EKE,
-jet position, time-mean SSH, learned energy forcing, offline-versus-online
-skill, and the rotated/stronger/mirrored cases are reported without moving
-these two preregistered gates.
+The closure is an Equinox module producing one scalar potential on native
+F points. The card applies the matched rotated gradient to form native U/V
+accelerations at **every RK3 stage**. The same F-point potential is constant on
+the closed boundary, so wall-normal force is zero; the discrete divergence of
+the volume-force transport is roundoff zero. The seam is a pure pytree term
+inside the certified step. If the closure argument is absent, no addition or
+reassociation occurs, preserving the certified card byte-for-byte.
 
-## Stochastic hooks
+Inputs are coarse SSH, native U/V velocity, masks and metrics as static leaves,
+an explicit RNG key, and a fixed-shape noise pytree. Outputs are the F-point
+potential plus named diagnostics; U/V acceleration is derived, not independently
+predicted. Deterministic calls pass a documented zero-noise array. The closure
+is passed through the training segment as an explicit argument, never captured
+by JIT. The steady wind is also an explicit `SegmentForcing` input and is not
+closed over.
 
-The closure call always accepts noise, the rollout accepts a per-step/per-member
-noise pytree as an explicit argument, and the objective interface accepts one
-or more trajectories. No deterministic parameter is duplicated for the
-stochastic branch. Phase 6 will preregister the noise law, ensemble size, and
-energy-score weighting before any stochastic training.
+Before an optimizer exists, synthetic tests must fail on planted violations of
+F-to-U/V staggering, zero wall-normal force, divergence, integrated momentum,
+absence-is-exactly-zero, and JVP/finite-difference agreement. Static masks and
+metrics are not trainable. Every trainable leaf must have a finite nonzero loss
+gradient under the repository's no-inert-parameter gate.
+
+## Loss, rollout, and curriculum
+
+The deterministic point loss is swappable and ensemble-aware from its first
+version. Given `(members, hours, fields)`, the point-loss implementation uses
+one member and the energy-score implementation requires `S >= 2`. The balanced
+point loss is the equal mean of training-split-variance-normalized, wet-area
+L2 errors in Gaussian-smoothed relative vorticity and the two components of the
+Dirichlet-streamfunction rotational velocity. Raw SSH is a monitored fast-mode
+diagnostic, not a fitted field. Hourly weights are uniform, and spatial weights
+are native wet areas. Normalizers are derived only from the training split and
+content-pinned in the run manifest.
+
+The first curriculum is exactly 1, 2, 4, and 8 days. A selected checkpoint
+initializes the next window. No 16, 32, or 60-day deterministic stage is
+authorized until the real network, batch, loss, and optimizer have been
+profiled. For scale, 60 days is 12,960 coarse steps and projects to about
+22.1 s and 4.49 GiB per sample under uniform checkpointing, beyond the measured
+10.4248-day provisional e-folding time. Uniform production-step checkpointing
+is the default; alternatives require a measured memory/time receipt.
+
+Optimizer construction must use `legoesm.ml.training.create_optimizer`.
+Learning rate, warmup, batch size, start sampler, split dates, architecture,
+and parameter count are explicit manifest fields, not defaults. The
+truth-generation day scan and training segment loop are distinct named
+compositions. With zero closure, 4-day and 8-day runs from the same coarse state
+must match bit-for-bit in native T/U/V at every common hourly endpoint. A
+failure blocks training rather than widening a tolerance.
+
+## Controls and held-out gates
+
+Both no-closure controls (`nu=10` Maddison replication and `nu=80`
+grid-Reynolds control) use the same evaluation harness. The `nu=80` control
+requires a finite, positive-thickness, sub-unit-Courant 30-day preflight before
+its 20-year CPU run. Reports are yearly, map scores use wet cells only, and
+health includes radial top-octave KE/enstrophy fractions and a native
+checkerboard index. Years 2–3 are currently the least-confounded exploratory
+window, not an equilibrated claim.
+
+Each trained window has at least three network seeds and a 20-year free run.
+Every seed must remain finite with positive thickness and `Cu,Cv < 1`. On the
+held-out years, the median seed must beat the **better** of the two controls in
+mean-transport absolute error, KE-spectrum relative L1 error, and wet-cell EKE
+map normalized RMSE. Every seed must retain basin EKE within 20% of filtered
+truth and must not exceed the worse control's top-octave fractions or
+checkerboard index. Confidence intervals and raw seed scores are reported; a
+median alone cannot hide an unstable seed.
+
+Two adversarial controls are mandatory. Replacing every time-varying anomaly
+by its time mean must fail the EKE-retention gate (collapsed variance).
+Adding a native two-cell checkerboard calibrated above the worse control must
+fail spectral health. A gate release that lets either plant pass is itself a
+failed gate. Mean transport merely lying between a baseline and truth is not
+an acceptance criterion.
+
+## Stochastic branch
+
+The rollout API always carries an explicit RNG key and member-indexed noise
+pytree. The loss API accepts `S` trajectories and dispatches between point loss
+and energy score without changing solver or closure signatures. Energy-score
+training requires `S >= 2`; member RNG streams are folded by step and member.
+There is no inactive trainable “noise parameter” in deterministic mode: noise
+scale is either static zero or an active trainable leaf that must pass the
+no-inert-parameter gate. Collapsed ensemble variance is a planted failure.
+
+## Review requirements and enforcement
+
+| # | Required change | Design answer | Enforcing test or measurement |
+|---|---|---|---|
+| 1 | Conservative, balanced initialization | Exact volume/face-transport restriction; raw state forbidden | Real continuity audit plus ten-start 6/24/48 h shock ratio |
+| 2 | Hourly targets | 24 right-endpoint restricted samples/day, no fine-state storage | Ten four-day caches; restart-next-day bitwise gate |
+| 3 | Adequate stationary reference | Stationarity scan and 3.125 km sensitivity before splits | Four yearly <=10% adequacy scores; annual velocity-difference report |
+| 4 | Balanced predictability | Smooth zero-divergence vorticity perturbation, two amplitudes, JVP | 120-day twins and registered balanced fit rule |
+| 5 | Cap curriculum | Initial windows 1/2/4/8 days only | Network-inclusive profile required before 16/32/60 days |
+| 6 | Non-divergent forcing | F-potential rotated gradient at every RK3 stage | Divergence, walls, momentum, zero seam, JVP/FD plants |
+| 7 | Viscosity controls | `nu=10` and `nu=80` are separate named controls | 30-day preflight, then identical 20-year health/climate harness |
+| 8 | Structural stochastic hook | Explicit RNG/noise and ensemble-aware swappable loss, `S>=2` | API shape tests, RNG independence, inert-noise and collapse plants |
+| 9 | Quantitative multi-seed gates | Three seeds; beat best control; variability and noise bounds | Held-out harness plus collapsed-variance/grid-noise failures |
+| 10 | Correct physics and composition | Full-gravity explicit free surface; named truth/training loops | Zero-closure 4/8-day bitwise A/B and manifest composition fields |

@@ -51,7 +51,8 @@ def test_gaussian_attenuates_plane_wave_by_analytic_factor():
     assert np.isclose(measured, expected, rtol=2.0e-5, atol=2.0e-5)
 
 
-def test_round1_diagnostic_is_explicitly_distinct_from_conservative_target():
+def test_round1_diagnostic_is_explicitly_distinct_from_conservative_target(
+        monkeypatch):
     source = coarse.cgrid_geometry(SWG_MADDISON_NAMELIST)
     target = coarse.cgrid_geometry(SWG_DG50_NAMELIST)
     rng = np.random.default_rng(2)
@@ -70,13 +71,21 @@ def test_round1_diagnostic_is_explicitly_distinct_from_conservative_target():
         gaussian_length_m=float(target["spacing_m"]))
     conservative = coarse.conservative_restrict_cgrid(fields, source, target)
     for kind in ("T", "U", "V"):
-        source_mean = np.mean(fields[kind][source["mask"][kind]], dtype=np.float64)
-        target_mean = np.mean(
-            diagnostic[kind][target["mask"][kind]], dtype=np.float64)
-        assert np.isclose(source_mean, target_mean, rtol=0.0, atol=5.0e-16)
         assert np.all(diagnostic[kind][~target["mask"][kind]] == 0.0)
     assert any(not np.array_equal(diagnostic[kind], conservative[kind])
                for kind in ("T", "U", "V"))
+    # Removing the round-1 mean patch must measurably change the diagnostic;
+    # this proves the test does not merely assert a value forced by the code.
+    monkeypatch.setattr(
+        coarse, "_restore_mean",
+        lambda field, mask, area, target_mean: np.where(mask, field, 0.0))
+    unpatched = coarse.coarse_grain_cgrid(
+        fields, source, target,
+        gaussian_length_m=float(target["spacing_m"]))
+    assert any(
+        abs(np.mean(diagnostic[kind][target["mask"][kind]])
+            - np.mean(unpatched[kind][target["mask"][kind]])) > 1.0e-8
+        for kind in ("T", "U", "V"))
 
 
 def _synthetic_state(source, seed=8):

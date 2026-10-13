@@ -445,10 +445,7 @@ def diagnose(provider: DailyProvider, *, days: int, card=None, namelist=None,
              geometry: dict | None = None) -> dict[str, np.ndarray]:
     """Compute the frozen Round-4 metrics in two streaming passes."""
     import jax.numpy as jnp
-    from legoesm.ocean.diagnostics import (
-        isotropic_energy_spectrum,
-        isotropic_enstrophy_spectrum,
-    )
+    from legoesm.ocean.diagnostics import isotropic_energy_spectrum
     from legoesm.ocean.fidelity.nemo_testcase_recipe import (
         SWG_MADDISON_NAMELIST,
         build_swg_card,
@@ -488,7 +485,6 @@ def diagnose(provider: DailyProvider, *, days: int, card=None, namelist=None,
     sum_speed = np.zeros(wet.shape, dtype=np.float64)
     ke_series = np.empty(days, dtype=np.float64)
     spectrum_sum = None
-    enstrophy_spectrum_sum = None
     wavenumber = None
     checkerboard = np.empty(days, dtype=np.float64)
     min_thickness = np.empty(days, dtype=np.float64) if card is not None else None
@@ -526,17 +522,6 @@ def diagnose(provider: DailyProvider, *, days: int, card=None, namelist=None,
         spectrum_sum += spectrum
         u_box = frame.u[j0:j1, i0:i1]
         v_box = frame.v[j0:j1, i0:i1]
-        zeta = (np.gradient(v_box, spacing, axis=1)
-                - np.gradient(u_box, spacing, axis=0))
-        k_zeta, enstrophy_spectrum = isotropic_enstrophy_spectrum(
-            jnp.asarray(zeta), spacing)
-        k_zeta = np.asarray(k_zeta)
-        enstrophy_spectrum = np.asarray(enstrophy_spectrum)
-        require(np.array_equal(k_zeta, wavenumber),
-                "KE and enstrophy wavenumbers differ")
-        if enstrophy_spectrum_sum is None:
-            enstrophy_spectrum_sum = np.zeros_like(enstrophy_spectrum)
-        enstrophy_spectrum_sum += enstrophy_spectrum
         checkerboard[index] = checkerboard_index(u_box, v_box)
     require(index + 1 == days, f"{provider.name}: daily sequence ended early")
     mean_ssh = sum_ssh / days
@@ -544,7 +529,10 @@ def diagnose(provider: DailyProvider, *, days: int, card=None, namelist=None,
     mean_v = sum_v / days
     mean_speed = sum_speed / days
     mean_ke_spectrum = spectrum_sum / days
-    mean_enstrophy_spectrum = enstrophy_spectrum_sum / days
+    # For a 2-D rotational flow, shell enstrophy is k^2 times shell KE.  This
+    # is the radial diagnostic used by the round-1 review (rather than a second
+    # FFT of a boundary-sensitive finite-difference vorticity).
+    mean_enstrophy_spectrum = wavenumber ** 2 * mean_ke_spectrum
     top_octave = wavenumber >= 0.5 * np.max(wavenumber)
     resolved = wavenumber > 0.0
     ke_spectral_total = np.sum(mean_ke_spectrum[resolved], dtype=np.float64)

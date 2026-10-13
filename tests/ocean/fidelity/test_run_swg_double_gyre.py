@@ -84,8 +84,10 @@ def test_tiny_cpu_driver_writes_daily_native_state_with_provenance(tmp_path):
     assert manifest["scan_vs_python"] is None
     assert manifest["numerical_health"]["all_finite"]
     assert manifest["numerical_health"]["minimum_total_layer_thickness_m"] > 0.0
-    assert manifest["numerical_health"]["maximum_u_courant"] >= 0.0
-    assert manifest["numerical_health"]["maximum_v_courant"] >= 0.0
+    # This zero-wind/rest control must remain exactly zero; a sign/abs
+    # tautology would also pass a broken nonzero diagnostic.
+    assert manifest["numerical_health"]["maximum_u_courant"] == 0.0
+    assert manifest["numerical_health"]["maximum_v_courant"] == 0.0
     saved_manifest = json.loads((output / "manifest.json").read_text())
     assert saved_manifest["steps_per_day"] == 2
     assert not (output / "manifest.pending.json").exists()
@@ -143,8 +145,12 @@ def test_scanned_program_matches_nontrivial_python_steps_on_tiny_grid():
 
     differences = driver.prognostic_differences(python_state, scan_state)
     assert differences["within_atol"], json.dumps(differences, sort_keys=True)
-    assert differences["atol"] == 1.0e-12
+    assert differences["atol"] == 1.0e-15
     assert np.any(np.asarray(python_state.u.data) != 0.0)
+    planted = scan_state._replace(eta=scan_state.eta.replace(
+        data=scan_state.eta.data + 2.0e-15))
+    assert not driver.prognostic_differences(
+        python_state, planted)["within_atol"]
 
 
 def test_compiled_day_mean_matches_post_step_production_states_on_tiny_grid():
