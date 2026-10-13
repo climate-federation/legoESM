@@ -13351,10 +13351,16 @@ class ModelDriver:
         # (Imported here: the later function-local import makes the name local
         # to this whole function.)
         from legoesm.forcing.time_utils import daily_forcing_bucket
-        if start_step > 0 and n_steps_total > 0 and _ext_forcing and (
-                daily_forcing_bucket(_DAY_ORIGIN + start_step * DT / 86400.0)
+
+        def _mid_forcing_day(abs_step):
+            """Daily external forcing is on and ``abs_step`` opens no new
+            forcing-day bucket: a resume there is not bitwise (D-REX-3)."""
+            return _ext_forcing and (
+                daily_forcing_bucket(_DAY_ORIGIN + abs_step * DT / 86400.0)
                 == daily_forcing_bucket(
-                    _DAY_ORIGIN + (start_step - 1) * DT / 86400.0)):
+                    _DAY_ORIGIN + (abs_step - 1) * DT / 86400.0))
+        if start_step > 0 and n_steps_total > 0 and _mid_forcing_day(
+                start_step):
             raise ValueError(
                 f"restart at step {start_step} (day "
                 f"{_DAY_ORIGIN + start_step * DT / 86400.0!r}) is not on a "
@@ -15003,10 +15009,26 @@ class ModelDriver:
         # the last loop step already hit the periodic cadence, which would
         # re-write the identical file (wasted device→host transfer + I/O
         # every whole-multiple job boundary).
+        # (c) when daily external forcing is on and the run ends mid-day
+        # (user 2026-10-13): D-REX-3 refuses to resume such a checkpoint, and
+        # its name would overwrite (or pose as) a whole-day one, so the chain
+        # resumes from the last whole-day checkpoint instead.
         if (CHECKPOINT_INTERVAL > 0 and run_status == "COMPLETED"
                 and n_steps_total % CHECKPOINT_INTERVAL != 0):
             _final_day = START_DAY + n_steps_total * DT / 86400.0
-            self.save_checkpoint(start_step + n_steps_total, _final_day)
+            if _mid_forcing_day(start_step + n_steps_total):
+                _msg = (
+                    f"run ended mid-day (step {start_step + n_steps_total}, "
+                    f"day {_final_day!r}) with daily external forcing "
+                    "(ozone/aerosol) active: the final partial-day state was "
+                    "NOT checkpointed; resumption must start from the last "
+                    "whole-day checkpoint (this run wrote none if it was "
+                    "shorter than one checkpoint interval, "
+                    f"{CHECKPOINT_INTERVAL} steps).")
+                logger.warning(_msg)
+                print(f"WARNING: {_msg}", file=sys.stderr)
+            else:
+                self.save_checkpoint(start_step + n_steps_total, _final_day)
 
         elapsed = time.time() - t_start
         logger.info(f"MPAS run {run_status} in {elapsed:.1f}s")

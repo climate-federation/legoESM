@@ -323,14 +323,30 @@ def test_mpas_restart_refuses_a_start_day_the_saved_origin_does_not_imply(
     assert _drive(dC.run, start_step=step, start_day=day + 1.0) == "COMPLETED"
 
 
+def test_mpas_mid_day_end_without_daily_forcing_still_checkpoints(
+        tmp_path, monkeypatch, capsys):
+    """Daily external forcing OFF (gray radiation): a run ending mid-day
+    (step 2 at 300 s) still writes its final checkpoint, unwarned."""
+    d = _mpas_continuous(tmp_path, "a", TWO_STEPS_DAYS, monkeypatch)
+    _require(d.config.radiation == "gray" and not d.config.nc_from_aerosol,
+             "daily external forcing would be on")
+    ckpts = sorted((tmp_path / "a").glob("checkpoint_day_*.npz"))
+    assert len(ckpts) == 1
+    with np.load(ckpts[0]) as z:
+        assert int(z["step"]) == 2
+    assert "NOT checkpointed" not in capsys.readouterr().err
+
+
 @pytest.mark.slow
 @pytest.mark.usefixtures("allow_version_drift")  # hand-built checkpoints, no manifest beside them
 def test_duo_daily_external_forcing_restart_needs_a_day_boundary(
-        tmp_path, monkeypatch):
+        tmp_path, monkeypatch, capsys):
     """D-REX-3, FV3-duo column lane, RRTMGP every 4 steps, the daily
-    external-ozone cache on: the whole-day checkpoint (step 144 at 600 s)
-    still resumes bitwise; the mid-day final checkpoint of a 148-step run
-    (step 148) is refused before any step, naming the step -- also with its
+    external-ozone cache on.  A 148-step run (600 s) ends mid-day: its final
+    checkpoint is NOT written (it would overwrite the whole-day one under the
+    same name), a warning says so, and the whole-day checkpoint (step 144)
+    survives and resumes bitwise.  A mid-day checkpoint (written by hand at
+    step 148) is refused before any step, naming the step -- also with its
     forcing-clock origin stripped (origin reconstructed from the start day)."""
     from legoesm.driver.model_driver import ModelDriver
     monkeypatch.setenv("LEGOESM_DIGEST_EVERY_STEPS", "1")
@@ -348,27 +364,37 @@ def test_duo_daily_external_forcing_restart_needs_a_day_boundary(
         _require(drv._ozone_ext_active, "external ozone not active")
         return drv, d
 
-    for name, n in (("a", 144), ("c", 148)):
-        _require(_drive(build(name, n)[0].run) == "COMPLETED", name)
+    dC, _ = build("c", 148)
+    capsys.readouterr()
+    _require(_drive(dC.run) == "COMPLETED", "c")
+    whole = tmp_path / "c" / "checkpoint_day_0001.npz"
+    assert sorted((tmp_path / "c").glob("checkpoint_day_*.npz")) == [whole]
+    with np.load(whole) as z:
+        assert int(z["step"]) == 144
+    assert "final partial-day state was NOT checkpointed" in \
+        capsys.readouterr().err
     dB, d = build("b", 4)
-    step, day = _drive(dB.load_checkpoint,
-                       tmp_path / "a" / "checkpoint_day_0001.npz")
+    step, day = _drive(dB.load_checkpoint, whole)
     _require(step == 144, step)
     _require(_drive(dB.run, start_step=step, start_day=day) == "COMPLETED",
              "b")
     steps, bad = _restarted_vs_continuous(tmp_path / "c", step, d)
     _require(steps == [145, 146, 147, 148], steps)
     assert not bad, _mismatch(tmp_path / "c", d, bad[0])
+    # The mid-day checkpoint the run no longer writes, from its end state.
+    dC._output_dir = tmp_path / "mid"
+    dC._output_dir.mkdir()
+    _drive(dC.save_checkpoint, 148, dC.config.start_day + 148 * 600.0 / 86400.0)
+    mid = tmp_path / "mid" / "checkpoint_day_0001.npz"
     dM, _ = build("m", 4)
-    step, day = _drive(dM.load_checkpoint,
-                       tmp_path / "c" / "checkpoint_day_0001.npz")
+    step, day = _drive(dM.load_checkpoint, mid)
     _require(step == 148, step)
     with pytest.raises(ValueError, match="restart at step 148 .* not on a "
                        "day boundary while daily external forcing"):
         dM.run(start_step=step, start_day=day)
     legacy = tmp_path / "legacy" / "checkpoint_day_0001.npz"
     legacy.parent.mkdir()
-    with np.load(tmp_path / "c" / "checkpoint_day_0001.npz") as z:
+    with np.load(mid) as z:
         np.savez(legacy, **{k: z[k] for k in z.files
                             if k != "clock_day_origin"})
     dN, _ = build("n", 4)
