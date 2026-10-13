@@ -313,7 +313,7 @@ def test_composition_summary_keeps_exact_and_numerical_counts_separate():
         "rows_within_1e-15": 2,
         "maximum_absolute_difference": 2.0e-15,
         "first_day_not_bit_identical": 1,
-        "first_day_over_1e-15": 1,
+        "first_day_over_1e-15": 2,
     }
     with pytest.raises(ValueError, match="unknown month composition"):
         lad.month_composition(Path("unused"), composition="nested",

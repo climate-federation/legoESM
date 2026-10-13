@@ -1016,6 +1016,11 @@ def _composition_summary(out: dict) -> dict:
     first_day_off = next(
         (day["day"] for day in out["per_kt"]
          if any(not row["bit_identical"] for row in day["rows"])), None)
+    first_day_over_numerical_bar = next(
+        (day["day"] for day in out["per_kt"]
+         if any(row["status"] == "DEBT"
+                and row.get("numerical_status") != "AT-BAR"
+                for row in day["rows"])), None)
     return {
         "rows": len(rows),
         "exact_rows": sum(row["bit_identical"] for row in rows),
@@ -1025,7 +1030,7 @@ def _composition_summary(out: dict) -> dict:
             for row in rows),
         "maximum_absolute_difference": max(row["max_abs"] for row in rows),
         "first_day_not_bit_identical": first_day_off,
-        "first_day_over_1e-15": out["first_day_over_bar"],
+        "first_day_over_1e-15": first_day_over_numerical_bar,
     }
 
 
