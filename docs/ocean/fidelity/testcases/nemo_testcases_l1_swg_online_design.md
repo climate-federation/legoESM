@@ -2,11 +2,12 @@
 
 Date: 2026-10-13
 
-Status: **pre-training gates built; optimization held**. One real CPU optimizer
-step is a seam test, not training. The conservative start is admitted; the
-3.125 km adequacy acquisition and corrected GPU profiles remain open. The
-learned term closes only the resolution gap and may not compensate a
-legoESM/NEMO gap.
+Status: **Round-5 pre-training implementation complete; acquisitions held**.
+One real CPU optimizer step remains a seam test, not training. The user has
+accepted the recorded dg50 composition debt, but the dual-operator start
+experiment, the content-pinned multi-year hourly data, and the 3.125 km
+adequacy result remain prerequisites to the first training run. The learned
+term closes only the resolution gap and may not compensate a legoESM/NEMO gap.
 
 ## Fixed physical model and target convention
 
@@ -25,8 +26,9 @@ bit-identical to NEMO. Per-step has 249/690 exact rows, 561/690 within
 differ on day 1 at `vtau_before[60,1]` by signed zero (one ordered IEEE word),
 then first exceed the numerical bar on day 9 at wall-adjacent `sshn[1,1]`
 (16 ULP per-step; 25 ULP compiled/flat). Therefore this document names the
-training composition but does not call it NEMO bit-for-bit; training remains
-held for the user's explicit approximately-`1e-14` composition ruling.
+training composition but does not call it NEMO bit-for-bit. The user accepted
+this debt on 2026-10-13; the unchanged `1e-15` certification bar still records
+it as debt.
 
 The state target is the conservative restriction in `swg_coarse_graining.py`:
 sum fine T-cell volumes into each coarse T cell and sum `e2*h*u` or `e1*h*v`
@@ -40,44 +42,60 @@ and `h*v` inside the compiled scan and restrict those mean transports; archived
 `h(mean eta)*mean(u)` products are explicitly refused. A temporal continuity
 plant that offsets restricted SSH by 1 m fails.
 
-Gaussian smoothing is optional only for the derived, already restricted
-relative-vorticity target. It uses reflecting closed walls and `sigma=1`
-coarse cell; `sigma` is the standard deviation, not an unspecified “width.”
-This matches Maddison's convention, which says “width (specifically a standard
-deviation) of 62.5 km,” while changing the state restriction to the
-continuity-conserving operator required by this free-surface C grid. Maddison
-filtered instantaneous relative vorticity, then subsampled; he did not
-independently filter face velocities. See
-[Maddison (2026), sections 2.3 and 2.4](https://agupubs.onlinelibrary.wiley.com/doi/full/10.1029/2024MS004883).
+There are two named objectives and **no default**. `symmetric` is the Round-4
+departure: initialize and target with the exact box restriction above, then
+apply a sigma-one-coarse-cell Gaussian to both model and target vorticity.
+`template` follows Maddison's data/model asymmetry: initialize and target from
+one fine-grid filtered restriction, while the model vorticity in the loss is
+unfiltered. Maddison defines the Gaussian “width (specifically a standard
+deviation)” as one coarse spacing, filters instantaneous fine vorticity, and
+then samples the coarse grid ([Maddison 2026, sections 2.3--2.4](https://agupubs.onlinelibrary.wiley.com/doi/full/10.1029/2024MS004883)).
+
+The `template` state operator works on finite-volume extensives before exact
+restriction. Fine T-cell volume is even-reflected about every wall. U transport
+is even across the south/north walls and odd about its zero west/east wall
+faces; V transport is odd about its zero south/north wall faces and even across
+the west/east walls. To see why, extend the closed-grid continuity stencil
+`D(Q)=Qe-Qw+Qn-Qs`: an even scalar extension requires the normal face flux to
+change sign, whereas a tangential flux remains even. The same separable
+convolution therefore satisfies `D(G*Q)=G*D(Q)`, fixes normal wall transport to
+exact zero, and preserves total volume without a posteriori mean restoration.
+The Gaussian has standard deviation 50 km = 8 fine cells and transfer
+`exp(-2 pi^2 sigma^2/lambda^2)` for an interior plane wave. The filtered
+extensives are then restricted by the existing exact volume/face sums.
 
 The reference is not yet adequate. At 6.25 km the Munk width has
 1.27 cells; restricted daily-mean truth gives consecutive annual mean-velocity
 differences of 0.04765 and 0.04203 m s-1 for years 1-to-2 and 2-to-3. A 3.125 km
 sensitivity is therefore mandatory. Its first eight days are compared from the
 common rest state using normalized RMS (bar 10%) and pattern correlation (bar
-0.99) for coarse SSH, relative vorticity, and velocity, with first 1% and 10%
+0.99) for coarse SSH, relative vorticity, and rotational velocity, with first 1% and 10%
 crossings reported. Year-1 KE, EKE, jet position, and DST-streamfunction KE
 spectrum must each agree within the larger of 10% and measured adjacent-year
 variability of the 6.25 km run. The tool exits nonzero on inadequacy.
 
 ## Initialization and hourly observations
 
-Ten starts are fixed at fine days 731, 771, ..., 1091. Each supplies a four-day
-hourly segment restricted inside the compiled fine-model scan, retaining only
-coarse T/U/V arrays. A restarted segment must reproduce the uninterrupted next
-fine daily state bit-for-bit under the same fp64/native policy. Maddison's loss
-has “`M=24w` hourly outputs”; this lane likewise scores 24, 48, 96, or 192
-right-endpoint observations for 1, 2, 4, or 8 days.
+Ten starts are fixed at fine days 731, 771, ..., 1091. Each supplies both
+four-day coarse states in one compiled fine-model pass: exact box restriction
+and filtered restriction. Schema v2 stores T/U/V at t0 plus 24 right endpoints
+per day for each operator; schema-v1 readers remain box-only. Enabling either
+sampler must leave the prognostic path and daily restart words unchanged. A
+restarted segment must reproduce the uninterrupted next fine daily state
+bit-for-bit under the same fp64/native policy. Maddison's loss has `M=24w`
+hourly outputs; this lane likewise scores 24, 48, 96, or 192 right endpoints
+for 1, 2, 4, or 8 days.
 
-Before training, every start receives paired 48-hour no-network dg50 forecasts
-from the old raw-filtered state and the conservative state. Admission applies
-to the state actually used, separately for all ten starts: vorticity error at
-hour 1 must be at most twice the hour-24 error divided by 24, and maximum fast
-divergent KE in hours 1--6 must be at most twice its hours-25--48 mean. Truth
-fast energy, truth vorticity RMS, and SSH tendency at hours 1, 6, 24, and 48 are
-reported. All ten conservative starts pass; all ten raw starts fail. The old
-raw/conservative ratio is retained only as a diagnostic because it cannot admit
-the conservative state.
+Before training, every start receives a 48-hour no-network dg50 forecast from
+each candidate state and is compared with targets made by that same operator.
+Admission applies separately per start: vorticity error at hour 1 must be at
+most twice the hour-24 error divided by 24, and maximum fast divergent KE in
+hours 1--6 must be at most twice its hours-25--48 mean. Truth fast energy,
+truth vorticity RMS, and SSH tendency at hours 1, 6, 24, and 48 are reported.
+If at least 8/10 filtered starts pass, experiment one selects `template`;
+otherwise it selects `symmetric` and records the measured departure. The old
+result (box-conservative 10/10, raw independent filter 0/10) remains diagnostic
+only and does not prejudge the filtered-restriction decision.
 
 ## Closure seam and pytree contract
 
@@ -88,6 +106,12 @@ the closed boundary, so wall-normal force is zero; the discrete divergence of
 the volume-force transport is roundoff zero. The seam is a pure pytree term
 inside the certified step. If the closure argument is absent, no addition or
 reassociation occurs, preserving the certified card byte-for-byte.
+
+The orientation is explicit: positive U is east and positive V is north. A
+positive northward potential difference accelerates U eastward, while a
+positive eastward potential difference accelerates V southward. Thus the force
+is the clockwise rotated gradient `(dPhi/dy, -dPhi/dx)`. Boundary potential is
+zero at all vertices, including corners.
 
 Inputs are coarse SSH, native U/V velocity averaged to T, wet mask, normalized
 non-trainable C-grid metrics, an explicit RNG key, and a fixed-shape noise
@@ -125,21 +149,36 @@ bit-identical at their 96 common hourly endpoints.
 
 ## Loss, rollout, and curriculum
 
-The deterministic point loss is Maddison's Eq. 7: at every hourly right
-endpoint it applies the sigma-one-cell Gaussian to relative vorticity and uses
-the squared error weighted by `dx^2` on interior cells, scaled by
-`1e4/(beta^2 L^2)/(4 L^2)/M`. Rotational-velocity terms are optional and off
-for experiment one. Raw SSH is monitored, not fitted. Training-only
-normalizers remain recorded for optional rotational and future ensemble losses;
-the frozen training split gives vorticity, rotational-U, and rotational-V
-variances `2.6760339e-12 s-2`, `0.01183459`, and `0.01357407 m2 s-2`.
+The objective is an explicit required argument. For `template`, fine volume and
+transport are filtered before restriction, that stored state is both t0 and
+truth, and the model vorticity remains unfiltered. For `symmetric`, stored box
+restriction is t0 and truth and the same coarse Gaussian acts on both diagnosed
+vorticities. In either case loss is exactly Maddison's Eq. 7: squared vorticity
+error weighted by `dx^2` at interior F points, multiplied by
+`1e4/(beta^2 L^2)/(4 L^2)`, and averaged inside the loss over all `M=24w`
+hours and all `N_windows` batch members. Consequently the loss is exactly zero
+at a stored window start, while the template objective still sees model-created
+grid noise. Rotational-velocity terms are explicit options and off in
+experiment one. Raw SSH is monitored, not fitted.
 
-The ten available four-day segments are content-pinned chronologically as six
-train (days 731--931), two validation (971, 1011), and two test (1051, 1091).
-Every target contains right endpoints of the same segment whose conservative
-day-N state is t0, and one diagnostic function is used for model and truth.
-This suffices for the real-seam test, not the ruled batch-10 eight-day stage;
-the larger acquisition is a prerequisite to training.
+One content-pinned dataset contract owns source-root and manifest hashes,
+operator name, split bounds, and batch construction. Each T0 is the stored
+T/U/V state at the chosen absolute hour and its targets are the following
+right endpoints from the same operator. Splits never share an hour and their
+endpoints are separated by at least 720 hours. The planned 12-year record is
+`[day731, day5111)`: training is `[731,4235]` (3,504 days, the template's
+first 80%), a 30-day gap precedes validation `[4265,5111]`, and another
+30-day gap precedes the independent test year `[5141,5506]`. Normalizers are
+computed only by the contract's training-split method and record the contract
+and source hashes. Any held-out normalizer request, split-crossing window,
+unregistered manifest, duplicate hour, or coverage gap inside a split raises.
+
+At each epoch and window length the contract redraws one seeded starting
+offset, forms non-overlapping 1/2/4/8-day windows, shuffles them, and yields
+batches of exactly ten. The 24 complete schema-v1 eight-day segments available
+at the Round-5 check are accepted only as pinned box diagnostics and prove the
+loader handles 192-hour inputs; they cannot silently supply the filtered
+objective or a missing t0. The future schema-v2 record is the training source.
 
 The first curriculum is exactly 1, 2, 4, and 8 days. A selected checkpoint
 initializes the next window. No 16, 32, or 60-day deterministic stage is
@@ -152,15 +191,18 @@ the amplitude dependence is reported rather than averaged away. Uniform
 production-step checkpointing
 is the default; alternatives require a measured memory/time receipt.
 
-Optimizer construction uses `legoesm.ml.training.create_optimizer`. Maddison's
-Keras AdamW defaults are learning rate `1e-3`, weight decay `0.004`, beta1
-`0.9`, beta2 `0.999`, epsilon `1e-7`, batch 10, and five epochs per window.
-The repository factory expresses AdamW, learning rate, weight decay, and beta
-defaults; it necessarily retains Optax epsilon `1e-8`, cosine scheduling, and
-the configured clipping transform. These differences are explicit manifest
-fields rather than an exact-optimizer claim.
-Learning rate, warmup, batch size, start sampler, split dates, architecture,
-and parameter count are explicit manifest fields, not defaults. The
+Optimizer construction uses `legoesm.ml.training.create_optimizer`. Experiment
+one passes the template settings explicitly: constant learning rate `1e-3`,
+AdamW weight decay `0.004`, beta1 `0.9`, beta2 `0.999`, epsilon `1e-7`, no
+separate clipping transform, batch 10, and five epochs per window. The network
+is carried across 1/2/4/8-day stages and optimizer state is reinitialized at
+each stage. The shared factory's historical defaults remain bit-for-bit the
+prior warmup/cosine, clipped, epsilon-`1e-8` result for every existing caller.
+Optax 0.2.8's AdamW source and the factory were read; a hand-computed first
+update guards the explicit experiment settings.
+
+Learning rate, schedule, epsilon, clipping, batch size, start sampler, split
+dates, architecture, and parameter count are manifest fields, not defaults. The
 truth-generation day scan and training segment loop are distinct named
 compositions. With zero closure, 4-day and 8-day runs from the same coarse state
 must match bit-for-bit in native T/U/V at every common hourly endpoint. A
@@ -198,13 +240,16 @@ truth and must not exceed the worse control's top-octave fractions or
 grid-noise index. Uncertainty ranges and raw seed scores are reported; a
 median alone cannot hide an unstable seed.
 
-The corrected native-array scorecard freezes control manifests and code
+The corrected native-face scorecard freezes control manifests and code
 thresholds. On years 2--3, `nu=10` has live-face-transport RMSE
-`1.4397e6 m3 s-1`, DST-spectrum L1 `0.24851`, wet EKE-map NRMSE `0.39367`, and
-EKE ratio `0.73234`; `nu=80` has `2.0071e6`, `0.33159`, `0.77316`, and
-`0.39643`. The `nu=10` top-octave KE/enstrophy and grid-noise bars are
-`0.0056396/0.063448/0.56444`. Finite, positive-thickness, sub-unit-Courant
-health is mandatory.
+`1.439733e6 m3 s-1`, DST-spectrum L1 `0.223004`, wet EKE-map NRMSE `0.393673`,
+and EKE ratio `0.732341`; `nu=80` has `2.007138e6`, `0.386407`, `0.773158`, and
+`0.396429`. Native-face `nu=10` top-octave KE, direct-vorticity enstrophy, and
+second-difference bars are `0.0538625/0.435918/0.931792`; `nu=80` gives
+`0.0275464/0.294723/0.706924`. The better skill and worse noise control are
+therefore both `nu=10` for these registered fields. Finite fields, positive
+thickness, and sub-unit Courant are unconditional per-seed gates; a perfect
+statistical score cannot override failed physics.
 
 Two adversarial controls are mandatory. Replacing every time-varying anomaly
 by its time mean must fail the EKE-retention gate (collapsed variance).
@@ -231,8 +276,8 @@ the no-inert-parameter gate. Collapsed ensemble variance is a planted failure.
 
 | # | Required change | Design answer | Enforcing test or measurement |
 |---|---|---|---|
-| 1 | Conservative, balanced initialization | Exact volume/face-transport restriction; raw state forbidden | Per-start no-jump/fast-energy gates: conservative 10/10, raw 0/10 |
-| 2 | Hourly targets | 24 right-endpoint restricted samples/day, no fine-state storage | Ten four-day caches; restart-next-day bitwise gate |
+| 1 | Conservative, balanced initialization | Explicit box/symmetric and filtered/template states; measurement selects one | Per-start no-jump/fast-energy gates; filtered requires at least 8/10 |
+| 2 | Hourly targets | Both coarse states at t0 and 24 right endpoints/day from one fine scan | Ten dual four-day caches; sampler-off/both-mode and restart-next-day word gates |
 | 3 | Adequate reference | Early common path plus uncertainty-aware 3.125 km sensitivity | Days 1--8 NRMS/correlation and year-1 statistics against interannual variability |
 | 4 | Balanced predictability | Smooth zero-divergence vorticity perturbation, two amplitudes, JVP | 120-day twins and registered balanced fit rule |
 | 5 | Cap curriculum | Initial windows 1/2/4/8 days only | Network-inclusive profile required before 16/32/60 days |
@@ -242,17 +287,18 @@ the no-inert-parameter gate. Collapsed ensemble variance is a planted failure.
 | 9 | Quantitative multi-seed gates | Three seeds; beat best control; variability and noise bounds | Held-out harness plus collapsed-variance/grid-noise failures |
 | 10 | Correct physics and composition | Full-gravity explicit free surface; named truth/training loops | Zero-closure 4/8-day bitwise A/B and manifest composition fields |
 
-## Phase-3 implementation disposition
+## Round-5 implementation disposition
 
 | Requirement | Design answer | Test or measurement |
 |---|---|---|
 | F-potential seam | Matched live-thickness transport curl at every RK3 stage; absent branch makes no addition | Random-potential divergence/wall/integral tests; unchanged dg50 ladder |
 | Explicit stochastic structure | RNG, member noise, and scale are traced; shared weights avoid an inactive noise branch | RNG/no-retrace tests and no-inert gradient gate |
-| Balanced target | Maddison scaled sigma-one vorticity loss; rotational U/V optional off | Analytic scaling and Brolly counterexample tests; `S=1` refused |
+| Objective choice | `template` is fine-filtered target versus unfiltered model; `symmetric` is explicit departure; no default | Zero-at-t0, checkerboard response, analytic transfer, and 8/10 admission rule |
 | Initial curriculum | Builders admit only 1/2/4/8 days | Refusal test for 16 days and measured per-window profiles |
 | Segment composition | Flat hourly scan with uniform per-step rematerialization; steady wind closed over | 4/8-day zero-closure common-endpoint bit identity |
-| Optimizer | AdamW through repository `create_optimizer`; differences explicit | Real pinned rollout/loss/update test; `training_performed=false` |
+| Dataset | Pinned schema-v2 roots/hashes; split-owned normalizers; seeded non-overlap batches of ten | Eight-day real loader and validation/test/cross-boundary leakage plants |
+| Optimizer | Exact template AdamW through repository `create_optimizer`; historical defaults unchanged | Hand first update, bitwise legacy update, real pinned rollout/loss/update |
 | Multi-seed gate | Median beats better control on three skill measures; every seed meets variability/noise bounds | Three-seed minimum plus failed collapsed and grid-noise plants |
 | Coarse controls | `nu=10` and `nu=80` scored from native arrays on years 2--3 | Frozen hashes, live transport, uncertainty, and four failing plants |
 | Model identity | Exact and numerical composition scores are kept separate | Three 30-day artifacts with first-cell ULP localization |
-| Training release | Requires balanced start, adequate/stationary reference, and user composition ruling | Explicit BUILD-NOT-TRAIN hold; no optimization update in phase 3 |
+| Training release | User accepted composition debt; filtered-start decision, adequate reference, and pinned data remain | Explicit BUILD-NOT-TRAIN hold; only the existing single-step seam test |
