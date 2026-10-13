@@ -312,7 +312,7 @@ def read_stage_ww(path: Path, expected_stage: int) -> dict:
     }
 
 
-def read_stage2_terms(path: Path) -> dict:
+def read_stage2_terms(path: Path, expected_dims=DIMS) -> dict:
     """Read source-ordered stage-2 Krhs snapshots from WRITE-only MY_SRC."""
     level = _registered(path, "now")
     with path.open("rb") as handle:
@@ -323,7 +323,7 @@ def read_stage2_terms(path: Path) -> dict:
     require(magic == "NEMO_L2_RKTRM_1", f"{path}: bad magic")
     require(
         (version, kt, stage, kmm, krhs, nx, ny, nz, bits)
-        == (1, 1, 2, 3, 2, *DIMS, 64),
+        == (1, 1, 2, 3, 2, *expected_dims, 64),
         f"{path}: bad header",
     )
     count = nx * ny * nz
