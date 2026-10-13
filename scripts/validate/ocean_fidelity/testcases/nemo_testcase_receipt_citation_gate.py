@@ -96,6 +96,7 @@ _ORCA2_R214VECPREV3_COMPILED = (
     NEMO / "cfgs/ORCA2_OMIP_L4_R214VECPREV3/BLD/ppsrc/nemo")
 _ORCA2_R229FOLDTRP = NEMO / "cfgs/ORCA2_OMIP_L4_R229FOLDTRP/BLD"
 _ORCA2_R230FOLDTRP = NEMO / "cfgs/ORCA2_OMIP_L4_R230FOLDTRP/BLD"
+_ORCA2G1_P3 = NEMO / "cfgs/ORCA2G1_OMIP_L1_P3/BLD"
 _ORCA2_R104EENACC_COMPILED = (
     NEMO / "cfgs/ORCA2_OMIP_L4_R104EENACC/BLD/ppsrc/nemo")
 _ORCA2_R105EENACC_COMPILED = (
@@ -136,6 +137,17 @@ FILES = {
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/domzgr.f90': NEMO / "cfgs/ORCA2_OMIP_L4/BLD/ppsrc/nemo/domzgr.f90",
     'tripole.py': REPO / "packages/core/legoesm/grids/tripole.py",
     # --- GRIDLADDER round 1 (G1 survey) END ---
+    # --- GRIDLADDER round 2 (compiled G1 record build) ---
+    "ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/dynvor.f90": (
+        _ORCA2G1_P3 / "ppsrc/nemo/dynvor.f90"),
+    "ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/domzgr.f90": (
+        _ORCA2G1_P3 / "ppsrc/nemo/domzgr.f90"),
+    "ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/domwri.f90": (
+        _ORCA2G1_P3 / "ppsrc/nemo/domwri.f90"),
+    "ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90": (
+        _ORCA2G1_P3 / "ppsrc/nemo/dynspg_ts.f90"),
+    "ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/dommsk.f90": (
+        _ORCA2G1_P3 / "ppsrc/nemo/dommsk.f90"),
     "stprk3.F90": _OCE / "stprk3.F90",
     "stprk3_stg.F90": _OCE / "stprk3_stg.F90",
     "ORCA2_R96SPG/ocean.output": _ORCA2_R96SPG_OUTPUT,
@@ -1708,6 +1720,37 @@ CITATION_MAP = {
     'vertical.py:1084': ('nemo_e3w_source="mesh_reference", allow_single_level: bool = False,', 1),
     'nemo_testcase_recipe.py:3725': ('allow_single_level=True,               # jpk = 2: one wet level', 1),
     # --- GRIDLADDER round 1 (G1 survey) END ---
+    # --- GRIDLADDER round 2 (G1 ladders, pivot-row vor_een) ---
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/domzgr.f90:575': ('mbkt(:,:) = MAX( k_bot(:,:) , 1 )', 1),
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/domwri.f90:164-165': [
+        ('zprt(:,:) = REAL( mbkt(:,:) , wp )', 1),
+        ("'mbathy', zprt", 1),
+        2],
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/dynvor.f90:779-780': [
+        ('zua = + r1_12 * r1_e1u(ji,jj) * (  ( ztne(ji,jj  ) * zwy(ji  ,jj  )', 1),
+        ('ztse(ji,jj  ) * zwy(ji  ,jj-1) + ztsw(ji+1,jj) * zwy(ji+1,jj-1)', 1),
+        2],
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/dynvor.f90:767': (
+        'zwy(ji,jj) = e1v(ji,jj) * (e3v_3d(ji,jj,jk) *(1._wp+r3v(ji,jj,Kmm)*vmask(ji,jj,jk))) * pv(ji,jj,jk)', 1),
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/dynvor.f90:720': (
+        'z1_e3f(ji,jj) = 1._wp / (e3f_0vor(ji,jj,jk) *(1._wp+r3f(ji,jj)*fe3mask(ji,jj,jk)))', 1),
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/dynvor.f90:727': ('zwz(ji,jj) = ff_f(ji,jj) * z1_e3f(ji,jj)', 1),
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/dynvor.f90:772-775': [
+        ('ztne(ji,jj) = zwz(ji-1,jj  ) + zwz(ji  ,jj  ) + zwz(ji  ,jj-1)', 1),
+        ('ztsw(ji,jj) = zwz(ji  ,jj-1) + zwz(ji-1,jj-1) + zwz(ji-1,jj  )', 1),
+        4],
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/dynvor.f90:919': (
+        'WHERE( e3f_0vor(:,:,:) == 0._wp )   e3f_0vor(:,:,:) = e3f_3d(:,:,:)', 1),
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:799-805': [
+        ("IF( iom_varid( numror, 'sshbb_e', ldstop = .FALSE. ) > 0 ) THEN", 1),
+        ("'vb_e'     ,    vb_e(:,:), cd_type = 'V', psgn = -1._wp", 1),
+        7],
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:817-822': [
+        ("CALL iom_rstput( kt, nitrst, numrow, 'sshbb_e'  , sshbb_e(:,:) )", 1),
+        ("CALL iom_rstput( kt, nitrst, numrow, 'vb_e'     ,    vb_e(:,:) )", 1),
+        6],
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/dommsk.f90:258': ('fe3mask(:,:,:) = fmask(:,:,:)', 1),
+    # --- GRIDLADDER round 2 END ---
     # --- ORCA2 round 253: kt=8 midpoint-SSH failure boundary -------
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:489-493': [
         ('Extrapolate Sea Level at step jit+0.5', 1),
