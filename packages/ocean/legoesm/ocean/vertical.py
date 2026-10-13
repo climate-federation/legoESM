@@ -547,11 +547,11 @@ def nemo_qco_live_vorticity_e3f_cgrid(
             "reference_e3f must be the native A2D F-point thickness with "
             f"shape {e3f0vor.shape}; got {reference.shape}")
     e3f_native = b(reference * b(one + r3f[..., None] * fe3mask))
-
+    if return_r3f: return r3f  # noqa: E701  (one line: later cited lines keep their numbers)
     # NEMO native F(i,j) maps to legoESM vertex [j+1,i+1].  The added
     # south/west rows are inert walls for this closed-box identity.
     with_south = jnp.concatenate([e3f_native[:1], e3f_native], axis=0)
-    return r3f if return_r3f else jnp.concatenate([with_south[:, -1:], with_south], axis=1)
+    return jnp.concatenate([with_south[:, -1:], with_south], axis=1)
 
 
 def _nemo_qco_hf0(raw, e3f0vor, fe3mask, dtype):

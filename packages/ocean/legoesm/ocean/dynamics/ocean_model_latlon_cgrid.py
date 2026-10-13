@@ -10592,10 +10592,10 @@ class LatLonCGridOceanModel:
             # was deferred; re-apply it here so a periodic card keeps the
             # invariant the stage used to leave behind.  Inert on all four
             # closed-basin cards, where both columns are masked to zero.
-            _u_after = _u_after.at[:, -1].set(_u_after[:, 0])
+            _u_after = _u_after.at[:, -1].set(_u_after[:, 0]); _v_after = _rk3_fold_exchange_top_v(_v_after, _grid, _ws_stage_v_mask) if _cfg_b.rk3_fold_exchange_top_v_row else _v_after  # noqa: E702,E501
             state_new = state_new._replace(
                 u=state_new.u.replace(data=_u_after),
-                v=state_new.v.replace(data=(_rk3_fold_exchange_top_v(_v_after, _grid, _ws_stage_v_mask) if _cfg_b.rk3_fold_exchange_top_v_row else _v_after)),  # noqa: E501
+                v=state_new.v.replace(data=_v_after),
             )
         elif _impose_mean:
             # NEMO stprk3_stg.F90:440: uu += (uu_b(Kaa) − Σ e3u_0·uu·r1_hu_0)

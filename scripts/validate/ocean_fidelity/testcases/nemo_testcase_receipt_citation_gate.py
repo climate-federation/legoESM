@@ -1874,12 +1874,12 @@ CITATION_MAP = {
         ('pvv(ji,jj,1,Krhs) = zhpj(ji,jj) + zvap', 1),
         15],
     'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/dynvor.f90:766-767': [
-        ('zwx(ji,jj) = e2u(ji,jj) * (e3u_3d(ji,jj,jk) *(1._wp+r3u(ji,jj,Kmm)*umask(ji,jj,jk))) * pu(ji,jj,jk)', 1),
-        ('zwy(ji,jj) = e1v(ji,jj) * (e3v_3d(ji,jj,jk) *(1._wp+r3v(ji,jj,Kmm)*vmask(ji,jj,jk))) * pv(ji,jj,jk)', 1),
+        ('zwx(ji,jj) = e2u(ji,jj) * (e3u_3d(ji,jj,jk) *(1._wp+r3u(ji,jj,Kmm)*umask(ji,jj,jk))) * pu(ji,jj,jk)', 3),
+        ('zwy(ji,jj) = e1v(ji,jj) * (e3v_3d(ji,jj,jk) *(1._wp+r3v(ji,jj,Kmm)*vmask(ji,jj,jk))) * pv(ji,jj,jk)', 3),
         2],
     'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/dynvor.f90:779-784': [
         ('zua = + r1_12 * r1_e1u(ji,jj) * (  ( ztne(ji,jj  ) * zwy(ji  ,jj  ) + ztnw(ji+1,jj) * zwy(ji+1,jj  ) )', 1),
-        ('pv_rhs(ji,jj,jk) = pv_rhs(ji,jj,jk) + zva', 1),
+        ('pv_rhs(ji,jj,jk) = pv_rhs(ji,jj,jk) + zva', 2),
         6],
     'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/dynzdf.f90:145-150': [
         ('puu(ji,jj,jk,Kaa) = (        ( 1._wp + r3u(ji,jj,Kbb) ) * puu(ji,jj,jk,Kbb )', 1),
@@ -1889,12 +1889,12 @@ CITATION_MAP = {
         ('puu(ji,jj,jk,Kaa) = ( puu(ji,jj,jk,Kaa) - uu_b(ji,jj,Kaa) ) * umask(ji,jj,jk)', 1),
         ('pvv(ji,jj,jk,Kaa) = ( pvv(ji,jj,jk,Kaa) - vv_b(ji,jj,Kaa) ) * vmask(ji,jj,jk)', 1),
         2],
-    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:218': ('r3f(:,:)     = r2_3 * r3fb(:,:) + r1_3 * r3fa(:,:)', 1),
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:218': ('r3f(:,:)     = r2_3 * r3fb(:,:) + r1_3 * r3fa(:,:)', 2),
     'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:239': ('r3f(:,:    ) = r1_2 * ( r3fb(:,:) + r3fa(:,:) )', 1),
     'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:546': ('r3f(:,:) = r3fa(:,:)', 1),
     'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:572-573': [
-        ("CALL lbc_lnk( 'stp_RK3_stg', uu(:,:,:,       Kaa), 'U', -1._wp, vv(:,:,:       ,Kaa), 'V', -1._wp   &", 1),
-        ("ts(:,:,:,jp_tem,Kaa), 'T',  1._wp, ts(:,:,:,jp_sal,Kaa), 'T',  1._wp, ldfull=.TRUE. )", 1),
+        ("CALL lbc_lnk( 'stp_RK3_stg', uu(:,:,:,       Kaa), 'U', -1._wp, vv(:,:,:       ,Kaa), 'V', -1._wp   &", 2),
+        ("ts(:,:,:,jp_tem,Kaa), 'T',  1._wp, ts(:,:,:,jp_sal,Kaa), 'T',  1._wp, ldfull=.TRUE. )", 2),
         2],
     # --- GRIDLADDER round 7 END ---
     # --- ORCA2 round 253: kt=8 midpoint-SSH failure boundary -------
