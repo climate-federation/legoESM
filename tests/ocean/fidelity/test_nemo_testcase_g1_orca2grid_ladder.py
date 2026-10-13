@@ -951,6 +951,10 @@ def test_stored_r3t_product_is_rounded_before_one_is_added():
     stretch = jax.jit(lambda e: eos.nemo_r3t_stretch(
         zc, e, depth, evaluation="nemo_reciprocal"))(eta)
     assert np.array_equal(np.asarray(stretch).ravel(), written[pick])
+    # review finding: a coordinate passed THROUGH jit carries the flag as a
+    # traced leaf; the identity test reads it as off and must not raise
+    traced = jax.jit(lambda c: vertical.compute_ocean_jacobian(eta, depth, c))(zc)
+    assert np.allclose(np.asarray(traced).ravel(), written[pick], rtol=1.0e-15, atol=0.0)
 
 
 @needs_record5

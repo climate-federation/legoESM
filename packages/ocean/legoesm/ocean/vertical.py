@@ -1688,7 +1688,7 @@ def create_partial_cell_coordinate(
         nemo_e2u=getattr(z_coord, "nemo_e2u", None),
         nemo_e1v=getattr(z_coord, "nemo_e1v", None),
         nemo_een_barotropic=getattr(
-            z_coord, "nemo_een_barotropic", None),
+            z_coord, "nemo_een_barotropic", None), nemo_r3t_stored_product=getattr(z_coord, "nemo_r3t_stored_product", False) is True,  # noqa: E501
     )
 
 
@@ -1770,7 +1770,7 @@ def create_full_step_coordinate(
         nemo_e2u=getattr(z_coord, "nemo_e2u", None),
         nemo_e1v=getattr(z_coord, "nemo_e1v", None),
         nemo_een_barotropic=getattr(
-            z_coord, "nemo_een_barotropic", None),
+            z_coord, "nemo_een_barotropic", None), nemo_r3t_stored_product=getattr(z_coord, "nemo_r3t_stored_product", False) is True,  # noqa: E501
     )
 
 
@@ -3091,6 +3091,6 @@ def _nemo_r3t_product(product, z_coord):
     record).  ``OceanPartialCellCoordinate.nemo_r3t_stored_product`` selects
     the rounded product; otherwise ``product`` is returned unchanged.
     """
-    if not getattr(z_coord, "nemo_r3t_stored_product", False):
-        return product
+    if getattr(z_coord, "nemo_r3t_stored_product", False) is not True:
+        return product      # identity test: a traced flag reads as off, never raises
     return nemo_source_round(product)
