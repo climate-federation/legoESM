@@ -2603,6 +2603,7 @@ def _bc_pv_flux(
     vorticity_scheme="al81",
     een_q_boundary="neumann_fill",
     een_fold_image_v=False,
+    een_written_order=False,
     een_e3f_scheme="min",
     een_metric_weighting="off",
     dz_ref=None,
@@ -2926,6 +2927,7 @@ def _bc_pv_flux(
                 f_vtx=_f_vtx_al,
                 q_boundary=een_q_boundary,
                 metric_widths=_mw,
+                written_order=een_written_order,
             )
         else:  # "ene"
             # NEMO vor_ene Sadourny 2-point.  f_vtx=None → relative-only
@@ -5450,6 +5452,8 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
                                        "neumann_fill"),
                 een_fold_image_v=getattr(
                     config, "een_fold_image_v_row", False),
+                een_written_order=getattr(
+                    config, "een_vorticity_written_order", False),
                 een_e3f_scheme=config.een_e3f_scheme,
                 een_metric_weighting=getattr(
                     config, "een_metric_weighting", "off"),
@@ -5496,6 +5500,8 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             een_q_boundary=getattr(config, "een_q_boundary", "neumann_fill"),
             een_fold_image_v=getattr(
                 config, "een_fold_image_v_row", False),
+            een_written_order=getattr(
+                config, "een_vorticity_written_order", False),
             een_e3f_scheme=config.een_e3f_scheme,
             een_metric_weighting=getattr(
                 config, "een_metric_weighting", "off"),
