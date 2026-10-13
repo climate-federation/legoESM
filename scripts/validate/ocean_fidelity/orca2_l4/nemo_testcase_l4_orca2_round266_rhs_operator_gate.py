@@ -80,8 +80,10 @@ def _owned_hpg(value: np.ndarray, *, three_d: bool = True) -> np.ndarray:
 
 def _candidate_owned(value: np.ndarray, *, three_d: bool = True) -> np.ndarray:
     value = np.asarray(value, np.float64)
-    require(value.shape[:2] == (148, 180), f"candidate shape moved: {value.shape}")
-    value = value[:, :90]
+    require(value.shape[:2] in ((148, 180), (148, 90)),
+            f"candidate shape moved: {value.shape}")
+    if value.shape[1] == 180:
+        value = value[:, :90]
     return value[..., :30] if three_d else value
 
 
