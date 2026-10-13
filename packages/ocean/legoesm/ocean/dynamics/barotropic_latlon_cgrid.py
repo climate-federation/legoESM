@@ -3527,7 +3527,7 @@ def barotropic_substeps_latlon_cgrid(
                 _H_u_primary, _H_v_primary = _nemo_ssh_avg_apply(
                     eta_avg, u_mask, v_mask, grid, _area,
                     _nemo_ssh_avg_prep(H_bathy, mask, grid, _dt,
-                                       north_fold_mask(grid)))
+                                       north_fold_mask(grid)), fold_top_v_wet=_nemo_fold_top_v_wet(config, z_coord, eta.dtype))  # noqa: E501
             else:
                 _H_primary = jnp.maximum(
                     eta_avg + H_bathy, min_water_col) * mask

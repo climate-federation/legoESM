@@ -357,7 +357,69 @@ model hooks in the instrument (measurement arm only).
 
 ## 11. Tests and review
 
-REVIEW_PLACEHOLDER
+Single review (codex): **findings**, one defect CONFIRMED and acted on. Log:
+/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/round3/codex_review_r3b.log.
+The first attempt (whole diff) ran into its own 540 s limit with no output
+(codex_review_r3.log) and was abandoned; the second covered the packages diff
+only, so the instrument, the tests and the acquisition wrapper were NOT
+reviewed. Verbatim:
+- "CONFIRMED — hidden default is unchanged."
+- "CONFIRMED — no sign, row, permutation, or staggering error found."
+- "CONFIRMED — no unintended whole-mask side effect relative to NEMO. The
+  replacement also affects `ssh_avg_v`, `r1_v`, and `r1_v0`/`r3_v`, but NEMO
+  uses the same `ssvmask` in its SSH average and reciprocal-depth expressions."
+- "CONFIRMED — solver inconsistency. All five calls inside `_run_substep_loop`
+  receive the new operands, but the final primary-transport-average conversion
+  calls `_nemo_ssh_avg_apply` without `fold_top_v_wet`".
+  Measured before acting: that call now receives the operand too, and 0 of
+  238 scored rows change in maximum, RMS or count (restart entry to step 41,
+  independent chain to step 40, against the files in final/). The path is
+  not consumed on G1; the edit removes the inconsistency for a later card.
+- "CONFIRMED — it is the last `BarotropicConfig` field."
+"VERDICT: findings." The fix after the review was not re-reviewed. No second
+(GLM) reviewer was available: a single review, not a dual one.
+
+Evidence stamp: the json files carry commit 697f82b39 (interior_events:
+99d891ba3). Later commits fold two card lines into their neighbours and pass
+the operand at the sixth call site; neither moves a scored number (checked
+as above for the second; the first changes no expression).
+
+Focused tests, synchronous:
+- The two G1 test files at the final tree: **35 passed** (17 ladder, 18
+  tools), including the option's plants: the operand row with the option off
+  reads zero against NEMO's nonzero row, and the one-step fold error at step
+  21 is above 1e-13 without it and below 1e-14 with it.
+- Six unit files nearest the edited solver helper (literal barotropic
+  continuity, seed faces, prognostic barotropic state, fold row, tripole
+  fold, zero-area face): **55 passed**.
+- G1 files plus six ratchets, before the review fix: 6121 passed, 2 skipped,
+  4 failed. Three are the reds recorded in rounds 1 and 2 (the jra55 literal,
+  the slab-land dispatch guard, the inline coefficients in the land restart
+  file; `git diff e579a1a2e -- packages/land tests/unit/test_jra55_do.py` is
+  empty). The fourth was my own new test's wrong expectation, corrected.
+- NOT RUN: the wider barotropic unit selection (it did not finish inside the
+  500 s limit and was abandoned); any closed-card ladder (GYRE, VORTEX,
+  TSUNAMI, ORCA2). The option is default-off and returns the same objects
+  when off (tested), but no closed card was re-scored.
+
+Citation gate on this receipt: PASS, 12 citations, 0 unmapped, whole-map
+audit clean; the shifted-citation plant exits 1 (citation_receipt.json,
+citation_plant.json under final/).
+
+Compliance, stated because no gate enforces it: search-before-build (section
+3); one variable per arm (each before / after pair differs in the one
+option); instruments checked before quoting (sections 1 and 8; the stage-arm
+pivot row is flagged, not used); non-vacuity (option plants, score and entry
+plants, citation plant shown red). Dual review: NOT met (single, partial
+scope).
+
+UNVERIFIED:
+- that the stage arm's pivot-row U disagreement is an instrument fault and
+  not a stage defect compensated inside the whole step;
+- the held operand's effect table (uncommitted tree);
+- the three scratch probes of section 5 (not committed instruments);
+- that the round-3 acquisition's rebuilt reference and domain file reproduce
+  round 1's bit for bit (the operator's admission decides).
 
 ## 12. Evidence hashes (SHA-256 prefixes, final/)
 
