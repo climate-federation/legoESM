@@ -270,6 +270,51 @@ def nemo_ue_rhs_replay(rhs, e3_0, mask, *, lanes: int = 1) -> np.ndarray:
     return part[0] * (ss / (h0 + 1.0 - ss))
 
 
+ABORT = {"ssh": "sossheig", "u": "vozocrtx", "v": "vomecrty", "T": "votemper",
+         "S": "vosaline"}
+
+
+def abort_witness(roots, kt: int):
+    """NEMO's output.abort.nc when stp_ctl stopped the run AT step kt: the
+    fp64 Kmm state the check judged (stpctl.f90:181, :245)."""
+    for root in roots:
+        path, ts = Path(root) / "output.abort.nc", Path(root) / "time.step"
+        if path.is_file() and ts.is_file() and int(ts.read_text()) == kt:
+            return path
+    return None
+
+
+def abort_rows(path: Path, kt: int, state, nk: int, reg, cls) -> dict:
+    """The card at NEMO's stop step: 2-D and level-1 rows by region, every
+    level by depth class, and stp_ctl's maxima (wet cells) on both sides."""
+    import netCDF4
+    cand = card_levels(state)
+    cand["ssh"] = np.asarray(state.eta.data)
+    with netCDF4.Dataset(path) as h:
+        ref = {f: np.asarray(h.variables[n][0], np.float64) for f, n in ABORT.items()}
+    require(all(a.dtype == np.float64 for a in ref.values()), "abort file is not fp64")
+    ref.update({f: levels_last(ref[f], nk) for f in RESTART})
+    rows = [g1.row(f"abort.kt{kt}.{f}", ref[f] if f == "ssh" else ref[f][..., 0],
+                   cand[f] if f == "ssh" else cand[f][..., 0], reg)
+            for f in ("ssh", "u", "v", "T", "S")]
+    levels = {f: {"summary": class_summary(level_rows(ref[f], cand[f], cls[POINT[f]]))}
+              for f in RESTART}
+
+    def peak(a, wet):
+        a = np.where(wet, np.abs(a), -1.0)
+        at = np.unravel_index(int(np.argmax(a)), a.shape)
+        # NEMO's (ji, jj, jk), 1-based, as stp_ctl prints them
+        return {"max": float(a[at]), "ji_jj_jk": [int(at[1]) + 1, int(at[0]) + 1]
+                + ([int(at[2]) + 1] if a.ndim == 3 else [])}
+    wet = {p: cls[p]["full"] | cls[p]["partial"] for p in "tuv"}
+    stp = {side: {"|ssh|": peak(src["ssh"], wet["t"][..., 0]),
+                  "|U|": peak(src["u"], wet["u"]), "|V|": peak(src["v"], wet["v"])}
+           for side, src in (("nemo", ref), ("card", cand))}
+    return {"kt": kt, "witness": str(path), "rows": rows,
+            "first_unequal": g1.first_unequal(rows), "all_levels": levels,
+            "stp_ctl_maxima": stp}
+
+
 def hand_edit_cells(root: Path, card) -> dict[str, np.ndarray]:
     """Decision 120: the wet cells ORCA2's hand edits of the initial state
     would change (dtatsd.f90:219), on the card's layout; u and v faces touch
@@ -697,6 +742,9 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
             state, seconds = step(state)
             path = restart_path(roots, kt)
             if path is None:
+                stop = abort_witness(roots, kt)
+                if stop is not None:
+                    out["per_kt"].append(abort_rows(stop, kt, state, nk, reg, cls))
                 continue
             cand = card_surface(state)
             with netCDF4.Dataset(path) as h:

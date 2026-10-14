@@ -200,24 +200,49 @@ def ladder():
     return mod
 
 
-@pytest.mark.skipif(not (PRIOR / "smoke_2step/ORCA2G1_00000002_restart.nc").is_file(),
-                    reason="the operator's G3 smoke record is not on this machine")
+def test_abort_witness_is_read_only_at_the_step_nemo_stopped(ladder, tmp_path):
+    run = tmp_path / "stopped"
+    run.mkdir()
+    (run / "time.step").write_text("      11\n")
+    assert ladder.abort_witness((tmp_path, run), 11) is None     # no abort file yet
+    (run / "output.abort.nc").write_bytes(b"")
+    assert ladder.abort_witness((tmp_path, run), 11) == run / "output.abort.nc"
+    assert ladder.abort_witness((tmp_path, run), 10) is None
+
+
+@pytest.mark.skipif(not (PRIOR / "ref_100step/output.abort.nc").is_file(),
+                    reason="the operator's G3 round-1 record is not on this machine")
 @pytest.mark.slow
-def test_g3_step_two_is_nemos_bit_for_bit_on_every_level(ladder):
-    """NEMO's step-2 restart (round 1's smoke): sea level, the barotropic
-    velocities, their six histories and u, v, T, S on all 30 levels equal the
-    card's own chain bit for bit."""
-    smoke = PRIOR / "smoke_2step"
-    out = ladder.run(smoke, arm="restart_independent", kt_to=2, case="ORCA2G3-ts",
+def test_g3_chain_against_nemos_steps_2_10_and_its_kt11_stop(ladder):
+    """The card's own chain against NEMO's G3 record (round 1): step 2 (the
+    smoke's restart) bit for bit on every field, level and barotropic
+    history; step 10 (the stopped run's restart) at the bar except u and v
+    (the open debt, pinned so it cannot grow unseen); step 11 (NEMO's
+    output.abort.nc) stops on the same |V| face with the same bits."""
+    out = ladder.run(PRIOR / "smoke_2step", arm="restart_independent", kt_to=11,
+                     restart_roots=(PRIOR / "ref_100step",), case="ORCA2G3-ts",
                      allow_dirty=True)
-    (kt2,) = out["per_kt"]
-    assert kt2["kt"] == 2
+    kt2, kt10, kt11 = out["per_kt"]
+    assert (kt2["kt"], kt10["kt"], kt11["kt"]) == (2, 10, 11)
     rows = kt2["rows"] + kt2["history_rows"]
     assert len(rows) == 13 and all(r["n_unequal"] == 0 for r in rows)
     for f, t in kt2["all_levels"].items():
         s = t["summary"]
         assert s["full"]["n_unequal"] == s["partial"]["n_unequal"] == s["dry_n_unequal"] == 0
         assert s["full"]["n_cells"] > 390000 and s["partial"]["n_cells"] > 15000
-    # Decision 120's hand-edit cells, counted on the card (u, v: faces beside one)
+    # Decision 120's hand-edit cells, counted on the card; none unequal at kt 10
     assert kt2["all_levels"]["T"]["hand_edit_cells"] == 1283
     assert kt2["all_levels"]["S"]["hand_edit_cells"] == 720
+    assert all(t["hand_edit_unequal"] == 0 for t in kt10["all_levels"].values())
+    status = {r["name"].rsplit(".", 1)[1]: r["status"]
+              for r in kt10["rows"] + kt10["history_rows"]}
+    assert {k for k, v in status.items() if v != "AT-BAR"} == {"u", "v"}
+    for f in ("u", "v"):
+        s = kt10["all_levels"][f]["summary"]
+        assert s["status"] == "DEBT" and s["dry_n_unequal"] == 0
+        assert max(s["full"]["relative"], s["partial"]["relative"]) < 2e-14
+    stp = kt11["stp_ctl_maxima"]
+    assert stp["nemo"]["|V|"] == stp["card"]["|V|"] == {
+        "max": 10.244435336848499, "ji_jj_jk": [22, 84, 27]}
+    assert stp["nemo"]["|U|"] == stp["card"]["|U|"]
+    assert stp["nemo"]["|ssh|"]["ji_jj_jk"] == stp["card"]["|ssh|"]["ji_jj_jk"] == [9, 90]
