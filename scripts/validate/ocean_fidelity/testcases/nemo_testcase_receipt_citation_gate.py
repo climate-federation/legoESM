@@ -2033,8 +2033,8 @@ CITATION_MAP = {
         ('END DO   ;   END DO   ;   END DO', 1),
         4],
     'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/dtatsd.f90:307-310': [
-        ('DO jk =  1,  jpk  ; DO jj = ntsj-(  nn_hls), ntej+(   nn_hls)', 1),
-        ('END DO   ;   END DO   ;   END DO', 1),
+        ('DO jk =  1,  jpk  ; DO jj = ntsj-(  nn_hls), ntej+(   nn_hls)', 2),
+        ('END DO   ;   END DO   ;   END DO', 2),
         4],
     # --- GRIDLADDER round 14 END ---
     # --- ORCA2 round 253: kt=8 midpoint-SSH failure boundary -------
