@@ -1031,7 +1031,9 @@ ROUND9 = ("rk3_stage_r3t_nemo_literal", "nemo_eos_gdept_rounded_product",
 def test_only_the_g1_card_selects_the_round9_statements():
     from legoesm.ocean.fidelity import nemo_testcase_recipe as recipe
     from legoesm.ocean.state import LatLonCGridOceanConfig
-    assert LatLonCGridOceanConfig._fields[-3:] == ROUND9
+    positions = tuple(
+        LatLonCGridOceanConfig._fields.index(name) for name in ROUND9)
+    assert positions == tuple(range(positions[0], positions[0] + len(ROUND9)))
     src = Path(recipe.__file__).read_text()
     start = src.index("def build_orca2g1_flat_card")
     for name in ROUND9:
