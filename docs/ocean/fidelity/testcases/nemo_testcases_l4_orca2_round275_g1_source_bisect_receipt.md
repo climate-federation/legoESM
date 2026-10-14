@@ -19,11 +19,11 @@ JIT enabled, fp64/libm.
 
 NEMO's executing statements are in the compiled ORCA2 source:
 
-- `cfgs/ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/stprk3_stg.f90:360-424`
+- `ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/stprk3_stg.f90:360-424`
   — stage RHS and velocity/update program;
-- `cfgs/ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynvor.f90:762-770`
+- `ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynvor.f90:762-770`
   and `:784-785` — the ORCA2 `np_CRV` EEN circulation and trend;
-- `cfgs/ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynzdf.f90:191-205`
+- `ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynzdf.f90:191-205`
   and `:360-375` — the distinct live face and 1-D interface thickness
   divisors of the U/V implicit momentum matrices.
 
