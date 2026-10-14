@@ -1651,9 +1651,6 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
         h_partial=jnp.asarray(h_partial, dtype=jnp.float64),
         bottom_level=jnp.asarray(bottom - 1, dtype=jnp.int32),
         is_active=jnp.asarray(tmask),
-        # Grid-ladder G1 round 8 / ORCA2 round 275: preserve NEMO's stored
-        # product when constructing the live T-point thickness ratio.
-        nemo_r3t_stored_product=True,
         nemo_e3t_0=jnp.asarray(raw_e3["e3t_0"], dtype=jnp.float64),
         nemo_bbl_e3u_0=jnp.asarray(raw_e3["e3u_0"], dtype=jnp.float64),
         nemo_bbl_e3v_0=jnp.asarray(raw_e3["e3v_0"], dtype=jnp.float64),
@@ -1730,22 +1727,9 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
     model_config = model_config._replace(
         een_fold_image_v_row=True,
         rk3_stage1_ssh_nemo_literal=True,
-        # Grid-ladder G1 round 6, retained on ORCA2 by round 275's
-        # individual Decision-96 source-unit census.
-        rk3_stage_velocity_written_order=True,
-        # Grid-ladder G1 round 8: use NEMO's staged T-point ratio expression.
-        rk3_stage_r3t_nemo_literal=True,
-        # Grid-ladder G2 round 11: the multi-level partial-cell momentum
-        # solve uses NEMO's distinct face and interface thickness divisors.
-        zdf_momentum_nemo_face_thickness=True,
         barotropic=model_config.barotropic._replace(
             barotropic_fold_top_v_face_ssh=True,
             barotropic_substep_dt_nemo_literal=True,
-            # Grid-ladder G1 round 6: NEMO associates the EEN live ratio
-            # and its fe3mask on the same T-pivot image row.  Round 275's
-            # ORCA2 source-unit census requires the pair atomically.
-            barotropic_een_ratio_fold_exchange=True,
-            barotropic_een_fe3mask_pivot_row=True,
         ),
     )
     # zdfphy.F90:146-173 initializes the pre-closure coefficient memory
