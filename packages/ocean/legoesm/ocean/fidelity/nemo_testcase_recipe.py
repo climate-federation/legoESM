@@ -1730,6 +1730,9 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
     model_config = model_config._replace(
         een_fold_image_v_row=True,
         rk3_stage1_ssh_nemo_literal=True,
+        # Grid-ladder G1 round 6, retained on ORCA2 by round 275's
+        # individual Decision-96 source-unit census.
+        rk3_stage_velocity_written_order=True,
         barotropic=model_config.barotropic._replace(
             barotropic_fold_top_v_face_ssh=True,
             barotropic_substep_dt_nemo_literal=True,
