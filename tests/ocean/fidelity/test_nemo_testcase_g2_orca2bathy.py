@@ -191,7 +191,8 @@ def test_g2_differs_from_g1_only_by_what_the_domain_resolves(g2_card):
     a, b = g2_card.recipe.model_config, g1.recipe.model_config
     assert [f for f in a._fields if repr(getattr(a, f)) != repr(getattr(b, f))] == [
         "barotropic", "zdf_momentum_nemo_face_thickness",   # round 2: dyn_zdf divisors
-        "zdf_tracer_nemo_rounded_thickness"]                # round 3: tra_zdf diagonal
+        "zdf_tracer_nemo_rounded_thickness",                # round 3: tra_zdf diagonal
+        "barotropic_rhs_ascending_level_sum"]               # round 4: Ue_rhs SUM order
     assert (a.zdf_tracer_nemo_rounded_thickness, b.zdf_tracer_nemo_rounded_thickness) == (
         True, False)
     assert (a.zdf_momentum_nemo_face_thickness, b.zdf_momentum_nemo_face_thickness) in (

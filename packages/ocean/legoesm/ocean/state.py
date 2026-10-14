@@ -3191,6 +3191,11 @@ class LatLonCGridOceanConfig(NamedTuple):
     # subtraction (one rounding): real-equal, different in the last place of
     # the diagonal, and through it of T and S on every level.
     zdf_tracer_nemo_rounded_thickness: bool = False
+    # NEMO's depth mean of the 3-D right-hand side (stp2d.f90:178-179) is a
+    # Fortran SUM over levels, accumulated in ascending k.  False leaves the
+    # order to XLA, whose vectorised reduction differs in the last place on
+    # some columns.
+    barotropic_rhs_ascending_level_sum: bool = False
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":

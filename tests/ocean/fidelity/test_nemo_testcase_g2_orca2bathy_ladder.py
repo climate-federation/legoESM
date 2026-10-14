@@ -140,8 +140,18 @@ def test_the_option_is_off_by_default_and_selected_by_g2_only():
             if "zdf_tracer_nemo_rounded_thickness=" in line]
     assert [name for name, _ in mine] == ["nemo_testcase_recipe.py"]
     assert "_ORCA2G_TRA_ZDF_ROUNDED[case]" in mine[0][1]
-    # appended as the LAST config field: no older field changed position
-    assert LatLonCGridOceanConfig._fields[-1] == "zdf_tracer_nemo_rounded_thickness"
+    # round 4's option: its own rung table, one assignment in the package
+    assert LatLonCGridOceanConfig._field_defaults[
+        "barotropic_rhs_ascending_level_sum"] is False
+    assert recipe._ORCA2G_UE_RHS_ASCENDING == {"ORCA2G1-flat": False, "ORCA2G2-zps": True}
+    sums = [(path.name, line) for path in (CASES.parents[3] / "packages").rglob("*.py")
+            for line in path.read_text().splitlines()
+            if "barotropic_rhs_ascending_level_sum=" in line]
+    assert [name for name, _ in sums] == ["nemo_testcase_recipe.py"]
+    assert "_ORCA2G_UE_RHS_ASCENDING[case]" in sums[0][1]
+    # each appended LAST in its round: no older field changed position
+    assert LatLonCGridOceanConfig._fields[-2:] == (
+        "zdf_tracer_nemo_rounded_thickness", "barotropic_rhs_ascending_level_sum")
     assert "_ORCA2G_ZDF_FACES[case]" in (
         CASES.parents[3] / "packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py"
     ).read_text().splitlines()[hits[0][1] - 1]
@@ -285,3 +295,39 @@ def test_the_traced_solver_loop_is_nemos_at_step_one(ladder):
     assert [(r["substep"], r["n_unequal"]) for r in tiny] == [(65, 1)]
     assert tiny[0]["max_abs"] < 1e-100 and tiny[0]["regions"]["fold_pivot_row"]["n_unequal"] == 1
     assert all(v["traced_vs_nemo_unequal"] == 0 for v in out["trace_passive"].values())
+
+
+def test_ascending_level_sum_is_fortrans_order():
+    """stp2d.f90:178-179's SUM accumulates in ascending k; the helper must
+    give that order bit for bit.  (A lone ``jnp.sum`` compiles ascending too;
+    XLA vectorises it only inside the full step, so the option's effect is
+    pinned by the record test's before arm below, not here.)"""
+    import jax
+    import jax.numpy as jnp
+    from legoesm.ocean.dynamics.barotropic_common import ascending_level_sum
+    rng = np.random.default_rng(0)
+    x = rng.standard_normal((400, 30)) * np.exp(rng.uniform(-20, 0, (400, 30)))
+    want = np.zeros(400)
+    for k in range(30):
+        want = want + x[:, k]
+    got = np.asarray(jax.jit(ascending_level_sum)(jnp.asarray(x)))
+    assert np.array_equal(got, want)
+    # the order is real: a 4-lane split of the same values differs somewhere
+    lanes = [x[:, k::4].sum(axis=1) for k in range(4)]
+    assert np.count_nonzero(((lanes[0] + lanes[1]) + (lanes[2] + lanes[3])) != want) > 0
+
+
+@needs_record
+@pytest.mark.slow
+def test_step_one_is_nemos_bit_for_bit_only_with_the_ascending_rhs_sum(ladder):
+    """The round-4 landing and its before arm: every scored field of step 1."""
+    for flag in (False, True):
+        out = ladder.run(RECORD, arm="independent", kt_from=1, kt_to=1,
+                         allow_dirty=True, without_rhs_ascending_sum=flag)
+        assert out["barotropic_rhs_ascending_level_sum"] is (not flag)
+        rows = {r["name"].rsplit(".", 1)[1]: r for r in out["per_kt"][0]["rows"]}
+        assert set(rows) == {"ssh", "uu_b", "vv_b", "u", "v", "T", "S"}
+        if flag:
+            assert rows["ssh"]["n_unequal"] > 500 and rows["uu_b"]["n_unequal"] > 500
+        else:
+            assert all(r["n_unequal"] == 0 for r in rows.values())

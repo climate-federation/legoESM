@@ -620,7 +620,7 @@ def nemo_reference_depth_reciprocal(
     return face_mask / (depth_ref + one - face_mask)
 
 
-def _ascending_level_sum(values: jnp.ndarray) -> jnp.ndarray:
+def ascending_level_sum(values: jnp.ndarray) -> jnp.ndarray:
     """Fortran's ``SUM`` over the level axis, accumulated in ascending ``k``.
 
     ``jnp.sum`` lets XLA choose the reduction shape, and on CPU it picks a
@@ -732,7 +732,7 @@ def rk3_stage_barotropic_correction(
             f"stage_mask {stage_mask.shape} must match field {field.shape} "
             f"or be its level-broadcast form {field.shape[:-1] + (1,)}")
     if written_order: return _rk3_stage_correction_written_order(field, target_mean, h_face_ref, r1_depth_ref, stage_mask)  # noqa: E501,E701
-    return (field + (target_mean - _ascending_level_sum(field * h_face_ref) * r1_depth_ref)[..., jnp.newaxis]) * stage_mask  # noqa: E501
+    return (field + (target_mean - ascending_level_sum(field * h_face_ref) * r1_depth_ref)[..., jnp.newaxis]) * stage_mask  # noqa: E501
 
 
 def bebt_blend(
@@ -1471,6 +1471,6 @@ def _rk3_stage_correction_written_order(field, target_mean, h_face_ref,
     the two statements rounded once, in the written order (the shared
     contraction guard); selected by its ``written_order`` argument."""
     from legoesm.core.source_rounding import nemo_source_round as r
-    own_mean = r(r(_ascending_level_sum(r(field * h_face_ref))) * r1_depth_ref)
+    own_mean = r(r(ascending_level_sum(r(field * h_face_ref))) * r1_depth_ref)
     # :417-418 as written: uu + zub*umask, not (uu + zub)*umask
     return r(field + r(r(target_mean - own_mean)[..., jnp.newaxis] * stage_mask))

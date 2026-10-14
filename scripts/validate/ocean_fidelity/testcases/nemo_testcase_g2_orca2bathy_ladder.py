@@ -316,7 +316,8 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
         geometry_plant: str | None = None, allow_dirty: bool = False,
         entries=(1, 3, 5, 7, 9), exposures=tuple(EXPOSURES),
         dump: Path | None = None, without_zdf_faces: bool = False,
-        without_tracer_rounding: bool = False) -> dict:
+        without_tracer_rounding: bool = False,
+        without_rhs_ascending_sum: bool = False) -> dict:
     require(arm in ARMS, f"unknown arm {arm!r}")
     require(plant in (None, "score", "level"), f"unknown plant {plant!r}")
     from legoesm.ocean.fidelity.provenance import allow_dirty_stamps, git_sha
@@ -348,6 +349,10 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
             "the G2 card no longer selects NEMO's tra_zdf diagonal rounding")
     if without_tracer_rounding:   # ROUND-3 BEFORE ARM / plant: the fused form
         cfg = cfg._replace(zdf_tracer_nemo_rounded_thickness=False)
+    require(cfg.barotropic_rhs_ascending_level_sum is True,
+            "the G2 card no longer selects NEMO's ascending Ue_rhs SUM")
+    if without_rhs_ascending_sum:  # ROUND-4 BEFORE ARM / plant: XLA's order
+        cfg = cfg._replace(barotropic_rhs_ascending_level_sum=False)
     nk = int(z.n_levels)
     roots = (root, *restart_roots)
     reg = g1.regions(np.asarray(z.is_active)[..., 0])
@@ -362,6 +367,8 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
                cfg.zdf_momentum_nemo_face_thickness),
            "zdf_tracer_nemo_rounded_thickness": bool(
                cfg.zdf_tracer_nemo_rounded_thickness),
+           "barotropic_rhs_ascending_level_sum": bool(
+               cfg.barotropic_rhs_ascending_level_sum),
            "n_barotropic_substeps": int(cfg.barotropic.n_barotropic_substeps),
            "region_cells": {k: int(m.sum()) for k, m in reg.items()},
            "depth_class_cells": {p: {k: int(m.sum()) for k, m in c.items()}
@@ -653,6 +660,8 @@ def main(argv=None) -> int:
                     help="BEFORE ARM: the card without NEMO's dyn_zdf divisors")
     ap.add_argument("--without-tracer-rounding", action="store_true",
                     help="BEFORE ARM: the card without NEMO's tra_zdf diagonal rounding")
+    ap.add_argument("--without-rhs-ascending-sum", action="store_true",
+                    help="BEFORE ARM: the card's Ue_rhs depth sum in XLA's order")
     ap.add_argument("--allow-dirty", action="store_true")
     ap.add_argument("--output", type=Path, required=True)
     a = ap.parse_args(argv)
@@ -663,7 +672,8 @@ def main(argv=None) -> int:
               entries=tuple(int(k) for k in a.entries.split(",")),
               exposures=tuple(a.exposures.split(",")), dump=a.dump,
               without_zdf_faces=a.without_zdf_faces,
-              without_tracer_rounding=a.without_tracer_rounding)
+              without_tracer_rounding=a.without_tracer_rounding,
+              without_rhs_ascending_sum=a.without_rhs_ascending_sum)
     a.output.write_text(json.dumps(out, indent=1) + "\n")
     if a.arm == "geometry":
         print(f"GEOMETRY {out['n_bit_identical']} of {out['n_rows']} rows bit-identical")
