@@ -126,7 +126,7 @@ R277-P5 **CONFIRMED** (no-host plant fired).
 - Citation gates: the receipt (2 citations) and the default receipt (274)
   PASS after a rigid re-anchor of the pins the import moved (one cited call
   range grew by the two imported arguments, 120 -> 122 lines); the shifted
-  `stprk3_stg.f90:215-217` plant fires.  Citation tests: 192/193 pass; the
+  stored-ratio citation plant fires.  Citation tests: 192/193 pass; the
   one red is round 228's stale span, a known base red.
 - Independent review (`codex exec --sandbox read-only`, one run): "HOLD —
   three confirmed gate defects; selector physics/default-off path and
