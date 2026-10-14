@@ -1456,9 +1456,9 @@ def build_orca2_initial_ts(
     are applied to the unmasked field.
 
     ``apply_hand_alterations=False`` is NEMO's branch when ln_tsd_dmp is false
-    (dtatsd.f90:219): the grid ladder's G3 card takes it because its deck
-    requires damping off; the ORCA2 card always takes the default (its deck
-    damps), and the ORCA2 fidelity gate uses False as its ablation control.
+    (dtatsd.f90:219): the grid ladder's G1/G2 decks (no T/S read) and the
+    ORCA2 fidelity gate's ablation control; the ORCA2 card and the ladder's
+    G3/G4 cards (Decision 120) take the default.
     No driver exposes it.
     """
 
@@ -3487,7 +3487,7 @@ ORCA2G1_UNMEASURED: tuple[str, ...] = (
 # refused: the card has no arm for it.
 _ORCA2G1_REQUIRED_SWITCHES: dict[str, object] = {
     "namcfg.ln_read_cfg": True,
-    "namtsd.ln_tsd_dmp": False,   # ln_tsd_init is the rung table's (G3)
+    # ln_tsd_init and ln_tsd_dmp are the rung tables' (G3, Decision 120)
     "namsbc.ln_flx": False,   # ln_usr ln_blk ln_traqsr ln_ssr ln_rnf nn_fwb: rung table (G4)
     "namsbc.ln_abl": False, "namsbc.ln_cpl": False, "namsbc.nn_ice": 0,
     "namsbc.ln_dm2dc": False, "namsbc.nn_fsbc": 2,
@@ -4001,6 +4001,11 @@ def build_orca2g2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
 # (ORCA2_OMIP_L4/EXP00/namelist_cfg:47,50,54-55); damping stays off.
 _ORCA2G_TSD_INIT = {"ORCA2G1-flat": False, "ORCA2G2-zps": False, "ORCA2G3-ts": True,
                     "ORCA2G4-sbc": True}
+# Decision 120: G3 and above set ln_tsd_dmp = T with ln_tradmp = F, so NEMO
+# applies the ORCA_R2 hand alterations to the initial state (dtatsd.f90:219)
+# and never restores (dta_tsd's only per-step caller is tradmp.f90:181).
+_ORCA2G_TSD_DMP = {"ORCA2G1-flat": False, "ORCA2G2-zps": False, "ORCA2G3-ts": True,
+                   "ORCA2G4-sbc": True}
 _ORCA2G3_TSD_FIELDS = {
     "namtsd.cn_dir": "'./'",
     "namtsd.sn_tem": ("'data_1m_potential_temperature_nomask',-1.,'votemper',"
@@ -4021,9 +4026,10 @@ def orca2g_initial_ts(deck_root: str | Path, case: str, tmask) -> tuple[np.ndarr
 
     ``ln_tsd_init = F`` (G1, G2): the case's uniform 20 / 30
     (usrdef_istate.F90).  ``ln_tsd_init = T`` (G3): ORCA2's climatology
-    through the ORCA2 card's reader (dtatsd.f90:260-263, :307-310), WITHOUT
-    the ORCA_R2 hand alterations: NEMO applies them only when ln_tsd_dmp is
-    true (dtatsd.f90:219), and every rung's deck requires it false.
+    through the ORCA2 card's reader (dtatsd.f90:260-263, :307-310), WITH
+    the ORCA_R2 hand alterations: NEMO applies them when ln_tsd_dmp is true
+    (dtatsd.f90:219), which G3 and above state (Decision 120); restoring
+    stays off (ln_tradmp = F is a required switch).
     """
 
     root = Path(deck_root)
@@ -4033,8 +4039,9 @@ def orca2g_initial_ts(deck_root: str | Path, case: str, tmask) -> tuple[np.ndarr
         raise ValueError(f"{case} is not a grid-ladder rung")
     if values.get("namtsd.ln_tsd_init") is not want:
         raise ValueError(f"{case} deck must state namtsd.ln_tsd_init = {want}")
-    if values.get("namtsd.ln_tsd_dmp") is not False:
-        raise ValueError(f"{case} deck must state namtsd.ln_tsd_dmp = False")
+    damp = _ORCA2G_TSD_DMP[case]
+    if values.get("namtsd.ln_tsd_dmp") is not damp:
+        raise ValueError(f"{case} deck must state namtsd.ln_tsd_dmp = {damp}")
     wet = np.asarray(tmask, dtype=bool)
     if not want:
         if any(name in values for name in _ORCA2G3_TSD_FIELDS):
@@ -4052,7 +4059,7 @@ def orca2g_initial_ts(deck_root: str | Path, case: str, tmask) -> tuple[np.ndarr
     return build_orca2_initial_ts(
         root / "data_1m_potential_temperature_nomask.nc",
         root / "data_1m_salinity_nomask.nc",
-        wet, apply_hand_alterations=False)
+        wet, apply_hand_alterations=damp)
 
 
 def build_orca2g3_ts_card(deck_root: str | Path) -> NEMOTestcaseCard:

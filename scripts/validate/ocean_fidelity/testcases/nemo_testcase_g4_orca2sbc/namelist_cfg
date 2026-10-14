@@ -66,7 +66,7 @@
 &namtsd        !    Temperature & Salinity Data
 !-----------------------------------------------------------------------
    ln_tsd_init = .true.    !  ORCA2:47 -- ORCA2's initial T/S
-   ln_tsd_dmp  = .false.   !  no restoring (ORCA2:48 has .true.)
+   ln_tsd_dmp  = .true.    !  ORCA2:48 -- ORCA_R2 hand edits (dtatsd.f90:219); ln_tradmp = F: no restoring (D120)
    cn_dir = './'           !  ORCA2:50
    sn_tem = 'data_1m_potential_temperature_nomask',     -1.     ,'votemper',   .true.    , .true. , 'yearly'  ,    ''    ,    ''    ,    ''   !  ORCA2:54
    sn_sal = 'data_1m_salinity_nomask'             ,     -1.     ,'vosaline',   .true.    , .true. , 'yearly'  ,    ''    ,    ''    ,    ''   !  ORCA2:55

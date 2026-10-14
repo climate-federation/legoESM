@@ -44,6 +44,14 @@ def _fp64():
     set_policy(before)
 
 
+AS_BUILT = "ad1ba285e37a"      # the decks rounds 14-20 acquired (before Decision 120)
+
+
+def _as_built(path):
+    return subprocess.run(["git", "-C", str(REPO), "show", f"{AS_BUILT}:{path.relative_to(REPO)}"],
+                          check=True, capture_output=True).stdout
+
+
 def _values(path):
     return recipe._orca2g1_namelist_values(path)
 
@@ -68,7 +76,7 @@ def test_g4_deck_is_g3_plus_the_forcing_groups():
         k: v for k, v in g3.items() if not k.startswith(GROUPS)}
     moved = sorted(k for k in g4 if k.startswith("namsbc.") and g4[k] != g3[k])
     assert moved == sorted(recipe._ORCA2G_SBC_SWITCHES)
-    assert g4["namsbc.nn_ice"] == 0 and g4["namtsd.ln_tsd_dmp"] is False
+    assert g4["namsbc.nn_ice"] == 0 and g4["namtsd.ln_tsd_dmp"] is True
     assert recipe.read_orca2g1_deck(G4_DIR) == recipe.read_orca2g1_deck(G3_DIR)
     assert recipe.orca2g_forcing_failures(G4_DIR, "ORCA2G4-sbc") == []
     assert recipe.orca2g_forcing_failures(G3_DIR, "ORCA2G3-ts") == []
@@ -152,8 +160,9 @@ def test_run_sh_reuses_g1_binaries_and_pins_every_forcing_file():
     for pin in ("REF_SHA", "RUN_SHA", "SHIPPED_DOMCFG_SHA"):
         want = re.search(rf"readonly {pin}=([0-9a-f]{{64}})", g3).group(1)
         assert re.search(rf"readonly {pin}=([0-9a-f]{{64}})", code).group(1) == want
+    # round 17 acquired the as-built G3 deck (before Decision 120)
     assert re.search(r"readonly G3_DECK_SHA=([0-9a-f]{64})", code).group(1) == hashlib.sha256(
-        (G3_DIR / "namelist_cfg").read_bytes()).hexdigest()
+        _as_built(G3_DIR / "namelist_cfg")).hexdigest()
     pinned = dict(line.strip().split(":") for line in re.search(
         r"readonly PINNED_FILES=\(\n(.*?)\n\)", code, re.S).group(1).splitlines())
     # every file the deck names (forcing, weights, chlorophyll, runoff), the
@@ -353,9 +362,9 @@ def test_r19_run_sh_iterations_and_frequency_are_the_resolved_deck():
     assert "namsbc_blk.nn_iter_algo" not in _values(G4_DIR / "namelist_cfg")
     if NAMELIST_REF.is_file():
         assert _values(NAMELIST_REF)["namsbc_blk.nn_iter_algo"] == 5
-    # the deck pinned in run_r19.sh is the committed G4 deck
+    # the deck pinned in run_r19.sh is the as-built G4 deck (before Decision 120)
     pinned = re.search(r"G4_DECK_SHA=(\w+)", text).group(1)
-    assert hashlib.sha256((G4_DIR / "namelist_cfg").read_bytes()).hexdigest() == pinned
+    assert hashlib.sha256(_as_built(G4_DIR / "namelist_cfg")).hexdigest() == pinned
 
 
 @needs_nemo
@@ -473,3 +482,36 @@ def test_forcing_steps_uv_faces_and_program_checks(tmp_path):
         with pytest.raises(SystemExit) as refused:
             mod.require_program(tmp_path, bad_fields)
         assert refused.value.code == 73
+
+
+def test_r21_run_sh_reacquires_g3_and_g4_on_the_decision120_decks():
+    """Round 21: one script, three admitted binaries (no build), the decks
+    = the as-built decks with ln_tsd_dmp moved, the round-19 input list."""
+    code = (G4_DIR / "run_r21.sh").read_text()
+    commands = "\n".join(l for l in code.splitlines() if not l.lstrip().startswith("#"))
+    assert not re.search(r"makenemo|maketools|\bmake\b", commands)
+    g3, r19 = (G3_DIR / "run.sh").read_text(), (G4_DIR / "run_r19.sh").read_text()
+    for mine, theirs, src in (("REF_SHA", "REF_SHA", g3), ("P5_SHA", "RUN_SHA", g3),
+                              ("G4_AS_BUILT_SHA", "G4_DECK_SHA", r19)):
+        want = re.search(rf"readonly {theirs}=([0-9a-f]{{64}})", src).group(1)
+        assert re.search(rf"readonly {mine}=([0-9a-f]{{64}})", code).group(1) == want
+    files = lambda text, name: re.search(rf"readonly {name}=\((.*?)\)", text, re.S).group(1).split()
+    assert files(code, "G4_FILES") == files(r19, "INPUT_FILES")
+    for deck in (G3_DIR, G4_DIR):
+        old, new = _values_text(_as_built(deck / "namelist_cfg")), _values(deck / "namelist_cfg")
+        assert {k for k in new if new[k] != old.get(k)} | {k for k in old if k not in new} == {
+            "namtsd.ln_tsd_dmp"}
+        assert (old["namtsd.ln_tsd_dmp"], new["namtsd.ln_tsd_dmp"]) == (False, True)
+        assert new["namtra_dmp.ln_tradmp"] is False
+    assert re.search(r"readonly AS_BUILT=(\w+)", code).group(1) == AS_BUILT
+    # NEMO's own facts the script relies on: no step-1 restart on this deck
+    assert "sbcmod.f90:341-349" in code and "restart.f90:119" in code
+    assert subprocess.run(["bash", "-n", str(G4_DIR / "run_r21.sh")]).returncode == 0
+
+
+def _values_text(data: bytes):
+    import tempfile
+    with tempfile.NamedTemporaryFile("wb", suffix="namelist_cfg") as handle:
+        handle.write(data)
+        handle.flush()
+        return _values(Path(handle.name))

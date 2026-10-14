@@ -40,7 +40,7 @@ needs_inputs = pytest.mark.skipif(
     not all((INPUTS / name).is_file() for name in FILES), reason="no ORCA2 input files")
 PRIOR = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/round14/"
              "oracle_g3_r14")
-TSD = ("namtsd.ln_tsd_init", "namtsd.cn_dir", "namtsd.sn_tem", "namtsd.sn_sal")
+TSD = ("namtsd.ln_tsd_dmp", "namtsd.ln_tsd_init", "namtsd.cn_dir", "namtsd.sn_tem", "namtsd.sn_sal")
 
 
 @pytest.fixture(autouse=True)
@@ -67,12 +67,14 @@ def test_g3_deck_is_g2_plus_orca2s_namtsd_lines():
     assert {k: v for k, v in g3.items() if k not in TSD} == {
         k: v for k, v in g2.items() if k not in TSD}
     assert (g2["namtsd.ln_tsd_init"], g3["namtsd.ln_tsd_init"]) == (False, True)
-    assert g3["namtsd.ln_tsd_dmp"] is False and g3["namtra_dmp.ln_tradmp"] is False
+    # Decision 120: hand edits on (dtatsd.f90:219), restoring off
+    assert (g2["namtsd.ln_tsd_dmp"], g3["namtsd.ln_tsd_dmp"]) == (False, True)
+    assert g3["namtra_dmp.ln_tradmp"] is False
     assert sorted(set(g3) - set(g2)) == ["namtsd.cn_dir", "namtsd.sn_sal", "namtsd.sn_tem"]
     assert recipe.read_orca2g1_deck(G3_DIR) == recipe.read_orca2g1_deck(G2_DIR)
     if ORCA2_DECK.is_file():        # the data lines are ORCA2's own
         orca2 = recipe._orca2g1_namelist_values(ORCA2_DECK)
-        for name in TSD[1:]:
+        for name in TSD:   # D120: ln_tsd_dmp is ORCA2's too
             assert "".join(str(g3[name]).split()) == "".join(str(orca2[name]).split())
 
 
@@ -132,14 +134,18 @@ def test_g3_card_is_the_g2_card_started_from_orca2s_climatology(g3_card, g3_root
     wet = np.asarray(g3_card.recipe.z_coord.is_active).astype(bool)
     t3 = np.asarray(s3.T.data)
     assert np.all(t3[~wet] == 0.0) and not np.any(t3[wet] == 20.0)
-    # NEMO's dtatsd.f90:219 skips the ORCA_R2 hand alterations with ln_tsd_dmp
-    # off: the card is the unaltered climatology, which differs from the
-    # altered one on exactly the ORCA2 lane's 1,283 T and 720 S cells.
+    # Decision 120: ln_tsd_dmp on, so NEMO's dtatsd.f90:219 applies the
+    # ORCA_R2 hand alterations: the card is the altered climatology, and the
+    # unaltered one differs on exactly the ORCA2 lane's 1,283 T / 720 S cells.
     t_alt, s_alt = recipe.build_orca2_initial_ts(
         INPUTS / "data_1m_potential_temperature_nomask.nc",
         INPUTS / "data_1m_salinity_nomask.nc", wet)
-    assert int((t3 != t_alt).sum()) == 1283
-    assert int((np.asarray(s3.S.data) != s_alt).sum()) == 720
+    assert np.array_equal(t3, t_alt) and np.array_equal(np.asarray(s3.S.data), s_alt)
+    t_off, s_off = recipe.build_orca2_initial_ts(
+        INPUTS / "data_1m_potential_temperature_nomask.nc",
+        INPUTS / "data_1m_salinity_nomask.nc", wet, apply_hand_alterations=False)
+    assert int((t3 != t_off).sum()) == 1283
+    assert int((np.asarray(s3.S.data) != s_off).sum()) == 720
 
 
 @needs_inputs
@@ -152,7 +158,7 @@ def test_g3_refuses_planted_disagreements(g3_card, g3_root, tmp_path):
             initial_state=state._replace(T=state.T.replace(data=deep)))), g3_root)
     text = (G3_DIR / "namelist_cfg").read_text()
     plants = {
-        "dmp_on": (text.replace("ln_tsd_dmp  = .false.", "ln_tsd_dmp  = .true."), "ln_tsd_dmp"),
+        "dmp_off": (text.replace("ln_tsd_dmp  = .true.", "ln_tsd_dmp  = .false."), "ln_tsd_dmp"),
         "file": (text.replace("'data_1m_salinity_nomask'", "'sali_ref_clim_monthly'"), "sn_sal"),
         "dt": (text.replace("rn_Dt       =  10800.", "rn_Dt       =   5400."), "rn_dt"),
         "date": (text.replace("nn_date0    =  010101", "nn_date0    =  010115"), "nn_date0"),
@@ -215,6 +221,9 @@ def test_abort_witness_is_read_only_at_the_step_nemo_stopped(ladder, tmp_path):
     assert ladder.abort_witness((tmp_path, run), 10) is None
 
 
+@pytest.mark.skip(reason="Decision 120: the as-built (ln_tsd_dmp = F) record is superseded; "
+                  "the card refuses it (test_card_refuses_the_as_built_records); G3 is "
+                  "re-certified on the round-21 record")
 @pytest.mark.skipif(not (PRIOR / "ref_100step/output.abort.nc").is_file(),
                     reason="the operator's G3 round-1 record is not on this machine")
 @pytest.mark.slow
@@ -253,6 +262,9 @@ R15 = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/ro
            "oracle_g3_r15")
 
 
+@pytest.mark.skip(reason="Decision 120: the as-built (ln_tsd_dmp = F) record is superseded; "
+                  "the card refuses it (test_card_refuses_the_as_built_records); G3 is "
+                  "re-certified on the round-21 record")
 @pytest.mark.skipif(not (R15 / "p3_a_10step/oracle_g1step_kt00000003.bin").is_file(),
                     reason="the operator's G3 round-2 record is not on this machine")
 @pytest.mark.slow
@@ -277,6 +289,17 @@ def test_g3_step3_needs_nemos_stored_r3u_in_dyn_zdf(ladder):
             assert s["full"]["n_unequal"] == s["partial"]["n_unequal"] == s["dry_n_unequal"] == 0
 
 
+@pytest.mark.skipif(not (R15 / "p3_a_10step/namelist_cfg").is_file(),
+                    reason="the operator's G3 round-2 record is not on this machine")
+def test_card_refuses_the_as_built_records():
+    """Decision 120: the round-14/15 records ran with ln_tsd_dmp = F (no hand
+    edits); the G3 card now transcribes only ln_tsd_dmp = T."""
+    for root in (R15 / "p3_a_10step", PRIOR / "smoke_2step"):
+        if (root / "namelist_cfg").is_file():
+            with pytest.raises(ValueError, match="ln_tsd_dmp = True"):
+                recipe.orca2g_initial_ts(root, "ORCA2G3-ts", np.ones((148, 180, 30), bool))
+
+
 @needs_inputs
 def test_stored_r3u_refuses_a_card_where_it_would_do_nothing(g3_card):
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
@@ -284,3 +307,26 @@ def test_stored_r3u_refuses_a_card_where_it_would_do_nothing(g3_card):
     cfg = r.model_config._replace(zdf_momentum_nemo_face_thickness=False)
     with pytest.raises(ValueError, match="zdf_momentum_stage_r3u_nemo_literal requires"):
         LatLonCGridOceanModel(r.grid, r.z_coord, cfg).step(r.initial_state, dt=g3_card.dt_s)
+
+
+D120_NEMO = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round5/"
+                 "acquisition/orca1ice_surface_entry_every_step_a_np2")
+
+
+@needs_inputs
+@pytest.mark.skipif(not (D120_NEMO / "oracle_step_entry_kt00000001.bin").is_file(),
+                    reason="the ORCA2 lane's kt = 1 entry record is not on this machine")
+def test_d120_initial_state_is_nemos_on_every_wet_cell(g3_root, tmp_path):
+    """Decision 120, offline: the G3 card's initial T/S equals NEMO's (the
+    ORCA2 lane's kt = 1 entry, hand edits on) on every wet cell; the plant
+    turns it red and the no-edits control differs on exactly the edits."""
+    import importlib.util
+    path = G3_DIR / "d120_initial_state.py"
+    spec = importlib.util.spec_from_file_location("d120_initial_state", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    row = mod.run({"ORCA2G3-ts": g3_root})["cases"]["ORCA2G3-ts"]
+    assert (row["unequal_T"], row["unequal_S"]) == (0, 0) and row["wet_cells"] == 430552
+    assert (row["control_no_edits_unequal_T"], row["control_no_edits_unequal_S"]) == (1283, 720)
+    assert (row["as_built_g3_level1_unequal_T"], row["as_built_g3_level1_unequal_S"]) == (0, 0)
+    assert mod.run({"ORCA2G3-ts": g3_root}, plant=True)["cases"]["ORCA2G3-ts"]["unequal_T"] == 1
