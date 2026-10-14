@@ -118,7 +118,7 @@ for pair in "$G3_REL:$G3_AS_BUILT_SHA" "$G4_REL:$G4_AS_BUILT_SHA"; do
     || { printf 'REFUSE: %s moves more than ln_tsd_dmp against the as-built deck\n' "$rel" >&2; exit 68; }
   [[ "$(block "$repo_root/$rel" namtsd)" == "$(block "$ORCA2_DECK" namtsd)" ]] \
     || { printf 'REFUSE: %s &namtsd is not ORCA2s own block\n' "$rel" >&2; exit 68; }
-  assignments "$repo_root/$rel" | grep -qx 'ln_tradmp=.false.' \
+  assignments "$repo_root/$rel" | grep -x 'ln_tradmp=.false.' >/dev/null \
     || { printf 'REFUSE: %s does not state ln_tradmp = .false.\n' "$rel" >&2; exit 68; }
 done
 grep -Eq '^ *nn_fsbc *= *'"$FSBC"'( |$)' "$G4_DECK" && ! grep -q 'nn_iter_algo' "$G4_DECK" \
