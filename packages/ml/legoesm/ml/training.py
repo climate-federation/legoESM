@@ -197,6 +197,15 @@ class TrainingConfig(NamedTuple):
     schedule: str = "warmup_cosine"
     clip_gradients: bool = True
     adam_epsilon: float = 1e-8
+    # Adam moment decay rates (defaults are Optax's own, so the historical
+    # update is unchanged) and where epsilon enters the denominator:
+    # "optax" adds it to sqrt of the bias-corrected second moment; Keras's
+    # "keras_epsilon_hat" adds it to sqrt of the UNcorrected moment
+    # (keras/src/optimizers/adam.py ``update_step``, Keras 3.6.0), which is
+    # Optax with epsilon / sqrt(1 - b2**t) at step t.  'adam'/'adamw' only.
+    adam_b1: float = 0.9
+    adam_b2: float = 0.999
+    adam_epsilon_convention: str = "optax"
 
 
 def create_optimizer(config: TrainingConfig) -> optax.GradientTransformation:
@@ -268,15 +277,40 @@ def create_optimizer(config: TrainingConfig) -> optax.GradientTransformation:
             f"Unknown schedule {config.schedule!r}; expected warmup_cosine or constant")
     if not np.isfinite(config.adam_epsilon) or config.adam_epsilon <= 0.0:
         raise ValueError("Adam epsilon must be positive finite")
+    if not (0.0 <= config.adam_b1 < 1.0 and 0.0 < config.adam_b2 < 1.0):
+        raise ValueError("Adam b1 must lie in [0, 1) and b2 in (0, 1)")
+    if config.adam_epsilon_convention == "optax":
+        epsilon = config.adam_epsilon
+
+        def wrap(factory):
+            return factory
+    elif config.adam_epsilon_convention == "keras_epsilon_hat":
+        if config.optimizer not in ("adam", "adamw"):
+            raise ValueError("keras_epsilon_hat applies to 'adam' and 'adamw'")
+
+        # Keras: m*lr*sqrt(1-b2^t)/(1-b1^t) / (sqrt(v) + eps), algebraically
+        # Optax's m_hat/(sqrt(v_hat) + eps/sqrt(1-b2^t)).  inject_hyperparams
+        # evaluates this at its pre-increment count, i.e. t - 1.
+        def epsilon(count):
+            return config.adam_epsilon / jnp.sqrt(
+                1.0 - config.adam_b2 ** (count + 1))
+
+        wrap = optax.inject_hyperparams
+    else:
+        raise ValueError(
+            "Unknown adam_epsilon_convention "
+            f"{config.adam_epsilon_convention!r}; expected optax or "
+            "keras_epsilon_hat")
 
     if config.optimizer == "adamw":
-        core = optax.adamw(
-            learning_rate=schedule, weight_decay=config.weight_decay,
-            eps=config.adam_epsilon,
+        core = wrap(optax.adamw)(
+            learning_rate=schedule, b1=config.adam_b1, b2=config.adam_b2,
+            eps=epsilon, weight_decay=config.weight_decay,
         )
     elif config.optimizer == "adam":
-        core = optax.adam(
-            learning_rate=schedule, eps=config.adam_epsilon)
+        core = wrap(optax.adam)(
+            learning_rate=schedule, b1=config.adam_b1, b2=config.adam_b2,
+            eps=epsilon)
     elif config.optimizer == "muon":
         try:
             from optax.contrib import muon
