@@ -122,6 +122,8 @@ def test_the_option_is_off_by_default_and_selected_by_g2_only():
     from legoesm.ocean.state import LatLonCGridOceanConfig
     assert LatLonCGridOceanConfig._field_defaults[
         "zdf_momentum_nemo_face_thickness"] is False
+    assert LatLonCGridOceanConfig._field_defaults[
+        "zdf_tracer_nemo_rounded_thickness"] is False       # round 3
     assert recipe._ORCA2G_ZDF_FACES == {"ORCA2G1-flat": False, "ORCA2G2-zps": True}
     assert recipe.ORCA2G2_UNMEASURED == ("multi_level_partial_cell_step",)
     # no other builder assigns it: one assignment in the whole package, the
@@ -131,6 +133,10 @@ def test_the_option_is_off_by_default_and_selected_by_g2_only():
             for n, line in enumerate(path.read_text().splitlines(), 1)
             if "zdf_momentum_nemo_face_thickness=" in line]
     assert [name for name, _ in hits] == ["nemo_testcase_recipe.py"]
+    # round 3's option is assigned on that same line and nowhere else
+    assert hits == [(path.name, n) for path in (CASES.parents[3] / "packages").rglob("*.py")
+                    for n, line in enumerate(path.read_text().splitlines(), 1)
+                    if "zdf_tracer_nemo_rounded_thickness=" in line]
     assert "_ORCA2G_ZDF_FACES[case]" in (
         CASES.parents[3] / "packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py"
     ).read_text().splitlines()[hits[0][1] - 1]
@@ -187,3 +193,85 @@ def test_two_steps_are_near_the_bar_only_with_nemos_dyn_zdf_divisors(ladder):
         assert deep[f]["summary"]["partial"]["max_abs"] > 1e-7
         assert (deep[f]["summary"]["partial"]["max_abs"]
                 > 10 * deep[f]["summary"]["full"]["max_abs"])
+
+
+def test_tracer_replay_is_nemos_solve(ladder):
+    """The offline replay against a dense solve of the same matrix, on a
+    column with a partial bottom cell and dry levels below it."""
+    g = _column()
+    nk, tmask, e3 = 5, g["mask"], g["e3_0"]
+    before = np.array([20.0, 19.5, 18.0, 15.0, 7.0])[None, None, :] * tmask
+    kw = dict(tmask=tmask, e3t_0=e3, e3w_1d=np.append(g["e3w_1d"], 30.0), avt0=1.2e-5,
+              r3t_bb=np.full((1, 1), 1e-5), r3t_mm=np.full((1, 1), 2e-5),
+              r3t_aa=np.full((1, 1), 3e-5), dt=10800.0)
+    got = ladder.nemo_trazdf_replay(before, **kw)[0, 0]
+    wet = int(tmask.sum())
+    a = np.zeros((wet, wet))
+    for k in range(wet):
+        up = 10800.0 * 1.2e-5 / (kw["e3w_1d"][k] * (1 + 2e-5)) if k else 0.0
+        dn = 10800.0 * 1.2e-5 / (kw["e3w_1d"][k + 1] * (1 + 2e-5)) if k < wet - 1 else 0.0
+        a[k, k] = e3[0, 0, k] * (1 + 3e-5) + up + dn
+        if k:
+            a[k, k - 1] = -up
+        if k < wet - 1:
+            a[k, k + 1] = -dn
+    want = np.linalg.solve(a, e3[0, 0, :wet] * (1 + 1e-5) * before[0, 0, :wet])
+    np.testing.assert_allclose(got[:wet], want, rtol=1e-13)
+    assert np.all(got[wet:] == 0.0)
+    # content is conserved by the solve (zero flux at both ends)
+    np.testing.assert_allclose((got * e3[0, 0] * (1 + 3e-5)).sum(),
+                               (before[0, 0] * e3[0, 0] * (1 + 1e-5)).sum(), rtol=1e-13)
+    # a uniform column stays uniform up to rounding: no diffusion to do
+    flat = ladder.nemo_trazdf_replay(20.0 * tmask, **dict(kw, r3t_bb=kw["r3t_aa"]))
+    np.testing.assert_allclose(flat[0, 0, :wet], 20.0, rtol=1e-14)
+
+
+@needs_record
+@pytest.mark.slow
+def test_tracers_are_nemos_bit_for_bit_only_with_the_rounded_diagonal(ladder):
+    """The round-3 landing and its before arm.  The replay must be NEMO's on
+    level 1 (0 unequal) before the card is compared with it on all levels."""
+    after = ladder.run(RECORD, arm="trazdf_replay", allow_dirty=True)
+    before = ladder.run(RECORD, arm="trazdf_replay", allow_dirty=True,
+                        without_tracer_rounding=True)
+    for f in ("T", "S"):
+        a, b = (x["per_kt"][0]["trazdf_replay"][f] for x in (after, before))
+        assert a["level1_replay_vs_nemo"]["n_unequal"] == 0
+        assert b["level1_replay_vs_nemo"]["n_unequal"] == 0
+        assert a["level1_card_vs_nemo"]["n_unequal"] == 0
+        assert sum(a["unequal_by_level"]) == 0
+        assert a["all_levels_card_vs_replay"]["dry_n_unequal"] == 0
+        assert b["level1_card_vs_nemo"]["n_unequal"] > 500
+        assert sum(b["unequal_by_level"]) > 10000 and min(b["unequal_by_level"]) > 100
+
+
+@needs_record
+@pytest.mark.slow
+def test_step_two_is_at_the_bar_on_all_levels_only_with_the_rounded_diagonal(ladder):
+    twin_b = RECORD.parent / "p3_b_10step"
+    for flag, at_bar in ((False, True), (True, False)):
+        out = ladder.run(RECORD, arm="independent", kt_from=1, kt_to=2,
+                         restart_roots=(twin_b,), allow_dirty=True,
+                         without_tracer_rounding=flag)
+        assert out["zdf_tracer_nemo_rounded_thickness"] is (not flag)
+        deep = out["per_kt"][1]["all_levels"]
+        assert all(deep[f]["summary"]["status"] == "AT-BAR"
+                   for f in ("u", "v", "T", "S")) is at_bar
+        rows = {r["name"].rsplit(".", 1)[1]: r for r in out["per_kt"][1]["rows"]}
+        assert (rows["ssh"]["status"] == "AT-BAR") is at_bar
+        if at_bar:
+            assert deep["T"]["summary"]["full"]["n_unequal"] == 0
+            assert deep["S"]["summary"]["partial"]["n_unequal"] == 0
+            assert deep["u"]["summary"]["full"]["max_abs"] < 1e-15
+        else:
+            assert deep["u"]["summary"]["full"]["max_abs"] > 1e-14
+
+
+@needs_record
+@pytest.mark.slow
+def test_the_traced_solver_loop_is_nemos_at_step_one(ladder):
+    out = ladder.run(RECORD, arm="substeps", allow_dirty=True)
+    assert out["n_substeps"] == 65 and not out["scalars_unequal"]
+    assert {r["operand"] for r in out["rows"] if not r["bit_identical"]} == {
+        "entry.sshb", "entry.sshbb"}     # NEMO's histories are not set at step 1
+    assert all(v["traced_vs_nemo_unequal"] == 0 for v in out["trace_passive"].values())

@@ -12686,6 +12686,12 @@ class LatLonCGridOceanModel:
             self._nemo_ws_test_hooks.legacy_zdf_midpoint_w_metric)
         _zdf_nemo_faces = bool(getattr(
             _cfg_b, "zdf_momentum_nemo_face_thickness", False))
+        _zdf_tracer_rounded = bool(getattr(
+            _cfg_b, "zdf_tracer_nemo_rounded_thickness", False))
+        if _zdf_tracer_rounded and not _zdf_literal:
+            raise ValueError(
+                "zdf_tracer_nemo_rounded_thickness requires "
+                "zdf_implicit_solver_evaluation='nemo_literal'")
         if _zdf_nemo_faces and (not _zdf_literal or _zdf_legacy_w or _dzw_slot):
             raise ValueError(
                 "zdf_momentum_nemo_face_thickness requires "
@@ -13301,7 +13307,8 @@ class LatLonCGridOceanModel:
                             K_v_cell, _tracer_e3t, _tracer_e3w, dt,
                             _tracer_wet,
                             evaluation="nemo_literal",
-                            implicit_w=nemo_aimp_tracer_w, return_matrix_trace=return_tracer_solve_trace))
+                            implicit_w=nemo_aimp_tracer_w, return_matrix_trace=return_tracer_solve_trace,
+                            rounded_thickness=_zdf_tracer_rounded))
                     if return_tracer_solve_trace:
                         T_new, S_new, _trace_matrix = _tracer_result
                         if (_trace_heat_K is None

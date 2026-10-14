@@ -12,10 +12,21 @@
 # record does not hold is levels 2..30 after one step.  Consecutive restarts
 # give all 30 levels at entry AND exit of every step 2..10.
 #
+# WHAT THE RUN GAVE (round 3): NEMO cannot write a list of consecutive
+# restarts.  rst_opn opens the file of nitrst at kt == nitrst - 1
+# (restart.f90:119) and the list pointer moves only after the write at
+# kt == nitrst (restart.f90:188, :199-202).  With the list starting at 1 no
+# step equals nitrst - 1 = 0, so nothing opens until the end-of-run fallback
+# of the same line fires at kt = 10 and creates the file NAMED for step 1;
+# kt = 10 is not nitrst = 1, so rst_write only defines its variables and the
+# file holds NO record.  The record therefore has no all-level state at any
+# odd step.  (A list of odd steps from 3 on would open: 3,5,7,9.)
+#
 # Admission: twin c's step streams kt = 1..10 are byte-identical to twin a's
-# (so the extra restart writes change nothing), its solver substep streams
-# equal twin a's on the consumed support, and its restarts at steps
-# 2, 4, 6, 8, 10 equal twin b's variable by variable.
+# and its solver substep streams equal twin a's on the consumed support (a
+# third run of the same trajectory); the file named for step 1 must hold no
+# record and be the only restart twin c has; the all-level states are twin
+# b's restarts of steps 2, 4, 6, 8, 10, each the recorded after-step state.
 set -Eeuo pipefail
 trap 'printf "REFUSE: unhandled command failure at run_r2.sh line %s\n" "$LINENO" >&2; exit 1' ERR
 
@@ -78,17 +89,30 @@ try:
     # one bit of twin a's copy), the solver streams on the consumed support
     result = cr.check(c, a, 10, 10, "twin-ulp" if plant == "twin-ulp" else "none")
     result["substeps"] = cr.check_substeps(c, a, [1, 2])
-    result["restarts_equal_twin_b"] = cr.restarts_identical(b, c, [2, 4, 6, 8, 10])
-    # EVERY restart, odd steps included, is the after-step state of the step
-    # stream just verified against twin a: sea level, both barotropic
-    # velocities and level 1 of u, v bit for bit.  Levels 2..30 of the odd
-    # restarts are new evidence that nothing else holds; the even ones equal
-    # twin b's above.
     import netCDF4
     import numpy as np
-    for step in range(1, 11):
-        path = c / f"ORCA2G1_{step:08d}_restart.nc"
-        cr.require(path.is_file(), f"twin c has no restart at step {step}")
+    # twin c's only restart file is the one NAMED for step 1, opened at
+    # kt = 10 by the end-of-run fallback and never written (header comment)
+    names = sorted(q.name for q in c.glob("*_restart.nc"))
+    cr.require(names == ["ORCA2G1_00000001_restart.nc"],
+               f"twin c holds restart files {names}, not the one empty file")
+    with netCDF4.Dataset(c / names[0]) as h:
+        records = len(h.dimensions["time_counter"])
+    if plant == "empty":
+        records = 1
+    cr.require(records == 0, "twin c's file named for step 1 holds a record: "
+               "read which step it is before using it")
+    log = (c / "ocean.output").read_text().splitlines()
+    opened = [log[n + 1].split()[-1] for n, line in enumerate(log)
+              if "open ocean restart NetCDF file" in line]
+    cr.require(opened == ["10"], f"NEMO opened restart files at kt {opened}, not once at 10")
+    result["twin_c_restart"] = {"file": names[0], "time_records": 0, "opened_at_kt": 10}
+    # the all-level states of this trajectory are twin b's: each restart is
+    # the after-step state of the step stream just verified against twin a
+    # (sea level, both barotropic velocities and level 1 of u, v bit for bit)
+    for step in (2, 4, 6, 8, 10):
+        path = b / f"ORCA2G1_{step:08d}_restart.nc"
+        cr.require(path.is_file(), f"twin b has no restart at step {step}")
         head, frame = cr.read_stream(cr.step_path(c, step).read_bytes(), path.name)
         js, je, i_s, ie = head["Njs0"] - 1, head["Nje0"], head["Nis0"] - 1, head["Nie0"]
         with netCDF4.Dataset(path) as h:
@@ -97,24 +121,25 @@ try:
                                    ("vn", "f_vv_k1_bb", 0)):
                 got = np.asarray(h.variables[var][0], dtype=np.float64)
                 got = got if lev is None else got[lev]
-                if plant == "restart" and step == 1 and var == "un":
+                if plant == "restart" and step == 2 and var == "un":
                     got = got.copy()
                     got.flat[got.size // 2] += 1.0
                 cr.require(np.array_equal(got, frame[name][js:je, i_s:ie]),
                            f"{path.name}: {var} is not the recorded after-step state")
-    result["restarts_equal_step_streams"] = list(range(1, 11))
+    result["restarts_equal_step_streams"] = [2, 4, 6, 8, 10]
 except cr.Refuse as exc:
     sys.exit(f"REFUSE: {exc}")
 if plant != "none":
     sys.exit("REFUSE: the plant stayed green")
 Path(out).write_text(json.dumps(result, indent=1, sort_keys=True) + "\n")
-print("G2_CONSECUTIVE_RESTARTS_ADMITTED steps 1..10; step streams equal twin a; restarts 2,4,6,8,10 equal twin b")
+print("G2_TWIN_C_ADMITTED step streams 1..10 equal twin a; NO odd-step restart exists "
+      "(the file named for step 1 holds no record); all-level states = twin b's 2,4,6,8,10")
 PY
 }
 
 if [[ "$mode" == --admit-existing ]]; then
   [[ -d "$TWIN_C" ]] || { printf 'REFUSE: nothing to admit, %s is absent\n' "$TWIN_C" >&2; exit 69; }
-  for plant in twin-ulp restart; do
+  for plant in twin-ulp restart empty; do
   if PLANT=$plant admit >/dev/null 2>&1; then printf 'REFUSE: the %s plant stayed green\n' "$plant" >&2; exit 72; fi
 done
   admit; printf 'ACQUISITION_DONE %s\n' "$EVIDENCE"; exit 0
@@ -135,7 +160,7 @@ git -C "$repo_root" rev-parse HEAD >"$EVIDENCE/legoesm_commit"
   mpirun -np 1 --oversubscribe ./nemo >>run.user.log 2>&1
   printf 'RUN_FINISHED_UTC=%s\nRUN_DONE\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>run.user.log
 )
-for plant in twin-ulp restart; do
+for plant in twin-ulp restart empty; do
   if PLANT=$plant admit >/dev/null 2>&1; then printf 'REFUSE: the %s plant stayed green\n' "$plant" >&2; exit 72; fi
 done
 admit

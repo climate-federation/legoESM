@@ -16,6 +16,15 @@ level; this script reuses its readers, regions and row scorer and adds what
                prognostics on all levels and the six barotropic histories),
                then one step (level 1 and 2-D rows) and a second step
                (all-level rows against NEMO's next restart: TWO-STEP rows).
+  substeps     step 1: the split-explicit solver's loop, every recorded
+               operand in compiled order against the model's write-only
+               trace (G1's reader and table), and the traced loop's exit and
+               the ordinary step's handoff each against NEMO's exit frame.
+  trazdf_replay  step 1, OFFLINE numpy replay of NEMO's implicit vertical
+               tracer solve (trazdf.f90:231-233, :269-272, :284-298) from
+               NEMO's recorded thickness ratios and the mesh file: level 1
+               against NEMO (must be 0 unequal: that makes it NEMO's), then
+               the card's T and S after one step against it on ALL levels.
 
 All-level rows are split by level and by DEPTH CLASS, read from NEMO's own
 mesh file: FULL = wet cell whose rest thickness equals the 1-D ladder's,
@@ -45,7 +54,8 @@ CASE = "ORCA2G2-zps"
 DEFAULT_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/round10/"
     "oracle_g2_r10/p3_a_100step")
-ARMS = ("geometry", "independent", "given_entry", "stages", "zdf_replay")
+ARMS = ("geometry", "independent", "given_entry", "stages", "zdf_replay",
+        "substeps", "trazdf_replay")
 # stage exposures of one step: the private hook that returns it, and the
 # level-1 NEMO frame fields (u, v, T, S, ssh) it must equal
 EXPOSURES = {
@@ -204,6 +214,38 @@ def nemo_dynzdf_replay(explicit, barotropic, *, e3_0, mask, avm_pair, r3_aa,
     return u, u + zub[..., None] * mask
 
 
+def nemo_trazdf_replay(before, *, tmask, e3t_0, e3w_1d, avt0, r3t_bb, r3t_mm,
+                       r3t_aa, dt) -> np.ndarray:
+    """NEMO's tra_zdf_imp on one tracer with a zero trend, every statement in
+    the written order with one rounding per operation (numpy has no fused
+    multiply-add).  ``before`` and the masks are (y, x, nk); the ratios are
+    (y, x).  avt = avt0 * wmask (zdfphy.f90:227, :349)."""
+    nk = before.shape[-1]
+    wmask = tmask.copy()
+    wmask[..., 1:] = tmask[..., 1:] * tmask[..., :-1]
+    wmask[..., 0] = 0.0                                   # trazdf.f90:216
+    avt = np.concatenate([avt0 * wmask, np.zeros_like(wmask[..., :1])], axis=-1)
+    zwi, zws, zwd = (np.empty_like(tmask) for _ in range(3))
+    for k in range(nk):                                   # trazdf.f90:231-233
+        zwi[..., k] = (-dt * avt[..., k]) / (e3w_1d[k] * (1.0 + r3t_mm))
+        zws[..., k] = (-dt * avt[..., k + 1]) / (e3w_1d[k + 1] * (1.0 + r3t_mm))
+        zwd[..., k] = (e3t_0[..., k] * (1.0 + r3t_aa * tmask[..., k])) - (
+            zwi[..., k] + zws[..., k])
+    zwt = np.empty_like(tmask)
+    zwt[..., 0] = zwd[..., 0]                             # trazdf.f90:269
+    for k in range(1, nk):                                # trazdf.f90:272
+        zwt[..., k] = zwd[..., k] - zwi[..., k] * zws[..., k - 1] / zwt[..., k - 1]
+    pt = np.empty_like(tmask)
+    for k in range(nk):                                   # trazdf.f90:284-290
+        zrhs = (e3t_0[..., k] * (1.0 + r3t_bb * tmask[..., k])) * before[..., k]
+        pt[..., k] = zrhs if k == 0 else (
+            zrhs - zwi[..., k] / zwt[..., k - 1] * pt[..., k - 1])
+    pt[..., -1] = pt[..., -1] / zwt[..., -1] * tmask[..., -1]   # trazdf.f90:294
+    for k in range(nk - 2, -1, -1):                       # trazdf.f90:297-298
+        pt[..., k] = (pt[..., k] - zws[..., k] * pt[..., k + 1]) / zwt[..., k] * tmask[..., k]
+    return pt
+
+
 def card_levels(state) -> dict[str, np.ndarray]:
     return {"u": np.asarray(state.u.data)[:, 1:], "v": np.asarray(state.v.data)[1:],
             "T": np.asarray(state.T.data), "S": np.asarray(state.S.data)}
@@ -273,7 +315,8 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
         state_out: Path | None = None, plant: str | None = None,
         geometry_plant: str | None = None, allow_dirty: bool = False,
         entries=(1, 3, 5, 7, 9), exposures=tuple(EXPOSURES),
-        dump: Path | None = None, without_zdf_faces: bool = False) -> dict:
+        dump: Path | None = None, without_zdf_faces: bool = False,
+        without_tracer_rounding: bool = False) -> dict:
     require(arm in ARMS, f"unknown arm {arm!r}")
     require(plant in (None, "score", "level"), f"unknown plant {plant!r}")
     from legoesm.ocean.fidelity.provenance import allow_dirty_stamps, git_sha
@@ -301,6 +344,10 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
             "the G2 card no longer selects NEMO's dyn_zdf divisors")
     if without_zdf_faces:      # ROUND-2 BEFORE ARM / plant: the two-cell mean
         cfg = cfg._replace(zdf_momentum_nemo_face_thickness=False)
+    require(cfg.zdf_tracer_nemo_rounded_thickness is True,
+            "the G2 card no longer selects NEMO's tra_zdf diagonal rounding")
+    if without_tracer_rounding:   # ROUND-3 BEFORE ARM / plant: the fused form
+        cfg = cfg._replace(zdf_tracer_nemo_rounded_thickness=False)
     nk = int(z.n_levels)
     roots = (root, *restart_roots)
     reg = g1.regions(np.asarray(z.is_active)[..., 0])
@@ -313,6 +360,8 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
            "plant": plant, "card_levels": nk, "packages_tree": packages,
            "zdf_momentum_nemo_face_thickness": bool(
                cfg.zdf_momentum_nemo_face_thickness),
+           "zdf_tracer_nemo_rounded_thickness": bool(
+               cfg.zdf_tracer_nemo_rounded_thickness),
            "n_barotropic_substeps": int(cfg.barotropic.n_barotropic_substeps),
            "region_cells": {k: int(m.sum()) for k, m in reg.items()},
            "depth_class_cells": {p: {k: int(m.sum()) for k, m in c.items()}
@@ -404,6 +453,72 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
             if dump is not None:
                 np.savez(Path(dump) / f"card_kt{kt}_{name}.npz", **card_levels(st),
                          ssh=np.asarray(st.eta.data))
+        return out
+    if arm == "substeps":
+        # the split-explicit solver's loop at step 1 (the exact initial state
+        # is its entry): every recorded operand in compiled order against the
+        # model's write-only trace.  Reader and table are G1's.
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import _NEMOWSRK3TestHooks
+        require(kt_from == 1, "the G2 substep walk starts from the initial state")
+        out["label"] = "INDEPENDENT = GIVEN-NEMO-ENTRY at step 1 (solver substep loop)"
+        head, sub = g1.read_substep_record(root, 1)
+        n_sub = head["icycle"]
+        require(n_sub == int(cfg.barotropic.n_barotropic_substeps),
+                "NEMO and the card ran different substep counts")
+        res = jax.device_get(LatLonCGridOceanModel(
+            card.recipe.grid, z, cfg, _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+                expose_barotropic_substeps=True)).step(s0, dt=card.dt_s))
+        trace = {k: np.asarray(v) for k, v in res.substeps.items()}
+        raw = z.nemo_een_barotropic
+        wet = {"t": np.asarray(z.is_active)[..., 0] > 0.5,
+               "u": np.asarray(raw.umask)[..., 0] > 0,
+               "v": np.asarray(raw.vmask)[..., 0] > 0}
+        table = g1.substep_table(sub, trace, n_sub, wet, reg, plant)
+        # passive: the traced loop's exit is the ordinary stage-1 handoff
+        plain = card_surface(jax.device_get(LatLonCGridOceanModel(
+            card.recipe.grid, z, cfg, _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+                expose_momentum_stage=1, expose_tracer_stage=1)).step(
+                    s0, dt=card.dt_s)))
+        traced = card_surface(res.state_after_barotropic)
+        # ... and both must sit at the same distance from NEMO's exit frame
+        out["trace_passive"] = {f: {
+            "ordinary_vs_traced_unequal": int(np.count_nonzero(plain[f] != traced[f])),
+            "ordinary_vs_traced_max_abs": float(np.max(np.abs(plain[f] - traced[f]))),
+            "ordinary_vs_nemo_unequal": int(np.count_nonzero(
+                (plain[f] != sub["o000_" + nm]) & wet[sg])),
+            "traced_vs_nemo_unequal": int(np.count_nonzero(
+                (traced[f] != sub["o000_" + nm]) & wet[sg]))}
+            for f, nm, sg in (("ssh", "ssh_aa", "t"), ("uu_b", "uu_b_aa", "u"),
+                              ("vv_b", "vv_b_aa", "v"))}
+        out.update({"kt": 1, "n_substeps": n_sub, **table})
+        return out
+    if arm == "trazdf_replay":
+        require(kt_from == 1, "the tracer replay starts from the initial state")
+        out["label"] = ("OFFLINE replay of NEMO's tra_zdf from NEMO's recorded "
+                        "ratios; the card from its own initial state (step 1)")
+        g = g1.read_step(root, 1)
+        with netCDF4.Dataset(root / "mesh_mask.nc") as h:
+            geom = dict(
+                tmask=levels_last(h.variables["tmask"][0], nk),
+                e3t_0=levels_last(h.variables["e3t_0"][0], nk),
+                e3w_1d=np.asarray(h.variables["e3w_1d"][0], np.float64),
+                avt0=float(recipe.read_orca2g1_deck(root).rn_avt0_m2_s),
+                r3t_bb=g["e_r3t_bb"], r3t_mm=g["2_r3t_aa"], r3t_aa=g["3_r3t_aa"],
+                dt=card.dt_s)
+        cand, rows = card_levels(step(s0)[0]), {}
+        for f in ("T", "S"):
+            name = f"3_{f.lower()}n_k1_aa"
+            rep = nemo_trazdf_replay(np.asarray(getattr(s0, f).data, np.float64), **geom)
+            by_level = level_rows(rep, cand[f], cls["t"])
+            rows[f] = {
+                "level1_replay_vs_nemo": g1.row(
+                    f"trazdf_replay.kt1.{f}", g[name], rep[..., 0], reg),
+                "level1_card_vs_nemo": g1.row(
+                    f"trazdf_replay.card.kt1.{f}", g[name], cand[f][..., 0], reg),
+                "all_levels_card_vs_replay": class_summary(by_level),
+                "unequal_by_level": [r["full"]["n_unequal"] + r["partial"]["n_unequal"]
+                                     for r in by_level]}
+        out["per_kt"].append({"kt": 1, "trazdf_replay": rows})
         return out
     if arm == "zdf_replay":
         # OFFLINE replay (rule 5): the card's own passive stage-3 arrays, from
@@ -534,6 +649,8 @@ def main(argv=None) -> int:
     ap.add_argument("--geometry-plant")
     ap.add_argument("--without-zdf-faces", action="store_true",
                     help="BEFORE ARM: the card without NEMO's dyn_zdf divisors")
+    ap.add_argument("--without-tracer-rounding", action="store_true",
+                    help="BEFORE ARM: the card without NEMO's tra_zdf diagonal rounding")
     ap.add_argument("--allow-dirty", action="store_true")
     ap.add_argument("--output", type=Path, required=True)
     a = ap.parse_args(argv)
@@ -543,7 +660,8 @@ def main(argv=None) -> int:
               geometry_plant=a.geometry_plant, allow_dirty=a.allow_dirty,
               entries=tuple(int(k) for k in a.entries.split(",")),
               exposures=tuple(a.exposures.split(",")), dump=a.dump,
-              without_zdf_faces=a.without_zdf_faces)
+              without_zdf_faces=a.without_zdf_faces,
+              without_tracer_rounding=a.without_tracer_rounding)
     a.output.write_text(json.dumps(out, indent=1) + "\n")
     if a.arm == "geometry":
         print(f"GEOMETRY {out['n_bit_identical']} of {out['n_rows']} rows bit-identical")
@@ -565,6 +683,27 @@ def main(argv=None) -> int:
                       f"{s2['full']['max_abs']:.2e} partial {s2['partial']['max_abs']:.2e}"
                       f" | solve only: full {s3['full']['max_abs']:.2e} partial "
                       f"{s3['partial']['max_abs']:.2e}")
+        return 0
+    if a.arm == "trazdf_replay":
+        bad = False
+        for f, per in out["per_kt"][0]["trazdf_replay"].items():
+            r, c, s2 = (per["level1_replay_vs_nemo"], per["level1_card_vs_nemo"],
+                        per["all_levels_card_vs_replay"])
+            n = s2["full"]["n_unequal"] + s2["partial"]["n_unequal"]
+            bad |= bool(r["n_unequal"] or c["n_unequal"] or n or s2["dry_n_unequal"])
+            print(f"{f} replay vs NEMO level 1: unequal {r['n_unequal']} | card vs NEMO "
+                  f"level 1: unequal {c['n_unequal']} max {c['max_abs']:.3e} | card vs "
+                  f"replay all levels: unequal {n} max "
+                  f"{max(s2['full']['max_abs'], s2['partial']['max_abs']):.3e}")
+        return 1 if bad else 0
+    if a.arm == "substeps":
+        f = out["first_unequal"]
+        print("SUBSTEPS first unequal operand:", f and (f["name"], f["n_unequal"]))
+        print("  rows unequal:", sorted({r["operand"] for r in out["rows"]
+                                         if not r["bit_identical"]}))
+        for k, v in out["trace_passive"].items():
+            print(f"  {k}: traced exit vs NEMO unequal {v['traced_vs_nemo_unequal']}, "
+                  f"ordinary handoff vs NEMO unequal {v['ordinary_vs_nemo_unequal']}")
         return 0
     bad = False
     for p in out["per_kt"]:

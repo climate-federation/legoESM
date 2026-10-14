@@ -3156,6 +3156,12 @@ class LatLonCGridOceanConfig(NamedTuple):
     # ``e3w_1d(jk)*(1 + r3u(Kmm))``.  False keeps the two-cell mean and the
     # face-mapped T-point interface thickness (every card before rung G2).
     zdf_momentum_nemo_face_thickness: bool = False
+    # NEMO's tra_zdf diagonal (trazdf.f90:233) rounds the after thickness
+    # ``e3t_3d*(1 + r3t(Kaa)*tmask)`` before subtracting the two off-diagonal
+    # coefficients.  False lets the compiled kernel fuse that product with the
+    # subtraction (one rounding): real-equal, different in the last place of
+    # the diagonal, and through it of T and S on every level.
+    zdf_tracer_nemo_rounded_thickness: bool = False
     # The stored top V row of the 3-D velocity is NEMO's fold image of the
     # row below it, as the exchange that ends each stage leaves it
     # (stprk3_stg.f90:572-573).  False keeps the row at the compact mask's

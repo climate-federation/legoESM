@@ -80,9 +80,12 @@ def test_round2_acquisition_is_one_run_of_the_pinned_binary_with_no_build():
         value = re.search(rf"readonly {pin}=([0-9a-f]{{64}})", text).group(1)
         assert f"{pin}={value}" in round1
     assert "nn_stocklist = ).*/\\11,2,3,4,5,6,7,8,9,10/" in text
-    assert "restarts_identical(b, c, [2, 4, 6, 8, 10])" in text
-    assert code.count("for plant in twin-ulp restart; do") == 2   # both plants must refuse
-    assert "is not the recorded after-step state" in text  # odd restarts are judged
+    # round 3: NEMO wrote no odd-step restart (restart.f90:119); the file named
+    # for step 1 must be empty, and twin b's even restarts are the states
+    assert code.count("for plant in twin-ulp restart empty; do") == 2   # all three refuse
+    assert 'cr.require(records == 0, "twin c\'s file named for step 1 holds a record' in text
+    assert "for step in (2, 4, 6, 8, 10):" in text
+    assert "is not the recorded after-step state" in text
 
 
 def _strait_free_copy(tmp_path: Path) -> Path:
@@ -187,7 +190,10 @@ def test_g2_differs_from_g1_only_by_what_the_domain_resolves(g2_card):
     g1 = recipe.build_nemo_testcase_card("ORCA2G1-flat", deck_root=G1_RECORD)
     a, b = g2_card.recipe.model_config, g1.recipe.model_config
     assert [f for f in a._fields if repr(getattr(a, f)) != repr(getattr(b, f))] == [
-        "barotropic", "zdf_momentum_nemo_face_thickness"]   # round 2: dyn_zdf divisors
+        "barotropic", "zdf_momentum_nemo_face_thickness",   # round 2: dyn_zdf divisors
+        "zdf_tracer_nemo_rounded_thickness"]                # round 3: tra_zdf diagonal
+    assert (a.zdf_tracer_nemo_rounded_thickness, b.zdf_tracer_nemo_rounded_thickness) == (
+        True, False)
     assert (a.zdf_momentum_nemo_face_thickness, b.zdf_momentum_nemo_face_thickness) in (
         (False, True), (True, False))
     assert [f for f in a.barotropic._fields
