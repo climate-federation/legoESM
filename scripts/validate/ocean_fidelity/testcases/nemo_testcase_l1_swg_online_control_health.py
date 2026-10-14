@@ -68,13 +68,19 @@ def report(root: Path, deck: str) -> dict:
         provider = climate.legoesm_npz_provider(
             root, DAYS_PER_YEAR, start_day=start, name=f"{deck} year {year}",
             expected_namelist=namelist)
+        # Top-octave, native grid-noise and thickness/Courant health exist only
+        # on the explicitly selected online path (the default is registered).
         arrays = climate.diagnose(
-            provider, days=DAYS_PER_YEAR, card=card, namelist=namelist)
+            provider, days=DAYS_PER_YEAR, card=card, namelist=namelist,
+            diagnostics="online")
         years.append({"year": year, "days": [start, start + 364],
                       **summarize_year(arrays)})
     return {
         "schema": "legoesm-swg-online-control-health-v1",
         "deck": deck,
+        "diagnostics": "online",
+        # Health of daily means and of snapshots differ; say which was read.
+        "sampling": provider.sampling,
         "source_root": str(root.resolve()),
         "source_manifest_sha256": climate.sha256(manifest_path),
         "years": years,

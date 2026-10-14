@@ -1,9 +1,20 @@
 #!/usr/bin/env python3
-"""Held-out SWG online-closure scorecard and adversarial gate plants."""
+"""Held-out SWG online-closure climate gate, no-closure controls, and plants.
+
+Every candidate -- a trained network seed or a no-closure control -- is a
+free run from rest scored on the SAME frozen two-year windows against the
+coarse truth climatology made by the SAME operator as the training objective
+(``symmetric`` = box restriction, ``template`` = filtered restriction).  The
+bars are the truth's own window-to-window spread, frozen in ``FROZEN_GATE``
+before any trained model exists; ``freeze --verify`` recomputes them from the
+pinned data and refuses any drift.
+"""
 from __future__ import annotations
 
 import argparse
+import functools
 import hashlib
+import io
 import json
 import sys
 from pathlib import Path
@@ -11,13 +22,13 @@ from pathlib import Path
 import numpy as np
 from legoesm.ocean.fidelity.nemo_testcase_recipe import (
     SWG_DG50_NAMELIST,
+    SWG_MADDISON_NAMELIST,
     build_swg_card,
 )
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import nemo_testcase_l1_swg_dg_climate as climate  # noqa: E402
-from nemo_testcase_l1_swg_dg_climate import grid_noise_index  # noqa: E402
 
 DEFAULT_ROUND2 = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgonl_rounds/round2")
@@ -27,14 +38,26 @@ EXPECTED_CONTROL_MANIFEST_SHA256 = {
     "nu80": "cbee1f9f2268cec353c99bd3922b86a08a645f57cea81f9950791cbe35895f26",
     "truth": "aaec7f829d7530a275c07a263cd96185a4fa6245be411c63626156e35fa65d2c",
 }
-HELD_OUT_THRESHOLDS = {
-    "mean_face_transport_rmse_m3_s": 1_439_733.0572095357,
-    "ke_spectrum_relative_l1": 0.22300407134605818,
-    "wet_eke_map_nrmse": 0.3936729545472666,
-    "top_octave_ke_fraction": 0.05386245208452097,
-    "top_octave_enstrophy_fraction": 0.43591781489231474,
-    "native_grid_noise_index": 0.9317922221566435,
+# Registered 20-year inputs of the round-6 gate.  The fine truth is the
+# 6.25 km run whose first 1095 days are bit-equal to the round-2 truth; only
+# its END-OF-DAY SNAPSHOT fields are read, because both controls archive
+# daily snapshots (a daily-mean truth would be a different quantity).
+FINE_TRUTH_ROOT = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgdg_rounds/"
+    "legoesm_runs/dg_gpu_7300d_truth")
+CONTROL_ROOTS = {
+    "nu10": DEFAULT_ROUND2.parent / "round1/dg50_cpu_7300d_no_closure",
+    "nu80": DEFAULT_ROUND2 / "dg50_nu80_cpu_7300d",
 }
+FINE_SNAPSHOT_LABEL = "end-of-day instantaneous state"
+GATE_WINDOW_DAYS = 730
+GATE_FIRST_DAY = 366
+SKILL_METRICS = ("mean_face_transport_rmse_m3_s", "ke_spectrum_relative_l1",
+                 "wet_eke_map_nrmse")
+NOISE_METRICS = ("top_octave_ke_fraction", "top_octave_enstrophy_fraction",
+                 "native_grid_noise_index")
+VARIABILITY_METRIC = "basin_eke_ratio"
+SCORE_METRICS = SKILL_METRICS + (VARIABILITY_METRIC,) + NOISE_METRICS
 
 
 def _sha256(path: Path) -> str:
@@ -43,15 +66,6 @@ def _sha256(path: Path) -> str:
         for block in iter(lambda: stream.read(1 << 20), b""):
             digest.update(block)
     return digest.hexdigest()
-
-
-def _load_year(root: Path, directory: str):
-    path = root / directory / "swg_dg_climate_arrays.npz"
-    if not path.is_file():
-        raise ValueError(f"missing admitted climate arrays {path}")
-    with np.load(path) as values:
-        arrays = {name: np.asarray(values[name]) for name in values.files}
-    return path, arrays
 
 
 def _deck_geometry():
@@ -64,8 +78,13 @@ def _deck_geometry():
     return mask, float(depth[mask][0])
 
 
-def _mean(years, key):
-    return np.mean(np.stack([year[key] for year in years]), axis=0)
+@functools.lru_cache(maxsize=1)
+def _dg50():
+    """The dg50 card and C-grid geometry, built once per process."""
+    from legoesm.ocean.fidelity.swg_coarse_graining import cgrid_geometry
+
+    _deck_geometry()
+    return build_swg_card(SWG_DG50_NAMELIST), cgrid_geometry(SWG_DG50_NAMELIST)
 
 
 def _native_array_provider(name: str, arrays: tuple[np.ndarray, ...]):
@@ -82,77 +101,209 @@ def _native_array_provider(name: str, arrays: tuple[np.ndarray, ...]):
     return climate.DailyProvider(name, "daily_snapshot", {}, iterate)
 
 
-def score_native_trajectory(candidate_arrays: tuple[np.ndarray, ...],
-                            truth_arrays: tuple[np.ndarray, ...]) -> dict:
-    """Score arbitrary native model arrays through the control diagnostic."""
-    from legoesm.ocean.fidelity.swg_coarse_graining import (
-        cgrid_geometry,
-        native_face_transports,
-    )
+def window_statistics(arrays: tuple[np.ndarray, ...]) -> dict:
+    """Diagnose one native dg50 (ssh, u, v) window once, candidate or truth."""
+    from legoesm.ocean.fidelity.swg_coarse_graining import native_face_transports
 
-    card = build_swg_card(SWG_DG50_NAMELIST)
-    days = int(candidate_arrays[0].shape[0])
-    if truth_arrays[0].shape[0] != days:
-        raise ValueError("candidate and truth trajectories have different lengths")
-    diagnosed = [climate.diagnose(
-        _native_array_provider(name, values), days=days, card=card,
+    card, geometry = _dg50()
+    days = int(arrays[0].shape[0])
+    diagnosed = climate.diagnose(
+        _native_array_provider("window", arrays), days=days, card=card,
         namelist=SWG_DG50_NAMELIST, diagnostics="online")
-        for name, values in (("candidate", candidate_arrays),
-                             ("truth", truth_arrays))]
-    candidate, truth = diagnosed
-    wet, _ = _deck_geometry()
-    geometry = cgrid_geometry(SWG_DG50_NAMELIST)
-
-    def mean_transport(arrays):
-        ssh, u, v = arrays
-        transports = [native_face_transports(
-            {"T": ssh[day], "U": u[day], "V": v[day]}, geometry)
-            for day in range(days)]
-        return {kind: np.mean(np.stack([
-            item[kind] for item in transports]), axis=0)
-            for kind in ("U", "V")}
-
-    candidate_q = mean_transport(candidate_arrays)
-    truth_q = mean_transport(truth_arrays)
-    face_error = np.concatenate([
-        (candidate_q[kind] - truth_q[kind])[geometry["mask"][kind]]
-        for kind in ("U", "V")])
-    spectrum_l1 = float(np.sum(np.abs(
-        candidate["mean_kinetic_energy_spectrum_m3_s2"]
-        - truth["mean_kinetic_energy_spectrum_m3_s2"]))
-        / np.sum(np.abs(truth["mean_kinetic_energy_spectrum_m3_s2"])))
-    candidate_eke = candidate["eke_map_m2_s2"]
-    truth_eke = truth["eke_map_m2_s2"]
-    eke_map_nrmse = float(np.sqrt(np.mean(
-        (candidate_eke[wet] - truth_eke[wet]) ** 2))
-        / np.sqrt(np.mean(truth_eke[wet] ** 2)))
-    eke_ratio = float(np.mean(candidate["basin_mean_eke_m2_s2"])
-                      / np.mean(truth["basin_mean_eke_m2_s2"]))
+    ssh, u, v = arrays
+    transports = [native_face_transports(
+        {"T": ssh[day], "U": u[day], "V": v[day]}, geometry)
+        for day in range(days)]
     health = {
-        "all_finite": bool(all(np.all(np.isfinite(value))
-                                for value in candidate_arrays)),
+        "all_finite": True,  # _native_array_provider refused anything else
         "minimum_total_layer_thickness_m": float(np.min(
-            candidate["minimum_total_layer_thickness_m"])),
+            diagnosed["minimum_total_layer_thickness_m"])),
         "maximum_courant": float(max(
-            np.max(candidate["maximum_u_courant"]),
-            np.max(candidate["maximum_v_courant"]))),
+            np.max(diagnosed["maximum_u_courant"]),
+            np.max(diagnosed["maximum_v_courant"]))),
     }
     health["passes"] = bool(
-        health["all_finite"]
-        and health["minimum_total_layer_thickness_m"] > 0.0
+        health["minimum_total_layer_thickness_m"] > 0.0
         and health["maximum_courant"] < 1.0)
+    return {
+        "days": days,
+        "mean_transport_m3_s": {kind: np.mean(np.stack([
+            item[kind] for item in transports]), axis=0) for kind in ("U", "V")},
+        "mean_kinetic_energy_spectrum_m3_s2": diagnosed[
+            "mean_kinetic_energy_spectrum_m3_s2"],
+        "eke_map_m2_s2": diagnosed["eke_map_m2_s2"],
+        "basin_mean_eke_m2_s2": float(np.mean(diagnosed["basin_mean_eke_m2_s2"])),
+        "top_octave_ke_fraction": float(diagnosed["top_octave_ke_fraction"][0]),
+        "top_octave_enstrophy_fraction": float(
+            diagnosed["top_octave_enstrophy_fraction"][0]),
+        "native_grid_noise_index": float(np.mean(
+            diagnosed["native_grid_noise_index"])),
+        "physical_health": health,
+    }
+
+
+def score_statistics(candidate: dict, reference: dict) -> dict:
+    """Score one candidate window against reference (truth) statistics."""
+    _, geometry = _dg50()
+    wet = np.asarray(geometry["mask"]["T"], dtype=bool)
+    face_error = np.concatenate([
+        (candidate["mean_transport_m3_s"][kind]
+         - reference["mean_transport_m3_s"][kind])[geometry["mask"][kind]]
+        for kind in ("U", "V")])
+    spectrum = "mean_kinetic_energy_spectrum_m3_s2"
+    spectrum_l1 = float(np.sum(np.abs(candidate[spectrum] - reference[spectrum]))
+                        / np.sum(np.abs(reference[spectrum])))
+    candidate_eke = candidate["eke_map_m2_s2"]
+    reference_eke = reference["eke_map_m2_s2"]
+    eke_map_nrmse = float(np.sqrt(np.mean(
+        (candidate_eke[wet] - reference_eke[wet]) ** 2))
+        / np.sqrt(np.mean(reference_eke[wet] ** 2)))
     return {
         "mean_face_transport_rmse_m3_s": float(np.sqrt(np.mean(face_error**2))),
         "ke_spectrum_relative_l1": spectrum_l1,
         "wet_eke_map_nrmse": eke_map_nrmse,
-        "basin_eke_ratio": eke_ratio,
-        "top_octave_ke_fraction": float(candidate["top_octave_ke_fraction"][0]),
-        "top_octave_enstrophy_fraction": float(
-            candidate["top_octave_enstrophy_fraction"][0]),
-        "native_grid_noise_index": float(np.mean(
-            candidate["native_grid_noise_index"])),
-        "physical_health": health,
+        "basin_eke_ratio": (candidate["basin_mean_eke_m2_s2"]
+                            / reference["basin_mean_eke_m2_s2"]),
+        **{metric: candidate[metric] for metric in NOISE_METRICS},
+        "physical_health": dict(candidate["physical_health"]),
     }
+
+
+def score_native_trajectory(candidate_arrays: tuple[np.ndarray, ...],
+                            truth_arrays: tuple[np.ndarray, ...]) -> dict:
+    """Score arbitrary native model arrays through the control diagnostic."""
+    if truth_arrays[0].shape[0] != candidate_arrays[0].shape[0]:
+        raise ValueError("candidate and truth trajectories have different lengths")
+    return score_statistics(window_statistics(candidate_arrays),
+                            window_statistics(truth_arrays))
+
+
+def climatology(window_stats: list[dict]) -> dict:
+    """Equal-weight mean of equal-length per-window reference statistics."""
+    if len(window_stats) < 2 or len({item["days"] for item in window_stats}) != 1:
+        raise ValueError("a climatology needs two or more equal-length windows")
+
+    def mean(values):
+        return np.mean(np.stack(values), axis=0)
+
+    spectrum = "mean_kinetic_energy_spectrum_m3_s2"
+    return {
+        "days": window_stats[0]["days"],
+        "windows": len(window_stats),
+        "mean_transport_m3_s": {kind: mean([
+            item["mean_transport_m3_s"][kind] for item in window_stats])
+            for kind in ("U", "V")},
+        spectrum: mean([item[spectrum] for item in window_stats]),
+        "eke_map_m2_s2": mean([item["eke_map_m2_s2"] for item in window_stats]),
+        "basin_mean_eke_m2_s2": float(np.mean([
+            item["basin_mean_eke_m2_s2"] for item in window_stats])),
+    }
+
+
+def leave_one_out_scores(window_stats: list[dict]) -> list[dict]:
+    """Score each truth window against the climatology of all OTHER windows."""
+    if len(window_stats) < 3:
+        raise ValueError("truth spread needs at least three windows")
+    return [score_statistics(window_stats[k], climatology(
+        window_stats[:k] + window_stats[k + 1:]))
+        for k in range(len(window_stats))]
+
+
+def registered_windows(count: int) -> list[tuple[int, int]]:
+    """The first ``count`` non-overlapping two-year windows after spin-up."""
+    return [(GATE_FIRST_DAY + k * GATE_WINDOW_DAYS,
+             GATE_FIRST_DAY + (k + 1) * GATE_WINDOW_DAYS - 1)
+            for k in range(count)]
+
+
+def truth_restrictor(objective: str):
+    """Return the coarse-graining operator of one explicitly named objective."""
+    from legoesm.ocean.fidelity.swg_coarse_graining import (
+        FILTER_TRUNCATE,
+        cgrid_geometry,
+        conservative_restrict_cgrid,
+        filtered_restrict_cgrid,
+    )
+    from legoesm.training.swg_online import OBJECTIVE_OPERATORS
+
+    if objective not in OBJECTIVE_OPERATORS:
+        raise ValueError(f"objective must be one of {OBJECTIVE_OPERATORS}, "
+                         f"got {objective!r}")
+    source = cgrid_geometry(SWG_MADDISON_NAMELIST)
+    target = _dg50()[1]
+    if objective == "symmetric":
+        return functools.partial(
+            conservative_restrict_cgrid, source=source, target=target)
+    # Same sigma derivation as the driver's in-scan sampler: one dg50 cell.
+    return functools.partial(
+        filtered_restrict_cgrid, source=source, target=target,
+        sigma_source_cells=float(target["spacing_m"]) / float(source["spacing_m"]),
+        truncate=FILTER_TRUNCATE)
+
+
+def _fine_truth_manifest(root: Path) -> dict:
+    """The fine truth manifest; a still-running archive is read by its pins."""
+    complete = root / "manifest.json"
+    path = complete if complete.is_file() else root / "manifest.pending.json"
+    manifest = json.loads(path.read_text())
+    if manifest.get("status") not in ("complete", "pending"):
+        raise ValueError(f"unusable fine truth manifest status in {path}")
+    climate._require_legoesm_deck(
+        manifest.get("namelist", {}), SWG_MADDISON_NAMELIST)
+    return manifest
+
+
+def fine_truth_pins_digest(root: Path, windows) -> str:
+    """One SHA-256 over every pinned fine-truth day file the windows read."""
+    pins = _fine_truth_manifest(root).get("daily_sha256", {})
+    lines = []
+    for first, last in windows:
+        for day in range(first, last + 1):
+            name = f"day{day:04d}.npz"
+            if name not in pins:
+                raise ValueError(f"fine truth does not pin {name} yet")
+            lines.append(f"{name} {pins[name]}\n")
+    return hashlib.sha256("".join(lines).encode()).hexdigest()
+
+
+def _snapshot_fields(saved, name: str, *, labelled: bool) -> tuple[np.ndarray, ...]:
+    """End-of-day snapshot (ssh, u, v) of one day file, never a daily mean.
+
+    Dual archives (v2) carry both samplings and label the snapshot; for them
+    ``labelled`` is required.  Single-sampling snapshot archives (v1, coarse
+    truth ``snapshots``) carry only the snapshot fields.
+    """
+    label = (str(saved["snapshot_sampling"])
+             if "snapshot_sampling" in saved.files else None)
+    if (labelled or label is not None) and label != FINE_SNAPSHOT_LABEL:
+        raise ValueError(f"{name}: no labelled end-of-day snapshot fields")
+    if not {"ssh_m", "u_m_s", "v_m_s"} <= set(saved.files):
+        raise ValueError(f"{name}: snapshot fields are absent")
+    return tuple(np.asarray(saved[field], dtype=np.float64)
+                 for field in ("ssh_m", "u_m_s", "v_m_s"))
+
+
+def restrict_fine_truth_window(root: Path, first: int, last: int, *,
+                               objective: str) -> tuple[np.ndarray, ...]:
+    """Coarse truth (ssh, u, v) for days first..last from fine SNAPSHOTS."""
+    manifest = _fine_truth_manifest(root)
+    pins = manifest.get("daily_sha256", {})
+    restrict = truth_restrictor(objective)
+    values = {kind: [] for kind in "TUV"}
+    for day in range(first, last + 1):
+        name = f"day{day:04d}.npz"
+        payload = (root / name).read_bytes()
+        if name not in pins or hashlib.sha256(payload).hexdigest() != pins[name]:
+            raise ValueError(f"fine truth digest differs or is unpinned: {name}")
+        with np.load(io.BytesIO(payload), allow_pickle=False) as saved:
+            if int(saved["day"]) != day:
+                raise ValueError(f"{name}: embedded day differs")
+            ssh, u, v = _snapshot_fields(
+                saved, name, labelled=manifest.get("sampling") == "daily_mean")
+        coarse = restrict({"T": ssh, "U": u, "V": v})
+        for kind in "TUV":
+            values[kind].append(coarse[kind])
+    return tuple(np.stack(values[kind]) for kind in "TUV")
 
 
 def _load_native_window(root: Path, start: int, days: int) -> tuple[np.ndarray, ...]:
@@ -160,21 +311,23 @@ def _load_native_window(root: Path, start: int, days: int) -> tuple[np.ndarray, 
     manifest = json.loads(manifest_path.read_text())
     if manifest.get("status") != "complete":
         raise ValueError(f"incomplete native trajectory {root}")
+    sampling = manifest.get("sampling", "daily_snapshot")
+    if sampling not in ("daily_snapshot", "daily_mean"):
+        raise ValueError(f"{root}: unsupported sampling {sampling!r}")
     pins = manifest.get("daily_sha256", manifest.get("output_daily_sha256", {}))
-    fields = ("ssh_m", "u_m_s", "v_m_s")
-    values = {field: [] for field in fields}
+    values = []
     for day in range(start, start + days):
         path = root / f"day{day:04d}.npz"
         if _sha256(path) != pins.get(path.name):
             raise ValueError(f"native trajectory digest differs: {path}")
         with np.load(path, allow_pickle=False) as saved:
-            for field in fields:
-                values[field].append(np.asarray(saved[field], dtype=np.float64))
-    return tuple(np.stack(values[field]) for field in fields)
+            values.append(_snapshot_fields(
+                saved, path.name, labelled=sampling == "daily_mean"))
+    return tuple(np.stack([day[index] for day in values]) for index in range(3))
 
 
 def score_control(root: Path, *, control: str) -> tuple[dict, dict]:
-    """Score one no-closure control from native outputs on years 2--3."""
+    """Round-5 record: one no-closure control on years 2--3 (not a gate)."""
     if control == "nu10":
         candidate_root = root.parent / "round1/dg50_cpu_7300d_no_closure"
     elif control == "nu80":
@@ -214,125 +367,687 @@ def score_control(root: Path, *, control: str) -> tuple[dict, dict]:
     return scores, provenance
 
 
-def held_out_gate(seed_scores: list[dict], controls: dict[str, dict]) -> dict:
-    """Apply the pre-registered three-seed climate and spectral gate."""
+# ------------------------------------------------------------------ gate ---
+# Pre-registration, frozen BEFORE any trained model exists (round 6,
+# 2026-10-14): per objective, the frozen windows, the pinned inputs, the
+# truth's leave-one-out table and both controls' tables on the SAME windows.
+# Every bar is ``gate_bars`` of the truth table (a test checks the stored
+# bars equal that derivation) and ``freeze --verify`` recomputes both tables
+# from the pinned data, refusing any difference.
+# Provenance of the frozen numbers: measured 2026-10-14 on the round-6 work
+# copy (base a0b5535b2) by ``freeze`` with the functions below, BEFORE any
+# trained model exists.  Truth: the fine truth's end-of-day snapshots, days
+# 366-6205 (eight complete two-year windows when 6661 of 7300 days were
+# pinned; ``fine_truth_pins_sha256`` digests every day file read), restricted
+# by each objective's operator.  Controls: the frozen nu=10 and nu=80 runs,
+# same windows, scored against the eight-window truth climatology.  Rule: the
+# bar is the largest of eight leave-one-out values (8/9 coverage for a new
+# exchangeable window), half_range = (bar - floor) / 2.  Re-verify with
+# ``freeze --objective <name> --verify`` (exit 0 only on exact equality).
+FROZEN_GATE: dict[str, dict] = {
+    "symmetric": {
+        "truth_operator": "box (exact volume/face-transport restriction)",
+        "windows": [
+            [366, 1095], [1096, 1825], [1826, 2555], [2556, 3285], [3286, 4015], [4016, 4745],
+            [4746, 5475], [5476, 6205],
+        ],
+        "fine_truth_pins_sha256": (
+            "f15177897479c7b662375de0c25960614919cb636926bf775ec7cbb0316b221b"),
+        "control_manifest_sha256": {
+            "nu10": "cdbdf5607a4185275ba794d63be152eb643a03579350e0bf8c2758dcb924cd6a",
+            "nu80": "cbee1f9f2268cec353c99bd3922b86a08a645f57cea81f9950791cbe35895f26",
+        },
+        "truth_loo": {
+            "mean_face_transport_rmse_m3_s": [
+                869094.5660015474, 429039.93049046333, 935200.831748481, 341884.6539103485,
+                576248.0785204493, 642946.9635092362, 522525.2571409132, 448621.84722457436,
+            ],
+            "ke_spectrum_relative_l1": [
+                0.044034519168936824, 0.03199146297488733, 0.0366631686092397,
+                0.057189579962744104, 0.03958609874700474, 0.05170498930444613,
+                0.03621107415451166, 0.04058635720645127,
+            ],
+            "wet_eke_map_nrmse": [
+                0.24208045768649325, 0.20768826927565262, 0.24765781167335535,
+                0.20657687353381493, 0.254478861111718, 0.18826409656168017, 0.25858090941579265,
+                0.223196663002778,
+            ],
+            "basin_eke_ratio": [
+                0.999251688435746, 1.0047434093795409, 0.931070892402481, 1.0029680330158026,
+                1.0160531362170242, 1.0262051244305066, 1.0215152241853473, 0.9989710848181484,
+            ],
+            "top_octave_ke_fraction": [
+                0.008760401753645217, 0.008860422348663846, 0.008559049520095272,
+                0.008074369011363469, 0.008638969160800333, 0.008663943236429437,
+                0.008541656045203006, 0.009024889960101827,
+            ],
+            "top_octave_enstrophy_fraction": [
+                0.12383097529317943, 0.125354594906669, 0.12271023427093879, 0.11650135295110754,
+                0.12520805598005072, 0.1251041045474609, 0.12202750771970777, 0.128005739170692,
+            ],
+            "native_grid_noise_index": [
+                0.489482533335054, 0.4926062532970408, 0.4838391559909701, 0.47614850062443664,
+                0.48183976476974055, 0.4839031623267024, 0.48189755708230403, 0.4926887002587099,
+            ],
+        },
+        "controls": {
+            "nu10": {
+                "mean_face_transport_rmse_m3_s": [
+                    1092363.6477454659, 1026916.36872774, 1093104.5070973742, 1233002.2434098243,
+                    1108228.1357472886, 1066923.67417058, 991275.3966122566, 1226118.7034810577,
+                ],
+                "ke_spectrum_relative_l1": [
+                    0.19296069219922665, 0.1848398366359322, 0.19047948841264892,
+                    0.23120342859911744, 0.2197628583811149, 0.19317243476634047,
+                    0.19573207793989114, 0.2486829587218263,
+                ],
+                "wet_eke_map_nrmse": [
+                    0.2892092430615287, 0.3165593778514286, 0.3071601709171936,
+                    0.3289610943566974, 0.29772246387976875, 0.3098216930736585,
+                    0.261502255890456, 0.32015288765137684,
+                ],
+                "basin_eke_ratio": [
+                    0.7344257751230171, 0.7621170241379881, 0.7629273048538573,
+                    0.6697243255206922, 0.7226722146247034, 0.7650266126925503,
+                    0.7776403184069864, 0.6926066339781036,
+                ],
+                "top_octave_ke_fraction": [
+                    0.05385808308751148, 0.05431220828775629, 0.053109340569998865,
+                    0.053979415676443786, 0.05346221797822512, 0.05273034832293095,
+                    0.05389270171069115, 0.05273495258351334,
+                ],
+                "top_octave_enstrophy_fraction": [
+                    0.4358899035364099, 0.43520560133837277, 0.4321887687360149,
+                    0.4382249162114404, 0.4316978435462325, 0.42787351577375754,
+                    0.43224528212845337, 0.4331466508747122,
+                ],
+                "native_grid_noise_index": [
+                    0.9317922221566435, 0.9324290909223998, 0.922547408868213, 0.934224007139235,
+                    0.9298433834823261, 0.9245550241533739, 0.9312884462858325,
+                    0.9220164021736723,
+                ],
+            },
+            "nu80": {
+                "mean_face_transport_rmse_m3_s": [
+                    1556147.8888052863, 1474400.6004586369, 1413649.5152089477,
+                    1175345.7945073915, 1300290.8857163473, 1527076.726261268, 1283369.659110044,
+                    1528134.1438899613,
+                ],
+                "ke_spectrum_relative_l1": [
+                    0.3543310060575042, 0.33886884207592705, 0.30385901465607534,
+                    0.2342269661415031, 0.2814103123694682, 0.3526664483908289,
+                    0.26965797793158036, 0.3472612090163635,
+                ],
+                "wet_eke_map_nrmse": [
+                    0.7192582573364832, 0.6921375696197843, 0.6545250786663317,
+                    0.5166506410225167, 0.6024572756460599, 0.7258322818092388,
+                    0.6056155144780753, 0.7187004678632576,
+                ],
+                "basin_eke_ratio": [
+                    0.39879593239265676, 0.4475947701656039, 0.45749121059436443,
+                    0.5092609715333555, 0.4788804356771709, 0.4208966762379451,
+                    0.48026989908589357, 0.41222320177540167,
+                ],
+                "top_octave_ke_fraction": [
+                    0.027546136941835227, 0.027131413970082726, 0.027031429637570735,
+                    0.029010706743404842, 0.028025033927312152, 0.02721218814779961,
+                    0.028257450114799906, 0.02702600482533653,
+                ],
+                "top_octave_enstrophy_fraction": [
+                    0.2947157212981263, 0.2925397160732689, 0.29027553872164685,
+                    0.3019123477060896, 0.2980875159236257, 0.29336611927854683,
+                    0.29838366084074874, 0.2918205856577802,
+                ],
+                "native_grid_noise_index": [
+                    0.7069240384788047, 0.7037497725320242, 0.7005463310707691,
+                    0.7204958190194521, 0.7089736016312511, 0.7036315574955214,
+                    0.7117141617369971, 0.7018983509261939,
+                ],
+            },
+        },
+        "bars": {
+            "mean_face_transport_rmse_m3_s": {
+                "bar": 935200.831748481,
+                "floor": 341884.6539103485,
+                "half_range": 296658.08891906624,
+            },
+            "ke_spectrum_relative_l1": {
+                "bar": 0.057189579962744104,
+                "floor": 0.03199146297488733,
+                "half_range": 0.012599058493928388,
+            },
+            "wet_eke_map_nrmse": {
+                "bar": 0.25858090941579265,
+                "floor": 0.18826409656168017,
+                "half_range": 0.03515840642705624,
+            },
+            "basin_eke_ratio": {
+                "bar": 1.0262051244305066,
+                "floor": 0.931070892402481,
+                "half_range": 0.04756711601401281,
+            },
+            "top_octave_ke_fraction": {
+                "bar": 0.009024889960101827,
+                "floor": 0.008074369011363469,
+                "half_range": 0.00047526047436917927,
+            },
+            "top_octave_enstrophy_fraction": {
+                "bar": 0.128005739170692,
+                "floor": 0.11650135295110754,
+                "half_range": 0.005752193109792227,
+            },
+            "native_grid_noise_index": {
+                "bar": 0.4926887002587099,
+                "floor": 0.47614850062443664,
+                "half_range": 0.008270099817136639,
+            },
+        },
+    },
+    "template": {
+        "truth_operator": "filtered (sigma 8 fine cells, then exact restriction)",
+        "windows": [
+            [366, 1095], [1096, 1825], [1826, 2555], [2556, 3285], [3286, 4015], [4016, 4745],
+            [4746, 5475], [5476, 6205],
+        ],
+        "fine_truth_pins_sha256": (
+            "f15177897479c7b662375de0c25960614919cb636926bf775ec7cbb0316b221b"),
+        "control_manifest_sha256": {
+            "nu10": "cdbdf5607a4185275ba794d63be152eb643a03579350e0bf8c2758dcb924cd6a",
+            "nu80": "cbee1f9f2268cec353c99bd3922b86a08a645f57cea81f9950791cbe35895f26",
+        },
+        "truth_loo": {
+            "mean_face_transport_rmse_m3_s": [
+                754949.2910386896, 345043.6510893438, 796170.8494628742, 278936.75514474424,
+                490331.20606561087, 541610.9793282589, 430041.96416013734, 369263.637561333,
+            ],
+            "ke_spectrum_relative_l1": [
+                0.0463431211467169, 0.03307898609631616, 0.0397827074926512,
+                0.061335289543215474, 0.03922056472970712, 0.05464462623367051,
+                0.037681183503900526, 0.040964277596383665,
+            ],
+            "wet_eke_map_nrmse": [
+                0.23655639317656227, 0.22171941944567466, 0.2458316605320523,
+                0.21049654825158864, 0.2558334451448734, 0.17532772736041827, 0.2620022147484432,
+                0.20579439039409086,
+            ],
+            "basin_eke_ratio": [
+                0.994983117883836, 1.0049872450251598, 0.9265103620764747, 0.99941161796939,
+                1.0246149593726162, 1.0378406595401541, 1.018203269237359, 0.9944352681221175,
+            ],
+            "top_octave_ke_fraction": [
+                3.3718154833021355e-05, 3.4268311112806014e-05, 3.3389818395325854e-05,
+                3.133966791964048e-05, 3.300286844474588e-05, 3.3286788723457686e-05,
+                3.3142808919939634e-05, 3.494090681411432e-05,
+            ],
+            "top_octave_enstrophy_fraction": [
+                0.0006988010060733775, 0.0007226455652212797, 0.0007003065542752054,
+                0.0006483859202105984, 0.0006980134805603585, 0.0007060285543640958,
+                0.0006881904639087929, 0.0007379065533362526,
+            ],
+            "native_grid_noise_index": [
+                0.21277639767314105, 0.21204275603340897, 0.21077828322537775,
+                0.21128569759199586, 0.2083463319019164, 0.20873994350138503,
+                0.21139078624502186, 0.2110783563435478,
+            ],
+        },
+        "controls": {
+            "nu10": {
+                "mean_face_transport_rmse_m3_s": [
+                    1365863.1183782492, 1303474.0380607818, 1357656.4270050747,
+                    1489055.9985645737, 1389740.3197816953, 1340529.728201074,
+                    1275427.9362856902, 1484469.754389993,
+                ],
+                "ke_spectrum_relative_l1": [
+                    0.4512402972018488, 0.4340509525168498, 0.44927314349116454,
+                    0.449839887713791, 0.46251414796678675, 0.4423691406312488,
+                    0.4457961472351256, 0.48054569882047093,
+                ],
+                "wet_eke_map_nrmse": [
+                    0.4038072188813543, 0.4484507815524961, 0.4859794664264817,
+                    0.3001141344786775, 0.3253127796201675, 0.4578763251629475,
+                    0.4813048989550855, 0.3342603527588073,
+                ],
+                "basin_eke_ratio": [
+                    1.0539613401925756, 1.0937005581122308, 1.0948633775259238,
+                    0.961109443043614, 1.0370940150054087, 1.0978760567892234, 1.115977761045661,
+                    0.993947436078967,
+                ],
+                "top_octave_ke_fraction": [
+                    0.05385808308751148, 0.05431220828775629, 0.053109340569998865,
+                    0.053979415676443786, 0.05346221797822512, 0.05273034832293095,
+                    0.05389270171069115, 0.05273495258351334,
+                ],
+                "top_octave_enstrophy_fraction": [
+                    0.4358899035364099, 0.43520560133837277, 0.4321887687360149,
+                    0.4382249162114404, 0.4316978435462325, 0.42787351577375754,
+                    0.43224528212845337, 0.4331466508747122,
+                ],
+                "native_grid_noise_index": [
+                    0.9317922221566435, 0.9324290909223998, 0.922547408868213, 0.934224007139235,
+                    0.9298433834823261, 0.9245550241533739, 0.9312884462858325,
+                    0.9220164021736723,
+                ],
+            },
+            "nu80": {
+                "mean_face_transport_rmse_m3_s": [
+                    1777032.89794184, 1705494.4490456928, 1653564.0528283883, 1437173.9490370022,
+                    1553582.5254495614, 1754769.1613866945, 1538996.9481028898,
+                    1755488.6780783804,
+                ],
+                "ke_spectrum_relative_l1": [
+                    0.5671753904996489, 0.5610997959727322, 0.5230811346237294,
+                    0.38093564699013255, 0.4740863488147589, 0.5643374438065404,
+                    0.47282542406462824, 0.5724012074733351,
+                ],
+                "wet_eke_map_nrmse": [
+                    0.6304521698291154, 0.6249958721095124, 0.5777350474283582,
+                    0.3777573605201305, 0.4810778213661539, 0.6696811997419511,
+                    0.4841953735374593, 0.6400633240544512,
+                ],
+                "basin_eke_ratio": [
+                    0.5723049348281779, 0.6423352771733938, 0.6565374824482364,
+                    0.730831343678214, 0.6872327781439509, 0.6040213184185158,
+                    0.6892267723173724, 0.5915741698048427,
+                ],
+                "top_octave_ke_fraction": [
+                    0.027546136941835227, 0.027131413970082726, 0.027031429637570735,
+                    0.029010706743404842, 0.028025033927312152, 0.02721218814779961,
+                    0.028257450114799906, 0.02702600482533653,
+                ],
+                "top_octave_enstrophy_fraction": [
+                    0.2947157212981263, 0.2925397160732689, 0.29027553872164685,
+                    0.3019123477060896, 0.2980875159236257, 0.29336611927854683,
+                    0.29838366084074874, 0.2918205856577802,
+                ],
+                "native_grid_noise_index": [
+                    0.7069240384788047, 0.7037497725320242, 0.7005463310707691,
+                    0.7204958190194521, 0.7089736016312511, 0.7036315574955214,
+                    0.7117141617369971, 0.7018983509261939,
+                ],
+            },
+        },
+        "bars": {
+            "mean_face_transport_rmse_m3_s": {
+                "bar": 796170.8494628742,
+                "floor": 278936.75514474424,
+                "half_range": 258617.047159065,
+            },
+            "ke_spectrum_relative_l1": {
+                "bar": 0.061335289543215474,
+                "floor": 0.03307898609631616,
+                "half_range": 0.014128151723449656,
+            },
+            "wet_eke_map_nrmse": {
+                "bar": 0.2620022147484432,
+                "floor": 0.17532772736041827,
+                "half_range": 0.04333724369401247,
+            },
+            "basin_eke_ratio": {
+                "bar": 1.0378406595401541,
+                "floor": 0.9265103620764747,
+                "half_range": 0.0556651487318397,
+            },
+            "top_octave_ke_fraction": {
+                "bar": 3.494090681411432e-05,
+                "floor": 3.133966791964048e-05,
+                "half_range": 1.8006194472369194e-06,
+            },
+            "top_octave_enstrophy_fraction": {
+                "bar": 0.0007379065533362526,
+                "floor": 0.0006483859202105984,
+                "half_range": 4.4760316562827084e-05,
+            },
+            "native_grid_noise_index": {
+                "bar": 0.21277639767314105,
+                "floor": 0.2083463319019164,
+                "half_range": 0.0022150328856123253,
+            },
+        },
+    },
+}
+
+
+def gate_bars(table: dict[str, list[float]]) -> dict[str, dict]:
+    """Window-to-window spread of one candidate's per-window values.
+
+    ``bar`` is the largest of the K values -- for K exchangeable windows the
+    K/(K+1) empirical quantile of a new window -- ``floor`` the smallest, and
+    ``half_range`` = (bar - floor) / 2, this file's ``uncertainty_half_range``
+    convention for sampling spread.
+    """
+    return {metric: {"bar": max(values), "floor": min(values),
+                     "half_range": (max(values) - min(values)) / 2.0}
+            for metric, values in table.items()}
+
+
+def frozen_gate(objective: str) -> dict:
+    """The frozen record of one explicitly selected objective."""
+    from legoesm.training.swg_online import OBJECTIVE_OPERATORS
+
+    if objective not in OBJECTIVE_OPERATORS:
+        raise ValueError(f"objective must be one of {OBJECTIVE_OPERATORS}, "
+                         f"got {objective!r}")
+    if objective not in FROZEN_GATE:
+        raise ValueError(f"no frozen gate for objective {objective!r}")
+    return FROZEN_GATE[objective]
+
+
+def _medians(rows: list[dict]) -> dict[str, float]:
+    return {metric: float(np.median([row[metric] for row in rows]))
+            for metric in SCORE_METRICS}
+
+
+def held_out_gate(seed_scores: dict[str, list[dict]], *, objective: str) -> dict:
+    """Apply the frozen gate to >= 3 seeds scored on the frozen windows.
+
+    Every candidate is summarised by its median over the frozen windows.  The
+    median seed must beat BOTH controls (frozen, verified scores on the same
+    windows) by more than the truth's half-range on every skill measure;
+    every seed's EKE ratio must lie inside the truth's own leave-one-out band
+    [floor, bar]; no seed's noise may exceed the worse control's median by
+    more than that control's own half-range (its sampling spread; the
+    filtered truth's top-octave spreads are 100-400 times smaller and would
+    fail a control-level closure half the time); physical health is
+    unconditional on every window and on the whole run.
+    """
+    frozen = frozen_gate(objective)
+    windows = len(frozen["windows"])
     if len(seed_scores) < 3:
         raise ValueError("held-out gate requires at least three network seeds")
-    skill = ("mean_face_transport_rmse_m3_s", "ke_spectrum_relative_l1",
-             "wet_eke_map_nrmse")
-    noise = ("top_octave_ke_fraction", "top_octave_enstrophy_fraction",
-             "native_grid_noise_index")
-    medians = {
-        metric: float(np.median([seed[metric] for seed in seed_scores]))
-        for metric in skill}
-    better = {metric: HELD_OUT_THRESHOLDS[metric] for metric in skill}
-    worse = {metric: HELD_OUT_THRESHOLDS[metric] for metric in noise}
-    skill_pass = all(medians[metric] < better[metric] for metric in skill)
-    variability_pass = all(
-        0.8 <= seed["basin_eke_ratio"] <= 1.2 for seed in seed_scores)
-    noise_pass = all(
-        seed[metric] <= worse[metric]
-        for seed in seed_scores for metric in noise)
-    physical_health_pass = all(
-        seed.get("physical_health", {}).get("passes") is True
-        for seed in seed_scores)
-    return {
-        "pass": bool(skill_pass and variability_pass and noise_pass
-                     and physical_health_pass),
-        "raw_seed_scores": seed_scores,
-        "seed_uncertainty_half_range": {
-            metric: 0.5 * (max(seed[metric] for seed in seed_scores)
-                           - min(seed[metric] for seed in seed_scores))
-            for metric in (*skill, "basin_eke_ratio", *noise)},
-        "median_skill": medians,
-        "better_control_skill": better,
-        "worse_control_noise": worse,
+    for name, rows in seed_scores.items():
+        if len(rows) != windows:
+            raise ValueError(f"{name}: needs one score per frozen window "
+                             f"({windows}), got {len(rows)}")
+    bars = frozen["bars"]
+    healthy = {name: all(row.get("physical_health", {}).get("passes") is True
+                         for row in rows)
+               for name, rows in seed_scores.items()}
+    result = {"objective": objective, "windows": frozen["windows"],
+              "raw_seed_scores": seed_scores,
+              "physical_health_by_seed": healthy,
+              "physical_health_pass": all(healthy.values())}
+    if not result["physical_health_pass"]:
+        return result | {"pass": False}
+    seeds = {name: _medians(rows) for name, rows in seed_scores.items()}
+    controls = {name: {metric: float(np.median(values))
+                       for metric, values in table.items()}
+                for name, table in frozen["controls"].items()}
+    median_seed = {metric: float(np.median([row[metric] for row in seeds.values()]))
+                   for metric in SKILL_METRICS}
+    required = {metric: min(row[metric] for row in controls.values())
+                - bars[metric]["half_range"] for metric in SKILL_METRICS}
+    noise_limit = {}
+    for metric in NOISE_METRICS:
+        worse = max(controls, key=lambda name: controls[name][metric])
+        noise_limit[metric] = controls[worse][metric] + gate_bars(
+            frozen["controls"][worse])[metric]["half_range"]
+    band = (bars[VARIABILITY_METRIC]["floor"], bars[VARIABILITY_METRIC]["bar"])
+    skill_pass = all(median_seed[metric] < required[metric]
+                     for metric in SKILL_METRICS)
+    variability_pass = all(band[0] <= row[VARIABILITY_METRIC] <= band[1]
+                           for row in seeds.values())
+    noise_pass = all(row[metric] <= noise_limit[metric]
+                     for row in seeds.values() for metric in NOISE_METRICS)
+    return result | {
+        "pass": bool(skill_pass and variability_pass and noise_pass),
+        "seed_window_medians": seeds,
+        "control_window_medians": controls,
+        "median_seed_skill": median_seed,
+        "skill_must_be_below": required,
+        "eke_ratio_band": list(band),
+        "noise_must_not_exceed": noise_limit,
         "skill_pass": bool(skill_pass),
         "variability_pass": bool(variability_pass),
         "spectral_health_pass": bool(noise_pass),
-        "physical_health_pass": bool(physical_health_pass),
     }
 
 
-def _physical_fail_plants() -> dict:
-    """Measure collapse and grid-mode plants before injecting their scores."""
-    jj, ii = np.indices((80, 80))
-    checkerboard = np.where((ii + jj) % 2 == 0, 1.0, -1.0)
-    anomaly = np.stack((-checkerboard, checkerboard))
-    collapsed = np.broadcast_to(np.mean(anomaly, axis=0), anomaly.shape)
-    source_energy = np.mean(anomaly * anomaly, dtype=np.float64)
-    collapsed_energy = np.mean(collapsed * collapsed, dtype=np.float64)
-    return {
-        "collapsed_eke_ratio": float(collapsed_energy / source_energy),
-        "grid_noise_index": grid_noise_index(
-            checkerboard, np.zeros_like(checkerboard)),
-        "top_octave_fraction": 1.0,
-    }
+def truth_as_seed(objective: str) -> list[dict]:
+    """The frozen truth windows as one perfect-model seed (leave-one-out)."""
+    table = frozen_gate(objective)["truth_loo"]
+    return [{**{metric: table[metric][k] for metric in SCORE_METRICS},
+             "physical_health": {"passes": True}}
+            for k in range(len(table[SKILL_METRICS[0]]))]
 
 
-def adversarial_plants(controls: dict[str, dict]) -> dict:
-    """Prove collapsed variance and two-cell noise cannot pass the gate."""
-    measured = _physical_fail_plants()
-    best = min(controls.values(), key=lambda value: sum((
-        value["mean_face_transport_rmse_m3_s"], value["ke_spectrum_relative_l1"],
-        value["wet_eke_map_nrmse"])))
-    metric_names = (
-        "mean_face_transport_rmse_m3_s", "ke_spectrum_relative_l1",
-        "wet_eke_map_nrmse", "basin_eke_ratio", "top_octave_ke_fraction",
-        "top_octave_enstrophy_fraction", "native_grid_noise_index")
-    ideal = {name: best[name] for name in metric_names}
-    ideal["physical_health"] = {"passes": True}
-    for metric in metric_names[:3]:
-        ideal[metric] = 0.0
-    collapsed = dict(ideal, basin_eke_ratio=measured["collapsed_eke_ratio"])
-    collapsed_gate = held_out_gate([collapsed] * 3, controls)
-    noisy = dict(ideal, basin_eke_ratio=1.0)
-    noisy["top_octave_ke_fraction"] = measured["top_octave_fraction"]
-    noisy["top_octave_enstrophy_fraction"] = measured["top_octave_fraction"]
-    noisy["native_grid_noise_index"] = measured["grid_noise_index"]
-    noise_gate = held_out_gate([noisy] * 3, controls)
-    if collapsed_gate["pass"] or noise_gate["pass"]:
-        raise AssertionError("an adversarial closure passed the held-out gate")
-    removes_noise_only = {name: best[name] for name in metric_names}
-    removes_noise_only["physical_health"] = {"passes": True}
-    for metric in metric_names[4:]:
-        removes_noise_only[metric] = 0.0
-    adds_eke_only = {name: best[name] for name in metric_names}
-    adds_eke_only["physical_health"] = {"passes": True}
-    adds_eke_only["basin_eke_ratio"] = 1.0
-    removes_noise_gate = held_out_gate([removes_noise_only] * 3, controls)
-    adds_eke_gate = held_out_gate([adds_eke_only] * 3, controls)
-    if removes_noise_gate["pass"] or adds_eke_gate["pass"]:
-        raise AssertionError("a one-sided closure passed the held-out gate")
-    return {
-        "collapsed_variance": {**collapsed_gate, "plant": measured},
-        "two_cell_grid_noise": {**noise_gate, "plant": measured},
-        "removes_grid_noise_only": removes_noise_gate,
-        "adds_eddy_energy_only": adds_eke_gate,
-    }
+def control_as_seed(objective: str, control: str) -> list[dict]:
+    """One frozen control's windows as a seed (it must fail the gate)."""
+    table = frozen_gate(objective)["controls"][control]
+    return [{**{metric: table[metric][k] for metric in SCORE_METRICS},
+             "physical_health": {"passes": True}}
+            for k in range(len(table[SKILL_METRICS[0]]))]
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--round2-root", type=Path, default=DEFAULT_ROUND2)
-    parser.add_argument("--output", type=Path, required=True)
-    args = parser.parse_args()
+def checkerboard_plant(arrays: tuple[np.ndarray, ...], amplitude_m_s: float, *,
+                       rotational: bool) -> tuple[np.ndarray, ...]:
+    """Add a day-to-day phase-flipped one-cell checkerboard on wet faces."""
+    _, geometry = _dg50()
+    ssh, u, v = arrays
+    jj, ii = np.indices(u.shape[1:])
+    checker = np.where((ii + jj) % 2 == 0, 1.0, -1.0)
+    phase = np.where(np.arange(u.shape[0]) % 2 == 0, 1.0, -1.0)[:, None, None]
+    sign_v = -1.0 if rotational else 1.0
+    return (ssh,
+            u + amplitude_m_s * phase * np.where(geometry["mask"]["U"], checker, 0.0),
+            v + sign_v * amplitude_m_s * phase
+            * np.where(geometry["mask"]["V"], checker, 0.0))
+
+
+def collapsed_variance_plant(arrays: tuple[np.ndarray, ...]) -> tuple[np.ndarray, ...]:
+    """Replace every day by the window's time mean (no eddies at all)."""
+    return tuple(np.broadcast_to(np.mean(value, axis=0), value.shape).copy()
+                 for value in arrays)
+
+
+def plant_verdicts(truth_window: tuple[np.ndarray, ...], reference: dict, *,
+                   objective: str) -> dict:
+    """Score the mandatory plants through the real scorer and the gate."""
+    windows = len(frozen_gate(objective)["windows"])
+    verdicts = {}
+    for name, arrays in (
+            ("collapsed_variance", collapsed_variance_plant(truth_window)),
+            ("native_checkerboard_0p1_m_s",
+             checkerboard_plant(truth_window, 0.1, rotational=False))):
+        score = score_statistics(window_statistics(arrays), reference)
+        gate = held_out_gate({f"seed{k}": [score] * windows for k in range(3)},
+                             objective=objective)
+        verdicts[name] = {"score": score, "pass": gate["pass"],
+                          "variability_pass": gate["variability_pass"],
+                          "spectral_health_pass": gate["spectral_health_pass"]}
+    return verdicts
+
+
+def available_windows(root: Path = FINE_TRUTH_ROOT) -> list[tuple[int, int]]:
+    """Every complete registered window the fine truth pins today."""
+    completed = int(_fine_truth_manifest(root)["completed_days"])
+    return registered_windows(
+        max(0, (completed - GATE_FIRST_DAY + 1) // GATE_WINDOW_DAYS))
+
+
+def freeze_record(objective: str, *, windows: list[tuple[int, int]],
+                  fine_root: Path = FINE_TRUTH_ROOT,
+                  control_roots: dict[str, Path] | None = None):
+    """Measure the truth's leave-one-out table and the controls' tables.
+
+    Returns the record, the first truth window's coarse arrays (for the
+    plants) and the truth climatology every candidate is scored against.
+    """
+    control_roots = CONTROL_ROOTS if control_roots is None else control_roots
+    truth, first_window = [], None
+    for first, last in windows:
+        arrays = restrict_fine_truth_window(
+            fine_root, first, last, objective=objective)
+        if first_window is None:
+            first_window = arrays
+        truth.append(window_statistics(arrays))
+    reference = climatology(truth)
+    loo = leave_one_out_scores(truth)
     controls = {}
-    provenance = {}
-    for name in ("nu10", "nu80"):
-        controls[name], hashes = score_control(args.round2_root, control=name)
-        provenance.update(hashes)
-    report = {
-        "schema": "legoesm.swg_online_evaluation.v1",
-        "window": "years 2-3 conservative truth",
-        "controls": controls,
-        "plants": adversarial_plants(controls),
-        "provenance": provenance,
+    for name, root in control_roots.items():
+        if _sha256(root / "manifest.json") != EXPECTED_CONTROL_MANIFEST_SHA256[name]:
+            raise ValueError(f"{name} control manifest differs from frozen hash")
+        controls[name] = [score_statistics(window_statistics(_load_native_window(
+            root, first, last - first + 1)), reference) for first, last in windows]
+    record = {
+        "objective": objective,
+        "windows": [list(window) for window in windows],
+        "fine_truth_pins_sha256": fine_truth_pins_digest(fine_root, windows),
+        "control_manifest_sha256": {
+            name: EXPECTED_CONTROL_MANIFEST_SHA256[name] for name in controls},
+        "truth_loo": {metric: [row[metric] for row in loo]
+                      for metric in SCORE_METRICS},
+        "controls": {name: {metric: [row[metric] for row in rows]
+                            for metric in SCORE_METRICS}
+                     for name, rows in controls.items()},
+        "control_physical_health": {
+            name: all(row["physical_health"]["passes"] for row in rows)
+            for name, rows in controls.items()},
     }
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
-    print(json.dumps(report, indent=2, sort_keys=True))
+    record["bars"] = gate_bars(record["truth_loo"])
+    return record, first_window, reference
+
+
+def score_free_run(root: Path, *, expected_manifest_sha256: str,
+                   reference: dict, windows: list[tuple[int, int]]) -> list[dict]:
+    """Score one bound dg50 free run; a non-finite window fails its health.
+
+    The driver's whole-run health record (every day, not only the scored
+    windows) must also be finite, positive-thickness and sub-unit Courant.
+    """
+    if _sha256(root / "manifest.json") != expected_manifest_sha256:
+        raise ValueError(f"{root}: manifest differs from its bound SHA-256")
+    manifest = json.loads((root / "manifest.json").read_text())
+    climate._require_legoesm_deck(manifest.get("namelist", {}), SWG_DG50_NAMELIST)
+    whole_run = manifest.get("numerical_health") or {}
+    whole_run_ok = (
+        whole_run.get("all_finite") is True
+        and whole_run.get("minimum_total_layer_thickness_m", -1.0) > 0.0
+        and max(whole_run.get("maximum_u_courant", 1.0),
+                whole_run.get("maximum_v_courant", 1.0)) < 1.0)
+    rows = []
+    for first, last in windows:
+        arrays = _load_native_window(root, first, last - first + 1)
+        if all(np.all(np.isfinite(value)) for value in arrays):
+            rows.append(score_statistics(window_statistics(arrays), reference))
+        else:
+            rows.append({"physical_health": {"all_finite": False,
+                                             "passes": False}})
+        if not whole_run_ok:
+            rows[-1]["physical_health"] = dict(
+                rows[-1]["physical_health"], passes=False, whole_run=whole_run)
+    return rows
+
+
+def score_trained_closure(seeds: dict[str, tuple[Path, str]], *, objective: str,
+                          fine_root: Path = FINE_TRUTH_ROOT) -> dict:
+    """Score >= 3 explicitly bound trained-closure free runs and gate them.
+
+    ``seeds`` maps a seed label to (free-run root, its manifest SHA-256).  The
+    truth climatology and both controls are recomputed on the frozen windows
+    and must reproduce the frozen tables exactly before any seed is scored.
+    """
+    frozen = frozen_gate(objective)
+    if len(seeds) < 3:
+        raise ValueError("held-out gate requires at least three network seeds")
+    windows = [tuple(window) for window in frozen["windows"]]
+    record, _, reference = freeze_record(
+        objective, windows=windows, fine_root=fine_root)
+    for key in ("fine_truth_pins_sha256", "truth_loo", "controls"):
+        if record[key] != frozen[key]:
+            raise ValueError(f"gate inputs drifted from the frozen {key}")
+    seed_scores = {name: score_free_run(
+        Path(root), expected_manifest_sha256=sha, reference=reference,
+        windows=windows) for name, (root, sha) in seeds.items()}
+    return {"schema": "legoesm.swg_online_held_out_gate.v2",
+            "seed_bindings": {name: {"root": str(Path(root).resolve()),
+                                     "manifest_sha256": sha}
+                              for name, (root, sha) in seeds.items()},
+            "gate": held_out_gate(seed_scores, objective=objective)}
+
+
+def freeze_report(objective: str, *, verify: bool) -> dict:
+    """Measure (or re-verify) one objective's frozen record and self-checks."""
+    windows = ([tuple(window) for window in frozen_gate(objective)["windows"]]
+               if verify else available_windows())
+    record, first_window, reference = freeze_record(objective, windows=windows)
+    report = {"record": record}
+    if verify:
+        frozen = frozen_gate(objective)
+        report["verified_equal"] = {
+            key: record[key] == frozen[key]
+            for key in ("windows", "fine_truth_pins_sha256",
+                        "control_manifest_sha256", "truth_loo", "controls",
+                        "bars")}
+        report["self_check"] = {
+            "truth_passes": held_out_gate(
+                {f"truth{k}": truth_as_seed(objective) for k in range(3)},
+                objective=objective)["pass"],
+            "controls_fail": {name: not held_out_gate(
+                {f"{name}{k}": control_as_seed(objective, name)
+                 for k in range(3)}, objective=objective)["pass"]
+                for name in CONTROL_ROOTS},
+            "plants_fail": {name: not value["pass"] for name, value in
+                            plant_verdicts(first_window, reference,
+                                           objective=objective).items()},
+        }
+    return report
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    commands = parser.add_subparsers(dest="command", required=True)
+    record = commands.add_parser(
+        "record", help="round-5 no-closure control record, years 2-3")
+    record.add_argument("--round2-root", type=Path, default=DEFAULT_ROUND2)
+    record.add_argument("--output", type=Path, required=True)
+    freeze = commands.add_parser(
+        "freeze", help="measure the truth-spread tables (--verify: the frozen)")
+    freeze.add_argument("--objective", required=True)
+    freeze.add_argument("--verify", action="store_true")
+    freeze.add_argument("--output", type=Path, required=True)
+    score = commands.add_parser(
+        "score", help="score >= 3 trained-closure free runs through the gate")
+    score.add_argument("--objective", required=True)
+    score.add_argument("--seed", nargs=3, action="append", required=True,
+                       metavar=("LABEL", "ROOT", "MANIFEST_SHA256"))
+    score.add_argument("--output", type=Path, required=True)
+    args = parser.parse_args(argv)
+    try:
+        if args.command == "record":
+            controls, provenance = {}, {}
+            for name in ("nu10", "nu80"):
+                controls[name], hashes = score_control(
+                    args.round2_root, control=name)
+                provenance.update(hashes)
+            report = {"schema": "legoesm.swg_online_evaluation.v1",
+                      "window": "years 2-3 conservative truth",
+                      "controls": controls, "provenance": provenance}
+            code = 0
+        elif args.command == "freeze":
+            report = freeze_report(args.objective, verify=args.verify)
+            checks = report.get("self_check", {})
+            code = 0 if (not args.verify or (
+                all(report["verified_equal"].values())
+                and checks["truth_passes"]
+                and all(checks["controls_fail"].values())
+                and all(checks["plants_fail"].values()))) else 1
+        else:
+            labels = [label for label, _, _ in args.seed]
+            if len(set(labels)) != len(labels):
+                raise ValueError("seed labels must be unique")
+            report = score_trained_closure(
+                {label: (Path(root), sha) for label, root, sha in args.seed},
+                objective=args.objective)
+            code = 0 if report["gate"]["pass"] else 1
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(
+            json.dumps(report, indent=2, sort_keys=True, default=float) + "\n")
+    except (OSError, RuntimeError, ValueError) as exc:
+        print(f"REFUSE: {exc}", file=sys.stderr)
+        return 2
+    print(f"{'PASS' if code == 0 else 'FAIL'} {args.command} -> {args.output}")
+    return code
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
+import json
 from pathlib import Path
 
 import numpy as np
@@ -13,6 +15,50 @@ _SPEC = importlib.util.spec_from_file_location("swg_online_control_health", _PAT
 assert _SPEC is not None and _SPEC.loader is not None
 health = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(health)
+_COARSE_TRUTH = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgonl_rounds/round2/"
+    "conservative_truth_dg50_1095d/snapshots")
+
+
+@pytest.mark.skipif(not (_COARSE_TRUTH / "manifest.json").is_file(),
+                    reason="registered dg50 coarse truth not mounted")
+def test_report_runs_online_health_on_a_real_year(tmp_path):
+    """Review EV-04: report() refused at the tip (registered diagnostics).
+
+    One real dg50 year (the restricted truth's year 1) is packaged as a
+    complete one-year dg50 snapshot archive and run through the CLI.
+    """
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import SWG_DG50_NAMELIST
+
+    root = tmp_path / "control"
+    root.mkdir()
+    pins = {}
+    for day in range(1, health.DAYS_PER_YEAR + 1):
+        with np.load(_COARSE_TRUTH / f"day{day:04d}.npz") as saved:
+            fields = {name: np.asarray(saved[name])
+                      for name in ("ssh_m", "u_m_s", "v_m_s")}
+        path = root / f"day{day:04d}.npz"
+        np.savez(path, day=np.int64(day),
+                 dt_s=np.float64(SWG_DG50_NAMELIST.rn_Dt_s), **fields)
+        pins[path.name] = hashlib.sha256(path.read_bytes()).hexdigest()
+    (root / "manifest.json").write_text(json.dumps({
+        "status": "complete", "days": health.DAYS_PER_YEAR,
+        "completed_days": health.DAYS_PER_YEAR,
+        "schema": "legoesm-swg-double-gyre-daily-v1",
+        "sampling": "daily_snapshot",
+        "namelist": SWG_DG50_NAMELIST._asdict(), "daily_sha256": pins}))
+    output = tmp_path / "health.json"
+    assert health.main(["--root", str(root), "--deck", "dg50",
+                        "--output", str(output)]) == 0
+    result = json.loads(output.read_text())
+    assert result["diagnostics"] == "online"
+    assert result["sampling"] == "daily_snapshot"
+    assert [row["days"] for row in result["years"]] == [[1, 365]]
+    row = result["years"][0]
+    assert 0.0 < row["grid_noise_index_mean"] <= row["grid_noise_index_max"]
+    assert 0.0 < row["top_octave_enstrophy_fraction"] < 1.0
+    assert row["minimum_total_layer_thickness_m"] > 0.0
+    assert 0.0 < max(row["maximum_u_courant"], row["maximum_v_courant"]) < 1.0
 
 
 def test_summarize_year_reports_extrema_and_refuses_nonfinite():
