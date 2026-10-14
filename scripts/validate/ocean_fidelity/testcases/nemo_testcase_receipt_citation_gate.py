@@ -174,6 +174,16 @@ FILES = {
         _ORCA2G1_P3 / "ppsrc/nemo/stp2d.f90"),
     "ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/domain.f90": (
         _ORCA2G1_P3 / "ppsrc/nemo/domain.f90"),
+    "ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/dtatsd.f90": (
+        _ORCA2G1_P3 / "ppsrc/nemo/dtatsd.f90"),
+    "ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/tradmp.f90": (
+        _ORCA2G1_P3 / "ppsrc/nemo/tradmp.f90"),
+    "ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/istate.f90": (
+        _ORCA2G1_P3 / "ppsrc/nemo/istate.f90"),
+    "ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90": (
+        _ORCA2G1_P3 / "ppsrc/nemo/stprk3.f90"),
+    "ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/zdfmxl.f90": (
+        _ORCA2G1_P3 / "ppsrc/nemo/zdfmxl.f90"),
     "stprk3.F90": _OCE / "stprk3.F90",
     "stprk3_stg.F90": _OCE / "stprk3_stg.F90",
     "ORCA2_R96SPG/ocean.output": _ORCA2_R96SPG_OUTPUT,
