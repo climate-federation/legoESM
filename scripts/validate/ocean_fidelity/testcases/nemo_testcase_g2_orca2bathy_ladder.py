@@ -540,9 +540,9 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
                 e3 = np.ascontiguousarray(np.moveaxis(np.asarray(
                     h.variables[e3n][0], np.float64)[:nk], 0, -1))
                 ref, wet = g[f"b_{f}{f}_rhs_k1"], mask[..., 0] > 0
-                scored = wet.copy()
-                if f == "v":
-                    scored[-1] = False   # top V row: the fold unit's raw operands
+                # the top V row included: the fold unit sums NEMO's raw mesh
+                # operands, which are the mesh file's
+                scored = wet
                 rows[f] = {
                     "level1_wet_faces": int(wet.sum()),
                     "level1_wet_unequal": int(np.count_nonzero((rhs[..., 0] != ref) & wet)),

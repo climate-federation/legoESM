@@ -362,6 +362,7 @@ def test_the_rhs_frame_is_nemos_on_wet_faces_and_its_depth_mean_is_ascending(lad
         assert r["level1_wet_faces"] > 15000 and r["level1_wet_unequal"] == 0
         assert r["level1_dry_card_nonzero"] == 0 and r["level1_dry_unequal"] > 1000
         assert r["ascending_replay_vs_card_unequal"] == 0
+        assert r["depth_mean_faces"] == r["level1_wet_faces"]   # fold row included
         assert r["lane4_replay_vs_card_unequal"] > 50
 
 
