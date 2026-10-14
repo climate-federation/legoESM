@@ -382,3 +382,71 @@ def test_r19_plant_list_names_every_checker_forcing_plant():
     text = (G4_DIR / "run_r19.sh").read_text()
     for plant in _load_checker().FORCING_PLANTS:
         assert plant in text
+
+
+# ---- round 4 (gridladder_r20): per-step forcing identity and the NCAR walk ----
+R19_TWIN_A = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/"
+                  "round19/oracle_g4_r19/p6_a")
+P5_PPSRC = NEMO / "ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo"
+# each walk row's cited line must hold the statement whose result it scores
+WALK_STATEMENT_TEXT = {
+    "ubzu": "Ubzu = MAX( 0.5_wp , U_zu )", "dtv": "ztmp0 = virt_temp(t_zt, q_zt)",
+    "stab": "ztmp1 = 0.5_wp + SIGN(0.5_wp,ztmp0)", "cdn": "zCdN = cd_n10_ncar( Ubzu )",
+    "ce": "Ce = ce_n10_ncar", "ch": "Ch = ch_n10_ncar", "t_zu": "t_zu = MAX( t_zt",
+    "q_zu": "q_zu = MAX( q_zt", "one_on_l": "ztmp0 = One_on_L(", "zeta_u": "zeta_u   = zu*ztmp0",
+    "psi_m": "ztmp2 = psi_m_ncar(zeta_u)", "un10": "ztmp0 = MAX( 0.25_wp , UN10_from_CD",
+    "it_cdn": "zCdN = cd_n10_ncar(ztmp0)", "sqrt_cdn": "zsqrt_CdN = sqrt(zCdN)",
+    "cd": "ztmp1  = 1._wp + zsqrt_CdN/vkarmn", "sqrt_cd": "zsqrt_Cd = SQRT( Cd )",
+    "psi_h_term": "psi_h_ncar(zeta_u) ) / vkarmn / zsqrt_CdN", "cd_ratio": "ztmp2 = zsqrt_Cd / zsqrt_CdN",
+    "it_stab": "ztmp1 = 0.5_wp + SIGN(0.5_wp,zeta_u)", "chn": "zChN  = 1.e-3_wp",
+    "cen": "zCeN  = 1.e-3_wp", "it_ch": "Ch    = MAX( zChN", "it_ce": "Ce    = MAX( zCeN",
+    "chain_cd": "Ubzu = MAX( 0.5_wp , U_zu )", "chain_ch": "Ubzu = MAX( 0.5_wp , U_zu )",
+    "chain_ce": "Ubzu = MAX( 0.5_wp , U_zu )",
+}
+
+
+def _steps_module():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("g4_forcing_steps", G4_DIR / "g4_forcing_steps.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+@pytest.mark.skipif(not P5_PPSRC.is_dir(), reason="no P5 build")
+def test_walk_rows_cite_the_ncar_statement_they_score():
+    mod = _steps_module()
+    assert set(mod.STATEMENTS) == set(WALK_STATEMENT_TEXT)
+    lines = (P5_PPSRC / "sbcblk_algo_ncar.f90").read_text().splitlines()
+    for name, cite in mod.STATEMENTS.items():
+        first = int(cite.rsplit(":", 1)[1].split("-")[0])
+        assert WALK_STATEMENT_TEXT[name] in lines[first - 1], (name, cite, lines[first - 1])
+
+
+def test_forcing_steps_helpers():
+    mod = _steps_module()
+    full = np.arange(6 * 7, dtype=float).reshape(6, 7)
+    assert mod.inner(full, (6, 7)).shape == (2, 3)          # full planes lose nn_hls = 2
+    assert mod.inner(full[2:-2, 2:-2], (6, 7)).shape == (2, 3)   # inner arrays pass through
+    log = "\n".join(f"   fld_read: var {v} kt =        3 (0.3 days), record:   0002 (x)"
+                    for _, _, v, _ in mod.o1.FIELD_SPECS)
+    assert set(mod.records(log, 3).values()) == {1}
+    with pytest.raises(SystemExit) as refused:
+        mod.records(log, 5)
+    assert refused.value.code == 73
+    wet = np.ones((1, 3), bool)
+    nemo, card = np.array([[1.0, 2.0, 4.0]]), np.array([[1.0, 2.0, 5.0]])
+    out = mod.split(card, nemo, wet, np.array([[0.0, 10.0, 30.0]]))
+    assert [b["unequal"] for b in out.values()] == [0, 0, 1] and out["20..infK"]["max_rel"] == 0.25
+    # sbcmod.f90:557: 0.5 (tau_i + tau_i+1)(2 - umask) max(tmask_i, tmask_i+1)
+    tau, t = np.array([[2.0, 4.0, 0.0]]), np.array([[1.0, 1.0, 0.0]])
+    u = np.array([[1.0, 0.0, 0.0]])
+    assert mod.t_to_uv(tau, t, u, u, True)[0, :2].tolist() == [3.0, 4.0]
+
+
+@pytest.mark.skipif(not (R19_TWIN_A / "oracle_g1step_kt00000001.bin").is_file(),
+                    reason="no round-19 record")
+def test_walk_on_the_record_names_the_neutral_drag_first():
+    out = _steps_module().walk(R19_TWIN_A, 1)["steps"][1]
+    assert out["first_unequal"] == "cdn"
+    assert out["rows"]["ubzu"]["unequal_cells"] == 0 and out["rows"]["dtv"]["unequal_cells"] == 0
