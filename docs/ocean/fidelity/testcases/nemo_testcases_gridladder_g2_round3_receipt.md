@@ -54,7 +54,7 @@ record binary's build ORCA2G1_OMIP_L1_P5 (cmp, this round).
   at step 10 and creates the file named for step 1. The write is complete
   and the pointer moves only when the step equals the restart step
   (`ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/restart.f90:188`,
-  `ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/restart.f90:199-202`); 10 is not 1, so
+  `ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/restart.f90:200-201`); 10 is not 1, so
   the variables are defined and left empty.
 - Correction to the operator's note: "only a restart every step opens every
   step" is right, but the step-1 file is not a state, and consecutive list

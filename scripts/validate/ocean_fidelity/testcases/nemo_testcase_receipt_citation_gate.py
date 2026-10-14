@@ -164,6 +164,12 @@ FILES = {
         _ORCA2G1_P3 / "ppsrc/nemo/stprk3_stg.f90"),
     "ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/trazdf.f90": (
         _ORCA2G1_P3 / "ppsrc/nemo/trazdf.f90"),
+    "ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/zdfphy.f90": (
+        _ORCA2G1_P3 / "ppsrc/nemo/zdfphy.f90"),
+    "ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/restart.f90": (
+        _ORCA2G1_P3 / "ppsrc/nemo/restart.f90"),
+    "ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/sbcmod.f90": (
+        _ORCA2G1_P3 / "ppsrc/nemo/sbcmod.f90"),
     "ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/stp2d.f90": (
         _ORCA2G1_P3 / "ppsrc/nemo/stp2d.f90"),
     "ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/domain.f90": (
@@ -1971,19 +1977,18 @@ CITATION_MAP = {
     'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/trazdf.f90:233': (
         'zwd(ji,jk) = (e3t_3d(ji,jj,jk) *(1._wp+r3t(ji,jj,Kaa)*tmask(ji,jj,jk))) - ( zwi(ji,jk) + zws(ji,jk) )', 1),
     'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/trazdf.f90:269-298': [
-        ('zwt(ji,jk) = zwd(ji,jk) - zwi(ji,jk) * zws(ji,jk-1) / zwt(ji,jk-1)', 1),
-        ('pt(ji,jj,jk,jn,Kaa) = zrhs - zwi(ji,jk) / zwt(ji,jk-1) * pt(ji,jj,jk-1,jn,Kaa)', 1),
-        ('pt(ji,jj,jpkm1,jn,Kaa) = pt(ji,jj,jpkm1,jn,Kaa) / zwt(ji,jpkm1) * tmask(ji,jj,jpkm1)', 1),
+        ('zwt(ji,1) = zwd(ji,1)', 1),
+        ('&             / zwt(ji,jk) * tmask(ji,jj,jk)', 1),
         30],
     'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/zdfphy.f90:227': (
         'avt_k(:,:,jk)    = avtb_2d(:,:) * avtb(jk) * wmask(', 1),
     'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/restart.f90:119': (
         'IF( kt == nitrst - 1 .OR. nn_stock == 1 .OR. ( kt == nitend .AND. .NOT. lrst_oce ) ) THEN', 1),
     'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/restart.f90:188': ('IF( kt == nitrst ) THEN', 1),
-    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/restart.f90:199-202': [
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/restart.f90:200-201': [
         ('nrst_lst = MIN(nrst_lst + 1, SIZE(nn_stocklist,1))', 1),
         ('nitrst   = nn_stocklist( nrst_lst )', 1),
-        4],
+        2],
     'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/sbcmod.f90:346': (
         'IF( .NOT. ln_rst_list .AND. MOD( nn_stock, nn_fsbc) /= 0 ) THEN', 1),
     # --- GRIDLADDER round 12 END ---
@@ -5248,7 +5253,7 @@ CITATION_MAP = {
         'K_v_cell = K_v_cell + K33_iso.astype(state.T.data.dtype)', 7],
     'ocean_model_latlon_cgrid.py:13281-13311': [
         ('if do_tracers:', 2),
-        'implicit_w=nemo_aimp_tracer_w, return_matrix_trace=return_tracer_solve_trace))', 30],
+        'rounded_thickness=_zdf_tracer_rounded))', 31],
     # --- parallel LDF step-3 re-proof: current private arm and execution ---
     'ocean_model_latlon_cgrid.py:1674-1677': [
         '# Route the already-computed GM/Redi rate into the same stage-3 source',
