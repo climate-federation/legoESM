@@ -16,6 +16,11 @@
 #   1. tools/DOMAINcfg builds domain_cfg.nc from ORCA2's shipped
 #      ORCA_R2_zps_domcfg.nc (as the coordinates file) and ORCA2's own
 #      land-sea mask over one 100 m level (domaincfg_namelist_cfg).
+#      make_domain_cfg.exe exits without MPI_Finalize AFTER closing the
+#      file, so mpirun's status is recorded but not judged: the domain is
+#      admitted by check_domain_cfg.py on the file itself.  If a complete
+#      domain_cfg.nc from an earlier --run is the only thing in the
+#      evidence directory, --run admits it and resumes at step 2.
 #   2. cfgs/ORCA2G1_OMIP_L1     = ORCA2_ICE_PISCES minus key_si3 key_top
 #      key_xios (= the ORCA2_OMIP_L4 keys minus key_si3), OCE only, with
 #      MY_SRC/usrdef_istate.F90 + usrdef_sbc.F90 + restart.F90 with ONE added
@@ -74,12 +79,13 @@ readonly STEP_MODULE=$here/g1_step_record.F90
 readonly STEP_PATCH=$here/stprk3_g1_step_record.patch
 readonly BATHY_TOOL=$here/make_bathy_level.py
 readonly CHECKER=$here/check_records.py
+readonly DOMCHECK=$here/check_domain_cfg.py
 readonly SHIPPED_STPRK3=$NEMO_ROOT/src/OCE/stprk3.F90
 readonly SSH_PATCH=$here/restart_g1_usrdef_ssh.patch
 readonly SHIPPED_RESTART=$NEMO_ROOT/src/OCE/IOM/restart.F90
 
 for f in "$DECK" "$DOM_NML" "$ISTATE" "$SBC" "$STEP_MODULE" "$STEP_PATCH" \
-         "$BATHY_TOOL" "$CHECKER" "$SHIPPED_STPRK3" "$SHIPPED_DOMCFG" \
+         "$BATHY_TOOL" "$CHECKER" "$DOMCHECK" "$SHIPPED_STPRK3" "$SHIPPED_DOMCFG" \
          "$SSH_PATCH" "$SHIPPED_RESTART" "$L4_KEYS_FILE" "$DOMTOOL/namelist_ref" "$NEMO_ROOT/makenemo" \
          "$NEMO_ROOT/tools/maketools" "$NEMO_ROOT/cfgs/SHARED/namelist_ref" \
          "$NEMO_ROOT/arch/arch-conda-scalarmath.fcm"; do
@@ -125,12 +131,47 @@ render_deck "$dry/ten" 10 '10,0,0,0,0,0,0,0,0,0'
 render_deck "$dry/full" 100 '10,20,30,40,50,60,70,80,90,100'
 cmp -s "$dry/full" "$DECK" \
   || { printf 'REFUSE: the committed deck is not the 100-step deck\n' >&2; exit 68; }
-python3 -I -m py_compile "$BATHY_TOOL" "$CHECKER"
+python3 -I -m py_compile "$BATHY_TOOL" "$CHECKER" "$DOMCHECK"
 printf 'PREFLIGHT: patch applies; keys "%s"; commit %s\n' "$want_keys" "$COMMIT"
 
 readonly SMOKE=$EVIDENCE/smoke_2step REF=$EVIDENCE/ref_100step
 readonly TWIN_A=$EVIDENCE/p3_a_100step TWIN_B=$EVIDENCE/p3_b_10step
 readonly DOMDIR=$EVIDENCE/domaincfg
+
+domain_cfg_admit() {   # $1 = directory for the logs; refuses unless complete
+  local plant
+  for plant in missing-variable bad-level thin-cell wrong-jperio wrong-dims nonfinite; do
+    if python3 -I "$DOMCHECK" --domain-cfg "$DOMDIR/domain_cfg.nc" --plant "$plant" \
+         >"$1/domain_plant_${plant}.log" 2>&1; then
+      printf 'REFUSE: domain plant %s stayed green\n' "$plant" >&2; exit 72
+    fi
+    grep -q 'STATUS PLANT-FIRED' "$1/domain_plant_${plant}.log" \
+      || { printf 'REFUSE: domain plant %s did not fire\n' "$plant" >&2; exit 72; }
+  done
+  python3 -I "$DOMCHECK" --domain-cfg "$DOMDIR/domain_cfg.nc" --shipped "$SHIPPED_DOMCFG" \
+       --json "$1/domain_cfg_check.json" >/dev/null \
+    || { printf 'REFUSE: %s is not a complete G1 domain file\n' "$DOMDIR/domain_cfg.nc" >&2; exit 70; }
+  # Facts the receipt quotes (reported, not judged).
+  grep -n 'close file: domain_cfg.nc ok' "$DOMDIR/ocean.output" | sed 's/^/G1_DOMAINCFG_CLOSE_LINE ocean.output:/' || true
+  printf 'G1_DOMAINCFG_NOT_FINALISED_LINES %s\n' "$(grep -c 'exiting improperly' "$DOMDIR/run.user.log" || true)"
+  printf 'G1_DOMAIN_CFG_SHA256 %s\n' "$(sha256sum "$DOMDIR/domain_cfg.nc" | awk '{print $1}')"
+}
+
+# The DOMAINcfg inputs of an existing domain_cfg.nc are the committed ones.
+domain_cfg_same_inputs() {
+  local dom_commit
+  dom_commit=$(cat "$EVIDENCE/manifest/legoesm_commit_domaincfg" 2>/dev/null \
+    || cat "$EVIDENCE/manifest/legoesm_commit" 2>/dev/null || true)
+  git -C "$repo_root" cat-file -e "${dom_commit:-none}^{commit}" 2>/dev/null \
+    || { printf 'REFUSE: the commit that ran DOMAINcfg ("%s") is not in this clone\n' "$dom_commit" >&2; exit 69; }
+  git -C "$repo_root" diff --quiet "$dom_commit" HEAD -- "$DOM_NML" "$BATHY_TOOL" \
+    || { printf 'REFUSE: the DOMAINcfg namelist or bathymetry tool changed since %s\n' "$dom_commit" >&2; exit 69; }
+  cmp -s "$DOMDIR/namelist_cfg" "$DOM_NML" && cmp -s "$DOMDIR/namelist_ref" "$DOMTOOL/namelist_ref" \
+    && cmp -s "$DOMDIR/make_domain_cfg.exe" "$DOMTOOL/BLD/bin/make_domain_cfg.exe" \
+    && [[ "$DOMDIR/coordinates.nc" -ef "$SHIPPED_DOMCFG" && -f "$DOMDIR/bathy_level.nc" ]] \
+    || { printf 'REFUSE: %s was not built from the committed DOMAINcfg inputs\n' "$DOMDIR" >&2; exit 69; }
+  printf '%s\n' "$dom_commit"
+}
 
 admit() {
   local plant
@@ -167,11 +208,23 @@ for name in "$REF_NAME" "$RUN_NAME"; do
     printf 'REFUSE: %s already exists; use --admit-existing or move it aside\n' \
       "$NEMO_ROOT/cfgs/$name" >&2; exit 69; }
 done
-[[ ! -e "$EVIDENCE" ]] || {
-  printf 'REFUSE: evidence directory %s already exists; use --admit-existing\n' "$EVIDENCE" >&2; exit 69; }
+resume=0
+if [[ -e "$EVIDENCE" ]]; then
+  # Only a domain-only directory (step 1 done, nothing after it) resumes.
+  [[ -f "$DOMDIR/domain_cfg.nc" && "$(ls -A "$EVIDENCE" | LC_ALL=C sort | xargs)" == "domaincfg manifest" ]] || {
+    printf 'REFUSE: evidence directory %s already exists; use --admit-existing\n' "$EVIDENCE" >&2; exit 69; }
+  resume=1
+  dom_commit=$(domain_cfg_same_inputs)
+fi
 
 if [[ "$mode" != --run ]]; then
-  printf 'WOULD: maketools -m conda-scalarmath -n DOMAINcfg; mpirun -np 1 make_domain_cfg.exe in %s\n' "$DOMDIR"
+  if [[ "$resume" -eq 1 ]]; then
+    domain_cfg_admit "$dry"
+    printf 'WOULD: admit the existing %s (DOMAINcfg ran at commit %s) and resume at the NEMO builds\n' \
+      "$DOMDIR/domain_cfg.nc" "$dom_commit"
+  else
+    printf 'WOULD: maketools -m conda-scalarmath -n DOMAINcfg; mpirun -np 1 make_domain_cfg.exe in %s\n' "$DOMDIR"
+  fi
   printf 'WOULD: makenemo -r ORCA2_ICE_PISCES -n %s|%s -d OCE -m conda-scalarmath del_key "key_si3 key_top key_xios"\n' \
     "$REF_NAME" "$RUN_NAME"
   printf 'WOULD: mpirun -np 1 ./nemo in %s/{smoke_2step,ref_100step,p3_a_100step,p3_b_10step}; then %s\n' \
@@ -181,14 +234,21 @@ if [[ "$mode" != --run ]]; then
 fi
 
 mkdir -p "$EVIDENCE/manifest" "$DOMDIR"
+if [[ "$resume" -eq 1 && ! -e "$EVIDENCE/manifest/legoesm_commit_domaincfg" ]]; then
+  mv "$EVIDENCE/manifest/legoesm_commit" "$EVIDENCE/manifest/legoesm_commit_domaincfg"
+  mv "$EVIDENCE/manifest/inputs.sha256" "$EVIDENCE/manifest/inputs_domaincfg.sha256"
+fi
 printf '%s\n' "$COMMIT" >"$EVIDENCE/manifest/legoesm_commit"
 sha256sum "$SHIPPED_DOMCFG" "$DECK" "$DOM_NML" "$ISTATE" "$SBC" "$STEP_MODULE" \
-  "$STEP_PATCH" "$SSH_PATCH" "$SHIPPED_RESTART" "$BATHY_TOOL" "$CHECKER" \
+  "$STEP_PATCH" "$SSH_PATCH" "$SHIPPED_RESTART" "$BATHY_TOOL" "$CHECKER" "$DOMCHECK" \
   "$SHIPPED_STPRK3" "$DOMTOOL/namelist_ref" \
   "$NEMO_ROOT/cfgs/SHARED/namelist_ref" "$NEMO_ROOT/arch/arch-conda-scalarmath.fcm" \
   >"$EVIDENCE/manifest/inputs.sha256"
 
 # ---- 1. domain_cfg.nc from NEMO's own tools/DOMAINcfg ----------------------
+if [[ "$resume" -eq 1 ]]; then
+  printf 'G1_DOMAINCFG_RESUME admitting the existing domain_cfg.nc (DOMAINcfg ran at commit %s)\n' "$dom_commit"
+else
 if [[ ! -x "$DOMTOOL/BLD/bin/make_domain_cfg.exe" ]]; then
   ( cd "$NEMO_ROOT/tools" && ./maketools -m conda-scalarmath -n DOMAINcfg )
 fi
@@ -201,10 +261,17 @@ fi
   ln -s "$SHIPPED_DOMCFG" coordinates.nc
   python3 -I "$BATHY_TOOL" --source "$SHIPPED_DOMCFG" --target bathy_level.nc | tee bathy_level.log
   cp "$DOMTOOL/BLD/bin/make_domain_cfg.exe" make_domain_cfg.exe
-  mpirun -np 1 --oversubscribe ./make_domain_cfg.exe >run.user.log 2>&1
+  # The tool exits without MPI_Finalize after closing domain_cfg.nc: the
+  # status is recorded, and the file check below decides.
+  dom_status=0
+  mpirun -np 1 --oversubscribe ./make_domain_cfg.exe >run.user.log 2>&1 || dom_status=$?
+  printf 'G1_DOMAINCFG_MPIRUN_EXIT %s\n' "$dom_status" | tee mpirun_exit.log
   [[ -f domain_cfg.nc ]] || { printf 'REFUSE: DOMAINcfg wrote no domain_cfg.nc\n' >&2; exit 70; }
-  sha256sum make_domain_cfg.exe namelist_cfg namelist_ref bathy_level.nc domain_cfg.nc >domaincfg.sha256
 )
+fi
+domain_cfg_admit "$EVIDENCE/manifest" | tee "$DOMDIR/domain_cfg_admission.log"
+( cd "$DOMDIR" && sha256sum make_domain_cfg.exe namelist_cfg namelist_ref bathy_level.nc \
+    domain_cfg.nc >domaincfg.sha256 )
 
 # ---- 2. the two NEMO builds ------------------------------------------------
 cd "$NEMO_ROOT"
