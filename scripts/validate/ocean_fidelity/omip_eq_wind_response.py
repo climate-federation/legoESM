@@ -22,6 +22,13 @@ footprint per mark = finite in every source):
             must come from pressure gradient, lateral friction or advection
   deta_WE   sea-surface height west minus east [cm] across 160-260E, from a
             least-squares line through the |lat|<=1 mean (+ = eastward push)
+  F_tot/F_ssh  0-400 m zonal pressure force per unit area / rho0 [1e-5 m2/s2],
+            |lat|<=1, 160-260E (+ = eastward), from the hydrostatic pressure
+            of each lane's own T, S, eta through ONE equation of state
+            (Wright, the tripole/MPAS one) so lanes differ only by structure;
+            F_ssh = the sea-surface part alone, F_tot - F_ssh = density part
+  ug_N/u_N, ug_S/u_S  50-300 m mean geostrophic vs actual zonal velocity
+            [m/s] at 2N / 2S (rows 1.5-2.5), 160-260E
 
 SAMPLING.  Lanes use INSTANTANEOUS velocity (FESOM stores no mean velocity) at
 the same marks, so the three lanes are like for like; inertial oscillations
@@ -96,6 +103,55 @@ def transports(u, v, zN, zi, eta=None):
     return r
 
 
+def pressure_terms(T, S, eta, u, zN, zi):
+    """Hydrostatic zonal pressure force and off-equator geostrophy.
+
+    T, S, u (nz, GLAT, GLON) on level centres zN (interfaces zi); eta (GLAT, GLON)
+    [m].  Pressure at a centre = g*rho0*eta + g * int_0^z (rho - rho0) dz'."""
+    import jax.numpy as jnp
+    from legoesm import constants
+    from legoesm.ocean.eos import wright_eos
+    g, r0, R = float(constants.g), float(constants.rho_ocean), float(constants.R_earth)
+    nz = zN.size
+    dz = np.diff(zi)[:nz]
+    p_hyd = r0 * g * np.broadcast_to(zN[:, None, None], T.shape)
+    b = g * (np.asarray(wright_eos(jnp.asarray(T), jnp.asarray(S), jnp.asarray(p_hyd))) - r0)
+    bc = band_weights(zi, 0.0, Z_COL)[:nz]
+
+    def p_at(zc):                                               # Pa at depths zc (nz,)
+        return g * r0 * eta[None] + np.cumsum(b * dz[:, None, None], axis=0) \
+            - b * dz[:, None, None] + b * (zc - zi[:nz])[:, None, None]
+    P = p_at(zN)                                                # NaN where any input is
+    Pc = p_at(np.where(bc < dz, zi[:nz] + 0.5 * bc, zN))        # clipped layer: overlap midpoint
+    eq = np.abs(GLAT) <= 1.0
+    ls = (GLON >= LON_SLOPE[0]) & (GLON <= LON_SLOPE[1])
+    full = np.all(np.isfinite(Pc[bc > 0][:, eq]), axis=(0, 1))  # every |lat|<=1 row, full 0-Z_COL
+    x = np.deg2rad(GLON[ls]) * R
+    out = {}
+    for tag, F in (("F_tot", Pc), ("F_ssh", g * r0 * np.broadcast_to(eta[None], P.shape))):
+        Fe = np.where(full[None], np.mean(F[:, eq], axis=1), np.nan)[:, ls]   # (nz, lon)
+        ok = np.all(np.isfinite(Fe[bc > 0]), axis=0)
+        if ok.sum() < 0.8 * ok.size:
+            raise ValueError(f"{tag}: full equatorial columns at only {ok.sum()}/{ok.size} longitudes")
+        slope = np.array([np.polyfit(x[ok], Fe[k, ok], 1)[0] for k in np.flatnonzero(bc > 0)])
+        out[tag] = float(-np.sum(slope * bc[bc > 0]) / r0 * 1e5)
+    bg = band_weights(zi, 50.0, 300.0)[:nz]
+    dy = np.deg2rad(1.0) * R
+    for tag, r_lo, r_hi in (("N", 1.5, 2.5), ("S", -1.5, -2.5)):
+        i_lo, i_hi = (int(np.argmin(np.abs(GLAT - v))) for v in (r_lo, r_hi))
+        f = 2.0 * float(constants.Omega) * np.sin(np.deg2rad(0.5 * (r_lo + r_hi)))
+        dPdy = (P[:, i_hi] - P[:, i_lo]) / (dy * np.sign(r_hi - r_lo))
+        ug = -dPdy / (f * r0)
+        ua = 0.5 * (u[:, i_lo] + u[:, i_hi])
+        both = np.isfinite(ug[bg > 0]).all(0) & np.isfinite(ua[bg > 0]).all(0) & ls
+        if both.sum() < 0.8 * ls.sum():
+            raise ValueError(f"geostrophy {tag}: full columns at only {both.sum()}/{ls.sum()} longitudes")
+        w = bg[bg > 0, None] / bg.sum()
+        out["ug_" + tag] = float(np.mean(np.sum(ug[bg > 0][:, both] * w, axis=0)))
+        out["u_" + tag] = float(np.mean(np.sum(ua[bg > 0][:, both] * w, axis=0)))
+    return out
+
+
 def main(argv=None):
     global Z_COL
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
@@ -108,6 +164,8 @@ def main(argv=None):
     p.add_argument("--z-col", type=float, default=Z_COL, help="column transport depth [m]")
     a = p.parse_args(argv)
     Z_COL = a.z_col
+    from legoesm.core.precision import PrecisionPolicy, set_policy
+    set_policy(PrecisionPolicy.fp64())                          # EOS in fp64
     a.out.mkdir(parents=True, exist_ok=True)
     import netCDF4 as nc
     T = nc.Dataset(a.nemo_prefix + "grid_T.nc"); U = nc.Dataset(a.nemo_prefix + "grid_U.nc")
@@ -154,22 +212,30 @@ def main(argv=None):
         uT = 0.5 * (t["u"][:, :-1, :kz] + t["u"][:, 1:, :kz]); vT = 0.5 * (t["v"][:-1, :, :kz] + t["v"][1:, :, :kz])
         G["tripole"] = (remap3(uT, t["lat_T"], t["lon_T"], wt), remap3(vT, t["lat_T"], t["lon_T"], wt))
         E["tripole"] = remap(t["eta"], t["lat_T"], t["lon_T"], wt[..., 0])
+        TS = {"tripole": tuple(remap3(t[q][..., :kz], t["lat_T"], t["lon_T"], wt) for q in ("T", "S"))}
         m = snap(a.mpas, d); zm = np.abs(m["z_center_ref"])[:kz]
         assert np.allclose(zm, zN, rtol=2e-3, atol=0.5)
         wm = wet3_from(m["H_bathy"], zm, m["T"][..., :kz].shape) & (m["land_mask"] > 0.5)[..., None]
         G["MPAS"] = (remap3(m["u_east"][:, :kz], m["lat_T"], m["lon_T"], wm),
                      remap3(m["v_north"][:, :kz], m["lat_T"], m["lon_T"], wm))
         E["MPAS"] = remap(m["eta"], m["lat_T"], m["lon_T"], wm[..., 0])
+        TS["MPAS"] = tuple(remap3(m[q][..., :kz], m["lat_T"], m["lon_T"], wm) for q in ("T", "S"))
         fz = snap(a.fesom, d); zf = np.abs(fz["z_center_ref"]); nf = zf.size
         wf = wet3_from(fz["H_bathy"], zf, fz["T"][..., :nf].shape) & (fz["land_mask"] > 0.5)[..., None]
         rf = lambda x: to_levels(remap3(x[..., :nf], fz["lat_T"], fz["lon_T"], wf), zf, zN)
         G["FESOM"] = (rf(fz["u_east"]), rf(fz["v_north"]))
         E["FESOM"] = remap(fz["eta"], fz["lat_T"], fz["lon_T"], wf[..., 0])
+        TS["FESOM"] = (rf(fz["T"]), rf(fz["S"]))
         common = np.all([np.isfinite(x) for uv in G.values() for x in uv], axis=0)
         ecom = common[0] & np.all([np.isfinite(x) for x in E.values()], axis=0)
         out["marks"][d] = {lab: transports(np.where(common, u, np.nan), np.where(common, v, np.nan), zN, zi,
                                            eta=np.where(ecom, E[lab], np.nan))
                            for lab, (u, v) in G.items()}
+        pcom = common & np.all([np.isfinite(x) for ts in TS.values() for x in ts], axis=0) & ecom[None]
+        for lab, (Tl, Sl) in TS.items():
+            out["marks"][d][lab].update(pressure_terms(
+                np.where(pcom, Tl, np.nan), np.where(pcom, Sl, np.nan), E[lab],
+                np.where(pcom, G[lab][0], np.nan), zN, zi))
         print(d, json.dumps({k: {q: round(x, 3) for q, x in r.items()} for k, r in out["marks"][d].items()}))
     labs = list(out["marks"][marks[0]])
     out["marks_used"] = marks

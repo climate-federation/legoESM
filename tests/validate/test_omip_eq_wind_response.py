@@ -71,3 +71,58 @@ def test_column_transport_and_ssh_slope(mod):
     assert mod.transports(u3, np.zeros_like(u3), zN3, zi3)["U_col_W"] == pytest.approx(500.0)
     with pytest.raises(ValueError, match="levels reach only"):
         mod.transports(u[:3], v[:3], zN[:3], zi[:4])
+
+
+def test_pressure_force_and_geostrophy(mod):
+    """Uniform water, SSH falling 1 cm/deg eastward -> eastward force
+    g*0.01/(1 deg in m)*400 m, all of it SSH; SSH rising 2 cm/deg northward ->
+    ug_N = -(g/f)*0.02/(1 deg in m); warm-west water, flat SSH -> westward
+    density force and zero SSH force."""
+    from legoesm import constants
+    from legoesm.core.precision import PrecisionPolicy, set_policy
+    set_policy(PrecisionPolicy.fp64())
+    g, R = constants.g, constants.R_earth
+    dm = np.deg2rad(1.0) * R
+    zi = np.array([0.0, 10.0, 50.0, 150.0, 300.0, 400.0, 600.0]); zN = 0.5 * (zi[1:] + zi[:-1])
+    shp = (zN.size, mod.GLAT.size, mod.GLON.size)
+    T = np.full(shp, 20.0); S = np.full(shp, 35.0); u = np.zeros(shp)
+    LA, LO = np.meshgrid(mod.GLAT, mod.GLON, indexing="ij")
+    r = mod.pressure_terms(T, S, -0.01 * (LO - 160.0), u, zN, zi)
+    assert r["F_ssh"] == pytest.approx(g * 0.01 / dm * 400.0 * 1e5, rel=1e-9)
+    assert r["F_tot"] == pytest.approx(r["F_ssh"], rel=1e-9)
+    r = mod.pressure_terms(T, S, 0.02 * LA, u, zN, zi)
+    f = 2.0 * constants.Omega * np.sin(np.deg2rad(2.0))
+    assert r["ug_N"] == pytest.approx(-g / f * 0.02 / dm, rel=1e-9)
+    assert r["ug_S"] == pytest.approx(-g / -f * 0.02 / dm, rel=1e-9)
+    assert r["u_N"] == 0.0
+    Tw = 25.0 - 0.05 * (LO - 160.0)[None] + 0.0 * T
+    r = mod.pressure_terms(Tw, S, 0.0 * LA, u, zN, zi)
+    assert r["F_ssh"] == pytest.approx(0.0, abs=1e-12) and r["F_tot"] < -1.0
+
+
+def test_density_force_magnitude_with_clipped_layer(mod):
+    """Warm-west water on levels whose last layer (300-500 m) straddles 400 m:
+    the force equals an explicit loop over layers, pressure taken at each
+    layer's centre and at 350 m (the overlap midpoint) for the clipped one."""
+    import jax.numpy as jnp
+    from legoesm import constants
+    from legoesm.core.precision import PrecisionPolicy, set_policy
+    from legoesm.ocean.eos import wright_eos
+    set_policy(PrecisionPolicy.fp64())
+    g, r0, R = constants.g, constants.rho_ocean, constants.R_earth
+    zi = np.array([0.0, 20.0, 100.0, 300.0, 500.0]); zN = np.array([8.0, 55.0, 190.0, 420.0])
+    shp = (zN.size, mod.GLAT.size, mod.GLON.size)
+    LA, LO = np.meshgrid(mod.GLAT, mod.GLON, indexing="ij")
+    T = 25.0 - 0.05 * (LO - 160.0)[None] - 0.02 * zN[:, None, None]
+    S = np.full(shp, 35.0)
+    r = mod.pressure_terms(T, S, 0.0 * LA, np.zeros(shp), zN, zi)
+    ls = (mod.GLON >= 160.0) & (mod.GLON <= 260.0)
+    x = np.deg2rad(mod.GLON[ls]) * R
+    rho = np.asarray(wright_eos(jnp.asarray(T), jnp.asarray(S),
+                                jnp.asarray(r0 * g * zN[:, None, None] + 0.0 * T)))[:, 10, ls]
+    zc = [8.0, 55.0, 190.0, 350.0]; thick = [20.0, 80.0, 200.0, 100.0]
+    F = 0.0
+    for k in range(4):
+        Pk = sum(g * (rho[j] - r0) * (zi[j + 1] - zi[j]) for j in range(k)) + g * (rho[k] - r0) * (zc[k] - zi[k])
+        F += -np.polyfit(x, Pk, 1)[0] / r0 * thick[k]
+    assert r["F_tot"] == pytest.approx(F * 1e5, rel=1e-9)
