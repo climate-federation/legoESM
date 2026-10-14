@@ -264,6 +264,79 @@ def test_hourly_sampler_refuses_missing_operator():
             {"box": lambda eta, u, v: (eta, u, v)})
 
 
+def test_run_long_dual_hourly_writer_operators_endpoints_and_t0(
+        tmp_path, monkeypatch):
+    """Review D1-04: run the schema-v2 writer itself on the real 6.25 km grid.
+
+    A drift model adds one fixed dyadic pattern per fine step, so the state
+    after n steps is exactly n times it and every stored record has a NumPy
+    reference.  Swapped streams, sigma of one fine cell, t0 after day one, a
+    left endpoint, or one fine step per sample each miss by 5e-5 or more
+    (measured, round 6), against tolerances of 2.1e-12 m and 3e-15 m/s.
+    """
+    from legoesm.ocean.dynamics import ocean_model_latlon_cgrid
+    from legoesm.ocean.fidelity import swg_coarse_graining as coarse
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        SWG_DG50_NAMELIST,
+        SWG_MADDISON_NAMELIST,
+    )
+
+    source = coarse.cgrid_geometry(SWG_MADDISON_NAMELIST)
+    target = coarse.cgrid_geometry(SWG_DG50_NAMELIST)
+    shape = source["mask"]["T"].shape
+    rng = np.random.default_rng(1014)
+    pattern = {kind: rng.integers(-64, 65, size=shape) * 2.0**-24
+               for kind in ("T", "U", "V")}
+
+    class DriftModel:
+        def __init__(self, *args):
+            del args
+
+        def step(self, state, dt_s, *, surface_forcing):
+            del dt_s, surface_forcing
+            return state._replace(
+                eta=state.eta.replace(data=state.eta.data + pattern["T"]),
+                u=state.u.replace(
+                    data=state.u.data.at[:, 1:, 0].add(pattern["U"])),
+                v=state.v.replace(
+                    data=state.v.data.at[1:, :, 0].add(pattern["V"])))
+
+    monkeypatch.setattr(
+        ocean_model_latlon_cgrid, "LatLonCGridOceanModel", DriftModel)
+    namelist = driver.resolved_daily_namelist(1, deck="maddison")
+    output = tmp_path / "hourly"
+    driver.run_long(namelist, output, days=1, mode="cpu-scanned",
+                    commit="a" * 40, physical_gpu=None, hourly_targets=True)
+    steps_per_hour = int(driver.SECONDS_PER_HOUR / namelist.rn_Dt_s)
+
+    def reference(steps):
+        fields = {kind: steps * value for kind, value in pattern.items()}
+        return {
+            "box": coarse.conservative_restrict_cgrid(fields, source, target),
+            "filtered": coarse.filtered_restrict_cgrid(
+                fields, source, target, sigma_source_cells=8.0)}
+
+    names = (("T", "ssh", "m"), ("U", "u", "m_s"), ("V", "v", "m_s"))
+    with np.load(output / "day0001.npz") as saved:
+        assert saved["absolute_hour"].tolist() == list(range(1, 25))
+        for hour in (0, 1, 24):
+            expected = reference(hour * steps_per_hour)
+            for operator in ("box", "filtered"):
+                for kind, field, unit in names:
+                    stored = (saved[f"{operator}_{field}_initial_{unit}"]
+                              if hour == 0 else
+                              saved[f"{operator}_{field}_hourly_{unit}"][
+                                  hour - 1])
+                    np.testing.assert_allclose(
+                        stored, expected[operator][kind], rtol=0.0,
+                        atol=2.1e-12 if kind == "T" else 3.0e-15,
+                        err_msg=f"hour {hour} {operator} {field}")
+        # The comparison resolves the stream identity (box vs filtered).
+        assert np.max(np.abs(saved["filtered_ssh_hourly_m"][-1]
+                             - reference(24 * steps_per_hour)["box"]["T"])) \
+            > 1.0e-4
+
+
 def test_real_dual_hourly_sampler_lowering_has_no_convolution_operation():
     import jax
     import jax.numpy as jnp

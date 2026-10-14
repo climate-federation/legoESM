@@ -113,7 +113,8 @@ def _sample_on_device(fields, device):
                       for operator in sampled), memory)
 
 
-def _compare_samples(cpu_sample, gpu_sample) -> list[dict]:
+def _compare_samples(cpu_sample, gpu_sample, *,
+                     label: str = "CPU/GPU") -> list[dict]:
     import numpy as np
 
     rows = []
@@ -125,19 +126,43 @@ def _compare_samples(cpu_sample, gpu_sample) -> list[dict]:
             if not (np.all(np.isfinite(cpu_value))
                     and np.all(np.isfinite(gpu_value))):
                 raise AssertionError(
-                    f"{operator} {field} CPU/GPU sample is non-finite")
+                    f"{operator} {field} {label} sample is non-finite")
             difference = np.abs(np.asarray(gpu_value) - np.asarray(cpu_value))
             maximum = float(np.max(difference))
             atol = 2.1e-12 if field == "ssh_m" else 3.0e-14
             np.testing.assert_allclose(
                 gpu_value, cpu_value, rtol=3.0e-14, atol=atol,
-                err_msg=f"{operator} {field} CPU/GPU mismatch")
+                err_msg=f"{operator} {field} {label} mismatch")
             rows.append({
-                "operator": operator, "field": field,
-                "max_abs_cpu_gpu": maximum, "atol": atol,
-                "rtol": 3.0e-14,
+                "comparison": label, "operator": operator, "field": field,
+                "max_abs": maximum, "atol": atol, "rtol": 3.0e-14,
             })
     return rows
+
+
+def _run_in_scan_sampler(driver, model, state, dt_s, forcing, restrictors):
+    """Execute the production nested-scan sampler program on the device.
+
+    Two fine steps per stored hour keep a real inner loop at 1/36 of the
+    production cost.  Its last sample must equal the stand-alone sampler on
+    the stepped state.  Round 5c's GPU fault depended on how XLA fused the
+    filter with its surroundings, which differs between the two programs, so
+    the stand-alone sample alone does not show that the scan runs.
+    """
+    import jax
+
+    stepper = driver.build_scanned_hourly_target_stepper(
+        model, dt_s, forcing, 2, restrictors)
+    final, hourly = stepper(state)
+    jax.block_until_ready(final.eta.data)
+    in_scan = tuple(tuple(jax.device_get(field[-1]) for field in operator)
+                    for operator in hourly)
+    standalone = jax.jit(driver.build_dual_coarse_sampler(restrictors))(
+        final.eta.data, final.u.data[:, 1:, 0], final.v.data[1:, :, 0])
+    standalone = tuple(tuple(jax.device_get(field) for field in operator)
+                       for operator in standalone)
+    return _compare_samples(
+        standalone, in_scan, label="in-scan/stand-alone")
 
 
 def _state_from_coarse_arrays(card, coarse):
@@ -211,6 +236,9 @@ def _run_worker(args) -> dict:
                 int(3_600 / fine_card.dt_s), full_restrictors)
             driver.assert_hourly_stepper_has_no_convolution(
                 full_stepper, fine_state)
+            in_scan_comparisons = _run_in_scan_sampler(
+                driver, fine_model, fine_state, fine_card.dt_s, fine_forcing,
+                full_restrictors)
         cpu_devices = jax.devices("cpu")
         if not cpu_devices:
             raise RuntimeError("CPU reference device is unavailable")
@@ -219,7 +247,8 @@ def _run_worker(args) -> dict:
         gpu_sample, gpu_compiled_memory = _sample_on_device(fields, gpu)
         result = {
             "task": "dual_hourly_sampler",
-            "comparisons": _compare_samples(cpu_sample, gpu_sample),
+            "comparisons": (_compare_samples(cpu_sample, gpu_sample)
+                            + in_scan_comparisons),
             "cpu_compiled_memory": cpu_compiled_memory,
             "gpu_compiled_memory": gpu_compiled_memory,
             "restart_admission": admission,
@@ -340,7 +369,7 @@ def _run_parent(args) -> dict:
                     f"GPU smoke worker {task} exited {completed.returncode}")
             results.append(json.loads(worker_output.read_text()))
     return {
-        "schema": "legoesm-swg-online-gpu-smoke-v1",
+        "schema": "legoesm-swg-online-gpu-smoke-v2",
         "status": "complete",
         "physical_gpu": args.physical_gpu,
         "legoesm_git_sha": commit,

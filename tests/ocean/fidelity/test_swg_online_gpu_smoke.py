@@ -46,3 +46,55 @@ def test_smoke_requires_explicit_memory_fraction_before_gpu_import(
     ])
     assert result == 2
     assert "XLA_PYTHON_CLIENT_MEM_FRACTION must be set" in capsys.readouterr().err
+
+
+def test_in_scan_sampler_check_matches_stand_alone_and_catches_left_endpoint():
+    import types
+    from typing import NamedTuple
+
+    import jax
+    import jax.numpy as jnp
+
+    class Field(NamedTuple):
+        data: object
+
+    class State(NamedTuple):
+        eta: Field
+        u: Field
+        v: Field
+
+    class Increment:
+        def step(self, state, dt_s, *, surface_forcing):
+            del dt_s, surface_forcing
+            return State(*(Field(field.data + 1.0) for field in state))
+
+    driver = smoke._load_driver_module()
+    state = State(Field(jnp.zeros((3, 3))), Field(jnp.zeros((3, 4, 1))),
+                  Field(jnp.zeros((4, 3, 1))))
+    restrictors = {"box": lambda eta, u, v: (eta, u, v),
+                   "filtered": lambda eta, u, v: (2.0 * eta, 2.0 * u, 2.0 * v)}
+    rows = smoke._run_in_scan_sampler(
+        driver, Increment(), state, 1.0, None, restrictors)
+    assert len(rows) == 6
+    assert {row["comparison"] for row in rows} == {"in-scan/stand-alone"}
+    assert max(row["max_abs"] for row in rows) == 0.0
+
+    def left_endpoint_stepper(model, dt_s, forcing, steps_per_hour, chosen):
+        sample = driver.build_dual_coarse_sampler(chosen)
+
+        def hour(carry, _):
+            taken = sample(carry.eta.data, carry.u.data[:, 1:, 0],
+                           carry.v.data[1:, :, 0])
+            for _ in range(steps_per_hour):
+                carry = model.step(carry, dt_s, surface_forcing=forcing)
+            return carry, taken
+
+        return jax.jit(
+            lambda start: jax.lax.scan(hour, start, None, length=24))
+
+    planted = types.SimpleNamespace(
+        build_scanned_hourly_target_stepper=left_endpoint_stepper,
+        build_dual_coarse_sampler=driver.build_dual_coarse_sampler)
+    with pytest.raises(AssertionError, match="box ssh_m in-scan/stand-alone"):
+        smoke._run_in_scan_sampler(
+            planted, Increment(), state, 1.0, None, restrictors)

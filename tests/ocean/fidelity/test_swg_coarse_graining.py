@@ -182,16 +182,24 @@ def test_filtered_extensives_commute_with_continuity_at_walls_and_corners():
                       rtol=0.0, atol=2.0e-13)
 
     # Plant the tempting even-reflection treatment on a normal transport.
+    # Two arms through the full commutator: rebuilding U's wall-normal pass
+    # with the odd matrix commutes, with the even one it does not (round 6,
+    # review D1-06: the former one-axis plant also "failed" for odd parity).
     kernel = coarse.gaussian_kernel_1d(sigma_cells=4.0)
-    radius = kernel.size // 2
-    wrong_u = coarse._convolve_valid_axis(
-        coarse._pad_even_cell_centres(u, radius, 1), kernel, 1)
-    wrong = wrong_u[:, 1:] - wrong_u[:, :-1]
-    assert np.max(np.abs(wrong[:, (0, -1)]
-                         - filtered_divergence[:, (0, -1)])) > 1.0e-3
+    along_y = coarse.closed_wall_filter_matrix(
+        ny, kernel, extension="symmetric") @ u
+    for extension, commutes in (("odd", True), ("symmetric", False)):
+        planted_u = along_y @ coarse.closed_wall_filter_matrix(
+            nx + 1, kernel, extension=extension).T
+        planted_u[:, (0, -1)] = 0.0
+        planted = (planted_u[:, 1:] - planted_u[:, :-1]
+                   + filtered_v[1:] - filtered_v[:-1] - filtered_divergence)
+        error = float(np.max(np.abs(planted)))
+        assert (error < 2.0e-15) is commutes, (extension, error)
+        assert commutes or error > 1.0e-3
 
 
-def test_shifted_filter_lowering_has_no_convolution_and_guard_catches_plant():
+def test_filter_lowering_has_no_convolution_and_guard_catches_plant():
     import jax
     import jax.numpy as jnp
     from legoesm.training.swg_online import assert_no_convolution_operations
@@ -203,7 +211,7 @@ def test_shifted_filter_lowering_has_no_convolution_and_guard_catches_plant():
     lowered = jax.jit(lambda a, b, c:
         coarse.filter_closed_cgrid_extensives_array(
             a, b, c, kernel=kernel)).lower(volume, u, v)
-    assert_no_convolution_operations(lowered, label="shifted filter plant control")
+    assert_no_convolution_operations(lowered, label="matrix filter plant control")
 
     dense_kernel = (kernel[:, None] * kernel[None, :])[None, None]
     padded = jnp.pad(volume, ((3, 3), (3, 3)), mode="symmetric")
@@ -212,6 +220,75 @@ def test_shifted_filter_lowering_has_no_convolution_and_guard_catches_plant():
         dimension_numbers=("NCHW", "OIHW", "NCHW"))[0, 0]).lower(padded)
     with pytest.raises(RuntimeError, match="forbidden convolution"):
         assert_no_convolution_operations(planted, label="planted dense filter")
+
+
+@pytest.mark.parametrize("shape,sigma", [((61, 67), 8.0), ((73, 79), 4.0)])
+def test_matrix_filter_equals_shifted_slice_definition(shape, sigma):
+    """Round 6 changed how the filter is evaluated, not what it is."""
+    rng = np.random.default_rng(20261014)
+    ny, nx = shape
+    kernel = coarse.gaussian_kernel_1d(sigma_cells=sigma)
+    volume = rng.normal(size=(ny, nx))
+    u = np.zeros((ny, nx + 1), dtype=np.float64)
+    v = np.zeros((ny + 1, nx), dtype=np.float64)
+    u[:, 1:-1] = rng.normal(size=(ny, nx - 1))
+    v[1:-1, :] = rng.normal(size=(ny - 1, nx))
+
+    def passes(values, first, second):
+        once = coarse.shifted_weighted_sum(
+            values, kernel, axis=0, extension=first)
+        return np.array(coarse.shifted_weighted_sum(
+            once, kernel, axis=1, extension=second))
+
+    expected = [passes(volume, "symmetric", "symmetric"),
+                passes(u, "symmetric", "odd"), passes(v, "odd", "symmetric")]
+    expected[1][:, (0, -1)] = 0.0
+    expected[2][(0, -1), :] = 0.0
+    actual = coarse.filter_closed_cgrid_extensives_array(
+        volume, u, v, kernel=kernel)
+    for got, want in zip(actual, expected, strict=True):
+        # measured 1.7e-16 at most, against filtered amplitudes 0.05-0.26
+        np.testing.assert_allclose(np.asarray(got), want, rtol=0.0, atol=1.0e-15)
+    # Not vacuous: rebuilding U's second pass reproduces it with the odd
+    # matrix only; the even (wrong) wall-normal parity is seen.
+    along_y = np.asarray(coarse.shifted_weighted_sum(
+        u, kernel, axis=0, extension="symmetric"))
+    for extension, agrees in (("odd", True), ("symmetric", False)):
+        rebuilt = along_y @ coarse.closed_wall_filter_matrix(
+            nx + 1, kernel, extension=extension).T
+        rebuilt[:, (0, -1)] = 0.0
+        error = float(np.max(np.abs(rebuilt - expected[1])))
+        assert (error < 1.0e-15) is agrees, (extension, error)
+        assert agrees or error > 1.0e-3
+    with pytest.raises(ValueError, match="symmetric or odd"):
+        coarse.closed_wall_filter_matrix(ny, kernel, extension="reflect")
+
+
+def test_filtered_restriction_lowers_to_matrix_products_not_tap_slices():
+    """GPU guard, checkable on the CPU (round 6).
+
+    The round-5c restriction lowered to 1185 slices (a data window and a
+    weight for each of 97 taps in six passes, 1164, plus the rest), and XLA
+    fused one pass into a kernel that faulted on the V100S with an illegal
+    address.  The restriction must stay a handful of matrix products.
+    """
+    import re
+    from collections import Counter
+
+    import jax
+    import jax.numpy as jnp
+
+    source = coarse.cgrid_geometry(SWG_MADDISON_NAMELIST)
+    target = coarse.cgrid_geometry(SWG_DG50_NAMELIST)
+    restrict = coarse.build_jax_filtered_restrictor(
+        source, target, sigma_source_cells=8.0)
+    arrays = tuple(jnp.zeros(source["mask"]["T"].shape, dtype=jnp.float64)
+                   for _ in range(3))
+    text = jax.jit(restrict).lower(*arrays).as_text()
+    operations = Counter(re.findall(r"stablehlo\.([a-z_]+)", text))
+    taps = coarse.gaussian_kernel_1d(sigma_cells=8.0).size
+    assert operations["dot_general"] == 6
+    assert operations["slice"] < taps, operations["slice"]
 
 
 def test_numpy_filter_refuses_silent_float64_downcast_without_jax_x64():
@@ -286,8 +363,9 @@ def test_filtered_restriction_jax_matches_numpy_and_uses_native_staggering():
     actual = jax.jit(restrict)(*arguments)
     jax.block_until_ready(actual[0])
     for kind, value in zip(("T", "U", "V"), actual, strict=True):
-        # The shifted filter plus compiled block restriction differs from the
-        # shared offline path by at most 2.0473e-12 m in the final subtraction.
+        # The compiled block restriction differs from the shared offline path
+        # in the final volume-to-SSH subtraction: 4.884e-13 m measured with
+        # the round-6 matrix filter (2.0473e-12 m with round-5c slices).
         tolerance = 2.1e-12 if kind == "T" else 3.0e-15
         np.testing.assert_allclose(
             np.asarray(value), expected[kind], rtol=3.0e-15, atol=tolerance)
@@ -484,7 +562,7 @@ _REAL_FINE_SNAPSHOT_ROOT = _REAL_FINE_ROOT.with_name("dg_gpu_1095d")
 
 @pytest.mark.skipif(not (_REAL_FINE_SNAPSHOT_ROOT / "manifest.json").is_file(),
                     reason="complete three-year fine snapshots not mounted")
-def test_real_day1095_shifted_filter_matches_round5_dense_result():
+def test_real_day1095_matrix_filter_matches_round5_dense_result():
     import jax
     import jax.numpy as jnp
 
@@ -539,22 +617,24 @@ def test_real_day1095_shifted_filter_matches_round5_dense_result():
         coarse._restrict_t_cell_sum(volume, source, target, layout),
         coarse.restrict_native_transports(
             transports, source, target, layout), target)
-    shifted_state = coarse.filtered_restrict_cgrid(
+    matrix_state = coarse.filtered_restrict_cgrid(
         fields, source, target, sigma_source_cells=8.0)
     tolerances = {"T": 1.3e-12, "U": 3.0e-15, "V": 2.0e-15}
     measured = {
-        kind: float(np.max(np.abs(shifted_state[kind] - old_state[kind])))
+        kind: float(np.max(np.abs(matrix_state[kind] - old_state[kind])))
         for kind in ("T", "U", "V")}
+    # Round-6 matrix filter on the CPU (same with one Eigen thread); the
+    # round-5c shifted slices gave the same T and U and V 1.887379141862766e-15.
     assert measured == pytest.approx({
         "T": 1.1937117960769683e-12,
         "U": 2.6645352591003757e-15,
-        "V": 1.887379141862766e-15,
+        "V": 1.7763568394002505e-15,
     }, rel=1.0e-12, abs=0.0)
     for kind in ("T", "U", "V"):
         np.testing.assert_allclose(
-            shifted_state[kind], old_state[kind], rtol=0.0,
+            matrix_state[kind], old_state[kind], rtol=0.0,
             atol=tolerances[kind])
-    planted = shifted_state["T"].copy()
+    planted = matrix_state["T"].copy()
     planted[target["mask"]["T"]] += 2.0e-11
     with pytest.raises(AssertionError):
         np.testing.assert_allclose(

@@ -444,6 +444,37 @@ def _convolve_valid_axis(values: np.ndarray, kernel: np.ndarray,
         lambda row: np.convolve(row, kernel, mode="valid"), axis, values)
 
 
+def closed_wall_filter_matrix(size: int, kernel, *,
+                              extension: str) -> np.ndarray:
+    """Dense ``(size, size)`` matrix of one closed-wall 1-D filter pass.
+
+    ``matrix @ values`` filters ``values`` along axis 0 with the wall parity
+    folded into the entries: ``symmetric`` is even about cell centres (cell
+    volumes, tangential transports), ``odd`` is odd about the two zero-valued
+    wall faces of a normal transport.  The matrix is the module's NumPy
+    reference (the same padding helpers and valid convolution) applied to the
+    identity, so the definition is unchanged; only the evaluation becomes one
+    matrix product per pass.
+    """
+    weights = np.asarray(kernel, dtype=np.float64)
+    if weights.ndim != 1 or weights.size % 2 != 1:
+        raise ValueError("closed-wall filter requires an odd one-dimensional kernel")
+    if type(size) is not int or size <= 0:
+        raise ValueError("closed-wall filter size must be a positive integer")
+    radius = weights.size // 2
+    basis = np.eye(size, dtype=np.float64)
+    if extension == "symmetric":
+        padded = _pad_even_cell_centres(basis, radius, 0)
+    elif extension == "odd":
+        # Wall faces carry exactly zero normal transport (callers enforce it),
+        # so their basis vectors are dropped instead of extended.
+        basis[(0, -1), :] = 0.0
+        padded = _pad_odd_boundary_faces(basis, radius, 0)
+    else:
+        raise ValueError("closed-wall filter extension must be symmetric or odd")
+    return _convolve_valid_axis(padded, weights, 0)
+
+
 def shifted_weighted_sum(values, kernel, *, axis: int, extension: str):
     """Apply one 1-D stencil as weighted shifted slices, never convolution.
 
@@ -452,6 +483,9 @@ def shifted_weighted_sum(values, kernel, *, axis: int, extension: str):
     or ``odd`` about explicitly zero normal wall faces.  The implementation is
     deliberately expressed as padding, slicing, multiplication, and addition;
     it lowers identically on CPU and GPU without a convolution custom call.
+    ponytail: short stencils only.  The 97-tap filtered restriction written
+    this way compiled on the V100S into one fused kernel that faulted with an
+    illegal address (round 6); long kernels use ``closed_wall_filter_matrix``.
     """
     import jax.numpy as jnp
 
@@ -487,19 +521,32 @@ def shifted_weighted_sum(values, kernel, *, axis: int, extension: str):
     return result
 
 
-@jax.jit
 def filter_closed_cgrid_extensives_array(
         cell_volume, u_transport, v_transport, *, kernel):
-    """Array-backend implementation shared by offline and in-scan filtering."""
-    volume = shifted_weighted_sum(
-        cell_volume, kernel, axis=0, extension="symmetric")
-    volume = shifted_weighted_sum(
-        volume, kernel, axis=1, extension="symmetric")
-    u = shifted_weighted_sum(
-        u_transport, kernel, axis=0, extension="symmetric")
-    u = shifted_weighted_sum(u, kernel, axis=1, extension="odd")
-    v = shifted_weighted_sum(v_transport, kernel, axis=0, extension="odd")
-    v = shifted_weighted_sum(v, kernel, axis=1, extension="symmetric")
+    """Array-backend implementation shared by offline and in-scan filtering.
+
+    Each separable pass is one dense matrix product, ``G_y X G_x^T`` with
+    axis 0 first, so the GPU runs a library GEMM rather than a fused kernel
+    of shifted slices.  ``kernel`` must be concrete: the closed-wall matrices
+    are built in NumPy when the caller is traced.
+    """
+    import jax.numpy as jnp
+
+    weights = np.asarray(kernel, dtype=np.float64)
+    ny, nx = np.shape(cell_volume)
+    even_y, even_x = (jnp.asarray(closed_wall_filter_matrix(
+        size, weights, extension="symmetric")) for size in (ny, nx))
+    odd_y, odd_x = (jnp.asarray(closed_wall_filter_matrix(
+        size, weights, extension="odd")) for size in (ny + 1, nx + 1))
+
+    def separable(values, rows, columns):
+        highest = jax.lax.Precision.HIGHEST
+        along_y = jnp.matmul(rows, values, precision=highest)
+        return jnp.matmul(along_y, columns.T, precision=highest)
+
+    volume = separable(cell_volume, even_y, even_x)
+    u = separable(u_transport, even_y, odd_x)
+    v = separable(v_transport, odd_y, even_x)
     # Odd parity fixes both normal wall faces analytically. Re-impose their
     # exact floating-point representation after accumulation roundoff.
     u = u.at[:, (0, -1)].set(0.0)
@@ -807,8 +854,8 @@ def build_jax_filtered_restrictor(
     ti0, ti1 = layout["target_i0"], layout["target_i1"]
     ny, nx = layout["target_ny"], layout["target_nx"]
     fine_ny, fine_nx = f * ny, f * nx
-    kernel = jnp.asarray(gaussian_kernel_1d(
-        sigma_cells=sigma_source_cells, truncate=truncate))
+    kernel = gaussian_kernel_1d(
+        sigma_cells=sigma_source_cells, truncate=truncate)
 
     source_tmask = jnp.asarray(source["mask"]["T"], dtype=jnp.float64)
     source_umask = jnp.asarray(source["mask"]["U"], dtype=jnp.float64)
