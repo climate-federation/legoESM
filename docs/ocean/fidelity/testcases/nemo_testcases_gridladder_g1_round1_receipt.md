@@ -14,8 +14,9 @@ first). Branch fidelity/nemo-testcases-orca2-gridladder from b65a32ff0.
   restart_g1_usrdef_ssh.patch, g1_step_record.F90,
   stprk3_g1_step_record.patch, make_bathy_level.py, check_records.py, run.sh.
 - The explicit card `build_orca2g1_flat_card(deck_root)` with its deck reader,
-  bump and validator, registered as "ORCA2G1-flat", declared NOT
-  execution-ready (two unmeasured features).
+  bump and deck-bound validator pair, dispatched as "ORCA2G1-flat", declared
+  NOT execution-ready (two unmeasured features). The shared validator's table
+  does not list it and refuses it as unknown (tested).
 - One shared-model addition: the one-level opt-in on the reference-coordinate
   builder, default off, selected only by this card. Caller grep
   (`grep -rn allow_single_level packages`): the definition and the G1 card,
@@ -43,7 +44,7 @@ first). Branch fidelity/nemo-testcases-orca2-gridladder from b65a32ff0.
 | writer and user routines are valid Fortran against NEMO's modules | `gfortran -fsyntax-only` with the TSUNAMI RK3 build's module directory | 3 of 3 clean |
 | the committed deck is the 100-step deck and renders to the 2- and 10-step decks by 3 lines | run.sh preflight | pass |
 | deck values; every one of the 54 required switches refused when moved | pytest, parametrised | pass |
-| card builds, is fp64, one level, 201-cell bump; ten planted disagreements refused | pytest on a stand-in domain synthesised from ORCA2's shipped file | pass |
+| card builds, is fp64, one level, 201-cell bump; thirteen planted disagreements refused | pytest on a stand-in domain synthesised from ORCA2's shipped file | pass |
 | the one-level opt-in is non-vacuous | reverting it turns 2 tests red | shown |
 | record checker: clean record admitted; five plants exit nonzero | pytest | pass |
 | geometry identity against NEMO's mesh | pytest | SKIPPED: no record yet |
@@ -68,6 +69,15 @@ skipped, 2 failed. Both failures are in files this round did not touch
 | cyclic i-exchange | TSUNAMI round 4 | to measure (from kt about 66) |
 | split-explicit substeps, EEN planetary | TSUNAMI round 5 | to measure (interior, kt = 1) |
 | coast: south wall and lateral walls | — | to measure (from kt about 45) |
+
+## Line-stability note
+
+The new card code sits at the end of the recipe file and the one-level opt-in
+keeps the coordinate file's line count, because the first layout moved five
+line citations of older receipts and turned the citation gate's whole-map
+audit red. The first 3379 lines of the recipe file are byte-identical to the
+base commit (checked by script). The preregistration's four Python line
+citations were re-pointed after the move; nothing else in it changed.
 
 ## Review
 

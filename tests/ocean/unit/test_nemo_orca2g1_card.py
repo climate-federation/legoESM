@@ -175,9 +175,12 @@ def test_standin_card_builds_and_states_every_selector(standin_root):
     assert (cfg.momentum_flux_scheme, cfg.vertical_momentum_scheme,
             cfg.tracer_advection) == ("none", "none", "none")
     assert np.count_nonzero(np.asarray(state.eta.data)) == 201
-    recipe.validate_nemo_testcase_card(card)
+    recipe.validate_orca2g1_flat_card(card, standin_root)
     with pytest.raises(ValueError, match="not execution-ready"):
-        recipe.validate_nemo_testcase_card_for_execution(card)
+        recipe.validate_orca2g1_flat_card_for_execution(card, standin_root)
+    # The shared table does not list this card: it must refuse, not guess.
+    with pytest.raises(ValueError, match="unknown NEMO testcase card"):
+        recipe.validate_nemo_testcase_card(card)
 
     def moved(**changes):
         return card._replace(recipe=card.recipe._replace(
@@ -188,6 +191,10 @@ def test_standin_card_builds_and_states_every_selector(standin_root):
         "ln_traadv_OFF": moved(tracer_advection="fct2"),
         "ln_dynvor_een": moved(vorticity_scheme="een"),
         "ln_traldf_OFF": moved(K_h=1.0),
+        "ln_hpg_sco": moved(pgf_scheme="adcroft"),
+        "ln_eos80": moved(eos="nemo_seos"),
+        "barotropic_identity": moved(barotropic=cfg.barotropic._replace(
+            barotropic_pgf_evaluation="vectorized")),
         "nn_e": moved(barotropic=cfg.barotropic._replace(n_barotropic_substeps=64)),
         "rn_bt_alpha": moved(barotropic=cfg.barotropic._replace(
             nemo_barotropic_filter_alpha=0.07)),

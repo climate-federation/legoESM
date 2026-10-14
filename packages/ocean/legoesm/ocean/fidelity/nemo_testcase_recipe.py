@@ -2921,9 +2921,6 @@ def validate_nemo_testcase_card(card: NEMOTestcaseCard) -> None:
         "OVERFLOW-zps": ("nemo_boxcar1_ab3", 3, 2, 20.0, 0, 1000.0),
         "GYRE-zco": ("nemo_ab3am4", 50, 0, 0.0, 0, 0.0),
         "ORCA2-zps": ("nemo_ab3am4", 65, 0, 0.0, 1, 1000.0),
-        # Grid ladder G1: the committed deck's nn_bt_flt = 3 and nn_e = 65,
-        # no BBL.  validate_orca2g1_flat_card holds the card to the deck.
-        "ORCA2G1-flat": ("nemo_ab3am4", 65, 0, 0.0, 0, 0.0),
         "VORTEX-zco": ("nemo_ab3am4", 48, 0, 0.0, 0, 0.0),
         # The vector-EEN deck differs from the flux deck only in the momentum
         # scheme set, so every row this table checks is the same row.
@@ -2954,7 +2951,6 @@ def validate_nemo_testcase_card(card: NEMOTestcaseCard) -> None:
         "OVERFLOW-zps": 0.0,
         "GYRE-zco": 0.07,
         "ORCA2-zps": 0.09,
-        "ORCA2G1-flat": 0.09,
         "VORTEX-zco": 0.07,
         "VORTEX_VEC-zco": 0.07,
         "VORTEX-15km-zco": 0.07,
@@ -3042,13 +3038,6 @@ def validate_nemo_testcase_card(card: NEMOTestcaseCard) -> None:
     if cfg.barotropic.barotropic_reconcile_target != "velocity_avg":
         raise ValueError(
             f"{card.case} requires NEMO's prognostic uu_b(Kaa) velocity frame")
-    if card.case == "ORCA2G1-flat":
-        # The deck-bound half (rn_Dt, nn_e, the domain file, the bump) needs
-        # the deck root and lives in validate_orca2g1_flat_card.
-        moved = _orca2g1_selector_failures(card)
-        if moved:
-            raise ValueError(f"ORCA2G1-flat selectors moved: {moved}")
-        return
     wet = np.asarray(card.recipe.land_mask) > 0.5
     if card.case in ("GYRE-zco", "ORCA2-zps"):
         if (cfg.momentum_advection != "vector_invariant"
@@ -3630,7 +3619,6 @@ def _orca2g1_auto_substeps(dom: dict[str, np.ndarray], deck: ORCA2G1Deck) -> int
         deck.rn_Dt_s, 1.0, float(np.max(zcu2)),
         float(NEMO_CONSTANTS_CONFIG.g), cmax=deck.rn_bt_cmax)
 
-
 def orca2g1_initial_ssh(glamt_deg, gphit_deg, surface_tmask) -> np.ndarray:
     """The case's ``usr_def_istate_ssh``: TSUNAMI's bump at (ji,jj) = (51,74).
 
@@ -3966,6 +3954,7 @@ __all__ = (
     "read_orca2g1_deck",
     "orca2g1_initial_ssh",
     "validate_orca2g1_flat_card",
+    "validate_orca2g1_flat_card_for_execution",
     "ORCA2G1_UNMEASURED",
     "build_vortex_zco_card",
     "build_vortex_smt_zps_card",
