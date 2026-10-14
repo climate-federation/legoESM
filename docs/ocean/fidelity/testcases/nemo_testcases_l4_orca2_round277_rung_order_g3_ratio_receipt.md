@@ -113,13 +113,30 @@ R277-P5 **CONFIRMED** (no-host plant fired).
   byte-equal to round 276's.  CPU 30-day member: all 30 daily snapshots
   byte-identical to round 276's (hashed before the rerun overwrote them);
   day-30 SHA256 `3c0602babb535aac55512f3b82561d0f562b1ec51d542552efd8499a119b443b`.
-- Plants: exact-row-loss plant fires on the classifier; stored-ratio
-  without-host plant fires.
+- Plants: exact-row-loss plant fires on the classifier; the stored-ratio
+  without-host plant fires on its specific refusal (any other error now
+  reports PLANT-NOT-FIRED); an increment census given the wrong host arm
+  refuses.  The increment table is produced by the gate's
+  `--classify-increment` mode, which checks that pair and host differ by
+  exactly the stored ratio.
 - Focused tests: 104/104 pass (round-277 import, round-276 imports, G1
   transfer, dyn_zdf literal, G1 ORCA2-grid ladder).  The full
   `tests/ocean/fidelity` battery was not run: no production selector or
   default changed and the shared model path is GYRE-byte-identical.
-- Independent review: see the review section below.
+- Citation gates: the receipt (2 citations) and the default receipt (274)
+  PASS after a rigid re-anchor of the pins the import moved (one cited call
+  range grew by the two imported arguments, 120 -> 122 lines); the shifted
+  `stprk3_stg.f90:215-217` plant fires.  Citation tests: 192/193 pass; the
+  one red is round 228's stale span, a known base red.
+- Independent review (`codex exec --sandbox read-only`, one run): "HOLD —
+  three confirmed gate defects; selector physics/default-off path and
+  citation re-anchors are sound."  The three were: the measurement label
+  had a default; the no-host plant would have counted any error as firing;
+  the increment controls were relabelled outside the gate.  All three are
+  fixed (label required; plant matches its refusal; increment mode checks
+  provenance) and the increment table was re-derived through the gate with
+  identical counts.  No ladder was re-run: every run had passed its label
+  explicitly.
 
 ## OPEN
 

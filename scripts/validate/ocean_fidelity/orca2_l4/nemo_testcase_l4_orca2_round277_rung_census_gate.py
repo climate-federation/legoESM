@@ -108,17 +108,46 @@ def measure(rung: str, deck_root: Path, twin_a: Path, arm: str,
     return result
 
 
+def classify_increment(host_path: Path, pair_path: Path, *,
+                       plant: str) -> dict:
+    """Census of the stored ratio alone: the pair against its host arm."""
+
+    import tempfile
+
+    host = json.loads(host_path.read_text(encoding="utf-8"))
+    pair = json.loads(pair_path.read_text(encoding="utf-8"))
+    require(host.get("arm") == "g2_momentum_divisors"
+            and pair.get("arm") == "g3_divisors_stage_r3u",
+            "increment needs the divisor host and the stored-ratio pair")
+    require(set(pair["selected_statements"])
+            - set(host["selected_statements"]) == {STAGE_R3U}
+            and set(host["selected_statements"])
+            < set(pair["selected_statements"]),
+            "pair and host differ by more than the stored ratio")
+    host["arm"] = "control"  # the host ladder is this census's control
+    with tempfile.NamedTemporaryFile("w", suffix=".json") as handle:
+        json.dump(host, handle)
+        handle.flush()
+        result = r276.classify(Path(handle.name), pair_path, plant=plant)
+    result["control_arm"] = "g2_momentum_divisors"
+    result["control_path"] = str(host_path)
+    return result
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--measure", action="store_true")
     parser.add_argument("--rung", choices=RUNGS)
-    parser.add_argument("--label", default="independent",
+    parser.add_argument("--label",
                         choices=("independent", "given_nemo_entry"))
     parser.add_argument("--deck-root", type=Path)
     parser.add_argument("--twin-a", type=Path)
     parser.add_argument("--arm", choices=tuple(r276.ARMS))
     parser.add_argument("--expect-commit")
     parser.add_argument("--classify", nargs=2, type=Path)
+    parser.add_argument(
+        "--classify-increment", nargs=2, type=Path, metavar=("HOST", "PAIR"),
+        help="score the stored ratio against its divisor-host ladder")
     parser.add_argument("--plant", choices=(
         "none", "exact-loss", "r3u-without-host"), default="none")
     parser.add_argument("--output", type=Path)
@@ -144,13 +173,20 @@ def main() -> int:
                 model.step(card.recipe.initial_state, card.dt_s,
                            freshwater=freshwater, surface_forcing=surface)
             except ValueError as error:
-                require(STAGE_R3U + " requires" not in str(error),
-                        f"stored r3u refused without its host: {error}")
-                raise
-            result = {"status": "R3U_WITHOUT_HOST_RAN"}
+                if STAGE_R3U + " requires" in str(error):
+                    print(f"STATUS PLANT-FIRED: stored r3u refused without "
+                          f"its host: {error}")
+                    return 2
+                print(f"STATUS PLANT-NOT-FIRED: unrelated refusal: {error}")
+                return 3
+            print("STATUS PLANT-NOT-FIRED: stored r3u ran without its host")
+            return 3
+        elif args.classify_increment:
+            result = classify_increment(*args.classify_increment,
+                                        plant=args.plant)
         elif args.measure:
-            require(all((args.rung, args.deck_root, args.twin_a, args.arm,
-                         args.expect_commit)),
+            require(all((args.rung, args.label, args.deck_root, args.twin_a,
+                         args.arm, args.expect_commit)),
                     "measurement arguments are incomplete")
             result = measure(args.rung, args.deck_root, args.twin_a,
                              args.arm, args.label, args.expect_commit)
