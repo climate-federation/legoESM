@@ -3785,7 +3785,7 @@ def build_orca2g1_flat_card(deck_root: str | Path, case: str = "ORCA2G1-flat") -
         # advective form, een_total (dynvor.f90:861-864 ntot = np_CRV).  NEMO
         # then takes the velocity-form external update (dynspg_ts.f90 "Vector
         # form" branch), so G1's two flux-form solver statements and its
-        # flux-form stage-1 RHS option are not NEMO's here; not selected below.
+        # flux-form stage-1 RHS option are not NEMO's here (deselected below).
         dynadv = {name: getattr(base, name) for name in _ORCA2G_VEC_SELECTORS}
     else:
         # ln_dynadv_OFF -> np_LIN_dyn (dynadv.f90:185).
@@ -3796,7 +3796,7 @@ def build_orca2g1_flat_card(deck_root: str | Path, case: str = "ORCA2G1-flat") -
         runoff_depth_spread_m=0.0, runoff_depth_spread_map=None,
         **dynadv,
         adaptive_implicit_vertadv=False,
-        een_fold_image_v_row=True, rk3_stage1_ssh_nemo_literal=True, rk3_stage1_rhs_nemo_literal=not _ORCA2G_DYNADV_VEC[case], rk3_stage_velocity_written_order=True, een_vorticity_written_order=True, zdf_barotropic_removal_nemo_literal=True, rk3_fold_exchange_top_v_row=True, rk3_stage_r3f_nemo_literal=True, rk3_stage_r3t_nemo_literal=True, nemo_eos_gdept_rounded_product=True, rk3_stage_r3uv_nemo_literal=True, barotropic=base.barotropic._replace(barotropic_fold_top_v_face_ssh=True, barotropic_flux_update_nemo_literal=not _ORCA2G_DYNADV_VEC[case], barotropic_substep_dt_nemo_literal=True, barotropic_entry_depth_nemo_literal=not _ORCA2G_DYNADV_VEC[case], barotropic_een_ratio_fold_exchange=True, barotropic_een_fe3mask_pivot_row=True, barotropic_een_ratio_written_order=True),  # noqa: E501
+        een_fold_image_v_row=True, rk3_stage1_ssh_nemo_literal=True, rk3_stage1_rhs_nemo_literal=True, rk3_stage_velocity_written_order=True, een_vorticity_written_order=True, zdf_barotropic_removal_nemo_literal=True, rk3_fold_exchange_top_v_row=True, rk3_stage_r3f_nemo_literal=True, rk3_stage_r3t_nemo_literal=True, nemo_eos_gdept_rounded_product=True, rk3_stage_r3uv_nemo_literal=True, barotropic=base.barotropic._replace(barotropic_fold_top_v_face_ssh=True, barotropic_flux_update_nemo_literal=True, barotropic_substep_dt_nemo_literal=True, barotropic_entry_depth_nemo_literal=True, barotropic_een_ratio_fold_exchange=True, barotropic_een_fe3mask_pivot_row=True, barotropic_een_ratio_written_order=True),  # noqa: E501
         tracer_advection="none",                        # traadv.f90:444
         lateral_viscosity=base.lateral_viscosity._replace(A_h=0.0),
         K_h=0.0, K_bih=0.0,                             # ln_traldf_OFF
@@ -3805,6 +3805,12 @@ def build_orca2g1_flat_card(deck_root: str | Path, case: str = "ORCA2G1-flat") -
             bottom_drag_bg_velocity=0.0, bottom_drag_bbl_thickness=0.0),
         zdf_drag_in_matrix=False, barotropic_drag_substep=False, zdf_momentum_nemo_face_thickness=_ORCA2G_ZDF_FACES[case], zdf_tracer_nemo_rounded_thickness=_ORCA2G_TRA_ZDF_ROUNDED[case], barotropic_rhs_ascending_level_sum=_ORCA2G_UE_RHS_ASCENDING[case], zdf_momentum_stage_r3u_nemo_literal=_ORCA2G_ZDF_STAGE_R3U[case],  # noqa: E501
         gm_redi=None)
+    if _ORCA2G_DYNADV_VEC[case]:     # dynspg_ts.f90:533 vector branch; state.py: flux-form only
+        model_config = model_config._replace(
+            rk3_stage1_rhs_nemo_literal=False,
+            barotropic=model_config.barotropic._replace(
+                barotropic_flux_update_nemo_literal=False,
+                barotropic_entry_depth_nemo_literal=False))
     recipe = NEMORecipe(
         model_config=model_config,
         physics_config=physics,
