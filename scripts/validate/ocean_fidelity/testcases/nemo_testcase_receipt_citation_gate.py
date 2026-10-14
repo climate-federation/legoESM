@@ -4520,7 +4520,7 @@ CITATION_MAP = {
         'ssha(:,:) = ssh (:,:,Kaa)',
         'CALL dom_qco_r3c_RK3( ssha, r3ta, r3ua, r3va, r3fa )', 31],
     'GYRE_OMIP_L2_P3_SM_R123PROC/BLD/ppsrc/nemo/stprk3_stg.f90:223-255': [
-        ('r3t(:,:,Kaa) = r1_2 * ( r3t(:,:,Kbb) + r3ta(:,:) )', 2),
+        ('r3t(:,:,Kaa) = r1_2 * ( r3t(:,:,Kbb) + r3ta(:,:) )', 1),
         ('r3t(:,:,Kaa) = r3ta(:,:)', 3), 33],
     'GYRE_OMIP_L2_P3_SM_R123PROC/BLD/ppsrc/nemo/domqco.f90:237-257': [
         ('SUBROUTINE dom_qco_r3c_RK3( pssh, pr3t, pr3u, pr3v, pr3f )', 1),
@@ -5183,7 +5183,7 @@ CITATION_MAP = {
         'pt(ji,jj,jk,jn,Kaa) = zrhs - zwi(ji,jk)', 19],
     'ocean_model_latlon_cgrid.py:10447-10568': [
         'T=state_new.T.replace(data=_adv_content_T)',
-        ('z_coord=z_coord, config=config, iwm_fields=iwm_fields)', 2), 120],
+        ('z_coord=z_coord, config=config, iwm_fields=iwm_fields)', 2), 122],
     'ocean_model_latlon_cgrid.py:12790-12796': [
         'K_v_cell = K_v_cell.astype(state.T.data.dtype)',
         'K_v_cell = K_v_cell + K33_iso.astype(state.T.data.dtype)', 7],
