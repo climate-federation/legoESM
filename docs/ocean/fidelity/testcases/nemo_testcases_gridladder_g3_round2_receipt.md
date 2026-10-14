@@ -163,3 +163,34 @@ UNVERIFIED:
 - that the restart of a 100-step deck at step 10 equals a 10-step deck's
   byte for byte (no variable depends on nn_itend by reading, not run);
 - the new run branch on a real record.
+
+## 10. Citation gate and evidence hashes
+
+Citation gate on this receipt at commit 39359cb09 (citation_receipt.json):
+PASS, 2 citations, 0 unmapped; the shifted-citation plant on the stop
+check exits 1. On the preregistration (citation_prereg.json): PASS, 2
+citations; its plant exits 1. This section holds no citation.
+
+SHA-256 prefixes, round15/: citation_receipt.json=3bee6dbb15574645,
+citation_prereg.json=cdccc06fc7c79221,
+explore/geometry.json=9cd0d2649c824393,
+explore/indep_kt1_2.json=8185775a1d84dd31,
+explore/indep_kt3_10.json=4ffe879eda9420ac,
+explore/indep_kt11_abort.json=355a01f7cc91e2c6,
+explore/plant_score.json=1b3e83eb5ea9d2e6,
+explore/plant_level.json=d0381695ae57b081,
+default_case_on_g3.log=35ca2c1a007a013e,
+preflight_g3_r15_final.log=ff402fb28ece3869,
+admit_real_prior_final.log=e9e785b1af4bd7cb,
+admit_plant_v.log=5f793e865ee928d0, admit_plant_step.log=26cb756cd9f8d7d3,
+admit_plant_smoke.log=bb73aafefa4e008e,
+admit_plant_noabort.log=a433486b0dd4f8af,
+plant_no_witness.log=7f3e83c8ffb12e33,
+codex_review_r15.log=28e56ea104b2be52,
+tests_g3_chain_slow.log=6813710d1bf56486,
+tests_focused_fast.log=6209be3329352139,
+tests_citation_gate.log=65ebea80035a7fde,
+tests_g2_step2_slow.log=d395c9bd049e8b1b.
+NEMO, round14/oracle_g3_r14/: smoke restart step 2=5dfb6cc9f57866ba,
+stopped run restart step 10=36882e0bd78abdb9, output.abort.nc=66bb06db635621df,
+ocean.output=3a23ac581b9f5282, smoke mesh_mask.nc=68559c711ddff043.
