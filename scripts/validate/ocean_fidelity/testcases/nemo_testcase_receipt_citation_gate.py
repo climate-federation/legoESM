@@ -188,6 +188,10 @@ FILES = {
         _ORCA2G1_P5 / "ppsrc/nemo/sbcblk.f90"),
     "ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/sbcblk_algo_ncar.f90": (
         _ORCA2G1_P5 / "ppsrc/nemo/sbcblk_algo_ncar.f90"),
+    "ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/sbcmod.f90": (
+        _ORCA2G1_P5 / "ppsrc/nemo/sbcmod.f90"),
+    "ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/sbc_phy.f90": (
+        _ORCA2G1_P5 / "ppsrc/nemo/sbc_phy.f90"),
     "ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/stp2d.f90": (
         _ORCA2G1_P5 / "ppsrc/nemo/stp2d.f90"),
     "ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/stprk3.f90": (
@@ -2101,6 +2105,21 @@ CITATION_MAP = {
     'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/sbcblk_algo_ncar.f90:223': 'ztmp1 = 0.5_wp + SIGN(0.5_wp,zeta_u)                                ! update stability',
     'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/sbcrnf.f90:151': '&      h_rnf (Nis0-(1):Nie0+(1),Njs0-(1):Nje0+(1))         , nk_rnf  (Nis0-(1):Nie0+(1),Njs0-(1):Nje0+(1))      ,     &',
     # --- GRIDLADDER round 19 END ---
+    # --- GRIDLADDER round 20 (G4 round 4): NCAR operand walk ---
+    'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/sbcmod.f90:557-560': ['utauU  (ji,jj) = 0.5_wp * ( utau(ji,jj) + utau(ji+1,jj) ) * &', 'vtauV  (ji,jj) = 0.5_wp * ( vtau(ji,jj) + vtau(ji,jj+1) ) * &', 4],
+    'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/sbcblk.f90:796': 'taum(:,:) = taum(:,:) * smask0(:,:)',
+    'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/sbcblk_algo_ncar.f90:141': 'zCdN = cd_n10_ncar( Ubzu )',
+    'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/sbcblk_algo_ncar.f90:148': 'Ce = ce_n10_ncar( zsqrt_CdN )',
+    'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/sbcblk_algo_ncar.f90:159': 'q_zu = MAX( q_zt , 1.e-6_wp )',
+    'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/sbcblk_algo_ncar.f90:195': 'ztmp2 = psi_m_ncar(zeta_u)',
+    'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/sbcblk_algo_ncar.f90:209': 'zCdN = cd_n10_ncar(ztmp0)',
+    'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/sbcblk_algo_ncar.f90:225': 'zCeN  = 1.e-3_wp * (34.6_wp * zsqrt_CdN)',
+    'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/sbcblk_algo_ncar.f90:241-274': ['FUNCTION cd_n10_ncar( pw10 )', 'END FUNCTION cd_n10_ncar', 34],
+    'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/sbcblk_algo_ncar.f90:260-261': ['zw6 = zw*zw*zw', 'zw6 = zw6*zw6', 2],
+    'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/sbcblk_algo_ncar.f90:305': 'ce_n10_ncar = MAX( 1.e-3_wp * ( 34.6_wp * psqrtcdn10 ) , Cx_min )',
+    'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/sbcblk_algo_ncar.f90:310-345': ['FUNCTION psi_m_ncar( pzeta )', 'END FUNCTION psi_m_ncar', 36],
+    'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/sbc_phy.f90:1198-1213': ['FUNCTION UN10_from_CD( pzu, pUb, pCd, ppsi )', 'END FUNCTION UN10_from_CD', 16],
+    # --- GRIDLADDER round 20 END ---
     # --- ORCA2 round 253: kt=8 midpoint-SSH failure boundary -------
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:489-493': [
         ('Extrapolate Sea Level at step jit+0.5', 1),
