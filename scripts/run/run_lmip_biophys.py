@@ -127,6 +127,25 @@ def build_model_times(start_doy: float, dt: float, n_steps: int, *, synthetic: b
     return t0 + dt * np.arange(n_steps, dtype=np.float64)
 
 
+def annual_co2_ppm(co2_file: str, years) -> dict:
+    """Annual global-mean CO2 [ppm] for each model year, from a CMIP6 GHG file.
+
+    The file's time axis holds annual means at mid-year (``Y + 0.5``).  A year
+    outside the file is refused rather than clamped to the nearest edge."""
+    from legoesm.forcing.external import _load_ghg_annual_file
+    file_years, data = _load_ghg_annual_file(str(co2_file))
+    lo, hi = float(file_years.min()), float(file_years.max())
+    out = {}
+    for y in years:
+        t = float(y) + 0.5
+        if not lo <= t <= hi:
+            raise SystemExit(
+                f"forcing.co2_file {co2_file} covers {lo - 0.5:.0f}-{hi - 0.5:.0f}; "
+                f"model year {y} is outside it")
+        out[int(y)] = float(np.interp(t, file_years, data["CO2"])) * 1.0e6
+    return out
+
+
 def _args_from_config(cfg, cli_args) -> argparse.Namespace:
     """Build the internal argument namespace from a validated LMIPConfig.
     CLI still supplies ``--output-dir`` and (optional) ``--restart-from``
@@ -174,6 +193,7 @@ def _args_from_config(cfg, cli_args) -> argparse.Namespace:
         dt=float(cfg.time["dt"]),
         n_steps=int(cfg.time["n_steps"]),
         k_neighbors=int(cfg.forcing.get("k_neighbors", 4)),
+        co2_file=cfg.forcing.get("co2_file", ""),
         land_mask_file=cfg.land_mask_file,
         land_frac_min=cfg.land_frac_min,
         # CLI overrides the config here for chaining ergonomics.
@@ -634,6 +654,15 @@ def run(args) -> int:
     if not year_masks:
         raise SystemExit(
             f"no model times fall within years [{year_start}, {year_end}]")
+    _co2_file = getattr(args, "co2_file", "")
+    if _co2_file:
+        co2_by_year = annual_co2_ppm(_co2_file, [y for y, _ in year_masks])
+        print("CO2 (annual global mean, ppm): " + ", ".join(
+            f"{y} {c:.1f}" for y, c in co2_by_year.items()))
+    else:
+        co2_by_year = {}
+        print("CO2: constant default (no forcing.co2_file)")
+    _co2_init = co2_by_year.get(year_masks[0][0])
 
     # T0 seed for cold-start soil temperature: stage just the first year's
     # first step (one AtmToSurface slice, ~100 KB) and extract T_lowest[0].
@@ -696,14 +725,16 @@ def run(args) -> int:
             # raises a carry pytree-structure mismatch.  Graft onto a canonical
             # cold-start template, as model_driver and run_land_spinup do.
             state = merge_land_restart_into_template(
-                loaded, init_multilayer_land_state(ncol, config, T_init=288.0),
+                loaded, init_multilayer_land_state(
+                    ncol, config, T_init=288.0, pmodel_co2_init_ppm=_co2_init),
                 allow_pmodel_cold_start=bool(
                     getattr(args, "pmodel_cold_restart", False)))
             print(f"restart: loaded state from {args.restart_from} "
                   f"(t_end_s={restart_meta['t_end_s']:.1f}, "
                   f"steps_completed={restart_meta['n_steps_completed']})")
         else:
-            state = init_multilayer_land_state(ncol, config, T_init=288.0)
+            state = init_multilayer_land_state(
+                ncol, config, T_init=288.0, pmodel_co2_init_ppm=_co2_init)
             state = state._replace(T_soil=jnp.broadcast_to(T0[:, None], state.T_soil.shape))
 
     update_land_params = make_step_land_params_updater(
@@ -1022,7 +1053,8 @@ def run(args) -> int:
             lat_rad, lon_rad, tq_local,
             year=year, data_dir=(None if synthetic else args.forcing_dir),
             prefix=args.prefix, suffix=args.suffix,
-            k_neighbors=args.k_neighbors, allow_synthetic=allow_syn)
+            k_neighbors=args.k_neighbors, allow_synthetic=allow_syn,
+            **({"co2_ppmv": co2_by_year[year]} if co2_by_year else {}))
         doy_year = jnp.asarray(tq_year / _SEC_PER_DAY)
         # Transient cover: broadcast this chunk's calendar year across its steps as
         # a TRACED scan input (not a Python constant baked into the closure) so

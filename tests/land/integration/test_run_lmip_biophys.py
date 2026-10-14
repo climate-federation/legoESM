@@ -578,3 +578,69 @@ def test_optimality_arms_run_on_the_global_driver(tmp_path, arm, extra):
         assert np.all(psil <= ds["pmodel_psi_soil"].values + 1e-9)
         np.testing.assert_allclose(ds["pmodel_vcmax25"].values,
                                    ds["pmodel_vcmax25_nostress"].values)
+
+
+def _write_ghg_file(path, co2_ppm_by_year):
+    """CMIP6-deck-schema annual GHG file: (time, lat=1, lon=1), mid-year times."""
+    import xarray as xr
+    years = np.array(sorted(co2_ppm_by_year), dtype=float) + 0.5
+    def var(v):
+        return (("time", "lat", "lon"), np.full((years.size, 1, 1), v, dtype=float))
+    ds = xr.Dataset(
+        {"CO2": (("time", "lat", "lon"),
+                 np.array([co2_ppm_by_year[int(y)] for y in years - 0.5],
+                          dtype=float)[:, None, None]),
+         "CH4": var(1800.0), "N2O": var(320.0), "CFC_11": var(250.0),
+         "CFC_12": var(530.0)},
+        coords={"time": ("time", years, {"units": "year as %Y.%f"}),
+                "lat": [0.0], "lon": [0.0]})
+    for v, u in (("CO2", "1e-6"), ("CH4", "1e-9"), ("N2O", "1e-9"),
+                 ("CFC_11", "1e-12"), ("CFC_12", "1e-12")):
+        ds[v].attrs["units"] = u
+    ds.to_netcdf(path)
+
+
+def test_annual_co2_lookup_reads_the_year_and_refuses_outside_the_file(tmp_path):
+    mod = _load_driver()
+    f = tmp_path / "ghg.nc"
+    _write_ghg_file(f, {1999: 368.0, 2000: 369.5, 2001: 371.0})
+    co2 = mod.annual_co2_ppm(str(f), [2000, 2001])
+    assert co2[2000] == pytest.approx(369.5) and co2[2001] == pytest.approx(371.0)
+    with pytest.raises(SystemExit, match="outside"):
+        mod.annual_co2_ppm(str(f), [2002])
+
+
+def test_co2_file_reaches_photosynthesis(tmp_path):
+    """Same run under two CO2 files: more CO2 -> more GPP, and the P-model
+    optimum chi responds, so the value is not just printed."""
+    import xarray as xr
+    import yaml
+
+    from legoesm.land.lmip_config import validate_config
+    mod = _load_driver()
+    sd = tmp_path / "sd.nc"
+    _write_surfdata(str(sd))
+    out = {}
+    for ppm in (300.0, 600.0):
+        ghg = tmp_path / f"ghg_{ppm:.0f}.nc"
+        _write_ghg_file(ghg, {1999: ppm, 2000: ppm, 2001: ppm})
+        cfg = validate_config({
+            "grid": {"type": "latlon", "resolution": 4},
+            "physics": {"land_mode": "multilayer", "surface_scheme": "two_leaf_canopy",
+                        "bulk_scheme": "most", "stomatal_model": "medlyn",
+                        "canopy_capacity_scheme": "p_model",
+                        "canopy_g1_source": "p_model"},
+            "forcing": {"source": "synthetic", "data_dir": "", "year_start": 2000,
+                        "year_end": 2000, "co2_file": str(ghg)},
+            "surfdata": {"path": str(sd)},
+            "time": {"dt": 3600.0, "n_steps": 24, "start_doy": 0.0},
+            "output": {"tapes": [{"name": "step", "freq": "step", "average": "inst",
+                                  "vars": ["GPP", "pmodel_chi"]}]},
+        }).raw
+        cfg_path = tmp_path / f"config_{ppm:.0f}.yaml"
+        cfg_path.write_text(yaml.safe_dump(cfg, sort_keys=False))
+        assert _run_config(mod, cfg_path, tmp_path / f"out_{ppm:.0f}") == 0
+        out[ppm] = xr.open_dataset(tmp_path / f"out_{ppm:.0f}" / "lmip_biophys.step.nc")
+    assert np.nansum(out[600.0]["GPP"].values) > np.nansum(out[300.0]["GPP"].values)
+    assert not np.allclose(out[600.0]["pmodel_chi"].values,
+                           out[300.0]["pmodel_chi"].values, equal_nan=True)

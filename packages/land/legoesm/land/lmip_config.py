@@ -29,6 +29,9 @@ An experiment is fully described by a YAML file with this schema::
       year_start: int
       year_end: int                    # >= year_start; == year_start for single-year
       k_neighbors: int                 # forcing regrid IDW neighbours (default 4)
+      co2_file: <path or "">           # CMIP6 annual global-mean GHG file; each model
+                                       #   year gets that year's CO2.  "" -> constant
+                                       #   412 ppm (forcing.cru_jra._DEFAULT_CO2_PPMV)
 
     surfdata:
       path: <path to a surfdata NetCDF (static CLM5 or transient LUH2/HYDE/...)>
@@ -379,6 +382,11 @@ def validate_config(data: dict) -> LMIPConfig:
     forcing.setdefault("prefix", _DEFAULT_PREFIX)
     forcing.setdefault("suffix", "")
     forcing.setdefault("k_neighbors", 4)
+    if forcing.get("co2_file") is None:            # absent, or an empty YAML value
+        forcing["co2_file"] = ""
+    if not isinstance(forcing["co2_file"], str):
+        raise ValueError(
+            f"forcing.co2_file must be a path string or '' (got {forcing['co2_file']!r})")
     # source must agree with data_dir: the driver decides real-vs-synthetic from
     # data_dir non-emptiness, so a mismatch would silently run the OTHER forcing
     # than declared (source='cru_jra' + empty data_dir -> silent synthetic).

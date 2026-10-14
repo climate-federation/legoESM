@@ -400,3 +400,17 @@ def test_pmodel_switches_that_would_be_dropped_are_refused():
         validate_config({**base, "physics": {
             "land_mode": "slab", "surface_scheme": "simple_seb",
             "bulk_scheme": "most", **pm}})
+
+
+def test_co2_file_defaults_to_empty_and_must_be_a_string():
+    import copy
+    from pathlib import Path
+    tmpl = Path(__file__).resolve().parents[2] / "templates/land/biophysics/smoke_4deg.yaml"
+    base = yaml.safe_load(tmpl.read_text())
+    base["forcing"].pop("co2_file", None)
+    assert validate_config(copy.deepcopy(base)).forcing["co2_file"] == ""
+    base["forcing"]["co2_file"] = None                  # what `-o forcing.co2_file=` yields
+    assert validate_config(copy.deepcopy(base)).forcing["co2_file"] == ""
+    base["forcing"]["co2_file"] = 412
+    with pytest.raises(ValueError, match="co2_file"):
+        validate_config(base)
