@@ -55,7 +55,7 @@ mpas_qv_smooth_del4_m4s: 0.0        # refused non-zero on the column lane (edge 
 # ---- land IC -------------------------------------------------------------------
 land_ic: data/lmip_soil_ic/soil_ic_latlon48_era5T_19790101.npz
                             # the spun-up soil IC regridded to this grid (same recipe / source /
-                            # output dir as the MPAS res-6 and duo C24 files, regrid_land_ic.py);
-                            # being built in a separate session -- the lane smoke runs with
-                            # --land-ic "" until it exists and its gate is PENDING on the file.
-                            # ASK: row added per coordinator 2026-10-12
+                            # batch as the MPAS res-6 and duo C24 files, regrid_land_ic.py at
+                            # 294495454, from restart_1985_d000h00.npz + ERA5 1979-01-01 soil T).
+                            # ADOPTED by the user 2026-10-14: md5 6ecd8c389e2522cf2951ad020a570134
+                            # (data/ is not tracked; copy the file beside the deck's data dir).
