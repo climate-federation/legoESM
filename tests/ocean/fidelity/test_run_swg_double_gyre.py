@@ -264,6 +264,47 @@ def test_hourly_sampler_refuses_missing_operator():
             {"box": lambda eta, u, v: (eta, u, v)})
 
 
+def test_real_dual_hourly_sampler_lowering_has_no_convolution_operation():
+    import jax
+    import jax.numpy as jnp
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        SWG_DG50_NAMELIST,
+        SWG_MADDISON_NAMELIST,
+    )
+    from legoesm.ocean.fidelity.swg_coarse_graining import (
+        build_jax_conservative_restrictor,
+        build_jax_filtered_restrictor,
+        cgrid_geometry,
+    )
+    from legoesm.training.swg_online import assert_no_convolution_operations
+
+    source = cgrid_geometry(SWG_MADDISON_NAMELIST)
+    target = cgrid_geometry(SWG_DG50_NAMELIST)
+    restrictors = {
+        "box": build_jax_conservative_restrictor(source, target),
+        "filtered": build_jax_filtered_restrictor(
+            source, target, sigma_source_cells=8.0),
+    }
+    sampler = jax.jit(driver.build_dual_coarse_sampler(restrictors))
+    shape = source["mask"]["T"].shape
+    arrays = tuple(jnp.zeros(shape, dtype=jnp.float64) for _ in range(3))
+    lowered = sampler.lower(*arrays)
+    assert_no_convolution_operations(lowered, label="real hourly sampler")
+
+    def planted_filter(eta, u_native, v_native):
+        dense = jax.lax.conv_general_dilated(
+            eta[None, None], jnp.ones((1, 1, 1, 1), eta.dtype),
+            (1, 1), "VALID",
+            dimension_numbers=("NCHW", "OIHW", "NCHW"))[0, 0]
+        return dense, u_native, v_native
+
+    planted = jax.jit(driver.build_dual_coarse_sampler({
+        "box": restrictors["box"], "filtered": planted_filter}))
+    with pytest.raises(RuntimeError, match="forbidden convolution"):
+        assert_no_convolution_operations(
+            planted.lower(*arrays), label="planted hourly sampler")
+
+
 def test_zero_closure_truth_day_scan_matches_flat_training_segments_at_4_and_8d():
     import jax
     from legoesm.core.precision import PrecisionPolicy, set_policy

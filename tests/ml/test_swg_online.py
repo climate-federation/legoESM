@@ -26,6 +26,7 @@ from legoesm.training.swg_online import (
     SWGNetworkSpec,
     SWGScalarPotentialCNN,
     assert_network_gradients_live,
+    assert_no_convolution_operations,
     balanced_normalizers_from_training,
     balanced_trajectory_loss,
     build_closure_geometry,
@@ -37,6 +38,7 @@ from legoesm.training.swg_online import (
     load_content_pinned_hourly_segment,
     load_content_pinned_initial_state,
     network_parameter_count,
+    swg_online_step,
 )
 
 
@@ -187,21 +189,62 @@ def test_named_objectives_are_zero_at_t0_and_see_checkerboard_differently(
     normalizers = BalancedNormalizers(1.0, 1.0, 1.0)
     losses = {}
     for objective in ("symmetric", "template"):
-        identical = deterministic_trajectory_loss(
-            target, target, geometry, objective=objective,
-            beta_m1_s1=2.0e-11, basin_length_m=4.0e6,
-            normalizers=normalizers)
-        assert float(identical) == 0.0
-        losses[objective] = float(deterministic_trajectory_loss(
-            model, target, geometry, objective=objective,
+        loss_fn = jax.jit(lambda predicted: deterministic_trajectory_loss(
+            predicted, target, geometry, objective=objective,
             beta_m1_s1=2.0e-11, basin_length_m=4.0e6,
             normalizers=normalizers))
+        identical = loss_fn(target)
+        assert float(identical) == 0.0
+        losses[objective] = float(loss_fn(model))
+        assert_no_convolution_operations(
+            loss_fn.lower(model), label=f"{objective} training loss")
     assert losses["template"] > 100.0 * losses["symmetric"] > 0.0
     with pytest.raises(ValueError, match="explicitly selected"):
         deterministic_trajectory_loss(
             target, target, geometry, objective="typo",
             beta_m1_s1=2.0e-11, basin_length_m=4.0e6,
             normalizers=normalizers)
+
+
+def test_symmetric_gaussian_matches_previous_dense_cpu_operator(online_case):
+    import legoesm.training.swg_online as online
+
+    _, geometry, _, _, _ = online_case
+    field = jax.random.normal(
+        jax.random.PRNGKey(93), geometry.tmask.shape, dtype=jnp.float64)
+    j0, j1, i0, i1 = geometry.wet_bounds
+    wet = field[j0:j1 + 1, i0:i1 + 1]
+    offsets = jnp.arange(-4, 5, dtype=jnp.float64)
+    kernel = jnp.exp(-0.5 * offsets**2)
+    kernel /= jnp.sum(kernel)
+
+    def shifted(value):
+        return online._gaussian_smooth_wet(value, geometry)
+
+    dense_kernel = (kernel[:, None] * kernel[None, :])[None, None]
+
+    def dense(value):
+        padded = jnp.pad(value, ((4, 4), (4, 4)), mode="reflect")
+        return jax.lax.conv_general_dilated(
+            padded[None, None], dense_kernel, (1, 1), "VALID",
+            dimension_numbers=("NCHW", "OIHW", "NCHW"))[0, 0]
+
+    dense_full = jnp.zeros_like(field).at[
+        j0:j1 + 1, i0:i1 + 1].set(dense(wet))
+    np.testing.assert_allclose(
+        np.asarray(shifted(field)), np.asarray(dense_full),
+        rtol=3.0e-14, atol=5.0e-15)
+    shifted_grad = jax.grad(lambda value: jnp.sum(shifted(value) ** 2))(field)
+    dense_grad = jax.grad(lambda value: jnp.sum(dense(
+        value[j0:j1 + 1, i0:i1 + 1]) ** 2))(field)
+    np.testing.assert_allclose(
+        np.asarray(shifted_grad), np.asarray(dense_grad),
+        rtol=5.0e-14, atol=1.0e-14)
+    assert_no_convolution_operations(
+        jax.jit(shifted).lower(field), label="symmetric shifted Gaussian")
+    with pytest.raises(RuntimeError, match="forbidden convolution"):
+        assert_no_convolution_operations(
+            jax.jit(dense).lower(wet), label="symmetric dense plant")
 
 
 def test_point_loss_owns_batch_reduction(online_case):
@@ -427,6 +470,115 @@ _ROUND2 = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgonl_rounds/round2")
 _REAL_TARGET = _ROUND2 / "hourly_targets/start_day0731"
 _REAL_T0 = _ROUND2 / "conservative_truth_dg50_1095d/snapshots"
+
+
+@pytest.mark.skipif(not (_REAL_T0 / "day0731.npz").is_file(),
+                    reason="Round-2 conservative truth is not mounted")
+def test_shifted_network_matches_previous_equinox_forward_and_gradient_on_real_state():
+    """Pin the 7,696-parameter replacement against the former CPU operator."""
+    card = build_swg_card(SWG_DG50_NAMELIST)
+    geometry = build_closure_geometry(card)
+    initial = load_content_pinned_initial_state(
+        card, _REAL_T0 / "day0731.npz",
+        manifest_path=_REAL_T0 / "manifest.json",
+        expected_manifest_sha256=(
+            "aaec7f829d7530a275c07a263cd96185a4fa6245be411c63626156e35fa65d2c"))
+    tau = swg_surface_wind(SWG_DG50_NAMELIST)
+    entry = _entry_from_state(
+        initial, tau, tau, card.recipe.grid, card.recipe.z_coord,
+        card.recipe.model_config)
+    spec = SWGNetworkSpec(
+        hidden_channels=16, hidden_layers=4, kernel_size=3,
+        ssh_scale_m=1.0, velocity_scale_m_s=1.0,
+        potential_scale_m3_s2=1.0)
+    key = jax.random.PRNGKey(20261013)
+    shifted = SWGScalarPotentialCNN(spec, key=key)
+    keys = jax.random.split(key, spec.hidden_layers + 1)
+    legacy_layers = [eqx.nn.Conv2d(
+        4, spec.hidden_channels, spec.kernel_size, padding=1,
+        key=keys[0], dtype=jnp.float64)]
+    for layer_key in keys[1:-1]:
+        legacy_layers.append(eqx.nn.Conv2d(
+            spec.hidden_channels, spec.hidden_channels, spec.kernel_size,
+            padding=1, key=layer_key, dtype=jnp.float64))
+    legacy_layers.append(eqx.nn.Conv2d(
+        spec.hidden_channels, 1, spec.kernel_size, padding=1,
+        use_bias=False, key=keys[-1], dtype=jnp.float64))
+    legacy = eqx.tree_at(
+        lambda model: model.layers, shifted, tuple(legacy_layers))
+    assert network_parameter_count(shifted) == 7_696
+    for new_layer, old_layer in zip(
+            shifted.layers, legacy.layers, strict=True):
+        assert np.array_equal(new_layer.weight, old_layer.weight)
+        if new_layer.bias is not None:
+            assert np.array_equal(new_layer.bias, old_layer.bias)
+
+    zero = jnp.zeros_like(entry.ssh_k)
+    def call(model):
+        return model(
+            entry, geometry, key=jax.random.PRNGKey(4), noise=zero,
+            noise_scale=jnp.asarray(0.0))
+    new_value = call(shifted)
+    old_value = call(legacy)
+    np.testing.assert_allclose(
+        np.asarray(new_value), np.asarray(old_value), rtol=2.0e-14,
+        atol=5.0e-15)
+    lowered = eqx.filter_jit(call).lower(shifted)
+    assert_no_convolution_operations(lowered, label="shifted real network")
+    with pytest.raises(RuntimeError, match="forbidden convolution"):
+        assert_no_convolution_operations(
+            eqx.filter_jit(call).lower(legacy), label="former Equinox network")
+
+    forcing = OceanSurfaceForcing(
+        tau_i_native=jnp.asarray(tau[0]), tau_j_native=jnp.asarray(tau[1]))
+    stage_noise = jnp.zeros((3,) + tuple(geometry.tmask.shape), jnp.float64)
+    step = eqx.filter_jit(lambda model: swg_online_step(
+        model, initial, stage_noise, jax.random.PRNGKey(6), jnp.asarray(0.0),
+        card=card, geometry=geometry, forcing=forcing))
+    assert_no_convolution_operations(
+        step.lower(shifted), label="real closure model step")
+
+    def loss(model):
+        return jnp.sum(call(model) ** 2)
+    new_grad = eqx.filter_grad(loss)(shifted)
+    old_grad = eqx.filter_grad(loss)(legacy)
+    new_leaves = jax.tree.leaves(eqx.filter(new_grad, eqx.is_inexact_array))
+    old_leaves = jax.tree.leaves(eqx.filter(old_grad, eqx.is_inexact_array))
+    assert len(new_leaves) == len(old_leaves)
+    for new_leaf, old_leaf in zip(new_leaves, old_leaves, strict=True):
+        np.testing.assert_allclose(
+            np.asarray(new_leaf), np.asarray(old_leaf), rtol=2.0e-12,
+            atol=2.0e-16)
+
+
+@pytest.mark.skipif(not (_REAL_T0 / "day1091.npz").is_file(),
+                    reason="ten Round-2 conservative starts are not mounted")
+def test_shifted_network_preserves_ten_state_initial_acceleration():
+    card = build_swg_card(SWG_DG50_NAMELIST)
+    geometry = build_closure_geometry(card)
+    states = tuple(load_content_pinned_initial_state(
+        card, _REAL_T0 / f"day{day:04d}.npz",
+        manifest_path=_REAL_T0 / "manifest.json",
+        expected_manifest_sha256=(
+            "aaec7f829d7530a275c07a263cd96185a4fa6245be411c63626156e35fa65d2c"))
+        for day in (731, 771, 811, 851, 891, 931, 971, 1011, 1051, 1091))
+    spec = SWGNetworkSpec(16, 4, 3, 1.0, 1.0, 1.0)
+    network = SWGScalarPotentialCNN(
+        spec, key=jax.random.PRNGKey(20261013))
+    result = initial_closure_acceleration_ratio(
+        network, states, card, geometry, key=jax.random.PRNGKey(20261013))
+    assert result["maximum_ratio"] == pytest.approx(
+        0.007791671811074865, rel=1.0e-13)
+    assert result["passes"]
+    planted = eqx.tree_at(
+        lambda model: model.layers[-1].weight, network,
+        network.layers[-1].weight * 1.01)
+    planted_result = initial_closure_acceleration_ratio(
+        planted, states, card, geometry, key=jax.random.PRNGKey(20261013))
+    assert planted_result["maximum_ratio"] == pytest.approx(
+        1.01 * result["maximum_ratio"], rel=2.0e-13)
+    assert planted_result["maximum_ratio"] != pytest.approx(
+        result["maximum_ratio"], rel=1.0e-4)
 
 
 @pytest.mark.skipif(not (_REAL_TARGET / "manifest.json").is_file(),

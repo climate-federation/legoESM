@@ -188,6 +188,29 @@ def test_filtered_extensives_commute_with_continuity_at_walls_and_corners():
                          - filtered_divergence[:, (0, -1)])) > 1.0e-3
 
 
+def test_shifted_filter_lowering_has_no_convolution_and_guard_catches_plant():
+    import jax
+    import jax.numpy as jnp
+    from legoesm.training.swg_online import assert_no_convolution_operations
+
+    kernel = jnp.asarray(coarse.gaussian_kernel_1d(sigma_cells=1.0))
+    volume = jnp.arange(64.0, dtype=jnp.float64).reshape(8, 8)
+    u = jnp.zeros((8, 9), dtype=jnp.float64)
+    v = jnp.zeros((9, 8), dtype=jnp.float64)
+    lowered = jax.jit(lambda a, b, c:
+        coarse.filter_closed_cgrid_extensives_array(
+            a, b, c, kernel=kernel)).lower(volume, u, v)
+    assert_no_convolution_operations(lowered, label="shifted filter plant control")
+
+    dense_kernel = (kernel[:, None] * kernel[None, :])[None, None]
+    padded = jnp.pad(volume, ((3, 3), (3, 3)), mode="symmetric")
+    planted = jax.jit(lambda value: jax.lax.conv_general_dilated(
+        value[None, None], dense_kernel, (1, 1), "VALID",
+        dimension_numbers=("NCHW", "OIHW", "NCHW"))[0, 0]).lower(padded)
+    with pytest.raises(RuntimeError, match="forbidden convolution"):
+        assert_no_convolution_operations(planted, label="planted dense filter")
+
+
 def test_filtered_extensive_transfer_function_and_temporal_continuity_plant():
     n = 256
     sigma = 8.0
@@ -237,7 +260,9 @@ def test_filtered_restriction_jax_matches_numpy_and_uses_native_staggering():
     actual = jax.jit(restrict)(*arguments)
     jax.block_until_ready(actual[0])
     for kind, value in zip(("T", "U", "V"), actual, strict=True):
-        tolerance = 8.0e-13 if kind == "T" else 3.0e-15
+        # The shifted filter plus compiled block restriction differs from the
+        # shared offline path by at most 2.0473e-12 m in the final subtraction.
+        tolerance = 2.1e-12 if kind == "T" else 3.0e-15
         np.testing.assert_allclose(
             np.asarray(value), expected[kind], rtol=3.0e-15, atol=tolerance)
     # Swapping native face components is a staggering violation, not a
@@ -428,6 +453,86 @@ def test_planted_round1_nonconservative_state_is_refused():
 _REAL_FINE_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgdg_rounds/"
     "legoesm_runs/dg_gpu_1095d_daily_mean")
+_REAL_FINE_SNAPSHOT_ROOT = _REAL_FINE_ROOT.with_name("dg_gpu_1095d")
+
+
+@pytest.mark.skipif(not (_REAL_FINE_SNAPSHOT_ROOT / "manifest.json").is_file(),
+                    reason="complete three-year fine snapshots not mounted")
+def test_real_day1095_shifted_filter_matches_round5_dense_result():
+    import jax
+    import jax.numpy as jnp
+
+    manifest = json.loads(
+        (_REAL_FINE_SNAPSHOT_ROOT / "manifest.json").read_text())
+    path = _REAL_FINE_SNAPSHOT_ROOT / "day1095.npz"
+    assert manifest["daily_sha256"][path.name] == coarse.sha256(path)
+    with np.load(path, allow_pickle=False) as saved:
+        fields = {kind: np.asarray(saved[name], dtype=np.float64)
+                  for kind, name in (("T", "ssh_m"), ("U", "u_m_s"),
+                                     ("V", "v_m_s"))}
+    source = coarse.cgrid_geometry(SWG_MADDISON_NAMELIST)
+    target = coarse.cgrid_geometry(SWG_DG50_NAMELIST)
+    layout = coarse._restriction_layout(source, target)
+    local = coarse._local_closed_extensives(fields, source, layout)
+    kernel = jnp.asarray(coarse.gaussian_kernel_1d(sigma_cells=8.0))
+    radius = int(kernel.size // 2)
+    kernel2 = (kernel[:, None] * kernel[None, :])[None, None]
+
+    def old_dense(value, parities):
+        for axis, parity in enumerate(parities):
+            if parity == "even":
+                padding = [(0, 0), (0, 0)]
+                padding[axis] = (radius, radius)
+                value = jnp.pad(value, padding, mode="symmetric")
+            else:
+                indices = jnp.arange(1, radius + 1)
+                value = jnp.concatenate((
+                    -jnp.take(value, indices[::-1], axis=axis), value,
+                    -jnp.take(value, value.shape[axis] - 1 - indices,
+                              axis=axis)), axis=axis)
+        return jax.lax.conv_general_dilated(
+            value[None, None], kernel2, (1, 1), "VALID",
+            dimension_numbers=("NCHW", "OIHW", "NCHW"))[0, 0]
+
+    dense = [np.asarray(jax.jit(
+        lambda value, parity=parities: old_dense(value, parity))(
+            jnp.asarray(value))).copy()
+        for value, parities in zip(
+            local, (("even", "even"), ("even", "odd"),
+                    ("odd", "even")), strict=True)]
+    dense[1][:, (0, -1)] = 0.0
+    dense[2][(0, -1), :] = 0.0
+    sj0, sj1 = layout["source_j0"], layout["source_j1"]
+    si0, si1 = layout["source_i0"], layout["source_i1"]
+    volume = np.zeros_like(source["area"]["T"])
+    volume[sj0:sj1 + 1, si0:si1 + 1] = dense[0]
+    transports = {"U": np.zeros_like(volume), "V": np.zeros_like(volume)}
+    transports["U"][sj0:sj1 + 1, si0:si1 + 1] = dense[1][:, 1:]
+    transports["V"][sj0:sj1 + 1, si0:si1 + 1] = dense[2][1:, :]
+    old_state = coarse._state_from_restricted_extensives(
+        coarse._restrict_t_cell_sum(volume, source, target, layout),
+        coarse.restrict_native_transports(
+            transports, source, target, layout), target)
+    shifted_state = coarse.filtered_restrict_cgrid(
+        fields, source, target, sigma_source_cells=8.0)
+    tolerances = {"T": 1.3e-12, "U": 3.0e-15, "V": 2.0e-15}
+    measured = {
+        kind: float(np.max(np.abs(shifted_state[kind] - old_state[kind])))
+        for kind in ("T", "U", "V")}
+    assert measured == pytest.approx({
+        "T": 1.1937117960769683e-12,
+        "U": 2.6645352591003757e-15,
+        "V": 1.887379141862766e-15,
+    }, rel=1.0e-12, abs=0.0)
+    for kind in ("T", "U", "V"):
+        np.testing.assert_allclose(
+            shifted_state[kind], old_state[kind], rtol=0.0,
+            atol=tolerances[kind])
+    planted = shifted_state["T"].copy()
+    planted[target["mask"]["T"]] += 2.0e-11
+    with pytest.raises(AssertionError):
+        np.testing.assert_allclose(
+            planted, old_state["T"], rtol=0.0, atol=tolerances["T"])
 
 
 @pytest.mark.skipif(not (_REAL_FINE_ROOT / "manifest.json").is_file(),

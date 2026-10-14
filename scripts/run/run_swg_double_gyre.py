@@ -254,6 +254,19 @@ def build_scanned_day_mean_stepper(model, dt_s: float, forcing, n_steps: int,
     return scanned
 
 
+def build_dual_coarse_sampler(restrictors):
+    """Build the dual-operator sampler used inside every retained hour."""
+    if set(restrictors) != {"box", "filtered"}:
+        raise ValueError("hourly sampler requires box and filtered restrictors")
+
+    def sample(eta, u_native, v_native):
+        arguments = (eta, u_native, v_native)
+        return tuple(restrictors[name](*arguments)
+                     for name in ("box", "filtered"))
+
+    return sample
+
+
 def build_scanned_hourly_target_stepper(
         model, dt_s: float, forcing, steps_per_hour: int, restrictors):
     """Compile one day while retaining two restricted hourly state streams."""
@@ -261,9 +274,7 @@ def build_scanned_hourly_target_stepper(
 
     if type(steps_per_hour) is not int or steps_per_hour <= 0:
         raise ValueError("hourly target steps must be a positive integer")
-
-    if set(restrictors) != {"box", "filtered"}:
-        raise ValueError("hourly sampler requires box and filtered restrictors")
+    sample = build_dual_coarse_sampler(restrictors)
 
     def step_body(state, _):
         return model.step(state, dt_s, surface_forcing=forcing), None
@@ -271,10 +282,8 @@ def build_scanned_hourly_target_stepper(
     def hour_body(state, _):
         state, _ = jax.lax.scan(
             step_body, state, None, length=steps_per_hour)
-        arguments = (
+        coarse = sample(
             state.eta.data, state.u.data[:, 1:, 0], state.v.data[1:, :, 0])
-        coarse = tuple(restrictors[name](*arguments)
-                       for name in ("box", "filtered"))
         return state, coarse
 
     @jax.jit

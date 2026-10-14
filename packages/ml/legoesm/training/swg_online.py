@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple
@@ -29,6 +30,7 @@ from legoesm.ocean.dynamics.swe_rk3 import (
     swe_rotated_potential_forcing,
 )
 from legoesm.ocean.fidelity.nemo_testcase_recipe import swg_surface_wind
+from legoesm.ocean.fidelity.swg_coarse_graining import shifted_weighted_sum
 from legoesm.ocean.state import OceanSurfaceForcing
 from legoesm.training.inert_params import assert_no_inert
 
@@ -116,6 +118,78 @@ class PinnedHourlySource(NamedTuple):
     last_absolute_hour: int
 
 
+class ShiftedConv2d(eqx.Module):
+    """Zero-padded 2-D cross-correlation without a convolution primitive.
+
+    Parameter shapes and initialization reproduce ``equinox.nn.Conv2d`` for
+    stride-one, dilation-one, single-group kernels.  The installed Equinox
+    0.13 implementation splits the supplied key into weight/bias keys and
+    samples both uniformly from ``[-1/sqrt(Cin*K*K), +...]``; retaining that
+    sequence keeps existing seeds and checkpoints numerically unchanged.
+    """
+
+    weight: jax.Array
+    bias: jax.Array | None
+    kernel_size: int = eqx.field(static=True)
+    padding: int = eqx.field(static=True)
+    in_channels: int = eqx.field(static=True)
+
+    def __init__(self, in_channels: int, out_channels: int, kernel_size: int,
+                 *, padding: int, use_bias: bool = True, key,
+                 dtype=jnp.float64):
+        if min(in_channels, out_channels) <= 0:
+            raise ValueError("shifted convolution channels must be positive")
+        if kernel_size <= 0 or kernel_size % 2 != 1:
+            raise ValueError("shifted convolution kernel must be positive odd")
+        if padding < 0:
+            raise ValueError("shifted convolution padding cannot be negative")
+        wkey, bkey = jax.random.split(key, 2)
+        limit = 1.0 / math.sqrt(in_channels * kernel_size * kernel_size)
+        self.weight = jax.random.uniform(
+            wkey, (out_channels, in_channels, kernel_size, kernel_size),
+            dtype=dtype, minval=-limit, maxval=limit)
+        self.bias = (jax.random.uniform(
+            bkey, (out_channels, 1, 1), dtype=dtype,
+            minval=-limit, maxval=limit) if use_bias else None)
+        self.kernel_size = kernel_size
+        self.padding = padding
+        self.in_channels = in_channels
+
+    def __call__(self, value):
+        """Contract all shifted slices with the unchanged OIHW weights."""
+        if value.ndim != 3 or value.shape[0] != self.in_channels:
+            raise ValueError(
+                "shifted convolution input must have shape (channels,y,x)")
+        padded = jnp.pad(
+            value, ((0, 0), (self.padding, self.padding),
+                    (self.padding, self.padding)))
+        height = padded.shape[1] - self.kernel_size + 1
+        width = padded.shape[2] - self.kernel_size + 1
+        shifted = jnp.stack([
+            padded[:, j:j + height, i:i + width]
+            for j in range(self.kernel_size)
+            for i in range(self.kernel_size)
+        ], axis=1)
+        weights = self.weight.reshape(
+            self.weight.shape[0], self.in_channels,
+            self.kernel_size * self.kernel_size)
+        output = jnp.einsum("oik,ikhw->ohw", weights, shifted)
+        return output if self.bias is None else output + self.bias
+
+
+def assert_no_convolution_operations(lowered, *, label: str) -> None:
+    """Fail if a JAX/Equinox lowered program contains a convolution op."""
+    as_text = getattr(lowered, "as_text", None)
+    if not callable(as_text):
+        raise TypeError("convolution guard requires a lowered JAX program")
+    text = as_text()
+    markers = ("stablehlo.convolution", "mhlo.convolution", " convolution(")
+    present = tuple(marker for marker in markers if marker in text)
+    if present:
+        raise RuntimeError(
+            f"{label} lowers a forbidden convolution operation: {present}")
+
+
 def build_closure_geometry(card) -> SWGClosureGeometry:
     """Build immutable closure geometry from one resolved SWG card."""
     tmask = np.asarray(card.recipe.land_mask, dtype=bool)
@@ -184,15 +258,15 @@ class SWGScalarPotentialCNN(eqx.Module):
             raise ValueError("SWG CNN physical scales must be positive")
         keys = jax.random.split(key, spec.hidden_layers + 1)
         padding = spec.kernel_size // 2
-        layers = [eqx.nn.Conv2d(
+        layers = [ShiftedConv2d(
             4, spec.hidden_channels, spec.kernel_size, padding=padding,
             key=keys[0], dtype=jnp.float64)]
         for layer_key in keys[1:-1]:
-            layers.append(eqx.nn.Conv2d(
+            layers.append(ShiftedConv2d(
                 spec.hidden_channels, spec.hidden_channels,
                 spec.kernel_size, padding=padding, key=layer_key,
                 dtype=jnp.float64))
-        layers.append(eqx.nn.Conv2d(
+        layers.append(ShiftedConv2d(
             spec.hidden_channels, 1, spec.kernel_size, padding=padding,
             use_bias=False, key=keys[-1], dtype=jnp.float64))
         self.layers = tuple(layers)
@@ -239,11 +313,10 @@ def _gaussian_smooth_wet(field, geometry: SWGClosureGeometry):
     offsets = jnp.arange(-4, 5, dtype=field.dtype)
     kernel = jnp.exp(-0.5 * offsets**2)
     kernel = kernel / jnp.sum(kernel)
-    padded = jnp.pad(wet, ((4, 4), (4, 4)), mode="reflect")
-    kernel2 = (kernel[:, None] * kernel[None, :])[None, None]
-    filtered = jax.lax.conv_general_dilated(
-        padded[None, None], kernel2, window_strides=(1, 1),
-        padding="VALID", dimension_numbers=("NCHW", "OIHW", "NCHW"))[0, 0]
+    filtered = shifted_weighted_sum(
+        wet, kernel, axis=0, extension="reflect")
+    filtered = shifted_weighted_sum(
+        filtered, kernel, axis=1, extension="reflect")
     return jnp.zeros_like(field).at[j0:j1 + 1, i0:i1 + 1].set(filtered)
 
 
@@ -837,6 +910,29 @@ def deterministic_trajectory_loss(
         rotational_velocity_weight=rotational_velocity_weight)
 
 
+def swg_online_step(network, state, stage_noise, key, noise_scale, *,
+                    card, geometry: SWGClosureGeometry, forcing):
+    """Run one certified RK3 step with an optional traced closure term."""
+    if network is None:
+        return swe_rk3_step(
+            state, card.dt_s, forcing, card.recipe.grid,
+            card.recipe.z_coord, card.recipe.model_config,
+            stage_potential_fn=None)
+    expected = (3,) + tuple(geometry.tmask.shape)
+    if stage_noise.shape != expected:
+        raise ValueError(
+            f"stage noise shape {stage_noise.shape}, expected {expected}")
+
+    def potential(entry, stage):
+        return network(
+            entry, geometry, key=jax.random.fold_in(key, stage),
+            noise=stage_noise[stage - 1], noise_scale=noise_scale)
+
+    return swe_rk3_step(
+        state, card.dt_s, forcing, card.recipe.grid, card.recipe.z_coord,
+        card.recipe.model_config, stage_potential_fn=potential)
+
+
 def build_segment_fn(card, geometry: SWGClosureGeometry, *,
                      window_days: int, checkpoint: bool = True):
     """Build one fixed-window hourly training segment with closed steady wind."""
@@ -855,22 +951,9 @@ def build_segment_fn(card, geometry: SWGClosureGeometry, *,
 
     def one_step(network, noise_scale, carry, inputs):
         step_key, stage_noise = inputs
-
-        if network is None:
-            state = swe_rk3_step(
-                carry, card.dt_s, forcing, card.recipe.grid,
-                card.recipe.z_coord, card.recipe.model_config,
-                stage_potential_fn=None)
-            return state, None
-
-        def potential(entry, stage):
-            return network(
-                entry, geometry, key=jax.random.fold_in(step_key, stage),
-                noise=stage_noise[stage - 1], noise_scale=noise_scale)
-
-        state = swe_rk3_step(
-            carry, card.dt_s, forcing, card.recipe.grid, card.recipe.z_coord,
-            card.recipe.model_config, stage_potential_fn=potential)
+        state = swg_online_step(
+            network, carry, stage_noise, step_key, noise_scale,
+            card=card, geometry=geometry, forcing=forcing)
         return state, None
 
     scanned_step = jax.checkpoint(one_step) if checkpoint else one_step

@@ -14,6 +14,7 @@ import io
 import json
 from pathlib import Path
 
+import jax
 import numpy as np
 from scipy.ndimage import gaussian_filter
 
@@ -443,6 +444,69 @@ def _convolve_valid_axis(values: np.ndarray, kernel: np.ndarray,
         lambda row: np.convolve(row, kernel, mode="valid"), axis, values)
 
 
+def shifted_weighted_sum(values, kernel, *, axis: int, extension: str):
+    """Apply one 1-D stencil as weighted shifted slices, never convolution.
+
+    ``extension`` is one of the three closed-basin conventions used by this
+    lane: ``symmetric`` about cell centres, ``reflect`` about the edge cell,
+    or ``odd`` about explicitly zero normal wall faces.  The implementation is
+    deliberately expressed as padding, slicing, multiplication, and addition;
+    it lowers identically on CPU and GPU without a convolution custom call.
+    """
+    import jax.numpy as jnp
+
+    array = jnp.asarray(values)
+    weights = jnp.asarray(kernel, dtype=array.dtype)
+    if array.ndim < 1 or weights.ndim != 1 or weights.shape[0] % 2 != 1:
+        raise ValueError("shifted stencil requires an odd one-dimensional kernel")
+    if not 0 <= axis < array.ndim:
+        raise ValueError("shifted stencil axis is out of range")
+    radius = int(weights.shape[0] // 2)
+    if extension == "odd":
+        if array.shape[axis] <= radius:
+            raise ValueError("shifted stencil support exceeds the odd face axis")
+        indices = jnp.arange(1, radius + 1)
+        left = -jnp.take(array, indices[::-1], axis=axis)
+        right = -jnp.take(
+            array, array.shape[axis] - 1 - indices, axis=axis)
+        padded = jnp.concatenate((left, array, right), axis=axis)
+    elif extension in ("symmetric", "reflect"):
+        padding = [(0, 0)] * array.ndim
+        padding[axis] = (radius, radius)
+        padded = jnp.pad(array, padding, mode=extension)
+    else:
+        raise ValueError(
+            "shifted stencil extension must be symmetric, reflect, or odd")
+
+    result = jnp.zeros_like(array)
+    width = array.shape[axis]
+    for offset in range(int(weights.shape[0])):
+        selection = [slice(None)] * array.ndim
+        selection[axis] = slice(offset, offset + width)
+        result = result + weights[offset] * padded[tuple(selection)]
+    return result
+
+
+@jax.jit
+def filter_closed_cgrid_extensives_array(
+        cell_volume, u_transport, v_transport, *, kernel):
+    """Array-backend implementation shared by offline and in-scan filtering."""
+    volume = shifted_weighted_sum(
+        cell_volume, kernel, axis=0, extension="symmetric")
+    volume = shifted_weighted_sum(
+        volume, kernel, axis=1, extension="symmetric")
+    u = shifted_weighted_sum(
+        u_transport, kernel, axis=0, extension="symmetric")
+    u = shifted_weighted_sum(u, kernel, axis=1, extension="odd")
+    v = shifted_weighted_sum(v_transport, kernel, axis=0, extension="odd")
+    v = shifted_weighted_sum(v, kernel, axis=1, extension="symmetric")
+    # Odd parity fixes both normal wall faces analytically. Re-impose their
+    # exact floating-point representation after accumulation roundoff.
+    u = u.at[:, (0, -1)].set(0.0)
+    v = v.at[(0, -1), :].set(0.0)
+    return volume, u, v
+
+
 def filter_closed_cgrid_extensives(
         cell_volume: np.ndarray, u_transport: np.ndarray,
         v_transport: np.ndarray, *, sigma_cells: float,
@@ -468,24 +532,13 @@ def filter_closed_cgrid_extensives(
     kernel = gaussian_kernel_1d(
         sigma_cells=sigma_cells, truncate=truncate)
     radius = kernel.size // 2
-
-    def convolve(values, parities):
-        result = values
-        for axis, parity in enumerate(parities):
-            padded = (_pad_even_cell_centres(result, radius, axis)
-                      if parity == "even" else
-                      _pad_odd_boundary_faces(result, radius, axis))
-            result = _convolve_valid_axis(padded, kernel, axis)
-        return result
-
-    filtered_volume = convolve(volume, ("even", "even"))
-    filtered_u = convolve(u, ("even", "odd"))
-    filtered_v = convolve(v, ("odd", "even"))
-    # The odd extension fixes both wall faces analytically.  Re-impose their
-    # exact floating-point representation after convolution roundoff.
-    filtered_u[:, (0, -1)] = 0.0
-    filtered_v[(0, -1), :] = 0.0
-    return filtered_volume, filtered_u, filtered_v
+    if u.shape[1] <= radius or v.shape[0] <= radius:
+        raise ValueError("Gaussian support exceeds the closed-basin face axis")
+    if np.any(u[:, (0, -1)] != 0.0) or np.any(v[(0, -1), :] != 0.0):
+        raise ValueError("normal transport on a closed wall must be exactly zero")
+    return tuple(np.asarray(value) for value in
+                 filter_closed_cgrid_extensives_array(
+                     volume, u, v, kernel=kernel))
 
 
 def _local_closed_extensives(fields: dict[str, np.ndarray], geometry: dict,
@@ -740,7 +793,6 @@ def build_jax_filtered_restrictor(
         source: dict, target: dict, *, sigma_source_cells: float,
         truncate: float = FILTER_TRUNCATE):
     """Build the closed-wall filtered restriction for an in-scan sampler."""
-    import jax
     import jax.numpy as jnp
 
     layout = _restriction_layout(source, target)
@@ -753,8 +805,6 @@ def build_jax_filtered_restrictor(
     fine_ny, fine_nx = f * ny, f * nx
     kernel = jnp.asarray(gaussian_kernel_1d(
         sigma_cells=sigma_source_cells, truncate=truncate))
-    radius = int(kernel.shape[0] // 2)
-    kernel2 = (kernel[:, None] * kernel[None, :])[None, None]
 
     source_tmask = jnp.asarray(source["mask"]["T"], dtype=jnp.float64)
     source_umask = jnp.asarray(source["mask"]["U"], dtype=jnp.float64)
@@ -783,26 +833,6 @@ def build_jax_filtered_restrictor(
             geometry["reference_thickness"][kind], dtype=jnp.float64) * (
                 1.0 + ratio)
 
-    def pad_even(values, axis):
-        pads = [(0, 0), (0, 0)]
-        pads[axis] = (radius, radius)
-        return jnp.pad(values, pads, mode="symmetric")
-
-    def pad_odd(values, axis):
-        indices = jnp.arange(1, radius + 1)
-        left = -jnp.take(values, indices[::-1], axis=axis)
-        right = -jnp.take(values, values.shape[axis] - 1 - indices, axis=axis)
-        return jnp.concatenate((left, values, right), axis=axis)
-
-    def convolve(values, parities):
-        padded = values
-        for axis, parity in enumerate(parities):
-            padded = pad_even(padded, axis) if parity == "even" \
-                else pad_odd(padded, axis)
-        return jax.lax.conv_general_dilated(
-            padded[None, None], kernel2, (1, 1), "VALID",
-            dimension_numbers=("NCHW", "OIHW", "NCHW"))[0, 0]
-
     def restrict(eta, u_native, v_native):
         volume = source_area_t * (
             source_reference_t + eta * source_tmask) * source_tmask
@@ -817,9 +847,9 @@ def build_jax_filtered_restrictor(
             :, 1:].set(transport_u[sj0:sj1 + 1, si0:si1 + 1])
         local_v = jnp.zeros((fine_ny + 1, fine_nx), dtype=eta.dtype).at[
             1:, :].set(transport_v[sj0:sj1 + 1, si0:si1 + 1])
-        filtered_volume = convolve(local_volume, ("even", "even"))
-        filtered_u = convolve(local_u, ("even", "odd")).at[:, (0, -1)].set(0.0)
-        filtered_v = convolve(local_v, ("odd", "even")).at[(0, -1), :].set(0.0)
+        filtered_volume, filtered_u, filtered_v = (
+            filter_closed_cgrid_extensives_array(
+                local_volume, local_u, local_v, kernel=kernel))
 
         coarse_volume_block = filtered_volume.reshape(
             ny, f, nx, f).sum(axis=(1, 3))
