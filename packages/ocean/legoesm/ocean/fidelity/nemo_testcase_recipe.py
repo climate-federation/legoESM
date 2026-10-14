@@ -1455,11 +1455,11 @@ def build_orca2_initial_ts(
     (``dtatsd.f90:307-310``) masks AFTER the copy, which is why the alterations
     are applied to the unmasked field.
 
-    ``apply_hand_alterations=False`` is an ABLATION CONTROL for the fidelity
-    gate -- it reproduces the pre-transcription state so the gate can show the
-    alterations own the whole residual.  It is not a configuration knob and no
-    card, recipe or driver exposes it; the card always takes the default, which
-    is what NEMO executes.
+    ``apply_hand_alterations=False`` is NEMO's branch when ln_tsd_dmp is false
+    (dtatsd.f90:219): the grid ladder's G3 card takes it because its deck
+    requires damping off; the ORCA2 card always takes the default (its deck
+    damps), and the ORCA2 fidelity gate uses False as its ablation control.
+    No driver exposes it.
     """
 
     import netCDF4  # noqa: N813
@@ -3423,7 +3423,7 @@ def build_nemo_testcase_card(
         if deck_root is None:
             raise ValueError("ORCA2-zps requires an explicit deck_root")
         return build_orca2_zps_card(deck_root)
-    if case in _ORCA2G_JPK:           # the grid ladder's rungs (G1, G2)
+    if case in _ORCA2G_JPK:           # the grid ladder's rungs (G1, G2, G3)
         if deck_root is None:
             raise ValueError(f"{case} requires an explicit deck_root")
         return build_orca2g1_flat_card(deck_root, case)
@@ -3487,7 +3487,7 @@ ORCA2G1_UNMEASURED: tuple[str, ...] = (
 # refused: the card has no arm for it.
 _ORCA2G1_REQUIRED_SWITCHES: dict[str, object] = {
     "namcfg.ln_read_cfg": True,
-    "namtsd.ln_tsd_init": False, "namtsd.ln_tsd_dmp": False,
+    "namtsd.ln_tsd_dmp": False,   # ln_tsd_init is the rung table's (G3)
     "namsbc.ln_usr": True, "namsbc.ln_flx": False, "namsbc.ln_blk": False,
     "namsbc.ln_abl": False, "namsbc.ln_cpl": False, "namsbc.nn_ice": 0,
     "namsbc.ln_traqsr": False, "namsbc.ln_ssr": False, "namsbc.ln_rnf": False,
@@ -3745,10 +3745,10 @@ def build_orca2g1_flat_card(deck_root: str | Path, case: str = "ORCA2G1-flat") -
         H_bathy_override=bathymetry,
         nemo_prognostic_barotropic_velocity=True,
     )
-    wet3 = tmask.astype(np.float64)
+    t_init, s_init = orca2g_initial_ts(root, case, tmask)
     state = state._replace(
-        T=state.T.replace(data=jnp.asarray(_ORCA2G1_T_C * wet3, dtype=jnp.float64)),
-        S=state.S.replace(data=jnp.asarray(_ORCA2G1_S_PSU * wet3, dtype=jnp.float64)),
+        T=state.T.replace(data=jnp.asarray(t_init, dtype=jnp.float64)),
+        S=state.S.replace(data=jnp.asarray(s_init, dtype=jnp.float64)),
         eta=state.eta.replace(data=jnp.asarray(ssh, dtype=jnp.float64)),
     )
 
@@ -3883,6 +3883,7 @@ def validate_orca2g1_flat_card(card: NEMOTestcaseCard, deck_root: str | Path) ->
     state = card.recipe.initial_state
     grid = card.recipe.grid
     perm_t = (grid.n_lon - np.arange(grid.n_lon)) % grid.n_lon
+    init_ts = orca2g_initial_ts(deck_root, card.case, wet3)
     checks = {
         "case": card.case in _ORCA2G_JPK,
         "rn_Dt": card.dt_s == deck.rn_Dt_s,
@@ -3900,10 +3901,8 @@ def validate_orca2g1_flat_card(card: NEMOTestcaseCard, deck_root: str | Path) ->
         # jperio = 4 on the de-haloed file: the last T row is the pivot row
         # and is its own image under i -> (n_lon - i) % n_lon.
         "t_fold_mask": np.array_equal(wet[-1], wet[-1][perm_t]),
-        "uniform_T": np.array_equal(np.asarray(state.T.data),
-                                    _ORCA2G1_T_C * wet3),
-        "uniform_S": np.array_equal(np.asarray(state.S.data),
-                                    _ORCA2G1_S_PSU * wet3),
+        "initial_T": np.array_equal(np.asarray(state.T.data), init_ts[0]),
+        "initial_S": np.array_equal(np.asarray(state.S.data), init_ts[1]),
         "bump": np.array_equal(
             np.asarray(state.eta.data),
             orca2g1_initial_ssh(dom["glamt"], dom["gphit"], wet)),
@@ -3936,22 +3935,27 @@ def validate_orca2g1_flat_card_for_execution(
 # (31 levels, partial bottom cells, ``strait_shlat``) under the name
 # ``domain_cfg.nc``.  The builder, the deck reader, the bump and every selector
 # are G1's; only the entries below differ by rung.
-_ORCA2G_JPK: dict[str, int] = {"ORCA2G1-flat": 2, "ORCA2G2-zps": 31}
+_ORCA2G_JPK: dict[str, int] = {"ORCA2G1-flat": 2, "ORCA2G2-zps": 31, "ORCA2G3-ts": 31}
 ORCA2G2_UNMEASURED: tuple[str, ...] = (
     "multi_level_partial_cell_step",   # round 2: record admitted, not at the bar
 )
+ORCA2G3_UNMEASURED: tuple[str, ...] = (
+    "g3_record_not_admitted",
+    "density_varying_step",            # EOS, pressure gradient, N2 on real T/S
+)
 _ORCA2G_UNMEASURED = {"ORCA2G1-flat": ORCA2G1_UNMEASURED,
-                      "ORCA2G2-zps": ORCA2G2_UNMEASURED}
+                      "ORCA2G2-zps": ORCA2G2_UNMEASURED,
+                      "ORCA2G3-ts": ORCA2G3_UNMEASURED}
 # NEMO's dyn_zdf matrix divisors (dynzdf.f90:191-205, :360-374): selected by
 # G2, the first rung with more than one level.  G1 has no interface to solve
 # across, so its card stays as certified.
-_ORCA2G_ZDF_FACES = {"ORCA2G1-flat": False, "ORCA2G2-zps": True}
+_ORCA2G_ZDF_FACES = {"ORCA2G1-flat": False, "ORCA2G2-zps": True, "ORCA2G3-ts": True}
 # NEMO's tra_zdf diagonal rounding (trazdf.f90:233; G2 round 3), its own row:
 # G1's one-level solve builds no such diagonal.
-_ORCA2G_TRA_ZDF_ROUNDED = {"ORCA2G1-flat": False, "ORCA2G2-zps": True}
+_ORCA2G_TRA_ZDF_ROUNDED = {"ORCA2G1-flat": False, "ORCA2G2-zps": True, "ORCA2G3-ts": True}
 # NEMO's ascending-k depth mean of the 3-D right-hand side (stp2d.f90:178-179;
 # G2 round 4), its own row: G1's one-level sum has no order to choose.
-_ORCA2G_UE_RHS_ASCENDING = {"ORCA2G1-flat": False, "ORCA2G2-zps": True}
+_ORCA2G_UE_RHS_ASCENDING = {"ORCA2G1-flat": False, "ORCA2G2-zps": True, "ORCA2G3-ts": True}
 
 
 def _orca2g_strait_shlat(domain_path: Path, shape) -> np.ndarray:
@@ -3970,6 +3974,71 @@ def build_orca2g2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
     return build_orca2g1_flat_card(deck_root, "ORCA2G2-zps")
 
 
+# ---------------------------------------------------------------------------
+# ORCA2G3 (grid ladder rung G3, DECISION 117): G2 with ONE switch, the initial
+# state.  &namtsd reads ORCA2's own T/S climatology with ORCA2's own lines
+# (ORCA2_OMIP_L4/EXP00/namelist_cfg:47,50,54-55); damping stays off.
+_ORCA2G_TSD_INIT = {"ORCA2G1-flat": False, "ORCA2G2-zps": False, "ORCA2G3-ts": True}
+_ORCA2G3_TSD_FIELDS = {
+    "namtsd.cn_dir": "'./'",
+    "namtsd.sn_tem": ("'data_1m_potential_temperature_nomask',-1.,'votemper',"
+                      ".true.,.true.,'yearly','','',''"),
+    "namtsd.sn_sal": ("'data_1m_salinity_nomask',-1.,'vosaline',"
+                      ".true.,.true.,'yearly','','',''"),
+}
+# build_orca2_initial_ts's fldread weight (249/496) is the kt = 1 weight of
+# THIS calendar and time step only; any other value is refused, not re-derived.
+_ORCA2G3_TSD_CALENDAR = {
+    "namrun.nn_it000": 1, "namrun.nn_date0": 10101, "namrun.nn_time0": 0,
+    "namrun.nn_leapy": 0, "namdom.rn_dt": 10800.0,
+}
+
+
+def orca2g_initial_ts(deck_root: str | Path, case: str, tmask) -> tuple[np.ndarray, np.ndarray]:
+    """A rung's initial T and S on ``tmask`` (y, x, level), as NEMO's istate.
+
+    ``ln_tsd_init = F`` (G1, G2): the case's uniform 20 / 30
+    (usrdef_istate.F90).  ``ln_tsd_init = T`` (G3): ORCA2's climatology
+    through the ORCA2 card's reader (dtatsd.f90:260-263, :307-310), WITHOUT
+    the ORCA_R2 hand alterations: NEMO applies them only when ln_tsd_dmp is
+    true (dtatsd.f90:219), and every rung's deck requires it false.
+    """
+
+    root = Path(deck_root)
+    values = _orca2g1_namelist_values(root / "namelist_cfg")
+    want = _ORCA2G_TSD_INIT.get(case)
+    if want is None:
+        raise ValueError(f"{case} is not a grid-ladder rung")
+    if values.get("namtsd.ln_tsd_init") is not want:
+        raise ValueError(f"{case} deck must state namtsd.ln_tsd_init = {want}")
+    if values.get("namtsd.ln_tsd_dmp") is not False:
+        raise ValueError(f"{case} deck must state namtsd.ln_tsd_dmp = False")
+    wet = np.asarray(tmask, dtype=bool)
+    if not want:
+        if any(name in values for name in _ORCA2G3_TSD_FIELDS):
+            raise ValueError(f"{case} deck names T/S input files it does not read")
+        wet3 = wet.astype(np.float64)
+        return _ORCA2G1_T_C * wet3, _ORCA2G1_S_PSU * wet3
+    for name, text in _ORCA2G3_TSD_FIELDS.items():
+        if "".join(str(values.get(name, "")).split()) != text:
+            raise ValueError(f"{case} deck {name} is not ORCA2's line")
+    for name, value in _ORCA2G3_TSD_CALENDAR.items():
+        if values.get(name) != value or type(values.get(name)) is not type(value):
+            raise ValueError(
+                f"{case} deck {name} = {values.get(name)!r}; the T/S time "
+                f"weight is transcribed for {value!r} only")
+    return build_orca2_initial_ts(
+        root / "data_1m_potential_temperature_nomask.nc",
+        root / "data_1m_salinity_nomask.nc",
+        wet, apply_hand_alterations=False)
+
+
+def build_orca2g3_ts_card(deck_root: str | Path) -> NEMOTestcaseCard:
+    """ORCA2G3: the G2 card started from ORCA2's real initial T and S."""
+
+    return build_orca2g1_flat_card(deck_root, "ORCA2G3-ts")
+
+
 __all__ = (
     "NEMOTestcaseCard",
     "GYRESurfaceBoundaryCondition",
@@ -3981,7 +4050,10 @@ __all__ = (
     "build_orca2_zps_card",
     "build_orca2g1_flat_card",
     "build_orca2g2_zps_card",
+    "build_orca2g3_ts_card",
+    "orca2g_initial_ts",
     "ORCA2G2_UNMEASURED",
+    "ORCA2G3_UNMEASURED",
     "read_orca2g1_deck",
     "orca2g1_initial_ssh",
     "validate_orca2g1_flat_card",

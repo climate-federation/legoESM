@@ -157,7 +157,7 @@ def test_g2_refuses_planted_disagreements(g2_card, g2_root):
     state = g2_card.recipe.initial_state
     deep = np.asarray(state.T.data).copy()
     deep[73, 50, 20] += 1.0e-3              # a level the one-level check never saw
-    with pytest.raises(ValueError, match="uniform_T"):
+    with pytest.raises(ValueError, match="initial_T"):
         recipe.validate_orca2g1_flat_card(g2_card._replace(recipe=g2_card.recipe._replace(
             initial_state=state._replace(T=state.T.replace(data=deep)))), g2_root)
     thick = np.asarray(g2_card.recipe.z_coord.h_partial).copy()
