@@ -7,7 +7,7 @@ per-step forcing to substitute).
 Preregistration: docs/ocean/fidelity/PREREG_nemo_testcases_gridladder_g4_round2.md
 (86c7d34e7, before the comparison; one citation off by a line: the
 `ssh_frc` copy is `dynspg_ts.f90:273`, not `:272`).
-Code: 1355c60b5 (admission fix), 627c0c8a9 (kt = 11 witness), this receipt.
+Code: 1355c60b5 (admission fix), 627c0c8a9 (kt = 11 witness), review fixes and this receipt's update in the last commit.
 Record: gridladder_rounds/round17/oracle_g4_r17. Evidence: gridladder_rounds/round18/.
 Decisions 120 and 121 pending: as-built deck.
 
@@ -18,9 +18,13 @@ Decisions 120 and 121 pending: as-built deck.
    Fixed the check; re-admitted without re-running NEMO: ACQUISITION_DONE.
 2. **Shortwave into the ocean is NEMO's bit for bit** at kt = 11 (all
    16,433 wet cells): file record, interpolation weights, albedo.
-3. **Wind stress is not:** direction exact (max angle 1.9e-16 rad), size
-   too large by 4e-10 (median) to 4e-9 relative on every wet cell —
-   over the bar (max 1.0e-3 Pa absolute on stresses up to 2.2 Pa).
+3. **Wind stress is not:** direction exact (max angle 1.9e-16 rad); size
+   off on every wet cell, two populations: 16,161 cells by < 1e-6
+   relative, 272 cells by 1e-6 to 80 % (up to 1.2e-3 Pa), all where the
+   sea is 23-39 K warmer than the air (ice-free polar water under cold
+   air: a consequence of running without ice). Over the bar.
+   (Retracted from this receipt's first commit: "one-signed 4e-10 to
+   4e-9" — that was the strong-stress subset only; 117 cells are low.)
 4. **First non-bit statement: NEMO's NCAR bulk stress magnitude**, the
    same shared leaf the ORCA2 lane registered as owned debt.
 5. **No ladder, no certification**: the next record must hold NEMO's
@@ -51,6 +55,9 @@ kt = 11, NEMO's surface mean from twin a's step-10 restart.
 | shortwave qsr | 0 / 16,433 | 0 | bit-identical |
 | zonal stress utau | 16,433 / 16,433 | 4.1e-4 | over the bar |
 | meridional stress vtau | 16,433 / 16,433 | 1.0e-3 | over the bar |
+| stress size, \|rel\| < 1e-6 | 16,161 cells | wind p50 7.7 m/s | SST − air p50 +0.9 K |
+| stress size, 1e-6 to 1e-3 | 223 cells | wind p50 6.6 m/s | SST − air p5..p95 +23..+34 K |
+| stress size, > 1e-3 | 49 cells | wind p50 5.6 m/s | SST − air p50 +32 K |
 | non-solar heat, emp − rnf | not scored | — | full heat assembly not wired; NEMO's SSS restoring absent from shared code |
 
 Predictions G4R2-P1 (stress over) and G4R2-P2 (shortwave bit) HELD. The
@@ -61,8 +68,11 @@ one-cell plant moves the at-bar row (exit 1, kt11_plant.log).
 The NCAR bulk's stress magnitude: `turb_ncar` (`ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/sbcblk.f90:706`),
 air density from the 10 m state (`:782-784`), the bulk formula giving
 taum (`:787-791`), stress = taum/wndm × wind (`:800-803`). The operand
-inside it is not isolated (PLAUSIBLE: a constant or the iteration — the
-bias is one-signed); isolating it needs NEMO's bulk intermediates. Not
+inside it is not isolated. PLAUSIBLE, from the population split: the
+strongly unstable branch of `turb_ncar` — the stability-parameter clamp
+(`ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/sbcblk_algo_ncar.f90:177-178`), the
+neutral-wind floor (`:207`) or the stability flag update (`:223`).
+Isolating it needs NEMO's bulk intermediates (Cd, zeta) at these cells. Not
 landed: no cited single statement, and the ORCA2 lane holds it as owned
 debt (phase 2h O1-B: over the bar on all seven outputs).
 
@@ -92,13 +102,25 @@ forcing and refuses G4); GIVEN-NEMO-ENTRY needs NEMO's per-step fluxes.
 ## 7. Tests (synchronous)
 
 Focused battery (G1 tools, G2, G2 ladder, G3, G4): 68 passed, 9
-deselected (JAX on CPU). Non-vacuity: the new finiteness test fails on the
+deselected (JAX on CPU), before and after the review fixes. Non-vacuity: the new finiteness test fails on the
 old checker; the old fixture's NaN sat in the halo and was moved inside
 (the expectation, not the code, was wrong). Witness plant: exit 1.
 
 ## 8. Review
 
-Single review (codex): PENDING at this commit.
+Single review (codex): **"VERDICT: findings"** (codex_review_r18.log), all
+three confirmed and fixed in the witness commit after this receipt's first:
+- HIGH, receipt claimed a one-signed 4e-10..4e-9 bias: measured 117
+  negative cells, range −0.80..+0.0019; retracted, the witness now emits
+  the population split (section 2).
+- MEDIUM, stress plant vacuous (rows already over): the plant now runs
+  only on rows at the bar unplanted (qsr) and names the rest; exit 1.
+- MEDIUM, no provenance: the witness now refuses unless the abort file is
+  NEMO's kt = 11 stop, NEMO's log reads the records it uses, and every
+  input file is byte-equal to the abort run's (wrong abort file: exit 73).
+  Refusals exit 73, never 1 (a fired plant). The NCAR defaults it
+  inherits (iterations, salt factor, no relative wind) match the deck by
+  reading, not by a check.
 
 ## 9. Choices
 

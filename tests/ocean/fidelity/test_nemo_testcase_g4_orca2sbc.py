@@ -289,5 +289,6 @@ def test_kt11_witness_reads_the_bulk_surface_mean_nemo_reads(tmp_path):
 
     assert mod.sst_m_kt11(restart(10, 2)).tolist() == [[1.5, 1.625]]
     for kt, fsbc in ((9, 2), (10, 1)):
-        with pytest.raises(SystemExit, match="REFUSE"):
+        with pytest.raises(SystemExit) as refused:
             mod.sst_m_kt11(restart(kt, fsbc))
+        assert refused.value.code == 73          # never a fired plant's exit 1

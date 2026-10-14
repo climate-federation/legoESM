@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -44,12 +45,52 @@ def sst_m_kt11(restart: Path) -> np.ndarray:
 
 
 def require(condition: bool, message: str) -> None:
-    if not condition:
-        raise SystemExit(f"REFUSE: {message}")
+    if not condition:              # exit 73: never confused with a fired plant (1)
+        print(f"REFUSE: {message}", file=sys.stderr)
+        raise SystemExit(73)
+
+
+def provenance(run: Path, abort: Path) -> None:
+    """The abort file is the reference run's kt = 11 stop, whose log reads the
+    records RECORD_KT11 names, and the replay reads that run's own inputs."""
+    import filecmp
+    ref = abort.parent
+    require((ref / "time.step").read_text().split() == ["11"]
+            and re.search(r"^ *kt 11 \|V\| +max", (ref / "ocean.output").read_text(), re.M),
+            f"{ref}: the abort file is not NEMO's stop at kt = 11")
+    log = (ref / "ocean.output").read_text()
+    for field, filename, variable, _ in o1.FIELD_SPECS:
+        hit = re.search(rf"fld_read: var {variable} kt = +11 .*record: +(\d+)", log)
+        require(bool(hit) and int(hit.group(1)) == RECORD_KT11[field] + 1,
+                f"{variable}: NEMO's log does not read record {RECORD_KT11[field] + 1} at kt = 11")
+        require(filecmp.cmp(run / filename, ref / filename, shallow=False),
+                f"{filename}: the replay's input is not the abort run's")
+    for name in ("domain_cfg.nc", "namelist_ref", "weights_core2_orca2_bicub.nc",
+                 "weights_core2_orca2_bilin.nc"):
+        require(filecmp.cmp(run / name, ref / name, shallow=False),
+                f"{name}: the replay's input is not the abort run's")
+
+
+def magnitude_split(card: dict, nemo: dict, wet, wind, dtemp) -> dict:
+    """Stress-magnitude ratio card/NEMO - 1 by population, with the 10 m
+    wind speed and SST minus air temperature of each population."""
+    rel = (np.hypot(card["utau"], card["vtau"])[wet]
+           / np.hypot(nemo["utau"], nemo["vtau"])[wet] - 1.0)
+    out = {"negative": int((rel < 0).sum()), "min": float(rel.min()), "max": float(rel.max())}
+    for label, lo, hi in (("below_1e-6", 0.0, 1e-6), ("1e-6_to_1e-3", 1e-6, 1e-3),
+                          ("above_1e-3", 1e-3, np.inf)):
+        sel = (np.abs(rel) >= lo) & (np.abs(rel) < hi)
+        out[label] = {"cells": int(sel.sum())}
+        if sel.any():
+            out[label].update({
+                "wind_p5_p50_p95": np.percentile(wind[wet][sel], [5, 50, 95]).tolist(),
+                "sst_minus_tair_p5_p50_p95": np.percentile(dtemp[wet][sel], [5, 50, 95]).tolist()})
+    return out
 
 
 def measure(run: Path, abort: Path, *, plant: bool = False) -> dict:
     import jax
+    provenance(run, abort)
     jax.config.update("jax_enable_x64", True)
     o1.set_policy(o1.PrecisionPolicy.fp64(transcendentals="libm"))
     require(jax.default_backend() == "cpu", "CPU only")
@@ -78,6 +119,9 @@ def measure(run: Path, abort: Path, *, plant: bool = False) -> dict:
             "qsr": (1.0 - ALBO) * maps["qsr_down"] * wet}
     with Dataset(abort) as ds:
         nemo = {"utau": ds["sozotaux"][0], "vtau": ds["sometauy"][0], "qsr": ds["soshfldo"][0]}
+    nemo = {k: np.asarray(v, dtype=np.float64) for k, v in nemo.items()}
+    split = magnitude_split(card, nemo, wet, np.hypot(maps["wndi"], maps["wndj"]),
+                            sst + o1.constants.T_freeze - maps["tair"])
     rows = {}
     for name, cand in card.items():
         ref = np.asarray(nemo[name], dtype=np.float64)
@@ -85,7 +129,7 @@ def measure(run: Path, abort: Path, *, plant: bool = False) -> dict:
         row = score(f"kt11.{name}", ref, np.asarray(cand, dtype=np.float64), wet, plant=plant)
         row["unequal_cells"] = int(unequal.sum())
         rows[name] = row
-    return {"kt": 11, "wet_cells": int(wet.sum()), "rows": rows,
+    return {"kt": 11, "wet_cells": int(wet.sum()), "rows": rows, "stress_magnitude": split,
             "inputs": {"records_0based": RECORD_KT11, "sst": "sst_m_kt11(restart 10)"}}
 
 
@@ -96,15 +140,20 @@ def main() -> int:
     p.add_argument("--json", type=Path)
     p.add_argument("--plant", action="store_true")
     a = p.parse_args()
-    out = measure(a.run, a.abort, plant=a.plant)
-    if a.plant:
-        fired = all(r["status"] != "AT-BAR" for r in out["rows"].values())
+    out = measure(a.run, a.abort)
+    if a.plant:     # only a row at the bar unplanted can show the plant firing
+        clean = [k for k, r in out["rows"].items() if r["status"] == "AT-BAR"]
+        planted = measure(a.run, a.abort, plant=True)["rows"]
+        fired = bool(clean) and all(planted[k]["status"] != "AT-BAR" for k in clean)
+        print(f"rows at the bar: {clean}; already over (plant not informative): "
+              f"{sorted(set(out['rows']) - set(clean))}")
         print("STATUS PLANT-FIRED" if fired else "REFUSE: plant stayed at the bar")
         return 1 if fired else 2
     if a.json:
         a.json.write_text(json.dumps(out, indent=1, sort_keys=True) + "\n")
     for name, r in out["rows"].items():
         print(name, r["status"], r["unequal_cells"], "/", r["n"], f"{r['normalized_max_abs']:.3e}")
+    print(json.dumps(out["stress_magnitude"]))
     return 0
 
 
