@@ -600,6 +600,41 @@ def _create_fv3_duo_column_model(config: ExperimentConfig, gc, model_type,
         energy_fixer=config.dycore.energy_fixer)
 
 
+def _create_latlon_column_model(config: ExperimentConfig, model):
+    """The lat-lon C-grid PE model behind the column contract (composable
+    physics P3): the shared column loop drives it with the CAM6 suite on
+    ``(ncol, nlev)`` columns.  Refused by name, as on the duo: a knob the
+    adapter cannot honour never runs inert.  The driver hands the factory
+    the NATIVE lat-lon grid (diffusion coefficients, polar masks and the
+    CFL clamp are the native lane's), and takes ``model.mesh`` as its grid."""
+    from legoesm.atmosphere.dynamics.gcm.latlon_column import (
+        LatLonColumnModel,
+    )
+    refused = []
+    for k in ("mpas_qv_smooth_del2_m2s", "mpas_qv_smooth_del4_m4s"):
+        if float(getattr(config, k, 0.0) or 0.0) != 0.0:
+            refused.append(f"{k}={getattr(config, k)!r} (an MPAS edge "
+                           "operator; no lat-lon counterpart)")
+    if config.held_suarez_forcing:
+        refused.append("held_suarez_forcing=True (the column loop's HS "
+                       "drops the meridional drag; use the native lane)")
+    if config.dycore.model_type != "hydrostatic":
+        refused.append(f"model_type={config.dycore.model_type!r}")
+    if getattr(config.output, "budget_ledger", False):
+        refused.append("output.budget_ledger=True (the column model exports "
+                       "no per-step ledger)")
+    if refused:
+        raise ValueError(
+            "latlon column lane cannot honour: " + "; ".join(refused))
+    from legoesm.driver.physics_pipeline import (
+        moisture_registry_for, validate_microphysics_tracer_slots)
+    registry = moisture_registry_for(config.microphysics)
+    validate_microphysics_tracer_slots(
+        config.microphysics, registry.n_tracers,
+        context="latlon column lane tracer slots")
+    return LatLonColumnModel(model, tracer_names=registry.names)
+
+
 def fv3_duo_dynamics_for_layout(config: ExperimentConfig, bundle, cfg):
     """The ``FV3DuoDynamicsModel`` for *bundle* / *cfg* on the execution
     layout the deck and the visible devices resolve to -- ONE policy for
@@ -1482,10 +1517,16 @@ def create_atmosphere_dycore(
                              else dc.time_integrator),
             # CAM-style dycore total-energy fixer (F15; DycoreConfig).
             energy_fixer=dc.energy_fixer,
+            # CAM-FV ldiv4 on this grid: the SCALE only; the dycore builds its
+            # own per-row 0.01*area_row^2/dt (NOT diff.div_damp4, whose
+            # smallest-cell / dx_min^2 value is wrong on a lat-lon grid).
+            nu_div4_scale=dc.mpas_div_damp4_scale,
         )
         model = CGridLatLonPrimitiveEquationModel(
             grid, sigma, cfg, dt=_effective_dt)
         model.effective_dt = _effective_dt
+        if dc.column_lane:
+            return _create_latlon_column_model(config, model)
         return model
 
     # ----- SFNO data-driven -----

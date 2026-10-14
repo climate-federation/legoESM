@@ -2179,10 +2179,20 @@ class ExperimentConfig(NamedTuple):
             errors.append(f"dycore.corner_fill must be one of {CORNER_FILL_MODES}, "
                           f"got {d.corner_fill!r}")
         if d.column_lane:
-            if d.discretization != "fv3_duo":
+            if d.discretization not in ("fv3_duo", "latlon_cgrid"):
                 errors.append(
                     "dycore.column_lane: no column adapter for "
-                    f"dycore.discretization={d.discretization!r} (fv3_duo only)")
+                    f"dycore.discretization={d.discretization!r} "
+                    "(fv3_duo or latlon_cgrid)")
+            if (d.discretization == "latlon_cgrid"
+                    and normalize_grid_type(self.grid.grid_type) != "latlon"):
+                errors.append(
+                    "dycore.column_lane with latlon_cgrid needs "
+                    f"grid.grid_type='latlon', got {self.grid.grid_type!r}")
+            if d.discretization == "latlon_cgrid" and self.distributed:
+                errors.append(
+                    "dycore.column_lane on latlon_cgrid is single-process "
+                    "(D6); distributed=True is the lat-band pipeline lane")
             # every column lane: the columns are a VIEW of the native
             # state and only the dycore's step may move the winds
             if self.sponge_enabled:
@@ -3684,13 +3694,24 @@ class ExperimentConfig(NamedTuple):
                 f"a_h_scale={d.a_h_scale!r} turns the del2 viscosity off; use a_h_scale > 0 "
                 "or set mpas_sponge_del2_top_layers=0")
         _dd4s = getattr(d, "mpas_div_damp4_scale", 0.0)
+        # Consumers: the hydrostatic MPAS dycore and the lat-lon C-grid PE
+        # (which builds its own per-row CAM coefficient from the scale).  The
+        # lat-lon lane is keyed on the factory's own dispatch matrix, so every
+        # (model_type, discretization) alias that reaches that solver counts.
+        from legoesm.driver.component_factory import supported_matrix
+        _latlon_pe = any(
+            r["solver"] == "latlon_cgrid_primitive_equations"
+            and (r["model_type"], r["discretization"], r["grid_type"])
+            == (d.model_type, d.discretization, normalize_grid_type(g.grid_type))
+            for r in supported_matrix())
         if (isinstance(_dd4s, (int, float)) and not isinstance(_dd4s, bool)
-                and _dd4s > 0
+                and _dd4s > 0 and not _latlon_pe
                 and (d.discretization != "mpas" or d.model_type != "hydrostatic")):
             errors.append(
                 "dycore.mpas_div_damp4_scale is wired into the hydrostatic MPAS dycore "
-                f"only; on discretization={d.discretization!r}/model_type={d.model_type!r} "
-                "it would be silently inert")
+                "and the lat-lon C-grid PE only; on "
+                f"discretization={d.discretization!r}/model_type={d.model_type!r}/"
+                f"grid_type={g.grid_type!r} it would be silently inert")
         if d.mpas_vert_advection_scheme not in _vert_adv_options:
             errors.append(
                 f"dycore.mpas_vert_advection_scheme must be one of "

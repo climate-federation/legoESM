@@ -4979,6 +4979,37 @@ def test_cam6_duo_deck_resolves_to_the_mpas_deck_outside_grid_intrinsic_rows():
         assert mpas[k] * mpas["dycore.dt"] == duo[k] * duo["dycore.dt"], k
 
 
+def test_latlon48_deck_resolves_div4_and_cam_polar_cutoff_into_the_dycore():
+    """The lat-lon production deck (NEW lat-lon baseline 2026-10-13) resolves
+    to the MPAS deck's div-4 scale and CAM's polar-filter start, and both
+    reach the dycore the run steps (resolved config + factory, not deck text)."""
+    import math
+    from legoesm.driver.component_factory import create_atmosphere_dycore
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.grids.vertical import make_cam6_l32_levels
+    amip = _repo_root() / "config" / "amip"
+    ll = _resolved_deck_fields(amip / "amip_production_latlon48.yaml")
+    mpas = _resolved_deck_fields(amip / "amip_production.yaml")
+    assert ll["dycore.mpas_div_damp4_scale"] == mpas["dycore.mpas_div_damp4_scale"] == 1.0
+    assert ll["dycore.use_polar_filter"] is True
+    # CAM: acos(min(0.81, 96/94)), a LATITUDE (CAM compares cos(lat) with it)
+    assert ll["dycore.polar_filter_cutoff_deg"] == 35.9041
+    assert abs(ll["dycore.polar_filter_cutoff_deg"] - math.degrees(math.acos(0.81))) < 1e-4
+    parser = build_arg_parser()
+    keys = load_yaml_config(str(amip / "amip_production_latlon48.yaml"), parser)
+    parser.set_defaults(**keys, _config_keys=frozenset(keys))
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args(
+        _AMIP_DUMMY_PATHS + ["--clm-surfdata-path", "/dummy/surfdata.nc"]), parser))
+    grid = create_latlon_grid(n_lat=cfg.grid.resolution, radius=constants.R_earth,
+                              omega=constants.Omega)
+    dyn = create_atmosphere_dycore(cfg, grid, make_cam6_l32_levels()).dyn
+    assert dyn.config.nu_div4_scale == 1.0
+    assert dyn.config.use_polar_filter is True
+    assert dyn.config.polar_filter_cutoff_deg == 35.9041
+    assert dyn.dt == cfg.dycore.dt == 450.0
+
+
 def test_argv_distributed_mode_matches_the_parser_and_config_default():
     """The import-time federation decision reads argv by hand (before the
     driver config can be imported); it must agree with argparse on every

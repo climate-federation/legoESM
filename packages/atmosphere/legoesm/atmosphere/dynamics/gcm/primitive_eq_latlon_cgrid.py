@@ -225,6 +225,27 @@ class CGridLatLonPrimitiveEquationConfig(NamedTuple):
     # sets it from ``DycoreConfig.energy_fixer`` (default True).  Appended at
     # the tuple END: preserves positional construction.
     energy_fixer: bool = False
+    # Divergence-SELECTIVE biharmonic damping (CAM-FV ``ldiv4``), as a
+    # multiple of CAM's nondimensional rate: per latitude row
+    # nu_row = nu_div4_scale * 0.01 * area_row**2 / dt [m^4/s], applied
+    # inside the final gradient as CAM does (sw_core.F90 ~1098).  The
+    # driver fills it from ``DycoreConfig.mpas_div_damp4_scale`` (one
+    # meaning, one value on every grid).  Per row, not one global value:
+    # built from the equatorial cell a global value is RK3-unstable near
+    # the poles, built from the pole cell it is ~1000x too weak.  0.0
+    # (default) is OFF and byte-identical; needs ``dt`` in the tendency.
+    nu_div4_scale: float = 0.0
+
+
+# CAM-FV ldiv4 nondimensional rate tau4*dt (cd_core.F90:620-684); the same
+# 0.01 as the MPAS lane's ``nu_div4_cam`` in driver.component_factory.
+CAM_DIV4_RATE = 0.01
+# Highest polar-filter start latitude [deg] at which the div-4 damping's
+# stability was measured (Fourier-block eigen check, 96x48, dt 450 s:
+# worst eig*dt -0.67 at 35.9041 deg, -0.83 at 60 deg, RK3 limit ~-2.51).
+# Above it the filter covers fewer rows and nothing was measured, so the
+# model refuses it (user decision 2026-10-13).
+DIV4_MAX_POLAR_FILTER_CUTOFF_DEG = 60.0
 
 
 def _zero_v_at_pole(v, *, south: bool, north: bool, offset: int = 0):
@@ -379,7 +400,8 @@ def cgrid_latlon_hydrostatic_tendencies(
         byte-identical.
     dt : float, optional
         Step length [s]; required only when ``config.nu_del4 > 0`` (sizes the
-        per-row pole stability cap of the hyperdiffusion).
+        per-row pole stability cap of the hyperdiffusion) or
+        ``config.nu_div4_scale > 0`` (the div-4 rate 0.01*area^2/dt).
 
     Returns
     -------
@@ -862,6 +884,26 @@ def cgrid_latlon_hydrostatic_tendencies(
         flux_T = dp_T * nu_u[..., None] * laplacian_cgrid(T, grid)
         dT_dt = dT_dt - laplacian_cgrid(flux_T, grid) / dp_T
 
+    # --- 13a'. Divergence-selective del-4 damping (CAM-FV ldiv4) ---
+    # SIGN: (du, dv) -= grad(nu * lap(D)), D = div(u, v).  The divergence of
+    # that increment is -lap(nu lap D); for constant nu a Fourier mode of D
+    # (lap -> -k^2) decays at nu k^4.  Non-divergent flow (D = 0) gets
+    # exactly zero.  nu is per latitude ROW (cell area squared), inside the
+    # final gradient as in CAM.  It runs at every RK stage, so the polar
+    # filter of du/dv covers it (without the filter the pole rows are
+    # unstable).  Off (0.0) adds nothing: byte-identical.
+    if config.nu_div4_scale > 0.0:
+        if dt is None:
+            raise ValueError(
+                "cgrid_latlon_hydrostatic_tendencies: nu_div4_scale > 0 "
+                "requires the dt argument (the coefficient is 0.01*area^2/dt).")
+        D = divergence_cgrid(u, v, grid, lat_pad=_lat_pad)
+        nu_row = (config.nu_div4_scale * CAM_DIV4_RATE
+                  * grid.area[:, 0] ** 2 / dt).astype(D.dtype)   # (n_lat,)
+        psi = nu_row[:, None, None] * laplacian_cgrid(D, grid)
+        du_dt = du_dt - gradient_x_cgrid(psi, grid)
+        dv_dt = dv_dt - gradient_y_cgrid(psi, grid)
+
     # --- 13b. Top sponge (Rayleigh damping increasing toward the lid, #836) ---
     # Absorb upward-propagating gravity-wave / convective energy that would else
     # reflect off the rigid model lid and contaminate the upper levels.  Gated on
@@ -951,6 +993,26 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         self.grid = grid
         self.sigma_coord = sigma_coord
         self.config = config or CGridLatLonPrimitiveEquationConfig()
+        if self.config.nu_div4_scale > 0.0 and not self.config.use_polar_filter:
+            # Measured (Fourier-block eigen check of the damping on the 96x48
+            # grid): worst eigenvalue x dt -149.6 with no filter, against the
+            # SSP-RK3 real-axis limit ~-2.51; -0.67 / -0.83 with the filter
+            # starting at 35.9 / 60 deg.  A smaller dt does not help: the
+            # coefficient scales as 1/dt, so the per-step damping is fixed.
+            raise ValueError(
+                "nu_div4_scale > 0 needs use_polar_filter=True: the per-row "
+                "div-4 coefficient 0.01*area^2/dt is unstable on the pole rows "
+                "without the polar filter (measured at scale 1; a smaller dt "
+                "does not help).")
+        if (self.config.nu_div4_scale > 0.0
+                and self.config.polar_filter_cutoff_deg
+                > DIV4_MAX_POLAR_FILTER_CUTOFF_DEG):
+            raise ValueError(
+                "nu_div4_scale > 0 needs polar_filter_cutoff_deg <= "
+                f"{DIV4_MAX_POLAR_FILTER_CUTOFF_DEG} (got "
+                f"{self.config.polar_filter_cutoff_deg}): the div-4 damping's "
+                "stability under the polar filter was measured only for a "
+                "filter starting at 35.9041 and 60 deg.")
 
         # Stash the constructor ``dt`` so callers downstream (notably
         # ``make_latlon_mpi_step`` rebuilding an MPI-aware model) can
@@ -1068,13 +1130,20 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         return result
 
     def _call_physics_raw(self, physics_fn, hs, phys_state=None, *,
-                          grid=None, sigma_coord=None):
+                          grid=None, sigma_coord=None, forcing=None):
         """As :meth:`_call_physics` but WITHOUT unwrapping the result —
         the carry-out evaluation needs ``result[1]``. ``grid`` / ``sigma_coord``
         default to ``self.*`` (serial / single-rank); the SPMD body passes the
-        BAND grid so per-band physics is correct."""
+        BAND grid so per-band physics is correct.
+
+        ``forcing`` (the column lane's per-step forcing pytree, TRACED
+        through the jit so a changing SST/solar never retraces the static
+        ``physics_fn``) is handed on as a fifth argument when given;
+        ``None`` (every other caller) is the unchanged 3/4-arg contract."""
         _grid = self.grid if grid is None else grid
         _sigma = self.sigma_coord if sigma_coord is None else sigma_coord
+        if forcing is not None:
+            return physics_fn(hs, _grid, _sigma, phys_state, forcing)
         if phys_state is not None:
             return physics_fn(hs, _grid, _sigma, phys_state)
         sig = inspect.signature(physics_fn)
@@ -1083,7 +1152,7 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
             return physics_fn(hs, _grid, _sigma)
         return physics_fn(hs)
 
-    @partial(jax.jit, static_argnums=(0, 4))
+    @partial(jax.jit, static_argnums=(0, 4, 8))
     def _step_cgrid(
         self,
         state: CGridLatLonHydrostaticState,
@@ -1092,6 +1161,8 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         physics_fn=None,
         phys_state=None,
         energy_pre=None,
+        forcing=None,
+        return_phys_tend: bool = False,
     ) -> tuple:
         """Internal (JITTED): advance one step on C-grid state (raw arrays).
 
@@ -1099,10 +1170,16 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         sigma_coord / polar masks. The lat-band SPMD body calls
         ``_step_cgrid_impl`` directly with the BAND geometry (un-jitted, so the
         band grid stays a concrete value rather than a tracer).
+
+        ``forcing`` is traced (column lane); ``return_phys_tend`` (static)
+        adds the physics tendencies to the return so their surface
+        diagnostics leave the jit explicitly instead of as a traced side
+        effect.  Both default to the legacy two-value return.
         """
         return self._step_cgrid_impl(
             state, dt, target_mass, physics_fn, phys_state,
-            energy_pre=energy_pre,
+            energy_pre=energy_pre, forcing=forcing,
+            return_phys_tend=return_phys_tend,
         )
 
     def _step_cgrid_impl(
@@ -1120,6 +1197,8 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         pole_v_bc_masks=None,
         geom_pads=None,
         energy_pre=None,
+        forcing=None,
+        return_phys_tend: bool = False,
     ) -> tuple:
         """Advance one step on C-grid state (raw arrays). UN-jitted.
 
@@ -1276,10 +1355,12 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         # --- Operator-split physics: one evaluation on the post-dynamics
         # state, applied as an Euler increment (see the docstring). ---
         phys_state_out = phys_state
+        phys_tend = None
         if physics_fn is not None:
             _pr = self._call_physics_raw(
                 physics_fn, cgrid_to_hydrostatic(state_new, grid),
-                phys_state, grid=grid, sigma_coord=sigma_coord)
+                phys_state, grid=grid, sigma_coord=sigma_coord,
+                forcing=forcing)
             if type(_pr) is tuple:
                 phys_tend = _pr[0]
                 if len(_pr) > 1 and phys_state is not None:
@@ -1307,6 +1388,8 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         # The physics carry-out is the second return of the ONE physics
         # evaluation above (issue #413 semantics: prognostic fields and
         # the carry advance exactly once per dt, from the same state).
+        if return_phys_tend:
+            return state_out, phys_state_out, phys_tend
         return state_out, phys_state_out
 
     # ------------------------------------------------------------------
@@ -1535,8 +1618,17 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         target_mass: jax.Array | None = None,
         physics_fn=None,
         phys_state=None,
+        forcing=None,
+        return_phys_tend: bool = False,
     ):
         """Advance one time step.
+
+        ``forcing`` / ``return_phys_tend`` (the column lane, P3): the
+        per-step forcing pytree is traced into the jit and handed to
+        ``physics_fn`` as its fifth argument; with ``return_phys_tend`` the
+        native C-grid path returns ``(state, phys_tend)`` so the physics'
+        surface diagnostics leave the jit explicitly.  Defaults (None,
+        False) are the unchanged legacy contract, byte-identical.
 
         Pure with respect to the explicit state argument — always
         advances the supplied state, never a cached copy.
@@ -1598,9 +1690,19 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
             target_mass = self._target_mass
 
         if isinstance(state, CGridLatLonHydrostaticState):
+            if return_phys_tend:
+                state_new, self._phys_state, phys_tend = self._step_cgrid(
+                    state, dt, target_mass, physics_fn, phys_state, None,
+                    forcing, True)
+                return state_new, phys_tend
             state_new, self._phys_state = self._step_cgrid(
-                state, dt, target_mass, physics_fn, phys_state)
+                state, dt, target_mass, physics_fn, phys_state, None, forcing)
             return state_new
+        if forcing is not None or return_phys_tend:
+            raise NotImplementedError(
+                "lat-lon C-grid step(): forcing / return_phys_tend are the "
+                "column lane's, which steps the native C-grid state; the "
+                "HydrostaticState entry does not take them")
 
         # HydrostaticState input: use cached face-staggered winds from
         # the previous step to avoid lossy cell→face re-projection.
