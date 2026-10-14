@@ -98,6 +98,7 @@ _ORCA2_R229FOLDTRP = NEMO / "cfgs/ORCA2_OMIP_L4_R229FOLDTRP/BLD"
 _ORCA2_R230FOLDTRP = NEMO / "cfgs/ORCA2_OMIP_L4_R230FOLDTRP/BLD"
 _ORCA2G1_P3 = NEMO / "cfgs/ORCA2G1_OMIP_L1_P3/BLD"
 _ORCA2G1_P5 = NEMO / "cfgs/ORCA2G1_OMIP_L1_P5/BLD"   # the G4 record build (rounds 17-19)
+_ORCA2G1_R4REF = NEMO / "cfgs/ORCA2G1_OMIP_L1_R4REF/BLD"   # G1b reference binary (round 22)
 _ORCA2_R104EENACC_COMPILED = (
     NEMO / "cfgs/ORCA2_OMIP_L4_R104EENACC/BLD/ppsrc/nemo")
 _ORCA2_R105EENACC_COMPILED = (
@@ -173,6 +174,27 @@ FILES = {
         _ORCA2G1_P3 / "ppsrc/nemo/restart.f90"),
     "ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/sbcmod.f90": (
         _ORCA2G1_P3 / "ppsrc/nemo/sbcmod.f90"),
+    # --- GRIDLADDER round 22 (G1b; the reference binary's build) ---
+    "ORCA2G1_OMIP_L1_R4REF/BLD/ppsrc/nemo/dynadv.f90": (
+        _ORCA2G1_R4REF / "ppsrc/nemo/dynadv.f90"),
+    "ORCA2G1_OMIP_L1_R4REF/BLD/ppsrc/nemo/dynkeg.f90": (
+        _ORCA2G1_R4REF / "ppsrc/nemo/dynkeg.f90"),
+    "ORCA2G1_OMIP_L1_R4REF/BLD/ppsrc/nemo/dynspg_ts.f90": (
+        _ORCA2G1_R4REF / "ppsrc/nemo/dynspg_ts.f90"),
+    "ORCA2G1_OMIP_L1_R4REF/BLD/ppsrc/nemo/dynvor.f90": (
+        _ORCA2G1_R4REF / "ppsrc/nemo/dynvor.f90"),
+    "ORCA2G1_OMIP_L1_R4REF/BLD/ppsrc/nemo/dynzad.f90": (
+        _ORCA2G1_R4REF / "ppsrc/nemo/dynzad.f90"),
+    "ORCA2G1_OMIP_L1_R4REF/BLD/ppsrc/nemo/dynzdf.f90": (
+        _ORCA2G1_R4REF / "ppsrc/nemo/dynzdf.f90"),
+    "ORCA2G1_OMIP_L1_R4REF/BLD/ppsrc/nemo/in_out_manager.f90": (
+        _ORCA2G1_R4REF / "ppsrc/nemo/in_out_manager.f90"),
+    "ORCA2G1_OMIP_L1_R4REF/BLD/ppsrc/nemo/stp2d.f90": (
+        _ORCA2G1_R4REF / "ppsrc/nemo/stp2d.f90"),
+    "ORCA2G1_OMIP_L1_R4REF/BLD/ppsrc/nemo/stpctl.f90": (
+        _ORCA2G1_R4REF / "ppsrc/nemo/stpctl.f90"),
+    "ORCA2G1_OMIP_L1_R4REF/BLD/ppsrc/nemo/stprk3_stg.f90": (
+        _ORCA2G1_R4REF / "ppsrc/nemo/stprk3_stg.f90"),
     # --- GRIDLADDER round 19 (G4 bulk sources; P5 record build) ---
     "ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/sbcblk.f90": (
         _ORCA2G1_P3 / "ppsrc/nemo/sbcblk.f90"),
@@ -1682,6 +1704,25 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- GRIDLADDER round 22 (G1b preregistration) ---
+    'ORCA2G1_OMIP_L1_R4REF/BLD/ppsrc/nemo/dynadv.f90:186': 'IF( ln_dynadv_vec  ) THEN   ;   ioptio = ioptio + 1   ;   n_dynadv = np_VEC_c2    ;   r_stb_thres_dyn = pp_stb_thres_dync2   ;  r_stb_cstra_dyn = pp_stb_cstra_dync2   ;  ENDIF',
+    'ORCA2G1_OMIP_L1_R4REF/BLD/ppsrc/nemo/dynvor.f90:864': 'ntot = np_CRV        ! relative + planetary vorticity',
+    'ORCA2G1_OMIP_L1_R4REF/BLD/ppsrc/nemo/dynvor.f90:744-748': [('CASE ( np_CRV )                           !* Coriolis + relative vorticity', 4), '&                          ) * r1_e1e2f(ji,jj)   ) * z1_e3f(ji,jj)', 5],
+    'ORCA2G1_OMIP_L1_R4REF/BLD/ppsrc/nemo/dynkeg.f90:117-125': ['CASE ( nkeg_C2 )                    !==  Standard scheme  ==!', 'zhke(ji,jj) = 0.25_wp * ( zv + zu )', 9],
+    'ORCA2G1_OMIP_L1_R4REF/BLD/ppsrc/nemo/dynadv.f90:137-138': ['CALL dyn_keg     ( kt, nn_dynkeg     , Kmm, puu, pvv, Krhs )', 'CALL dyn_zad     ( kt                , Kmm, puu, pvv, Krhs )                  !* vertical advection', 2],
+    'ORCA2G1_OMIP_L1_R4REF/BLD/ppsrc/nemo/dynzad.f90:105': 'DO jk =  1,  jpk-2  ; DO jj = ntsj-(  0), ntej+(   0 ) ; DO ji = ntsi-( 0), ntei+(   0)   !=  surface to jpk-2 vertical advection',
+    'ORCA2G1_OMIP_L1_R4REF/BLD/ppsrc/nemo/dynzad.f90:132-137': ['jk = jpkm1', '&                                              * zWdzV(ji,jj)', 6],
+    'ORCA2G1_OMIP_L1_R4REF/BLD/ppsrc/nemo/stp2d.f90:144-163': ['CALL dyn_vor( kt,      Kbb, uu, vv, Krhs )', 'CALL dyn_zad( kt, Kbb, uu, vv, Krhs )                 !- vertical advection', 20],
+    'ORCA2G1_OMIP_L1_R4REF/BLD/ppsrc/nemo/stprk3_stg.f90:287-291': ['IF( ln_dynadv_vec ) THEN                 !* Vector invariant Form : no use of ww at stage 1 as 3D RHS computed in stp_2D', 'CALL wzv( kstp, Kbb, Kmm, Kaa, uu(:,:,:,Kmm), vv(:,:,:,Kmm), ww, np_velocity )', 5],
+    'ORCA2G1_OMIP_L1_R4REF/BLD/ppsrc/nemo/stprk3_stg.f90:331-332': ['IF( ln_dynadv_vec ) THEN                        ! VIF: only velocities used for momentum advection', 'CALL dyn_adv( kstp, Kmm, Kmm, uu, vv, Krhs)', 2],
+    'ORCA2G1_OMIP_L1_R4REF/BLD/ppsrc/nemo/stprk3_stg.f90:366-370': ['IF( ln_dynadv_vec .OR. lk_linssh ) THEN   !* applied on velocity', ('END DO   ;   END DO   ;   END DO', 4), 5],
+    'ORCA2G1_OMIP_L1_R4REF/BLD/ppsrc/nemo/dynzdf.f90:138-141': ['IF( ln_dynadv_vec .OR. lk_linssh ) THEN   ! applied on velocity', 'pvv(ji,jj,jk,Kaa) = ( pvv(ji,jj,jk,Kbb) + rDt * pvv(ji,jj,jk,Krhs) ) * vmask(ji,jj,jk)', 4],
+    'ORCA2G1_OMIP_L1_R4REF/BLD/ppsrc/nemo/dynspg_ts.f90:533-545': ['IF( ln_dynadv_vec .OR. lk_linssh ) THEN      !* Vector form', '&   ) * ssvmask(ji,jj)', 13],
+    'ORCA2G1_OMIP_L1_R4REF/BLD/ppsrc/nemo/dynspg_ts.f90:627-629': ['IF( ln_dynadv_vec .OR. lk_linssh ) THEN    ! Sum velocities', ('pvv_b  (:,:,Kaa) = pvv_b  (:,:,Kaa) + za1 * va_e  (:,:)', 1), 3],
+    'ORCA2G1_OMIP_L1_R4REF/BLD/ppsrc/nemo/dynspg_ts.f90:674': 'IF( (.NOT.(ln_dynadv_vec .OR. lk_linssh)) .AND. ll_bt_av ) THEN                  ! at this stage, pssh(:,:,:,Krhs) has been corrected: compute new depths at velocity points',
+    'ORCA2G1_OMIP_L1_R4REF/BLD/ppsrc/nemo/dynspg_ts.f90:533': 'IF( ln_dynadv_vec .OR. lk_linssh ) THEN      !* Vector form',
+    'ORCA2G1_OMIP_L1_R4REF/BLD/ppsrc/nemo/in_out_manager.f90:51': 'INTEGER, DIMENSION(10) :: nn_stocklist  !: restart dump times',
+    'ORCA2G1_OMIP_L1_R4REF/BLD/ppsrc/nemo/stpctl.f90:243-246': ['IF(  zmax(1) >   20._wp .OR.                  &         ! too large sea surface height ( > 20 m )', '& zmax(4) <= zminsal .OR.                  &         ! negative or zero sea surface salinity', 4],
     # --- GRIDLADDER round 1 (G1 survey) BEGIN ---
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynspg_ts.f90:1056-1080': [
         ('zcmax = MAXVAL( zcu(Nis0:Nie0,Njs0:Nje0) )', 1),
@@ -1778,13 +1819,13 @@ CITATION_MAP = {
     'vertical.py:883': ('class NemoEENBarotropicOperands(NamedTuple):', 1),
     'vertical.py:673': ('def nemo_qco_resolved_mesh_operands(', 1),
     'ocean_model_latlon_cgrid.py:4416': ('_nemo_filter_alpha = config.barotropic.nemo_barotropic_filter_alpha', 1),
-    'nemo_testcase_recipe.py:3662': ('def build_orca2g1_flat_card(deck_root: str | Path, case: str = "ORCA2G1-flat") -> NEMOTestcaseCard:', 1),
+    'nemo_testcase_recipe.py:3663': ('def build_orca2g1_flat_card(deck_root: str | Path, case: str = "ORCA2G1-flat") -> NEMOTestcaseCard:', 1),
     'nemo_testcase_recipe.py:3562': ('def read_orca2g1_deck(deck_root: str | Path) -> ORCA2G1Deck:', 1),
-    'nemo_testcase_recipe.py:3611': ('def orca2g1_initial_ssh(glamt_deg, gphit_deg, surface_tmask) -> np.ndarray:', 1),
-    'nemo_testcase_recipe.py:3599': ('def _orca2g1_auto_substeps(dom: dict[str, np.ndarray], deck: ORCA2G1Deck) -> int:', 1),
-    'nemo_testcase_recipe.py:3875': ('def validate_orca2g1_flat_card(card: NEMOTestcaseCard, deck_root: str | Path) -> None:', 1),
+    'nemo_testcase_recipe.py:3612': ('def orca2g1_initial_ssh(glamt_deg, gphit_deg, surface_tmask) -> np.ndarray:', 1),
+    'nemo_testcase_recipe.py:3600': ('def _orca2g1_auto_substeps(dom: dict[str, np.ndarray], deck: ORCA2G1Deck) -> int:', 1),
+    'nemo_testcase_recipe.py:3888': ('def validate_orca2g1_flat_card(card: NEMOTestcaseCard, deck_root: str | Path) -> None:', 1),
     'vertical.py:1084': ('nemo_e3w_source="mesh_reference", allow_single_level: bool = False,', 1),
-    'nemo_testcase_recipe.py:3725': ('allow_single_level=_ORCA2G_JPK[case] == 2,   # jpk = 2: one wet level', 1),
+    'nemo_testcase_recipe.py:3726': ('allow_single_level=_ORCA2G_JPK[case] == 2,   # jpk = 2: one wet level', 1),
     # --- GRIDLADDER round 1 (G1 survey) END ---
     # --- GRIDLADDER round 2 (G1 ladders, pivot-row vor_een) ---
     'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/domzgr.f90:575': ('mbkt(:,:) = MAX( k_bot(:,:) , 1 )', 1),
