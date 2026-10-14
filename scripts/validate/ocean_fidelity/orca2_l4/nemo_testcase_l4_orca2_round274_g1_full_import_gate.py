@@ -162,8 +162,8 @@ def main() -> int:
             result["format"] = "nemo-testcase-l4-orca2-round274-g1-decision96-v1"
             result["status"] = "PASS_R274_G1_FULL_IMPORT_DECISION96"
         require(args.plant == "none", f"{args.plant} plant stayed green")
-    except (GateError, prior.GateError, OSError, KeyError, TypeError,
-            ValueError, StopIteration) as error:
+    except (GateError, prior.GateError, prior.decision96.GateError,
+            OSError, KeyError, TypeError, ValueError, StopIteration) as error:
         marker = "PLANT-FIRED" if args.plant != "none" else "REFUSE"
         print(f"STATUS {marker}: {error}")
         return 2
