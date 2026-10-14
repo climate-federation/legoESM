@@ -125,7 +125,7 @@ namelist parsers in packages/.
   advection-OFF arms; the RK3 identity "orca2_vector_een_c2" with the OMT-0
   five-OFF selections.
 - New: `nemo_testcase_recipe.py:3650` (builder), `:3562` deck reader, `:3599`
-  bump, `:3857` validator. A separate builder rather than a parameterised
+  bump, `:3863` validator. A separate builder rather than a parameterised
   ORCA2 card: the ORCA2 builder requires five input files G1 has no use for
   (T/S, viscosity, wave mixing) and builds ice and TKE state; the shared part
   is the geometry helpers, which are called, not copied.
