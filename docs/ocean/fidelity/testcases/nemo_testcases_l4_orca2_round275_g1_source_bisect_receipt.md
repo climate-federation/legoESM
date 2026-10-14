@@ -105,14 +105,36 @@ Evidence JSON SHA256:
 
 ## Gate disposition
 
-- The focused selector/arm tests pass (5/5).
-- GYRE/DINO/tank trajectory gates are off-claim after the OMT Decision-96
-  veto: no ORCA2 selector landed.  The imported G2 implementation defaults
-  false on every existing card and is covered by the card-selected private
-  arm; production card behavior is unchanged at the final tree.
-- Independent review, citation gates, the focused suite, and the single
-  `tests/ocean/fidelity -n 12` battery are recorded in the round evidence
-  directory after this receipt is committed.
+- The final focused recipe/selector suite passes **30/30**.  The three G1
+  config-layout tests that used brittle negative tuple offsets were updated
+  to assert named-field order after the G2 selector was inserted; their
+  isolated rerun passes 3/3.
+- The imported G2 implementation remains false on every production card.
+  GYRE's tip ladder is byte-identical to the round-274 baseline: 70/70 rows
+  unchanged, zero ULP worsening, first-over-bar step 3 unchanged, and
+  residual archive SHA256
+  `3b3d865cf5c82d38e15b24356492572a85546e51e35f70c2e7c89e5b9cb9df5`.
+  The required 30-day member is byte-identical at all 30 daily snapshots;
+  day 30 remains
+  `3c0602babb535aac55512f3b82561d0f562b1ec51d542552efd8499a119b443b`.
+  Only the manifest differs, as it stamps the new producer commit/root.
+- The required `tests/ocean/fidelity -n 12` battery was run once.  It
+  collected 3,582 tests, reached 99%, lost two G1 workers, and then stalled
+  without a terminal summary; it was terminated and not rerun.  Both crashed
+  node IDs pass serially (1/1 each).  Three selector-layout failures caused by
+  this round pass after the named-field repair.  Eight isolated reds reproduce
+  and are pre-existing at base `b7bf36941`: the registered GYRE round-129
+  harness stamp and SI3 `MY_SRC` provenance reds; the worktree-stamp and
+  allow-dirty-scope ratchets; OMT-1's stale "only vector module" assertion;
+  round 228's stale hard-coded citation; and two stale GYRE round-33 mutation
+  anchors.  The relevant test files and recipe are byte-identical to base (or,
+  for the citation, base already maps `693-747` while its receipt says
+  `688-742`).
+- Default and round-receipt citation gates pass with no unmapped citations;
+  the shifted compiled `dynzdf` plant fires.  Independent review is
+  **independent review unavailable in-sandbox**: `codex exec --sandbox
+  read-only` failed before review because its app-server client could not
+  initialize on the read-only filesystem.
 
 ## OPEN
 
