@@ -42,10 +42,17 @@ def adequacy_metrics(candidate: dict[str, np.ndarray],
     paired = np.isfinite(jet_candidate) & np.isfinite(jet_sensitivity)
     if not np.any(paired) or ke_sensitivity <= 0.0 or eke_sensitivity <= 0.0:
         raise ValueError("reference adequacy denominator is unavailable")
+    wavenumber = np.asarray(sensitivity["spectrum_wavenumber_m-1"])
+    if not np.array_equal(np.asarray(candidate["spectrum_wavenumber_m-1"]),
+                          wavenumber):
+        raise ValueError("reference spectra use different wavenumber bins")
+    # Drop only a zero-wavenumber (mean) bin.  The pre-registered sine-transform
+    # spectrum has none: its first bin is the gravest basin mode.
+    resolved = wavenumber > 0.0
     spectrum_candidate = np.asarray(
-        candidate["mean_kinetic_energy_spectrum_m3_s2"])[1:]
+        candidate["mean_kinetic_energy_spectrum_m3_s2"])[resolved]
     spectrum_sensitivity = np.asarray(
-        sensitivity["mean_kinetic_energy_spectrum_m3_s2"])[1:]
+        sensitivity["mean_kinetic_energy_spectrum_m3_s2"])[resolved]
     spectrum_denominator = np.sum(np.abs(spectrum_sensitivity), dtype=np.float64)
     if spectrum_denominator <= 0.0:
         raise ValueError("reference spectrum denominator is zero")
@@ -171,6 +178,10 @@ def compare_references(candidate_root: Path, sensitivity_root: Path,
 
     if years != 1:
         raise ValueError("the registered sensitivity acquisition is exactly one year")
+    card = build_swg_card(SWG_DG50_NAMELIST)
+    # The dg50 coordinates, sine-transform spectrum and jet live only on the
+    # explicitly selected online path; the registered default reads the
+    # 6.25 km coordinate table and would under-report a jet shift eightfold.
     candidate_years = []
     sensitivity_year = None
     for year in range(1, 4):
@@ -179,24 +190,26 @@ def compare_references(candidate_root: Path, sensitivity_root: Path,
             candidate_root, DAYS_PER_YEAR, start_day=start_day,
             name=f"6.25 km truth year {year}")
         candidate_years.append(diagnose(
-            provider, days=DAYS_PER_YEAR,
-            card=build_swg_card(SWG_DG50_NAMELIST),
-            namelist=SWG_DG50_NAMELIST))
+            provider, days=DAYS_PER_YEAR, card=card,
+            namelist=SWG_DG50_NAMELIST, diagnostics="online"))
         if year == 1:
+            sensitivity = filtered_npz_provider(
+                sensitivity_root, DAYS_PER_YEAR, start_day=1,
+                name="3.125 km sensitivity year 1")
+            if sensitivity.sampling != provider.sampling:
+                raise ValueError(
+                    f"sampling mismatch: candidate {provider.sampling}, "
+                    f"sensitivity {sensitivity.sampling}")
             sensitivity_year = diagnose(
-                filtered_npz_provider(
-                    sensitivity_root, DAYS_PER_YEAR, start_day=1,
-                    name="3.125 km sensitivity year 1"),
-                days=DAYS_PER_YEAR, card=build_swg_card(SWG_DG50_NAMELIST),
-                namelist=SWG_DG50_NAMELIST)
+                sensitivity, days=DAYS_PER_YEAR, card=card,
+                namelist=SWG_DG50_NAMELIST, diagnostics="online")
     uncertainty = _year_to_year_uncertainty(
         candidate_years, SWG_DG50_NAMELIST.rn_domsiz_m)
     annual = adequacy_metrics(
         candidate_years[0], sensitivity_year,
         basin_width_m=SWG_DG50_NAMELIST.rn_domsiz_m,
         uncertainty=uncertainty)
-    wet = np.asarray(build_swg_card(SWG_DG50_NAMELIST).recipe.land_mask,
-                     dtype=bool)
+    wet = np.asarray(card.recipe.land_mask, dtype=bool)
     early = early_path_metrics(
         _load_early_fields(candidate_root),
         _load_early_fields(sensitivity_root), wet)

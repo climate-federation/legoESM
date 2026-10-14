@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Measure raw-versus-conservative dg50 initialization shock at 6/24/48 h."""
+"""Admit dg50 starts against same-operator truth, fast energy relative to truth.
+
+The tool reports; it does not select the training objective (owner decision).
+"""
 from __future__ import annotations
 
 import argparse
@@ -8,13 +11,20 @@ import json
 from pathlib import Path
 
 import numpy as np
-from scipy.fft import dctn, dstn, idctn
+from scipy.fft import dstn
 
 HOURS_PER_DAY = 24
 SECONDS_PER_HOUR = 3_600.0
 DEFAULT_START_DAYS = tuple(range(731, 1092, 40))
 NO_JUMP_FACTOR = 2.0
-FAST_ENERGY_TRANSIENT_FACTOR = 2.0
+# A start passes only if its no-closure forecast carries at most this many
+# times the divergent (fast) KE of the same-operator coarse-grained truth:
+# in the worst single hour of hours 1-6 and in the hours-25-48 mean.
+FAST_ENERGY_TRUTH_FACTOR = 2.0
+# Sea-level rebalancing preserves volume by construction; more than this
+# fraction of the basin volume means the instrument, not the start, failed.
+REBALANCE_VOLUME_FRACTION = 1.0e-12
+WALL_RING_OPTIONS = ("weighted", "excluded")
 
 
 def sha256(path: Path) -> str:
@@ -25,62 +35,13 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _wet_rectangle(mask: np.ndarray) -> tuple[int, int, int, int]:
-    wet = np.asarray(mask, dtype=bool)
-    jj, ii = np.where(wet)
-    if wet.ndim != 2 or jj.size == 0:
-        raise ValueError("projection mask must be a nonempty 2-D rectangle")
-    bounds = int(jj.min()), int(jj.max()), int(ii.min()), int(ii.max())
-    expected = np.zeros_like(wet)
-    expected[bounds[0]:bounds[1] + 1, bounds[2]:bounds[3] + 1] = True
-    if not np.array_equal(wet, expected):
-        raise ValueError("projection mask is not one rectangle")
-    return bounds
-
-
-def divergent_velocity_projection(
-        u: np.ndarray, v: np.ndarray, mask: np.ndarray, spacing_m: float,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Return the closed-wall discrete gradient carrying input divergence."""
-    u = np.asarray(u, dtype=np.float64)
-    v = np.asarray(v, dtype=np.float64)
-    wet = np.asarray(mask, dtype=bool)
-    if u.shape != wet.shape or v.shape != wet.shape:
-        raise ValueError("native U/V and T mask shapes differ")
-    if not np.isfinite(spacing_m) or spacing_m <= 0.0:
-        raise ValueError("projection spacing must be positive finite")
-    j0, j1, i0, i1 = _wet_rectangle(wet)
-    divergence = (
-        u - np.roll(u, 1, axis=1)
-        + v - np.roll(v, 1, axis=0)
-    ) / spacing_m
-    rhs = divergence[j0:j1 + 1, i0:i1 + 1]
-    rhs = rhs - np.mean(rhs, dtype=np.float64)
-    ny, nx = rhs.shape
-    ky = np.arange(ny, dtype=np.float64)
-    kx = np.arange(nx, dtype=np.float64)
-    eigenvalue = (
-        2.0 * (np.cos(np.pi * ky / ny) - 1.0)[:, None]
-        + 2.0 * (np.cos(np.pi * kx / nx) - 1.0)[None, :]
-    ) / spacing_m ** 2
-    rhs_hat = dctn(rhs, type=2, norm="ortho")
-    phi_hat = np.zeros_like(rhs_hat)
-    phi_hat[1:, :] = rhs_hat[1:, :] / eigenvalue[1:, :]
-    phi_hat[0, 1:] = rhs_hat[0, 1:] / eigenvalue[0, 1:]
-    phi = idctn(phi_hat, type=2, norm="ortho")
-
-    u_div = np.zeros_like(u)
-    v_div = np.zeros_like(v)
-    u_div[j0:j1 + 1, i0:i1] = np.diff(phi, axis=1) / spacing_m
-    v_div[j0:j1, i0:i1 + 1] = np.diff(phi, axis=0) / spacing_m
-    return u_div, v_div
-
-
 def fast_divergent_energy(
         u: np.ndarray, v: np.ndarray, mask: np.ndarray, spacing_m: float,
 ) -> float:
     """Basin-mean KE of the closed-wall divergent velocity component."""
-    u_div, v_div = divergent_velocity_projection(u, v, mask, spacing_m)
+    from legoesm.training.swg_online import closed_wall_divergent_part
+
+    _, u_div, v_div = closed_wall_divergent_part(u, v, mask, spacing_m)
     wet = np.asarray(mask, dtype=bool)
     u_center = 0.5 * (u_div + np.roll(u_div, 1, axis=1))
     v_center = 0.5 * (v_div + np.roll(v_div, 1, axis=0))
@@ -122,35 +83,70 @@ def initialization_ratios(
     return result
 
 
-def _state_admission(record: dict, label: str) -> dict:
-    """Apply the pre-registered per-start gate to one initialized state."""
-    error = np.asarray(
-        record[f"{label}_relative_vorticity_error_rms_s-1"],
-        dtype=np.float64)
-    fast = np.asarray(
-        record[f"{label}_fast_divergent_ke_m2_s-2"], dtype=np.float64)
-    ssh = np.asarray(record[f"{label}_ssh_tendency_rms_m_s"], dtype=np.float64)
-    if error.shape != (48,) or fast.shape != (48,) or ssh.shape != (48,) \
-            or not all(np.all(np.isfinite(x)) for x in (error, fast, ssh)):
-        raise ValueError(f"{label} admission requires 48 finite hourly values")
+def state_admission(*, error, fast, truth_fast, ssh_tendency,
+                    rebalance: dict | None = None,
+                    volume_bound_m3: float | None = None) -> dict:
+    """The registered per-start rule, judged against same-operator truth.
+
+    A start is admitted only if (i) no jump: the hour-1 vorticity error is at
+    most twice the hour-24 error over 24; (ii) its no-closure forecast's fast
+    (closed-wall divergent) KE over the truth's is at most 2 in the worst
+    hour of hours 1-6 AND for the hours-25-48 means; (iii) fail closed: the
+    truth's fast KE is positive at every hour, and a rebalanced start
+    converged with its volume unchanged to ``volume_bound_m3``.
+    """
+    series = {}
+    for name, value in (("error", error), ("fast", fast),
+                        ("truth_fast", truth_fast),
+                        ("ssh_tendency", ssh_tendency)):
+        array = np.asarray(value, dtype=np.float64)
+        if array.shape != (48,) or not np.all(np.isfinite(array)) \
+                or np.any(array < 0.0):
+            raise ValueError(
+                f"{name} admission requires 48 finite non-negative hourly values")
+        series[name] = array
+    error, fast = series["error"], series["fast"]
+    truth_fast, ssh = series["truth_fast"], series["ssh_tendency"]
+    failed = []
+    truth_positive = bool(np.all(truth_fast > 0.0))
+    if not truth_positive:
+        failed.append("truth fast energy is not positive at every hour")
+    early = (float(np.max(fast[:6] / truth_fast[:6]))
+             if truth_positive else float("inf"))
+    late = (float(np.mean(fast[24:48]) / np.mean(truth_fast[24:48]))
+            if truth_positive else float("inf"))
+    if not early <= FAST_ENERGY_TRUTH_FACTOR:
+        failed.append("hours 1-6 fast energy exceeds twice the truth's")
+    if not late <= FAST_ENERGY_TRUTH_FACTOR:
+        failed.append("hours 25-48 mean fast energy exceeds twice the truth's")
     jump_limit = NO_JUMP_FACTOR * error[23] / HOURS_PER_DAY
-    late_fast = float(np.mean(fast[24:48], dtype=np.float64))
-    fast_limit = FAST_ENERGY_TRANSIENT_FACTOR * late_fast
     no_jump = bool(error[0] <= jump_limit)
-    fast_bounded = bool(np.max(fast[:6]) <= fast_limit)
+    if not no_jump:
+        failed.append("vorticity error jumps in hour 1")
+    if rebalance is not None:
+        if "failed" in rebalance:
+            failed.append(f"rebalancing failed: {rebalance['failed']}")
+        elif volume_bound_m3 is None \
+                or not abs(rebalance["volume_change_m3"]) <= volume_bound_m3:
+            failed.append("rebalancing changed the basin volume")
     return {
         "no_jump": no_jump,
         "zeta_error_hour1_s-1": float(error[0]),
         "zeta_error_hour24_s-1": float(error[23]),
         "zeta_error_hour1_limit_s-1": float(jump_limit),
-        "fast_energy_bounded": fast_bounded,
+        "fast_energy_worst_hour1_6_over_truth": early,
+        "fast_energy_mean25_48_over_truth": late,
+        "fast_energy_limit_over_truth": FAST_ENERGY_TRUTH_FACTOR,
         "fast_energy_max_hours1_6_m2_s-2": float(np.max(fast[:6])),
-        "fast_energy_mean_hours25_48_m2_s-2": late_fast,
-        "fast_energy_limit_m2_s-2": fast_limit,
+        "fast_energy_mean_hours25_48_m2_s-2": float(np.mean(fast[24:48])),
+        "truth_fast_energy_max_hours1_6_m2_s-2": float(np.max(truth_fast[:6])),
+        "truth_fast_energy_mean_hours25_48_m2_s-2": float(
+            np.mean(truth_fast[24:48])),
         "ssh_tendency_rms_m_s": {
             str(hour): float(ssh[hour - 1]) for hour in (1, 6, 24, 48)
         },
-        "admitted": bool(no_jump and fast_bounded),
+        "failed": failed,
+        "admitted": not failed,
     }
 
 
@@ -194,28 +190,42 @@ def apply_registered_admission(report: dict, hourly_root: Path) -> dict:
             "mean_hours25_48": float(np.mean(truth_fast[24:48])),
         }
         record["admission"] = {
-            label: _state_admission(record, label)
+            label: state_admission(
+                error=record[f"{label}_relative_vorticity_error_rms_s-1"],
+                fast=record[f"{label}_fast_divergent_ke_m2_s-2"],
+                truth_fast=truth_fast,
+                ssh_tendency=record[f"{label}_ssh_tendency_rms_m_s"])
             for label in ("conservative", "raw")
         }
     conservative = [
         record["admission"]["conservative"]["admitted"] for record in records
     ]
     raw = [record["admission"]["raw"]["admitted"] for record in records]
-    report["admission_rule"] = {
-        "pre_registered_manifest": (
-            "manifests/nemo_testcases_l1_swg_online_round4_preregister.json"),
-        "no_jump": "error_h1 <= 2 * error_h24 / 24",
-        "fast_energy": "max_h1_6 <= 2 * mean_h25_48",
-        "per_start": True,
-        "all_ten_required": True,
-    }
+    report["admission_rule"] = _admission_rule()
+    # Legacy diagnostic of STORED starts; training starts are rebalanced and
+    # are admitted only by --dual-operator.
     report["admission_summary"] = {
         "conservative_pass_count": int(sum(conservative)),
         "raw_pass_count": int(sum(raw)),
-        "conservative_admitted_for_training": bool(all(conservative)),
-        "raw_admitted_for_training": bool(all(raw)),
+        "conservative_stored_start_admitted": bool(all(conservative)),
+        "raw_stored_start_admitted": bool(all(raw)),
     }
     return report
+
+
+def _admission_rule() -> dict:
+    return {
+        "no_jump": "error_h1 <= 2 * error_h24 / 24",
+        "fast_energy": (
+            "max_h1_6(fast/truth_fast) <= 2 and "
+            "mean_h25_48(fast)/mean_h25_48(truth_fast) <= 2, "
+            "truth = same-operator coarse-grained truth"),
+        "fail_closed": (
+            "non-finite input, non-positive truth fast energy, failed "
+            "rebalancing, or a rebalancing volume change above "
+            f"{REBALANCE_VOLUME_FRACTION:g} of the basin volume rejects"),
+        "per_start": True,
+    }
 
 
 def _load_coarse_state(state, forcing, path: Path):
@@ -229,6 +239,7 @@ def _load_coarse_state(state, forcing, path: Path):
 def _coarse_state_from_fields(state, forcing, fields):
     """Build a dg50 state from one explicit native T/U/V mapping."""
     import jax.numpy as jnp
+    from legoesm.training.swg_online import coarse_state_from_native
 
     values = [np.asarray(fields[kind], dtype=np.float64)
               for kind in ("T", "U", "V")]
@@ -237,13 +248,7 @@ def _coarse_state_from_fields(state, forcing, fields):
         raise ValueError(f"coarse state shape differs from {expected}")
     if not all(np.all(np.isfinite(field)) for field in values):
         raise ValueError("coarse state is non-finite")
-    u = np.zeros(state.u.data.shape, dtype=np.float64)
-    v = np.zeros(state.v.data.shape, dtype=np.float64)
-    u[:, 1:, 0], v[1:, :, 0] = values[1], values[2]
-    return state._replace(
-        eta=state.eta.replace(data=jnp.asarray(values[0])),
-        u=state.u.replace(data=jnp.asarray(u)),
-        v=state.v.replace(data=jnp.asarray(v)),
+    return coarse_state_from_native(state, *values)._replace(
         tau_x_prev=jnp.asarray(forcing.tau_i_native, dtype=jnp.float64),
         tau_y_prev=jnp.asarray(forcing.tau_j_native, dtype=jnp.float64),
     )
@@ -270,47 +275,31 @@ def _build_hourly_stepper(model, dt_s: float, forcing, steps_per_hour: int):
 
 def _load_hourly_target(root: Path, *, operator: str,
                         ) -> tuple[dict[str, np.ndarray], dict | None, dict]:
-    manifest_path = root / "manifest.json"
-    manifest = json.loads(manifest_path.read_text())
-    schema = manifest.get("schema")
-    if operator not in ("symmetric", "template"):
-        raise ValueError("hourly target operator must be symmetric or template")
-    if schema not in {"legoesm-swg-double-gyre-hourly-target-v1",
-                      "legoesm-swg-double-gyre-hourly-target-v2"} \
-            or manifest.get("status") != "complete" \
-            or manifest.get("completed_days", 0) < 2:
-        raise ValueError(f"incomplete hourly target segment: {root}")
-    if schema.endswith("v1"):
-        if operator != "symmetric":
-            raise ValueError("v1 hourly targets contain only the box operator")
-        prefix = ""
-    else:
-        prefix = "box_" if operator == "symmetric" else "filtered_"
-    stacked = {kind: [] for kind in ("T", "U", "V")}
-    keys = {"T": f"{prefix}ssh_hourly_m", "U": f"{prefix}u_hourly_m_s",
-            "V": f"{prefix}v_hourly_m_s"}
-    initial = None
-    for day in (1, 2):
-        path = root / f"day{day:04d}.npz"
-        if sha256(path) != manifest.get("daily_sha256", {}).get(path.name):
-            raise ValueError(f"hourly target digest differs: {path}")
-        with np.load(path, allow_pickle=False) as saved:
-            if any(name in saved.files for name in ("ssh_m", "u_m_s", "v_m_s")):
-                raise ValueError("hourly target leaks native fine fields")
-            for kind, key in keys.items():
-                stacked[kind].append(np.asarray(saved[key], dtype=np.float64))
-            if day == 1 and schema.endswith("v2"):
-                initial = {
-                    "T": np.asarray(saved[f"{prefix}ssh_initial_m"]),
-                    "U": np.asarray(saved[f"{prefix}u_initial_m_s"]),
-                    "V": np.asarray(saved[f"{prefix}v_initial_m_s"]),
-                }
-    return ({kind: np.concatenate(values, axis=0)
-             for kind, values in stacked.items()}, initial, {
+    """First 48 hourly targets (and a v2 stream's t0) via the lane loader.
+
+    ``load_content_pinned_hourly_segment`` checks every day file's digest,
+    its 24 records, the absolute-hour lineage, finiteness and, for schema v2,
+    the truth provenance.  The manifest is pinned to its present digest,
+    which the report records.
+    """
+    from legoesm.training.swg_online import load_content_pinned_hourly_segment
+
+    manifest_sha256 = sha256(root / "manifest.json")
+    record = load_content_pinned_hourly_segment(
+        root, expected_manifest_sha256=manifest_sha256, operator=operator)
+    first = 1 if record.includes_initial_state else 0
+    fields = dict(zip(("T", "U", "V"),
+                      (record.ssh_m, record.u_m_s, record.v_m_s), strict=True))
+    if fields["T"].shape[0] - first < 48:
+        raise ValueError(f"hourly target segment holds under 48 hours: {root}")
+    target = {kind: value[first:first + 48] for kind, value in fields.items()}
+    initial = ({kind: value[0] for kind, value in fields.items()}
+               if first else None)
+    return target, initial, {
         "root": str(root.resolve()),
-        "manifest_sha256": sha256(manifest_path),
+        "manifest_sha256": manifest_sha256,
         "operator": operator,
-    })
+    }
 
 
 def run_experiment(raw_root: Path, conservative_root: Path,
@@ -460,9 +449,8 @@ def _top_octave_variance_share(zeta: np.ndarray, wet: np.ndarray) -> float:
     return float(np.sum(power[top]) / np.sum(power))
 
 
-def run_dual_operator_experiment(hourly_root: Path,
-                                 start_days: tuple[int, ...]) -> dict:
-    """Admit box/filtered starts against targets made by the same operator."""
+def build_dual_context() -> dict:
+    """Build the CPU fp64 dg50 model, stepper and rebalancer once."""
     import jax
     import jax.numpy as jnp
     from legoesm.core.precision import PrecisionPolicy, set_policy
@@ -477,12 +465,12 @@ def run_dual_operator_experiment(hourly_root: Path,
     from legoesm.ocean.fidelity.swg_coarse_graining import cgrid_geometry
     from legoesm.ocean.state import OceanSurfaceForcing
     from legoesm.training.swg_online import (
+        START_REBALANCE_MAX_ITERATIONS,
+        START_REBALANCE_TOLERANCE,
         build_closure_geometry,
-        diagnose_native_trajectory,
+        build_start_rebalancer,
     )
 
-    if len(start_days) != 10 or len(set(start_days)) != 10:
-        raise ValueError("dual-operator admission requires ten unique starts")
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
     if not bool(jax.config.jax_enable_x64) or jax.default_backend() != "cpu":
         raise RuntimeError("dual-operator admission requires CPU fp64")
@@ -493,13 +481,159 @@ def run_dual_operator_experiment(hourly_root: Path,
     forcing = OceanSurfaceForcing(
         tau_i_native=jnp.asarray(tau_u, dtype=jnp.float64),
         tau_j_native=jnp.asarray(tau_v, dtype=jnp.float64))
-    run_48h = _build_hourly_stepper(
-        model, card.dt_s, forcing, int(SECONDS_PER_HOUR / card.dt_s))
     geometry = cgrid_geometry(SWG_DG50_NAMELIST)
-    closure_geometry = build_closure_geometry(card)
     wet = np.asarray(geometry["mask"]["T"], dtype=bool)
-    jj, ii = np.indices(wet.shape)
-    checkerboard = 0.1 * np.where((ii + jj) % 2, -1.0, 1.0)
+    volume = float(np.sum(
+        geometry["reference_thickness"]["T"][wet] * geometry["area"]["T"][wet]))
+    return {
+        "card": card,
+        "forcing": forcing,
+        "run_48h": _build_hourly_stepper(
+            model, card.dt_s, forcing, int(SECONDS_PER_HOUR / card.dt_s)),
+        "rebalance": build_start_rebalancer(
+            card, tolerance=START_REBALANCE_TOLERANCE,
+            max_iterations=START_REBALANCE_MAX_ITERATIONS),
+        "rebalance_rule": {
+            "tolerance": START_REBALANCE_TOLERANCE,
+            "max_iterations": START_REBALANCE_MAX_ITERATIONS,
+        },
+        "closure_geometry": build_closure_geometry(card),
+        "wet": wet,
+        "spacing_m": float(geometry["spacing_m"]),
+        "volume_bound_m3": REBALANCE_VOLUME_FRACTION * volume,
+    }
+
+
+def evaluate_operator_start(context: dict, truth: dict, initial: dict, *,
+                            objective: str) -> dict:
+    """Admit one stored and one rebalanced start against same-operator truth.
+
+    ``truth`` and ``initial`` are native T/U/V mappings (48 hourly states and
+    the stored t0).  Training starts from the rebalanced state, so its
+    admission is the one that counts; the stored start is a diagnostic.
+    """
+    import jax
+    import jax.numpy as jnp
+    from legoesm.training.swg_online import (
+        deterministic_trajectory_loss,
+        diagnose_native_trajectory,
+    )
+
+    card = context["card"]
+    geometry = context["closure_geometry"]
+    interior = np.asarray(geometry.vertex_interior, dtype=bool)
+    wet = context["wet"]
+    spacing = context["spacing_m"]
+    target_native = tuple(np.asarray(truth[kind][:48], dtype=np.float64)
+                          for kind in ("T", "U", "V"))
+    if any(value.shape[0] != 48 for value in target_native):
+        raise ValueError("dual-operator admission requires 48 truth hours")
+    diagnosed_target = np.asarray(diagnose_native_trajectory(
+        tuple(jnp.asarray(value) for value in target_native), geometry,
+        objective=objective).relative_vorticity_s1)
+    truth_fast = np.asarray([fast_divergent_energy(
+        target_native[1][hour], target_native[2][hour], wet, spacing)
+        for hour in range(48)])
+    truth_rms = np.sqrt(np.mean(
+        diagnosed_target[:, interior] ** 2, axis=1, dtype=np.float64))
+    stored = {kind: np.asarray(initial[kind], dtype=np.float64)
+              for kind in ("T", "U", "V")}
+
+    def forecast_admission(start, rebalance):
+        state = _coarse_state_from_fields(
+            card.recipe.initial_state, context["forcing"], start)
+        _, samples = context["run_48h"](state)
+        jax.block_until_ready(samples[0])
+        predicted = tuple(np.asarray(value, dtype=np.float64)
+                          for value in samples)
+        if not all(np.all(np.isfinite(value)) for value in predicted):
+            raise ValueError("no-closure forecast is non-finite")
+        zeta = np.asarray(diagnose_native_trajectory(
+            tuple(jnp.asarray(value) for value in predicted), geometry,
+            objective=objective).relative_vorticity_s1)
+        error = np.sqrt(np.mean(
+            (zeta - diagnosed_target)[:, interior] ** 2, axis=1,
+            dtype=np.float64))
+        fast = np.asarray([fast_divergent_energy(
+            predicted[1][hour], predicted[2][hour], wet, spacing)
+            for hour in range(48)])
+        prior = np.concatenate((start["T"][None], predicted[0][:-1]))
+        ssh_tendency = np.sqrt(np.mean(
+            ((predicted[0] - prior) / SECONDS_PER_HOUR)[:, wet] ** 2,
+            axis=1, dtype=np.float64))
+        return state_admission(
+            error=error, fast=fast, truth_fast=truth_fast,
+            ssh_tendency=ssh_tendency, rebalance=rebalance,
+            volume_bound_m3=context["volume_bound_m3"])
+
+    try:
+        balanced_ssh, rebalance = context["rebalance"](
+            stored["T"], stored["U"], stored["V"])
+        change = (balanced_ssh - stored["T"])[wet]
+        rebalance |= {
+            "ssh_change_rms_m": float(np.sqrt(np.mean(change**2))),
+            "ssh_change_max_abs_m": float(np.max(np.abs(change))),
+        }
+        admission = forecast_admission(
+            stored | {"T": balanced_ssh}, rebalance)
+    except ValueError as error:
+        rebalance = {"failed": str(error)}
+        admission = {"admitted": False, "failed": [str(error)]}
+    checkerboard = 0.1 * np.where(np.indices(wet.shape).sum(axis=0) % 2,
+                                  -1.0, 1.0)
+    planted = (target_native[0], target_native[1] + checkerboard,
+               target_native[2])
+    return {
+        "objective": objective,
+        "truth_fast_divergent_ke_m2_s-2": {
+            "max_hours1_6": float(np.max(truth_fast[:6])),
+            "mean_hours25_48": float(np.mean(truth_fast[24:48])),
+        },
+        "truth_relative_vorticity_rms_s-1": {
+            str(hour): float(truth_rms[hour - 1]) for hour in (1, 6, 24, 48)
+        },
+        "rebalance": rebalance,
+        "admission": admission,
+        "stored_start_admission": forecast_admission(stored, None),
+        "target_top_octave_vorticity_variance_share": (
+            _top_octave_variance_share(diagnosed_target, wet)),
+        "checkerboard_0.1m_s_eq7_loss": {
+            ring: float(deterministic_trajectory_loss(
+                tuple(jnp.asarray(value)[None] for value in planted),
+                tuple(jnp.asarray(value)[None] for value in target_native),
+                geometry, objective=objective,
+                beta_m1_s1=card.resolved_namelist.rn_beta_m_s,
+                basin_length_m=card.resolved_namelist.rn_domsiz_m,
+                wall_ring=ring))
+            for ring in WALL_RING_OPTIONS
+        },
+    }
+
+
+def summarize_dual(records: list[dict]) -> dict:
+    """Count admissions per operator; never select the objective."""
+    counts = {
+        key: {label: sum(bool(item["operators"][label][key]["admitted"])
+                         for item in records) for label in ("box", "filtered")}
+        for key in ("admission", "stored_start_admission")
+    }
+    return {
+        "rebalanced_pass_count": counts["admission"],
+        "stored_start_pass_count": counts["stored_start_admission"],
+        "starts": len(records),
+        "all_rebalanced_starts_admitted": all(
+            item["operators"][label]["admission"]["admitted"]
+            for item in records for label in ("box", "filtered")),
+        "objective_selection": "owner decision; this tool selects nothing",
+    }
+
+
+def run_dual_operator_experiment(hourly_root: Path,
+                                 start_days: tuple[int, ...]) -> dict:
+    """Admit rebalanced box/filtered starts against same-operator truth."""
+    if len(start_days) != 10 or len(set(start_days)) != 10:
+        raise ValueError("dual-operator admission requires ten unique starts")
+    context = build_dual_context()
     records = []
     for start_day in start_days:
         record = {"start_day": start_day, "operators": {}}
@@ -510,80 +644,19 @@ def run_dual_operator_experiment(hourly_root: Path,
                 operator=objective)
             if initial is None:
                 raise ValueError("dual-operator segment lacks its stored t0 state")
-            state = _coarse_state_from_fields(
-                card.recipe.initial_state, forcing, initial)
-            _, samples = run_48h(state)
-            jax.block_until_ready(samples[0])
-            predicted_native = tuple(np.asarray(value) for value in samples)
-            target_native = tuple(target[kind][:48]
-                                  for kind in ("T", "U", "V"))
-            predicted = diagnose_native_trajectory(
-                tuple(jnp.asarray(value) for value in predicted_native),
-                closure_geometry, objective=objective)
-            diagnosed_target = diagnose_native_trajectory(
-                tuple(jnp.asarray(value) for value in target_native),
-                closure_geometry, objective=objective)
-            error = np.sqrt(np.mean(
-                (np.asarray(predicted.relative_vorticity_s1)[:, wet]
-                 - np.asarray(diagnosed_target.relative_vorticity_s1)[:, wet]) ** 2,
-                axis=1, dtype=np.float64))
-            fast = np.asarray([fast_divergent_energy(
-                predicted_native[1][hour], predicted_native[2][hour], wet,
-                float(geometry["spacing_m"])) for hour in range(48)])
-            prior = np.concatenate((initial["T"][None], predicted_native[0][:-1]))
-            ssh_tendency = np.sqrt(np.mean(
-                ((predicted_native[0] - prior) / SECONDS_PER_HOUR)[:, wet] ** 2,
-                axis=1, dtype=np.float64))
-            planted_native = (
-                target_native[0], target_native[1] + checkerboard,
-                target_native[2])
-            planted = diagnose_native_trajectory(
-                tuple(jnp.asarray(value) for value in planted_native),
-                closure_geometry, objective=objective)
-            planted_error = (
-                np.asarray(planted.relative_vorticity_s1)
-                - np.asarray(diagnosed_target.relative_vorticity_s1))
-            checkerboard_loss = float(np.mean(np.sum(
-                planted_error**2 * np.asarray(closure_geometry.area_t_m2)
-                * wet, axis=(-2, -1))))
-            admission_input = {
-                f"{label}_relative_vorticity_error_rms_s-1": error,
-                f"{label}_fast_divergent_ke_m2_s-2": fast,
-                f"{label}_ssh_tendency_rms_m_s": ssh_tendency,
-            }
-            record["operators"][label] = {
-                "objective": objective,
-                "target": provenance,
-                "admission": _state_admission(admission_input, label),
-                "target_top_octave_vorticity_variance_share": (
-                    _top_octave_variance_share(
-                        np.asarray(diagnosed_target.relative_vorticity_s1), wet)),
-                "checkerboard_0.1m_s_objective_unscaled": checkerboard_loss,
-            }
+            record["operators"][label] = evaluate_operator_start(
+                context, target, initial, objective=objective) | {
+                    "target": provenance}
         records.append(record)
-    counts = {label: sum(item["operators"][label]["admission"]["admitted"]
-                         for item in records) for label in ("box", "filtered")}
-    kernel_x = np.arange(-4, 5, dtype=np.float64)
-    kernel = np.exp(-0.5 * kernel_x**2)
-    kernel /= np.sum(kernel)
-    nyquist_transfer = float(np.sum(kernel * (-1.0) ** kernel_x))
-    filtered_admitted = counts["filtered"] >= 8
     return {
-        "schema": "swg-online-balanced-start-dual-v2",
+        "schema": "swg-online-balanced-start-dual-v3",
         "start_days": list(start_days),
         "records": records,
-        "admission_rule": {
-            "no_jump": "error_h1 <= 2 * error_h24 / 24",
-            "fast_energy": "max_h1_6 <= 2 * mean_h25_48",
-            "filtered_decision": "template iff at least 8 of 10 starts pass",
+        "admission_rule": _admission_rule() | {
+            "start": "stored t0 with sea level rebalanced",
+            "rebalance": context["rebalance_rule"],
         },
-        "summary": {
-            "box_pass_count": counts["box"],
-            "filtered_pass_count": counts["filtered"],
-            "selected_objective": "template" if filtered_admitted else "symmetric",
-            "analytic_symmetric_to_template_checkerboard_loss_ratio": (
-                nyquist_transfer ** 4),
-        },
+        "summary": summarize_dual(records),
     }
 
 
@@ -625,19 +698,24 @@ def main(argv=None) -> int:
         return 2
     if args.dual_operator:
         summary = report["summary"]
-        passed = summary["filtered_pass_count"] >= 8
+        passed = summary["all_rebalanced_starts_admitted"]
+        rebalanced = summary["rebalanced_pass_count"]
+        stored = summary["stored_start_pass_count"]
         print(
-            f"{'PASS' if passed else 'FAIL'} "
-            f"filtered={summary['filtered_pass_count']}/10 "
-            f"box={summary['box_pass_count']}/10 "
-            f"selected={summary['selected_objective']}")
+            f"{'PASS' if passed else 'FAIL'} rebalanced "
+            f"box={rebalanced['box']}/{summary['starts']} "
+            f"filtered={rebalanced['filtered']}/{summary['starts']} "
+            f"(stored box={stored['box']} filtered={stored['filtered']}); "
+            f"objective={summary['objective_selection']}")
         return 0 if passed else 1
     summary = report["admission_summary"]
     print(
-        f"{'PASS' if summary['conservative_admitted_for_training'] else 'FAIL'} "
-        f"conservative={summary['conservative_pass_count']}/10 "
-        f"raw={summary['raw_pass_count']}/10")
-    return 0 if summary["conservative_admitted_for_training"] else 1
+        f"{'PASS' if summary['conservative_stored_start_admitted'] else 'FAIL'} "
+        f"legacy stored starts: conservative="
+        f"{summary['conservative_pass_count']}/10 "
+        f"raw={summary['raw_pass_count']}/10 (training starts are rebalanced; "
+        "admit them with --dual-operator)")
+    return 0 if summary["conservative_stored_start_admitted"] else 1
 
 
 if __name__ == "__main__":
