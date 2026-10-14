@@ -292,6 +292,8 @@ FILES = {
         _ORCA2_R230FOLDTRP / "ppsrc/nemo/dynhpg.f90"),
     "ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynvor.f90": (
         _ORCA2_R230FOLDTRP / "ppsrc/nemo/dynvor.f90"),
+    "ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynzdf.f90": (
+        _ORCA2_R230FOLDTRP / "ppsrc/nemo/dynzdf.f90"),
     "ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/traadv_cen.f90": (
         _ORCA2_R230FOLDTRP / "ppsrc/nemo/traadv_cen.f90"),
     "ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/domzgr.f90": (
@@ -1634,6 +1636,15 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 round 275: G2 live momentum-thickness divisors -------
+    'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynzdf.f90:191-205': [
+        ('DO jk =    2,  jpkm1,  1', 1),
+        ('zwd(ji,1) = 1._wp - zzws', 1),
+        15],
+    'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynzdf.f90:360-375': [
+        ('DO jk =     2,  jpkm1,  1', 2),
+        ('zwd(ji,1) = 1._wp - zzws', 2),
+        16],
     # --- ORCA2 round 268: transferred G1 EEN statement and remaining row ---
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynvor.f90:762-770': [
         ('CASE ( np_CRV )                           !* Coriolis + relative vorticity', 4),
