@@ -120,6 +120,13 @@ on this branch until that branch is merged here.
   `<evidence>/domaincfg`: `maketools -m conda-scalarmath -n DOMAINcfg`, then
   `mpirun -np 1 ./make_domain_cfg.exe` with coordinates.nc a symlink to the
   shipped domain file. The tool has never been built on this machine.
+- MEASURED after the freeze (acquisition attempt 1, 2026-10-12; D118 in
+  force): the tool built and wrote domain_cfg.nc, SHA-256
+  73801c6ff5c78183b85b5e654c0a8c152355007d85cea1ef3ae8e6b151deabdd, from the
+  committed namelist (SHA-256 2be2fccc...6c5e). The tool exits without
+  finalising MPI after closing the file, so run.sh admits the domain by a
+  check of the file, not by mpirun's status. P1 holds on shape, mask and wet
+  e3t_0. Full provenance block: the round-1 receipt, "Acquisition attempt 1".
 
 ### (d) legoESM on this branch: what G1's card reuses
 Searched `grep -n "^def \|^class "` in the recipe and `grep -rn` for

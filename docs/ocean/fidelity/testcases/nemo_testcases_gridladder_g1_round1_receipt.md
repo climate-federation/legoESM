@@ -1,7 +1,8 @@
 # Grid ladder rung G1 — round 1 receipt (gridladder_r1)
 
-Status: **STOPPED_FOR_RECORD** (DECISION 118 applied; measurement setup only;
-nothing measured, no NEMO run). Earlier status STOPPED_FOR_DECISION is closed. Preregistration:
+Status: **STOPPED_FOR_RECORD** (DECISION 118 applied and recorded; the domain
+file is built and admitted, see "Acquisition attempt 1"; no NEMO build or run
+yet). Earlier status STOPPED_FOR_DECISION is closed. Preregistration:
 docs/ocean/fidelity/PREREG_nemo_testcases_gridladder_g1_round1.md (committed
 first). Branch fidelity/nemo-testcases-orca2-gridladder from b65a32ff0.
 
@@ -87,7 +88,8 @@ reference value ORCA2's deck leaves in place; NEMO overwrites it.)
 | the one-level opt-in is non-vacuous | reverting it turns 2 tests red | shown |
 | record checker: clean record admitted; five plants exit nonzero | pytest | pass |
 | geometry identity against NEMO's mesh | pytest | SKIPPED: no record yet |
-| DOMAINcfg builds and runs; NEMO builds and runs | NO GATE this round | unexecuted |
+| DOMAINcfg builds and writes a complete domain file | check_domain_cfg.py on the operator's file; seven plants exit nonzero | pass (attempt 1) |
+| NEMO builds and runs | NO GATE this round | unexecuted |
 
 The stand-in domain is NOT DOMAINcfg output and supports no geometry claim.
 run.sh has only been preflighted; its build and run branches are unexecuted.
@@ -163,10 +165,97 @@ re-run this pass.
 1. CLOSED by D118 (coastline kept; 10800 s).
 2. Operator: merge the TSUNAMI branch (PR #1920) into this branch, so the
    one-level step, the y-wrap scoping and the TSUNAMI card are present.
-3. Operator: `run.sh --run`; record the DOMAINcfg namelist and the SHA-256 of
-   domain_cfg.nc (run.sh prints it) here.
+3. Operator: `run.sh --run` again. It admits the existing domain file and
+   resumes at the NEMO builds. The DOMAINcfg namelist and the SHA-256 are
+   recorded in "Acquisition attempt 1" below.
 4. Round 2: admit the record, run geometry identity (P3), then the kt = 1..10
    and 100-step ladders with the section-7 region counts.
 5. Named, not done: the bump is far from every boundary, so stage frames
    (kt 1..10) never see the fold at finite amplitude; a second record with
    stage frames around kt 20-25 would (kt 40-50 at the SUPERSEDED step).
+
+## Acquisition attempt 1 (operator, 2026-10-12) and the admitted domain file
+
+The operator ran `run.sh --run` at commit 9930d56ab. DOMAINcfg built, ran, and
+wrote a complete domain file; the script then stopped before the NEMO builds.
+
+Cause: the tool closes the file and then exits without finalising MPI, so
+mpirun returned nonzero and the script treated that as a failed domain build.
+The tool's own log ends, at line 350 of `domaincfg/ocean.output`,
+`iom_close ~~~ close file: domain_cfg.nc ok`, followed by its end marker;
+`domaincfg/run.user.log` carries the launcher's "exited without calling
+finalize" message. The check was wrong, not the run.
+
+Fix (commits a37153970, 1e308d991, 498f56be1):
+- The script records mpirun's status and no longer judges it. The domain is
+  admitted by a check of the file itself. **The tool's non-finalised exit is
+  tolerated only when that check passes.**
+- `--run` resumes at the NEMO builds when the evidence directory holds only
+  the domain step. It does not rebuild or re-run DOMAINcfg. It refuses unless
+  the namelist, reference namelist, executable and coordinates beside the file
+  are the committed and built ones, and the namelist and bathymetry tool are
+  unchanged since the commit that ran DOMAINcfg.
+- Every other refusal is unchanged. `--admit-existing` additionally runs the
+  same domain check (review finding).
+
+What the check judges: dimensions x = 180, y = 148, nav_lev = 2; all 39
+variables the tool wrote besides the four coordinate ones present and finite; bottom_level exactly {0, 1}; e3t_0
+shaped (nav_lev, y, x) and 100 m on every wet cell; jperio = 4, jpkglo = 2,
+ln_zco = 1, ln_zps = 0. Seven planted defects must each exit nonzero first.
+
+### DOMAINcfg provenance
+
+| item | value |
+|---|---|
+| domain_cfg.nc SHA-256 | 73801c6ff5c78183b85b5e654c0a8c152355007d85cea1ef3ae8e6b151deabdd |
+| size, wet cells | 7 674 996 bytes; 16 433 wet of 26 640 |
+| namelist | the committed domaincfg_namelist_cfg, SHA-256 2be2fccc1f555f28508f542dad930f751885a43e71ff610c3aefbae1830c6e5e (byte-identical copy beside the file) |
+| reference namelist | the tool's own, SHA-256 ba6a1a3d5175b1dd765086c6129903cba8d45a70a9825b26c5770f336219dbf8 |
+| executable | make_domain_cfg.exe built by maketools, SHA-256 bbb188be3c1e85ce0deae0ad7705efabda2a76dd02b820223d8232c8d63a1193 |
+| coordinates | ORCA2's shipped domain file, SHA-256 7125f7a54e8693ff8f1327b878d2258d258878bc7302ac123ac671f2339d2839 |
+| level bathymetry | bathy_level.nc, SHA-256 8d1bf360a51c703b2c2724ea9efdcfe1937f66b560a2402a3c9ed5a8a62b78df, 16 433 wet |
+| commit that ran DOMAINcfg | 9930d56ab21c239806e38ed6c5693873149dfa74 |
+
+Reported by the check, not judged by it (domain_cfg_check_r1.json, SHA-256
+92865a70...678b): the wet mask equals ORCA2's shipped mask; all sixteen
+horizontal mesh fields are bit-identical to ORCA2's shipped file; the Coriolis
+fields differ from the shipped ones by at most 2.7e-20 (the tool recomputes
+them, as the preregistration said it would), so the card must take Coriolis
+from this file, never from ORCA2's. The file's global-size variables read 182
+and 150; NEMO does not read them, it sizes the domain from e3t_0
+(180 x 148 x 2).
+
+Prediction P1 (shape, mask, 100 m thickness): HOLDS on these items. The full
+geometry identity is still round 2's job.
+
+Read-only preflight of the resume on the operator's evidence
+(preflight_resume_r1.log, SHA-256 b95125dc...f0ef): the check passes, the
+script prints the hash above and "resume at the NEMO builds", PREFLIGHT_OK.
+The resume path itself has NOT been executed.
+
+### Review of this change
+
+Single review (codex): **findings**, three CONFIRMED and acted on, one
+PLAUSIBLE and not acted on. Verbatim:
+- "CONFIRMED — `--admit-existing` calls `admit` without `domain_cfg_admit`".
+  Fixed.
+- "CONFIRMED — variable dimension names/order are never validated. `e3t_0`
+  shaped `(time_counter,y,x)` with length 2 can pass". Fixed, with a plant.
+- "CONFIRMED — resume checks adjacent inputs but never verifies the existing
+  `domaincfg.sha256`". Partly fixed: checksums are re-verified when they
+  exist. Attempt 1 stopped before writing them, so for this file the hash
+  recorded above is the pin.
+- "PLAUSIBLE — the shell contract test only searches source text". Not acted
+  on; the preflight above exercises the real path up to the builds.
+No second (GLM) reviewer was available: a single review, not a dual one. The
+fixes after the review were not re-reviewed.
+
+Focused tests: 78 passed, 1 skipped (card and acquisition tools; the skip is
+the geometry identity, which needs the record).
+
+Choices made in this pass. ASKED: everything in the operator's instruction.
+UNASKED, offered for revert: (1) the check also requires jpkglo = 2,
+ln_zco = 1, ln_zps = 0 and the e3t_0 shape; (2) `--admit-existing` now runs
+the domain check; (3) a resume refuses if the domain inputs differ from the
+committed ones. Deliberately NOT made a refusal: mask and mesh identity with
+ORCA2's file (reported only).
