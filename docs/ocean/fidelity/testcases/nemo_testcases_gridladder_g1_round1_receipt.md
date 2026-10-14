@@ -138,6 +138,26 @@ refusal; rows for the vorticity thickness option and lateral mixing were added
 at the same time. The acquisition script's failure paths were NOT reviewed by
 anyone but the author. Treat run.sh as unreviewed.
 
+### Review of the DECISION 118 change
+
+Single review (codex): **clean.** Scope: the two D118 commits only. Verbatim:
+"`_orca2g1_auto_substeps` matches NEMO: masked `ht_0` sum, exact gravity
+9.80665, pointwise metric factor, and `CEILING` produce `nn_e=13` ... the
+maximum is not near an integer boundary."; "No stale 5400-second, `nn_e=65`,
+or `ln_bt_auto=F` assumptions remain in `run.sh`, `check_records.py`, or the
+patches."; "RK3 scheduling remains consistent"; "VERDICT: clean". Log:
+/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/round1/codex_review_r1_d118.log.
+A first attempt timed out waiting on standard input and reviewed nothing; the
+second ran with input closed. The round-1 review above stays INCOMPLETE and
+run.sh's failure paths stay unreviewed. No second (GLM) reviewer was available
+in this session: this is a single review, not a dual one.
+
+Focused tests after D118: 86 passed, 1 skipped (card, acquisition tools,
+citation gate; the skip is the geometry identity, which needs the record).
+Citation gate on the preregistration: 42 citations, 0 unmapped, 0 failures
+(citation_prereg_d118.json beside the log). Neighbouring suites were NOT
+re-run this pass.
+
 ## OPEN for round 2
 
 1. CLOSED by D118 (coastline kept; 10800 s).
