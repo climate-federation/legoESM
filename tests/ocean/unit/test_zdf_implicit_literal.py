@@ -332,3 +332,46 @@ def test_the_ordered_sweep_trace_is_the_live_recurrence():
                                   np.asarray(diagonal[..., :1]))
     np.testing.assert_array_equal(np.asarray(forward[..., :1]),
                                   np.asarray(rhs[..., :1]))
+
+
+def test_the_tracer_diagonal_rounds_its_thickness_product_separately():
+    """The rounded arm transcribes trazdf.f90:233 and the control can fail."""
+    from legoesm.ocean.physics.vertical_mixing.implicit_solver import (
+        nemo_tracer_tridiagonal,
+    )
+
+    rng = np.random.default_rng(3)
+    shape = (64, 64, 6)
+    e3t_0 = rng.uniform(5.0, 400.0, shape)
+    stretch = 1.0 + rng.uniform(-2e-5, 2e-5, shape[:2])[..., None]
+    K = np.full(shape[:2] + (shape[2] - 1,), 1.2e-5)
+    e3w = rng.uniform(5.0, 400.0, K.shape)
+    wet = np.ones(shape, bool)
+
+    def diagonal(rounded):
+        @jax.jit
+        def evaluate(e3t, ratio):
+            return nemo_tracer_tridiagonal(
+                jnp.asarray(K), e3t * ratio, jnp.asarray(e3w), 10800.0,
+                jnp.asarray(wet), rounded_thickness=rounded)
+
+        return [
+            np.asarray(value)
+            for value in evaluate(jnp.asarray(e3t_0), jnp.asarray(stretch))
+        ]
+
+    lower, diagonal_rounded, upper = diagonal(True)
+    written = (e3t_0 * stretch) - (lower + upper)
+    np.testing.assert_array_equal(diagonal_rounded, written)
+    fused = diagonal(False)[1]
+    assert np.count_nonzero(fused != written) > 100
+    assert np.max(np.abs(fused - written) / written) < 4e-16
+
+
+def test_rounded_thickness_is_refused_without_the_literal_solver():
+    x = jnp.ones((1, 1, 3))
+    with pytest.raises(ValueError, match="rounded_thickness requires"):
+        implicit_vertical_diffusion_ocean_tracer_pair_dispatch(
+            x, x, x, x, jnp.ones((1, 1, 2)), x,
+            jnp.ones((1, 1, 2)), 1.0, jnp.ones((1, 1, 3), bool),
+            rounded_thickness=True)

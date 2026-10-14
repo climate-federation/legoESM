@@ -480,6 +480,7 @@ def implicit_vertical_diffusion_nemo_tracer_pair(
     implicit_w: jax.Array | None = None,
     *,
     return_matrix_trace: bool = False,
+    rounded_thickness: bool = False,
 ) -> tuple[jax.Array, jax.Array]:
     """Literal NEMO ``trazdf`` content matrix and paired ordered solves."""
     if content_rhs_1.shape != content_rhs_2.shape:
@@ -503,7 +504,7 @@ def implicit_vertical_diffusion_nemo_tracer_pair(
     wet_f = jnp.asarray(wet, dtype=content_rhs_1.dtype)
     lower, diagonal, upper = nemo_tracer_tridiagonal(
         K, e3t_after, e3w_now, dt, wet, implicit_w=implicit_w,
-        dtype=content_rhs_1.dtype)
+        dtype=content_rhs_1.dtype, rounded_thickness=rounded_thickness)
     if return_matrix_trace:
         out_1_raw, (eliminated_1, forward_1) = _nemo_ordered_solve(
             lower, diagonal, upper, content_rhs_1, return_trace=True)
@@ -530,6 +531,7 @@ def nemo_tracer_tridiagonal(
     *,
     implicit_w: jax.Array | None = None,
     dtype=None,
+    rounded_thickness: bool = False,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
     """NEMO ``trazdf``'s three tracer diagonals, exactly as the solve uses them.
 
@@ -577,7 +579,14 @@ def nemo_tracer_tridiagonal(
     lower = jnp.concatenate([zero, coeff], axis=-1)
     upper = jnp.concatenate([coeff, zero], axis=-1)
     coefficient_sum = jax.lax.optimization_barrier(lower + upper)
-    diagonal = jax.lax.optimization_barrier(e3t_after - coefficient_sum)
+    # trazdf.f90:233 rounds the live thickness product before subtracting.
+    # Without this barrier the backend may fuse the caller's product with
+    # the subtraction, changing the last bit of the diagonal.
+    thickness = (
+        _round_the_multiply(e3t_after)
+        if rounded_thickness else e3t_after
+    )
+    diagonal = jax.lax.optimization_barrier(thickness - coefficient_sum)
     if implicit_w is not None:
         if implicit_w.shape != e3t_after.shape[:-1] + (
                 e3t_after.shape[-1] + 1,):
@@ -657,10 +666,13 @@ def implicit_vertical_diffusion_ocean_tracer_pair_dispatch(
     evaluation: str = "shared_thomas",
     implicit_w: jax.Array | None = None,
     return_matrix_trace: bool = False,
+    rounded_thickness: bool = False,
 ) -> tuple[jax.Array, jax.Array]:
     """Static production dispatch for the paired tracer ZDF application."""
     if evaluation == "shared_thomas" and implicit_w is not None:
         raise ValueError("implicit_w requires evaluation='nemo_literal'")
+    if evaluation == "shared_thomas" and rounded_thickness:
+        raise ValueError("rounded_thickness requires evaluation='nemo_literal'")
     if evaluation == "shared_thomas":
         if return_matrix_trace:
             raise ValueError(
@@ -671,7 +683,8 @@ def implicit_vertical_diffusion_ocean_tracer_pair_dispatch(
         return implicit_vertical_diffusion_nemo_tracer_pair(
             content_rhs_1, content_rhs_2, K, dz_after, e3w_now, dt, wet,
             implicit_w=implicit_w,
-            return_matrix_trace=return_matrix_trace)
+            return_matrix_trace=return_matrix_trace,
+            rounded_thickness=rounded_thickness)
     raise ValueError(
         "unknown ZDF tracer solver evaluation "
         f"{evaluation!r}; expected 'shared_thomas' or 'nemo_literal'")

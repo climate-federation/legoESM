@@ -3180,6 +3180,14 @@ class LatLonCGridOceanConfig(NamedTuple):
     # :216-217), read by the stage velocity weights and the stage's face
     # thickness.  False takes the ratio of the interpolated sea level.
     rk3_stage_r3uv_nemo_literal: bool = False
+    # NEMO's tracer ZDF diagonal rounds its live T thickness before
+    # subtracting the two off-diagonal coefficients (trazdf.f90:233).
+    # False leaves the compiler free to fuse the product and subtraction.
+    zdf_tracer_nemo_rounded_thickness: bool = False
+    # NEMO's barotropic forcing depth mean is a Fortran SUM over levels in
+    # ascending k (stp2d.f90:178-179).  False leaves the reduction tree to
+    # the backend.
+    barotropic_rhs_ascending_level_sum: bool = False
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":

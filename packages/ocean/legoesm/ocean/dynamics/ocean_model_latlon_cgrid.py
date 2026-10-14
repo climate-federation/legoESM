@@ -85,6 +85,7 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     min_cell_to_vface,
 )
 from legoesm.ocean.dynamics.barotropic_common import (
+    ascending_level_sum,
     nemo_literal_after_level_reconcile,
     nemo_reference_depth_reciprocal,
     rk3_stage_barotropic_correction,
@@ -6399,12 +6400,16 @@ class LatLonCGridOceanModel:
             _wet_v0 = (_ops0.hv_0 > 0.0).astype(du_dt.dtype)
             _r1_hu_0 = _wet_u0 / (_ops0.hu_0 + _one - _wet_u0)
             _r1_hv_0 = _wet_v0 / (_ops0.hv_0 + _one - _wet_v0)
-            _slow_u_native = jnp.sum(
-                _ops0.e3u_0 * du_dt[:, 1:, :] * _ops0.umask3,
-                axis=-1) * _r1_hu_0
-            _slow_v_native = jnp.sum(
-                _ops0.e3v_0 * dv_dt[1:, :, :] * _ops0.vmask3,
-                axis=-1) * _r1_hv_0
+            # stp2d.f90:178-179: Fortran SUM, ascending k, when selected.
+            _level_sum = (
+                ascending_level_sum
+                if _cfg_b.barotropic_rhs_ascending_level_sum
+                else lambda x: jnp.sum(x, axis=-1)
+            )
+            _slow_u_native = _level_sum(
+                _ops0.e3u_0 * du_dt[:, 1:, :] * _ops0.umask3) * _r1_hu_0
+            _slow_v_native = _level_sum(
+                _ops0.e3v_0 * dv_dt[1:, :, :] * _ops0.vmask3) * _r1_hv_0
             if _atomic_hpg_unit:
                 # NEMO's fold exchange keeps these V faces wet.  The raw
                 # e3v/vmask/hv_0 operands and the folded HPG neighbour are one
@@ -6415,9 +6420,8 @@ class LatLonCGridOceanModel:
                 _raw_r1_hv_0 = (
                     _raw_wet_v0
                     / (_raw_hv0 + _one - _raw_wet_v0))
-                _raw_slow_v = jnp.sum(
-                    _raw_e3v0 * dv_dt[1:, :, :] * _raw_vmask0,
-                    axis=-1) * _raw_r1_hv_0
+                _raw_slow_v = _level_sum(
+                    _raw_e3v0 * dv_dt[1:, :, :] * _raw_vmask0) * _raw_r1_hv_0
                 _slow_v_native = jnp.where(
                     _fold_unit_v, _raw_slow_v, _slow_v_native)
             F_slow_u = (F_slow_u.at[:, 1:].set(_slow_u_native)
@@ -12696,6 +12700,12 @@ class LatLonCGridOceanModel:
             self._nemo_ws_test_hooks.legacy_zdf_midpoint_w_metric)
         _zdf_nemo_faces = bool(getattr(
             _cfg_b, "zdf_momentum_nemo_face_thickness", False))
+        _zdf_tracer_rounded = bool(getattr(
+            _cfg_b, "zdf_tracer_nemo_rounded_thickness", False))
+        if _zdf_tracer_rounded and not _zdf_literal:
+            raise ValueError(
+                "zdf_tracer_nemo_rounded_thickness requires "
+                "zdf_implicit_solver_evaluation='nemo_literal'")
         if _zdf_nemo_faces and (not _zdf_literal or _zdf_legacy_w or _dzw_slot):
             raise ValueError(
                 "zdf_momentum_nemo_face_thickness requires "
@@ -13305,7 +13315,9 @@ class LatLonCGridOceanModel:
                             K_v_cell, _tracer_e3t, _tracer_e3w, dt,
                             _tracer_wet,
                             evaluation="nemo_literal",
-                            implicit_w=nemo_aimp_tracer_w, return_matrix_trace=return_tracer_solve_trace))
+                            implicit_w=nemo_aimp_tracer_w,
+                            return_matrix_trace=return_tracer_solve_trace,
+                            rounded_thickness=_zdf_tracer_rounded))
                     if return_tracer_solve_trace:
                         T_new, S_new, _trace_matrix = _tracer_result
                         if (_trace_heat_K is None
