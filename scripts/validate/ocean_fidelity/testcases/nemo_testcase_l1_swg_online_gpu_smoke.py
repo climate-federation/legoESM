@@ -194,7 +194,6 @@ def _run_worker(args) -> dict:
     )
     from legoesm.ocean.state import OceanSurfaceForcing
     from legoesm.training.swg_online import (
-        BalancedNormalizers,
         SWGNetworkSpec,
         SWGScalarPotentialCNN,
         assert_network_gradients_live,
@@ -294,17 +293,19 @@ def _run_worker(args) -> dict:
             key = jax.random.PRNGKey(311)
             _, target = segment(None, initial, noise, key, jnp.asarray(0.0))
             target = tuple(value[None] for value in target)
-            normalizers = BalancedNormalizers(1.0, 1.0, 1.0)
 
             def loss(net):
                 _, predicted = segment(
                     net, initial, noise, key, jnp.asarray(0.0))
+                # The smoke exercises the GPU path of the loss; the wall-ring
+                # option changes only the static Eq. 7 point weights, which the
+                # unit tests pin for both selections.
                 return deterministic_trajectory_loss(
                     tuple(value[None] for value in predicted), target,
                     geometry, objective=objective,
                     beta_m1_s1=card.resolved_namelist.rn_beta_m_s,
                     basin_length_m=card.resolved_namelist.rn_domsiz_m,
-                    normalizers=normalizers)
+                    wall_ring="weighted")
 
             measured = eqx.filter_jit(eqx.filter_value_and_grad(loss))
             lowered = measured.lower(network)

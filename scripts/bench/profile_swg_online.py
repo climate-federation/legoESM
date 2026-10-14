@@ -19,7 +19,6 @@ from legoesm.ocean.fidelity.nemo_testcase_recipe import (
     build_swg_card,
 )
 from legoesm.training.swg_online import (
-    BalancedNormalizers,
     SWGNetworkSpec,
     SWGScalarPotentialCNN,
     assert_network_gradients_live,
@@ -95,17 +94,18 @@ def run_profile(window_days: int, mode: str, objective_operator: str,
         weight_decay=4.0e-3, optimizer="adamw", schedule="constant",
         clip_gradients=False, adam_epsilon=1.0e-7))
     optimizer.init(eqx.filter(network, eqx.is_inexact_array))
-    normalizers = BalancedNormalizers(1.0, 1.0, 1.0)
 
     def objective(net):
         _, hourly = segment(net, initial, noise, key, jnp.asarray(0.0))
         predicted = tuple(value[None] for value in hourly)
         target = tuple(jnp.zeros_like(value) for value in predicted)
+        # Cost profile only: the wall-ring option changes the static Eq. 7
+        # point weights, not the work done.
         return deterministic_trajectory_loss(
             predicted, target, geometry, objective=objective_operator,
-            normalizers=normalizers,
             beta_m1_s1=card.resolved_namelist.rn_beta_m_s,
-            basin_length_m=card.resolved_namelist.rn_domsiz_m)
+            basin_length_m=card.resolved_namelist.rn_domsiz_m,
+            wall_ring="weighted")
 
     if mode == "forward":
         measured = eqx.filter_jit(objective)
