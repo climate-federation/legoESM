@@ -189,3 +189,32 @@ def test_orca2_and_omt_cards_select_executed_transferred_statements():
                    for name in round274.BAROTROPIC_SELECTORS)
     with pytest.raises(round274.GateError, match="retained selectors"):
         round274.legacy_card(selected, plant="retained-selector")
+
+
+def test_round275_private_arms_select_only_the_registered_fields():
+    from pathlib import Path
+
+    from scripts.validate.ocean_fidelity.orca2_l4 import (
+        nemo_testcase_l4_orca2_round269_g1_decision96_gate as decision96,
+        nemo_testcase_l4_orca2_round275_g1_source_bisect_gate as round275,
+    )
+
+    deck = Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/"
+        "round83/acquisition/orca2_rung0_restart_list_10step_a_np2")
+    if not (deck / "namelist_cfg").is_file():
+        pytest.skip("admitted rung-0 deck is not present")
+    card = decision96._selected_card("rung0", deck)
+    universe = round275.MODEL | round275.BAROTROPIC | round275.COORDINATE
+    for arm, expected in round275.ARMS.items():
+        selected = round275.arm_card(card, arm)
+        cfg = selected.recipe.model_config
+        actual = {name for name in round275.MODEL if getattr(cfg, name)}
+        actual |= {name for name in round275.BAROTROPIC
+                   if getattr(cfg.barotropic, name)}
+        if selected.recipe.z_coord.nemo_r3t_stored_product:
+            actual.add("nemo_r3t_stored_product")
+        assert actual == set(expected)
+        assert actual <= universe
+    with pytest.raises(round275.GateError, match="selected fields differ"):
+        round275.arm_card(card, "vertical_residual", plant="extra-selector")
