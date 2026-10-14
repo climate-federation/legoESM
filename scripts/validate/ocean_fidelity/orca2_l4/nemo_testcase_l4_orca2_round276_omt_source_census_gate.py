@@ -104,7 +104,7 @@ def measure(rung: str, deck_root: Path, twin_a: Path, arm: str,
     import jax
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
 
-    require(rung in ("rung0", "omt1", "omt2", "omt3"),
+    require(rung in ("rung0", "omt1", "omt2", "omt3", "omt4"),
             f"unsupported rung {rung}")
     stamp = worktree_stamp()
     require(stamp["clean"] and stamp["commit"].lower() == expect_commit.lower(),
@@ -246,7 +246,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--list-arms", action="store_true")
     parser.add_argument("--measure", action="store_true")
-    parser.add_argument("--rung", choices=("rung0", "omt1", "omt2", "omt3"))
+    parser.add_argument(
+        "--rung", choices=("rung0", "omt1", "omt2", "omt3", "omt4"))
     parser.add_argument("--deck-root", type=Path)
     parser.add_argument("--twin-a", type=Path)
     parser.add_argument("--arm", choices=tuple(ARMS))
