@@ -2243,6 +2243,13 @@ class LatLonCGridOceanConfig(NamedTuple):
     # (NEMO vor_een ln_dynvor_msk=F: coast shear-vorticity stays LIVE in the
     # triads; select on NEMO-faithful cards). Unknown raises in the operator.
     een_q_boundary: str = "neumann_fill"
+    # NEMO vor_een on a T-pivot north fold: the u trend on the pivot T row
+    # reads vv, e3v and vmask on the fold-image V row above it
+    # (dynvor.f90:767, :779-780), where NEMO holds the lbc_lnk image of the
+    # row below.  True hands the 3-D vorticity trend that image row; False
+    # (default) is the bit-identical legacy path whose compact V mask leaves
+    # the row dry.  Selected explicitly by a card; needs an active fold.
+    een_fold_image_v_row: bool = False
     # F-point (vertex) layer-thickness rule for the AL81/EEN PV flux:
     # "min" (default, bit-identical legacy) — MITgcm hFacZ convention, min
     #   over the 4 surrounding ACTIVE cells (Adcroft-Hill-Marshall 1997 /

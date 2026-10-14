@@ -243,38 +243,22 @@ def test_single_level_column_needs_the_explicit_opt_in():
     assert np.asarray(one.dz_ref).shape == (1,)
 
 
-# NEMO mesh_mask.nc name -> how the card states the same array.
-def _card_geometry(card) -> dict[str, np.ndarray]:
-    raw = card.recipe.z_coord.nemo_een_barotropic
-    out = {name: np.asarray(getattr(raw, name)) for name in (
-        "e1t", "e2t", "e1u", "e2u", "e1v", "e2v", "e1f", "e2f", "ff_f")}
-    for name in ("umask", "vmask", "fmask", "e3u_0", "e3v_0", "e3f_0"):
-        out[name] = np.asarray(getattr(raw, name))[..., 0]
-    out["tmask"] = np.asarray(card.recipe.z_coord.is_active)[..., 0].astype(float)
-    out["e3t_0"] = np.asarray(card.recipe.z_coord.nemo_e3t_0)[..., 0]
-    return out
-
-
 def test_geometry_identity_against_nemo_mesh_mask():
-    netCDF4 = pytest.importorskip("netCDF4")
-    mesh = RECORD / "mesh_mask.nc"
-    if not (mesh.is_file() and (RECORD / "domain_cfg.nc").is_file()
-            and (RECORD / "namelist_cfg").is_file()):
-        pytest.skip(
-            f"the G1 record is not admitted on this machine ({RECORD}); the "
-            "operator runs nemo_testcase_g1_orca2grid/run.sh --run")
-    card = recipe.build_nemo_testcase_card("ORCA2G1-flat", deck_root=RECORD)
-    mine = _card_geometry(card)
-    compared, unequal = 0, {}
-    with netCDF4.Dataset(mesh) as ds:
-        for name, value in mine.items():
-            theirs = np.squeeze(np.asarray(ds.variables[name][:], dtype=np.float64))
-            if theirs.ndim == 3:
-                theirs = theirs[0]
-            assert theirs.shape == value.shape, name
-            compared += 1
-            count = int(np.count_nonzero(theirs != value))
-            if count:
-                unequal[name] = count
-    assert compared == len(mine) == 19
-    assert not unequal, f"arrays not bit-identical to NEMO's mesh: {unequal}"
+    """Every mesh array the card carries equals NEMO's mesh file (36 rows).
+
+    Round 1 listed 17 names and asserted 19; the list and the count now live
+    in the round-2 gate, which this test runs on the admitted record.
+    """
+    pytest.importorskip("netCDF4")
+    if not (RECORD / "mesh_mask.nc").is_file():
+        pytest.skip(f"the G1 record is not admitted on this machine ({RECORD})")
+    import importlib.util
+    path = (Path(__file__).resolve().parents[3] / "scripts/validate/ocean_fidelity/"
+            "testcases/nemo_testcase_g1_orca2grid_ladder.py")
+    spec = importlib.util.spec_from_file_location("g1_ladder_for_card_test", path)
+    gate = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gate)
+    result = gate.geometry(RECORD)
+    assert result["n_rows"] == 36
+    assert result["all_bit_identical"], [
+        r for r in result["rows"] if not r["bit_identical"]]
