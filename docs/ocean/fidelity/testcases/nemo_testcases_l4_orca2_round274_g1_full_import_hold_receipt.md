@@ -124,10 +124,15 @@ failed.
 - Citation gate: PASS, 274 citations, zero failed map entries and zero
   unmapped citations.  All nine self-tests, including shifted and widened
   anchors, fire or pass as intended.
+- Round-receipt citation gate: PASS, 10/10 compiled citations mapped; the
+  planted `dynzdf.f90:145-150` shift exits nonzero with
+  `SYMBOL-NOT-AT-LINE`.
 - G1 card/record support: 82/83 passed on the combined focused run; the one
   paired-patch whitespace control passed in isolation after normalising both
   committed patch artifacts.  The four combined-lane selector-count controls
   pass after requiring exactly the G1 and round-270 ORCA2 sites.
+- Push battery: **128 passed** in `755.86 s`; log SHA256
+  `6b42c554fb1a18a7f6b1c0c2d12d5b190b8ee880110b0bf4b24b7b799968f4dc`.
 - Required `tests/ocean/fidelity -n 12` was launched once.  It reached 99%
   with the known resource-failure pattern and a worker stall; it was not run
   a second time.  The isolated G1 support failures were dispositioned above.
