@@ -3564,7 +3564,7 @@ def read_orca2g1_deck(deck_root: str | Path) -> ORCA2G1Deck:
 
     path = Path(deck_root) / "namelist_cfg"
     values = _orca2g1_namelist_values(path)
-    for name, want in _ORCA2G1_REQUIRED_SWITCHES.items():
+    for name, want in {**_ORCA2G1_REQUIRED_SWITCHES, **_orca2g_sbc_switch_set(values)}.items():
         if name not in values:
             raise ValueError(f"ORCA2G1 deck does not state {name}")
         if values[name] != want or type(values[name]) is not type(want):
@@ -4102,6 +4102,14 @@ _ORCA2G4_SBC_FIELDS: dict[str, object] = {
     "namsbc_rnf.sn_dep_rnf": "'runoffs',0.,'rodepth',.false.,.true.,'yearly','','',''",
 }
 _ORCA2G4_SBC_GROUPS = ("namsbc_blk.", "namtra_qsr.", "namsbc_ssr.", "namsbc_rnf.")
+
+
+def _orca2g_sbc_switch_set(values: dict[str, object]) -> dict[str, object]:
+    """The one complete forcing-switch set a deck may state: G1-G3's (no
+    forcing) or G4's, chosen by ln_blk; a mixed deck is refused by the reader."""
+
+    pick = int(values.get("namsbc.ln_blk") is True)
+    return {name: pair[pick] for name, pair in _ORCA2G_SBC_SWITCHES.items()}
 
 
 def _orca2g_qsr(case: str, dt_s: float):

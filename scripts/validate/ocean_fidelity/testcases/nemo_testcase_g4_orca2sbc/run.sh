@@ -64,6 +64,7 @@ readonly EVIDENCE=${EVIDENCE:-/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gr
 readonly SHIPPED_DOMCFG=/data/abyssal/dbalwada/nemo-testcases-l4/inputs/ORCA2_ICE_v5.0.0/ORCA_R2_zps_domcfg.nc
 readonly SHIPPED_DOMCFG_SHA=7125f7a54e8693ff8f1327b878d2258d258878bc7302ac123ac671f2339d2839
 readonly INPUTS=$(dirname "$SHIPPED_DOMCFG")
+readonly NAMELIST_REF_SHA=b04f2ce4d12aa247ae3b707483d25cf2d38d0b3cf8817d71d33e66918fd81cfd
 readonly G3_DECK_SHA=5b2699e8e20c49bd0b8cce6a8dfcf3286821001a2079a3318a6a0f77fed215a6
 # Every file NEMO opens under this deck besides the domain file, as name:SHA-256.
 readonly PINNED_FILES=(
@@ -120,6 +121,8 @@ for entry in "${PINNED_FILES[@]}"; do
 done
 [[ "$(sha_of "$REF_BIN")" == "$REF_SHA" && "$(sha_of "$RUN_BIN")" == "$RUN_SHA" ]] \
   || { printf 'REFUSE: a G1 binary is not the round-4 one (rebuilt?)\n' >&2; exit 67; }
+[[ "$(sha_of "$NEMO_ROOT/cfgs/SHARED/namelist_ref")" == "$NAMELIST_REF_SHA" ]] \
+  || { printf 'REFUSE: namelist_ref changed (every unstated forcing value resolves there)\n' >&2; exit 67; }
 [[ "$(sha_of "$G3_DECK")" == "$G3_DECK_SHA" ]] \
   || { printf 'REFUSE: the G3 deck is not the certified one\n' >&2; exit 67; }
 
@@ -235,7 +238,8 @@ completed_steps() {
   local t
   t=$(tr -d ' \n' <"$REF/time.step")
   if grep -qx 'RUN_DONE' "$REF/run.user.log"; then
-    [[ "$t" == 100 ]] || { printf 'REFUSE: the reference finished at %s, not 100\n' "$t" >&2; exit 73; }
+    [[ "$t" == 100 ]] && ! grep -q 'E R R O R' "$REF/ocean.output" \
+      || { printf 'REFUSE: the reference finished at %s, not 100, or with an error\n' "$t" >&2; exit 73; }
     printf '100'; return
   fi
   grep -q 'stp_ctl: |ssh| > 20 m  or  |U| > 10 m/s' "$REF/ocean.output" && [[ -f "$REF/output.abort.nc" ]] \
@@ -256,6 +260,8 @@ judge_dir() {          # $1 = dir, $2 = binary sha, $3 = list
   local dir=$1 step entry
   [[ -f "$dir/domain_cfg.nc" && "$(sha_of "$dir/domain_cfg.nc")" == "$SHIPPED_DOMCFG_SHA" ]] \
     || { printf 'REFUSE: %s does not hold the shipped ORCA2 domain file\n' "$dir" >&2; exit 73; }
+  [[ -f "$dir/namelist_ref" && "$(sha_of "$dir/namelist_ref")" == "$NAMELIST_REF_SHA" ]] \
+    || { printf 'REFUSE: %s ran another namelist_ref\n' "$dir" >&2; exit 73; }
   [[ -f "$dir/nemo" && "$(sha_of "$dir/nemo")" == "$2" ]] \
     || { printf 'REFUSE: %s was not run with its pinned binary\n' "$dir" >&2; exit 73; }
   for entry in "${PINNED_FILES[@]}"; do
@@ -353,7 +359,8 @@ PY
   ( cd "$EVIDENCE" && sha256sum g4_round17_admission.json p3_a/mesh_mask.nc \
       p3_a/ORCA2G1_$(printf '%08d' "$steps")_restart.nc p3_b/ORCA2G1_*_restart.nc \
       p3_c/ORCA2G1_*_restart.nc smoke_2step/ORCA2G1_00000002_restart.nc \
-      ref_100step/ORCA2G1_*_restart.nc ref_100step/ocean.output ) >"$EVIDENCE/manifest/outputs.sha256"
+      ref_100step/ORCA2G1_*_restart.nc ref_100step/ocean.output \
+      p3_a/oracle_*.bin p3_b/oracle_*.bin p3_c/oracle_*.bin ) >"$EVIDENCE/manifest/outputs.sha256"
   [[ ! -f "$REF/output.abort.nc" ]] || sha256sum "$REF/output.abort.nc" >>"$EVIDENCE/manifest/outputs.sha256"
   printf 'ACQUISITION_DONE %s\n' "$EVIDENCE"
 }

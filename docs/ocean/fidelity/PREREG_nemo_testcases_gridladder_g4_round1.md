@@ -85,14 +85,16 @@ whatever record length NEMO allows.
    barotropic forcing; qns/qsr/emp to tracers and sea level (trasbc.f90,
    sbcmod.f90); sbc called at kt = 1, 3, 5, … (nn_fsbc = 2) and held
    between.
-4. **Runoff**: surface volume flux into the divergence (nk_rnf = 1) and the
+4. **Runoff**: surface volume flux into the level-1 divergence
+   (ln_rnf_depth = F branch, sbcrnf.f90:279-283) and the
    river-mouth extra diffusivity `avt += 2·rn_avt_rnf·rnfmsk·wmask` for
    jk = 2..nkrnf (zdfphy.f90:353-355, nkrnf from sbcrnf.f90:512-515) — the
    first non-constant vertical diffusivity on this ladder.
 5. **Penetrating shortwave**: RGB with chlorophyll data, analytic profile
    (traqsr.f90:1133 np_RGBc), heating below level 1.
-6. **SSS restoring**: emp damping toward sss_data, bounded at 4 mm/day
-   (sbcssr.f90:150).
+6. **SSS restoring**: emp (and the matching qns) damping toward sss_data,
+   bounded at 4 mm/day, switched off near river mouths by
+   `coefice*(1-2*rnfmsk)` (sbcssr.f90:187-199; data read at :150).
 7. **Freshwater budget nn_fwb = 2**: without a restart the correction is
    rn_fwb0 = 0 and stays 0 in year 1 (sbcfwb.f90:289-293, :302-318); the
    kt = 1 global sum runs and adds exactly zero (sbcfwb.f90:328-329).

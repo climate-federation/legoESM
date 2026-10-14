@@ -247,3 +247,17 @@ def test_g4_card_refuses_a_g3_selection(cards):
             g4._replace(recipe=g4.recipe._replace(model_config=no_light)), root)
     with pytest.raises(ValueError, match="ln_blk"):
         recipe.validate_orca2g1_flat_card(g4._replace(case="ORCA2G3-ts"), root)
+
+
+@pytest.mark.parametrize("deck_dir", [G3_DIR, G4_DIR], ids=["g3", "g4"])
+@pytest.mark.parametrize("name", sorted(recipe._ORCA2G_SBC_SWITCHES))
+def test_reader_refuses_a_mixed_forcing_switch_set(deck_dir, name):
+    key = name.split(".", 1)[1]
+    text = (deck_dir / "namelist_cfg").read_text()
+    lines = [line for line in text.splitlines() if line.split("=")[0].strip() == key]
+    assert len(lines) == 1
+    value = lines[0].split("=", 1)[1].split("!")[0].strip()
+    flipped = {".true.": ".false.", ".false.": ".true.", "0": "2", "2": "0"}[value]
+    planted = text.replace(lines[0], lines[0].replace(value, flipped, 1))
+    with pytest.raises(ValueError, match="namsbc"):
+        recipe.read_orca2g1_deck(_tmp_deck(planted))
