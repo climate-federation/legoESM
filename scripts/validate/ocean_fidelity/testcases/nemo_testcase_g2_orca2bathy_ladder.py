@@ -500,7 +500,9 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
         with netCDF4.Dataset(root / "mesh_mask.nc") as h:
             geom = dict(
                 tmask=levels_last(h.variables["tmask"][0], nk),
-                e3t_0=levels_last(h.variables["e3t_0"][0], nk),
+                # NEMO's e3t_0 is nonzero on its level 31; the card has 30
+                e3t_0=np.ascontiguousarray(np.moveaxis(np.asarray(
+                    h.variables["e3t_0"][0], np.float64)[:nk], 0, -1)),
                 e3w_1d=np.asarray(h.variables["e3w_1d"][0], np.float64),
                 avt0=float(recipe.read_orca2g1_deck(root).rn_avt0_m2_s),
                 r3t_bb=g["e_r3t_bb"], r3t_mm=g["2_r3t_aa"], r3t_aa=g["3_r3t_aa"],
