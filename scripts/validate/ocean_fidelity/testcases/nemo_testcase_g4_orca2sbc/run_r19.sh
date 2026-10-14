@@ -23,7 +23,7 @@
 #   dynspg_ts  frame 'c' after the copies the solver reads
 #              (dynspg_ts.f90:274-276; the sources are DEALLOCATEd at
 #              stp2d.f90:270, so they exist only inside dyn_spg_ts);
-#   sbcblk     frame 'k' after the ocean stress (sbcblk.f90:787-803);
+#   sbcblk     frame 'k' after the ocean stress (sbcblk.f90:788-803);
 #   sbcblk_algo_ncar  frame 'n' at turb_ncar entry and one frame per
 #              iteration ('A'..'E', nn_iter_algo = 5) holding 1/L and the
 #              clamped zeta (:174-178), psi_m and the floored U_N10 (:195-207),

@@ -97,6 +97,7 @@ _ORCA2_R214VECPREV3_COMPILED = (
 _ORCA2_R229FOLDTRP = NEMO / "cfgs/ORCA2_OMIP_L4_R229FOLDTRP/BLD"
 _ORCA2_R230FOLDTRP = NEMO / "cfgs/ORCA2_OMIP_L4_R230FOLDTRP/BLD"
 _ORCA2G1_P3 = NEMO / "cfgs/ORCA2G1_OMIP_L1_P3/BLD"
+_ORCA2G1_P5 = NEMO / "cfgs/ORCA2G1_OMIP_L1_P5/BLD"   # the G4 record build (rounds 17-19)
 _ORCA2_R104EENACC_COMPILED = (
     NEMO / "cfgs/ORCA2_OMIP_L4_R104EENACC/BLD/ppsrc/nemo")
 _ORCA2_R105EENACC_COMPILED = (
@@ -172,6 +173,27 @@ FILES = {
         _ORCA2G1_P3 / "ppsrc/nemo/restart.f90"),
     "ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/sbcmod.f90": (
         _ORCA2G1_P3 / "ppsrc/nemo/sbcmod.f90"),
+    # --- GRIDLADDER round 19 (G4 bulk sources; P5 record build) ---
+    "ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/sbcblk.f90": (
+        _ORCA2G1_P3 / "ppsrc/nemo/sbcblk.f90"),
+    "ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/sbcblk_algo_ncar.f90": (
+        _ORCA2G1_P3 / "ppsrc/nemo/sbcblk_algo_ncar.f90"),
+    "ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/dynspg_ts.f90": (
+        _ORCA2G1_P5 / "ppsrc/nemo/dynspg_ts.f90"),
+    "ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/dynzdf.f90": (
+        _ORCA2G1_P5 / "ppsrc/nemo/dynzdf.f90"),
+    "ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/sbcblk.f90": (
+        _ORCA2G1_P5 / "ppsrc/nemo/sbcblk.f90"),
+    "ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/sbcblk_algo_ncar.f90": (
+        _ORCA2G1_P5 / "ppsrc/nemo/sbcblk_algo_ncar.f90"),
+    "ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/stp2d.f90": (
+        _ORCA2G1_P5 / "ppsrc/nemo/stp2d.f90"),
+    "ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/stprk3.f90": (
+        _ORCA2G1_P5 / "ppsrc/nemo/stprk3.f90"),
+    "ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/traqsr.f90": (
+        _ORCA2G1_P5 / "ppsrc/nemo/traqsr.f90"),
+    "ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/trasbc.f90": (
+        _ORCA2G1_P5 / "ppsrc/nemo/trasbc.f90"),
     "ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/stp2d.f90": (
         _ORCA2G1_P3 / "ppsrc/nemo/stp2d.f90"),
     "ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/domain.f90": (
@@ -2045,6 +2067,35 @@ CITATION_MAP = {
     'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/stpctl.f90:245': (
         '& zmax(3) >   10._wp .OR.', 1),
     # --- GRIDLADDER round 15 END ---
+    # --- GRIDLADDER round 19 (G4 round 3: round-18 citations mapped; forcing acquisition) ---
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/stp2d.f90:122': 'ALLOCATE( sshe_rhs(jpi,jpj) , Ue_rhs(Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0)) , Ve_rhs(Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0)) , CdU_u(jpi,jpj) , CdU_v(jpi,jpj) )',
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:1237-1248': ['IF( ln_isfcav.OR.ln_drgice_imp ) THEN          ! top+bottom friction (ocean cavities)', ('ENDIF', 50), 12],
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:518': 'zv_trd(ji,jj) = zv_trd(ji,jj) + zCdU_v(ji,jj) * vn_e(ji,jj) * hvr_e(ji,jj)',
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:575': 'va_e(ji,jj) =  va_e(ji,jj) / ( 1._wp - rDt_e * zCdU_v(ji,jj) * hvr_e(ji,jj) )',
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:277': 'zCdU_v  (:,:) = CdU_v   (:,:)',
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/sbcblk.f90:706': 'CALL turb_ncar    (     rn_zqt, rn_zu, zsspt, ptair, pssq, pqair, wndm, &',
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/sbcblk.f90:782-784': [('DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  0)', 3), 'rhoa(ji,jj) = rho_air( ztabs(ji,jj), q_zu(ji,jj), zpre(ji,jj) )', 3],
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/sbcblk.f90:788-792': ['CALL BULK_FORMULA( rn_zu, zsspt(:,:), pssq(:,:), theta_zu(:,:), q_zu(:,:), &', '&                      pEvap=pevp(:,:), pfact_evap=rn_efac )', 5],
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/sbcblk.f90:800-803': ['IF( wndm(ji,jj) > 0._wp ) THEN', 'vtau(ji,jj) = zztmp * pwndj(ji,jj)', 4],
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/sbcblk_algo_ncar.f90:177-178': ['zeta_u   = zu*ztmp0', 'zeta_u   = sign( min(abs(zeta_u),10._wp), zeta_u )', 2],
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/sbcblk_algo_ncar.f90:207': 'ztmp0 = MAX( 0.25_wp , UN10_from_CD(zu, Ubzu, Cd, ppsi=ztmp2) ) ! U_n10 (ztmp2 == psi_m_ncar(zeta_u))',
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/sbcblk_algo_ncar.f90:223': 'ztmp1 = 0.5_wp + SIGN(0.5_wp,zeta_u)                                ! update stability',
+    'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/stprk3.f90:142': 'CALL sbc        ( kstp, Nbb, Nbb )                ! Sea Boundary Condition (including sea-ice)',
+    'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/stp2d.f90:198-199': ['Ue_rhs(ji,jj) =  Ue_rhs(ji,jj) + r1_rho0 * utauU(ji,jj) * (r1_hu_0(ji,jj) /(1._wp+r3u(ji,jj,Kbb)))', 'Ve_rhs(ji,jj) =  Ve_rhs(ji,jj) + r1_rho0 * vtauV(ji,jj) * (r1_hv_0(ji,jj) /(1._wp+r3v(ji,jj,Kbb)))', 2],
+    'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/stp2d.f90:242-245': ['sshe_rhs(:,:) =                 emp(:,:)', 'sshe_rhs(:,:) = r1_rho0 * sshe_rhs(:,:)', 4],
+    'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/stp2d.f90:270': 'DEALLOCATE( sshe_rhs , Ue_rhs , Ve_rhs , CdU_u , CdU_v )',
+    'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/dynspg_ts.f90:274-276': ['ssh_frc(:,:) = sshe_rhs(:,:)', 'zv_frc(:,:) =   Ve_rhs(:,:)', 3],
+    'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/dynzdf.f90:338': 'puu(ji,jj,1,Kaa) = puu(ji,jj,1,Kaa) + rDt * utauU(ji,jj)   &',
+    'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/dynzdf.f90:506': 'pvv(ji,jj,1,Kaa) = pvv(ji,jj,1,Kaa) + rDt * vtauV(ji,jj)   &',
+    'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/trasbc.f90:269-270': ['qns(ji,jj) = qns(ji,jj) + qsr(ji,jj)         ! total heat flux in qns', 'qsr(ji,jj) = 0._wp                           ! qsr set to zero', 2],
+    'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/trasbc.f90:285': 'pts(ji,jj,1,jp_tem,Krhs) = pts(ji,jj,1,jp_tem,Krhs) - emp(ji,jj)*pts(ji,jj,1,jp_tem,Kbb) * z1_rho0_e3t',
+    'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/trasbc.f90:307-308': ['pts(ji,jj,1,jp_tem,Krhs) = pts(ji,jj,1,jp_tem,Krhs) +  r1_rcp * qns(ji,jj) * z1_rho0_e3t', 'pts(ji,jj,1,jp_sal,Krhs) = pts(ji,jj,1,jp_sal,Krhs) +           sfx(ji,jj) * z1_rho0_e3t', 2],
+    'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/trasbc.f90:323': 'pts(ji,jj,jk,jp_tem,Krhs) = pts(ji,jj,jk,jp_tem,Krhs)  + rnf_tsc(ji,jj,jp_tem) * zdep',
+    'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/traqsr.f90:371-373': [('ze0(ji,jj) = zz0 * qsr(ji,jj)   ;   zeR(ji,jj) = zz1 * qsr(ji,jj)    ! IR    ; Red', 1), ('zeT(ji,jj) =       qsr(ji,jj)                                        ! Total', 1), 3],
+    'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/sbcblk.f90:554': 'IF( MOD( kt - 1, nn_fsbc ) == 0 ) THEN',
+    'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/sbcblk_algo_ncar.f90:174-178': ['ztmp0 = One_on_L( t_zu, q_zu, ztmp0, ztmp1, ztmp2 )', 'zeta_u   = sign( min(abs(zeta_u),10._wp), zeta_u )', 5],
+    'cfgs/SHARED/namelist_ref:241': 'nn_iter_algo = 5       !  Number of iterations in bulk param. algo ("stable ABL + weak wind" requires more)',
+    # --- GRIDLADDER round 19 END ---
     # --- ORCA2 round 253: kt=8 midpoint-SSH failure boundary -------
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:489-493': [
         ('Extrapolate Sea Level at step jit+0.5', 1),

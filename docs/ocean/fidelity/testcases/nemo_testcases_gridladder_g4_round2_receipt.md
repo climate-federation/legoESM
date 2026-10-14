@@ -36,7 +36,7 @@ Decisions 120 and 121 pending: as-built deck.
 |---|---|
 | non-finite words | `i000_zCdU_v`, kt = 1, (jj, ji) = (1, 98), (2, 77), (129, 2); same in twins a, b, c |
 | inner domain (Fortran) | ji 3..182, jj 3..150: all three outside |
-| NEMO | ALLOCATE uninitialised `ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/stp2d.f90:122`; set on the inner domain only `ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:1238-1247` (tiling off); read only at `:518` and `:575`; whole array copied at `:277` |
+| NEMO | ALLOCATE uninitialised `ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/stp2d.f90:122`; set on the inner domain only `ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/dynspg_ts.f90:1237-1248` (round 19 correction: was 1238-1247, off by one at both ends) (tiling off); read only at `:518` and `:575`; whole array copied at `:277` |
 | card reader | cuts every plane to the inner domain |
 | fix | finiteness on the consumed support (inner domain of full planes, other arrays whole); halo NaNs counted in the JSON; new plant `substep-inner-nonfinite` |
 | re-admission | `run.sh --admit-existing`: PASS_G1_RECORD, 60 frame fields per stage step, twin restarts passive, frames identical kt 1..10, ACQUISITION_DONE; 8 of 8 plants fired |
@@ -67,7 +67,7 @@ one-cell plant moves the at-bar row (exit 1, kt11_plant.log).
 
 The NCAR bulk's stress magnitude: `turb_ncar` (`ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/sbcblk.f90:706`),
 air density from the 10 m state (`:782-784`), the bulk formula giving
-taum (`:787-791`), stress = taum/wndm × wind (`:800-803`). The operand
+taum (`:788-792`; round 19 correction: was 787-791, one line early), stress = taum/wndm × wind (`:800-803`). The operand
 inside it is not isolated. PLAUSIBLE, from the population split: the
 strongly unstable branch of `turb_ncar` — the stability-parameter clamp
 (`ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/sbcblk_algo_ncar.f90:177-178`), the
