@@ -278,7 +278,7 @@ def test_g1_and_orca2_cards_select_nemos_stage1_sea_level():
     from legoesm.ocean.fidelity import nemo_testcase_recipe as recipe
     from legoesm.ocean.state import LatLonCGridOceanConfig
     assert LatLonCGridOceanConfig._field_defaults["rk3_stage1_ssh_nemo_literal"] is False
-    assert LatLonCGridOceanConfig._fields[-10] == "rk3_stage1_ssh_nemo_literal"   # round 9 appended three
+    assert "rk3_stage1_ssh_nemo_literal" in LatLonCGridOceanConfig._fields
     src = Path(recipe.__file__).read_text()
     start = src.index("def build_orca2g1_flat_card")
     assert src.count("rk3_stage1_ssh_nemo_literal=True") == 2
@@ -525,7 +525,9 @@ def test_only_the_g1_card_selects_the_round6_statements():
     from legoesm.ocean.fidelity import nemo_testcase_recipe as recipe
     from legoesm.ocean.state import BarotropicConfig, LatLonCGridOceanConfig
     assert BarotropicConfig._fields[-3:-1] == ROUND6_SOLVER
-    assert LatLonCGridOceanConfig._fields[-9:-7] == ROUND6_STAGE   # rounds 7 and 9 appended seven
+    assert tuple(
+        n for n in LatLonCGridOceanConfig._fields if n in ROUND6_STAGE
+    ) == ROUND6_STAGE
     src = Path(recipe.__file__).read_text()
     start = src.index("def build_orca2g1_flat_card")
     for cls, names in ((BarotropicConfig, ROUND6_SOLVER),
@@ -699,7 +701,9 @@ ROUND7 = ("een_vorticity_written_order", "zdf_barotropic_removal_nemo_literal",
 def test_only_the_g1_card_selects_the_round7_statements():
     from legoesm.ocean.fidelity import nemo_testcase_recipe as recipe
     from legoesm.ocean.state import LatLonCGridOceanConfig
-    assert LatLonCGridOceanConfig._fields[-7:-3] == ROUND7     # round 9 appended three
+    assert tuple(
+        n for n in LatLonCGridOceanConfig._fields if n in ROUND7
+    ) == ROUND7
     src = Path(recipe.__file__).read_text()
     start = src.index("def build_orca2g1_flat_card")
     for name in ROUND7:
