@@ -1974,8 +1974,7 @@ CITATION_MAP = {
         'WHERE( zstrshlat(:,:) >= 0._wp )   fmask(:,:,jk) = zstrshlat(:,:)', 1),
     # --- GRIDLADDER round 11 END ---
     # --- GRIDLADDER round 12 (G2 round 3: tra_zdf diagonal; restart list) ---
-    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/trazdf.f90:233': (
-        'zwd(ji,jk) = (e3t_3d(ji,jj,jk) *(1._wp+r3t(ji,jj,Kaa)*tmask(ji,jj,jk))) - ( zwi(ji,jk) + zws(ji,jk) )', 1),
+    # trazdf.f90:233 (the diagonal) is already pinned above by a G1 round
     'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/trazdf.f90:269-298': [
         ('zwt(ji,1) = zwd(ji,1)', 1),
         ('&             / zwt(ji,jk) * tmask(ji,jj,jk)', 1),
