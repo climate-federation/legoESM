@@ -299,14 +299,99 @@ def walk(run: Path, steps: int, plant: bool = False) -> dict:
             "steps": out}
 
 
+# Decision 123: the fields NEMO's ocean reads after sbc (round-19 's' frame),
+# each consumed where NEMO consumes it -- stress: stp2d.f90:198-199 and
+# dynzdf.f90:338, :506; emp/rnf: stp2d.f90:242-245 and trasbc.f90:285;
+# qns/sfx: trasbc.f90:307-308; runoff content: trasbc.f90:323; qsr:
+# traqsr.f90:371-373 (P5 build line numbers, the P6 build adds writer lines).
+ROUTE_FIELDS = ("utau", "vtau", "qns", "qsr", "emp", "sfx", "rnf", "taum", "fr_i")
+STAGE_ROWS = {"ssh": "ssh_aa", "uu_b": "uu_b_aa", "vv_b": "vv_b_aa",
+              "u": "uu_k1_aa", "v": "vv_k1_aa", "T": "tn_k1_aa", "S": "sn_k1_aa"}
+
+
+def nemo_supplied_forcing(card, run: Path, kt: int, *, zero: bool = False):
+    """NEMO's own surface fields at step kt as the card's (freshwater, surface)
+    inputs, through the ORCA2 lane's route unchanged (round-1 ladder gate
+    ``_surface_forcings``).  ``zero``: every field 0 (the non-vacuity control)."""
+    from nemo_testcase_l4_orca2_round1_ladder_gate import _surface_forcings
+    f = frames(run, kt)
+    full = f["s_sst_m"].shape
+    fields = {name: inner(f[f"s_{name}"], full) for name in ROUTE_FIELDS}
+    fields["rnf_tsc"] = np.stack([inner(f["s_rnf_tsc_tem"], full),
+                                  inner(f["s_rnf_tsc_sal"], full)], axis=-1)
+    if zero:
+        fields = {k: np.zeros_like(v) for k, v in fields.items()}
+    return _surface_forcings(card, run, fields, kt)
+
+
+def route(run: Path, deck_root: Path, *, zero: bool = False, stages: str = "123",
+          dump: Path | None = None) -> dict:
+    """GIVEN-NEMO-ENTRY, kt = 1: the G4 card from NEMO's as-built initial state
+    (the record ran ln_tsd_dmp = F: no hand edits), forced by NEMO's kt = 1
+    surface fields, each RK3 stage compared with NEMO's stage frame."""
+    import jax
+    import jax.numpy as jnp
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel, _NEMOWSRK3TestHooks)
+    from legoesm.ocean.fidelity import nemo_testcase_recipe as recipe
+    import nemo_testcase_g1_orca2grid_ladder as g1
+    import nemo_testcase_g2_orca2bathy_ladder as g2
+    g1._fp64()
+    require(jax.default_backend() == "cpu", "CPU only")
+    require("ln_tsd_dmp  =  F" in (run / "ocean.output").read_text(), "not the as-built record")
+    card = recipe.build_nemo_testcase_card("ORCA2G4-sbc", deck_root=deck_root)
+    wet = np.asarray(card.recipe.z_coord.is_active) > 0.5
+    t0, s0 = recipe.build_orca2_initial_ts(
+        run / "data_1m_potential_temperature_nomask.nc", run / "data_1m_salinity_nomask.nc",
+        wet, apply_hand_alterations=False)
+    st = card.recipe.initial_state
+    entry = st._replace(T=st.T.replace(data=jnp.asarray(t0)), S=st.S.replace(data=jnp.asarray(s0)))
+    freshwater, surface = nemo_supplied_forcing(card, run, 1, zero=zero)
+    nemo = frames(run, 1)
+    full = nemo["s_sst_m"].shape
+    out = {"label": "GIVEN-NEMO-ENTRY (as-built initial state), kt = 1", "zero_forcing": zero,
+           "stages": {}}
+    for stage, (hooks, _) in (("1", g2.EXPOSURES["stage1"]), ("2", g2.EXPOSURES["stage2"]),
+                              ("3", g2.EXPOSURES["stage3"])):
+        if stage not in stages:
+            continue
+        new = jax.device_get(LatLonCGridOceanModel(
+            card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+            _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(**hooks)).step(
+                entry, dt=card.dt_s, freshwater=freshwater, surface_forcing=surface))
+        cand = g2.card_surface(new)
+        rows = {}
+        for name, key in STAGE_ROWS.items():
+            ref = np.asarray(inner(nemo[f"{stage}_{key}"], full), np.float64)
+            got = np.asarray(cand[name], np.float64)
+            rows[name] = {"unequal": int((ref.view("<u8") != got.view("<u8")).sum()),
+                          "max_abs": float(np.max(np.abs(ref - got)))}
+        out["stages"][stage] = rows
+        if dump is not None:
+            np.savez(Path(dump) / f"route_stage{stage}.npz",
+                     **{f"card_{n}": np.asarray(cand[n]) for n in STAGE_ROWS},
+                     **{f"nemo_{n}": inner(nemo[f"{stage}_{k}"], full) for n, k in STAGE_ROWS.items()})
+    return out
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
-    p.add_argument("mode", choices=("identity", "walk"))
+    p.add_argument("mode", choices=("identity", "walk", "route"))
+    p.add_argument("--deck-root", type=Path, help="route: the G4 deck with the record's inputs")
+    p.add_argument("--zero", action="store_true", help="route: zero forcing (control)")
+    p.add_argument("--stages", default="123", help="route: which RK3 stages")
+    p.add_argument("--dump", type=Path, help="route: save card and NEMO rows (npz)")
     p.add_argument("--run", type=Path, required=True, help="twin a of the round-19 record")
     p.add_argument("--steps", type=int, default=10)
     p.add_argument("--json", type=Path)
     p.add_argument("--plant", action="store_true")
     a = p.parse_args()
+    if a.mode == "route":
+        out = route(a.run, a.deck_root, zero=a.zero, stages=a.stages, dump=a.dump)
+        if a.json:
+            a.json.write_text(json.dumps(out, indent=1, sort_keys=True) + "\n")
+        print(json.dumps(out, sort_keys=True))
+        return 0
     measure = identity if a.mode == "identity" else walk
     if a.plant:
         if a.mode == "identity":

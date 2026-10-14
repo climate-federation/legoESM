@@ -515,3 +515,25 @@ def _values_text(data: bytes):
         handle.write(data)
         handle.flush()
         return _values(Path(handle.name))
+
+
+@needs_inputs
+@pytest.mark.slow
+@pytest.mark.skipif(not (R19_TWIN_A / "oracle_g1step_kt00000001.bin").is_file(),
+                    reason="no round-19 record")
+def test_nemo_supplied_forcing_is_read_at_nemos_stage_one(tmp_path):
+    """Decision 123: the round-19 record's kt = 1 surface fields through the
+    ORCA2 lane's route.  Zeroed, every wet column's stage-1 state moves (the
+    route is consumed); NEMO's own fields leave stage 1 unequal only in the
+    sea-level bump's patch, at <= 1e-9 (round 21: P1 REFUTED, open)."""
+    root = tmp_path / "g4"
+    root.mkdir()
+    (root / "namelist_cfg").write_text((G4_DIR / "namelist_cfg").read_text())
+    for f in R19_TWIN_A.glob("*.nc"):
+        if not re.search(r"restart|300h|mesh_mask|layout", f.name):
+            (root / f.name).symlink_to(f)
+    mod = _steps_module()
+    zero = mod.route(R19_TWIN_A, root, zero=True, stages="1")["stages"]["1"]
+    assert all(r["unequal"] > 15000 for r in zero.values())
+    fed = mod.route(R19_TWIN_A, root, stages="1")["stages"]["1"]
+    assert all(0 < r["unequal"] < 2500 and r["max_abs"] < 1e-9 for r in fed.values())
