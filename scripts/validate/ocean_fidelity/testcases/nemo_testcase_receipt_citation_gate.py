@@ -2001,6 +2001,32 @@ CITATION_MAP = {
         ('pvv(ji,jj,1,Krhs) = zhpj(ji,jj) + zvap', 1),
         2],
     # --- GRIDLADDER round 13 END ---
+    # --- GRIDLADDER round 14 (G3 round 1: ORCA2's initial T/S) ---
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/dtatsd.f90:219': ('IF( nn_cfg == 2 .AND. ln_tsd_dmp ) THEN', 1),
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/tradmp.f90:181': ('CALL dta_tsd( kt, zts_dta )', 1),
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/istate.f90:117-118': [
+        ('IF( ln_tsd_init ) THEN', 1),
+        ('CALL dta_tsd( nit000, ts(:,:,:,:,Kbb) )', 1),
+        2],
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/stp2d.f90:137': ('CALL eos    ( ts, Kbb, rhd )', 1),
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/eosbn2.f90:635-742': [
+        ('SUBROUTINE eos_insitu_t( pts, ktts, prd, ktrd, pdep, ktdep, kbnd )', 1),
+        ('END SUBROUTINE eos_insitu_t', 1),
+        108],
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3.f90:160-161': [
+        ('CALL eos_rab( ts(:,:,:,:,Nbb), rab_b, Nbb )', 1),
+        ('CALL bn2    ( ts(:,:,:,:,Nbb), rab_b, rn2b, Nbb )', 1),
+        2],
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/zdfmxl.f90:117': ('hmlp(ji,jj) =  hmlp(ji,jj) + MAX( rn2b(ji,jj,jk) , 0._wp )', 1),
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/dtatsd.f90:260-263': [
+        ('DO jk =  1,  jpk  ; DO jj = ntsj-(  nn_hls), ntej+(   nn_hls)', 1),
+        ('END DO   ;   END DO   ;   END DO', 1),
+        4],
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/dtatsd.f90:307-310': [
+        ('DO jk =  1,  jpk  ; DO jj = ntsj-(  nn_hls), ntej+(   nn_hls)', 1),
+        ('END DO   ;   END DO   ;   END DO', 1),
+        4],
+    # --- GRIDLADDER round 14 END ---
     # --- ORCA2 round 253: kt=8 midpoint-SSH failure boundary -------
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:489-493': [
         ('Extrapolate Sea Level at step jit+0.5', 1),
@@ -2152,7 +2178,7 @@ CITATION_MAP = {
     # --- ORCA2 round 176: the independent rung-0 entry guard ---
     'nemo_testcase_recipe.py:1422-1462': [
         'def apply_orca2_hand_alterations(temperature, salinity):',
-        'is what NEMO executes.', 41],
+        'No driver exposes it.', 41],
     'nemo_testcase_recipe.py:1659-1660': [
         'temperature, salinity = build_orca2_initial_ts(',
         'temperature_path, salinity_path, tmask)', 2],
