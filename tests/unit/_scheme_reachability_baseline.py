@@ -34,24 +34,10 @@ UNREACHABLE_SCHEMES = {
         "SAM's CRM convention (cloud fraction = 1 wherever condensate > 0); "
         "raises without explicit q_cloud/q_ice from microphysics. Not a C48 "
         "GCM scheme -- it belongs to the plane/CRM lane, not AMIP.",
-    # NOTE: run_coupled DOES offer --clouds resolved and --microphysics
-    # ml_emulator. An earlier draft of this baseline assumed it mirrored
-    # run_amip's exclusions; the self-test below caught the guess. Whether
-    # run_coupled SHOULD offer them is a separate physics question (it has no
-    # _require_full_physics_for_amip guard for ml_emulator to fool), tracked
-    # rather than silently changed here.
-
-    # --- verified gap, no legitimate use in this driver ---
-    ("run_coupled", "clouds", "cam6_clubb"):
-        "CAM6 cloud fraction on the CLUBB path is wired on the MPAS combined-"
-        "physics lane only (validate_strict requires discretization='mpas'); "
-        "run_coupled drives the FV pipeline, where the cloud call threads "
-        "neither lat nor the deep-convection carries, so the scheme cannot "
-        "function there. Offer it once the pipeline threads them.",
-    ("run_coupled", "radiation", "none"):
-        "run_coupled has NO --held-suarez-forcing lane (verified), so a "
-        "coupled run with radiation off has no energy source at all -- it "
-        "would silently produce garbage. run_amip DOES offer 'none' because "
-        "its --held-suarez-forcing lane is a dry core and HS forcing is "
-        "ADDITIVE to the physics pipeline rather than a replacement.",
+    # run_coupled shares run_amip's parser (composable physics P5a), so it
+    # carries exactly run_amip's two protective exclusions above.
+    ("run_coupled", "microphysics", "ml_emulator"):
+        "Shared parser with run_amip (P5a): same untrained-network exclusion.",
+    ("run_coupled", "clouds", "resolved"):
+        "Shared parser with run_amip (P5a): same CRM-only-convention exclusion.",
 }

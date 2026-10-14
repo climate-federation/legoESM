@@ -96,7 +96,8 @@ def read_yaml_with_includes(path, _seen=None) -> dict:
     return merged
 
 
-def load_yaml_config(path, parser, *, example_keys: str | None = None) -> dict:
+def load_yaml_config(path, parser, *, example_keys: str | None = None,
+                     renamed_keys: dict[str, str] | None = None) -> dict:
     """Load a run YAML config file into a dict of argument defaults.
 
     Used by ``--config`` to make a canonical run (e.g. the tuned
@@ -116,6 +117,16 @@ def load_yaml_config(path, parser, *, example_keys: str | None = None) -> dict:
     appended to the unknown-key error to help operators fix typos.
     """
     doc = read_yaml_with_includes(path)
+    # Driver-local renames (top level only; the global RENAMED_CONFIG_KEYS
+    # apply at any depth, which a key such as ``grid`` must not).
+    for old, new in (renamed_keys or {}).items():
+        if old in doc:
+            if new in doc and doc[new] != doc[old]:
+                raise SystemExit(
+                    f"--config {path}: sets both {old!r} (old name) and "
+                    f"{new!r} to different values ({doc[old]!r} vs "
+                    f"{doc[new]!r}).")
+            doc[new] = doc.pop(old)
     actions = {a.dest: a for a in parser._actions}
     unknown = sorted(set(doc) - set(actions))
     if unknown:
