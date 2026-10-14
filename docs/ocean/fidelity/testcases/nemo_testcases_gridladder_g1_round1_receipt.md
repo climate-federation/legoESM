@@ -250,7 +250,9 @@ PLAUSIBLE and not acted on. Verbatim:
 No second (GLM) reviewer was available: a single review, not a dual one. The
 fixes after the review were not re-reviewed.
 
-Focused tests: 78 passed, 1 skipped (card and acquisition tools; the skip is
+Focused tests on the committed tree: 95 passed, 1 skipped (card, acquisition
+tools, citation gate; preregistration 42 citations, 0 unmapped, 0 failures;
+the skip is
 the geometry identity, which needs the record).
 
 Choices made in this pass. ASKED: everything in the operator's instruction.
