@@ -304,10 +304,11 @@ code changed in this repair.
 
 The operator measured that every cuDNN convolution on the installed V100S,
 JAX 0.10.0, and cuDNN 9.21.1.3 path failed at execution.  The cause is not
-claimed.  Commit `850672081` therefore removes convolution primitives from all
-three programs that the next acquisition lowers: the dual hourly sampler, the
-closure model and training objectives, and the cost profiler.  No objective,
-dataset, optimizer, or evaluation definition changed.
+claimed.  Commits `850672081` and `0c668733d` therefore remove convolution
+primitives from all three programs that the next acquisition lowers: the
+complete stepped dual-hourly scan, the closure model and training objectives,
+and the cost profiler.  No objective, dataset, optimizer, or evaluation
+definition changed.
 
 The closed-C-grid filter now uses one shared array implementation for both the
 offline tool and in-scan sampler.  Each Gaussian axis is a weighted sum of
@@ -318,8 +319,10 @@ fine day 1095, the final coarse T/U/V state differs from Round 5's dense 97 by
 `1.887379141862766e-15 m s-1`, respectively.  The continuity residual is
 `4.459310829938671e-18 m s-1` in interior cells and
 `3.2500654186147504e-18 m s-1` on wall cells; normal wall transports are
-bitwise zero and relative volume error is `2.5e-16`.  The existing continuity,
-wall, volume, and transfer-function plants remain live.  CPU XLA reports the
+bitwise zero and relative volume error is `2.5e-16`.  The NumPy entry point now
+refuses unless JAX x64 is enabled, instead of silently downcasting its declared
+float64 arrays.  The existing continuity, wall, volume, and transfer-function
+plants remain live.  CPU XLA reports the
 fine dual sampler's filtered restriction at `30,587,136` temporary bytes,
 `9,953,664` argument bytes, and `169,368` output bytes: a 40,710,168-byte
 compiled live bound, rather than the failed 28.71-GiB dense request.  The GPU
@@ -340,17 +343,20 @@ The installed JAX source was read rather than assuming inspection APIs:
 `Device.memory_stats()` supplies platform-dependent live and peak bytes.  A
 single fail-closed guard rejects `stablehlo.convolution`, `mhlo.convolution`,
 or textual `convolution(`.  Tests lower the real filtered restriction, both
-real objectives, the 7,696-parameter model step, and the real dual sampler.
-Each also lowers an actual planted `lax.conv_general_dilated`; bypassing the
-guard makes all four tests fail with `DID NOT RAISE`.
+real objectives, the 7,696-parameter model step, and the complete real
+fine-model 24-hour stepped-and-sampled scan.  Plants place an actual
+`lax.conv_general_dilated` in both the sampler and the prognostic model step;
+bypassing the guard makes the tests fail with `DID NOT RAISE`.
 
 The committed GPU smoke requires a physical GPU and
 `XLA_PYTHON_CLIENT_MEM_FRACTION`, refuses a dirty tree or non-GPU backend, and
 runs three fresh workers so peak statistics are per task.  It compares one
-pinned fine restart's box and filtered samples between CPU and GPU, then runs a
-reverse-mode 24-hour real-network window for each objective and requires every
-parameter-gradient leaf to be finite and nonzero.  It prints and stores wall
-seconds, compiler memory, and GPU `peak_bytes_in_use`.  GPU execution is
+pinned fine restart's box and filtered samples between CPU and GPU, rejecting
+any non-finite value even when both devices produce a matching NaN.  It also
+lowers the complete fine stepped scan before running a reverse-mode 24-hour
+real-network window for each objective; every element of every parameter-
+gradient leaf must be finite and each leaf must be nonzero.  It prints and
+stores wall seconds, compiler memory, and GPU `peak_bytes_in_use`. GPU execution is
 **ACQUISITION_NEEDED**; no GPU was used in this CPU-only round.
 
 A CPU 1-day template forward profile exercised the final compiled path:
@@ -371,11 +377,25 @@ Every new test was run against a scratch mutation; logs are under
 | Network preserves Equinox initialization and the initial-force bound | Scale the initializer bound by 1.01 | same log: weight words differ and ten-state ratio becomes `0.008210819625129451`; `4 failed` total |
 | GPU smoke comparison and memory-fraction refusal fail closed | Set comparison tolerance to 1 and bypass the fraction check | `round5c_reversion_smoke.log`: comparator plant `DID NOT RAISE`; missing-fraction assertion fails; `2 failed` |
 | Profiles identify shifted layers and require a matching physical GPU | Restore the old metadata and bypass GPU selection | `round5c_reversion_profile.log`: missing shifted-layer key and missing exception; `2 failed` |
+| Review poison cases fail closed | Remove the x64, sample-finiteness, gradient-finiteness, and complete-scan guards | `round5c_reversion_review_fixes.log`: the silent downcast runs, matching NaNs and partial-NaN gradients report `DID NOT RAISE`, and the step-level convolution plant reports `DID NOT RAISE`; `4 failed` |
 
-The focused final-state verification is `60 passed in 328.15s (0:05:28)`.
+The focused final-state verification is `62 passed in 282.33s (0:04:42)`.
 Targeted Ruff reports `All checks passed!`; `compileall -q`, shell syntax,
 and `git diff --check` exit zero without output.  The exact full lane battery
-and two independent review verdicts are recorded below after they complete.
+from `autopilot.sh` collected 285 tests and ended:
+
+```text
+284 passed, 1 skipped in 1902.97s (0:31:42)
+```
+
+Two independent adversarial reviewers initially returned HOLD.  Reviewer A
+reproduced the matching-NaN comparator and x64-downcast defects.  Reviewer B
+independently reproduced matching NaNs, a partially NaN gradient leaf, and the
+missing complete-scan guard.  After commit `0c668733d`, both returned
+**PROCEED**: all poison reproducers fail closed, and no remaining CPU-side
+defect was found.  Their records are `round5c_review_a.txt` and
+`round5c_review_b.txt` in the Round-5 evidence directory.  Both explicitly
+leave real GPU execution to the ordered smoke acquisition.
 
 ### Round 5c exact acquisitions
 
@@ -416,6 +436,7 @@ XLA_PYTHON_CLIENT_MEM_FRACTION="${XLA_PYTHON_CLIENT_MEM_FRACTION:?set GPU memory
 
 ## OPEN
 
+- Pass the Round 5c GPU smoke, then acquire all eight device profiles.
 - Acquire and score the ten dual starts; this selects `template` or `symmetric`.
 - Acquire and freeze the schema-v2 12-year train/validation record and held-out
   year, then materialize the contract JSON with every final manifest hash.
