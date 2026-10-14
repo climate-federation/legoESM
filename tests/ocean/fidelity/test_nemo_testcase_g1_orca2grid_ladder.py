@@ -111,10 +111,11 @@ def test_g1_and_orca2_cards_select_the_fold_image_row():
     assert LatLonCGridOceanConfig._field_defaults["een_fold_image_v_row"] is False
     src = (Path(__file__).resolve().parents[3]
            / "packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py").read_text()
-    # ORCA2 imported the G1 rounds 2--5 statements in its round 270.
+    start = src.index("def build_orca2g1_flat_card")
+    # ORCA2 imported this G1 statement in its round 270; G1 remains the
+    # second and only other selecting card.
     assert src.count("een_fold_image_v_row=True") == 2
-    assert src.index("een_fold_image_v_row=True") > src.index(
-        "def build_orca2g1_flat_card")
+    assert src.count("een_fold_image_v_row=True", start) == 1
 
 
 @needs_record
@@ -194,9 +195,9 @@ def test_g1_and_orca2_cards_select_the_fold_row_v_face_depth():
     assert BarotropicConfig._field_defaults["barotropic_fold_top_v_face_ssh"] is False
     assert BarotropicConfig._fields[-7] == "barotropic_fold_top_v_face_ssh"   # round 8 appended one
     src = Path(recipe.__file__).read_text()
-    assert src.count("barotropic_fold_top_v_face_ssh=True") == 2
     start = src.index("def build_orca2g1_flat_card")
-    assert src.index("barotropic_fold_top_v_face_ssh=True") > start
+    assert src.count("barotropic_fold_top_v_face_ssh=True") == 2
+    assert src.count("barotropic_fold_top_v_face_ssh=True", start) == 1
 
 
 @needs_record
@@ -279,9 +280,9 @@ def test_g1_and_orca2_cards_select_nemos_stage1_sea_level():
     assert LatLonCGridOceanConfig._field_defaults["rk3_stage1_ssh_nemo_literal"] is False
     assert LatLonCGridOceanConfig._fields[-10] == "rk3_stage1_ssh_nemo_literal"   # round 9 appended three
     src = Path(recipe.__file__).read_text()
+    start = src.index("def build_orca2g1_flat_card")
     assert src.count("rk3_stage1_ssh_nemo_literal=True") == 2
-    assert src.index("rk3_stage1_ssh_nemo_literal=True") > src.index(
-        "def build_orca2g1_flat_card")
+    assert src.count("rk3_stage1_ssh_nemo_literal=True", start) == 1
 
 
 def test_stage_steps_are_read_off_the_record(tmp_path):
@@ -356,10 +357,15 @@ def test_g1_and_orca2_cards_select_the_three_solver_statements():
     assert BarotropicConfig._fields[-6:-3] == ROUND5_OPTIONS
     src = Path(recipe.__file__).read_text()
     start = src.index("def build_orca2g1_flat_card")
+    intended_sites = {
+        "barotropic_flux_update_nemo_literal": 1,
+        "barotropic_substep_dt_nemo_literal": 2,
+        "barotropic_entry_depth_nemo_literal": 1,
+    }
     for name in ROUND5_OPTIONS:
         assert BarotropicConfig._field_defaults[name] is False
-        assert src.count(f"{name}=True") == 2
-        assert src.index(f"{name}=True") > start
+        assert src.count(f"{name}=True") == intended_sites[name]
+        assert src.count(f"{name}=True", start) == 1
     if RECORD.is_dir():      # the built card carries them, validator included
         cfg = recipe.build_nemo_testcase_card(
             "ORCA2G1-flat", deck_root=RECORD).recipe.model_config
