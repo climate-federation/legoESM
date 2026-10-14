@@ -175,6 +175,12 @@ FILES = {
     "ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/sbcmod.f90": (
         _ORCA2G1_P3 / "ppsrc/nemo/sbcmod.f90"),
     # --- GRIDLADDER round 22 (G1b; the reference binary's build) ---
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynspg_ts.f90": (
+        _ORCA2_COMPILED / "dynspg_ts.f90"),
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynvor.f90": (
+        _ORCA2_COMPILED / "dynvor.f90"),
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynzdf.f90": (
+        _ORCA2_COMPILED / "dynzdf.f90"),
     "ORCA2G1_OMIP_L1_R4REF/BLD/ppsrc/nemo/dynadv.f90": (
         _ORCA2G1_R4REF / "ppsrc/nemo/dynadv.f90"),
     "ORCA2G1_OMIP_L1_R4REF/BLD/ppsrc/nemo/dynkeg.f90": (
@@ -1704,6 +1710,12 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- GRIDLADDER round 22 (G1b receipt, D122 pointer into ORCA2's build) ---
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynspg_ts.f90:666': 'IF( ln_dynadv_vec .OR. lk_linssh ) THEN      !* Vector form',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:467': 'IF( ln_dynadv_vec .OR. lk_linssh ) THEN   !* applied on velocity',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynzdf.f90:138': 'IF( ln_dynadv_vec .OR. lk_linssh ) THEN   ! applied on velocity',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynvor.f90:762': ('CASE ( np_CRV )                           !* Coriolis + relative vorticity', 4),
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynspg_ts.f90:799': 'IF( ln_dynadv_vec .OR. lk_linssh ) THEN    ! Sum velocities',
     # --- GRIDLADDER round 22 (G1b preregistration) ---
     'ORCA2G1_OMIP_L1_R4REF/BLD/ppsrc/nemo/dynadv.f90:191': "IF( nn_dynkeg /= nkeg_C2 .AND. nn_dynkeg /= nkeg_HW )   CALL ctl_stop( 'KEG scheme wrong value of nn_dynkeg' )",
     'ORCA2G1_OMIP_L1_R4REF/BLD/ppsrc/nemo/dynadv.f90:186': 'IF( ln_dynadv_vec  ) THEN   ;   ioptio = ioptio + 1   ;   n_dynadv = np_VEC_c2    ;   r_stb_thres_dyn = pp_stb_thres_dync2   ;  r_stb_cstra_dyn = pp_stb_cstra_dync2   ;  ENDIF',

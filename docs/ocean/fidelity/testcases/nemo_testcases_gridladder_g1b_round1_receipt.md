@@ -87,10 +87,9 @@ stage 2.
 
 Every G1b statement runs on ORCA2's own build under its vector deck:
 `ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynspg_ts.f90:666` (external update),
-`:799` (velocity sum), `ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:467`
+`ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynspg_ts.f90:799` (velocity sum), `ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:467`
 (stage update), `ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynzdf.f90:138`,
-`ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynvor.f90:762` (np_CRV). (Unmapped in the
-citation gate: that build carries ORCA2-lane writer lines.)
+`ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynvor.f90:762` (np_CRV).
 
 ## 5. Review and tests
 
