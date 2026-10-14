@@ -99,8 +99,12 @@ def early_path_metrics(candidate: dict[str, np.ndarray],
         else:
             left_flat = left[:EARLY_DAYS, wet]
             right_flat = right[:EARLY_DAYS, wet]
-        rms = np.sqrt(np.mean((left_flat - right_flat) ** 2, axis=1))
-        denominator = np.sqrt(np.mean(right_flat**2, axis=1))
+        # ONE number per day: the RMS runs over every axis but the day -- all
+        # wet points, and both components of the rotational velocity (the
+        # vector RMS, as the pattern correlation below already pools them).
+        axes = tuple(range(1, left_flat.ndim))
+        rms = np.sqrt(np.mean((left_flat - right_flat) ** 2, axis=axes))
+        denominator = np.sqrt(np.mean(right_flat**2, axis=axes))
         if np.any(denominator <= 0.0):
             raise ValueError(f"early {name} normalization is zero")
         nrms = rms / denominator
@@ -159,13 +163,12 @@ def _load_early_fields(root: Path) -> dict[str, np.ndarray]:
     return {name: np.stack(value) for name, value in fields.items()}
 
 
-def _year_to_year_uncertainty(years: list[dict[str, np.ndarray]],
-                              basin_width_m: float) -> dict[str, float]:
-    """Maximum adjacent 6.25-km annual difference in each gate metric."""
-    pairs = [adequacy_metrics(years[index], years[index + 1],
-                              basin_width_m=basin_width_m)["scores"]
-             for index in range(len(years) - 1)]
-    return {name: max(pair[name] for pair in pairs) for name in pairs[0]}
+def _year_to_year_pairs(years: list[dict[str, np.ndarray]],
+                        basin_width_m: float) -> list[dict[str, float]]:
+    """Each adjacent 6.25-km annual difference in each gate metric."""
+    return [adequacy_metrics(years[index], years[index + 1],
+                             basin_width_m=basin_width_m)["scores"]
+            for index in range(len(years) - 1)]
 
 
 def compare_references(candidate_root: Path, sensitivity_root: Path,
@@ -203,8 +206,9 @@ def compare_references(candidate_root: Path, sensitivity_root: Path,
             sensitivity_year = diagnose(
                 sensitivity, days=DAYS_PER_YEAR, card=card,
                 namelist=SWG_DG50_NAMELIST, diagnostics="online")
-    uncertainty = _year_to_year_uncertainty(
-        candidate_years, SWG_DG50_NAMELIST.rn_domsiz_m)
+    pairs = _year_to_year_pairs(candidate_years, SWG_DG50_NAMELIST.rn_domsiz_m)
+    # Pre-registered: the largest adjacent-year difference (all pairs).
+    uncertainty = {name: max(pair[name] for pair in pairs) for name in pairs[0]}
     annual = adequacy_metrics(
         candidate_years[0], sensitivity_year,
         basin_width_m=SWG_DG50_NAMELIST.rn_domsiz_m,
@@ -223,6 +227,8 @@ def compare_references(candidate_root: Path, sensitivity_root: Path,
             sensitivity_root / "manifest.json"),
         "early_common_path": early,
         "year1_statistics": annual,
+        "year_to_year_scores": {f"{k + 1}-{k + 2}": pair
+                                for k, pair in enumerate(pairs)},
         "rule": (
             "6.25 km is adequate only when days 1-8 have NRMS<=10% and "
             "correlation>=0.99 for SSH/vorticity/rotational velocity, and "
