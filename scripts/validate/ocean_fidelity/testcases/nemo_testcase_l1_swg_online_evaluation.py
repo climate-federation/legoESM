@@ -11,8 +11,10 @@ pinned data and refuses any drift.  Every day file is admitted by its own
 per-file sampling label and, where the archive holds daily means beside the
 snapshots, shown from the data not to be its own day's daily mean.  A
 trained-closure score needs three or more DISTINCT runs (distinct day files
-and distinct scored data), each manifest naming its checkpoint, network seed,
-objective and training window.
+and distinct scored data), each manifest in the one free-run schema the
+training driver writes (``legoesm.training.swg_online``): checkpoint file and
+its SHA-256 (checked against the file), network seed, objective and training
+window.
 """
 from __future__ import annotations
 
@@ -29,6 +31,14 @@ from legoesm.ocean.fidelity.nemo_testcase_recipe import (
     SWG_DG50_NAMELIST,
     SWG_MADDISON_NAMELIST,
     build_swg_card,
+)
+from legoesm.training.swg_online import (  # the one schema, with its writer
+    DAILY_MEAN_FIELDS,
+    DAILY_MEAN_LABEL,
+    DUAL_SCHEMA,
+    SNAPSHOT_FIELDS,
+    SNAPSHOT_LABEL,
+    admit_free_run_closure,
 )
 
 HERE = Path(__file__).resolve().parent
@@ -62,21 +72,14 @@ CONTROL_ROOTS = {
     "nu80": DEFAULT_ROUND2 / "dg50_nu80_cpu_7300d",
 }
 # Per-file sampling labels exactly as the writers store them in EVERY day
-# file (run_swg_double_gyre.py ``run_long``; swg_coarse_graining.py
-# ``filter_truth_directory``).  The file's own label decides; a manifest never
-# supplies one.
-DUAL_SCHEMA = "legoesm-swg-double-gyre-daily-v2"  # snapshot AND daily mean
+# file (run_swg_double_gyre.py ``run_long`` and the training driver's free
+# run: ``DUAL_SCHEMA`` with ``SNAPSHOT_LABEL``/``DAILY_MEAN_LABEL``, imported
+# above; swg_coarse_graining.py ``filter_truth_directory``).  The file's own
+# label decides; a manifest never supplies one.
 SINGLE_SAMPLING_SCHEMAS = (
     "legoesm-swg-double-gyre-daily-v1",  # driver: end-of-day snapshot only
     "legoesm-swg-conservative-truth-v2",  # restricted product, one sampling
 )
-SNAPSHOT_LABEL = "end-of-day instantaneous state"
-DAILY_MEAN_LABEL = "arithmetic mean of every post-step state in model day"
-SNAPSHOT_FIELDS = ("ssh_m", "u_m_s", "v_m_s")
-DAILY_MEAN_FIELDS = ("ssh_daily_mean_m", "u_daily_mean_m_s", "v_daily_mean_m_s")
-# What every trained-closure manifest must state under "closure".
-CLOSURE_IDENTITY_KEYS = ("checkpoint_sha256", "network_seed", "objective",
-                         "window_days")
 GATE_WINDOW_DAYS = 730
 GATE_FIRST_DAY = 366
 SKILL_METRICS = ("mean_face_transport_rmse_m3_s", "ke_spectrum_relative_l1",
@@ -396,7 +399,10 @@ def _day_file_pins(manifest: dict) -> dict:
     """The day-file digests a native manifest pins, under either writer's key
     (driver ``daily_sha256``; restricted product ``output_daily_sha256``).
     The ONE reading shared by the loader and the trained-run binding."""
-    return manifest.get("daily_sha256", manifest.get("output_daily_sha256", {}))
+    pins = manifest.get("daily_sha256", manifest.get("output_daily_sha256", {}))
+    if not isinstance(pins, dict):
+        raise ValueError("manifest day-file digests are not a mapping")
+    return pins
 
 
 def _read_admitted_day(root: Path, day: int, pins: dict):
@@ -1064,18 +1070,49 @@ def score_free_run(root: Path, *, expected_manifest_sha256: str,
     return rows
 
 
+def admit_trained_run(root: Path, manifest_sha256: str, *, objective: str,
+                      window_days: int) -> dict:
+    """Admit ONE trained-closure free run by its manifest, before scoring.
+
+    The manifest, bound by its SHA-256, must follow the one free-run schema
+    (``admit_free_run_closure``: the training driver's closure block, and the
+    checkpoint file it names must exist with the stated SHA-256); its
+    objective and window length must equal the score request; it must pin
+    the day files the loader reads (``_day_file_pins``, a non-empty set).
+    """
+    root = Path(root).resolve()
+    if _sha256(root / "manifest.json") != manifest_sha256:
+        raise ValueError("manifest differs from its bound SHA-256")
+    manifest = json.loads((root / "manifest.json").read_text())
+    closure = admit_free_run_closure(manifest)
+    request = {"objective": objective, "window_days": window_days}
+    stated = {key: closure[key] for key in request}
+    if stated != request:
+        raise ValueError(f"manifest states {stated}, the score request "
+                         f"{request}")
+    pins = _day_file_pins(manifest)  # exactly the files the loader reads
+    if not pins:
+        raise ValueError("manifest pins no day files")
+    directory = root.stat()
+    return {
+        "root": str(root), "manifest_sha256": manifest_sha256,
+        "checkpoint_path": closure["checkpoint_path"],
+        "checkpoint_sha256": closure["checkpoint_sha256"],
+        "network_seed": closure["network_seed"],
+        "_directory": (directory.st_dev, directory.st_ino),
+        "_day_files": set(pins.values()),
+    }
+
+
 def bind_trained_runs(seeds: dict[str, tuple[Path, str]], *, objective: str,
                       window_days: int) -> dict[str, dict]:
-    """Refuse anything but three or more DISTINCT, identified trained runs.
+    """Refuse anything but three or more DISTINCT, admitted trained runs.
 
-    Each manifest, bound by its SHA-256, must state under ``closure`` the
-    checkpoint SHA-256, the network seed, the objective and the training
-    window length; objective and window must equal the score request.  Roots
-    (as directories, so a symlink or bind mount is the same root), manifests,
-    network seeds, checkpoints and day files must all differ between seeds;
-    the day files are the non-empty set the loader reads (``_day_file_pins``).
-    Identical data under different bytes is refused once the windows are
-    loaded (``score_trained_closure``).
+    Each run is admitted by ``admit_trained_run``.  Roots (as directories,
+    so a symlink or bind mount is the same root), manifests, network seeds,
+    checkpoints and day files must all differ between seeds.  Identical data
+    under different bytes is refused once the windows are loaded
+    (``score_trained_closure``).
     """
     from legoesm.training.swg_online import ADMITTED_WINDOWS_DAYS
 
@@ -1087,37 +1124,11 @@ def bind_trained_runs(seeds: dict[str, tuple[Path, str]], *, objective: str,
         raise ValueError("held-out gate requires at least three network seeds")
     bound = {}
     for label, (root, sha) in seeds.items():
-        root = Path(root).resolve()
-        if _sha256(root / "manifest.json") != sha:
-            raise ValueError(f"{label}: manifest differs from its bound SHA-256")
-        manifest = json.loads((root / "manifest.json").read_text())
-        closure = manifest.get("closure")
-        missing = (sorted(set(CLOSURE_IDENTITY_KEYS) - set(closure))
-                   if isinstance(closure, dict) else list(CLOSURE_IDENTITY_KEYS))
-        if missing:
-            raise ValueError(f"{label}: manifest does not identify {missing}")
-        checkpoint, network_seed = (closure["checkpoint_sha256"],
-                                    closure["network_seed"])
-        if not (isinstance(checkpoint, str) and len(checkpoint) == 64
-                and set(checkpoint) <= set("0123456789abcdef")):
-            raise ValueError(f"{label}: checkpoint_sha256 is not a SHA-256")
-        if type(network_seed) is not int or network_seed < 0:
-            raise ValueError(f"{label}: network_seed is not a non-negative int")
-        request = {"objective": objective, "window_days": window_days}
-        stated = {key: closure[key] for key in request}
-        if stated != request:
-            raise ValueError(f"{label}: manifest states {stated}, the score "
-                             f"request {request}")
-        pins = _day_file_pins(manifest)  # exactly the files the loader reads
-        if not pins:
-            raise ValueError(f"{label}: manifest pins no day files")
-        directory = root.stat()
-        bound[label] = {
-            "root": str(root), "manifest_sha256": sha,
-            "checkpoint_sha256": checkpoint, "network_seed": network_seed,
-            "_directory": (directory.st_dev, directory.st_ino),
-            "_day_files": set(pins.values()),
-        }
+        try:
+            bound[label] = admit_trained_run(
+                root, sha, objective=objective, window_days=window_days)
+        except ValueError as error:
+            raise ValueError(f"{label}: {error}") from error
     for key in ("_directory", "manifest_sha256", "network_seed",
                 "checkpoint_sha256"):
         values = [item[key] for item in bound.values()]

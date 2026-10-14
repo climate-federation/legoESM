@@ -1542,3 +1542,90 @@ def assert_network_gradients_live(grads) -> None:
             "SWG network gradient contains non-finite elements: "
             f"{poisoned}")
     assert_no_inert(named)
+
+
+# ---------------------------------------------------- trained-closure free run
+# ONE schema for a trained closure's free run: the training driver
+# (scripts/run/run_swg_online_training.py) writes it and the held-out scorer
+# (nemo_testcase_l1_swg_online_evaluation.py) reads it, both from here.
+# Every day file is a dual file of the double-gyre driver's daily-mean format
+# (run_swg_double_gyre.py ``run_long``): the end-of-day snapshot beside the
+# arithmetic mean of every post-step state of that model day, under these
+# per-file labels; the scorer shows the sampling from the data.
+DUAL_SCHEMA = "legoesm-swg-double-gyre-daily-v2"
+SNAPSHOT_LABEL = "end-of-day instantaneous state"
+DAILY_MEAN_LABEL = "arithmetic mean of every post-step state in model day"
+SNAPSHOT_FIELDS = ("ssh_m", "u_m_s", "v_m_s")
+DAILY_MEAN_FIELDS = ("ssh_daily_mean_m", "u_daily_mean_m_s", "v_daily_mean_m_s")
+FREE_RUN_MANIFEST_SCHEMA = "legoesm-swg-online-free-run-v2"
+FREE_RUN_CLOSURE_KEYS = (
+    "run_id", "experiment", "config_sha256", "dataset_contract_sha256",
+    "network_seed", "window_days", "objective", "wall_ring", "network_spec",
+    "checkpoint_path", "checkpoint_sha256")
+
+
+def _is_sha256(value) -> bool:
+    return (isinstance(value, str) and len(value) == 64
+            and set(value) <= set("0123456789abcdef"))
+
+
+def free_run_closure(closure) -> dict:
+    """Validate the ``closure`` block of a trained-closure free-run manifest.
+
+    The writer builds the block through this function and the reader admits
+    it through ``admit_free_run_closure``.  Exactly ``FREE_RUN_CLOSURE_KEYS``;
+    ``checkpoint_path`` must name an existing file whose SHA-256 is
+    ``checkpoint_sha256``, so a manifest is tied to the network file it names.
+    """
+    if not isinstance(closure, dict) \
+            or set(closure) != set(FREE_RUN_CLOSURE_KEYS):
+        found = (sorted(closure) if isinstance(closure, dict)
+                 else type(closure).__name__)
+        raise ValueError("free-run closure must hold exactly the keys "
+                         f"{sorted(FREE_RUN_CLOSURE_KEYS)}, found {found}")
+    for key in ("run_id", "experiment"):
+        if not isinstance(closure[key], str) or not closure[key]:
+            raise ValueError(f"free-run closure {key} must be a non-empty string")
+    for key in ("config_sha256", "dataset_contract_sha256", "checkpoint_sha256"):
+        if not _is_sha256(closure[key]):
+            raise ValueError(f"free-run closure {key} is not a SHA-256")
+    seed = closure["network_seed"]
+    if type(seed) is not int or seed < 0:
+        raise ValueError("free-run closure network_seed must be a "
+                         "non-negative int")
+    window = closure["window_days"]
+    if type(window) is not int or window not in ADMITTED_WINDOWS_DAYS:
+        raise ValueError("free-run closure window_days must be one of "
+                         f"{ADMITTED_WINDOWS_DAYS}")
+    if closure["objective"] not in OBJECTIVE_OPERATORS:
+        raise ValueError(f"free-run closure objective must be one of "
+                         f"{OBJECTIVE_OPERATORS}")
+    if closure["wall_ring"] not in WALL_RING_OPTIONS:
+        raise ValueError(f"free-run closure wall_ring must be one of "
+                         f"{WALL_RING_OPTIONS}")
+    if not isinstance(closure["network_spec"], dict) \
+            or set(closure["network_spec"]) != set(SWGNetworkSpec._fields):
+        raise ValueError("free-run closure network_spec must hold exactly the "
+                         f"keys {sorted(SWGNetworkSpec._fields)}")
+    path = closure["checkpoint_path"]
+    if not isinstance(path, str) or not Path(path).is_absolute():
+        raise ValueError("free-run closure checkpoint_path must be absolute")
+    if not Path(path).is_file():
+        raise ValueError(f"free-run checkpoint file is missing: {path}")
+    if _sha256(Path(path)) != closure["checkpoint_sha256"]:
+        raise ValueError(
+            f"free-run checkpoint file {path} differs from checkpoint_sha256")
+    return dict(closure)
+
+
+def admit_free_run_closure(manifest) -> dict:
+    """The validated closure of one trained-closure free-run manifest.
+
+    Refuses any other manifest schema and every closure ``free_run_closure``
+    refuses (missing, extra or mistyped key; missing or changed checkpoint).
+    """
+    schema = manifest.get("schema") if isinstance(manifest, dict) else None
+    if schema != FREE_RUN_MANIFEST_SCHEMA:
+        raise ValueError(f"free-run manifest schema must be "
+                         f"{FREE_RUN_MANIFEST_SCHEMA!r}, found {schema!r}")
+    return free_run_closure(manifest.get("closure"))

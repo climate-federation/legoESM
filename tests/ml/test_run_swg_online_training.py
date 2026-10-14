@@ -15,8 +15,14 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
-from legoesm.ocean.fidelity.nemo_testcase_recipe import build_swg_card
+from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+    build_swg_card,
+    swg_surface_wind,
+)
+from legoesm.ocean.state import OceanSurfaceForcing
 from legoesm.training.swg_online import (
+    DAILY_MEAN_FIELDS,
+    SNAPSHOT_FIELDS,
     SWGOptimizerSettings,
     SWGScalarPotentialCNN,
     build_closure_geometry,
@@ -25,6 +31,7 @@ from legoesm.training.swg_online import (
     create_swg_optimizer,
     deterministic_trajectory_loss,
     maddison_eq6_network_scales,
+    swg_online_step,
 )
 
 _ROOT = Path(__file__).parents[2]
@@ -46,7 +53,8 @@ records = _load("swg_online_record_writer",
 evaluation = _load(
     "swg_online_evaluation", _ROOT / "scripts/validate/ocean_fidelity/"
     "testcases/nemo_testcase_l1_swg_online_evaluation.py")
-CONFIGS = sorted((_ROOT / "config/swg_online").glob("*.json"))
+CONFIGS = sorted((_ROOT / "config/swg_online").glob("exp1_*.json"))
+PILOT = _ROOT / "config/swg_online/pilot_template_ring_excluded.json"
 CPU = {"device": "cpu", "backend": "cpu", "precision_policy": "fp64",
        "transcendentals": "libm", "physical_gpu": None,
        "cuda_visible_devices": None, "jax_platforms": "cpu",
@@ -96,9 +104,30 @@ def test_committed_configs_are_the_three_candidates_of_the_template_procedure():
         assert config["network"] == {
             "hidden_channels": 16, "hidden_layers": 4, "kernel_size": 3,
             "scales": driver.SCALE_RULE}
+        # Daily means beside the snapshots, on the controls' CPU and libm.
         assert config["free_run"] == {
-            "days": 7300, "start": "rest", "sampling": "daily_snapshot"}
+            "days": 7300, "start": "rest",
+            "sampling": "end_of_day_snapshot_and_daily_mean",
+            "device": "cpu", "transcendentals": "libm"}
         assert config["deck"] == "dg50"
+
+
+def test_pilot_restricts_seeds_windows_and_training_years_by_its_own_keys():
+    """The pilot is candidate template+excluded with only these keys changed:
+    one seed, window lengths 1 and 2 days, and the train split cut to the
+    first two training years of the 12-year record; validation, test and
+    every other choice are experiment one's."""
+    pilot = driver.load_config(PILOT)
+    base = driver.load_config(
+        _ROOT / "config/swg_online/exp1_template_ring_excluded.json")
+    first = base["dataset"]["splits_days"]["train"][0]
+    expected = copy.deepcopy(base)
+    expected.update(experiment="swgonl_pilot_template_ring_excluded",
+                    description=pilot["description"], seeds=[20261013])
+    expected["dataset"]["splits_days"]["train"] = [first, first + 2 * 365]
+    expected["curriculum"]["window_days"] = [1, 2]
+    assert pilot == expected
+    assert pilot["dataset"]["splits_days"]["train"] == [731, 1461]
 
 
 @pytest.mark.parametrize("edit,match", [
@@ -111,8 +140,8 @@ def test_committed_configs_are_the_three_candidates_of_the_template_procedure():
     (lambda c: c["optimiser"].update(schedule="warmup_cosine"), "constant"),
     (lambda c: c["optimiser"].update(gradient_clipping="global_norm"), "none"),
     (lambda c: c["optimiser"].update(learning_rate=1), "finite float"),
-    (lambda c: c.update(seeds=[1, 2]), "three distinct"),
-    (lambda c: c.update(seeds=[1, 1, 2]), "three distinct"),
+    (lambda c: c.update(seeds=[]), "one or more distinct"),
+    (lambda c: c.update(seeds=[1, 1, 2]), "one or more distinct"),
     (lambda c: c["curriculum"].update(window_days=[1, 16]), "window_days"),
     (lambda c: c["curriculum"].update(window_days=[2, 1]), "window_days"),
     (lambda c: c["curriculum"].update(optimiser_between_windows="carried"),
@@ -120,6 +149,10 @@ def test_committed_configs_are_the_three_candidates_of_the_template_procedure():
     (lambda c: c["dataset"].update(batch_size=8), "batch_size"),
     (lambda c: c["network"].update(scales="unit"), "scales"),
     (lambda c: c["free_run"].update(start="restart"), "rest"),
+    (lambda c: c["free_run"].update(sampling="daily_snapshot"), "sampling"),
+    (lambda c: c["free_run"].pop("device"), "exactly the keys"),
+    (lambda c: c["free_run"].update(device="cuda"), "controls ran"),
+    (lambda c: c["free_run"].update(transcendentals="native"), "controls ran"),
     (lambda c: c.update(deck="maddison"), "deck"),
 ])
 def test_config_refuses_missing_extra_and_unknown_choices(tmp_path, edit, match):
@@ -212,8 +245,8 @@ def _config(record_root: Path, **changes) -> dict:
     config = json.loads(CONFIGS[0].read_text())
     config.update(
         experiment="test_small", objective="template", wall_ring="excluded",
-        seeds=[11, 7, 4],
-        free_run={"days": 1, "start": "rest", "sampling": "daily_snapshot"})
+        seeds=[11, 7, 4])
+    config["free_run"]["days"] = 2   # day 1's sampling check reads day 2
     config["dataset"]["records"] = [
         {"root": str(record_root), "chunk_label": "dual"}]
     config["dataset"]["splits_days"] = {
@@ -542,32 +575,177 @@ def test_resume_reproduces_the_next_update_bit_for_bit(trained):
         == trained["killed_epoch_two_sha256"]
 
 
-def test_free_runs_are_scored_by_the_harness_and_identify_the_closure(trained):
-    log = trained["log"]
-    assert [run["window_days"] for run in log["free_runs"]] == [1, 2]
-    for run in log["free_runs"]:
-        root = Path(run["root"])
-        manifest = json.loads((root / "manifest.json").read_text())
-        assert run["manifest_sha256"] == driver._sha256(root / "manifest.json")
+def test_free_runs_are_scored_by_the_harness_and_identify_the_closure(
+        trained, small_card):
+    """Each trained window length's free run (``free-run``, after training)
+    names that window's last checkpoint and is admitted by the held-out
+    scorer: the manifest binds and day 1 is shown from the data to be an
+    end-of-day snapshot (against day 2's mean)."""
+    log, config, path = trained["log"], trained["config"], trained["path"]
+    run_dir = trained["folder"] / "run"
+
+    def free(window_days):
+        return driver.run_free_run(
+            config, path, card=small_card, seed=11, run_dir=run_dir,
+            window_days=window_days, device=CPU, commit="0" * 40)
+
+    admitted = {}
+    for window_days in (1, 2):
+        manifest = free(window_days)
+        root = run_dir / "free_runs" / f"w{window_days:02d}"
         final = next(entry for entry in log["epochs"]
-                     if entry["window_days"] == run["window_days"]
+                     if entry["window_days"] == window_days
                      and entry["epoch"] == 2)
         closure = manifest["closure"]
-        assert closure["checkpoint"]["sha256"] == final["checkpoint"]["sha256"]
+        assert closure["checkpoint_sha256"] == final["checkpoint"]["sha256"]
+        assert closure["checkpoint_path"] == str(
+            (run_dir / final["checkpoint"]["path"]).resolve())
         assert closure["network_seed"] == 11
-        assert closure["window_days"] == run["window_days"]
+        assert closure["window_days"] == window_days
         assert closure["objective"] == "template"
         assert closure["run_id"] == "test_small/seed11"
-        assert manifest["sampling"] == "daily_snapshot"
-        assert manifest["start"] == "rest"
+        assert manifest["start"] == "rest" and manifest["status"] == "complete"
+        admitted[window_days] = evaluation.admit_trained_run(
+            root, driver._sha256(root / "manifest.json"),
+            objective="template", window_days=window_days)
         ssh, u, v = evaluation._load_native_window(root, 1, 1)
         assert ssh.shape[0] == 1 and np.all(np.isfinite(ssh))
         assert np.any(u != 0.0)
-        with np.load(root / "day0001.npz") as saved:
-            assert str(saved["snapshot_sampling"]) \
-                == evaluation.FINE_SNAPSHOT_LABEL
-    assert log["free_runs"][0]["checkpoint_sha256"] \
-        != log["free_runs"][1]["checkpoint_sha256"]
+    assert admitted[1]["checkpoint_sha256"] != admitted[2]["checkpoint_sha256"]
+    with pytest.raises(FileExistsError, match="complete free run"):
+        free(1)
+    with pytest.raises(ValueError, match="has not completed"):
+        free(4)
+
+
+def test_end_to_end_two_steps_free_run_and_the_scorers_admission(
+        tmp_path, small_card, record):
+    """Round 8 on the tiny synthetic record: two optimiser steps, a CPU/libm
+    free run of four days, and the held-out scorer's admission of it on a
+    shortened window (days 1-3).  (1) One manifest schema: the driver's
+    manifest is admitted, corrupted ones are refused.  (2) Every day file
+    holds the end-of-day snapshot beside the mean of every post-step state,
+    under the scorer's dual labels, and the free run executes only as the
+    configuration states.  (3) The checkpoint file the manifest names is
+    checked against its digest."""
+    config = _config(record, seeds=[11])
+    config["curriculum"].update(window_days=[1], epochs_per_window=1)
+    config["free_run"]["days"] = 4
+    path = _write_config(tmp_path / "config.json", config)
+    run_dir = tmp_path / "run"
+    log = driver.train(config, path, card=small_card, seed=11, run_dir=run_dir,
+                       device=CPU, windows_per_call=10, commit="0" * 40)
+    assert [entry["optimizer_steps"] for entry in log["epochs"]] == [2]
+    checkpoint = run_dir / log["epochs"][0]["checkpoint"]["path"]
+
+    def free(device):
+        return driver.run_free_run(
+            config, path, card=small_card, seed=11, run_dir=run_dir,
+            window_days=1, device=device, commit="0" * 40)
+
+    # (2) Not on another device or math library than the configuration's.
+    for device in (dict(CPU, device="cuda", backend="gpu",
+                        transcendentals="native"),
+                   dict(CPU, transcendentals="native")):
+        with pytest.raises(RuntimeError, match="execute as configured"):
+            free(device)
+    manifest = free(CPU)
+    root = run_dir / "free_runs" / "w01"
+    sha = driver._sha256(root / "manifest.json")
+    assert (manifest["backend"], manifest["transcendentals"]) == ("cpu", "libm")
+
+    # (1)+(3) The scorer admits the driver's manifest and its checkpoint file.
+    admitted = evaluation.admit_trained_run(root, sha, objective="template",
+                                            window_days=1)
+    assert admitted["checkpoint_path"] == str(checkpoint.resolve())
+    assert admitted["checkpoint_sha256"] == driver._sha256(checkpoint) \
+        == log["epochs"][0]["checkpoint"]["sha256"]
+    assert admitted["network_seed"] == 11
+
+    # (2) Shortened window, days 1-3: dual files, each snapshot shown from the
+    # data against its own and the next day's mean (day 4's for day 3).
+    loaded = evaluation._load_native_window(root, 1, 3)
+    with np.load(root / "day0001.npz") as saved:
+        assert all(np.array_equal(saved[key], value[0])
+                   for key, value in zip(SNAPSHOT_FIELDS, loaded, strict=True))
+        stored = [np.asarray(saved[key]) for key in DAILY_MEAN_FIELDS]
+    # ... and day 1's mean is that of all 24 post-step states, recomputed
+    # one step at a time from the checkpoint the manifest names.
+    geometry = build_closure_geometry(small_card)
+    spec, _ = driver.network_spec(config, small_card, geometry)
+    network = SWGScalarPotentialCNN(spec, key=jax.random.PRNGKey(11))
+    optimizer = create_swg_optimizer(SWGOptimizerSettings(**config["optimiser"]))
+    network, _ = driver.load_checkpoint_or_fail(checkpoint, (
+        network, optimizer.init(eqx.filter(network, eqx.is_inexact_array))))
+    tau_u, tau_v = swg_surface_wind(small_card.resolved_namelist)
+    forcing = OceanSurfaceForcing(tau_i_native=jnp.asarray(tau_u),
+                                  tau_j_native=jnp.asarray(tau_v))
+    state = driver._double_gyre_driver().seed_steady_forcing_carry(
+        small_card.recipe.initial_state, forcing)
+    noise = jnp.zeros((3,) + tuple(geometry.tmask.shape))
+    step = jax.jit(lambda current: swg_online_step(
+        network, current, noise, jax.random.PRNGKey(11), jnp.asarray(0.0),
+        card=small_card, geometry=geometry, forcing=forcing))
+    total = [0.0, 0.0, 0.0]
+    for _ in range(24):
+        state = step(state)
+        total = [value + np.asarray(field) for value, field in zip(total, (
+            state.eta.data, state.u.data[:, 1:, 0], state.v.data[1:, :, 0]))]
+    for mean, value in zip(stored, total, strict=True):
+        np.testing.assert_allclose(mean, value / 24, rtol=0.0,
+                                   atol=1.0e-12 * np.max(np.abs(value / 24)))
+
+    # (1) Corrupted manifests are refused.
+    def corrupted(name, edit):
+        target = tmp_path / name
+        target.mkdir()
+        payload = json.loads((root / "manifest.json").read_text())
+        edit(payload)
+        (target / "manifest.json").write_text(json.dumps(payload))
+        return evaluation.admit_trained_run(
+            target, driver._sha256(target / "manifest.json"),
+            objective="template", window_days=1)
+
+    def round7_block(payload):
+        closure = payload["closure"]
+        closure["checkpoint"] = {"path": closure.pop("checkpoint_path"),
+                                 "sha256": closure.pop("checkpoint_sha256")}
+
+    for name, edit, match in (
+            ("round7_schema", lambda payload: payload.update(
+                schema="legoesm-swg-online-free-run-v1"), "manifest schema"),
+            ("other_digest", lambda payload: payload["closure"].update(
+                checkpoint_sha256="0" * 64), "differs from checkpoint_sha256"),
+            ("round7_block", round7_block, "exactly the keys")):
+        with pytest.raises(ValueError, match=match):
+            corrupted(name, edit)
+
+    # (3) The checkpoint file missing, then changed by one bit.
+    original = checkpoint.read_bytes()
+    checkpoint.rename(tmp_path / "moved.eqx")
+    with pytest.raises(ValueError, match="checkpoint file is missing"):
+        evaluation.admit_trained_run(root, sha, objective="template",
+                                     window_days=1)
+    checkpoint.write_bytes(original[:-1] + bytes([original[-1] ^ 1]))
+    with pytest.raises(ValueError, match="differs from checkpoint_sha256"):
+        evaluation.admit_trained_run(root, sha, objective="template",
+                                     window_days=1)
+
+
+def test_free_run_command_takes_its_device_from_the_configuration(
+        tmp_path, monkeypatch, capsys):
+    """``free-run`` has no device flag: the configuration's CPU is selected,
+    and an environment set up for another platform is refused."""
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(_config(tmp_path / "record")))
+    argv = ["free-run", "--config", str(path), "--seed", "11", "--run-root",
+            str(tmp_path / "runs"), "--window-days", "1"]
+    with pytest.raises(SystemExit):
+        driver.main(argv + ["--device", "cuda"])
+    monkeypatch.setenv("JAX_PLATFORMS", "cuda")
+    assert driver.main(argv) == 2
+    assert "JAX_PLATFORMS must be exactly 'cpu'" in capsys.readouterr().err
+    assert not (tmp_path / "runs").exists()
 
 
 def test_dg50_free_run_deck_passes_the_scorers_deck_binding():
@@ -614,6 +792,16 @@ _REAL_RECORD = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
                     "swgonl_rounds/round6/hourly_dual_12y")
 _REAL_CHUNKS = tuple(f"dual_day{day:04d}_to_day{day + 30:04d}"
                      for day in range(731, 911, 30))
+
+
+@pytest.mark.skipif(not _REAL_RECORD.is_dir(),
+                    reason="round-6 hourly record not mounted")
+def test_every_committed_record_label_names_complete_chunks_on_disk():
+    """Round 8: the test-year chunks are ``dual_test_day...``; a configuration
+    labelling them ``dual`` pins none and the contract refuses its test split."""
+    for path in (*CONFIGS, PILOT):
+        for record in driver.load_config(path)["dataset"]["records"]:
+            assert driver.complete_chunks(record), (path.name, record)
 
 
 @pytest.mark.skipif(

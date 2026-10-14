@@ -225,8 +225,10 @@ decay, clipping and Optax epsilon) is refused, and any schedule but
 --windows-per-call <n>` runs one network seed of one configuration in
 `<dir>/<experiment>/seed<s>`. It refuses to start without a configuration
 file, and the file must state every choice with no extra or missing key:
-deck, objective, wall ring, network, at least three seeds, record roots and
-chunk label, split days, batch size, curriculum, optimiser and free run.
+deck, objective, wall ring, network, one or more seeds (the held-out gate
+scores three or more), record roots and chunk label, split days, batch size,
+curriculum, optimiser and free run (including its device and math policy,
+which must be the controls' CPU and libm).
 `windows_per_call` (1, 2, 5 or 10) only splits each batch of ten into equal
 device calls to bound memory; the batch loss and gradient are the mean of
 the parts.
@@ -252,15 +254,21 @@ the parts.
 - Resume: rerunning the same command continues after the last logged epoch
   from its checkpoint (digest checked) and refuses if anything in the run
   manifest differs (configuration, commit, device type, windows per call).
-- After the last epoch of each window length: a free run of the coarse model
-  from rest with the trained closure (`swg_online_step`, closure at every
-  stage) for 7,300 days, daily snapshots with the snapshot label on every
-  file, and a manifest that names the run, seed, window length, checkpoint
-  digest, objective and contract digest. An interrupted free run is archived
-  and restarted.
+- After the last epoch of a window length, a separate process (`free-run
+  --config <file> --seed <s> --run-root <dir> --window-days <w>`, round 8)
+  runs the coarse model from rest with that window's last checkpoint
+  (`swg_online_step`, closure at every stage) for 7,300 days on the device
+  and math policy the configuration states (CPU, libm, as the controls).
+  Every day file holds the end-of-day snapshot beside the mean of every
+  post-step state of that day, under the scorer's dual per-file labels; the
+  manifest is the one free-run schema of `legoesm.training.swg_online`
+  (checkpoint file and digest, network seed, objective, window length, run
+  and contract identity), which the scorer reads through the same module
+  and checks against the checkpoint file. An interrupted free run is
+  archived and restarted; a complete one is never overwritten.
 - `profile` times one batch-10 optimiser step and one validation batch per
-  window length and one free-run day on the selected device, and
-  extrapolates one seed.
+  window length, and one free-run day only on the free runs' configured
+  device, and extrapolates one seed.
 - `check-data` pins the record the same way and builds the first batch of
   every split at every window length (digests, record counts, finiteness,
   rebalanced starts), so the finished record is exercised before any run.
@@ -285,6 +293,11 @@ epoch are fixed. Training is 396 h per seed; the four 20-year free runs add
 34--36 h (4.2--4.5 s per model day); loading, digests and start rebalancing
 add about 0.5 s per batch (measured on the real chunks), about half an hour.
 One seed is therefore about 430 h on this CPU, so training needs the GPU.
+
+**Superseded (round 8):** the operator's `profile --device cuda` at
+`2a227dbc9` measured one batch-10 step at 6.2, 12.4, 24.8 and 49.7 s (1, 2,
+4, 8 days), 30--31 times the CPU, so the 4.6x expectation below was far too
+pessimistic; the round-8 integration receipt has the numbers.
 
 **GPU expectation (not measured).** The one GPU/CPU pair measured on this
 machine for the SWG step, the compiled one-day forward scan of the 6.25 km
@@ -355,7 +368,7 @@ no-inert gate. Collapsed ensemble variance is a planted failure.
 | Network scales | Eq. 6 shallow-water analogue from the deck | Formula and moved-deck tests; ten-start measurement |
 | Start gates | 1% initial acceleration, no inert leaf, finite every step | End-to-end test (gate recorded); real-chunk test |
 | Checkpoint and resume | Atomic per-epoch checkpoints; resume refuses any changed choice | Killed-run test: resumed epoch equals the killed process's state word for word |
-| Free runs | 7,300 days from rest, labelled snapshots, closure identity | Read through the held-out harness's own loader |
+| Free runs | 7,300 days from rest on CPU/libm, snapshot and daily mean every day, one manifest schema with the checkpoint file's digest | Round-8 end-to-end test: two steps, free run, the scorer's admission; corrupted manifests and a missing or changed checkpoint refused |
 | Held-out gate | Truth-spread bars, three seeds | Evaluation tests; three review findings open |
 | Non-divergent forcing | F-potential rotated gradient at every RK3 stage | Divergence, wall, momentum, zero-seam, JVP/FD tests |
 
@@ -379,8 +392,10 @@ no-inert gate. Collapsed ensemble variance is a planted failure.
 4. Seeds 20261013, 20261014, 20261015; 20261015 measured 0.86% of the 1%
    initial-acceleration bar, so a seed may fail the gate on its own first
    batch and stop.
-5. Free runs run in the training process after each window length, so a
-   seed's wall time includes four 20-year runs; running them elsewhere needs
-   a separate command.
+5. Free runs are a separate CPU process per window length (round 8), so GPU
+   training does not wait for them; each 20-year CPU run costs about 9-12 h
+   (round-8 receipt), against about 40 minutes on the GPU (operator's
+   profile, 0.33 s per day) at the price of comparability with the CPU/libm
+   controls.
 6. Gate decisions carried from round 6 (window count, skill margin, noise
    tolerance) and the adequacy bars (spin-up pair).

@@ -13,8 +13,13 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from legoesm.training.swg_online import (
+    FREE_RUN_CLOSURE_KEYS,
+    FREE_RUN_MANIFEST_SCHEMA,
+    SWGNetworkSpec,
+)
 
-SCRIPT = (Path(__file__).parents[3] / "scripts" / "validate" / "ocean_fidelity"
+SCRIPT =(Path(__file__).parents[3] / "scripts" / "validate" / "ocean_fidelity"
           / "testcases" / "nemo_testcase_l1_swg_online_evaluation.py")
 SPEC = importlib.util.spec_from_file_location("swg_online_evaluation", SCRIPT)
 evaluation = importlib.util.module_from_spec(SPEC)
@@ -391,29 +396,49 @@ def test_free_run_scoring_binds_manifest_and_marks_nonfinite_seed(tmp_path):
     assert not rows[0]["physical_health"]["passes"]
 
 
-def _trained_run(root, *, seed, checkpoint, objective="symmetric",
-                 window_days=4, day_digest=None, drop=None,
+def _closure(root, *, seed, objective="symmetric", window_days=4,
+             checkpoint=None):
+    """A closure block in the one free-run schema; its checkpoint is a real
+    file under ``root`` holding ``checkpoint`` (default: the root's name)."""
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / "closure.eqx"
+    path.write_bytes(root.name.encode() if checkpoint is None else checkpoint)
+    return {"run_id": f"test/seed{seed}", "experiment": "test",
+            "config_sha256": "a" * 64, "dataset_contract_sha256": "b" * 64,
+            "network_seed": seed, "window_days": window_days,
+            "objective": objective, "wall_ring": "excluded",
+            "network_spec": dict.fromkeys(SWGNetworkSpec._fields, 1),
+            "checkpoint_path": str(path.resolve()),
+            "checkpoint_sha256": evaluation._sha256(path)}
+
+
+def _trained_run(root, *, seed, checkpoint=None, objective="symmetric",
+                 window_days=4, day_digest=None, edit=None,
                  digest_key="daily_sha256"):
     """A minimal trained-closure free-run manifest (the binding reads only it).
 
     ``digest_key`` is where the day-file digests go: either key the loader
-    accepts, or None for a manifest that pins no day files."""
-    root.mkdir()
-    closure = {"checkpoint_sha256": checkpoint, "network_seed": seed,
-               "objective": objective, "window_days": window_days}
-    closure.pop(drop, None)
+    accepts, or None for a manifest that pins no day files; ``edit`` changes
+    the manifest before it is written."""
+    closure = _closure(root, seed=seed, objective=objective,
+                       window_days=window_days, checkpoint=checkpoint)
     digest = day_digest or hashlib.sha256(root.name.encode()).hexdigest()
     pins = {} if digest_key is None else {digest_key: {"day0001.npz": digest}}
-    (root / "manifest.json").write_text(json.dumps({
-        "status": "complete", "closure": closure, **pins}))
+    manifest = {"schema": FREE_RUN_MANIFEST_SCHEMA, "status": "complete",
+                "closure": closure, **pins}
+    if edit is not None:
+        edit(manifest)
+    (root / "manifest.json").write_text(json.dumps(manifest))
     return root, evaluation._sha256(root / "manifest.json")
 
 
 def test_trained_score_requires_three_distinct_identified_runs(tmp_path,
                                                               monkeypatch):
     """Codex round-6 defect 3: one run under three labels never passes, and
-    every manifest must identify checkpoint, network seed, objective and
-    window, matching the request.  No plant reaches the scorer."""
+    every manifest must follow the one free-run schema (checkpoint file and
+    digest, network seed, objective, window), matching the request; round 8:
+    the checkpoint file must exist with that digest.  No plant reaches the
+    scorer."""
     objective = "symmetric"
     scored = []
     monkeypatch.setattr(evaluation, "freeze_record", lambda *args, **kwargs: (
@@ -422,8 +447,17 @@ def test_trained_score_requires_three_distinct_identified_runs(tmp_path,
         scored.append(root) or [dict(row, scored_data_sha256=f"{root}/{k}")
                                 for k, row in enumerate(
                                     evaluation.truth_as_seed(objective))]))
-    runs = {f"s{k}": _trained_run(tmp_path / f"run{k}", seed=k,
-                                  checkpoint=f"{k:064x}") for k in range(3)}
+    runs = {f"s{k}": _trained_run(tmp_path / f"run{k}", seed=k)
+            for k in range(3)}
+    missing_checkpoint = _trained_run(tmp_path / "gone", seed=40)
+    (tmp_path / "gone" / "closure.eqx").unlink()
+    changed_checkpoint = _trained_run(tmp_path / "changed", seed=41)
+    (tmp_path / "changed" / "closure.eqx").write_bytes(b"another network")
+
+    def round7_block(manifest):
+        closure = manifest["closure"]
+        closure["checkpoint"] = {"path": closure.pop("checkpoint_path"),
+                                 "sha256": closure.pop("checkpoint_sha256")}
 
     def score(seeds, **request):
         return evaluation.score_trained_closure(
@@ -443,43 +477,57 @@ def test_trained_score_requires_three_distinct_identified_runs(tmp_path,
             runs | {"s3": (tmp_path / "copy0", runs["s0"][1])},
             "share a manifest_sha256"),
         "duplicate network seed": (runs | {"s3": _trained_run(
-            tmp_path / "dup_seed", seed=0, checkpoint="f" * 64)},
-            "share a network_seed"),
+            tmp_path / "dup_seed", seed=0)}, "share a network_seed"),
         "duplicate checkpoint": (runs | {"s3": _trained_run(
-            tmp_path / "dup_checkpoint", seed=9, checkpoint=f"{0:064x}")},
+            tmp_path / "dup_checkpoint", seed=9, checkpoint=b"run0")},
             "share a checkpoint_sha256"),
         "copied day files, relabelled": (runs | {"s3": _trained_run(
-            tmp_path / "dup_days", seed=8, checkpoint="e" * 64,
+            tmp_path / "dup_days", seed=8,
             day_digest=hashlib.sha256(b"run0").hexdigest())},
             "share day files"),
         # round-7 verifier: one run's day files under three relabelled
         # manifests whose digests sit under the loader's second key
         "copied day files, second digest key": ({f"o{k}": _trained_run(
-            tmp_path / f"out{k}", seed=20 + k, checkpoint=f"{20 + k:064x}",
+            tmp_path / f"out{k}", seed=20 + k,
             day_digest=hashlib.sha256(b"one run").hexdigest(),
             digest_key="output_daily_sha256") for k in range(3)},
             "share day files"),
         "no day files pinned": (runs | {"s0": _trained_run(
-            tmp_path / "no_pins", seed=30, checkpoint="9" * 64,
-            digest_key=None)}, "pins no day files"),
-        "malformed checkpoint": (runs | {"s0": _trained_run(
-            tmp_path / "bad_checkpoint", seed=5, checkpoint="xyz")},
+            tmp_path / "no_pins", seed=30, digest_key=None)},
+            "pins no day files"),
+        "malformed checkpoint digest": (runs | {"s0": _trained_run(
+            tmp_path / "bad_checkpoint", seed=5, edit=lambda manifest:
+            manifest["closure"].update(checkpoint_sha256="xyz"))},
             "not a SHA-256"),
         "boolean seed": (runs | {"s0": _trained_run(
-            tmp_path / "bad_seed", seed=True, checkpoint="b" * 64)},
-            "non-negative int"),
+            tmp_path / "bad_seed", seed=True)}, "non-negative int"),
         "objective differs": (runs | {"s0": _trained_run(
-            tmp_path / "bad_objective", seed=6, checkpoint="c" * 64,
-            objective="template")}, "score request"),
+            tmp_path / "bad_objective", seed=6, objective="template")},
+            "score request"),
         "window differs": (runs | {"s0": _trained_run(
-            tmp_path / "bad_window", seed=6, checkpoint="c" * 64,
-            window_days=8)}, "score request"),
+            tmp_path / "bad_window", seed=6, window_days=8)}, "score request"),
         "two runs": ({key: runs[key] for key in ("s0", "s1")}, "three"),
+        # round 8: the checkpoint file is read, and the schema is the one
+        "checkpoint file missing": (runs | {"s0": missing_checkpoint},
+                                    "checkpoint file is missing"),
+        "checkpoint file changed": (runs | {"s0": changed_checkpoint},
+                                    "differs from checkpoint_sha256"),
+        "round-7 checkpoint block": (runs | {"s0": _trained_run(
+            tmp_path / "round7_block", seed=42, edit=round7_block)},
+            "exactly the keys"),
+        "another manifest schema": (runs | {"s0": _trained_run(
+            tmp_path / "round7_schema", seed=43, edit=lambda manifest:
+            manifest.update(schema="legoesm-swg-online-free-run-v1"))},
+            "manifest schema"),
+        # round-7 verifier, minor 1: a list crashed instead of refusing
+        "day-file digests listed": (runs | {"s0": _trained_run(
+            tmp_path / "listed", seed=44, edit=lambda manifest:
+            manifest.update(daily_sha256=["0" * 64]))}, "not a mapping"),
     }
-    for key in evaluation.CLOSURE_IDENTITY_KEYS:
+    for key in FREE_RUN_CLOSURE_KEYS:
         plants[f"no {key}"] = (runs | {"s0": _trained_run(
-            tmp_path / f"no_{key}", seed=7, checkpoint="d" * 64, drop=key)},
-            "does not identify")
+            tmp_path / f"no_{key}", seed=7, edit=lambda manifest, key=key:
+            manifest["closure"].pop(key))}, "exactly the keys")
     for name, (seeds, match) in plants.items():
         with pytest.raises(ValueError, match=match):
             score(seeds)
@@ -511,16 +559,16 @@ def test_runs_with_identical_scored_data_are_refused(tmp_path, monkeypatch):
         frozen, None, reference))
 
     def run(k, **archive):
+        root = tmp_path / f"run{k}"
         manifest = {
+            "schema": FREE_RUN_MANIFEST_SCHEMA,
             "namelist": SWG_DG50_NAMELIST._asdict(),
             "numerical_health": {
                 "all_finite": True, "minimum_total_layer_thickness_m": 497.0,
                 "maximum_u_courant": 0.02, "maximum_v_courant": 0.01},
-            "closure": {"checkpoint_sha256": f"{k:064x}", "network_seed": k,
-                        "objective": objective, "window_days": 4}}
-        sha = _dual_archive(tmp_path / f"run{k}", range(400, 404),
-                            manifest=manifest, **archive)
-        return tmp_path / f"run{k}", sha
+            "closure": _closure(root, seed=k, objective=objective)}
+        return root, _dual_archive(root, range(400, 404), manifest=manifest,
+                                   **archive)
 
     copies = {f"s{k}": run(k, extra={"pad": np.int64(k)}) for k in range(3)}
     assert len(evaluation.bind_trained_runs(

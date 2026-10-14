@@ -1,5 +1,5 @@
 {
-  "schema": "legoesm-swg-online-training-v1",
+  "schema": "legoesm-swg-online-training-v2",
   "experiment": "swgonl_exp1_template_ring_weighted",
   "description": "Experiment one, candidate template+weighted: fine-filtered start and target, unfiltered model vorticity in Eq. 7, every interior F point weighted as Eq. 7 is written (first ring next to the walls included). One of three candidates; the owner has not chosen the objective or the wall-ring treatment.",
   "deck": "dg50",
@@ -20,7 +20,7 @@
       },
       {
         "root": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgonl_rounds/round6/hourly_dual_test_year",
-        "chunk_label": "dual"
+        "chunk_label": "dual_test"
       }
     ],
     "splits_days": {
@@ -50,6 +50,8 @@
   "free_run": {
     "days": 7300,
     "start": "rest",
-    "sampling": "daily_snapshot"
+    "sampling": "end_of_day_snapshot_and_daily_mean",
+    "device": "cpu",
+    "transcendentals": "libm"
   }
 }

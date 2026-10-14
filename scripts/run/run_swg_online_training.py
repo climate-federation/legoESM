@@ -2,18 +2,24 @@
 """Train the SWG online closure (experiment one) from one explicit config.
 
 ``train`` runs one network seed of one configuration file: the round-6
-dataset contract over the hourly dual record, windows of 1, 2, 4 and 8 days,
-five epochs each, batches of ten, Eq. 7, AdamW at a constant rate through
-the strict SWG wrapper (re-initialised at every window length, network
-carried), a checkpoint after every epoch, and at the end of every window
-length a free run from rest in the format the held-out harness scores.  It
-resumes from the last completed epoch of its run directory.
+dataset contract over the hourly dual record, the configured window lengths
+(of 1, 2, 4 and 8 days) and epochs, batches of ten, Eq. 7, AdamW at a
+constant rate through the strict SWG wrapper (re-initialised at every window
+length, network carried) and a checkpoint after every epoch.  It resumes
+from the last completed epoch of its run directory.
+
+``free-run`` integrates the coarse card from rest with the closure of one
+trained window length (its last checkpoint) on the device and math policy
+the configuration states, writing every day's end-of-day snapshot beside its
+daily mean in the one free-run schema the held-out scorer admits
+(``legoesm.training.swg_online``).  It is a separate process, so a GPU
+training run and CPU free runs proceed side by side.
 
 ``profile`` times one optimiser step per window length (batch 10), one
-validation batch and one free-run day on the selected device and
-extrapolates the cost of one seed.  ``check-data`` runs the record through
-every split and window length before any training.  No command has a
-default for any scientific choice: the configuration file states them all
+validation batch and, on the free runs' configured device, one free-run day,
+and extrapolates the cost of one seed.  ``check-data`` runs the record
+through every split and window length before any training.  No command has
+a default for any scientific choice: the configuration file states them all
 and the run manifest records them.
 """
 from __future__ import annotations
@@ -32,6 +38,7 @@ import shutil
 import sys
 import tempfile
 import time
+import types
 from pathlib import Path
 
 import equinox as eqx
@@ -50,9 +57,15 @@ from legoesm.ocean.fidelity.nemo_testcase_recipe import (
 from legoesm.ocean.state import OceanSurfaceForcing
 from legoesm.training.swg_online import (
     ADMITTED_WINDOWS_DAYS,
+    DAILY_MEAN_FIELDS,
+    DAILY_MEAN_LABEL,
+    DUAL_SCHEMA,
+    FREE_RUN_MANIFEST_SCHEMA,
     HOURS_PER_DAY,
     OBJECTIVE_OPERATORS,
     SECONDS_PER_HOUR,
+    SNAPSHOT_FIELDS,
+    SNAPSHOT_LABEL,
     START_REBALANCE_MAX_ITERATIONS,
     START_REBALANCE_TOLERANCE,
     TEMPLATE_BATCH_SIZE,
@@ -69,6 +82,7 @@ from legoesm.training.swg_online import (
     create_swg_optimizer,
     deterministic_trajectory_loss,
     eq6_scale_report,
+    free_run_closure,
     initial_closure_acceleration_ratio,
     maddison_eq6_network_scales,
     maddison_half_width_m,
@@ -76,17 +90,20 @@ from legoesm.training.swg_online import (
     swg_online_step,
 )
 
-CONFIG_SCHEMA = "legoesm-swg-online-training-v1"
+CONFIG_SCHEMA = "legoesm-swg-online-training-v2"
 RUN_SCHEMA = "legoesm-swg-online-training-run-v1"
-LOG_SCHEMA = "legoesm-swg-online-training-log-v1"
-FREE_RUN_SCHEMA = "legoesm-swg-online-free-run-v1"
+LOG_SCHEMA = "legoesm-swg-online-training-log-v2"
 PROFILE_SCHEMA = "legoesm-swg-online-training-profile-v1"
 DATASET_SCHEMA = "legoesm-swg-online-dataset-v1"
 SCALE_RULE = "maddison_eq6_shallow_water_grid_analogue"
 DECKS = {"dg50": SWG_DG50_NAMELIST}
-# The per-file label the held-out harness requires on a snapshot it scores
-# (its FINE_SNAPSHOT_LABEL; a test reads a free run through its loader).
-SNAPSHOT_SAMPLING = "end-of-day instantaneous state"
+FREE_RUN_SAMPLING = "end_of_day_snapshot_and_daily_mean"
+# The held-out gate compares every trained free run with the no-closure
+# controls, and both controls ran on the CPU with libm (their manifests:
+# cpu-scanned, libm).  A configuration must state this execution for its
+# free runs; nothing else is admitted, so seed and controls differ only by
+# the closure.
+CONTROL_EXECUTION = {"device": "cpu", "transcendentals": "libm"}
 SECONDS_PER_DAY = 86_400
 _OPERATOR_FIELDS = {"symmetric": "box", "template": "filtered"}
 
@@ -166,12 +183,15 @@ def load_config(path: Path) -> dict:
     if network["scales"] != SCALE_RULE:
         raise ValueError(f"network scales must be {SCALE_RULE!r}")
 
+    # One or more: a pilot trains one seed; the held-out gate scores only
+    # three or more distinct runs (the scorer refuses fewer).
     seeds = config["seeds"]
-    if not isinstance(seeds, list) or len(seeds) < 3 \
-            or len(set(seeds)) != len(seeds):
-        raise ValueError("seeds must list at least three distinct seeds")
+    if not isinstance(seeds, list) or not seeds:
+        raise ValueError("seeds must list one or more distinct seeds")
     for seed in seeds:
         _require_int(seed, "seed", minimum=0)
+    if len(set(seeds)) != len(seeds):
+        raise ValueError("seeds must list one or more distinct seeds")
 
     dataset = config["dataset"]
     _require_keys(dataset, ("records", "splits_days", "batch_size"), "dataset")
@@ -185,9 +205,10 @@ def load_config(path: Path) -> dict:
         if not isinstance(record["root"], str) \
                 or not Path(record["root"]).is_absolute():
             raise ValueError("dataset record root must be an absolute path")
+        # The test-year chunks on disk are dual_test_dayAAAA_to_dayBBBB.
         if not isinstance(record["chunk_label"], str) \
-                or re.fullmatch(r"[a-z0-9]+", record["chunk_label"]) is None:
-            raise ValueError("chunk_label must be a lowercase [a-z0-9] word")
+                or re.fullmatch(r"[a-z0-9_]+", record["chunk_label"]) is None:
+            raise ValueError("chunk_label must be a lowercase [a-z0-9_] word")
     if len({record["root"] for record in records}) != len(records):
         raise ValueError("dataset record roots are duplicated")
     splits = dataset["splits_days"]
@@ -218,10 +239,15 @@ def load_config(path: Path) -> dict:
     create_swg_optimizer(SWGOptimizerSettings(**config["optimiser"]))
 
     free_run = config["free_run"]
-    _require_keys(free_run, ("days", "start", "sampling"), "free_run")
+    _require_keys(free_run, ("days", "start", "sampling", "device",
+                             "transcendentals"), "free_run")
     _require_int(free_run["days"], "free_run days", minimum=1)
-    if free_run["start"] != "rest" or free_run["sampling"] != "daily_snapshot":
-        raise ValueError("free runs start from rest with daily snapshots")
+    if free_run["start"] != "rest" or free_run["sampling"] != FREE_RUN_SAMPLING:
+        raise ValueError(
+            f"free runs start from rest with sampling {FREE_RUN_SAMPLING!r}")
+    if {key: free_run[key] for key in CONTROL_EXECUTION} != CONTROL_EXECUTION:
+        raise ValueError(
+            f"free runs must run as the gate's controls ran: {CONTROL_EXECUTION}")
     return config
 
 
@@ -465,47 +491,66 @@ def batch_start_states(card, batch) -> tuple:
 
 # ------------------------------------------------------------------- free run
 
-def free_run(network, card, geometry, output: Path, *, days: int,
-             closure: dict, commit: str, device: dict) -> dict:
-    """Integrate the coarse card from rest with the closure, daily snapshots.
+def free_run_day(network, card, geometry, *, key):
+    """One compiled model day of a free run, and the steady forcing.
 
-    One jitted scan of ``swg_online_step`` (the trained composition, closure
-    at every RK3 stage, zero noise) per model day.  Every day file carries
-    the snapshot label the held-out harness requires; the manifest names the
-    run, seed, window length, checkpoint digest and objective.
+    The double-gyre driver's daily-mean stepper around ``swg_online_step``
+    (closure at every RK3 stage, zero stage noise, noise scale 0;
+    ``network=None`` steps without a closure): ``state -> (end-of-day state,
+    (ssh, u, v) arithmetic means of every post-step state of the day)``.
     """
-    driver = _double_gyre_driver()
-    per_day = steps_per_day(card)
-    namelist = free_run_namelist(card, days)
     tau_u, tau_v = swg_surface_wind(card.resolved_namelist)
     forcing = OceanSurfaceForcing(
         tau_i_native=jnp.asarray(tau_u, dtype=jnp.float64),
         tau_j_native=jnp.asarray(tau_v, dtype=jnp.float64))
-    state = driver.seed_steady_forcing_carry(card.recipe.initial_state, forcing)
     stage_noise = jnp.zeros((3,) + tuple(geometry.tmask.shape), jnp.float64)
-    key = jax.random.PRNGKey(closure["network_seed"])
 
-    @eqx.filter_jit
-    def one_day(net, carry):
-        def body(current, _):
-            return swg_online_step(
-                net, current, stage_noise, key, jnp.asarray(0.0), card=card,
-                geometry=geometry, forcing=forcing), None
-        return jax.lax.scan(body, carry, None, length=per_day)[0]
+    def step(state, dt_s, surface_forcing):
+        if dt_s != card.dt_s:
+            raise ValueError("a free-run step must use the card's timestep")
+        return swg_online_step(
+            network, state, stage_noise, key, jnp.asarray(0.0), card=card,
+            geometry=geometry, forcing=surface_forcing)
 
+    return forcing, _double_gyre_driver().build_scanned_day_mean_stepper(
+        types.SimpleNamespace(step=step), card.dt_s, forcing,
+        steps_per_day(card))
+
+
+def free_run(network, card, geometry, output: Path, *, days: int,
+             closure: dict, commit: str, device: dict) -> dict:
+    """Integrate the coarse card from rest with the closure, dual day files.
+
+    One compiled day (``free_run_day``) per model day.  Every day file holds
+    the end-of-day snapshot and that day's mean of every post-step state
+    under the dual per-file labels the held-out scorer admits; the manifest
+    is the one free-run schema, its closure block validated (checkpoint file
+    included) by ``free_run_closure`` before anything is written.
+    """
+    driver = _double_gyre_driver()
+    closure = free_run_closure(closure)
+    per_day = steps_per_day(card)
+    namelist = free_run_namelist(card, days)
+    forcing, one_day = free_run_day(
+        network, card, geometry, key=jax.random.PRNGKey(closure["network_seed"]))
+    state = driver.seed_steady_forcing_carry(card.recipe.initial_state, forcing)
     output.mkdir(parents=True)
     manifest = {
-        "schema": FREE_RUN_SCHEMA, "legoesm_git_sha": commit,
+        "schema": FREE_RUN_MANIFEST_SCHEMA, "legoesm_git_sha": commit,
         "backend": device["backend"], "precision_policy": "fp64",
         "transcendentals": device["transcendentals"], "days": days,
         "steps_per_day": per_day, "start": "rest",
-        "integration": ("one jitted scan per model day of swg_online_step: "
-                        "certified SWE RK3 step, closure potential at every "
-                        "stage, zero stage noise, noise scale 0"),
-        "sampling": "daily_snapshot",
+        "integration": ("one jitted scan per model day of swg_online_step "
+                        "(certified SWE RK3 step, closure potential at every "
+                        "stage, zero stage noise, noise scale 0) in the "
+                        "double-gyre driver's daily-mean stepper"),
+        "sampling": FREE_RUN_SAMPLING,
         "fields": {"ssh_m": "end-of-day snapshot; T points",
                    "u_m_s": "end-of-day snapshot; native NEMO U record",
-                   "v_m_s": "end-of-day snapshot; native NEMO V record"},
+                   "v_m_s": "end-of-day snapshot; native NEMO V record",
+                   "ssh_daily_mean_m": "daily mean of post-step T-point SSH",
+                   "u_daily_mean_m_s": "daily mean of post-step native U velocity",
+                   "v_daily_mean_m_s": "daily mean of post-step native V velocity"},
         "namelist": namelist._asdict(), "closure": closure,
         "numerical_health": None,
     }
@@ -516,7 +561,7 @@ def free_run(network, card, geometry, output: Path, *, days: int,
     health = None
     started = time.perf_counter()
     for day in range(1, days + 1):
-        state = one_day(network, state)
+        state, means = one_day(state)
         jax.block_until_ready(state.eta.data)
         if day == 1:
             first_day_s = time.perf_counter() - started
@@ -533,15 +578,19 @@ def free_run(network, card, geometry, output: Path, *, days: int,
         manifest["numerical_health"] = health
         name = f"day{day:04d}.npz"
         temporary = output / f".{name}.tmp"
+        snapshot = (state.eta.data, state.u.data[:, 1:, 0],
+                    state.v.data[1:, :, 0])
         with temporary.open("wb") as stream:
-            np.savez(stream, schema=np.str_(FREE_RUN_SCHEMA),
+            np.savez(stream, schema=np.str_(DUAL_SCHEMA),
                      legoesm_git_sha=np.str_(commit), day=np.int64(day),
                      absolute_day=np.int64(day),
                      step=np.int64(day * per_day), dt_s=np.float64(card.dt_s),
-                     snapshot_sampling=np.str_(SNAPSHOT_SAMPLING),
-                     ssh_m=np.asarray(state.eta.data, dtype=np.float64),
-                     u_m_s=np.asarray(state.u.data[:, 1:, 0], dtype=np.float64),
-                     v_m_s=np.asarray(state.v.data[1:, :, 0], dtype=np.float64))
+                     snapshot_sampling=np.str_(SNAPSHOT_LABEL),
+                     daily_mean_sampling=np.str_(DAILY_MEAN_LABEL),
+                     daily_mean_sample_count=np.int64(per_day),
+                     **{key: np.asarray(value, dtype=np.float64) for key, value
+                        in zip(SNAPSHOT_FIELDS + DAILY_MEAN_FIELDS,
+                               snapshot + tuple(means), strict=True)})
         temporary.replace(output / name)
         hashes[name] = _sha256(output / name)
         if day % driver.METADATA_CHECKPOINT_DAYS == 0 or day == days:
@@ -710,7 +759,7 @@ def train(config: dict, config_path: Path, *, card, seed: int, run_dir: Path,
             _write_json(staging / manifest_path.name, identity)
             log = {"schema": LOG_SCHEMA, "run_id": identity["run_id"],
                    "status": "running", "gates": None, "epochs": [],
-                   "free_runs": [], "invocations": []}
+                   "invocations": []}
             _write_json(staging / log_path.name, log)
         except BaseException:
             shutil.rmtree(staging)
@@ -795,35 +844,65 @@ def train(config: dict, config_path: Path, *, card, seed: int, run_dir: Path,
                 "checkpoint": {"path": name,
                                "sha256": _sha256(run_dir / name)}})
             _write_json(log_path, log)
-        final = next(entry for entry in log["epochs"]
-                     if entry["window_days"] == window_days
-                     and entry["epoch"] == epochs)
-        if any(entry["window_days"] == window_days
-               for entry in log["free_runs"]):
-            continue
-        output = run_dir / "free_runs" / f"w{window_days:02d}"
-        _archive_incomplete(output)
-        closure = {
-            "run_id": identity["run_id"], "experiment": config["experiment"],
-            "config_sha256": identity["config_sha256"],
-            "dataset_contract_sha256": identity["dataset"]["contract_sha256"],
-            "network_seed": seed, "window_days": window_days,
-            "checkpoint": {"path": str((run_dir / final["checkpoint"]["path"])
-                                       .resolve()),
-                           "sha256": final["checkpoint"]["sha256"]},
-            "objective": config["objective"], "wall_ring": config["wall_ring"],
-            "network_spec": spec._asdict()}
-        free_run(network, card, geometry, output,
-                 days=config["free_run"]["days"], closure=closure,
-                 commit=commit, device=device)
-        log["free_runs"].append({
-            "window_days": window_days, "root": str(output.resolve()),
-            "manifest_sha256": _sha256(output / "manifest.json"),
-            "checkpoint_sha256": final["checkpoint"]["sha256"]})
-        _write_json(log_path, log)
     log["status"] = "complete"
     _write_json(log_path, log)
     return log
+
+
+def run_free_run(config: dict, config_path: Path, *, card, seed: int,
+                 run_dir: Path, window_days: int, device: dict,
+                 commit: str) -> dict:
+    """Free-run one trained window length of one seed (``free-run``).
+
+    The run directory must be this configuration file's (digest) and seed's;
+    the window length's last epoch must be logged; its checkpoint must match
+    the logged digest before it is loaded.  The device and math policy must
+    be the configuration's free-run execution.  An incomplete earlier free
+    run is archived; a complete one is never overwritten.
+    """
+    run_dir = Path(run_dir)
+    execution = {key: device[key] for key in CONTROL_EXECUTION}
+    if execution != {key: config["free_run"][key] for key in CONTROL_EXECUTION}:
+        raise RuntimeError(f"free runs execute as configured "
+                           f"({config['free_run']['device']}, "
+                           f"{config['free_run']['transcendentals']}), "
+                           f"not {execution}")
+    identity = json.loads((run_dir / "run_manifest.json").read_text())
+    if identity["config_sha256"] != _sha256(config_path) \
+            or identity["seed"]["value"] != seed:
+        raise ValueError(f"{run_dir} is not this configuration's seed {seed}")
+    epochs = config["curriculum"]["epochs_per_window"]
+    log = json.loads((run_dir / "training_log.json").read_text())
+    final = next((entry for entry in log["epochs"]
+                  if entry["window_days"] == window_days
+                  and entry["epoch"] == epochs), None)
+    if final is None:
+        raise ValueError(f"window length {window_days} d has not completed "
+                         f"its {epochs} epochs in {run_dir}")
+    output = run_dir / "free_runs" / f"w{window_days:02d}"
+    if (output / "manifest.json").is_file():
+        raise FileExistsError(f"{output} already holds a complete free run")
+    geometry = build_closure_geometry(card)
+    spec, _ = network_spec(config, card, geometry)
+    closure = free_run_closure({
+        "run_id": identity["run_id"], "experiment": config["experiment"],
+        "config_sha256": identity["config_sha256"],
+        "dataset_contract_sha256": identity["dataset"]["contract_sha256"],
+        "network_seed": seed, "window_days": window_days,
+        "objective": config["objective"], "wall_ring": config["wall_ring"],
+        "network_spec": _jsonable(spec._asdict()),
+        "checkpoint_path": str((run_dir / final["checkpoint"]["path"]).resolve()),
+        "checkpoint_sha256": final["checkpoint"]["sha256"]})
+    network = SWGScalarPotentialCNN(spec, key=jax.random.PRNGKey(seed))
+    optimizer = create_swg_optimizer(SWGOptimizerSettings(**config["optimiser"]))
+    network, _ = load_checkpoint_or_fail(
+        closure["checkpoint_path"],
+        (network, optimizer.init(eqx.filter(network, eqx.is_inexact_array))),
+        what="SWG closure and optimiser")
+    _archive_incomplete(output)
+    return free_run(network, card, geometry, output,
+                    days=config["free_run"]["days"], closure=closure,
+                    commit=commit, device=device)
 
 
 def _update_function(optimizer):
@@ -869,12 +948,12 @@ def profile(config: dict, *, card, device: dict, windows_per_call: int) -> dict:
     shapes and no data-dependent branches, so their cost does not depend on
     the values.  Extrapolates one seed from the split lengths: training
     windows per epoch ``floor(train_days / w)`` (the contract's lattice
-    count at offset zero, an upper bound), the same for validation.
+    count at offset zero, an upper bound), the same for validation.  The
+    free-run day is timed only on the free runs' configured device.
     """
     geometry = build_closure_geometry(card)
     spec, _ = network_spec(config, card, geometry)
-    seed = config["seeds"][0]
-    key = jax.random.PRNGKey(seed)
+    key = jax.random.PRNGKey(config["seeds"][0])
     network = SWGScalarPotentialCNN(spec, key=key)
     optimizer = create_swg_optimizer(
         SWGOptimizerSettings(**config["optimiser"]))
@@ -921,28 +1000,37 @@ def profile(config: dict, *, card, device: dict, windows_per_call: int) -> dict:
                      **_peak_memory(device)})
         # A longer window may not fit in memory: report each as it lands.
         print(f"PROFILE_WINDOW {json.dumps(rows[-1])}", flush=True)
-    with tempfile.TemporaryDirectory(prefix="swgonl-profile-") as folder:
-        timing = free_run(
-            network, card, geometry, Path(folder) / "run", days=3,
-            closure={"network_seed": seed, "profile": True},
-            commit="profile", device=device)["execution_seconds"]
-    # Days two and three; day one carries the compilation.
-    day_s = (timing["all_days"] - timing["first_day_with_compile"]) / 2.0
-    free_days = config["free_run"]["days"]
+    # Free runs execute only on their configured device (another process).
+    free, excludes = None, "compilation, data loading and rebalancing"
+    if device["device"] == config["free_run"]["device"]:
+        forcing, one_day = free_run_day(network, card, geometry, key=key)
+        state = _double_gyre_driver().seed_steady_forcing_carry(
+            card.recipe.initial_state, forcing)
+        times = []
+        for _ in range(3):
+            started = time.perf_counter()
+            state, _ = one_day(state)
+            jax.block_until_ready(state.eta.data)
+            times.append(time.perf_counter() - started)
+        day_s = (times[1] + times[2]) / 2.0  # day one carries the compilation
+        free = {"seconds_per_day": day_s,
+                "seconds_per_run": config["free_run"]["days"] * day_s}
+    else:
+        excludes += (f"; free runs (configured on {config['free_run']['device']}"
+                     ": profile there)")
     training_s = sum(row["window_s"] for row in rows)
-    free_s = len(rows) * free_days * day_s
+    free_s = 0.0 if free is None else len(rows) * free["seconds_per_run"]
     return {
         "schema": PROFILE_SCHEMA, "device": device,
         "windows_per_call": windows_per_call, "batch_size": TEMPLATE_BATCH_SIZE,
         "network_parameter_count": network_parameter_count(network),
         "windows": rows,
-        "free_run": {"seconds_per_day": day_s,
-                     "seconds_per_run": free_days * day_s},
+        "free_run": free,
         "one_seed_estimate": {
             "training_hours": training_s / 3600.0,
-            "free_run_hours": free_s / 3600.0,
+            "free_run_hours": None if free is None else free_s / 3600.0,
             "total_hours": (training_s + free_s) / 3600.0,
-            "excludes": "compilation, data loading and rebalancing"},
+            "excludes": excludes},
     }
 
 
@@ -951,26 +1039,44 @@ def profile(config: dict, *, card, device: dict, windows_per_call: int) -> dict:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    for name in ("train", "profile", "check-data"):
+    for name in ("train", "free-run", "profile", "check-data"):
         command = commands.add_parser(name)
         command.add_argument("--config", type=Path, required=True)
-        command.add_argument("--device", choices=("cpu", "cuda"), required=True)
-        command.add_argument("--physical-gpu", type=int)
-        if name != "check-data":
+        if name != "free-run":  # a free run's device is the configuration's
+            command.add_argument("--device", choices=("cpu", "cuda"),
+                                 required=True)
+            command.add_argument("--physical-gpu", type=int)
+        if name in ("train", "profile"):
             command.add_argument("--windows-per-call", type=int, required=True,
                                  choices=(1, 2, 5, 10))
-        if name == "train":
+        if name in ("train", "free-run"):
             command.add_argument("--seed", type=int, required=True)
             command.add_argument("--run-root", type=Path, required=True)
         else:
             command.add_argument("--output", type=Path, required=True)
+        if name == "free-run":
+            command.add_argument("--window-days", type=int, required=True)
     args = parser.parse_args(argv)
     try:
         from legoesm.ocean.fidelity.provenance import git_sha
 
         config = load_config(args.config)
-        device = select_device(args.device, args.physical_gpu)
+        if args.command == "free-run":
+            device = select_device(config["free_run"]["device"], None)
+        else:
+            device = select_device(args.device, args.physical_gpu)
         card = build_deck_card(config["deck"])
+        if args.command == "free-run":
+            run_dir = args.run_root / config["experiment"] / f"seed{args.seed}"
+            manifest = run_free_run(
+                config, args.config, card=card, seed=args.seed,
+                run_dir=run_dir, window_days=args.window_days, device=device,
+                commit=git_sha())
+            output = run_dir / "free_runs" / f"w{args.window_days:02d}"
+            print(f"FREE_RUN_COMPLETE root={output.resolve()} "
+                  f"manifest_sha256={_sha256(output / 'manifest.json')} "
+                  f"all_finite={manifest['numerical_health']['all_finite']}")
+            return 0
         if args.command == "check-data":
             report = check_data(config, card=card)
             args.output.parent.mkdir(parents=True, exist_ok=True)
