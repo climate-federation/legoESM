@@ -197,3 +197,13 @@ Decision 123. Under (1), feed the record's per-step surface fields to the
 card and ladder kt = 1..10. Under (2), land, one at a time, the two NEMO
 statements in section 3 (no neutral-drag wind floor, humidity floor), then
 the last-bit forms.
+
+## 7. Citation gate and evidence hashes
+
+Citation gate on this receipt (from section 1): **PASS**, 16 citations, 0
+failures, 0 unmapped, map audit clean; planted shift of `:209` exits 1;
+gate tests 17 passed.
+Instrument runs at commit 642e8c619 (round20/legoesm_commit); admission
+re-run at the same commit.
+
+SHA-256 prefixes, round20/: admit_existing.log=5eb04c55071a44c1, forcing_identity.json=0faae13d7ddc7500, forcing_walk.json=a9c9acedecfde45d, plant_identity.log=d1c3f86e9c0f34eb, plant_walk.log=d1c3f86e9c0f34eb, codex_review_r20.log=8ee89a96bf0a7fce, tests_focused.log=c7ee4c796f15ca20, citation_receipt.json=eb0c96dc0559fdb1, citation_plant.log=498a255625e8a674, tests_citation_gate.log=1b546ad510fdce01, round19/oracle_g4_r19/g4_round19_passivity.json=75337ee077c8f3f8.
