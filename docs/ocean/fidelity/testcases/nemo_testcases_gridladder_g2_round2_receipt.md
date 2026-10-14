@@ -312,7 +312,7 @@ recursion, the vorticity term at depth, the density's depth at 30 levels.
 | R2-P4 partial class worse than full | HOLDS before the landing; reversed after it |
 | R2-P5 kt = 1: no unequal cell at fold, seam, south | HOLDS |
 | R2-P6 not at the bar through 100 steps | HOLDS |
-| R2-P7 tiny numbers reappear | NOT FOUND in the sea-level rows of steps 1, 10, 100 (the only ones read) |
+| R2-P7 tiny numbers reappear | REFUTED: no number below the smallest normal double, in NEMO or in the card, in any scored row of the 100 steps (level 1 and 2-D fields) |
 | R2-P8 G1 unchanged | HOLDS by its 100-step certification test; the other 77 tests of that file NOT RUN |
 | round-1 G-P5 T leaves 20 after step 1 | HOLDS (NEMO level-1 T reaches 20.00042) |
 | round-1 G-P6 stage-1 right-hand side bit-identical | NOT ESTABLISHED: my right-hand-side exposure differed from NEMO's frame by 5e-6 while the stage-1 velocity built from it is at 1e-18, so the two are not the same quantity. Instrument unvalidated; no finding drawn |
@@ -331,10 +331,12 @@ recursion, the vorticity term at depth, the density's depth at 30 levels.
 | G1 certification | G1 100-step test | 4 passed |
 | next acquisition script | bash syntax; preflight; committed test | PREFLIGHT_OK; its run and admission branches are UNEXECUTED |
 | dual review, claim review before code | NO GATE | single review only (lane rule 6); claim review NOT done |
+| citations | citation gate on this receipt (commit c8c6cf693) | PASS: 7 citations, 0 unmapped, audit clean; shifted-citation plant exits 1 |
 
-Focused tests, synchronous, final code (tests_focused.log): the two G2
-files, the G1 tools file and the citation gate file; see the last lines of
-this file for the final count.
+Focused tests, synchronous, at commit c8c6cf693 (tests_focused.log): the two
+G2 files, the G1 tools file and the citation gate file, slow tests included:
+55 passed. NOT RUN: 77 of the 81 tests of the G1 ladder file; the ratchet
+files; any closed-card ladder.
 
 ## 9. Review
 
@@ -426,4 +428,6 @@ final/zdf_replay_kt1_after.json=00d49ad81ea027e1,
 codex_review_r11.log=b0321fe4f3615f77, g2_admit_existing.log=d6895432d5303785,
 twin_kt2_substep_diff_map.log=999305f77782f47f,
 tests_g1_100step.log=ce49ceac4e534e89, preflight_run_r2.log=df79053b728b1dab;
-round10/oracle_g2_r10/g2_round10_admission.json=e895c2154665677d.
+round10/oracle_g2_r10/g2_round10_admission.json=e895c2154665677d,
+citation_receipt.json=2124a213d80de5af, citation_receipt_plant.json=a77ee382c3e58b43,
+tests_focused.log=f86f25d6a21b3f14.
