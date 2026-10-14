@@ -34,14 +34,29 @@ All fifteen selectors were off on the ORCA2 card before this round.
 | G2 ascending-level RHS depth sum | G2 round 4 | `ORCA2_OMIP_L4/BLD/ppsrc/nemo/stp2d.f90:198-199` |
 | G1 EEN ratio fold exchange + fe3mask pivot row (atomic) | G1 round 6 | `ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:169`; `ORCA2_OMIP_L4/BLD/ppsrc/nemo/dommsk.f90:232`, `:258` |
 | G1 EEN ratio written order | G1 round 8 | `ORCA2_OMIP_L4/BLD/ppsrc/nemo/domqco.f90:266-269` |
-| G1 stage-1 RHS handoff | G1 round 6 | `ORCA2_OMIP_L4/BLD/ppsrc/nemo/stp2d.f90:141`, `:147` |
-| G1 stage velocity written order | G1 round 6 | `ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:474-479`, `:514-515`, `:536-537` |
+| G1 stage-1 RHS handoff (inert on ORCA2, see below) | G1 round 6 | `ORCA2_OMIP_L4/BLD/ppsrc/nemo/stp2d.f90:141`, `:147` |
+| G1 stage velocity written order (barotropic correction only, see below) | G1 round 6 | `ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:514-515`, `:536-537` |
 | G1 ZDF barotropic removal | G1 round 7 | `ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynzdf.f90:158-161` |
 | G1 stage F ratio | G1 round 7 | `ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:224`, `:245` |
-| G1 stage T ratio; stored T-ratio product | G1 rounds 9, 8 | `ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:221-223` |
+| G1 stage T ratio | G1 round 9 | `ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:221-223` |
+| G1 stored T-ratio product | G1 round 8 | `ORCA2_OMIP_L4/BLD/ppsrc/nemo/domqco.f90:257` |
 | G1 EOS depth product | G1 round 9 | `ORCA2_OMIP_L4/BLD/ppsrc/nemo/eosbn2.f90:357`, `:646` |
 | G1 stage U/V ratio | G1 round 9 | `ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:178-179` |
-| G1 completed-stage top-V fold exchange | G1 round 7 | `ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:795-796` |
+| G1 completed-stage top-V fold exchange (held) | G1 round 7 | rung 0: `ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:795-796`; rung 10 (TKE): `:791-793` |
+
+Branch notes (from the independent review, checked in source and code).
+G1 certified the stage velocity and stage-1 RHS statements on a flux-form
+program, where NEMO's thickness-weighted stage update
+`ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:474-479` runs; ORCA2
+(`ln_dynadv_vec=T`) runs the velocity-form update instead.  On a
+vector-form card legoESM's stage update takes its vector arm before the
+written-order option is read, and the stage-1 RHS option is OR-ed with the
+vector-form predicate, so on the production card the stage-velocity selector
+acts only through the barotropic correction (the cited lines, which ORCA2
+runs at every stage) and the stage-1 RHS selector is a no-op (measured:
+0 rows moved on all seven card/labels).  The top-V exchange's G1 line is the
+`l_zdfsh2=F` call; with TKE (rung 10) ORCA2 runs the `l_zdfsh2=T` call that
+also exchanges `avm_k`, so its (b) is not met on the production card either.
 
 Not a candidate: G1's EEN vorticity written order certifies the planetary
 `np_COR` line `ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynvor.f90:745`; ORCA2's

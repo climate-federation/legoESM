@@ -93,13 +93,15 @@ def decide(census_paths: list[Path]) -> dict:
             "first_away_kt": d["first_away_kt"],
             "final_stage3_ssh_max": d["final_stage3_ssh_max"],
         })
+    passed = all(c["c_no_exact_loss"] and c["d_first_over_bar_ok"]
+                 for c in cards)
     return {
         "format": "nemo-testcase-l4-orca2-round278-d122-decision-v1",
-        "status": "PASS_R278_D122_DECISION",
+        "status": "PASS_R278_D122_DECISION" if passed
+        else "FAIL_R278_D122_DECISION",
         "arm": arms.pop(), "worktree_commit": commits.pop(),
         "cards": cards,
-        "d122_c_and_d": all(c["c_no_exact_loss"] and c["d_first_over_bar_ok"]
-                            for c in cards),
+        "d122_c_and_d": passed,
     }
 
 
@@ -118,7 +120,7 @@ def main() -> int:
                        encoding="utf-8")
         print(f"STATUS {result['status']} d122_c_and_d="
               f"{result['d122_c_and_d']}")
-        return 0
+        return 0 if result["d122_c_and_d"] else 1
     return r277.main()
 
 

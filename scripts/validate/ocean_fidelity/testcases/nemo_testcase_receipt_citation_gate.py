@@ -1667,6 +1667,8 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/eosbn2.f90:357': ('zh  = ((gdept_1d(jk) ) *(1._wp+r3t(ji,jj,Knn))) * r1_Z0', 1),
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/eosbn2.f90:646': ('zh  = ((gdept_1d(jk) ) *(1._wp+r3t(ji,jj,Knn))) * r1_Z0', 2),
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynvor.f90:745': 'zwz(ji,jj) = ff_f(ji,jj) * z1_e3f(ji,jj)',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/domqco.f90:257': ('pr3t(ji,jj) = pssh(ji,jj) * r1_ht_0(ji,jj)', 2),
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:791-793': [("CALL lbc_lnk( 'stp_RK3_stg', uu(:,:,:,       Kaa), 'U', -1._wp, vv(:,:", 1), (', avm_k(:,:,:)        , \'W\',  1._wp, ldfull=.TRUE. ) !  lbc_lnk needed for zdf_sh2', 2), 3],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:795-796': [("CALL lbc_lnk( 'stp_RK3_stg', uu(:,:,:,       Kaa), 'U', -1._wp, vv(:,:", 2), ("&                       , ts(:,:,:,jp_tem,Kaa), 'T',  1._wp, ts(:,:,:,", 2), 2],
     # --- ORCA2 round 275: G2 live momentum-thickness divisors -------
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynzdf.f90:191-205': [
