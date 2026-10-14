@@ -842,6 +842,11 @@ def run(args) -> int:
                 _n_etr = jnp.where(_c4_only, jnp.nan, _n_etr)
             values["pmodel_n_rubisco_leaf"] = _n_rub
             values["pmodel_n_electron_transport_leaf"] = _n_etr
+        else:
+            # No acclimated optimum on prescribed capacities: NaN, so the same
+            # tape list serves every arm.
+            values["pmodel_n_rubisco_leaf"] = jnp.full(ncol, jnp.nan)
+            values["pmodel_n_electron_transport_leaf"] = jnp.full(ncol, jnp.nan)
         # --- atomic per-column NaN-revert guard (ported from run_ec_site) ---
         # Columns are independent, so if a column's state update goes non-finite,
         # revert THAT column to its previous state (jnp.where): a diverging boreal

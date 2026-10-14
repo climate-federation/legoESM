@@ -537,7 +537,8 @@ def test_optimality_arms_run_on_the_global_driver(tmp_path, arm, extra):
     out = tmp_path / "out"
     diag = ["pmodel_chi", "pmodel_vcmax25", "pmodel_vcmax25_nostress", "pmodel_g1",
             "pmodel_wfrac", "pmodel_psi_soil", "pmodel_psi_leaf",
-            "ci_ca_sun_day", "ci_ca_shade_day", "day_frac"]
+            "ci_ca_sun_day", "ci_ca_shade_day", "day_frac",
+            "pmodel_n_rubisco_leaf", "pmodel_n_electron_transport_leaf"]
     cfg = validate_config({
         "grid": {"type": "latlon", "resolution": 4},
         "physics": {"land_mode": "multilayer", "surface_scheme": "two_leaf_canopy",
@@ -566,10 +567,13 @@ def test_optimality_arms_run_on_the_global_driver(tmp_path, arm, extra):
         assert np.all(c[day == 0.0] == 0.0)
         assert np.all((c[day == 1.0] > 0.0) & (c[day == 1.0] <= 1.0))
     chi, psil = ds["pmodel_chi"].values, ds["pmodel_psi_leaf"].values
+    n_rub = ds["pmodel_n_rubisco_leaf"].values
     if arm == "baseline":
         assert np.all(np.isnan(chi)) and np.all(np.isnan(psil))
+        assert np.all(np.isnan(n_rub))
     else:
         assert np.all((chi > 0.0) & (chi <= 1.0))
+        assert np.nanmin(n_rub) > 0.0
     if arm == "phydro":
         assert np.all(psil <= ds["pmodel_psi_soil"].values + 1e-9)
         np.testing.assert_allclose(ds["pmodel_vcmax25"].values,
