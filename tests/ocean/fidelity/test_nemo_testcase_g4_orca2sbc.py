@@ -261,3 +261,33 @@ def test_reader_refuses_a_mixed_forcing_switch_set(deck_dir, name):
     planted = text.replace(lines[0], lines[0].replace(value, flipped, 1))
     with pytest.raises(ValueError, match="namsbc"):
         recipe.read_orca2g1_deck(_tmp_deck(planted))
+
+
+def test_kt11_witness_reads_the_bulk_surface_mean_nemo_reads(tmp_path):
+    """sst_m at kt = 11 = (restart-10 partial sum + entering level-1 T) * 0.5
+    (sbcssm.f90, nn_fsbc = 2); any other restart is refused."""
+    import importlib.util
+
+    import netCDF4
+    path = (Path(__file__).resolve().parents[3] / "scripts/validate/ocean_fidelity/"
+            "testcases/nemo_testcase_g4_orca2sbc/kt11_forcing_witness.py")
+    spec = importlib.util.spec_from_file_location("g4_kt11_witness", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert mod.RECORD_KT11["wndi"] == 5 and mod.RECORD_KT11["qsr_down"] == 1
+
+    def restart(kt, fsbc):
+        name = tmp_path / f"r{kt}_{fsbc}.nc"
+        with netCDF4.Dataset(name, "w") as ds:
+            ds.createDimension("t", 1), ds.createDimension("z", 2)
+            ds.createDimension("y", 1), ds.createDimension("x", 2)
+            ds.createVariable("kt", "f8")[:] = kt
+            ds.createVariable("nn_fsbc", "f8")[:] = fsbc
+            ds.createVariable("sst_m", "f8", ("t", "y", "x"))[:] = [[[1.0, 3.0]]]
+            ds.createVariable("tn", "f8", ("t", "z", "y", "x"))[:] = [[[[2.0, 0.25]], [[9.0, 9.0]]]]
+        return name
+
+    assert mod.sst_m_kt11(restart(10, 2)).tolist() == [[1.5, 1.625]]
+    for kt, fsbc in ((9, 2), (10, 1)):
+        with pytest.raises(SystemExit, match="REFUSE"):
+            mod.sst_m_kt11(restart(kt, fsbc))
