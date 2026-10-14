@@ -106,12 +106,13 @@ def test_fold_image_v_row_is_the_signed_mirror_of_the_row_below():
         _een_fold_image_v_row(True, _Grid(None), h_v, v, h_u, u, u_mask, mask)
 
 
-def test_only_the_g1_card_selects_the_fold_image_row():
+def test_g1_and_orca2_cards_select_the_fold_image_row():
     from legoesm.ocean.state import LatLonCGridOceanConfig
     assert LatLonCGridOceanConfig._field_defaults["een_fold_image_v_row"] is False
     src = (Path(__file__).resolve().parents[3]
            / "packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py").read_text()
-    assert src.count("een_fold_image_v_row=True") == 1
+    # ORCA2 imported the G1 rounds 2--5 statements in its round 270.
+    assert src.count("een_fold_image_v_row=True") == 2
     assert src.index("een_fold_image_v_row=True") > src.index(
         "def build_orca2g1_flat_card")
 
@@ -187,13 +188,13 @@ def test_fold_top_v_operands_are_untouched_unless_a_row_is_given():
     assert np.array_equal(np.asarray(moved)[:-1], np.asarray(v_mask)[:-1])
 
 
-def test_only_the_g1_card_selects_the_fold_row_v_face_depth():
+def test_g1_and_orca2_cards_select_the_fold_row_v_face_depth():
     from legoesm.ocean.fidelity import nemo_testcase_recipe as recipe
     from legoesm.ocean.state import BarotropicConfig
     assert BarotropicConfig._field_defaults["barotropic_fold_top_v_face_ssh"] is False
     assert BarotropicConfig._fields[-7] == "barotropic_fold_top_v_face_ssh"   # round 8 appended one
     src = Path(recipe.__file__).read_text()
-    assert src.count("barotropic_fold_top_v_face_ssh=True") == 1
+    assert src.count("barotropic_fold_top_v_face_ssh=True") == 2
     start = src.index("def build_orca2g1_flat_card")
     assert src.index("barotropic_fold_top_v_face_ssh=True") > start
 
@@ -272,13 +273,13 @@ needs_record4 = pytest.mark.skipif(
     reason="the 50-stage-step G1 record is not admitted on this machine")
 
 
-def test_only_the_g1_card_selects_nemos_stage1_sea_level():
+def test_g1_and_orca2_cards_select_nemos_stage1_sea_level():
     from legoesm.ocean.fidelity import nemo_testcase_recipe as recipe
     from legoesm.ocean.state import LatLonCGridOceanConfig
     assert LatLonCGridOceanConfig._field_defaults["rk3_stage1_ssh_nemo_literal"] is False
     assert LatLonCGridOceanConfig._fields[-10] == "rk3_stage1_ssh_nemo_literal"   # round 9 appended three
     src = Path(recipe.__file__).read_text()
-    assert src.count("rk3_stage1_ssh_nemo_literal=True") == 1
+    assert src.count("rk3_stage1_ssh_nemo_literal=True") == 2
     assert src.index("rk3_stage1_ssh_nemo_literal=True") > src.index(
         "def build_orca2g1_flat_card")
 
@@ -349,7 +350,7 @@ ROUND5_OPTIONS = ("barotropic_flux_update_nemo_literal",
                   "barotropic_entry_depth_nemo_literal")
 
 
-def test_only_the_g1_card_selects_the_three_solver_statements():
+def test_g1_and_orca2_cards_select_the_three_solver_statements():
     from legoesm.ocean.fidelity import nemo_testcase_recipe as recipe
     from legoesm.ocean.state import BarotropicConfig
     assert BarotropicConfig._fields[-6:-3] == ROUND5_OPTIONS
@@ -357,7 +358,7 @@ def test_only_the_g1_card_selects_the_three_solver_statements():
     start = src.index("def build_orca2g1_flat_card")
     for name in ROUND5_OPTIONS:
         assert BarotropicConfig._field_defaults[name] is False
-        assert src.count(f"{name}=True") == 1
+        assert src.count(f"{name}=True") == 2
         assert src.index(f"{name}=True") > start
     if RECORD.is_dir():      # the built card carries them, validator included
         cfg = recipe.build_nemo_testcase_card(
