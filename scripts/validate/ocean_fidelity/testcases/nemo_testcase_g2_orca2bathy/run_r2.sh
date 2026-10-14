@@ -110,6 +110,10 @@ try:
     # the all-level states of this trajectory are twin b's: each restart is
     # the after-step state of the step stream just verified against twin a
     # (sea level, both barotropic velocities and level 1 of u, v bit for bit)
+    # Levels 2..30 of twin b's restarts have ONE independent witness: twin a
+    # wrote a restart at step 10 only.  Steps 2, 4, 6, 8 below level 1 rest
+    # on twin b alone (its step streams are byte-identical to twin a's).
+    result["restart_10_equals_twin_a_all_levels"] = cr.restarts_identical(a, b, [10])
     for step in (2, 4, 6, 8, 10):
         path = b / f"ORCA2G1_{step:08d}_restart.nc"
         cr.require(path.is_file(), f"twin b has no restart at step {step}")

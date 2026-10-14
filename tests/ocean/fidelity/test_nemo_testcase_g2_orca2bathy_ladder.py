@@ -133,10 +133,15 @@ def test_the_option_is_off_by_default_and_selected_by_g2_only():
             for n, line in enumerate(path.read_text().splitlines(), 1)
             if "zdf_momentum_nemo_face_thickness=" in line]
     assert [name for name, _ in hits] == ["nemo_testcase_recipe.py"]
-    # round 3's option is assigned on that same line and nowhere else
-    assert hits == [(path.name, n) for path in (CASES.parents[3] / "packages").rglob("*.py")
-                    for n, line in enumerate(path.read_text().splitlines(), 1)
-                    if "zdf_tracer_nemo_rounded_thickness=" in line]
+    # round 3's option: its own rung table, one assignment in the package
+    assert recipe._ORCA2G_TRA_ZDF_ROUNDED == {"ORCA2G1-flat": False, "ORCA2G2-zps": True}
+    mine = [(path.name, line) for path in (CASES.parents[3] / "packages").rglob("*.py")
+            for line in path.read_text().splitlines()
+            if "zdf_tracer_nemo_rounded_thickness=" in line]
+    assert [name for name, _ in mine] == ["nemo_testcase_recipe.py"]
+    assert "_ORCA2G_TRA_ZDF_ROUNDED[case]" in mine[0][1]
+    # appended as the LAST config field: no older field changed position
+    assert LatLonCGridOceanConfig._fields[-1] == "zdf_tracer_nemo_rounded_thickness"
     assert "_ORCA2G_ZDF_FACES[case]" in (
         CASES.parents[3] / "packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py"
     ).read_text().splitlines()[hits[0][1] - 1]
