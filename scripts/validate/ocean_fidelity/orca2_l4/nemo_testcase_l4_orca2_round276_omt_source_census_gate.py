@@ -18,6 +18,7 @@ for package in (REPO_ROOT, REPO_ROOT / "packages/core",
 
 from legoesm.ocean.fidelity.provenance import worktree_stamp
 from scripts.validate.ocean_fidelity.orca2_l4 import (
+    nemo_testcase_l4_orca2_round1_ladder_gate as rung10,
     nemo_testcase_l4_orca2_round92_rung0_card_gate as rung0,
     nemo_testcase_l4_orca2_round209_omt1_ladder_gate as omt1,
     nemo_testcase_l4_orca2_round269_g1_decision96_gate as prior,
@@ -104,7 +105,7 @@ def measure(rung: str, deck_root: Path, twin_a: Path, arm: str,
     import jax
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
 
-    require(rung in ("rung0", "omt1", "omt2", "omt3", "omt4"),
+    require(rung in ("rung0", "omt1", "omt2", "omt3", "omt4", "rung10"),
             f"unsupported rung {rung}")
     stamp = worktree_stamp()
     require(stamp["clean"] and stamp["commit"].lower() == expect_commit.lower(),
@@ -115,20 +116,56 @@ def measure(rung: str, deck_root: Path, twin_a: Path, arm: str,
     require(jax.default_backend() == "cpu" and not jax.config.jax_disable_jit,
             "round-276 measurement requires production JIT on CPU")
 
-    card = arm_card(prior._selected_card(rung, deck_root), arm, plant=plant)
-    entry = rung0.assemble_frame(twin_a, 1, 0)
-    state = (rung0.bridge_entry(card, entry)
-             if rung == "rung0" else card.recipe.initial_state)
-    steps = tuple(range(1, 9 if rung == "omt1" else 11))
-    ladder = omt1._run_ladder(
-        card, twin_a, state, "independent", steps=steps)
-    require(ladder["row_count"] == (160 if rung == "omt1" else 200),
-            "source arm ladder is incomplete")
+    if rung == "rung10":
+        require(arm in ("control", "g2_rhs_ascending_sum"),
+                "shipped-card census accepts only the surviving G2 arm")
+        require(plant == "none", "shipped-card measurement plant is unsupported")
+        _, base = rung10.card_fields(deck_root)
+        cfg = base.recipe.model_config._replace(
+            barotropic_rhs_ascending_level_sum=(arm != "control"))
+        card = base._replace(recipe=base.recipe._replace(model_config=cfg))
+        trajectory = rung10.candidate_trajectory(
+            deck_root, twin_a, card, max_step=10, bridge_ssh=True)
+        rows = []
+        first = None
+        for checkpoint in trajectory["checkpoints"]:
+            if first is None and checkpoint["first_non_bit_field"] is not None:
+                first = {
+                    "kt": checkpoint["kt"],
+                    "checkpoint": checkpoint["checkpoint"],
+                    "field": checkpoint["first_non_bit_field"],
+                }
+            for field, score in checkpoint["rows"].items():
+                rows.append({
+                    "kt": checkpoint["kt"],
+                    "checkpoint": checkpoint["checkpoint"],
+                    "field": field,
+                    **score,
+                })
+        require(len(rows) == 200 and first is not None,
+                "shipped-card source arm ladder is incomplete")
+        ladder = {
+            "rows": rows,
+            "row_count": len(rows),
+            "first_non_bit_checkpoint": first,
+        }
+        label = "given_nemo_entry"
+    else:
+        card = arm_card(prior._selected_card(rung, deck_root), arm, plant=plant)
+        entry = rung0.assemble_frame(twin_a, 1, 0)
+        state = (rung0.bridge_entry(card, entry)
+                 if rung == "rung0" else card.recipe.initial_state)
+        steps = tuple(range(1, 9 if rung == "omt1" else 11))
+        ladder = omt1._run_ladder(
+            card, twin_a, state, "independent", steps=steps)
+        require(ladder["row_count"] == (160 if rung == "omt1" else 200),
+                "source arm ladder is incomplete")
+        label = "independent"
     return {
         "format": "nemo-testcase-l4-orca2-round276-source-ladder-v1",
         "status": "PASS_R276_SOURCE_LADDER",
         "rung": rung,
-        "label": "independent",
+        "label": label,
         "arm": arm,
         "selected_statements": list(ARMS[arm]),
         "worktree": stamp,
@@ -176,8 +213,9 @@ def classify(control_path: Path, candidate_path: Path, plant: str) -> dict:
         before["rows"][0]["unequal"] = 0
         after["rows"][0]["bit_identical"] = False
         after["rows"][0]["unequal"] = 1
-    comparison = decision96._comparison(
-        {"independent": before}, {"independent": after})
+    label = candidate["label"]
+    require(control["label"] == label, "claim label moved")
+    comparison = decision96._comparison({label: before}, {label: after})
     moved = comparison["moved_rows"]
     early = [row for row in moved if int(row["kt"]) <= 3]
     late = [row for row in moved if int(row["kt"]) >= 4]
@@ -209,7 +247,7 @@ def classify(control_path: Path, candidate_path: Path, plant: str) -> dict:
         "format": "nemo-testcase-l4-orca2-round276-early-late-census-v1",
         "status": "PASS_R276_EARLY_LATE_CENSUS",
         "rung": candidate["rung"],
-        "label": "independent",
+        "label": label,
         "arm": candidate["arm"],
         "selected_statements": candidate["selected_statements"],
         "worktree_commit": candidate["worktree"]["commit"],
@@ -247,7 +285,8 @@ def main() -> int:
     parser.add_argument("--list-arms", action="store_true")
     parser.add_argument("--measure", action="store_true")
     parser.add_argument(
-        "--rung", choices=("rung0", "omt1", "omt2", "omt3", "omt4"))
+        "--rung", choices=(
+            "rung0", "omt1", "omt2", "omt3", "omt4", "rung10"))
     parser.add_argument("--deck-root", type=Path)
     parser.add_argument("--twin-a", type=Path)
     parser.add_argument("--arm", choices=tuple(ARMS))
