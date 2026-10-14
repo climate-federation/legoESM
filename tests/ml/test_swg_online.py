@@ -10,9 +10,10 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
+import optax
 import pytest
 from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
-from legoesm.ml.training import TrainingConfig
+from legoesm.ml.training import TrainingConfig, create_optimizer
 from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
 from legoesm.ocean.dynamics.swe_rk3 import _entry_from_state, swe_rk3_step
 from legoesm.ocean.fidelity.nemo_testcase_recipe import (
@@ -30,6 +31,7 @@ from legoesm.training.swg_online import (
     BalancedTrajectory,
     SWGDatasetContract,
     SWGNetworkSpec,
+    SWGOptimizerSettings,
     SWGScalarPotentialCNN,
     WindowBatch,
     assert_network_gradients_live,
@@ -43,9 +45,11 @@ from legoesm.training.swg_online import (
     coarse_state_from_native,
     create_swg_optimizer,
     deterministic_trajectory_loss,
+    eq6_scale_report,
     initial_closure_acceleration_ratio,
     load_content_pinned_hourly_segment,
     load_content_pinned_initial_state,
+    maddison_eq6_network_scales,
     network_parameter_count,
     swg_online_step,
 )
@@ -1181,11 +1185,7 @@ def test_real_data_one_optimizer_step_has_no_inert_leaf():
     assert_network_gradients_live(grads)
     # Keras 3.6.0 AdamW defaults: lr 1e-3, weight decay 0.004, betas 0.9 and
     # 0.999, epsilon 1e-7 as "epsilon hat", no clipping, constant rate.
-    optimizer = create_swg_optimizer(TrainingConfig(
-        lr=1.0e-3, warmup_steps=0, total_steps=100,
-        weight_decay=4.0e-3, optimizer="adamw", schedule="constant",
-        clip_gradients=False, adam_epsilon=1.0e-7, adam_b1=0.9,
-        adam_b2=0.999, adam_epsilon_convention="keras_epsilon_hat"))
+    optimizer = create_swg_optimizer(_TEMPLATE_ADAMW)
     params = eqx.filter(network, eqx.is_inexact_array)
     opt_state = optimizer.init(params)
     updates, _ = optimizer.update(grads, opt_state, params)
@@ -1195,3 +1195,153 @@ def test_real_data_one_optimizer_step_has_no_inert_leaf():
     assert all(np.all(np.isfinite(np.asarray(value))) for value in after)
     assert any(np.any(np.asarray(left) != np.asarray(right))
                for left, right in zip(before, after, strict=True))
+
+
+# --- strict optimiser wrapper ----------------------------------------------
+
+_TEMPLATE_ADAMW = SWGOptimizerSettings(
+    optimizer="adamw", learning_rate=1.0e-3, schedule="constant",
+    weight_decay=4.0e-3, adam_b1=0.9, adam_b2=0.999, adam_epsilon=1.0e-7,
+    adam_epsilon_convention="keras_epsilon_hat", gradient_clipping="none")
+
+
+def test_swg_optimizer_refuses_unset_and_shared_default_choices():
+    fields = _TEMPLATE_ADAMW._asdict()
+    for name in SWGOptimizerSettings._fields:
+        with pytest.raises(TypeError, match=name):
+            SWGOptimizerSettings(**{key: value for key, value in fields.items()
+                                    if key != name})
+    with pytest.raises(TypeError, match="SWGOptimizerSettings"):
+        create_swg_optimizer(TrainingConfig(
+            lr=1.0e-3, schedule="constant", clip_gradients=False))
+    for name, value, match in (
+            ("optimizer", "adam", "adamw"),
+            ("schedule", "warmup_cosine", "constant"),
+            ("gradient_clipping", "global_norm", "none"),
+            ("adam_epsilon_convention", "keras", "convention"),
+            ("learning_rate", 1, "finite float"),
+            ("adam_epsilon", float("nan"), "finite float"),
+            ("learning_rate", 0.0, "positive rate")):
+        with pytest.raises(ValueError, match=match):
+            create_swg_optimizer(_TEMPLATE_ADAMW._replace(**{name: value}))
+
+
+def test_swg_optimizer_is_the_explicit_template_update():
+    """Constant rate, no clipping, Keras epsilon: no factory default leaks."""
+    rng = np.random.default_rng(5)
+    params = {"w": jnp.asarray(rng.normal(size=6))}
+    # Gradient norms from 1e-7 to 1e3: a warm-up, a decay, clipping or the
+    # Optax epsilon would each change at least one of the six steps.
+    gradients = [{"w": jnp.asarray(rng.normal(size=6) * scale)}
+                 for scale in (1.0e3, 1.0e-7, 30.0, 2.0e-6, 5.0, 1.0e2)]
+
+    def trajectory(optimizer):
+        state, current, out = optimizer.init(params), params, []
+        for grads in gradients:
+            update, state = optimizer.update(grads, state, current)
+            current = optax.apply_updates(current, update)
+            out.append(np.asarray(current["w"]))
+        return out
+
+    explicit = create_optimizer(TrainingConfig(
+        lr=1.0e-3, warmup_steps=0, weight_decay=4.0e-3, optimizer="adamw",
+        schedule="constant", clip_gradients=False, adam_epsilon=1.0e-7,
+        adam_b1=0.9, adam_b2=0.999,
+        adam_epsilon_convention="keras_epsilon_hat"))
+    for left, right in zip(trajectory(create_swg_optimizer(_TEMPLATE_ADAMW)),
+                           trajectory(explicit), strict=True):
+        assert np.array_equal(left, right)
+    # Step one by hand: |g| equal to Keras' epsilon-hat is half the rate.
+    optimizer = create_swg_optimizer(_TEMPLATE_ADAMW)
+    w = {"w": jnp.asarray([2.0])}
+    update, _ = optimizer.update(
+        {"w": jnp.asarray([1.0e-7 / np.sqrt(1.0 - 0.999)])},
+        optimizer.init(w), w)
+    assert float(update["w"][0]) == pytest.approx(
+        -1.0e-3 * (0.5 + 4.0e-3 * 2.0), rel=1.0e-12)
+
+
+# --- Maddison Eq. 6 network scales -----------------------------------------
+
+def test_eq6_network_scales_follow_the_deck_and_move_with_it(online_case):
+    card, geometry = online_case[:2]
+    scales = maddison_eq6_network_scales(card, geometry)
+    constants = card.recipe.model_config.constants
+    assert (constants.rho_0, constants.g) == (1026.0, 9.80665)
+    beta, half, dx, f0, tau0, depth = 2.0e-11, 2.0e6, 5.0e4, 7.0e-5, 0.1, 500.0
+    expected = {
+        "vorticity_scale_s1": beta * half,
+        "vorticity_tendency_scale_s2":
+            tau0 * np.pi / (constants.rho_0 * depth * half),
+        "grid_spacing_m": dx, "depth_m": depth,
+        "velocity_scale_m_s": beta * half * dx,
+        "ssh_scale_m": f0 * beta * half * dx**2 / constants.g,
+        "potential_scale_m3_s2":
+            tau0 * np.pi * dx**2 / (constants.rho_0 * half),
+    }
+    for name, value in expected.items():
+        assert getattr(scales, name) == pytest.approx(value, rel=1.0e-14), name
+    moved = maddison_eq6_network_scales(card._replace(
+        resolved_namelist=card.resolved_namelist._replace(
+            rn_tau_pa=0.2, rn_beta_m_s=4.0e-11, rn_f0_s=1.4e-4)), geometry)
+    assert moved.potential_scale_m3_s2 == pytest.approx(
+        2.0 * scales.potential_scale_m3_s2, rel=1.0e-14)
+    assert moved.velocity_scale_m_s == pytest.approx(
+        2.0 * scales.velocity_scale_m_s, rel=1.0e-14)
+    assert moved.ssh_scale_m == pytest.approx(
+        4.0 * scales.ssh_scale_m, rel=1.0e-14)
+    with pytest.raises(ValueError, match="2L"):
+        maddison_eq6_network_scales(card._replace(
+            resolved_namelist=card.resolved_namelist._replace(
+                rn_domsiz_m=2.0e6)), geometry)
+    thickness = np.array(card.recipe.z_coord.nemo_e3t_0)
+    j0, _, i0, _ = geometry.wet_bounds
+    thickness[j0, i0] = 400.0
+    with pytest.raises(ValueError, match="one positive resting depth"):
+        maddison_eq6_network_scales(card._replace(recipe=card.recipe._replace(
+            z_coord=card.recipe.z_coord._replace(
+                nemo_e3t_0=jnp.asarray(thickness)))), geometry)
+
+
+def test_eq6_scale_report_measures_what_the_network_reads(online_case):
+    card, geometry = online_case[:2]
+    scales = maddison_eq6_network_scales(card, geometry)
+    spec = SWGNetworkSpec(8, 2, 3, scales.ssh_scale_m,
+                          scales.velocity_scale_m_s,
+                          scales.potential_scale_m3_s2)
+    network = SWGScalarPotentialCNN(spec, key=jax.random.PRNGKey(3))
+    u, v = _streamfunction_flow(geometry, 3.0e5)
+    wet = np.asarray(geometry.tmask, dtype=bool)
+    state = coarse_state_from_native(
+        card.recipe.initial_state, 0.3 * wet, u, v)
+    report = eq6_scale_report(network, (state,), card, geometry, scales,
+                              key=jax.random.PRNGKey(4))
+    assert report["ssh"]["max_abs"] == pytest.approx(
+        0.3 / scales.ssh_scale_m, rel=1.0e-14)
+    u_t = 0.5 * (u + np.roll(u, 1, axis=1))
+    assert report["u_t"]["max_abs"] == pytest.approx(
+        np.abs(u_t[wet]).max() / scales.velocity_scale_m_s, rel=1.0e-12)
+    # The template's input on the same state: the F-point curl of a
+    # wall-zero streamfunction flow is its five-point Laplacian / dx**2.
+    psi = np.cumsum(-u * geometry.spacing_m, axis=0) \
+        * np.asarray(geometry.vertex_interior)
+    lap = (np.roll(psi, 1, 0) + np.roll(psi, -1, 0) + np.roll(psi, 1, 1)
+           + np.roll(psi, -1, 1) - 4.0 * psi) / geometry.spacing_m**2
+    interior = np.asarray(geometry.vertex_interior, dtype=bool)
+    assert report["template_input_zeta"]["max_abs"] == pytest.approx(
+        np.abs(lap[interior]).max() / scales.vorticity_scale_s1, rel=1.0e-9)
+    tau = swg_surface_wind(card.resolved_namelist)
+    entry = _entry_from_state(state, tau, tau, card.recipe.grid,
+                              card.recipe.z_coord, card.recipe.model_config)
+    potential = np.asarray(network(
+        entry, geometry, key=jax.random.fold_in(jax.random.PRNGKey(4), 0),
+        noise=jnp.zeros_like(entry.ssh_k), noise_scale=jnp.asarray(0.0)))
+    assert report["output_potential"]["max_abs"] == pytest.approx(
+        np.abs(potential[interior]).max() / scales.potential_scale_m3_s2,
+        rel=1.0e-12)
+    assert 0.0 < report["output_laplacian"]["max_abs"] < np.inf
+    with pytest.raises(ValueError, match="Eq. 6"):
+        eq6_scale_report(SWGScalarPotentialCNN(
+            spec._replace(potential_scale_m3_s2=1.0),
+            key=jax.random.PRNGKey(3)),
+            (state,), card, geometry, scales, key=jax.random.PRNGKey(4))

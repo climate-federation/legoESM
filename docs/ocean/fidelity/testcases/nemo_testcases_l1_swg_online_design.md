@@ -1,13 +1,14 @@
 # SWG online-learning design
 
-Date: 2026-10-13
+Date: 2026-10-14
 
-Status: **Round-5 pre-training implementation complete; acquisitions held**.
-One real CPU optimizer step remains a seam test, not training. The user has
-accepted the recorded dg50 composition debt, but the dual-operator start
-experiment, the content-pinned multi-year hourly data, and the 3.125 km
-adequacy result remain prerequisites to the first training run. The learned
-term closes only the resolution gap and may not compensate a legoESM/NEMO gap.
+Status: **Round 7: training driver built, nothing trained.** The driver
+(`scripts/run/run_swg_online_training.py`) and one committed configuration
+per candidate objective (`config/swg_online/`) exist and are tested on the
+CPU. The first training run still waits on owner decisions (objective and
+wall-ring treatment) and on the prerequisites listed near the end. The user has
+accepted the recorded dg50 composition debt. The learned term closes only
+the resolution gap and may not compensate a legoESM/NEMO gap.
 
 ## Fixed physical model and target convention
 
@@ -34,271 +35,352 @@ The state target is the conservative restriction in `swg_coarse_graining.py`:
 sum fine T-cell volumes into each coarse T cell and sum `e2*h*u` or `e1*h*v`
 over the fine faces tiling each coarse face, then diagnose coarse SSH and face
 velocity using the coarse live QCO thickness. There is no component-mean
-restoration. The real day-1095 continuity residual is `4.520e-18 m s-1`
-interior and `2.887e-18 m s-1` in the outer four cells. The round-1
-independent-state Gaussian remains a labelled diagnostic and is forbidden as a
-training target. New daily-mean acquisitions accumulate instantaneous `h*u`
-and `h*v` inside the compiled scan and restrict those mean transports; archived
-`h(mean eta)*mean(u)` products are explicitly refused. A temporal continuity
-plant that offsets restricted SSH by 1 m fails.
+restoration. The round-1 independent-state Gaussian remains a labelled
+diagnostic and is forbidden as a training target.
 
-There are two named objectives and **no default**. `symmetric` is the Round-4
-departure: initialize and target with the exact box restriction above, then
-apply a sigma-one-coarse-cell Gaussian to both model and target vorticity.
-`template` follows Maddison's data/model asymmetry: initialize and target from
-one fine-grid filtered restriction, while the model vorticity in the loss is
-unfiltered. Maddison defines the Gaussian “width (specifically a standard
-deviation)” as one coarse spacing, filters instantaneous fine vorticity, and
-then samples the coarse grid ([Maddison 2026, sections 2.3--2.4](https://agupubs.onlinelibrary.wiley.com/doi/full/10.1029/2024MS004883)).
+There are two named objectives and **no default**; the owner has not chosen.
+`symmetric` starts and targets with the exact box restriction and applies a
+sigma-one-coarse-cell Gaussian to both model and target vorticity (registered
+on F points, odd about the wall vertices). `template` follows Maddison's
+data/model asymmetry: start and target from one fine-grid filtered
+restriction, model vorticity unfiltered in the loss. Maddison defines the
+Gaussian "width (specifically a standard deviation)" as one coarse spacing,
+filters instantaneous fine vorticity, and then samples the coarse grid
+([Maddison 2026, sections 2.3--2.4](https://agupubs.onlinelibrary.wiley.com/doi/full/10.1029/2024MS004883)).
+The `template` operator filters the fine finite-volume extensives (volume
+even about the walls, normal transport odd, tangential transport even;
+standard deviation 50 km = 8 fine cells) and then restricts them exactly, so
+continuity, zero normal wall transport and total volume hold without any
+restoration.
 
-The `template` state operator works on finite-volume extensives before exact
-restriction. Fine T-cell volume is even-reflected about every wall. U transport
-is even across the south/north walls and odd about its zero west/east wall
-faces; V transport is odd about its zero south/north wall faces and even across
-the west/east walls. To see why, extend the closed-grid continuity stencil
-`D(Q)=Qe-Qw+Qn-Qs`: an even scalar extension requires the normal face flux to
-change sign, whereas a tangential flux remains even. The same separable
-convolution therefore satisfies `D(G*Q)=G*D(Q)`, fixes normal wall transport to
-exact zero, and preserves total volume without a posteriori mean restoration.
-The Gaussian has standard deviation 50 km = 8 fine cells and transfer
-`exp(-2 pi^2 sigma^2/lambda^2)` for an interior plane wave. The filtered
-extensives are then restricted by the existing exact volume/face sums.
+## Reference adequacy (open)
 
-The reference is not yet adequate. At 6.25 km the Munk width has
-1.27 cells; restricted daily-mean truth gives consecutive annual mean-velocity
-differences of 0.04765 and 0.04203 m s-1 for years 1-to-2 and 2-to-3. A 3.125 km
-sensitivity is therefore mandatory. Its first eight days are compared from the
-common rest state using normalized RMS (bar 10%) and pattern correlation (bar
-0.99) for coarse SSH, relative vorticity, and rotational velocity, with first 1% and 10%
-crossings reported. Year-1 KE, EKE, jet position, and DST-streamfunction KE
-spectrum must each agree within the larger of 10% and measured adjacent-year
-variability of the 6.25 km run. The tool exits nonzero on inadequacy.
+At 6.25 km the Munk width has 1.27 cells, so a 3.125 km sensitivity run is
+the adequacy test: days 1--8 from the common rest state (normalized RMS at
+most 10% and pattern correlation at least 0.99 for coarse SSH, relative
+vorticity and rotational velocity) and year-1 KE, EKE, jet position and
+DST-streamfunction KE spectrum against the 6.25 km run's adjacent-year
+difference.
+
+Operator measurement on the round-6 code (`round6/reference/adequacy.json`):
+the tool printed `FAIL measured=1 adequate=False`. Year 1 passes every
+statistic (KE 1.1%, EKE 9.6%, jet 3.6% of the basin width, spectrum 8.7%,
+against bars of 19.6%, 18.6%, 10% and 19.8%). Days 1--8 pass for SSH (NRMS
+0.36--0.42%) and vorticity (0.44--0.50%), correlation above 0.99998. Rotational
+velocity "fails" only through an instrument defect: its arrays are
+(day, component, wet point) and the NRMS reduction runs over the component
+axis (`nemo_testcase_l1_swg_online_reference_adequacy.py:102-103`, `axis=1`),
+so each day's value is 6,400 per-point numbers and the reported first
+crossing "day 1562" is a flattened index. Its pattern correlation is above
+0.99998. The corrected rotational-velocity NRMS has not been measured. Two
+earlier points stay open: the year-1 bars include the spin-up change from
+year 1 to year 2 (an earlier review), and the 3.125 km run covers one year.
 
 ## Initialization and hourly observations
 
-Ten starts are fixed at fine days 731, 771, ..., 1091. Each supplies both
-four-day coarse states in one compiled fine-model pass: exact box restriction
-and filtered restriction. Schema v2 stores T/U/V at t0 plus 24 right endpoints
-per day for each operator; schema-v1 readers remain box-only. Enabling either
-sampler must leave the prognostic path and daily restart words unchanged. A
-restarted segment must reproduce the uninterrupted next fine daily state
-bit-for-bit under the same fp64/native policy. Maddison's loss has `M=24w`
-hourly outputs; this lane likewise scores 24, 48, 96, or 192 right endpoints
-for 1, 2, 4, or 8 days.
+The fine 6.25 km truth (`swgdg_rounds/legoesm_runs/dg_gpu_7300d_truth`)
+restarts every 30 days into dual-operator hourly chunks (schema v2): one
+compiled fine scan stores both coarse states (box and filtered) at t0 and at
+24 right endpoints per day, and each chunk must reproduce the uninterrupted
+next fine daily state bit for bit (`--verify-next`). The 12-year record
+`[day731, day5111)` is written to `round6/hourly_dual_12y` as chunks
+`dual_dayAAAA_to_dayBBBB`; the independent test year `[day5141, day5506]`
+goes to `round6/hourly_dual_test_year`.
 
-Before training, every start receives a 48-hour no-network dg50 forecast from
-each candidate state and is compared with targets made by that same operator.
-Admission applies separately per start: vorticity error at hour 1 must be at
-most twice the hour-24 error divided by 24, and maximum fast divergent KE in
-hours 1--6 must be at most twice its hours-25--48 mean. Truth fast energy,
-truth vorticity RMS, and SSH tendency at hours 1, 6, 24, and 48 are reported.
-If at least 8/10 filtered starts pass, experiment one selects `template`;
-otherwise it selects `symmetric` and records the measured departure. The old
-result (box-conservative 10/10, raw independent filter 0/10) remains diagnostic
-only and does not prejudge the filtered-restriction decision.
+Every training and validation window starts from the stored state at its
+start hour with its **sea level rebalanced** (`build_start_rebalancer`):
+velocities are never changed; each iteration takes the card's own first-step
+acceleration without closure, splits off its closed-wall divergent part
+`grad(phi)` and adds `(phi - <phi>)/g` to wet SSH, so volume is unchanged; it
+stops when the divergent part's rms is at most `1e-3` of the rotational
+part's and raises after 20 updates. Targets are the stored right endpoints of
+the same operator 1..24w hours later. Measured on the stored day-731 start:
+box converges in 6 iterations, filtered in 5.
 
-## Closure seam and pytree contract
+Start admission is **truth-relative and selects nothing**
+(`nemo_testcase_l1_swg_online_balanced_start.py`). Each rebalanced start
+gets a 48-hour no-closure forecast compared with targets of the same
+operator; it passes if the hour-1 vorticity error is at most twice the
+hour-24 error divided by 24, if its fast (divergent) kinetic energy is at
+most twice the same-operator truth's in the worst of hours 1--6 and in the
+mean of hours 25--48, and if rebalancing kept the volume (within `1e-12` of
+the basin volume). The tool reports both operators; the old rule that
+selected `template` when 8 of 10 filtered starts passed is gone. The
+admission run on the current record is the operator's.
+
+## Dataset contract
+
+`SWGDatasetContract` owns the data (`legoesm-swg-online-dataset-v1`): split
+bounds in absolute hours, one objective (which selects the operator's
+fields), batch size 10, and a list of chunk roots each pinned by its
+manifest's SHA-256. Every source must be complete, schema v2, fp64,
+unperturbed, from the registered fine deck, with a passed next-day
+verification and a restart that the one fine truth run lists with the same
+digest; day files must hold exactly 24 records with the right absolute
+hours. Adjacent chunks must agree at their shared restart hour to `1e-10` of
+the field maximum, and each split must be one contiguous pinned record.
+
+Experiment one's splits (days, inclusive bounds as right endpoints): training
+`[731, 4235]` (3,504 days, the first 80% of the 12 years, as Maddison),
+validation `[4265, 5111]` after a 30-day gap, test `[5141, 5506]` after
+another 30-day gap. The test year is pinned in the contract and never read
+by training.
+
+Training batches: one starting offset per (seed, window length, epoch),
+non-overlapping windows, shuffled, ten per batch, an incomplete last batch
+dropped (Maddison redraws the offset and the order at each window length and
+epoch). Held-out batches use one fixed chronological lattice from the
+split's first hour. Each issued batch is bound to its split by a content
+digest. Eq. 7 needs no data normalizers; the contract computes none.
+
+## Closure seam and network
 
 The closure is an Equinox module producing one scalar potential on native
 F points. The card applies the matched rotated gradient to form native U/V
-accelerations at **every RK3 stage**. The same F-point potential is constant on
+accelerations at **every RK3 stage**. The same F-point potential is zero on
 the closed boundary, so wall-normal force is zero; the discrete divergence of
-the volume-force transport is roundoff zero. The seam is a pure pytree term
-inside the certified step. If the closure argument is absent, no addition or
-reassociation occurs, preserving the certified card byte-for-byte.
+the volume-force transport is roundoff zero. If the closure argument is
+absent, no addition or reassociation occurs, preserving the certified card
+byte-for-byte. Positive U is east and positive V is north; the force is the
+clockwise rotated gradient `(dPhi/dy, -dPhi/dx)` divided by the live face
+cross-section.
 
-The orientation is explicit: positive U is east and positive V is north. A
-positive northward potential difference accelerates U eastward, while a
-positive eastward potential difference accelerates V southward. Thus the force
-is the clockwise rotated gradient `(dPhi/dy, -dPhi/dx)`. Boundary potential is
-zero at all vertices, including corners.
+The network reads four channels: SSH (plus the explicit noise input), U and
+V averaged to T points, and the wet mask. It has five width-3 convolutions,
+16 hidden channels, ELU, an 11-cell (550 km) receptive field and 7,696
+parameters, smaller than Maddison's seven width-5, 32-filter residual
+layers with 154,857 weights. The final convolution has no bias (a constant
+potential is annihilated by the curl); noise enters the SSH channel through
+the state weights, so deterministic training has no noise-only leaf.
 
-Inputs are coarse SSH, native U/V velocity averaged to T, wet mask, normalized
-non-trainable C-grid metrics, an explicit RNG key, and a fixed-shape noise
-pytree. Uniform metrics act only in the potential-to-face transform and are
-not duplicated as indistinguishable CNN channels. The
-phase-3 Equinox model has five width-3 convolutions, 16 hidden channels, ELU,
-an 11-cell (550 km) receptive field, and 7,696 parameters. Its output is the
-native F-point potential; U/V acceleration is derived, never independently
-predicted. The final convolution has no bias because a constant-potential bias
-would be annihilated by the curl and become inert. Noise enters the SSH channel
-through the same state weights, so deterministic zero noise leaves no
-noise-only trainable leaf. This is intentionally smaller than Maddison's seven
-width-5, 32-filter residual convolutions with 154,857 weights (paper lines
-436--442). Architecture and normalization scales are mandatory manifest data,
-not training defaults. Initialization uses seed 20261013 and is small random,
-never exactly zero. On ten real t0 states its maximum closure acceleration is
-`1.519e-9 m s-2`, or `0.7792%` of `tau0/(rho0 H)`, below the pre-registered 1%
-bar while leaving every trainable leaf live.
+**Input and output scales: the shallow-water analogue of Maddison Eq. 6**
+(`maddison_eq6_network_scales`). The template divides its input vorticity by
+`|beta| L` and multiplies its output vorticity tendency by
+`alpha_out = |tau0| pi / (rho0 D L)`, `L` half the basin side. This network
+reads grid-point SSH and velocity and returns a transport potential, so each
+scale is the field whose differences over one coarse spacing `dx` carry the
+template's scale: velocity `U = |beta| L dx` (a one-cell difference of `u/U`
+is `zeta/(|beta| L)`), SSH `|f0| |beta| L dx^2 / g` (the five-point Laplacian
+of the scaled SSH is the geostrophic vorticity over `|beta| L`), potential
+`alpha_out D dx^2` (the force's curl is `-lap(Phi)/h`, so minus the
+five-point Laplacian of the scaled potential is the template's output for
+`h = D`). From the deck: `beta = 2e-11`, `L = 2,000 km`, `dx = 50 km`,
+`f0 = 7e-5`, `tau0 = 0.1 Pa`, `D = 500 m`, and the card's `rho0 = 1026`
+(NEMO's, which turns the stress into acceleration; Maddison's Table 1 uses
+1000) and `g`: `U = 2.0 m s-1`, SSH scale `0.7138 m`, potential scale
+`0.3827 m3 s-2`, `|beta| L = 4e-5 s-1`, `alpha_out = 3.062e-13 s-2`.
 
-The closure module, noise array, noise scale, and RNG key are explicit traced
-arguments. Per the round-3 ruling, the analytically steady wind is closed over
-by the segment builder (it is neither time-varying nor trainable). Separate
-functions are built once for each admitted window. Replacing parameters,
-noise, or keys at fixed shapes does not retrace.
+Measured on ten real starts (absolute days 731 + 18k, rebalanced, both
+operators): scaled SSH rms 0.48--0.50 and maximum 2.9--3.4; scaled T-centred
+velocity rms 0.056--0.077 and maximum 0.53--0.78; the template's own input
+`zeta/(|beta| L)` on the same states rms 0.045--0.073 and maximum 0.42--0.92,
+so the analogue gives the network the template's magnitudes. The initial
+scaled output is small: potential rms 0.02--0.10 and maximum 0.06--0.15.
+Initialization is `PRNGKey(seed)` per network seed.
 
-Before training, tests must fail on planted violations of
-F-to-U/V staggering, zero wall-normal force, divergence, integrated momentum,
-absence-is-exactly-zero, and JVP/finite-difference agreement. Static masks and
-metrics are not trainable. Every trainable leaf must have a finite nonzero loss
-gradient under the repository's no-inert-parameter gate. The gate runs through
-one real 24-hour rollout, real loss, and AdamW update from a content-pinned
-conservative start; one-step and 24-hour JVPs agree
-with centred finite differences, and closure-free 4/8-day segment outputs are
-bit-identical at their 96 common hourly endpoints.
+**Start gates, every run.** On the ten starts of the first training batch,
+the initial closure acceleration must be at most 1% of `tau0/(rho0 H)`
+(`initial_closure_acceleration_ratio`), and every parameter leaf must have a
+finite non-zero gradient at the first optimiser step (the repository's
+no-inert rule). With the Eq. 6 scales one percent corresponds to a one-cell
+scaled-potential difference of about `L/(100 pi dx) = 0.127`. Measured on the
+ten real starts above: seeds 20261013, 20261014 and 20261015 give 0.24%,
+0.35% and 0.86% (filtered) and 0.29%, 0.43% and 0.86% (box). The loss and
+every gradient element must be finite at every step.
 
-## Loss, rollout, and curriculum
+## Loss, rollout and curriculum
 
-The objective is an explicit required argument. For `template`, fine volume and
-transport are filtered before restriction, that stored state is both t0 and
-truth, and the model vorticity remains unfiltered. For `symmetric`, stored box
-restriction is t0 and truth and the same coarse Gaussian acts on both diagnosed
-vorticities. In either case loss is exactly Maddison's Eq. 7: squared vorticity
-error weighted by `dx^2` at interior F points, multiplied by
-`1e4/(beta^2 L^2)/(4 L^2)`, and averaged inside the loss over all `M=24w`
-hours and all `N_windows` batch members. Consequently the loss is exactly zero
-at a stored window start, while the template objective still sees model-created
-grid noise. Rotational-velocity terms are explicit options and off in
-experiment one. Raw SSH is monitored, not fitted.
+The loss is exactly Maddison's Eq. 7: squared vorticity error weighted by
+`dx^2` at interior F points, times `1e4/(beta^2 L^2)/(4 L^2)` with `L`
+half the deck's square side (`rn_domsiz_m = 2L`, checked against the grid),
+averaged over all `M = 24w` hourly right endpoints and all windows. Model and
+target pass through the same diagnostic, so the loss is zero at a stored
+start. Rotational-velocity terms and data normalizers are not part of it.
+Whether the first interior F ring next to the walls is weighted is an owner
+decision: `wall_ring` is `weighted` (Eq. 7 as written) or `excluded`, with no
+default; under `template` that ring carries 14--20% of the no-closure loss.
 
-One content-pinned dataset contract owns source-root and manifest hashes,
-operator name, split bounds, and batch construction. Each T0 is the stored
-T/U/V state at the chosen absolute hour and its targets are the following
-right endpoints from the same operator. Splits never share an hour and their
-endpoints are separated by at least 720 hours. The planned 12-year record is
-`[day731, day5111)`: training is `[731,4235]` (3,504 days, the template's
-first 80%), a 30-day gap precedes validation `[4265,5111]`, and another
-30-day gap precedes the independent test year `[5141,5506]`. Normalizers are
-computed only by the contract's training-split method and record the contract
-and source hashes. Any held-out normalizer request, split-crossing window,
-unregistered manifest, duplicate hour, or coverage gap inside a split raises.
+Each window runs the certified segment (`build_segment_fn`, rematerialising
+every production step) with the closure at every stage, zero stage noise and
+zero noise scale. The curriculum is exactly 1, 2, 4 and 8 days, five epochs
+each, batch 10. The network is carried from one window length to the next;
+the optimiser is re-initialised at every window length. No 16, 32 or 60-day
+stage is authorized: 60 days is 12,960 coarse steps, beyond the measured
+balanced-vorticity predictability time (10.3 days at `1e-11 s-1`, 13.6 days at
+`1e-10 s-1`).
 
-At each epoch and window length the contract redraws one seeded starting
-offset, forms non-overlapping 1/2/4/8-day windows, shuffles them, and yields
-batches of exactly ten. The 24 complete schema-v1 eight-day segments available
-at the Round-5 check are accepted only as pinned box diagnostics and prove the
-loader handles 192-hour inputs; they cannot silently supply the filtered
-objective or a missing t0. The future schema-v2 record is the training source.
+The optimiser is the template's Keras-default AdamW at a constant rate: rate
+`1e-3`, weight decay `0.004`, betas `0.9` and `0.999`, epsilon `1e-7` added to
+the square root of the uncorrected second moment (Keras' convention), no
+clipping. It is built only through the strict wrapper `create_swg_optimizer`
+over the shared factory: every field of `SWGOptimizerSettings` is required,
+a `TrainingConfig` (whose unset fields carry the factory's warm-up, cosine
+decay, clipping and Optax epsilon) is refused, and any schedule but
+`constant` or any clipping is refused.
 
-The first curriculum is exactly 1, 2, 4, and 8 days. A selected checkpoint
-initializes the next window. No 16, 32, or 60-day deterministic stage is
-authorized until the real network, batch, loss, and optimizer have been
-profiled. For scale, 60 days is 12,960 coarse steps and projects to about
-22.1 s and 4.49 GiB per sample under uniform checkpointing, beyond the measured
-balanced-vorticity predictability time. The pre-registered balanced fit gives
-10.282 days (`1e-11 s-1`, R2 0.957) and 13.621 days (`1e-10 s-1`, R2 0.885);
-the amplitude dependence is reported rather than averaged away. Uniform
-production-step checkpointing
-is the default; alternatives require a measured memory/time receipt.
+## The training driver
 
-Optimizer construction uses `legoesm.ml.training.create_optimizer`. Experiment
-one passes the template settings explicitly: constant learning rate `1e-3`,
-AdamW weight decay `0.004`, beta1 `0.9`, beta2 `0.999`, epsilon `1e-7`, no
-separate clipping transform, batch 10, and five epochs per window. The network
-is carried across 1/2/4/8-day stages and optimizer state is reinitialized at
-each stage. The shared factory's historical defaults remain bit-for-bit the
-prior warmup/cosine, clipped, epsilon-`1e-8` result for every existing caller.
-Optax 0.2.8's AdamW source and the factory were read; a hand-computed first
-update guards the explicit experiment settings.
+`scripts/run/run_swg_online_training.py train --config <file> --seed <s>
+--run-root <dir> --device cpu|cuda [--physical-gpu <k>]
+--windows-per-call <n>` runs one network seed of one configuration in
+`<dir>/<experiment>/seed<s>`. It refuses to start without a configuration
+file, and the file must state every choice with no extra or missing key:
+deck, objective, wall ring, network, at least three seeds, record roots and
+chunk label, split days, batch size, curriculum, optimiser and free run.
+`windows_per_call` (1, 2, 5 or 10) only splits each batch of ten into equal
+device calls to bound memory; the batch loss and gradient are the mean of
+the parts.
 
-Learning rate, schedule, epsilon, clipping, batch size, start sampler, split
-dates, architecture, and parameter count are manifest fields, not defaults. The
-truth-generation day scan and training segment loop are distinct named
-compositions. With zero closure, 4-day and 8-day runs from the same coarse state
-must match bit-for-bit in native T/U/V at every common hourly endpoint. A
-failure blocks training rather than widening a tolerance.
+- A GPU run needs `JAX_PLATFORMS=cuda` (JAX 0.10 refuses `gpu`),
+  `CUDA_VISIBLE_DEVICES` equal to `--physical-gpu`, x64, and runs with native
+  transcendentals; a CPU run needs `JAX_PLATFORMS=cpu` and uses libm.
+  Training refuses a tree with modified tracked files (it stamps the commit).
+- First start: the driver pins every complete chunk (a `manifest.json` with
+  status complete; chunks still being written are skipped) that touches a
+  split into a round-6 contract, validates it, and only then creates the run
+  directory with `run_manifest.json` (every resolved choice: configuration
+  and its digest, seed and what it seeds, commit, versions, device, card
+  namelist, network spec and scales, optimiser, loss constants, contract
+  digest, operator, start-state rule, curriculum, gates, free-run deck). The
+  contract needs all three splits covered, so training cannot start before
+  the test year is written.
+- Every epoch: training batches, then the validation loss on every
+  validation batch of that window length, then an atomic checkpoint of the
+  network and optimiser state, then `training_log.json` with the per-batch
+  training losses (each at its pre-update parameters), the validation loss,
+  and the checkpoint's digest.
+- Resume: rerunning the same command continues after the last logged epoch
+  from its checkpoint (digest checked) and refuses if anything in the run
+  manifest differs (configuration, commit, device type, windows per call).
+- After the last epoch of each window length: a free run of the coarse model
+  from rest with the trained closure (`swg_online_step`, closure at every
+  stage) for 7,300 days, daily snapshots with the snapshot label on every
+  file, and a manifest that names the run, seed, window length, checkpoint
+  digest, objective and contract digest. An interrupted free run is archived
+  and restarted.
+- `profile` times one batch-10 optimiser step and one validation batch per
+  window length and one free-run day on the selected device, and
+  extrapolates one seed.
+- `check-data` pins the record the same way and builds the first batch of
+  every split at every window length (digests, record counts, finiteness,
+  rebalanced starts), so the finished record is exercised before any run.
 
-The phase-3 CPU profile used the real 7,696-parameter network, one sample, and
-uniform production-step rematerialization. These are execution-only profiles;
-the temporary unit-valued field scales are not admitted training
-normalizations and no optimizer update was taken.
+## Cost
 
-| Window | Steps / observations | Forward execution / peak RSS | Reverse execution / peak RSS |
-|---:|---:|---:|---:|
-| 1 day | 216 / 24 | 2.15 s / 1.10 GiB | 10.58 s / 1.86 GiB |
-| 2 days | 432 / 48 | 4.71 s / 1.18 GiB | 14.12 s / 2.05 GiB |
-| 4 days | 864 / 96 | 8.50 s / 1.33 GiB | 30.24 s / 2.39 GiB |
-| 8 days | 1,728 / 192 | 17.38 s / 1.62 GiB | 62.67 s / 3.10 GiB |
+Measured on the CPU with the driver's own `profile` (real dg50 card, the
+7,696-parameter network with the Eq. 6 scales, ten windows per call, one
+optimiser step timed after a compiled first step; other users' jobs kept the
+load average at 11--26 on 80 cores). Batches per epoch are the training and
+validation lattice counts, `floor(days / w) / 10`.
 
-## Controls and held-out gates
+| Window | Steps per epoch | One step (batch 10) | Validation batches | One validation batch | Five epochs |
+|---:|---:|---:|---:|---:|---:|
+| 1 day | 350 | 188 s | 84 | 59 s | 98.4 h |
+| 2 days | 175 | 390 s | 42 | 119 s | 101.9 h |
+| 4 days | 87 | 768 s | 21 | 236 s | 99.7 h |
+| 8 days | 43 | 1,507 s | 10 | 469 s | 96.5 h |
+
+Each window length costs about the same, because the training days per
+epoch are fixed. Training is 396 h per seed; the four 20-year free runs add
+34--36 h (4.2--4.5 s per model day); loading, digests and start rebalancing
+add about 0.5 s per batch (measured on the real chunks), about half an hour.
+One seed is therefore about 430 h on this CPU, so training needs the GPU.
+
+**GPU expectation (not measured).** The one GPU/CPU pair measured on this
+machine for the SWG step, the compiled one-day forward scan of the 6.25 km
+model, runs 4.6 times faster on a V100S (4.49 against 20.73 ms per step). If
+the batch-10 training program gains the same factor, one seed takes about
+94 h (3.9 days) on one GPU: 86 h of training and 7.5 h of free runs. This is
+a different program (reverse mode with rematerialisation, a convolutional
+network, 70,560 cells per step against 409,600), so the first GPU action is
+`profile --device cuda` (about half an hour at that ratio), which prints each
+window length as it completes and replaces this estimate. One candidate (three
+seeds) on the two GPUs would then take about 8 days; all three candidates
+about 20.
+
+## Controls and held-out gate
 
 Both no-closure controls (`nu=10` Maddison replication and `nu=80`
-grid-Reynolds control) use the same evaluation harness. The `nu=80` control
-requires a finite, positive-thickness, sub-unit-Courant 30-day preflight before
-its 20-year CPU run. Reports are yearly, map scores use wet cells only, and
-health includes top-octave DST-streamfunction KE, direct-vorticity enstrophy,
-and a local second-difference grid-noise index that a phase reversal cannot
-evade. Years 2–3 are currently the least-confounded exploratory
-window, not an equilibrated claim.
+grid-Reynolds control) and every trained seed are 20-year free runs from
+rest, scored by one harness on the eight non-overlapping two-year windows
+after year 1 that the 6.25 km truth pins (days 366--6205), against the truth
+climatology made by the selected objective's own operator (`symmetric`: box
+restriction; `template`: filtered restriction). Every number is a median
+over those windows. The bars are the truth's own window-to-window spread,
+frozen in code before any trained model exists: each truth window is scored
+against the climatology of the other seven, and the bar is the largest of
+the eight values. The median seed must beat both controls by more than the
+truth's half-range in live-face-transport RMSE, KE-spectrum L1 and wet
+EKE-map NRMSE; every seed's EKE ratio must lie in the truth's own
+eight-window band; no seed may exceed the worse control's top-octave
+fractions or grid-noise index by more than that control's own half-range.
+Finite fields, positive thickness and sub-unit Courant numbers are
+unconditional on every window and on the whole run. Measured: the perfect
+model passes and both controls fail, for both objectives; `freeze --verify`
+recomputes the record from the pinned data and refuses any difference.
 
-Each trained window has at least three network seeds and a 20-year free run.
-Every seed must remain finite with positive thickness and `Cu,Cv < 1`. On the
-held-out years, the median seed must beat the **better** of the two controls in
-live-face-transport absolute error, KE-spectrum relative L1 error, and wet-cell EKE
-map normalized RMSE. Every seed must retain basin EKE within 20% of filtered
-truth and must not exceed the worse control's top-octave fractions or
-grid-noise index. Uncertainty ranges and raw seed scores are reported; a
-median alone cannot hide an unstable seed.
+A review of round 6 held three points of this gate open (outside the
+driver): the spectral-health allowances come from the worse control's
+spread, not the truth's; three seed labels can bind one free-run root, and
+the scorer does not require the manifest to name a checkpoint or seed (the
+driver's free-run manifests now do); and the snapshot/daily-mean separation
+trusts a manifest label and treats missing sampling metadata as snapshots
+(the driver labels every file).
 
-The corrected native-face scorecard freezes control manifests and code
-thresholds. On years 2--3, `nu=10` has live-face-transport RMSE
-`1.439733e6 m3 s-1`, DST-spectrum L1 `0.223004`, wet EKE-map NRMSE `0.393673`,
-and EKE ratio `0.732341`; `nu=80` has `2.007138e6`, `0.386407`, `0.773158`, and
-`0.396429`. Native-face `nu=10` top-octave KE, direct-vorticity enstrophy, and
-second-difference bars are `0.0538625/0.435918/0.931792`; `nu=80` gives
-`0.0275464/0.294723/0.706924`. The better skill and worse noise control are
-therefore both `nu=10` for these registered fields. Finite fields, positive
-thickness, and sub-unit Courant are unconditional per-seed gates; a perfect
-statistical score cannot override failed physics.
-
-Two adversarial controls are mandatory. Replacing every time-varying anomaly
-by its time mean must fail the EKE-retention gate (collapsed variance).
-Adding a native two-cell checkerboard in either phase above the worse control must
-fail spectral health. A gate release that lets either plant pass is itself a
-failed gate. Mean transport merely lying between a baseline and truth is not
-an acceptance criterion.
+Two adversarial plants stay mandatory: replacing every time-varying anomaly
+by its time mean must fail the EKE band, and a native two-cell checkerboard
+above the worse control must fail spectral health.
 
 ## Stochastic branch
 
-Stochastic readiness is **interface only in phase 4**. The rollout API carries an explicit RNG key and member-indexed noise
-pytree. The loss API accepts `S` trajectories and dispatches between point loss
-and energy score without changing solver or closure signatures. The dormant
-energy-score implementation follows Brolly Eqs. 9--10: Euclidean score at each
-lead, pair term divided by `2 S (S-1)`, then uniform lead averaging. It requires
-`S >= 2`; `{truth, truth+1}` scores exactly zero. No stochastic rollout or
-stochastic-learning claim is made this round.
-There is no inactive trainable “noise parameter” in deterministic mode. The
-noise scale is an explicit non-parameter input; noise uses the same weights as
-the state path. Any future choice to make its scale trainable must first pass
-the no-inert-parameter gate. Collapsed ensemble variance is a planted failure.
+Stochastic readiness is **interface only**. The rollout API carries an
+explicit RNG key and member-indexed noise pytree. The loss API accepts `S`
+trajectories and dispatches between point loss and energy score without
+changing solver or closure signatures. The dormant energy score follows
+Brolly Eqs. 9--10: Euclidean score at each lead, pair term divided by
+`2 S (S-1)`, then uniform lead averaging; it requires `S >= 2` and
+caller-supplied normalizers. There is no inactive trainable noise parameter
+in deterministic mode; any future trainable noise scale must first pass the
+no-inert gate. Collapsed ensemble variance is a planted failure.
 
-## Review requirements and enforcement
+## What enforces each requirement
 
-| # | Required change | Design answer | Enforcing test or measurement |
-|---|---|---|---|
-| 1 | Conservative, balanced initialization | Explicit box/symmetric and filtered/template states; measurement selects one | Per-start no-jump/fast-energy gates; filtered requires at least 8/10 |
-| 2 | Hourly targets | Both coarse states at t0 and 24 right endpoints/day from one fine scan | Ten dual four-day caches; sampler-off/both-mode and restart-next-day word gates |
-| 3 | Adequate reference | Early common path plus uncertainty-aware 3.125 km sensitivity | Days 1--8 NRMS/correlation and year-1 statistics against interannual variability |
-| 4 | Balanced predictability | Smooth zero-divergence vorticity perturbation, two amplitudes, JVP | 120-day twins and registered balanced fit rule |
-| 5 | Cap curriculum | Initial windows 1/2/4/8 days only | Network-inclusive profile required before 16/32/60 days |
-| 6 | Non-divergent forcing | F-potential rotated gradient at every RK3 stage | Divergence, walls, momentum, zero seam, JVP/FD plants |
-| 7 | Viscosity controls | `nu=10` and `nu=80` are separate named controls | 30-day preflight, then identical 20-year health/climate harness |
-| 8 | Structural stochastic hook | Interface only: explicit RNG/noise and swappable Brolly score, `S>=2` | Counterexample, RNG independence, inert-noise and collapse plants |
-| 9 | Quantitative multi-seed gates | Three seeds; beat best control; variability and noise bounds | Held-out harness plus collapsed-variance/grid-noise failures |
-| 10 | Correct physics and composition | Full-gravity explicit free surface; named truth/training loops | Zero-closure 4/8-day bitwise A/B and manifest composition fields |
-
-## Round-5 implementation disposition
-
-| Requirement | Design answer | Test or measurement |
+| Requirement | Design answer | Enforcing test or measurement |
 |---|---|---|
-| F-potential seam | Matched live-thickness transport curl at every RK3 stage; absent branch makes no addition | Random-potential divergence/wall/integral tests; unchanged dg50 ladder |
-| Explicit stochastic structure | RNG, member noise, and scale are traced; shared weights avoid an inactive noise branch | RNG/no-retrace tests and no-inert gradient gate |
-| Objective choice | `template` is fine-filtered target versus unfiltered model; `symmetric` is explicit departure; no default | Zero-at-t0, checkerboard response, analytic transfer, and 8/10 admission rule |
-| Initial curriculum | Builders admit only 1/2/4/8 days | Refusal test for 16 days and measured per-window profiles |
-| Segment composition | Flat hourly scan with uniform per-step rematerialization; steady wind closed over | 4/8-day zero-closure common-endpoint bit identity |
-| Dataset | Pinned schema-v2 roots/hashes; split-owned normalizers; seeded non-overlap batches of ten | Eight-day real loader and validation/test/cross-boundary leakage plants |
-| Optimizer | Exact template AdamW through repository `create_optimizer`; historical defaults unchanged | Hand first update, bitwise legacy update, real pinned rollout/loss/update |
-| Multi-seed gate | Median beats better control on three skill measures; every seed meets variability/noise bounds | Three-seed minimum plus failed collapsed and grid-noise plants |
-| Coarse controls | `nu=10` and `nu=80` scored from native arrays on years 2--3 | Frozen hashes, live transport, uncertainty, and four failing plants |
-| Model identity | Exact and numerical composition scores are kept separate | Three 30-day artifacts with first-cell ULP localization |
-| Training release | User accepted composition debt; filtered-start decision, adequate reference, and pinned data remain | Explicit BUILD-NOT-TRAIN hold; only the existing single-step seam test |
+| Conservative, balanced starts | Stored state, sea level rebalanced; truth-relative admission that selects nothing | Rebalancer and contract tests (`tests/ml/test_swg_online.py`); admission tool tests |
+| Hourly targets | Dual-operator v2 chunks, right endpoints, next-day bitwise restart check | Contract plants; real-chunk driver test |
+| Adequate reference | 3.125 km early path and year-1 statistics | Open: instrument defect in the rotational-velocity NRMS |
+| Curriculum | 1/2/4/8 days, five epochs, batch 10, network carried, optimiser re-initialised | Configuration tests; two-window end-to-end test reads the optimiser step count and the carried weights |
+| Optimiser | Strict wrapper, Keras AdamW, constant rate, no clipping | Unset-field, refusal and pinned-update tests |
+| Network scales | Eq. 6 shallow-water analogue from the deck | Formula and moved-deck tests; ten-start measurement |
+| Start gates | 1% initial acceleration, no inert leaf, finite every step | End-to-end test (gate recorded); real-chunk test |
+| Checkpoint and resume | Atomic per-epoch checkpoints; resume refuses any changed choice | Killed-run test: resumed epoch equals the killed process's state word for word |
+| Free runs | 7,300 days from rest, labelled snapshots, closure identity | Read through the held-out harness's own loader |
+| Held-out gate | Truth-spread bars, three seeds | Evaluation tests; three review findings open |
+| Non-divergent forcing | F-potential rotated gradient at every RK3 stage | Divergence, wall, momentum, zero-seam, JVP/FD tests |
+
+## Before the first training run
+
+1. The 12-year record and the test year complete; `check-data` passes on the
+   chosen configuration.
+2. The adequacy tool's rotational-velocity reduction repaired and the
+   3.125 km comparison re-run.
+3. `profile --device cuda` on one GPU, to fix `windows_per_call` and the
+   schedule.
+4. The owner's decisions below.
+
+## Open decisions
+
+1. Objective: `template` or `symmetric` (one configuration committed for each).
+2. Wall ring: `excluded` or `weighted` for `template`; and for `symmetric`,
+   whose configuration uses `weighted` (Eq. 7 as written).
+3. Network scales: confirm the Eq. 6 shallow-water analogue (velocity, SSH
+   and potential scales above) and `rho0 = 1026` from the card.
+4. Seeds 20261013, 20261014, 20261015; 20261015 measured 0.86% of the 1%
+   initial-acceleration bar, so a seed may fail the gate on its own first
+   batch and stop.
+5. Free runs run in the training process after each window length, so a
+   seed's wall time includes four 20-year runs; running them elsewhere needs
+   a separate command.
+6. Gate decisions carried from round 6 (window count, skill margin, noise
+   tolerance) and the adequacy bars (spin-up pair).

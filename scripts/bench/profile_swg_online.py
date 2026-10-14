@@ -13,13 +13,13 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 from legoesm.core.precision import PrecisionPolicy, set_policy
-from legoesm.ml.training import TrainingConfig
 from legoesm.ocean.fidelity.nemo_testcase_recipe import (
     SWG_DG50_NAMELIST,
     build_swg_card,
 )
 from legoesm.training.swg_online import (
     SWGNetworkSpec,
+    SWGOptimizerSettings,
     SWGScalarPotentialCNN,
     assert_network_gradients_live,
     assert_no_convolution_operations,
@@ -89,10 +89,11 @@ def run_profile(window_days: int, mode: str, objective_operator: str,
     initial = card.recipe.initial_state
     # Construct through the shared factory and initialize state, but take no
     # update: this round proves plumbing and gradient reachability, not fit.
-    optimizer = create_swg_optimizer(TrainingConfig(
-        lr=1.0e-3, warmup_steps=0, total_steps=100,
-        weight_decay=4.0e-3, optimizer="adamw", schedule="constant",
-        clip_gradients=False, adam_epsilon=1.0e-7))
+    optimizer = create_swg_optimizer(SWGOptimizerSettings(
+        optimizer="adamw", learning_rate=1.0e-3, schedule="constant",
+        weight_decay=4.0e-3, adam_b1=0.9, adam_b2=0.999, adam_epsilon=1.0e-7,
+        adam_epsilon_convention="keras_epsilon_hat",
+        gradient_clipping="none"))
     optimizer.init(eqx.filter(network, eqx.is_inexact_array))
 
     def objective(net):

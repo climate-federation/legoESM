@@ -366,6 +366,134 @@ def network_parameter_count(network: SWGScalarPotentialCNN) -> int:
     return int(sum(np.prod(leaf.shape, dtype=np.int64) for leaf in leaves))
 
 
+class Eq6NetworkScales(NamedTuple):
+    """Maddison Eq. 6 scales and this network's shallow-water analogue."""
+
+    vorticity_scale_s1: float
+    vorticity_tendency_scale_s2: float
+    grid_spacing_m: float
+    depth_m: float
+    ssh_scale_m: float
+    velocity_scale_m_s: float
+    potential_scale_m3_s2: float
+
+
+def maddison_eq6_network_scales(
+        card, geometry: SWGClosureGeometry) -> Eq6NetworkScales:
+    """Shallow-water analogue of Maddison Eq. 6, every factor from the deck.
+
+    Eq. 6 divides the template network's input vorticity by ``|beta| L``
+    and multiplies its output by the wind-forcing scale of the vorticity
+    equation, ``alpha_out = |tau0| pi / (rho0 D L)``, ``L`` half the basin
+    side (Table 1, "Domain size 2L").  This network reads grid-point SSH and
+    velocity and returns an F-point volume-transport potential ``Phi``, so
+    each of its scales is the field whose one-spacing (``dx``) differences
+    carry the template's scale:
+
+    * velocity ``U = |beta| L dx``: a one-cell difference of ``u/U`` is the
+      template's input ``zeta/(|beta| L)`` with ``zeta ~ du/dx``;
+    * SSH ``eta_s = |f0| |beta| L dx**2 / g``: the five-point Laplacian of
+      ``eta/eta_s`` is the geostrophic ``(g lap(eta)/f0)/(|beta| L)``;
+    * potential ``Phi_s = alpha_out D dx**2``: the closure force
+      ``(d_y Phi, -d_x Phi)/h`` has curl ``-lap(Phi)/h``, so for ``h = D``
+      minus the five-point Laplacian of ``Phi/Phi_s`` is the template's
+      output ``S/alpha_out``.
+
+    ``beta``, ``f0``, ``tau0`` and ``2L`` come from the resolved namelist,
+    ``rho0`` and ``g`` from the card's constants (the values the model uses
+    to turn wind stress into acceleration), ``D`` from the card's resting
+    layer thickness, which must be one value over the wet basin, and ``dx``
+    from the closure geometry.
+    """
+    namelist = card.resolved_namelist
+    constants = card.recipe.model_config.constants
+    wet = np.asarray(geometry.tmask, dtype=bool)
+    thickness = np.asarray(card.recipe.z_coord.nemo_e3t_0, dtype=np.float64)
+    depths = np.unique(thickness.reshape(wet.shape + (-1,))[wet])
+    if depths.size != 1 or not np.isfinite(depths[0]) or depths[0] <= 0.0:
+        raise ValueError(
+            "Eq. 6 analogue needs one positive resting depth over the basin, "
+            f"got {depths[:4]}")
+    half_width = maddison_half_width_m(namelist.rn_domsiz_m, geometry)
+    beta = abs(float(namelist.rn_beta_m_s))
+    f0 = abs(float(namelist.rn_f0_s))
+    tau0 = abs(float(namelist.rn_tau_pa))
+    rho0 = float(constants.rho_0)
+    gravity = float(constants.g)
+    depth = float(depths[0])
+    spacing = float(geometry.spacing_m)
+    if min(beta, f0, tau0, rho0, gravity, spacing) <= 0.0:
+        raise ValueError("Eq. 6 analogue needs positive deck parameters")
+    vorticity = beta * half_width
+    tendency = tau0 * math.pi / (rho0 * depth * half_width)
+    return Eq6NetworkScales(
+        vorticity_scale_s1=vorticity,
+        vorticity_tendency_scale_s2=tendency,
+        grid_spacing_m=spacing,
+        depth_m=depth,
+        ssh_scale_m=f0 * vorticity * spacing**2 / gravity,
+        velocity_scale_m_s=vorticity * spacing,
+        potential_scale_m3_s2=tendency * depth * spacing**2)
+
+
+def eq6_scale_report(network: SWGScalarPotentialCNN, states: tuple,
+                     card, geometry: SWGClosureGeometry,
+                     scales: Eq6NetworkScales, *, key) -> dict:
+    """Dimensionless network inputs and initial output on given states.
+
+    Reports, per state and over all of them, the rms and maximum magnitude of
+    the scaled SSH and T-centred velocities on wet T points (what the network
+    reads), of the template's own input ``zeta/(|beta| L)`` on interior F
+    points (for comparison), and of the scaled output ``Phi/Phi_s`` and the
+    five-point Laplacian of it (the template's output in grid units).
+    """
+    if network.spec.ssh_scale_m != scales.ssh_scale_m \
+            or network.spec.velocity_scale_m_s != scales.velocity_scale_m_s \
+            or network.spec.potential_scale_m3_s2 \
+            != scales.potential_scale_m3_s2:
+        raise ValueError("network scales differ from the Eq. 6 analogue")
+    tau = swg_surface_wind(card.resolved_namelist)
+    wet = np.asarray(geometry.tmask, dtype=bool)
+    interior = np.asarray(geometry.vertex_interior, dtype=bool)
+    fields = {name: [] for name in (
+        "ssh", "u_t", "v_t", "template_input_zeta", "output_potential",
+        "output_laplacian")}
+    for index, state in enumerate(states):
+        entry = _entry_from_state(
+            state, tau, tau, card.recipe.grid, card.recipe.z_coord,
+            card.recipe.model_config)
+        potential = np.asarray(network(
+            entry, geometry, key=jax.random.fold_in(key, index),
+            noise=jnp.zeros_like(entry.ssh_k), noise_scale=jnp.asarray(0.0)),
+            dtype=np.float64) / scales.potential_scale_m3_s2
+        u = np.asarray(entry.u_k, dtype=np.float64)
+        v = np.asarray(entry.v_k, dtype=np.float64)
+        u_t = 0.5 * (u + np.concatenate([np.zeros_like(u[:, :1]), u[:, :-1]], 1))
+        v_t = 0.5 * (v + np.concatenate([np.zeros_like(v[:1]), v[:-1]], 0))
+        zeta = np.asarray(balanced_fields_from_native(
+            u, v, geometry, objective="template").relative_vorticity_s1)
+        padded = np.pad(potential, 1)
+        laplacian = (padded[2:, 1:-1] + padded[:-2, 1:-1] + padded[1:-1, 2:]
+                     + padded[1:-1, :-2] - 4.0 * potential)
+        fields["ssh"].append(
+            np.asarray(entry.ssh_k, dtype=np.float64)[wet] / scales.ssh_scale_m)
+        fields["u_t"].append(u_t[wet] / scales.velocity_scale_m_s)
+        fields["v_t"].append(v_t[wet] / scales.velocity_scale_m_s)
+        fields["template_input_zeta"].append(
+            zeta[interior] / scales.vorticity_scale_s1)
+        fields["output_potential"].append(potential[interior])
+        fields["output_laplacian"].append(laplacian[interior])
+
+    def summary(values):
+        return {"per_state_rms": [float(np.sqrt(np.mean(x**2))) for x in values],
+                "per_state_max_abs": [float(np.max(np.abs(x))) for x in values],
+                "rms": float(np.sqrt(np.mean(np.concatenate(values) ** 2))),
+                "max_abs": float(np.max(np.abs(np.concatenate(values))))}
+
+    return {"scales": scales._asdict(), "states": len(states),
+            **{name: summary(values) for name, values in fields.items()}}
+
+
 def _gaussian_smooth_vorticity(zeta, geometry: SWGClosureGeometry):
     """Registered sigma-one-cell coarse Gaussian on the closed F rectangle.
 
@@ -1336,9 +1464,67 @@ def build_segment_fn(card, geometry: SWGClosureGeometry, *,
     return raw, eqx.filter_jit(raw)
 
 
-def create_swg_optimizer(config: TrainingConfig):
-    """Construct the optimizer only through the repository-owned factory."""
-    return create_optimizer(config)
+class SWGOptimizerSettings(NamedTuple):
+    """Every optimiser choice of one SWG online run; no field has a default.
+
+    The shared factory's defaults (warm-up, cosine decay, global-norm
+    clipping, Optax epsilon 1e-8) are the historical SFNO recipe, not the
+    template's, so each choice is named here and the strict wrapper below
+    admits none of the shared ones by omission.
+    """
+
+    optimizer: str
+    learning_rate: float
+    schedule: str
+    weight_decay: float
+    adam_b1: float
+    adam_b2: float
+    adam_epsilon: float
+    adam_epsilon_convention: str
+    gradient_clipping: str
+
+
+def create_swg_optimizer(settings: SWGOptimizerSettings):
+    """AdamW at a constant rate through the shared factory, strictly.
+
+    Only ``optimizer="adamw"``, ``schedule="constant"`` (no warm-up, no
+    decay) and ``gradient_clipping="none"`` are admitted, and the epsilon
+    convention must be named (``keras_epsilon_hat`` is the template's Keras
+    AdamW).  A ``TrainingConfig``, whose unset fields silently carry the
+    factory defaults, is refused, and a settings tuple with a missing field
+    cannot be built.  The factory reads neither its warm-up/total step counts
+    nor its clip norm on this path (constant schedule, clipping off).
+    """
+    if type(settings) is not SWGOptimizerSettings:
+        raise TypeError(
+            "SWG optimiser requires SWGOptimizerSettings with every field "
+            f"stated, not {type(settings).__name__}")
+    if settings.optimizer != "adamw":
+        raise ValueError("SWG optimiser must be 'adamw'")
+    if settings.schedule != "constant":
+        raise ValueError(
+            "SWG optimiser schedule must be 'constant' (no warm-up or decay)")
+    if settings.gradient_clipping != "none":
+        raise ValueError("SWG optimiser gradient_clipping must be 'none'")
+    if settings.adam_epsilon_convention not in ("keras_epsilon_hat", "optax"):
+        raise ValueError(
+            "SWG optimiser epsilon convention must be 'keras_epsilon_hat' or "
+            "'optax'")
+    for name in ("learning_rate", "weight_decay", "adam_b1", "adam_b2",
+                 "adam_epsilon"):
+        value = getattr(settings, name)
+        if type(value) is not float or not math.isfinite(value):
+            raise ValueError(f"SWG optimiser {name} must be a finite float")
+    if settings.learning_rate <= 0.0 or settings.weight_decay < 0.0:
+        raise ValueError(
+            "SWG optimiser needs a positive rate and non-negative decay")
+    return create_optimizer(TrainingConfig(
+        lr=settings.learning_rate, warmup_steps=0,
+        weight_decay=settings.weight_decay, optimizer="adamw",
+        schedule="constant", clip_gradients=False,
+        adam_epsilon=settings.adam_epsilon, adam_b1=settings.adam_b1,
+        adam_b2=settings.adam_b2,
+        adam_epsilon_convention=settings.adam_epsilon_convention))
 
 
 def assert_network_gradients_live(grads) -> None:
