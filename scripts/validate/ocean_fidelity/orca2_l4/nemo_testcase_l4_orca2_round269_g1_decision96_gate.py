@@ -189,7 +189,14 @@ def classify(baseline_path: Path, candidate_path: Path, *, plant: str) -> dict:
     final_before = _row(baseline, final_target)
     final_after = _row(candidate, final_target)
     ssh_not_worse = float(final_after["max_abs"]) <= float(final_before["max_abs"])
-    require(majority, "G1 transfer lacks a strict majority toward NEMO by RMS")
+    require(
+        majority,
+        "G1 transfer lacks a strict majority toward NEMO by RMS: "
+        f"rms={counts['rms']}, max_abs={counts['max_abs']}, "
+        f"first={first_target}:{first_direction}, "
+        f"final_stage3_ssh_max={float(final_before['max_abs'])}->"
+        f"{float(final_after['max_abs'])}",
+    )
     require(first_direction in ("toward", "equal"), "first non-bit row moved away")
     require(not comparison["bit_identical_losses"], "an exact row left the bar")
     ssh_before = float(final_before["max_abs"])
