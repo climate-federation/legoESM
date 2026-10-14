@@ -29,6 +29,14 @@ footprint per mark = finite in every source):
             F_ssh = the sea-surface part alone, F_tot - F_ssh = density part
   ug_N/u_N, ug_S/u_S  50-300 m mean geostrophic vs actual zonal velocity
             [m/s] at 2N / 2S (rows 1.5-2.5), 160-260E
+  A_x, A_y, A_z, Cor, lapU  0-400 m zonal momentum terms per unit area of the
+            box |lat|<=1, 160-260E [1e-5 m2/s2], + = eastward gain, flux form:
+            A_x = (int u^2 dz at 160E - at 260E) / Lx; A_y = (int u v dz at
+            1S - at 1N) / Ly; A_z = u w at 400 m, w = int_0^400 div(u, v) dz
+            (rigid lid, + up); Cor = f int v dz; lapU = curvature of the 0-400 m
+            transport, i.e. lateral friction PER 1000 m2/s of viscosity
+            (snapshots carry no viscosity).  U_box = box-mean 0-400 m transport.
+            All from the 1-degree remap: an estimate, not the native operator.
 
 SAMPLING.  Lanes use INSTANTANEOUS velocity (FESOM stores no mean velocity) at
 the same marks, so the three lanes are like for like; inertial oscillations
@@ -152,6 +160,48 @@ def pressure_terms(T, S, eta, u, zN, zi):
     return out
 
 
+def momentum_terms(u, v, zN, zi):
+    """Flux-form 0-Z_COL zonal momentum terms over |lat|<=1, LON_SLOPE (see module doc).
+
+    u, v (nz, GLAT, GLON) on level centres zN, interfaces zi; NaN = dry/missing."""
+    from legoesm import constants
+    R, Om = float(constants.R_earth), float(constants.Omega)
+    nz = zN.size
+    bc = band_weights(zi, 0.0, Z_COL)[:nz]
+    k = bc > 0
+    col = lambda q: np.sum(q[k] * bc[k, None, None], axis=0)      # NaN if any layer missing
+    U, V, UU, UV = col(u), col(v), col(u * u), col(u * v)
+    eq = np.abs(GLAT) <= 1.0
+    l0, l1 = LON_SLOPE
+    ls = (GLON >= l0) & (GLON <= l1)
+    rN, rS = np.flatnonzero(eq).max(), np.flatnonzero(eq).min()
+    iW, iE = int(np.flatnonzero(ls).min()), int(np.flatnonzero(ls).max())
+    Lx = np.deg2rad(l1 - l0) * R
+    Ly = np.deg2rad(GLAT[rN] - GLAT[rS] + 1.0) * R
+    face_x = lambda i: np.mean(0.5 * (UU[eq, i - 1] + UU[eq, i]))         # 2-row mean at a lon face
+    face_y = lambda r0, r1: np.mean(0.5 * (UV[r0, ls] + UV[r1, ls]))      # lon mean at a lat face
+    out = {"A_x": (face_x(iW) - face_x(iE + 1)) / Lx,
+           "A_y": (face_y(rS - 1, rS) - face_y(rN, rN + 1)) / Ly}
+    lat = np.deg2rad(GLAT)[:, None]
+    dx = np.deg2rad(1.0) * R * np.cos(lat)
+    dy = np.deg2rad(1.0) * R
+    div = np.gradient(U, axis=1) / dx + np.gradient(V * np.cos(lat), axis=0) / (dy * np.cos(lat))
+    kb = int(np.flatnonzero(k).max())                            # level containing Z_COL
+    u400 = u[kb] if bc[kb] >= 0.5 * (zi[kb + 1] - zi[kb]) else 0.5 * (u[kb] + u[kb - 1])
+    box = lambda q: q[eq][:, ls]
+    f = 2.0 * Om * np.sin(lat)
+    lap = np.gradient(np.gradient(U, axis=1) / dx, axis=1) / dx + np.gradient(np.gradient(U, axis=0) / dy, axis=0) / dy
+    for tag, q in (("A_z", u400 * div), ("Cor", f * V), ("lapU", 1.0e3 * lap), ("U_box", U)):
+        b = box(q)
+        if np.isfinite(b).sum() < 0.8 * b.size:
+            raise ValueError(f"{tag}: finite at only {np.isfinite(b).sum()}/{b.size} box columns")
+        out[tag] = float(np.nanmean(b))
+    for tag in ("A_x", "A_y"):
+        if not np.isfinite(out[tag]):
+            raise ValueError(f"{tag}: a box face has a missing column")
+    return {t: (x if t == "U_box" else x * 1e5) for t, x in out.items()}
+
+
 def main(argv=None):
     global Z_COL
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
@@ -231,6 +281,9 @@ def main(argv=None):
         out["marks"][d] = {lab: transports(np.where(common, u, np.nan), np.where(common, v, np.nan), zN, zi,
                                            eta=np.where(ecom, E[lab], np.nan))
                            for lab, (u, v) in G.items()}
+        for lab, (u, v) in G.items():
+            out["marks"][d][lab].update(momentum_terms(
+                np.where(common, u, np.nan), np.where(common, v, np.nan), zN, zi))
         pcom = common & np.all([np.isfinite(x) for ts in TS.values() for x in ts], axis=0) & ecom[None]
         for lab, (Tl, Sl) in TS.items():
             out["marks"][d][lab].update(pressure_terms(
@@ -241,6 +294,11 @@ def main(argv=None):
     out["marks_used"] = marks
     out["six_mark_mean"] = {lab: {q: float(np.mean([out["marks"][d][lab][q] for d in marks]))
                                   for q in out["marks"][marks[0]][lab]} for lab in labs}
+    late = [d for d in marks if d >= 10]
+    out["dUdt_late_1e5"] = {lab: float(np.polyfit(np.array(late) * 86400.0,
+                                                  [out["marks"][d][lab]["U_box"] for d in late], 1)[0] * 1e5)
+                            for lab in labs} if len(late) >= 2 else {}
+    print("dU_box/dt days", late, json.dumps({k: round(x, 3) for k, x in out["dUdt_late_1e5"].items()}))
     print("MEAN", json.dumps({k: {q: round(x, 3) for q, x in r.items()} for k, r in out["six_mark_mean"].items()}))
     (a.out / "eq_wind_response.json").write_text(json.dumps(out, indent=1))
     import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot as plt

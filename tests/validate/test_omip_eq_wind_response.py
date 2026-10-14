@@ -126,3 +126,37 @@ def test_density_force_magnitude_with_clipped_layer(mod):
         Pk = sum(g * (rho[j] - r0) * (zi[j + 1] - zi[j]) for j in range(k)) + g * (rho[k] - r0) * (zc[k] - zi[k])
         F += -np.polyfit(x, Pk, 1)[0] / r0 * thick[k]
     assert r["F_tot"] == pytest.approx(F * 1e5, rel=1e-9)
+
+
+def test_momentum_terms_known_answers(mod):
+    """Depth-uniform fields to 400 m (9 m/s below must not count).
+    (1) u = 0.3 + 0.004 (lon - 210), v = 0: A_x = H (u160^2 - u260^2) / Lx,
+    upwelling w = H a / dx lifts the box-mean u = 0.3 -> A_z = 0.3 H a / dx;
+    curvature, Coriolis and A_y are zero.
+    (2) u = 0.5, v = 0.02 * lat: A_y = -2 c u H / Ly, Cor = H c 0.5 f(0.5)."""
+    from legoesm import constants
+    R, Om = float(constants.R_earth), float(constants.Omega)
+    zi = np.array([0.0, 10.0, 50.0, 150.0, 400.0, 600.0])
+    zN = 0.5 * (zi[1:] + zi[:-1]); H = 400.0
+    shp = (zN.size, mod.GLAT.size, mod.GLON.size)
+    a = 0.004
+    u = np.broadcast_to(0.3 + a * (mod.GLON - 210.0), shp).copy(); u[4:] = 9.0
+    v = np.zeros(shp)
+    r = mod.momentum_terms(u, v, zN, zi)
+    uW, uE = 0.3 + a * (160.0 - 210.0), 0.3 + a * (260.0 - 210.0)
+    assert r["A_x"] == pytest.approx(1e5 * H * (uW ** 2 - uE ** 2) / (np.deg2rad(100.0) * R))
+    dx = np.deg2rad(1.0) * R * np.cos(np.deg2rad(0.5))
+    assert r["A_z"] == pytest.approx(1e5 * 0.3 * H * a / dx)
+    for t in ("A_y", "Cor", "lapU"):
+        assert abs(r[t]) < 1e-9, t
+    assert r["U_box"] == pytest.approx(0.3 * H)
+    c = 0.02
+    u = np.full(shp, 0.5); u[4:] = 9.0
+    v = np.broadcast_to((c * mod.GLAT)[:, None], shp[1:]).copy() * np.ones((zN.size, 1, 1)); v[4:] = 9.0
+    r = mod.momentum_terms(u, v, zN, zi)
+    assert r["A_y"] == pytest.approx(1e5 * -2.0 * c * 0.5 * H / (np.deg2rad(2.0) * R))
+    assert r["Cor"] == pytest.approx(1e5 * H * c * 0.5 * 2.0 * Om * np.sin(np.deg2rad(0.5)))
+    assert abs(r["A_x"]) < 1e-9 and abs(r["lapU"]) < 1e-9
+    u[2, :, 30] = np.nan                                 # 160.5E: a missing west-face column must raise
+    with pytest.raises(ValueError, match="box face"):
+        mod.momentum_terms(u, v, zN, zi)
