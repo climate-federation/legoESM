@@ -215,6 +215,91 @@ No training driver, stochastic rollout, or optimization experiment was added.
 Stochastic readiness remains interface-only, and the energy-score definition
 from Round 4 is unchanged.
 
+## Round 5b repair
+
+The registered double-gyre climate instrument is restored to its branch-point
+behaviour. The branch point is
+`8f8551c8734947ff5b1489eb169f3cfd4cdfcaf2`, the parent of the first
+`swg_online` commit (`23bc6d0cb`) and the last commit before this lane changed
+the instrument. The last double-gyre-lane commit on the file was `09671b614`.
+The repair is `3461a66d6`.
+
+The five commits named by the operator changed an existing registered caller
+as follows:
+
+| Commit | Effect seen by an existing caller before this repair |
+|---|---|
+| `23bc6d0cb` | Generalised the provider and made the default no-geometry diagnostic add thickness and Courant outputs; the CLI roots also ceased to be argparse-required. |
+| `fe9596c60` | Replaced dry-cell zeros by NaNs in five maps and added enstrophy, top-octave, and checkerboard-health outputs to the default metric set. |
+| `18862d4cf` | Added the `nu=10`/`nu=80` online control selector; it made no further numerical change to the registered NEMO/legoESM arm. |
+| `a9d98be95` | Replaced the registered periodic isotropic KE spectrum by the closed-basin sine-transform spectrum and replaced the checkerboard projection by a second-difference index. |
+| `a01d68f4f` | Replaced cell-centred online spectra/noise by native-face versions inside the shared default; callers without a card then failed before producing a report. |
+
+The history also contains interstitial commit `68646355a`, not one of the five
+listed in the addendum. It transiently changed the added enstrophy derivation;
+`a9d98be95` superseded that implementation, so it leaves no independent
+tip-versus-branch-point delta.
+
+`diagnose(..., diagnostics="registered")` is now the unchanged default and
+contains the branch-point metric implementation: cell-centred maps, periodic
+isotropic KE spectrum, and exactly the original twelve output arrays.
+`diagnostics="online"` owns the sine-transform streamfunction spectrum,
+direct native-vorticity enstrophy, native-face spectra, native-face
+second-difference noise, and physical-health fields. The online evaluation
+harness passes that selection explicitly. Both the Python and CLI dispatchers
+raise on an unknown selection, and the filtered/coarse CLI arm refuses to run
+unless `--diagnostics online` is stated.
+
+The requested full years-2--3 replay was stopped before output creation after
+the registered Python tile assembler proved too slow. The authorized year-1
+fallback completed against the same raw NEMO and legoESM daily-mean inputs:
+
+```text
+PASS year 1, spin-up -> /data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgonl_rounds/round5/round5b_registered_replay_y1
+metrics_json_exact True
+comparison_json_exact True
+array_keys_exact True
+array_ieee_words_exact True unequal []
+metric_rows 24
+comparison_rows 12
+```
+
+The comparison target is the committed fp64 year-1 report at
+`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgdgsa_rounds/round2/climate_year1_daily_mean_fp64/`.
+Thus every metric summary and comparison row is JSON-exact, and every stored
+floating-point word is identical. The non-fp64 sibling report is deliberately
+not the target: its NEMO cell-centred fields were generated under a different
+precision policy.
+
+The online controls were independently regenerated through the explicit
+online path at `round5/control_scorecard_round5b.json`. The JSON is byte-for-
+byte equal to `control_scorecard.json`, including SHA-256
+`6309446a91f63c1e4edb4a720d1b353c6d1fef97ae15fb5636980f6c89c8a59c`.
+The frozen `nu=10` values remain EKE/truth
+`0.7323411189244107`, sine-transform KE error
+`0.22300407134605818`, and native noise
+`0.9317922221566435`; `nu=80` remains
+`0.3964287848321674`, `0.3864065874533908`, and
+`0.7069240384788047`, respectively.
+
+The new full-default synthetic JSON pin was exercised against a scratch
+reversion. Changing the default selector from `registered` back to `online`
+made the pinned test fail with
+`GateError: online diagnostics require a card and resolved namelist` and the
+terminal line `1 failed in 1.44s`. Reapplying the repair produced
+`SCRATCH_REVERT_CLEAN`; the landed focused selection reports
+`17 passed in 25.24s`.
+
+The exact full lane battery from `autopilot.sh` collected 283 tests and ended:
+
+```text
+282 passed, 1 skipped in 2323.82s (0:38:43)
+```
+
+Targeted Ruff reports `All checks passed!`; `git diff --check` emits no output.
+No filtered-restriction, objective, dataset-contract, optimizer, or acquisition
+code changed in this repair.
+
 ## OPEN
 
 - Acquire and score the ten dual starts; this selects `template` or `symmetric`.
