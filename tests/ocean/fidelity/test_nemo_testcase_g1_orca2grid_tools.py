@@ -170,3 +170,21 @@ def test_run_sh_judges_the_domain_file_not_the_mpirun_status():
         assert f" {plant}" in text
     last_admit = text.rindex('domain_cfg_admit "$EVIDENCE/manifest"')
     assert text.index("# ---- 1. domain_cfg.nc") < last_admit < text.index("# ---- 2. the two NEMO")
+
+
+def test_round3_acquisition_only_moves_the_stage_frame_gate():
+    """run_r3.sh is run.sh under a new target with stage frames to kt 50; its
+    patch is the round-1 patch with the writer's gate moved, nothing else."""
+    base = (CASE / "stprk3_g1_step_record.patch").read_text()
+    moved = (CASE / "stprk3_g1_step_record_stage50.patch").read_text()
+    assert base.count("kstp <= nit000 + 9 )") == 5
+    assert moved == base.replace("kstp <= nit000 + 9 )", "kstp <= nit000 + 49 )")
+    wrapper = (CASE / "run_r3.sh").read_text()
+    assert "export RUN_NAME=ORCA2G1_OMIP_L1_P4" in wrapper
+    assert "export STAGE_STEPS=50" in wrapper and 'exec "$here/run.sh" "$@"' in wrapper
+    assert "makenemo" not in wrapper and "mpirun" not in wrapper
+    text = (CASE / "run.sh").read_text()
+    # the defaults of the round-1 acquisition are unchanged
+    assert "RUN_NAME=${RUN_NAME:-ORCA2G1_OMIP_L1_P3}" in text
+    assert "STAGE_STEPS=${STAGE_STEPS:-10}" in text
+    assert "STEP_PATCH=${STEP_PATCH:-$here/stprk3_g1_step_record.patch}" in text

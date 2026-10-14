@@ -47,9 +47,9 @@ export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
 
 readonly NEMO_ROOT=${NEMO_ROOT:-/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2}
 readonly REF_NAME=ORCA2G1_OMIP_L1
-readonly RUN_NAME=ORCA2G1_OMIP_L1_P3
+readonly RUN_NAME=${RUN_NAME:-ORCA2G1_OMIP_L1_P3}      # run_r3.sh: a NEW target name
 readonly STEPS=100
-readonly STAGE_STEPS=10
+readonly STAGE_STEPS=${STAGE_STEPS:-10}             # must equal the patch gate
 readonly EVIDENCE=${EVIDENCE:-/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/round1/oracle_g1_r1}
 readonly SHIPPED_DOMCFG=/data/abyssal/dbalwada/nemo-testcases-l4/inputs/ORCA2_ICE_v5.0.0/ORCA_R2_zps_domcfg.nc
 readonly SHIPPED_DOMCFG_SHA=7125f7a54e8693ff8f1327b878d2258d258878bc7302ac123ac671f2339d2839
@@ -76,7 +76,7 @@ readonly DOM_NML=$here/domaincfg_namelist_cfg
 readonly ISTATE=$here/usrdef_istate.F90
 readonly SBC=$here/usrdef_sbc.F90
 readonly STEP_MODULE=$here/g1_step_record.F90
-readonly STEP_PATCH=$here/stprk3_g1_step_record.patch
+readonly STEP_PATCH=${STEP_PATCH:-$here/stprk3_g1_step_record.patch}
 readonly BATHY_TOOL=$here/make_bathy_level.py
 readonly CHECKER=$here/check_records.py
 readonly DOMCHECK=$here/check_domain_cfg.py
