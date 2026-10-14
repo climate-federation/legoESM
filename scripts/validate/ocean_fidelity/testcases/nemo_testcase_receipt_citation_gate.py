@@ -5169,7 +5169,7 @@ CITATION_MAP = {
         'K_v_cell = K_v_cell + K33_iso.astype(state.T.data.dtype)', 7],
     'ocean_model_latlon_cgrid.py:13289-13320': [
         ('if do_tracers:', 2),
-        'implicit_w=nemo_aimp_tracer_w, return_matrix_trace=return_tracer_solve_trace))', 30],
+        'rounded_thickness=_zdf_tracer_rounded))', 32],
     # --- parallel LDF step-3 re-proof: current private arm and execution ---
     'ocean_model_latlon_cgrid.py:1675-1678': [
         '# Route the already-computed GM/Redi rate into the same stage-3 source',
