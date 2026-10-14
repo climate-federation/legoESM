@@ -1735,6 +1735,9 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
         rk3_stage_velocity_written_order=True,
         # Grid-ladder G1 round 8: use NEMO's staged T-point ratio expression.
         rk3_stage_r3t_nemo_literal=True,
+        # Grid-ladder G2 round 11: the multi-level partial-cell momentum
+        # solve uses NEMO's distinct face and interface thickness divisors.
+        zdf_momentum_nemo_face_thickness=True,
         barotropic=model_config.barotropic._replace(
             barotropic_fold_top_v_face_ssh=True,
             barotropic_substep_dt_nemo_literal=True,
