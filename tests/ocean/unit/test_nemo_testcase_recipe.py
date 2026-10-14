@@ -507,6 +507,70 @@ def test_gyre_nemo_qsr_pipeline_uses_live_kbb_stretch():
         np.asarray(expected)[active], np.asarray(static)[active])
 
 
+def test_nemo_qsr_2bd_refuses_integrators_without_its_stage3_kmm_call():
+    """Only rk3_ws replaces the pipeline's step-entry qsr_2BD with NEMO's
+    stage-3 Kmm call; every other integrator must refuse the scheme."""
+    from legoesm.ocean.fidelity.nemo_recipe import build_nemo_gyre_recipe
+    from legoesm.ocean.physics.shortwave_penetration import (
+        ShortwavePenetrationConfig,
+    )
+
+    recipe = build_nemo_gyre_recipe()
+    qsr = ShortwavePenetrationConfig(
+        scheme="nemo_qsr_2bd", water_type="I", nemo_time_step_s=14400.0)
+
+    def with_qsr(cfg):
+        return cfg._replace(
+            physics=cfg.physics._replace(shortwave_penetration=qsr))
+
+    rk3 = recipe.model_config._replace(
+        momentum_time_integrator="rk3", tracer_time_integrator="rk3")
+    # Each half of the refused pair is legal on its own.
+    LatLonCGridOceanModel(recipe.grid, recipe.z_coord, rk3)
+    LatLonCGridOceanModel(
+        recipe.grid, recipe.z_coord, with_qsr(recipe.model_config))
+    with pytest.raises(ValueError, match="nemo_qsr_2bd"):
+        LatLonCGridOceanModel(recipe.grid, recipe.z_coord, with_qsr(rk3))
+
+
+def test_stage3_two_band_solar_uses_the_stage_weights_kmm_stretch():
+    """NEMO's stage-3 tra_qsr reads 1+r3t(Kmm) with r3t(Kmm) built at stage 2
+    as (r3t(Kbb)+r3ta)/2 -- the word the stage-3 tracer weights already hold
+    (``q_Kmm``).  A mean-thickness ratio is the same real number but rounds
+    differently in some columns, which left a 17-ULP debt at the solar
+    boundary (round-8 review F3)."""
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        _NEMOWSRK3TestHooks,
+    )
+    from legoesm.ocean.physics.shortwave_penetration import (
+        shortwave_penetration_tendency,
+    )
+
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    card = build_nemo_testcase_card("GYRE-zco")
+    wet = jnp.asarray(card.recipe.land_mask) > 0.5
+    state = card.recipe.initial_state
+    # A live Kbb sea surface, so Kbb and N+1 both enter the Kmm average.
+    state = state._replace(eta=state.eta.replace(
+        data=jnp.where(wet, jnp.asarray(0.25, dtype=jnp.float64), 0.0)))
+    freshwater, surface = gyre_surface_forcings(card, state, 2)
+    trace = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(tracer_process_trace=()),
+    ).step(state, card.dt_s, freshwater=freshwater, surface_forcing=surface)
+    stretch = jnp.where(wet, jnp.asarray(trace.q_Kmm), 0.0)
+    config = card.recipe.model_config
+    expected = shortwave_penetration_tendency(
+        surface.sw_down, card.recipe.z_coord.dz_ref,
+        card.recipe.z_coord.z_half_ref, stretch,
+        config.physics.shortwave_penetration, rho_0=config.rho_0,
+        c_sw=config.physics.constants.c_sw, z_half_stretch=stretch)
+    active = np.asarray(card.recipe.z_coord.is_active, dtype=bool)
+    np.testing.assert_array_equal(
+        np.asarray(trace.qsr_association.qsr_kmm)[active],
+        np.asarray(expected)[active])
+
+
 def test_gyre_five_year_clock_matches_nemo_completed_year_arithmetic():
     """Compiled usrdef_sbc.f90:92,105-106 over the operator's full run."""
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))

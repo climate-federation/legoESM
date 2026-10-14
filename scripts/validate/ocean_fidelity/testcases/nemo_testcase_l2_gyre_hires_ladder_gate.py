@@ -2279,6 +2279,464 @@ def run_step2_tracer_owner(oracle_root: Path, output: Path) -> dict:
     return report
 
 
+def prandtl_split(nemo_avt, nemo_avm, lego_avt, lego_avm, mask, *,
+                  threshold: float = 1.0e-12) -> dict:
+    """Split an avt residual into the common TKE factor and the Prandtl factor.
+
+    Above its floors NEMO writes ``avm = zav`` and ``avt = pdlr*zav``
+    (zdftke.f90:684-692), so ``avt/avm`` isolates the inverse Prandtl number
+    and a residual common to both coefficients cancels in it.
+    """
+    def ratio(avt, avm):
+        avm = np.asarray(avm, dtype=np.float64)
+        return np.asarray(avt, dtype=np.float64) / np.where(avm > 0.0, avm, 1.0)
+
+    def relative(candidate, reference):
+        reference = np.asarray(reference, dtype=np.float64)
+        return (np.abs(np.asarray(candidate, dtype=np.float64) - reference)
+                / np.maximum(np.abs(reference), np.finfo(np.float64).tiny))
+
+    active = np.asarray(mask, dtype=bool)
+    rel_ratio = relative(ratio(lego_avt, lego_avm), ratio(nemo_avt, nemo_avm))
+    rel_avm = relative(lego_avm, nemo_avm)
+    prandtl = active & (rel_ratio > threshold)
+    common = active & (rel_avm > threshold)
+    return {
+        "prandtl_cells": prandtl,
+        "common_cells": common,
+        "summary": {
+            "threshold_relative": threshold,
+            "prandtl_cells": int(prandtl.sum()),
+            "prandtl_levels": sorted({int(k) for k in np.nonzero(prandtl)[2]}),
+            "prandtl_max_relative": float(np.max(rel_ratio[active])),
+            "common_factor_cells": int(common.sum()),
+            "common_factor_levels": sorted(
+                {int(k) for k in np.nonzero(common)[2]}),
+            "common_factor_max_relative": float(np.max(rel_avm[active])),
+        },
+    }
+
+
+def run_step2_vertical_owner(oracle_root: Path, output: Path) -> dict:
+    """Round 9 (F5): measure, do not infer, the step-2 tra_zdf T owner.
+
+    Same bridge as :func:`run_step2_tracer_owner`: NEMO's kt=2 T/S/U/V/SSH,
+    legoESM's carried closure memories.  Each arm changes ONE input of the
+    production-jitted step: NEMO's executed ``avt`` at the solve seam
+    (everywhere, or only where the inverse Prandtl number differs, or only
+    elsewhere), NEMO's kt=1 ``avm``/``avt`` as the carried closure memory,
+    and the same traced step evaluated eagerly instead of under JIT.
+    """
+    import time
+
+    import jax
+    import jax.numpy as jnp
+
+    from legoesm.core.precision import PrecisionPolicy, set_policy
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+        _NEMOVerticalSolveTestInput,
+        _NEMOWSRK3TestHooks,
+    )
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        GYRE_R4_NAMELIST,
+        build_nemo_testcase_card,
+        gyre_surface_forcings,
+    )
+    from legoesm.ocean.fidelity.provenance import worktree_stamp
+    from nemo_testcase_l2_gyre_round35_trazdf_matrix import (
+        read_trazdf_matrix,
+    )
+
+    if jax.default_backend() != "cpu":
+        raise RuntimeError("step-2 vertical owner discriminator requires CPU")
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    clock = time.perf_counter()
+    timings = {}
+    admission = admit_oracle("r4_step2", "scalar", oracle_root)
+    card = build_nemo_testcase_card(
+        "GYRE-zco", namelist=GYRE_R4_NAMELIST._replace(
+            nn_itend=10, nn_stock=10, nn_write=10))
+    ordinary = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
+    state = card.recipe.initial_state
+    freshwater, surface = gyre_surface_forcings(card, state, 1)
+    state = jax.device_get(ordinary.step(
+        state, card.dt_s, freshwater=freshwater, surface_forcing=surface))
+    entry = read_entry(
+        oracle_root / "oracle_step_entry_kt00000002.bin", dims=NEMO_DIMS)
+    u, v = _redundant_faces(entry["u"], entry["v"])
+    state = state._replace(
+        T=state.T.replace(data=jnp.asarray(entry["T"][..., :30])),
+        S=state.S.replace(data=jnp.asarray(entry["S"][..., :30])),
+        u=state.u.replace(data=jnp.asarray(u)),
+        v=state.v.replace(data=jnp.asarray(v)),
+        eta=state.eta.replace(data=jnp.asarray(entry["ssh"])),
+    )
+    freshwater, surface = gyre_surface_forcings(card, state, 2)
+    timings["step1_and_bridge_s"] = time.perf_counter() - clock
+
+    wet = expected_masks(card)["T"]
+    iwet = wet[:, :, 1:]
+    record = read_trazdf_matrix(
+        oracle_root / "oracle_trazdf_matrix_kt00000002.bin",
+        expect_kt=2, expected_domain=NEMO_DIMS)
+
+    def native(name: str, stop: int | None = None) -> np.ndarray:
+        value = np.asarray(record["arrays"][name], dtype=np.float64)
+        value = value[2:-2, 2:-2]
+        if stop is not None:
+            value = value[..., :stop]
+        return value.transpose(1, 0, 2)
+
+    zdf1 = read_zdf_entry(
+        oracle_root / "oracle_zdf_entry_kt00000001.bin", dims=NEMO_DIMS)
+    zdf2 = read_zdf_entry(
+        oracle_root / "oracle_zdf_entry_kt00000002.bin", dims=NEMO_DIMS,
+        expected_kt=2)
+    nemo_avt = native("avt")[:, :, 1:30]
+    nemo_avm = zdf2["avm"][:, :, 1:30]
+    nemo_solved = native("sol_T_pre_clamp", 30)
+    stage3 = read_stage(
+        oracle_root / "oracle_stage_kt00000002_s3.bin", 3, dims=NEMO_DIMS,
+        expected_kt=2, expected_kaa=STEP2_STAGE_KAA[3])
+    record_rows = [
+        exact_score("NEMO.kt2.tra_zdf_avt_vs_zdf_entry_avt",
+                    zdf2["avt"][:, :, 1:30], nemo_avt, iwet),
+        exact_score("kt1.carried_avm_k_vs_NEMO_avm",
+                    zdf1["avm"][:, :, 1:30],
+                    np.asarray(state.tke_avm.data), iwet),
+        exact_score("kt1.carried_avt_k_vs_NEMO_avt",
+                    zdf1["avt"][:, :, 1:30],
+                    np.asarray(state.tke_avt.data), iwet),
+    ]
+
+    model = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+            tracer_process_trace=(), vertical_solve_trace=True))
+
+    def jit_step(step_state, override=None):
+        return jax.device_get(model.step(
+            step_state, card.dt_s, freshwater=freshwater,
+            surface_forcing=surface, _vertical_K_test_override=override))
+
+    def arm_rows(name: str, result, *, reference=None) -> list[dict]:
+        vertical = result.vertical_solve
+        rows = [
+            exact_score(f"{name}.heat_K_vs_NEMO_avt", nemo_avt,
+                        np.asarray(vertical.heat_K), iwet),
+            exact_score(f"{name}.viscosity_K_vs_NEMO_avm", nemo_avm,
+                        np.asarray(vertical.viscosity_K), iwet),
+            exact_score(f"{name}.solved_T_vs_NEMO", nemo_solved,
+                        np.asarray(vertical.solved_T), wet),
+            exact_score(f"{name}.stage3_T_vs_NEMO", stage3["T"][..., :30],
+                        np.asarray(result.state_after.T.data), wet),
+        ]
+        if reference is not None:
+            rows.append(exact_score(
+                f"{name}.solved_T_vs_reference_arm", reference,
+                np.asarray(vertical.solved_T), wet))
+        return rows
+
+    clock = time.perf_counter()
+    free = jit_step(state)
+    timings["jit_free_s"] = time.perf_counter() - clock
+    own = {name: np.asarray(getattr(free.vertical_solve, name),
+                            dtype=np.float64)
+           for name in ("heat_K", "viscosity_K", "effective_K", "e3w_now",
+                        "e3t_after", "content_T", "solved_T")}
+    split = prandtl_split(nemo_avt, nemo_avm, own["heat_K"],
+                          own["viscosity_K"], iwet)
+    prandtl = split["prandtl_cells"]
+    walls = np.zeros_like(iwet)
+    wet_cols = wet[..., 0]
+    js, is_ = np.nonzero(wet_cols)
+    walls[js.min(), :, :] = walls[js.max(), :, :] = True
+    walls[:, is_.min(), :] = walls[:, is_.max(), :] = True
+    split["summary"]["prandtl_cells_on_wet_boundary_rows"] = int(
+        (prandtl & walls).sum())
+
+    def fixed(heat, replace_heat: bool):
+        selectors = np.zeros(6, dtype=np.bool_)
+        selectors[0] = replace_heat
+        return _NEMOVerticalSolveTestInput(
+            heat_K=jnp.asarray(heat),
+            viscosity_K=jnp.asarray(own["viscosity_K"]),
+            formed_K=jnp.asarray(own["effective_K"]),
+            tracer_e3w=jnp.asarray(own["e3w_now"]),
+            tracer_e3t=jnp.asarray(own["e3t_after"]),
+            temperature_content=jnp.asarray(own["content_T"]),
+            replace=jnp.asarray(selectors))
+
+    plant_scale = np.float64(1.0 + 2.0 ** -40)
+    seam_inputs = {
+        "seam_disabled": fixed(own["heat_K"], False),
+        "nemo_avt_everywhere": fixed(nemo_avt, True),
+        "nemo_avt_prandtl_cells_only": fixed(
+            np.where(prandtl, nemo_avt, own["heat_K"]), True),
+        "nemo_avt_outside_prandtl_cells": fixed(
+            np.where(prandtl, own["heat_K"], nemo_avt), True),
+        "control_plant_nemo_avt_scaled": fixed(
+            np.where(iwet, nemo_avt * plant_scale, nemo_avt), True),
+    }
+    clock = time.perf_counter()
+    seam = {name: jit_step(state, override)
+            for name, override in seam_inputs.items()}
+    timings["jit_seam_arms_s"] = time.perf_counter() - clock
+    disabled_solved = np.asarray(seam["seam_disabled"].vertical_solve.solved_T)
+    nemo_solved_arm = np.asarray(
+        seam["nemo_avt_everywhere"].vertical_solve.solved_T)
+    arms = {"free_jit": arm_rows("free_jit", free)}
+    # References: the disabled seam against the free step (is the seam
+    # passive?), the plant against the NEMO-avt arm (does one input scale
+    # move the solve?), every other arm against the disabled seam.
+    references = {"seam_disabled": own["solved_T"],
+                  "control_plant_nemo_avt_scaled": nemo_solved_arm}
+    for name, result in seam.items():
+        arms[name] = arm_rows(
+            name, result, reference=references.get(name, disabled_solved))
+
+    clock = time.perf_counter()
+    memory_avm = jnp.asarray(np.where(iwet, zdf1["avm"][:, :, 1:30], 0.0))
+    memory_avt = jnp.asarray(np.where(iwet, zdf1["avt"][:, :, 1:30], 0.0))
+    arms["NEMO_kt1_avm_as_carried_memory"] = arm_rows(
+        "NEMO_kt1_avm_as_carried_memory",
+        jit_step(state._replace(
+            tke_avm=state.tke_avm.replace(data=memory_avm))))
+    arms["NEMO_kt1_avt_as_carried_memory"] = arm_rows(
+        "NEMO_kt1_avt_as_carried_memory",
+        jit_step(state._replace(
+            tke_avt=state.tke_avt.replace(data=memory_avt))))
+    timings["jit_memory_arms_s"] = time.perf_counter() - clock
+
+    def row(name: str) -> dict:
+        return next(item for item in arms[name] if "solved_T_vs_NEMO" in
+                    item["name"])
+
+    free_max = row("free_jit")["max_abs"]
+    nemo_max = row("nemo_avt_everywhere")["max_abs"]
+    plant_fired = arms["control_plant_nemo_avt_scaled"][-1]["n_unequal"] > 0
+    seam_magnitude_kept = row("seam_disabled")["max_abs"] == free_max
+    owner_confirmed = (plant_fired and seam_magnitude_kept
+                       and nemo_max <= 1.0e-2 * free_max)
+    # A tree whose free residual already sits at the NEMO-avt floor has no
+    # avt owner left to name; say so instead of calling it refuted.
+    no_avt_residual = plant_fired and free_max <= 2.0 * nemo_max
+    report = {
+        "format": "nemo-testcase-l2-gyre-r4-step2-vertical-owner-v1",
+        "worktree": worktree_stamp(),
+        "oracle_admission": admission,
+        "policy": "fp64/x64/cpu/libm certified",
+        "bridge": (
+            "NEMO kt=2 T/S/U/V/SSH primary state; legoESM hidden closure "
+            "and RK memories retained from its certified step 1"),
+        "record_rows": record_rows,
+        "avt_decomposition": split["summary"],
+        "arms": arms,
+        "plant_scale": float(plant_scale),
+        "control_plant_fired": plant_fired,
+        "seam_disabled_keeps_free_magnitude": seam_magnitude_kept,
+        "owner": (
+            "the executed tra_zdf avt (TKE closure output) owns the step-2 "
+            "solved-T residual" if owner_confirmed
+            else "no avt-owned residual: free solve already at the NEMO-avt "
+            "floor" if no_avt_residual else "UNMEASURED"),
+        "compiled_nemo_sources": {
+            "closure_coefficients": (
+                "GYRE_OMIP_L2_P3_SMW/BLD/ppsrc/nemo/zdftke.f90:681-692"),
+            "prandtl_number": (
+                "GYRE_OMIP_L2_P3_SMW/BLD/ppsrc/nemo/zdftke.f90:389-404"),
+            "shear_divisor": (
+                "GYRE_OMIP_L2_P3_SMW/BLD/ppsrc/nemo/zdfsh2.f90:99-103"),
+        },
+        "timings_s": timings,
+        "verdict": ("CONFIRMED" if owner_confirmed
+                    else "NO_AVT_RESIDUAL" if no_avt_residual
+                    else "REFUTED"),
+    }
+    arrays = {
+        "nemo_avt": nemo_avt, "nemo_avm": nemo_avm,
+        "nemo_solved_T": nemo_solved,
+        "jit_heat_K": own["heat_K"], "jit_viscosity_K": own["viscosity_K"],
+        "jit_solved_T": own["solved_T"], "prandtl_cells": prandtl,
+        "interface_wet": iwet,
+    }
+    for name, result in seam.items():
+        arrays[f"{name}_solved_T"] = np.asarray(
+            result.vertical_solve.solved_T)
+    output.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    np.savez_compressed(output.with_suffix(".npz"), **arrays)
+
+    # Eager last: a JIT-only composition owner shows up as an eager arm that
+    # moves the residual while the source program is unchanged.
+    clock = time.perf_counter()
+    with jax.disable_jit():
+        eager = jax.device_get(model._step_impl(
+            state, card.dt_s, freshwater=freshwater, surface_forcing=surface,
+            _return_tracer_process_trace=True))
+    timings["eager_s"] = time.perf_counter() - clock
+    arms["production_eager"] = arm_rows(
+        "production_eager", eager, reference=own["solved_T"])
+    eager_heat = np.asarray(eager.vertical_solve.heat_K, dtype=np.float64)
+    eager_visc = np.asarray(eager.vertical_solve.viscosity_K,
+                            dtype=np.float64)
+    report["eager_vs_jit"] = [
+        exact_score("eager_vs_jit.heat_K", own["heat_K"], eager_heat, iwet),
+        exact_score("eager_vs_jit.viscosity_K", own["viscosity_K"],
+                    eager_visc, iwet),
+    ]
+    report["eager_avt_decomposition"] = prandtl_split(
+        nemo_avt, nemo_avm, eager_heat, eager_visc, iwet)["summary"]
+    arrays.update({"eager_heat_K": eager_heat,
+                   "eager_viscosity_K": eager_visc,
+                   "eager_solved_T": np.asarray(eager.vertical_solve.solved_T)})
+    output.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    np.savez_compressed(output.with_suffix(".npz"), **arrays)
+    print(json.dumps(report, indent=2))
+    return report
+
+
+def _kmm_stretch_scores(card, tracer, qsr, eta_b, eta_a, prefix: str):
+    """Score three ``1+r3t(Kmm)`` compositions against NEMO's stage-3 words.
+
+    NEMO's statement is ``r3t(Kmm) = r1_2*(r3t(Kbb)+r3ta)`` with
+    ``r3t = ssh*r1_ht_0`` (stage 2, np_HYB), consumed once by ``tra_qsr`` at
+    stage 3.  Inputs are NEMO's own sea surfaces, so every unequal word is
+    composition, not trajectory.
+    """
+    import jax.numpy as jnp
+
+    from legoesm.ocean.eos import nemo_r3t_stretch
+    from legoesm.ocean.physics.shortwave_penetration import (
+        shortwave_penetration_tendency,
+    )
+    from legoesm.ocean.vertical import compute_layer_thickness
+
+    zc, cfg = card.recipe.z_coord, card.recipe.model_config
+    wet = expected_masks(card)["T"]
+    wet2, nz = wet[..., 0], wet.shape[-1]
+    eta_b = jnp.asarray(eta_b, dtype=jnp.float64)
+    eta_a = jnp.asarray(eta_a, dtype=jnp.float64)
+    depth = card.recipe.initial_state.H_bathy.data
+
+    def stretch(eta):
+        return np.asarray(nemo_r3t_stretch(
+            zc, eta, depth, evaluation="nemo_reciprocal"))
+
+    def thickness(eta):
+        return np.asarray(compute_layer_thickness(
+            eta, depth, zc, min_water_column_m=cfg.min_water_column_m))
+
+    one = np.float64(1.0)
+    column = np.asarray(depth, dtype=np.float64)
+    # domain.f90 r1_ht_0 = 1/ht_0 on wet columns; the Kbb/Kaa rows below
+    # check this reciprocal against NEMO's own r3t words.
+    r1_ht = np.where(column > 0.0,
+                     one / np.where(column > 0.0, column, one), 0.0)
+    r3t_bb = np.asarray(eta_b) * r1_ht
+    r3t_aa = np.asarray(eta_a) * r1_ht
+    record = one + tracer["r3t_Kmm"]
+    candidates = {
+        # NEMO's statement: average the two ratios, then add one.
+        "nemo_statement_mean_of_ratios": one + np.float64(0.5) * (
+            r3t_bb + r3t_aa),
+        # legoESM's stage weights (_qco_t_ratio on the averaged sea
+        # surface); the stage-3 qsr_2BD stretch since round 9.
+        "legoesm_ratio_of_mean_eta": stretch(np.float64(0.5) * (eta_b + eta_a)),
+        # The round-8 stage-3 qsr_2BD stretch (mean live / reference
+        # thickness), kept as the measured "before" arm.
+        "round8_qsr_mean_thickness": (
+            (np.float64(0.5) * (thickness(eta_b) + thickness(eta_a)))[..., 0]
+            / np.maximum(thickness(jnp.zeros_like(eta_b))[..., 0], 1.0e-10)),
+    }
+    rows = [
+        exact_score(f"{prefix}r3t.Kbb.ssh_times_r1_ht_0_vs_record",
+                    tracer["r3t_Kbb"], r3t_bb, wet2),
+        exact_score(f"{prefix}r3t.Kaa.ssh_times_r1_ht_0_vs_record",
+                    tracer["r3t_Kaa"], r3t_aa, wet2),
+        exact_score(f"{prefix}stretch.Kbb.legoesm_vs_record",
+                    one + tracer["r3t_Kbb"], stretch(eta_b), wet2),
+    ] + [exact_score(f"{prefix}stretch.Kmm.{name}_vs_record", record, value,
+                     wet2)
+         for name, value in candidates.items()]
+    before = tracer["after_sbc_T"][..., :nz]
+    accumulated = tracer["after_qsr_T"][..., :nz]
+    qsr_rows = []
+    for name, value in (("record", record), *candidates.items()):
+        increment = np.asarray(shortwave_penetration_tendency(
+            jnp.asarray(qsr["qsr"]), zc.dz_ref, zc.z_half_ref,
+            jnp.asarray(value), cfg.physics.shortwave_penetration,
+            rho_0=cfg.rho_0, c_sw=cfg.physics.constants.c_sw,
+            z_half_stretch=jnp.asarray(value)), dtype=np.float64)
+        qsr_rows.append(accumulated_component_score(
+            f"{prefix}tra_qsr.accumulator.{name}_stretch", before,
+            accumulated, increment, wet))
+    return rows, qsr_rows
+
+
+def run_stage3_kmm_stretch(oracle_root: Path, output: Path) -> dict:
+    """Round 9 (F3): legoESM's stage-3 ``1+r3t(Kmm)`` compositions.
+
+    Quarter degree at kt=2 (the scalar step-2 record) and the shipped
+    one-degree card at kt=1 (its scalar stage-3 record, the only step that
+    record holds), so the changed operator is scored on every card it runs.
+    """
+    from legoesm.core.precision import PrecisionPolicy, set_policy
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        GYRE_R4_NAMELIST,
+        build_nemo_testcase_card,
+    )
+    from legoesm.ocean.fidelity.provenance import worktree_stamp
+    import nemo_testcase_l2_gyre_phase3_gate as one_degree
+
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    admission = admit_oracle("r4_step2", "scalar", oracle_root)
+    card = build_nemo_testcase_card(
+        "GYRE-zco", namelist=GYRE_R4_NAMELIST._replace(
+            nn_itend=10, nn_stock=10, nn_write=10))
+    entry = read_entry(
+        oracle_root / "oracle_step_entry_kt00000002.bin", dims=NEMO_DIMS)
+    after = read_stage(
+        oracle_root / "oracle_stage_kt00000002_s3.bin", 3, dims=NEMO_DIMS,
+        expected_kt=2, expected_kaa=STEP2_STAGE_KAA[3])
+    rows, qsr_rows = _kmm_stretch_scores(
+        card,
+        read_tracer_stage3_hires(
+            oracle_root / "oracle_rktracer_stage3_kt00000002.bin",
+            expected_kt=2),
+        read_qsr_stage3_hires(
+            oracle_root / "oracle_qsr_stage3_kt00000002.bin", expected_kt=2),
+        entry["ssh"], after["ssh"], "r4.kt2.")
+    root_1deg = Path(one_degree.SCALAR_MATH_ROOT)
+    rows_1deg, qsr_rows_1deg = _kmm_stretch_scores(
+        build_nemo_testcase_card("GYRE-zco"),
+        one_degree.read_tracer_stage3(
+            root_1deg / "oracle_rktracer_stage3_kt00000001.bin"),
+        one_degree.read_qsr_stage3(
+            root_1deg / "oracle_qsr_stage3_kt00000001.bin"),
+        one_degree.read_entry(
+            root_1deg / "oracle_step_entry_kt00000001.bin")["ssh"],
+        one_degree.read_stage(
+            root_1deg / "oracle_stage_kt00000001_s3.bin", 3)["ssh"],
+        "1deg.kt1.")
+    report = {
+        "format": "nemo-testcase-l2-gyre-stage3-kmm-stretch-v2",
+        "worktree": worktree_stamp(),
+        "oracle_admission": admission,
+        "one_degree_root": str(root_1deg),
+        "policy": "fp64/x64/cpu/libm certified, eager kernel replay",
+        "inputs": ("NEMO's own entry (Kbb) and stage-3 (N+1) sea surfaces: "
+                   "quarter degree kt=2, one degree kt=1"),
+        "stretch_rows": rows + rows_1deg,
+        "qsr_accumulator_rows": qsr_rows + qsr_rows_1deg,
+        "verdict": "REPORT_ONLY",
+    }
+    output.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    print(json.dumps(report, indent=2))
+    return report
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--deck", choices=tuple(DEFAULT_ORACLES), default="r4")
@@ -2289,6 +2747,8 @@ def main(argv=None) -> int:
     parser.add_argument("--stage2-composition-only", action="store_true")
     parser.add_argument("--stage3-geometry-only", action="store_true")
     parser.add_argument("--step2-tracer-owner-only", action="store_true")
+    parser.add_argument("--step2-vertical-owner-only", action="store_true")
+    parser.add_argument("--stage3-kmm-stretch-only", action="store_true")
     parser.add_argument(
         "--trajectory-only", action="store_true",
         help="score the ten entry records and one-ULP controls only",
@@ -2324,7 +2784,9 @@ def main(argv=None) -> int:
         admission = admit_oracle(args.deck, args.math_flavour, args.oracle_root)
         narrow = sum((args.stage2_composition_only,
                       args.stage3_geometry_only,
-                      args.step2_tracer_owner_only))
+                      args.step2_tracer_owner_only,
+                      args.step2_vertical_owner_only,
+                      args.stage3_kmm_stretch_only))
         if narrow > 1:
             raise ValueError("choose only one narrow discriminator")
         if narrow and args.trajectory_only:
@@ -2351,6 +2813,16 @@ def main(argv=None) -> int:
             step2_admission = admit_oracle("r4_step2", "scalar")
             report = run_step2_tracer_owner(
                 Path(step2_admission["root"]), args.output)
+        elif args.step2_vertical_owner_only or args.stage3_kmm_stretch_only:
+            if (args.deck, args.math_flavour) != ("r4", "scalar"):
+                raise ValueError(
+                    "step-2 record discriminators require r4/scalar")
+            step2_admission = admit_oracle("r4_step2", "scalar")
+            discriminator = (run_step2_vertical_owner
+                             if args.step2_vertical_owner_only
+                             else run_stage3_kmm_stretch)
+            report = discriminator(
+                Path(step2_admission["root"]), args.output)
         else:
             report = run(
                 Path(admission["root"]), args.output,
@@ -2362,7 +2834,8 @@ def main(argv=None) -> int:
         print(str(exc), file=sys.stderr)
         return 2
     return 0 if report["verdict"] in (
-        "PASS", "RAW_UPDATE_AT_BAR", "REPORT_ONLY", "CONFIRMED") else 1
+        "PASS", "RAW_UPDATE_AT_BAR", "REPORT_ONLY", "CONFIRMED",
+        "NO_AVT_RESIDUAL") else 1
 
 
 if __name__ == "__main__":

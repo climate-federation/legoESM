@@ -396,14 +396,14 @@ def _xy(values: np.ndarray, nx: int, ny: int) -> np.ndarray:
     return values.reshape((nx, ny), order="F")[2:-2, 2:-2].T
 
 
-def read_zdf_entry(path: Path, dims=DIMS) -> dict:
+def read_zdf_entry(path: Path, dims=DIMS, *, expected_kt: int = 1) -> dict:
     with path.open("rb") as handle:
         magic = handle.read(16).decode("ascii").rstrip()
         header = struct.unpack("=7i", handle.read(28))
         values = np.fromfile(handle, dtype=np.float64)
     version, kt, level, nx, ny, nz, bits = header
     require(magic == "NEMO_L2_ZDF___1", f"{path}: bad magic")
-    require((version, kt, nx, ny, nz, bits) == (1, 1, *dims, 64), f"{path}: bad header")
+    require((version, kt, nx, ny, nz, bits) == (1, expected_kt, *dims, 64), f"{path}: bad header")
     avm_count = nx * ny * nz
     avt_count = (nx - 4) * (ny - 4) * nz
     require(values.size == avm_count + avt_count, f"{path}: bad payload")

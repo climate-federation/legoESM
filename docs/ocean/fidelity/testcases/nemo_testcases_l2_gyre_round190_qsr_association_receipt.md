@@ -1,5 +1,11 @@
 # Round 190 receipt — production QSR observer association
 
+> **RETRACTED in part (2026-10-14, quarter-degree round 9).**  The
+> 10,200/18,000-cell Kbb QSR difference below was the production false solar
+> source fixed in quarter-degree round 8, not an observer artifact.  What it
+> was and what killed it: `nemo_testcases_l2_gyre_hires_round9_receipt.md`,
+> "Retractions and revisions (Rule 11)".
+
 **Status: HELD.**  Round 189's `9,679/18,000`-cell,
 `2.467770444880557e-06 K` actual-row/direct-rebuild split reproduces exactly,
 but it is an **observer classification artifact**, not a model shortwave

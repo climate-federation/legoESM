@@ -4847,6 +4847,22 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 "NEMO rk3_ws is one coupled momentum/tracer stage program; "
                 "select rk3_ws for both integrators or for neither")
+        # NEMO calls tra_qsr once per step, inside stage 3, with Kmm
+        # (src/OCE/stprk3_stg.F90:585).  Only the rk3_ws stage program
+        # replaces the shared physics pipeline's step-entry qsr_2BD field
+        # with that Kmm call; any other integrator would keep the step-entry
+        # field as the only solar source, a time level NEMO never evaluates.
+        _sw_pen_cfg = getattr(
+            getattr(config, "physics", None), "shortwave_penetration", None)
+        if (getattr(_sw_pen_cfg, "scheme", None) == "nemo_qsr_2bd"
+                and config.tracer_time_integrator != "rk3_ws"):
+            raise ValueError(
+                "physics.shortwave_penetration.scheme='nemo_qsr_2bd' is "
+                "NEMO's stage-3 Kmm tra_qsr and is wired only into the rk3_ws "
+                "stage program; tracer_time_integrator="
+                f"{config.tracer_time_integrator!r} would deposit the "
+                "step-entry field instead. Select rk3_ws or another "
+                "shortwave scheme")
         if config.tracer_time_integrator == "rk3_ws":
             if config.tracer_advection != "fct2":
                 raise ValueError(
@@ -7699,8 +7715,8 @@ class LatLonCGridOceanModel:
                 # from ``tend.dT_dt`` leaves a false source in Krhs.
                 _r3t_b = compute_ocean_jacobian(
                     state.eta.data, state.H_bathy.data, _zc)
-                _r3t_m = _h_live_one_half[..., 0] / jnp.maximum(
-                    _h_ref_ws[..., 0], 1.0e-10)
+                # 1+r3t(Kmm) as the stage weights hold it; 0 on dry columns.
+                _r3t_m = jnp.where(_h_ref_ws[..., 0] > 0.0, _qt_12, 0.0)
                 _qsr_stretch_override = (
                     self._nemo_ws_test_hooks.stage3_qsr_stretch_override)
                 if _qsr_stretch_override is not None:

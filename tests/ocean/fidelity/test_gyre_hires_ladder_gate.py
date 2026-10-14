@@ -565,3 +565,30 @@ def test_stage3_tracer_reader_accepts_selected_resolution(tmp_path):
     bad.write_bytes(path.read_bytes()[:-8])
     with pytest.raises(ValueError, match="payload"):
         GATE.read_tracer_stage3_hires(bad, dims=dims)
+
+
+def test_prandtl_split_separates_common_factor_from_inverse_prandtl():
+    """avt = pdlr*zav, avm = zav: a common zav error cancels in avt/avm."""
+    rng = np.random.default_rng(9)
+    shape = (4, 5, 3)
+    zav = rng.uniform(1.0e-4, 1.0e-2, shape)
+    pdlr = rng.uniform(0.1, 1.0, shape)
+    mask = np.ones(shape, dtype=bool)
+    mask[0, 0, 0] = False
+    common = np.zeros(shape, dtype=bool)
+    common[1, :, 0] = True
+    prandtl = np.zeros(shape, dtype=bool)
+    prandtl[2, 3, 1] = prandtl[3, 1, 0] = True
+    lego_zav = np.where(common, zav * (1.0 + 1.0e-9), zav)
+    lego_pdlr = np.where(prandtl, pdlr * (1.0 + 1.0e-7), pdlr)
+    # The masked-out cell carries both errors and must not be counted.
+    lego_zav[0, 0, 0] *= 1.0 + 1.0e-9
+    lego_pdlr[0, 0, 0] *= 1.0 + 1.0e-7
+    split = GATE.prandtl_split(pdlr * zav, zav, lego_pdlr * lego_zav,
+                               lego_zav, mask)
+    np.testing.assert_array_equal(split["prandtl_cells"], prandtl)
+    np.testing.assert_array_equal(split["common_cells"], common)
+    assert split["summary"]["prandtl_cells"] == 2
+    assert split["summary"]["common_factor_cells"] == 5
+    clean = GATE.prandtl_split(pdlr * zav, zav, pdlr * zav, zav, mask)
+    assert not clean["prandtl_cells"].any() and not clean["common_cells"].any()
