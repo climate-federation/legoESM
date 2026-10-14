@@ -534,6 +534,8 @@ def test_nemo_supplied_forcing_is_read_at_nemos_stage_one(tmp_path):
             (root / f.name).symlink_to(f)
     mod = _steps_module()
     zero = mod.route(R19_TWIN_A, root, zero=True, stages="1")["stages"]["1"]
+    # every wet column (16,433) moves in sea level, T and S; nearly every face in u, v
+    assert [zero[n]["unequal"] for n in ("ssh", "T", "S")] == [16433] * 3
     assert all(r["unequal"] > 15000 for r in zero.values())
     fed = mod.route(R19_TWIN_A, root, stages="1")["stages"]["1"]
     assert all(0 < r["unequal"] < 2500 and r["max_abs"] < 1e-9 for r in fed.values())

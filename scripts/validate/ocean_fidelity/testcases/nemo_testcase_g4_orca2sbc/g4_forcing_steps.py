@@ -391,7 +391,8 @@ def main() -> int:
         if a.json:
             a.json.write_text(json.dumps(out, indent=1, sort_keys=True) + "\n")
         print(json.dumps(out, sort_keys=True))
-        return 0
+        same = all(r["unequal"] == 0 for rows in out["stages"].values() for r in rows.values())
+        return 0 if same else 1
     measure = identity if a.mode == "identity" else walk
     if a.plant:
         if a.mode == "identity":

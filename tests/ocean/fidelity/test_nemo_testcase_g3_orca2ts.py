@@ -328,5 +328,6 @@ def test_d120_initial_state_is_nemos_on_every_wet_cell(g3_root, tmp_path):
     row = mod.run({"ORCA2G3-ts": g3_root})["cases"]["ORCA2G3-ts"]
     assert (row["unequal_T"], row["unequal_S"]) == (0, 0) and row["wet_cells"] == 430552
     assert (row["control_no_edits_unequal_T"], row["control_no_edits_unequal_S"]) == (1283, 720)
+    assert row["control_mask_is_edits_T"] and row["control_mask_is_edits_S"]
     assert (row["as_built_g3_level1_unequal_T"], row["as_built_g3_level1_unequal_S"]) == (0, 0)
     assert mod.run({"ORCA2G3-ts": g3_root}, plant=True)["cases"]["ORCA2G3-ts"]["unequal_T"] == 1

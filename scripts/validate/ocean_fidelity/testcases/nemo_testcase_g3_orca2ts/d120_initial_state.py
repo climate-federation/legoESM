@@ -118,6 +118,9 @@ def run(deck_roots: dict, plant: bool = False) -> dict:
             "control_no_edits_unequal_S": _bits(np.asarray(off_S)[..., :nk], nemo["S"], w),
             "nemo_level_beyond_card": int(np.asarray(state.T.data).shape[-1] - nk),
         }
+        for f, off in (("T", off_T), ("S", off_S)):    # the same CELLS, not just counts
+            moved = (np.asarray(off)[..., :nk].view("<u8") != nemo[f].view("<u8")) & w
+            row[f"control_mask_is_edits_{f}"] = bool(np.array_equal(moved, edits[f][..., :nk] & w))
         g3 = g1.read_step(G3_RECORD, 1)
         w1 = wet[..., 0]
         row["as_built_g3_level1_unequal_T"] = _bits(T[..., 0], g3["e_tn_k1_bb"], w1)
@@ -143,9 +146,11 @@ def main(argv=None) -> int:
     if a.json:
         a.json.write_text(text + "\n")
     for row in out["cases"].values():
-        require(row["control_no_edits_unequal_T"] == row["edited_cells_T"] > 0
-                and row["control_no_edits_unequal_S"] == row["edited_cells_S"] > 0,
+        require(row["control_mask_is_edits_T"] and row["control_mask_is_edits_S"]
+                and row["edited_cells_T"] > 0 and row["edited_cells_S"] > 0,
                 "the no-edits control does not differ exactly on the edited cells")
+        require(row["as_built_g3_level1_unequal_T"] == row["as_built_g3_level1_unequal_S"] == 0,
+                "the as-built G3 record's level 1 is not the card's")
     return 0 if all(r["bit_identical"] for r in out["cases"].values()) else 1
 
 

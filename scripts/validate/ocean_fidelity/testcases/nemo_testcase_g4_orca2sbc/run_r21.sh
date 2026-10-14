@@ -99,6 +99,35 @@ done
 for f in "${G3_FILES[@]}"; do [[ -f "$R15_RUN/$f" ]] || { printf 'REFUSE: missing %s/%s\n' "$R15_RUN" "$f" >&2; exit 67; }; done
 for f in "${G4_FILES[@]}"; do [[ -f "$R17_RUN/$f" ]] || { printf 'REFUSE: missing %s/%s\n' "$R17_RUN" "$f" >&2; exit 67; }; done
 sha_of() { sha256sum "$1" | awk '{print $1}'; }
+# the admitted as-built copies, pinned (round 15 / round 17 twin a)
+readonly -A G3_PIN=(
+  [domain_cfg.nc]=7125f7a54e8693ff8f1327b878d2258d258878bc7302ac123ac671f2339d2839
+  [data_1m_potential_temperature_nomask.nc]=ca00905c27078305e80130ea6dd07fc575de2ae3257fad38003b329458cf7f7a
+  [data_1m_salinity_nomask.nc]=ad648d972f0631bde7e1b598d98470a979b7f2649271fc9cf5ccfca158e31d0c
+  [namelist_ref]=b04f2ce4d12aa247ae3b707483d25cf2d38d0b3cf8817d71d33e66918fd81cfd
+)
+readonly -A G4_PIN=(
+  [data_1m_potential_temperature_nomask.nc]=ca00905c27078305e80130ea6dd07fc575de2ae3257fad38003b329458cf7f7a
+  [data_1m_salinity_nomask.nc]=ad648d972f0631bde7e1b598d98470a979b7f2649271fc9cf5ccfca158e31d0c
+  [u_10.15JUNE2009_fill.nc]=219bf3a6891dfe25871ba9d739e8ad465e12934b62f6524422a985b3858ae96b
+  [v_10.15JUNE2009_fill.nc]=b3913b212b6a194fa8f79214ea56819728cbef94a06c6a82e94d65337d6e7b3a
+  [ncar_rad.15JUNE2009_fill.nc]=050ee263198d49ce285070bc4d3e75953091c61c8f6a0d992484e79974fc37a7
+  [t_10.15JUNE2009_fill.nc]=bee5df15a69d757f3911660910efc54c936555ec8bce742215ec047a16a4338b
+  [q_10.15JUNE2009_fill.nc]=4c46f4527e8e5c1f3cc12942a87d0938c10431fcdb56cff7d25a9b5db2e69806
+  [ncar_precip.15JUNE2009_fill.nc]=ed17b5069ddb13cd2a596079a0102e7792899e5dbe4ce1ba5a20e29802b5337a
+  [slp.15JUNE2009_fill.nc]=19dea3069caa8f513218c7cbc11b3dce83d7cb9363e44b787e892917625c81fb
+  [weights_core2_orca2_bicub.nc]=2cfefd58b0231f355cf999f943a48586f63e4e9264f0cbcc7197334f12b3e7e8
+  [weights_core2_orca2_bilin.nc]=e5fe31582615262d84b06d01aeaa1893f4d942dc978aebc3e13f56cda484d766
+  [chlorophyll.nc]=9178f44245f9465c584168eeb47b28e83c358a9ef78ed614cd623c4456ad7890
+  [sss_data.nc]=ea4609d6deca4ccf95b6307a7b7eed1bff3b767146eb69c2a82762824bf1ed49
+  [runoff_core_monthly.nc]=b92ff46e4c406096a1e1fe3815dfdcce12b234e84541a3b6dffb1037e777d4eb
+  [domain_cfg.nc]=7125f7a54e8693ff8f1327b878d2258d258878bc7302ac123ac671f2339d2839
+  [namelist_ref]=b04f2ce4d12aa247ae3b707483d25cf2d38d0b3cf8817d71d33e66918fd81cfd
+)
+for f in "${G3_FILES[@]}"; do [[ "$(sha_of "$R15_RUN/$f")" == "${G3_PIN[$f]}" ]] \
+  || { printf 'REFUSE: %s/%s is not the pinned admitted copy\n' "$R15_RUN" "$f" >&2; exit 67; }; done
+for f in "${G4_FILES[@]}"; do [[ "$(sha_of "$R17_RUN/$f")" == "${G4_PIN[$f]}" ]] \
+  || { printf 'REFUSE: %s/%s is not the pinned admitted copy\n' "$R17_RUN" "$f" >&2; exit 67; }; done
 [[ "$(sha_of "$REF_BIN")" == "$REF_SHA" && "$(sha_of "$P5_BIN")" == "$P5_SHA" \
    && "$(sha_of "$P6_BIN")" == "$P6_SHA" && "$(awk '{print $1}' "$R19_BIN_SHA_FILE")" == "$P6_SHA" ]] \
   || { printf 'REFUSE: a binary is not the admitted one (rebuilt?)\n' >&2; exit 67; }
