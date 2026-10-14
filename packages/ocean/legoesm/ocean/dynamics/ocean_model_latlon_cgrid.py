@@ -6735,6 +6735,7 @@ class LatLonCGridOceanModel:
         _nemo_ws_advection_content_rhs = None
         _nemo_ws_fct_input_trace = None
         _nemo_ws_zdf_eta_kmm = None
+        _nemo_ws_zdf_stage_pair = None
         _nemo_ws_process_qco = None
         _nemo_ws_process_surface_rate = None
         _nemo_ws_process_qsr_rate = None
@@ -7875,6 +7876,11 @@ class LatLonCGridOceanModel:
                 state.eta.data
                 if self._nemo_ws_test_hooks.legacy_zdf_entry_kmm_eta
                 else _eta_live_one_half)
+            if (getattr(_cfg_b, "zdf_momentum_stage_r3u_nemo_literal", False)
+                    and not self._nemo_ws_test_hooks.legacy_zdf_entry_kmm_eta
+                    and (_stage_entry_override is None
+                         or _stage_entry_override[0] != 3)):
+                _nemo_ws_zdf_stage_pair = (2, *_ws_eta_pair)
             if isinstance(_zc, OceanPartialCellCoordinate):
                 _u_live_mask, _v_live_mask = compute_face_masks_3d(
                     _zc.is_active, _grid)
@@ -10521,6 +10527,7 @@ class LatLonCGridOceanModel:
                         _nemo_ws_zdf_eta_kmm
                         if _nemo_ws_zdf_eta_kmm is not None
                         else state.eta.data),
+                    nemo_zdf_stage_pair=_nemo_ws_zdf_stage_pair,
                     u_now=state.u.data, v_now=state.v.data,
                     effective_K_test_override=_vertical_K_test_override,
                     nemo_aimp_tracer_w=_nemo_ws_aimp_tracer_w,
@@ -10551,6 +10558,7 @@ class LatLonCGridOceanModel:
                         _nemo_ws_zdf_eta_kmm
                         if _nemo_ws_zdf_eta_kmm is not None
                         else state.eta.data),
+                    nemo_zdf_stage_pair=_nemo_ws_zdf_stage_pair,
                     u_now=state.u.data, v_now=state.v.data,
                     effective_K_test_override=_vertical_K_test_override,
                     nemo_aimp_tracer_w=_nemo_ws_aimp_tracer_w,
@@ -12180,6 +12188,7 @@ class LatLonCGridOceanModel:
         n2_tracers_before=None,
         tke_n2_bundle=None,
         eta_now=None,
+        nemo_zdf_stage_pair=None,
         u_now=None,
         v_now=None,
         nemo_tracer_content_rhs=None,
@@ -12710,6 +12719,13 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 "zdf_momentum_nemo_face_thickness requires "
                 "zdf_implicit_solver_evaluation='nemo_literal'")
+        if (getattr(_cfg_b, "zdf_momentum_stage_r3u_nemo_literal", False)
+                and (not _zdf_nemo_faces or getattr(
+                    _cfg_b, "momentum_time_integrator", "euler") != "rk3_ws")):
+            raise ValueError(
+                "zdf_momentum_stage_r3u_nemo_literal requires "
+                "zdf_momentum_nemo_face_thickness and "
+                "momentum_time_integrator='rk3_ws'")
         # Cell-centered NOW thickness and NOW (1+r3t) (only computed / used
         # under the NEMO identity; both feed the u/v-face divisor below so the
         # tracer and momentum solves share one NOW-eta evaluation).
@@ -12953,10 +12969,14 @@ class LatLonCGridOceanModel:
                     _um3, _vm3 = compute_face_masks_3d(_zc.is_active, _grid)
                     _, _, _r3u1, _r3v1 = _nemo_ws_qco_stage_faces(
                         _eta_now, _h_ref_zdf, _um3, _vm3, _grid,
-                        z_coord=_zc)
+                        z_coord=_zc, nemo_stage_pair=nemo_zdf_stage_pair)
                     _raw1 = jnp.asarray(_raw_e3w0)[1:]
                     dz_half_u = (_r3u1[..., None] * _raw1).astype(dz_u.dtype)
                     dz_half_v = (_r3v1[..., None] * _raw1).astype(dz_v.dtype)
+                elif nemo_zdf_stage_pair is not None:
+                    raise ValueError(
+                        "zdf_momentum_stage_r3u_nemo_literal needs the 1-D "
+                        "interface ladder z_coord.nemo_e3w_0")
                 elif _zdf_legacy_w:
                     dz_half_u = build_dz_half(dz_u_open)
                     dz_half_v = build_dz_half(dz_v_open)

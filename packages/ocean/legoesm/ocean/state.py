@@ -3188,6 +3188,11 @@ class LatLonCGridOceanConfig(NamedTuple):
     # ascending k (stp2d.f90:178-179).  False leaves the reduction tree to
     # the backend.
     barotropic_rhs_ascending_level_sum: bool = False
+    # dyn_zdf's interface thickness at stage 3 reads r3u/r3v(Kmm), which
+    # stprk3_stg.f90:216-217 stored as r1_2*(r3u(Kbb) + r3ua): the mean of
+    # the two ratios, not the ratio of the mean sea level.  False takes the
+    # ratio of the interpolated sea level (last-place different on some faces).
+    zdf_momentum_stage_r3u_nemo_literal: bool = False
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":
