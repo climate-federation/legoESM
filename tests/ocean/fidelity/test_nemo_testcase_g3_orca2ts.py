@@ -83,6 +83,10 @@ def test_run_sh_reuses_g2s_binaries_and_pins_the_climatology():
     assert FILES["data_1m_potential_temperature_nomask.nc"] in text
     assert FILES["data_1m_salinity_nomask.nc"] in text
     assert "'3,5,7,9,0,0,0,0,0,0'" in code and "'2,4,6,8,10,0,0,0,0,0'" in code
+    # after its last entry nitrst is 0: twin c's last restart is step 9, not 10
+    assert 'run_one "$RUN_BIN" "$TWIN_C" 10 "$L_ODD" 9' in code
+    # admission renders each run's whole deck, restart list included
+    assert 'render_deck "$dry/admit_deck" "$steps" "$list"' in code
     assert "gridladder_rounds/round14/oracle_g3_r14" in code
     assert "does not state the T/S read with damping off" in code
     for name, sha in FILES.items():

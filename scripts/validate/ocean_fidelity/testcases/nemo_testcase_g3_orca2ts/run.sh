@@ -151,10 +151,12 @@ render_deck() {        # $1 = target, $2 = nn_itend, $3 = nn_stocklist
 }
 dry=$(mktemp -d)
 trap 'rm -rf "$dry"' EXIT
-render_deck "$dry/smoke" 2 '2,0,0,0,0,0,0,0,0,0'
-render_deck "$dry/ten" 10 '2,4,6,8,10,0,0,0,0,0'
-render_deck "$dry/odd" 10 '3,5,7,9,0,0,0,0,0,0'
-render_deck "$dry/full" 100 '10,20,30,40,50,60,70,80,90,100'
+readonly L_SMOKE='2,0,0,0,0,0,0,0,0,0' L_FULL='10,20,30,40,50,60,70,80,90,100'
+readonly L_EVEN='2,4,6,8,10,0,0,0,0,0' L_ODD='3,5,7,9,0,0,0,0,0,0'
+render_deck "$dry/smoke" 2 "$L_SMOKE"
+render_deck "$dry/ten" 10 "$L_EVEN"
+render_deck "$dry/odd" 10 "$L_ODD"
+render_deck "$dry/full" 100 "$L_FULL"
 cmp -s "$dry/full" "$DECK" \
   || { printf 'REFUSE: the committed deck is not the 100-step deck\n' >&2; exit 68; }
 python3 -I -m py_compile "$CHECKER"
@@ -175,9 +177,10 @@ admit() {
   # Provenance of what is admitted (a fresh --run and --admit-existing alike):
   # every run directory holds the pinned domain file and its pinned binary,
   # finished, at its own length; the smoke is one of them.
-  for dir in "$SMOKE:$REF_SHA:2" "$REF:$REF_SHA:100" "$TWIN_A:$RUN_SHA:100" "$TWIN_B:$RUN_SHA:10" \
-             "$TWIN_C:$RUN_SHA:10"; do
-    IFS=: read -r dir bin steps <<<"$dir"
+  local list step
+  for dir in "$SMOKE:$REF_SHA:2:$L_SMOKE" "$REF:$REF_SHA:100:$L_FULL" "$TWIN_A:$RUN_SHA:100:$L_FULL" \
+             "$TWIN_B:$RUN_SHA:10:$L_EVEN" "$TWIN_C:$RUN_SHA:10:$L_ODD"; do
+    IFS=: read -r dir bin steps list <<<"$dir"
     [[ -f "$dir/domain_cfg.nc" && "$(sha_of "$dir/domain_cfg.nc")" == "$SHIPPED_DOMCFG_SHA" ]] \
       || { printf 'REFUSE: %s does not hold the shipped ORCA2 domain file\n' "$dir" >&2; exit 73; }
     [[ -f "$dir/nemo" && "$(sha_of "$dir/nemo")" == "$bin" ]] \
@@ -189,9 +192,15 @@ admit() {
     grep -qx 'RUN_DONE' "$dir/run.user.log" && [[ "$(tr -d ' \n' <"$dir/time.step")" == "$steps" ]] \
       && grep -Eq 'jpkglo *= *31' "$dir/ocean.output" && ! grep -q 'E R R O R' "$dir/ocean.output" \
       || { printf 'REFUSE: %s is not a finished %s-step 31-level run\n' "$dir" "$steps" >&2; exit 73; }
-    cmp -s <(assignments "$dir/namelist_cfg" | grep -Ev 'nn_itend|nn_stock') \
-           <(assignments "$DECK" | grep -Ev 'nn_itend|nn_stock') \
-      || { printf 'REFUSE: %s ran a deck that is not the committed one\n' "$dir" >&2; exit 73; }
+    # The whole deck, run length and restart list included, is the committed
+    # one rendered for this run; every listed restart exists.
+    render_deck "$dry/admit_deck" "$steps" "$list"
+    cmp -s "$dir/namelist_cfg" "$dry/admit_deck" \
+      || { printf 'REFUSE: %s ran a deck that is not the committed one at its length and list\n' "$dir" >&2; exit 73; }
+    for step in ${list//,/ }; do
+      [[ "$step" == 0 || -f "$dir/ORCA2G1_$(printf '%08d' "$step")_restart.nc" ]] \
+        || { printf 'REFUSE: %s has no restart at listed step %s\n' "$dir" "$step" >&2; exit 73; }
+    done
   done
   for plant in truncation nonfinite missing-frame twin-ulp missing-step missing-substep \
                twin-substep-inner; do
@@ -291,7 +300,7 @@ printf '%s\n' "$COMMIT" >"$EVIDENCE/manifest/legoesm_commit"
 sha256sum "$SHIPPED_DOMCFG" "$INPUTS/$TEM_FILE" "$INPUTS/$SAL_FILE" "$DECK" "$G2_DECK" "$G1_DECK" "$CHECKER" "$REF_BIN" "$RUN_BIN" \
   "$NEMO_ROOT/cfgs/SHARED/namelist_ref" >"$EVIDENCE/manifest/inputs.sha256"
 
-run_one() {            # $1 = binary, $2 = run dir, $3 = nn_itend, $4 = stocklist
+run_one() {            # $1 = binary, $2 = run dir, $3 = nn_itend, $4 = stocklist, $5 = last listed step
   local dir=$2
   mkdir -p "$dir"
   render_deck "$dir/namelist_cfg" "$3" "$4"
@@ -316,20 +325,22 @@ run_one() {            # $1 = binary, $2 = run dir, $3 = nn_itend, $4 = stocklis
     || { printf 'REFUSE: %s did not read the T/S climatology with damping off\n' "$dir" >&2; exit 71; }
   [[ "$(tr -d ' \n' <"$dir/time.step")" == "$3" ]] \
     || { printf 'REFUSE: %s stopped before step %s\n' "$dir" "$3" >&2; exit 71; }
-  [[ -f "$dir/ORCA2G1_$(printf '%08d' "$3")_restart.nc" ]] \
-    || { printf 'REFUSE: %s wrote no final restart\n' "$dir" >&2; exit 71; }
+  # The last LISTED step: twin c's odd list ends at 9, and after its last
+  # entry nitrst is 0, so NEMO writes no step-10 restart (restart.f90:199-202).
+  [[ -f "$dir/ORCA2G1_$(printf '%08d' "$5")_restart.nc" ]] \
+    || { printf 'REFUSE: %s wrote no restart at its last listed step %s\n' "$dir" "$5" >&2; exit 71; }
   # Facts the receipt quotes, read from NEMO's own log (reported, not judged).
   grep -E 'nn_e *=|ln_bt_auto|jpiglo|jpjglo|jpkglo|l_Iperio|l_NFold|c_NFtype|G1_BUMP|ourant|l_zps|strait|mbku|tsd|ln_eos|ln_hpg|dta_tsd|fld_' \
     "$dir/ocean.output" >"$dir/resolved_facts.log" || true
 }
 
 # ---- runs: the mandatory 2-step smoke first --------------------------------
-run_one "$REF_BIN" "$SMOKE" 2 '2,0,0,0,0,0,0,0,0,0'
+run_one "$REF_BIN" "$SMOKE" 2 "$L_SMOKE" 2
 printf 'G3_SMOKE_OK %s\n' "$SMOKE"
-run_one "$REF_BIN" "$REF" 100 '10,20,30,40,50,60,70,80,90,100'
-run_one "$RUN_BIN" "$TWIN_A" 100 '10,20,30,40,50,60,70,80,90,100'
-run_one "$RUN_BIN" "$TWIN_B" 10 '2,4,6,8,10,0,0,0,0,0'
-run_one "$RUN_BIN" "$TWIN_C" 10 '3,5,7,9,0,0,0,0,0,0'
+run_one "$REF_BIN" "$REF" 100 "$L_FULL" 100
+run_one "$RUN_BIN" "$TWIN_A" 100 "$L_FULL" 100
+run_one "$RUN_BIN" "$TWIN_B" 10 "$L_EVEN" 10
+run_one "$RUN_BIN" "$TWIN_C" 10 "$L_ODD" 9
 
 # ---- admission -------------------------------------------------------------
 admit
