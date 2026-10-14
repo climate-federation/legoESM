@@ -268,3 +268,27 @@ UNVERIFIED:
    ORCA2 lane.
 3. A record of NEMO's `Ue_rhs` itself, if a direct witness of the depth
    mean is wanted (not needed for the certification).
+
+## 11. Citation gate and evidence hashes
+
+Citation gate on this receipt at commit 627216616 (citation_receipt.json):
+PASS, 2 citations, 0 unmapped, map audit clean; the shifted-citation plant
+on `stp2d.f90:178-179` exits 1; the gate's own test file: 17 passed. This
+section was added after that run and holds no citation.
+
+SHA-256 prefixes, round13/: final/independent_after.json=bb18f8cdac6ccb89,
+final/independent_before.json=09e12ab9ffad668b,
+final/independent_after_nofma.json=f3a74707186b43f6,
+final/given_entry_after.json=5645e9f3e926e68e,
+final/rhs_frame.json=5230df4355f0a00f,
+final/substeps_kt1.json=24f33beedbc42f76,
+final/plant_score.json=9eede49a55ebf2d2,
+final/plant_level.json=dd6e2ac6305b5ad8,
+explore/replay_ue_rhs.json=f29fcd2665a9b7de,
+codex_review_r13.log=4b4b2d6bbb662a76,
+tests_final_fast.log=11a1e87cde0728fa,
+tests_final_slow.log=7ea822315b728796,
+tests_final_slow_rhs.log=f03f54c7bf4d91b3,
+tests_g1_100step.log=4de921eeaf62ec19,
+tests_final_ratchets.log=b4b6223eac638e42,
+citation_receipt.json=ba0fda64811b3402.
