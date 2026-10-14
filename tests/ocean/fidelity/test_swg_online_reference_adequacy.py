@@ -63,6 +63,35 @@ def test_early_common_path_reports_crossings_and_correlation_failure():
     assert failed["fields"]["ssh"]["first_day_above"]["0.1"] == 3
 
 
+def test_early_rotational_velocity_is_one_vector_rms_per_day():
+    """Round-7 bug: the per-day value was an array over wet cells.
+
+    Known answer: on day k one wet U value is raised by delta_k, so the pooled
+    (both components, all wet points) normalised RMS is
+    delta_k / sqrt(sum over wet points of u^2 + v^2) -- one number per day.
+    """
+    rng = np.random.default_rng(7)
+    wet = np.zeros((6, 7), dtype=bool)
+    wet[1:5, 1:6] = True
+    sensitivity = {"ssh": rng.normal(size=(8, 6, 7)),
+                   "relative_vorticity": rng.normal(size=(8, 6, 7)),
+                   "rotational_velocity": rng.normal(size=(8, 2, 6, 7))}
+    candidate = {name: value.copy() for name, value in sensitivity.items()}
+    delta = np.array([0.0, 0.05, 0.2, 0.4, 0.8, 1.6, 3.2, 6.4])
+    candidate["rotational_velocity"][:, 0, 2, 3] += delta
+    reference = sensitivity["rotational_velocity"][:, :, wet]
+    expected = delta / np.sqrt(np.sum(reference**2, axis=(1, 2)))
+    record = adequacy.early_path_metrics(
+        candidate, sensitivity, wet)["fields"]["rotational_velocity"]
+    by_day = record["normalized_rms_by_day"]
+    assert len(by_day) == adequacy.EARLY_DAYS
+    assert all(isinstance(value, float) for value in by_day)
+    assert by_day == pytest.approx(expected.tolist(), rel=1e-12, abs=0.0)
+    above = [day + 1 for day, value in enumerate(expected) if value > 0.1]
+    assert record["first_day_above"]["0.1"] == above[0] <= adequacy.EARLY_DAYS
+    assert not record["passes"]
+
+
 def test_early_loader_uses_preregistered_rotational_velocity(monkeypatch,
                                                              tmp_path):
     shape = cgrid_geometry(SWG_DG50_NAMELIST)["mask"]["T"].shape

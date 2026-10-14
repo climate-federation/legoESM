@@ -7,7 +7,12 @@ coarse truth climatology made by the SAME operator as the training objective
 (``symmetric`` = box restriction, ``template`` = filtered restriction).  The
 bars are the truth's own window-to-window spread, frozen in ``FROZEN_GATE``
 before any trained model exists; ``freeze --verify`` recomputes them from the
-pinned data and refuses any drift.
+pinned data and refuses any drift.  Every day file is admitted by its own
+per-file sampling label and, where the archive holds daily means beside the
+snapshots, shown from the data not to be its own day's daily mean.  A
+trained-closure score needs three or more DISTINCT runs (distinct day files
+and distinct scored data), each manifest naming its checkpoint, network seed,
+objective and training window.
 """
 from __future__ import annotations
 
@@ -38,6 +43,13 @@ EXPECTED_CONTROL_MANIFEST_SHA256 = {
     "nu80": "cbee1f9f2268cec353c99bd3922b86a08a645f57cea81f9950791cbe35895f26",
     "truth": "aaec7f829d7530a275c07a263cd96185a4fa6245be411c63626156e35fa65d2c",
 }
+# A single-sampling archive (no daily mean beside its snapshot) holds nothing a
+# daily mean could not also hold, so it is admitted only under one of these
+# manifests, frozen in code, whose snapshot sampling the round-7 evaluation
+# receipt shows from the data: bitwise one-day replay of both controls, and
+# the midpoint test of the round-5 truth against its daily-mean twin.
+FROZEN_SINGLE_SAMPLING_MANIFESTS = frozenset(
+    EXPECTED_CONTROL_MANIFEST_SHA256.values())
 # Registered 20-year inputs of the round-6 gate.  The fine truth is the
 # 6.25 km run whose first 1095 days are bit-equal to the round-2 truth; only
 # its END-OF-DAY SNAPSHOT fields are read, because both controls archive
@@ -49,7 +61,22 @@ CONTROL_ROOTS = {
     "nu10": DEFAULT_ROUND2.parent / "round1/dg50_cpu_7300d_no_closure",
     "nu80": DEFAULT_ROUND2 / "dg50_nu80_cpu_7300d",
 }
-FINE_SNAPSHOT_LABEL = "end-of-day instantaneous state"
+# Per-file sampling labels exactly as the writers store them in EVERY day
+# file (run_swg_double_gyre.py ``run_long``; swg_coarse_graining.py
+# ``filter_truth_directory``).  The file's own label decides; a manifest never
+# supplies one.
+DUAL_SCHEMA = "legoesm-swg-double-gyre-daily-v2"  # snapshot AND daily mean
+SINGLE_SAMPLING_SCHEMAS = (
+    "legoesm-swg-double-gyre-daily-v1",  # driver: end-of-day snapshot only
+    "legoesm-swg-conservative-truth-v2",  # restricted product, one sampling
+)
+SNAPSHOT_LABEL = "end-of-day instantaneous state"
+DAILY_MEAN_LABEL = "arithmetic mean of every post-step state in model day"
+SNAPSHOT_FIELDS = ("ssh_m", "u_m_s", "v_m_s")
+DAILY_MEAN_FIELDS = ("ssh_daily_mean_m", "u_daily_mean_m_s", "v_daily_mean_m_s")
+# What every trained-closure manifest must state under "closure".
+CLOSURE_IDENTITY_KEYS = ("checkpoint_sha256", "network_seed", "objective",
+                         "window_days")
 GATE_WINDOW_DAYS = 730
 GATE_FIRST_DAY = 366
 SKILL_METRICS = ("mean_face_transport_rmse_m3_s", "ke_spectrum_relative_l1",
@@ -266,31 +293,84 @@ def fine_truth_pins_digest(root: Path, windows) -> str:
     return hashlib.sha256("".join(lines).encode()).hexdigest()
 
 
-def _snapshot_fields(saved, name: str, *, labelled: bool) -> tuple[np.ndarray, ...]:
-    """End-of-day snapshot (ssh, u, v) of one day file, never a daily mean.
+def _fields(saved, name: str, keys: tuple[str, ...]) -> tuple[np.ndarray, ...]:
+    if not set(keys) <= set(saved.files):
+        raise ValueError(f"{name}: fields {keys} are absent")
+    return tuple(np.asarray(saved[key], dtype=np.float64) for key in keys)
 
-    Dual archives (v2) carry both samplings and label the snapshot; for them
-    ``labelled`` is required.  Single-sampling snapshot archives (v1, coarse
-    truth ``snapshots``) carry only the snapshot fields.
+
+def _admit_day_file(saved, name: str):
+    """(end-of-day snapshot, daily mean or None) of one day file, by its OWN label.
+
+    The per-file ``schema`` is the writer's sampling label.  A dual (v2) file
+    holds both samplings and must carry the driver's snapshot AND daily-mean
+    labels; a single-sampling file must hold no daily-mean field.  A missing
+    or unknown label refuses: nothing falls back to the manifest.
     """
-    label = (str(saved["snapshot_sampling"])
-             if "snapshot_sampling" in saved.files else None)
-    if (labelled or label is not None) and label != FINE_SNAPSHOT_LABEL:
-        raise ValueError(f"{name}: no labelled end-of-day snapshot fields")
-    if not {"ssh_m", "u_m_s", "v_m_s"} <= set(saved.files):
-        raise ValueError(f"{name}: snapshot fields are absent")
-    return tuple(np.asarray(saved[field], dtype=np.float64)
-                 for field in ("ssh_m", "u_m_s", "v_m_s"))
+    files = set(saved.files)
+    schema = str(saved["schema"]) if "schema" in files else None
+    if schema == DUAL_SCHEMA:
+        labels = {key: str(saved[key]) if key in files else None
+                  for key in ("snapshot_sampling", "daily_mean_sampling")}
+        if labels != {"snapshot_sampling": SNAPSHOT_LABEL,
+                      "daily_mean_sampling": DAILY_MEAN_LABEL}:
+            raise ValueError(f"{name}: dual-file labels {labels} are not the "
+                             "driver's snapshot and daily-mean labels")
+        return (_fields(saved, name, SNAPSHOT_FIELDS),
+                _fields(saved, name, DAILY_MEAN_FIELDS))
+    if schema in SINGLE_SAMPLING_SCHEMAS:
+        if any("daily_mean" in key for key in files):
+            raise ValueError(f"{name}: a single-sampling {schema} file "
+                             "carries daily-mean fields")
+        return _fields(saved, name, SNAPSHOT_FIELDS), None
+    raise ValueError(f"{name}: no known per-file sampling label "
+                     f"(schema {schema!r})")
+
+
+def _require_end_of_day_snapshots(name: str, snapshot, daily_mean,
+                                  next_daily_mean) -> None:
+    """Show from the data that a dual file's snapshot fields are end-of-day.
+
+    The day-d end-of-day state lies half a day from the day-d and day-(d+1)
+    daily means, so it is nearer their average than its own day's mean; a
+    day's own daily mean put under its snapshot names IS that mean and fails.
+    (The NEXT day's mean under those names passes: the test cannot see that
+    shift.)  Per field, no parameter.  Only a non-finite SNAPSHOT field skips
+    the test: it is then in the returned arrays, so a candidate's window
+    fails physical health (``score_free_run``) and the truth refuses
+    (``window_statistics``).  A finite snapshot beside a non-finite daily mean
+    of its own or the next day refuses: renamed fields could hide behind it.
+    """
+    for field, s, m, n in zip(("ssh", "u", "v"), snapshot, daily_mean,
+                              next_daily_mean, strict=True):
+        if not np.all(np.isfinite(s)):
+            continue
+        for which, mean in (("its own day's", m), ("the next day's", n)):
+            if not np.all(np.isfinite(mean)):
+                raise ValueError(
+                    f"{name}: the {field} snapshot is finite but {which} daily "
+                    "mean is not, so its sampling cannot be shown from the "
+                    "data (a renamed daily mean, or a run that blew up)")
+        if not np.sum((s - 0.5 * (m + n)) ** 2) < np.sum((s - m) ** 2):
+            raise ValueError(
+                f"{name}: {field} is not an end-of-day snapshot -- it is no "
+                "nearer the average of its own and the next day's daily means "
+                "than its own day's mean")
 
 
 def restrict_fine_truth_window(root: Path, first: int, last: int, *,
                                objective: str) -> tuple[np.ndarray, ...]:
-    """Coarse truth (ssh, u, v) for days first..last from fine SNAPSHOTS."""
-    manifest = _fine_truth_manifest(root)
-    pins = manifest.get("daily_sha256", {})
+    """Coarse truth (ssh, u, v) for days first..last from fine SNAPSHOTS.
+
+    The fine truth is a dual archive: each day's snapshot is admitted by its
+    own labels and shown from the data to be an end-of-day state (the check of
+    day ``last`` reads day ``last + 1``'s daily mean).
+    """
+    pins = _fine_truth_manifest(root).get("daily_sha256", {})
     restrict = truth_restrictor(objective)
     values = {kind: [] for kind in "TUV"}
-    for day in range(first, last + 1):
+    previous = None
+    for day in range(first, last + 2):
         name = f"day{day:04d}.npz"
         payload = (root / name).read_bytes()
         if name not in pins or hashlib.sha256(payload).hexdigest() != pins[name]:
@@ -298,32 +378,66 @@ def restrict_fine_truth_window(root: Path, first: int, last: int, *,
         with np.load(io.BytesIO(payload), allow_pickle=False) as saved:
             if int(saved["day"]) != day:
                 raise ValueError(f"{name}: embedded day differs")
-            ssh, u, v = _snapshot_fields(
-                saved, name, labelled=manifest.get("sampling") == "daily_mean")
-        coarse = restrict({"T": ssh, "U": u, "V": v})
+            snapshot, daily_mean = _admit_day_file(saved, name)
+        if daily_mean is None:
+            raise ValueError(f"{name}: the fine truth must be a dual archive")
+        if previous is not None:
+            _require_end_of_day_snapshots(*previous, daily_mean)
+        if day > last:
+            break
+        previous = (name, snapshot, daily_mean)
+        coarse = restrict(dict(zip("TUV", snapshot, strict=True)))
         for kind in "TUV":
             values[kind].append(coarse[kind])
     return tuple(np.stack(values[kind]) for kind in "TUV")
 
 
+def _day_file_pins(manifest: dict) -> dict:
+    """The day-file digests a native manifest pins, under either writer's key
+    (driver ``daily_sha256``; restricted product ``output_daily_sha256``).
+    The ONE reading shared by the loader and the trained-run binding."""
+    return manifest.get("daily_sha256", manifest.get("output_daily_sha256", {}))
+
+
+def _read_admitted_day(root: Path, day: int, pins: dict):
+    path = root / f"day{day:04d}.npz"
+    if _sha256(path) != pins.get(path.name):
+        raise ValueError(f"native trajectory digest differs: {path}")
+    with np.load(path, allow_pickle=False) as saved:
+        return _admit_day_file(saved, path.name)
+
+
 def _load_native_window(root: Path, start: int, days: int) -> tuple[np.ndarray, ...]:
+    """End-of-day (ssh, u, v) of days start..start+days-1, admitted per file.
+
+    A dual archive shows every snapshot from the data (the last day's check
+    reads day start+days); a single-sampling archive is admitted only under a
+    manifest frozen in this file.
+    """
     manifest_path = root / "manifest.json"
     manifest = json.loads(manifest_path.read_text())
     if manifest.get("status") != "complete":
         raise ValueError(f"incomplete native trajectory {root}")
-    sampling = manifest.get("sampling", "daily_snapshot")
-    if sampling not in ("daily_snapshot", "daily_mean"):
-        raise ValueError(f"{root}: unsupported sampling {sampling!r}")
-    pins = manifest.get("daily_sha256", manifest.get("output_daily_sha256", {}))
-    values = []
-    for day in range(start, start + days):
-        path = root / f"day{day:04d}.npz"
-        if _sha256(path) != pins.get(path.name):
-            raise ValueError(f"native trajectory digest differs: {path}")
-        with np.load(path, allow_pickle=False) as saved:
-            values.append(_snapshot_fields(
-                saved, path.name, labelled=sampling == "daily_mean"))
-    return tuple(np.stack([day[index] for day in values]) for index in range(3))
+    pins = _day_file_pins(manifest)
+    files = [_read_admitted_day(root, day, pins)
+             for day in range(start, start + days)]
+    means = [daily_mean for _, daily_mean in files]
+    if any(daily_mean is None for daily_mean in means):
+        if _sha256(manifest_path) not in FROZEN_SINGLE_SAMPLING_MANIFESTS:
+            raise ValueError(
+                f"{root}: a single-sampling archive cannot show from its data "
+                "that its fields are end-of-day snapshots; only the frozen "
+                "controls and the round-5 truth are admitted")
+    else:
+        means.append(_read_admitted_day(root, start + days, pins)[1])
+        if means[-1] is None:
+            raise ValueError(f"{root}: day {start + days} is not a dual file")
+        for k, (snapshot, _) in enumerate(files):
+            _require_end_of_day_snapshots(
+                f"{root.name}/day{start + k:04d}.npz", snapshot, means[k],
+                means[k + 1])
+    return tuple(np.stack([snapshot[index] for snapshot, _ in files])
+                 for index in range(3))
 
 
 def score_control(root: Path, *, control: str) -> tuple[dict, dict]:
@@ -373,7 +487,10 @@ def score_control(root: Path, *, control: str) -> tuple[dict, dict]:
 # truth's leave-one-out table and both controls' tables on the SAME windows.
 # Every bar is ``gate_bars`` of the truth table (a test checks the stored
 # bars equal that derivation) and ``freeze --verify`` recomputes both tables
-# from the pinned data, refusing any difference.
+# from the pinned data, refusing any difference.  Every tolerance and
+# allowance ``held_out_gate`` applies is one of these truth bars (round 7:
+# the noise allowance no longer uses a control's spread); the controls'
+# tables supply only the levels a seed must beat or not exceed.
 # Provenance of the frozen numbers: measured 2026-10-14 on the round-6 work
 # copy (base a0b5535b2) by ``freeze`` with the functions below, BEFORE any
 # trained model exists.  Truth: the fine truth's end-of-day snapshots, days
@@ -384,6 +501,11 @@ def score_control(root: Path, *, control: str) -> tuple[dict, dict]:
 # bar is the largest of eight leave-one-out values (8/9 coverage for a new
 # exchangeable window), half_range = (bar - floor) / 2.  Re-verify with
 # ``freeze --objective <name> --verify`` (exit 0 only on exact equality).
+# Round 7 (2026-10-14): the ``template`` tables were re-measured the same way
+# (same windows, pins and rule; still no trained model) because the round-6
+# GPU fix evaluates the filtered restriction as matrix products, which moves
+# 32 of its 189 numbers by at most 5.6e-15 relative; ``symmetric`` (box
+# restriction) verified unchanged.
 FROZEN_GATE: dict[str, dict] = {
     "symmetric": {
         "truth_operator": "box (exact volume/face-transport restriction)",
@@ -561,9 +683,9 @@ FROZEN_GATE: dict[str, dict] = {
                 490331.20606561087, 541610.9793282589, 430041.96416013734, 369263.637561333,
             ],
             "ke_spectrum_relative_l1": [
-                0.0463431211467169, 0.03307898609631616, 0.0397827074926512,
-                0.061335289543215474, 0.03922056472970712, 0.05464462623367051,
-                0.037681183503900526, 0.040964277596383665,
+                0.04634312114671689, 0.03307898609631619, 0.03978270749265124,
+                0.061335289543215474, 0.03922056472970714, 0.05464462623367048,
+                0.03768118350390047, 0.04096427759638369,
             ],
             "wet_eke_map_nrmse": [
                 0.23655639317656227, 0.22171941944567466, 0.2458316605320523,
@@ -575,14 +697,14 @@ FROZEN_GATE: dict[str, dict] = {
                 1.0246149593726162, 1.0378406595401541, 1.018203269237359, 0.9944352681221175,
             ],
             "top_octave_ke_fraction": [
-                3.3718154833021355e-05, 3.4268311112806014e-05, 3.3389818395325854e-05,
-                3.133966791964048e-05, 3.300286844474588e-05, 3.3286788723457686e-05,
-                3.3142808919939634e-05, 3.494090681411432e-05,
+                3.371815483302136e-05, 3.426831111280602e-05, 3.338981839532585e-05,
+                3.133966791964047e-05, 3.3002868444745865e-05, 3.328678872345769e-05,
+                3.314280891993964e-05, 3.494090681411433e-05,
             ],
             "top_octave_enstrophy_fraction": [
-                0.0006988010060733775, 0.0007226455652212797, 0.0007003065542752054,
-                0.0006483859202105984, 0.0006980134805603585, 0.0007060285543640958,
-                0.0006881904639087929, 0.0007379065533362526,
+                0.0006988010060733777, 0.0007226455652212796, 0.0007003065542752054,
+                0.0006483859202105985, 0.0006980134805603586, 0.0007060285543640957,
+                0.000688190463908793, 0.0007379065533362526,
             ],
             "native_grid_noise_index": [
                 0.21277639767314105, 0.21204275603340897, 0.21077828322537775,
@@ -593,14 +715,14 @@ FROZEN_GATE: dict[str, dict] = {
         "controls": {
             "nu10": {
                 "mean_face_transport_rmse_m3_s": [
-                    1365863.1183782492, 1303474.0380607818, 1357656.4270050747,
+                    1365863.1183782492, 1303474.0380607818, 1357656.427005075,
                     1489055.9985645737, 1389740.3197816953, 1340529.728201074,
                     1275427.9362856902, 1484469.754389993,
                 ],
                 "ke_spectrum_relative_l1": [
-                    0.4512402972018488, 0.4340509525168498, 0.44927314349116454,
+                    0.4512402972018489, 0.4340509525168498, 0.44927314349116454,
                     0.449839887713791, 0.46251414796678675, 0.4423691406312488,
-                    0.4457961472351256, 0.48054569882047093,
+                    0.4457961472351256, 0.4805456988204709,
                 ],
                 "wet_eke_map_nrmse": [
                     0.4038072188813543, 0.4484507815524961, 0.4859794664264817,
@@ -636,7 +758,7 @@ FROZEN_GATE: dict[str, dict] = {
                 ],
                 "ke_spectrum_relative_l1": [
                     0.5671753904996489, 0.5610997959727322, 0.5230811346237294,
-                    0.38093564699013255, 0.4740863488147589, 0.5643374438065404,
+                    0.38093564699013255, 0.474086348814759, 0.5643374438065404,
                     0.47282542406462824, 0.5724012074733351,
                 ],
                 "wet_eke_map_nrmse": [
@@ -674,8 +796,8 @@ FROZEN_GATE: dict[str, dict] = {
             },
             "ke_spectrum_relative_l1": {
                 "bar": 0.061335289543215474,
-                "floor": 0.03307898609631616,
-                "half_range": 0.014128151723449656,
+                "floor": 0.03307898609631619,
+                "half_range": 0.014128151723449642,
             },
             "wet_eke_map_nrmse": {
                 "bar": 0.2620022147484432,
@@ -688,14 +810,14 @@ FROZEN_GATE: dict[str, dict] = {
                 "half_range": 0.0556651487318397,
             },
             "top_octave_ke_fraction": {
-                "bar": 3.494090681411432e-05,
-                "floor": 3.133966791964048e-05,
-                "half_range": 1.8006194472369194e-06,
+                "bar": 3.494090681411433e-05,
+                "floor": 3.133966791964047e-05,
+                "half_range": 1.8006194472369296e-06,
             },
             "top_octave_enstrophy_fraction": {
                 "bar": 0.0007379065533362526,
-                "floor": 0.0006483859202105984,
-                "half_range": 4.4760316562827084e-05,
+                "floor": 0.0006483859202105985,
+                "half_range": 4.476031656282703e-05,
             },
             "native_grid_noise_index": {
                 "bar": 0.21277639767314105,
@@ -745,10 +867,10 @@ def held_out_gate(seed_scores: dict[str, list[dict]], *, objective: str) -> dict
     windows) by more than the truth's half-range on every skill measure;
     every seed's EKE ratio must lie inside the truth's own leave-one-out band
     [floor, bar]; no seed's noise may exceed the worse control's median by
-    more than that control's own half-range (its sampling spread; the
-    filtered truth's top-octave spreads are 100-400 times smaller and would
-    fail a control-level closure half the time); physical health is
-    unconditional on every window and on the whole run.
+    more than the truth's half-range; physical health is unconditional on
+    every window and on the whole run.  Every tolerance and allowance is the
+    TRUTH's own window-to-window spread (``bars``); a control's spread never
+    enters (codex round-6 defect 2).
     """
     frozen = frozen_gate(objective)
     windows = len(frozen["windows"])
@@ -779,8 +901,7 @@ def held_out_gate(seed_scores: dict[str, list[dict]], *, objective: str) -> dict
     noise_limit = {}
     for metric in NOISE_METRICS:
         worse = max(controls, key=lambda name: controls[name][metric])
-        noise_limit[metric] = controls[worse][metric] + gate_bars(
-            frozen["controls"][worse])[metric]["half_range"]
+        noise_limit[metric] = controls[worse][metric] + bars[metric]["half_range"]
     band = (bars[VARIABILITY_METRIC]["floor"], bars[VARIABILITY_METRIC]["bar"])
     skill_pass = all(median_seed[metric] < required[metric]
                      for metric in SKILL_METRICS)
@@ -858,10 +979,11 @@ def plant_verdicts(truth_window: tuple[np.ndarray, ...], reference: dict, *,
 
 
 def available_windows(root: Path = FINE_TRUTH_ROOT) -> list[tuple[int, int]]:
-    """Every complete registered window the fine truth pins today."""
+    """Every complete registered window the fine truth pins today, each with
+    the following day pinned too (its last snapshot's sampling check)."""
     completed = int(_fine_truth_manifest(root)["completed_days"])
     return registered_windows(
-        max(0, (completed - GATE_FIRST_DAY + 1) // GATE_WINDOW_DAYS))
+        max(0, (completed - GATE_FIRST_DAY) // GATE_WINDOW_DAYS))
 
 
 def freeze_record(objective: str, *, windows: list[tuple[int, int]],
@@ -913,6 +1035,8 @@ def score_free_run(root: Path, *, expected_manifest_sha256: str,
 
     The driver's whole-run health record (every day, not only the scored
     windows) must also be finite, positive-thickness and sub-unit Courant.
+    Every row carries ``scored_data_sha256``, one SHA-256 over the window's
+    loaded (ssh, u, v) arrays, so runs can be compared on their data.
     """
     if _sha256(root / "manifest.json") != expected_manifest_sha256:
         raise ValueError(f"{root}: manifest differs from its bound SHA-256")
@@ -935,20 +1059,97 @@ def score_free_run(root: Path, *, expected_manifest_sha256: str,
         if not whole_run_ok:
             rows[-1]["physical_health"] = dict(
                 rows[-1]["physical_health"], passes=False, whole_run=whole_run)
+        rows[-1]["scored_data_sha256"] = hashlib.sha256(
+            b"".join(value.tobytes() for value in arrays)).hexdigest()
     return rows
 
 
-def score_trained_closure(seeds: dict[str, tuple[Path, str]], *, objective: str,
-                          fine_root: Path = FINE_TRUTH_ROOT) -> dict:
-    """Score >= 3 explicitly bound trained-closure free runs and gate them.
+def bind_trained_runs(seeds: dict[str, tuple[Path, str]], *, objective: str,
+                      window_days: int) -> dict[str, dict]:
+    """Refuse anything but three or more DISTINCT, identified trained runs.
 
-    ``seeds`` maps a seed label to (free-run root, its manifest SHA-256).  The
-    truth climatology and both controls are recomputed on the frozen windows
-    and must reproduce the frozen tables exactly before any seed is scored.
+    Each manifest, bound by its SHA-256, must state under ``closure`` the
+    checkpoint SHA-256, the network seed, the objective and the training
+    window length; objective and window must equal the score request.  Roots
+    (as directories, so a symlink or bind mount is the same root), manifests,
+    network seeds, checkpoints and day files must all differ between seeds;
+    the day files are the non-empty set the loader reads (``_day_file_pins``).
+    Identical data under different bytes is refused once the windows are
+    loaded (``score_trained_closure``).
     """
-    frozen = frozen_gate(objective)
+    from legoesm.training.swg_online import ADMITTED_WINDOWS_DAYS
+
+    frozen_gate(objective)
+    if type(window_days) is not int or window_days not in ADMITTED_WINDOWS_DAYS:
+        raise ValueError(f"window_days must be one of {ADMITTED_WINDOWS_DAYS}, "
+                         f"got {window_days!r}")
     if len(seeds) < 3:
         raise ValueError("held-out gate requires at least three network seeds")
+    bound = {}
+    for label, (root, sha) in seeds.items():
+        root = Path(root).resolve()
+        if _sha256(root / "manifest.json") != sha:
+            raise ValueError(f"{label}: manifest differs from its bound SHA-256")
+        manifest = json.loads((root / "manifest.json").read_text())
+        closure = manifest.get("closure")
+        missing = (sorted(set(CLOSURE_IDENTITY_KEYS) - set(closure))
+                   if isinstance(closure, dict) else list(CLOSURE_IDENTITY_KEYS))
+        if missing:
+            raise ValueError(f"{label}: manifest does not identify {missing}")
+        checkpoint, network_seed = (closure["checkpoint_sha256"],
+                                    closure["network_seed"])
+        if not (isinstance(checkpoint, str) and len(checkpoint) == 64
+                and set(checkpoint) <= set("0123456789abcdef")):
+            raise ValueError(f"{label}: checkpoint_sha256 is not a SHA-256")
+        if type(network_seed) is not int or network_seed < 0:
+            raise ValueError(f"{label}: network_seed is not a non-negative int")
+        request = {"objective": objective, "window_days": window_days}
+        stated = {key: closure[key] for key in request}
+        if stated != request:
+            raise ValueError(f"{label}: manifest states {stated}, the score "
+                             f"request {request}")
+        pins = _day_file_pins(manifest)  # exactly the files the loader reads
+        if not pins:
+            raise ValueError(f"{label}: manifest pins no day files")
+        directory = root.stat()
+        bound[label] = {
+            "root": str(root), "manifest_sha256": sha,
+            "checkpoint_sha256": checkpoint, "network_seed": network_seed,
+            "_directory": (directory.st_dev, directory.st_ino),
+            "_day_files": set(pins.values()),
+        }
+    for key in ("_directory", "manifest_sha256", "network_seed",
+                "checkpoint_sha256"):
+        values = [item[key] for item in bound.values()]
+        if len(set(values)) != len(values):
+            raise ValueError(f"seeds share a {key.strip('_')}: three or more "
+                             "distinct runs are required")
+    labels = sorted(bound)
+    for k, left in enumerate(labels):
+        for right in labels[k + 1:]:
+            if bound[left]["_day_files"] & bound[right]["_day_files"]:
+                raise ValueError(f"{left} and {right} share day files: three "
+                                 "or more distinct runs are required")
+    return {label: {key: value for key, value in item.items()
+                    if not key.startswith("_")}
+            for label, item in bound.items()}
+
+
+def score_trained_closure(seeds: dict[str, tuple[Path, str]], *, objective: str,
+                          window_days: int,
+                          fine_root: Path = FINE_TRUTH_ROOT) -> dict:
+    """Score >= 3 distinct, explicitly bound trained-closure free runs.
+
+    ``seeds`` maps a seed label to (free-run root, its manifest SHA-256); the
+    runs are bound by ``bind_trained_runs`` before anything is computed.  The
+    truth climatology and both controls are recomputed on the frozen windows
+    and must reproduce the frozen tables exactly before any seed is scored.
+    File bytes can differ while data do not, so two seeds whose loaded
+    arrays are identical in any scored window are refused before the gate.
+    """
+    frozen = frozen_gate(objective)
+    bindings = bind_trained_runs(seeds, objective=objective,
+                                 window_days=window_days)
     windows = [tuple(window) for window in frozen["windows"]]
     record, _, reference = freeze_record(
         objective, windows=windows, fine_root=fine_root)
@@ -958,10 +1159,19 @@ def score_trained_closure(seeds: dict[str, tuple[Path, str]], *, objective: str,
     seed_scores = {name: score_free_run(
         Path(root), expected_manifest_sha256=sha, reference=reference,
         windows=windows) for name, (root, sha) in seeds.items()}
-    return {"schema": "legoesm.swg_online_held_out_gate.v2",
-            "seed_bindings": {name: {"root": str(Path(root).resolve()),
-                                     "manifest_sha256": sha}
-                              for name, (root, sha) in seeds.items()},
+    first_seen = {}
+    for name, rows in seed_scores.items():
+        for window, row in zip(windows, rows, strict=True):
+            other, where = first_seen.setdefault(
+                row["scored_data_sha256"], (name, window))
+            if other != name:
+                raise ValueError(
+                    f"{other} (window {where}) and {name} (window {window}) "
+                    "hold identical data: three or more distinct runs are "
+                    "required")
+    return {"schema": "legoesm.swg_online_held_out_gate.v3",
+            "objective": objective, "window_days": window_days,
+            "seed_bindings": bindings,
             "gate": held_out_gate(seed_scores, objective=objective)}
 
 
@@ -1008,6 +1218,8 @@ def main(argv=None) -> int:
     score = commands.add_parser(
         "score", help="score >= 3 trained-closure free runs through the gate")
     score.add_argument("--objective", required=True)
+    score.add_argument("--window-days", type=int, required=True,
+                       help="training window length every seed must state")
     score.add_argument("--seed", nargs=3, action="append", required=True,
                        metavar=("LABEL", "ROOT", "MANIFEST_SHA256"))
     score.add_argument("--output", type=Path, required=True)
@@ -1037,7 +1249,7 @@ def main(argv=None) -> int:
                 raise ValueError("seed labels must be unique")
             report = score_trained_closure(
                 {label: (Path(root), sha) for label, root, sha in args.seed},
-                objective=args.objective)
+                objective=args.objective, window_days=args.window_days)
             code = 0 if report["gate"]["pass"] else 1
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(
