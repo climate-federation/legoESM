@@ -359,6 +359,8 @@ def test_duo_daily_forcing_setup_refuses_a_mid_day_cadence(
     with pytest.raises(ValueError,
                        match=r"checkpoint_days=1\.5 is not a whole number"):
         drv("ck_on", 600.0, 1.5, **on).setup()
+    with pytest.raises(ValueError, match=r"start_day=0\.5 is not a whole day"):
+        drv("sd_on", 600.0, 1, start_day=0.5, **on).setup()
     ok = drv("ok_on", 600.0, 1, **on)
     ok.setup()
     _require(ok._column_daily_forcing_active(), "daily forcing not on")
@@ -367,6 +369,7 @@ def test_duo_daily_forcing_setup_refuses_a_mid_day_cadence(
         off.setup()
         _require(off.config.dycore.dt == dt, off.config.dycore.dt)
         _require(not off._column_daily_forcing_active(), "forcing on")
+    drv("sd_off", 600.0, 1, start_day=0.5).setup()
 
 
 @pytest.mark.slow

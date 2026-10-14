@@ -2300,6 +2300,15 @@ class ModelDriver:
                     "is active on the column loop: checkpoints would land "
                     "mid-day, where a restart is refused (D-REX-3).  Use a "
                     "whole number of days.")
+            # User 2026-10-14: a fractional start day puts whole-day
+            # checkpoints mid-day just the same.
+            _sd = float(self.config.start_day)
+            if not _sd.is_integer():
+                raise ValueError(
+                    f"start_day={_sd!r} is not a whole day while daily "
+                    "external forcing (ozone/aerosol/GHG) is active on the "
+                    "column loop: every checkpoint would land mid-day, where "
+                    "a restart is refused (D-REX-3).  Use a whole start day.")
         self._create_physics()
         self._create_diagnostics()
         self._create_friction()
