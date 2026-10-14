@@ -144,11 +144,12 @@ def test_complete_domain_cfg_is_admitted_with_its_hash(domain_cfg):
 
 
 @pytest.mark.parametrize("plant", ["missing-variable", "bad-level", "thin-cell",
-                                   "wrong-jperio", "wrong-dims", "nonfinite"])
+                                   "wrong-jperio", "wrong-dims", "nonfinite", "flat-e3t"])
 def test_every_domain_plant_exits_nonzero(domain_cfg, plant):
     domcheck, path = domain_cfg
     assert set(domcheck.PLANTS) - {"none"} == {
-        "missing-variable", "bad-level", "thin-cell", "wrong-jperio", "wrong-dims", "nonfinite"}
+        "missing-variable", "bad-level", "thin-cell", "wrong-jperio", "wrong-dims", "nonfinite",
+        "flat-e3t"}
     with pytest.raises(domcheck.Refuse):
         domcheck.check(path, plant=plant)
     done = subprocess.run(
@@ -157,8 +158,15 @@ def test_every_domain_plant_exits_nonzero(domain_cfg, plant):
     assert done.returncode == 1 and "STATUS PLANT-FIRED" in done.stderr
 
 
+def domcheck_plants():
+    return [p for p in _load("check_domain_cfg").PLANTS if p != "none"]
+
+
 def test_run_sh_judges_the_domain_file_not_the_mpirun_status():
     text = (CASE / "run.sh").read_text()
     assert "./make_domain_cfg.exe >run.user.log 2>&1 || dom_status=$?" in text
-    assert text.count("domain_cfg_admit ") == 2  # preflight of a resume, and --run
-    assert text.index('domain_cfg_admit "$EVIDENCE/manifest"') < text.index("build_one \"$REF_NAME\" 0")
+    assert text.count("domain_cfg_admit ") == 3  # --admit-existing, resume preflight, --run
+    for plant in domcheck_plants():
+        assert f" {plant}" in text
+    last_admit = text.rindex('domain_cfg_admit "$EVIDENCE/manifest"')
+    assert text.index("# ---- 1. domain_cfg.nc") < last_admit < text.index("# ---- 2. the two NEMO")
