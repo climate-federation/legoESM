@@ -101,6 +101,9 @@ def test_old_coupled_yaml_keys_still_load(tmp_path):
     out = load_yaml_config(str(p), coupled_parser(), renamed_keys=_COUPLED_RENAMED_KEYS)
     assert out == {"grid_type": "voronoi", "use_polar_filter": False,
                    "conv_cloud_max": 0.4}
+    q = tmp_path / "new.yaml"
+    q.write_text("grid_type: voronoi\nuse_polar_filter: false\nconv_cloud_max: 0.4\n")
+    assert load_yaml_config(str(q), coupled_parser()) == out
     p.write_text("grid: voronoi\ngrid_type: latlon\n")
     with pytest.raises(SystemExit, match="old name"):
         load_yaml_config(str(p), coupled_parser(), renamed_keys=_COUPLED_RENAMED_KEYS)
@@ -108,11 +111,56 @@ def test_old_coupled_yaml_keys_still_load(tmp_path):
         load_yaml_config(str(p), coupled_parser())
 
 
-@pytest.mark.parametrize("argv", [["--truncation", "21"], ["--land-model", "slab"]])
-def test_unresolved_amip_flags_are_refused(argv):
+def test_main_only_amip_dests_are_computed_not_guessed():
     from scripts.run import run_coupled
-    with pytest.raises(SystemExit, match="post-parse"):
+    main_only = set(run_coupled._amip_main_only_dests(coupled_parser()))
+    assert {"truncation", "land_model", "multicontroller", "production_profile",
+            "restart_from", "restart_start_day", "profile",
+            "per_step_rollout"} <= main_only
+    # read by the shared builder or by run_coupled itself: never refused
+    assert not main_only & {"convection", "grid_type", "output", "params",
+                            "config", "ocean", "preset", "zm_tau", "clubb_c8"}
+
+
+@pytest.mark.parametrize("argv", [
+    ["--truncation", "21"], ["--land-model", "slab"],
+    ["--restart-from", "ckpt.npz"], ["--profile", "3"],
+])
+def test_main_only_amip_flags_are_refused(argv):
+    from scripts.run import run_coupled
+    with pytest.raises(SystemExit, match="run_amip-only"):
         run_coupled.main(argv, build_only=True)
+
+
+def test_main_only_amip_keys_are_refused_from_yaml_too(tmp_path):
+    from scripts.run import run_coupled
+    p = tmp_path / "deck.yaml"
+    p.write_text("truncation: 21\n")
+    with pytest.raises(SystemExit, match="run_amip-only"):
+        run_coupled.main(["--config", str(p)], build_only=True)
+
+
+def test_explicit_discretization_survives_the_grid_map():
+    from scripts.run import run_coupled
+    drv = run_coupled.main(["--grid", "latlon", "--discretization", "centered"],
+                           build_only=True)
+    assert drv.atm_config.dycore.discretization == "centered"
+    drv = run_coupled.main(["--grid", "latlon"], build_only=True)
+    assert drv.atm_config.dycore.discretization == "latlon_cgrid"
+
+
+def test_land_tile_flags_stay_out_of_the_atmosphere_config():
+    """These select the coupler's land tile (D4); the atmosphere config keeps
+    its defaults exactly as before P5a (an atm transient_land_cover=True
+    would be refused by validate_strict without multilayer land)."""
+    from scripts.run import run_coupled
+    drv = run_coupled.main(["--preset", "slab_richards", "--transient-land-cover",
+                            "--land-cover-surfdata", "cover.nc",
+                            "--snow-albedo-feedback"], build_only=True)
+    assert drv.atm_config.transient_land_cover is False
+    assert drv.atm_config.land_cover_surfdata == ""
+    assert drv.atm_config.snow_albedo_feedback is False
+    assert drv.coupled_cfg.land_config.snow_albedo_feedback is True
 
 
 def test_yaml_grid_type_key_and_grid_flag_agree():

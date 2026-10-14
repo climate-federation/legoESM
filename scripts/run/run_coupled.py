@@ -516,10 +516,28 @@ _COUPLED_RENAMED_KEYS = {
     "cloud_conv_cloud_condensate": "conv_cloud_condensate",
 }
 
-# run_amip options whose meaning is resolved in its own post-parse step
-# (_postprocess_args / _resolve_land_model), which the coupled lane does not
-# run: accepting them would silently do nothing.
-_UNRESOLVED_AMIP_DESTS = ("truncation", "land_model", "multicontroller")
+def _amip_main_only_dests(parser):
+    """run_amip dests that neither run_amip.build_config_from_args nor this
+    script read.  Their effect lives in run_amip's own main / post-parse step
+    (--truncation, --land-model, --restart-from, --profile, ...), so on the
+    coupled lane they would be accepted and silently ignored; main() refuses
+    them instead."""
+    import inspect
+    import re
+    from legoesm.driver.config import CLUBB_SCALAR_FIELDS, ZM_SCALAR_FIELDS
+    pat = r"(?:args|pre)\.(\w+)|getattr\((?:args|pre),\s*\"(\w+)\""
+    read = {m[0] or m[1] for m in re.findall(
+        pat, inspect.getsource(_run_amip().build_config_from_args)
+        + Path(__file__).read_text())}
+    read |= set(ZM_SCALAR_FIELDS) | set(CLUBB_SCALAR_FIELDS)
+    amip = {a.dest for a in _run_amip().build_arg_parser()._actions}
+    return sorted((amip - read) - {"help"})
+
+
+# The coupler's land tile owns land on this lane (decision D4); these three
+# select that tile and never reached the atmosphere config before P5a.
+_LAND_TILE_ONLY = ("transient_land_cover", "land_cover_surfdata",
+                   "snow_albedo_feedback")
 
 # Grid -> hydrostatic-dycore discretization when the deck names none.  lat-lon
 # uses the Arakawa C-grid so the atm co-locates with the C-grid 3-D ocean
@@ -538,7 +556,9 @@ def _coupled_atm_config(args):
     if args.max_wallclock_hours and cfg.output.max_wallclock_seconds:
         raise SystemExit("--max-wallclock-hours and --max-wallclock-seconds both "
                          "set; pass one.")
+    from legoesm.driver.config import ExperimentConfig
     return cfg._replace(
+        **{f: getattr(ExperimentConfig(), f) for f in _LAND_TILE_ONLY},
         dycore=cfg.dycore._replace(
             model_type="hydrostatic",
             discretization=(explicit_discretization
@@ -935,6 +955,8 @@ def main(argv=None, *, build_only=False):
     constructed and returns it (deck tests build every committed deck this way
     without integrating)."""
     parser = build_parser()
+    main_only = _amip_main_only_dests(parser)
+    base_defaults = {d: parser.get_default(d) for d in main_only}
 
     # Two-pass parse so a --config file supplies defaults that explicit CLI
     # flags still override (precedence: CLI > config file > parser default).
@@ -946,12 +968,12 @@ def main(argv=None, *, build_only=False):
             renamed_keys=_COUPLED_RENAMED_KEYS))
 
     args = parser.parse_args(argv)
-    for dest in _UNRESOLVED_AMIP_DESTS:
-        if getattr(args, dest) != parser.get_default(dest):
-            raise SystemExit(
-                f"--{dest.replace('_', '-')} is resolved by run_amip's own "
-                "post-parse step, which the coupled lane does not run; spell "
-                "the setting out (--grid / --resolution / --use-multilayer-land).")
+    ignored = [d for d in main_only if getattr(args, d) != base_defaults[d]]
+    if ignored:
+        raise SystemExit(
+            f"run_amip-only option(s) {ignored} have no effect on the coupled "
+            "lane (their handling lives in run_amip's own main / post-parse "
+            "step); drop them or spell the setting out.")
 
     # --minimal-physics: collapse the full-physics defaults to a cheap
     # idealized atmosphere (gray radiation + SBM convection only).  Applied
