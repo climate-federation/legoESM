@@ -1733,6 +1733,8 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
         # Grid-ladder G1 round 6, retained on ORCA2 by round 275's
         # individual Decision-96 source-unit census.
         rk3_stage_velocity_written_order=True,
+        # Grid-ladder G1 round 8: use NEMO's staged T-point ratio expression.
+        rk3_stage_r3t_nemo_literal=True,
         barotropic=model_config.barotropic._replace(
             barotropic_fold_top_v_face_ssh=True,
             barotropic_substep_dt_nemo_literal=True,
