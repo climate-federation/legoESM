@@ -190,3 +190,84 @@ def test_round3_acquisition_only_moves_the_stage_frame_gate():
     assert "RUN_NAME=${RUN_NAME:-ORCA2G1_OMIP_L1_P3}" in text
     assert "STAGE_STEPS=${STAGE_STEPS:-10}" in text
     assert "STEP_PATCH=${STEP_PATCH:-$here/stprk3_g1_step_record.patch}" in text
+
+
+# ------------------------------------------------- round 4: substep records
+def _substep_blob(step, icycle=2, bad=None):
+    import struct
+    blob = b"NEMO_G1_SPGTS1  " + struct.pack(
+        "<15i", 1, step, 1, 1, 2, 3, 6, 5, 2, icycle, 3, 3, 4, 3, 64)
+
+    def rec(name, a):
+        a = np.asarray(a, dtype="<f8")
+        shape = (a.shape[1], a.shape[0], 1) if a.ndim == 2 else (a.size, 1, 1)
+        return (name.ljust(16).encode() + struct.pack("<4i", a.ndim, *shape)
+                + a.tobytes())
+    blob += rec("i000_sshn_e", np.ones((5, 6))) + rec("i000_ffu_nw", np.ones((1, 2)))
+    for jn in range(1, icycle + 1):
+        ssh = np.full((5, 6), float(jn))
+        if bad == "nonfinite" and jn == icycle:
+            ssh[0, 0] = np.nan
+        blob += rec(f"j{jn:03d}_ssha_e", ssh) + rec(f"j{jn:03d}_ext_coef", np.ones(3))
+    return blob + rec("o000_ssh_aa", np.zeros((5, 6)))
+
+
+def _records_checker():
+    import importlib.util
+    path = (Path(__file__).resolve().parents[3] / "scripts/validate/ocean_fidelity/"
+            "testcases/nemo_testcase_g1_orca2grid/check_records.py")
+    spec = importlib.util.spec_from_file_location("g1_check_records_r4", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_substep_streams_are_admitted_at_exactly_the_listed_steps(tmp_path):
+    cr = _records_checker()
+    a, b = tmp_path / "a", tmp_path / "b"
+    a.mkdir(), b.mkdir()
+    for step in (1, 17):
+        cr.substep_path(a, step).write_bytes(_substep_blob(step))
+    cr.substep_path(b, 1).write_bytes(_substep_blob(1))
+    out = cr.check_substeps(a, b, [1, 17])
+    assert out[17] == {"icycle": 2, "n_fields": 7,
+                       "substep_fields": ["ext_coef", "ssha_e"]}
+    head, fields = cr.read_substeps(cr.substep_path(a, 1).read_bytes(), "x")
+    assert head["icycle"] == 2 and fields["i000_ffu_nw"].shape == (1, 2)
+    assert fields["j002_ext_coef"].shape == (3,)
+    # each refusal, one at a time
+    with pytest.raises(cr.Refuse, match="missing substep record"):
+        cr.check_substeps(a, b, [1, 17], plant="missing-substep")
+    with pytest.raises(cr.Refuse, match="unlisted steps"):
+        cr.check_substeps(a, b, [1])
+    cr.substep_path(b, 1).write_bytes(_substep_blob(1, icycle=3))
+    with pytest.raises(cr.Refuse, match="twin run differs"):
+        cr.check_substeps(a, b, [1, 17])
+    cr.substep_path(b, 1).unlink()
+    cr.substep_path(a, 17).write_bytes(_substep_blob(17, bad="nonfinite"))
+    with pytest.raises(cr.Refuse, match="non-finite"):
+        cr.check_substeps(a, b, [1, 17])
+    cr.substep_path(a, 17).write_bytes(_substep_blob(17)[:-8])
+    with pytest.raises(cr.Refuse, match="truncated payload"):
+        cr.check_substeps(a, b, [1, 17])
+    blob = _substep_blob(17, icycle=3)
+    cut = blob.index(b"j003_ssha_e")
+    cr.substep_path(a, 17).write_bytes(blob[:cut] + blob[blob.index(b"o000_ssh_aa"):])
+    with pytest.raises(cr.Refuse, match="frames"):
+        cr.check_substeps(a, b, [1, 17])
+
+
+def test_round4_substep_patch_only_adds_writer_calls_and_matches_its_gate():
+    here = (Path(__file__).resolve().parents[3] / "scripts/validate/ocean_fidelity/"
+            "testcases/nemo_testcase_g1_orca2grid")
+    patch = (here / "dynspg_ts_g1_substep_record.patch").read_text().splitlines()
+    added = [ln[1:].strip() for ln in patch if ln.startswith("+") and not ln.startswith("+++")]
+    assert not [ln for ln in patch if ln.startswith("-") and not ln.startswith("---")]
+    assert all(ln.startswith(("USE g1_spgts_record", "!", "CALL spgts_r12_", "&"))
+               for ln in added)
+    assert sum("'ff" in ln for ln in added) == 8
+    module = (here / "g1_spgts_record.F90").read_text()
+    import re
+    assert re.findall(r"kstp /= (\d+)", module) == ["1", "2", "17", "31", "41"]
+    wrapper = (here / "run_r4.sh").read_text()
+    assert "SPGTS_STEPS=1,2,17,31,41" in wrapper and "ORCA2G1_OMIP_L1_P5" in wrapper

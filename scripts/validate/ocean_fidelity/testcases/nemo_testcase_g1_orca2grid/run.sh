@@ -81,6 +81,11 @@ readonly BATHY_TOOL=$here/make_bathy_level.py
 readonly CHECKER=$here/check_records.py
 readonly DOMCHECK=$here/check_domain_cfg.py
 readonly SHIPPED_STPRK3=$NEMO_ROOT/src/OCE/stprk3.F90
+# run_r4.sh only: the solver substep writer.  Unset = rounds 1-3, unchanged.
+readonly SPGTS_MODULE=${SPGTS_MODULE:-}
+readonly SPGTS_PATCH=${SPGTS_PATCH:-}
+readonly SPGTS_STEPS=${SPGTS_STEPS:-}               # must equal the module's gate
+readonly SHIPPED_SPGTS=$NEMO_ROOT/src/OCE/DYN/dynspg_ts.F90
 readonly SSH_PATCH=$here/restart_g1_usrdef_ssh.patch
 readonly SHIPPED_RESTART=$NEMO_ROOT/src/OCE/IOM/restart.F90
 
@@ -109,6 +114,20 @@ patch -s --fuzz=0 "$dry/stprk3.F90" <"$STEP_PATCH"
 patch -s --fuzz=0 "$dry/restart.F90" <"$SSH_PATCH"
 [[ "$(cat "$STEP_PATCH" "$SSH_PATCH" | grep -c '^-[^-]' || true)" -eq 0 ]] \
   || { printf 'REFUSE: a source patch removes lines\n' >&2; exit 68; }
+if [[ -n "$SPGTS_PATCH$SPGTS_MODULE$SPGTS_STEPS" ]]; then
+  [[ -f "$SPGTS_PATCH" && -f "$SPGTS_MODULE" && -f "$SHIPPED_SPGTS" && -n "$SPGTS_STEPS" ]] \
+    || { printf 'REFUSE: the substep writer needs its module, patch and step list\n' >&2; exit 67; }
+  cp "$SHIPPED_SPGTS" "$dry/dynspg_ts.F90"
+  patch -s --fuzz=0 "$dry/dynspg_ts.F90" <"$SPGTS_PATCH"
+  [[ "$(grep -c '^-[^-]' "$SPGTS_PATCH" || true)" -eq 0 ]] \
+    || { printf 'REFUSE: the substep patch removes lines\n' >&2; exit 68; }
+  # every added line is a USE, a comment, a writer call or its continuation
+  [[ "$(grep '^+[^+]' "$SPGTS_PATCH" | grep -vcE '^\+ *(USE g1_spgts_record|!|CALL spgts_r12_|&)' || true)" -eq 0 ]] \
+    || { printf 'REFUSE: the substep patch adds something other than writer calls\n' >&2; exit 68; }
+  gate=$(grep -oE 'kstp /= [0-9]+' "$SPGTS_MODULE" | awk '{print $3}' | paste -sd, -)
+  [[ "$gate" == "$SPGTS_STEPS" ]] \
+    || { printf 'REFUSE: the writer opens at steps "%s", the step list says "%s"\n' "$gate" "$SPGTS_STEPS" >&2; exit 68; }
+fi
 [[ "$(grep -c '^+[^+]' "$SSH_PATCH")" -eq 1 ]] \
   || { printf 'REFUSE: the ssh patch adds more than its one statement\n' >&2; exit 68; }
 
@@ -178,9 +197,11 @@ domain_cfg_same_inputs() {
 
 admit() {
   local plant
-  for plant in truncation nonfinite missing-frame twin-ulp missing-step; do
+  for plant in truncation nonfinite missing-frame twin-ulp missing-step \
+               ${SPGTS_STEPS:+missing-substep}; do
     if python3 -I "$CHECKER" --evidence "$TWIN_A" --twin "$TWIN_B" \
          --steps "$STEPS" --stage-steps "$STAGE_STEPS" --plant "$plant" \
+         ${SPGTS_STEPS:+--substep-steps "$SPGTS_STEPS"} \
          >"$EVIDENCE/manifest/plant_${plant}.log" 2>&1; then
       printf 'REFUSE: record plant %s stayed green\n' "$plant" >&2; exit 72
     fi
@@ -189,6 +210,7 @@ admit() {
   done
   python3 -I "$CHECKER" --evidence "$TWIN_A" --twin "$TWIN_B" --reference "$REF" \
     --steps "$STEPS" --stage-steps "$STAGE_STEPS" --restart-steps 10,100 \
+    ${SPGTS_STEPS:+--substep-steps "$SPGTS_STEPS"} \
     --json "$EVIDENCE/g1_round1_admission.json"
   ( cd "$EVIDENCE" && sha256sum g1_round1_admission.json domaincfg/domain_cfg.nc \
       p3_a_100step/mesh_mask.nc ref_100step/ORCA2G1_00000100_restart.nc \
@@ -245,7 +267,7 @@ fi
 printf '%s\n' "$COMMIT" >"$EVIDENCE/manifest/legoesm_commit"
 sha256sum "$SHIPPED_DOMCFG" "$DECK" "$DOM_NML" "$ISTATE" "$SBC" "$STEP_MODULE" \
   "$STEP_PATCH" "$SSH_PATCH" "$SHIPPED_RESTART" "$BATHY_TOOL" "$CHECKER" "$DOMCHECK" \
-  "$SHIPPED_STPRK3" "$DOMTOOL/namelist_ref" \
+  "$SHIPPED_STPRK3" ${SPGTS_PATCH:+"$SPGTS_PATCH" "$SPGTS_MODULE" "$SHIPPED_SPGTS"} "$DOMTOOL/namelist_ref" \
   "$NEMO_ROOT/cfgs/SHARED/namelist_ref" "$NEMO_ROOT/arch/arch-conda-scalarmath.fcm" \
   >"$EVIDENCE/manifest/inputs.sha256"
 
@@ -294,6 +316,11 @@ build_one() {          # $1 = config name, $2 = 1 to add the record writer
     cp "$SHIPPED_STPRK3" "$cfg/MY_SRC/stprk3.F90"
     cp "$STEP_MODULE" "$cfg/MY_SRC/"
     patch --fuzz=0 "$cfg/MY_SRC/stprk3.F90" <"$STEP_PATCH"
+    if [[ -n "$SPGTS_PATCH" ]]; then
+      cp "$SHIPPED_SPGTS" "$cfg/MY_SRC/dynspg_ts.F90"
+      cp "$SPGTS_MODULE" "$cfg/MY_SRC/"
+      patch --fuzz=0 "$cfg/MY_SRC/dynspg_ts.F90" <"$SPGTS_PATCH"
+    fi
   fi
   touch "$cfg/MY_SRC/"*.F90
   ./makenemo -n "$name" -m conda-scalarmath
@@ -310,6 +337,10 @@ build_one() {          # $1 = config name, $2 = 1 to add the record writer
   grep -q 'ORCA2G1: the ssh bump' "$pp/restart.f90" \
     || { printf 'REFUSE: %s did not compile the ssh-bump statement\n' "$name" >&2; exit 70; }
   grep -q 'g1r_open' "$pp/stprk3.f90" && hits=1
+  if [[ "$instrumented" -eq 1 && -n "$SPGTS_PATCH" ]]; then
+    grep -q 'spgts_r12_open' "$pp/dynspg_ts.f90" \
+      || { printf 'REFUSE: %s did not compile the substep writer\n' "$name" >&2; exit 70; }
+  fi
   [[ "$hits" -eq "$instrumented" ]] \
     || { printf 'REFUSE: %s writer presence %s, instrumented=%s\n' "$name" "$hits" "$instrumented" >&2; exit 70; }
 }
