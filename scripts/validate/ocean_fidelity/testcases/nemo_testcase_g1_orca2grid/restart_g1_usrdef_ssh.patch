@@ -1,0 +1,10 @@
+--- restart.F90
++++ restart.F90
+@@ -457,6 +457,7 @@
+             IF( ln_read_cfg ) THEN                 ! read configuration : ssh is set to 0
+                IF(lwp) WRITE(numout,*) '      rst_read_ssh : Ocean at rest, ssh is zero'
+                ssh(:,:,Kbb) = 0._wp
++               CALL usr_def_istate_ssh( tmask, ssh(:,:,Kbb) )   ! ORCA2G1: the ssh bump on a READ domain (NEMO leaves ssh = 0 here)
+             ELSE                                   ! user define configuration case
+                CALL usr_def_istate_ssh( tmask, ssh(:,:,Kbb) )
+             ENDIF

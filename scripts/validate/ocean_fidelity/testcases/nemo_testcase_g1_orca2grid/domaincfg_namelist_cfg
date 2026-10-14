@@ -1,0 +1,83 @@
+!!>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+!! tools/DOMAINcfg namelist_cfg for ORCA2G1 (grid ladder rung G1)
+!!
+!! Horizontal mesh: ORCA2's shipped ORCA_R2_zps_domcfg.nc read as the
+!! coordinates file (it carries glam*/gphi*/e1*/e2*; domhgr.F90:484-502).
+!! Vertical: uniform z, jpk = 2, one 100 m wet level (ppkth = 0 with
+!! pphmax = 100: domzgr.F90:425-437), full steps (zgr_zco :961-984).
+!! Land-sea mask: ORCA2's own (bathy_level.nc = 1 where the shipped
+!! bottom_level > 0, else 0; written by make_bathy_level.py).
+!! cp_cfg is NOT "orca": zgr_bat's ORCA_R2 strait edits (domzgr.F90:
+!! 633-652) would write levels 15 and 12 into a one-level column.
+!!>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+&namrun
+/
+&namdom
+   ln_read_cfg = .false.
+   nn_bathy    =    1
+   cn_domcfg   = ''
+   cn_fcoord   = 'coordinates.nc'    ! symlink to ORCA_R2_zps_domcfg.nc
+   cn_topolvl  = 'bathy_level.nc'
+   cn_bathlvl  = 'Bathy_level'
+   rn_bathy    =    0.
+   nn_msh      =    0
+   rn_hmin     =   -1.               ! one level: zhmin = gdepw_1d(2) = 100 m
+   rn_e3zps_min=   20.               ! unused (zco)
+   rn_e3zps_rat=    0.1              ! unused (zco)
+   jphgr_msh   =    0                ! read the coordinates file
+   ppglam0     =  999999.0
+   ppgphi0     =  999999.0
+   ppe1_deg    =  999999.0
+   ppe2_deg    =  999999.0
+   ppe1_m      =  999999.0
+   ppe2_m      =  999999.0
+   ppsur       =  999999.0           ! unused (ppkth = 0)
+   ppa0        =  999999.0           ! unused (ppkth = 0)
+   ppa1        =  999999.0           ! unused (ppkth = 0)
+   ppkth       =       0.0           ! uniform vertical grid
+   ppacr       =       1.0           ! unused (ppkth = 0)
+   ppdzmin     =  999999.0
+   pphmax      =     100.0           ! total depth [m]
+   ldbletanh   =  .false.
+   ppa2        =  999999.0
+   ppkth2      =  999999.0
+   ppacr2      =  999999.0
+/
+&namcfg
+   ln_e3_dep   = .true.
+      ln_dept_mid = .false.
+   cp_cfg      =  "orca2g1"
+   jp_cfg      =       2
+   jpidta      =     180
+   jpjdta      =     148
+   jpkdta      =       2
+   Ni0glo      =     180
+   Nj0glo      =     148
+   jpkglo      =       2
+   jperio      =       4             ! cyclic east-west + T-pivot north fold
+   ln_domclo   = .false.
+/
+&namzgr
+   ln_zco      = .true.
+   ln_zps      = .false.
+   ln_sco      = .false.
+   ln_mes      = .false.
+   ln_isfcav   = .false.
+   ln_loczgr   = .false.
+/
+&namzgr_isf
+/
+&namzgr_sco
+/
+&namzgr_mes
+/
+&namclo
+/
+&namlbc
+   rn_shlat    =    2.
+   ln_vorlat   = .false.
+/
+&namagrif
+/
+&namnc4
+/

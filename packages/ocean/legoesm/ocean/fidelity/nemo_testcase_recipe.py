@@ -2921,6 +2921,9 @@ def validate_nemo_testcase_card(card: NEMOTestcaseCard) -> None:
         "OVERFLOW-zps": ("nemo_boxcar1_ab3", 3, 2, 20.0, 0, 1000.0),
         "GYRE-zco": ("nemo_ab3am4", 50, 0, 0.0, 0, 0.0),
         "ORCA2-zps": ("nemo_ab3am4", 65, 0, 0.0, 1, 1000.0),
+        # Grid ladder G1: the committed deck's nn_bt_flt = 3 and nn_e = 65,
+        # no BBL.  validate_orca2g1_flat_card holds the card to the deck.
+        "ORCA2G1-flat": ("nemo_ab3am4", 65, 0, 0.0, 0, 0.0),
         "VORTEX-zco": ("nemo_ab3am4", 48, 0, 0.0, 0, 0.0),
         # The vector-EEN deck differs from the flux deck only in the momentum
         # scheme set, so every row this table checks is the same row.
@@ -2951,6 +2954,7 @@ def validate_nemo_testcase_card(card: NEMOTestcaseCard) -> None:
         "OVERFLOW-zps": 0.0,
         "GYRE-zco": 0.07,
         "ORCA2-zps": 0.09,
+        "ORCA2G1-flat": 0.09,
         "VORTEX-zco": 0.07,
         "VORTEX_VEC-zco": 0.07,
         "VORTEX-15km-zco": 0.07,
@@ -3038,6 +3042,13 @@ def validate_nemo_testcase_card(card: NEMOTestcaseCard) -> None:
     if cfg.barotropic.barotropic_reconcile_target != "velocity_avg":
         raise ValueError(
             f"{card.case} requires NEMO's prognostic uu_b(Kaa) velocity frame")
+    if card.case == "ORCA2G1-flat":
+        # The deck-bound half (rn_Dt, nn_e, the domain file, the bump) needs
+        # the deck root and lives in validate_orca2g1_flat_card.
+        moved = _orca2g1_selector_failures(card)
+        if moved:
+            raise ValueError(f"ORCA2G1-flat selectors moved: {moved}")
+        return
     wet = np.asarray(card.recipe.land_mask) > 0.5
     if card.case in ("GYRE-zco", "ORCA2-zps"):
         if (cfg.momentum_advection != "vector_invariant"
@@ -3435,6 +3446,10 @@ def build_nemo_testcase_card(
         if deck_root is None:
             raise ValueError("ORCA2-zps requires an explicit deck_root")
         return build_orca2_zps_card(deck_root)
+    if case == "ORCA2G1-flat":
+        if deck_root is None:
+            raise ValueError("ORCA2G1-flat requires an explicit deck_root")
+        return build_orca2g1_flat_card(deck_root)
     if case not in builders:
         raise ValueError(
             f"unknown NEMO testcase {case!r}; expected one of {sorted(builders)}"
@@ -3947,6 +3962,11 @@ __all__ = (
     "apply_orca2_hand_alterations",
     "build_orca2_initial_ts",
     "build_orca2_zps_card",
+    "build_orca2g1_flat_card",
+    "read_orca2g1_deck",
+    "orca2g1_initial_ssh",
+    "validate_orca2g1_flat_card",
+    "ORCA2G1_UNMEASURED",
     "build_vortex_zco_card",
     "build_vortex_smt_zps_card",
     "vortex_smt_bathymetry",
