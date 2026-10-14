@@ -22,7 +22,8 @@ HEADER_NAMES = ("version", "step", "Nbb", "Nnn", "Naa", "Nrhs", "jpi", "jpj",
 STAGE_FRAMES = ("e", "b", "1", "2", "3", "f")
 PLANTS = ("none", "truncation", "nonfinite", "missing-frame", "twin-ulp",
           "missing-step")
-SUB_PLANTS = ("missing-substep", "twin-substep-inner")   # need --substep-steps
+SUB_PLANTS = ("missing-substep", "twin-substep-inner",   # need --substep-steps
+              "substep-inner-nonfinite")
 # the least each frame must hold for the round-4 walk (more is recorded)
 SUB_ENTRY = ("sshn_e", "un_e", "vn_e", "zu_frc", "zv_frc", "ffu_nw", "ffu_ne",
              "ffu_sw", "ffu_se", "ffv_nw", "ffv_ne", "ffv_sw", "ffv_se")
@@ -121,6 +122,33 @@ def twin_halo_words(header: dict, fields: dict, other_blob: bytes, label: str,
     return halo
 
 
+def finite_on_consumed_support(header: dict, fields: dict, label: str,
+                               plant: bool = False) -> dict:
+    """Finite on the inner domain of every full (jpj, jpi) plane and on every
+    other array whole; returns the non-finite HALO words per field.  The
+    writer dumps whole work arrays NEMO fills only on the inner domain
+    (G4 round 2: CdU_v is ALLOCATEd uninitialised at stp2d.f90:122, set on
+    ntsi..ntei x ntsj..ntej at dynspg_ts.f90:1238-1247, read there only at
+    :518 and :575, but copied whole at :277)."""
+    js, je = header["Njs0"] - 1, header["Nje0"]
+    i_s, ie = header["Nis0"] - 1, header["Nie0"]
+    full, halo, planted = (header["jpj"], header["jpi"]), {}, not plant
+    for name, data in fields.items():
+        bad = ~np.isfinite(data)
+        if data.shape != full:
+            require(not bad.any(), f"{label}: {name} non-finite")
+            continue
+        inner = bad[js:je, i_s:ie].copy()
+        if not planted:             # the plant: one non-finite inner-domain word
+            inner[inner.shape[0] // 2, inner.shape[1] // 2] = planted = True
+        require(not inner.any(), f"{label}: {name} non-finite on the inner "
+                f"domain ({int(inner.sum())} words)")
+        if bad.any():
+            halo[name] = int(bad.sum())
+    require(planted, f"{label}: no full plane to plant in")
+    return halo
+
+
 def check_substeps(evidence: Path, twin: Path | None, steps: list[int],
                    plant: str = "none") -> dict:
     """The substep streams exist at exactly the listed steps, are finite,
@@ -150,8 +178,9 @@ def check_substeps(evidence: Path, twin: Path | None, steps: list[int],
             names = sorted(n.split("_", 1)[1] for n in fields
                            if n.startswith(f"j{jn:03d}_"))
             require(names == first, f"{path.name}: substep {jn} field list moved")
-        for name, data in fields.items():
-            require(bool(np.all(np.isfinite(data))), f"{path.name}: {name} non-finite")
+        halo_nonfinite = finite_on_consumed_support(
+            header, fields, path.name,
+            plant=plant == "substep-inner-nonfinite" and step == steps[0])
         if twin is not None and step_path(twin, step).is_file():
             # the twin ran this step: its substep stream must exist and agree
             require(substep_path(twin, step).is_file(),
@@ -163,7 +192,8 @@ def check_substeps(evidence: Path, twin: Path | None, steps: list[int],
             halo_words = None       # the twin did not run this step
         out[step] = {"icycle": header["icycle"], "n_fields": len(fields),
                      "substep_fields": first,
-                     "twin_halo_words_differing": halo_words}
+                     "twin_halo_words_differing": halo_words,
+                     "halo_words_nonfinite": halo_nonfinite}
     stray = sorted(p.name for p in evidence.glob("oracle_g1spgts_kt*.bin")
                    if p not in {substep_path(evidence, s) for s in steps})
     require(not stray, f"substep records at unlisted steps: {stray[:3]}")

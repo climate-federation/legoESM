@@ -210,7 +210,7 @@ def _substep_blob(step, icycle=2, bad=None):
     for jn in range(1, icycle + 1):
         ssh = np.full((5, 6), float(jn))
         if bad == "nonfinite" and jn == icycle:
-            ssh[0, 0] = np.nan
+            ssh[2, 2] = np.nan     # inner domain (halo NaNs are admitted)
         for n in cr.SUB_STEP:
             blob += rec(f"j{jn:03d}_{n}", ssh)
         blob += rec(f"j{jn:03d}_ext_coef", np.ones(3))
@@ -334,3 +334,33 @@ def test_substep_twin_check_compares_the_consumed_support_only(tmp_path):
         blob[:short] + np.float64(2.0).tobytes() + blob[short + 8:])
     with pytest.raises(cr.Refuse, match="twin run differs in j001_ext_coef"):
         cr.check_substeps(a, b, [1])
+
+
+def test_substep_finiteness_is_checked_on_the_consumed_support_only(tmp_path):
+    """G4 round 2: CdU_v's halo is uninitialised storage NEMO never reads.  A
+    halo NaN is counted, not refused; an inner NaN, a NaN in an array that is
+    not a full plane, or the plant refuses."""
+    cr = _records_checker()
+    a = tmp_path / "a"
+    a.mkdir()
+    blob = _substep_blob(1)
+    head, _ = cr.read_substeps(blob, "x")
+
+    def with_nan(name, j, i):
+        at = blob.index(name.ljust(16).encode()) + 32 + 8 * (j * head["jpi"] + i)
+        return blob[:at] + np.float64(np.nan).tobytes() + blob[at + 8:]
+
+    cr.substep_path(a, 1).write_bytes(blob)
+    assert cr.check_substeps(a, None, [1])[1]["halo_words_nonfinite"] == {}
+    cr.substep_path(a, 1).write_bytes(with_nan("j001_ssha_e", 0, 0))        # halo
+    assert cr.check_substeps(a, None, [1])[1]["halo_words_nonfinite"] == {"j001_ssha_e": 1}
+    cr.substep_path(a, 1).write_bytes(
+        with_nan("j001_ssha_e", head["Njs0"] - 1, head["Nie0"] - 1))       # inner corner
+    with pytest.raises(cr.Refuse, match="non-finite on the inner domain"):
+        cr.check_substeps(a, None, [1])
+    cr.substep_path(a, 1).write_bytes(with_nan("j001_ext_coef", 0, 0))
+    with pytest.raises(cr.Refuse, match="j001_ext_coef non-finite"):
+        cr.check_substeps(a, None, [1])
+    cr.substep_path(a, 1).write_bytes(blob)
+    with pytest.raises(cr.Refuse, match="non-finite on the inner domain"):
+        cr.check_substeps(a, None, [1], plant="substep-inner-nonfinite")

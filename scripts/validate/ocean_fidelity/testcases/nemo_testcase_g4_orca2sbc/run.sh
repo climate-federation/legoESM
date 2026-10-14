@@ -297,7 +297,7 @@ admit() {
       || { printf 'REFUSE: %s is not a finished %s-step run\n' "$dir" "$len" >&2; exit 73; }
   done
   for plant in truncation nonfinite missing-frame twin-ulp missing-step missing-substep \
-               twin-substep-inner; do
+               twin-substep-inner substep-inner-nonfinite; do
     if python3 -I "$CHECKER" --evidence "$TWIN_A" --twin "$TWIN_B" \
          --steps "$steps" --stage-steps "$steps" --plant "$plant" \
          --substep-steps "$RECORD_SPGTS" >"$EVIDENCE/manifest/plant_${plant}.log" 2>&1; then
