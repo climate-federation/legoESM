@@ -45,6 +45,22 @@ ZERO_WITHOUT_ICE = ("sfx", "fr_i")          # no sea ice in G4: the card's value
 DT_BINS = ((-np.inf, 5.0), (5.0, 20.0), (20.0, np.inf))   # SST minus air T [K]
 
 
+def require_program(run: Path, fields: dict) -> None:
+    """The constants this instrument assumes are the run's: nn_hls = 2,
+    nn_fsbc = FSBC, rn_zqt = rn_zu = 10 m (turb_ncar's height shift is
+    skipped), no wave drag, and exactly len(ITER) recorded NCAR iterations."""
+    log = (run / "ocean.output").read_text()
+    for pattern, what in ((r"halo width .* nn_hls = +2$", "nn_hls = 2"),
+                          (rf"nn_fsbc += +{FSBC}$", f"nn_fsbc = {FSBC}"),
+                          (r"rn_zqt += +10\.0+ *$", "rn_zqt = 10"), (r"rn_zu += +10\.0+ *$", "rn_zu = 10")):
+        require(re.search(pattern, log, re.M) is not None, f"{run.name}: the run is not {what}")
+    decks = [(run / n).read_text() for n in ("namelist_cfg", "namelist_ref")]
+    cdgw = [re.search(r"^ *ln_cdgw *= *\.(true|false)\.", d, re.M | re.I) for d in decks]
+    require(next(m for m in cdgw if m).group(1).lower() == "false", f"{run.name}: wave drag on")
+    letters = {k[0] for k in fields if len(k) > 1 and k[1] == "_" and k[0].isupper()}
+    require(letters == set(ITER), f"{run.name}: recorded NCAR iterations {sorted(letters)}")
+
+
 def frames(run: Path, kt: int) -> dict:
     _, fields = cr.read_stream(cr.step_path(run, kt).read_bytes(), f"kt={kt}", allow_inner=True)
     return fields
@@ -128,6 +144,7 @@ def identity(run: Path, steps: int, plant: bool = False) -> dict:
     with Dataset(run / "mesh_mask.nc") as ds:
         wet = np.asarray(ds["tmask"][0, 0].data, dtype=bool)
     out, card, kb_prev, tu_ok = {}, None, None, True
+    require_program(run, frames(run, 1))
     for kt in range(1, steps + 1):
         f = frames(run, kt)
         full = f["s_sst_m"].shape
@@ -156,8 +173,9 @@ def identity(run: Path, steps: int, plant: bool = False) -> dict:
                 arr[2:-2, 2:-2] = ds[n][0, 0]
         for name, src, ref_mask, along in (("utauU", "utau", um, True), ("vtauV", "vtau", vm, False)):
             nemo_full = f[f"s_{name}"]
-            sel = np.zeros(full, bool); sel[2:-2, 2:-2] = wet | (inner(ref_mask, full) > 0)
-            sel[2:-2, -3] = False; sel[-3, 2:-2] = False     # i+1 / j+1 neighbours outside the inner copy
+            # every face NEMO's statement can make nonzero: MAX(tmask here, tmask next)
+            sel = t_to_uv(np.ones(full), tm, um, vm, along) != 0
+            sel[:, -3:] = False; sel[-3:, :] = False; sel[:2, :] = False; sel[:, :2] = False
             mirror = t_to_uv(f[f"s_{src}"], tm, um, vm, along)
             tu_ok &= bool(np.array_equal(mirror[sel].view("<u8"), nemo_full[sel].view("<u8")))
             card_full = np.zeros(full); card_full[2:-2, 2:-2] = card[src] * wet   # taum * smask0 (sbcblk.f90:795)
@@ -201,6 +219,8 @@ def walk(run: Path, steps: int, plant: bool = False) -> dict:
     from legoesm.ocean import bulk_flux_omip as bof
     jax.config.update("jax_enable_x64", True)
     o1.set_policy(o1.PrecisionPolicy.fp64(transcendentals="libm"))
+    require(jax.default_backend() == "cpu", "CPU only")
+    require_program(run, frames(run, 1))
     k = o1.constants.kappa_von_karman
     with Dataset(run / "mesh_mask.nc") as ds:
         wet = np.asarray(ds["tmask"][0, 0].data, dtype=bool)

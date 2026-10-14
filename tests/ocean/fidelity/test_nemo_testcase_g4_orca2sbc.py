@@ -450,3 +450,26 @@ def test_walk_on_the_record_names_the_neutral_drag_first():
     out = _steps_module().walk(R19_TWIN_A, 1)["steps"][1]
     assert out["first_unequal"] == "cdn"
     assert out["rows"]["ubzu"]["unequal_cells"] == 0 and out["rows"]["dtv"]["unequal_cells"] == 0
+
+
+def test_forcing_steps_uv_faces_and_program_checks(tmp_path):
+    mod = _steps_module()
+    # dry T here, wet T east, umask 0: NEMO's face carries the wet cell's full stress
+    tau, t, u = np.array([[0.0, 4.0, 0.0]]), np.array([[0.0, 1.0, 0.0]]), np.zeros((1, 3))
+    assert mod.t_to_uv(tau, t, u, u, True)[0, 0] == 4.0
+    log = ("halo width (applies to both rows and columns)       nn_hls =            2\n"
+           "frequency update of sbc (and ice)             nn_fsbc       =            2\n"
+           "Air temperature and humidity reference height (m)   rn_zqt       =    10.000000000000000     \n"
+           "Wind vector reference height (m)                    rn_zu        =    10.000000000000000     \n")
+    (tmp_path / "namelist_cfg").write_text("&namsbc_blk\n/\n")
+    (tmp_path / "namelist_ref").write_text("   ln_cdgw     = .false.\n")
+    fields = {f"{c}_cd": 0 for c in mod.ITER} | {"n_cd": 0, "s_utau": 0}
+    (tmp_path / "ocean.output").write_text(log)
+    mod.require_program(tmp_path, fields)
+    for bad_log, bad_fields in ((log.replace("=            2\nAir", "=            3\nAir"), fields),
+                                (log.replace("rn_zu        =    10.", "rn_zu        =    2."), fields),
+                                (log, {k: v for k, v in fields.items() if k != "E_cd"})):
+        (tmp_path / "ocean.output").write_text(bad_log)
+        with pytest.raises(SystemExit) as refused:
+            mod.require_program(tmp_path, bad_fields)
+        assert refused.value.code == 73

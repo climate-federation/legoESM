@@ -276,7 +276,7 @@ from pathlib import Path
 sys.path.insert(0, sys.argv[1])
 import check_records as cr
 r17, ev, steps = Path(sys.argv[2]), Path(sys.argv[3]), int(sys.argv[4])
-halo = {}
+halo, band = {}, {}
 try:
     for twin in "abc":
         old, new = r17 / f"p3_{twin}", ev / f"p6_{twin}"
@@ -290,13 +290,26 @@ try:
         for path in sorted(old.glob("ORCA2G1_*_restart.nc")):
             step = int(path.name.split("_")[1])
             cr.restarts_identical(old, new, [step])
+        import netCDF4
+        for path in sorted(old.glob("ORCA2G1_300h_*.nc")):     # NEMO's own diagnostic output
+            with netCDF4.Dataset(path) as a, netCDF4.Dataset(new / path.name) as b:
+                for var in a.variables:
+                    cr.require(var in b.variables and a[var][:].tobytes() == b[var][:].tobytes(),
+                               f"twin {twin}: {path.name} {var} moved against round 17")
         # substep streams: equal on the consumed support (inner domain of full
         # planes, other arrays whole); halo storage NEMO never sets is counted
         for path in sorted(old.glob("oracle_g1spgts_kt*.bin")):
             header, before = cr.read_substeps(path.read_bytes(), f"r17 {twin} {path.name}")
-            _, after = cr.read_substeps((new / path.name).read_bytes(), f"r19 {twin} {path.name}")
+            header_new, after = cr.read_substeps((new / path.name).read_bytes(), f"r19 {twin} {path.name}")
+            cr.require(header_new == header, f"twin {twin}: {path.name} header moved against round 17")
             halo[f"{twin}/{path.name}"] = cr.twin_halo_words(
                 header, before, after, f"twin {twin}: {path.name} against round 17")
+            # the band next to the inner domain (solver stencils read it; the
+            # whole stage arrays, restarts and diagnostics above stay byte-identical)
+            js, je, i0, ie = header["Njs0"] - 1, header["Nje0"], header["Nis0"] - 1, header["Nie0"]
+            band[f"{twin}/{path.name}"] = sum(
+                int(((before[n].view("<u8") != after[n].view("<u8"))[js - 1:je + 1, i0 - 1:ie + 1]).sum())
+                for n in before if before[n].shape == (header["jpj"], header["jpi"]))
     cr.restarts_identical(r17 / "smoke_2step", ev / "smoke_2step", [2])
     try:    # plant: one moved inner-domain word must refuse
         cr.twin_halo_words(header, before, after, "plant", plant=True)
@@ -306,7 +319,8 @@ try:
 except cr.Refuse as exc:
     sys.exit(f"REFUSE: {exc}")
 (ev / "g4_round19_passivity.json").write_text(json.dumps(
-    {"substep_halo_words_differing": halo, "plant": "fired"}, indent=1) + "\n")
+    {"substep_halo_words_differing": halo, "of_which_adjacent_band": band,
+     "plant": "fired"}, indent=1) + "\n")
 print(f"G4R19_PASSIVE every round-17 step frame kt=1..{steps} and restart of twins a, b, c "
       "and the smoke is byte-identical; substep streams identical on the consumed support "
       f"({sum(halo.values())} halo words differ, counted in g4_round19_passivity.json)")
