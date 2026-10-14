@@ -12707,6 +12707,13 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 "zdf_momentum_nemo_face_thickness requires "
                 "zdf_implicit_solver_evaluation='nemo_literal'")
+        if (getattr(_cfg_b, "zdf_momentum_stage_r3u_nemo_literal", False)
+                and (not _zdf_nemo_faces or getattr(
+                    _cfg_b, "momentum_time_integrator", "euler") != "rk3_ws")):
+            raise ValueError(
+                "zdf_momentum_stage_r3u_nemo_literal requires "
+                "zdf_momentum_nemo_face_thickness and "
+                "momentum_time_integrator='rk3_ws'")
         # Cell-centered NOW thickness and NOW (1+r3t) (only computed / used
         # under the NEMO identity; both feed the u/v-face divisor below so the
         # tracer and momentum solves share one NOW-eta evaluation).
@@ -12954,6 +12961,10 @@ class LatLonCGridOceanModel:
                     _raw1 = jnp.asarray(_raw_e3w0)[1:]
                     dz_half_u = (_r3u1[..., None] * _raw1).astype(dz_u.dtype)
                     dz_half_v = (_r3v1[..., None] * _raw1).astype(dz_v.dtype)
+                elif nemo_zdf_stage_pair is not None:
+                    raise ValueError(
+                        "zdf_momentum_stage_r3u_nemo_literal needs the 1-D "
+                        "interface ladder z_coord.nemo_e3w_0")
                 elif _zdf_legacy_w:
                     dz_half_u = build_dz_half(dz_u_open)
                     dz_half_v = build_dz_half(dz_v_open)

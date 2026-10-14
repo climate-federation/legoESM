@@ -271,5 +271,16 @@ def test_g3_step3_needs_nemos_stored_r3u_in_dyn_zdf(ladder):
         assert [(r["level"], r["full"]["n_unequal"], r["partial"]["n_unequal"])
                 for r in u["levels"] if r["full"]["n_unequal"] or r["partial"]["n_unequal"]] == (
             [(13, 1, 0)] if without else [])
-        assert all(t["summary"]["full"]["n_unequal"] == 0 for f, t in kt3["all_levels"].items()
-                   if f != "u")
+        assert u["summary"]["partial"]["n_unequal"] == u["summary"]["dry_n_unequal"] == 0
+        for f in ("v", "T", "S"):
+            s = kt3["all_levels"][f]["summary"]
+            assert s["full"]["n_unequal"] == s["partial"]["n_unequal"] == s["dry_n_unequal"] == 0
+
+
+@needs_inputs
+def test_stored_r3u_refuses_a_card_where_it_would_do_nothing(g3_card):
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
+    r = g3_card.recipe
+    cfg = r.model_config._replace(zdf_momentum_nemo_face_thickness=False)
+    with pytest.raises(ValueError, match="zdf_momentum_stage_r3u_nemo_literal requires"):
+        LatLonCGridOceanModel(r.grid, r.z_coord, cfg).step(r.initial_state, dt=g3_card.dt_s)
