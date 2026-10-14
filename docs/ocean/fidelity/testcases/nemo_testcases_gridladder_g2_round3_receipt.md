@@ -383,3 +383,23 @@ UNVERIFIED:
 4. An operator question, not blocking: the fusion-off flag removes this
    whole class at once for every card. Keeping per-statement options
    (recorded in the card) is my pick; the flag stays a diagnostic.
+
+## 11. Citation gate and evidence hashes
+
+Citation gate on this receipt at commit 2d3651e2c (citation_receipt.json):
+PASS, 7 citations, 0 unmapped, map audit clean; the shifted-citation plant
+exits 1; the gate's own test file: 17 passed. This section was added after
+that run and holds no citation.
+
+SHA-256 prefixes, round12/: final/independent_after.json=aa0cada14442c773,
+final/independent_before.json=87289e508a22c556,
+final/given_entry_after.json=61b8f15411ae81d7,
+final/trazdf_replay_after.json=7cb65e8b76cc63d1,
+final/trazdf_replay_before.json=4ae75f9d6f2d5ddb,
+final/substeps_kt1.json=8270442a48c170e6,
+final/independent_after_nofma_env.json=0b39c7916b108a51,
+final/control_before_nofma_env_kt2.json=397cae9f48150b8a,
+codex_review_r12.log=0d69ddafe37a4240,
+g2_admit_existing_r12.log=f379418b41bf6980,
+tests_final_fast.log=2c0966518f7005e5,
+tests_final_g1_100step.log=d1d40670a78989ba.
