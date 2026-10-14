@@ -270,11 +270,13 @@ admit() {
     --bulk-iterations "$BULK_ITERATIONS" --fsbc "$FSBC" --json "$EVIDENCE/g4_round19_smoke.json"
   # passivity: every round-17 word is reproduced
   python3 -I - "$G1_DIR" "$R17" "$EVIDENCE" "$STEPS" <<'PY'
+import json
 import sys
 from pathlib import Path
 sys.path.insert(0, sys.argv[1])
 import check_records as cr
 r17, ev, steps = Path(sys.argv[2]), Path(sys.argv[3]), int(sys.argv[4])
+halo = {}
 try:
     for twin in "abc":
         old, new = r17 / f"p3_{twin}", ev / f"p6_{twin}"
@@ -288,14 +290,26 @@ try:
         for path in sorted(old.glob("ORCA2G1_*_restart.nc")):
             step = int(path.name.split("_")[1])
             cr.restarts_identical(old, new, [step])
+        # substep streams: equal on the consumed support (inner domain of full
+        # planes, other arrays whole); halo storage NEMO never sets is counted
         for path in sorted(old.glob("oracle_g1spgts_kt*.bin")):
-            cr.require((new / path.name).read_bytes() == path.read_bytes(),
-                       f"twin {twin}: {path.name} moved against round 17")
+            header, before = cr.read_substeps(path.read_bytes(), f"r17 {twin} {path.name}")
+            _, after = cr.read_substeps((new / path.name).read_bytes(), f"r19 {twin} {path.name}")
+            halo[f"{twin}/{path.name}"] = cr.twin_halo_words(
+                header, before, after, f"twin {twin}: {path.name} against round 17")
     cr.restarts_identical(r17 / "smoke_2step", ev / "smoke_2step", [2])
+    try:    # plant: one moved inner-domain word must refuse
+        cr.twin_halo_words(header, before, after, "plant", plant=True)
+        sys.exit("REFUSE: the passivity plant stayed green")
+    except cr.Refuse:
+        pass
 except cr.Refuse as exc:
     sys.exit(f"REFUSE: {exc}")
-print(f"G4R19_PASSIVE every round-17 step frame kt=1..{steps}, substep stream and restart "
-      "of twins a, b, c and the smoke is byte-identical")
+(ev / "g4_round19_passivity.json").write_text(json.dumps(
+    {"substep_halo_words_differing": halo, "plant": "fired"}, indent=1) + "\n")
+print(f"G4R19_PASSIVE every round-17 step frame kt=1..{steps} and restart of twins a, b, c "
+      "and the smoke is byte-identical; substep streams identical on the consumed support "
+      f"({sum(halo.values())} halo words differ, counted in g4_round19_passivity.json)")
 PY
   ( cd "$EVIDENCE" && sha256sum g4_round19_*.json p6_a/oracle_*.bin p6_b/oracle_g1step_*.bin \
       p6_c/oracle_g1step_*.bin smoke_2step/oracle_g1step_*.bin p6_*/ORCA2G1_*_restart.nc \
