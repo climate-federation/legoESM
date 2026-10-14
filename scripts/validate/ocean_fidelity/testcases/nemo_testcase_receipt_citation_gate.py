@@ -2106,7 +2106,7 @@ CITATION_MAP = {
     'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/sbcrnf.f90:151': '&      h_rnf (Nis0-(1):Nie0+(1),Njs0-(1):Nje0+(1))         , nk_rnf  (Nis0-(1):Nie0+(1),Njs0-(1):Nje0+(1))      ,     &',
     # --- GRIDLADDER round 19 END ---
     # --- GRIDLADDER round 20 (G4 round 4): NCAR operand walk ---
-    'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/sbcmod.f90:557-560': ['utauU  (ji,jj) = 0.5_wp * ( utau(ji,jj) + utau(ji+1,jj) ) * &', 'vtauV  (ji,jj) = 0.5_wp * ( vtau(ji,jj) + vtau(ji,jj+1) ) * &', 4],
+    'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/sbcmod.f90:557-560': ['utauU  (ji,jj) = 0.5_wp * ( utau(ji,jj) + utau(ji+1,jj) ) * &', '( 2. - vmask(ji,jj,1) ) * MAX( tmask(ji,jj,1), tmask(ji,jj+1,1) )', 4],
     'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/sbcblk.f90:796': 'taum(:,:) = taum(:,:) * smask0(:,:)',
     'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/sbcblk_algo_ncar.f90:141': 'zCdN = cd_n10_ncar( Ubzu )',
     'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/sbcblk_algo_ncar.f90:148': 'Ce = ce_n10_ncar( zsqrt_CdN )',
