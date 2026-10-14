@@ -5300,7 +5300,7 @@ CITATION_MAP = {
         'pt(ji,jj,jk,jn,Kaa) = zrhs - zwi(ji,jk)', 19],
     'ocean_model_latlon_cgrid.py:10435-10556': [
         'T=state_new.T.replace(data=_adv_content_T)',
-        ('z_coord=z_coord, config=config, iwm_fields=iwm_fields)', 2), 120],
+        ('z_coord=z_coord, config=config, iwm_fields=iwm_fields)', 2), 122],
     'ocean_model_latlon_cgrid.py:12778-12784': [
         'K_v_cell = K_v_cell.astype(state.T.data.dtype)',
         'K_v_cell = K_v_cell + K33_iso.astype(state.T.data.dtype)', 7],
