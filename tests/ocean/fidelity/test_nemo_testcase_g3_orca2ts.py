@@ -2,14 +2,17 @@
 switch, the initial state (ORCA2's T/S climatology read by &namtsd).
 
 Deck and acquisition-script contracts need no data.  The card tests read
-ORCA2's shipped domain and climatology files and skip when absent.  Nothing
-here compares with a NEMO record: none exists yet.
+ORCA2's shipped domain and climatology files and skip when absent.  The one
+comparison with NEMO (round 2) reads round 1's smoke restart and skips when
+absent.
 """
 
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import re
+import sys
 import subprocess
 from pathlib import Path
 
@@ -35,6 +38,8 @@ ORCA2_DECK = Path("/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/ORCA2_OMIP
                   "namelist_cfg")
 needs_inputs = pytest.mark.skipif(
     not all((INPUTS / name).is_file() for name in FILES), reason="no ORCA2 input files")
+PRIOR = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/round14/"
+             "oracle_g3_r14")
 TSD = ("namtsd.ln_tsd_init", "namtsd.cn_dir", "namtsd.sn_tem", "namtsd.sn_sal")
 
 
@@ -160,3 +165,59 @@ def test_g3_refuses_planted_disagreements(g3_card, g3_root, tmp_path):
         recipe.orca2g_initial_ts(g3_root, "ORCA2G2-zps", np.ones((148, 180, 30), dtype=bool))
     with pytest.raises(ValueError, match="not a grid-ladder rung"):
         recipe.orca2g_initial_ts(g3_root, "ORCA2-zps", np.ones((148, 180, 30), dtype=bool))
+
+
+def test_run_sh_records_to_nemos_kt11_boundary_and_admits_round_one():
+    """Round 2: NEMO stops the 100-step G3 run at kt = 11 (stp_ctl, |V| > 10
+    m/s).  The new acquisition runs nothing past kt = 10, admits round 1's
+    smoke and stopped run in place before any run, and refuses any stop."""
+    code = "\n".join(line for line in (G3_DIR / "run.sh").read_text().splitlines()
+                     if not line.lstrip().startswith("#"))
+    runs = re.findall(r'^run_one "\$(\w+)" "\$(\w+)" (\d+) "\$(\w+)" (\d+)$', code, re.M)
+    assert runs == [("RUN_BIN", "TWIN_A", "10", "L_TEN", "10"),
+                    ("RUN_BIN", "TWIN_B", "10", "L_EVEN", "10"),
+                    ("RUN_BIN", "TWIN_C", "10", "L_ODD", "9")]
+    assert code.index("\nadmit_prior\n") < code.index('\nrun_one "$RUN_BIN"')
+    assert "readonly STEPS=10 RECORD_SPGTS=1,2" in code
+    assert code.count('--stage-steps "$STEPS"') == 2
+    assert "gridladder_rounds/round15/oracle_g3_r15" in code
+    # the boundary: kt 11, |V| alone over its limit, the step-10 restart only
+    assert '"$(tr -d \' \\n\' <"$REF/time.step")" == 11' in code
+    assert "s+0 <= 20 && u+0 <= 10 && v+0 > 10 && n+0 > 0 && x+0 < 100" in code
+    # a stop in a new run is refused, never trapped as an unhandled failure
+    assert "|| rc=$?" in code and "not the registered kt = 11 boundary" in code
+
+
+@pytest.fixture(scope="module")
+def ladder():
+    cases = str(CASES)
+    if cases not in sys.path:
+        sys.path.insert(0, cases)
+    spec = importlib.util.spec_from_file_location(
+        "g2_ladder_for_g3", CASES / "nemo_testcase_g2_orca2bathy_ladder.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+@pytest.mark.skipif(not (PRIOR / "smoke_2step/ORCA2G1_00000002_restart.nc").is_file(),
+                    reason="the operator's G3 smoke record is not on this machine")
+@pytest.mark.slow
+def test_g3_step_two_is_nemos_bit_for_bit_on_every_level(ladder):
+    """NEMO's step-2 restart (round 1's smoke): sea level, the barotropic
+    velocities, their six histories and u, v, T, S on all 30 levels equal the
+    card's own chain bit for bit."""
+    smoke = PRIOR / "smoke_2step"
+    out = ladder.run(smoke, arm="restart_independent", kt_to=2, case="ORCA2G3-ts",
+                     allow_dirty=True)
+    (kt2,) = out["per_kt"]
+    assert kt2["kt"] == 2
+    rows = kt2["rows"] + kt2["history_rows"]
+    assert len(rows) == 13 and all(r["n_unequal"] == 0 for r in rows)
+    for f, t in kt2["all_levels"].items():
+        s = t["summary"]
+        assert s["full"]["n_unequal"] == s["partial"]["n_unequal"] == s["dry_n_unequal"] == 0
+        assert s["full"]["n_cells"] > 390000 and s["partial"]["n_cells"] > 15000
+    # Decision 120's hand-edit cells, counted on the card (u, v: faces beside one)
+    assert kt2["all_levels"]["T"]["hand_edit_cells"] == 1283
+    assert kt2["all_levels"]["S"]["hand_edit_cells"] == 720

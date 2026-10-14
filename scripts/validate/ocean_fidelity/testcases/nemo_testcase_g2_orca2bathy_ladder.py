@@ -55,11 +55,12 @@ import nemo_testcase_g1_orca2grid_ladder as g1  # noqa: E402
 from nemo_testcase_g1_orca2grid_ladder import BAR, require  # noqa: E402
 
 CASE = "ORCA2G2-zps"
+CASES = ("ORCA2G2-zps", "ORCA2G3-ts")   # G3 = G2 + ORCA2's initial T/S
 DEFAULT_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/round10/"
     "oracle_g2_r10/p3_a_100step")
 ARMS = ("geometry", "independent", "given_entry", "stages", "zdf_replay",
-        "substeps", "trazdf_replay", "rhs_frame")
+        "substeps", "trazdf_replay", "rhs_frame", "restart_independent")
 # stage exposures of one step: the private hook that returns it, and the
 # level-1 NEMO frame fields (u, v, T, S, ssh) it must equal
 EXPOSURES = {
@@ -269,6 +270,22 @@ def nemo_ue_rhs_replay(rhs, e3_0, mask, *, lanes: int = 1) -> np.ndarray:
     return part[0] * (ss / (h0 + 1.0 - ss))
 
 
+def hand_edit_cells(root: Path, card) -> dict[str, np.ndarray]:
+    """Decision 120: the wet cells ORCA2's hand edits of the initial state
+    would change (dtatsd.f90:219), on the card's layout; u and v faces touch
+    an edited T or S cell on either side."""
+    from legoesm.ocean.fidelity import nemo_testcase_recipe as recipe
+    wet = np.asarray(card.recipe.z_coord.is_active) > 0.5
+    paths = (root / "data_1m_potential_temperature_nomask.nc",
+             root / "data_1m_salinity_nomask.nc")
+    on = recipe.build_orca2_initial_ts(*paths, wet, apply_hand_alterations=True)
+    off = recipe.build_orca2_initial_ts(*paths, wet, apply_hand_alterations=False)
+    t, s = (np.asarray(a) != np.asarray(b) for a, b in zip(on, off))
+    ts = t | s
+    return {"T": t, "S": s, "u": ts | np.roll(ts, -1, axis=1),
+            "v": ts | np.concatenate([ts[1:], np.zeros_like(ts[:1])], axis=0)}
+
+
 def card_levels(state) -> dict[str, np.ndarray]:
     return {"u": np.asarray(state.u.data)[:, 1:], "v": np.asarray(state.v.data)[1:],
             "T": np.asarray(state.T.data), "S": np.asarray(state.S.data)}
@@ -283,11 +300,11 @@ def card_surface(state) -> dict[str, np.ndarray]:
             "T": lev["T"][..., 0], "S": lev["S"][..., 0]}
 
 
-def geometry(root: Path, plant: str | None = None) -> dict:
+def geometry(root: Path, plant: str | None = None, case: str = CASE) -> dict:
     import netCDF4
     from legoesm.ocean.fidelity import nemo_testcase_recipe as recipe
     g1._fp64()                 # a direct caller must not get the f32 default
-    card = recipe.build_nemo_testcase_card(CASE, deck_root=root)
+    card = recipe.build_nemo_testcase_card(case, deck_root=root)
     nk = int(card.recipe.z_coord.n_levels)
     dom = recipe._orca2g1_domain(root / "domain_cfg.nc", nk + 1)
     rows_in = g1.card_geometry_rows(card, dom, all_levels=True)
@@ -326,7 +343,7 @@ def geometry(root: Path, plant: str | None = None) -> dict:
                                    if bad.size and lego.ndim == 3 else []),
                 "max_abs_difference": float(np.max(np.abs(lego - ref))),
                 "planted": plant == name})
-    return {"arm": "geometry", "case": CASE, "mesh_mask": str(root / "mesh_mask.nc"),
+    return {"arm": "geometry", "case": case, "mesh_mask": str(root / "mesh_mask.nc"),
             "card_levels": nk, "rows": out, "n_rows": len(out),
             "nemo_nonzero_below_card_levels": below,
             "n_bit_identical": sum(r["bit_identical"] for r in out),
@@ -340,7 +357,8 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
         entries=(1, 3, 5, 7, 9), exposures=tuple(EXPOSURES),
         dump: Path | None = None, without_zdf_faces: bool = False,
         without_tracer_rounding: bool = False,
-        without_rhs_ascending_sum: bool = False) -> dict:
+        without_rhs_ascending_sum: bool = False, case: str = CASE) -> dict:
+    require(case in CASES, f"unknown case {case!r}")
     require(arm in ARMS, f"unknown arm {arm!r}")
     require(plant in (None, "score", "level"), f"unknown plant {plant!r}")
     from legoesm.ocean.fidelity.provenance import allow_dirty_stamps, git_sha
@@ -354,7 +372,7 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
     g1._fp64()
     _pickle_fields()
     if arm == "geometry":
-        return {**geometry(root, geometry_plant), "legoesm_git_sha": sha}
+        return {**geometry(root, geometry_plant, case), "legoesm_git_sha": sha}
 
     import jax
     import jax.numpy as jnp
@@ -362,7 +380,7 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
     from legoesm.ocean.fidelity import nemo_testcase_recipe as recipe
 
-    card = recipe.build_nemo_testcase_card(CASE, deck_root=root)
+    card = recipe.build_nemo_testcase_card(case, deck_root=root)
     cfg, z, s0 = card.recipe.model_config, card.recipe.z_coord, card.recipe.initial_state
     require(cfg.zdf_momentum_nemo_face_thickness is True,
             "the G2 card no longer selects NEMO's dyn_zdf divisors")
@@ -380,10 +398,15 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
     roots = (root, *restart_roots)
     reg = g1.regions(np.asarray(z.is_active)[..., 0])
     cls = depth_classes(root / "mesh_mask.nc", nk)
-    n_stage = g1.stage_steps(root)
+    # no step frames (an acquisition that stopped before the record binary
+    # ran): only the restart-scored arm can run
+    has_frames = (root / "oracle_g1step_kt00000001.bin").is_file()
+    require(has_frames or arm == "restart_independent",
+            f"{root} holds no step frames; only restart_independent can run")
+    n_stage = g1.stage_steps(root) if has_frames else 0
     model = LatLonCGridOceanModel(card.recipe.grid, z, cfg)
     require(s0.eta_rk3_after is None, "the card carries an after-ssh slot")
-    out = {"arm": arm, "case": CASE, "legoesm_git_sha": sha, "root": str(root),
+    out = {"arm": arm, "case": case, "legoesm_git_sha": sha, "root": str(root),
            "restart_roots": [str(r) for r in restart_roots], "bar": BAR,
            "plant": plant, "card_levels": nk, "packages_tree": packages,
            "zdf_momentum_nemo_face_thickness": bool(
@@ -418,10 +441,11 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
             return None
         cand, rows = card_levels(state), {}
         with netCDF4.Dataset(path) as h:
-            frame = g1.read_step(root, kt)
-            require(np.array_equal(np.asarray(h.variables["sshn"][0], np.float64),
-                                   frame["f_ssh_bb"]),
-                    f"kt {kt}: the restart is not the recorded after-step state")
+            if has_frames:
+                frame = g1.read_step(root, kt)
+                require(np.array_equal(np.asarray(h.variables["sshn"][0], np.float64),
+                                       frame["f_ssh_bb"]),
+                        f"kt {kt}: the restart is not the recorded after-step state")
             for f, var in RESTART.items():
                 ref = levels_last(h.variables[var][0], nk)
                 by_level = level_rows(ref, cand[f], cls[POINT[f]],
@@ -656,6 +680,52 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
             np.savez(Path(dump) / f"card_kt{kt}_zdf_observer.npz",
                      **{f"a{i}": a for i, a in enumerate(seen[0])})
         return out
+    if arm == "restart_independent":
+        # the card's own chain, scored ONLY where a NEMO restart exists: the
+        # 2-D fields and level 1 by region, every level by depth class
+        out["label"] = "INDEPENDENT (restart-scored; no step frames)"
+        require((kt_from == 1) == (state_in is None),
+                "a chain starts at step 1 or resumes from --state-in")
+        edits = hand_edit_cells(root, card) if case == "ORCA2G3-ts" else None
+        state = s0
+        if state_in is not None:
+            saved = pickle.loads(Path(state_in).read_bytes())
+            require(saved["after_kt"] == kt_from - 1 and saved["packages"] == packages,
+                    "--state-in is not this model code's chain after step kt_from - 1")
+            state = saved["state"]
+        for kt in range(kt_from, kt_to + 1):
+            state, seconds = step(state)
+            path = restart_path(roots, kt)
+            if path is None:
+                continue
+            cand = card_surface(state)
+            with netCDF4.Dataset(path) as h:
+                var = lambda n: np.asarray(h.variables[n][0], np.float64)  # noqa: E731
+                ref = {"ssh": var("sshn"), "uu_b": var("uu_n"), "vv_b": var("vv_n"),
+                       **{f: levels_last(var(n), nk)[..., 0] for f, n in RESTART.items()}}
+            rows = [g1.row(f"restart.kt{kt}.{f}", ref[f], cand[f], reg,
+                           plant=(plant == "score" and f == "ssh"))
+                    for f in ("ssh", "uu_b", "vv_b", "u", "v", "T", "S")]
+            levels = all_level_rows(kt, state)
+            if edits is not None:
+                lev = card_levels(state)
+                with netCDF4.Dataset(path) as h:
+                    for f, var in RESTART.items():
+                        d = levels_last(h.variables[var][0], nk) != lev[f]
+                        levels[f]["hand_edit_cells"] = int(edits[f].sum())
+                        levels[f]["hand_edit_unequal"] = int(np.count_nonzero(d & edits[f]))
+                # P3: an unequal T/S cell in a column whose sea level is equal
+                        if f in ("T", "S"):
+                            levels[f]["unequal_in_equal_ssh_columns"] = int(
+                                np.count_nonzero(d & (cand["ssh"] == ref["ssh"])[..., None]))
+            out["per_kt"].append({"kt": kt, "seconds": seconds, "restart": str(path),
+                                  "rows": rows, "first_unequal": g1.first_unequal(rows),
+                                  "all_levels": levels,
+                                  "history_rows": g1.history_rows(path.parent, kt, state, reg)})
+        if state_out is not None:
+            Path(state_out).write_bytes(pickle.dumps(
+                {"after_kt": kt_to, "packages": packages, "state": state}))
+        return out
     if arm == "independent":
         out["label"] = "INDEPENDENT"
         require(1 <= kt_from <= kt_to <= 100, "steps must lie in 1..100")
@@ -719,6 +789,7 @@ def main(argv=None) -> int:
                     help="BEFORE ARM: the card without NEMO's tra_zdf diagonal rounding")
     ap.add_argument("--without-rhs-ascending-sum", action="store_true",
                     help="BEFORE ARM: the card's Ue_rhs depth sum in XLA's order")
+    ap.add_argument("--case", choices=CASES, default=CASE)
     ap.add_argument("--allow-dirty", action="store_true")
     ap.add_argument("--output", type=Path, required=True)
     a = ap.parse_args(argv)
@@ -730,7 +801,7 @@ def main(argv=None) -> int:
               exposures=tuple(a.exposures.split(",")), dump=a.dump,
               without_zdf_faces=a.without_zdf_faces,
               without_tracer_rounding=a.without_tracer_rounding,
-              without_rhs_ascending_sum=a.without_rhs_ascending_sum)
+              without_rhs_ascending_sum=a.without_rhs_ascending_sum, case=a.case)
     a.output.write_text(json.dumps(out, indent=1) + "\n")
     if a.arm == "geometry":
         print(f"GEOMETRY {out['n_bit_identical']} of {out['n_rows']} rows bit-identical")
@@ -787,7 +858,7 @@ def main(argv=None) -> int:
         return 0
     bad = False
     for p in out["per_kt"]:
-        for r in p["rows"] + p.get("two_step_rows", []):
+        for r in p["rows"] + p.get("two_step_rows", []) + p.get("history_rows", []):
             bad |= r["status"] != "AT-BAR"
             print(f"{r['name']:34s} {r['status']:6s} max {r['max_abs']:.3e} "
                   f"rms {r['rms']:.3e} unequal {r['n_unequal']}")
