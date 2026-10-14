@@ -30,6 +30,14 @@ BAROTROPIC = set(round274.BAROTROPIC_SELECTORS)
 COORDINATE = {"nemo_r3t_stored_product"}
 
 ARMS: dict[str, tuple[str, ...]] = {
+    "round275_landing": (
+        "barotropic_een_ratio_fold_exchange",
+        "barotropic_een_fe3mask_pivot_row",
+        "nemo_r3t_stored_product",
+        "rk3_stage_velocity_written_order",
+        "rk3_stage_r3t_nemo_literal",
+        "zdf_momentum_nemo_face_thickness",
+    ),
     "barotropic_een_fold_pair": (
         "barotropic_een_ratio_fold_exchange",
         "barotropic_een_fe3mask_pivot_row",
