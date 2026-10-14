@@ -150,8 +150,18 @@ def test_the_option_is_off_by_default_and_selected_by_g2_only():
     assert [name for name, _ in sums] == ["nemo_testcase_recipe.py"]
     assert "_ORCA2G_UE_RHS_ASCENDING[case]" in sums[0][1]
     # each appended LAST in its round: no older field changed position
-    assert LatLonCGridOceanConfig._fields[-2:] == (
-        "zdf_tracer_nemo_rounded_thickness", "barotropic_rhs_ascending_level_sum")
+    # G3 round 3's option: its own rung table (G3 only), one assignment
+    assert LatLonCGridOceanConfig._field_defaults[
+        "zdf_momentum_stage_r3u_nemo_literal"] is False
+    assert recipe._ORCA2G_ZDF_STAGE_R3U == {"ORCA2G1-flat": False, "ORCA2G2-zps": False, "ORCA2G3-ts": True}
+    r3u = [(path.name, line) for path in (CASES.parents[3] / "packages").rglob("*.py")
+           for line in path.read_text().splitlines()
+           if "zdf_momentum_stage_r3u_nemo_literal=" in line]
+    assert [name for name, _ in r3u] == ["nemo_testcase_recipe.py"]
+    assert "_ORCA2G_ZDF_STAGE_R3U[case]" in r3u[0][1]
+    assert LatLonCGridOceanConfig._fields[-3:] == (
+        "zdf_tracer_nemo_rounded_thickness", "barotropic_rhs_ascending_level_sum",
+        "zdf_momentum_stage_r3u_nemo_literal")
     assert "_ORCA2G_ZDF_FACES[case]" in (
         CASES.parents[3] / "packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py"
     ).read_text().splitlines()[hits[0][1] - 1]

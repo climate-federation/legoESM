@@ -3792,7 +3792,7 @@ def build_orca2g1_flat_card(deck_root: str | Path, case: str = "ORCA2G1-flat") -
         bottom_drag=base.bottom_drag._replace(          # ln_drg_OFF
             bottom_drag_scheme="legacy", bottom_drag_r=0.0,
             bottom_drag_bg_velocity=0.0, bottom_drag_bbl_thickness=0.0),
-        zdf_drag_in_matrix=False, barotropic_drag_substep=False, zdf_momentum_nemo_face_thickness=_ORCA2G_ZDF_FACES[case], zdf_tracer_nemo_rounded_thickness=_ORCA2G_TRA_ZDF_ROUNDED[case], barotropic_rhs_ascending_level_sum=_ORCA2G_UE_RHS_ASCENDING[case],  # noqa: E501
+        zdf_drag_in_matrix=False, barotropic_drag_substep=False, zdf_momentum_nemo_face_thickness=_ORCA2G_ZDF_FACES[case], zdf_tracer_nemo_rounded_thickness=_ORCA2G_TRA_ZDF_ROUNDED[case], barotropic_rhs_ascending_level_sum=_ORCA2G_UE_RHS_ASCENDING[case], zdf_momentum_stage_r3u_nemo_literal=_ORCA2G_ZDF_STAGE_R3U[case],  # noqa: E501
         gm_redi=None)
     recipe = NEMORecipe(
         model_config=model_config,
@@ -3842,7 +3842,7 @@ def _orca2g1_selector_failures(card: NEMOTestcaseCard) -> list[str]:
         "nn_bt_flt=3": cfg.barotropic.barotropic_time_filter == "nemo_ab3am4",
         "ln_dynadv_OFF": (cfg.momentum_advection, cfg.momentum_flux_scheme,
                           cfg.vertical_momentum_scheme) == ("flux_form", "none", "none"),
-        "ln_dynvor_een": (cfg.vorticity_scheme, cfg.een_fold_image_v_row) == ("een_planetary", True), "zhvp2_e fold row": cfg.barotropic.barotropic_fold_top_v_face_ssh is True, "ua_e flux form": cfg.barotropic.barotropic_flux_update_nemo_literal is True, "rDt_e": cfg.barotropic.barotropic_substep_dt_nemo_literal is True, "hu_e entry": cfg.barotropic.barotropic_entry_depth_nemo_literal is True, "r3 fold exchange": cfg.barotropic.barotropic_een_ratio_fold_exchange is True, "fe3mask pivot row": cfg.barotropic.barotropic_een_fe3mask_pivot_row is True, "r3 written order": cfg.barotropic.barotropic_een_ratio_written_order is True, "r3t stored product": card.recipe.z_coord.nemo_r3t_stored_product is True, "stage-1 ssh": cfg.rk3_stage1_ssh_nemo_literal is True, "stage-1 Krhs": cfg.rk3_stage1_rhs_nemo_literal is True, "stage velocity order": cfg.rk3_stage_velocity_written_order is True, "vor_een order": cfg.een_vorticity_written_order is True, "dyn_zdf residual": cfg.zdf_barotropic_removal_nemo_literal is True, "vv(Kaa) fold exchange": cfg.rk3_fold_exchange_top_v_row is True, "stage r3f": cfg.rk3_stage_r3f_nemo_literal is True, "stage r3t": cfg.rk3_stage_r3t_nemo_literal is True, "eos gdept": cfg.nemo_eos_gdept_rounded_product is True, "stage r3u/r3v": cfg.rk3_stage_r3uv_nemo_literal is True, "dyn_zdf divisors": cfg.zdf_momentum_nemo_face_thickness is _ORCA2G_ZDF_FACES.get(card.case), "tra_zdf diagonal": cfg.zdf_tracer_nemo_rounded_thickness is _ORCA2G_TRA_ZDF_ROUNDED.get(card.case), "Ue_rhs ascending SUM": cfg.barotropic_rhs_ascending_level_sum is _ORCA2G_UE_RHS_ASCENDING.get(card.case),  # noqa: E501
+        "ln_dynvor_een": (cfg.vorticity_scheme, cfg.een_fold_image_v_row) == ("een_planetary", True), "zhvp2_e fold row": cfg.barotropic.barotropic_fold_top_v_face_ssh is True, "ua_e flux form": cfg.barotropic.barotropic_flux_update_nemo_literal is True, "rDt_e": cfg.barotropic.barotropic_substep_dt_nemo_literal is True, "hu_e entry": cfg.barotropic.barotropic_entry_depth_nemo_literal is True, "r3 fold exchange": cfg.barotropic.barotropic_een_ratio_fold_exchange is True, "fe3mask pivot row": cfg.barotropic.barotropic_een_fe3mask_pivot_row is True, "r3 written order": cfg.barotropic.barotropic_een_ratio_written_order is True, "r3t stored product": card.recipe.z_coord.nemo_r3t_stored_product is True, "stage-1 ssh": cfg.rk3_stage1_ssh_nemo_literal is True, "stage-1 Krhs": cfg.rk3_stage1_rhs_nemo_literal is True, "stage velocity order": cfg.rk3_stage_velocity_written_order is True, "vor_een order": cfg.een_vorticity_written_order is True, "dyn_zdf residual": cfg.zdf_barotropic_removal_nemo_literal is True, "vv(Kaa) fold exchange": cfg.rk3_fold_exchange_top_v_row is True, "stage r3f": cfg.rk3_stage_r3f_nemo_literal is True, "stage r3t": cfg.rk3_stage_r3t_nemo_literal is True, "eos gdept": cfg.nemo_eos_gdept_rounded_product is True, "stage r3u/r3v": cfg.rk3_stage_r3uv_nemo_literal is True, "dyn_zdf divisors": cfg.zdf_momentum_nemo_face_thickness is _ORCA2G_ZDF_FACES.get(card.case), "tra_zdf diagonal": cfg.zdf_tracer_nemo_rounded_thickness is _ORCA2G_TRA_ZDF_ROUNDED.get(card.case), "Ue_rhs ascending SUM": cfg.barotropic_rhs_ascending_level_sum is _ORCA2G_UE_RHS_ASCENDING.get(card.case), "dyn_zdf r3u(Kmm)": cfg.zdf_momentum_stage_r3u_nemo_literal is _ORCA2G_ZDF_STAGE_R3U.get(card.case),  # noqa: E501
         "ln_traadv_OFF": cfg.tracer_advection == "none",
         "ln_dynldf_OFF": all(getattr(lv, name) == 0.0 for name in (
             "A_h", "B_h", "C_smag", "C_smag_lap", "C_leith")),
@@ -3956,6 +3956,9 @@ _ORCA2G_TRA_ZDF_ROUNDED = {"ORCA2G1-flat": False, "ORCA2G2-zps": True, "ORCA2G3-
 # NEMO's ascending-k depth mean of the 3-D right-hand side (stp2d.f90:178-179;
 # G2 round 4), its own row: G1's one-level sum has no order to choose.
 _ORCA2G_UE_RHS_ASCENDING = {"ORCA2G1-flat": False, "ORCA2G2-zps": True, "ORCA2G3-ts": True}
+# dyn_zdf's interface thickness reads the stored stage ratio r3u(Kmm)
+# (dynzdf.f90:193-195, stprk3_stg.f90:216-217; G3 round 3), G3's card only.
+_ORCA2G_ZDF_STAGE_R3U = {"ORCA2G1-flat": False, "ORCA2G2-zps": False, "ORCA2G3-ts": True}
 
 
 def _orca2g_strait_shlat(domain_path: Path, shape) -> np.ndarray:

@@ -117,7 +117,11 @@ def test_g3_card_is_the_g2_card_started_from_orca2s_climatology(g3_card, g3_root
     g2_root = _deck(tmp_path, (G2_DIR / "namelist_cfg").read_text(), "g2")
     g2 = recipe.build_nemo_testcase_card("ORCA2G2-zps", deck_root=g2_root)
     a, b = g3_card.recipe.model_config, g2.recipe.model_config
-    assert [f for f in a._fields if repr(getattr(a, f)) != repr(getattr(b, f))] == []
+    # round 3: NEMO's stored r3u(Kmm) in dyn_zdf, selected by G3's card only
+    assert [f for f in a._fields if repr(getattr(a, f)) != repr(getattr(b, f))] == [
+        "zdf_momentum_stage_r3u_nemo_literal"]
+    assert (a.zdf_momentum_stage_r3u_nemo_literal, b.zdf_momentum_stage_r3u_nemo_literal) == (
+        True, False)
     assert recipe._orca2g1_selector_failures(g3_card) == []
     assert g3_card.unmeasured_features == recipe.ORCA2G3_UNMEASURED
     with pytest.raises(ValueError, match="not execution-ready"):
@@ -215,11 +219,10 @@ def test_abort_witness_is_read_only_at_the_step_nemo_stopped(ladder, tmp_path):
                     reason="the operator's G3 round-1 record is not on this machine")
 @pytest.mark.slow
 def test_g3_chain_against_nemos_steps_2_10_and_its_kt11_stop(ladder):
-    """The card's own chain against NEMO's G3 record (round 1): step 2 (the
-    smoke's restart) bit for bit on every field, level and barotropic
-    history; step 10 (the stopped run's restart) at the bar except u and v
-    (the open debt, pinned so it cannot grow unseen); step 11 (NEMO's
-    output.abort.nc) stops on the same |V| face with the same bits."""
+    """The card's own chain against NEMO's G3 record (round 1): steps 2 (the
+    smoke's restart) and 10 (the stopped run's restart) bit for bit on every
+    field, level and barotropic history; step 11 (NEMO's output.abort.nc,
+    past the record) stops on the same faces with the same bits."""
     out = ladder.run(PRIOR / "smoke_2step", arm="restart_independent", kt_to=11,
                      restart_roots=(PRIOR / "ref_100step",), case="ORCA2G3-ts",
                      allow_dirty=True)
@@ -235,15 +238,38 @@ def test_g3_chain_against_nemos_steps_2_10_and_its_kt11_stop(ladder):
     assert kt2["all_levels"]["T"]["hand_edit_cells"] == 1283
     assert kt2["all_levels"]["S"]["hand_edit_cells"] == 720
     assert all(t["hand_edit_unequal"] == 0 for t in kt10["all_levels"].values())
-    status = {r["name"].rsplit(".", 1)[1]: r["status"]
-              for r in kt10["rows"] + kt10["history_rows"]}
-    assert {k for k, v in status.items() if v != "AT-BAR"} == {"u", "v"}
-    for f in ("u", "v"):
-        s = kt10["all_levels"][f]["summary"]
-        assert s["status"] == "DEBT" and s["dry_n_unequal"] == 0
-        assert max(s["full"]["relative"], s["partial"]["relative"]) < 2e-14
+    rows = kt10["rows"] + kt10["history_rows"]
+    assert len(rows) == 13 and all(r["n_unequal"] == 0 for r in rows)
+    for t in kt10["all_levels"].values():
+        s = t["summary"]
+        assert s["full"]["n_unequal"] == s["partial"]["n_unequal"] == s["dry_n_unequal"] == 0
     stp = kt11["stp_ctl_maxima"]
-    assert stp["nemo"]["|V|"] == stp["card"]["|V|"] == {
-        "max": 10.244435336848499, "ji_jj_jk": [22, 84, 27]}
-    assert stp["nemo"]["|U|"] == stp["card"]["|U|"]
-    assert stp["nemo"]["|ssh|"]["ji_jj_jk"] == stp["card"]["|ssh|"]["ji_jj_jk"] == [9, 90]
+    assert stp["nemo"] == stp["card"]
+    assert stp["card"]["|V|"] == {"max": 10.244435336848499, "ji_jj_jk": [22, 84, 27]}
+    assert stp["card"]["|ssh|"]["ji_jj_jk"] == [9, 90]
+
+
+R15 = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/round15/"
+           "oracle_g3_r15")
+
+
+@pytest.mark.skipif(not (R15 / "p3_a_10step/oracle_g1step_kt00000003.bin").is_file(),
+                    reason="the operator's G3 round-2 record is not on this machine")
+@pytest.mark.slow
+def test_g3_step3_needs_nemos_stored_r3u_in_dyn_zdf(ladder):
+    """Round 3's statement, non-vacuous: deselected, the card's step 3 is
+    unequal in exactly one u cell (level 13, full class, last place); selected,
+    steps 1-3 are bit-identical on every field and level."""
+    kw = dict(arm="independent", kt_to=3, case="ORCA2G3-ts", allow_dirty=True,
+              restart_roots=(R15 / "p3_b_10step", R15 / "p3_c_10step"))
+    for without in (False, True):
+        out = ladder.run(R15 / "p3_a_10step", without_zdf_stage_r3u=without, **kw)
+        assert out["zdf_momentum_stage_r3u_nemo_literal"] is (not without)
+        kt3 = out["per_kt"][2]
+        assert all(r["n_unequal"] == 0 for p in out["per_kt"] for r in p["rows"])
+        u = kt3["all_levels"]["u"]
+        assert [(r["level"], r["full"]["n_unequal"], r["partial"]["n_unequal"])
+                for r in u["levels"] if r["full"]["n_unequal"] or r["partial"]["n_unequal"]] == (
+            [(13, 1, 0)] if without else [])
+        assert all(t["summary"]["full"]["n_unequal"] == 0 for f, t in kt3["all_levels"].items()
+                   if f != "u")
