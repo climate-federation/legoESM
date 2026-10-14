@@ -1730,6 +1730,11 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
         barotropic=model_config.barotropic._replace(
             barotropic_fold_top_v_face_ssh=True,
             barotropic_substep_dt_nemo_literal=True,
+            # Grid-ladder G1 round 6: NEMO associates the EEN live ratio
+            # and its fe3mask on the same T-pivot image row.  Round 275's
+            # ORCA2 source-unit census requires the pair atomically.
+            barotropic_een_ratio_fold_exchange=True,
+            barotropic_een_fe3mask_pivot_row=True,
         ),
     )
     # zdfphy.F90:146-173 initializes the pre-closure coefficient memory
