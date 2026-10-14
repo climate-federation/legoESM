@@ -152,6 +152,8 @@ FILES = {
         _ORCA2G1_P3 / "ppsrc/nemo/lbcnfd.f90"),
     "ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/dynhpg.f90": (
         _ORCA2G1_P3 / "ppsrc/nemo/dynhpg.f90"),
+    "ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/stpctl.f90": (
+        _ORCA2G1_P3 / "ppsrc/nemo/stpctl.f90"),
     "ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/dynzdf.f90": (
         _ORCA2G1_P3 / "ppsrc/nemo/dynzdf.f90"),
     "ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/domqco.f90": (
@@ -2037,6 +2039,12 @@ CITATION_MAP = {
         ('END DO   ;   END DO   ;   END DO', 2),
         4],
     # --- GRIDLADDER round 14 END ---
+    # --- GRIDLADDER round 15 (G3 round 2: NEMO's kt=11 boundary) ---
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/stpctl.f90:181': (
+        'zmax(3) = MAXVAL(  ABS( vv(:,:,:,Kmm) ), mask = llmsk )', 1),
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/stpctl.f90:245': (
+        '& zmax(3) >   10._wp .OR.', 1),
+    # --- GRIDLADDER round 15 END ---
     # --- ORCA2 round 253: kt=8 midpoint-SSH failure boundary -------
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:489-493': [
         ('Extrapolate Sea Level at step jit+0.5', 1),
