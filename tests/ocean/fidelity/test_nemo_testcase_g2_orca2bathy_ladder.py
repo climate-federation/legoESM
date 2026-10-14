@@ -272,6 +272,11 @@ def test_step_two_is_at_the_bar_on_all_levels_only_with_the_rounded_diagonal(lad
 def test_the_traced_solver_loop_is_nemos_at_step_one(ladder):
     out = ladder.run(RECORD, arm="substeps", allow_dirty=True)
     assert out["n_substeps"] == 65 and not out["scalars_unequal"]
-    assert {r["operand"] for r in out["rows"] if not r["bit_identical"]} == {
-        "entry.sshb", "entry.sshbb"}     # NEMO's histories are not set at step 1
+    unequal = [r for r in out["rows"] if not r["bit_identical"]]
+    # NEMO's histories are not set at step 1; and one cell of the fold pivot
+    # row holds a number of order 1e-112 at the last substep
+    assert {r["operand"] for r in unequal} == {"entry.sshb", "entry.sshbb", "spg.v"}
+    tiny = [r for r in unequal if r["operand"] == "spg.v"]
+    assert [(r["substep"], r["n_unequal"]) for r in tiny] == [(65, 1)]
+    assert tiny[0]["max_abs"] < 1e-100 and tiny[0]["regions"]["fold_pivot_row"]["n_unequal"] == 1
     assert all(v["traced_vs_nemo_unequal"] == 0 for v in out["trace_passive"].values())
