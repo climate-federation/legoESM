@@ -24,7 +24,9 @@ def test_round277_g3_arm_selects_the_ratio_with_its_divisor_host():
     if not (deck / "namelist_cfg").is_file():
         pytest.skip("admitted OMT-1 deck is absent")
     base = prior._selected_card("omt1", deck)
-    assert not getattr(base.recipe.model_config, round277.STAGE_R3U)
+    # Landed on the ORCA2 identity by Decision 122 (round 278); the arm must
+    # still reduce the card to exactly the pair.
+    assert getattr(base.recipe.model_config, round277.STAGE_R3U)
     cfg = round277.r276.arm_card(
         base, "g3_divisors_stage_r3u").recipe.model_config
     on = {name for name in round277.r276.MODEL if getattr(cfg, name)}

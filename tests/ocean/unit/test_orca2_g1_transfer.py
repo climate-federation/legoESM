@@ -151,28 +151,33 @@ def test_orca2_and_omt_cards_select_executed_transferred_statements():
         assert config.een_fold_image_v_row is True
         assert config.barotropic.barotropic_fold_top_v_face_ssh is True
         assert config.rk3_stage1_ssh_nemo_literal is True
-        assert config.barotropic_rhs_ascending_level_sum is False
+        # Decision 122 (round 278): ladder-certified statements land on the
+        # ORCA2 identity and every card derived from it.
         assert config.barotropic.barotropic_substep_dt_nemo_literal is True
-        assert card.recipe.z_coord.nemo_r3t_stored_product is False
+        assert card.recipe.z_coord.nemo_r3t_stored_product is True
         for name in (
             "rk3_stage1_rhs_nemo_literal",
             "rk3_stage_velocity_written_order",
-            "een_vorticity_written_order",
             "zdf_barotropic_removal_nemo_literal",
             "zdf_momentum_nemo_face_thickness",
-            "rk3_fold_exchange_top_v_row",
+            "zdf_momentum_stage_r3u_nemo_literal",
+            "zdf_tracer_nemo_rounded_thickness",
+            "barotropic_rhs_ascending_level_sum",
             "rk3_stage_r3f_nemo_literal",
             "rk3_stage_r3t_nemo_literal",
             "nemo_eos_gdept_rounded_product",
             "rk3_stage_r3uv_nemo_literal",
         ):
-            assert getattr(config, name) is False
+            assert getattr(config, name) is True, name
         for name in (
             "barotropic_een_ratio_fold_exchange",
             "barotropic_een_fe3mask_pivot_row",
             "barotropic_een_ratio_written_order",
         ):
-            assert getattr(config.barotropic, name) is False
+            assert getattr(config.barotropic, name) is True, name
+        # np_COR-certified (ORCA2 runs np_CRV) and the held top-V exchange.
+        assert config.een_vorticity_written_order is False
+        assert config.rk3_fold_exchange_top_v_row is False
     assert omt0_card.recipe.model_config.barotropic.barotropic_flux_update_nemo_literal
     assert omt0_card.recipe.model_config.barotropic.barotropic_entry_depth_nemo_literal
     for card in (shipped, omt1_card, omt4_card):

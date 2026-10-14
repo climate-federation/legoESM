@@ -1732,6 +1732,30 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
             barotropic_substep_dt_nemo_literal=True,
         ),
     )
+    # Decision 122 (ORCA2 round 278): geometry-ladder-certified statements
+    # whose cited line the ORCA2 build executes, each meeting no-exact-loss and
+    # first-over-bar-not-away on rung 0, OMT-1..4 and rung 10 (both labels).
+    # Left off: G1's EEN vorticity order (certified on the np_COR line, ORCA2
+    # runs np_CRV) and the completed-stage top-V fold exchange (held: rung-0
+    # ten-step SSH maximum 0.38 -> 8.39 m).
+    model_config = model_config._replace(
+        zdf_momentum_nemo_face_thickness=True,
+        zdf_momentum_stage_r3u_nemo_literal=True,
+        zdf_tracer_nemo_rounded_thickness=True,
+        barotropic_rhs_ascending_level_sum=True,
+        rk3_stage1_rhs_nemo_literal=True,
+        rk3_stage_velocity_written_order=True,
+        zdf_barotropic_removal_nemo_literal=True,
+        rk3_stage_r3f_nemo_literal=True,
+        rk3_stage_r3t_nemo_literal=True,
+        nemo_eos_gdept_rounded_product=True,
+        rk3_stage_r3uv_nemo_literal=True,
+        barotropic=model_config.barotropic._replace(
+            barotropic_een_ratio_fold_exchange=True,
+            barotropic_een_fe3mask_pivot_row=True,
+            barotropic_een_ratio_written_order=True,
+        ),
+    )
     # zdfphy.F90:146-173 initializes the pre-closure coefficient memory
     # before zdf_tke_init.  This deck resolves nn_avb=0, nn_havtb=1, so avm_k
     # is constant rn_avm0=1.2e-4 while avt_k is rn_avt0=1.2e-5 times the
@@ -1813,7 +1837,7 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
         model_config=model_config,
         physics_config=model_config.physics,
         grid=grid,
-        z_coord=z_coord,
+        z_coord=z_coord._replace(nemo_r3t_stored_product=True),
         land_mask=jnp.asarray(tmask[..., 0], dtype=jnp.float64),
         initial_state=state,
         iwm_forcing=_orca2_iwm_forcing(

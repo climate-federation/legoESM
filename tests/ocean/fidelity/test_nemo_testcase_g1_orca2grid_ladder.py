@@ -6,9 +6,11 @@ are skipped off this machine; each one has a plant that must turn it red.
 from __future__ import annotations
 
 import importlib.util
+import re
 from pathlib import Path
 
 import jax.numpy as jnp
+
 import numpy as np
 import pytest
 
@@ -516,6 +518,31 @@ def test_step_1_substep_loop_is_nemos_bit_for_bit_only_with_all_three(off, floor
 
 # --- round 6: the fold pivot row of the coefficients; the stage velocity -----
 
+# Decision 122 (ORCA2 round 278): these G1 statements also land on the
+# production ORCA2 identity; the np_COR vorticity order and the held top-V
+# exchange stay G1-card-only.
+D122_ORCA2_LANDED = frozenset((
+    "barotropic_een_ratio_fold_exchange", "barotropic_een_fe3mask_pivot_row",
+    "rk3_stage1_rhs_nemo_literal", "rk3_stage_velocity_written_order",
+    "zdf_barotropic_removal_nemo_literal", "rk3_stage_r3f_nemo_literal",
+    "barotropic_een_ratio_written_order", "nemo_r3t_stored_product",
+    "rk3_stage_r3t_nemo_literal", "nemo_eos_gdept_rounded_product",
+    "rk3_stage_r3uv_nemo_literal"))
+
+
+def _selecting_builders(src, name):
+    """The card builders whose body sets ``name=True``."""
+    sites = set()
+    for match in re.finditer(rf"\b{name}=True", src):
+        sites.add(re.findall(r"^def (\w+)", src[:match.start()], re.M)[-1])
+    return sites
+
+
+def _expected_builders(name):
+    return {"build_orca2g1_flat_card"} | (
+        {"build_orca2_zps_card"} if name in D122_ORCA2_LANDED else set())
+
+
 ROUND6_SOLVER = ("barotropic_een_ratio_fold_exchange",
                  "barotropic_een_fe3mask_pivot_row")
 ROUND6_STAGE = ("rk3_stage1_rhs_nemo_literal", "rk3_stage_velocity_written_order")
@@ -529,13 +556,11 @@ def test_only_the_g1_card_selects_the_round6_statements():
         n for n in LatLonCGridOceanConfig._fields if n in ROUND6_STAGE
     ) == ROUND6_STAGE
     src = Path(recipe.__file__).read_text()
-    start = src.index("def build_orca2g1_flat_card")
     for cls, names in ((BarotropicConfig, ROUND6_SOLVER),
                        (LatLonCGridOceanConfig, ROUND6_STAGE)):
         for name in names:
             assert cls._field_defaults[name] is False
-            assert src.count(f"{name}=True") == 1
-            assert src.index(f"{name}=True") > start
+            assert _selecting_builders(src, name) == _expected_builders(name)
     if RECORD.is_dir():
         cfg = recipe.build_nemo_testcase_card(
             "ORCA2G1-flat", deck_root=RECORD).recipe.model_config
@@ -708,7 +733,7 @@ def test_only_the_g1_card_selects_the_round7_statements():
     start = src.index("def build_orca2g1_flat_card")
     for name in ROUND7:
         assert LatLonCGridOceanConfig._field_defaults[name] is False
-        assert name not in src[:start], name      # no other card selects it
+        assert _selecting_builders(src, name) == _expected_builders(name), name
         assert f"{name}=True" in src[start:] and f"cfg.{name} is True" in src[start:]
 
 
@@ -910,10 +935,8 @@ def test_only_the_g1_card_selects_the_round8_statements():
     assert BarotropicConfig._field_defaults[ROUND8_SOLVER] is False
     assert OceanPartialCellCoordinate._field_defaults[ROUND8_COORDINATE] is False
     src = Path(recipe.__file__).read_text()
-    start = src.index("def build_orca2g1_flat_card")
     for name in (ROUND8_SOLVER, ROUND8_COORDINATE):
-        assert src.count(f"{name}=True") == 1
-        assert src.index(f"{name}=True") > start
+        assert _selecting_builders(src, name) == _expected_builders(name)
     if RECORD5.is_dir():
         card = recipe.build_nemo_testcase_card("ORCA2G1-flat", deck_root=RECORD5)
         assert card.recipe.model_config.barotropic.barotropic_een_ratio_written_order is True
@@ -1038,7 +1061,7 @@ def test_only_the_g1_card_selects_the_round9_statements():
     start = src.index("def build_orca2g1_flat_card")
     for name in ROUND9:
         assert LatLonCGridOceanConfig._field_defaults[name] is False
-        assert name not in src[:start], name      # no other card selects it
+        assert _selecting_builders(src, name) == _expected_builders(name), name
         assert f"{name}=True" in src[start:] and f"cfg.{name} is True" in src[start:]
 
 
