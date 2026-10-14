@@ -1724,9 +1724,11 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
     # fold-image V transport in vor_een and in the split-explicit live face
     # depth. These are deck-invariant geometry statements, so every hierarchy
     # and OMT card derived from this ORCA2 identity carries them explicitly.
+    # G2 round 4 adds stp2d.f90:178-179's ascending vertical SUM.
     model_config = model_config._replace(
         een_fold_image_v_row=True,
         rk3_stage1_ssh_nemo_literal=True,
+        barotropic_rhs_ascending_level_sum=True,
         barotropic=model_config.barotropic._replace(
             barotropic_fold_top_v_face_ssh=True,
             barotropic_substep_dt_nemo_literal=True,
