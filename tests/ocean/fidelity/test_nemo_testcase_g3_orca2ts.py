@@ -184,6 +184,7 @@ def test_run_sh_records_to_nemos_kt11_boundary_and_admits_round_one():
     # the boundary: kt 11, |V| alone over its limit, the step-10 restart only
     assert '"$(tr -d \' \\n\' <"$REF/time.step")" == 11' in code
     assert "s+0 <= 20 && u+0 <= 10 && v+0 > 10 && n+0 > 0 && x+0 < 100" in code
+    assert '[[ -f "$REF/output.abort.nc" ]]' in code and '"$REF/output.abort.nc" )' in code
     # a stop in a new run is refused, never trapped as an unhandled failure
     assert "|| rc=$?" in code and "not the registered kt = 11 boundary" in code
 

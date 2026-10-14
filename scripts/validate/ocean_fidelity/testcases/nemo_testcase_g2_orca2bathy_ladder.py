@@ -770,6 +770,7 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
                                   "rows": rows, "first_unequal": g1.first_unequal(rows),
                                   "all_levels": levels,
                                   "history_rows": g1.history_rows(path.parent, kt, state, reg)})
+        require(bool(out["per_kt"]), f"no NEMO restart or abort witness at kt {kt_from}..{kt_to}")
         if state_out is not None:
             Path(state_out).write_bytes(pickle.dumps(
                 {"after_kt": kt_to, "packages": packages, "state": state}))

@@ -219,7 +219,8 @@ admit_boundary() {
   [[ "$(tr -d ' \n' <"$REF/time.step")" == 11 ]] && ! grep -qx 'RUN_DONE' "$REF/run.user.log" \
     && grep -q 'stp_ctl: |ssh| > 20 m  or  |U| > 10 m/s' "$REF/ocean.output" \
     && [[ -f "$REF/ORCA2G1_00000010_restart.nc" && ! -e "$REF/ORCA2G1_00000020_restart.nc" ]] \
-    || { printf 'REFUSE: %s did not stop in stp_ctl at kt = 11 after its step-10 restart\n' "$REF" >&2; exit 73; }
+    && [[ -f "$REF/output.abort.nc" ]] \
+    || { printf 'REFUSE: %s did not stop in stp_ctl at kt = 11 after its step-10 restart, with its abort state\n' "$REF" >&2; exit 73; }
   # which check fired, from NEMO's own kt = 11 lines: |V| alone
   awk '/^ *kt 11 \|ssh\| max/ {s=$5} /^ *kt 11 \|U\| +max/ {u=$5} /^ *kt 11 \|V\| +max/ {v=$5}
        /^ *kt 11 Sal +min/ {n=$5} /^ *kt 11 Sal +max/ {x=$5}
@@ -339,7 +340,7 @@ PY
       p3_b_10step/ORCA2G1_0000000{2,4,6,8}_restart.nc p3_b_10step/ORCA2G1_00000010_restart.nc \
       p3_c_10step/ORCA2G1_0000000{3,5,7,9}_restart.nc \
       "$SMOKE/ORCA2G1_00000002_restart.nc" "$REF/ORCA2G1_00000010_restart.nc" \
-      "$REF/ocean.output" ) >"$EVIDENCE/manifest/outputs.sha256"
+      "$REF/ocean.output" "$REF/output.abort.nc" ) >"$EVIDENCE/manifest/outputs.sha256"
   printf 'ACQUISITION_DONE %s\n' "$EVIDENCE"
 }
 
