@@ -55,7 +55,7 @@ def _deck_copy(tmp_path: Path, edit=None) -> Path:
 def test_committed_deck_states_the_g1_values(tmp_path):
     deck = recipe.read_orca2g1_deck(_deck_copy(tmp_path))
     assert deck == recipe.ORCA2G1Deck(
-        rn_Dt_s=5400.0, nn_itend=100, nn_fsbc=2, nn_e=65, rn_bt_alpha=0.09,
+        rn_Dt_s=10800.0, nn_itend=100, nn_fsbc=2, rn_bt_cmax=0.8, rn_bt_alpha=0.09,
         rn_avm0_m2_s=1.2e-4, rn_avt0_m2_s=1.2e-5)
 
 
@@ -165,13 +165,14 @@ def test_standin_card_builds_and_states_every_selector(standin_root):
     card = recipe.build_nemo_testcase_card("ORCA2G1-flat", deck_root=standin_root)
     cfg = card.recipe.model_config
     state = card.recipe.initial_state
-    assert (card.case, card.dt_s, card.n_steps) == ("ORCA2G1-flat", 5400.0, 100)
+    assert (card.case, card.dt_s, card.n_steps) == ("ORCA2G1-flat", 10800.0, 100)
     assert np.asarray(state.T.data).shape == (148, 180, 1)
     assert np.asarray(state.T.data).dtype == np.float64
     assert np.asarray(card.recipe.z_coord.dz_ref).dtype == np.float64
     assert float(np.max(np.asarray(card.recipe.z_coord.h_partial))) == 100.0
     assert cfg.barotropic.nemo_barotropic_filter_alpha == 0.09
-    assert cfg.barotropic.n_barotropic_substeps == 65
+    # CEILING(10800 / 0.8 * 9.4035e-4) = CEILING(12.69) (dynspg_ts.f90:1062)
+    assert cfg.barotropic.n_barotropic_substeps == 13
     assert (cfg.momentum_flux_scheme, cfg.vertical_momentum_scheme,
             cfg.tracer_advection) == ("none", "none", "none")
     assert np.count_nonzero(np.asarray(state.eta.data)) == 201
@@ -200,10 +201,10 @@ def test_standin_card_builds_and_states_every_selector(standin_root):
         "ln_eos80": moved(eos="nemo_seos"),
         "barotropic_identity": moved(barotropic=cfg.barotropic._replace(
             barotropic_pgf_evaluation="vectorized")),
-        "nn_e": moved(barotropic=cfg.barotropic._replace(n_barotropic_substeps=64)),
+        "nn_e": moved(barotropic=cfg.barotropic._replace(n_barotropic_substeps=65)),
         "rn_bt_alpha": moved(barotropic=cfg.barotropic._replace(
             nemo_barotropic_filter_alpha=0.07)),
-        "rn_Dt": card._replace(dt_s=10800.0),
+        "rn_Dt": card._replace(dt_s=5400.0),
         "no_ice": card._replace(icebergs_enabled=True),
         "bump": card._replace(recipe=card.recipe._replace(
             initial_state=state._replace(eta=state.eta.replace(
@@ -215,6 +216,23 @@ def test_standin_card_builds_and_states_every_selector(standin_root):
     for name, planted in plants.items():
         with pytest.raises(ValueError, match=re.escape(name)):
             recipe.validate_orca2g1_flat_card(planted, standin_root)
+
+
+def test_external_courant_number_at_the_deck_time_step(standin_root):
+    """dynspg_ts.f90:1049-1080 in NEMO's own order, not the card's helper."""
+    dom = recipe._orca2g1_domain(standin_root / "domain_cfg.nc")
+    deck = recipe.read_orca2g1_deck(standin_root)
+    ht_0 = 100.0 * (dom["bottom_level"] > 0)
+    zcu = np.sqrt(float(recipe.NEMO_CONSTANTS_CONFIG.g) * ht_0
+                  * (dom["e1t"] ** -2 + dom["e2t"] ** -2))
+    j, i = np.unravel_index(np.argmax(zcu), zcu.shape)
+    nn_e = int(np.ceil(deck.rn_Dt_s / deck.rn_bt_cmax * zcu.max()))
+    courant = zcu.max() * deck.rn_Dt_s / nn_e
+    assert (j + 1, i + 1) == (2, 50)                  # (jj, ji), Antarctic coast
+    assert nn_e == recipe._orca2g1_auto_substeps(dom, deck) == 13
+    np.testing.assert_allclose(zcu.max(), 9.4035e-4, rtol=1e-4)   # 1/s
+    np.testing.assert_allclose(courant, 0.7812, rtol=1e-4)
+    assert courant < deck.rn_bt_cmax < 0.9            # NEMO's stop is at 0.9
 
 
 def test_single_level_column_needs_the_explicit_opt_in():

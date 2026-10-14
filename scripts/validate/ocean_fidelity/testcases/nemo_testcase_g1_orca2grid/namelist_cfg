@@ -38,7 +38,7 @@
 !-----------------------------------------------------------------------
 &namdom        !   time and space domain
 !-----------------------------------------------------------------------
-   rn_Dt       =   5400.   !  operator pick (D117); ORCA2's RK3 deck runs 10800.
+   rn_Dt       =  10800.   !  ORCA2_OMIP_L4/EXP00/namelist_cfg:28 (D118; 5400. superseded)
    rn_atfp     =      0.1  !  unused under key_RK3
    ln_c1d      = .false.
    ln_meshmask = .true.    !  geometry receipt
@@ -207,9 +207,9 @@
       ln_bt_fw      = .true.
       nn_bt_flt     = 3          !  ORCA2
       rn_bt_alpha   = 0.09       !  ORCA2
-      ln_bt_auto    = .false.    !  nn_e stated, not resolved from the mesh
-         rn_bt_cmax   =  0.8        !  unused (ln_bt_auto = F)
-         nn_e         =  65         !  the value ORCA2's ln_bt_auto resolves
+      ln_bt_auto    = .true.     !  as ORCA2's deck resolves it (namelist_ref:1099; D118)
+         rn_bt_cmax   =  0.8        !  as ORCA2's deck resolves it (namelist_ref:1100)
+         nn_e         =  30         !  unused (ln_bt_auto = T; namelist_ref:1101): dynspg_ts.f90:1062 resolves 13
 /
 !-----------------------------------------------------------------------
 &namdyn_ldf    !   lateral diffusion on momentum
