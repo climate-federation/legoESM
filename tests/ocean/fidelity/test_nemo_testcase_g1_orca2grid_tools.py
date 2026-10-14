@@ -364,3 +364,98 @@ def test_substep_finiteness_is_checked_on_the_consumed_support_only(tmp_path):
     cr.substep_path(a, 1).write_bytes(blob)
     with pytest.raises(cr.Refuse, match="non-finite on the inner domain"):
         cr.check_substeps(a, None, [1], plant="substep-inner-nonfinite")
+
+
+# ---- G4 round 3: the surface forcing frames (--bulk-iterations) ------------
+INNER = (1, 2)      # (Nje0 - Njs0 + 1, Nie0 - Nis0 + 1) of _stream's header
+
+
+def _rec(name, a):
+    a = np.asarray(a, dtype="<f8")
+    return struct.pack("<16s4i", name.ljust(16).encode(), 2, a.shape[1], a.shape[0], 1) + a.tobytes()
+
+
+def _forcing_stream(step, iterations=2, halo_nan=True, inner_bad=None, bulk=None):
+    """Stage frames, then the forcing frames ('s', 'c'; on odd steps 'n',
+    'A'.., 'k'), then 'f' last, as stprk3 writes them."""
+    stage = _stream(step, True)
+    head, body = stage[:72], stage[72:]
+    f_at = body.index(b"f_ssh_bb")
+    full = np.full((JPJ, JPI), float(step))
+    if halo_nan:
+        full[0, 0] = np.nan                     # halo word NEMO never sets
+    bulk = step % 2 == 1 if bulk is None else bulk
+    frames = ["s", "c"] + (["n"] + [chr(65 + j) for j in range(iterations)] + ["k"]
+                           if bulk else [])
+    extra = b""
+    for fr in frames:
+        plane = full.copy()
+        if inner_bad and inner_bad == (step, fr):
+            plane[2, 2] = 7.0                    # inner domain (j 3, i 3 Fortran)
+        extra += _rec(f"{fr}_full", plane) + _rec(f"{fr}_inner", np.ones(INNER) * step)
+    return head + body[:f_at] + extra + body[f_at:]
+
+
+@pytest.fixture
+def forcing_record(tmp_path):
+    a, b = tmp_path / "fa", tmp_path / "fb"
+    a.mkdir()
+    b.mkdir()
+    for step in range(1, 5):
+        (a / f"oracle_g1step_kt{step:08d}.bin").write_bytes(_forcing_stream(step))
+        (b / f"oracle_g1step_kt{step:08d}.bin").write_bytes(_forcing_stream(step, halo_nan=False))
+    return a, b
+
+
+def test_forcing_record_is_admitted_on_its_consumed_support(forcing_record):
+    a, b = forcing_record
+    out = checker.check(a, b, steps=4, stage_steps=4, iterations=2, fsbc=2)
+    steps = out["forcing"]["steps"]
+    assert steps[1]["frames"] == ["A", "B", "c", "k", "n", "s"]
+    assert steps[2]["frames"] == ["c", "s"]
+    assert steps[1]["halo_words_nonfinite"] == {f"{f}_full": 1 for f in "ABckns"}
+    assert steps[1]["twin_halo_words_differing"] == 6     # the halo NaNs only
+    assert out["fields_stage"] == sorted(out["fields_stage"])
+
+
+def test_forcing_mode_is_off_by_default(forcing_record):
+    a, _ = forcing_record
+    with pytest.raises(checker.Refuse, match="not a \\(jpj, jpi\\) field"):
+        checker.check(a, None, steps=4, stage_steps=4)
+
+
+@pytest.mark.parametrize("plant", checker.FORCING_PLANTS)
+def test_every_forcing_plant_exits_nonzero(forcing_record, plant):
+    a, b = forcing_record
+    with pytest.raises(checker.Refuse):
+        checker.check(a, b, steps=4, stage_steps=4, plant=plant, iterations=2)
+    done = subprocess.run(
+        [sys.executable, str(CASE / "check_records.py"), "--evidence", str(a), "--twin", str(b),
+         "--steps", "4", "--stage-steps", "4", "--bulk-iterations", "2", "--plant", plant],
+        capture_output=True, text=True)
+    assert done.returncode == 1 and "STATUS PLANT-FIRED" in done.stderr
+    with pytest.raises(checker.Refuse, match="needs --bulk-iterations"):
+        checker.check(a, b, steps=4, stage_steps=4, plant=plant)
+
+
+def test_real_forcing_defects_are_refused(forcing_record):
+    a, b = forcing_record
+    # an iteration short on a bulk step
+    (a / "oracle_g1step_kt00000003.bin").write_bytes(_forcing_stream(3, iterations=1))
+    with pytest.raises(checker.Refuse, match="frames"):
+        checker.check(a, None, steps=4, stage_steps=4, iterations=2)
+    # bulk frames on a step the bulk does not run
+    (a / "oracle_g1step_kt00000003.bin").write_bytes(_forcing_stream(3))
+    (a / "oracle_g1step_kt00000002.bin").write_bytes(_forcing_stream(2, bulk=True))
+    with pytest.raises(checker.Refuse, match="frames"):
+        checker.check(a, None, steps=4, stage_steps=4, iterations=2)
+    # the twin differs on the inner domain of a forcing plane
+    (a / "oracle_g1step_kt00000002.bin").write_bytes(_forcing_stream(2))
+    (b / "oracle_g1step_kt00000001.bin").write_bytes(
+        _forcing_stream(1, halo_nan=False, inner_bad=(1, "B")))
+    with pytest.raises(checker.Refuse, match="B_full on the inner domain"):
+        checker.check(a, b, steps=4, stage_steps=4, iterations=2)
+    # a stage frame must stay byte-exact against the twin, even in forcing mode
+    (b / "oracle_g1step_kt00000001.bin").write_bytes(_forcing_stream(1, halo_nan=False)[:-1] + b"\x01")
+    with pytest.raises(checker.Refuse, match="twin run differs in f_"):
+        checker.check(a, b, steps=4, stage_steps=4, iterations=2)

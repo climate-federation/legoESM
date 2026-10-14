@@ -1,0 +1,43 @@
+--- stprk3.F90
++++ stprk3.F90
+@@ -24,6 +24,7 @@
+    USE stprk3_stg     ! RK3 stages
+    USE stp2d          ! external mode solver
+    USE g1_step_record   ! grid ladder G1: read-only RK3 step record
++   USE sbcssr, ONLY : erp, qrp   ! grid ladder G4: read-only surface forcing record
+    USE lib_mpp, ONLY : l_perpetual_ts
+ 
+    IMPLICIT NONE
+@@ -155,6 +156,32 @@
+       IF( ln_bdy     )   CALL bdy_dta    ( kstp, Nbb )                     ! update dynamic & tracer data at open boundaries
+       IF( ln_isf     )   CALL isf_stp    ( kstp, Nbb )                     ! update iceshelf geometry
+                          CALL sbc        ( kstp, Nbb, Nbb )                ! Sea Boundary Condition (including sea-ice)
++      !                                   !== grid ladder G4: read-only surface forcing record ==!
++      CALL g1r_frame( 's' )
++      CALL g1r_w2( 'utau', utau )
++      CALL g1r_w2( 'vtau', vtau )
++      CALL g1r_w2( 'utauU', utauU )
++      CALL g1r_w2( 'vtauV', vtauV )
++      CALL g1r_w2( 'taum', taum )
++      CALL g1r_w2( 'wndm', wndm )
++      CALL g1r_w2( 'qns', qns )
++      CALL g1r_w2( 'qsr', qsr )
++      CALL g1r_w2( 'emp', emp )
++      CALL g1r_w2( 'sfx', sfx )
++      CALL g1r_w2( 'rnf', rnf )
++      CALL g1r_w2( 'erp', erp )
++      CALL g1r_w2( 'qrp', qrp )
++      CALL g1r_w2( 'rnf_tsc_tem', rnf_tsc(:,:,jp_tem) )
++      CALL g1r_w2( 'rnf_tsc_sal', rnf_tsc(:,:,jp_sal) )
++      CALL g1r_w2( 'h_rnf', h_rnf )
++      CALL g1r_w2( 'fr_i', fr_i )
++      CALL g1r_w2( 'sst_m', sst_m )
++      CALL g1r_w2( 'sss_m', sss_m )
++      CALL g1r_w2( 'ssu_m', ssu_m )
++      CALL g1r_w2( 'ssv_m', ssv_m )
++      CALL g1r_w2( 'ssh_m', ssh_m )
++      CALL g1r_w2( 'e3t_m', e3t_m )
++      CALL g1r_w2( 'frq_m', frq_m )
+ !!$      IF( ln_isf     )   CALL isf_stp    ( kstp, Nbb )                     ! update iceshelf geometry
+                          !clem: problem with isf and cpl: sbcfwb needs isf but isf needs fwf from sbccpl
+ 

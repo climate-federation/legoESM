@@ -1,0 +1,73 @@
+--- sbcblk_algo_ncar.F90
++++ sbcblk_algo_ncar.F90
+@@ -29,6 +29,7 @@
+    USE phycst          ! physical constants
+    USE sbc_phy         ! Catalog of functions for physical/meteorological parameters in the marine boundary layer
+    USE lib_fortran     ! to use sign with key_nosignedzero
++   USE g1_step_record  ! grid ladder G4: read-only NCAR bulk record
+ 
+    IMPLICIT NONE
+    PRIVATE
+@@ -142,10 +143,26 @@
+       !! Initializing values at z_u with z_t values:
+       t_zu = MAX( t_zt ,  180._wp )   ! who knows what's given on masked-continental regions...
+       q_zu = MAX( q_zt , 1.e-6_wp )   !               "
++      CALL g1r_frame( 'n' )   ! grid ladder G4: turb_ncar entry
++      CALL g1r_w2( 'sst', sst )
++      CALL g1r_w2( 't_zt', t_zt )
++      CALL g1r_w2( 'ssq', ssq )
++      CALL g1r_w2( 'q_zt', q_zt )
++      CALL g1r_w2( 'u_zu', U_zu )
++      CALL g1r_w2( 'ubzu', Ubzu )
++      CALL g1r_w2( 'dtv', ztmp0 )
++      CALL g1r_w2( 'stab', ztmp1 )
++      CALL g1r_w2( 'cdn', zCdN )
++      CALL g1r_w2( 'cd', Cd )
++      CALL g1r_w2( 'ch', Ch )
++      CALL g1r_w2( 'ce', Ce )
++      CALL g1r_w2( 't_zu', t_zu )
++      CALL g1r_w2( 'q_zu', q_zu )
+ 
+ 
+       !! ITERATION BLOCK
+       DO jit = 1, nbit
++         CALL g1r_frame( ACHAR( IACHAR('A') + jit - 1 ) )   ! grid ladder G4: iteration jit = A, B, ..
+          !
+          ztmp1 = t_zu - sst   ! Updating air/sea differences
+          ztmp2 = q_zu - ssq
+@@ -161,6 +178,8 @@
+          !! Stability parameters :
+          zeta_u   = zu*ztmp0
+          zeta_u   = sign( min(abs(zeta_u),10._wp), zeta_u )
++         CALL g1r_w2( 'one_on_l', ztmp0 )
++         CALL g1r_w2( 'zeta_u', zeta_u )
+ 
+          !! Shifting temperature and humidity at zu (L&Y 2004 Eq. (9b-9c))
+          IF( .NOT. l_zt_equal_zu ) THEN
+@@ -190,6 +209,8 @@
+ 
+          ELSE
+          ztmp0 = MAX( 0.25_wp , UN10_from_CD(zu, Ubzu, Cd, ppsi=ztmp2) ) ! U_n10 (ztmp2 == psi_m_ncar(zeta_u))
++         CALL g1r_w2( 'psi_m', ztmp2 )
++         CALL g1r_w2( 'un10', ztmp0 )
+ 
+          zCdN = cd_n10_ncar(ztmp0)
+          zsqrt_CdN = sqrt(zCdN)
+@@ -211,6 +232,17 @@
+ 
+          Ch    = MAX( zChN*ztmp2 / ( 1._wp + zChN*ztmp0 ) , Cx_min ) ! L&Y 2004 eq. (10b)
+          Ce    = MAX( zCeN*ztmp2 / ( 1._wp + zCeN*ztmp0 ) , Cx_min ) ! L&Y 2004 eq. (10c)
++         CALL g1r_w2( 'cdn', zCdN )
++         CALL g1r_w2( 'sqrt_cdn', zsqrt_CdN )
++         CALL g1r_w2( 'cd', Cd )
++         CALL g1r_w2( 'sqrt_cd', zsqrt_Cd )
++         CALL g1r_w2( 'psi_h_term', ztmp0 )
++         CALL g1r_w2( 'cd_ratio', ztmp2 )
++         CALL g1r_w2( 'stab', ztmp1 )
++         CALL g1r_w2( 'chn', zChN )
++         CALL g1r_w2( 'cen', zCeN )
++         CALL g1r_w2( 'ch', Ch )
++         CALL g1r_w2( 'ce', Ce )
+ 
+          ENDIF
+ 

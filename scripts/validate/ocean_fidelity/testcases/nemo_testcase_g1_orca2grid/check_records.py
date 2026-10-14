@@ -22,6 +22,12 @@ HEADER_NAMES = ("version", "step", "Nbb", "Nnn", "Naa", "Nrhs", "jpi", "jpj",
 STAGE_FRAMES = ("e", "b", "1", "2", "3", "f")
 PLANTS = ("none", "truncation", "nonfinite", "missing-frame", "twin-ulp",
           "missing-step")
+# G4 surface forcing record (--bulk-iterations): 's' after sbc (stprk3), 'c'
+# the composites dyn_spg_ts reads; on bulk steps 'n' turb_ncar entry, one
+# frame per NCAR iteration ('A', 'B', ..) and 'k' the ocean bulk after the stress.
+FORCING_FRAMES = ("s", "c")
+BULK_FRAMES = ("n", "k")
+FORCING_PLANTS = ("forcing-missing-iteration", "forcing-nonfinite", "forcing-twin-inner")
 SUB_PLANTS = ("missing-substep", "twin-substep-inner",   # need --substep-steps
               "substep-inner-nonfinite")
 # the least each frame must hold for the round-4 walk (more is recorded)
@@ -44,7 +50,7 @@ def require(condition: bool, message: str) -> None:
         raise Refuse(message)
 
 
-def read_stream(blob: bytes, label: str):
+def read_stream(blob: bytes, label: str, allow_inner: bool = False):
     require(blob[:16] == MAGIC, f"{label}: bad magic {blob[:16]!r}")
     header = dict(zip(HEADER_NAMES, struct.unpack("<14i", blob[16:72])))
     require(header["word_bits"] == 64, f"{label}: word size is not 64 bits")
@@ -60,7 +66,9 @@ def read_stream(blob: bytes, label: str):
         require(name not in fields, f"{label}: duplicate field {name}")
         data = np.frombuffer(blob, "<f8", count, offset).reshape(
             (n2, n1) if rank == 2 else (n3, n2, n1))
-        require(data.shape[-1] == header["jpi"] and data.shape[-2] == header["jpj"],
+        inner = (header["Nje0"] - header["Njs0"] + 1, header["Nie0"] - header["Nis0"] + 1)
+        require(data.shape[-2:] == (header["jpj"], header["jpi"])
+                or (allow_inner and rank == 2 and data.shape == inner),
                 f"{label}: {name} is not a (jpj, jpi) field of its own header")
         fields[name] = data
         offset += 8 * count
@@ -94,16 +102,14 @@ def read_substeps(blob: bytes, label: str):
     return header, fields
 
 
-def twin_halo_words(header: dict, fields: dict, other_blob: bytes, label: str,
+def twin_halo_words(header: dict, fields: dict, other: dict, label: str,
                     plant: bool = False) -> int:
     """The twin's stream equals this one on the CONSUMED support: the inner
     domain of every full (jpj, jpi) plane (all the reader keeps) and every
     other array whole.  Returns the number of differing HALO words: the
     writer dumps work arrays whose halo NEMO never sets, so that storage is
     whatever the process held (G2 round 2: 3,384 words at kt = 2)."""
-    other_header, other = read_substeps(other_blob, f"{label} (twin)")
-    require(other_header == header and list(other) == list(fields),
-            f"{label}: twin run differs (header or field list)")
+    require(list(other) == list(fields), f"{label}: twin run differs (field list)")
     js, je = header["Njs0"] - 1, header["Nje0"]
     i_s, ie = header["Nis0"] - 1, header["Nie0"]
     full, halo, planted = (header["jpj"], header["jpi"]), 0, not plant
@@ -185,8 +191,11 @@ def check_substeps(evidence: Path, twin: Path | None, steps: list[int],
             # the twin ran this step: its substep stream must exist and agree
             require(substep_path(twin, step).is_file(),
                     f"{path.name}: the twin run has no substep record")
+            other_header, other = read_substeps(substep_path(twin, step).read_bytes(),
+                                                f"{path.name} (twin)")
+            require(other_header == header, f"{path.name}: twin run differs (header)")
             halo_words = twin_halo_words(
-                header, fields, substep_path(twin, step).read_bytes(), path.name,
+                header, fields, other, path.name,
                 plant=plant == "twin-substep-inner" and step == steps[0])
         else:
             halo_words = None       # the twin did not run this step
@@ -204,10 +213,25 @@ def step_path(root: Path, step: int) -> Path:
     return root / f"oracle_g1step_kt{step:08d}.bin"
 
 
+def forcing_frames(step: int, iterations: int, fsbc: int) -> set:
+    """The G4 forcing frames a step holds: none without the forcing writer;
+    's' and 'c' every step; the bulk frames on steps the bulk runs,
+    MOD(kt - 1, nn_fsbc) == 0 (sbcblk.f90:554)."""
+    if not iterations:
+        return set()
+    out = set(FORCING_FRAMES)
+    if (step - 1) % fsbc == 0:
+        out |= set(BULK_FRAMES) | {chr(ord("A") + j) for j in range(iterations)}
+    return out
+
+
 def check(evidence: Path, twin: Path | None, steps: int, stage_steps: int,
-          plant: str = "none") -> dict:
-    require(plant in PLANTS, f"unknown plant {plant}")
+          plant: str = "none", iterations: int = 0, fsbc: int = 2) -> dict:
+    require(plant in PLANTS + FORCING_PLANTS, f"unknown plant {plant}")
+    require(plant not in FORCING_PLANTS or iterations > 0,
+            f"the {plant} plant needs --bulk-iterations")
     first_header, names_by_step, worst = None, {}, 0.0
+    first_names, forcing = {}, {}
     for step in range(1, steps + 1):
         path = step_path(evidence, step)
         if plant == "missing-step" and step == steps:
@@ -216,7 +240,11 @@ def check(evidence: Path, twin: Path | None, steps: int, stage_steps: int,
         blob = path.read_bytes()
         if plant == "truncation" and step == 1:
             blob = blob[:-8]
-        header, fields = read_stream(blob, path.name)
+        header, fields = read_stream(blob, path.name, allow_inner=iterations > 0)
+        new = forcing_frames(step, iterations, fsbc) if step <= stage_steps else set()
+        if plant == "forcing-missing-iteration" and step == 1:
+            last = chr(ord("A") + iterations - 1)
+            fields = {k: v for k, v in fields.items() if not k.startswith(f"{last}_")}
         if plant == "missing-frame" and step == 1:
             fields = {k: v for k, v in fields.items() if not k.startswith("b_")}
         if plant == "nonfinite" and step == 1:
@@ -231,26 +259,47 @@ def check(evidence: Path, twin: Path | None, steps: int, stage_steps: int,
             first_header = geometry
         require(geometry == first_header, f"{path.name}: geometry header moved")
         frames = {name.split("_", 1)[0] for name in fields}
-        wanted = set(STAGE_FRAMES) if step <= stage_steps else {"f"}
+        wanted = (set(STAGE_FRAMES) | new) if step <= stage_steps else {"f"}
         require(frames == wanted,
                 f"{path.name}: frames {sorted(frames)} != {sorted(wanted)}")
+        is_new = {name: name.split("_", 1)[0] in new for name in fields}
         for name, data in fields.items():
-            require(bool(np.all(np.isfinite(data))), f"{path.name}: {name} non-finite")
+            if not is_new[name]:
+                require(bool(np.all(np.isfinite(data))), f"{path.name}: {name} non-finite")
         names_by_step[step] = sorted(fields)
-        kind = 1 if step <= stage_steps else stage_steps + 1
+        kind = first_names.setdefault(frozenset(wanted), step)
         require(names_by_step[step] == names_by_step[kind],
                 f"{path.name}: field list moved")
+        if new:     # forcing frames: judged on the consumed support
+            sub = {k: v for k, v in fields.items() if is_new[k]}
+            forcing[step] = {"frames": sorted(frames & new), "halo_words_nonfinite":
+                             finite_on_consumed_support(header, sub, path.name,
+                                 plant=plant == "forcing-nonfinite" and step == 1)}
         worst = max(worst, float(np.max(np.abs(fields["f_ssh_bb"]))))
         if twin is not None and step_path(twin, step).is_file():
             other = step_path(twin, step).read_bytes()
             if plant == "twin-ulp" and step == 1:
                 other = other[:-1] + bytes([other[-1] ^ 1])
-            require(other == blob, f"{path.name}: twin run differs")
+            if not new:
+                require(other == blob, f"{path.name}: twin run differs")
+            else:   # stage frames byte-exact; forcing frames on the consumed support
+                other_header, theirs = read_stream(other, f"{path.name} (twin)", allow_inner=True)
+                require(other_header == header and list(theirs) == list(fields),
+                        f"{path.name}: twin run differs (header or field list)")
+                for name, mine in fields.items():
+                    require(is_new[name] or mine.tobytes() == theirs[name].tobytes(),
+                            f"{path.name}: twin run differs in {name}")
+                forcing[step]["twin_halo_words_differing"] = twin_halo_words(
+                    header, sub, {k: theirs[k] for k in sub}, path.name,
+                    plant=plant == "forcing-twin-inner" and step == 1)
     require(worst > 0.0, "ssh is identically zero: the bump was not applied")
-    return {"status": "PASS_G1_RECORD", "steps": steps,
-            "stage_steps": stage_steps, "geometry": first_header,
-            "max_abs_ssh": worst, "fields_stage": names_by_step[1],
-            "fields_final_only": names_by_step.get(stage_steps + 1, [])}
+    out = {"status": "PASS_G1_RECORD", "steps": steps,
+           "stage_steps": stage_steps, "geometry": first_header,
+           "max_abs_ssh": worst, "fields_stage": names_by_step[1],
+           "fields_final_only": names_by_step.get(stage_steps + 1, [])}
+    if iterations:
+        out["forcing"] = {"bulk_iterations": iterations, "fsbc": fsbc, "steps": forcing}
+    return out
 
 
 def restarts_identical(reference: Path, candidate: Path, steps: list[int]) -> dict:
@@ -281,12 +330,16 @@ def main() -> int:
     parser.add_argument("--restart-steps", default="")
     parser.add_argument("--substep-steps", default="",
                         help="steps that must hold a solver substep stream")
-    parser.add_argument("--plant", default="none", choices=PLANTS + SUB_PLANTS)
+    parser.add_argument("--bulk-iterations", type=int, default=0,
+                        help="G4 forcing record: NCAR iterations (0 = no forcing frames)")
+    parser.add_argument("--fsbc", type=int, default=2, help="nn_fsbc of the deck")
+    parser.add_argument("--plant", default="none", choices=PLANTS + SUB_PLANTS + FORCING_PLANTS)
     parser.add_argument("--json", type=Path)
     args = parser.parse_args()
     try:
         result = check(args.evidence, args.twin, args.steps, args.stage_steps,
-                       "none" if args.plant in SUB_PLANTS else args.plant)
+                       "none" if args.plant in SUB_PLANTS else args.plant,
+                       args.bulk_iterations, args.fsbc)
         if args.substep_steps:
             result["substeps"] = check_substeps(
                 args.evidence, args.twin,

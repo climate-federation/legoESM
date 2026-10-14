@@ -1,0 +1,39 @@
+--- sbcblk.F90
++++ sbcblk.F90
+@@ -65,6 +65,7 @@
+    USE prtctl         ! Print control
+ 
+    USE sbc_phy        ! Catalog of functions for physical/meteorological parameters in the marine boundary layer
++   USE g1_step_record ! grid ladder G4: read-only ocean bulk record
+ 
+    IMPLICIT NONE
+    PRIVATE
+@@ -890,6 +891,28 @@
+                vtau(ji,jj) = 0._wp
+             ENDIF
+          END_2D
++         CALL g1r_frame( 'k' )   ! grid ladder G4: ocean bulk, after the stress
++         CALL g1r_w2( 'sspt', zsspt )
++         CALL g1r_w2( 'tair', ptair )
++         CALL g1r_w2( 'qair', pqair )
++         CALL g1r_w2( 'ssq', pssq )
++         CALL g1r_w2( 'wndm', wndm )
++         CALL g1r_w2( 'wndi', pwndi )
++         CALL g1r_w2( 'wndj', pwndj )
++         CALL g1r_w2( 'slp', pslp )
++         CALL g1r_w2( 'cd', zcd_oce )
++         CALL g1r_w2( 'ch', zch_oce )
++         CALL g1r_w2( 'ce', zce_oce )
++         CALL g1r_w2( 'theta_zu', theta_zu )
++         CALL g1r_w2( 'q_zu', q_zu )
++         CALL g1r_w2( 'u_zu', zU_zu )
++         CALL g1r_w2( 'rhoa', rhoa )
++         CALL g1r_w2( 'taum', taum )
++         CALL g1r_w2( 'sen', psen )
++         CALL g1r_w2( 'lat', plat )
++         CALL g1r_w2( 'evp', pevp )
++         CALL g1r_w2( 'utau', utau )
++         CALL g1r_w2( 'vtau', vtau )
+ 
+          IF( ln_crt_fbk ) THEN   ! aply eq. 10 and 11 of Renault et al. 2020 (doi: 10.1029/2019MS001715)
+             zstmax = MIN( rn_stau_a * 3._wp + rn_stau_b, 0._wp )   ! set the max value of Stau corresponding to a wind of 3 m/s (<0)

@@ -1,0 +1,21 @@
+--- dynspg_ts.F90
++++ dynspg_ts.F90
+@@ -59,6 +59,7 @@
+    USE prtctl          ! Print control
+    USE iom             ! IOM library
+    USE g1_spgts_record   ! grid ladder G1: read-only barotropic substep record
++   USE g1_step_record     ! grid ladder G4: read-only forcing composites
+    USE restart         ! only for lrst_oce
+ 
+    USE iom   ! to remove
+@@ -282,6 +283,10 @@
+        ssh_frc(:,:) = sshe_rhs(:,:)
+         zu_frc(:,:) =   Ue_rhs(:,:)
+         zv_frc(:,:) =   Ve_rhs(:,:)
++      CALL g1r_frame( 'c' )   ! grid ladder G4: the composites the solver reads
++      CALL g1r_w2( 'ssh_frc', ssh_frc )
++      CALL g1r_w2( 'zu_frc', zu_frc )
++      CALL g1r_w2( 'zv_frc', zv_frc )
+       zCdU_u  (:,:) = CdU_u   (:,:)
+       zCdU_v  (:,:) = CdU_v   (:,:)
+ 

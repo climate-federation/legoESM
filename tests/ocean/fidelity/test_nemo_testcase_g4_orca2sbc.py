@@ -292,3 +292,90 @@ def test_kt11_witness_reads_the_bulk_surface_mean_nemo_reads(tmp_path):
         with pytest.raises(SystemExit) as refused:
             mod.sst_m_kt11(restart(kt, fsbc))
         assert refused.value.code == 73          # never a fired plant's exit 1
+
+
+# ---- round 3 (gridladder_r19): the per-step surface forcing acquisition -----
+R19_PATCHES = ("stprk3", "dynspg_ts", "sbcblk", "sbcblk_algo_ncar")
+NEMO_ROOT = NEMO.parent
+G1_DIR = CASES / "nemo_testcase_g1_orca2grid"
+OLD = {"stprk3": (NEMO_ROOT / "src/OCE/stprk3.F90", G1_DIR / "stprk3_g1_step_record_stage50.patch"),
+       "dynspg_ts": (NEMO_ROOT / "src/OCE/DYN/dynspg_ts.F90", G1_DIR / "dynspg_ts_g1_substep_record.patch"),
+       "sbcblk": (NEMO_ROOT / "src/OCE/SBC/sbcblk.F90", None),
+       "sbcblk_algo_ncar": (NEMO_ROOT / "src/OCE/SBC/sbcblk_algo_ncar.F90", None)}
+WRITER_LINE = re.compile(r"^\+ *(USE g1_step_record|USE sbcssr, ONLY : erp, qrp|!|"
+                         r"CALL g1r_frame\(|CALL g1r_w2\( '(\w+)', )")
+
+
+def _added(name):
+    text = (G4_DIR / f"{name}_g4_forcing_record.patch").read_text().splitlines()
+    return [l for l in text if l.startswith("+") and not l.startswith("+++")], \
+           [l for l in text if l.startswith("-") and not l.startswith("---")]
+
+
+def test_r19_patches_add_only_writer_calls_with_unique_short_names():
+    checker = _load_checker()
+    frames_seen = set()
+    for name in R19_PATCHES:
+        added, removed = _added(name)
+        assert removed == [] and added
+        frame, names = None, {}
+        for line in added:
+            assert WRITER_LINE.match(line), line
+            hit = re.search(r"CALL g1r_frame\( '(\w)' \)", line)
+            if hit or "ACHAR( IACHAR('A') + jit - 1 )" in line:
+                frame = hit.group(1) if hit else "iteration"
+                frames_seen.add(frame)
+                names.setdefault(frame, [])
+            w = re.search(r"CALL g1r_w2\( '(\w+)'", line)
+            if w:
+                assert frame is not None and len(w.group(1)) <= 14     # CHARACTER(16) 'X_name'
+                names[frame].append(w.group(1))
+        for listed in names.values():
+            assert len(listed) == len(set(listed))
+    assert frames_seen == set(checker.FORCING_FRAMES) | set(checker.BULK_FRAMES) | {"iteration"}
+
+
+def _load_checker():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("g1_check_records_r19", G1_DIR / "check_records.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_r19_run_sh_iterations_and_frequency_are_the_resolved_deck():
+    text = (G4_DIR / "run_r19.sh").read_text()
+    assert re.search(r"readonly BULK_ITERATIONS=5 FSBC=2", text)
+    assert _values(G4_DIR / "namelist_cfg")["namsbc.nn_fsbc"] == 2
+    assert "namsbc_blk.nn_iter_algo" not in _values(G4_DIR / "namelist_cfg")
+    if NAMELIST_REF.is_file():
+        assert _values(NAMELIST_REF)["namsbc_blk.nn_iter_algo"] == 5
+    # the deck pinned in run_r19.sh is the committed G4 deck
+    pinned = re.search(r"G4_DECK_SHA=(\w+)", text).group(1)
+    assert hashlib.sha256((G4_DIR / "namelist_cfg").read_bytes()).hexdigest() == pinned
+
+
+@needs_nemo
+def test_r19_patches_apply_unfuzzed_on_the_round4_sources(tmp_path):
+    for name in R19_PATCHES:
+        shipped, old = OLD[name]
+        target = tmp_path / f"{name}.F90"
+        target.write_bytes(shipped.read_bytes())
+        if old is not None:
+            subprocess.run(["patch", "-s", "--fuzz=0", str(target)], stdin=old.open(), check=True)
+            p5 = NEMO / "ORCA2G1_OMIP_L1_P5/MY_SRC" / f"{name}.F90"
+            if p5.is_file():
+                assert target.read_bytes() == p5.read_bytes()
+        before = target.read_text().splitlines()
+        patch = G4_DIR / f"{name}_g4_forcing_record.patch"
+        subprocess.run(["patch", "-s", "--fuzz=0", str(target)], stdin=patch.open(), check=True)
+        after = target.read_text().splitlines()
+        assert len(after) == len(before) + len(_added(name)[0])
+        it = iter(after)
+        assert all(any(line == other for other in it) for line in before)   # order kept
+
+
+def test_r19_plant_list_names_every_checker_forcing_plant():
+    text = (G4_DIR / "run_r19.sh").read_text()
+    for plant in _load_checker().FORCING_PLANTS:
+        assert plant in text
