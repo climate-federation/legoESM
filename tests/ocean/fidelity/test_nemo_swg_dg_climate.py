@@ -75,12 +75,55 @@ def test_synthetic_metrics_have_known_answer():
     assert np.array_equal(out["basin_mean_ke_m2_s2"], expected_ke)
     assert np.array_equal(out["jet_y_m"], np.full(4, 2.0))
     assert np.array_equal(out["jet_eastward_speed_m_s"], expected_mean_u[2])
-    assert out["spectrum_wavenumber_m-1"].ndim == 1
-    assert out["spectrum_wavenumber_m-1"].size > 2
+    assert out["spectrum_wavenumber_m-1"].shape == (2,)
     assert np.all(np.isfinite(out["mean_kinetic_energy_spectrum_m3_s2"]))
-    assert 0.0 <= out["top_octave_ke_fraction"][0] <= 1.0
-    assert 0.0 <= out["top_octave_enstrophy_fraction"][0] <= 1.0
-    assert np.all(out["native_grid_noise_index"] >= 0.0)
+
+
+def test_registered_default_full_json_is_branch_point_pinned():
+    summary = climate._summary(climate.diagnose(
+        _synthetic_provider(), days=2, geometry=_geometry()))
+    expected = json.loads(r'''{
+      "basin_mean_eke_m2_s2": {"max": 0.40625, "mean": 0.40625,
+        "min": 0.40625,
+        "sha256": "384a0491b37cd8f232fcae8a8ab99fc08e1edef47c36fbda6dd6a97447711b2b",
+        "shape": [2]},
+      "basin_mean_ke_m2_s2": {"max": 8.734375, "mean": 5.890625,
+        "min": 3.046875,
+        "sha256": "c377d4bda7c6969af58351ff7e6900255206e9e6132df1225b6dcbdd63921a26",
+        "shape": [2]},
+      "eke_map_m2_s2": {"max": 0.5, "mean": 0.40625, "min": 0.125,
+        "sha256": "3e6859241ea14bdda66d652316549b1e2eb4aea8bf47d3e59a949c0d1f280718",
+        "shape": [4, 4]},
+      "jet_eastward_speed_m_s": {"max": 5.0, "mean": 4.375, "min": 2.5,
+        "sha256": "b2980b76ddc11c35bc2f9b03ae3bc1162f93c353c6aa281167a9ff2f840c7b9d",
+        "shape": [4]},
+      "jet_x_m": {"max": 3.0, "mean": 1.5, "min": 0.0,
+        "sha256": "9392b85eaba90b4aa6f39e1f269927b4bd6bec47cd2e34a80cf3ed914c26dc7e",
+        "shape": [4]},
+      "jet_y_m": {"max": 2.0, "mean": 2.0, "min": 2.0,
+        "sha256": "cd34cc32a2fbe9220600b249a3fe6562dc85f45cad9f1ddd32b535591fb78415",
+        "shape": [4]},
+      "mean_kinetic_energy_spectrum_m3_s2": {"max": 3.2734375,
+        "mean": 1.63671875, "min": 0.0,
+        "sha256": "12c55abc0051072d5a2d3c2b18b225376026f7ca7ddd2339ac9365c1d93d3bad",
+        "shape": [2]},
+      "mean_speed_m_s": {"max": 5.0, "mean": 3.0625, "min": 1.0,
+        "sha256": "6fd3f618c0ec4a970ae65b06f8ba01004ce73925596f4739778076bf1e318108",
+        "shape": [4, 4]},
+      "mean_ssh_m": {"max": 1.0, "mean": 1.0, "min": 1.0,
+        "sha256": "dbd8ebb4d364765882694170cedf5afc7702dd5338a7198705c45b613f6e1c9d",
+        "shape": [4, 4]},
+      "mean_u_m_s": {"max": 5.0, "mean": 3.0625, "min": 1.0,
+        "sha256": "6fd3f618c0ec4a970ae65b06f8ba01004ce73925596f4739778076bf1e318108",
+        "shape": [4, 4]},
+      "mean_v_m_s": {"max": 0.0, "mean": 0.0, "min": 0.0,
+        "sha256": "38723a2e5e8a17aa7950dc008209944e898f69a7bd10a23c839d341e935fd5ca",
+        "shape": [4, 4]},
+      "spectrum_wavenumber_m-1": {"max": 0.25, "mean": 0.125,
+        "min": 0.0, "sha256": "bf881abdd02907ef646666ca7352c12628539f6c4ef7e95958c0a4de7446f2c5",
+        "shape": [2]}
+    }''')
+    assert summary == expected
 
 
 def test_local_grid_noise_index_catches_phase_reversed_checkerboard():
@@ -127,16 +170,20 @@ def test_comparison_refuses_different_daily_sampling():
         climate.compare((left, right), days=2)
 
 
-def test_supplied_card_requires_its_resolved_namelist():
+def test_online_diagnostics_require_card_namelist_and_refuse_unknown():
     from legoesm.ocean.fidelity.nemo_testcase_recipe import (
         SWG_DG50_NAMELIST,
         build_swg_card,
     )
 
-    with pytest.raises(Exception, match="requires its resolved namelist"):
+    with pytest.raises(Exception, match="require a card and resolved namelist"):
         climate.diagnose(
             _synthetic_provider(), days=2,
-            card=build_swg_card(SWG_DG50_NAMELIST))
+            card=build_swg_card(SWG_DG50_NAMELIST), diagnostics="online")
+    with pytest.raises(ValueError, match="unknown climate diagnostics"):
+        climate.diagnose(
+            _synthetic_provider(), days=2, geometry=_geometry(),
+            diagnostics="post-hoc")
 
 
 def test_instrument_writes_json_arrays_and_side_by_side_figure(tmp_path):

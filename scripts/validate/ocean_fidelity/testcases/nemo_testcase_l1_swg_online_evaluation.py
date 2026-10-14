@@ -96,7 +96,7 @@ def score_native_trajectory(candidate_arrays: tuple[np.ndarray, ...],
         raise ValueError("candidate and truth trajectories have different lengths")
     diagnosed = [climate.diagnose(
         _native_array_provider(name, values), days=days, card=card,
-        namelist=SWG_DG50_NAMELIST)
+        namelist=SWG_DG50_NAMELIST, diagnostics="online")
         for name, values in (("candidate", candidate_arrays),
                              ("truth", truth_arrays))]
     candidate, truth = diagnosed
