@@ -1733,6 +1733,22 @@ CITATION_MAP = {
         ('vv(ji,jj,jk,Kaa) = vv(ji,jj,jk,Kaa) + zvb(ji,jj)*vmask(ji,jj,jk)', 1),
         2],
     'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/stp2d.f90:138': ('CALL dyn_hpg( kt, Kbb     , uu, vv, Krhs )', 1),
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/dynzdf.f90:192-198': [
+        ('zzwi = - zDt_2 * ( avm(ji+1,jj,jk  )', 1),
+        ('zwd(ji,jk) = 1._wp - zzwi - zzws', 1),
+        7],
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/dynzdf.f90:361-367': [
+        ('zzwi = - zDt_2 * ( avm(ji,jj+1,jk  )', 1),
+        ('zwd(ji,jk) = 1._wp - zwi(ji,jk) - zws(ji,jk)', 1),
+        7],
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/trazdf.f90:231-233': [
+        ('zwi(ji,jk) = - p2dt * zwt(ji,jk  )', 1),
+        ('zwd(ji,jk) = (e3t_3d(ji,jj,jk)', 1),
+        3],
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/stp2d.f90:178-179': [
+        ('Ue_rhs(ji,jj) = SUM( e3u_3d(ji,jj,1:jpkm1)', 1),
+        ('Ve_rhs(ji,jj) = SUM( e3v_3d(ji,jj,1:jpkm1)', 1),
+        2],
     # --- GRIDLADDER round 6 END ---
     # --- GRIDLADDER round 7 (vorticity order, stage 3, stage F ratio, V exchange) ---
     'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/dynhpg.f90:380-394': [
