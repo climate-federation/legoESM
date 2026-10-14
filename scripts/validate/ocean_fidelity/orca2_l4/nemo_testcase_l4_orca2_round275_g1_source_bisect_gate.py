@@ -78,8 +78,13 @@ def arm_card(card, arm: str, *, plant: str = "none"):
     unknown = set(names) - MODEL - BAROTROPIC - COORDINATE
     require(not unknown, f"arm has unknown selectors: {sorted(unknown)}")
     config = base.recipe.model_config._replace(
-        **{name: True for name in names if name in MODEL},
+        **{name: False for name in MODEL},
         barotropic=base.recipe.model_config.barotropic._replace(
+            **{name: False for name in BAROTROPIC}),
+    )
+    config = config._replace(
+        **{name: True for name in names if name in MODEL},
+        barotropic=config.barotropic._replace(
             **{name: True for name in names if name in BAROTROPIC}),
     )
     z_coord = base.recipe.z_coord._replace(
