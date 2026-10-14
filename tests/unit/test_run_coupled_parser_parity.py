@@ -28,11 +28,14 @@ def test_every_amip_dest_is_a_coupled_dest():
     missing = sorted(set(amip) - set(coupled))
     assert not missing, missing
     for dest, a in amip.items():
-        if dest != "grid_type":   # the coupled lane couples four grids only
+        if dest not in ("grid_type", "surface_bulk_scheme"):
             assert coupled[dest].choices == a.choices, dest
         assert coupled[dest].type == a.type, dest
     assert sorted(coupled["grid_type"].choices) == [
         "cubed_sphere", "gaussian", "latlon", "voronoi"]
+    # the coupled lane couples four grids only; no surface fluxes cannot drive an ocean
+    assert coupled["surface_bulk_scheme"].choices == [
+        s for s in amip["surface_bulk_scheme"].choices if s != "none"]
 
 
 @pytest.mark.parametrize("deck", [
@@ -109,6 +112,16 @@ def test_old_coupled_yaml_keys_still_load(tmp_path):
         load_yaml_config(str(p), coupled_parser(), renamed_keys=_COUPLED_RENAMED_KEYS)
     with pytest.raises(SystemExit, match="unknown key"):
         load_yaml_config(str(p), coupled_parser())
+
+
+def test_child_old_key_overrides_included_base_new_key(tmp_path):
+    from scripts.run.run_coupled import _COUPLED_RENAMED_KEYS
+    (tmp_path / "base.yaml").write_text("grid_type: latlon\n")
+    child = tmp_path / "child.yaml"
+    child.write_text("include: base.yaml\ngrid: voronoi\n")
+    out = load_yaml_config(str(child), coupled_parser(),
+                           renamed_keys=_COUPLED_RENAMED_KEYS)
+    assert out == {"grid_type": "voronoi"}
 
 
 def test_main_only_amip_dests_are_computed_not_guessed():

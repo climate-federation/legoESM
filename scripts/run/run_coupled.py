@@ -559,6 +559,10 @@ def _coupled_atm_config(args):
     from legoesm.driver.config import ExperimentConfig
     return cfg._replace(
         **{f: getattr(ExperimentConfig(), f) for f in _LAND_TILE_ONLY},
+        # Pinned kk2000: an unset law resolves to kk2000_cam6 under mg (needs CLUBB relvar).
+        morrison_warm_rain_scheme=(
+            args.morrison_warm_rain_scheme
+            or ("kk2000" if args.microphysics == "morrison" else None)),
         dycore=cfg.dycore._replace(
             model_type="hydrostatic",
             discretization=(explicit_discretization
@@ -568,6 +572,9 @@ def _coupled_atm_config(args):
             use_polar_filter=(args.grid_type == "latlon" and args.use_polar_filter),
         ),
         output=cfg.output._replace(
+            # The driver gets the output root itself; the coupled manifest
+            # records the atmosphere without it, so a rerun elsewhere replays.
+            output_dir="",
             max_wallclock_seconds=(args.max_wallclock_hours * 3600.0
                                    if args.max_wallclock_hours
                                    else cfg.output.max_wallclock_seconds),
@@ -620,6 +627,10 @@ def build_parser():
     _alias(parser, "rrtmgp_gpoint_checkpoint", "--rrtmgp-gpoint-checkpoint",
            store_true=True)
     _alias(parser, "unfused_radiation", "--no-unfused-radiation", store_false=True)
+    acts = {a.dest: a for a in parser._actions}
+    # "none" (no surface fluxes) cannot drive an ocean.
+    acts["surface_bulk_scheme"].choices = [
+        s for s in acts["surface_bulk_scheme"].choices if s != "none"]
 
     # Preset
     parser.add_argument(

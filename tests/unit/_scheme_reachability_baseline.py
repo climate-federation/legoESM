@@ -40,4 +40,7 @@ UNREACHABLE_SCHEMES = {
         "Shared parser with run_amip (P5a): same untrained-network exclusion.",
     ("run_coupled", "clouds", "resolved"):
         "Shared parser with run_amip (P5a): same CRM-only-convention exclusion.",
+    ("run_coupled", "surface_bulk_scheme", "none"):
+        "No surface bulk fluxes means no air-sea exchange, so nothing drives "
+        "the ocean; run_coupled refuses it (test_surface_bulk_none).",
 }
