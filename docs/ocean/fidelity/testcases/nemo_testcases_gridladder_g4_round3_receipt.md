@@ -157,3 +157,14 @@ Admit the record (`run_r19.sh --admit-existing` after the operator's
 first non-bit operand (option 2).
 
 ## 9. Review verdict and evidence hashes
+
+Citation gate on this receipt (from section 1): **PASS**, 18 citations, 0
+failures, 0 unmapped, map audit clean; planted shift exits 1. Round 18's
+receipt: PASS, 12 citations.
+
+SHA-256 prefixes, round19/: preflight.log=c677b539646abe14,
+citation_receipt.json=96e135ba4bd2ef71, citation_plant_r19.log=232ccb74c47dead4,
+citation_round18_receipt.json=b97f28f850ad049c, citation_plant.log=f364a7f1a1dbb7e4,
+codex_review_r19.log=b0f03de941316936, tests_focused_final.log=857961725c58ea85,
+tests_citation_gate.log=09982498970dbb8e, r17_readmit.json=6d05567bc024e364
+(= round 17's admission, re-admitted by the edited checker).
