@@ -15,6 +15,9 @@ if [[ "$(sed 's/kstp <= nit000 + 9 )/kstp <= nit000 + 49 )/' "$here/stprk3_g1_st
   printf 'REFUSE: the stage-50 patch is not the round-1 patch with its gate moved\n' >&2
   exit 68
 fi
+# run.sh refuses a target that already exists, so the reference binary is
+# rebuilt under its own new name too (same sources as round 1's reference).
+export REF_NAME=ORCA2G1_OMIP_L1_R3REF
 export RUN_NAME=ORCA2G1_OMIP_L1_P4
 export STAGE_STEPS=50
 export STEP_PATCH=$here/stprk3_g1_step_record_stage50.patch

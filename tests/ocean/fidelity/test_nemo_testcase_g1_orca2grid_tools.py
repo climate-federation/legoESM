@@ -181,6 +181,8 @@ def test_round3_acquisition_only_moves_the_stage_frame_gate():
     assert moved == base.replace("kstp <= nit000 + 9 )", "kstp <= nit000 + 49 )")
     wrapper = (CASE / "run_r3.sh").read_text()
     assert "export RUN_NAME=ORCA2G1_OMIP_L1_P4" in wrapper
+    assert "export REF_NAME=ORCA2G1_OMIP_L1_R3REF" in wrapper
+    assert "REF_NAME=${REF_NAME:-ORCA2G1_OMIP_L1}" in (CASE / "run.sh").read_text()
     assert "export STAGE_STEPS=50" in wrapper and 'exec "$here/run.sh" "$@"' in wrapper
     assert "makenemo" not in wrapper and "mpirun" not in wrapper
     text = (CASE / "run.sh").read_text()
