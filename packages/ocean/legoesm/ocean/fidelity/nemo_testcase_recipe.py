@@ -3502,7 +3502,7 @@ _ORCA2G1_REQUIRED_SWITCHES: dict[str, object] = {
     "namtra_adv.ln_traadv_ubs": False, "namtra_adv.ln_traadv_qck": False,
     "namtra_ldf.ln_traldf_off": True, "namtra_mle.ln_mle": False,
     "namtra_eiv.ln_ldfeiv": False, "namtra_dmp.ln_tradmp": False,
-    "namdyn_adv.ln_dynadv_off": True, "namdyn_adv.ln_dynadv_vec": False,
+    # ln_dynadv_OFF / ln_dynadv_vec (and nn_dynkeg): the rung table (G1b)
     "namdyn_adv.ln_dynadv_cen2": False, "namdyn_adv.ln_dynadv_up3": False,
     "namdyn_vor.ln_dynvor_een": True, "namdyn_vor.nn_e3f_typ": 0,
     "namdyn_hpg.ln_hpg_sco": True,
@@ -3564,7 +3564,8 @@ def read_orca2g1_deck(deck_root: str | Path) -> ORCA2G1Deck:
 
     path = Path(deck_root) / "namelist_cfg"
     values = _orca2g1_namelist_values(path)
-    for name, want in {**_ORCA2G1_REQUIRED_SWITCHES, **_orca2g_sbc_switch_set(values)}.items():
+    for name, want in {**_ORCA2G1_REQUIRED_SWITCHES, **_orca2g_sbc_switch_set(values),
+                       **_orca2g_dynadv_switch_set(values)}.items():
         if name not in values:
             raise ValueError(f"ORCA2G1 deck does not state {name}")
         if values[name] != want or type(values[name]) is not type(want):
@@ -3778,14 +3779,24 @@ def build_orca2g1_flat_card(deck_root: str | Path, case: str = "ORCA2G1-flat") -
         # vertical diffusion, which this deck switches off.
         convection=base.physics.convection._replace(scheme="none"),
     )
+    if _ORCA2G_DYNADV_VEC[case]:
+        # ln_dynadv_vec -> np_VEC_c2 (dynadv.f90:186): the ORCA2 identity's own
+        # arm, unchanged -- vector_invariant, c2 (nn_dynkeg = 0), dyn_zad's
+        # advective form, een_total (dynvor.f90:861-864 ntot = np_CRV).  NEMO
+        # then takes the velocity-form external update (dynspg_ts.f90 "Vector
+        # form" branch), so G1's two flux-form solver statements are not
+        # NEMO's on this rung and are not selected (below).
+        dynadv = {name: getattr(base, name) for name in _ORCA2G_VEC_SELECTORS}
+    else:
+        # ln_dynadv_OFF -> np_LIN_dyn (dynadv.f90:185).
+        dynadv = dict(momentum_advection="flux_form", momentum_flux_scheme="none",
+                      vertical_momentum_scheme="none", vorticity_scheme="een_planetary")
     model_config = base._replace(
         A_v=0.0, K_v=0.0, physics=physics,
         runoff_depth_spread_m=0.0, runoff_depth_spread_map=None,
-        # ln_dynadv_OFF -> np_LIN_dyn (dynadv.f90:185).
-        momentum_advection="flux_form",
-        momentum_flux_scheme="none", vertical_momentum_scheme="none",
+        **dynadv,
         adaptive_implicit_vertadv=False,
-        vorticity_scheme="een_planetary", een_fold_image_v_row=True, rk3_stage1_ssh_nemo_literal=True, rk3_stage1_rhs_nemo_literal=True, rk3_stage_velocity_written_order=True, een_vorticity_written_order=True, zdf_barotropic_removal_nemo_literal=True, rk3_fold_exchange_top_v_row=True, rk3_stage_r3f_nemo_literal=True, rk3_stage_r3t_nemo_literal=True, nemo_eos_gdept_rounded_product=True, rk3_stage_r3uv_nemo_literal=True, barotropic=base.barotropic._replace(barotropic_fold_top_v_face_ssh=True, barotropic_flux_update_nemo_literal=True, barotropic_substep_dt_nemo_literal=True, barotropic_entry_depth_nemo_literal=True, barotropic_een_ratio_fold_exchange=True, barotropic_een_fe3mask_pivot_row=True, barotropic_een_ratio_written_order=True),  # noqa: E501
+        een_fold_image_v_row=True, rk3_stage1_ssh_nemo_literal=True, rk3_stage1_rhs_nemo_literal=True, rk3_stage_velocity_written_order=True, een_vorticity_written_order=True, zdf_barotropic_removal_nemo_literal=True, rk3_fold_exchange_top_v_row=True, rk3_stage_r3f_nemo_literal=True, rk3_stage_r3t_nemo_literal=True, nemo_eos_gdept_rounded_product=True, rk3_stage_r3uv_nemo_literal=True, barotropic=base.barotropic._replace(barotropic_fold_top_v_face_ssh=True, barotropic_flux_update_nemo_literal=not _ORCA2G_DYNADV_VEC[case], barotropic_substep_dt_nemo_literal=True, barotropic_entry_depth_nemo_literal=not _ORCA2G_DYNADV_VEC[case], barotropic_een_ratio_fold_exchange=True, barotropic_een_fe3mask_pivot_row=True, barotropic_een_ratio_written_order=True),  # noqa: E501
         tracer_advection="none",                        # traadv.f90:444
         lateral_viscosity=base.lateral_viscosity._replace(A_h=0.0),
         K_h=0.0, K_bih=0.0,                             # ln_traldf_OFF
@@ -3840,9 +3851,11 @@ def _orca2g1_selector_failures(card: NEMOTestcaseCard) -> list[str]:
         "wall_fill": bool(cfg.tracer_wall_neumann_fill),
         "ln_eos80": cfg.eos == "nemo_eos80",
         "nn_bt_flt=3": cfg.barotropic.barotropic_time_filter == "nemo_ab3am4",
-        "ln_dynadv_OFF": (cfg.momentum_advection, cfg.momentum_flux_scheme,
-                          cfg.vertical_momentum_scheme) == ("flux_form", "none", "none"),
-        "ln_dynvor_een": (cfg.vorticity_scheme, cfg.een_fold_image_v_row) == ("een_planetary", True), "zhvp2_e fold row": cfg.barotropic.barotropic_fold_top_v_face_ssh is True, "ua_e flux form": cfg.barotropic.barotropic_flux_update_nemo_literal is True, "rDt_e": cfg.barotropic.barotropic_substep_dt_nemo_literal is True, "hu_e entry": cfg.barotropic.barotropic_entry_depth_nemo_literal is True, "r3 fold exchange": cfg.barotropic.barotropic_een_ratio_fold_exchange is True, "fe3mask pivot row": cfg.barotropic.barotropic_een_fe3mask_pivot_row is True, "r3 written order": cfg.barotropic.barotropic_een_ratio_written_order is True, "r3t stored product": card.recipe.z_coord.nemo_r3t_stored_product is True, "stage-1 ssh": cfg.rk3_stage1_ssh_nemo_literal is True, "stage-1 Krhs": cfg.rk3_stage1_rhs_nemo_literal is True, "stage velocity order": cfg.rk3_stage_velocity_written_order is True, "vor_een order": cfg.een_vorticity_written_order is True, "dyn_zdf residual": cfg.zdf_barotropic_removal_nemo_literal is True, "vv(Kaa) fold exchange": cfg.rk3_fold_exchange_top_v_row is True, "stage r3f": cfg.rk3_stage_r3f_nemo_literal is True, "stage r3t": cfg.rk3_stage_r3t_nemo_literal is True, "eos gdept": cfg.nemo_eos_gdept_rounded_product is True, "stage r3u/r3v": cfg.rk3_stage_r3uv_nemo_literal is True, "dyn_zdf divisors": cfg.zdf_momentum_nemo_face_thickness is _ORCA2G_ZDF_FACES.get(card.case), "tra_zdf diagonal": cfg.zdf_tracer_nemo_rounded_thickness is _ORCA2G_TRA_ZDF_ROUNDED.get(card.case), "Ue_rhs ascending SUM": cfg.barotropic_rhs_ascending_level_sum is _ORCA2G_UE_RHS_ASCENDING.get(card.case), "dyn_zdf r3u(Kmm)": cfg.zdf_momentum_stage_r3u_nemo_literal is _ORCA2G_ZDF_STAGE_R3U.get(card.case),  # noqa: E501
+        ("ln_dynadv_vec" if _ORCA2G_DYNADV_VEC.get(card.case) else "ln_dynadv_OFF"): tuple(getattr(cfg, name) for name in _ORCA2G_VEC_SELECTORS[:4]) == (
+            _ORCA2G_VEC_ARM[:4] if _ORCA2G_DYNADV_VEC.get(card.case)
+            else ("flux_form", "c2", "none", "none")),  # G1's c2: inert
+        "ln_dynvor_een": (cfg.vorticity_scheme, cfg.een_fold_image_v_row) == (
+            "een_total" if _ORCA2G_DYNADV_VEC.get(card.case) else "een_planetary", True), "zhvp2_e fold row": cfg.barotropic.barotropic_fold_top_v_face_ssh is True, "ua_e flux form": cfg.barotropic.barotropic_flux_update_nemo_literal is not _ORCA2G_DYNADV_VEC.get(card.case), "rDt_e": cfg.barotropic.barotropic_substep_dt_nemo_literal is True, "hu_e entry": cfg.barotropic.barotropic_entry_depth_nemo_literal is not _ORCA2G_DYNADV_VEC.get(card.case), "r3 fold exchange": cfg.barotropic.barotropic_een_ratio_fold_exchange is True, "fe3mask pivot row": cfg.barotropic.barotropic_een_fe3mask_pivot_row is True, "r3 written order": cfg.barotropic.barotropic_een_ratio_written_order is True, "r3t stored product": card.recipe.z_coord.nemo_r3t_stored_product is True, "stage-1 ssh": cfg.rk3_stage1_ssh_nemo_literal is True, "stage-1 Krhs": cfg.rk3_stage1_rhs_nemo_literal is True, "stage velocity order": cfg.rk3_stage_velocity_written_order is True, "vor_een order": cfg.een_vorticity_written_order is True, "dyn_zdf residual": cfg.zdf_barotropic_removal_nemo_literal is True, "vv(Kaa) fold exchange": cfg.rk3_fold_exchange_top_v_row is True, "stage r3f": cfg.rk3_stage_r3f_nemo_literal is True, "stage r3t": cfg.rk3_stage_r3t_nemo_literal is True, "eos gdept": cfg.nemo_eos_gdept_rounded_product is True, "stage r3u/r3v": cfg.rk3_stage_r3uv_nemo_literal is True, "dyn_zdf divisors": cfg.zdf_momentum_nemo_face_thickness is _ORCA2G_ZDF_FACES.get(card.case), "tra_zdf diagonal": cfg.zdf_tracer_nemo_rounded_thickness is _ORCA2G_TRA_ZDF_ROUNDED.get(card.case), "Ue_rhs ascending SUM": cfg.barotropic_rhs_ascending_level_sum is _ORCA2G_UE_RHS_ASCENDING.get(card.case), "dyn_zdf r3u(Kmm)": cfg.zdf_momentum_stage_r3u_nemo_literal is _ORCA2G_ZDF_STAGE_R3U.get(card.case),  # noqa: E501
         "ln_traadv_OFF": cfg.tracer_advection == "none",
         "ln_dynldf_OFF": all(getattr(lv, name) == 0.0 for name in (
             "A_h", "B_h", "C_smag", "C_smag_lap", "C_leith")),
@@ -3886,6 +3899,8 @@ def validate_orca2g1_flat_card(card: NEMOTestcaseCard, deck_root: str | Path) ->
     init_ts = orca2g_initial_ts(deck_root, card.case, wet3)
     checks = {
         "case": card.case in _ORCA2G_JPK,
+        "ln_dynadv_vec": _orca2g1_namelist_values(Path(deck_root) / "namelist_cfg").get(
+            "namdyn_adv.ln_dynadv_vec") is _ORCA2G_DYNADV_VEC.get(card.case),
         "rn_Dt": card.dt_s == deck.rn_Dt_s,
         "nn_itend": card.n_steps == deck.nn_itend,
         "rn_bt_alpha": cfg.barotropic.nemo_barotropic_filter_alpha == deck.rn_bt_alpha,
@@ -3937,7 +3952,7 @@ def validate_orca2g1_flat_card_for_execution(
 # ``domain_cfg.nc``.  The builder, the deck reader, the bump and every selector
 # are G1's; only the entries below differ by rung.
 _ORCA2G_JPK: dict[str, int] = {"ORCA2G1-flat": 2, "ORCA2G2-zps": 31, "ORCA2G3-ts": 31,
-                             "ORCA2G4-sbc": 31}
+                             "ORCA2G4-sbc": 31, "ORCA2G1b-vec": 2}
 ORCA2G2_UNMEASURED: tuple[str, ...] = (
     "multi_level_partial_cell_step",   # round 2: record admitted, not at the bar
 )
@@ -3956,27 +3971,66 @@ ORCA2G4_UNMEASURED: tuple[str, ...] = (
     "sss_restoring",                   # sbcssr.f90 nn_sssr = 2
     "freshwater_budget_nn_fwb2",       # sbcfwb.f90 (zero correction in year 1)
 )
-_ORCA2G_UNMEASURED = {"ORCA2G1-flat": ORCA2G1_UNMEASURED,
+# G1b = G1 + ORCA2's vector-form momentum advection (user, 2026-10-14).
+ORCA2G1B_UNMEASURED: tuple[str, ...] = (
+    "g1b_record_not_admitted",
+    "vector_form_relative_vorticity_step",   # np_CRV EEN, KE gradient, velocity-form stages
+)
+_ORCA2G_UNMEASURED = {"ORCA2G1-flat": ORCA2G1_UNMEASURED, "ORCA2G1b-vec": ORCA2G1B_UNMEASURED,
                       "ORCA2G2-zps": ORCA2G2_UNMEASURED,
                       "ORCA2G3-ts": ORCA2G3_UNMEASURED,
                       "ORCA2G4-sbc": ORCA2G4_UNMEASURED}
 # NEMO's dyn_zdf matrix divisors (dynzdf.f90:191-205, :360-374): selected by
 # G2, the first rung with more than one level.  G1 has no interface to solve
 # across, so its card stays as certified.
-_ORCA2G_ZDF_FACES = {"ORCA2G1-flat": False, "ORCA2G2-zps": True, "ORCA2G3-ts": True,
+_ORCA2G_ZDF_FACES = {"ORCA2G1-flat": False, "ORCA2G1b-vec": False, "ORCA2G2-zps": True, "ORCA2G3-ts": True,
                      "ORCA2G4-sbc": True}
 # NEMO's tra_zdf diagonal rounding (trazdf.f90:233; G2 round 3), its own row:
 # G1's one-level solve builds no such diagonal.
-_ORCA2G_TRA_ZDF_ROUNDED = {"ORCA2G1-flat": False, "ORCA2G2-zps": True, "ORCA2G3-ts": True,
+_ORCA2G_TRA_ZDF_ROUNDED = {"ORCA2G1-flat": False, "ORCA2G1b-vec": False, "ORCA2G2-zps": True, "ORCA2G3-ts": True,
                            "ORCA2G4-sbc": True}
 # NEMO's ascending-k depth mean of the 3-D right-hand side (stp2d.f90:178-179;
 # G2 round 4), its own row: G1's one-level sum has no order to choose.
-_ORCA2G_UE_RHS_ASCENDING = {"ORCA2G1-flat": False, "ORCA2G2-zps": True, "ORCA2G3-ts": True,
+_ORCA2G_UE_RHS_ASCENDING = {"ORCA2G1-flat": False, "ORCA2G1b-vec": False, "ORCA2G2-zps": True, "ORCA2G3-ts": True,
                             "ORCA2G4-sbc": True}
 # dyn_zdf's interface thickness reads the stored stage ratio r3u(Kmm)
 # (dynzdf.f90:193-195, stprk3_stg.f90:216-217; G3 round 3), G3's card only.
-_ORCA2G_ZDF_STAGE_R3U = {"ORCA2G1-flat": False, "ORCA2G2-zps": False, "ORCA2G3-ts": True,
+_ORCA2G_ZDF_STAGE_R3U = {"ORCA2G1-flat": False, "ORCA2G1b-vec": False, "ORCA2G2-zps": False, "ORCA2G3-ts": True,
                          "ORCA2G4-sbc": True}
+
+
+# ln_dynadv_vec by rung: only G1b selects ORCA2's vector form so far.
+_ORCA2G_DYNADV_VEC = {"ORCA2G1-flat": False, "ORCA2G2-zps": False, "ORCA2G3-ts": False,
+                      "ORCA2G4-sbc": False, "ORCA2G1b-vec": True}
+_ORCA2G_VEC_SELECTORS = ("momentum_advection", "ke_gradient_scheme",
+                         "vertical_momentum_scheme", "momentum_flux_scheme",
+                         "vorticity_scheme")
+# The ORCA2 identity's values (momentum_flux_scheme "upwind" is the inert
+# library value every vector-form card carries; dyn_adv never reaches it).
+_ORCA2G_VEC_ARM = ("vector_invariant", "c2", "nemo_advective", "upwind", "een_total")
+# The &namdyn_adv lines that move with the rung: (OFF value, vector value);
+# nn_dynkeg is stated only by a vector deck (ORCA2 namelist_cfg:347).
+_ORCA2G_DYNADV_SWITCHES: dict[str, tuple[object, object]] = {
+    "namdyn_adv.ln_dynadv_off": (True, False), "namdyn_adv.ln_dynadv_vec": (False, True),
+}
+
+
+def _orca2g_dynadv_switch_set(values: dict[str, object]) -> dict[str, object]:
+    """G1's linear dynamics or ORCA2's vector form, chosen by ln_dynadv_vec."""
+
+    pick = int(values.get("namdyn_adv.ln_dynadv_vec") is True)
+    out = {name: pair[pick] for name, pair in _ORCA2G_DYNADV_SWITCHES.items()}
+    if pick:
+        out["namdyn_adv.nn_dynkeg"] = 0
+    elif "namdyn_adv.nn_dynkeg" in values:
+        raise ValueError("ORCA2G1 deck states nn_dynkeg without the vector form")
+    return out
+
+
+def build_orca2g1b_vec_card(deck_root: str | Path) -> NEMOTestcaseCard:
+    """ORCA2G1b: the G1 card with ORCA2's vector-form momentum advection."""
+
+    return build_orca2g1_flat_card(deck_root, "ORCA2G1b-vec")
 
 
 def _orca2g_strait_shlat(domain_path: Path, shape) -> np.ndarray:
@@ -3999,12 +4053,12 @@ def build_orca2g2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
 # ORCA2G3 (grid ladder rung G3, DECISION 117): G2 with ONE switch, the initial
 # state.  &namtsd reads ORCA2's own T/S climatology with ORCA2's own lines
 # (ORCA2_OMIP_L4/EXP00/namelist_cfg:47,50,54-55); damping stays off.
-_ORCA2G_TSD_INIT = {"ORCA2G1-flat": False, "ORCA2G2-zps": False, "ORCA2G3-ts": True,
+_ORCA2G_TSD_INIT = {"ORCA2G1-flat": False, "ORCA2G1b-vec": False, "ORCA2G2-zps": False, "ORCA2G3-ts": True,
                     "ORCA2G4-sbc": True}
 # Decision 120: G3 and above set ln_tsd_dmp = T with ln_tradmp = F, so NEMO
 # applies the ORCA_R2 hand alterations to the initial state (dtatsd.f90:219)
 # and never restores (dta_tsd's only per-step caller is tradmp.f90:181).
-_ORCA2G_TSD_DMP = {"ORCA2G1-flat": False, "ORCA2G2-zps": False, "ORCA2G3-ts": True,
+_ORCA2G_TSD_DMP = {"ORCA2G1-flat": False, "ORCA2G1b-vec": False, "ORCA2G2-zps": False, "ORCA2G3-ts": True,
                    "ORCA2G4-sbc": True}
 _ORCA2G3_TSD_FIELDS = {
     "namtsd.cn_dir": "'./'",
@@ -4072,7 +4126,7 @@ def build_orca2g3_ts_card(deck_root: str | Path) -> NEMOTestcaseCard:
 # ORCA2G4 (grid ladder rung G4, DECISION 117): G3 with ONE switch, the surface
 # boundary condition.  &namsbc is ORCA2's (ORCA2_OMIP_L4/EXP00/namelist_cfg:
 # 80-92) with nn_ice = 0, and the four data groups are ORCA2's lines.
-_ORCA2G_SBC = {"ORCA2G1-flat": False, "ORCA2G2-zps": False, "ORCA2G3-ts": False,
+_ORCA2G_SBC = {"ORCA2G1-flat": False, "ORCA2G1b-vec": False, "ORCA2G2-zps": False, "ORCA2G3-ts": False,
                "ORCA2G4-sbc": True}
 # The &namsbc switches that move with the rung: (G1-G3 value, G4 value).
 _ORCA2G_SBC_SWITCHES: dict[str, tuple[object, object]] = {
@@ -4167,6 +4221,7 @@ __all__ = (
     "build_orca2_initial_ts",
     "build_orca2_zps_card",
     "build_orca2g1_flat_card",
+    "build_orca2g1b_vec_card",
     "build_orca2g2_zps_card",
     "build_orca2g3_ts_card",
     "build_orca2g4_sbc_card",
