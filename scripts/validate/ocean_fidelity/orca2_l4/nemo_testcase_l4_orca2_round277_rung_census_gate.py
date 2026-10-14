@@ -159,7 +159,8 @@ def main() -> int:
                     "classification inputs are required")
             result = r276.classify(*args.classify, plant=args.plant)
         require(args.plant == "none", f"{args.plant} plant stayed green")
-    except (GateError, OSError, KeyError, TypeError, ValueError,
+    except (GateError, r276.decision96.GateError, OSError, KeyError,
+            TypeError, ValueError,
             StopIteration) as error:
         marker = "PLANT-FIRED" if args.plant != "none" else "REFUSE"
         print(f"STATUS {marker}: {error}")

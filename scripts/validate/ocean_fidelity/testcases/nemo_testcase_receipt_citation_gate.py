@@ -1749,6 +1749,10 @@ CITATION_MAP = {
         ('Ue_rhs(ji,jj) = SUM( e3u_3d(ji,jj,1:jpkm1)', 1),
         ('Ve_rhs(ji,jj) = SUM( e3v_3d(ji,jj,1:jpkm1)', 1),
         2],
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/stprk3_stg.f90:215-217': [
+        ('r3t(:,:,Kaa) = r1_2 * ( r3t(:,:,Kbb) + r3ta(:,:) )', 1),
+        ('r3v(:,:,Kaa) = r1_2 * ( r3v(:,:,Kbb) + r3va(:,:) )', 1),
+        3],
     # --- GRIDLADDER round 6 END ---
     # --- GRIDLADDER round 7 (vorticity order, stage 3, stage F ratio, V exchange) ---
     'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/dynhpg.f90:380-394': [
