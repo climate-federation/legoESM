@@ -737,6 +737,17 @@ def solve_richards(
     # invert only approximately (round trip off by up to ~0.08 m3/m3), so there
     # the debited layer's psi carries that pre-existing inverse error; resetting
     # theta from psi instead destroyed ~0.3 kg/m2 per step on a dry column.
+    # A deficit the unsaturated room could not take back (a ponded, saturated
+    # column whose last unconverged iterate lost water: measured up to 4 mm per
+    # step) goes back into the pond, the overflow above pond_max to overland
+    # runoff, so the step closes.  Unconverged columns only: a converged column
+    # carries round-off here, and a round-off pond would switch on pond physics.
+    returned = jnp.where(converged, 0.0,
+                         jnp.maximum(-(_budget(theta_final) - refill), 0.0))
+    pond_total = surface_water_new + returned
+    surface_water_new = jnp.minimum(pond_total, richards_config.pond_max)
+    runoff_surface = runoff_surface + (pond_total - surface_water_new) / dt
+    runoff_surface_kgm2s = runoff_surface * constants.rho_water
     water_created = _budget(theta_final) - refill
 
     return RichardsOutput(

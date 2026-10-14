@@ -159,3 +159,54 @@ def test_float32_gradient_finite_with_no_room_below_saturation():
 
     g = jax.grad(loss)(jnp.zeros(2, dtype=jnp.float32))
     assert bool(jnp.all(jnp.isfinite(g)))
+
+
+# Ponded, saturated column recorded from the same production day (rank 9): the
+# last unconverged iterate lost 7.8 mm, the unsaturated room took back 3.7 mm,
+# and the remaining 4.15 mm was left unbooked in water_created.
+_COL_C = dict(
+    psi=(0.0023566209578574585, -3.2026816784060446e-05, -3.2026816784060446e-05,
+         -3.2026816784060446e-05, -3.2026816784060446e-05, 0.0067904783601186874,
+         0.02089967221276129, 0.049126764102415066, 0.011893385860325506,
+         -3.2026816784060446e-05),
+    theta=(0.3900000919082174, 0.39, 0.39, 0.39, 0.39, 0.3900002648286561,
+           0.3900008150872163, 0.3900019159438, 0.39000046384204856, 0.39),
+    sink=(5.250675370930875e-08, 2.6025238833471116e-08, 1.2787446511059473e-08,
+          6.174361291360322e-09, 2.878978695216838e-09, 1.251875879574599e-09,
+          4.734094347261932e-10, 1.3539984859767316e-10, 2.215188632460956e-11,
+          1.1858391396658656e-12),
+    flux_top=-9.869970764942571e-09,
+    pond=0.004164217237920083)
+
+
+def test_unreturnable_deficit_goes_back_to_the_pond():
+    col = _COL_C
+    rc = MultiLayerLandConfig().richards
+    out = solve_richards(
+        jnp.asarray([col["psi"]]), jnp.asarray([col["theta"]]), make_soil_grid_custom(_DZ),
+        _HYDRO, rc, jnp.asarray([col["flux_top"]]), jnp.asarray([col["sink"]]), _DT,
+        surface_water=jnp.asarray([col["pond"]]))
+    assert not bool(out.converged[0])
+    dz = np.asarray(_DZ)
+    # in - out - d(storage) over soil + pond, drainage and overland runoff [m]
+    residual = (np.asarray(out.theta_new[0]) @ dz - np.asarray(col["theta"]) @ dz
+                + float(out.surface_water[0]) - col["pond"]
+                - (col["flux_top"] - np.asarray(col["sink"]) @ dz) * _DT
+                + (float(out.runoff_surface[0]) + float(out.runoff_subsurface[0]))
+                / constants.rho_water * _DT
+                - float(out.refill[0]))
+    assert abs(residual) < 1e-12
+    assert abs(float(out.water_created[0])) < 1e-12
+    assert 0.0 < float(out.surface_water[0]) <= rc.pond_max
+
+
+def test_returned_deficit_above_pond_max_spills_to_runoff():
+    col = _COL_C
+    rc = MultiLayerLandConfig().richards._replace(pond_max=0.001)
+    out = solve_richards(
+        jnp.asarray([col["psi"]]), jnp.asarray([col["theta"]]), make_soil_grid_custom(_DZ),
+        _HYDRO, rc, jnp.asarray([col["flux_top"]]), jnp.asarray([col["sink"]]), _DT,
+        surface_water=jnp.asarray([col["pond"]]))
+    assert float(out.surface_water[0]) <= rc.pond_max
+    assert float(out.runoff_surface[0]) > 0.0
+    assert abs(float(out.water_created[0])) < 1e-12
