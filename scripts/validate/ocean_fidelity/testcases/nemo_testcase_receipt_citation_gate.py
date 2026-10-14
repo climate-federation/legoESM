@@ -1705,6 +1705,7 @@ FILES = {
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
     # --- GRIDLADDER round 22 (G1b preregistration) ---
+    'ORCA2G1_OMIP_L1_R4REF/BLD/ppsrc/nemo/dynadv.f90:191': "IF( nn_dynkeg /= nkeg_C2 .AND. nn_dynkeg /= nkeg_HW )   CALL ctl_stop( 'KEG scheme wrong value of nn_dynkeg' )",
     'ORCA2G1_OMIP_L1_R4REF/BLD/ppsrc/nemo/dynadv.f90:186': 'IF( ln_dynadv_vec  ) THEN   ;   ioptio = ioptio + 1   ;   n_dynadv = np_VEC_c2    ;   r_stb_thres_dyn = pp_stb_thres_dync2   ;  r_stb_cstra_dyn = pp_stb_cstra_dync2   ;  ENDIF',
     'ORCA2G1_OMIP_L1_R4REF/BLD/ppsrc/nemo/dynvor.f90:864': 'ntot = np_CRV        ! relative + planetary vorticity',
     'ORCA2G1_OMIP_L1_R4REF/BLD/ppsrc/nemo/dynvor.f90:744-748': [('CASE ( np_CRV )                           !* Coriolis + relative vorticity', 4), '&                          ) * r1_e1e2f(ji,jj)   ) * z1_e3f(ji,jj)', 5],
@@ -1722,7 +1723,8 @@ CITATION_MAP = {
     'ORCA2G1_OMIP_L1_R4REF/BLD/ppsrc/nemo/dynspg_ts.f90:674': 'IF( (.NOT.(ln_dynadv_vec .OR. lk_linssh)) .AND. ll_bt_av ) THEN                  ! at this stage, pssh(:,:,:,Krhs) has been corrected: compute new depths at velocity points',
     'ORCA2G1_OMIP_L1_R4REF/BLD/ppsrc/nemo/dynspg_ts.f90:533': 'IF( ln_dynadv_vec .OR. lk_linssh ) THEN      !* Vector form',
     'ORCA2G1_OMIP_L1_R4REF/BLD/ppsrc/nemo/in_out_manager.f90:51': 'INTEGER, DIMENSION(10) :: nn_stocklist  !: restart dump times',
-    'ORCA2G1_OMIP_L1_R4REF/BLD/ppsrc/nemo/stpctl.f90:243-246': ['IF(  zmax(1) >   20._wp .OR.                  &         ! too large sea surface height ( > 20 m )', '& zmax(4) <= zminsal .OR.                  &         ! negative or zero sea surface salinity', 4],
+    'ORCA2G1_OMIP_L1_R4REF/BLD/ppsrc/nemo/stpctl.f90:243-250': ['IF(  zmax(1) >   20._wp .OR.                  &         ! too large sea surface height ( > 20 m )', '& ABS(   SUM(zmax(1:jptst)) ) > HUGE(1._wp) ) THEN   ! Infinity encounter in the tests', 8],
+    'ORCA2G1_OMIP_L1_R4REF/BLD/ppsrc/nemo/stpctl.f90:310': "IF(lwp) THEN   ;   CALL ctl_stop( ctmp1, ' ', ctmp2, ctmp3, ctmp4, ctmp5, ctmp6, ' ', ctmp7 )",
     # --- GRIDLADDER round 1 (G1 survey) BEGIN ---
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynspg_ts.f90:1056-1080': [
         ('zcmax = MAXVAL( zcu(Nis0:Nie0,Njs0:Nje0) )', 1),

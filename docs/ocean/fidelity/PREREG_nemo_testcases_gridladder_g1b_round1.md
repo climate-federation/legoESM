@@ -14,7 +14,7 @@ acquisition runs); `ORCA2` = `ORCA2_OMIP_L4` (D122 pointer).
 |---|---|---|---|
 | ln_dynadv_OFF | .true. | .false. | ORCA2 does not state it; namelist_ref:1054 .false. |
 | ln_dynadv_vec | .false. | .true. | ORCA2_OMIP_L4/EXP00/namelist_cfg:346 |
-| nn_dynkeg | not stated (unread) | 0 | ORCA2_OMIP_L4/EXP00/namelist_cfg:347 |
+| nn_dynkeg | not stated: namelist_ref:1056 = 0, read and range-checked (`ORCA2G1_OMIP_L1_R4REF/BLD/ppsrc/nemo/dynadv.f90:191`), inert under linear dynamics | 0 | ORCA2_OMIP_L4/EXP00/namelist_cfg:347 |
 
 No other deck line changes (the acquisition script refuses any other
 difference). The neighbouring choices NEMO reads on this path are already
@@ -55,7 +55,7 @@ for the deck to settle: **no DECISION_NEEDED**.
 
 G1's builder with one rung table, `_ORCA2G_DYNADV_VEC`. Measured on G1's
 admitted domain file: the G1b and G1 model configurations differ in exactly
-six fields (test pins it):
+seven fields (test pins it):
 
 - the four momentum selectors keep the ORCA2 identity's own values:
   vector_invariant, een_total, nemo_advective, and the inert upwind flux
@@ -65,7 +65,11 @@ six fields (test pins it):
   NEMO's vector deck takes the velocity-form branch at
   `ORCA2G1_OMIP_L1_R4REF/BLD/ppsrc/nemo/dynspg_ts.f90:533` and never runs
   them. The model refuses the combination
-  ("needs NEMO's flux-form external update").
+  ("needs NEMO's flux-form external update");
+- the flux-form stage-1 right-hand-side option (rk3_stage1_rhs_nemo_literal)
+  is not selected on G1b: under vector form the model already hands stage 1
+  the whole right-hand side and ignores the option (review finding, added
+  before any record; no behaviour change).
 
 Searched before building: the G1 builder, its per-rung tables and validator
 pair, the ORCA2 identity's vector-form selectors (`_model_config(...,
@@ -96,7 +100,7 @@ stop.
 
 | id | prediction | falsifier |
 |---|---|---|
-| S-P1 | NEMO completes all 100 steps; no stp_ctl stop | stp_ctl stops it (`ORCA2G1_OMIP_L1_R4REF/BLD/ppsrc/nemo/stpctl.f90:243-246`) at any kt <= 100 |
+| S-P1 | NEMO completes all 100 steps; no stp_ctl stop | stp_ctl's predicate (`ORCA2G1_OMIP_L1_R4REF/BLD/ppsrc/nemo/stpctl.f90:243-250`) stops it (`ORCA2G1_OMIP_L1_R4REF/BLD/ppsrc/nemo/stpctl.f90:310`) at any kt <= 100 |
 | S-P2 | max abs U and V stay below 0.05 m/s at every step (G1's NEMO record: at most 0.018) | any step above 0.05 m/s |
 | V-P1 | G1b's NEMO record differs from G1's at kt = 1 by more than 1e-8 m/s on U (card: 1.1e-6) | bit-identical, or below 1e-8: the switch would be inert at kt 1 |
 | F-P1 | the INDEPENDENT label's first non-bit row is at kt = 1 | kt 1 bit-identical on every field |

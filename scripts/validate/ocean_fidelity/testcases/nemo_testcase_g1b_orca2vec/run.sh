@@ -180,6 +180,7 @@ vec_logged() {
 record_steps() {
   local k
   [[ "$(sha_of "$REF/domain_cfg.nc")" == "$G1_DOMCFG_SHA" && "$(sha_of "$REF/nemo")" == "$REF_SHA" ]] && vec_logged "$REF" \
+    && cmp -s "$REF/namelist_ref" "$NEMO_ROOT/cfgs/SHARED/namelist_ref" \
     || { printf 'REFUSE: %s is not the pinned G1b reference run\n' "$REF" >&2; exit 73; }
   cmp -s "$REF/namelist_cfg" "$DECK" || { printf 'REFUSE: the reference ran another deck\n' >&2; exit 73; }
   k=$(tr -d ' \n' <"$REF/time.step")
@@ -208,7 +209,8 @@ admit() {
       && [[ -f "$dir/nemo" && "$(sha_of "$dir/nemo")" == "$bin" ]] && vec_logged "$dir" \
       && grep -qx 'RUN_DONE' "$dir/run.user.log" && [[ "$(tr -d ' \n' <"$dir/time.step")" == "$steps" ]] \
       && ! grep -q 'E R R O R' "$dir/ocean.output" \
-      || { printf 'REFUSE: %s is not a finished pinned %s-step G1b run\n' "$dir" "$steps" >&2; exit 73; }
+      && cmp -s "$dir/namelist_ref" "$NEMO_ROOT/cfgs/SHARED/namelist_ref" \
+      || { printf 'REFUSE: %s is not a finished pinned %s-step G1b run (with the pinned namelist_ref)\n' "$dir" "$steps" >&2; exit 73; }
     render_deck "$dry/admit_deck" "$steps" "$list"
     cmp -s "$dir/namelist_cfg" "$dry/admit_deck" \
       || { printf 'REFUSE: %s ran a deck that is not the committed one at its length and list\n' "$dir" >&2; exit 73; }
@@ -277,7 +279,7 @@ PY
   done
   printf 'G1B_RESTART_EVERY_STEP 1..%s\n' "$n"
   ( cd "$EVIDENCE" && sha256sum g1b_round22_admission.json r10/domain_cfg.nc r10/mesh_mask.nc \
-      ref_100step/ocean.output r??/ORCA2G1_*_restart.nc ) >"$EVIDENCE/manifest/outputs.sha256"
+      ref_100step/ocean.output ref_100step/namelist_ref r??/ORCA2G1_*_restart.nc ) >"$EVIDENCE/manifest/outputs.sha256"
   printf 'ACQUISITION_DONE %s N=%s\n' "$EVIDENCE" "$n"
 }
 

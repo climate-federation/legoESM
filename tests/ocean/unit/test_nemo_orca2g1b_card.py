@@ -3,8 +3,8 @@
 * FILE-FREE: the committed G1b deck is G1's with exactly the &namdyn_adv
   lines ORCA2 states; the reader refuses each moved or misplaced switch.
 * ON G1'S ADMITTED DOMAIN FILE (skipped off this machine): the G1b card and
-  the G1 card differ in the momentum-advection selectors and the two
-  flux-form solver statements NEMO's vector deck does not execute, and in
+  the G1 card differ in the momentum-advection selectors and the three
+  flux-form-only options NEMO's vector deck does not execute, and in
   nothing else; each card refuses the other rung's deck.
 """
 from __future__ import annotations
@@ -116,6 +116,7 @@ def test_g1b_card_differs_from_g1_only_by_nemos_vector_branch(roots):
         "vorticity_scheme": ("een_planetary", "een_total"),
         "momentum_flux_scheme": ("none", "upwind"),
         "vertical_momentum_scheme": ("none", "nemo_advective"),
+        "rk3_stage1_rhs_nemo_literal": (True, False),   # flux-form only (state.py)
     }
     ba, bb = ca.barotropic, cb.barotropic
     moved_bt = {f for f in ba._fields if repr(getattr(ba, f)) != repr(getattr(bb, f))}
@@ -144,6 +145,7 @@ def test_g1b_selector_plants_are_refused(roots):
     cfg = card.recipe.model_config
     for change in ({"vorticity_scheme": "een_planetary"},
                    {"momentum_advection": "flux_form"},
+                   {"rk3_stage1_rhs_nemo_literal": True},
                    {"barotropic": cfg.barotropic._replace(
                        barotropic_flux_update_nemo_literal=True)}):
         planted = card._replace(recipe=card.recipe._replace(
