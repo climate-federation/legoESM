@@ -3488,10 +3488,10 @@ ORCA2G1_UNMEASURED: tuple[str, ...] = (
 _ORCA2G1_REQUIRED_SWITCHES: dict[str, object] = {
     "namcfg.ln_read_cfg": True,
     "namtsd.ln_tsd_dmp": False,   # ln_tsd_init is the rung table's (G3)
-    "namsbc.ln_usr": True, "namsbc.ln_flx": False, "namsbc.ln_blk": False,
+    "namsbc.ln_flx": False,   # ln_usr ln_blk ln_traqsr ln_ssr ln_rnf nn_fwb: rung table (G4)
     "namsbc.ln_abl": False, "namsbc.ln_cpl": False, "namsbc.nn_ice": 0,
-    "namsbc.ln_traqsr": False, "namsbc.ln_ssr": False, "namsbc.ln_rnf": False,
-    "namsbc.nn_fwb": 0, "namsbc.ln_apr_dyn": False, "namsbc.ln_wave": False,
+    "namsbc.ln_dm2dc": False, "namsbc.nn_fsbc": 2,
+    "namsbc.ln_apr_dyn": False, "namsbc.ln_wave": False,
     "namberg.ln_icebergs": False, "namisf.ln_isf": False,
     "namlbc.rn_shlat": 2.0,
     "namdrg.ln_drg_off": True,
@@ -3772,7 +3772,7 @@ def build_orca2g1_flat_card(deck_root: str | Path, case: str = "ORCA2G1-flat") -
     )
     physics = base.physics._replace(
         vertical_mixing=vertical,
-        shortwave_penetration=None,                     # ln_traqsr = F
+        shortwave_penetration=_orca2g_qsr(case, deck.rn_Dt_s),    # ln_traqsr (G4: ORCA2's RGB)
         mle=None,                                       # ln_mle = F
         # ln_zdfevd = F: the ORCA2 identity carries ORCA2's enhanced
         # vertical diffusion, which this deck switches off.
@@ -3804,8 +3804,8 @@ def build_orca2g1_flat_card(deck_root: str | Path, case: str = "ORCA2G1-flat") -
     )
     card = NEMOTestcaseCard(
         case, recipe, deck.rn_Dt_s, deck.nn_itend, 1, 0, 0, 0.0, 0.0,
-        surface_boundary_condition="none",
-        surface_input_operator="none",
+        surface_boundary_condition="ncar_core_sbcblk" if _ORCA2G_SBC[case] else "none",
+        surface_input_operator="nemo_fld_read" if _ORCA2G_SBC[case] else "none",
         unmeasured_features=_ORCA2G_UNMEASURED[case],
         icebergs_enabled=False,
         iceberg_inputs=(),
@@ -3857,9 +3857,9 @@ def _orca2g1_selector_failures(card: NEMOTestcaseCard) -> list[str]:
         "nn_e3f_typ=0": cfg.een_e3f_scheme == "nemo_avg4",
         "lateral_mixing_none": cfg.physics.lateral_mixing.scheme == "none",
         "ln_trabbl=F": (cfg.bbl_adv_option, cfg.bbl_diffusive_option) == (0, 0),
-        "no_forcing": (card.surface_boundary_condition == "none"
-                       and card.surface_input_operator == "none"
-                       and cfg.physics.shortwave_penetration is None
+        "surface_forcing": ((card.surface_boundary_condition, card.surface_input_operator) == (
+                       ("ncar_core_sbcblk", "nemo_fld_read") if _ORCA2G_SBC.get(card.case) else ("none", "none"))
+                       and cfg.physics.shortwave_penetration == _orca2g_qsr(card.case, card.dt_s)
                        and cfg.physics.mle is None),
         "no_ice": card.icebergs_enabled is False and card.iceberg_inputs == (),
         "wet_levels": (np.shape(state.T.data)[-1] == _ORCA2G_JPK.get(card.case, 0) - 1
@@ -3910,6 +3910,7 @@ def validate_orca2g1_flat_card(card: NEMOTestcaseCard, deck_root: str | Path) ->
             _ORCA2G1_BUMP_JJ - 1, _ORCA2G1_BUMP_JI - 1]) == 0.1,
     }
     failed = sorted(name for name, ok in checks.items() if not ok)
+    failed += orca2g_forcing_failures(deck_root, card.case)
     failed += _orca2g1_selector_failures(card)
     if failed:
         raise ValueError(f"{card.case} disagrees with its deck: {failed}")
@@ -3935,7 +3936,8 @@ def validate_orca2g1_flat_card_for_execution(
 # (31 levels, partial bottom cells, ``strait_shlat``) under the name
 # ``domain_cfg.nc``.  The builder, the deck reader, the bump and every selector
 # are G1's; only the entries below differ by rung.
-_ORCA2G_JPK: dict[str, int] = {"ORCA2G1-flat": 2, "ORCA2G2-zps": 31, "ORCA2G3-ts": 31}
+_ORCA2G_JPK: dict[str, int] = {"ORCA2G1-flat": 2, "ORCA2G2-zps": 31, "ORCA2G3-ts": 31,
+                             "ORCA2G4-sbc": 31}
 ORCA2G2_UNMEASURED: tuple[str, ...] = (
     "multi_level_partial_cell_step",   # round 2: record admitted, not at the bar
 )
@@ -3943,22 +3945,38 @@ ORCA2G3_UNMEASURED: tuple[str, ...] = (
     "g3_record_not_admitted",
     "density_varying_step",            # EOS, pressure gradient, N2 on real T/S
 )
+# G4 = G3 + ORCA2's surface boundary condition, no ice.  The card names the
+# forcing family; none of it has met a NEMO record on this ladder.
+ORCA2G4_UNMEASURED: tuple[str, ...] = (
+    "g4_record_not_admitted",
+    "ncar_bulk_open_ocean",            # sbcblk.f90 blk_oce_1/2, turb_ncar iteration
+    "surface_stress_heat_freshwater_application",   # utau/vtau, qns/qsr, emp, sfx
+    "runoff_and_mouth_mixing",         # sbcrnf.f90, zdfphy.f90:353-355
+    "rgb_penetrating_shortwave_chl",   # traqsr.f90 np_RGBc, nn_chlprfl = 1
+    "sss_restoring",                   # sbcssr.f90 nn_sssr = 2
+    "freshwater_budget_nn_fwb2",       # sbcfwb.f90 (zero correction in year 1)
+)
 _ORCA2G_UNMEASURED = {"ORCA2G1-flat": ORCA2G1_UNMEASURED,
                       "ORCA2G2-zps": ORCA2G2_UNMEASURED,
-                      "ORCA2G3-ts": ORCA2G3_UNMEASURED}
+                      "ORCA2G3-ts": ORCA2G3_UNMEASURED,
+                      "ORCA2G4-sbc": ORCA2G4_UNMEASURED}
 # NEMO's dyn_zdf matrix divisors (dynzdf.f90:191-205, :360-374): selected by
 # G2, the first rung with more than one level.  G1 has no interface to solve
 # across, so its card stays as certified.
-_ORCA2G_ZDF_FACES = {"ORCA2G1-flat": False, "ORCA2G2-zps": True, "ORCA2G3-ts": True}
+_ORCA2G_ZDF_FACES = {"ORCA2G1-flat": False, "ORCA2G2-zps": True, "ORCA2G3-ts": True,
+                     "ORCA2G4-sbc": True}
 # NEMO's tra_zdf diagonal rounding (trazdf.f90:233; G2 round 3), its own row:
 # G1's one-level solve builds no such diagonal.
-_ORCA2G_TRA_ZDF_ROUNDED = {"ORCA2G1-flat": False, "ORCA2G2-zps": True, "ORCA2G3-ts": True}
+_ORCA2G_TRA_ZDF_ROUNDED = {"ORCA2G1-flat": False, "ORCA2G2-zps": True, "ORCA2G3-ts": True,
+                           "ORCA2G4-sbc": True}
 # NEMO's ascending-k depth mean of the 3-D right-hand side (stp2d.f90:178-179;
 # G2 round 4), its own row: G1's one-level sum has no order to choose.
-_ORCA2G_UE_RHS_ASCENDING = {"ORCA2G1-flat": False, "ORCA2G2-zps": True, "ORCA2G3-ts": True}
+_ORCA2G_UE_RHS_ASCENDING = {"ORCA2G1-flat": False, "ORCA2G2-zps": True, "ORCA2G3-ts": True,
+                            "ORCA2G4-sbc": True}
 # dyn_zdf's interface thickness reads the stored stage ratio r3u(Kmm)
 # (dynzdf.f90:193-195, stprk3_stg.f90:216-217; G3 round 3), G3's card only.
-_ORCA2G_ZDF_STAGE_R3U = {"ORCA2G1-flat": False, "ORCA2G2-zps": False, "ORCA2G3-ts": True}
+_ORCA2G_ZDF_STAGE_R3U = {"ORCA2G1-flat": False, "ORCA2G2-zps": False, "ORCA2G3-ts": True,
+                         "ORCA2G4-sbc": True}
 
 
 def _orca2g_strait_shlat(domain_path: Path, shape) -> np.ndarray:
@@ -3981,7 +3999,8 @@ def build_orca2g2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
 # ORCA2G3 (grid ladder rung G3, DECISION 117): G2 with ONE switch, the initial
 # state.  &namtsd reads ORCA2's own T/S climatology with ORCA2's own lines
 # (ORCA2_OMIP_L4/EXP00/namelist_cfg:47,50,54-55); damping stays off.
-_ORCA2G_TSD_INIT = {"ORCA2G1-flat": False, "ORCA2G2-zps": False, "ORCA2G3-ts": True}
+_ORCA2G_TSD_INIT = {"ORCA2G1-flat": False, "ORCA2G2-zps": False, "ORCA2G3-ts": True,
+                    "ORCA2G4-sbc": True}
 _ORCA2G3_TSD_FIELDS = {
     "namtsd.cn_dir": "'./'",
     "namtsd.sn_tem": ("'data_1m_potential_temperature_nomask',-1.,'votemper',"
@@ -4042,6 +4061,87 @@ def build_orca2g3_ts_card(deck_root: str | Path) -> NEMOTestcaseCard:
     return build_orca2g1_flat_card(deck_root, "ORCA2G3-ts")
 
 
+# ---------------------------------------------------------------------------
+# ORCA2G4 (grid ladder rung G4, DECISION 117): G3 with ONE switch, the surface
+# boundary condition.  &namsbc is ORCA2's (ORCA2_OMIP_L4/EXP00/namelist_cfg:
+# 80-92) with nn_ice = 0, and the four data groups are ORCA2's lines.
+_ORCA2G_SBC = {"ORCA2G1-flat": False, "ORCA2G2-zps": False, "ORCA2G3-ts": False,
+               "ORCA2G4-sbc": True}
+# The &namsbc switches that move with the rung: (G1-G3 value, G4 value).
+_ORCA2G_SBC_SWITCHES: dict[str, tuple[object, object]] = {
+    "namsbc.ln_usr": (True, False), "namsbc.ln_blk": (False, True),
+    "namsbc.ln_traqsr": (False, True), "namsbc.ln_ssr": (False, True),
+    "namsbc.ln_rnf": (False, True), "namsbc.nn_fwb": (0, 2),
+}
+# ORCA2's &namsbc_blk / &namtra_qsr / &namsbc_ssr / &namsbc_rnf assignments
+# (namelist_cfg:97-115, :133-149, :151-157, :159-175), blanks removed.
+_ORCA2G4_SBC_FIELDS: dict[str, object] = {
+    "namsbc_blk.ln_ncar": True,
+    "namsbc_blk.cn_dir": "'./'",
+    "namsbc_blk.sn_wndi": "'u_10.15JUNE2009_fill',6.,'U_10_MOD',.false.,.true.,'yearly','weights_core2_orca2_bicub','Uwnd',''",  # noqa: E501
+    "namsbc_blk.sn_wndj": "'v_10.15JUNE2009_fill',6.,'V_10_MOD',.false.,.true.,'yearly','weights_core2_orca2_bicub','Vwnd',''",  # noqa: E501
+    "namsbc_blk.sn_qsr": "'ncar_rad.15JUNE2009_fill',24.,'SWDN_MOD',.false.,.true.,'yearly','weights_core2_orca2_bilin','',''",  # noqa: E501
+    "namsbc_blk.sn_qlw": "'ncar_rad.15JUNE2009_fill',24.,'LWDN_MOD',.false.,.true.,'yearly','weights_core2_orca2_bilin','',''",  # noqa: E501
+    "namsbc_blk.sn_tair": "'t_10.15JUNE2009_fill',6.,'T_10_MOD',.false.,.true.,'yearly','weights_core2_orca2_bilin','',''",  # noqa: E501
+    "namsbc_blk.sn_humi": "'q_10.15JUNE2009_fill',6.,'Q_10_MOD',.false.,.true.,'yearly','weights_core2_orca2_bilin','',''",  # noqa: E501
+    "namsbc_blk.sn_prec": "'ncar_precip.15JUNE2009_fill',-1.,'PRC_MOD1',.false.,.true.,'yearly','weights_core2_orca2_bilin','',''",  # noqa: E501
+    "namsbc_blk.sn_snow": "'ncar_precip.15JUNE2009_fill',-1.,'SNOW',.false.,.true.,'yearly','weights_core2_orca2_bilin','',''",  # noqa: E501
+    "namsbc_blk.sn_slp": "'slp.15JUNE2009_fill',6.,'SLP',.false.,.true.,'yearly','weights_core2_orca2_bilin','',''",  # noqa: E501
+    "namtra_qsr.ln_qsr_rgb": True, "namtra_qsr.nn_chldta": 1, "namtra_qsr.nn_chlprfl": 1,
+    "namtra_qsr.cn_dir": "'./'",
+    "namtra_qsr.sn_chl": "'chlorophyll',-1.,'CHLA',.true.,.true.,'yearly','','',''",
+    "namsbc_ssr.nn_sssr": 2, "namsbc_ssr.rn_deds": -166.67,
+    "namsbc_ssr.ln_sssr_bnd": True, "namsbc_ssr.rn_sssr_bnd": 4.0,
+    "namsbc_rnf.ln_rnf_mouth": True, "namsbc_rnf.rn_hrnf": 15.0,
+    "namsbc_rnf.rn_avt_rnf": 1.0e-3, "namsbc_rnf.rn_rfact": 1.0,
+    "namsbc_rnf.cn_dir": "'./'",
+    "namsbc_rnf.sn_rnf": "'runoff_core_monthly',-1.,'sorunoff',.true.,.true.,'yearly','','',''",
+    "namsbc_rnf.sn_cnf": "'runoff_core_monthly',0.,'socoefr0',.false.,.true.,'yearly','','',''",
+    "namsbc_rnf.sn_s_rnf": "'runoffs',24.,'rosaline',.true.,.true.,'yearly','','',''",
+    "namsbc_rnf.sn_t_rnf": "'runoffs',24.,'rotemper',.true.,.true.,'yearly','','',''",
+    "namsbc_rnf.sn_dep_rnf": "'runoffs',0.,'rodepth',.false.,.true.,'yearly','','',''",
+}
+_ORCA2G4_SBC_GROUPS = ("namsbc_blk.", "namtra_qsr.", "namsbc_ssr.", "namsbc_rnf.")
+
+
+def _orca2g_qsr(case: str, dt_s: float):
+    """ln_traqsr: None (G1-G3) or ORCA2's RGB light, the ORCA2 identity's own
+    selection (traqsr.f90:1133 np_RGBc; rn_abs, rn_si0 at namelist_ref)."""
+
+    if not _ORCA2G_SBC[case]:
+        return None
+    return ShortwavePenetrationConfig(scheme="nemo_qsr_rgb", nemo_time_step_s=dt_s)
+
+
+def orca2g_forcing_failures(deck_root: str | Path, case: str) -> list[str]:
+    """Which of a rung's surface-forcing deck lines disagree with its card."""
+
+    values = _orca2g1_namelist_values(Path(deck_root) / "namelist_cfg")
+    if case not in _ORCA2G_SBC:
+        return ["case"]
+    pick = int(_ORCA2G_SBC[case])
+    failed = [name for name, pair in _ORCA2G_SBC_SWITCHES.items()
+              if name not in values or values[name] != pair[pick]
+              or type(values[name]) is not type(pair[pick])]
+    stated = {k: v for k, v in values.items() if k.startswith(_ORCA2G4_SBC_GROUPS)}
+    if not pick:
+        failed += sorted(stated)                 # G1-G3 read no forcing data
+        return failed
+
+    def canon(value):
+        return "".join(value.split()) if isinstance(value, str) else value
+
+    if {k: canon(v) for k, v in stated.items()} != _ORCA2G4_SBC_FIELDS:
+        failed.append("orca2_forcing_groups")
+    return failed
+
+
+def build_orca2g4_sbc_card(deck_root: str | Path) -> NEMOTestcaseCard:
+    """ORCA2G4: the G3 card under ORCA2's surface forcing, no sea ice."""
+
+    return build_orca2g1_flat_card(deck_root, "ORCA2G4-sbc")
+
+
 __all__ = (
     "NEMOTestcaseCard",
     "GYRESurfaceBoundaryCondition",
@@ -4054,6 +4154,9 @@ __all__ = (
     "build_orca2g1_flat_card",
     "build_orca2g2_zps_card",
     "build_orca2g3_ts_card",
+    "build_orca2g4_sbc_card",
+    "orca2g_forcing_failures",
+    "ORCA2G4_UNMEASURED",
     "orca2g_initial_ts",
     "ORCA2G2_UNMEASURED",
     "ORCA2G3_UNMEASURED",
