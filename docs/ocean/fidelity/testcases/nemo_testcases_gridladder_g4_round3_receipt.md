@@ -29,7 +29,7 @@ Program points (NEMO 5.0.2, P5 compiled source; P6 adds only writer lines):
 
 | frame | where written | fields | NEMO readers |
 |---|---|---|---|
-| `s`, every kt | after `ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/stprk3.f90:142` | utau, vtau (T), utauU, vtauV (U, V), taum, wndm, qns, qsr, emp, sfx, rnf, erp, qrp, rnf_tsc T and S, h_rnf, fr_i, sst/sss/ssu/ssv/ssh/e3t/frq means | listed below |
+| `s`, every kt | after `ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/stprk3.f90:142` | utau, vtau (T), utauU, vtauV (U, V), taum, wndm, qns, qsr, emp, sfx, rnf, erp, qrp, rnf_tsc T and S, fr_i, sst/sss/ssu/ssv/ssh/e3t/frq means | listed below |
 | `c`, every kt | inside dyn_spg_ts after its copies | ssh_frc, zu_frc, zv_frc | the solver |
 | `n`, kt odd | turb_ncar entry | inputs, bounded wind, virtual-temperature difference, initial stability flag, neutral and initial coefficients, t_zu, q_zu | — |
 | `A`..`E`, kt odd | each NCAR iteration | 1/L, clamped zeta, psi_m, floored U_N10, CdN, Cd, their roots, psi_h term, Cd ratio, stability flag, ChN, CeN, Ch, Ce | — |
@@ -64,13 +64,15 @@ their entry values (recorded at entry).
   equal the rendered deck; record kt = 1..10 from round 17's reference
   (NEMO stopped at kt = 11 in stp_ctl, same rule as round 17).
   `PREFLIGHT_OK`.
-- Build: makenemo, new target ORCA2G1_OMIP_L1_P6 (refuses if it exists);
-  after the build, every compiled file must equal P5's except added writer
-  lines.
+- Build: makenemo, new target ORCA2G1_OMIP_L1_P6 (refuses if it exists).
+  One build judge, run after the build AND on `--admit-existing`: P6's
+  MY_SRC is the committed sources byte for byte; the compiled file set is
+  P5's and each file is P5's plus writer lines; the evidence's binary hash
+  is the built binary's.
 - Runs: smoke (2 steps, checked before twins), twins a/b/c (10 steps,
   round 17's restart lists), inputs copied from round 17's admitted run
   directories and compared byte for byte.
-- Admission: 8 plants must fire (5 existing, 3 new forcing plants); record
+- Admission: 9 plants must fire (5 existing, 4 new forcing plants); record
   a vs b (with restart and substep checks), a vs c, the smoke; then
   passivity against round 17. `--admit-existing` re-admits completed runs.
 - Syntax: the four patched sources pass `gfortran -fsyntax-only` against
@@ -83,10 +85,12 @@ their entry values (recorded at entry).
 ## 3. Checker forcing mode (check_records.py)
 
 Off by default (round 17's admission reproduces unchanged). On: inner-domain
-arrays allowed; forcing frames required exactly per step; judged finite and
+arrays allowed; forcing frames required exactly per step, each holding
+exactly the fields the patches write (a test ties the two); judged finite and
 twin-equal on the consumed support (halo words counted); stage frames stay
 byte-exact. Non-vacuity: three mutations (stage frames not compared,
-inner arrays always allowed, one iteration short) each turn tests red.
+inner arrays always allowed, one iteration short) each turn tests red, and
+so does disabling the field-schema check.
 
 ## 4. Predictions
 
@@ -102,12 +106,30 @@ formula call 788-792 (was 787-791).
 
 ## 6. Tests (synchronous)
 
-Focused battery (G1 tools, G2, G2 ladder, G3, G4): 78 passed, 9
-deselected (68 before + 10 new). Citation gate tests: 17 passed.
+Focused battery (G1 tools, G2, G2 ladder, G3, G4): 80 passed, 9
+deselected (68 before + 12 new), after the review fixes. Citation gate
+tests: 17 passed.
 
 ## 7. Review
 
-Single review (codex): see section 9 (filled after the review returns).
+Single review (codex): **"VERDICT: findings"** (codex_review_r19.log).
+Each checked before acting:
+- HIGH, the smoke would be refused: CONFIRMED, the runoff depth is
+  allocated with a one-cell halo (`ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/sbcrnf.f90:151`),
+  a shape the checker rejects. Fixed by not recording it: it is set once at
+  start-up, not per-step forcing. Every other field's shape re-read: full
+  or inner domain.
+- HIGH, no field schema (dropping the solar write would pass): CONFIRMED.
+  Fixed: per-frame schema in the checker, a test that the patches write
+  exactly it, a fourth plant.
+- HIGH, `--admit-existing` trusted an evidence-local binary hash:
+  CONFIRMED. Fixed by the build judge above.
+- MEDIUM, compiled-source gate saw only P5's file names: CONFIRMED. Fixed
+  (file sets must be equal).
+- LOW, the iteration count is namelist_ref's, not the deck's: kept. The
+  deck must stay round 17's (changing it changes the program); the check now
+  reads the namelist_ref copy the runs actually use, and the record's five
+  iteration frames are its own witness.
 
 ## 8. Choices
 
@@ -118,6 +140,7 @@ rather than a new module; (2) the `s` frame is ungated (every kt), so the
 P6 binary is fit for runs up to 50 steps only under this checker;
 (3) carrying round 4's substep writer into P6 (kt 1, 2; ~0.4 GB per twin)
 to keep P6 = P5 + writer lines.
+(4) not recording the runoff depth (time-invariant, review finding 1).
 
 No gate exists for: dual review (single, lane rule 6), claim review before
 code, non-vacuity (shown above).

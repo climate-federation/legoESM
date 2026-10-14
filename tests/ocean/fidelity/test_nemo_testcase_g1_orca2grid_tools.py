@@ -392,7 +392,9 @@ def _forcing_stream(step, iterations=2, halo_nan=True, inner_bad=None, bulk=None
         plane = full.copy()
         if inner_bad and inner_bad == (step, fr):
             plane[2, 2] = 7.0                    # inner domain (j 3, i 3 Fortran)
-        extra += _rec(f"{fr}_full", plane) + _rec(f"{fr}_inner", np.ones(INNER) * step)
+        names = checker.FORCING_FIELDS[fr if fr in checker.FORCING_FIELDS else "A"]
+        extra += _rec(f"{fr}_{names[0]}", plane)        # one full plane, the rest inner
+        extra += b"".join(_rec(f"{fr}_{n}", np.ones(INNER) * step) for n in names[1:])
     return head + body[:f_at] + extra + body[f_at:]
 
 
@@ -413,7 +415,8 @@ def test_forcing_record_is_admitted_on_its_consumed_support(forcing_record):
     steps = out["forcing"]["steps"]
     assert steps[1]["frames"] == ["A", "B", "c", "k", "n", "s"]
     assert steps[2]["frames"] == ["c", "s"]
-    assert steps[1]["halo_words_nonfinite"] == {f"{f}_full": 1 for f in "ABckns"}
+    first = {f: checker.FORCING_FIELDS[f if f in "sckn" else "A"][0] for f in "ABckns"}
+    assert steps[1]["halo_words_nonfinite"] == {f"{f}_{n}": 1 for f, n in first.items()}
     assert steps[1]["twin_halo_words_differing"] == 6     # the halo NaNs only
     assert out["fields_stage"] == sorted(out["fields_stage"])
 
@@ -453,9 +456,21 @@ def test_real_forcing_defects_are_refused(forcing_record):
     (a / "oracle_g1step_kt00000002.bin").write_bytes(_forcing_stream(2))
     (b / "oracle_g1step_kt00000001.bin").write_bytes(
         _forcing_stream(1, halo_nan=False, inner_bad=(1, "B")))
-    with pytest.raises(checker.Refuse, match="B_full on the inner domain"):
+    with pytest.raises(checker.Refuse, match="B_one_on_l on the inner domain"):
         checker.check(a, b, steps=4, stage_steps=4, iterations=2)
     # a stage frame must stay byte-exact against the twin, even in forcing mode
     (b / "oracle_g1step_kt00000001.bin").write_bytes(_forcing_stream(1, halo_nan=False)[:-1] + b"\x01")
     with pytest.raises(checker.Refuse, match="twin run differs in f_"):
         checker.check(a, b, steps=4, stage_steps=4, iterations=2)
+
+
+def test_a_forcing_frame_missing_one_field_is_refused(forcing_record, tmp_path):
+    a, _ = forcing_record
+    blob = _forcing_stream(2)
+    _, fields = checker.read_stream(blob, "x", allow_inner=True)
+    cut = blob.index(b"c_zv_frc".ljust(16))
+    rest = blob[cut:]
+    nbytes = 32 + 8 * fields["c_zv_frc"].size
+    (a / "oracle_g1step_kt00000002.bin").write_bytes(blob[:cut] + rest[nbytes:])
+    with pytest.raises(checker.Refuse, match="forcing frame c holds 2 fields"):
+        checker.check(a, None, steps=4, stage_steps=4, iterations=2)

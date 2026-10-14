@@ -8,7 +8,7 @@
     USE lib_mpp, ONLY : l_perpetual_ts
  
     IMPLICIT NONE
-@@ -155,6 +156,32 @@
+@@ -155,6 +156,31 @@
        IF( ln_bdy     )   CALL bdy_dta    ( kstp, Nbb )                     ! update dynamic & tracer data at open boundaries
        IF( ln_isf     )   CALL isf_stp    ( kstp, Nbb )                     ! update iceshelf geometry
                           CALL sbc        ( kstp, Nbb, Nbb )                ! Sea Boundary Condition (including sea-ice)
@@ -29,7 +29,6 @@
 +      CALL g1r_w2( 'qrp', qrp )
 +      CALL g1r_w2( 'rnf_tsc_tem', rnf_tsc(:,:,jp_tem) )
 +      CALL g1r_w2( 'rnf_tsc_sal', rnf_tsc(:,:,jp_sal) )
-+      CALL g1r_w2( 'h_rnf', h_rnf )
 +      CALL g1r_w2( 'fr_i', fr_i )
 +      CALL g1r_w2( 'sst_m', sst_m )
 +      CALL g1r_w2( 'sss_m', sss_m )

@@ -332,6 +332,9 @@ def test_r19_patches_add_only_writer_calls_with_unique_short_names():
                 names[frame].append(w.group(1))
         for listed in names.values():
             assert len(listed) == len(set(listed))
+        for frame, listed in names.items():      # the checker's schema is what is written
+            key = "A" if frame == "iteration" else frame
+            assert tuple(listed) == checker.FORCING_FIELDS[key], frame
     assert frames_seen == set(checker.FORCING_FRAMES) | set(checker.BULK_FRAMES) | {"iteration"}
 
 

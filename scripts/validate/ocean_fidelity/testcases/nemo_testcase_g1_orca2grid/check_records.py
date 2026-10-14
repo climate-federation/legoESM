@@ -27,7 +27,22 @@ PLANTS = ("none", "truncation", "nonfinite", "missing-frame", "twin-ulp",
 # frame per NCAR iteration ('A', 'B', ..) and 'k' the ocean bulk after the stress.
 FORCING_FRAMES = ("s", "c")
 BULK_FRAMES = ("n", "k")
-FORCING_PLANTS = ("forcing-missing-iteration", "forcing-nonfinite", "forcing-twin-inner")
+FORCING_PLANTS = ("forcing-missing-iteration", "forcing-nonfinite", "forcing-twin-inner",
+                  "forcing-missing-field")
+# what each forcing frame must hold (the G4 round-3 writer patches); "A"
+# stands for every iteration frame
+FORCING_FIELDS = {
+    "s": ("utau", "vtau", "utauU", "vtauV", "taum", "wndm", "qns", "qsr", "emp", "sfx",
+          "rnf", "erp", "qrp", "rnf_tsc_tem", "rnf_tsc_sal", "fr_i", "sst_m", "sss_m",
+          "ssu_m", "ssv_m", "ssh_m", "e3t_m", "frq_m"),
+    "c": ("ssh_frc", "zu_frc", "zv_frc"),
+    "n": ("sst", "t_zt", "ssq", "q_zt", "u_zu", "ubzu", "dtv", "stab", "cdn", "cd", "ch",
+          "ce", "t_zu", "q_zu"),
+    "A": ("one_on_l", "zeta_u", "psi_m", "un10", "cdn", "sqrt_cdn", "cd", "sqrt_cd",
+          "psi_h_term", "cd_ratio", "stab", "chn", "cen", "ch", "ce"),
+    "k": ("sspt", "tair", "qair", "ssq", "wndm", "wndi", "wndj", "slp", "cd", "ch", "ce",
+          "theta_zu", "q_zu", "u_zu", "rhoa", "taum", "sen", "lat", "evp", "utau", "vtau"),
+}
 SUB_PLANTS = ("missing-substep", "twin-substep-inner",   # need --substep-steps
               "substep-inner-nonfinite")
 # the least each frame must hold for the round-4 walk (more is recorded)
@@ -245,6 +260,8 @@ def check(evidence: Path, twin: Path | None, steps: int, stage_steps: int,
         if plant == "forcing-missing-iteration" and step == 1:
             last = chr(ord("A") + iterations - 1)
             fields = {k: v for k, v in fields.items() if not k.startswith(f"{last}_")}
+        if plant == "forcing-missing-field" and step == 1:
+            fields = {k: v for k, v in fields.items() if k != "s_qsr"}
         if plant == "missing-frame" and step == 1:
             fields = {k: v for k, v in fields.items() if not k.startswith("b_")}
         if plant == "nonfinite" and step == 1:
@@ -270,6 +287,11 @@ def check(evidence: Path, twin: Path | None, steps: int, stage_steps: int,
         kind = first_names.setdefault(frozenset(wanted), step)
         require(names_by_step[step] == names_by_step[kind],
                 f"{path.name}: field list moved")
+        for fr in new:
+            have = sorted(k.split("_", 1)[1] for k in fields if k.split("_", 1)[0] == fr)
+            want = sorted(FORCING_FIELDS[fr if fr in FORCING_FIELDS else "A"])
+            require(have == want, f"{path.name}: forcing frame {fr} holds {len(have)} "
+                    f"fields, not the {len(want)} the writer writes")
         if new:     # forcing frames: judged on the consumed support
             sub = {k: v for k, v in fields.items() if is_new[k]}
             forcing[step] = {"frames": sorted(frames & new), "halo_words_nonfinite":

@@ -118,9 +118,10 @@ sha_of() { sha256sum "$1" | awk '{print $1}'; }
   || { printf 'REFUSE: the G4 deck is not round 17s\n' >&2; exit 67; }
 [[ "$(sha_of "$R17/g4_round17_admission.json")" == "$R17_ADMISSION_SHA" ]] \
   || { printf 'REFUSE: the round-17 admission changed\n' >&2; exit 67; }
-# nn_iter_algo: the deck is silent, namelist_ref says 5 (the record's frame count)
+# nn_iter_algo: the deck is silent; the namelist_ref every run copies (round
+# 17's admitted one) says 5 -- and the record's iteration frames must agree
 ! grep -q 'nn_iter_algo' "$DECK" \
-  && grep -Eq '^ *nn_iter_algo *= *'"$BULK_ITERATIONS"' ' "$NEMO_ROOT/cfgs/SHARED/namelist_ref" \
+  && grep -Eq '^ *nn_iter_algo *= *'"$BULK_ITERATIONS"' ' "$R17/p3_a/namelist_ref" \
   && grep -Eq '^ *nn_fsbc *= *'"$FSBC"'( |$)' "$DECK" \
   || { printf 'REFUSE: nn_iter_algo / nn_fsbc do not resolve to %s / %s\n' "$BULK_ITERATIONS" "$FSBC" >&2; exit 68; }
 
@@ -194,6 +195,34 @@ printf 'PREFLIGHT: P5 sources reproduced; 4 additive writer patches apply; recor
 readonly SMOKE=$EVIDENCE/smoke_2step TWIN_A=$EVIDENCE/p6_a TWIN_B=$EVIDENCE/p6_b TWIN_C=$EVIDENCE/p6_c
 readonly CFG=$NEMO_ROOT/cfgs/$RUN_NAME BIN_SHA_FILE=$EVIDENCE/manifest/binary.sha256
 
+# The P6 build is the committed sources and nothing else: MY_SRC equals what
+# preflight produced, keys, every compiled file is P5's plus writer lines
+# (same file set), and the binary is the one hashed after the build.
+judge_build() {
+  local f added
+  [[ -x "$CFG/BLD/bin/nemo.exe" ]] || { printf 'REFUSE: %s has no binary\n' "$RUN_NAME" >&2; exit 70; }
+  [[ "$(ls "$CFG/MY_SRC" | LC_ALL=C sort | xargs)" == "$(ls "$dry/src" | LC_ALL=C sort | xargs)" ]] \
+    || { printf 'REFUSE: %s MY_SRC is not the committed file set\n' "$RUN_NAME" >&2; exit 70; }
+  for f in "$dry/src/"*.F90; do
+    cmp -s "$f" "$CFG/MY_SRC/$(basename "$f")" \
+      || { printf 'REFUSE: %s MY_SRC/%s is not the committed source\n' "$RUN_NAME" "$(basename "$f")" >&2; exit 70; }
+  done
+  [[ "$(sed -E 's/.*fppkeys *//' "$CFG/cpp_$RUN_NAME.fcm" | xargs -n1 | LC_ALL=C sort | xargs)" == "$WANT_KEYS" ]] \
+    || { printf 'REFUSE: %s keys are not "%s"\n' "$RUN_NAME" "$WANT_KEYS" >&2; exit 70; }
+  # the compiled sources are P5's plus writer lines only
+  [[ "$(cd "$P5/BLD/ppsrc/nemo" && ls *.f90 | xargs)" == "$(cd "$CFG/BLD/ppsrc/nemo" && ls *.f90 | xargs)" ]] \
+    || { printf 'REFUSE: P6 compiles another file set than P5\n' >&2; exit 70; }
+  for f in $(cd "$P5/BLD/ppsrc/nemo" && ls *.f90); do
+    [[ -f "$CFG/BLD/ppsrc/nemo/$f" ]] || { printf 'REFUSE: P6 lacks %s\n' "$f" >&2; exit 70; }
+    added=$(diff "$P5/BLD/ppsrc/nemo/$f" "$CFG/BLD/ppsrc/nemo/$f" | grep -E '^[<>]' || true)
+    [[ -z "$(grep '^<' <<<"$added" || true)" && -z "$(grep '^>' <<<"$added" \
+          | grep -vE '^> *(USE g1_step_record|USE sbcssr, ONLY : erp, qrp|!|CALL g1r_frame\(|CALL g1r_w2\()' || true)" ]] \
+      || { printf 'REFUSE: compiled %s differs from P5 beyond writer lines\n' "$f" >&2; exit 70; }
+  done
+  [[ ! -f "$BIN_SHA_FILE" || "$(awk '{print $1}' "$BIN_SHA_FILE")" == "$(sha_of "$CFG/BLD/bin/nemo.exe")" ]] \
+    || { printf 'REFUSE: the evidence binary hash is not the built P6 binary\n' >&2; exit 70; }
+}
+
 judge_dir() {          # $1 = dir, $2 = round-17 twin dir, $3 = steps, $4 = list
   local dir=$1 r=$2 f step
   for f in "${INPUT_FILES[@]}"; do
@@ -214,12 +243,14 @@ judge_dir() {          # $1 = dir, $2 = round-17 twin dir, $3 = steps, $4 = list
 
 admit() {
   local plant
+  [[ -f "$BIN_SHA_FILE" ]] || { printf 'REFUSE: no P6 binary hash in the evidence\n' >&2; exit 73; }
+  judge_build
   judge_dir "$SMOKE" "$R17/smoke_2step" 2 "$(pad10 2)"
   judge_dir "$TWIN_A" "$R17/p3_a" "$STEPS" "$(list_a "$STEPS")"
   judge_dir "$TWIN_B" "$R17/p3_b" "$STEPS" "$(list_b "$STEPS")"
   judge_dir "$TWIN_C" "$R17/p3_c" "$STEPS" "$(list_c "$STEPS")"
   for plant in truncation nonfinite missing-frame twin-ulp missing-step \
-               forcing-missing-iteration forcing-nonfinite forcing-twin-inner; do
+               forcing-missing-iteration forcing-nonfinite forcing-twin-inner forcing-missing-field; do
     if python3 -I "$CHECKER" --evidence "$TWIN_A" --twin "$TWIN_B" --steps "$STEPS" \
          --stage-steps "$STEPS" --bulk-iterations "$BULK_ITERATIONS" --fsbc "$FSBC" \
          --plant "$plant" >"$EVIDENCE/manifest/plant_${plant}.log" 2>&1; then
@@ -304,16 +335,7 @@ cp "$dry/src/"*.F90 "$CFG/MY_SRC/"          # cp, NOT cp -a: fcm must see new mt
 touch "$CFG/MY_SRC/"*.F90
 ./makenemo -n "$RUN_NAME" -m conda-scalarmath
 [[ -x "$CFG/BLD/bin/nemo.exe" ]] || { printf 'REFUSE: %s did not build\n' "$RUN_NAME" >&2; exit 70; }
-[[ "$(sed -E 's/.*fppkeys *//' "$CFG/cpp_$RUN_NAME.fcm" | xargs -n1 | LC_ALL=C sort | xargs)" == "$WANT_KEYS" ]] \
-  || { printf 'REFUSE: %s keys are not "%s"\n' "$RUN_NAME" "$WANT_KEYS" >&2; exit 70; }
-# the compiled sources are P5's plus writer lines only
-for f in $(cd "$P5/BLD/ppsrc/nemo" && ls *.f90); do
-  [[ -f "$CFG/BLD/ppsrc/nemo/$f" ]] || { printf 'REFUSE: P6 lacks %s\n' "$f" >&2; exit 70; }
-  added=$(diff "$P5/BLD/ppsrc/nemo/$f" "$CFG/BLD/ppsrc/nemo/$f" | grep -E '^[<>]' || true)
-  [[ -z "$(grep '^<' <<<"$added" || true)" && -z "$(grep '^>' <<<"$added" \
-        | grep -vE '^> *(USE g1_step_record|USE sbcssr, ONLY : erp, qrp|!|CALL g1r_frame\(|CALL g1r_w2\()' || true)" ]] \
-    || { printf 'REFUSE: compiled %s differs from P5 beyond writer lines\n' "$f" >&2; exit 70; }
-done
+judge_build
 sha256sum "$CFG/BLD/bin/nemo.exe" >"$BIN_SHA_FILE"
 
 run_one() {            # $1 = run dir, $2 = round-17 dir, $3 = nn_itend, $4 = list

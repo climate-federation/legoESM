@@ -182,6 +182,8 @@ FILES = {
         _ORCA2G1_P5 / "ppsrc/nemo/dynspg_ts.f90"),
     "ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/dynzdf.f90": (
         _ORCA2G1_P5 / "ppsrc/nemo/dynzdf.f90"),
+    "ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/sbcrnf.f90": (
+        _ORCA2G1_P5 / "ppsrc/nemo/sbcrnf.f90"),
     "ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/sbcblk.f90": (
         _ORCA2G1_P5 / "ppsrc/nemo/sbcblk.f90"),
     "ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/sbcblk_algo_ncar.f90": (
@@ -2097,6 +2099,7 @@ CITATION_MAP = {
     'cfgs/SHARED/namelist_ref:241': 'nn_iter_algo = 5       !  Number of iterations in bulk param. algo ("stable ABL + weak wind" requires more)',
     'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/sbcblk_algo_ncar.f90:207': 'ztmp0 = MAX( 0.25_wp , UN10_from_CD(zu, Ubzu, Cd, ppsi=ztmp2) ) ! U_n10 (ztmp2 == psi_m_ncar(zeta_u))',
     'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/sbcblk_algo_ncar.f90:223': 'ztmp1 = 0.5_wp + SIGN(0.5_wp,zeta_u)                                ! update stability',
+    'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/sbcrnf.f90:151': '&      h_rnf (Nis0-(1):Nie0+(1),Njs0-(1):Nje0+(1))         , nk_rnf  (Nis0-(1):Nie0+(1),Njs0-(1):Nje0+(1))      ,     &',
     # --- GRIDLADDER round 19 END ---
     # --- ORCA2 round 253: kt=8 midpoint-SSH failure boundary -------
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:489-493': [
