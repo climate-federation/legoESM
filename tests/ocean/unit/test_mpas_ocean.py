@@ -848,6 +848,21 @@ class TestMPASLandFill:
         assert float(got[3]) == 3.0
         assert float(got[4]) == 9.0
 
+    def test_held_edge_with_missing_far_cell_is_not_a_neighbour(self):
+        """The MPI-per-rank partition keeps an edge when either cell is local
+        and marks the missing far cell -1 in cellsOnEdge.  Chain 0-1-2-3-4-5,
+        land cell 3, far cell of edge 3 (cells 3-4) cut to -1: cell 3 fills
+        from cell 2 only.  Read as an index, -1 is the LAST cell (ocean, 7.0)
+        and gives (3 + 7) / 2 = 5.0."""
+        from legoesm.ocean.dynamics.mpas_fill import fill_land_cells_mpas
+
+        field = jnp.array([1.0, 2.0, 3.0, 0.0, 9.0, 7.0])
+        mask = jnp.array([1.0, 1.0, 1.0, 0.0, 1.0, 1.0])
+        c1, c2, eoc, neoc = self._chain_connectivity(6)
+        got = fill_land_cells_mpas(field, mask, c1, c2.at[3].set(-1), eoc, neoc,
+                                   n_iter=1)
+        assert float(got[3]) == 3.0
+
     def test_gather_matches_frozen_edge_scatter_on_mesh(self):
         """The per-cell gather visits exactly the edges the former per-edge
         scatter-add did: on a real SCVT mesh with a random coastline the two

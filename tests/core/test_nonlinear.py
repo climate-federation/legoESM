@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import jax
+import pytest
 import jax.numpy as jnp
-from legoesm.core.nonlinear import make_implicit_newton_solver
+from legoesm.core.nonlinear import attach_implicit_gradient, make_implicit_newton_solver
 
 
 def _solver(fun, *, x_scale, f_scale, max_iters=80, **kwargs):
@@ -159,3 +160,75 @@ def test_nonconverged_root_has_zero_parameter_gradient():
     result = solve(jnp.array([0.1]), jnp.array([4.0]))
     assert not bool(result[2])
     assert float(jax.grad(objective)(jnp.array([4.0]))[0]) == 0.0
+
+
+@pytest.fixture
+def x64():
+    prev = jax.config.jax_enable_x64
+    jax.config.update("jax_enable_x64", True)
+    try:
+        yield
+    finally:
+        jax.config.update("jax_enable_x64", prev)
+
+
+def _cube_root_newton(a, iters=40):
+    return jax.lax.fori_loop(
+        0, iters, lambda _, x: x - (x ** 3 - a) / (3.0 * x ** 2), jnp.ones_like(a))
+
+
+def test_attach_implicit_gradient_value_gradient_and_no_replay(x64):
+    a = jnp.array([2.0, 27.0, 0.5])
+
+    def root(a):
+        return attach_implicit_gradient(_cube_root_newton(a), lambda x: x ** 3 - a)
+
+    x = root(a)
+    assert jnp.allclose(x, jnp.cbrt(a), rtol=0, atol=1e-14)
+    g = jax.vmap(jax.grad(lambda ai: root(ai)))(a)
+    assert jnp.allclose(g, 1.0 / (3.0 * jnp.cbrt(a) ** 2), rtol=1e-12)
+    # Reverse mode must not replay the forward iteration.
+    _, lin = jax.linearize(root, a)
+    assert "while" not in str(jax.make_jaxpr(lin)(a))
+
+
+def test_attach_implicit_gradient_clip_gives_zero_gradient(x64):
+    a = jnp.array([8.0, 1000.0])
+
+    def root(a):
+        return attach_implicit_gradient(
+            jnp.clip(_cube_root_newton(a), 0.0, 5.0), lambda x: x ** 3 - a,
+            lo=0.0, hi=5.0)
+
+    assert jnp.allclose(root(a), jnp.array([2.0, 5.0]))
+    g = jax.vmap(jax.grad(root))(a)
+    assert g[1] == 0.0 and g[0] > 0.0
+
+
+def test_attach_implicit_gradient_bound_and_nan(x64):
+    a = jnp.array([125.0, 8.0])
+
+    def root(a):
+        # x0 exactly AT the bound (5.0): zero gradient, not clip's half.
+        return attach_implicit_gradient(
+            jnp.clip(_cube_root_newton(a), 0.0, 5.0), lambda x: x ** 3 - a,
+            lo=0.0, hi=5.0)
+
+    g = jax.vmap(jax.grad(root))(a)
+    assert g[0] == 0.0 and g[1] > 0.0
+    # A pinned value keeps its forward value even if the step points inward.
+    x = attach_implicit_gradient(jnp.array([5.0]), lambda x: x ** 3 - 100.0,
+                                 lo=0.0, hi=5.0)
+    assert x[0] == 5.0
+    # A NaN slope with a finite residual must give NaN, not a value moved by
+    # residual / floor.
+    @jax.custom_jvp
+    def resid(x):
+        return x - 0.5
+
+    @resid.defjvp
+    def _resid_jvp(primals, tangents):
+        return resid(primals[0]), tangents[0] * jnp.nan
+
+    x = attach_implicit_gradient(jnp.array([1.0]), resid)
+    assert jnp.isnan(x).all()

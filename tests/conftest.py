@@ -1,5 +1,6 @@
 """Shared test fixtures for legoESM."""
 
+import functools
 import os
 import resource
 from pathlib import Path
@@ -237,6 +238,38 @@ def _isolate_corner_fill_process_state():
     halo._corner_fill_mode, halo._corner_fill_claimed = saved[0], saved[1]
     halo._corner_fill_traced.clear()
     halo._corner_fill_traced.update(saved[2])
+
+
+@functools.cache
+def _tree_is_dirty() -> bool:
+    from legoesm.io.git_provenance import git_provenance
+    return git_provenance(Path(__file__)).dirty
+
+
+@pytest.fixture(autouse=True)
+def _allow_version_drift_on_dirty_tree():
+    """On a tree with uncommitted changes every resume/restart test would hit
+    the version-drift gate.  Allow drift only then, so a clean checkout (CI)
+    still runs every restart test through the real gate.  The gate itself is
+    tested in tests/unit/test_version_drift.py, which unsets the variable."""
+    # Plain os.environ, not monkeypatch: requesting monkeypatch here would
+    # reorder its teardown after _isolate_corner_fill_process_state.
+    key = "LEGOESM_ALLOW_VERSION_DRIFT"
+    saved = os.environ.get(key)
+    if _tree_is_dirty():
+        os.environ[key] = "1"
+    yield
+    if saved is None:
+        os.environ.pop(key, None)
+    else:
+        os.environ[key] = saved
+
+
+@pytest.fixture
+def allow_version_drift(monkeypatch):
+    """For tests that load hand-built checkpoints with no run manifest beside
+    them: they test loading, not provenance."""
+    monkeypatch.setenv("LEGOESM_ALLOW_VERSION_DRIFT", "1")
 
 
 @pytest.fixture(scope="session")

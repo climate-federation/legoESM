@@ -29,8 +29,7 @@ from typing import NamedTuple
 
 # Legal Hines launch pressure [Pa]: above the boundary layer, below the
 # upper troposphere.  The ONE range for ``HinesConfig.launch_p`` and the
-# driver's ``hines_launch_p`` (validated in ``ExperimentConfig``); matches the
-# E3SM frontal sibling's ``launch_p`` spec bounds.
+# driver's ``hines_launch_p`` (validated in ``ExperimentConfig``).
 HINES_LAUNCH_P_RANGE_PA = (3.0e4, 9.0e4)
 
 
@@ -38,6 +37,9 @@ __param_spec__ = {
     "E3SMBeresConfig": {
         "scheme_key": "atm.gwd.E3SMBeresConfig",
         "excluded": {
+            "source_wind_p": "selects a level INDEX by argmin(|p - value|), so the drag is piecewise-constant in it and its gradient is identically zero (review F4; Hines launch_p precedent)",
+            "z_heat_max": "bounds the integer heating-depth search window (a comparison), so the drag is piecewise-constant in it and its gradient is identically zero (review F4; Hines launch_p precedent)",
+            "hdepth_min_km": "enters only a hard on/off comparison, so the drag is piecewise-constant in it and its gradient is identically zero (review F4; Hines launch_p precedent)",
             "mfcc_uh_slope": "stand-in-table-only surrogate slope (default 0 = uh-independent); the real source spectrum is the offline mfcc table, not a trained scalar",
             "storm_speed_min": "ground-relative storm-speed floor used only to truncate the integer Doppler cell-speed CS; a discretisation threshold, not a continuum closure",
         },
@@ -46,10 +48,6 @@ __param_spec__ = {
             "cf": {"units": "1", "bounds": (5.0, 60.0), "tunable_tier": 1, "transform": "sigmoid", "category": "source_spectrum", "reference": "Beres et al. (2004); E3SM gw_convect_hcf", "shape": None},
             "al": {"units": "m", "bounds": (1.0e4, 1.0e6), "tunable_tier": 1, "transform": "sigmoid", "category": "source_spectrum", "reference": "Beres et al. (2004); E3SM AL", "shape": None},
             "hdepth_scaling_factor": {"units": "1", "bounds": (0.25, 4.0), "tunable_tier": 2, "transform": "sigmoid", "category": "source_spectrum", "reference": "Beres et al. (2004); E3SM hdepth_scaling_factor", "shape": None},
-            # --- convective source triggering / search window ---
-            "hdepth_min_km": {"units": "km", "bounds": (0.5, 10.0), "tunable_tier": 2, "transform": "sigmoid", "category": "source_spectrum", "reference": "Beres et al. (2004); E3SM hdepth_min", "shape": None},
-            "z_heat_max": {"units": "m", "bounds": (5.0e3, 4.0e4), "tunable_tier": 3, "transform": "sigmoid", "category": "source_spectrum", "reference": "Beres et al. (2004) scheme default", "shape": None},
-            "source_wind_p": {"units": "Pa", "bounds": (4.0e4, 9.0e4), "tunable_tier": 3, "transform": "sigmoid", "category": "launch_level", "reference": "E3SM gw_beres_src k700 source-wind level", "shape": None},
             # --- analytic stand-in spectrum surrogate (not Beres-faithful) ---
             "mfcc_peak": {"units": "Pa", "bounds": (1.0e-4, 1.0e-1), "tunable_tier": 2, "transform": "sigmoid", "category": "source_spectrum", "reference": "stand-in mfcc surrogate (E3SM mfcc table replacement)", "shape": None},
             "mfcc_c0": {"units": "m/s", "bounds": (5.0, 90.0), "tunable_tier": 2, "transform": "sigmoid", "category": "source_spectrum", "reference": "stand-in mfcc surrogate phase-speed width", "shape": None},
@@ -59,6 +57,7 @@ __param_spec__ = {
     "E3SMCAMConfig": {
         "scheme_key": "atm.gwd.E3SMCAMConfig",
         "excluded": {
+            "ediff_kbot_p": "selects a level INDEX by argmin(|p - value|), so the drag is piecewise-constant in it and its gradient is identically zero (review F4; Hines launch_p precedent)",
             "alpha_newtonian": "uniform Newtonian-cooling coefficient (default 0 = off); when used it is replaced by the E3SM height profile, not a single trained scalar",
             # dc is the phase-speed bin width but the frontal source quadrature
             # turns it into a Python integer sub-interval COUNT
@@ -83,33 +82,30 @@ __param_spec__ = {
             "dback": {"units": "m^2/s", "bounds": (0.0, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "saturation", "reference": "E3SM gw_common background diffusivity dback", "shape": None},
             "prndl": {"units": "1", "bounds": (0.05, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "saturation", "reference": "E3SM gw_diffusion inverse Prandtl number", "shape": None},
             "egwd_max": {"units": "m^2/s", "bounds": (10.0, 500.0), "tunable_tier": 3, "transform": "sigmoid", "category": "saturation", "reference": "E3SM gw_diffusion eddy-diffusivity cap", "shape": None},
-            "ediff_kbot_p": {"units": "Pa", "bounds": (3.0e4, 9.0e4), "tunable_tier": 3, "transform": "sigmoid", "category": "launch_level", "reference": "E3SM gw_diffusion kbotbg eddy-diffusion bottom level", "shape": None},
         },
     },
     "E3SMFrontalConfig": {
         "scheme_key": "atm.gwd.E3SMFrontalConfig",
         "excluded": {
+            "front_p": "selects a level INDEX by argmin(|p - value|), so the drag is piecewise-constant in it and its gradient is identically zero (review F4; Hines launch_p precedent)",
+            "launch_p": "selects a level INDEX by argmin(|p - value|), so the drag is piecewise-constant in it and its gradient is identically zero (review F4; Hines launch_p precedent)",
+            "frontgfc": "enters only a hard on/off comparison, so the drag is piecewise-constant in it and its gradient is identically zero (review F4; Hines launch_p precedent)",
             "front_spectrum_dc_resolution": "sub-bin c-grid quadrature spacing dca for the Gaussian integration; a numerical resolution of the spectrum, not a closure",
         },
         "params": {
             # --- frontal source amplitude / triggering ---
             "taubgnd": {"units": "Pa", "bounds": (1.0e-4, 1.0e-2), "tunable_tier": 1, "transform": "sigmoid", "category": "momentum_flux", "reference": "Charron & Manzini (2002); CAM taubgnd", "shape": None},
-            "frontgfc": {"units": "K^2/(m^2 s)", "bounds": (1.0e-16, 1.0e-13), "tunable_tier": 2, "transform": "sigmoid", "category": "source_spectrum", "reference": "E3SM namelist_defaults_eam.xml frontgfc 1.25e-15 (7.5e-16 at 4x5; 2e-14 at ne120np4 on E3SM master); Charron & Manzini (2002)", "shape": None},
             "c0": {"units": "m/s", "bounds": (10.0, 90.0), "tunable_tier": 2, "transform": "sigmoid", "category": "source_spectrum", "reference": "CAM gw_front Gaussian phase-speed width c0", "shape": None},
-            # --- launch / trigger levels ---
-            "launch_p": {"units": "Pa", "bounds": (3.0e4, 9.0e4), "tunable_tier": 3, "transform": "sigmoid", "category": "launch_level", "reference": "E3SM gw_front kbotbg launch interface", "shape": None},
-            "front_p": {"units": "Pa", "bounds": (4.0e4, 9.0e4), "tunable_tier": 3, "transform": "sigmoid", "category": "launch_level", "reference": "E3SM gw_front kfront trigger level", "shape": None},
         },
     },
     "E3SMOrographicConfig": {
         "scheme_key": "atm.gwd.E3SMOrographicConfig",
         "excluded": {
+            "oro_min_wind": "enters only a hard on/off comparison, so the drag is piecewise-constant in it and its gradient is identically zero (review F4; Hines launch_p precedent)",
+            "oro_min_h": "enters only a hard on/off comparison, so the drag is piecewise-constant in it and its gradient is identically zero (review F4; Hines launch_p precedent)",
             "sgh_default": "default subgrid-orography stddev (default 0 = no oro waves); a per-column boundary input supplied by the dataset, not a trained scalar",
         },
         "params": {
-            # --- orographic source activation thresholds ---
-            "oro_min_h": {"units": "m", "bounds": (1.0, 50.0), "tunable_tier": 2, "transform": "sigmoid", "category": "orographic", "reference": "McFarlane (1987); E3SM orohmin", "shape": None},
-            "oro_min_wind": {"units": "m/s", "bounds": (0.5, 6.0), "tunable_tier": 2, "transform": "sigmoid", "category": "orographic", "reference": "McFarlane (1987); E3SM orovmin", "shape": None},
         },
     },
     "GWDMLEmulatorConfig": {

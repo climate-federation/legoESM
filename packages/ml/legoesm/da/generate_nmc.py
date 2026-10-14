@@ -652,6 +652,7 @@ def generate_nmc(config: NMCConfig) -> None:
             model_type="spectral_pe",
             discretization="spectral",
             dt=config.dt,
+            energy_fixer=False,   # not wired on spectral (F15, vote V11-C)
         ),
         output=OutputConfig(
             output_dir=str(tmp_dir),

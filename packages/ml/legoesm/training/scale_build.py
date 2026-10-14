@@ -258,7 +258,8 @@ _WB_SPECTRAL_KEYS = frozenset({
 # nested blocks (#1663 review: these were unvalidated, so a nested typo like
 # ``nn_hiden`` silently fell back to the default -- the inert-key defect class).
 _WB_CLASSICAL_KEYS = frozenset({
-    "cloud", "clubb_top_press_hpa", "convection", "gwd", "microphysics",
+    "cld_macmic_num_steps",
+    "cloud", "clubb_liquid_partition", "clubb_top_press_hpa", "convection", "gwd", "microphysics",
     "convective_rain_to_surface", "orbital_insolation",
     "param_fixed", "param_init",
     "rad_update_interval_steps", "rrtmgp_column_chunk_size",
@@ -430,7 +431,7 @@ def _spectral_pe_config(yml):
     )
 
 
-def _build_mode_components_spectral(cfg, yml):
+def _build_mode_components_spectral(cfg, yml, column_mesh=None):
     """Spectral (Gaussian + semi-implicit) training-core components (#817).
 
     Same 7-tuple contract as the lat-lon path, with the rollout routed through
@@ -528,6 +529,7 @@ def _build_mode_components_spectral(cfg, yml):
             cloud_scheme=str(_cl.get("cloud", "xu_randall")),
             surface_bulk_scheme=str(_cl.get("surface_bulk", "constant")),
         )
+        reject_no_surface_flux_with_era5_fluxes(yml)
         _rad_interval = int(_cl.get("rad_update_interval_steps", 6))
 
         # Any scheme in any family may be swapped, and the TRAINABLE
@@ -604,6 +606,16 @@ def _build_mode_components_spectral(cfg, yml):
         # 32-level arm sets 50 hPa — the diagnostic scheme's measured
         # stratospheric excursion lives 16-50 hPa there. A non-finite or
         # non-positive value is a config error, not a silent off-switch.
+        # CAM macro/micro sub-cycle count (CAM6 namelist cld_macmic_num_steps,
+        # 3 with mg2+clubb_sgs). 1 = the parallel accumulate, unchanged.
+        # Passed through RAW: make_physics refuses a bool, a non-integer and
+        # < 1, and an int() here would turn 3.9 into 3 and true into 1.
+        _macmic = _cl.get("cld_macmic_num_steps", 1)
+        _liq_part = _cl.get("clubb_liquid_partition", False)
+        if not isinstance(_liq_part, bool):
+            raise ValueError(
+                "classical.clubb_liquid_partition must be true or false, got "
+                f"{_liq_part!r}")
         _clubb_top_hpa = _cl.get("clubb_top_press_hpa")
         if _clubb_top_hpa is None:
             _clubb_top = None
@@ -653,7 +665,10 @@ def _build_mode_components_spectral(cfg, yml):
                     _cl.get("orbital_insolation", False)),
                 convective_rain_to_surface=bool(
                     _cl.get("convective_rain_to_surface", False)),
-                clubb_top_press=_clubb_top, **_schemes)
+                clubb_top_press=_clubb_top,
+                clubb_liquid_partition=_liq_part,
+                cld_macmic_num_steps=_macmic, column_mesh=column_mesh,
+                **_schemes)
         # The sample's forcing carries ERA5 skin temperature and the scene's
         # real calendar.  It used to be dropped here: the surface then sat at
         # the lowest model level's own air temperature (zero sensible heat
@@ -747,8 +762,34 @@ def _build_mode_components_spectral(cfg, yml):
             else:
                 self._physics_fn, self._rad_fn = physics_fn, None
 
-        def raw(self, ic_carry, n_steps, forcing):
-            state0 = carry_to_spectral_state(ic_carry, grid)
+        def raw(self, ic_carry, n_steps, forcing, adjoint_steps=0):
+            final = self._roll(carry_to_spectral_state(ic_carry, grid),
+                               n_steps, forcing, adjoint_steps=adjoint_steps)
+            return spectral_state_to_carry(final, grid, sigma)
+
+        def raw_two_leg(self, suffix_seg, ic_carry, n_steps, forcing,
+                        suffix_steps):
+            """One forecast whose last ``suffix_steps`` run ``suffix_seg``'s
+            parameters, handed the full carry (state, physics state, cached
+            radiation, step clock). With ``suffix_seg is self`` it is the same
+            forecast as ``raw``; its derivative in the suffix parameters is
+            what ``raw(..., adjoint_steps=suffix_steps)`` differentiates."""
+            import jax
+
+            k0 = int(n_steps) - int(suffix_steps)
+            if not 0 < k0 < int(n_steps):
+                raise ValueError(f"suffix_steps must be in 1..{int(n_steps) - 1}, "
+                                 f"got {suffix_steps}")
+            mid, ps, rad = self._roll(
+                carry_to_spectral_state(ic_carry, grid), k0, forcing,
+                return_phys_state=True, return_rad_tendency=True)
+            mid, ps, rad = jax.lax.stop_gradient((mid, ps, rad))
+            final = suffix_seg._roll(
+                mid, int(suffix_steps), forcing, phys_state_in=ps,
+                rad_tendency_in=rad, step_offset=k0)
+            return spectral_state_to_carry(final, grid, sigma)
+
+        def _roll(self, state0, n_steps, forcing, **kw):
             forcing_base = forcing if uses_forcing else None
             # Classical convection reads the grid's mask, not PhysicsState.
             # Keep the per-sample plane traced and the shared grid immutable.
@@ -763,14 +804,13 @@ def _build_mode_components_spectral(cfg, yml):
             gated = ({} if self._rad_fn is None else
                      {"rad_physics_fn": self._rad_fn,
                       "rad_update_interval": split_rad_interval})
-            final = spectral_rollout(
+            return spectral_rollout(
                 state0, self._physics_fn, physics_grid, sigma, pe_config,
                 dt, int(n_steps),
                 sponge_factor, spectral_filter,
                 forcing_base=forcing_base,
-                **gated,
+                **gated, **kw,
             )
-            return spectral_state_to_carry(final, grid, sigma)
 
     def make_run_seg(trainable):
         return _SpectralRunSeg(make_physics_fn(trainable))
@@ -835,8 +875,12 @@ def check_surface_drag_confound(yml, mode, training_core):
             f"equalised comparison (#1464).")
     return None
 
-def build_mode_components(cfg, yml):
-    """Return (model, grid, sigma, params, make_run_seg, loss_config, dt) for cfg.mode."""
+def build_mode_components(cfg, yml, column_mesh=None):
+    """Return (model, grid, sigma, params, make_run_seg, loss_config, dt) for cfg.mode.
+
+    ``column_mesh`` shards the radiation solve across devices; spectral
+    classical mode only.
+    """
     import jax
 
     from legoesm.driver.model_driver import ModelDriver
@@ -851,8 +895,13 @@ def build_mode_components(cfg, yml):
     if note:
         import logging
         logging.getLogger("scale_build").warning("CONFOUNDED RUN: %s", note)
+    if column_mesh is not None and (
+            core != "spectral" or getattr(cfg, "mode", None) != "physics"):
+        raise ValueError(
+            "column sharding is wired only for training_core='spectral', "
+            f"mode='physics'; got core={core!r} mode={getattr(cfg, 'mode', None)!r}")
     if core == "spectral":
-        return _build_mode_components_spectral(cfg, yml)
+        return _build_mode_components_spectral(cfg, yml, column_mesh)
     if core != "latlon":
         raise ValueError(
             f"unknown training_core {core!r}; choose 'latlon' (explicit "
@@ -1070,6 +1119,19 @@ def _era5_config(cfg, yml):
         # loader's documented option), so the key's presence decides.
         c = c._replace(flux_zarr=str(yml["era5_flux_zarr"] or ""))
     return c
+
+
+def reject_no_surface_flux_with_era5_fluxes(yml) -> None:
+    """``classical.surface_bulk: none`` and ``era5_surface_fluxes: true`` are
+    two contradicting surface choices: the ERA5 planes are folded into the
+    turbulence lower boundary condition from the physics state and would
+    silently replace the zero fluxes "none" prescribes."""
+    if (str((yml.get("classical") or {}).get("surface_bulk", "constant"))
+            == "none" and bool(yml.get("era5_surface_fluxes", False))):
+        raise ValueError(
+            "classical.surface_bulk='none' (no surface fluxes) contradicts "
+            "era5_surface_fluxes=true (ERA5 surface fluxes prescribed); "
+            "choose one.")
 
 
 def prescribed_surface_planes(sl, grid):

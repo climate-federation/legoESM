@@ -10,6 +10,9 @@ Two CESM layouts the loaders in ``legoesm.forcing.external`` cannot read as-is:
     sampling and put the 1850-2014 record in the wrong months.  This writes a
     CF ``time`` axis (days since 1850-01-01, noleap, mid-month) built from the
     file's own ``date`` (YYYYMMDD) variable, and keeps only the years asked for.
+    The ETH original (``CMIP_ECHAM6_radiation_v4.nc``, v4.0.0, 1850-2016) has
+    the same layout without ``date``; its records are dated from the 1-based
+    ``month`` index instead.
 
 ``ozone``  ``atm/cam/ozone_strataero/ozone_strataero_WACCM_L70_zm5day_*.nc``
     (CAM6 prescribed ozone, 5-day zonal means on the WACCM L70 HYBRID grid).
@@ -31,6 +34,7 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import re
 from pathlib import Path
 
 import numpy as np
@@ -53,25 +57,50 @@ def _year_mask(years: np.ndarray, first: int, last: int) -> np.ndarray:
     return keep
 
 
+def _month_index_labels(month) -> tuple[np.ndarray, np.ndarray]:
+    """(year, month) of a bare 1-based ``month`` index whose units read
+    "month starting from YYYY MM" (the ETH v4 file, which has no ``date``)."""
+    hit = re.fullmatch(r"\s*month starting from (\d{4}) (\d{1,2})\s*",
+                       str(month.attrs.get("units", "")))
+    k = np.asarray(month.values, dtype=np.float64)
+    if (hit is None or not 1 <= int(hit[2]) <= 12 or np.any(k != np.round(k))
+            or np.any(k < 1)):
+        raise ValueError("expected a 'date' variable, or a 1-based integer "
+                         "'month' index with units 'month starting from YYYY "
+                         f"MM' (got units {month.attrs.get('units')!r})")
+    abs_m = (int(hit[1]) * 12 + int(hit[2]) - 1) + k.astype(np.int64) - 1
+    return abs_m // 12, abs_m % 12 + 1
+
+
 def adapt_volcanic(ds, first_year: int, last_year: int):
-    """CF-time the CESM volcanic optics file and keep ``[first_year, last_year]``.
+    """CF-time the CMIP6 IACETH volcanic optics file; keep ``[first_year, last_year]``.
 
     Each monthly record is placed at the middle of its month on a noleap
     ``days since 1850-01-01`` axis, from the file's own ``date`` variable (the
-    ``month`` coordinate is a bare index).  Records of other years are dropped;
-    the file duplicates 1850 as "1849" and 2014 as "2015", so those labels are
-    never inside a 1850-2014 window.
+    CESM copy) or, without one, from its bare 1-based ``month`` index and the
+    index's "month starting from YYYY MM" units (the ETH v4.0.0 ECHAM6 file).
+    Records of other years are dropped; the CESM file duplicates 1850 as
+    "1849" and 2014 as "2015", so those labels are never inside a 1850-2014
+    window.
     """
-    if "month" not in ds.dims or "date" not in ds:
-        raise ValueError("expected the CESM volcanic layout: a 'month' record "
-                         "dimension and a YYYYMMDD 'date' variable")
-    years, months, _ = _split_date(ds["date"].values)
+    if "month" not in ds.dims:
+        raise ValueError("expected the CMIP6 volcanic layout: a 'month' record "
+                         "dimension")
+    if "date" in ds:
+        years, months, _ = _split_date(ds["date"].values)
+    else:
+        years, months = _month_index_labels(ds["month"])
+    if np.any((months < 1) | (months > 12)):
+        raise ValueError("volcanic record months outside 1..12")
     keep = _year_mask(years, first_year, last_year)
     idx = np.nonzero(keep)[0]
     out = ds.isel(month=idx)
     y, m = years[idx], months[idx]
     if np.any(np.diff(y * 12 + m) != 1):
         raise ValueError("volcanic records are not consecutive months")
+    if idx.size != 12 * (last_year - first_year + 1):
+        raise ValueError(f"volcanic records cover {idx.size} months, not all of "
+                         f"{first_year}-01..{last_year}-12")
     mid = (y - 1850) * 365.0 + _NOLEAP_CUM[m - 1] + 0.5 * _NOLEAP_LEN[m - 1]
     # ``date`` holds the file's own labels; the CF ``time`` below replaces it,
     # and a stale copy would invite a reader to anchor on it instead.

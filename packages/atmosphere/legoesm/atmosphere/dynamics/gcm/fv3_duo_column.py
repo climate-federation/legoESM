@@ -36,7 +36,7 @@ column leaves the driver holds are gathered to every host each step
 
 from __future__ import annotations
 
-from typing import Any, NamedTuple
+from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -50,6 +50,7 @@ from legoesm.core.fv3_native_physics_coupling import (
 from legoesm.grids.fv3_native_gridstruct import (
     FV3_KAPPA, FV3_OMEGA, FV3_RADIUS_M,
 )
+from legoesm.grids.column_mesh import ColumnMesh
 from legoesm.grids.vertical import create_hybrid_coordinate
 from legoesm.timestepping.integration import (
     refuse_unthreaded_stateful_physics)
@@ -61,74 +62,11 @@ from .fv3_duo_dynamics import FV3DuoDynamicsModel
 # water species in order (nwat = 6), passengers (N_*) after them
 DUO_COLUMN_TRACER_NAMES = FV3_WATER_SPECIES[:3]
 
-
-class DuoColumnMesh(NamedTuple):
-    """What the MPAS lane and its physics read off ``model.mesh``: cell
-    lat/lon [rad] and area [m^2] per column, no edge topology (a frontal
-    GWD source, which needs gradients, is refused on it).  Per-cell 1-D
-    like the Voronoi mesh (``grid_shape_2d == (nCells,)``), so every
-    setup-time regrid (topography, SST/SIC, land, ozone) lands on the
-    duo's own A-grid centres -- the driver's standard cubed-sphere
-    centres are NOT these (MEASURED 2026-09-26: 1.6 deg offsets)."""
-    latCell: jax.Array
-    lonCell: jax.Array
-    areaCell: jax.Array
-    nCells: int
-    grid_lat: jax.Array
-    grid_lon: jax.Array
-    grid_shape_2d: tuple
-    lat: jax.Array
-    lon: jax.Array
-    #: cell corners ``(nCells, 4)`` [rad], the B-grid nodes of each compute
-    #: cell in ring order: the terrain product's exact quad ownership
-    cornerLat: jax.Array
-    cornerLon: jax.Array
-    #: per-column subgrid orographic stddev [m] for the orographic GWD launch,
-    #: attached by the driver (``grid._replace``) like the Voronoi mesh's;
-    #: None = the scheme's scalar fallback
-    subgrid_topo_stddev: Any = None
-    #: per-column land fraction for convection (ZM autoconversion split)
-    #: and orographic GWD, attached by the driver like the Voronoi mesh's;
-    #: None = no land field (ZM land_fraction="required" then refuses)
-    land_frac: Any = None
-
-    # the rest of GridProtocol, as the Voronoi mesh defines them.  Radius
-    # and rotation rate are the DUO GRID'S (FV3's gfs_constants, which the
-    # six-face context is built with: areas, metrics, Coriolis), not
-    # legoESM's -- 3.1e-5 relative apart; a mesh reporting one radius
-    # while its areas use another would be a hidden choice.
-    @property
-    def grid_area(self) -> jax.Array:
-        return self.areaCell
-
-    @property
-    def grid_total_area(self) -> jax.Array:
-        return jnp.sum(self.areaCell)
-
-    @property
-    def grid_coriolis(self) -> jax.Array:
-        return 2.0 * FV3_OMEGA * jnp.sin(self.latCell)
-
-    @property
-    def grid_radius(self) -> float:
-        return FV3_RADIUS_M
-
-    @property
-    def radius(self) -> float:
-        return FV3_RADIUS_M
-
-    @property
-    def grid_n_columns(self) -> int:
-        return self.nCells
-
-    def to_columns(self, field):
-        return field
-
-    def from_columns(self, cols):
-        return cols
+#: the column mesh moved to legoesm.grids.column_mesh (old name kept)
+DuoColumnMesh = ColumnMesh
 
 
-def build_duo_column_mesh(ctx_np, n: int, ng: int) -> DuoColumnMesh:
+def build_duo_column_mesh(ctx_np, n: int, ng: int) -> ColumnMesh:
     """The column mesh of a duo grid context: the six faces' compute-
     window A-grid centres and areas, flattened ``(6, n, n) -> (6*n*n,)``
     row-major (the model's ``_columns`` order).  Built by the driver at
@@ -152,11 +90,12 @@ def build_duo_column_mesh(ctx_np, n: int, ng: int) -> DuoColumnMesh:
             ne, nw = g[ng + 1:ng + n + 1, ng + 1:ng + n + 1], g[ng:ng + n, ng + 1:ng + n + 1]
             out.append(np.stack([sw, se, ne, nw], axis=-1))
         return jnp.asarray(np.stack(out).reshape(6 * n * n, 4))
-    return DuoColumnMesh(
+    return ColumnMesh(
         latCell=jlat, lonCell=jlon, areaCell=jnp.asarray(area),
         nCells=int(lat.shape[0]), grid_lat=jlat, grid_lon=jlon,
         grid_shape_2d=(int(lat.shape[0]),), lat=jlat, lon=jlon,
-        cornerLat=corners("grid_lat"), cornerLon=corners("grid_lon"))
+        cornerLat=corners("grid_lat"), cornerLon=corners("grid_lon"),
+        radius=FV3_RADIUS_M, omega=FV3_OMEGA)
 
 
 class FV3DuoColumnState(NamedTuple):
@@ -173,7 +112,8 @@ class FV3DuoColumnState(NamedTuple):
 class FV3DuoColumnModel:
     def __init__(self, dyn: FV3DuoDynamicsModel, *, tracer_names=None,
                  conservative_tracer_clamp: bool = True,
-                 energy_consistent_moisture_clip: bool = False):
+                 energy_consistent_moisture_clip: bool = False,
+                 energy_fixer: bool = False):
         if dyn.window_layout is not None and dyn.window_layout.nb == 6:
             raise NotImplementedError(
                 "FV3DuoColumnModel: kt=1 windows stack like six faces, so a "
@@ -223,6 +163,11 @@ class FV3DuoColumnModel:
                 "energy_consistent_moisture_clip=True needs the floor's "
                 "latent-heat T correction written back into pt, which this "
                 "lane does not do; use the borrow (True) or drop the flag")
+        # CAM-style dycore energy fixer (F15): the energy the dynamics window
+        # loses (d_con=0 damping, B1/B2, numerics) comes back as a uniform
+        # pt increment on the post-dynamics state, before physics.  False on
+        # the raw model; the driver passes DycoreConfig.energy_fixer.
+        self.energy_fixer = bool(energy_fixer)
         self._state_type = FV3DuoColumnState
         self._phys_state = None
         self._sfc_diag = None
@@ -473,6 +418,11 @@ class FV3DuoColumnModel:
         self._last = self._host_state(fn(bundle))
         return self._last
 
+    def init_state(self, driver) -> None:
+        """ColumnModel fresh IC: the driver's duo builder (terrain-product
+        grid rebuild, ERA5 or DCMIP16 through the bundle)."""
+        driver._fv3_duo_column_init_state()
+
     def _native_of(self, state):
         """The bundle a column state stands for, with the driver's
         post-step column edits (T, tracers -- e.g. a hard-saturation
@@ -548,29 +498,35 @@ class FV3DuoColumnModel:
         if timers is not None:
             import time
             t0 = time.perf_counter()
-        bundle = self.dyn.step(self._native_of(state), dt)
+        bundle_pre = self._native_of(state)
+        bundle = self.dyn.step(bundle_pre, dt)
         if timers is not None:
             jax.block_until_ready(bundle["state"]["pt"])
             t1 = time.perf_counter()
             timers["dynamics"] += t1 - t0
+        # the fixer's window start rides into the jit only when it is on
+        pre = bundle_pre if self.energy_fixer else None
         if physics_fn is None:
             fn = self._post_fns.get(None)
             if fn is None:
-                def _pos(b):
+                def _pos(b, b_pre):
                     f = self._faces6(b)
-                    return self._rejoin(b, f, f["state"], f["press"],
-                                        self._positivity(f["state"],
-                                                         list(f["q"])))
+                    st = f["state"]
+                    if b_pre is not None:
+                        st, _ = self._fix_energy(
+                            f, self._view3(b)[0], b_pre)
+                    return self._rejoin(b, f, st, f["press"],
+                                        self._positivity(st, list(f["q"])))
                 fn = jax.jit(_pos)
                 self._post_fns[None] = fn
-            return self.from_bundle(fn(bundle))
+            return self.from_bundle(fn(bundle, pre))
         fn = self._post_fns.get(physics_fn)
         if fn is None:
-            fn = jax.jit(lambda b, dt_, fo, ps: self._physics_and_apply(
-                b, dt_, physics_fn, fo, ps))
+            fn = jax.jit(lambda b, dt_, fo, ps, b_pre: self._physics_and_apply(
+                b, dt_, physics_fn, fo, ps, b_pre))
             self._post_fns[physics_fn] = fn
         state_new, phys_out, sfc_diag = fn(bundle, float(dt), forcing,
-                                           phys_state)
+                                           phys_state, pre)
         if timers is not None:
             jax.block_until_ready(state_new.T.data)
             timers["physics"] += time.perf_counter() - t1
@@ -595,7 +551,12 @@ class FV3DuoColumnModel:
             # slot-wise merge as the MPAS model does: sw/lw refresh only
             # on a radiation step, precip every step -- keep the last
             # non-None value per slot
-            prev = self._sfc_diag or (None,) * len(sfc_diag)
+            prev = self._sfc_diag or ()
+            # pad the shorter tuple (as the MPAS model does): a zip would
+            # TRUNCATE to the shorter one and silently drop held slots
+            n = max(len(sfc_diag), len(prev))
+            prev = prev + (None,) * (n - len(prev))
+            sfc_diag = sfc_diag + (None,) * (n - len(sfc_diag))
             self._sfc_diag = tuple(
                 new if new is not None else old
                 for new, old in zip(sfc_diag, prev))
@@ -637,9 +598,50 @@ class FV3DuoColumnModel:
                     jnp.any(tr_w[nm] < 0.0), fixed[nm], tr_w[nm]))
                 for i, nm in enumerate(self.tracer_names)]
 
-    def _physics_and_apply(self, bundle, dt, physics_fn, forcing, phys_state):
+    def _fix_energy(self, faces, cols, bundle_pre):
+        """The dycore energy fixer on a post-dynamics bundle (F15).
+
+        ``cols`` is the post-dynamics column view of ``faces``.
+        Returns ``(state_dict, dT)``: ``faces["state"]`` with ``pt`` raised
+        on the compute window by the uniform ``dT`` [K, +warming] of
+        :func:`legoesm.core.conservation.energy_fixer_dT`, which restores
+        the column energy (``dycore_column_energy``, cell-centre KE of the
+        physics-facing A-grid winds, ``dp`` from the hybrid coordinate) of
+        ``bundle_pre``.  Reductions over every column (GSPMD-global)."""
+        from legoesm.core.conservation import (
+            conservation_accumulator, dycore_column_energy, energy_fixer_dT)
+        acc = conservation_accumulator()
+        area = jnp.asarray(self.mesh.areaCell, dtype=acc)
+
+        def _sums(cols):
+            ph = self.sigma_coord.pressure_at_half(cols.p_s.data)
+            dp = ph[..., 1:] - ph[..., :-1]
+            ke = 0.5 * (cols.u.data ** 2 + cols.v.data ** 2)
+            e = dycore_column_energy(cols.T.data, ke, dp, cols.phis.data,
+                                     cols.p_s.data)
+            m = jnp.sum(dp.astype(acc), axis=-1) / constants.g
+            return jnp.sum(e * area), jnp.sum(m * area)
+
+        e0, _ = _sums(self._view3(bundle_pre)[0])
+        e1, m1 = _sums(cols)
+        dT = energy_fixer_dT(e0, e1, m1)
+        ci = slice(self.ng, self.ng + self.n)
+        st = dict(faces["state"])
+        st["pt"] = jnp.asarray(st["pt"]).at[:, ci, ci].add(
+            dT.astype(st["pt"].dtype))
+        return st, dT
+
+    def _physics_and_apply(self, bundle, dt, physics_fn, forcing, phys_state,
+                           bundle_pre=None):
         from legoesm.core.state import MPAS_SFC_DIAG_EXTRA_KEYS
         cols, view, faces = self._view3(bundle)
+        st_in = faces["state"]
+        if bundle_pre is not None:
+            # fixer BEFORE physics (CAM check_energy_fix at the top of
+            # tphysbc): physics sees the fixed T, the applier the fixed pt
+            st_in, dT_fix = self._fix_energy(faces, cols, bundle_pre)
+            cols = cols._replace(T=cols.T.replace(
+                data=cols.T.data + dT_fix.astype(cols.T.data.dtype)))
         pr = physics_fn(cols, self.mesh, self.sigma_coord,
                         phys_state=phys_state, forcing=forcing)
         tend, phys_out = (pr[0], pr[1]) if type(pr) is tuple else (pr, phys_state)
@@ -673,7 +675,7 @@ class FV3DuoColumnModel:
                 "the DRY deck (FV3DuoConfig.moist=False ignores humidity in "
                 "the dycore); run the moist deck")
         st, press, q = apply_column_increments_sixface_jax(
-            faces["state"], faces["press"], list(faces["q"]), view,
+            st_in, faces["press"], list(faces["q"]), view,
             self._tab, self._wv6, u_dt_c, v_dt_c, t_dt_c, q_dt_c, dt=dt,
             n=self.n, ng=self.ng, km=self.km, ptop=self.dyn.ptop,
             akap=FV3_KAPPA, moist_cp=self.config.moist, nwat=self.nwat)

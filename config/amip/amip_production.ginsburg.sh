@@ -66,25 +66,38 @@ DATA="${AMIP_DATA:-${REPO}/data/amip}"
 : "${CMIP6_FORCING_DIR:=/burg-archive/glab/users/pg2328/legoESM/data/cmip6_forcing}"
 : "${SOLAR:=${CMIP6_FORCING_DIR}/solar_cmip6_SOLARIS-HEPPA-3-2_mon.nc}"
 : "${OZONE:=${CMIP6_FORCING_DIR}/vmro3_input4MIPs_ozone_CMIP_UReading-CCMI-1-0_zonalmean_185001-201412.nc}"
-# The coupled CMIP lane (run_coupled.py) has no YAML for these: pass the whole
-# set so it consumes the SAME real forcing as every AMIP grid.
+# Coupled CMIP lane: the canonical decks (config/cmip/cmip_ocean_*.yaml) now
+# carry the forcing SCHEME keys (F40) and take only PATHS from CMIP_PATH_FLAGS
+# below.  CMIP6_FORCING_FLAGS (schemes + paths) remains for the CLI-only
+# probes under scripts/cluster/cmip6_coupled/ that run without a deck.
 CMIP6_FORCING_FLAGS=(
   --ozone-source standard --ozone-forcing external --ozone-file "${OZONE}"
   --solar-source spectral_file --solar-file "${SOLAR}"
   --solar-tsi-var TSI --solar-spectral-var SSI_frac --solar-spectral-band-order rrtmg_sw
   --orbital-insolation --diurnal-cycle   # as every AMIP deck (gridaudit 2026-10-09)
 )
-# REAL GHG / aerosol / volcanic (2026-10-08), same set as Levante's ICON pool
-# files.  The synthetic aerosol_amip_clim.nc (four hand-picked constants, no
-# longitude) set cloud droplets at ~768 cm-3 through aerosol_ccn.  Staging +
+# REAL GHG / aerosol / volcanic (2026-10-08).  The aerosol pair below is the
+# product set both launchers name (review 2026-10-10 F33); GHG / volcanic /
+# solar / ozone are still machine-specific preparations.  The synthetic
+# aerosol_amip_clim.nc (four hand-picked constants, no longitude) set cloud
+# droplets at ~768 cm-3 through aerosol_ccn.  Staging +
 # provenance: fv3_duo_gaps/forcing_stage/ (deck_ledgers.md 2026-10-08).
 #   GHG: input4MIPs UoM-CMIP-1-2-0 global means incl. CFC-22/CCl4/CF4.
-#   AEROSOL: Kinne MACv1 fine+coarse (radiation); AEROSOL_CCN: fine mode (CCN).
-#   VOLCANIC: ETH CMIP6 stratospheric aerosol v4.0.0, ECHAM6 bands (SW + LW).
+#   AEROSOL: fine+coarse (radiation); AEROSOL_CCN: fine mode (CCN).  MACv2-SP
+#     anthropogenic plumes (input4MIPs MPI-M-MACv2-SP-1-0 v20170201, Stevens et
+#     al. 2017) on the Kinne MACv1 pre-industrial fine (+ coarse) background,
+#     1850-2014, one product for every lane (review 2026-10-10 F37, vote): built
+#     by scripts/data/adapt_cmip6_aerosol.py from aerosol/raw_macv2sp (README +
+#     sha256 there) and aerosol/raw_macv1; md5 in the .md5 files beside them.
+#   VOLCANIC: ETH CMIP6 stratospheric aerosol v4.0.0, ECHAM6 bands (SW + LW),
+#     1850-2014 for every lane (review 2026-10-10 F37, vote): built from the raw
+#     CMIP_ECHAM6_radiation_v4.nc by scripts/data/adapt_cesm_forcing.py volcanic
+#     --years 1850 2014 (md5 22f926c24aaf5fcce373a6a21be7caf0); 1979-2014 records equal the old
+#     *_1979-2014_IACETH-v4.nc slice.
 : "${GHG:=${CMIP6_FORCING_DIR}/ghg_cmip6_UoM-CMIP-1-2-0_halogens_0000-2014.nc}"
-: "${AEROSOL:=${CMIP6_FORCING_DIR}/aeropt_kinne_sw_b14_tot_1979-2014_MACv1.nc}"
-: "${AEROSOL_CCN:=${CMIP6_FORCING_DIR}/aeropt_kinne_sw_b14_fin_1979-2014_MACv1.nc}"
-: "${VOLCANIC:=${CMIP6_FORCING_DIR}/bc_aeropt_cmip6_volc_lw_b16_sw_b14_1979-2014_IACETH-v4.nc}"
+: "${AEROSOL:=${CMIP6_FORCING_DIR}/aeropt_macv2sp_sw_b14_tot_1850-2014_MACv1bg.nc}"
+: "${AEROSOL_CCN:=${CMIP6_FORCING_DIR}/aeropt_macv2sp_sw_b14_fin_1850-2014_MACv1bg.nc}"
+: "${VOLCANIC:=${CMIP6_FORCING_DIR}/bc_aeropt_cmip6_volc_lw_b16_sw_b14_1850-2014_IACETH-v4.nc}"
 CMIP6_FORCING_FLAGS+=(
   --ghg-forcing external --ghg-file "${GHG}"
   --aerosol-forcing external --aerosol-file "${AEROSOL}" --aerosol-ccn-file "${AEROSOL_CCN}"
@@ -135,7 +148,19 @@ CMIP6_FORCING_FLAGS+=( --rrtmgp-overhead-layer )
 # the twin's recorded 3.6 m (the residual is the source, our ETOPO regridded to
 # 1 deg vs their etopo_1deg_clean), i.e. 1.21x in drag where the previous file
 # was 2.31x.
-: "${AMIP_SSO:=/burg-archive/glab/users/pg2328/legoESM_chunk/data_pg/amip/sso_stdh_2deg_from1deg.nc}"
+# _seamfix (review 2026-10-10 F33): the SAME product name as the Levante twin,
+# the recipe above rebuilt with the current (post-#1712) regridder.  Staged
+# 2026-10-10 (md5 1a735e4987c9588a1154d5018c448d6b): its values equal the older
+# Ginsburg file sso_stdh_2deg_from1deg.nc in every column (SO 40-60S mean sgh
+# 3.611 m both), so switching name changes no Ginsburg run.
+: "${AMIP_SSO:=/burg-archive/glab/users/pg2328/legoESM_chunk/data_pg/amip/sso_stdh_2deg_from1deg_seamfix.nc}"
+# Land-sea mask (sftlf) built from the CLM surfdata by
+# scripts/data/build_sftlf_from_surfdata.py, as the Levante twin.  Without it
+# f_land comes from ETOPO elevation>0, which turns the Caspian and Aral (below
+# sea level) into ocean with prescribed SST (review 2026-10-10 F33).
+# Staged 2026-10-10 beside pg2328 data/clm/ surfdata (md5 7bcc2bf1fd37cc830fc72726ac44213c;
+# Caspian/Aral 1.0, open ocean 0.0).
+: "${AMIP_LAND_MASK:=${CLM_SURFDATA%/*}/sftlf_clm_1.9x2.5.nc}"
 
 # --- machine-specific PATH flags (everything else is in the YAML) -------------
 AMIP_PATH_FLAGS=(
@@ -163,9 +188,29 @@ fi
 if [[ -n "${AMIP_SSO}" ]]; then
   AMIP_PATH_FLAGS+=( --subgrid-orography-file "${AMIP_SSO}" )
 fi
+if [[ -n "${AMIP_LAND_MASK}" ]]; then
+  AMIP_PATH_FLAGS+=( --land-mask-file "${AMIP_LAND_MASK}" )
+fi
+
+# Coupled CMIP decks (config/cmip/cmip_ocean_*.yaml): machine PATHS only --
+# the decks select the forcing schemes (F40).  Terrain + subgrid orography are
+# the AMIP lane's (F36); the AMIP_VOLCANIC_LW / AMIP_SSO opt-outs apply as above.
+CMIP_PATH_FLAGS=(
+  --ozone-file "${OZONE}" --solar-file "${SOLAR}" --ghg-file "${GHG}"
+  --aerosol-file "${AEROSOL}" --aerosol-ccn-file "${AEROSOL_CCN}"
+  --volcanic-aerosol-file "${VOLCANIC}"
+  --topography "${ETOPO}"
+)
+if [[ "${AMIP_VOLCANIC_LW:-1}" == "1" ]]; then
+  CMIP_PATH_FLAGS+=( --volcanic-aerosol-lw )
+fi
+if [[ -n "${AMIP_SSO}" ]]; then
+  CMIP_PATH_FLAGS+=( --subgrid-orography-file "${AMIP_SSO}" )
+fi
 
 # Warn (don't fail) on a missing local input so a Stage-0 flat-topo smoke still works.
-for _f in "${ETOPO}" "${CLM_SURFDATA}" "${AMIP_SURFDATA}" ${AMIP_SSO:+"${AMIP_SSO}"}; do
+for _f in "${ETOPO}" "${CLM_SURFDATA}" "${AMIP_SURFDATA}" ${AMIP_SSO:+"${AMIP_SSO}"} \
+          ${AMIP_LAND_MASK:+"${AMIP_LAND_MASK}"}; do
   [ -e "${_f}" ] || echo "[ginsburg] NOTE: ${_f} not found — stage it (ETOPO: " \
     "scripts/data/prep_etopo_topography.py; CLM surfdata: data/clm/; harmonized " \
     "surfdata: scripts/data/build_legoesm_surfdata.py), or run a flat-topo " \

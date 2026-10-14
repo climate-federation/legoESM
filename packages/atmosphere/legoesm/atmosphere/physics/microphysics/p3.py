@@ -598,4 +598,5 @@ def p3_microphysics(
         dN_r_dt=dN_r_dt,
         dN_i_dt=dN_i_dt,
         precipitation=precipitation,
+        precip_frozen=precip_i,                        # the ice category
     )

@@ -3,7 +3,7 @@
 Each lane is set up for real (tiny grid, rrtmg) with the forcing readers
 monkeypatched to a synthetic latitude- and day-dependent set, then stopped at
 its first hand-off to physics: the per-step ``forcing`` dict given to
-``model.step`` (MPAS; the fv3_duo column lane runs this same ``_run_mpas``),
+``model.step`` (MPAS; the fv3_duo column lane runs this same ``_run_column``),
 the spectral ``forcing_data`` dict, or the ``pack_forcing`` kwargs that become
 the compiled cube / lat-lon SegmentForcing.  Every lane must hand its
 radiation the same TSI, spectrum, ozone, aerosol column, CCN AOD, volcanic LW
@@ -97,7 +97,7 @@ def _spy_lane(monkeypatch, d, lane):
             raise _Stop
         monkeypatch.setattr(type(d.model), "step", _step)
         with pytest.raises(_Stop):
-            (d._run_mpas if lane == "mpas" else d._run_spectral)(0, None)
+            (d._run_column if lane == "mpas" else d._run_spectral)(0, None)
         f, rad = rec["forcing"], rec["rad"]
         s0 = rad.rrtmgp.S_0 if rad.scheme == "rrtmgp" else rad.gray.S_0
         return dict(
@@ -131,7 +131,7 @@ def _spy_lane(monkeypatch, d, lane):
 def _build(tmp_path, lane, **over):
     g, dy = LANES[lane]
     cfg = ExperimentConfig(
-        grid=GridConfig(**g), dycore=DycoreConfig(**dy),
+        grid=GridConfig(**g), dycore=DycoreConfig(energy_fixer=False, **dy),
         output=OutputConfig(output_dir="", diag_days=1, checkpoint_days=0),
         days=1.0, dataset="analytical", radiation="rrtmg", convection="none",
         turbulence="none", microphysics="none", precision="fp64",
@@ -204,7 +204,7 @@ def test_every_lane_samples_the_same_forcing_days(monkeypatch, tmp_path, lane):
         days.append(float(day)) or {"tsi": 1361.0, "solar_fraction_by_gpt": None}))
     g, dy = LANES[lane.split("-")[0]]
     cfg = ExperimentConfig(
-        grid=GridConfig(**g), dycore=DycoreConfig(**dy),
+        grid=GridConfig(**g), dycore=DycoreConfig(energy_fixer=False, **dy),
         output=OutputConfig(output_dir="", diag_days=1, checkpoint_days=0),
         days=2.0, dataset="analytical", radiation="gray", convection="none",
         # louis: spectral full-physics (forcing dict); spectral-dry: legacy gray
@@ -227,7 +227,7 @@ _SWITCHES = ("ozone_forcing", "solar_source", "solar_tsi_var", "solar_spectral_v
              "solar_spectral_band_order", "ghg_forcing", "aerosol_forcing",
              "orbital_insolation", "diurnal_cycle")
 _DECKS = ("amip_production.yaml", "amip_production_fv3duo_c24.yaml",
-          "amip_sundqvist_l36.yaml", "amip_production_latlon24.yaml",
+          "amip_sundqvist_l36.yaml", "amip_sundqvist_latlon24.yaml",
           "amip_production_l36.yaml")
 
 

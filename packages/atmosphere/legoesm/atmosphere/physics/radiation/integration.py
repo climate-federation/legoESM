@@ -752,6 +752,29 @@ def _simple_lw_radiation(*, T, p_half, q_v, q_cloud, q_ice, config):
     )
 
 
+def _column_constraint(column_mesh, ncol: int):
+    """Sharding constraint for arrays whose leading axis is the ``ncol`` columns.
+
+    Every other leaf (scalars, per-band tables, None) passes through unchanged.
+    """
+    from jax.sharding import NamedSharding, PartitionSpec as P
+
+    n_dev = column_mesh.shape["col"]
+    if ncol % n_dev:
+        raise ValueError(
+            f"column_mesh: solver column count {ncol} is not divisible by "
+            f"{n_dev} devices")
+
+    def cons(x):
+        if getattr(x, "ndim", 0) >= 1 and x.shape[0] == ncol:
+            spec = P("col", *((None,) * (x.ndim - 1)))
+            return jax.lax.with_sharding_constraint(
+                x, NamedSharding(column_mesh, spec))
+        return x
+
+    return cons
+
+
 def _call_radiation_backend(
     radiation_config: RadiationConfig,
     T: jnp.ndarray,
@@ -785,6 +808,7 @@ def _call_radiation_backend(
     conv_mass_flux_up: jnp.ndarray | None = None,
     conv_icwmr: jnp.ndarray | None = None,
     clear_sky_toa: bool = False,
+    column_mesh=None,
 ):
     """Call configured radiation backend with a unified integration interface.
 
@@ -1035,12 +1059,29 @@ def _call_radiation_backend(
     # super-linear rrtmgp XLA compile time at higher horizontal resolution.
     # Columns are physically independent, so this is numerically EXACT.
     _col_chunk = getattr(radiation_config.rrtmgp, "column_chunk_size", 0)
+    if column_mesh is not None:
+        if _col_chunk and _col_chunk > 0:
+            raise ValueError(
+                "column_mesh with rrtmgp column_chunk_size > 0 is not "
+                "supported: the chunked solve scans over column blocks, so "
+                "the column axis it would shard is a scan axis.")
+        # Constrain the SOLVER's column axis (after the sub-column expansion):
+        # a partition placed only on the physics inputs does not propagate into
+        # the solver's working arrays, which keep full width on every device.
+        from legoesm.atmosphere.physics.clouds.subcolumns import (
+            PER_COLUMN_SOLVER_KEYS,
+        )
+        _cons = _column_constraint(column_mesh, _rad_kwargs["T"].shape[0])
+        _rad_kwargs = {k: (_cons(v) if k in PER_COLUMN_SOLVER_KEYS else v)
+                       for k, v in _rad_kwargs.items()}
     if _col_chunk and _col_chunk > 0:
         result = rrtmgp_solver.solve_columns_chunked(
             column_chunk_size=_col_chunk, **_rad_kwargs,
         )
     else:
         result = rrtmgp_solver.solve_columns(**_rad_kwargs)
+    if column_mesh is not None:
+        result = jax.tree.map(_cons, result)
 
     if _n_sub > 1:
         from legoesm.atmosphere.physics.clouds import subcolumns as _sub
@@ -1266,6 +1307,7 @@ def make_radiation_physics(
             sfc_albedo_override=sfc_albedo_override,
             sfc_emissivity_override=sfc_emissivity_override,
             use_clubb_cloud_fraction=use_clubb_cloud_fraction,
+            column_mesh=column_mesh,
         )
     elif model_type == "mpas":
         return _make_mpas_radiation(radiation_config, rrtmgp_solver,
@@ -2553,6 +2595,7 @@ def _make_spectral_pe_radiation(
     sfc_albedo_override: jnp.ndarray | float | None = None,
     sfc_emissivity_override: jnp.ndarray | float | None = None,
     use_clubb_cloud_fraction: bool = False,
+    column_mesh=None,
 ) -> Callable:
     """Create radiation physics_fn for SpectralPEModel.
 
@@ -2808,6 +2851,7 @@ def _make_spectral_pe_radiation(
             cloud_fraction_override=_cf_ovr,
             conv_mass_flux_up=_conv_mf_col,
             conv_icwmr=_conv_icwmr_col,
+            column_mesh=column_mesh,
         )
 
         # Reshape heating rate back to (n_lat, n_lon, nlev)

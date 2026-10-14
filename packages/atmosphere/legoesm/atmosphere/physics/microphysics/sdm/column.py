@@ -214,6 +214,7 @@ def _sdm_condensation_only_microphysics(
         dN_r_dt=z,
         dN_i_dt=z,
         precipitation=z1,
+        precip_frozen=z1,
     )
 
 
@@ -445,6 +446,7 @@ def _sdm_reconstructed_box_microphysics(
         dN_r_dt=jnp.reshape(dNr, shape),
         dN_i_dt=z,
         precipitation=z1,
+        precip_frozen=z1,
     )
 
 

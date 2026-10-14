@@ -200,7 +200,7 @@ def _build(distributed, mask_path, output_dir=None, fix_mass=True,
         # Named for the same reason: the per-step surfdata refresh exists only
         # for the two-leaf canopy (production keeps it on there) and the
         # driver refuses it for any other scheme.
-        mpas_land_params_refresh=(land_surface_scheme == "two_leaf"),
+        land_params_refresh=(land_surface_scheme == "two_leaf"),
         land_ic_path=land_ic,
         distributed=distributed,
     )

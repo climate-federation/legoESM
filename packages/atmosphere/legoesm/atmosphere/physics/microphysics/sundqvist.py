@@ -388,4 +388,5 @@ def sundqvist_microphysics(
         dN_r_dt=z,
         dN_i_dt=z,
         precipitation=precipitation,
+        precip_frozen=jnp.zeros_like(precipitation),   # L_v-only: all liquid
     )

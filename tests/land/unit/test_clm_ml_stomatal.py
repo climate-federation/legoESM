@@ -9,6 +9,7 @@ goes beyond the global PFT table — requires the Medlyn path.  These need no
 """
 from __future__ import annotations
 
+import importlib
 import sys
 import types
 
@@ -21,6 +22,8 @@ from legoesm.land.canopy.config import (
     CLMMLCanopyConfig,
 )
 
+_BACKEND = "legoesm.land.canopy.clm_ml_backend.multilayer_canopy"
+
 
 @pytest.fixture
 def fake_backend(monkeypatch):
@@ -28,11 +31,13 @@ def fake_backend(monkeypatch):
     ctl.gs_type = 2
     photo = types.ModuleType("multilayer_canopy.MLLeafPhotosynthesisMod")
     photo.gs_type = 2                      # by-value copy the kernel branches on
-    pkg = sys.modules.get("multilayer_canopy") or types.ModuleType("multilayer_canopy")
-    monkeypatch.setitem(sys.modules, "multilayer_canopy", pkg)
-    monkeypatch.setitem(sys.modules, "multilayer_canopy.MLclm_varctl", ctl)
-    monkeypatch.setitem(sys.modules,
-                        "multilayer_canopy.MLLeafPhotosynthesisMod", photo)
+    pkg = importlib.import_module(_BACKEND)
+    monkeypatch.setitem(sys.modules, f"{_BACKEND}.MLclm_varctl", ctl)
+    monkeypatch.setitem(sys.modules, f"{_BACKEND}.MLLeafPhotosynthesisMod", photo)
+    monkeypatch.setattr(pkg, "MLclm_varctl", ctl, raising=False)
+    monkeypatch.setattr(pkg, "MLLeafPhotosynthesisMod", photo, raising=False)
+    import legoesm.land.canopy.clm_ml_interface as iface
+    monkeypatch.setattr(iface, "_APPLIED_GS_TYPE", iface._APPLIED_GS_TYPE)   # restored at teardown
     return ctl, photo
 
 

@@ -1,7 +1,7 @@
 """The ledger WRITER must ship the reduction its rows were built for (#1354).
 
 The reader is tested directly in ``test_mpas_ledger_report.py``, but the
-writer lives inside ``ModelDriver._run_mpas``'s diagnostic block, which needs
+writer lives inside ``ModelDriver._run_column``'s diagnostic block, which needs
 a full MPAS run to reach. Codex flagged the consequence during review of the
 fix: *"No test locks this writer/tracker identity."*
 
@@ -34,9 +34,9 @@ def _run_mpas_body() -> ast.FunctionDef:
     """
     tree = ast.parse(_SRC.read_text())
     for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == "_run_mpas":
+        if isinstance(node, ast.FunctionDef) and node.name == "_run_column":
             return node
-    pytest.fail("ModelDriver._run_mpas not found -- the pin has lost its target")
+    pytest.fail("ModelDriver._run_column not found -- the pin has lost its target")
 
 
 def _ledger_savez(fn: ast.FunctionDef) -> ast.Call:
@@ -49,7 +49,7 @@ def _ledger_savez(fn: ast.FunctionDef) -> ast.Call:
         if any(isinstance(kw.arg, str) and kw.arg == "ledger_rates"
                for kw in node.keywords):
             return node
-    pytest.fail("the budget-ledger savez call is gone from _run_mpas")
+    pytest.fail("the budget-ledger savez call is gone from _run_column")
 
 
 def _area_kw_dict(fn: ast.FunctionDef) -> dict[str, str]:
@@ -69,7 +69,7 @@ def _area_kw_dict(fn: ast.FunctionDef) -> dict[str, str]:
             return {k.value: ast.unparse(v)
                     for k, v in zip(node.keys, node.values)
                     if isinstance(k, ast.Constant)}
-    pytest.fail("no dict literal carrying 'area_cell' inside _run_mpas")
+    pytest.fail("no dict literal carrying 'area_cell' inside _run_column")
 
 
 def test_writer_ships_weights_and_their_fingerprint():

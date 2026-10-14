@@ -217,6 +217,45 @@ def test_cam6_deck_smoke_builds_its_cloud_settings_into_the_cam6_cloud_config(
     assert cc.scheme == "cam6_clubb"
     pinned = yml["classical"]["param_fixed"]["atm.clouds.CloudConfig"]
     assert {f: getattr(cc, f) for f in pinned} == pinned
+    # The CAM6 liquid hand-off (classical.clubb_liquid_partition) reaches the
+    # built turbulence config: with it absent the closure's liquid is never
+    # handed to the microphysics, silently.
+    assert yml["classical"]["clubb_liquid_partition"] is True
+    assert built[-1].turbulence.liquid_partition is True
+
+
+@pytest.mark.parametrize("bad", ["yes", 1])
+def test_clubb_liquid_partition_key_must_be_a_bool(bad):
+    import yaml
+
+    from legoesm.training.scale_build import build_mode_components
+
+    deck = "config/wb/campaign/spectral_t63_cam6.yaml"
+    yml = yaml.safe_load(open(deck))
+    yml["classical"]["clubb_liquid_partition"] = bad
+    cfg = build_scale_config_from_args(
+        ["--config", deck, "--mode", "physics", "--training-core", "spectral",
+         "--smoke"])
+    from scripts.run.train_weatherbench_scale import _resolve_training_keys
+    cfg, _, _ = _resolve_training_keys(cfg, yml)
+    cfg = _apply_smoke_overrides(cfg, yml)
+    with pytest.raises(ValueError, match="clubb_liquid_partition must be true or false"):
+        build_mode_components(cfg, yml)
+
+
+def test_clubb_liquid_partition_refuses_a_non_clubb_closure():
+    from legoesm.grids.gaussian import create_gaussian_grid
+    from legoesm.training.aimip_params import make_aimip_classical_spectral_physics
+    from legoesm.training.model_registry import build_variant
+
+    params = build_variant(
+        "classical", nlev=8, overrides={"spatial_surface": False,
+                                        "spatial_init_std": 0.0,
+                                        "spatial_seed": 0})
+    with pytest.raises(ValueError, match="liquid hand-off"):
+        make_aimip_classical_spectral_physics(
+            params, create_gaussian_grid(8), 1800.0, radiation="gray",
+            turbulence_scheme="louis", clubb_liquid_partition=True)
 
 
 def test_latlon_grid_exposes_2d_lat_for_radiation():

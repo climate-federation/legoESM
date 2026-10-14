@@ -11,7 +11,7 @@ every column including land, because:
 
 * ``physics_pipeline.compute_radiation_core`` — which DOES form an
   ocean/ice/land albedo blend — belongs to the FV/lat-lon lane and is NOT
-  called by ``ModelDriver._run_mpas``; and
+  called by ``ModelDriver._run_column``; and
 * ``_make_hydrostatic_radiation`` (aliased as ``_make_mpas_radiation``) called
   ``_call_radiation_backend`` with no ``sfc_albedo_override`` and had no
   ``forcing["sfc_albedo"]`` hook, so no per-column albedo could reach the

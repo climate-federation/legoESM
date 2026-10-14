@@ -398,9 +398,12 @@ def apply_predicted_sundqvist_rain_survival_fraction(
     base_evap_flux = _flux_pair[..., 1]
     target_precip = jnp.clip(predicted_rain_survival_fraction, 0.0, 1.0) * generated_rain_flux
     target_evap_flux = jnp.clip(generated_rain_flux - target_precip, 0.0, generated_rain_flux)
+    # Double where: a rain-free column has base_evap_flux == 0 exactly, and a
+    # 0/0 in the discarded branch still poisons the reverse pass with NaN.
+    _evap_ok = base_evap_flux > 1.0e-12
     scale = jnp.where(
-        base_evap_flux > 1.0e-12,
-        target_evap_flux / base_evap_flux,
+        _evap_ok,
+        target_evap_flux / jnp.where(_evap_ok, base_evap_flux, 1.0),
         1.0,
     )
     evaporation = rates.evaporation * scale[:, None]

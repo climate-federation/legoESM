@@ -222,6 +222,9 @@ def zhang_mcfarlane_convection(
         du_dt_conv=du_dt_conv,
         dv_dt_conv=dv_dt_conv,
         dq_r_conv_dt=evap.ntprprd,
+        # surface snow flux of zm_conv_evap (its fusion heat is in tend_s):
+        # the land's convective snowfall (F29)
+        precip_frozen_sfc=evap.snow,
         # pbuf fields clubb_intr's deepcu reads (clubb_intr.F90:2501-2504):
         # CMFMC = zm_convr's net mass flux mc (mu + md, mb-scaled) scattered
         # to interface k = the top face of layer k, bottom face 0, hPa/s ->

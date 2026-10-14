@@ -258,6 +258,40 @@ def virtual_temperature(T, q_v):
     return T * (1.0 + coeff * q_v)
 
 
+def ke_dissipation_heating(u, v, du_dt, dv_dt, dt):
+    """Heating [K/s] that returns as heat the kinetic energy a momentum
+    tendency removes (frictional / dissipative heating), per level.
+
+        dT/dt = -(du*(u + dt/2*du) + dv*(v + dt/2*dv)) / c_pd
+
+    Discretely exact for the host update ``u += dt*du, v += dt*dv,
+    T += dt*dT``: ``c_pd*dt*dT = -[(u+dt*du)^2 - u^2 + (v+dt*dv)^2 - v^2]/2``
+    per unit mass, so the momentum tendency leaves the column
+    ``sum((c_pd*T + KE) dp/g)`` unchanged level by level.  Sign: positive
+    (warming) where the tendency removes kinetic energy.  The same closure as
+    the orographic GWD port (``e3sm_cam.py``, ``use_discrete_ke_heating``) and
+    CAM's ``diffusion_solver`` ``dtk``/``clubb_do_energyfix`` intent.
+    """
+    return -(du_dt * (u + 0.5 * dt * du_dt)
+             + dv_dt * (v + 0.5 * dt * dv_dt)) / constants.c_pd
+
+
+def column_energy_fixer_heating(residual, layer_mass, weight):
+    """Heating [K/s] that removes a column energy residual (CAM ``se_dis``).
+
+        dT/dt_k = -residual * w_k / (c_pd * sum_j layer_mass_j * w_j)
+
+    ``residual`` [W/m2, + = energy created], ``layer_mass`` [kg/m2] (dp/g),
+    ``weight`` >= 0 per level (where the fix may act; uniform per unit mass
+    where it is 1).  Exact: ``sum(c_pd * dT/dt * layer_mass) == -residual``.
+    CAM6 ``clubb_intr`` ``clubb_do_energyfix``: the imbalance spread evenly
+    per unit mass over the depth where CLUBB is active.
+    """
+    return -(residual[..., None] * weight
+             / (constants.c_pd * jnp.sum(layer_mass * weight, axis=-1,
+                                         keepdims=True)))
+
+
 def broadcast_column_param(value, like):
     """Broadcast a config coefficient over a column field's vertical dimension.
 

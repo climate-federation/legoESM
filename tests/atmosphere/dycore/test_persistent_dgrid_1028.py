@@ -202,6 +202,7 @@ def test_physics_increment_goes_through_the_driver_helper(cube):
         # the helper asks the driver whether the lane is active, so the stub
         # carries the real predicate bound to itself
         _persistent_dgrid_active = ModelDriver._persistent_dgrid_active
+        _persistent_cgrid_active = ModelDriver._persistent_cgrid_active
 
     stub = _Stub()
     stub._persistent_dgrid = True
@@ -359,7 +360,7 @@ def test_cc_view_is_a_view_not_a_write_back(cube):
     """``fv3_to_hydrostatic`` must not be assigned back over the D winds.
 
     Nothing enforces this mechanically, so the test states the invariant the
-    driver's ``_state_cc`` docstring promises: taking the view leaves the
+    driver's ``cell_centre_state`` docstring promises: taking the view leaves the
     D-staggered arrays untouched.  A write-back would reinstate the round trip
     one call site at a time.
     """

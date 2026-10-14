@@ -343,4 +343,5 @@ def sbm_convection(
         dq_c_conv_dt=dq_c_conv_dt,
         cape=cape,
         convective_mask=trigger,
+        precip_frozen_sfc=jnp.zeros_like(cape),  # L_v-only: liquid at sfc (F29)
     )

@@ -328,12 +328,15 @@ def shard_hydrostatic_to_atm_latlon(hs, grid, mesh):
     # entirely (#1362 round 4).
     _agree_mesh_entry(mesh, hs, where="shard_hydrostatic_to_atm_latlon")
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
-        hydrostatic_to_cgrid)
-    c_state = hydrostatic_to_cgrid(hs, grid)
+        facewind_to_cgrid, hydrostatic_to_cgrid)
+    # A LatLonFaceWindState already carries the native faces: no projection.
+    c_state = (facewind_to_cgrid(hs) if hasattr(hs, "u_f")
+               else hydrostatic_to_cgrid(hs, grid))
     return c_state if mesh is None else shard_state_atm_latlon(c_state, mesh)
 
 
-def gather_atm_latlon_to_hydrostatic(c_state, grid, mesh):
+def gather_atm_latlon_to_hydrostatic(c_state, grid, mesh, *,
+                                     as_facewind: bool = False):
     """Inverse of :func:`shard_hydrostatic_to_atm_latlon`: gather the sharded
     C-grid state THEN convert (C-grid faces -> cell winds) to the cell-centered,
     Field-wrapped ``HydrostaticState`` the driver/output/restart contract
@@ -343,9 +346,10 @@ def gather_atm_latlon_to_hydrostatic(c_state, grid, mesh):
     _agree_mesh_entry(mesh, c_state,
                       where="gather_atm_latlon_to_hydrostatic")
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
-        cgrid_to_hydrostatic)
+        cgrid_to_facewind, cgrid_to_hydrostatic)
     full = c_state if mesh is None else gather_state_atm_latlon(c_state, mesh)
-    return cgrid_to_hydrostatic(full, grid)
+    # ``as_facewind``: hand back the native faces (a driver carrying them).
+    return cgrid_to_facewind(full) if as_facewind else cgrid_to_hydrostatic(full, grid)
 
 
 # LatLonGrid scalar fields that stay STATIC per band (uniform bands -> one
@@ -1398,6 +1402,9 @@ def run_atm_latlon_spmd(model, mesh, hs_init, dt, n_steps, *,
                       has_on_segment=on_segment is not None,
                       where="run_atm_latlon_spmd")
     import jax.numpy as jnp
+    # A face-wind input (a driver carrying the native C-grid winds) gets face
+    # winds back at every boundary; cell-centre in -> cell-centre out.
+    _fw = hasattr(hs_init, "u_f")
     if n_steps < 1:
         raise ValueError(f"n_steps must be >= 1, got {n_steps}")
     seg = n_steps if segment_steps is None else int(segment_steps)
@@ -1427,12 +1434,13 @@ def run_atm_latlon_spmd(model, mesh, hs_init, dt, n_steps, *,
             # full state is gathered only on blowup / for the callback.
             if not bool(ok):
                 hs_out = gather_atm_latlon_to_hydrostatic(
-                    c_state, model.grid, mesh)
+                    c_state, model.grid, mesh, as_facewind=_fw)
                 return hs_out, f"BLOWUP at step {done}"
             if on_segment is not None:
                 on_segment(gather_atm_latlon_to_hydrostatic(
-                    c_state, model.grid, mesh), done)
-        return (gather_atm_latlon_to_hydrostatic(c_state, model.grid, mesh),
+                    c_state, model.grid, mesh, as_facewind=_fw), done)
+        return (gather_atm_latlon_to_hydrostatic(c_state, model.grid, mesh,
+                                             as_facewind=_fw),
                 "COMPLETED")
 
     step = make_sharded_atm_latlon_step(model, mesh, physics_fn=physics_fn)
@@ -1448,14 +1456,16 @@ def run_atm_latlon_spmd(model, mesh, hs_init, dt, n_steps, *,
         # Gather a cell-centered COPY for output / blowup-check ONLY — the
         # integration continues from c_state (sharded C-grid), so the lossy
         # cell<->face round-trip is NOT fed back into the dynamics.
-        hs_out = gather_atm_latlon_to_hydrostatic(c_state, model.grid, mesh)
+        hs_out = gather_atm_latlon_to_hydrostatic(c_state, model.grid, mesh,
+                                             as_facewind=_fw)
         finite = bool(jnp.isfinite(hs_out.p_s.data).all()
                       & jnp.isfinite(hs_out.T.data).all())
         if not finite:
             return hs_out, f"BLOWUP at step {done}"
         if on_segment is not None:
             on_segment(hs_out, done)
-    return gather_atm_latlon_to_hydrostatic(c_state, model.grid, mesh), status
+    return gather_atm_latlon_to_hydrostatic(c_state, model.grid, mesh,
+                                             as_facewind=_fw), status
 
 
 # ==============================================================================

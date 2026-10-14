@@ -634,4 +634,5 @@ def thompson_microphysics(
         dN_r_dt=dN_r_dt,
         dN_i_dt=dN_i_dt,
         precipitation=precipitation,
+        precip_frozen=precip_i + precip_s + precip_g,
     )

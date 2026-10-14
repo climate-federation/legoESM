@@ -9414,9 +9414,8 @@ def main() -> int:
     # reference. The hashed payload is an OceanRunRecord = runtime config + the
     # run controls (dt, total days, grid, mesh, output, forcing, IC) that live
     # OUTSIDE model.config — so two runs that differ only in dt/grid/output get
-    # distinct config_hashes (codex review HIGH). Best-effort: a provenance-write
-    # failure never aborts a long integration.
-    # Process-0 only under --distributed (every process shares one output dir).
+    # distinct config_hashes (codex review HIGH). A failed write aborts the run
+    # (2026-10-12 decision). Process 0 writes under --distributed.
     #
     # Resolve the CORE-II cache the run will actually read, so the manifest
     # records the forcing rather than the flag.  --forcing-path wins; otherwise
@@ -9428,52 +9427,50 @@ def main() -> int:
         from legoesm.ocean.forcing import core2_nyf_cache_dir
         _resolved_forcing_path = str(core2_nyf_cache_dir())
     print(f"[setup] CORE-II forcing cache: {_resolved_forcing_path}")
-    manifest_path = None
-    if _is_io_proc():
-        try:
-            from legoesm.driver.restart import (
-                dataset_provenance_entry,
-                write_run_manifest,
+    # Every process calls the writer (process 0 writes, all raise on failure):
+    # a run without its manifest is not reconstructible, so it does not start.
+    from legoesm.driver.restart import (
+        dataset_provenance_entry,
+        write_run_manifest_on_root,
+    )
+    from legoesm.ocean.config import OceanRunRecord
+    run_record = OceanRunRecord(
+        runtime_config=model.config,
+        grid=str(args.grid),
+        mesh=str(args.mesh),
+        nlev=int(args.nlev),
+        dt_seconds=float(dt),
+        total_days=float(total_days),
+        output_path=str(args.output),
+        forcing="core2_nyf",
+        # RESOLVED, not the flag.  An empty string here used to mean
+        # "the default", and the default silently changed from the raw
+        # CORE-II winds to the bias-corrected ones -- so every manifest
+        # written before this recorded nothing about which forcing the
+        # run actually used, and the loader's own provenance line is
+        # swallowed by the `| tail` most arm scripts pipe through.
+        forcing_path=str(_resolved_forcing_path),
+        woa_init=bool(args.woa_init),
+        woa_t=str(args.woa_t or ""),
+        woa_s=str(args.woa_s or ""),
+        latlon_res=str(args.latlon_res),
+        smoke=bool(args.smoke),
+    )
+    manifest_path = write_run_manifest_on_root(
+        out_dir, run_record, config_kind="ocean",
+        runner_tag="run_omip_core2",
+        dataset_provenance=[
+            dataset_provenance_entry(pth, dataset_id=did)
+            for did, pth in (
+                ("core2_forcing", _resolved_forcing_path),
+                ("woa_t", args.woa_t),
+                ("woa_s", args.woa_s),
             )
-            from legoesm.ocean.config import OceanRunRecord
-            run_record = OceanRunRecord(
-                runtime_config=model.config,
-                grid=str(args.grid),
-                mesh=str(args.mesh),
-                nlev=int(args.nlev),
-                dt_seconds=float(dt),
-                total_days=float(total_days),
-                output_path=str(args.output),
-                forcing="core2_nyf",
-                # RESOLVED, not the flag.  An empty string here used to mean
-                # "the default", and the default silently changed from the raw
-                # CORE-II winds to the bias-corrected ones -- so every manifest
-                # written before this recorded nothing about which forcing the
-                # run actually used, and the loader's own provenance line is
-                # swallowed by the `| tail` most arm scripts pipe through.
-                forcing_path=str(_resolved_forcing_path),
-                woa_init=bool(args.woa_init),
-                woa_t=str(args.woa_t or ""),
-                woa_s=str(args.woa_s or ""),
-                latlon_res=str(args.latlon_res),
-                smoke=bool(args.smoke),
-            )
-            manifest_path = write_run_manifest(
-                out_dir, run_record, config_kind="ocean",
-                runner_tag="run_omip_core2",
-                dataset_provenance=[
-                    dataset_provenance_entry(pth, dataset_id=did)
-                    for did, pth in (
-                        ("core2_forcing", _resolved_forcing_path),
-                        ("woa_t", args.woa_t),
-                        ("woa_s", args.woa_s),
-                    )
-                    if pth
-                ],
-            )
-            print(f"[setup] wrote run manifest {manifest_path}")
-        except Exception as _exc:  # noqa: BLE001 — provenance is best-effort
-            print(f"[warn] run manifest not written: {type(_exc).__name__}: {_exc}")
+            if pth
+        ],
+    )
+    if manifest_path is not None:
+        print(f"[setup] wrote run manifest {manifest_path}")
 
     _csv_cols = ["step", "day", "mean_sst_C", "mean_sss", "max_abs_u",
                  "max_abs_v", "umax_lat", "umax_lon", "umax_lev", "steps_per_s"]
@@ -10415,7 +10412,8 @@ def main() -> int:
                     grid_type=app_grid_type, runoff_R=_R,
                     emp=args.emp_freshwater, ramp=ramp,
                     u_oce=_u_oce, v_oce=_v_oce,
-                    wind_current_feedback_vfac=_wind_vfac)
+                    wind_current_feedback_vfac=_wind_vfac,
+                    forcing_remap=args.forcing_remap)
                 sf = sf._replace(freshwater=net_freshwater_flux(fw))
             state = model.step(state, dt, surface_forcing=sf,
                                t_seconds=_t_sec)
@@ -10430,7 +10428,8 @@ def main() -> int:
                     grid_type=app_grid_type, runoff_R=_R,
                     emp=args.emp_freshwater, ramp=ramp,
                     u_oce=_u_oce, v_oce=_v_oce,
-                    wind_current_feedback_vfac=_wind_vfac)
+                    wind_current_feedback_vfac=_wind_vfac,
+                    forcing_remap=args.forcing_remap)
             if ice_resp is not None:
                 # ONE shared, mask-aware partition (coupler.ocean_forcing):
                 # open-water stress/evap/heat/SW x f_open=(1-A) at the SINGLE

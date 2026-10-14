@@ -98,8 +98,9 @@ def safe_pow(x, p):
     Returns
     -------
     array
-        ``x ** p`` for ``x > 0``, else 0; gradient is finite
-        everywhere.
+        ``x ** p`` for ``x > 0``, else 0.  The gradient is finite at every
+        point but UNBOUNDED as ``x -> 0+`` for ``p < 1``: callers must keep
+        tiny-but-positive inputs out (gate the source below QSMALL).
     """
     positive = x > 0.0
     safe_x = jnp.where(positive, x, 1.0)

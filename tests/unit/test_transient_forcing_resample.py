@@ -38,7 +38,7 @@ def _make_atm_driver(days=2, diag_days=1, resolution=8, nlev=5, dt=600.0):
 
     cfg = ExperimentConfig(
         grid=GridConfig(grid_type="cubed_sphere", resolution=resolution, nlev=nlev),
-        dycore=DycoreConfig(dt=dt, model_type="hydrostatic"),
+        dycore=DycoreConfig(energy_fixer=False, dt=dt, model_type="hydrostatic"),
         output=OutputConfig(diag_days=diag_days),
         radiation="gray",
         days=days,

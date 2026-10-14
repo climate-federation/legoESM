@@ -107,9 +107,13 @@ JAX_ENABLE_X64=1 .venv/bin/python -m pytest tests/atmosphere/dycore/regression/ 
 
 Layered on legoESM's **existing** reproducibility core (do not reinvent it):
 `legoesm run <config.yaml>` writes `run_manifest.json` (resolved config +
-`state_digest` + `git_hash` + jax/numpy versions + platform), and `legoesm
-reproduce <manifest> --check` does a **bit-identical** re-run. That manifest is a
-superset of the lesommer `experiment.tag`.
+`state_digest` + legoESM commit + jax/numpy versions + platform), and `legoesm
+reproduce <manifest> --check` re-runs it and compares the final-state digest
+(a bitwise match can only be expected on the same software, hardware and
+device layout). Known
+gaps — physics-scheme parameters not recorded, drivers without a manifest, no
+commit check on replay, no input checksums — are listed in
+`docs/architecture/reproducibility.md`.
 
 The harness adds the *intent/ergonomics* layer:
 
@@ -125,7 +129,8 @@ The harness adds the *intent/ergonomics* layer:
   intent). Strict-validates *before* writing (bad override fails fast).
 - **`scripts/experiment/validate_templates.py [--write-status]`** — loads every
   template through the same `Config.from_yaml(...).to_experiment_config().validate_strict()`
-  path `legoesm run` uses; regenerates `project_status.md`.
+  path `legoesm run` uses (a `setup:` template goes through the shared matrix-case
+  selector instead); regenerates `project_status.md`.
 - **`scripts/experiment/fetch_data.py check|fetch <template>`** — resolves a
   template's `experiment.data` against `config/data_catalog.yaml` + the machine
   `data_root`; idealized templates need nothing.
@@ -136,10 +141,16 @@ The harness adds the *intent/ergonomics* layer:
 # idealized (no data)
 python scripts/experiment/fetch_data.py check 2d/williamson2_sw
 python scripts/experiment/init_experiment.py 2d/williamson2_sw --name w2 --output-dir ./runs/w2
-cd ./runs/w2 && bash run.sh
+(cd ./runs/w2 && bash run.sh)
 
-# higher resolution + longer
-python scripts/experiment/init_experiment.py 2d/williamson2_sw --name w2hi --output-dir ./runs/w2hi \
+# longer (shallow-water templates run the matrix case: besides setup.name/grid and
+# output.path, only setup.duration_days, setup.resolution and setup.quick can be set,
+# and no run_manifest.json is written)
+python scripts/experiment/init_experiment.py 2d/williamson2_sw --name w2long --output-dir ./runs/w2long \
+    -o setup.duration_days=10
+
+# higher resolution + longer (a `legoesm run` template: any config field is overridable)
+python scripts/experiment/init_experiment.py 3d_idealized/held_suarez --name hshi --output-dir ./runs/hshi \
     -o grid.resolution=96 -o time.duration_hours=240
 
 # data-gated template (the one template with a data list; the run itself is
@@ -147,8 +158,9 @@ python scripts/experiment/init_experiment.py 2d/williamson2_sw --name w2hi --out
 python scripts/experiment/fetch_data.py fetch 3d_idealized/hydrostatic_gray_1yr
 python scripts/experiment/init_experiment.py 3d_idealized/hydrostatic_gray_1yr --name hs1 --output-dir ./runs/hs1
 
-# reproduce any past run from its manifest
-legoesm reproduce ./runs/w2/<output>/run_manifest.json --check
+# reproduce a past `legoesm run` run from its manifest (not the matrix-case templates)
+(cd ./runs/hshi && bash run.sh)
+legoesm reproduce ./runs/hshi/output/held_suarez/run_manifest.json --check
 ```
 
 ## 5. Source-guardrail harness (AI-assisted-dev tripwires)

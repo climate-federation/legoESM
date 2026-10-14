@@ -1,6 +1,6 @@
 """Regression for the coupled-voronoi (MPAS) surface radiative-flux export.
 
-The lean ``_run_mpas`` loop advances the atmosphere with an operator-split
+The lean ``_run_column`` loop advances the atmosphere with an operator-split
 physics_fn that returns only a tendency, so the surface net radiative fluxes it
 computes were discarded — ``_build_atm_forcing`` then read ``held_sw_net_sfc``
 from ``_carry_aux`` where it defaulted to zeros, forcing the coupled ocean/land
@@ -11,7 +11,7 @@ callback, exactly as the compiled cube/latlon path exports its ``PhysicsOutput``
 
 This runs a short coupled voronoi case and asserts the exported surface SW is
 physically nonzero (a globe under gray radiation nets ~O(100) W/m^2), not the
-pre-fix zero.  Subprocess (the driver's real ``_run_mpas`` path); ~30 s.
+pre-fix zero.  Subprocess (the driver's real ``_run_column`` path); ~30 s.
 """
 from __future__ import annotations
 

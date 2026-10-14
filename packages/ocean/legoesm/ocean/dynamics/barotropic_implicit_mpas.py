@@ -664,14 +664,15 @@ def barotropic_implicit_mpas(
 
         _pcg_variant = str(config.barotropic_implicit_pcg_variant)
         _deep_halo = None
-        if _pcg_variant == "single_reduce_deep":
+        if _pcg_variant in ("single_reduce_deep", "chebyshev_deep"):
             # jacobi implies not gpoly, so this branch is the distributed one
             if _pcg_precond != "jacobi":
                 raise NotImplementedError(
-                    "barotropic_implicit_pcg_variant='single_reduce_deep' needs "
+                    f"barotropic_implicit_pcg_variant={_pcg_variant!r} needs "
                     "barotropic_implicit_pcg_precond='jacobi' (got "
                     f"{_pcg_precond!r}): the preconditioner must be pointwise; "
-                    "select pcg_variant='single_reduce' for the polynomial ones.")
+                    "select pcg_variant='single_reduce' for the polynomial ones "
+                    "(chebyshev_deep builds its own polynomial in D^-1 A).")
             if _vlayout is not None:
                 _rings = int(_vlayout.complete_cell_rings)
                 _exch_many = (halo_refresh.cells if halo_refresh is not None
@@ -681,7 +682,7 @@ def barotropic_implicit_mpas(
                 _exch_many = halo_refresh.cells
             if _rings < 1:
                 raise NotImplementedError(
-                    "barotropic_implicit_pcg_variant='single_reduce_deep' needs a "
+                    f"barotropic_implicit_pcg_variant={_pcg_variant!r} needs a "
                     f"layout certifying >= 1 complete cell ring (got {_rings}).")
             _deep_halo = (_exch_many, _owned, _rings)
 

@@ -201,7 +201,10 @@ _EXTRA_ORDER = ("lw_up_toa", "sw_up_toa", "sw_down_toa",
                 "sed_substeps_required",
                 # slot 13: the water flux the column received (turbulence
                 # evap_sfc) -- CMOR evspsbl / moisture closure, never hfls/L_v.
-                "evap_sfc")
+                "evap_sfc",
+                # slot 14 (2026-10-10, F29): the frozen part of the precip,
+                # the interactive land's snowfall.
+                "precip_frozen")
 
 
 class TestSfcDiagContract:
@@ -260,7 +263,7 @@ class TestSfcDiagContract:
             else getattr(_pt, _k, None)
             for _k in MPAS_SFC_DIAG_EXTRA_KEYS)
         sfc = (_pt.sw_net_sfc, _pt.lw_net_sfc, _pt.precip) + _extras
-        assert len(sfc) == 14
+        assert len(sfc) == 15
         assert sfc[10].name == "sw_up_toa_clr"   # rsutcs
         assert sfc[11].name == "lw_up_toa_clr"   # rlutcs
         # the MPI producer publishes the sub-step count at the same slot the
@@ -283,7 +286,7 @@ class TestSfcDiagContract:
         _pt = _tend_with_extras()
         _extras = tuple(getattr(_pt, _k, None) for _k in _EXTRA_ORDER)
         sfc_diag = (_pt.sw_net_sfc, _pt.lw_net_sfc, _pt.precip) + _extras
-        assert len(sfc_diag) == 14
+        assert len(sfc_diag) == 15
         # Consumer (_feed_mpas_cmip_accumulators): slot 3->rlut, 4->rsut,
         # 5->rsdt, 6->hfss, 7->hfls, 10->rsutcs, 11->rlutcs; slots 8/9 are
         # the _marshal_land_forcing downwelling pair.
@@ -807,7 +810,7 @@ class TestRound4:
         MPAS loop."""
         import inspect
         from legoesm.driver.model_driver import ModelDriver
-        src = inspect.getsource(ModelDriver._run_mpas)
+        src = inspect.getsource(ModelDriver._run_column)
         assert "(DIAG_PHASE + step + 1) % DIAG_INTERVAL == 0" in src, (
             "MPAS diagnostics must trigger on the phased step index")
         assert ("DIAG_PHASE = start_step if cfg.output.diag_days > 0 else 0"
@@ -894,7 +897,7 @@ class TestRound4:
         steps, producing a wrong interval mean."""
         import inspect
         from legoesm.driver.model_driver import ModelDriver
-        src = inspect.getsource(ModelDriver._run_mpas)
+        src = inspect.getsource(ModelDriver._run_column)
         assert "DROPPED a partial diag" in src, (
             "feed-off runs must drop (and log) staged cmor_flux* payloads")
         # The drop must be in the else-branch of the accumulator build,
@@ -1346,7 +1349,10 @@ class TestCloudCmorFeed:
         assert np.all(out["field_2d_clwvi"] > 0.0), (
             "radiative clwvi must include the diagnostic condensate floor")
         assert np.all(out["field_2d_clt"] > 0.0)
-        assert np.all(out["field_2d_clt"] <= 100.0)
+        # The native clt is exactly 100 here; the 10-degree CMOR regrid's
+        # weight round-off lifts 103 of 648 cells to 100 + 2.8e-14 (job
+        # 10330692), so the bound allows round-off only.
+        assert np.all(out["field_2d_clt"] <= 100.0 + 1e-9)
 
     def test_clt_bounds_and_units_percent(self, mesh):
         """clt is in CMIP % units: a fully saturated column -> ~100, and
@@ -1516,7 +1522,7 @@ class TestClearSkyPassEffective:
     def test_run_mpas_uses_the_helper_for_the_radiation_config(self):
         """The gate must reach the RadiationConfig the MPAS lane BUILDS —
         passing the raw flag there is the defect this helper exists to stop.
-        Asserted on the AST of the symbol that runs (_run_mpas)."""
+        Asserted on the AST of the symbol that runs (_run_column)."""
         import ast
         import inspect
         import textwrap
@@ -1524,18 +1530,18 @@ class TestClearSkyPassEffective:
         from legoesm.driver.model_driver import ModelDriver
 
         tree = ast.parse(textwrap.dedent(
-            inspect.getsource(ModelDriver._run_mpas)))
+            inspect.getsource(ModelDriver._run_column)))
         kw = [k for n in ast.walk(tree) if isinstance(n, ast.Call)
               and isinstance(n.func, ast.Name)
               and n.func.id == "RadiationConfig"
               for k in (n.keywords or []) if k.arg == "clear_sky_diag"]
         assert len(kw) == 1, (
             "expected exactly one RadiationConfig(clear_sky_diag=...) in "
-            "_run_mpas")
+            "_run_column")
         names = {n.attr for n in ast.walk(kw[0].value)
                  if isinstance(n, ast.Attribute)}
         assert "_mpas_clear_sky_effective" in names, (
-            "_run_mpas passes the RAW flag into RadiationConfig; it must pass "
+            "_run_column passes the RAW flag into RadiationConfig; it must pass "
             "the publishability-checked value from clear_sky_pass_effective.")
         assert "clear_sky_diag" not in names
 

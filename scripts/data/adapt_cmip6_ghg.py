@@ -26,7 +26,7 @@ Usage::
     python scripts/data/adapt_cmip6_ghg.py --co2 co2.nc --ch4 ch4.nc \\
         --n2o n2o.nc --cfc11 cfc11.nc --cfc12 cfc12.nc --out ghg_cmip6.nc
 
-Consume it with ``run_amip_cmip6_deck.py --ghg-forcing external --ghg-file
+Consume it with ``run_amip_smoke_deck.py --ghg-forcing external --ghg-file
 <out>`` (or ``run_amip.py`` directly).
 """
 
@@ -420,7 +420,7 @@ def main(argv: list[str] | None = None) -> int:
     yrs = np.asarray(merged["time"].values)
     print(f"Wrote {args.out} ({yrs.size} years, {yrs[0]:.1f}->{yrs[-1]:.1f}; "
           f"vars {list(merged.data_vars)})")
-    print("Consume: run_amip_cmip6_deck.py --ghg-forcing external "
+    print("Consume: run_amip_smoke_deck.py --ghg-forcing external "
           f"--ghg-file {args.out}")
     return 0
 

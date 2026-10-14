@@ -443,7 +443,7 @@ def beta_limited_surface_humidity(
 ) -> jax.Array:
     """Soil-moisture-limited effective surface humidity for a BLENDED surface.
 
-    ``beta_land`` may be a scalar (the static ``mpas_land_beta`` knob) or a
+    ``beta_land`` may be a scalar (the static ``land_beta`` knob) or a
     per-column array of shape ``(ncol,)`` (the traced root-zone ``beta_soil``
     from the interactive multilayer land, #1312 phase 2b) — the formula below
     is elementwise either way.

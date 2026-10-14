@@ -31,6 +31,8 @@ import numpy as np
 from legoesm import constants
 from legoesm.core.source_rounding import nemo_source_round
 from legoesm.grids.latlon import LatLonGrid  # noqa: F401 — kept for type compat
+from legoesm.grids.halo_latlon import (
+    get_meridionally_periodic, lat_faces_from_north, meridional_periodicity)
 from legoesm.grids.operators_latlon_cgrid import (
     pad_ns_zero,
     pad_ns_zero_multi,
@@ -4011,6 +4013,7 @@ def _nemo_hpg_sco_literal_cgrid_impl(
     *,
     return_components: bool = False,
     _source_round: bool = True,
+    _j_periodic: bool = False,
 ) -> tuple[jnp.ndarray, ...]:
     """Literal NEMO ``hpg_sco`` recurrence on native east/north faces.
 
@@ -4124,10 +4127,12 @@ def _nemo_hpg_sco_literal_cgrid_impl(
 
     native_u = jnp.stack(u_levels, axis=-1)
     native_v = jnp.stack(v_levels, axis=-1)
-    result = (
-        jnp.concatenate([native_u[:, -1:, :], native_u], axis=1),
-        jnp.concatenate([jnp.zeros_like(native_v[:1]), native_v], axis=0),
-    )
+    # The y-wrap is a jit static (the cache must not serve a walled trace).
+    with meridional_periodicity(_j_periodic):
+        result = (
+            jnp.concatenate([native_u[:, -1:, :], native_u], axis=1),
+            lat_faces_from_north(native_v),
+        )
     if not return_components:
         return result
 
@@ -4136,8 +4141,8 @@ def _nemo_hpg_sco_literal_cgrid_impl(
         return jnp.concatenate([native[:, -1:, :], native], axis=1)
 
     def _v_redundant(levels):
-        native = jnp.stack(levels, axis=-1)
-        return jnp.concatenate([jnp.zeros_like(native[:1]), native], axis=0)
+        with meridional_periodicity(_j_periodic):
+            return lat_faces_from_north(jnp.stack(levels, axis=-1))
 
     return result + (
         _u_redundant(u_zhpi_levels), _v_redundant(v_zhpj_levels),
@@ -4147,7 +4152,7 @@ def _nemo_hpg_sco_literal_cgrid_impl(
 
 _nemo_hpg_sco_literal_cgrid_compiled = jax.jit(
     _nemo_hpg_sco_literal_cgrid_impl,
-    static_argnames=("return_components", "_source_round"))
+    static_argnames=("return_components", "_source_round", "_j_periodic"))
 
 
 def nemo_hpg_sco_literal_cgrid(
@@ -4164,11 +4169,13 @@ def nemo_hpg_sco_literal_cgrid(
     if isinstance(rhd, jax.core.Tracer):
         return _nemo_hpg_sco_literal_cgrid_impl(
             rhd, e3w, gdept_z0, grid, g,
-            return_components=return_components, _source_round=_source_round)
+            return_components=return_components, _source_round=_source_round,
+            _j_periodic=get_meridionally_periodic())
     with jax.disable_jit(False):
         return _nemo_hpg_sco_literal_cgrid_compiled(
             rhd, e3w, gdept_z0, grid, g,
-            return_components=return_components, _source_round=_source_round)
+            return_components=return_components, _source_round=_source_round,
+            _j_periodic=get_meridionally_periodic())
 
 
 def partial_cell_pgf_correction_x(

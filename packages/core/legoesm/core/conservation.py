@@ -11,6 +11,8 @@ References
 
 from __future__ import annotations
 
+from typing import NamedTuple
+
 import jax
 import jax.numpy as jnp
 
@@ -37,52 +39,47 @@ from legoesm.grids.vertical import compute_geopotential
 # top level (re-enters their __init__ mid-load, breaks isolated pytest; CLAUDE.md).
 
 
-def energy_consistent_moisture_floor(q_v_raw, T):
-    """Floor ``q_v`` at zero while conserving moist static energy.
+def energy_consistent_moisture_floor(q_v_raw, T, weight):
+    """Floor ``q_v`` at zero conserving column water AND moist static energy.
 
     Issue #323.  The per-step physics tracer update
     ``q_v_raw = q_v + dt * dq_v_dt`` can go negative when the combined
     convective (SBM) + microphysical (Kessler) vapour sink exceeds the
-    available vapour in a column.  A plain ``max(q_v_raw, 0)`` floor
-    truncates the vapour sink but leaves the matching condensation latent
-    heat already added to ``T`` in full, injecting spurious heat that
-    accumulates under organised convection and drives the wind blow-up.
+    available vapour in a cell, while the matching condensation latent heat
+    is already in ``T``.  A plain ``max(q_v_raw, 0)`` leaves that phantom
+    heat (the kessler+sbm wind blow-up) AND creates the clipped vapour.
 
-    This floors ``q_v`` AND removes the latent heat tied to the clipped
-    (un-removed) vapour, so the floor is moist-static-energy neutral::
+    This borrows the deficit from the column's positive vapour
+    (:func:`conservative_positive_clip`, the same borrow as the default floor)
+    and books the latent heat of every cell's vapour change::
 
-        deficit = max(-q_v_raw, 0)            # vapour the sink could not remove
-        q_v_out = q_v_raw + deficit = max(q_v_raw, 0)
-        T_out   = T - (L_v / c_pd) * deficit
+        q_v_out = conservative_positive_clip(q_v_raw, weight)[0]
+        T_out   = T - (L_v / c_pd) * (q_v_out - q_v_raw)
 
-    Hence ``c_pd*T_out + L_v*q_v_out == c_pd*T + L_v*q_v_raw`` to roundoff
-    (the map is piecewise-linear in ``q_v_raw``), whereas the plain floor
-    leaves a residual ``+L_v*deficit`` of spurious energy.
+    so ``c_pd*T + L_v*q_v`` is unchanged in EVERY cell (to roundoff): the
+    clipped cell cools by ``L_v*deficit`` (its phantom condensation heat is
+    removed, as before), and the donor cells whose vapour is borrowed warm
+    by ``L_v`` times what they give (the vapour the sink could not remove
+    where it ran out is removed where it exists, with its condensation
+    heat).  This is a numerical energy correction, not a modelled process.
+    The default borrow (T untouched) conserves only the COLUMN energy.
 
-    Scope / limitations (deliberate; this targets the *energy* blow-up).
-    ------------------------------------------------------------------
-    * **Conserves moist static energy, NOT total water.**  It does not touch
-      ``q_c``/``q_r``: if the over-removed vapour had been routed to condensate
-      (``dq_c > 0``), that condensate is still created, so column total water
-      ``q_v + q_c + q_r`` rises by ``deficit``.  Removing the spurious *heat*
-      is what stops the wind blow-up; full total-water closure needs a
-      per-scheme limiter that caps each scheme's vapour sink AND its matching
-      condensate/rain source together (a larger change, see Issue #323).
-    * **First-order latent-heat attribution.**  ``deficit`` is taken from the
-      *summed* ``dq_v_dt``, which also carries non-condensational sinks
-      (turbulent mixing, surface evaporation) that release no latent heat.
-      Attributing the whole overshoot to condensation slightly over-cools
-      when those are present.  This is a good approximation for the
-      condensation-dominated drying it is meant for (kessler+sbm) and is why
-      it is opt-in (default off) rather than always on.
+    Water: column ``sum(weight*q_v)`` is conserved wherever the column's
+    total is positive.  A net-negative column has nothing to borrow from and
+    is zeroed (the borrow's minimum-creation choice); the water that creates
+    is paid by cooling, so energy still closes there.  ``q_c``/``q_r`` are
+    untouched (their own floors run separately).
 
-    Pure ``jnp``; differentiable (subgradient at the ``q_v_raw = 0`` kink).
-    Returns ``(q_v_out, T_out)`` with the dtypes of the inputs preserved by
-    the caller's downstream ``_match_dtype`` cast.
+    First-order attribution: the whole overshoot is treated as condensation
+    even if part of the summed ``dq_v_dt`` is non-condensational (mixing,
+    evaporation).  Opt-in (default off).
+
+    ``weight`` is the per-layer mass weight along the trailing (vertical)
+    axis, as for :func:`conservative_positive_clip`.  Pure ``jnp``;
+    differentiable.  Returns ``(q_v_out, T_out)``.
     """
-    deficit = jnp.maximum(-q_v_raw, 0.0)
-    q_v_out = q_v_raw + deficit
-    T_out = T - (constants.L_v / constants.c_pd) * deficit  # latent-ok: atmosphere moist-enthalpy reference L (constant by convention; surface gap booked by surface_layer.latent_enthalpy_correction)
+    q_v_out = conservative_positive_clip(q_v_raw, weight, axis=-1)[0]
+    T_out = T - (constants.L_v / constants.c_pd) * (q_v_out - q_v_raw)  # latent-ok: atmosphere moist-enthalpy reference L (constant by convention; surface gap booked by surface_layer.latent_enthalpy_correction)
     return q_v_out, T_out
 
 
@@ -129,8 +126,9 @@ _FLOOR_LATENT_COEF = {
 def energy_consistent_water_floor(tracers, T):
     """Hard-floor every water tracer to zero, conserving frozen MSE.
 
-    Generalises :func:`energy_consistent_moisture_floor` (vapour only) to the
-    condensate species.  Each species is floored ``q_out = max(q_raw, 0)``; the
+    The hard-floor, all-species form of the per-cell MSE bookkeeping in
+    :func:`energy_consistent_moisture_floor` (which borrows the vapour instead
+    of creating it).  Each species is floored ``q_out = max(q_raw, 0)``; the
     per-cell temperature is corrected by ``dT = -(coef/c_pd)*deficit`` with
     ``coef`` from :data:`_FLOOR_LATENT_COEF`, so the model's frozen MSE
     ``c_pd*T + L_v*q_v − L_f*(q_i+q_s+q_g)`` is unchanged pointwise (vapour
@@ -385,6 +383,59 @@ def conservative_positive_clip_global(q, weight, axis=-1, eps=1e-30,
     factor = jnp.where(live, 1.0 - resid / safe_total,
                        jnp.where(pos_total > 0.0, 1.0, 0.0))
     return q_col * jnp.clip(factor, 0.0, 1.0).astype(q.dtype), created
+
+
+def restore_level_mass(q_new, q_ref, dp, area, *, clip, owned_mask=None,
+                       reduce=None):
+    """Per-level multiplicative restore of a tracer's global MASS after a
+    horizontal filter.
+
+    A horizontal filter on the mixing ratio (SCVT del2/del4, a spectral
+    hyperdiffusion) conserves ``sum_c A_c q_c`` per level, not the tracer
+    mass ``sum_c A_c dp_c q_c``: wherever the layer mass ``dp`` varies
+    (terrain, any p_s gradient) it moves mass between thin and thick
+    columns and so creates or destroys it.  This rescales each level ``l``
+    of ``q_new`` (optionally clipped to ``q >= 0`` first) by::
+
+        factor_l = sum_c A_c dp_c,l q_ref_c,l / sum_c A_c dp_c,l q_new_c,l
+
+    so the level's mass equals the PRE-filter ``q_ref`` mass to roundoff.
+    The layer masses do not change across the filter, so restoring every
+    level restores the global tracer mass and leaves the global dry mass
+    (``p_s`` untouched) unchanged.  ``dp`` enters as ``max(dp, 0)``: the
+    same positive-weight contract as the positivity borrow (a hybrid
+    coordinate's surface layer can go non-positive over high terrain).
+
+    ``q_new``/``q_ref``/``dp``: ``(n, nlev)``; ``area``: ``(n,)`` -- pass a
+    dimensionless ratio (area / a GLOBAL reference) when the tracer is
+    large (number concentrations), so the fp32 quotient VJP cannot
+    overflow.  ``owned_mask`` (``(n,)`` bool) drops MPI halo duplicates
+    from the sums; ``reduce`` combines the per-level partial sums across
+    ranks (an allreduce-SUM, the AD-safe collective); ``None`` = serial.
+    Sums in the budget accumulator; the factor is cast back to ``q_new``'s
+    dtype.  ``clip=True``: ``max(q_new, 0)`` first, which only adds mass,
+    so the factor also removes exactly what the clip created.  A level
+    whose filtered field is entirely non-positive (``den <= tiny``) cannot
+    be restored and comes back as ``max(q_new, 0)`` (clip) or unchanged.
+    Pure jnp, no Python branch on traced values; differentiable.
+    """
+    acc = conservation_accumulator()
+    w = jnp.asarray(area)[:, None] * jnp.maximum(dp, 0.0)
+    if owned_mask is not None:
+        w = jnp.where(jnp.asarray(owned_mask)[:, None], w, 0.0)
+    w = w.astype(acc)
+    q_out = jnp.maximum(q_new, 0.0) if clip else q_new
+    num = jnp.sum(w * q_ref.astype(acc), axis=0)
+    den = jnp.sum(w * q_out.astype(acc), axis=0)
+    if reduce is not None:
+        num, den = reduce(num), reduce(den)
+    tiny = jnp.finfo(acc).tiny
+    live = den > tiny
+    # max(., 0): a level whose reference mass is non-positive is floored at
+    # zero rather than sign-flipped (nothing exists to restore there).
+    factor = jnp.where(
+        live, jnp.maximum(num / jnp.where(live, den, 1.0), 0.0), 1.0)
+    return q_out * factor.astype(q_new.dtype)[None, :]
 
 
 def _accumulation_dtype():
@@ -1307,6 +1358,55 @@ def shift_ps_keep_tracer_mass(p_s, tracers, sigma_coord, correction):
     return p_s_new, out
 
 
+class SigmaLayers(NamedTuple):
+    """Pure-sigma layer masses ``dp_k = p_s * dsigma_k`` as the minimal
+    vertical coordinate the water/dry-mass helpers above need
+    (``layer_thickness_dp`` and the top-interface pressure).  The compiled
+    cube / lat-lon column lanes carry only ``dsigma`` and use exactly these
+    layer masses for every other water budget (moisture fixer, borrow,
+    ledger), so the dry-mass convention there is built on the same ones.
+    The top interface is ``p_s * (1 - sum(dsigma))`` so ``p_top + sum dp ==
+    p_s`` holds as on every coordinate."""
+    dsigma: jax.Array
+
+    def layer_thickness_dp(self, p_s):
+        return p_s[..., None] * self.dsigma
+
+    def pressure_at_half(self, p_s):
+        top = 1.0 - jnp.sum(self.dsigma)
+        half = jnp.concatenate([top[None], top + jnp.cumsum(self.dsigma)])
+        return p_s[..., None] * half
+
+
+def global_dry_mass(p_s, tracers, sigma_coord, grid, owned_mask=None):
+    """``∫ dry surface pressure dA`` [Pa m^2] (fp64 accumulator): the
+    integral the dry-mass fixers anchor (water species per
+    :data:`WATER_MASS_SPECIES`; ``tracers=None`` is a dry run)."""
+    return global_area_sum(dry_surface_pressure(p_s, tracers, sigma_coord),
+                           grid, owned_mask=owned_mask)
+
+
+def fix_ps_dry_mass_target(p_s, tracers, target_dry_mass, grid, sigma_coord,
+                           owned_mask=None):
+    """Target-anchored DRY-mass fixer on raw arrays: the dry twin of
+    :func:`fix_ps_mass_target` (user decision 2026-09-28, the FV3/IFS/CAM
+    convention; review 2026-10-10 F13 for the compiled/training lanes).
+
+    One uniform ``p_s`` correction returns ``∫ dry_surface_pressure dA`` to
+    ``target_dry_mass``; every tracer is re-weighted onto the new layer
+    masses (:func:`shift_ps_keep_tracer_mass`) so the added or removed mass
+    is dry air and each tracer's column mass is untouched.  A fixer on the
+    TOTAL ``p_s`` instead puts precipitated water straight back as dry air.
+    Returns ``(p_s_new, tracers_new)``.  ``owned_mask`` as in
+    :func:`global_area_sum`; the reduction's VJP allreduces the cotangent
+    (the correction is broadcast to every cell)."""
+    mass_now = global_area_sum(
+        dry_surface_pressure(p_s, tracers, sigma_coord), grid,
+        owned_mask=owned_mask, differentiable_broadcast=True)
+    correction = (target_dry_mass - mass_now) / _total_area(grid)
+    return shift_ps_keep_tracer_mass(p_s, tracers, sigma_coord, correction)
+
+
 def fix_total_water(
     tracers: dict[str, jax.Array],
     target_total_water: jax.Array,
@@ -1701,6 +1801,106 @@ def compute_conservation_diagnostics(
         'total_mass': total_mass,
         'total_energy': total_energy,
     }
+
+
+# ==============================================================================
+# Grid-agnostic dycore total-energy fixer (CAM ``check_energy_fix`` analogue)
+# ==============================================================================
+
+def dycore_column_energy(T, ke, dp, phis, p_s) -> jax.Array:
+    """Column total energy [J/m^2] the dycore energy fixer conserves.
+
+        E = sum_k (c_pd*T_k + KE_k) * dp_k / g  +  phis * p_s / g
+
+    CAM's ``check_energy`` ``te`` (enthalpy + kinetic energy + surface
+    geopotential, the quantity a hydrostatic constant-``p_top`` column
+    conserves) WITHOUT the latent water terms: a dycore water error belongs to
+    the water fixers and must not be turned into heat (vote 2026-10-10, F15).
+    ``ke`` is the lane's own per-level kinetic energy [J/kg] (TRiSK cell KE on
+    the Voronoi lane, ``0.5*(u^2+v^2)`` of the cell-centre winds elsewhere);
+    ``dp`` the layer mass [Pa] (level axis last).  fp64 budget accumulator.
+    """
+    acc = conservation_accumulator()
+    c_pd = jnp.asarray(constants.c_pd, dtype=acc)
+    col = jnp.sum((c_pd * T.astype(acc) + ke.astype(acc)) * dp.astype(acc),
+                  axis=-1)
+    return (col + phis.astype(acc) * p_s.astype(acc)) / constants.g
+
+
+def energy_fixer_dT(e_before, e_after, mass) -> jax.Array:
+    """Uniform temperature increment [K] that returns a dynamics window's
+    global total-energy change as heat (CAM ``check_energy_fix``).
+
+    ``e_before``/``e_after`` are the GLOBAL area integrals [J] of
+    :func:`dycore_column_energy` at the start and end of the window and
+    ``mass`` the global air mass [kg] (``sum(dp)/g * area``) of the state the
+    increment is added to.  ``T += dT`` on every level of every column raises
+    that state's energy by exactly ``c_pd*dT*mass`` (``dp`` does not depend on
+    ``T``), so ``E(after + dT) == E(before)``.  Positive (warming) when the
+    dynamics lost energy, e.g. to damping.  Linear, so ``jax.grad`` is exact;
+    a lane under MPI reduces the three integrals with ``global_sum_mpi``.
+    """
+    return (e_before - e_after) / (constants.c_pd * mass)
+
+
+def gridded_energy_fixer_dT(pre, post, grid, sigma_coord) -> jax.Array:
+    """:func:`energy_fixer_dT` for the structured lanes (lat-lon C-grid, cube
+    C-D grid), serial and distributed.
+
+    ``pre`` / ``post`` are the window's start / end as ``(T, u, v, p_s,
+    phis)`` cell-centre arrays (level axis last; ``u``/``v`` the cell-centre
+    winds the physics reads, KE = 0.5*(u^2+v^2), the duo-lane form, vote
+    F15b-V1).  The three global integrals go through ONE
+    :func:`batch_global_area_sums` call -- the reduction the lanes' own mass
+    fixers use (serial, MPI allreduce-SUM, lat-band / tile SPMD psum, cube
+    face GSPMD), all AD-safe.
+    """
+    acc = conservation_accumulator()
+
+    def _col(T, u, v, p_s, phis):
+        ph = sigma_coord.pressure_at_half(p_s)
+        dp = ph[..., 1:] - ph[..., :-1]
+        e = dycore_column_energy(T, 0.5 * (u * u + v * v), dp, phis, p_s)
+        return e, jnp.sum(dp.astype(acc), axis=-1) / constants.g
+
+    e0, _ = _col(*pre)
+    e1, m1 = _col(*post)
+    s0, s1, sm = batch_global_area_sums([e0, e1, m1], grid)
+    return energy_fixer_dT(s0, s1, sm)
+
+
+def voronoi_energy_fixer_dT(state_pre, state_post, mesh, sigma_coord, area,
+                            sum_fn=None) -> jax.Array:
+    """:func:`energy_fixer_dT` for the MPAS hydrostatic lane (serial + MPI).
+
+    Column energy with the TRiSK cell kinetic energy the dycore itself
+    conserves (``kinetic_energy_cell_3d`` of the edge-normal ``u``).  ``area``
+    is the per-cell weight (owned-cell area under MPI, zero on halo cells) and
+    ``sum_fn`` the cross-rank reduction of the three local integrals
+    (``global_sum_mpi`` on the MPI lane, ``None`` serial).  Every weighted
+    cell's edges must hold valid winds (exchange the halo first under MPI).
+    """
+    from legoesm.core.operators_voronoi import kinetic_energy_cell_3d
+    if state_pre.v is not None or state_post.v is not None:
+        raise ValueError(
+            "voronoi_energy_fixer_dT: the MPAS hydrostatic state carries "
+            "edge-normal u only (v=None); got a cell-wind state")
+    acc = conservation_accumulator()
+
+    def _col(s):
+        ph = sigma_coord.pressure_at_half(s.p_s.data)
+        dp = ph[..., 1:] - ph[..., :-1]
+        e = dycore_column_energy(s.T.data, kinetic_energy_cell_3d(s.u.data, mesh),
+                                 dp, s.phis.data, s.p_s.data)
+        return e, jnp.sum(dp.astype(acc), axis=-1) / constants.g
+
+    e0, _ = _col(state_pre)
+    e1, m1 = _col(state_post)
+    w = area.astype(acc)
+    tot = jnp.stack([jnp.sum(e0 * w), jnp.sum(e1 * w), jnp.sum(m1 * w)])
+    if sum_fn is not None:
+        tot = sum_fn(tot)
+    return energy_fixer_dT(tot[0], tot[1], tot[2])
 
 
 # ==============================================================================

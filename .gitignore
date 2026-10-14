@@ -76,6 +76,15 @@ ifs-source/
 # Exception: SCM jax_scm-oracle benchmark NetCDFs (committed asset; see
 # scripts/run_jax_scm_oracle.py + scripts/setup_jax_scm_oracle.sh).
 !tests/validation/scm_oracle/*.nc
+# Exception: the checked-in EC-site (flux-tower) validation example NetCDFs —
+# a losslessly compressed model+obs asset (~34 MB) so the publication figure
+# regenerates from the repo alone.  See docs/land/ec_site_evaluation_runbook.md.
+!scripts/validate/ec_site_example_data/*.nc
+# Exception: the trimmed EC-site DRIVER NetCDFs (analysis-window subset, model-
+# consumed variables only, float64, annotated; ~30 MB) so the model itself can be
+# re-run from the repo alone (runbook section B).  Built by
+# scripts/data/build_ec_site_example_drivers.py.
+!scripts/validate/ec_site_example_drivers/*.nc
 # Exception: the vendored CLM-ML-JAX RSL psihat look-up table — committed MODEL
 # DATA (~187 KB), a required input the canopy turbulence reads, not a runtime
 # output.  Ships with the land package so legoESM needs no external clm-ml-jax.

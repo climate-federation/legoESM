@@ -54,6 +54,7 @@ def _make_config(precision: str, output_dir: str) -> ExperimentConfig:
             nlev=5,
         ),
         dycore=DycoreConfig(
+            energy_fixer=False,  # explicit opt-out: pins pre-fixer numerics (F15b vote V5)
             model_type="hydrostatic",
             discretization="cdgrid",
             dt=600.0,

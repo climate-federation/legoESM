@@ -272,7 +272,7 @@ def test_validation_cli_and_amip_round_trip():
     with pytest.raises(ValueError, match="cld_macmic_num_steps"):
         make_physics(_cfg(), model_type="mpas", dt=1.0, cld_macmic_num_steps=0)
     with pytest.raises(ValueError, match="cld_macmic_num_steps"):
-        make_physics(_cfg(), model_type="spectral_pe", dt=1.0, cld_macmic_num_steps=2)
+        make_physics(_cfg(), model_type="nonhydrostatic", dt=1.0, cld_macmic_num_steps=2)
     with pytest.raises(ValueError, match="both are 'none'"):
         make_physics(PhysicsConfig(turbulence=TurbulenceConfig(scheme="none"),
                                    microphysics=MicrophysicsConfig(scheme="none")),

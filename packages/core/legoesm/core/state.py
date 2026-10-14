@@ -186,6 +186,13 @@ class HydrostaticTendencies(NamedTuple):
     # bulk L_v(T_sfc) inverse).  CMOR evspsbl and the moisture closure read
     # it -- never lhflx / L_v.  Appended LAST so no field index moves.
     evap_sfc: Field | None = None
+    # FROZEN part of ``precip`` [kg/m^2/s, +into surface]: the microphysics'
+    # ice + snow + graupel plus convective snow, summed like ``precip``.  The
+    # interactive land takes its snow from this (the atmosphere's own phase
+    # partition, review 2026-10-10 F29).  None when no module publishes it OR
+    # when a precipitating module does not (the sum would be incomplete).
+    # Appended LAST so no field index moves.
+    precip_frozen: Field | None = None
 
 
 # Slot contract of the MPAS lean-loop ``sfc_diag`` export tuple, shared by BOTH
@@ -221,6 +228,9 @@ MPAS_SFC_DIAG_EXTRA_KEYS = (
     # (turbulence ``evap_sfc``); appended at the END so no existing slot
     # index moves.  CMOR evspsbl / moisture closure read this, never hfls/L_v.
     "evap_sfc",
+    # slot 14: the FROZEN part of the slot-2 precip [kg/m2/s] (F29): the
+    # interactive land's snowfall.  Appended at the END, no index moves.
+    "precip_frozen",
 )
 
 # Extras the MPI producer deliberately leaves EMPTY (published as None at their

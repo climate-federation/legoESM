@@ -33,13 +33,22 @@ def test_pe_configs_expose_p_ceil_default():
     # tail.  #836 appended the lat-lon C-grid top-sponge knobs after ``p_ceil``.
     _APPENDED_AFTER_P_CEIL = {
         # #771: moisture flux-form flag appended after p_ceil (default False).
-        "CDGridPrimitiveEquationConfig": ("moisture_flux_form",),
+        # a4bacf763d: dycore energy fixer appended after it (default False).
+        "CDGridPrimitiveEquationConfig": ("moisture_flux_form", "energy_fixer"),
         # #836: lat-lon C-grid top-sponge knobs appended after p_ceil (default OFF).
+        # Later defaulted appends: SB81 omega conversion (a676ea4395), del-4
+        # hyperdiffusion (f4036a54b3), dycore energy fixer (a4bacf763d).
         "CGridLatLonPrimitiveEquationConfig": (
             "sponge_coeff", "sponge_width_m", "sponge_shape",
-            "sponge_scale_height_m",
+            "sponge_scale_height_m", "sb81_omega_conversion", "nu_del4",
+            "nu_del4_cfl_frac", "energy_fixer",
         ),
-        # MPAS: nothing appended -> p_ceil is still last (allowed default ()).
+        # MPAS: defaulted appends since p_ceil (vertical filter, advection
+        # scheme, top sponge, div4 damping, dycore energy fixer).
+        "MPASPrimitiveEquationConfig": (
+            "nu_vert4_T", "vert_advection_scheme", "sponge_del2_top_layers",
+            "sponge_del2_top_factor", "nu_div4", "energy_fixer",
+        ),
     }
     for cfg_cls in (
         CDGridPrimitiveEquationConfig,

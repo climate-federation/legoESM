@@ -3,8 +3,10 @@
 Welcome. This is the **fastest** path from a clean checkout to a
 running simulation — and a map for "where do I look next?"
 
-If you have never touched legoESM before, read this top-to-bottom; it
-takes about 20 minutes including the first run.
+If you have never touched legoESM before, start with the step-by-step,
+verified [Getting started](../../README.md#getting-started-about-one-hour)
+section of the README (clone → install → first Held–Suarez experiment →
+plots), then come back here for the map of the code.
 
 For technical depth, see [SPECIFICATION.md](../science/specs/SPECIFICATION.md). For
 context on what changed recently, see [CHANGELOG.md](../../CHANGELOG.md).
@@ -67,7 +69,7 @@ Optional MPI extras (only if you want multi-node runs):
 pip install "mpi4py>=4.1,<5" "mpi4jax>=0.9,<0.10"
 ```
 
-Requirements: **Python ≥ 3.11, JAX ≥ 0.4.35**. Apple Silicon users
+Requirements: **Python ≥ 3.11, JAX ≥ 0.5.3** (install minimum in `pyproject.toml`). Apple Silicon users
 who want the spectral solver should set `JAX_PLATFORMS=cpu` (the
 Metal backend has no `float64`).
 
@@ -81,7 +83,7 @@ Quick sanity check:
 
 ## 3. Your first runs
 
-### a. A 30-second shallow-water test
+### a. A quick shallow-water test (≈ 1.5 min on 2 CPU cores, including compilation)
 
 ```bash
 legoesm test williamson --case 2 --resolution 48 --days 5
@@ -126,6 +128,13 @@ Fully coupled atmosphere + slab ocean + bucket land. Other presets:
 ---
 
 ## 4. Repository layout (where things live)
+
+The tree below shows the `legoesm.*` import layout. On disk, each
+component's source lives under `packages/<member>/legoesm/<subpkg>/`, e.g.
+`packages/atmosphere/legoesm/atmosphere/`, and `constants.py`/`thermo.py` are in
+`packages/core/legoesm/`. Only a few meta-package modules (`cli.py`,
+`config.py`, `supported_matrix.py`, …) are in `src/legoesm/`. See
+the README's *Repository Structure*.
 
 ```
 src/legoesm/

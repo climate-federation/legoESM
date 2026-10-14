@@ -172,8 +172,8 @@ class AMIPExperimentConfig(NamedTuple):
     turbulence: str = "none"
     gravity_wave_drag: str = "none"
     fix_moisture: bool = False
-    # Issue #323: moist-static-energy-conserving q_v floor (remove the
-    # latent heat of the clipped vapour sink).  Opt-in for kessler+sbm.
+    # Issue #323: the q_v floor also books each cell's latent heat (per-cell
+    # moist-static-energy-conserving borrow).  Opt-in for kessler+sbm.
     energy_consistent_moisture_clip: bool = False
 
     # Topography

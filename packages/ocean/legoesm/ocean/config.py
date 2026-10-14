@@ -51,6 +51,7 @@ from __future__ import annotations
 import copy
 import shlex
 import warnings
+from pathlib import PurePath
 from typing import Any, NamedTuple
 
 import yaml
@@ -721,6 +722,8 @@ def _encode_config(obj):
         return {k: _encode_config(v) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
         return [_encode_config(v) for v in obj]
+    if isinstance(obj, PurePath):
+        return str(obj)
     if hasattr(obj, "shape") and hasattr(obj, "dtype"):
         import numpy as _np
         arr = _np.asarray(obj)

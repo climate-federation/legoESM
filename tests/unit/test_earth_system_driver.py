@@ -21,7 +21,7 @@ class TestEarthSystemDriver:
     def _make_config(self):
         return ExperimentConfig(
             grid=GridConfig(resolution=8, nlev=5),
-            dycore=DycoreConfig(dt=600.0),
+            dycore=DycoreConfig(energy_fixer=False, dt=600.0),
             output=OutputConfig(diag_days=1),
             days=1,
             dataset="analytical",

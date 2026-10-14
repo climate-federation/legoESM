@@ -34,7 +34,7 @@ def _make_driver(preset="aquaplanet", days=10, output_dir=None, **kwargs):
     # identical between a straight run and a restarted run.
     atm_config = ExperimentConfig(
         grid=GridConfig(grid_type="cubed_sphere", resolution=8, nlev=5),
-        dycore=DycoreConfig(dt=600.0, model_type="hydrostatic"),
+        dycore=DycoreConfig(energy_fixer=False, dt=600.0, model_type="hydrostatic"),
         output=OutputConfig(diag_days=1, checkpoint_days=0),
         radiation="gray",
         days=days,
@@ -241,13 +241,18 @@ def _make_dynamic_driver(days=4, output_dir=None, nlev=4):
         # runtime — straight and restarted runs then share an identical step
         # schedule (steps_per_day below stays exact).
         grid=GridConfig(grid_type="latlon", resolution=16, nlev=5),
-        dycore=DycoreConfig(dt=150.0, model_type="hydrostatic",
+        dycore=DycoreConfig(energy_fixer=False, dt=150.0, model_type="hydrostatic",
                             discretization="latlon_cgrid"),
         output=OutputConfig(diag_days=1, checkpoint_days=0),
         radiation="gray", convection="none", days=days,
     )
+    # Decision 90: an RK3 ocean card must STATE the slow-forcing depth
+    # average; this restart test states the pre-decision default.
+    _ocn = LatLonCGridOceanConfig()
+    _ocn = _ocn._replace(barotropic=_ocn.barotropic._replace(
+        barotropic_slow_forcing_depth_evaluation="min_rule_live"))
     coupled_cfg = CoupledConfig(
-        ocean_mode="dynamic", ocean_config=LatLonCGridOceanConfig(),
+        ocean_mode="dynamic", ocean_config=_ocn,
         ocean_nlev=nlev, ocean_dt_s=300.0, ocean_ic="rest",
     )
     driver = CoupledESMDriver(atm_config, coupled_cfg, output_dir=output_dir)

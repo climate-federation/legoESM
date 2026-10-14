@@ -76,8 +76,12 @@ def fill_land_cells_mpas(
     e2 = c2[eoc]
     here = jnp.arange(n_cells)[jnp.newaxis, :]
     nbr = jnp.where(e1 == here, e2, e1)               # far-end cell per edge
-    valid = held & (jnp.arange(edges_on_cell.shape[0])[:, jnp.newaxis]
-                    < n_edges_on_cell[jnp.newaxis, :])
+    # The MPI-per-rank partition keeps an edge when EITHER cell is local and
+    # marks the missing far cell -1; that is not a neighbour here (it used to
+    # index the last local cell).
+    valid = held & (nbr >= 0) & (jnp.arange(edges_on_cell.shape[0])[:, jnp.newaxis]
+                                 < n_edges_on_cell[jnp.newaxis, :])
+    nbr = jnp.where(valid, nbr, 0)
 
     filled = field_cell
     m = mask_cell

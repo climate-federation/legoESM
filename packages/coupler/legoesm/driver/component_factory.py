@@ -327,6 +327,10 @@ _FV3_DUO_ALLOWED_NONDEFAULT: frozenset[str] = frozenset({
     # Pinned to 'fp64' by the specific guard (the ExperimentConfig default
     # is 'fp32', so every valid duo config differs here).
     "precision",
+    # The energy fixer (F15) is not wired on this closed lane, so True is
+    # refused (refuse_unwired_energy_fixer): every valid config here sets
+    # the explicit opt-out False, which differs from the default.
+    "dycore.energy_fixer",
     # The five scheme selectors are pinned to 'none' by the specific guard.
     "radiation", "convection", "microphysics", "turbulence",
     "gravity_wave_drag",
@@ -485,9 +489,9 @@ def _create_fv3_duo_column_model(config: ExperimentConfig, gc, model_type,
     cannot honour yet is refused HERE, by name, so nothing is silently
     inert (the wall's failure mode):
       * the MPAS-lane numerics knobs that edit the state after the step
-        (top sponge, q_v del2/del4 smoothing): the columns are a VIEW of
-        the duo bundle and the model refuses wind edits; q_v smoothing
-        is OFF on the duo by decision (user 2026-09-26);
+        (q_v del2/del4 smoothing): OFF on the duo by decision (user
+        2026-09-26); the top sponge and grid-operator convection are
+        refused for every column lane in ``validate_strict``;
       * held_suarez_forcing: the closed lane's FV3 hswf is the certified
         HS on this dycore; the MPAS lane's HS drops the meridional drag;
       * NH / km outside {5, 10} (M4); distributed and windows run through
@@ -501,8 +505,6 @@ def _create_fv3_duo_column_model(config: ExperimentConfig, gc, model_type,
     )
 
     refused = []
-    if getattr(config, "sponge_enabled", False):
-        refused.append("sponge_enabled=True (post-step wind edit)")
     for k in ("mpas_qv_smooth_del2_m2s", "mpas_qv_smooth_del4_m4s"):
         if float(getattr(config, k, 0.0) or 0.0) != 0.0:
             refused.append(f"{k}={getattr(config, k)!r} (q_v smoothing is "
@@ -549,22 +551,6 @@ def _create_fv3_duo_column_model(config: ExperimentConfig, gc, model_type,
     # :324/:335/:352, moist_cp case(6)).  A scheme whose tendencies
     # target a tracer the registry does not carry is refused by the
     # registry's own slot validation below.
-    # Convection schemes that READ A GRID OPERATOR are refused by trait:
-    # the column mesh carries no edge topology, so the moisture-
-    # convergence operator and the resolved-w diagnostic return None,
-    # which Kuo turns into a zero source (an inert scheme that runs,
-    # codex 2026-09-30) and Kain-Fritsch needs concretely.  Tiedtke /
-    # Bechtold engage their internal saturation-deficit proxy on None
-    # (the unified pipeline's own degrade path) and are admitted.
-    if config.convection != "none":
-        from legoesm.atmosphere.physics.convection.integration import (
-            convection_scheme_traits)
-        _tr = convection_scheme_traits(config.convection)
-        if _tr.is_simple_mc_consumer or _tr.is_w_grid_consumer:
-            refused.append(
-                f"convection={config.convection!r} (reads a grid operator "
-                f"-- moisture convergence / resolved w -- the column mesh "
-                f"has no edge topology for; it would run inert)")
     # MPAS-dycore numerics knobs (dycore.mpas_*) are the MPAS model's; the
     # duo reads none of them except the grid-general positivity knob, so a
     # non-default value would be inert
@@ -610,7 +596,8 @@ def _create_fv3_duo_column_model(config: ExperimentConfig, gc, model_type,
     return FV3DuoColumnModel(
         dyn, tracer_names=registry.names,
         conservative_tracer_clamp=config.dycore.mpas_conservative_tracer_clamp,
-        energy_consistent_moisture_clip=config.energy_consistent_moisture_clip)
+        energy_consistent_moisture_clip=config.energy_consistent_moisture_clip,
+        energy_fixer=config.dycore.energy_fixer)
 
 
 def fv3_duo_dynamics_for_layout(config: ExperimentConfig, bundle, cfg):
@@ -718,18 +705,87 @@ def fv3_duo_dynamics_for_layout(config: ExperimentConfig, bundle, cfg):
     return FV3DuoDynamicsModel(bundle, cfg)
 
 
+def energy_fixer_wired(config: ExperimentConfig, solver_name: str) -> bool:
+    """Whether the dycore ``solver_name`` runs ``DycoreConfig.energy_fixer``
+    (the CAM-style global total-energy fixer, review 2026-10-10 F15): the
+    MPAS hydrostatic core (serial ``_step_jit`` + MPI ``voronoi_mpi._step``),
+    the FV3-duo COLUMN lane, the lat-lon C-grid hydrostatic core (every lane
+    runs ``_step_cgrid_impl``) and the cube C-D grid hydrostatic core
+    (``_step_fv3``; the sub-face-TILED dynamics lanes do not run it and are
+    refused at their driver entry).  Every other solver does not run it."""
+    return (solver_name in _ENERGY_FIXER_SOLVERS
+            or (solver_name == "fv3_duo_primitive_equations"
+                and bool(config.dycore.column_lane)))
+
+
+_ENERGY_FIXER_SOLVERS = frozenset({
+    "mpas_primitive_equations",
+    "latlon_cgrid_primitive_equations",
+    "cdgrid_primitive_equations",
+})
+
+
+def refuse_unwired_energy_fixer(config: ExperimentConfig,
+                                solver_name: str) -> None:
+    """``energy_fixer=True`` on a lane that does not run it is an ERROR,
+    never a silently open energy sink (vote 2026-10-10, F15 V8-A): the run
+    must opt out explicitly with ``energy_fixer=False``."""
+    if config.dycore.energy_fixer and not energy_fixer_wired(config,
+                                                             solver_name):
+        raise ValueError(
+            f"DycoreConfig.energy_fixer=True, but the dycore total-energy "
+            f"fixer is wired only on the MPAS, lat-lon C-grid and cube C-D grid "
+            f"hydrostatic and FV3-duo column lanes; {solver_name!r} would run WITHOUT it and leave the "
+            f"damping/numerical energy sink open.  Set energy_fixer=False "
+            f"(run_amip/run_coupled --no-energy-fixer) to accept that sink "
+            f"explicitly on this lane.")
+
+
+#: Dycores whose end-of-step positivity stage passes
+#: ``energy_consistent_moisture_clip`` to :func:`apply_water_positivity`
+#: (spectral and FV3-duo pass ``energy_consistent=False``).
+_HARD_VAPOUR_FLOOR_SOLVERS = frozenset({
+    "mpas_primitive_equations",
+    "latlon_cgrid_primitive_equations",
+    "cdgrid_primitive_equations",
+})
+
+
+def warn_if_vapour_floor_creates_water(config: ExperimentConfig,
+                                       solver_name: str) -> None:
+    """Announce the one remaining water-creating vapour floor tied to
+    ``energy_consistent_moisture_clip``: the dycore HARD floor, which runs
+    only with ``mpas_conservative_tracer_clamp=False`` on a dycore that
+    passes the flag.  Everywhere else the flag's floor is the conserving
+    borrow, so nothing is announced (owner decision 2026-08-16: any
+    NON-conserving form announces itself)."""
+    if (config.energy_consistent_moisture_clip
+            and not config.dycore.mpas_conservative_tracer_clamp
+            and solver_name in _HARD_VAPOUR_FLOOR_SOLVERS):
+        logger.warning(
+            "NON-CONSERVING form selected: energy_consistent_moisture_clip"
+            "=True with mpas_conservative_tracer_clamp=False runs the "
+            "dycore hard water floor, which conserves moist static energy "
+            "but CREATES the clipped water (%s).", solver_name)
+
+
 def create_atmosphere_dycore(
     config: ExperimentConfig,
     grid,
     sigma,
     coeff_grid=None,
     fv3_duo_bundle=None,
+    latlon_native_grid=None,
 ) -> Any:
     """Resolve and instantiate the configured atmosphere dynamical core.
 
     ``fv3_duo_bundle``: the duo grid the driver built at grid creation
     (column lane only); the column model is built ON it so its mesh is
     the grid every forcing was regridded onto.
+
+    ``latlon_native_grid``: the lat-lon COLUMN lane's native grid (``grid``
+    is then its column mesh); the C-grid dycore is built on it and wrapped
+    in :class:`LatLonCGridColumnModel`.
 
     Parameters
     ----------
@@ -759,6 +815,13 @@ def create_atmosphere_dycore(
     """
     dc = config.dycore
     gc = config.grid
+    if dc.column_lane and dc.discretization == "latlon_cgrid":
+        if latlon_native_grid is None:
+            raise ValueError(
+                "create_atmosphere_dycore: the lat-lon column lane needs "
+                "latlon_native_grid (the driver builds it in _create_grid)")
+        grid = latlon_native_grid
+        coeff_grid = None
 
     model_type = dc.model_type
     discretization = dc.discretization
@@ -777,6 +840,8 @@ def create_atmosphere_dycore(
         _fail_unsupported(model_type, discretization, grid_type)
 
     solver_name = _DRIVER_SUPPORTED[key]
+    refuse_unwired_energy_fixer(config, solver_name)
+    warn_if_vapour_floor_creates_water(config, solver_name)
     if coeff_grid is None:
         coeff_grid = grid
     diff = compute_diffusion(coeff_grid, dc)
@@ -888,6 +953,8 @@ def create_atmosphere_dycore(
             # #771: flux-form moisture transport (needs moisture attached via
             # ExperimentConfig.moisture_advection; default off = advective).
             moisture_flux_form=getattr(dc, "moisture_flux_form", False),
+            # CAM-style dycore total-energy fixer (F15; DycoreConfig).
+            energy_fixer=dc.energy_fixer,
         )
         return CDGridPrimitiveEquationModel(grid, sigma, cfg)
 
@@ -1038,6 +1105,7 @@ def create_atmosphere_dycore(
             time_integrator=_ti,
             # #930 cure: vertical biharmonic damping of the 2Δσ T checkerboard.
             nu_vert4_T=dc.mpas_nu_vert4_T,
+            vert4_flux_form_tracers=tuple(dc.mpas_vert4_flux_form_tracers),
             # Mass-conserving tracer positivity clamp (see DycoreConfig).
             conservative_tracer_clamp=dc.mpas_conservative_tracer_clamp,
             energy_consistent_moisture_clip=config.energy_consistent_moisture_clip,  # #1354/#1515 (no-op under the borrow)
@@ -1050,6 +1118,8 @@ def create_atmosphere_dycore(
             # alike; this one is the piece CAM applies at every level and we
             # had computed (``div_damp``) but never handed to this core.
             nu_div4=diff.div_damp4,
+            # CAM-style dycore total-energy fixer (F15; DycoreConfig).
+            energy_fixer=dc.energy_fixer,
             # Budget-ledger vertical band. The dycore owns the SNAPSHOT-derived
             # dynamics and clips rows, so it needs the SAME weight the physics
             # rows use; without it those two rows stay full-column while the
@@ -1092,7 +1162,7 @@ def create_atmosphere_dycore(
 
     # ----- FV3 six-face duo cube (certified fv_dynamics JAX lane) -----
     if (solver_name == "fv3_duo_primitive_equations"
-            and getattr(config.dycore, "fv3_duo_column_lane", False)):
+            and config.dycore.column_lane):
         return _create_fv3_duo_column_model(config, gc, model_type,
                                             bundle=fv3_duo_bundle)
     if solver_name == "fv3_duo_primitive_equations":
@@ -1452,10 +1522,18 @@ def create_atmosphere_dycore(
             time_integrator=(CGridLatLonPrimitiveEquationConfig().time_integrator
                              if dc.time_integrator == "auto"
                              else dc.time_integrator),
+            # CAM-style dycore total-energy fixer (F15; DycoreConfig).
+            energy_fixer=dc.energy_fixer,
         )
         model = CGridLatLonPrimitiveEquationModel(
             grid, sigma, cfg, dt=_effective_dt)
         model.effective_dt = _effective_dt
+        if dc.column_lane:
+            from legoesm.atmosphere.dynamics.gcm.latlon_cgrid_column import (
+                LatLonCGridColumnModel,
+            )
+            model = LatLonCGridColumnModel(model)
+            model.effective_dt = _effective_dt
         return model
 
     # ----- SFNO data-driven -----

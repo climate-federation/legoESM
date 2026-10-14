@@ -21,6 +21,7 @@ from legoesm.core.bulk_flux import (
     apply_gustiness,
     ocean_surface_q_sat,
 )
+from legoesm.land.canopy.config import CLMMLCanopyConfig
 from legoesm.land.multilayer_land import init_multilayer_land_state
 from legoesm.land.surface_params import reshape_params
 from legoesm.surface_albedo import ocean_albedo as compute_ocean_albedo
@@ -556,6 +557,30 @@ def make_coupler(
     # catalog in any order and assemble the result uniformly — replacing the
     # former hardcoded inline land/ice/lake/ocean stepping with a data-driven set.
 
+    # The land step (the canopy Newton solve: lax.map / while_loop over
+    # columns) ran EAGERLY on every coupling step, and an eager control-flow
+    # primitive built from fresh closures compiles a new executable per call:
+    # a coupled run grew ~2000 memory maps per step until it hit the kernel's
+    # vm.max_map_count and aborted (measured, job 10330808).  One jit per
+    # coupler, built here, compiles once; ``dt`` (the coupling step, concrete
+    # -- step_surface refuses a non-positive one in Python) is static, every
+    # array argument is traced.  The CLM-ML canopy stays eager: its multi-
+    # column forward refuses traced forcing without a per-column GridInfo
+    # (clm_ml_interface), which this coupler does not carry.
+    def _land_kernel(state, forcing, dt, lat_, carbon, doy, land_params, frozen):
+        if _use_multilayer:
+            return step_multilayer_land(
+                state, forcing, land_config, U_min, dt, lat=lat_,
+                carbon_state=carbon, doy=doy, land_params=land_params,
+                soil_frozen_fraction=frozen)
+        return step_land(state, forcing, land_config, U_min, dt, lat=lat_,
+                         carbon_state=carbon, doy=doy, land_params=land_params)
+
+    _land_kernel_jit = (
+        _land_kernel
+        if isinstance(getattr(land_config, "surface_scheme", None), CLMMLCanopyConfig)
+        else jax.jit(_land_kernel, static_argnames=("dt",)))
+
     def _step_land_tile(ctx: _TileContext):
         if _use_multilayer:
             # Multi-layer land operates on columnar (ncol,) arrays.
@@ -576,12 +601,9 @@ def make_coupler(
                 if (_land_soil_frozen_fraction is not None
                     and hasattr(_land_soil_frozen_fraction, 'reshape'))
                 else _land_soil_frozen_fraction)
-            land_new, land_resp_flat, carbon_new = step_multilayer_land(
-                ctx.sfc_state.land, _flat_forcing, land_config, U_min, ctx.dt,
-                lat=_flat_lat, carbon_state=ctx.sfc_state.carbon, doy=ctx.doy,
-                land_params=ctx.land_params,
-                soil_frozen_fraction=_flat_frozen,
-            )
+            land_new, land_resp_flat, carbon_new = _land_kernel_jit(
+                ctx.sfc_state.land, _flat_forcing, ctx.dt, _flat_lat,
+                ctx.sfc_state.carbon, ctx.doy, ctx.land_params, _flat_frozen)
             # Unflatten TileResponse fields back to spatial shape
             land_resp = jax.tree.map(
                 lambda x: (x.reshape(_spatial_shape)
@@ -591,11 +613,9 @@ def make_coupler(
                 land_resp_flat,
             )
         else:
-            land_new, land_resp, carbon_new = step_land(
-                ctx.sfc_state.land, ctx.atm_forcing, land_config, U_min, ctx.dt,
-                lat=_lat, carbon_state=ctx.sfc_state.carbon, doy=ctx.doy,
-                land_params=ctx.land_params,
-            )
+            land_new, land_resp, carbon_new = _land_kernel_jit(
+                ctx.sfc_state.land, ctx.atm_forcing, ctx.dt, _lat,
+                ctx.sfc_state.carbon, ctx.doy, ctx.land_params, None)
         return land_resp, {"land": land_new, "carbon": carbon_new}
 
     def _step_ice_tile(ctx: _TileContext):

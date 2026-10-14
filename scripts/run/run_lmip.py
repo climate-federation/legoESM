@@ -895,9 +895,33 @@ def main() -> None:
             apply_params_to_config,
             load_params_config,
         )
+        _params = load_params_config(args.params)
         run_config = apply_params_to_config(
-            run_config, load_params_config(args.params), driver="run_lmip")
+            run_config, _params, driver="run_lmip")
     config = run_config.land
+
+    # Run manifest (failed write aborts the run).  Forcing is synthetic, so the
+    # resolved land config + every CLI control define the experiment.
+    from legoesm.driver.restart import (
+        dataset_provenance_entry,
+        record_final_state_digest,
+        write_run_manifest_on_root,
+    )
+    manifest_path = write_run_manifest_on_root(
+        out_dir,
+        {"runner": "run_lmip", "run_config": run_config._asdict(),
+         "cli_args": vars(args)},
+        config_kind="land",
+        runner_tag="run_lmip",
+        rng_seeds={"master": int(run_config.seed)},
+        params_applied=_params if getattr(args, "params", None) else None,
+        dataset_provenance=[
+            dataset_provenance_entry(pth, dataset_id=did)
+            for did, pth in (("restart_from", args.restart_from),
+                             ("carbon_ic", getattr(args, "carbon_ic", "")))
+            if pth
+        ],
+    )
 
     dt = args.dt
     n_total_steps = int(args.days * _SECS_PER_DAY / dt)
@@ -1240,6 +1264,8 @@ def main() -> None:
     _save_restart(final_restart, start_step + n_total_steps,
                   start_day_abs + args.days, state, carbon_state,
                   soil_frozen_fraction=carbon_phi)
+    if status == "PASS":
+        record_final_state_digest(manifest_path, state, carbon_state)
 
     # --- Summary JSON ---
     wall_time = time.time() - t_wall_start

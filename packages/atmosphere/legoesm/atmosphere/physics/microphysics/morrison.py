@@ -138,6 +138,7 @@ _VT_CLIP_RAIN = 20.0             # rain fall-speed clip ceiling [m/s]
 _VT_CLIP_FROZEN = 5.0            # snow/ice fall-speed clip ceiling [m/s]
 _VT_CAP_SNOW_ICE = 1.2           # snow/ice-cap fall-speed factor [m/s]
 _DV_PREFACTOR = 8.794e-5         # Hall-Pruppacher vapour diffusivity prefactor
+_QSMALL = 1.0e-14                # SAM/M2005 negligible hydrometeor mass [kg/kg]
 _DV_T_EXPONENT = 1.81
 _COOPER_EXP_CAP = 80.0           # Cooper ice-nuclei exp argument cap
 _NUC_T_THRESHOLD_K = 265.15      # heterogeneous ice-nucleation T threshold [K]
@@ -538,6 +539,14 @@ def morrison_microphysics(
             / jnp.clip(dt, 1.0) * hom_gate
         )
         dq_i_hom = dN_i_hom * mi0
+        # The gate product is never exactly zero, so warm air receives ~1e-126
+        # crystals/kg; EPSI's N^(2/3) then has a ~1e41 derivative there and the
+        # CAM macro/micro sub-cycle compounds it into an fp64 overflow in the
+        # parameter gradient. Drop sub-QSMALL nucleation at the source so every
+        # downstream budget sees the same zero (owner 2026-09-30).
+        _hom_real = dq_i_hom * dt >= _QSMALL
+        dN_i_hom = jnp.where(_hom_real, dN_i_hom, 0.0)
+        dq_i_hom = jnp.where(_hom_real, dq_i_hom, 0.0)
     else:
         dN_i_hom = jnp.zeros_like(N_i)
         dq_i_hom = jnp.zeros_like(q_v)
@@ -1817,6 +1826,7 @@ def morrison_microphysics(
         dN_r_dt=dN_r_dt,
         dN_i_dt=dN_i_dt,
         precipitation=precipitation,
+        precip_frozen=precip_i + precip_s + precip_g,
         dN_s_dt=dN_s_dt,
         dN_g_dt=dN_g_dt,
         sed_substeps_required=sed_substeps_required,

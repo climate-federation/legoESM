@@ -46,6 +46,7 @@ def _make_cfg(out_dir, *, n_devices, days=N_STEPS * DT / 86400.0):
     return ExperimentConfig(
         grid=GridConfig(grid_type="cubed_sphere", resolution=RES, nlev=NLEV),
         dycore=DycoreConfig(
+            energy_fixer=False,  # unwired lane opts out (F15)
             model_type="hydrostatic", discretization="cdgrid", dt=DT,
             fix_mass=True,
             # The tiled base-cut RK3 carries no hyperdiffusion / A_h /

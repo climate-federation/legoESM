@@ -177,7 +177,7 @@ def test_mpas_negative_epoch_chain_crossing_day_zero(tmp_path):
 def _build_cube_driver(tmpdir: str, days: float) -> ModelDriver:
     cfg = ExperimentConfig(
         grid=GridConfig(grid_type="cubed_sphere", resolution=8, nlev=10),
-        dycore=DycoreConfig(dt=300.0),
+        dycore=DycoreConfig(energy_fixer=False, dt=300.0),
         # Uniform cadence on every run (see the scheduler pins): 1-day
         # checkpoints ⇒ 288-step segments; the restart lands exactly on
         # the segment boundary so per-segment forcing aligns.
@@ -251,7 +251,7 @@ def _spy_forcing_days(driver: ModelDriver) -> list:
 def _build_small_cube_driver(tmpdir: str, days: float) -> ModelDriver:
     cfg = ExperimentConfig(
         grid=GridConfig(grid_type="cubed_sphere", resolution=4, nlev=5),
-        dycore=DycoreConfig(dt=600.0),
+        dycore=DycoreConfig(energy_fixer=False, dt=600.0),
         output=OutputConfig(output_dir="", diag_days=1, checkpoint_days=1),
         days=days, dataset="analytical", radiation="gray",
         rad_update_steps=2,
@@ -322,7 +322,7 @@ def test_spectral_bitexact_restart_continuation(tmp_path):
     def build(tmpdir: str, days: float) -> ModelDriver:
         cfg = ExperimentConfig(
             grid=GridConfig(grid_type="gaussian", resolution=8, nlev=5),
-            dycore=DycoreConfig(discretization="spectral", dt=600.0),
+            dycore=DycoreConfig(energy_fixer=False, discretization="spectral", dt=600.0),
             output=OutputConfig(output_dir="", diag_days=1,
                                 checkpoint_days=1),
             days=days, dataset="analytical", radiation="gray",
@@ -375,7 +375,7 @@ def test_per_step_bitexact_restart_off_radiation_boundary(tmp_path):
     def build(tmpdir: str, days: float) -> ModelDriver:
         cfg = ExperimentConfig(
             grid=GridConfig(grid_type="cubed_sphere", resolution=4, nlev=5),
-            dycore=DycoreConfig(dt=600.0),
+            dycore=DycoreConfig(energy_fixer=False, dt=600.0),
             output=OutputConfig(output_dir="", diag_days=1,
                                 checkpoint_days=1),
             days=days, dataset="analytical", radiation="gray",

@@ -245,8 +245,8 @@ def test_pipeline_builder_switches_mpas_cmt_on_for_every_cmt_scheme():
 
     assert cc("zhang_mcfarlane").mpas_cmt is True
     assert cc("tiedtke").mpas_cmt is True
-    # Bechtold's lane-preserving MPAS default is CMT off (bechtold_enable_cmt None)
-    assert cc("bechtold").mpas_cmt is False
+    # Bechtold CMT unset resolves ON on every lane (review 2026-10-10 F22)
+    assert cc("bechtold").mpas_cmt is True
     assert convection_config_for(ExperimentConfig(
         grid=GridConfig(grid_type="cubed_sphere", resolution=4, nlev=NLEV),
         convection="zhang_mcfarlane")).mpas_cmt is False

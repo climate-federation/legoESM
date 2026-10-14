@@ -2023,7 +2023,7 @@ def era5_terrain_product(era5: ERA5Slice, grid, passes: int = 4):
     the grid: ``(6, n, n)`` cube, ``(n_lat, n_lon)`` structured, ``(nCells,)``
     Voronoi."""
     from legoesm.grids.regridding import regrid_scalar
-    from legoesm.grids.topography import _neighbour_table, masked_diffusion
+    from legoesm.grids.topography import neighbour_table, masked_diffusion
     lat = np.asarray(grid.grid_lat)
     if lat.ndim == 3:
         raw = regrid_scalar(jnp.asarray(np.asarray(era5.phis).ravel()),
@@ -2037,7 +2037,7 @@ def era5_terrain_product(era5: ERA5Slice, grid, passes: int = 4):
             np.asarray(grid.latCell), np.asarray(grid.lonCell))
         raw = regrid_scalar(jnp.asarray(era5.phis), w)
     raw = np.asarray(raw, dtype=np.float64)
-    nb, area = _neighbour_table(grid)
+    nb, area = neighbour_table(grid)
     out = masked_diffusion(raw.ravel(), np.ones(area.shape), nb, area, passes=passes)
     return jnp.asarray(out.reshape(raw.shape))
 

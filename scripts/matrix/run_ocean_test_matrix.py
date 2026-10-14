@@ -637,6 +637,13 @@ def _build_test_matrix() -> list[TestCase]:
     matrix.append(TestCase(
         "isomip_plus", "latlon_regional", "32x16", 365.0, 5.0))
 
+    # --- BENCH (NEMO-BENCH-inspired perf benchmark, Irrmann 2022) ---
+    # CI-sized latlon lane; the resolution presets (orca{1,025,12}_like)
+    # and the synthetic-tripole fold lane belong to the standalone
+    # scripts/run/run_bench.py harness (timing JSONL contract).
+    matrix.append(TestCase(
+        "bench", "latlon", "36x72", 0.5, 0.05))
+
     return matrix
 
 
@@ -6796,6 +6803,15 @@ def _run_experiment_via_registry(
             run_kwargs=dict(tc.run_kwargs, **bounds),
         )
 
+    # Experiment-owned vertical grid: when the experiment exposes a
+    # z-coordinate factory (EXPERIMENT_CONFIG["create_z_coord"], e.g.
+    # BENCH's uniform NEMO-BENCH grid), build it and inject it so the
+    # matrix lane runs the SAME vertical grid the production driver does.
+    # Without this the lane silently runs the default stretched z* grid.
+    z_coord_factory = exp_config.get("create_z_coord")
+    if z_coord_factory is not None:
+        setup_kw["z_coord"] = z_coord_factory(cfg)
+
     grid, z_coord, _, model, coord_kind, lon_deg, lat_deg = (
         _create_ocean_setup_rich(tc, **setup_kw)
     )
@@ -6977,6 +6993,33 @@ def run_held_larichev(tc: TestCase, output_dir: Path, days: float
         tc, output_dir, days,
         exp_config=HL_CONFIG, label="Held-Larichev",
         eos_linear_factory=_eos,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Runner: BENCH (NEMO-BENCH-inspired performance benchmark)
+# ---------------------------------------------------------------------------
+
+def run_bench(tc: TestCase, output_dir: Path, days: float
+              ) -> tuple[str, float, str]:
+    """BENCH: stability-gated benchmark run (results physically meaningless).
+
+    Drives the ``bench`` experiment through the registry path: the model
+    config comes from ``bench.bench_model_config`` (the
+    ``legoesm_nemo_like_v1`` production recipe), so the matrix case runs
+    the SAME dycore the standalone ``scripts/run/run_bench.py`` harness
+    times.  Validation is the pre-registered stability gates only
+    (finite fields, max speed, max |eta| — see
+    ``bench.validate_results``); the tripole fold lane is exercised by
+    the standalone harness, not the mesh-file-backed matrix tripole.
+    """
+    from legoesm.ocean.experiments.bench import (
+        EXPERIMENT_CONFIG as BENCH_CONFIG,
+    )
+
+    return _run_experiment_via_registry(
+        tc, output_dir, days,
+        exp_config=BENCH_CONFIG, label="BENCH",
     )
 
 
@@ -7894,6 +7937,7 @@ RUNNERS: dict[str, Callable] = {
     "held_larichev": run_held_larichev,
     "neverworld2_lite": run_neverworld2_lite,
     "isomip_plus": run_isomip_plus,
+    "bench": run_bench,
 }
 
 

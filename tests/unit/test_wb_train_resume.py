@@ -537,25 +537,34 @@ def test_the_optimizer_default_hash_ignores_unrelated_settings():
 def test_probe_freeze_restored_without_complete_epoch(tmp_path):
     """A link killed between the reachability probe (~9 h at T63/sub3) and
     the first epoch write must NOT re-measure on resume: the persisted probe
-    result is honoured iff its fingerprint matches the current run exactly."""
+    result is honoured iff its fingerprint AND probed content match."""
     import json
 
+    import numpy as np
+
     fp = {"config_sha256": "abc", "lr": 1.5e-3}
+    content = mod._sample_fingerprint([np.arange(4.0), np.ones(3)])
     (tmp_path / "probe_freeze.json").write_text(json.dumps(
         {"schema": mod._MANIFEST_SCHEMA, "fingerprint": fp,
-         "frozen": ["a", "b"]}))
-    assert mod._read_probe_freeze(str(tmp_path), fp) == ["a", "b"]
+         "frozen": ["a", "b"], **mod._content_payload(content)}))
+    assert mod._read_probe_freeze(str(tmp_path), fp, content) == ["a", "b"]
     # Any fingerprint drift invalidates it.
-    assert mod._read_probe_freeze(str(tmp_path), {**fp, "lr": 3e-4}) is None
+    assert mod._read_probe_freeze(str(tmp_path), {**fp, "lr": 3e-4},
+                                  content) is None
+    # Same count and shapes, different values: only the content gate sees it.
+    other = mod._sample_fingerprint([np.arange(4.0) + 1.0, np.ones(3)])
+    assert mod._read_probe_freeze(str(tmp_path), fp, other) is None
     # Absent / truncated files are None, not errors.
-    assert mod._read_probe_freeze(str(tmp_path / "nope"), fp) is None
+    assert mod._read_probe_freeze(str(tmp_path / "nope"), fp, content) is None
     (tmp_path / "probe_freeze.json").write_text("{trunc")
-    assert mod._read_probe_freeze(str(tmp_path), fp) is None
-    # Unknown schema fails toward re-probing.
-    (tmp_path / "probe_freeze.json").write_text(json.dumps(
-        {"schema": mod._MANIFEST_SCHEMA + 1, "fingerprint": fp,
-         "frozen": ["a"]}))
-    assert mod._read_probe_freeze(str(tmp_path), fp) is None
+    assert mod._read_probe_freeze(str(tmp_path), fp, content) is None
+    # Unknown schema, or a payload without content, fails toward re-probing.
+    for extra, schema in (({}, mod._MANIFEST_SCHEMA),
+                          (mod._content_payload(content),
+                           mod._MANIFEST_SCHEMA + 1)):
+        (tmp_path / "probe_freeze.json").write_text(json.dumps(
+            {"schema": schema, "fingerprint": fp, "frozen": ["a"], **extra}))
+        assert mod._read_probe_freeze(str(tmp_path), fp, content) is None
 
 
 def test_probe_freeze_counts_as_chain_progress(tmp_path, capsys):
@@ -568,3 +577,12 @@ def test_probe_freeze_counts_as_chain_progress(tmp_path, capsys):
     mod.print_latest_complete_signature(str(tmp_path))
     out = capsys.readouterr().out
     assert "probe_freeze.json" in out
+
+
+def test_partial_probe_counts_as_chain_progress(tmp_path, capsys):
+    """A link that ends mid-probe must still chain: the next link resumes it."""
+    sub = tmp_path / "physics"
+    sub.mkdir()
+    (sub / "probe_progress.json").write_text("{}")
+    mod.print_latest_complete_signature(str(tmp_path))
+    assert "probe_progress.json" in capsys.readouterr().out

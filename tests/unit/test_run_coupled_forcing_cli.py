@@ -79,3 +79,53 @@ def test_external_channel_without_a_file_is_refused():
                  ["--aerosol-forcing", "external"]):
         with pytest.raises(SystemExit):
             run_coupled.require_forcing_files(coupled_parser().parse_args(argv))
+
+
+# Terrain / land-sea mask / subgrid orography (F36, review 2026-10-10): the
+# coupled atmosphere was always flat and the slab deck's land analytic because
+# run_coupled had none of these.  Same dests/defaults as run_amip, and each
+# reaches the ExperimentConfig built in run_coupled.main.
+_TERRAIN = {   # run_coupled/run_amip dest -> ExperimentConfig field
+    "topography": "topography",
+    "topo_smoothing": "topo_smoothing",
+    "land_mask_file": "land_mask_path",
+    "subgrid_orography_file": "subgrid_orography_path",
+}
+
+
+def test_terrain_flags_match_run_amip_and_reach_the_atm_config():
+    import inspect
+
+    from scripts.run import run_coupled
+    amip, coupled = _actions(amip_parser()), _actions(coupled_parser())
+    for dest in _TERRAIN:
+        assert dest in coupled, dest
+        assert coupled[dest].default == amip[dest].default, dest
+        assert coupled[dest].type == amip[dest].type, dest
+    src = inspect.getsource(run_coupled.main)
+    for dest, field in _TERRAIN.items():
+        assert f"{field}=args.{dest}," in src, dest
+    # the vertical coordinate that must hold the terrain (#1029)
+    for dest in ("vertical_coord", "transition_exponent"):
+        assert coupled[dest].default == amip[dest].default, dest
+        assert coupled[dest].choices == amip[dest].choices, dest
+    assert "vertical_coord=args.vertical_coord," in src
+    assert "transition_exponent=(args.transition_exponent" in src
+
+
+def test_cmip_decks_select_the_forcing_schemes():
+    """F40: the canonical coupled decks carry the forcing SCHEME keys of the
+    production AMIP deck; only file paths come from the launcher."""
+    from pathlib import Path
+
+    from legoesm.driver.run_config_yaml import read_yaml_with_includes
+    root = Path(__file__).resolve().parents[2]
+    amip = read_yaml_with_includes(root / "config/amip/amip_production.yaml")
+    keys = ("ozone_forcing", "solar_source", "solar_tsi_var",
+            "solar_spectral_var", "solar_spectral_band_order", "ghg_forcing",
+            "aerosol_forcing", "diurnal_cycle", "orbital_insolation",
+            "rrtmgp_overhead_layer")
+    for deck in ("cmip_ocean_slab.yaml", "cmip_ocean_3D.yaml"):
+        cfg = read_yaml_with_includes(root / "config/cmip" / deck)
+        for k in keys:
+            assert cfg.get(k) == amip.get(k), (deck, k)

@@ -32,7 +32,7 @@ class TestAMIPValidation:
         out = tmp_path_factory.mktemp("amip_validation")
         cfg = ExperimentConfig(
             grid=GridConfig(resolution=8, nlev=5),
-            dycore=DycoreConfig(dt=600.0, fix_mass=True),
+            dycore=DycoreConfig(energy_fixer=False, dt=600.0, fix_mass=True),
             output=OutputConfig(diag_days=2, output_dir=str(out)),
             days=10,
             dataset="analytical",

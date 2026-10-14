@@ -79,6 +79,9 @@ mpas_vert_advection_scheme: sb       # conservative Simmons-Burridge flux form
                                      # 6.7e-16 conservative.  USER-APPROVED
                                      # 2026-09-23; the CODE default stays
                                      # 'upwind' and this deck selects it.
+mpas_vert4_flux_form_tracers: [q_v]  # vertical del4 filter on vapour in mass-conserving flux form
+                                     # (the projected form dried the stratosphere to ~1 ppmv;
+                                     # 60-day A/B 2026-10-08: 0.64 -> 4.05 ppmv, UTLS T -2.3 K)
 mpas_div_damp4_scale: 1.0            # CAM6: fv_div24del2flag=4 selects ldiv4,
                                      # 4th-order DIVERGENCE damping at every
                                      # level (cd_core.F90 tau4 = 0.01/dt times
@@ -100,6 +103,12 @@ mpas_div_damp4_scale: 1.0            # CAM6: fv_div24del2flag=4 selects ldiv4,
                                      # transport above the drift REVERSES to
                                      # -1.10 K/h, which is why this deck
                                      # carries both or neither.
+energy_fixer: true                   # CAM6 check_energy_fix analogue (review
+                                     # 2026-10-10 F15, by vote): the energy each
+                                     # dynamics step loses (sponge/del4/div4 KE,
+                                     # numerics) returns as a uniform heating
+                                     # before physics.  Named, not inherited
+                                     # (the code default is also true).
 
 # ---- physics cadence ---------------------------------------------------------
 physics_update_steps: 16    # CAM6: physics every 1800 s (16 x 112.5 s); the
@@ -370,6 +379,9 @@ solar_spectral_band_order: rrtmg_sw   # explicit: SSI_frac is in RRTMG-SW band o
 ozone_forcing: external
 ghg_forcing: external
 aerosol_forcing: external
+# A date outside a multi-year forcing file's years raises (explicit: the
+# end-record hold is an opt-in for deliberate experiments only; F37).
+forcing_hold_outside_file_years: false
 start_year: 1979
 diag_days: 1
 checkpoint_days: 30         # run control, carried from the outgoing production

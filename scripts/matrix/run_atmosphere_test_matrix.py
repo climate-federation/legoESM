@@ -4244,6 +4244,12 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
 # Runner: Held-Suarez
 # ===========================================================================
 
+def _hs_persistent_d_enabled() -> bool:
+    """#1028 persistent-D for the cube HS case: ON unless LEGOESM_HS_PERSISTENT_D=0."""
+    return ((os.environ.get("LEGOESM_HS_PERSISTENT_D", "").strip().lower()
+             or "1") in ("1", "true", "yes", "on"))
+
+
 def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
                     radiation: str = "gray") -> tuple[str, float, str]:
     """Run a Held-Suarez test on the given test case.
@@ -4468,7 +4474,8 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
                       if radiation == "rrtmgp" else held_suarez_forcing)
 
         # --- #1028 persistent-D option (2026-08-03) ---------------------
-        # LEGOESM_HS_PERSISTENT_D=1 keeps the prognostic state in FV3 D
+        # ON by default (user decision 2026-10-13); LEGOESM_HS_PERSISTENT_D=0
+        # restores the damped cc round trip.  It keeps the prognostic state in FV3 D
         # staggering BETWEEN steps, instead of the default cc -> corner ->
         # cc round trip every step.  Measured motivation (frozen-threshold
         # A/B, C48/L30/20d, config mirrored to this lane): the extra outer
@@ -4479,14 +4486,12 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         # the existing physics adapter still converts D -> cc at every RK
         # stage and lifts the wind tendencies back (primitive_eq_cdgrid.py
         # :1613/:1045), so the inner conversions remain.  Matrix
-        # diagnostics convert D -> cc at diagnostic cadence.  Unset =>
-        # bit-identical (the state never converts, _cc is the identity).
+        # diagnostics convert D -> cc at diagnostic cadence.  =0 => the old
+        # path bit-identically (the state never converts, _cc is the identity).
         # NOTE the #1028 gate consumes scalar_fn["max_wind"] =
         # sqrt(u^2+v^2) at centres -- the same operator either way, since
         # the legacy wrapper also exits through fv3_to_hydrostatic.
-        _hs_persistent_d = (
-            os.environ.get("LEGOESM_HS_PERSISTENT_D", "0").strip().lower()
-            in ("1", "true", "yes", "on"))
+        _hs_persistent_d = _hs_persistent_d_enabled()
         if _hs_persistent_d:
             from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
                 fv3_to_hydrostatic as _f2h,

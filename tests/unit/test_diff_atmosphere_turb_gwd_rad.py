@@ -687,6 +687,66 @@ class TestGWDE3SMCAMGrad:
                            min_nonzero_frac=0.02)
 
 
+class TestGWDE3SMExcludedKnobsGrad:
+    """Review F4: nine E3SM knobs reach the drag only through an argmin level
+    choice or a hard on/off comparison.  MEASURED identically-zero gradient
+    (with a non-trivial forward, so the zero is not vacuous), and the spec
+    must therefore list each as ``excluded``, never as a tunable tier."""
+
+    CASES = [
+        # (sub-config, field, source, value)
+        ("orographic", "oro_min_h", "orographic", 10.0),
+        ("orographic", "oro_min_wind", "orographic", 2.0),
+        ("frontal", "frontgfc", "frontal", 1e-10),
+        ("frontal", "launch_p", "frontal", 50000.0),
+        ("frontal", "front_p", "frontal", 60000.0),
+        ("beres", "hdepth_min_km", "convective", 2.5),
+        ("beres", "z_heat_max", "convective", 20000.0),
+        ("beres", "source_wind_p", "convective", 70000.0),
+        (None, "ediff_kbot_p", "frontal", 50000.0),
+    ]
+    _SPEC_CLASS = {"orographic": "E3SMOrographicConfig",
+                   "frontal": "E3SMFrontalConfig",
+                   "beres": "E3SMBeresConfig", None: "E3SMCAMConfig"}
+
+    @pytest.mark.parametrize("sub,field,source,value", CASES,
+                             ids=[c[1] for c in CASES])
+    def test_measured_zero_and_spec_excluded(self, sub, field, source, value):
+        from legoesm.atmosphere.physics.gravity_wave_drag import config as gcfg
+        from legoesm.atmosphere.physics.gravity_wave_drag.e3sm_cam import e3sm_cam_gwd
+
+        col = _gwd_column(ncol=3, nlev=24, seed=3)
+        ncol, nlev = col["u"].shape
+        base = gcfg.E3SMCAMConfig(
+            source=source, pgwv=4, dc=5.0, effgw=0.4,
+            orographic=gcfg.E3SMOrographicConfig(sgh_default=200.0),
+            frontal=gcfg.E3SMFrontalConfig(taubgnd=1.5e-3, frontgfc=1e-10))
+        kw = {}
+        if source == "frontal":
+            kw["frontgf_col"] = jnp.full((ncol, nlev), 1e-9)
+        if source == "convective":
+            sig = col["sigma_full"]
+            kw["netdt_col"] = 8.0e-4 * jnp.exp(-((sig - 0.6) / 0.25) ** 2)[None, :] \
+                * jnp.ones((ncol, 1))
+
+        def cfg_at(p):
+            if sub is None:
+                return base._replace(**{field: p})
+            return base._replace(**{sub: getattr(base, sub)._replace(**{field: p})})
+
+        def loss(p):
+            out = e3sm_cam_gwd(*_gwd_args(col), 1800.0, cfg_at(p), **kw)
+            return jnp.sum(out.du_dt ** 2) + jnp.sum(out.dT_dt ** 2)
+
+        p0 = jnp.asarray(value, dtype=col["u"].dtype)
+        out = e3sm_cam_gwd(*_gwd_args(col), 1800.0, cfg_at(p0), **kw)
+        assert float(jnp.max(jnp.abs(out.du_dt))) > 0.0, "vacuous: no drag"
+        assert_exactly_zero(jax.grad(loss)(p0), f"e3sm {field}",
+                            reason="argmin level index / hard threshold")
+        spec = gcfg.__param_spec__[self._SPEC_CLASS[sub]]
+        assert field in spec["excluded"] and field not in spec["params"]
+
+
 class TestGWDMLEmulatorGrad:
     """Neural GWD emulator — gradient must reach BOTH the column inputs and the
     network weights (the latter is the whole point of an emulator)."""

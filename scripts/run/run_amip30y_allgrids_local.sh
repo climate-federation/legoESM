@@ -21,7 +21,7 @@ set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 PY="$REPO/.venv/bin/python"
-DECK="$REPO/scripts/run/run_amip_cmip6_deck.py"
+DECK="$REPO/scripts/run/run_amip_smoke_deck.py"
 FORCING="${FORCING_DIR:-$REPO/forcing_amip}"
 OUT_BASE="${OUT_BASE:-$REPO/results/amip30y}"
 START_YEAR=1979

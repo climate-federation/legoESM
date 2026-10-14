@@ -30,7 +30,7 @@ def _make_driver(preset="aquaplanet", days=1, resolution=8, nlev=5, dt=600.0,
 
     atm_config = ExperimentConfig(
         grid=GridConfig(grid_type="cubed_sphere", resolution=resolution, nlev=nlev),
-        dycore=DycoreConfig(dt=dt, model_type="hydrostatic"),
+        dycore=DycoreConfig(energy_fixer=False, dt=dt, model_type="hydrostatic"),
         output=OutputConfig(diag_days=max(days, 1)),
         radiation="gray",
         days=days,
@@ -133,7 +133,7 @@ class TestMixedGridCoupling(unittest.TestCase):
 
         atm_config = ExperimentConfig(
             grid=GridConfig(grid_type="latlon", resolution=atm_nlat, nlev=5),
-            dycore=DycoreConfig(dt=600.0, model_type="hydrostatic",
+            dycore=DycoreConfig(energy_fixer=False, dt=600.0, model_type="hydrostatic",
                                 discretization="finite_volume"),
             output=OutputConfig(diag_days=max(days, 1)),
             radiation="gray", days=days,
@@ -216,7 +216,7 @@ class TestCoupledResumeStatePersistence(unittest.TestCase):
     def setUpClass(cls):
         import tempfile
         cls._tmp = tempfile.TemporaryDirectory()
-        # slab_simple has land, so the lagged runoff channel is genuinely
+        # slab_simple has land, so the lagged surface water flux is genuinely
         # nonzero — the round-trip equality below is not vacuous.
         cls.driver = _make_driver("slab_simple", days=1,
                                   output_dir=cls._tmp.name)
@@ -234,7 +234,11 @@ class TestCoupledResumeStatePersistence(unittest.TestCase):
         ref = self.driver._last_sfc_response
         self.assertIsNotNone(ref)
         self.assertIsNotNone(self.driver._sst_mean_init)
-        self.assertTrue(bool(jnp.any(ref.river_runoff_flux != 0.0)))
+        # Non-vacuity: the buffer carries a live land-sourced channel.  Not
+        # the river runoff: after this 1-day run the slab bucket sits at
+        # ~75 of W_max=150 kg/m2 and runoff is exactly 0 everywhere (job
+        # 10331261) -- the surface water flux is the channel that is live.
+        self.assertTrue(bool(jnp.any(ref.surface_mass_flux != 0.0)))
 
         resumed = _make_driver("slab_simple", days=1)  # fresh: lag buffer None
         self.assertIsNone(resumed._last_sfc_response)
@@ -318,7 +322,7 @@ class TestUnfusedRadiation(unittest.TestCase):
         from legoesm.driver.coupled_esm_driver import CoupledESMDriver
         atm = ExperimentConfig(
             grid=GridConfig(grid_type="cubed_sphere", resolution=8, nlev=5),
-            dycore=DycoreConfig(dt=600.0, model_type="hydrostatic"),
+            dycore=DycoreConfig(energy_fixer=False, dt=600.0, model_type="hydrostatic"),
             output=OutputConfig(diag_days=days),
             radiation="gray", days=days,
             rad_update_steps=rad_update_steps,
@@ -580,7 +584,7 @@ class TestLandModeDispatch(unittest.TestCase):
 
         atm_config = ExperimentConfig(
             grid=GridConfig(grid_type="cubed_sphere", resolution=8, nlev=5),
-            dycore=DycoreConfig(dt=600.0, model_type="hydrostatic"),
+            dycore=DycoreConfig(energy_fixer=False, dt=600.0, model_type="hydrostatic"),
             output=OutputConfig(diag_days=1),
             radiation="gray",
             days=1,
