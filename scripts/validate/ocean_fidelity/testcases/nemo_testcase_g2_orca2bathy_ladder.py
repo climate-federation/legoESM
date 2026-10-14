@@ -20,6 +20,10 @@ level; this script reuses its readers, regions and row scorer and adds what
                operand in compiled order against the model's write-only
                trace (G1's reader and table), and the traced loop's exit and
                the ordinary step's handoff each against NEMO's exit frame.
+  rhs_frame    step 1: the traced solver's 3-D right-hand side, level 1,
+               against NEMO's frame after stp_2D (wet and dry faces apart),
+               and an OFFLINE replay of its depth mean (stp2d.f90:178-179,
+               ascending k) against the card's.
   trazdf_replay  step 1, OFFLINE numpy replay of NEMO's implicit vertical
                tracer solve (trazdf.f90:231-233, :269-272, :284-298) from
                NEMO's recorded thickness ratios and the mesh file: level 1
@@ -55,7 +59,7 @@ DEFAULT_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/round10/"
     "oracle_g2_r10/p3_a_100step")
 ARMS = ("geometry", "independent", "given_entry", "stages", "zdf_replay",
-        "substeps", "trazdf_replay")
+        "substeps", "trazdf_replay", "rhs_frame")
 # stage exposures of one step: the private hook that returns it, and the
 # level-1 NEMO frame fields (u, v, T, S, ssh) it must equal
 EXPOSURES = {
@@ -244,6 +248,25 @@ def nemo_trazdf_replay(before, *, tmask, e3t_0, e3w_1d, avt0, r3t_bb, r3t_mm,
     for k in range(nk - 2, -1, -1):                       # trazdf.f90:297-298
         pt[..., k] = (pt[..., k] - zws[..., k] * pt[..., k + 1]) / zwt[..., k] * tmask[..., k]
     return pt
+
+
+def nemo_ue_rhs_replay(rhs, e3_0, mask, *, lanes: int = 1) -> np.ndarray:
+    """OFFLINE stp2d.f90:178-179: SUM(e3*rhs*mask over levels) * r1_h_0,
+    with hu_0 summed as domain.f90 does and r1_hu_0 = ss/(h0 + 1 - ss).
+    lanes = 1 is Fortran's ascending k; lanes > 1 splits k by residue and
+    adds the partial sums pairwise (a vector order, for contrast only)."""
+    nk = mask.shape[-1]
+    h0 = np.zeros(mask.shape[:-1])
+    for k in range(nk):
+        h0 = h0 + e3_0[..., k] * mask[..., k]
+    ss = mask[..., 0]
+    prod = e3_0 * rhs * mask
+    part = [np.zeros(mask.shape[:-1]) for _ in range(lanes)]
+    for k in range(nk):
+        part[k % lanes] = part[k % lanes] + prod[..., k]
+    while len(part) > 1:
+        part = [part[i] + part[i + 1] for i in range(0, len(part), 2)]
+    return part[0] * (ss / (h0 + 1.0 - ss))
 
 
 def card_levels(state) -> dict[str, np.ndarray]:
@@ -499,6 +522,40 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
                               ("vv_b", "vv_b_aa", "v"))}
         out.update({"kt": 1, "n_substeps": n_sub, **table})
         return out
+    if arm == "rhs_frame":
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import _NEMOWSRK3TestHooks
+        require(kt_from == 1, "the right-hand-side frame is scored at step 1")
+        out["label"] = "INDEPENDENT = GIVEN-NEMO-ENTRY at step 1 (3-D RHS after stp_2D)"
+        g = g1.read_step(root, 1)
+        res = jax.device_get(LatLonCGridOceanModel(
+            card.recipe.grid, z, cfg, _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+                expose_barotropic_substeps=True)).step(s0, dt=card.dt_s))
+        ops = {k: np.asarray(v) for k, v in res.slow_forcing_operands.items()}
+        rows = {}
+        with netCDF4.Dataset(root / "mesh_mask.nc") as h:
+            for f, cut, e3n, mn in (("u", lambda a: a[:, 1:], "e3u_0", "umask"),
+                                    ("v", lambda a: a[1:], "e3v_0", "vmask")):
+                rhs, card_mean = cut(ops[f"d{f}_dt"]), cut(ops[f"depth_{f}"])
+                mask = levels_last(h.variables[mn][0], nk)
+                e3 = np.ascontiguousarray(np.moveaxis(np.asarray(
+                    h.variables[e3n][0], np.float64)[:nk], 0, -1))
+                ref, wet = g[f"b_{f}{f}_rhs_k1"], mask[..., 0] > 0
+                scored = wet.copy()
+                if f == "v":
+                    scored[-1] = False   # top V row: the fold unit's raw operands
+                rows[f] = {
+                    "level1_wet_faces": int(wet.sum()),
+                    "level1_wet_unequal": int(np.count_nonzero((rhs[..., 0] != ref) & wet)),
+                    "level1_dry_unequal": int(np.count_nonzero((rhs[..., 0] != ref) & ~wet)),
+                    "level1_dry_card_nonzero": int(np.count_nonzero((rhs[..., 0] != 0) & ~wet)),
+                    "level1_dry_nemo_max_abs": float(np.max(np.abs(ref[~wet]))),
+                    "depth_mean_faces": int(scored.sum()),
+                    "ascending_replay_vs_card_unequal": int(np.count_nonzero(
+                        (nemo_ue_rhs_replay(rhs, e3, mask) != card_mean) & scored)),
+                    "lane4_replay_vs_card_unequal": int(np.count_nonzero(
+                        (nemo_ue_rhs_replay(rhs, e3, mask, lanes=4) != card_mean) & scored))}
+        out["per_kt"].append({"kt": 1, "rhs_frame": rows})
+        return out
     if arm == "trazdf_replay":
         require(kt_from == 1, "the tracer replay starts from the initial state")
         out["label"] = ("OFFLINE replay of NEMO's tra_zdf from NEMO's recorded "
@@ -707,6 +764,17 @@ def main(argv=None) -> int:
                   f"level 1: unequal {c['n_unequal']} max {c['max_abs']:.3e} | card vs "
                   f"replay all levels: unequal {n} max "
                   f"{max(s2['full']['max_abs'], s2['partial']['max_abs']):.3e}")
+        return 1 if bad else 0
+    if a.arm == "rhs_frame":
+        bad = False
+        for f, r in out["per_kt"][0]["rhs_frame"].items():
+            bad |= bool(r["level1_wet_unequal"] or r["level1_dry_card_nonzero"]
+                        or r["ascending_replay_vs_card_unequal"])
+            print(f"{f} RHS level 1 vs NEMO: wet unequal {r['level1_wet_unequal']} of "
+                  f"{r['level1_wet_faces']}, dry unequal {r['level1_dry_unequal']} (NEMO "
+                  f"max {r['level1_dry_nemo_max_abs']:.2e}) | depth mean: ascending "
+                  f"replay unequal {r['ascending_replay_vs_card_unequal']}, 4-lane "
+                  f"{r['lane4_replay_vs_card_unequal']}")
         return 1 if bad else 0
     if a.arm == "substeps":
         f = out["first_unequal"]

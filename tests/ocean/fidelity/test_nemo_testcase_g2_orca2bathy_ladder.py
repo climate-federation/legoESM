@@ -331,3 +331,55 @@ def test_step_one_is_nemos_bit_for_bit_only_with_the_ascending_rhs_sum(ladder):
             assert rows["ssh"]["n_unequal"] > 500 and rows["uu_b"]["n_unequal"] > 500
         else:
             assert all(r["n_unequal"] == 0 for r in rows.values())
+
+
+def test_ue_rhs_replay_is_an_ascending_masked_mean(ladder):
+    rng = np.random.default_rng(1)
+    rhs = rng.standard_normal((3, 4, 5)) * np.exp(rng.uniform(-30, 0, (3, 4, 5)))
+    e3 = rng.uniform(10, 500, (3, 4, 5))
+    mask = np.ones((3, 4, 5))
+    mask[0, 0] = 0.0                      # a dry column
+    mask[1, 1, 3:] = 0.0                  # a shallow one
+    got = ladder.nemo_ue_rhs_replay(rhs, e3, mask)
+    assert got[0, 0] == 0.0
+    acc, h0 = 0.0, 0.0
+    for k in range(5):
+        acc, h0 = acc + e3[1, 1, k] * rhs[1, 1, k] * mask[1, 1, k], h0 + e3[1, 1, k] * mask[1, 1, k]
+    assert got[1, 1] == acc * (1.0 / (h0 + 1.0 - 1.0))
+    np.testing.assert_allclose(ladder.nemo_ue_rhs_replay(rhs, e3, mask, lanes=4), got, rtol=1e-12)
+
+
+@needs_record
+@pytest.mark.slow
+def test_the_rhs_frame_is_nemos_on_wet_faces_and_its_depth_mean_is_ascending(ladder):
+    """R2-P3 / G-P6: the card's 3-D RHS after stp_2D equals NEMO's frame on
+    every wet face; NEMO's frame alone carries the unmasked sco pressure
+    gradient on dry faces (dynhpg.f90:393-394).  The depth mean is the
+    ascending replay's, and a 4-lane order would not be."""
+    out = ladder.run(RECORD, arm="rhs_frame", allow_dirty=True)
+    for f in ("u", "v"):
+        r = out["per_kt"][0]["rhs_frame"][f]
+        assert r["level1_wet_faces"] > 15000 and r["level1_wet_unequal"] == 0
+        assert r["level1_dry_card_nonzero"] == 0 and r["level1_dry_unequal"] > 1000
+        assert r["ascending_replay_vs_card_unequal"] == 0
+        assert r["lane4_replay_vs_card_unequal"] > 50
+
+
+@needs_record
+@pytest.mark.slow
+def test_the_100_step_record_is_bit_identical_on_every_field(ladder):
+    """G2 certification (round 4): INDEPENDENT, 100 steps, level 1 and the
+    2-D fields every step, all levels by depth class where NEMO wrote a
+    restart, and the six barotropic histories every tenth step."""
+    twin_b = RECORD.parent / "p3_b_10step"
+    out = ladder.run(RECORD, arm="independent", kt_from=1, kt_to=100,
+                     restart_roots=(twin_b,), allow_dirty=True)
+    assert len(out["per_kt"]) == 100
+    assert all(r["n_unequal"] == 0 for p in out["per_kt"] for r in p["rows"])
+    deep = [p["all_levels"] for p in out["per_kt"] if p["all_levels"]]
+    assert [p["kt"] for p in out["per_kt"] if p["all_levels"]] == [
+        2, 4, 6, 8, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
+    assert all(v["summary"][c]["n_unequal"] == 0 and v["summary"]["dry_n_unequal"] == 0
+               for d in deep for v in d.values() for c in ("full", "partial"))
+    assert len(out["history_rows"]) == 60
+    assert all(r["n_unequal"] == 0 for r in out["history_rows"])
