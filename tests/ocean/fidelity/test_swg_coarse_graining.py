@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -209,6 +212,29 @@ def test_shifted_filter_lowering_has_no_convolution_and_guard_catches_plant():
         dimension_numbers=("NCHW", "OIHW", "NCHW"))[0, 0]).lower(padded)
     with pytest.raises(RuntimeError, match="forbidden convolution"):
         assert_no_convolution_operations(planted, label="planted dense filter")
+
+
+def test_numpy_filter_refuses_silent_float64_downcast_without_jax_x64():
+    program = """
+import numpy as np
+from legoesm.ocean.fidelity.swg_coarse_graining import filter_closed_cgrid_extensives
+volume = np.zeros((7, 7), dtype=np.float64)
+u = np.zeros((7, 8), dtype=np.float64)
+v = np.zeros((8, 7), dtype=np.float64)
+try:
+    filter_closed_cgrid_extensives(volume, u, v, sigma_cells=1.0, truncate=2.0)
+except RuntimeError as exc:
+    assert "JAX_ENABLE_X64=1" in str(exc)
+else:
+    raise AssertionError("float64 restriction silently ran with JAX x64 disabled")
+"""
+    environment = dict(os.environ)
+    environment["JAX_ENABLE_X64"] = "0"
+    environment["JAX_PLATFORMS"] = "cpu"
+    completed = subprocess.run(
+        [sys.executable, "-c", program], env=environment,
+        capture_output=True, text=True, check=False)
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_filtered_extensive_transfer_function_and_temporal_continuity_plant():

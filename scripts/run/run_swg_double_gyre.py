@@ -293,6 +293,14 @@ def build_scanned_hourly_target_stepper(
     return scanned
 
 
+def assert_hourly_stepper_has_no_convolution(hourly_stepper, state) -> None:
+    """Guard the complete stepped-and-sampled production lowering."""
+    from legoesm.training.swg_online import assert_no_convolution_operations
+
+    assert_no_convolution_operations(
+        hourly_stepper.lower(state), label="production hourly target scan")
+
+
 def run_python_steps(model, state, dt_s: float, forcing, n_steps: int):
     """Run the retained certified per-step production dispatch."""
     if type(n_steps) is not int or n_steps <= 0:
@@ -673,6 +681,7 @@ def run_long(
             hourly_stepper = build_scanned_hourly_target_stepper(
                 model, card.dt_s, forcing, int(steps_per_hour_f),
                 hourly_restrictors)
+            assert_hourly_stepper_has_no_convolution(hourly_stepper, state)
         if profile_steps:
             profile = profile_step_modes(
                 model, state, card.dt_s, forcing, profile_steps)

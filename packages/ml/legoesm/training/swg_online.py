@@ -1001,4 +1001,11 @@ def assert_network_gradients_live(grads) -> None:
         for path, value in jax.tree.leaves_with_path(
             eqx.filter(grads, eqx.is_inexact_array))
     }
+    poisoned = sorted(
+        name for name, value in named.items()
+        if not bool(jnp.all(jnp.isfinite(value))))
+    if poisoned:
+        raise ValueError(
+            "SWG network gradient contains non-finite elements: "
+            f"{poisoned}")
     assert_no_inert(named)

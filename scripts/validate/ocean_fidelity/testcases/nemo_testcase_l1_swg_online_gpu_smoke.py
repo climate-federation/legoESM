@@ -122,6 +122,10 @@ def _compare_samples(cpu_sample, gpu_sample) -> list[dict]:
         for field, cpu_value, gpu_value in zip(
                 ("ssh_m", "u_m_s", "v_m_s"), cpu_fields, gpu_fields,
                 strict=True):
+            if not (np.all(np.isfinite(cpu_value))
+                    and np.all(np.isfinite(gpu_value))):
+                raise AssertionError(
+                    f"{operator} {field} CPU/GPU sample is non-finite")
             difference = np.abs(np.asarray(gpu_value) - np.asarray(cpu_value))
             maximum = float(np.max(difference))
             atol = 2.1e-12 if field == "ssh_m" else 3.0e-14
@@ -154,8 +158,12 @@ def _run_worker(args) -> dict:
     import jax.numpy as jnp
     import numpy as np
     from legoesm.core.precision import PrecisionPolicy, set_policy
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
     from legoesm.ocean.fidelity.nemo_testcase_recipe import (
         SWG_DG50_NAMELIST,
+        SWG_MADDISON_NAMELIST,
         build_swg_card,
         swg_surface_wind,
     )
@@ -179,11 +187,30 @@ def _run_worker(args) -> dict:
         raise RuntimeError(
             f"GPU smoke selected backend {jax.default_backend()!r}, not 'gpu'")
     gpu = jax.devices("gpu")[0]
-    admission = _load_driver_module().admit_listed_snapshot(args.restart)
+    driver = _load_driver_module()
+    admission = driver.admit_listed_snapshot(args.restart)
     fields = _load_restart(args.restart)
     started = time.perf_counter()
 
     if args.worker == "sampler":
+        with jax.default_device(gpu):
+            fine_card = build_swg_card(SWG_MADDISON_NAMELIST)
+            fine_model = LatLonCGridOceanModel(
+                fine_card.recipe.grid, fine_card.recipe.z_coord,
+                fine_card.recipe.model_config)
+            fine_tau = swg_surface_wind(SWG_MADDISON_NAMELIST)
+            fine_forcing = OceanSurfaceForcing(
+                tau_i_native=jnp.asarray(fine_tau[0], dtype=jnp.float64),
+                tau_j_native=jnp.asarray(fine_tau[1], dtype=jnp.float64))
+            fine_state, _ = driver.restart_state_from_npz(
+                fine_card.recipe.initial_state, fine_forcing, args.restart,
+                dt_s=fine_card.dt_s)
+            _, _, full_restrictors = _sampler_components()
+            full_stepper = driver.build_scanned_hourly_target_stepper(
+                fine_model, fine_card.dt_s, fine_forcing,
+                int(3_600 / fine_card.dt_s), full_restrictors)
+            driver.assert_hourly_stepper_has_no_convolution(
+                full_stepper, fine_state)
         cpu_devices = jax.devices("cpu")
         if not cpu_devices:
             raise RuntimeError("CPU reference device is unavailable")
@@ -201,7 +228,6 @@ def _run_worker(args) -> dict:
         objective = args.worker
         with jax.default_device(gpu):
             _, _, restrictors = _sampler_components()
-            driver = _load_driver_module()
             sampler = jax.jit(driver.build_dual_coarse_sampler(restrictors))
             sampled = sampler(*(jnp.asarray(value) for value in fields))
             selected = sampled[0 if objective == "symmetric" else 1]

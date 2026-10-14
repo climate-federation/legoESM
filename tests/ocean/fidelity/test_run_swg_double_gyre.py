@@ -267,17 +267,23 @@ def test_hourly_sampler_refuses_missing_operator():
 def test_real_dual_hourly_sampler_lowering_has_no_convolution_operation():
     import jax
     import jax.numpy as jnp
+    from legoesm.core.precision import PrecisionPolicy, set_policy
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
     from legoesm.ocean.fidelity.nemo_testcase_recipe import (
         SWG_DG50_NAMELIST,
         SWG_MADDISON_NAMELIST,
+        build_swg_card,
+        swg_surface_wind,
     )
     from legoesm.ocean.fidelity.swg_coarse_graining import (
         build_jax_conservative_restrictor,
         build_jax_filtered_restrictor,
         cgrid_geometry,
     )
+    from legoesm.ocean.state import OceanSurfaceForcing
     from legoesm.training.swg_online import assert_no_convolution_operations
 
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
     source = cgrid_geometry(SWG_MADDISON_NAMELIST)
     target = cgrid_geometry(SWG_DG50_NAMELIST)
     restrictors = {
@@ -291,6 +297,20 @@ def test_real_dual_hourly_sampler_lowering_has_no_convolution_operation():
     lowered = sampler.lower(*arrays)
     assert_no_convolution_operations(lowered, label="real hourly sampler")
 
+    card = build_swg_card(SWG_MADDISON_NAMELIST)
+    model = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
+    tau = swg_surface_wind(SWG_MADDISON_NAMELIST)
+    forcing = OceanSurfaceForcing(
+        tau_i_native=jnp.asarray(tau[0], dtype=jnp.float64),
+        tau_j_native=jnp.asarray(tau[1], dtype=jnp.float64))
+    full_stepper = driver.build_scanned_hourly_target_stepper(
+        model, card.dt_s, forcing, int(3_600 / card.dt_s), restrictors)
+    seeded_state = driver.seed_steady_forcing_carry(
+        card.recipe.initial_state, forcing)
+    driver.assert_hourly_stepper_has_no_convolution(
+        full_stepper, seeded_state)
+
     def planted_filter(eta, u_native, v_native):
         dense = jax.lax.conv_general_dilated(
             eta[None, None], jnp.ones((1, 1, 1, 1), eta.dtype),
@@ -303,6 +323,22 @@ def test_real_dual_hourly_sampler_lowering_has_no_convolution_operation():
     with pytest.raises(RuntimeError, match="forbidden convolution"):
         assert_no_convolution_operations(
             planted.lower(*arrays), label="planted hourly sampler")
+
+    class PlantedStepModel:
+        def step(self, state, dt_s, *, surface_forcing):
+            del dt_s, surface_forcing
+            eta = jax.lax.conv_general_dilated(
+                state.eta.data[None, None],
+                jnp.ones((1, 1, 1, 1), state.eta.data.dtype),
+                (1, 1), "VALID",
+                dimension_numbers=("NCHW", "OIHW", "NCHW"))[0, 0]
+            return state._replace(eta=state.eta.replace(data=eta))
+
+    planted_stepper = driver.build_scanned_hourly_target_stepper(
+        PlantedStepModel(), card.dt_s, forcing, 1, restrictors)
+    with pytest.raises(RuntimeError, match="forbidden convolution"):
+        driver.assert_hourly_stepper_has_no_convolution(
+            planted_stepper, card.recipe.initial_state)
 
 
 def test_zero_closure_truth_day_scan_matches_flat_training_segments_at_4_and_8d():

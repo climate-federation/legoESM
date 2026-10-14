@@ -450,6 +450,14 @@ def test_segment_builder_rejects_unregistered_windows_and_has_live_gradients(
     assert_network_gradients_live(grads)
 
 
+def test_network_gradient_gate_rejects_one_poisoned_component():
+    assert_network_gradients_live({"live": jnp.asarray([1.0, 2.0])})
+    with pytest.raises(ValueError, match="non-finite elements"):
+        assert_network_gradients_live({"partial": jnp.asarray([1.0, jnp.nan])})
+    with pytest.raises(ValueError, match="identically-zero gradient"):
+        assert_network_gradients_live({"dead": jnp.asarray([0.0, 0.0])})
+
+
 def test_zero_closure_four_and_eight_day_compositions_match(online_case):
     card, geometry, _, _, _ = online_case
     _, four_day = build_segment_fn(card, geometry, window_days=4)

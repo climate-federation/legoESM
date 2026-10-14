@@ -521,6 +521,10 @@ def filter_closed_cgrid_extensives(
     Arrays use the local closed-grid shapes ``T=(ny,nx)``,
     ``U=(ny,nx+1)``, and ``V=(ny+1,nx)``.
     """
+    if not bool(jax.config.jax_enable_x64):
+        raise RuntimeError(
+            "filtered C-grid restriction requires JAX_ENABLE_X64=1; "
+            "refusing a silent float64 downcast")
     volume = np.asarray(cell_volume, dtype=np.float64)
     u = np.asarray(u_transport, dtype=np.float64)
     v = np.asarray(v_transport, dtype=np.float64)

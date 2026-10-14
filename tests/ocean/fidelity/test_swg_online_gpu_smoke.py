@@ -28,6 +28,13 @@ def test_cpu_gpu_comparator_accepts_roundoff_and_rejects_live_plant():
     planted[1][1][1, 1] = 1.0e-10
     with pytest.raises(AssertionError, match="filtered u_m_s"):
         smoke._compare_samples(reference, planted)
+    nonfinite = tuple(
+        tuple(value.copy() for value in operator) for operator in reference)
+    nonfinite[0][0][0, 0] = np.nan
+    matching_nonfinite = tuple(
+        tuple(value.copy() for value in operator) for operator in nonfinite)
+    with pytest.raises(AssertionError, match="box ssh_m.*non-finite"):
+        smoke._compare_samples(nonfinite, matching_nonfinite)
 
 
 def test_smoke_requires_explicit_memory_fraction_before_gpu_import(
