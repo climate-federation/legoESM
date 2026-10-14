@@ -155,3 +155,43 @@ stp2d lines).
   reads the landed card.  Non-vacuity: with only the card edit reverted, all
   five updated tests fail; restored and verified.
 - The full `tests/ocean/fidelity` battery was not run.
+- Citation gates: the receipt (24 citations) and the default receipt (274)
+  PASS with no unmapped citation and no failing map entry, after the shared
+  re-anchor tool moved eight recipe pins rigidly by +24 lines; the shifted
+  dyn_zdf citation plant fires.  `--decide` plant (one exact-row loss planted
+  in the final set's rung-10 census) reports FAIL and exits 1; the real final
+  set reports PASS.
+
+## Independent review
+
+`codex exec --sandbox read-only`, one run: "HOLD — four confirmed defects,
+including one production selector lacking the required same-line
+certification."  Disposition:
+
+1. `--decide` always reported PASS and exit 0 — **fixed**; plant above.
+2. Stage velocity cited the thickness-weighted update, which ORCA2 does not
+   run — **citation fixed; selector kept**.  On the vector-form production
+   card the selector acts only through the barotropic correction, a line
+   ORCA2 runs (branch notes, section 1).  This is read off the code, not
+   separately measured; the reviewer read it as an uncertified branch
+   transfer.  The discriminating check is a production-card arm with the
+   correction option alone; not run this round.
+3. Top-V exchange cited the `l_zdfsh2=F` call — **fixed**; on rung 10 the
+   executed call differs, so the held unit also fails (b) there.
+4. Stored T-ratio product cited the stage interpolation — **fixed**
+   (domqco's stored ratio).
+
+## Choices
+
+- ASKED (Decision 122): landing rule, cards, selectors on the production
+  card only.
+- UNASKED, offered for revert: holding the top-V exchange despite (c)+(d)
+  (preregistered R278-P3); keeping the stage-velocity selector on the
+  review's disputed point 2; landing the stage-1 RHS and EOS depth units,
+  which are bit-inert on every measured card.
+
+## OPEN
+
+User decision on the top-V fold exchange (meets (c)+(d) on rung 0, fails
+(b) on rung 10, grows the ten-step SSH maximum ~20x on rung 0 and OMT-4).
+Next walk: the first over-bar row of the landed production card.
