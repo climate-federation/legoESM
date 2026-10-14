@@ -2095,6 +2095,8 @@ CITATION_MAP = {
     'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/sbcblk.f90:554': 'IF( MOD( kt - 1, nn_fsbc ) == 0 ) THEN',
     'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/sbcblk_algo_ncar.f90:174-178': ['ztmp0 = One_on_L( t_zu, q_zu, ztmp0, ztmp1, ztmp2 )', 'zeta_u   = sign( min(abs(zeta_u),10._wp), zeta_u )', 5],
     'cfgs/SHARED/namelist_ref:241': 'nn_iter_algo = 5       !  Number of iterations in bulk param. algo ("stable ABL + weak wind" requires more)',
+    'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/sbcblk_algo_ncar.f90:207': 'ztmp0 = MAX( 0.25_wp , UN10_from_CD(zu, Ubzu, Cd, ppsi=ztmp2) ) ! U_n10 (ztmp2 == psi_m_ncar(zeta_u))',
+    'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/sbcblk_algo_ncar.f90:223': 'ztmp1 = 0.5_wp + SIGN(0.5_wp,zeta_u)                                ! update stability',
     # --- GRIDLADDER round 19 END ---
     # --- ORCA2 round 253: kt=8 midpoint-SSH failure boundary -------
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynspg_ts.f90:489-493': [
