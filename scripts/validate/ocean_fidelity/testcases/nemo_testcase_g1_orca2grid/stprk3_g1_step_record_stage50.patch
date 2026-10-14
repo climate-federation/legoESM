@@ -6,7 +6,7 @@
     USE stp2d          ! external mode solver
 +   USE g1_step_record   ! grid ladder G1: read-only RK3 step record
     USE lib_mpp, ONLY : l_perpetual_ts
- 
+
     IMPLICIT NONE
 @@ -126,6 +127,24 @@
        ENDIF
@@ -30,8 +30,8 @@
 +         CALL g1r_w2( 'tn_k1_bb', ts(:,:,1,jp_tem,Nbb) )
 +         CALL g1r_w2( 'sn_k1_bb', ts(:,:,1,jp_sal,Nbb) )
 +      ENDIF
- 
- 
+
+
        !>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 @@ -184,6 +203,17 @@
        !  RK3 : single first external mode computation
@@ -48,7 +48,7 @@
 +         CALL g1r_w2( 'uu_rhs_k1', uu(:,:,1,Nrhs) )
 +         CALL g1r_w2( 'vv_rhs_k1', vv(:,:,1,Nrhs) )
 +      ENDIF
- 
+
        !>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
        !  RK3 time integration
 @@ -193,11 +223,39 @@
@@ -114,7 +114,7 @@
        !
 @@ -215,6 +287,14 @@
           ! linear extrapolation of ssh to compute ww at the beginning of the next time-step
-          ! ssh(n+1) = 2*ssh(n) - ssh(n-1)    
+          ! ssh(n+1) = 2*ssh(n) - ssh(n-1)
           ssh(:,:,Naa) = 2*ssh(:,:,Nbb) - ssh(:,:,Naa)
 +         CALL g1r_frame( 'f' )
 +         CALL g1r_w2( 'ssh_bb', ssh(:,:,Nbb) )
