@@ -138,3 +138,13 @@ UNVERIFIED:
 - that NEMO's kt = 11 bulk read the 10 m air fields without temporal
   interpolation (deck `.false.`; log names one record each);
 - the operand inside the bulk that carries the bias.
+
+## 10. Citation gate and evidence hashes
+
+Citation gate on this receipt (from section 1, commit aca284a5f): **FAIL**,
+12 citations found, 0 failures, 12 unmapped (no CITATION_MAP entries were
+added this round; none is mis-anchored by the gate's audit). Offered as
+next round's housekeeping.
+
+SHA-256 prefixes, round18/: admit_existing.log=4ded2200c9f65020, kt11_forcing_witness.json=5083acafcac9dfa2, kt11_plant.log=6d078acedef37266, kt11_wrong_abort.log=5e0af15d2bb4a1ab, codex_review_r18.log=dc36d7382153a21f, tests_focused_final.log=b069a6445a945d1c, citation_receipt.json=5ec72aa85bc608b0.
+round17/oracle_g4_r17/g4_round17_admission.json=6d05567bc024e364.
