@@ -223,6 +223,15 @@ FILES = {
         _ORCA2_COMPILED / "in_out_manager.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcflx.f90": (
         _ORCA2_COMPILED / "sbcflx.f90"),
+    # ORCA2 round 278 cites the Decision-122 statements in the shipped build.
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynzdf.f90": (
+        _ORCA2_COMPILED / "dynzdf.f90"),
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/domqco.f90": (
+        _ORCA2_COMPILED / "domqco.f90"),
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/eosbn2.f90": (
+        _ORCA2_COMPILED / "eosbn2.f90"),
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynvor.f90": (
+        _ORCA2_COMPILED / "dynvor.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90": (
         _ORCA2_COMPILED / "stprk3_stg.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3.f90": (
@@ -1636,6 +1645,29 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 round 278: Decision-122 lines in the shipped ORCA2 build ---
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynzdf.f90:192-198': ['zzwi = - zDt_2 * ( avm(ji+1,jj,jk  )     +  avm(ji,jj,jk  )     ) &', 'zwd(ji,jk) = 1._wp - zzwi - zzws', 7],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynzdf.f90:361-367': ['zzwi = - zDt_2 * ( avm(ji,jj+1,jk  )     +  avm(ji,jj,jk  )     ) &', 'zwd(ji,jk) = 1._wp - zwi(ji,jk) - zws(ji,jk)', 7],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/trazdf.f90:231-233': ['zwi(ji,jk) = - p2dt * zwt(ji,jk  ) / (e3w_1d(jk) *(1._wp+r3t(ji,jj,Kmm', ('zwd(ji,jk) = (e3t_3d(ji,jj,jk) *(1._wp+r3t(ji,jj,Kaa)*tmask(ji,jj,jk))', 2), 3],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stp2d.f90:198-199': ['Ue_rhs(ji,jj) = SUM( e3u_3d(ji,jj,1:jpkm1)*uu(ji,jj,1:jpkm1,Krhs)*umas', 'Ve_rhs(ji,jj) = SUM( e3v_3d(ji,jj,1:jpkm1)*vv(ji,jj,1:jpkm1,Krhs)*vmas', 2],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:221-223': [('r3t(:,:,Kaa) = r1_2 * ( r3t(:,:,Kbb) + r3ta(:,:) )   ! at N+1/2 (Kaa)', 2), ('r3v(:,:,Kaa) = r1_2 * ( r3v(:,:,Kbb) + r3va(:,:) )', 2), 3],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:169': "CALL lbc_lnk( 'stp_RK3_stg', r3ua, 'U', 1._wp, r3va, 'V', 1._wp, r3fa,",
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dommsk.f90:232': "CALL lbc_lnk( 'dommsk', umask, 'U', 1.0_wp, vmask, 'V', 1.0_wp, fmask,",
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dommsk.f90:258': 'fe3mask(:,:,:) = fmask(:,:,:)',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/domqco.f90:266-269': [('pr3u(ji,jj) = 0.5_wp * (  e1e2t(ji  ,jj) * pssh(ji  ,jj)  &', 2), ('&                    + e1e2t(ji,jj+1) * pssh(ji,jj+1)  ) * r1_hv_0(ji,', 2), 4],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stp2d.f90:141': 'CALL dyn_hpg( kt, Kbb     , uu, vv, Krhs )            ! horizontal gra',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stp2d.f90:147': 'CALL dyn_vor( kt,      Kbb, uu, vv, Krhs )',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:474-479': ['uu(ji,jj,jk,Kaa) = (         ( 1._wp + r3u(ji,jj,Kbb) ) * uu(ji,jj,jk,', '&             /           ( 1._wp + r3v(ji,jj,Kaa) ) * vmask(ji,jj,jk)', 6],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:514-515': ['zub(ji,jj) = uu_b(ji,jj,Kaa) - SUM( e3u_3d(ji,jj,:)*uu(ji,jj,:,Kaa) )', 'zvb(ji,jj) = vv_b(ji,jj,Kaa) - SUM( e3v_3d(ji,jj,:)*vv(ji,jj,:,Kaa) )', 2],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:536-537': ['uu(ji,jj,jk,Kaa) = uu(ji,jj,jk,Kaa) + zub(ji,jj)*umask(ji,jj,jk)', 'vv(ji,jj,jk,Kaa) = vv(ji,jj,jk,Kaa) + zvb(ji,jj)*vmask(ji,jj,jk)', 2],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynzdf.f90:158-161': ['IF( ln_drgimp .AND. ln_dynspg_ts ) THEN', 'pvv(ji,jj,jk,Kaa) = ( pvv(ji,jj,jk,Kaa) - vv_b(ji,jj,Kaa) ) * vmask(ji', 4],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:224': ('r3f(:,:)     = r2_3 * r3fb(:,:) + r1_3 * r3fa(:,:)   ! at N+1/3 (Kmm)', 2),
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:245': 'r3f(:,:    ) = r1_2 * ( r3fb(:,:) + r3fa(:,:) )   ! at N+1/2 (Kmm)',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:178-179': ['r3u(:,:,Kaa) = r2_3 * r3u(:,:,Kbb) + r1_3 * r3ua(:,:)', 'r3v(:,:,Kaa) = r2_3 * r3v(:,:,Kbb) + r1_3 * r3va(:,:)', 2],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/eosbn2.f90:357': ('zh  = ((gdept_1d(jk) ) *(1._wp+r3t(ji,jj,Knn))) * r1_Z0', 1),
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/eosbn2.f90:646': ('zh  = ((gdept_1d(jk) ) *(1._wp+r3t(ji,jj,Knn))) * r1_Z0', 2),
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynvor.f90:745': 'zwz(ji,jj) = ff_f(ji,jj) * z1_e3f(ji,jj)',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:795-796': [("CALL lbc_lnk( 'stp_RK3_stg', uu(:,:,:,       Kaa), 'U', -1._wp, vv(:,:", 2), ("&                       , ts(:,:,:,jp_tem,Kaa), 'T',  1._wp, ts(:,:,:,", 2), 2],
     # --- ORCA2 round 275: G2 live momentum-thickness divisors -------
     'ORCA2_OMIP_L4_R230FOLDTRP/BLD/ppsrc/nemo/dynzdf.f90:191-205': [
         ('DO jk =    2,  jpkm1,  1', 1),
