@@ -1743,7 +1743,7 @@ CITATION_MAP = {
         7],
     'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/trazdf.f90:231-233': [
         ('zwi(ji,jk) = - p2dt * zwt(ji,jk  )', 1),
-        ('zwd(ji,jk) = (e3t_3d(ji,jj,jk)', 1),
+        ('zwd(ji,jk) = (e3t_3d(ji,jj,jk)', 2),
         3],
     'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/stp2d.f90:178-179': [
         ('Ue_rhs(ji,jj) = SUM( e3u_3d(ji,jj,1:jpkm1)', 1),
