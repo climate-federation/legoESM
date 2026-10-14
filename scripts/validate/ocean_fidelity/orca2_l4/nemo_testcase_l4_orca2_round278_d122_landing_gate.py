@@ -50,7 +50,13 @@ UNITS: dict[str, tuple[str, ...]] = {
     "u_eos_gdept_product": ("nemo_eos_gdept_rounded_product",),
     "u_stage_r3uv": ("rk3_stage_r3uv_nemo_literal",),
 }
+# Units that met (c)+(d) singly, less the top-V fold exchange, whose ten-step
+# SSH maximum grows ~20x on rung 0 and is held for a user decision.
+HELD = ("u_fold_exchange_top_v_row",)
+FINAL_SET = tuple(sorted({name for unit, names in UNITS.items()
+                          if unit not in HELD for name in names}))
 r276.ARMS.update(UNITS)
+r276.ARMS["d122_final_set"] = FINAL_SET
 
 CARDS = (("rung0", "independent"), ("omt1", "independent"),
          ("omt2", "independent"), ("omt3", "independent"),
