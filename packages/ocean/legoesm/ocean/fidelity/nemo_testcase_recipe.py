@@ -1651,6 +1651,9 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
         h_partial=jnp.asarray(h_partial, dtype=jnp.float64),
         bottom_level=jnp.asarray(bottom - 1, dtype=jnp.int32),
         is_active=jnp.asarray(tmask),
+        # Grid-ladder G1 round 8 / ORCA2 round 275: preserve NEMO's stored
+        # product when constructing the live T-point thickness ratio.
+        nemo_r3t_stored_product=True,
         nemo_e3t_0=jnp.asarray(raw_e3["e3t_0"], dtype=jnp.float64),
         nemo_bbl_e3u_0=jnp.asarray(raw_e3["e3u_0"], dtype=jnp.float64),
         nemo_bbl_e3v_0=jnp.asarray(raw_e3["e3v_0"], dtype=jnp.float64),
