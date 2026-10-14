@@ -300,6 +300,120 @@ Targeted Ruff reports `All checks passed!`; `git diff --check` emits no output.
 No filtered-restriction, objective, dataset-contract, optimizer, or acquisition
 code changed in this repair.
 
+## Round 5c GPU path
+
+The operator measured that every cuDNN convolution on the installed V100S,
+JAX 0.10.0, and cuDNN 9.21.1.3 path failed at execution.  The cause is not
+claimed.  Commit `850672081` therefore removes convolution primitives from all
+three programs that the next acquisition lowers: the dual hourly sampler, the
+closure model and training objectives, and the cost profiler.  No objective,
+dataset, optimizer, or evaluation definition changed.
+
+The closed-C-grid filter now uses one shared array implementation for both the
+offline tool and in-scan sampler.  Each Gaussian axis is a weighted sum of
+shifted slices after the registered even/odd parity extension.  On the pinned
+fine day 1095, the final coarse T/U/V state differs from Round 5's dense 97 by
+97 result by `1.1937117960769683e-12 m`,
+`2.6645352591003757e-15 m s-1`, and
+`1.887379141862766e-15 m s-1`, respectively.  The continuity residual is
+`4.459310829938671e-18 m s-1` in interior cells and
+`3.2500654186147504e-18 m s-1` on wall cells; normal wall transports are
+bitwise zero and relative volume error is `2.5e-16`.  The existing continuity,
+wall, volume, and transfer-function plants remain live.  CPU XLA reports the
+fine dual sampler's filtered restriction at `30,587,136` temporary bytes,
+`9,953,664` argument bytes, and `169,368` output bytes: a 40,710,168-byte
+compiled live bound, rather than the failed 28.71-GiB dense request.  The GPU
+smoke records the actual device peak before any long acquisition.
+
+`ShiftedConv2d` retains each former Equinox layer's OIHW weight and bias shapes,
+key split, uniform initialization, padding, and cross-correlation orientation.
+The real five-layer network remains 7,696 parameters and agrees with the former
+Equinox network in forward values and parameter gradients to rounding.  Its
+ten-state maximum initial closure/wind acceleration ratio remains exactly
+`0.007791671811074865`, below the registered 1% bound.  The symmetric
+objective's 9 by 9 Gaussian is likewise two shifted 1-D sums and agrees with
+the previous dense forward and gradient results to rounding.
+
+The installed JAX source was read rather than assuming inspection APIs:
+`jax._src.stages.Lowered.as_text()` supplies StableHLO text,
+`Compiled.memory_analysis()` supplies compiler estimates, and
+`Device.memory_stats()` supplies platform-dependent live and peak bytes.  A
+single fail-closed guard rejects `stablehlo.convolution`, `mhlo.convolution`,
+or textual `convolution(`.  Tests lower the real filtered restriction, both
+real objectives, the 7,696-parameter model step, and the real dual sampler.
+Each also lowers an actual planted `lax.conv_general_dilated`; bypassing the
+guard makes all four tests fail with `DID NOT RAISE`.
+
+The committed GPU smoke requires a physical GPU and
+`XLA_PYTHON_CLIENT_MEM_FRACTION`, refuses a dirty tree or non-GPU backend, and
+runs three fresh workers so peak statistics are per task.  It compares one
+pinned fine restart's box and filtered samples between CPU and GPU, then runs a
+reverse-mode 24-hour real-network window for each objective and requires every
+parameter-gradient leaf to be finite and nonzero.  It prints and stores wall
+seconds, compiler memory, and GPU `peak_bytes_in_use`.  GPU execution is
+**ACQUISITION_NEEDED**; no GPU was used in this CPU-only round.
+
+A CPU 1-day template forward profile exercised the final compiled path:
+objective `2.2992715948960706e-05`, execution `6.758193481713533 s`, and
+compiled temporary `64,135,904` bytes.  It was a profile only, with no update.
+All eight GPU profiles must follow the measured objective selection and now
+take the physical device explicitly.
+
+### Round 5c live reversions
+
+Every new test was run against a scratch mutation; logs are under
+`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgonl_rounds/round5/`.
+
+| Contract | Scratch reversion | Decisive output |
+|---|---|---|
+| Lowered filter, symmetric objective, network, and sampler contain no convolution | Make the shared guard inert | `round5c_reversion_guard.log`: `4 failed`; every real `lax.conv_general_dilated` plant reports `DID NOT RAISE` |
+| Fine filter preserves the dense result and analytic transfer | Scale every shifted kernel weight by 1.0001 | `round5c_reversion_numerical.log`: transfer `0.7347498729944048` versus `0.7346029443286334`; real T difference becomes `0.10030584733323167 m` |
+| Network preserves Equinox initialization and the initial-force bound | Scale the initializer bound by 1.01 | same log: weight words differ and ten-state ratio becomes `0.008210819625129451`; `4 failed` total |
+| GPU smoke comparison and memory-fraction refusal fail closed | Set comparison tolerance to 1 and bypass the fraction check | `round5c_reversion_smoke.log`: comparator plant `DID NOT RAISE`; missing-fraction assertion fails; `2 failed` |
+| Profiles identify shifted layers and require a matching physical GPU | Restore the old metadata and bypass GPU selection | `round5c_reversion_profile.log`: missing shifted-layer key and missing exception; `2 failed` |
+
+The focused final-state verification is `60 passed in 328.15s (0:05:28)`.
+Targeted Ruff reports `All checks passed!`; `compileall -q`, shell syntax,
+and `git diff --check` exit zero without output.  The exact full lane battery
+and two independent review verdicts are recorded below after they complete.
+
+### Round 5c exact acquisitions
+
+Run these from the clean committed clone, in order.  Physical GPU 0 is explicit
+in every GPU command; substitute one other idle physical index consistently if
+needed, and never kill a running job.
+
+1. Smoke the real sampler and both 24-hour reverse objectives first:
+
+```bash
+XLA_PYTHON_CLIENT_MEM_FRACTION="${XLA_PYTHON_CLIENT_MEM_FRACTION:?set GPU memory fraction}" PYTHONPATH=packages/core:packages/ocean:packages/atmosphere:packages/coupler:packages/ice:packages/land:packages/ml:packages/tools:src JAX_ENABLE_X64=1 /home/dbalwada/legoESM/.venv/bin/python scripts/validate/ocean_fidelity/testcases/nemo_testcase_l1_swg_online_gpu_smoke.py 0 --restart /data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgdg_rounds/legoesm_runs/dg_gpu_1095d/day0731.npz --output /data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgonl_rounds/round5/gpu_smoke_gpu0.json
+```
+
+2. Archive the ten failed cuDNN attempts, regenerate the ten dual-operator
+segments, and apply the registered objective-selection rule.  Analyzer exit 0
+selects `template`; exit 1 is a valid measured selection of `symmetric`; any
+other exit refuses the sequence.
+
+```bash
+TRUTH=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgdg_rounds/legoesm_runs/dg_gpu_1095d OUT=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgonl_rounds/round5/hourly_dual_10x4d; mkdir -p "$OUT"; for day in 731 771 811 851 891 931 971 1011 1051 1091; do next=$((day + 1)); target=$(printf '%s/start_day%04d' "$OUT" "$day"); if [[ -f $target/manifest.json ]] && grep -q '"status": "complete"' "$target/manifest.json"; then continue; fi; if [[ -e $target ]]; then archive=$target.cudnn_failed; suffix=0; while [[ -e $archive ]]; do suffix=$((suffix + 1)); archive=$target.cudnn_failed.$suffix; done; mv -- "$target" "$archive"; fi; XLA_PYTHON_CLIENT_MEM_FRACTION="${XLA_PYTHON_CLIENT_MEM_FRACTION:?set GPU memory fraction}" scripts/run/run_swg_double_gyre_gpu.sh 0 --deck maddison --days 4 --restart "$(printf '%s/day%04d.npz' "$TRUTH" "$day")" --hourly-targets --verify-next "$(printf '%s/day%04d.npz' "$TRUTH" "$next")" --output "$target" || exit; done
+set +e; PYTHONPATH=packages/core:packages/ocean:packages/atmosphere:packages/coupler:packages/ice:packages/land:packages/ml:packages/tools:src JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 /home/dbalwada/legoESM/.venv/bin/python scripts/validate/ocean_fidelity/testcases/nemo_testcase_l1_swg_online_balanced_start.py --dual-operator --hourly-root /data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgonl_rounds/round5/hourly_dual_10x4d --start-days 731 771 811 851 891 931 971 1011 1051 1091 --json /data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgonl_rounds/round5/dual_operator_admission.json; admission_rc=$?; set -e; [[ $admission_rc -eq 0 || $admission_rc -eq 1 ]]
+```
+
+3. Profile forward and reverse for 1, 2, 4, and 8 days with the selected
+objective:
+
+```bash
+ADMISSION=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgonl_rounds/round5/dual_operator_admission.json; OBJECTIVE=$(/home/dbalwada/legoESM/.venv/bin/python -c 'import json,sys; print(json.load(open(sys.argv[1]))["summary"]["selected_objective"])' "$ADMISSION"); for mode in forward reverse; do for days in 1 2 4 8; do env -u JAX_PLATFORMS CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_MEM_FRACTION="${XLA_PYTHON_CLIENT_MEM_FRACTION:?set GPU memory fraction}" JAX_ENABLE_X64=1 PYTHONPATH=packages/core:packages/ocean:packages/atmosphere:packages/coupler:packages/ice:packages/land:packages/ml:packages/tools:src /home/dbalwada/legoESM/.venv/bin/python scripts/bench/profile_swg_online.py --window-days "$days" --mode "$mode" --objective "$OBJECTIVE" --physical-gpu 0 --output "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgonl_rounds/round5/profile/gpu0_${OBJECTIVE}_${mode}_${days}d.json" || exit; done; done
+```
+
+4. Generate the resumable dual-operator 12-year record and held-out year:
+
+```bash
+XLA_PYTHON_CLIENT_MEM_FRACTION="${XLA_PYTHON_CLIENT_MEM_FRACTION:?set GPU memory fraction}" scripts/run/run_swg_online_hourly_chunks.sh 0 731 2921 30 /data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgdg_rounds/legoesm_runs/dg_gpu_7300d_truth /data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgonl_rounds/round5/hourly_dual_12y dual
+XLA_PYTHON_CLIENT_MEM_FRACTION="${XLA_PYTHON_CLIENT_MEM_FRACTION:?set GPU memory fraction}" scripts/run/run_swg_online_hourly_chunks.sh 1 2921 5111 30 /data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgdg_rounds/legoesm_runs/dg_gpu_7300d_truth /data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgonl_rounds/round5/hourly_dual_12y dual
+XLA_PYTHON_CLIENT_MEM_FRACTION="${XLA_PYTHON_CLIENT_MEM_FRACTION:?set GPU memory fraction}" scripts/run/run_swg_online_hourly_chunks.sh 0 5141 5506 30 /data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgdg_rounds/legoesm_runs/dg_gpu_7300d_truth /data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgonl_rounds/round5/hourly_dual_test_year dual_test
+```
+
 ## OPEN
 
 - Acquire and score the ten dual starts; this selects `template` or `symmetric`.
