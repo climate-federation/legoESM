@@ -151,7 +151,7 @@ def test_orca2_and_omt_cards_select_executed_transferred_statements():
         assert config.een_fold_image_v_row is True
         assert config.barotropic.barotropic_fold_top_v_face_ssh is True
         assert config.rk3_stage1_ssh_nemo_literal is True
-        assert config.barotropic_rhs_ascending_level_sum is True
+        assert config.barotropic_rhs_ascending_level_sum is False
         assert config.barotropic.barotropic_substep_dt_nemo_literal is True
         assert card.recipe.z_coord.nemo_r3t_stored_product is False
         for name in (
