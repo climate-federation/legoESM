@@ -7,7 +7,7 @@ stop.
 Preregistration: docs/ocean/fidelity/PREREG_nemo_testcases_gridladder_g3_round3.md
 (fe46ccb45, before any comparison).
 Code: 07a184943 (the statement, card selection, ladder before-arm, tests),
-07e18b56a (review fixes), 802527439 / ff657b977 (citation pins moved by
+07e18b56a (review fixes), 7c1b5bd4e, 802527439, ff657b977 (citation pins moved by
 the edit), this receipt's commit.
 Record: gridladder_rounds/round15/oracle_g3_r15 (operator's round-2
 acquisition, ACQUISITION_DONE). Evidence: gridladder_rounds/round16/.
