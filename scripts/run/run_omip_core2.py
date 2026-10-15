@@ -6907,6 +6907,143 @@ def _kprofiles(model, state, sf, dt, z_coord):
     return out
 
 
+MOM_BOX = (-1.0, 1.0, 160.0, 260.0)     # lat0, lat1, lon0, lon1 [deg]
+MOM_BOX_ZMAX = 400.0                     # [m]
+_MOM_BOX_SLOTS = ("u", "v", "T", "S", "eta", "tke")
+
+
+def momentum_box_column_mean(fe, lat, lon, area, zi, wet, box=MOM_BOX,
+                             zmax=MOM_BOX_ZMAX):
+    """Area-weighted box mean of the 0-``zmax`` m depth integral of a
+    cell-centre field ``fe`` (nlat, nlon, nz); ``zi`` = the nz+1 reference
+    interface depths [m, positive down].  Only columns that are ``wet`` and
+    inside ``box`` (lat0, lat1, lon0, lon1; lon taken mod 360) count; any
+    non-finite value in a counted column raises (no silent drop)."""
+    zi = np.asarray(zi, dtype=np.float64)
+    w = np.clip(np.minimum(zi[1:], zmax) - np.minimum(zi[:-1], zmax), 0.0, None)
+    la0, la1, lo0, lo1 = box
+    lo = np.asarray(lon) % 360.0
+    sel = (np.asarray(wet, dtype=bool) & (lat >= la0) & (lat <= la1)
+           & (lo >= lo0) & (lo <= lo1))
+    if not sel.any():
+        raise ValueError("momentum box selects no wet column")
+    col = np.sum(np.asarray(fe, dtype=np.float64)[sel][:, w > 0] * w[w > 0], axis=-1)
+    if not np.all(np.isfinite(col)):
+        raise ValueError(f"non-finite value in {int((~np.isfinite(col)).sum())} "
+                         "momentum-box columns")
+    a = np.asarray(area, dtype=np.float64)[sel]
+    return float(np.sum(col * a) / np.sum(a))
+
+
+def momentum_box_interface_flux(K, uc, zc, zi_inner, lat, lon, area, wet,
+                                box=MOM_BOX, zmax=MOM_BOX_ZMAX):
+    """Box mean of the vertical-viscosity momentum flux INTO the 0-``zmax``
+    layer through its bottom: + K du/dd at depth ``zmax`` (d positive down),
+    i.e. Av (u_below - u_above)/(d_below - d_above), linearly interpolated in
+    depth between the interior interfaces ``zi_inner`` (where ``K`` lives,
+    shape (nlat, nlon, nz-1)); ``uc`` (nlat, nlon, nz) on centres ``zc``.
+    Negative = the water below drags the layer westward-relative."""
+    zc = np.asarray(zc, dtype=np.float64)
+    zi_inner = np.asarray(zi_inner, dtype=np.float64)
+    flux = np.asarray(K) * np.diff(uc, axis=-1) / np.diff(zc)
+    j = int(np.searchsorted(zi_inner, zmax))
+    if not 0 < j < zi_inner.size:
+        raise ValueError(f"interfaces do not bracket {zmax} m")
+    t = (zmax - zi_inner[j - 1]) / (zi_inner[j] - zi_inner[j - 1])
+    f = (1.0 - t) * flux[..., j - 1] + t * flux[..., j]
+    la0, la1, lo0, lo1 = box
+    lo = np.asarray(lon) % 360.0
+    sel = (np.asarray(wet, dtype=bool) & (lat >= la0) & (lat <= la1)
+           & (lo >= lo0) & (lo <= lo1))
+    if not np.all(np.isfinite(f[sel])):
+        raise ValueError("non-finite interface flux in the momentum box")
+    a = np.asarray(area, dtype=np.float64)[sel]
+    return float(np.sum(f[sel] * a) / np.sum(a))
+
+
+def _inject_snapshot_state(state, snap):
+    """Overwrite the prognostic slots ``_MOM_BOX_SLOTS`` of a freshly built
+    state with a snapshot's arrays (shapes must match exactly)."""
+    for k in _MOM_BOX_SLOTS:
+        cur = getattr(state, k, None)
+        if cur is None or k not in snap.files:
+            raise SystemExit(f"--diag-momentum-box-snapshot: slot {k!r} missing "
+                             "from the state or the snapshot")
+        data = getattr(cur, "data", cur)
+        arr = np.asarray(snap[k])
+        if arr.shape != tuple(data.shape):
+            raise SystemExit(f"--diag-momentum-box-snapshot: {k} shape "
+                             f"{arr.shape} != state {tuple(data.shape)}")
+        new = jnp.asarray(arr, dtype=data.dtype)
+        state = state._replace(**{k: cur.replace(data=new) if hasattr(cur, "replace")
+                                  and hasattr(cur, "data") else new})
+    return state
+
+
+def _momentum_box_record(model, state, sf, dt, snap, step):
+    """0-400 m equatorial zonal momentum terms [m2/s2] for one state.
+
+    Explicit terms come from the closure-tested ``tendencies_with_diagnostics``
+    (start-of-step, explicit form).  Terms the production step applies
+    OUTSIDE that function are estimated from the snapshot and forcing: the
+    sea-surface-height gradient (barotropic solve), wind stress and the
+    vertical viscosity across 400 m (implicit vertical solve), and planetary
+    Coriolis when the vorticity scheme keeps it out of ``vortcor``."""
+    from legoesm import constants
+    lat = np.asarray(snap["lat_T"], dtype=np.float64)
+    lon = np.asarray(snap["lon_T"], dtype=np.float64)
+    area = np.asarray(snap["cell_area"], dtype=np.float64)
+    zc = np.abs(np.asarray(snap["z_center_ref"], dtype=np.float64))
+    zin = np.abs(np.asarray(snap["z_interface_ref"], dtype=np.float64))
+    zi = np.concatenate([[0.0], zin, [2.0 * zc[-1] - zin[-1]]])
+    wet = ((np.asarray(snap["land_mask"]) > 0.5)
+           & (np.asarray(snap["H_bathy"]) >= MOM_BOX_ZMAX))
+    la0, la1, lo0, lo1 = MOM_BOX
+    sel = wet & (lat >= la0) & (lat <= la1) & ((lon % 360) >= lo0) & ((lon % 360) <= lo1)
+    # the i-direction must be geographic east inside the box (no rotation done)
+    dlat = np.gradient(lat, axis=1)
+    dlon = np.gradient(np.unwrap(np.deg2rad(lon), axis=1), axis=1)
+    alpha = np.arctan2(np.deg2rad(dlat), dlon * np.cos(np.deg2rad(lat)))
+    if np.max(np.abs(alpha[sel])) > 1e-6:
+        raise SystemExit(f"momentum box: grid i-direction is {np.max(np.abs(alpha[sel])):.2e} "
+                         "rad from east; rotation not implemented")
+    to_c = lambda fu: 0.5 * (fu[:, :-1] + fu[:, 1:])            # u-faces -> centres
+    box = lambda fe: momentum_box_column_mean(fe, lat, lon, area, zi, wet)
+    _t, diag = model.tendencies_with_diagnostics(state, surface_forcing=sf, dt=dt)
+    rec = {"step": int(step), "time_days": float(snap["time_days"])}
+    for name in diag._fields:
+        if name.endswith("_u"):
+            rec[name[:-2]] = box(to_c(np.asarray(getattr(diag, name).data, dtype=np.float64)))
+    aimp = bool(getattr(model.config, "adaptive_implicit_vertadv", False))
+    parts = [k for k in rec if k not in ("step", "time_days", "total")
+             and not (aimp and k == "vertadv")]
+    rec["closure_residual"] = rec["total"] - sum(rec[k] for k in parts)
+    rec["vertadv_in_total"] = not aimp
+    g, rho0 = float(constants.g), float(constants.rho_ocean)
+    eta = np.asarray(snap["eta"], dtype=np.float64)
+    dx_u = np.asarray(snap["dx_u"], dtype=np.float64)
+    deta = np.concatenate([eta[:, :1] - eta[:, -1:], np.diff(eta, axis=1),
+                           eta[:, :1] - eta[:, -1:]], axis=1)         # cyclic faces
+    gx = -g * deta / dx_u
+    rec["ssh_grad"] = box(np.repeat(to_c(gx)[..., None], zc.size, axis=-1))
+    tau_x = getattr(sf, "tau_x", None)
+    rec["wind_stress_offline"] = (float(np.sum(-np.asarray(tau_x)[sel] * area[sel])
+                                        / np.sum(area[sel])) / rho0
+                                  if tau_x is not None else float("nan"))
+    uc = to_c(np.asarray(snap["u"], dtype=np.float64))
+    rec["vvisc_400"] = momentum_box_interface_flux(
+        np.asarray(snap["K_M_diag"], dtype=np.float64), uc, zc, zin,
+        lat, lon, area, wet)
+    vc = 0.5 * (np.asarray(snap["v"], dtype=np.float64)[:-1] + np.asarray(snap["v"], dtype=np.float64)[1:])
+    f = 2.0 * float(constants.Omega) * np.sin(np.deg2rad(lat))
+    rec["coriolis_offline"] = box(f[..., None] * vc)
+    rec["vorticity_scheme"] = str(getattr(model.config, "vorticity_scheme", "?"))
+    rec["coriolis_in_vortcor"] = rec["vorticity_scheme"].endswith("_total")
+    rec["U_box"] = box(uc)
+    rec["surface_stress_implicit"] = bool(getattr(model.config, "surface_stress_implicit", False))
+    return rec
+
+
 def _dump_momentum_terms(model, state, sf, dt, lat2d, lon2d, tag=""):
     """DEBUG: per-term momentum-tendency breakdown (which term drives a
     cold-start blowup). Uses the lat-lon C-grid model's public
@@ -8065,6 +8202,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "per-term momentum-tendency breakdown (PGF/Coriolis/advection/"
                         "viscosity/...) global-max + location, to pin the term driving "
                         "a cold-start blowup. -1=off.")
+    p.add_argument("--diag-momentum-box-snapshot", type=str, default=None,
+                   help="DIAGNOSTIC (tripole/latlon_bathy, fresh start only): load "
+                        "u,v,T,S,eta,tke from this snapshot npz into the built "
+                        "state, start the loop at the snapshot's step (so the "
+                        "surface forcing is the one at that time), write the "
+                        "0-400 m equatorial zonal momentum terms of ONE step's "
+                        "tendency to --diag-momentum-box-json, and exit without "
+                        "integrating.")
+    p.add_argument("--diag-momentum-box-json", type=str, default=None,
+                   help="Output JSON for --diag-momentum-box-snapshot.")
     p.add_argument("--prescribed-flow", choices=("zero", "frozen"), default=None,
                    help="Vertical-physics isolation (IN-MODEL lever: threads "
                         "LatLonCGridOceanConfig.prescribed_flow, pinned inside "
@@ -10684,6 +10831,24 @@ def main() -> int:
                   "from the resume point only; a chained run's per-leg means "
                   "must be recombined offline (weighted by leg length).",
                   flush=True)
+    _mbox_snap = None
+    if args.diag_momentum_box_snapshot:
+        if args.restart_from or args.restart_save:
+            raise SystemExit("--diag-momentum-box-snapshot replaces the state; "
+                             "do not combine it with --restart-from/--restart-save")
+        if args.grid not in ("tripole", "latlon_bathy"):
+            raise SystemExit("--diag-momentum-box-snapshot needs the C-grid "
+                             "tendencies_with_diagnostics (tripole/latlon_bathy)")
+        if not args.diag_momentum_box_json:
+            raise SystemExit("--diag-momentum-box-snapshot needs --diag-momentum-box-json")
+        _mbox_snap = np.load(args.diag_momentum_box_snapshot)
+        state = _inject_snapshot_state(state, _mbox_snap)
+        start_step = int(_mbox_snap["step"])
+        if start_step >= n_steps:
+            raise SystemExit(f"snapshot step {start_step} >= run target {n_steps}; "
+                             "raise --years")
+        print(f"[mom-box] state from {args.diag_momentum_box_snapshot} "
+              f"(step {start_step}, day {float(_mbox_snap['time_days']):.2f})", flush=True)
     start_day = start_step * dt / _SEC_PER_DAY
     if visc_schedule and start_step:
         # Skip every segment whose start day the checkpoint is already past,
@@ -11669,6 +11834,13 @@ def main() -> int:
         if args.diag_momentum_step >= 0 and step <= args.diag_momentum_step:
             _dump_momentum_terms(model, state, sf, dt, lat2d, lon2d,
                                  tag=f" step{step}")
+        if _mbox_snap is not None:
+            import json as _json
+            _rec = _momentum_box_record(model, state, sf, dt, _mbox_snap, step)
+            _rec["snapshot"] = str(Path(args.diag_momentum_box_snapshot).resolve())
+            Path(args.diag_momentum_box_json).write_text(_json.dumps(_rec, indent=1))
+            print(f"[mom-box] {_json.dumps(_rec)}", flush=True)
+            return 0
         # Surface freshwater (atmospheric P - E + optional Dai-Trenberth runoff)
         # is delivered through the IN-CORE channel
         # ``model.step(..., freshwater=FreshwaterForcing)``: the dynamics core
