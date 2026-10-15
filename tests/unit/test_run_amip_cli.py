@@ -5396,6 +5396,8 @@ def test_production_deck_selects_log_form_vapour_filter():
     keys = load_yaml_config(
         str(_repo_root() / "config" / "amip" / "amip_production.yaml"), parser)
     parser.set_defaults(**keys)
+    # No _postprocess_args: it needs forcing paths the deck lacks and does not
+    # touch the vert4 keys (same as the div-damp4 deck test).
     cfg = build_config_from_args(parser.parse_args([]))
     assert cfg.dycore.mpas_vert4_log_form_tracers == ("q_v",)
     assert cfg.dycore.mpas_vert4_flux_form_tracers == ()

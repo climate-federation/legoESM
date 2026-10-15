@@ -157,20 +157,25 @@ def test_dycore_routes_log_tracers_and_refuses_overlap():
             vert4_log_form_tracers=("q_v",)), None, 0.0)
 
 
-@pytest.mark.parametrize("dry", [1.0e-12, 5.0e-8, 1.0e-6])
-def test_worst_contrast_outflow_is_bounded(dry):
-    """A 2-level zigzag between 30 g/kg and a (near-)dry value is the largest
-    contrast in g = ln(q + q_eps).  Each layer loses at most nu*dt*8*G of its OWN
-    water per step (G = range of g; mobility <= the layer's water, w <= dp), so a
-    near-dry layer is not drained and the step stays non-negative."""
+@pytest.mark.parametrize("pattern", [
+    (0.03, 1.0e-12), (0.03, 5.0e-8), (0.03, 1.0e-6),
+    (0.03, 1.0e-12, 5.0e-8, 1.0e-12)])         # last: a near-dry layer that LOSES
+def test_worst_contrast_outflow_is_bounded(pattern):
+    """Zigzags between 30 g/kg and near-dry values are the largest contrasts in
+    g = ln(q + q_eps).  Each layer loses at most nu*dt*8*G of its OWN water per
+    step (G = range of g; mobility <= the layer's water, w <= dp), so a near-dry
+    layer is not drained and the step stays non-negative."""
     dp = _l32_dp()
-    q = jnp.broadcast_to(jnp.where(jnp.arange(32) % 2 == 0, 0.03, dry), dp.shape)
+    prof = jnp.asarray(np.resize(np.asarray(pattern), 32))
+    q = jnp.broadcast_to(prof, dp.shape)
     tend = vertical_del4_tracer_tendency_log(q, NU, dp)
-    g_range = float(np.log((0.03 + VERT4_LOG_Q_EPS) / (dry + VERT4_LOG_Q_EPS)))
-    loss = np.asarray(jnp.where(q > 0, -jnp.minimum(tend, 0.0) * DT / jnp.where(q > 0, q, 1.0), 0.0))
+    g_range = float(np.log((max(pattern) + VERT4_LOG_Q_EPS) / (min(pattern) + VERT4_LOG_Q_EPS)))
+    loss = np.asarray(-jnp.minimum(tend, 0.0) * DT / q)
     assert loss.max() > 0.0                                   # the zigzag is being damped
     assert loss.max() <= NU * DT * 8.0 * g_range
     assert float(jnp.min(q + DT * tend)) >= 0.0
+    if len(pattern) == 4:                                     # the 5e-8 layers themselves lose
+        assert float(np.min(loss[..., 2::4])) > 0.0
 
 
 def test_form_checks_run_on_a_state_without_tracers():
