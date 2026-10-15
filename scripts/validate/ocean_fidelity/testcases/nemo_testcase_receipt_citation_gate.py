@@ -1710,6 +1710,17 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- GRIDLADDER round 23 (G4 round 6 receipt) ---
+    'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/stp2d.f90:198': 'Ue_rhs(ji,jj) =  Ue_rhs(ji,jj) + r1_rho0 * utauU(ji,jj) * (r1_hu_0(ji,jj) /(1._wp+r3u(ji,jj,Kbb)))',
+    'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/sbcmod.f90:548': "CALL lbc_lnk( 'sbcmod', utau, 'T', -1.0_wp, vtau  , 'T', -1.0_wp, emp, 'T', 1.0_wp, &",
+    'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/sbcmod.f90:559': 'vtauV  (ji,jj) = 0.5_wp * ( vtau(ji,jj) + vtau(ji,jj+1) ) * &',
+    'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/dynzdf.f90:338': 'puu(ji,jj,1,Kaa) = puu(ji,jj,1,Kaa) + rDt * utauU(ji,jj)   &',
+    'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/trasbc.f90:284': 'z1_rho0_e3t = r1_rho0 / (e3t_3d(ji,jj,1) *(1._wp+r3t(ji,jj,Kmm)*tmask(ji,jj,1)))',
+    'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/sbcrnf.f90:279': 'ELSE                       !==   runoff put only at the surface   ==!',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stp2d.f90:229': 'Ue_rhs(ji,jj) =  Ue_rhs(ji,jj) + r1_rho0 * utauU(ji,jj) * (r1_hu_0(ji,jj) /(1._wp+r3u(ji,jj,Kbb)))',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcmod.f90:557': "CALL lbc_lnk( 'sbcmod', utau, 'T', -1.0_wp, vtau  , 'T', -1.0_wp, emp, 'T', 1.0_wp, &",
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcmod.f90:568': 'vtauV  (ji,jj) = 0.5_wp * ( vtau(ji,jj) + vtau(ji,jj+1) ) * &',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynzdf.f90:338': 'puu(ji,jj,1,Kaa) = puu(ji,jj,1,Kaa) + rDt * utauU(ji,jj)   &',
     # --- GRIDLADDER round 22 (G1b receipt, D122 pointer into ORCA2's build) ---
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynspg_ts.f90:666': 'IF( ln_dynadv_vec .OR. lk_linssh ) THEN      !* Vector form',
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:467': 'IF( ln_dynadv_vec .OR. lk_linssh ) THEN   !* applied on velocity',
