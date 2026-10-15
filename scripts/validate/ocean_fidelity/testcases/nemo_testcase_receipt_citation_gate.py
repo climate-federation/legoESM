@@ -1649,6 +1649,31 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 round 282: G1b statements measured on ORCA2 --------
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynvor.f90:648-651': [
+        ('CASE ( np_CRV )                           !* Coriolis + relative vorticity', 3),
+        ('-( e1u(ji  ,jj+1) * pu(ji  ,jj+1,jk) - e1u(ji,jj) * pu(ji,jj,jk) )  ) * r1_e1e2f(ji,jj)', 1),
+        4],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/domhgr.f90:155-156': [
+        'e1e2t (:,:) = e1t(:,:) * e2t(:,:)   ;   r1_e1e2t(:,:) = 1._wp / e1e2t(:,:)',
+        'e1e2f (:,:) = e1f(:,:) * e2f(:,:)   ;   r1_e1e2f(:,:) = 1._wp / e1e2f(:,:)',
+        2],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynspg_ts.f90:509-519': [
+        "!                          ! ocean u- and v-depth at mid-step   (separate DO-loops remove the need of a lbc_lnk)",
+        ('&                                 + e1e2t(ji,jj+1) * zsshp2_e(ji,jj+1)  ) * ssvmask(ji,jj)', 1),
+        11],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynspg_ts.f90:530-535': [
+        "!                             ! resulting flux at mid-step (not over the full domain)",
+        ('zhV(ji,jj) = e1v(ji,jj) * va_e(ji,jj) * zhvp2_e(ji,jj)', 1),
+        6],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynspg_ts.f90:666-678': [
+        ('IF( ln_dynadv_vec .OR. lk_linssh ) THEN      !* Vector form', 1),
+        ('&   ) * ssvmask(ji,jj)', 1),
+        13],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynspg_ts.f90:721-730': [
+        ('IF( .NOT.lk_linssh ) THEN   !* Update ocean depth (variable volume case only)', 1),
+        ("&                   , hur_e, 'U',  1._wp, hvr_e, 'V',  1._wp  , ssha_e, 'T', 1._wp, ldfull=.TRUE. )", 1),
+        10],
     # --- ORCA2 round 281: admitted stage-1 source split ---
     'ORCA2_OMIP_L4_R280STAGE1/BLD/ppsrc/nemo/stprk3_stg.f90:477-480': [
         'IF( ln_dynadv_vec .OR. lk_linssh ) THEN',
