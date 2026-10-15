@@ -4142,6 +4142,12 @@ class LatLonCGridOceanModel:
                 f"{sorted(VALID_MOMENTUM_ADVECTION)}, "
                 f"got {config.momentum_advection!r}",
             )
+        if (config.rk3_vector_rhs_nemo_order
+                and config.momentum_advection == "flux_form"):
+            raise ValueError(
+                "rk3_vector_rhs_nemo_order=True requires vector-form "
+                "momentum advection; flux_form has no separate dyn_keg "
+                "Krhs accumulation to order")
         if config.weno_smoothness not in VALID_WENO_SMOOTHNESS:
             raise ValueError(
                 f"weno_smoothness must be one of "

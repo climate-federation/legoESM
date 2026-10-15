@@ -162,6 +162,19 @@ def test_g1b_selector_plants_are_refused(roots):
             recipe.validate_orca2g1_flat_card(planted, roots["g1b"])
 
 
+def test_vector_rhs_nemo_order_refuses_flux_form(roots):
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+
+    card = recipe.build_nemo_testcase_card(
+        "ORCA2G1b-vec", deck_root=roots["g1b"])
+    cfg = card.recipe.model_config._replace(momentum_advection="flux_form")
+    with pytest.raises(ValueError, match=(
+            "rk3_vector_rhs_nemo_order=True requires vector-form")):
+        LatLonCGridOceanModel(card.recipe.grid, card.recipe.z_coord, cfg)
+
+
 def test_g1b_fold_unit_predicate_admits_vector_form_only_when_selected(roots):
     from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
         nemo_literal_external_mode_active)
