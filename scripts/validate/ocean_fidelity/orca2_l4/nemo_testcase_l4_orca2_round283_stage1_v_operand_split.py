@@ -131,9 +131,17 @@ def measure(deck_root: Path, record_root: Path, baseline_root: Path,
     nemo_rhs = np.asarray(oracle["rhs_v"], np.float64)[..., :-1]
     nemo_raw = np.asarray(oracle["pre_v"], np.float64)[..., :-1]
     active = nemo_mask != 0.0
+    oracle_shapes = {
+        "live_raw": live_raw.shape,
+        "nemo_mask": nemo_mask.shape,
+        "nemo_entry": nemo_entry.shape,
+        "nemo_rhs": nemo_rhs.shape,
+        "nemo_raw": nemo_raw.shape,
+        "active": active.shape,
+    }
     require(all(value.shape == live_raw.shape for value in (
         nemo_mask, nemo_entry, nemo_rhs, nemo_raw, active)),
-        "oracle stage-1 operand shape moved")
+        f"oracle stage-1 operand shape moved: {oracle_shapes}")
 
     candidate_dt = np.float64(card.dt_s) / np.float64(3.0)
     nemo_dt = np.float64(10800.0) / np.float64(3.0)
