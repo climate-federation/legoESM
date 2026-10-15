@@ -54,6 +54,12 @@ _UNITS = {"rsut": "W m-2", "rsdt": "W m-2", "rlut": "W m-2", "clt": "%",
           "tas": "K", "prw": "kg m-2", "evspsbl": "kg m-2 s-1",
           "pr": "kg m-2 s-1"}
 Z_LIM = 3.0
+# z is undefined where the models agree to within nothing: polar-night rsut
+# (every model 0), desert pr/evspsbl.  Cells whose inter-model spread is below
+# this fraction of the variable's median spread (median over the valid cells)
+# are greyed out and left out of the |z| > 2 fraction.  User-approved
+# 2026-10-15.
+SPREAD_FLOOR_FRAC = 0.1
 _MONTH = ["January", "February", "March", "April", "May", "June", "July",
           "August", "September", "October", "November", "December"]
 
@@ -114,7 +120,11 @@ def model_files(root, inst, model, member, var):
         raise SystemExit(f"FATAL: {model} {var} has grids {grids}; "
                          "choosing one is a decision, not a default")
     vers = sorted(os.listdir(f"{base}/{grids[0]}"))
-    files = sorted(glob.glob(f"{base}/{grids[0]}/{vers[-1]}/*.nc"))
+    # The standard CMIP6 filename only: GISS-E2-1-G also ships every file a
+    # second time as "<var>_Amon_amip_<model>_...", so a bare *.nc glob reads
+    # each month twice.
+    files = sorted(glob.glob(f"{base}/{grids[0]}/{vers[-1]}/"
+                             f"{var}_Amon_{model}_amip_{member}_{grids[0]}_*.nc"))
     return grids[0], vers[-1], files
 
 
@@ -199,7 +209,8 @@ def ensemble_stats(lego, ref, models):
     ``lego`` and ``ref`` are (lat, lon); ``models`` is (n, lat, lon).  The
     returned ``valid`` mask is where ALL inputs are finite; every field is NaN
     outside it.  ``spread`` is the sample (ddof=1) standard deviation across
-    models of their biases.
+    models of their biases.  ``z`` is additionally NaN where ``z_ok`` is False:
+    spread below ``SPREAD_FLOOR_FRAC`` x its median over the valid cells.
     """
     models = np.asarray(models, dtype=np.float64)
     valid = (np.isfinite(lego) & np.isfinite(ref)
@@ -208,9 +219,10 @@ def ensemble_stats(lego, ref, models):
     b_lego = (lego - ref) * nan
     b_mod = (models - ref[None]) * nan[None]
     spread = np.std(b_mod, axis=0, ddof=1)
+    z_ok = valid & (spread >= SPREAD_FLOOR_FRAC * np.median(spread[valid]))
     return {"valid": valid, "b_lego": b_lego, "b_mod": b_mod,
             "b_mmm": b_mod.mean(axis=0), "spread": spread,
-            "z": b_lego / spread}
+            "z": np.where(z_ok, b_lego, np.nan) / spread, "z_ok": z_ok}
 
 
 # ------------------------------------------------------------------ main ----
@@ -326,11 +338,16 @@ def figure_a(run, window, rows, out_dir):
                           units)
         fig.colorbar(m, ax=axes[i, :2], shrink=0.85, pad=0.01)
         z = st["z"]
-        out2 = float(np.where(v, np.abs(np.nan_to_num(z)) > 2, False).sum())
-        fz = area_mean((np.abs(np.nan_to_num(z)) > 2).astype(float), lat, v)
+        zk = st["z_ok"]
+        fz = area_mean((np.abs(np.nan_to_num(z)) > 2).astype(float), lat, zk)
+        fmask = 1.0 - area_mean(zk.astype(float), lat, v)
+        from matplotlib.colors import ListedColormap
+        bm._panel(axes[i, 2], lon, lat, np.where(v & ~zk, 1.0, np.nan), "",
+                  ListedColormap(["0.65"]), 0.0, 1.0, "-")
         m3 = bm._panel(axes[i, 2], lon, lat, z,
                        f"{name} legoESM bias / CMIP6 spread (N={n})\n"
-                       f"|z|>2 on {fz:.0%} of area ({out2:.0f} cells)",
+                       f"|z|>2 on {fz:.0%} of unmasked area; grey = spread "
+                       f"< {SPREAD_FLOOR_FRAC:g} x median ({fmask:.1%})",
                        "RdBu_r", -Z_LIM, Z_LIM, "-")
         fig.colorbar(m3, ax=axes[i, 2], shrink=0.85, pad=0.01)
     fig.suptitle(f"PROVISIONAL  {run} vs CMIP6 AMIP r1 members: "
@@ -404,6 +421,12 @@ def main(argv=None):
     write_csv(rows, meta, excluded, out / f"cmip6_rms_{args.run}.csv")
     figure_a(args.run, window, rows, out)
     ranks = figure_b(args.run, window, rows, out)
+    for var, _l, lat, _lo, _n, st, *_ in rows:
+        v, zk = st["valid"], st["z_ok"]
+        print(f"    z {var:<8} masked {1 - area_mean(zk.astype(float), lat, v):.1%}"
+              f" of valid area; |z|>2 on "
+              f"{area_mean((np.abs(np.nan_to_num(st['z'])) > 2).astype(float), lat, zk):.1%}"
+              " of unmasked area")
     for var, (k, n) in ranks.items():
         print(f"    rank {var:<8} {k} of {n}")
     return 0

@@ -22,22 +22,23 @@ def _load():
 def test_window_selection_and_coverage(tmp_path):
     xr = pytest.importorskip("xarray")
     ce = _load()
-    # 1-deg synthetic CMIP6 file, Dec 2000 - Feb 2001; January carries 7.
+    # 1-deg synthetic CMIP6 file: Jan 2000 = 3, Jan 2001 = 7, Feb 2001 = 11.
+    # Two Januaries, so a month-only (year-blind) selection gives the wrong 5.
     lat = np.arange(-89.5, 90.0, 1.0)
     lon = np.arange(0.5, 360.0, 1.0)
     vals = np.stack([np.full((lat.size, lon.size), x) for x in (3.0, 7.0, 11.0)])
     cftime = pytest.importorskip("cftime")
     time = [cftime.DatetimeNoLeap(y, m, 16) for y, m in
-            ((2000, 12), (2001, 1), (2001, 2))]
+            ((2000, 1), (2001, 1), (2001, 2))]
     da = xr.DataArray(vals, dims=("time", "lat", "lon"),
                       coords={"time": time, "lat": lat, "lon": lon},
                       attrs={"units": "%"})
-    f = tmp_path / "clt_Amon_X_amip_r1i1p1f1_gn_200012-200102.nc"
+    f = tmp_path / "clt_Amon_X_amip_r1i1p1f1_gn_200001-200102.nc"
     da.to_dataset(name="clt").to_netcdf(f)
     got, _, _ = ce.window_mean([str(f)], "clt", [(2001, 1)])
     np.testing.assert_allclose(got, 7.0)
-    got, _, _ = ce.window_mean([str(f)], "clt", [(2000, 12), (2001, 1)])
-    np.testing.assert_allclose(got, 5.0)
+    got, _, _ = ce.window_mean([str(f)], "clt", [(2000, 1), (2001, 2)])
+    np.testing.assert_allclose(got, 7.0)
     with pytest.raises(LookupError):              # month absent -> left out
         ce.window_mean([str(f)], "clt", [(2001, 3)])
     with pytest.raises(SystemExit):               # outside AMIP -> fatal
@@ -61,13 +62,22 @@ def test_regrid_bias_and_zscore_known_answer():
     ref = box
     models = np.stack([box + 1.0, box + 3.0, box + 5.0])  # biases 1, 3, 5
     lego = box + 8.0                                     # bias 8
-    lego[0, 0] = np.nan                                  # one masked cell
+    lego[0, 0] = np.nan                                  # masked in legoESM
+    models[1, 3, 4] = np.nan                             # masked in one model
     st = ce.ensemble_stats(lego, ref, models)
-    assert not st["valid"][0, 0] and st["valid"].sum() == box.size - 1
+    assert not st["valid"][0, 0] and not st["valid"][3, 4]
+    assert st["valid"].sum() == box.size - 2
     v = st["valid"]
     np.testing.assert_allclose(st["b_mmm"][v], 3.0)
     np.testing.assert_allclose(st["spread"][v], 2.0)     # ddof=1 sd of 1,3,5
     np.testing.assert_allclose(st["z"][v], 4.0)
+    assert st["z_ok"][v].all()
+    # a cell where the models agree (spread 0.1 < 0.1 x median 2) is masked
+    agree = models.copy()
+    agree[:, 5, 6] = ref[5, 6] + np.array([3.0, 3.1, 3.2])
+    sa = ce.ensemble_stats(lego, ref, agree)
+    assert sa["valid"][5, 6] and not sa["z_ok"][5, 6]
+    assert np.isnan(sa["z"][5, 6]) and np.isfinite(sa["z"][5, 7])
     assert np.isnan(st["z"][0, 0])
     np.testing.assert_allclose(ce.area_mean(st["b_lego"], mlat, v), 8.0)
     np.testing.assert_allclose(ce.area_rms(st["b_mod"][2], mlat, v), 5.0)
