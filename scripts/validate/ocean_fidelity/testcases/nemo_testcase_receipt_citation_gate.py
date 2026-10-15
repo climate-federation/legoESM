@@ -6729,7 +6729,7 @@ CITATION_MAP = {
     'ocean_model_latlon_cgrid.py:12295-12299': [
         ('_zc = self.z_coord if z_coord is None else z_coord', 11),
         '# Argument validation at ENTRY, not inside the drag branch below:', 5],
-    'ocean_model_latlon_cgrid.py:12874-12877': [
+    'ocean_model_latlon_cgrid.py:12874-12878': [
         'u_new, v_new = state.u.data, state.v.data',
         'if do_momentum and getattr(_cfg_b, "surface_stress_implicit",', 4],
     'ocean_model_latlon_cgrid.py:13121-13124': [
@@ -7118,7 +7118,7 @@ CITATION_MAP = {
     'ocean_model_latlon_cgrid.py:6008-6107': [
         '_ws_face_thickness_kbb = None',
         ('_ws_v_live_mask, _grid, z_coord=_zc)[:2])', 1), 100],
-    'ocean_model_latlon_cgrid.py:6484-6525': [
+    'ocean_model_latlon_cgrid.py:6484-6547': [
         ('if _sfx is not None:', 1),
         ('F_slow_v + _wind_increment_v) * _slow_surface_v_mask', 1), 42],
     # --- round 186: admitted pre-day-180 process stream and qsr promotion ---
