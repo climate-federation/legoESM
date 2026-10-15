@@ -92,3 +92,38 @@ def test_lowest_f_member(tmp_path):
     for m in ("r1i1p1f10", "r1i1p1f2", "r2i1p1f1"):
         (tmp_path / "I" / "M" / "amip" / m).mkdir(parents=True)
     assert ce.list_models(str(tmp_path)) == {"M": ("I", "r1i1p1f2")}
+
+
+def test_model_field_albedo_is_ratio_of_binned_fluxes(tmp_path):
+    """File-backed: month selection, binning with cos weights, ratio order."""
+    xr = pytest.importorskip("xarray")
+    cftime = pytest.importorskip("cftime")
+    ce = _load()
+    lat = np.arange(-89.5, 90.0, 1.0)
+    lon = np.arange(0.5, 360.0, 1.0)
+    mlat = np.arange(-87.5, 90.0, 5.0)
+    mlon = np.arange(2.5, 360.0, 5.0)
+    # rsdt and the albedo both vary inside each 5-deg box and are correlated,
+    # so the mean of ratios differs from the ratio of binned means.
+    k = np.arange(lat.size) % 5
+    rsdt = (100.0 + 60.0 * k)[:, None] + 10.0 * np.cos(np.deg2rad(lon))[None, :]
+    alb = np.broadcast_to((0.1 + 0.1 * k)[:, None], rsdt.shape)
+    time = [cftime.DatetimeNoLeap(2000, 1, 16), cftime.DatetimeNoLeap(2001, 1, 16)]
+    files = {}
+    for v, f in (("rsut", alb * rsdt), ("rsdt", rsdt)):
+        da = xr.DataArray(np.stack([f * 0.5, f]), dims=("time", "lat", "lon"),
+                          coords={"time": time, "lat": lat, "lon": lon},
+                          attrs={"units": "W m-2"})
+        p = tmp_path / f"{v}_Amon_M_amip_r1i1p1f1_gn_200001-200112.nc"
+        da.to_dataset(name=v).to_netcdf(p)
+        files[v] = [str(p)]
+    got = ce.model_field("albedo", files, [(2001, 1)], mlat, mlon)
+    # independent answer: cos-lat weighted 5x5 block means, then the ratio
+    w = np.cos(np.deg2rad(lat))[:, None] * np.ones_like(rsdt)
+
+    def block(a):
+        num = (a * w).reshape(36, 5, 72, 5).sum(axis=(1, 3))
+        return num / w.reshape(36, 5, 72, 5).sum(axis=(1, 3))
+    want = block(alb * rsdt) / block(rsdt)
+    np.testing.assert_allclose(got, want, rtol=1e-10)
+    assert not np.allclose(got, block(alb), rtol=1e-6)   # ratio order matters

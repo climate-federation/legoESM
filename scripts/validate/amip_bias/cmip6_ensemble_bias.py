@@ -15,7 +15,8 @@ this script adds is the ensemble:
               directory.  Recorded in the CSV.
 * spread   -- z = (legoESM bias) / (inter-model standard deviation of the
               CMIP6 biases), per cell, all against the same reference on the
-              same grid.  |z| > 2 is outside the CMIP6 range.
+              same grid.  |z| > 2: legoESM's bias exceeds twice the inter-model
+              spread (not a min-max range test).
 
 Every statistic is taken over ONE per-variable cell set: the cells where
 legoESM, the reference and every included model all carry a value.  Only the
@@ -65,7 +66,7 @@ _MONTH = ["January", "February", "March", "April", "May", "June", "July",
 
 
 # ---------------------------------------------------------------- window ----
-def run_window(run):
+def run_window(run, var="rsut"):
     """(year, month) pairs the legoESM run published, from its CMOR time axis.
 
     ``bias_maps`` (via ``rb._load_model``) reads only the LAST CMOR file of a
@@ -75,13 +76,13 @@ def run_window(run):
     """
     import cftime
     n = len(glob.glob(f"{rb.ROOT}/{run}/cmor/Amon/"
-                      "rsut_Amon_legoESM-1-0_amip_r1i1p1f1_gn*.nc"))
+                      f"{var}_Amon_legoESM-1-0_amip_r1i1p1f1_gn*.nc"))
     if n > 1:
-        raise SystemExit(f"FATAL: {run} has {n} CMOR rsut files; bias_maps "
+        raise SystemExit(f"FATAL: {run} has {n} CMOR {var} files; bias_maps "
                          "reads only the last one -- extend it before use")
-    d = rb._load_model(run, "rsut")
+    d = rb._load_model(run, var)
     if d is None:
-        raise SystemExit(f"{run}: no CMOR rsut -- cannot read the run window")
+        raise SystemExit(f"{run}: no CMOR {var} -- cannot read the run window")
     t = d["time"]
     dates = cftime.num2date(np.asarray(t), t.attrs["units"],
                             t.attrs.get("calendar", "standard"))
@@ -179,8 +180,12 @@ def window_mean(files, var, window):
             seen += [ym[i] for i in pick]
             slices.append(np.asarray(v.isel(time=pick).transpose(
                 "time", "lat", "lon"), dtype=np.float64))
-            lat = np.asarray(ds["lat"], dtype=np.float64)
-            lon = np.asarray(ds["lon"], dtype=np.float64) % 360.0
+            la = np.asarray(ds["lat"], dtype=np.float64)
+            lo = np.asarray(ds["lon"], dtype=np.float64) % 360.0
+            if lat is not None and not (np.array_equal(la, lat)
+                                        and np.array_equal(lo, lon)):
+                raise LookupError("lat/lon differ between files")
+            lat, lon = la, lo
     if sorted(seen) != sorted(window):
         raise LookupError(f"window months missing or duplicated: got "
                           f"{sorted(seen)}, need {sorted(window)}")
@@ -246,6 +251,10 @@ def collect(run, variables, root=CMIP6_AMIP):
     models = list_models(root)
     rows, excluded, meta = [], [], {}
     for var in variables:
+        for v in (["rsut", "rsdt"] if var == "albedo" else [var]):
+            if run_window(run, v) != window:
+                raise SystemExit(f"FATAL: legoESM {v} covers "
+                                 f"{run_window(run, v)}, not {window}")
         got = bm._model_clim(run, var)
         if got is None:
             raise SystemExit(f"{run}: no model output for {var}")
