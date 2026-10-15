@@ -35,6 +35,9 @@ def test_round282_arms_change_exactly_the_two_registered_fields():
     )
 
     base = _card()
+    assert base.recipe.model_config.een_nemo_relative_vorticity is True
+    assert (base.recipe.model_config.barotropic
+            .barotropic_literal_fold_unit_vector_form) is False
     for arm, expected in gate.ARMS.items():
         selected = gate.arm_card(base, arm)
         cfg = selected.recipe.model_config

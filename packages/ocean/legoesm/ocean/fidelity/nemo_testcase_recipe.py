@@ -1739,6 +1739,13 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
     # runs np_CRV) and the completed-stage top-V fold exchange (held: rung-0
     # ten-step SSH maximum 0.38 -> 8.39 m).
     model_config = model_config._replace(
+        # G1b round 2 / ORCA2 round 282: np_CRV divides its relative
+        # circulation by NEMO's F-cell area e1f*e2f (dynvor.f90:648;
+        # domhgr.f90:156), not the grid library's generic vertex area.
+        # The companion vector-form fold unit stays off: it reaches the live
+        # W-thickness guard at kt=8 on rung 0 / OMT-4 and on the shipped card
+        # under both labels.
+        een_nemo_relative_vorticity=True,
         zdf_momentum_nemo_face_thickness=True,
         zdf_momentum_stage_r3u_nemo_literal=True,
         zdf_tracer_nemo_rounded_thickness=True,

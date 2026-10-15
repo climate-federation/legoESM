@@ -9,8 +9,10 @@ already active on the production ORCA2 card remains active.
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import sys
+from collections import Counter
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -47,10 +49,6 @@ def arm_card(card, arm: str, *, plant: str = "none"):
 
     require(arm in ARMS, f"unknown arm {arm}")
     cfg = card.recipe.model_config
-    require(not cfg.een_nemo_relative_vorticity,
-            "production card already selects the np_CRV F-area statement")
-    require(not cfg.barotropic.barotropic_literal_fold_unit_vector_form,
-            "production card already selects the vector fold unit")
     selected = set(ARMS[arm])
     if plant == "extra-selector":
         selected.add("rk3_stage1_ssh_nemo_literal")
@@ -185,6 +183,120 @@ def decide(census_paths: list[Path]) -> dict:
     }
 
 
+def _row(document: dict, target: tuple[int, str, str]) -> dict:
+    for row in document["rows"]:
+        if (row["kt"], row["checkpoint"], row["field"]) == target:
+            return row
+    raise GateError(f"missing ladder row {target}")
+
+
+def _census(rows: list[dict]) -> dict[str, object]:
+    counts = Counter(row["metrics"]["rms"]["direction"] for row in rows)
+    rendered = {name: int(counts[name])
+                for name in ("toward", "away", "equal")}
+    votes = rendered["toward"] + rendered["away"]
+    return {
+        **rendered,
+        "rms_moving_votes": votes,
+        "strict_majority_toward": rendered["toward"] * 2 > votes,
+        "strict_majority_away": rendered["away"] * 2 > votes,
+    }
+
+
+def classify(control_path: Path, candidate_path: Path, plant: str) -> dict:
+    """D96 census, allowing a candidate to move the first-non-bit marker.
+
+    D96 scores the control's first-over-bar row.  A qualifying fix may make
+    that row bit-exact and therefore move the descriptive marker later; the
+    older round-276 helper incorrectly refused that improvement.
+    """
+
+    control = json.loads(control_path.read_text(encoding="utf-8"))
+    candidate = json.loads(candidate_path.read_text(encoding="utf-8"))
+    require(control.get("status") == "PASS_R276_SOURCE_LADDER"
+            and control.get("arm") == "control", "control is not admitted")
+    require(candidate.get("status") == "PASS_R276_SOURCE_LADDER"
+            and candidate.get("arm") != "control", "candidate is not admitted")
+    require(control["rung"] == candidate["rung"]
+            and control["label"] == candidate["label"],
+            "card or claim label moved")
+    require(control["worktree"]["commit"] == candidate["worktree"]["commit"],
+            "control and candidate are not from one committed tree")
+    before = copy.deepcopy(control["ladder"])
+    after = copy.deepcopy(candidate["ladder"])
+    if plant == "exact-loss":
+        before["rows"][0]["bit_identical"] = True
+        before["rows"][0]["unequal"] = 0
+        after["rows"][0]["bit_identical"] = False
+        after["rows"][0]["unequal"] = 1
+    key = lambda row: (int(row["kt"]), row["checkpoint"], row["field"])
+    old = {key(row): row for row in before["rows"]}
+    new = {key(row): row for row in after["rows"]}
+    require(len(old) in (160, 200) and old.keys() == new.keys(),
+            "candidate ladder row set moved")
+    moved, losses = [], []
+    for target in sorted(old):
+        left, right = old[target], new[target]
+        if left == right:
+            continue
+        if left["bit_identical"] and not right["bit_identical"]:
+            losses.append(target)
+        metrics = {}
+        for name in ("rms", "max_abs", "mean_abs_over_unequal"):
+            delta = float(right[name]) - float(left[name])
+            metrics[name] = {
+                "before": left[name], "after": right[name], "delta": delta,
+                "direction": "toward" if delta < 0 else "away" if delta > 0
+                else "equal",
+            }
+        moved.append({
+            "kt": target[0], "checkpoint": target[1], "field": target[2],
+            "bit_identical_before": left["bit_identical"],
+            "bit_identical_after": right["bit_identical"],
+            "unequal_before": left["unequal"],
+            "unequal_after": right["unequal"], "metrics": metrics,
+        })
+    early = [row for row in moved if row["kt"] <= 3]
+    late = [row for row in moved if row["kt"] >= 4]
+    if plant == "exact-loss":
+        require(not losses,
+                f"previously exact rows left the bar: {losses}")
+    all_census = _census(moved)
+    first = before["first_non_bit_checkpoint"]
+    require(first is not None, "control has no first non-bit row")
+    first_target = (int(first["kt"]), first["checkpoint"], first["field"])
+    first_direction = r276.decision96._direction(
+        _row(before, first_target), _row(after, first_target), "rms")
+    last_kt = max(old)[0]
+    final_target = (last_kt, "stage3", "ssh")
+    eligible = (bool(all_census["strict_majority_toward"])
+                and first_direction in ("toward", "equal") and not losses)
+    away = [row for row in moved
+            if row["metrics"]["rms"]["direction"] == "away"]
+    return {
+        "format": "nemo-testcase-l4-orca2-round282-census-v1",
+        "status": "PASS_R276_EARLY_LATE_CENSUS",
+        "rung": candidate["rung"], "label": candidate["label"],
+        "arm": candidate["arm"],
+        "selected_statements": candidate["selected_statements"],
+        "worktree_commit": candidate["worktree"]["commit"],
+        "row_count": len(old), "bit_touched_row_count": len(moved),
+        "exact_row_losses": losses,
+        "rms_direction_census": {
+            "all": all_census, "early_kt1_3": _census(early),
+            "late_kt4_plus": _census(late)},
+        "first_away_kt": min((row["kt"] for row in away), default=None),
+        "first_over_bar": {"target": list(first_target),
+                           "rms_direction": first_direction},
+        "first_non_bit_before": before["first_non_bit_checkpoint"],
+        "first_non_bit_after": after["first_non_bit_checkpoint"],
+        "final_stage3_ssh_max": {
+            "kt": last_kt, "before": _row(before, final_target)["max_abs"],
+            "after": _row(after, final_target)["max_abs"]},
+        "decision96_eligible": eligible,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--measure", action="store_true")
@@ -210,13 +322,14 @@ def main() -> int:
         elif args.classify:
             require(args.plant in ("none", "exact-loss"),
                     "bad classification plant")
-            result = r276.classify(*args.classify, plant=args.plant)
+            result = classify(*args.classify, plant=args.plant)
         else:
             require(args.decide is not None and args.plant == "none",
                     "decision inputs are required")
             result = decide(args.decide)
         require(args.plant == "none", f"{args.plant} plant stayed green")
-    except (GateError, r276.decision96.GateError, OSError, KeyError,
+    except (GateError, rung10.GateError, r276.decision96.GateError,
+            OSError, KeyError,
             TypeError, ValueError, StopIteration) as error:
         marker = "PLANT-FIRED" if args.plant != "none" else "REFUSE"
         print(f"STATUS {marker}: {error}")
