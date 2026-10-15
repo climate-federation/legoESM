@@ -152,8 +152,12 @@ def list_models(root=CMIP6_AMIP):
     for d in sorted(glob.glob(f"{root}/*/*/amip")):
         inst, model = d.split("/")[-3:-1]
         mems = [m for m in os.listdir(d) if re.fullmatch(r"r1i1p1f\d+", m)]
+        if model in out:
+            raise SystemExit(f"FATAL: {model} published by two institutes")
         if mems:
             out[model] = (inst, min(mems, key=_f_index))
+        else:
+            print(f"  excluded (all variables): {model} has no r1i1p1f* member")
     return out
 
 
@@ -282,10 +286,12 @@ def ensemble_stats(lego, ref, models):
     b_lego = (lego - ref) * nan
     b_mod = (models - ref[None]) * nan[None]
     spread = np.std(b_mod, axis=0, ddof=1)
-    z_ok = valid & (spread >= SPREAD_FLOOR_FRAC * np.median(spread[valid]))
+    z_ok = (valid & (spread > 0.0)
+            & (spread >= SPREAD_FLOOR_FRAC * np.median(spread[valid])))
     return {"valid": valid, "b_lego": b_lego, "b_mod": b_mod,
             "b_mmm": b_mod.mean(axis=0), "spread": spread,
-            "z": np.where(z_ok, b_lego, np.nan) / spread, "z_ok": z_ok}
+            "z": np.divide(b_lego, spread, out=np.full_like(spread, np.nan),
+                           where=z_ok), "z_ok": z_ok}
 
 
 # ------------------------------------------------------------------ main ----
