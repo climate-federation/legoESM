@@ -4,11 +4,10 @@
 #   preflight (default):  run.sh
 #   acquire:              run.sh --run
 #   re-admit:             run.sh --admit-existing
-#   resume (round 23):    run.sh --resume   -- the round-22 --run finished the
-#                         smoke and the 100-step reference, then refused the
-#                         twin r01 deck before NEMO started (the rendering
-#                         check, fixed); both runs are admitted in place, never
-#                         re-run, and the ten twins run.
+#   resume (round 24):    run.sh --resume   -- admits the smoke, the reference
+#                         and every finished twin IN PLACE (never re-run) and
+#                         runs only the twins whose directory is absent: after
+#                         round 23's resume, the three extra twins r11..r13.
 #
 # The agent that wrote this ran neither makenemo nor NEMO.
 #
@@ -40,9 +39,24 @@
 #             opens (G2 round 3), so ten stride-10 lists give a restart at
 #             EVERY step 1..N.  r10 is twin a (restarts 10, 20, ..);
 #             r01 is the determinism twin.
+#   ROUND 24 (measured on round 23's resume): the stride-10 plan does NOT
+#             give every step.  A listed file opens one step early
+#             (restart.f90:119); the pointer advances only after a write
+#             (restart.f90:188, :200-201).  So (a) a list starting at 1 never
+#             opens (there is no step 0): r01 wrote nothing, and its one file,
+#             named for step 1, is an empty shell made by :119's end-of-run
+#             clause; (b) a full 10-entry list ending below N leaves the
+#             pointer on its last entry, and the same clause re-opens and
+#             BLANKS that file at kt = N: r02..r09's restarts 92..99 are empty
+#             shells.  No step-1 restart can exist on this deck (G2 round 3,
+#             G4 round 5).  Extra twins (N = 100), each list ending on a 0
+#             (nitrst = 0 never opens, :120): r11 = 11,21,..,91;
+#             r12 = 92,94,96,98; r13 = 93,95,97,99 (consecutive entries
+#             never open, :119).
 # ADMISSION: G1's check_records.py, unchanged, on twin a with twin r01 and
 # the reference; every other twin's step frames byte-identical to twin a's
-# at kt = 1..N (extra restart writes are passive); a restart at every step;
+# at kt = 1..N (extra restart writes are passive); a restart HOLDING A
+# RECORD AT ITS STEP (a time record, kt = step) at every step 2..N;
 # NEMO's own log states the vector form and total vorticity.
 set -Eeuo pipefail
 
@@ -163,6 +177,16 @@ twin_list() {          # $1 = j, $2 = N: j, j+10, .. <= N, zero-padded to 10 ent
   local IFS=,; printf '%s' "${out[*]}"
 }
 readonly L_SMOKE='2,0,0,0,0,0,0,0,0,0' L_FULL='10,20,30,40,50,60,70,80,90,100'
+readonly N_TWINS=13 L_R11='11,21,31,41,51,61,71,81,91,0' \
+         L_R12='92,94,96,98,0,0,0,0,0,0' L_R13='93,95,97,99,0,0,0,0,0,0'
+twin_list_of() {       # $1 = j, $2 = N: r01..r10 stride 10; r11..r13 the extra lists (N = 100 only)
+  case "$1" in
+    11|12|13)
+      [[ "$2" == 100 ]] || { printf 'REFUSE: the extra twins are planned for N = 100, not %s\n' "$2" >&2; exit 73; }
+      case "$1" in 11) printf '%s' "$L_R11" ;; 12) printf '%s' "$L_R12" ;; *) printf '%s' "$L_R13" ;; esac ;;
+    *) twin_list "$1" "$2" ;;
+  esac
+}
 dry=$(mktemp -d)
 trap 'rm -rf "$dry"' EXIT
 render_deck "$dry/smoke" 2 "$L_SMOKE"
@@ -173,6 +197,7 @@ cmp -s "$dry/full" "$DECK" \
    && "$(twin_list 7 30)" == '7,17,27,0,0,0,0,0,0,0' ]] \
   || { printf 'REFUSE: twin_list is wrong\n' >&2; exit 68; }
 render_deck "$dry/one" 100 "$(twin_list 1 100)"      # the twin r01 deck: one line moves
+for j in 11 12 13; do render_deck "$dry/x$j" 100 "$(twin_list_of "$j" 100)"; done
 [[ "$(diff "$DECK" "$dry/one" | grep -c '^>')" -eq 1 ]] \
   || { printf 'REFUSE: the N = 100 twin deck should move nn_stocklist only\n' >&2; exit 68; }
 sed 's/^\(   rn_Dt *= *\).*/\1 5400./' "$dry/one" >"$dry/plant"          # plant: a non-run-length line
@@ -211,6 +236,28 @@ record_steps() {
   printf '%s' $(( (k - 1) / 2 * 2 ))
 }
 
+# $1 = first step, $2 = last step, rest = twin dirs.  Every step in the range
+# needs a restart holding a time record with kt = that step; an empty shell
+# (restart.f90:119's end-of-run clause) does not count.  Exit 1 if any is missing.
+restart_cover() {
+  python3 -I -c '
+import sys
+from pathlib import Path
+import netCDF4
+lo, hi, dirs = int(sys.argv[1]), int(sys.argv[2]), sys.argv[3:]
+full = set()
+for d in dirs:
+    for f in sorted(Path(d).glob("ORCA2G1_*_restart.nc")):
+        step = int(f.name.split("_")[1])
+        with netCDF4.Dataset(f) as nc:
+            if nc.dimensions["time_counter"].size >= 1 and int(nc["kt"][...]) == step:
+                full.add(step)
+missing = [s for s in range(lo, hi + 1) if s not in full]
+print("RESTART_FULL", len(full), "MISSING", ",".join(map(str, missing)) or "none")
+sys.exit(1 if missing else 0)
+' "$@"
+}
+
 admit() {
   local n stage_steps spgts restarts dir j list step kt plant
   n=$(record_steps)
@@ -221,7 +268,7 @@ admit() {
   # provenance: every run directory holds the pinned domain file and binary,
   # finished at its own length, with the committed deck rendered for it
   for dir in "$SMOKE:$REF_SHA:2:$L_SMOKE" \
-             $(for j in $(seq 1 10); do printf '%s:%s:%s:%s ' "$(twin_dir "$j")" "$RUN_SHA" "$n" "$(twin_list "$j" "$n")"; done); do
+             $(for j in $(seq 1 "$N_TWINS"); do printf '%s:%s:%s:%s ' "$(twin_dir "$j")" "$RUN_SHA" "$n" "$(twin_list_of "$j" "$n")"; done); do
     IFS=: read -r dir bin steps list <<<"$dir"
     [[ -f "$dir/domain_cfg.nc" && "$(sha_of "$dir/domain_cfg.nc")" == "$G1_DOMCFG_SHA" ]] \
       && [[ -f "$dir/nemo" && "$(sha_of "$dir/nemo")" == "$bin" ]] && vec_logged "$dir" \
@@ -232,10 +279,6 @@ admit() {
     render_deck "$dry/admit_deck" "$steps" "$list"
     cmp -s "$dir/namelist_cfg" "$dry/admit_deck" \
       || { printf 'REFUSE: %s ran a deck that is not the committed one at its length and list\n' "$dir" >&2; exit 73; }
-    for step in ${list//,/ }; do
-      [[ "$step" == 0 || -f "$dir/ORCA2G1_$(printf '%08d' "$step")_restart.nc" ]] \
-        || { printf 'REFUSE: %s has no restart at listed step %s\n' "$dir" "$step" >&2; exit 73; }
-    done
   done
   readonly TWIN_A=$(twin_dir 10) TWIN_B=$(twin_dir 1)
   for plant in truncation nonfinite missing-frame twin-ulp missing-step missing-substep twin-substep-inner; do
@@ -282,20 +325,32 @@ except check_records.Refuse as exc:
 print("G1B_FRAME_FIELDS_COMPLETE", len(stage), "per stage step")
 PY
   # extra restart writes are passive: every twin's step frames are twin a's
-  for j in $(seq 1 9); do
+  for j in $(seq 1 9) $(seq 11 "$N_TWINS"); do
     for kt in $(seq 1 "$n"); do
       cmp -s "$TWIN_A/oracle_g1step_kt$(printf '%08d' "$kt").bin" \
              "$(twin_dir "$j")/oracle_g1step_kt$(printf '%08d' "$kt").bin" \
         || { printf 'REFUSE: twin r%02d step frame kt=%s differs from twin a\n' "$j" "$kt" >&2; exit 73; }
     done
   done
-  printf 'G1B_TWIN_FRAMES_IDENTICAL kt=1..%s (twins r01..r09 against r10)\n' "$n"
-  for step in $(seq 1 "$n"); do
-    j=$(( (step - 1) % 10 + 1 ))
-    [[ -f "$(twin_dir "$j")/ORCA2G1_$(printf '%08d' "$step")_restart.nc" ]] \
-      || { printf 'REFUSE: no restart at step %s\n' "$step" >&2; exit 73; }
-  done
-  printf 'G1B_RESTART_EVERY_STEP 1..%s\n' "$n"
+  printf 'G1B_TWIN_FRAMES_IDENTICAL kt=1..%s (twins r01..r09, r11..r%s against r10)\n' "$n" "$N_TWINS"
+  # plants (N = 100): NEMO's own empty shells at steps 1 (r01) and 92 (r02)
+  # must not count, and the ten stride-10 twins alone must leave steps uncovered
+  if [[ "$n" == 100 ]]; then
+    for plant in "1 $(twin_dir 1)" "92 $(twin_dir 2)"; do
+      read -r step dir <<<"$plant"
+      [[ -f "$dir/ORCA2G1_$(printf '%08d' "$step")_restart.nc" ]] \
+        || { printf 'REFUSE: restart plant file for step %s is absent\n' "$step" >&2; exit 72; }
+      if restart_cover "$step" "$step" "$dir" >/dev/null; then
+        printf 'REFUSE: restart plant (empty shell, step %s) stayed green\n' "$step" >&2; exit 72
+      fi
+    done
+    if restart_cover 2 "$n" $(for j in $(seq 1 10); do twin_dir "$j"; done) >/dev/null; then
+      printf 'REFUSE: restart plant (stride-10 twins only) stayed green\n' >&2; exit 72
+    fi
+  fi
+  restart_cover 2 "$n" $(for j in $(seq 1 "$N_TWINS"); do twin_dir "$j"; done) \
+    || { printf 'REFUSE: a step in 2..%s has no restart holding its record\n' "$n" >&2; exit 73; }
+  printf 'G1B_RESTART_EVERY_STEP 2..%s (no step-1 restart can be written on this deck: restart.f90:119)\n' "$n"
   ( cd "$EVIDENCE" && sha256sum g1b_round22_admission.json r10/domain_cfg.nc r10/mesh_mask.nc \
       ref_100step/ocean.output ref_100step/namelist_ref r??/ORCA2G1_*_restart.nc ) >"$EVIDENCE/manifest/outputs.sha256"
   printf 'ACQUISITION_DONE %s N=%s\n' "$EVIDENCE" "$n"
@@ -322,7 +377,7 @@ if [[ "$mode" == --admit-existing ]]; then
 fi
 if [[ "$mode" == --preflight-only && -e "$EVIDENCE" ]]; then
   admit_smoke_in_place
-  printf 'RESUME_READY smoke and %s-step reference admissible in place; run.sh --resume runs the ten twins\n' "$(record_steps)"
+  printf 'RESUME_READY smoke and %s-step reference admissible in place; run.sh --resume runs the absent twins of r01..r13\n' "$(record_steps)"
   exit 0
 fi
 [[ "$mode" == --resume || ! -e "$EVIDENCE" ]] || {
@@ -376,15 +431,14 @@ if [[ "$mode" == --resume ]]; then
   admit_smoke_in_place
   N=$(record_steps)
   printf 'G1B_RESUME smoke and reference admitted in place; N=%s\n' "$N"
-  for j in $(seq 1 10); do        # every twin directory checked before any runs
+  for j in $(seq 1 "$N_TWINS"); do    # every twin directory checked before any runs
     d=$(twin_dir "$j")
-    [[ ! -e "$d" || "$(ls -A "$d")" == namelist_cfg ]] \
-      || { printf 'REFUSE: %s holds more than the refused deck; inspect, never re-run blindly\n' "$d" >&2; exit 69; }
+    [[ ! -e "$d" ]] || finished "$d" "$N"     # present = a finished run, admitted in place
   done
-  for j in $(seq 1 10); do
+  for j in $(seq 1 "$N_TWINS"); do
     d=$(twin_dir "$j")
-    rm -f "$d/namelist_cfg"
-    run_one "$RUN_BIN" "$d" "$N" "$(twin_list "$j" "$N")"
+    if [[ -e "$d" ]]; then printf 'G1B_TWIN_ADMITTED_IN_PLACE %s\n' "$d"; continue; fi
+    run_one "$RUN_BIN" "$d" "$N" "$(twin_list_of "$j" "$N")"
     finished "$d" "$N"
   done
   admit
@@ -400,8 +454,8 @@ run_one "$REF_BIN" "$REF" 100 "$L_FULL"
 N=$(record_steps)
 grep -E '^ *kt +[0-9]+ \|' "$REF/ocean.output" | tail -6 || true
 printf 'G1B_REFERENCE_STEPS N=%s\n' "$N"
-for j in $(seq 1 10); do
-  run_one "$RUN_BIN" "$(twin_dir "$j")" "$N" "$(twin_list "$j" "$N")"
+for j in $(seq 1 "$N_TWINS"); do
+  run_one "$RUN_BIN" "$(twin_dir "$j")" "$N" "$(twin_list_of "$j" "$N")"
   finished "$(twin_dir "$j")" "$N"
 done
 
