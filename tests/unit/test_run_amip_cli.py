@@ -5385,3 +5385,17 @@ def test_mpas_vert4_log_form_tracers_flag_flows_to_dycore_config():
         mpas_vert4_flux_form_tracers=("q_v",)))
     with pytest.raises(ValueError, match="each tracer takes one filter form"):
         both.validate_strict()
+
+
+def test_production_deck_selects_log_form_vapour_filter():
+    """Production deck -> loader -> DycoreConfig: vapour takes the log form of
+    the MPAS vertical del4 filter and no tracer takes the flux form (user
+    approved 2026-10-15).  Red if the deck row is dropped or reverted."""
+    from legoesm.driver.run_config_yaml import load_yaml_config
+    parser = build_arg_parser()
+    keys = load_yaml_config(
+        str(_repo_root() / "config" / "amip" / "amip_production.yaml"), parser)
+    parser.set_defaults(**keys)
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([]), parser))
+    assert cfg.dycore.mpas_vert4_log_form_tracers == ("q_v",)
+    assert cfg.dycore.mpas_vert4_flux_form_tracers == ()
