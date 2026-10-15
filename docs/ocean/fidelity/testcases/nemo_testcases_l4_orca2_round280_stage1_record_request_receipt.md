@@ -66,15 +66,12 @@ truncation, swapped rank, global coverage, inherited-frame bytes, and restart
 bytes. The later source-split measurement must additionally fire raw-bit and
 corrected-bit plants before either P2 or P3 may receive a verdict.
 
-The committed preflight proves that the additions-only patch applies to the
-pinned OMT-4 source and that both Fortran units compile. It prints
-`ORCA2_ROUND280_STAGE1_PREFLIGHT_READY` for the new target. Evidence:
-
-- `round280/preflight.log`, SHA256
-  `7b1252c5fe76ec21424fea481defef4a61a81d22557f3fcd745c370ba3e49292`;
-- `round280/layout_plant.log`, SHA256
-  `891db9d01bff4772cdad92c34862cedcc468b8176c244c49324d794a920c6ff2`,
-  exit 69 with `STATUS PLANT-FIRED layout`.
+The clean-tree final preflight proves that the additions-only patch applies
+to the pinned OMT-4 source and that both Fortran units compile. It prints
+`ORCA2_ROUND280_STAGE1_PREFLIGHT_READY` for the new target. The corresponding
+layout plant exits 69 with `STATUS PLANT-FIRED layout`; both logs live under
+the round-280 evidence directory as `final_preflight.log` and
+`final_layout_plant.log`.
 
 No NEMO run was attempted in the sandbox. The record-dependent admission
 plants remain unexecuted until the operator runs the launcher; they are not
