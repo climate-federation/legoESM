@@ -2606,6 +2606,8 @@ def _bc_pv_flux(
     een_written_order=False,
     een_e3f_scheme="min",
     een_metric_weighting="off",
+    een_nemo_zeta=False,
+    nemo_f_area=None,
     dz_ref=None,
     h_vtx_override=None,
     f_vtx_override=None,
@@ -2675,11 +2677,13 @@ def _bc_pv_flux(
         # no relative vorticity is dropped silently here.
         zeta = jnp.zeros_like(curl_vertex_cgrid(u, v, grid))
     elif (een_metric_weighting == "nemo"
-            and vorticity_scheme in ("ene", "ene_total")):
+            and (vorticity_scheme in ("ene", "ene_total")
+                 or (een_nemo_zeta and vorticity_scheme == "een_total"))):
         from legoesm.ocean.dynamics.latlon_cgrid_operators import (
             nemo_vor_ene_vorticity_cgrid,
         )
-        zeta = nemo_vor_ene_vorticity_cgrid(u, v, grid)
+        zeta = nemo_vor_ene_vorticity_cgrid(
+            u, v, grid if nemo_f_area is None else grid._replace(area_q=nemo_f_area))
     else:
         zeta = curl_vertex_cgrid(u, v, grid)  # (n_lat+1, n_lon+1, nlev)
 
@@ -5505,6 +5509,9 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             een_e3f_scheme=config.een_e3f_scheme,
             een_metric_weighting=getattr(
                 config, "een_metric_weighting", "off"),
+            een_nemo_zeta=config.een_nemo_relative_vorticity,
+            nemo_f_area=(_nemo_f_vertex_area(grid, z_coord)
+                         if config.een_nemo_relative_vorticity else None),
             dz_ref=z_coord.dz_ref,
             h_vtx_override=_h_vtx_override,
             f_vtx_override=_f_vtx_override,
@@ -6307,3 +6314,18 @@ def _nemo_eos_gdept(config, z_coord, eta, H_bathy, stage_stretch=None):
     if getattr(config, "nemo_eos_gdept_rounded_product", False):
         depth = nemo_source_round(depth)
     return depth
+
+
+def _nemo_f_vertex_area(grid, z_coord):
+    """``area_q`` with NEMO's F-cell area ``e1e2f = e1f*e2f`` (domhgr.f90:156)
+    on the native F points (vertex ``[1:, 1:]``, the west column its cyclic
+    image), the area np_CRV's relative vorticity divides by
+    (dynvor.f90:744-748).  The south wall row keeps the grid's own."""
+    raw = getattr(z_coord, "nemo_een_barotropic", None)
+    if raw is None:
+        raise ValueError(
+            "een_nemo_relative_vorticity reads NEMO's e1f and e2f; the card must "
+            "carry them as z_coord.nemo_een_barotropic")
+    area = jnp.asarray(grid.area_q)
+    e1e2f = jnp.asarray(raw.e1f, area.dtype) * jnp.asarray(raw.e2f, area.dtype)
+    return area.at[1:, 1:].set(e1e2f).at[1:, 0].set(e1e2f[:, -1])

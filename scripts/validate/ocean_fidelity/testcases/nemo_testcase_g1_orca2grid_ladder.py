@@ -435,7 +435,8 @@ def geometry(root: Path, plant: str | None = None) -> dict:
 
 
 def rhs_term_replay(root: Path, kt: int, fe3mask, *, stage: int = 1,
-                    zero_image_row: bool = False, rhd=None) -> dict:
+                    zero_image_row: bool = False, rhd=None,
+                    vector: bool = False) -> dict:
     """NEMO's 3-D momentum right-hand side of one stage, term by term, offline.
 
     The pressure gradient on the one level (dynhpg.f90:379-394) and the
@@ -450,6 +451,10 @@ def rhs_term_replay(root: Path, kt: int, fe3mask, *, stage: int = 1,
     with the shared library function on NEMO's recorded T and S at NEMO's
     stretched depth (eosbn2.f90 reads gdept at Kmm).  The top V row is not
     replayed: its north operands are fold halos the mesh file does not hold.
+    ``vector`` (G1b): zwz is NEMO's np_CRV, planetary plus relative vorticity
+    (dynvor.f90:744-748, unmasked: ln_dynvor_msk = F), and the KE gradient
+    (dynkeg.f90:117-125, nkeg_C2) is subtracted after the vorticity trend
+    (stp2d.f90:142, :155); dyn_zad adds nothing on one level (dynzad.f90:105).
     """
     import netCDF4
     cr = _checker()
@@ -475,7 +480,7 @@ def rhs_term_replay(root: Path, kt: int, fe3mask, *, stage: int = 1,
         return out
     with netCDF4.Dataset(root / "mesh_mask.nc") as h:
         lev = lambda n: np.asarray(h.variables[n][0], dtype=np.float64)  # noqa: E731
-        m2 = {n: halo(lev(n)) for n in ("ff_f", "e1v", "e1u", "e2u", "e2v")}
+        m2 = {n: halo(lev(n)) for n in ("ff_f", "e1v", "e1u", "e2u", "e2v", "e1f", "e2f")}
         m3 = {n: halo(lev(n)[0]) for n in (
             "tmask", "vmask", "umask", "e3t_0", "e3u_0", "e3v_0", "e3f_0")}
         gdept, e3w = (float(lev(n)[0]) for n in ("gdept_1d", "e3w_1d"))
@@ -496,7 +501,14 @@ def rhs_term_replay(root: Path, kt: int, fe3mask, *, stage: int = 1,
     fe3 = halo(np.asarray(fe3mask, dtype=np.float64))
     at = lambda a, dj, di: np.roll(a, (-dj, -di), (0, 1))  # noqa: E731  a(ji+di, jj+dj)
     with np.errstate(divide="ignore", invalid="ignore"):
-        zwz = m2["ff_f"] * (1.0 / (e3f0 * (1.0 + r3f * fe3)))
+        z1_e3f = 1.0 / (e3f0 * (1.0 + r3f * fe3))
+        if vector:                              # np_CRV, dynvor.f90:744-748
+            r1_e1e2f = 1.0 / (m2["e1f"] * m2["e2f"])
+            zwz = (m2["ff_f"] + ((at(m2["e2v"], 0, 1) * at(v, 0, 1) - m2["e2v"] * v)
+                                 - (at(m2["e1u"], 1, 0) * at(u, 1, 0) - m2["e1u"] * u))
+                   * r1_e1e2f) * z1_e3f
+        else:
+            zwz = m2["ff_f"] * z1_e3f
         r1_e1u, r1_e2v = 1.0 / m2["e1u"], 1.0 / m2["e2v"]
     zwx = m2["e2u"] * (m3["e3u_0"] * (1.0 + r3u * m3["umask"])) * u
     zwy = m2["e1v"] * (m3["e3v_0"] * (1.0 + r3v * m3["vmask"])) * v
@@ -541,6 +553,15 @@ def rhs_term_replay(root: Path, kt: int, fe3mask, *, stage: int = 1,
            "ff_f": cut(m2["ff_f"]), "depth": cut(gdept * (1.0 + r3t))}
     out["rhs_u"] = out["hpg_u"] + out["vor_u"]
     out["rhs_v"] = out["hpg_v"] + out["vor_v"]
+    if vector:                                  # dynkeg.f90:117-125
+        zhke = 0.25 * ((at(v, -1, 0) * at(v, -1, 0) + v * v)
+                       + (at(u, 0, -1) * at(u, 0, -1) + u * u))
+        with np.errstate(invalid="ignore"):
+            keg_u = (at(zhke, 0, 1) - zhke) * r1_e1u
+            keg_v = (at(zhke, 1, 0) - zhke) * r1_e2v
+        out["keg_u"], out["keg_v"] = clean(keg_u, wet_u), clean(keg_v, wet_v)
+        out["rhs_u"] = out["rhs_u"] - out["keg_u"]
+        out["rhs_v"] = out["rhs_v"] - out["keg_v"]
     return out
 
 
@@ -1345,7 +1366,9 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
         without_stage_r3f: bool = False, without_stage_r3t: bool = False,
         without_eos_gdept: bool = False, without_stage_r3uv: bool = False,
         without_ratio_order: bool = False,
-        without_r3t_product: bool = False) -> dict:
+        without_r3t_product: bool = False,
+        without_nemo_zeta: bool = False,
+        without_fold_unit_vec: bool = False) -> dict:
     if vor_fold_image:
         from legoesm.ocean.fidelity import nemo_testcase_recipe as _recipe
         calls: list = []
@@ -1371,7 +1394,9 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
                       without_eos_gdept=without_eos_gdept,
                       without_stage_r3uv=without_stage_r3uv,
                       without_ratio_order=without_ratio_order,
-                      without_r3t_product=without_r3t_product)
+                      without_r3t_product=without_r3t_product,
+                      without_nemo_zeta=without_nemo_zeta,
+                      without_fold_unit_vec=without_fold_unit_vec)
         require(len(calls) > 0, "the vorticity fold-image arm was never traced")
         out["vor_fold_image_measurement_arm"] = {"traces": len(calls)}
         out["label"] = f"{out['label']} + MEASUREMENT ARM (fold-image V row "\
@@ -1446,10 +1471,16 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
                       (without_stage_r3f, "rk3_stage_r3f_nemo_literal"),
                       (without_stage_r3t, "rk3_stage_r3t_nemo_literal"),  # round 9
                       (without_eos_gdept, "nemo_eos_gdept_rounded_product"),
-                      (without_stage_r3uv, "rk3_stage_r3uv_nemo_literal")):
+                      (without_stage_r3uv, "rk3_stage_r3uv_nemo_literal"),
+                      (without_nemo_zeta, "een_nemo_relative_vorticity")):  # G1b round 2
         if off:               # ROUND-6 BEFORE ARMS / plants, one option each
             require(getattr(cfg, name) is True, f"the card no longer selects {name}")
             cfg = cfg._replace(**{name: False})
+    if without_fold_unit_vec:  # G1b ROUND-2 BEFORE ARM / plant
+        require(cfg.barotropic.barotropic_literal_fold_unit_vector_form is True,
+                "the card no longer selects the fold unit under vector form")
+        cfg = cfg._replace(barotropic=cfg.barotropic._replace(
+            barotropic_literal_fold_unit_vector_form=False))
     if without_ratio_order:   # ROUND-8 BEFORE ARM / plant: divide by the area
         require(cfg.barotropic.barotropic_een_ratio_written_order is True,
                 "the card no longer selects the written-order ratios")
@@ -1660,6 +1691,9 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
            "nemo_eos_gdept_rounded_product": bool(
                cfg.nemo_eos_gdept_rounded_product),
            "rk3_stage_r3uv_nemo_literal": bool(cfg.rk3_stage_r3uv_nemo_literal),
+           "een_nemo_relative_vorticity": bool(cfg.een_nemo_relative_vorticity),
+           "barotropic_literal_fold_unit_vector_form": bool(
+               cfg.barotropic.barotropic_literal_fold_unit_vector_form),
            "barotropic_een_ratio_written_order": bool(
                cfg.barotropic.barotropic_een_ratio_written_order),
            "nemo_r3t_stored_product": bool(
@@ -1880,7 +1914,8 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
             jax.block_until_ready(observed.step(seed(g, before[kt], kt), dt=card.dt_s))
             jax.effects_barrier()           # the observer is an async callback
             require(bool(seen), "the right-hand-side term observer never fired")
-            rep = rhs_term_replay(root, kt, fe3)
+            vec = CASE == "ORCA2G1b-vec"
+            rep = rhs_term_replay(root, kt, fe3, vector=vec)
             rows = []
             for f in "uv":
                 wet = rep["wet_" + f]
@@ -1899,8 +1934,10 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
                         plant=plant == "score"),
                     "card_total_vs_nemo": substep_row(
                         f"rhs.{f}", g[f"b_{f}{f}_rhs_k1"], total, wet, reg),
+                    # the card's KE_PGF term holds the KE gradient too (G1b)
                     "card_pressure_gradient_vs_replay": substep_row(
-                        f"hpg.{f}", rep["hpg_" + f], terms["KE_PGF"], wet, reg),
+                        f"hpg.{f}", rep["hpg_" + f] - rep["keg_" + f] if vec
+                        else rep["hpg_" + f], terms["KE_PGF"], wet, reg),
                     "card_vorticity_vs_replay": substep_row(
                         f"vor.{f}", rep["vor_" + f], terms["vortcor"], wet, reg),
                     "replay_sum_of_card_terms_vs_nemo": substep_row(
@@ -2261,6 +2298,12 @@ def main(argv=None) -> int:
     ap.add_argument("--without-stage-r3uv", action="store_true",
                     help="the card with rk3_stage_r3uv_nemo_literal off "
                          "(round 9's before arm / plant)")
+    ap.add_argument("--without-nemo-zeta", action="store_true",
+                    help="G1b: een_total's relative vorticity from the generic "
+                         "curl and the grid's F area (round 2's before arm / plant)")
+    ap.add_argument("--without-fold-unit-vec", action="store_true",
+                    help="G1b: the solver's literal fold unit off under vector "
+                         "form (round 2's before arm / plant)")
     ap.add_argument("--without-written-order", action="store_true",
                     help="the card with rk3_stage_velocity_written_order "
                          "switched off (a round-6 before arm; also its plant)")
@@ -2296,7 +2339,9 @@ def main(argv=None) -> int:
                   without_eos_gdept=a.without_eos_gdept,
                   without_stage_r3uv=a.without_stage_r3uv,
                   without_ratio_order=a.without_ratio_order,
-                  without_r3t_product=a.without_r3t_product)
+                  without_r3t_product=a.without_r3t_product,
+                  without_nemo_zeta=a.without_nemo_zeta,
+                  without_fold_unit_vec=a.without_fold_unit_vec)
     except Exception as e:      # noqa: BLE001 -- refusals print and exit 2
         print(f"REFUSE: {type(e).__name__}: {e}", file=sys.stderr)
         return 2

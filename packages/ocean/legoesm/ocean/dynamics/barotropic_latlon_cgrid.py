@@ -2882,8 +2882,12 @@ def nemo_literal_external_mode_active(config) -> bool:
     select its literal continuity and transport-accumulation statements.
     """
     barotropic = config.barotropic
+    vector_form = (
+        barotropic.barotropic_literal_fold_unit_vector_form
+        and getattr(config, "momentum_time_integrator", "euler") == "rk3_ws"
+        and getattr(config, "momentum_advection", "") == "vector_invariant")
     return (
-        nemo_flux_form_update_active(config)
+        (nemo_flux_form_update_active(config) or vector_form)
         and barotropic.barotropic_face_depth == "nemo_ssh_avg"
         and barotropic.barotropic_continuity_evaluation == "nemo_literal"
         and (barotropic.barotropic_transport_accumulation_evaluation

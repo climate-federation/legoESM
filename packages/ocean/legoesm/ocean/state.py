@@ -1633,6 +1633,12 @@ class BarotropicConfig(NamedTuple):
     # :281-285): times the stored reciprocal face area, not divided by the
     # area.  False keeps the division.  e1 * e2 face areas only.
     barotropic_een_ratio_written_order: bool = False
+    # The solver's literal fold unit (raw hu_0/hv_0, the fold-image V row's
+    # transport zhV, its materialised product, the end-of-substep exchange)
+    # also under vector-form momentum: those statements sit outside NEMO's
+    # vector/flux branch (dynspg_ts.f90:413-421, :436-438, :594).  False
+    # keeps the unit to flux-form decks only.
+    barotropic_literal_fold_unit_vector_form: bool = False
 
 
 class RuntimeChecksConfig(NamedTuple):
@@ -3193,6 +3199,11 @@ class LatLonCGridOceanConfig(NamedTuple):
     # the two ratios, not the ratio of the mean sea level.  False takes the
     # ratio of the interpolated sea level (last-place different on some faces).
     zdf_momentum_stage_r3u_nemo_literal: bool = False
+    # een_total's relative vorticity in vor_een's np_CRV statement
+    # (dynvor.f90:744-748): the circulation bracket of e2v*v and e1u*u times
+    # r1_e1e2f, added to ff_f before the F thickness.  False takes the
+    # generic vertex curl, which differs on a curvilinear mesh.
+    een_nemo_relative_vorticity: bool = False
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":
