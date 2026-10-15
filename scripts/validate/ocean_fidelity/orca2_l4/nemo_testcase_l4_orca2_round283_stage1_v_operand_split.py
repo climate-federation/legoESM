@@ -32,7 +32,7 @@ from scripts.validate.ocean_fidelity.orca2_l4 import (  # noqa: E402
 FLOOR = np.float64(2.0e-10)
 OPERAND_ORDER = ("entry_v", "rhs_v", "rDt", "vmask", "written_order")
 PLANTS = (
-    "none", "passivity", "self-replay", "source-order", "prefix-live",
+    "none", "passivity", "self-replay", "source-order", "owner-prefix",
     "one-bit",
 )
 
@@ -200,8 +200,11 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
         report["self_replay"]["unequal"] = 1
     elif plant == "source-order":
         report["source_order"][1:3] = reversed(report["source_order"][1:3])
-    elif plant == "prefix-live":
-        report["prefix_rows"]["rhs_v"] = report["prefix_rows"]["candidate"]
+    elif plant == "owner-prefix":
+        planted_owner = next(
+            name for name in OPERAND_ORDER
+            if report["operand_rows"][name]["max_abs"] > FLOOR)
+        report["prefix_rows"][planted_owner] = report["prefix_rows"]["candidate"]
     elif plant == "one-bit":
         report["one_bit_control"]["unequal"] = 0
 
@@ -223,8 +226,8 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
     require(first is not None, "no valued stage-update operand boundary")
     prefix = report["prefix_rows"]
     rhs_toward = prefix["rhs_v"]["rms"] < prefix["candidate"]["rms"]
-    require(prefix["rhs_v"] != prefix["candidate"],
-            "RHS prefix arm is vacuous")
+    require(first in prefix and prefix[first] != prefix["candidate"],
+            f"{first} prefix arm is vacuous")
     report["first_valued_operand"] = first
     report["prediction_ledger"] = {
         "R283-P1": "CONFIRMED",
