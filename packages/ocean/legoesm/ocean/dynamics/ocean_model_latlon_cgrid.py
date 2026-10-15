@@ -4119,10 +4119,8 @@ class LatLonCGridOceanModel:
                     "(the prognostic TKE advances inside the implicit "
                     "vertical-mixing solve; without it the advection would "
                     "silently never apply).")
-
-        # Fail-fast momentum-advection dispatch validation (was a silent
-        # fallthrough to vector-invariant for any unknown literal). Single
-        # source: VALID_MOMENTUM_ADVECTION in ocean_pe_latlon_cgrid.
+        # Fail fast instead of falling through to vector-invariant. The valid
+        # values have one source in ocean_pe_latlon_cgrid.
         from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
             VALID_MOMENTUM_ADVECTION,
             VALID_TRACER_ADVECTION,
@@ -4136,18 +4134,14 @@ class LatLonCGridOceanModel:
             VALID_WENO_SMOOTHNESS,
             VALID_LATERAL_FRICTION_SCHEME,
         )
-        if config.momentum_advection not in VALID_MOMENTUM_ADVECTION:
-            raise ValueError(
-                f"momentum_advection must be one of "
-                f"{sorted(VALID_MOMENTUM_ADVECTION)}, "
-                f"got {config.momentum_advection!r}",
-            )
-        if (config.rk3_vector_rhs_nemo_order
-                and config.momentum_advection == "flux_form"):
-            raise ValueError(
-                "rk3_vector_rhs_nemo_order=True requires vector-form "
-                "momentum advection; flux_form has no separate dyn_keg "
-                "Krhs accumulation to order")
+        _mom_adv = config.momentum_advection
+        if _mom_adv not in VALID_MOMENTUM_ADVECTION:
+            raise ValueError(f"momentum_advection must be one of "
+                             f"{sorted(VALID_MOMENTUM_ADVECTION)}, got {_mom_adv!r}")
+        if config.rk3_vector_rhs_nemo_order and _mom_adv == "flux_form":
+            raise ValueError("rk3_vector_rhs_nemo_order=True requires vector-form "
+                             "momentum advection; flux_form has no separate "
+                             "dyn_keg Krhs accumulation to order")
         if config.weno_smoothness not in VALID_WENO_SMOOTHNESS:
             raise ValueError(
                 f"weno_smoothness must be one of "

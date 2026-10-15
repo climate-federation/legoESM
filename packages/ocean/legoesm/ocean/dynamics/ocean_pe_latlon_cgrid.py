@@ -5115,7 +5115,8 @@ def _bc_horizontal_momentum_advection_flux_form(
 
 def _nemo_keg_accumulate(accumulator, kinetic_energy_gradient):
     """Apply NEMO dyn_keg's product, then its Krhs subtraction."""
-    return accumulator + nemo_source_round(-kinetic_energy_gradient)
+    return (
+        accumulator + nemo_source_round(-kinetic_energy_gradient))
 
 
 def latlon_cgrid_ocean_baroclinic_tendencies(
@@ -5591,27 +5592,21 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         dv_dt = jax.lax.optimization_barrier(dv_dt)
         _nemo_after_vor_u = du_dt
         _nemo_after_vor_v = dv_dt
-        # dynkeg.f90:128-130 evaluates the metric-scaled KE-gradient product
-        # inside the Krhs subtraction.  ``optimization_barrier`` disappears
-        # from optimized HLO and lets XLA contract that product into the add;
-        # G1b's public source-order selector materializes the product only.
+        # NEMO evaluates the metric-scaled KE-gradient product inside the
+        # subtraction; G1b's public selector materializes that product alone.
         if config.rk3_vector_rhs_nemo_order:
             du_dt = _nemo_keg_accumulate(du_dt, dKE_dx)
             dv_dt = _nemo_keg_accumulate(dv_dt, dKE_dy)
         else:
-            # Preserve private measurement arms exactly as they ran before
-            # G1b selected the contraction guard.
             du_dt = jax.lax.optimization_barrier(du_dt + (-dKE_dx))
             dv_dt = jax.lax.optimization_barrier(dv_dt + (-dKE_dy))
         _nemo_after_keg_u = du_dt
         _nemo_after_keg_v = dv_dt
-
     # --- Stage 7c: WENO divergence (D-term) dissipation. ---
     du_dt, dv_dt, diag_Dterm_u, diag_Dterm_v = _bc_dterm(
         du_dt, dv_dt, u, v, u_mask_3d, v_mask_3d, mask, grid, config, _mom_adv,
         _weno_order if _weno_order is not None else 5,
     )
-
     # --- Stage 8: vertical momentum advection. ---
     # ``u``/``v`` (FULL velocity) are passed as ``u_full``/``v_full`` for the
     # Veros-faithful ``centered_full`` scheme; the default

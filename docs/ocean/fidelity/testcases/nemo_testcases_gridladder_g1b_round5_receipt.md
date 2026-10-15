@@ -30,13 +30,14 @@ written order `4 -> 0`; unguarded traced JIT versus written order `4`; traced
 JIT versus fused replay `0`; guarded traced JIT versus written order `0`.
 Thus R5-M1 and R5-M2 are **CONFIRMED**, not merely plausible.
 
-The source statement is NEMO's stored KE-gradient multiply followed by the
+The source statement is NEMO's metric-scaled KE-gradient product inside the
 in-place Krhs subtraction, in both the record build and the Decision-122 full
-ORCA2 build: `BLD/ppsrc/nemo/dynkeg.f90:128-130`.  legoESM now calls the
-existing shared source-operation materializer, **`nemo_source_round`**, around
-the completed KEG addend and the following accumulator add.  The existing
-`rk3_vector_rhs_nemo_order` route selects it; G1b is the ladder card selecting
-that route, the library default remains false, and no selector was added.
+ORCA2 build: `BLD/ppsrc/nemo/dynkeg.f90:128-130`.  It is one expression, not a
+stored gradient temporary.  legoESM now calls the existing shared
+source-operation materializer, **`nemo_source_round`**, around that completed
+product only.  The existing `rk3_vector_rhs_nemo_order` route selects it; G1b
+is the ladder card selecting that route, the library default remains false,
+and no selector was added.
 
 ## Statement walk, kt 2 GIVEN-NEMO-ENTRY
 
@@ -97,12 +98,29 @@ cross the bar.
 
 ## Controls, tests, provenance, and choices
 
-- R5-C1 is **CONFIRMED**.  Replacing the production helper by the unguarded
-  subtraction makes the traced-input test fail (`1 failed`, exit 1); restored,
-  the same test passes.  Its internal planted path differs on all four inputs.
+- R5-C1 is **REFUTED for its outer-round half**.  Removing only the inner
+  product round makes the traced-input test fail and restores the kt-2 stage-1
+  RHS census to 4 U / 0 V; removing only the outer accumulator round leaves
+  that test and the RHS at 0/0.  The production helper therefore retains only
+  the independently necessary inner materialization.  Its portable control
+  requires at least one unguarded difference; the guarded result must equal
+  every expected element.
+- Full-record removal control: excluding only the stamped git SHA, the
+  no-outer-round `independent100.json`, `given_entry50.json`, and
+  `restart_entry100.json` objects are exactly equal to their two-round
+  counterparts.  Therefore every GIVEN and INDEPENDENT number in the table
+  above is unchanged.
+- `rk3_vector_rhs_nemo_order=True` now raises on flux-form momentum configs,
+  where there is no separate `dyn_keg` Krhs accumulation to order.
 - Focused CPU tests, synchronously with `JAX_ENABLE_X64=1`: G1b card plus
-  source-rounding tests **16 passed**; traced contraction, record-backed split,
-  and stage replay **3 passed**; citation gate **17 passed**.
+  traced contraction, record-backed split, and stage replay **18 passed**;
+  other-card tests **169 passed, 3 deselected**; ratchets **6083 passed,
+  2 skipped, 3 pre-existing failures**; citation gate **17 passed**.
+- The three deselected other-card checks are stale certified-card digest pins
+  (GYRE, LOCK_EXCHANGE, OVERFLOW), and the three ratchet failures are in
+  unrelated JRA55/land files.  Each set was run separately and reproduced
+  unchanged at the pre-round-5 commit `e1062dce9`; no baseline was silently
+  re-pinned or widened.
 - Search-before-build found and reused `nemo_source_round`, the existing
   `rk3_vector_rhs_nemo_order` route, the production accumulator exposures, the
   stage replay, and `fused_multiply_add`.  One probe function extends the
@@ -115,17 +133,42 @@ cross the bar.
   confirmed, select through G1b's existing route, walk velocity, rescore both
   labels.  UNASKED: none.
 
-Evidence SHA-256 (first 16): `rhs_terms_contraction_kt2.json`
-`196b17f6858b459f`; `stages_kt2.json` `95a797b2f8b74111`;
-`independent100.json` `b4d97418e2b03b6f`; `given_entry50.json`
-`5bc0948ab59c7b42`; `restart_entry100.json` `82706182d7e2687d`.
+## Independent-review collateral measurements
+
+The private `nemo_stage_rhs_accumulation_order_arm` reaches the GYRE round-11
+and round-83 gates, ORCA2-L4 round-41/42 gates, and VORTEX round-193 and SMT
+round-238 gates.  OVERFLOW round 51 passes the older private hook directly,
+but uses flux-form momentum; `_nemo_vector_order` is false there, so the KEG
+branch cannot be reached.
+
+The initially broad guard changed VORTEX last-bit censuses.  For stage 2,
+KEG U/V moved from `21797/21995` to `21799/21995`, and ZAD from
+`22066/21995` to `22068/22004`; for stage 3, KEG moved from `21945/21534` to
+`21950/21534`, and ZAD from `21945/21534` to `21950/21539`.  Maxima stayed
+at `1.3553e-20` U and `2.7105e-20` V, with outputs at `1.1102e-16` (stage 2)
+and `2.2204e-16` (stage 3).  The guard is therefore gated to the public G1b
+selector; private-hook arms retain their pre-round-5 addition expression.
+
+The other measured arms did not move: GYRE round 11 remained U/V
+`11469/10677`, maximum `8.131516293641283e-20`; ORCA2-L4 round 41 retained
+first non-bit HPG V at rank 0 `668/226637`, maximum
+`2.362041079622794e-06`, and rank 1 `651/188538`, maximum
+`3.1384570529614414e-06`, while all 64 disputed rank-1 U rows remained exact.
+The final VORTEX, GYRE, and ORCA2 artifacts were produced at `ded95e469`.
+
+Independent-review evidence is under `round29/review_fix/`.  Final SHA-256
+(first 16): `independent100.json` `cdbbeb5fa65e7400`;
+`given_entry50.json` `034dc7a265d69914`; `restart_entry100.json`
+`c46bd539973aeb01`; `gyre_nemo_order.json` `966aa602c45d31a5`;
+`orca2_rhs_family.json` `6f83682a9fc81404`; `vortex_source_order.json`
+`a57a7817f5679c50`.
 
 UNVERIFIED:
 - the full ORCA2 card executes the cited lines but was read, not run;
 - the cause of the remaining INDEPENDENT kt-81 sea-level debt is not yet
   localized.
 
-COMMITS_IN: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/gridladder_r29-188413974
+COMMITS_IN: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/claude_rounds/gridladder_r29/repo
 ACQUISITION_NEEDED: NONE
 DECISION_NEEDED: NONE
 ROUND_STATUS: LANDED — the KEG accumulator is exact; G1b remains uncertified on the INDEPENDENT label.
