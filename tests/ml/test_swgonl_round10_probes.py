@@ -17,6 +17,20 @@ import pytest
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 os.environ.setdefault("JAX_ENABLE_X64", "1")
 
+# The probe modules refuse to guess a run directory (SWGONL_RUN / SWGONL_DIAG must
+# be set when they run as scripts).  These tests exercise only their pure parts, so
+# they point the modules at the first pilot's run and a scratch output directory
+# unless the environment already names them, and skip where that run is absent.
+_PILOT_RUN = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgonl_rounds/round9_pilot"
+                  "/pilot/swgonl_pilot_template_ring_excluded/seed20261013")
+if "SWGONL_RUN" not in os.environ:
+    if not (_PILOT_RUN / "run_manifest.json").is_file():
+        pytest.skip("the first pilot's run directory is not on this machine", allow_module_level=True)
+    os.environ["SWGONL_RUN"] = str(_PILOT_RUN)
+if "SWGONL_DIAG" not in os.environ:
+    import tempfile
+    os.environ["SWGONL_DIAG"] = tempfile.mkdtemp(prefix="swgonl-probe-tests-")
+
 _ROOT = Path(__file__).resolve().parents[2]
 _DIR = _ROOT / "scripts/validate/swgonl_round10"
 
