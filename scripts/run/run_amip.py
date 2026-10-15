@@ -480,14 +480,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         default=list(_DYCORE_DEFAULTS.mpas_vert4_flux_form_tracers),
                         help="tracer names whose MPAS vertical del4 filter uses "
                              "the mass-weighted flux form instead of the "
-                             "projected form (default: q_v; pass the flag with "
-                             "no names for the old all-projected form)")
+                             "projected form (default: none; q_v takes the log "
+                             "form; a name here must not also be in "
+                             "--mpas-vert4-log-form-tracers)")
     parser.add_argument("--mpas-vert4-log-form-tracers", nargs="*",
                         default=list(_DYCORE_DEFAULTS.mpas_vert4_log_form_tracers),
                         help="tracer names whose MPAS vertical del4 filter acts "
                              "on ln(q + 1e-7) with a water-weighted mass-"
-                             "conserving flux (default: none; a name here must "
-                             "not also be in --mpas-vert4-flux-form-tracers)")
+                             "conserving flux (default: q_v; pass the flag with "
+                             "no names to free q_v for the flux form; a name "
+                             "here must not also be in "
+                             "--mpas-vert4-flux-form-tracers)")
     parser.add_argument("--mpas-conservative-tracer-clamp",
                         action=argparse.BooleanOptionalAction, default=True,
                         help="MPAS floors: borrow the clipped negative tracer "

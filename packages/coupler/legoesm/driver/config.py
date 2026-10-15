@@ -398,18 +398,19 @@ class DycoreConfig(NamedTuple):
     # The projected form subtracts the column-mean tendency as a uniform
     # mixing-ratio offset, which drains stratospheric water vapour (measured
     # -0.4 ppmv/day at 45-70N, -3 ppmv/day in the tropics on e12_year).
-    # Default ("q_v",) since 2026-10 (owner decision after the 60-day A/B:
-    # 45-70N 70-150 hPa vapour 0.64 -> 4.05 ppmv, 100-200 hPa T -2.3 K).
-    # Empty = every tracer projected (the pre-2026-10 form, for bit-comparison).
-    mpas_vert4_flux_form_tracers: tuple = ("q_v",)
+    # Was ("q_v",) from 2026-10 (60-day A/B vs projected: 45-70N 70-150 hPa
+    # vapour 0.64 -> 4.05 ppmv); empty since 2026-10-15, when q_v moved to the
+    # log form below (a tracer may not be in both lists).  Empty with an empty
+    # log list = every tracer projected (the pre-2026-10 form).
+    mpas_vert4_flux_form_tracers: tuple = ()
     # Tracer names whose vertical del4 filter acts on ln(q + 1e-7) with a
     # water-weighted, mass-conserving flux (``vertical_del4_tracer_tendency_log``):
     # the flux form's fourth difference of q removes 4.5-8.8 %/day of
     # upper-tropospheric water from ERA5 profiles; the log form does not drift
     # an exponential-in-level profile.  Must not overlap the flux-form list.
-    # Code default empty; config/amip/amip_production.yaml selects [q_v] (with an
-    # empty flux-form list) after the 30/60-day pair, user-approved 2026-10-15.
-    mpas_vert4_log_form_tracers: tuple = ()
+    # Default ("q_v",) since 2026-10-15 (user decision after the 30/60-day pair
+    # against the flux form); amip_production.yaml also pins it explicitly.
+    mpas_vert4_log_form_tracers: tuple = ("q_v",)
 
 
 class EvaluationConfig(NamedTuple):

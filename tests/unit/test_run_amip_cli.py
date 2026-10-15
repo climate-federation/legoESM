@@ -5342,18 +5342,20 @@ def test_forcing_hold_outside_file_years_round_trips_and_defaults_off():
 
 def test_mpas_vert4_flux_form_tracers_flag_flows_to_dycore_config():
     """--mpas-vert4-flux-form-tracers reaches DycoreConfig as a tuple; absent
-    means the default (q_v, owner decision 2026-10); the bare flag means none."""
+    means the default (none since 2026-10-15: q_v takes the log form); the bare
+    flag means none."""
     parser = build_arg_parser()
     cfg_default = build_config_from_args(_postprocess_args(
         parser.parse_args(["--dataset", "analytical"]), parser))
-    assert cfg_default.dycore.mpas_vert4_flux_form_tracers == ("q_v",)
+    assert cfg_default.dycore.mpas_vert4_flux_form_tracers == ()
     cfg_none = build_config_from_args(_postprocess_args(parser.parse_args([
         "--dataset", "analytical", "--mpas-vert4-flux-form-tracers"]), parser))
     assert cfg_none.dycore.mpas_vert4_flux_form_tracers == ()
     cfg_set = build_config_from_args(_postprocess_args(parser.parse_args([
         "--dataset", "analytical", "--mpas-vert4-flux-form-tracers", "q_v",
-    ]), parser))
+        "--mpas-vert4-log-form-tracers"]), parser))
     assert cfg_set.dycore.mpas_vert4_flux_form_tracers == ("q_v",)
+    cfg_set.validate_strict()
     # a typo'd tracer name is refused at validation (the dycore would skip it)
     for typo in (("qv",), ("trc_q_v",), "q_v", ""):
         bad = cfg_set._replace(dycore=cfg_set.dycore._replace(
@@ -5364,12 +5366,17 @@ def test_mpas_vert4_flux_form_tracers_flag_flows_to_dycore_config():
 
 def test_mpas_vert4_log_form_tracers_flag_flows_to_dycore_config():
     """--mpas-vert4-log-form-tracers reaches DycoreConfig as a tuple; absent
-    means none (production unchanged); typos and an overlap with the flux-form
-    list are refused at validation."""
+    means q_v (code default since 2026-10-15, user decision); typos and an
+    overlap with the flux-form list are refused at validation."""
     parser = build_arg_parser()
     cfg_default = build_config_from_args(_postprocess_args(
         parser.parse_args(["--dataset", "analytical"]), parser))
-    assert cfg_default.dycore.mpas_vert4_log_form_tracers == ()
+    assert cfg_default.dycore.mpas_vert4_log_form_tracers == ("q_v",)
+    assert cfg_default.dycore.mpas_vert4_flux_form_tracers == ()
+    cfg_default.validate_strict()
+    from legoesm.driver.config import DycoreConfig
+    assert DycoreConfig().mpas_vert4_log_form_tracers == ("q_v",)
+    assert DycoreConfig().mpas_vert4_flux_form_tracers == ()
     cfg_set = build_config_from_args(_postprocess_args(parser.parse_args([
         "--dataset", "analytical", "--mpas-vert4-flux-form-tracers",
         "--mpas-vert4-log-form-tracers", "q_v"]), parser))
