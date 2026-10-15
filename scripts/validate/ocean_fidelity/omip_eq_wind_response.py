@@ -160,7 +160,7 @@ def pressure_terms(T, S, eta, u, zN, zi):
     return out
 
 
-def momentum_terms(u, v, zN, zi):
+def momentum_terms(u, v, zN, zi, fields=None):
     """Flux-form 0-Z_COL zonal momentum terms over |lat|<=1, LON_SLOPE (see module doc).
 
     u, v (nz, GLAT, GLON) on level centres zN, interfaces zi; NaN = dry/missing."""
@@ -171,6 +171,8 @@ def momentum_terms(u, v, zN, zi):
     k = bc > 0
     col = lambda q: np.sum(q[k] * bc[k, None, None], axis=0)      # NaN if any layer missing
     U, V, UU, UV = col(u), col(v), col(u * u), col(u * v)
+    if fields is not None:
+        fields.update(U=U, UV=UV)
     eq = np.abs(GLAT) <= 1.0
     l0, l1 = LON_SLOPE
     ls = (GLON >= l0) & (GLON <= l1)
@@ -243,6 +245,7 @@ def main(argv=None):
     out = {"provenance": {"argv": sys.argv, "lanes": [a.trp, a.mpas, a.fesom], "nemo_ssh": sshv[0],
                           "sampling": "lanes instantaneous; NEMO 5-day mean"}, "marks": {}}
     marks = []
+    MAPS = {}
     for d in DAYS:
         try:
             [snap(l, d) for l in (a.trp, a.mpas, a.fesom)]
@@ -285,8 +288,10 @@ def main(argv=None):
                                            eta=np.where(ecom, E[lab], np.nan))
                            for lab, (u, v) in G.items()}
         for lab, (u, v) in G.items():
+            fl = {}
             out["marks"][d][lab].update(momentum_terms(
-                np.where(common, u, np.nan), np.where(common, v, np.nan), zN, zi))
+                np.where(common, u, np.nan), np.where(common, v, np.nan), zN, zi, fields=fl))
+            MAPS.setdefault(lab, []).append(fl)
         pcom = common & np.all([np.isfinite(x) for ts in TS.values() for x in ts], axis=0) & ecom[None]
         for lab, (Tl, Sl) in TS.items():
             out["marks"][d][lab].update(pressure_terms(
@@ -320,6 +325,30 @@ def main(argv=None):
     fig.suptitle("Same winds, three grids: lanes instantaneous, NEMO 5-day mean (180-260E)")
     fig.savefig(a.out / "eq_wind_response.png", dpi=110)
     print("PNG", a.out / "eq_wind_response.png")
+    fig, ax = plt.subplots(len(labs) + 1, 2, figsize=(13, 3.0 * (len(labs) + 1)), constrained_layout=True)
+    for j, (key, ttl, vm) in enumerate((("U", "0-400 m zonal transport [m2/s]", 80.0),
+                                         ("UV", "0-400 m int u v dz [m3/s2]", 4.0))):
+        for i, s in enumerate(labs):
+            fld = np.nanmean([fl[key] for fl in MAPS[s]], axis=0)
+            pc = ax[i, j].pcolormesh(GLON, GLAT, fld, cmap="RdBu_r", vmin=-vm, vmax=vm, shading="nearest")
+            ax[i, j].add_patch(plt.Rectangle((LON_SLOPE[0], -1.0), LON_SLOPE[1] - LON_SLOPE[0], 2.0, fill=False, ec="k"))
+            ax[i, j].set_title(f"{s}: {ttl}, mean of days {marks}", fontsize=9)
+            fig.colorbar(pc, ax=ax[i, j], shrink=0.8)
+    terms = ("F_tot", "A_x", "A_y", "A_z", "Cor", "lapU")
+    lanes = [s for s in labs if s != "NEMO_mean"]
+    x = np.arange(len(terms))
+    for k, s in enumerate(lanes):
+        ax[-1, 0].bar(x + 0.25 * (k - 1), [out["six_mark_mean"][s][t] for t in terms], 0.25, label=s)
+    ax[-1, 0].set_xticks(x, ["pressure", "adv W-E", "adv S-N", "adv 400m", "Coriolis", "friction/1000"])
+    ax[-1, 0].axhline(0, c="0.5", lw=0.5); ax[-1, 0].legend(fontsize=8)
+    ax[-1, 0].set_title("box |lat|<=1, 160-260E, 0-400 m: momentum terms [1e-5 m2/s2], + = eastward gain", fontsize=9)
+    for s in labs:
+        ax[-1, 1].plot(marks, [out["marks"][d][s]["U_box"] for d in marks], "o-" if s != "NEMO_mean" else "k--", label=s)
+    ax[-1, 1].set_title("box-mean 0-400 m zonal transport [m2/s]", fontsize=9); ax[-1, 1].set_xlabel("day")
+    ax[-1, 1].legend(fontsize=8)
+    fig.suptitle("Equatorial momentum: lanes instantaneous, NEMO 5-day mean (1-degree remap)")
+    fig.savefig(a.out / "eq_momentum.png", dpi=100)
+    print("PNG", a.out / "eq_momentum.png")
     return 0
 
 
