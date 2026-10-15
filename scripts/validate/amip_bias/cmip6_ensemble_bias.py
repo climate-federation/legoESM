@@ -140,6 +140,9 @@ def _f_index(member):
 def correction(model, var, member, version):
     """(factor, reason) from ``CORRECTIONS`` on an EXACT key, else (1.0, None)."""
     hit = CORRECTIONS.get((model, var, member, version))
+    if hit is None and any(k[:3] == (model, var, member) for k in CORRECTIONS):
+        print(f"  WARNING: {model} {var} {member} {version} is not the version "
+              "the CORRECTIONS table was verified on -- NOT corrected")
     return (1.0, None) if hit is None else (hit[0], hit[1])
 
 
@@ -197,27 +200,27 @@ def window_mean(files, var, window):
     want = set(window)
     slices, seen, lat = [], [], None
     for path in files:              # no dask here: read only the window slices
-        ds = xr.open_dataset(path, decode_times=xr.coders.CFDatetimeCoder(
-            use_cftime=True))
-        v = ds[var]
-        units = v.attrs.get("units")
-        if units != _UNITS[var]:
-            raise LookupError(f"units {units!r}, expected {_UNITS[var]!r}")
-        if "lat" not in v.dims or "lon" not in v.dims:
-            raise LookupError(f"not a lat/lon grid (dims {v.dims})")
-        ym = list(zip(v["time"].dt.year.values.tolist(),
-                      v["time"].dt.month.values.tolist()))
-        pick = [i for i, x in enumerate(ym) if x in want]
-        if pick:
-            seen += [ym[i] for i in pick]
-            slices.append(np.asarray(v.isel(time=pick).transpose(
-                "time", "lat", "lon"), dtype=np.float64))
-            la = np.asarray(ds["lat"], dtype=np.float64)
-            lo = np.asarray(ds["lon"], dtype=np.float64) % 360.0
-            if lat is not None and not (np.array_equal(la, lat)
-                                        and np.array_equal(lo, lon)):
-                raise LookupError("lat/lon differ between files")
-            lat, lon = la, lo
+        with xr.open_dataset(path, decode_times=xr.coders.CFDatetimeCoder(
+                use_cftime=True)) as ds:
+            v = ds[var]
+            units = v.attrs.get("units")
+            if units != _UNITS[var]:
+                raise LookupError(f"units {units!r}, expected {_UNITS[var]!r}")
+            if set(v.dims) != {"time", "lat", "lon"}:
+                raise LookupError(f"not a (time, lat, lon) field (dims {v.dims})")
+            ym = list(zip(v["time"].dt.year.values.tolist(),
+                          v["time"].dt.month.values.tolist()))
+            pick = [i for i, x in enumerate(ym) if x in want]
+            if pick:
+                seen += [ym[i] for i in pick]
+                slices.append(np.asarray(v.isel(time=pick).transpose(
+                    "time", "lat", "lon"), dtype=np.float64))
+                la = np.asarray(ds["lat"], dtype=np.float64)
+                lo = np.asarray(ds["lon"], dtype=np.float64) % 360.0
+                if lat is not None and not (np.array_equal(la, lat)
+                                            and np.array_equal(lo, lon)):
+                    raise LookupError("lat/lon differ between files")
+                lat, lon = la, lo
     if sorted(seen) != sorted(window):
         raise LookupError(f"window months missing or duplicated: got "
                           f"{sorted(seen)}, need {sorted(window)}")
@@ -301,6 +304,11 @@ def collect(run, variables, root=CMIP6_AMIP):
         if got is None:
             raise SystemExit(f"{run}: no model output for {var}")
         lego, mlat, mlon, months = got
+        # bias_maps picks the reference months with a 365-day modulo that
+        # ignores the time origin; it must agree with the decoded window.
+        if list(months) != [m for _, m in window]:
+            raise SystemExit(f"FATAL: {var} reference months {months} != "
+                             f"window {window}")
         src, label, *_ = bm.SPEC[var]
         ref = bm._ref_clim(var, months, mlat, mlon, src)
         if ref is None:
@@ -380,7 +388,7 @@ def instrument_check(rows):
 def write_csv(rows, meta, excluded, path):
     with open(path, "w", newline="") as fh:
         w = csv.writer(fh)
-        w.writerow(["variable", "model", "member", "files", "correction",
+        w.writerow(["variable", "model", "member", "grid_version", "correction",
                     "status", "global_mean_bias", "rms_bias_area_weighted"])
         for var, _l, lat, _lon, names, st, *_ in rows:
             v = st["valid"]
@@ -445,7 +453,8 @@ def figure_a(run, window, rows, out_dir):
                        "RdBu_r", -Z_LIM, Z_LIM, "-")
         fig.colorbar(m3, ax=axes[i, 2], shrink=0.85, pad=0.01)
     fig.suptitle(f"PROVISIONAL  {run} vs CMIP6 AMIP r1 members: "
-                 f"{window_label(window)}, ESMValTool reference datasets "
+                 f"{window_label(window)} model fields vs the ESMValTool "
+                 f"reference CLIMATOLOGIES of the same calendar months "
                  f"(area-weighted mean and RMS)", fontsize=11)
     out = pathlib.Path(out_dir) / f"cmip6_bias_maps_{run}.png"
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -492,8 +501,9 @@ def figure_b(run, window, rows, out_dir, meta):
         fig.supxlabel("* published field corrected for a unit/sign error in "
                       "the CMIP6 file (see CSV): " + ", ".join(fixed),
                       fontsize=8)
-    fig.suptitle(f"PROVISIONAL  {run} vs CMIP6 AMIP r1 members: global RMS "
-                 f"bias, {window_label(window)}", fontsize=11)
+    fig.suptitle(f"PROVISIONAL  {run} vs CMIP6 AMIP r1 members: global "
+                 f"area-weighted RMS bias, {window_label(window)} vs reference "
+                 f"climatologies", fontsize=11)
     out = pathlib.Path(out_dir) / f"cmip6_rms_rank_{run}.png"
     _save(fig, out)
     plt.close(fig)
