@@ -1046,9 +1046,15 @@ def test_free_run_from_a_record_start_records_it_and_differs_from_rest(
         (run_dir / "run_manifest.json").read_text())["config_sha256"]
     assert driver.free_run_output(config, run_dir, 1, None) \
         == run_dir / "free_runs" / "w01_day0052"
+    rest = copy.deepcopy(config)
+    rest["free_run"]["start"] = "rest"
+    driver.run_free_run(
+        rest, _write_config(tmp_path / "rest.json", rest), card=small_card,
+        seed=11, run_dir=run_dir, window_days=1, device=CPU, commit="0" * 40,
+        output=tmp_path / "from_rest")
     with np.load(root / "day0001.npz") as started, \
-            np.load(run_dir / "free_runs/w01/day0001.npz") as rest:
-        assert not np.array_equal(started["u_m_s"], rest["u_m_s"])
+            np.load(tmp_path / "from_rest/day0001.npz") as from_rest:
+        assert not np.array_equal(started["u_m_s"], from_rest["u_m_s"])
     # A training key that differs is still refused.
     changed = copy.deepcopy(config)
     changed["optimiser"]["learning_rate"] = 2.0e-3

@@ -974,9 +974,11 @@ def run_free_run(config: dict, config_path: Path, *, card, seed: int,
                            f"{config['free_run']['math_library']}), "
                            f"not {execution}")
     identity = json.loads((run_dir / "run_manifest.json").read_text())
-    # The free-run block (days, start, device) is the free run's own; every
-    # other key must be the training configuration the run was made from.
-    if config | {"free_run": identity["config"]["free_run"]} \
+    # The free-run block (days, start, device) and the prose description are
+    # the free run's own; every other key must be the training configuration
+    # the run was made from.
+    if config | {key: identity["config"][key]
+                 for key in ("free_run", "description")} \
             != identity["config"] or identity["seed"]["value"] != seed:
         raise ValueError(f"{run_dir} is not this configuration's seed {seed}")
     epochs = config["curriculum"]["epochs_per_window"]
