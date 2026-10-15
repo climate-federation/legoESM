@@ -92,7 +92,7 @@ not claimed measured by this round.
 ## 4. Ten-step ladders
 
 The committed ladder injects NEMO's recorded freshwater and surface forcing
-at each kt (`nemo_testcase_g2_orca2bathy_ladder.py:558-565`).
+at each kt (`nemo_testcase_g2_orca2bathy_ladder.py:557-564`).
 Bar = normalized maximum absolute error <= 1e-15. In the tables below each
 cell is `status max_abs/unequal`; A = AT-BAR, D = DEBT. T/S surface fields at
 kt 10 have no kt 11 entry frame, so the kt 10 restart supplies their all-level
@@ -216,8 +216,8 @@ No new owner is claimed.
 - Focused fast: 45 passed, 9 slow deselected (19.43 s).
 - Slow G4 stage/control route: 1 passed (242.97 s). The control restores
   58 T and 45 S stage-1 mismatches.
-- Receipt citation tests: 17 passed (5.01 s). The round-25 receipt gate passes
-  all 14 citations with zero failures, zero unmapped citations and zero map
+- Receipt citation tests: 17 passed (4.91 s). The round-25 receipt gate passes
+  all 16 citations with zero failures, zero unmapped citations and zero map
   audit failures; shifting `ocean_model_latlon_cgrid.py:2519-2523` exits 1
   with `SYMBOL-NOT-AT-LINE`.
 - Dispatch hardening: 23 passed, 1 handed pre-existing failure
