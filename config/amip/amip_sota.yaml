@@ -24,8 +24,10 @@
 #   run_amip.py --config config/amip/amip_sota.yaml "${AMIP_PATH_FLAGS[@]}" \
 #       --clm-surfdata-path data/clm/surfdata_1.9x2.5_16pfts_CMIP6_simyr2000.nc \
 #       --land-mask-file <lsm.nc> --days N --output DIR
-# Run (Levante): source config/amip/amip_sota.sh (the shared Levante paths
-# with this deck's start file), then the same run_amip.py line.
+# Run (Levante): source config/amip/amip_sota.sh (the shared Levante paths,
+# CLM surfdata and land mask included, with this deck's start file), then:
+#   run_amip.py --config config/amip/amip_sota.yaml "${AMIP_PATH_FLAGS[@]}" \
+#       --days N --output DIR
 # Machine PATHS are NOT pinned here (see amip_production.sh) — pass at runtime.
 # Tracking: GitHub issue #636.
 # =============================================================================

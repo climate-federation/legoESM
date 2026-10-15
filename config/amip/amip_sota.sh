@@ -6,5 +6,7 @@
 #   source config/amip/amip_sota.sh
 #   "${PY}" -u scripts/run/run_amip.py --config config/amip/amip_sota.yaml \
 #       "${AMIP_PATH_FLAGS[@]}" --days "${DAYS}" --output "${OUTDIR}"
-: "${ERA5_IC:=/scratch/b/b309178/era5_ic_1979-01-01.zarr}"
+# Set, not defaulted: a shell that already sourced amip_production.sh holds
+# its ERA5_IC.  Override with AMIP_SOTA_ERA5_IC.
+ERA5_IC="${AMIP_SOTA_ERA5_IC:-/scratch/b/b309178/era5_ic_1979-01-01.zarr}"
 source "$(dirname "${BASH_SOURCE[0]}")/amip_production.sh"
