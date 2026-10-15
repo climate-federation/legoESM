@@ -1736,13 +1736,13 @@ CITATION_MAP = {
     # --- GRIDLADDER round 30 (G4 round 9 receipt) ---
     'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/stprk3_stg.f90:215': ('r3t(:,:,Kaa) = r1_2 * ( r3t(:,:,Kbb) + r3ta(:,:) )', 2),
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:221': ('r3t(:,:,Kaa) = r1_2 * ( r3t(:,:,Kbb) + r3ta(:,:) )', 2),
-    'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/domqco.f90:257': 'pr3t(ji,jj) = pssh(ji,jj) * r1_ht_0(ji,jj)',
+    'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/domqco.f90:257': ('pr3t(ji,jj) = pssh(ji,jj) * r1_ht_0(ji,jj)', 2),
     'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/sbcrnf.f90:281': 'update h_rnf to be depth of top box',
     'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/trazdf.f90:231-232': [
         'zwi(ji,jk) = - p2dt * zwt(ji,jk  ) / (e3w_1d(jk) *(1._wp+r3t(ji,jj,Kmm)))',
         'zws(ji,jk) = - p2dt * zwt(ji,jk+1) / (e3w_1d(jk+1) *(1._wp+r3t(ji,jj,Kmm)))', 2],
     'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/trazdf.f90:233': 'zwd(ji,jk) = (e3t_3d(ji,jj,jk) *(1._wp+r3t(ji,jj,Kaa)*tmask(ji,jj,jk))) - ( zwi(ji,jk) + zws(ji,jk) )',
-    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/domqco.f90:257': 'pr3t(ji,jj) = pssh(ji,jj) * r1_ht_0(ji,jj)',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/domqco.f90:257': ('pr3t(ji,jj) = pssh(ji,jj) * r1_ht_0(ji,jj)', 2),
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcrnf.f90:281': 'update h_rnf to be depth of top box',
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/trazdf.f90:231-232': [
         'zwi(ji,jk) = - p2dt * zwt(ji,jk  ) / (e3w_1d(jk) *(1._wp+r3t(ji,jj,Kmm)))',
@@ -2029,7 +2029,7 @@ CITATION_MAP = {
         2],
     'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/trazdf.f90:294': (
         'pt(ji,jj,jpkm1,jn,Kaa) = pt(ji,jj,jpkm1,jn,Kaa) / zwt(ji,jpkm1) * tmask(ji,jj,jpkm1)', 1),
-    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/domqco.f90:257': ('pr3t(ji,jj) = pssh(ji,jj) * r1_ht_0(ji,jj)', 2),
+    'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/domqco.f90:257': (('pr3t(ji,jj) = pssh(ji,jj) * r1_ht_0(ji,jj)', 2), 2),
     'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/stp2d.f90:137-138': [
         ('CALL eos    ( ts, Kbb, rhd )', 1), ('CALL dyn_hpg( kt, Kbb     , uu, vv, Krhs )', 1), 2],
     'ORCA2G1_OMIP_L1_P3/BLD/ppsrc/nemo/stp2d.f90:144': ('CALL dyn_vor( kt,      Kbb, uu, vv, Krhs )', 1),
@@ -4350,7 +4350,7 @@ CITATION_MAP = {
     # :153 multiplies it back); what is new here is the statement that makes
     # it and legoESM's three answering lines.
     'GYRE_OMIP_L2_P3_SM_R156ST2/BLD/ppsrc/nemo/domqco.f90:257':
-        ('pr3t(ji,jj) = pssh(ji,jj) * r1_ht_0(ji,jj)', 2),
+        (('pr3t(ji,jj) = pssh(ji,jj) * r1_ht_0(ji,jj)', 2), 2),
     'ocean_pe_latlon_cgrid.py:1746':
         ('r3_now = jax.lax.optimization_barrier(eta_now * r1_h0)', 1),
     'ocean_pe_latlon_cgrid.py:1747':
@@ -4765,7 +4765,7 @@ CITATION_MAP = {
         'DO jk =  2,  jpkm1',
         '/ (e3w_1d(jk) *(1._wp+r3t(ji,jj,Kmm))) * wmask(ji,jj,jk)', 10],
     'GYRE_OMIP_L2_P3_SM_R125ZDFMAG/BLD/ppsrc/nemo/domqco.f90:208': (
-        'pr3t(ji,jj) = pssh(ji,jj) * r1_ht_0(ji,jj)', 1),
+        ('pr3t(ji,jj) = pssh(ji,jj) * r1_ht_0(ji,jj)', 2), 1),
     'GYRE_OMIP_L2_P3_SM_R125ZDFMAG/BLD/ppsrc/nemo/trazdf.f90:132-140': [
         'll_l2_tra = ( lwp .AND. kt <= nit000 + 1 )',
         'IF( jpts /= 2 )', 9],
@@ -4866,7 +4866,7 @@ CITATION_MAP = {
         ('r3t(:,:,Kaa) = r3ta(:,:)', 3), 33],
     'GYRE_OMIP_L2_P3_SM_R123PROC/BLD/ppsrc/nemo/domqco.f90:237-257': [
         ('SUBROUTINE dom_qco_r3c_RK3( pssh, pr3t, pr3u, pr3v, pr3f )', 1),
-        ('pr3t(ji,jj) = pssh(ji,jj) * r1_ht_0(ji,jj)', 2), 21],
+        (('pr3t(ji,jj) = pssh(ji,jj) * r1_ht_0(ji,jj)', 2), 2), 21],
     'GYRE_OMIP_L2_P3_SM_R123PROC/BLD/ppsrc/nemo/stprk3_stg.f90:861-869': [
         'CALL tra_adv    ( kstp, Kbb, Kmm, Kaa, ts, Krhs, zFu, zFv, zFw, kstg )',
         ('IF( lr123_write )   WRITE(r123_unit) ts(:,:,:,jp_tem,Krhs)', 2), 9],
