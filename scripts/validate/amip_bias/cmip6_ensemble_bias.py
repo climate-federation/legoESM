@@ -503,7 +503,7 @@ def figure_b(run, window, rows, out_dir, meta):
                       fontsize=8)
     fig.suptitle(f"PROVISIONAL  {run} vs CMIP6 AMIP r1 members: global "
                  f"area-weighted RMS bias, {window_label(window)} vs reference "
-                 f"climatologies", fontsize=11)
+                 f"climatologies of the same calendar months", fontsize=11)
     out = pathlib.Path(out_dir) / f"cmip6_rms_rank_{run}.png"
     _save(fig, out)
     plt.close(fig)
