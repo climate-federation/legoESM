@@ -3201,6 +3201,19 @@ class LatLonCGridOceanConfig(NamedTuple):
     # the two ratios, not the ratio of the mean sea level.  False takes the
     # ratio of the interpolated sea level (last-place different on some faces).
     zdf_momentum_stage_r3u_nemo_literal: bool = False
+    # The barotropic wind term (stp2d.f90:198-199) divides by NEMO's stored
+    # r1_hu_0/(1+r3u(Kbb)) (domqco).  False divides by the card's live column
+    # depth, which differs wherever the sea level is not zero.
+    barotropic_wind_nemo_stored_depth: bool = False
+    # The native surface stress's pivot-row V face on a T-pivot fold reads
+    # NEMO's vector halo, -vtau(pivot-1) mirrored (sbcmod.f90:548-551, :559).
+    # False takes the scalar mirror of the face below.
+    surface_stress_nemo_fold_vector_sign: bool = False
+    # dyn_zdf's surface-stress deposit (dynzdf.f90:338-339, V :505-506)
+    # divides by NEMO's e3u_3d(1)*(1+r3u(Kaa)*umask), the face thickness the
+    # NEMO-divisor solve uses.  False divides by the cell-averaged stretched
+    # top thickness.
+    zdf_surface_stress_nemo_face_thickness: bool = False
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":

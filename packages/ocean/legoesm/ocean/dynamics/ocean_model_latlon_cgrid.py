@@ -6471,6 +6471,9 @@ class LatLonCGridOceanModel:
                         use_native=not (
                             self._nemo_ws_test_hooks
                             .legacy_geographic_surface_stress_arm),
+                        nemo_fold_vector_sign=getattr(
+                            _cfg_b, "surface_stress_nemo_fold_vector_sign",
+                            False),
                         **({} if self._nemo_ws_test_hooks
                             .legacy_coastal_surface_stress_factors else {
                                 "cell_mask": state.land_mask.data,
@@ -6487,6 +6490,28 @@ class LatLonCGridOceanModel:
                 _wind_r1_rho0 = nemo_source_round(1.0 / _r0)
                 _wind_r1_hu = nemo_source_round(1.0 / H_u_pre)
                 _wind_r1_hv = nemo_source_round(1.0 / H_v_pre)
+                if getattr(_cfg_b, "barotropic_wind_nemo_stored_depth", False):
+                    # stp2d.f90:198-199 divides by r1_hu_0/(1+r3u(Kbb)), the
+                    # stored domqco ratio, not by the live column depth.
+                    if getattr(_cfg_b, "momentum_time_integrator", "euler") != "rk3_ws":
+                        raise ValueError(
+                            "barotropic_wind_nemo_stored_depth requires "
+                            "momentum_time_integrator='rk3_ws'")
+                    from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
+                        _nemo_een_ratio_fold_exchange,
+                    )
+                    _r1u, _r1v = _nemo_ws_qco_stage_faces(
+                        state.eta.data, _ws_h_ref, _ws_u_live_mask,
+                        _ws_v_live_mask, _grid, z_coord=_zc,
+                        include_reciprocals=True)[4:]
+                    # r3u/r3v(Kbb) carry the T-pivot fold exchange
+                    # (stprk3_stg.f90:163); the mirrored r1_h*_0 rows are
+                    # equal, so exchanging the stored reciprocal is the same.
+                    _r1u_n, _r1v_n, _ = _nemo_een_ratio_fold_exchange(
+                        _r1u[:, 1:], _r1v[1:], _r1v[1:], _grid,
+                        _cfg_b.barotropic.barotropic_een_ratio_fold_exchange)
+                    _wind_r1_hu = _r1u.at[:, 1:].set(_r1u_n)
+                    _wind_r1_hv = _r1v.at[1:].set(_r1v_n)
                 _wind_operand_override = (
                     self._nemo_ws_test_hooks
                     .slow_forcing_wind_operand_override)
@@ -12849,6 +12874,7 @@ class LatLonCGridOceanModel:
         u_new, v_new = state.u.data, state.v.data
         u_solve_in, v_solve_in = state.u.data, state.v.data
         _zdf_explicit_u, _zdf_explicit_v = u_solve_in, v_solve_in
+        _zdf_top_stress = None
         if do_momentum and getattr(_cfg_b, "surface_stress_implicit",
                                    False) and surface_forcing is not None:
             # NEMO dynzdf surface BC: deposit the wind stress in the TOP cell
@@ -12862,7 +12888,9 @@ class LatLonCGridOceanModel:
             )
             _sfx = surface_stress_faces(
                 surface_forcing, state.u.data.dtype, _zc, J_cell,
-                _grid, **({} if self._nemo_ws_test_hooks
+                _grid, nemo_fold_vector_sign=getattr(
+                    _cfg_b, "surface_stress_nemo_fold_vector_sign", False),
+                **({} if self._nemo_ws_test_hooks
                            .legacy_coastal_surface_stress_factors else {
                                "cell_mask": state.land_mask.data,
                                "u_mask": state.u_mask.data,
@@ -12872,10 +12900,33 @@ class LatLonCGridOceanModel:
                 _tau_i_u, _tau_j_v, _dz0u, _dz0v = _sfx
                 _r0 = jnp.asarray(_cfg_b.constants.rho_0,
                                   dtype=state.u.data.dtype)
-                u_solve_in = state.u.data.at[..., 0].add(
-                    dt_mom * _tau_i_u / (_r0 * jnp.maximum(_dz0u, 1e-10)))
-                v_solve_in = state.v.data.at[..., 0].add(
-                    dt_mom * _tau_j_v / (_r0 * jnp.maximum(_dz0v, 1e-10)))
+                if getattr(_cfg_b, "zdf_surface_stress_nemo_face_thickness",
+                           False):
+                    # dynzdf.f90:338-339 (V :505-506): rDt*utauU /
+                    # ((e3u_3d(1)*(1+r3u(Kaa)*umask))*rho0) * umask
+                    if not _zdf_nemo_faces:
+                        raise ValueError(
+                            "zdf_surface_stress_nemo_face_thickness requires "
+                            "zdf_momentum_nemo_face_thickness")
+                    _e3u1, _e3v1 = (a[..., 0] for a in
+                                    _nemo_dynzdf_drag_face_thickness(
+                                        state.eta.data, state.H_bathy.data,
+                                        _zc, _cfg_b, _grid,
+                                        state.u.data.dtype))
+                    # added in the second recurrence, AFTER the barotropic
+                    # removal and the bottom-drag add (dynzdf.f90:156-167):
+                    # deposited just before the solve, below
+                    _rnd = nemo_source_round
+                    _zdf_top_stress = (
+                        _rnd(_rnd(_rnd(dt_mom * _tau_i_u) / _rnd(_e3u1 * _r0))
+                             * state.u_mask.data),
+                        _rnd(_rnd(_rnd(dt_mom * _tau_j_v) / _rnd(_e3v1 * _r0))
+                             * state.v_mask.data))
+                else:
+                    u_solve_in = state.u.data.at[..., 0].add(
+                        dt_mom * _tau_i_u / (_r0 * jnp.maximum(_dz0u, 1e-10)))
+                    v_solve_in = state.v.data.at[..., 0].add(
+                        dt_mom * _tau_j_v / (_r0 * jnp.maximum(_dz0v, 1e-10)))
         if do_momentum:
             A_v_cell = A_v_cell.astype(state.u.data.dtype)
             if _wet_if_vmix is not None:
@@ -13242,6 +13293,9 @@ class LatLonCGridOceanModel:
                     dt_mom * _r_eff_v[..., jnp.newaxis]
                     / jnp.maximum(_drg_e3v, 1e-10) * _is_bot_v * _v_bt_mean)
         _zdf_baro_drag_u, _zdf_baro_drag_v = u_solve_in, v_solve_in
+        if _zdf_top_stress is not None:
+            u_solve_in = u_solve_in.at[..., 0].add(_zdf_top_stress[0])
+            v_solve_in = v_solve_in.at[..., 0].add(_zdf_top_stress[1])
 
         # ---- Solve dispatch: batched (opt-in diag) / T+S pair / singles ---
         # Trace-time env switches (feature-gating exception: static

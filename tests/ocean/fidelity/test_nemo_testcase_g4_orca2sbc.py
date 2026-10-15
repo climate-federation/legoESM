@@ -222,7 +222,15 @@ def cards(tmp_path_factory):
 def test_g4_card_is_the_g3_card_under_orca2s_forcing(cards):
     g4, root, g3 = cards
     a, b = g4.recipe.model_config, g3.recipe.model_config
-    assert [f for f in a._fields if repr(getattr(a, f)) != repr(getattr(b, f))] == ["physics"]
+    # round 23: NEMO's surface-stress statements, G4's card only
+    stress = ["barotropic_wind_nemo_stored_depth", "surface_stress_nemo_fold_vector_sign",
+              "zdf_surface_stress_nemo_face_thickness"]
+    assert sorted(f for f in a._fields if repr(getattr(a, f)) != repr(getattr(b, f))) == sorted(
+        ["physics", *stress])
+    assert all(getattr(a, f) is True and getattr(b, f) is False for f in stress)
+    assert [c for c, on in recipe._ORCA2G_WIND_STORED_DEPTH.items() if on] == ["ORCA2G4-sbc"]
+    from legoesm.ocean.state import LatLonCGridOceanConfig
+    assert all(LatLonCGridOceanConfig._field_defaults[f] is False for f in stress)
     assert [f for f in a.physics._fields
             if repr(getattr(a.physics, f)) != repr(getattr(b.physics, f))] == [
         "shortwave_penetration"]
@@ -517,6 +525,39 @@ def _values_text(data: bytes):
         return _values(Path(handle.name))
 
 
+R21_P6_A = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/round21/"
+                "oracle_g4_r21/p6_a")
+
+
+@needs_inputs
+@pytest.mark.slow
+@pytest.mark.skipif(not (R21_P6_A / "oracle_g1step_kt00000001.bin").is_file(),
+                    reason="no round-21 record")
+def test_nemo_supplied_forcing_stage_one_and_three(tmp_path):
+    """Decision 123 on the Decision-120 record (round 21), kt = 1, NEMO's own
+    surface fields through the ORCA2 lane's route.  With NEMO's three
+    surface-stress statements (round 23) stage 1 is NEMO's in sea level,
+    both barotropic transports and v; u differs only by signed zeros; T and
+    S by the last place on the bump cells (open).  Stage 3's stress
+    response is gone.  Deselected, round 21's bump-patch gap returns."""
+    root = tmp_path / "g4"
+    root.mkdir()
+    (root / "namelist_cfg").write_text((G4_DIR / "namelist_cfg").read_text())
+    for f in R21_P6_A.glob("*.nc"):
+        if not re.search(r"restart|300h|mesh_mask|layout", f.name):
+            (root / f.name).symlink_to(f)
+    mod = _steps_module()
+    fed = mod.route(R21_P6_A, root, stages="13")["stages"]
+    one, three = fed["1"], fed["3"]
+    assert [one[n]["unequal"] for n in ("ssh", "uu_b", "vv_b", "v")] == [0, 0, 0, 0]
+    assert one["u"]["unequal_values"] == 0
+    assert all(0 < one[n]["unequal"] < 100 and one[n]["max_abs"] < 1e-14 for n in ("T", "S"))
+    assert three["ssh"]["unequal"] == 0 and max(three[n]["max_abs"] for n in ("u", "v")) < 2e-15
+    assert max(three[n]["max_abs"] for n in ("T", "S")) < 1e-14   # one last place (T ~ 20 C)
+    before = mod.route(R21_P6_A, root, stages="1", without_stress_options=True)["stages"]["1"]
+    assert before["ssh"]["unequal"] > 2000 and before["uu_b"]["max_abs"] > 1e-10
+
+
 @needs_inputs
 @pytest.mark.slow
 @pytest.mark.skipif(not (R19_TWIN_A / "oracle_g1step_kt00000001.bin").is_file(),
@@ -537,5 +578,6 @@ def test_nemo_supplied_forcing_is_read_at_nemos_stage_one(tmp_path):
     # every wet column (16,433) moves in sea level, T and S; nearly every face in u, v
     assert [zero[n]["unequal"] for n in ("ssh", "T", "S")] == [16433] * 3
     assert all(r["unequal"] > 15000 for r in zero.values())
-    fed = mod.route(R19_TWIN_A, root, stages="1")["stages"]["1"]
+    # round 21's measurement, the card without round 23's stress statements
+    fed = mod.route(R19_TWIN_A, root, stages="1", without_stress_options=True)["stages"]["1"]
     assert all(0 < r["unequal"] < 2500 and r["max_abs"] < 1e-9 for r in fed.values())

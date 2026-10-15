@@ -4406,7 +4406,7 @@ def _bc_physics_tendencies(du_dt, dv_dt, dT_dt, dS_dt, physics_fn, state, grid, 
 def surface_stress_faces(
     surface_forcing, u_dtype, z_coord, J, grid, *,
     nemo_literal_association=False, use_native=True,
-    cell_mask=None, u_mask=None, v_mask=None,
+    cell_mask=None, u_mask=None, v_mask=None, nemo_fold_vector_sign=False,
 ):
     """Wind stress at u/v faces + the top-cell thicknesses (single owner of
     the tau sign/interp/rotation chain — used by the explicit stage-10b'
@@ -4417,6 +4417,11 @@ def surface_stress_faces(
     identity.  They apply ``sbcmod.F90:543-546``'s coastal unmasking after
     interpolation: ``(2-umask)*MAX(tmask_w,tmask_e)`` (and its V analogue).
     Omitting all three retains the generic non-NEMO handoff.
+
+    ``nemo_fold_vector_sign`` (native stress, T-pivot fold with the pivot row
+    stored): the pivot-row V face reads the halo NEMO's ``lbc_lnk`` gives
+    ``vtau`` as a vector, ``-vtau(pivot-1)`` mirrored (``sbcmod.F90:548-551``
+    then ``:559``); otherwise the face is the scalar mirror of the one below.
 
     Returns ``(tau_i_u, tau_j_v, dz_0_u, dz_0_v)`` (ocean-reaction sign,
     grid-aligned) or ``None`` when the forcing carries no stress."""
@@ -4458,9 +4463,32 @@ def surface_stress_faces(
         tau_j_v, dz_0_v = interp_to_v_points_multi(
             (tau_j_T, jnp.asarray(z_coord.dz_ref[0], dtype=u_dtype) * J),
             grid=grid, source_round=True)
+        if nemo_fold_vector_sign:
+            from legoesm.grids.operators_latlon_cgrid import fold_ghost_source_T
+            fold = getattr(grid, "fold", None)
+            if not (fold_is_local(grid)
+                    and bool(getattr(fold, "pivot_row_stored", False))):
+                raise ValueError(
+                    "nemo_fold_vector_sign needs a local T-pivot north fold "
+                    "with its pivot row stored")
         dz_0_u = interp_cell_to_uface(
             jnp.asarray(z_coord.dz_ref[0], dtype=u_dtype) * J)
         tau_i_u, tau_j_v = _apply_nemo_coastal_factors(tau_i_u, tau_j_v)
+        if nemo_fold_vector_sign:
+            # the pivot-row V face, all of sbcmod.F90:559-560 on NEMO's folded
+            # rows: vtau's halo is -vtau(pivot-1) mirrored, and vmask/tmask
+            # there are the scalar mirrors (the card stores this row as wall)
+            if cell_mask is None:
+                raise ValueError("nemo_fold_vector_sign needs the NEMO masks")
+            halo = -fold_ghost_source_T(tau_j_T, fold)[0][fold.perm_T]
+            tm = jnp.asarray(cell_mask, dtype=u_dtype)
+            vm_top = jnp.asarray(v_mask, dtype=u_dtype)[-2][fold.perm_v]
+            tm_halo = fold_ghost_source_T(tm, fold)[0][fold.perm_T]
+            top = nemo_source_round(0.5 * nemo_source_round(tau_j_T[-1] + halo))
+            top = nemo_source_round(
+                nemo_source_round(top * nemo_source_round(2.0 - vm_top))
+                * jnp.maximum(tm[-1], tm_halo))
+            tau_j_v = tau_j_v.at[-1].set(top)
         return tau_i_u, tau_j_v, dz_0_u, dz_0_v
     if surface_forcing is None or _sf_tau_x is None or _sf_tau_y is None:
         return None

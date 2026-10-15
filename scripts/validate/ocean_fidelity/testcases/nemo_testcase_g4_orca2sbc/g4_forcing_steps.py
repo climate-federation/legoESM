@@ -324,8 +324,14 @@ def nemo_supplied_forcing(card, run: Path, kt: int, *, zero: bool = False):
     return _surface_forcings(card, run, fields, kt)
 
 
+# NEMO's surface-stress statements the G4 card selects (round 23); ``without``
+# deselects them (the before arm).
+STRESS_OPTIONS = ("barotropic_wind_nemo_stored_depth", "surface_stress_nemo_fold_vector_sign",
+                  "zdf_surface_stress_nemo_face_thickness")
+
+
 def route(run: Path, deck_root: Path, *, zero: bool = False, stages: str = "123",
-          dump: Path | None = None) -> dict:
+          dump: Path | None = None, without_stress_options: bool = False) -> dict:
     """GIVEN-NEMO-ENTRY, kt = 1: the G4 card from NEMO's as-built initial state
     (the record ran ln_tsd_dmp = F: no hand edits), forced by NEMO's kt = 1
     surface fields, each RK3 stage compared with NEMO's stage frame."""
@@ -338,18 +344,29 @@ def route(run: Path, deck_root: Path, *, zero: bool = False, stages: str = "123"
     import nemo_testcase_g2_orca2bathy_ladder as g2
     g1._fp64()
     require(jax.default_backend() == "cpu", "CPU only")
-    require("ln_tsd_dmp  =  F" in (run / "ocean.output").read_text(), "not the as-built record")
+    log = (run / "ocean.output").read_text()
+    as_built = "ln_tsd_dmp  =  F" in log
+    require(as_built or "ln_tsd_dmp  =  T" in log, "ln_tsd_dmp not in NEMO's log")
     card = recipe.build_nemo_testcase_card("ORCA2G4-sbc", deck_root=deck_root)
-    wet = np.asarray(card.recipe.z_coord.is_active) > 0.5
-    t0, s0 = recipe.build_orca2_initial_ts(
-        run / "data_1m_potential_temperature_nomask.nc", run / "data_1m_salinity_nomask.nc",
-        wet, apply_hand_alterations=False)
+    require(all(getattr(card.recipe.model_config, o) is True for o in STRESS_OPTIONS),
+            "the G4 card no longer selects NEMO's surface-stress statements")
+    if without_stress_options:
+        card = card._replace(recipe=card.recipe._replace(model_config=card.recipe.model_config._replace(
+            **{o: False for o in STRESS_OPTIONS})))
     st = card.recipe.initial_state
-    entry = st._replace(T=st.T.replace(data=jnp.asarray(t0)), S=st.S.replace(data=jnp.asarray(s0)))
+    entry = st          # Decision 120 record: the card's state is NEMO's (hand edits)
+    if as_built:        # rounds 17-19 records: NEMO ran without the hand edits
+        wet = np.asarray(card.recipe.z_coord.is_active) > 0.5
+        t0, s0 = recipe.build_orca2_initial_ts(
+            run / "data_1m_potential_temperature_nomask.nc", run / "data_1m_salinity_nomask.nc",
+            wet, apply_hand_alterations=False)
+        entry = st._replace(T=st.T.replace(data=jnp.asarray(t0)), S=st.S.replace(data=jnp.asarray(s0)))
     freshwater, surface = nemo_supplied_forcing(card, run, 1, zero=zero)
     nemo = frames(run, 1)
     full = nemo["s_sst_m"].shape
-    out = {"label": "GIVEN-NEMO-ENTRY (as-built initial state), kt = 1", "zero_forcing": zero,
+    out = {"label": "GIVEN-NEMO-ENTRY (%s initial state), kt = 1" % (
+               "as-built" if as_built else "Decision-120"), "zero_forcing": zero,
+           "without_stress_options": without_stress_options,
            "stages": {}}
     for stage, (hooks, _) in (("1", g2.EXPOSURES["stage1"]), ("2", g2.EXPOSURES["stage2"]),
                               ("3", g2.EXPOSURES["stage3"])):
@@ -365,6 +382,7 @@ def route(run: Path, deck_root: Path, *, zero: bool = False, stages: str = "123"
             ref = np.asarray(inner(nemo[f"{stage}_{key}"], full), np.float64)
             got = np.asarray(cand[name], np.float64)
             rows[name] = {"unequal": int((ref.view("<u8") != got.view("<u8")).sum()),
+                          "unequal_values": int((ref != got).sum()),
                           "max_abs": float(np.max(np.abs(ref - got)))}
         out["stages"][stage] = rows
         if dump is not None:
