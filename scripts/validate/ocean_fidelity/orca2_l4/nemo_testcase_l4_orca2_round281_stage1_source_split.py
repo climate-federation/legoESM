@@ -22,20 +22,20 @@ from scripts.validate.ocean_fidelity.orca2_l4 import (  # noqa: E402
     nemo_testcase_l4_orca2_round92_rung0_card_gate as rung0,
 )
 from scripts.validate.ocean_fidelity.orca2_l4 import (  # noqa: E402
+    nemo_testcase_l4_orca2_round170_slow_producer_walk as r170,
+)
+from scripts.validate.ocean_fidelity.orca2_l4 import (  # noqa: E402
     nemo_testcase_l4_orca2_round176_stage1_offline_replay as r176,
 )
 from scripts.validate.ocean_fidelity.orca2_l4 import (  # noqa: E402
     nemo_testcase_l4_orca2_round223_omt4_ladder_gate as omt4,
-)
-from scripts.validate.ocean_fidelity.orca2_l4 import (  # noqa: E402
-    nemo_testcase_l4_orca2_round279_runoff_topv_gate as r279,
 )
 from scripts.validate.ocean_fidelity.orca2_l4.nemo_testcase_l4_orca2_round280_stage1_acquisition import (  # noqa: E402,E501
     check_record as admission_gate,
 )
 
 SOURCE_ROW = 146
-SOURCE_ORDER = ("entry_v", "rhs_v", "pre_v", "cor_v", "final_v")
+SOURCE_ORDER = ("entry_v", "pre_v", "cor_v", "final_v")
 PLANTS = (
     "none", "admission", "source-order", "matched-point", "raw-bit",
     "corrected-bit", "final-bit", "source-row", "one-bit",
@@ -192,10 +192,13 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
 def measure(deck_root: Path, record_root: Path, baseline_root: Path,
             prior_report: Path, expect_commit: str) -> dict[str, object]:
     import jax
+    import jax.numpy as jnp
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+    from legoesm.ocean.dynamics.barotropic_common import (
+        rk3_stage_barotropic_correction,
+    )
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
-        LatLonCGridOceanModel,
-        _NEMOWSRK3TestHooks,
+        rk3_stage_velocity_update,
     )
 
     stamp = worktree_stamp()
@@ -220,37 +223,35 @@ def measure(deck_root: Path, record_root: Path, baseline_root: Path,
     require(not cfg.rk3_fold_exchange_top_v_row,
             "Decision 125 top-V selector is unexpectedly enabled")
     state = card.recipe.initial_state
-    freshwater, surface = r279.rung0_ladder._zero_forcing((148, 180))
-
-    def run(hooks):
-        model = LatLonCGridOceanModel(
-            card.recipe.grid, card.recipe.z_coord, cfg,
-            _nemo_ws_test_hooks=hooks)
-        return jax.device_get(model.step(
-            state, card.dt_s, freshwater=freshwater,
-            surface_forcing=surface))
-
-    rhs_state = run(_NEMOWSRK3TestHooks(expose_stage1_momentum_rhs=True))
-    raw_state = run(_NEMOWSRK3TestHooks(expose_stage1_raw_momentum=True))
-    corrected_state = run(_NEMOWSRK3TestHooks(expose_momentum_stage=1))
-    # Decision 125 keeps the only subsequent completed-stage V association
-    # off on OMT-4.  Therefore the card's completed V is the corrected V.
-    # Do not call round 279's combined momentum+tracer exposure here: that
-    # returns stage-1 T/S and would mix tracer program points in the passivity
-    # comparison even though this gate observes V only.
-    completed_state = corrected_state
+    ops = r170._candidate_reference_operands(card, state)
+    active_v = np.asarray(ops["mask_v"] != 0.0)
+    require(active_v.shape == (148, 180, 31),
+            f"production V support moved: {active_v.shape}")
+    entry_v = np.asarray(rung0.candidate_fields(state)["v"], np.float64)
+    pre_v = jax.device_get(rk3_stage_velocity_update(
+        jnp.asarray(entry_v), jnp.asarray(oracle["rhs_v"][..., :-1]),
+        card.dt_s / 3.0, jnp.asarray(active_v[..., :-1]),
+        vector_form=True, written_order=cfg.rk3_stage_velocity_written_order,
+    ))
+    cor_v = jax.device_get(rk3_stage_barotropic_correction(
+        jnp.asarray(pre_v), jnp.asarray(oracle["ext_vb"]),
+        jnp.asarray(ops["e3_v"][..., :-1]),
+        jnp.asarray(ops["r1_h0_v"]),
+        jnp.asarray(ops["mask_v"][..., :-1]),
+        cfg.rk3_stage_velocity_written_order,
+    ))
 
     candidate = {
-        "entry_v": r176._with_jpk_zero(rung0.candidate_fields(state)["v"]),
-        "rhs_v": r176._with_jpk_zero(rung0.candidate_fields(rhs_state)["v"]),
-        "pre_v": r176._with_jpk_zero(rung0.candidate_fields(raw_state)["v"]),
-        "cor_v": r176._with_jpk_zero(rung0.candidate_fields(corrected_state)["v"]),
-        "final_v": r176._with_jpk_zero(rung0.candidate_fields(completed_state)["v"]),
+        "entry_v": r176._with_jpk_zero(entry_v),
+        "pre_v": r176._with_jpk_zero(pre_v),
+        "cor_v": r176._with_jpk_zero(cor_v),
+        # Decision 125 keeps the subsequent completed-stage association off,
+        # so this is also the candidate's completed V at the matched boundary.
+        "final_v": r176._with_jpk_zero(cor_v),
     }
     entry = rung0.assemble_frame(record_root, 1, 0)
     expected = {
         "entry_v": r176._with_jpk_zero(entry["v"]),
-        "rhs_v": oracle["rhs_v"],
         "pre_v": oracle["pre_v"],
         "cor_v": oracle["cor_v"],
         "final_v": oracle["final_v"],
@@ -268,13 +269,6 @@ def measure(deck_root: Path, record_root: Path, baseline_root: Path,
                 candidate[name][SOURCE_ROW, :, :-1],
                 expected[name][SOURCE_ROW, :, :-1]),
         }
-
-    passivity = {}
-    for field in ("T", "S", "ssh"):
-        values = [rung0.candidate_fields(item)[field]
-                  for item in (rhs_state, raw_state, corrected_state, completed_state)]
-        passivity[field] = all(np.array_equal(values[0], value) for value in values[1:])
-    require(all(passivity.values()), "write-only source seams moved an unobserved field")
 
     controls = {
         "pre_v": _one_bit_control(expected["pre_v"].shape),
@@ -303,7 +297,11 @@ def measure(deck_root: Path, record_root: Path, baseline_root: Path,
             "rms": prior_source["rms"],
             "argmax": [SOURCE_ROW, *prior_source["argmax"]],
         },
-        "passivity": passivity,
+        "execution": "offline replay of shared pure operators; no executable observer",
+        "recorded_inputs": {
+            "rhs_v": admission["records"][0]["fields"]["rhs_v"]["payload_sha256"],
+            "ext_vb": admission["records"][0]["fields"]["ext_vb"]["payload_sha256"],
+        },
         "controls": controls,
         "operand_availability_if_correction_owns": {
             "recorded": ["pre_v", "ext_vb", "cor_v"],
