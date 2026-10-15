@@ -460,7 +460,16 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
     has_frames = (root / "oracle_g1step_kt00000001.bin").is_file()
     require(has_frames or arm == "restart_independent",
             f"{root} holds no step frames; only restart_independent can run")
-    n_stage = g1.stage_steps(root) if has_frames else 0
+    if has_frames and case == "ORCA2G4-sbc":
+        # G4 records the NCAR bulk-iteration operands on odd forcing steps,
+        # so its otherwise complete kt=1..10 stage files alternate sizes.
+        # Count the contiguous files; G1-G3's equal-size rule is not valid.
+        checker = g1._checker()
+        n_stage = 0
+        while checker.step_path(root, n_stage + 1).is_file():
+            n_stage += 1
+    else:
+        n_stage = g1.stage_steps(root) if has_frames else 0
     model = LatLonCGridOceanModel(card.recipe.grid, z, cfg)
     require(s0.eta_rk3_after is None, "the card carries an after-ssh slot")
     if case == "ORCA2G4-sbc":
