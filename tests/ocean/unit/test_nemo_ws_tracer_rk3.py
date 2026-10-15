@@ -743,6 +743,42 @@ def test_nemo_ws_stage1_trace_exposes_live_rhs_boundaries(monkeypatch):
     assert not np.array_equal(b1, adv_b)
 
 
+def test_nemo_ws_tracer_stage_update_can_preserve_nemo_written_order():
+    """The selected arm rounds every product/sum in stprk3_stg:503-505."""
+    values = np.array([
+        [21.770198420753154, 1.007385575907986, 0.9925777791415137,
+         0.9929383310694823, 1.2780931360124603e-09],
+        [20.093576887515358, 1.0025728693360225, 1.0035453604482691,
+         1.004913259700945, -7.437895220147277e-09],
+        [17.31900965870356, 1.0048125818941962, 0.9936625683254304,
+         0.9949067590439657, 4.655958369288929e-09],
+        [31.146819125679247, 0.9950401452461842, 1.0058326163307618,
+         1.0088521400157253, 3.94753675890741e-09],
+    ], dtype=np.float64)
+    base = jnp.asarray(values[:, 0])[None, :, None]
+    source = jnp.asarray(values[:, 4])[None, :, None]
+    q_before = jnp.asarray(values[:, 1])[None, :]
+    q_rhs = jnp.asarray(values[:, 2])[None, :]
+    q_after = jnp.asarray(values[:, 3])[None, :]
+    ones = jnp.ones_like(base)
+    vertical = jnp.ones((1, 4, 2), dtype=jnp.float64)
+
+    def run(written_order):
+        return model_module._nemo_ws_rk3_tracer_pair_step(
+            base, base, "none", ones, ones, vertical,
+            ones, ones, ones, ones, object(), 10800.0, ones,
+            stage_source_rates=((source, source),) * 3,
+            stage_qco_weights=((q_before, q_rhs, q_after),) * 3,
+            stage_tracer_written_order=written_order,
+            stop_after_stage=1,
+        )[0]
+
+    ordered = np.asarray(jax.jit(lambda: run(True))())
+    contracted = np.asarray(jax.jit(lambda: run(False))())
+    assert ordered[0, 3, 0] == np.float64(30.720408364609142)
+    assert np.any(ordered.view(np.uint64) != contracted.view(np.uint64))
+
+
 def test_nemo_ws_stage1_trace_preserves_source_statement_order(monkeypatch):
     """EMP and runoff must enter Krhs as two ordered additions."""
     def large_advective_rhs(a, b, *args, **kwargs):

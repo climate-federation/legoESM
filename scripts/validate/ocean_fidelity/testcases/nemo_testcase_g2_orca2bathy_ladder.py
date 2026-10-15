@@ -55,7 +55,7 @@ import nemo_testcase_g1_orca2grid_ladder as g1  # noqa: E402
 from nemo_testcase_g1_orca2grid_ladder import BAR, require  # noqa: E402
 
 CASE = "ORCA2G2-zps"
-CASES = ("ORCA2G2-zps", "ORCA2G3-ts")   # G3 = G2 + ORCA2's initial T/S
+CASES = ("ORCA2G2-zps", "ORCA2G3-ts", "ORCA2G4-sbc")
 DEFAULT_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/round10/"
     "oracle_g2_r10/p3_a_100step")
@@ -428,6 +428,12 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
 
     card = recipe.build_nemo_testcase_card(case, deck_root=root)
     cfg, z, s0 = card.recipe.model_config, card.recipe.z_coord, card.recipe.initial_state
+    if case == "ORCA2G4-sbc":
+        require(arm in ("independent", "given_entry"),
+                "G4's NEMO-supplied per-step forcing is registered only for "
+                "the independent and given-entry ladders")
+        require(cfg.rk3_stage_tracer_written_order is True,
+                "the G4 card no longer selects NEMO's tracer update order")
     require(cfg.zdf_momentum_nemo_face_thickness is True,
             "the G2 card no longer selects NEMO's dyn_zdf divisors")
     if without_zdf_faces:      # ROUND-2 BEFORE ARM / plant: the two-cell mean
@@ -440,8 +446,9 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
             "the G2 card no longer selects NEMO's ascending Ue_rhs SUM")
     if without_rhs_ascending_sum:  # ROUND-4 BEFORE ARM / plant: XLA's order
         cfg = cfg._replace(barotropic_rhs_ascending_level_sum=False)
-    require(cfg.zdf_momentum_stage_r3u_nemo_literal is (case == "ORCA2G3-ts"),
-            "only the G3 card selects NEMO's stored r3u(Kmm) in dyn_zdf")
+    require(cfg.zdf_momentum_stage_r3u_nemo_literal is
+            (case in ("ORCA2G3-ts", "ORCA2G4-sbc")),
+            "only the G3/G4 cards select NEMO's stored r3u(Kmm) in dyn_zdf")
     if without_zdf_stage_r3u:      # G3 ROUND-3 BEFORE ARM / plant
         cfg = cfg._replace(zdf_momentum_stage_r3u_nemo_literal=False)
     nk = int(z.n_levels)
@@ -467,6 +474,10 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
                cfg.barotropic_rhs_ascending_level_sum),
            "zdf_momentum_stage_r3u_nemo_literal": bool(
                cfg.zdf_momentum_stage_r3u_nemo_literal),
+           "rk3_stage_tracer_written_order": bool(
+               cfg.rk3_stage_tracer_written_order),
+           "forcing": ("NEMO-supplied surface fields at each kt"
+                       if case == "ORCA2G4-sbc" else "none"),
            "n_barotropic_substeps": int(cfg.barotropic.n_barotropic_substeps),
            "region_cells": {k: int(m.sum()) for k, m in reg.items()},
            "depth_class_cells": {p: {k: int(m.sum()) for k, m in c.items()}
@@ -524,9 +535,17 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
                 vv_b=s0.vv_b.replace(data=jnp.asarray(g1.pad_v(var("vv_n")))),
                 bt_hist=g1.nemo_histories(path.parent, kt))
 
-    def step(state):
+    if case == "ORCA2G4-sbc":
+        sys.path.insert(0, str(HERE / "nemo_testcase_g4_orca2sbc"))
+        import g4_forcing_steps as g4  # noqa: E402
+
+    def step(state, kt):
         t0 = time.time()
-        new = jax.device_get(model.step(state, dt=card.dt_s))
+        kwargs = {}
+        if case == "ORCA2G4-sbc":
+            freshwater, surface = g4.nemo_supplied_forcing(card, root, kt)
+            kwargs = {"freshwater": freshwater, "surface_forcing": surface}
+        new = jax.device_get(model.step(state, dt=card.dt_s, **kwargs))
         return new, round(time.time() - t0, 1)
 
     if arm == "stages":
@@ -647,7 +666,7 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
                 avt0=float(recipe.read_orca2g1_deck(root).rn_avt0_m2_s),
                 r3t_bb=g["e_r3t_bb"], r3t_mm=g["2_r3t_aa"], r3t_aa=g["3_r3t_aa"],
                 dt=card.dt_s)
-        cand, rows = card_levels(step(s0)[0]), {}
+        cand, rows = card_levels(step(s0, 1)[0]), {}
         for f in ("T", "S"):
             name = f"3_{f.lower()}n_k1_aa"
             rep = nemo_trazdf_replay(np.asarray(getattr(s0, f).data, np.float64), **geom)
@@ -746,7 +765,7 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
                     "--state-in is not this model code's chain after step kt_from - 1")
             state = saved["state"]
         for kt in range(kt_from, kt_to + 1):
-            state, seconds = step(state)
+            state, seconds = step(state, kt)
             path = restart_path(roots, kt)
             if path is None:
                 stop = abort_witness(roots, kt)
@@ -794,7 +813,7 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
                     "--state-in is not this model code's chain after step kt_from - 1")
             state = saved["state"]
         for kt in range(kt_from, kt_to + 1):
-            state, seconds = step(state)
+            state, seconds = step(state, kt)
             rows = surface_rows("independent", kt, state)
             out["per_kt"].append({"kt": kt, "seconds": seconds, "rows": rows,
                                   "first_unequal": g1.first_unequal(rows),
@@ -810,11 +829,12 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
     else:
         out["label"] = ("GIVEN-NEMO-ENTRY (NEMO's restart of step kt - 1: all "
                         "prognostics on all levels and the six barotropic "
-                        "histories; w is the card's rest value)")
+                        "histories; w is the card's rest value; G4 uses "
+                        "NEMO's surface fields at each kt)")
         for kt in entries:
-            first, s1 = step(s0 if kt == 1 else nemo_entry(kt))
+            first, s1 = step(s0 if kt == 1 else nemo_entry(kt), kt)
             rows = surface_rows("given_entry", kt, first)
-            second, s2 = step(first)
+            second, s2 = step(first, kt + 1)
             out["per_kt"].append({
                 "kt": kt, "seconds": [s1, s2], "rows": rows,
                 "first_unequal": g1.first_unequal(rows),

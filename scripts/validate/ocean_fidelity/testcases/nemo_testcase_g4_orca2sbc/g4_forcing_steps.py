@@ -328,10 +328,12 @@ def nemo_supplied_forcing(card, run: Path, kt: int, *, zero: bool = False):
 # deselects them (the before arm).
 STRESS_OPTIONS = ("barotropic_wind_nemo_stored_depth", "surface_stress_nemo_fold_vector_sign",
                   "zdf_surface_stress_nemo_face_thickness")
+TRACER_UPDATE_OPTION = "rk3_stage_tracer_written_order"
 
 
 def route(run: Path, deck_root: Path, *, zero: bool = False, stages: str = "123",
-          dump: Path | None = None, without_stress_options: bool = False) -> dict:
+          dump: Path | None = None, without_stress_options: bool = False,
+          without_tracer_update_option: bool = False) -> dict:
     """GIVEN-NEMO-ENTRY, kt = 1: the G4 card from NEMO's as-built initial state
     (the record ran ln_tsd_dmp = F: no hand edits), forced by NEMO's kt = 1
     surface fields, each RK3 stage compared with NEMO's stage frame."""
@@ -353,6 +355,12 @@ def route(run: Path, deck_root: Path, *, zero: bool = False, stages: str = "123"
     if without_stress_options:
         card = card._replace(recipe=card.recipe._replace(model_config=card.recipe.model_config._replace(
             **{o: False for o in STRESS_OPTIONS})))
+    require(getattr(card.recipe.model_config, TRACER_UPDATE_OPTION) is True,
+            "the G4 card no longer selects NEMO's tracer-update statement")
+    if without_tracer_update_option:
+        card = card._replace(recipe=card.recipe._replace(
+            model_config=card.recipe.model_config._replace(
+                **{TRACER_UPDATE_OPTION: False})))
     st = card.recipe.initial_state
     entry = st          # Decision 120 record: the card's state is NEMO's (hand edits)
     if as_built:        # rounds 17-19 records: NEMO ran without the hand edits
@@ -367,6 +375,7 @@ def route(run: Path, deck_root: Path, *, zero: bool = False, stages: str = "123"
     out = {"label": "GIVEN-NEMO-ENTRY (%s initial state), kt = 1" % (
                "as-built" if as_built else "Decision-120"), "zero_forcing": zero,
            "without_stress_options": without_stress_options,
+           "without_tracer_update_option": without_tracer_update_option,
            "stages": {}}
     for stage, (hooks, _) in (("1", g2.EXPOSURES["stage1"]), ("2", g2.EXPOSURES["stage2"]),
                               ("3", g2.EXPOSURES["stage3"])):

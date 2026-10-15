@@ -3225,6 +3225,11 @@ class LatLonCGridOceanConfig(NamedTuple):
     # r1_e1e2f, added to ff_f before the F thickness.  False takes the
     # generic vertex curl, which differs on a curvilinear mesh.
     een_nemo_relative_vorticity: bool = False
+    # NEMO's stage-1/2 tracer update (stprk3_stg.f90:503-505) rounds each
+    # written product and sum before the final quotient.  False leaves XLA
+    # free to contract the products into the following sum.  Appended so
+    # positional constructors retain their existing field order.
+    rk3_stage_tracer_written_order: bool = False
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":

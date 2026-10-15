@@ -2289,6 +2289,7 @@ def _nemo_ws_rk3_tracer_pair_step(
     stage_source_rates=None,
     stage_source_terms=None,
     stage_qco_weights=None,
+    stage_tracer_written_order: bool = False,
     stop_after_stage: int = 3,
     resume=None,
     stage3_advection_content_override=None,
@@ -2515,10 +2516,16 @@ def _nemo_ws_rk3_tracer_pair_step(
             q_before, q_rhs, q_after = stage_qco_weights[stage_index]
             rhs = _source_order_sum(
                 concentration_rhs, source_rate, source_terms)
-            out = (
-                q_before[..., None] * base
-                + stage_dt * q_rhs[..., None] * rhs
-            ) / q_after[..., None]
+            if stage_tracer_written_order:
+                r = nemo_source_round
+                out = r(r(r(q_before[..., None] * base)
+                          + r(r(stage_dt * q_rhs[..., None]) * rhs))
+                        / q_after[..., None])
+            else:
+                out = (
+                    q_before[..., None] * base
+                    + stage_dt * q_rhs[..., None] * rhs
+                ) / q_after[..., None]
             return jnp.where(active_3d > 0.5, out, base)
         out = (
             h_k_old * base - stage_dt * flux_div
@@ -8353,6 +8360,8 @@ class LatLonCGridOceanModel:
                     stage_source_rates=_stage_source_rates,
                     stage_source_terms=_stage12_source_terms,
                     stage_qco_weights=_tracer_qco_weights,
+                    stage_tracer_written_order=(
+                        _cfg_b.rk3_stage_tracer_written_order),
                     stop_after_stage=stop_after_stage,
                     resume=resume,
                     return_stage1_trace=(
@@ -9976,6 +9985,8 @@ class LatLonCGridOceanModel:
                         if self._nemo_ws_test_hooks.two_step_fct_predictor
                         else "one_step"),
                     stage_source_rates=_ws_stage_source_rates,
+                    stage_tracer_written_order=(
+                        _cfg_b.rk3_stage_tracer_written_order),
                     bbl_context=_bbl_context,
                     # One stage ladder: stages 1-2 were advanced by the
                     # momentum program on the same Kmm transports as the

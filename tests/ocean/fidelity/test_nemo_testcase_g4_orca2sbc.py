@@ -222,15 +222,20 @@ def cards(tmp_path_factory):
 def test_g4_card_is_the_g3_card_under_orca2s_forcing(cards):
     g4, root, g3 = cards
     a, b = g4.recipe.model_config, g3.recipe.model_config
-    # round 23: NEMO's surface-stress statements, G4's card only
+    # rounds 23/25: NEMO's surface-stress and tracer-update statements,
+    # G4's card only
     stress = ["barotropic_wind_nemo_stored_depth", "surface_stress_nemo_fold_vector_sign",
               "zdf_surface_stress_nemo_face_thickness"]
+    tracer_update = "rk3_stage_tracer_written_order"
     assert sorted(f for f in a._fields if repr(getattr(a, f)) != repr(getattr(b, f))) == sorted(
-        ["physics", *stress])
+        ["physics", tracer_update, *stress])
     assert all(getattr(a, f) is True and getattr(b, f) is False for f in stress)
+    assert getattr(a, tracer_update) is True and getattr(b, tracer_update) is False
     assert [c for c, on in recipe._ORCA2G_WIND_STORED_DEPTH.items() if on] == ["ORCA2G4-sbc"]
+    assert [c for c, on in recipe._ORCA2G_TRA_STAGE_ORDER.items() if on] == ["ORCA2G4-sbc"]
     from legoesm.ocean.state import LatLonCGridOceanConfig
-    assert all(LatLonCGridOceanConfig._field_defaults[f] is False for f in stress)
+    assert all(LatLonCGridOceanConfig._field_defaults[f] is False
+               for f in [*stress, tracer_update])
     assert [f for f in a.physics._fields
             if repr(getattr(a.physics, f)) != repr(getattr(b.physics, f))] == [
         "shortwave_penetration"]
@@ -536,10 +541,10 @@ R21_P6_A = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_roun
 def test_nemo_supplied_forcing_stage_one_and_three(tmp_path):
     """Decision 123 on the Decision-120 record (round 21), kt = 1, NEMO's own
     surface fields through the ORCA2 lane's route.  With NEMO's three
-    surface-stress statements (round 23) stage 1 is NEMO's in sea level,
-    both barotropic transports and v; u differs only by signed zeros; T and
-    S by the last place on the bump cells (open).  Stage 3's stress
-    response is gone.  Deselected, round 21's bump-patch gap returns."""
+    surface-stress statements (round 23) and source-ordered tracer update
+    (round 25), every value at stage 1 is NEMO's; u differs only by signed
+    zeros.  Stage 3's stress response is gone.  Each deselected arm restores
+    its registered gap."""
     root = tmp_path / "g4"
     root.mkdir()
     (root / "namelist_cfg").write_text((G4_DIR / "namelist_cfg").read_text())
@@ -551,11 +556,14 @@ def test_nemo_supplied_forcing_stage_one_and_three(tmp_path):
     one, three = fed["1"], fed["3"]
     assert [one[n]["unequal"] for n in ("ssh", "uu_b", "vv_b", "v")] == [0, 0, 0, 0]
     assert one["u"]["unequal_values"] == 0
-    assert all(0 < one[n]["unequal"] < 100 and one[n]["max_abs"] < 1e-14 for n in ("T", "S"))
+    assert all(one[n]["unequal"] == 0 for n in ("T", "S"))
     assert three["ssh"]["unequal"] == 0 and max(three[n]["max_abs"] for n in ("u", "v")) < 2e-15
     assert max(three[n]["max_abs"] for n in ("T", "S")) < 1e-14   # one last place (T ~ 20 C)
     before = mod.route(R21_P6_A, root, stages="1", without_stress_options=True)["stages"]["1"]
     assert before["ssh"]["unequal"] > 2000 and before["uu_b"]["max_abs"] > 1e-10
+    tracer_before = mod.route(
+        R21_P6_A, root, stages="1", without_tracer_update_option=True)["stages"]["1"]
+    assert (tracer_before["T"]["unequal"], tracer_before["S"]["unequal"]) == (58, 45)
 
 
 @needs_inputs
