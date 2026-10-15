@@ -833,18 +833,20 @@ def stage1_momentum_replay(g: dict, card, card_fields: dict, reg,
                            card_rhs=None, card_raw=None) -> dict:
     """NEMO's stage-1 velocity from NEMO's own recorded operands, offline.
 
-    The thickness-weighted update (stprk3_stg.f90:373-378) and the barotropic
-    correction (:413-414, :417-418), with the after ratio taken three ways:
-    NEMO's recorded one; two thirds of the before ratio plus one third of the
-    ratio of the solver's sea level (:171-173); the ratio of the stage's
-    interpolated sea level.  Each is scored against NEMO's stage-1 frame and
-    against the card's own stage-1 velocity from the same entry.  Stage 1
-    only: the later stages' right-hand sides are not in the record.  The top
-    V row is not replayed (its north neighbour is the fold)."""
+    Select the same compiled branch as the card: the vector G1b deck applies
+    the velocity update at stprk3_stg.f90:366-370 (ORCA2_OMIP_L4:467-471);
+    flux-form G1 applies the thickness-weighted update at :371-379.  Both are
+    followed by the barotropic correction.  The QCO arm takes the after ratio
+    three ways; the vector arm does not read a ratio.  Each result is scored
+    against NEMO's stage-1 frame and against the card's own stage-1 velocity
+    from the same entry.  Stage 1 only: later-stage RHS arrays are not in the
+    record.  The top V row is not replayed (its north neighbour is the fold)."""
     raw = card.recipe.z_coord.nemo_een_barotropic
     a = lambda n: np.asarray(getattr(raw, n), dtype=np.float64)  # noqa: E731
     area = a("e1t") * a("e2t")
     rdt = (1.0 / 3.0) * float(card.dt_s)             # rDt = r1_3 * rn_Dt
+    vector_form = (
+        card.recipe.model_config.momentum_advection == "vector_invariant")
 
     def ratios(ssh):
         x = area * ssh
@@ -857,23 +859,29 @@ def stage1_momentum_replay(g: dict, card, card_fields: dict, reg,
         if face == "v":
             wet[-1] = False
         r3b, r3a = g[f"e_r3{face}_bb"], g[f"1_r3{face}_aa"]
-        after = dict(zip(STAGE1_RATIOS, (
-            r3a,
-            (2.0 / 3.0) * r3b + (1.0 / 3.0) * ratios(g["b_ssh_aa"])[k],
-            ratios(g["1_ssh_aa"])[k])))
+        after = ({"not_read_vector_form": r3a} if vector_form else
+                 dict(zip(STAGE1_RATIOS, (
+                     r3a,
+                     (2.0 / 3.0) * r3b
+                     + (1.0 / 3.0) * ratios(g["b_ssh_aa"])[k],
+                     ratios(g["1_ssh_aa"])[k]))))
         ref, mine = g[f"1_{face}{face}_k1_aa"], card_fields[face]
         before, rhs = g[f"e_{face}{face}_k1_bb"], g[f"b_{face}{face}_rhs_k1"]
         target, r1 = g[f"1_{face}{face}_b_aa"], _inverse_depth(a(f"h{face}_0"))
-        for name, order in ((n, o) for n in after for o in STAGE1_ORDERS):
+        orders = ("written",) if vector_form else STAGE1_ORDERS
+        for name, order in ((n, o) for n in after for o in orders):
             ratio = after[name]
-            if order in ("fused_rhs_product", "fused_rhs_product_and_correction"):
+            if vector_form:
+                top = before + rdt * rhs
+            elif order in ("fused_rhs_product", "fused_rhs_product_and_correction"):
                 top = fused_multiply_add(rdt * (1.0 + r3b), rhs, (1.0 + r3b) * before)
             elif order == "fused_before_product":
                 top = fused_multiply_add(1.0 + r3b, before, rdt * (1.0 + r3b) * rhs)
             else:
                 top = (1.0 + r3b) * before + rdt * (1.0 + r3b) * rhs
             with np.errstate(divide="ignore", invalid="ignore"):
-                vel = np.where(wet, top / (1.0 + ratio) * mask, 0.0)
+                vel = (top * mask if vector_form else
+                       np.where(wet, top / (1.0 + ratio) * mask, 0.0))
             if order in ("fused_correction", "fused_rhs_product_and_correction"):
                 vel = vel + fused_multiply_add(-(e3 * vel), r1, target) * mask
             else:
@@ -893,10 +901,15 @@ def stage1_momentum_replay(g: dict, card, card_fields: dict, reg,
         # entry): its right-hand side against NEMO's, and the written
         # statements re-run in numpy on that right-hand side
         mine_rhs, mine_raw = card_rhs[face], card_raw[face]
-        with np.errstate(divide="ignore", invalid="ignore"):
-            raw_nemo, raw_card = (np.where(wet, (
-                (1.0 + r3b) * before + rdt * (1.0 + r3b) * x) / (1.0 + r3a) * mask, 0.0)
-                for x in (rhs, mine_rhs))
+        if vector_form:
+            raw_nemo, raw_card = (
+                (before + rdt * x) * mask for x in (rhs, mine_rhs))
+        else:
+            with np.errstate(divide="ignore", invalid="ignore"):
+                raw_nemo, raw_card = (np.where(wet, (
+                    (1.0 + r3b) * before
+                    + rdt * (1.0 + r3b) * x) / (1.0 + r3a) * mask, 0.0)
+                    for x in (rhs, mine_rhs))
         done = raw_card + (target - (e3 * raw_card) * r1) * mask
         done_from_raw = mine_raw + (target - (e3 * mine_raw) * r1) * mask
         out.setdefault("card_operand_rows", []).append({

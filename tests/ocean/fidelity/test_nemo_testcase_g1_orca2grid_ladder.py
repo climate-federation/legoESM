@@ -862,6 +862,33 @@ def test_right_hand_side_split_control_fires_on_a_planted_half():
     assert _terms(out, "card_hpg_vs_replay") == [1, 1]
 
 
+G1B_RECORD = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/"
+    "round26/g1b_merged")
+needs_g1b_record = pytest.mark.skipif(
+    not (G1B_RECORD / "oracle_g1step_kt00000002.bin").is_file(),
+    reason="the admitted G1b record is not on this machine")
+
+
+@needs_g1b_record
+def test_g1b_stage1_replay_selects_vector_velocity_statement(monkeypatch):
+    """The G1b stage table must replay the executed IF arm, not QCO ELSE."""
+    monkeypatch.setattr(ladder, "CASE", "ORCA2G1b-vec")
+    out = ladder.run(G1B_RECORD, arm="stages", kt_min=2, kt_max=2,
+                     allow_dirty=True)
+    replay = out["per_kt"][0]["stages"][0]["momentum_replay"]
+    assert {r["after_ratio"] for r in replay["rows"]} == {
+        "not_read_vector_form", "card_live_row"}
+    for row in replay["card_operand_rows"]:
+        assert row["card_raw_vs_written_update_of_card_rhs"]["n_unequal"] == 0
+
+    off = ladder.run(G1B_RECORD, arm="stages", kt_min=2, kt_max=2,
+                     allow_dirty=True, without_written_order=True)
+    replay_off = off["per_kt"][0]["stages"][0]["momentum_replay"]
+    assert sum(r["card_raw_vs_written_update_of_card_rhs"]["n_unequal"]
+               for r in replay_off["card_operand_rows"]) >= 1
+
+
 @needs_record5
 @pytest.mark.parametrize("off, stage, key, floor", [
     ((), None, None, 0),

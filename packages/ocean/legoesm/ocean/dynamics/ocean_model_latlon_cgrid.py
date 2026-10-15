@@ -1772,12 +1772,20 @@ def rk3_stage_velocity_update(
             f"{velocity_before.shape}")
     if vector_form:
         # dynzdf.F90:121-122 and stprk3_stg.F90:367-368, in NEMO's own
-        # association order: add, then mask.
+        # association order: multiply, add, then mask.  ``written_order`` is
+        # selected by the ORCA2 cards; on G1b it applies to this vector arm
+        # (record build :366-370; ORCA2_OMIP_L4 :467-471).  Materialize each
+        # source operation because an optimization barrier is stripped from
+        # optimized HLO and otherwise XLA contracts the multiply-add.
         if face_mask.shape not in (velocity_before.shape,
                                    velocity_before.shape[:-1] + (1,)):
             raise ValueError(
                 f"face_mask {face_mask.shape} must match velocity_before "
                 f"{velocity_before.shape} or be its level-broadcast form")
+        if written_order:
+            increment = nemo_source_round(dt_stage * rhs)
+            updated = nemo_source_round(velocity_before + increment)
+            return nemo_source_round(updated * face_mask)
         return (velocity_before + dt_stage * rhs) * face_mask
     # dynzdf.F90:127-132 and stprk3_stg.F90:373-378, key_qco form.
     return (_rk3_stage_update_written_order(velocity_before, rhs, dt_stage, qco_before, qco_now, qco_after, face_mask) if written_order  # noqa: E501
