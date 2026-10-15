@@ -126,8 +126,27 @@ partner for Decision 125 on this tree.
 - Round-279 measurement gate: PASS; both independent plants fire.
 - No model file changed, so no GYRE, DINO, tank, or ORCA2 trajectory was
   eligible to move or land in this round.
-- Citation gate, focused tests, fidelity battery, and independent review are
-  recorded below after execution.
+- Citation gate: PASS, 5/5 receipt citations mapped with no failure; the
+  default receipt also passes 274/274 citations.  Shifting the runoff-branch
+  citation by two lines makes the gate fail and exit 1.
+- Focused citation/card tests: 42/42 pass in 344.92 s.
+- Required `tests/ocean/fidelity -n 12` battery: reached 98%, then worker
+  `gw9` died during JAX compilation of
+  `test_the_step_19_tracer_cell_needs_the_stored_ratio`; xdist replaced the
+  worker but did not terminate or print a failure summary, so the run was
+  interrupted rather than allowed to leave stale workers.  The crashed test's
+  two parameterisations both pass serially.  Serial isolation of the standing
+  known-red files gives 22 pass and exactly three reproduced pre-existing
+  failures: SI3 scalar-math V2 (`A MY_SRC is not verbatim`), the worktree-stamp
+  grow-only ratchet (13 old unstamped emitters), and the round-35 scoped-dirty
+  ratchet (14 old unscoped drivers).  None names or imports the round-279 gate.
+
+## Independent review
+
+Independent review unavailable in-sandbox.  The required
+`codex exec --sandbox read-only` attempt returned: "failed to initialize
+in-process app-server client: Read-only file system" before reading the diff.
+No review verdict is claimed.
 
 ## OPEN
 
