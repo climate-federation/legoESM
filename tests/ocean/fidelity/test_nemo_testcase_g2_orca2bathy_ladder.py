@@ -135,7 +135,7 @@ def test_the_option_is_off_by_default_and_selected_by_g2_only():
             if "zdf_momentum_nemo_face_thickness=" in line]
     assert [name for name, _ in hits] == ["nemo_testcase_recipe.py"]
     # round 3's option: its own rung table, one assignment in the package
-    assert recipe._ORCA2G_TRA_ZDF_ROUNDED == {"ORCA2G1-flat": False, "ORCA2G2-zps": True, "ORCA2G3-ts": True,
+    assert recipe._ORCA2G_TRA_ZDF_ROUNDED == {"ORCA2G1-flat": False, "ORCA2G1b-vec": False, "ORCA2G2-zps": True, "ORCA2G3-ts": True,
                                           "ORCA2G4-sbc": True}
     mine = [(path.name, line) for path in (CASES.parents[3] / "packages").rglob("*.py")
             for line in path.read_text().splitlines()
@@ -145,7 +145,7 @@ def test_the_option_is_off_by_default_and_selected_by_g2_only():
     # round 4's option: its own rung table, one assignment in the package
     assert LatLonCGridOceanConfig._field_defaults[
         "barotropic_rhs_ascending_level_sum"] is False
-    assert recipe._ORCA2G_UE_RHS_ASCENDING == {"ORCA2G1-flat": False, "ORCA2G2-zps": True, "ORCA2G3-ts": True,
+    assert recipe._ORCA2G_UE_RHS_ASCENDING == {"ORCA2G1-flat": False, "ORCA2G1b-vec": False, "ORCA2G2-zps": True, "ORCA2G3-ts": True,
                                           "ORCA2G4-sbc": True}
     sums = [(path.name, line) for path in (CASES.parents[3] / "packages").rglob("*.py")
             for line in path.read_text().splitlines()
