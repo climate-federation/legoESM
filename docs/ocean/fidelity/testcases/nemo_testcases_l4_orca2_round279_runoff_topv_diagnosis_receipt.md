@@ -7,6 +7,23 @@ an already-non-bit source row.**  No package/model configuration changed.
 Every number below is **independent** (the OMT-4 card's own initial state),
 unless the row explicitly says oracle/card configuration.
 
+## CORRECTION FROM ROUND 281 (2026-10-15)
+
+The 1,440/5,400-cell, 0.0162073695895 m/s completed source-row result and
+the resulting source-row owner attribution below are **RETRACTED**.  The
+round-279 in-executable stage observer is not bit-passive.  The admitted
+round-280 stream, replayed offline without an executable observer, finds zero
+valued error on that source row (323 signed-zero differences after the raw
+update; 121 after the barotropic correction).  It instead names the raw
+stage-1 vector-form V update on the full active support as the first trusted
+valued boundary: 1,319/415,175 unequal, maximum 0.011299245240990687 m/s at
+`[147,133,27]`, against NEMO's executing statement at
+`ORCA2_OMIP_L4_R280STAGE1/BLD/ppsrc/nemo/stprk3_stg.f90:477-480`.
+
+The runoff-depth finding is independent of that observer and remains valid.
+The round-279 tool now fails closed before it can emit the withdrawn top-V
+claim.  Round 281's receipt and committed gate are the controlling evidence.
+
 ## Provenance
 
 - Branch base: `4a7410281c6cec111a2f8857864cb41a68b0d2d8`.

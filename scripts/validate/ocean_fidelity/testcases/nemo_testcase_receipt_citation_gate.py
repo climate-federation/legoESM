@@ -94,6 +94,8 @@ _ORCA2_R213VECPRE_COMPILED = (
     NEMO / "cfgs/ORCA2_OMIP_L4_R213VECPRE/BLD/ppsrc/nemo")
 _ORCA2_R214VECPREV3_COMPILED = (
     NEMO / "cfgs/ORCA2_OMIP_L4_R214VECPREV3/BLD/ppsrc/nemo")
+_ORCA2_R280STAGE1_COMPILED = (
+    NEMO / "cfgs/ORCA2_OMIP_L4_R280STAGE1/BLD/ppsrc/nemo")
 _ORCA2_R229FOLDTRP = NEMO / "cfgs/ORCA2_OMIP_L4_R229FOLDTRP/BLD"
 _ORCA2_R230FOLDTRP = NEMO / "cfgs/ORCA2_OMIP_L4_R230FOLDTRP/BLD"
 _ORCA2G1_P3 = NEMO / "cfgs/ORCA2G1_OMIP_L1_P3/BLD"
@@ -256,6 +258,8 @@ FILES = {
         _ORCA2_R210OMT1_COMPILED / "dynldf_lev.f90"),
     "ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/stprk3_stg.f90": (
         _ORCA2_R210OMT1_COMPILED / "stprk3_stg.f90"),
+    "ORCA2_OMIP_L4_R280STAGE1/BLD/ppsrc/nemo/stprk3_stg.f90": (
+        _ORCA2_R280STAGE1_COMPILED / "stprk3_stg.f90"),
     "ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/traadv.f90": (
         _ORCA2_R210OMT1_COMPILED / "traadv.f90"),
     "ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/traadv_cen.f90": (
@@ -1645,6 +1649,12 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 round 281: admitted stage-1 source split ---
+    'ORCA2_OMIP_L4_R280STAGE1/BLD/ppsrc/nemo/stprk3_stg.f90:477-480': [
+        'IF( ln_dynadv_vec .OR. lk_linssh ) THEN',
+        'vv(ji,jj,jk,Kaa) = ( vv(ji,jj,jk,Kbb) + rDt * vv(ji,jj,jk,Krhs) ) * vmask(ji,jj,jk)',
+        4,
+    ],
     # --- ORCA2 round 278: Decision-122 lines in the shipped ORCA2 build ---
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynzdf.f90:192-198': ['zzwi = - zDt_2 * ( avm(ji+1,jj,jk  )     +  avm(ji,jj,jk  )     ) &', 'zwd(ji,jk) = 1._wp - zzwi - zzws', 7],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynzdf.f90:361-367': ['zzwi = - zDt_2 * ( avm(ji,jj+1,jk  )     +  avm(ji,jj,jk  )     ) &', 'zwd(ji,jk) = 1._wp - zwi(ji,jk) - zws(ji,jk)', 7],
