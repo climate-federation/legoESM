@@ -67,7 +67,7 @@ at `ORCA2_OMIP_L4_R280STAGE1/BLD/ppsrc/nemo/dommsk.f90:211`,
 `ORCA2_OMIP_L4_R280STAGE1/BLD/ppsrc/nemo/dommsk.f90:225`, and
 `ORCA2_OMIP_L4_R280STAGE1/BLD/ppsrc/nemo/dommsk.f90:232`.
 The executing update consumes that associated 3-D mask at the cited
-`stprk3_stg.f90:477-480` statement.  legoESM instead sources this stage mask
+`ORCA2_OMIP_L4_R280STAGE1/BLD/ppsrc/nemo/stprk3_stg.f90:477-480` statement.  legoESM instead sources this stage mask
 from its compact `compute_face_masks_3d` route.  That source is the first
 non-bit statement; its 1,319-cell census exactly equals the raw-update census.
 
