@@ -118,6 +118,7 @@ def test_g1b_card_differs_from_g1_only_by_nemos_vector_branch(roots):
         "vertical_momentum_scheme": ("none", "nemo_advective"),
         "rk3_stage1_rhs_nemo_literal": (True, False),   # flux-form only (state.py)
         "een_nemo_relative_vorticity": (False, True),   # dynvor.f90:744-748
+        "rk3_vector_rhs_nemo_order": (False, True),     # stp2d.f90:138, :144, :161
     }
     ba, bb = ca.barotropic, cb.barotropic
     moved_bt = {f for f in ba._fields if repr(getattr(ba, f)) != repr(getattr(bb, f))}
@@ -152,6 +153,7 @@ def test_g1b_selector_plants_are_refused(roots):
                    {"barotropic": cfg.barotropic._replace(
                        barotropic_flux_update_nemo_literal=True)},
                    {"een_nemo_relative_vorticity": False},
+                   {"rk3_vector_rhs_nemo_order": False},
                    {"barotropic": cfg.barotropic._replace(
                        barotropic_literal_fold_unit_vector_form=False)}):
         planted = card._replace(recipe=card.recipe._replace(

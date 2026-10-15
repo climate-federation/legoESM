@@ -3230,6 +3230,10 @@ class LatLonCGridOceanConfig(NamedTuple):
     # free to contract the products into the following sum.  Appended so
     # positional constructors retain their existing field order.
     rk3_stage_tracer_written_order: bool = False
+    # Vector form: Krhs accumulates dyn_hpg, dyn_vor, then dyn_keg in that
+    # order (stp2d.f90:138/:144/:161; stprk3_stg.f90 stages 2-3).  False sums
+    # the fused KE-plus-pressure term with the vorticity term.
+    rk3_vector_rhs_nemo_order: bool = False
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":

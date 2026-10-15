@@ -6154,7 +6154,8 @@ class LatLonCGridOceanModel:
                                up3_upwind_selector=_up3_selector_override,
                                momentum_flux_face_thickness=_ws_face_thickness_kbb,
                                ldf_thickness_operands=_ws_ldf_thickness_kbb,
-                               nemo_operator_association=self._nemo_ws_test_hooks.nemo_stage_rhs_accumulation_order_arm,
+                               nemo_operator_association=(self._nemo_ws_test_hooks.nemo_stage_rhs_accumulation_order_arm
+                                                          or bool(_cfg_b.rk3_vector_rhs_nemo_order)),
                                nemo_stage_zad_operands=(
                                    (self._nemo_ws_test_hooks.stage1_zad_w_override, None, None)
                                    if self._nemo_ws_test_hooks.stage1_zad_w_override is not None else None),
@@ -6982,7 +6983,8 @@ class LatLonCGridOceanModel:
                                          .legacy_hpg_algebraic_association),
                                      nemo_operator_association=(
                                          self._nemo_ws_test_hooks
-                                         .nemo_stage_rhs_accumulation_order_arm is True),
+                                         .nemo_stage_rhs_accumulation_order_arm is True
+                                         or bool(_cfg_b.rk3_vector_rhs_nemo_order)),
                                      nemo_stage_zad_operands=stage_zad_operands,
                                      nemo_stage_zad_operand_observer=(
                                          _zad_observers[stage_index - 1]),

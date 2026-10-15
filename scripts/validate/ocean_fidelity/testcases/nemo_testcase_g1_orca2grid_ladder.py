@@ -1893,7 +1893,8 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
         observed = {face: model(_NEMOWSRK3TestHooks(
             slow_forcing_rhs_observer=(
                 lambda v, face=face: seen.__setitem__(face, np.asarray(v))),
-            slow_forcing_rhs_observer_face=face)) for face in ("u", "v")}
+            slow_forcing_rhs_observer_face=face,
+            **{n: True for n in hook_arm})) for face in ("u", "v")}
         for kt in scored:
             g = records[kt]
             seen.clear()
