@@ -6498,7 +6498,7 @@ class LatLonCGridOceanModel:
                             "barotropic_wind_nemo_stored_depth requires "
                             "momentum_time_integrator='rk3_ws'")
                     from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
-                        _nemo_een_ratio_fold_exchange,
+                        nemo_een_ratio_fold_exchange,
                     )
                     _r1u, _r1v = _nemo_ws_qco_stage_faces(
                         state.eta.data, _ws_h_ref, _ws_u_live_mask,
@@ -6507,7 +6507,7 @@ class LatLonCGridOceanModel:
                     # r3u/r3v(Kbb) carry the T-pivot fold exchange
                     # (stprk3_stg.f90:163); the mirrored r1_h*_0 rows are
                     # equal, so exchanging the stored reciprocal is the same.
-                    _r1u_n, _r1v_n, _ = _nemo_een_ratio_fold_exchange(
+                    _r1u_n, _r1v_n, _ = nemo_een_ratio_fold_exchange(
                         _r1u[:, 1:], _r1v[1:], _r1v[1:], _grid,
                         _cfg_b.barotropic.barotropic_een_ratio_fold_exchange)
                     _wind_r1_hu = _r1u.at[:, 1:].set(_r1u_n)

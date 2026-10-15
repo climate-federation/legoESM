@@ -557,9 +557,9 @@ def test_ratio_fold_exchange_refuses_a_grid_without_a_stored_pivot_row():
 
     from legoesm.ocean.dynamics import barotropic_latlon_cgrid as B
     a = jnp.ones((4, 6))
-    assert B._nemo_een_ratio_fold_exchange(a, a, a, None, False) == (a, a, a)
+    assert B.nemo_een_ratio_fold_exchange(a, a, a, None, False) == (a, a, a)
     with pytest.raises(ValueError, match="T-pivot"):
-        B._nemo_een_ratio_fold_exchange(a, a, a, SimpleNamespace(fold=None), True)
+        B.nemo_een_ratio_fold_exchange(a, a, a, SimpleNamespace(fold=None), True)
 
 
 @needs_record5
@@ -571,7 +571,7 @@ def test_ratio_fold_exchange_writes_nemos_three_rules_and_nothing_else():
     grid = recipe.build_nemo_testcase_card("ORCA2G1-flat", deck_root=RECORD5).recipe.grid
     rng = np.random.default_rng(6)
     u, v, f = (rng.normal(size=(148, 180)) for _ in range(3))
-    eu, ev, ef = (np.asarray(x) for x in B._nemo_een_ratio_fold_exchange(
+    eu, ev, ef = (np.asarray(x) for x in B.nemo_een_ratio_fold_exchange(
         jnp.asarray(u), jnp.asarray(v), jnp.asarray(f), grid, True))
     n = np.arange(180)
     assert np.array_equal(ev[-1], v[-2][(180 - n) % 180])

@@ -1203,7 +1203,7 @@ def _nemo_literal_een_coefficients(eta, z_coord, dtype, scheme="een",
     r3u = b(b(half * b(area_eta + east)) * r1_hu0 / b(e1u * e2u))
     r3v = b(b(half * b(area_eta + north)) * r1_hv0 / b(e1v * e2v))
     quad = b(b(area_eta + east) + b(north + northeast))
-    r3u, r3v, r3f = _nemo_een_ratio_fold_exchange(*_nemo_een_ratio_written_order((r3u, r3v, b(b(quarter * quad) * r1_hf0 / b(e1f * e2f))), (b(half * b(area_eta + east)), b(half * b(area_eta + north)), b(quarter * quad)), (r1_hu0, r1_hv0, r1_hf0), (b(e1u * e2u), b(e1v * e2v), b(e1f * e2f)), fold_pivot_row[2:]), grid, fold_pivot_row[0])  # noqa: E501
+    r3u, r3v, r3f = nemo_een_ratio_fold_exchange(*_nemo_een_ratio_written_order((r3u, r3v, b(b(quarter * quad) * r1_hf0 / b(e1f * e2f))), (b(half * b(area_eta + east)), b(half * b(area_eta + north)), b(quarter * quad)), (r1_hu0, r1_hv0, r1_hf0), (b(e1u * e2u), b(e1v * e2v), b(e1f * e2f)), fold_pivot_row[2:]), grid, fold_pivot_row[0])  # noqa: E501
     # dynspg_ts.f90:1339-1348 leaves the local and neighbouring live face
     # thicknesses unmasked, then applies the one written neighbouring U mask.
     e3u = b(e3u0 * b(one + r3u[..., None] * umask))
@@ -4141,7 +4141,7 @@ def _nemo_entry_face_depths(config, summed, prep, entry):
     return r(prep[0] * r(1.0 + entry[2])), r(prep[1] * r(1.0 + entry[3]))
 
 
-def _nemo_een_ratio_fold_exchange(r3u, r3v, r3f, grid, selected):
+def nemo_een_ratio_fold_exchange(r3u, r3v, r3f, grid, selected):
     """NEMO's north-fold exchange of the U-, V- and F-point thickness ratios.
 
     ``stprk3_stg.f90:163`` (``domqco.f90:182-183`` at start-up) passes the ratios
