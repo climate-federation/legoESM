@@ -224,6 +224,8 @@ FILES = {
         _ORCA2G1_P5 / "ppsrc/nemo/stp2d.f90"),
     "ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/stprk3.f90": (
         _ORCA2G1_P5 / "ppsrc/nemo/stprk3.f90"),
+    "ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/stprk3_stg.f90": (
+        _ORCA2G1_P5 / "ppsrc/nemo/stprk3_stg.f90"),
     "ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/traqsr.f90": (
         _ORCA2G1_P5 / "ppsrc/nemo/traqsr.f90"),
     "ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/trasbc.f90": (
@@ -1267,6 +1269,9 @@ FILES = {
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM/cpp_GYRE_OMIP_L2_P3_SM.fcm",
     "nemo_testcase_recipe.py":
         REPO / "packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py",
+    "nemo_testcase_g2_orca2bathy_ladder.py":
+        REPO / "scripts/validate/ocean_fidelity/testcases"
+             / "nemo_testcase_g2_orca2bathy_ladder.py",
     "nemo_testcase_l4_orca2_round226_fct_rhs_walk.py":
         REPO / "scripts/validate/ocean_fidelity/orca2_l4"
              / "nemo_testcase_l4_orca2_round226_fct_rhs_walk.py",
@@ -1710,6 +1715,35 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- GRIDLADDER round 25 (G4 round 7 receipt) ---
+    'barotropic_latlon_cgrid.py:4144': (
+        'def nemo_een_ratio_fold_exchange(r3u, r3v, r3f, grid, selected):', 1),
+    'ocean_model_latlon_cgrid.py:6508': (
+        'nemo_een_ratio_fold_exchange,', 1),
+    'ocean_model_latlon_cgrid.py:6517': (
+        '_r1u_n, _r1v_n, _ = nemo_een_ratio_fold_exchange(', 1),
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/trasbc.f90:284': (
+        'z1_rho0_e3t = r1_rho0 / (e3t_3d(ji,jj,1) *(1._wp+r3t(ji,jj,Kmm)*tmask(ji,jj,1)))', 1),
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/trasbc.f90:285': (
+        'pts(ji,jj,1,jp_tem,Krhs) = pts(ji,jj,1,jp_tem,Krhs) - emp(ji,jj)*pts(ji,jj,1,jp_tem,Kbb) * z1_rho0_e3t', 1),
+    'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/stprk3_stg.f90:503-505': [
+        'ts(ji,jj,jk,jn,Kaa) = (        ( 1._wp + r3t(ji,jj,Kbb) )*ts(ji,jj,jk,jn,Kbb )',
+        '&                /          ( 1._wp + r3t(ji,jj,Kaa) )', 3],
+    'ocean_model_latlon_cgrid.py:2519-2523': [
+        'if stage_tracer_written_order:',
+        '/ q_after[..., None])', 5],
+    'state.py:3232': ('rk3_stage_tracer_written_order: bool = False', 1),
+    'nemo_testcase_recipe.py:4015-4020': [
+        "# NEMO's written stage-1/2 tracer update (stprk3_stg.f90:503-505; G4 round",
+        '"ORCA2G4-sbc": True}', 6],
+    'nemo_testcase_recipe.py:3806': (
+        'rk3_stage_tracer_written_order=_ORCA2G_TRA_STAGE_ORDER[case],', 1),
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:678-680': [
+        'ts(ji,jj,jk,jn,Kaa) = (        ( 1._wp + r3t(ji,jj,Kbb) )*ts(ji,jj,jk,jn,Kbb )',
+        '&                /          ( 1._wp + r3t(ji,jj,Kaa) )', 3],
+    'nemo_testcase_g2_orca2bathy_ladder.py:558-565': [
+        'def step(state, kt):',
+        'return new, round(time.time() - t0, 1)', 8],
     # --- GRIDLADDER round 23 (G4 round 6 receipt) ---
     'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/stp2d.f90:198': 'Ue_rhs(ji,jj) =  Ue_rhs(ji,jj) + r1_rho0 * utauU(ji,jj) * (r1_hu_0(ji,jj) /(1._wp+r3u(ji,jj,Kbb)))',
     'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/sbcmod.f90:548': "CALL lbc_lnk( 'sbcmod', utau, 'T', -1.0_wp, vtau  , 'T', -1.0_wp, emp, 'T', 1.0_wp, &",
