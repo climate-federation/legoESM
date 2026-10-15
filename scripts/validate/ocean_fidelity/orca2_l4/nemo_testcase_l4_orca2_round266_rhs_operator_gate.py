@@ -113,9 +113,12 @@ def _model(card, hooks):
 def _hooks(card, *, live: bool, stage_entry=None,
            literal_hpg_accumulator: bool = False):
     hooks = r265._hooks(card, live=live, stage_entry=stage_entry)
-    return hooks._replace(
-        nemo_stage_rhs_accumulation_order_arm=True,
-        stage_hpg_literal_accumulator=literal_hpg_accumulator)
+    changes = {"nemo_stage_rhs_accumulation_order_arm": True}
+    # The literal HPG assignment was promoted and its private diagnostic hook
+    # removed; current-tree replays use the production statement directly.
+    if "stage_hpg_literal_accumulator" in hooks._fields:
+        changes["stage_hpg_literal_accumulator"] = literal_hpg_accumulator
+    return hooks._replace(**changes)
 
 
 def _associated_stage(card, values):
