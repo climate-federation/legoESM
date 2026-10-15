@@ -119,6 +119,8 @@ whole solve together, not the RHS alone (finding 4).
 - New solve-RHS unit test: passes; XLA does not fuse that small program, so it
   pins the written arithmetic only (removing the rounding still passes). The
   route control carries non-vacuity.
+- Receipt citation gate (from the first-leave heading): PASS, 6 citations;
+  shifting the heat statement's citation exits 1 (SYMBOL-NOT-AT-LINE).
 - Citation tests: 196 passed after the mechanical reanchor (three span extents
   grew; endpoints unchanged).
 - Single review (codex): "DO NOT SHIP" — (1) midpoint Kmm thickness instead of
