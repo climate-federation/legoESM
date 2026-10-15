@@ -159,7 +159,8 @@ def main() -> int:
                 *args.classify_ladder,
                 plant="exact-loss" if args.plant == "exact-loss" else "none")
         require(args.plant == "none", f"{args.plant} plant stayed green")
-    except (GateError, r266.GateError, r276.GateError, OSError, KeyError,
+    except (GateError, r266.GateError, r276.GateError,
+            r276.decision96.GateError, OSError, KeyError,
             TypeError, ValueError, IndexError) as error:
         marker = "PLANT-FIRED" if args.plant != "none" else "REFUSE"
         print(f"STATUS {marker}: {error}")
