@@ -124,6 +124,7 @@ _OVERFLOW_R62ZDF_COMPILED = (
 FILES = {
     # --- GRIDLADDER round 1 (G1 survey) BEGIN ---
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynspg_ts.f90': NEMO / "cfgs/ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynspg_ts.f90",
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynkeg.f90': NEMO / "cfgs/ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynkeg.f90",
     'cfgs/ORCA2_OMIP_L4/EXP00/namelist_cfg': NEMO / "cfgs/ORCA2_OMIP_L4/EXP00/namelist_cfg",
     'cfgs/SHARED/namelist_ref': NEMO / "cfgs/SHARED/namelist_ref",
     'src/OCE/IOM/restart.F90': NEMO / "src/OCE/IOM/restart.F90",
@@ -1719,6 +1720,13 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- GRIDLADDER round 29 (G1b round 5 receipt) ---
+    'ORCA2G1_OMIP_L1_R4REF/BLD/ppsrc/nemo/dynkeg.f90:128-130': [
+        ('DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  0)', 1),
+        'pvv(ji,jj,jk,Krhs) = pvv(ji,jj,jk,Krhs) - ( zhke(ji  ,jj+1) - zhke(ji,jj) ) * r1_e2v(ji,jj)', 3],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynkeg.f90:128-130': [
+        ('DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  0)', 1),
+        'pvv(ji,jj,jk,Krhs) = pvv(ji,jj,jk,Krhs) - ( zhke(ji  ,jj+1) - zhke(ji,jj) ) * r1_e2v(ji,jj)', 3],
     # --- GRIDLADDER round 28 (G4 round 8 receipt) ---
     'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/trasbc.f90:307': 'r1_rcp * qns(ji,jj) * z1_rho0_e3t',
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/trasbc.f90:307': 'r1_rcp * qns(ji,jj) * z1_rho0_e3t',
