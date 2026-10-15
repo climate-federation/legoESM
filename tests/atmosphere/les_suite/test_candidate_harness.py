@@ -297,7 +297,7 @@ def test_hb_equivalent_reproduces_hb_on_a_moist_column():
         assert d < 1e-10, (k, d)
     assert float(jnp.max(rb.at(0).q_c)) > 1e-5                  # cloud present
     assert float(jnp.max(jnp.abs(rb.final_inputs.q_c - rb.at(0).q_c))) > 1e-7
-    s = ev.e2_score(art, rc, 10.0, momflux_floor=1e-3)
+    s = ev.e2_score(art, rc, 10.0)
     assert {"qt", "wqt"} <= set(s.per_var)
     # non-vacuous: a zero-interior-flux candidate must change the moist column
     zero = cmod.load_candidate(_CANDS / "hb_equivalent.py")._replace(
@@ -351,28 +351,54 @@ def test_e2_score_finite_and_gradient_reaches_candidate_param(tmp_path):
 
     def loss(p):
         rec, _ = arm.run(art, ev.e2_nsteps(art, 10.0), params=p, nlev=16, dt=10.0)
-        return ev.e2_score(art, rec, 10.0, momflux_floor=1e-3).combined
+        return ev.e2_score(art, rec, 10.0).combined
     val = loss(cand.default_params())
     g = jax.grad(loss)(cand.default_params())
     assert np.isfinite(float(val)) and float(abs(g["K"])) > 0.0
     from cosci_eval import candidate_case_loss
     art60 = _cbl_artifact(seconds=600.0)
-    jl = candidate_case_loss(arm, art60, nlev=16, dt=10.0, momflux_floor=1e-3)
+    jl = candidate_case_loss(arm, art60, nlev=16, dt=10.0)
     assert abs(float(jl(cand.default_params())) - float(val)) < 1e-12
     gj = jax.grad(jl)(cand.default_params())
     assert abs(float(gj["K"]) - float(g["K"])) <= 1e-9 * abs(float(g["K"]))
     short, _ = arm.run(art, ev.e2_nsteps(art, 10.0) - 1, params=cand.default_params(),
                        nlev=16, dt=10.0)
     with pytest.raises(ValueError, match="e2_nsteps"):
-        ev.e2_score(art, short, 10.0, momflux_floor=1e-3)
+        ev.e2_score(art, short, 10.0)
 
 
 def _forced_artifact():
     import dataclasses
     art = _cbl_artifact()
     z = np.asarray(art.heights_m)
+    nt = np.asarray(art.times_s).shape[0]
     return dataclasses.replace(art, f_c=1e-4, u_geo=5.0 + 0.004 * z,
-                               v_geo=np.zeros_like(z))
+                               v_geo=np.zeros_like(z),
+                               # t=0 stress differs: the floor must use frames after t=0
+                               tau_x_s=np.r_[-9.0, np.full(nt - 1, -0.09)],
+                               tau_y_s=np.r_[12.0, np.full(nt - 1, 0.12)])
+
+
+def test_frames_take_the_nearest_step():
+    import dataclasses
+    art = dataclasses.replace(_cbl_artifact(nt=3, seconds=1309.0),
+                              times_s=np.array([0.0, 654.5, 1309.0]))
+    assert ev._frames(art, 10.0) == [65, 131]   # 654.5 s -> 650 s, 1309 s -> 1310 s
+    with pytest.raises(ValueError, match="collide"):
+        ev._frames(dataclasses.replace(art, times_s=np.array([0.0, 11.0, 12.0])), 10.0)
+
+
+def test_momentum_scored_only_with_geostrophic_wind_and_floor_is_5pct_ustar2():
+    import dataclasses
+    assert ev.momentum_flux_floor(_cbl_artifact()) is None         # f_c=0, no u_geo
+    zero_geo = dataclasses.replace(_cbl_artifact(), u_geo=np.zeros(20))
+    assert ev.momentum_flux_floor(zero_geo) is None
+    forced = _forced_artifact()
+    assert abs(ev.momentum_flux_floor(forced) - 0.05 * 0.15) < 1e-15   # |(-.09,.12)|=.15
+    with pytest.raises(ValueError, match="momentum data"):
+        ev.momentum_flux_floor(dataclasses.replace(forced, uw_resolved=None))
+    with pytest.raises(ValueError, match="momentum data"):
+        ev.momentum_flux_floor(dataclasses.replace(forced, tau_x_s=None))
 
 
 @pytest.mark.parametrize("plant", [False, True])
@@ -474,8 +500,8 @@ def test_cli_requires_explicit_choices():
     with pytest.raises(SystemExit):
         cosci_eval.parse_args(["--stage", "E0", "--candidate", cand, "--out", "x.json"])
     with pytest.raises(SystemExit):
-        cosci_eval.parse_args(["--stage", "E2", "--candidate", cand, "--baseline", "louis",
-                               "--heat-form", "theta", "--out", "x.json"])
+        cosci_eval.parse_args(["--stage", "E0", "--baseline-only", "louis",
+                               "--out", "x.json"])
     cosci_eval.check_kind_choices("scalar", "theta", None)
     cosci_eval.check_kind_choices("momentum", None, "on")
     for kind, hf, ke in (("scalar", None, None), ("scalar", "theta", "off"),
@@ -495,7 +521,7 @@ def test_e2_tuning_refuses_an_inert_parameter(tmp_path):
     with pytest.raises(SystemExit, match="unused"):
         cosci_eval.main([
             "--stage", "E2", "--candidate", cand.source_path, "--baseline", "louis",
-            "--heat-form", "theta", "--momflux-floor", "1e-3",
+            "--heat-form", "theta",
             "--artifacts", str(art_path), "--nlev", "16", "--ad-steps", "1",
             "--out", str(tmp_path / "e2.json")])
 
@@ -509,7 +535,7 @@ def test_cli_e2_writes_provenanced_json(tmp_path):
     cand = _write(tmp_path, "good4", _GOOD_SCALAR)
     rc = cosci_eval.main([
         "--stage", "E2", "--candidate", cand.source_path, "--baseline", "louis",
-        "--heat-form", "theta", "--momflux-floor", "1e-3",
+        "--heat-form", "theta",
         "--artifacts", str(art_path), "--baseline-only", "louis", "--no-tune",
         "--nlev", "16", "--out", str(out)])
     assert rc == 0
@@ -519,4 +545,5 @@ def test_cli_e2_writes_provenanced_json(tmp_path):
     assert rec["provenance"]["baseline_only"] == ["louis"]
     assert rec["provenance"]["candidate"]["sha256"]
     scores = rec["result"]["arms"]["candidate:good4"]["default"]["cbl_harness.npz"]
-    assert np.isfinite(scores["combined"]) and "uw" in scores["per_var"]
+    # no geostrophic wind in this case -> momentum fluxes not scored
+    assert np.isfinite(scores["combined"]) and "uw" not in scores["per_var"]

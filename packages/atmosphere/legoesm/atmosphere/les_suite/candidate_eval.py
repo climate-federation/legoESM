@@ -309,13 +309,47 @@ def e2_nsteps(artifact: LESReferenceArtifact, dt: float) -> int:
 
 
 def _frames(artifact: LESReferenceArtifact, dt: float) -> list[int]:
+    """SCM step of each LES frame after t=0: the NEAREST step (offset <= dt/2; user
+    decision 2026-10-15). Distinct frames must land on distinct steps."""
     times = [float(t) for t in np.asarray(artifact.times_s)]  # host-side: static under jit
     steps = [int(round(t / dt)) for t in times[1:]]
     if not steps:
         raise ValueError(f"{artifact.case_name}: no output frame after t=0 to score")
-    if any(abs(s * dt - t) > 1e-6 * max(1.0, t) for s, t in zip(steps, times[1:])):
-        raise ValueError(f"{artifact.case_name}: output times are not multiples of dt={dt}")
+    if min(steps) < 1:
+        raise ValueError(f"{artifact.case_name}: a frame after t=0 rounds to step 0 "
+                         f"(the initial column) at dt={dt}")
+    if len(set(steps)) != len(steps):
+        raise ValueError(f"{artifact.case_name}: frames closer than dt={dt} collide on "
+                         "one SCM step")
     return steps
+
+
+#: Momentum-flux normalisation floor as a fraction of the case's LES u*^2
+#: (user decision 2026-10-15).
+MOMFLUX_FLOOR_USTAR2_FRAC = 0.05
+
+
+def momentum_flux_floor(artifact: LESReferenceArtifact) -> float | None:
+    """Floor for scoring u'w', v'w' in ``artifact``, or ``None`` = not scored.
+
+    Momentum fluxes are scored only in a case with a geostrophic wind (``u_geo`` or
+    ``v_geo`` present and not all zero); the floor is ``MOMFLUX_FLOOR_USTAR2_FRAC``
+    times the case's LES ``u*^2`` = mean over the frames after t=0 of the surface
+    stress magnitude ``|(tau_x_s, tau_y_s)|``. Such a case without LES momentum
+    fluxes or surface stress is an error (user decision 2026-10-15)."""
+    geo = [np.asarray(g) for g in (artifact.u_geo, artifact.v_geo) if g is not None]
+    if not any(bool(np.any(g != 0.0)) for g in geo):
+        return None
+    missing = [n for n in ("uw_resolved", "vw_resolved", "tau_x_s", "tau_y_s")
+               if getattr(artifact, n) is None]
+    if missing:
+        raise ValueError(f"{artifact.case_name}: geostrophic-wind case without LES "
+                         f"momentum data {missing}; its momentum fluxes must be scored")
+    tau = np.hypot(np.asarray(artifact.tau_x_s)[1:], np.asarray(artifact.tau_y_s)[1:])
+    ustar2 = float(np.mean(tau))
+    if not ustar2 > 0.0:
+        raise ValueError(f"{artifact.case_name}: LES u*^2 = {ustar2}; no momentum floor")
+    return MOMFLUX_FLOOR_USTAR2_FRAC * ustar2
 
 
 class E2Score(NamedTuple):
@@ -325,14 +359,15 @@ class E2Score(NamedTuple):
     combined: Array
 
 
-def e2_score(artifact: LESReferenceArtifact, rec: RolloutRecord, dt: float,
-             *, momflux_floor: float) -> E2Score:
+def e2_score(artifact: LESReferenceArtifact, rec: RolloutRecord, dt: float) -> E2Score:
     """Score a rollout against every LES frame after t=0: θ_l, q_t (moist), u, v
     profiles and heat, moisture (moist), u'w', v'w' fluxes, equally weighted (RMS of
     the per-variable normalized RMSEs). Fluxes are LES resolved+SGS totals, which are
     snapshots at the frame time, so they are compared with the SCM flux evaluated on
-    the frame's own column (``rec`` must run :func:`e2_nsteps` steps)."""
+    the frame's own column (``rec`` must run :func:`e2_nsteps` steps). Momentum
+    fluxes are scored per :func:`momentum_flux_floor`."""
     steps = _frames(artifact, dt)
+    momflux_floor = momentum_flux_floor(artifact)
     if rec.fluxes.wtheta.shape[0] <= steps[-1]:
         raise ValueError(f"{artifact.case_name}: rollout has "
                          f"{rec.fluxes.wtheta.shape[0]} steps; E2 needs e2_nsteps = "
@@ -352,7 +387,7 @@ def e2_score(artifact: LESReferenceArtifact, rec: RolloutRecord, dt: float,
     if artifact.is_moist:
         truth["qt"] = jnp.asarray(artifact.qt)[sl]
         truth["wqt"] = total_turbulent_flux(artifact.wqt_resolved, artifact.wqt_sgs)[sl]
-    if artifact.uw_resolved is not None:
+    if momflux_floor is not None:
         truth["uw"] = total_turbulent_flux(artifact.uw_resolved, artifact.uw_sgs)[sl]
         truth["vw"] = total_turbulent_flux(artifact.vw_resolved, artifact.vw_sgs)[sl]
     model = {k: [] for k in truth}

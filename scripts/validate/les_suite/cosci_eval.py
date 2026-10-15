@@ -25,7 +25,7 @@ Usage::
     JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 python scripts/validate/les_suite/cosci_eval.py \\
         --candidate scripts/validate/les_suite/cosci_candidates/hb_equivalent.py \\
         --baseline holtslag_boville --heat-form theta \\
-        --momflux-floor 1e-3 --stage E2 --artifacts cbl.npz --out e2.json
+        --stage E2 --artifacts cbl.npz --out e2.json
 """
 from __future__ import annotations
 
@@ -56,6 +56,7 @@ from legoesm.atmosphere.les_suite.candidate import column_inputs, load_candidate
 from legoesm.atmosphere.les_suite.candidate_eval import (  # noqa: E402
     AD_LR,
     AD_STEPS,
+    MOMFLUX_FLOOR_USTAR2_FRAC,
     SCM_DT_S,
     SCM_NLEV,
     Fluxes,
@@ -66,6 +67,7 @@ from legoesm.atmosphere.les_suite.candidate_eval import (  # noqa: E402
     ekman_metrics,
     free_convection_metrics,
     gradient_activity,
+    momentum_flux_floor,
     neutral_surface_layer_metrics,
     rollout,
     stable_metrics,
@@ -183,7 +185,7 @@ class Arm:
                                  nsteps, params)
 
 
-def candidate_case_loss(arm, artifact, *, nlev, dt, momflux_floor):
+def candidate_case_loss(arm, artifact, *, nlev, dt):
     """The E2 loss of one case as a jitted function of the candidate parameters: the
     SCM is built once and the rollout compiled once, so every tuning step reuses it."""
     prep = arm.prepare(artifact, nlev=nlev, dt=dt)
@@ -192,7 +194,7 @@ def candidate_case_loss(arm, artifact, *, nlev, dt, momflux_floor):
     @jax.jit
     def loss(params):
         rec, _ = arm.run_prepared(prep, n, params)
-        return e2_score(artifact, rec, dt, momflux_floor=momflux_floor).combined
+        return e2_score(artifact, rec, dt).combined
     return loss
 
 
@@ -378,18 +380,19 @@ def _frame_artifact(art, k):
     return dataclasses.replace(art, **fields)
 
 
-def stage_e1(arms: dict, artifacts, nlev, dt, momflux_floor) -> dict:
+def stage_e1(arms: dict, artifacts, nlev, dt) -> dict:
     res = {}
     for path, art in artifacts:
         z = jnp.asarray(art.heights_m)
         w = layer_weights_from_heights(z)
         nt = int(jnp.asarray(art.times_s).shape[0])
         truth = {"wtheta": total_turbulent_flux(art.wtheta_resolved, art.wtheta_sgs)[1:]}
+        momflux_floor = momentum_flux_floor(art)
         floors = {"wtheta": PROFILE_FLOOR_FLUX, "wqt": PROFILE_FLOOR_QFLUX,
                   "uw": momflux_floor, "vw": momflux_floor}
         if art.is_moist:
             truth["wqt"] = total_turbulent_flux(art.wqt_resolved, art.wqt_sgs)[1:]
-        if art.uw_resolved is not None:
+        if momflux_floor is not None:
             truth["uw"] = total_turbulent_flux(art.uw_resolved, art.uw_sgs)[1:]
             truth["vw"] = total_turbulent_flux(art.vw_resolved, art.vw_sgs)[1:]
         per_arm = {}
@@ -411,12 +414,12 @@ def stage_e1(arms: dict, artifacts, nlev, dt, momflux_floor) -> dict:
 
 # --- E2 -------------------------------------------------------------------------------
 
-def _case_scores(arm, artifacts, nlev, dt, momflux_floor, params=None, turb=None):
+def _case_scores(arm, artifacts, nlev, dt, params=None, turb=None):
     out = {}
     for path, art in artifacts:
         n = e2_nsteps(art, dt)
         rec, _ = arm.run(art, n, params=params, turb=turb, nlev=nlev, dt=dt)
-        s = e2_score(art, rec, dt, momflux_floor=momflux_floor)
+        s = e2_score(art, rec, dt)
         out[Path(path).name] = {"per_var": {k: float(v) for k, v in s.per_var.items()},
                                 "combined": float(s.combined)}
     return out
@@ -437,7 +440,7 @@ def _regime_mean_loss(scores_fn, train):
     return sum(sum(v) / len(v) for v in by_reg.values()) / len(by_reg)
 
 
-def stage_e2(cand_arm, base_names, artifacts, nlev, dt, momflux_floor, steps, lr,
+def stage_e2(cand_arm, base_names, artifacts, nlev, dt, steps, lr,
              tune: bool) -> dict:
     train = [(p, a) for p, a in artifacts if not _held_out(a.case_name)]
     res = {"split": {Path(p).name: {"held_out": _held_out(a.case_name),
@@ -449,7 +452,7 @@ def stage_e2(cand_arm, base_names, artifacts, nlev, dt, momflux_floor, steps, lr
             arm, kw = make_arm_and_kwargs
             n = e2_nsteps(art, dt)
             rec, _ = arm.run(art, n, nlev=nlev, dt=dt, **kw)
-            return e2_score(art, rec, dt, momflux_floor=momflux_floor).combined
+            return e2_score(art, rec, dt).combined
         return per_case
 
     if cand_arm is not None:
@@ -457,7 +460,7 @@ def stage_e2(cand_arm, base_names, artifacts, nlev, dt, momflux_floor, steps, lr
         names, lo, hi = cand.bounds()
         x0 = jnp.asarray([float(cand.params[k][0]) for k in names])
         to_params = lambda x: {k: x[i] for i, k in enumerate(names)}  # noqa: E731
-        entry = {"default": _case_scores(cand_arm, artifacts, nlev, dt, momflux_floor,
+        entry = {"default": _case_scores(cand_arm, artifacts, nlev, dt,
                                          params=cand.default_params())}
         base_rec_diff = {}
         for path, art in artifacts:
@@ -469,8 +472,7 @@ def stage_e2(cand_arm, base_names, artifacts, nlev, dt, momflux_floor, steps, lr
                 for k in ("theta_l", "q_t", "u", "v")}
         entry["max_abs_diff_vs_baseline_rollout"] = base_rec_diff
         if tune and train and names:
-            case_loss = {path: candidate_case_loss(cand_arm, art, nlev=nlev, dt=dt,
-                                                   momflux_floor=momflux_floor)
+            case_loss = {path: candidate_case_loss(cand_arm, art, nlev=nlev, dt=dt)
                          for path, art in train}
 
             def loss_of(x):
@@ -487,15 +489,15 @@ def stage_e2(cand_arm, base_names, artifacts, nlev, dt, momflux_floor, steps, lr
                            "train_loss_default": d_loss, "train_loss_best": best_loss,
                            "history": hist,
                            "scores": _case_scores(cand_arm, artifacts, nlev, dt,
-                                                  momflux_floor, params=tuned)}
+                                                  params=tuned)}
         res["arms"]["candidate:" + cand.name] = entry
     for name in base_names:
         base, key = _base_turbulence(name)
         arm = Arm(base)
-        entry = {"default": _case_scores(arm, artifacts, nlev, dt, momflux_floor)}
+        entry = {"default": _case_scores(arm, artifacts, nlev, dt)}
         tuned_turb = apply_les_tuned_turbulence(base)
         if tuned_turb != base:
-            entry["les_tuned"] = _case_scores(arm, artifacts, nlev, dt, momflux_floor,
+            entry["les_tuned"] = _case_scores(arm, artifacts, nlev, dt,
                                               turb=tuned_turb)
         if tune and train:
             metas = _scheme_tunable_metas(key, (1,))
@@ -516,7 +518,7 @@ def stage_e2(cand_arm, base_names, artifacts, nlev, dt, momflux_floor, steps, lr
             ov = {f: float(best[i]) for i, f in enumerate(fields)}
             entry["ad"] = {"params": ov, "train_loss_default": d_loss,
                            "train_loss_best": best_loss, "history": hist,
-                           "scores": _case_scores(arm, artifacts, nlev, dt, momflux_floor,
+                           "scores": _case_scores(arm, artifacts, nlev, dt,
                                                   turb=apply_overrides_to_base(base, ov))}
         res["arms"]["baseline:" + name] = entry
     return res
@@ -524,7 +526,7 @@ def stage_e2(cand_arm, base_names, artifacts, nlev, dt, momflux_floor, steps, lr
 
 # --- E0 -------------------------------------------------------------------------------
 
-def stage_e0(cand_arm, artifacts, nlev, dt, momflux_floor) -> dict:
+def stage_e0(cand_arm, artifacts, nlev, dt) -> dict:
     cand = cand_arm.candidate
     params = cand.default_params()
     cols = {}
@@ -543,8 +545,7 @@ def stage_e0(cand_arm, artifacts, nlev, dt, momflux_floor) -> dict:
                        for k, v in cols.items()}}
     train = [(p, a) for p, a in artifacts if not _held_out(a.case_name)]
     if train and cand.params:
-        case_loss = {path: candidate_case_loss(cand_arm, art, nlev=nlev, dt=dt,
-                                               momflux_floor=momflux_floor)
+        case_loss = {path: candidate_case_loss(cand_arm, art, nlev=nlev, dt=dt)
                      for path, art in train}
 
         def loss(p):
@@ -572,8 +573,6 @@ def parse_args(argv=None):
     p.add_argument("--baseline-only", nargs="*", default=[],
                    help="roster closures to score (default/LES-tuned/AD-tuned arms)")
     p.add_argument("--artifacts", nargs="*", type=Path, default=[])
-    p.add_argument("--momflux-floor", type=float, default=None,
-                   help="momentum-flux normalisation floor [m^2/s^2] (required for E0/E1/E2)")
     p.add_argument("--ad-steps", type=int, default=AD_STEPS)
     p.add_argument("--ad-lr", type=float, default=AD_LR)
     p.add_argument("--nlev", type=int, default=SCM_NLEV)
@@ -585,8 +584,6 @@ def parse_args(argv=None):
         p.error("give --candidate and/or --baseline-only")
     if args.candidate is not None and args.baseline is None:
         p.error("--candidate needs --baseline (no default)")
-    if args.stage in ("E0", "E1", "E2") and args.momflux_floor is None:
-        p.error(f"--stage {args.stage} needs --momflux-floor (no default)")
     if args.stage == "E0" and args.candidate is None:
         p.error("--stage E0 checks a candidate; give --candidate")
     return args
@@ -618,14 +615,14 @@ def main(argv=None) -> int:
     for name in args.baseline_only:
         arms["baseline:" + name] = Arm(_base_turbulence(name)[0])
     if args.stage == "E0":
-        result = stage_e0(cand_arm, artifacts, args.nlev, args.dt, args.momflux_floor)
+        result = stage_e0(cand_arm, artifacts, args.nlev, args.dt)
     elif args.stage == "L":
         result = stage_l(arms, artifacts, args.nlev, args.dt)
     elif args.stage == "E1":
-        result = stage_e1(arms, artifacts, args.nlev, args.dt, args.momflux_floor)
+        result = stage_e1(arms, artifacts, args.nlev, args.dt)
     else:
         result = stage_e2(cand_arm, args.baseline_only, artifacts, args.nlev, args.dt,
-                          args.momflux_floor, args.ad_steps, args.ad_lr, not args.no_tune)
+                          args.ad_steps, args.ad_lr, not args.no_tune)
     record = {
         "stage": args.stage, "result": result,
         "provenance": {
@@ -634,7 +631,8 @@ def main(argv=None) -> int:
                 "path": str(args.candidate), "sha256": _sha256(args.candidate),
                 "kind": cand_arm.candidate.kind, "params": cand_arm.candidate.params},
             "baseline": args.baseline, "heat_form": args.heat_form,
-            "ke_heating": args.ke_heating, "momflux_floor": args.momflux_floor,
+            "ke_heating": args.ke_heating,
+            "momflux_floor_ustar2_frac": MOMFLUX_FLOOR_USTAR2_FRAC,
             "nlev": args.nlev, "dt": args.dt, "ad_steps": args.ad_steps, "ad_lr": args.ad_lr,
             "baseline_only": list(args.baseline_only),
             "held_out_families": HELD_OUT_FAMILIES,
