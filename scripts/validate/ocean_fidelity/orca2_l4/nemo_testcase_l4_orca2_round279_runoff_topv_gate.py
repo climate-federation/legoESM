@@ -55,7 +55,8 @@ def _score(actual, expected) -> dict[str, object]:
         "unequal": int(np.count_nonzero(bits)),
         "max_abs": float(np.nanmax(delta)) if delta.size else 0.0,
         "rms": float(np.sqrt(np.mean(delta * delta))) if delta.size else 0.0,
-        "argmax": list(np.unravel_index(flat, delta.shape)) if delta.size else [],
+        "argmax": ([int(index) for index in np.unravel_index(flat, delta.shape)]
+                   if delta.size else []),
     }
 
 
