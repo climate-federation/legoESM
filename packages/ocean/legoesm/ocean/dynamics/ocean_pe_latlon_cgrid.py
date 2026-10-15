@@ -4422,6 +4422,8 @@ def surface_stress_faces(
     stored): the pivot-row V face reads the halo NEMO's ``lbc_lnk`` gives
     ``vtau`` as a vector, ``-vtau(pivot-1)`` mirrored (``sbcmod.F90:548-551``
     then ``:559``); otherwise the face is the scalar mirror of the one below.
+    The T-point stress must already carry NEMO's pivot-row fold (NEMO's own
+    post-``sbc`` fields do); a card-computed stress is not folded here.
 
     Returns ``(tau_i_u, tau_j_v, dz_0_u, dz_0_v)`` (ocean-reaction sign,
     grid-aligned) or ``None`` when the forcing carries no stress."""

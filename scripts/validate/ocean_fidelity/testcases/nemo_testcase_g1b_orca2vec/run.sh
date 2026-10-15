@@ -376,13 +376,14 @@ if [[ "$mode" == --resume ]]; then
   admit_smoke_in_place
   N=$(record_steps)
   printf 'G1B_RESUME smoke and reference admitted in place; N=%s\n' "$N"
+  for j in $(seq 1 10); do        # every twin directory checked before any runs
+    d=$(twin_dir "$j")
+    [[ ! -e "$d" || "$(ls -A "$d")" == namelist_cfg ]] \
+      || { printf 'REFUSE: %s holds more than the refused deck; inspect, never re-run blindly\n' "$d" >&2; exit 69; }
+  done
   for j in $(seq 1 10); do
     d=$(twin_dir "$j")
-    if [[ -e "$d" ]]; then
-      [[ "$(ls -A "$d")" == namelist_cfg ]] \
-        || { printf 'REFUSE: %s holds more than the refused deck; inspect, never re-run blindly\n' "$d" >&2; exit 69; }
-      rm -f "$d/namelist_cfg"
-    fi
+    rm -f "$d/namelist_cfg"
     run_one "$RUN_BIN" "$d" "$N" "$(twin_list "$j" "$N")"
     finished "$d" "$N"
   done
