@@ -272,8 +272,8 @@ def test_emit_writes_turbulence_stats_and_closes_budgets(tiny_cases, tmp_path, c
     assert setup["surface_bc"] == ("cooling_K_per_h" if case == "tiny_sbl"
                                    else "flux_K_m_s")
     # the SCM is driven by the realised series: interval means of the exact integral
-    from legoesm.atmosphere.les_suite.bridge import surface_heat_flux_fn
-    fn = surface_heat_flux_fn(art)
+    from legoesm.atmosphere.les_suite.bridge import surface_flux_fn
+    fn = surface_flux_fn(art, "w_theta_s")
     t, cum = np.asarray(art.times_s), np.asarray(art.w_theta_s_cum)
     integral = sum(float(fn(0.5 * (t[k] + t[k + 1]))) * (t[k + 1] - t[k])
                    for k in range(art.nt - 1))

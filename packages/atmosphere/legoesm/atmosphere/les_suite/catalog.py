@@ -105,6 +105,63 @@ ANCHOR_CASES: tuple[LESCase, ...] = (
 )
 
 
+# --- further cloudy cases (grids/durations = their driver's current defaults) --
+# Each runs through its own driver with ``--emit-suite-artifact``. The grids are
+# the drivers' defaults, which differ from the published setups for RICO (dz),
+# RF02 (domain, dx, stretched dz, 6 h) and ASTEX (grid, 6 h) — pending a decision.
+MOIST_CASES: tuple[LESCase, ...] = (
+    LESCase(
+        name="rico_cu",
+        regime="shallow_cumulus",
+        core="spectral",
+        grid=LESGrid(nx=128, ny=128, nz=100, Lx_m=12800.0, Ly_m=12800.0, Lz_m=4000.0,
+                     dt_s=2.0),
+        duration_hours=24.0,
+        surface_theta_flux_K_m_s=None,   # interactive bulk fluxes over fixed SST
+        geostrophic_wind_m_s=None,       # height-dependent (u_g, v_g) from the deck lsf
+        sgs_variants=_SGS_DEFAULT,
+        driver="run_rico_les.py",
+        reference="van Zanten et al. (2011) RICO precipitating shallow-cumulus LES "
+                  "intercomparison",
+        ci_marker="manual_only",
+        description="Precipitating trade cumulus over a fixed SST with interactive "
+                    "bulk surface fluxes; the artifact records the realised series.",
+    ),
+    LESCase(
+        name="dycoms_rf02_sc",
+        regime="stratocumulus",
+        core="spectral",
+        grid=LESGrid(nx=96, ny=96, nz=192, Lx_m=3360.0, Ly_m=3360.0, Lz_m=1500.0,
+                     dt_s=0.5),
+        duration_hours=4.0,
+        surface_theta_flux_K_m_s=None,   # prescribed SHF/LHF (driver-internal)
+        geostrophic_wind_m_s=None,       # sheared (u_g, v_g) from the deck lsf
+        sgs_variants=_SGS_DEFAULT,
+        driver="run_dycoms_les.py",
+        reference="Ackerman et al. (2009) DYCOMS-II RF02 drizzling stratocumulus LES "
+                  "intercomparison",
+        ci_marker="manual_only",
+        description="Drizzling nocturnal stratocumulus (run_dycoms_les.py --case rf02).",
+    ),
+    LESCase(
+        name="astex_sc",
+        regime="stratocumulus",
+        core="spectral",
+        grid=LESGrid(nx=96, ny=96, nz=192, Lx_m=3360.0, Ly_m=3360.0, Lz_m=2500.0,
+                     dt_s=0.5),
+        duration_hours=4.0,
+        surface_theta_flux_K_m_s=None,   # prescribed SHF/LHF (driver-internal)
+        geostrophic_wind_m_s=None,       # no Coriolis in the deck
+        sgs_variants=_SGS_DEFAULT,
+        driver="run_dycoms_les.py",
+        reference="ASTEX flight 209 stratocumulus (gSAM ASTEX209 deck)",
+        ci_marker="manual_only",
+        description="ASTEX stratocumulus deck, steady forcing "
+                    "(run_dycoms_les.py --case astex).",
+    ),
+)
+
+
 def _classify_dry_regime(flux_K_m_s: float) -> Regime:
     """Regime of a dry grid point from its surface heat flux sign (D2 axes)."""
     if flux_K_m_s > 1.0e-4:
@@ -181,7 +238,7 @@ def register_default_catalog(*, include_dry_grid: bool = True) -> list[LESCase]:
     duplicate name, so call :func:`~...registry.clear_registry` first if
     re-registering (tests do)."""
     registered: list[LESCase] = []
-    for case in ANCHOR_CASES:
+    for case in ANCHOR_CASES + MOIST_CASES:
         registered.append(register_case(case))
     if include_dry_grid:
         for case in dry_shear_buoyancy_grid():

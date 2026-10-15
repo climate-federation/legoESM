@@ -597,3 +597,63 @@ def test_a_saturation_adjustment_that_did_not_settle_is_refused():
     )
     with pytest.raises(ValueError, match="did not settle"):
         build_cbl_scm_from_artifact(art, _mynn_config(), nlev=16, dt=10.0)
+
+
+# --- moist SCM microphysics + realised moisture flux --------------------------
+def test_moist_scm_microphysics_precedence_and_legacy():
+    from legoesm.atmosphere.les_suite.scm_runner import (
+        microphysics_from_record,
+        microphysics_record,
+        moist_scm_microphysics,
+    )
+    from legoesm.atmosphere.physics.microphysics.config import (
+        KesslerConfig,
+        MicrophysicsConfig,
+    )
+    kes = MicrophysicsConfig(scheme="kessler",
+                             kessler=KesslerConfig(autoconversion_threshold=5e-4))
+    rec = microphysics_record(kes)
+    assert microphysics_from_record(rec) == kes                  # exact round trip
+    art = _moist_artifact(les_setup={"microphysics": rec})
+    assert moist_scm_microphysics(art) == kes                    # the LES's own scheme
+    explicit = MicrophysicsConfig(scheme="sundqvist")
+    assert moist_scm_microphysics(art, explicit) is explicit     # caller wins
+    # an artifact without the record keeps its historical pairing
+    assert moist_scm_microphysics(_moist_artifact()).scheme == "sundqvist"
+    with pytest.raises(ValueError):
+        microphysics_from_record({"scheme": "kessler", "kessler": {"nope": 1.0}})
+    with pytest.raises(ValueError):                              # no silent defaults
+        microphysics_from_record({"scheme": "kessler"})
+    # nested sub-configs (Morrison's activation) survive the JSON round trip the
+    # artifact's les_setup takes
+    import json
+
+    from legoesm.atmosphere.physics.microphysics.config import MorrisonConfig
+    mor = MicrophysicsConfig(scheme="morrison",
+                             morrison=MorrisonConfig(morrison_flavor="sam"))
+    back = microphysics_from_record(json.loads(json.dumps(microphysics_record(mor))))
+    assert back == mor
+    assert any(hasattr(v, "_asdict") for v in back.morrison)   # the case is exercised
+    with pytest.raises(ValueError):
+        microphysics_from_record(json.loads(json.dumps(
+            {"scheme": "morrison", "morrison": {"activation": {"nope": 1}}})))
+
+
+def test_moist_scm_takes_the_realised_moisture_flux_not_its_first_sample():
+    from legoesm.atmosphere.les_suite.scm_runner import microphysics_record
+    from legoesm.atmosphere.physics.microphysics.config import MicrophysicsConfig
+    t = np.linspace(0.0, 1800.0, NT)
+    w_qv = np.array([2e-5, 6e-5, 8e-5])
+    cum = np.concatenate([[0.0], np.cumsum(0.5 * (w_qv[1:] + w_qv[:-1]) * np.diff(t))])
+    art = _moist_artifact(
+        w_qv_s=w_qv, w_qv_s_cum=cum,
+        les_setup={"microphysics": microphysics_record(
+            MicrophysicsConfig(scheme="kessler"))})
+    dt = 60.0
+    scm, _grid = build_cbl_scm_from_artifact(art, _mynn_config(), nlev=NZ, dt=dt)
+    applied = sum(float(scm.forcing.w_qv_s(k * dt)) * dt for k in range(int(t[-1] / dt)))
+    np.testing.assert_allclose(applied, cum[-1], rtol=1e-12)
+    assert float(scm.forcing.w_qv_s(1500.0)) > 1.5 * w_qv[0]  # not the frozen t=0 value
+    final = scm_scan_final_state(scm, 5)
+    assert "q_r" in final.tracers                              # Kessler carries rain
+    assert np.all(np.isfinite(np.asarray(final.T.data)))

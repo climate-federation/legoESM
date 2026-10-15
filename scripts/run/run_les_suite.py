@@ -55,15 +55,11 @@ from legoesm.atmosphere.les_suite import (  # noqa: E402
     register_default_catalog,
 )
 from legoesm.atmosphere.les_suite.bridge import save_artifact  # noqa: E402
-from legoesm.atmosphere.les_suite.emit import (  # noqa: E402
-    build_reference_artifact,
-    column_share,
-    covariance,
-    horizontal_mean,
-    resolved_vertical_flux,
-    sgs_flux_from_face_stress,
-    sgs_vertical_scalar_flux_mean,
-    third_moment,
+from legoesm.atmosphere.les_suite.emit import build_reference_artifact  # noqa: E402
+from legoesm.atmosphere.les_suite.frame_stats import (  # noqa: E402
+    FrameRecorder,
+    floor_shares,
+    make_frame_fields_fn,
 )
 from legoesm.timestepping.split_explicit import select_dt  # noqa: E402
 
@@ -129,11 +125,6 @@ def _build_cbl(case, args, dtype, sgs="lasd", u_geo_mag=0.0):
         z0=args.z0, dealias=True, **_sgs_les_config(sgs),
         time_scheme="rk3",
         buoyancy=True, theta_ref0=theta0, pr_sgs=args.pr_sgs,
-        # sgs_buoyancy MUST stay off: emit.sgs_vertical_scalar_flux_mean reconstructs
-        # the SGS heat flux from eddy_viscosity() with K_h=ν_t/Pr, matching the core's
-        # scalar_rhs. If sgs_buoyancy were on, the core rescales ν_t by the Lilly
-        # factor (spectral_les_plane rhs) and the emitted SGS flux would no longer
-        # equal the flux the model integrated.
         sgs_buoyancy=False)
     g = sl.make_grid(cfg, dtype=dtype)
     z = g.z_c
@@ -282,94 +273,6 @@ def _make_emit_step(g, regime, u_geo, f_cor, Q0, Lz, dtype):
     raise SystemExit(f"no emit step wired for regime {regime!r}")
 
 
-def _frame_fields_fn(g, u_geo, f_cor, Q0):
-    """Jitted per-frame field set (device): ν_t, the applied surface BC, the SGS
-    momentum stress on faces, and the kinematic pressure with its gradients.
-
-    The SGS fluxes are rebuilt from ``eddy_viscosity`` — what ``rhs`` applies only
-    while ``sgs_buoyancy`` is off (with it on, ``rhs`` rescales ``ν_t`` by the Lilly
-    factor first), so that combination is refused rather than emitted wrong."""
-    if g.cfg.sgs_buoyancy:
-        raise SystemExit("emitted SGS fluxes assume sgs_buoyancy=False (rhs would "
-                         "rescale ν_t by the Lilly factor before applying it)")
-    q0 = 0.0 if Q0 is None else Q0
-
-    @jax.jit
-    def _fields(st, t_sfc=None):
-        cd_surf, q = sl.surface_boundary(st.u, st.v, st.theta, g, q0, t_sfc)
-        nu_t = sl.eddy_viscosity(st.u, st.v, st.w, g)
-        tau13, tau23, spd1, cd = sl.sgs_vertical_momentum_flux_faces(
-            st.u, st.v, st.w, nu_t, g, cd_surf=cd_surf)
-        p = sl.kinematic_pressure(st, g, u_geo, f_cor, sfc_theta_flux=q0, t_sfc=t_sfc)
-        dpdz = sl.f2c(jnp.pad(sl.ddz_c2f(p, g.dz), ((0, 0), (0, 0), (1, 1))))
-        floor = jnp.full_like(nu_t, g.cfg.nu_floor)
-        fl13, fl23, _s, _c = sl.sgs_vertical_momentum_flux_faces(
-            st.u, st.v, st.w, floor, g, cd_surf=cd_surf)
-        fl13 = fl13.at[..., 0].set(0.0)   # the wall stress is not the floor's
-        fl23 = fl23.at[..., 0].set(0.0)
-        return dict(
-            q=jnp.asarray(q, st.u.dtype), nu_t=nu_t, tau13=tau13, tau23=tau23,
-            tau_x_s=-cd * spd1 * jnp.mean(st.u[..., 0]),
-            tau_y_s=-cd * spd1 * jnp.mean(st.v[..., 0]),
-            p=p, dpdx=sl.ddx(p, g), dpdy=sl.ddy(p, g), dpdz=dpdz,
-            dudx=sl.ddx(st.u, g), dvdy=sl.ddy(st.v, g),
-            dwdz=sl.ddz_f2c(st.w, g.dz), wc=sl.f2c(st.w),
-            fl13=fl13, fl23=fl23)
-    return _fields
-
-
-def _frame_stats(st, g, fields, pr_sgs):
-    """Horizontal-mean truth profiles + turbulence statistics for one snapshot.
-
-    The SGS heat flux uses the core's exact face discretization (via emit) with
-    the surface flux the core APPLIED at this state (prescribed ``Q0`` or the MOST
-    flux under prescribed cooling) — so the emitted ``<w'θ'>_sgs`` equals the flux
-    ``scalar_rhs`` integrates. Momentum SGS fluxes come from the core's own face
-    stress (``sgs_vertical_momentum_flux_faces``)."""
-    a = {k: np.asarray(v) for k, v in fields.items()}
-    u, v, th, wc = np.asarray(st.u), np.asarray(st.v), np.asarray(st.theta), a["wc"]
-    wf = np.asarray(st.w)
-    q = float(a["q"])
-    ww_f = covariance(wf, wf)                 # faces (nz+1) via the same reducer
-    out = dict(
-        theta=horizontal_mean(th), u=horizontal_mean(u), v=horizontal_mean(v),
-        wtheta_resolved=resolved_vertical_flux(wc, th),
-        wtheta_sgs=sgs_vertical_scalar_flux_mean(th, a["nu_t"], float(g.dz),
-                                                 pr_sgs=pr_sgs, surface_flux=q),
-        uw_resolved=covariance(u, wc), vw_resolved=covariance(v, wc),
-        uw_sgs=sgs_flux_from_face_stress(a["tau13"]),
-        vw_sgs=sgs_flux_from_face_stress(a["tau23"]),
-        uu=covariance(u, u), vv=covariance(v, v),
-        ww=0.5 * (ww_f[:-1] + ww_f[1:]), thth=covariance(th, th),
-        wwtheta=third_moment(wc, wc, th),
-        wp=covariance(wc, a["p"]), theta_dpdz=covariance(th, a["dpdz"]),
-        pstrain_11=covariance(a["p"], a["dudx"]),
-        pstrain_22=covariance(a["p"], a["dvdy"]),
-        pstrain_33=covariance(a["p"], a["dwdz"]),
-        pres_uw=covariance(u, a["dpdz"]) + covariance(wc, a["dpdx"]),
-        pres_vw=covariance(v, a["dpdz"]) + covariance(wc, a["dpdy"]),
-        wtheta_floor=sgs_vertical_scalar_flux_mean(
-            th, np.full_like(th, g.cfg.nu_floor), float(g.dz), pr_sgs=pr_sgs,
-            surface_flux=0.0),
-        uw_floor=sgs_flux_from_face_stress(a["fl13"]),
-        vw_floor=sgs_flux_from_face_stress(a["fl23"]),
-    )
-    out["tke_resolved"] = 0.5 * (out["uu"] + out["vv"] + out["ww"])
-    surface = dict(w_theta_s=q, tau_x_s=float(a["tau_x_s"]),
-                   tau_y_s=float(a["tau_y_s"]))
-    return out, surface
-
-
-def _floor_shares(prof):
-    """Column share of the background-viscosity floor in the total (resolved+SGS)
-    heat and momentum flux profiles."""
-    return (
-        column_share(prof["wtheta_floor"], prof["wtheta_resolved"] + prof["wtheta_sgs"]),
-        column_share(prof["uw_floor"], prof["uw_resolved"] + prof["uw_sgs"]),
-        column_share(prof["vw_floor"], prof["vw_resolved"] + prof["vw_sgs"]),
-    )
-
-
 def _refined_case(case, n):
     """``case`` on an ``n``× finer grid over the same domain, ``dt_s/n``."""
     gr = case.grid
@@ -515,11 +418,9 @@ def main(argv: list[str] | None = None) -> int:
           f"hours={hours} dt={dt0:.4f} n_steps={n_steps} refine={args.refine} "
           f"nu_floor={g.cfg.nu_floor} frames={len(rec_steps) + 1} sgs={sgs_name}")
 
-    fields_fn = _frame_fields_fn(g, (u_geo_mag, 0.0), f_cor, Q0)
-    profs: dict[str, list] = {}
-    sfc: dict[str, list] = {"w_theta_s": [], "tau_x_s": [], "tau_y_s": []}
-    cum = {"w_theta_s_cum": [], "tau_x_s_cum": [], "tau_y_s_cum": []}
-    times = []
+    fields_fn = make_frame_fields_fn(g, (u_geo_mag, 0.0), f_cor)
+    rec = FrameRecorder(g, g.cfg.pr_sgs)
+    q0_applied = 0.0 if Q0 is None else Q0
     n_core = len(sl.BUDGET_TERMS)
     acc = jnp.zeros(n_core + 3, dtype)       # time-integrated budget terms
 
@@ -532,17 +433,14 @@ def main(argv: list[str] | None = None) -> int:
                          for f in (state.theta, state.u, state.v)])
 
     def _record(t):
-        prof, srf = _frame_stats(st, g, fields_fn(st, _t_sfc(t)), args.pr_sgs)
-        for k, val in prof.items():
-            profs.setdefault(k, []).append(val)
-        for k, val in srf.items():
-            sfc[k].append(val)
         a_np = np.asarray(acc)
-        cum["w_theta_s_cum"].append(float(a_np[0]))
-        cum["tau_x_s_cum"].append(float(a_np[1]))
-        cum["tau_y_s_cum"].append(float(a_np[2]))
-        times.append(float(t))
-        sh, su, sv = _floor_shares(prof)
+        names = dict(zip(sl.BUDGET_TERMS, a_np[:n_core]))
+        prof, srf = rec.record(
+            t, st, fields_fn(st, q0_applied, 0.0, _t_sfc(t)),
+            series={"w_theta_s_cum": names["sfc_heat_flux"],
+                  "tau_x_s_cum": names["sfc_stress_x"],
+                  "tau_y_s_cum": names["sfc_stress_y"]})
+        sh, su, sv = floor_shares(prof)
         print(f"  frame t={t / 3600:.3f}h  nu_floor share of total flux: "
               f"heat={sh:.4f} u-mom={su:.4f} v-mom={sv:.4f}  "
               f"w'θ'_0={srf['w_theta_s']:+.5f} u'w'_0={srf['tau_x_s']:+.5f}")
@@ -563,7 +461,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"[BLOWUP] step {k} t={k * dt0:.0f}s max|w|={mw}")
                 return 1
             _record(k * dt0)
-    print(f"[DONE] wall={time.time()-t0:.1f}s  {len(times)} frames")
+    print(f"[DONE] wall={time.time()-t0:.1f}s  {len(rec.times)} frames")
 
     # RULE 0 column budgets: change of the column-integrated mean = boundary +
     # body sources the RK stages applied + the sponge (reported separately).
@@ -585,35 +483,22 @@ def main(argv: list[str] | None = None) -> int:
               f"column={col1[i]:+.6e}")
 
     # Times are strictly increasing + distinct by construction (index sampling).
-    times_arr = np.asarray(times)
     recs_z = np.asarray(g.z_c)
-    stats = {k: np.stack(v) for k, v in profs.items()
-             if k not in ("theta", "u", "v", "wtheta_resolved", "wtheta_sgs")}
     artifact = build_reference_artifact(
         case_name=case.name,
         sgs=sgs_name,
-        z=recs_z,
-        times_s=times_arr,
-        theta=np.stack(profs["theta"]),
-        u=np.stack(profs["u"]),
-        v=np.stack(profs["v"]),
-        wtheta_resolved=np.stack(profs["wtheta_resolved"]),
-        wtheta_sgs=np.stack(profs["wtheta_sgs"]),
         subsidence_w=np.zeros_like(recs_z),   # dry: no large-scale subsidence
         prescribe="fluxes",
-        # the surface heat flux the LES APPLIED at each output time (the prescribed
-        # Q0, or the MOST flux under prescribed cooling) — the SCM gets this series.
-        w_theta_s=np.asarray(sfc["w_theta_s"]),
         # geostrophic forcing the SCM must receive too: the bridge rebuilds SCMForcing
         # from these so the SCM arm sees the SAME U_g/f. Free-convective (U_g=0) leaves
         # u_geo/v_geo absent (None) — byte-identical to the pre-shear artifacts.
         u_geo=(np.full_like(recs_z, u_geo_mag) if u_geo_mag > 0.0 else None),
         v_geo=(np.zeros_like(recs_z) if u_geo_mag > 0.0 else None),
         f_c=f_cor,
-        tau_x_s=np.asarray(sfc["tau_x_s"]),
-        tau_y_s=np.asarray(sfc["tau_y_s"]),
-        **{k: np.asarray(v) for k, v in cum.items()},
-        **stats,
+        # truth + flux profiles, the surface heat flux / stress the LES APPLIED at
+        # each output time (prescribed Q0, or the MOST flux under prescribed cooling)
+        # and their exact time integrals, and the turbulence statistics.
+        **rec.artifact_kwargs(),
         les_setup={
             "surface_bc": ("cooling_K_per_h" if rate is not None else "flux_K_m_s"),
             "surface_bc_value": float(rate if rate is not None else Q0),

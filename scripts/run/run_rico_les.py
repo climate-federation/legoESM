@@ -67,6 +67,13 @@ import les_record  # noqa: E402
 import run_bomex_les as bx  # noqa: E402  (shared forcing/profiles machinery)
 
 from legoesm.atmosphere.forcing.sam_case_forcing import resolve_sam_case_dir  # noqa: E402
+from legoesm.atmosphere.les_suite.bridge import save_artifact  # noqa: E402
+from legoesm.atmosphere.les_suite.frame_stats import (  # noqa: E402
+    MoistRunEmitter,
+    column_contents,
+    moist_step_budget,
+)
+from legoesm.atmosphere.les_suite.scm_runner import microphysics_record  # noqa: E402
 
 # Default case dir: external LEGOESM_GSAM_ROOT if set, else the repo-local
 # cache (scripts/data/fetch_les_forcing.py); --case-dir overrides. See
@@ -122,6 +129,11 @@ def parse_args():
     p.add_argument("--print-every", type=int, default=1000)
     p.add_argument("--record-frames", type=int, default=24)
     p.add_argument("--case-label", type=str, default="rico")
+    p.add_argument("--emit-suite-artifact", type=Path, default=None,
+                   help="write the moist LESReferenceArtifact (the SCM tuner's input) "
+                        "to this path: per-frame statistics on the --record-frames "
+                        "cadence, the realised (interactive) surface flux series and "
+                        "precipitation, and the column budgets (printed).")
     p.add_argument("--output", type=Path, default=Path("results/les_rico"))
     return p.parse_args()
 
@@ -162,37 +174,63 @@ def main():
     spf = jnp.where(zf > z_sp, 0.5 * (1.0 - jnp.cos(
         jnp.pi * (zf - z_sp) / (args.Lz - z_sp))), 0.0).astype(dtype)
 
-    @partial(jax.jit, static_argnames=("first", "do_micro"))
-    def step(state, dt, first=False, do_micro=True):
+    def _bulk_fluxes(state):
+        """Planar-mean bulk surface fluxes at ``state`` (held over the step)."""
         u1, v1 = state.u[..., 0], state.v[..., 0]
         spd1 = jnp.mean(jnp.sqrt(u1 ** 2 + v1 ** 2 + 1.0))   # gustiness floor 1
         th_flux = _C_H * spd1 * (th_sfc - jnp.mean(state.theta[..., 0]))
         qv_flux = _C_Q * spd1 * (q_sfc - jnp.mean(state.tracers[..., 0, 0]))
-        state, us = sl.step(state, g=g, dt=dt,
-                            u_geo=(forc["ug"], forc["vg"]), f_cor=_FCOR,
-                            first=first, force=(0.0, 0.0),
-                            sfc_theta_flux=th_flux, sfc_qv_flux=qv_flux)
+        return th_flux, qv_flux
+
+    emit = args.emit_suite_artifact is not None
+    zcol = jnp.zeros(6, dtype)
+
+    def _cols(state):
+        return column_contents(state, g, ref) if emit else zcol
+
+    @partial(jax.jit, static_argnames=("first", "do_micro"))
+    def step(state, dt, first=False, do_micro=True):
+        th_flux, qv_flux = _bulk_fluxes(state)
+        out = sl.step(state, g=g, dt=dt,
+                      u_geo=(forc["ug"], forc["vg"]), f_cor=_FCOR,
+                      first=first, force=(0.0, 0.0),
+                      sfc_theta_flux=th_flux, sfc_qv_flux=qv_flux,
+                      return_budget=emit)
+        state, us = out[0], out[1]
+        c0 = _cols(state)
         state = forcing(state, dt)
+        c1 = _cols(state)
+        d_micro = d_pos = zcol
         if do_micro:
             dth, dtr, pr = micro(state.theta, state.tracers)
             tr = state.tracers + dt * args.micro_every * dtr
+            state = state._replace(
+                theta=state.theta + dt * args.micro_every * dth, tracers=tr)
+            c2 = _cols(state)
             wat = tr[..., :6]
             created = jnp.sum(jnp.clip(-wat, 0.0, None))
             tr = jnp.concatenate([jnp.clip(wat, 0.0, None),
                                   jnp.clip(tr[..., 6:], 0.0, None)], axis=-1)
-            state = state._replace(
-                theta=state.theta + dt * args.micro_every * dth, tracers=tr)
+            state = state._replace(tracers=tr)
+            d_micro = c2 - c1
+            d_pos = _cols(state) - c2
             precip = jnp.mean(pr)                 # domain-mean [kg/m²/s]
         else:
             created = jnp.asarray(0.0, state.theta.dtype)
             precip = jnp.asarray(0.0, state.theta.dtype)
+        c3 = _cols(state)
         rc = (dt / tau_sp) * spc
         rf = (dt / tau_sp) * spf
         u = state.u - rc * (state.u - state.u.mean((0, 1), keepdims=True))
         v = state.v - rc * (state.v - state.v.mean((0, 1), keepdims=True))
         w = state.w - rf * state.w
         u, v, w = sl.project(u, v, w, dt=dt, g=g)
-        return state._replace(u=u, v=v, w=w), us, created, precip
+        state = state._replace(u=u, v=v, w=w)
+        budget = (moist_step_budget(out[2], ls=c1 - c0, micro=d_micro, positivity=d_pos,
+                                    sponge=_cols(state) - c3,
+                                    precip_mass=dt * args.micro_every * precip)
+                  if emit else None)
+        return state, us, created, precip, budget
 
     T = args.hours * 3600.0
     n_steps = int(round(T / dt0))
@@ -204,6 +242,11 @@ def main():
           f"(θ_s={th_sfc:.2f} K, q_s={q_sfc * 1e3:.2f} g/kg), {n_steps} steps")
 
     rec = args.record_frames > 0
+    if emit and not rec:
+        raise SystemExit("--emit-suite-artifact needs --record-frames > 0")
+    emitter = (MoistRunEmitter(g, ref, (forc["ug"], forc["vg"]), _FCOR)
+               if emit else None)
+    precip_rate = [0.0]                  # last step's domain-mean surface precip [kg/m²/s]
     zc_np = np.asarray(g.z_c)
     if rec:
         h_idx, h_z = les_record.select_heights(zc_np, args.Lz)
@@ -219,10 +262,16 @@ def main():
                 qv3=np.asarray(st.tracers[..., 0]),
                 qc3=np.asarray(st.tracers[..., 1]),
                 rho_z=np.asarray(ref.rho_c))
+            if emitter is not None:
+                # the bulk fluxes the next step applies at this state
+                th_flux, qv_flux = _bulk_fluxes(st)
+                emitter.record(t_hours * 3600.0, st, th_flux, qv_flux, precip_rate[0])
             frame += 1
             _last_rec_h[0] = t_hours
 
     dt = jnp.asarray(dt0, dtype)
+    if emitter is not None:
+        emitter.start(st)
     if rec:
         _save(0.0)
     t = 0.0; i = 0
@@ -235,9 +284,13 @@ def main():
     next_rec = T / args.record_frames if rec else np.inf
     t0 = time.time()
     while t < T:
-        st, us, created, pr = step(st, dt, first=(i == 0),
-                                   do_micro=((i + 1) % args.micro_every == 0))
+        do_micro = (i + 1) % args.micro_every == 0
+        st, us, created, pr, budget = step(st, dt, first=(i == 0), do_micro=do_micro)
         created_tot += float(created)
+        if emitter is not None:
+            emitter.add(budget)
+            if do_micro:
+                precip_rate[0] = pr
         precip_accum += float(pr) * dt0 * args.micro_every
         t += dt0; i += 1
         if i % args.print_every == 0:
@@ -280,6 +333,39 @@ def main():
           f"(ref ~10-20), accum precip={precip_accum:.3f} mm "
           f"(ref ~0.3 mm/day · {args.hours:.0f} h)")
     print(f"  profiles -> {args.output}/rico_les_final.npz")
+    if emitter is not None:
+        emitter.close_budgets(st)
+        exner = np.asarray(ref.exner_c)
+        art = emitter.artifact(
+            case_name=args.case_label,
+            sgs="lasd" if args.dynamic else args.sgs_model,
+            f_c=float(_FCOR),
+            u_geo=np.asarray(forc["ug"], np.float64),
+            v_geo=np.asarray(forc["vg"], np.float64),
+            subsidence_w=np.asarray(forc["w_ls"], np.float64),
+            # the θ tendency the LES applied (tls is SAM's absolute-T tendency on θ
+            # through the reference Exner); the SCM reads theta_adv as dθ/dt
+            theta_adv=np.asarray(forc["tls"], np.float64) / exner,
+            qv_adv=np.asarray(forc["qls"], np.float64),
+            les_setup={
+                "microphysics": microphysics_record(micro_cfg),
+                "grid": f"{g.cfg.nx}x{g.cfg.ny}x{g.cfg.nz}",
+                "domain_m": [g.cfg.Lx, g.cfg.Ly, g.cfg.Lz],
+                "dt_s": float(dt0), "hours": float(args.hours),
+                "sgs": "lasd" if args.dynamic else args.sgs_model,
+                "sgs_buoyancy": bool(g.cfg.sgs_buoyancy),
+                "nu_floor_m2_s": float(g.cfg.nu_floor),
+                "pr_sgs": float(g.cfg.pr_sgs),
+                "scalar_advection": g.cfg.scalar_advection,
+                "z0_m": float(g.cfg.z0), "positive_mode": "clip",
+                "micro_every": int(args.micro_every),
+                "micro_scheme_dt_s": float(dt0 * args.micro_every),
+                "surface": "interactive bulk (van Zanten 2011 C_h, C_q) over fixed SST; "
+                           "the realised flux series is recorded",
+            })
+        save_artifact(art, args.emit_suite_artifact)
+        print(f"[emit-suite-artifact] {art.case_name}: {art.nt} frames, "
+              f"{art.nz} levels, sgs={art.sgs} -> {args.emit_suite_artifact}")
     return 0
 
 

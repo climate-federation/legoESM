@@ -571,6 +571,24 @@ def eddy_viscosity(u, v, w, g: SpectralLESGrid):
     return (l_m ** 2) * Smag + g.cfg.nu_floor               # (ny,nx,nz)
 
 
+def effective_eddy_viscosity(u, v, w, g: SpectralLESGrid, theta=None, tracers=None):
+    """The ``ν_t`` :func:`rhs` actually applies to momentum and (as ``ν_t/Pr``) to
+    every scalar: :func:`eddy_viscosity`, and with ``cfg.sgs_buoyancy`` and a θ field
+    the Lilly (1962) stable-stratification suppression on top of it.
+
+    The suppression damps momentum and scalar SGS mixing by the SAME factor, so the
+    cloud-top inversion stops over-entraining; neutral runs leave it off (byte-
+    identical).  ``f·(strain + nu_floor) + (1−f)·nu_floor = f·strain + nu_floor``
+    keeps the background floor UNsuppressed: a molecular-like minimum that must
+    survive ``f→0``, else the inviscid inversion grows the 2Δ KH/gravity-wave mode
+    ``nu_floor`` exists to damp."""
+    nu_t = eddy_viscosity(u, v, w, g)
+    if g.cfg.sgs_buoyancy and theta is not None:
+        f_buoy = sgs_buoyancy_factor(theta, tracers, u, v, w, g)
+        nu_t = f_buoy * nu_t + (1.0 - f_buoy) * g.cfg.nu_floor
+    return nu_t
+
+
 def sgs_buoyancy_factor(theta, tracers, u, v, w, g: SpectralLESGrid):
     """Lilly (1962) stable-stratification suppression factor for the SGS eddy
     viscosity, at CENTRES: ``f = √(max(0, 1 − Ri/Pr_t))`` with ``Ri = N²/|S|²``.
@@ -1158,18 +1176,7 @@ def rhs(u, v, w, g: SpectralLESGrid, u_geo, f_cor, force=(0.0, 0.0),
     from the coupled stable MOST surface layer (:func:`most_surface_flux`) — the
     GABLS1-faithful prescribed-cooling boundary condition."""
     Cu, Cv, Cw = advection(u, v, w, g)
-    nu_t = eddy_viscosity(u, v, w, g)
-    if g.cfg.sgs_buoyancy and theta is not None:
-        # Suppress the strain-based ν_t across stable stratification (Lilly 1962);
-        # the SAME factor damps momentum (sgs_and_wall) and scalar (K_h=ν_t/Pr)
-        # mixing, so the cloud-top inversion stops over-entraining. Neutral runs
-        # leave this off ⇒ byte-identical.
-        #   f·(strain + nu_floor) + (1−f)·nu_floor = f·strain + nu_floor
-        # keeps the background floor UNsuppressed — a molecular-like minimum that
-        # must survive f→0, else the inviscid inversion grows the 2Δ KH/gravity-
-        # wave mode nu_floor exists to damp. No-op when nu_floor=0 (the default).
-        f_buoy = sgs_buoyancy_factor(theta, tracers, u, v, w, g)
-        nu_t = f_buoy * nu_t + (1.0 - f_buoy) * g.cfg.nu_floor
+    nu_t = effective_eddy_viscosity(u, v, w, g, theta=theta, tracers=tracers)
     cd_surf, sfc_flux = surface_boundary(u, v, theta, g, sfc_theta_flux, t_sfc)
     Fu, Fv, Fw, u_star = sgs_and_wall(u, v, w, nu_t, g, u_geo, cd_surf=cd_surf)
     ug, vg = u_geo
@@ -1345,17 +1352,34 @@ def resolved_kinetic_energy(u, v, w, g: SpectralLESGrid):
 
 
 # Order of the column-budget source terms returned by ``step(return_budget=True)``.
+# ``fv_theta`` / ``fv_water`` are the NON-flux-form part of the monotone scalar
+# advection (``+φ·∇_fv·u``, see :func:`scalar_rhs_monotone`): the one transport
+# term whose column integral is not zero by construction. ``fv_water`` sums the
+# water-species slots (``N_WATER_SLOTS``); both are 0 on the spectral scalar path.
 BUDGET_TERMS = ("sfc_heat_flux", "sfc_stress_x", "sfc_stress_y",
-                "coriolis_u", "coriolis_v", "body_force_u", "body_force_v")
+                "coriolis_u", "coriolis_v", "body_force_u", "body_force_v",
+                "sfc_qv_flux", "fv_theta", "fv_water")
+
+# Water-species slots of the standard microphysics tracer layout (q_v, q_c, q_r,
+# q_i, q_s, q_g); the slots after them are number concentrations.
+N_WATER_SLOTS = 6
+
+
+def _column_fv_source(phi, div_fv, g: SpectralLESGrid):
+    """``∫⟨φ ∇_fv·u⟩ dz`` — the column-integrated planar-mean source the monotone
+    path's free-stream correction adds to ``φ`` (zero for a uniform ``φ``)."""
+    return g.dz * jnp.sum(_planar_mean(phi * div_fv, g))
 
 
 def _budget_rates(s: SpectralLESState, g: SpectralLESGrid, u_geo, f_cor, force,
-                  sfc_theta_flux, t_sfc):
-    """Column-integrated horizontal-mean source rates entering the θ/u/v budgets
-    at state ``s`` (kinematic; heat [K m/s], momentum [m²/s²]), in
-    :data:`BUDGET_TERMS` order. Each is the boundary/body term ``rhs`` applies: the
-    surface face of the θ flux, the surface face of the momentum flux
-    (``−Cd⟨|u₁|⟩⟨u₁⟩``), ``∫f(v−v_g)dz``, ``−∫f(u−u_g)dz`` and ``∫force dz``."""
+                  sfc_theta_flux, t_sfc, sfc_qv_flux=0.0):
+    """Column-integrated horizontal-mean source rates entering the θ/u/v/water
+    budgets at state ``s`` (kinematic; heat [K m/s], momentum [m²/s²], water
+    [(kg/kg) m/s]), in :data:`BUDGET_TERMS` order. Each is a boundary/body term
+    ``rhs`` applies — the surface face of the θ flux, the surface face of the
+    momentum flux (``−Cd⟨|u₁|⟩⟨u₁⟩``), ``∫f(v−v_g)dz``, ``−∫f(u−u_g)dz``,
+    ``∫force dz``, the surface moisture flux into ``q_v`` — or the monotone
+    advection's free-stream correction for θ and the summed water slots."""
     cd_surf, q = surface_boundary(s.u, s.v, s.theta, g, sfc_theta_flux, t_sfc)
     cd = surface_drag_coefficient(g, cd_surf)
     u1, v1 = s.u[..., 0], s.v[..., 0]
@@ -1365,6 +1389,15 @@ def _budget_rates(s: SpectralLESState, g: SpectralLESGrid, u_geo, f_cor, force,
     um = _planar_mean(s.u, g)
     vm = _planar_mean(s.v, g)
     dt_ = s.u.dtype
+    has_tr = s.tracers is not None and s.tracers.shape[-1] > 0
+    fv_theta = fv_water = 0.0
+    if g.cfg.monotone_scalars and (s.theta is not None or has_tr):
+        div_fv = _vanleer_fv_velocity_divergence(s.u, s.v, s.w, g)
+        if s.theta is not None:
+            fv_theta = _column_fv_source(s.theta, div_fv, g)
+        if has_tr:
+            water = jnp.sum(s.tracers[..., :N_WATER_SLOTS], axis=-1)
+            fv_water = _column_fv_source(water, div_fv, g)
     terms = (
         q if s.theta is not None else 0.0,
         -cd * spd1_mean * _planar_mean(u1, g),
@@ -1373,6 +1406,9 @@ def _budget_rates(s: SpectralLESState, g: SpectralLESGrid, u_geo, f_cor, force,
         -f_cor * g.dz * jnp.sum(um - ug),
         force[0] * lz,
         force[1] * lz,
+        sfc_qv_flux if has_tr else 0.0,
+        fv_theta,
+        fv_water,
     )
     return jnp.stack([jnp.asarray(t, dt_) for t in terms])
 
@@ -1456,7 +1492,7 @@ def step(state: SpectralLESState, g: SpectralLESGrid, dt,
         def slow_aug(sa):
             s, _acc = sa
             return (slow_fn(s), _budget_rates(s, g, u_geo, f_cor, force,
-                                              sfc_theta_flux, t_sfc))
+                                              sfc_theta_flux, t_sfc, sfc_qv_flux))
 
         def proj_aug(sa, slow_tend, dt_sub, n_sub, cfg):
             return (proj_fn(sa[0], slow_tend[0], dt_sub, n_sub, cfg), sa[1])

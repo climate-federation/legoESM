@@ -19,6 +19,7 @@ from .bridge import (
 )
 from .catalog import (
     ANCHOR_CASES,
+    MOIST_CASES,
     dry_shear_buoyancy_grid,
     register_default_catalog,
 )
@@ -90,6 +91,7 @@ from .sigma_les import (
 
 __all__ = [
     "ANCHOR_CASES",
+    "MOIST_CASES",
     "CBL_ENVELOPE",
     "CBLDiagnostics",
     "CI_MARKERS",
