@@ -1727,6 +1727,23 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynkeg.f90:128-130': [
         ('DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  0)', 1),
         ('pvv(ji,jj,jk,Krhs) = pvv(ji,jj,jk,Krhs) - ( zhke(ji  ,jj+1) - zhke(ji,jj) ) * r1_e2v(ji,jj)', 1), 3],
+    # --- GRIDLADDER round 30 (G4 round 9 receipt) ---
+    'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/stprk3_stg.f90:215': ('r3t(:,:,Kaa) = r1_2 * ( r3t(:,:,Kbb) + r3ta(:,:) )', 2),
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:221': ('r3t(:,:,Kaa) = r1_2 * ( r3t(:,:,Kbb) + r3ta(:,:) )', 2),
+    'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/domqco.f90:257': 'pr3t(ji,jj) = pssh(ji,jj) * r1_ht_0(ji,jj)',
+    'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/sbcrnf.f90:281': 'update h_rnf to be depth of top box',
+    'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/trazdf.f90:231-232': [
+        'zwi(ji,jk) = - p2dt * zwt(ji,jk  ) / (e3w_1d(jk) *(1._wp+r3t(ji,jj,Kmm)))',
+        'zws(ji,jk) = - p2dt * zwt(ji,jk+1) / (e3w_1d(jk+1) *(1._wp+r3t(ji,jj,Kmm)))', 2],
+    'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/trazdf.f90:233': 'zwd(ji,jk) = (e3t_3d(ji,jj,jk) *(1._wp+r3t(ji,jj,Kaa)*tmask(ji,jj,jk))) - ( zwi(ji,jk) + zws(ji,jk) )',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/domqco.f90:257': 'pr3t(ji,jj) = pssh(ji,jj) * r1_ht_0(ji,jj)',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcrnf.f90:281': 'update h_rnf to be depth of top box',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/trazdf.f90:231-232': [
+        'zwi(ji,jk) = - p2dt * zwt(ji,jk  ) / (e3w_1d(jk) *(1._wp+r3t(ji,jj,Kmm)))',
+        'zws(ji,jk) = - p2dt * zwt(ji,jk+1) / (e3w_1d(jk+1) *(1._wp+r3t(ji,jj,Kmm)))', 2],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/trazdf.f90:233': 'zwd(ji,jk) = (e3t_3d(ji,jj,jk) *(1._wp+r3t(ji,jj,Kaa)*tmask(ji,jj,jk))) - ( zwi(ji,jk) + zws(ji,jk) )',
+    'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/traqsr.f90:387': ('ze3t = (e3t_3d(ji,jj,jk) *(1._wp+r3t(ji,jj,Kmm)*tmask(ji,jj,jk)))', 1),
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traqsr.f90:388': ('ze3t = (e3t_3d(ji,jj,jk) *(1._wp+r3t(ji,jj,Kmm)*tmask(ji,jj,jk)))', 1),
     # --- GRIDLADDER round 28 (G4 round 8 receipt) ---
     'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/trasbc.f90:307': 'r1_rcp * qns(ji,jj) * z1_rho0_e3t',
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/trasbc.f90:307': 'r1_rcp * qns(ji,jj) * z1_rho0_e3t',
