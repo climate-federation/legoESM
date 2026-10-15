@@ -260,6 +260,8 @@ FILES = {
         _ORCA2_R210OMT1_COMPILED / "stprk3_stg.f90"),
     "ORCA2_OMIP_L4_R280STAGE1/BLD/ppsrc/nemo/stprk3_stg.f90": (
         _ORCA2_R280STAGE1_COMPILED / "stprk3_stg.f90"),
+    "ORCA2_OMIP_L4_R280STAGE1/BLD/ppsrc/nemo/dommsk.f90": (
+        _ORCA2_R280STAGE1_COMPILED / "dommsk.f90"),
     "ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/traadv.f90": (
         _ORCA2_R210OMT1_COMPILED / "traadv.f90"),
     "ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/traadv_cen.f90": (
@@ -1679,6 +1681,14 @@ CITATION_MAP = {
         'IF( ln_dynadv_vec .OR. lk_linssh ) THEN',
         'vv(ji,jj,jk,Kaa) = ( vv(ji,jj,jk,Kbb) + rDt * vv(ji,jj,jk,Krhs) ) * vmask(ji,jj,jk)',
         4,
+    ],
+    # --- ORCA2 round 283: stage-1 V-mask operand owner ---
+    'ORCA2_OMIP_L4_R280STAGE1/BLD/ppsrc/nemo/stprk3_stg.f90:136':
+        'rDt = r1_3 * rn_Dt',
+    'ORCA2_OMIP_L4_R280STAGE1/BLD/ppsrc/nemo/dommsk.f90:208-232': [
+        'vmask(ji,jj,jk) = tmask(ji,jj  ,jk) * tmask(ji  ,jj+1,jk)',
+        "CALL lbc_lnk( 'dommsk', umask, 'U', 1.0_wp, vmask, 'V', 1.0_wp, fmask, 'F', 1.0_wp )",
+        25,
     ],
     # --- ORCA2 round 278: Decision-122 lines in the shipped ORCA2 build ---
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynzdf.f90:192-198': ['zzwi = - zDt_2 * ( avm(ji+1,jj,jk  )     +  avm(ji,jj,jk  )     ) &', 'zwd(ji,jk) = 1._wp - zzwi - zzws', 7],
