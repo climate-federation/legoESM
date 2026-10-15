@@ -613,8 +613,8 @@ def keg_contraction_probe(rep: dict, production: np.ndarray, face: str,
                 "max_abs": float(np.max(np.abs(np.where(
                     wet, left - right, 0.0))))}
 
-    production_bad = wet & (production != written)
-    coords = np.argwhere(production_bad)
+    baseline_bad = wet & (baseline != written)
+    coords = np.argwhere(baseline_bad)
     return {
         "dtype": str(baseline.dtype),
         "production_vs_written": comparison(production, written),
