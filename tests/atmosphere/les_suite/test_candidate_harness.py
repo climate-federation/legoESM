@@ -510,7 +510,7 @@ def test_cli_requires_explicit_choices():
             cosci_eval.check_kind_choices(kind, hf, ke)
 
 
-def test_e2_tuning_refuses_an_inert_parameter(tmp_path):
+def test_e2_tuning_freezes_an_inactive_parameter_and_tunes_the_rest(tmp_path):
     import cosci_eval
     from legoesm.atmosphere.les_suite.bridge import save_artifact
     art_path = tmp_path / "cbl_harness.npz"
@@ -518,12 +518,55 @@ def test_e2_tuning_refuses_an_inert_parameter(tmp_path):
     cand = _write(tmp_path, "inert_e2", _GOOD_SCALAR.replace(
         '"K": (10.0, 1.0, 100.0, "m2/s")}',
         '"K": (10.0, 1.0, 100.0, "m2/s"), "unused": (1.0, 0.0, 2.0, "1")}'))
-    with pytest.raises(SystemExit, match="unused"):
-        cosci_eval.main([
-            "--stage", "E2", "--candidate", cand.source_path, "--baseline", "louis",
-            "--heat-form", "theta",
-            "--artifacts", str(art_path), "--nlev", "16", "--ad-steps", "1",
-            "--out", str(tmp_path / "e2.json")])
+    out = tmp_path / "e2.json"
+    cosci_eval.main([
+        "--stage", "E2", "--candidate", cand.source_path, "--baseline", "louis",
+        "--heat-form", "theta", "--artifacts", str(art_path), "--nlev", "16",
+        "--ad-steps", "2", "--out", str(out)])
+    ad = json.loads(out.read_text())["result"]["arms"]["candidate:inert_e2"]["ad"]
+    assert ad["frozen_inactive"] == ["unused"] and ad["params"]["unused"] == 1.0
+    assert ad["init_grad"]["K"] != 0.0 and len(ad["history"]) == 3
+
+
+def test_tune_active_moves_active_keeps_frozen_and_flags_all_inactive():
+    import cosci_eval
+    lo, hi = jnp.zeros(2), jnp.full(2, 10.0)
+    x0 = jnp.asarray([8.0, 4.0])
+    best, rec = cosci_eval.tune_active(lambda x: (x[0] - 3.0) ** 2 + 0.0 * x[1], lo, hi,
+                                       x0, ["a", "b"], steps=40, lr=0.1)
+    assert rec["frozen_inactive"] == ["b"] and float(best[1]) == 4.0
+    assert abs(float(best[0]) - 3.0) < 0.5
+    assert rec["train_loss_best"] < rec["train_loss_default"]
+    same, rec2 = cosci_eval.tune_active(lambda x: 0.0 * jnp.sum(x), lo, hi, x0,
+                                        ["a", "b"], steps=5, lr=0.1)
+    assert "not_tuned" in rec2 and bool(jnp.all(same == x0))
+
+
+def test_tune_active_refuses_a_non_finite_gradient():
+    import cosci_eval
+    with pytest.raises(SystemExit, match="non-finite"):
+        cosci_eval.tune_active(lambda x: jnp.sqrt(x[0] - 1.0) + x[1], jnp.zeros(2),
+                               jnp.full(2, 2.0), jnp.asarray([1.0, 1.0]), ["a", "b"],
+                               steps=1, lr=0.1)
+
+
+def test_les_tuned_arm_records_inapplicable_clubb_instead_of_crashing():
+    import cosci_eval
+    from tune_scm_to_les import _base_turbulence
+    tuned, why = cosci_eval.les_tuned_arm(_base_turbulence("clubb")[0])
+    assert tuned is None and "PROGNOSTIC" in why
+    tuned, why = cosci_eval.les_tuned_arm(_base_turbulence("tke")[0])
+    assert why is None and tuned is not None
+
+
+def test_les_tuned_arm_propagates_a_malformed_tuned_file(monkeypatch):
+    import cosci_eval
+
+    def bad(base):
+        raise ValueError("les_tuned: unknown field in tuned YAML")
+    monkeypatch.setattr(cosci_eval, "apply_les_tuned_turbulence", bad)
+    with pytest.raises(ValueError, match="unknown field"):
+        cosci_eval.les_tuned_arm(None)
 
 
 def test_cli_e2_writes_provenanced_json(tmp_path):

@@ -84,9 +84,11 @@ from legoesm.atmosphere.les_suite.score import (  # noqa: E402
     normalized_rmse_series,
 )
 from legoesm.atmosphere.physics.turbulence.les_tuned import (  # noqa: E402
+    LESTunedInapplicableError,
     apply_les_tuned_turbulence,
 )
 from legoesm.core.profile_metrics import layer_weights_from_heights  # noqa: E402
+from legoesm.training.inert_params import assert_no_inert  # noqa: E402
 
 from legoesm import constants  # noqa: E402
 
@@ -425,11 +427,44 @@ def _case_scores(arm, artifacts, nlev, dt, params=None, turb=None):
     return out
 
 
-def _inert_or_nonfinite(loss_of, x0, names) -> list[str]:
-    """Parameters whose first E2-loss gradient is exactly zero or non-finite."""
+def tune_active(loss_of, lo, hi, x0, names, *, steps, lr):
+    """AD-tune under the NO-INERT rule. The first gradient of the training loss is
+    measured: a parameter with an exactly-zero gradient is inactive on these cases,
+    so it is FROZEN at its default and removed from the optimised set (the
+    ``_inactive_keys`` pattern, decided by measurement as in
+    ``legoesm.training.inert_params``); every remaining parameter must then pass
+    ``assert_no_inert`` (a non-finite gradient refuses the run).
+
+    Returns ``(x_best, record)`` with ``x_best`` the FULL parameter vector."""
     g = jax.grad(loss_of)(x0)
-    return [n for i, n in enumerate(names)
-            if not bool(jnp.isfinite(g[i])) or float(g[i]) == 0.0]
+    active = [i for i in range(len(names)) if float(g[i]) != 0.0]
+    frozen = [names[i] for i in range(len(names)) if i not in active]
+    try:
+        assert_no_inert({f"{i}:{names[i]}": g[i] for i in active})
+    except ValueError as err:
+        raise SystemExit(f"E2 tuning refused: {err}") from err
+    record = {"frozen_inactive": frozen,
+              "init_grad": {n: float(g[i]) for i, n in enumerate(names)}}
+    if not active:
+        return x0, {**record, "not_tuned": "every parameter is inactive on the "
+                                           "training cases"}
+    idx = jnp.asarray(active)
+    best, best_loss, d_loss, hist = adam_descend_normalized(
+        lambda xa: loss_of(x0.at[idx].set(xa)), lo[idx], hi[idx], x0[idx],
+        steps=steps, lr=lr)
+    return x0.at[idx].set(best), {**record, "train_loss_default": d_loss,
+                                  "train_loss_best": best_loss, "history": hist}
+
+
+def les_tuned_arm(base):
+    """The LES-tuned config of ``base``, or ``(None, reason)`` when the tuned
+    coefficients do not apply to this base (e.g. CLUBB coefficients fit on the
+    prognostic path vs the tuner's diagnostic base) -- recorded, not fatal."""
+    try:
+        tuned = apply_les_tuned_turbulence(base)
+    except LESTunedInapplicableError as err:
+        return None, f"not applicable: {err}"
+    return (tuned, None) if tuned != base else (None, "no LES-tuned entry")
 
 
 def _regime_mean_loss(scores_fn, train):
@@ -478,16 +513,9 @@ def stage_e2(cand_arm, base_names, artifacts, nlev, dt, steps, lr,
             def loss_of(x):
                 p = to_params(x)
                 return _regime_mean_loss(lambda path, art: case_loss[path](p), train)
-            bad = _inert_or_nonfinite(loss_of, x0, names)
-            if bad:
-                raise SystemExit(f"E2 tuning refused: inert/non-finite parameters {bad} "
-                                 f"of candidate {cand.name} (no inert parameters)")
-            best, best_loss, d_loss, hist = adam_descend_normalized(
-                loss_of, lo, hi, x0, steps=steps, lr=lr)
+            best, record = tune_active(loss_of, lo, hi, x0, names, steps=steps, lr=lr)
             tuned = to_params(best)
-            entry["ad"] = {"params": {k: float(v) for k, v in tuned.items()},
-                           "train_loss_default": d_loss, "train_loss_best": best_loss,
-                           "history": hist,
+            entry["ad"] = {"params": {k: float(v) for k, v in tuned.items()}, **record,
                            "scores": _case_scores(cand_arm, artifacts, nlev, dt,
                                                   params=tuned)}
         res["arms"]["candidate:" + cand.name] = entry
@@ -495,10 +523,9 @@ def stage_e2(cand_arm, base_names, artifacts, nlev, dt, steps, lr,
         base, key = _base_turbulence(name)
         arm = Arm(base)
         entry = {"default": _case_scores(arm, artifacts, nlev, dt)}
-        tuned_turb = apply_les_tuned_turbulence(base)
-        if tuned_turb != base:
-            entry["les_tuned"] = _case_scores(arm, artifacts, nlev, dt,
-                                              turb=tuned_turb)
+        tuned_turb, why_not = les_tuned_arm(base)
+        entry["les_tuned"] = ({"not_scored": why_not} if tuned_turb is None else
+                              _case_scores(arm, artifacts, nlev, dt, turb=tuned_turb))
         if tune and train:
             metas = _scheme_tunable_metas(key, (1,))
             fields = [m.field for m in metas]
@@ -509,15 +536,9 @@ def stage_e2(cand_arm, base_names, artifacts, nlev, dt, steps, lr,
             def loss_of(x, base=base, fields=fields, arm=arm):
                 turb = apply_overrides_to_base(base, {f: x[i] for i, f in enumerate(fields)})
                 return _regime_mean_loss(loss_for((arm, {"turb": turb})), train)
-            bad = _inert_or_nonfinite(loss_of, x0, fields)
-            if bad:
-                raise SystemExit(f"E2 tuning refused: inert/non-finite tier-1 parameters "
-                                 f"{bad} of baseline {name} (no inert parameters)")
-            best, best_loss, d_loss, hist = adam_descend_normalized(
-                loss_of, lo, hi, x0, steps=steps, lr=lr)
+            best, record = tune_active(loss_of, lo, hi, x0, fields, steps=steps, lr=lr)
             ov = {f: float(best[i]) for i, f in enumerate(fields)}
-            entry["ad"] = {"params": ov, "train_loss_default": d_loss,
-                           "train_loss_best": best_loss, "history": hist,
+            entry["ad"] = {"params": ov, **record,
                            "scores": _case_scores(arm, artifacts, nlev, dt,
                                                   turb=apply_overrides_to_base(base, ov))}
         res["arms"]["baseline:" + name] = entry

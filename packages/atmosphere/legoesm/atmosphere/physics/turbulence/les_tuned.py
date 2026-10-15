@@ -179,6 +179,11 @@ def apply_les_tuned_turbulence(
     return turb._replace(**{field: apply_param_overrides(sub, scheme_overrides)})
 
 
+class LESTunedInapplicableError(ValueError):
+    """The tuned coefficients exist but were fit on a different path of the
+    scheme than the supplied config selects (not a malformed tuned file)."""
+
+
 def _apply_clubb(turb, field, sub, overrides):
     """Splice CLUBB's nested tuned coefficients (``CLUBBParams``).
 
@@ -204,7 +209,7 @@ def _apply_clubb(turb, field, sub, overrides):
     if sub is None:
         sub = CLUBBConfig(prognostic=True)
     elif not sub.prognostic:
-        raise ValueError(
+        raise LESTunedInapplicableError(
             "les_tuned: CLUBB tuned coefficients were fit on the PROGNOSTIC path, "
             "but the supplied CLUBBConfig has prognostic=False. Pass "
             "prognostic=True or les_tuned=False.")
