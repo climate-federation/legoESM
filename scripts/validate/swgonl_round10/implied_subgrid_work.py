@@ -64,19 +64,21 @@ HOURS_PER_DAY = 24
 
 
 def starts(card):
-    """[(label, start (ssh,u,v), truth at +1 h, truth at +24 h)]."""
+    """[(label, absolute start hour, start (ssh,u,v), truth at +1 h, truth at +24 h)]."""
     contract = SWGDatasetContract.from_json(eb.RUN / "dataset_contract.json", card=card)
     rows = []
     train = contract.batches(split="train", window_days=1, epoch=0, seed=eb.SEED)
     for index in range(N_TRAIN_BATCHES):
         batch = next(train)
         rows.append((f"train_batch{index:02d}_win0_h{int(batch.start_absolute_hour[0])}",
+                     int(batch.start_absolute_hour[0]),
                      tuple(np.asarray(a[0]) for a in batch.initial),
                      tuple(np.asarray(a[0, 0]) for a in batch.target),
                      tuple(np.asarray(a[0, HOURS_PER_DAY - 1]) for a in batch.target)))
     batch = next(contract.batches(split="validation", window_days=1))
     for index in range(N_VALIDATION_STARTS):
         rows.append((f"validation_win{index}_h{int(batch.start_absolute_hour[index])}",
+                     int(batch.start_absolute_hour[index]),
                      tuple(np.asarray(a[index]) for a in batch.initial),
                      tuple(np.asarray(a[index, 0]) for a in batch.target),
                      tuple(np.asarray(a[index, HOURS_PER_DAY - 1]) for a in batch.target)))
@@ -187,7 +189,7 @@ def main():
     out_rows = []
     controls = {"stepper_route_max_abs_diff_m_s": [], "self_truth_a_sg_max": [],
                 "fields_vs_make_terms_rel": []}
-    for label, start, truth_1h, truth_24h in rows:
+    for label, _hour, start, truth_1h, truth_24h in rows:
         ssh, u, v = (np.asarray(a, dtype=np.float64) for a in start)
         state = seeded(ssh, u, v)
         # Control (a): both steppers give the same one-hour state.

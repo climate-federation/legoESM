@@ -10,8 +10,11 @@ pushed through the closure path: control, must give exactly 0 work).
 
 Reported per state and network: work(lambda)/work(1), the least-squares
 exponent of log|work| vs log(lambda) over the six lambdas (sign recorded),
-the same for wind and drag, the smallest lambda at which closure work exceeds
-|drag work|, and whether the closure exponent exceeds the drag exponent.
+the same for wind and drag, the SET of sampled lambdas at which closure work
+exceeds |drag work| (it need not hold again at larger lambda, so no single
+threshold is defined), and whether the closure exponent exceeds the drag
+exponent over the sampled range (a local response, not an equilibrium
+statement).
 Drag is linear in u (swe_rk3.py: drag_u = r * before_entry.u_k), so its work
 scales as lambda^2 exactly; the wind source is tau/(2 rho_0 e3u), state
 independent except through the live layer thickness e3u, so ~lambda^1.
@@ -63,6 +66,12 @@ def scaled(wet, ssh, u, v, lam):
     return np.where(wet, mean + lam * (ssh - mean), ssh), lam * u, lam * v
 
 
+def lambdas_where_closure_exceeds_abs_drag(rows):
+    """Sampled lambdas at which closure_work > |drag_work|; a set, not a
+    threshold: a hit at one lambda says nothing about larger ones."""
+    return [r["lambda"] for r in rows if r["closure_work"] > abs(r["drag_work"])]
+
+
 def exponent(values):
     """Slope of log|w| vs log(lambda); sign flips across lambdas are reported."""
     w = np.asarray(values)
@@ -101,8 +110,7 @@ def main():
             block = {"samples": rows,
                      "ratio_to_lambda1": {k: [r[k] / at1[k] if at1[k] != 0.0 else None for r in rows] for k in WORKS},
                      "exponent": {k: exponent([r[k] for r in rows]) for k in WORKS}}
-            exceed = [r["lambda"] for r in rows if r["closure_work"] > abs(r["drag_work"])]
-            block["closure_exceeds_abs_drag_from_lambda"] = exceed[0] if exceed else None
+            block["closure_exceeds_abs_drag_at_lambdas"] = lambdas_where_closure_exceeds_abs_drag(rows)
             e_c, e_d = block["exponent"]["closure_work"]["exponent"], block["exponent"]["drag_work"]["exponent"]
             block["closure_grows_faster_than_drag"] = None if e_c is None else bool(e_c > e_d)
             if net == "zero_potential":
@@ -121,7 +129,7 @@ def main():
             entry["networks"][net] = block
             print(name, net, "clo ratios", [None if x is None else round(x, 3) for x in block["ratio_to_lambda1"]["closure_work"]],
                   "exp clo/wind/drag", [block["exponent"][k].get("exponent") for k in ("closure_work", "wind_work", "drag_work")],
-                  "clo>|drag| from", block["closure_exceeds_abs_drag_from_lambda"])
+                  "clo>|drag| at", block["closure_exceeds_abs_drag_at_lambdas"])
         out["states"][name] = entry
     OUT.write_text(json.dumps(out, indent=1))
     print("WROTE", OUT)
