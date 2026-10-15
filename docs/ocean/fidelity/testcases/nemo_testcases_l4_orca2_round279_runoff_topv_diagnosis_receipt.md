@@ -42,9 +42,9 @@ successful claim.
 The ORCA2 deck does not override the reference flags.  The reference has
 `ln_rnf_depth=.false.` and `ln_rnf_depth_ini=.false.` (with `rn_dep_max=150`
 only for the inactive initialisation arm) at
-`cfgs/SHARED/namelist_ref:474-480`.  The compiled executing branch tests those
+`cfgs/SHARED/namelist_ref:474,478,480`.  The compiled executing branch tests those
 two flags and, when both are false, changes only `phdivn(:,:,1)` at
-`ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcrnf.f90:259-283`.  Therefore the NEMO deck is
+`ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcrnf.f90:259-282`.  Therefore the NEMO deck is
 surface-only; the 150 m reference value is inert.
 
 The mechanically instantiated legoESM cards are:
