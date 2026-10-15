@@ -98,8 +98,12 @@ def _model(card, hooks):
 
 
 def _hooks(card, *, live: bool, stage_entry=None, rhs_override=None):
-    hooks = r249._hooks(card, True, live=live)._replace(
-        stage_v_ratio_association=True)
+    hooks = r249._hooks(card, True, live=live)
+    # The round-264 arm was promoted into production and its private hook was
+    # subsequently removed.  Retain compatibility with the admitted probe on
+    # older trees without inventing a replacement hook on the current tree.
+    if "stage_v_ratio_association" in hooks._fields:
+        hooks = hooks._replace(stage_v_ratio_association=True)
     if stage_entry is not None:
         hooks = hooks._replace(stage_entry_override=stage_entry)
     if rhs_override is not None:
