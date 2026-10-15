@@ -497,6 +497,8 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
                cfg.rk3_stage_tracer_written_order),
            "rk3_stage3_heat_nemo_written": bool(
                cfg.rk3_stage3_heat_nemo_written),
+           "rk3_stage3_tracer_nemo_stored_thickness": bool(
+               cfg.rk3_stage3_tracer_nemo_stored_thickness),
            "forcing": ("NEMO-supplied surface fields at each kt"
                        if case == "ORCA2G4-sbc" else "none"),
            "n_barotropic_substeps": int(cfg.barotropic.n_barotropic_substeps),

@@ -8045,9 +8045,23 @@ class LatLonCGridOceanModel:
                     (_qt_b, _qt_12, _qt_aa),
                 )
             )
-            # The card's own Kbb / stage-3 Kmm thicknesses: its implicit solve
-            # is built on them, so the written-order RHS must use the same.
-            _stage3_e3t = ((h_k_old, _h_live_one_half)
+            # Stage 3's Kmm: NEMO's stored e3t_0*(1+r3t(Kmm)), r3t(Kmm) being
+            # stage 2's r1_2*(r3t(Kbb)+r3ta) (stprk3_stg.f90:215), when the
+            # card selects it; otherwise the thickness mean.
+            _stretch_s3_kmm = None
+            _h_s3_kmm = _h_live_one_half
+            if _cfg_b.rk3_stage3_tracer_nemo_stored_thickness:
+                if not _cfg_b.rk3_stage3_heat_nemo_written:
+                    raise ValueError(
+                        "rk3_stage3_tracer_nemo_stored_thickness needs "
+                        "rk3_stage3_heat_nemo_written")
+                _stretch_s3_kmm = nemo_r3t_rk3_stage1_stretch(
+                    _zc, state.eta.data, state_new.eta.data,
+                    state.H_bathy.data, half=True)
+                _h_s3_kmm = nemo_source_round(
+                    _h_ref_ws * _stretch_s3_kmm[..., None])
+            # trazdf.f90:284-289 reads e3t(Kbb) and e3t(Kmm).
+            _stage3_e3t = ((h_k_old, _h_s3_kmm)
                            if _cfg_b.rk3_stage3_heat_nemo_written else None)
             _vector_velocity_stage_update = (
                 getattr(_cfg_b, "momentum_advection", "flux_form")
@@ -8215,8 +8229,10 @@ class LatLonCGridOceanModel:
                     compute_ocean_jacobian(
                         state.eta.data, state.H_bathy.data, _zc),
                     dtype=_rgb_dtype)
-                _rgb_stretch_m = _h_live_one_half[..., 0] / jnp.maximum(
-                    _h_ref_ws[..., 0], 1.0e-10)
+                _rgb_stretch_m = (
+                    _h_live_one_half[..., 0] / jnp.maximum(
+                        _h_ref_ws[..., 0], 1.0e-10)
+                    if _stretch_s3_kmm is None else _stretch_s3_kmm)
 
                 def _rgb_qsr(h_live, stretch):
                     return apply_shortwave_penetration(
@@ -8232,7 +8248,7 @@ class LatLonCGridOceanModel:
                         c_sw=_cfg_b.physics.constants.c_sw,
                     )
 
-                _stage3_qsr_kmm = _rgb_qsr(_h_live_one_half, _rgb_stretch_m)
+                _stage3_qsr_kmm = _rgb_qsr(_h_s3_kmm, _rgb_stretch_m)
                 _stage3_T_rate = _nemo_qsr_stage3_rate(
                     tend.dT_dt.data,
                     _rgb_qsr(h_k_old, _rgb_stretch_b),
@@ -8297,7 +8313,7 @@ class LatLonCGridOceanModel:
                     / jnp.asarray(_cfg_b.physics.constants.c_sw, dtype=_dt_h))
                 _z1_rho0_e3t = nemo_source_round(
                     _stage_r1_rho0
-                    / jnp.maximum(_h_live_one_half[..., 0], 1.0e-10))
+                    / jnp.maximum(_h_s3_kmm[..., 0], 1.0e-10))
                 _heat_top = nemo_source_round(
                     nemo_source_round(_r1_rcp * jnp.asarray(_qns, dtype=_dt_h))
                     * _z1_rho0_e3t) * _active_live[..., 0]
@@ -8305,7 +8321,7 @@ class LatLonCGridOceanModel:
                     _add_rnf_stage_rate(
                         _zero_stage_source.at[..., 0].set(_heat_top),
                         None if _rnf_content is None else _rnf_content[0],
-                        _h_live_one_half)) + _stage3_qsr_kmm)
+                        _h_s3_kmm)) + _stage3_qsr_kmm)
 
             _stage12_source_terms = (
                 None
@@ -8341,9 +8357,9 @@ class LatLonCGridOceanModel:
                         _h_live_one_half),
                     _add_rnf_stage_rate(
                         tend.dS_dt.data * h_k_old
-                        / jnp.maximum(_h_live_one_half, 1.0e-10),
+                        / jnp.maximum(_h_s3_kmm, 1.0e-10),
                         None if _rnf_content is None else _rnf_content[1],
-                        _h_live_one_half),
+                        _h_s3_kmm),
                 ),
             )
             if _return_tracer_process_trace:
@@ -12847,11 +12863,20 @@ class LatLonCGridOceanModel:
                 min_water_column_m=_cfg_b.min_water_column_m)
             _stretch_now = nemo_r3t_stretch(
                 _zc, _eta_now, state.H_bathy.data)
+            _tracer_stretch_now = _stretch_now
+            if (nemo_zdf_stage_pair is not None and getattr(
+                    _cfg_b, "rk3_stage3_tracer_nemo_stored_thickness", False)):
+                # trazdf.f90:231-232: e3w(Kmm) on stage 2's stored
+                # r3t(Kmm) (stprk3_stg.f90:215), not the mean sea level's.
+                from legoesm.ocean.eos import nemo_r3t_rk3_stage1_stretch
+                _tracer_stretch_now = nemo_r3t_rk3_stage1_stretch(
+                    _zc, *nemo_zdf_stage_pair[1:], state.H_bathy.data,
+                    half=True)
             if _zdf_legacy_w:
                 dz_half_cell = build_dz_half(e3t_now).astype(dz_cell.dtype)
             else:
                 dz_half_cell = nemo_e3w_kmm(
-                    _zc, e3t_now, _stretch_now).astype(dz_cell.dtype)
+                    _zc, e3t_now, _tracer_stretch_now).astype(dz_cell.dtype)
         else:
             dz_half_cell = build_dz_half(dz_cell)
 

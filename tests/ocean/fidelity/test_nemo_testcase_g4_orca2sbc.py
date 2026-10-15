@@ -229,16 +229,18 @@ def test_g4_card_is_the_g3_card_under_orca2s_forcing(cards):
               "zdf_surface_stress_nemo_face_thickness"]
     tracer_update = "rk3_stage_tracer_written_order"
     stage3_heat = "rk3_stage3_heat_nemo_written"     # round 28
+    stage3_kmm = "rk3_stage3_tracer_nemo_stored_thickness"     # round 30
     assert sorted(f for f in a._fields if repr(getattr(a, f)) != repr(getattr(b, f))) == sorted(
-        ["physics", tracer_update, stage3_heat, *stress])
+        ["physics", tracer_update, stage3_heat, stage3_kmm, *stress])
     assert all(getattr(a, f) is True and getattr(b, f) is False for f in stress)
     assert getattr(a, tracer_update) is True and getattr(b, tracer_update) is False
     assert getattr(a, stage3_heat) is True and getattr(b, stage3_heat) is False
+    assert getattr(a, stage3_kmm) is True and getattr(b, stage3_kmm) is False
     assert [c for c, on in recipe._ORCA2G_WIND_STORED_DEPTH.items() if on] == ["ORCA2G4-sbc"]
     assert [c for c, on in recipe._ORCA2G_TRA_STAGE_ORDER.items() if on] == ["ORCA2G4-sbc"]
     from legoesm.ocean.state import LatLonCGridOceanConfig
     assert all(LatLonCGridOceanConfig._field_defaults[f] is False
-               for f in [*stress, tracer_update, stage3_heat])
+               for f in [*stress, tracer_update, stage3_heat, stage3_kmm])
     assert [f for f in a.physics._fields
             if repr(getattr(a.physics, f)) != repr(getattr(b.physics, f))] == [
         "shortwave_penetration"]
@@ -592,9 +594,11 @@ def test_nemo_supplied_forcing_stage_one_and_three(tmp_path):
     assert (tracer_before["T"]["unequal"], tracer_before["S"]["unequal"]) == (58, 45)
     # round 28: NEMO's written stage-3 heat Krhs and solve RHS take stage-3 T
     # from 489 to 200 unequal cells; deselected, the 489 return (the control).
-    assert three["T"]["unequal_values"] == 200 and three["S"]["unequal"] == 0
-    heat_before = mod.route(R21_P6_A, root, stages="3", without_stage3_heat_option=True)["stages"]["3"]
-    assert heat_before["T"]["unequal_values"] == 489
+    # round 30: NEMO's stored stage-3 Kmm thickness through the whole solve
+    # takes stage-3 T from 200 to 0; deselected, the 200 return (the control).
+    assert all(three[n]["unequal_values"] == 0 for n in three)
+    kmm_before = mod.route(R21_P6_A, root, stages="3", without_stage3_kmm_option=True)["stages"]["3"]
+    assert kmm_before["T"]["unequal_values"] == 200 and kmm_before["S"]["unequal"] == 0
 
 
 @needs_inputs

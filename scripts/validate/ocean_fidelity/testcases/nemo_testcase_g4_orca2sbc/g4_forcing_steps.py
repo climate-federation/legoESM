@@ -353,12 +353,14 @@ STRESS_OPTIONS = ("barotropic_wind_nemo_stored_depth", "surface_stress_nemo_fold
                   "zdf_surface_stress_nemo_face_thickness")
 TRACER_UPDATE_OPTION = "rk3_stage_tracer_written_order"
 STAGE3_HEAT_OPTION = "rk3_stage3_heat_nemo_written"
+STAGE3_KMM_OPTION = "rk3_stage3_tracer_nemo_stored_thickness"   # round 30
 
 
 def route(run: Path, deck_root: Path, *, zero: bool = False, stages: str = "123",
           dump: Path | None = None, without_stress_options: bool = False,
           without_tracer_update_option: bool = False,
-          without_stage3_heat_option: bool = False) -> dict:
+          without_stage3_heat_option: bool = False,
+          without_stage3_kmm_option: bool = False) -> dict:
     """GIVEN-NEMO-ENTRY, kt = 1: the G4 card from NEMO's as-built initial state
     (the record ran ln_tsd_dmp = F: no hand edits), forced by NEMO's kt = 1
     surface fields, each RK3 stage compared with NEMO's stage frame."""
@@ -392,6 +394,12 @@ def route(run: Path, deck_root: Path, *, zero: bool = False, stages: str = "123"
         card = card._replace(recipe=card.recipe._replace(
             model_config=card.recipe.model_config._replace(
                 **{STAGE3_HEAT_OPTION: False})))
+    require(getattr(card.recipe.model_config, STAGE3_KMM_OPTION) is True,
+            "the G4 card no longer selects NEMO's stage-3 Kmm thickness")
+    if without_stage3_kmm_option:
+        card = card._replace(recipe=card.recipe._replace(
+            model_config=card.recipe.model_config._replace(
+                **{STAGE3_KMM_OPTION: False})))
     st = card.recipe.initial_state
     entry = st          # Decision 120 record: the card's state is NEMO's (hand edits)
     if as_built:        # rounds 17-19 records: NEMO ran without the hand edits
@@ -407,6 +415,7 @@ def route(run: Path, deck_root: Path, *, zero: bool = False, stages: str = "123"
            "without_stress_options": without_stress_options,
            "without_tracer_update_option": without_tracer_update_option,
            "without_stage3_heat_option": without_stage3_heat_option,
+           "without_stage3_kmm_option": without_stage3_kmm_option,
            "stages": {}}
     for stage, (hooks, _) in (("1", g2.EXPOSURES["stage1"]), ("2", g2.EXPOSURES["stage2"]),
                               ("3", g2.EXPOSURES["stage3"])):
@@ -440,6 +449,8 @@ def main() -> int:
     p.add_argument("--stages", default="123", help="route: which RK3 stages")
     p.add_argument("--without-stage3-heat", action="store_true",
                    help="route: deselect the stage-3 heat statement (control)")
+    p.add_argument("--without-stage3-kmm", action="store_true",
+                   help="route: deselect the stage-3 stored Kmm thickness (control)")
     p.add_argument("--dump", type=Path, help="route: save card and NEMO rows (npz)")
     p.add_argument("--run", type=Path, required=True, help="twin a of the round-19 record")
     p.add_argument("--steps", type=int, default=10)
@@ -448,7 +459,8 @@ def main() -> int:
     a = p.parse_args()
     if a.mode == "route":
         out = route(a.run, a.deck_root, zero=a.zero, stages=a.stages, dump=a.dump,
-                    without_stage3_heat_option=a.without_stage3_heat)
+                    without_stage3_heat_option=a.without_stage3_heat,
+                    without_stage3_kmm_option=a.without_stage3_kmm)
         if a.json:
             a.json.write_text(json.dumps(out, indent=1, sort_keys=True) + "\n")
         print(json.dumps(out, sort_keys=True))
