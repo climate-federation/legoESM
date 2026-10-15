@@ -12,6 +12,13 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+def _run_in_order(fields, names):
+    """``names`` are all fields, in this order (a pin later appended or
+    inserted fields cannot move)."""
+    it = iter(fields)
+    return all(name in it for name in names)
+
+
 _PATH = (Path(__file__).resolve().parents[3] / "scripts/validate/ocean_fidelity/"
          "testcases/nemo_testcase_g1_orca2grid_ladder.py")
 _spec = importlib.util.spec_from_file_location("g1_orca2grid_ladder", _PATH)
@@ -191,7 +198,7 @@ def test_only_the_g1_card_selects_the_fold_row_v_face_depth():
     from legoesm.ocean.fidelity import nemo_testcase_recipe as recipe
     from legoesm.ocean.state import BarotropicConfig
     assert BarotropicConfig._field_defaults["barotropic_fold_top_v_face_ssh"] is False
-    assert BarotropicConfig._fields[-7] == "barotropic_fold_top_v_face_ssh"   # round 8 appended one
+    assert _run_in_order(BarotropicConfig._fields, ("barotropic_fold_top_v_face_ssh",))   # round 8 appended one
     src = Path(recipe.__file__).read_text()
     assert src.count("barotropic_fold_top_v_face_ssh=True") == 1
     start = src.index("def build_orca2g1_flat_card")
@@ -276,7 +283,7 @@ def test_only_the_g1_card_selects_nemos_stage1_sea_level():
     from legoesm.ocean.fidelity import nemo_testcase_recipe as recipe
     from legoesm.ocean.state import LatLonCGridOceanConfig
     assert LatLonCGridOceanConfig._field_defaults["rk3_stage1_ssh_nemo_literal"] is False
-    assert LatLonCGridOceanConfig._fields[-10] == "rk3_stage1_ssh_nemo_literal"   # round 9 appended three
+    assert _run_in_order(LatLonCGridOceanConfig._fields, ("rk3_stage1_ssh_nemo_literal",))   # round 9 appended three
     src = Path(recipe.__file__).read_text()
     assert src.count("rk3_stage1_ssh_nemo_literal=True") == 1
     assert src.index("rk3_stage1_ssh_nemo_literal=True") > src.index(
@@ -352,7 +359,7 @@ ROUND5_OPTIONS = ("barotropic_flux_update_nemo_literal",
 def test_only_the_g1_card_selects_the_three_solver_statements():
     from legoesm.ocean.fidelity import nemo_testcase_recipe as recipe
     from legoesm.ocean.state import BarotropicConfig
-    assert BarotropicConfig._fields[-6:-3] == ROUND5_OPTIONS
+    assert _run_in_order(BarotropicConfig._fields, ROUND5_OPTIONS)
     src = Path(recipe.__file__).read_text()
     start = src.index("def build_orca2g1_flat_card")
     for name in ROUND5_OPTIONS:
@@ -517,8 +524,8 @@ ROUND6_STAGE = ("rk3_stage1_rhs_nemo_literal", "rk3_stage_velocity_written_order
 def test_only_the_g1_card_selects_the_round6_statements():
     from legoesm.ocean.fidelity import nemo_testcase_recipe as recipe
     from legoesm.ocean.state import BarotropicConfig, LatLonCGridOceanConfig
-    assert BarotropicConfig._fields[-3:-1] == ROUND6_SOLVER
-    assert LatLonCGridOceanConfig._fields[-9:-7] == ROUND6_STAGE   # rounds 7 and 9 appended seven
+    assert _run_in_order(BarotropicConfig._fields, ROUND6_SOLVER)
+    assert _run_in_order(LatLonCGridOceanConfig._fields, ROUND6_STAGE)   # rounds 7 and 9 appended seven
     src = Path(recipe.__file__).read_text()
     start = src.index("def build_orca2g1_flat_card")
     for cls, names in ((BarotropicConfig, ROUND6_SOLVER),
@@ -692,7 +699,7 @@ ROUND7 = ("een_vorticity_written_order", "zdf_barotropic_removal_nemo_literal",
 def test_only_the_g1_card_selects_the_round7_statements():
     from legoesm.ocean.fidelity import nemo_testcase_recipe as recipe
     from legoesm.ocean.state import LatLonCGridOceanConfig
-    assert LatLonCGridOceanConfig._fields[-7:-3] == ROUND7     # round 9 appended three
+    assert _run_in_order(LatLonCGridOceanConfig._fields, ROUND7)     # round 9 appended three
     src = Path(recipe.__file__).read_text()
     start = src.index("def build_orca2g1_flat_card")
     for name in ROUND7:
@@ -894,8 +901,8 @@ def test_only_the_g1_card_selects_the_round8_statements():
     from legoesm.ocean.fidelity import nemo_testcase_recipe as recipe
     from legoesm.ocean.state import BarotropicConfig
     from legoesm.ocean.vertical import OceanPartialCellCoordinate
-    assert BarotropicConfig._fields[-1] == ROUND8_SOLVER
-    assert OceanPartialCellCoordinate._fields[-1] == ROUND8_COORDINATE
+    assert _run_in_order(BarotropicConfig._fields, (ROUND8_SOLVER,))
+    assert _run_in_order(OceanPartialCellCoordinate._fields, (ROUND8_COORDINATE,))
     assert BarotropicConfig._field_defaults[ROUND8_SOLVER] is False
     assert OceanPartialCellCoordinate._field_defaults[ROUND8_COORDINATE] is False
     src = Path(recipe.__file__).read_text()
@@ -1020,7 +1027,7 @@ ROUND9 = ("rk3_stage_r3t_nemo_literal", "nemo_eos_gdept_rounded_product",
 def test_only_the_g1_card_selects_the_round9_statements():
     from legoesm.ocean.fidelity import nemo_testcase_recipe as recipe
     from legoesm.ocean.state import LatLonCGridOceanConfig
-    assert LatLonCGridOceanConfig._fields[-3:] == ROUND9
+    assert _run_in_order(LatLonCGridOceanConfig._fields, ROUND9)
     src = Path(recipe.__file__).read_text()
     start = src.index("def build_orca2g1_flat_card")
     for name in ROUND9:

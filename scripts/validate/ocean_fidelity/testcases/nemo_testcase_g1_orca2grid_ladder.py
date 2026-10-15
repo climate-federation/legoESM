@@ -506,8 +506,15 @@ def rhs_term_replay(root: Path, kt: int, fe3mask, *, stage: int = 1,
         z1_e3f = 1.0 / (e3f0 * (1.0 + r3f * fe3))
         if vector:                              # np_CRV, dynvor.f90:744-748
             r1_e1e2f = 1.0 / (m2["e1f"] * m2["e2f"])
+            # the top F row reads e1u on the U fold halo row: the image of the
+            # row below the pivot, mirrored as NEMO's own u halo is (sign +)
+            e1u_h = m2["e1u"].copy()
+            hits = [s for s in range(-4, 5) if np.array_equal(
+                u[jp + 1, 2:-2], -u[jp - 1, (ni - np.arange(2, ni - 2) + s) % ni])]
+            if bool(np.any(u[jp + 1, 2:-2])) and len(hits) == 1:
+                e1u_h[jp + 1] = e1u_h[jp - 1, (ni - np.arange(ni) + hits[0]) % ni]
             zwz = (m2["ff_f"] + ((at(m2["e2v"], 0, 1) * at(v, 0, 1) - m2["e2v"] * v)
-                                 - (at(m2["e1u"], 1, 0) * at(u, 1, 0) - m2["e1u"] * u))
+                                 - (at(e1u_h, 1, 0) * at(u, 1, 0) - e1u_h * u))
                    * r1_e1e2f) * z1_e3f
         else:
             zwz = m2["ff_f"] * z1_e3f

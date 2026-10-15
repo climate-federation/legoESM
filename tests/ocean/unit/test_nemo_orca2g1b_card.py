@@ -117,11 +117,14 @@ def test_g1b_card_differs_from_g1_only_by_nemos_vector_branch(roots):
         "momentum_flux_scheme": ("none", "upwind"),
         "vertical_momentum_scheme": ("none", "nemo_advective"),
         "rk3_stage1_rhs_nemo_literal": (True, False),   # flux-form only (state.py)
+        "een_nemo_relative_vorticity": (False, True),   # dynvor.f90:744-748
     }
     ba, bb = ca.barotropic, cb.barotropic
     moved_bt = {f for f in ba._fields if repr(getattr(ba, f)) != repr(getattr(bb, f))}
     assert moved_bt == {"barotropic_flux_update_nemo_literal",
-                        "barotropic_entry_depth_nemo_literal"}
+                        "barotropic_entry_depth_nemo_literal",
+                        "barotropic_literal_fold_unit_vector_form"}
+    assert bb.barotropic_literal_fold_unit_vector_form is True
     assert (bb.barotropic_flux_update_nemo_literal,
             bb.barotropic_entry_depth_nemo_literal) == (False, False)
     assert cb.ke_gradient_scheme == "c2" and not cb.adaptive_implicit_vertadv
@@ -147,8 +150,42 @@ def test_g1b_selector_plants_are_refused(roots):
                    {"momentum_advection": "flux_form"},
                    {"rk3_stage1_rhs_nemo_literal": True},
                    {"barotropic": cfg.barotropic._replace(
-                       barotropic_flux_update_nemo_literal=True)}):
+                       barotropic_flux_update_nemo_literal=True)},
+                   {"een_nemo_relative_vorticity": False},
+                   {"barotropic": cfg.barotropic._replace(
+                       barotropic_literal_fold_unit_vector_form=False)}):
         planted = card._replace(recipe=card.recipe._replace(
             model_config=cfg._replace(**change)))
         with pytest.raises(ValueError, match="disagrees with its deck"):
             recipe.validate_orca2g1_flat_card(planted, roots["g1b"])
+
+
+def test_g1b_fold_unit_predicate_admits_vector_form_only_when_selected(roots):
+    from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
+        nemo_literal_external_mode_active)
+    cfg = recipe.build_nemo_testcase_card(
+        "ORCA2G1b-vec", deck_root=roots["g1b"]).recipe.model_config
+    assert nemo_literal_external_mode_active(cfg)
+    off = cfg._replace(barotropic=cfg.barotropic._replace(
+        barotropic_literal_fold_unit_vector_form=False))
+    assert not nemo_literal_external_mode_active(off)     # plant: the old gate
+    g1 = recipe.build_nemo_testcase_card(
+        "ORCA2G1-flat", deck_root=roots["g1"]).recipe.model_config
+    assert nemo_literal_external_mode_active(g1)          # flux form unchanged
+
+
+def test_nemo_f_vertex_area_is_e1f_times_e2f(roots):
+    import numpy as np
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import _nemo_f_vertex_area
+    card = recipe.build_nemo_testcase_card("ORCA2G1b-vec", deck_root=roots["g1b"])
+    grid, z = card.recipe.grid, card.recipe.z_coord
+    raw = z.nemo_een_barotropic
+    area = np.asarray(_nemo_f_vertex_area(grid, z))
+    e1e2f = np.asarray(raw.e1f) * np.asarray(raw.e2f)
+    assert np.array_equal(area[1:, 1:], e1e2f)
+    assert np.array_equal(area[1:, 0], e1e2f[:, -1])       # cyclic west column
+    assert np.array_equal(area[0], np.asarray(grid.area_q)[0])
+    # the grid's own F area is not NEMO's on this mesh (the defect it fixes)
+    assert not np.array_equal(np.asarray(grid.area_q)[1:, 1:], e1e2f)
+    with pytest.raises(ValueError, match="e1f and e2f"):
+        _nemo_f_vertex_area(grid, z._replace(nemo_een_barotropic=None))
