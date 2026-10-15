@@ -4,6 +4,11 @@
 #   preflight (default):  run.sh
 #   acquire:              run.sh --run
 #   re-admit:             run.sh --admit-existing
+#   resume (round 23):    run.sh --resume   -- the round-22 --run finished the
+#                         smoke and the 100-step reference, then refused the
+#                         twin r01 deck before NEMO started (the rendering
+#                         check, fixed); both runs are admitted in place, never
+#                         re-run, and the ten twins run.
 #
 # The agent that wrote this ran neither makenemo nor NEMO.
 #
@@ -65,8 +70,8 @@ readonly EVIDENCE=${EVIDENCE:-/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gr
 
 mode=--preflight-only
 case "${1:---preflight-only}" in
-  --run|--preflight-only|--admit-existing) mode=${1:---preflight-only} ;;
-  *) printf 'Usage: %s [--run|--preflight-only|--admit-existing]\n' "$0" >&2; exit 64 ;;
+  --run|--preflight-only|--admit-existing|--resume) mode=${1:---preflight-only} ;;
+  *) printf 'Usage: %s [--run|--preflight-only|--admit-existing|--resume]\n' "$0" >&2; exit 64 ;;
 esac
 
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
@@ -140,10 +145,16 @@ render_deck() {        # $1 = target, $2 = nn_itend, $3 = nn_stocklist
   sed -E -e "s/^(   nn_itend    = ).*/\1    $2/" \
          -e "s/^(   nn_stock    = ).*/\1    $2/" \
          -e "s/^(   nn_stocklist = ).*/\1$3/" "$DECK" >"$1"
-  local moved
-  moved=$(diff "$DECK" "$1" | grep -c '^>' || true)
-  [[ "$moved" -eq 0 || "$moved" -eq 3 ]] \
-    || { printf 'REFUSE: rendering changed %s deck lines, not the 3 run-length lines\n' "$moved" >&2; exit 68; }
+  only_run_length "$DECK" "$1" || exit 68
+}
+# Every line the rendering changed is one of the three run-length lines (at
+# N = the deck's own 100 only nn_stocklist moves, so the count is 0..3).
+only_run_length() {    # $1 = committed deck, $2 = rendered deck
+  local other
+  other=$(diff "$1" "$2" | grep -E '^[<>]' \
+          | grep -Ev '^[<>]    nn_(itend|stock) +=  |^[<>]    nn_stocklist = ' || true)
+  [[ $(wc -l <"$1") == $(wc -l <"$2") && -z "$other" ]] \
+    || { printf 'REFUSE: rendering changed a deck line that is not a run-length line: %s\n' "${other:-line count}" >&2; return 1; }
 }
 twin_list() {          # $1 = j, $2 = N: j, j+10, .. <= N, zero-padded to 10 entries
   local j=$1 n=$2 out=() k
@@ -161,6 +172,13 @@ cmp -s "$dry/full" "$DECK" \
 [[ "$(twin_list 10 100)" == "$L_FULL" && "$(twin_list 3 100)" == '3,13,23,33,43,53,63,73,83,93' \
    && "$(twin_list 7 30)" == '7,17,27,0,0,0,0,0,0,0' ]] \
   || { printf 'REFUSE: twin_list is wrong\n' >&2; exit 68; }
+render_deck "$dry/one" 100 "$(twin_list 1 100)"      # the twin r01 deck: one line moves
+[[ "$(diff "$DECK" "$dry/one" | grep -c '^>')" -eq 1 ]] \
+  || { printf 'REFUSE: the N = 100 twin deck should move nn_stocklist only\n' >&2; exit 68; }
+sed 's/^\(   rn_Dt *= *\).*/\1 5400./' "$dry/one" >"$dry/plant"          # plant: a non-run-length line
+if only_run_length "$DECK" "$dry/plant" 2>/dev/null || cmp -s "$dry/one" "$dry/plant"; then
+  printf 'REFUSE: the rendering plant (rn_Dt moved) stayed green\n' >&2; exit 72
+fi
 python3 -I -m py_compile "$CHECKER"
 printf 'PREFLIGHT: binaries and domain pinned; keys "%s"; deck = G1 plus ORCA2 namdyn_adv; commit %s\n' "$WANT_KEYS" "$COMMIT"
 
@@ -283,6 +301,17 @@ PY
   printf 'ACQUISITION_DONE %s N=%s\n' "$EVIDENCE" "$n"
 }
 
+admit_smoke_in_place() {
+  [[ "$(sha_of "$SMOKE/domain_cfg.nc")" == "$G1_DOMCFG_SHA" && "$(sha_of "$SMOKE/nemo")" == "$REF_SHA" ]] \
+    && vec_logged "$SMOKE" && grep -qx 'RUN_DONE' "$SMOKE/run.user.log" \
+    && [[ "$(tr -d ' \n' <"$SMOKE/time.step")" == 2 && -f "$SMOKE/ORCA2G1_00000002_restart.nc" ]] \
+    && ! grep -q 'E R R O R' "$SMOKE/ocean.output" \
+    && cmp -s "$SMOKE/namelist_ref" "$NEMO_ROOT/cfgs/SHARED/namelist_ref" \
+    || { printf 'REFUSE: %s is not the finished pinned 2-step smoke\n' "$SMOKE" >&2; exit 73; }
+  render_deck "$dry/smoke_admit" 2 "$L_SMOKE"
+  cmp -s "$SMOKE/namelist_cfg" "$dry/smoke_admit" \
+    || { printf 'REFUSE: the smoke ran another deck\n' >&2; exit 73; }
+}
 if [[ "$mode" == --admit-existing ]]; then
   for target in "$SMOKE" "$REF" "$(twin_dir 1)" "$(twin_dir 10)"; do
     [[ -e "$target" ]] || { printf 'REFUSE: nothing to admit, %s is absent\n' "$target" >&2; exit 69; }
@@ -291,19 +320,26 @@ if [[ "$mode" == --admit-existing ]]; then
   admit
   exit 0
 fi
-[[ ! -e "$EVIDENCE" ]] || {
-  printf 'REFUSE: evidence directory %s already exists; use --admit-existing\n' "$EVIDENCE" >&2; exit 69; }
-if [[ "$mode" != --run ]]; then
+if [[ "$mode" == --preflight-only && -e "$EVIDENCE" ]]; then
+  admit_smoke_in_place
+  printf 'RESUME_READY smoke and %s-step reference admissible in place; run.sh --resume runs the ten twins\n' "$(record_steps)"
+  exit 0
+fi
+[[ "$mode" == --resume || ! -e "$EVIDENCE" ]] || {
+  printf 'REFUSE: evidence directory %s already exists; use --admit-existing or --resume\n' "$EVIDENCE" >&2; exit 69; }
+if [[ "$mode" == --preflight-only ]]; then
   printf 'WOULD: mpirun -np 1 ./nemo (%s) in %s/{smoke_2step,ref_100step}; then (%s) in %s/r01..r10 to the reference length N; then %s\n' \
     "$REF_NAME" "$EVIDENCE" "$RUN_NAME" "$EVIDENCE" "$CHECKER"
   printf 'PREFLIGHT_OK\n'
   exit 0
 fi
 
+if [[ "$mode" == --run ]]; then
 mkdir -p "$EVIDENCE/manifest"
 printf '%s\n' "$COMMIT" >"$EVIDENCE/manifest/legoesm_commit"
 sha256sum "$G1_DOMCFG" "$DECK" "$G1_DECK" "$ORCA2_DECK" "$CHECKER" "$STEP_PATCH" "$REF_BIN" "$RUN_BIN" \
   "$NEMO_ROOT/cfgs/SHARED/namelist_ref" >"$EVIDENCE/manifest/inputs.sha256"
+fi
 
 run_one() {            # $1 = binary, $2 = run dir, $3 = nn_itend, $4 = stocklist; returns NEMO's status
   local dir=$2 rc=0
@@ -332,6 +368,27 @@ finished() {           # $1 = dir, $2 = steps
          printf 'REFUSE: %s did not finish %s steps\n' "$1" "$2" >&2; exit 71; }
 }
 
+if [[ "$mode" == --resume ]]; then
+  # the smoke and the reference must be the finished pinned runs of the
+  # committed deck; a twin directory may hold only the deck the refused
+  # rendering wrote (NEMO never started there) and is re-rendered
+  printf '%s\n' "$COMMIT" >"$EVIDENCE/manifest/legoesm_commit_resume"
+  admit_smoke_in_place
+  N=$(record_steps)
+  printf 'G1B_RESUME smoke and reference admitted in place; N=%s\n' "$N"
+  for j in $(seq 1 10); do
+    d=$(twin_dir "$j")
+    if [[ -e "$d" ]]; then
+      [[ "$(ls -A "$d")" == namelist_cfg ]] \
+        || { printf 'REFUSE: %s holds more than the refused deck; inspect, never re-run blindly\n' "$d" >&2; exit 69; }
+      rm -f "$d/namelist_cfg"
+    fi
+    run_one "$RUN_BIN" "$d" "$N" "$(twin_list "$j" "$N")"
+    finished "$d" "$N"
+  done
+  admit
+  exit 0
+fi
 # ---- the smoke first ---------------------------------------------------------
 run_one "$REF_BIN" "$SMOKE" 2 "$L_SMOKE"
 finished "$SMOKE" 2
