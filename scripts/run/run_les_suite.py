@@ -54,6 +54,7 @@ import math
 import os
 import sys
 import time
+import types
 from pathlib import Path
 
 import numpy as np
@@ -382,7 +383,7 @@ def _make_step(g, u_geo, f_cor, Q0, dtype, sponge=None):
     q0 = 0.0 if Q0 is None else Q0
 
     def _col(f):
-        return g.dz * jnp.sum(f.mean((0, 1)))
+        return g.dz * jnp.sum(sl.planar_mean(f, g))
 
     if sponge is None:
         @jax.jit
@@ -410,10 +411,11 @@ def _make_step(g, u_geo, f_cor, Q0, dtype, sponge=None):
                                return_budget=True)
         rc = (dt / tau) * spc
         rf = (dt / tau) * spf
-        u = state.u - rc * (state.u - state.u.mean((0, 1), keepdims=True))
-        v = state.v - rc * (state.v - state.v.mean((0, 1), keepdims=True))
+        u = state.u - rc * (state.u - sl.planar_mean(state.u, g, keepdims=True))
+        v = state.v - rc * (state.v - sl.planar_mean(state.v, g, keepdims=True))
         w = state.w - rf * state.w
-        th = state.theta - rc * (state.theta - state.theta.mean((0, 1), keepdims=True))
+        th = state.theta - rc * (state.theta
+                                 - sl.planar_mean(state.theta, g, keepdims=True))
         u, v, w = sl.project(u, v, w, dt=dt, g=g)  # sponge broke ∇·u=0 → re-project
         sp = jnp.stack([_col(th) - _col(state.theta), _col(u) - _col(state.u),
                         _col(v) - _col(state.v)])
@@ -450,8 +452,8 @@ def _frame_fields_fn(g, u_geo, f_cor, Q0):
         fl23 = fl23.at[..., 0].set(0.0)
         return dict(
             q=jnp.asarray(q, st.u.dtype), nu_t=nu_t, tau13=tau13, tau23=tau23,
-            tau_x_s=-cd * spd1 * jnp.mean(st.u[..., 0]),
-            tau_y_s=-cd * spd1 * jnp.mean(st.v[..., 0]),
+            tau_x_s=-cd * spd1 * sl.planar_mean(st.u[..., 0], g),
+            tau_y_s=-cd * spd1 * sl.planar_mean(st.v[..., 0], g),
             p=p, dpdx=sl.ddx(p, g), dpdy=sl.ddy(p, g), dpdz=dpdz,
             dudx=sl.ddx(st.u, g), dvdy=sl.ddy(st.v, g),
             dwdz=sl.ddz_f2c(st.w, g.dz), wc=sl.f2c(st.w),
@@ -584,6 +586,81 @@ def _fingerprint(case, args, sgs, dt0, n_steps, rec_steps, hours, cfg, inputs):
     return json.dumps(rec, sort_keys=True, default=str)
 
 
+def _distribute(g, st, comm, dtype):
+    """Serial grid + GLOBAL initial state -> the y-slab MPI grid + this rank's slab.
+
+    The IC is built (and projected) globally on every rank exactly as in a serial
+    run, then sliced, so the distributed initial state is bit-identical to the
+    serial one. ``comm=None`` (serial) returns its inputs unchanged."""
+    if comm is None:
+        return g, st
+    n, r = comm.Get_size(), comm.Get_rank()
+    if getattr(st, "tracers", None) is not None:
+        raise SystemExit("--mpi: tracer-carrying states are not gathered for output "
+                         "(dry cases only)")
+    ny = g.cfg.ny
+    if ny % n:
+        raise SystemExit(f"--mpi: ny={ny} must divide by the {n} ranks (y-slab)")
+    if g.cfg.dealias and (ny // n) % 2:
+        raise SystemExit(f"--mpi: the 3/2-rule de-aliasing needs an even ny per rank; "
+                         f"ny={ny} over {n} ranks gives {ny // n}")
+    layout = sl.SpectralLESLayout(rank=r, n_ranks=n, ny_global=ny, nx=g.cfg.nx,
+                                  comm=comm)
+    gd = sl.make_grid(g.cfg, dtype=dtype, layout=layout)
+    nyl = ny // n
+    rows = slice(r * nyl, (r + 1) * nyl)
+    return gd, jax.tree_util.tree_map(lambda a: a[rows], st)  # every leaf is (ny, ...)
+
+
+def _gather_y(comm, a):
+    """Rank 0: the y-slabs of ``a`` stacked into the global array; other ranks:
+    ``None``. Arrays of rank < 3 (planar-mean scalars, identical on every rank) and
+    serial runs pass through."""
+    a = np.asarray(a)
+    if comm is None:
+        return a
+    if a.ndim < 3:
+        # only rank-invariant planar-mean scalars may skip the gather; a 2-D slab
+        # field passed through would silently stand for the whole plane
+        if a.size != 1:
+            raise SystemExit(f"_gather_y: a {a.shape} field is neither a (y,x,z) slab "
+                             "nor a scalar; gather it explicitly")
+        return a
+    parts = comm.gather(a, root=0)
+    return None if parts is None else np.concatenate(parts, axis=0)
+
+
+def _all_ok(hcomm, fn, what):
+    """Run ``fn`` on every rank and fail on EVERY rank if it failed on any (a
+    rank-local exception must not leave the others waiting in a collective)."""
+    if hcomm is None:
+        return fn()
+    out, err = None, None
+    try:
+        out = fn()
+    except (Exception, SystemExit) as exc:  # noqa: BLE001 -- re-raised collectively
+        err = f"{type(exc).__name__}: {exc}"
+    errs = hcomm.allgather(err)
+    bad = [(r, e) for r, e in enumerate(errs) if e is not None]
+    if bad:
+        raise SystemExit(f"{what} failed on rank(s) {[r for r, _ in bad]}: {bad[0][1]}")
+    return out
+
+
+def _stray_checkpoints(base, n_ranks):
+    """Checkpoint files for ``base`` written by a run over a DIFFERENT rank count
+    (or serial vs MPI): resuming would silently restart from t=0, so they are
+    refused instead."""
+    if base is None:
+        return []
+    found = [q for q in base.parent.glob(base.name + ".r*of*")
+             if not q.name.endswith(".partial")
+             and not (n_ranks and q.name.endswith(f"of{n_ranks}"))]
+    if n_ranks and base.exists():
+        found.append(base)
+    return sorted(found)
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -652,6 +729,9 @@ def main(argv: list[str] | None = None) -> int:
                         f"--checkpoint and exit {EXIT_CHECKPOINTED} (the job script "
                         "resubmits)")
     p.add_argument("--f32", action="store_true")
+    p.add_argument("--mpi", action="store_true",
+                   help="run the y-slab MPI decomposition over MPI.COMM_WORLD "
+                        "(launch under mpiexec); rank 0 writes the artifact")
     p.add_argument("--output", type=Path, default=Path("results/les_suite/artifacts"))
     args = p.parse_args(argv)
 
@@ -698,6 +778,14 @@ def main(argv: list[str] | None = None) -> int:
         case = _refined_case(case, args.refine)
     dtype = jnp.float32 if args.f32 else jnp.float64
     args.output.mkdir(parents=True, exist_ok=True)
+    comm = hcomm = MPI = None
+    if args.mpi:
+        from mpi4py import MPI  # noqa: PLC0415
+        comm = MPI.COMM_WORLD
+        # Host-side (mpi4py) collectives use their OWN communicator, so they can
+        # never match a pending mpi4jax collective of the jitted step on ``comm``.
+        hcomm = comm.Dup()
+    rank = 0 if comm is None else comm.Get_rank()
 
     res = None
     if case.setup is not None:
@@ -711,6 +799,8 @@ def main(argv: list[str] | None = None) -> int:
                              "case's LESSetup, which defines them")
         args.pr_sgs, args.nu_floor = _PR_SGS, _NU_FLOOR_M2_S
         g, st, Q0, res = _build_setup(case, args, dtype, sgs_name)
+        st_ic = st
+        g, st = _distribute(g, st, comm, dtype)
         args.theta0 = res["theta_ref"]
         u_geo = (jnp.asarray(res["ug"], dtype), jnp.asarray(res["vg"], dtype))
         u_geo_mag = float(np.max(np.hypot(res["ug"], res["vg"])))
@@ -749,6 +839,8 @@ def main(argv: list[str] | None = None) -> int:
             g, st, Q0 = _build_sbl(case, args, dtype, sgs=sgs_name, u_geo_mag=u_geo_mag)
         else:
             g, st, Q0 = _build_cbl(case, args, dtype, sgs=sgs_name, u_geo_mag=u_geo_mag)
+        st_ic = st
+        g, st = _distribute(g, st, comm, dtype)
         u_geo = (u_geo_mag, 0.0)
         step = _make_emit_step(g, case.regime, u_geo, f_cor, Q0,
                                case.grid.Lz_m, dtype)
@@ -823,14 +915,26 @@ def main(argv: list[str] | None = None) -> int:
         return None if ts is None else jnp.asarray(ts, dtype)
 
     def _col_means(state):
-        return np.array([float(g.dz * jnp.sum(f.mean((0, 1))))
+        return np.array([float(g.dz * jnp.sum(sl.planar_mean(f, g)))
                          for f in (state.theta, state.u, state.v)])
 
     dz_min = min(float(g.dz), case.grid.Lx_m / case.grid.nx,
                  case.grid.Ly_m / case.grid.ny)
 
     def _record(t):
-        prof, srf = _frame_stats(st, g, fields_fn(st, _t_sfc(t)), args.pr_sgs)
+        # finish every device collective before any host-side MPI call
+        fields = jax.block_until_ready(fields_fn(st, _t_sfc(t)))
+        vmax = max(float(jnp.max(jnp.abs(f))) for f in (st.u, st.v, st.w))
+        if comm is not None:
+            vmax = hcomm.allreduce(vmax, op=MPI.MAX)
+            st_g = types.SimpleNamespace(**{f: _gather_y(hcomm, getattr(st, f))
+                                            for f in ("u", "v", "w", "theta")})
+            fields = {k: _gather_y(hcomm, v) for k, v in fields.items()}
+            if rank != 0:
+                return
+        else:
+            st_g = st
+        prof, srf = _frame_stats(st_g, g, fields, args.pr_sgs)
         for k, val in prof.items():
             profs.setdefault(k, []).append(val)
         for k, val in srf.items():
@@ -841,7 +945,6 @@ def main(argv: list[str] | None = None) -> int:
         cum["tau_y_s_cum"].append(float(a_np[2]))
         times.append(float(t))
         sh, su, sv = _floor_shares(prof)
-        vmax = max(float(jnp.max(jnp.abs(f))) for f in (st.u, st.v, st.w))
         print(f"  frame t={t / 3600:.3f}h  nu_floor share of total flux: "
               f"heat={sh:.4f} u-mom={su:.4f} v-mom={sv:.4f}  "
               f"w'θ'_0={srf['w_theta_s']:+.5f} u'w'_0={srf['tau_x_s']:+.5f}  "
@@ -856,12 +959,36 @@ def main(argv: list[str] | None = None) -> int:
         # would be lost on resume
         raise SystemExit(f"--checkpoint supports time_scheme='rk3' only, got "
                          f"{g.cfg.time_scheme!r}")
+    fp_inputs = (st_ic, u_geo, Q0, f_cor, res)
+    if comm is not None:   # a run over a different rank count is a different run
+        fp_inputs = fp_inputs + (np.asarray(comm.Get_size()),)
     fp = _fingerprint(case, args, sgs_name, dt0, n_steps, rec_steps, hours, g.cfg,
-                      (st, u_geo, Q0, f_cor, res))
+                      fp_inputs)
+    del st_ic, fp_inputs
+    ckpt = args.checkpoint
+    n_ranks = 0 if comm is None else comm.Get_size()
+    stray = _stray_checkpoints(args.checkpoint, n_ranks)
+    if comm is not None:   # one decision for all ranks (rank 0's view of the dir)
+        stray = hcomm.bcast(stray, root=0)
+    if stray:
+        raise SystemExit(f"checkpoint(s) from a run over a different rank count: "
+                         f"{[str(q) for q in stray]}; refusing to restart from t=0")
+    if ckpt is not None and comm is not None:
+        ckpt = ckpt.with_name(f"{ckpt.name}.r{rank}of{n_ranks}")
+    have = ckpt is not None and ckpt.exists()
+    if comm is not None:
+        if hcomm.allreduce(have, op=MPI.LOR) != hcomm.allreduce(have, op=MPI.LAND):
+            raise SystemExit(f"rank {rank}: per-rank checkpoints {args.checkpoint}.r* "
+                             "exist on some ranks only; refusing a partial resume")
     k_start = 1
-    if args.checkpoint is not None and args.checkpoint.exists():
-        st, acc, k_done, col0, profs, sfc, cum, times = _load_checkpoint(
-            args.checkpoint, st, fp, dtype)
+    if have:
+        st, acc, k_done, col0, profs, sfc, cum, times = _all_ok(
+            hcomm, lambda: _load_checkpoint(ckpt, st, fp, dtype), "checkpoint load")
+        if comm is not None:
+            steps = hcomm.allgather(k_done)
+            if len(set(steps)) != 1:
+                raise SystemExit("per-rank checkpoints are at different steps "
+                                 f"({sorted(set(steps))}); refusing")
         k_start = k_done + 1
         print(f"[RESUME] {args.checkpoint} at step {k_done}/{n_steps}, "
               f"{len(times)} frames recorded")
@@ -876,39 +1003,54 @@ def main(argv: list[str] | None = None) -> int:
     for k in range(k_start, n_steps + 1):
         st, _, b = step(st, dt, _t_sfc((k - 1) * dt0))
         acc = acc + b
+        if comm is not None:
+            # the step's mpi4jax collectives complete before any host MPI call
+            jax.block_until_ready((st, acc))
         if args.wall_limit_s is not None:
             # dispatch is asynchronous: without this the clock would time the
             # enqueue, and the checkpoint write could land past the walltime
             acc.block_until_ready()
         if k in rec_set:
             mw = float(jnp.max(jnp.abs(st.w)))
-            if not np.isfinite(mw) or mw > 1e3:
-                print(f"[BLOWUP] step {k} t={k * dt0:.0f}s max|w|={mw}")
+            bad = not np.isfinite(mw) or mw > 1e3
+            if comm is not None:
+                bad = hcomm.allreduce(bad, op=MPI.LOR)
+            if bad:
+                print(f"[BLOWUP] step {k} t={k * dt0:.0f}s max|w|={mw} (rank {rank})")
                 return 1
             _record(k * dt0)
-            if args.checkpoint is not None:
-                _save_checkpoint(args.checkpoint, st, acc, k, col0, profs, sfc, cum,
-                                 times, fp)
-        if (args.wall_limit_s is not None and k < n_steps
-                and time.time() - t0 >= args.wall_limit_s):
-            _save_checkpoint(args.checkpoint, st, acc, k, col0, profs, sfc, cum,
-                             times, fp)
+            if ckpt is not None:
+                _all_ok(hcomm, lambda: _save_checkpoint(
+                    ckpt, st, acc, k, col0, profs, sfc, cum, times, fp),
+                    "checkpoint write")
+        stop = (args.wall_limit_s is not None and k < n_steps
+                and time.time() - t0 >= args.wall_limit_s)
+        if comm is not None and args.wall_limit_s is not None:
+            stop = hcomm.bcast(stop, root=0)   # every rank stops at the same step
+        if stop:
+            _all_ok(hcomm, lambda: _save_checkpoint(
+                ckpt, st, acc, k, col0, profs, sfc, cum, times, fp), "checkpoint write")
             print(f"[CHECKPOINT] wall limit {args.wall_limit_s:.0f}s reached at step "
                   f"{k}/{n_steps} -> {args.checkpoint}; exit {EXIT_CHECKPOINTED}")
             return EXIT_CHECKPOINTED
     print(f"[DONE] wall={time.time()-t0:.1f}s  {len(times)} frames")
+    d_col = _col_means(st) - col0          # collective: every rank takes part
+    col1 = _col_means(st)
+    if rank != 0:
+        hcomm.Barrier()                    # rank 0 has saved the artifact
+        if ckpt is not None and ckpt.exists():
+            ckpt.unlink()
+        return 0
 
     # RULE 0 column budgets: change of the column-integrated mean = boundary +
     # body sources the RK stages applied + the sponge (reported separately).
     a_np = np.asarray(acc)
-    d_col = _col_means(st) - col0
     names = dict(zip(sl.BUDGET_TERMS, a_np[:n_core]))
     src_th = names["sfc_heat_flux"]
     src_u = names["sfc_stress_x"] + names["coriolis_u"] + names["body_force_u"]
     src_v = names["sfc_stress_y"] + names["coriolis_v"] + names["body_force_v"]
     # Round-off is set by the column CONTENT (e.g. ∫θdz ~ 1e5 K m), so the residual
     # is printed next to it as well as next to the change.
-    col1 = _col_means(st)
     for i, (lab, src, sp) in enumerate((("theta", src_th, a_np[n_core]),
                                         ("u", src_u, a_np[n_core + 1]),
                                         ("v", src_v, a_np[n_core + 2]))):
@@ -944,6 +1086,7 @@ def main(argv: list[str] | None = None) -> int:
         "held_out": bool(case.held_out),
         "smoke": bool(args.smoke),
         "f32": bool(args.f32),
+        "mpi_ranks": 1 if comm is None else int(comm.Get_size()),
         # prescribed-surface-temperature MOST solver: worst convergence residual over
         # the output frames (None on the prescribed-flux paths)
         # (and how many frames' residuals were not finite — a failed solve is
@@ -996,10 +1139,36 @@ def main(argv: list[str] | None = None) -> int:
                          f"{smoke_tag}.npz")
     save_artifact(artifact, out)
     print(f"  artifact -> {out}  (nt={artifact.nt}, nz={artifact.nz})")
-    if args.checkpoint is not None and args.checkpoint.exists():
-        args.checkpoint.unlink()
+    if comm is not None:
+        hcomm.Barrier()
+    if ckpt is not None and ckpt.exists():
+        ckpt.unlink()
     return 0
 
 
+def _run_cli() -> None:
+    """Under ``--mpi`` any failure on one rank aborts the whole job: a rank that
+    exits (an exception, a rank-local refusal, a failed artifact write on rank 0)
+    must never leave the others waiting in a collective until the walltime."""
+    if "--mpi" in sys.argv:
+        from mpi4py import MPI  # noqa: PLC0415
+        if MPI.COMM_WORLD.Get_rank() != 0:   # one log: rank 0's (errors stay on stderr)
+            sys.stdout = open(os.devnull, "w")  # noqa: SIM115
+    try:
+        rc = main()
+    except BaseException as exc:
+        if "--mpi" not in sys.argv:
+            raise
+        import traceback  # noqa: PLC0415
+        traceback.print_exc()
+        code = exc.code if isinstance(exc, SystemExit) else 1
+        if code in (0, None):
+            raise
+        from mpi4py import MPI  # noqa: PLC0415
+        MPI.COMM_WORLD.Abort(code if isinstance(code, int) else 1)
+        raise
+    sys.exit(rc)
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    _run_cli()

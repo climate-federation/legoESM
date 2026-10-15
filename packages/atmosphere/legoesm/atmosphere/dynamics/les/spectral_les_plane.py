@@ -390,7 +390,7 @@ def _ifft(fh, g: SpectralLESGrid):
                               n_ranks=L.n_ranks, comm=L.comm)
 
 
-def _planar_mean(f, g: SpectralLESGrid, keepdims=False):
+def planar_mean(f, g: SpectralLESGrid, keepdims=False):
     """Horizontal (y, x) mean. Serial: ``jnp.mean`` over axes (0,1). Under the
     y-slab MPI layout each rank holds only a y-slab, so the true planar mean is a
     global reduction: ``global_sum_mpi(Σ_slab) / (ny_global·nx)`` (AD-safe SUM
@@ -890,13 +890,13 @@ def surface_boundary(u, v, theta, g: SpectralLESGrid, sfc_theta_flux, t_sfc,
                 f"sfc_flux_drag='most' needs ln(z1/z0) > psi_m(-{_MOST_ZETA_CLIP}) = "
                 f"{psi_clip:.3f} (no MOST solution in free convection otherwise); "
                 f"z1={z1} m, z0={g.cfg.z0} m")
-        spd_mean = _planar_mean(jnp.sqrt(u1 ** 2 + v1 ** 2 + 1e-12), g)
+        spd_mean = planar_mean(jnp.sqrt(u1 ** 2 + v1 ** 2 + 1e-12), g)
         _us, cd_surf = most_drag_prescribed_flux(
             spd_mean, sfc_theta_flux, g.z_c[0], g.cfg.z0, g.cfg.theta_ref0)
         return ((cd_surf, sfc_theta_flux, jnp.nan) if return_residual
                 else (cd_surf, sfc_theta_flux))
-    spd_mean = _planar_mean(jnp.sqrt(u1 ** 2 + v1 ** 2 + 1e-12), g)
-    th1_mean = _planar_mean(theta[..., 0], g)
+    spd_mean = planar_mean(jnp.sqrt(u1 ** 2 + v1 ** 2 + 1e-12), g)
+    th1_mean = planar_mean(theta[..., 0], g)
     out = most_surface_flux(
         spd_mean, th1_mean, t_sfc, g.z_c[0], g.cfg.z0, g.cfg.theta_ref0,
         z0h=g.cfg.z0h, return_residual=return_residual)
@@ -930,7 +930,7 @@ def sgs_vertical_momentum_flux_faces(u, v, w, nu_t, g: SpectralLESGrid, cd_surf=
     # the local wind — the standard, well-behaved ABL-LES wall model.
     u1, v1 = u[..., 0], v[..., 0]
     spd1 = jnp.sqrt(u1 ** 2 + v1 ** 2 + 1e-12)
-    spd1_mean = _planar_mean(spd1, g)                       # planar mean ⟨|u₁|⟩
+    spd1_mean = planar_mean(spd1, g)                       # planar mean ⟨|u₁|⟩
     # Neutral log-law drag, OR the stability-corrected drag ``cd_surf`` supplied by
     # the coupled MOST surface layer (GABLS1 prescribed-cooling BC). cd_surf=None
     # ⇒ neutral (unchanged default path, no regression).
@@ -1203,7 +1203,7 @@ def buoyancy_w_moist(theta, tracers, g: SpectralLESGrid):
     — the planar mean is absorbed by the pressure projection)."""
     th_v = virtual_theta(theta, tracers)
     g_over_th = constants.g / g.cfg.theta_ref0
-    b_c = g_over_th * (th_v - _planar_mean(th_v, g, keepdims=True))
+    b_c = g_over_th * (th_v - planar_mean(th_v, g, keepdims=True))
     return jnp.pad(c2f(b_c), ((0, 0), (0, 0), (1, 1)))      # faces, 0 at walls
 
 
@@ -1212,7 +1212,7 @@ def buoyancy_w(theta, g: SpectralLESGrid):
     the deviation from the horizontal-mean profile drives the eddies (the mean is
     in hydrostatic balance, absorbed by the pressure)."""
     g_over_th = constants.g / g.cfg.theta_ref0
-    b_c = g_over_th * (theta - _planar_mean(theta, g, keepdims=True))
+    b_c = g_over_th * (theta - planar_mean(theta, g, keepdims=True))
     bf = jnp.pad(c2f(b_c), ((0, 0), (0, 0), (1, 1)))        # faces, 0 at walls
     return bf
 
@@ -1438,7 +1438,7 @@ def _surface_ustar(u, v, g: SpectralLESGrid):
     kappa = constants.kappa_von_karman
     u1, v1 = u[..., 0], v[..., 0]
     Cd = (kappa / jnp.log(g.z_c[0] / g.cfg.z0)) ** 2
-    return (Cd ** 0.5) * _planar_mean(jnp.sqrt(u1 ** 2 + v1 ** 2 + 1e-12), g)
+    return (Cd ** 0.5) * planar_mean(jnp.sqrt(u1 ** 2 + v1 ** 2 + 1e-12), g)
 
 
 def _filt_state(u, v, w, th, tr, g):
@@ -1533,16 +1533,16 @@ def _budget_rates(s: SpectralLESState, g: SpectralLESGrid, u_geo, f_cor, force,
     cd_surf, q = surface_boundary(s.u, s.v, s.theta, g, sfc_theta_flux, t_sfc)
     cd = surface_drag_coefficient(g, cd_surf)
     u1, v1 = s.u[..., 0], s.v[..., 0]
-    spd1_mean = _planar_mean(jnp.sqrt(u1 ** 2 + v1 ** 2 + 1e-12), g)
+    spd1_mean = planar_mean(jnp.sqrt(u1 ** 2 + v1 ** 2 + 1e-12), g)
     lz = g.dz * s.u.shape[-1]
     ug, vg = u_geo
-    um = _planar_mean(s.u, g)
-    vm = _planar_mean(s.v, g)
+    um = planar_mean(s.u, g)
+    vm = planar_mean(s.v, g)
     dt_ = s.u.dtype
     terms = (
         q if s.theta is not None else 0.0,
-        -cd * spd1_mean * _planar_mean(u1, g),
-        -cd * spd1_mean * _planar_mean(v1, g),
+        -cd * spd1_mean * planar_mean(u1, g),
+        -cd * spd1_mean * planar_mean(v1, g),
         f_cor * g.dz * jnp.sum(vm - vg),
         -f_cor * g.dz * jnp.sum(um - ug),
         force[0] * lz,

@@ -48,17 +48,15 @@ def _f(lat):
 
 # --- catalog ----------------------------------------------------------------
 def test_every_published_case_validates_and_runs_through_the_suite_driver():
-    assert len(_BY_NAME) == len(PUBLISHED_CASES) == 21
+    assert len(_BY_NAME) == len(PUBLISHED_CASES) == 26
     for c in PUBLISHED_CASES:
         c.validate()
         assert c.setup is not None and c.driver == "run_les_suite.py"
-        # user 2026-10-15: every proposed value approved; GABLS4's raised dt
-        # stays pending until its validation is in; the Pedersen cases came later
-        if c.name.startswith("ekman_pedersen14_"):
-            assert c.setup.pending and not c.setup.approved, c.name
-        else:
-            assert c.setup.approved, c.name
-            assert bool(c.setup.pending) == (c.name == "gabls4_e2"), c.name
+        # user 2026-10-15: every proposed value approved, incl. GABLS4's raised dt
+        # and the Pedersen Ekman values; FC01: the user's fill-ins approved, the
+        # suite values nobody asked about still pending (production refused)
+        assert c.setup.approved, c.name
+        assert bool(c.setup.pending) == c.name.startswith("fc01_"), c.name
 
 
 def test_held_out_split_is_the_users():
@@ -144,9 +142,10 @@ def test_pedersen14_neutral_ekman_cases(run, gamma, hours):
                                [290.0, 290.0 + gamma * 1000.0])
     np.testing.assert_allclose(m._knots([0.0, 2000.0], s.geostrophic_knots, 1), [10.0] * 2)
     np.testing.assert_allclose(m._knots([0.0, 2000.0], s.wind_init_knots, 1), [10.0] * 2)
-    # the values the paper does not fix are pending, not silently chosen
+    # the values the paper does not fix were proposed, then approved by the user
     assert c.grid.dt_s == 0.5 and (s.sponge_bottom_m, s.sponge_tau_s) == (1600.0, 50.0)
-    topics = [p.split(":")[0] for p in s.pending]
+    topics = [p.removeprefix("APPROVED 2026-10-15 (was: ").split(":")[0]
+              for p in s.approved]
     assert topics == ["dt", "top boundary", "θ_ref", "seed noise",
                       "SGS closure + numerics"], topics
 
@@ -278,10 +277,67 @@ def test_published_cases_record_the_approved_driver_closure():
               f"C_s {m._SBL_STATIC_CS}"):
         assert v in text, v
     for c in catalog.PUBLISHED_CASES:
-        if c.name.startswith("ekman_pedersen14_"):
+        if c.name.startswith("fc01_"):
             assert c.setup.pending[-1] == text, c.name
         else:
             assert c.setup.approved[-1] == f"APPROVED 2026-10-15 (was: {text})", c.name
+
+
+@pytest.mark.parametrize("tag,n1,n2", [("lin_n008", 0.008, 0.008),
+                                       ("lin_n011", 0.011, 0.011),
+                                       ("lin_n014", 0.014, 0.014),
+                                       ("ws", 0.005, 0.018), ("sw", 0.018, 0.005)])
+def test_fedorovich_conzemius_2001_cases(tag, n1, n2):
+    """Fedorovich & Conzemius (2001): B_s = 0.0098 m2/s3, 5 x 5 x 4 km at
+    100 x 100 x 20 m, top-20 % sponge, stop at z_i = 0.6 Lz; user fill-ins
+    θ0 = 300 K, switch 1000 m, z0 = 0.01 m, linear from the surface."""
+    c = _BY_NAME[f"fc01_{tag}"]
+    s = c.setup
+    assert (c.regime, c.held_out, c.geostrophic_wind_m_s) == ("dry_convective",
+                                                                False, None)
+    assert (c.grid.nx, c.grid.ny, c.grid.nz) == (50, 50, 200)
+    assert (c.grid.Lx_m, c.grid.Ly_m, c.grid.Lz_m) == (5000.0, 5000.0, 4000.0)
+    # duration: the time the CBL (C_eps = 0.17, paper Fig. 2) needs to reach
+    # 0.6 Lz = 2400 m. Linear N: z_i = sqrt(2 (1+2C) B_s t) / N (paper eq. 10);
+    # two-layer: the mixed layer must gain the buoyancy b0(z_i) over the depth,
+    # i.e. ∫_0^zi (b0(z_i) - b0(z)) dz, evaluated here by quadrature.
+    zi, zs, k = 2400.0, 1000.0, (1.0 + 2 * 0.17) * 0.0098
+    z = np.linspace(0.0, zi, 240001)
+    b0 = np.where(z <= zs, n1 ** 2 * z, n1 ** 2 * zs + n2 ** 2 * (z - zs))
+    f = b0[-1] - b0
+    t = float(np.sum(0.5 * (f[1:] + f[:-1]) * np.diff(z))) / k
+    if n1 == n2:
+        np.testing.assert_allclose(t, (zi * n1) ** 2 / (2 * k), rtol=1e-9)
+    np.testing.assert_allclose(c.duration_hours * 3600.0, t, rtol=1e-8)
+    assert c.duration_hours * 3600.0 < 1.0e5
+    np.testing.assert_allclose(c.surface_theta_flux_K_m_s * constants.g / 300.0,
+                               0.0098, rtol=1e-12)
+    assert s.z0_m == 0.01 and s.theta_ref_K == 300.0 and s.sponge_bottom_m == 3200.0
+    m = _driver()
+    th = m._knots([0.0, 1000.0, 4000.0], s.theta_knots, 1)
+    np.testing.assert_allclose((th[1] - th[0]) / 1000.0 * constants.g / 300.0, n1 ** 2,
+                               rtol=1e-12)
+    np.testing.assert_allclose((th[2] - th[1]) / 3000.0 * constants.g / 300.0, n2 ** 2,
+                               rtol=1e-12)
+    fills = [a for a in s.approved if "user fill-in" in a]
+    assert len(fills) == 3 == len(s.approved) and any("1000 m" in a for a in fills)
+    topics = [p.split(":")[0] for p in s.pending]
+    assert s.lat_deg == 0.0                       # paper: Coriolis neglected
+    assert topics == ["dt", "sponge", "seed noise", "surface drag", "duration",
+                      "SGS closure + numerics"], topics
+
+
+def test_stable_dry_grid_points_run_on_the_gabls1_grid():
+    """User 2026-10-15: the stable dry-grid points on the GABLS1 grid; the
+    convective points keep the 33 m grid."""
+    from legoesm.atmosphere.les_suite import catalog
+    for c in catalog.dry_shear_buoyancy_grid():
+        g = c.grid
+        if c.regime == "dry_stable":
+            assert (g.nx, g.ny, g.nz, g.Lx_m, g.Lz_m, g.dt_s) == (64, 64, 96, 400.0,
+                                                                  400.0, 0.1), c.name
+        else:
+            assert g == catalog._DRY_GRID, c.name
 
 
 def test_setup_duration_is_the_published_one(tiny_registry, tmp_path):

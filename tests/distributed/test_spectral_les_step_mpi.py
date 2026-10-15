@@ -95,7 +95,7 @@ def test_distributed_step_matches_serial():
             rtol=1e-9, atol=1e-9, err_msg=f"{name} mismatch")
 
     # u_* depends on the GLOBAL planar-mean wall stress — must match the serial
-    # scalar at every step (the whole point of the distributed _planar_mean).
+    # scalar at every step (the whole point of the distributed planar_mean).
     np.testing.assert_allclose(np.asarray(us_dist), np.asarray(us_ser),
                                rtol=1e-10, atol=1e-12)
 

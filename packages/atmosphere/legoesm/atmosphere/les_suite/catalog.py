@@ -42,6 +42,10 @@ _SGS_SPREAD: tuple[SgsClosure, ...] = ("lasd", "smagorinsky", "vreman")
 # Canonical dry-regime production grid (96^3 over a 3.2 x 3.2 x 1.6 km box,
 # dt 0.5 s) — the run_spectral_cbl default, D8's production resolution.
 _DRY_GRID = LESGrid(nx=96, ny=96, nz=96, Lx_m=3200.0, Ly_m=3200.0, Lz_m=1600.0, dt_s=0.5)
+# The stable dry-grid points run on the GABLS1 grid (6.25 m x ~4.2 m, dt 0.1 s): the
+# 33 m convective grid cannot resolve a stable layer (user 2026-10-15).
+_STABLE_GRID = LESGrid(nx=64, ny=64, nz=96, Lx_m=400.0, Ly_m=400.0, Lz_m=400.0,
+                       dt_s=0.1)
 
 
 # --- anchor cases (real published setups; parameters == driver defaults) -----
@@ -131,6 +135,7 @@ def dry_shear_buoyancy_grid(
     winds_m_s: tuple[float, ...] = _DEFAULT_WINDS_M_S,
     *,
     grid: LESGrid = _DRY_GRID,
+    stable_grid: LESGrid = _STABLE_GRID,
     duration_hours: float = 4.0,
     ci_marker: str = "manual_only",
 ) -> list[LESCase]:
@@ -160,7 +165,7 @@ def dry_shear_buoyancy_grid(
                     name=f"dry_grid_b{i}s{j}",
                     regime=regime,
                     core="spectral",
-                    grid=grid,
+                    grid=stable_grid if stable else grid,
                     duration_hours=duration_hours,
                     surface_theta_flux_K_m_s=float(flux),
                     geostrophic_wind_m_s=(float(wind) if wind > 0.0 else None),
@@ -172,6 +177,8 @@ def dry_shear_buoyancy_grid(
                     description=(
                         f"Dry-regime grid point: w'θ'_s={flux:+.3f} K m/s, "
                         f"|U_g|={wind:.1f} m/s.{note}"
+                        + (" On the GABLS1 grid (user approved 2026-10-15); the "
+                           "U_g=0 point may stay laminar." if stable else "")
                     ),
                     provisional_axis=True,
                 )
@@ -429,10 +436,9 @@ _PENDING_CLOSURE = ("SGS closure + numerics: PROPOSED the suite's (run_les_suite
 # User 2026-10-15: every proposed value above is APPROVED (Huang 2013 with the
 # GABLS1 sponge instead of none). They move to ``setup.approved`` (artifact
 # provenance); only what is still open stays pending.
-_STILL_PENDING = {
-    "gabls4_e2": ("dt 0.3 s: validation against 0.1 s over the first 1 h (mean "
-                  "profiles + fluxes vs σ_LES) not yet done",),
-}
+# GABLS4 dt 0.3 s and the Pedersen Ekman values: approved too (user 2026-10-15,
+# GABLS4 before its 0.1 s comparison, which is done from its output later).
+_STILL_PENDING: dict[str, tuple[str, ...]] = {}
 PUBLISHED_CASES = tuple(
     dataclasses.replace(c, setup=dataclasses.replace(
         c.setup, approved=tuple(f"APPROVED 2026-10-15 (was: {p})"
@@ -478,13 +484,103 @@ def _pedersen14_case(run):
                 _PENDING_SEED.format(amp=0.1, top=50, paper="small divergence-free "
                                      "u, v, θ perturbations below 50 m, amplitude "
                                      "not stated"),
+            )))
+
+
+_FC01_REF = ("Fedorovich & Conzemius (2001), 'LES of convective entrainment in "
+             "linearly and discretely stratified fluids', Direct and Large-Eddy "
+             "Simulation IV (ERCOFTAC Series 8)")
+_FC01_BS_M2_S3 = 0.0098            # surface buoyancy flux B_s (paper)
+_FC01_THETA0_K = 300.0             # user fill-in: converts B_s and N to θ units
+_FC01_LZ_M = 4000.0
+_FC01_SWITCH_M = 1000.0            # user fill-in: WS/SW switch height (paper Fig. 3)
+_FC01_GRID = LESGrid(nx=50, ny=50, nz=200, Lx_m=5000.0, Ly_m=5000.0, Lz_m=_FC01_LZ_M,
+                     dt_s=0.5)
+
+
+def _fc01_gamma(n_s):
+    """dθ/dz [K/m] of a buoyancy frequency N [1/s]: N²θ0/g."""
+    return n_s ** 2 * _FC01_THETA0_K / constants.g
+
+
+# The paper stops each run once z_i reaches 60 % of the domain height (its
+# Sect. 2: "the time advancement is maintained only as long as the CBL depth is
+# less than 60% of the domain height"). The fixed duration that reproduces this is
+# estimated from the heat budget of a CBL mixed to z_i: the buoyancy it must gain
+# to erase the initial stratification below z_i is ∫_0^{z_i} z N²(z) dz
+# (encroachment); entrainment is folded in with the zero-order-jump factor
+# (1 + 2 C_eps) of the paper's eq. (10), C_eps = 0.17 its LES asymptote (Fig. 2) —
+# exact for linear N, an estimate across the two-layer switch.
+_FC01_STOP_FRAC = 0.6
+_FC01_C_EPS = 0.17
+
+
+def _fc01_stop_hours(n_below, n_above):
+    zi, zs = _FC01_STOP_FRAC * _FC01_LZ_M, _FC01_SWITCH_M
+    deficit = 0.5 * (n_below ** 2 * zs ** 2 + n_above ** 2 * (zi ** 2 - zs ** 2))
+    return deficit / ((1.0 + 2.0 * _FC01_C_EPS) * _FC01_BS_M2_S3) / 3600.0
+
+
+def _fc01_case(tag, n_below, n_above):
+    """One Fedorovich & Conzemius (2001) shear-free CBL: constant B_s into linear
+    (N below = N above) or two-layer stratification switching at 1000 m."""
+    g1, g2 = _fc01_gamma(n_below), _fc01_gamma(n_above)
+    th1 = _FC01_THETA0_K + g1 * _FC01_SWITCH_M
+    knots = ((0.0, _FC01_THETA0_K), (_FC01_SWITCH_M, th1),
+             (_FC01_LZ_M, th1 + g2 * (_FC01_LZ_M - _FC01_SWITCH_M)))
+    q = _FC01_BS_M2_S3 * _FC01_THETA0_K / constants.g
+    hours = _fc01_stop_hours(n_below, n_above)
+    return LESCase(
+        name=f"fc01_{tag}", regime="dry_convective", core="spectral", grid=_FC01_GRID,
+        duration_hours=hours, surface_theta_flux_K_m_s=q,
+        geostrophic_wind_m_s=None, sgs_variants=_SGS_DEFAULT,
+        driver="run_les_suite.py", reference=_FC01_REF, ci_marker="manual_only",
+        description=f"Shear-free CBL, B_s = {_FC01_BS_M2_S3} m2/s3, N = {n_below} s^-1 "
+                    f"below / {n_above} s^-1 above {_FC01_SWITCH_M:g} m, until "
+                    f"z_i = 0.6 Lz (~{hours:.1f} h).",
+        setup=LESSetup(
+            # f = 0: the paper neglects Coriolis (shear-free CBL, its Sect. 2)
+            lat_deg=0.0, z0_m=0.01, theta_ref_K=_FC01_THETA0_K, perturb_K=0.1,
+            perturb_top_m=200.0, theta_knots=knots,
+            geostrophic_knots=((0.0, 0.0, 0.0),), surface_drag="most",
+            sponge_bottom_m=0.8 * _FC01_LZ_M, sponge_tau_s=_SUITE_SPONGE_TAU_S,
+            approved=(
+                "APPROVED 2026-10-15 (user fill-in): switch height 1000 m (paper Fig. 3)",
+                "APPROVED 2026-10-15 (user fill-in): z0 = 0.01 m",
+                "APPROVED 2026-10-15 (user fill-in): linear stratification from the "
+                "surface, no initial mixed layer; theta0 = 300 K converts B_s, N",
+            ),
+            pending=(
+                _PENDING_DT.format(dt=0.5) + " — the CF06 value at the same 20 m dz",
+                f"sponge: top 20 % per paper; timescale PROPOSED {_SUITE_SPONGE_TAU_S} s "
+                "(paper: not stated)",
+                _PENDING_SEED.format(amp=0.1, top=200, paper="not stated"),
+                "surface drag: PROPOSED the driver's MOST drag from the PLANAR-MEAN "
+                "first-level wind at the prescribed flux (paper: MOST point by point)",
+                f"duration: PROPOSED {hours:.2f} h = the paper's stop at z_i = 0.6 Lz, "
+                "estimated by the zero-order-jump budget with C_eps = 0.17 (the brief "
+                "said 1e5 s, which at N <= 0.011 s^-1 would grow the CBL past the "
+                "4 km lid)",
                 _PENDING_CLOSURE,
             )))
 
 
-# Added 2026-10-15 after the approval above: their own values are still pending.
+# Added 2026-10-15. Ekman: every pending value approved by the user that day.
+# Fedorovich & Conzemius 2001: the user's fill-ins are approved; the suite values
+# the user was not asked about stay pending (production refused until approved).
 PUBLISHED_CASES = PUBLISHED_CASES + tuple(
-    _pedersen14_case(r) for r in ("n01", "n02", "n03", "n04"))
+    dataclasses.replace(c, setup=dataclasses.replace(
+        c.setup, approved=tuple(f"APPROVED 2026-10-15 (was: {p})"
+                                for p in c.setup.pending + (_PENDING_CLOSURE,)),
+        pending=()))
+    for c in (_pedersen14_case(r) for r in ("n01", "n02", "n03", "n04"))
+) + (
+    _fc01_case("lin_n008", 0.008, 0.008),
+    _fc01_case("lin_n011", 0.011, 0.011),
+    _fc01_case("lin_n014", 0.014, 0.014),
+    _fc01_case("ws", 0.005, 0.018),
+    _fc01_case("sw", 0.018, 0.005),
+)
 
 
 def register_default_catalog(*, include_dry_grid: bool = True,
