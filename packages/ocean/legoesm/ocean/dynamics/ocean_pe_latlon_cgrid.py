@@ -5113,14 +5113,9 @@ def _bc_horizontal_momentum_advection_flux_form(
     return du_dt, dv_dt, diag_hadv_u, diag_hadv_v
 
 
-def _nemo_keg_accumulate(
-    accumulator, kinetic_energy_gradient, *, materialize_product: bool,
-):
+def _nemo_keg_accumulate(accumulator, kinetic_energy_gradient):
     """Apply NEMO dyn_keg's product, then its Krhs subtraction."""
-    if materialize_product:
-        return accumulator + nemo_source_round(-kinetic_energy_gradient)
-    return jax.lax.optimization_barrier(
-        accumulator + (-kinetic_energy_gradient))
+    return accumulator + nemo_source_round(-kinetic_energy_gradient)
 
 
 def latlon_cgrid_ocean_baroclinic_tendencies(
@@ -5600,12 +5595,14 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         # inside the Krhs subtraction.  ``optimization_barrier`` disappears
         # from optimized HLO and lets XLA contract that product into the add;
         # G1b's public source-order selector materializes the product only.
-        du_dt = _nemo_keg_accumulate(
-            du_dt, dKE_dx,
-            materialize_product=config.rk3_vector_rhs_nemo_order)
-        dv_dt = _nemo_keg_accumulate(
-            dv_dt, dKE_dy,
-            materialize_product=config.rk3_vector_rhs_nemo_order)
+        if config.rk3_vector_rhs_nemo_order:
+            du_dt = _nemo_keg_accumulate(du_dt, dKE_dx)
+            dv_dt = _nemo_keg_accumulate(dv_dt, dKE_dy)
+        else:
+            # Preserve private measurement arms exactly as they ran before
+            # G1b selected the contraction guard.
+            du_dt = jax.lax.optimization_barrier(du_dt + (-dKE_dx))
+            dv_dt = jax.lax.optimization_barrier(dv_dt + (-dKE_dy))
         _nemo_after_keg_u = du_dt
         _nemo_after_keg_v = dv_dt
 

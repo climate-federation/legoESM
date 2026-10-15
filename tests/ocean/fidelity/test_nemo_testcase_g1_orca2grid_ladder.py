@@ -717,10 +717,8 @@ def test_g1b_keg_accumulator_stops_fma_under_jit():
         return np.asarray(jax.jit(lambda a, d, m: statement(a, d * m))(
             jnp.asarray(accumulator), jnp.asarray(delta), jnp.asarray(metric)))
 
-    planted = compiled(lambda a, dke: P._nemo_keg_accumulate(
-        a, dke, materialize_product=False))
-    got = compiled(lambda a, dke: P._nemo_keg_accumulate(
-        a, dke, materialize_product=True))
+    planted = compiled(lambda a, dke: a - dke)
+    got = compiled(P._nemo_keg_accumulate)
     assert np.count_nonzero(planted != expected) >= 1
     assert np.array_equal(got, expected)
     # The tested symbol is the one the production tendency calls on U and V.
