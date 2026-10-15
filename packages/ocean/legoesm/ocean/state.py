@@ -3200,10 +3200,15 @@ class LatLonCGridOceanConfig(NamedTuple):
     # ratio of the interpolated sea level (last-place different on some faces).
     zdf_momentum_stage_r3u_nemo_literal: bool = False
     # een_total's relative vorticity in vor_een's np_CRV statement
-    # (dynvor.f90:744-748): the circulation bracket of e2v*v and e1u*u times
+    # (dynvor.f90:762-766): the circulation bracket of e2v*v and e1u*u times
     # r1_e1e2f, added to ff_f before the F thickness.  False takes the
     # generic vertex curl, which differs on a curvilinear mesh.
     een_nemo_relative_vorticity: bool = False
+    # At the top F row, NEMO's np_CRV circulation reads e1u*u from the U-fold
+    # halo north of the pivot row (vor_een, dynvor.f90:764-766), not a zero
+    # wall.  Kept separate from the F-area selector so each cited statement
+    # has a one-variable landing gate.
+    een_nemo_top_f_u_halo: bool = False
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":

@@ -1740,7 +1740,8 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
     # ten-step SSH maximum 0.38 -> 8.39 m).
     model_config = model_config._replace(
         # G1b round 2 / ORCA2 round 282: np_CRV divides its relative
-        # circulation by NEMO's F-cell area e1f*e2f (dynvor.f90:648;
+        # circulation by NEMO's F-cell area e1f*e2f (vor_een,
+        # dynvor.f90:762-766;
         # domhgr.f90:156), not the grid library's generic vertex area.
         # The companion vector-form fold unit stays off: it reaches the live
         # W-thickness guard at kt=8 on rung 0 / OMT-4 and on the shipped card

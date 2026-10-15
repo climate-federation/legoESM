@@ -42,7 +42,7 @@ lines of work.
 The shipped deck resolves vector-form momentum, EEN vorticity, and the
 split-explicit solver.  In its compiled source, np_CRV forms the relative
 circulation and multiplies by `r1_e1e2f` at
-`ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynvor.f90:648-651`; that reciprocal is built
+`ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynvor.f90:762-766`; that reciprocal is built
 from `e1e2f=e1f*e2f` at
 `ORCA2_OMIP_L4/BLD/ppsrc/nemo/domhgr.f90:155-156`.  This is statement A.
 

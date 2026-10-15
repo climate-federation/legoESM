@@ -205,3 +205,29 @@ def test_bc_pv_flux_rejects_unknown_vorticity_scheme():
             None, None, None, None, None, None, None, None, None, None, None, None,
             vorticity_scheme="bogus",
         )
+
+
+def test_nemo_curl_top_f_row_reads_u_fold_halo():
+    """vor_een np_CRV: the top F row reads NEMO's U fold halo."""
+    from legoesm.grids.tripole import create_synthetic_tripole_pivot
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+        nemo_vor_ene_vorticity_cgrid,
+    )
+
+    grid = create_synthetic_tripole_pivot(8, 12)
+    n = grid.n_lon
+    rng = np.random.default_rng(3)
+    u = rng.standard_normal((grid.n_lat, n + 1))
+    u[:, 0] = u[:, -1]
+    v = np.zeros((grid.n_lat + 1, n))
+    off = np.asarray(nemo_vor_ene_vorticity_cgrid(
+        jnp.asarray(u), jnp.asarray(v), grid))
+    on = np.asarray(nemo_vor_ene_vorticity_cgrid(
+        jnp.asarray(u), jnp.asarray(v), grid, north_fold_u=True))
+    np.testing.assert_array_equal(on[:-1], off[:-1])
+    zu = np.asarray(grid.dx_u) * u
+    halo_east = -zu[-2, 1:][n - 1 - np.arange(n)]
+    halo = np.concatenate([halo_east[-1:], halo_east])
+    want = (zu[-1] - halo) / np.asarray(grid.area_q)[-1]
+    np.testing.assert_allclose(on[-1], want, rtol=1e-14, atol=0.0)
+    assert not np.allclose(off[-1], want, rtol=1e-14, atol=0.0)

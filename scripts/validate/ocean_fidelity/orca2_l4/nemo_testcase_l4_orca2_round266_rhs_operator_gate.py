@@ -125,7 +125,7 @@ def _associated_stage(card, values):
 def measure(deck_root: Path, frame_root: Path, record_root: Path,
             label: str, expect_commit: str, *,
             literal_hpg_accumulator: bool = False,
-            passive_trace_callback=None) -> dict[str, object]:
+            passive_trace_callback=None, card_transform=None) -> dict[str, object]:
     import jax
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import _NEMOWSLiveOperandTrace
 
@@ -133,6 +133,8 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
     stamp = r249._policy_stamp(expect_commit)
     card = omt4.build_omt4_card(deck_root)
     omt4.validate_omt4_card(deck_root, card)
+    if card_transform is not None:
+        card = card_transform(card)
     entry = rung0.assemble_frame(frame_root, 1, 0)
     oracle_stage1 = rung0.assemble_frame(frame_root, 1, 1)
     oracle_stage2 = rung0.assemble_frame(frame_root, 1, 2)

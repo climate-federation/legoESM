@@ -2607,6 +2607,7 @@ def _bc_pv_flux(
     een_e3f_scheme="min",
     een_metric_weighting="off",
     een_nemo_zeta=False,
+    een_nemo_top_f_u_halo=False,
     nemo_f_area=None,
     dz_ref=None,
     h_vtx_override=None,
@@ -2647,6 +2648,14 @@ def _bc_pv_flux(
             f"unknown een_metric_weighting {een_metric_weighting!r}; expected "
             f"'off' or 'nemo'"
         )
+    if een_nemo_zeta and een_metric_weighting != "nemo":
+        raise ValueError(
+            "een_nemo_relative_vorticity requires een_metric_weighting='nemo'"
+        )
+    if een_nemo_top_f_u_halo and not een_nemo_zeta:
+        raise ValueError(
+            "een_nemo_top_f_u_halo requires een_nemo_relative_vorticity"
+        )
     # --- 7b. Potential vorticity flux (#160, Sadourny EC) ---
     # Vector-invariant advection: (u·∇)u = ∇(KE) + (f+ζ) × u.
     # Coriolis (f × u) handled in step function; here only ζ × u.
@@ -2683,7 +2692,10 @@ def _bc_pv_flux(
             nemo_vor_ene_vorticity_cgrid,
         )
         zeta = nemo_vor_ene_vorticity_cgrid(
-            u, v, grid if nemo_f_area is None else grid._replace(area_q=nemo_f_area))
+            u, v,
+            grid if nemo_f_area is None else grid._replace(area_q=nemo_f_area),
+            north_fold_u=bool(een_nemo_top_f_u_halo),
+        )
     else:
         zeta = curl_vertex_cgrid(u, v, grid)  # (n_lat+1, n_lon+1, nlev)
 
@@ -5510,6 +5522,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             een_metric_weighting=getattr(
                 config, "een_metric_weighting", "off"),
             een_nemo_zeta=config.een_nemo_relative_vorticity,
+            een_nemo_top_f_u_halo=config.een_nemo_top_f_u_halo,
             nemo_f_area=(_nemo_f_vertex_area(grid, z_coord)
                          if config.een_nemo_relative_vorticity else None),
             dz_ref=z_coord.dz_ref,

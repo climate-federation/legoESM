@@ -198,6 +198,11 @@ def _row(document: dict, target: tuple[int, str, str]) -> dict:
 def classify(control_path: Path, candidate_path: Path, plant: str) -> dict:
     control = json.loads(control_path.read_text(encoding="utf-8"))
     candidate = json.loads(candidate_path.read_text(encoding="utf-8"))
+    return classify_documents(control, candidate, plant=plant)
+
+
+def classify_documents(control: dict, candidate: dict, plant: str) -> dict:
+    """Frozen Decision-96 classifier for already-loaded ladder documents."""
     require(control.get("status") == "PASS_R276_SOURCE_LADDER"
             and control.get("arm") == "control", "control is not admitted")
     require(candidate.get("status") == "PASS_R276_SOURCE_LADDER"

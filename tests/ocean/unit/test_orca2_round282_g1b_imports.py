@@ -25,11 +25,13 @@ def test_g1b_orca2_selectors_default_off():
 
     assert LatLonCGridOceanConfig._field_defaults[
         "een_nemo_relative_vorticity"] is False
+    assert LatLonCGridOceanConfig._field_defaults[
+        "een_nemo_top_f_u_halo"] is False
     assert BarotropicConfig._field_defaults[
         "barotropic_literal_fold_unit_vector_form"] is False
 
 
-def test_round282_arms_change_exactly_the_two_registered_fields():
+def test_round282_arms_change_exactly_the_registered_fields():
     from scripts.validate.ocean_fidelity.orca2_l4 import (
         nemo_testcase_l4_orca2_round282_g1b_orca2_gate as gate,
     )
@@ -44,12 +46,13 @@ def test_round282_arms_change_exactly_the_two_registered_fields():
         actual = {
             name for name, value in (
                 (gate.A, cfg.een_nemo_relative_vorticity),
+                (gate.C, cfg.een_nemo_top_f_u_halo),
                 (gate.B,
                  cfg.barotropic.barotropic_literal_fold_unit_vector_form),
             ) if value
         }
         assert actual == set(expected)
-    with pytest.raises(gate.GateError, match="outside A/B"):
+    with pytest.raises(gate.GateError, match="outside A/B/C"):
         gate.arm_card(base, "npcrv_f_area", plant="extra-selector")
 
 
@@ -66,7 +69,30 @@ def test_npcrv_area_uses_raw_nemo_f_metrics_and_control_can_fail():
     expected = (np.asarray(raw.e1f, dtype=actual.dtype)
                 * np.asarray(raw.e2f, dtype=actual.dtype))
     np.testing.assert_array_equal(actual[1:, 1:], expected)
+    np.testing.assert_array_equal(actual[1:, 0], expected[:, -1])
+    np.testing.assert_array_equal(actual[0], np.asarray(grid.area_q)[0])
     assert np.count_nonzero(np.asarray(grid.area_q)[1:, 1:] != expected) > 0
+    with pytest.raises(ValueError, match="e1f and e2f"):
+        _nemo_f_vertex_area(
+            grid, z_coord._replace(nemo_een_barotropic=None))
+
+
+def test_npcrv_selector_is_bound_at_the_executing_call_site():
+    """Plant from the round-282 review: hard-wiring the kwarg false fails."""
+    import inspect
+    from legoesm.ocean.dynamics import ocean_pe_latlon_cgrid as pe
+
+    source = inspect.getsource(pe.latlon_cgrid_ocean_baroclinic_tendencies)
+    assert "een_nemo_zeta=config.een_nemo_relative_vorticity" in source
+    assert "een_nemo_top_f_u_halo=config.een_nemo_top_f_u_halo" in source
+
+
+def test_npcrv_area_refuses_non_nemo_metric_weighting():
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import _bc_pv_flux
+
+    with pytest.raises(ValueError, match="requires een_metric_weighting='nemo'"):
+        _bc_pv_flux(*([None] * 12), een_metric_weighting="off",
+                    een_nemo_zeta=True)
 
 
 def test_vector_fold_unit_predicate_is_selected_only_by_its_arm():
