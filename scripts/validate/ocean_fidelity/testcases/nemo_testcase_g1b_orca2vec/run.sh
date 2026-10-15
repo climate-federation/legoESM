@@ -208,7 +208,7 @@ python3 -I -m py_compile "$CHECKER"
 printf 'PREFLIGHT: binaries and domain pinned; keys "%s"; deck = G1 plus ORCA2 namdyn_adv; commit %s\n' "$WANT_KEYS" "$COMMIT"
 
 readonly SMOKE=$EVIDENCE/smoke_2step REF=$EVIDENCE/ref_100step
-twin_dir() { printf '%s/r%02d' "$EVIDENCE" "$1"; }
+twin_dir() { printf '%s/r%02d\n' "$EVIDENCE" "$1"; }   # newline: $(for ..; twin_dir) must split into words
 
 # NEMO's own log: the vector form and the total vorticity it derives
 # (dynadv.f90:197, dynvor.f90 dyn_vor_init "vector form dynamics").
@@ -259,7 +259,7 @@ sys.exit(1 if missing else 0)
 }
 
 admit() {
-  local n stage_steps spgts restarts dir j list step kt plant
+  local n stage_steps spgts restarts dir j list step kt plant want
   n=$(record_steps)
   printf 'G1B_RECORD_STEPS %s (reference time.step %s)\n' "$n" "$(tr -d ' \n' <"$REF/time.step")"
   stage_steps=$(( n < STAGE_GATE ? n : STAGE_GATE ))
@@ -344,9 +344,14 @@ PY
         printf 'REFUSE: restart plant (empty shell, step %s) stayed green\n' "$step" >&2; exit 72
       fi
     done
-    if restart_cover 2 "$n" $(for j in $(seq 1 10); do twin_dir "$j"; done) >/dev/null; then
-      printf 'REFUSE: restart plant (stride-10 twins only) stayed green\n' >&2; exit 72
-    fi
+    # it must miss EXACTLY the steps r11..r13 were planned for (not "everything": a
+    # glob over one concatenated nonexistent path also misses every step)
+    want=$(printf '%s,%s,%s\n' "$L_R11" "$L_R12" "$L_R13" | tr , '\n' | grep -vx 0 | sort -n | paste -sd, -)
+    plant=$(restart_cover 2 "$n" $(for j in $(seq 1 10); do twin_dir "$j"; done)) \
+      && { printf 'REFUSE: restart plant (stride-10 twins only) stayed green\n' >&2; exit 72; }
+    [[ "$plant" == *" MISSING $want" ]] \
+      || { printf 'REFUSE: restart plant (stride-10 twins only) failed for the wrong reason: %s (want MISSING %s)\n' "$plant" "$want" >&2; exit 72; }
+    printf 'G1B_RESTART_PLANT_STRIDE10 %s\n' "$plant"
   fi
   restart_cover 2 "$n" $(for j in $(seq 1 "$N_TWINS"); do twin_dir "$j"; done) \
     || { printf 'REFUSE: a step in 2..%s has no restart holding its record\n' "$n" >&2; exit 73; }
