@@ -228,3 +228,30 @@ def test_nemo_curl_top_f_row_reads_u_fold_halo():
     want = (zu[-1] - halo) / np.asarray(grid.area_q)[-1]
     assert np.allclose(on[-1], want, rtol=1e-14, atol=0.0)
     assert not np.allclose(off[-1], want, rtol=1e-14, atol=0.0)
+
+
+def test_een_nemo_zeta_routes_the_fold_halo_into_the_curl(monkeypatch):
+    """_bc_pv_flux hands north_fold_u=True to the NEMO curl exactly when
+    een_total takes NEMO's np_CRV zeta (een_nemo_zeta), else False."""
+    from legoesm.ocean.dynamics import latlon_cgrid_operators as ops
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import _bc_pv_flux
+    seen = []
+    real = ops.nemo_vor_ene_vorticity_cgrid
+
+    def spy(u, v, grid, north_fold_u=False):
+        seen.append(north_fold_u)
+        return real(u, v, grid, north_fold_u)
+
+    monkeypatch.setattr(ops, "nemo_vor_ene_vorticity_cgrid", spy)
+    from legoesm.grids.latlon import ensure_geometry
+    state = _build_test_state(n_lat=8, n_lon=12, partial_cells=False, seed=5)
+    state["grid"] = ensure_geometry(state["grid"])
+    for nemo_zeta in (True, False):
+        _bc_pv_flux(
+            jnp.zeros_like(state["u"]), jnp.zeros_like(state["v"]),
+            state["u"], state["v"], state["h_u"], state["h_v"], state["h_T"],
+            state["u_mask_3d"], state["v_mask_3d"], None, state["grid"],
+            "vector_invariant", vertex_mask=state["vtx_mask"],
+            vorticity_scheme="een_total" if nemo_zeta else "ene",
+            een_metric_weighting="nemo", een_nemo_zeta=nemo_zeta)
+    assert seen == [True, False]

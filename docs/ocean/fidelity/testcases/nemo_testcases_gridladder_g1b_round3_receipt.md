@@ -140,7 +140,7 @@ Correction (Rule 11): round 24's pointer `ORCA2/dynvor.f90:648` is in
 
 ## 6. Tests and review
 
-- G1b card file + NEMO curl test file: 13 + 7 passed.
+- G1b card file + NEMO curl test file: 14 + 8 passed (with the review's two route tests).
 - Focused battery (citation gate, ORCA2 receipt citations, card, curl,
   dispatch, private imports, validate_strict coverage, inline imports):
   24 reds at the base f22dd5f4e, the same 24 after (slab_land dispatch guard,
@@ -152,7 +152,17 @@ Correction (Rule 11): round 24's pointer `ORCA2/dynvor.f90:648` is in
   (`north_fold_u` False; the option False → association value identical to
   the hook's), not measured.
 
-REVIEW_PLACEHOLDER
+Single review (codex), round26/codex_review_r26.log: **"VERDICT: findings"**.
+- "CONFIRMED — Production routing is untested": the curl test called
+  `north_fold_u=True` directly and the card test pinned config values only.
+  Acted on: `test_een_nemo_zeta_routes_the_fold_halo_into_the_curl` (spy on
+  the curl inside `_bc_pv_flux`) and
+  `test_g1b_step_routes_the_vector_rhs_order_into_every_stage` (one G1b
+  step; every stage's tendencies call carries the option, none with it
+  off). Each fails with its route deleted (2 failed), passes restored
+  (22 passed in the two files).
+- "No sign, staggering, permutation, pivot-layout, SPMD-mask,
+  hidden-default, or shell defects found."
 
 Compliance without a gate: searched before building — the fold helpers
 (`fold_ghost_source_T`, `fold_perm_u`, `apply_north_fold`), the existing

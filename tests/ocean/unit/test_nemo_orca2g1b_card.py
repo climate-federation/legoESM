@@ -191,3 +191,26 @@ def test_nemo_f_vertex_area_is_e1f_times_e2f(roots):
     assert not np.array_equal(np.asarray(grid.area_q)[1:, 1:], e1e2f)
     with pytest.raises(ValueError, match="e1f and e2f"):
         _nemo_f_vertex_area(grid, z._replace(nemo_een_barotropic=None))
+
+
+def test_g1b_step_routes_the_vector_rhs_order_into_every_stage(roots, monkeypatch):
+    """stp2d.f90:138/:144/:161 and stprk3_stg.f90 stages 2-3: the card's
+    option reaches every stage's tendencies call; off, none of them."""
+    from legoesm.ocean.dynamics import ocean_model_latlon_cgrid as om
+    card = recipe.build_nemo_testcase_card("ORCA2G1b-vec", deck_root=roots["g1b"])
+    seen = []
+    real = om.LatLonCGridOceanModel.tendencies
+
+    def spy(self, *a, **kw):
+        seen.append(kw.get("nemo_operator_association", False))
+        return real(self, *a, **kw)
+
+    monkeypatch.setattr(om.LatLonCGridOceanModel, "tendencies", spy)
+    cfg = card.recipe.model_config
+    for on in (True, False):
+        seen.clear()
+        m = om.LatLonCGridOceanModel(card.recipe.grid, card.recipe.z_coord,
+                                     cfg._replace(rk3_vector_rhs_nemo_order=on))
+        m.step(card.recipe.initial_state, dt=card.dt_s)
+        assert len(seen) >= 3
+        assert all(bool(s) is on for s in seen), seen
