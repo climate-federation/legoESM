@@ -14,13 +14,21 @@ The compiled ORCA2 vector branch writes stage-1 `vv(Kaa)` from `vv(Kbb)`,
 `rDt`, `vv(Krhs)`, and `vmask` at
 `ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:467-470`.  It then diagnoses
 `zvb = vv_b(Kaa) - SUM(e3v_3d*vv(Kaa))*r1_hv_0` and adds
-`zvb*vmask` at `stprk3_stg.f90:523-550`.  The held completed-stage V exchange
+`zvb*vmask` at
+`ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:513-537`.  The held completed-stage V exchange
 comes later and is already exonerated as the magnitude creator by round 279.
+
+**Pre-measurement citation correction.**  The first committed preregistration
+misidentified this second span as `stprk3_stg.f90:523-550`; those lines begin
+inside an instrumented stage-2 writer and extend beyond the executing
+correction.  The compiled correction is the range above.  No prediction,
+threshold, or measurement changed.
 
 The admitted OMT-4 record under round 222 contains the completed per-stage
 state and a stage-1 transport stream, but that transport stream records
 `vv(Kmm)` before the stage update, not `vv(Kaa)` before and after the
-barotropic correction (`stprk3_stg.f90:286-310`).  Therefore it cannot split
+barotropic correction
+(`ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:286-310`).  Therefore it cannot split
 the two source-row statements.  The round-175 rank-complete stage-1 recorder
 already defines the needed `rhs_v`, `pre_v`, and `cor_v` fields; round 280
 reuses that schema and writer on the OMT-4 deck.

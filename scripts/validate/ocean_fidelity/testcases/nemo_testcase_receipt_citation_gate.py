@@ -2876,6 +2876,9 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:467-470': [
         'IF( ln_dynadv_vec .OR. lk_linssh ) THEN',
         'vv(ji,jj,jk,Kaa) = ( vv(ji,jj,jk,Kbb) + rDt * vv(ji,jj,jk,Krhs) ) * vmask(ji,jj,jk)', 4],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:286-310': [
+        '! Round-13 WRITE-only stage-1 transport operand record.',
+        "l4_canon_2d((r1_hv_0(:,:) /(1._wp+r3v(:,:,Kmm))),'V'), l4_canon_2d(vv_b(:,:,Kmm),'V')", 25],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:513-537': [
         'DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  0)             ! barotropic velocity correction',
         'vv(ji,jj,jk,Kaa) = vv(ji,jj,jk,Kaa) + zvb(ji,jj)*vmask(ji,jj,jk)', 25],
