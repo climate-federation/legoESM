@@ -8,7 +8,9 @@ field at the bar under both labels) is therefore not met.
 
 Code commits: `20cbdf5e86` (housekeeping), `bb2cabcd17` (preregistration),
 `d3bea91071` (tracer statement), `7bc7e0d09e` and `69435a4039` (G4 ladder
-reader). Record: `gridladder_rounds/round21/oracle_g4_r21`. Evidence:
+reader), `1f482bf9a` and `21d9f08a4` (citation gate), and `ce6eb35cc`
+(mechanical historical-receipt reanchor). Record:
+`gridladder_rounds/round21/oracle_g4_r21`. Evidence:
 `gridladder_rounds/round25/`.
 
 ## 1. Housekeeping first
@@ -189,6 +191,10 @@ No new owner is claimed.
 - Focused fast: 45 passed, 9 slow deselected (19.43 s).
 - Slow G4 stage/control route: 1 passed (242.97 s). The control restores
   58 T and 45 S stage-1 mismatches.
+- Receipt citation tests: 17 passed (5.01 s). The round-25 receipt gate passes
+  all 14 citations with zero failures, zero unmapped citations and zero map
+  audit failures; shifting `ocean_model_latlon_cgrid.py:2519-2523` exits 1
+  with `SYMBOL-NOT-AT-LINE`.
 - Dispatch hardening: 23 passed, 1 handed pre-existing failure
   (`slab_land.step_land`), unchanged.
 - A larger G1 ladder attempt earlier in the round hit the documented JAX
