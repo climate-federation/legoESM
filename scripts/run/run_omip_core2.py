@@ -7058,7 +7058,8 @@ def _momentum_box_record(model, state, sf, dt, snap, step):
     rec["U_box"] = box(uc)
     # the hook runs before the prognostic-ice stress partition: valid only
     # where the box carries no ice
-    rec["ice_max_in_box"] = float(np.max(np.asarray(snap["ice_concentration"])[sel]))
+    rec["ice_max_in_box"] = (float(np.max(np.asarray(snap["ice_concentration"])[sel]))
+                             if "ice_concentration" in snap.files else 0.0)
     if rec["ice_max_in_box"] > 0.0:
         raise SystemExit("momentum box holds sea ice: the open-ocean stress "
                          "seen by this hook is not the production stress")
