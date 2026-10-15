@@ -44,6 +44,11 @@ readonly WRITER=$here/../nemo_testcase_l4_orca2_round175_stage1_acquisition/l4_r
 readonly PATCH=$here/../nemo_testcase_l4_orca2_round175_stage1_acquisition/stprk3_stg_round175.patch
 readonly CHECKER=$here/check_record.py
 readonly PREREG=$REPO/docs/ocean/fidelity/PREREG_nemo_testcases_l4_orca2_round280.md
+readonly LEGACY_RUNNER_SHA=2a64819b835907a803519137274962ecca4c61a4b5be47d382a603248eb771b1
+
+producer_artifacts() {
+  printf '%s\n' "$RUNNER" "$WRITER" "$PATCH" "$CHECKER" "$PREREG"
+}
 
 pin() {
   local expected=$1 path=$2 label=$3
@@ -54,8 +59,33 @@ pin() {
 }
 
 artifact_digest() {
-  sha256sum "$RUNNER" "$WRITER" "$PATCH" "$CHECKER" "$PREREG" | \
-    sha256sum | awk '{print $1}'
+  while IFS= read -r artifact; do
+    sha256sum "$artifact" | awk '{print $1}'
+  done < <(producer_artifacts) | sha256sum | awk '{print $1}'
+}
+
+legacy_producer_content_matches() {
+  local manifest=$TARGET_RUN/toolchain.sha256
+  local legacy_digest recorded_digest index
+  local -a recorded_hashes current_hashes
+  [[ -f "$manifest" ]] || return 1
+  mapfile -t recorded_hashes < <(head -n 5 "$manifest" | awk '{print $1}')
+  mapfile -t current_hashes < <(
+    while IFS= read -r artifact; do
+      sha256sum "$artifact" | awk '{print $1}'
+    done < <(producer_artifacts)
+  )
+  [[ "${#recorded_hashes[@]}" -eq 5 && "${#current_hashes[@]}" -eq 5 ]] || return 1
+  # The produced record predates the path-independent digest fix in this
+  # launcher.  Its launcher hash is frozen here; the other four producer
+  # artifacts must still match the current committed files byte-for-byte.
+  [[ "${recorded_hashes[0]}" == "$LEGACY_RUNNER_SHA" ]] || return 1
+  for index in 1 2 3 4; do
+    [[ "${recorded_hashes[$index]}" == "${current_hashes[$index]}" ]] || return 1
+  done
+  legacy_digest=$(head -n 5 "$manifest" | sha256sum | awk '{print $1}')
+  recorded_digest=$(cat "$TARGET_RUN/producer_content.sha256")
+  [[ "$legacy_digest" == "$recorded_digest" ]]
 }
 
 check_layout() {
@@ -151,9 +181,12 @@ admit() {
   [[ -f "$TARGET_RUN/producer_content.sha256" ]] || {
     printf 'REFUSE: target lacks producer content stamp\n' >&2; exit 70;
   }
-  [[ "$(cat "$TARGET_RUN/producer_content.sha256")" == "$expected_digest" ]] || {
-    printf 'REFUSE: producer artifact content differs from current tree\n' >&2; exit 70;
-  }
+  if [[ "$(cat "$TARGET_RUN/producer_content.sha256")" != "$expected_digest" ]]; then
+    legacy_producer_content_matches || {
+      printf 'REFUSE: producer artifact content differs from current tree\n' >&2; exit 70;
+    }
+    printf 'LEGACY_ABSOLUTE_PATH_DIGEST_VERIFIED_BY_ARTIFACT_HASHES\n'
+  fi
   [[ "$(find "$TARGET_RUN" -maxdepth 1 -type f -name 'oracle_r175_stage1_rank????_kt00000001.bin' | wc -l)" -eq 2 ]] || {
     printf 'REFUSE: expected exactly two rank stage-1 records\n' >&2; exit 70;
   }
