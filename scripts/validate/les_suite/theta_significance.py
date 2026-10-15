@@ -123,7 +123,8 @@ def rescore_theta(
     combined + the self-check). Returns an enriched copy, or ``None`` if the artifact is
     missing or the SCM diverged. The re-score uses the record's nlev/dt (fallback to the
     campaign default) so it matches the tuning protocol."""
-    from legoesm.atmosphere.les_suite.bridge import load_artifact
+    from legoesm.atmosphere.les_suite.bridge import (
+        BridgeError, load_artifact, surface_roughness)
     from legoesm.atmosphere.les_suite.scm_runner import scm_les_final_score
 
     stem = record.get("artifact") or record.get("case")
@@ -132,7 +133,12 @@ def rescore_theta(
         print(f"[skip] artifact {art_path.name} not found", file=sys.stderr)
         return None
     artifact = load_artifact(art_path)
-    base, _key = _base_turbulence(record["scheme"])
+    try:
+        z0_m, z0h_m = surface_roughness(artifact)
+    except BridgeError as exc:
+        print(f"[skip] {exc}", file=sys.stderr)
+        return None
+    base, _key = _base_turbulence(record["scheme"], z0_m=z0_m, z0h_m=z0h_m)
     cfg = apply_overrides_to_base(base, record.get("best_overrides") or {})
     nlev = int(record.get("nlev") or _DEFAULT_NLEV)
     dt = float(record.get("dt") or _DEFAULT_DT)

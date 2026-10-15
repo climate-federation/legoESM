@@ -436,7 +436,8 @@ def _frame_fields_fn(g, u_geo, f_cor, Q0):
 
     @jax.jit
     def _fields(st, t_sfc=None):
-        cd_surf, q = sl.surface_boundary(st.u, st.v, st.theta, g, q0, t_sfc)
+        cd_surf, q, most_resid = sl.surface_boundary(st.u, st.v, st.theta, g, q0,
+                                                     t_sfc, return_residual=True)
         nu_t = sl.eddy_viscosity(st.u, st.v, st.w, g)
         tau13, tau23, spd1, cd = sl.sgs_vertical_momentum_flux_faces(
             st.u, st.v, st.w, nu_t, g, cd_surf=cd_surf)
@@ -454,7 +455,7 @@ def _frame_fields_fn(g, u_geo, f_cor, Q0):
             p=p, dpdx=sl.ddx(p, g), dpdy=sl.ddy(p, g), dpdz=dpdz,
             dudx=sl.ddx(st.u, g), dvdy=sl.ddy(st.v, g),
             dwdz=sl.ddz_f2c(st.w, g.dz), wc=sl.f2c(st.w),
-            fl13=fl13, fl23=fl23)
+            fl13=fl13, fl23=fl23, most_resid=jnp.asarray(most_resid, st.u.dtype))
     return _fields
 
 
@@ -496,7 +497,7 @@ def _frame_stats(st, g, fields, pr_sgs):
     )
     out["tke_resolved"] = 0.5 * (out["uu"] + out["vv"] + out["ww"])
     surface = dict(w_theta_s=q, tau_x_s=float(a["tau_x_s"]),
-                   tau_y_s=float(a["tau_y_s"]))
+                   tau_y_s=float(a["tau_y_s"]), most_resid=float(a["most_resid"]))
     return out, surface
 
 
@@ -797,6 +798,8 @@ def main(argv: list[str] | None = None) -> int:
         bc_label = f"Q0={Q0}"
         if res is not None:
             bc_label += f"(drag={g.cfg.sfc_flux_drag})"
+    # the prescribed-surface-temperature MOST solver runs (and reports a residual)
+    most_path = sfc_bc in ("surface_theta_series", "cooling_K_per_h")
     # cooling base: the case's initial surface θ (setup) or θ0 (GABLS1 anchors)
     t_s0 = (args.theta0 if res is None else float(res["theta"][0]))
     print(f"[les-suite emit] case={case.name} regime={case.regime} "
@@ -806,7 +809,8 @@ def main(argv: list[str] | None = None) -> int:
           f"{' SMOKE' if args.smoke else ''}")
 
     profs: dict[str, list] = {}
-    sfc: dict[str, list] = {"w_theta_s": [], "tau_x_s": [], "tau_y_s": []}
+    sfc: dict[str, list] = {"w_theta_s": [], "tau_x_s": [], "tau_y_s": [],
+                            "most_resid": []}
     cum = {"w_theta_s_cum": [], "tau_x_s_cum": [], "tau_y_s_cum": []}
     times = []
     n_core = len(sl.BUDGET_TERMS)
@@ -842,6 +846,7 @@ def main(argv: list[str] | None = None) -> int:
               f"heat={sh:.4f} u-mom={su:.4f} v-mom={sv:.4f}  "
               f"w'θ'_0={srf['w_theta_s']:+.5f} u'w'_0={srf['tau_x_s']:+.5f}  "
               f"CFL<={vmax * dt0 / dz_min:.3f}"
+              + (f"  MOST-resid={srf['most_resid']:.1e}" if most_path else "")
               + ("" if clock["t0"] is None
                  else f"  wall={time.time() - clock['t0']:.1f}s"))
 
@@ -939,6 +944,17 @@ def main(argv: list[str] | None = None) -> int:
         "held_out": bool(case.held_out),
         "smoke": bool(args.smoke),
         "f32": bool(args.f32),
+        # prescribed-surface-temperature MOST solver: worst convergence residual over
+        # the output frames (None on the prescribed-flux paths)
+        # (and how many frames' residuals were not finite — a failed solve is
+        # counted, never dropped)
+        "most_residual_max": (
+            None if not most_path or not np.any(np.isfinite(sfc["most_resid"]))
+            else float(np.max(np.asarray(sfc["most_resid"])[
+                np.isfinite(sfc["most_resid"])]))),
+        "most_residual_nonfinite_frames": (
+            None if not most_path
+            else int(np.sum(~np.isfinite(sfc["most_resid"])))),
     }
     if case.setup is not None:
         les_setup["setup"] = json.loads(json.dumps(dataclasses.asdict(case.setup)))

@@ -289,13 +289,14 @@ def _huang13_case(rate, extra_pending=()):
         ci_marker="manual_only", surface_cooling_rate_K_per_h=rate,
         description=f"GABLS1 with surface cooling {rate} K/h, 800x800x400 m, 10 h "
                     "(statistics over the last 3 h).",
-        setup=_gabls1_family_setup(400.0, None, (
+        setup=_gabls1_family_setup(400.0, (300.0, _SUITE_SPONGE_TAU_S), (
             _PENDING_DT.format(dt=0.05),
             "grid: PROPOSED 162x162x160 (5 x 5 x 2.5 m) for all 10 h; the paper ran "
             "80^3 for 0-6 h then interpolated to 162x162x160 for 6-10 h, a regrid "
             "this driver does not do",
-            "top boundary: no sponge, stress-free (paper); the suite's GABLS1 runs "
-            "blew up at ~0.9 h without one",
+            f"top boundary: Rayleigh sponge above 300 m, {_SUITE_SPONGE_TAU_S} s, as "
+            "the suite's GABLS1 (user 2026-10-15; paper: none, stress-free — the "
+            "suite's GABLS1 runs blew up at ~0.9 h without one)",
             _PENDING_SEED.format(amp=0.1, top=50, paper="not stated"),
         ) + tuple(extra_pending)))
 
@@ -398,7 +399,7 @@ PUBLISHED_CASES: tuple[LESCase, ...] = (
     _dephy_case(
         name="gabls4_e2", regime="dry_stable", dephy="gabls4_stage3",
         grid=LESGrid(nx=200, ny=200, nz=500, Lx_m=1000.0, Ly_m=1000.0, Lz_m=1000.0,
-                     dt_s=0.1),
+                     dt_s=0.3),
         hours=24.0, lat=-75.1, z0=0.001, z0h=0.0001, theta_ref=271.3,
         reference="Couvreux et al. (2020, BLM 176, 369), "
                   "doi:10.1007/s10546-020-00539-4, experiment 2",
@@ -408,7 +409,8 @@ PUBLISHED_CASES: tuple[LESCase, ...] = (
         pending=(
             "grid: PROPOSED 200x200x500 (5 x 5 x 2 m, the protocol's reference); the "
             "coarsest participant ran 10 x 10 x 5 m",
-            _PENDING_DT.format(dt=0.1),
+            "dt: 0.3 s ≈ 0.8 of the CFL limit (CFL 0.26 at 0.1 s at t0; user "
+            "2026-10-15: raise from 0.1 s)",
             "sponge: above 700 m per paper; timescale PROPOSED 1000 s (Meso-NH's "
             "K = 1e-3 s^-1 in the paper's Table 2)",
             "θ_ref: PROPOSED 271.3 K = the file's surface θ at t0",
@@ -424,10 +426,65 @@ _PENDING_CLOSURE = ("SGS closure + numerics: PROPOSED the suite's (run_les_suite
                     "0.01 m2/s and static Smagorinsky C_s 0.18; RK3, 3/2-rule "
                     "zero-padding dealiasing, no SGS buoyancy term (paper: own "
                     "closure/numerics)")
+# User 2026-10-15: every proposed value above is APPROVED (Huang 2013 with the
+# GABLS1 sponge instead of none). They move to ``setup.approved`` (artifact
+# provenance); only what is still open stays pending.
+_STILL_PENDING = {
+    "gabls4_e2": ("dt 0.3 s: validation against 0.1 s over the first 1 h (mean "
+                  "profiles + fluxes vs σ_LES) not yet done",),
+}
 PUBLISHED_CASES = tuple(
     dataclasses.replace(c, setup=dataclasses.replace(
-        c.setup, pending=c.setup.pending + (_PENDING_CLOSURE,)))
+        c.setup, approved=tuple(f"APPROVED 2026-10-15 (was: {p})"
+                                for p in c.setup.pending + (_PENDING_CLOSURE,)),
+        pending=_STILL_PENDING.get(c.name, ())))
     for c in PUBLISHED_CASES)
+
+_PEDERSEN14_REF = ("Pedersen, Gryning & Kelly (2014, BLM 153, 43), "
+                   "doi:10.1007/s10546-014-9937-z")
+_PEDERSEN14_GAMMA = {"n01": 0.001, "n02": 0.003, "n03": 0.006, "n04": 0.010}
+
+
+def _pedersen14_case(run):
+    """Pedersen et al. (2014) neutral inversion-capped Ekman layer (their "neutral
+    cases" n01-n04, Table 1): θ = 290 K + γz from the surface, u = G = (10, 0) m/s
+    everywhere at t0, f = 1e-4 s⁻¹, z0 = 0.01 m, zero surface heat flux, 3 x 3 x
+    2 km at 256³, 24 h (n02: 32 h)."""
+    gamma = _PEDERSEN14_GAMMA[run]
+    hours = 32.0 if run == "n02" else 24.0
+    grid = LESGrid(nx=256, ny=256, nz=256, Lx_m=3000.0, Ly_m=3000.0, Lz_m=2000.0,
+                   dt_s=0.5)
+    return LESCase(
+        name=f"ekman_pedersen14_{run}", regime="dry_neutral", core="spectral",
+        grid=grid, duration_hours=hours, surface_theta_flux_K_m_s=0.0,
+        geostrophic_wind_m_s=10.0, sgs_variants=_SGS_DEFAULT,
+        driver="run_les_suite.py", reference=f"{_PEDERSEN14_REF}, run {run}",
+        ci_marker="manual_only", held_out=True,
+        description=f"Neutral Ekman layer capped by dθ/dz = {gamma} K/m, G = 10 m/s, "
+                    f"{hours:g} h (Pedersen et al. 2014 {run}).",
+        setup=LESSetup(
+            lat_deg=_lat_for_f(1.0e-4), z0_m=0.01, theta_ref_K=290.0, perturb_K=0.1,
+            perturb_top_m=50.0,
+            theta_knots=((0.0, 290.0), (2000.0, 290.0 + gamma * 2000.0)),
+            geostrophic_knots=((0.0, 10.0, 0.0),),
+            wind_init_knots=((0.0, 10.0, 0.0),), surface_drag="most",
+            sponge_bottom_m=1600.0, sponge_tau_s=_SUITE_SPONGE_TAU_S,
+            pending=(
+                "dt: PROPOSED 0.5 s fixed (paper: ~0.92 s mean, 500 steps ~ 460 s; "
+                "at 0.92 s the advective CFL bound would exceed 0.8 at |u| ~ 11 m/s)",
+                f"top boundary: PROPOSED Rayleigh sponge in the top 20 % (1600 m), "
+                f"{_SUITE_SPONGE_TAU_S} s (paper: Klemp & Durran radiation condition)",
+                "θ_ref: PROPOSED 290 K = the surface θ (paper: θ0 not stated)",
+                _PENDING_SEED.format(amp=0.1, top=50, paper="small divergence-free "
+                                     "u, v, θ perturbations below 50 m, amplitude "
+                                     "not stated"),
+                _PENDING_CLOSURE,
+            )))
+
+
+# Added 2026-10-15 after the approval above: their own values are still pending.
+PUBLISHED_CASES = PUBLISHED_CASES + tuple(
+    _pedersen14_case(r) for r in ("n01", "n02", "n03", "n04"))
 
 
 def register_default_catalog(*, include_dry_grid: bool = True,

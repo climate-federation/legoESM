@@ -715,7 +715,7 @@ def _flux_most_root_jvp(primals, tangents):
 
 
 def most_surface_flux(spd_mean, th_air_mean, t_sfc, z1, z0, theta_ref, n_iter=10,
-                      z0h=None):
+                      z0h=None, return_residual=False):
     """Coupled Monin–Obukhov surface layer (planar-mean, GABLS1-faithful).
 
     Given the planar-mean first-level wind speed ``spd_mean=⟨|u₁|⟩`` and potential
@@ -743,7 +743,11 @@ def most_surface_flux(spd_mean, th_air_mean, t_sfc, z1, z0, theta_ref, n_iter=10
     cannot reproduce.
 
     Differentiable / JIT-safe: a fixed Python-unrolled iteration on scalar
-    (planar-mean) quantities, no data-dependent control flow."""
+    (planar-mean) quantities, no data-dependent control flow.
+
+    ``return_residual=True`` appends the convergence residual: the relative change
+    one more iteration would make, ``max(|Δu_*|/u_*, |Δθ_*|/|θ_*|)`` (the returned
+    values themselves are unchanged)."""
     kappa = constants.kappa_von_karman
     gacc = constants.g
     lnz = jnp.log(z1 / z0)
@@ -758,7 +762,17 @@ def most_surface_flux(spd_mean, th_air_mean, t_sfc, z1, z0, theta_ref, n_iter=10
         th_star = kappa * dth / (lnzh - psi_h(zeta))
     q0 = -u_star * th_star
     cd_eff = (u_star / (spd_mean + 1e-12)) ** 2
-    return u_star, th_star, q0, cd_eff
+    if not return_residual:
+        return u_star, th_star, q0, cd_eff
+    inv_L = kappa * gacc * th_star / (u_star ** 2 * theta_ref + 1e-12)
+    zeta = z1 * inv_L
+    tiny = jnp.finfo(jnp.result_type(u_star)).tiny
+    resid = jnp.maximum(
+        jnp.abs(kappa * spd_mean / (lnz - psi_m(zeta)) - u_star)
+        / jnp.maximum(jnp.abs(u_star), tiny),
+        jnp.abs(kappa * dth / (lnzh - psi_h(zeta)) - th_star)
+        / jnp.maximum(jnp.abs(th_star), tiny))
+    return u_star, th_star, q0, cd_eff, resid
 
 
 def most_drag_prescribed_flux(spd_mean, q0, z1, z0, theta_ref):
@@ -776,9 +790,9 @@ def most_drag_prescribed_flux(spd_mean, q0, z1, z0, theta_ref):
     ``cd_eff = (u_*/⟨U⟩)²``.
 
     Defined for ``⟨U⟩ ≥ 5e−7`` m/s (NaN below; :func:`surface_boundary`'s speed,
-    ≥ 1e−6, always is). ``q0 ≤ 0``: fixed-point iteration in ``u_*``; if its relative residual exceeds
-    ``sqrt(eps)`` (slow or no convergence near the critical cooling) the result is
-    NaN — loud, never a wrong stress. Past ζ = +10 the shared ψ is clamped, so
+    ≥ 1e−6, always is). ``q0 ≤ 0``: fixed-point iteration in ``u_*``; if its
+    relative residual exceeds ``sqrt(eps)`` (slow or no convergence near the
+    critical cooling) the result is NaN — loud, never a wrong stress. Past ζ = +10 the shared ψ is clamped, so
     strong cooling gets ``u_* = κ⟨U⟩/(ln(z₁/z0) − ψ_m(10))``, the root of the
     relation as implemented (mirror of the unstable ζ ≤ −10 limit below).
     ``q0 > 0``:
@@ -844,14 +858,19 @@ def surface_drag_coefficient(g: SpectralLESGrid, cd_surf=None):
     return (kappa / jnp.log(g.z_c[0] / g.cfg.z0)) ** 2
 
 
-def surface_boundary(u, v, theta, g: SpectralLESGrid, sfc_theta_flux, t_sfc):
+def surface_boundary(u, v, theta, g: SpectralLESGrid, sfc_theta_flux, t_sfc,
+                     return_residual=False):
     """Surface BC actually applied by :func:`rhs`: ``(cd_surf, sfc_flux)``.
 
     ``t_sfc=None`` (or no θ) ⇒ the prescribed kinematic heat flux, with the
     neutral drag (``cd_surf=None``) when ``cfg.sfc_flux_drag == "neutral"`` or the
     Businger–Dyer drag at the flux's Obukhov length when ``"most"``
     (:func:`most_drag_prescribed_flux`). A prescribed surface temperature ⇒ both
-    from the coupled MOST surface layer on the planar-mean first level."""
+    from the coupled MOST surface layer on the planar-mean first level.
+
+    ``return_residual=True`` appends that coupled solver's convergence residual
+    (:func:`most_surface_flux`; NaN on the prescribed-flux paths, which have their
+    own convergence handling)."""
     drag = g.cfg.sfc_flux_drag
     if drag not in ("neutral", "most"):
         raise ValueError(f"sfc_flux_drag must be 'neutral' or 'most', got {drag!r}")
@@ -861,7 +880,8 @@ def surface_boundary(u, v, theta, g: SpectralLESGrid, sfc_theta_flux, t_sfc):
                          "the heat flux's Obukhov length")
     if t_sfc is None or theta is None:
         if drag == "neutral":
-            return None, sfc_theta_flux
+            return ((None, sfc_theta_flux, jnp.nan) if return_residual
+                    else (None, sfc_theta_flux))
         z1 = 0.5 * g.cfg.Lz / g.cfg.nz          # static: cfg holds strings, never traced
         with jax.ensure_compile_time_eval():    # a constant, also under jit
             psi_clip = float(psi_m(-_MOST_ZETA_CLIP))
@@ -873,13 +893,14 @@ def surface_boundary(u, v, theta, g: SpectralLESGrid, sfc_theta_flux, t_sfc):
         spd_mean = _planar_mean(jnp.sqrt(u1 ** 2 + v1 ** 2 + 1e-12), g)
         _us, cd_surf = most_drag_prescribed_flux(
             spd_mean, sfc_theta_flux, g.z_c[0], g.cfg.z0, g.cfg.theta_ref0)
-        return cd_surf, sfc_theta_flux
+        return ((cd_surf, sfc_theta_flux, jnp.nan) if return_residual
+                else (cd_surf, sfc_theta_flux))
     spd_mean = _planar_mean(jnp.sqrt(u1 ** 2 + v1 ** 2 + 1e-12), g)
     th1_mean = _planar_mean(theta[..., 0], g)
-    _us, _ths, sfc_flux, cd_surf = most_surface_flux(
+    out = most_surface_flux(
         spd_mean, th1_mean, t_sfc, g.z_c[0], g.cfg.z0, g.cfg.theta_ref0,
-        z0h=g.cfg.z0h)
-    return cd_surf, sfc_flux
+        z0h=g.cfg.z0h, return_residual=return_residual)
+    return (out[3], out[2], out[4]) if return_residual else (out[3], out[2])
 
 
 def sgs_vertical_momentum_flux_faces(u, v, w, nu_t, g: SpectralLESGrid, cd_surf=None):

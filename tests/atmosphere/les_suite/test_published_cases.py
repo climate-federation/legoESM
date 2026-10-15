@@ -48,11 +48,17 @@ def _f(lat):
 
 # --- catalog ----------------------------------------------------------------
 def test_every_published_case_validates_and_runs_through_the_suite_driver():
-    assert len(_BY_NAME) == len(PUBLISHED_CASES) == 17
+    assert len(_BY_NAME) == len(PUBLISHED_CASES) == 21
     for c in PUBLISHED_CASES:
         c.validate()
         assert c.setup is not None and c.driver == "run_les_suite.py"
-        assert c.setup.pending, f"{c.name}: every case has unapproved values today"
+        # user 2026-10-15: every proposed value approved; GABLS4's raised dt
+        # stays pending until its validation is in; the Pedersen cases came later
+        if c.name.startswith("ekman_pedersen14_"):
+            assert c.setup.pending and not c.setup.approved, c.name
+        else:
+            assert c.setup.approved, c.name
+            assert bool(c.setup.pending) == (c.name == "gabls4_e2"), c.name
 
 
 def test_held_out_split_is_the_users():
@@ -82,7 +88,7 @@ def test_conzemius_fedorovich_matrix_points():
         assert s.sponge_bottom_m == 0.8 * c.grid.Lz_m            # top 20 %
         assert (c.grid.Lx_m / c.grid.nx, c.grid.Lz_m / c.grid.nz) == (20.0, 20.0)
     assert any("NOT RUN in the paper" in p
-               for p in _BY_NAME["cf06_q03_g10_ns"].setup.pending)
+               for p in _BY_NAME["cf06_q03_g10_ns"].setup.approved)
 
 
 def test_sullivan_patton_run_d():
@@ -113,11 +119,36 @@ def test_gabls1_family_cases(name, rate, grid):
     assert c.grid.Lz_m == 400.0
     np.testing.assert_allclose(_f(s.lat_deg), 1.39e-4, rtol=1e-12)
     assert (s.z0_m, s.z0h_m, s.theta_ref_K) == (0.1, None, 265.0)
+    # Huang 2013 too gets the suite's GABLS1 sponge (user 2026-10-15)
+    assert (s.sponge_bottom_m, s.sponge_tau_s) == (300.0, 50.0)
     m = _driver()
     # sharp GABLS1 sounding as the papers state it: 265 K to 100 m, then +0.01 K/m
     np.testing.assert_allclose(m._knots([50.0, 100.0, 200.0], s.theta_knots, 1),
                                [265.0, 265.0, 266.0])
     np.testing.assert_allclose(m._knots([0.0], s.geostrophic_knots, 1), [8.0])
+
+
+@pytest.mark.parametrize("run,gamma,hours", [("n01", 0.001, 24.0), ("n02", 0.003, 32.0),
+                                              ("n03", 0.006, 24.0), ("n04", 0.010, 24.0)])
+def test_pedersen14_neutral_ekman_cases(run, gamma, hours):
+    """Pedersen, Gryning & Kelly (2014) Sect. 2.2 + Table 1 neutral cases."""
+    c = _BY_NAME[f"ekman_pedersen14_{run}"]
+    s = c.setup
+    assert (c.regime, c.held_out, c.duration_hours) == ("dry_neutral", True, hours)
+    assert (c.grid.nx, c.grid.ny, c.grid.nz) == (256, 256, 256)
+    assert (c.grid.Lx_m, c.grid.Ly_m, c.grid.Lz_m) == (3000.0, 3000.0, 2000.0)
+    assert c.surface_theta_flux_K_m_s == 0.0 and s.z0_m == 0.01
+    np.testing.assert_allclose(_f(s.lat_deg), 1.0e-4, rtol=1e-12)
+    m = _driver()
+    np.testing.assert_allclose(m._knots([0.0, 1000.0], s.theta_knots, 1),
+                               [290.0, 290.0 + gamma * 1000.0])
+    np.testing.assert_allclose(m._knots([0.0, 2000.0], s.geostrophic_knots, 1), [10.0] * 2)
+    np.testing.assert_allclose(m._knots([0.0, 2000.0], s.wind_init_knots, 1), [10.0] * 2)
+    # the values the paper does not fix are pending, not silently chosen
+    assert c.grid.dt_s == 0.5 and (s.sponge_bottom_m, s.sponge_tau_s) == (1600.0, 50.0)
+    topics = [p.split(":")[0] for p in s.pending]
+    assert topics == ["dt", "top boundary", "θ_ref", "seed noise",
+                      "SGS closure + numerics"], topics
 
 
 def test_dephy_cases_point_at_registered_files():
@@ -128,6 +159,7 @@ def test_dephy_cases_point_at_registered_files():
     g4 = _BY_NAME["gabls4_e2"].setup
     assert (g4.lat_deg, g4.z0_m, g4.z0h_m) == (-75.1, 0.001, 0.0001)
     assert _BY_NAME["gabls4_e2"].duration_hours == 24.0
+    assert _BY_NAME["gabls4_e2"].grid.dt_s == 0.3          # user 2026-10-15
 
 
 # --- registry rules -----------------------------------------------------------
@@ -196,7 +228,8 @@ def tiny_registry():
                      surface_theta_knots=((0.0, 265.0), (3600.0, 240.0)),
                      sponge_bottom_m=300.0, sponge_tau_s=50.0)))
     register_case(_case(name="tiny_pending",
-                        setup=_setup(pending=("dt: PROPOSED 1 s",))))
+                        setup=_setup(pending=("dt: PROPOSED 1 s",),
+                                     approved=("seed: APPROVED 0.1 K",))))
     yield
     LES_CASE_REGISTRY.clear()
     LES_CASE_REGISTRY.update(saved)
@@ -223,6 +256,7 @@ def test_pending_case_refuses_production_and_allows_smoke(tiny_registry, tmp_pat
     art = load_artifact(tmp_path / "tiny_pending__lasd__smoke.npz")
     assert art.les_setup["smoke"] is True
     assert art.les_setup["setup"]["pending"] == ["dt: PROPOSED 1 s"]
+    assert art.les_setup["setup"]["approved"] == ["seed: APPROVED 0.1 K"]
 
 
 @pytest.mark.parametrize("flag", [["--z0", "0.2"], ["--theta0", "290"], ["--Ug", "3"],
@@ -234,8 +268,8 @@ def test_cli_cannot_override_a_setup(tiny_registry, tmp_path, flag):
         _driver().main(["--case", "tiny_flux", *flag, "--output", str(tmp_path)])
 
 
-def test_published_cases_list_the_driver_closure_as_pending():
-    """Every published case carries the suite closure as an unapproved item, and
+def test_published_cases_record_the_approved_driver_closure():
+    """Every published case records the suite closure as an approved item, and
     the item quotes the values the driver actually uses."""
     from legoesm.atmosphere.les_suite import catalog
     m = _driver()
@@ -243,7 +277,11 @@ def test_published_cases_list_the_driver_closure_as_pending():
     for v in (f"Prandtl {m._PR_SGS}", f"viscosity {m._NU_FLOOR_M2_S} m2/s",
               f"C_s {m._SBL_STATIC_CS}"):
         assert v in text, v
-    assert all(c.setup.pending[-1] == text for c in catalog.PUBLISHED_CASES)
+    for c in catalog.PUBLISHED_CASES:
+        if c.name.startswith("ekman_pedersen14_"):
+            assert c.setup.pending[-1] == text, c.name
+        else:
+            assert c.setup.approved[-1] == f"APPROVED 2026-10-15 (was: {text})", c.name
 
 
 def test_setup_duration_is_the_published_one(tiny_registry, tmp_path):
@@ -278,6 +316,20 @@ def test_setup_case_emits_and_closes_column_budgets(tiny_registry, tmp_path, cap
     out = capsys.readouterr().out
     art = load_artifact(tmp_path / f"{case}__lasd.npz")
     rows = _budget_lines(out)
+    # the prescribed-surface-temperature solver reports its convergence residual
+    resid = art.les_setup["most_residual_max"]
+    bad = art.les_setup["most_residual_nonfinite_frames"]
+    if case == "tiny_ts":
+        assert resid is not None and np.isfinite(resid) and resid >= 0.0 and bad == 0
+        assert "MOST-resid=" in out
+    else:
+        assert resid is None and bad is None and "MOST-resid=" not in out
+    # the emitted record carries the roughness the SCM tuner reads back
+    from legoesm.atmosphere.les_suite.bridge import surface_roughness
+    s = LES_CASE_REGISTRY[case].setup
+    assert surface_roughness(art) == (s.z0_m, s.z0_m if s.z0h_m is None else s.z0h_m)
+    if case == "tiny_ts":
+        assert surface_roughness(art) == (0.01, 0.001)
     for lab in ("theta", "u", "v"):
         r = rows[lab]
         assert abs(r["residual"]) <= 1e-13 * abs(r["column"]) + 1e-12, (lab, r)

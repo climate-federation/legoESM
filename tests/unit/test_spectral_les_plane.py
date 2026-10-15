@@ -360,6 +360,21 @@ def test_most_drag_prescribed_flux_limits_and_fixed_point():
     assert bool(jnp.isfinite(gq)) and float(gq) > 0.0
 
 
+def test_most_surface_flux_reports_its_convergence_residual():
+    """return_residual leaves the values bit-identical and returns exactly the
+    relative change an 11th iteration makes."""
+    for args in [(4.0, 265.0, 263.0, 2.0, 0.1, 265.0),       # stable, converged
+                 (0.5, 300.0, 306.0, 10.0, 0.1, 300.0)]:     # weak wind, strong heating
+        ref = sl.most_surface_flux(*args)
+        *vals, resid = sl.most_surface_flux(*args, return_residual=True)
+        assert [float(x) for x in vals] == [float(x) for x in ref]
+        u11, th11 = (float(x) for x in sl.most_surface_flux(*args, n_iter=11)[:2])
+        u10, th10 = float(ref[0]), float(ref[1])
+        np.testing.assert_allclose(
+            float(resid), max(abs(u11 - u10) / u10, abs(th11 - th10) / abs(th10)),
+            rtol=1e-12, atol=1e-300)
+
+
 def test_most_drag_prescribed_flux_converges_near_free_convection():
     """Weak wind + strong heating (Sullivan–Patton start: ⟨U⟩=1, q0=0.24, z1=4,
     z0=0.1), where a plain fixed point oscillates: u_* matches an independently

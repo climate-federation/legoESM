@@ -13,6 +13,7 @@ from legoesm.atmosphere.les_suite.bridge import (
     load_artifact,
     prognostic_truth,
     save_artifact,
+    surface_roughness,
     total_turbulent_flux,
 )
 
@@ -426,3 +427,18 @@ def test_les_setup_round_trip(tmp_path):
 def load_artifact_without_setup(tmp_path):
     save_artifact(_dry_artifact(), tmp_path / "b.npz")
     return load_artifact(tmp_path / "b.npz")
+
+
+def test_surface_roughness_comes_from_the_run_record(tmp_path):
+    """z0 / z0h are read from les_setup (z0h=None means one roughness); survives a
+    save/load round trip; a record without z0 is refused, never defaulted."""
+    art = _dry_artifact(les_setup={"z0_m": 1e-3, "z0h_m": 1e-4})
+    path = tmp_path / "a.npz"
+    save_artifact(art, path)
+    assert surface_roughness(load_artifact(path)) == (1e-3, 1e-4)
+    assert surface_roughness(_dry_artifact(les_setup={"z0_m": 0.16, "z0h_m": None})) == (
+        0.16, 0.16)
+    for setup in (None, {}, {"z0h_m": 1e-4}, {"z0_m": 0.0}, {"z0_m": 0.1, "z0h_m": -1.0},
+                  {"z0_m": float("nan")}, {"z0_m": "invalid"}, {"z0_m": 0.1, "z0h_m": []}):
+        with pytest.raises(BridgeError, match="roughness"):
+            surface_roughness(_dry_artifact(les_setup=setup))

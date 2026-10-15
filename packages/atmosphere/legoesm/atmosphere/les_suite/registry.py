@@ -137,6 +137,9 @@ class LESSetup:
         Values in this setup the user has NOT approved yet, one line each (value
         and why). A case with any pending item cannot emit a production artifact
         — the driver refuses it except as a ``--smoke`` run.
+    approved : tuple[str, ...]
+        Formerly pending items the user approved (recorded with the setup, so
+        every artifact carries them as provenance).
     """
 
     lat_deg: float
@@ -154,6 +157,7 @@ class LESSetup:
     sponge_tau_s: float | None = None
     dephy_case: str | None = None
     pending: tuple[str, ...] = ()
+    approved: tuple[str, ...] = ()
 
     def validate(self, name: str) -> None:
         if not (-90.0 <= self.lat_deg <= 90.0):

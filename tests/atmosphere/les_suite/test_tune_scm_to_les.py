@@ -28,7 +28,11 @@ def _cbl_artifact() -> LESReferenceArtifact:
         u=np.zeros((NT, NZ)), v=np.zeros((NT, NZ)),
         wtheta_resolved=np.zeros((NT, NZ)), wtheta_sgs=np.zeros((NT, NZ)),
         prescribe="fluxes", w_theta_s=np.full(NT, 0.06), f_c=0.0,
+        les_setup={"z0_m": 0.1, "z0h_m": None},
     )
+
+
+_RGH = {"z0_m": 0.1, "z0h_m": 0.1}
 
 
 def _tuner():
@@ -56,7 +60,7 @@ def test_candidate_overrides_include_default_and_probes():
 
 def test_tune_returns_best_no_worse_than_default():
     m = _tuner()
-    base, scheme_key = m._base_turbulence("mynn25")
+    base, scheme_key = m._base_turbulence("mynn25", **_RGH)
     result = m.tune_closure_derivative_free(
         _cbl_artifact(), base, scheme_key,
         tiers=(1,), n_random=2, nlev=NZ, dt=20.0, seed=0,
@@ -73,24 +77,24 @@ def test_tune_returns_best_no_worse_than_default():
 def test_unknown_scheme_rejected():
     m = _tuner()
     with pytest.raises(SystemExit):
-        m._base_turbulence("not_a_scheme")
+        m._base_turbulence("not_a_scheme", **_RGH)
 
 
 def test_clubb_no_cloud_buoyancy_flag_builds_control_arm():
     # D9 control: --clubb-no-cloud-buoyancy → the base clubb config disables the PDF cloud
     # buoyancy; default (True) keeps it; the flag is a no-op for non-clubb schemes.
     m = _tuner()
-    base_on, _ = m._base_turbulence("clubb", clubb_cloud_buoyancy=True)
-    base_off, _ = m._base_turbulence("clubb", clubb_cloud_buoyancy=False)
+    base_on, _ = m._base_turbulence("clubb", **_RGH, clubb_cloud_buoyancy=True)
+    base_off, _ = m._base_turbulence("clubb", **_RGH, clubb_cloud_buoyancy=False)
     assert base_on.clubb.cloud_buoyancy is True
     assert base_off.clubb.cloud_buoyancy is False
     # the literal D9 forced-shared arm: cloud_source native vs shared
-    base_native, _ = m._base_turbulence("clubb", clubb_cloud_source="native")
-    base_shared, _ = m._base_turbulence("clubb", clubb_cloud_source="shared")
+    base_native, _ = m._base_turbulence("clubb", **_RGH, clubb_cloud_source="native")
+    base_shared, _ = m._base_turbulence("clubb", **_RGH, clubb_cloud_source="shared")
     assert base_native.clubb.cloud_source == "native"
     assert base_shared.clubb.cloud_source == "shared"
     # non-clubb schemes ignore the kwargs (no cloud_buoyancy/cloud_source field to set)
-    base_mynn, _ = m._base_turbulence("mynn25", clubb_cloud_buoyancy=False,
+    base_mynn, _ = m._base_turbulence("mynn25", **_RGH, clubb_cloud_buoyancy=False,
                                       clubb_cloud_source="shared")
     assert base_mynn.scheme == "mynn25"
 
@@ -144,7 +148,7 @@ def test_tune_closure_ad_reduces_or_matches_default():
     # AD gradient descent must not make the loss WORSE than the default (best <= default).
     # dt=100 keeps the grad-unroll small (fast); steps few — a smoke test of convergence.
     m = _tuner()
-    base, key = m._base_turbulence("smagorinsky")
+    base, key = m._base_turbulence("smagorinsky", **_RGH)
     result = m.tune_closure_ad(
         _cbl_artifact(), base, key, tiers=(1,), nlev=NZ, dt=100.0, steps=3, lr=0.1)
     assert result.scheme == "smagorinsky"
@@ -160,7 +164,7 @@ def test_all_wired_schemes_build_with_registry_key():
     m = _tuner()
     for scheme in ("smagorinsky", "louis", "holtslag_boville", "ysu", "tke",
                    "mynn25", "clubb_lite", "edmf", "clubb"):
-        base, key = m._base_turbulence(scheme)
+        base, key = m._base_turbulence(scheme, **_RGH)
         assert base.scheme == scheme
         assert getattr(base, scheme) is not None
         metas = m._scheme_tunable_metas(key, tiers=(1,))
@@ -172,7 +176,7 @@ def test_clubb_override_descends_into_nested_params():
     # (apply_overrides_to_base) must descend + re-wrap so an override lands on the
     # nested CLUBBParams, not the wrapper — exercised directly, not re-implemented.
     m = _tuner()
-    base, key = m._base_turbulence("clubb")
+    base, key = m._base_turbulence("clubb", **_RGH)
     metas = m._scheme_tunable_metas(key, tiers=(1,))
     field = metas[0].field  # e.g. "C1"
     cfg = m.apply_overrides_to_base(base, {field: 0.4321})
@@ -187,7 +191,7 @@ def test_clubb_override_descends_into_nested_params():
 def test_apply_overrides_flat_scheme_lands_on_config():
     # for a flat scheme the same apply-site sets the field on the sub-config directly.
     m = _tuner()
-    base, key = m._base_turbulence("mynn25")
+    base, key = m._base_turbulence("mynn25", **_RGH)
     field = m._scheme_tunable_metas(key, tiers=(1,))[0].field
     cfg = m.apply_overrides_to_base(base, {field: 0.4321})
     assert getattr(cfg.mynn25, field) == pytest.approx(0.4321)
@@ -222,3 +226,39 @@ def test_main_stamps_flux_provenance(tmp_path):
     # analysis re-scores best_overrides at the SAME resolution/timestep it was tuned at).
     assert rec["nlev"] == NZ
     assert rec["dt"] == pytest.approx(20.0)
+
+
+def test_main_drives_the_scm_with_the_artifacts_roughness(tmp_path, monkeypatch):
+    """The SCM surface layer gets the LES case's z0 and z0h (here 0.01 / 0.001 m)
+    from the artifact — not a fixed stand-in."""
+    import dataclasses
+
+    from legoesm.atmosphere.les_suite.bridge import save_artifact
+    m = _tuner()
+    art = tmp_path / "rough.npz"
+    save_artifact(dataclasses.replace(
+        _cbl_artifact(), les_setup={"z0_m": 0.01, "z0h_m": 0.001}), art)
+    seen = {}
+
+    class _Stop(Exception):
+        pass
+
+    def capture(artifact, base, *a, **k):
+        seen["surface"] = base.mynn25.surface
+        raise _Stop
+
+    monkeypatch.setattr(m, "tune_closure_derivative_free", capture)
+    with pytest.raises(_Stop):
+        m.main(["--artifact", str(art), "--scheme", "mynn25", "--n-random", "1"])
+    assert seen["surface"].z0 == 0.01
+    assert seen["surface"].z0h_z0_ratio == pytest.approx(0.1)
+
+
+def test_main_refuses_an_artifact_without_roughness(tmp_path):
+    import dataclasses
+
+    from legoesm.atmosphere.les_suite.bridge import save_artifact
+    m = _tuner()
+    art = tmp_path / "bare.npz"
+    save_artifact(dataclasses.replace(_cbl_artifact(), les_setup=None), art)
+    assert m.main(["--artifact", str(art), "--scheme", "mynn25"]) == 2

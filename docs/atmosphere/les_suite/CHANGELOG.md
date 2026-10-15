@@ -260,3 +260,17 @@ obs-constrained NCAR-SCCM variational-analysis product already on disk at
   bit-identical to an uninterrupted one (test); the fingerprint covers the case, run
   options, the resolved core config, a digest of the resolved IC + forcing and of the
   source, so a checkpoint never resumes under different inputs or edited code.
+- **User decisions 2026-10-15:** every proposed value is approved and recorded in
+  `setup.approved` (artifact provenance). Huang & Bou-Zeid 2013 gets the suite's GABLS1
+  sponge (above 300 m, 50 s) instead of none. GABLS4 dt is raised to 0.3 s (~0.8 of the
+  advective CFL bound); it stays pending until a short-window check against 0.1 s.
+  GABLS3 moves to the cloud-case stage.
+- **Neutral Ekman:** Pedersen, Gryning & Kelly (2014), doi:10.1007/s10546-014-9937-z,
+  neutral cases n01–n04, held out, with their unstated values pending. Liu & Stevens
+  (2022) is analytical (its LES is given only by Zi/Ro), so it is not registered.
+- **SCM roughness:** the SCM tuner used z0 = 0.1 m for every case. It now gets the
+  case's z0/z0h from the artifact (`bridge.surface_roughness`, error if absent). Under
+  the tuner's constant-Cd surface layer z0 is not yet read; that switch is pending.
+- **Prescribed-surface-temperature MOST solver** (10 iterations, unchanged) reports its
+  convergence residual: per frame in the log and the worst value in
+  `les_setup['most_residual_max']`.

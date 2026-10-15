@@ -389,6 +389,30 @@ def load_artifact(path) -> LESReferenceArtifact:
     return LESReferenceArtifact(**kwargs)
 
 
+def surface_roughness(artifact: LESReferenceArtifact) -> tuple[float, float]:
+    """The LES run's surface roughness ``(z0 momentum, z0h heat)`` [m], read from the
+    artifact's run record (``les_setup``). ``z0h`` is ``z0`` when the run used a
+    single roughness (the LES's own ``z0h=None`` convention). Raises
+    :class:`BridgeError` when the artifact does not record it — an SCM driven by
+    this artifact must not fall back to a roughness the LES never had."""
+    import math
+
+    setup = artifact.les_setup or {}
+    if setup.get("z0_m") is None:
+        raise BridgeError(f"{artifact.case_name}: artifact records no surface "
+                          "roughness (les_setup['z0_m']); re-emit it with run_les_suite")
+    try:
+        z0 = float(setup["z0_m"])
+        z0h = z0 if setup.get("z0h_m") is None else float(setup["z0h_m"])
+    except (TypeError, ValueError) as exc:
+        raise BridgeError(f"{artifact.case_name}: recorded roughness is not a number "
+                          f"({exc})") from exc
+    if not (math.isfinite(z0) and z0 > 0 and math.isfinite(z0h) and z0h > 0):
+        raise BridgeError(f"{artifact.case_name}: recorded roughness z0={z0}, "
+                          f"z0h={z0h} m is not finite and positive")
+    return z0, z0h
+
+
 def total_turbulent_flux(
     resolved: Array, sgs: Array | None
 ) -> Array:
