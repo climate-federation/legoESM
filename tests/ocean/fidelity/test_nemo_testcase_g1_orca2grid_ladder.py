@@ -195,7 +195,7 @@ def test_g1_and_orca2_cards_select_the_fold_row_v_face_depth():
     from legoesm.ocean.fidelity import nemo_testcase_recipe as recipe
     from legoesm.ocean.state import BarotropicConfig
     assert BarotropicConfig._field_defaults["barotropic_fold_top_v_face_ssh"] is False
-    assert BarotropicConfig._fields[-7] == "barotropic_fold_top_v_face_ssh"   # round 8 appended one
+    assert "barotropic_fold_top_v_face_ssh" in BarotropicConfig._fields
     src = Path(recipe.__file__).read_text()
     start = src.index("def build_orca2g1_flat_card")
     assert src.count("barotropic_fold_top_v_face_ssh=True") == 2
@@ -356,7 +356,8 @@ ROUND5_OPTIONS = ("barotropic_flux_update_nemo_literal",
 def test_g1_and_orca2_cards_select_the_three_solver_statements():
     from legoesm.ocean.fidelity import nemo_testcase_recipe as recipe
     from legoesm.ocean.state import BarotropicConfig
-    assert BarotropicConfig._fields[-6:-3] == ROUND5_OPTIONS
+    assert tuple(name for name in BarotropicConfig._fields
+                 if name in ROUND5_OPTIONS) == ROUND5_OPTIONS
     src = Path(recipe.__file__).read_text()
     start = src.index("def build_orca2g1_flat_card")
     intended_sites = {
@@ -551,7 +552,8 @@ ROUND6_STAGE = ("rk3_stage1_rhs_nemo_literal", "rk3_stage_velocity_written_order
 def test_only_the_g1_card_selects_the_round6_statements():
     from legoesm.ocean.fidelity import nemo_testcase_recipe as recipe
     from legoesm.ocean.state import BarotropicConfig, LatLonCGridOceanConfig
-    assert BarotropicConfig._fields[-3:-1] == ROUND6_SOLVER
+    assert tuple(name for name in BarotropicConfig._fields
+                 if name in ROUND6_SOLVER) == ROUND6_SOLVER
     assert tuple(
         n for n in LatLonCGridOceanConfig._fields if n in ROUND6_STAGE
     ) == ROUND6_STAGE
@@ -930,7 +932,7 @@ def test_only_the_g1_card_selects_the_round8_statements():
     from legoesm.ocean.fidelity import nemo_testcase_recipe as recipe
     from legoesm.ocean.state import BarotropicConfig
     from legoesm.ocean.vertical import OceanPartialCellCoordinate
-    assert BarotropicConfig._fields[-1] == ROUND8_SOLVER
+    assert ROUND8_SOLVER in BarotropicConfig._fields
     assert OceanPartialCellCoordinate._fields[-1] == ROUND8_COORDINATE
     assert BarotropicConfig._field_defaults[ROUND8_SOLVER] is False
     assert OceanPartialCellCoordinate._field_defaults[ROUND8_COORDINATE] is False

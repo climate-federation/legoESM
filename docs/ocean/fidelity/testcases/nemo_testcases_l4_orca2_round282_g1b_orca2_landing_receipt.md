@@ -61,6 +61,13 @@ sets only `een_nemo_relative_vorticity=True`; every GYRE, DINO, tank, generic,
 and non-ORCA card retains the false path.  The vector-fold selector remains
 false everywhere on ORCA2.
 
+The imported validation replay originally referenced the grid branch's
+module-global G1/G1b dispatcher, which this lane intentionally did not import.
+The full battery exposed that incomplete conflict resolution as a `NameError`.
+The replay now resolves planetary versus vector form from the constructed
+card, and four field-order assertions were made append-safe without weakening
+their selector/default checks.  All ten affected G1 exact IDs pass serially.
+
 ## Frozen predictions and controls
 
 | Prediction | Verdict | Measurement |
@@ -125,10 +132,15 @@ request.  B and A+B remain default-off.
 - The citation/recipe/freshwater push battery passes 128/128 in 377.11 s.
 - Round-282 focused tests pass 4/4 on the final production selection.
 - The one permitted `tests/ocean/fidelity -n 12` battery selected 3,592
-  non-slow tests and logged 3,554 passes with no failure or error before its
-  long tail exceeded the outer timeout.  The unfinished IDs were collected
-  mechanically and rerun serially; their terminal result is recorded in the
-  round evidence.  The full parallel battery was not rerun.
+  non-slow tests.  Before its long tail exceeded the outer timeout it logged
+  3,554 passes, seven skips, and 18 failures.  Ten failures were the imported
+  G1 conflict-resolution defect just described; all ten exact IDs pass after
+  the repair (4 + 3 + 3 serial groups).  The hanging stage-sweep plant passes
+  alone in 1,151.41 s.  The other eight reds are the branch's registered
+  pre-existing SI3 provenance, GYRE round-129/year, two GYRE round-33 anchors,
+  OMT-1 module-edge, round-228 citation expectation, dirty-escape scope, and
+  worktree-stamp ratchets; their exact IDs were rerun serially and remain
+  registered.  The full parallel battery was not rerun.
 
 The known unrelated `tests/test_dispatch_hardening.py` slab-land guard is
 outside this battery and outside the changed paths; it was not modified.

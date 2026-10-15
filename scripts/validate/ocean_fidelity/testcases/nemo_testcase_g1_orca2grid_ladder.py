@@ -1914,7 +1914,11 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
             jax.block_until_ready(observed.step(seed(g, before[kt], kt), dt=card.dt_s))
             jax.effects_barrier()           # the observer is an async callback
             require(bool(seen), "the right-hand-side term observer never fired")
-            vec = CASE == "ORCA2G1b-vec"
+            # Resolve the executing program from the card itself.  The ORCA2
+            # lane has the G1 card but not the grid-lane's module-global CASE
+            # dispatcher; a copied global would make library use order-
+            # dependent and broke the original G1 replay.
+            vec = cfg.momentum_advection == "vector_invariant"
             rep = rhs_term_replay(root, kt, fe3, vector=vec)
             rows = []
             for f in "uv":
