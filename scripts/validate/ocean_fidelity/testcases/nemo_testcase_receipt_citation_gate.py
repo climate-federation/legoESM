@@ -1736,13 +1736,13 @@ CITATION_MAP = {
     # --- GRIDLADDER round 30 (G4 round 9 receipt) ---
     'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/stprk3_stg.f90:215': ('r3t(:,:,Kaa) = r1_2 * ( r3t(:,:,Kbb) + r3ta(:,:) )', 2),
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:221': ('r3t(:,:,Kaa) = r1_2 * ( r3t(:,:,Kbb) + r3ta(:,:) )', 2),
-    'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/domqco.f90:257': ('pr3t(ji,jj) = pssh(ji,jj) * r1_ht_0(ji,jj)', 2),
+    'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/domqco.f90:257': (('pr3t(ji,jj) = pssh(ji,jj) * r1_ht_0(ji,jj)', 2), 1),
     'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/sbcrnf.f90:281': 'update h_rnf to be depth of top box',
     'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/trazdf.f90:231-232': [
         'zwi(ji,jk) = - p2dt * zwt(ji,jk  ) / (e3w_1d(jk) *(1._wp+r3t(ji,jj,Kmm)))',
         'zws(ji,jk) = - p2dt * zwt(ji,jk+1) / (e3w_1d(jk+1) *(1._wp+r3t(ji,jj,Kmm)))', 2],
     'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/trazdf.f90:233': 'zwd(ji,jk) = (e3t_3d(ji,jj,jk) *(1._wp+r3t(ji,jj,Kaa)*tmask(ji,jj,jk))) - ( zwi(ji,jk) + zws(ji,jk) )',
-    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/domqco.f90:257': ('pr3t(ji,jj) = pssh(ji,jj) * r1_ht_0(ji,jj)', 2),
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/domqco.f90:257': (('pr3t(ji,jj) = pssh(ji,jj) * r1_ht_0(ji,jj)', 2), 1),
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcrnf.f90:281': 'update h_rnf to be depth of top box',
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/trazdf.f90:231-232': [
         'zwi(ji,jk) = - p2dt * zwt(ji,jk  ) / (e3w_1d(jk) *(1._wp+r3t(ji,jj,Kmm)))',
@@ -5572,9 +5572,12 @@ CITATION_MAP = {
     'ocean_model_latlon_cgrid.py:2545-2628': [
         'h_one_third = h_k_old',
         '+ dt * h_one_half * stage_source_rates[2][1])', 84],
+    # Extent 172 -> 174 and end anchor renamed at G4 round 9: the stage-3
+    # Kmm option added two lines inside the span; endpoints are the same
+    # statements.
     'ocean_model_latlon_cgrid.py:8187-8360': [
         '_stage3_T_rate = (',
-        '/ jnp.maximum(_h_live_one_half, 1.0e-10),', 172],
+        '/ jnp.maximum(_h_s3_kmm, 1.0e-10),', 174],
     # Extent 433 -> 434 at the 2026-09-25 merge: main added one line inside
     # this span (``omega=_cfg_b.omega,`` on the isoneutral K33 call), so the
     # two pinned endpoint statements are one line further apart than before.
