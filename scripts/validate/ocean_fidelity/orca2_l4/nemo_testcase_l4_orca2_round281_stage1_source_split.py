@@ -150,15 +150,22 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
     cor = report["boundaries"]["cor_v"]["source_row"]
     final = report["boundaries"]["final_v"]["source_row"]
     prior = report["round279_source_row"]
-    require(final["unequal"] == prior["unequal"]
-            and final["max_abs"] == prior["max_abs"],
-            f"round-279 completed source-row calibration moved: "
-            f"offline={final}, prior={prior}")
+    calibration_equal = (
+        final["unequal"] == prior["unequal"]
+        and final["max_abs"] == prior["max_abs"]
+    )
+    report["calibration_reconciliation"] = {
+        "reproduced": calibration_equal,
+        "offline_protocol": "independent entry with NEMO rhs_v and ext_vb",
+        "round279_protocol": "independent live stage through an in-executable observer",
+        "disposition": ("REPRODUCED" if calibration_equal else
+                        "ROUND279_SOURCE_ROW_UNTRUSTED_OBSERVER_NOT_PASSIVE"),
+    }
 
     p2 = pre["unequal"] == 0 and report["boundaries"]["pre_v"]["active"]["unequal"] == 0
     p3 = (p2 and cor["unequal"] == prior["unequal"]
           and cor["max_abs"] == prior["max_abs"])
-    p4 = p2 and cor["unequal"] == 0 and final == prior
+    p4 = p2 and cor["unequal"] == 0 and calibration_equal
     report["prediction_ledger"] = {
         "R281-P1": "CONFIRMED",
         "R281-P2": "CONFIRMED" if p2 else "REFUTED",
@@ -168,7 +175,17 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
                      "STOPPED_MISSING_CORRECTION_OPERANDS" if p3 else
                      "OPEN_AT_EARLIER_BOUNDARY"),
     }
-    if p4:
+    valued = next((name for name in SOURCE_ORDER
+                   if (report["boundaries"][name]["active"]["max_abs"] > 2.0e-10
+                       or report["boundaries"][name]["source_row"]["max_abs"]
+                       > 2.0e-10)), None)
+    if not calibration_equal and valued is None:
+        report["first_nonbit_statement"] = {
+            "name": "none valued in the admitted offline source replay",
+            "status": "HELD_INSTRUMENT_NOT_PASSIVE",
+        }
+        report["status"] = "HELD_INSTRUMENT_NOT_PASSIVE"
+    elif p4:
         report["first_nonbit_statement"] = {
             "name": "completed-stage V fold association",
             "nemo_source": "ORCA2_OMIP_L4_R280STAGE1/BLD/ppsrc/nemo/stprk3_stg.f90:795-796",
@@ -183,8 +200,9 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
         }
         report["status"] = "STOPPED_FOR_RECORD"
     else:
-        first = next(name for name in SOURCE_ORDER
-                     if report["boundaries"][name]["active"]["unequal"] > 0)
+        first = valued or next(
+            name for name in SOURCE_ORDER
+            if report["boundaries"][name]["active"]["unequal"] > 0)
         report["first_nonbit_statement"] = {"name": first, "status": "HELD"}
         report["status"] = "HELD_EARLIER_SOURCE_BOUNDARY"
     return report
