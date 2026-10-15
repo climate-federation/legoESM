@@ -661,6 +661,36 @@ def test_written_order_stage_update_and_correction_match_numpy_under_jit():
     assert np.allclose(loose, want, rtol=0, atol=1e-17)
 
 
+def test_written_order_vector_stage_update_matches_numpy_under_jit():
+    """stprk3_stg.f90:366-370: multiply, add, and mask round separately."""
+    import jax
+    from legoesm.ocean.dynamics import ocean_model_latlon_cgrid as M
+    if not jax.config.jax_enable_x64:
+        pytest.skip("needs x64")
+    rng = np.random.default_rng(7)
+    shape = (96, 96, 1)
+    before = rng.normal(scale=1e-2, size=shape)
+    rhs = rng.normal(scale=1e-7, size=shape)
+    mask = np.ones(shape)
+    dt = np.float64(3600.0)
+
+    # Independent one-source-operation-at-a-time NumPy transcription.
+    expected = np.multiply(dt, rhs)
+    expected = np.add(before, expected)
+    expected = np.multiply(expected, mask)
+
+    def compiled(written_order):
+        return jax.jit(lambda b, r, m: M.rk3_stage_velocity_update(
+            b, r, dt, m, vector_form=True,
+            written_order=written_order))(
+            jnp.asarray(before), jnp.asarray(rhs), jnp.asarray(mask))
+
+    got = np.asarray(compiled(True))
+    contracted = np.asarray(compiled(False))
+    assert np.array_equal(got, expected)
+    assert np.count_nonzero(contracted != expected) == 465
+
+
 @needs_record5
 @pytest.mark.parametrize("off, floor", [((), 0), (("without_stage1_rhs",), 1),
                                         (("without_written_order",), 1)])
@@ -834,14 +864,12 @@ def test_step_2_right_hand_side_is_nemos_only_in_the_written_order(off, floor):
     """The offline replay of dynhpg.f90:380-394 and vor_een against NEMO's
     recorded right-hand side is the control (0 unequal).  The card's pressure
     gradient is bit-equal either way; its vorticity term only in NEMO's
-    order.  Plant: the option off leaves hundreds of unequal faces."""
+    order.  Plant: the option off leaves hundreds of unequal faces.  This G1
+    flat-bottom card has zero KEG, so it cannot test the HPG/KEG split."""
     out = ladder.run(RECORD5, arm="rhs_terms", kt_min=2, kt_max=2, allow_dirty=True,
                      **{k: True for k in off})
     assert _terms(out, "control_replay_vs_nemo") == [0, 0]
     assert _terms(out, "card_pressure_gradient_vs_replay") == [0, 0]
-    assert _terms(out, "control_split_sum_vs_combined") == [0, 0]
-    assert _terms(out, "card_hpg_vs_replay") == [0, 0]
-    assert _terms(out, "card_keg_vs_replay") == [0, 0]
     for key in ("card_vorticity_vs_replay", "card_total_vs_nemo"):
         got = _terms(out, key)
         assert (got == [0, 0]) if not floor else min(got) >= floor, (key, got)
@@ -854,20 +882,32 @@ def test_right_hand_side_control_fires_on_a_planted_cell():
     assert _terms(out, "control_replay_vs_nemo") == [1, 1]
 
 
-@needs_record5
-def test_right_hand_side_split_control_fires_on_a_planted_half():
-    out = ladder.run(RECORD5, arm="rhs_terms", kt_min=2, kt_max=2,
-                     allow_dirty=True, plant="rhs_split")
-    assert min(_terms(out, "control_split_sum_vs_combined")) >= 1
-    assert _terms(out, "card_hpg_vs_replay") == [1, 1]
-
-
 G1B_RECORD = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/"
     "round26/g1b_merged")
 needs_g1b_record = pytest.mark.skipif(
     not (G1B_RECORD / "oracle_g1step_kt00000002.bin").is_file(),
     reason="the admitted G1b record is not on this machine")
+
+
+@needs_g1b_record
+def test_g1b_nonzero_hpg_keg_split_and_plant(monkeypatch):
+    """The split closure and its plant both run on nonzero HPG and KEG."""
+    monkeypatch.setattr(ladder, "CASE", "ORCA2G1b-vec")
+    out = ladder.run(G1B_RECORD, arm="rhs_terms", kt_min=2, kt_max=2,
+                     allow_dirty=True)
+    for row in out["per_kt"][0]["rows"]:
+        assert row["card_term_max_abs"]["hpg"] > 0.0
+        assert row["card_term_max_abs"]["keg"] > 0.0
+    split = _terms(out, "control_split_sum_vs_combined")
+    assert split == [5, 0]
+    assert _terms(out, "card_hpg_vs_replay") == [0, 0]
+    assert _terms(out, "card_keg_vs_replay") == [0, 0]
+
+    planted = ladder.run(G1B_RECORD, arm="rhs_terms", kt_min=2, kt_max=2,
+                         allow_dirty=True, plant="rhs_split")
+    assert _terms(planted, "control_split_sum_vs_combined") == [n + 1 for n in split]
+    assert _terms(planted, "card_hpg_vs_replay") == [1, 1]
 
 
 @needs_g1b_record

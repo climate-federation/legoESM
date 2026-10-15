@@ -1948,7 +1948,10 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
                          if k.endswith("_" + f)}
                 if plant == "rhs_split":
                     planted = terms["hpg"].copy()
-                    j, i = np.argwhere(wet)[0]
+                    nonzero_hpg = wet & (planted != 0.0)
+                    require(np.any(nonzero_hpg),
+                            f"rhs_split plant needs nonzero {f.upper()} HPG")
+                    j, i = np.argwhere(nonzero_hpg)[0]
                     planted[j, i] = np.nextafter(planted[j, i], np.inf)
                     terms["hpg"] = planted
                 total = terms["total"]
