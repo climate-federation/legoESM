@@ -81,11 +81,11 @@ mpas_vert_advection_scheme: sb       # conservative Simmons-Burridge flux form
                                      # 'upwind' and this deck selects it.
 mpas_vert4_flux_form_tracers: []     # vapour takes the log form below instead
 mpas_vert4_log_form_tracers: [q_v]   # vertical del4 filter on ln(q_v + 1e-7), water-weighted
-                                     # mass-conserving flux.  The flux form [q_v] (60-day A/B
-                                     # 2026-10-08 vs projected: 0.64 -> 4.05 ppmv) still removed
-                                     # 8-10 %/day of UTLS water; 30/60-day pair 2026-10-14: Feb
-                                     # 45-70N 200-250 hPa water +110 %, T -3.3 K vs flux form.
-                                     # USER-APPROVED 2026-10-15; CODE default unchanged (empty).
+                                     # mass-conserving flux.  The flux form [q_v] removed 8-10 %/day
+                                     # of UTLS water offline; one 60-day pair vs it (2026-10-14,
+                                     # PLAUSIBLE): Feb ClimateEval median RMSE ratio 0.97, 200 hPa
+                                     # T RMSE -26..-32 %.  USER-APPROVED 2026-10-15; CODE default
+                                     # unchanged (empty).
 mpas_div_damp4_scale: 1.0            # CAM6: fv_div24del2flag=4 selects ldiv4,
                                      # 4th-order DIVERGENCE damping at every
                                      # level (cd_core.F90 tau4 = 0.01/dt times

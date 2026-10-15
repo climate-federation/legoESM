@@ -155,3 +155,35 @@ def test_dycore_routes_log_tracers_and_refuses_overlap():
         mpas_hydrostatic_tendencies(state, mesh, coord, cfg._replace(
             nu_vert4_T=0.0, vert4_flux_form_tracers=("q_v",),
             vert4_log_form_tracers=("q_v",)), None, 0.0)
+
+
+@pytest.mark.parametrize("dry", [1.0e-12, 5.0e-8, 1.0e-6])
+def test_worst_contrast_outflow_is_bounded(dry):
+    """A 2-level zigzag between 30 g/kg and a (near-)dry value is the largest
+    contrast in g = ln(q + q_eps).  Each layer loses at most nu*dt*8*G of its OWN
+    water per step (G = range of g; mobility <= the layer's water, w <= dp), so a
+    near-dry layer is not drained and the step stays non-negative."""
+    dp = _l32_dp()
+    q = jnp.broadcast_to(jnp.where(jnp.arange(32) % 2 == 0, 0.03, dry), dp.shape)
+    tend = vertical_del4_tracer_tendency_log(q, NU, dp)
+    g_range = float(np.log((0.03 + VERT4_LOG_Q_EPS) / (dry + VERT4_LOG_Q_EPS)))
+    loss = np.asarray(jnp.where(q > 0, -jnp.minimum(tend, 0.0) * DT / jnp.where(q > 0, q, 1.0), 0.0))
+    assert loss.max() > 0.0                                   # the zigzag is being damped
+    assert loss.max() <= NU * DT * 8.0 * g_range
+    assert float(jnp.min(q + DT * tend)) >= 0.0
+
+
+def test_form_checks_run_on_a_state_without_tracers():
+    """The log-name and overlap checks sit in the dycore's entry validator, so a
+    dry state (no tracers) with the filter off still refuses a bad selection."""
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import mpas_hydrostatic_tendencies
+    from tests.atmosphere.hydrostatic.unit.test_mpas_vert4_flux_form import _tracer_state
+    mesh, coord, cfg, state = _tracer_state()
+    dry = state._replace(tracers=None)
+    off = cfg._replace(nu_vert4_T=0.0)
+    with pytest.raises(ValueError, match="each tracer takes one filter form"):
+        mpas_hydrostatic_tendencies(dry, mesh, coord, off._replace(
+            vert4_flux_form_tracers=("q_v",), vert4_log_form_tracers=("q_v",)), None, 0.0)
+    with pytest.raises(ValueError, match="vert4_log_form_tracers: unknown tracer names"):
+        mpas_hydrostatic_tendencies(dry, mesh, coord, off._replace(
+            vert4_log_form_tracers=("qv",)), None, 0.0)

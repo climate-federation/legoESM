@@ -407,7 +407,8 @@ class DycoreConfig(NamedTuple):
     # the flux form's fourth difference of q removes 4.5-8.8 %/day of
     # upper-tropospheric water from ERA5 profiles; the log form does not drift
     # an exponential-in-level profile.  Must not overlap the flux-form list.
-    # Default empty: production unchanged pending the 30-day pair (2026-10-13).
+    # Code default empty; config/amip/amip_production.yaml selects [q_v] (with an
+    # empty flux-form list) after the 30/60-day pair, user-approved 2026-10-15.
     mpas_vert4_log_form_tracers: tuple = ()
 
 
