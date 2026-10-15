@@ -599,6 +599,9 @@ def test_nemo_supplied_forcing_stage_one_and_three(tmp_path):
     assert all(three[n]["unequal_values"] == 0 for n in three)
     kmm_before = mod.route(R21_P6_A, root, stages="3", without_stage3_kmm_option=True)["stages"]["3"]
     assert kmm_before["T"]["unequal_values"] == 200 and kmm_before["S"]["unequal"] == 0
+    # round 28's control: heat (and with it the Kmm option) deselected
+    heat_before = mod.route(R21_P6_A, root, stages="3", without_stage3_heat_option=True)["stages"]["3"]
+    assert heat_before["T"]["unequal_values"] == 489
 
 
 @needs_inputs

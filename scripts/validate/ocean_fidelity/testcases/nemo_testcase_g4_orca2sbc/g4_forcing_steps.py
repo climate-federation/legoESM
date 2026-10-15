@@ -396,7 +396,9 @@ def route(run: Path, deck_root: Path, *, zero: bool = False, stages: str = "123"
                 **{STAGE3_HEAT_OPTION: False})))
     require(getattr(card.recipe.model_config, STAGE3_KMM_OPTION) is True,
             "the G4 card no longer selects NEMO's stage-3 Kmm thickness")
-    if without_stage3_kmm_option:
+    if without_stage3_kmm_option or without_stage3_heat_option:
+        # the Kmm option needs the heat option: deselecting heat is round 8's
+        # before arm, which had neither
         card = card._replace(recipe=card.recipe._replace(
             model_config=card.recipe.model_config._replace(
                 **{STAGE3_KMM_OPTION: False})))
