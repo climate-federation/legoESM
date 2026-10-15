@@ -345,6 +345,9 @@ class OceanSurfaceForcing(NamedTuple):
     # salt helper (``freshwater.runoff_spread_virtual_salt_tendency_3d``).
     # ``None`` -> no runoff tracer source, which is every card that does not
     # supply one.
+    q_nonsolar: object = None          # jnp.ndarray | None [W/m^2], NEMO ``qns``
+    # Read only by ``rk3_stage3_heat_nemo_written`` (trasbc.f90 stage-3
+    # ``r1_rcp*qns*z1_rho0_e3t``); ``q_net - sw_down`` is not bitwise ``qns``.
 
 
 class OceanConfig(NamedTuple):
@@ -3234,6 +3237,11 @@ class LatLonCGridOceanConfig(NamedTuple):
     # order (stp2d.f90:138/:144/:161; stprk3_stg.f90 stages 2-3).  False sums
     # the fused KE-plus-pressure term with the vorticity term.
     rk3_vector_rhs_nemo_order: bool = False
+    # NEMO's stage-3 temperature Krhs (trasbc.f90 stage-3 non-linear branch,
+    # then runoff, then tra_qsr on Kmm): ``r1_rcp*qns*z1_rho0_e3t`` from
+    # ``OceanSurfaceForcing.q_nonsolar``.  False derives it from the Kbb
+    # tendency minus the Kbb solar, rescaled to Kmm.
+    rk3_stage3_heat_nemo_written: bool = False
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":

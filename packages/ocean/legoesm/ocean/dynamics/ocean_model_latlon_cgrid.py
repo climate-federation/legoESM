@@ -2298,6 +2298,7 @@ def _nemo_ws_rk3_tracer_pair_step(
     stage_source_terms=None,
     stage_qco_weights=None,
     stage_tracer_written_order: bool = False,
+    stage3_content_written_order=None,
     stop_after_stage: int = 3,
     resume=None,
     stage3_advection_content_override=None,
@@ -2602,10 +2603,29 @@ def _nemo_ws_rk3_tracer_pair_step(
     if stage3_advection_content_override is not None:
         advection_content_a, advection_content_b = (
             stage3_advection_content_override)
-    content_a = (advection_content_a
-                 + dt * h_one_half * stage_source_rates[2][0])
-    content_b = (advection_content_b
-                 + dt * h_one_half * stage_source_rates[2][1])
+    if stage3_content_written_order is not None:
+        # trazdf.f90 2nd recurrence: e3t(Kbb)*T(Kbb) + p2dt*e3t(Kmm)*Krhs,
+        # each product and the sum rounded as written; the argument is the
+        # literal (e3t(Kbb), e3t(Kmm)) pair.
+        e3t_bb, e3t_mm = stage3_content_written_order
+        # ponytail: advection content kept as the card forms it (exact
+        # only when advection is OFF, as on G4); fold -dt*fd2 into Krhs
+        # when an advecting rung selects this.
+        sr = nemo_source_round
+        dt_h = sr(dt * e3t_mm)
+        content_a = sr(sr(e3t_bb * tr_a) - sr(dt * fd2_a)
+                       if stage3_advection_content_override is None
+                       else advection_content_a)
+        content_b = sr(sr(e3t_bb * tr_b) - sr(dt * fd2_b)
+                       if stage3_advection_content_override is None
+                       else advection_content_b)
+        content_a = sr(content_a + sr(dt_h * stage_source_rates[2][0]))
+        content_b = sr(content_b + sr(dt_h * stage_source_rates[2][1]))
+    else:
+        content_a = (advection_content_a
+                     + dt * h_one_half * stage_source_rates[2][0])
+        content_b = (advection_content_b
+                     + dt * h_one_half * stage_source_rates[2][1])
     out_a = jnp.where(
         active_3d > 0.5,
         content_a / jnp.maximum(h_k_new, 1.0e-10), tr_a)
@@ -8020,6 +8040,10 @@ class LatLonCGridOceanModel:
                     (_qt_b, _qt_12, _qt_aa),
                 )
             )
+            # The card's own Kbb / stage-3 Kmm thicknesses: its implicit solve
+            # is built on them, so the written-order RHS must use the same.
+            _stage3_e3t = ((h_k_old, _h_live_one_half)
+                           if _cfg_b.rk3_stage3_heat_nemo_written else None)
             _vector_velocity_stage_update = (
                 getattr(_cfg_b, "momentum_advection", "flux_form")
                 == "vector_invariant"
@@ -8144,6 +8168,7 @@ class LatLonCGridOceanModel:
             _stage3_T_rate = (
                 tend.dT_dt.data * h_k_old
                 / jnp.maximum(_h_live_one_half, 1.0e-10))
+            _stage3_qsr_kmm = None
             _sw_pen_scheme_ws = getattr(
                 getattr(
                     getattr(_cfg_b, "physics", None),
@@ -8202,10 +8227,11 @@ class LatLonCGridOceanModel:
                         c_sw=_cfg_b.physics.constants.c_sw,
                     )
 
+                _stage3_qsr_kmm = _rgb_qsr(_h_live_one_half, _rgb_stretch_m)
                 _stage3_T_rate = _nemo_qsr_stage3_rate(
                     tend.dT_dt.data,
                     _rgb_qsr(h_k_old, _rgb_stretch_b),
-                    _rgb_qsr(_h_live_one_half, _rgb_stretch_m),
+                    _stage3_qsr_kmm,
                     h_k_old, _h_live_one_half)
             elif (
                 _sw_pen_scheme_ws == "nemo_qsr_2bd"
@@ -8248,6 +8274,34 @@ class LatLonCGridOceanModel:
                     tend.dT_dt.data, _qsr_b, _qsr_m,
                     h_k_old, _h_live_one_half)
 
+            _stage3_T_written = None
+            if _cfg_b.rk3_stage3_heat_nemo_written:
+                # trasbc.f90 stage 3, non-linear ssh: Krhs(1) = r1_rcp*qns
+                # *z1_rho0_e3t(Kmm) into a cleared Krhs; then the runoff block;
+                # then tra_qsr on Kmm (stprk3_stg.f90:525).
+                _qns = (None if surface_forcing is None
+                        else getattr(surface_forcing, "q_nonsolar", None))
+                if _qns is None or _stage3_qsr_kmm is None:
+                    raise ValueError(
+                        "rk3_stage3_heat_nemo_written needs "
+                        "OceanSurfaceForcing.q_nonsolar and a NEMO qsr "
+                        "scheme (nemo_qsr_rgb / nemo_qsr_2bd)")
+                _dt_h = state.T.data.dtype
+                _r1_rcp = nemo_source_round(
+                    jnp.asarray(1.0, dtype=_dt_h)
+                    / jnp.asarray(_cfg_b.physics.constants.c_sw, dtype=_dt_h))
+                _z1_rho0_e3t = nemo_source_round(
+                    _stage_r1_rho0
+                    / jnp.maximum(_h_live_one_half[..., 0], 1.0e-10))
+                _heat_top = nemo_source_round(
+                    nemo_source_round(_r1_rcp * jnp.asarray(_qns, dtype=_dt_h))
+                    * _z1_rho0_e3t) * _active_live[..., 0]
+                _stage3_T_written = nemo_source_round(
+                    _add_rnf_stage_rate(
+                        _zero_stage_source.at[..., 0].set(_heat_top),
+                        None if _rnf_content is None else _rnf_content[0],
+                        _h_live_one_half)) + _stage3_qsr_kmm
+
             _stage12_source_terms = (
                 None
                 if _rnf_content is None
@@ -8274,7 +8328,9 @@ class LatLonCGridOceanModel:
                 # cancels the Kmm divisor, rather than spuriously weighting
                 # surface heat by h(Kmm)/h(Kbb).
                 (
-                    _add_rnf_stage_rate(
+                    _stage3_T_written
+                    if _stage3_T_written is not None
+                    else _add_rnf_stage_rate(
                         _stage3_T_rate,
                         None if _rnf_content is None else _rnf_content[0],
                         _h_live_one_half),
@@ -10005,6 +10061,7 @@ class LatLonCGridOceanModel:
                         if self._nemo_ws_test_hooks.two_step_fct_predictor
                         else "one_step"),
                     stage_source_rates=_ws_stage_source_rates,
+                    stage3_content_written_order=_stage3_e3t,
                     # The written-order selector belongs to the weighted
                     # stage-1/2 call; this stage-3 finalizer has no weights.
                     bbl_context=_bbl_context,
