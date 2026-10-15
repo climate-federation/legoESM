@@ -125,9 +125,12 @@ def measure(deck_root: Path, record_root: Path, baseline_root: Path,
 
     raw_mesh = card.recipe.z_coord.nemo_een_barotropic
     require(raw_mesh is not None, "OMT-4 lacks raw NEMO mesh operands")
-    nemo_mask = np.asarray(raw_mesh.vmask[..., :-1], np.float64)
+    # The resolved raw mask and stage-entry V carry NEMO's jpkm1 levels
+    # already; the self-describing Krhs/Kaa record carries jpk and needs its
+    # final land level removed.
+    nemo_mask = np.asarray(raw_mesh.vmask, np.float64)
     nemo_entry = np.asarray(rung0.assemble_frame(record_root, 1, 0)["v"],
-                            np.float64)[..., :-1]
+                            np.float64)
     nemo_rhs = np.asarray(oracle["rhs_v"], np.float64)[..., :-1]
     nemo_raw = np.asarray(oracle["pre_v"], np.float64)[..., :-1]
     active = nemo_mask != 0.0
