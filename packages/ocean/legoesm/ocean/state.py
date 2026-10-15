@@ -3214,6 +3214,11 @@ class LatLonCGridOceanConfig(NamedTuple):
     # NEMO-divisor solve uses.  False divides by the cell-averaged stretched
     # top thickness.
     zdf_surface_stress_nemo_face_thickness: bool = False
+    # een_total's relative vorticity in vor_een's np_CRV statement
+    # (dynvor.f90:744-748): the circulation bracket of e2v*v and e1u*u times
+    # r1_e1e2f, added to ff_f before the F thickness.  False takes the
+    # generic vertex curl, which differs on a curvilinear mesh.
+    een_nemo_relative_vorticity: bool = False
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":
