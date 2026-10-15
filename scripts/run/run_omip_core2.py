@@ -6966,11 +6966,17 @@ def _inject_snapshot_state(state, snap):
     state with a snapshot's arrays (shapes must match exactly)."""
     for k in _MOM_BOX_SLOTS:
         cur = getattr(state, k, None)
-        if cur is None or k not in snap.files:
+        if k not in snap.files or (cur is None and k != "tke"):
             raise SystemExit(f"--diag-momentum-box-snapshot: slot {k!r} missing "
                              "from the state or the snapshot")
-        data = getattr(cur, "data", cur)
         arr = np.asarray(snap[k])
+        if cur is None:                      # fresh state: TKE is created by the first step
+            from legoesm.core.field import Field
+            state = state._replace(tke=Field(
+                data=jnp.asarray(arr, dtype=state.T.data.dtype), name="tke",
+                dims=("lat", "lon", "level"), units="m^2/s^2"))
+            continue
+        data = getattr(cur, "data", cur)
         if arr.shape != tuple(data.shape):
             raise SystemExit(f"--diag-momentum-box-snapshot: {k} shape "
                              f"{arr.shape} != state {tuple(data.shape)}")
@@ -6989,7 +6995,6 @@ def _momentum_box_record(model, state, sf, dt, snap, step):
     sea-surface-height gradient (barotropic solve), wind stress and the
     vertical viscosity across 400 m (implicit vertical solve), and planetary
     Coriolis when the vorticity scheme keeps it out of ``vortcor``."""
-    from legoesm import constants
     lat = np.asarray(snap["lat_T"], dtype=np.float64)
     lon = np.asarray(snap["lon_T"], dtype=np.float64)
     area = np.asarray(snap["cell_area"], dtype=np.float64)
@@ -7019,7 +7024,7 @@ def _momentum_box_record(model, state, sf, dt, snap, step):
              and not (aimp and k == "vertadv")]
     rec["closure_residual"] = rec["total"] - sum(rec[k] for k in parts)
     rec["vertadv_in_total"] = not aimp
-    g, rho0 = float(constants.g), float(constants.rho_ocean)
+    g, rho0 = float(model.config.g), float(model.config.rho_0)
     eta = np.asarray(snap["eta"], dtype=np.float64)
     dx_u = np.asarray(snap["dx_u"], dtype=np.float64)
     deta = np.concatenate([eta[:, :1] - eta[:, -1:], np.diff(eta, axis=1),
@@ -7035,10 +7040,17 @@ def _momentum_box_record(model, state, sf, dt, snap, step):
         np.asarray(snap["K_M_diag"], dtype=np.float64), uc, zc, zin,
         lat, lon, area, wet)
     vc = 0.5 * (np.asarray(snap["v"], dtype=np.float64)[:-1] + np.asarray(snap["v"], dtype=np.float64)[1:])
-    f = 2.0 * float(constants.Omega) * np.sin(np.deg2rad(lat))
+    f = np.asarray(model.grid.f, dtype=np.float64)
+    if f.shape != lat.shape:
+        raise SystemExit(f"grid.f shape {f.shape} != centres {lat.shape}")
     rec["coriolis_offline"] = box(f[..., None] * vc)
-    rec["vorticity_scheme"] = str(getattr(model.config, "vorticity_scheme", "?"))
-    rec["coriolis_in_vortcor"] = rec["vorticity_scheme"].endswith("_total")
+    rec["vorticity_scheme"] = str(model.config.vorticity_scheme)
+    rec["coriolis_scheme"] = str(getattr(model.config, "coriolis_scheme", "matsuno_split"))
+    # mirrors ocean_pe_latlon_cgrid: f enters vortcor inside these vorticity
+    # schemes, or via the explicit_ab2 face-f add; otherwise the step applies it
+    rec["coriolis_in_vortcor"] = (
+        rec["vorticity_scheme"] in ("ene_total", "een_total", "een_planetary")
+        or rec["coriolis_scheme"] == "explicit_ab2")
     rec["U_box"] = box(uc)
     rec["surface_stress_implicit"] = bool(getattr(model.config, "surface_stress_implicit", False))
     return rec
@@ -10841,9 +10853,16 @@ def main() -> int:
                              "tendencies_with_diagnostics (tripole/latlon_bathy)")
         if not args.diag_momentum_box_json:
             raise SystemExit("--diag-momentum-box-snapshot needs --diag-momentum-box-json")
+        if int(args.scan_block) > 0:
+            raise SystemExit("--diag-momentum-box-snapshot needs the per-step "
+                             "loop; drop --scan-block")
         _mbox_snap = np.load(args.diag_momentum_box_snapshot)
         state = _inject_snapshot_state(state, _mbox_snap)
         start_step = int(_mbox_snap["step"])
+        if abs(start_step * dt - float(_mbox_snap["time_days"]) * _SEC_PER_DAY) > 0.5 * dt:
+            raise SystemExit(f"snapshot step {start_step} x dt {dt} does not match "
+                             f"its time_days {float(_mbox_snap['time_days'])}: "
+                             "different timestep than the run that wrote it")
         if start_step >= n_steps:
             raise SystemExit(f"snapshot step {start_step} >= run target {n_steps}; "
                              "raise --years")
