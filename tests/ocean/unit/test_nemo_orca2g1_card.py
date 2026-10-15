@@ -209,7 +209,7 @@ def test_standin_card_builds_and_states_every_selector(standin_root):
         "bump": card._replace(recipe=card.recipe._replace(
             initial_state=state._replace(eta=state.eta.replace(
                 data=np.asarray(state.eta.data) * 2.0)))),
-        "uniform_T": card._replace(recipe=card.recipe._replace(
+        "initial_T": card._replace(recipe=card.recipe._replace(
             initial_state=state._replace(T=state.T.replace(
                 data=np.asarray(state.T.data) + 1.0)))),
     }
