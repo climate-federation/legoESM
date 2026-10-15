@@ -2867,6 +2867,18 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcrnf.f90:146-152': [
         'INTEGER FUNCTION sbc_rnf_alloc()',
         'rnf_tsc_b(Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0),jpts) , rnf_tsc (Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0),jpts) , STAT=sbc_rnf_alloc )', 7],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcrnf.f90:259-283': [
+        'IF( ln_rnf_depth .OR. ln_rnf_depth_ini ) THEN',
+        'phdivn(ji,jj,1) = phdivn(ji,jj,1) - rnf(ji,jj) * r1_rho0', 25],
+    'cfgs/SHARED/namelist_ref:474-480': [
+        'ln_rnf_depth = .false.', 'ln_rnf_depth_ini = .false.',
+        'rn_dep_max  = 150.', 7],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:467-470': [
+        'IF( ln_dynadv_vec .OR. lk_linssh ) THEN',
+        'vv(ji,jj,jk,Kaa) = ( vv(ji,jj,jk,Kbb) + rDt * vv(ji,jj,jk,Krhs) ) * vmask(ji,jj,jk)', 4],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:513-537': [
+        'zvb(ji,jj) = vv_b(ji,jj,Kaa) - SUM( e3v_3d(ji,jj,:)*vv(ji,jj,:,Kaa) ) * r1_hv_0(ji,jj)',
+        'vv(ji,jj,jk,Kaa) = vv(ji,jj,jk,Kaa) + zvb(ji,jj)*vmask(ji,jj,jk)', 25],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/icbini.f90:133-140': [
         'CALL icb_nam               ! Read and print namelist parameters',
         "IF( icb_alloc() /= 0 )   CALL ctl_stop( 'STOP', 'icb_alloc : unable to allocate arrays' )", 8],
