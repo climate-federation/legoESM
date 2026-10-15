@@ -93,12 +93,26 @@ Failed predictions remain in the ledger.
 
 All five plants fire: passivity, self-replay, source order, owner-prefix
 non-vacuity, and one-bit detection.  The focused round-283 tests pass 6/6.
-The citation gate and its shifted-line plant are run against this receipt before
-closeout; the default cumulative receipt is also required to stay green.
+The receipt citation gate passes 5/5 compiled anchors with no unmapped
+citations; shifting the mapped line 232 to line 234 makes it fail as
+`SYMBOL-NOT-AT-LINE`.  The default cumulative gate passes all 274 citations
+with no unmapped citation.
 
-Independent review: **operator**.  The lane instruction assigns independent
-review of round code to the operator; no nested reviewer is started in this
-sandbox.
+The required 12-worker `tests/ocean/fidelity` battery reached 95% with 3,418
+unique passes and no failure or error line, then its xdist controller stalled
+after the workers disappeared.  The 255 tests without terminal results were
+rerun serially in bounded file chunks.  The round-283 tests and citation tests
+pass.  Two large pre-existing chunks hit the 300-second resource bound; the
+other reds are all outside this round's diff: the known SI3 scalar-math
+provenance red, two worktree-stamp ratchets, a moved GYRE year-harness stamp,
+two stale round-33 mutation anchors, a stale OMT-1 card-field expectation, and
+a missing round-228 historical citation-map entry.  The logs and SHA256 sums
+are under `orca2_rounds/round283/`; no parallel battery was repeated.
+
+Independent review: **unavailable in-sandbox**.  The required read-only
+`codex exec` attempt failed before review with `failed to initialize in-process
+app-server client: Read-only file system`; the operator remains the independent
+reviewer for this measurement code.
 
 Configuration choices: none.  Decision 125 remains taken (top-V exchange
 off).  Decision 126 remains pending outside this round and is not re-raised.
