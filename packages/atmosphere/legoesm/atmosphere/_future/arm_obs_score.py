@@ -107,7 +107,7 @@ def _profile_scale(obs: np.ndarray, weights: np.ndarray, floor: float) -> float:
     """Floored mass-weighted spread of the observation series (one scale/channel).
 
     Uses the time-mean obs profile's weighted std over finite levels (mirrors
-    ``score._normalized_rmse_series``: a single, stable normalizer per channel).
+    ``score.normalized_rmse_series``: a single, stable normalizer per channel).
     """
     if not np.isfinite(obs).any():        # all-missing obs -> no scale, use the floor
         return floor

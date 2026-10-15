@@ -30,6 +30,11 @@ from pathlib import Path
 import numpy as np
 from legoesm.atmosphere.forcing.scm.scm_forcing import SCMForcing  # noqa: F401  (doc)
 from legoesm.atmosphere.les_suite.bridge import load_artifact
+from legoesm.atmosphere.les_suite.candidate_eval import (
+    AD_LR,
+    AD_STEPS,
+    adam_descend_normalized,
+)
 from legoesm.atmosphere.les_suite.scm_runner import scm_les_final_loss
 from legoesm.atmosphere.physics.turbulence.tunable_subconfig import (
     rewrap_tunable_subconfig,
@@ -37,7 +42,6 @@ from legoesm.atmosphere.physics.turbulence.tunable_subconfig import (
 )
 from legoesm.core.param_overrides import apply_param_overrides
 from legoesm.training.param_collector import build_registry
-
 
 # A tuned loss at/above this is the AD divergence penalty (scm_les_loss_jax returns a
 # large finite barrier for a non-finite SCM), NOT a real fit — real losses are O(1).
@@ -178,8 +182,8 @@ def tune_closure_ad(
     tiers: tuple[int, ...] = (1,),
     nlev: int = 24,
     dt: float = 10.0,
-    steps: int = 20,
-    lr: float = 0.08,
+    steps: int = AD_STEPS,
+    lr: float = AD_LR,
     seed: int = 0,  # noqa: ARG001 — deterministic AD; kept for a uniform signature
 ) -> TuneResult:
     """AD calibration (D4): gradient descent on the tunable params via the DIFFERENTIABLE
@@ -198,31 +202,21 @@ def tune_closure_ad(
     clips back into bounds each step. A non-finite loss/grad (diverged SCM) stops the
     descent (AD cannot use a concrete +inf under trace) — the DF path is the fallback.
     """
-    import jax
     import jax.numpy as jnp
-    import optax
     from legoesm.atmosphere.les_suite.scm_runner import scm_les_loss_jax
 
     metas = _scheme_tunable_metas(scheme_key, tiers)
     fields = [m.field for m in metas]
     lo = jnp.asarray([float(m.bounds[0]) for m in metas])
     hi = jnp.asarray([float(m.bounds[1]) for m in metas])
-    span = hi - lo
-    if not bool(jnp.all(span > 0.0)):  # zero-span bound ⇒ normalisation divide-by-zero
+    if not bool(jnp.all(hi - lo > 0.0)):  # zero-span bound ⇒ normalisation divide-by-zero
         bad = [m.field for m in metas if float(m.bounds[1]) <= float(m.bounds[0])]
         raise SystemExit(f"{scheme_key}: params with non-positive bound span: {bad}")
-    n0 = jnp.clip((jnp.asarray([float(m.default) for m in metas]) - lo) / span, 0.0, 1.0)
+    x0 = jnp.asarray([float(m.default) for m in metas])
 
-    def _overrides(norm):
-        vals = lo + jnp.clip(norm, 0.0, 1.0) * span
-        return {f: vals[i] for i, f in enumerate(fields)}
-
-    def _to_py(norm) -> dict:
-        vals = lo + jnp.clip(norm, 0.0, 1.0) * span
-        return {f: float(vals[i]) for i, f in enumerate(fields)}
-
-    def loss_of(norm):
-        cfg = apply_overrides_to_base(base_turbulence, _overrides(norm))
+    def loss_of(vals):
+        cfg = apply_overrides_to_base(
+            base_turbulence, {f: vals[i] for i, f in enumerate(fields)})
         return scm_les_loss_jax(artifact, cfg, nlev=nlev, dt=dt)
 
     # NOT jax.jit'd: build_cbl_scm_from_artifact has concrete float() grid-setup that is
@@ -230,24 +224,10 @@ def tune_closure_ad(
     # the params enter as TRACED leaves (one jaxpr across all param values, XLA-cached),
     # whereas the DF path builds a NEW static-leaf config per candidate ⇒ a fresh compile
     # each time. So AD re-uses the compiled grad while DF recompiles per candidate.
-    value_and_grad = jax.value_and_grad(loss_of)
-    opt = optax.adam(lr)
-    opt_state = opt.init(n0)
-    norm = n0
-    default_loss = float(loss_of(n0))
-    best_loss = default_loss if np.isfinite(default_loss) else np.inf
-    best_norm = n0
-    history: list = [(default_loss, _to_py(n0))]
-    for _ in range(max(1, steps)):
-        loss, grad = value_and_grad(norm)
-        if not (np.isfinite(float(loss)) and bool(jnp.all(jnp.isfinite(grad)))):
-            break  # diverged → stop; the derivative-free path is the fallback
-        updates, opt_state = opt.update(grad, opt_state)
-        norm = jnp.clip(optax.apply_updates(norm, updates), 0.0, 1.0)
-        cur = float(loss_of(norm))
-        history.append((cur, _to_py(norm)))
-        if np.isfinite(cur) and cur < best_loss:
-            best_loss, best_norm = cur, norm
+    best_vals, best_loss, default_loss, raw_hist = adam_descend_normalized(
+        loss_of, lo, hi, x0, steps=steps, lr=lr)
+    history: list = [(loss, dict(zip(fields, vals))) for loss, vals in raw_hist]
+    best_overrides = {f: float(best_vals[i]) for i, f in enumerate(fields)}
     # A diverged trajectory returns the large finite _AD_DIVERGE_PENALTY (not +inf), so a
     # finite best_loss is not enough — a best still in penalty territory means EVERY
     # evaluation diverged (no real fit). Threshold well above any real loss (O(1)).
@@ -257,7 +237,7 @@ def tune_closure_ad(
             f"(best={best_loss:g}); try the derivative-free path or a smaller dt/lr.")
     return TuneResult(
         scheme=base_turbulence.scheme,
-        best_overrides=_to_py(best_norm),
+        best_overrides=best_overrides,
         best_loss=best_loss,
         default_loss=default_loss,
         n_evaluated=len(history),
@@ -343,8 +323,8 @@ def main(argv: list[str] | None = None) -> int:
                         "DF per-candidate recompile), both=run+compare")
     p.add_argument("--n-random", type=int, default=12,
                    help="number of random candidates after the coordinate probe (df)")
-    p.add_argument("--ad-steps", type=int, default=20, help="AD gradient steps")
-    p.add_argument("--ad-lr", type=float, default=0.08, help="AD Adam learning rate")
+    p.add_argument("--ad-steps", type=int, default=AD_STEPS, help="AD gradient steps")
+    p.add_argument("--ad-lr", type=float, default=AD_LR, help="AD Adam learning rate")
     p.add_argument("--nlev", type=int, default=32, help="SCM vertical levels")
     p.add_argument("--dt", type=float, default=10.0, help="SCM timestep [s]")
     p.add_argument("--seed", type=int, default=0)

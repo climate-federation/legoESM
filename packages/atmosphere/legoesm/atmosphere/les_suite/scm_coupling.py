@@ -19,7 +19,9 @@ extrapolation of turbulence beyond the resolved column).
 """
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
+import numpy as np
 from legoesm.atmosphere.physics.thermodynamics import (
     potential_temperature_from_temperature,
     temperature_from_theta,
@@ -92,6 +94,9 @@ def interp_profile(values: Array, z_src: Array, z_dst: Array) -> Array:
     ``values`` is ``(nz_src,)`` or ``(nt, nz_src)`` (regrids the last axis);
     ``z_src`` is ``(nz_src,)`` strictly increasing. Targets outside ``z_src`` clamp
     to the nearest endpoint value (``jnp.interp`` semantics) — no extrapolation.
+    A non-increasing ``z_src`` raises when concrete; under tracing (e.g. the SCM's
+    own evolving heights inside ``jit``/``grad``) it cannot raise, so the result is
+    NaN instead of a plausible-looking wrong profile.
     """
     values = jnp.asarray(values)
     z_src = jnp.asarray(z_src, dtype=values.dtype)
@@ -102,12 +107,17 @@ def interp_profile(values: Array, z_src: Array, z_dst: Array) -> Array:
         raise ValueError(
             f"values last axis {values.shape[-1]} != len(z_src) {z_src.shape[0]}"
         )
-    if z_src.shape[0] >= 2 and not bool(jnp.all(jnp.diff(z_src) > 0)):
+    traced = isinstance(z_src, jax.core.Tracer)
+    if (z_src.shape[0] >= 2 and not traced
+            and not bool(np.all(np.diff(np.asarray(z_src)) > 0))):
         raise ValueError("z_src must be strictly increasing (surface-first)")
     if values.ndim == 1:
-        return jnp.interp(z_dst, z_src, values)
-    # (nt, nz): interp each row onto z_dst
-    return jnp.stack([jnp.interp(z_dst, z_src, row) for row in values])
+        out = jnp.interp(z_dst, z_src, values)
+    else:  # (nt, nz): interp each row onto z_dst
+        out = jnp.stack([jnp.interp(z_dst, z_src, row) for row in values])
+    if traced and z_src.shape[0] >= 2:
+        out = jnp.where(jnp.all(jnp.diff(z_src) > 0), out, jnp.nan)
+    return out
 
 
 def regrid_truth(truth: LESTruth, z_dst: Array) -> LESTruth:

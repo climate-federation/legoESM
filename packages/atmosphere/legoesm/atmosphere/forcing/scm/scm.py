@@ -637,6 +637,7 @@ class SingleColumnModel:
         # _tendency_fn skips the forcing branch entirely when no forcing
         # was supplied — preserves bit-exact behaviour for callers that
         # never use forcing.
+        self.forcing_arg = forcing
         self._tend_fn = _tendency_fn(
             physics_fn, grid, sigma_coord, forcing=forcing,
         )
@@ -1112,6 +1113,30 @@ class SingleColumnModel:
                 "pure_step is undefined for the AB2 integrator (it threads prev_tend "
                 "statefully); use forward_euler/rk2/rk4 for a scan rollout.")
         return self._step_fn(state, phys_state, self._tend_fn, self.dt, t_seconds)
+
+    def pure_step_with_physics(self, state, phys_state, t_seconds, physics_fn):
+        """:meth:`pure_step` with ``physics_fn`` in place of the built physics.
+
+        Same forcing (incl. the per-stage surface-flux / ``T_s`` injection into
+        ``phys_state``), integrator and ``dt``; only the physics evaluation differs.
+        ``physics_fn`` has the ``make_physics`` signature
+        ``(state, grid, sigma_coord, phys_state=None) -> (tendencies, phys_state)``.
+        Used to drive a column with a substitute closure that is not in the
+        production scheme dispatch. Refused for AB2 (stateful) and for split
+        microphysics substepping (its step function closes over the built physics).
+        """
+        if self.time_integrator == "ab2":
+            raise ValueError(
+                "pure_step_with_physics is undefined for the AB2 integrator; use "
+                "forward_euler/rk2/rk4.")
+        if self.microphysics_substeps > 1:
+            raise ValueError(
+                "pure_step_with_physics does not support microphysics_substeps > 1 "
+                "(the split step closes over the built microphysics function).")
+        tend_fn = _tendency_fn(
+            physics_fn, self.grid, self.sigma_coord, forcing=self.forcing_arg,
+        )
+        return self._step_fn(state, phys_state, tend_fn, self.dt, t_seconds)
 
     def run(
         self,

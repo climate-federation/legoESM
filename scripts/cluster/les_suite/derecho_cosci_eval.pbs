@@ -1,0 +1,46 @@
+#!/bin/bash
+#PBS -N cosci_eval
+#PBS -A UCLB0017
+#PBS -q develop
+#PBS -l select=1:ncpus=128:mem=230GB
+#PBS -l walltime=06:00:00
+#PBS -j oe
+#
+# Co-scientist experimenter on one Derecho CPU node: every line of JOBS is the
+# argument list of one scripts/validate/les_suite/cosci_eval.py run (candidate x
+# stage x cases, or a baseline). Lines run as NPROC parallel processes; XLA's Eigen
+# pool is single-threaded and OMP/BLAS get THREADS each, so NPROC ~ cores/THREADS
+# fills the node with many candidates/cases at once. Exits non-zero if any job
+# failed (each job's exit code is in its log line and in xargs' status).
+#
+#   qsub -v JOBS=/path/jobs.txt,NPROC=64,THREADS=2 derecho_cosci_eval.pbs
+set -uo pipefail
+: "${JOBS:?JOBS (file with one cosci_eval.py argument line per job) is required}"
+: "${REPO:=/glade/u/home/${USER}/legoesm}"
+: "${NPROC:=32}"
+: "${THREADS:=4}"
+: "${CONDA_ENV_PREFIX:=/glade/work/${USER}/conda-envs/legoesm-gpu}"
+LOGDIR="${LOGDIR:-$(dirname "${JOBS}")/logs}"
+mkdir -p "${LOGDIR}"
+
+module load conda gcc >/dev/null 2>&1 || { echo "module load failed" >&2; exit 90; }
+conda activate "${CONDA_ENV_PREFIX}" || exit 90
+cd "${REPO}" || exit 2
+# The env's editable install resolves legoesm.* to the MAIN checkout; put REPO's
+# own sources first so a worktree/branch REPO runs its own code.
+PYTHONPATH="${REPO}/src$(printf ':%s' "${REPO}"/packages/*)${PYTHONPATH:+:${PYTHONPATH}}"
+export PYTHONPATH JAX_PLATFORMS=cpu JAX_ENABLE_X64=1
+export OMP_NUM_THREADS="${THREADS}" OPENBLAS_NUM_THREADS="${THREADS}" MKL_NUM_THREADS="${THREADS}"
+export XLA_FLAGS="${XLA_FLAGS:-} --xla_cpu_multi_thread_eigen=false"
+echo "[cosci] host=$(hostname) sha=$(git rev-parse HEAD) dirty=$(git status --porcelain | wc -l) jobs=${JOBS} nproc=${NPROC} threads=${THREADS}"
+
+# shellcheck disable=SC2016
+grep -v '^\s*\(#\|$\)' "${JOBS}" | nl -ba -nrz -w4 | xargs -P "${NPROC}" -L 1 bash -c '
+  i=$1; shift
+  python scripts/validate/les_suite/cosci_eval.py "$@" > "'"${LOGDIR}"'/job_${i}.log" 2>&1
+  rc=$?
+  echo "[cosci] job ${i} exit=${rc}"
+  exit "${rc}"' _
+rc=$?
+echo "[cosci] all jobs finished, status=${rc}"
+exit "${rc}"

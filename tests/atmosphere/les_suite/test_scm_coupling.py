@@ -105,6 +105,18 @@ def test_interp_rejects_non_increasing_src():
         interp_profile(jnp.array([1.0, 2.0, 3.0]), z_src, jnp.array([50.0]))
 
 
+def test_interp_traced_src_matches_eager_and_poisons_non_increasing():
+    import jax
+    vals = jnp.array([1.0, 2.0, 3.0])
+    dst = jnp.array([50.0, 150.0])
+    jitted = jax.jit(lambda zs: interp_profile(vals, zs, dst))
+    good = jnp.array([0.0, 100.0, 200.0])
+    assert jnp.array_equal(jitted(good), interp_profile(vals, good, dst))
+    assert bool(jnp.all(jnp.isnan(jitted(jnp.array([0.0, 200.0, 100.0])))))
+    closed = jax.jit(lambda v: interp_profile(v, good, dst))  # concrete, captured heights
+    assert jnp.array_equal(closed(vals), interp_profile(vals, good, dst))
+
+
 def test_interp_rejects_shape_mismatch():
     with pytest.raises(ValueError):
         interp_profile(jnp.array([1.0, 2.0]), jnp.array([0.0, 1.0, 2.0]),

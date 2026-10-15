@@ -42,11 +42,11 @@ Array = jnp.ndarray
 # Floor on the normalizing std so a near-constant reference profile cannot blow up
 # the normalized RMSE (matches scm_rce_metrics.profile_floor usage). Applied in the
 # variable's own units, so it is passed per-call from the score functions below.
-_DEFAULT_PROFILE_FLOOR_THETA = 0.1        # K
-_DEFAULT_PROFILE_FLOOR_QT = 1.0e-4        # kg/kg
-_DEFAULT_PROFILE_FLOOR_WIND = 0.1         # m/s
-_DEFAULT_PROFILE_FLOOR_FLUX = 1.0e-3      # K m/s (heat flux)
-_DEFAULT_PROFILE_FLOOR_QFLUX = 1.0e-6     # (kg/kg) m/s
+PROFILE_FLOOR_THETA = 0.1        # K
+PROFILE_FLOOR_QT = 1.0e-4        # kg/kg
+PROFILE_FLOOR_WIND = 0.1         # m/s
+PROFILE_FLOOR_FLUX = 1.0e-3      # K m/s (heat flux)
+PROFILE_FLOOR_QFLUX = 1.0e-6     # (kg/kg) m/s
 
 
 def _normalized_rmse(
@@ -65,7 +65,7 @@ def _normalized_rmse(
     return weighted_rmse((scm - ref) / std, weights)
 
 
-def _normalized_rmse_series(
+def normalized_rmse_series(
     scm: Array, ref: Array, weights: Array, floor: float
 ) -> Array:
     """RMS-over-time of the per-snapshot normalized RMSE for a ``(nt, nz)`` series.
@@ -136,8 +136,8 @@ def diagnostic_flux_score(
     scm_wqt: Array | None = None,
     *,
     weights: Array | None = None,
-    theta_flux_floor: float = _DEFAULT_PROFILE_FLOOR_FLUX,
-    qt_flux_floor: float = _DEFAULT_PROFILE_FLOOR_QFLUX,
+    theta_flux_floor: float = PROFILE_FLOOR_FLUX,
+    qt_flux_floor: float = PROFILE_FLOOR_QFLUX,
 ) -> DiagnosticScore:
     """Score an SCM closure's flux against the LES total flux (D6 diagnostic).
 
@@ -196,9 +196,9 @@ def prognostic_profile_score(
     scm_qt: Array | None = None,
     *,
     weights: Array | None = None,
-    theta_floor: float = _DEFAULT_PROFILE_FLOOR_THETA,
-    qt_floor: float = _DEFAULT_PROFILE_FLOOR_QT,
-    wind_floor: float = _DEFAULT_PROFILE_FLOOR_WIND,
+    theta_floor: float = PROFILE_FLOOR_THETA,
+    qt_floor: float = PROFILE_FLOOR_QT,
+    wind_floor: float = PROFILE_FLOOR_WIND,
 ) -> PrognosticScore:
     """Score freely-integrated SCM profiles against LES truth (D6 prognostic).
 
@@ -208,9 +208,9 @@ def prognostic_profile_score(
     variables (θ_l, u, v, and q_t when moist).
     """
     w = _resolve_weights(truth.heights_m, weights)
-    theta_rmse = _normalized_rmse_series(scm_theta, truth.theta, w, theta_floor)
-    u_rmse = _normalized_rmse_series(scm_u, truth.u, w, wind_floor)
-    v_rmse = _normalized_rmse_series(scm_v, truth.v, w, wind_floor)
+    theta_rmse = normalized_rmse_series(scm_theta, truth.theta, w, theta_floor)
+    u_rmse = normalized_rmse_series(scm_u, truth.u, w, wind_floor)
+    v_rmse = normalized_rmse_series(scm_v, truth.v, w, wind_floor)
     if truth.qt is not None and scm_qt is None:
         raise ValueError(
             f"{truth.case_name}: moist truth (qt set) requires scm_qt; "
@@ -218,7 +218,7 @@ def prognostic_profile_score(
         )
     qt_rmse = None
     if truth.qt is not None:
-        qt_rmse = _normalized_rmse_series(scm_qt, truth.qt, w, qt_floor)
+        qt_rmse = normalized_rmse_series(scm_qt, truth.qt, w, qt_floor)
     terms = [theta_rmse, u_rmse, v_rmse]
     if qt_rmse is not None:
         terms.append(qt_rmse)

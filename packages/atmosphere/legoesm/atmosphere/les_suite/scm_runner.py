@@ -147,6 +147,16 @@ def _moist_cbl_physics(turbulence: TurbulenceConfig) -> PhysicsConfig:
     )
 
 
+def scm_physics_config(
+    artifact: LESReferenceArtifact, turbulence: TurbulenceConfig
+) -> PhysicsConfig:
+    """The physics config the artifact's SCM runs: turbulence only for a dry artifact,
+    turbulence + diagnostic condensation for a moist one (the selection
+    :func:`build_cbl_scm_from_artifact` applies)."""
+    return (_moist_cbl_physics(turbulence) if artifact.is_moist
+            else _dry_cbl_physics(turbulence))
+
+
 def _const_profile(profile):
     """A time-constant SCMForcing ``ProfileFn`` returning ``profile`` for every ``t`` — used
     for the steady geostrophic wind of the sheared CBL / stable SBL."""
@@ -338,8 +348,7 @@ def build_cbl_scm_from_artifact(
             if prof is not None:
                 moist_kwargs[fld] = _const_profile(
                     interp_profile(jnp.asarray(prof), z_les, z_scm))
-    physics = (_moist_cbl_physics(turbulence) if artifact.is_moist
-               else _dry_cbl_physics(turbulence))
+    physics = scm_physics_config(artifact, turbulence)
     forcing = SCMForcing(
         f_c=float(artifact.f_c),
         prescribe="fluxes",
