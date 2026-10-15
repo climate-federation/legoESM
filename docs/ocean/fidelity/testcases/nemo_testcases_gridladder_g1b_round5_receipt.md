@@ -141,10 +141,10 @@ round-238 gates.  OVERFLOW round 51 passes the older private hook directly,
 but uses flux-form momentum; `_nemo_vector_order` is false there, so the KEG
 branch cannot be reached.
 
-The initially broad guard changed VORTEX last-bit censuses.  For stage 2,
-KEG U/V moved from `21797/21995` to `21799/21995`, and ZAD from
-`22066/21995` to `22068/22004`; for stage 3, KEG moved from `21945/21534` to
-`21950/21534`, and ZAD from `21945/21534` to `21950/21539`.  Maxima stayed
+The initially broad guard REDUCED VORTEX last-bit censuses (toward NEMO).  For stage 2,
+KEG U/V moved from `21799/21995` to `21797/21995`, and ZAD from
+`22068/22004` to `22066/21995`; for stage 3, KEG moved from `21950/21534` to
+`21945/21534`, and ZAD from `21950/21539` to `21945/21534` (direction corrected after review).  Maxima stayed
 at `1.3553e-20` U and `2.7105e-20` V, with outputs at `1.1102e-16` (stage 2)
 and `2.2204e-16` (stage 3).  The guard is therefore gated to the public G1b
 selector; private-hook arms retain their pre-round-5 addition expression.
