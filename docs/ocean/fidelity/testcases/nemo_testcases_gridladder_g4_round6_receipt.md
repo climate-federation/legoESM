@@ -137,6 +137,12 @@ UNVERIFIED:
 - the stage-1 T/S cause (37 of 58 cells explained);
 - that `--resume` runs end to end (preflight only).
 
-## 8. Evidence hashes
+## 8. Citation gate and evidence
 
-SHA-256 prefixes in round23/ are listed in `round23/manifest.sha256`.
+- Gate on this receipt: 10 citations, 0 failures. 56 older code citations
+  shifted by this round's edits were re-anchored. Still red (OPEN): two
+  older map ranges now enclose lines this round inserted (the wind block
+  and the dyn_zdf stress block) — EXTENT-MISMATCH, their receipts' extents
+  need re-pinning.
+- SHA-256 prefixes of every round23/ artifact: `round23/manifest.sha256`
+  (32 files: ladders, route, probes, review log, gate output).
