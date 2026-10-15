@@ -2157,7 +2157,6 @@ CITATION_MAP = {
     'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/stp2d.f90:242-245': ['sshe_rhs(:,:) =                 emp(:,:)', 'sshe_rhs(:,:) = r1_rho0 * sshe_rhs(:,:)', 4],
     'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/stp2d.f90:270': 'DEALLOCATE( sshe_rhs , Ue_rhs , Ve_rhs , CdU_u , CdU_v )',
     'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/dynspg_ts.f90:274-276': ['ssh_frc(:,:) = sshe_rhs(:,:)', 'zv_frc(:,:) =   Ve_rhs(:,:)', 3],
-    'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/dynzdf.f90:338': 'puu(ji,jj,1,Kaa) = puu(ji,jj,1,Kaa) + rDt * utauU(ji,jj)   &',
     'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/dynzdf.f90:506': 'pvv(ji,jj,1,Kaa) = pvv(ji,jj,1,Kaa) + rDt * vtauV(ji,jj)   &',
     'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/trasbc.f90:269-270': ['qns(ji,jj) = qns(ji,jj) + qsr(ji,jj)         ! total heat flux in qns', 'qsr(ji,jj) = 0._wp                           ! qsr set to zero', 2],
     'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/trasbc.f90:285': 'pts(ji,jj,1,jp_tem,Krhs) = pts(ji,jj,1,jp_tem,Krhs) - emp(ji,jj)*pts(ji,jj,1,jp_tem,Kbb) * z1_rho0_e3t',
@@ -6731,7 +6730,7 @@ CITATION_MAP = {
         '# Argument validation at ENTRY, not inside the drag branch below:', 5],
     'ocean_model_latlon_cgrid.py:12874-12878': [
         'u_new, v_new = state.u.data, state.v.data',
-        'if do_momentum and getattr(_cfg_b, "surface_stress_implicit",', 4],
+        'if do_momentum and getattr(_cfg_b, "surface_stress_implicit",', 5],
     'ocean_model_latlon_cgrid.py:13121-13124': [
         'u_solve_in = u_solve_in - _u_bt_mean',
         'u_solve_in, v_solve_in)', 4],
@@ -7120,7 +7119,7 @@ CITATION_MAP = {
         ('_ws_v_live_mask, _grid, z_coord=_zc)[:2])', 1), 100],
     'ocean_model_latlon_cgrid.py:6484-6547': [
         ('if _sfx is not None:', 1),
-        ('F_slow_v + _wind_increment_v) * _slow_surface_v_mask', 1), 42],
+        ('F_slow_v + _wind_increment_v) * _slow_surface_v_mask', 1), 64],
     # --- round 186: admitted pre-day-180 process stream and qsr promotion ---
     'GYRE_OMIP_L2_P3_SM_R185PREPROC/BLD/ppsrc/nemo/stprk3_stg.f90:818-830': [
         'lr123_write = lwp .AND. .NOT.ln_tile .AND. kstg == 3 .AND.',
