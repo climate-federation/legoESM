@@ -1655,7 +1655,6 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynvor.f90:648-651': {
         'anchors': [
             ('CASE ( np_CRV )                           !* Coriolis + relative vorticity', 4),
-            'zwz(ji,jj) = ff_f(ji,jj)',
             ') * r1_e1e2f(ji,jj)',
             4],
         'routine': 'vor_ens',
