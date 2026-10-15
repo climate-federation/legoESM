@@ -1369,7 +1369,8 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
         without_eos_gdept: bool = False, without_stage_r3uv: bool = False,
         without_ratio_order: bool = False,
         without_r3t_product: bool = False,
-        without_nemo_zeta: bool = False) -> dict:
+        without_nemo_zeta: bool = False,
+        without_fold_unit_vec: bool = False) -> dict:
     if vor_fold_image:
         from legoesm.ocean.fidelity import nemo_testcase_recipe as _recipe
         calls: list = []
@@ -1396,7 +1397,8 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
                       without_stage_r3uv=without_stage_r3uv,
                       without_ratio_order=without_ratio_order,
                       without_r3t_product=without_r3t_product,
-                      without_nemo_zeta=without_nemo_zeta)
+                      without_nemo_zeta=without_nemo_zeta,
+                      without_fold_unit_vec=without_fold_unit_vec)
         require(len(calls) > 0, "the vorticity fold-image arm was never traced")
         out["vor_fold_image_measurement_arm"] = {"traces": len(calls)}
         out["label"] = f"{out['label']} + MEASUREMENT ARM (fold-image V row "\
@@ -1476,6 +1478,11 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
         if off:               # ROUND-6 BEFORE ARMS / plants, one option each
             require(getattr(cfg, name) is True, f"the card no longer selects {name}")
             cfg = cfg._replace(**{name: False})
+    if without_fold_unit_vec:  # G1b ROUND-2 BEFORE ARM / plant
+        require(cfg.barotropic.barotropic_literal_fold_unit_vector_form is True,
+                "the card no longer selects the fold unit under vector form")
+        cfg = cfg._replace(barotropic=cfg.barotropic._replace(
+            barotropic_literal_fold_unit_vector_form=False))
     if without_ratio_order:   # ROUND-8 BEFORE ARM / plant: divide by the area
         require(cfg.barotropic.barotropic_een_ratio_written_order is True,
                 "the card no longer selects the written-order ratios")
@@ -1687,6 +1694,8 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
                cfg.nemo_eos_gdept_rounded_product),
            "rk3_stage_r3uv_nemo_literal": bool(cfg.rk3_stage_r3uv_nemo_literal),
            "een_nemo_relative_vorticity": bool(cfg.een_nemo_relative_vorticity),
+           "barotropic_literal_fold_unit_vector_form": bool(
+               cfg.barotropic.barotropic_literal_fold_unit_vector_form),
            "barotropic_een_ratio_written_order": bool(
                cfg.barotropic.barotropic_een_ratio_written_order),
            "nemo_r3t_stored_product": bool(
@@ -2298,6 +2307,9 @@ def main(argv=None) -> int:
     ap.add_argument("--without-nemo-zeta", action="store_true",
                     help="G1b: een_total's relative vorticity from the generic "
                          "curl and the grid's F area (round 2's before arm / plant)")
+    ap.add_argument("--without-fold-unit-vec", action="store_true",
+                    help="G1b: the solver's literal fold unit off under vector "
+                         "form (round 2's before arm / plant)")
     ap.add_argument("--without-written-order", action="store_true",
                     help="the card with rk3_stage_velocity_written_order "
                          "switched off (a round-6 before arm; also its plant)")
@@ -2335,7 +2347,8 @@ def main(argv=None) -> int:
                   without_stage_r3uv=a.without_stage_r3uv,
                   without_ratio_order=a.without_ratio_order,
                   without_r3t_product=a.without_r3t_product,
-                  without_nemo_zeta=a.without_nemo_zeta)
+                  without_nemo_zeta=a.without_nemo_zeta,
+                  without_fold_unit_vec=a.without_fold_unit_vec)
     except Exception as e:      # noqa: BLE001 -- refusals print and exit 2
         print(f"REFUSE: {type(e).__name__}: {e}", file=sys.stderr)
         return 2
