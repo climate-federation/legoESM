@@ -13,6 +13,18 @@ at kt=8, so that selector remains false.
 Sea ice, runoff, decks, records, and NEMO sources did not change.  Decision
 126 remains pending with the user and the shipped runoff value is untouched.
 
+## LOUD CORRECTION (round 284)
+
+The original round-282 receipt marked preregistered falsifier R282-P2
+CONFIRMED from the seven-card trajectory census, but it did not run the
+preregistered matched stage-2 after-VOR check at `[19,33,3]`.  Round 284 ran
+that missing check under both entry labels.  Statement A reduces the absolute
+error from `1.2863307536456779e-08` to `3.3881317890172014e-21` m/s2 under
+each label.  The scientific prediction is therefore CONFIRMED, but the
+round-282 process claim that it had already been measured is retracted.  The
+repair, controls, and evidence are in
+`nemo_testcases_l4_orca2_round284_round282_review_receipt.md`.
+
 ## Provenance and imported statements
 
 - Lane base: `7bbe6b910032187f3acd024fb1128ddc27d40831`.
