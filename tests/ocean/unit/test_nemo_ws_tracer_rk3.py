@@ -794,6 +794,39 @@ def test_nemo_ws_tracer_stage_update_can_preserve_nemo_written_order():
     assert np.any(expected.view(np.uint64) != contracted.view(np.uint64))
 
 
+@pytest.mark.skipif(
+    not jax.config.x64_enabled, reason="requires JAX_ENABLE_X64=1")
+def test_nemo_ws_stage3_solve_rhs_written_order():
+    """trazdf.f90:284-289: e3t(Kbb)*T(Kbb) + p2dt*e3t(Kmm)*Krhs, rounded as written."""
+    rng = np.random.default_rng(11)
+    shape = (96, 96, 1)
+    base = jnp.asarray(rng.uniform(-2.0, 30.0, shape))
+    rate = jnp.asarray(rng.normal(scale=1e-6, size=shape))
+    e3t_b = jnp.asarray(rng.uniform(9.99, 10.01, shape))
+    e3t_m = jnp.asarray(rng.uniform(9.99, 10.01, shape))
+    ones = jnp.ones_like(base)
+    dt = jnp.asarray(10800.0, dtype=jnp.float64)
+
+    def content(written):
+        return model_module._nemo_ws_rk3_tracer_pair_step(
+            base, base, "none", ones, ones, jnp.ones((96, 96, 2)),
+            ones, ones, ones, ones, object(), dt, ones,
+            stage_source_rates=((rate, rate),) * 3,
+            stage3_content_written_order=(e3t_b, e3t_m) if written else None,
+            return_final_content=True)[2]
+
+    got = np.asarray(jax.jit(lambda: content(True))())
+    expected = np.add(np.multiply(np.asarray(e3t_b), np.asarray(base)),
+                      np.multiply(np.multiply(10800.0, np.asarray(e3t_m)),
+                                  np.asarray(rate)))
+    np.testing.assert_array_equal(got, expected)
+    # XLA does not fuse this small program either way, so this pins the
+    # written arithmetic only; production fusion is measured by the G4 stage
+    # route (round 28: 345 -> 200 cells).  The unselected arm reads the
+    # generic thickness (ones here) and must differ.
+    assert not np.array_equal(np.asarray(jax.jit(lambda: content(False))()), expected)
+
+
 def test_nemo_ws_tracer_written_order_requires_qco_weights():
     tracer = jnp.ones((1, 1, 1))
     with pytest.raises(ValueError, match="requires stage_qco_weights"):

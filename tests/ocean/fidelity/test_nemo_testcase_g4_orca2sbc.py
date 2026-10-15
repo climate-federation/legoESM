@@ -228,15 +228,17 @@ def test_g4_card_is_the_g3_card_under_orca2s_forcing(cards):
     stress = ["barotropic_wind_nemo_stored_depth", "surface_stress_nemo_fold_vector_sign",
               "zdf_surface_stress_nemo_face_thickness"]
     tracer_update = "rk3_stage_tracer_written_order"
+    stage3_heat = "rk3_stage3_heat_nemo_written"     # round 28
     assert sorted(f for f in a._fields if repr(getattr(a, f)) != repr(getattr(b, f))) == sorted(
-        ["physics", tracer_update, *stress])
+        ["physics", tracer_update, stage3_heat, *stress])
     assert all(getattr(a, f) is True and getattr(b, f) is False for f in stress)
     assert getattr(a, tracer_update) is True and getattr(b, tracer_update) is False
+    assert getattr(a, stage3_heat) is True and getattr(b, stage3_heat) is False
     assert [c for c, on in recipe._ORCA2G_WIND_STORED_DEPTH.items() if on] == ["ORCA2G4-sbc"]
     assert [c for c, on in recipe._ORCA2G_TRA_STAGE_ORDER.items() if on] == ["ORCA2G4-sbc"]
     from legoesm.ocean.state import LatLonCGridOceanConfig
     assert all(LatLonCGridOceanConfig._field_defaults[f] is False
-               for f in [*stress, tracer_update])
+               for f in [*stress, tracer_update, stage3_heat])
     assert [f for f in a.physics._fields
             if repr(getattr(a.physics, f)) != repr(getattr(b.physics, f))] == [
         "shortwave_penetration"]
@@ -588,6 +590,11 @@ def test_nemo_supplied_forcing_stage_one_and_three(tmp_path):
     tracer_before = mod.route(
         R21_P6_A, root, stages="1", without_tracer_update_option=True)["stages"]["1"]
     assert (tracer_before["T"]["unequal"], tracer_before["S"]["unequal"]) == (58, 45)
+    # round 28: NEMO's written stage-3 heat Krhs and solve RHS take stage-3 T
+    # from 489 to 200 unequal cells; deselected, the 489 return (the control).
+    assert three["T"]["unequal_values"] == 200 and three["S"]["unequal"] == 0
+    heat_before = mod.route(R21_P6_A, root, stages="3", without_stage3_heat_option=True)["stages"]["3"]
+    assert heat_before["T"]["unequal_values"] == 489
 
 
 @needs_inputs
