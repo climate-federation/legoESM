@@ -6195,10 +6195,20 @@ class LatLonCGridOceanModel:
                 _live_operands["advection_v"].data
                 + _live_operands["flux_form_hadv_v"].data)
             if callable(_rhs_term_observer):
+                _rhs_term_payload = {
+                    name: getattr(_mom_term_diagnostics, name).data
+                    for name in type(_mom_term_diagnostics)._fields}
+                # The historical diagnostic combines HPG and KEG in KE_PGF.
+                # Publish the already-computed production halves as well so
+                # the G1b walk can follow NEMO's compiled stp2d order
+                # (dyn_hpg, dyn_vor, dyn_keg) without re-evaluating either
+                # operator.  The observer remains write-only.
+                _rhs_term_payload.update({
+                    name: _live_operands[name].data
+                    for name in ("hpg_u", "hpg_v", "keg_u", "keg_v")})
                 jax.debug.callback(
                     _rhs_term_observer,
-                    {name: getattr(_mom_term_diagnostics, name).data
-                     for name in type(_mom_term_diagnostics)._fields},
+                    _rhs_term_payload,
                     ordered=False)
         else:
             tend = _tend_result

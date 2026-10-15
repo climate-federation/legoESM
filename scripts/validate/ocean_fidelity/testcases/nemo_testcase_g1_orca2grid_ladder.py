@@ -150,7 +150,7 @@ ARMS = ("geometry", "independent", "given_entry", "rhs", "handoff", "stages",
         "interior_events", "stage_replay", "substeps", "substeps_independent",
         "flux_update_replay", "ratio_fold_replay", "ratio_order_replay",
         "stage_operand_replay", "subnormal_environment")
-PLANTS = ("score", "entry")
+PLANTS = ("score", "entry", "rhs_split")
 CASES = ("ORCA2G1-flat", "ORCA2G1b-vec")   # G1b = G1 + ORCA2's vector-form advection
 CASE = CASES[0]           # --case: the card every arm builds
 STAGE_STEPS = 10          # round 1's record: stage frames at kt = 1..10
@@ -1933,9 +1933,15 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
                 wet = rep["wet_" + f]
                 terms = {k[:-2]: cut[f](v) for k, v in seen.items()
                          if k.endswith("_" + f)}
+                if plant == "rhs_split":
+                    planted = terms["hpg"].copy()
+                    j, i = np.argwhere(wet)[0]
+                    planted[j, i] = np.nextafter(planted[j, i], np.inf)
+                    terms["hpg"] = planted
                 total = terms["total"]
                 others = sum(v for k, v in terms.items()
-                             if k not in ("KE_PGF", "vortcor", "total"))
+                             if k not in ("KE_PGF", "vortcor", "total",
+                                          "hpg", "keg"))
                 rows.append({
                     "face": f,
                     "card_term_max_abs": {k: float(np.max(np.abs(v[wet])))
@@ -1950,6 +1956,15 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
                     "card_pressure_gradient_vs_replay": substep_row(
                         f"hpg.{f}", rep["hpg_" + f] - rep["keg_" + f] if vec
                         else rep["hpg_" + f], terms["KE_PGF"], wet, reg),
+                    "control_split_sum_vs_combined": substep_row(
+                        f"split.{f}", terms["KE_PGF"],
+                        terms["hpg"] + terms["keg"], wet, reg),
+                    "card_hpg_vs_replay": substep_row(
+                        f"hpg.{f}", rep["hpg_" + f], terms["hpg"], wet, reg),
+                    "card_keg_vs_replay": substep_row(
+                        f"keg.{f}", -rep["keg_" + f] if vec
+                        else np.zeros_like(rep["hpg_" + f]),
+                        terms["keg"], wet, reg),
                     "card_vorticity_vs_replay": substep_row(
                         f"vor.{f}", rep["vor_" + f], terms["vortcor"], wet, reg),
                     "replay_sum_of_card_terms_vs_nemo": substep_row(
@@ -2115,6 +2130,8 @@ def _print(out: dict) -> None:
                       {k: f"{v:.2e}" for k, v in r["card_term_max_abs"].items() if v})
                 for k in ("control_replay_vs_nemo", "card_total_vs_nemo",
                           "card_pressure_gradient_vs_replay",
+                          "control_split_sum_vs_combined",
+                          "card_hpg_vs_replay", "card_keg_vs_replay",
                           "card_vorticity_vs_replay",
                           "replay_sum_of_card_terms_vs_nemo"):
                     x = r[k]
@@ -2378,6 +2395,19 @@ def main(argv=None) -> int:
         if a.arm == "substeps":     # the table's own plant: one interior cell
             fired = any(r["name"] == "j001.mid.eta" and r["n_unequal"] == 1
                         for r in out["rows"])   # bit-identical when unplanted
+            print("STATUS PLANT-FIRED" if fired else "REFUSE: plant stayed green",
+                  file=sys.stderr)
+            return 1 if fired else 3
+        if a.plant == "rhs_split":
+            if a.arm != "rhs_terms" or a.kt_min != 2 or a.kt_max != 2:
+                print("REFUSE: rhs_split plant needs rhs_terms at kt 2",
+                      file=sys.stderr)
+                return 2
+            rows = out["per_kt"][0]["rows"]
+            fired = all(
+                r["control_split_sum_vs_combined"]["n_unequal"] >= 1
+                and r["card_hpg_vs_replay"]["n_unequal"] == 1
+                for r in rows)
             print("STATUS PLANT-FIRED" if fired else "REFUSE: plant stayed green",
                   file=sys.stderr)
             return 1 if fired else 3

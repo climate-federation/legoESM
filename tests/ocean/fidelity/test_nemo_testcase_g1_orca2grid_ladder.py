@@ -839,6 +839,9 @@ def test_step_2_right_hand_side_is_nemos_only_in_the_written_order(off, floor):
                      **{k: True for k in off})
     assert _terms(out, "control_replay_vs_nemo") == [0, 0]
     assert _terms(out, "card_pressure_gradient_vs_replay") == [0, 0]
+    assert _terms(out, "control_split_sum_vs_combined") == [0, 0]
+    assert _terms(out, "card_hpg_vs_replay") == [0, 0]
+    assert _terms(out, "card_keg_vs_replay") == [0, 0]
     for key in ("card_vorticity_vs_replay", "card_total_vs_nemo"):
         got = _terms(out, key)
         assert (got == [0, 0]) if not floor else min(got) >= floor, (key, got)
@@ -849,6 +852,14 @@ def test_right_hand_side_control_fires_on_a_planted_cell():
     out = ladder.run(RECORD5, arm="rhs_terms", kt_min=2, kt_max=2, allow_dirty=True,
                      plant="score")
     assert _terms(out, "control_replay_vs_nemo") == [1, 1]
+
+
+@needs_record5
+def test_right_hand_side_split_control_fires_on_a_planted_half():
+    out = ladder.run(RECORD5, arm="rhs_terms", kt_min=2, kt_max=2,
+                     allow_dirty=True, plant="rhs_split")
+    assert min(_terms(out, "control_split_sum_vs_combined")) >= 1
+    assert _terms(out, "card_hpg_vs_replay") == [1, 1]
 
 
 @needs_record5
