@@ -403,7 +403,8 @@ def _closure(root, *, seed, objective="symmetric", window_days=4,
     root.mkdir(parents=True, exist_ok=True)
     path = root / "closure.eqx"
     path.write_bytes(root.name.encode() if checkpoint is None else checkpoint)
-    return {"run_id": f"test/seed{seed}", "experiment": "test",
+    return {"kind": "trained", "run_id": f"test/seed{seed}",
+            "experiment": "test",
             "config_sha256": "a" * 64, "dataset_contract_sha256": "b" * 64,
             "network_seed": seed, "window_days": window_days,
             "objective": objective, "wall_ring": "excluded",
@@ -424,12 +425,109 @@ def _trained_run(root, *, seed, checkpoint=None, objective="symmetric",
                        window_days=window_days, checkpoint=checkpoint)
     digest = day_digest or hashlib.sha256(root.name.encode()).hexdigest()
     pins = {} if digest_key is None else {digest_key: {"day0001.npz": digest}}
-    manifest = {"schema": FREE_RUN_MANIFEST_SCHEMA, "status": "complete",
-                "closure": closure, **pins}
+    manifest = {
+        "schema": FREE_RUN_MANIFEST_SCHEMA, "status": "complete",
+        "device": "cpu", "backend": "cpu", "math_library": "libm",
+        "xla_flags": "", "jax_version": "test", "gpu_name": None,
+        "closure": closure, **pins}
     if edit is not None:
         edit(manifest)
     (root / "manifest.json").write_text(json.dumps(manifest))
     return root, evaluation._sha256(root / "manifest.json")
+
+
+def _cuda_control(root, control):
+    root.mkdir(parents=True)
+    manifest = {
+        "schema": FREE_RUN_MANIFEST_SCHEMA, "status": "complete",
+        "device": "cuda", "backend": "gpu", "math_library": "native",
+        "xla_flags": "--xla_gpu_autotune_level=0",
+        "jax_version": "test", "gpu_name": "synthetic GPU",
+        "namelist": evaluation.CONTROL_NAMELISTS[control]._asdict(),
+        "closure": {"kind": "none", "control": control},
+        "daily_sha256": {"day0001.npz": hashlib.sha256(
+            control.encode()).hexdigest()},
+    }
+    (root / "manifest.json").write_text(json.dumps(manifest))
+    return root, evaluation._sha256(root / "manifest.json")
+
+
+def _device_record(tmp_path, *, passes):
+    objective = "template"
+    controls = {name: _cuda_control(tmp_path / name, name)
+                for name in evaluation.CONTROL_NAMELISTS}
+    bindings = {name: evaluation.admit_control_run(
+        root, sha, control=name) for name, (root, sha) in controls.items()}
+    rows = {
+        name: (evaluation.control_as_seed(objective, name) if passes else
+               evaluation.truth_as_seed(objective))
+        for name in evaluation.CONTROL_NAMELISTS
+    }
+    payload = evaluation._device_check_summary(
+        rows, objective=objective, bindings=bindings)
+    path = tmp_path / ("device-pass.json" if passes else "device-fail.json")
+    path.write_text(json.dumps(payload, sort_keys=True, default=float))
+    return path, evaluation._sha256(path), payload
+
+
+def test_device_record_is_mechanical_and_cuda_requires_a_bound_pass(tmp_path):
+    pass_path, pass_sha, passed = _device_record(tmp_path / "passing",
+                                                 passes=True)
+    assert passed["pass"] and passed["verdict"] == "PASS"
+    assert evaluation.admit_device_check(
+        pass_path, pass_sha, objective="template") == passed
+
+    fail_path, fail_sha, failed = _device_record(tmp_path / "failing",
+                                                 passes=False)
+    assert not failed["pass"] and failed["verdict"] == "FAIL"
+    with pytest.raises(ValueError, match="verdict is not PASS"):
+        evaluation.admit_device_check(
+            fail_path, fail_sha, objective="template")
+
+    def cuda(manifest):
+        manifest.update(
+            device="cuda", backend="gpu", math_library="native",
+            xla_flags="--xla_gpu_autotune_level=0", gpu_name="synthetic GPU")
+
+    run = _trained_run(tmp_path / "trained", seed=7, objective="template",
+                       window_days=2, edit=cuda)
+    with pytest.raises(ValueError, match="requires an explicit PASS"):
+        evaluation.admit_trained_run(
+            *run, objective="template", window_days=2)
+    admitted = evaluation.admit_trained_run(
+        *run, objective="template", window_days=2,
+        device_check_record=(pass_path, pass_sha))
+    assert admitted["execution"]["device"] == "cuda"
+
+    payload = json.loads(pass_path.read_text())
+    payload["criteria"]["metric_tolerance"] = "tampered"
+    pass_path.write_text(json.dumps(payload, sort_keys=True))
+    with pytest.raises(ValueError, match="bound SHA-256"):
+        evaluation.admit_trained_run(
+            *run, objective="template", window_days=2,
+            device_check_record=(pass_path, pass_sha))
+    tampered_sha = evaluation._sha256(pass_path)
+    with pytest.raises(ValueError, match="does not reproduce"):
+        evaluation.admit_device_check(
+            pass_path, tampered_sha, objective="template")
+
+
+def test_one_seed_pilot_is_scored_without_claiming_the_three_seed_gate(
+        tmp_path, monkeypatch):
+    run = _trained_run(tmp_path / "pilot", seed=20261013, objective="template",
+                       window_days=2)
+    frozen = evaluation.frozen_gate("template")
+    rows = evaluation.truth_as_seed("template")
+    monkeypatch.setattr(evaluation, "freeze_record", lambda *args, **kwargs: (
+        frozen, None, {}))
+    monkeypatch.setattr(evaluation, "score_free_run",
+                        lambda *args, **kwargs: rows)
+    report = evaluation.score_one_trained_run(
+        *run, objective="template", window_days=2)
+    assert report["scores"] == rows
+    assert report["window_medians"] == evaluation._medians(rows)
+    assert report["gate_verdict"] is None
+    assert "three" in report["gate_verdict_reason"]
 
 
 def test_trained_score_requires_three_distinct_identified_runs(tmp_path,
@@ -519,6 +617,14 @@ def test_trained_score_requires_three_distinct_identified_runs(tmp_path,
             tmp_path / "round7_schema", seed=43, edit=lambda manifest:
             manifest.update(schema="legoesm-swg-online-free-run-v1"))},
             "manifest schema"),
+        "execution device missing": (runs | {"s0": _trained_run(
+            tmp_path / "no_device", seed=45, edit=lambda manifest:
+            manifest.pop("device"))}, "cpu\\+libm"),
+        "CUDA autotuning not disabled": (runs | {"s0": _trained_run(
+            tmp_path / "cuda_autotune", seed=46, edit=lambda manifest:
+            manifest.update(device="cuda", backend="gpu",
+                            math_library="native", gpu_name="test GPU"))},
+            "required XLA flag"),
         # round-7 verifier, minor 1: a list crashed instead of refusing
         "day-file digests listed": (runs | {"s0": _trained_run(
             tmp_path / "listed", seed=44, edit=lambda manifest:
@@ -562,6 +668,8 @@ def test_runs_with_identical_scored_data_are_refused(tmp_path, monkeypatch):
         root = tmp_path / f"run{k}"
         manifest = {
             "schema": FREE_RUN_MANIFEST_SCHEMA,
+            "device": "cpu", "backend": "cpu", "math_library": "libm",
+            "xla_flags": "", "jax_version": "test", "gpu_name": None,
             "namelist": SWG_DG50_NAMELIST._asdict(),
             "numerical_health": {
                 "all_finite": True, "minimum_total_layer_thickness_m": 497.0,
@@ -731,6 +839,33 @@ def test_available_windows_need_the_next_day_pinned(monkeypatch):
                             lambda root, c=completed: {"completed_days": c})
         assert evaluation.available_windows() == \
             evaluation.registered_windows(count), completed
+
+
+def test_device_check_and_single_run_commands_write_their_records(
+        tmp_path, monkeypatch):
+    device_report = {"schema": evaluation.DEVICE_CHECK_SCHEMA,
+                     "pass": True, "verdict": "PASS"}
+    monkeypatch.setattr(evaluation, "device_check",
+                        lambda controls, objective: device_report)
+    device_output = tmp_path / "device.json"
+    assert evaluation.main([
+        "device-check", "--objective", "template",
+        "--control", "nu10", "/nu10", "a" * 64,
+        "--control", "nu80", "/nu80", "b" * 64,
+        "--output", str(device_output)]) == 0
+    assert json.loads(device_output.read_text()) == device_report
+
+    score_report = {"schema": "legoesm.swg_online_single_run_score.v1",
+                    "gate_verdict": None}
+    monkeypatch.setattr(evaluation, "score_one_trained_run",
+                        lambda *args, **kwargs: score_report)
+    score_output = tmp_path / "score.json"
+    assert evaluation.main([
+        "score-run", "--objective", "template", "--window-days", "2",
+        "--run-root", "/run", "--manifest-sha256", "c" * 64,
+        "--device-check", "/device", "d" * 64,
+        "--output", str(score_output)]) == 0
+    assert json.loads(score_output.read_text()) == score_report
 
 
 @real_fields

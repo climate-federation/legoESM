@@ -13,7 +13,8 @@ trained window length (its last checkpoint) on the device and math policy
 the configuration states, writing every day's end-of-day snapshot beside its
 daily mean in the one free-run schema the held-out scorer admits
 (``legoesm.training.swg_online``).  It is a separate process, so a GPU
-training run and CPU free runs proceed side by side.
+training run and a configured CPU/libm or CUDA/native free run do not share
+an initialized JAX backend.
 
 ``profile`` times one optimiser step per window length (batch 10), one
 validation batch and, on the free runs' configured device, one free-run day,
@@ -54,12 +55,15 @@ from legoesm.ocean.fidelity.nemo_testcase_recipe import (
     build_swg_card,
     swg_surface_wind,
 )
+from legoesm.ocean.fidelity.swg_online_decks import SWG_DG50_NU80_NAMELIST
 from legoesm.ocean.state import OceanSurfaceForcing
 from legoesm.training.swg_online import (
     ADMITTED_WINDOWS_DAYS,
+    CUDA_AUTOTUNE_FLAG,
     DAILY_MEAN_FIELDS,
     DAILY_MEAN_LABEL,
     DUAL_SCHEMA,
+    FREE_RUN_EXECUTIONS,
     FREE_RUN_MANIFEST_SCHEMA,
     HOURS_PER_DAY,
     OBJECTIVE_OPERATORS,
@@ -90,20 +94,17 @@ from legoesm.training.swg_online import (
     swg_online_step,
 )
 
-CONFIG_SCHEMA = "legoesm-swg-online-training-v2"
+CONFIG_SCHEMA = "legoesm-swg-online-training-v3"
+CONTROL_CONFIG_SCHEMA = "legoesm-swg-online-control-v1"
 RUN_SCHEMA = "legoesm-swg-online-training-run-v1"
 LOG_SCHEMA = "legoesm-swg-online-training-log-v2"
 PROFILE_SCHEMA = "legoesm-swg-online-training-profile-v1"
 DATASET_SCHEMA = "legoesm-swg-online-dataset-v1"
 SCALE_RULE = "maddison_eq6_shallow_water_grid_analogue"
-DECKS = {"dg50": SWG_DG50_NAMELIST}
+DECKS = {"dg50": SWG_DG50_NAMELIST, "dg50-nu80": SWG_DG50_NU80_NAMELIST}
+TRAINING_DECKS = ("dg50",)
+CONTROL_DECKS = {"nu10": "dg50", "nu80": "dg50-nu80"}
 FREE_RUN_SAMPLING = "end_of_day_snapshot_and_daily_mean"
-# The held-out gate compares every trained free run with the no-closure
-# controls, and both controls ran on the CPU with libm (their manifests:
-# cpu-scanned, libm).  A configuration must state this execution for its
-# free runs; nothing else is admitted, so seed and controls differ only by
-# the closure.
-CONTROL_EXECUTION = {"device": "cpu", "transcendentals": "libm"}
 SECONDS_PER_DAY = 86_400
 _OPERATOR_FIELDS = {"symmetric": "box", "template": "filtered"}
 
@@ -152,9 +153,43 @@ def _require_int(value, where: str, *, minimum: int) -> int:
     return value
 
 
+def _validate_free_run(free_run: dict) -> None:
+    _require_keys(free_run, ("days", "start", "sampling", "device",
+                             "math_library"), "free_run")
+    _require_int(free_run["days"], "free_run days", minimum=1)
+    if free_run["start"] != "rest" or free_run["sampling"] != FREE_RUN_SAMPLING:
+        raise ValueError(
+            f"free runs start from rest with sampling {FREE_RUN_SAMPLING!r}")
+    execution = (free_run["device"], free_run["math_library"])
+    if execution not in FREE_RUN_EXECUTIONS:
+        raise ValueError(
+            "free-run device and math_library must be either "
+            "cpu+libm or cuda+native")
+
+
 def load_config(path: Path) -> dict:
     """Read one training configuration; every key is required, none extra."""
     config = json.loads(Path(path).read_text())
+    if config.get("schema") == CONTROL_CONFIG_SCHEMA:
+        _require_keys(config, (
+            "schema", "experiment", "description", "control", "deck",
+            "closure", "free_run"), "control configuration")
+        if not isinstance(config["experiment"], str) \
+                or re.fullmatch(r"[a-z0-9_]+", config["experiment"]) is None:
+            raise ValueError("experiment must be a lowercase [a-z0-9_] name")
+        if not isinstance(config["description"], str) or not config["description"]:
+            raise ValueError("description must be a non-empty string")
+        if config["control"] not in CONTROL_DECKS:
+            raise ValueError(f"control must be one of {sorted(CONTROL_DECKS)}")
+        if config["deck"] != CONTROL_DECKS[config["control"]]:
+            raise ValueError(
+                f"control {config['control']} requires deck "
+                f"{CONTROL_DECKS[config['control']]!r}")
+        if config["closure"] != "none":
+            raise ValueError("control free runs require closure='none'")
+        _validate_free_run(config["free_run"])
+        return config
+
     _require_keys(config, (
         "schema", "experiment", "description", "deck", "objective",
         "wall_ring", "network", "seeds", "dataset", "curriculum", "optimiser",
@@ -166,8 +201,8 @@ def load_config(path: Path) -> dict:
         raise ValueError("experiment must be a lowercase [a-z0-9_] name")
     if not isinstance(config["description"], str) or not config["description"]:
         raise ValueError("description must be a non-empty string")
-    if config["deck"] not in DECKS:
-        raise ValueError(f"deck must be one of {sorted(DECKS)}")
+    if config["deck"] not in TRAINING_DECKS:
+        raise ValueError(f"training deck must be one of {TRAINING_DECKS}")
     if config["objective"] not in OBJECTIVE_OPERATORS:
         raise ValueError(f"objective must be one of {OBJECTIVE_OPERATORS}")
     if config["wall_ring"] not in WALL_RING_OPTIONS:
@@ -238,23 +273,14 @@ def load_config(path: Path) -> dict:
     _require_keys(config["optimiser"], SWGOptimizerSettings._fields, "optimiser")
     create_swg_optimizer(SWGOptimizerSettings(**config["optimiser"]))
 
-    free_run = config["free_run"]
-    _require_keys(free_run, ("days", "start", "sampling", "device",
-                             "transcendentals"), "free_run")
-    _require_int(free_run["days"], "free_run days", minimum=1)
-    if free_run["start"] != "rest" or free_run["sampling"] != FREE_RUN_SAMPLING:
-        raise ValueError(
-            f"free runs start from rest with sampling {FREE_RUN_SAMPLING!r}")
-    if {key: free_run[key] for key in CONTROL_EXECUTION} != CONTROL_EXECUTION:
-        raise ValueError(
-            f"free runs must run as the gate's controls ran: {CONTROL_EXECUTION}")
+    _validate_free_run(config["free_run"])
     return config
 
 
 # ---------------------------------------------------------------- device/card
 
-def select_device(device: str, physical_gpu: int | None, *,
-                  environ=None) -> dict:
+def select_device(device: str, math_library: str, physical_gpu: int | None, *,
+                  reproducible_cuda: bool = False, environ=None) -> dict:
     """Check the explicit device selection and set the fp64 policy.
 
     A GPU run needs ``JAX_PLATFORMS=cuda`` (JAX 0.10 refuses ``gpu``) and
@@ -262,8 +288,9 @@ def select_device(device: str, physical_gpu: int | None, *,
     needs ``JAX_PLATFORMS=cpu``.  Nothing is inferred from what is visible.
     """
     environment = os.environ if environ is None else environ
-    if device not in ("cpu", "cuda"):
-        raise ValueError("device must be 'cpu' or 'cuda'")
+    if (device, math_library) not in FREE_RUN_EXECUTIONS:
+        raise ValueError(
+            "device and math_library must be cpu+libm or cuda+native")
     if environment.get("JAX_PLATFORMS") != device:
         raise RuntimeError(
             f"JAX_PLATFORMS must be exactly {device!r}, found "
@@ -276,6 +303,17 @@ def select_device(device: str, physical_gpu: int | None, *,
                 "CUDA_VISIBLE_DEVICES differs from --physical-gpu: "
                 f"{environment.get('CUDA_VISIBLE_DEVICES')!r} != "
                 f"{physical_gpu}")
+        if reproducible_cuda:
+            flags = environment.get("XLA_FLAGS", "").split()
+            autotune = [flag for flag in flags
+                        if flag.startswith("--xla_gpu_autotune_level=")]
+            if autotune and autotune != [CUDA_AUTOTUNE_FLAG]:
+                raise RuntimeError(
+                    "XLA_FLAGS sets a conflicting xla_gpu_autotune_level; "
+                    f"free runs require {CUDA_AUTOTUNE_FLAG}")
+            if not autotune:
+                flags.append(CUDA_AUTOTUNE_FLAG)
+                environment["XLA_FLAGS"] = " ".join(flags)
     elif physical_gpu is not None:
         raise ValueError("--physical-gpu is only valid with --device cuda")
     if not bool(jax.config.jax_enable_x64):
@@ -283,13 +321,16 @@ def select_device(device: str, physical_gpu: int | None, *,
     backend = jax.default_backend()
     if backend != ("gpu" if device == "cuda" else "cpu"):
         raise RuntimeError(f"device {device} selected backend {backend!r}")
-    transcendentals = "native" if device == "cuda" else "libm"
-    set_policy(PrecisionPolicy.fp64(transcendentals=transcendentals))
+    set_policy(PrecisionPolicy.fp64(transcendentals=math_library))
+    devices = jax.devices()
+    gpu_name = devices[0].device_kind if device == "cuda" else None
     return {
         "device": device, "backend": backend, "precision_policy": "fp64",
-        "transcendentals": transcendentals, "physical_gpu": physical_gpu,
+        "math_library": math_library, "physical_gpu": physical_gpu,
         "cuda_visible_devices": environment.get("CUDA_VISIBLE_DEVICES"),
         "jax_platforms": environment.get("JAX_PLATFORMS"),
+        "xla_flags": environment.get("XLA_FLAGS", ""),
+        "jax_version": jax.__version__, "gpu_name": gpu_name,
         "xla_python_client_mem_fraction": environment.get(
             "XLA_PYTHON_CLIENT_MEM_FRACTION"),
     }
@@ -531,14 +572,17 @@ def free_run(network, card, geometry, output: Path, *, days: int,
     closure = free_run_closure(closure)
     per_day = steps_per_day(card)
     namelist = free_run_namelist(card, days)
-    forcing, one_day = free_run_day(
-        network, card, geometry, key=jax.random.PRNGKey(closure["network_seed"]))
+    key = (jax.random.PRNGKey(closure["network_seed"])
+           if closure["kind"] == "trained" else None)
+    forcing, one_day = free_run_day(network, card, geometry, key=key)
     state = driver.seed_steady_forcing_carry(card.recipe.initial_state, forcing)
     output.mkdir(parents=True)
     manifest = {
         "schema": FREE_RUN_MANIFEST_SCHEMA, "legoesm_git_sha": commit,
-        "backend": device["backend"], "precision_policy": "fp64",
-        "transcendentals": device["transcendentals"], "days": days,
+        "device": device["device"], "backend": device["backend"],
+        "precision_policy": "fp64", "math_library": device["math_library"],
+        "xla_flags": device["xla_flags"], "jax_version": device["jax_version"],
+        "gpu_name": device["gpu_name"], "days": days,
         "steps_per_day": per_day, "start": "rest",
         "integration": ("one jitted scan per model day of swg_online_step "
                         "(certified SWE RK3 step, closure potential at every "
@@ -642,7 +686,8 @@ def _identity(config: dict, config_path: Path, card, geometry, spec, scales,
         "versions": {"jax": jax.__version__, "equinox": eqx.__version__,
                      "optax": optax.__version__, "numpy": np.__version__},
         "device": {key: device[key] for key in (
-            "device", "backend", "precision_policy", "transcendentals")},
+            "device", "backend", "precision_policy", "math_library",
+            "xla_flags", "jax_version", "gpu_name")},
         "execution": {
             "windows_per_call": windows_per_call,
             "segment": "build_segment_fn(checkpoint=True): rematerialise "
@@ -861,11 +906,12 @@ def run_free_run(config: dict, config_path: Path, *, card, seed: int,
     run is archived; a complete one is never overwritten.
     """
     run_dir = Path(run_dir)
-    execution = {key: device[key] for key in CONTROL_EXECUTION}
-    if execution != {key: config["free_run"][key] for key in CONTROL_EXECUTION}:
+    execution = {key: device[key] for key in ("device", "math_library")}
+    if execution != {key: config["free_run"][key]
+                     for key in ("device", "math_library")}:
         raise RuntimeError(f"free runs execute as configured "
                            f"({config['free_run']['device']}, "
-                           f"{config['free_run']['transcendentals']}), "
+                           f"{config['free_run']['math_library']}), "
                            f"not {execution}")
     identity = json.loads((run_dir / "run_manifest.json").read_text())
     if identity["config_sha256"] != _sha256(config_path) \
@@ -885,6 +931,7 @@ def run_free_run(config: dict, config_path: Path, *, card, seed: int,
     geometry = build_closure_geometry(card)
     spec, _ = network_spec(config, card, geometry)
     closure = free_run_closure({
+        "kind": "trained",
         "run_id": identity["run_id"], "experiment": config["experiment"],
         "config_sha256": identity["config_sha256"],
         "dataset_contract_sha256": identity["dataset"]["contract_sha256"],
@@ -903,6 +950,27 @@ def run_free_run(config: dict, config_path: Path, *, card, seed: int,
     return free_run(network, card, geometry, output,
                     days=config["free_run"]["days"], closure=closure,
                     commit=commit, device=device)
+
+
+def run_control_free_run(config: dict, *, card, output: Path, device: dict,
+                         commit: str) -> dict:
+    """Run one explicitly configured no-closure control from rest."""
+    if config.get("schema") != CONTROL_CONFIG_SCHEMA:
+        raise ValueError("no-closure free run requires a control configuration")
+    execution = {key: device[key] for key in ("device", "math_library")}
+    configured = {key: config["free_run"][key]
+                  for key in ("device", "math_library")}
+    if execution != configured:
+        raise RuntimeError(
+            f"control free run executes as configured {configured}, not {execution}")
+    if (output / "manifest.json").is_file():
+        raise FileExistsError(f"{output} already holds a complete free run")
+    _archive_incomplete(output)
+    return free_run(
+        None, card, build_closure_geometry(card), output,
+        days=config["free_run"]["days"],
+        closure=free_run_closure({"kind": "none", "control": config["control"]}),
+        commit=commit, device=device)
 
 
 def _update_function(optimizer):
@@ -1049,30 +1117,51 @@ def main(argv=None) -> int:
         if name in ("train", "profile"):
             command.add_argument("--windows-per-call", type=int, required=True,
                                  choices=(1, 2, 5, 10))
-        if name in ("train", "free-run"):
+        if name == "train":
             command.add_argument("--seed", type=int, required=True)
             command.add_argument("--run-root", type=Path, required=True)
+        elif name == "free-run":
+            command.add_argument("--seed", type=int)
+            command.add_argument("--run-root", type=Path, required=True)
+            command.add_argument("--physical-gpu", type=int)
         else:
             command.add_argument("--output", type=Path, required=True)
         if name == "free-run":
-            command.add_argument("--window-days", type=int, required=True)
+            command.add_argument("--window-days", type=int)
     args = parser.parse_args(argv)
     try:
         from legoesm.ocean.fidelity.provenance import git_sha
 
         config = load_config(args.config)
         if args.command == "free-run":
-            device = select_device(config["free_run"]["device"], None)
+            device = select_device(
+                config["free_run"]["device"], config["free_run"]["math_library"],
+                args.physical_gpu, reproducible_cuda=True)
         else:
-            device = select_device(args.device, args.physical_gpu)
+            math_library = "native" if args.device == "cuda" else "libm"
+            device = select_device(args.device, math_library, args.physical_gpu)
         card = build_deck_card(config["deck"])
         if args.command == "free-run":
-            run_dir = args.run_root / config["experiment"] / f"seed{args.seed}"
-            manifest = run_free_run(
-                config, args.config, card=card, seed=args.seed,
-                run_dir=run_dir, window_days=args.window_days, device=device,
-                commit=git_sha())
-            output = run_dir / "free_runs" / f"w{args.window_days:02d}"
+            if config["schema"] == CONTROL_CONFIG_SCHEMA:
+                if args.seed is not None or args.window_days is not None:
+                    raise ValueError(
+                        "no-closure control free runs do not take --seed or "
+                        "--window-days")
+                output = args.run_root / config["experiment"]
+                manifest = run_control_free_run(
+                    config, card=card, output=output, device=device,
+                    commit=git_sha())
+            else:
+                if args.seed is None or args.window_days is None:
+                    raise ValueError(
+                        "trained free runs require --seed and --window-days")
+                run_dir = (args.run_root / config["experiment"]
+                           / f"seed{args.seed}")
+                manifest = run_free_run(
+                    config, args.config, card=card, seed=args.seed,
+                    run_dir=run_dir, window_days=args.window_days, device=device,
+                    commit=git_sha())
+                output = run_dir / "free_runs" / f"w{args.window_days:02d}"
             print(f"FREE_RUN_COMPLETE root={output.resolve()} "
                   f"manifest_sha256={_sha256(output / 'manifest.json')} "
                   f"all_finite={manifest['numerical_health']['all_finite']}")

@@ -1,5 +1,5 @@
 {
-  "schema": "legoesm-swg-online-training-v2",
+  "schema": "legoesm-swg-online-training-v3",
   "experiment": "swgonl_exp1_template_ring_excluded",
   "description": "Experiment one, candidate template+excluded: fine-filtered start and target, unfiltered model vorticity in Eq. 7, first interior F ring next to the walls given zero weight. One of three candidates; the owner has not chosen the objective or the wall-ring treatment.",
   "deck": "dg50",
@@ -52,6 +52,6 @@
     "start": "rest",
     "sampling": "end_of_day_snapshot_and_daily_mean",
     "device": "cpu",
-    "transcendentals": "libm"
+    "math_library": "libm"
   }
 }

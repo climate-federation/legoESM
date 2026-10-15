@@ -32,6 +32,7 @@ from legoesm.ocean.fidelity.nemo_testcase_recipe import (
     SWG_MADDISON_NAMELIST,
     build_swg_card,
 )
+from legoesm.ocean.fidelity.swg_online_decks import SWG_DG50_NU80_NAMELIST
 from legoesm.training.swg_online import (  # the one schema, with its writer
     DAILY_MEAN_FIELDS,
     DAILY_MEAN_LABEL,
@@ -39,6 +40,7 @@ from legoesm.training.swg_online import (  # the one schema, with its writer
     SNAPSHOT_FIELDS,
     SNAPSHOT_LABEL,
     admit_free_run_closure,
+    admit_free_run_execution,
 )
 
 HERE = Path(__file__).resolve().parent
@@ -88,6 +90,9 @@ NOISE_METRICS = ("top_octave_ke_fraction", "top_octave_enstrophy_fraction",
                  "native_grid_noise_index")
 VARIABILITY_METRIC = "basin_eke_ratio"
 SCORE_METRICS = SKILL_METRICS + (VARIABILITY_METRIC,) + NOISE_METRICS
+DEVICE_CHECK_SCHEMA = "legoesm.swg_online_device_check.v1"
+CONTROL_NAMELISTS = {"nu10": SWG_DG50_NAMELIST,
+                     "nu80": SWG_DG50_NU80_NAMELIST}
 
 
 def _sha256(path: Path) -> str:
@@ -1036,7 +1041,8 @@ def freeze_record(objective: str, *, windows: list[tuple[int, int]],
 
 
 def score_free_run(root: Path, *, expected_manifest_sha256: str,
-                   reference: dict, windows: list[tuple[int, int]]) -> list[dict]:
+                   reference: dict, windows: list[tuple[int, int]],
+                   expected_namelist=SWG_DG50_NAMELIST) -> list[dict]:
     """Score one bound dg50 free run; a non-finite window fails its health.
 
     The driver's whole-run health record (every day, not only the scored
@@ -1047,7 +1053,7 @@ def score_free_run(root: Path, *, expected_manifest_sha256: str,
     if _sha256(root / "manifest.json") != expected_manifest_sha256:
         raise ValueError(f"{root}: manifest differs from its bound SHA-256")
     manifest = json.loads((root / "manifest.json").read_text())
-    climate._require_legoesm_deck(manifest.get("namelist", {}), SWG_DG50_NAMELIST)
+    climate._require_legoesm_deck(manifest.get("namelist", {}), expected_namelist)
     whole_run = manifest.get("numerical_health") or {}
     whole_run_ok = (
         whole_run.get("all_finite") is True
@@ -1070,8 +1076,131 @@ def score_free_run(root: Path, *, expected_manifest_sha256: str,
     return rows
 
 
+def admit_control_run(root: Path, manifest_sha256: str, *, control: str) -> dict:
+    """Admit one CUDA/native no-closure control for the device check."""
+    if control not in CONTROL_NAMELISTS:
+        raise ValueError(f"control must be one of {sorted(CONTROL_NAMELISTS)}")
+    root = Path(root).resolve()
+    if _sha256(root / "manifest.json") != manifest_sha256:
+        raise ValueError("control manifest differs from its bound SHA-256")
+    manifest = json.loads((root / "manifest.json").read_text())
+    closure = admit_free_run_closure(manifest)
+    if closure != {"kind": "none", "control": control}:
+        raise ValueError(
+            f"control manifest closure must identify no-closure {control}")
+    execution = admit_free_run_execution(manifest)
+    if (execution["device"], execution["math_library"]) != ("cuda", "native"):
+        raise ValueError("device-check controls must be CUDA/native free runs")
+    climate._require_legoesm_deck(
+        manifest.get("namelist", {}), CONTROL_NAMELISTS[control])
+    if not _day_file_pins(manifest):
+        raise ValueError("control manifest pins no day files")
+    return {"root": str(root), "manifest_sha256": manifest_sha256,
+            "control": control, "execution": execution}
+
+
+def _device_check_summary(control_rows: dict[str, list[dict]], *,
+                          objective: str, bindings: dict[str, dict]) -> dict:
+    """Build the mechanical device verdict from already scored controls."""
+    frozen = frozen_gate(objective)
+    if set(control_rows) != set(CONTROL_NAMELISTS) \
+            or set(bindings) != set(CONTROL_NAMELISTS):
+        raise ValueError("device check requires exactly nu10 and nu80 controls")
+    reports = {}
+    for control in sorted(CONTROL_NAMELISTS):
+        rows = control_rows[control]
+        medians = _medians(rows)
+        cpu = {metric: float(np.median(frozen["controls"][control][metric]))
+               for metric in SCORE_METRICS}
+        metrics = {
+            metric: {
+                "gpu": medians[metric], "cpu": cpu[metric],
+                "absolute_difference": abs(medians[metric] - cpu[metric]),
+                "truth_half_range": frozen["bars"][metric]["half_range"],
+                "passes": abs(medians[metric] - cpu[metric])
+                < frozen["bars"][metric]["half_range"],
+            }
+            for metric in SCORE_METRICS
+        }
+        pass_mark = held_out_gate(
+            {f"{control}{index}": rows for index in range(3)},
+            objective=objective)
+        reports[control] = {
+            "binding": bindings[control], "scores": rows,
+            "metrics": metrics, "all_metrics_within_truth_half_range": all(
+                value["passes"] for value in metrics.values()),
+            "pass_mark_pass": pass_mark["pass"],
+        }
+    passed = all(
+        report["all_metrics_within_truth_half_range"]
+        and not report["pass_mark_pass"] for report in reports.values())
+    return {
+        "schema": DEVICE_CHECK_SCHEMA, "objective": objective,
+        "criteria": {
+            "metric_tolerance": "strictly less than the metric's frozen truth half-range",
+            "controls_must_fail_pass_mark": True,
+        },
+        "controls": reports, "pass": passed,
+        "verdict": "PASS" if passed else "FAIL",
+    }
+
+
+def device_check(controls: dict[str, tuple[Path, str]], *,
+                 objective: str, fine_root: Path = FINE_TRUTH_ROOT) -> dict:
+    """Score both CUDA controls and compare them with their frozen CPU twins."""
+    frozen = frozen_gate(objective)
+    windows = [tuple(window) for window in frozen["windows"]]
+    record, _, reference = freeze_record(
+        objective, windows=windows, fine_root=fine_root)
+    for key in ("fine_truth_pins_sha256", "truth_loo", "controls"):
+        if record[key] != frozen[key]:
+            raise ValueError(f"gate inputs drifted from the frozen {key}")
+    bindings = {name: admit_control_run(root, sha, control=name)
+                for name, (root, sha) in controls.items()}
+    rows = {name: score_free_run(
+        root, expected_manifest_sha256=sha, reference=reference, windows=windows,
+        expected_namelist=CONTROL_NAMELISTS[name])
+        for name, (root, sha) in controls.items()}
+    return _device_check_summary(rows, objective=objective, bindings=bindings)
+
+
+def admit_device_check(path: Path, sha256: str, *, objective: str) -> dict:
+    """Admit a byte-bound PASS device record and re-evaluate its verdict."""
+    path = Path(path)
+    if _sha256(path) != sha256:
+        raise ValueError("device-check record differs from its bound SHA-256")
+    payload = json.loads(path.read_text())
+    if payload.get("schema") != DEVICE_CHECK_SCHEMA:
+        raise ValueError(f"device-check schema must be {DEVICE_CHECK_SCHEMA!r}")
+    if payload.get("objective") != objective:
+        raise ValueError("device-check objective differs from the score request")
+    controls = payload.get("controls")
+    if not isinstance(controls, dict) or set(controls) != set(CONTROL_NAMELISTS):
+        raise ValueError("device-check record requires exactly nu10 and nu80")
+    bindings = {}
+    rows = {}
+    for name in CONTROL_NAMELISTS:
+        report = controls[name]
+        if not isinstance(report, dict) or not isinstance(report.get("binding"), dict) \
+                or not isinstance(report.get("scores"), list):
+            raise ValueError(f"device-check {name} evidence is malformed")
+        binding = report["binding"]
+        bindings[name] = admit_control_run(
+            Path(binding.get("root", "")), binding.get("manifest_sha256", ""),
+            control=name)
+        rows[name] = report["scores"]
+    expected = _device_check_summary(
+        rows, objective=objective, bindings=bindings)
+    if payload != expected:
+        raise ValueError("device-check record content does not reproduce its verdict")
+    if not payload["pass"] or payload["verdict"] != "PASS":
+        raise ValueError("device-check record verdict is not PASS")
+    return payload
+
+
 def admit_trained_run(root: Path, manifest_sha256: str, *, objective: str,
-                      window_days: int) -> dict:
+                      window_days: int,
+                      device_check_record: tuple[Path, str] | None = None) -> dict:
     """Admit ONE trained-closure free run by its manifest, before scoring.
 
     The manifest, bound by its SHA-256, must follow the one free-run schema
@@ -1085,6 +1214,14 @@ def admit_trained_run(root: Path, manifest_sha256: str, *, objective: str,
         raise ValueError("manifest differs from its bound SHA-256")
     manifest = json.loads((root / "manifest.json").read_text())
     closure = admit_free_run_closure(manifest)
+    if closure.get("kind") != "trained":
+        raise ValueError("manifest does not identify a trained closure")
+    execution = admit_free_run_execution(manifest)
+    if execution["device"] == "cuda":
+        if device_check_record is None:
+            raise ValueError(
+                "CUDA trained free run requires an explicit PASS device-check record")
+        admit_device_check(*device_check_record, objective=objective)
     request = {"objective": objective, "window_days": window_days}
     stated = {key: closure[key] for key in request}
     if stated != request:
@@ -1099,13 +1236,16 @@ def admit_trained_run(root: Path, manifest_sha256: str, *, objective: str,
         "checkpoint_path": closure["checkpoint_path"],
         "checkpoint_sha256": closure["checkpoint_sha256"],
         "network_seed": closure["network_seed"],
+        "execution": execution,
         "_directory": (directory.st_dev, directory.st_ino),
         "_day_files": set(pins.values()),
     }
 
 
 def bind_trained_runs(seeds: dict[str, tuple[Path, str]], *, objective: str,
-                      window_days: int) -> dict[str, dict]:
+                      window_days: int,
+                      device_check_record: tuple[Path, str] | None = None
+                      ) -> dict[str, dict]:
     """Refuse anything but three or more DISTINCT, admitted trained runs.
 
     Each run is admitted by ``admit_trained_run``.  Roots (as directories,
@@ -1126,7 +1266,8 @@ def bind_trained_runs(seeds: dict[str, tuple[Path, str]], *, objective: str,
     for label, (root, sha) in seeds.items():
         try:
             bound[label] = admit_trained_run(
-                root, sha, objective=objective, window_days=window_days)
+                root, sha, objective=objective, window_days=window_days,
+                device_check_record=device_check_record)
         except ValueError as error:
             raise ValueError(f"{label}: {error}") from error
     for key in ("_directory", "manifest_sha256", "network_seed",
@@ -1148,6 +1289,7 @@ def bind_trained_runs(seeds: dict[str, tuple[Path, str]], *, objective: str,
 
 def score_trained_closure(seeds: dict[str, tuple[Path, str]], *, objective: str,
                           window_days: int,
+                          device_check_record: tuple[Path, str] | None = None,
                           fine_root: Path = FINE_TRUTH_ROOT) -> dict:
     """Score >= 3 distinct, explicitly bound trained-closure free runs.
 
@@ -1160,7 +1302,8 @@ def score_trained_closure(seeds: dict[str, tuple[Path, str]], *, objective: str,
     """
     frozen = frozen_gate(objective)
     bindings = bind_trained_runs(seeds, objective=objective,
-                                 window_days=window_days)
+                                 window_days=window_days,
+                                 device_check_record=device_check_record)
     windows = [tuple(window) for window in frozen["windows"]]
     record, _, reference = freeze_record(
         objective, windows=windows, fine_root=fine_root)
@@ -1184,6 +1327,34 @@ def score_trained_closure(seeds: dict[str, tuple[Path, str]], *, objective: str,
             "objective": objective, "window_days": window_days,
             "seed_bindings": bindings,
             "gate": held_out_gate(seed_scores, objective=objective)}
+
+
+def score_one_trained_run(root: Path, manifest_sha256: str, *, objective: str,
+                          window_days: int,
+                          device_check_record: tuple[Path, str] | None = None,
+                          fine_root: Path = FINE_TRUTH_ROOT) -> dict:
+    """Score one trained run without claiming the three-seed gate verdict."""
+    binding = admit_trained_run(
+        root, manifest_sha256, objective=objective, window_days=window_days,
+        device_check_record=device_check_record)
+    frozen = frozen_gate(objective)
+    windows = [tuple(window) for window in frozen["windows"]]
+    record, _, reference = freeze_record(
+        objective, windows=windows, fine_root=fine_root)
+    for key in ("fine_truth_pins_sha256", "truth_loo", "controls"):
+        if record[key] != frozen[key]:
+            raise ValueError(f"gate inputs drifted from the frozen {key}")
+    rows = score_free_run(
+        root, expected_manifest_sha256=manifest_sha256, reference=reference,
+        windows=windows)
+    return {
+        "schema": "legoesm.swg_online_single_run_score.v1",
+        "objective": objective, "window_days": window_days,
+        "binding": binding, "scores": rows,
+        "window_medians": _medians(rows),
+        "gate_verdict": None,
+        "gate_verdict_reason": "one pilot seed; held-out gate requires at least three",
+    }
 
 
 def freeze_report(objective: str, *, verify: bool) -> dict:
@@ -1233,7 +1404,24 @@ def main(argv=None) -> int:
                        help="training window length every seed must state")
     score.add_argument("--seed", nargs=3, action="append", required=True,
                        metavar=("LABEL", "ROOT", "MANIFEST_SHA256"))
+    score.add_argument("--device-check", nargs=2,
+                       metavar=("RECORD", "SHA256"))
     score.add_argument("--output", type=Path, required=True)
+    one = commands.add_parser(
+        "score-run", help="score one pilot run without a three-seed verdict")
+    one.add_argument("--objective", required=True)
+    one.add_argument("--window-days", type=int, required=True)
+    one.add_argument("--run-root", type=Path, required=True)
+    one.add_argument("--manifest-sha256", required=True)
+    one.add_argument("--device-check", nargs=2,
+                     metavar=("RECORD", "SHA256"))
+    one.add_argument("--output", type=Path, required=True)
+    device = commands.add_parser(
+        "device-check", help="compare CUDA controls with frozen CPU controls")
+    device.add_argument("--objective", required=True)
+    device.add_argument("--control", nargs=3, action="append", required=True,
+                        metavar=("NAME", "ROOT", "MANIFEST_SHA256"))
+    device.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
         if args.command == "record":
@@ -1254,14 +1442,32 @@ def main(argv=None) -> int:
                 and checks["truth_passes"]
                 and all(checks["controls_fail"].values())
                 and all(checks["plants_fail"].values()))) else 1
-        else:
+        elif args.command == "score":
             labels = [label for label, _, _ in args.seed]
             if len(set(labels)) != len(labels):
                 raise ValueError("seed labels must be unique")
             report = score_trained_closure(
                 {label: (Path(root), sha) for label, root, sha in args.seed},
-                objective=args.objective, window_days=args.window_days)
+                objective=args.objective, window_days=args.window_days,
+                device_check_record=(None if args.device_check is None else
+                                     (Path(args.device_check[0]),
+                                      args.device_check[1])))
             code = 0 if report["gate"]["pass"] else 1
+        elif args.command == "score-run":
+            report = score_one_trained_run(
+                args.run_root, args.manifest_sha256,
+                objective=args.objective, window_days=args.window_days,
+                device_check_record=(None if args.device_check is None else
+                                     (Path(args.device_check[0]),
+                                      args.device_check[1])))
+            code = 0
+        else:
+            named = {name: (Path(root), sha) for name, root, sha in args.control}
+            if set(named) != set(CONTROL_NAMELISTS) \
+                    or len(named) != len(args.control):
+                raise ValueError("device-check needs one nu10 and one nu80 control")
+            report = device_check(named, objective=args.objective)
+            code = 0 if report["pass"] else 1
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(
             json.dumps(report, indent=2, sort_keys=True, default=float) + "\n")

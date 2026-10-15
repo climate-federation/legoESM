@@ -1557,11 +1557,14 @@ SNAPSHOT_LABEL = "end-of-day instantaneous state"
 DAILY_MEAN_LABEL = "arithmetic mean of every post-step state in model day"
 SNAPSHOT_FIELDS = ("ssh_m", "u_m_s", "v_m_s")
 DAILY_MEAN_FIELDS = ("ssh_daily_mean_m", "u_daily_mean_m_s", "v_daily_mean_m_s")
-FREE_RUN_MANIFEST_SCHEMA = "legoesm-swg-online-free-run-v2"
+FREE_RUN_MANIFEST_SCHEMA = "legoesm-swg-online-free-run-v3"
+FREE_RUN_EXECUTIONS = (("cpu", "libm"), ("cuda", "native"))
+CUDA_AUTOTUNE_FLAG = "--xla_gpu_autotune_level=0"
 FREE_RUN_CLOSURE_KEYS = (
-    "run_id", "experiment", "config_sha256", "dataset_contract_sha256",
+    "kind", "run_id", "experiment", "config_sha256", "dataset_contract_sha256",
     "network_seed", "window_days", "objective", "wall_ring", "network_spec",
     "checkpoint_path", "checkpoint_sha256")
+FREE_RUN_CONTROL_KEYS = ("kind", "control")
 
 
 def _is_sha256(value) -> bool:
@@ -1577,12 +1580,21 @@ def free_run_closure(closure) -> dict:
     ``checkpoint_path`` must name an existing file whose SHA-256 is
     ``checkpoint_sha256``, so a manifest is tied to the network file it names.
     """
+    if isinstance(closure, dict) and closure.get("kind") == "none":
+        if set(closure) != set(FREE_RUN_CONTROL_KEYS):
+            raise ValueError("no-closure free-run closure must hold exactly "
+                             f"the keys {sorted(FREE_RUN_CONTROL_KEYS)}")
+        if closure["control"] not in ("nu10", "nu80"):
+            raise ValueError("no-closure free-run control must be 'nu10' or 'nu80'")
+        return dict(closure)
     if not isinstance(closure, dict) \
             or set(closure) != set(FREE_RUN_CLOSURE_KEYS):
         found = (sorted(closure) if isinstance(closure, dict)
                  else type(closure).__name__)
         raise ValueError("free-run closure must hold exactly the keys "
                          f"{sorted(FREE_RUN_CLOSURE_KEYS)}, found {found}")
+    if closure["kind"] != "trained":
+        raise ValueError("trained free-run closure kind must be 'trained'")
     for key in ("run_id", "experiment"):
         if not isinstance(closure[key], str) or not closure[key]:
             raise ValueError(f"free-run closure {key} must be a non-empty string")
@@ -1629,3 +1641,35 @@ def admit_free_run_closure(manifest) -> dict:
         raise ValueError(f"free-run manifest schema must be "
                          f"{FREE_RUN_MANIFEST_SCHEMA!r}, found {schema!r}")
     return free_run_closure(manifest.get("closure"))
+
+
+def admit_free_run_execution(manifest) -> dict:
+    """Validate and return one free run's explicit execution provenance."""
+    if not isinstance(manifest, dict):
+        raise ValueError("free-run manifest must be a mapping")
+    execution = {key: manifest.get(key) for key in (
+        "device", "backend", "math_library", "xla_flags", "jax_version",
+        "gpu_name")}
+    pair = (execution["device"], execution["math_library"])
+    if pair not in FREE_RUN_EXECUTIONS:
+        raise ValueError(
+            "free-run manifest execution must be cpu+libm or cuda+native")
+    expected_backend = "gpu" if execution["device"] == "cuda" else "cpu"
+    if execution["backend"] != expected_backend:
+        raise ValueError(
+            f"free-run manifest backend must be {expected_backend!r}")
+    if not isinstance(execution["xla_flags"], str):
+        raise ValueError("free-run manifest xla_flags must be a string")
+    if not isinstance(execution["jax_version"], str) \
+            or not execution["jax_version"]:
+        raise ValueError("free-run manifest jax_version must be a non-empty string")
+    if execution["device"] == "cuda":
+        if CUDA_AUTOTUNE_FLAG not in execution["xla_flags"].split():
+            raise ValueError(
+                f"CUDA free run lacks required XLA flag {CUDA_AUTOTUNE_FLAG}")
+        if not isinstance(execution["gpu_name"], str) \
+                or not execution["gpu_name"]:
+            raise ValueError("CUDA free run must record a GPU name")
+    elif execution["gpu_name"] is not None:
+        raise ValueError("CPU free run must record gpu_name as null")
+    return execution

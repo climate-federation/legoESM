@@ -55,9 +55,14 @@ evaluation = _load(
     "testcases/nemo_testcase_l1_swg_online_evaluation.py")
 CONFIGS = sorted((_ROOT / "config/swg_online").glob("exp1_*.json"))
 PILOT = _ROOT / "config/swg_online/pilot_template_ring_excluded.json"
+CONTROL_CONFIGS = {
+    name: _ROOT / f"config/swg_online/control_{name}_gpu.json"
+    for name in ("nu10", "nu80")}
+SMOKE_CONFIG = _ROOT / "config/swg_online/control_nu10_gpu_smoke_2d.json"
 CPU = {"device": "cpu", "backend": "cpu", "precision_policy": "fp64",
-       "transcendentals": "libm", "physical_gpu": None,
+       "math_library": "libm", "physical_gpu": None,
        "cuda_visible_devices": None, "jax_platforms": "cpu",
+       "xla_flags": "", "jax_version": jax.__version__, "gpu_name": None,
        "xla_python_client_mem_fraction": None}
 
 
@@ -108,7 +113,7 @@ def test_committed_configs_are_the_three_candidates_of_the_template_procedure():
         assert config["free_run"] == {
             "days": 7300, "start": "rest",
             "sampling": "end_of_day_snapshot_and_daily_mean",
-            "device": "cpu", "transcendentals": "libm"}
+            "device": "cpu", "math_library": "libm"}
         assert config["deck"] == "dg50"
 
 
@@ -126,8 +131,32 @@ def test_pilot_restricts_seeds_windows_and_training_years_by_its_own_keys():
                     description=pilot["description"], seeds=[20261013])
     expected["dataset"]["splits_days"]["train"] = [first, first + 2 * 365]
     expected["curriculum"]["window_days"] = [1, 2]
+    expected["free_run"].update(device="cuda", math_library="native")
     assert pilot == expected
     assert pilot["dataset"]["splits_days"]["train"] == [731, 1461]
+
+
+def test_gpu_control_configs_name_the_frozen_control_choices_exactly():
+    for name, path in CONTROL_CONFIGS.items():
+        config = driver.load_config(path)
+        assert config == {
+            "schema": driver.CONTROL_CONFIG_SCHEMA,
+            "experiment": f"swgonl_control_{name}_gpu",
+            "description": config["description"],
+            "control": name,
+            "deck": "dg50" if name == "nu10" else "dg50-nu80",
+            "closure": "none",
+            "free_run": {
+                "days": 7300, "start": "rest",
+                "sampling": "end_of_day_snapshot_and_daily_mean",
+                "device": "cuda", "math_library": "native"},
+        }
+    smoke = driver.load_config(SMOKE_CONFIG)
+    assert smoke["control"] == "nu10"
+    assert smoke["free_run"] == {
+        "days": 2, "start": "rest",
+        "sampling": "end_of_day_snapshot_and_daily_mean",
+        "device": "cuda", "math_library": "native"}
 
 
 @pytest.mark.parametrize("edit,match", [
@@ -151,8 +180,8 @@ def test_pilot_restricts_seeds_windows_and_training_years_by_its_own_keys():
     (lambda c: c["free_run"].update(start="restart"), "rest"),
     (lambda c: c["free_run"].update(sampling="daily_snapshot"), "sampling"),
     (lambda c: c["free_run"].pop("device"), "exactly the keys"),
-    (lambda c: c["free_run"].update(device="cuda"), "controls ran"),
-    (lambda c: c["free_run"].update(transcendentals="native"), "controls ran"),
+    (lambda c: c["free_run"].update(device="tpu"), r"cpu\+libm"),
+    (lambda c: c["free_run"].update(math_library="fast"), r"cpu\+libm"),
     (lambda c: c.update(deck="maddison"), "deck"),
 ])
 def test_config_refuses_missing_extra_and_unknown_choices(tmp_path, edit, match):
@@ -180,32 +209,48 @@ def test_driver_refuses_to_start_without_a_configuration_file(tmp_path, capsys):
 
 def test_device_selection_is_explicit_and_never_inferred(monkeypatch):
     with pytest.raises(RuntimeError, match="exactly 'cuda'"):
-        driver.select_device("cuda", 1, environ={
+        driver.select_device("cuda", "native", 1, environ={
             "JAX_PLATFORMS": "gpu", "CUDA_VISIBLE_DEVICES": "1"})
     with pytest.raises(RuntimeError, match="exactly 'cuda'"):
-        driver.select_device("cuda", 1, environ={"CUDA_VISIBLE_DEVICES": "1"})
+        driver.select_device("cuda", "native", 1,
+                             environ={"CUDA_VISIBLE_DEVICES": "1"})
     with pytest.raises(ValueError, match="--physical-gpu"):
-        driver.select_device("cuda", None, environ={"JAX_PLATFORMS": "cuda"})
+        driver.select_device("cuda", "native", None,
+                             environ={"JAX_PLATFORMS": "cuda"})
     with pytest.raises(RuntimeError, match="CUDA_VISIBLE_DEVICES"):
-        driver.select_device("cuda", 1, environ={
+        driver.select_device("cuda", "native", 1, environ={
             "JAX_PLATFORMS": "cuda", "CUDA_VISIBLE_DEVICES": "0"})
     with pytest.raises(ValueError, match="only valid"):
-        driver.select_device("cpu", 0, environ={"JAX_PLATFORMS": "cpu"})
+        driver.select_device("cpu", "libm", 0, environ={"JAX_PLATFORMS": "cpu"})
     with pytest.raises(RuntimeError, match="exactly 'cpu'"):
-        driver.select_device("cpu", None, environ={})
+        driver.select_device("cpu", "libm", None, environ={})
     with pytest.raises(RuntimeError, match="selected backend"):
-        driver.select_device("cuda", 1, environ={
+        driver.select_device("cuda", "native", 1, environ={
             "JAX_PLATFORMS": "cuda", "CUDA_VISIBLE_DEVICES": "1"})
+    with pytest.raises(ValueError, match=r"cpu\+libm"):
+        driver.select_device("cuda", "libm", 1, environ={})
     previous = get_policy()
     try:
         assert driver.select_device(
-            "cpu", None, environ={"JAX_PLATFORMS": "cpu"})["transcendentals"] \
+            "cpu", "libm", None,
+            environ={"JAX_PLATFORMS": "cpu"})["math_library"] \
             == "libm"
         monkeypatch.setattr(driver.jax, "default_backend", lambda: "gpu")
-        selected = driver.select_device("cuda", 1, environ={
-            "JAX_PLATFORMS": "cuda", "CUDA_VISIBLE_DEVICES": "1"})
-        assert selected["transcendentals"] == "native"
+        monkeypatch.setattr(driver.jax, "devices", lambda: [
+            types.SimpleNamespace(device_kind="V100S")])
+        environment = {"JAX_PLATFORMS": "cuda", "CUDA_VISIBLE_DEVICES": "1",
+                       "XLA_FLAGS": "--another_flag=true"}
+        selected = driver.select_device(
+            "cuda", "native", 1, reproducible_cuda=True, environ=environment)
+        assert selected["math_library"] == "native"
         assert selected["physical_gpu"] == 1
+        assert selected["gpu_name"] == "V100S"
+        assert environment["XLA_FLAGS"].split()[-1] == driver.CUDA_AUTOTUNE_FLAG
+        with pytest.raises(RuntimeError, match="conflicting"):
+            driver.select_device(
+                "cuda", "native", 1, reproducible_cuda=True,
+                environ={"JAX_PLATFORMS": "cuda", "CUDA_VISIBLE_DEVICES": "1",
+                         "XLA_FLAGS": "--xla_gpu_autotune_level=2"})
     finally:
         set_policy(previous)
 
@@ -619,7 +664,7 @@ def test_free_runs_are_scored_by_the_harness_and_identify_the_closure(
 
 
 def test_end_to_end_two_steps_free_run_and_the_scorers_admission(
-        tmp_path, small_card, record):
+        tmp_path, small_card, record, monkeypatch):
     """Round 8 on the tiny synthetic record: two optimiser steps, a CPU/libm
     free run of four days, and the held-out scorer's admission of it on a
     shortened window (days 1-3).  (1) One manifest schema: the driver's
@@ -645,14 +690,14 @@ def test_end_to_end_two_steps_free_run_and_the_scorers_admission(
 
     # (2) Not on another device or math library than the configuration's.
     for device in (dict(CPU, device="cuda", backend="gpu",
-                        transcendentals="native"),
-                   dict(CPU, transcendentals="native")):
+                        math_library="native", gpu_name="test GPU"),
+                   dict(CPU, math_library="native")):
         with pytest.raises(RuntimeError, match="execute as configured"):
             free(device)
     manifest = free(CPU)
     root = run_dir / "free_runs" / "w01"
     sha = driver._sha256(root / "manifest.json")
-    assert (manifest["backend"], manifest["transcendentals"]) == ("cpu", "libm")
+    assert (manifest["backend"], manifest["math_library"]) == ("cpu", "libm")
 
     # (1)+(3) The scorer admits the driver's manifest and its checkpoint file.
     admitted = evaluation.admit_trained_run(root, sha, objective="template",
@@ -665,6 +710,16 @@ def test_end_to_end_two_steps_free_run_and_the_scorers_admission(
     # (2) Shortened window, days 1-3: dual files, each snapshot shown from the
     # data against its own and the next day's mean (day 4's for day 3).
     loaded = evaluation._load_native_window(root, 1, 3)
+    from legoesm.ocean.fidelity.swg_coarse_graining import cgrid_geometry
+
+    monkeypatch.setattr(evaluation, "_dg50", lambda: (
+        small_card, cgrid_geometry(_SMALL)))
+    reference = evaluation.window_statistics(loaded)
+    (score,) = evaluation.score_free_run(
+        root, expected_manifest_sha256=sha, reference=reference,
+        windows=[(1, 3)], expected_namelist=_SMALL)
+    assert score["physical_health"]["passes"]
+    assert all(np.isfinite(score[key]) for key in evaluation.SCORE_METRICS)
     with np.load(root / "day0001.npz") as saved:
         assert all(np.array_equal(saved[key], value[0])
                    for key, value in zip(SNAPSHOT_FIELDS, loaded, strict=True))
@@ -762,6 +817,30 @@ def test_dg50_free_run_deck_passes_the_scorers_deck_binding():
         evaluation.climate._require_legoesm_deck(
             json.loads(json.dumps(namelist._replace(nn_write=1)._asdict())),
             namelist)
+
+
+@pytest.mark.parametrize("control", ("nu10", "nu80"))
+def test_cpu_control_command_reproduces_frozen_days_one_and_two_bitwise(
+        tmp_path, monkeypatch, control):
+    """The new control path is the frozen control path, not a new scheme."""
+    from legoesm.ocean.fidelity import provenance
+
+    config = json.loads(CONTROL_CONFIGS[control].read_text())
+    config["experiment"] = f"test_{control}"
+    config["free_run"].update(days=2, device="cpu", math_library="libm")
+    path = _write_config(tmp_path / f"{control}.json", config)
+    monkeypatch.setattr(provenance, "git_sha", lambda **kwargs: "0" * 40)
+    assert driver.main([
+        "free-run", "--config", str(path), "--run-root", str(tmp_path)]) == 0
+    root = tmp_path / config["experiment"]
+    frozen = evaluation.CONTROL_ROOTS[control]
+    for day in (1, 2):
+        with np.load(root / f"day{day:04d}.npz") as actual, \
+                np.load(frozen / f"day{day:04d}.npz") as expected:
+            for field in SNAPSHOT_FIELDS:
+                assert np.array_equal(actual[field], expected[field]), \
+                    (control, day, field,
+                     np.max(np.abs(actual[field] - expected[field])))
 
 
 def test_resume_refuses_a_changed_configuration_or_execution(

@@ -1,14 +1,14 @@
 # SWG online-learning design
 
-Date: 2026-10-14
+Date: 2026-10-15
 
-Status: **Round 7: training driver built, nothing trained.** The driver
+Status: **Round 9: pilot ready, nothing trained.** The driver
 (`scripts/run/run_swg_online_training.py`) and one committed configuration
 per candidate objective (`config/swg_online/`) exist and are tested on the
-CPU. The first training run still waits on owner decisions (objective and
-wall-ring treatment) and on the prerequisites listed near the end. The user has
-accepted the recorded dg50 composition debt. The learned term closes only
-the resolution gap and may not compensate a legoESM/NEMO gap.
+CPU. The pilot choices are fixed below. Its CUDA/native free runs are admitted
+only after the two no-closure GPU controls pass the mechanical device check.
+The user has accepted the recorded dg50 composition debt. The learned term
+closes only the resolution gap and may not compensate a legoESM/NEMO gap.
 
 ## Fixed physical model and target convention
 
@@ -228,7 +228,8 @@ file, and the file must state every choice with no extra or missing key:
 deck, objective, wall ring, network, one or more seeds (the held-out gate
 scores three or more), record roots and chunk label, split days, batch size,
 curriculum, optimiser and free run (including its device and math policy,
-which must be the controls' CPU and libm).
+which must be explicitly `cpu`+`libm` or `cuda`+`native`; the pilot selects
+the latter).
 `windows_per_call` (1, 2, 5 or 10) only splits each batch of ten into equal
 device calls to bound memory; the batch loss and gradient are the mean of
 the parts.
@@ -258,7 +259,8 @@ the parts.
   --config <file> --seed <s> --run-root <dir> --window-days <w>`, round 8)
   runs the coarse model from rest with that window's last checkpoint
   (`swg_online_step`, closure at every stage) for 7,300 days on the device
-  and math policy the configuration states (CPU, libm, as the controls).
+  and math policy the configuration states. CUDA runs disable XLA autotuning
+  and record the device, math library, XLA flags, JAX version and GPU name.
   Every day file holds the end-of-day snapshot beside the mean of every
   post-step state of that day, under the scorer's dual per-file labels; the
   manifest is the one free-run schema of `legoesm.training.swg_online`
@@ -368,34 +370,22 @@ no-inert gate. Collapsed ensemble variance is a planted failure.
 | Network scales | Eq. 6 shallow-water analogue from the deck | Formula and moved-deck tests; ten-start measurement |
 | Start gates | 1% initial acceleration, no inert leaf, finite every step | End-to-end test (gate recorded); real-chunk test |
 | Checkpoint and resume | Atomic per-epoch checkpoints; resume refuses any changed choice | Killed-run test: resumed epoch equals the killed process's state word for word |
-| Free runs | 7,300 days from rest on CPU/libm, snapshot and daily mean every day, one manifest schema with the checkpoint file's digest | Round-8 end-to-end test: two steps, free run, the scorer's admission; corrupted manifests and a missing or changed checkpoint refused |
+| Free runs | 7,300 days from rest on explicit CPU/libm or CUDA/native, snapshot and daily mean every day, one manifest schema with the checkpoint file's digest | Round-8 end-to-end test plus round-9 two-day bitwise CPU replays and CUDA device-record refusal tests |
 | Held-out gate | Truth-spread bars, three seeds | Evaluation tests; three review findings open |
 | Non-divergent forcing | F-potential rotated gradient at every RK3 stage | Divergence, wall, momentum, zero-seam, JVP/FD tests |
 
-## Before the first training run
+## Before the pilot
 
-1. The 12-year record and the test year complete; `check-data` passes on the
-   chosen configuration.
-2. The adequacy tool's rotational-velocity reduction repaired and the
-   3.125 km comparison re-run.
-3. `profile --device cuda` on one GPU, to fix `windows_per_call` and the
-   schedule.
-4. The owner's decisions below.
+1. `check-data` passes on the committed pilot configuration (67 sources and
+   all six split/window combinations in round 9).
+2. The GPU smoke is finite with tiny differences from frozen CPU days 1-2.
+3. The two 7,300-day GPU controls run; the device check must PASS before a
+   trained CUDA free run is scored. Training need not wait for the controls.
 
-## Open decisions
+## Fixed pilot decisions
 
-1. Objective: `template` or `symmetric` (one configuration committed for each).
-2. Wall ring: `excluded` or `weighted` for `template`; and for `symmetric`,
-   whose configuration uses `weighted` (Eq. 7 as written).
-3. Network scales: confirm the Eq. 6 shallow-water analogue (velocity, SSH
-   and potential scales above) and `rho0 = 1026` from the card.
-4. Seeds 20261013, 20261014, 20261015; 20261015 measured 0.86% of the 1%
-   initial-acceleration bar, so a seed may fail the gate on its own first
-   batch and stop.
-5. Free runs are a separate CPU process per window length (round 8), so GPU
-   training does not wait for them; each 20-year CPU run costs about 9-12 h
-   (round-8 receipt), against about 40 minutes on the GPU (operator's
-   profile, 0.33 s per day) at the price of comparability with the CPU/libm
-   controls.
-6. Gate decisions carried from round 6 (window count, skill margin, noise
-   tolerance) and the adequacy bars (spin-up pair).
+Template objective; first interior wall ring excluded; seed 20261013; 1- and
+2-day windows, five epochs each, batch 10; template optimiser; first two
+training years; `windows_per_call=10`; one 7,300-day CUDA/native free run after
+each window length. The frozen truth, frozen CPU controls, pass mark, gate
+tolerances, decks, schemes and all other scientific choices are unchanged.
