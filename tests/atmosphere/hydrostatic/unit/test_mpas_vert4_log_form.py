@@ -105,16 +105,24 @@ def test_jit_parity_and_finite_gradients():
     assert bool(jnp.all(jnp.isfinite(g)))
 
 
-def test_check_grads_second_order():
-    """Away from dry cells and mobility ties the operator is smooth."""
+@pytest.mark.parametrize("near_dry", [None, 5.0e-8])
+def test_check_grads_second_order(near_dry):
+    """Away from dry cells and mobility ties the operator is smooth, including
+    at a near-dry (q ~ q_eps) layer, where d ln(q + q_eps)/dq is largest: the
+    differentiated single-time 4D-Var lane runs this form by default."""
     from jax.test_util import check_grads
     dp = _l32_dp((1.0e5,))[0]
     k = np.arange(32, dtype=np.float64)
-    q = jnp.asarray(2e-2 * np.exp(-0.3 * (31 - k)) * (1 + 0.05 * np.sin(k)))
+    q = 2e-2 * np.exp(-0.3 * (31 - k)) * (1 + 0.05 * np.sin(k))
+    if near_dry is not None:
+        q[3] = near_dry
+    q = jnp.asarray(q)
 
     def f(x):
         return vertical_del4_tracer_tendency_log(x, NU, dp) / NU
-    check_grads(f, (q,), order=2, modes=("fwd", "rev"), atol=1e-6, rtol=1e-6, eps=1e-9)
+    # FD step well below the near-dry layer's q + q_eps ~ 1.5e-7 (ln curvature)
+    eps = 1e-9 if near_dry is None else 1e-12
+    check_grads(f, (q,), order=2, modes=("fwd", "rev"), atol=1e-6, rtol=1e-6, eps=eps)
 
 
 def test_flux_form_without_mobility_is_unchanged():
@@ -122,7 +130,7 @@ def test_flux_form_without_mobility_is_unchanged():
     dp = _l32_dp()
     q = jnp.broadcast_to(_shifted_exponential(), dp.shape)
     a = vertical_del4_tracer_tendency_flux(q, NU, dp)
-    b = vertical_del4_tracer_tendency_flux(q, NU, dp, mobility=jnp.ones(q.shape[:-1] + (31,)))
+    b = vertical_del4_tracer_tendency_flux(q, NU, dp, mobility=jnp.ones(q.shape[:-1] + (q.shape[-1] - 1,)))
     np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
 
 
