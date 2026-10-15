@@ -1654,8 +1654,8 @@ CITATION_MAP = {
     # --- ORCA2 round 282: G1b statements measured on ORCA2 --------
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynvor.f90:648-651': {
         'anchors': [
-            ('CASE ( np_CRV )                           !* Coriolis + relative vorticity', 4),
-            ') * r1_e1e2f(ji,jj)',
+            ('CASE ( np_CRV )                           !* Coriolis + relative vorticity', 3),
+            '&                        -( e1u(ji  ,jj+1) * pu(ji  ,jj+1,jk) - e1u(ji,jj) * pu(ji,jj,jk) )  ) * r1_e1e2f(ji,jj)',
             4],
         'routine': 'vor_ens',
     },
