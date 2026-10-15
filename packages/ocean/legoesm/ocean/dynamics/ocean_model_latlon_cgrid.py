@@ -1775,9 +1775,8 @@ def rk3_stage_velocity_update(
         # association order: multiply, add, then mask.  ``written_order`` is
         # selected by the ORCA2G ladder builder; on G1b it applies to this
         # vector arm (record build :366-370; ORCA2_OMIP_L4 :467-471).
-        # Materialize each
-        # source operation because an optimization barrier is stripped from
-        # optimized HLO and otherwise XLA contracts the multiply-add.
+        # Materialize each source operation because an optimization barrier is
+        # stripped from optimized HLO; otherwise XLA contracts the multiply-add.
         if face_mask.shape not in (velocity_before.shape,
                                    velocity_before.shape[:-1] + (1,)):
             raise ValueError(
