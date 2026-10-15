@@ -565,22 +565,30 @@ def _fc01_case(tag, n_below, n_above):
             )))
 
 
-# Added 2026-10-15. Ekman: every pending value approved by the user that day.
-# Fedorovich & Conzemius 2001: the user's fill-ins are approved; the suite values
-# the user was not asked about stay pending (production refused until approved).
+# Added 2026-10-15. Ekman and Fedorovich & Conzemius 2001: every pending value
+# approved by the user that day, exactly as proposed (FC01: suite dt, sponge
+# timescale and seed noise as CF06; no mean wind, so the planar-mean MOST drag is
+# ~0; duration from the paper's z_i = 0.6 Lz stop rule).
+def _approve_pending(c):
+    return dataclasses.replace(c, setup=dataclasses.replace(
+        c.setup, approved=c.setup.approved + tuple(
+            f"APPROVED 2026-10-15 (was: {p})" for p in c.setup.pending),
+        pending=()))
+
+
 PUBLISHED_CASES = PUBLISHED_CASES + tuple(
     dataclasses.replace(c, setup=dataclasses.replace(
         c.setup, approved=tuple(f"APPROVED 2026-10-15 (was: {p})"
                                 for p in c.setup.pending + (_PENDING_CLOSURE,)),
         pending=()))
     for c in (_pedersen14_case(r) for r in ("n01", "n02", "n03", "n04"))
-) + (
-    _fc01_case("lin_n008", 0.008, 0.008),
-    _fc01_case("lin_n011", 0.011, 0.011),
-    _fc01_case("lin_n014", 0.014, 0.014),
-    _fc01_case("ws", 0.005, 0.018),
-    _fc01_case("sw", 0.018, 0.005),
-)
+) + tuple(_approve_pending(_fc01_case(*a)) for a in (
+    ("lin_n008", 0.008, 0.008),
+    ("lin_n011", 0.011, 0.011),
+    ("lin_n014", 0.014, 0.014),
+    ("ws", 0.005, 0.018),
+    ("sw", 0.018, 0.005),
+))
 
 
 def register_default_catalog(*, include_dry_grid: bool = True,

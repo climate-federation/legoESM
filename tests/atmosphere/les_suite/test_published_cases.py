@@ -53,10 +53,9 @@ def test_every_published_case_validates_and_runs_through_the_suite_driver():
         c.validate()
         assert c.setup is not None and c.driver == "run_les_suite.py"
         # user 2026-10-15: every proposed value approved, incl. GABLS4's raised dt
-        # and the Pedersen Ekman values; FC01: the user's fill-ins approved, the
-        # suite values nobody asked about still pending (production refused)
+        # the Pedersen Ekman values and the FC01 suite values and duration
         assert c.setup.approved, c.name
-        assert bool(c.setup.pending) == c.name.startswith("fc01_"), c.name
+        assert not c.setup.pending, c.name
 
 
 def test_held_out_split_is_the_users():
@@ -277,10 +276,7 @@ def test_published_cases_record_the_approved_driver_closure():
               f"C_s {m._SBL_STATIC_CS}"):
         assert v in text, v
     for c in catalog.PUBLISHED_CASES:
-        if c.name.startswith("fc01_"):
-            assert c.setup.pending[-1] == text, c.name
-        else:
-            assert c.setup.approved[-1] == f"APPROVED 2026-10-15 (was: {text})", c.name
+        assert c.setup.approved[-1] == f"APPROVED 2026-10-15 (was: {text})", c.name
 
 
 @pytest.mark.parametrize("tag,n1,n2", [("lin_n008", 0.008, 0.008),
@@ -320,8 +316,10 @@ def test_fedorovich_conzemius_2001_cases(tag, n1, n2):
     np.testing.assert_allclose((th[2] - th[1]) / 3000.0 * constants.g / 300.0, n2 ** 2,
                                rtol=1e-12)
     fills = [a for a in s.approved if "user fill-in" in a]
-    assert len(fills) == 3 == len(s.approved) and any("1000 m" in a for a in fills)
-    topics = [p.split(":")[0] for p in s.pending]
+    assert len(fills) == 3 and any("1000 m" in a for a in fills)
+    assert not s.pending                          # user approved 2026-10-15
+    topics = [p.removeprefix("APPROVED 2026-10-15 (was: ").split(":")[0]
+              for p in s.approved[3:]]
     assert s.lat_deg == 0.0                       # paper: Coriolis neglected
     assert topics == ["dt", "sponge", "seed noise", "surface drag", "duration",
                       "SGS closure + numerics"], topics
