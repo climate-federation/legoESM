@@ -463,6 +463,17 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
     n_stage = g1.stage_steps(root) if has_frames else 0
     model = LatLonCGridOceanModel(card.recipe.grid, z, cfg)
     require(s0.eta_rk3_after is None, "the card carries an after-ssh slot")
+    if case == "ORCA2G4-sbc":
+        sys.path.insert(0, str(HERE / "nemo_testcase_g4_orca2sbc"))
+        import g4_forcing_steps as g4  # noqa: E402
+
+        def read_step(kt):
+            fields = g4.frames(root, kt)
+            full = fields["s_sst_m"].shape
+            return {name: g4.inner(value, full)
+                    for name, value in fields.items()}
+    else:
+        read_step = lambda kt: g1.read_step(root, kt)  # noqa: E731
     out = {"arm": arm, "case": case, "legoesm_git_sha": sha, "root": str(root),
            "restart_roots": [str(r) for r in restart_roots], "bar": BAR,
            "plant": plant, "card_levels": nk, "packages_tree": packages,
@@ -485,10 +496,10 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
            "per_kt": []}
 
     def surface_rows(tag, kt, state):
-        g = g1.read_step(root, kt)
+        g = read_step(kt)
         ref = {f: g[n] for f, n in FRAME.items()}
         if kt < n_stage:           # T, S after the step = the next step's entry
-            nxt = g1.read_step(root, kt + 1)
+            nxt = read_step(kt + 1)
             ref["T"], ref["S"] = nxt["e_tn_k1_bb"], nxt["e_sn_k1_bb"]
             for f, n in (("ssh", "e_ssh_bb"), ("u", "e_uu_k1_bb"), ("v", "e_vv_k1_bb")):
                 require(np.array_equal(ref[f], nxt[n]),
@@ -505,7 +516,7 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
         cand, rows = card_levels(state), {}
         with netCDF4.Dataset(path) as h:
             if has_frames:
-                frame = g1.read_step(root, kt)
+                frame = read_step(kt)
                 require(np.array_equal(np.asarray(h.variables["sshn"][0], np.float64),
                                        frame["f_ssh_bb"]),
                         f"kt {kt}: the restart is not the recorded after-step state")
@@ -535,10 +546,6 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
                 vv_b=s0.vv_b.replace(data=jnp.asarray(g1.pad_v(var("vv_n")))),
                 bt_hist=g1.nemo_histories(path.parent, kt))
 
-    if case == "ORCA2G4-sbc":
-        sys.path.insert(0, str(HERE / "nemo_testcase_g4_orca2sbc"))
-        import g4_forcing_steps as g4  # noqa: E402
-
     def step(state, kt):
         t0 = time.time()
         kwargs = {}
@@ -556,7 +563,7 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
         out["label"] = ("INDEPENDENT (the card's own chain; stage-local)"
                         if kt == 1 or state_in is not None else
                         "GIVEN-NEMO-ENTRY (NEMO's restart; stage-local)")
-        g = g1.read_step(root, kt)
+        g = read_step(kt)
         if state_in is not None:
             saved = pickle.loads(Path(state_in).read_bytes())
             require(saved["after_kt"] == kt - 1 and saved["packages"] == packages,
@@ -621,7 +628,7 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import _NEMOWSRK3TestHooks
         require(kt_from == 1, "the right-hand-side frame is scored at step 1")
         out["label"] = "INDEPENDENT = GIVEN-NEMO-ENTRY at step 1 (3-D RHS after stp_2D)"
-        g = g1.read_step(root, 1)
+        g = read_step(1)
         res = jax.device_get(LatLonCGridOceanModel(
             card.recipe.grid, z, cfg, _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
                 expose_barotropic_substeps=True)).step(s0, dt=card.dt_s))
@@ -655,7 +662,7 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
         require(kt_from == 1, "the tracer replay starts from the initial state")
         out["label"] = ("OFFLINE replay of NEMO's tra_zdf from NEMO's recorded "
                         "ratios; the card from its own initial state (step 1)")
-        g = g1.read_step(root, 1)
+        g = read_step(1)
         with netCDF4.Dataset(root / "mesh_mask.nc") as h:
             geom = dict(
                 tmask=levels_last(h.variables["tmask"][0], nk),
@@ -689,7 +696,7 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
         out["label"] = ("OFFLINE replay of NEMO's dyn_zdf from the card's own "
                         "stage-3 inputs; " + ("INDEPENDENT entry" if kt == 1
                                               else "GIVEN-NEMO-ENTRY"))
-        g, entry = g1.read_step(root, kt), s0 if kt == 1 else nemo_entry(kt)
+        g, entry = read_step(kt), s0 if kt == 1 else nemo_entry(kt)
         st = jax.device_get(LatLonCGridOceanModel(
             card.recipe.grid, z, cfg, _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
                 zdf_momentum_observer=lambda *a: seen.append(
