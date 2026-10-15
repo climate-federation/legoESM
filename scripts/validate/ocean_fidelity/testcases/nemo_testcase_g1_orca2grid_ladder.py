@@ -569,9 +569,71 @@ def rhs_term_replay(root: Path, kt: int, fe3mask, *, stage: int = 1,
             keg_u = (at(zhke, 0, 1) - zhke) * r1_e1u
             keg_v = (at(zhke, 1, 0) - zhke) * r1_e2v
         out["keg_u"], out["keg_v"] = clean(keg_u, wet_u), clean(keg_v, wet_v)
+        # Keep the two operands of dynkeg.f90:128-130 apart for the G1b
+        # contraction check.  ``keg`` above is their already-rounded product;
+        # these arrays are evidence only and never feed the model.
+        out["keg_delta_u"] = clean(at(zhke, 0, 1) - zhke, wet_u)
+        out["keg_delta_v"] = clean(at(zhke, 1, 0) - zhke, wet_v)
+        out["keg_metric_u"] = clean(r1_e1u, wet_u)
+        out["keg_metric_v"] = clean(r1_e2v, wet_v)
         out["rhs_u"] = out["rhs_u"] - out["keg_u"]
         out["rhs_v"] = out["rhs_v"] - out["keg_v"]
     return out
+
+
+def keg_contraction_probe(rep: dict, production: np.ndarray, face: str,
+                          wet: np.ndarray) -> dict:
+    """Trace dyn_keg's final multiply into its Krhs subtraction.
+
+    Inputs are NEMO's recorded, independently replayed operands.  The plain
+    JIT is the production expression before source materialisation; the guard
+    is the same ``nemo_source_round`` identity used by written-order paths.
+    """
+    import jax
+    import jax.numpy as jnp
+    from legoesm.core.source_rounding import nemo_source_round
+
+    accumulator = np.add(rep["hpg_" + face], rep["vor_" + face])
+    delta = rep["keg_delta_" + face]
+    metric = rep["keg_metric_" + face]
+    written = np.subtract(accumulator, np.multiply(delta, metric))
+    baseline = np.asarray(jax.jit(
+        lambda a, d, m: a - d * m)(
+            jnp.asarray(accumulator), jnp.asarray(delta), jnp.asarray(metric)))
+    guarded = np.asarray(jax.jit(
+        lambda a, d, m: nemo_source_round(
+            a + nemo_source_round(-(d * m))))(
+                jnp.asarray(accumulator), jnp.asarray(delta),
+                jnp.asarray(metric)))
+    fused = fused_multiply_add(-delta, metric, accumulator)
+
+    def comparison(left, right):
+        bad = wet & (left != right)
+        return {"n_unequal": int(np.count_nonzero(bad)),
+                "max_abs": float(np.max(np.abs(np.where(
+                    wet, left - right, 0.0))))}
+
+    production_bad = wet & (production != written)
+    coords = np.argwhere(production_bad)
+    return {
+        "dtype": str(baseline.dtype),
+        "production_vs_written": comparison(production, written),
+        "production_vs_traced_baseline": comparison(production, baseline),
+        "traced_baseline_vs_written": comparison(baseline, written),
+        "traced_baseline_vs_fused": comparison(baseline, fused),
+        "traced_guarded_vs_written": comparison(guarded, written),
+        "unequal_faces": [{
+            "ji_jj": [int(i), int(j)],
+            "accumulator": float(accumulator[j, i]),
+            "delta": float(delta[j, i]),
+            "metric": float(metric[j, i]),
+            "production": float(production[j, i]),
+            "traced_baseline": float(baseline[j, i]),
+            "fused": float(fused[j, i]),
+            "written": float(written[j, i]),
+            "traced_guarded": float(guarded[j, i]),
+        } for j, i in coords],
+    }
 
 
 def vor_een_u_replay(root: Path, kt: int, fe3mask, *, zero_image_row: bool) -> dict:
@@ -1945,7 +2007,10 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
             for f in "uv":
                 wet = rep["wet_" + f]
                 terms = {k[:-2]: cut[f](v) for k, v in seen.items()
-                         if k.endswith("_" + f)}
+                         if k.endswith("_" + f) and not k.startswith("after_")}
+                accumulators = {
+                    k[:-2]: cut[f](v) for k, v in seen.items()
+                    if k.endswith("_" + f) and k.startswith("after_")}
                 if plant == "rhs_split":
                     planted = terms["hpg"].copy()
                     nonzero_hpg = wet & (planted != 0.0)
@@ -1958,7 +2023,7 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
                 others = sum(v for k, v in terms.items()
                              if k not in ("KE_PGF", "vortcor", "total",
                                           "hpg", "keg"))
-                rows.append({
+                item = {
                     "face": f,
                     "card_term_max_abs": {k: float(np.max(np.abs(v[wet])))
                                           for k, v in terms.items()},
@@ -1985,7 +2050,22 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
                         f"vor.{f}", rep["vor_" + f], terms["vortcor"], wet, reg),
                     "replay_sum_of_card_terms_vs_nemo": substep_row(
                         f"rhs.{f}", g[f"b_{f}{f}_rhs_k1"],
-                        terms["KE_PGF"] + terms["vortcor"], wet, reg)})
+                        terms["KE_PGF"] + terms["vortcor"], wet, reg)}
+                if vec:
+                    item["keg_contraction_probe"] = keg_contraction_probe(
+                        rep, total, f, wet)
+                    expected = {
+                        "after_hpg": rep["hpg_" + f],
+                        "after_vor": np.add(
+                            rep["hpg_" + f], rep["vor_" + f]),
+                        "after_keg": rep["rhs_" + f],
+                        "after_adv": rep["rhs_" + f],
+                    }
+                    item["accumulator_vs_replay"] = {
+                        name: substep_row(
+                            f"{name}.{f}", value, accumulators[name], wet, reg)
+                        for name, value in expected.items()}
+                rows.append(item)
             out["per_kt"].append({"kt": kt, "rows": rows})
     elif arm == "vor_fold_replay":
         out["label"] = ("GIVEN-NEMO-ENTRY (offline replay of vor_een on the "

@@ -5113,6 +5113,12 @@ def _bc_horizontal_momentum_advection_flux_form(
     return du_dt, dv_dt, diag_hadv_u, diag_hadv_v
 
 
+def _nemo_keg_accumulate(accumulator, kinetic_energy_gradient):
+    """NEMO dyn_keg's stored gradient followed by its Krhs subtraction."""
+    return nemo_source_round(
+        accumulator + nemo_source_round(-kinetic_energy_gradient))
+
+
 def latlon_cgrid_ocean_baroclinic_tendencies(
     state: LatLonCGridOceanState,
     grid: LatLonGrid,
@@ -5586,8 +5592,12 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         dv_dt = jax.lax.optimization_barrier(dv_dt)
         _nemo_after_vor_u = du_dt
         _nemo_after_vor_v = dv_dt
-        du_dt = jax.lax.optimization_barrier(du_dt + (-dKE_dx))
-        dv_dt = jax.lax.optimization_barrier(dv_dt + (-dKE_dy))
+        # dynkeg.f90:128-130 first stores the metric-scaled KE gradient, then
+        # subtracts it from Krhs.  ``optimization_barrier`` disappears from
+        # optimized HLO and lets XLA contract that multiply into this add;
+        # the shared source-round identity preserves the two source operations.
+        du_dt = _nemo_keg_accumulate(du_dt, dKE_dx)
+        dv_dt = _nemo_keg_accumulate(dv_dt, dKE_dy)
         _nemo_after_keg_u = du_dt
         _nemo_after_keg_v = dv_dt
 

@@ -6233,7 +6233,12 @@ class LatLonCGridOceanModel:
                 # operator.  The observer remains write-only.
                 _rhs_term_payload.update({
                     name: _live_operands[name].data
-                    for name in ("hpg_u", "hpg_v", "keg_u", "keg_v")})
+                    for name in (
+                        "hpg_u", "hpg_v", "keg_u", "keg_v",
+                        "after_hpg_u", "after_hpg_v",
+                        "after_vor_u", "after_vor_v",
+                        "after_keg_u", "after_keg_v",
+                        "after_adv_u", "after_adv_v")})
                 jax.debug.callback(
                     _rhs_term_observer,
                     _rhs_term_payload,

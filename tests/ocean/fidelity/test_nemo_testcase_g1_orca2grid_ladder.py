@@ -691,6 +691,41 @@ def test_written_order_vector_stage_update_matches_numpy_under_jit():
     assert np.count_nonzero(contracted != expected) >= 1   # count is CPU/XLA-dependent
 
 
+def test_g1b_keg_accumulator_stops_fma_under_jit():
+    """dynkeg.f90:128-130: store delta*metric before subtracting from Krhs."""
+    import inspect
+    import jax
+    from legoesm.ocean.dynamics import ocean_pe_latlon_cgrid as P
+    if not jax.config.jax_enable_x64:
+        pytest.skip("needs x64")
+
+    # The four unequal kt-2 U faces from the admitted G1b record.  They are
+    # dynamic JIT inputs, not closed-over constants, so this exercises XLA's
+    # optimized multiply/add graph used by production.
+    accumulator = np.array([
+        2.6243961512937743e-09, 1.202317009826677e-08,
+        8.431492963927303e-09, 2.6243961512937743e-09])
+    delta = np.array([
+        2.08359565415706e-06, 3.1699116714346456e-05,
+        -3.159456080698642e-05, 2.08359565415706e-06])
+    metric = np.array([
+        4.501333388137321e-06, 4.501333388137321e-06,
+        4.4964464087762765e-06, 4.501333388137321e-06])
+    expected = np.subtract(accumulator, np.multiply(delta, metric))
+
+    def compiled(statement):
+        return np.asarray(jax.jit(lambda a, d, m: statement(a, d * m))(
+            jnp.asarray(accumulator), jnp.asarray(delta), jnp.asarray(metric)))
+
+    planted = compiled(lambda a, dke: a - dke)
+    got = compiled(P._nemo_keg_accumulate)
+    assert np.count_nonzero(planted != expected) == 4
+    assert np.array_equal(got, expected)
+    # The tested symbol is the one the production tendency calls on U and V.
+    production = inspect.getsource(P.latlon_cgrid_ocean_baroclinic_tendencies)
+    assert production.count("_nemo_keg_accumulate(") == 2
+
+
 @needs_record5
 @pytest.mark.parametrize("off, floor", [((), 0), (("without_stage1_rhs",), 1),
                                         (("without_written_order",), 1)])
@@ -903,6 +938,9 @@ def test_g1b_nonzero_hpg_keg_split_and_plant(monkeypatch):
     assert split == [5, 0]
     assert _terms(out, "card_hpg_vs_replay") == [0, 0]
     assert _terms(out, "card_keg_vs_replay") == [0, 0]
+    for row in out["per_kt"][0]["rows"]:
+        assert all(score["n_unequal"] == 0
+                   for score in row["accumulator_vs_replay"].values())
 
     planted = ladder.run(G1B_RECORD, arm="rhs_terms", kt_min=2, kt_max=2,
                          allow_dirty=True, plant="rhs_split")
