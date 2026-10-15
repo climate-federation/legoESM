@@ -34,10 +34,11 @@ Decision 126 remains pending and is not re-raised.
 The shipped ORCA2 deck selects EEN.  The executing `vor_een` np_CRV branch
 forms the relative circulation and applies `r1_e1e2f` at
 `ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynvor.f90:762-766`; the F-cell reciprocal is
-built from `e1f*e2f` at
+is built from `e1f*e2f` at
 `ORCA2_OMIP_L4/BLD/ppsrc/nemo/domhgr.f90:155-156`.  The previous
-`dynvor.f90:648-651` anchor is inside dead `vor_ens` for this deck and is
-retracted.  The citation gate now checks the enclosing routine, and a planted
+`ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynvor.f90:648-651` anchor is inside dead
+`vor_ens` for this deck and is retracted.  The citation gate now checks the
+enclosing routine, and a planted
 `vor_ens` expectation at the live span refuses with
 `ROUTINE-CONTEXT-MISMATCH`.
 
