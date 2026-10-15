@@ -6971,6 +6971,10 @@ def _inject_snapshot_state(state, snap):
                              "from the state or the snapshot")
         arr = np.asarray(snap[k])
         if cur is None:                      # fresh state: TKE is created by the first step
+            want = tuple(state.T.data.shape[:-1]) + (state.T.data.shape[-1] - 1,)
+            if arr.shape != want:
+                raise SystemExit(f"--diag-momentum-box-snapshot: tke shape {arr.shape} "
+                                 f"!= interior-interface shape {want}")
             from legoesm.core.field import Field
             state = state._replace(tke=Field(
                 data=jnp.asarray(arr, dtype=state.T.data.dtype), name="tke",
@@ -7052,6 +7056,12 @@ def _momentum_box_record(model, state, sf, dt, snap, step):
         rec["vorticity_scheme"] in ("ene_total", "een_total", "een_planetary")
         or rec["coriolis_scheme"] == "explicit_ab2")
     rec["U_box"] = box(uc)
+    # the hook runs before the prognostic-ice stress partition: valid only
+    # where the box carries no ice
+    rec["ice_max_in_box"] = float(np.max(np.asarray(snap["ice_concentration"])[sel]))
+    if rec["ice_max_in_box"] > 0.0:
+        raise SystemExit("momentum box holds sea ice: the open-ocean stress "
+                         "seen by this hook is not the production stress")
     rec["surface_stress_implicit"] = bool(getattr(model.config, "surface_stress_implicit", False))
     return rec
 
