@@ -12,7 +12,7 @@ not changed.  Sea ice and its `unmeasured_features` tuple are untouched.
 
 The compiled ORCA2 vector branch writes stage-1 `vv(Kaa)` from `vv(Kbb)`,
 `rDt`, `vv(Krhs)`, and `vmask` at
-`ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:477-480`.  It then diagnoses
+`ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:467-470`.  It then diagnoses
 `zvb = vv_b(Kaa) - SUM(e3v_3d*vv(Kaa))*r1_hv_0` and adds
 `zvb*vmask` at `stprk3_stg.f90:523-550`.  The held completed-stage V exchange
 comes later and is already exonerated as the magnitude creator by round 279.
