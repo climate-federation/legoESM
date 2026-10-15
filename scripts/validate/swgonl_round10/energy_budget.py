@@ -11,12 +11,17 @@ convention of the operator's probe (0.5*(mean u^2 + mean v^2)).
 Two products: (a) instantaneous samples on stored end-of-day snapshots of
 the named runs; (b) hourly means from CPU/libm reintegration of the named
 spans (the free-run stepper, one hour = 9 steps per jitted call).
-Usage: energy_budget.py snapshots | spans
+Usage: SWGONL_RUN=<run dir> SWGONL_DIAG=<output dir> energy_budget.py snapshots | spans
+The run directory (seed directory holding run_manifest.json, checkpoints/,
+dataset_contract.json, training_log.json) and the output directory are
+required: there is no default run, so the probe refuses to start without
+them.  The run's configuration and seed are read from its own run manifest.
 """
 from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -44,10 +49,25 @@ from legoesm.training.swg_online import (
 )
 
 REPO = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/claude-swgonl-r10")
+# Round-9 root: the no-closure control runs the step-4 snapshot mode compares against.
 R9 = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgonl_rounds/round9_pilot")
-RUN = R9 / "pilot/swgonl_pilot_template_ring_excluded/seed20261013"
-DIAG = R9 / "round10_diagnosis"
-SEED = 20261013
+
+
+def _required_dir(variable):
+    value = os.environ.get(variable)
+    if not value:
+        raise SystemExit(f"{variable} is not set: name the directory explicitly "
+                         "(no default run; refusing to guess)")
+    path = Path(value)
+    if not path.is_dir():
+        raise SystemExit(f"{variable}={value} is not a directory")
+    return path
+
+
+RUN = _required_dir("SWGONL_RUN")
+DIAG = _required_dir("SWGONL_DIAG")
+MANIFEST = json.loads((RUN / "run_manifest.json").read_text())
+SEED = int(MANIFEST["seed"]["value"])
 STEPS_PER_HOUR = 9
 
 
@@ -63,7 +83,7 @@ def setup():
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
     driver = _load("run_swg_online_training",
                    REPO / "scripts/run/run_swg_online_training.py")
-    config = driver.load_config(REPO / "config/swg_online/pilot_template_ring_excluded.json")
+    config = MANIFEST["config"]   # the run's own (driver-validated) configuration
     card = build_swg_card(SWG_DG50_NAMELIST)
     geometry = build_closure_geometry(card)
     spec, _ = driver.network_spec(config, card, geometry)
@@ -82,8 +102,14 @@ def setup():
     return driver, config, card, geometry, nets, forcing, key
 
 
-def make_terms(card, geometry, network, forcing, key):
-    """(ssh, u, v) -> dict of work terms [m2 s-3] and KE [m2 s-2] at that state."""
+def make_terms(card, geometry, network, forcing, key, rings=None):
+    """(ssh, u, v) -> dict of work terms [m2 s-3] and KE [m2 s-2] at that state.
+
+    rings: optional (ring_u, ring_v) boolean face masks (implied_subgrid_work.
+    face_rings); when given, the closure work is also split into the wall ring
+    and the interior, both normalised by the full wet-face counts so that
+    ring + interior == total.
+    """
     template = card.recipe.initial_state._replace(
         tau_x_prev=forcing.tau_i_native, tau_y_prev=forcing.tau_j_native)
     grid, z_coord, cfg = card.recipe.grid, card.recipe.z_coord, card.recipe.model_config
@@ -119,8 +145,8 @@ def make_terms(card, geometry, network, forcing, key):
         nv_u, nv_v = stage3(entry, None, cfg_no_visc)
         nd_u, nd_v = stage3(entry, None, cfg_no_drag)
 
-        def work(au, av):
-            return (jnp.sum(u * au * umask) / n_u + jnp.sum(v * av * vmask) / n_v)
+        def work(au, av, sel_u=umask, sel_v=vmask):
+            return (jnp.sum(u * au * sel_u) / n_u + jnp.sum(v * av * sel_v) / n_v)
 
         def accel(with_u, with_v, without_u, without_v):
             return (with_u - without_u) / dt, (with_v - without_v) / dt
@@ -129,7 +155,7 @@ def make_terms(card, geometry, network, forcing, key):
         a_wind = accel(base_u, base_v, nw_u, nw_v)
         a_visc = accel(base_u, base_v, nv_u, nv_v)
         a_drag = accel(base_u, base_v, nd_u, nd_v)
-        return {
+        out = {
             "closure_work": work(*a_clo), "wind_work": work(*a_wind),
             "viscous_work": work(*a_visc), "drag_work": work(*a_drag),
             "closure_accel_max": jnp.maximum(jnp.max(jnp.abs(a_clo[0])), jnp.max(jnp.abs(a_clo[1]))),
@@ -138,6 +164,11 @@ def make_terms(card, geometry, network, forcing, key):
             "ke": 0.5 * (jnp.sum(u**2 * umask) / n_u + jnp.sum(v**2 * vmask) / n_v),
             "max_speed": jnp.maximum(jnp.max(jnp.abs(u)), jnp.max(jnp.abs(v))),
         }
+        if rings is not None:
+            ring_u, ring_v = rings
+            out["closure_work_ring"] = work(*a_clo, ring_u, ring_v)
+            out["closure_work_interior"] = work(*a_clo, umask & ~ring_u, vmask & ~ring_v)
+        return out
 
     return terms
 

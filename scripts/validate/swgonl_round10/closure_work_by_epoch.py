@@ -13,10 +13,16 @@ and validation loss; the wind work alongside as the constant reference; the
 Pearson correlation across the eleven networks between mean closure work and
 validation loss.
 
+The closure work is also split into the first interior wall ring and the
+interior (implied_subgrid_work.face_rings: wet faces with either adjoining T
+cell in the outermost wet T row/column; both parts normalised by the full
+wet-face counts, so ring + interior == total).
+
 Controls: a zero-potential closure must give exactly 0.0 work and the
 initial network's acceleration ratio is re-measured with the driver's own
 gate (initial_closure_acceleration_ratio) on the same ten training starts.
-Usage: closure_work_by_epoch.py
+Usage: SWGONL_RUN=<run dir> SWGONL_DIAG=<output dir> closure_work_by_epoch.py
+(both required, see energy_budget).
 """
 from __future__ import annotations
 
@@ -31,6 +37,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import energy_budget as eb  # noqa: E402
+from implied_subgrid_work import face_rings  # noqa: E402
 from legoesm.ml.checkpoint_io import load_checkpoint_or_fail  # noqa: E402
 from legoesm.training.swg_online import (  # noqa: E402
     SWGDatasetContract,
@@ -122,14 +129,18 @@ def main():
     print(f"control init gate: max ratio {gate['maximum_ratio']:.4%} "
           f"(logged {log['gates']['initial_closure_acceleration']['maximum_ratio']:.4%})")
 
+    ring_u, ring_v, _, _ = face_rings(geometry)
     per_network = {}
     for name, net in nets.items():
-        fn = jax.jit(eb.make_terms(card, geometry, net, forcing, key))
+        fn = jax.jit(eb.make_terms(card, geometry, net, forcing, key, rings=(ring_u, ring_v)))
         samples = []
         for label, ssh, u, v in rows:
             values = fn(jnp.asarray(ssh), jnp.asarray(u), jnp.asarray(v))
             samples.append({"start": label, **{k: float(x) for k, x in values.items()}})
         clo = np.array([s["closure_work"] for s in samples])
+        ring = np.array([s["closure_work_ring"] for s in samples])
+        interior = np.array([s["closure_work_interior"] for s in samples])
+        assert np.allclose(ring + interior, clo, rtol=1e-9, atol=1e-30), name
         wind = np.array([s["wind_work"] for s in samples])
         rms = np.array([s["closure_accel_rms"] for s in samples])
         train_mask = np.array([s["start"].startswith("train") for s in samples])
@@ -140,6 +151,8 @@ def main():
             "closure_work_mean_train_starts": float(clo[train_mask].mean()),
             "closure_work_mean_validation_starts": float(clo[~train_mask].mean()),
             "closure_work_positive_fraction": float((clo > 0).mean()),
+            "closure_work_ring_mean": float(ring.mean()),
+            "closure_work_interior_mean": float(interior.mean()),
             "closure_accel_rms_mean": float(rms.mean()),
             "closure_over_wind_work_mean": float(clo.mean() / wind.mean()),
             "wind_work_mean": float(wind.mean()),
@@ -148,7 +161,9 @@ def main():
             "samples": samples,
         }
         per_network[name] = summary
-        print(f"{name:8s} clo mean {summary['closure_work_mean']:+.3e} med {summary['closure_work_median']:+.3e} "
+        print(f"{name:8s} clo mean {summary['closure_work_mean']:+.3e} "
+              f"(ring {summary['closure_work_ring_mean']:+.3e} int {summary['closure_work_interior_mean']:+.3e}) "
+              f"med {summary['closure_work_median']:+.3e} "
               f"pos {summary['closure_work_positive_fraction']:.2f} a_rms {summary['closure_accel_rms_mean']:.3e} "
               f"clo/wind {summary['closure_over_wind_work_mean']:+.3f} "
               f"train {summary['train_loss_mean']} val {summary['validation_loss']}")
@@ -175,6 +190,10 @@ def main():
         "units": {"work": "m2 s-3 (per unit mass, mean over wet faces)", "closure_accel": "m s-2"},
         "definition": __doc__,
         "machinery": "energy_budget.make_terms (stage-3 program differenced closure on/off), CPU/libm fp64",
+        "run": str(eb.RUN),
+        "ring_choice": "wet face with either adjoining T cell in the outermost wet T row/column "
+                       "(implied_subgrid_work.face_rings); ring and interior work normalised by the "
+                       "full wet-face counts, ring + interior == total",
         "starts": labels,
         "controls": {
             "zero_potential_closure_work": zero_work,
