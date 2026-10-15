@@ -181,8 +181,12 @@ Then: the kt-27 accumulated interior event; the three last-place classes.
 
 | statement | G1b | ORCA2 build |
 |---|---|---|
-| A: np_CRV F area | landed, selected | `ORCA2/dynvor.f90:648` (vor_een np_CRV CASE), `ORCA2/domhgr.f90:156`. ORCA2 runs een_total; its grid `area_q` was not compared with e1f·e2f. UNMEASURED |
+| A: np_CRV F area | landed, selected | `ORCA2/dynvor.f90:762-766` (vor_een np_CRV CASE; `r1_e1e2f` at :766), `ORCA2/domhgr.f90:156`. ORCA2 runs een_total; its grid `area_q` was not compared with e1f·e2f. UNMEASURED |
 | B: fold unit, vector form | landed, selected | `ORCA2/dynspg_ts.f90:517` (zhvp2_e), `ORCA2/dynspg_ts.f90:535` (zhV), `ORCA2/dynspg_ts.f90:723` (exchange); vector branch `ORCA2/dynspg_ts.f90:666`. UNMEASURED |
+
+Correction (Rule 11, round 28): this table first cited `ORCA2/dynvor.f90:648` for A.
+That line is the np_CRV case of `vor_ens` (SUBROUTINE at :586), not `vor_een`
+(SUBROUTINE at :692); ORCA2's deck runs EEN, whose np_CRV case is :762-766.
 
 ## 8. Tests and review
 

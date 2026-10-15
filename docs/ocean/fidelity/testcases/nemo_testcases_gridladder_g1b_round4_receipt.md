@@ -134,7 +134,7 @@ Evidence SHA-256 (first 16): `rhs_terms_kt2_before.json` b9578e80c3201c2f;
 `rhs_terms_split_plant.json` a6b9a70626ce4adb (clean producer `f70edbc32`);
 `stages_kt2_without_written_order.json` dae05726b769a68c;
 `stages_kt2_after.json` e944543b13dda41f;
-`l0/indep100.json` c4f3f889d9626f59; `l0/given_entry50.json`
+`l0/stages_kt2.json` 4bf5f38d4c7b2f0f; `l0/indep100.json` c4f3f889d9626f59; `l0/given_entry50.json`
 3b00630966aec414; `l0/restart_entry100.json` b20c1a2670f98060;
 `l1/indep100.json` a247aa796967e0ea; `l1/given_entry50.json`
 3040e3186588f3d0; `l1/restart_entry100.json` 2a587da38e667847.
