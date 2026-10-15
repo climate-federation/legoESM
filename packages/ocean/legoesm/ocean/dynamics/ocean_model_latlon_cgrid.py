@@ -2310,9 +2310,7 @@ def _nemo_ws_rk3_tracer_pair_step(
     applies the previous stage RHS with ``dt/3``, ``dt/2``, then ``dt``.
     Under key_qco the stage result is thickness weighted; the one-third and
     one-half thicknesses below are the corresponding linear r3t stages.
-    The flux reconstruction receives the live stage interval so FCT uses the
-    same stage Courant factor.  This selector changes no existing ``rk3``
-    (SSP) user.
+    The live stage interval feeds FCT; this selector changes no ``rk3`` (SSP) user.
     """
     if stage_transport_geometry is None:
         stage_transport_geometry = (
@@ -2330,6 +2328,8 @@ def _nemo_ws_rk3_tracer_pair_step(
         raise ValueError("stage_source_rates must contain exactly 3 stages")
     if stage_source_terms is not None and len(stage_source_terms) != 3:
         raise ValueError("stage_source_terms must contain exactly 3 stages")
+    if stage_tracer_written_order and stage_qco_weights is None:
+        raise ValueError("stage_tracer_written_order requires stage_qco_weights")
     if stage_qco_weights is not None and len(stage_qco_weights) != 3:
         raise ValueError("stage_qco_weights must contain exactly 3 stages")
     resume_stage = 0
@@ -9985,8 +9985,8 @@ class LatLonCGridOceanModel:
                         if self._nemo_ws_test_hooks.two_step_fct_predictor
                         else "one_step"),
                     stage_source_rates=_ws_stage_source_rates,
-                    stage_tracer_written_order=(
-                        _cfg_b.rk3_stage_tracer_written_order),
+                    # The written-order selector belongs to the weighted
+                    # stage-1/2 call; this stage-3 finalizer has no weights.
                     bbl_context=_bbl_context,
                     # One stage ladder: stages 1-2 were advanced by the
                     # momentum program on the same Kmm transports as the

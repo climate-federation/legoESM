@@ -25,6 +25,11 @@ The allowlist remains empty. Focused helper plus ratchet after promotion:
 8 passed; the final combined focused battery below also includes all six
 ratchet tests and passes.
 
+The diff also fixes the G2 config field-order test that was already failing at
+base commit `174f6966cf`: `een_nemo_relative_vorticity` had been appended after
+the test froze the prior six-field suffix. The assertion now records that
+vorticity field followed by this round's tracer-order field.
+
 `tests/test_dispatch_hardening.py` remains red only at the handed pre-campaign
 `packages/land/legoesm/land/slab_land.py::step_land` row: 1 failed, 23 passed.
 It was measured and left unchanged as instructed.
@@ -70,6 +75,15 @@ G1, G1b, G2 and G3 remain False
 The card assignment is at
 `nemo_testcase_recipe.py:3806`.
 
+The G4 route executes both tracer helper call sites. Its momentum-stage ladder
+supplies the stage thickness weights and selects the written-order arm at
+`ocean_model_latlon_cgrid.py:8362-8364`; that is the live stage-1/2 call. The
+later tracer finalizer resumes from the completed stage 2 at
+`ocean_model_latlon_cgrid.py:9995-10000` and evaluates stage 3 only, without
+stage weights. It no longer passes the stage-1/2 selector. The helper now
+raises if the selector is true without weights, so this contract cannot again
+be silently inert.
+
 Decision 122 points to the same live statement in the full ORCA2 build:
 `ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:678-680`. No exact ORCA2 row
 is lost by the default-off option; the ORCA2 card remains deselected and is
@@ -100,8 +114,10 @@ depth rows instead.
 | 10 | D 5.729e-14/13089 | D 1.796e-14/13648 | D 2.345e-14/13633 | D 4.807e-14/10464 | D 1.089e-13/10727 | restart below | restart below |
 
 Surface rows: 68 total, 53 AT-BAR, 15 DEBT. All-level depth rows: 36 total,
-26 AT-BAR, 10 DEBT. First debt is kt 6 u/v. At kt 6 their whole-domain
-normalized maxima are 5.727011341529318e-15 and 1.9802115519243914e-14.
+26 AT-BAR, 10 DEBT. First debt is kt 6 u/v. At kt 6 their surface-row
+normalized maxima are 5.727011341529318e-15 (u) and
+2.5019802058061227e-14 (v). Their all-level normalized maxima are
+5.729930307554562e-15 (u) and 1.9802115519243914e-14 (v).
 
 ### GIVEN-NEMO-ENTRY
 
@@ -188,6 +204,15 @@ No new owner is claimed.
 
 ## 7. Tests and review
 
+- Claude-review follow-up fast battery under `JAX_ENABLE_X64=1`: 38 passed,
+  2 slow deselected (16.81 s). This includes every G4 fast test, the two direct
+  tracer tests, the corrected G2 config-order test, and all six ratchet tests.
+- Replacing the selected tracer arm with the default regrouped expression made
+  the direct test fail in all 4 cells. The decisive cell was
+  30.720408364609142 (regrouped) versus 30.72040836460914 (independent NumPy,
+  one operation at a time). The production arm was then restored.
+- The G4 reader's planted header-step and invalid-bound cases both refuse with
+  exit 73; the non-two-cell-halo synthetic header reads its declared bounds.
 - Focused fast: 45 passed, 9 slow deselected (19.43 s).
 - Slow G4 stage/control route: 1 passed (242.97 s). The control restores
   58 T and 45 S stage-1 mismatches.

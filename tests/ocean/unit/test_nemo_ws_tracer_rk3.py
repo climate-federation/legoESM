@@ -743,6 +743,8 @@ def test_nemo_ws_stage1_trace_exposes_live_rhs_boundaries(monkeypatch):
     assert not np.array_equal(b1, adv_b)
 
 
+@pytest.mark.skipif(
+    not jax.config.x64_enabled, reason="requires JAX_ENABLE_X64=1")
 def test_nemo_ws_tracer_stage_update_can_preserve_nemo_written_order():
     """The selected arm rounds every product/sum in stprk3_stg:503-505."""
     values = np.array([
@@ -755,28 +757,50 @@ def test_nemo_ws_tracer_stage_update_can_preserve_nemo_written_order():
         [31.146819125679247, 0.9950401452461842, 1.0058326163307618,
          1.0088521400157253, 3.94753675890741e-09],
     ], dtype=np.float64)
-    base = jnp.asarray(values[:, 0])[None, :, None]
-    source = jnp.asarray(values[:, 4])[None, :, None]
-    q_before = jnp.asarray(values[:, 1])[None, :]
-    q_rhs = jnp.asarray(values[:, 2])[None, :]
-    q_after = jnp.asarray(values[:, 3])[None, :]
-    ones = jnp.ones_like(base)
-    vertical = jnp.ones((1, 4, 2), dtype=jnp.float64)
+    inputs = tuple(jnp.asarray(column) for column in values.T)
 
-    def run(written_order):
+    def run(base_arg, q_before_arg, q_rhs_arg, q_after_arg, source_arg,
+            dt_arg, *, written_order):
+        base = base_arg[None, :, None]
+        source = source_arg[None, :, None]
+        q_before = q_before_arg[None, :]
+        q_rhs = q_rhs_arg[None, :]
+        q_after = q_after_arg[None, :]
+        ones = jnp.ones_like(base)
+        vertical = jnp.ones((1, base.shape[1], 2), dtype=base.dtype)
         return model_module._nemo_ws_rk3_tracer_pair_step(
             base, base, "none", ones, ones, vertical,
-            ones, ones, ones, ones, object(), 10800.0, ones,
+            ones, ones, ones, ones, object(), dt_arg, ones,
             stage_source_rates=((source, source),) * 3,
             stage_qco_weights=((q_before, q_rhs, q_after),) * 3,
             stage_tracer_written_order=written_order,
             stop_after_stage=1,
         )[0]
 
-    ordered = np.asarray(jax.jit(lambda: run(True))())
-    contracted = np.asarray(jax.jit(lambda: run(False))())
-    assert ordered[0, 3, 0] == np.float64(30.720408364609142)
-    assert np.any(ordered.view(np.uint64) != contracted.view(np.uint64))
+    dt = jnp.asarray(10800.0, dtype=jnp.float64)
+    ordered = np.asarray(jax.jit(
+        lambda *args: run(*args, written_order=True))(*inputs, dt))
+    contracted = np.asarray(jax.jit(
+        lambda *args: run(*args, written_order=False))(*inputs, dt))
+
+    stage_dt = np.divide(np.float64(10800.0), np.float64(3.0))
+    first_product = np.multiply(values[:, 1], values[:, 0])
+    coefficient = np.multiply(stage_dt, values[:, 2])
+    second_product = np.multiply(coefficient, values[:, 4])
+    numerator = np.add(first_product, second_product)
+    expected = np.divide(numerator, values[:, 3])[None, :, None]
+    np.testing.assert_array_equal(ordered, expected)
+    assert expected[0, 3, 0] == np.float64(30.72040836460914)
+    assert np.any(expected.view(np.uint64) != contracted.view(np.uint64))
+
+
+def test_nemo_ws_tracer_written_order_requires_qco_weights():
+    tracer = jnp.ones((1, 1, 1))
+    with pytest.raises(ValueError, match="requires stage_qco_weights"):
+        model_module._nemo_ws_rk3_tracer_pair_step(
+            tracer, tracer, "none", tracer, tracer,
+            jnp.ones((1, 1, 2)), tracer, tracer, tracer, tracer,
+            object(), 1.0, tracer, stage_tracer_written_order=True)
 
 
 def test_nemo_ws_stage1_trace_preserves_source_statement_order(monkeypatch):

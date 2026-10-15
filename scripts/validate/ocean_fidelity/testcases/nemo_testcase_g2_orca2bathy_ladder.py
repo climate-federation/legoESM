@@ -477,9 +477,8 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
         import g4_forcing_steps as g4  # noqa: E402
 
         def read_step(kt):
-            fields = g4.frames(root, kt)
-            full = fields["s_sst_m"].shape
-            return {name: g4.inner(value, full)
+            header, fields = g4.frames(root, kt)
+            return {name: g4.inner(value, header)
                     for name, value in fields.items()}
     else:
         read_step = lambda kt: g1.read_step(root, kt)  # noqa: E731

@@ -1734,6 +1734,12 @@ CITATION_MAP = {
     'ocean_model_latlon_cgrid.py:2519-2523': [
         'if stage_tracer_written_order:',
         '/ q_after[..., None])', 5],
+    'ocean_model_latlon_cgrid.py:8362-8364': [
+        'stage_qco_weights=_tracer_qco_weights,',
+        '_cfg_b.rk3_stage_tracer_written_order),', 3],
+    'ocean_model_latlon_cgrid.py:9995-10000': [
+        ('resume=(', 3),
+        'else (2, *_nemo_ws_stage_tracers)),', 6],
     'state.py:3232': ('rk3_stage_tracer_written_order: bool = False', 1),
     'nemo_testcase_recipe.py:4015-4020': [
         "# NEMO's written stage-1/2 tracer update (stprk3_stg.f90:503-505; G4 round",
@@ -1743,7 +1749,7 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:678-680': [
         'ts(ji,jj,jk,jn,Kaa) = (        ( 1._wp + r3t(ji,jj,Kbb) )*ts(ji,jj,jk,jn,Kbb )',
         '&                /          ( 1._wp + r3t(ji,jj,Kaa) )', 3],
-    'nemo_testcase_g2_orca2bathy_ladder.py:558-565': [
+    'nemo_testcase_g2_orca2bathy_ladder.py:557-564': [
         'def step(state, kt):',
         'return new, round(time.time() - t0, 1)', 8],
     # --- GRIDLADDER round 23 (G4 round 6 receipt) ---

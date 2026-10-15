@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import struct
 import subprocess
 from pathlib import Path
 
@@ -445,11 +446,34 @@ def test_walk_rows_cite_the_ncar_statement_they_score():
         assert WALK_STATEMENT_TEXT[name] in lines[first - 1], (name, cite, lines[first - 1])
 
 
-def test_forcing_steps_helpers():
+def test_forcing_steps_helpers(tmp_path):
     mod = _steps_module()
+    header = dict(zip(mod.cr.HEADER_NAMES, (
+        1, 4, 1, 2, 3, 4, 7, 6, 2, 2, 3, 5, 4, 64)))
     full = np.arange(6 * 7, dtype=float).reshape(6, 7)
-    assert mod.inner(full, (6, 7)).shape == (2, 3)          # full planes lose nn_hls = 2
-    assert mod.inner(full[2:-2, 2:-2], (6, 7)).shape == (2, 3)   # inner arrays pass through
+    assert mod.inner(full, header).shape == (2, 4)
+    assert mod.inner(full[2:4, 1:5], header).shape == (2, 4)
+
+    # Header plants: the reader must refuse a filename/header step mismatch
+    # and impossible inner bounds before any field can be consumed.
+    path = mod.cr.step_path(tmp_path, 4)
+    blob = mod.cr.MAGIC + struct.pack("<14i", *header.values())
+    path.write_bytes(blob)
+    read_header, fields = mod.frames(tmp_path, 4)
+    assert read_header == header and fields == {}
+    planted_step = bytearray(blob)
+    struct.pack_into("<i", planted_step, 20, 5)
+    path.write_bytes(planted_step)
+    with pytest.raises(SystemExit) as refused:
+        mod.frames(tmp_path, 4)
+    assert refused.value.code == 73
+    planted_bounds = bytearray(blob)
+    struct.pack_into("<i", planted_bounds, 52, 0)
+    path.write_bytes(planted_bounds)
+    with pytest.raises(SystemExit) as refused:
+        mod.frames(tmp_path, 4)
+    assert refused.value.code == 73
+
     log = "\n".join(f"   fld_read: var {v} kt =        3 (0.3 days), record:   0002 (x)"
                     for _, _, v, _ in mod.o1.FIELD_SPECS)
     assert set(mod.records(log, 3).values()) == {1}

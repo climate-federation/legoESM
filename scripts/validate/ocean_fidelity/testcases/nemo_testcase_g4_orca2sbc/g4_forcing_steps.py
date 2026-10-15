@@ -61,14 +61,31 @@ def require_program(run: Path, fields: dict) -> None:
     require(letters == set(ITER), f"{run.name}: recorded NCAR iterations {sorted(letters)}")
 
 
-def frames(run: Path, kt: int) -> dict:
-    _, fields = cr.read_stream(cr.step_path(run, kt).read_bytes(), f"kt={kt}", allow_inner=True)
-    return fields
+def _inner_slices(header: dict) -> tuple[slice, slice]:
+    require(1 <= header["Nis0"] <= header["Nie0"] <= header["jpi"]
+            and 1 <= header["Njs0"] <= header["Nje0"] <= header["jpj"],
+            "invalid inner-domain bounds in the frame header")
+    return (slice(header["Njs0"] - 1, header["Nje0"]),
+            slice(header["Nis0"] - 1, header["Nie0"]))
 
 
-def inner(a: np.ndarray, shape: tuple) -> np.ndarray:
-    """Full (jpj, jpi) planes cut to the inner domain (nn_hls = 2)."""
-    return a[2:-2, 2:-2] if a.shape == shape else a
+def frames(run: Path, kt: int) -> tuple[dict, dict]:
+    header, fields = cr.read_stream(
+        cr.step_path(run, kt).read_bytes(), f"kt={kt}", allow_inner=True)
+    require(header["step"] == kt,
+            f"kt={kt}: frame header holds step {header['step']}")
+    _inner_slices(header)
+    return header, fields
+
+
+def inner(a: np.ndarray, header: dict) -> np.ndarray:
+    """Cut a full plane to the inner-domain bounds stored in its header."""
+    slices = _inner_slices(header)
+    full = (header["jpj"], header["jpi"])
+    inner_shape = tuple(bound.stop - bound.start for bound in slices)
+    require(a.shape in (full, inner_shape),
+            f"field shape {a.shape} is neither full {full} nor inner {inner_shape}")
+    return a[slices] if a.shape == full else a
 
 
 def records(log: str, kt: int) -> dict:
@@ -144,20 +161,22 @@ def identity(run: Path, steps: int, plant: bool = False) -> dict:
     with Dataset(run / "mesh_mask.nc") as ds:
         wet = np.asarray(ds["tmask"][0, 0].data, dtype=bool)
     out, card, kb_prev, tu_ok = {}, None, None, True
-    require_program(run, frames(run, 1))
+    _, first_fields = frames(run, 1)
+    require_program(run, first_fields)
     for kt in range(1, steps + 1):
-        f = frames(run, kt)
-        full = f["s_sst_m"].shape
+        header, f = frames(run, kt)
+        full = (header["jpj"], header["jpi"])
+        inner_slices = _inner_slices(header)
         kb = kt - (kt - 1) % FSBC
         if kb != kb_prev:      # the bulk runs at MOD(kt-1, nn_fsbc) == 0 (sbcblk.f90:554)
             rec = records(log, kb)
-            card = card_bulk(run, rec, inner(f["s_sst_m"], full), cache)
+            card = card_bulk(run, rec, inner(f["s_sst_m"], header), cache)
             card["qsr"] = (1.0 - ALBO) * card["maps"]["qsr_down"] * wet
-            dtemp = inner(f["s_sst_m"], full) + o1.constants.T_freeze - card["maps"]["tair"]
+            dtemp = inner(f["s_sst_m"], header) + o1.constants.T_freeze - card["maps"]["tair"]
             kb_prev = kb
         rows = {}
         for name in ("qsr", "utau", "vtau"):
-            nemo = inner(f[f"s_{name}"], full)
+            nemo = inner(f[f"s_{name}"], header)
             row = score(f"kt{kt}.{name}", nemo, np.asarray(card[name], np.float64), wet,
                         plant=plant and kt == 1 and name == "qsr")
             row["unequal_cells"] = int(((np.asarray(card[name]).view("<u8")
@@ -170,24 +189,26 @@ def identity(run: Path, steps: int, plant: bool = False) -> dict:
         tm = np.zeros(full); um = np.zeros(full); vm = np.zeros(full)
         with Dataset(run / "mesh_mask.nc") as ds:
             for arr, n in ((tm, "tmask"), (um, "umask"), (vm, "vmask")):
-                arr[2:-2, 2:-2] = ds[n][0, 0]
+                arr[inner_slices] = ds[n][0, 0]
         for name, src, ref_mask, along in (("utauU", "utau", um, True), ("vtauV", "vtau", vm, False)):
             nemo_full = f[f"s_{name}"]
             # every face NEMO's statement can make nonzero: MAX(tmask here, tmask next)
             sel = t_to_uv(np.ones(full), tm, um, vm, along) != 0
-            sel[:, -3:] = False; sel[-3:, :] = False; sel[:2, :] = False; sel[:, :2] = False
+            js, i_s = inner_slices
+            sel[:js.start, :] = False; sel[js.stop - 1:, :] = False
+            sel[:, :i_s.start] = False; sel[:, i_s.stop - 1:] = False
             mirror = t_to_uv(f[f"s_{src}"], tm, um, vm, along)
             tu_ok &= bool(np.array_equal(mirror[sel].view("<u8"), nemo_full[sel].view("<u8")))
-            card_full = np.zeros(full); card_full[2:-2, 2:-2] = card[src] * wet   # taum * smask0 (sbcblk.f90:795)
+            card_full = np.zeros(full); card_full[inner_slices] = card[src] * wet   # taum * smask0 (sbcblk.f90:795)
             cand = t_to_uv(card_full, tm, um, vm, along)
             row = score(f"kt{kt}.{name}", nemo_full, cand, sel)
             row["unequal_cells"] = int(((cand.view("<u8") != nemo_full.view("<u8")) & sel).sum())
             rows[name] = {k: row[k] for k in ("status", "normalized_max_abs", "unequal_cells")}
         for name in ZERO_WITHOUT_ICE:
-            nemo = inner(f[f"s_{name}"], full)
+            nemo = inner(f[f"s_{name}"], header)
             rows[name] = {"card": "0 (no sea ice)", "nemo_nonzero_wet_cells": int((nemo[wet] != 0).sum())}
         for name in NO_CARD_OPERATOR:
-            nemo = inner(f[f"s_{name}"], full)
+            nemo = inner(f[f"s_{name}"], header)
             rows[name] = {"card": "NO CARD OPERATOR",
                           "nemo_min_max_wet": [float(nemo[wet].min()), float(nemo[wet].max())]}
         for name in ("ssh_frc", "zu_frc", "zv_frc"):
@@ -220,16 +241,16 @@ def walk(run: Path, steps: int, plant: bool = False) -> dict:
     jax.config.update("jax_enable_x64", True)
     o1.set_policy(o1.PrecisionPolicy.fp64(transcendentals="libm"))
     require(jax.default_backend() == "cpu", "CPU only")
-    require_program(run, frames(run, 1))
+    _, first_fields = frames(run, 1)
+    require_program(run, first_fields)
     k = o1.constants.kappa_von_karman
     with Dataset(run / "mesh_mask.nc") as ds:
         wet = np.asarray(ds["tmask"][0, 0].data, dtype=bool)
     a = np.asarray
     out = {}
     for kt in range(1, steps + 1, FSBC):
-        f = frames(run, kt)
+        _, f = frames(run, kt)
         n = {key[2:]: v for key, v in f.items() if key.startswith("n_")}
-        full = f["s_sst_m"].shape
         dtemp = f["k_sspt"] - f["k_tair"]      # potential SST minus the bulk's air temperature
         rows = {}
 
@@ -314,11 +335,10 @@ def nemo_supplied_forcing(card, run: Path, kt: int, *, zero: bool = False):
     inputs, through the ORCA2 lane's route unchanged (round-1 ladder gate
     ``_surface_forcings``).  ``zero``: every field 0 (the non-vacuity control)."""
     from nemo_testcase_l4_orca2_round1_ladder_gate import _surface_forcings
-    f = frames(run, kt)
-    full = f["s_sst_m"].shape
-    fields = {name: inner(f[f"s_{name}"], full) for name in ROUTE_FIELDS}
-    fields["rnf_tsc"] = np.stack([inner(f["s_rnf_tsc_tem"], full),
-                                  inner(f["s_rnf_tsc_sal"], full)], axis=-1)
+    header, f = frames(run, kt)
+    fields = {name: inner(f[f"s_{name}"], header) for name in ROUTE_FIELDS}
+    fields["rnf_tsc"] = np.stack([inner(f["s_rnf_tsc_tem"], header),
+                                  inner(f["s_rnf_tsc_sal"], header)], axis=-1)
     if zero:
         fields = {k: np.zeros_like(v) for k, v in fields.items()}
     return _surface_forcings(card, run, fields, kt)
@@ -370,8 +390,7 @@ def route(run: Path, deck_root: Path, *, zero: bool = False, stages: str = "123"
             wet, apply_hand_alterations=False)
         entry = st._replace(T=st.T.replace(data=jnp.asarray(t0)), S=st.S.replace(data=jnp.asarray(s0)))
     freshwater, surface = nemo_supplied_forcing(card, run, 1, zero=zero)
-    nemo = frames(run, 1)
-    full = nemo["s_sst_m"].shape
+    header, nemo = frames(run, 1)
     out = {"label": "GIVEN-NEMO-ENTRY (%s initial state), kt = 1" % (
                "as-built" if as_built else "Decision-120"), "zero_forcing": zero,
            "without_stress_options": without_stress_options,
@@ -388,7 +407,7 @@ def route(run: Path, deck_root: Path, *, zero: bool = False, stages: str = "123"
         cand = g2.card_surface(new)
         rows = {}
         for name, key in STAGE_ROWS.items():
-            ref = np.asarray(inner(nemo[f"{stage}_{key}"], full), np.float64)
+            ref = np.asarray(inner(nemo[f"{stage}_{key}"], header), np.float64)
             got = np.asarray(cand[name], np.float64)
             rows[name] = {"unequal": int((ref.view("<u8") != got.view("<u8")).sum()),
                           "unequal_values": int((ref != got).sum()),
@@ -397,7 +416,7 @@ def route(run: Path, deck_root: Path, *, zero: bool = False, stages: str = "123"
         if dump is not None:
             np.savez(Path(dump) / f"route_stage{stage}.npz",
                      **{f"card_{n}": np.asarray(cand[n]) for n in STAGE_ROWS},
-                     **{f"nemo_{n}": inner(nemo[f"{stage}_{k}"], full) for n, k in STAGE_ROWS.items()})
+                     **{f"nemo_{n}": inner(nemo[f"{stage}_{k}"], header) for n, k in STAGE_ROWS.items()})
     return out
 
 
