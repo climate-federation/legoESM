@@ -6,6 +6,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import shutil
 import types
 from pathlib import Path
 
@@ -1080,3 +1081,182 @@ def test_committed_day4265_configs_select_the_record_start():
             "record": {"root": str(_REAL_RECORD), "chunk_label": "dual"}}
     assert pilot["dataset"]["splits_days"]["validation"][0] == 4265
     assert control["control"] == "nu10"
+
+
+# ------------------------------------------------------ curriculum extension
+
+WEIGHTED_PILOT = _ROOT / "config/swg_online/pilot_template_ring_weighted.json"
+
+
+def test_committed_w4_configs_extend_the_weighted_pilot():
+    """The w=4 configuration is the weighted pilot with the four-day window
+    appended (same experiment name, so it extends the pilot's run); its
+    day-4265 twin differs from it only as the pilot's twin does from the
+    pilot (the free-run block and the prose)."""
+    pilot = driver.load_config(WEIGHTED_PILOT)
+    w4 = driver.load_config(WEIGHTED_PILOT.with_name(
+        "pilot_template_ring_weighted_w4.json"))
+    twin = driver.load_config(WEIGHTED_PILOT.with_name(
+        "pilot_template_ring_weighted_w4_day4265_20y.json"))
+    pilot_twin = driver.load_config(WEIGHTED_PILOT.with_name(
+        "pilot_template_ring_weighted_day4265_20y.json"))
+    assert pilot["curriculum"]["window_days"] == [1, 2]
+    assert w4["curriculum"]["window_days"] == [1, 2, 4]
+    assert w4 | {"description": pilot["description"],
+                 "curriculum": pilot["curriculum"]} == pilot
+    assert w4["curriculum"] | {"window_days": [1, 2]} == pilot["curriculum"]
+    assert w4["experiment"] == pilot["experiment"]
+    assert w4["description"] != pilot["description"]
+    assert twin | {"description": w4["description"],
+                   "free_run": w4["free_run"]} == w4
+    assert twin["free_run"] == pilot_twin["free_run"]
+    assert twin["free_run"]["days"] == 7300
+    assert twin["free_run"]["start"]["day"] == 4265
+
+
+@pytest.fixture(scope="module")
+def one_window(tmp_path_factory, small_card, record):
+    """A completed run of the one-day window alone (two epochs)."""
+    folder = tmp_path_factory.mktemp("swg_extend")
+    config = _config(record)
+    config["curriculum"]["window_days"] = [1]
+    path = _write_config(folder / "config.json", config)
+    log = driver.train(config, path, card=small_card, seed=11,
+                       run_dir=folder / "run", device=CPU,
+                       windows_per_call=10, commit="0" * 40)
+    assert log["status"] == "complete"
+    return {"folder": folder, "config": config, "path": path}
+
+
+def _extension(one_window, tmp_path, window_days=(1, 2)):
+    """A scratch copy of the completed run and a configuration appending
+    the two-day window to it (a new description, as the committed w=4 file
+    has)."""
+    run = tmp_path / "run"
+    shutil.copytree(one_window["folder"] / "run", run)
+    config = copy.deepcopy(one_window["config"])
+    config["curriculum"]["window_days"] = list(window_days)
+    config["description"] = "the one-day run continued to two days"
+    return run, config
+
+
+def _digests(run: Path) -> dict:
+    return {str(path.relative_to(run)): driver._sha256(path)
+            for path in sorted(run.rglob("*")) if path.is_file()}
+
+
+def test_extension_appends_a_window_and_keeps_the_finished_stages(
+        one_window, tmp_path, small_card):
+    run, config = _extension(one_window, tmp_path)
+    path = _write_config(tmp_path / "extended.json", config)
+    before = _digests(run)
+    stored = json.loads((run / "run_manifest.json").read_text())
+    finished = json.loads((run / "training_log.json").read_text())["epochs"]
+    assert [(e["window_days"], e["epoch"]) for e in finished] == [(1, 1), (1, 2)]
+
+    log = driver.train(config, path, card=small_card, seed=11, run_dir=run,
+                       device=CPU, windows_per_call=10, commit="2" * 40)
+
+    # The finished stages: checkpoints bit-identical, log entries unchanged.
+    after = _digests(run)
+    assert {name: after[name] for name in before if "checkpoints/" in name} \
+        == {name: before[name] for name in before if "checkpoints/" in name}
+    assert log["epochs"][:2] == finished
+    assert [(e["window_days"], e["epoch"]) for e in log["epochs"]] \
+        == [(1, 1), (1, 2), (2, 1), (2, 2)]
+    assert log["status"] == "complete"
+    # The new stage: optimiser reinitialised, network carried from the
+    # last finished checkpoint (the existing between-windows test's bars).
+    steps = {(e["window_days"], e["epoch"]): e["optimizer_steps"]
+             for e in log["epochs"]}
+    end_one, _, initial = _params(
+        run / "checkpoints/w01_e02.eqx", small_card, config, 11)
+    start_two, count_two, _ = _params(
+        run / "checkpoints/w02_e01.eqx", small_card, config, 11)
+    assert count_two and set(count_two) == {steps[(2, 1)]}
+    lr = config["optimiser"]["learning_rate"]
+    assert all(np.max(np.abs(new - old)) <= 1.01 * lr
+               for new, old in zip(start_two, end_one, strict=True))
+    assert any(np.max(np.abs(new - old)) > 1.5 * lr
+               for new, old in zip(start_two, initial, strict=True))
+    # The record: manifest now the extending configuration's, with the
+    # extension (from what, to what, at which commit) in it and in the log.
+    manifest = json.loads((run / "run_manifest.json").read_text())
+    assert manifest["config"] == config
+    assert manifest["config_sha256"] == driver._sha256(path)
+    assert manifest["curriculum"]["window_days"] == [1, 2]
+    assert manifest["legoesm_git_sha"] == "2" * 40
+    (extension,) = manifest["curriculum_extensions"]
+    assert extension.pop("extended_utc")
+    assert extension == {
+        "from_window_days": [1], "to_window_days": [1, 2],
+        "epochs_per_window": 2, "completed_epochs_at_extension": 2,
+        "from_config_sha256": stored["config_sha256"],
+        "to_config_sha256": driver._sha256(path),
+        "from_legoesm_git_sha": "0" * 40, "legoesm_git_sha": "2" * 40}
+    assert log["invocations"][-1]["completed_epochs_at_start"] == 2
+    assert log["invocations"][-1]["curriculum_extension"] \
+        | {"extended_utc": None} == extension | {"extended_utc": None}
+    assert driver.run_identity(manifest) | {
+        key: stored[key] for key in driver._EXTENSION_KEYS} == stored
+
+    # The extended run resumes as any other: identical, nothing to do; the
+    # commit it now records is the extending one.
+    again = driver.train(config, path, card=small_card, seed=11, run_dir=run,
+                         device=CPU, windows_per_call=10, commit="2" * 40)
+    assert again["epochs"] == log["epochs"]
+    with pytest.raises(RuntimeError, match="legoesm_git_sha"):
+        driver.train(config, path, card=small_card, seed=11, run_dir=run,
+                     device=CPU, windows_per_call=10, commit="0" * 40)
+    # Free runs bind to the extended configuration, not the one it extends.
+    with pytest.raises(ValueError, match="not this configuration"):
+        driver.run_free_run(
+            one_window["config"], one_window["path"], card=small_card,
+            seed=11, run_dir=run, window_days=1, device=CPU, commit="2" * 40)
+    free = driver.run_free_run(
+        config, path, card=small_card, seed=11, run_dir=run, window_days=2,
+        device=CPU, commit="2" * 40)
+    assert free["closure"]["window_days"] == 2
+    assert free["closure"]["checkpoint_sha256"] \
+        == log["epochs"][-1]["checkpoint"]["sha256"]
+    assert free["closure"]["config_sha256"] == driver._sha256(path)
+
+
+def test_extension_refuses_anything_but_appended_windows(
+        one_window, tmp_path, small_card):
+    def refused(config, path, match, run):
+        untouched = _digests(run)
+        with pytest.raises(RuntimeError, match=match):
+            driver.train(config, path, card=small_card, seed=11, run_dir=run,
+                         device=CPU, windows_per_call=10, commit="2" * 40)
+        assert _digests(run) == untouched
+
+    # Anything else changed beside the appended window: refused.
+    run, config = _extension(one_window, tmp_path / "a")
+    config["optimiser"]["learning_rate"] = 2.0e-3
+    refused(config, _write_config(tmp_path / "a.json", config), "differs in",
+            run)
+    run, config = _extension(one_window, tmp_path / "b")
+    config["curriculum"]["epochs_per_window"] = 3
+    refused(config, _write_config(tmp_path / "b.json", config), "differs in",
+            run)
+    # The same windows under a new description: an ordinary changed
+    # configuration.  A removed window, a replaced window or a reordered
+    # list: not an extension.
+    for name, windows, match in (("c", [1], "differs in"),
+                                 ("d", [2], "do not extend"),
+                                 ("e", [2, 1], "do not extend"),
+                                 ("g", [2, 1, 4], "do not extend")):
+        run, config = _extension(one_window, tmp_path / name, windows)
+        path = tmp_path / f"{name}.json"
+        path.write_text(json.dumps(config))   # [2, 1] never loads; direct
+        refused(config, path, match, run)
+    # A run whose own curriculum has not completed: resume it first.
+    run, config = _extension(one_window, tmp_path / "f")
+    log_path = run / "training_log.json"
+    log = json.loads(log_path.read_text())
+    log["epochs"] = log["epochs"][:1]
+    log["status"] = "running"
+    log_path.write_text(json.dumps(log))
+    refused(config, _write_config(tmp_path / "f.json", config),
+            "has not completed", run)

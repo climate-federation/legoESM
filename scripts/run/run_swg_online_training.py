@@ -6,7 +6,12 @@ dataset contract over the hourly dual record, the configured window lengths
 (of 1, 2, 4 and 8 days) and epochs, batches of ten, Eq. 7, AdamW at a
 constant rate through the strict SWG wrapper (re-initialised at every window
 length, network carried) and a checkpoint after every epoch.  It resumes
-from the last completed epoch of its run directory.
+from the last completed epoch of its run directory.  A completed run's
+curriculum may be extended by a configuration that only appends window
+lengths (same epochs per window and everything else): the finished stages
+stay as logged, the new stage starts from the last checkpoint's network
+with a fresh optimiser, and the run manifest and training log record the
+extension (from which windows to which, from which commit to which).
 
 ``free-run`` integrates the coarse card from rest with the closure of one
 trained window length (its last checkpoint) on the device and math policy
@@ -26,6 +31,7 @@ and the run manifest records them.
 from __future__ import annotations
 
 import argparse
+import copy
 import datetime
 import functools
 import hashlib
@@ -800,6 +806,65 @@ def _checkpoint_name(window_days: int, epoch: int) -> str:
     return f"checkpoints/w{window_days:02d}_e{epoch:02d}.eqx"
 
 
+# A finished run's curriculum may be extended by appending window lengths.
+# The extending configuration then differs from the stored run manifest in
+# these keys only: the window list, the prose description, the file's digest
+# and the commit of the extending code.  Everything else, epochs_per_window
+# included, must be identical.
+_EXTENSION_KEYS = ("config", "config_sha256", "curriculum", "legoesm_git_sha")
+
+
+def run_identity(stored: dict) -> dict:
+    """A stored run manifest without its record of curriculum extensions."""
+    return {key: value for key, value in stored.items()
+            if key != "curriculum_extensions"}
+
+
+def curriculum_extension(stored: dict, identity: dict, log: dict,
+                         run_dir: Path) -> dict | None:
+    """The extension record when ``identity`` appends window lengths to the
+    completed curriculum of the ``stored`` run manifest; ``None`` when the
+    two are identical (a plain resume).  Any other difference refuses."""
+    if identity == run_identity(stored):
+        return None
+
+    def apart_from_the_extension(manifest: dict) -> dict:
+        manifest = copy.deepcopy(run_identity(manifest))
+        for block in (manifest, manifest["config"]):
+            block["curriculum"].pop("window_days")
+        manifest["config"].pop("description")
+        for key in ("config_sha256", "legoesm_git_sha"):
+            manifest.pop(key)
+        return manifest
+
+    old = stored["curriculum"]["window_days"]
+    new = identity["curriculum"]["window_days"]
+    if apart_from_the_extension(identity) != apart_from_the_extension(stored) \
+            or new == old:
+        differing = sorted(key for key in identity
+                           if identity.get(key) != stored.get(key))
+        raise RuntimeError(
+            f"refusing to resume {run_dir}: the run differs in {differing}")
+    if len(new) <= len(old) or new[:len(old)] != old:
+        raise RuntimeError(
+            f"refusing to resume {run_dir}: window lengths {new} do not "
+            f"extend the run's {old} (only appending is admitted)")
+    if log["status"] != "complete":
+        raise RuntimeError(
+            f"refusing to extend {run_dir}: its curriculum {old} has not "
+            f"completed (status {log['status']!r}); resume it with its own "
+            "configuration first")
+    return {
+        "extended_utc": datetime.datetime.now(datetime.UTC).isoformat(),
+        "from_window_days": old, "to_window_days": new,
+        "epochs_per_window": stored["curriculum"]["epochs_per_window"],
+        "completed_epochs_at_extension": len(log["epochs"]),
+        "from_config_sha256": stored["config_sha256"],
+        "to_config_sha256": identity["config_sha256"],
+        "from_legoesm_git_sha": stored["legoesm_git_sha"],
+        "legoesm_git_sha": identity["legoesm_git_sha"]}
+
+
 def train(config: dict, config_path: Path, *, card, seed: int, run_dir: Path,
           device: dict, windows_per_call: int, commit: str) -> dict:
     """Run, or resume, one seed of one configuration in ``run_dir``."""
@@ -828,13 +893,20 @@ def train(config: dict, config_path: Path, *, card, seed: int, run_dir: Path,
 
     if manifest_path.is_file():
         stored = json.loads(manifest_path.read_text())
-        identity = identity_for(contract_path)
-        if identity != stored:
-            differing = sorted(key for key in identity
-                               if identity.get(key) != stored.get(key))
-            raise RuntimeError(
-                f"refusing to resume {run_dir}: the run differs in {differing}")
         log = json.loads(log_path.read_text())
+        identity = identity_for(contract_path)
+        extension = curriculum_extension(stored, identity, log, run_dir)
+        if extension is not None:
+            # The finished stages stay as logged; the manifest becomes the
+            # extending configuration's and keeps the record of every
+            # extension, so the extended run resumes as any other.
+            _write_json(manifest_path, stored
+                        | {key: identity[key] for key in _EXTENSION_KEYS}
+                        | {"curriculum_extensions":
+                           stored.get("curriculum_extensions", [])
+                           + [extension]})
+            log["status"] = "running"
+            invocation["curriculum_extension"] = extension
     else:
         if run_dir.exists():
             raise FileExistsError(
