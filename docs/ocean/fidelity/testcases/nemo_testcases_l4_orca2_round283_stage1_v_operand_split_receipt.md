@@ -63,7 +63,9 @@ it bit-for-bit.  The written arithmetic order is therefore exonerated.
 
 NEMO constructs `vmask` from the two adjacent T masks, applies the configured
 bottom-level masking, and then applies the V-point lateral-boundary association
-at `ORCA2_OMIP_L4_R280STAGE1/BLD/ppsrc/nemo/dommsk.f90:208-232`.
+at `ORCA2_OMIP_L4_R280STAGE1/BLD/ppsrc/nemo/dommsk.f90:211`,
+`ORCA2_OMIP_L4_R280STAGE1/BLD/ppsrc/nemo/dommsk.f90:225`, and
+`ORCA2_OMIP_L4_R280STAGE1/BLD/ppsrc/nemo/dommsk.f90:232`.
 The executing update consumes that associated 3-D mask at the cited
 `stprk3_stg.f90:477-480` statement.  legoESM instead sources this stage mask
 from its compact `compute_face_masks_3d` route.  That source is the first
