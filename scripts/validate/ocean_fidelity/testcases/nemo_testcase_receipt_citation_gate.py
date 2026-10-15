@@ -228,6 +228,8 @@ FILES = {
         _ORCA2G1_P5 / "ppsrc/nemo/stprk3_stg.f90"),
     "ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/traqsr.f90": (
         _ORCA2G1_P5 / "ppsrc/nemo/traqsr.f90"),
+    "ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/trazdf.f90": (
+        _ORCA2G1_P5 / "ppsrc/nemo/trazdf.f90"),
     "ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/trasbc.f90": (
         _ORCA2G1_P5 / "ppsrc/nemo/trasbc.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/trasbc.f90": (
@@ -1717,6 +1719,16 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- GRIDLADDER round 28 (G4 round 8 receipt) ---
+    'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/trasbc.f90:307': 'r1_rcp * qns(ji,jj) * z1_rho0_e3t',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/trasbc.f90:307': 'r1_rcp * qns(ji,jj) * z1_rho0_e3t',
+    'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/trazdf.f90:288-289': [
+        'zrhs =       (e3t_3d(ji,jj,jk)', '& + p2dt * (e3t_3d(ji,jj,jk)', 2],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/trazdf.f90:288-289': [
+        'zrhs =       (e3t_3d(ji,jj,jk)', '& + p2dt * (e3t_3d(ji,jj,jk)', 2],
+    'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/traqsr.f90:393': (
+        'pts(ji,jj,jk,jp_tem,Krhs) = pts(ji,jj,jk,jp_tem,Krhs) + r1_rho0_rcp * ( zeT(ji,jj) - zzeT ) / ze3t', 1),
+    'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/sbcrnf.f90:489': 'h_rnf (ji,jj) = (e3t_3d(ji,jj,1)',
     # --- GRIDLADDER round 25 (G4 round 7 receipt) ---
     'barotropic_latlon_cgrid.py:4144': (
         'def nemo_een_ratio_fold_exchange(r3u, r3v, r3f, grid, selected):', 1),
