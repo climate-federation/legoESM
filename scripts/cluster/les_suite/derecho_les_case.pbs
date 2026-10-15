@@ -12,11 +12,29 @@
 #
 #   qsub -N cbl_lasd -v ARGS="--case cbl_nieuwstadt --sgs lasd --hours 1 --frames 12" \
 #        derecho_les_case.pbs
+#
+# A run longer than one walltime chains: set CKPT (checkpoint file) and
+# WALL_LIMIT_S (seconds of stepping per link, leave margin for compile + the
+# checkpoint write). The driver checkpoints and exits 75 at the limit; this
+# script then queues the next link (qsub -V: the whole environment, so no
+# setting reverts to a default mid-run) with walltime RESUBMIT_WALLTIME, and
+# the next link resumes from CKPT.
+#
+#   qsub -N gabls1_r2 -l walltime=12:00:00 -v ARGS="--case sbl_gabls1 --refine 2 \
+#        --hours 9",CKPT=/glade/derecho/scratch/$USER/les_suite/ckpt/gabls1_r2.npz,\
+#        WALL_LIMIT_S=41400,RESUBMIT_WALLTIME=12:00:00 derecho_les_case.pbs
 set -uo pipefail
 : "${ARGS:?ARGS (run_les_suite.py arguments) is required}"
 : "${REPO:=/glade/u/home/${USER}/legoesm}"
 : "${OUT:=${REPO}/results/les_suite/artifacts}"
 : "${CONDA_ENV_PREFIX:=/glade/work/${USER}/conda-envs/legoesm-gpu}"
+CHAIN_ARGS=()
+if [[ -n "${CKPT:-}" ]]; then
+    : "${WALL_LIMIT_S:?WALL_LIMIT_S is required with CKPT}"
+    : "${RESUBMIT_WALLTIME:?RESUBMIT_WALLTIME is required with CKPT}"
+    mkdir -p "$(dirname "${CKPT}")"
+    CHAIN_ARGS=(--checkpoint "${CKPT}" --wall-limit-s "${WALL_LIMIT_S}")
+fi
 LOGDIR="${REPO}/results/les_suite/campaign"
 mkdir -p "${OUT}" "${LOGDIR}"
 exec > >(tee -a "${LOGDIR}/${PBS_JOBNAME:-les}-${PBS_JOBID:-local}.out") 2>&1
@@ -31,7 +49,22 @@ export PYTHONPATH
 echo "[les] host=$(hostname) sha=$(git rev-parse HEAD) dirty=$(git status --porcelain | wc -l) args=${ARGS} out=${OUT}"
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 # shellcheck disable=SC2086
-JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 python scripts/run/run_les_suite.py ${ARGS} --output "${OUT}"
+JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 python scripts/run/run_les_suite.py ${ARGS} \
+    "${CHAIN_ARGS[@]}" --output "${OUT}"
 rc=$?
 echo "[les] exit=${rc}"
+if (( rc == 75 )); then
+    if [[ -z "${PBS_JOBID:-}" ]]; then
+        echo "[les] checkpointed at the wall limit; not under PBS, so no next link"
+        exit 75
+    fi
+    if ! NEXT=$(qsub -V -N "${PBS_JOBNAME}" -l walltime="${RESUBMIT_WALLTIME}" \
+                -W depend=afterok:"${PBS_JOBID}" \
+                "${REPO}/scripts/cluster/les_suite/derecho_les_case.pbs"); then
+        echo "[les] RESUBMIT FAILED; resume by hand from ${CKPT}" >&2
+        exit 71
+    fi
+    echo "[les] checkpointed -> ${CKPT}; queued next link ${NEXT}"
+    exit 0
+fi
 exit "${rc}"

@@ -42,7 +42,13 @@ def _build_test_matrix() -> list[MatrixCase]:
 
 
 def _driver_command(case) -> list[str]:
-    """The ``scripts/run/<driver>`` invocation for one LES case (dry-run text)."""
+    """The ``scripts/run/<driver>`` invocation for one LES case (dry-run text).
+
+    A case with a full LESSetup runs through the suite driver by name — every
+    input is on the case, so no flags are passed for them."""
+    if case.setup is not None:
+        return ["python", f"scripts/run/{case.driver}", "--case", case.name,
+                "--sgs", case.sgs_variants[0]]
     cmd = ["python", f"scripts/run/{case.driver}"]
     if case.surface_theta_flux_K_m_s is not None:
         cmd += ["--Q0", str(case.surface_theta_flux_K_m_s)]

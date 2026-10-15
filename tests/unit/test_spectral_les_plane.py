@@ -307,3 +307,192 @@ def test_most_surface_flux_reuses_shared_psi(monkeypatch):
     us_patched = float(sl.most_surface_flux(U, 270.0, 260.0, z1, z0, thref)[0])
     # ψ≡0 ⇒ pure neutral log-law, regardless of the (strong) stratification.
     assert abs(us_patched - un) < 1e-6
+
+
+def test_most_surface_flux_thermal_roughness():
+    """z0h=None (default) and z0h=z0 give identical results, and in the neutral
+    limit θ_* = κΔθ/ln(z₁/z0h): a smaller z0h lengthens the thermal log layer and
+    weakens the heat flux by ln(z₁/z0)/ln(z₁/z0h). Identity to the pre-z0h code:
+    the default reproduces outputs frozen from that code (commit 8232c3c49; equal
+    bit for bit on CPU when frozen, compared at 1e-13 for portability)."""
+    frozen = {(4.0, 265.0, 263.0, 2.0, 0.1, 265.0): (
+                  0.5093883918647581, 0.2546941959323791, -0.12973826688328222,
+                  0.016217283360402165),
+              (8.0, 300.0, 301.5, 5.0, 0.01, 300.0): (
+                  0.5221088251452545, -0.09922605066298044, 0.051806796735452215,
+                  0.004259337895226402)}
+    for args, ref in frozen.items():
+        np.testing.assert_allclose([float(x) for x in sl.most_surface_flux(*args)], ref,
+                                   rtol=1e-13)
+    z1, z0, thref, U = 2.0, 0.1, 265.0, 4.0
+    a = sl.most_surface_flux(U, 265.0, 263.0, z1, z0, thref)
+    b = sl.most_surface_flux(U, 265.0, 263.0, z1, z0, thref, z0h=None)
+    c = sl.most_surface_flux(U, 265.0, 263.0, z1, z0, thref, z0h=z0)
+    for x, y, w in zip(a, b, c):
+        assert float(x) == float(y) == float(w)
+    # neutral-limit check: tiny Δθ so ψ_h ≈ 0
+    dth = 1e-6
+    _us, ths, _q, _cd = sl.most_surface_flux(U, 265.0 + dth, 265.0, z1, z0, thref,
+                                             z0h=1e-3)
+    kappa = sl.constants.kappa_von_karman
+    np.testing.assert_allclose(float(ths), kappa * dth / np.log(z1 / 1e-3), rtol=1e-6)
+    q_small = float(sl.most_surface_flux(U, 265.0, 263.0, z1, z0, thref, z0h=1e-3)[2])
+    assert float(a[2]) < q_small < 0.0      # weaker cooling flux with smaller z0h
+
+
+def test_most_drag_prescribed_flux_limits_and_fixed_point():
+    """Zero flux ⇒ the neutral log law (to ψ's 1e-10 ζ clamp); surface heating (q0>0, unstable)
+    ⇒ MORE drag than neutral, cooling ⇒ less; the returned u_* satisfies the
+    Businger–Dyer relation at the Obukhov length the flux sets; AD finite."""
+    z1, z0, thref, U = 10.0, 0.01, 300.0, 10.0
+    un = _neutral_ustar(U, z1, z0)
+    us0, cd0 = sl.most_drag_prescribed_flux(U, 0.0, z1, z0, thref)
+    np.testing.assert_allclose(float(us0), un, rtol=1e-9)
+    np.testing.assert_allclose(float(cd0), (un / U) ** 2, rtol=1e-9)
+    us_u, cd_u = sl.most_drag_prescribed_flux(U, 0.10, z1, z0, thref)
+    us_s, cd_s = sl.most_drag_prescribed_flux(U, -0.01, z1, z0, thref)
+    assert float(cd_u) > float(cd0) > float(cd_s)
+    kappa = sl.constants.kappa_von_karman
+    inv_L = -kappa * sl.constants.g * 0.10 / (float(us_u) ** 3 * thref)
+    rhs = kappa * U / (np.log(z1 / z0) - float(sl.psi_m(z1 * inv_L)))
+    np.testing.assert_allclose(float(us_u), rhs, rtol=1e-6)
+    gq = jax.grad(lambda q: sl.most_drag_prescribed_flux(U, q, z1, z0, thref)[1])(0.1)
+    assert bool(jnp.isfinite(gq)) and float(gq) > 0.0
+
+
+def test_most_drag_prescribed_flux_converges_near_free_convection():
+    """Weak wind + strong heating (Sullivan–Patton start: ⟨U⟩=1, q0=0.24, z1=4,
+    z0=0.1), where a plain fixed point oscillates: u_* matches an independently
+    converged root (damped iteration, residual 3e-14) and satisfies the
+    Businger–Dyer relation to round-off over a weak-to-strong sweep; AD matches
+    finite differences."""
+    for (U, q0, z1, z0), ref in [((1.0, 0.24, 4.0, 0.1), 0.183255152572),
+                                 ((0.5, 0.24, 10.0, 0.01), 0.045887479379)]:
+        us, _ = sl.most_drag_prescribed_flux(U, q0, z1, z0, 300.0)
+        np.testing.assert_allclose(float(us), ref, rtol=1e-10)
+    kappa, gacc = sl.constants.kappa_von_karman, sl.constants.g
+    for z1, z0 in [(4.0, 0.1), (10.0, 0.01), (10.0, 0.1), (1.0, 1e-3)]:
+        for U in np.r_[1e-6, 1e-3, np.geomspace(0.1, 20.0, 9)]:   # incl. calm start
+            for q0 in np.geomspace(1e-5, 0.5, 9):
+                us = float(sl.most_drag_prescribed_flux(U, q0, z1, z0, 300.0)[0])
+                inv_L = -kappa * gacc * q0 / (us ** 3 * 300.0)
+                rhs = kappa * U / (np.log(z1 / z0) - float(sl.psi_m(z1 * inv_L)))
+                np.testing.assert_allclose(us, rhs, rtol=1e-9, err_msg=f"{U=} {q0=} {z1=}")
+    for q0 in (1e-25, 1e-40):             # root below the bracket: neutral to round-off
+        us = float(sl.most_drag_prescribed_flux(10.0, q0, 10.0, 0.01, 300.0)[0])
+        np.testing.assert_allclose(us, _neutral_ustar(10.0, 10.0, 0.01), rtol=1e-9)
+    from jax.test_util import check_grads
+    grad = jax.grad(lambda U, q: sl.most_drag_prescribed_flux(U, q, 4.0, 0.1, 300.0)[1],
+                    argnums=(0, 1))
+    for U, q0 in [(1e-6, 0.24), (1e-3, 0.24), (1.0, 0.24), (10.0, 1e-25), (10.0, 0.0),
+                  (8.0, -0.05)]:       # every branch selected once; none may NaN the others
+        assert all(np.isfinite(float(x)) for x in grad(U, q0)), (U, q0)
+    for U0 in (1.0, 1e-3):                # bisected root / clamped free-convection root
+        check_grads(lambda U, q: sl.most_drag_prescribed_flux(U, q, 4.0, 0.1, 300.0)[1],
+                    (U0, 0.24), order=2, modes=("fwd", "rev"))
+    # Root inside the bracket where the shared ψ is constant (|ζ| < 1e-10): u_* is
+    # exactly linear in ⟨U⟩, so its curvature must vanish (implicit 2nd derivative).
+    d2 = jax.grad(jax.grad(
+        lambda U: sl.most_drag_prescribed_flux(U, 1e-15, 10.0, 0.01, 300.0)[0]))(10.0)
+    assert abs(float(d2)) < 1e-12, float(d2)
+
+
+def test_most_drag_prescribed_cooling_converges_or_is_nan():
+    """Stable prescribed flux: every returned u_* satisfies the Businger–Dyer
+    relation (with the shared ψ, clamped at ζ = 10) to 1e-7, or is NaN — never a
+    wrong stress. Strong cooling (ζ past the clamp) gets the clamped closed form."""
+    kappa, gacc = sl.constants.kappa_von_karman, sl.constants.g
+    z1, z0, U = 10.0, 0.01, 10.0
+    us = float(sl.most_drag_prescribed_flux(U, -0.5, z1, z0, 300.0)[0])
+    np.testing.assert_allclose(
+        us, kappa * U / (np.log(z1 / z0) - float(sl.psi_m(10.0))), rtol=1e-12)
+    # weak wind, weak cooling: ζ is far past the clamp — no regulariser may bias it
+    us = float(sl.most_drag_prescribed_flux(1e-6, -1e-16, z1, z0, 300.0)[0])
+    np.testing.assert_allclose(
+        us, kappa * 1e-6 / (np.log(z1 / z0) - float(sl.psi_m(10.0))), rtol=1e-12)
+    for q0 in (-1e-4, -0.01, -0.05, -0.1, -0.2, -0.3, -0.5, -2.0):
+        us = float(sl.most_drag_prescribed_flux(U, q0, z1, z0, 300.0)[0])
+        if np.isnan(us):
+            continue                      # marginal root: refused loudly, allowed
+        inv_L = -kappa * gacc * q0 / (us ** 3 * 300.0)
+        rhs = kappa * U / (np.log(z1 / z0) - float(sl.psi_m(z1 * inv_L)))
+        np.testing.assert_allclose(us, rhs, rtol=1e-7, err_msg=f"{q0=}")
+    assert np.isfinite(float(sl.most_drag_prescribed_flux(U, -0.05, z1, z0, 300.0)[0]))
+
+
+def test_most_drag_prescribed_flux_outside_its_domain_is_nan():
+    """⟨U⟩ below 5e-7 m/s: NaN (loud). The
+    calm-start speed surface_boundary produces (sqrt(1e-12) in float32) is inside."""
+    for q0 in (0.24, -0.05, 0.0):
+        assert np.isnan(float(sl.most_drag_prescribed_flux(1e-8, q0, 10.0, 0.01, 300.0)[1]))
+    calm = jnp.sqrt(jnp.float32(1e-12))
+    assert np.isfinite(float(sl.most_drag_prescribed_flux(
+        calm, jnp.float32(0.1), jnp.float32(10.0), jnp.float32(0.01),
+        jnp.float32(300.0))[1]))
+
+
+def test_most_drag_prescribed_flux_mixed_precision_under_jit():
+    """float32 wind, float64 flux, Python-float geometry: one dtype, any regime."""
+    f = jax.jit(lambda U, q: sl.most_drag_prescribed_flux(U, q, 10.0, 0.01, 300.0)[1])
+    for q0 in (0.1, -0.05, 0.0):
+        cd = f(jnp.float32(5.0), jnp.asarray(q0, jnp.float64))
+        assert np.isfinite(float(cd))
+        g = jax.grad(f, argnums=1)(jnp.float32(5.0), jnp.asarray(q0, jnp.float64))
+        assert np.isfinite(float(g))
+    # all-float32 weak wind, both signs and the clamped regimes: finite fwd + rev
+    f32 = jax.jit(lambda U, q: sl.most_drag_prescribed_flux(
+        U, q, jnp.float32(10.0), jnp.float32(0.01), jnp.float32(300.0))[1])
+    f64 = jax.jit(lambda U, q: sl.most_drag_prescribed_flux(U, q, 10.0, 0.01, 300.0)[1])
+    for U, q0 in [(1e-6, -1e-16), (1e-6, 0.24), (1e-3, -0.05), (1e-3, 0.24), (5.0, -0.05)]:
+        args = (jnp.float32(U), jnp.float32(q0))
+        cd = f32(*args)
+        assert cd.dtype == jnp.float32
+        np.testing.assert_allclose(float(cd), float(f64(U, q0)), rtol=1e-3)
+        for g in jax.grad(f32, argnums=(0, 1))(*args):
+            assert np.isfinite(float(g)), (U, q0)
+        _, t = jax.jvp(f32, args, (jnp.float32(1.0), jnp.float32(1.0)))
+        assert np.isfinite(float(t)), (U, q0)
+
+
+def test_most_flux_drag_needs_a_first_level_above_the_free_convection_limit():
+    """ln(z1/z0) <= psi_m(-10) has no unstable MOST solution: the prescribed-flux
+    MOST path refuses it; the neutral path and the surface-temperature path do not
+    use it and still run."""
+    import pytest
+    cfg = sl.SpectralLESConfig(nx=8, ny=8, nz=8, Lx=800.0, Ly=800.0, Lz=8.0, z0=0.1,
+                               buoyancy=True, theta_ref0=300.0, sfc_flux_drag="most")
+    u, v = jnp.full((8, 8, 8), 5.0), jnp.zeros((8, 8, 8))
+    th = jnp.full((8, 8, 8), 300.0)
+    for wrap in (lambda f: f, jax.jit):                    # eager and under jit
+        with pytest.raises(ValueError, match="ln\\(z1/z0\\)"):    # z1 = 0.5 m
+            wrap(lambda u_: sl.surface_boundary(u_, v, th, sl.make_grid(cfg), 0.1,
+                                                None))(u)
+        g_ok = sl.make_grid(cfg._replace(Lz=800.0))
+        cd, _ = wrap(lambda u_: sl.surface_boundary(u_, v, th, g_ok, 0.1, None))(u)
+        assert np.isfinite(float(cd))
+    sl.surface_boundary(u, v, th, sl.make_grid(cfg), None, 299.0)
+    sl.surface_boundary(u, v, th, sl.make_grid(cfg._replace(sfc_flux_drag="neutral")),
+                        0.1, None)
+    sl.surface_boundary(u, v, th, sl.make_grid(cfg._replace(Lz=800.0)), 0.1, None)
+
+
+def test_surface_boundary_flux_drag_dispatch():
+    """sfc_flux_drag selects the wall drag under a prescribed flux; the default
+    'neutral' returns no override (unchanged path); an unknown value, or 'most'
+    without θ, raises."""
+    import pytest
+    cfg = sl.SpectralLESConfig(nx=8, ny=8, nz=8, Lx=800.0, Ly=800.0, Lz=800.0,
+                               buoyancy=True, theta_ref0=300.0)
+    g = sl.make_grid(cfg)
+    u = jnp.full((8, 8, 8), 5.0)
+    v = jnp.zeros((8, 8, 8))
+    th = jnp.full((8, 8, 8), 300.0)
+    assert sl.surface_boundary(u, v, th, g, 0.1, None) == (None, 0.1)
+    g_most = sl.make_grid(cfg._replace(sfc_flux_drag="most"))
+    cd, q = sl.surface_boundary(u, v, th, g_most, 0.1, None)
+    assert float(q) == 0.1 and float(cd) > float(sl.surface_drag_coefficient(g))
+    with pytest.raises(ValueError, match="needs θ"):
+        sl.surface_boundary(u, v, None, g_most, 0.1, None)
+    g_bad = sl.make_grid(cfg._replace(sfc_flux_drag="nope"))
+    with pytest.raises(ValueError, match="sfc_flux_drag"):
+        sl.surface_boundary(u, v, th, g_bad, 0.1, None)

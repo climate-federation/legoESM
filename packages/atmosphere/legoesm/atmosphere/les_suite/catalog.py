@@ -20,9 +20,15 @@ Two parts (LES_SUITE.md §5/§6):
 """
 from __future__ import annotations
 
+import dataclasses
+import math
+
+from legoesm import constants
+
 from .registry import (
     LESCase,
     LESGrid,
+    LESSetup,
     Regime,
     SgsClosure,
     register_case,
@@ -173,8 +179,261 @@ def dry_shear_buoyancy_grid(
     return cases
 
 
-def register_default_catalog(*, include_dry_grid: bool = True) -> list[LESCase]:
-    """Register the anchor cases (and, by default, the provisional dry grid).
+# --- published dry cases with a full LESSetup (2026-10-15 campaign) ----------
+# Every physical parameter is the paper's. Values the paper does not fix (or that
+# the spectral core cannot reproduce as published: a radiation top boundary, an
+# adaptive-CFL dt) are PROPOSED and listed in ``setup.pending`` — the driver
+# refuses a production artifact until the user approves them (--smoke runs only).
+def _lat_for_f(f_cor: float) -> float:
+    """Latitude [deg] whose ``2Ω sin φ`` is the paper's Coriolis parameter."""
+    return math.degrees(math.asin(f_cor / (2.0 * constants.Omega)))
+
+
+_GABLS1_F = 1.39e-4                 # Beare et al. (2006) / Sullivan 2016 / Huang 2013
+_SUITE_SPONGE_TAU_S = 50.0          # the suite's SBL sponge timescale (proposal only)
+_PENDING_DT = "dt: PROPOSED {dt} s fixed (paper: adaptive CFL / not stated)"
+_PENDING_SEED = ("seed noise: PROPOSED {amp} K θ below {top} m (paper: {paper})")
+
+_CF_REF = ("Conzemius & Fedorovich (2006, JAS 63, 1151); matrix and setup from "
+           "Conzemius & Fedorovich, AMS 16th BLT symposium preprint 5.6 (24 runs, "
+           "flux x lapse rate x shear)")
+_CF_GRID = LESGrid(nx=256, ny=256, nz=80, Lx_m=5120.0, Ly_m=5120.0, Lz_m=1600.0,
+                   dt_s=0.5)
+_CF_GEO = {
+    "ns": ((0.0, 0.0, 0.0),),                         # no geostrophic wind
+    "gc": ((0.0, 20.0, 0.0),),                        # 20 m/s, constant with height
+    "gs": ((0.0, 0.0, 0.0), (1600.0, 20.0, 0.0)),     # 0 at surface -> 20 m/s at top
+}
+
+
+def _cf_case(q_K_m_s, gamma_K_m, shear, hours, extra_pending=()):
+    """One Conzemius–Fedorovich point: θ = 300 K + γz from the surface (initial CBL
+    depth 0), geostrophic initial wind, 40°N, z0 = 0.01 m, constant surface flux,
+    MO-similarity surface layer, sponge in the top 20 %."""
+    tag = f"cf06_q{round(q_K_m_s * 100):02d}_g{round(gamma_K_m * 1000):02d}_{shear}"
+    return LESCase(
+        name=tag, regime="dry_convective", core="spectral", grid=_CF_GRID,
+        duration_hours=hours, surface_theta_flux_K_m_s=q_K_m_s,
+        geostrophic_wind_m_s=(None if shear == "ns" else 20.0),
+        sgs_variants=_SGS_DEFAULT, driver="run_les_suite.py", reference=_CF_REF,
+        ci_marker="manual_only",
+        description=f"CBL growth into dθ/dz={gamma_K_m} K/m, w'θ'_s={q_K_m_s} K m/s, "
+                    f"shear={shear} (ns none / gc constant 20 m/s / gs 0->20 m/s).",
+        setup=LESSetup(
+            lat_deg=40.0, z0_m=0.01, theta_ref_K=300.0, perturb_K=0.1,
+            perturb_top_m=200.0,
+            theta_knots=((0.0, 300.0), (1600.0, 300.0 + gamma_K_m * 1600.0)),
+            geostrophic_knots=_CF_GEO[shear], surface_drag="most",
+            sponge_bottom_m=1280.0, sponge_tau_s=_SUITE_SPONGE_TAU_S,
+            pending=(
+                _PENDING_DT.format(dt=0.5),
+                f"sponge: top 20 % per paper; timescale PROPOSED {_SUITE_SPONGE_TAU_S}"
+                " s (paper: not stated)",
+                _PENDING_SEED.format(amp=0.1, top=200, paper="'2 K' in preprint 3.1, "
+                                     "form not stated"),
+                f"duration: PROPOSED {hours} h = zero-order-jump time for z_i to reach "
+                "1000 m, z_i^2 = 2.8 Q t / γ (paper: run until z_i ≈ 1000 m)",
+                "domain: 5.12 x 5.12 x 1.6 km at 20 m (preprint 5.6); preprint 3.1 "
+                "says 'minimum 6.4 x 6.4 x 1.6 km'",
+            ) + tuple(extra_pending)))
+
+
+def _gabls1_family_setup(Lz_m, sponge, pending):
+    """GABLS1 physics as Sullivan et al. (2016) / Huang & Bou-Zeid (2013) state it:
+    θ = 265 K to 100 m then +0.01 K/m (sharp), U_g = (8, 0) m/s, f = 1.39e-4 s⁻¹,
+    z0m = z0h = 0.1 m, still-air θ0 = 265 K."""
+    return LESSetup(
+        lat_deg=_lat_for_f(_GABLS1_F), z0_m=0.1, theta_ref_K=265.0, perturb_K=0.1,
+        perturb_top_m=50.0,
+        theta_knots=((0.0, 265.0), (100.0, 265.0), (Lz_m, 265.0 + 0.01 * (Lz_m - 100.0))),
+        geostrophic_knots=((0.0, 8.0, 0.0),), surface_drag="most",
+        sponge_bottom_m=None if sponge is None else sponge[0],
+        sponge_tau_s=None if sponge is None else sponge[1],
+        pending=pending)
+
+
+_SULLIVAN16_REF = ("Sullivan, McWilliams, Weil, Patton & Fernando (2016, JAS 73, "
+                   "1815), doi:10.1175/JAS-D-15-0339.1")
+_HUANG13_REF = ("Huang & Bou-Zeid (2013, JAS 70, 1513), "
+                "doi:10.1175/JAS-D-12-0167.1")
+
+
+def _sullivan16_case(rate, grid, extra_pending=()):
+    sponge = (300.0, _SUITE_SPONGE_TAU_S)
+    return LESCase(
+        name=f"sullivan16_cr{round(rate * 100):03d}", regime="dry_stable",
+        core="spectral", grid=grid, duration_hours=9.0, surface_theta_flux_K_m_s=None,
+        geostrophic_wind_m_s=8.0, sgs_variants=_SGS_DEFAULT, driver="run_les_suite.py",
+        reference=_SULLIVAN16_REF, ci_marker="manual_only",
+        surface_cooling_rate_K_per_h=rate,
+        description=f"GABLS1 with surface cooling {rate} K/h, 400^3 m, 9 h.",
+        setup=_gabls1_family_setup(400.0, sponge, (
+            _PENDING_DT.format(dt=grid.dt_s),
+            f"top boundary: PROPOSED Rayleigh sponge above 300 m, "
+            f"{_SUITE_SPONGE_TAU_S} s (paper: radiation condition, not available in "
+            "the spectral core)",
+            _PENDING_SEED.format(amp=0.1, top=50, paper="'small random perturbations "
+                                 "in temperature near the surface' + an SGS-energy "
+                                 "profile this core has no equivalent of"),
+        ) + tuple(extra_pending)))
+
+
+def _huang13_case(rate, extra_pending=()):
+    return LESCase(
+        name=f"huang13_cr{round(rate * 100):03d}", regime="dry_stable",
+        core="spectral",
+        grid=LESGrid(nx=162, ny=162, nz=160, Lx_m=800.0, Ly_m=800.0, Lz_m=400.0,
+                     dt_s=0.05),
+        duration_hours=10.0, surface_theta_flux_K_m_s=None, geostrophic_wind_m_s=8.0,
+        sgs_variants=_SGS_DEFAULT, driver="run_les_suite.py", reference=_HUANG13_REF,
+        ci_marker="manual_only", surface_cooling_rate_K_per_h=rate,
+        description=f"GABLS1 with surface cooling {rate} K/h, 800x800x400 m, 10 h "
+                    "(statistics over the last 3 h).",
+        setup=_gabls1_family_setup(400.0, None, (
+            _PENDING_DT.format(dt=0.05),
+            "grid: PROPOSED 162x162x160 (5 x 5 x 2.5 m) for all 10 h; the paper ran "
+            "80^3 for 0-6 h then interpolated to 162x162x160 for 6-10 h, a regrid "
+            "this driver does not do",
+            "top boundary: no sponge, stress-free (paper); the suite's GABLS1 runs "
+            "blew up at ~0.9 h without one",
+            _PENDING_SEED.format(amp=0.1, top=50, paper="not stated"),
+        ) + tuple(extra_pending)))
+
+
+def _dephy_case(name, regime, dephy, grid, hours, lat, z0, z0h, theta_ref, reference,
+                description, pending, sponge=None):
+    return LESCase(
+        name=name, regime=regime, core="spectral", grid=grid, duration_hours=hours,
+        surface_theta_flux_K_m_s=None, geostrophic_wind_m_s=None,
+        sgs_variants=_SGS_DEFAULT, driver="run_les_suite.py", reference=reference,
+        ci_marker="manual_only", description=description, held_out=True,
+        setup=LESSetup(
+            lat_deg=lat, z0_m=z0, z0h_m=z0h, theta_ref_K=theta_ref, perturb_K=0.1,
+            perturb_top_m=100.0, dephy_case=dephy,
+            sponge_bottom_m=None if sponge is None else sponge[0],
+            sponge_tau_s=None if sponge is None else sponge[1],
+            pending=pending))
+
+
+_AYOTTE_THETA0 = {"00sc": 300.5, "00wc": 300.3, "03sc": 300.3, "05sc": 300.5,
+                  "05wc": 300.2, "24sc": 301.1}   # θ at z=0 in each DEPHY file
+_AYOTTE_FLUX = {"00sc": 0.0, "00wc": 0.0, "03sc": 0.03, "05sc": 0.05, "05wc": 0.05,
+                "24sc": 0.24}                     # the original kinematic fluxes
+
+
+def _ayotte_case(sub):
+    grid = LESGrid(nx=128, ny=128, nz=120, Lx_m=5120.0, Ly_m=5120.0, Lz_m=2400.0,
+                   dt_s=0.5)
+    return _dephy_case(
+        name=f"ayotte96_{sub}", regime="dry_neutral" if sub.startswith("00")
+        else "dry_convective", dephy=f"ayotte_{sub}", grid=grid, hours=7.0,
+        lat=45.0, z0=0.16, z0h=None, theta_ref=_AYOTTE_THETA0[sub],
+        reference="Ayotte et al. (1996, BLM 79, 131); DEPHY-SCM AYOTTE/"
+                  f"{sub.upper()}",
+        description=f"Ayotte {sub.upper()}: U_g = 15 m/s, w'θ'_s = "
+                    f"{_AYOTTE_FLUX[sub]} K m/s, "
+                    f"{'weak' if sub.endswith('wc') else 'strong'} capping inversion.",
+        sponge=(1920.0, _SUITE_SPONGE_TAU_S),
+        pending=(
+            "grid: PROPOSED 128x128x120 over 5.12 x 5.12 x 2.4 km (40 x 40 x 20 m); "
+            "the DEPHY file gives no LES grid and Ayotte et al. (1996) was not "
+            "available to check",
+            _PENDING_DT.format(dt=0.5),
+            f"sponge: PROPOSED top 20 % (1920 m), {_SUITE_SPONGE_TAU_S} s (not stated)",
+            f"θ_ref: PROPOSED {_AYOTTE_THETA0[sub]} K = the file's surface θ",
+            f"surface flux: the DEPHY loader turns hfss into "
+            f"{_AYOTTE_FLUX[sub] * 1125.4 / 1164.5:.4f} K m/s (ρ from the file's "
+            f"300 K, 1000 hPa surface); DEPHY made hfss from the ORIGINAL "
+            f"{_AYOTTE_FLUX[sub]} K m/s with ρc_p = 1125.4 — 3.5 % apart",
+            _PENDING_SEED.format(amp=0.1, top=100, paper="not stated"),
+        ))
+
+
+PUBLISHED_CASES: tuple[LESCase, ...] = (
+    _cf_case(0.10, 0.003, "ns", 2.98),
+    _cf_case(0.30, 0.001, "ns", 0.33),
+    _cf_case(0.03, 0.010, "ns", 33.0, extra_pending=(
+        "case: NOT RUN in the paper (preprint 5.6: the 0.03 K m/s x 0.010 K/m "
+        "combination was skipped as too slow); keep, replace, or drop?",)),
+    _cf_case(0.10, 0.003, "gc", 2.98),
+    _cf_case(0.10, 0.003, "gs", 2.98),
+    LESCase(
+        name="sullivan_patton11_d", regime="dry_convective", core="spectral",
+        grid=LESGrid(nx=256, ny=256, nz=256, Lx_m=5120.0, Ly_m=5120.0, Lz_m=2048.0,
+                     dt_s=0.5),
+        duration_hours=3.70, surface_theta_flux_K_m_s=0.24, geostrophic_wind_m_s=1.0,
+        sgs_variants=_SGS_DEFAULT, driver="run_les_suite.py",
+        reference="Sullivan & Patton (2011, JAS 68, 2395), "
+                  "doi:10.1175/JAS-D-10-05010.1, run D",
+        ci_marker="manual_only", held_out=True,
+        description="Weakly sheared CBL under an 8 K inversion: run D (20 x 20 x 8 m), "
+                    "the coarsest of the paper's meshes at least as fine as the CBL "
+                    "anchor in every direction.",
+        setup=LESSetup(
+            lat_deg=_lat_for_f(1.0e-4), z0_m=0.1, theta_ref_K=300.0, perturb_K=0.1,
+            perturb_top_m=100.0,
+            theta_knots=((0.0, 300.0), (974.0, 300.0), (1074.0, 308.0),
+                         (2048.0, 308.0 + 0.003 * (2048.0 - 1074.0))),
+            geostrophic_knots=((0.0, 1.0, 0.0),), surface_drag="most",
+            sponge_bottom_m=1638.4, sponge_tau_s=_SUITE_SPONGE_TAU_S,
+            pending=(
+                _PENDING_DT.format(dt=0.5),
+                "duration: PROPOSED 3.70 h = 25 z_i/w_* with z_i = 1092 m, w_* = 2.05 "
+                "m/s (paper Table 2, run D; 'about 25 large-eddy turnover times')",
+                f"top boundary: PROPOSED Rayleigh sponge in the top 20 %, "
+                f"{_SUITE_SPONGE_TAU_S} s (paper: radiation condition)",
+                "θ_ref: PROPOSED 300 K (paper writes β = g/θ0 without the value)",
+                _PENDING_SEED.format(amp=0.1, top=100, paper="'small random seed "
+                                     "perturbations in temperature near the "
+                                     "surface'"),
+            ))),
+    _sullivan16_case(0.25, LESGrid(nx=200, ny=200, nz=200, Lx_m=400.0, Ly_m=400.0,
+                                   Lz_m=400.0, dt_s=0.05)),
+    _sullivan16_case(1.0, LESGrid(nx=200, ny=200, nz=200, Lx_m=400.0, Ly_m=400.0,
+                                  Lz_m=400.0, dt_s=0.05), extra_pending=(
+        "grid: the paper ran 1.0 K/h ONLY on 1024^3 (0.39 m, ~900k steps); PROPOSED "
+        "200^3 (2 m), the paper's grid for 0.25 K/h — not a published configuration",)),
+    _huang13_case(1.0),
+    _huang13_case(2.5),
+    _dephy_case(
+        name="gabls4_e2", regime="dry_stable", dephy="gabls4_stage3",
+        grid=LESGrid(nx=200, ny=200, nz=500, Lx_m=1000.0, Ly_m=1000.0, Lz_m=1000.0,
+                     dt_s=0.1),
+        hours=24.0, lat=-75.1, z0=0.001, z0h=0.0001, theta_ref=271.3,
+        reference="Couvreux et al. (2020, BLM 176, 369), "
+                  "doi:10.1007/s10546-020-00539-4, experiment 2",
+        description="GABLS4 stage 3, experiment 2: Dome C diurnal cycle, prescribed "
+                    "surface temperature, z0 = 1e-3 m, z0h = 1e-4 m, 24 h from 00 UTC.",
+        sponge=(700.0, 1000.0),
+        pending=(
+            "grid: PROPOSED 200x200x500 (5 x 5 x 2 m, the protocol's reference); the "
+            "coarsest participant ran 10 x 10 x 5 m",
+            _PENDING_DT.format(dt=0.1),
+            "sponge: above 700 m per paper; timescale PROPOSED 1000 s (Meso-NH's "
+            "K = 1e-3 s^-1 in the paper's Table 2)",
+            "θ_ref: PROPOSED 271.3 K = the file's surface θ at t0",
+            "experiment: PROPOSED 2 (the DEPHY file's roughness); experiment 3 is "
+            "the 10 h run from 10 UTC on a 250-500 m domain",
+            _PENDING_SEED.format(amp=0.1, top=100, paper="not stated"),
+        )),
+    *(_ayotte_case(s) for s in ("00sc", "00wc", "03sc", "05sc", "05wc", "24sc")),
+)
+# The driver's own SGS closure is the suite's convention, not any paper's.
+_PENDING_CLOSURE = ("SGS closure + numerics: PROPOSED the suite's (run_les_suite): "
+                    "turbulent Prandtl 1.0; stable cases add background viscosity "
+                    "0.01 m2/s and static Smagorinsky C_s 0.18; RK3, 3/2-rule "
+                    "zero-padding dealiasing, no SGS buoyancy term (paper: own "
+                    "closure/numerics)")
+PUBLISHED_CASES = tuple(
+    dataclasses.replace(c, setup=dataclasses.replace(
+        c.setup, pending=c.setup.pending + (_PENDING_CLOSURE,)))
+    for c in PUBLISHED_CASES)
+
+
+def register_default_catalog(*, include_dry_grid: bool = True,
+                             include_published: bool = True) -> list[LESCase]:
+    """Register the anchor cases, by default the provisional dry grid, and by
+    default the published full-setup cases (:data:`PUBLISHED_CASES`).
 
     Returns the registered cases. Idempotency is the caller's responsibility —
     :func:`~legoesm.atmosphere.les_suite.registry.register_case` raises on a
@@ -185,5 +444,8 @@ def register_default_catalog(*, include_dry_grid: bool = True) -> list[LESCase]:
         registered.append(register_case(case))
     if include_dry_grid:
         for case in dry_shear_buoyancy_grid():
+            registered.append(register_case(case))
+    if include_published:
+        for case in PUBLISHED_CASES:
             registered.append(register_case(case))
     return registered

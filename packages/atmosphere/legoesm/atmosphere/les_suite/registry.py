@@ -86,6 +86,112 @@ class LESGrid:
                 raise RegistryError(f"LESGrid.{name} must be a positive number, got {v!r}")
 
 
+SurfaceDrag = Literal["neutral", "most"]
+SURFACE_DRAGS: tuple[SurfaceDrag, ...] = ("neutral", "most")
+
+
+@dataclass(frozen=True)
+class LESSetup:
+    """Full published setup of a case the generic dry builder runs.
+
+    Every scientific input is a field here, so nothing falls back to a CLI
+    default: the case is the record. Profiles are piecewise-linear knots in
+    height, interpolated to the LES levels (held constant beyond the end knots).
+
+    Attributes
+    ----------
+    lat_deg : float
+        Latitude [deg] — the Coriolis parameter ``f = 2Ω sin φ`` (sign kept, so a
+        southern-hemisphere case rotates the right way).
+    z0_m : float
+        Momentum roughness length [m].
+    theta_ref_K : float
+        Reference θ of the Boussinesq buoyancy term [K].
+    theta_knots : tuple of (z [m], θ [K])
+        Initial potential-temperature profile. Empty when ``dephy_case`` supplies it.
+    geostrophic_knots : tuple of (z [m], u_g [m/s], v_g [m/s])
+        Geostrophic wind profile (constant in time). Empty when ``dephy_case``
+        supplies it.
+    wind_init_knots : tuple of (z [m], u [m/s], v [m/s])
+        Initial wind; empty ⇒ the geostrophic profile.
+    z0h_m : float | None
+        Thermal roughness [m] of the prescribed-surface-temperature MOST layer;
+        ``None`` ⇒ ``z0_m``.
+    surface_drag : "neutral" | "most"
+        Wall drag under a prescribed surface heat FLUX (the core's
+        ``sfc_flux_drag``); the published cases use Monin–Obukhov similarity.
+    surface_theta_knots : tuple of (t [s], θ_s [K])
+        Prescribed surface potential temperature series (MOST BC), linear in time.
+        Empty ⇒ flux- or cooling-rate-forced from the LESCase fields.
+    sponge_bottom_m, sponge_tau_s : float | None
+        Rayleigh sponge from ``sponge_bottom_m`` to the lid with timescale
+        ``sponge_tau_s`` (cosine ramp, the suite's SBL sponge form). ``None`` = no
+        sponge.
+    perturb_K, perturb_top_m : float
+        Amplitude [K] of the random θ seed noise and the height [m] below which it
+        is applied.
+    dephy_case : str | None
+        Name in ``forcing.scm.dephy_scm.DEPHY_SCM_CASES`` whose file supplies the
+        initial θ/u/v, the geostrophic wind, the surface forcing, z0 and latitude.
+    pending : tuple[str, ...]
+        Values in this setup the user has NOT approved yet, one line each (value
+        and why). A case with any pending item cannot emit a production artifact
+        — the driver refuses it except as a ``--smoke`` run.
+    """
+
+    lat_deg: float
+    z0_m: float
+    theta_ref_K: float
+    perturb_K: float
+    perturb_top_m: float
+    theta_knots: tuple[tuple[float, float], ...] = ()
+    geostrophic_knots: tuple[tuple[float, float, float], ...] = ()
+    wind_init_knots: tuple[tuple[float, float, float], ...] = ()
+    z0h_m: float | None = None
+    surface_drag: SurfaceDrag = "most"
+    surface_theta_knots: tuple[tuple[float, float], ...] = ()
+    sponge_bottom_m: float | None = None
+    sponge_tau_s: float | None = None
+    dephy_case: str | None = None
+    pending: tuple[str, ...] = ()
+
+    def validate(self, name: str) -> None:
+        if not (-90.0 <= self.lat_deg <= 90.0):
+            raise RegistryError(f"{name}: setup.lat_deg must be in [-90, 90]")
+        for fld in ("z0_m", "theta_ref_K", "perturb_top_m"):
+            if not getattr(self, fld) > 0:
+                raise RegistryError(f"{name}: setup.{fld} must be > 0")
+        if self.perturb_K < 0:
+            raise RegistryError(f"{name}: setup.perturb_K must be >= 0")
+        if self.z0h_m is not None and not self.z0h_m > 0:
+            raise RegistryError(f"{name}: setup.z0h_m must be > 0 or None")
+        if self.surface_drag not in SURFACE_DRAGS:
+            raise RegistryError(f"{name}: unknown setup.surface_drag "
+                                f"{self.surface_drag!r}; known {SURFACE_DRAGS}")
+        if (self.sponge_bottom_m is None) != (self.sponge_tau_s is None):
+            raise RegistryError(f"{name}: set both sponge_bottom_m and sponge_tau_s or "
+                                "neither")
+        if self.sponge_tau_s is not None and not self.sponge_tau_s > 0:
+            raise RegistryError(f"{name}: setup.sponge_tau_s must be > 0")
+        if self.dephy_case is None:
+            if len(self.theta_knots) < 1 or len(self.geostrophic_knots) < 1:
+                raise RegistryError(f"{name}: a setup without dephy_case needs "
+                                    "theta_knots and geostrophic_knots")
+        elif (self.theta_knots or self.geostrophic_knots or self.wind_init_knots
+              or self.surface_theta_knots):
+            raise RegistryError(f"{name}: dephy_case supplies the profiles and the "
+                                "surface forcing; do not also give knots")
+        for label, knots, width in (("theta_knots", self.theta_knots, 2),
+                                    ("geostrophic_knots", self.geostrophic_knots, 3),
+                                    ("wind_init_knots", self.wind_init_knots, 3),
+                                    ("surface_theta_knots", self.surface_theta_knots, 2)):
+            if any(len(k) != width for k in knots):
+                raise RegistryError(f"{name}: every {label} entry needs {width} values")
+            x = [k[0] for k in knots]
+            if any(b <= a for a, b in zip(x, x[1:])):
+                raise RegistryError(f"{name}: {label} must be strictly increasing")
+
+
 @dataclass(frozen=True)
 class LESCase:
     """One LES reference run in the suite catalog.
@@ -128,6 +234,13 @@ class LESCase:
     provisional_axis : bool
         ``True`` while the ``(flux, wind)`` axis values are placeholders pending the
         gate-0 CBL calibration (LES_SUITE.md §8/§9); real anchors set ``False``.
+    setup : LESSetup | None
+        Full published setup for the generic dry builder; ``None`` = the legacy
+        anchor/grid builders driven by the flux/U_g fields and CLI values.
+    held_out : bool
+        ``True`` = held out of tuning and evolution, scored only for
+        generalisation (the user's 2026-10-15 split: Ayotte, Sullivan–Patton,
+        GABLS3, GABLS4, neutral Ekman, RICO held out).
     """
 
     name: str
@@ -144,6 +257,8 @@ class LESCase:
     description: str = ""
     provisional_axis: bool = False
     surface_cooling_rate_K_per_h: float | None = None
+    setup: LESSetup | None = None
+    held_out: bool = False
 
     def validate(self) -> None:
         if not self.name or not isinstance(self.name, str):
@@ -180,6 +295,19 @@ class LESCase:
                     "surface_theta_flux_K_m_s, not both")
         if self.geostrophic_wind_m_s is not None and self.geostrophic_wind_m_s < 0:
             raise RegistryError(f"{self.name}: geostrophic_wind_m_s must be >= 0")
+        if self.setup is not None:
+            if not isinstance(self.setup, LESSetup):
+                raise RegistryError(f"{self.name}: setup must be an LESSetup")
+            self.setup.validate(self.name)
+            n_forcing = sum((self.surface_theta_flux_K_m_s is not None,
+                             self.surface_cooling_rate_K_per_h is not None,
+                             bool(self.setup.surface_theta_knots),
+                             self.setup.dephy_case is not None))
+            if n_forcing != 1:
+                raise RegistryError(
+                    f"{self.name}: a setup case needs exactly one surface forcing "
+                    "(flux, cooling rate, surface θ series or a DEPHY file), got "
+                    f"{n_forcing}")
         self.grid.validate()
 
 

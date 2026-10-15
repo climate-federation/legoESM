@@ -34,6 +34,7 @@ buoyancy-independent.
 """
 from __future__ import annotations
 
+import math
 from typing import Any, NamedTuple
 
 import jax
@@ -197,6 +198,13 @@ class SpectralLESConfig(NamedTuple):
     #                                 moist monotone scalar path leaves water
     #                                 tracers unfiltered by default; set True only
     #                                 to reproduce the old filtered-tracer behavior.
+    z0h: float | None = None        # thermal roughness [m] for the prescribed-surface-
+    #                                 temperature MOST layer; None = z0 (GABLS1, Beare
+    #                                 et al. 2006). GABLS4 sets z0 ≠ z0h.
+    sfc_flux_drag: str = "neutral"  # wall drag under a PRESCRIBED surface heat flux:
+    #                                 "neutral" = log law (κ/ln(z₁/z0))²; "most" =
+    #                                 Businger–Dyer stability-corrected drag at the
+    #                                 Obukhov length the prescribed flux sets.
 
 
 class SpectralLESLayout(NamedTuple):
@@ -657,7 +665,57 @@ def advection(u, v, w, g: SpectralLESGrid):
 # --------------------------------------------------------------------------- #
 # Coupled stable Monin–Obukhov surface layer (GABLS1 prescribed-cooling BC)     #
 # --------------------------------------------------------------------------- #
-def most_surface_flux(spd_mean, th_air_mean, t_sfc, z1, z0, theta_ref, n_iter=10):
+# Unstable prescribed-flux MOST root bracket in s = ln(−ζ): ζ ∈ [−ZETA_CLIP, −1e−20].
+# The shared ψ clamps ζ at −ZETA_CLIP, so a root beyond it is closed-form; 64
+# halvings of the ~48-wide bracket leave < 1e−17.
+_MOST_ZETA_CLIP = 10.0
+_MOST_BISECT_S_LO = -46.0
+_MOST_BISECT_N = 64
+_MOST_FP_N = 50          # stable prescribed-flux fixed-point iterations
+# Domain of most_drag_prescribed_flux: ⟨U⟩ ≥ this; surface_boundary's planar-mean
+# speed ⟨sqrt(u² + v² + 1e−12)⟩ ≥ 1e−6 always is (2x margin for float32 rounding).
+# Below it: NaN (loud), not a float32 overflow of the ⟨U⟩⁻³ terms.
+_MOST_U_MIN = 5e-7
+
+
+def _flux_most_resid(s, spd, a, lnz):
+    """``F(s) = κ⟨U⟩/u_*(s) − (ln(z₁/z0) − ψ_m(−e^s))`` with ``u_*³ = a e^{−s}``:
+    the unstable prescribed-flux MOST relation in ``s = ln(−ζ)``, strictly
+    increasing in ``s``."""
+    kappa = constants.kappa_von_karman
+    return kappa * spd / jnp.cbrt(a * jnp.exp(-s)) - (lnz - psi_m(-jnp.exp(s)))
+
+
+@jax.custom_jvp
+def _flux_most_root(spd, a, lnz):
+    """Root of :func:`_flux_most_resid` in ``[S_LO, ln ZETA_CLIP]`` by bisection (the
+    bracket edge when the root lies outside; callers select those cases away).
+    Derivatives of every order follow the implicit-function rule (custom JVP)."""
+    def bisect(_, lohi):
+        lo, hi = lohi
+        mid = 0.5 * (lo + hi)
+        up = _flux_most_resid(mid, spd, a, lnz) > 0
+        return jnp.where(up, lo, mid), jnp.where(up, mid, hi)
+
+    lo, hi = jax.lax.fori_loop(
+        0, _MOST_BISECT_N, bisect,
+        (jnp.full_like(a, _MOST_BISECT_S_LO), jnp.full_like(a, math.log(_MOST_ZETA_CLIP))))
+    return 0.5 * (lo + hi)
+
+
+@_flux_most_root.defjvp
+def _flux_most_root_jvp(primals, tangents):
+    # F(s(p), p) = 0  ⇒  ṡ = −(∂F/∂p · ṗ) / (∂F/∂s); F_s > 0 for ⟨U⟩ > 0.
+    spd, a, lnz = primals
+    s = _flux_most_root(spd, a, lnz)
+    f_s = jax.jvp(lambda s_: _flux_most_resid(s_, spd, a, lnz), (s,),
+                  (jnp.ones_like(s),))[1]
+    f_p = jax.jvp(lambda *p: _flux_most_resid(s, *p), primals, tangents)[1]
+    return s, -f_p / f_s
+
+
+def most_surface_flux(spd_mean, th_air_mean, t_sfc, z1, z0, theta_ref, n_iter=10,
+                      z0h=None):
     """Coupled Monin–Obukhov surface layer (planar-mean, GABLS1-faithful).
 
     Given the planar-mean first-level wind speed ``spd_mean=⟨|u₁|⟩`` and potential
@@ -673,7 +731,9 @@ def most_surface_flux(spd_mean, th_air_mean, t_sfc, z1, z0, theta_ref, n_iter=10
     implementation (:func:`legoesm.core.bulk_flux.psi_m`/``psi_h``; stable branch
     Dyer 1974 ``−5ζ``, unstable Businger–Dyer, both internally clipped to
     ``ζ∈[−10,10]`` with safe-branch gradients) rather than a re-derived form.
-    Thermal roughness ``z0h=z0`` (Beare et al. 2006 specify z0m=z0h=0.1 m).
+    Thermal roughness ``z0h`` enters the θ relation as ``ln(z₁/z0h) − ψ_h``;
+    ``None`` means ``z0h = z0`` (Beare et al. 2006 specify z0m=z0h=0.1 m), which
+    reproduces the single-roughness form exactly.
 
     Returns ``(u_star, theta_star, q0, cd_eff)`` with the kinematic surface heat
     flux ``q0 = ⟨w'θ'⟩₀ = −u_* θ_*`` (negative ⇒ surface cooling) and the
@@ -687,17 +747,88 @@ def most_surface_flux(spd_mean, th_air_mean, t_sfc, z1, z0, theta_ref, n_iter=10
     kappa = constants.kappa_von_karman
     gacc = constants.g
     lnz = jnp.log(z1 / z0)
+    lnzh = lnz if z0h is None else jnp.log(z1 / z0h)
     dth = th_air_mean - t_sfc                     # >0 when air warmer than surface
     u_star = kappa * spd_mean / lnz               # neutral first guess
-    th_star = kappa * dth / lnz
+    th_star = kappa * dth / lnzh
     for _ in range(n_iter):
         inv_L = kappa * gacc * th_star / (u_star ** 2 * theta_ref + 1e-12)
         zeta = z1 * inv_L                         # +ve stable, −ve unstable
         u_star = kappa * spd_mean / (lnz - psi_m(zeta))
-        th_star = kappa * dth / (lnz - psi_h(zeta))
+        th_star = kappa * dth / (lnzh - psi_h(zeta))
     q0 = -u_star * th_star
     cd_eff = (u_star / (spd_mean + 1e-12)) ** 2
     return u_star, th_star, q0, cd_eff
+
+
+def most_drag_prescribed_flux(spd_mean, q0, z1, z0, theta_ref):
+    """Stability-corrected wall drag when the surface heat flux is PRESCRIBED.
+
+    The flux fixes the Obukhov length directly, ``1/L = −κ g q0 / (u_*³ θ_ref)``
+    (``q0 > 0`` heating ⇒ ``L < 0``, unstable), so only the momentum relation is
+    iterated::
+
+        u_* = κ ⟨U⟩ / (ln(z₁/z0) − ψ_m(z₁/L))
+
+    with the shared Businger–Dyer ``ψ_m`` (:func:`legoesm.core.bulk_flux.psi_m`).
+    ``q0 = 0`` gives ``1/L = 0`` and the neutral log law (to the ``1e-10`` ζ clamp
+    inside the shared ψ). Returns ``(u_star, cd_eff)`` with
+    ``cd_eff = (u_*/⟨U⟩)²``.
+
+    Defined for ``⟨U⟩ ≥ 5e−7`` m/s (NaN below; :func:`surface_boundary`'s speed,
+    ≥ 1e−6, always is). ``q0 ≤ 0``: fixed-point iteration in ``u_*``; if its relative residual exceeds
+    ``sqrt(eps)`` (slow or no convergence near the critical cooling) the result is
+    NaN — loud, never a wrong stress. Past ζ = +10 the shared ψ is clamped, so
+    strong cooling gets ``u_* = κ⟨U⟩/(ln(z₁/z0) − ψ_m(10))``, the root of the
+    relation as implemented (mirror of the unstable ζ ≤ −10 limit below).
+    ``q0 > 0``:
+    the fixed point oscillates near free convection, so the root is found in
+    ``s = ln(−ζ)``, where ``F(s) = κ⟨U⟩/u_*(s) − (ln(z₁/z0) − ψ_m(−e^s))`` with
+    ``u_*³ = κ g q0 z₁/(θ_ref e^s)`` is strictly increasing (unique root), by
+    bisection with implicit-function derivatives of every order
+    (:func:`_flux_most_root`). The shared ψ is constant for ζ ≤ −10, so when the
+    root lies there (calm wind / free convection) ``u_* = κ⟨U⟩/(ln(z₁/z0) −
+    ψ_m(−10))`` exactly; that needs ``ln(z₁/z0) > ψ_m(−10)`` (checked in
+    :func:`surface_boundary`). JIT- and AD-safe."""
+    kappa = constants.kappa_von_karman
+    gacc = constants.g
+    dt = jnp.result_type(spd_mean, q0, z1, z0, theta_ref, float)
+    spd_mean, q0, z1, z0, theta_ref = (jnp.asarray(x, dt)
+                                       for x in (spd_mean, q0, z1, z0, theta_ref))
+    lnz = jnp.log(z1 / z0)
+    in_domain = spd_mean >= _MOST_U_MIN
+    spd_mean = jnp.where(in_domain, spd_mean, 1.0)   # safe operand; NaN returned below
+
+    # Iterate in ζ (the u_* iteration mapped through ζ(u_*), same sequence) so no
+    # 1/u_*³ appears: ζ = c (ln(z₁/z0) − ψ_m(ζ))³ with c = −z₁ g q0/(θ_ref κ² ⟨U⟩³).
+    stable = q0 <= 0
+    # inactive branches get safe operands, so no 0·inf reaches the gradient
+    c = -z1 * gacc * jnp.where(stable, q0, 0.0) / (
+        theta_ref * kappa ** 2 * jnp.where(stable, spd_mean, 1.0) ** 3)
+
+    def zeta_step(_, zeta):
+        return c * (lnz - psi_m(zeta)) ** 3
+
+    zeta = jax.lax.fori_loop(0, _MOST_FP_N, zeta_step, c * lnz ** 3)  # neutral guess
+    u_star = kappa * spd_mean / (lnz - psi_m(zeta))
+    u_next = kappa * spd_mean / (lnz - psi_m(zeta_step(0, zeta)))
+    tol = jnp.sqrt(jnp.finfo(dt).eps)
+    u_star = jnp.where(jnp.abs(u_next - u_star) <= tol * u_star, u_star, jnp.nan)
+
+    unstable = q0 > 0
+    a = kappa * gacc * jnp.where(unstable, q0, 1.0) * z1 / theta_ref   # u_*³ (−ζ)
+    spd_arr, lnz_arr = spd_mean, lnz
+    s = _flux_most_root(spd_arr, a, lnz_arr)
+    u_free = kappa * spd_mean / (lnz - psi_m(-_MOST_ZETA_CLIP))   # ψ clamped
+    f_hi = _flux_most_resid(jnp.full_like(a, math.log(_MOST_ZETA_CLIP)), spd_arr, a, lnz_arr)
+    f_lo = _flux_most_resid(jnp.full_like(a, _MOST_BISECT_S_LO), spd_arr, a, lnz_arr)
+    # Root past ζ = −10: closed form. Root below ζ = −1e−20 (q0 ≈ 0): neutral to
+    # round-off, which the fixed point already has. Otherwise the bisected root.
+    u_unst = jnp.where(f_hi <= 0, u_free,
+                       jnp.where(f_lo >= 0, u_star, jnp.cbrt(a * jnp.exp(-s))))
+    u_star = jnp.where(in_domain, jnp.where(unstable, u_unst, u_star), jnp.nan)
+    cd_eff = (u_star / (spd_mean + 1e-12)) ** 2
+    return u_star, cd_eff
 
 
 # --------------------------------------------------------------------------- #
@@ -716,16 +847,38 @@ def surface_drag_coefficient(g: SpectralLESGrid, cd_surf=None):
 def surface_boundary(u, v, theta, g: SpectralLESGrid, sfc_theta_flux, t_sfc):
     """Surface BC actually applied by :func:`rhs`: ``(cd_surf, sfc_flux)``.
 
-    ``t_sfc=None`` (or no θ) ⇒ the prescribed kinematic heat flux and the neutral
-    drag (``cd_surf=None``). A prescribed surface temperature ⇒ both from the
-    coupled stable MOST surface layer on the planar-mean first level."""
-    if t_sfc is None or theta is None:
-        return None, sfc_theta_flux
+    ``t_sfc=None`` (or no θ) ⇒ the prescribed kinematic heat flux, with the
+    neutral drag (``cd_surf=None``) when ``cfg.sfc_flux_drag == "neutral"`` or the
+    Businger–Dyer drag at the flux's Obukhov length when ``"most"``
+    (:func:`most_drag_prescribed_flux`). A prescribed surface temperature ⇒ both
+    from the coupled MOST surface layer on the planar-mean first level."""
+    drag = g.cfg.sfc_flux_drag
+    if drag not in ("neutral", "most"):
+        raise ValueError(f"sfc_flux_drag must be 'neutral' or 'most', got {drag!r}")
     u1, v1 = u[..., 0], v[..., 0]
+    if drag == "most" and theta is None:
+        raise ValueError("sfc_flux_drag='most' needs θ (buoyancy): the drag is set by "
+                         "the heat flux's Obukhov length")
+    if t_sfc is None or theta is None:
+        if drag == "neutral":
+            return None, sfc_theta_flux
+        z1 = 0.5 * g.cfg.Lz / g.cfg.nz          # static: cfg holds strings, never traced
+        with jax.ensure_compile_time_eval():    # a constant, also under jit
+            psi_clip = float(psi_m(-_MOST_ZETA_CLIP))
+        if math.log(z1 / g.cfg.z0) <= psi_clip:
+            raise ValueError(
+                f"sfc_flux_drag='most' needs ln(z1/z0) > psi_m(-{_MOST_ZETA_CLIP}) = "
+                f"{psi_clip:.3f} (no MOST solution in free convection otherwise); "
+                f"z1={z1} m, z0={g.cfg.z0} m")
+        spd_mean = _planar_mean(jnp.sqrt(u1 ** 2 + v1 ** 2 + 1e-12), g)
+        _us, cd_surf = most_drag_prescribed_flux(
+            spd_mean, sfc_theta_flux, g.z_c[0], g.cfg.z0, g.cfg.theta_ref0)
+        return cd_surf, sfc_theta_flux
     spd_mean = _planar_mean(jnp.sqrt(u1 ** 2 + v1 ** 2 + 1e-12), g)
     th1_mean = _planar_mean(theta[..., 0], g)
     _us, _ths, sfc_flux, cd_surf = most_surface_flux(
-        spd_mean, th1_mean, t_sfc, g.z_c[0], g.cfg.z0, g.cfg.theta_ref0)
+        spd_mean, th1_mean, t_sfc, g.z_c[0], g.cfg.z0, g.cfg.theta_ref0,
+        z0h=g.cfg.z0h)
     return cd_surf, sfc_flux
 
 
