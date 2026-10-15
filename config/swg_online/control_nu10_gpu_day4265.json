@@ -1,0 +1,23 @@
+{
+  "schema": "legoesm-swg-online-control-v1",
+  "experiment": "swgonl_control_nu10_gpu_day4265",
+  "description": "Round-10 diagnosis control: the nu10 no-closure free run from the same record start as the pilot's diagnosis free runs (stored filtered coarse truth state at the end of day 4265, sea level rebalanced as a training window start), three years on CUDA/native. Operator's choice (2026-10-15).",
+  "control": "nu10",
+  "deck": "dg50",
+  "closure": "none",
+  "free_run": {
+    "days": 1095,
+    "start": {
+      "kind": "record_state",
+      "record": {
+        "root": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgonl_rounds/round6/hourly_dual_12y",
+        "chunk_label": "dual"
+      },
+      "day": 4265,
+      "objective": "template"
+    },
+    "sampling": "end_of_day_snapshot_and_daily_mean",
+    "device": "cuda",
+    "math_library": "native"
+  }
+}

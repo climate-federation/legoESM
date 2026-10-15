@@ -752,6 +752,84 @@ def _pinned_source(root: Path, manifest_sha256: str) -> PinnedHourlySource:
               for day in range(1, days + 1)), truth_run)
 
 
+def _pinned_day(source: PinnedHourlySource, objective: str, day_index: int):
+    return _load_pinned_day(
+        str(Path(source.root) / f"day{day_index + 1:04d}.npz"),
+        source.daily_sha256[day_index],
+        "box_" if objective == "symmetric" else "filtered_",
+        source.first_absolute_hour + HOURS_PER_DAY * day_index + 1,
+        day_index == 0)
+
+
+def _record_at(source: PinnedHourlySource, objective: str, hour: int):
+    day_index, index = divmod(
+        hour - source.first_absolute_hour - 1, HOURS_PER_DAY)
+    return tuple(value[index]
+                 for value in _pinned_day(source, objective, day_index)[0])
+
+
+def stored_state_at(sources, objective: str, hour: int):
+    """Stored (ssh, u, v) of ``objective``'s operator at one absolute hour,
+    and the pinned source that served it.
+
+    An hour is served by the chunk holding it as a right endpoint (the
+    in-scan restriction, like every target).  A chunk's stored t0 serves
+    only an hour on which no chunk ends, i.e. the first hour of a record; at
+    a shared restart hour it is checked by the contract, not used.
+    """
+    if objective not in OBJECTIVE_OPERATORS:
+        raise ValueError(
+            f"objective must be explicitly selected from {OBJECTIVE_OPERATORS}")
+    for source in sources:
+        if source.first_absolute_hour < hour <= source.last_absolute_hour:
+            return _record_at(source, objective, hour), source
+    for source in sources:
+        if source.first_absolute_hour == hour:
+            return _pinned_day(source, objective, 0)[1], source
+    raise ValueError(f"dataset source gap at absolute hour {hour}")
+
+
+def pinned_sources(chunk_roots) -> tuple[PinnedHourlySource, ...]:
+    """Admit complete v2 chunks by their on-disk manifest digests."""
+    return tuple(
+        _pinned_source(Path(root), _sha256(Path(root) / "manifest.json"))
+        for root in chunk_roots)
+
+
+def start_rebalancer(card):
+    """The registered window-start rule: one rebalancer for every start."""
+    return build_start_rebalancer(
+        card, tolerance=START_REBALANCE_TOLERANCE,
+        max_iterations=START_REBALANCE_MAX_ITERATIONS)
+
+
+def record_start_state(card, chunk_roots, *, objective: str,
+                       absolute_hour: int):
+    """A free-run start built exactly as a training window start.
+
+    The stored state of ``objective``'s operator at ``absolute_hour`` in the
+    pinned chunks, its sea level rebalanced by the registered rule
+    (``start_rebalancer``); returns ``((ssh, u, v), provenance)`` with the
+    serving chunk, its manifest digest and the rebalancing report.
+    """
+    if type(absolute_hour) is not int or absolute_hour < 0:
+        raise ValueError("record start hour must be a non-negative integer")
+    (ssh, u, v), source = stored_state_at(
+        pinned_sources(chunk_roots), objective, absolute_hour)
+    ssh, report = start_rebalancer(card)(ssh, u, v)
+    return (ssh, u, v), {
+        "absolute_hour": absolute_hour, "objective": objective,
+        "operator": "box" if objective == "symmetric" else "filtered",
+        "chunk_root": source.root,
+        "chunk_manifest_sha256": source.manifest_sha256,
+        "rebalance": {
+            "rule": "stored state at the start hour, sea level rebalanced "
+                    "(build_start_rebalancer), as every training window start",
+            "tolerance": START_REBALANCE_TOLERANCE,
+            "max_iterations": START_REBALANCE_MAX_ITERATIONS,
+            "report": report}}
+
+
 @dataclass(frozen=True)
 class SWGDatasetContract:
     """Validated, split-safe view of content-pinned hourly state records.
@@ -806,9 +884,7 @@ class SWGDatasetContract:
         grid = tuple(self.card.recipe.initial_state.eta.data.shape)
         if self._stored_state(self.splits[0][1])[0].shape != grid:
             raise ValueError("dataset grid differs from the coarse card")
-        object.__setattr__(self, "_rebalance", build_start_rebalancer(
-            self.card, tolerance=START_REBALANCE_TOLERANCE,
-            max_iterations=START_REBALANCE_MAX_ITERATIONS))
+        object.__setattr__(self, "_rebalance", start_rebalancer(self.card))
 
     @staticmethod
     def from_json(path: Path, *, card) -> SWGDatasetContract:
@@ -876,37 +952,21 @@ class SWGDatasetContract:
                 raise ValueError(
                     f"{name} split is not a contiguous pinned hourly record")
 
-    def _day(self, source: PinnedHourlySource, day_index: int):
-        return _load_pinned_day(
-            str(Path(source.root) / f"day{day_index + 1:04d}.npz"),
-            source.daily_sha256[day_index],
-            "box_" if self.objective == "symmetric" else "filtered_",
-            source.first_absolute_hour + HOURS_PER_DAY * day_index + 1,
-            day_index == 0)
-
     def _record(self, source: PinnedHourlySource, hour: int):
-        day_index, index = divmod(
-            hour - source.first_absolute_hour - 1, HOURS_PER_DAY)
-        return tuple(value[index] for value in self._day(source, day_index)[0])
+        return _record_at(source, self.objective, hour)
 
     def _initial(self, source: PinnedHourlySource):
-        return self._day(source, 0)[1]
+        return _pinned_day(source, self.objective, 0)[1]
 
     def _stored_state(self, hour: int):
-        """Stored (ssh, u, v) of the contract's operator at one absolute hour.
+        return stored_state_at(self.sources, self.objective, hour)[0]
 
-        An hour is served by the chunk holding it as a right endpoint (the
-        in-scan restriction, like every target).  A chunk's stored t0 serves
-        only an hour on which no chunk of the contract ends, i.e. the first
-        hour of a record; at a shared restart hour it is checked, not used.
-        """
-        for source in self.sources:
-            if source.first_absolute_hour < hour <= source.last_absolute_hour:
-                return self._record(source, hour)
-        for source in self.sources:
-            if source.first_absolute_hour == hour:
-                return self._initial(source)
-        raise ValueError(f"dataset source gap at absolute hour {hour}")
+    def start_state(self, absolute_hour: int):
+        """One window start: the stored state at ``absolute_hour`` with its
+        sea level rebalanced by the registered rule; ``((ssh, u, v), report)``."""
+        ssh, u, v = self._stored_state(absolute_hour)
+        ssh, report = self._rebalance(ssh, u, v)
+        return (ssh, u, v), report
 
     def _split_bounds(self, split: str) -> tuple[int, int]:
         for name, start, end in self.splits:
@@ -953,11 +1013,10 @@ class SWGDatasetContract:
                 f"fewer than one batch of {self.batch_size}")
         for first in range(0, usable, self.batch_size):
             batch_starts = starts[first:first + self.batch_size]
-            stored = [self._stored_state(int(start)) for start in batch_starts]
-            initial = (
-                np.stack([self._rebalance(*state)[0] for state in stored]),
-                np.stack([state[1] for state in stored]),
-                np.stack([state[2] for state in stored]))
+            start_states = [self.start_state(int(start))[0]
+                            for start in batch_starts]
+            initial = tuple(np.stack([state[index] for state in start_states])
+                            for index in range(3))
             hourly = [[self._stored_state(int(start) + lead)
                        for lead in range(1, window_hours + 1)]
                       for start in batch_starts]

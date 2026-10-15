@@ -91,6 +91,7 @@ from legoesm.training.swg_online import (
     maddison_eq6_network_scales,
     maddison_half_width_m,
     network_parameter_count,
+    record_start_state,
     swg_online_step,
 )
 
@@ -157,9 +158,24 @@ def _validate_free_run(free_run: dict) -> None:
     _require_keys(free_run, ("days", "start", "sampling", "device",
                              "math_library"), "free_run")
     _require_int(free_run["days"], "free_run days", minimum=1)
-    if free_run["start"] != "rest" or free_run["sampling"] != FREE_RUN_SAMPLING:
+    if free_run["sampling"] != FREE_RUN_SAMPLING:
+        raise ValueError(f"free_run sampling must be {FREE_RUN_SAMPLING!r}")
+    start = free_run["start"]
+    if isinstance(start, dict):
+        _require_keys(start, ("kind", "record", "day", "objective"),
+                      "free_run start")
+        if start["kind"] != "record_state":
+            raise ValueError(
+                "free_run start must be 'rest' or a record_state start")
+        _require_keys(start["record"], ("root", "chunk_label"),
+                      "free_run start record")
+        _require_int(start["day"], "free_run start day", minimum=0)
+        if start["objective"] not in OBJECTIVE_OPERATORS:
+            raise ValueError("free_run start objective must be one of "
+                             f"{OBJECTIVE_OPERATORS}")
+    elif start != "rest":
         raise ValueError(
-            f"free runs start from rest with sampling {FREE_RUN_SAMPLING!r}")
+            "free_run start must be 'rest' or a record_state start")
     execution = (free_run["device"], free_run["math_library"])
     if execution not in FREE_RUN_EXECUTIONS:
         raise ValueError(
@@ -274,7 +290,35 @@ def load_config(path: Path) -> dict:
     create_swg_optimizer(SWGOptimizerSettings(**config["optimiser"]))
 
     _validate_free_run(config["free_run"])
+    start = config["free_run"]["start"]
+    if isinstance(start, dict) and start["objective"] != config["objective"]:
+        raise ValueError("a trained free run's record start must use the "
+                         "training objective's operator")
     return config
+
+
+def resolve_start(config: dict, card):
+    """The configured free-run start: ``(state or None, manifest block)``.
+
+    ``"rest"`` is the card's resting state (``None`` here; ``free_run`` seeds
+    it).  A ``record_state`` start is the stored coarse state of the named
+    record at the end of ``day`` (absolute hour ``24 * day``), sea level
+    rebalanced exactly as every training window start
+    (``record_start_state``); the manifest block records the serving chunk,
+    its digest and the rebalancing report.
+    """
+    start = config["free_run"]["start"]
+    if start == "rest":
+        return None, "rest"
+    chunks = [str(path) for _, _, path in complete_chunks(start["record"])]
+    if not chunks:
+        raise ValueError(f"free_run start record {start['record']['root']} "
+                         "holds no complete chunk")
+    (ssh, u, v), provenance = record_start_state(
+        card, chunks, objective=start["objective"],
+        absolute_hour=HOURS_PER_DAY * start["day"])
+    state = coarse_state_from_native(card.recipe.initial_state, ssh, u, v)
+    return state, _jsonable(start | provenance)
 
 
 # ---------------------------------------------------------------- device/card
@@ -559,8 +603,11 @@ def free_run_day(network, card, geometry, *, key):
 
 
 def free_run(network, card, geometry, output: Path, *, days: int,
-             closure: dict, commit: str, device: dict) -> dict:
-    """Integrate the coarse card from rest with the closure, dual day files.
+             closure: dict, commit: str, device: dict, start) -> dict:
+    """Integrate the coarse card with the closure, dual day files.
+
+    ``start`` is ``resolve_start``'s pair: the initial state (``None`` for
+    the card's rest state) and the manifest's ``start`` block.
 
     One compiled day (``free_run_day``) per model day.  Every day file holds
     the end-of-day snapshot and that day's mean of every post-step state
@@ -575,7 +622,9 @@ def free_run(network, card, geometry, output: Path, *, days: int,
     key = (jax.random.PRNGKey(closure["network_seed"])
            if closure["kind"] == "trained" else None)
     forcing, one_day = free_run_day(network, card, geometry, key=key)
-    state = driver.seed_steady_forcing_carry(card.recipe.initial_state, forcing)
+    initial, start_block = start
+    state = driver.seed_steady_forcing_carry(
+        card.recipe.initial_state if initial is None else initial, forcing)
     output.mkdir(parents=True)
     manifest = {
         "schema": FREE_RUN_MANIFEST_SCHEMA, "legoesm_git_sha": commit,
@@ -583,7 +632,7 @@ def free_run(network, card, geometry, output: Path, *, days: int,
         "precision_policy": "fp64", "math_library": device["math_library"],
         "xla_flags": device["xla_flags"], "jax_version": device["jax_version"],
         "gpu_name": device["gpu_name"], "days": days,
-        "steps_per_day": per_day, "start": "rest",
+        "steps_per_day": per_day, "start": start_block,
         "integration": ("one jitted scan per model day of swg_online_step "
                         "(certified SWE RK3 step, closure potential at every "
                         "stage, zero stage noise, noise scale 0) in the "
@@ -894,9 +943,20 @@ def train(config: dict, config_path: Path, *, card, seed: int, run_dir: Path,
     return log
 
 
+def free_run_output(config: dict, run_dir: Path, window_days: int,
+                    output: Path | None) -> Path:
+    """``<run_dir>/free_runs/wNN`` from rest, ``wNN_dayDDDD`` from a record
+    start, or the explicit ``output`` directory."""
+    if output is not None:
+        return Path(output)
+    start = config["free_run"]["start"]
+    suffix = "" if start == "rest" else f"_day{start['day']:04d}"
+    return run_dir / "free_runs" / f"w{window_days:02d}{suffix}"
+
+
 def run_free_run(config: dict, config_path: Path, *, card, seed: int,
                  run_dir: Path, window_days: int, device: dict,
-                 commit: str) -> dict:
+                 commit: str, output: Path | None = None) -> dict:
     """Free-run one trained window length of one seed (``free-run``).
 
     The run directory must be this configuration file's (digest) and seed's;
@@ -914,8 +974,10 @@ def run_free_run(config: dict, config_path: Path, *, card, seed: int,
                            f"{config['free_run']['math_library']}), "
                            f"not {execution}")
     identity = json.loads((run_dir / "run_manifest.json").read_text())
-    if identity["config_sha256"] != _sha256(config_path) \
-            or identity["seed"]["value"] != seed:
+    # The free-run block (days, start, device) is the free run's own; every
+    # other key must be the training configuration the run was made from.
+    if config | {"free_run": identity["config"]["free_run"]} \
+            != identity["config"] or identity["seed"]["value"] != seed:
         raise ValueError(f"{run_dir} is not this configuration's seed {seed}")
     epochs = config["curriculum"]["epochs_per_window"]
     log = json.loads((run_dir / "training_log.json").read_text())
@@ -925,7 +987,7 @@ def run_free_run(config: dict, config_path: Path, *, card, seed: int,
     if final is None:
         raise ValueError(f"window length {window_days} d has not completed "
                          f"its {epochs} epochs in {run_dir}")
-    output = run_dir / "free_runs" / f"w{window_days:02d}"
+    output = free_run_output(config, run_dir, window_days, output)
     if (output / "manifest.json").is_file():
         raise FileExistsError(f"{output} already holds a complete free run")
     geometry = build_closure_geometry(card)
@@ -949,7 +1011,8 @@ def run_free_run(config: dict, config_path: Path, *, card, seed: int,
     _archive_incomplete(output)
     return free_run(network, card, geometry, output,
                     days=config["free_run"]["days"], closure=closure,
-                    commit=commit, device=device)
+                    commit=commit, device=device,
+                    start=resolve_start(config, card))
 
 
 def run_control_free_run(config: dict, *, card, output: Path, device: dict,
@@ -970,7 +1033,7 @@ def run_control_free_run(config: dict, *, card, output: Path, device: dict,
         None, card, build_closure_geometry(card), output,
         days=config["free_run"]["days"],
         closure=free_run_closure({"kind": "none", "control": config["control"]}),
-        commit=commit, device=device)
+        commit=commit, device=device, start=resolve_start(config, card))
 
 
 def _update_function(optimizer):
@@ -1128,6 +1191,10 @@ def main(argv=None) -> int:
             command.add_argument("--output", type=Path, required=True)
         if name == "free-run":
             command.add_argument("--window-days", type=int)
+            command.add_argument(
+                "--output", type=Path,
+                help="directory of this trained free run (default "
+                     "<run>/free_runs/wNN, or wNN_dayDDDD from a record start)")
     args = parser.parse_args(argv)
     try:
         from legoesm.ocean.fidelity.provenance import git_sha
@@ -1143,10 +1210,11 @@ def main(argv=None) -> int:
         card = build_deck_card(config["deck"])
         if args.command == "free-run":
             if config["schema"] == CONTROL_CONFIG_SCHEMA:
-                if args.seed is not None or args.window_days is not None:
+                if args.seed is not None or args.window_days is not None \
+                        or args.output is not None:
                     raise ValueError(
-                        "no-closure control free runs do not take --seed or "
-                        "--window-days")
+                        "no-closure control free runs do not take --seed, "
+                        "--window-days or --output")
                 output = args.run_root / config["experiment"]
                 manifest = run_control_free_run(
                     config, card=card, output=output, device=device,
@@ -1160,8 +1228,9 @@ def main(argv=None) -> int:
                 manifest = run_free_run(
                     config, args.config, card=card, seed=args.seed,
                     run_dir=run_dir, window_days=args.window_days, device=device,
-                    commit=git_sha())
-                output = run_dir / "free_runs" / f"w{args.window_days:02d}"
+                    commit=git_sha(), output=args.output)
+                output = free_run_output(
+                    config, run_dir, args.window_days, args.output)
             print(f"FREE_RUN_COMPLETE root={output.resolve()} "
                   f"manifest_sha256={_sha256(output / 'manifest.json')} "
                   f"all_finite={manifest['numerical_health']['all_finite']}")

@@ -959,3 +959,118 @@ def test_profile_times_a_ten_window_step_and_extrapolates_one_seed(
     estimate = report["one_seed_estimate"]
     assert estimate["total_hours"] == pytest.approx(
         (row["window_s"] + free["seconds_per_run"]) / 3600.0, rel=1.0e-12)
+
+
+# ------------------------------------------------- record-state free-run start
+
+def _record_start(record: Path, day: int, **changes) -> dict:
+    return {"kind": "record_state",
+            "record": {"root": str(record), "chunk_label": "dual"},
+            "day": day, "objective": "template"} | changes
+
+
+@pytest.mark.parametrize("edit,match", [
+    (lambda s: s.update(kind="restart"), "record_state"),
+    (lambda s: s.pop("day"), "exactly the keys"),
+    (lambda s: s.update(day=-1), "integer >= 0"),
+    (lambda s: s.update(objective="box"), "objective"),
+    (lambda s: s["record"].pop("chunk_label"), "exactly the keys"),
+    (lambda s: s.update(objective="symmetric"), "training objective"),
+])
+def test_config_refuses_a_malformed_or_mismatched_record_start(
+        tmp_path, edit, match):
+    config = _config(tmp_path / "record")
+    start = _record_start(tmp_path / "record", 52)
+    edit(start)
+    config["free_run"]["start"] = start
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(config))
+    with pytest.raises(ValueError, match=match):
+        driver.load_config(path)
+    with pytest.raises(ValueError, match="rest"):
+        driver._validate_free_run(dict(config["free_run"], start="truth"))
+
+
+def test_record_start_is_the_datasets_window_start_bit_for_bit(
+        small_card, record, tmp_path):
+    """A free run started at day D resumes exactly the state the contract
+    issues as the first validation window's start for that day: the same
+    stored state, the same rebalancing, bit for bit."""
+    config = _config(record, seeds=[11])
+    config["free_run"]["start"] = _record_start(record, 52)
+    path = _write_config(tmp_path / "config.json", config)
+    contract_path = tmp_path / "contract.json"
+    driver.write_dataset_contract(config, contract_path)
+    contract = driver.SWGDatasetContract.from_json(contract_path, card=small_card)
+    batch = next(contract.batches(split="validation", window_days=1))
+    assert int(batch.start_absolute_hour[0]) == 52 * 24
+    state, block = driver.resolve_start(driver.load_config(path), small_card)
+    for index, field in enumerate((state.eta.data, state.u.data[:, 1:, 0],
+                                   state.v.data[1:, :, 0])):
+        assert np.array_equal(np.asarray(field), batch.initial[index][0])
+    (ssh, u, v), report = contract.start_state(52 * 24)
+    assert np.array_equal(np.asarray(state.eta.data), ssh)
+    assert block["rebalance"]["report"] == report
+    assert block["absolute_hour"] == 52 * 24 and block["day"] == 52
+    assert block["chunk_root"].endswith("dual_day0052_to_day0072")
+    assert state.tau_x_prev is None   # free_run seeds the steady wind carry
+    # A day no complete chunk serves is refused, not substituted.
+    config["free_run"]["start"] = _record_start(record, 40)
+    with pytest.raises(ValueError, match="source gap"):
+        driver.resolve_start(config, small_card)
+    config["free_run"]["start"] = _record_start(tmp_path / "nowhere", 52)
+    with pytest.raises((ValueError, OSError)):
+        driver.resolve_start(config, small_card)
+
+
+def test_free_run_from_a_record_start_records_it_and_differs_from_rest(
+        trained, small_card, record, tmp_path):
+    """The free-run block is the free run's own: a configuration equal to the
+    training one except there runs the trained closure from the record
+    start into its own folder, the manifest records the start and the
+    rebalancing report, and the first day differs from the from-rest run."""
+    config = copy.deepcopy(trained["config"])
+    config["free_run"].update(days=1, start=_record_start(record, 52))
+    path = _write_config(tmp_path / "config.json", config)
+    run_dir = trained["folder"] / "run"
+    manifest = driver.run_free_run(
+        config, path, card=small_card, seed=11, run_dir=run_dir,
+        window_days=1, device=CPU, commit="0" * 40,
+        output=tmp_path / "from_day52")
+    root = tmp_path / "from_day52"
+    assert (root / "manifest.json").is_file()
+    assert manifest["start"]["kind"] == "record_state"
+    assert manifest["start"]["day"] == 52
+    assert manifest["start"]["rebalance"]["report"]["iterations"] >= 0
+    assert manifest["closure"]["config_sha256"] == json.loads(
+        (run_dir / "run_manifest.json").read_text())["config_sha256"]
+    assert driver.free_run_output(config, run_dir, 1, None) \
+        == run_dir / "free_runs" / "w01_day0052"
+    with np.load(root / "day0001.npz") as started, \
+            np.load(run_dir / "free_runs/w01/day0001.npz") as rest:
+        assert not np.array_equal(started["u_m_s"], rest["u_m_s"])
+    # A training key that differs is still refused.
+    changed = copy.deepcopy(config)
+    changed["optimiser"]["learning_rate"] = 2.0e-3
+    with pytest.raises(ValueError, match="not this configuration"):
+        driver.run_free_run(
+            changed, _write_config(tmp_path / "changed.json", changed),
+            card=small_card, seed=11, run_dir=run_dir, window_days=1,
+            device=CPU, commit="0" * 40, output=tmp_path / "refused")
+
+
+def test_committed_day4265_configs_select_the_record_start():
+    pilot = driver.load_config(PILOT)
+    diagnosis = driver.load_config(
+        _ROOT / "config/swg_online/pilot_template_ring_excluded_day4265.json")
+    assert diagnosis | {"free_run": pilot["free_run"],
+                        "description": pilot["description"]} == pilot
+    control = driver.load_config(
+        _ROOT / "config/swg_online/control_nu10_gpu_day4265.json")
+    for config in (diagnosis, control):
+        assert config["free_run"]["days"] == 1095
+        assert config["free_run"]["start"] == {
+            "kind": "record_state", "day": 4265, "objective": "template",
+            "record": {"root": str(_REAL_RECORD), "chunk_label": "dual"}}
+    assert pilot["dataset"]["splits_days"]["validation"][0] == 4265
+    assert control["control"] == "nu10"
