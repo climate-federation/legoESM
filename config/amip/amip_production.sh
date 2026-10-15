@@ -46,9 +46,12 @@
 # --- Machine-specific paths (Levante defaults; override via the environment) ---
 : "${ICON_ROOT:=/pool/data/ICON/grids/public/mpim}"
 # ERA5 IC with the analysis's 1..30 hPa levels added (scripts/data/
-# add_era5_upper_levels.py): the plain 13-level file stops at 50 hPa and the
-# L32 top layers start ~40/20 K cold.  SAME product as the Ginsburg twin
-# (review 2026-10-10 F33; stage the Ginsburg-built zarr here before a launch).
+# add_era5_upper_levels.py) to the 13-level proxy, whose top is 50 hPa and
+# whose L32 top layers start ~40/20 K cold.  SAME product as the Ginsburg twin
+# (review 2026-10-10 F33).  Not staged on Levante.  Levante does have
+# /scratch/b/b309178/era5_ic_1979-01-01.zarr: 37 pressure levels, 1-1000 hPa,
+# 1979-01-01 00Z, 1 deg, built with cdo from /pool/data/ERA5 (amip_sota.sh uses
+# it).
 : "${ERA5_IC:=/scratch/b/b309178/era5_ic_1979-01-01_gproxy_L21.zarr}"
 # Topography: 0.25 deg, built with scripts/data/prep_etopo_topography.py (its
 # defaults) from NOAA ETOPO 2022 60 arc-second ice-surface relief.  The 1 deg

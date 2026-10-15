@@ -24,6 +24,8 @@
 #   run_amip.py --config config/amip/amip_sota.yaml "${AMIP_PATH_FLAGS[@]}" \
 #       --clm-surfdata-path data/clm/surfdata_1.9x2.5_16pfts_CMIP6_simyr2000.nc \
 #       --land-mask-file <lsm.nc> --days N --output DIR
+# Run (Levante): source config/amip/amip_sota.sh (the shared Levante paths
+# with this deck's start file), then the same run_amip.py line.
 # Machine PATHS are NOT pinned here (see amip_production.sh) — pass at runtime.
 # Tracking: GitHub issue #636.
 # =============================================================================
@@ -32,6 +34,7 @@
 grid_type: cubed_sphere
 resolution: 48
 nlev: 40
+transition_exponent: 2       # C48 resolves ~4760 m of Tibet; exponent 3 gives negative layer mass above ~3470 m (#1029)
 discretization: cdgrid
 persistent_dgrid: true       # #1028: carry D-staggered winds between steps; the cc round trip damps eddies (C36 HS jet 13 -> 39-41 m/s). Single-process cube only.
 energy_fixer: true                   # dycore energy fixer, now wired on this lane (review 2026-10-10 F15, vote F15b-V6)
