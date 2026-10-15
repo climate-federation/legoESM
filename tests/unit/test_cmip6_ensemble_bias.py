@@ -127,3 +127,25 @@ def test_model_field_albedo_is_ratio_of_binned_fluxes(tmp_path):
     want = block(alb * rsdt) / block(rsdt)
     np.testing.assert_allclose(got, want, rtol=1e-10)
     assert not np.allclose(got, block(alb), rtol=1e-6)   # ratio order matters
+
+
+def test_corrections_apply_to_exact_entries_only():
+    pytest.importorskip("xarray")
+    ce = _load()
+    assert set(ce.CORRECTIONS) == {
+        ("FGOALS-f3-L", "clt", "r1i1p1f1", "v20190422"),
+        ("GFDL-AM4", "clt", "r1i1p1f1", "v20180807"),
+        ("CIESM", "clt", "r1i1p1f1", "v20200417"),
+        ("CAMS-CSM1-0", "evspsbl", "r1i1p1f1", "v20190708"),
+        ("CIESM", "pr", "r1i1p1f1", "v20200417")}
+    want = {"clt": 100.0, "evspsbl": -1.0, "pr": 1000.0}
+    for (model, var, member, ver), entry in ce.CORRECTIONS.items():
+        assert len(entry) == 3 and all(entry[1:])       # reason + evidence
+        assert ce.correction(model, var, member, ver) == (want[var], entry[1])
+        # any one key field changed -> no correction
+        for alt in ((model + "X", var, member, ver), (model, "tas", member, ver),
+                    (model, var, "r1i1p1f2", ver), (model, var, member, "v1")):
+            assert ce.correction(*alt) == (1.0, None)
+    # the other variables of a corrected model are untouched
+    assert ce.correction("CIESM", "evspsbl", "r1i1p1f1", "v20200417") == (1.0, None)
+    assert ce.correction("CAMS-CSM1-0", "pr", "r1i1p1f1", "v20190708") == (1.0, None)

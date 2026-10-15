@@ -39,6 +39,8 @@ import sys
 
 import numpy as np
 
+from legoesm import constants
+
 _DIR = pathlib.Path(__file__).resolve().parent
 _spec = importlib.util.spec_from_file_location("bm", _DIR / "bias_maps.py")
 bm = importlib.util.module_from_spec(_spec)
@@ -54,6 +56,30 @@ VARS = ["albedo", "rsut", "rlut", "clt", "tas", "prw", "evspsbl", "pr"]
 _UNITS = {"rsut": "W m-2", "rsdt": "W m-2", "rlut": "W m-2", "clt": "%",
           "tas": "K", "prw": "kg m-2", "evspsbl": "kg m-2 s-1",
           "pr": "kg m-2 s-1"}
+# Published CMIP6 fields whose stored values contradict their own metadata.
+# User decision 2026-10-15: CORRECT these, and only these -- the key is exact
+# (model, variable, member, version directory), so a re-published version or
+# another member is NOT corrected and will show up as an outlier again.
+# Evidence: Jan-2001 native-grid reads (cos-lat mean, min, max) on Levante.
+CORRECTIONS = {
+    ("FGOALS-f3-L", "clt", "r1i1p1f1", "v20190422"): (
+        100.0, "fraction 0-1 labelled '%'",
+        "raw min 0.067 max 0.999 mean 0.636"),
+    ("GFDL-AM4", "clt", "r1i1p1f1", "v20180807"): (
+        100.0, "fraction 0-1 labelled '%'",
+        "raw min 0.050 max 1.027 mean 0.665"),
+    ("CIESM", "clt", "r1i1p1f1", "v20200417"): (
+        100.0, "fraction 0-1 labelled '%'",
+        "raw min 0.025 max 1.000 mean 0.692"),
+    ("CAMS-CSM1-0", "evspsbl", "r1i1p1f1", "v20190708"): (
+        -1.0, "sign reversed (surface-downward stored as upward evaporation)",
+        "raw min -14.8 max 0.37 mean -2.68 mm/day"),
+    ("CIESM", "pr", "r1i1p1f1", "v20200417"): (
+        constants.rho_water,
+        "m s-1 (water depth rate) labelled kg m-2 s-1; factor = water density",
+        "raw max 0.043 mean 0.0030 mm/day"),
+}
+
 Z_LIM = 3.0
 # z is undefined where the models agree to within nothing: polar-night rsut
 # (every model 0), desert pr/evspsbl.  Cells whose inter-model spread is below
@@ -109,6 +135,12 @@ def window_label(window):
 # ----------------------------------------------------------- CMIP6 files ----
 def _f_index(member):
     return int(re.fullmatch(r"r1i1p1f(\d+)", member).group(1))
+
+
+def correction(model, var, member, version):
+    """(factor, reason) from ``CORRECTIONS`` on an EXACT key, else (1.0, None)."""
+    hit = CORRECTIONS.get((model, var, member, version))
+    return (1.0, None) if hit is None else (hit[0], hit[1])
 
 
 def list_models(root=CMIP6_AMIP):
@@ -192,15 +224,17 @@ def window_mean(files, var, window):
     return np.concatenate(slices).mean(axis=0), lat, lon
 
 
-def model_field(var, files_by_var, window, mlat, mlon):
+def model_field(var, files_by_var, window, mlat, mlon, factors=None):
     """One CMIP6 model's window-mean field on the legoESM grid.
 
     Uses the SAME reduction as the reference (``rb.bin_to_model``) and, for the
     albedo, the SAME order as ``bias_maps._ref_clim``: bin rsut and rsdt, then
-    form the ratio with ``bias_maps._toa_albedo``.
+    form the ratio with ``bias_maps._toa_albedo``.  ``factors`` maps a CMOR
+    variable to its ``CORRECTIONS`` factor, applied on the native grid.
     """
     def binned(v):
         f, lat, lon = window_mean(files_by_var[v], v, window)
+        f = f * (factors or {}).get(v, 1.0)
         return rb.bin_to_model(f, lat, lon, mlat, mlon, label=v)
     if var == "albedo":
         return bm._toa_albedo(binned("rsut"), binned("rsdt"))[0]
@@ -215,6 +249,14 @@ def area_mean(f, lat, valid):
     """
     return rb.region_mean(f, lat, np.arange(f.shape[1]), rb.REGIONS["GLOBAL"],
                           valid=valid)
+
+
+def pattern_corr(a, b, lat, valid):
+    """cos-lat weighted centred pattern correlation over ``valid``."""
+    da = a - area_mean(a, lat, valid)
+    db = b - area_mean(b, lat, valid)
+    return area_mean(da * db, lat, valid) / np.sqrt(
+        area_mean(da ** 2, lat, valid) * area_mean(db ** 2, lat, valid))
 
 
 def area_rms(d, lat, valid):
@@ -265,36 +307,63 @@ def collect(run, variables, root=CMIP6_AMIP):
             raise SystemExit(f"{var}: no {label} reference")
         scale = bm._DISPLAY_SCALE.get(var, 1.0)
         need = ["rsut", "rsdt"] if var == "albedo" else [var]
-        names, fields = [], []
+        names, fields, raw = [], [], {}
         for model, (inst, member) in models.items():
-            fb, info = {}, []
+            fb, info, factors, fixes = {}, [], {}, []
             for v in need:
                 got_f = model_files(root, inst, model, member, v)
                 if got_f is None:
                     break
                 fb[v] = got_f[2]
                 info.append(f"{v}:{got_f[0]}/{got_f[1]}")
+                fac, why = correction(model, v, member, got_f[1])
+                if why is not None:
+                    factors[v] = fac
+                    fixes.append(f"{v} x {fac:g}: {why}")
             if len(fb) < len(need):
                 excluded.append((var, model, member, f"no Amon {v}"))
                 continue
             try:
-                f = model_field(var, fb, window, mlat, mlon)
+                f = model_field(var, fb, window, mlat, mlon, factors)
+                if factors:
+                    raw[model] = model_field(var, fb, window, mlat, mlon) * scale
             except LookupError as exc:
                 excluded.append((var, model, member, str(exc)))
                 continue
             names.append(model)
             fields.append(f * scale)
-            meta[(var, model)] = (member, " ".join(info))
+            meta[(var, model)] = (member, " ".join(info), "; ".join(fixes))
         if len(names) < 2:
             raise SystemExit(f"{var}: {len(names)} CMIP6 models -- no spread")
         st = ensemble_stats(np.asarray(lego, float) * scale,
                             np.asarray(ref, float) * scale, np.stack(fields))
+        check_corrections(var, names, fields, raw, st["valid"], mlat,
+                          np.asarray(ref, float) * scale)
         rows.append((var, label, mlat, mlon, names, st,
                      np.asarray(lego, float) * scale,
                      np.asarray(ref, float) * scale))
         print(f"  {var}: N={len(names)}  valid on "
               f"{st['valid'].mean():.0%} of cells")
     return window, rows, excluded, meta
+
+
+def check_corrections(var, names, fields, raw, valid, lat, ref):
+    """Before/after global mean and pattern correlation vs the median of the
+    OTHER models, for every corrected field.  Printed, not gated: whether a
+    factor landed plausibly is read off these lines."""
+    for model, before in raw.items():
+        k = names.index(model)
+        med = np.median(np.stack([f for j, f in enumerate(fields) if j != k]),
+                        axis=0)
+        after = fields[k]
+        print(f"    corrected {var:<8} {model:<12} global mean "
+              f"{area_mean(before, lat, valid):.4g} -> "
+              f"{area_mean(after, lat, valid):.4g}  (median of others "
+              f"{area_mean(med, lat, valid):.4g}, obs "
+              f"{area_mean(ref, lat, valid):.4g});  pattern corr with that "
+              f"median {pattern_corr(before, med, lat, valid):+.3f} -> "
+              f"{pattern_corr(after, med, lat, valid):+.3f}, with obs "
+              f"{pattern_corr(after, ref, lat, valid):+.3f}")
 
 
 def instrument_check(rows):
@@ -311,11 +380,11 @@ def instrument_check(rows):
 def write_csv(rows, meta, excluded, path):
     with open(path, "w", newline="") as fh:
         w = csv.writer(fh)
-        w.writerow(["variable", "model", "member", "files", "status",
-                    "global_mean_bias", "rms_bias_area_weighted"])
+        w.writerow(["variable", "model", "member", "files", "correction",
+                    "status", "global_mean_bias", "rms_bias_area_weighted"])
         for var, _l, lat, _lon, names, st, *_ in rows:
             v = st["valid"]
-            w.writerow([var, "legoESM", "", "", "included",
+            w.writerow([var, "legoESM", "", "", "", "included",
                         f"{area_mean(st['b_lego'], lat, v):.6g}",
                         f"{area_rms(st['b_lego'], lat, v):.6g}"])
             for k, name in enumerate(names):
@@ -324,7 +393,8 @@ def write_csv(rows, meta, excluded, path):
                             f"{area_mean(b, lat, v):.6g}",
                             f"{area_rms(b, lat, v):.6g}"])
         for var, model, member, why in excluded:
-            w.writerow([var, model, member, "", f"excluded: {why}", "", ""])
+            w.writerow([var, model, member, "", "", f"excluded: {why}", "",
+                        ""])
     print(f"  wrote {path}")
 
 
@@ -388,7 +458,7 @@ def rank_of(lego_rms, model_rms):
     return 1 + int(np.sum(np.asarray(model_rms) < lego_rms))
 
 
-def figure_b(run, window, rows, out_dir):
+def figure_b(run, window, rows, out_dir, meta):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -402,7 +472,8 @@ def figure_b(run, window, rows, out_dir):
         v = st["valid"]
         rms = [area_rms(b, lat, v) for b in st["b_mod"]]
         lr = area_rms(st["b_lego"], lat, v)
-        allv = sorted(zip(rms + [lr], names + ["legoESM"]))
+        tag = [n + ("*" if meta[(var, n)][2] else "") for n in names]
+        allv = sorted(zip(rms + [lr], tag + ["legoESM"]))
         k = rank_of(lr, rms)
         ranks[var] = (k, len(names) + 1)
         y = np.arange(len(allv))
@@ -416,6 +487,11 @@ def figure_b(run, window, rows, out_dir):
         ax.set_xlabel("area-weighted RMS bias", fontsize=8)
     for ax in axes[len(rows):]:
         ax.set_visible(False)
+    fixed = sorted({f"{n} {v}" for (v, n), m in meta.items() if m[2]})
+    if fixed:
+        fig.supxlabel("* published field corrected for a unit/sign error in "
+                      "the CMIP6 file (see CSV): " + ", ".join(fixed),
+                      fontsize=8)
     fig.suptitle(f"PROVISIONAL  {run} vs CMIP6 AMIP r1 members: global RMS "
                  f"bias, {window_label(window)}", fontsize=11)
     out = pathlib.Path(out_dir) / f"cmip6_rms_rank_{run}.png"
@@ -444,7 +520,7 @@ def main(argv=None):
     out.mkdir(parents=True, exist_ok=True)
     write_csv(rows, meta, excluded, out / f"cmip6_rms_{args.run}.csv")
     figure_a(args.run, window, rows, out)
-    ranks = figure_b(args.run, window, rows, out)
+    ranks = figure_b(args.run, window, rows, out, meta)
     for var, _l, lat, _lo, _n, st, *_ in rows:
         v, zk = st["valid"], st["z_ok"]
         print(f"    z {var:<8} masked {1 - area_mean(zk.astype(float), lat, v):.1%}"
