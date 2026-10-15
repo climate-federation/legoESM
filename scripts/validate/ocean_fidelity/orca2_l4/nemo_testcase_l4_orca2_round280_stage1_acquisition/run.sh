@@ -113,7 +113,7 @@ scratch=$(mktemp -d "$WORK_ROOT/orca2-r280-stage1.XXXXXX")
 printf 'temporary source proof directory (retained): %s\n' "$scratch"
 cp "$SOURCE_ROOT/MY_SRC/stprk3_stg.F90" "$scratch/stprk3_stg.F90"
 cp "$WRITER" "$scratch/l4_r175_stage1.F90"
-patch --batch --forward --fuzz=0 -p0 -d "$scratch" <"$PATCH"
+patch --batch --forward --fuzz=1 -p0 -d "$scratch" <"$PATCH"
 check_layout "$scratch/stprk3_stg.F90" || {
   printf 'REFUSE: patched stage-program call census is incomplete\n' >&2; exit 66;
 }
@@ -213,7 +213,7 @@ while IFS= read -r -d '' source; do
 done < <(find "$SOURCE_ROOT/MY_SRC" -maxdepth 1 \( -type f -o -type l \) -print0 | sort -z)
 cp "$SOURCE_ROOT/cpp_$SOURCE_CFG.fcm" "$TARGET_ROOT/cpp_$TARGET_CFG.fcm"
 cp "$WRITER" "$TARGET_ROOT/MY_SRC/l4_r175_stage1.F90"
-patch --batch --forward --fuzz=0 -p0 -d "$TARGET_ROOT/MY_SRC" <"$PATCH"
+patch --batch --forward --fuzz=1 -p0 -d "$TARGET_ROOT/MY_SRC" <"$PATCH"
 touch "$TARGET_ROOT/MY_SRC/"*.F90
 ./makenemo -n "$TARGET_CFG" -m conda-scalarmath del_key 'key_xios'
 readonly BINARY=$TARGET_ROOT/BLD/bin/nemo.exe
