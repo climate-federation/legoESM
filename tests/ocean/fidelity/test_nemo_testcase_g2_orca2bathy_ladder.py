@@ -124,7 +124,7 @@ def test_the_option_is_off_by_default_and_selected_by_g2_only():
         "zdf_momentum_nemo_face_thickness"] is False
     assert LatLonCGridOceanConfig._field_defaults[
         "zdf_tracer_nemo_rounded_thickness"] is False       # round 3
-    assert recipe._ORCA2G_ZDF_FACES == {"ORCA2G1-flat": False, "ORCA2G2-zps": True, "ORCA2G3-ts": True,
+    assert recipe._ORCA2G_ZDF_FACES == {"ORCA2G1-flat": False, "ORCA2G1b-vec": False, "ORCA2G2-zps": True, "ORCA2G3-ts": True,
                                           "ORCA2G4-sbc": True}
     assert recipe.ORCA2G2_UNMEASURED == ("multi_level_partial_cell_step",)
     # no other builder assigns it: one assignment in the whole package, the
