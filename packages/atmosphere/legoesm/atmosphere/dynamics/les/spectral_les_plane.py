@@ -703,24 +703,41 @@ def most_surface_flux(spd_mean, th_air_mean, t_sfc, z1, z0, theta_ref, n_iter=10
 # --------------------------------------------------------------------------- #
 # SGS stress divergence + MOST wall model                                      #
 # --------------------------------------------------------------------------- #
-def sgs_and_wall(u, v, w, nu_t, g: SpectralLESGrid, u_geo, cd_surf=None):
-    """SGS force ``∂_j(2 ν_t S_ij)`` with the surface vertical momentum flux
-    replaced by the Monin–Obukhov (neutral) wall stress.
-
-    Returns ``(Fu, Fv, Fw)`` (centres, centres, faces) and the surface friction
-    velocity ``u_*`` (diagnostic)."""
-    dz = g.dz
+def surface_drag_coefficient(g: SpectralLESGrid, cd_surf=None):
+    """Wall-model drag coefficient: the neutral log law ``(κ/ln(z₁/z0))²`` at the
+    first centre level, or the stability-corrected ``cd_surf`` from the coupled
+    MOST surface layer when one is supplied."""
+    if cd_surf is not None:
+        return cd_surf
     kappa = constants.kappa_von_karman
-    (S11, S22, S33, S12, S13, S23), _ = _strain(u, v, w, g)
-    tau11, tau22, tau33 = 2 * nu_t * S11, 2 * nu_t * S22, 2 * nu_t * S33
-    tau12 = 2 * nu_t * S12
-    _tau13, _tau23 = 2 * nu_t * S13, 2 * nu_t * S23           # centres
-    # Horizontal divergence of the stress (spectral, exact).
-    Fu = ddx(tau11, g) + ddy(tau12, g)
-    Fv = ddx(tau12, g) + ddy(tau22, g)
-    # Vertical SGS momentum flux on FACES: τ_i3 = 2 ν_t S_i3, interpolated to
-    # faces; the SURFACE face value is the MOST wall stress (not the interior
-    # closure), the rigid-lid top is no-stress.
+    return (kappa / jnp.log(g.z_c[0] / g.cfg.z0)) ** 2
+
+
+def surface_boundary(u, v, theta, g: SpectralLESGrid, sfc_theta_flux, t_sfc):
+    """Surface BC actually applied by :func:`rhs`: ``(cd_surf, sfc_flux)``.
+
+    ``t_sfc=None`` (or no θ) ⇒ the prescribed kinematic heat flux and the neutral
+    drag (``cd_surf=None``). A prescribed surface temperature ⇒ both from the
+    coupled stable MOST surface layer on the planar-mean first level."""
+    if t_sfc is None or theta is None:
+        return None, sfc_theta_flux
+    u1, v1 = u[..., 0], v[..., 0]
+    spd_mean = _planar_mean(jnp.sqrt(u1 ** 2 + v1 ** 2 + 1e-12), g)
+    th1_mean = _planar_mean(theta[..., 0], g)
+    _us, _ths, sfc_flux, cd_surf = most_surface_flux(
+        spd_mean, th1_mean, t_sfc, g.z_c[0], g.cfg.z0, g.cfg.theta_ref0)
+    return cd_surf, sfc_flux
+
+
+def sgs_vertical_momentum_flux_faces(u, v, w, nu_t, g: SpectralLESGrid, cd_surf=None):
+    """Vertical SGS momentum flux on ALL faces ``(τ13, τ23)``, shape ``(ny,nx,nz+1)``.
+
+    Interior faces: ``τ_i3 = ν_t(∂u_i/∂z + ∂w/∂x_i)`` (``ν_t`` centre→face). Surface
+    face: minus the MOST wall stress ``τ_w = −Cd⟨|u₁|⟩u_i,1`` (Moeng 1984: magnitude
+    from the planar-mean speed, direction from the local wind). Lid: no stress.
+    Convention: ``∂u_i/∂t ∋ ∂τ_i3/∂z``; the turbulent flux is ``⟨u_i'w'⟩ = −τ_i3``.
+    Also returns the planar-mean first-level speed and the ``Cd`` used."""
+    dz = g.dz
     nu_t_f = c2f(nu_t)
     dudz_f = ddz_c2f(u, dz)
     dvdz_f = ddz_c2f(v, dz)
@@ -743,11 +760,9 @@ def sgs_and_wall(u, v, w, nu_t, g: SpectralLESGrid, u_geo, cd_surf=None):
     # Neutral log-law drag, OR the stability-corrected drag ``cd_surf`` supplied by
     # the coupled MOST surface layer (GABLS1 prescribed-cooling BC). cd_surf=None
     # ⇒ neutral (unchanged default path, no regression).
-    Cd = ((kappa / jnp.log(g.z_c[0] / g.cfg.z0)) ** 2
-          if cd_surf is None else cd_surf)
-    tau_w_x = -Cd * spd1_mean * u1                          # ∝ ⟨U⟩·u₁ (kinematic)
-    tau_w_y = -Cd * spd1_mean * v1
-    u_star = (Cd ** 0.5) * spd1_mean
+    cd = surface_drag_coefficient(g, cd_surf)
+    tau_w_x = -cd * spd1_mean * u1                          # ∝ ⟨U⟩·u₁ (kinematic)
+    tau_w_y = -cd * spd1_mean * v1
     # Assemble full-face momentum flux: [surface, interior, top=0]. The surface
     # face carries the wall stress τ_w = -Cd⟨U⟩u₁ (a momentum SINK: the
     # divergence ∂_z(flux) then decelerates the near-surface wind). Interior
@@ -755,12 +770,32 @@ def sgs_and_wall(u, v, w, nu_t, g: SpectralLESGrid, u_geo, cd_surf=None):
     z = jnp.zeros_like(u1)[..., None]
     tau13_full = jnp.concatenate([(-tau_w_x)[..., None], tau13_f, z], axis=-1)
     tau23_full = jnp.concatenate([(-tau_w_y)[..., None], tau23_f, z], axis=-1)
+    return tau13_full, tau23_full, spd1_mean, cd
+
+
+def sgs_and_wall(u, v, w, nu_t, g: SpectralLESGrid, u_geo, cd_surf=None):
+    """SGS force ``∂_j(2 ν_t S_ij)`` with the surface vertical momentum flux
+    replaced by the Monin–Obukhov wall stress
+    (:func:`sgs_vertical_momentum_flux_faces`).
+
+    Returns ``(Fu, Fv, Fw)`` (centres, centres, faces) and the surface friction
+    velocity ``u_*`` (diagnostic)."""
+    dz = g.dz
+    (S11, S22, S33, S12, S13, S23), _ = _strain(u, v, w, g)
+    tau11, tau22, tau33 = 2 * nu_t * S11, 2 * nu_t * S22, 2 * nu_t * S33
+    tau12 = 2 * nu_t * S12
+    # Horizontal divergence of the stress (spectral, exact).
+    Fu = ddx(tau11, g) + ddy(tau12, g)
+    Fv = ddx(tau12, g) + ddy(tau22, g)
+    tau13_full, tau23_full, spd1_mean, cd = sgs_vertical_momentum_flux_faces(
+        u, v, w, nu_t, g, cd_surf=cd_surf)
+    u_star = (cd ** 0.5) * spd1_mean
     # ∂τ_i3/∂z at centres.
     Fu = Fu + ddz_f2c(tau13_full, dz)
     Fv = Fv + ddz_f2c(tau23_full, dz)
     # Vertical SGS force on interior FACES: ∂_x τ13 + ∂_y τ23 + ∂_z τ33.
     #   τ13_f, τ23_f live on interior faces (nz-1); τ33 at centres (nz).
-    Fw_int = (ddx(tau13_f, g) + ddy(tau23_f, g)
+    Fw_int = (ddx(tau13_full[..., 1:-1], g) + ddy(tau23_full[..., 1:-1], g)
               + ddz_c2f(tau33, dz))                        # (ny, nx, nz-1)
     Fw = jnp.pad(Fw_int, ((0, 0), (0, 0), (1, 1)))         # 0 at the walls → nz+1
     return Fu, Fv, Fw, u_star
@@ -1011,10 +1046,13 @@ def buoyancy_w(theta, g: SpectralLESGrid):
 # --------------------------------------------------------------------------- #
 # Pressure projection (fractional step)                                        #
 # --------------------------------------------------------------------------- #
-def project(u_s, v_s, w_s, dt, g: SpectralLESGrid):
-    """Enforce ``∇·u=0`` by a pressure projection. Solve per horizontal
-    wavenumber a tridiagonal vertical Poisson ``φ''−k²φ = div(u*)/dt`` with
-    Neumann (``w=0``) walls, then ``u = u* − dt ∇φ``."""
+def pressure_potential(u_s, v_s, w_s, dt, g: SpectralLESGrid):
+    """The projection potential ``φ`` (centres): per horizontal wavenumber the
+    tridiagonal vertical Poisson ``φ''−k²φ = div(u*)/dt`` with Neumann (``w=0``)
+    walls and the gauge ``φ[0]=0`` on the k²=0 columns. :func:`project` removes
+    ``dt ∇φ``. Called with the rotational-form RHS ``(R_u, R_v, R_w)`` and ``dt=1``
+    it returns the DYNAMIC pressure ``P = p/ρ₀ + ½|u|²`` that keeps the tendency
+    divergence-free — use :func:`kinematic_pressure` for ``p/ρ₀`` itself."""
     nz = u_s.shape[-1]
     # Tridiagonal arrays live in SPECTRAL space: (ny_global, nkx_local, nz) under
     # MPI, (ny, nxr, nz) serially — take the horizontal shape from g.kx (already
@@ -1050,8 +1088,15 @@ def project(u_s, v_s, w_s, dt, g: SpectralLESGrid):
     rhs = rhs.at[..., 0].set(jnp.where(sing, 0.0 + 0.0j, rhs[..., 0]))
     del s0
     phi_h = thomas_solve(a, b, c, rhs)
+    return _ifft(phi_h, g)
+
+
+def project(u_s, v_s, w_s, dt, g: SpectralLESGrid):
+    """Enforce ``∇·u=0`` by a pressure projection: ``u = u* − dt ∇φ`` with
+    ``φ`` from :func:`pressure_potential`."""
+    dz = g.dz
+    phi = pressure_potential(u_s, v_s, w_s, dt, g)
     # u = u* - dt ∇φ.  Horizontal grad spectral; vertical grad to faces.
-    phi = _ifft(phi_h, g)
     u_new = u_s - dt * ddx(phi, g)
     v_new = v_s - dt * ddy(phi, g)
     dphidz_f = jnp.pad(ddz_c2f(phi, dz), ((0, 0), (0, 0), (1, 1)))    # 0 at walls
@@ -1125,13 +1170,7 @@ def rhs(u, v, w, g: SpectralLESGrid, u_geo, f_cor, force=(0.0, 0.0),
         # wave mode nu_floor exists to damp. No-op when nu_floor=0 (the default).
         f_buoy = sgs_buoyancy_factor(theta, tracers, u, v, w, g)
         nu_t = f_buoy * nu_t + (1.0 - f_buoy) * g.cfg.nu_floor
-    cd_surf, sfc_flux = None, sfc_theta_flux
-    if t_sfc is not None and theta is not None:
-        u1, v1 = u[..., 0], v[..., 0]
-        spd_mean = _planar_mean(jnp.sqrt(u1 ** 2 + v1 ** 2 + 1e-12), g)
-        th1_mean = _planar_mean(theta[..., 0], g)
-        _us, _ths, sfc_flux, cd_surf = most_surface_flux(
-            spd_mean, th1_mean, t_sfc, g.z_c[0], g.cfg.z0, g.cfg.theta_ref0)
+    cd_surf, sfc_flux = surface_boundary(u, v, theta, g, sfc_theta_flux, t_sfc)
     Fu, Fv, Fw, u_star = sgs_and_wall(u, v, w, nu_t, g, u_geo, cd_surf=cd_surf)
     ug, vg = u_geo
     Ru = Cu + Fu + f_cor * (v - vg) + force[0]
@@ -1270,9 +1309,77 @@ def _filt_state(u, v, w, th, tr, g):
     return u, v, w, th, tr
 
 
+def kinematic_pressure(state: SpectralLESState, g: SpectralLESGrid, u_geo,
+                       f_cor: float, force=(0.0, 0.0), sfc_theta_flux=0.0,
+                       t_sfc=None, sfc_qv_flux=0.0):
+    """Instantaneous kinematic pressure ``p/ρ₀`` [m²/s²] at centres (diagnostic).
+
+    The momentum RHS here is the ROTATIONAL form ``u×ω + …``, so the potential the
+    projection removes is the dynamic pressure ``P = p/ρ₀ + ½|u|²``, not ``p``. The
+    Poisson ``∇²P = ∇·R`` (same discrete operator and Neumann walls as
+    :func:`project`, ``dt=1``) on the full RHS ``R`` (advection, SGS, Coriolis,
+    buoyancy, body force) gives ``P``; ``p/ρ₀ = P − ½|u|²``
+    (:func:`resolved_kinetic_energy`). Defined up to a constant per column mean;
+    consumers use the deviation from the horizontal mean. It is the pressure of the
+    model's own RHS only: a driver that damps (sponge) and re-projects after the
+    step adds a further projection this does not include."""
+    ru, rv, rw, _us, _rth, _rtr = rhs(
+        state.u, state.v, state.w, g, u_geo, f_cor, force=force, theta=state.theta,
+        sfc_theta_flux=sfc_theta_flux, t_sfc=t_sfc, tracers=state.tracers,
+        sfc_qv_flux=sfc_qv_flux)
+    big_p = pressure_potential(ru, rv, rw, 1.0, g)
+    return big_p - resolved_kinetic_energy(state.u, state.v, state.w, g)
+
+
+def resolved_kinetic_energy(u, v, w, g: SpectralLESGrid):
+    """``½(u² + v² + w²)`` at centres (``w²`` formed on faces, averaged to centres),
+    with the SAME 3/2-padded alias-free products :func:`advection` uses when
+    ``cfg.dealias`` — so it is the Bernoulli term the rotational form hands to the
+    pressure, without the folded high-wavenumber modes a coarse-grid square has."""
+    if not g.cfg.dealias:
+        return 0.5 * (u ** 2 + v ** 2 + f2c(w ** 2))
+    pf = lambda x: _pad_to_fine(x, g)                              # noqa: E731
+    u_f, v_f, w_f = pf(u), pf(v), pf(w)
+    return _truncate_from_fine(0.5 * (u_f ** 2 + v_f ** 2 + f2c(w_f ** 2)),
+                               u.shape[0], u.shape[1], g)
+
+
+# Order of the column-budget source terms returned by ``step(return_budget=True)``.
+BUDGET_TERMS = ("sfc_heat_flux", "sfc_stress_x", "sfc_stress_y",
+                "coriolis_u", "coriolis_v", "body_force_u", "body_force_v")
+
+
+def _budget_rates(s: SpectralLESState, g: SpectralLESGrid, u_geo, f_cor, force,
+                  sfc_theta_flux, t_sfc):
+    """Column-integrated horizontal-mean source rates entering the θ/u/v budgets
+    at state ``s`` (kinematic; heat [K m/s], momentum [m²/s²]), in
+    :data:`BUDGET_TERMS` order. Each is the boundary/body term ``rhs`` applies: the
+    surface face of the θ flux, the surface face of the momentum flux
+    (``−Cd⟨|u₁|⟩⟨u₁⟩``), ``∫f(v−v_g)dz``, ``−∫f(u−u_g)dz`` and ``∫force dz``."""
+    cd_surf, q = surface_boundary(s.u, s.v, s.theta, g, sfc_theta_flux, t_sfc)
+    cd = surface_drag_coefficient(g, cd_surf)
+    u1, v1 = s.u[..., 0], s.v[..., 0]
+    spd1_mean = _planar_mean(jnp.sqrt(u1 ** 2 + v1 ** 2 + 1e-12), g)
+    lz = g.dz * s.u.shape[-1]
+    ug, vg = u_geo
+    um = _planar_mean(s.u, g)
+    vm = _planar_mean(s.v, g)
+    dt_ = s.u.dtype
+    terms = (
+        q if s.theta is not None else 0.0,
+        -cd * spd1_mean * _planar_mean(u1, g),
+        -cd * spd1_mean * _planar_mean(v1, g),
+        f_cor * g.dz * jnp.sum(vm - vg),
+        -f_cor * g.dz * jnp.sum(um - ug),
+        force[0] * lz,
+        force[1] * lz,
+    )
+    return jnp.stack([jnp.asarray(t, dt_) for t in terms])
+
+
 def step(state: SpectralLESState, g: SpectralLESGrid, dt,
          u_geo, f_cor: float, first: bool = False, force=(0.0, 0.0),
-         sfc_theta_flux=0.0, t_sfc=None, sfc_qv_flux=0.0):
+         sfc_theta_flux=0.0, t_sfc=None, sfc_qv_flux=0.0, return_budget=False):
     """One time step + pressure projection.
 
     ``time_scheme`` selects the integrator. The RK options ("rk3"=SSP-RK3,
@@ -1282,9 +1389,16 @@ def step(state: SpectralLESState, g: SpectralLESGrid, dt,
     substep). "ab2" is a self-contained Adams–Bashforth-2 fallback (``first`` uses
     forward Euler). When ``state.theta`` is set the scalar is advanced with the same
     scheme and Boussinesq buoyancy is added to w. A high-k spectral cutoff is applied
-    once at the end. ``dt`` may be a Python float or a JAX scalar."""
+    once at the end. ``dt`` may be a Python float or a JAX scalar.
+
+    ``return_budget=True`` (RK schemes only) also returns the time integral over
+    the step of the :data:`BUDGET_TERMS` source rates, carried through the SAME
+    RK stage combination as the state (an auxiliary pytree leaf) — so it equals
+    exactly what the step applied, stage by stage."""
     u, v, w, th = state.u, state.v, state.w, state.theta
     tr = state.tracers
+    if return_budget and g.cfg.time_scheme == "ab2":
+        raise ValueError("return_budget requires an RK time_scheme, not ab2")
     if g.cfg.time_scheme == "ab2":
         Ru, Rv, Rw, u_star, Rth, Rtr = rhs(u, v, w, g, u_geo, f_cor, force=force,
                                            theta=th, sfc_theta_flux=sfc_theta_flux,
@@ -1337,16 +1451,33 @@ def step(state: SpectralLESState, g: SpectralLESGrid, dt,
         return s_slow._replace(u=un, v=vn, w=wn)           # θ untouched by projection
 
     se_cfg = SplitExplicitConfig(n_substeps=1, outer_integrator=g.cfg.time_scheme)
-    out = split_explicit_step(state, slow_fn, proj_fn, dt, se_cfg)
+    budget = None
+    if return_budget:
+        def slow_aug(sa):
+            s, _acc = sa
+            return (slow_fn(s), _budget_rates(s, g, u_geo, f_cor, force,
+                                              sfc_theta_flux, t_sfc))
+
+        def proj_aug(sa, slow_tend, dt_sub, n_sub, cfg):
+            return (proj_fn(sa[0], slow_tend[0], dt_sub, n_sub, cfg), sa[1])
+
+        acc0 = jnp.zeros((len(BUDGET_TERMS),), state.u.dtype)
+        out, budget = split_explicit_step((state, acc0), slow_aug, proj_aug, dt,
+                                          se_cfg)
+    else:
+        out = split_explicit_step(state, slow_fn, proj_fn, dt, se_cfg)
     u_n, v_n, w_n, th_n, tr_n = _filt_state(out.u, out.v, out.w, out.theta,
                                             out.tracers, g)
     # u_* diagnostic from the RETURNED (filtered) state so it matches what the
     # caller sees (the filter is a horizontal low-pass; the surface-layer effect is
     # tiny, but keep them consistent).
     u_star = _surface_ustar(u_n, v_n, g)
-    return SpectralLESState(
+    new_state = SpectralLESState(
         u=u_n, v=v_n, w=w_n, theta=th_n, tracers=tr_n,
         rhs_u_prev=jnp.zeros_like(u_n), rhs_v_prev=jnp.zeros_like(v_n),
         rhs_w_prev=jnp.zeros_like(w_n),
         rhs_theta_prev=None if th_n is None else jnp.zeros_like(th_n),
-        rhs_tracers_prev=None if tr_n is None else jnp.zeros_like(tr_n)), u_star
+        rhs_tracers_prev=None if tr_n is None else jnp.zeros_like(tr_n))
+    if return_budget:
+        return new_state, u_star, budget
+    return new_state, u_star

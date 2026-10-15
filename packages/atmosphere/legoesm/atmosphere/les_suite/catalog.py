@@ -45,7 +45,7 @@ ANCHOR_CASES: tuple[LESCase, ...] = (
         regime="dry_convective",
         core="spectral",
         grid=_DRY_GRID,
-        duration_hours=1.0,
+        duration_hours=2.0,              # gate-0 validation run length (2 h)
         surface_theta_flux_K_m_s=0.06,   # run_spectral_cbl --Q0 default
         geostrophic_wind_m_s=None,       # free convection (u_geo = 0)
         sgs_variants=_SGS_SPREAD,        # dry-convective anchor is in the D7 spread subset
@@ -60,15 +60,17 @@ ANCHOR_CASES: tuple[LESCase, ...] = (
         regime="dry_stable",
         core="spectral",
         grid=LESGrid(nx=64, ny=64, nz=96, Lx_m=400.0, Ly_m=400.0, Lz_m=400.0, dt_s=0.1),
-        duration_hours=4.0,
-        surface_theta_flux_K_m_s=-0.005,  # run_spectral_sbl --Q0 (GABLS1 0.25 K/hr cooling)
+        duration_hours=9.0,              # Beare et al. (2006): 9 h, last hour analysed
+        surface_theta_flux_K_m_s=None,    # flux comes from MOST under the cooling below
         geostrophic_wind_m_s=8.0,         # --Ug default
+        surface_cooling_rate_K_per_h=0.25,  # Beare et al. (2006): T_s = 265 K − 0.25 K/h·t
         sgs_variants=_SGS_SPREAD,         # stable anchor is in the D7 spread subset
         driver="run_spectral_sbl.py",
         reference="Beare et al. (2006) GABLS1 stable BL LES intercomparison",
         ci_marker="nightly",
         description="GABLS1 stably-stratified sheared Ekman SBL (Ug=8, f=1.39e-4); "
-                    "surface cooling drives a low-level jet at the SBL top.",
+                    "prescribed surface cooling 0.25 K/h with a Monin-Obukhov "
+                    "surface layer drives a low-level jet at the SBL top.",
     ),
     LESCase(
         name="bomex_cu",

@@ -46,6 +46,8 @@ def _driver_command(case) -> list[str]:
     cmd = ["python", f"scripts/run/{case.driver}"]
     if case.surface_theta_flux_K_m_s is not None:
         cmd += ["--Q0", str(case.surface_theta_flux_K_m_s)]
+    if case.surface_cooling_rate_K_per_h is not None:
+        cmd += ["--cooling-rate", str(case.surface_cooling_rate_K_per_h)]
     if case.geostrophic_wind_m_s is not None:
         cmd += ["--Ug", str(case.geostrophic_wind_m_s)]
     cmd += ["--sgs", case.sgs_variants[0]]

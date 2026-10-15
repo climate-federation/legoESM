@@ -1,0 +1,37 @@
+#!/bin/bash
+#PBS -N les_case
+#PBS -A UCLB0069
+#PBS -q main
+#PBS -l select=1:ncpus=8:ngpus=1:gpu_type=a100:mem=60GB
+#PBS -l walltime=06:00:00
+#PBS -j oe
+#
+# One LES-suite reference emission (scripts/run/run_les_suite.py) on one A100.
+# Derecho twin of les_suite_campaign.sbatch's emit step. All run arguments are
+# passed explicitly through ARGS so the run's configuration is in the job record.
+#
+#   qsub -N cbl_lasd -v ARGS="--case cbl_nieuwstadt --sgs lasd --hours 1 --frames 12" \
+#        derecho_les_case.pbs
+set -uo pipefail
+: "${ARGS:?ARGS (run_les_suite.py arguments) is required}"
+: "${REPO:=/glade/u/home/${USER}/legoesm}"
+: "${OUT:=${REPO}/results/les_suite/artifacts}"
+: "${CONDA_ENV_PREFIX:=/glade/work/${USER}/conda-envs/legoesm-gpu}"
+LOGDIR="${REPO}/results/les_suite/campaign"
+mkdir -p "${OUT}" "${LOGDIR}"
+exec > >(tee -a "${LOGDIR}/${PBS_JOBNAME:-les}-${PBS_JOBID:-local}.out") 2>&1
+
+module load conda gcc cuda >/dev/null 2>&1 || { echo "module load failed" >&2; exit 90; }
+conda activate "${CONDA_ENV_PREFIX}" || exit 90
+cd "${REPO}" || exit 2
+# The env's editable install resolves legoesm.* to the MAIN checkout; put REPO's
+# own sources first so a worktree/branch REPO runs its own code.
+PYTHONPATH="${REPO}/src$(printf ':%s' "${REPO}"/packages/*)${PYTHONPATH:+:${PYTHONPATH}}"
+export PYTHONPATH
+echo "[les] host=$(hostname) sha=$(git rev-parse HEAD) dirty=$(git status --porcelain | wc -l) args=${ARGS} out=${OUT}"
+nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
+# shellcheck disable=SC2086
+JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 python scripts/run/run_les_suite.py ${ARGS} --output "${OUT}"
+rc=$?
+echo "[les] exit=${rc}"
+exit "${rc}"

@@ -205,3 +205,36 @@ def test_build_reference_artifact_invalid_raises():
             prescribe="fluxes",
             w_theta_s=np.full(nt, 0.06),
         )
+
+
+# --- turbulence-statistics reducers ---------------------------------------------
+def test_covariance_and_third_moment_match_numpy():
+    from legoesm.atmosphere.les_suite.emit import covariance, third_moment
+    rng = np.random.default_rng(7)
+    a, b, c = (rng.normal(size=(NY, NX, NZ)) + 3.0 for _ in range(3))
+    ap, bp, cp = (f - f.mean(axis=(0, 1), keepdims=True) for f in (a, b, c))
+    np.testing.assert_allclose(covariance(a, b), (ap * bp).mean(axis=(0, 1)))
+    np.testing.assert_allclose(third_moment(a, b, c), (ap * bp * cp).mean(axis=(0, 1)))
+    np.testing.assert_allclose(covariance(a, b), resolved_vertical_flux(a, b))
+    with pytest.raises(ValueError):
+        covariance(a, b[..., :-1])
+
+
+def test_sgs_flux_from_face_stress_sign_and_staggering():
+    from legoesm.atmosphere.les_suite.emit import sgs_flux_from_face_stress
+    # core convention: τ on faces with ∂u/∂t ∋ ∂τ/∂z; the wall face holds −τ_w.
+    # A decelerating wall τ_w = −0.1 (u'w'_0 < 0) ⇒ face value +0.1, flux −τ.
+    tau = np.zeros((NY, NX, NZ + 1))
+    tau[..., 0] = 0.1
+    tau[..., 1:-1] = 0.04
+    flux = sgs_flux_from_face_stress(tau)
+    assert flux.shape == (NZ,)
+    assert flux[0] == pytest.approx(-0.5 * (0.1 + 0.04))   # face→centre average
+    assert flux[-1] == pytest.approx(-0.5 * 0.04)          # lid face is 0
+    assert np.all(flux < 0.0)                               # downward momentum flux
+
+
+def test_column_share():
+    from legoesm.atmosphere.les_suite.emit import column_share
+    assert column_share(np.array([0.1, -0.1]), np.array([1.0, -1.0])) == pytest.approx(0.1)
+    assert np.isnan(column_share(np.ones(3), np.zeros(3)))

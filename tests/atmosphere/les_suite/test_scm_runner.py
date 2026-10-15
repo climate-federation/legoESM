@@ -163,6 +163,22 @@ def test_build_scm_from_artifact():
     assert np.all(T0 > 200.0) and np.all(T0 < 340.0)
 
 
+def test_scm_surface_flux_follows_the_realised_series():
+    # a cooling-forced reference records a time-varying realised flux; the SCM must
+    # receive it (interval means of the exact integral), not its t=0 value.
+    t = np.linspace(0.0, 1800.0, NT)                     # 0, 900, 1800 s
+    cum = np.array([0.0, -0.9, -2.7])                    # means -1e-3, -2e-3
+    art = _cbl_artifact(w_theta_s=np.array([0.0, -1.5e-3, -2.5e-3]),
+                        w_theta_s_cum=cum, times_s=t)
+    scm, _grid = build_cbl_scm_from_artifact(art, _mynn_config(), nlev=NZ, dt=60.0)
+    fn = scm.forcing.w_th_s
+    assert float(fn(10.0)) == pytest.approx(-1e-3)
+    assert float(fn(1000.0)) == pytest.approx(-2e-3)
+    assert float(fn(870.0)) == pytest.approx(0.5 * (-1e-3) + 0.5 * (-2e-3))  # straddles
+    applied = sum(float(fn(60.0 * k)) * 60.0 for k in range(30))   # 0..1800 s
+    assert applied == pytest.approx(cum[-1], rel=1e-12)
+
+
 def _windy_cbl_artifact(**over):
     """A well-mixed dry CBL with a light mean wind — so the bulk surface layer can carry
     the prescribed heat flux (the Q1b diagnostic-flux margin fixture)."""

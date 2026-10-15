@@ -59,6 +59,7 @@ from .bridge import (
     LESTruth,
     diagnostic_truth,
     prognostic_truth,
+    surface_heat_flux_fn,
 )
 from .scm_coupling import (
     T_from_theta,
@@ -240,7 +241,6 @@ def build_cbl_scm_from_artifact(
     v_scm = interp_profile(v0, z_les, z_scm)
     T_profile = T_from_theta(theta_scm, p_full)
 
-    q0 = float(jnp.asarray(artifact.w_theta_s)[0])
     # Geostrophic wind forcing (sheared CBL / stable SBL). SCMForcing's Coriolis convention
     # du/dt=+f_c(v-v_g), dv/dt=-f_c(u-u_g) matches the LES emission, and it disables the
     # Coriolis+geostrophic term ENTIRELY when f_c=0 — so a free-convective CBL (f_c=0,
@@ -350,7 +350,9 @@ def build_cbl_scm_from_artifact(
         # against large-eddy truth is the whole purpose here, so the nonlocal
         # ones would have been ranked on a boundary condition they never got.
         flux_to_closure=True,
-        w_th_s=lambda _t: jnp.asarray(q0),
+        # the realised surface flux the LES column received, as its mean over each
+        # forward-Euler step (exact recorded heat even across output times)
+        w_th_s=surface_heat_flux_fn(artifact, dt_s=dt),
         **geo_kwargs,
         **moist_kwargs,
     )

@@ -323,3 +323,106 @@ def test_forcing_reverses_profile_for_top_to_bottom_scm():
     assert jnp.allclose(top2bot.subsidence_w(0.0), prof[::-1])
     surf_first = artifact_to_scm_forcing(art, scm_top_to_bottom=False)
     assert jnp.allclose(surf_first.subsidence_w(0.0), prof)
+
+
+# --- turbulence statistics + realised surface series (optional channels) --------
+def test_turbulence_stats_round_trip_and_old_artifacts_still_load(tmp_path):
+    import numpy as np
+    from legoesm.atmosphere.les_suite.bridge import (
+        SURFACE_SERIES_FIELDS,
+        TURBULENCE_STAT_FIELDS,
+    )
+    old = _dry_artifact()
+    save_artifact(old, tmp_path / "old.npz")
+    back = load_artifact(tmp_path / "old.npz")
+    assert all(getattr(back, n) is None for n in TURBULENCE_STAT_FIELDS)
+    extra = {n: _profile_series(0.1 * (i + 1)) for i, n in enumerate(TURBULENCE_STAT_FIELDS)}
+    extra.update({n: jnp.full((NT,), -0.07) for n in SURFACE_SERIES_FIELDS})
+    art = _dry_artifact(**extra)
+    save_artifact(art, tmp_path / "new.npz")
+    back = load_artifact(tmp_path / "new.npz")
+    for n in TURBULENCE_STAT_FIELDS + SURFACE_SERIES_FIELDS:
+        np.testing.assert_array_equal(np.asarray(getattr(back, n)),
+                                      np.asarray(getattr(art, n)))
+
+
+@pytest.mark.parametrize("name,shape", [("uw_resolved", (NT, NZ + 1)),
+                                        ("pres_uw", (NZ,)),
+                                        ("tau_x_s", (NT + 1,)),
+                                        ("w_theta_s_cum", (NT, NZ))])
+def test_turbulence_stat_shape_mismatch_rejected(name, shape):
+    with pytest.raises(BridgeError):
+        _dry_artifact(**{name: jnp.zeros(shape)})
+
+
+def test_surface_heat_flux_fn_interval_means_and_fallback():
+    from legoesm.atmosphere.les_suite.bridge import surface_heat_flux_fn
+    t = jnp.asarray([0.0, 100.0, 300.0, 600.0])
+    samples = jnp.asarray([0.0, -0.5e-3, -1e-3, -4e-3])
+    cum = jnp.asarray([0.0, -0.1, -0.5, -1.4])            # means -1e-3, -2e-3, -3e-3
+    art = _dry_artifact(times_s=t, w_theta_s=samples, w_theta_s_cum=cum)
+    fn = surface_heat_flux_fn(art)
+    for tt, want in ((0.0, -1e-3), (99.0, -1e-3), (100.0, -2e-3), (450.0, -3e-3),
+                     (900.0, -3e-3)):
+        assert float(fn(tt)) == pytest.approx(want)
+    # without the integral: linear interpolation of the instantaneous samples
+    legacy = surface_heat_flux_fn(_dry_artifact(times_s=t, w_theta_s=samples))
+    assert float(legacy(50.0)) == pytest.approx(-0.25e-3)
+    # the bridge's forcing uses the same reconstruction
+    assert float(artifact_to_scm_forcing(art).w_th_s(450.0)) == pytest.approx(-3e-3)
+
+
+def test_surface_heat_flux_step_mean_conserves_across_frames():
+    # frames 0/100/300 s, recorded heat −0.1 then −0.4 K m; a 60 s forward-Euler step
+    # straddles t=100: sampling interval means at step starts gives −0.48 K m over
+    # 300 s, the step means telescope to exactly −0.5.
+    from legoesm.atmosphere.les_suite.bridge import surface_heat_flux_fn
+    t = jnp.asarray([0.0, 100.0, 300.0])
+    art = _dry_artifact(times_s=t, w_theta_s=jnp.asarray([0.0, -1e-3, -2e-3]),
+                        w_theta_s_cum=jnp.asarray([0.0, -0.1, -0.5]),
+                        theta=_profile_series(300.0, nt=3), u=_profile_series(1.0, nt=3),
+                        v=_profile_series(0.0, nt=3),
+                        wtheta_resolved=_profile_series(0.05, nt=3),
+                        wtheta_sgs=_profile_series(0.01, nt=3))
+    steps = [60.0 * k for k in range(5)]
+    sampled = sum(float(surface_heat_flux_fn(art)(s)) * 60.0 for s in steps)
+    assert sampled == pytest.approx(-0.48)           # the defect the step mean removes
+    fn = surface_heat_flux_fn(art, dt_s=60.0)
+    assert sum(float(fn(s)) * 60.0 for s in steps) == pytest.approx(-0.5, rel=1e-12)
+    # beyond the last output the last interval's mean continues
+    assert float(fn(400.0)) == pytest.approx(-2e-3)
+    # integer timestamps must not truncate fractional step times
+    art_int = _dry_artifact(times_s=jnp.asarray([0, 100, 300]),
+                            w_theta_s=jnp.asarray([0.0, -1e-3, -2e-3]),
+                            w_theta_s_cum=jnp.asarray([0.0, -0.1, -0.5]),
+                            theta=_profile_series(300.0, nt=3),
+                            u=_profile_series(1.0, nt=3), v=_profile_series(0.0, nt=3),
+                            wtheta_resolved=_profile_series(0.05, nt=3),
+                            wtheta_sgs=_profile_series(0.01, nt=3))
+    fn_int = surface_heat_flux_fn(art_int, dt_s=0.5)
+    assert float(fn_int(10.25)) == pytest.approx(-1e-3)
+    assert float(fn_int(99.75)) == pytest.approx(0.5 * (-1e-3) + 0.5 * (-2e-3))
+    with pytest.raises(BridgeError):
+        surface_heat_flux_fn(art, dt_s=0.0)
+    # an old artifact (no integral): constant flux is fine, a varying one is refused
+    assert float(surface_heat_flux_fn(_dry_artifact(), dt_s=60.0)(30.0)) == pytest.approx(0.06)
+    with pytest.raises(BridgeError):
+        surface_heat_flux_fn(_dry_artifact(
+            w_theta_s=jnp.asarray([0.0, -1e-3, -2e-3, -3e-3])), dt_s=60.0)
+    with pytest.raises(BridgeError):                  # an integral without its series
+        _dry_artifact(prescribe="none", w_theta_s=None,
+                      w_theta_s_cum=jnp.zeros((NT,)))
+
+
+def test_les_setup_round_trip(tmp_path):
+    setup = {"surface_bc": "cooling_K_per_h", "refine": 2}
+    save_artifact(_dry_artifact(les_setup=setup), tmp_path / "a.npz")
+    assert load_artifact(tmp_path / "a.npz").les_setup == setup
+    assert load_artifact_without_setup(tmp_path).les_setup is None
+    with pytest.raises(BridgeError):
+        _dry_artifact(les_setup="cooling")
+
+
+def load_artifact_without_setup(tmp_path):
+    save_artifact(_dry_artifact(), tmp_path / "b.npz")
+    return load_artifact(tmp_path / "b.npz")

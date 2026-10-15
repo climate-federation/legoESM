@@ -54,6 +54,54 @@ def resolved_vertical_flux(w_center: Array, phi: Array) -> Array:
     return (w_prime * phi_prime).mean(axis=_HORIZ)
 
 
+def covariance(a: Array, b: Array) -> Array:
+    """Horizontal-mean covariance ``<a'b'>`` of two ``(ny, nx, nz)`` fields → ``(nz,)``
+    (primes = deviation from the horizontal mean at each level)."""
+    a = np.asarray(a)
+    b = np.asarray(b)
+    if a.shape != b.shape or a.ndim != 3:
+        raise ValueError("a and b must be matching (ny,nx,nz) fields")
+    return ((a - a.mean(axis=_HORIZ, keepdims=True))
+            * (b - b.mean(axis=_HORIZ, keepdims=True))).mean(axis=_HORIZ)
+
+
+def third_moment(a: Array, b: Array, c: Array) -> Array:
+    """Horizontal-mean triple correlation ``<a'b'c'>`` → ``(nz,)``."""
+    fields = [np.asarray(f) for f in (a, b, c)]
+    if any(f.shape != fields[0].shape or f.ndim != 3 for f in fields):
+        raise ValueError("a, b, c must be matching (ny,nx,nz) fields")
+    prod = np.ones_like(fields[0])
+    for f in fields:
+        prod = prod * (f - f.mean(axis=_HORIZ, keepdims=True))
+    return prod.mean(axis=_HORIZ)
+
+
+def sgs_flux_from_face_stress(tau_faces: Array) -> Array:
+    """Horizontal-mean SGS momentum flux ``<u_i'w'>_sgs`` at centres → ``(nz,)``.
+
+    ``tau_faces`` is the core's vertical SGS stress on all ``nz+1`` faces
+    (``spectral_les_plane.sgs_vertical_momentum_flux_faces``: ``∂u_i/∂t ∋ ∂τ_i3/∂z``,
+    surface face = minus the wall stress, lid = 0). The turbulent flux is ``−τ_i3``,
+    averaged face→centre exactly as :func:`sgs_vertical_scalar_flux_mean` does for
+    heat, so a decelerating wall gives a NEGATIVE (downward) near-surface flux."""
+    t = np.asarray(tau_faces)
+    if t.ndim != 3:
+        raise ValueError(f"expected a (ny,nx,nz+1) face field, got shape {t.shape}")
+    turb = -t
+    return (0.5 * (turb[..., :-1] + turb[..., 1:])).mean(axis=_HORIZ)
+
+
+def column_share(part: Array, total: Array) -> float:
+    """``Σ|part| / Σ|total|`` over levels — the fraction of a column flux profile
+    carried by one component (e.g. the background-viscosity floor). An L1 ratio,
+    not a partition: with sign changes in the total it can exceed 1. ``nan`` when
+    the total vanishes identically."""
+    den = float(np.sum(np.abs(np.asarray(total))))
+    if den == 0.0:
+        return float("nan")
+    return float(np.sum(np.abs(np.asarray(part)))) / den
+
+
 def sgs_vertical_scalar_flux_mean(
     phi: Array, nu_t: Array, dz: float, *, pr_sgs: float = 1.0,
     surface_flux: float = 0.0,
@@ -121,6 +169,8 @@ def build_reference_artifact(
     T_s: Array | None = None,
     w_theta_s: Array | None = None,
     w_qv_s: Array | None = None,
+    les_setup: dict | None = None,
+    **extra: Array | None,
 ) -> LESReferenceArtifact:
     """Assemble a validated :class:`LESReferenceArtifact` from stacked mean profiles.
 
@@ -128,9 +178,14 @@ def build_reference_artifact(
     forcing profiles are ``(nz,)`` and the surface series ``(nt,)``. This is a thin,
     validated constructor (``LESReferenceArtifact.validate`` runs on build) so the
     GPU driver's only job is to run the LES and stack these reductions per output
-    time — the contract lives in one place.
+    time — the contract lives in one place. ``extra`` passes the optional
+    turbulence-statistics / realised-surface channels
+    (``bridge.TURBULENCE_STAT_FIELDS`` + ``bridge.SURFACE_SERIES_FIELDS``) through
+    by name; an unknown name is a ``TypeError`` from the dataclass.
     """
     return LESReferenceArtifact(
+        **{k: (None if a is None else np.asarray(a)) for k, a in extra.items()},
+        les_setup=les_setup,
         case_name=case_name,
         sgs=sgs,
         heights_m=np.asarray(z),

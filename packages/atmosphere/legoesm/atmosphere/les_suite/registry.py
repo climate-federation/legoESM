@@ -120,6 +120,11 @@ class LESCase:
         Cost tier for any harness that iterates the catalog.
     description : str
         Free-text.
+    surface_cooling_rate_K_per_h : float | None
+        Prescribed surface-temperature COOLING rate [K/h] for a stable case forced
+        the published way (GABLS1: ``T_s(t) = θ₀ − rate·t`` with the surface flux
+        and drag from Monin–Obukhov similarity). Mutually exclusive with
+        ``surface_theta_flux_K_m_s``; ``None`` = flux-forced.
     provisional_axis : bool
         ``True`` while the ``(flux, wind)`` axis values are placeholders pending the
         gate-0 CBL calibration (LES_SUITE.md §8/§9); real anchors set ``False``.
@@ -138,6 +143,7 @@ class LESCase:
     ci_marker: CiMarker = "nightly"
     description: str = ""
     provisional_axis: bool = False
+    surface_cooling_rate_K_per_h: float | None = None
 
     def validate(self) -> None:
         if not self.name or not isinstance(self.name, str):
@@ -163,6 +169,15 @@ class LESCase:
             v = getattr(self, axis)
             if v is not None and not isinstance(v, (int, float)):
                 raise RegistryError(f"{self.name}: {axis} must be a number or None, got {v!r}")
+        rate = self.surface_cooling_rate_K_per_h
+        if rate is not None:
+            if isinstance(rate, bool) or not isinstance(rate, (int, float)) or not rate > 0:
+                raise RegistryError(
+                    f"{self.name}: surface_cooling_rate_K_per_h must be > 0, got {rate!r}")
+            if self.surface_theta_flux_K_m_s is not None:
+                raise RegistryError(
+                    f"{self.name}: set surface_cooling_rate_K_per_h OR "
+                    "surface_theta_flux_K_m_s, not both")
         if self.geostrophic_wind_m_s is not None and self.geostrophic_wind_m_s < 0:
             raise RegistryError(f"{self.name}: geostrophic_wind_m_s must be >= 0")
         self.grid.validate()

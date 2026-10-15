@@ -72,6 +72,42 @@ class LESReferenceArtifact:
         w_theta_s, w_qv_s : (nt,) surface kinematic heat/moisture fluxes
             [K m/s] / [(kg/kg) m/s], positive up, or ``None``.
 
+    Turbulence statistics (optional, ``(nt, nz)``, horizontal means at cell
+    centres, kinematic, primes = deviation from the horizontal mean; ``p`` is the
+    kinematic pressure ``p/ρ₀`` [m²/s²]) — see :data:`TURBULENCE_STAT_FIELDS`:
+        uw_resolved, uw_sgs, vw_resolved, vw_sgs : momentum flux ``<u'w'>``,
+            ``<v'w'>`` [m²/s²], positive up. The SGS part is minus the core's face
+            stress averaged face→centre, so level 0 is the mean of the wall flux and
+            the first interior face (the wall value itself is ``tau_x_s``).
+        uu, vv, ww, thth : variances (``ww`` formed on faces, averaged to centres).
+        tke_resolved : ``½(uu+vv+ww)`` [m²/s²]. No SGS TKE: the LES closures here
+            (LASD / static Smagorinsky / Vreman) are algebraic and carry none.
+        wwtheta : third moment ``<w'w'θ'>`` [K m²/s²].
+        wp : ``<w'p'>`` [m³/s³] (pressure transport of TKE is ``−∂<w'p'>/∂z``).
+        theta_dpdz : ``<θ'∂p'/∂z>``; the heat-flux budget pressure term is its
+            negative.
+        pstrain_11, pstrain_22, pstrain_33 : pressure–strain ``<p'∂u'/∂x>``,
+            ``<p'∂v'/∂y>``, ``<p'∂w'/∂z>`` (sum = ``<p'∇·u'>`` ≈ 0).
+        pres_uw, pres_vw : ``<u'∂p'/∂z + w'∂p'/∂x>``, ``<v'∂p'/∂z + w'∂p'/∂y>``;
+            the momentum-flux budget pressure terms are their negatives.
+            ``∂p'/∂z`` is formed on faces (zero at the Neumann walls, as in the
+            projection) and averaged to centres, so the first and last levels of
+            ``theta_dpdz`` / ``pres_*`` carry half a wall face. The pressure is the
+            model RHS's own (``kinematic_pressure``); a driver sponge + re-projection
+            adds pressure work these exclude, so they are not budget-exact inside a
+            sponge layer.
+        wtheta_floor, uw_floor, vw_floor : the part of the SGS flux carried by
+            the background viscosity floor ``nu_floor`` (zero surface face).
+
+    Realised surface series (optional, ``(nt,)``) — see
+    :data:`SURFACE_SERIES_FIELDS`:
+        tau_x_s, tau_y_s : horizontal-mean surface stress ``<u'w'>₀``,
+            ``<v'w'>₀`` [m²/s²] the wall model applies at each output time
+            (negative = momentum taken out of the flow for u, v > 0).
+        w_theta_s_cum, tau_x_s_cum, tau_y_s_cum : time integrals from ``t=0`` of
+            the surface heat flux [K m] and stress [m²/s] as the RK stages applied
+            them (exact column-budget inputs).
+
     Provenance:
         case_name : the :class:`LESCase` this run realizes.
         sgs : SGS closure used (one of the case's ``sgs_variants``).
@@ -106,6 +142,35 @@ class LESReferenceArtifact:
     T_s: Array | None = None
     w_theta_s: Array | None = None
     w_qv_s: Array | None = None
+    uw_resolved: Array | None = None
+    uw_sgs: Array | None = None
+    vw_resolved: Array | None = None
+    vw_sgs: Array | None = None
+    uu: Array | None = None
+    vv: Array | None = None
+    ww: Array | None = None
+    thth: Array | None = None
+    tke_resolved: Array | None = None
+    wwtheta: Array | None = None
+    wp: Array | None = None
+    theta_dpdz: Array | None = None
+    pstrain_11: Array | None = None
+    pstrain_22: Array | None = None
+    pstrain_33: Array | None = None
+    pres_uw: Array | None = None
+    pres_vw: Array | None = None
+    wtheta_floor: Array | None = None
+    uw_floor: Array | None = None
+    vw_floor: Array | None = None
+    tau_x_s: Array | None = None
+    tau_y_s: Array | None = None
+    w_theta_s_cum: Array | None = None
+    tau_x_s_cum: Array | None = None
+    tau_y_s_cum: Array | None = None
+    #: JSON-serialisable record of how the reference was produced (surface BC,
+    #: viscosity floor, refinement, dt, grid) so references made under different
+    #: setups of the same case are distinguishable after the fact.
+    les_setup: dict | None = None
 
     def __post_init__(self) -> None:
         self.validate()
@@ -123,6 +188,8 @@ class LESReferenceArtifact:
         return self.qt is not None
 
     def validate(self) -> None:
+        if self.les_setup is not None and not isinstance(self.les_setup, dict):
+            raise BridgeError(f"{self.case_name}: les_setup must be a dict or None")
         if not self.case_name:
             raise BridgeError("LESReferenceArtifact.case_name must be non-empty")
         if self.prescribe not in ("none", "T_s", "fluxes"):
@@ -146,7 +213,7 @@ class LESReferenceArtifact:
         nt, nz = self.nt, self.nz
         # profile time series: (nt, nz)
         for name in ("theta", "u", "v", "wtheta_resolved", "wtheta_sgs",
-                     "qt", "wqt_resolved", "wqt_sgs", "qc"):
+                     "qt", "wqt_resolved", "wqt_sgs", "qc") + TURBULENCE_STAT_FIELDS:
             arr = getattr(self, name)
             if arr is None:
                 continue
@@ -166,7 +233,7 @@ class LESReferenceArtifact:
                     f"{self.case_name}: {name} must have shape {(nz,)}, got {a.shape}"
                 )
         # surface time series: (nt,)
-        for name in ("T_s", "w_theta_s", "w_qv_s"):
+        for name in ("T_s", "w_theta_s", "w_qv_s") + SURFACE_SERIES_FIELDS:
             arr = getattr(self, name)
             if arr is None:
                 continue
@@ -210,6 +277,9 @@ class LESReferenceArtifact:
                     f"{self.case_name}: dry artifact (qt is None) must not carry "
                     f"moisture field(s) {dry_forbidden}"
                 )
+        if self.w_theta_s_cum is not None and self.w_theta_s is None:
+            raise BridgeError(
+                f"{self.case_name}: w_theta_s_cum set without the w_theta_s series")
         # A SGS moisture flux without its resolved counterpart is inconsistent.
         if self.wqt_sgs is not None and self.wqt_resolved is None:
             raise BridgeError(
@@ -249,6 +319,18 @@ class LESReferenceArtifact:
                 )
 
 
+# Optional per-frame turbulence statistics ((nt, nz)) and realised surface series
+# ((nt,)); module-level so the validator, npz I/O and emitters share one list.
+TURBULENCE_STAT_FIELDS = (
+    "uw_resolved", "uw_sgs", "vw_resolved", "vw_sgs",
+    "uu", "vv", "ww", "thth", "tke_resolved", "wwtheta",
+    "wp", "theta_dpdz", "pstrain_11", "pstrain_22", "pstrain_33",
+    "pres_uw", "pres_vw", "wtheta_floor", "uw_floor", "vw_floor",
+)
+SURFACE_SERIES_FIELDS = (
+    "tau_x_s", "tau_y_s", "w_theta_s_cum", "tau_x_s_cum", "tau_y_s_cum",
+)
+
 # Array-valued fields serialized to/from npz (order-independent; a missing key on
 # load ⇒ that optional channel was None). Scalar/string fields ride in a metadata
 # key so an int/str never becomes a 0-d array on round-trip.
@@ -257,7 +339,7 @@ _ARTIFACT_ARRAY_FIELDS = (
     "wtheta_resolved", "wtheta_sgs", "qt", "wqt_resolved", "wqt_sgs", "qc",
     "u_geo", "v_geo", "subsidence_w", "theta_adv", "qv_adv",
     "T_s", "w_theta_s", "w_qv_s",
-)
+) + TURBULENCE_STAT_FIELDS + SURFACE_SERIES_FIELDS
 
 
 def save_artifact(artifact: LESReferenceArtifact, path) -> None:
@@ -282,6 +364,8 @@ def save_artifact(artifact: LESReferenceArtifact, path) -> None:
         "f_c": float(artifact.f_c),
         "prescribe": artifact.prescribe,
     }
+    if artifact.les_setup is not None:
+        meta["les_setup"] = artifact.les_setup
     arrays["__meta__"] = np.frombuffer(
         json.dumps(meta).encode("utf-8"), dtype=np.uint8
     )
@@ -438,6 +522,60 @@ def _interp_scalar_fn(times_s: Array, values: Array):
     return _fn
 
 
+def surface_heat_flux_fn(artifact: LESReferenceArtifact, *, dt_s: float | None = None):
+    """The surface kinematic heat flux ``w_th_s(t)`` [K m/s] that drives the SCM.
+
+    When the artifact carries the exact time integral of the flux the LES applied
+    (``w_theta_s_cum``), the channel is the piecewise-constant INTERVAL MEAN
+    ``(cum[k+1] − cum[k]) / (t[k+1] − t[k])`` on ``[t_k, t_{k+1})`` (the last
+    interval continues past the final frame), so an SCM stepping on the frame
+    boundaries receives exactly the heat the LES column received — the exchanged
+    flux is the same at both ends. A constant prescribed flux gives that constant.
+    Older artifacts without the integral fall back to linear interpolation of the
+    instantaneous ``w_theta_s`` samples.
+
+    ``dt_s`` (the consumer's step) returns instead the mean over ``[t, t+dt_s]`` of
+    that piecewise-constant flux, ``(C(t+dt_s) − C(t))/dt_s`` with ``C`` the
+    piecewise-linear integral — so a single-stage integrator that samples at the
+    step start (forward Euler) applies exactly the recorded heat even when its
+    steps straddle output times (the sum telescopes)."""
+    # floating time axis: integer timestamps would truncate fractional step times
+    times = jnp.asarray(artifact.times_s, dtype=jnp.result_type(float))
+    cum = artifact.w_theta_s_cum
+    if cum is None or times.shape[0] < 2:
+        samples = jnp.asarray(artifact.w_theta_s)
+        if dt_s is not None and bool(jnp.any(samples != samples[0])):
+            raise BridgeError(
+                f"{artifact.case_name}: a step-mean flux (dt_s) needs the recorded "
+                "flux integral w_theta_s_cum; this artifact has only time-varying "
+                "instantaneous samples, whose interpolation does not conserve heat")
+        return _interp_scalar_fn(artifact.times_s, artifact.w_theta_s)
+    cum = jnp.asarray(cum, dtype=times.dtype)
+    means = jnp.diff(cum) / jnp.diff(times)
+    last = means.shape[0] - 1
+
+    if dt_s is None:
+        def _fn(t_seconds: float) -> Array:
+            k = jnp.searchsorted(times, jnp.asarray(t_seconds, dtype=times.dtype),
+                                 side="right") - 1
+            return means[jnp.clip(k, 0, last)]
+        return _fn
+
+    if not dt_s > 0:
+        raise BridgeError(f"dt_s must be > 0, got {dt_s}")
+
+    def _integral(t):
+        t = jnp.asarray(t, dtype=times.dtype)
+        # beyond the last output the last interval's mean flux continues
+        past = cum[-1] + means[-1] * (t - times[-1])
+        return jnp.where(t > times[-1], past, jnp.interp(t, times, cum))
+
+    def _step_mean(t_seconds: float) -> Array:
+        return (_integral(t_seconds + dt_s) - _integral(t_seconds)) / dt_s
+
+    return _step_mean
+
+
 def artifact_to_scm_forcing(
     artifact: LESReferenceArtifact, *, scm_top_to_bottom: bool = True
 ) -> SCMForcing:
@@ -446,9 +584,11 @@ def artifact_to_scm_forcing(
     Builds an :class:`SCMForcing` whose channels reproduce the artifact's stored
     forcing. Geostrophic wind, subsidence, and advective tendencies are
     time-independent profiles (the idealized LES cases hold them fixed); surface
-    channels (``T_s`` / ``w_theta_s`` / ``w_qv_s``) are linearly interpolated in
-    time from the stored series so a variable surface forcing (e.g. GABLS1's
-    prescribed cooling) is honored. Disabled (``None``) channels stay ``None``.
+    channels follow the stored series in time so a variable surface forcing (e.g.
+    GABLS1's prescribed cooling) is honored: the heat flux via
+    :func:`surface_heat_flux_fn` (exact interval means when the artifact carries
+    the flux integral), ``T_s`` / ``w_qv_s`` by linear interpolation. Disabled
+    (``None``) channels stay ``None``.
 
     Because the forcing comes from the artifact — not re-derived from the registry
     case — the SCM is driven by byte-identical forcing to the LES, satisfying the
@@ -489,7 +629,7 @@ def artifact_to_scm_forcing(
         # exactly zero. See SCMForcing.flux_to_closure.
         kwargs["flux_to_closure"] = True
         if artifact.w_theta_s is not None:
-            kwargs["w_th_s"] = _interp_scalar_fn(artifact.times_s, artifact.w_theta_s)
+            kwargs["w_th_s"] = surface_heat_flux_fn(artifact)
         if artifact.w_qv_s is not None:
             kwargs["w_qv_s"] = _interp_scalar_fn(artifact.times_s, artifact.w_qv_s)
     return SCMForcing(**kwargs)

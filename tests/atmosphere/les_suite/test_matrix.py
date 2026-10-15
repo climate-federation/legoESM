@@ -136,3 +136,15 @@ def test_runner_exact_miss_exits_nonzero():
 
     with pytest.raises(SystemExit):
         run_matrix.main(["--only", "=nope_case"])
+
+
+def test_driver_command_carries_the_cooling_rate_not_a_flux():
+    sys.path.insert(0, str(_REPO_ROOT / "scripts" / "matrix"))
+    import run_les_suite_matrix as run_matrix  # noqa: PLC0415
+    from legoesm.atmosphere.les_suite.catalog import register_default_catalog
+
+    by_name = {c.name: c for c in register_default_catalog()}
+    cmd = run_matrix._driver_command(by_name["sbl_gabls1"])
+    assert cmd[cmd.index("--cooling-rate") + 1] == "0.25"
+    assert "--Q0" not in cmd
+    assert "--cooling-rate" not in run_matrix._driver_command(by_name["cbl_nieuwstadt"])

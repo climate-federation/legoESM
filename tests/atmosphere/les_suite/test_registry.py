@@ -179,3 +179,17 @@ def test_dry_grid_flags_sheared_convective_driver_gap():
 def test_dry_grid_rejects_empty_axes():
     with pytest.raises(ValueError):
         dry_shear_buoyancy_grid(fluxes_K_m_s=(), winds_m_s=(1.0,))
+
+
+def test_cooling_rate_validation_and_gabls1_is_cooling_forced():
+    with pytest.raises(RegistryError):   # both forcings set
+        _mk_case(surface_cooling_rate_K_per_h=0.25).validate()
+    for bad in (0.0, -0.25, True):
+        with pytest.raises(RegistryError):
+            _mk_case(surface_theta_flux_K_m_s=None,
+                     surface_cooling_rate_K_per_h=bad).validate()
+    _mk_case(surface_theta_flux_K_m_s=None, surface_cooling_rate_K_per_h=0.25).validate()
+    by_name = {c.name: c for c in register_default_catalog()}
+    gabls = by_name["sbl_gabls1"]
+    assert gabls.surface_cooling_rate_K_per_h == 0.25   # Beare et al. (2006)
+    assert gabls.surface_theta_flux_K_m_s is None
