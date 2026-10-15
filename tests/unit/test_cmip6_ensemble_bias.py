@@ -92,6 +92,10 @@ def test_lowest_f_member(tmp_path):
     for m in ("r1i1p1f10", "r1i1p1f2", "r2i1p1f1"):
         (tmp_path / "I" / "M" / "amip" / m).mkdir(parents=True)
     assert ce.list_models(str(tmp_path)) == {"M": ("I", "r1i1p1f2")}
+    # same model under a second institute, even one with no r1 member: fatal
+    (tmp_path / "A" / "M" / "amip").mkdir(parents=True)
+    with pytest.raises(SystemExit):
+        ce.list_models(str(tmp_path))
 
 
 def test_model_field_albedo_is_ratio_of_binned_fluxes(tmp_path):

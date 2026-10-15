@@ -148,12 +148,13 @@ def correction(model, var, member, version):
 
 def list_models(root=CMIP6_AMIP):
     """{model: (institute, member)} with the lowest-f r1i1p1f* member."""
-    out = {}
+    out, seen = {}, set()
     for d in sorted(glob.glob(f"{root}/*/*/amip")):
         inst, model = d.split("/")[-3:-1]
         mems = [m for m in os.listdir(d) if re.fullmatch(r"r1i1p1f\d+", m)]
-        if model in out:
+        if model in seen:
             raise SystemExit(f"FATAL: {model} published by two institutes")
+        seen.add(model)
         if mems:
             out[model] = (inst, min(mems, key=_f_index))
         else:
@@ -277,7 +278,8 @@ def ensemble_stats(lego, ref, models):
     returned ``valid`` mask is where ALL inputs are finite; every field is NaN
     outside it.  ``spread`` is the sample (ddof=1) standard deviation across
     models of their biases.  ``z`` is additionally NaN where ``z_ok`` is False:
-    spread below ``SPREAD_FLOOR_FRAC`` x its median over the valid cells.
+    spread zero, or below ``SPREAD_FLOOR_FRAC`` x its median over the valid
+    cells.
     """
     models = np.asarray(models, dtype=np.float64)
     valid = (np.isfinite(lego) & np.isfinite(ref)
