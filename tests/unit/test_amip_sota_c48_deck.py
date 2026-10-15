@@ -28,14 +28,19 @@ def _value(flags, name):
 def test_deck_uses_transition_exponent_2():
     from scripts.run import run_amip
     parser = run_amip.build_arg_parser()
-    assert load_yaml_config(str(_AMIP / "amip_sota.yaml"),
-                            parser)["transition_exponent"] == 2
+    parser.set_defaults(**load_yaml_config(str(_AMIP / "amip_sota.yaml"), parser))
+    flags = _flags(_AMIP / "amip_sota.sh")
+    cfg = run_amip.build_config_from_args(
+        run_amip._postprocess_args(parser.parse_args(flags), parser))
+    cfg.validate_strict()
+    assert cfg.grid.transition_exponent == 2
 
 
 def test_sota_paths_pick_the_37_level_start_file_and_shared_terrain():
     sota, shared = _flags(_AMIP / "amip_sota.sh"), _flags(_AMIP / "amip_production.sh")
     assert _value(sota, "--ic-path") == "/scratch/b/b309178/era5_ic_1979-01-01.zarr"
     assert _value(shared, "--ic-path") != _value(sota, "--ic-path")
+    assert "--clm-surfdata-path" in sota and "--land-mask-file" in sota
     assert (_value(sota, "--topography") == _value(shared, "--topography")
             and _value(sota, "--topography").endswith("etopo2022_60s_0p25deg.nc"))
 
