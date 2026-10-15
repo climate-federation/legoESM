@@ -82,12 +82,34 @@ represented as passing controls.
 
 ## Gates, tests, and review
 
-The citation gate and test results are recorded in the final verification
-commit after this receipt. No model file changed, so no ORCA2, GYRE, DINO, or
-tank trajectory is eligible to move or land.
+The round citation gate passes all 3 mapped citations with no failure or map
+audit debt. The cumulative default receipt passes 274/274 citations. Shifting
+the correction citation by two lines makes this round's gate fail and exit 1,
+so the control is non-vacuous.
 
-Independent review is attempted separately with a read-only Codex process;
-its exact disposition is recorded here before the final commit.
+Focused citation, round-175 boundary, and OMT-4 acquisition tests pass 31/31
+in 5.12 s. The one permitted `tests/ocean/fidelity -n 12` battery reached 99%
+with 3,537 passes and 7 skips before xdist lost workers and stopped producing
+a terminal summary. It logged 22 failed node IDs. Each exact ID was rerun in
+a fresh serial process: all 14 G1/JAX worker-loss nodes pass; eight
+pre-existing assertions reproduce:
+
+- the registered GYRE round-129 certified-year harness movement;
+- two stale GYRE round-33 mutation anchors;
+- the OMT-1 module-edge test's extra `barotropic` group;
+- the stale round-228 citation-map expectation;
+- the 14-driver dirty-escape scope ratchet;
+- the 13-emitter worktree-stamp ratchet;
+- the SI3 scalar-math provenance refusal (`A MY_SRC is not verbatim`).
+
+The round changes none of the files named by those eight assertions. No model
+file changed, so no ORCA2, GYRE, DINO, or tank trajectory is eligible to move
+or land.
+
+Independent review is unavailable in-sandbox. The separate
+`codex exec --sandbox read-only` attempt exited before reading the diff with
+`failed to initialize in-process app-server client: Read-only file system`.
+No review verdict is claimed; the operator remains the independent reviewer.
 
 ## Configuration choices
 
