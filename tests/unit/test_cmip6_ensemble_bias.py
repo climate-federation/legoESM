@@ -47,6 +47,7 @@ def test_window_selection_and_coverage(tmp_path):
 
 
 def test_regrid_bias_and_zscore_known_answer():
+    pytest.importorskip("xarray")                 # regional_bias imports it
     ce = _load()
     # model grid 5 deg; source 1 deg field constant within each 5-deg box,
     # so the area-weighted binning must return the box value exactly.
@@ -86,6 +87,7 @@ def test_regrid_bias_and_zscore_known_answer():
 
 
 def test_lowest_f_member(tmp_path):
+    pytest.importorskip("xarray")
     ce = _load()
     for m in ("r1i1p1f10", "r1i1p1f2", "r2i1p1f1"):
         (tmp_path / "I" / "M" / "amip" / m).mkdir(parents=True)

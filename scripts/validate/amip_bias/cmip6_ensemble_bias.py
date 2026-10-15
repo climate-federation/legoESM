@@ -66,8 +66,19 @@ _MONTH = ["January", "February", "March", "April", "May", "June", "July",
 
 # ---------------------------------------------------------------- window ----
 def run_window(run):
-    """(year, month) pairs the legoESM run published, from its CMOR time axis."""
+    """(year, month) pairs the legoESM run published, from its CMOR time axis.
+
+    ``bias_maps`` (via ``rb._load_model``) reads only the LAST CMOR file of a
+    run, so the legoESM field covers that one file.  A run split over several
+    files would make the window and the field disagree with the run's true
+    coverage; refuse it rather than compare a truncated window.
+    """
     import cftime
+    n = len(glob.glob(f"{rb.ROOT}/{run}/cmor/Amon/"
+                      "rsut_Amon_legoESM-1-0_amip_r1i1p1f1_gn*.nc"))
+    if n > 1:
+        raise SystemExit(f"FATAL: {run} has {n} CMOR rsut files; bias_maps "
+                         "reads only the last one -- extend it before use")
     d = rb._load_model(run, "rsut")
     if d is None:
         raise SystemExit(f"{run}: no CMOR rsut -- cannot read the run window")
@@ -145,6 +156,8 @@ def window_mean(files, var, window):
     is not a 1-D lat/lon product).
     """
     import xarray as xr
+    if not files:
+        raise LookupError("no CMOR-named file in the version directory")
     files = [f for f in files if _overlaps(f, window)]
     if not files:
         raise LookupError("no file covers the window")
@@ -239,6 +252,8 @@ def collect(run, variables, root=CMIP6_AMIP):
         lego, mlat, mlon, months = got
         src, label, *_ = bm.SPEC[var]
         ref = bm._ref_clim(var, months, mlat, mlon, src)
+        if ref is None:
+            raise SystemExit(f"{var}: no {label} reference")
         scale = bm._DISPLAY_SCALE.get(var, 1.0)
         need = ["rsut", "rsdt"] if var == "albedo" else [var]
         names, fields = [], []
