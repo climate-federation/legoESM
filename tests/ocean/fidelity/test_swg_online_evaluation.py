@@ -651,6 +651,27 @@ def test_one_seed_pilot_is_scored_without_claiming_the_three_seed_gate(
     assert "three" in report["gate_verdict_reason"]
 
 
+def test_one_seed_score_record_is_writable_json_without_bookkeeping_keys(
+        tmp_path, monkeypatch):
+    """The score-run command crashed on the first real pilot run: the admitted
+    binding carries in-process bookkeeping (a set of day files, an inode pair)
+    that json cannot encode and that is not part of the record."""
+    run = _trained_run(tmp_path / "pilot", seed=20261013, objective="template",
+                       window_days=4)
+    frozen = evaluation.frozen_gate("template")
+    rows = evaluation.truth_as_seed("template")
+    monkeypatch.setattr(evaluation, "freeze_record", lambda *args, **kwargs: (
+        frozen, None, {}))
+    monkeypatch.setattr(evaluation, "score_free_run",
+                        lambda *args, **kwargs: rows)
+    report = evaluation.score_one_trained_run(
+        *run, objective="template", window_days=4)
+    text = json.dumps(report, indent=2, sort_keys=True, default=float)
+    assert not [key for key in report["binding"] if key.startswith("_")]
+    assert json.loads(text)["binding"]["checkpoint_sha256"] \
+        == report["binding"]["checkpoint_sha256"]
+
+
 def test_trained_score_requires_three_distinct_identified_runs(tmp_path,
                                                               monkeypatch):
     """Codex round-6 defect 3: one run under three labels never passes, and

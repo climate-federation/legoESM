@@ -1364,7 +1364,11 @@ def score_one_trained_run(root: Path, manifest_sha256: str, *, objective: str,
     return {
         "schema": "legoesm.swg_online_single_run_score.v1",
         "objective": objective, "window_days": window_days,
-        "binding": binding, "scores": rows,
+        # The underscored binding entries (device/inode, the day-file set) are
+        # in-process distinctness bookkeeping, not part of the written record.
+        "binding": {key: value for key, value in binding.items()
+                    if not key.startswith("_")},
+        "scores": rows,
         "window_medians": _medians(rows),
         "gate_verdict": None,
         "gate_verdict_reason": "one pilot seed; held-out gate requires at least three",
