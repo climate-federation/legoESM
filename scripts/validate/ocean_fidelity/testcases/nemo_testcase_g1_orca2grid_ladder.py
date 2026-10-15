@@ -151,6 +151,8 @@ ARMS = ("geometry", "independent", "given_entry", "rhs", "handoff", "stages",
         "flux_update_replay", "ratio_fold_replay", "ratio_order_replay",
         "stage_operand_replay", "subnormal_environment")
 PLANTS = ("score", "entry")
+CASES = ("ORCA2G1-flat", "ORCA2G1b-vec")   # G1b = G1 + ORCA2's vector-form advection
+CASE = CASES[0]           # --case: the card every arm builds
 STAGE_STEPS = 10          # round 1's record: stage frames at kt = 1..10
 FOLD_ROWS, SEAM_COLS, SOUTH_ROWS = 3, 2, 3
 FIELDS = ("ssh", "uu_b", "vv_b", "u", "v")
@@ -395,7 +397,7 @@ def geometry(root: Path, plant: str | None = None) -> dict:
     import netCDF4
     from legoesm.ocean.fidelity import nemo_testcase_recipe as recipe
     _fp64()
-    card = recipe.build_nemo_testcase_card("ORCA2G1-flat", deck_root=root)
+    card = recipe.build_nemo_testcase_card(CASE, deck_root=root)
     dom = recipe._orca2g1_domain(root / "domain_cfg.nc")
     rows_in = card_geometry_rows(card, dom)
     names = [r[0] for r in rows_in]
@@ -1350,7 +1352,7 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
         from legoesm.ocean.fidelity import nemo_testcase_recipe as _recipe
         calls: list = []
         with vor_fold_image_arm(_recipe.build_nemo_testcase_card(
-                "ORCA2G1-flat", deck_root=root), calls):
+                CASE, deck_root=root), calls):
             out = run(root, arm=arm, kt_max=kt_max, kt_min=kt_min, plant=plant,
                       allow_dirty=allow_dirty, geometry_plant=geometry_plant,
                       fold_fill_v=fold_fill_v, before_arm=before_arm,
@@ -1401,7 +1403,7 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
         LatLonCGridOceanModel, _NEMOWSRK3TestHooks)
     from legoesm.ocean.fidelity import nemo_testcase_recipe as recipe
 
-    card = recipe.build_nemo_testcase_card("ORCA2G1-flat", deck_root=root)
+    card = recipe.build_nemo_testcase_card(CASE, deck_root=root)
     if without_r3t_product:   # ROUND-8 BEFORE ARM / plant: the bare product
         require(card.recipe.z_coord.nemo_r3t_stored_product is True,
                 "the card no longer selects the stored T-point ratio")
@@ -1627,7 +1629,7 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
             uu_b=s0.uu_b.replace(data=jnp.asarray(pad_u(g["e_uu_b_bb"]))),
             vv_b=s0.vv_b.replace(data=jnp.asarray(pad_v(g["e_vv_b_bb"]))))
 
-    out = {"arm": arm, "label": None, "legoesm_git_sha": sha, "plant": plant,
+    out = {"arm": arm, "case": CASE, "label": None, "legoesm_git_sha": sha, "plant": plant,
            "bar": BAR, "root": str(root), "kts": list(scored),
            "stage_steps": n_stage,
            "fold_fill_v_measurement_arm": fold_fill_v,
@@ -1676,7 +1678,9 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
                 "this card reads the carried after-ssh slot; seed NEMO's ssha first")
         m, chain = model(), s0
         for kt in kts:
-            if kt % 10 == 1 and kt > 1:
+            # every step whose previous restart the record holds (G1's
+            # record: every tenth; G1b's merged root: every step NEMO wrote)
+            if kt > 1 and (root / f"ORCA2G1_{kt - 1:08d}_restart.nc").is_file():
                 k0 = kt - 1
                 path = root / f"ORCA2G1_{k0:08d}_restart.nc"
                 require(path.is_file(), f"missing {path}")
@@ -2185,9 +2189,11 @@ def _print(out: dict) -> None:
 
 
 def main(argv=None) -> int:
+    global CASE
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--arm", choices=ARMS, required=True)
     ap.add_argument("--root", type=Path, default=DEFAULT_ROOT)
+    ap.add_argument("--case", choices=CASES, default=CASE)
     ap.add_argument("--kt-max", type=int, default=10)
     ap.add_argument("--kt-min", type=int, default=1,
                     help="first scored step of a stage-frame arm")
@@ -2272,6 +2278,7 @@ def main(argv=None) -> int:
                     help="the card with barotropic_fold_top_v_face_ssh switched "
                          "off (the round-3 before arm; also the option's plant)")
     a = ap.parse_args(argv)
+    CASE = a.case
     CELL[:] = [int(x) for x in a.cell.split(",")] if a.cell else []
     try:
         out = run(a.root, arm=a.arm, kt_max=a.kt_max, kt_min=a.kt_min, plant=a.plant,
