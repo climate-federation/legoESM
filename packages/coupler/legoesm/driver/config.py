@@ -3814,7 +3814,11 @@ class ExperimentConfig(NamedTuple):
                 _both := sorted(set(_v4f or ()) & set(_v4l or ()))):
             errors.append(
                 f"dycore: tracers {_both} are in both mpas_vert4_flux_form_tracers "
-                "and mpas_vert4_log_form_tracers; each tracer takes one filter form")
+                "and mpas_vert4_log_form_tracers; each tracer takes one filter form. "
+                f"The log-form list defaults to {DycoreConfig._field_defaults['mpas_vert4_log_form_tracers']}: "
+                f"to give {_both} the flux form, also set the log-form list without "
+                "them (CLI: --mpas-vert4-log-form-tracers with no names; YAML: "
+                "mpas_vert4_log_form_tracers: [])")
         if d.mpas_vert_advection_scheme not in _vert_adv_options:
             errors.append(
                 f"dycore.mpas_vert_advection_scheme must be one of "

@@ -5351,6 +5351,12 @@ def test_mpas_vert4_flux_form_tracers_flag_flows_to_dycore_config():
     cfg_none = build_config_from_args(_postprocess_args(parser.parse_args([
         "--dataset", "analytical", "--mpas-vert4-flux-form-tracers"]), parser))
     assert cfg_none.dycore.mpas_vert4_flux_form_tracers == ()
+    # The pre-2026-10-15 spelling (flux flag alone) now overlaps the log default:
+    # a hard error that names the flag to add (user decision by vote 2026-10-15).
+    old = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--mpas-vert4-flux-form-tracers", "q_v"]), parser))
+    with pytest.raises(ValueError, match=r"--mpas-vert4-log-form-tracers with no names"):
+        old.validate_strict()
     cfg_set = build_config_from_args(_postprocess_args(parser.parse_args([
         "--dataset", "analytical", "--mpas-vert4-flux-form-tracers", "q_v",
         "--mpas-vert4-log-form-tracers"]), parser))
