@@ -188,7 +188,7 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
     elif p4:
         report["first_nonbit_statement"] = {
             "name": "completed-stage V fold association",
-            "nemo_source": "ORCA2_OMIP_L4_R280STAGE1/BLD/ppsrc/nemo/stprk3_stg.f90:795-796",
+            "nemo_source": "ORCA2_OMIP_L4_R280STAGE1/BLD/ppsrc/nemo/stprk3_stg.f90:818-819",
             "status": "HELD_CITED_STATEMENT",
         }
         report["status"] = "HELD_FIRST_NONBIT_POST_STAGE_V_ASSOCIATION"
@@ -203,7 +203,29 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
         first = valued or next(
             name for name in SOURCE_ORDER
             if report["boundaries"][name]["active"]["unequal"] > 0)
-        report["first_nonbit_statement"] = {"name": first, "status": "HELD"}
+        statement = {
+            "pre_v": (
+                "stage-1 vector-form V update",
+                "ORCA2_OMIP_L4_R280STAGE1/BLD/ppsrc/nemo/"
+                "stprk3_stg.f90:477-480",
+            ),
+            "cor_v": (
+                "stage-1 barotropic V correction",
+                "ORCA2_OMIP_L4_R280STAGE1/BLD/ppsrc/nemo/"
+                "stprk3_stg.f90:521-528",
+            ),
+            "final_v": (
+                "completed-stage V fold association",
+                "ORCA2_OMIP_L4_R280STAGE1/BLD/ppsrc/nemo/"
+                "stprk3_stg.f90:818-819",
+            ),
+        }.get(first)
+        report["first_nonbit_statement"] = {
+            "name": statement[0] if statement else first,
+            "boundary": first,
+            "status": "HELD_CITED_STATEMENT" if statement else "HELD",
+            **({"nemo_source": statement[1]} if statement else {}),
+        }
         report["status"] = "HELD_EARLIER_SOURCE_BOUNDARY"
     return report
 
