@@ -152,7 +152,8 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
     prior = report["round279_source_row"]
     require(final["unequal"] == prior["unequal"]
             and final["max_abs"] == prior["max_abs"],
-            "round-279 completed source-row calibration moved")
+            f"round-279 completed source-row calibration moved: "
+            f"offline={final}, prior={prior}")
 
     p2 = pre["unequal"] == 0 and report["boundaries"]["pre_v"]["active"]["unequal"] == 0
     p3 = (p2 and cor["unequal"] == prior["unequal"]
