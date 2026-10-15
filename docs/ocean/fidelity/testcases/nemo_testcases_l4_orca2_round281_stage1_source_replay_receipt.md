@@ -90,10 +90,29 @@ sea-ice trajectories are ineligible to move.  Decision 125 remains as taken:
 the top-V exchange stays off.  Decision 126 remains pending with the user;
 the shipped runoff setting is untouched and is not re-raised.
 
-Focused round-281 tests pass 10/10 and both lint invocations pass.  The old
-round-279 module retains its pre-existing import-layout lint exclusions; the
-new retraction itself is clean.  The citation gate and the one permitted
-`tests/ocean/fidelity -n 12` battery are recorded below after execution.
+The round citation gate passes its one mapped compiled citation with no
+unmapped or failed row; shifting that citation by two lines makes the gate
+fail with exit 1.  The cumulative default receipt remains green at 274/274
+citations.  Focused round-281, round-175 record, and citation-gate tests pass
+34/34.  Both lint invocations pass; the old round-279 module retains only its
+pre-existing import-layout exclusions, and the new retraction itself is
+clean.
+
+The one permitted `tests/ocean/fidelity -n 12` battery reached 99%, then two
+workers aborted during JAX compilation in the large G1 file and xdist did not
+emit a terminal summary.  It logged 12 failed node IDs.  Every exact ID was
+rerun in its own serial process: the four G1 worker-loss cases pass, while the
+same eight pre-existing assertions registered by round 280 reproduce:
+
+- the GYRE round-129 certified-year harness movement;
+- two stale GYRE round-33 mutation anchors;
+- the OMT-1 module-edge test's extra `barotropic` group;
+- the stale round-228 citation-map expectation;
+- the 14-driver dirty-escape scope ratchet;
+- the 13-emitter worktree-stamp ratchet;
+- the SI3 scalar-math provenance refusal (`A MY_SRC is not verbatim`).
+
+None names or imports the round-281 gate.  The full battery was not rerun.
 
 Independent review: **operator**.  Per the current lane instruction, no
 nested review is attempted in this sandbox.
