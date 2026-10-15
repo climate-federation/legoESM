@@ -8296,11 +8296,11 @@ class LatLonCGridOceanModel:
                 _heat_top = nemo_source_round(
                     nemo_source_round(_r1_rcp * jnp.asarray(_qns, dtype=_dt_h))
                     * _z1_rho0_e3t) * _active_live[..., 0]
-                _stage3_T_written = nemo_source_round(
+                _stage3_T_written = nemo_source_round(nemo_source_round(
                     _add_rnf_stage_rate(
                         _zero_stage_source.at[..., 0].set(_heat_top),
                         None if _rnf_content is None else _rnf_content[0],
-                        _h_live_one_half)) + _stage3_qsr_kmm
+                        _h_live_one_half)) + _stage3_qsr_kmm)
 
             _stage12_source_terms = (
                 None
