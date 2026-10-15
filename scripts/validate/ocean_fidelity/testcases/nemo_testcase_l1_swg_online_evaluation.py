@@ -90,7 +90,7 @@ NOISE_METRICS = ("top_octave_ke_fraction", "top_octave_enstrophy_fraction",
                  "native_grid_noise_index")
 VARIABILITY_METRIC = "basin_eke_ratio"
 SCORE_METRICS = SKILL_METRICS + (VARIABILITY_METRIC,) + NOISE_METRICS
-DEVICE_CHECK_SCHEMA = "legoesm.swg_online_device_check.v1"
+DEVICE_CHECK_SCHEMA = "legoesm.swg_online_device_check.v2"
 CONTROL_NAMELISTS = {"nu10": SWG_DG50_NAMELIST,
                      "nu80": SWG_DG50_NU80_NAMELIST}
 
@@ -1101,7 +1101,15 @@ def admit_control_run(root: Path, manifest_sha256: str, *, control: str) -> dict
 
 def _device_check_summary(control_rows: dict[str, list[dict]], *,
                           objective: str, bindings: dict[str, dict]) -> dict:
-    """Build the mechanical device verdict from already scored controls."""
+    """Build the mechanical device verdict from already scored controls.
+
+    Each metric's GPU-minus-CPU difference of window medians must be strictly
+    less than the CPU control's OWN half-range over the frozen scoring windows
+    (user decision 2026-10-15, schema v2).  The truth half-range -- the pass
+    mark's tolerance for the truth's internal spread -- is recorded for
+    information only; it is far tighter than two runs of the same model differ
+    by sampling.  The pass mark itself is unchanged.
+    """
     frozen = frozen_gate(objective)
     if set(control_rows) != set(CONTROL_NAMELISTS) \
             or set(bindings) != set(CONTROL_NAMELISTS):
@@ -1112,32 +1120,38 @@ def _device_check_summary(control_rows: dict[str, list[dict]], *,
         medians = _medians(rows)
         cpu = {metric: float(np.median(frozen["controls"][control][metric]))
                for metric in SCORE_METRICS}
-        metrics = {
-            metric: {
+        control_bars = gate_bars(frozen["controls"][control])
+        metrics = {}
+        for metric in SCORE_METRICS:
+            difference = abs(medians[metric] - cpu[metric])
+            tolerance = control_bars[metric]["half_range"]
+            metrics[metric] = {
                 "gpu": medians[metric], "cpu": cpu[metric],
-                "absolute_difference": abs(medians[metric] - cpu[metric]),
+                "absolute_difference": difference,
+                "control_half_range": tolerance,
+                "ratio_to_control_half_range": difference / tolerance,
                 "truth_half_range": frozen["bars"][metric]["half_range"],
-                "passes": abs(medians[metric] - cpu[metric])
-                < frozen["bars"][metric]["half_range"],
+                "passes": difference < tolerance,
             }
-            for metric in SCORE_METRICS
-        }
         pass_mark = held_out_gate(
             {f"{control}{index}": rows for index in range(3)},
             objective=objective)
         reports[control] = {
             "binding": bindings[control], "scores": rows,
-            "metrics": metrics, "all_metrics_within_truth_half_range": all(
+            "metrics": metrics, "all_metrics_within_control_half_range": all(
                 value["passes"] for value in metrics.values()),
             "pass_mark_pass": pass_mark["pass"],
         }
     passed = all(
-        report["all_metrics_within_truth_half_range"]
+        report["all_metrics_within_control_half_range"]
         and not report["pass_mark_pass"] for report in reports.values())
     return {
         "schema": DEVICE_CHECK_SCHEMA, "objective": objective,
         "criteria": {
-            "metric_tolerance": "strictly less than the metric's frozen truth half-range",
+            "metric_tolerance": (
+                "strictly less than the CPU control's own half-range over its "
+                "frozen scoring windows (truth half-range recorded for "
+                "information only)"),
             "controls_must_fail_pass_mark": True,
         },
         "controls": reports, "pass": passed,

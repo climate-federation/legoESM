@@ -212,3 +212,42 @@ PY
 No new scientific choice was made in round 9. The explicit device policy,
 control reruns, device criterion, pilot seed/windows/epochs/batch/data/free-run
 length, and template/excluded objective are the user's stated decisions.
+
+## Amendment 2026-10-15: device-check tolerance (user decision)
+
+The first real device check (2026-10-14, `device_check_template.json`)
+returned FAIL under the round-9 criterion (each metric's GPU-minus-CPU
+difference of window medians strictly below the TRUTH's half-range), although
+every difference was 0.01-0.64 of the CPU control's own half-range over its
+eight scoring windows. The truth half-range is the pass mark's allowance for
+the truth's internal spread and is far tighter than two runs of the same model
+differ by sampling; four noise-metric differences of order 1e-4 failed against
+truth half-ranges of order 1e-6 to 1e-5.
+
+**User decision (2026-10-15):** the device check compares each metric
+difference against the CPU control's own half-range over its eight frozen
+scoring windows (half of max minus min of its frozen per-window values).
+Strict inequality and "both GPU controls still fail the pass mark" are
+unchanged; nothing about the pass mark itself (frozen bars, thresholds, noise
+allowance) changes. The record carries both tolerances (the control one
+decides; the truth one is recorded for information) and the ratio
+difference / control half-range. Schema bumped to
+`legoesm.swg_online_device_check.v2`; `admit_device_check` refuses v1 records
+and re-evaluates every record under the new criterion, so the 2026-10-14 FAIL
+record is refused outright ("schema must be ...v2").
+
+Re-run on the same GPU controls (same manifests and digests as step 3 above),
+CPU, written to `device_check_template_v2.json` (SHA-256
+`8b310ddb09b1313c7884832a07ee632856b86ee0044b39f7fb09e19c60d0bf97`):
+**PASS**; both controls still fail the pass mark. Ratios of difference to
+control half-range, nu10 / nu80: mean face transport 0.19 / 0.40, KE spectrum
+0.33 / 0.25, EKE map 0.34 / 0.25, basin EKE ratio 0.18 / 0.64, top-octave KE
+0.29 / 0.08, top-octave enstrophy 0.44 / 0.04, native-grid noise 0.01 / 0.04.
+Largest ratio 0.64 (nu80 basin EKE ratio). Use this record and digest as
+`$DEVICE` / `$DEVICE_SHA` in the trained-run scoring commands above.
+
+Tests: synthetic PASS between the two tolerances, FAIL just above and exactly
+at the control half-range, a v1 record refused, and the ratio arithmetic on a
+tiny synthetic frozen gate; all three new tests fail against the round-9
+scorer (`3 failed, 2 passed` on a scratch copy). Full scorer suite
+`42 passed`; ruff `All checks passed!`.

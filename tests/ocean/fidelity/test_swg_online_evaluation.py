@@ -512,6 +512,127 @@ def test_device_record_is_mechanical_and_cuda_requires_a_bound_pass(tmp_path):
             pass_path, tampered_sha, objective="template")
 
 
+def _shifted_control(objective, control, metric, shift):
+    """The frozen control's windows with one metric moved by ``shift``."""
+    return [dict(row, **{metric: row[metric] + shift})
+            for row in evaluation.control_as_seed(objective, control)]
+
+
+def test_device_check_tolerance_is_the_control_own_half_range(tmp_path):
+    """User decision 2026-10-15: a GPU control may differ from its frozen CPU
+    twin by less than that control's OWN window-to-window half-range, not the
+    truth's (which is the pass mark's tolerance and far tighter).  Both
+    tolerances are written; only the control one decides."""
+    objective = "template"
+    frozen = evaluation.frozen_gate(objective)
+    controls = {name: _cuda_control(tmp_path / name, name)
+                for name in evaluation.CONTROL_NAMELISTS}
+    bindings = {name: evaluation.admit_control_run(
+        root, sha, control=name) for name, (root, sha) in controls.items()}
+    metric = "top_octave_ke_fraction"
+    control_half = evaluation.gate_bars(
+        frozen["controls"]["nu10"])[metric]["half_range"]
+    truth_half = frozen["bars"][metric]["half_range"]
+    assert truth_half < control_half  # the round-9 FAIL's shape
+
+    def summary(shift):
+        rows = {"nu10": _shifted_control(objective, "nu10", metric, shift),
+                "nu80": evaluation.control_as_seed(objective, "nu80")}
+        return evaluation._device_check_summary(
+            rows, objective=objective, bindings=bindings)
+
+    between = 0.5 * (truth_half + control_half)  # old criterion: FAIL
+    passed = summary(between)
+    assert passed["verdict"] == "PASS" and passed["pass"]
+    assert passed["schema"] == "legoesm.swg_online_device_check.v2"
+    assert "control's own half-range" in passed["criteria"]["metric_tolerance"]
+    entry = passed["controls"]["nu10"]["metrics"][metric]
+    assert entry["control_half_range"] == control_half
+    assert entry["truth_half_range"] == truth_half
+    assert entry["absolute_difference"] > truth_half
+    assert entry["passes"]
+    assert passed["controls"]["nu10"]["all_metrics_within_control_half_range"]
+    assert not passed["controls"]["nu10"]["pass_mark_pass"]
+
+    failed = summary(control_half * 1.01)
+    assert failed["verdict"] == "FAIL" and not failed["pass"]
+    assert not failed["controls"]["nu10"]["metrics"][metric]["passes"]
+    assert not failed["controls"]["nu10"]["all_metrics_within_control_half_range"]
+    assert failed["controls"]["nu80"]["all_metrics_within_control_half_range"]
+
+    exact = summary(control_half)  # strict inequality
+    assert exact["verdict"] == "FAIL"
+
+
+def test_device_check_refuses_records_written_under_the_truth_criterion(tmp_path):
+    """A round-9 record (schema v1, truth half-range tolerance) is refused by
+    admission even when byte-bound and even when its verdict says PASS."""
+    pass_path, _, payload = _device_record(tmp_path / "passing", passes=True)
+    old = json.loads(json.dumps(payload))
+    old["schema"] = "legoesm.swg_online_device_check.v1"
+    old["criteria"]["metric_tolerance"] = (
+        "strictly less than the metric's frozen truth half-range")
+    for report in old["controls"].values():
+        report["all_metrics_within_truth_half_range"] = report.pop(
+            "all_metrics_within_control_half_range")
+        for entry in report["metrics"].values():
+            del entry["control_half_range"]
+            del entry["ratio_to_control_half_range"]
+    old_path = tmp_path / "device_check_v1.json"
+    old_path.write_text(json.dumps(old, sort_keys=True, default=float))
+    with pytest.raises(ValueError, match="schema must be .*v2"):
+        evaluation.admit_device_check(
+            old_path, evaluation._sha256(old_path), objective="template")
+    # Same content relabelled v2 still does not reproduce the v2 verdict.
+    old["schema"] = "legoesm.swg_online_device_check.v2"
+    old_path.write_text(json.dumps(old, sort_keys=True, default=float))
+    with pytest.raises(ValueError, match="does not reproduce"):
+        evaluation.admit_device_check(
+            old_path, evaluation._sha256(old_path), objective="template")
+
+
+def test_device_check_ratio_arithmetic_on_a_tiny_frozen_gate(tmp_path,
+                                                            monkeypatch):
+    """difference / control half-range, with half-range = (max - min) / 2 of
+    that control's own eight per-window values."""
+    windows = [[k, k + 1] for k in range(8)]
+    tiny = {
+        "windows": windows,
+        "controls": {
+            "nu10": {metric: [10.0 + k for k in range(8)]
+                     for metric in evaluation.SCORE_METRICS},
+            "nu80": {metric: [20.0 + 2 * k for k in range(8)]
+                     for metric in evaluation.SCORE_METRICS},
+        },
+        "bars": {metric: {"bar": 1.0, "floor": 0.0, "half_range": 0.5}
+                 for metric in evaluation.SCORE_METRICS},
+    }
+    monkeypatch.setattr(evaluation, "frozen_gate", lambda objective: tiny)
+    controls = {name: _cuda_control(tmp_path / name, name)
+                for name in evaluation.CONTROL_NAMELISTS}
+    bindings = {name: evaluation.admit_control_run(
+        root, sha, control=name) for name, (root, sha) in controls.items()}
+    rows = {
+        "nu10": [{**{m: 10.0 + k + 1.4 for m in evaluation.SCORE_METRICS},
+                  "physical_health": {"passes": True}} for k in range(8)],
+        "nu80": [{**{m: 20.0 + 2 * k - 7.0 for m in evaluation.SCORE_METRICS},
+                  "physical_health": {"passes": True}} for k in range(8)],
+    }
+    report = evaluation._device_check_summary(
+        rows, objective="template", bindings=bindings)
+    nu10 = report["controls"]["nu10"]["metrics"]["basin_eke_ratio"]
+    assert nu10["cpu"] == 13.5 and nu10["gpu"] == 14.9
+    assert nu10["control_half_range"] == 3.5  # (17 - 10) / 2
+    assert nu10["absolute_difference"] == pytest.approx(1.4)
+    assert nu10["ratio_to_control_half_range"] == pytest.approx(0.4)
+    assert nu10["truth_half_range"] == 0.5 and nu10["passes"]
+    nu80 = report["controls"]["nu80"]["metrics"]["basin_eke_ratio"]
+    assert nu80["control_half_range"] == 7.0  # (34 - 20) / 2
+    assert nu80["ratio_to_control_half_range"] == pytest.approx(1.0)
+    assert not nu80["passes"]
+    assert report["verdict"] == "FAIL"
+
+
 def test_one_seed_pilot_is_scored_without_claiming_the_three_seed_gate(
         tmp_path, monkeypatch):
     run = _trained_run(tmp_path / "pilot", seed=20261013, objective="template",

@@ -381,6 +381,20 @@ no-inert gate. Collapsed ensemble variance is a planted failure.
 2. The GPU smoke is finite with tiny differences from frozen CPU days 1-2.
 3. The two 7,300-day GPU controls run; the device check must PASS before a
    trained CUDA free run is scored. Training need not wait for the controls.
+   The device check scores each GPU control on the eight frozen windows and
+   requires, for every scored metric, that the GPU-minus-CPU difference of
+   window medians is strictly less than that CPU control's own half-range
+   over the same eight windows (half of max minus min of its frozen
+   per-window values), and that both GPU controls still fail the unchanged
+   pass mark. **Amended 2026-10-15 (user decision):** the tolerance was the
+   truth's half-range until round 9; that is the pass mark's allowance for
+   the truth's internal spread and is far tighter than two runs of the same
+   model differ by sampling, so the first GPU check failed with every
+   difference at 0.01-0.64 of the control's own spread. The record now
+   carries both tolerances (the control one decides; the truth one is
+   information) and the ratio difference / control half-range; its schema is
+   `legoesm.swg_online_device_check.v2`, and admission refuses v1 records.
+   The pass mark (frozen bars, thresholds, noise allowance) is unchanged.
 
 ## Fixed pilot decisions
 
