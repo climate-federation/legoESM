@@ -177,7 +177,10 @@ def _top_v_audit(deck_root: Path, record_root: Path, *, plant: str):
         "v", np.asarray(outputs["on"][0].v_mask.data, np.float64))
     perm = np.asarray(arm.recipe.grid.fold.perm_v)
     sign = float(arm.recipe.grid.fold.vector_sign_v)
-    candidate_fold = sign * arm1["v"][-2, perm] * v_mask[-2, perm]
+    source_mask = v_mask[-2, perm]
+    if source_mask.ndim == 1:
+        source_mask = source_mask[:, None]
+    candidate_fold = sign * arm1["v"][-2, perm] * source_mask
     oracle_fold = sign * oracle1["v"][-2, perm]
     source = {
         "candidate_source_vs_nemo": _score(
