@@ -85,9 +85,13 @@ therefore remains OPEN, not certified.
   or new configuration field was added.
 - independent review: operator (Claude)
 
-Focused fp64 CPU tests at receipt creation: RHS split + plant and G1b stage
-route + deselection plant, **5 passed**. Final focused battery is recorded in
-the follow-up receipt commit.
+Focused fp64 CPU tests, synchronous: RHS split + plant and G1b stage route +
+deselection plant, **5 passed**; G1b card and the shared stage-arm suite,
+**36 passed**; citation gate after the repository re-anchor pass, **17 passed**.
+The re-anchor moved 60 citation-map lines and 16 audited-receipt lines after
+the helper insertion; its two exact-string mutation controls were updated and
+both replanted defects fire. No nested Codex review was run, per the round
+instruction; the operator reviews the diff before landing.
 
 Evidence SHA-256 (first 16): `rhs_terms_kt2_before.json` b9578e80c3201c2f;
 `rhs_terms_split_plant.json` 1dccb46b0657109d;
