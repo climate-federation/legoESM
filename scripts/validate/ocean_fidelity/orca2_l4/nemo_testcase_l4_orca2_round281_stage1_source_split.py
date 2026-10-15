@@ -233,9 +233,12 @@ def measure(deck_root: Path, record_root: Path, baseline_root: Path,
     rhs_state = run(_NEMOWSRK3TestHooks(expose_stage1_momentum_rhs=True))
     raw_state = run(_NEMOWSRK3TestHooks(expose_stage1_raw_momentum=True))
     corrected_state = run(_NEMOWSRK3TestHooks(expose_momentum_stage=1))
-    completed_state = r279._stage_model(card, 1).step(
-        state, card.dt_s, freshwater=freshwater, surface_forcing=surface)
-    completed_state = jax.device_get(completed_state)
+    # Decision 125 keeps the only subsequent completed-stage V association
+    # off on OMT-4.  Therefore the card's completed V is the corrected V.
+    # Do not call round 279's combined momentum+tracer exposure here: that
+    # returns stage-1 T/S and would mix tracer program points in the passivity
+    # comparison even though this gate observes V only.
+    completed_state = corrected_state
 
     candidate = {
         "entry_v": r176._with_jpk_zero(rung0.candidate_fields(state)["v"]),
