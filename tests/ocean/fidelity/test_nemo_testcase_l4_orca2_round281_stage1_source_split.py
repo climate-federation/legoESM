@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import copy
+from pathlib import Path
 
 import pytest
 
+from scripts.validate.ocean_fidelity.orca2_l4 import (
+    nemo_testcase_l4_orca2_round279_runoff_topv_gate as round279,
+)
 from scripts.validate.ocean_fidelity.orca2_l4 import (
     nemo_testcase_l4_orca2_round281_stage1_source_split as gate,
 )
@@ -64,3 +68,8 @@ def test_exact_pre_and_correction_select_the_post_stage_statement() -> None:
 def test_every_plant_refuses(plant: str) -> None:
     with pytest.raises(gate.GateError):
         gate.classify(_report(), plant)
+
+
+def test_withdrawn_round279_observer_cannot_emit_the_source_row_claim() -> None:
+    with pytest.raises(round279.GateError, match="observer is not bit-passive"):
+        round279._top_v_audit(Path("."), Path("."), plant="none")

@@ -131,6 +131,14 @@ def _boundary_rows(off, on) -> dict[str, dict[str, object]]:
 
 
 def _top_v_audit(deck_root: Path, record_root: Path, *, plant: str):
+    # Round 281 proved that this audit's in-executable stage observer is not
+    # bit-passive.  Fail closed so the withdrawn 1,440-cell source-row claim
+    # cannot be emitted again.  The runoff half remains independently valid.
+    raise GateError(
+        "RETRACTED: round-279 top-V observer is not bit-passive; "
+        "use the round-281 offline source replay"
+    )
+
     import jax
 
     base = omt4.build_omt4_card(deck_root)
