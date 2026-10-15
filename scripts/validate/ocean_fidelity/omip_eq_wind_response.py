@@ -186,8 +186,11 @@ def momentum_terms(u, v, zN, zi):
     dx = np.deg2rad(1.0) * R * np.cos(lat)
     dy = np.deg2rad(1.0) * R
     div = np.gradient(U, axis=1) / dx + np.gradient(V * np.cos(lat), axis=0) / (dy * np.cos(lat))
-    kb = int(np.flatnonzero(k).max())                            # level containing Z_COL
-    u400 = u[kb] if bc[kb] >= 0.5 * (zi[kb + 1] - zi[kb]) else 0.5 * (u[kb] + u[kb - 1])
+    j = int(np.searchsorted(zN, Z_COL))                          # zN[j-1] < Z_COL <= zN[j]
+    if not 0 < j < nz:
+        raise ValueError(f"level centres {zN[0]:.1f}-{zN[-1]:.1f} m do not bracket {Z_COL} m")
+    wgt = (Z_COL - zN[j - 1]) / (zN[j] - zN[j - 1])
+    u400 = (1.0 - wgt) * u[j - 1] + wgt * u[j]                   # linear in depth to Z_COL
     box = lambda q: q[eq][:, ls]
     f = 2.0 * Om * np.sin(lat)
     lap = np.gradient(np.gradient(U, axis=1) / dx, axis=1) / dx + np.gradient(np.gradient(U, axis=0) / dy, axis=0) / dy

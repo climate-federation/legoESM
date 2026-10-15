@@ -157,6 +157,11 @@ def test_momentum_terms_known_answers(mod):
     assert r["A_y"] == pytest.approx(1e5 * -2.0 * c * 0.5 * H / (np.deg2rad(2.0) * R))
     assert r["Cor"] == pytest.approx(1e5 * H * c * 0.5 * 2.0 * Om * np.sin(np.deg2rad(0.5)))
     assert abs(r["A_x"]) < 1e-9 and abs(r["lapU"]) < 1e-9
+    assert r["A_z"] == pytest.approx(1e5 * 0.5 * H * c / (np.deg2rad(1.0) * R), rel=1e-3)  # meridional divergence lifts u
+    us = u.copy(); us[3] = 0.1; us[4] = 0.7              # sheared: u(400 m) interpolated between centres 275 and 500 m
+    w400 = (400.0 - 275.0) / (500.0 - 275.0)
+    rs = mod.momentum_terms(us, v, zN, zi)
+    assert rs["A_z"] == pytest.approx(r["A_z"] / 0.5 * ((1 - w400) * 0.1 + w400 * 0.7), rel=1e-9)
     u[2, :, 30] = np.nan                                 # 160.5E: a missing west-face column must raise
     with pytest.raises(ValueError, match="box face"):
         mod.momentum_terms(u, v, zN, zi)
