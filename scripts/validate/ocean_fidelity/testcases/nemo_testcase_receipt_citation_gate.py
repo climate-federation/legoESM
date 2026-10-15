@@ -5531,7 +5531,7 @@ CITATION_MAP = {
         'S_mid = S_mid + dt * dS_gm * active_3d', 453],
     'ocean_model_latlon_cgrid.py:9961-10004': [
         ('_nemo_ws_rk3_tracer_pair_step(', 3),
-        'return_final_content=True,', 42],
+        'return_final_content=True,', 44],
     # --- round 65: admitted R64 Krhs/FCT/TKE walk ---
     'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stprk3_stg.f90:827-828': [
         ('DO jn = 1, jpts', 1), 'ts(:,:,:,jn,Krhs) = 0._wp', 2],
