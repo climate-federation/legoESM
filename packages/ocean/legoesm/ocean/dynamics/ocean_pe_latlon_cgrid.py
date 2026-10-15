@@ -2681,7 +2681,8 @@ def _bc_pv_flux(
             nemo_vor_ene_vorticity_cgrid,
         )
         zeta = nemo_vor_ene_vorticity_cgrid(
-            u, v, grid if nemo_f_area is None else grid._replace(area_q=nemo_f_area))
+            u, v, grid if nemo_f_area is None else grid._replace(area_q=nemo_f_area),
+            north_fold_u=bool(een_nemo_zeta and vorticity_scheme == "een_total"))
     else:
         zeta = curl_vertex_cgrid(u, v, grid)  # (n_lat+1, n_lon+1, nlev)
 

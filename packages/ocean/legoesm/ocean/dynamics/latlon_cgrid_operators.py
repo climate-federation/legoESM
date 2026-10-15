@@ -678,9 +678,12 @@ def coriolis_cgrid_energy_conserving(
 
 
 def _nemo_vor_curl_bracket_cgrid(
-    u: jnp.ndarray, v: jnp.ndarray, grid: LatLonGrid,
+    u: jnp.ndarray, v: jnp.ndarray, grid: LatLonGrid, north_fold_u: bool = False,
 ) -> jnp.ndarray:
-    """Compiled ``dynvor.f90:538-540`` circulation bracket on F points."""
+    """Compiled ``dynvor.f90:538-540`` circulation bracket on F points.
+
+    ``north_fold_u``: the top F row reads ``e1u*u`` on NEMO's U fold halo
+    (``dynvor.f90:744-748`` at jj = Nje0), not zero."""
     sr = nemo_source_round
     is_3d = u.ndim == 3
     bu = (..., jnp.newaxis) if is_3d else (...,)
@@ -693,17 +696,26 @@ def _nemo_vor_curl_bracket_cgrid(
     from legoesm.grids.halo_latlon import pad_with_pole_bc_lat
     zu_pad = pad_with_pole_bc_lat(
         zu, halo=1, south_value=0.0, north_value=0.0)
+    fold = getattr(grid, "fold", None)
+    if north_fold_u and (fold_is_local(grid) or north_fold_mask(grid) is not None):
+        from legoesm.grids.operators_latlon_cgrid import (
+            apply_north_fold, fold_ghost_source_T, fold_perm_u,
+        )
+        # perm_u indexes east faces (columns 1..n_lon); column 0 is their cyclic copy
+        east = fold.vector_sign_u * fold_ghost_source_T(zu, fold)[0][1:][fold_perm_u(fold)]
+        zu_pad = apply_north_fold(
+            zu_pad, jnp.concatenate([east[-1:], east])[jnp.newaxis], grid)
     # south-minus-north is the written ``-(e1u*u north-e1u*u south)``.
     du = sr(zu_pad[:-1] - zu_pad[1:])
     return sr(dv + du)
 
 
 def nemo_vor_ene_vorticity_cgrid(
-    u: jnp.ndarray, v: jnp.ndarray, grid: LatLonGrid,
+    u: jnp.ndarray, v: jnp.ndarray, grid: LatLonGrid, north_fold_u: bool = False,
 ) -> jnp.ndarray:
     """Literal relative vorticity in compiled ``vor_ene`` source order."""
     sr = nemo_source_round
-    bracket = _nemo_vor_curl_bracket_cgrid(u, v, grid)
+    bracket = _nemo_vor_curl_bracket_cgrid(u, v, grid, north_fold_u)
     r1_area = sr(1.0 / jnp.asarray(grid.area_q))
     if bracket.ndim == 3:
         r1_area = r1_area[..., jnp.newaxis]
