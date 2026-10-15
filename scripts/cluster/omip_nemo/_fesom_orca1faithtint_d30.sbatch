@@ -69,8 +69,10 @@ HEAD=$(git rev-parse HEAD)
 [ "$HEAD" = "$PIN" ] || { echo "FATAL: HEAD $HEAD != pinned $PIN"; exit 1; }
 echo "HEAD: $(git log --oneline -1)"
 # fesom_jax = local branch legoesm/nemo-vmom (main + NEMO vertical momentum option, efebc73); never pushed upstream
-echo "fesom_jax: $(git -C /burg-archive/glab/users/pg2328/_wt_fesomjax_vmom log --oneline -1)"
-export PYTHONPATH="$ROOT/src:$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' ':')/burg-archive/glab/users/pg2328/_wt_fesomjax_vmom:$ROOT:$ROOT/scripts/validate"
+# FESOM_JAX / CARD_EXTRA: optional overrides (default = the card as run since 2026-10-06)
+FESOM_JAX=${FESOM_JAX:-/burg-archive/glab/users/pg2328/_wt_fesomjax_vmom}
+echo "fesom_jax: $FESOM_JAX $(git -C $FESOM_JAX log --oneline -1); extra flags: ${CARD_EXTRA:-none}"
+export PYTHONPATH="$ROOT/src:$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' ':')$FESOM_JAX:$ROOT:$ROOT/scripts/validate"
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 NEMOIN=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/INPUTS
 OUT=${OUT:-/burg-archive/glab/users/pg2328/legoESM/results/omip_nemo/fesom_orca1faithtint_d30}
@@ -119,7 +121,7 @@ JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid fesom \
   --ice-exchange nemo_si3 \
   --forcing-time-interp linear \
   --forcing-remap nemo_weights `# user 2026-10-13 "1": NEMO wind remap (bicubic u10/v10, bilinear rest), same point method on every grid` \
-  --dt 900 --years 0.0822 --snapshot-every-days 5 \
+  --dt 900 --years 0.0822 --snapshot-every-days 5 ${CARD_EXTRA:-} \
   --output $OUT 2>&1 | tail -20
 run_rc=${PIPESTATUS[0]}
 echo "=== run rc=$run_rc"

@@ -3069,6 +3069,8 @@ _FESOM_WIRED_DESTS = frozenset({
     "state_accumulate", "mld_accumulate",
     # NEMO dynzad vertical momentum on FESOM elements (fesom_jax vertical="nemo_advective")
     "vertical_momentum_scheme",
+    # read-only equatorial box momentum budget (fesom_jax.mom_trd)
+    "mom_trd_accumulate",
 })
 
 # B4 selectors that CONSUME the forced loop's forcing/coupling — meaningless
@@ -3094,6 +3096,8 @@ _FESOM_FORCED_ONLY_DESTS = (
     # not run drops nothing, and rejecting it would break the natural
     # "unforced, and explicitly no P-E" card.
     "forcing_path",
+    # the budget is accumulated by the forced loop only
+    "mom_trd_accumulate",
 )
 
 
@@ -3698,6 +3702,10 @@ def run_fesom_forced_loop(args, grid, z_coord, model, state) -> None:
             _facc_last.update(got)
         return dict(_facc_last)
 
+    _macc = None
+    if args.mom_trd_accumulate:
+        model.enable_mom_trd(**_MOM_TRD_BOX)
+        _macc = _MomTrdAccumulator(out / "mom_trd.json")
     for step in range(1, n_steps + 1):
         it = _idx_t(step, dt, n_rec)
         _dm2dc_win = None
@@ -3864,14 +3872,20 @@ def run_fesom_forced_loop(args, grid, z_coord, model, state) -> None:
                 river_runoff=_R_gate)
         if _facc is not None:
             _fesom_acc_add(state)
+        if _macc is not None:
+            _macc.add(model.last_mom_trd)
         if snap_every and step % snap_every == 0:
             d = int(round(step * dt / 86400.0))
+            if _macc is not None:
+                _macc.drain(d)
             write_snapshot(out, f"day{d:04d}", state.inner, model.mesh,
                            extra=_fesom_acc_drain())
     _T_fin = np.asarray(state.inner.T)
     if not np.all(np.isfinite(_T_fin)):
         raise SystemExit("fesom forced loop: non-finite temperature after "
                          f"{n_steps} steps — refusing to report success.")
+    if _macc is not None:
+        _macc.drain(round(n_steps * dt / 86400.0, 3))
     write_snapshot(out, "final", state.inner, model.mesh,
                    extra=_fesom_acc_drain())
     if ice_state is not None:
@@ -6739,6 +6753,34 @@ class _SurfaceFluxAccumulator:
         return out
 
 
+# Box of --mom-trd-accumulate: the equatorial 0-400 m zonal-momentum box of
+# scripts/validate/ocean_fidelity/omip_eq_wind_response.py (|lat|<=1, 160-260E).
+_MOM_TRD_BOX = {"lat_half_deg": 1.0, "lon0_deg": 160.0, "lon1_deg": 260.0, "z_bot_m": 400.0}
+
+
+class _MomTrdAccumulator:
+    """Window means of the FESOM box momentum budget (``model.last_mom_trd``,
+    m2/s2 per step) written to ``<out>/mom_trd.json``, one entry per snapshot."""
+
+    def __init__(self, path):
+        self._path, self._sum, self._n, self._windows = path, {}, 0, []
+
+    def add(self, terms):
+        for k, v in terms.items():
+            self._sum[k] = self._sum.get(k, 0.0) + float(v)
+        self._n += 1
+
+    def drain(self, day):
+        import json
+        if self._n == 0:
+            return
+        self._windows.append({"day": day, "n_steps": self._n,
+                              **{k: v / self._n for k, v in self._sum.items()}})
+        self._sum, self._n = {}, 0
+        self._path.write_text(json.dumps({"box": _MOM_TRD_BOX, "units": "m2/s2",
+                                          "windows": self._windows}, indent=1))
+
+
 class _ZdfTrendAccumulator:
     """Host-side running mean of the implicit vertical-diffusion T tendency.
 
@@ -8150,6 +8192,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "ttrd_zdf, degC/s) into each snapshot as "
                         "ttrd_zdf_mean. Read-only diagnostic; costs one "
                         "device-to-host copy of T per step.")
+    p.add_argument("--mom-trd-accumulate", action="store_true",
+                   help="FESOM only: write the window mean of the equatorial box "
+                        "(|lat|<=1, 160-260E, 0-400 m) eastward momentum budget, "
+                        "per term [m2/s2], to mom_trd.json in the output dir. "
+                        "Read-only diagnostic; prognostics are unchanged.")
     p.add_argument("--trd-series-box", type=float, nargs=3, default=None,
                    metavar=("LON0", "LON1", "HALFLAT"),
                    help="With --trd-accumulate: also store the per-step "
@@ -8752,6 +8799,9 @@ def main() -> int:
                          "silently ignored")
     if args.trd_columns is not None and not args.trd_accumulate:
         raise SystemExit("--trd-columns needs --trd-accumulate")
+    if args.mom_trd_accumulate and args.grid != "fesom":
+        raise SystemExit("--mom-trd-accumulate is wired on --grid fesom only "
+                         f"(got {args.grid!r}); it would be silently ignored.")
     if args.trd_accumulate and args.grid != "tripole":
         raise SystemExit("--trd-accumulate is wired on --grid tripole only "
                          f"(got {args.grid!r}); it would be silently ignored.")

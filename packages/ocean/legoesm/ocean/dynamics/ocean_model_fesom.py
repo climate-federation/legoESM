@@ -1503,6 +1503,10 @@ class FesomOceanModel:
         # (ahm_node, rn_shlat): NEMO's viscosity values on the element edges replace
         # fesom's own viscosity (fesom_jax.momentum.visc_nemo_elem).
         self._visc_nemo = visc_nemo
+        # Read-only box momentum budget (enable_mom_trd); None => step unchanged.
+        self._mom_trd = None
+        self._mom_trd_prev = None
+        self.last_mom_trd = None
         from fesom_jax import config as fconfig
         from fesom_jax import ssh as fssh
         from fesom_jax.params import Params
@@ -1603,6 +1607,50 @@ class FesomOceanModel:
             raise ValueError(
                 "evd_config (NEMO zdfevd) is applied on the legoESM TKE bridge "
                 "only; select vertical_mixing='legoesm_tke'.")
+
+    def enable_mom_trd(self, *, lat_half_deg: float, lon0_deg: float,
+                       lon1_deg: float, z_bot_m: float) -> None:
+        """Make every :meth:`step` also compute the box momentum budget of
+        ``fesom_jax.mom_trd`` over elements with centroid ``|lat| <= lat_half``
+        and ``lon0 <= lon <= lon1`` (geographic, degE), layers 0..``z_bot_m``
+        (the layer containing ``z_bot_m`` weighted by its fraction above it,
+        on the reference interfaces).  The step's AB2-composed terms [m2/s2]
+        land in ``self.last_mom_trd`` (a dict of floats).  Prognostics are
+        unchanged: the terms are computed in a separate jit from the step's
+        input and output states."""
+        from fesom_jax.mom_trd import MomTrdBox
+        if self.config.vertical_momentum_scheme != "nemo_advective":
+            raise ValueError("enable_mom_trd: the advection split needs "
+                             "vertical_momentum_scheme='nemo_advective'")
+        if getattr(self._ale_cfg, "use_wsplit", False):
+            raise ValueError("enable_mom_trd: use_wsplit puts implicit vertical "
+                             "advection inside the solve that vvisc is read from")
+        mesh = self.mesh
+        lat_e, lon_e = element_centroid_lat_lon(mesh)
+        lat_d, lon_d = np.degrees(np.asarray(lat_e)), np.degrees(np.asarray(lon_e))
+        box = ((np.abs(lat_d) <= lat_half_deg) & (lon_d >= lon0_deg)
+               & (lon_d <= lon1_deg) & np.asarray(mesh.elem_layer_mask[:, 0]))
+        if not box.any():
+            raise ValueError("enable_mom_trd: no wet element in the box")
+        area = np.asarray(mesh.elem_area, dtype=np.float64)
+        a_w = np.where(box, area, 0.0) / np.sum(area[box])
+        z = -np.asarray(mesh.zbar, dtype=np.float64)               # positive down
+        frac = np.zeros(int(mesh.nl))
+        frac[:-1] = np.clip(np.minimum(z[1:], z_bot_m) - z[:-1], 0.0, None) / (z[1:] - z[:-1])
+        if not 0.0 < z_bot_m < z[-1]:
+            raise ValueError(f"enable_mom_trd: z_bot_m={z_bot_m} is not inside the column")
+        n = int(mesh.nod2D)
+        ca_n, sa_n = rotated_to_geographic_node_vector(
+            mesh, jnp.ones((n,), jnp.float64), jnp.zeros((n,), jnp.float64))
+        ca = np.asarray(ca_n)[np.asarray(mesh.elem_nodes)].mean(axis=1)
+        sa = np.asarray(sa_n)[np.asarray(mesh.elem_nodes)].mean(axis=1)
+        nrm = np.hypot(ca, sa)
+        self._mom_trd = MomTrdBox(
+            w=jnp.asarray(a_w[:, None] * frac[None, :]),
+            ca=jnp.asarray(ca / nrm), sa=jnp.asarray(sa / nrm))
+        self._mom_trd_prev = None
+        print(f"[mom-trd] box |lat|<={lat_half_deg} {lon0_deg}-{lon1_deg}E 0-{z_bot_m} m: "
+              f"{int(box.sum())} elements, {np.sum(area[box]) / 1e12:.4f}e6 km2")
 
     def step(self, state: FesomOceanState, dt: float, *,
              surface_forcing=None, freshwater=None,
@@ -1707,6 +1755,24 @@ class FesomOceanModel:
             visc_nemo=self._visc_nemo,
             vertical_momentum=self.config.vertical_momentum_scheme,
         )
+        if self._mom_trd is not None:
+            # separate jit from the two states: step_jit's graph is untouched
+            from fesom_jax.mom_trd import box_terms_jit, compose
+            if isinstance(new_inner.uv, jax.core.Tracer):
+                raise ValueError("enable_mom_trd is a host diagnostic of the eager "
+                                 "step loop; it cannot run inside jit/grad/scan")
+            raw = box_terms_jit(
+                self.mesh, self._mom_trd, state.inner, new_inner,
+                (surface_fluxes.stress_surf if surface_fluxes is not None
+                 else self._stress_surf), self._visc_nemo,
+                dt=self._dt, is_first_step=state.is_first_step,
+                vertical_momentum=self.config.vertical_momentum_scheme,
+                zstar=self._ale_cfg is not None)
+            raw = {k: float(v) for k, v in raw.items()}
+            # a cold start has an empty AB slot: never pair it with an old trajectory
+            self.last_mom_trd = compose(
+                raw, None if state.is_first_step else self._mom_trd_prev)
+            self._mom_trd_prev = raw
         if tke_nl is not None:
             new_inner = dataclasses.replace(new_inner, tke=tke_nl)
 
