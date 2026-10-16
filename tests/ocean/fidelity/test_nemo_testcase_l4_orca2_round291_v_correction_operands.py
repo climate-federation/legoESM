@@ -79,6 +79,7 @@ def test_classifier_names_mask_boundary_and_every_plant_fires():
     result = gate.classify(_report())
     assert result["status"] == "HELD_R291_STAGE_MASK_CANCELLING_STATEMENT"
     assert result["prediction_ledger"]["R291-P5"] == "CONFIRMED"
+    assert result["prediction_ledger"]["R291-P3"] == "CONFIRMED"
     for plant in gate.PLANTS[1:]:
         with pytest.raises(gate.GateError):
             gate.classify(_report(), plant=plant)

@@ -359,14 +359,19 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
         and rows["stage_vmask"]["unequal"] == 1319
         and cumulative["stage_vmask"]["max_abs"] <= FLOOR)
     p2 = rows["external_target_v"]["max_abs"] <= FLOOR
-    p3 = all(rows[name]["max_abs"] <= FLOOR for name in (
+    p3_aggregate = all(rows[name]["max_abs"] <= FLOOR for name in (
         "depth_weighted_sum", "r1_hv_0"))
+    reference_e3v_exact = (
+        report["raw_operands"]["reference_e3v"]["max_abs"] <= FLOOR)
     p4 = (rows["scalar_correction"]["max_abs"] <= FLOOR
           and report["replays"]["candidate_self"]["max_abs"] <= FLOOR)
     report["prediction_ledger"] = {
         "R291-P1": "CONFIRMED",
         "R291-P2": "CONFIRMED" if p2 else "REFUTED_TARGET_OWNS",
-        "R291-P3": "CONFIRMED" if p3 else "REFUTED_RAW_OPERAND_MOVED",
+        "R291-P3": (
+            "CONFIRMED" if p3_aggregate and reference_e3v_exact else
+            "REFUTED_REFERENCE_E3V_NULL_SUM_AND_RECIPROCAL_EXACT"
+            if p3_aggregate else "REFUTED_AGGREGATE_OR_RECIPROCAL_MOVED"),
         "R291-P4": "CONFIRMED" if p4 else "REFUTED_SCALAR_MOVED",
         "R291-P5": "CONFIRMED" if mask_prediction else "REFUTED",
         "R291-P6": "CONFIRMED",
