@@ -55,7 +55,8 @@ import nemo_testcase_g1_orca2grid_ladder as g1  # noqa: E402
 from nemo_testcase_g1_orca2grid_ladder import BAR, require  # noqa: E402
 
 CASE = "ORCA2G2-zps"
-CASES = ("ORCA2G2-zps", "ORCA2G3-ts", "ORCA2G4-sbc")
+CASES = ("ORCA2G2-zps", "ORCA2G3-ts", "ORCA2G4-sbc", "ORCA2G5-ice")
+FORCED = ("ORCA2G4-sbc", "ORCA2G5-ice")   # NEMO-supplied surface fields each kt (D123)
 DEFAULT_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/round10/"
     "oracle_g2_r10/p3_a_100step")
@@ -428,9 +429,9 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
 
     card = recipe.build_nemo_testcase_card(case, deck_root=root)
     cfg, z, s0 = card.recipe.model_config, card.recipe.z_coord, card.recipe.initial_state
-    if case == "ORCA2G4-sbc":
-        require(arm in ("independent", "given_entry"),
-                "G4's NEMO-supplied per-step forcing is registered only for "
+    if case in FORCED:
+        require(arm in ("independent", "given_entry", "stages"),
+                "G4/G5's NEMO-supplied per-step forcing is registered only for "
                 "the independent and given-entry ladders")
         require(cfg.rk3_stage_tracer_written_order is True,
                 "the G4 card no longer selects NEMO's tracer update order")
@@ -447,7 +448,7 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
     if without_rhs_ascending_sum:  # ROUND-4 BEFORE ARM / plant: XLA's order
         cfg = cfg._replace(barotropic_rhs_ascending_level_sum=False)
     require(cfg.zdf_momentum_stage_r3u_nemo_literal is
-            (case in ("ORCA2G3-ts", "ORCA2G4-sbc")),
+            (case in ("ORCA2G3-ts", *FORCED)),
             "only the G3/G4 cards select NEMO's stored r3u(Kmm) in dyn_zdf")
     if without_zdf_stage_r3u:      # G3 ROUND-3 BEFORE ARM / plant
         cfg = cfg._replace(zdf_momentum_stage_r3u_nemo_literal=False)
@@ -457,10 +458,16 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
     cls = depth_classes(root / "mesh_mask.nc", nk)
     # no step frames (an acquisition that stopped before the record binary
     # ran): only the restart-scored arm can run
-    has_frames = (root / "oracle_g1step_kt00000001.bin").is_file()
+    # G5's record build writes the ORCA2 lane's single-rank frames instead
+    has_frames = (root / ("oracle_step_entry_kt00000001.bin" if case == "ORCA2G5-ice"
+                          else "oracle_g1step_kt00000001.bin")).is_file()
     require(has_frames or arm == "restart_independent",
             f"{root} holds no step frames; only restart_independent can run")
-    if has_frames and case == "ORCA2G4-sbc":
+    if has_frames and case == "ORCA2G5-ice":
+        n_stage = 0
+        while (root / f"oracle_step_entry_kt{n_stage + 1:08d}.bin").is_file():
+            n_stage += 1
+    elif has_frames and case == "ORCA2G4-sbc":
         # G4 records the NCAR bulk-iteration operands on odd forcing steps,
         # so its otherwise complete kt=1..10 stage files alternate sizes.
         # Count the contiguous files; G1-G3's equal-size rule is not valid.
@@ -480,6 +487,10 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
             header, fields = g4.frames(root, kt)
             return {name: g4.inner(value, header)
                     for name, value in fields.items()}
+    elif case == "ORCA2G5-ice":
+        sys.path.insert(0, str(HERE / "nemo_testcase_g5_orca2ice"))
+        import g5_records as g5  # noqa: E402
+        read_step = lambda kt: g5.read_step(root, kt, roots, nk)  # noqa: E731
     else:
         read_step = lambda kt: g1.read_step(root, kt)  # noqa: E731
     out = {"arm": arm, "case": case, "legoesm_git_sha": sha, "root": str(root),
@@ -500,7 +511,9 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
            "rk3_stage3_tracer_nemo_stored_thickness": bool(
                cfg.rk3_stage3_tracer_nemo_stored_thickness),
            "forcing": ("NEMO-supplied surface fields at each kt"
-                       if case == "ORCA2G4-sbc" else "none"),
+                       if case == "ORCA2G4-sbc" else
+                       "NEMO's post-SI3 ocean surface input at each kt"
+                       if case == "ORCA2G5-ice" else "none"),
            "n_barotropic_substeps": int(cfg.barotropic.n_barotropic_substeps),
            "region_cells": {k: int(m.sum()) for k, m in reg.items()},
            "depth_class_cells": {p: {k: int(m.sum()) for k, m in c.items()}
@@ -561,8 +574,9 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
     def step(state, kt):
         t0 = time.time()
         kwargs = {}
-        if case == "ORCA2G4-sbc":
-            freshwater, surface = g4.nemo_supplied_forcing(card, root, kt)
+        if case in FORCED:
+            freshwater, surface = (g4 if case == "ORCA2G4-sbc" else g5).nemo_supplied_forcing(
+                card, root, kt)
             kwargs = {"freshwater": freshwater, "surface_forcing": surface}
         new = jax.device_get(model.step(state, dt=card.dt_s, **kwargs))
         return new, round(time.time() - t0, 1)
@@ -585,13 +599,19 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
             entry = s0 if kt == 1 else nemo_entry(kt)
         for name in exposures:
             hooks, frame = EXPOSURES[name]
+            kwargs = {}
+            if case in FORCED:
+                fw, sf = (g4 if case == "ORCA2G4-sbc" else g5).nemo_supplied_forcing(
+                    card, root, kt)
+                kwargs = {"freshwater": fw, "surface_forcing": sf}
             st = jax.device_get(LatLonCGridOceanModel(
                 card.recipe.grid, z, cfg,
                 _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(**hooks)).step(
-                    entry, dt=card.dt_s))
+                    entry, dt=card.dt_s, **kwargs))
             cand = card_surface(st)
+            # G5's stage frames hold no barotropic velocity: those rows are absent
             rows = [g1.row(f"{name}.kt{kt}.{f}", g[n], cand[f], reg)
-                    for f, n in frame.items()]
+                    for f, n in frame.items() if n in g]
             out["per_kt"].append({"kt": kt, "exposure": name, "rows": rows,
                                   "first_unequal": g1.first_unequal(rows)})
             if dump is not None:
