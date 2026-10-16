@@ -60,3 +60,10 @@ No NEMO acquisition is planned. Missing passive frames are
 completed-stage top-V exchange and the resolved stage-mask candidate remain
 off in production. Decision 126 remains pending and shipped runoff is
 unchanged.
+
+## Correction appended 2026-10-16
+
+The frozen compiled depth span above says `dynspg_ts.f90:509-520`; the
+mechanically anchored executable span is `dynspg_ts.f90:509-519`. Line 520 is
+outside the eleven-line statement block. The original frozen text is retained
+unchanged; this correction governs the receipt and citation gate.
