@@ -61,56 +61,76 @@ def _component_geometry(candidate, oracle, component: str):
 
 def _transport_qco_replays(card, state, trace, candidate_geometry,
                            oracle_geometry):
-    """Replay the literal stage-1 CEN2 and QCO statements with one JIT."""
-    import jax
-    import jax.numpy as jnp
-    from legoesm.core.source_rounding import nemo_source_round as r
-    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
-        _nemo_cen2_tracer_rhs,
-    )
+    """Replay literal CEN2/QCO with eager binary64 statement boundaries."""
+    active = np.asarray(card.recipe.z_coord.is_active, bool)
+    h_stage = np.asarray(candidate_geometry[3], np.float64)
+    q0 = np.asarray(1.0 + trace.stage_qco[0][0], np.float64)
+    q1 = np.asarray(1.0 + trace.stage_qco[1][0], np.float64)
+    dt = np.float64(card.dt_s / 3.0)
+    area = np.asarray(card.recipe.grid.area_T, np.float64)[..., None]
+    base = (np.asarray(state.T.data, np.float64),
+            np.asarray(state.S.data, np.float64))
+    perm_t = np.asarray(card.recipe.grid.fold.perm_T, np.int64)
 
-    active = jnp.asarray(card.recipe.z_coord.is_active) > 0.5
-    h_stage = jnp.asarray(candidate_geometry[3])
-    q0 = jnp.asarray(1.0 + trace.stage_qco[0][0])
-    q1 = jnp.asarray(1.0 + trace.stage_qco[1][0])
-    dt = jnp.asarray(card.dt_s / 3.0, dtype=q0.dtype)
-    base_t = jnp.asarray(state.T.data)
-    base_s = jnp.asarray(state.S.data)
+    def source(value):
+        return np.array(value, dtype=np.float64, copy=True, order="C")
+
+    def u_sum(tracer):
+        core = source(np.roll(tracer, 1, axis=1) + tracer)
+        return np.concatenate([core, core[:, :1]], axis=1)
+
+    def v_sum(tracer):
+        result = np.zeros((tracer.shape[0] + 1, *tracer.shape[1:]), np.float64)
+        result[1:-1] = source(tracer[:-1] + tracer[1:])
+        north = source(tracer[-2:-1] + tracer[-1:])[:, perm_t]
+        result[-1] = north[0]
+        return result
+
+    def rhs(tracer, p_u, p_v, p_w):
+        flux_u = source(source(np.float64(0.5) * p_u) * u_sum(tracer))
+        flux_v = source(source(np.float64(0.5) * p_v) * v_sum(tracer))
+        delta_u = source(flux_u[:, 1:] - flux_u[:, :-1])
+        delta_v = source(flux_v[1:] - flux_v[:-1])
+        horizontal = source(delta_u + delta_v)
+        inverse_area = source(np.float64(1.0) / area)
+        horizontal_scaled = source(horizontal * inverse_area)
+        result = source(-source(horizontal_scaled / h_stage))
+        tracer_w_sum = source(tracer[..., :-1] + tracer[..., 1:])
+        wmask = source(active[..., 1:] * active[..., :-1])
+        flux_w_inner = source(
+            source(source(np.float64(0.5) * p_w[..., 1:-1]) * tracer_w_sum)
+            * wmask)
+        flux_w = np.pad(flux_w_inner, ((0, 0), (0, 0), (1, 1)))
+        vertical_difference = source(flux_w[..., :-1] - flux_w[..., 1:])
+        vertical_scaled = source(vertical_difference * inverse_area)
+        return source(result - source(vertical_scaled / h_stage))
 
     def one(p_u, p_v, p_w):
-        rhs_t = _nemo_cen2_tracer_rhs(
-            base_t, p_u, p_v, p_w, h_stage, active, card.recipe.grid)
-        rhs_s = _nemo_cen2_tracer_rhs(
-            base_s, p_u, p_v, p_w, h_stage, active, card.recipe.grid)
-
-        def update(base, rhs):
+        outputs = []
+        for tracer in base:
+            tendency = rhs(tracer, p_u, p_v, p_w)
             if card.recipe.model_config.rk3_stage_tracer_written_order:
-                out = r(r(r(q0[..., None] * base)
-                          + r(r(dt * q0[..., None]) * rhs)) / q1[..., None])
+                first = source(q0[..., None] * tracer)
+                second = source(source(dt * q0[..., None]) * tendency)
+                out = source(source(first + second) / q1[..., None])
             else:
-                out = (q0[..., None] * base
-                       + dt * q0[..., None] * rhs) / q1[..., None]
-            return jnp.where(active, out, base)
-
-        return update(base_t, rhs_t), update(base_s, rhs_s)
-
-    compiled = jax.jit(one)
+                out = ((q0[..., None] * tracer
+                        + dt * q0[..., None] * tendency) / q1[..., None])
+            outputs.append(np.where(active, out, tracer))
+        return tuple(outputs)
 
     def metric_triplet(geometry):
-        return (jnp.asarray(geometry[7]), jnp.asarray(geometry[8]),
-                jnp.asarray(geometry[2])
-                * jnp.asarray(card.recipe.grid.area_T)[..., None])
+        return (np.asarray(geometry[7], np.float64),
+                np.asarray(geometry[8], np.float64),
+                np.asarray(geometry[2], np.float64) * area)
 
     geometries = {
         "candidate": candidate_geometry, "full_nemo": oracle_geometry,
         **{name: _component_geometry(
             candidate_geometry, oracle_geometry, name) for name in COMPONENTS},
     }
-    return {
-        name: tuple(np.asarray(value, np.float64) for value in
-                    jax.device_get(compiled(*metric_triplet(geometry))))
-        for name, geometry in geometries.items()
-    }
+    return {name: one(*metric_triplet(geometry))
+            for name, geometry in geometries.items()}
 
 
 def _measure_label(deck_root: Path, frame_root: Path, oracle: dict,
