@@ -1359,6 +1359,10 @@ def make_aimip_classical_spectral_physics(
     rrtmgp_gpoint_checkpoint: bool = True,
     rrtmgp_gpoint_batch_size: int = 16,
     rrtmgp_column_chunk_size: int = 0,
+    # CAM RRTMG lid layer above the model top / fp32 optics+RTE (the AMIP
+    # production MPAS path runs both on); off = byte-identical.
+    rrtmgp_overhead_layer: bool = False,
+    rrtmgp_compute_fp32: bool = False,
     column_mesh=None,
 ):
     """Build a SpectralPE physics function for the AIMIP classical variant.
@@ -1540,6 +1544,8 @@ def make_aimip_classical_spectral_physics(
             gpoint_checkpoint=rrtmgp_gpoint_checkpoint,
             gpoint_batch_size=rrtmgp_gpoint_batch_size,
             column_chunk_size=rrtmgp_column_chunk_size,
+            overhead_layer=bool(rrtmgp_overhead_layer),
+            compute_fp32=bool(rrtmgp_compute_fp32),
         )
         rad_cfg = RadiationConfig(
             scheme="rrtmgp",

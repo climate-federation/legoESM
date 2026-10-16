@@ -257,3 +257,120 @@ def test_the_cam6_deck_pins_the_condensate_floor_off_and_builds():
     assert "atm.clouds.CloudConfig.q_c_diagnostic" not in names
     mk(params)
     assert jax.tree.leaves(params)
+
+
+def test_the_amip_radiation_lid_and_fp32_are_deck_keys_the_solver_runs():
+    """AMIP production runs RRTMGP with the lid layer above the model top
+    and in fp32.  The radiation config is not a registry parameter, so the
+    WB deck carries both as classical keys: accepted by the validator,
+    forwarded onto the built RRTMGPConfig, and CONSUMED by the solver built
+    from it (fp32 output; a lid that changes the fluxes).
+
+    Non-vacuity: drop either key from ``_WB_CLASSICAL_KEYS`` and validation
+    fails; stop forwarding it in ``make_aimip_classical_spectral_physics``
+    and the config assertion fails.
+    """
+    import jax.numpy as jnp
+    import numpy as np
+    import yaml
+    from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
+    from legoesm.grids.gaussian import create_gaussian_grid
+    from legoesm.training.aimip_params import (
+        AIMIPTrainableBundle,
+        make_aimip_classical_spectral_physics,
+    )
+    from legoesm.training.model_registry import build_variant
+    from legoesm.training.scale_build import validate_wb_campaign_yaml
+
+    deck = yaml.safe_load(
+        open("config/wb/campaign/spectral_t63_cam6_tier3.yaml"))
+    validate_wb_campaign_yaml(deck)
+    cl = deck["classical"]
+    assert cl["rrtmgp_overhead_layer"] is True
+    assert cl["rrtmgp_compute_fp32"] is True
+
+    def _rrtmgp(on):
+        _, rad = make_aimip_classical_spectral_physics(
+            AIMIPTrainableBundle(
+                classical=build_variant(
+                    "classical", nlev=8,
+                    overrides={"spatial_surface": False,
+                               "spatial_init_std": 0.0, "spatial_seed": 0}),
+                schemes=_build({}, cl["param_fixed"])),
+            create_gaussian_grid(8), 1800.0, radiation="rrtmgp",
+            split_rad=True, rad_update_interval_steps=2,
+            rrtmgp_gpoint_batch_size=8,
+            rrtmgp_overhead_layer=on, rrtmgp_compute_fp32=on,
+            param_overrides={k: dict(v) for k, v in cl["param_fixed"].items()},
+            clubb_liquid_partition=True, cld_macmic_num_steps=3,
+            convection_scheme=cl["convection"],
+            turbulence_scheme=cl["turbulence"], gwd_scheme=cl["gwd"],
+            microphysics_scheme=cl["microphysics"],
+            cloud_scheme=cl["cloud"], surface_bulk_scheme=cl["surface_bulk"])
+        return rad.radiation_config.rrtmgp
+
+    off_cfg, on_cfg = _rrtmgp(False), _rrtmgp(True)
+    assert (off_cfg.overhead_layer, off_cfg.compute_fp32) == (False, False)
+    assert (on_cfg.overhead_layer, on_cfg.compute_fp32) == (True, True)
+
+    ncol, nlev = 2, 8
+    p_half = jnp.broadcast_to(jnp.array(
+        [225.5, 503.0, 1.5e3, 5e3, 1.5e4, 3.5e4, 6e4, 8.5e4, 1e5]),
+        (ncol, nlev + 1))
+    inp = dict(
+        T=jnp.broadcast_to(jnp.array(
+            [255., 240., 225., 215., 220., 250., 275., 290.]), (ncol, nlev)),
+        p_full=0.5 * (p_half[:, 1:] + p_half[:, :-1]), p_half=p_half,
+        sfc_temperature=jnp.full((ncol,), 290.0),
+        q_v=jnp.full((ncol, nlev), 3e-6), cos_zenith=jnp.full((ncol,), 0.6))
+    clear = lambda c: RRTMGP.from_legoesm_config(  # noqa: E731
+        c._replace(include_clouds=False)).solve_columns(**inp)
+    r_off, r_on = clear(off_cfg), clear(on_cfg)
+    h_off = np.asarray(r_off.sw_heating_rate)
+    h_on = np.asarray(r_on.sw_heating_rate)
+    assert h_off.dtype == np.float64
+    assert h_on.dtype == np.float32
+    # The lid's ozone shields the top model layer: its SW heating drops.
+    assert np.all(h_on[:, 0] < h_off[:, 0])
+
+
+def test_the_trainer_forwards_the_lid_and_fp32_deck_keys(monkeypatch):
+    """The trainer's builder hands the two deck keys to the physics factory.
+
+    Non-vacuity: drop either ``_cl.get`` forward in scale_build and the
+    captured kwarg falls back to its False default.
+    """
+    import copy
+    import pathlib
+    from types import SimpleNamespace
+
+    import yaml
+
+    import legoesm.training.aimip_params as ap
+    from legoesm.training.scale_build import build_mode_components
+
+    seen = {}
+    real = ap.make_aimip_classical_spectral_physics
+
+    def spy(*a, **k):
+        seen.update(k)
+        return real(*a, **k)
+
+    monkeypatch.setattr(ap, "make_aimip_classical_spectral_physics", spy)
+    repo = pathlib.Path(__file__).resolve().parents[2]
+    yml = copy.deepcopy(yaml.safe_load((
+        repo / "config" / "wb" / "campaign"
+        / "spectral_t63_cam6_tier3.yaml").read_text()))
+    yml["spectral"] = dict(yml["spectral"], n_max=10)
+    cfg = SimpleNamespace(mode="physics", training_core="spectral",
+                          smoke=False, multi_step_hours=(6,), n_days=1)
+    *_, params, mk, _loss, _dt = build_mode_components(cfg, yml)
+    mk(params)
+    assert seen["rrtmgp_overhead_layer"] is True
+    assert seen["rrtmgp_compute_fp32"] is True
+
+    import pytest as _pt
+    bad = copy.deepcopy(yml)
+    bad["classical"]["rrtmgp_compute_fp32"] = "false"
+    with _pt.raises(ValueError, match="must be a YAML boolean"):
+        build_mode_components(cfg, bad)

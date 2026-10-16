@@ -263,7 +263,8 @@ _WB_CLASSICAL_KEYS = frozenset({
     "convective_rain_to_surface", "orbital_insolation",
     "param_fixed", "param_init",
     "rad_update_interval_steps", "rrtmgp_column_chunk_size",
-    "rrtmgp_gpoint_batch_size", "spatial_init_std",
+    "rrtmgp_compute_fp32", "rrtmgp_gpoint_batch_size", "rrtmgp_overhead_layer",
+    "spatial_init_std",
     "spatial_seed", "spatial_surface", "surface_bulk", "trainable_schemes",
     "turbulence",
 })
@@ -695,12 +696,22 @@ def _build_mode_components_spectral(cfg, yml, column_mesh=None):
                 f"{_gpt_batch}; use the scan path by setting it to 1 rather "
                 "than 0 or a negative value.")
 
+        # A quoted "false" would be truthy under bool(); refuse non-bools.
+        _rad_flags = {k: _cl.get(k, False) for k in (
+            "rrtmgp_overhead_layer", "rrtmgp_compute_fp32")}
+        for _k, _v in _rad_flags.items():
+            if not isinstance(_v, bool):
+                raise ValueError(
+                    f"classical.{_k} must be a YAML boolean, got {_v!r}")
+
         def make_physics_fn(p):
             return make_aimip_classical_spectral_physics(
                 p, grid, dt, radiation=_radiation, split_rad=True,
                 rad_update_interval_steps=_rad_interval,
                 rrtmgp_gpoint_batch_size=_gpt_batch,
                 rrtmgp_column_chunk_size=_col_chunk,
+                rrtmgp_overhead_layer=_rad_flags["rrtmgp_overhead_layer"],
+                rrtmgp_compute_fp32=_rad_flags["rrtmgp_compute_fp32"],
                 param_overrides=(_param_fixed or None),
                 orbital_insolation=bool(
                     _cl.get("orbital_insolation", False)),

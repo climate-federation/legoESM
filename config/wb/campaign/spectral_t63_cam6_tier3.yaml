@@ -266,6 +266,8 @@ classical:
   orbital_insolation: true
   convective_rain_to_surface: true
   rrtmgp_gpoint_batch_size: 8
+  rrtmgp_overhead_layer: true  # AMIP production: CAM RRTMG lid layer above the model top
+  rrtmgp_compute_fp32: true    # AMIP production: fp32 optics + RTE solve (dycore stays fp64)
   param_fixed:
     atm.clouds.CloudConfig:
       # 0.0 = floor OFF, as in the MPAS production deck (cloud_q_c_diagnostic:
