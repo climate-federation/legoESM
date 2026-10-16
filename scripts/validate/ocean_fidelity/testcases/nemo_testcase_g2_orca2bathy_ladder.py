@@ -1111,7 +1111,8 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
             first, s1 = step(s0 if kt == 1 else nemo_entry(kt), kt)
             rows = surface_rows("given_entry", kt, first)
             result = {"kt": kt, "seconds": [s1], "rows": rows,
-                      "first_unequal": g1.first_unequal(rows)}
+                      "first_unequal": g1.first_unequal(rows),
+                      "all_levels": all_level_rows(kt, first)}
             # The G6 acquisition completed kt=7 but its certification record
             # ends at kt=6 (nn_fsbc=2).  Do not manufacture an unrecorded kt=7
             # two-step row merely because kt=6 is a requested entry point.
