@@ -7,6 +7,7 @@ the shared lat-lon C-grid model; this module contains no solver or oracle I/O.
 
 from __future__ import annotations
 
+import hashlib
 import math
 from pathlib import Path
 from typing import NamedTuple
@@ -1521,6 +1522,41 @@ def _orca2_iwm_forcing(path, surface_tmask: np.ndarray, lat_t, lon_t):
     )
 
 
+def _orca2_initial_ice_ssh_adjustment(
+    grid, e1t, e2t, temperature, salinity, tmask
+) -> float:
+    """SI3's globally uniform initial SSH mass adjustment.
+
+    ``iceistate.F90:262-291`` creates one-category ice from surface T/S and
+    hemisphere, ``:309-393`` distributes it over five categories, and
+    ``:398-427`` removes snow, ice, and live pond mass from SSH.  The fold-row
+    uniqueness mask is ``dom_uniq`` (``domutl.F90:91-121``).
+    """
+
+    surface_s = np.asarray(salinity)[..., 0]
+    surface_t = np.asarray(temperature)[..., 0]
+    surface_wet = np.asarray(tmask, dtype=bool)[..., 0]
+    freezing_t = (
+        -0.0575
+        + 1.710523e-3 * np.sqrt(surface_s)
+        - 2.154996e-4 * surface_s
+    ) * surface_s
+    initial_ice = ((surface_t - freezing_t) * surface_wet < 2.0) & surface_wet
+    ice_thickness = np.where(np.asarray(grid.f_T) >= 0.0, 2.0, 1.0)
+    snow_ice_pond_mass = np.where(
+        initial_ice,
+        0.9 * (constants.rho_snow * 0.2 + constants.rho_ice * ice_thickness)
+        + constants.rho_water * 0.18 * 0.05,
+        0.0,
+    )
+    unique_t = np.ones(surface_wet.shape, dtype=np.float64)
+    unique_t[-1, grid.n_lon // 2 :] = 0.0
+    area = np.asarray(e1t) * np.asarray(e2t)
+    return float(np.sum(
+        snow_ice_pond_mass / NEMO_CONSTANTS_CONFIG.rho_0 * area * unique_t
+    ) / np.sum(area * surface_wet * unique_t))
+
+
 def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
     """Build the source-file-driven ORCA2+SI3 card through ocean kt=1 entry.
 
@@ -1659,37 +1695,10 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
     temperature, salinity = build_orca2_initial_ts(
         temperature_path, salinity_path, tmask)
 
-    # iceistate.F90:262-291 creates one-category ice from the surface T/S and
-    # hemisphere, :309-393 distributes it over jpl=5 while conserving volume,
-    # and :398-427 removes the globally averaged snow+ice+pond mass from SSH.
-    # The resolved pond arm is live (a_p=.2*a_i, h_p=.05 m), so it contributes
-    # 9 kg m-2 wherever initial ice exists; omitting it misses the oracle SSH.
-    surface_s = salinity[..., 0]
-    surface_t = temperature[..., 0]
-    freezing_t = (
-        -0.0575
-        + 1.710523e-3 * np.sqrt(surface_s)
-        - 2.154996e-4 * surface_s
-    ) * surface_s
     surface_wet = tmask[..., 0]
-    initial_ice = ((surface_t - freezing_t) * surface_wet < 2.0) & surface_wet
-    ice_thickness = np.where(np.asarray(grid.f_T) >= 0.0, 2.0, 1.0)
-    snow_ice_pond_mass = np.where(
-        initial_ice,
-        0.9 * (constants.rho_snow * 0.2 + constants.rho_ice * ice_thickness)
-        + constants.rho_water * 0.18 * 0.05,
-        0.0,
+    ssh_adjustment = _orca2_initial_ice_ssh_adjustment(
+        grid, metric["e1t"], metric["e2t"], temperature, salinity, tmask
     )
-    # dom_uniq (domutl.F90:91-121) excludes the duplicated right half of the
-    # T-fold row from glob_2Dsum.  On this de-haloed 180-column T-fold, the
-    # retained half is i=0:89.  The exact reduction below reproduces the
-    # source-produced -0.09343505872684969 m adjustment.
-    unique_t = np.ones(surface_wet.shape, dtype=np.float64)
-    unique_t[-1, grid.n_lon // 2 :] = 0.0
-    area = metric["e1t"] * metric["e2t"]
-    ssh_adjustment = np.sum(
-        snow_ice_pond_mass / NEMO_CONSTANTS_CONFIG.rho_0 * area * unique_t
-    ) / np.sum(area * surface_wet * unique_t)
     initial_ssh = np.where(surface_wet, -ssh_adjustment, 0.0)
 
     state = rest_state_latlon_cgrid_ocean(
@@ -3489,7 +3498,7 @@ _ORCA2G1_REQUIRED_SWITCHES: dict[str, object] = {
     "namcfg.ln_read_cfg": True,
     # ln_tsd_init and ln_tsd_dmp are the rung tables' (G3, Decision 120)
     "namsbc.ln_flx": False,   # ln_usr ln_blk ln_traqsr ln_ssr ln_rnf nn_fwb: rung table (G4)
-    "namsbc.ln_abl": False, "namsbc.ln_cpl": False, "namsbc.nn_ice": 0,
+    "namsbc.ln_abl": False, "namsbc.ln_cpl": False,
     "namsbc.ln_dm2dc": False, "namsbc.nn_fsbc": 2,
     "namsbc.ln_apr_dyn": False, "namsbc.ln_wave": False,
     "namberg.ln_icebergs": False, "namisf.ln_isf": False,
@@ -3559,13 +3568,20 @@ def _orca2g1_namelist_values(path: Path) -> dict[str, object]:
     return found
 
 
-def read_orca2g1_deck(deck_root: str | Path) -> ORCA2G1Deck:
+def read_orca2g1_deck(
+    deck_root: str | Path, case: str = "ORCA2G1-flat"
+) -> ORCA2G1Deck:
     """Read ``namelist_cfg`` and refuse any switch the card has no arm for."""
 
     path = Path(deck_root) / "namelist_cfg"
     values = _orca2g1_namelist_values(path)
-    for name, want in {**_ORCA2G1_REQUIRED_SWITCHES, **_orca2g_sbc_switch_set(values),
-                       **_orca2g_dynadv_switch_set(values)}.items():
+    required = {
+        **_ORCA2G1_REQUIRED_SWITCHES,
+        **_orca2g_sbc_switch_set(values),
+        **_orca2g_dynadv_switch_set(values),
+        "namsbc.nn_ice": 2 if case == "ORCA2G5-ice" else 0,
+    }
+    for name, want in required.items():
         if name not in values:
             raise ValueError(f"ORCA2G1 deck does not state {name}")
         if values[name] != want or type(values[name]) is not type(want):
@@ -3672,7 +3688,7 @@ def build_orca2g1_flat_card(deck_root: str | Path, case: str = "ORCA2G1-flat") -
     """
 
     root = Path(deck_root)
-    deck = read_orca2g1_deck(root)
+    deck = read_orca2g1_deck(root, case)
     domain_path = root / "domain_cfg.nc"
     if not domain_path.is_file():
         raise FileNotFoundError(f"missing ORCA2G1 domain file: {domain_path}")
@@ -3747,6 +3763,10 @@ def build_orca2g1_flat_card(deck_root: str | Path, case: str = "ORCA2G1-flat") -
         nemo_prognostic_barotropic_velocity=True,
     )
     t_init, s_init = orca2g_initial_ts(root, case, tmask)
+    if case == "ORCA2G5-ice":
+        ssh -= _orca2_initial_ice_ssh_adjustment(
+            grid, dom["e1t"], dom["e2t"], t_init, s_init, tmask
+        ) * surface_wet
     state = state._replace(
         T=state.T.replace(data=jnp.asarray(t_init, dtype=jnp.float64)),
         S=state.S.replace(data=jnp.asarray(s_init, dtype=jnp.float64)),
@@ -3824,8 +3844,14 @@ def build_orca2g1_flat_card(deck_root: str | Path, case: str = "ORCA2G1-flat") -
     )
     card = NEMOTestcaseCard(
         case, recipe, deck.rn_Dt_s, deck.nn_itend, 1, 0, 0, 0.0, 0.0,
-        surface_boundary_condition="ncar_core_sbcblk" if _ORCA2G_SBC[case] else "none",
-        surface_input_operator="nemo_fld_read" if _ORCA2G_SBC[case] else "none",
+        surface_boundary_condition=(
+            "nemo_post_si3_records" if case == "ORCA2G5-ice"
+            else "ncar_core_sbcblk" if _ORCA2G_SBC[case] else "none"
+        ),
+        surface_input_operator=(
+            "nemo_ocean_surface_input_v1" if case == "ORCA2G5-ice"
+            else "nemo_fld_read" if _ORCA2G_SBC[case] else "none"
+        ),
         unmeasured_features=_ORCA2G_UNMEASURED[case],
         icebergs_enabled=False,
         iceberg_inputs=(),
@@ -3880,10 +3906,13 @@ def _orca2g1_selector_failures(card: NEMOTestcaseCard) -> list[str]:
         "lateral_mixing_none": cfg.physics.lateral_mixing.scheme == "none",
         "ln_trabbl=F": (cfg.bbl_adv_option, cfg.bbl_diffusive_option) == (0, 0),
         "surface_forcing": ((card.surface_boundary_condition, card.surface_input_operator) == (
-                       ("ncar_core_sbcblk", "nemo_fld_read") if _ORCA2G_SBC.get(card.case) else ("none", "none"))
+                       ("nemo_post_si3_records", "nemo_ocean_surface_input_v1")
+                       if card.case == "ORCA2G5-ice" else
+                       ("ncar_core_sbcblk", "nemo_fld_read") if _ORCA2G_SBC.get(card.case)
+                       else ("none", "none"))
                        and cfg.physics.shortwave_penetration == _orca2g_qsr(card.case, card.dt_s)
                        and cfg.physics.mle is None),
-        "no_ice": card.icebergs_enabled is False and card.iceberg_inputs == (),
+        "no_internal_ice_model": card.icebergs_enabled is False and card.iceberg_inputs == (),
         "wet_levels": (np.shape(state.T.data)[-1] == _ORCA2G_JPK.get(card.case, 0) - 1
                           and card.dummy_bottom_records == 1),
         "rest": (not np.any(np.asarray(state.u.data))
@@ -3897,7 +3926,7 @@ def _orca2g1_selector_failures(card: NEMOTestcaseCard) -> list[str]:
 def validate_orca2g1_flat_card(card: NEMOTestcaseCard, deck_root: str | Path) -> None:
     """Refuse a G1 card whose selectors or state disagree with its deck."""
 
-    deck = read_orca2g1_deck(deck_root)
+    deck = read_orca2g1_deck(deck_root, card.case)
     dom = _orca2g1_domain(Path(deck_root) / "domain_cfg.nc", _ORCA2G_JPK.get(card.case, 2))
     cfg = card.recipe.model_config
     vm = cfg.physics.vertical_mixing
@@ -3906,6 +3935,11 @@ def validate_orca2g1_flat_card(card: NEMOTestcaseCard, deck_root: str | Path) ->
     grid = card.recipe.grid
     perm_t = (grid.n_lon - np.arange(grid.n_lon)) % grid.n_lon
     init_ts = orca2g_initial_ts(deck_root, card.case, wet3)
+    expected_ssh = orca2g1_initial_ssh(dom["glamt"], dom["gphit"], wet)
+    if card.case == "ORCA2G5-ice":
+        expected_ssh -= _orca2_initial_ice_ssh_adjustment(
+            grid, dom["e1t"], dom["e2t"], init_ts[0], init_ts[1], wet3
+        ) * wet
     checks = {
         "case": card.case in _ORCA2G_JPK,
         "ln_dynadv_vec": _orca2g1_namelist_values(Path(deck_root) / "namelist_cfg").get(
@@ -3927,14 +3961,14 @@ def validate_orca2g1_flat_card(card: NEMOTestcaseCard, deck_root: str | Path) ->
         "t_fold_mask": np.array_equal(wet[-1], wet[-1][perm_t]),
         "initial_T": np.array_equal(np.asarray(state.T.data), init_ts[0]),
         "initial_S": np.array_equal(np.asarray(state.S.data), init_ts[1]),
-        "bump": np.array_equal(
-            np.asarray(state.eta.data),
-            orca2g1_initial_ssh(dom["glamt"], dom["gphit"], wet)),
+        "bump": np.array_equal(np.asarray(state.eta.data), expected_ssh),
         "bump_centre": float(np.asarray(state.eta.data)[
-            _ORCA2G1_BUMP_JJ - 1, _ORCA2G1_BUMP_JI - 1]) == 0.1,
+            _ORCA2G1_BUMP_JJ - 1, _ORCA2G1_BUMP_JI - 1]) == expected_ssh[
+                _ORCA2G1_BUMP_JJ - 1, _ORCA2G1_BUMP_JI - 1],
     }
     failed = sorted(name for name, ok in checks.items() if not ok)
     failed += orca2g_forcing_failures(deck_root, card.case)
+    failed += orca2g_ice_failures(deck_root, card.case)
     failed += _orca2g1_selector_failures(card)
     if failed:
         raise ValueError(f"{card.case} disagrees with its deck: {failed}")
@@ -3961,7 +3995,7 @@ def validate_orca2g1_flat_card_for_execution(
 # ``domain_cfg.nc``.  The builder, the deck reader, the bump and every selector
 # are G1's; only the entries below differ by rung.
 _ORCA2G_JPK: dict[str, int] = {"ORCA2G1-flat": 2, "ORCA2G2-zps": 31, "ORCA2G3-ts": 31,
-                             "ORCA2G4-sbc": 31, "ORCA2G1b-vec": 2}
+                             "ORCA2G4-sbc": 31, "ORCA2G5-ice": 31, "ORCA2G1b-vec": 2}
 ORCA2G2_UNMEASURED: tuple[str, ...] = (
     "multi_level_partial_cell_step",   # round 2: record admitted, not at the bar
 )
@@ -3980,6 +4014,11 @@ ORCA2G4_UNMEASURED: tuple[str, ...] = (
     "sss_restoring",                   # sbcssr.f90 nn_sssr = 2
     "freshwater_budget_nn_fwb2",       # sbcfwb.f90 (zero correction in year 1)
 )
+ORCA2G5_UNMEASURED: tuple[str, ...] = (
+    "g5_record_not_admitted",
+    "nemo_post_si3_surface_records",
+    "implicit_ice_ocean_top_drag_rCdU_ice",
+)
 # G1b = G1 + ORCA2's vector-form momentum advection (user, 2026-10-14).
 ORCA2G1B_UNMEASURED: tuple[str, ...] = (
     "g1b_record_not_admitted",
@@ -3988,42 +4027,43 @@ ORCA2G1B_UNMEASURED: tuple[str, ...] = (
 _ORCA2G_UNMEASURED = {"ORCA2G1-flat": ORCA2G1_UNMEASURED, "ORCA2G1b-vec": ORCA2G1B_UNMEASURED,
                       "ORCA2G2-zps": ORCA2G2_UNMEASURED,
                       "ORCA2G3-ts": ORCA2G3_UNMEASURED,
-                      "ORCA2G4-sbc": ORCA2G4_UNMEASURED}
+                      "ORCA2G4-sbc": ORCA2G4_UNMEASURED,
+                      "ORCA2G5-ice": ORCA2G5_UNMEASURED}
 # NEMO's dyn_zdf matrix divisors (dynzdf.f90:191-205, :360-374): selected by
 # G2, the first rung with more than one level.  G1 has no interface to solve
 # across, so its card stays as certified.
 _ORCA2G_ZDF_FACES = {"ORCA2G1-flat": False, "ORCA2G1b-vec": False, "ORCA2G2-zps": True, "ORCA2G3-ts": True,
-                     "ORCA2G4-sbc": True}
+                     "ORCA2G4-sbc": True, "ORCA2G5-ice": True}
 # NEMO's tra_zdf diagonal rounding (trazdf.f90:233; G2 round 3), its own row:
 # G1's one-level solve builds no such diagonal.
 _ORCA2G_TRA_ZDF_ROUNDED = {"ORCA2G1-flat": False, "ORCA2G1b-vec": False, "ORCA2G2-zps": True, "ORCA2G3-ts": True,
-                           "ORCA2G4-sbc": True}
+                           "ORCA2G4-sbc": True, "ORCA2G5-ice": True}
 # NEMO's ascending-k depth mean of the 3-D right-hand side (stp2d.f90:178-179;
 # G2 round 4), its own row: G1's one-level sum has no order to choose.
 _ORCA2G_UE_RHS_ASCENDING = {"ORCA2G1-flat": False, "ORCA2G1b-vec": False, "ORCA2G2-zps": True, "ORCA2G3-ts": True,
-                            "ORCA2G4-sbc": True}
+                            "ORCA2G4-sbc": True, "ORCA2G5-ice": True}
 # dyn_zdf's interface thickness reads the stored stage ratio r3u(Kmm)
 # (dynzdf.f90:193-195, stprk3_stg.f90:216-217; G3 round 3), G3's card only.
 _ORCA2G_ZDF_STAGE_R3U = {"ORCA2G1-flat": False, "ORCA2G1b-vec": False, "ORCA2G2-zps": False, "ORCA2G3-ts": True,
-                         "ORCA2G4-sbc": True}
-# NEMO's surface-stress transcription (G4 round 6), G4's card only (no other
-# rung is forced): the barotropic wind term divides by the stored
+                         "ORCA2G4-sbc": True, "ORCA2G5-ice": True}
+# NEMO's surface-stress transcription (G4 round 6), inherited by G5: the
+# barotropic wind term divides by the stored
 # r1_hu_0/(1+r3u(Kbb)) (stp2d.f90:198-199), and the pivot-row V stress reads
 # vtau's vector fold halo (sbcmod.f90:548-551, :559), and dyn_zdf's stress
 # deposit divides by e3u_3d(1)*(1+r3u(Kaa)) (dynzdf.f90:338-339).
 _ORCA2G_WIND_STORED_DEPTH = {"ORCA2G1-flat": False, "ORCA2G1b-vec": False, "ORCA2G2-zps": False,
-                             "ORCA2G3-ts": False, "ORCA2G4-sbc": True}
+                             "ORCA2G3-ts": False, "ORCA2G4-sbc": True, "ORCA2G5-ice": True}
 # NEMO's written stage-1/2 tracer update (stprk3_stg.f90:503-505; G4 round
-# 7).  G4 is the first rung where the live surface source makes contraction
-# observable, so earlier certified cards remain byte-for-byte unchanged.
+# 7), inherited by G5.  G4 is the first rung where the live surface source
+# makes contraction observable, so earlier certified cards remain unchanged.
 _ORCA2G_TRA_STAGE_ORDER = {"ORCA2G1-flat": False, "ORCA2G1b-vec": False,
                            "ORCA2G2-zps": False, "ORCA2G3-ts": False,
-                           "ORCA2G4-sbc": True}
+                           "ORCA2G4-sbc": True, "ORCA2G5-ice": True}
 
 
 # ln_dynadv_vec by rung: only G1b selects ORCA2's vector form so far.
 _ORCA2G_DYNADV_VEC = {"ORCA2G1-flat": False, "ORCA2G2-zps": False, "ORCA2G3-ts": False,
-                      "ORCA2G4-sbc": False, "ORCA2G1b-vec": True}
+                      "ORCA2G4-sbc": False, "ORCA2G5-ice": False, "ORCA2G1b-vec": True}
 _ORCA2G_VEC_SELECTORS = ("momentum_advection", "ke_gradient_scheme",
                          "vertical_momentum_scheme", "momentum_flux_scheme",
                          "vorticity_scheme")
@@ -4076,12 +4116,12 @@ def build_orca2g2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
 # state.  &namtsd reads ORCA2's own T/S climatology with ORCA2's own lines
 # (ORCA2_OMIP_L4/EXP00/namelist_cfg:47,50,54-55); damping stays off.
 _ORCA2G_TSD_INIT = {"ORCA2G1-flat": False, "ORCA2G1b-vec": False, "ORCA2G2-zps": False, "ORCA2G3-ts": True,
-                    "ORCA2G4-sbc": True}
+                    "ORCA2G4-sbc": True, "ORCA2G5-ice": True}
 # Decision 120: G3 and above set ln_tsd_dmp = T with ln_tradmp = F, so NEMO
 # applies the ORCA_R2 hand alterations to the initial state (dtatsd.f90:219)
 # and never restores (dta_tsd's only per-step caller is tradmp.f90:181).
 _ORCA2G_TSD_DMP = {"ORCA2G1-flat": False, "ORCA2G1b-vec": False, "ORCA2G2-zps": False, "ORCA2G3-ts": True,
-                   "ORCA2G4-sbc": True}
+                   "ORCA2G4-sbc": True, "ORCA2G5-ice": True}
 _ORCA2G3_TSD_FIELDS = {
     "namtsd.cn_dir": "'./'",
     "namtsd.sn_tem": ("'data_1m_potential_temperature_nomask',-1.,'votemper',"
@@ -4149,7 +4189,7 @@ def build_orca2g3_ts_card(deck_root: str | Path) -> NEMOTestcaseCard:
 # boundary condition.  &namsbc is ORCA2's (ORCA2_OMIP_L4/EXP00/namelist_cfg:
 # 80-92) with nn_ice = 0, and the four data groups are ORCA2's lines.
 _ORCA2G_SBC = {"ORCA2G1-flat": False, "ORCA2G1b-vec": False, "ORCA2G2-zps": False, "ORCA2G3-ts": False,
-               "ORCA2G4-sbc": True}
+               "ORCA2G4-sbc": True, "ORCA2G5-ice": True}
 # The &namsbc switches that move with the rung: (G1-G3 value, G4 value).
 _ORCA2G_SBC_SWITCHES: dict[str, tuple[object, object]] = {
     "namsbc.ln_usr": (True, False), "namsbc.ln_blk": (False, True),
@@ -4185,6 +4225,9 @@ _ORCA2G4_SBC_FIELDS: dict[str, object] = {
     "namsbc_rnf.sn_dep_rnf": "'runoffs',0.,'rodepth',.false.,.true.,'yearly','','',''",
 }
 _ORCA2G4_SBC_GROUPS = ("namsbc_blk.", "namtra_qsr.", "namsbc_ssr.", "namsbc_rnf.")
+_ORCA2G5_ICE_NAMELIST_SHA256 = (
+    "9d5ae3fae3878a74c4fe88f0fd8db40129fe97ca6ffa6d699121d1cd44713dd8"
+)
 
 
 def _orca2g_sbc_switch_set(values: dict[str, object]) -> dict[str, object]:
@@ -4227,10 +4270,36 @@ def orca2g_forcing_failures(deck_root: str | Path, case: str) -> list[str]:
     return failed
 
 
+def orca2g_ice_failures(deck_root: str | Path, case: str) -> list[str]:
+    """Refuse any sea-ice selection except G5's exact ORCA2 SI3 overlay."""
+
+    if case not in _ORCA2G_JPK:
+        return ["ice_case"]
+    root = Path(deck_root)
+    values = _orca2g1_namelist_values(root / "namelist_cfg")
+    want = 2 if case == "ORCA2G5-ice" else 0
+    failed = [] if values.get("namsbc.nn_ice") == want else ["namsbc.nn_ice"]
+    ice = root / "namelist_ice_cfg"
+    if want == 2:
+        if not ice.is_file():
+            failed.append("namelist_ice_cfg")
+        elif hashlib.sha256(ice.read_bytes()).hexdigest() != _ORCA2G5_ICE_NAMELIST_SHA256:
+            failed.append("namelist_ice_cfg")
+    elif ice.exists():
+        failed.append("unexpected_namelist_ice_cfg")
+    return failed
+
+
 def build_orca2g4_sbc_card(deck_root: str | Path) -> NEMOTestcaseCard:
     """ORCA2G4: the G3 card under ORCA2's surface forcing, no sea ice."""
 
     return build_orca2g1_flat_card(deck_root, "ORCA2G4-sbc")
+
+
+def build_orca2g5_ice_card(deck_root: str | Path) -> NEMOTestcaseCard:
+    """G5: certified G4 plus ORCA2 SI3, driven by NEMO's post-SI3 records."""
+
+    return build_orca2g1_flat_card(deck_root, "ORCA2G5-ice")
 
 
 __all__ = (
@@ -4247,8 +4316,11 @@ __all__ = (
     "build_orca2g2_zps_card",
     "build_orca2g3_ts_card",
     "build_orca2g4_sbc_card",
+    "build_orca2g5_ice_card",
     "orca2g_forcing_failures",
+    "orca2g_ice_failures",
     "ORCA2G4_UNMEASURED",
+    "ORCA2G5_UNMEASURED",
     "orca2g_initial_ts",
     "ORCA2G2_UNMEASURED",
     "ORCA2G3_UNMEASURED",
