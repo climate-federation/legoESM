@@ -3231,6 +3231,12 @@ class LatLonCGridOceanConfig(NamedTuple):
     # (trasbc.f90, sbcrnf.f90, traqsr.f90). False retains the prior derived
     # Kbb-source path.
     rk3_stage3_heat_nemo_written: bool = False
+    # Stage 3's Kmm thickness as NEMO stores it, e3t_0*(1+r3t(Kmm)) with
+    # r3t(Kmm) stage 2's r1_2*(r3t(Kbb)+r3ta) (stprk3_stg.f90:215), in every
+    # stage-3 tracer read: heat/runoff/solar divisors, solve RHS, e3w(Kmm).
+    # False keeps the thickness mean 0.5*(h(Kbb)+h(Kaa)).  Needs
+    # rk3_stage3_heat_nemo_written.
+    rk3_stage3_tracer_nemo_stored_thickness: bool = False
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":
