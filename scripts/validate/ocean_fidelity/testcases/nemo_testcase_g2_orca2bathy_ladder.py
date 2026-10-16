@@ -60,8 +60,9 @@ FORCED = ("ORCA2G4-sbc", "ORCA2G5-ice")   # NEMO-supplied surface fields each kt
 DEFAULT_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/round10/"
     "oracle_g2_r10/p3_a_100step")
-ARMS = ("geometry", "independent", "given_entry", "stages", "zdf_replay",
-        "substeps", "trazdf_replay", "rhs_frame", "restart_independent")
+ARMS = ("geometry", "independent", "given_entry", "stages", "barotropic_exit",
+        "zdf_replay", "substeps", "trazdf_replay", "rhs_frame",
+        "restart_independent")
 # stage exposures of one step: the private hook that returns it, and the
 # level-1 NEMO frame fields (u, v, T, S, ssh) it must equal
 EXPOSURES = {
@@ -431,7 +432,8 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
     cfg, z, s0 = card.recipe.model_config, card.recipe.z_coord, card.recipe.initial_state
     if case in FORCED:
         require(arm in ("independent", "given_entry")
-                or (arm == "stages" and case == "ORCA2G5-ice"),
+                or (arm in ("stages", "barotropic_exit")
+                    and case == "ORCA2G5-ice"),
                 "G4/G5's NEMO-supplied per-step forcing is registered only for "
                 "the independent and given-entry ladders")
         require(cfg.rk3_stage_tracer_written_order is True,
@@ -618,6 +620,39 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
             if dump is not None:
                 np.savez(Path(dump) / f"card_kt{kt}_{name}.npz", **card_levels(st),
                          ssh=np.asarray(st.eta.data))
+        return out
+    if arm == "barotropic_exit":
+        # G5 round 3 follow-on walk.  The admitted record has a compact
+        # after-window uu_b/vv_b frame at every kt, but its operand-complete
+        # external-mode stream only at kt=1.  Expose the ordinary solver's
+        # exit without changing it, so a post-kt1 card chain can locate a
+        # later leave on the barotropic side of the stage-1 handoff.
+        require(case == "ORCA2G5-ice", "barotropic_exit is a G5-only arm")
+        require(state_in is not None, "barotropic_exit needs --state-in")
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import _NEMOWSRK3TestHooks
+        from nemo_testcase_l1_vortex_kt2_walk import read_bt_frame
+        saved = pickle.loads(Path(state_in).read_bytes())
+        require(saved["after_kt"] == kt_from - 1 and saved["packages"] == packages,
+                "--state-in is not this model code's chain after step kt - 1")
+        fw, sf = g5.nemo_supplied_forcing(card, root, kt_from)
+        result = jax.device_get(LatLonCGridOceanModel(
+            card.recipe.grid, z, cfg,
+            _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+                expose_barotropic_substeps=True)).step(
+                    saved["state"], dt=card.dt_s, freshwater=fw,
+                    surface_forcing=sf))
+        ref = read_bt_frame(
+            root / f"oracle_bt_frames_kt{kt_from:08d}.bin",
+            expect_step=kt_from)
+        cand = {"uu_b": np.asarray(result.state_after_barotropic.uu_b.data)[:, 1:],
+                "vv_b": np.asarray(result.state_after_barotropic.vv_b.data)[1:, :]}
+        rows = [g1.row(f"barotropic_exit.kt{kt_from}.{name}", ref[name],
+                       cand[name], reg,
+                       plant=(plant == "score" and name == "uu_b"))
+                for name in ("uu_b", "vv_b")]
+        out.update({"label": "INDEPENDENT (card chain; barotropic exit)",
+                    "kt": kt_from, "rows": rows,
+                    "first_unequal": g1.first_unequal(rows)})
         return out
     if arm == "substeps":
         # the split-explicit solver's loop at step 1 (the exact initial state
