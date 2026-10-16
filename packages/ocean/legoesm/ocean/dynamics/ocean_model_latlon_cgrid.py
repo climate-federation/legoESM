@@ -4593,9 +4593,10 @@ class LatLonCGridOceanModel:
                     'barotropic_solver="explicit_substep" or leave the flag '
                     "False.")
         # ORCA2 G5's ln_drgice_imp path: the four consumers form one atomic
-        # composition.  This card has no cavity and rCdU_bot=0; fail closed on
-        # the not-yet-transcribed top+bottom association instead of silently
-        # summing two independently rounded face rates.
+        # composition (no cavity).  With bottom drag too (G7) only NEMO's
+        # linear law is transcribed: the substeps take the one combined
+        # coefficient (dynspg_ts.f90:1431-1432), the residual and dyn_zdf run
+        # bottom then top (:1462/:1487; dynzdf.f90:166/:175, :306/:312).
         if getattr(config, "implicit_ice_ocean_top_drag", False):
             if not getattr(config, "implicit_vertical_mixing", False):
                 raise ValueError(
@@ -4612,12 +4613,17 @@ class LatLonCGridOceanModel:
                     "implicit_ice_ocean_top_drag=True requires "
                     "barotropic_solver='explicit_substep' for dynspg_ts's "
                     "frozen top-drag consumer")
-            if getattr(config, "zdf_drag_in_matrix", False) or getattr(
-                    config, "barotropic_drag_substep", False):
+            _bot_matrix = getattr(config, "zdf_drag_in_matrix", False)
+            _bot_substep = getattr(config, "barotropic_drag_substep", False)
+            if (_bot_matrix or _bot_substep) and not (
+                    _bot_matrix and _bot_substep
+                    and config.bottom_drag.bottom_drag_scheme == "nemo_linear"):
                 raise ValueError(
-                    "implicit_ice_ocean_top_drag currently transcribes the "
-                    "ORCA2 G5 no-bottom-drag composition only; bottom and "
-                    "top face pairs must not be independently reassociated")
+                    "implicit_ice_ocean_top_drag transcribes no bottom drag "
+                    "(G5) or the full linear bundle (G7: bottom_drag_scheme="
+                    "'nemo_linear' with zdf_drag_in_matrix and "
+                    "barotropic_drag_substep); bottom and top face pairs must "
+                    "not be independently reassociated")
             if getattr(config.barotropic, "barotropic_wide_halo", False):
                 raise ValueError(
                     "implicit_ice_ocean_top_drag is not wired into the "

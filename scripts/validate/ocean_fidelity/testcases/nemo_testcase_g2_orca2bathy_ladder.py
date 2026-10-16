@@ -57,8 +57,8 @@ from nemo_testcase_g1_orca2grid_ladder import BAR, require  # noqa: E402
 
 CASE = "ORCA2G2-zps"
 CASES = ("ORCA2G2-zps", "ORCA2G3-ts", "ORCA2G4-sbc", "ORCA2G5-ice",
-         "ORCA2G6-vec")
-ICE_CASES = ("ORCA2G5-ice", "ORCA2G6-vec")
+         "ORCA2G6-vec", "ORCA2G7-drg")
+ICE_CASES = ("ORCA2G5-ice", "ORCA2G6-vec", "ORCA2G7-drg")
 FORCED = ("ORCA2G4-sbc", *ICE_CASES)   # NEMO-supplied surface fields each kt (D123)
 DEFAULT_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/round10/"
@@ -965,6 +965,8 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
         out["per_kt"].append({"kt": 1, "trazdf_replay": rows})
         return out
     if arm == "zdf_replay":
+        require(case != "ORCA2G7-drg",
+                "the dyn_zdf replay transcribes zero drag; G7 has bottom drag")
         # OFFLINE replay (rule 5): the card's own passive stage-3 arrays, from
         # its write-only observer, are pushed through NEMO's statements.
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import _NEMOWSRK3TestHooks

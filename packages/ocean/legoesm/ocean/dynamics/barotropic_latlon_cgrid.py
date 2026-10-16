@@ -3304,12 +3304,18 @@ def barotropic_substeps_latlon_cgrid(
         # the POST-momentum u* -- see the ``u_now`` docstring paragraph.
         _u_drg = u_corr if u_now is None else u_now.astype(_dt)
         _v_drg = v_corr if v_now is None else v_now.astype(_dt)
+        _with_top = getattr(config, "implicit_ice_ocean_top_drag", False)
         _drag_values = nemo_bottom_drag_rate_faces(
             _u_drg, _v_drg, _hk_now, z_coord, config, grid,
-            return_cell_rate=_nemo_substep_trace_test_hook)
+            return_cell_rate=_nemo_substep_trace_test_hook or _with_top)
         _r_u_bt, _r_v_bt = _drag_values[:2]
         if _nemo_substep_trace_test_hook:
             _drag_r_t = _drag_values[4]
+        if _with_top:
+            # zdfdrg.f90:276: rCdU_bot = -rCd0_bot*rn_Uc0, rCd0_bot masked by
+            # ssmask (:525, :546), so dry columns hold -0.
+            _bot_rcdu_t = jnp.where(
+                z_coord.bottom_level >= 0, -_drag_values[4], -0.0)
         _drag_r_u = _r_u_bt.astype(_dt)
         _drag_r_v = _r_v_bt.astype(_dt)
     if getattr(config, "implicit_ice_ocean_top_drag", False):
@@ -3320,9 +3326,20 @@ def barotropic_substeps_latlon_cgrid(
         from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
             nemo_ice_ocean_top_drag_coeff_faces,
         )
+        # dynspg_ts.f90:1431-1432: ONE statement sums the bottom pair and
+        # the top pair, so the substeps consume that coefficient alone.
+        _bot_rcdu = None
+        if _drag_r_u is not None:
+            if _nemo_drag_rate_test_override is not None:
+                raise ValueError(
+                    "barotropic drag-rate substitution is not defined for the "
+                    "combined top+bottom drag coefficient")
+            _bot_rcdu = _bot_rcdu_t
+            _drag_r_u = _drag_r_v = None
         _top_cdu_u, _top_cdu_v, _, _, _top_cdu_t = (
             nemo_ice_ocean_top_drag_coeff_faces(
-                ice_ocean_top_drag_rCdu, grid, dtype=_dt))
+                ice_ocean_top_drag_rCdu, grid, dtype=_dt,
+                rCdU_bot=_bot_rcdu))
         _drag_coeff_u = _top_cdu_u
         _drag_coeff_v = _top_cdu_v
         if _nemo_substep_trace_test_hook:

@@ -237,9 +237,9 @@ def test_g4_card_is_the_g3_card_under_orca2s_forcing(cards):
     assert getattr(a, stage3_heat) is True and getattr(b, stage3_heat) is False
     assert getattr(a, stage3_kmm) is True and getattr(b, stage3_kmm) is False
     assert [c for c, on in recipe._ORCA2G_WIND_STORED_DEPTH.items() if on] == [
-        "ORCA2G4-sbc", "ORCA2G5-ice", "ORCA2G6-vec"]
+        "ORCA2G4-sbc", "ORCA2G5-ice", "ORCA2G6-vec", "ORCA2G7-drg"]
     assert [c for c, on in recipe._ORCA2G_TRA_STAGE_ORDER.items() if on] == [
-        "ORCA2G4-sbc", "ORCA2G5-ice", "ORCA2G6-vec"]
+        "ORCA2G4-sbc", "ORCA2G5-ice", "ORCA2G6-vec", "ORCA2G7-drg"]
     from legoesm.ocean.state import LatLonCGridOceanConfig
     assert all(LatLonCGridOceanConfig._field_defaults[f] is False
                for f in [*stress, tracer_update, stage3_heat, stage3_kmm])

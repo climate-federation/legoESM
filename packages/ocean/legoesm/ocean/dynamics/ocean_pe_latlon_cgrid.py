@@ -4078,36 +4078,46 @@ def _bc_horizontal_viscosity(
             diag_Cl_leith_v, kdiss_h_cell)
 
 
-def nemo_ice_ocean_top_drag_coeff_faces(rCdU_ice, grid, *, dtype=None):
+def nemo_ice_ocean_top_drag_coeff_faces(rCdU_ice, grid, *, dtype=None,
+                                        rCdU_bot=None):
     """SI3's recorded ``rCdU_ice`` mapped to NEMO U/V coefficients.
 
     ``rCdU_ice`` is NEMO's non-positive T-point coefficient [m/s].  The
     returned arrays retain NEMO's non-positive sign and statement boundaries:
-    round the T-point value, round each neighbour sum, add the zero bottom-pair,
-    then multiply by one half (``dynspg_ts.f90:1431-1432``).  That explicit
-    zero-pair addition is load-bearing for NEMO's positive signed zeros.  The V
-    map applies the scalar T-pivot fold exchange before the northern face.
+    round the T-point value, round each neighbour sum, add the bottom pair,
+    then multiply by one half (``dynspg_ts.f90:1431-1432``).  Without
+    ``rCdU_bot`` (G5: ln_drg_OFF) the bottom pair is an explicit zero, which
+    is load-bearing for NEMO's positive signed zeros.  With it (NEMO's
+    non-positive T-point ``rCdU_bot``, G7) the bottom pair is formed by the
+    same maps.  The V map applies the scalar T-pivot fold exchange before the
+    northern face.  ``sum_u``/``sum_v`` and ``r_cdu`` stay the top pair alone.
     """
-    r_cdu = jnp.asarray(rCdU_ice, dtype=dtype)
-    if r_cdu.ndim != 2:
-        raise ValueError(
-            "ice-ocean top drag rCdU_ice must be a 2-D T-point field; got "
-            f"shape {r_cdu.shape}")
-    r_cdu = nemo_source_round(r_cdu)
     from legoesm.grids.operators_latlon_cgrid import pad_lon_cgrid
-    r_lon = pad_lon_cgrid(r_cdu, halo=1)
-    sum_u = nemo_source_round(r_lon[:, :-1] + r_lon[:, 1:])
-    sum_v = interp_to_v_points(r_cdu, grid, nemo_source_sum=True)
-    # pCdU = .5*((rCdU_bot pair) + (rCdU_top pair)); rCdU_bot is +0 on G5.
-    # XLA may eliminate ``+ 0`` under jit and retain the top pair's ``-0``.
-    # Materialize NEMO's positive zero explicitly before the final multiply.
-    sum_u = jnp.where(sum_u == 0.0, jnp.abs(sum_u), sum_u)
-    sum_v = jnp.where(sum_v == 0.0, jnp.abs(sum_v), sum_v)
-    zero_u, zero_v = jnp.zeros_like(sum_u), jnp.zeros_like(sum_v)
+
+    def pairs(field):
+        field = nemo_source_round(jnp.asarray(field, dtype=dtype))
+        if field.ndim != 2:
+            raise ValueError(
+                "top/bottom drag coefficients must be 2-D T-point fields; "
+                f"got shape {field.shape}")
+        lon = pad_lon_cgrid(field, halo=1)
+        return (field, nemo_source_round(lon[:, :-1] + lon[:, 1:]),
+                interp_to_v_points(field, grid, nemo_source_sum=True))
+
+    r_cdu, sum_u, sum_v = pairs(rCdU_ice)
+    if rCdU_bot is None:
+        # pCdU = .5*((rCdU_bot pair) + (rCdU_top pair)); rCdU_bot is +0 on G5.
+        # XLA may eliminate ``+ 0`` under jit and retain the top pair's ``-0``.
+        # Materialize NEMO's positive zero explicitly before the final multiply.
+        sum_u = jnp.where(sum_u == 0.0, jnp.abs(sum_u), sum_u)
+        sum_v = jnp.where(sum_v == 0.0, jnp.abs(sum_v), sum_v)
+        bot_u, bot_v = jnp.zeros_like(sum_u), jnp.zeros_like(sum_v)
+    else:
+        _, bot_u, bot_v = pairs(rCdU_bot)
     coeff_u = nemo_source_round(
-        0.5 * nemo_source_round(zero_u + sum_u))
+        0.5 * nemo_source_round(bot_u + sum_u))
     coeff_v = nemo_source_round(
-        0.5 * nemo_source_round(zero_v + sum_v))
+        0.5 * nemo_source_round(bot_v + sum_v))
     return coeff_u, coeff_v, sum_u, sum_v, r_cdu
 
 
