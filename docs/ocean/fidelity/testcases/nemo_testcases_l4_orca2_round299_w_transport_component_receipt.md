@@ -50,7 +50,7 @@ the returned U, V, and W fields in that order at
 
 On the resolved vector/C2, non-Shuman branch, the transport routine first
 sets the bottom transports to zero at
-`ORCA2_OMIP_L4_R297STAGE7/BLD/ppsrc/nemo/traadv.f90:248-252`, calls the W
+`ORCA2_OMIP_L4_R297STAGE7/BLD/ppsrc/nemo/traadv.f90:248-251`, calls the W
 diagnosis at
 `ORCA2_OMIP_L4_R297STAGE7/BLD/ppsrc/nemo/traadv.f90:267-302`, and finally
 forms `pFw=e1e2t*ww` at

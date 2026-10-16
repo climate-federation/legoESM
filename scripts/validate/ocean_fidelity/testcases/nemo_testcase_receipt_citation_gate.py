@@ -1760,10 +1760,10 @@ CITATION_MAP = {
         "CALL r175_put3(kstp, kstg, 'trp_w', zFw)",
         3,
     ],
-    'ORCA2_OMIP_L4_R297STAGE7/BLD/ppsrc/nemo/traadv.f90:248-252': [
+    'ORCA2_OMIP_L4_R297STAGE7/BLD/ppsrc/nemo/traadv.f90:248-251': [
         ('DO jj = ntsj-( nn_hls), ntej+(  nn_hls-1 ) ; DO ji = ntsi-( nn_hls), ntei+(  nn_hls-1)', 2),
         'pFw(ji,jj,jpk) = 0._wp',
-        5,
+        4,
     ],
     'ORCA2_OMIP_L4_R297STAGE7/BLD/ppsrc/nemo/traadv.f90:267-302': [
         'IF( ll_Fw ) THEN',
