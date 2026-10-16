@@ -98,6 +98,7 @@ _ORCA2_R229FOLDTRP = NEMO / "cfgs/ORCA2_OMIP_L4_R229FOLDTRP/BLD"
 _ORCA2_R230FOLDTRP = NEMO / "cfgs/ORCA2_OMIP_L4_R230FOLDTRP/BLD"
 _ORCA2G1_P3 = NEMO / "cfgs/ORCA2G1_OMIP_L1_P3/BLD"
 _ORCA2G1_P5 = NEMO / "cfgs/ORCA2G1_OMIP_L1_P5/BLD"   # the G4 record build (rounds 17-19)
+_ORCA2G5_R31 = NEMO / "cfgs/ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD"   # the G5 record build (round 31)
 _ORCA2G1_R4REF = NEMO / "cfgs/ORCA2G1_OMIP_L1_R4REF/BLD"   # G1b reference binary (round 22)
 _ORCA2_R104EENACC_COMPILED = (
     NEMO / "cfgs/ORCA2_OMIP_L4_R104EENACC/BLD/ppsrc/nemo")
@@ -122,6 +123,21 @@ _OVERFLOW_R56UP3_COMPILED = (
 _OVERFLOW_R62ZDF_COMPILED = (
     NEMO / "tests/OVERFLOW_OMIP_L1_P3_R62ZDF/BLD/ppsrc/nemo")
 FILES = {
+    # --- GRIDLADDER round 32 (G5 record build) ---
+    "ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/dynspg_ts.f90": (
+        _ORCA2G5_R31 / "ppsrc/nemo/dynspg_ts.f90"),
+    "ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/stp2d.f90": (
+        _ORCA2G5_R31 / "ppsrc/nemo/stp2d.f90"),
+    "ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/zdfdrg.f90": (
+        _ORCA2G5_R31 / "ppsrc/nemo/zdfdrg.f90"),
+    "ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/iceupdate.f90": (
+        _ORCA2G5_R31 / "ppsrc/nemo/iceupdate.f90"),
+    "ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/stprk3.f90": (
+        _ORCA2G5_R31 / "ppsrc/nemo/stprk3.f90"),
+    "ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/dynzdf.f90": (
+        _ORCA2G5_R31 / "ppsrc/nemo/dynzdf.f90"),
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/iceupdate.f90": (
+        _ORCA2_COMPILED / "iceupdate.f90"),
     # --- GRIDLADDER round 1 (G1 survey) BEGIN ---
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynspg_ts.f90': NEMO / "cfgs/ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynspg_ts.f90",
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynkeg.f90': NEMO / "cfgs/ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynkeg.f90",
@@ -1816,9 +1832,9 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:678-680': [
         'ts(ji,jj,jk,jn,Kaa) = (        ( 1._wp + r3t(ji,jj,Kbb) )*ts(ji,jj,jk,jn,Kbb )',
         '&                /          ( 1._wp + r3t(ji,jj,Kaa) )', 3],
-    'nemo_testcase_g2_orca2bathy_ladder.py:561-568': [
+    'nemo_testcase_g2_orca2bathy_ladder.py:574-582': [
         'def step(state, kt):',
-        'return new, round(time.time() - t0, 1)', 8],
+        'return new, round(time.time() - t0, 1)', 9],
     # --- GRIDLADDER round 23 (G4 round 6 receipt) ---
     'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/stp2d.f90:198': 'Ue_rhs(ji,jj) =  Ue_rhs(ji,jj) + r1_rho0 * utauU(ji,jj) * (r1_hu_0(ji,jj) /(1._wp+r3u(ji,jj,Kbb)))',
     'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/sbcmod.f90:548': "CALL lbc_lnk( 'sbcmod', utau, 'T', -1.0_wp, vtau  , 'T', -1.0_wp, emp, 'T', 1.0_wp, &",
