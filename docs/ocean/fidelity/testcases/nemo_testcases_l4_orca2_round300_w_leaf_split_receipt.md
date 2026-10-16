@@ -293,7 +293,21 @@ The card's selection is not changed.
 
 ### Review-response gates
 
-- Citation gate and private-import ratchet: recorded below.
+All run with `JAX_ENABLE_X64=1` and the landing script's `PYTHONPATH`.
+
+- Citation gate at `3493522ed`: this receipt PASS (11 citations, 0
+  failures, 0 failing map entries); default receipt PASS (274); a line plant
+  on the stage-1 Kaa blend and a routine plant on the `dyn_spg_ts` call both
+  fire (exit 1).
+- Private-import ratchet: `6 passed`.
+- Focused tests (round-300 split, citation gate, G1 grid ladder, ORCA2
+  parallel receipt gate): `104 passed`.
+- Remaining landing-gate unit tests: 118 PASSED, 0 failed under `-n 12`;
+  the one that did not finish within 10 minutes under load (flat-bottom card
+  bit-identical under the mask-rank arm) passes alone: `1 passed`.
+- GYRE ten-step / 30-day member: not run here; the only package change is
+  the symbol rename (no behaviour change), and the landing script runs the
+  DINO month gate because a package file changed.
 - codex review: paused (quota).
 
 ## Configuration choices
