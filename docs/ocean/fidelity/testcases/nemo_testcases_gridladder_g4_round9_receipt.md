@@ -116,7 +116,7 @@ The full ORCA2 card does not select the option; UNMEASURED there.
   every stage-3 value exact with the option, 200 T cells with it deselected,
   and round 8's before arm (heat statement off) at 489.
 - Citation gate (from this receipt's first heading): PASS, 16 citations, map
-  audit clean; shifting `stprk3_stg.f90:215` exits 1 (SYMBOL-NOT-AT-LINE).
+  audit clean; shifting `ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/stprk3_stg.f90:215` exits 1 (SYMBOL-NOT-AT-LINE).
   The model-file shift was remapped with the reanchor tool (53 lines); one
   span's extent grew 172 -> 174 with the same endpoint statements.
 - Citation tests: 193 passed. Config field-order test updated (field appended
