@@ -3156,7 +3156,7 @@ CITATION_MAP = {
     'ocean_pe_latlon_cgrid.py:6067-6086': [
         ('du_dt = du_dt * u_mask_3d', 1),
         'dv_dt = jnp.where(_restore_hpg, hpg_tendency_v, dv_dt * v_mask_3d)',
-        14],
+        20],
     'ORCA2_OMIP_L4_R92RHS/BLD/ppsrc/nemo/dynhpg.f90:386-427': [
         ('DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  0)              ! Surface value', 2),
         'pvv(ji,jj,jk,Krhs) = zhpj(ji,jj) + zvap', 42],
@@ -7279,7 +7279,7 @@ CITATION_MAP = {
         'r1_hf_0(:,:) = ssfmask', 4],
     'ocean_model_latlon_cgrid.py:6087-6192': [
         '_ws_face_thickness_kbb = None',
-        ('_ws_v_live_mask, _grid, z_coord=_zc)[:2])', 1), 100],
+        ('_ws_v_live_mask, _grid, z_coord=_zc)[:2])', 1), 106],
     'ocean_model_latlon_cgrid.py:6585-6648': [
         ('if _sfx is not None:', 1),
         ('F_slow_v + _wind_increment_v) * _slow_surface_v_mask', 1), 64],
