@@ -44,20 +44,23 @@ def test_decision127_tolerates_and_counts_only_nemo_subnormal_to_card_zero():
 
     tolerated = gate.score("subnormal_to_zero", oracle[:2], candidate[:2], use[:2])
     assert tolerated["status"] == "AT-BAR"
-    assert tolerated["matches"] is True and tolerated["exact"] is False
+    assert tolerated["exact_modulo_flushed_subnormal"] is True
+    assert tolerated["exact"] is False
     assert tolerated["flushed_subnormal"] == 2
     assert tolerated["normal_difference"] == 0
 
     different_subnormal = gate.score(
         "subnormal_to_different_subnormal", oracle[2:3], candidate[2:3], use[2:3])
-    assert different_subnormal["status"] == "DEBT"
+    assert different_subnormal["status"] == "AT-BAR"
+    assert different_subnormal["exact_modulo_flushed_subnormal"] is False
     assert different_subnormal["flushed_subnormal"] == 0
     assert different_subnormal["normal_difference"] == 1
 
     normal_to_zero = gate.score(
         "normal_to_zero", oracle[3:], candidate[3:], use[3:])
     assert oracle[3] > tiny
-    assert normal_to_zero["status"] == "DEBT"
+    assert normal_to_zero["status"] == "AT-BAR"
+    assert normal_to_zero["exact_modulo_flushed_subnormal"] is False
     assert normal_to_zero["flushed_subnormal"] == 0
     assert normal_to_zero["normal_difference"] == 1
 

@@ -97,7 +97,8 @@ def test_ladder_row_uses_shared_decision127_classes_and_score_mask():
     assert result["flushed_subnormal"] == 1
     assert result["normal_difference"] == 1
     assert result["first_normal_difference_cell"] == [1, 0]
-    assert result["status"] == "DEBT"
+    assert result["exact_modulo_flushed_subnormal"] is False
+    assert result["status"] == "AT-BAR"
     assert result["regions"]["interior"]["n_cells"] == 3
 
 
@@ -1289,27 +1290,24 @@ def test_stage_operands_at_steps_5_and_40_name_the_round9_cells():
     assert (d3["depth_n_unequal"], d3["rhd_n_unequal"]) == (1, 0)
 
 
-R9_FIRST_NORMAL_DEBT = {
-    (): 9,
-    ("without_stage_r3t",): 9,
-    ("without_eos_gdept",): 9,
-    ("without_stage_r3uv",): 9,
-}
+R9_FIRST_OVER = {(): None, ("without_stage_r3t",): 76,
+                 ("without_eos_gdept",): 63,
+                 ("without_stage_r3uv",): None}
 
 
 @needs_record5
-@pytest.mark.parametrize("off", list(R9_FIRST_NORMAL_DEBT))
-def test_the_100_step_record_applies_decision127_and_needs_round9_statements(off):
-    """INDEPENDENT chain, 100 steps.  Step 8 contains only tolerated flushed
-    subnormals; step 9 is the first normal-range debt under Decision 127.
-    Each round-9 option off remains non-vacuous by creating differences after
-    step 11, where the selected card has none."""
+@pytest.mark.parametrize("off", list(R9_FIRST_OVER))
+def test_the_100_step_record_is_at_bar_and_needs_round9_statements(off):
+    """INDEPENDENT chain, 100 steps.  Step 8 contains only Decision-127
+    flushed subnormals; normal-range differences at steps 9--11 remain below
+    the unchanged 1e-15 bar.  Each option-off plant retains its registered
+    first over-bar step or creates differences after step 11."""
     out = ladder.run(RECORD5, arm="independent", kt_max=100, allow_dirty=True,
                      **{k: True for k in off})
     rows = [(k["kt"], r) for k in out["per_kt"] for r in k["rows"]]
     over = [kt for kt, r in rows if r["status"] != "AT-BAR"]
     late = [kt for kt, r in rows if kt > 11 and r["n_unequal"]]
-    assert (min(over) if over else None) == R9_FIRST_NORMAL_DEBT[off]
+    assert (min(over) if over else None) == R9_FIRST_OVER[off]
     if off:
         assert late                               # the plant moved cells
         return

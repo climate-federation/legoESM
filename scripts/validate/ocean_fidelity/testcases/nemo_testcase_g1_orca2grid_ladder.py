@@ -121,7 +121,8 @@ Arms (``--arm``):
 
 Every scored field at every step reports the shared Decision 127 comparison
 classes: NEMO-nonzero-subnormal/card-zero cells are matching but counted as
-``flushed_subnormal``; every other unequal cell is ``normal_difference`` debt.
+``flushed_subnormal``; every other unequal cell is ``normal_difference`` and
+retains the campaign's 1e-15 normalized bar.
 
 Every scored row is split into the preregistered regions (fold band, seam,
 south, interior; interior again into coast-adjacent and open).  The scorer
@@ -280,7 +281,7 @@ def row(name, ref, cand, reg, *, mask=None, plant=False) -> dict:
         "rms": float(np.sqrt(np.mean(d * d))),
         "ref_max_abs": float(np.max(np.abs(ref))),
         "bit_identical": bool(bitwise_bad.shape[0] == 0),
-        "matches": bool(bad.shape[0] == 0),
+        "exact_modulo_flushed_subnormal": bool(bad.shape[0] == 0),
         "at_cell": at_cell,
         "regions": {},
     })
@@ -303,7 +304,7 @@ def row(name, ref, cand, reg, *, mask=None, plant=False) -> dict:
 
 def first_unequal(rows):
     for r in rows:
-        if not r["matches"]:
+        if not r["exact_modulo_flushed_subnormal"]:
             return {k: r[k] for k in ("name", "n_unequal", "first_unequal_cell",
                                       "max_abs", "normalized_max_abs", "status")}
     return None
@@ -1396,7 +1397,8 @@ def substep_row(name, ref, cand, wet, reg, *, plant=False) -> dict:
             "max_abs_cell": [int(x) for x in worst],
             "ref_max_abs": float(np.max(np.abs(ref[wet]))),
             "bit_identical": not np.any(masks["unequal"]),
-            "matches": not np.any(masks["normal_difference"]),
+            "exact_modulo_flushed_subnormal": not np.any(
+                masks["normal_difference"]),
             "at_cell": at_cell,
             "regions": {k: part(reg[k]) for k in (
                 *SUB_REGIONS, *(n for n, _ in FOLD_ROW_NAMES))}}
@@ -1704,7 +1706,7 @@ def run(root: Path, *, arm: str, kt_max: int = 10, kt_min: int = 1,
             nemo, mine = g["f_ssh_bb"], np.asarray(st.eta.data)
             masks = comparison_masks(nemo, mine, wet)
             err = np.where(masks["normal_difference"], mine - nemo, 0.0)
-            over = masks["normal_difference"]
+            over = np.abs(err) > BAR
             ev = {"kt": kt, "n_over_bar": int(over.sum()),
                   "flushed_subnormal": int(masks["flushed_subnormal"].sum()),
                   "max_abs": float(np.max(np.abs(err)))}

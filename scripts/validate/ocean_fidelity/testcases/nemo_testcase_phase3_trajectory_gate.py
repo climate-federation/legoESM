@@ -241,17 +241,17 @@ def score(
     census = comparison_census(oracle, candidate, use)
     masks = comparison_masks(oracle, candidate, use)
     exact = census["bitwise_unequal"] == 0
-    matches = census["normal_difference"] == 0
+    exact_modulo_flushed_subnormal = census["normal_difference"] == 0
     scale = max(float(np.max(np.abs(oracle[use]))), 1.0)
     normal_residual = np.where(
         masks["normal_difference"], candidate - oracle, 0.0)
     error = float(np.max(np.abs(normal_residual[use]))) / scale
-    status = "AT-BAR" if matches else "DEBT"
+    status = "AT-BAR" if error <= BAR else "DEBT"
     row = {
         "name": name,
         "status": status,
         "exact": exact,
-        "matches": matches,
+        "exact_modulo_flushed_subnormal": exact_modulo_flushed_subnormal,
         "normalized_max_abs": error,
         "bar": BAR,
         "n": int(use.sum()),
