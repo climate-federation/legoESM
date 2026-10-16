@@ -5067,13 +5067,9 @@ class ModelDriver:
 
     def _precompute_external_forcing(self, day, p_s, lat, temp=None):
         """Pre-compute ozone/aerosol/GHG fields outside JIT boundary."""
-        from legoesm.forcing.external import (
-            get_ozone_at_time, get_aerosol_at_time, get_aerosol_lw_at_time,
-            get_aerosol_sw_volcanic_at_time,
-        )
+        from legoesm.forcing.external import get_ozone_at_time
         from legoesm.forcing.surface_utils import (
-            distribute_column_aod_to_layers,
-            place_stratospheric_aod_profile_to_layers,
+            aerosol_layer_fields,
             stratospheric_layer_weight,
         )
 
@@ -5155,57 +5151,12 @@ class ModelDriver:
         self._o3_top_vmr = jnp.mean(o3_vmr[:, nlev:], axis=1)
         o3_vmr = o3_vmr[:, :nlev]
 
-        aerosol_od = jnp.zeros((ncol, nlev), dtype=p_s.dtype)
-        if self._aerosol_active:
-            _acfg = self._aerosol_config
-            # Volcanic SW (CMIP6 ``ext_sun``) is placed at its true
-            # stratospheric pressure like the LW profile below, NOT spread
-            # with the tropospheric column by pressure mass.  A legacy
-            # column-only volcanic file (profile None) stays in the column.
-            volc_sw = get_aerosol_sw_volcanic_at_time(_acfg, day, lat_grid=lat_col)
-            _trop_cfg = _acfg._replace(volcanic_enabled=False)
-            aerosol_col = get_aerosol_at_time(
-                _acfg if volc_sw is None else _trop_cfg, day, lat_grid=lat_col,
-            )
-            aerosol_od = distribute_column_aod_to_layers(
-                jnp.asarray(aerosol_col), p_half_col,
-            )
-            if volc_sw is not None:
-                aerosol_od = aerosol_od + (place_stratospheric_aod_profile_to_layers(
-                    jnp.asarray(volc_sw[0]), jnp.asarray(volc_sw[1]), p_half_col,
-                ) * w_strat
-                ).astype(aerosol_od.dtype)
-            # AOD->CCN input: TROPOSPHERIC column in the visible (550 nm)
-            # band, volcanic excluded, from ``ccn_path`` (fine mode) if set.
-            self._aerosol_ccn_aod = jnp.asarray(get_aerosol_at_time(
-                _trop_cfg._replace(path=_acfg.ccn_path or _acfg.path),
-                day, lat_grid=lat_col, band="vis",
-            )).reshape(ncol).astype(p_s.dtype)
-
-        # Volcanic stratospheric LONGWAVE aerosol (gap #9): same (ncol,
-        # nlev) shape as ``aerosol_od``, default zeros so the SegmentForcing
-        # / forcing-dict leaf is a concrete fixed-shape array (no retrace)
-        # and a run without volcanic LW aerosol is byte-identical (zeros LW
-        # od is a RRTMGP no-op).  ``get_aerosol_lw_at_time`` returns the
-        # file's height-resolved ABSORPTION profile (ext*(1-omega), Planck-
-        # weighted gray band collapse) plus its pressure edges; the profile
-        # is placed at its true stratospheric pressure by a conservative
-        # overlap remap -- NOT spread by full-column pressure mass, which
-        # dumped ~90% of a stratospheric aerosol into the troposphere.
-        # Stored as an instance attribute (NOT added to the 3-tuple return)
-        # so the five existing unpack call sites keep their arity.
-        aerosol_lw_od = jnp.zeros((ncol, nlev), dtype=p_s.dtype)
-        if self._aerosol_lw_active:
-            aerosol_lw_prof = get_aerosol_lw_at_time(
-                self._aerosol_config, day, lat_grid=lat_col,
-            )
-            if aerosol_lw_prof is not None:
-                prof_col, p_edges = aerosol_lw_prof
-                aerosol_lw_od = (place_stratospheric_aod_profile_to_layers(
-                    jnp.asarray(prof_col), jnp.asarray(p_edges), p_half_col,
-                ) * w_strat
-                ).astype(p_s.dtype)
-        self._aerosol_lw_od = aerosol_lw_od
+        aerosol_od, _ccn_aod, self._aerosol_lw_od = aerosol_layer_fields(
+            self._aerosol_config, day, lat_col, p_half_col, w_strat,
+            active=self._aerosol_active, lw_active=self._aerosol_lw_active,
+            dtype=p_s.dtype)
+        if _ccn_aod is not None:
+            self._aerosol_ccn_aod = _ccn_aod
 
         ghg_vmr = self.radiation_ghg_vmr(day)
         return o3_vmr, aerosol_od, ghg_vmr

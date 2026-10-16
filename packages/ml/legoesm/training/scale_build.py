@@ -263,7 +263,10 @@ _WB_CLASSICAL_KEYS = frozenset({
     "convective_rain_to_surface", "orbital_insolation",
     "param_fixed", "param_init",
     "rad_update_interval_steps", "rrtmgp_column_chunk_size",
+    "aerosol_ccn_file", "aerosol_climatology_years", "aerosol_file",
+    "aerosol_reference_aod",
     "rrtmgp_compute_fp32", "rrtmgp_gpoint_batch_size", "rrtmgp_overhead_layer",
+    "volcanic_aerosol_file", "volcanic_aerosol_lw",
     "spatial_init_std",
     "spatial_seed", "spatial_surface", "surface_bulk", "trainable_schemes",
     "turbulence",
@@ -1214,7 +1217,79 @@ def prescribed_surface_planes(sl, grid):
     return planes
 
 
-def build_spectral_forcing(sl, grid, time_ns, year):
+_NOLEAP_MONTH_START = (0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334)
+
+
+def wb_aerosol_spec(yml):
+    """(AerosolConfig, years, lw_active) from the deck's classical block, or
+    None when it names no ``aerosol_file`` (every older deck: no aerosol).
+
+    The AMIP production aerosol, as its driver builds it, but on a
+    calendar-month CLIMATOLOGY over ``aerosol_climatology_years`` [first,
+    last]: the files end 2014 and the WB windows are 2015-2020 (owner
+    decision 2026-10-16)."""
+    cl = dict(yml.get("classical", {}) or {})
+    if not cl.get("aerosol_file"):
+        return None
+    from legoesm.forcing.external import AerosolConfig
+
+    years = cl.get("aerosol_climatology_years")
+    lw = cl.get("volcanic_aerosol_lw", False)
+    if (not isinstance(years, list) or len(years) != 2
+            or not all(isinstance(y, int) for y in years)
+            or years[0] > years[1]):
+        raise ValueError("classical.aerosol_climatology_years must be "
+                         f"[first, last] integer years, got {years!r}")
+    if not isinstance(lw, bool):
+        raise ValueError(
+            f"classical.volcanic_aerosol_lw must be a YAML boolean, got {lw!r}")
+    volc = str(cl.get("volcanic_aerosol_file", "") or "")
+    acfg = AerosolConfig(
+        enabled=True, source="climatology", path=str(cl["aerosol_file"]),
+        ccn_path=str(cl.get("aerosol_ccn_file", "") or ""),
+        use_reference_if_missing=True,
+        reference_aod_550=float(cl.get("aerosol_reference_aod", 0.03)),
+        volcanic_enabled=bool(volc), volcanic_path=volc,
+        volcanic_lw_enabled=(lw and bool(volc)),
+        hold_outside_file_years=False)
+    return acfg, tuple(range(years[0], years[1] + 1)), (lw and bool(volc))
+
+
+def wb_aerosol_forcing(spec, grid, sigma, carry, time_ns):
+    """``aerosol_od`` / ``aerosol_ccn_aod`` / ``aerosol_lw_od`` for one sample:
+    the AMIP driver's fields (``aerosol_layer_fields``) at the sample's
+    calendar date in each climatology year, averaged.  Columns are the
+    initial state's (p_s, T) -- the stratospheric placement uses its
+    tropopause, as the driver's daily refresh does -- and the fields are held
+    over the forecast window.  The date is put on the readers' noleap clock;
+    29 February reads 28 February."""
+    import jax.numpy as jnp
+
+    from legoesm.forcing.surface_utils import (
+        aerosol_layer_fields,
+        stratospheric_layer_weight,
+    )
+
+    acfg, years, lw_active = spec
+    t = np.datetime64(time_ns, "s").astype(object)
+    day = min(t.day, 28) if t.month == 2 else t.day
+    sim_day = (_NOLEAP_MONTH_START[t.month - 1] + day - 1
+               + (t.hour * 3600 + t.minute * 60 + t.second) / 86400.0)
+    p_s = jnp.asarray(carry.p_s).reshape(-1)
+    p_half = jnp.asarray(sigma.pressure_at_half(p_s))
+    p_full = jnp.asarray(sigma.pressure_at_full(p_s))
+    lat_col = jnp.repeat(jnp.asarray(grid.lat), int(grid.n_lon))
+    temp = jnp.asarray(carry.T).reshape(p_full.shape)
+    w_strat = stratospheric_layer_weight(p_half, lat_col, p_full, temp)
+    per_year = [aerosol_layer_fields(
+        acfg._replace(start_year=y), sim_day, lat_col, p_half, w_strat,
+        active=True, lw_active=lw_active, dtype=p_s.dtype) for y in years]
+    od, ccn, lw = (jnp.mean(jnp.stack(f), axis=0) for f in zip(*per_year))
+    return {"aerosol_od": od, "aerosol_ccn_aod": ccn, "aerosol_lw_od": lw}
+
+
+def build_spectral_forcing(sl, grid, time_ns, year, *, aerosol=None,
+                           sigma=None, ic_carry=None):
     """The traced per-sample forcing dict of the spectral core, from a slice.
 
     ONE builder for the training loader and the WB2 forecast eval, so a model
@@ -1244,6 +1319,9 @@ def build_spectral_forcing(sl, grid, time_ns, year):
     # the output dict is identical to the pre-helper version.
     for _key, _plane_2d in prescribed_surface_planes(sl, grid).items():
         forcing[_key] = _plane_2d.reshape(-1)
+    if aerosol is not None:
+        forcing.update(wb_aerosol_forcing(aerosol, grid, sigma, ic_carry,
+                                          time_ns))
     return forcing
 
 
@@ -1317,7 +1395,7 @@ def _load_era5_samples_spectral(cfg, yml, grid, sigma, *,
     # Carrying turbulence energy across steps on this path is separate work.
     _cl = dict(yml.get("classical", {})) if cfg.mode == "physics" else {}
     _micro = str(_cl.get("microphysics", "none"))
-
+    _aerosol = wb_aerosol_spec(yml) if cfg.mode == "physics" else None
 
     samples = []
     for year, i_ic, i_tg in _sharded_indices(
@@ -1332,7 +1410,9 @@ def _load_era5_samples_spectral(cfg, yml, grid, sigma, *,
             validate_carry_holds_scheme(
                 ic, _micro, context=f"WB {cfg.mode} arm initial condition")
         sst_src = load_era5_slice(sst_cfg, i_ic, ds=ds, flux_ds=flux_ds)
-        forcing = build_spectral_forcing(sst_src, grid, times[i_ic], year)
+        forcing = build_spectral_forcing(sst_src, grid, times[i_ic], year,
+                                         aerosol=_aerosol, sigma=sigma,
+                                         ic_carry=ic)
         sample = (ic, target, forcing)
         samples.append(_sample_to_host(sample) if host_resident else sample)
     return samples

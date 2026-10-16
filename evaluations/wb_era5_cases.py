@@ -135,6 +135,7 @@ def _build_verification(ds, time_idx, resolution_deg):
 def build_forecast_cases(
     era5_cfg, grid, sigma, *, leads_hours, eval_year, n_inits,
     init_stride_hours, resolution_deg, ds=None, smoothing_passes=4,
+    aerosol=None,
 ):
     """Build the WB2 forecast-eval cases for one eval year.
 
@@ -144,6 +145,8 @@ def build_forecast_cases(
         ERA5 store + level + cadence config. ``era5_cfg.dt_hours`` is the store
         cadence; the IC uses ``era5_cfg.levels`` for the vertical interpolation.
     grid, sigma : Gaussian grid + sigma coordinate of the spectral training core.
+    aerosol : ``scale_build.wb_aerosol_spec(yml)`` or None -- the training
+        lane's aerosol climatology, so the eval forcing matches training.
     leads_hours : iterable of int
         Forecast lead times [h]. Each MUST be a multiple of the ERA5 cadence.
     eval_year : int
@@ -228,7 +231,9 @@ def build_forecast_cases(
         # The SAME forcing the training loader builds (prescribed SST, and
         # the surface-flux planes / land fraction whenever ``era5_cfg`` asks
         # for them), so a model is scored with the forcing it trained on.
-        forcing = build_spectral_forcing(ic_slice, grid, times[i_ic], eval_year)
+        forcing = build_spectral_forcing(ic_slice, grid, times[i_ic], eval_year,
+                                         aerosol=aerosol, sigma=sigma,
+                                         ic_carry=init_carry)
 
         verif_by_lead = {}
         for lead in leads:

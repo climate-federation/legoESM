@@ -237,7 +237,7 @@ def main(argv=None, ds=None):
     # --- ERA5 cases (ICs + forcing + WB2-grid verification) ---
     # The eval's surface forcing must match training: the prescribed-flux
     # planes and the land fraction are loaded iff the deck (and mode) ask.
-    from legoesm.training.scale_build import wb_needs_land_frac
+    from legoesm.training.scale_build import wb_aerosol_spec, wb_needs_land_frac
     era5_cfg = TrainingERA5Config(dt_hours=cadence)._replace(
         zarr_store=yml["era5_zarr"],
         load_surface_fluxes=bool(yml.get("era5_surface_fluxes", False)),
@@ -248,7 +248,8 @@ def main(argv=None, ds=None):
         era5_cfg, grid, sigma,
         leads_hours=cfg.leads_hours, eval_year=eval_year, n_inits=cfg.n_inits,
         init_stride_hours=cfg.init_stride_hours,
-        resolution_deg=cfg.resolution_deg, ds=ds)
+        resolution_deg=cfg.resolution_deg, ds=ds,
+        aerosol=(wb_aerosol_spec(yml) if cfg.mode == "physics" else None))
     log.info("WB2 eval: mode=%s year=%d inits=%d leads=%s res=%.3gdeg dt=%.1fs",
              cfg.mode, eval_year, len(cases), list(cfg.leads_hours),
              cfg.resolution_deg, dt)

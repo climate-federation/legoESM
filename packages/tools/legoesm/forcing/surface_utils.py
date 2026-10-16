@@ -637,3 +637,68 @@ def stratospheric_layer_weight(p_half_col: jnp.ndarray,
     top = jnp.minimum(p_half_col[:, :-1], p_half_col[:, 1:])
     bot = jnp.maximum(p_half_col[:, :-1], p_half_col[:, 1:])
     return jnp.where(bot <= p_tp, 1.0, jnp.where(top >= p_tp, 0.0, 0.5))
+
+
+def aerosol_layer_fields(acfg, day, lat_col, p_half_col, w_strat, *,
+                         active, lw_active, dtype):
+    """Per-layer aerosol forcing for one day: ``(aerosol_od, ccn_aod,
+    aerosol_lw_od)``, as the AMIP driver feeds radiation and the aerosol-CCN
+    droplet number.  ``ccn_aod`` is None when ``active`` is off; the two
+    optical-depth fields are zeros (ncol, nlev) when their switch is off."""
+    from legoesm.forcing.external import (
+        get_aerosol_at_time,
+        get_aerosol_lw_at_time,
+        get_aerosol_sw_volcanic_at_time,
+    )
+
+    ncol, nlev = p_half_col.shape[0], p_half_col.shape[1] - 1
+    ccn_aod = None
+    aerosol_od = jnp.zeros((ncol, nlev), dtype=dtype)
+    if active:
+        _acfg = acfg
+        # Volcanic SW (CMIP6 ``ext_sun``) is placed at its true
+        # stratospheric pressure like the LW profile below, NOT spread
+        # with the tropospheric column by pressure mass.  A legacy
+        # column-only volcanic file (profile None) stays in the column.
+        volc_sw = get_aerosol_sw_volcanic_at_time(_acfg, day, lat_grid=lat_col)
+        _trop_cfg = _acfg._replace(volcanic_enabled=False)
+        aerosol_col = get_aerosol_at_time(
+            _acfg if volc_sw is None else _trop_cfg, day, lat_grid=lat_col,
+        )
+        aerosol_od = distribute_column_aod_to_layers(
+            jnp.asarray(aerosol_col), p_half_col,
+        )
+        if volc_sw is not None:
+            aerosol_od = aerosol_od + (place_stratospheric_aod_profile_to_layers(
+                jnp.asarray(volc_sw[0]), jnp.asarray(volc_sw[1]), p_half_col,
+            ) * w_strat
+            ).astype(aerosol_od.dtype)
+        # AOD->CCN input: TROPOSPHERIC column in the visible (550 nm)
+        # band, volcanic excluded, from ``ccn_path`` (fine mode) if set.
+        ccn_aod = jnp.asarray(get_aerosol_at_time(
+            _trop_cfg._replace(path=_acfg.ccn_path or _acfg.path),
+            day, lat_grid=lat_col, band="vis",
+        )).reshape(ncol).astype(dtype)
+
+    # Volcanic stratospheric LONGWAVE aerosol (gap #9): same (ncol,
+    # nlev) shape as ``aerosol_od``, default zeros so the SegmentForcing
+    # / forcing-dict leaf is a concrete fixed-shape array (no retrace)
+    # and a run without volcanic LW aerosol is byte-identical (zeros LW
+    # od is a RRTMGP no-op).  ``get_aerosol_lw_at_time`` returns the
+    # file's height-resolved ABSORPTION profile (ext*(1-omega), Planck-
+    # weighted gray band collapse) plus its pressure edges; the profile
+    # is placed at its true stratospheric pressure by a conservative
+    # overlap remap -- NOT spread by full-column pressure mass, which
+    # dumped ~90% of a stratospheric aerosol into the troposphere.
+    aerosol_lw_od = jnp.zeros((ncol, nlev), dtype=dtype)
+    if lw_active:
+        aerosol_lw_prof = get_aerosol_lw_at_time(
+            acfg, day, lat_grid=lat_col,
+        )
+        if aerosol_lw_prof is not None:
+            prof_col, p_edges = aerosol_lw_prof
+            aerosol_lw_od = (place_stratospheric_aod_profile_to_layers(
+                jnp.asarray(prof_col), jnp.asarray(p_edges), p_half_col,
+            ) * w_strat
+            ).astype(dtype)
+    return aerosol_od, ccn_aod, aerosol_lw_od

@@ -374,3 +374,96 @@ def test_the_trainer_forwards_the_lid_and_fp32_deck_keys(monkeypatch):
     bad["classical"]["rrtmgp_compute_fp32"] = "false"
     with _pt.raises(ValueError, match="must be a YAML boolean"):
         build_mode_components(cfg, bad)
+
+
+def _tier3():
+    import pathlib
+
+    import yaml
+    repo = pathlib.Path(__file__).resolve().parents[2]
+    return yaml.safe_load((repo / "config" / "wb" / "campaign"
+                           / "spectral_t63_cam6_tier3.yaml").read_text())
+
+
+def test_aerosol_climatology_averages_the_years_on_the_noleap_clock(
+        monkeypatch):
+    """Owner 2026-10-16: the AMIP aerosol as a 2005-2014 calendar-month
+    climatology.  Every year is read at the SAME noleap day (29 Feb -> 28 Feb,
+    1 Mar of a leap year -> day 59) and the three fields are averaged."""
+    from types import SimpleNamespace
+
+    import jax.numpy as jnp
+    import numpy as np
+
+    import legoesm.forcing.external as ext
+    from legoesm.grids.gaussian import create_gaussian_grid
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.training.scale_build import (
+        build_spectral_forcing, wb_aerosol_spec)
+
+    calls = []
+
+    def _aod(c, day, lat_grid=None, band="gray"):
+        calls.append((c.start_year, float(day), band))
+        return np.full(np.shape(lat_grid), 1e-3 * (c.start_year - 2000)
+                       + (0.5 if band == "vis" else 0.0))
+    monkeypatch.setattr(ext, "get_aerosol_at_time", _aod)
+    monkeypatch.setattr(ext, "get_aerosol_sw_volcanic_at_time",
+                        lambda c, day, lat_grid=None: None)
+    monkeypatch.setattr(ext, "get_aerosol_lw_at_time",
+                        lambda c, day, lat_grid=None: None)
+
+    spec = wb_aerosol_spec(_tier3())
+    assert spec[1] == tuple(range(2005, 2015)) and spec[2] is True
+    assert spec[0].ccn_path and spec[0].volcanic_path
+    assert wb_aerosol_spec({"classical": {}}) is None
+
+    grid, sigma = create_gaussian_grid(8), create_sigma_coordinate(4)
+    carry = SimpleNamespace(
+        p_s=jnp.full((grid.n_lat, grid.n_lon), 1e5),
+        T=jnp.full((grid.n_lat, grid.n_lon, 4), 250.0))
+    sl = SimpleNamespace(sst=np.full((4, 8), 290.0), lat=np.linspace(-80, 80, 4),
+                         lon=np.linspace(0, 315, 8), sfc_shf=None, land_frac=None)
+    for stamp, want in (("2016-03-01T00", 59.0), ("2016-02-29T06", 58.25),
+                        ("2015-12-31T18", 364.75)):
+        calls.clear()
+        f = build_spectral_forcing(sl, grid, np.datetime64(stamp, "ns"), 2016,
+                                   aerosol=spec, sigma=sigma, ic_carry=carry)
+        assert sorted({y for y, _, _ in calls}) == list(range(2005, 2015))
+        assert {d for _, d, _ in calls} == {want}
+        col = np.asarray(f["aerosol_od"]).sum(axis=1)
+        np.testing.assert_allclose(col, 1e-3 * 9.5, rtol=1e-12)
+        np.testing.assert_allclose(np.asarray(f["aerosol_ccn_aod"]),
+                                   0.5 + 1e-3 * 9.5, rtol=1e-12)
+    plain = build_spectral_forcing(sl, grid, np.datetime64("2016-03-01", "ns"),
+                                   2016)
+    assert "aerosol_od" not in plain
+
+
+def test_the_cam6_tier3_deck_runs_aerosol_ccn_like_amip(monkeypatch):
+    """The droplet-number-from-aerosol switch reaches the BUILT physics (both
+    radiation and microphysics read it), and the deck's aerosol keys are
+    accepted.  Non-vacuity: drop ``nc_from_aerosol`` from the deck's
+    param_fixed and the gate reads False."""
+    import copy
+    from types import SimpleNamespace
+
+    import legoesm.atmosphere.physics.combined as combined
+    from legoesm.training.scale_build import (
+        build_mode_components, validate_wb_campaign_yaml)
+
+    yml = copy.deepcopy(_tier3())
+    validate_wb_campaign_yaml(yml)
+    seen = []
+    real = combined.make_physics
+
+    def spy(cfg, *a, **k):
+        seen.append(combined._aerosol_ccn_active(cfg))
+        return real(cfg, *a, **k)
+    monkeypatch.setattr(combined, "make_physics", spy)
+    yml["spectral"] = dict(yml["spectral"], n_max=10)
+    cfg = SimpleNamespace(mode="physics", training_core="spectral",
+                          smoke=False, multi_step_hours=(6,), n_days=1)
+    *_, params, mk, _loss, _dt = build_mode_components(cfg, yml)
+    mk(params)
+    assert seen and all(seen)

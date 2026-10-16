@@ -268,6 +268,18 @@ classical:
   rrtmgp_gpoint_batch_size: 8
   rrtmgp_overhead_layer: true  # AMIP production: CAM RRTMG lid layer above the model top
   rrtmgp_compute_fp32: true    # AMIP production: fp32 optics + RTE solve (dycore stays fp64)
+  # AMIP production aerosol (config/amip/amip_production.sh files), as a
+  # calendar-month climatology over 2005-2014: the files end 2014 and the WB
+  # windows are 2015-2020 (owner 2026-10-16). Radiation optics + Morrison
+  # droplet number from aerosol (nc_from_aerosol below), as AMIP runs them.
+  aerosol_file: /work/bb1596/b309178/diffESM/legoesm_ap/data/forcing/cmip6_1979-2014/aeropt_macv2sp_sw_b14_tot_1850-2014_MACv1bg.nc
+  aerosol_ccn_file: /work/bb1596/b309178/diffESM/legoesm_ap/data/forcing/cmip6_1979-2014/aeropt_macv2sp_sw_b14_fin_1850-2014_MACv1bg.nc
+  # Production names the 1850-2014 IACETH-v4 build, not staged here; its
+  # 1979-2014 records equal this file (amip_production.sh, #1948).
+  volcanic_aerosol_file: /work/bb1596/b309178/diffESM/legoesm_ap/data/forcing/cmip6_1979-2014/bc_aeropt_cmip6_volc_lw_b16_sw_b14_1979-2014.nc
+  volcanic_aerosol_lw: true
+  aerosol_reference_aod: 0.03
+  aerosol_climatology_years: [2005, 2014]
   param_fixed:
     atm.clouds.CloudConfig:
       # 0.0 = floor OFF, as in the MPAS production deck (cloud_q_c_diagnostic:
@@ -289,6 +301,7 @@ classical:
       prognostic: true
     atm.micro.MorrisonConfig:
       warm_rain_incloud: true  # AMIP production (CAM6 MG2 in-cloud warm rain)
+      nc_from_aerosol: true  # AMIP production --aerosol-ccn
       # CAM6 clubb_do_liqsupersat = .false.: no condensation step after the
       # physics, and no ice-curve blend of it. Matches the MPAS production
       # deck (config/amip/amip_production.yaml, both rows false).
