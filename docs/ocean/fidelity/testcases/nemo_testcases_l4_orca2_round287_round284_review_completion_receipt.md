@@ -56,6 +56,11 @@ remeasured or changed in this round.
 The behavioral and review-gate focused tests pass 10/10.  `git diff --check`
 is clean.
 
+The cumulative default-receipt citation gate and this receipt's gate both
+pass with no failures, no unmapped citations, and no citation-map audit
+failures.  A rigid two-line shift of the live np_CRV citation exits 1 with
+`SYMBOL-NOT-AT-LINE`, proving the round gate fires.
+
 ## Shared GYRE proof
 
 Because the citation-only edit touches a shared model file, the full shared
