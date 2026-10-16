@@ -52,6 +52,7 @@ PLANTS = (
     "none", "admission", "label-coverage", "source-order", "passivity",
     "candidate-replay", "oracle-replay", "first-leaf", "one-bit",
 )
+_PROGRAM_JIT = None
 
 
 class GateError(RuntimeError):
@@ -123,6 +124,7 @@ def _program(inputs: dict[str, object]) -> dict[str, np.ndarray]:
         nemo_transport_wzv_divergence_level,
     )
 
+    global _PROGRAM_JIT
     names = ("trp_u", "trp_v", "w_r1area", "w_area", "w_e3t0",
              "w_r3bb", "w_r3mm", "w_r3aa", "w_tmask", "w_dt")
     values = tuple(jnp.asarray(inputs[name], dtype=jnp.float64) for name in names)
@@ -155,7 +157,9 @@ def _program(inputs: dict[str, object]) -> dict[str, np.ndarray]:
                 transport_divergence, live_thickness, flux_divergence,
                 ratio_delta, stretch_rate, ww, area_product)
 
-    result = jax.device_get(jax.jit(execute)(*values))
+    if _PROGRAM_JIT is None:
+        _PROGRAM_JIT = jax.jit(execute)
+    result = jax.device_get(_PROGRAM_JIT(*values))
     return {name: np.asarray(value, np.float64)
             for name, value in zip(SOURCE_ORDER, result)}
 
