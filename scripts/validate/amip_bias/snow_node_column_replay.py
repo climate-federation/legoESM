@@ -81,6 +81,11 @@ def capture(a):
     argv[argv.index("--days") + 1] = str(int(np.ceil(a.calls * a.land_dt / 86400.0)) + 1)
     if a.config:                       # e.g. another run's state on THIS tree's deck
         argv[argv.index("--config") + 1] = a.config
+    for m in a.path_map:               # moved input trees: same files, new place
+        src, dst = m.split("=", 1)
+        if not (src.startswith("/") and len(src) > 1 and dst.startswith("/")):
+            raise SystemExit(f"--path-map needs absolute OLD=NEW paths, got {m!r}")
+        argv = [v.replace(src, dst) for v in argv]
     if a.restart_copy:                 # a checkpoint copy away from the run's sidecars
         argv[argv.index("--restart-from") + 1] = a.restart_copy
     rec: dict = {"forcing": [], "cells": None}
@@ -255,6 +260,169 @@ def replay(a):
           f"{int(np.sum((last_n['skin'] > tf + 1e-9) & (last_n['snow'] > 0)))}")
 
 
+def to_plain(x):
+    """Code-version-independent copy: NamedTuples become tagged field dicts."""
+    if isinstance(x, tuple) and hasattr(x, "_fields"):
+        return {"__nt__": f"{type(x).__module__}:{type(x).__qualname__}",
+                **{f: to_plain(v) for f, v in zip(x._fields, x)}}
+    if isinstance(x, dict):
+        return {kk: to_plain(v) for kk, v in x.items()}
+    if isinstance(x, (list, tuple)):
+        return type(x)(to_plain(v) for v in x)
+    if hasattr(x, "shape") and hasattr(x, "dtype"):
+        return np.asarray(x)
+    return x
+
+
+def from_plain(x, log):
+    """Rebuild with THIS checkout's classes; fields this checkout lacks are
+    dropped and fields it adds take its defaults, both recorded in ``log``
+    (class -> (dropped, defaulted)).  A new field without a default raises."""
+    import importlib
+    if isinstance(x, dict) and "__nt__" in x:
+        mod, name = x["__nt__"].split(":")
+        cls = importlib.import_module(mod)
+        for part in name.split("."):
+            cls = getattr(cls, part)
+        given = {f: v for f, v in x.items() if f != "__nt__"}
+        known = set(cls._fields)
+        log[name] = (sorted(set(given) - known), sorted(known - set(given)))
+        return cls(**{f: from_plain(v, log) for f, v in given.items() if f in known})
+    if isinstance(x, dict):
+        return {kk: from_plain(v, log) for kk, v in x.items()}
+    if isinstance(x, (list, tuple)):
+        return type(x)(from_plain(v, log) for v in x)
+    return x
+
+
+def export(a):
+    """Write a capture as plain data that another checkout can rebuild."""
+    import jax.numpy as jnp
+    cap = pickle.load(open(a.capture, "rb"))
+    treedef, stat, vals, pos = cap["args"]
+    state0, _, x, k = join_static(treedef, stat, [jnp.asarray(v) for v in vals], pos)
+    with open(a.out, "wb") as fh:
+        pickle.dump({"run": cap["run"], "day": cap["day"],
+                     "f_land_packed": cap["f_land_packed"],
+                     "state": to_plain(state0), "forcing": [to_plain(f) for f in cap["forcing"]],
+                     "config": to_plain(x[0]), "U_min": float(x[1]), "dt": float(x[2]),
+                     "kw": to_plain(dict(k))}, fh)
+    print(f"wrote {a.out}")
+
+
+TRACE_SWE = 1e-6      # kg/m2: "trace" pack, below any physical snow cover
+HEALTHY_SWE = 1.0     # kg/m2
+
+
+def trace_summary(T_snow, T_soil0, skin, swe, land, t_freeze, cohort=None):
+    """Per-class extremes on land columns: trace (0 < SWE < TRACE_SWE), healthy
+    (SWE > HEALTHY_SWE), and all land; runaway = T_snow > T_freeze + 5 K on a
+    column that holds snow."""
+    from legoesm import constants
+    meltout_K = constants.L_f / constants.c_pi
+    out = {}
+    classes = [("trace", land & (swe > 0) & (swe < TRACE_SWE)),
+               ("healthy", land & (swe > HEALTHY_SWE)), ("land", land)]
+    if cohort is not None:      # columns trace at ANY step so far, melted out or not
+        classes.insert(1, ("cohort", land & cohort))
+    for name, m in classes:
+        n = int(m.sum())
+        snowy = m & (swe > 0)       # T_snow of a snow-free column mirrors soil
+        out[name] = dict(
+            n=n,
+            runaway=int(np.sum(snowy & (T_snow > t_freeze + 5.0))),
+            # trace pack melts out only above L_f/c_ice over freezing
+            past_meltout=int(np.sum(snowy & (T_snow > t_freeze + meltout_K))),
+            T_snow_max=float(T_snow[snowy].max()) if snowy.any() else float("nan"),
+            T_soil0_max=float(T_soil0[m].max()) if n else float("nan"),
+            skin_max=float(skin[m].max()) if n else float("nan"))
+    return out
+
+
+def worst_of(rows):
+    """Day aggregate of per-step summaries: the largest value of every entry
+    (a node overheated at one step is melted back at the next, so a day-end
+    look alone can miss it); n is the day-end count."""
+    agg = {}
+    for c in rows[-1]:
+        agg[c] = {key: (rows[-1][c][key] if key == "n" else
+                        max(r[c][key] for r in rows) if key in ("runaway", "past_meltout") else
+                        float(np.nanmax([r[c][key] for r in rows])))
+                  for key in rows[-1][c]}
+    return agg
+
+
+def trace(a):
+    """Snow node ON from an exported (node OFF) capture's start, as a run
+    restarted without the node starts it; report runaway on trace-snow land
+    columns.  The export is rebuilt with THIS checkout's classes, so the same
+    columns, forcing and resolved land config run on either code version."""
+    import jax
+    import jax.numpy as jnp
+    from legoesm import constants
+    from legoesm.land.multilayer_land import (
+        init_snow_temperature, land_skin_temperature,
+        step_multilayer_land_with_diagnostics)
+
+    cap = pickle.load(open(a.plain, "rb"))
+    log: dict = {}
+    to_j = lambda t: jax.tree_util.tree_map(  # noqa: E731
+        lambda v: jnp.asarray(v) if isinstance(v, np.ndarray) else v, t)
+    state0 = to_j(from_plain(cap["state"], log))
+    forcings = [to_j(from_plain(f, log)) for f in cap["forcing"]]
+    config = from_plain(cap["config"], log)
+    k = to_j(from_plain(cap["kw"], log))
+    U_min, dt = cap["U_min"], cap["dt"]
+    for name, (dropped, defaulted) in sorted(log.items()):
+        if dropped or defaulted:
+            print(f"rebuild {name}: dropped {dropped}, defaulted {defaulted}")
+    land = cap["f_land_packed"] > 0.5
+    if config.thermal.snow_insulation:
+        raise SystemExit("FATAL: captured run already has the snow node on")
+    if abs(len(forcings) * dt - 86400.0) > 1e-6:
+        raise SystemExit(f"FATAL: the captured forcing spans {len(forcings) * dt} s")
+    if a.trace_swe_to is not None:
+        sw = state0.snow_depth
+        state0 = state0._replace(snow_depth=jnp.where(
+            (sw > 0) & (sw < TRACE_SWE), a.trace_swe_to, sw))
+    tf = constants.T_freeze
+    kw = dict(k)
+    res = {}
+    for arm, on in (("off", False), ("on", True)):
+        cfg = config._replace(thermal=config.thermal._replace(snow_insulation=on))
+        s = init_snow_temperature(state0) if on else state0
+        step = jax.jit(lambda s_, f_, c=cfg: step_multilayer_land_with_diagnostics(
+            s_, f_, c, U_min, dt, **kw))
+        rows, day = [], []
+        sw = np.asarray(s.snow_depth)
+        cohort = (sw > 0) & (sw < TRACE_SWE)
+        for i in range(a.days * len(forcings)):
+            s = step(s, forcings[i % len(forcings)])[0]
+            T0 = np.asarray(s.T_soil[:, 0])
+            Ts = np.asarray(s.T_snow) if on else T0
+            sw = np.asarray(s.snow_depth)
+            cohort |= (sw > 0) & (sw < TRACE_SWE)
+            day.append(trace_summary(Ts, T0, np.asarray(land_skin_temperature(s)),
+                                     sw, land, tf, cohort))
+            if (i + 1) % len(forcings) == 0:
+                rows.append(worst_of(day))
+                day = []
+        res[arm] = rows
+    print(f"run {cap['run']} day {cap['day']}: {int(land.sum())} land columns, "
+          f"dt {dt} s, trace SWE < {TRACE_SWE} kg/m2, healthy > {HEALTHY_SWE}"
+          + (f", start trace SWE set to {a.trace_swe_to}" if a.trace_swe_to is not None else ""))
+    print(f"day arm | class n(day end) | worst over the day's steps: runaway "
+          f"past_meltout(>{constants.L_f / constants.c_pi:.0f} K) T_snow_max-Tf (snow columns) "
+          "T_soil0_max skin_max (K); cohort = land columns trace at any step")
+    for d in range(a.days):
+        for arm in ("off", "on"):
+            for c, v in res[arm][d].items():
+                print(f"{d + 1:3d} {arm:3s} | {c:7s} {v['n']:6d} {v['runaway']:6d} "
+                      f"{v['past_meltout']:6d} "
+                      f"{v['T_snow_max'] - tf:8.1f} {v['T_soil0_max']:8.1f} {v['skin_max']:8.1f}")
+    return res
+
+
 def soil_budget(a):
     """Energy budget of the FINAL soil-thermal solve of every land step, node
     OFF (main's bulk path), on the captured columns over the captured day.
@@ -408,12 +576,23 @@ def main(argv=None):
                         "(e.g. without the run's CMOR accumulator sidecars)")
     c.add_argument("--config", default="",
                    help="replace the run's --config deck (default: keep it)")
+    c.add_argument("--path-map", action="append", default=[], metavar="OLD=NEW",
+                   help="rewrite this path prefix in the run's command line "
+                        "(an input tree that moved)")
     c.add_argument("--land-dt", type=float, default=1800.0,
                    help="full land step [s]; shorter (start-up) calls are skipped")
     r = sp.add_parser("replay")
     r.add_argument("capture")
     r.add_argument("--days", type=int, required=True)
     r.add_argument("--lat-band", type=float, nargs=2, default=(45.0, 70.0))
+    e = sp.add_parser("export")
+    e.add_argument("capture")
+    e.add_argument("--out", required=True)
+    t = sp.add_parser("trace")
+    t.add_argument("plain", help="output of the export subcommand")
+    t.add_argument("--days", type=int, required=True)
+    t.add_argument("--trace-swe-to", type=float, default=None,
+                   help="set start SWE of trace columns to this value [kg/m2]")
     b = sp.add_parser("soil-budget")
     b.add_argument("capture")
     b.add_argument("--lat-band", type=float, nargs=2, default=(45.0, 70.0))
@@ -422,7 +601,8 @@ def main(argv=None):
     b.add_argument("--substeps", type=int, default=0,
                    help="override the final solve's freeze/thaw sub-steps (0 = model's)")
     a = p.parse_args(argv)
-    return {"capture": capture, "replay": replay, "soil-budget": soil_budget}[a.cmd](a)
+    return {"capture": capture, "replay": replay, "export": export, "trace": trace,
+            "soil-budget": soil_budget}[a.cmd](a)
 
 
 if __name__ == "__main__":

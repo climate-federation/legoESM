@@ -143,3 +143,60 @@ def test_soil_budget_control_closes_and_freeze_thaw_does_not(tmp_path, capsys):
                                       nq=200, control=False, substeps=0))
     lin, sub, r = _budget_lines(capsys.readouterr().out)
     assert lin < 1e-6 and sub < 1e-9 and abs(r) > 1e-3, (lin, sub, r)
+
+
+def test_trace_summary_classes_and_runaway_count():
+    tf = 273.15  # const-ok: synthetic known-answer value, passed in explicitly
+    swe = np.array([1e-9, 5.0, 0.0, 1e-9, 5.0])
+    land = np.array([True, True, True, True, False])
+    T_snow = np.array([tf + 50, tf + 6, tf + 90, tf - 1, tf + 80])
+    out = rp.trace_summary(T_snow, T_snow, T_snow, swe, land, tf)
+    assert out["trace"]["n"] == 2 and out["trace"]["runaway"] == 1
+    assert out["trace"]["T_snow_max"] == tf + 50
+    assert out["healthy"]["n"] == 1 and out["healthy"]["runaway"] == 1
+    # snow-free land (T_snow mirrors soil) is not a runaway; sea column ignored
+    assert out["land"]["n"] == 4 and out["land"]["runaway"] == 2
+    assert out["land"]["T_snow_max"] == tf + 50       # snow-free 90 K column excluded
+    from legoesm import constants
+    hot = rp.trace_summary(np.full(5, tf + constants.L_f / constants.c_pi + 1), T_snow,
+                           T_snow, swe, land, tf, cohort=np.array([1, 0, 0, 0, 1], bool))
+    assert hot["trace"]["past_meltout"] == 2 and hot["cohort"]["n"] == 1
+    later = rp.trace_summary(T_snow - 60, T_snow, T_snow, swe, land, tf)
+    day = rp.worst_of([out, later])
+    assert day["trace"]["runaway"] == 1 and day["trace"]["T_snow_max"] == tf + 50
+
+
+def test_plain_round_trip_and_field_drift_log():
+    cfg, st, f = _setup()
+    tree = {"state": st, "cfg": cfg, "lat": jnp.ones(3), "doy": None}
+    plain = rp.to_plain(tree)
+    log = {}
+    back = rp.from_plain(plain, log)
+    assert back["cfg"] == cfg and back["doy"] is None
+    np.testing.assert_array_equal(back["state"].T_soil, np.asarray(st.T_soil))
+    assert all(d == ([], []) for d in log.values())
+    # an exporting checkout with an extra field, and one lacking a field
+    plain["state"]["field_from_elsewhere"] = np.zeros(3)
+    del plain["state"]["T_snow"]                      # has a default (None)
+    log = {}
+    back = rp.from_plain(plain, log)
+    assert log[type(st).__qualname__] == (["field_from_elsewhere"], ["T_snow"])
+    assert back["state"].T_snow is None
+    del plain["state"]["snow_age"]                    # no default: must refuse
+    with pytest.raises(TypeError):
+        rp.from_plain(plain, {})
+
+
+def test_export_then_trace_runs_both_arms(tmp_path, capsys):
+    cfg, st, f = _setup()
+    st = st._replace(snow_depth=jnp.array([1e-9, 0.0, 20.0]))
+    p = _capture_file(tmp_path, cfg, st, f)
+    q = tmp_path / "plain.pkl"
+    rp.export(argparse.Namespace(capture=str(p), out=str(q)))
+    ns = dict(plain=str(q), days=1, trace_swe_to=None)
+    res = rp.trace(argparse.Namespace(**ns))
+    assert set(res) == {"off", "on"} and len(res["on"]) == 1
+    assert res["on"][0]["land"]["n"] == 3
+    assert "  1 on  | land" in capsys.readouterr().out
+    res = rp.trace(argparse.Namespace(**{**ns, "trace_swe_to": 10.0}))
+    assert res["on"][0]["trace"]["n"] == 0
