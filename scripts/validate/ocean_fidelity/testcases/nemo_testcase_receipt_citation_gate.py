@@ -5615,9 +5615,11 @@ CITATION_MAP = {
     # Extent 172 -> 174 and end anchor renamed at G4 round 9: the stage-3
     # Kmm option added two lines inside the span; endpoints are the same
     # statements.
+    # Extent 174 -> 199 at G5 round 4: the stage-3 salt block (trasbc.f90:308)
+    # was inserted between the same two pinned endpoint statements.
     'ocean_model_latlon_cgrid.py:8312-8510': [
         '_stage3_T_rate = (',
-        '/ jnp.maximum(_h_s3_kmm, 1.0e-10),', 174],
+        '/ jnp.maximum(_h_s3_kmm, 1.0e-10),', 199],
     # Extent 433 -> 434 at the 2026-09-25 merge: main added one line inside
     # this span (``omega=_cfg_b.omega,`` on the isoneutral K33 call), so the
     # two pinned endpoint statements are one line further apart than before.
