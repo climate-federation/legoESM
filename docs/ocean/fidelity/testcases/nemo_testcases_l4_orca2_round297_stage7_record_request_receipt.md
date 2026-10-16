@@ -67,10 +67,10 @@ byte-identical.
 The clean-tree preflight applies the one-line scientific writer change,
 compiles the patched Fortran writer, and prints
 `ORCA2_ROUND297_STAGE7_PREFLIGHT_READY`. SHA-256:
-`846c56e6c67244fc2b4ba240400d7192d327b9e667667e5bae002f252168110f`.
+`551a8f2740e6909142bc78259721cf2b9e983a45306b79119beb7e2585b1d4cb`.
 The writer-layout plant removes the kt=7 selector and exits 69 with
 `STATUS PLANT-FIRED layout`. SHA-256:
-`e7b45e09b53d82b0bee473faafeca5c3dd325383ff007008c8ce366c0663ed34`.
+`378490743b135b49af841552cc0e9fdce317260c2f80f81e7316bb708145d462`.
 No `mpirun` was attempted in the sandbox.
 
 ## Validation and review
