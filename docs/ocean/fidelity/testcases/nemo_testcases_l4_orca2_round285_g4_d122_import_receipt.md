@@ -43,6 +43,12 @@ The G4 certification receipts are
 `nemo_testcases_gridladder_g4_round2` through `round9`; their terminal gate is
 bit-identical for every field at kt=1..10 under both labels.
 
+Lane base is `d379c2cc93974148579d69f12d1a11e7411956ed`; the frozen
+preregistration is `79e2955db`; the imported package commits are
+`4bdbf8c23`, `3c92393f5`, `f105805a2`, and `70c37acf2`; and the measurement
+producer is `30b8de354`.  The Decision-122 artifact SHA256 is
+`3c1492edee6fe536904af5afa36a021d8cd2535140c11feee03eed808cd641cd`.
+
 ## Frozen predictions
 
 R285-P1 **CONFIRMED**: the imported hunks retain fail-closed false defaults and
@@ -87,11 +93,17 @@ reported quantities, not substituted landing predicates.
   `3c0602babb535aac55512f3b82561d0f562b1ec51d542552efd8499a119b443b`.
 - DINO/tank/generic-card focused battery: 61 passed.
 - Imported-statement focused tests: 6 passed.
+- Citation/recipe/freshwater push battery: 128 passed in 372.37 s.
 - Default citation gate: PASS after the required SequenceMatcher re-anchor;
   zero unmapped citations and zero audit failures.  The round citation plant
   fires.
-- The required `tests/ocean/fidelity` battery is recorded below after its one
-  permitted run.  Independent review: operator.
+- The single required `tests/ocean/fidelity -n 12` invocation collected 3,600
+  tests and reached its displayed 99% before one xdist worker aborted in JAX
+  compilation and the controller stopped making progress.  The two affected
+  G1 parameter IDs both pass in a fresh serial `-p no:xdist` process.  The two
+  other displayed failures reproduce serially and are the registered
+  pre-existing worktree-stamp ratchet and SI3 scalar-math provenance reds.
+  The full battery was not re-run.  Independent review: operator.
 
 Evidence is in
 `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round285/`.
