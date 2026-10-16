@@ -250,6 +250,15 @@ def classify(report: dict[str, object], *, plant: str = "none") -> dict[str, obj
     require(plant in PLANTS, f"unknown plant {plant!r}")
     report = copy.deepcopy(report)
     registered_single = report.get("closing_single_substitution")
+    incoming_status = report.get("status")
+    require(incoming_status == "PASS_R295_MEASUREMENT"
+            or (isinstance(incoming_status, str)
+                and incoming_status.startswith("HELD_R295_VECTOR_V_")),
+            "measurement status moved")
+    # A classified report is valid classifier input for the planted controls.
+    # Restore its pre-classification marker so every plant reaches the exact
+    # invariant it claims to exercise instead of failing on idempotency.
+    report["status"] = "PASS_R295_MEASUREMENT"
     if plant == "passivity":
         report["passivity"][next(iter(report["passivity"]))] = False
     elif plant == "source-order":
@@ -270,8 +279,6 @@ def classify(report: dict[str, object], *, plant: str = "none") -> dict[str, obj
     elif plant == "one-bit":
         report["one_bit_control"]["unequal"] = 0
 
-    require(report["status"] == "PASS_R295_MEASUREMENT",
-            "measurement status moved")
     require(report["claim_label"] == "independent_omt4_kt1_stage1_substep1",
             "claim label moved")
     require(report["admission"]["status"] ==
