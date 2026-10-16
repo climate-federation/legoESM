@@ -35,6 +35,7 @@ def git_sha(*, allow_dirty: bool = False) -> str:
         raise GateError(f"cannot stamp legoESM git SHA: {error}") from error
 
 BAR = 1.0e-15
+FLOAT64_SMALLEST_NORMAL = float(np.finfo(np.float64).tiny)
 DEFAULT_ORACLE_ROOTS = {
     "LOCK_EXCHANGE-zco": Path(
         "/data/abyssal/dbalwada/nemo-testcases-l1/phase3/lock_kt1_10"),
@@ -97,6 +98,50 @@ class GateError(RuntimeError):
 def require(ok: bool, message: str) -> None:
     if not ok:
         raise GateError(message)
+
+
+def comparison_masks(oracle, candidate, mask) -> dict[str, np.ndarray]:
+    """Decision 127 masks for one oracle/card comparison.
+
+    A NEMO nonzero binary64 subnormal paired with either signed card zero is
+    the one tolerated class.  Every other unequal active cell remains debt.
+    """
+    oracle = np.asarray(oracle, dtype=np.float64)
+    candidate = np.asarray(candidate)
+    use = np.asarray(mask, dtype=bool)
+    require(oracle.shape == candidate.shape == use.shape,
+            "comparison masks: shape mismatch")
+    unequal = use & (oracle != candidate)
+    flushed_subnormal = (
+        unequal
+        & (oracle != 0.0)
+        & (np.abs(oracle) < FLOAT64_SMALLEST_NORMAL)
+        & (candidate == 0.0)
+    )
+    return {
+        "unequal": unequal,
+        "flushed_subnormal": flushed_subnormal,
+        "normal_difference": unequal & ~flushed_subnormal,
+    }
+
+
+def comparison_census(oracle, candidate, mask) -> dict[str, int]:
+    """Counts for the shared Decision 127 comparison classes."""
+    oracle = np.asarray(oracle, dtype=np.float64)
+    candidate = np.asarray(candidate)
+    use = np.asarray(mask, dtype=bool)
+    masks = comparison_masks(oracle, candidate, mask)
+    return {
+        "bitwise_unequal": int(masks["unequal"].sum()),
+        "flushed_subnormal": int(masks["flushed_subnormal"].sum()),
+        "normal_difference": int(masks["normal_difference"].sum()),
+        "oracle_nonzero_subnormal": int((use & (oracle != 0.0)
+                                          & (np.abs(oracle)
+                                             < FLOAT64_SMALLEST_NORMAL)).sum()),
+        "candidate_nonzero_subnormal": int((use & (candidate != 0.0)
+                                             & (np.abs(candidate)
+                                                < FLOAT64_SMALLEST_NORMAL)).sum()),
+    }
 
 
 def read_entry(path: Path, case: str, *, expect_interior=None) -> dict:
@@ -193,17 +238,24 @@ def score(
     require(np.all(np.isfinite(candidate[use])), f"{name}: candidate nonfinite")
     from legoesm.ocean.fidelity.ulp_move_gate import record_residual_field
     record_residual_field(name, oracle, candidate, use)
-    exact = bool(np.array_equal(oracle[use], candidate[use]))
+    census = comparison_census(oracle, candidate, use)
+    masks = comparison_masks(oracle, candidate, use)
+    exact = census["bitwise_unequal"] == 0
+    matches = census["normal_difference"] == 0
     scale = max(float(np.max(np.abs(oracle[use]))), 1.0)
-    error = float(np.max(np.abs(candidate[use] - oracle[use]))) / scale
-    status = "AT-BAR" if error <= BAR else "DEBT"
+    normal_residual = np.where(
+        masks["normal_difference"], candidate - oracle, 0.0)
+    error = float(np.max(np.abs(normal_residual[use]))) / scale
+    status = "AT-BAR" if matches else "DEBT"
     row = {
         "name": name,
         "status": status,
         "exact": exact,
+        "matches": matches,
         "normalized_max_abs": error,
         "bar": BAR,
         "n": int(use.sum()),
+        **census,
         "oracle_dtype": str(oracle.dtype),
         "candidate_dtype": str(candidate.dtype),
     }

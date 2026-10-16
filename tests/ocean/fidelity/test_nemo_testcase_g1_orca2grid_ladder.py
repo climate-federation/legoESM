@@ -88,25 +88,17 @@ def test_carried_leaf_diff_checks_every_leaf_and_its_plant():
     assert planted["nested[1]"]["cells"] == [[1]]
 
 
-def test_scaled_subnormal_increment_survives_compiled_add_and_is_differentiable():
-    """The G1b repair carries a flushed increment to a normal residual."""
-    import jax
-    from legoesm.ocean.dynamics import ocean_model_latlon_cgrid as M
-
-    field = jnp.asarray([7.767256946156942e-297])
-    physical_increment = -6.7821825463957e-310
-    scaled = jnp.asarray([
-        physical_increment * M._NEMO_SUBNORMAL_KEG_SCALE_SQUARED])
-    active = jnp.asarray([True])
-    compiled = jax.jit(M._nemo_add_scaled_subnormal_increment)
-    got = np.asarray(compiled(field, scaled, active))
-    expected = np.asarray(field) + physical_increment
-    flushed = np.asarray(jax.jit(lambda x, dx: x + dx)(
-        field, jnp.asarray([physical_increment])))
-    assert np.array_equal(got, expected)
-    assert np.array_equal(flushed, np.asarray(field))
-    tangent = jax.grad(lambda x: jnp.sum(compiled(x, scaled, active)))(field)
-    assert np.array_equal(np.asarray(tangent), np.ones(1))
+def test_ladder_row_uses_shared_decision127_classes_and_score_mask():
+    ref = np.array([[1.0, 1.0e-310], [2.3e-308, 0.0]], dtype=np.float64)
+    cand = np.array([[2.0, 0.0], [0.0, 0.0]], dtype=np.float64)
+    use = np.array([[False, True], [True, True]])
+    result = ladder.row("masked", ref, cand, {"interior": use}, mask=use)
+    assert result["n"] == 3
+    assert result["flushed_subnormal"] == 1
+    assert result["normal_difference"] == 1
+    assert result["first_normal_difference_cell"] == [1, 0]
+    assert result["status"] == "DEBT"
+    assert result["regions"]["interior"]["n_cells"] == 3
 
 
 class _Fold:
@@ -1002,30 +994,6 @@ def test_g1b_stage1_replay_selects_vector_velocity_statement(monkeypatch):
                for r in replay_off["card_operand_rows"]) >= 1
 
 
-@needs_g1b_record
-def test_g1b_kt7_subnormal_keg_path_closes_stage3_and_removal_reopens_it(
-        monkeypatch):
-    """The selected gradual-underflow path owns the first trajectory bit."""
-    monkeypatch.setattr(ladder, "CASE", "ORCA2G1b-vec")
-    landed = ladder.run(G1B_RECORD, arm="stages", kt_min=7, kt_max=7,
-                        allow_dirty=True)
-    stage3 = landed["per_kt"][0]["stages"][2]
-    assert all(row["n_unequal"] == 0 for row in stage3["rows"])
-    replay_u = next(row for row in stage3["stage_replay"]["rows"]
-                    if row["face"] == "u")
-    assert replay_u["control_replay_vs_nemo"]["n_unequal"] == 0
-    assert replay_u["card_raw_vs_replay_raw"]["n_unequal"] == 0
-    assert replay_u["card_keg_vs_replay"]["n_unequal"] >= 1
-
-    removed = ladder.run(G1B_RECORD, arm="stages", kt_min=7, kt_max=7,
-                         allow_dirty=True, without_subnormal_keg=True)
-    stage3_off = removed["per_kt"][0]["stages"][2]
-    u_off = next(row for row in stage3_off["rows"]
-                 if row["name"].endswith(".u"))
-    assert u_off["n_unequal"] == 1
-    assert u_off["first_unequal_cell"] == [130, 113]
-
-
 @needs_record5
 @pytest.mark.parametrize("off, stage, key, floor", [
     ((), None, None, 0),
@@ -1262,16 +1230,6 @@ def test_stage_t_stretch_is_one_plus_the_mean_of_the_stored_ratios():
             NS(rk3_stage_r3t_nemo_literal=True, pgf_scheme="adcroft"), 3, pair, zc, depth)
 
 
-def test_unequal_census_separates_flushed_subnormals_from_other_cells():
-    ref = np.array([0.0, 1.0e-310, -3.0e-320, 1.0e-300, 2.0, 5.0e-309])
-    cand = np.array([0.0, 0.0, 0.0, 1.1e-300, 2.0, 5.0e-309])
-    c = ladder.unequal_census(ref, cand)
-    assert (c["n_unequal"], c["nemo_subnormal_card_zero"], c["other"]) == (3, 2, 1)
-    assert (c["nemo_subnormal_anywhere"], c["card_subnormal_anywhere"]) == (3, 1)
-    assert c["unequal_nemo_abs_min"] == 3.0e-320 and c["unequal_nemo_abs_max"] == 1.0e-300
-    assert ladder.unequal_census(ref, ref)["unequal_nemo_abs_min"] is None
-
-
 def test_xla_flushes_subnormals_and_numpy_keeps_them_on_this_host():
     """The registered environment row: the card's executable returns zero
     for a subnormal result and reads a subnormal operand as zero; numpy in
@@ -1331,35 +1289,38 @@ def test_stage_operands_at_steps_5_and_40_name_the_round9_cells():
     assert (d3["depth_n_unequal"], d3["rhd_n_unequal"]) == (1, 0)
 
 
-R9_FIRST_OVER = {(): None, ("without_stage_r3t",): 76, ("without_eos_gdept",): 63,
-                 ("without_stage_r3uv",): None}
+R9_FIRST_NORMAL_DEBT = {
+    (): 9,
+    ("without_stage_r3t",): 9,
+    ("without_eos_gdept",): 9,
+    ("without_stage_r3uv",): 9,
+}
 
 
 @needs_record5
-@pytest.mark.parametrize("off", list(R9_FIRST_OVER))
-def test_the_100_step_record_is_at_the_bar_and_needs_each_round9_statement(off):
-    """INDEPENDENT chain, 100 steps.  The card: no row over the bar, no
-    unequal cell after step 11, and steps 8 to 11 hold only the registered
-    tiny-number class (NEMO subnormal, the card zero, and their descendants
-    below 1e-280).  Each option off is the plant: the sea level leaves the
-    bar at the pinned step, or (the U and V ratios) cells differ past step 11
-    while staying at the bar."""
+@pytest.mark.parametrize("off", list(R9_FIRST_NORMAL_DEBT))
+def test_the_100_step_record_applies_decision127_and_needs_round9_statements(off):
+    """INDEPENDENT chain, 100 steps.  Step 8 contains only tolerated flushed
+    subnormals; step 9 is the first normal-range debt under Decision 127.
+    Each round-9 option off remains non-vacuous by creating differences after
+    step 11, where the selected card has none."""
     out = ladder.run(RECORD5, arm="independent", kt_max=100, allow_dirty=True,
                      **{k: True for k in off})
     rows = [(k["kt"], r) for k in out["per_kt"] for r in k["rows"]]
     over = [kt for kt, r in rows if r["status"] != "AT-BAR"]
     late = [kt for kt, r in rows if kt > 11 and r["n_unequal"]]
-    assert (min(over) if over else None) == R9_FIRST_OVER[off]
+    assert (min(over) if over else None) == R9_FIRST_NORMAL_DEBT[off]
     if off:
         assert late                               # the plant moved cells
         return
     assert not late
-    early = [(kt, r) for kt, r in rows if r["n_unequal"]]
+    early = [(kt, r) for kt, r in rows if kt <= 11 and r["n_bitwise_unequal"]]
     assert {kt for kt, _ in early} == {8, 9, 10, 11}
-    assert all(r["max_abs"] < 1.0e-280 for _, r in early)
-    assert all(r["unequal_census"]["card_subnormal_anywhere"] == 0 for _, r in rows)
-    first = [r for kt, r in early if kt == 8]
-    assert all(r["unequal_census"]["other"] == 0 for r in first)
+    assert all(r["max_abs"] < 1.0e-280 for kt, r in early if kt > 8)
+    assert all(r["candidate_nonzero_subnormal"] == 0 for _, r in rows)
+    step8 = [r for kt, r in early if kt == 8]
+    assert step8 and all(r["normal_difference"] == 0 for r in step8)
+    assert sum(r["flushed_subnormal"] for r in step8) > 0
 
 
 @needs_record5

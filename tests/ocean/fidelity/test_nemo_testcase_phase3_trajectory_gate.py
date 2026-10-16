@@ -35,6 +35,33 @@ def test_planted_wet_state_violation_turns_row_red():
     assert row["normalized_max_abs"] > gate.BAR
 
 
+def test_decision127_tolerates_and_counts_only_nemo_subnormal_to_card_zero():
+    tiny = gate.FLOAT64_SMALLEST_NORMAL
+    oracle = np.array(
+        [1.0e-310, -1.0e-310, 1.0e-310, 2.3e-308], dtype=np.float64)
+    candidate = np.array([0.0, -0.0, 2.0e-310, 0.0], dtype=np.float64)
+    use = np.ones(4, dtype=bool)
+
+    tolerated = gate.score("subnormal_to_zero", oracle[:2], candidate[:2], use[:2])
+    assert tolerated["status"] == "AT-BAR"
+    assert tolerated["matches"] is True and tolerated["exact"] is False
+    assert tolerated["flushed_subnormal"] == 2
+    assert tolerated["normal_difference"] == 0
+
+    different_subnormal = gate.score(
+        "subnormal_to_different_subnormal", oracle[2:3], candidate[2:3], use[2:3])
+    assert different_subnormal["status"] == "DEBT"
+    assert different_subnormal["flushed_subnormal"] == 0
+    assert different_subnormal["normal_difference"] == 1
+
+    normal_to_zero = gate.score(
+        "normal_to_zero", oracle[3:], candidate[3:], use[3:])
+    assert oracle[3] > tiny
+    assert normal_to_zero["status"] == "DEBT"
+    assert normal_to_zero["flushed_subnormal"] == 0
+    assert normal_to_zero["normal_difference"] == 1
+
+
 def test_empty_structural_face_is_loud_unmeasured_but_nonzero_still_red():
     zeros = np.zeros(2, dtype=np.float64)
     empty = np.zeros(2, dtype=bool)

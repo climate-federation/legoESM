@@ -3247,11 +3247,6 @@ class LatLonCGridOceanConfig(NamedTuple):
     # order (stp2d.f90:138/:144/:161; stprk3_stg.f90 stages 2-3).  False sums
     # the fused KE-plus-pressure term with the vorticity term.
     rk3_vector_rhs_nemo_order: bool = False
-    # Preserve a C2 KE-gradient contribution that NEMO retains by gradual
-    # underflow but XLA's CPU backend flushes to zero.  The selected one-level
-    # WS-RK3 path carries the contribution in a power-of-two-scaled residual
-    # until it is normal again.  False leaves every ordinary card unchanged.
-    rk3_vector_keg_subnormal_preservation: bool = False
     # NEMO's stage-3 temperature Krhs (trasbc.f90 stage-3 non-linear branch,
     # then runoff, then tra_qsr on Kmm): ``r1_rcp*qns*z1_rho0_e3t`` from
     # ``OceanSurfaceForcing.q_nonsolar``.  False derives it from the Kbb
