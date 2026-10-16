@@ -125,7 +125,8 @@ def test_g5_card_is_g4_plus_si3_entry_and_record_route(tmp_path):
     assert (g5.surface_boundary_condition, g5.surface_input_operator) == (
         "nemo_post_si3_records", "nemo_ocean_surface_input_v1")
     assert g5.unmeasured_features == recipe.ORCA2G5_UNMEASURED
-    assert "implicit_ice_ocean_top_drag_rCdU_ice" in g5.unmeasured_features
+    assert "implicit_ice_ocean_top_drag_rCdU_ice" not in g5.unmeasured_features
+    assert "kt2_barotropic_continuation_with_ice_drag" in g5.unmeasured_features
     assert g5.icebergs_enabled is False and g5.iceberg_inputs == ()
     assert recipe._orca2g1_selector_failures(g5) == []
     with pytest.raises(ValueError, match="not execution-ready"):

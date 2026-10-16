@@ -4025,7 +4025,7 @@ ORCA2G4_UNMEASURED: tuple[str, ...] = (
 ORCA2G5_UNMEASURED: tuple[str, ...] = (
     "g5_record_not_admitted",
     "nemo_post_si3_surface_records",
-    "implicit_ice_ocean_top_drag_rCdU_ice",
+    "kt2_barotropic_continuation_with_ice_drag",
 )
 # G1b = G1 + ORCA2's vector-form momentum advection (user, 2026-10-14).
 ORCA2G1B_UNMEASURED: tuple[str, ...] = (

@@ -320,8 +320,8 @@ def top_drag(ev: Path, plant: bool = False) -> dict:
     rep_u, rep_v, _, _, _ = nemo_ice_ocean_top_drag_coeff_faces(
         rec["rCdU_ice"], card.recipe.grid, dtype=np.float64)
     # NEMO stores the east/north native face; lego stores redundant west/south
-    # boundaries, hence [:,1:] / [1:,:].  Convert the positive-rate card
-    # convention back to NEMO's negative pCdU convention before comparison.
+    # boundaries, hence [:,1:] / [1:,:].  The G5-selected production path
+    # carries NEMO's signed (non-positive) pCdU coefficient directly.
     card_faces = {"zCdU_u": np.asarray(rep_u)[:, 1:],
                   "zCdU_v": np.asarray(rep_v)[1:, :]}
     nemo_faces = {"zCdU_u": cdu_u[2:-2, 2:-2],
