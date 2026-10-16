@@ -303,5 +303,6 @@ def test_g5_top_drag_replay_is_exact_and_its_plant_fires():
     for face, n in (("zCdU_u", 3519), ("zCdU_v", 3593)):
         assert res[face]["nemo_nonzero_faces"] == n
         assert res[face]["replay_vs_nemo_on_nemo_nonzero"]["unequal"] == 0
+        assert res[face]["replay_vs_nemo_on_all_wet_faces"]["unequal"] == 0
     with pytest.raises(g5.Refuse, match="plant fired"):
         g5.top_drag(RECORD, plant=True)

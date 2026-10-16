@@ -430,7 +430,8 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
     card = recipe.build_nemo_testcase_card(case, deck_root=root)
     cfg, z, s0 = card.recipe.model_config, card.recipe.z_coord, card.recipe.initial_state
     if case in FORCED:
-        require(arm in ("independent", "given_entry", "stages"),
+        require(arm in ("independent", "given_entry")
+                or (arm == "stages" and case == "ORCA2G5-ice"),
                 "G4/G5's NEMO-supplied per-step forcing is registered only for "
                 "the independent and given-entry ladders")
         require(cfg.rk3_stage_tracer_written_order is True,

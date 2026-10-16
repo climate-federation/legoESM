@@ -281,8 +281,11 @@ def identity(ev: Path, deck_root: Path, plant: bool = False) -> dict:
         out[kt] = rows
     bad = [(kt, n) for kt, rows in out.items() for n, r in rows.items()
            if isinstance(r, dict) and r.get("unequal", 0)]
-    if plant:
-        require(not bad, f"plant fired: {bad[:3]}")
+    no_drag = [kt for kt, rows in out.items()
+               if rows["rCdU_ice (NO CARD INPUT)"]["nonzero_on_ice_wet"] == 0]
+    # preregistered falsifiers: any field mismatch, or no ice-ocean drag on ice
+    require(not bad, f"{'plant fired' if plant else 'forcing identity FAILED'}: {bad[:3]}")
+    require(not no_drag, f"rCdU_ice is zero on every ice-covered wet cell at kt {no_drag}")
     return {"label": "card surface inputs vs NEMO's post-SI3 record (twin A), kt 1..10",
             "wet_cells": int(wet.sum()), "unequal_rows": bad, "steps": out}
 
@@ -317,8 +320,13 @@ def top_drag(ev: Path, plant: bool = False) -> dict:
     rep_u, rep_v = np.zeros_like(top), np.zeros_like(top)
     rep_u[:, :-1] = 0.5 * ((0.0 + 0.0) + (top[:, 1:] + top[:, :-1]))
     rep_v[:-1, :] = 0.5 * ((0.0 + 0.0) + (top[1:, :] + top[:-1, :]))
+    import netCDF4
+    with netCDF4.Dataset(root / "mesh_mask.nc") as h:
+        faces = {n: np.pad(np.asarray(h.variables[n][0, 0], np.float64), 2) > 0
+                 for n in ("umask", "vmask")}
     rows, ice = {}, rec["fr_i"] > 0
-    for name, nemo, rep in (("zCdU_u", cdu_u, rep_u), ("zCdU_v", cdu_v, rep_v)):
+    for name, nemo, rep, face in (("zCdU_u", cdu_u, rep_u, faces["umask"]),
+                                  ("zCdU_v", cdu_v, rep_v, faces["vmask"])):
         wet = nemo != 0
         sel = np.zeros_like(wet)
         sel[2:-2, 2:-2] = True
@@ -329,14 +337,16 @@ def top_drag(ev: Path, plant: bool = False) -> dict:
         rows[name] = {"nemo_nonzero_faces": int(wet.sum()),
                       "nemo_range": [float(nemo[wet].min()), float(nemo[wet].max())] if wet.any() else None,
                       "replay_vs_nemo_on_nemo_nonzero": _cmp(rep, nemo, wet & sel),
+                      "replay_vs_nemo_on_all_wet_faces": _cmp(rep, nemo, face & sel),
+                      "wet_faces_scored": int((face & sel).sum()),
                       "fold_row_faces_not_replayed": int((wet & fold).sum()),
                       "card_coefficient": 0.0,
                       "card_vs_nemo_unequal": int(wet.sum())}
     rows["fr_i>0_cells"] = int(ice.sum())
-    if plant:
-        require(rows["zCdU_u"]["replay_vs_nemo_on_nemo_nonzero"]["unequal"] == 0
-                and rows["zCdU_v"]["replay_vs_nemo_on_nemo_nonzero"]["unequal"] == 0,
-                "plant fired")
+    bad = [n for n in ("zCdU_u", "zCdU_v")
+           if rows[n]["replay_vs_nemo_on_all_wet_faces"]["unequal"]
+           or rows[n]["nemo_nonzero_faces"] == 0]
+    require(not bad, f"{'plant fired' if plant else 'top-drag replay FAILED'}: {bad}")
     return {"label": "kt 1 external-mode drag coefficient, NEMO record vs replay vs card", **rows}
 
 

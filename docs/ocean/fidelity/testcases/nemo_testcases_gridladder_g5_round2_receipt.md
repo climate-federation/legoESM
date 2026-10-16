@@ -3,7 +3,9 @@
 Status: **HELD. G5 is not certified.** The record is admitted (passivity
 passes). Every ocean-read surface/ice field the card takes from NEMO's record
 is bit-identical at kt 1..10. The first non-bit statement is the preregistered
-one: the implicit ice-ocean top drag, which the card has no input for. Every
+one: the implicit ice-ocean top drag, which the card has no input for. The
+preregistered locality clause (open ocean stays exact) is FALSIFIED: the
+external mode spreads the error up to 30 cells from the ice edge in stage 1. Every
 surface and all-level row is DEBT under both labels from kt 1. Nothing landed:
 the fix is a new top-drag path (input + four consumers), not one statement.
 
@@ -14,11 +16,11 @@ everything else). Record `gridladder_rounds/round31/oracle_g5_r31`
 `|V| = 10.25 m/s`). Instruments `c24c154fa`. Evidence
 `gridladder_rounds/round32/` (`manifest.sha256`): `g5_admission.json`
 a18ae39aab3d5d51, `g5_forcing_identity.json` f96770cc244d4ea3,
-`g5_top_drag_kt1.json` b344e97a5db97945, `g5_stages_kt1.json` 125e142bf1a070b0,
+`g5_top_drag_kt1.json` 80d3208ed4df9fa4, `g5_stages_kt1.json` 125e142bf1a070b0,
 `g5_stage1_kt1.json` d50de3cc863324b2, `g5_independent_kt1_4.json`
 6a13d59fb93b6790, `g5_independent_kt5_10.json` f23e3755d2c0e353,
 `g5_given_13579.json` 27fee1b25e0118f3, `g5_tables.md` d227225225302915
-(from `probe/summarize.py` 4da2a9d9c15c46b1).
+(from `probe/summarize.py` 4da2a9d9c15c46b1), `codex_review.log` f0773fe4f52bd2af.
 
 ## 1. Passivity (the reviewer's must-do) — PASS
 
@@ -71,7 +73,9 @@ record on the 16433 wet cells. Cell = unequal cells.
   unequal (my `1e3*(1e-3*sfx)` round trip) and U/V stress 1148 faces (mirror
   on halo-less arrays, then land faces NEMO stores as 0). Both were probe
   defects; the table is the fixed probe.
-- Plant (`emp` + 1e-12 on one wet cell, kt 1) refuses.
+- The check refuses (exit 73) on any field mismatch or on `rCdU_ice` zero on
+  every ice cell (the preregistered falsifiers). Plant (`emp` + 1e-12 on one
+  wet cell, kt 1) refuses.
 - `snwice_mass` is not read by this ocean (`ln_ice_embd = F`, run log).
 
 ## 4. First non-bit statement (kt 1, stage 1)
@@ -109,8 +113,10 @@ ice-dependent statement is the external-mode drag coefficient
   3519 U and 3593 V faces (range -1.51e-3 .. -2.4e-10 m/s). An offline replay
   of :1431-1432 from the recorded `rCdU_ice` (with `rCdU_bot = 0`) equals it
   bit-for-bit on all 3519 U and 3525 V faces; the 68 fold-row V faces are not
-  replayed (the record holds `rCdU_ice` before its fold exchange). The card's
-  value is 0 on all of them. Plant (1e-9 on one ice cell) refuses.
+  replayed (the record holds `rCdU_ice` before its fold exchange). Over every
+  interior wet face (15853 U, 15875 V; zero faces included) the replay equals
+  NEMO with 0 unequal, and the check refuses otherwise. The card's value is 0
+  on all nonzero faces. Plant (1e-9 on one ice cell) refuses.
 - READ OFF THE CODE: the statements before it in `stp_2D`
   (`ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/stp2d.f90:140-166`: eos, hpg, vor, wzv, keg, zad) read only the entry
   state, which is bit-identical. Not separately measured this round.
@@ -123,7 +129,10 @@ ice-dependent statement is the external-mode drag coefficient
   half is the implicit top drag. Without it the card's under-ice ocean has no
   drag, and errors reach ~1 m/s by kt 8.
 
-Prediction 3 CONFIRMED. Prediction 4 CONFIRMED (not certified).
+Prediction 3: the statement is CONFIRMED; its locality clause ("open-ocean
+columns stay bit-identical") is FALSIFIED — 6429 ice-free wet cells already
+differ at stage 1, all within 30 cells of ice (table above). Prediction 4
+CONFIRMED (not certified). Predictions 1 and 2 CONFIRMED.
 
 The same coefficient's other consumers, all absent from the card: the
 baroclinic top-drag RHS term `ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/dynspg_ts.f90:1487-1488`, the implicit drag in
@@ -228,16 +237,25 @@ No legoESM statement landed, so nothing moves on the full ORCA2 card.
 - G2/G3/G4 ladder fast tests: 47 passed, 11 slow deselected.
 - Private-import + hardcoded-constant ratchets: 5634 passed, 1 failed — the
   pre-existing `tests/unit/test_jra55_do.py` row (file untouched here).
-- Ladder edit: adds `ORCA2G5-ice` and lets G4/G5 run the stages arm with
-  NEMO's forcing; G2/G3/G4 independent and given-entry paths unchanged.
+- Ladder edit: adds `ORCA2G5-ice` (and its stages arm, with NEMO's forcing).
+  G2/G3/G4 paths are unchanged; G4's stages arm still refuses.
 
-REVIEW_PLACEHOLDER
+Single review (codex), on `f2faf0483` plus the gate commit: **DO NOT SHIP**,
+four findings, all CONFIRMED and acted on:
+1. Forcing identity was fail-open (mismatch or zero ice drag still returned
+   success). Fixed: refuses, exit 73.
+2. Top-drag replay scored only NEMO-nonzero faces and enforced equality only
+   under the plant. Fixed: scores every interior wet face and refuses.
+3. Prediction 3 was reported CONFIRMED although its open-ocean clause failed.
+   Fixed: reported FALSIFIED above.
+4. G4's stages arm had been opened (unasked). Reverted: G5 only.
+After the fixes: focused G5 + G2/G3/G4 fast tests 59 passed, 11 slow
+deselected; both instruments re-run (numbers above), both plants refuse.
 
 ASKED: passivity first; admission; per-step ice-ocean forcing identity; both
 ladders with region/depth splits; first non-bit statement with citation;
 Decision-122 pointers; tests; one review.
-UNASKED, offered for revert: the ladder's stages arm now accepts G4 (it
-refused before) and passes NEMO's forcing for G4/G5.
+UNASKED: none (the G4 stages-arm change was reverted after review).
 
 UNVERIFIED: that the statements before `dyn_drg_init` are bit-exact at kt 1
 (read off the code, not measured); that the missing top drag owns ALL of the
