@@ -603,6 +603,13 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
             for f, n in (("ssh", "e_ssh_bb"), ("u", "e_uu_k1_bb"), ("v", "e_vv_k1_bb")):
                 require(np.array_equal(ref[f], nxt[n]),
                         f"kt {kt}: after-step {f} != entry of kt {kt + 1}")
+        elif (path := restart_path(roots, kt)) is not None:
+            # The final admitted step has no following entry frame.  Its
+            # restart is already tied to the after-step frame above, and is
+            # the only recorded source for the endpoint tracer surfaces.
+            with netCDF4.Dataset(path) as h:
+                ref["T"] = levels_last(h.variables["tn"][0], nk)[..., 0]
+                ref["S"] = levels_last(h.variables["sn"][0], nk)[..., 0]
         cand = card_surface(state)
         return [g1.row(f"{tag}.kt{kt}.{f}", ref[f], cand[f], reg,
                        plant=(plant == "score" and f == "ssh"))
