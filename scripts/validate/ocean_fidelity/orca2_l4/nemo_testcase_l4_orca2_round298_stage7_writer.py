@@ -156,8 +156,13 @@ def _oracle_geometry(geometry, oracle, grid):
     dy = np.asarray(grid.dy_u, np.float64)[..., None]
     dx = np.asarray(grid.dx_v, np.float64)[..., None]
     area = np.asarray(grid.area_T, np.float64)[..., None]
+    # The ORCA2 boundary contains zero-width faces.  NEMO's metric transport
+    # is zero there; preserve that value rather than manufacturing 0/0.
+    mf_u = np.divide(p_u, dy, out=np.zeros_like(p_u), where=dy != 0.0)
+    mf_v = np.divide(p_v, dx, out=np.zeros_like(p_v), where=dx != 0.0)
+    mf_w = np.divide(p_w, area, out=np.zeros_like(p_w), where=area != 0.0)
     return (
-        p_u / dy, p_v / dx, p_w / area,
+        mf_u, mf_v, mf_w,
         *geometry[3:7], p_u, p_v, *geometry[9:],
     )
 
@@ -445,6 +450,7 @@ def main() -> int:
     parser.add_argument("--baseline-root", type=Path)
     parser.add_argument("--expect-commit")
     parser.add_argument("--report-in", type=Path)
+    parser.add_argument("--raw-output", type=Path)
     parser.add_argument("--plant", choices=PLANTS, default="none")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
@@ -459,6 +465,10 @@ def main() -> int:
         else:
             require(args.report_in is not None, "classification needs --report-in")
             report = json.loads(args.report_in.read_text(encoding="utf-8"))
+        if args.raw_output:
+            args.raw_output.write_text(
+                json.dumps(report, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8")
         result = classify(report, args.plant)
     except (GateError, admission_gate.Refusal, admission_gate.schema.Refusal,
             omt4.GateError, OSError, KeyError, TypeError, ValueError,

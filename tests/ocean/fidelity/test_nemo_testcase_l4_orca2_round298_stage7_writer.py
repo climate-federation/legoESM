@@ -2,6 +2,7 @@
 
 import copy
 
+import numpy as np
 import pytest
 
 from scripts.validate.ocean_fidelity.orca2_l4 import (
@@ -54,8 +55,20 @@ def test_classifier_names_advection_and_every_plant_fires():
 
 
 def test_subnormal_flush_is_counted_as_matching():
-    tiny = __import__("numpy").nextafter(0.0, 1.0)
+    tiny = np.nextafter(0.0, 1.0)
     row = gate._score([0.0], [tiny], [True])
     assert row["raw_unequal"] == 1
     assert row["subnormal_matches"] == 1
     assert row["unequal"] == 0
+
+
+def test_oracle_geometry_keeps_zero_metric_faces_finite():
+    base = tuple(np.ones((1, 1, 1)) for _ in range(12))
+    oracle = {name: np.zeros((1, 1, 31))
+              for name in ("trp_u", "trp_v", "trp_w")}
+    grid = type("Grid", (), {
+        "dy_u": np.zeros((1, 2)), "dx_v": np.zeros((2, 1)),
+        "area_T": np.zeros((1, 1)),
+    })()
+    result = gate._oracle_geometry(base, oracle, grid)
+    assert all(np.isfinite(value).all() for value in result[:3])
