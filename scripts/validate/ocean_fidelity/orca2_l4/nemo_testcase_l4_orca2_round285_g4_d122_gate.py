@@ -166,7 +166,8 @@ def main() -> int:
             if args.plant == "exact-loss":
                 raise GateError("exact-loss plant requires --classify")
         require(args.plant == "none", f"{args.plant} plant stayed green")
-    except (GateError, OSError, KeyError, TypeError, ValueError) as error:
+    except (GateError, r276.decision96.GateError, OSError, KeyError,
+            TypeError, ValueError) as error:
         print(f"STATUS {'PLANT-FIRED' if args.plant != 'none' else 'REFUSE'}: {error}")
         return 2
     rendered = json.dumps(result, indent=2, sort_keys=True) + "\n"
