@@ -81,6 +81,19 @@ def test_pair_refusal_is_a_measured_hold_not_a_gate_crash():
     assert result["prediction_ledger"]["R288-P2"] == "REFUTED"
 
 
+def test_first_matched_pair_effect_moving_v_away_holds_the_pair():
+    control, single, pair = _documents()
+    pair["boundaries"][0]["rows"]["v"] = _score(
+        rms=3.0, maximum=2.0, exact=False)
+    result = gate.classify(control, single, pair)
+    assert result["status"] == "HELD_R288_PAIR"
+    assert result["prediction_ledger"]["R288-P3"] == "REFUTED"
+    assert result["prediction_ledger"]["R288-P4"] == "OFF_CLAIM"
+    assert result["first_pair_effect"]["kt"] == 1
+    assert result["first_pair_effect"]["checkpoint"] == "stage1"
+    assert result["first_pair_effect"]["field"] == "v"
+
+
 @pytest.mark.parametrize(
     "plant", ("one-bit", "missing-single-failure", "fake-pair-pass"))
 def test_every_known_answer_plant_fires(plant):
