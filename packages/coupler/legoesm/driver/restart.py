@@ -682,6 +682,16 @@ class RunnerReplaySpec(NamedTuple):
     difference is refused.
     ``restart_input_ids``: ``dataset_provenance`` ids of restart inputs, which
     a continuation legitimately changes.
+    ``extra_rewrites``: ``(flags, resolved_config key)`` pairs reproduce also
+    rewrites, to the recorded value of that key (``run_omip --grid all``
+    writes one manifest per grid; its replay runs that grid only).  Their
+    ``cli_args`` keys belong in ``rewritten_keys``.
+    ``no_digest_keys``: dotted ``resolved_config`` keys that, when true, mean
+    the run records no final digest, so ``--check`` is refused up front.
+    ``relocated_outputs``: ``(flags, resolved_config key)`` pairs of further
+    output-file flags; when recorded, replay points them at the same file
+    name inside the rerun's output directory (their keys belong in
+    ``rewritten_keys``).
     """
     script: str
     output_flags: tuple
@@ -689,6 +699,9 @@ class RunnerReplaySpec(NamedTuple):
     rewritten_keys: tuple
     continuation_keys: tuple
     restart_input_ids: tuple = ()
+    extra_rewrites: tuple = ()
+    no_digest_keys: tuple = ()
+    relocated_outputs: tuple = ()
 
 
 RUNNER_REPLAY_SPECS = {
@@ -704,6 +717,33 @@ RUNNER_REPLAY_SPECS = {
             "run_config.max_wallclock_seconds",
             "run_config.restart_buffer_seconds"),
         restart_input_ids=("restart_from",)),
+    "run_omip": RunnerReplaySpec(
+        script="run_omip.py",
+        output_flags=("--output",),
+        manifest_depth=2,                       # <output>/<grid>/<resolution>
+        rewritten_keys=("cli_args.output", "cli_args.grid"),
+        # Not continuation controls: --diag-every (it also sets the JRA55
+        # forcing block size) and --quick (it changes other defaults too).
+        continuation_keys=(
+            "cli_args.output", "cli_args.days", "days", "cli_args.restart",
+            "cli_args.checkpoint_days", "cli_args.no_final_snapshot",
+            "cli_args.max_wallclock_seconds",
+            "cli_args.restart_buffer_seconds",
+            "run_config.max_wallclock_seconds",
+            "run_config.restart_buffer_seconds"),
+        extra_rewrites=((("--grid",), "grid_type"),)),
+    "run_dino": RunnerReplaySpec(
+        script="run_dino.py",
+        output_flags=("--output-dir",),
+        manifest_depth=0,
+        rewritten_keys=("cli_args.output_dir", "cli_args.timing_jsonl"),
+        continuation_keys=(
+            "cli_args.output_dir", "cli_args.days", "cli_args.allow_multiyear",
+            "cli_args.restart_from", "cli_args.snapshot_every_days",
+            "cli_args.timing_jsonl"),
+        restart_input_ids=("restart_from",),
+        no_digest_keys=("cli_args.multicontroller",),
+        relocated_outputs=((("--timing-jsonl",), "cli_args.timing_jsonl"),)),
 }
 
 

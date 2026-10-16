@@ -4684,6 +4684,17 @@ def _source_revision_drift_note(parent_sha, this_sha) -> str | None:
     return None
 
 
+def _refuse_restart_source_drift(parent_sha, this_sha, path) -> None:
+    """Version-drift rule for ``--restart-from`` (reproducibility decision 3):
+    a restart written by other or unidentifiable code (unknown, mismatched,
+    dirty or mixed-tree revision) is refused on every process unless
+    ``LEGOESM_ALLOW_VERSION_DRIFT`` is set, which downgrades it to a warning."""
+    from legoesm.driver.restart import collective_version_drift_gate
+    note = _source_revision_drift_note(parent_sha, this_sha)
+    collective_version_drift_gate(lambda: [note] if note else [],
+                                  f"restart {path}")
+
+
 def _revision_ambiguity(rev) -> str | None:
     """Why a revision string fails to identify the running code, or ``None``.
 
@@ -9299,13 +9310,13 @@ def main() -> int:
     # resumes silently.  Recorded always, via _source_revision() — which scopes
     # the query to THIS script's checkout, marks a dirty tree, and returns
     # _SOURCE_REV_UNAVAILABLE instead of silently omitting the field.
-    # DELIBERATELY A WARNING, NOT AN ABORT: chaining a multi-day production run
-    # across a bug fix is a legitimate and expected workflow, and a hard error
-    # would make the feature unusable exactly when it matters.  The state
-    # itself is still validated by the config fingerprint; this line makes the
-    # code drift visible in the log and in the archive so a scorecard is never
-    # attributed to the wrong revision.  It is provenance, NOT a proof of
-    # identical code — see ocean.restart's SCOPE OF THE GUARANTEE.
+    # A resume across a source change is REFUSED (reproducibility decision 3,
+    # approved 2026-10-12; it was a warning before): chaining a production run
+    # across a bug fix stays possible, but explicitly, with
+    # LEGOESM_ALLOW_VERSION_DRIFT=1 (then a warning).  The state itself is
+    # still validated by the config fingerprint.  The revision is provenance,
+    # NOT a proof of identical code — see ocean.restart's SCOPE OF THE
+    # GUARANTEE.
     _restart_src_sha = None
     if args.restart_save or args.restart_from:
         _restart_src_sha = _source_revision()
@@ -9370,10 +9381,8 @@ def main() -> int:
         # Source-revision drift: three DISTINCT outcomes (unknown / mismatch /
         # equal-but-dirty), decided by the pure helper so the logic is unit
         # tested rather than only exercised by a full driver run.
-        _drift_note = _source_revision_drift_note(_rs_meta.get("sha"),
-                                                  _restart_src_sha)
-        if _drift_note:
-            print(_drift_note, flush=True)
+        _refuse_restart_source_drift(_rs_meta.get("sha"), _restart_src_sha,
+                                     _rs_path)
         start_step = int(_rs_meta["step"])
         if start_step >= n_steps:
             # Never exit silently "already at target" (CLAUDE.md run-target

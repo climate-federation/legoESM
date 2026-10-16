@@ -969,6 +969,18 @@ def main():
 
         # --- Restart from a previous snapshot (lat-lon only) ---
         if args.restart_from is not None:
+            # Continuing from a snapshot needs the code that wrote it: its
+            # run's manifest sits in <output-dir>/, one level above
+            # snapshots/ (or beside a copied snapshot).  Before the load.
+            from legoesm.driver.restart import (
+                collective_version_drift_gate,
+                restart_version_drift,
+            )
+            _rs = Path(args.restart_from)
+            collective_version_drift_gate(
+                lambda: restart_version_drift(
+                    _rs, [_rs.parent, _rs.parent.parent]),
+                f"restart {_rs}")
             restart = _load_restart(args.restart_from)
             state = _apply_restart_arrays(state, restart, grid_kind)
             print(f"[restart] Applied restart at "

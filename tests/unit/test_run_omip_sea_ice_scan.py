@@ -179,3 +179,16 @@ def test_scan_block_off_returns_ocean_state_only(tmp_path):
     # Not a (state, ice) tuple — the ocean LatLonCGridOceanState itself.
     assert hasattr(out, "T") and hasattr(out, "S")
     assert bool(jnp.all(jnp.isfinite(out.T.data)))
+
+
+def test_loop_hands_the_final_ice_state_to_the_digest(tmp_path):
+    """The run manifest's final digest covers the sea ice: the loop leaves the
+    evolved ice state for run_omip_single (its 5-tuple return is pinned)."""
+    model, state, js = _setup(tmp_path, sea_ice=True)
+    grid, z_coord, _, _, _ = _make_tiny_latlon_setup(n_lat=8, n_lon=16)
+    run_omip._run_omip_loop(model, state, "latlon", grid, z_coord, 600.0, 2, 1,
+                            jra55_state=js)
+    ice = js["ice_state_final"]
+    assert type(ice) is type(js["ice_state_init"])
+    assert ice is not js["ice_state_init"]           # the loop's own output
+    assert run_omip._final_digest_trees(state, js)[1] is ice

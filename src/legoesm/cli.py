@@ -419,6 +419,26 @@ def _reproduce_runner(args, manifest: dict, allow_drift: bool) -> int:
     from legoesm.driver import restart as R
 
     spec = R.RUNNER_REPLAY_SPECS[manifest["reproducibility"]["runner_tag"]]
+    resolved = manifest["config"].get("resolved_config") or {}
+
+    def recorded(dotted):
+        node = resolved
+        for part in dotted.split("."):
+            node = node.get(part) if isinstance(node, dict) else None
+        return node
+
+    if args.check:
+        no_digest = [k for k in spec.no_digest_keys if recorded(k)]
+        if no_digest:
+            logger.error(f"Refusing to reproduce --check: this run records no "
+                         f"final digest ({', '.join(no_digest)} is set).")
+            return 2
+        try:
+            reference = R.recorded_state_digest(manifest)
+        except ValueError as exc:
+            logger.error(f"Refusing to reproduce --check: {exc}")
+            return 2
+
     run = manifest["run"]
     argv, cwd = run.get("argv"), run.get("cwd")
     if not (isinstance(argv, list) and argv
@@ -457,13 +477,6 @@ def _reproduce_runner(args, manifest: dict, allow_drift: bool) -> int:
                      f"({argv[0]}) differs from the {script} this rerun would "
                      f"run.")
         return 2
-    if args.check:
-        try:
-            reference = R.recorded_state_digest(manifest)
-        except ValueError as exc:
-            logger.error(f"Refusing to reproduce --check: {exc}")
-            return 2
-
     ref = Path(args.manifest).resolve()
     if ref.is_dir():
         ref = ref / R.RUN_MANIFEST_FILENAME
@@ -477,10 +490,7 @@ def _reproduce_runner(args, manifest: dict, allow_drift: bool) -> int:
     # The reference run's output: where its manifest sits now, and where the
     # run wrote it (a copied or archived manifest sits elsewhere).
     ref_roots = [ref_root]
-    recorded_out = manifest["config"].get("resolved_config") or {}
-    for part in spec.rewritten_keys[0].split("."):
-        recorded_out = (recorded_out.get(part)
-                        if isinstance(recorded_out, dict) else None)
+    recorded_out = recorded(spec.rewritten_keys[0])
     if isinstance(recorded_out, str) and recorded_out:
         ref_roots.append((Path(cwd) / recorded_out).resolve())
 
@@ -502,8 +512,26 @@ def _reproduce_runner(args, manifest: dict, allow_drift: bool) -> int:
             logger.error(f"Refusing to reproduce: --output {new_root} already "
                          f"holds a run manifest; use a fresh directory.")
             return 2
+
+    def rewritten(out):
+        new = R.rewrite_flag_argv(argv[1:], spec.output_flags, out)
+        for extra_flags, key in spec.extra_rewrites:
+            value = recorded(key)
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"the manifest does not record {key}")
+            new = R.rewrite_flag_argv(new, extra_flags, value)
+        for out_flags, key in spec.relocated_outputs:
+            value = recorded(key)
+            if value:
+                new = R.rewrite_flag_argv(new, out_flags,
+                                          str(Path(out) / Path(value).name))
+            elif any(str(t).split("=", 1)[0] in out_flags for t in argv[1:]):
+                raise ValueError(f"the command line sets {out_flags[0]} but "
+                                 f"the manifest does not record {key}")
+        return new
+
     try:
-        R.rewrite_flag_argv(argv[1:], spec.output_flags, "<output>")
+        rewritten("<output>")
     except ValueError as exc:
         logger.error(f"Refusing to reproduce: {exc}")
         return 2
@@ -514,8 +542,7 @@ def _reproduce_runner(args, manifest: dict, allow_drift: bool) -> int:
         return 2
     if n_proc != 1:
         out = str(Path(args.output).resolve()) if args.output else "OUT"
-        cmd = [sys.executable, str(script),
-               *R.rewrite_flag_argv(argv[1:], spec.output_flags, out)]
+        cmd = [sys.executable, str(script), *rewritten(out)]
         logger.error(
             f"Refusing to reproduce: the run used {n_proc} processes and this "
             f"command reruns one. Launch it yourself on {n_proc} processes with "
@@ -531,7 +558,7 @@ def _reproduce_runner(args, manifest: dict, allow_drift: bool) -> int:
         if _overlaps(new_root):      # TMPDIR inside the reference tree
             new_root.rmdir()
             return 2
-    child = R.rewrite_flag_argv(argv[1:], spec.output_flags, str(new_root))
+    child = rewritten(str(new_root))
     env = dict(os.environ)
     env[R.REPRODUCE_REFERENCE_ENV] = str(ref)
     env[R.REPRODUCE_OUTPUT_ENV] = str(new_root)
