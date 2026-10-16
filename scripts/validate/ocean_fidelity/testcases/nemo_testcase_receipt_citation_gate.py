@@ -1663,6 +1663,13 @@ CITATION_MAP = {
             4],
         'routine': 'vor_ens',
     },
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynvor.f90:692-694': {
+        'anchors': [
+            'SUBROUTINE vor_een( kt, Kmm, kvor, pu, pv, pu_rhs, pv_rhs )',
+            '!!                ***  ROUTINE vor_een  ***',
+            3],
+        'routine': 'vor_een',
+    },
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynvor.f90:762-766': {
         'anchors': [
             ('CASE ( np_CRV )                           !* Coriolis + relative vorticity', 4),
