@@ -8,8 +8,13 @@ card's own production code, fed NEMO's operands, reproduces NEMO's recorded
 1,972).  The fold-band debt arrives through the inputs.  Every dynamic
 factor is already non-bit at kt-7 entry; the static factors are exact.  The
 card's fold-band entry U first leaves the bar at kt 2, together with the
-interior.  It separates from the interior during step 6 (fold max difference
-0.256 -> 6.23 m/s; interior 0.519 -> 0.652 m/s).  No package, card,
+interior.  CORRECTED after the independent review: measured relative to
+NEMO's own signal in each region, the fold band is already far worse than
+the interior at kt 2 (RMS error 12% vs 1.7%), then 59% vs 2.7% at kt 3 and
+281% vs 4.8% at kt 6 (reviewer scratch; to be committed as a probe); only
+the MAXIMUM jumps during step 6 (fold 0.256 -> 6.23 m/s; interior 0.519 ->
+0.652 m/s).  Both labels are free runs from kt 1 with bit-identical kt-1
+entries, so their runs are identical.  No package, card,
 selector, carried state, sea ice, `unmeasured_features`, runoff depth (D126)
 or after-SSH selection (D132) changes.
 
@@ -117,11 +122,12 @@ domain for U and sea level, western half for `uu_b`:
 - After step 1, the 3-D U differs over the whole domain (203,314 interior
   faces), while sea level and `uu_b` are still exact.  This is the known
   kt-1 3-D velocity debt.  It is not specific to the fold.
-- The fold band breaks away from the interior during step 6.  Its U
-  difference grows 24x (0.256 -> 6.23 m/s) while the interior grows 1.3x.
-  That step is where the fold debt that round 296 saw at kt-7 stage 1
-  starts.  CONFIRMED (measured).  That this is a fold-specific statement
-  rather than amplification of the kt-1 debt is PLAUSIBLE.
+- WITHDRAWN after the independent review: "the fold band breaks away during
+  step 6".  Only its MAXIMUM U difference jumps in step 6 (24x, 0.256 -> 6.23
+  m/s; interior 1.3x).  By relative RMS against NEMO's signal in each region
+  the fold band is already 12% off at kt 2 (interior 1.7%), 59% at kt 3
+  (2.7%) and 281% at kt 6 (4.8%) -- reviewer scratch, not yet a committed
+  probe.  The fold departure therefore starts at kt 2-3, not kt 6.
 
 ## Prediction ledger
 
@@ -162,10 +168,9 @@ domain for U and sea level, western half for `uu_b`:
 
 ## OPEN
 
-1. Localise the fold-band U break-away inside kt 6 by stage, from the
-   admitted kt-6 stage frames (rank-complete; no acquisition needed),
-   scored in the fold band against the interior.
-2. Then split the first growing stage's writer at kt 6.  That needs a
-   round-297-style source record at kt 6, to be defined once step 1 names
-   the stage.
+1. Commit a per-kt, per-region relative-error history probe (fold band vs
+   interior, both labels, kt 1-7) to replace the review's scratch numbers.
+2. Walk the EARLIEST fold-band departure, at kt 2 (U non-bit on 3,463 of
+   3,933 fold faces and 203,314 of 409,097 interior faces), by stage, from
+   the admitted stage frames; split the first growing stage's writer there.
 3. Keep the complete fold unit private and atomic.
