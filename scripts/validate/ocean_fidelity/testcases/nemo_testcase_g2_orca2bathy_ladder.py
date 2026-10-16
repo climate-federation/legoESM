@@ -793,6 +793,12 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
             tke_cfg, rec["taum"], cfg.constants.rho_0, cfg.constants.g,
             np.asarray(z.is_active)[..., 0], rec["fr_i"],
             g5.read_v1_hm_i(root, 1))
+        card_taum = np.asarray(
+            trace.tke_statement_trace.taum_surface, np.float64)
+        card_l_surface = _mxl0_surface_anchor(
+            tke_cfg, card_taum, cfg.constants.rho_0, cfg.constants.g,
+            np.asarray(z.is_active)[..., 0], rec["fr_i"],
+            g5.read_v1_hm_i(root, 1))
         carried_e3t = np.asarray(bundle.e3t_Kmm, np.float64)
         with netCDF4.Dataset(root / "mesh_mask.nc") as h:
             raw_e3t = np.moveaxis(
@@ -821,14 +827,15 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
         candidate_lm, candidate_ld = lengths(candidate_e3t)
         card_en = np.asarray(plain.tke.data, np.float64)
 
-        def lengths_from_en(energy, e3t):
+        def lengths_from_en(energy, e3t, surface_anchor):
             return tuple(np.asarray(a) for a in compute_mixing_lengths(
                 jnp.asarray(energy), jnp.asarray(rn2),
                 jnp.asarray(bundle.e3w_Kmm), tke_cfg, signed_n2=True,
                 dz_cell=jnp.asarray(e3t),
-                l_surface_anchor=jnp.asarray(l_surface)))
+                l_surface_anchor=jnp.asarray(surface_anchor)))
 
-        card_en_lm, card_en_ld = lengths_from_en(card_en, true_e3t)
+        card_en_lm, card_en_ld = lengths_from_en(
+            card_en, true_e3t, card_l_surface)
         planted_output_moved = bool(
             np.any(candidate_lm != nemo_lm) or np.any(candidate_ld != nemo_ld))
         if plant == "tke_e3t":
@@ -850,6 +857,13 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
                                / np.sqrt(en[active]))
 
         rows = {
+            "card_taum_vs_nemo_record": _mxl_array_row(
+                "card_taum_vs_nemo_record", rec["taum"], card_taum,
+                np.asarray(z.is_active)[..., 0].astype(bool)),
+            "card_surface_mxl_vs_nemo_replay": _mxl_array_row(
+                "card_surface_mxl_vs_nemo_replay", np.asarray(l_surface),
+                np.asarray(card_l_surface),
+                np.asarray(z.is_active)[..., 0].astype(bool)),
             "legacy_zmxlm_vs_nemo_replay": _mxl_array_row(
                 "legacy_zmxlm_vs_nemo_replay", nemo_lm, legacy_lm, wet_w),
             "legacy_zmxld_vs_nemo_replay": _mxl_array_row(
