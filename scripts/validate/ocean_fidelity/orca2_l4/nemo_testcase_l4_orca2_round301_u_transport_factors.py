@@ -115,6 +115,7 @@ def nemo_factors(record_root: Path, plant: str = "none") -> dict[str, np.ndarray
     corrected = frame["u"][w] + zub[..., None] * umask[w]
     zfu = (e2u[w][..., None] * e3u_kmm[w]) * corrected
     return {
+        "_inverse_depth": r1_hu0[w] / (1.0 + r3u[w]),
         "un_adv": bt7["un_adv"], "ssh_kmm": ssh[w], "uu_b_kmm": bt6["uu_b"],
         "zub": corrected[..., 0] - frame["u"][w][..., 0],
         "e2u": e2u[w], "umask": umask[w], "e3u_kmm": e3u_kmm[w],
@@ -127,7 +128,42 @@ def closure(nemo: dict[str, np.ndarray], record_root: Path) -> dict[str, object]
         record_root, record_root.parents[2] / "round297/acquisition/"
         "orca2_omt4_stage7_source_10step_np2")
     recorded = oracle["trp_u"][:, :WEST, :NZ]
-    return r298._regions(nemo["zfu"], recorded, nemo["umask"] > 0.0)
+    return r298._regions(nemo["zfu"], recorded, nemo["umask"] > 0.0), recorded
+
+
+def statement_replay(nemo: dict[str, np.ndarray], recorded: np.ndarray) -> dict:
+    """NEMO's operands through the card's production :284/:290 helpers (jit)."""
+    import jax
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        _nemo_metric_stage_transport, _nemo_stage_corrected_velocity,
+    )
+
+    def program(u, un_adv, inverse_depth, uu_b, umask, e2u, e3u):
+        return _nemo_metric_stage_transport(e2u, e3u, _nemo_stage_corrected_velocity(
+            u, un_adv, inverse_depth, uu_b, umask))
+
+    replay = np.asarray(jax.jit(program)(
+        nemo["uu_kmm"], nemo["un_adv"], nemo["_inverse_depth"],
+        nemo["uu_b_kmm"], nemo["umask"], nemo["e2u"], nemo["e3u_kmm"]))
+    return r298._regions(replay, recorded, nemo["umask"] > 0.0)
+
+
+def entry_history(entries, record_root: Path) -> list[dict]:
+    """Card step-entry u/ssh/uu_b at kt=1..7 against NEMO's stage-0 frames."""
+    history = []
+    umask = read_mesh(record_root)["umask"] > 0.0
+    for kt, state in enumerate(entries, start=1):
+        frame = r300.omt4.rung0.assemble_frame(record_root, kt, 0)
+        row = {"kt": kt,
+               "u": _row(_u(state.u.data), frame["u"], umask),
+               "ssh": _row(np.asarray(state.eta.data, np.float64), frame["ssh"],
+                           umask[..., 0])}
+        if kt > 1:
+            bt = read_bt(record_root / f"oracle_bt_frames_kt{kt - 1:08d}.bin", kt - 1)
+            row["uu_b"] = _row(_u(state.uu_b.data)[:, :WEST], bt["uu_b"],
+                               umask[:, :WEST, 0])
+        history.append(row)
+    return history
 
 
 def _u(value) -> np.ndarray:
@@ -138,8 +174,9 @@ def _u(value) -> np.ndarray:
 def card_factors(deck_root: Path, frame_root: Path, label: str) -> tuple[dict, dict]:
     from legoesm.ocean.dynamics.latlon_cgrid_operators import compute_face_masks_3d
 
+    entries: list = []
     card, state, trace, passivity = r300.traced_kt7_stage1(
-        deck_root, frame_root, label)
+        deck_root, frame_root, label, entries)
     geometry = trace.stage_geometry[0]
     u_mask, _ = compute_face_masks_3d(
         card.recipe.z_coord.is_active, card.recipe.grid)
@@ -155,7 +192,7 @@ def card_factors(deck_root: Path, frame_root: Path, label: str) -> tuple[dict, d
         "umask": _u(u_mask)[w],
         "e3u_kmm": _u(geometry[4])[w],
         "uu_kmm": uu, "corrected_u": corrected, "zfu": _u(geometry[7])[w],
-    }, passivity
+    }, passivity, entries
 
 
 def _row(candidate, oracle, support) -> dict[str, object]:
@@ -170,18 +207,23 @@ def _row(candidate, oracle, support) -> dict[str, object]:
 
 def measure_label(deck_root, frame_root, record_root, label, plant="none"):
     nemo = nemo_factors(record_root, plant)
-    closed = closure(nemo, record_root)
-    card, passivity = card_factors(deck_root, frame_root, label)
+    closed, recorded = closure(nemo, record_root)
+    require(closed["complete"]["unequal"] == 0,
+            f"NEMO factor closure misses trp_u: {closed['complete']}")
+    replayed = statement_replay(nemo, recorded)
+    card, passivity, entries = card_factors(deck_root, frame_root, label)
     wet3 = nemo["umask"] > 0.0
     wet2 = wet3[..., 0]
     rows = {}
+    nemo = {k: v for k, v in nemo.items() if not k.startswith("_")}
     for name in SOURCE_ORDER:
         support = wet3 if np.ndim(nemo[name]) == 3 else wet2
         if name == "umask":
             support = np.ones_like(wet3)
         rows[name] = _row(card[name], nemo[name], support)
     return {"label": label, "passivity": passivity, "closure": closed,
-            "rows": rows,
+            "statement_replay": replayed,
+            "history": entry_history(entries, record_root), "rows": rows,
             "one_bit_control": r298._score(
                 np.asarray([1.0]), np.asarray([np.nextafter(1.0, 2.0)]),
                 np.asarray([True]))}
@@ -198,12 +240,18 @@ def classify(reports: list[dict], plant: str = "none") -> dict[str, object]:
         require(all(report["passivity"].values()), "trace is not passive")
         require(report["closure"]["complete"]["unequal"] == 0,
                 f"NEMO factor closure misses trp_u: {report['closure']['complete']}")
-        control = report["one_bit_control"]
-        require(control["unequal"] == 1 and plant != "one-bit",
-                "one-bit control did not register")
+        require(report["statement_replay"]["complete"]["unequal"] == 0,
+                "production :284/:290 helpers do not replay NEMO's trp_u")
+        control = (r298._score(np.asarray([1.0]), np.asarray([1.0]),
+                               np.asarray([True]))
+                   if plant == "one-bit" else report["one_bit_control"])
+        require(control["unequal"] == 1, "one-bit control did not register")
     first = reports[0]["rows"]
     for report in reports[1:]:
-        require(report["rows"] == first, "labels disagree")
+        require(report["rows"] == first
+                and report["history"] == reports[0]["history"], "labels disagree")
+    onset = next((h["kt"] for h in reports[0]["history"]
+                  if h["u"]["fold_relative"] > 0.01), None)
     nonbit = [n for n in SOURCE_ORDER if first[n]["fold_band"]["unequal"] > 0]
     require(nonbit, "every factor is exact in the fold band")
     dominant = max(nonbit, key=lambda n: first[n]["fold_relative"]
@@ -215,6 +263,13 @@ def classify(reports: list[dict], plant: str = "none") -> dict[str, object]:
         "fold_band": {n: first[n]["fold_band"] for n in SOURCE_ORDER},
         "interior": {n: first[n]["interior"] for n in SOURCE_ORDER},
         "closure": reports[0]["closure"],
+        "statement_replay": reports[0]["statement_replay"],
+        "fold_u_onset_kt": onset,
+        "history": [{"kt": h["kt"], **{f: {"fold_max": h[f]["fold_band"]["max_abs"],
+                                          "fold_relative": h[f]["fold_relative"],
+                                          "interior_max": h[f]["interior"]["max_abs"]}
+                                      for f in ("u", "ssh", "uu_b") if f in h}}
+                    for h in reports[0]["history"]],
     }
 
 
@@ -255,8 +310,6 @@ def main() -> int:
             require(bool(args.report_in), "--report-in is required")
             reports = [json.loads(p.read_text()) for p in args.report_in]
         if reports is None:
-            require(report["closure"]["complete"]["unequal"] == 0,
-                    f"NEMO factor closure misses trp_u: {report['closure']['complete']}")
             print(f"STATUS MEASURED {args.label}")
             return 0
         result = classify(reports, args.plant)

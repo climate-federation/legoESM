@@ -58,3 +58,17 @@ derived from them are scored on the western half (columns 0-89) only.
    the fold-band U. Controls: an admission/coverage plant, a closure plant
    (one NEMO factor perturbed one ulp must break P1) and the one-bit control
    must refuse with a distinct plant code.
+
+## Addendum (2026-10-16, appended after the kt-7 factor table, before the history below is measured)
+
+The kt-7 factor table shows every dynamic factor already non-bit in the fold
+band at stage-1 entry, and the production helpers for `:284`/`:290` replay
+NEMO's `trp_u` exactly from NEMO's operands. To place the carried entry U in
+time, the same traced run records the card's step-entry `u`, `ssh` and
+`uu_b` at kt 1..7 and scores them against NEMO's stage-0 frames (and, for
+`uu_b`, NEMO's kt-1 bt frame, west half), fold band versus interior.
+
+7. **R301-P7 — onset.** Predicted: the fold-band entry U is exact at kt 1
+   (admitted entry) and first exceeds 1% of NEMO's fold-band U maximum at
+   kt 2 (the end of the first full step), well before kt 7. Falsifier: the
+   first >1% kt is 5 or later.

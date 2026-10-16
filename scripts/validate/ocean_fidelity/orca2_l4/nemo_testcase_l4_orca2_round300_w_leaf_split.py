@@ -164,8 +164,12 @@ def _program(inputs: dict[str, object]) -> dict[str, np.ndarray]:
             for name, value in zip(SOURCE_ORDER, result)}
 
 
-def traced_kt7_stage1(deck_root: Path, frame_root: Path, label: str):
-    """Run the card six steps, then trace kt=7; return (card, state, trace, passivity)."""
+def traced_kt7_stage1(deck_root: Path, frame_root: Path, label: str,
+                      entries: list | None = None):
+    """Run the card six steps, then trace kt=7; return (card, state, trace, passivity).
+
+    ``entries`` (optional) receives the step-entry state of kt=1..7.
+    """
     import jax
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         LatLonCGridOceanModel, _NEMOWSLiveOperandTrace,
@@ -187,9 +191,13 @@ def traced_kt7_stage1(deck_root: Path, frame_root: Path, label: str):
     with r245._barotropic_surface_mask_arm(
             card, True, v_only=True, t_pivot_north_neighbor=True):
         for _ in range(6):
+            if entries is not None:
+                entries.append(state)
             state = jax.device_get(ordinary_model.step(
                 state, card.dt_s, freshwater=forcing[0],
                 surface_forcing=forcing[1]))
+        if entries is not None:
+            entries.append(state)
         ordinary = jax.device_get(ordinary_model.step(
             state, card.dt_s, freshwater=forcing[0],
             surface_forcing=forcing[1]))
