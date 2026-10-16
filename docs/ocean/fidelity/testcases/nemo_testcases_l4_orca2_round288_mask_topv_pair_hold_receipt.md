@@ -80,11 +80,29 @@ print `STATUS PLANT-FIRED` and exit 2.  The classifier status is
 
 ## Validation
 
-- Focused round-288 tests: pending final receipt update.
-- Citation gate and rigid-shift plant: pending final receipt update.
-- Required single `tests/ocean/fidelity -n 12` battery: pending final receipt
-  update.
-- `git diff --check`: pending final receipt update.
+- Focused round-288 classifier tests pass 6/6; the focused cumulative citation
+  tests pass 17/17.  Their logs have SHA256
+  `28ea3f40e4e4da4bdea6442aa0a6b7f6d842f553bd713542c3019b623bab086f`
+  and
+  `99df6ad9258095de79b14b98f849e19c52843c836f7c0d8c390a0d8a561421a7`.
+- This receipt's citation gate finds three mapped live citations with no
+  failure; the cumulative default-receipt gate is also clean.  A rigid
+  two-line shift of the completed-stage association exits 1 with
+  `SYMBOL-NOT-AT-LINE`.
+- The single permitted `tests/ocean/fidelity -n 12` battery collected 3,611
+  tests and reached 99%.  One G1 worker then aborted inside the JAX compiler;
+  the replacement controller stopped after its remaining work, without a
+  summary.  The eight ordinary reds printed before the abort are all the
+  registered branch-tip reds: the round-129 GYRE record hash, two round-33
+  source anchors, the OMT-1 module-edge ratchet, the round-228 citation entry,
+  dirty-escape scope, worktree stamping, and SI3 scalar-math provenance.
+- The crashed worker printed seven G1 failures.  Each exact node ID passes in
+  a fresh serial process (`-p no:xdist`), in 34.23--103.47 seconds.  The full
+  battery was not rerun.  Its log SHA256 is
+  `897112ce433c6f23b749df79ca9fd64494d59770d407e001ac81da52e56df412`;
+  the seven-test serial log SHA256 is
+  `09ea849473cb9ba9e9f1c30a06f90accfd0664bbb673eb6e95c242f6f1299dac`.
+- `git diff --check` is clean.
 - Independent review: **operator**, per the lane instruction.  The candidate
   does not land and no nested review was attempted in this sandbox.
 
