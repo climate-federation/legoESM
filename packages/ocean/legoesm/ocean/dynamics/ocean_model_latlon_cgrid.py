@@ -6991,9 +6991,13 @@ class LatLonCGridOceanModel:
                 stage_face_thickness=None, stage_index=0,
                 stage_zad_operands=None,
             ):
+                # vor_een np_CRV reads vv(Kmm) on the pivot row, NEMO's fold
+                # image (dynvor.f90:762-766); the compact mask zeroes it.
                 st = state._replace(
                     u=state.u.replace(data=u_in * u_mask_3d),
-                    v=state.v.replace(data=v_in * v_mask_3d),
+                    v=state.v.replace(data=v_in * (
+                        _ws_stage_v_mask if _cfg_b.rk3_vector_raw_vmask
+                        else v_mask_3d)),
                 )
                 stage_geom_density = _geom_density
                 if stage_tracers_eta is not None:

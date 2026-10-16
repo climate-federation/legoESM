@@ -265,10 +265,55 @@ def test_g6_raw_vmask_consumers_are_live_under_traced_jit(roots):
     rhs_words = exposed("expose_stage2_momentum_rhs").view(np.uint64)
     raw_words = exposed("expose_stage2_raw_momentum").view(np.uint64)
     assert np.array_equal(rhs_words, np.array([
-        0xbdff8bd9c6b04ff4, 0xbe08b82cbfe3c8d9,
-        0xbe115ba0992e2879, 0xbe193713afdf5438,
+        0xbdff8bd7c5fbf193, 0xbe08b82c5abcff03,
+        0xbe115ba09e6de23e, 0xbe193713aaab926c,
     ], dtype=np.uint64))
     assert np.array_equal(raw_words, np.array([
-        0xbec4cb6fcdb8b8b4, 0xbed04b677f7d66a5,
-        0xbed6e24c39f25a5c, 0xbee09f0e3a2e76c4,
+        0xbec4cb6e7bc1d37e, 0xbed04b673cd01519,
+        0xbed6e24c40ddddc5, 0xbee09f0e36c098c5,
     ], dtype=np.uint64))
+
+
+def test_g6_stage_state_hands_vor_een_the_folded_pivot_v(roots, monkeypatch):
+    """dynvor.f90:762-766: np_CRV's pivot-row F vorticity reads vv(Kmm) on
+    the pivot V row, which the stage-end lbc_lnk fills with the fold image of
+    the row below (lbcnfd.f90 'V').  Under G6's raw V mask the stage state
+    handed to the momentum tendency keeps that row; the compact mask zeroes
+    it.  Fails if the stage state goes back to the compact mask."""
+    import jax
+    import jax.numpy as jnp
+    import numpy as np
+
+    from legoesm.ocean.dynamics import ocean_model_latlon_cgrid as om
+
+    card = recipe.build_nemo_testcase_card(
+        "ORCA2G1b-vec", deck_root=roots["g1b"])
+    state = card.recipe.initial_state
+    v = state.v.data.at[-2, :, 0].set(
+        jnp.linspace(4.0e-5, -1.0e-5, state.v.data.shape[1]))
+    state = state._replace(v=state.v.replace(data=v))
+    seen = []
+    real = om.LatLonCGridOceanModel.tendencies
+
+    def spy(self, st, *a, **kw):
+        jax.debug.callback(lambda x: seen.append(np.asarray(x)),
+                           st.v.data[..., 0], ordered=True)
+        return real(self, st, *a, **kw)
+
+    monkeypatch.setattr(om.LatLonCGridOceanModel, "tendencies", spy)
+    fold = card.recipe.grid.fold
+    pivots = {}
+    for on in (True, False):
+        seen.clear()
+        cfg = card.recipe.model_config._replace(rk3_vector_raw_vmask=on)
+        om.LatLonCGridOceanModel(card.recipe.grid, card.recipe.z_coord,
+                                 cfg).step(state, dt=card.dt_s)
+        assert len(seen) >= 3
+        pivots[on] = [s[-1] for s in seen[1:]]
+        if on:
+            for s in seen[1:]:
+                image = fold.vector_sign_v * s[-2][np.asarray(fold.perm_v)]
+                wet = s[-1] != 0.0
+                assert wet.any()
+                assert np.array_equal(s[-1][wet], image[wet])
+    assert not any(p.any() for p in pivots[False])
