@@ -109,7 +109,7 @@ this sandbox does not retry `mpirun`.
 ## Validation and review
 
 - Citation gate: **PASS**, seven citations, zero failures and zero unmapped
-  citations. The rigid shift of the `traadv.f90:267-302` W-diagnosis span
+  citations. The rigid shift of the mapped W-diagnosis span
   refuses. The default cumulative receipt also passes with zero failures and
   zero unmapped citations. Receipt/default/plant log SHA-256:
   `742b0fb1a90d1b4707452c9b24017a0a76b741e2e0715c8ff0e880f2b9be22bb`,
