@@ -166,9 +166,9 @@ not manufacture a record.
 
 ## Tests and review
 
-- Focused G6/operator/HPG tests: 10 passed (CPU fp64).
-- Required citation and private-import gates: recorded after the final
-  citation re-anchor below.
+- Focused G6 card, AL81 fold-halo and HPG-fold tests: 11 passed (CPU fp64).
+- Required receipt-citation + private-import files: 23 passed (CPU fp64),
+  after mechanically re-anchoring 64 gate pins and 20 audited-receipt pins.
 - independent review: operator (Claude)
 
 ASKED: passivity before admission; both labels kt 1..6; every surface field;
