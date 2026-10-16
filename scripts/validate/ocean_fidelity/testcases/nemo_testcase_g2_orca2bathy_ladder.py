@@ -41,6 +41,7 @@ from __future__ import annotations
 import argparse
 import json
 import pickle
+import struct
 import subprocess
 import sys
 import time
@@ -62,7 +63,8 @@ FORCED = ("ORCA2G4-sbc", *ICE_CASES)   # NEMO-supplied surface fields each kt (D
 DEFAULT_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/round10/"
     "oracle_g2_r10/p3_a_100step")
-ARMS = ("geometry", "independent", "given_entry", "stages", "barotropic_exit",
+ARMS = ("geometry", "independent", "given_entry", "stages", "operators",
+        "barotropic_exit",
         "zdf_replay", "substeps", "trazdf_replay", "rhs_frame",
         "restart_independent", "carried")
 # stage exposures of one step: the private hook that returns it, and the
@@ -102,6 +104,41 @@ def levels_last(a, nk: int) -> np.ndarray:
     a = np.asarray(a, dtype=np.float64)
     require(not np.any(a[nk:]), "NEMO holds a value below the card's last level")
     return np.ascontiguousarray(np.moveaxis(a[:nk], 0, -1))
+
+
+def read_stage2_terms(path: Path) -> dict[str, np.ndarray]:
+    """Read NEMO's source-ordered stage-2 momentum accumulators.
+
+    The writer records native ``(i, j, k)`` arrays including the two-cell
+    halo and dummy bottom level.  Keep that native extent here; the caller
+    strips it only after validating the header and payload.
+    """
+    with path.open("rb") as handle:
+        magic = handle.read(16).decode("ascii").rstrip()
+        raw_header = handle.read(struct.calcsize("=9i"))
+        require(len(raw_header) == struct.calcsize("=9i"),
+                f"{path}: truncated stage-2 header")
+        header = struct.unpack("=9i", raw_header)
+        values = np.fromfile(handle, dtype=np.float64)
+        require(handle.read(1) == b"", f"{path}: trailing stage-2 payload")
+    version, kt, stage, kmm, krhs, nx, ny, nz, bits = header
+    require(magic == "NEMO_L2_RKTRM_1", f"{path}: bad stage-2 magic")
+    require((version, kt, stage, kmm, krhs, bits) == (1, 1, 2, 3, 2, 64),
+            f"{path}: bad stage-2 header {header}")
+    count = nx * ny * nz
+    names = (
+        "before_u", "before_v", "after_hpg_u", "after_hpg_v",
+        "after_vorticity_u", "after_vorticity_v",
+        "after_advection_u", "after_advection_v",
+    )
+    require(values.size == len(names) * count,
+            f"{path}: bad stage-2 payload count {values.size}")
+    require(bool(np.isfinite(values).all()), f"{path}: non-finite stage-2 payload")
+    out = {}
+    for index, name in enumerate(names):
+        raw = values[index * count:(index + 1) * count]
+        out[name] = raw.reshape((nx, ny, nz), order="F").transpose(1, 0, 2).copy()
+    return out
 
 
 def depth_classes(mesh_path: Path, nk: int) -> dict:
@@ -440,7 +477,7 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
     cfg, z, s0 = card.recipe.model_config, card.recipe.z_coord, card.recipe.initial_state
     if case in FORCED:
         require(arm in ("independent", "given_entry")
-                or (arm in ("stages", "barotropic_exit", "carried")
+                or (arm in ("stages", "operators", "barotropic_exit", "carried")
                     and case in ICE_CASES),
                 "G4/G5/G6 NEMO-supplied per-step forcing is registered only for "
                 "the independent and given-entry ladders")
@@ -655,6 +692,62 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
             if dump is not None:
                 np.savez(Path(dump) / f"card_kt{kt}_{name}.npz", **card_levels(st),
                          ssh=np.asarray(st.eta.data))
+        return out
+    if arm == "operators":
+        # G6's first multilevel vector-form statement walk.  The record is
+        # source ordered: zero accumulator -> HPG -> VOR -> KEG+ZAD.  Publish
+        # the production accumulators through the existing write-only hook;
+        # no operator is reimplemented here.
+        require(case == "ORCA2G6-vec" and kt_from == 1,
+                "the operator walk is registered for G6 step 1 only")
+        terms = read_stage2_terms(
+            root / "oracle_rkstage2_terms_kt00000001.bin")
+        require(all(not np.any(terms[name]) for name in ("before_u", "before_v")),
+                "NEMO's stage-2 accumulator did not start at zero")
+        out["label"] = (
+            "INDEPENDENT = GIVEN-NEMO-ENTRY at kt 1 (source-ordered stage-2 "
+            "momentum accumulators)"
+        )
+        fw, sf = g5.nemo_supplied_forcing(card, root, 1)
+        boundaries = (
+            ("after_hpg", "after_hpg"),
+            ("after_vor", "after_vorticity"),
+            ("after_zad", "after_advection"),
+        )
+        for hook_name, record_name in boundaries:
+            exposed = jax.device_get(LatLonCGridOceanModel(
+                card.recipe.grid, z, cfg,
+                _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+                    expose_momentum_operator=hook_name,
+                    expose_momentum_operator_stage=2,
+                )).step(s0, dt=card.dt_s, freshwater=fw, surface_forcing=sf))
+            cand = card_levels(exposed)
+            rows, all_levels = [], {}
+            for field in ("u", "v"):
+                native = terms[f"{record_name}_{field}"]
+                require(native.shape[-1] == nk + 1 and native.shape[:2] == (
+                    cand[field].shape[0] + 4, cand[field].shape[1] + 4),
+                    f"{field}: unexpected native stage-2 shape {native.shape}")
+                ref = native[2:-2, 2:-2, :nk]
+                rows.append(g1.row(
+                    f"stage2.{hook_name}.{field}", ref[..., 0],
+                    cand[field][..., 0], reg,
+                    plant=(plant == "score" and hook_name == "after_hpg"
+                           and field == "u"),
+                ))
+                by_level = level_rows(
+                    ref, cand[field], cls[field],
+                    plant=(plant == "level" and hook_name == "after_hpg"
+                           and field == "u"),
+                )
+                all_levels[field] = {
+                    "summary": class_summary(by_level), "levels": by_level,
+                }
+            out["per_kt"].append({
+                "kt": 1, "boundary": hook_name, "rows": rows,
+                "first_unequal": g1.first_unequal(rows),
+                "all_levels": all_levels,
+            })
         return out
     if arm == "carried":
         # G5 round 4: every leaf the card carries into step kt against what

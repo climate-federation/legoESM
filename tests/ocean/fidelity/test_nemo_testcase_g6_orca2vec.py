@@ -147,6 +147,33 @@ def test_g2_family_ladder_routes_g6_through_the_ice_record_path():
     assert "ORCA2G6-vec" in ladder.CASES
     assert "ORCA2G6-vec" in ladder.ICE_CASES
     assert "ORCA2G6-vec" in ladder.FORCED
+    assert "operators" in ladder.ARMS
+
+
+G6_RECORD = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/"
+                 "round36/oracle_g6_r36/twin_a")
+
+
+@pytest.mark.skipif(not (G6_RECORD / "oracle_rkstage2_terms_kt00000001.bin").is_file(),
+                    reason="no G6 record")
+def test_g6_stage2_term_reader_admits_the_record_schema():
+    sys.path.insert(0, str(CASES))
+    path = CASES / "nemo_testcase_g2_orca2bathy_ladder.py"
+    spec = importlib.util.spec_from_file_location("g6_operator_ladder", path)
+    ladder = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ladder)
+    terms = ladder.read_stage2_terms(
+        G6_RECORD / "oracle_rkstage2_terms_kt00000001.bin")
+    assert tuple(terms) == (
+        "before_u", "before_v", "after_hpg_u", "after_hpg_v",
+        "after_vorticity_u", "after_vorticity_v",
+        "after_advection_u", "after_advection_v",
+    )
+    assert all(value.shape == (152, 184, 31) for value in terms.values())
+    assert not np.any(terms["before_u"])
+    assert not np.any(terms["before_v"])
+    assert np.any(terms["after_advection_u"])
+    assert np.any(terms["after_advection_v"])
 
 
 G5_RECORD = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/"
