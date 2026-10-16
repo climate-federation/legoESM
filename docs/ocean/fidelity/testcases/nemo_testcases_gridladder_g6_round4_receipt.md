@@ -140,7 +140,8 @@ against NEMO's kt-2 stage records:
   (a fresh extrapolation).  CORRECTED after the independent review: the full
   ORCA2 card ALSO resolves it as `'rk3_extrapolated'`, exactly like G6; only the
   GYRE and VORTEX vector setups use `'rk3_extrapolated_carried'`. NEMO writes
-  `ssh(Naa) = 2*ssh(Nbb) - ssh(Naa)` at the end of each step (stprk3.f90:241)
+  `ssh(Naa) = 2*ssh(Nbb) - ssh(Naa)` at the end of each step (stprk3.f90:241 in G6's reused G5 round-31
+  build, :237 in ORCA2_OMIP_L4)
   and reads that slot here in the next step.  The two agree at kt 1 and differ from kt 2.  Changing
   ONLY that field on the G6 card (scratch, `5f471f290` + in-memory card
   edit):
