@@ -75,3 +75,22 @@ calibrates the held arm at that same substep.  Three controlled executions are
 frozen here: held arm with current compact masks, held arm with raw V surface
 mask, and held arm with raw V surface mask plus the T-pivot north-neighbour
 association.  This clarification changes no prediction or threshold.
+
+## Instrument correction — 2026-10-16, before accepted measurement
+
+The combined three-arm executable produced no report; the first isolated arm
+was then killed during full-step compilation, also before emitting a report.
+Round 292 already proves that substep-1 midpoint SSH and V are array-exact,
+and the named boundary is purely the face-depth formula.  The accepted
+instrument therefore evaluates the existing production face-depth function
+and the independent round-245 source replay offline on NEMO's admitted
+substep-1 SSH, with the card's instantiated geometry operands.  The two
+implementations must be bit-identical and must reproduce round 292's frozen
+13-cell / 719 m boundary before any split is read.  The three arms are then
+offline one-variable substitutions on that calibrated statement.  This keeps
+the frozen operands, order, predictions, and falsifiers; it removes only the
+irrelevant full-step recompilation.
+
+Prediction R293-P5 is still tested literally.  If the immediate transport was
+already exact because substep-1 midpoint V is zero, its claimed closure is
+**REFUTED as a null consumer**, not credited to the operand pair.
