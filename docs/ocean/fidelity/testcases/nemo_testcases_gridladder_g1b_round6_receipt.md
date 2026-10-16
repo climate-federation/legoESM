@@ -54,10 +54,10 @@ contribution is `-6.279798654e-314`; the ordinary card contribution is zero.
 The source first forms and stores C2 `zu`, `zv`, and `zhke`, then subtracts
 their metric-scaled gradient from `Krhs`: record build
 `ORCA2G1_OMIP_L1_R4REF/BLD/ppsrc/nemo/dynkeg.f90:117-130`.  The enclosing
-`SUBROUTINE dyn_keg` opens at :61 and ends at :175.  NEMO then consumes that
+`SUBROUTINE dyn_keg` opens at `:61` and ends at `:175`.  NEMO then consumes that
 RHS in the vector update and removes the barotropic velocity at
 `ORCA2G1_OMIP_L1_R4REF/BLD/ppsrc/nemo/dynzdf.f90:138-160`; the enclosing
-`SUBROUTINE dyn_zdf` opens at :67.
+`SUBROUTINE dyn_zdf` opens at `:67`.
 
 R6-S1 is therefore **REFUTED as predicted and resolved by measurement**: the
 first non-bit statement is stage-3 `dyn_keg`, not a stage-1 velocity update.
@@ -79,10 +79,10 @@ is one.  R6-L1 is **CONFIRMED locally** and no exact GIVEN row is lost.
 
 The full build's enclosing routine was opened, not inferred from the record
 build.  `ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynkeg.f90:61` begins
-`SUBROUTINE dyn_keg`, which ends at :175; the identical C2 statements are
-:117-130.  Its enclosing
+`SUBROUTINE dyn_keg`, which ends at `:175`; the identical C2 statements are
+`:117-130`.  Its enclosing
 `ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynzdf.f90:67` likewise opens there, with the
-same vector update and removal at :138-160.  The full ORCA2 card is not
+same vector update and removal at `:138-160`.  The full ORCA2 card is not
 selected by this G1b-only round because Decision 122 requires its own measured
 execution chain.
 
