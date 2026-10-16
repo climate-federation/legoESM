@@ -848,10 +848,6 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
         observed_lm = np.zeros_like(en)
         observed_lm[active] = (avm[active] / float(tke_cfg.c_k)
                                / np.sqrt(en[active]))
-        dissl = zdf["dissl"][..., 1:nk]
-        active_ld = wet_w & (dissl > 0.0) & (en > 0.0)
-        observed_ld = np.zeros_like(en)
-        observed_ld[active_ld] = np.sqrt(en[active_ld]) / dissl[active_ld]
 
         rows = {
             "legacy_zmxlm_vs_nemo_replay": _mxl_array_row(
@@ -868,8 +864,6 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
                 "card_en_zmxld_vs_nemo_en_replay", nemo_ld, card_en_ld, wet_w),
             "nemo_zmxlm_replay_vs_observable": _mxl_array_row(
                 "nemo_zmxlm_replay_vs_observable", observed_lm, nemo_lm, active),
-            "nemo_zmxld_replay_vs_observable": _mxl_array_row(
-                "nemo_zmxld_replay_vs_observable", observed_ld, nemo_ld, active_ld),
             "nemo_avm_replay_vs_record": _mxl_array_row(
                 "nemo_avm_replay_vs_record", avm, pred_avm, wet_w),
             "card_avm_vs_record": _mxl_array_row(
@@ -919,6 +913,9 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
             "seconds": seconds,
             "trace_passive": trace_passive,
             "frame_restart_exact": frame_restart_exact,
+            "observable_limits": {
+                "zmxld": "kt-1 ZDF frame records no dissl or mixing length",
+            },
             "rn2_trace_vs_direct_bundle": rn2_bundle_comparison,
             "plant_output_moved": planted_output_moved,
             "preregistered_p2_confirmed": (
