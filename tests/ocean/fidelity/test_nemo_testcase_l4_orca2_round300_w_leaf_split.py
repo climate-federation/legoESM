@@ -49,19 +49,64 @@ def test_classifier_names_u_difference_and_every_plant_fires():
             gate.classify(copy.deepcopy(_report()), plant)
 
 
-def test_program_reuses_source_helpers_and_zeroes_the_bottom():
-    shape = (2, 3, 2)
-    inputs = {
-        "trp_u": np.zeros(shape), "trp_v": np.zeros(shape),
-        "w_r1area": np.ones(shape[:2]), "w_area": np.ones(shape[:2]),
-        "w_e3t0": np.ones(shape), "w_r3bb": np.zeros(shape[:2]),
-        "w_r3mm": np.zeros(shape[:2]), "w_r3aa": np.zeros(shape[:2]),
-        "w_tmask": np.ones(shape), "w_dt": np.asarray(1.0),
+def _record(shape=(4, 5, 31), seed=300):
+    """Non-zero NEMO-shaped operands with dry cells and a dry bottom level."""
+    rng = np.random.default_rng(seed)
+    tmask = (rng.random(shape) > 0.2).astype(np.float64)
+    tmask[..., -1] = 0.0
+    return {
+        "trp_u": rng.normal(0.0, 1e6, shape),
+        "trp_v": rng.normal(0.0, 1e6, shape),
+        "w_r1area": 1.0 / rng.uniform(1e9, 3e10, shape[:2]),
+        "w_area": rng.uniform(1e9, 3e10, shape[:2]),
+        "w_e3t0": rng.uniform(10.0, 500.0, shape),
+        "w_r3bb": rng.normal(0.0, 1e-3, shape[:2]),
+        "w_r3mm": rng.normal(0.0, 1e-3, shape[:2]),
+        "w_r3aa": rng.normal(0.0, 1e-3, shape[:2]),
+        "w_tmask": tmask,
     }
+
+
+def _reference_w(x):
+    """NumPy NEMO W in written order: divhor.f90:132-139, sshwzv.f90:271-298."""
+    pu, pv, tm = x["trp_u"], x["trp_v"], x["w_tmask"]
+    west = np.empty_like(pu)
+    west[:, 1:], west[:, 0] = pu[:, :-1], pu[:, -1]
+    south = np.zeros_like(pv)
+    south[1:] = pv[:-1]
+    live = x["w_e3t0"] * (1.0 + x["w_r3mm"][..., None] * tm)
+    numerator = (pu - west) + (pv - south)
+    tdiv = (numerator * x["w_r1area"][..., None]) * tm
+    flux_div = (live * (tdiv / np.where(tm > 0.5, live, 1.0))) * tm
+    stretch = ((1.0 / x["w_dt"]) * x["w_e3t0"]) * (
+        x["w_r3aa"] - x["w_r3bb"])[..., None]
+    ww = np.zeros(pu.shape[:2] + (pu.shape[-1] + 1,))
+    for k in range(pu.shape[-1] - 1, -1, -1):
+        ww[..., k] = ww[..., k + 1] - (flux_div[..., k] + stretch[..., k]) * tm[..., k]
+    return ww, stretch
+
+
+def test_oracle_program_replays_nemo_w_bit_for_bit_at_the_stage_clock():
+    dt = 10800.0
+    inputs = gate._oracle_inputs(_record(), dt)
     result = gate._program(inputs)
-    assert tuple(result) == gate.SOURCE_ORDER
-    assert np.array_equal(result["w_recurrence"], np.zeros((2, 3, 3)))
-    assert np.array_equal(result["area_product"], np.zeros((2, 3, 3)))
+    reference = dict(inputs, w_dt=dt / 3.0)
+    ww, stretch = _reference_w(reference)
+    assert np.count_nonzero(stretch) > 0 and np.count_nonzero(ww) > 0
+    assert np.array_equal(result["stretch_rate"], stretch)
+    assert np.array_equal(result["w_recurrence"], ww)
+    assert np.array_equal(result["bottom_zero"], np.zeros(ww.shape[:2]))
+    assert np.array_equal(result["area_product"],
+                          reference["w_area"][..., None] * ww)
+
+
+def test_ratio_delta_row_compares_matched_time_levels():
+    rng = np.random.default_rng(7)
+    stage_delta = rng.normal(0.0, 1e-3, (3, 4))
+    full_step_delta = stage_delta * 3.0
+    matched = gate.time_matched_ratio_delta(stage_delta, 10800.0, 3600.0)
+    assert np.array_equal(matched, full_step_delta)
+    assert not np.array_equal(stage_delta, full_step_delta)
 
 
 def test_cumulative_walk_is_monotone_in_recorded_operand_sets():

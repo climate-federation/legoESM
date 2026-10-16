@@ -244,6 +244,31 @@ def _candidate_context(deck_root: Path, frame_root: Path, label: str):
     return card, passivity, candidate, native
 
 
+def _oracle_inputs(oracle: dict[str, np.ndarray], dt_s: float) -> dict[str, np.ndarray]:
+    """NEMO's stage-1 W operands on the candidate's 30 active layers."""
+    inputs = {
+        name: (oracle[name][..., :30]
+               if name in {"trp_u", "trp_v", "w_e3t0", "w_tmask"}
+               else oracle[name])
+        for name in ("trp_u", "trp_v", "w_r1area", "w_area", "w_e3t0",
+                     "w_r3bb", "w_r3mm", "w_r3aa", "w_tmask")
+    }
+    # Stage-1 clock rn_Dt/3 (stprk3_stg.f90:136-137).
+    inputs["w_dt"] = np.asarray(dt_s / 3.0, np.float64)
+    return inputs
+
+
+def time_matched_ratio_delta(oracle_delta, candidate_dt, oracle_dt):
+    """Put NEMO's stage-1 Kaa-Kbb ratio delta on the candidate's step.
+
+    NEMO's stage-1 r3t(Kaa) is 2/3 r3t(Kbb) + 1/3 r3ta (np_HYB,
+    stprk3_stg.f90:51,179), so its delta spans rn_Dt/3; the candidate's
+    delta spans the full step to ssh(N+1).  Comparing the raw deltas
+    compares different time levels.
+    """
+    return np.asarray(oracle_delta) * (float(candidate_dt) / float(oracle_dt))
+
+
 def _support(name: str, oracle: dict[str, np.ndarray]) -> np.ndarray:
     tmask = np.asarray(oracle["w_tmask"], bool)
     if name in {"bottom_zero", "ratio_delta"}:
@@ -258,15 +283,10 @@ def _measure_label(deck_root: Path, frame_root: Path,
     card, passivity, candidate, native = _candidate_context(
         deck_root, frame_root, label)
     candidate_program = _program(candidate)
-    oracle_inputs = {
-        name: (oracle[name][..., :30]
-               if name in {"trp_u", "trp_v", "w_e3t0", "w_tmask"}
-               else oracle[name])
-        for name in candidate
-        if name != "w_dt"
-    }
-    oracle_inputs["w_dt"] = np.asarray(card.dt_s / 3.0, np.float64)
+    oracle_inputs = _oracle_inputs(oracle, card.dt_s)
     oracle_program = _program(oracle_inputs)
+    oracle_program["ratio_delta"] = time_matched_ratio_delta(
+        oracle_program["ratio_delta"], candidate["w_dt"], oracle_inputs["w_dt"])
     rows = {
         name: r298._regions(candidate_program[name], oracle_program[name],
                             _support(name, oracle))
@@ -403,7 +423,8 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
 
 
 def measure(deck_root: Path, frame_root: Path, record_root: Path,
-            baseline_root: Path, expect_commit: str) -> dict[str, object]:
+            baseline_root: Path, expect_commit: str,
+            labels: tuple[str, ...] = LABELS) -> dict[str, object]:
     import jax
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
 
@@ -418,7 +439,7 @@ def measure(deck_root: Path, frame_root: Path, record_root: Path,
             "round 300 requires production JIT on CPU")
     oracle, admission = assemble_record(record_root, baseline_root)
     labels = [_measure_label(deck_root, frame_root, oracle, label)
-              for label in LABELS]
+              for label in labels]
     return {
         "format": "nemo-testcase-l4-orca2-round300-w-leaf-v1",
         "status": "PASS_R300_MEASUREMENT", "worktree": stamp,
@@ -436,6 +457,9 @@ def main() -> int:
     parser.add_argument("--record-root", type=Path)
     parser.add_argument("--baseline-root", type=Path)
     parser.add_argument("--expect-commit")
+    # ponytail: one label per call fits the 10-minute synchronous limit;
+    # classification still requires both labels' rows in one report.
+    parser.add_argument("--label", choices=LABELS, action="append")
     parser.add_argument("--report-in", type=Path)
     parser.add_argument("--raw-output", type=Path)
     parser.add_argument("--plant", choices=PLANTS, default="none")
@@ -449,7 +473,8 @@ def main() -> int:
                 args.baseline_root, args.expect_commit)),
                 "measurement paths and --expect-commit are required")
             report = measure(args.deck_root, args.frame_root, args.record_root,
-                             args.baseline_root, args.expect_commit)
+                             args.baseline_root, args.expect_commit,
+                             tuple(args.label or LABELS))
             if args.raw_output:
                 args.raw_output.write_text(
                     json.dumps(report, indent=2, sort_keys=True) + "\n",
