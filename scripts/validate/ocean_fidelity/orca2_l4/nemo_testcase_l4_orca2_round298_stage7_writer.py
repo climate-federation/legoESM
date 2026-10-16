@@ -267,6 +267,7 @@ def _measure_label(deck_root: Path, frame_root: Path, oracle: dict,
     replay = _tracer_replay(card, state, trace, g0)
     oracle_geometry = _oracle_geometry(g0, oracle, card.recipe.grid)
     transport_replay = _tracer_replay(card, state, trace, oracle_geometry)
+    candidate_adv_qco = _adv_qco(card, state, trace, replay[2], replay[3])
     adv_qco = _adv_qco(card, state, trace, oracle["adv_t"], oracle["adv_s"])
 
     candidate = {
@@ -316,6 +317,18 @@ def _measure_label(deck_root: Path, frame_root: Path, oracle: dict,
         "T": _regions(adv_qco[0], oracle["qco_t"][..., :30], supports["t"]),
         "S": _regions(adv_qco[1], oracle["qco_s"][..., :30], supports["t"]),
     }
+    candidate_adv_arm = {
+        "T": _regions(candidate_adv_qco[0], oracle["qco_t"][..., :30], supports["t"]),
+        "S": _regions(candidate_adv_qco[1], oracle["qco_s"][..., :30], supports["t"]),
+    }
+    source_rounding = {
+        "candidate_T": _regions(replay[2], replay[4], supports["t"]),
+        "candidate_S": _regions(replay[3], replay[5], supports["t"]),
+        "oracle_T": _regions(oracle["adv_t"][..., :30],
+                             oracle["sbc_t"][..., :30], supports["t"]),
+        "oracle_S": _regions(oracle["adv_s"][..., :30],
+                             oracle["sbc_s"][..., :30], supports["t"]),
+    }
     one = _score(np.asarray([0.0]),
                  np.asarray([np.nextafter(0.0, 1.0)]), np.asarray([True]))
     return {
@@ -323,12 +336,14 @@ def _measure_label(deck_root: Path, frame_root: Path, oracle: dict,
         "passivity": passivity, "rows": rows, "entry": entry_rows,
         "candidate_replay": replay_checks,
         "oracle_transport_qco_arm": transport_arm,
+        "candidate_adv_qco_arm": candidate_adv_arm,
         "oracle_adv_qco_arm": adv_arm,
+        "adv_sbc_direct": source_rounding,
         "unforced_checks": {
-            "oracle_adv_t_equals_sbc_t": bool(np.array_equal(oracle["adv_t"], oracle["sbc_t"])),
-            "oracle_adv_s_equals_sbc_s": bool(np.array_equal(oracle["adv_s"], oracle["sbc_s"])),
-            "candidate_adv_t_equals_sbc_t": bool(np.array_equal(replay[2], replay[4])),
-            "candidate_adv_s_equals_sbc_s": bool(np.array_equal(replay[3], replay[5])),
+            "oracle_adv_t_matches_sbc_t": source_rounding["oracle_T"]["complete"]["unequal"] == 0,
+            "oracle_adv_s_matches_sbc_s": source_rounding["oracle_S"]["complete"]["unequal"] == 0,
+            "candidate_adv_t_matches_sbc_t": source_rounding["candidate_T"]["complete"]["unequal"] == 0,
+            "candidate_adv_s_matches_sbc_s": source_rounding["candidate_S"]["complete"]["unequal"] == 0,
         },
         "one_bit_control": one,
     }
@@ -349,7 +364,7 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
     elif plant == "replay":
         report["labels"][0]["candidate_replay"]["S"]["complete"]["max_abs"] = 1.0
     elif plant == "unforced":
-        report["labels"][0]["unforced_checks"]["oracle_adv_s_equals_sbc_s"] = False
+        report["labels"][0]["unforced_checks"]["oracle_adv_s_matches_sbc_s"] = False
     elif plant == "first-carrier":
         report["labels"][0]["oracle_transport_qco_arm"]["S"]["fold_band"]["max_abs"] = 0.0
     elif plant == "one-bit":
@@ -377,11 +392,14 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
         prior = row["entry"]["S"]["fold_band"]["max_abs"]
         actual = row["rows"]["qco_s"]["fold_band"]["max_abs"]
         trp = row["oracle_transport_qco_arm"]["S"]["fold_band"]["max_abs"]
+        sbc = row["candidate_adv_qco_arm"]["S"]["fold_band"]["max_abs"]
         adv = row["oracle_adv_qco_arm"]["S"]["fold_band"]["max_abs"]
         require(prior > FLOOR and actual > 10.0 * prior,
                 f"{label}: frozen kt=7 growth did not reproduce")
         if trp <= 10.0 * prior:
             carrier = "trp"
+        elif sbc <= 10.0 * prior:
+            carrier = "sbc"
         elif adv <= 10.0 * prior:
             carrier = "adv"
         else:
@@ -392,11 +410,13 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
             "qco_fold_S_max": actual,
             "growth_ratio": actual / prior,
             "oracle_transport_arm_fold_S_max": trp,
+            "candidate_adv_arm_fold_S_max": sbc,
             "oracle_adv_arm_fold_S_max": adv,
             "carrier": carrier,
             "rows": row["rows"],
             "entry": row["entry"],
             "candidate_replay": row["candidate_replay"],
+            "adv_sbc_direct": row["adv_sbc_direct"],
             "unforced_checks": row["unforced_checks"],
         }
     require(len(set(carriers.values())) == 1,

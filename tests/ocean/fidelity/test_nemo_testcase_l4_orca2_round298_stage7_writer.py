@@ -29,11 +29,14 @@ def _label(name):
         "entry": {"T": _regions(1.0), "S": _regions(2.0)},
         "candidate_replay": {"T": _regions(0.0), "S": _regions(0.0)},
         "oracle_transport_qco_arm": {"T": _regions(0.0), "S": _regions(30.0)},
+        "candidate_adv_qco_arm": {"T": _regions(0.0), "S": _regions(40.0)},
         "oracle_adv_qco_arm": {"T": _regions(0.0), "S": _regions(2.0)},
-        "unforced_checks": {"oracle_adv_t_equals_sbc_t": True,
-                            "oracle_adv_s_equals_sbc_s": True,
-                            "candidate_adv_t_equals_sbc_t": True,
-                            "candidate_adv_s_equals_sbc_s": True},
+        "adv_sbc_direct": {key: _regions(0.0) for key in
+                           ("candidate_T", "candidate_S", "oracle_T", "oracle_S")},
+        "unforced_checks": {"oracle_adv_t_matches_sbc_t": True,
+                            "oracle_adv_s_matches_sbc_s": True,
+                            "candidate_adv_t_matches_sbc_t": True,
+                            "candidate_adv_s_matches_sbc_s": True},
         "one_bit_control": {"unequal": 1},
     }
 
