@@ -82,6 +82,10 @@ table totals 222 tolerated cells per label.  Normal-range differences at steps
 
 - The three Decision-127 plants pass in the shared scorer's direct test; the
   ordinary one-unit wet-state plant still leaves the bar.
+- Focused CPU/fp64 tests passed: 32 shared-scorer, G1b-card, environment, and
+  100-step option-plant tests.  After the substantive commit, the required
+  receipt-citation and no-private-cross-import gates passed 23/23 on the clean
+  tree; the citation map's shifted-anchor plants all fired.
 - The independent 100-step and GIVEN 50-step rescoring ran synchronously on
   CPU in fp64.  The kt-7 stage rescore independently names stage 3 U and the
   same cell.
