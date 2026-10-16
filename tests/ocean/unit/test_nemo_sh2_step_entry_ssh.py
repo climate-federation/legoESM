@@ -35,3 +35,47 @@ def test_selected_flag_refuses_paths_that_would_ignore_it():
         _nemo_sh2_eta(cfg, prognostic=True, eta_now=STAGE, eta_step_entry=None)
     with pytest.raises(ValueError, match="requires prognostic TKE"):
         _nemo_sh2_eta(cfg, prognostic=False, eta_now=STAGE, eta_step_entry=ENTRY)
+
+
+class _ShearSeen(Exception):
+    pass
+
+
+def _shear_eta_at_call_site(flag):
+    """Run the production vertical-mixing method up to its shear call and
+    return the eta it hands ``_tke_step_entry_p_sh2`` (review gap: the call
+    site could bypass the helper and every unit test above stayed green)."""
+    from types import MethodType, SimpleNamespace
+
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+
+    tke = TKEConfig(prognostic=True, tke_shear_production="nemo_face_native",
+                    nemo_sh2_step_entry_ssh=flag)
+    physics = SimpleNamespace(
+        vertical_mixing=SimpleNamespace(scheme="tke", tke=tke),
+        convection=SimpleNamespace(scheme="none"))
+    cfg = SimpleNamespace(physics=physics, eos="linear", eos_linear=None,
+                          eos_nemo_seos=None, implicit_ice_ocean_top_drag=False)
+
+    def spy(self, state, *, eta_now, **kwargs):
+        raise _ShearSeen(eta_now)
+
+    model = SimpleNamespace(
+        config=cfg, z_coord=None, _iwm_forcing=None,
+        grid=SimpleNamespace(lat_T=jnp.zeros((1, 1))),
+        _nemo_ws_test_hooks=SimpleNamespace(zdf_momentum_observer=None),
+        _tke_post_mixing_active=lambda: False,
+        _lat_dependent_constant_vmix=lambda: False)
+    model._tke_step_entry_p_sh2 = MethodType(spy, model)
+    with pytest.raises(_ShearSeen) as seen:
+        LatLonCGridOceanModel._apply_implicit_vertical_mixing(
+            model, SimpleNamespace(), 1.0, None,
+            eta_now=STAGE, eta_step_entry=ENTRY)
+    return seen.value.args[0]
+
+
+def test_production_shear_call_site_routes_through_the_selector():
+    assert _shear_eta_at_call_site(True) is ENTRY
+    assert _shear_eta_at_call_site(False) is STAGE

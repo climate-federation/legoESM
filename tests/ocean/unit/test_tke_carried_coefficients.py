@@ -1706,3 +1706,25 @@ def test_nemo_literal_matrix_pins_every_row_including_jpkm1(monkeypatch):
     assert no_deep_diss != diag[3]                     # jpkm1-only mutation
     swapped = 1.0 - lw[0] - up[0] + 0.7 * dissl[0]     # 1.5 <-> 0.5 weights
     assert swapped != diag[0]
+
+
+@pytest.mark.parametrize("flag", [True, False])
+def test_bn2_source_rounded_flag_reaches_the_step_entry_bundle(flag, monkeypatch):
+    """Review gap: the bundle's ``source_rounded`` wiring could be cut (fixed
+    False) with every unit test green.  Spy on the production builder."""
+    from legoesm.ocean import eos as eos_mod
+
+    seen = []
+    real = eos_mod.compute_buoyancy_frequency_nemo_bn2
+
+    def spy(*args, **kwargs):
+        seen.append(kwargs.get("source_rounded", False))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(eos_mod, "compute_buoyancy_frequency_nemo_bn2", spy)
+    tke_cfg = dino_mod._dino_vertical_mixing_config(
+        dino_config_for_recipe("nemo_dino_kamm_mlf")).tke._replace(
+            n2_eos_form="eos80", nemo_bn2_source_rounded=flag)
+    model, state = _step_entry_helper_fixture(tke_cfg)
+    LatLonCGridOceanModel._tke_step_entry_n2_bundle(model, state)
+    assert seen and all(s is flag for s in seen)
