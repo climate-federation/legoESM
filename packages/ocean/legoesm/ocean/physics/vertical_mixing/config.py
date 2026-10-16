@@ -643,12 +643,14 @@ class TKEConfig(NamedTuple):
     # Arithmetic used by the nn_etau penetration profile. ``jax_expression``
     # is the historical single jnp.exp call. ``nemo_literal`` reproduces the
     # ordinary-range glibc-2.34 vector EXP linked into the DINO oracle; only
-    # the two complete DINO oracle cards select it.
+    # the two complete DINO oracle cards select it. ``nemo_scalar_libm`` calls
+    # the precision policy's scalar exp (NEMO builds without libmvec, V1).
     tke_etau_exponential_evaluation: str = "jax_expression"
     # Latitude-profile arithmetic for nn_htau=1. ``jax_expression`` is the
     # historical jnp.deg2rad+jnp.sin path. ``nemo_literal`` consumes native
     # mesh degrees and transcribes glibc-2.34's two-lane vector SIN arithmetic.
-    # Only complete DINO oracle cards select it.
+    # Only complete DINO oracle cards select it. ``nemo_scalar_libm`` takes the
+    # same native-degree phase through the precision policy's scalar sin.
     tke_htau_evaluation: str = "jax_expression"
     # Raw nn_mxl buoyancy length. ``factored`` preserves the historical
     # sqrt(2)*sqrt(e)/sqrt(max(N2,1e-12)) expression. ``nemo_literal`` uses
@@ -670,6 +672,10 @@ class TKEConfig(NamedTuple):
     # zdf_sh2's r3u/r3v at the whole-step entry level (RK3 zdf_phy(Nbb,Nbb),
     # zdfsh2.F90 e3w_1d*(1+r3u(Kmm))), not the stage Kmm. Card-selected.
     nemo_sh2_step_entry_ssh: bool = False
+    # zdftke.f90:466,472 recurrences with each product rounded before its
+    # subtraction (NEMO's build has no FMA); the default lets XLA contract.
+    # Card-selected.
+    nemo_tke_solve_source_rounded: bool = False
     # Langmuir source evaluation. ``vectorized`` is the historical shared
     # construction. ``nemo_literal`` preserves zdftke.F90:422-463 operation
     # order, including the per-column mbkt+1 no-crossing fallback. Only the

@@ -12818,7 +12818,7 @@ class LatLonCGridOceanModel:
             )
             _tke_cfg = _vmix_cfg.tke
             if (getattr(_tke_cfg, "tke_htau_evaluation", "jax_expression")
-                    == "nemo_literal"):
+                    in ("nemo_literal", "nemo_scalar_libm")):
                 _tke_lat_deg = getattr(_grid, "native_lat_T_deg", None)
                 if _tke_lat_deg is None:
                     raise ValueError(

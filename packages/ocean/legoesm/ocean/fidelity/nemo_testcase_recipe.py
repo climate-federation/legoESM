@@ -3713,6 +3713,9 @@ def build_orca2g1_flat_card(deck_root: str | Path, case: str = "ORCA2G1-flat") -
         fold_convention="(n_lon-i)%n_lon",     # jperio = 4: T-pivot fold
         use_mesh_coriolis=True,                # ff_f/ff_t are in the file
     )
+    if case == "ORCA2V1-tke":                  # htau reads gphit, zdftke.f90:864
+        grid = grid._replace(
+            native_lat_T_deg=jnp.asarray(dom["gphit"], dtype=jnp.float64))
     # dommsk.f90:289 applies strait_shlat only when the file holds it (G1's: none).
     no_strait = _orca2g_strait_shlat(domain_path, dom["bottom_level"].shape)
     tmask, umask, vmask, fmask = _orca2_masks(dom["bottom_level"], no_strait)
@@ -4391,6 +4394,9 @@ def _orca2v1_tke_vertical(g5_vm, deck: ORCA2G1Deck):
         tke_mxl_raw_evaluation="nemo_literal",  # MAX(rmxl_min,SQRT(2*en/zrn2)), :643-645
         nemo_bn2_source_rounded=True,           # rab_3d_t/bn2_t, eosbn2.f90:1281-1333,1631-1637
         nemo_sh2_step_entry_ssh=True,           # zdf_sh2 r3u(Nbb), zdfsh2.f90:98-108; stprk3.f90:185
+        nemo_tke_solve_source_rounded=True,     # zdftke.f90:466,472 without FMA
+        tke_htau_evaluation="nemo_scalar_libm",  # SIN(rpi/180*gphit), :864
+        tke_etau_exponential_evaluation="nemo_scalar_libm",  # EXP, :500
         etau_mode="below_ml",                   # nn_etau=1, :498-502
         etau_htau_mode="latitude",              # nn_htau=1 (namelist_ref:1252)
         etau_frac=_ORCA2V1_RN_EFR,              # rn_efr
@@ -4412,10 +4418,13 @@ def _orca2v1_tke_selected(vm) -> bool:
                  t.bottom_tke_bc, t.tke_langmuir_evaluation, t.nemo_mxlice,
                  t.nemo_mxl_terminal_e3t, t.nemo_etau_wmask,
                  t.tke_mxl_raw_evaluation, t.nemo_mxl0_surface_tmask,
-                 t.nemo_bn2_source_rounded, t.nemo_sh2_step_entry_ssh) == (
+                 t.nemo_bn2_source_rounded, t.nemo_sh2_step_entry_ssh,
+                 t.nemo_tke_solve_source_rounded, t.tke_htau_evaluation,
+                 t.tke_etau_exponential_evaluation) == (
                 3, _ORCA2V1_RN_EMIN, _ORCA2V1_RN_EMIN0, True, True, True,
                 _ORCA2V1_RN_LC, "below_ml", "latitude", _ORCA2V1_RN_EFR, 1, False,
-                "nemo_literal", 2, True, True, "nemo_literal", True, True, True))
+                "nemo_literal", 2, True, True, "nemo_literal", True, True, True,
+                True, "nemo_scalar_libm", "nemo_scalar_libm"))
 
 
 def _orca2v1_tke_initial_state(state, tmask, deck: ORCA2G1Deck):

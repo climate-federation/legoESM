@@ -136,7 +136,10 @@ def test_v1_card_is_g5_plus_the_tke_selection(cards):
                      "physics.vertical_mixing.tke.nemo_etau_wmask",
                      "physics.vertical_mixing.tke.tke_mxl_raw_evaluation",
                      "physics.vertical_mixing.tke.nemo_bn2_source_rounded",
-                     "physics.vertical_mixing.tke.nemo_sh2_step_entry_ssh"}
+                     "physics.vertical_mixing.tke.nemo_sh2_step_entry_ssh",
+                     "physics.vertical_mixing.tke.nemo_tke_solve_source_rounded",
+                     "physics.vertical_mixing.tke.tke_htau_evaluation",
+                     "physics.vertical_mixing.tke.tke_etau_exponential_evaluation"}
     vm = v1.recipe.model_config.physics.vertical_mixing
     t = vm.tke
     # Rule 10: the numbers the closure will use, as instantiated.
@@ -160,10 +163,20 @@ def test_v1_card_is_g5_plus_the_tke_selection(cards):
     assert (t.nemo_sh2_step_entry_ssh, g5_tke.nemo_sh2_step_entry_ssh) == (True, False)
     assert (t.tke_mxl_raw_evaluation, g5_tke.tke_mxl_raw_evaluation) == (
         "nemo_literal", "factored")    # zdftke.f90:643-645
+    # zdftke.f90:466,472 without FMA; :864 SIN(rpi/180*gphit) and :500 EXP in
+    # scalar libm (the V1 build links no libmvec)
+    assert (t.nemo_tke_solve_source_rounded, t.tke_htau_evaluation,
+            t.tke_etau_exponential_evaluation) == (
+        True, "nemo_scalar_libm", "nemo_scalar_libm")
+    assert (g5_tke.nemo_tke_solve_source_rounded, g5_tke.tke_htau_evaluation,
+            g5_tke.tke_etau_exponential_evaluation) == (
+        False, "jax_expression", "jax_expression")
+    assert g5.recipe.grid.native_lat_T_deg is None
     assert g5.recipe.z_coord.nemo_e3t_jpk is None
     dom = recipe._orca2g1_domain(INPUTS / CARD_FILES[0], 31)
     assert np.array_equal(
         np.asarray(v1.recipe.z_coord.nemo_e3t_jpk), dom["e3t_jpk"])
+    assert np.array_equal(np.asarray(v1.recipe.grid.native_lat_T_deg), dom["gphit"])
     assert (t.kappaM_min, t.kappaH_min, t.c_k, t.c_eps) == (1.2e-4, 1.2e-5, 0.1, 0.7)
     assert v1.recipe.model_config.physics.convection.scheme == "none"   # ln_zdfevd=F
     assert v1.unmeasured_features == recipe.ORCA2V1_UNMEASURED
@@ -202,7 +215,10 @@ def test_v1_selector_check_fires_on_each_planted_tke_line(cards):
                   {"nemo_mxl_terminal_e3t": False}, {"nemo_etau_wmask": False},
                   {"tke_mxl_raw_evaluation": "factored"},
                   {"nemo_bn2_source_rounded": False},
-                  {"nemo_sh2_step_entry_ssh": False}):
+                  {"nemo_sh2_step_entry_ssh": False},
+                  {"nemo_tke_solve_source_rounded": False},
+                  {"tke_htau_evaluation": "jax_expression"},
+                  {"tke_etau_exponential_evaluation": "jax_expression"}):
         bad = vm._replace(tke=vm.tke._replace(**plant))
         card = v1._replace(recipe=v1.recipe._replace(model_config=cfg._replace(
             physics=cfg.physics._replace(vertical_mixing=bad))))

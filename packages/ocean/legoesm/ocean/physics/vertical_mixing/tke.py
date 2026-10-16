@@ -110,6 +110,8 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.core.source_rounding import nemo_source_round
+from legoesm.core.transcendentals import exp as precision_exp
+from legoesm.core.transcendentals import sin as precision_sin
 from legoesm.core.transcendentals import tanh as precision_tanh
 from legoesm.ocean.physics.vertical_mixing._glibc234_exp_table import (
     GLIBC234_EXP_TABLE_BITS,
@@ -1107,6 +1109,7 @@ def _nemo_literal_tke_solve(
     surface_en: jnp.ndarray,
     w_active: jnp.ndarray,
     floor: float,
+    source_rounded: bool = False,
 ) -> jnp.ndarray:
     """Solve the NEMO ``zdftke`` system in literal source order.
 
@@ -1125,7 +1128,11 @@ def _nemo_literal_tke_solve(
     index IS ``jpkm1``, the deepest row NEMO SOLVES. ``en(jpk)`` is read by
     nothing — the back-substitution above drops it and ``tke_avn`` loops
     ``jk = 1, jpkm1`` (``zdftke.f90:681-687``) — so no slot is needed for it.
+
+    ``source_rounded`` (card-selected) rounds the two products that feed a
+    subtraction (``zdftke.f90:466,472``) so XLA cannot contract them to FMAs.
     """
+    rp = nemo_source_round if source_rounded else (lambda value: value)
     if not (a.shape == b.shape == c.shape == rhs.shape):
         raise ValueError("literal TKE tridiagonal operands must share a shape")
     if a.ndim < 1 or a.shape[-1] < 2:
@@ -1169,7 +1176,7 @@ def _nemo_literal_tke_solve(
         def rhs_step(previous, operands):
             source, lower, previous_diagonal = operands
             # Preserve NEMO's division-before-multiply association (:556).
-            current = source - lower / previous_diagonal * previous
+            current = source - rp(lower / previous_diagonal * previous)
             return current, current
 
         _, work_rows = jax.lax.scan(rhs_step, work_seed, rhs_inputs)
@@ -1184,7 +1191,7 @@ def _nemo_literal_tke_solve(
 
             def reverse_step(next_value, operands):
                 source, upper, current_diagonal = operands
-                current = (source - upper * next_value) / current_diagonal
+                current = (source - rp(upper * next_value)) / current_diagonal
                 return current, current
 
             _, reverse_rows = jax.lax.scan(
@@ -1918,7 +1925,8 @@ def _solve_tke_backward_euler(
         if literal_solver:
             e_new = _nemo_literal_tke_solve(
                 a_ext, b_ext, c_ext, rhs_ext, e_sfc, w_active,
-                cfg.tke_background)
+                cfg.tke_background, source_rounded=bool(getattr(
+                    cfg, "nemo_tke_solve_source_rounded", False)))
         else:
             e_new_ext = _tridiag_thomas(a_ext, b_ext, c_ext, rhs_ext)
             e_new = e_new_ext[..., 1:]
@@ -2653,6 +2661,18 @@ def _nemo_glibc234_vector_sin(argument: jnp.ndarray) -> jnp.ndarray:
     return jnp.where(ordinary, literal, jnp.sin(argument))
 
 
+def _require_libm_policy(field: str) -> None:
+    """'nemo_scalar_libm' promises NEMO's scalar libm; the native policy
+    would silently substitute XLA's own sin/exp."""
+    from legoesm.core.precision import get_policy
+
+    if get_policy().transcendentals != "libm":
+        raise ValueError(
+            f"TKEConfig.{field}='nemo_scalar_libm' requires the precision "
+            "policy's transcendentals='libm'; got "
+            f"{get_policy().transcendentals!r}")
+
+
 def _nemo_etau_htau(
     lat_deg: jnp.ndarray,
     cfg: TKEConfig,
@@ -2664,17 +2684,22 @@ def _nemo_etau_htau(
         # Historical expression: deliberately unchanged for every generic and
         # non-oracle card.
         sine = jnp.sin(jnp.deg2rad(lat_deg))
-    elif evaluation == "nemo_literal":
+    elif evaluation in ("nemo_literal", "nemo_scalar_libm"):
         # NEMO zdftke.F90:493: rpi / 180._wp * gphit.  The caller guarantees
         # that lat_deg is the bridge-carried native gphit array in this arm.
         phase = _nemo_binary64_round(
             jnp.asarray(lat_deg, dtype=dtype)
             * float.fromhex("0x1.1df46a2529d39p-6"))
-        sine = _nemo_glibc234_vector_sin(phase)
+        if evaluation == "nemo_literal":
+            sine = _nemo_glibc234_vector_sin(phase)
+        else:
+            _require_libm_policy("tke_htau_evaluation")
+            sine = precision_sin(phase)
     else:
         raise ValueError(
             "Unknown TKEConfig.tke_htau_evaluation: expected "
-            f"'jax_expression' or 'nemo_literal', got {evaluation!r}.")
+            "'jax_expression', 'nemo_literal' or 'nemo_scalar_libm', got "
+            f"{evaluation!r}.")
     return jnp.maximum(
         _NEMO_TKE_HTAU_MIN_M,
         jnp.minimum(
@@ -2712,10 +2737,12 @@ def nemo_etau_injection(
     """
     exp_evaluation = getattr(
         cfg, "tke_etau_exponential_evaluation", "jax_expression")
-    if exp_evaluation not in ("jax_expression", "nemo_literal"):
+    if exp_evaluation not in (
+            "jax_expression", "nemo_literal", "nemo_scalar_libm"):
         raise ValueError(
             "Unknown TKEConfig.tke_etau_exponential_evaluation: expected "
-            f"'jax_expression' or 'nemo_literal', got {exp_evaluation!r}.")
+            "'jax_expression', 'nemo_literal' or 'nemo_scalar_libm', got "
+            f"{exp_evaluation!r}.")
     mode = cfg.etau_mode
     if mode == "none":
         return e
@@ -2741,6 +2768,9 @@ def nemo_etau_injection(
                         * jnp.maximum(taum, 0.0))
     if exp_evaluation == "jax_expression":
         profile = jnp.exp(-depth_w / htau)
+    elif exp_evaluation == "nemo_scalar_libm":
+        _require_libm_policy("tke_etau_exponential_evaluation")
+        profile = precision_exp(-depth_w / htau)
     else:  # validated above
         profile = _nemo_glibc234_vector_exp(-depth_w / htau)
     inj = cfg.etau_frac * e_sfc[..., None] * profile
