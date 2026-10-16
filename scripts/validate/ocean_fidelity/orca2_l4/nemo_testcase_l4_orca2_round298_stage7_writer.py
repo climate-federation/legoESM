@@ -329,8 +329,10 @@ def _measure_label(deck_root: Path, frame_root: Path, oracle: dict,
         "oracle_S": _regions(oracle["adv_s"][..., :30],
                              oracle["sbc_s"][..., :30], supports["t"]),
     }
-    one = _score(np.asarray([0.0]),
-                 np.asarray([np.nextafter(0.0, 1.0)]), np.asarray([True]))
+    subnormal = _score(np.asarray([0.0]),
+                       np.asarray([np.nextafter(0.0, 1.0)]), np.asarray([True]))
+    one = _score(np.asarray([1.0]),
+                 np.asarray([np.nextafter(1.0, 2.0)]), np.asarray([True]))
     return {
         "status": "PASS_R298_LABEL_MEASUREMENT", "label": label,
         "passivity": passivity, "rows": rows, "entry": entry_rows,
@@ -345,13 +347,24 @@ def _measure_label(deck_root: Path, frame_root: Path, oracle: dict,
             "candidate_adv_t_matches_sbc_t": source_rounding["candidate_T"]["complete"]["unequal"] == 0,
             "candidate_adv_s_matches_sbc_s": source_rounding["candidate_S"]["complete"]["unequal"] == 0,
         },
-        "one_bit_control": one,
+        "subnormal_flush_control": subnormal, "one_bit_control": one,
     }
 
 
 def classify(report: dict[str, object], plant: str = "none") -> dict[str, object]:
     require(plant in PLANTS, f"unknown plant {plant!r}")
     report = copy.deepcopy(report)
+    # The first measurement draft used 0 -> the smallest subnormal as its
+    # one-bit plant.  Decision 127 deliberately classifies that pair as a
+    # match.  Preserve it as the D127 control and derive the actual one-bit
+    # control in the normal range; neither depends on the measured model data.
+    for row in report.get("labels", ()):
+        row["subnormal_flush_control"] = _score(
+            np.asarray([0.0]), np.asarray([np.nextafter(0.0, 1.0)]),
+            np.asarray([True]))
+        row["one_bit_control"] = _score(
+            np.asarray([1.0]), np.asarray([np.nextafter(1.0, 2.0)]),
+            np.asarray([True]))
     if plant == "admission":
         report["admission"]["status"] = "BROKEN"
     elif plant == "label-coverage":
@@ -389,6 +402,10 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
                 f"{label}: OMT-4 adv/sbc equality moved")
         require(row["one_bit_control"]["unequal"] == 1,
                 f"{label}: one-bit control did not fire")
+        require(row["subnormal_flush_control"]["raw_unequal"] == 1
+                and row["subnormal_flush_control"]["subnormal_matches"] == 1
+                and row["subnormal_flush_control"]["unequal"] == 0,
+                f"{label}: Decision-127 subnormal control moved")
         prior = row["entry"]["S"]["fold_band"]["max_abs"]
         actual = row["rows"]["qco_s"]["fold_band"]["max_abs"]
         trp = row["oracle_transport_qco_arm"]["S"]["fold_band"]["max_abs"]
