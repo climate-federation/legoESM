@@ -40,7 +40,7 @@ def _system(n=3000, nw=12, seed=5):
 
 
 def _literal(up, lw, dg, rhs, en1):
-    """zdftke.f90:463-475 in Fortran source order, one rounding per op."""
+    """zdftke.f90:458-473 in Fortran source order, one rounding per op."""
     n = dg.shape[-1]
     zdiag = np.concatenate([(1.0 / en1)[:, None], dg], -1)
     zlw = np.concatenate([np.ones_like(en1)[:, None], lw], -1)
