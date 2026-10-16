@@ -59,7 +59,7 @@ transport-form U difference before the V difference at
 `ORCA2_OMIP_L4_R299W7/BLD/ppsrc/nemo/divhor.f90:132-139`.
 
 The QCO recurrence sets bottom W to zero and integrates upward at
-`ORCA2_OMIP_L4_R299W7/BLD/ppsrc/nemo/sshwzv.f90:271-299`.  Its stage-1
+`ORCA2_OMIP_L4_R299W7/BLD/ppsrc/nemo/sshwzv.f90:271-298`.  Its stage-1
 clock is `rn_Dt/3`, followed by the reciprocal, at
 `ORCA2_OMIP_L4_R299W7/BLD/ppsrc/nemo/stprk3_stg.f90:136-137`.  These are
 live branches under the admitted OMT-4 namelist, not dead-arm citations.
