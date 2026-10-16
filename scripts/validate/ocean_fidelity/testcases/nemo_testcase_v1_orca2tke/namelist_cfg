@@ -298,7 +298,7 @@
 &namzdf        !   vertical physics manager
 !-----------------------------------------------------------------------
    ln_zad_Aimp = .false.
-   ln_zdfcst   = .false.      !  V1: namelist_ref:1176 (ORCA2 states no ln_zdfcst)
+   ln_zdfcst   = .false.      !  V1: namelist_ref:1180 (ORCA2 states no ln_zdfcst)
    ln_zdfric   = .false.
    ln_zdftke   = .true.       !  V1: ORCA2 :389
    ln_zdfgls   = .false.

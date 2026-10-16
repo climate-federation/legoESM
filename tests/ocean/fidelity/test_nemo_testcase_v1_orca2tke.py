@@ -234,3 +234,14 @@ def test_hmi_frame_gate_passes_good_frames_and_refuses_plants(tmp_path):
         assert run().returncode != 0
     _hmi_frame(frame, 1, np.full(12, 0.5))       # wrong kt in the header
     assert run().returncode != 0
+
+
+def test_additive_guard_refuses_a_removed_or_changed_line(tmp_path):
+    (tmp_path / "o").write_text("a\nb\nc\n")
+    (tmp_path / "ok").write_text("a\nX\nb\nc\n")
+    (tmp_path / "bad").write_text("a\nc\nZ\n")
+    check = lambda new: subprocess.run(  # noqa: E731
+        [str(RUN), "--check-additive", str(tmp_path / "o"), str(tmp_path / new)],
+        capture_output=True, text=True).returncode
+    assert check("ok") == 0
+    assert check("bad") != 0

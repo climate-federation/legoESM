@@ -13,14 +13,14 @@ ORCA2 = `cfgs/ORCA2_OMIP_L4/EXP00/namelist_cfg`. Only differing rows are listed.
 
 | key | G5 | ORCA2 | source |
 |---|---|---|---|
-| `ln_zdfcst` | T | F | G5 :301; ORCA2 states none, ref :1176 |
+| `ln_zdfcst` | T | F | G5 :301; ORCA2 states none, ref :1180 |
 | `ln_zdftke` | F | T | G5 :303; ORCA2 :389 |
 | `ln_zdfevd` (`nn_evdm`=0, `rn_evd`=100 both) | F | T | G5 :306; ORCA2 :390-392 |
 | `ln_zdfddm` (`rn_avts`=1e-4, `rn_hsbfr`=1.6 both) | F | T | G5 :309; ORCA2 :393-395 |
 | `ln_zdfiwm` | F | T | G5 :310; ORCA2 :396 |
 | `nn_havtb` | 0 | 1 | G5 :315; ORCA2 :401 |
-| `namzdf_tke.nn_mxlice` | 0 (ref, inert) | 2 | ref :1233; ORCA2 :415 |
-| `namzdf_iwm.sn_*` (6 files) | `'NOT USED'` (inert) | `zdfiwm_forcing_orca2` | ref :1344-1349; ORCA2 :430-435 |
+| `namzdf_tke.nn_mxlice` | 0 (ref, inert) | 2 | ref :1237; ORCA2 :415 |
+| `namzdf_iwm.sn_*` (6 files) | `'NOT USED'` (inert) | `zdfiwm_forcing_orca2` | ref :1348-1353; ORCA2 :430-435 |
 
 Equal in both (no row): `rn_avm0`=1.2e-4, `rn_avt0`=1.2e-5, `nn_avb`=0,
 `ln_zad_Aimp`=F, ric/gls/osm/npc/mfc/swm off, every other `namzdf_tke` key
@@ -63,7 +63,7 @@ declared gap).
 V1 = G5's deck + `ln_zdftke=T`, `ln_zdfcst=F` + ORCA2's four `&namzdf_tke`
 lines (`nn_mxl=3`, `nn_etau=1`, `ln_mxhsw=F`, `nn_mxlice=2`), everything else
 G5's (`ln_zdfiwm=F`, `ln_drg_OFF=T`, `nn_havtb=0`). Deck SHA-256
-`7eec2924000da6472780619c9ecb82bd83684aa4678ce33472f56eb1b1e1fcad`; SI3
+`5b5dd21ee452d98797a822320e2cdfcf8fa21b35c4c94b5d2a9ff7fcc814ba2c`; SI3
 overlay unchanged (`9d5ae3fa...`).
 
 **Not settled by ORCA2's deck (DECISION_NEEDED, built as option 1):** with

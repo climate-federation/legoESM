@@ -28,7 +28,7 @@ readonly G5_REC_BIN_SHA=41cd9a63844218e7c37e75708813649603b80df0366102b8ce3e340f
 readonly G5_MYSRC_SET_SHA=28e265096d11d22c4f342b342b3065575115dcf38aaa0c60fe21330cd3f14607
 readonly G5_STPRK3_SHA=fa8a0f6c18d0c08cee3d74a1d379125614ccd805193de4e9f7ea0abb5812f3f3
 readonly G5_CPP_SHA=2e0d729f348b2377e52a6421afbb56e9dabbbc5ae57e39fbcfa1a3f5edbd8f67
-readonly V1_DECK_SHA=7eec2924000da6472780619c9ecb82bd83684aa4678ce33472f56eb1b1e1fcad
+readonly V1_DECK_SHA=5b5dd21ee452d98797a822320e2cdfcf8fa21b35c4c94b5d2a9ff7fcc814ba2c
 readonly ICE_DECK_SHA=9d5ae3fae3878a74c4fe88f0fd8db40129fe97ca6ffa6d699121d1cd44713dd8
 readonly ICE_REF=$NEMO_ROOT/cfgs/SHARED/namelist_ice_ref
 readonly FSBC=2
@@ -84,8 +84,13 @@ patch_stprk3() { # in, out
     { print }
     END { if (n1 != 1 || n2 != 1 || n3 != 1) exit 1 }
   ' "$1" >"$2" || fail "stprk3.F90 anchors not found exactly once"
-  # additive only: no line of G5's file is removed or changed
-  ! diff "$1" "$2" | grep -q '^<' || fail 'hm_i patch removed or changed a G5 line'
+  check_additive "$1" "$2"
+}
+
+check_additive() { # original, patched: no line of the original removed or changed
+  local removed
+  removed=$( { diff "$1" "$2" || true; } | grep -c '^<' || true)
+  [[ "$removed" == 0 ]] || fail "patch removed or changed $removed line(s) of $1"
 }
 
 check_hmi_frames() { # directory, completed steps
@@ -110,6 +115,10 @@ mode=${1:---preflight-only}
 if [[ "$mode" == --check-hmi-frames ]]; then
   (($# == 3)) || exit 64
   check_hmi_frames "$2" "$3"; printf 'V1_HMI_FRAMES_OK %s steps=1..%s\n' "$2" "$3"; exit 0
+fi
+if [[ "$mode" == --check-additive ]]; then
+  (($# == 3)) || exit 64
+  check_additive "$2" "$3"; printf 'V1_ADDITIVE_OK %s\n' "$3"; exit 0
 fi
 if [[ "$mode" == --patch-stprk3 ]]; then
   (($# == 3)) || exit 64

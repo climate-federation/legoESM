@@ -4343,11 +4343,14 @@ _ORCA2V1_TKE_FIELDS: dict[str, object] = {
     "namzdf_tke.nn_mxl": 3, "namzdf_tke.nn_etau": 1,
     "namzdf_tke.ln_mxhsw": False, "namzdf_tke.nn_mxlice": 2,
 }
-_ORCA2V1_RN_EMIN = 1.0e-6       # namelist_ref:1227; ln_zdfiwm=F keeps it (zdftke.f90:835-841)
-_ORCA2V1_RN_EMIN0 = 1.0e-4      # namelist_ref:1228
-_ORCA2V1_RN_EFR = 0.05          # namelist_ref:1240
-_ORCA2V1_RN_LC = 0.15           # namelist_ref:1238
-_ORCA2V1_DISSL0 = 1.0e-12       # tke_rst from rest, zdftke.f90:916
+_ORCA2V1_RN_EMIN = 1.0e-6       # namelist_ref:1228; ln_zdfiwm=F keeps it (zdftke.f90:835-841)
+_ORCA2V1_RN_EMIN0 = 1.0e-4      # namelist_ref:1229
+_ORCA2V1_RN_EFR = 0.05          # namelist_ref:1251
+_ORCA2V1_RN_LC = 0.15           # namelist_ref:1246
+# tke_rst from rest, zdftke.f90:916 (unmasked there; dry cells only meet it
+# times wmask or dry en=0 at :420/:425 and :711 overwrites it at kt 1, so the
+# shared init's wet-masked seed is kept)
+_ORCA2V1_DISSL0 = 1.0e-12
 # nn_mxlice=2 (zdftke.f90:620-623) scales the surface mixing length under
 # ice by SI3's mean thickness hm_i; the shared TKE has no such arm and the
 # G5 record carries no hm_i, so the card names it rather than dropping it.
@@ -4377,7 +4380,7 @@ def _orca2v1_tke_vertical(g5_vm, deck: ORCA2G1Deck):
         nemo_mxl0_rmxl_min_overwrite=True,      # rn_mxl0 = rmxl_min, :853-856
         lc=True, lc_coeff=_ORCA2V1_RN_LC,       # ln_lc, rn_lc
         etau_mode="below_ml",                   # nn_etau=1, :498-502
-        etau_htau_mode="latitude",              # nn_htau=1 (namelist_ref:1241)
+        etau_htau_mode="latitude",              # nn_htau=1 (namelist_ref:1252)
         etau_frac=_ORCA2V1_RN_EFR,              # rn_efr
         eice=1,                                 # nn_eice=1; nn_ice=2 keeps it (:792-795)
         bottom_tke_bc=False,                    # ln_drg_OFF=T: :285 branch not taken
