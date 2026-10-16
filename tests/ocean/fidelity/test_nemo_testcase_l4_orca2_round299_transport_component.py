@@ -21,6 +21,7 @@ def _label(name):
         "passivity": {"T": True, "S": True},
         "entry": {"T": _regions(1.0), "S": _regions(2.0)},
         "candidate_replay": {"T": _regions(0.0), "S": _regions(0.0)},
+        "direct_replay": {"T": _regions(0.0), "S": _regions(0.0)},
         "candidate": {"T": _regions(0.0), "S": _regions(40.0)},
         "full_nemo": {"T": _regions(0.0), "S": _regions(2.0)},
         "component_arms": {

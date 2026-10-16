@@ -59,6 +59,60 @@ def _component_geometry(candidate, oracle, component: str):
     return tuple(result)
 
 
+def _transport_qco_replays(card, state, trace, candidate_geometry,
+                           oracle_geometry):
+    """Replay the literal stage-1 CEN2 and QCO statements with one JIT."""
+    import jax
+    import jax.numpy as jnp
+    from legoesm.core.source_rounding import nemo_source_round as r
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        _nemo_cen2_tracer_rhs,
+    )
+
+    active = jnp.asarray(card.recipe.z_coord.is_active) > 0.5
+    h_stage = jnp.asarray(candidate_geometry[3])
+    q0 = jnp.asarray(1.0 + trace.stage_qco[0][0])
+    q1 = jnp.asarray(1.0 + trace.stage_qco[1][0])
+    dt = jnp.asarray(card.dt_s / 3.0, dtype=q0.dtype)
+    base_t = jnp.asarray(state.T.data)
+    base_s = jnp.asarray(state.S.data)
+
+    def one(p_u, p_v, p_w):
+        rhs_t = _nemo_cen2_tracer_rhs(
+            base_t, p_u, p_v, p_w, h_stage, active, card.recipe.grid)
+        rhs_s = _nemo_cen2_tracer_rhs(
+            base_s, p_u, p_v, p_w, h_stage, active, card.recipe.grid)
+
+        def update(base, rhs):
+            if card.recipe.model_config.rk3_stage_tracer_written_order:
+                out = r(r(r(q0[..., None] * base)
+                          + r(r(dt * q0[..., None]) * rhs)) / q1[..., None])
+            else:
+                out = (q0[..., None] * base
+                       + dt * q0[..., None] * rhs) / q1[..., None]
+            return jnp.where(active, out, base)
+
+        return update(base_t, rhs_t), update(base_s, rhs_s)
+
+    compiled = jax.jit(one)
+
+    def metric_triplet(geometry):
+        return (jnp.asarray(geometry[7]), jnp.asarray(geometry[8]),
+                jnp.asarray(geometry[2])
+                * jnp.asarray(card.recipe.grid.area_T)[..., None])
+
+    geometries = {
+        "candidate": candidate_geometry, "full_nemo": oracle_geometry,
+        **{name: _component_geometry(
+            candidate_geometry, oracle_geometry, name) for name in COMPONENTS},
+    }
+    return {
+        name: tuple(np.asarray(value, np.float64) for value in
+                    jax.device_get(compiled(*metric_triplet(geometry))))
+        for name, geometry in geometries.items()
+    }
+
+
 def _measure_label(deck_root: Path, frame_root: Path, oracle: dict,
                    label: str) -> dict[str, object]:
     import jax
@@ -99,13 +153,8 @@ def _measure_label(deck_root: Path, frame_root: Path, oracle: dict,
     g0 = trace.stage_geometry[0]
     oracle_geometry = r298._oracle_geometry(g0, oracle, card.recipe.grid)
     candidate = r298._tracer_replay(card, state, trace, g0)
-    full = r298._tracer_replay(card, state, trace, oracle_geometry)
-    arms = {
-        name: r298._tracer_replay(
-            card, state, trace,
-            _component_geometry(g0, oracle_geometry, name))
-        for name in COMPONENTS
-    }
+    direct = _transport_qco_replays(
+        card, state, trace, g0, oracle_geometry)
     oracle_qco = {
         "T": np.asarray(oracle["qco_t"][..., :30], np.float64),
         "S": np.asarray(oracle["qco_s"][..., :30], np.float64),
@@ -130,13 +179,18 @@ def _measure_label(deck_root: Path, frame_root: Path, oracle: dict,
         "S": r298._regions(
             candidate[1], np.asarray(trace.stage_outputs[0][3]), active_t),
     }
+    direct_check = {
+        "T": r298._regions(direct["candidate"][0], candidate[0], active_t),
+        "S": r298._regions(direct["candidate"][1], candidate[1], active_t),
+    }
     return {
         "status": "PASS_R299_LABEL_MEASUREMENT", "label": label,
         "passivity": passivity, "entry": entry_rows,
-        "candidate_replay": replay_check,
-        "candidate": score_pair(candidate), "full_nemo": score_pair(full),
-        "component_arms": {name: score_pair(values)
-                           for name, values in arms.items()},
+        "candidate_replay": replay_check, "direct_replay": direct_check,
+        "candidate": score_pair(direct["candidate"]),
+        "full_nemo": score_pair(direct["full_nemo"]),
+        "component_arms": {name: score_pair(direct[name])
+                           for name in COMPONENTS},
         "subnormal_flush_control": r298._score(
             np.asarray([0.0]), np.asarray([np.nextafter(0.0, 1.0)]),
             np.asarray([True])),
@@ -192,6 +246,9 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
         require(all(item["complete"]["max_abs"] <= FLOOR
                     for item in row["candidate_replay"].values()),
                 f"{label}: offline replay missed production")
+        require(all(item["complete"]["max_abs"] <= FLOOR
+                    for item in row["direct_replay"].values()),
+                f"{label}: direct transport replay missed the trusted replay")
         require(row["one_bit_control"]["unequal"] == 1,
                 f"{label}: normal one-bit control did not fire")
         sub = row["subnormal_flush_control"]
