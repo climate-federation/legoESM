@@ -79,3 +79,56 @@ def _shear_eta_at_call_site(flag):
 def test_production_shear_call_site_routes_through_the_selector():
     assert _shear_eta_at_call_site(True) is ENTRY
     assert _shear_eta_at_call_site(False) is STAGE
+
+
+class _LatSeen(Exception):
+    pass
+
+
+def _htau_lat_at_call_site(evaluation, monkeypatch):
+    """Run the production vertical-mixing method up to its closure call and
+    return the latitude it hands it for htau (zdftke.f90:864 reads gphit;
+    round-7 review gap: the V1 arm could fall back to degrees(lat_T))."""
+    from types import SimpleNamespace
+
+    import legoesm.ocean.physics.vertical_mixing as vm
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+
+    def spy(*args, lat_deg=None, **kwargs):
+        raise _LatSeen(lat_deg)
+
+    monkeypatch.setattr(vm, "compute_vertical_K_profiles", spy)
+    tke = TKEConfig(tke_htau_evaluation=evaluation,
+                    tke_shear_production="nemo_face_native")
+    physics = SimpleNamespace(
+        vertical_mixing=SimpleNamespace(scheme="tke", tke=tke),
+        convection=SimpleNamespace(scheme="none"))
+    cfg = SimpleNamespace(physics=physics, eos="linear", eos_linear=None,
+                          eos_nemo_seos=None, implicit_ice_ocean_top_drag=False,
+                          A_v=1e-4, K_v=1e-5)
+    model = SimpleNamespace(
+        config=cfg, z_coord=None, _iwm_forcing=None,
+        grid=SimpleNamespace(lat_T=jnp.asarray([[0.5]]),
+                             native_lat_T_deg=GPHIT),
+        _nemo_ws_test_hooks=SimpleNamespace(zdf_momentum_observer=None),
+        _tke_post_mixing_active=lambda: False,
+        _lat_dependent_constant_vmix=lambda: False)
+    with pytest.raises(_LatSeen) as seen:
+        LatLonCGridOceanModel._apply_implicit_vertical_mixing(
+            model, SimpleNamespace(), 1.0, None)
+    return seen.value.args[0]
+
+
+GPHIT = jnp.asarray([[28.0]])
+
+
+@pytest.mark.parametrize("evaluation", ["nemo_literal", "nemo_scalar_libm"])
+def test_production_htau_arms_read_native_gphit(evaluation, monkeypatch):
+    assert _htau_lat_at_call_site(evaluation, monkeypatch) is GPHIT
+
+
+def test_default_htau_keeps_degrees_of_lat_t(monkeypatch):
+    lat = _htau_lat_at_call_site("jax_expression", monkeypatch)
+    assert lat is not GPHIT and float(lat[0, 0]) == float(jnp.degrees(0.5))
