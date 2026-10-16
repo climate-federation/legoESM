@@ -292,6 +292,10 @@ FILES = {
         _ORCA2_R299W7_COMPILED / "stprk3_stg.f90"),
     "ORCA2_OMIP_L4_R299W7/BLD/ppsrc/nemo/stp2d.f90": (
         _ORCA2_R299W7_COMPILED / "stp2d.f90"),
+    "ORCA2_OMIP_L4_R299W7/BLD/ppsrc/nemo/dynspg_ts.f90": (
+        _ORCA2_R299W7_COMPILED / "dynspg_ts.f90"),
+    "ORCA2_OMIP_L4_R299W7/BLD/ppsrc/nemo/stprk3.f90": (
+        _ORCA2_R299W7_COMPILED / "stprk3.f90"),
     "ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/traadv.f90": (
         _ORCA2_R210OMT1_COMPILED / "traadv.f90"),
     "ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/traadv_cen.f90": (
@@ -1851,6 +1855,39 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4_R299W7/BLD/ppsrc/nemo/stp2d.f90:303': {
         'anchors': 'CALL dyn_spg_ts( kt, Kbb, Kbb, Krhs',
         'routine': 'stp_2D',
+    },
+    # --- ORCA2 round 301: stage-1 U-transport factors and un_adv ---
+    'ORCA2_OMIP_L4_R299W7/BLD/ppsrc/nemo/stprk3_stg.f90:284': {
+        'anchors': 'zub(ji,jj) = un_adv(ji,jj)*(r1_hu_0(ji,jj) /(1._wp+r3u(ji,jj,Kmm))) - uu_b(ji,jj,Kmm)',
+        'routine': 'stp_RK3_stg',
+    },
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:276': {
+        'anchors': 'zub(ji,jj) = un_adv(ji,jj)*(r1_hu_0(ji,jj) /(1._wp+r3u(ji,jj,Kmm))) - uu_b(ji,jj,Kmm)',
+        'routine': 'stp_RK3_stg',
+    },
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:282': {
+        'anchors': 'zFu(ji,jj,jk) = e2u(ji,jj)*(e3u_3d(ji,jj,jk) *(1._wp+r3u(ji,jj,Kmm)',
+        'routine': 'stp_RK3_stg',
+    },
+    'ORCA2_OMIP_L4_R299W7/BLD/ppsrc/nemo/stprk3.f90:215': {
+        'anchors': 'CALL stp_RK3_stg( 1, kstp, Nbb, Nbb, Nrhs, Naa )',
+        'routine': 'stp_RK3',
+    },
+    'ORCA2_OMIP_L4_R299W7/BLD/ppsrc/nemo/dynspg_ts.f90:570': {
+        'anchors': 'un_adv(ji,jj) = un_adv(ji,jj) + za2 * zhU(ji,jj) * r1_e2u(ji,jj)',
+        'routine': 'dyn_spg_ts',
+    },
+    'ORCA2_OMIP_L4_R299W7/BLD/ppsrc/nemo/dynspg_ts.f90:831': {
+        'anchors': 'un_adv(:,:) = un_adv(:,:) / r1_wgt2s',
+        'routine': 'dyn_spg_ts',
+    },
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynspg_ts.f90:570': {
+        'anchors': 'un_adv(ji,jj) = un_adv(ji,jj) + za2 * zhU(ji,jj) * r1_e2u(ji,jj)',
+        'routine': 'dyn_spg_ts',
+    },
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynspg_ts.f90:831': {
+        'anchors': 'un_adv(:,:) = un_adv(:,:) / r1_wgt2s',
+        'routine': 'dyn_spg_ts',
     },
     # --- ORCA2 round 291: carried external-mode V target boundary ---
     'ORCA2_OMIP_L4_R280STAGE1/BLD/ppsrc/nemo/dynspg_ts.f90:857-860': [
