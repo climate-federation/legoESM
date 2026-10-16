@@ -53,3 +53,11 @@ must be reported exactly.
 
 No bar verdict is claimed in round 1.  This round stops for operator acquisition
 and returns the absolute `run.sh` path.
+
+## Dated correction — 2026-10-15
+
+The OMT-0 framing above came from the operator's erroneous round brief and is
+withdrawn without altering the frozen G5 prediction.  Decision-103 OMT-0 has
+no surface forcing and no sea ice.  G5 is exactly the certified G4 deck plus
+ORCA2's sea ice and is not OMT-0; it climbs the separate forcing/ice axis toward
+the shipped ORCA2 program.

@@ -157,3 +157,11 @@ nn_fwb = 2) is listed as unmeasured.
 
 SSS restoring (nn_sssr = 2, −166.67 mm/day) is a damping, like the T/S
 damping of Decision 120. Built as ORCA2's deck has it (ON).
+
+## Dated correction — 2026-10-15
+
+Lines 14–15 above used the operator's incorrect description of the ORCA2
+lane's OMT-0.  Decision-103 OMT-0 has no surface forcing and no sea ice; it is
+closest to G3, not G5.  G4 and G5 instead climb the separate forcing/ice axis
+toward the shipped ORCA2 program.  This correction does not change the frozen
+G4 deck, predictions, or falsifiers.

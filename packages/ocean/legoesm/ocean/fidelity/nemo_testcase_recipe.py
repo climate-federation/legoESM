@@ -3936,10 +3936,12 @@ def validate_orca2g1_flat_card(card: NEMOTestcaseCard, deck_root: str | Path) ->
     perm_t = (grid.n_lon - np.arange(grid.n_lon)) % grid.n_lon
     init_ts = orca2g_initial_ts(deck_root, card.case, wet3)
     expected_ssh = orca2g1_initial_ssh(dom["glamt"], dom["gphit"], wet)
+    ice_ssh_adjustment = 0.0
     if card.case == "ORCA2G5-ice":
-        expected_ssh -= _orca2_initial_ice_ssh_adjustment(
+        ice_ssh_adjustment = _orca2_initial_ice_ssh_adjustment(
             grid, dom["e1t"], dom["e2t"], init_ts[0], init_ts[1], wet3
-        ) * wet
+        )
+        expected_ssh -= ice_ssh_adjustment * wet
     checks = {
         "case": card.case in _ORCA2G_JPK,
         "ln_dynadv_vec": _orca2g1_namelist_values(Path(deck_root) / "namelist_cfg").get(
@@ -3963,8 +3965,7 @@ def validate_orca2g1_flat_card(card: NEMOTestcaseCard, deck_root: str | Path) ->
         "initial_S": np.array_equal(np.asarray(state.S.data), init_ts[1]),
         "bump": np.array_equal(np.asarray(state.eta.data), expected_ssh),
         "bump_centre": float(np.asarray(state.eta.data)[
-            _ORCA2G1_BUMP_JJ - 1, _ORCA2G1_BUMP_JI - 1]) == expected_ssh[
-                _ORCA2G1_BUMP_JJ - 1, _ORCA2G1_BUMP_JI - 1],
+            _ORCA2G1_BUMP_JJ - 1, _ORCA2G1_BUMP_JI - 1]) == 0.1 - ice_ssh_adjustment,
     }
     failed = sorted(name for name, ok in checks.items() if not ok)
     failed += orca2g_forcing_failures(deck_root, card.case)

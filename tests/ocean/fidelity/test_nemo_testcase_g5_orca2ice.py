@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import re
 import shutil
+import struct
 import subprocess
 from pathlib import Path
 
@@ -22,6 +23,8 @@ INPUTS = Path("/data/abyssal/dbalwada/nemo-testcases-l4/inputs/ORCA2_ICE_v5.0.0"
 NEMO = Path("/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2")
 ORCA2 = NEMO / "cfgs/ORCA2_OMIP_L4/EXP00"
 R5 = NEMO / "cfgs/ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY"
+P2 = NEMO / "cfgs/ORCA2_OMIP_L4_P2VBND_R2"
+ICE_REF = NEMO / "cfgs/SHARED/namelist_ice_ref"
 CARD_FILES = ("ORCA_R2_zps_domcfg.nc", "data_1m_potential_temperature_nomask.nc",
               "data_1m_salinity_nomask.nc")
 needs_inputs = pytest.mark.skipif(
@@ -63,17 +66,27 @@ def test_g5_deck_is_g4_plus_nn_ice_only():
 
 
 @needs_nemo
-def test_g5_resolves_as_round_defined_omt0_with_exact_orca2_si3():
-    """The brief's OMT-0 target is G4's five-OFF program + forcing + SI3."""
+def test_g5_is_g4_plus_orca2_ice_and_is_not_decision103_omt0():
     g4, g5 = _values(G4 / "namelist_cfg"), _values(G5 / "namelist_cfg")
-    target = dict(g4)
-    target["namsbc.nn_ice"] = _values(ORCA2 / "namelist_cfg")["namsbc.nn_ice"]
-    assert target == g5                         # resolved-deck diff is empty
+    changed = {key: (g4.get(key), g5.get(key)) for key in set(g4) | set(g5)
+               if g4.get(key) != g5.get(key)}
+    assert changed == {"namsbc.nn_ice": (0, 2)}
+    # Decision 103's OMT-0 explicitly has no bulk forcing, sea ice, penetrating
+    # shortwave, SSS restoring, runoff, or freshwater-budget correction.
+    omt0 = {"namsbc.ln_blk": False, "namsbc.nn_ice": 0,
+            "namsbc.ln_traqsr": False, "namsbc.ln_ssr": False,
+            "namsbc.ln_rnf": False, "namsbc.nn_fwb": 0}
+    assert {key: g5[key] for key in omt0} != omt0
+    assert {key: g5[key] for key in omt0} == {
+        "namsbc.ln_blk": True, "namsbc.nn_ice": 2,
+        "namsbc.ln_traqsr": True, "namsbc.ln_ssr": True,
+        "namsbc.ln_rnf": True, "namsbc.nn_fwb": 2,
+    }
     assert (G5 / "namelist_ice_cfg").read_bytes() == (ORCA2 / "namelist_ice_cfg").read_bytes()
     # ORCA2 states empty SI3 overlay groups, so every SI3 value resolves from
     # the shared reference without a G5-only assignment.
     assert _values(G5 / "namelist_ice_cfg") == {}
-    assert len(_values(NEMO / "cfgs/SHARED/namelist_ice_ref")) == 185
+    assert len(_values(ICE_REF)) == 185
 
 
 def test_ice_contract_refuses_planted_selection_and_overlay(tmp_path):
@@ -117,11 +130,26 @@ def test_g5_card_is_g4_plus_si3_entry_and_record_route(tmp_path):
         recipe.validate_orca2g1_flat_card_for_execution(g5, g5_root)
 
 
+def _writer_is_immediately_after_exact_sbc(source):
+    statements = [line.split("!", 1)[0].strip() for line in source.splitlines()]
+    statements = [line for line in statements if line]
+    sbc = [i for i, line in enumerate(statements) if re.fullmatch(
+        r"CALL\s+sbc\s*\(\s*kstp\s*,\s*Nbb\s*,\s*Nbb\s*\)", line, re.I)]
+    writer = [i for i, line in enumerate(statements) if re.fullmatch(
+        r"CALL\s+l4_dump_ocean_surface_input\s*\(\s*kstp\s*,\s*Nbb\s*\)",
+        line, re.I)]
+    return len(sbc) == len(writer) == 1 and writer[0] == sbc[0] + 1
+
+
 @needs_nemo
-def test_reused_writer_is_post_sbc_and_records_every_ice_exchange():
+def test_reused_writer_is_post_exact_sbc_and_records_every_ice_exchange():
     source = (R5 / "MY_SRC/stprk3.F90").read_text()
-    call = source.index("CALL l4_dump_ocean_surface_input( kstp, Nbb )")
-    assert source.rfind("CALL sbc", 0, call) >= 0
+    assert _writer_is_immediately_after_exact_sbc(source)
+    sbc_line = "                         CALL sbc        ( kstp, Nbb, Nbb )                ! Sea Boundary Condition (including sea-ice)"
+    writer_line = "                         CALL l4_dump_ocean_surface_input( kstp, Nbb )     ! round-1 WRITE-only per-step acquisition"
+    planted = source.replace(f"{sbc_line}\n{writer_line}", f"{writer_line}\n{sbc_line}", 1)
+    assert planted != source
+    assert not _writer_is_immediately_after_exact_sbc(planted)
     body = source[source.index("SUBROUTINE l4_dump_ocean_surface_input"):]
     for field in ("utau", "vtau", "qsr", "qns", "emp", "sfx", "fwfice",
                   "rnf", "fr_i", "snwice_mass", "rCdU_ice", "rnf_tsc"):
@@ -131,19 +159,68 @@ def test_reused_writer_is_post_sbc_and_records_every_ice_exchange():
     assert "key_si3" in cpp
 
 
+@needs_nemo
+def test_acquisition_preflight_rejects_writer_selector_mismatch():
+    run = G5 / "run.sh"
+    good = subprocess.run(
+        ["bash", str(run), "--check-writer-contract",
+         str(P2 / "MY_SRC/icedyn_adv_pra.F90"), str(ICE_REF),
+         str(G5 / "namelist_ice_cfg")], capture_output=True, text=True)
+    assert good.returncode == 0, good.stderr
+    bad = subprocess.run(
+        ["bash", str(run), "--check-writer-contract",
+         str(R5 / "MY_SRC/icedyn_adv_pra.F90"), str(ICE_REF),
+         str(G5 / "namelist_ice_cfg")], capture_output=True, text=True)
+    assert bad.returncode != 0
+    assert "requires nn_icesal=2 and ponds off" in bad.stderr
+
+
+def test_surface_payload_size_gate_refuses_truncation(tmp_path):
+    run = G5 / "run.sh"
+    path = tmp_path / "oracle_ocean_surface_input_kt00000001.bin"
+    jpi, jpj, jpts, halo = 6, 6, 2, 1
+    header = (1, 1, 1, jpi, jpj, jpts, 10, halo, 20, 12, 1, 2, 64)
+    count = (20 * jpi * jpj + 12 * (jpi - 2 * halo) * (jpj - 2 * halo)
+             + (jpi - 2) * (jpj - 2)
+             + 2 * (jpi - 2 * halo) * (jpj - 2 * halo) * jpts)
+    frame = b"NEMO_L4_SBCIN_1 " + struct.pack("=13i", *header) + np.zeros(
+        count, dtype=np.float64).tobytes()
+    path.write_bytes(frame)
+    good = subprocess.run(
+        ["bash", str(run), "--check-surface-payload", str(tmp_path), "1"],
+        capture_output=True, text=True)
+    assert good.returncode == 0, good.stderr
+    path.write_bytes(frame[:-8])
+    bad = subprocess.run(
+        ["bash", str(run), "--check-surface-payload", str(tmp_path), "1"],
+        capture_output=True, text=True)
+    assert bad.returncode != 0
+    assert "bad G5 surface payload size" in bad.stderr
+
+
 def test_run_script_is_fail_closed_smoke_first_and_never_uses_step1_restart():
     run = G5 / "run.sh"
     assert subprocess.run(["bash", "-n", str(run)]).returncode == 0
     text = run.read_text()
     driver = text[text.index("preflight\nif"):]
-    assert driver.index('if [[ "$mode" == --preflight-only ]]') < driver.index("build_target")
-    executions = re.findall(r'^run_one "\$(\w+)"', text, re.M)
-    assert executions == ["SMOKE", "REF", "TWIN_A", "TWIN_B", "TWIN_C"]
+    assert driver.index('if [[ "$mode" == --preflight-only ]]') < driver.index("build_targets")
+    executions = re.findall(r'^run_one "([^\"]+)" "\$(\w+)"', text, re.M)
+    assert executions == [
+        ("$TARGET/BLD/bin/nemo.exe", "SMOKE"),
+        ("$REF_TARGET/BLD/bin/nemo.exe", "REF"),
+        ("$TARGET/BLD/bin/nemo.exe", "TWIN_A"),
+        ("$TARGET/BLD/bin/nemo.exe", "TWIN_B"),
+        ("$TARGET/BLD/bin/nemo.exe", "TWIN_C"),
+    ]
     assert "steps=$((steps - steps % FSBC))" in text
     assert 'for step in $(seq 2 "$steps")' in text
     assert "seq 1 \"$steps\"" not in text[text.index("for step in"):]
     assert "key_si3" in text and "rCdU_ice" in text and "fwfice" in text
     assert "expected_boundary=kt11_after_10_completed" in text
+    assert "path.stat().st_size != expected_bytes" in text
+    assert "reference binary carries the surface writer" in text
+    assert "! -name 'icedyn_adv_pra.F90'" in text and 'cp -a "$P2_PRA"' in text
+    assert 'makenemo -n "$name" -m conda-scalarmath -y --clean' in text
     # Build is isolated under cfgs/MY_SRC; the shared NEMO src tree is never a target.
     assert not re.search(r'cp .*\$NEMO_ROOT/src|patch .*\$NEMO_ROOT/src', text)
 

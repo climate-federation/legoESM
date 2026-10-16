@@ -1,27 +1,20 @@
 # Grid ladder rung G5 — round 1 receipt (gridladder_r31)
 
-Status: **STOPPED_FOR_RECORD.**  The card, exact deck, preregistration, and
-operator acquisition are committed.  No G5 NEMO integration was run and no
-trajectory or bar verdict is claimed.
+Status: **STOPPED_FOR_RECORD.**  The first operator acquisition stopped during
+the two-step smoke at kt=1 because an ORCA1-only diagnostic rejected ORCA2's
+ice selectors.  The corrected acquisition is committed; no failed-smoke field
+is admitted and no trajectory or bar verdict is claimed.
 
 Preregistration: `docs/ocean/fidelity/PREREG_nemo_testcases_gridladder_g5_round1.md`
 at `9970164eb`.  Card/acquisition: `888621bd3`; inherited-selector test
 registration: `c608effd7`.  Acquisition evidence is specified under
 `gridladder_rounds/round31/oracle_g5_r31`.
 
-## Resolved-deck comparison
+## Resolved-deck comparison (corrected 2026-10-15)
 
-The round brief defines its OMT-0 target as ORCA2 geometry/T/S with momentum
-and tracer advection, both lateral diffusion modules, and bottom drag OFF,
-while forcing and SI3 are ON.  G5 is the certified G4 deck plus ORCA2's ice
-selection and therefore has this resolved comparison:
-
-| differing resolved key | G5 | round-defined ORCA2 OMT-0 |
-|---|---|---|
-| *(none)* | — | — |
-
-**The diff is empty: G5 IS OMT-0 under the definition in this round.**  The
-direct G4→G5 assignment delta is exactly one key:
+G5 is the certified G4 deck plus ORCA2's sea ice.  It is **not** the ORCA2
+lane's Decision-103 OMT-0.  The direct G4→G5 assignment delta is exactly one
+key:
 
 | key | G4 | G5 / ORCA2 |
 |---|---:|---:|
@@ -32,15 +25,15 @@ ORCA2 states `nn_ice=2` at
 the running branch dispatches value 2 to SI3 at
 `ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/BLD/ppsrc/nemo/sbcmod.f90:499-503`.
 
-There is a historical naming collision, not an unresolved choice.  The
-read-only `fidelity/nemo-testcases-orca2-rounds` Decision-103 gate calls a
-different, older zero-flux/ice-off object “OMT-0”; its frozen changes explicitly
-set `ln_blk=false`, `nn_ice=0`, `ln_traqsr=false`, `ln_ssr=false`, `ln_rnf=false`
-and `nn_fwb=0`
+Decision-103's OMT-0 is the rung-0 deck: ORCA2 mesh and 31 levels,
+climatological T/S under the `ln_tsd_dmp` guard, from rest, with no surface
+forcing and no ice; advection, lateral diffusion, and drag are off while EEN,
+split-explicit free surface, and constant vertical mixing remain.  Its binding
+gate sets `ln_blk=false`, `nn_ice=0`, `ln_traqsr=false`, `ln_ssr=false`,
+`ln_rnf=false`, and `nn_fwb=0`
 (`scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round82_rung0_deck_gate.py:21-43`).
-That object cannot satisfy this round's explicit forcing-and-ice-ON definition,
-so it was inspected but not silently substituted.  No configuration decision
-remains: the current round definition is authoritative.
+G5 instead keeps every G4 forcing switch and sets `nn_ice=2`; it climbs the
+forcing/ice axis toward the shipped ORCA2 program, not the OMT module ladder.
 
 ## Exact SI3 overlay
 
@@ -93,13 +86,32 @@ measure it without inventing a second ice model.
 
 ## Acquisition
 
-`run.sh` reuses the pinned R5 `key_si3 key_qco key_vco_1d3d key_RK3` writer
-source set and overlays only the certified G4 `restart.F90`/`usrdef_istate.F90`
-in an isolated config `ORCA2G5_OMIP_L4_R31FULLENTRY`; it never edits NEMO
-`src/`.  A byte-for-byte existing binary cannot be reused because R5 lacks
-G4's prescribed SSH bump.  The existing R5 binary, CPP card, writer set, bump
-sources, SI3 reference, deck and every data file are SHA-pinned before the
-operator build.
+The first `run.sh` reused R5's complete MY_SRC set.  That set was built for the
+ORCA1 ice deck: its extra Prather dump stops unless `nn_icesal=2` and ponds are
+off (`ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY/MY_SRC/icedyn_adv_pra.F90:504-515`).
+G5 resolves `nn_icesal=4`, `ln_pnd_LEV=true`, and Prather advection from
+`cfgs/SHARED/namelist_ice_ref:127-130,197-204,240-250`.  The operator's smoke
+therefore wrote `time.step=1`, logged `l4_orca1ice_pra_dump: selector contract
+changed` twice, and exited 123.  The failed directory was preserved as
+`smoke_2step_failed_orca1ice_writer_20261015`; none of it is admissible.
+
+The corrected acquisition replaces only `icedyn_adv_pra.F90` with the pinned
+SHA-256 `d1be8a22cbb6dd2f7c695e31164ba3d09b4cd3f5bcbe5f71ed0cfec5749f3828`
+from `ORCA2_OMIP_L4_P2VBND_R2`, whose writer ran the same ORCA2 ice overlay and
+serializes the selected salinity and pond families behind their allocation
+selectors (:502-543).  The complete hybrid MY_SRC manifest is pinned as
+`f1bfa3ee99cf841e9dab64204b0967e91715084daf74b43489935c8c3181e59c`.
+Preflight now resolves the three selector values from the reference plus
+overlay and rejects the old writer before any build; the direct planted test
+passes the ORCA2 writer and makes the ORCA1 writer exit nonzero.
+
+Two fresh config names prevent reuse of any object from the failed build:
+`ORCA2G5_OMIP_L4_R31REF_FIX1` is a writer-free G5 reference with only the bump
+sources, and `ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1` is the record build.  Both use
+the same pinned CPP keys.  The record smoke runs first, the writer-free
+reference discovers NEMO's boundary, then record twins run only to that
+boundary.  The surface admission now checks the exact byte count implied by
+the frozen schema as well as finite values and twin identity.
 
 Execution order is fixed: two-step smoke first; a 100-step boundary run;
 then twins A/B/C only to `min(10, completed)` rounded to `nn_fsbc=2`.  The
@@ -108,10 +120,7 @@ kt 1–10.  Across A/B/C, restart coverage is every writable step 2 through the
 admitted boundary; step 1 is never requested.  Per-step surface frames must be
 finite, schema-valid, and byte-identical across all three twins.
 
-Read-only preflight at `c608effd7` passed:
-
-`G5_PREFLIGHT_OK source=ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY commit=c608effd7b8b1bc01ac5c18ec4d196f5582c345a expected_boundary=kt11_after_10_completed`
-
+The corrected read-only preflight result and final commit are recorded below.
 No `makenemo` or `mpirun` was invoked by the author.
 
 ## Preregistered prediction and tests
@@ -122,7 +131,7 @@ state/supported-flux mismatch, absent or everywhere-zero wet-ice `rCdU_ice`,
 an unexpected resolved-deck key, or exact agreement through that consumer.
 The exact observed boundary supersedes the prediction next round.
 
-- Focused G4+G5, CPU fp64 (`JAX_ENABLE_X64=1`): **36 passed, 2 deselected**.
+- Focused G4+G5, CPU fp64 (`JAX_ENABLE_X64=1`): **38 passed, 2 deselected**.
 - Split G2/G3 inherited-selector regression: **27 passed, 9 deselected**.
 - Split G1 selection regression: **8 passed, 77 deselected**.
 - The initial combined 148-test process was discarded after hitting the
@@ -130,19 +139,27 @@ The exact observed boundary supersedes the prediction next round.
   repository-prescribed remedy, and the affected selector assertions pass.
 - `bash -n`, Python compilation, `git diff --check`, and acquisition preflight:
   PASS.
-- Controls: changing `nn_ice`, modifying any byte of the SI3 overlay, omitting
-  the exact writer fields, requesting a step-1 restart, a non-finite frame, or
-  unequal twins is refused by a direct test or the acquisition admission.
+- Controls: changing `nn_ice`, modifying any byte of the SI3 overlay, selecting
+  the ORCA1-only Prather writer, moving the surface writer above exact `CALL
+  sbc`, truncating its payload, omitting a required field, requesting a step-1
+  restart, a non-finite frame, or unequal twins is refused by a direct test or
+  acquisition admission.  Each of the three new review controls was planted
+  and observed to exit nonzero or fail its assertion.
 
-independent review: operator (Claude)
+independent review: Claude — HOLD on the first acquisition; all four findings
+were incorporated.  Per the operator's resume instruction, no Codex review was
+run on this correction.
 
 ## OPEN
 
 The operator must run the acquisition.  Round 2 admits the record and tests
 the preregistered top-drag boundary; G5 is not execution-ready before that.
 
-ASKED: exact G4+ORCA2-SI3 deck, resolved OMT-0 diff, ORCA2 surface/ice record
-route, SI3 writer acquisition, card/preregistration, focused synchronous tests.
-UNASKED: no physics fix, no new sea-ice model, no NEMO source edit, no run.
+ASKED: exact G4+ORCA2-SI3 deck, corrected non-OMT framing, ORCA2 surface/ice
+record route, compatible SI3 writer acquisition, card/preregistration, focused
+synchronous tests.
+UNASKED: the card-side G1–G4 rejection of an unexpected `namelist_ice_cfg` is
+retained and changes no run deck; no physics fix, new sea-ice model, NEMO source
+edit, or author-run integration was added.
 UNVERIFIED: G5 trajectory, actual stop boundary, nonzero wet-ice `rCdU_ice`,
 and the first numerical mismatch.

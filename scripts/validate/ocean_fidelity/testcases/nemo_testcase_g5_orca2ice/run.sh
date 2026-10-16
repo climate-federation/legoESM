@@ -7,18 +7,104 @@ set -Eeuo pipefail
 fail() { printf 'REFUSE: G5 acquisition: %s\n' "$*" >&2; exit 66; }
 trap 'fail "unexpected failure at line ${BASH_LINENO[0]:-${LINENO}}"' ERR
 
+resolve_ice_value() { # key, reference namelist, overlay namelist
+  awk -F= -v want="$1" '
+    { sub(/!.*/, ""); key=$1; gsub(/[[:space:]]/, "", key) }
+    tolower(key) == tolower(want) {
+      value=$2; gsub(/[[:space:],]/, "", value); found=value
+    }
+    END { if (found == "") exit 1; print tolower(found) }
+  ' "$2" "$3"
+}
+
+check_ice_writer_contract() { # writer, reference namelist, overlay namelist
+  local writer=$1 ref=$2 overlay=$3 sal lev topo pra path
+  for path in "$writer" "$ref" "$overlay"; do [[ -f "$path" ]] || fail "missing $path"; done
+  sal=$(resolve_ice_value nn_icesal "$ref" "$overlay") \
+    || fail 'cannot resolve nn_icesal for ice writer'
+  lev=$(resolve_ice_value ln_pnd_LEV "$ref" "$overlay") \
+    || fail 'cannot resolve ln_pnd_LEV for ice writer'
+  topo=$(resolve_ice_value ln_pnd_TOPO "$ref" "$overlay") \
+    || fail 'cannot resolve ln_pnd_TOPO for ice writer'
+  pra=$(resolve_ice_value ln_adv_Pra "$ref" "$overlay") \
+    || fail 'cannot resolve ln_adv_Pra for ice writer'
+  [[ "$pra" == .true. ]] || fail 'deck does not select the Prather writer'
+  if grep -Fq 'l4_orca1ice_pra_dump: selector contract changed' "$writer"; then
+    [[ "$sal" == 2 && "$lev" == .false. && "$topo" == .false. ]] \
+      || fail "Prather writer requires nn_icesal=2 and ponds off; deck resolves nn_icesal=$sal ln_pnd_LEV=$lev ln_pnd_TOPO=$topo"
+  fi
+  if [[ "$sal" == 4 ]]; then
+    grep -Fq "IF( nn_icesal == 4 ) WRITE(iunit) l4_canon_4d(sxsi,'T')" "$writer" \
+      || fail 'Prather writer does not serialize the selected nn_icesal=4 moments'
+  fi
+  if [[ "$lev" == .true. || "$topo" == .true. ]]; then
+    grep -Fq 'IF( ln_pnd_LEV .OR. ln_pnd_TOPO ) THEN' "$writer" \
+      || fail 'Prather writer does not serialize the selected pond moments'
+  fi
+}
+
+check_surface_payloads() { # directory, completed steps
+  python3 -I - "$1" "$2" <<'PY'
+import pathlib, struct, sys
+import numpy as np
+root, steps = pathlib.Path(sys.argv[1]), int(sys.argv[2])
+for kt in range(1, steps + 1):
+    path = root / f"oracle_ocean_surface_input_kt{kt:08d}.bin"
+    with path.open("rb") as stream:
+        magic = stream.read(16).decode("ascii").rstrip()
+        header = struct.unpack("=13i", stream.read(52))
+        values = np.fromfile(stream, dtype=np.float64)
+    if magic != "NEMO_L4_SBCIN_1" or header[0:3] != (1, kt, 1 if kt % 2 else 3):
+        raise SystemExit(f"bad G5 surface header: {path.name} {magic!r} {header}")
+    _, _, _, jpi, jpj, jpts, _, halo, nfull, nreduced, nhalo1, n3d, bits = header
+    if (nfull, nreduced, nhalo1, n3d, bits) != (20, 12, 1, 2, 64):
+        raise SystemExit(f"bad G5 surface schema: {path.name} {header}")
+    expected_values = (
+        nfull * jpi * jpj
+        + nreduced * (jpi - 2 * halo) * (jpj - 2 * halo)
+        + nhalo1 * (jpi - 2) * (jpj - 2)
+        + n3d * (jpi - 2 * halo) * (jpj - 2 * halo) * jpts
+    )
+    expected_bytes = 16 + 13 * 4 + expected_values * (bits // 8)
+    if path.stat().st_size != expected_bytes or values.size != expected_values:
+        raise SystemExit(
+            f"bad G5 surface payload size: {path.name} "
+            f"bytes={path.stat().st_size}/{expected_bytes} values={values.size}/{expected_values}"
+        )
+    if not values.size or not np.isfinite(values).all():
+        raise SystemExit(f"bad G5 surface payload: {path.name}")
+PY
+}
+
 mode=${1:---preflight-only}
+if [[ "$mode" == --check-writer-contract ]]; then
+  (($# == 4)) || exit 64
+  check_ice_writer_contract "$2" "$3" "$4"
+  printf 'G5_WRITER_CONTRACT_OK %s\n' "$2"
+  exit 0
+fi
+if [[ "$mode" == --check-surface-payload ]]; then
+  (($# == 3)) || exit 64
+  check_surface_payloads "$2" "$3"
+  printf 'G5_SURFACE_PAYLOAD_OK %s steps=1..%s\n' "$2" "$3"
+  exit 0
+fi
 case "$mode" in --preflight-only|--run|--admit-existing) ;; *) exit 64 ;; esac
 
 export PATH=/home/dbalwada/legoESM/.venv/bin:/home/dbalwada/miniconda3/envs/nemo-build/bin:${PATH}
 export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
 readonly NEMO_ROOT=${NEMO_ROOT:-/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2}
 readonly SOURCE_NAME=ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY
-readonly TARGET_NAME=ORCA2G5_OMIP_L4_R31FULLENTRY
-readonly SOURCE=$NEMO_ROOT/cfgs/$SOURCE_NAME TARGET=$NEMO_ROOT/cfgs/$TARGET_NAME
+readonly P2_NAME=ORCA2_OMIP_L4_P2VBND_R2
+readonly REF_TARGET_NAME=ORCA2G5_OMIP_L4_R31REF_FIX1
+readonly TARGET_NAME=ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1
+readonly SOURCE=$NEMO_ROOT/cfgs/$SOURCE_NAME P2=$NEMO_ROOT/cfgs/$P2_NAME
+readonly REF_TARGET=$NEMO_ROOT/cfgs/$REF_TARGET_NAME TARGET=$NEMO_ROOT/cfgs/$TARGET_NAME
 readonly R5_BIN_SHA=0d4360984a193ff9bce2cfbaa13a45dbd26fcd18b215e0159c95254075830630
 readonly R5_CPP_SHA=2e0d729f348b2377e52a6421afbb56e9dabbbc5ae57e39fbcfa1a3f5edbd8f67
-readonly R5_MYSRC_SET_SHA=8c94f3b8cf01de142e726a9c2c9a43be9c11a74b8f2b6ad36371cdafe91b9766
+readonly P2_BIN_SHA=5b470620cae10795786e6e548b4492840bc1ba89c676f23322c86ff15f38c1bd
+readonly P2_PRA_SHA=d1be8a22cbb6dd2f7c695e31164ba3d09b4cd3f5bcbe5f71ed0cfec5749f3828
+readonly HYBRID_MYSRC_SET_SHA=f1bfa3ee99cf841e9dab64204b0967e91715084daf74b43489935c8c3181e59c
 readonly BUMP_RESTART_SHA=c49f94bd68f39c0254fa082e5b59feb3a918b6d2d173c19535380f3a6731327b
 readonly BUMP_ISTATE_SHA=af1459b31f74e88c235ba2ebbf0c17bd3f02c0e6ce16e039e254f32a25b34782
 readonly ICE_REF_SHA=055ab5e6839c12dbae61bf1c3bcdda46a8f95cf275b7f294d68d7f8e73179307
@@ -63,19 +149,24 @@ repo=$(git -C "$here" rev-parse --show-toplevel) || fail 'not in worktree'
 readonly COMMIT=$(git -C "$repo" rev-parse HEAD)
 readonly DECK=$here/namelist_cfg ICE_DECK=$here/namelist_ice_cfg
 readonly R5_BIN=$SOURCE/BLD/bin/nemo.exe R5_CPP=$SOURCE/cpp_$SOURCE_NAME.fcm
+readonly P2_BIN=$P2/BLD/bin/nemo.exe P2_PRA=$P2/MY_SRC/icedyn_adv_pra.F90
 readonly G1_SOURCE=$NEMO_ROOT/cfgs/ORCA2G1_OMIP_L1_P6/MY_SRC
 readonly ICE_REF=$NEMO_ROOT/cfgs/SHARED/namelist_ice_ref
 
 sha() { sha256sum "$1" | awk '{print $1}'; }
 sorted_keys() { sed -E 's/.*fppkeys *//' "$1" | xargs -n1 | LC_ALL=C sort | xargs; }
-source_set_sha() {
-  find "$SOURCE/MY_SRC" -maxdepth 1 -type f ! -name '*.orig' -printf '%f\n' | LC_ALL=C sort |
-    while read -r f; do sha256sum "$SOURCE/MY_SRC/$f"; done | sha256sum | awk '{print $1}'
+hybrid_source_set_sha() {
+  {
+    find "$SOURCE/MY_SRC" -maxdepth 1 -type f ! -name '*.orig' \
+      ! -name 'icedyn_adv_pra.F90' -printf '%f\n' | LC_ALL=C sort |
+      while read -r f; do printf '%s  %s\n' "$(sha "$SOURCE/MY_SRC/$f")" "$f"; done
+    printf '%s  icedyn_adv_pra.F90\n' "$(sha "$P2_PRA")"
+  } | LC_ALL=C sort -k2 | sha256sum | awk '{print $1}'
 }
 
 preflight() {
   local f
-  for f in "$DECK" "$ICE_DECK" "$R5_BIN" "$R5_CPP" "$ICE_REF" \
+  for f in "$DECK" "$ICE_DECK" "$R5_BIN" "$R5_CPP" "$P2_BIN" "$P2_PRA" "$ICE_REF" \
            "$G1_SOURCE/restart.F90" "$G1_SOURCE/usrdef_istate.F90"; do
     [[ -f "$f" ]] || fail "missing $f"
   done
@@ -87,12 +178,16 @@ preflight() {
     || fail 'committed G5 deck changed'
   [[ "$(sha "$R5_BIN")" == "$R5_BIN_SHA" && "$(sha "$R5_CPP")" == "$R5_CPP_SHA" ]] \
     || fail 'reusable ORCA2 R5 build changed'
-  [[ "$(source_set_sha)" == "$R5_MYSRC_SET_SHA" ]] || fail 'R5 MY_SRC writer set changed'
+  [[ "$(sha "$P2_BIN")" == "$P2_BIN_SHA" && "$(sha "$P2_PRA")" == "$P2_PRA_SHA" ]] \
+    || fail 'proven ORCA2 ice writer changed'
+  [[ "$(hybrid_source_set_sha)" == "$HYBRID_MYSRC_SET_SHA" ]] \
+    || fail 'hybrid G5 MY_SRC writer set changed'
   [[ "$(sha "$G1_SOURCE/restart.F90")" == "$BUMP_RESTART_SHA" \
      && "$(sha "$G1_SOURCE/usrdef_istate.F90")" == "$BUMP_ISTATE_SHA" ]] \
     || fail 'certified G4 bump sources changed'
   [[ "$(sha "$ICE_REF")" == "$ICE_REF_SHA" ]] || fail 'SI3 namelist reference changed'
   [[ "$(sorted_keys "$R5_CPP")" == "$WANT_KEYS" ]] || fail 'R5 lacks the exact key_si3 key set'
+  check_ice_writer_contract "$P2_PRA" "$ICE_REF" "$ICE_DECK"
   grep -Fq 'CALL l4_dump_ocean_surface_input( kstp, Nbb )' "$SOURCE/MY_SRC/stprk3.F90" \
     && grep -Fq "l4_canon_2d(rCdU_ice,'T')" "$SOURCE/MY_SRC/stprk3.F90" \
     && grep -Fq "l4_canon_2d(fwfice,'T')" "$SOURCE/MY_SRC/stprk3.F90" \
@@ -112,44 +207,62 @@ list_a() { pad10 "$1"; }
 list_b() { pad10 $(seq 2 2 "$1"); }
 list_c() { (($1 >= 3)) && pad10 $(seq 3 2 "$1") || pad10 0; }
 
-build_target() {
-  [[ ! -e "$TARGET" ]] || fail "target config already exists: $TARGET"
-  (cd "$NEMO_ROOT" && ./makenemo -r ORCA2_ICE_PISCES -n "$TARGET_NAME" \
-    -m conda-scalarmath del_key key_xios)
-  local src
-  while IFS= read -r -d '' src; do cp -a "$src" "$TARGET/MY_SRC/$(basename "$src")"; done \
-    < <(find "$SOURCE/MY_SRC" -maxdepth 1 -type f ! -name '*.orig' -print0 | sort -z)
-  cp "$G1_SOURCE/restart.F90" "$G1_SOURCE/usrdef_istate.F90" "$TARGET/MY_SRC/"
-  cp "$R5_CPP" "$TARGET/cpp_$TARGET_NAME.fcm"
-  touch "$TARGET/MY_SRC/"*.F90
-  (cd "$NEMO_ROOT" && ./makenemo -n "$TARGET_NAME" -m conda-scalarmath del_key key_xios)
-  [[ -x "$TARGET/BLD/bin/nemo.exe" ]] || fail 'G5 build produced no executable'
-  grep -Fq 'ORCA2G1: the ssh bump' "$TARGET/BLD/ppsrc/nemo/restart.f90" \
-    && grep -Fq 'CALL l4_dump_ocean_surface_input( kstp, Nbb )' "$TARGET/BLD/ppsrc/nemo/stprk3.f90" \
-    || fail 'compiled G5 binary lacks bump or per-step writer'
+build_targets() {
+  [[ ! -e "$REF_TARGET" ]] || fail "reference target config already exists: $REF_TARGET"
+  [[ ! -e "$TARGET" ]] || fail "record target config already exists: $TARGET"
+  local name root src
+  for name in "$REF_TARGET_NAME" "$TARGET_NAME"; do
+    (cd "$NEMO_ROOT" && ./makenemo -r ORCA2_ICE_PISCES -n "$name" \
+      -m conda-scalarmath del_key key_xios)
+    root=$NEMO_ROOT/cfgs/$name
+    cp "$G1_SOURCE/restart.F90" "$G1_SOURCE/usrdef_istate.F90" "$root/MY_SRC/"
+    cp "$R5_CPP" "$root/cpp_$name.fcm"
+    if [[ "$name" == "$TARGET_NAME" ]]; then
+      while IFS= read -r -d '' src; do
+        cp -a "$src" "$root/MY_SRC/$(basename "$src")"
+      done < <(find "$SOURCE/MY_SRC" -maxdepth 1 -type f ! -name '*.orig' \
+        ! -name 'icedyn_adv_pra.F90' -print0 | sort -z)
+      cp -a "$P2_PRA" "$root/MY_SRC/icedyn_adv_pra.F90"
+    fi
+    # Both names are new, and an explicit clean after the CPP/source overlay
+    # prevents even their initial reference-clone objects from being reused.
+    touch "$root/MY_SRC/"*.F90
+    (cd "$NEMO_ROOT" && ./makenemo -n "$name" -m conda-scalarmath -y --clean)
+    (cd "$NEMO_ROOT" && ./makenemo -n "$name" -m conda-scalarmath del_key key_xios)
+    [[ -x "$root/BLD/bin/nemo.exe" ]] || fail "$name produced no executable"
+    grep -Fq 'ORCA2G1: the ssh bump' "$root/BLD/ppsrc/nemo/restart.f90" \
+      || fail "$name lacks the prescribed G5 bump"
+  done
+  grep -Fq 'CALL l4_dump_ocean_surface_input( kstp, Nbb )' \
+    "$TARGET/BLD/ppsrc/nemo/stprk3.f90" \
+    || fail 'compiled G5 record binary lacks the per-step writer'
+  ! grep -Rqs 'l4_dump_ocean_surface_input' "$REF_TARGET/BLD/ppsrc/nemo" \
+    || fail 'compiled G5 reference binary carries the surface writer'
+  check_ice_writer_contract "$TARGET/BLD/ppsrc/nemo/icedyn_adv_pra.f90" \
+    "$ICE_REF" "$ICE_DECK"
 }
 
-stage_run() { # directory, itend, stocklist
-  local dir=$1 f
+stage_run() { # binary, directory, itend, stocklist
+  local binary=$1 dir=$2 f
   [[ ! -e "$dir" ]] || fail "run directory exists: $dir"
   mkdir -p "$dir"
   for f in "${INPUT_FILES[@]}"; do cp "$INPUT_ROOT/$f" "$dir/$f"; done
   cp "$ICE_REF" "$dir/namelist_ice_ref"
   cp "$ICE_DECK" "$dir/namelist_ice_cfg"
-  render_deck "$dir/namelist_cfg" "$2" "$3"
-  cp "$TARGET/BLD/bin/nemo.exe" "$dir/nemo"
+  render_deck "$dir/namelist_cfg" "$3" "$4"
+  cp "$binary" "$dir/nemo"
 }
 
-run_one() { # directory, itend, stocklist, expected=done|boundary
-  local dir=$1 rc=0
-  stage_run "$dir" "$2" "$3"
+run_one() { # binary, directory, itend, stocklist, expected=done|boundary
+  local dir=$2 rc=0
+  stage_run "$1" "$dir" "$3" "$4"
   (cd "$dir"; mpirun -np 1 --oversubscribe ./nemo >run.user.log 2>&1) || rc=$?
   printf '%s\n' "$rc" >"$dir/run.exit"
   [[ -f "$dir/ocean.output" && -f "$dir/time.step" ]] || fail "$dir produced no NEMO log"
   grep -Eq 'nn_ice += +2$' "$dir/ocean.output" || fail "$dir did not resolve nn_ice=2"
-  if [[ "$4" == done ]]; then
-    [[ "$rc" -eq 0 && "$(tr -d '[:space:]' <"$dir/time.step")" == "$2" ]] \
-      || fail "$dir did not complete $2 steps"
+  if [[ "$5" == done ]]; then
+    [[ "$rc" -eq 0 && "$(tr -d '[:space:]' <"$dir/time.step")" == "$3" ]] \
+      || fail "$dir did not complete $3 steps"
   fi
 }
 
@@ -163,7 +276,14 @@ completed_steps() {
 }
 
 admit() {
-  local steps=$1 kt name dir step
+  local steps=$1 kt name dir step completed expected_steps
+  completed=$(completed_steps "$REF")
+  expected_steps=$((completed < 10 ? completed : 10))
+  expected_steps=$((expected_steps - expected_steps % FSBC))
+  [[ "$steps" -eq "$expected_steps" ]] \
+    || fail "record length $steps disagrees with writer-free reference boundary $completed"
+  [[ -f "$REF/ORCA2G1_$(printf '%08d' "$steps")_restart.nc" ]] \
+    || fail "writer-free reference lacks restart step $steps"
   for dir in "$TWIN_A" "$TWIN_B" "$TWIN_C"; do
     [[ "$(<"$dir/run.exit")" == 0 ]] || fail "$dir is not a completed twin"
     for kt in $(seq 1 "$steps"); do
@@ -181,24 +301,11 @@ admit() {
     [[ -f "$TWIN_A/$name" || -f "$TWIN_B/$name" || -f "$TWIN_C/$name" ]] \
       || fail "no twin wrote restart step $step"
   done
-  python3 -I - "$TWIN_A" "$steps" <<'PY'
-import pathlib, struct, sys
-import numpy as np
-root, steps = pathlib.Path(sys.argv[1]), int(sys.argv[2])
-for kt in range(1, steps + 1):
-    path = root / f"oracle_ocean_surface_input_kt{kt:08d}.bin"
-    with path.open("rb") as stream:
-        magic = stream.read(16).decode("ascii").rstrip()
-        header = struct.unpack("=13i", stream.read(52))
-        values = np.fromfile(stream, dtype=np.float64)
-    if magic != "NEMO_L4_SBCIN_1" or header[0:3] != (1, kt, 1 if kt % 2 else 3):
-        raise SystemExit(f"bad G5 surface header: {path.name} {magic!r} {header}")
-    if not values.size or not np.isfinite(values).all():
-        raise SystemExit(f"bad G5 surface payload: {path.name}")
-PY
+  check_surface_payloads "$TWIN_A" "$steps"
   mkdir -p "$EVIDENCE/manifest"
   printf '%s\n' "$COMMIT" >"$EVIDENCE/manifest/legoesm_commit"
-  sha256sum "$DECK" "$ICE_DECK" "$TARGET/BLD/bin/nemo.exe" \
+  sha256sum "$DECK" "$ICE_DECK" "$REF_TARGET/BLD/bin/nemo.exe" \
+    "$TARGET/BLD/bin/nemo.exe" "$P2_PRA" \
     >"$EVIDENCE/manifest/producers.sha256"
   printf 'G5_ACQUISITION_PASS steps=1..%s restarts=2..%s expected_stop=kt11 evidence=%s\n' \
     "$steps" "$steps" "$EVIDENCE"
@@ -206,26 +313,30 @@ PY
 
 preflight
 if [[ "$mode" == --preflight-only ]]; then
-  printf 'WOULD_BUILD %s; then smoke, boundary, twins A/B/C\n' "$TARGET"
+  printf 'WOULD_BUILD writer-free=%s record=%s; then smoke, boundary, twins A/B/C\n' \
+    "$REF_TARGET" "$TARGET"
   exit 0
 fi
 if [[ "$mode" == --admit-existing ]]; then
-  [[ -x "$TARGET/BLD/bin/nemo.exe" && -d "$EVIDENCE" ]] || fail 'no existing target/evidence'
+  [[ -x "$REF_TARGET/BLD/bin/nemo.exe" && -x "$TARGET/BLD/bin/nemo.exe" \
+     && -d "$EVIDENCE" ]] || fail 'no existing targets/evidence'
   steps=$(tr -d '[:space:]' <"$TWIN_A/time.step")
   admit "$steps"
   exit 0
 fi
-[[ ! -e "$EVIDENCE" ]] || fail "evidence exists: $EVIDENCE"
+for dir in "$SMOKE" "$REF" "$TWIN_A" "$TWIN_B" "$TWIN_C"; do
+  [[ ! -e "$dir" ]] || fail "live run directory exists: $dir"
+done
 mkdir -p "$EVIDENCE"
-build_target
+build_targets
 
 # Smoke is the first NEMO execution.  Only after it passes is the long boundary run allowed.
-run_one "$SMOKE" 2 "$(pad10 2)" done
-run_one "$REF" 100 '2,4,6,8,10,12,14,16,18,20' boundary
+run_one "$TARGET/BLD/bin/nemo.exe" "$SMOKE" 2 "$(pad10 2)" done
+run_one "$REF_TARGET/BLD/bin/nemo.exe" "$REF" 100 '2,4,6,8,10,12,14,16,18,20' boundary
 completed=$(completed_steps "$REF")
 steps=$((completed < 10 ? completed : 10)); steps=$((steps - steps % FSBC))
 ((steps >= 2)) || fail "NEMO completed only $completed steps"
-run_one "$TWIN_A" "$steps" "$(list_a "$steps")" done
-run_one "$TWIN_B" "$steps" "$(list_b "$steps")" done
-run_one "$TWIN_C" "$steps" "$(list_c "$steps")" done
+run_one "$TARGET/BLD/bin/nemo.exe" "$TWIN_A" "$steps" "$(list_a "$steps")" done
+run_one "$TARGET/BLD/bin/nemo.exe" "$TWIN_B" "$steps" "$(list_b "$steps")" done
+run_one "$TARGET/BLD/bin/nemo.exe" "$TWIN_C" "$steps" "$(list_c "$steps")" done
 admit "$steps"
