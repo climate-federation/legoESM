@@ -67,6 +67,25 @@ Evidence lives in
 `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round286/`.
 Independent review: operator.
 
+## Validation
+
+- The round receipt citation gate and the cumulative default-receipt gate are
+  PASS with zero unmapped citations, zero citation failures and zero map-audit
+  failures.  The round's rigid-shift plant exits 1 as required.
+- The focused round/citation battery is 21 passed.
+- The one required `tests/ocean/fidelity -n 12` invocation collected 3,604
+  tests and reached 99%.  A JAX compiler abort killed one G1 worker; its two
+  reported parameter IDs both pass in fresh serial processes (91.23 s and
+  90.51 s).  The replacement worker later stopped making progress, so the
+  stalled controller was interrupted and the full battery was not re-run.
+- Eight other displayed failures all reproduce serially on the restored tree:
+  the registered SI3 scalar-math provenance red; the worktree-stamp and
+  allow-dirty-scope ratchets; stale round-33 source-string anchors (two IDs);
+  the round-129 certified-harness hash; the round-209 OMT-1 field-set ratchet;
+  and round 228's older missing citation-map entry.  None names a round-286
+  file.  The final `packages/` tree has zero diff from the supplied round-285
+  tip, so these are branch-tip reds, not effects of the held/reverted arm.
+
 ## OPEN
 
 1. The resolved stage mask is a source-exact local closer but exposes the
