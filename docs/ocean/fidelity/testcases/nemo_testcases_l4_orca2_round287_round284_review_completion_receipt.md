@@ -39,7 +39,7 @@ remeasured or changed in this round.
    `b9a3a966674a0b0dcf298afe150e27ac2fd9230bfe00236deaddd37e40e1c33d`.
 2. **R287-P2 — CONFIRMED.**  The first 81 lines of the round-282
    preregistration are byte-identical to commit `9cc8d2ba3`; the original
-   dead-arm `:648-652` text is restored.  A dated correction below the frozen
+   dead-arm 648–652 text is restored.  A dated correction below the frozen
    body retracts it and records the executing `:762-766` EEN span.  No frozen
    prediction was edited in place.
 3. **R287-P3 — CONFIRMED.**  The round-284 CLI now gives a fired known-answer
