@@ -3579,7 +3579,7 @@ def read_orca2g1_deck(
         **_ORCA2G1_REQUIRED_SWITCHES,
         **_orca2g_sbc_switch_set(values),
         **_orca2g_dynadv_switch_set(values),
-        "namsbc.nn_ice": 2 if case == "ORCA2G5-ice" else 0,
+        "namsbc.nn_ice": 2 if case in _ORCA2G_ICE else 0,
     }
     for name, want in required.items():
         if name not in values:
@@ -3763,7 +3763,7 @@ def build_orca2g1_flat_card(deck_root: str | Path, case: str = "ORCA2G1-flat") -
         nemo_prognostic_barotropic_velocity=True,
     )
     t_init, s_init = orca2g_initial_ts(root, case, tmask)
-    if case == "ORCA2G5-ice":
+    if case in _ORCA2G_ICE:
         ssh -= _orca2_initial_ice_ssh_adjustment(
             grid, dom["e1t"], dom["e2t"], t_init, s_init, tmask
         ) * surface_wet
@@ -3825,11 +3825,11 @@ def build_orca2g1_flat_card(deck_root: str | Path, case: str = "ORCA2G1-flat") -
             bottom_drag_bg_velocity=0.0, bottom_drag_bbl_thickness=0.0),
         zdf_drag_in_matrix=False, barotropic_drag_substep=False, zdf_momentum_nemo_face_thickness=_ORCA2G_ZDF_FACES[case], zdf_tracer_nemo_rounded_thickness=_ORCA2G_TRA_ZDF_ROUNDED[case], barotropic_rhs_ascending_level_sum=_ORCA2G_UE_RHS_ASCENDING[case], zdf_momentum_stage_r3u_nemo_literal=_ORCA2G_ZDF_STAGE_R3U[case], barotropic_wind_nemo_stored_depth=_ORCA2G_WIND_STORED_DEPTH[case], surface_stress_nemo_fold_vector_sign=_ORCA2G_WIND_STORED_DEPTH[case], zdf_surface_stress_nemo_face_thickness=_ORCA2G_WIND_STORED_DEPTH[case], rk3_stage_tracer_written_order=_ORCA2G_TRA_STAGE_ORDER[case], rk3_stage3_heat_nemo_written=_ORCA2G_TRA_STAGE_ORDER[case], rk3_stage3_tracer_nemo_stored_thickness=_ORCA2G_TRA_STAGE_ORDER[case],  # noqa: E501
         gm_redi=None)
-    if case == "ORCA2G5-ice":
+    if case in _ORCA2G_ICE:
         # ORCA2 resolves ln_drgice_imp=T.  SI3 supplies rCdU_ice through the
         # post-SI3 record; all other rungs retain the appended default False.
         # Stage 2's stored e3t(Kmm) divisor (trasbc.f90:284-286) and stage
-        # 3's sfx*z1_rho0_e3t (:308): G5 only; G4 is certified without them
+        # 3's sfx*z1_rho0_e3t (:308): G5 and G6; G4 is certified without them
         # and stays as measured.
         model_config = model_config._replace(
             implicit_ice_ocean_top_drag=True,
@@ -3855,11 +3855,11 @@ def build_orca2g1_flat_card(deck_root: str | Path, case: str = "ORCA2G1-flat") -
     card = NEMOTestcaseCard(
         case, recipe, deck.rn_Dt_s, deck.nn_itend, 1, 0, 0, 0.0, 0.0,
         surface_boundary_condition=(
-            "nemo_post_si3_records" if case == "ORCA2G5-ice"
+            "nemo_post_si3_records" if case in _ORCA2G_ICE
             else "ncar_core_sbcblk" if _ORCA2G_SBC[case] else "none"
         ),
         surface_input_operator=(
-            "nemo_ocean_surface_input_v1" if case == "ORCA2G5-ice"
+            "nemo_ocean_surface_input_v1" if case in _ORCA2G_ICE
             else "nemo_fld_read" if _ORCA2G_SBC[case] else "none"
         ),
         unmeasured_features=_ORCA2G_UNMEASURED[case],
@@ -3909,11 +3909,11 @@ def _orca2g1_selector_failures(card: NEMOTestcaseCard) -> list[str]:
                        and not cfg.zdf_drag_in_matrix
                        and not cfg.barotropic_drag_substep),
         "ln_drgice_imp": cfg.implicit_ice_ocean_top_drag is (
-            card.case == "ORCA2G5-ice"),
+            card.case in _ORCA2G_ICE),
         "stage-2 Kmm e3t": cfg.rk3_stage2_tracer_nemo_stored_thickness is (
-            card.case == "ORCA2G5-ice"),
+            card.case in _ORCA2G_ICE),
         "stage-3 salt Krhs": cfg.rk3_stage3_salt_nemo_written is (
-            card.case == "ORCA2G5-ice"),
+            card.case in _ORCA2G_ICE),
         "ln_zdfcst": (vm.scheme == "constant" and not vm.constant.lat_dependent
                       and not vm.iwm.enabled and not vm.ddm.enabled),
         "ln_zad_Aimp=F": not cfg.adaptive_implicit_vertadv,
@@ -3923,7 +3923,7 @@ def _orca2g1_selector_failures(card: NEMOTestcaseCard) -> list[str]:
         "ln_trabbl=F": (cfg.bbl_adv_option, cfg.bbl_diffusive_option) == (0, 0),
         "surface_forcing": ((card.surface_boundary_condition, card.surface_input_operator) == (
                        ("nemo_post_si3_records", "nemo_ocean_surface_input_v1")
-                       if card.case == "ORCA2G5-ice" else
+                       if card.case in _ORCA2G_ICE else
                        ("ncar_core_sbcblk", "nemo_fld_read") if _ORCA2G_SBC.get(card.case)
                        else ("none", "none"))
                        and cfg.physics.shortwave_penetration == _orca2g_qsr(card.case, card.dt_s)
@@ -3953,7 +3953,7 @@ def validate_orca2g1_flat_card(card: NEMOTestcaseCard, deck_root: str | Path) ->
     init_ts = orca2g_initial_ts(deck_root, card.case, wet3)
     expected_ssh = orca2g1_initial_ssh(dom["glamt"], dom["gphit"], wet)
     ice_ssh_adjustment = 0.0
-    if card.case == "ORCA2G5-ice":
+    if card.case in _ORCA2G_ICE:
         ice_ssh_adjustment = _orca2_initial_ice_ssh_adjustment(
             grid, dom["e1t"], dom["e2t"], init_ts[0], init_ts[1], wet3
         )
@@ -4012,7 +4012,10 @@ def validate_orca2g1_flat_card_for_execution(
 # ``domain_cfg.nc``.  The builder, the deck reader, the bump and every selector
 # are G1's; only the entries below differ by rung.
 _ORCA2G_JPK: dict[str, int] = {"ORCA2G1-flat": 2, "ORCA2G2-zps": 31, "ORCA2G3-ts": 31,
-                             "ORCA2G4-sbc": 31, "ORCA2G5-ice": 31, "ORCA2G1b-vec": 2}
+                             "ORCA2G4-sbc": 31, "ORCA2G5-ice": 31, "ORCA2G1b-vec": 2,
+                             "ORCA2G6-vec": 31}
+# Rungs fed NEMO's post-SI3 ocean surface records (D123): G5 and G6 = G5 + vector form.
+_ORCA2G_ICE = frozenset({"ORCA2G5-ice", "ORCA2G6-vec"})
 ORCA2G2_UNMEASURED: tuple[str, ...] = (
     "multi_level_partial_cell_step",   # round 2: record admitted, not at the bar
 )
@@ -4036,6 +4039,13 @@ ORCA2G4_UNMEASURED: tuple[str, ...] = (
 ORCA2G5_UNMEASURED: tuple[str, ...] = (
     "nemo_post_si3_surface_records",
 )
+# G6 = certified G5 + ORCA2's vector-form momentum advection (Decision 128).
+# New against G1b: more than one level, so dyn_zad, the velocity-form wzv and
+# the vector-form dyn_zdf update meet partial cells for the first time.
+ORCA2G6_UNMEASURED: tuple[str, ...] = (
+    "g6_record_not_admitted",
+    "vector_form_multilevel_step",   # np_CRV EEN + KEG + ZAD on 31 levels with SI3 records
+)
 # G1b = G1 + ORCA2's vector-form momentum advection (user, 2026-10-14).
 ORCA2G1B_UNMEASURED: tuple[str, ...] = (
     "g1b_record_not_admitted",
@@ -4045,42 +4055,50 @@ _ORCA2G_UNMEASURED = {"ORCA2G1-flat": ORCA2G1_UNMEASURED, "ORCA2G1b-vec": ORCA2G
                       "ORCA2G2-zps": ORCA2G2_UNMEASURED,
                       "ORCA2G3-ts": ORCA2G3_UNMEASURED,
                       "ORCA2G4-sbc": ORCA2G4_UNMEASURED,
-                      "ORCA2G5-ice": ORCA2G5_UNMEASURED}
+                      "ORCA2G5-ice": ORCA2G5_UNMEASURED,
+                      "ORCA2G6-vec": ORCA2G6_UNMEASURED}
 # NEMO's dyn_zdf matrix divisors (dynzdf.f90:191-205, :360-374): selected by
 # G2, the first rung with more than one level.  G1 has no interface to solve
 # across, so its card stays as certified.
 _ORCA2G_ZDF_FACES = {"ORCA2G1-flat": False, "ORCA2G1b-vec": False, "ORCA2G2-zps": True, "ORCA2G3-ts": True,
-                     "ORCA2G4-sbc": True, "ORCA2G5-ice": True}
+                     "ORCA2G4-sbc": True, "ORCA2G5-ice": True,
+    "ORCA2G6-vec": True}
 # NEMO's tra_zdf diagonal rounding (trazdf.f90:233; G2 round 3), its own row:
 # G1's one-level solve builds no such diagonal.
 _ORCA2G_TRA_ZDF_ROUNDED = {"ORCA2G1-flat": False, "ORCA2G1b-vec": False, "ORCA2G2-zps": True, "ORCA2G3-ts": True,
-                           "ORCA2G4-sbc": True, "ORCA2G5-ice": True}
+                           "ORCA2G4-sbc": True, "ORCA2G5-ice": True,
+    "ORCA2G6-vec": True}
 # NEMO's ascending-k depth mean of the 3-D right-hand side (stp2d.f90:178-179;
 # G2 round 4), its own row: G1's one-level sum has no order to choose.
 _ORCA2G_UE_RHS_ASCENDING = {"ORCA2G1-flat": False, "ORCA2G1b-vec": False, "ORCA2G2-zps": True, "ORCA2G3-ts": True,
-                            "ORCA2G4-sbc": True, "ORCA2G5-ice": True}
+                            "ORCA2G4-sbc": True, "ORCA2G5-ice": True,
+    "ORCA2G6-vec": True}
 # dyn_zdf's interface thickness reads the stored stage ratio r3u(Kmm)
 # (dynzdf.f90:193-195, stprk3_stg.f90:216-217; G3 round 3), G3's card only.
 _ORCA2G_ZDF_STAGE_R3U = {"ORCA2G1-flat": False, "ORCA2G1b-vec": False, "ORCA2G2-zps": False, "ORCA2G3-ts": True,
-                         "ORCA2G4-sbc": True, "ORCA2G5-ice": True}
+                         "ORCA2G4-sbc": True, "ORCA2G5-ice": True,
+    "ORCA2G6-vec": True}
 # NEMO's surface-stress transcription (G4 round 6), inherited by G5: the
 # barotropic wind term divides by the stored
 # r1_hu_0/(1+r3u(Kbb)) (stp2d.f90:198-199), and the pivot-row V stress reads
 # vtau's vector fold halo (sbcmod.f90:548-551, :559), and dyn_zdf's stress
 # deposit divides by e3u_3d(1)*(1+r3u(Kaa)) (dynzdf.f90:338-339).
 _ORCA2G_WIND_STORED_DEPTH = {"ORCA2G1-flat": False, "ORCA2G1b-vec": False, "ORCA2G2-zps": False,
-                             "ORCA2G3-ts": False, "ORCA2G4-sbc": True, "ORCA2G5-ice": True}
+                             "ORCA2G3-ts": False, "ORCA2G4-sbc": True, "ORCA2G5-ice": True,
+    "ORCA2G6-vec": True}
 # NEMO's written stage-1/2 tracer update (stprk3_stg.f90:503-505; G4 round
 # 7), inherited by G5.  G4 is the first rung where the live surface source
 # makes contraction observable, so earlier certified cards remain unchanged.
 _ORCA2G_TRA_STAGE_ORDER = {"ORCA2G1-flat": False, "ORCA2G1b-vec": False,
                            "ORCA2G2-zps": False, "ORCA2G3-ts": False,
-                           "ORCA2G4-sbc": True, "ORCA2G5-ice": True}
+                           "ORCA2G4-sbc": True, "ORCA2G5-ice": True,
+    "ORCA2G6-vec": True}
 
 
-# ln_dynadv_vec by rung: only G1b selects ORCA2's vector form so far.
+# ln_dynadv_vec by rung: G1b and G6 select ORCA2's vector form.
 _ORCA2G_DYNADV_VEC = {"ORCA2G1-flat": False, "ORCA2G2-zps": False, "ORCA2G3-ts": False,
-                      "ORCA2G4-sbc": False, "ORCA2G5-ice": False, "ORCA2G1b-vec": True}
+                      "ORCA2G4-sbc": False, "ORCA2G5-ice": False, "ORCA2G1b-vec": True,
+                      "ORCA2G6-vec": True}
 _ORCA2G_VEC_SELECTORS = ("momentum_advection", "ke_gradient_scheme",
                          "vertical_momentum_scheme", "momentum_flux_scheme",
                          "vorticity_scheme")
@@ -4133,12 +4151,14 @@ def build_orca2g2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
 # state.  &namtsd reads ORCA2's own T/S climatology with ORCA2's own lines
 # (ORCA2_OMIP_L4/EXP00/namelist_cfg:47,50,54-55); damping stays off.
 _ORCA2G_TSD_INIT = {"ORCA2G1-flat": False, "ORCA2G1b-vec": False, "ORCA2G2-zps": False, "ORCA2G3-ts": True,
-                    "ORCA2G4-sbc": True, "ORCA2G5-ice": True}
+                    "ORCA2G4-sbc": True, "ORCA2G5-ice": True,
+    "ORCA2G6-vec": True}
 # Decision 120: G3 and above set ln_tsd_dmp = T with ln_tradmp = F, so NEMO
 # applies the ORCA_R2 hand alterations to the initial state (dtatsd.f90:219)
 # and never restores (dta_tsd's only per-step caller is tradmp.f90:181).
 _ORCA2G_TSD_DMP = {"ORCA2G1-flat": False, "ORCA2G1b-vec": False, "ORCA2G2-zps": False, "ORCA2G3-ts": True,
-                   "ORCA2G4-sbc": True, "ORCA2G5-ice": True}
+                   "ORCA2G4-sbc": True, "ORCA2G5-ice": True,
+    "ORCA2G6-vec": True}
 _ORCA2G3_TSD_FIELDS = {
     "namtsd.cn_dir": "'./'",
     "namtsd.sn_tem": ("'data_1m_potential_temperature_nomask',-1.,'votemper',"
@@ -4206,7 +4226,8 @@ def build_orca2g3_ts_card(deck_root: str | Path) -> NEMOTestcaseCard:
 # boundary condition.  &namsbc is ORCA2's (ORCA2_OMIP_L4/EXP00/namelist_cfg:
 # 80-92) with nn_ice = 0, and the four data groups are ORCA2's lines.
 _ORCA2G_SBC = {"ORCA2G1-flat": False, "ORCA2G1b-vec": False, "ORCA2G2-zps": False, "ORCA2G3-ts": False,
-               "ORCA2G4-sbc": True, "ORCA2G5-ice": True}
+               "ORCA2G4-sbc": True, "ORCA2G5-ice": True,
+    "ORCA2G6-vec": True}
 # The &namsbc switches that move with the rung: (G1-G3 value, G4 value).
 _ORCA2G_SBC_SWITCHES: dict[str, tuple[object, object]] = {
     "namsbc.ln_usr": (True, False), "namsbc.ln_blk": (False, True),
@@ -4294,7 +4315,7 @@ def orca2g_ice_failures(deck_root: str | Path, case: str) -> list[str]:
         return ["ice_case"]
     root = Path(deck_root)
     values = _orca2g1_namelist_values(root / "namelist_cfg")
-    want = 2 if case == "ORCA2G5-ice" else 0
+    want = 2 if case in _ORCA2G_ICE else 0
     failed = [] if values.get("namsbc.nn_ice") == want else ["namsbc.nn_ice"]
     ice = root / "namelist_ice_cfg"
     if want == 2:
@@ -4319,6 +4340,12 @@ def build_orca2g5_ice_card(deck_root: str | Path) -> NEMOTestcaseCard:
     return build_orca2g1_flat_card(deck_root, "ORCA2G5-ice")
 
 
+def build_orca2g6_vec_card(deck_root: str | Path) -> NEMOTestcaseCard:
+    """G6: certified G5 plus ORCA2's vector-form momentum advection."""
+
+    return build_orca2g1_flat_card(deck_root, "ORCA2G6-vec")
+
+
 __all__ = (
     "NEMOTestcaseCard",
     "GYRESurfaceBoundaryCondition",
@@ -4334,10 +4361,12 @@ __all__ = (
     "build_orca2g3_ts_card",
     "build_orca2g4_sbc_card",
     "build_orca2g5_ice_card",
+    "build_orca2g6_vec_card",
     "orca2g_forcing_failures",
     "orca2g_ice_failures",
     "ORCA2G4_UNMEASURED",
     "ORCA2G5_UNMEASURED",
+    "ORCA2G6_UNMEASURED",
     "orca2g_initial_ts",
     "ORCA2G2_UNMEASURED",
     "ORCA2G3_UNMEASURED",

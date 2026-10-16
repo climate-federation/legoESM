@@ -158,11 +158,11 @@ def _cmp(card, nemo, sel) -> dict:
             "max_abs": float(np.max(np.abs(card - nemo)[sel])) if sel.any() else 0.0}
 
 
-def admit(ev: Path, plant: str | None = None) -> dict:
+def admit(ev: Path, plant: str | None = None, steps: int = STEPS) -> dict:
     ev = Path(ev)
     ref, a = ev / "ref_100step", ev / "twin_a"
     roots = [ev / t for t in TWINS]
-    common = max(s for s in range(2, STEPS + 1)
+    common = max(s for s in range(2, steps + 1)
                  if (ref / f"ORCA2G1_{s:08d}_restart.nc").is_file()
                  and (a / f"ORCA2G1_{s:08d}_restart.nc").is_file())
     cand = a
@@ -184,21 +184,21 @@ def admit(ev: Path, plant: str | None = None) -> dict:
         raise Refuse(f"PASSIVITY FAILED: {exc}") from exc
     extra = {}
     for t in ("twin_b", "twin_c"):
-        steps = [s for s in range(2, STEPS + 1)
-                 if (ref / f"ORCA2G1_{s:08d}_restart.nc").is_file()
-                 and (ev / t / f"ORCA2G1_{s:08d}_restart.nc").is_file()]
-        extra[t] = cr.restarts_identical(ref, ev / t, steps)
+        common_t = [s for s in range(2, steps + 1)
+                    if (ref / f"ORCA2G1_{s:08d}_restart.nc").is_file()
+                    and (ev / t / f"ORCA2G1_{s:08d}_restart.nc").is_file()]
+        extra[t] = cr.restarts_identical(ref, ev / t, common_t)
     twin = {}
-    for kt in range(1, STEPS + 1):
+    for kt in range(1, steps + 1):
         for pat in PER_STEP:
             name = pat.format(kt=kt)
             blobs = [(r / name).read_bytes() for r in roots]
             require(all(b == blobs[0] for b in blobs[1:]), f"twins differ: {name}")
             twin[name] = len(blobs[0])
     cons = {}
-    for kt in range(1, STEPS + 1):
+    for kt in range(1, steps + 1):
         g = read_step(a, kt, roots)
-        if kt < STEPS:
+        if kt < steps:
             n = read_step(a, kt + 1, roots)
             for k in ("ssh", "tn_k1", "sn_k1", "uu_k1", "vv_k1"):
                 fk, ek = (f"3_{k}_aa", f"e_{k}_bb")
@@ -219,7 +219,7 @@ def admit(ev: Path, plant: str | None = None) -> dict:
     return {"status": "PASS_G5_ADMISSION", "passivity": {"reference": str(ref),
             "candidate": "twin_a", "step": common, "restart_fields": passive},
             "reference_vs_twin_b_c": extra, "twin_identical_files": len(twin),
-            "stage3_equals_next_entry_kt": list(range(1, STEPS)),
+            "stage3_equals_next_entry_kt": list(range(1, steps)),
             "restart_consistency": cons}
 
 
@@ -366,10 +366,11 @@ def main() -> int:
     ap.add_argument("--deck-root", type=Path)
     ap.add_argument("--plant", action="store_true")
     ap.add_argument("--json", type=Path)
+    ap.add_argument("--steps", type=int, default=STEPS, help="admitted record length (admit)")
     args = ap.parse_args()
     try:
         if args.mode == "admit":
-            res = admit(args.evidence, "passivity" if args.plant else None)
+            res = admit(args.evidence, "passivity" if args.plant else None, args.steps)
         elif args.mode == "top_drag":
             res = top_drag(args.evidence, args.plant)
         else:
