@@ -1,0 +1,104 @@
+# ORCA2 round 297 — kt=7 stage-1 writer record request
+
+Date: 2026-10-16
+
+Status: **STOPPED_FOR_RECORD**. Round 296's complete private fold unit first
+grows by more than 10x at the finite kt=7 stage-1 boundary under both
+**independent OMT-4** and **given NEMO's entry**. The admitted OMT-4 record has
+the kt=7 entry and completed stage but not the intervening source-order fields.
+This round commits a fail-closed, rank-complete acquisition of that existing
+23-field schema. It changes no production package, card, deck, selector,
+carried state, sea-ice field, or NEMO physics.
+
+## Provenance and record gap
+
+- Lane base: `6ca3a8892`; frozen preregistration: `07abec778`; acquisition
+  implementation: `ecf85c64d`.
+- Evidence root:
+  `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round297/`.
+- Admitted source run:
+  `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round280/acquisition/orca2_omt4_stage1_source_10step_np2`.
+- Requested target:
+  `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round297/acquisition/orca2_omt4_stage7_source_10step_np2`.
+- Absolute launcher:
+  `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/work/autopilot-orca2-923613361/scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_round297_stage7_acquisition/run.sh`.
+
+The admitted round-222/280 records contain 80 rank-complete entry/stage
+frames for kt=1..10, but the 23-field `rhs/pre/cor/trp/adv/sbc/qco/final`
+stream exists only at kt=1. No admitted record brackets the kt=7 stage-1
+growth. R297-P1 is therefore **CONFIRMED** and the scientific split remains
+UNMEASURED-with-spec until this acquisition admits.
+
+## Compiled source order
+
+The resolved OMT-4 vector path applies the stage-1 velocity update at
+`ORCA2_OMIP_L4_R280STAGE1/BLD/ppsrc/nemo/stprk3_stg.f90:477-480`, diagnoses
+the barotropic correction at `:521-528`, and adds it at `:547-549`. It then
+builds the active-tracer transports at `:568-592`, zeros and fills the tracer
+RHS through advection at `:617-662`, applies the surface source at `:664-672`,
+and performs the QCO stage update at `:693-720`. The completed U/V/T/S state
+is associated at `:812-820`.
+
+The requested record copies round 280's already-admitted writer and call
+sites. A committed patch changes only the selected step (`1` to `7`) and the
+self-describing magic/file/error labels. The source NEMO stage program is
+unchanged. Both labels use the same oracle stage stream; their candidate
+replays remain separate in the next round.
+
+## Frozen prediction ledger
+
+| ID | Verdict | Mechanical result |
+|---|---|---|
+| R297-P1 | **CONFIRMED** | Existing rank-complete intermediates stop at kt=1; kt=7 has entry/completed-stage frames only. |
+| R297-P2 | **UNMEASURED_WITH_SPEC** | Admission requires two rank records, 23 fields, exactly-once 148x180 coverage, 80 frame byte identities, and two restart byte identities. |
+| R297-P3 | **UNMEASURED_WITH_SPEC** | Frozen first-writer prediction is `adv_t`/`adv_s`; an earlier or later boundary is retained as REFUTED. |
+| R297-P4 | **UNMEASURED_WITH_SPEC** | Same-program-point candidate and oracle self-replays require the record. |
+| R297-P5 | **PARTIAL** | Writer-layout plant fires now; eight payload/additions-only plants await the record; one-bit replay control belongs to the measurement round. |
+
+## Acquisition and controls
+
+The launcher pins the source stage program, writer, cpp keys, binary, deck
+manifest, input manifest, and every committed producer artifact by SHA-256.
+It parses the record's own magic, header integers, field names, ranks,
+dimensions, and payload sizes. Admission refuses unless both rank slabs cover
+148x180 exactly once and all inherited frames plus terminal restarts are
+byte-identical.
+
+The clean-tree preflight applies the one-line scientific writer change,
+compiles the patched Fortran writer, and prints
+`ORCA2_ROUND297_STAGE7_PREFLIGHT_READY`. SHA-256:
+`846c56e6c67244fc2b4ba240400d7192d327b9e667667e5bae002f252168110f`.
+The writer-layout plant removes the kt=7 selector and exits 69 with
+`STATUS PLANT-FIRED layout`. SHA-256:
+`e7b45e09b53d82b0bee473faafeca5c3dd325383ff007008c8ce366c0663ed34`.
+No `mpirun` was attempted in the sandbox.
+
+## Validation and review
+
+- The generic inherited parser now takes explicit expected step and magic;
+  defaults remain the round-175 kt=1 schema. A behavioral test proves kt=7 is
+  accepted only when both explicit values are supplied.
+- The admission/control tests pass. Record-dependent plants are deliberately
+  not claimed before the operator produces the record.
+- Independent review: operator. A nested Codex review is unavailable inside
+  this sandbox.
+
+## Configuration choices
+
+- **ASKED:** none.
+- **UNASKED:** none.
+- Decision 125's top-V exchange, the resolved stage mask, raw `hv_0`, raw
+  `ssvmask`, and the complete fold unit remain off in production.
+- Decision 126 remains pending; shipped runoff is unchanged and is not
+  re-raised. Sea ice and `unmeasured_features` remain unchanged.
+
+## OPEN
+
+1. The operator runs the absolute launcher with `--run`. It must finish with
+   `STOP 0`, fire all eight record plants, and print
+   `ORCA2_ROUND297_STAGE7_ACQUISITION_PASS`.
+2. The next round admits the two rank records, replays both labels at matched
+   program points, and names the first `rhs/pre/cor/trp/adv/sbc/qco/final`
+   boundary that creates the kt=7 stage-1 growth.
+3. The complete fold unit remains private and atomic. No constituent lands
+   until OMT-4 completes under both labels and the standing gates pass.

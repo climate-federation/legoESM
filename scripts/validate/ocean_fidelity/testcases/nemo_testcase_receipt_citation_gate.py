@@ -1713,6 +1713,32 @@ CITATION_MAP = {
         ('END DO   ;   END DO', 9),
         8,
     ],
+    # --- ORCA2 round 297: kt=7 stage-1 source-order record ----------
+    'ORCA2_OMIP_L4_R280STAGE1/BLD/ppsrc/nemo/stprk3_stg.f90:547-549': [
+        'DO jk =  1,  jpkm1  ; DO jj = ntsj-(  0), ntej+(   0) ; DO ji = ntsi-( 0), ntei+(   0)   ! corrected horizontal velocity',
+        'vv(ji,jj,jk,Kaa) = vv(ji,jj,jk,Kaa) + zvb(ji,jj)*vmask(ji,jj,jk)',
+        3,
+    ],
+    'ORCA2_OMIP_L4_R280STAGE1/BLD/ppsrc/nemo/stprk3_stg.f90:568-592': [
+        'IF( .NOT.ln_shuman ) THEN             ! No Shuman averaging- tra_adv_trp can be in tiling loop',
+        ('CALL tra_adv_trp( kstp, kstg, nit000, Kbb, Kmm, Kaa, Krhs, zFu, zFv, zFw )', 2),
+        25,
+    ],
+    'ORCA2_OMIP_L4_R280STAGE1/BLD/ppsrc/nemo/stprk3_stg.f90:617-662': [
+        '!                       !==  T-S Tracers  ==!',
+        "CALL r175_put3(kstp, kstg, 'adv_s', ts(:,:,:,jp_sal,Krhs))",
+        46,
+    ],
+    'ORCA2_OMIP_L4_R280STAGE1/BLD/ppsrc/nemo/stprk3_stg.f90:664-672': [
+        'CALL tra_sbc_RK3( kstp, Kbb, Kmm,      ts, Krhs,                kstg )   ! surface boundary condition',
+        "CALL r175_put3(kstp, kstg, 'sbc_s', ts(:,:,:,jp_sal,Krhs))",
+        9,
+    ],
+    'ORCA2_OMIP_L4_R280STAGE1/BLD/ppsrc/nemo/stprk3_stg.f90:693-720': [
+        'CASE ( 1 , 2 )    !==  Stage 1 & 2  ==!    time stepping',
+        "CALL r175_put3(kstp, kstg, 'qco_s', ts(:,:,:,jp_sal,Kaa))",
+        28,
+    ],
     # --- ORCA2 round 291: carried external-mode V target boundary ---
     'ORCA2_OMIP_L4_R280STAGE1/BLD/ppsrc/nemo/dynspg_ts.f90:857-860': [
         'IF(.NOT.ll_bt_av ) THEN                          !* Update Kaa barotropic external mode',

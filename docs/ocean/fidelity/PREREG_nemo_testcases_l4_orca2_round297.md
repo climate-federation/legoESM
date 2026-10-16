@@ -61,3 +61,11 @@ After admission, the next round scores both labels and walks the first writer
 offline. The complete fold unit stays private and atomic. Decision 125's
 top-V exchange and the resolved stage-mask statement remain off in production.
 Decision 126 remains pending; shipped runoff and sea ice are unchanged.
+
+## Citation correction appended 2026-10-16
+
+The frozen compiled-order paragraph cites `stprk3_stg.f90:467-481` for the
+raw vector update. Lines 467-476 are the stage-integration heading and case
+dispatch; the executable vector update is exactly `:477-480`. The frozen
+prediction and source order are unchanged; this correction governs the
+receipt and citation gate.
