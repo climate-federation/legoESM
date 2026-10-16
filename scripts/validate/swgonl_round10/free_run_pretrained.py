@@ -176,6 +176,7 @@ def main(argv=None):
         if not daily["all_finite"]:
             print("NOT FINITE: stopping")
             break
+    _write_series(out_root, series, receipt, umask, vmask, args.days)   # the blow-up days too
     driver._write_json(pending, manifest | {
         "status": "complete" if health["all_finite"] and day == args.days else "blew_up",
         "completed_days": day, "daily_sha256": hashes,
