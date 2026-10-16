@@ -1849,31 +1849,6 @@ def _nemo_ws_qco_stage_faces(
     )
 
 
-def _nemo_ws_stage_face_masks(z_coord, grid, dtype):
-    """NEMO's associated 3-D U/V masks on redundant C-grid faces.
-
-    ``dommsk.f90:210-232`` builds ``umask``/``vmask`` from the T mask,
-    applies the bottom-level limits, and then applies ``lbc_lnk``.  Cards
-    carrying NEMO's raw mesh must therefore read the associated masks from
-    the same resolved operand source as the live face geometry; rebuilding
-    them from compact T-cell activity loses the ORCA2 fold rows.  Analytic
-    partial-cell cards take the resolved builder's existing reconstruction,
-    which is identical to their compact masks.
-    """
-    compact_u, compact_v = compute_face_masks_3d(z_coord.is_active, grid)
-    compact_u = compact_u.astype(dtype)
-    compact_v = compact_v.astype(dtype)
-    if getattr(z_coord, "nemo_een_barotropic", None) is None:
-        return compact_u, compact_v
-    ops = nemo_qco_resolved_mesh_operands(
-        z_coord, grid, compact_u, compact_v, dtype,
-        z_coord.is_active.shape[-1])
-    return (
-        compact_u.at[:, 1:, :].set(ops.umask3),
-        compact_v.at[1:, :, :].set(ops.vmask3),
-    )
-
-
 
 def _nemo_dynzdf_drag_face_thickness(
     eta_after, h_bathy, z_coord, config, grid, dtype,
@@ -6071,8 +6046,10 @@ class LatLonCGridOceanModel:
             # the ONE shared kernel; ``None`` (the private legacy hook) keeps
             # tendencies()' own min-of-stretched-thicknesses rule.
             if isinstance(_zc, OceanPartialCellCoordinate):
-                _ws_u_live_mask, _ws_v_live_mask = _nemo_ws_stage_face_masks(
-                    _zc, _grid, state.eta.data.dtype)
+                _ws_u_live_mask, _ws_v_live_mask = compute_face_masks_3d(
+                    _zc.is_active, _grid)
+                _ws_u_live_mask = _ws_u_live_mask.astype(state.eta.data.dtype)
+                _ws_v_live_mask = _ws_v_live_mask.astype(state.eta.data.dtype)
             else:
                 # An OceanZStarCoordinate carries no per-level active flag, so
                 # the 2-D face mask IS the only mask available on that path;
