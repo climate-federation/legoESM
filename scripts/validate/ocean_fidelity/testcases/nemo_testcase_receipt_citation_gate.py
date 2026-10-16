@@ -266,6 +266,8 @@ FILES = {
         _ORCA2_R280STAGE1_COMPILED / "stprk3_stg.f90"),
     "ORCA2_OMIP_L4_R280STAGE1/BLD/ppsrc/nemo/dommsk.f90": (
         _ORCA2_R280STAGE1_COMPILED / "dommsk.f90"),
+    "ORCA2_OMIP_L4_R280STAGE1/BLD/ppsrc/nemo/lbcnfd.f90": (
+        _ORCA2_R280STAGE1_COMPILED / "lbcnfd.f90"),
     "ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/traadv.f90": (
         _ORCA2_R210OMT1_COMPILED / "traadv.f90"),
     "ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/traadv_cen.f90": (
