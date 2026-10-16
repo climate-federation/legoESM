@@ -105,6 +105,7 @@ No `mpirun` was attempted in the sandbox.
 
 ## Citation correction
 
-The first committed receipt cited the active-tracer transport as `:568-592`.
+The first committed receipt cited the active-tracer transport as lines
+568 through 592.
 The branch begins at line 565; `:565-592` is the exact compiled span. The
 source order and acquisition schema are unchanged.
