@@ -1705,6 +1705,17 @@ CITATION_MAP = {
         'IF (mbkv(ji,jj)==1) vmask(ji,jj,:) = 0._wp',
     'ORCA2_OMIP_L4_R280STAGE1/BLD/ppsrc/nemo/dommsk.f90:232':
         "CALL lbc_lnk( 'dommsk', umask, 'U', 1.0_wp, vmask, 'V', 1.0_wp, fmask, 'F', 1.0_wp )",
+    # --- ORCA2 round 286: held resolved stage-mask statement ---
+    'ORCA2_OMIP_L4_R280STAGE1/BLD/ppsrc/nemo/dommsk.f90:206-232': [
+        '!  Ocean/land mask at u-, v-, and f-points   (computed from tmask)',
+        "CALL lbc_lnk( 'dommsk', umask, 'U', 1.0_wp, vmask, 'V', 1.0_wp, fmask, 'F', 1.0_wp )",
+        27,
+    ],
+    'ocean_model_latlon_cgrid.py:6048-6052': [
+        'if isinstance(_zc, OceanPartialCellCoordinate):',
+        '_ws_v_live_mask = _ws_v_live_mask.astype(state.eta.data.dtype)',
+        5,
+    ],
     # --- ORCA2 round 278: Decision-122 lines in the shipped ORCA2 build ---
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynzdf.f90:192-198': ['zzwi = - zDt_2 * ( avm(ji+1,jj,jk  )     +  avm(ji,jj,jk  )     ) &', 'zwd(ji,jk) = 1._wp - zzwi - zzws', 7],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynzdf.f90:361-367': ['zzwi = - zDt_2 * ( avm(ji,jj+1,jk  )     +  avm(ji,jj,jk  )     ) &', 'zwd(ji,jk) = 1._wp - zwi(ji,jk) - zws(ji,jk)', 7],
