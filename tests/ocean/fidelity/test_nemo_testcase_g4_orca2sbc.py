@@ -20,6 +20,11 @@ import pytest
 from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
 from legoesm.ocean.fidelity import nemo_testcase_recipe as recipe
 
+
+def _g_rungs(table):
+    """The G rungs of a shared rung table (the V lane appends its own rows)."""
+    return {k: v for k, v in table.items() if k.startswith("ORCA2G")}
+
 REPO = Path(__file__).resolve().parents[3]
 CASES = REPO / "scripts/validate/ocean_fidelity/testcases"
 G4_DIR = CASES / "nemo_testcase_g4_orca2sbc"
@@ -236,9 +241,9 @@ def test_g4_card_is_the_g3_card_under_orca2s_forcing(cards):
     assert getattr(a, tracer_update) is True and getattr(b, tracer_update) is False
     assert getattr(a, stage3_heat) is True and getattr(b, stage3_heat) is False
     assert getattr(a, stage3_kmm) is True and getattr(b, stage3_kmm) is False
-    assert [c for c, on in recipe._ORCA2G_WIND_STORED_DEPTH.items() if on] == [
+    assert [c for c, on in _g_rungs(recipe._ORCA2G_WIND_STORED_DEPTH).items() if on] == [
         "ORCA2G4-sbc", "ORCA2G5-ice"]
-    assert [c for c, on in recipe._ORCA2G_TRA_STAGE_ORDER.items() if on] == [
+    assert [c for c, on in _g_rungs(recipe._ORCA2G_TRA_STAGE_ORDER).items() if on] == [
         "ORCA2G4-sbc", "ORCA2G5-ice"]
     from legoesm.ocean.state import LatLonCGridOceanConfig
     assert all(LatLonCGridOceanConfig._field_defaults[f] is False

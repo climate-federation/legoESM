@@ -3518,7 +3518,7 @@ _ORCA2G1_REQUIRED_SWITCHES: dict[str, object] = {
     "namdyn_spg.ln_dynspg_ts": True, "namdyn_spg.ln_bt_fw": True,
     "namdyn_spg.nn_bt_flt": 3, "namdyn_spg.ln_bt_auto": True,
     "namdyn_ldf.ln_dynldf_off": True,
-    "namzdf.ln_zdfcst": True, "namzdf.ln_zdftke": False,
+    # ln_zdfcst / ln_zdftke and &namzdf_tke: the rung table (V1)
     "namzdf.ln_zdfevd": False, "namzdf.ln_zdfddm": False,
     "namzdf.ln_zdfiwm": False, "namzdf.ln_zad_aimp": False,
     "namzdf.nn_avb": 0, "namzdf.nn_havtb": 0,
@@ -3579,8 +3579,15 @@ def read_orca2g1_deck(
         **_ORCA2G1_REQUIRED_SWITCHES,
         **_orca2g_sbc_switch_set(values),
         **_orca2g_dynadv_switch_set(values),
-        "namsbc.nn_ice": 2 if case == "ORCA2G5-ice" else 0,
+        "namsbc.nn_ice": 2 if case in _ORCA2G_SI3_CASES else 0,
+        "namzdf.ln_zdfcst": case != "ORCA2V1-tke",
+        "namzdf.ln_zdftke": case == "ORCA2V1-tke",
     }
+    tke_lines = {k: v for k, v in values.items() if k.startswith("namzdf_tke.")}
+    if tke_lines != (_ORCA2V1_TKE_FIELDS if case == "ORCA2V1-tke" else {}):
+        raise ValueError(
+            f"ORCA2G1 deck states &namzdf_tke {tke_lines!r}; the card "
+            "transcribes only ORCA2's four lines, and only on V1")
     for name, want in required.items():
         if name not in values:
             raise ValueError(f"ORCA2G1 deck does not state {name}")
@@ -3763,7 +3770,7 @@ def build_orca2g1_flat_card(deck_root: str | Path, case: str = "ORCA2G1-flat") -
         nemo_prognostic_barotropic_velocity=True,
     )
     t_init, s_init = orca2g_initial_ts(root, case, tmask)
-    if case == "ORCA2G5-ice":
+    if case in _ORCA2G_SI3_CASES:
         ssh -= _orca2_initial_ice_ssh_adjustment(
             grid, dom["e1t"], dom["e2t"], t_init, s_init, tmask
         ) * surface_wet
@@ -3772,6 +3779,8 @@ def build_orca2g1_flat_card(deck_root: str | Path, case: str = "ORCA2G1-flat") -
         S=state.S.replace(data=jnp.asarray(s_init, dtype=jnp.float64)),
         eta=state.eta.replace(data=jnp.asarray(ssh, dtype=jnp.float64)),
     )
+    if case == "ORCA2V1-tke":
+        state = _orca2v1_tke_initial_state(state, tmask, deck)
 
     base = _model_config(
         barotropic_time_filter="nemo_ab3am4",          # nn_bt_flt = 3
@@ -3791,6 +3800,8 @@ def build_orca2g1_flat_card(deck_root: str | Path, case: str = "ORCA2G1-flat") -
         ddm=vertical.ddm._replace(enabled=False),
         vmix_background_mode="additive",
     )
+    if case == "ORCA2V1-tke":
+        vertical = _orca2v1_tke_vertical(vertical, deck)
     physics = base.physics._replace(
         vertical_mixing=vertical,
         shortwave_penetration=_orca2g_qsr(case, deck.rn_Dt_s),    # ln_traqsr (G4: ORCA2's RGB)
@@ -3825,7 +3836,7 @@ def build_orca2g1_flat_card(deck_root: str | Path, case: str = "ORCA2G1-flat") -
             bottom_drag_bg_velocity=0.0, bottom_drag_bbl_thickness=0.0),
         zdf_drag_in_matrix=False, barotropic_drag_substep=False, zdf_momentum_nemo_face_thickness=_ORCA2G_ZDF_FACES[case], zdf_tracer_nemo_rounded_thickness=_ORCA2G_TRA_ZDF_ROUNDED[case], barotropic_rhs_ascending_level_sum=_ORCA2G_UE_RHS_ASCENDING[case], zdf_momentum_stage_r3u_nemo_literal=_ORCA2G_ZDF_STAGE_R3U[case], barotropic_wind_nemo_stored_depth=_ORCA2G_WIND_STORED_DEPTH[case], surface_stress_nemo_fold_vector_sign=_ORCA2G_WIND_STORED_DEPTH[case], zdf_surface_stress_nemo_face_thickness=_ORCA2G_WIND_STORED_DEPTH[case], rk3_stage_tracer_written_order=_ORCA2G_TRA_STAGE_ORDER[case], rk3_stage3_heat_nemo_written=_ORCA2G_TRA_STAGE_ORDER[case], rk3_stage3_tracer_nemo_stored_thickness=_ORCA2G_TRA_STAGE_ORDER[case],  # noqa: E501
         gm_redi=None)
-    if case == "ORCA2G5-ice":
+    if case in _ORCA2G_SI3_CASES:
         # ORCA2 resolves ln_drgice_imp=T.  SI3 supplies rCdU_ice through the
         # post-SI3 record; all other rungs retain the appended default False.
         # Stage 2's stored e3t(Kmm) divisor (trasbc.f90:284-286) and stage
@@ -3855,11 +3866,11 @@ def build_orca2g1_flat_card(deck_root: str | Path, case: str = "ORCA2G1-flat") -
     card = NEMOTestcaseCard(
         case, recipe, deck.rn_Dt_s, deck.nn_itend, 1, 0, 0, 0.0, 0.0,
         surface_boundary_condition=(
-            "nemo_post_si3_records" if case == "ORCA2G5-ice"
+            "nemo_post_si3_records" if case in _ORCA2G_SI3_CASES
             else "ncar_core_sbcblk" if _ORCA2G_SBC[case] else "none"
         ),
         surface_input_operator=(
-            "nemo_ocean_surface_input_v1" if case == "ORCA2G5-ice"
+            "nemo_ocean_surface_input_v1" if case in _ORCA2G_SI3_CASES
             else "nemo_fld_read" if _ORCA2G_SBC[case] else "none"
         ),
         unmeasured_features=_ORCA2G_UNMEASURED[case],
@@ -3909,13 +3920,15 @@ def _orca2g1_selector_failures(card: NEMOTestcaseCard) -> list[str]:
                        and not cfg.zdf_drag_in_matrix
                        and not cfg.barotropic_drag_substep),
         "ln_drgice_imp": cfg.implicit_ice_ocean_top_drag is (
-            card.case == "ORCA2G5-ice"),
+            card.case in _ORCA2G_SI3_CASES),
         "stage-2 Kmm e3t": cfg.rk3_stage2_tracer_nemo_stored_thickness is (
-            card.case == "ORCA2G5-ice"),
+            card.case in _ORCA2G_SI3_CASES),
         "stage-3 salt Krhs": cfg.rk3_stage3_salt_nemo_written is (
-            card.case == "ORCA2G5-ice"),
-        "ln_zdfcst": (vm.scheme == "constant" and not vm.constant.lat_dependent
-                      and not vm.iwm.enabled and not vm.ddm.enabled),
+            card.case in _ORCA2G_SI3_CASES),
+        ("ln_zdftke" if card.case == "ORCA2V1-tke" else "ln_zdfcst"): (
+            _orca2v1_tke_selected(vm) if card.case == "ORCA2V1-tke" else
+            (vm.scheme == "constant" and not vm.constant.lat_dependent
+             and not vm.iwm.enabled and not vm.ddm.enabled)),
         "ln_zad_Aimp=F": not cfg.adaptive_implicit_vertadv,
         "ln_zdfevd=F": cfg.physics.convection.scheme == "none",
         "nn_e3f_typ=0": cfg.een_e3f_scheme == "nemo_avg4",
@@ -3923,7 +3936,7 @@ def _orca2g1_selector_failures(card: NEMOTestcaseCard) -> list[str]:
         "ln_trabbl=F": (cfg.bbl_adv_option, cfg.bbl_diffusive_option) == (0, 0),
         "surface_forcing": ((card.surface_boundary_condition, card.surface_input_operator) == (
                        ("nemo_post_si3_records", "nemo_ocean_surface_input_v1")
-                       if card.case == "ORCA2G5-ice" else
+                       if card.case in _ORCA2G_SI3_CASES else
                        ("ncar_core_sbcblk", "nemo_fld_read") if _ORCA2G_SBC.get(card.case)
                        else ("none", "none"))
                        and cfg.physics.shortwave_penetration == _orca2g_qsr(card.case, card.dt_s)
@@ -3953,7 +3966,7 @@ def validate_orca2g1_flat_card(card: NEMOTestcaseCard, deck_root: str | Path) ->
     init_ts = orca2g_initial_ts(deck_root, card.case, wet3)
     expected_ssh = orca2g1_initial_ssh(dom["glamt"], dom["gphit"], wet)
     ice_ssh_adjustment = 0.0
-    if card.case == "ORCA2G5-ice":
+    if card.case in _ORCA2G_SI3_CASES:
         ice_ssh_adjustment = _orca2_initial_ice_ssh_adjustment(
             grid, dom["e1t"], dom["e2t"], init_ts[0], init_ts[1], wet3
         )
@@ -3967,7 +3980,8 @@ def validate_orca2g1_flat_card(card: NEMOTestcaseCard, deck_root: str | Path) ->
         "rn_bt_alpha": cfg.barotropic.nemo_barotropic_filter_alpha == deck.rn_bt_alpha,
         "nn_e": cfg.barotropic.n_barotropic_substeps == _orca2g1_auto_substeps(
             dom, deck),
-        "rn_avm0/rn_avt0": (vm.constant.A_v, vm.constant.K_v) == (
+        "rn_avm0/rn_avt0": ((vm.tke.kappaM_min, vm.tke.kappaH_min) if vm.scheme == "tke"
+                            else (vm.constant.A_v, vm.constant.K_v)) == (
             deck.rn_avm0_m2_s, deck.rn_avt0_m2_s),
         "domain_shape": np.shape(state.eta.data) == wet.shape,
         "coast": np.array_equal(np.asarray(card.recipe.land_mask) > 0.5, wet),
@@ -4294,7 +4308,7 @@ def orca2g_ice_failures(deck_root: str | Path, case: str) -> list[str]:
         return ["ice_case"]
     root = Path(deck_root)
     values = _orca2g1_namelist_values(root / "namelist_cfg")
-    want = 2 if case == "ORCA2G5-ice" else 0
+    want = 2 if case in _ORCA2G_SI3_CASES else 0
     failed = [] if values.get("namsbc.nn_ice") == want else ["namsbc.nn_ice"]
     ice = root / "namelist_ice_cfg"
     if want == 2:
@@ -4319,6 +4333,100 @@ def build_orca2g5_ice_card(deck_root: str | Path) -> NEMOTestcaseCard:
     return build_orca2g1_flat_card(deck_root, "ORCA2G5-ice")
 
 
+# ---------------------------------------------------------------------------
+# ORCA2V1 (vertical-mixing lane rung V1, DECISION 128): certified G5 with ONE
+# switch, ORCA2's TKE closure.  The deck is G5's plus ln_zdftke=T,
+# ln_zdfcst=F and ORCA2's four &namzdf_tke lines (namelist_cfg:404-419);
+# every other key, ln_zdfiwm=F and ln_drg_OFF=T included, is G5's.
+_ORCA2G_SI3_CASES = ("ORCA2G5-ice", "ORCA2V1-tke")
+_ORCA2V1_TKE_FIELDS: dict[str, object] = {
+    "namzdf_tke.nn_mxl": 3, "namzdf_tke.nn_etau": 1,
+    "namzdf_tke.ln_mxhsw": False, "namzdf_tke.nn_mxlice": 2,
+}
+_ORCA2V1_RN_EMIN = 1.0e-6       # namelist_ref:1227; ln_zdfiwm=F keeps it (zdftke.f90:835-841)
+_ORCA2V1_RN_EMIN0 = 1.0e-4      # namelist_ref:1228
+_ORCA2V1_RN_EFR = 0.05          # namelist_ref:1240
+_ORCA2V1_RN_LC = 0.15           # namelist_ref:1238
+_ORCA2V1_DISSL0 = 1.0e-12       # tke_rst from rest, zdftke.f90:916
+# nn_mxlice=2 (zdftke.f90:620-623) scales the surface mixing length under
+# ice by SI3's mean thickness hm_i; the shared TKE has no such arm and the
+# G5 record carries no hm_i, so the card names it rather than dropping it.
+ORCA2V1_UNMEASURED: tuple[str, ...] = (
+    "nemo_post_si3_surface_records",
+    "v1_record_not_admitted",
+    "tke_nn_mxlice2_under_ice_mixing_length",
+)
+for _rung_table in (_ORCA2G_JPK, _ORCA2G_ZDF_FACES, _ORCA2G_TRA_ZDF_ROUNDED,
+                    _ORCA2G_UE_RHS_ASCENDING, _ORCA2G_ZDF_STAGE_R3U,
+                    _ORCA2G_WIND_STORED_DEPTH, _ORCA2G_TRA_STAGE_ORDER,
+                    _ORCA2G_DYNADV_VEC, _ORCA2G_TSD_INIT, _ORCA2G_TSD_DMP,
+                    _ORCA2G_SBC):
+    _rung_table["ORCA2V1-tke"] = _rung_table["ORCA2G5-ice"]
+_ORCA2G_UNMEASURED["ORCA2V1-tke"] = ORCA2V1_UNMEASURED
+
+
+def _orca2v1_tke_vertical(g5_vm, deck: ORCA2G1Deck):
+    """G5's vertical block with the ORCA2 identity's TKE arm (already carried,
+    inert, in G5's ``tke``) selected and stated for V1's resolved deck."""
+
+    tke = g5_vm.tke._replace(
+        tke_mxl_choice=3,                       # nn_mxl=3
+        tke_background=_ORCA2V1_RN_EMIN,        # rn_emin
+        tke_surface_min=_ORCA2V1_RN_EMIN0,      # rn_emin0, zdftke.f90:271
+        nemo_derived_mxl_min=True,              # rmxl_min=1e-6/(rn_ediff*SQRT(rn_emin)), :840
+        nemo_mxl0_rmxl_min_overwrite=True,      # rn_mxl0 = rmxl_min, :853-856
+        lc=True, lc_coeff=_ORCA2V1_RN_LC,       # ln_lc, rn_lc
+        etau_mode="below_ml",                   # nn_etau=1, :498-502
+        etau_htau_mode="latitude",              # nn_htau=1 (namelist_ref:1241)
+        etau_frac=_ORCA2V1_RN_EFR,              # rn_efr
+        eice=1,                                 # nn_eice=1; nn_ice=2 keeps it (:792-795)
+        bottom_tke_bc=False,                    # ln_drg_OFF=T: :285 branch not taken
+        kappaM_min=deck.rn_avm0_m2_s,           # avmb (nn_avb=0, zdfphy.f90:206-208), :709
+        kappaH_min=deck.rn_avt0_m2_s,           # avtb_2d*avtb, nn_havtb=0 (zdfphy.f90:215), :710
+    )
+    return g5_vm._replace(scheme="tke", tke=tke, vmix_background_mode="nemo_max_floor")
+
+
+def _orca2v1_tke_selected(vm) -> bool:
+    t = vm.tke
+    return (vm.scheme == "tke" and not vm.iwm.enabled and not vm.ddm.enabled
+            and vm.vmix_background_mode == "nemo_max_floor"
+            and (t.tke_mxl_choice, t.tke_background, t.tke_surface_min,
+                 t.nemo_derived_mxl_min, t.nemo_mxl0_rmxl_min_overwrite, t.lc,
+                 t.lc_coeff, t.etau_mode, t.etau_htau_mode, t.etau_frac, t.eice,
+                 t.bottom_tke_bc) == (
+                3, _ORCA2V1_RN_EMIN, _ORCA2V1_RN_EMIN0, True, True, True,
+                _ORCA2V1_RN_LC, "below_ml", "latitude", _ORCA2V1_RN_EFR, 1, False))
+
+
+def _orca2v1_tke_initial_state(state, tmask, deck: ORCA2G1Deck):
+    """zdfphy.f90:226-229 seeds avt_k/avm_k with the background, then
+    tke_rst from rest sets en=rn_emin*wmask and dissl (zdftke.f90:913-916);
+    the same carried fields and masking as the full ORCA2 card."""
+
+    wet_w = np.asarray(tmask[..., 1:], dtype=np.float64)
+
+    def field(data, name, units):
+        return Field(data=jnp.asarray(data), name=name,
+                     dims=("lat", "lon", "level"), units=units)
+
+    return state._replace(
+        tke=field(_ORCA2V1_RN_EMIN * wet_w, "tke", "m^2/s^2"),
+        tke_avm=field(deck.rn_avm0_m2_s * wet_w, "tke_avm", "m^2/s"),
+        tke_avt=field(deck.rn_avt0_m2_s * wet_w, "tke_avt", "m^2/s"),
+        tke_avm_surface=Field(
+            data=jnp.asarray(deck.rn_avm0_m2_s * np.asarray(tmask[..., 0], dtype=np.float64)),
+            name="tke_avm_surface", dims=("lat", "lon"), units="m^2/s"),
+        tke_dissl=field(_ORCA2V1_DISSL0 * wet_w, "tke_dissl", "s^-1"),
+    )
+
+
+def build_orca2v1_tke_card(deck_root: str | Path) -> NEMOTestcaseCard:
+    """V1: certified G5 plus ORCA2's TKE closure (ln_zdftke), one switch."""
+
+    return build_orca2g1_flat_card(deck_root, "ORCA2V1-tke")
+
+
 __all__ = (
     "NEMOTestcaseCard",
     "GYRESurfaceBoundaryCondition",
@@ -4334,6 +4442,8 @@ __all__ = (
     "build_orca2g3_ts_card",
     "build_orca2g4_sbc_card",
     "build_orca2g5_ice_card",
+    "build_orca2v1_tke_card",
+    "ORCA2V1_UNMEASURED",
     "orca2g_forcing_failures",
     "orca2g_ice_failures",
     "ORCA2G4_UNMEASURED",
