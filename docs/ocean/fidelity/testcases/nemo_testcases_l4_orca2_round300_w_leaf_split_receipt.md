@@ -167,9 +167,21 @@ The codex session stopped at the quota ceiling after the battery reached
   `classification.json` byte-for-byte (`HELD_R300_FIRST_W_LEAF_U_DIFFERENCE`).
 - The five round-300 citation-map entries now pin their enclosing
   SUBROUTINE (they were text-and-line only).
-- Citation gate, focused tests and the fidelity battery: results in the
-  evidence directory (`citation_r300c*.log`, `focused_tests_r300c.log`,
-  `fidelity_battery_r300c*.log`), summarised in the final status below.
+- Citation gate at `44a62f5eb`: round-300 receipt PASS (5 citations, each
+  at its pinned subroutine); default receipt PASS (274); a line-shift plant
+  on the `divhor.f90` range and a routine plant on the `sshwzv.f90` range
+  both fail the gate (exit 1, `SYMBOL-NOT-AT-LINE` / `ROUTINE-CONTEXT-MISMATCH`).
+- Focused tests (round-300 split + citation gate): `20 passed`.
+- Fidelity battery (`tests/ocean/fidelity`, `-n 12`, run in four quarters
+  because the whole battery exceeds the 10-minute synchronous limit under
+  load ~24): 3,605 passed, 7 skipped, 8 failed.  The 8 are exactly the
+  pre-existing reds of round 299's battery (SI3 scalar-math gate, worktree
+  stamp, round-35 stamp scope, round-129 spread floor, two round-33 stale
+  anchors, round-209 OMT-1 module set, round-228 citation map); none names
+  a round-300 file.  One GYRE end-to-end plant test
+  (`phase3_stage_sweep_gate::test_planted_stage_control_exits_nonzero_end_to_end`)
+  did not finish within 10 minutes even alone; it exercises no file this
+  round changes.  The ORCA2 grid-ladder straggler passed in isolation.
 - GYRE ten-step trajectory and 30-day member: **not required** — this round
   changes no file under `packages/` (no model change).
 - codex review: paused (quota).  The operator runs an independent Claude
