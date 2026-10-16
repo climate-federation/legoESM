@@ -227,3 +227,48 @@ def test_g1b_step_routes_the_vector_rhs_order_into_every_stage(roots, monkeypatc
         m.step(card.recipe.initial_state, dt=card.dt_s)
         assert len(seen) >= 3
         assert all(bool(s) is on for s in seen), seen
+
+
+def test_g6_raw_vmask_consumers_are_live_under_traced_jit(roots):
+    """G6's raw V mask reaches both Krhs and the vector stage update.
+
+    The one-level G1b card is the fast instance of the same vector/fold
+    program; only G6 selects ``rk3_vector_raw_vmask``.  The perturbed fold-row
+    velocities enter ``model.step`` as dynamic inputs to its production JIT.
+    Exact binary64 words pin the completed stage-2 RHS and its raw Kaa update,
+    so removing either production consumer changes the asserted last bits.
+    """
+    import jax.numpy as jnp
+    import numpy as np
+
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+        _NEMOWSRK3TestHooks,
+    )
+
+    card = recipe.build_nemo_testcase_card(
+        "ORCA2G1b-vec", deck_root=roots["g1b"])
+    cfg = card.recipe.model_config._replace(rk3_vector_raw_vmask=True)
+    state = card.recipe.initial_state
+    u = state.u.data.at[-1, :, 0].set(
+        jnp.linspace(-2.0e-5, 3.0e-5, state.u.data.shape[1]))
+    v = state.v.data.at[-2, :, 0].set(
+        jnp.linspace(4.0e-5, -1.0e-5, state.v.data.shape[1]))
+    state = state._replace(u=state.u.replace(data=u), v=state.v.replace(data=v))
+
+    def exposed(name):
+        model = LatLonCGridOceanModel(
+            card.recipe.grid, card.recipe.z_coord, cfg,
+            _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(**{name: True}))
+        return np.asarray(model.step(state, dt=card.dt_s).v.data)[-1, 29:33, 0]
+
+    rhs_words = exposed("expose_stage2_momentum_rhs").view(np.uint64)
+    raw_words = exposed("expose_stage2_raw_momentum").view(np.uint64)
+    assert np.array_equal(rhs_words, np.array([
+        0xbdff8bd9c6b04ff4, 0xbe08b82cbfe3c8d9,
+        0xbe115ba0992e2879, 0xbe193713afdf5438,
+    ], dtype=np.uint64))
+    assert np.array_equal(raw_words, np.array([
+        0xbec4cb6fcdb8b8b4, 0xbed04b677f7d66a5,
+        0xbed6e24c39f25a5c, 0xbee09f0e3a2e76c4,
+    ], dtype=np.uint64))

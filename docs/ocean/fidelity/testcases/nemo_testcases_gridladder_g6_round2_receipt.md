@@ -11,7 +11,8 @@ round-1 receipt.  Record:
 `gridladder_rounds/round36/oracle_g6_r36/`.  Round-2 evidence:
 `gridladder_rounds/round37/final/`.  The final JSON SHA-256 prefixes are:
 independent `503d86b1389249c8`, given-entry `b2c44fdba726d579`, stages
-`14e6f663d4cfad56`, operators `e468ef75d3865f8`, without HPG fold geometry
+`14e6f663d4cfad56`, operators
+`e468ef75d3865f8b7c57b5a4b3845e1d9a557af232bbaeb246a7b0a87f5d6f32`, without HPG fold geometry
 `3a0a28453833eb5e`, and without raw V mask `8e2ddf586b83601c`.
 
 ## 1. Passivity first, then admission
@@ -151,8 +152,9 @@ change the verdict.
 ## 5. Landed transcription and scope
 
 Two G6-only, default-off selectors transcribe the measured HPG geometry/raw
-V-mask pair.  The north AL81 V update now receives NEMO's T-pivot F triads and
-signed U-transport fold halo.  The code follows NEMO's stored/native column
+V-mask pair.  The north AL81 V update receives NEMO's T-pivot F triads and
+signed U-transport fold halo only when G6's `rk3_vector_raw_vmask` selector is
+also on; G1, G1b, G2, G4 and G5 retain the compact-mask path.  The code follows NEMO's stored/native column
 layout before restoring the cyclic column; the first trial folded a cyclic
 slice and was two columns wrong, so it was rejected.  G1b and all non-G6
 cards retain their prior configuration.  `ORCA2G6_UNMEASURED` no longer says
@@ -166,7 +168,18 @@ not manufacture a record.
 
 ## Tests and review
 
-- Focused G6 card, AL81 fold-halo and HPG-fold tests: 11 passed (CPU fp64).
+- Focused G6 card, AL81 fold-halo, HPG-fold and raw-V-consumer tests passed
+  on CPU fp64.  The traced-JIT consumer test asserts exact binary64 words at
+  both the completed RHS and raw stage update; disabling the RHS consumer
+  fails its first word assertion, and independently disabling the stage-mask
+  consumer returns negative zero and fails its stage-word assertion.
+- Scope certification on the final tree: G1's 100-step test passed; G2's
+  100-step all-field/depth/history test passed; the G4 and G5 focused files
+  passed 42 tests with their two slow acquisition tests deselected.  A direct
+  G1b 100-step INDEPENDENT rescore reproduced its recorded label exactly:
+  598 rows, 575 AT-BAR and 23 DEBT, first over-bar at kt 81 SSH, with 170
+  bit-exact rows, 178 exact-modulo-D127 rows, 3,216,400 normal-difference
+  cells and 222 flushed-subnormal cells unchanged.
 - Required receipt-citation + private-import files: 23 passed (CPU fp64),
   after mechanically re-anchoring 64 gate pins and 20 audited-receipt pins.
 - independent review: operator (Claude)

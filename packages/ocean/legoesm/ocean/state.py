@@ -3278,11 +3278,13 @@ class LatLonCGridOceanConfig(NamedTuple):
     # ``OceanSurfaceForcing.salt_flux_sfx``.  False rescales the Kbb salt-flux
     # tendency to Kmm.  Needs rk3_stage3_tracer_nemo_stored_thickness.
     rk3_stage3_salt_nemo_written: bool = False
-    # NEMO hpg_sco's northern V-pivot statement reads every north-column
-    # operand (rhd, e3w and gdept_z0) from the T-point fold ghost
+    # NEMO hpg_sco's northern V-pivot statement reads the north-row operands
+    # rhd, r3t and ssh from the T-point fold ghost; e3w_1d and gdept_1d are
+    # one-dimensional in this compiled build
     # (dynhpg.f90:391-398, :417-424).  The shared literal kernel already
-    # folds density; this card-selected extension folds the two live geometry
-    # operands as well.  False preserves previously measured cards.
+    # folds density; this card-selected extension supplies the r3t/ssh fold
+    # geometry through the assembled live e3w/gdept fields.  False preserves
+    # previously measured cards.
     nemo_hpg_sco_fold_geometry: bool = False
     # NEMO's vector RK3 program applies the raw 3-D ``vmask`` on its
     # northern V-pivot row to the completed Krhs and the velocity update

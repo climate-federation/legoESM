@@ -2603,7 +2603,8 @@ def _bc_pv_flux(
     enstrophy_metric=False,
     reconstruct_zeta=False,
     vorticity_scheme="al81",
-    een_q_boundary="neumann_fill", een_fold_image_v=False, een_written_order=False,
+    een_q_boundary="neumann_fill", een_fold_image_v=False,
+    een_fold_halo_v=False, een_written_order=False,
     een_e3f_scheme="min",
     een_metric_weighting="off",
     een_nemo_zeta=False,
@@ -2931,7 +2932,7 @@ def _bc_pv_flux(
                 f_vtx=_f_vtx_al,
                 q_boundary=een_q_boundary,
                 metric_widths=_mw,
-                north_fold_grid=(grid if een_fold_image_v else None),
+                north_fold_grid=(grid if een_fold_halo_v else None),
             )
         else:  # "ene"
             # NEMO vor_ene Sadourny 2-point.  f_vtx=None → relative-only
@@ -5522,7 +5523,10 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
                 reconstruct_zeta=config.vortcor_reconstruct_zeta,
                 vorticity_scheme="een_planetary",
                 een_q_boundary=getattr(config, "een_q_boundary", "neumann_fill"),
-                een_fold_image_v=getattr(config, "een_fold_image_v_row", False), een_written_order=getattr(config, "een_vorticity_written_order", False),  # noqa: E501
+                een_fold_image_v=getattr(
+                    config, "een_fold_image_v_row", False),
+                een_fold_halo_v=bool(config.rk3_vector_raw_vmask),
+                een_written_order=getattr(config, "een_vorticity_written_order", False),  # noqa: E501
                 een_e3f_scheme=config.een_e3f_scheme,
                 een_metric_weighting=getattr(
                     config, "een_metric_weighting", "off"),
@@ -5566,7 +5570,14 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             enstrophy_metric=config.vortcor_enstrophy_metric,
             reconstruct_zeta=config.vortcor_reconstruct_zeta,
             vorticity_scheme=getattr(config, "vorticity_scheme", "al81"),
-            een_q_boundary=getattr(config, "een_q_boundary", "neumann_fill"), een_fold_image_v=getattr(config, "een_fold_image_v_row", False), een_written_order=getattr(config, "een_vorticity_written_order", False),  # noqa: E501
+            een_q_boundary=getattr(config, "een_q_boundary", "neumann_fill"),
+            een_fold_image_v=getattr(
+                config, "een_fold_image_v_row", False),
+            # This newly added north-triad/U-transport halo is part of G6's
+            # raw-V-support program.  Earlier ORCA2G cards retain the existing
+            # fold-image V operands but must not enter this G6-only extension.
+            een_fold_halo_v=bool(config.rk3_vector_raw_vmask),
+            een_written_order=getattr(config, "een_vorticity_written_order", False),  # noqa: E501
             een_e3f_scheme=config.een_e3f_scheme,
             een_metric_weighting=getattr(
                 config, "een_metric_weighting", "off"),
