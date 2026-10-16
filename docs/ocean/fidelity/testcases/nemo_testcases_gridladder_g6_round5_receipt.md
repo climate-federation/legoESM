@@ -169,8 +169,8 @@ today, so nothing changes there; not imported by this round.
   then restored (`git status --porcelain` clean).
 - `tests/ocean/unit/test_nemo_orca2g1b_card.py` +
   `tests/ocean/fidelity/test_nemo_testcase_g6_orca2vec.py`: 27 passed (CPU fp64).
-- Receipt-citation gate + private-import ratchet: run before the final
-  commit (result in the round's final message).
+- Receipt-citation gate + private-import ratchet: 23 passed on the clean
+  tree (no citation re-anchored; the landing is line-neutral in cited code).
 - codex review: paused (quota).  The operator runs an independent Claude
   review of this diff before landing.
 
