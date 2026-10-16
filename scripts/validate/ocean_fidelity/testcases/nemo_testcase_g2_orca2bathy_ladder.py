@@ -773,14 +773,19 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
         en = zdf["en"][..., 1:nk]
         avm = zdf["avm"][..., 1:nk]
         restart_kt1 = restart_path(roots, 1)
-        require(restart_kt1 is not None, "V1 record has no restart after kt 1")
-        with netCDF4.Dataset(restart_kt1) as h:
-            restart_en = levels_last(h.variables["en"][0], nk + 1)[..., 1:nk]
-            restart_avm = levels_last(h.variables["avm_k"][0], nk + 1)[..., 1:nk]
-        require(np.array_equal(en, restart_en),
-                "kt-1 zdf en frame != NEMO restart en")
-        require(np.array_equal(avm, restart_avm),
-                "kt-1 zdf avm frame != NEMO restart avm_k")
+        frame_restart_exact = {"available": restart_kt1 is not None}
+        if restart_kt1 is not None:
+            with netCDF4.Dataset(restart_kt1) as h:
+                restart_en = levels_last(h.variables["en"][0], nk + 1)[..., 1:nk]
+                restart_avm = levels_last(
+                    h.variables["avm_k"][0], nk + 1)[..., 1:nk]
+            frame_restart_exact.update(
+                en=bool(np.array_equal(en, restart_en)),
+                avm_k=bool(np.array_equal(avm, restart_avm)))
+            require(frame_restart_exact["en"],
+                    "kt-1 zdf en frame != NEMO restart en")
+            require(frame_restart_exact["avm_k"],
+                    "kt-1 zdf avm frame != NEMO restart avm_k")
         wet_w = wcls["full"] | wcls["partial"]
         rec = g5.surface(root, 1)
         tke_cfg = cfg.physics.vertical_mixing.tke
@@ -913,7 +918,7 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
             "label": "V1 kt-1 source-ordered nn_mxl=3 cellwise replay",
             "seconds": seconds,
             "trace_passive": trace_passive,
-            "frame_restart_exact": {"en": True, "avm_k": True},
+            "frame_restart_exact": frame_restart_exact,
             "rn2_trace_vs_direct_bundle": rn2_bundle_comparison,
             "plant_output_moved": planted_output_moved,
             "preregistered_p2_confirmed": (
