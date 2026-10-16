@@ -360,8 +360,10 @@ def test_g6_pivot_v_ratio_is_nemos_fold_image(roots, monkeypatch):
     div_hor (divhor.f90:125-130 -> ww) and dyn_zad's divisor
     (dynzad.f90:125-126) read that image.  The card's stencil wraps the
     pivot V row's northern neighbour to row 0.  Under G6's raw V mask the
-    ZAD divisor's pivot row is the fold image and the pivot-row ww moves;
-    fails if either the stage faces or the wzv call drops the exchange."""
+    ZAD divisor's pivot row is the fold image (fails if the stage faces drop
+    the exchange), and the wzv builder called directly with the exchange moves
+    only the pivot-row ww (fails if the builder drops it).  Whether each wzv
+    CALL SITE passes the exchange is pinned by the next test."""
     import jax
     import numpy as np
     from legoesm.ocean.dynamics import ocean_model_latlon_cgrid as om
@@ -418,3 +420,43 @@ def test_g6_pivot_v_ratio_is_nemos_fold_image(roots, monkeypatch):
     assert (lv_off[-1][wet] != lv_on[-1][wet]).any()
     assert (w_on[-1] != w_off[-1]).any()
     np.testing.assert_array_equal(w_on[:-1], w_off[:-1])
+
+
+def test_g6_every_wzv_call_site_takes_the_fold_exchange(roots, monkeypatch):
+    """The three G6 wzv calls -- the tracer (stprk3_stg.f90:297) and momentum
+    (:360) solves in the stage transport and the tendency's first call -- each
+    carry the pivot-row ww fix (sshwzv.f90 via divhor.f90:125-130).  One step
+    of G6 records, per call site, whether the fold exchange reached it; fails
+    if any one site drops it."""
+    import sys
+
+    from legoesm.ocean.dynamics import ocean_model_latlon_cgrid as om
+    from legoesm.ocean.dynamics import ocean_pe_latlon_cgrid as pe
+
+    card = recipe.build_nemo_testcase_card(
+        "ORCA2G1b-vec", deck_root=roots["g1b"])
+    seen = []
+    real = pe.nemo_qco_wzv_operands
+
+    def spy(*a, **kw):
+        f = sys._getframe(1)
+        if f.f_code.co_name == "_step_impl":
+            # ponytail: the step-body call only builds the stored diagnostic w
+            # on G6 (no prognostic moves over two steps), so it is not pinned.
+            return real(*a, **kw)
+        seen.append(((f.f_code.co_name, f.f_lineno),
+                     kw.get("fold_exchange_ratios", False)))
+        return real(*a, **kw)
+
+    monkeypatch.setattr(om, "nemo_qco_wzv_operands", spy)
+    monkeypatch.setattr(pe, "_nemo_qco_zad_operands", spy)
+    for on in (True, False):
+        seen.clear()
+        cfg = card.recipe.model_config._replace(rk3_vector_raw_vmask=on)
+        om.LatLonCGridOceanModel(card.recipe.grid, card.recipe.z_coord,
+                                 cfg).step(card.recipe.initial_state, dt=card.dt_s)
+        sites = {s for s, _ in seen}
+        names = sorted(n for n, _ in sites)
+        assert names == ["_nemo_ws_stage_transport", "_nemo_ws_stage_transport",
+                         "latlon_cgrid_ocean_baroclinic_tendencies"], sites
+        assert {flag for _, flag in seen} == {on}, seen

@@ -12,7 +12,8 @@ ran first).  Record: round 36 `gridladder_rounds/round36/oracle_g6_r36/`
 `977112d8b0` (clean tree).  SHA-256 prefixes: independent `c852b6a201dd85b8`,
 given-entry `bdf661c091eafb4f`, operators kt 1 `c3d10027af20f7bc`; probes
 `probe_pivot_geom.py` `fdd1b14d776885be` (json `be030ee706f1222e`),
-`probe_pivot_w_replay.py` `20c4e9474f3a3f0c` (json `063adddf1a5a1cf3`),
+`probe_pivot_w_replay.py` `20c4e9474f3a3f0c` (json `063adddf1a5a1cf3`; resume
+re-run with one added key: `79c35d37edd54a22`, json `e45a747a68910eac`),
 `probe_pivot_v_zad.py` `998f167daccf85fd` (json `464e77965716a6c3`); passive
 captures `capture_wzv_ops.py` `851bbd4b20dfd11d` (pre-fix card, `wzvcap/`)
 and `capture_zad_ops.py` `64b29c679a7ac097` (post-fix card, `zadcap/`).
@@ -28,7 +29,7 @@ both.
 |---|---|---|
 | velocity-form divergence | `divhor.f90:125-130` | `div_hor_RK3_t` :85 |
 | runoff divergence (`ln_rnf_depth=F` arm) | `sbcrnf.f90:279-283` | `sbc_rnf_div` :238 |
-| qco `w` recurrence | `sshwzv.f90:298-300` | `wzv_RK3_t` :236 |
+| qco `w` recurrence | `sshwzv.f90:297-298` | `wzv_RK3_t` :236 |
 | stage-2/3 momentum `wzv` call | `stprk3_stg.f90:327` | `stp_RK3_stg` :78 |
 | stage ratios, then their fold exchange | `stprk3_stg.f90:167`, `:169` | `stp_RK3_stg` :78 |
 | `dyn_zad` V update (divisor `e3v*(1+r3v)`) | `dynzad.f90:125-126` | `dyn_zad` :59 |
@@ -42,7 +43,7 @@ numpy replay of `div_hor_RK3_t` np_velocity plus the qco recurrence:
 | check | result |
 |---|---|
 | card velocities vs NEMO's recorded stage-2 `uu/vv(Kmm)` | 0 / 0 unequal |
-| replay calibration (wet cells off the pivot row, levels >= 2) | 2.2e-16 relative max |
+| replay calibration (wet cells off the pivot row, levels >= 2) | 2.17e-16 relative max (json key `..._levels_ge2`, added on resume; the original json held only the all-level figure 2.2e3, which includes the level-1 runoff cells) |
 | level 1 | differs at 4 618 cells; the card adds runoff there and the replay does not (cells not matched to the runoff field) |
 | NEMO's U-face `w` pair (inverted from its ZAD increment, round-39 method) vs card, pivot T row | median 4.3e-4 (reproduces round 39) |
 | same, interior control rows 140 / 145 | 1.1e-12 / 2.0e-12 |
@@ -158,6 +159,39 @@ today, so nothing changes there; not imported by this round.
 1. kt 2+ whole domain: owner measured in round 39 (after-step sea-level
    slot); lands on the user's answer to Decision 132; then re-walk kt 2.
 
+## Resume (after the independent Claude review: HOLD)
+
+1. **Test gap closed.**  The round's test pinned the stage faces and the wzv
+   builder, not the three wzv CALL SITES.  New
+   `test_g6_every_wzv_call_site_takes_the_fold_exchange` steps G6 once and
+   records, per call site, whether the exchange reached it (tracer and
+   momentum solves in the stage transport, the tendency's first call).
+   Planted `fold_exchange_ratios=False` at each site in turn: each failed
+   (`assert {False, True} == {True}` naming that site), restored,
+   `git status --porcelain` clean.  The old test's docstring overclaimed
+   ("fails if ... the wzv call drops the exchange"); corrected.
+2. **Finding (not changed).**  The step also reaches a FOURTH wzv call (the
+   step body's leapfrog-style call 2, `wzv_call2_evaluation`) without the
+   exchange.  Measured on G1b + G6 flag, random wet sea level, two steps,
+   with the exchange forced at that one site: every prognostic identical;
+   only the stored diagnostic `w` differs (35 cells, 6.3e-9).  Diagnostic
+   only, so left alone and excluded from the new test by a commented filter
+   (`resume/probe_call2_site.py` `4f86ca90a356b560`, json `b3b79c9ca5fce81f`).
+3. **Citation.**  NEMO's qco `w` statement is `sshwzv.f90:297-298` (the
+   assignment and its continuation) in both builds; the table is fixed.  The
+   frozen preregistration keeps its `298-300` (not edited after the fact).
+   The citation gate pins another receipt's legoESM lines, so nothing to
+   re-anchor.
+4. **Pre-existing red G2 test: the EXPECTATION was stale, not the code.**
+   `test_the_option_is_off_by_default_and_selected_by_g2_only` checks the
+   tail order of the config's fields with a fixed slice.  G6 round
+   `9f8316fab` ("carry G6 vector fold operands") appended
+   `nemo_hpg_sco_fold_geometry` and `rk3_vector_raw_vmask` last, both default
+   off and selected only by G6 (`nemo_testcase_recipe.py:3833-3834`), without
+   moving the slice.  No older field moved.  Slice widened by two, the two
+   names appended, and their off defaults asserted.
+5. Calibration figure: the receipt cites the BELOW-SURFACE figure, 2.17e-16.
+
 ## Tests and review
 
 - New `test_g6_pivot_v_ratio_is_nemos_fold_image` (G1b card with the G6 flag,
@@ -171,6 +205,8 @@ today, so nothing changes there; not imported by this round.
   `tests/ocean/fidelity/test_nemo_testcase_g6_orca2vec.py`: 27 passed (CPU fp64).
 - Receipt-citation gate + private-import ratchet: 23 passed on the clean
   tree (no citation re-anchored; the landing is line-neutral in cited code).
+- Resume: new call-site test + the round's test pass; G2 off-by-default
+  test green after the expectation update (counts in the resume commit).
 - codex review: paused (quota).  The operator runs an independent Claude
   review of this diff before landing.
 
