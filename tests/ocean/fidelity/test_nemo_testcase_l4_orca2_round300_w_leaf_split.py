@@ -56,9 +56,9 @@ def test_program_reuses_source_helpers_and_zeroes_the_bottom():
         "w_r1area": np.ones(shape[:2]), "w_area": np.ones(shape[:2]),
         "w_e3t0": np.ones(shape), "w_r3bb": np.zeros(shape[:2]),
         "w_r3mm": np.zeros(shape[:2]), "w_r3aa": np.zeros(shape[:2]),
-        "w_tmask": np.ones(shape),
+        "w_tmask": np.ones(shape), "w_dt": np.asarray(1.0),
     }
-    result = gate._program(inputs, 1.0)
+    result = gate._program(inputs)
     assert tuple(result) == gate.SOURCE_ORDER
     assert np.array_equal(result["w_recurrence"], np.zeros((2, 3, 3)))
     assert np.array_equal(result["area_product"], np.zeros((2, 3, 3)))

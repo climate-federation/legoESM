@@ -44,9 +44,9 @@ CUMULATIVE_ARMS = (
     ("trp_u", "trp_v", "w_r1area"),
     ("trp_u", "trp_v", "w_r1area", "w_e3t0", "w_r3mm", "w_tmask"),
     ("trp_u", "trp_v", "w_r1area", "w_e3t0", "w_r3mm", "w_tmask",
-     "w_r3bb", "w_r3aa"),
+     "w_r3bb", "w_r3aa", "w_dt"),
     ("trp_u", "trp_v", "w_r1area", "w_e3t0", "w_r3mm", "w_tmask",
-     "w_r3bb", "w_r3aa", "w_area"),
+     "w_r3bb", "w_r3aa", "w_dt", "w_area"),
 )
 PLANTS = (
     "none", "admission", "label-coverage", "source-order", "passivity",
@@ -113,7 +113,7 @@ def assemble_record(root: Path, baseline: Path) -> tuple[dict[str, np.ndarray], 
     return arrays, admission
 
 
-def _program(inputs: dict[str, object], dt: float) -> dict[str, np.ndarray]:
+def _program(inputs: dict[str, object]) -> dict[str, np.ndarray]:
     """Run the already-shared literal divergence and QCO recurrence helpers."""
     import jax
     import jax.numpy as jnp
@@ -124,10 +124,10 @@ def _program(inputs: dict[str, object], dt: float) -> dict[str, np.ndarray]:
     )
 
     names = ("trp_u", "trp_v", "w_r1area", "w_area", "w_e3t0",
-             "w_r3bb", "w_r3mm", "w_r3aa", "w_tmask")
+             "w_r3bb", "w_r3mm", "w_r3aa", "w_tmask", "w_dt")
     values = tuple(jnp.asarray(inputs[name], dtype=jnp.float64) for name in names)
 
-    def execute(pu, pv, r1area, area, e3t0, r3bb, r3mm, r3aa, tmask):
+    def execute(pu, pv, r1area, area, e3t0, r3bb, r3mm, r3aa, tmask, dt):
         west = jnp.roll(pu, 1, axis=1)
         south = jnp.concatenate([jnp.zeros_like(pv[:1]), pv[:-1]], axis=0)
         u_difference = sr(pu - west)
@@ -144,11 +144,11 @@ def _program(inputs: dict[str, object], dt: float) -> dict[str, np.ndarray]:
                 live_thickness[..., level], tmask[..., level]))
         flux_divergence = jnp.stack(levels, axis=-1)
         ratio_delta = sr(r3aa - r3bb)
-        r1_dt = sr(jnp.asarray(1.0, e3t0.dtype) / jnp.asarray(dt, e3t0.dtype))
+        r1_dt = sr(jnp.asarray(1.0, e3t0.dtype) / dt)
         stretch_rate = sr(sr(r1_dt * e3t0) * ratio_delta[..., None])
         ww = nemo_qco_wzv_recurrence(
             flux_divergence, e3t0, r3bb, r3aa, tmask,
-            jnp.asarray(dt, e3t0.dtype))
+            dt)
         area_product = sr(area[..., None] * ww)
         bottom_zero = ww[..., -1]
         return (bottom_zero, u_difference, v_difference, horizontal_sum,
@@ -206,17 +206,31 @@ def _candidate_context(deck_root: Path, frame_root: Path, label: str):
     ops = nemo_qco_resolved_mesh_operands(
         card.recipe.z_coord, card.recipe.grid, u_mask, v_mask,
         jnp.float64, card.recipe.z_coord.n_levels)
-    qco = trace.stage_qco
+    def ratio_from_eta(eta, e3t0, tmask):
+        h0 = jnp.zeros_like(eta)
+        for level in range(e3t0.shape[-1]):
+            h0 = jax.lax.optimization_barrier(
+                h0 + e3t0[..., level] * tmask[..., level])
+        reciprocal = jax.lax.optimization_barrier(
+            1.0 / jnp.where(h0 > 0.0, h0, 1.0))
+        return jax.lax.optimization_barrier(eta * reciprocal)
+
+    tmask = jnp.asarray(card.recipe.z_coord.is_active, jnp.float64)
+    e3t0 = jnp.asarray(ops.e3t_0, jnp.float64)
+    r3bb = ratio_from_eta(jnp.asarray(state.eta.data), e3t0, tmask)
+    r3aa = ratio_from_eta(
+        jnp.asarray(trace.barotropic_targets[4]), e3t0, tmask)
     candidate = {
         "trp_u": np.asarray(geometry[7][:, 1:], np.float64),
         "trp_v": np.asarray(geometry[8][1:], np.float64),
         "w_r1area": np.asarray(sr(1.0 / ops.area_t), np.float64),
         "w_area": np.asarray(ops.area_t, np.float64),
         "w_e3t0": np.asarray(ops.e3t_0, np.float64),
-        "w_r3bb": np.asarray(qco[0][0], np.float64),
-        "w_r3mm": np.asarray(qco[0][0], np.float64),
-        "w_r3aa": np.asarray(qco[1][0], np.float64),
-        "w_tmask": np.asarray(card.recipe.z_coord.is_active, np.float64),
+        "w_r3bb": np.asarray(r3bb, np.float64),
+        "w_r3mm": np.asarray(r3bb, np.float64),
+        "w_r3aa": np.asarray(r3aa, np.float64),
+        "w_tmask": np.asarray(tmask, np.float64),
+        "w_dt": np.asarray(card.dt_s, np.float64),
     }
     native = {
         "ww": np.asarray(geometry[2], np.float64),
@@ -239,14 +253,15 @@ def _measure_label(deck_root: Path, frame_root: Path,
                    oracle: dict[str, np.ndarray], label: str) -> dict[str, object]:
     card, passivity, candidate, native = _candidate_context(
         deck_root, frame_root, label)
-    candidate_program = _program(candidate, card.dt_s)
+    candidate_program = _program(candidate)
     oracle_inputs = {
         name: (oracle[name][..., :30]
                if name in {"trp_u", "trp_v", "w_e3t0", "w_tmask"}
                else oracle[name])
         for name in candidate
     }
-    oracle_program = _program(oracle_inputs, card.dt_s)
+    oracle_inputs["w_dt"] = np.asarray(card.dt_s / 3.0, np.float64)
+    oracle_program = _program(oracle_inputs)
     rows = {
         name: r298._regions(candidate_program[name], oracle_program[name],
                             _support(name, oracle))
@@ -268,7 +283,7 @@ def _measure_label(deck_root: Path, frame_root: Path,
     for names in CUMULATIVE_ARMS:
         inputs = dict(candidate)
         inputs.update({name: oracle_inputs[name] for name in names})
-        program = _program(inputs, card.dt_s)
+        program = _program(inputs)
         arms["+".join(names)] = r298._regions(
             program["area_product"], oracle["trp_w"],
             np.asarray(oracle["w_tmask"], bool))
