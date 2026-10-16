@@ -38,7 +38,8 @@ def digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def read_record(path: Path, plant: str = "none") -> dict[str, object]:
+def read_record(path: Path, plant: str = "none", *, expected_kt: int = 1,
+                expected_magic: bytes = MAGIC) -> dict[str, object]:
     raw = path.read_bytes()
     if plant == "truncation":
         raw = raw[:-1]
@@ -46,13 +47,13 @@ def read_record(path: Path, plant: str = "none") -> dict[str, object]:
     magic = raw[:16]
     if plant == "header":
         magic = b"X" + magic[1:]
-    require(magic == MAGIC, f"{path.name}: bad magic")
+    require(magic == expected_magic, f"{path.name}: bad magic")
     header = struct.unpack_from("=19i", raw, 16)
     (version, kt, stage, kbb, kmm, krhs, kaa, rank, nx, ny, nz,
      nimpp, njmpp, ntsi, ntsj, ntei, ntej, bits, nfields) = header
     if plant == "swapped-rank":
         rank = 1 - rank
-    require((version, kt, stage, bits) == (1, 1, 1, 64),
+    require((version, kt, stage, bits) == (1, expected_kt, 1, 64),
             f"{path.name}: version/step/stage/precision moved")
     require((nx, ny, nz) == (94, 152, 31), f"{path.name}: local shape moved")
     require((ntsi, ntsj, ntei, ntej) == (3, 3, 92, 150),
