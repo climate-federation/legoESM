@@ -216,7 +216,7 @@ def _candidate_context(deck_root: Path, frame_root: Path, label: str):
         "w_r3bb": np.asarray(qco[0][0], np.float64),
         "w_r3mm": np.asarray(qco[0][0], np.float64),
         "w_r3aa": np.asarray(qco[1][0], np.float64),
-        "w_tmask": np.asarray(ops.tmask3, np.float64),
+        "w_tmask": np.asarray(card.recipe.z_coord.is_active, np.float64),
     }
     native = {
         "ww": np.asarray(geometry[2], np.float64),
