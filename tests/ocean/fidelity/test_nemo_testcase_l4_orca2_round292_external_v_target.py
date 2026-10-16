@@ -92,3 +92,12 @@ def test_classifier_keeps_a_refuted_earlier_boundary():
     result = gate.classify(report)
     assert result["status"] == "HELD_R292_SLOW_V"
     assert result["prediction_ledger"]["R292-P3"].startswith("REFUTED")
+
+
+def test_classifier_keeps_a_refuted_rank_half_calibration():
+    report = _report()
+    report["target"]["candidate_vs_oracle"] = _score(
+        34, 0.012404972646641737, 90)
+    result = gate.classify(report)
+    assert result["prediction_ledger"]["R292-P2"] == (
+        "REFUTED_RANK_SLAB_IS_NOT_AN_EVEN_HALF")

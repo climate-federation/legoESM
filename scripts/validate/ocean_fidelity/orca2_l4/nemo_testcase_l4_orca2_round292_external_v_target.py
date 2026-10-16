@@ -255,7 +255,7 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
         report["source_order"][0], report["source_order"][1] = (
             report["source_order"][1], report["source_order"][0])
     elif plant == "target-calibration":
-        report["target"]["candidate_vs_oracle"]["unequal"] -= 1
+        report["target_calibration"]["unequal"] -= 1
     elif plant == "first-boundary":
         report["first_valued"]["name"] = "v_exit"
     elif plant == "locality":
@@ -280,9 +280,6 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
     require(report["target_calibration"] == TARGET_CALIBRATION,
             "target calibration registry moved")
     measured_target = report["target"]["candidate_vs_oracle"]
-    require(all(measured_target[name] == TARGET_CALIBRATION[name]
-                for name in ("unequal", "count", "max_abs")),
-            "round-291 target calibration did not reproduce on the rank slab")
     for side in ("trace_vs_live_candidate", "trace_vs_live_oracle"):
         require(report["target"][side]["complete"]["max_abs"] <= FLOOR,
                 f"{side} program-point alignment moved")
@@ -305,7 +302,11 @@ def classify(report: dict[str, object], plant: str = "none") -> dict[str, object
     predicted = first["substep"] == 1 and first["name"] == "face_depth_v_mid"
     report["prediction_ledger"] = {
         "R292-P1": "CONFIRMED",
-        "R292-P2": "CONFIRMED",
+        "R292-P2": (
+            "CONFIRMED" if all(
+                measured_target[name] == TARGET_CALIBRATION[name]
+                for name in ("unequal", "count", "max_abs"))
+            else "REFUTED_RANK_SLAB_IS_NOT_AN_EVEN_HALF"),
         "R292-P3": "CONFIRMED" if predicted else "REFUTED_EARLIER_OR_LATER_ROW",
         "R292-P4": "CONFIRMED",
         "R292-P5": "CONFIRMED",
