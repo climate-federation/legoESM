@@ -123,12 +123,15 @@ first-carrier selection, and the normal one-bit control.
   anchors; OMT-1's added required barotropic field; round-228's missing map
   key; 14 allow-dirty scope ratchets; and 13 worktree-stamp ratchets. The
   ninth is round-179's clean-tree preflight observing this uncommitted
-  receipt; it is rechecked after the receipt commit. Serial log SHA-256:
+  receipt. After the receipt commit it passes alone in 0.61 s (SHA-256
+  `c4b177e6347575263b804de1bcf544b95deefeb2a6ba61ece1e2daeaeca75624`).
+  Serial-red log SHA-256:
   `8675a31fec925efad3475ef4a26dd6933bc35a38c7fc4d81ae29503c774b8d9f`.
-- Independent review: pending the required read-only `codex exec` attempt;
-  if the in-sandbox client cannot start, the final receipt records
-  independent review unavailable in-sandbox and hands review to the
-  operator.
+- Independent review unavailable in-sandbox. The required read-only
+  `codex exec` attempt could not initialize its in-process app-server client
+  because the sandbox filesystem is read-only; review is handed to the
+  operator. Log SHA-256:
+  `eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5`.
 
 ## Configuration choices
 
