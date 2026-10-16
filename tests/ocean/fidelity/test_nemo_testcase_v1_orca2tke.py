@@ -192,6 +192,10 @@ def test_run_script_is_fail_closed_smoke_first_and_never_uses_step1_restart():
     # writer-free reference = G5's pinned binary, never rebuilt
     assert "ORCA2G5_OMIP_L4_R31REF_FIX1/BLD/bin/nemo.exe" in text
     assert text.count("makenemo -r") == 1
+    resume = text[text.index('if [[ "$mode" == --resume ]]'):text.index("else\n", text.index(
+        'if [[ "$mode" == --resume ]]'))]
+    assert "admit_smoke_in_place" in resume and "prepare_resume_target" in resume
+    assert 'run_one "$TARGET/BLD/bin/nemo.exe" "$SMOKE"' not in resume
 
 
 @needs_nemo
@@ -206,6 +210,7 @@ def test_hmi_patch_is_additive_write_only_and_refuses_a_moved_anchor(tmp_path):
     added = [line for tag, _, _, j1, j2 in ops if tag == "insert" for line in new[j1:j2]]
     assert len(new) - len(old) == len(added) == 21
     assert not any(re.match(r"\s*hm_i\s*[(=]", line) for line in added)   # never assigned
+    assert any("SIZE(hm_i,1), SIZE(hm_i,2)" in line for line in added)
     call = new.index(next(line for line in new if "CALL v1_dump_hm_i( kstp )" in line))
     assert "CALL l4_dump_ocean_surface_input( kstp, Nbb )" in new[call - 1]
     assert "CALL sbc        ( kstp, Nbb, Nbb )" in new[call - 2]
@@ -217,8 +222,10 @@ def test_hmi_patch_is_additive_write_only_and_refuses_a_moved_anchor(tmp_path):
     assert bad.returncode != 0 and "anchors" in bad.stderr
 
 
-def _hmi_frame(path: Path, kt: int, values: np.ndarray) -> None:
-    head = b"NEMO_V1_HMI_1".ljust(16) + struct.pack("=5i", 1, kt, 4, 3, 64)
+def _hmi_frame(
+    path: Path, kt: int, values: np.ndarray, shape: tuple[int, int] = (4, 3)
+) -> None:
+    head = b"NEMO_V1_HMI_1".ljust(16) + struct.pack("=5i", 1, kt, *shape, 64)
     path.write_bytes(head + values.astype("<f8").tobytes())
 
 
@@ -234,6 +241,23 @@ def test_hmi_frame_gate_passes_good_frames_and_refuses_plants(tmp_path):
         assert run().returncode != 0
     _hmi_frame(frame, 1, np.full(12, 0.5))       # wrong kt in the header
     assert run().returncode != 0
+
+
+def test_hmi_frame_gate_refuses_the_legacy_writer_shape_and_bad_legacy_plant(tmp_path):
+    values = np.full(180 * 148, 0.5)
+    for kt in (1, 2):
+        _hmi_frame(tmp_path / f"oracle_v1_hm_i_kt{kt:08d}.bin", kt, values,
+                   shape=(184, 152))
+    strict = subprocess.run([str(RUN), "--check-hmi-frames", str(tmp_path), "2"],
+                            capture_output=True, text=True)
+    assert strict.returncode != 0 and "26640" in strict.stderr
+    legacy = lambda: subprocess.run(  # noqa: E731
+        [str(RUN), "--check-legacy-hmi-frames", str(tmp_path), "2"],
+        capture_output=True, text=True)
+    assert legacy().returncode == 0
+    # Plant: even the narrow round-1 admission refuses a different halo header.
+    _hmi_frame(tmp_path / "oracle_v1_hm_i_kt00000002.bin", 2, values, shape=(184, 151))
+    assert legacy().returncode != 0
 
 
 def test_additive_guard_refuses_a_removed_or_changed_line(tmp_path):

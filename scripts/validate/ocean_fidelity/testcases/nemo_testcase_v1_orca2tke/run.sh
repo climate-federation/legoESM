@@ -10,7 +10,9 @@
 # TKE's own state (en, avt_k, avm_k, dissl) is in NEMO's restart (tke_rst,
 # zdftke.f90:922-926), so restarts at every writable step carry it.
 # Default is read-only preflight.  --run builds, smokes, finds NEMO's
-# boundary with the writer-free binary, then acquires three twins.
+# boundary with the writer-free binary, then acquires three twins.  --resume
+# admits round 1's completed smoke in place, rebuilds only the corrected record
+# writer, and starts with the boundary run; it never reruns the smoke.
 set -Eeuo pipefail
 
 fail() { printf 'REFUSE: V1 acquisition: %s\n' "$*" >&2; exit 66; }
@@ -28,6 +30,10 @@ readonly G5_REC_BIN_SHA=41cd9a63844218e7c37e75708813649603b80df0366102b8ce3e340f
 readonly G5_MYSRC_SET_SHA=28e265096d11d22c4f342b342b3065575115dcf38aaa0c60fe21330cd3f14607
 readonly G5_STPRK3_SHA=fa8a0f6c18d0c08cee3d74a1d379125614ccd805193de4e9f7ea0abb5812f3f3
 readonly G5_CPP_SHA=2e0d729f348b2377e52a6421afbb56e9dabbbc5ae57e39fbcfa1a3f5edbd8f67
+readonly LEGACY_V1_REC_BIN_SHA=7c22ffda4f3dd7984824d9b7eadecf06c9778ffa4ac19f7d1b27c61403e2caf9
+readonly LEGACY_V1_STPRK3_SHA=93c5a83e606a7ec5a59cae45aae4de710ee398b2c4b75a08290039e896eda4fd
+readonly LEGACY_HMI_KT1_SHA=4ee8613099f9998e6ee0124e3c3b9ef903d7b79213c66c8b399c324a80de90d1
+readonly LEGACY_HMI_KT2_SHA=476276778fd9ab82a6b58c63b1e634be92f3eab2d4dc23a6e683660e5c534d87
 readonly V1_DECK_SHA=5b5dd21ee452d98797a822320e2cdfcf8fa21b35c4c94b5d2a9ff7fcc814ba2c
 readonly ICE_DECK_SHA=9d5ae3fae3878a74c4fe88f0fd8db40129fe97ca6ffa6d699121d1cd44713dd8
 readonly ICE_REF=$NEMO_ROOT/cfgs/SHARED/namelist_ice_ref
@@ -75,7 +81,7 @@ patch_stprk3() { # in, out
       print "         &  FORM='\''UNFORMATTED'\'', STATUS='\''NEW'\'', ACTION='\''WRITE'\'', IOSTAT=ios )"
       print "      IF( ios /= 0 )   CALL ctl_stop( '\''cannot open V1 hm_i file'\'' )"
       print "      magic = '\''NEMO_V1_HMI_1'\''"
-      print "      WRITE(iunit) magic, 1, kstp, jpi, jpj, STORAGE_SIZE(1._wp)"
+      print "      WRITE(iunit) magic, 1, kstp, SIZE(hm_i,1), SIZE(hm_i,2), STORAGE_SIZE(1._wp)"
       print "      WRITE(iunit) l4_canon_2d(hm_i,'\''T'\'')"
       print "      CLOSE(iunit)"
       print "   END SUBROUTINE v1_dump_hm_i"
@@ -93,18 +99,28 @@ check_additive() { # original, patched: no line of the original removed or chang
   [[ "$removed" == 0 ]] || fail "patch removed or changed $removed line(s) of $1"
 }
 
-check_hmi_frames() { # directory, completed steps
-  python3 -I - "$1" "$2" <<'PY'
+check_hmi_frames() { # directory, completed steps, strict|legacy-v1-r1
+  python3 -I - "$1" "$2" "${3:-strict}" <<'PY'
 import pathlib, struct, sys
 import numpy as np
-root, steps = pathlib.Path(sys.argv[1]), int(sys.argv[2])
+root, steps, mode = pathlib.Path(sys.argv[1]), int(sys.argv[2]), sys.argv[3]
+if mode not in {"strict", "legacy-v1-r1"}:
+    raise SystemExit(f"bad V1 hm_i check mode: {mode}")
 for kt in range(1, steps + 1):
     path = root / f"oracle_v1_hm_i_kt{kt:08d}.bin"
     with path.open("rb") as stream:
         magic = stream.read(16).decode("ascii").rstrip()
         version, k, jpi, jpj, bits = struct.unpack("=5i", stream.read(20))
         values = np.fromfile(stream, dtype=np.float64)
-    if (magic, version, k, bits) != ("NEMO_V1_HMI_1", 1, kt, 64) or values.size != jpi * jpj:
+    header = (magic, version, k, bits)
+    shape_ok = values.size == jpi * jpj
+    if mode == "legacy-v1-r1":
+        # The refused round-1 writer put NEMO's haloed local 184x152 shape in
+        # the header but l4_canon_2d(hm_i) wrote hm_i's full-grid 180x148 shape.
+        # This exception is exact and is used only to admit those two pinned
+        # smoke frames; every newly written frame must be self-describing.
+        shape_ok = (jpi, jpj, values.size) == (184, 152, 180 * 148)
+    if header != ("NEMO_V1_HMI_1", 1, kt, 64) or not shape_ok:
         raise SystemExit(f"bad V1 hm_i frame: {path.name} {magic!r} {version} {k} {bits} {values.size}")
     if not np.isfinite(values).all() or values.min() < 0.0:
         raise SystemExit(f"bad V1 hm_i values: {path.name}")
@@ -116,6 +132,11 @@ if [[ "$mode" == --check-hmi-frames ]]; then
   (($# == 3)) || exit 64
   check_hmi_frames "$2" "$3"; printf 'V1_HMI_FRAMES_OK %s steps=1..%s\n' "$2" "$3"; exit 0
 fi
+if [[ "$mode" == --check-legacy-hmi-frames ]]; then
+  (($# == 3)) || exit 64
+  check_hmi_frames "$2" "$3" legacy-v1-r1
+  printf 'V1_LEGACY_HMI_FRAMES_OK %s steps=1..%s\n' "$2" "$3"; exit 0
+fi
 if [[ "$mode" == --check-additive ]]; then
   (($# == 3)) || exit 64
   check_additive "$2" "$3"; printf 'V1_ADDITIVE_OK %s\n' "$3"; exit 0
@@ -124,7 +145,7 @@ if [[ "$mode" == --patch-stprk3 ]]; then
   (($# == 3)) || exit 64
   patch_stprk3 "$2" "$3"; printf 'V1_STPRK3_PATCH_OK %s\n' "$3"; exit 0
 fi
-case "$mode" in --preflight-only|--run) ;; *) exit 64 ;; esac
+case "$mode" in --preflight-only|--run|--resume) ;; *) exit 64 ;; esac
 
 export PATH=/home/dbalwada/legoESM/.venv/bin:/home/dbalwada/miniconda3/envs/nemo-build/bin:${PATH}
 export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
@@ -187,6 +208,10 @@ build_target() {
   touch "$TARGET/MY_SRC/"*.F90
   (cd "$NEMO_ROOT" && ./makenemo -n "$TARGET_NAME" -m conda-scalarmath -y --clean)
   (cd "$NEMO_ROOT" && ./makenemo -n "$TARGET_NAME" -m conda-scalarmath del_key key_xios)
+  validate_target
+}
+
+validate_target() {
   [[ -x "$TARGET/BLD/bin/nemo.exe" ]] || fail "$TARGET_NAME produced no executable"
   grep -Fq 'CALL v1_dump_hm_i( kstp )' "$TARGET/BLD/ppsrc/nemo/stprk3.f90" \
     && grep -Fq 'CALL l4_dump_ocean_surface_input( kstp, Nbb )' "$TARGET/BLD/ppsrc/nemo/stprk3.f90" \
@@ -195,6 +220,48 @@ build_target() {
     || fail 'V1 record binary lacks the certified bump'
   cmp -s "$TARGET/BLD/ppsrc/nemo/zdftke.f90" "$NEMO_ROOT/cfgs/ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90" \
     || fail 'V1 record binary compiled a different zdftke'
+  grep -Fq 'SIZE(hm_i,1), SIZE(hm_i,2), STORAGE_SIZE(1._wp)' \
+    "$TARGET/BLD/ppsrc/nemo/stprk3.f90" || fail 'compiled V1 writer has stale haloed dimensions'
+}
+
+prepare_resume_target() {
+  local expected; expected=$(mktemp)
+  patch_stprk3 "$G5_SRC/MY_SRC/stprk3.F90" "$expected"
+  if cmp -s "$expected" "$TARGET/MY_SRC/stprk3.F90" \
+     && grep -Fq 'SIZE(hm_i,1), SIZE(hm_i,2), STORAGE_SIZE(1._wp)' \
+          "$TARGET/BLD/ppsrc/nemo/stprk3.f90" 2>/dev/null; then
+    rm -f "$expected"
+    validate_target
+    printf 'V1_RECORD_BUILD_ADMITTED corrected writer already built in %s\n' "$TARGET"
+    return
+  fi
+  [[ "$(sha "$TARGET/BLD/bin/nemo.exe")" == "$LEGACY_V1_REC_BIN_SHA" \
+     && "$(sha "$TARGET/MY_SRC/stprk3.F90")" == "$LEGACY_V1_STPRK3_SHA" ]] \
+    || fail 'existing V1 target is neither the pinned refused build nor the corrected build'
+  cp -f "$expected" "$TARGET/MY_SRC/stprk3.F90"
+  rm -f "$expected"
+  touch "$TARGET/MY_SRC/"*.F90
+  (cd "$NEMO_ROOT" && ./makenemo -n "$TARGET_NAME" -m conda-scalarmath -y --clean)
+  (cd "$NEMO_ROOT" && ./makenemo -n "$TARGET_NAME" -m conda-scalarmath del_key key_xios)
+  validate_target
+  printf 'V1_RECORD_BUILD_REPAIRED %s (smoke not rerun)\n' "$TARGET"
+}
+
+resume_target_state() {
+  local expected state=unknown; expected=$(mktemp)
+  patch_stprk3 "$G5_SRC/MY_SRC/stprk3.F90" "$expected"
+  if cmp -s "$expected" "$TARGET/MY_SRC/stprk3.F90" \
+     && grep -Fq 'SIZE(hm_i,1), SIZE(hm_i,2), STORAGE_SIZE(1._wp)' \
+          "$TARGET/BLD/ppsrc/nemo/stprk3.f90" 2>/dev/null; then
+    state=corrected
+  elif [[ "$(sha "$TARGET/BLD/bin/nemo.exe")" == "$LEGACY_V1_REC_BIN_SHA" \
+          && "$(sha "$TARGET/MY_SRC/stprk3.F90")" == "$LEGACY_V1_STPRK3_SHA" ]]; then
+    state=pinned-legacy
+  fi
+  rm -f "$expected"
+  [[ "$state" != unknown ]] \
+    || fail 'existing V1 target is neither the pinned refused build nor the corrected build'
+  printf '%s' "$state"
 }
 
 stage_run() { # binary, directory, itend, stocklist
@@ -214,7 +281,16 @@ run_one() { # binary, directory, itend, stocklist, expected=done|boundary
   (cd "$dir"; mpirun -np 1 --oversubscribe ./nemo >run.user.log 2>&1) || rc=$?
   printf '%s\n' "$rc" >"$dir/run.exit"
   [[ -f "$dir/ocean.output" && -f "$dir/time.step" ]] || fail "$dir produced no NEMO log"
-  # the run resolved V1's closure, not G5's, and not the IWM-forced floors
+  check_v1_log "$dir"
+  if [[ "$5" == done ]]; then
+    [[ "$rc" -eq 0 && "$(tr -d '[:space:]' <"$dir/time.step")" == "$3" ]] \
+      || fail "$dir did not complete $3 steps"
+  fi
+}
+
+check_v1_log() { # completed/stopped V1 run directory
+  local dir=$1
+  # The run resolved V1's closure, not G5's, and not the IWM-forced floors.
   grep -Eq 'nn_ice += +2$' "$dir/ocean.output" || fail "$dir did not resolve nn_ice=2"
   grep -Eq 'ln_zdftke = +T$' "$dir/ocean.output" && grep -Eq 'ln_zdfcst = +F$' "$dir/ocean.output" \
     && grep -Eq 'ln_zdfiwm = +F$' "$dir/ocean.output" || fail "$dir did not resolve V1's switches"
@@ -223,10 +299,31 @@ run_one() { # binary, directory, itend, stocklist, expected=done|boundary
   grep -Fq 'minimum mixing length with your parameters rmxl_min' "$dir/ocean.output" \
     && ! grep -Fq 'Internal wave-driven mixing case' "$dir/ocean.output" \
     || fail "$dir took the IWM-forced TKE floors"
-  if [[ "$5" == done ]]; then
-    [[ "$rc" -eq 0 && "$(tr -d '[:space:]' <"$dir/time.step")" == "$3" ]] \
-      || fail "$dir did not complete $3 steps"
-  fi
+}
+
+admit_smoke_in_place() {
+  local f probe
+  [[ -d "$SMOKE" && "$(<"$SMOKE/run.exit")" == 0 \
+     && "$(tr -d '[:space:]' <"$SMOKE/time.step")" == 2 \
+     && -f "$SMOKE/ORCA2G1_00000002_restart.nc" \
+     && ! -e "$SMOKE/ORCA2G1_00000001_restart.nc" ]] \
+    || fail "$SMOKE is not the completed two-step smoke"
+  [[ "$(sha "$SMOKE/nemo")" == "$LEGACY_V1_REC_BIN_SHA" ]] \
+    || fail 'smoke did not use the pinned round-1 V1 record binary'
+  for f in "${INPUT_FILES[@]}"; do
+    cmp -s "$INPUT_ROOT/$f" "$SMOKE/$f" || fail "smoke input changed: $f"
+  done
+  cmp -s "$ICE_REF" "$SMOKE/namelist_ice_ref" \
+    && cmp -s "$ICE_DECK" "$SMOKE/namelist_ice_cfg" || fail 'smoke ice deck changed'
+  probe=$(mktemp); render_deck "$probe" 2 "$(pad10 2)"
+  cmp -s "$probe" "$SMOKE/namelist_cfg" || { rm -f "$probe"; fail 'smoke V1 deck changed'; }
+  rm -f "$probe"
+  check_v1_log "$SMOKE"
+  check_hmi_frames "$SMOKE" 2 legacy-v1-r1
+  [[ "$(sha "$SMOKE/oracle_v1_hm_i_kt00000001.bin")" == "$LEGACY_HMI_KT1_SHA" \
+     && "$(sha "$SMOKE/oracle_v1_hm_i_kt00000002.bin")" == "$LEGACY_HMI_KT2_SHA" ]] \
+    || fail 'legacy smoke hm_i frames differ from the pinned refused record'
+  printf 'V1_SMOKE_ADMITTED_IN_PLACE %s (legacy header 184x152, payload 180x148; smoke not rerun)\n' "$SMOKE"
 }
 
 completed_steps() {
@@ -270,19 +367,37 @@ admit() {
 
 preflight
 if [[ "$mode" == --preflight-only ]]; then
+  if [[ -d "$SMOKE" ]]; then
+    admit_smoke_in_place
+    for dir in "$REF" "$TWIN_A" "$TWIN_B" "$TWIN_C"; do
+      [[ ! -e "$dir" ]] || fail "resume target already exists: $dir"
+    done
+    printf 'V1_RESUME_PREFLIGHT_OK target=%s next=boundary_then_twins command=%s --resume\n' \
+      "$(resume_target_state)" "$here/run.sh"
+    exit 0
+  fi
   printf 'WOULD_BUILD record=%s; reuse writer-free %s; then smoke, boundary, twins A/B/C\n' \
     "$TARGET" "$REF_BIN"
   exit 0
 fi
-for dir in "$SMOKE" "$REF" "$TWIN_A" "$TWIN_B" "$TWIN_C"; do
-  [[ ! -e "$dir" ]] || fail "live run directory exists: $dir"
-done
-mkdir -p "$EVIDENCE"
-build_target
-
-# Smoke is the first NEMO execution; only after it passes is the boundary run allowed.
-run_one "$TARGET/BLD/bin/nemo.exe" "$SMOKE" 2 "$(pad10 2)" done
-check_hmi_frames "$SMOKE" 2
+if [[ "$mode" == --resume ]]; then
+  admit_smoke_in_place
+  for dir in "$REF" "$TWIN_A" "$TWIN_B" "$TWIN_C"; do
+    [[ ! -e "$dir" ]] || fail "resume target already exists: $dir"
+  done
+  mkdir -p "$EVIDENCE/manifest"
+  printf '%s\n' "$COMMIT" >"$EVIDENCE/manifest/legoesm_commit_resume"
+  prepare_resume_target
+else
+  for dir in "$SMOKE" "$REF" "$TWIN_A" "$TWIN_B" "$TWIN_C"; do
+    [[ ! -e "$dir" ]] || fail "live run directory exists: $dir"
+  done
+  mkdir -p "$EVIDENCE"
+  build_target
+  # Smoke is the first NEMO execution; only after it passes is the boundary run allowed.
+  run_one "$TARGET/BLD/bin/nemo.exe" "$SMOKE" 2 "$(pad10 2)" done
+  check_hmi_frames "$SMOKE" 2
+fi
 run_one "$REF_BIN" "$REF" 100 '2,4,6,8,10,12,14,16,18,20' boundary
 completed=$(completed_steps "$REF")
 steps=$((completed < 10 ? completed : 10)); steps=$((steps - steps % FSBC))
