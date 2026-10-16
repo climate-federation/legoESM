@@ -7,7 +7,7 @@ cells, INDEPENDENT and GIVEN-NEMO-ENTRY.
 Preregistration `PREREG_nemo_testcases_gridladder_g5_round4.md` (`1d7dd78bd`,
 before any measurement). Record `gridladder_rounds/round31/oracle_g5_r31`
 (admitted round 2). Landing commit `6c1cebfd7`. Evidence
-`gridladder_rounds/round34/` (`manifest.sha256` 1c2a6e0488f68d00):
+`gridladder_rounds/round34/` (`manifest.sha256` 3d7cd95576a68c72):
 `g5_stages_kt1.json` 871c934003a717de, `g5_independent_kt1_6.json`
 dfaf60a62b1e64cb, `g5_carried_kt7.json` 193179af8c81b10b,
 `g5_stages_kt5_given.json` 703fa3783883ede3, `g5_stages_kt9_given.json`
@@ -16,10 +16,16 @@ dfaf60a62b1e64cb, `g5_carried_kt7.json` 193179af8c81b10b,
 00d092d334eb39f7, `g5_stages_kt9_both.json` 6d42d38f229b714e,
 `g5_independent_kt1_10.json` 56fc2b4123c7ada3, `g5_given_kt1_10.json`
 f32083764655eae8, `g5_independent_plant_score.json` e0e00d57d8dc3672,
-`consumer_plants.log` 31946f0138f284e9. The two kt 1..10 ladders and the
-plant are stamped clean at `6c1cebfd7` (packages tree `b357597fd558`); the
-stage and carried arms ran on the working tree (`-dirty` stamps) and are
-identified by their arm and option state below.
+`consumer_plants.log` 31946f0138f284e9, `codex_review.log` cf95013ea31f3caf.
+The two kt 1..10 ladders and the plant are stamped clean at `6c1cebfd7`
+(packages tree `b357597fd558`). The option table in section 3 is the
+`stamped/` set, clean at `62060a46c`, each file recording both option flags:
+`kt1_both` a77cf3d4e401fbb5, `kt1_no_s2` fa7ab17c1ccb2fcc, `kt5_both`
+9ae787bba2aed6e1, `kt5_no_s2` a7a9b2b64aa12dba, `kt5_no_salt`
+58783d0922b21433, `kt9_both` bc40070588e77fce, `kt9_no_salt`
+ad6a7d45dbd85768. The first-leave, carried and both-off stage arms ran on a
+working tree whose `packages/` equalled `e965b1b7f` (`-dirty` stamps; only the
+instrument script differed).
 
 ## 1. Where the INDEPENDENT chain first leaves NEMO (P1 CONFIRMED)
 
@@ -86,13 +92,14 @@ the stage's runoff divisor is the same stored thickness
 
 | arm (stage-local, all levels) | kt 1 stage 2 | kt 5 stage 2 | kt 5 stage 3 | kt 9 stage 3 |
 |---|---|---|---|---|
-| both options off (control) | T 1, S 2 | T 1, S 1 | S 1 | S 3 |
-| + stage-2 stored thickness | exact | exact | S 1 | S 3 |
-| + stage-3 `sfx` statement (landed) | exact | exact | exact | exact |
+| both options off (round-3 card, dirty arm) | T 1, S 2 | T 1, S 1 | S 1 | S 3 |
+| stage-2 option off (stamped) | T 1, S 2 | T 1, S 1 | exact | — |
+| stage-3 salt option off (stamped) | — | exact | S 1 | S 3 |
+| both on, landed (stamped) | exact | exact | exact | exact |
 
-With both options on, all 21 stage rows (7 fields × 3 stages) are bit-exact at
-kt 1, 5 and 9. Turning either option off brings its cells back (control rows
-above).
+With both options on, every stage row (seven fields, stages 1-3, plus the
+3-D RHS frame) is bit-exact at kt 1, 5 and 9. Each option off brings back
+exactly its own cells.
 
 Selection: both options default False and only G5 selects them
 (`build_orca2g1_flat_card`'s `ORCA2G5-ice` block; identity checks
@@ -171,7 +178,30 @@ test red (4/4). Tree restored, checked with `git status --porcelain`.
 - Citation gate: 17 passed. I reanchored 107 citations mechanically with the
   hunk-shift script, saved as evidence `reanchor.py`. One span grew from 174
   to 199 lines; its two pinned endpoint statements are unchanged.
-- Single review (codex): see below.
+- Single review (codex), on `e965b1b7f..d8d92a306`: **"DO NOT SHIP"**. It
+  found no sign, units, staggering or rounding defect: raw `sfx` is positive,
+  at T points and in g/m²/s, and `_qt_13` matches NEMO's stored
+  `1 + r2_3*r3t(Kbb) + r1_3*r3ta`. Non-G5 paths are unchanged. Its three
+  CONFIRMED findings are all acted on in `62060a46c`:
+  1. The stage-2 option ignored a stage-2 `stage_entry_override` (a private
+     instrument hook). It now raises in that combination.
+  2. Neither new statement had a positive non-vacuity test. A fast synthetic
+     host was not reachable: VORTEX has no NEMO solar/physics block, and the
+     attempts stopped on three successive config refusals. I added a
+     record-backed test instead,
+     `test_g5_stage2_e3t_and_stage3_sfx_statements_are_each_required`. It is
+     slow-marked and passed in 230 s. It asserts kt 5 is exact with both
+     options on, stage-2 T 1 / S 1 with the stage-2 option off, and stage-3
+     S 1 with the salt option off. **No FAST test covers these two
+     statements; registered.**
+  3. Stage artifacts did not stamp the option state. The instrument now
+     stamps both flags and has `--without-stage2-stored-thickness` and
+     `--without-stage3-salt` before-arms. I re-ran the section-3 table clean
+     as `stamped/`.
+
+  After the fixes: fast G4 + G5 + G2-ladder + consumer files gave 57 passed,
+  11 deselected. The citation gate gave 17 passed after a second mechanical
+  reanchor for the guard's 6 lines.
 
 ASKED: first-leave measurement; carried-state comparison; compiled-order walk;
 the cited G5-selected landings; both labels kt 1..10; Decision-122 lines; the
@@ -180,7 +210,8 @@ UNMEASURED labels; fast per-consumer tests; the citation gate; one review.
 UNASKED, offered for revert:
 - the new optional forcing field `salt_flux_sfx`. It is needed to transcribe
   `sfx` bitwise and is inert unless the G5 option is on.
-- the new `carried` arm in the ladder instrument. It has no direct test; it is
-  exercised only by this round's record run.
+- the new `carried` arm and the two before-arm flags in the ladder
+  instrument. The `carried` arm has no direct test; it is exercised only by
+  this round's record run.
 
 UNVERIFIED: the full ORCA2 card's response (pointer only).
