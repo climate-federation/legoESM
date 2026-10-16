@@ -78,8 +78,28 @@ No `mpirun` was attempted in the sandbox.
 - The generic inherited parser now takes explicit expected step and magic;
   defaults remain the round-175 kt=1 schema. A behavioral test proves kt=7 is
   accepted only when both explicit values are supplied.
-- The admission/control tests pass. Record-dependent plants are deliberately
-  not claimed before the operator produces the record.
+- The focused round-295/296/297 plus citation-gate battery passes **25/25**
+  in 8.60 s (SHA-256
+  `5b385babe7d049495b7b223824c9d220201ee28320e9a63c24cc0f666419d558`).
+  Record-dependent plants are deliberately not claimed before the operator
+  produces the record.
+- The required `tests/ocean/fidelity -n 12` battery reached 99% with **3,589
+  passes**, seven deterministic branch-tip reds, and one xdist worker abort
+  while compiling G1 case `off1-1` (SHA-256
+  `ec4e98085759405819c2a10270ec8658751e891ed43390f4081afb934ac47701`).
+  The aborted `off1-1` case passes alone in 142.03 s; the not-run `off2-1`
+  case passes alone in 143.77 s (log SHA-256
+  `943b7abd86fd719309fb036f3320f193442560a89d89644e82e931d527c3dab1`).
+  This is the campaign's documented parallel JAX resource-failure class, not
+  a round-297 failure.
+- The seven named reds reproduce serially (log SHA-256
+  `a20f677d83fe094d8d22fa6faac5d8372ecd2777e971bdb8ea83d8aacbfd4a3d`):
+  the stale GYRE round-33 mutation anchor; the GYRE round-129 year-harness
+  stamp; OMT-1's added required barotropic card field; round-228's already
+  missing citation-map key; the 14 allow-dirty scope ratchets; the 13
+  worktree-stamp ratchets; and the SI3 `MY_SRC` provenance mismatch. None is
+  in the round-297 change set. In particular, the round-228 citation key is
+  absent at base `6ca3a8892`, while this round only adds new map entries.
 - Independent review: operator. A nested Codex review is unavailable inside
   this sandbox.
 
