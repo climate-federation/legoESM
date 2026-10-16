@@ -137,9 +137,11 @@ against NEMO's kt-2 stage records:
   resolves NEMO's first vector-form `wzv` call (`stp2d.f90:149-156`: the
   after-height ratio `r3t(Kaa)` is set from the `ssh(Kaa)` slot at :152 and
   read by `wzv` at :156) with `nemo_first_wzv_after_ssh='rk3_extrapolated'`
-  (a fresh extrapolation).  The ORCA2 card resolves the same statement as
-  `'rk3_extrapolated_carried'` (the slot the previous step left, carried as
-  NEMO's `ssha`).  The two agree at kt 1 and differ from kt 2.  Changing
+  (a fresh extrapolation).  CORRECTED after the independent review: the full
+  ORCA2 card ALSO resolves it as `'rk3_extrapolated'`, exactly like G6; only the
+  GYRE and VORTEX vector setups use `'rk3_extrapolated_carried'`. NEMO writes
+  `ssh(Naa) = 2*ssh(Nbb) - ssh(Naa)` at the end of each step (stprk3.f90:241)
+  and reads that slot here in the next step.  The two agree at kt 1 and differ from kt 2.  Changing
   ONLY that field on the G6 card (scratch, `5f471f290` + in-memory card
   edit):
 
@@ -152,7 +154,7 @@ against NEMO's kt-2 stage records:
   | 3 | u | 1.311e-02/15853 | 1.994e-06/7472 |
 
   kt 1 is unchanged by it (identical rows).  It adds a carried field to
-  G6's state (the after-SSH slot, restart-loaded on the ORCA2 card), so it
+  G6's state (the after-SSH slot; neither G6 nor the ORCA2 card carries it today), so it
   is a carried-state change and is NOT landed: DECISION_NEEDED.
 
 ## 6. OPEN (ranked by magnitude)

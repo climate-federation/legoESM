@@ -5658,7 +5658,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # ``u``/``v`` (FULL velocity) are passed as ``u_full``/``v_full`` for the
     # Veros-faithful ``centered_full`` scheme; the default
     # ``upwind_perturbation`` scheme ignores them and advects ``u_prime``.
-    # dyn_zad updates the pivot V row too (dynzad.f90:118-119); the compact
+    # dyn_zad updates the pivot V row too (dynzad.f90:125-126); the compact
     # mask is dry there, NEMO's raw vmask is not.
     du_dt, dv_dt, diag_vertadv_u, diag_vertadv_v = _bc_vertical_momentum_advection(
         du_dt, dv_dt, u_prime, v_prime, zad_w, zad_h_u, zad_h_v,

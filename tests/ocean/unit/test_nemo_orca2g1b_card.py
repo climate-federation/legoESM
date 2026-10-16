@@ -320,7 +320,7 @@ def test_g6_stage_state_hands_vor_een_the_folded_pivot_v(roots, monkeypatch):
 
 
 def test_g6_dyn_zad_v_face_mask_keeps_the_pivot_row(roots, monkeypatch):
-    """dynzad.f90:118-119: dyn_zad updates the pivot V row, whose raw vmask is
+    """dynzad.f90:125-126: dyn_zad updates the pivot V row, whose raw vmask is
     wet.  Under G6's raw V mask the vector-form vertical momentum advection
     gets that mask for its V faces; the compact mask is dry there and zeroed
     the increment.  Fails if the ZAD call goes back to the compact mask."""
