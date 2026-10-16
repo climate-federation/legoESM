@@ -1,7 +1,7 @@
 {
   "schema": "legoesm-swg-online-training-v3",
   "experiment": "swgonl_exp1_template_ring_weighted",
-  "description": "Experiment one, candidate template+weighted: fine-filtered start and target, unfiltered model vorticity in Eq. 7, every interior F point weighted as Eq. 7 is written (first ring next to the walls included). One of three candidates; the owner has not chosen the objective or the wall-ring treatment.",
+  "description": "Experiment one, candidate template+weighted: fine-filtered start and target, unfiltered model vorticity in Eq. 7, every interior F point weighted as Eq. 7 is written (first ring next to the walls included). One of three candidates; the owner has not chosen the objective or the wall-ring treatment. Free runs on CUDA/native (user decision 2026-10-14; the GPU controls passed the v2 device check).",
   "deck": "dg50",
   "objective": "template",
   "wall_ring": "weighted",
@@ -11,7 +11,11 @@
     "kernel_size": 3,
     "scales": "maddison_eq6_shallow_water_grid_analogue"
   },
-  "seeds": [20261013, 20261014, 20261015],
+  "seeds": [
+    20261013,
+    20261014,
+    20261015
+  ],
   "dataset": {
     "records": [
       {
@@ -24,14 +28,28 @@
       }
     ],
     "splits_days": {
-      "train": [731, 4235],
-      "validation": [4265, 5111],
-      "test": [5141, 5506]
+      "train": [
+        731,
+        4235
+      ],
+      "validation": [
+        4265,
+        5111
+      ],
+      "test": [
+        5141,
+        5506
+      ]
     },
     "batch_size": 10
   },
   "curriculum": {
-    "window_days": [1, 2, 4, 8],
+    "window_days": [
+      1,
+      2,
+      4,
+      8
+    ],
     "epochs_per_window": 5,
     "network_between_windows": "carried",
     "optimiser_between_windows": "reinitialised"
@@ -51,7 +69,7 @@
     "days": 7300,
     "start": "rest",
     "sampling": "end_of_day_snapshot_and_daily_mean",
-    "device": "cpu",
-    "math_library": "libm"
+    "device": "cuda",
+    "math_library": "native"
   }
 }
