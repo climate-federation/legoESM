@@ -263,6 +263,7 @@ def _measure_label(deck_root: Path, frame_root: Path,
                if name in {"trp_u", "trp_v", "w_e3t0", "w_tmask"}
                else oracle[name])
         for name in candidate
+        if name != "w_dt"
     }
     oracle_inputs["w_dt"] = np.asarray(card.dt_s / 3.0, np.float64)
     oracle_program = _program(oracle_inputs)
