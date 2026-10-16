@@ -12,7 +12,7 @@ cited statements (`nemo_testcases_gridladder_g1b_round2_receipt.md`, section
 7).  This round imports, measures, and if eligible selects exactly these two:
 
 1. **A — np_CRV F-cell area.**  ORCA2 executes the combined Coriolis plus
-   relative-vorticity branch (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynvor.f90:762-766`).
+   relative-vorticity branch (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynvor.f90:648-652`).
    Its relative circulation is multiplied by `r1_e1e2f`, constructed from
    `e1f*e2f` (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/domhgr.f90:150-156`).  The current
    `een_total` path instead passes the generic grid `area_q` to the curl.
@@ -78,3 +78,11 @@ change is authorised.  Decision 126 remains pending and untouched.
 Package edits require GYRE's certified ten-step and year gates, DINO, tanks,
 generic card census, citation gate with a firing plant, focused tests, the
 single `tests/ocean/fidelity -n 12` battery, and independent operator review.
+
+## Correction appended 2026-10-16
+
+The frozen line 15 citation above is retained exactly as preregistered, but it
+is a dead-arm citation and is retracted.  The shipped ORCA2 deck executes EEN;
+its live `SUBROUTINE vor_een` np_CRV branch is
+`ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynvor.f90:762-766`.  Round 284 measured and
+landed statement A against that executing branch.

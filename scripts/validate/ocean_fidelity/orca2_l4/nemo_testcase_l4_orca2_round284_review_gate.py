@@ -26,6 +26,8 @@ from nemo_testcase_l2_gyre_phase3_gate import read_stage2_terms  # noqa: E402
 LABELS = ("independent", "given_nemo_entry")
 STAGE_ARMS = ("area_off", "area_on", "top_f_halo")
 FLOOR = np.float64(2.0e-10)
+PLANT_FIRED_EXIT = 2
+PLANT_STAYED_GREEN_EXIT = 3
 
 
 class GateError(RuntimeError):
@@ -158,13 +160,15 @@ def main() -> int:
             result = classify_ladder(
                 *args.classify_ladder,
                 plant="exact-loss" if args.plant == "exact-loss" else "none")
-        require(args.plant == "none", f"{args.plant} plant stayed green")
+        if args.plant != "none":
+            print(f"STATUS PLANT-STAYED-GREEN: {args.plant} plant stayed green")
+            return PLANT_STAYED_GREEN_EXIT
     except (GateError, r266.GateError, r276.GateError,
             r276.decision96.GateError, OSError, KeyError,
             TypeError, ValueError, IndexError) as error:
         marker = "PLANT-FIRED" if args.plant != "none" else "REFUSE"
         print(f"STATUS {marker}: {error}")
-        return 2
+        return PLANT_FIRED_EXIT
     payload = json.dumps(result, indent=2, sort_keys=True) + "\n"
     if args.output:
         args.output.write_text(payload, encoding="utf-8")

@@ -61,3 +61,10 @@ Evidence goes under
 `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/orca2_rounds/round284/`.
 The receipt is
 `docs/ocean/fidelity/testcases/nemo_testcases_l4_orca2_round284_round282_review_receipt.md`.
+
+## Correction appended 2026-10-16
+
+The frozen line 19 text above says `SUBROUTINE vor_een` starts at line 694.
+That prose locator is stale: in the compiled ORCA2 source used by the current
+citation map, `SUBROUTINE vor_een` starts at line 692.  The cited executable
+statement span `dynvor.f90:762-766` is unchanged.

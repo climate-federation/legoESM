@@ -6361,7 +6361,7 @@ def _nemo_f_vertex_area(grid, z_coord):
     """``area_q`` with NEMO's F-cell area ``e1e2f = e1f*e2f`` (domhgr.f90:156)
     on the native F points (vertex ``[1:, 1:]``, the west column its cyclic
     image), the area np_CRV's relative vorticity divides by
-    (dynvor.f90:744-748).  The south wall row keeps the grid's own."""
+    (dynvor.f90:762-766).  The south wall row keeps the grid's own."""
     raw = getattr(z_coord, "nemo_een_barotropic", None)
     if raw is None:
         raise ValueError(

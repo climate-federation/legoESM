@@ -87,6 +87,80 @@ def test_npcrv_selector_is_bound_at_the_executing_call_site():
     assert "een_nemo_top_f_u_halo=config.een_nemo_top_f_u_halo" in source
 
 
+def test_npcrv_area_selector_changes_live_relative_vorticity_by_area_ratio(
+    monkeypatch,
+):
+    """Exercise statement A through its live caller on a small grid.
+
+    The two-times NEMO F area makes the selected relative vorticity exactly
+    one half of the unselected value.  This goes red if either the
+    ``een_nemo_zeta`` dispatch clause or the call-site ``nemo_f_area`` operand
+    is removed.
+    """
+    import jax.numpy as jnp
+
+    from legoesm.grids.latlon import create_latlon_grid, ensure_geometry
+    from legoesm.ocean.dynamics import ocean_pe_latlon_cgrid as pe
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+        nemo_vor_ene_vorticity_cgrid,
+    )
+    from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
+    from legoesm.ocean.state import LatLonCGridOceanConfig
+    from legoesm.ocean.vertical import create_ocean_z_star
+
+    grid = ensure_geometry(create_latlon_grid(8, 12))
+    z_coord = create_ocean_z_star(n_levels=2, H_max=1000.0)
+    state = rest_state_latlon_cgrid_ocean(
+        grid, z_coord, T_water_init_C=10.0, T_deep=4.0,
+        S_uniform=35.0, H_max=1000.0,
+    )
+    jj_u = jnp.arange(grid.n_lat, dtype=jnp.float64)[:, None, None]
+    jj_v = jnp.arange(grid.n_lat + 1, dtype=jnp.float64)[:, None, None]
+    ii_u = jnp.arange(grid.n_lon + 1, dtype=jnp.float64)[None, :, None]
+    ii_v = jnp.arange(grid.n_lon, dtype=jnp.float64)[None, :, None]
+    u = jnp.sin((jj_u + 1.0) * (ii_u + 1.0) / 17.0) * 0.03
+    v = jnp.cos((jj_v + 1.0) * (ii_v + 2.0) / 19.0) * 0.02
+    u = jnp.broadcast_to(u, state.u.data.shape)
+    v = jnp.broadcast_to(v, state.v.data.shape).at[0].set(0.0).at[-1].set(0.0)
+    state = state._replace(
+        u=state.u.replace(data=u),
+        v=state.v.replace(data=v),
+    )
+
+    generic_area = jnp.asarray(grid.area_q)
+    nemo_area = generic_area * jnp.float64(2.0)
+    monkeypatch.setattr(pe, "_nemo_f_vertex_area", lambda *_args: nemo_area)
+    monkeypatch.setattr(
+        pe, "curl_vertex_cgrid",
+        lambda u_arg, v_arg, grid_arg: nemo_vor_ene_vorticity_cgrid(
+            u_arg, v_arg, grid_arg),
+    )
+
+    captured = []
+
+    def capture_zeta(zeta, _h_vtx, _h_v, v_arg, _h_u, u_arg,
+                     *_args, **_kwargs):
+        captured.append(np.asarray(zeta))
+        return jnp.zeros_like(u_arg), jnp.zeros_like(v_arg)
+
+    monkeypatch.setattr(pe, "pv_flux_al81_partial_cell", capture_zeta)
+    base = LatLonCGridOceanConfig.from_flat(
+        A_h=0.0, A_v=0.0, K_h=0.0, K_v=0.0, bottom_drag_r=0.0,
+        vorticity_scheme="een_total", een_metric_weighting="nemo",
+        een_nemo_relative_vorticity=False,
+    )
+    for enabled in (False, True):
+        pe.latlon_cgrid_ocean_baroclinic_tendencies(
+            state, grid, z_coord,
+            base._replace(een_nemo_relative_vorticity=enabled),
+            momentum_only=True,
+        )
+    assert len(captured) == 2
+    off, on = captured
+    assert np.count_nonzero(off) > 0
+    np.testing.assert_array_equal(on, off * np.float64(0.5))
+
+
 def test_npcrv_area_refuses_non_nemo_metric_weighting():
     from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import _bc_pv_flux
 

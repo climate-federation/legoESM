@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import sys
 
 import pytest
 
@@ -46,3 +47,26 @@ def test_npcrv_citation_is_pinned_to_vor_een_and_context_plant_fires():
     assert citations.check(
         key, citations.CITATION_MAP[key], routine_plant=True
     )["status"] == "ROUTINE-CONTEXT-MISMATCH"
+
+
+def test_cli_distinguishes_fired_from_green_plant(monkeypatch, capsys):
+    argv = ["round284", "--classify-stage", *("unused.json",) * 6,
+            "--plant", "stage"]
+    monkeypatch.setattr(sys, "argv", argv)
+    monkeypatch.setattr(
+        gate, "classify_stage",
+        lambda *_args, **_kwargs: {"status": "PASS_BROKEN_PLANT"},
+    )
+    assert gate.main() == gate.PLANT_STAYED_GREEN_EXIT
+    output = capsys.readouterr().out
+    assert "STATUS PLANT-STAYED-GREEN: stage plant stayed green" in output
+    assert "STATUS PLANT-FIRED" not in output
+
+    def fired(*_args, **_kwargs):
+        raise gate.GateError("known-answer difference detected")
+
+    monkeypatch.setattr(gate, "classify_stage", fired)
+    assert gate.main() == gate.PLANT_FIRED_EXIT
+    output = capsys.readouterr().out
+    assert "STATUS PLANT-FIRED: known-answer difference detected" in output
+    assert "STATUS PLANT-STAYED-GREEN" not in output
