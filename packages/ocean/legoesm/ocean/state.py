@@ -3209,6 +3209,15 @@ class LatLonCGridOceanConfig(NamedTuple):
     # wall.  Kept separate from the F-area selector so each cited statement
     # has a one-variable landing gate.
     een_nemo_top_f_u_halo: bool = False
+    # The barotropic wind term (stp2d.f90:225-230) divides by NEMO's stored
+    # r1_hu_0/(1+r3u(Kbb)), not the card's live column depth.
+    barotropic_wind_nemo_stored_depth: bool = False
+    # The native surface stress's pivot-row V face reads NEMO's vector halo,
+    # -vtau(pivot-1) mirrored (sbcmod.f90:553-569).
+    surface_stress_nemo_fold_vector_sign: bool = False
+    # dyn_zdf's surface-stress deposit divides by NEMO's live face thickness
+    # e3u_3d(1)*(1+r3u(Kaa)*umask) (dynzdf.f90:334-340).
+    zdf_surface_stress_nemo_face_thickness: bool = False
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":
