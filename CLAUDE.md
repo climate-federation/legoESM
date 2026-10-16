@@ -230,6 +230,34 @@ leave choice pending.
 NOT COVERED, proceed normally: what user asked in that message; pure additions
 changing no existing behaviour; tests; comments; docs; error text.
 
+**2026-10-16 EXTENSION — NO SIDE IMPLEMENTATION DECISIONS (STRICT).** User:
+*"No side implementation decisions as strict Claude.md rule."* Approving a
+change does NOT approve the decisions made while implementing it.
+
+A SIDE DECISION = any value, behaviour, or method that changes what the code
+computes, accepts, rejects, or reads, and is NOT dictated by the user's answer,
+the oracle being ported, or existing repo code reused unchanged. Each one gets
+ASKED (one line, current -> proposed, batched) before the code embodying it;
+one found mid-implementation → stop and ask then. Classes, not exhaustive:
+- tolerances and acceptance thresholds (incl. checks on input files, and the
+  tolerance an oracle-match test certifies)
+- guards, floors, caps, clamp vs extrapolate, and their fp32-vs-fp64 behaviour
+- edge cases: zero/empty/missing input, absent file, old checkpoint
+- mappings between representations (bands, grids, levels, units)
+- algorithm and order: interpolation, aggregation, update/operation order
+- where data or files live; names and defaults of user-facing switches
+- which lanes/grids get it; error vs warning vs fallback there
+
+PRECEDENCE: this OVERRIDES the "NOT COVERED" line above for pure additions and
+tests whenever they carry a side decision. Still exempt: error MESSAGE wording,
+comments, docs. Ponytail/minimal-diff governs how much code, never licenses
+picking a value. "Formatting only", "minor", "internal", "implementation
+detail", "numerically negligible" are NOT exemptions. Subagent briefs must
+state this rule. Any item on an end-of-task UNASKED list is a violation of this
+rule (target: empty), not a disclosure that discharges it. FAILURE 2026-10-16:
+radiation stage 1 shipped a band-list check tolerance and an fp32 tiny-path
+guard behaviour, both labelled "formatting only", neither asked.
+
 MECHANICAL CHECK, end of every task: print list of choices made, each one line,
 marked ASKED or UNASKED. Empty UNASKED list = target. Anything on UNASKED list
 offered for revert in same message. Worked example, five from 2026-08-21 that
