@@ -92,7 +92,7 @@ units of each row.
 | transport divergence | 430,552 / 430,552 | 2.6023067008330836e-2 | 1.0794110578633983e-4 | `[147,48,25]` |
 | live thickness | 430,552 / 430,552 | 6.668582857059846e-2 | 1.1693549040022798e-3 | `[147,50,23]` |
 | flux divergence | 430,552 / 430,552 | 2.6023067008330836e-2 | 1.0794110578633983e-4 | `[147,48,25]` |
-| Kaa-Kbb ratio delta, time-matched (corrected) | 16,433 / 16,433 | 9.4070653952792217e-3 | 2.1140007761263205e-4 | interior |
+| Kaa-Kbb ratio delta, time-matched (corrected) | 16,433 / 16,433 | 9.4070653952792217e-3 | 2.1140007761263205e-4 | `[141,125]` |
 | stretch rate | 430,552 / 430,552 | 8.836174225055932e-5 | 8.009334080397122e-7 | `[147,48,27]` |
 | W recurrence | 430,529 / 430,552 | 1.9152110475369796e-1 | 1.5744398704267452e-3 | `[147,48,0]` |
 | area product | 430,529 / 430,552 | 1.4843986124373436e9 | 1.222542183061254e7 | `[147,48,0]` |
@@ -267,7 +267,8 @@ CONFIRMED (re-measured).  Consequences:
 The all-zero W test is replaced by a bit-exact NumPy known answer on
 non-zero operands (dry cells, dry bottom level) passed as traced `jit`
 arguments, at NEMO's stage clock; a second test pins the time-matched ratio
-row.  Each planted break fails and was restored (`git status --porcelain`
+helper (not the measurement's call of it: switching the time-matching off at
+that call still passes, per the independent review).  Each planted break fails and was restored (`git status --porcelain`
 empty after each):
 
 | Break | Result |
@@ -288,7 +289,9 @@ behaviour change; allowlist stays empty).  The ratchet passes (see gates).
 Switching the ORCA2 card to the carried after-sea-level slot
 (`rk3_extrapolated_carried`) moves the kt=7 operands (U transport by up to
 `1.254e4 m3/s`, V by `2.541e4`, W by `2.76e-5 m/s`) but changes every
-max and RMS distance to NEMO by at most 0.04% (independent label only).
+whole-domain max and RMS distance to NEMO by at most 0.040% (independent
+label only); the interior RMS of the step-entry sea-level difference moves
+0.046%.
 The card's selection is not changed.
 
 ### Review-response gates
