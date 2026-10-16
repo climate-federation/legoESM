@@ -1121,23 +1121,6 @@ class _NEMOWSFCTInputTrace(NamedTuple):
     w_implicit: object
 
 
-def _nemo_sh2_eta(tke_cfg, *, prognostic, eta_now, eta_step_entry):
-    """Sea level for zdf_sh2's r3u/r3v.  NEMO's RK3 calls
-    zdf_phy(kstp,Nbb,Nbb,Nrhs) once at step entry (stprk3.f90:185), so with
-    ``nemo_sh2_step_entry_ssh`` the shear reads the whole-step entry eta, not
-    the stage Kmm eta that dyn_zdf/tra_zdf read through ``eta_now``."""
-    if not getattr(tke_cfg, "nemo_sh2_step_entry_ssh", False):
-        return eta_now
-    if not prognostic:
-        raise ValueError("nemo_sh2_step_entry_ssh=True requires prognostic "
-                         "TKE (the frozen step-entry p_sh2 path)")
-    if eta_step_entry is None and eta_now is not None:
-        raise ValueError("nemo_sh2_step_entry_ssh=True needs the whole-step "
-                         "entry eta (eta_step_entry) when a stage eta_now is "
-                         "supplied")
-    return eta_step_entry
-
-
 class _NEMOWSRK3TestHooks(NamedTuple):
     """Private causal controls; never part of a constructible model config."""
 
@@ -17198,3 +17181,20 @@ def _nemo_ws_stage_r3uv(stage_pair, ops, dtype):
         for eta in (before, after))
     return (_nemo_stage_ratio(kmm, gb.r3u, ga.r3u),
             _nemo_stage_ratio(kmm, gb.r3v, ga.r3v))
+
+
+def _nemo_sh2_eta(tke_cfg, *, prognostic, eta_now, eta_step_entry):
+    """Sea level for zdf_sh2's r3u/r3v.  NEMO's RK3 calls
+    zdf_phy(kstp,Nbb,Nbb,Nrhs) once at step entry (stprk3.f90:185), so with
+    ``nemo_sh2_step_entry_ssh`` the shear reads the whole-step entry eta, not
+    the stage Kmm eta that dyn_zdf/tra_zdf read through ``eta_now``."""
+    if not getattr(tke_cfg, "nemo_sh2_step_entry_ssh", False):
+        return eta_now
+    if not prognostic:
+        raise ValueError("nemo_sh2_step_entry_ssh=True requires prognostic "
+                         "TKE (the frozen step-entry p_sh2 path)")
+    if eta_step_entry is None and eta_now is not None:
+        raise ValueError("nemo_sh2_step_entry_ssh=True needs the whole-step "
+                         "entry eta (eta_step_entry) when a stage eta_now is "
+                         "supplied")
+    return eta_step_entry
