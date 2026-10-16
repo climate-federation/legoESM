@@ -14,7 +14,8 @@ frozen P1/P2, and both are falsified (section 2).
 Commits:
 - `ae07cb6c8`: the landing, instrument and tests;
 - `94d20fbfb`: citation re-anchor;
-- `8e1dc0ee0`: ladder summary printer.
+- `8e1dc0ee0`: ladder summary printer;
+- `6e157c3e6`: review fixes; `ff123c293`: re-anchor after them.
 
 Record: `gridladder_vmix_rounds/round1/oracle_v1_r1` (operator's
 `run.sh --resume`; log `v1_acq2_run.log`: `V1_ACQUISITION_PASS steps=1..10
@@ -104,6 +105,11 @@ Mixing lengths are not in NEMO's record at kt 1. The dissipation length
 `dissl` is scored from kt 2 in section 5.
 
 ## 4. First non-bit statements, in compiled order
+
+From the card's own initial state, kt 1 stage 1 is bit-exact on every level
+for u, v, T, S, ssh, `uu_b` and `vv_b` (`v1_stages_kt1_s1_dirty.json`,
+script-only dirty tree after the review fix). So the leave first appears at
+stage 3, the stage that consumes the mixing coefficients.
 
 ### 4.1 Langmuir depth when no level crosses (LANDED)
 
@@ -248,7 +254,24 @@ All runs were synchronous, on CPU in fp64 (`JAX_ENABLE_X64=1`):
 - I amended my own minutes-old, unpushed re-anchor commit once to fix that
   span length. Disclosed here.
 
-Single review (codex): see the addendum below.
+Single review (codex).
+
+- **First pass:** hit the 590 s limit with no verdict (`codex_review.log`,
+  sha256 prefix in the addendum). It spent the time reading project notes.
+- **Re-run:** scoped to the diff and the cited NEMO lines
+  (`codex_review_2.log`). Verdict: **"VERDICT: DO NOT SHIP"**.
+  - CONFIRMED correct: the CASE(2) arithmetic, evaluation order and MAX
+    against `zdftke.f90:620-623,635-637`; all three TKE call sites get
+    initialised `hm_i`/`fr_i` inputs; the w-level alignment and the ZDF frame
+    layout.
+  - CONFIRMED defect, fixed: the ladder's `stages` arm built its own forcing
+    without `hm_i`, so V1 refused it. Both arms now share one forcing
+    builder, and the V1 stage-1 run above executes.
+  - PLAUSIBLE, acted on: the default-arm test compared only the ice-free
+    column. It now pins CASE 0 bitwise on every column, ice ones included.
+- **After the fixes:** citation gate + private imports + V1 file + G2-ladder
+  fast set: 45 passed, 9 deselected. That run included the `step()` citation
+  re-anchor (span now 4 lines, endpoints unchanged).
 
 ## Scope
 
@@ -266,3 +289,11 @@ UNASKED, offered for revert:
 UNVERIFIED:
 - the next owner (4.3);
 - the full ORCA2 card's response (pointer only).
+
+## Addendum: review evidence
+
+| file | sha256 prefix |
+|---|---|
+| `codex_review.log` | 91cee31255f2a93d |
+| `codex_review_2.log` | 9eb7fc6717c4b693 |
+| `v1_stages_kt1_s1_dirty.json` | 9bbd5fa0a22deead |
