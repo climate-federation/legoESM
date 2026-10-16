@@ -90,7 +90,7 @@ def setup():
     optimizer = create_swg_optimizer(SWGOptimizerSettings(**config["optimiser"]))
     key = jax.random.PRNGKey(SEED)
     nets = {}
-    for w in (1, 2):
+    for w in MANIFEST["config"]["curriculum"]["window_days"]:
         skeleton = SWGScalarPotentialCNN(spec, key=key)
         nets[w], _ = load_checkpoint_or_fail(
             RUN / "checkpoints" / f"w{w:02d}_e05.eqx",
