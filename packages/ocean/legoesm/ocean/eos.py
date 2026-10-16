@@ -942,15 +942,15 @@ def nemo_r3t_stretch(
     -------
     array ``(...)`` — the stretch factor ``(1 + r3t)``, floored at 1e-6.
     """
+    if evaluation not in ("quotient", "nemo_reciprocal"):
+        raise ValueError(
+            f"unknown r3t evaluation {evaluation!r}; expected 'quotient' "
+            "or 'nemo_reciprocal'")
     if getattr(z_coord, "linear_free_surface", False):
         # NEMO key_linssh: domqco is NOT active, so r3t == 0 -- the column
         # never stretches.  Mirrors the same special case in
         # vertical.compute_ocean_jacobian (:813-815).
         return jnp.ones_like(jnp.asarray(eta))
-    if evaluation not in ("quotient", "nemo_reciprocal"):
-        raise ValueError(
-            f"unknown r3t evaluation {evaluation!r}; expected 'quotient' "
-            "or 'nemo_reciprocal'")
     # Dry columns (H_bathy == 0) -> r3t = 0 (inert; all their cells are masked)
     # rather than eta/0 -> inf/NaN poisoning the downstream chain.
     H = jnp.asarray(H_bathy)

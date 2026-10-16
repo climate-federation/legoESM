@@ -2599,7 +2599,7 @@ production is AT-BAR at every stage:
 All figures are production JIT, CPU, binary64, scalar-libm.  The apparent
 stage-1 tracer contradiction is resolved: legoESM's literal WZV call receives
 the full-step `eta_after-eta_before` pair at
-`ocean_model_latlon_cgrid.py:6120-6140`, so its full-step thickness delta and
+`ocean_model_latlon_cgrid.py:6154-6174`, so its full-step thickness delta and
 full `dt` yield the same stretching rate as NEMO's stage-local delta and
 stage-local `rDt` (`stprk3_stg.F90:123-124,177-178,221-222`;
 `sshwzv.F90:334-335`).  The private arm changes only the denominator while
