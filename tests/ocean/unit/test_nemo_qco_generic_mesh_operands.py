@@ -22,6 +22,9 @@ import numpy as np
 import pytest
 
 from legoesm.grids.latlon import create_beta_plane_cgrid_geometry
+from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+    _nemo_ws_stage_face_masks,
+)
 from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import nemo_qco_wzv_operands
 from legoesm.ocean.vertical import (
     NemoEENBarotropicOperands,
@@ -203,6 +206,31 @@ def test_raw_mesh_source_uses_its_associated_face_masks():
     with pytest.raises(ValueError, match="associated umask/vmask"):
         nemo_qco_resolved_mesh_operands(
             missing, grid, u_mask, v_mask, jnp.float64, NLEV)
+
+
+def test_ws_stage_masks_use_the_resolved_raw_mesh_source():
+    """The stage update reads the associated raw masks, not compact rebuilds."""
+    grid, z_coord, u_mask, v_mask, _ = _fixture()
+    ops = nemo_qco_resolved_mesh_operands(
+        z_coord, grid, u_mask, v_mask, jnp.float64, NLEV)
+    raw_coord = _attach_raw(z_coord, ops)
+
+    planted = np.asarray(ops.vmask3).copy()
+    wet = tuple(np.argwhere(planted != 0.0)[0])
+    planted[wet] = 0.0
+    raw_coord = raw_coord._replace(
+        nemo_een_barotropic=raw_coord.nemo_een_barotropic._replace(
+            vmask=jnp.asarray(planted)))
+
+    stage_u, stage_v = _nemo_ws_stage_face_masks(
+        raw_coord, grid, jnp.float64)
+    np.testing.assert_array_equal(
+        np.asarray(stage_u)[:, 1:, :], np.asarray(ops.umask3))
+    np.testing.assert_array_equal(np.asarray(stage_v)[1:, :, :], planted)
+
+    compact_v = np.asarray(v_mask)
+    assert compact_v[(wet[0] + 1, wet[1], wet[2])] == 1.0
+    assert np.asarray(stage_v)[wet[0] + 1, wet[1], wet[2]] == 0.0
 
 
 def test_raw_branch_is_bit_identical_when_the_mesh_is_full_step():
