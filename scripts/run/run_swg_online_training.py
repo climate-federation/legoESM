@@ -12,6 +12,12 @@ lengths (same epochs per window and everything else): the finished stages
 stay as logged, the new stage starts from the last checkpoint's network
 with a fresh optimiser, and the run manifest and training log record the
 extension (from which windows to which, from which commit to which).
+An optional ``network.initial_checkpoint`` (absolute path of a checkpoint in
+this driver's format; no default: absent means the seed's random
+initialisation) initialises the network from that file before the first
+stage, the optimiser starting fresh; the file's SHA-256 is recorded in the
+run manifest and the training log, and a missing, structurally different or
+later changed file refuses the run.
 
 ``free-run`` integrates the coarse card from rest with the closure of one
 trained window length (its last checkpoint) on the device and math policy
@@ -231,8 +237,14 @@ def load_config(path: Path) -> dict:
         raise ValueError(f"wall_ring must be one of {WALL_RING_OPTIONS}")
 
     network = config["network"]
-    _require_keys(network, ("hidden_channels", "hidden_layers", "kernel_size",
-                            "scales"), "network")
+    _require_keys({key: value for key, value in network.items()
+                   if key != "initial_checkpoint"},
+                  ("hidden_channels", "hidden_layers", "kernel_size",
+                   "scales"), "network")
+    if "initial_checkpoint" in network and (
+            not isinstance(network["initial_checkpoint"], str)
+            or not Path(network["initial_checkpoint"]).is_absolute()):
+        raise ValueError("network initial_checkpoint must be an absolute path")
     _require_int(network["hidden_channels"], "hidden_channels", minimum=1)
     _require_int(network["hidden_layers"], "hidden_layers", minimum=1)
     if _require_int(network["kernel_size"], "kernel_size", minimum=1) % 2 != 1:
@@ -725,6 +737,16 @@ def _identity(config: dict, config_path: Path, card, geometry, spec, scales,
     namelist = card.resolved_namelist
     half_width = maddison_half_width_m(namelist.rn_domsiz_m, geometry)
     per_day = steps_per_day(card)
+    pretrained = config["network"].get("initial_checkpoint")
+    network_init = "SWGScalarPotentialCNN(spec, key=PRNGKey(seed))"
+    initial_checkpoint = {}
+    if pretrained is not None:
+        # A missing file raises here (FileNotFoundError), before any run
+        # directory exists.
+        initial_checkpoint = {"initial_checkpoint": {
+            "path": pretrained, "sha256": _sha256(Path(pretrained))}}
+        network_init += ("; weights then loaded from "
+                         "network.initial_checkpoint (optimiser fresh)")
     return _jsonable({
         "schema": RUN_SCHEMA,
         "run_id": f"{config['experiment']}/seed{seed}",
@@ -732,7 +754,7 @@ def _identity(config: dict, config_path: Path, card, geometry, spec, scales,
         "config": config,
         "seed": {
             "value": seed,
-            "network_init": "SWGScalarPotentialCNN(spec, key=PRNGKey(seed))",
+            "network_init": network_init,
             "window_sampler": "SWGDatasetContract.batches(seed=seed, "
                               "epoch=epoch-1): offset per (seed, window, "
                               "epoch), shuffled",
@@ -758,7 +780,8 @@ def _identity(config: dict, config_path: Path, card, geometry, spec, scales,
             "input_channels": ["ssh/ssh_scale (+ zero noise)",
                                "T-centred u/velocity_scale",
                                "T-centred v/velocity_scale", "wet mask"],
-            "output": "potential_scale x boundary-zero F-point potential"},
+            "output": "potential_scale x boundary-zero F-point potential",
+            **initial_checkpoint},
         "optimiser": {
             "settings": config["optimiser"],
             "constructor": "legoesm.training.swg_online.create_swg_optimizer",
@@ -891,6 +914,18 @@ def train(config: dict, config_path: Path, *, card, seed: int, run_dir: Path,
             json.loads(path.read_text()), seed=seed, device=device,
             windows_per_call=windows_per_call, commit=commit)
 
+    key = jax.random.PRNGKey(seed)
+    network = SWGScalarPotentialCNN(spec, key=key)
+    opt_state = optimizer.init(eqx.filter(network, eqx.is_inexact_array))
+    pretrained = config["network"].get("initial_checkpoint")
+    if pretrained is not None:
+        # The file's network replaces the seed's initialisation; its
+        # optimiser state is discarded (the first stage starts fresh).  A
+        # structurally different file raises here, before any run directory.
+        network, _ = load_checkpoint_or_fail(
+            Path(pretrained), (network, opt_state),
+            what="network initial_checkpoint")
+
     if manifest_path.is_file():
         stored = json.loads(manifest_path.read_text())
         log = json.loads(log_path.read_text())
@@ -925,7 +960,9 @@ def train(config: dict, config_path: Path, *, card, seed: int, run_dir: Path,
             _write_json(staging / manifest_path.name, identity)
             log = {"schema": LOG_SCHEMA, "run_id": identity["run_id"],
                    "status": "running", "gates": None, "epochs": [],
-                   "invocations": []}
+                   "invocations": [],
+                   **{key: identity["network"][key] for key in
+                      ("initial_checkpoint",) if key in identity["network"]}}
             _write_json(staging / log_path.name, log)
         except BaseException:
             shutil.rmtree(staging)
@@ -936,9 +973,6 @@ def train(config: dict, config_path: Path, *, card, seed: int, run_dir: Path,
         "completed_epochs_at_start": len(log["epochs"])})
     _write_json(log_path, log)
 
-    key = jax.random.PRNGKey(seed)
-    network = SWGScalarPotentialCNN(spec, key=key)
-    opt_state = optimizer.init(eqx.filter(network, eqx.is_inexact_array))
     if log["epochs"]:
         last = log["epochs"][-1]
         checkpoint = run_dir / last["checkpoint"]["path"]

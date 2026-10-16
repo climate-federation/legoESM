@@ -1,0 +1,74 @@
+{
+  "schema": "legoesm-swg-online-training-v3",
+  "experiment": "swgonl_pretrain_template_ring_weighted",
+  "description": "Round 13: experiment one's candidate template+weighted (same objective, wall-ring treatment, dataset, curriculum, optimiser and free-run execution), one seed, the network initialised from the offline-pretrained closure (capacity_test architecture (a) fitted to the representable one-hour correction a_S on the round-11 capacity dataset, continued to convergence by scripts/validate/swgonl_round10/pretrain_offline.py) instead of the seed's random initialisation; the optimiser starts fresh. Tests whether offline pretraining initialises online training better than a random start.",
+  "deck": "dg50",
+  "objective": "template",
+  "wall_ring": "weighted",
+  "network": {
+    "hidden_channels": 16,
+    "hidden_layers": 4,
+    "kernel_size": 3,
+    "scales": "maddison_eq6_shallow_water_grid_analogue",
+    "initial_checkpoint": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgonl_rounds/round13_pretrain/offline_pretrained_ours.eqx"
+  },
+  "seeds": [
+    20261013
+  ],
+  "dataset": {
+    "records": [
+      {
+        "root": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgonl_rounds/round6/hourly_dual_12y",
+        "chunk_label": "dual"
+      },
+      {
+        "root": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgonl_rounds/round6/hourly_dual_test_year",
+        "chunk_label": "dual_test"
+      }
+    ],
+    "splits_days": {
+      "train": [
+        731,
+        4235
+      ],
+      "validation": [
+        4265,
+        5111
+      ],
+      "test": [
+        5141,
+        5506
+      ]
+    },
+    "batch_size": 10
+  },
+  "curriculum": {
+    "window_days": [
+      1,
+      2,
+      4,
+      8
+    ],
+    "epochs_per_window": 5,
+    "network_between_windows": "carried",
+    "optimiser_between_windows": "reinitialised"
+  },
+  "optimiser": {
+    "optimizer": "adamw",
+    "learning_rate": 0.001,
+    "schedule": "constant",
+    "weight_decay": 0.004,
+    "adam_b1": 0.9,
+    "adam_b2": 0.999,
+    "adam_epsilon": 1e-07,
+    "adam_epsilon_convention": "keras_epsilon_hat",
+    "gradient_clipping": "none"
+  },
+  "free_run": {
+    "days": 7300,
+    "start": "rest",
+    "sampling": "end_of_day_snapshot_and_daily_mean",
+    "device": "cuda",
+    "math_library": "native"
+  }
+}

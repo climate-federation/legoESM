@@ -16,6 +16,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+from legoesm.ml.checkpoint_io import CheckpointStructureError
 from legoesm.ocean.fidelity.nemo_testcase_recipe import (
     build_swg_card,
     swg_surface_wind,
@@ -178,6 +179,8 @@ def test_gpu_control_configs_name_the_frozen_control_choices_exactly():
      "reinitialised"),
     (lambda c: c["dataset"].update(batch_size=8), "batch_size"),
     (lambda c: c["network"].update(scales="unit"), "scales"),
+    (lambda c: c["network"].update(initial_checkpoint="pretrained.eqx"),
+     "absolute path"),
     (lambda c: c["free_run"].update(start="restart"), "rest"),
     (lambda c: c["free_run"].update(sampling="daily_snapshot"), "sampling"),
     (lambda c: c["free_run"].pop("device"), "exactly the keys"),
@@ -1260,3 +1263,116 @@ def test_extension_refuses_anything_but_appended_windows(
     log_path.write_text(json.dumps(log))
     refused(config, _write_config(tmp_path / "f.json", config),
             "has not completed", run)
+
+
+# ------------------------------------------------ pretrained initialisation
+
+def _pretrained_file(path: Path, card, config, seed, scale):
+    """A checkpoint in the driver's format holding ``seed``'s initialisation
+    with every weight scaled by ``scale``; returns its network leaves."""
+    geometry = build_closure_geometry(card)
+    spec, _ = driver.network_spec(config, card, geometry)
+    network = SWGScalarPotentialCNN(spec, key=jax.random.PRNGKey(seed))
+    params, static = eqx.partition(network, eqx.is_inexact_array)
+    network = eqx.combine(jax.tree.map(lambda leaf: scale * leaf, params), static)
+    optimizer = create_swg_optimizer(SWGOptimizerSettings(**config["optimiser"]))
+    driver.save_checkpoint(
+        (network, optimizer.init(eqx.filter(network, eqx.is_inexact_array))),
+        path)
+    return [np.asarray(leaf) for leaf in jax.tree.leaves(
+        eqx.filter(network, eqx.is_inexact_array))]
+
+
+def _one_epoch(record, **changes):
+    config = _config(record, **changes)
+    config["curriculum"].update(window_days=[1], epochs_per_window=1)
+    return config
+
+
+def _train(config, path, card, run_dir):
+    return driver.train(config, path, card=card, seed=11, run_dir=run_dir,
+                        device=CPU, windows_per_call=10, commit="0" * 40)
+
+
+def test_initial_checkpoint_loads_the_file_and_records_its_digest(
+        tmp_path, small_card, record):
+    file = tmp_path / "pretrained.eqx"
+    config = _one_epoch(record)
+    expected = _pretrained_file(file, small_card, config, 11, 0.5)
+    config["network"]["initial_checkpoint"] = str(file)
+    path = _write_config(tmp_path / "config.json", config)
+    seen = []
+    gates = driver._start_gates
+
+    def capturing(network, *args, **kwargs):
+        seen.append([np.asarray(leaf) for leaf in jax.tree.leaves(
+            eqx.filter(network, eqx.is_inexact_array))])
+        return gates(network, *args, **kwargs)
+
+    driver._start_gates = capturing
+    try:
+        log = _train(config, path, small_card, tmp_path / "run")
+    finally:
+        driver._start_gates = gates
+    assert log["status"] == "complete"
+    # The network at the first step is the file's, leaf for leaf.
+    assert all(np.array_equal(mine, theirs)
+               for mine, theirs in zip(seen[0], expected, strict=True))
+    digest = {"path": str(file), "sha256": driver._sha256(file)}
+    manifest = json.loads((tmp_path / "run/run_manifest.json").read_text())
+    assert manifest["network"]["initial_checkpoint"] == digest
+    assert "initial_checkpoint" in manifest["seed"]["network_init"]
+    assert log["initial_checkpoint"] == digest
+
+
+def test_initial_checkpoint_refuses_a_missing_or_mismatching_file(
+        tmp_path, small_card, record, capsys):
+    config = _one_epoch(record)
+    config["network"]["initial_checkpoint"] = str(tmp_path / "absent.eqx")
+    path = _write_config(tmp_path / "config.json", config)
+    assert driver.main(["train", "--config", str(path), "--device", "cpu",
+                        "--windows-per-call", "10", "--seed", "11",
+                        "--run-root", str(tmp_path / "root")]) == 2
+    assert "REFUSE" in capsys.readouterr().err
+    assert not (tmp_path / "root").exists()
+    # A file of another architecture: refused before any run directory.
+    other = _one_epoch(record)
+    other["network"]["hidden_channels"] = 8
+    _pretrained_file(tmp_path / "other.eqx", small_card, other, 11, 1.0)
+    config["network"]["initial_checkpoint"] = str(tmp_path / "other.eqx")
+    path = _write_config(tmp_path / "config.json", config)
+    with pytest.raises(CheckpointStructureError):
+        _train(config, path, small_card, tmp_path / "run")
+    assert not (tmp_path / "run").exists()
+    # A file changed after the run started: refused on resume.
+    _pretrained_file(tmp_path / "other.eqx", small_card, config, 11, 0.5)
+    log = _train(config, path, small_card, tmp_path / "run")
+    assert log["status"] == "complete"
+    _pretrained_file(tmp_path / "other.eqx", small_card, config, 11, 0.25)
+    with pytest.raises(RuntimeError, match="differs in"):
+        _train(config, path, small_card, tmp_path / "run")
+
+
+def test_without_initial_checkpoint_the_seed_initialises_as_before(
+        tmp_path, small_card, record):
+    plain = _one_epoch(record)
+    assert "initial_checkpoint" not in plain["network"]
+    log = _train(plain, _write_config(tmp_path / "plain.json", plain),
+                 small_card, tmp_path / "plain")
+    manifest = json.loads((tmp_path / "plain/run_manifest.json").read_text())
+    assert "initial_checkpoint" not in manifest["network"]
+    assert "initial_checkpoint" not in log
+    assert manifest["seed"]["network_init"] \
+        == "SWGScalarPotentialCNN(spec, key=PRNGKey(seed))"
+    # A file holding exactly the seed's initialisation reproduces the plain
+    # run's first stage bit for bit: absent means the seed's initialisation.
+    file = tmp_path / "seed_init.eqx"
+    _pretrained_file(file, small_card, plain, 11, 1.0)
+    seeded = copy.deepcopy(plain)
+    seeded["network"]["initial_checkpoint"] = str(file)
+    seeded_log = _train(seeded, _write_config(tmp_path / "seeded.json", seeded),
+                        small_card, tmp_path / "seeded")
+    assert seeded_log["epochs"][0]["train_loss_per_batch"] \
+        == log["epochs"][0]["train_loss_per_batch"]
+    assert seeded_log["epochs"][0]["checkpoint"]["sha256"] \
+        == log["epochs"][0]["checkpoint"]["sha256"]
