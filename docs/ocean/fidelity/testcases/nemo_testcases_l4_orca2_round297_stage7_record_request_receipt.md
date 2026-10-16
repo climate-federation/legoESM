@@ -100,8 +100,12 @@ No `mpirun` was attempted in the sandbox.
   worktree-stamp ratchets; and the SI3 `MY_SRC` provenance mismatch. None is
   in the round-297 change set. In particular, the round-228 citation key is
   absent at base `6ca3a8892`, while this round only adds new map entries.
-- Independent review: operator. A nested Codex review is unavailable inside
-  this sandbox.
+- Independent review: operator. The required nested `codex exec --sandbox
+  read-only` attempt could not initialize its in-process app-server client in
+  the read-only sandbox (`Read-only file system`; log SHA-256
+  `eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5`).
+  Independent review is therefore unavailable in-sandbox and remains an
+  operator handoff.
 
 ## Configuration choices
 
