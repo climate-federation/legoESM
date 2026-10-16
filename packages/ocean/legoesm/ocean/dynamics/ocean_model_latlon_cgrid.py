@@ -6717,7 +6717,7 @@ class LatLonCGridOceanModel:
             from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
                 nemo_ice_ocean_top_drag_coeff_faces,
             )
-            _top_cdu_u, _top_cdu_v, _ = nemo_ice_ocean_top_drag_coeff_faces(
+            _top_cdu_u, _top_cdu_v, _, _, _ = nemo_ice_ocean_top_drag_coeff_faces(
                 _top_drag_rCdu, _grid, dtype=F_slow_u.dtype)
             if state.uu_b is None or state.vv_b is None:
                 raise ValueError(
@@ -13514,24 +13514,34 @@ class LatLonCGridOceanModel:
             from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
                 nemo_ice_ocean_top_drag_coeff_faces,
             )
-            _top_cdu_u, _top_cdu_v, _ = nemo_ice_ocean_top_drag_coeff_faces(
+            _, _, _top_sum_u, _top_sum_v, _ = nemo_ice_ocean_top_drag_coeff_faces(
                 _top_drag_rCdu, _grid, dtype=state.u.data.dtype)
             _top_e3u, _top_e3v = _nemo_dynzdf_drag_face_thickness(
                 state.eta.data, state.H_bathy.data, _zc, _cfg_b, _grid,
                 dz_u_open.dtype)
             _is_top_u = jnp.zeros_like(u_solve_in).at[..., 0].set(1.0)
             _is_top_v = jnp.zeros_like(v_solve_in).at[..., 0].set(1.0)
-            _top_diag_u = (
-                -dt_mom * _top_cdu_u[..., jnp.newaxis]
-                / jnp.maximum(_top_e3u, 1e-10) * _is_top_u)
-            _top_diag_v = (
-                -dt_mom * _top_cdu_v[..., jnp.newaxis]
-                / jnp.maximum(_top_e3v, 1e-10) * _is_top_v)
+            _zdt_2 = nemo_source_round(
+                jnp.asarray(dt_mom, dtype=state.u.data.dtype) * 0.5)
+            _top_prod_u = nemo_source_round(
+                _zdt_2 * _top_sum_u)[..., jnp.newaxis]
+            _top_prod_v = nemo_source_round(
+                _zdt_2 * _top_sum_v)[..., jnp.newaxis]
+            _top_diag_u = -nemo_source_round(
+                _top_prod_u / jnp.maximum(_top_e3u, 1e-10)) * _is_top_u
+            _top_diag_v = -nemo_source_round(
+                _top_prod_v / jnp.maximum(_top_e3v, 1e-10)) * _is_top_v
             extra_diag_u = extra_diag_u + _top_diag_u
             extra_diag_v = extra_diag_v + _top_diag_v
             if _zdf_baroclinic_only:
-                u_solve_in = u_solve_in - _top_diag_u * _u_bt_mean
-                v_solve_in = v_solve_in - _top_diag_v * _v_bt_mean
+                _top_rhs_u = nemo_source_round(
+                    nemo_source_round(_top_prod_u * _u_bt_mean)
+                    / jnp.maximum(_top_e3u, 1e-10)) * _is_top_u
+                _top_rhs_v = nemo_source_round(
+                    nemo_source_round(_top_prod_v * _v_bt_mean)
+                    / jnp.maximum(_top_e3v, 1e-10)) * _is_top_v
+                u_solve_in = nemo_source_round(u_solve_in + _top_rhs_u)
+                v_solve_in = nemo_source_round(v_solve_in + _top_rhs_v)
         _zdf_baro_drag_u, _zdf_baro_drag_v = u_solve_in, v_solve_in
         if _zdf_top_stress is not None:
             u_solve_in = u_solve_in.at[..., 0].add(_zdf_top_stress[0])

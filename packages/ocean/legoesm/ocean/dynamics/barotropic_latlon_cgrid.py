@@ -3320,7 +3320,7 @@ def barotropic_substeps_latlon_cgrid(
         from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
             nemo_ice_ocean_top_drag_coeff_faces,
         )
-        _top_cdu_u, _top_cdu_v, _top_cdu_t = (
+        _top_cdu_u, _top_cdu_v, _, _, _top_cdu_t = (
             nemo_ice_ocean_top_drag_coeff_faces(
                 ice_ocean_top_drag_rCdu, grid, dtype=_dt))
         _drag_coeff_u = _top_cdu_u

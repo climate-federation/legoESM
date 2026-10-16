@@ -4090,14 +4090,17 @@ def nemo_ice_ocean_top_drag_coeff_faces(rCdU_ice, grid, *, dtype=None):
             "ice-ocean top drag rCdU_ice must be a 2-D T-point field; got "
             f"shape {r_cdu.shape}")
     r_cdu = nemo_source_round(r_cdu)
-    coeff_u = interp_cell_to_uface(r_cdu, source_round=True)
-    (coeff_v,) = interp_to_v_points_multi(
-        (r_cdu,), grid=grid, source_round=True)
+    from legoesm.grids.operators_latlon_cgrid import pad_lon_cgrid
+    r_lon = pad_lon_cgrid(r_cdu, halo=1)
+    sum_u = nemo_source_round(r_lon[:, :-1] + r_lon[:, 1:])
+    sum_v = interp_to_v_points(r_cdu, grid, nemo_source_sum=True)
     # pCdU = .5*((rCdU_bot pair) + (rCdU_top pair)); rCdU_bot is +0 on G5.
-    # Re-materialise the addition's +0 result where the top average is zero.
-    coeff_u = jnp.where(coeff_u == 0, jnp.zeros_like(coeff_u), coeff_u)
-    coeff_v = jnp.where(coeff_v == 0, jnp.zeros_like(coeff_v), coeff_v)
-    return coeff_u, coeff_v, r_cdu
+    zero_u, zero_v = jnp.zeros_like(sum_u), jnp.zeros_like(sum_v)
+    coeff_u = nemo_source_round(
+        0.5 * nemo_source_round(zero_u + sum_u))
+    coeff_v = nemo_source_round(
+        0.5 * nemo_source_round(zero_v + sum_v))
+    return coeff_u, coeff_v, sum_u, sum_v, r_cdu
 
 
 def nemo_bottom_drag_rate_faces(
