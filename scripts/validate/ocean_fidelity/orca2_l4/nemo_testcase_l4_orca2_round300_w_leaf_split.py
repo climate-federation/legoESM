@@ -275,14 +275,23 @@ def _measure_label(deck_root: Path, frame_root: Path,
     candidate_replay = {
         "ww": r298._regions(candidate_program["w_recurrence"], native["ww"],
                             np.asarray(oracle["w_tmask"], bool)),
-        "trp_w": r298._regions(candidate_program["area_product"], native["trp_w"],
-                               np.asarray(oracle["w_tmask"], bool)),
+        # ``trp_w`` is an area-scaled representation of the same W field.
+        # Score its replay in W-equivalent units so a sub-floor W rounding
+        # difference is not amplified by the O(1e10 m2) ORCA2 cell area.
+        # The raw area-product statement remains separately reported in
+        # ``rows`` below and is never hidden by this calibration check.
+        "trp_w_w_equivalent": r298._regions(
+            candidate_program["area_product"] / candidate["w_area"][..., None],
+            native["trp_w"] / candidate["w_area"][..., None],
+            np.asarray(oracle["w_tmask"], bool)),
     }
     oracle_replay = {
         "ww": r298._regions(oracle_program["w_recurrence"], oracle["w_ww"],
                             np.asarray(oracle["w_tmask"], bool)),
-        "trp_w": r298._regions(oracle_program["area_product"], oracle["trp_w"],
-                               np.asarray(oracle["w_tmask"], bool)),
+        "trp_w_w_equivalent": r298._regions(
+            oracle_program["area_product"] / oracle_inputs["w_area"][..., None],
+            oracle["trp_w"] / oracle_inputs["w_area"][..., None],
+            np.asarray(oracle["w_tmask"], bool)),
     }
     arms = {}
     for names in CUMULATIVE_ARMS:
@@ -290,7 +299,7 @@ def _measure_label(deck_root: Path, frame_root: Path,
         inputs.update({name: oracle_inputs[name] for name in names})
         program = _program(inputs)
         arms["+".join(names)] = r298._regions(
-            program["area_product"], oracle["trp_w"],
+            program["w_recurrence"], oracle["w_ww"],
             np.asarray(oracle["w_tmask"], bool))
     return {
         "status": "PASS_R300_LABEL_MEASUREMENT", "label": label,
