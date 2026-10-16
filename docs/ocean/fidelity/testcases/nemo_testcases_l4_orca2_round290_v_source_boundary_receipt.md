@@ -67,11 +67,29 @@ after it.  This is a statement boundary, not yet a leaf attribution.
 
 ## Validation
 
-- The round-290 direct tests and their round-281/283/289 neighbour tests pass.
+- The round-290 direct tests, round-281/283/288/289 neighbour tests, and
+  citation-gate tests pass 42/42.  The focused log SHA256 is
+  `473fddff6f87389265d3ab3f856ef9df62e71bc7a47d55d70ceb2de6cac647e8`.
 - This receipt's citation gate and the cumulative default-receipt gate pass;
-  a rigid two-line shift of the new correction citation fires.
-- The required fidelity-battery and independent-review results are recorded
-  in the final validation commit for this round.
+  each has zero failures, zero unmapped citations and zero citation-map audit
+  failures.  A rigid two-line shift of the new correction citation exits 1.
+- The one permitted `tests/ocean/fidelity -n 12` battery reached 93%, with
+  3,419 passed and the same eight registered branch-tip reds as rounds
+  288--289, before every pytest worker disappeared without a terminal
+  summary.  The orphaned controller was stopped and the full battery was not
+  repeated.  Its log SHA256 is
+  `3e4aae8e43abf02679607857df99866264504cc56b37142178c7a5e1b0baefc0`.
+  The round-290 tests had already passed inside that battery.
+- The eight printed reds reproduce serially: the GYRE round-129 record hash,
+  two stale round-33 mutation anchors, the OMT-1 module-edge ratchet, the
+  missing round-228 historical citation-map entry, the dirty-escape scope
+  ratchet, the worktree-stamp ratchet, and SI3 scalar-math provenance.  The
+  isolated log SHA256 is
+  `4d23789469a9d481d7ec5486d833f5c3315a6d4b3c52f6b0250f2ec59f53b0f9`.
+- Independent review unavailable in-sandbox: the required read-only
+  `codex exec` attempt exited before review because its in-process app-server
+  client tried to write in the read-only sandbox.  The retained log SHA256 is
+  `eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5`.
 - No package or card file changes exist, so ORCA2 trajectory, GYRE, DINO,
   tank and acquisition gates are off-claim.
 
