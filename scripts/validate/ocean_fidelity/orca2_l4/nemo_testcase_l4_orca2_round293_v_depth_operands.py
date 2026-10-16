@@ -55,35 +55,42 @@ def _score(left, right, support) -> dict[str, object]:
     )
 
 
-def measure(deck_root: Path, frame_root: Path, twin_a: Path, twin_b: Path,
-            expect_commit: str) -> dict[str, object]:
-    """Reuse round 245's calibrated executable and source replay at substep 1."""
+def measure_arm(deck_root: Path, frame_root: Path, twin_a: Path, twin_b: Path,
+                expect_commit: str, arm: str) -> dict[str, object]:
+    """Measure one arm in a fresh process to bound JAX compilation memory."""
 
+    require(arm in ARMS, f"unknown arm {arm!r}")
     original_substeps = r245.SUBSTEPS
     r245.SUBSTEPS = (1,)
     try:
-        baseline = r245.measure(
+        report = r245.measure(
             deck_root, frame_root, twin_a, twin_b, "independent",
-            expect_commit)
-        raw_mask = r245.measure(
-            deck_root, frame_root, twin_a, twin_b, "independent",
-            expect_commit, raw_v_surface_mask=True)
-        pair = r245.measure(
-            deck_root, frame_root, twin_a, twin_b, "independent",
-            expect_commit, raw_v_surface_mask=True,
-            t_pivot_north_neighbor=True)
+            expect_commit,
+            raw_v_surface_mask=arm != "baseline",
+            t_pivot_north_neighbor=arm == "mask_t_neighbor_pair")
     finally:
         r245.SUBSTEPS = original_substeps
+    require(report["substeps"] == [1], f"{arm}: substep registry moved")
+    require(report["label"] == "independent", f"{arm}: label moved")
+    report["round293_arm"] = arm
+    return report
 
-    reports = {
-        "baseline": baseline,
-        "raw_v_surface_mask": raw_mask,
-        "mask_t_neighbor_pair": pair,
-    }
-    for name, report in reports.items():
+
+def assemble(reports: list[dict[str, object]]) -> dict[str, object]:
+    """Combine three independently stamped arm reports without recomputation."""
+
+    require(len(reports) == len(ARMS), "exactly three arm reports are required")
+    by_arm = {report.get("round293_arm"): report for report in reports}
+    require(set(by_arm) == set(ARMS), "arm report coverage moved")
+    for name, report in by_arm.items():
         require(report["substeps"] == [1], f"{name}: substep registry moved")
         require(report["label"] == "independent", f"{name}: label moved")
+    commits = {report["worktree"]["commit"] for report in by_arm.values()}
+    require(len(commits) == 1, "arm reports were measured on different trees")
 
+    baseline = by_arm["baseline"]
+    raw_mask = by_arm["raw_v_surface_mask"]
+    pair = by_arm["mask_t_neighbor_pair"]
     base_row = baseline["rows"][0]
     mask_row = raw_mask["rows"][0]
     pair_row = pair["rows"][0]
@@ -115,7 +122,7 @@ def measure(deck_root: Path, frame_root: Path, twin_a: Path, twin_b: Path,
         "operand_order": list(OPERAND_ORDER),
         "arms": list(ARMS),
         "passivity": {
-            name: report["passivity"] for name, report in reports.items()
+            name: report["passivity"] for name, report in by_arm.items()
         },
         "operand_rows": baseline["operand_rows"],
         "baseline_replay_vs_production":
@@ -218,7 +225,8 @@ def classify(report: dict[str, object], *, plant: str = "none") -> dict[str, obj
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--measure", action="store_true")
+    parser.add_argument("--measure-arm", choices=ARMS)
+    parser.add_argument("--assemble", nargs=3, type=Path)
     parser.add_argument("--deck-root", type=Path)
     parser.add_argument("--frame-root", type=Path)
     parser.add_argument("--twin-a", type=Path)
@@ -229,12 +237,18 @@ def main() -> int:
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     try:
-        if args.measure:
+        if args.measure_arm:
             require(all((args.deck_root, args.frame_root, args.twin_a,
                          args.twin_b, args.expect_commit)),
                     "measurement arguments incomplete")
-            result = measure(args.deck_root, args.frame_root, args.twin_a,
-                             args.twin_b, args.expect_commit)
+            result = measure_arm(
+                args.deck_root, args.frame_root, args.twin_a, args.twin_b,
+                args.expect_commit, args.measure_arm)
+        elif args.assemble:
+            result = assemble([
+                json.loads(path.read_text(encoding="utf-8"))
+                for path in args.assemble
+            ])
         else:
             require(args.report_in is not None, "classification report missing")
             result = classify(json.loads(args.report_in.read_text()),
