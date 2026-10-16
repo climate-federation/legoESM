@@ -111,11 +111,17 @@ def test_committed_configs_are_the_three_candidates_of_the_template_procedure():
         assert config["network"] == {
             "hidden_channels": 16, "hidden_layers": 4, "kernel_size": 3,
             "scales": driver.SCALE_RULE}
-        # Daily means beside the snapshots, on the controls' CPU and libm.
+        # Daily means beside the snapshots.  The candidate chosen for the full
+        # experiment (template, wall ring weighted) runs its free runs on the
+        # GPU with native math (user decision 2026-10-14, after the GPU
+        # controls passed the device check); the other candidates keep the
+        # controls' CPU and libm execution.
+        chosen = (config["objective"], config["wall_ring"]) == ("template", "weighted")
         assert config["free_run"] == {
             "days": 7300, "start": "rest",
             "sampling": "end_of_day_snapshot_and_daily_mean",
-            "device": "cpu", "math_library": "libm"}
+            "device": "cuda" if chosen else "cpu",
+            "math_library": "native" if chosen else "libm"}
         assert config["deck"] == "dg50"
 
 
