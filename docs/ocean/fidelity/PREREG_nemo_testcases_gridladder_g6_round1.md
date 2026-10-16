@@ -141,3 +141,10 @@ next entry, restarts = stage-3 frames.
 - P5 refuted by any other first statement.
 
 No bar verdict is claimed this round.  ROUND_STATUS: STOPPED_FOR_RECORD.
+
+## Dated correction — 2026-10-16 (after review, before any record)
+
+Section 2's unmeasured tuple is incomplete: G6 also carries G5's
+`nemo_post_si3_surface_records` (same input route), restored in `5b5046102`
+after the codex review.  No prediction changes.
+
