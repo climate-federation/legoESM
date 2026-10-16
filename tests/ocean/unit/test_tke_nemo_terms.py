@@ -1683,6 +1683,9 @@ def test_nn_mxlice2_anchor_is_nemos_case2_and_refuses_missing_inputs():
     # an ice column moves; the ice-free one is CASE 0's value
     assert np.asarray(got)[1] != np.asarray(case0)[1]
     assert np.asarray(got)[0] == np.asarray(case0)[0]
+    # the default arm stays CASE 0 on EVERY column, ice ones included
+    want0 = np.maximum(_mixing_length_floor(base), zraug * (taum * tm))
+    assert np.asarray(case0).view(np.uint64).tolist() == want0.view(np.uint64).tolist()
     for kw in ({"mxlice_hm_i": None}, {"mxlice_fr_i": None}):
         args = {"mxlice_fr_i": jnp.asarray(fr), "mxlice_hm_i": jnp.asarray(hm), **kw}
         with pytest.raises(ValueError, match="nemo_mxlice=2"):

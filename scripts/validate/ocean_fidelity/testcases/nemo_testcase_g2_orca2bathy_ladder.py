@@ -670,16 +670,18 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
                 **({"tke_avm_surface": s0.tke_avm_surface.replace(
                     data=jnp.asarray(var("avm_k")[0]))} if case == "ORCA2V1-tke" else {}))
 
+    def forcing(kt):
+        if case not in FORCED:
+            return {}
+        freshwater, surface = (g4 if case == "ORCA2G4-sbc" else g5).nemo_supplied_forcing(
+            card, root, kt)
+        if case == "ORCA2V1-tke":    # nn_mxlice=2 reads SI3's hm_i (D123 route)
+            surface = surface._replace(ice_mean_thickness_hm_i=g5.read_v1_hm_i(root, kt))
+        return {"freshwater": freshwater, "surface_forcing": surface}
+
     def step(state, kt):
         t0 = time.time()
-        kwargs = {}
-        if case in FORCED:
-            freshwater, surface = (g4 if case == "ORCA2G4-sbc" else g5).nemo_supplied_forcing(
-                card, root, kt)
-            if case == "ORCA2V1-tke":    # nn_mxlice=2 reads SI3's hm_i (D123 route)
-                surface = surface._replace(ice_mean_thickness_hm_i=g5.read_v1_hm_i(root, kt))
-            kwargs = {"freshwater": freshwater, "surface_forcing": surface}
-        new = jax.device_get(model.step(state, dt=card.dt_s, **kwargs))
+        new = jax.device_get(model.step(state, dt=card.dt_s, **forcing(kt)))
         return new, round(time.time() - t0, 1)
 
     if arm == "stages":
@@ -700,11 +702,7 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
             entry = s0 if kt == 1 else nemo_entry(kt)
         for name in exposures:
             hooks, frame = EXPOSURES[name]
-            kwargs = {}
-            if case in FORCED:
-                fw, sf = (g4 if case == "ORCA2G4-sbc" else g5).nemo_supplied_forcing(
-                    card, root, kt)
-                kwargs = {"freshwater": fw, "surface_forcing": sf}
+            kwargs = forcing(kt)
             st = jax.device_get(LatLonCGridOceanModel(
                 card.recipe.grid, z, cfg,
                 _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(**hooks)).step(
