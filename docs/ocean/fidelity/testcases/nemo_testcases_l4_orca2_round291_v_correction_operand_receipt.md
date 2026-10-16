@@ -89,9 +89,29 @@ upstream substep leaf that made `va_e` non-bit.
 
 ## Validation
 
-- **TO_FILL focused tests.**
-- **TO_FILL citation gates and plant.**
-- **TO_FILL ocean-fidelity battery.**
+- The round-291 direct tests, round-281/283/288/289/290 neighbour tests, and
+  citation-gate tests pass 44/44.  The focused log SHA256 is
+  `016efc14ac57a38463af0e66c0f9ae8b7f933beee2ae4c9369c011bec6b2a229`.
+- This receipt's citation gate and the cumulative default-receipt gate pass
+  with zero failures, zero unmapped citations and zero citation-map audit
+  failures (2 and 274 citations respectively).  A rigid two-line shift of the
+  external-target assignment exits 1.  The three retained SHA256 values are
+  `dbb6881523f3a7b62469304f6b067dbdba8f5e0b05d676d7daf571ee59441c6a`,
+  `8ddea3f2b4316b843b6f9cf70abac5d9b828bd33ab27ce858e579c45f4de1852`,
+  and `86b824220d3e2946fe2179f54213935bd87baf39f4238a04905fa1ea77499554`.
+- The one permitted `tests/ocean/fidelity -n 12` battery reached 91%, printed
+  five failures, then every pytest process disappeared without a terminal
+  summary; the orphaned wrapper was stopped and the battery was not repeated.
+  Its log SHA256 is
+  `d94f26ad525038fdc486df6509cb0a9baed36712756071cabcae2b137bb3b242`.
+  The eight registered branch-tip reds from round 290 were then run serially
+  and all eight reproduce: the GYRE round-129 record hash, two stale round-33
+  mutation anchors, the OMT-1 module-edge ratchet, the missing round-228
+  historical citation-map entry, the dirty-escape scope ratchet, the
+  worktree-stamp ratchet, and SI3 scalar-math provenance.  The isolated log
+  SHA256 is
+  `dd8b9574d4870ced54ab2097bf5bc8ad04f1f5c313caac42f36b10c84fb1472d`.
+  The round-291 tests are green in the focused run.
 - Independent review: operator.  No in-sandbox nested review was attempted,
   per the lane's current operator-review rule.
 - No package or card file changes exist, so ORCA2 trajectory, GYRE, DINO,
