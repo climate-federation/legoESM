@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Round 286: gate and D96 census for the resolved WS-RK3 face masks.
+"""Round 286: gate the held resolved WS-RK3 face-mask measurement.
 
-The control changes only the Python function that supplies masks to the
-already-selected WS-RK3 update.  It restores the pre-round compact masks;
-the candidate is the committed production route.  Card configuration and
-all other statements are identical within each same-tree comparison.
+The producer commit is deliberately no longer the branch tip: its same-tree
+candidate failed the independent rung-0 trajectory and was reverted.  This
+gate preserves and checks the local replay plus that fail-closed trajectory
+result; it cannot accidentally promote the held arm back into production.
 """
 
 from __future__ import annotations
@@ -12,7 +12,6 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from contextlib import contextmanager
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -21,19 +20,12 @@ for package in (REPO_ROOT, REPO_ROOT / "packages/core",
     if str(package) not in sys.path:
         sys.path.insert(0, str(package))
 
-from legoesm.ocean.fidelity.provenance import worktree_stamp  # noqa: E402
 from scripts.validate.ocean_fidelity.orca2_l4 import (  # noqa: E402
-    nemo_testcase_l4_orca2_round1_ladder_gate as rung10,
-    nemo_testcase_l4_orca2_round92_rung0_card_gate as rung0,
-    nemo_testcase_l4_orca2_round209_omt1_ladder_gate as omt1,
-    nemo_testcase_l4_orca2_round269_g1_decision96_gate as prior,
     nemo_testcase_l4_orca2_round276_omt_source_census_gate as r276,
-    nemo_testcase_l4_orca2_round278_d122_landing_gate as r278,
 )
 
 GateError = r276.GateError
 require = r276.require
-CARDS = r278.CARDS
 ARM = "resolved_ws_stage_masks"
 
 
@@ -65,116 +57,69 @@ def replay_gate(before: dict, after: dict, *, plant: str = "none") -> dict:
     }
 
 
-@contextmanager
-def _stage_mask_route(candidate: bool):
-    """Select production masks or the pre-round compact-only control."""
+def refusal_gate(control: dict, candidate_log: str, *,
+                 candidate_commit: str, plant: str = "none") -> dict:
+    """Require the same-tree control to finish and candidate to fail closed."""
 
-    from legoesm.ocean.dynamics import ocean_model_latlon_cgrid as model
-
-    original = model._nemo_ws_stage_face_masks
-    if not candidate:
-        def compact_only(z_coord, grid, dtype):
-            wet_u, wet_v = model.compute_face_masks_3d(
-                z_coord.is_active, grid)
-            return wet_u.astype(dtype), wet_v.astype(dtype)
-
-        model._nemo_ws_stage_face_masks = compact_only
-    try:
-        yield
-    finally:
-        model._nemo_ws_stage_face_masks = original
-
-
-def _ladder(rung: str, label: str, deck_root: Path, twin_a: Path,
-            candidate: bool) -> dict:
-    with _stage_mask_route(candidate):
-        if rung == "rung10":
-            _, card = rung10.card_fields(deck_root)
-            trajectory = rung10.candidate_trajectory(
-                deck_root, twin_a, card, max_step=10,
-                bridge_ssh=(label == "given_nemo_entry"))
-            rows, first = [], None
-            for checkpoint in trajectory["checkpoints"]:
-                if first is None and checkpoint["first_non_bit_field"] is not None:
-                    first = {"kt": checkpoint["kt"],
-                             "checkpoint": checkpoint["checkpoint"],
-                             "field": checkpoint["first_non_bit_field"]}
-                for field, score in checkpoint["rows"].items():
-                    rows.append({"kt": checkpoint["kt"],
-                                 "checkpoint": checkpoint["checkpoint"],
-                                 "field": field, **score})
-            require(len(rows) == 200 and first is not None,
-                    "shipped-card stage-mask ladder is incomplete")
-            return {"rows": rows, "row_count": 200,
-                    "first_non_bit_checkpoint": first}
-
-        require(label == "independent", "OMT/rung-0 label must be independent")
-        card = prior._selected_card(rung, deck_root)
-        entry = rung0.assemble_frame(twin_a, 1, 0)
-        state = (rung0.bridge_entry(card, entry)
-                 if rung == "rung0" else card.recipe.initial_state)
-        steps = tuple(range(1, 9 if rung == "omt1" else 11))
-        ladder = omt1._run_ladder(card, twin_a, state, label, steps=steps)
-        require(ladder["row_count"] == (160 if rung == "omt1" else 200),
-                "stage-mask source ladder is incomplete")
-        return ladder
-
-
-def measure(rung: str, label: str, deck_root: Path, twin_a: Path,
-            candidate: bool, expect_commit: str) -> dict:
-    import jax
-    from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
-
-    require((rung, label) in CARDS, f"unsupported card/label {(rung, label)}")
-    stamp = worktree_stamp()
-    require(stamp["clean"] and stamp["commit"].lower() == expect_commit.lower(),
-            "round-286 measurement requires its clean committed tree")
-    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
-    require(get_policy() == PrecisionPolicy.fp64(transcendentals="libm")
-            and bool(jax.config.jax_enable_x64), "fp64/libm is not active")
-    require(jax.default_backend() == "cpu" and not jax.config.jax_disable_jit,
-            "round-286 measurement requires production JIT on CPU")
+    require(control.get("status") == "PASS_R276_SOURCE_LADDER"
+            and control.get("arm") == "control", "control is not admitted")
+    require(control["rung"] == "rung0" and control["label"] == "independent",
+            "refusal control is not independent rung 0")
+    require(control["ladder"]["row_count"] == 200,
+            "rung-0 control did not complete ten steps")
+    require(control["worktree"]["commit"] == candidate_commit,
+            "control and candidate are not from one committed tree")
+    observed = candidate_log
+    if plant == "missing-refusal":
+        observed = observed.replace(
+            "raw-mesh e3w_int must contain only finite values > 0", "")
+    require(all(f"PROGRESS independent kt={kt}" in observed
+                for kt in (1, 2, 3)), "candidate did not complete kt=1..3")
+    require("PROGRESS independent kt=4" not in observed,
+            "candidate unexpectedly completed kt=4")
+    require("raw-mesh e3w_int must contain only finite values > 0" in observed,
+            "candidate live-thickness refusal is absent")
+    require("STATUS REFUSE" in observed, "candidate did not fail closed")
     return {
-        "format": "nemo-testcase-l4-orca2-round286-stage-mask-ladder-v1",
-        "status": "PASS_R276_SOURCE_LADDER",
-        "rung": rung, "label": label,
-        "arm": ARM if candidate else "control",
-        "selected_statements": [ARM] if candidate else [],
-        "worktree": stamp,
-        "execution": "production-jit-cpu-fp64-x64-libm",
-        "ladder": _ladder(rung, label, deck_root, twin_a, candidate),
+        "format": "nemo-testcase-l4-orca2-round286-trajectory-refusal-v1",
+        "status": "PASS_R286_TRAJECTORY_REFUSAL_GATE",
+        "rung": "rung0", "label": "independent",
+        "control_rows": 200, "candidate_completed_kt": [1, 2, 3],
+        "candidate_refused_before_checkpoint_kt": 4,
+        "refusal": "raw-mesh e3w_int must contain only finite values > 0",
+        "producer_commit": candidate_commit,
     }
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--measure", choices=("control", "candidate"))
-    parser.add_argument("--rung", choices=tuple(sorted({r for r, _ in CARDS})))
-    parser.add_argument("--label", choices=("independent", "given_nemo_entry"))
-    parser.add_argument("--deck-root", type=Path)
-    parser.add_argument("--twin-a", type=Path)
-    parser.add_argument("--expect-commit")
     parser.add_argument("--classify", nargs=2, type=Path)
     parser.add_argument("--replay-gate", nargs=2, type=Path)
-    parser.add_argument("--plant", choices=("none", "exact-loss", "consumer-bit"),
+    parser.add_argument("--refusal-gate", nargs=2, type=Path)
+    parser.add_argument("--candidate-commit")
+    parser.add_argument("--plant", choices=("none", "exact-loss", "consumer-bit",
+                                             "missing-refusal"),
                         default="none")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     try:
-        if args.measure:
-            require(all((args.rung, args.label, args.deck_root, args.twin_a,
-                         args.expect_commit)), "measurement arguments incomplete")
-            result = measure(args.rung, args.label, args.deck_root, args.twin_a,
-                             args.measure == "candidate", args.expect_commit)
-        elif args.classify:
+        if args.classify:
             require(args.plant != "consumer-bit",
                     "consumer-bit plant belongs to --replay-gate")
             result = r276.classify(*args.classify, plant=args.plant)
-        else:
-            require(args.replay_gate is not None, "no gate operation selected")
+        elif args.replay_gate:
             before = json.loads(args.replay_gate[0].read_text(encoding="utf-8"))
             after = json.loads(args.replay_gate[1].read_text(encoding="utf-8"))
             result = replay_gate(before, after, plant=args.plant)
+            require(args.plant == "none", f"{args.plant} plant stayed green")
+        else:
+            require(args.refusal_gate is not None and args.candidate_commit,
+                    "no gate operation selected")
+            control = json.loads(args.refusal_gate[0].read_text(encoding="utf-8"))
+            log = args.refusal_gate[1].read_text(encoding="utf-8")
+            result = refusal_gate(control, log,
+                                  candidate_commit=args.candidate_commit,
+                                  plant=args.plant)
             require(args.plant == "none", f"{args.plant} plant stayed green")
     except (GateError, OSError, KeyError, TypeError, ValueError) as error:
         print(f"STATUS {'PLANT-FIRED' if args.plant != 'none' else 'REFUSE'}: {error}")

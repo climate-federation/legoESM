@@ -32,6 +32,20 @@ def test_consumer_bit_plant_fires():
         gate.replay_gate(*_docs(), plant="consumer-bit")
 
 
+def test_trajectory_refusal_and_plant():
+    control_path = ROOT / "round286/rung0_independent_control.json"
+    log_path = ROOT / "round286/rung0_independent_candidate.log"
+    control = json.loads(control_path.read_text())
+    log = log_path.read_text()
+    commit = control["worktree"]["commit"]
+    result = gate.refusal_gate(control, log, candidate_commit=commit)
+    assert result["candidate_completed_kt"] == [1, 2, 3]
+    assert result["candidate_refused_before_checkpoint_kt"] == 4
+    with pytest.raises(gate.GateError, match="refusal is absent"):
+        gate.refusal_gate(control, log, candidate_commit=commit,
+                          plant="missing-refusal")
+
+
 def test_decision96_exact_loss_plant_fires():
     control = {
         "status": "PASS_R276_SOURCE_LADDER", "arm": "control",
