@@ -67,7 +67,7 @@ def test_classifier_names_signed_zero_then_mask_and_every_plant_fires():
     assert result["status"] == "HELD_R295_VECTOR_V_SSVMASK"
     for plant in gate.PLANTS[1:]:
         with pytest.raises(gate.GateError):
-            gate.classify(_report(), plant=plant)
+            gate.classify(result, plant=plant)
 
 
 def test_refuted_prediction_retains_measured_first_valued_operand():

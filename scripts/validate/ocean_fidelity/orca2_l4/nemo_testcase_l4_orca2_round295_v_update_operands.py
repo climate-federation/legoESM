@@ -249,6 +249,7 @@ def measure(deck_root: Path, record_root: Path, baseline_root: Path,
 def classify(report: dict[str, object], *, plant: str = "none") -> dict[str, object]:
     require(plant in PLANTS, f"unknown plant {plant!r}")
     report = copy.deepcopy(report)
+    registered_single = report.get("closing_single_substitution")
     if plant == "passivity":
         report["passivity"][next(iter(report["passivity"]))] = False
     elif plant == "source-order":
@@ -313,6 +314,9 @@ def classify(report: dict[str, object], *, plant: str = "none") -> dict[str, obj
         (name for name in INPUT_ORDER
          if report["cumulative_substitution"][name]["complete"]["unequal"] == 0),
         None)
+    if registered_single is not None:
+        require(registered_single == closing_single,
+                "registered single-substitution closure moved")
     predicted_bit = (
         first_bit == PREDICTED_BIT[0]
         and rows[first_bit]["complete"]["unequal"] == PREDICTED_BIT[1])
