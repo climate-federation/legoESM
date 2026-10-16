@@ -67,3 +67,9 @@ The frozen compiled depth span above says `dynspg_ts.f90:509-520`; the
 mechanically anchored executable span is `dynspg_ts.f90:509-519`. Line 520 is
 outside the eleven-line statement block. The original frozen text is retained
 unchanged; this correction governs the receipt and citation gate.
+
+## Correction appended 2026-10-16, second
+
+The preceding correction is **RETRACTED**. The compiled R280 block includes
+its closing `END DO` line, and the citation gate anchors the complete span as
+`dynspg_ts.f90:509-520`. The original frozen citation was correct.
