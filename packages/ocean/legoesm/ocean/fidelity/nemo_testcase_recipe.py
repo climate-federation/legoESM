@@ -1758,6 +1758,15 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
         rk3_stage_r3t_nemo_literal=True,
         nemo_eos_gdept_rounded_product=True,
         rk3_stage_r3uv_nemo_literal=True,
+        # G4 rounds 6-9: the shipped ORCA2 forcing/tracer program executes
+        # NEMO's stored wind divisor, folded V stress, live stress divisor,
+        # written tracer updates, and stored stage-3 Kmm thickness.
+        barotropic_wind_nemo_stored_depth=True,
+        surface_stress_nemo_fold_vector_sign=True,
+        zdf_surface_stress_nemo_face_thickness=True,
+        rk3_stage_tracer_written_order=True,
+        rk3_stage3_heat_nemo_written=True,
+        rk3_stage3_tracer_nemo_stored_thickness=True,
         barotropic=model_config.barotropic._replace(
             barotropic_een_ratio_fold_exchange=True,
             barotropic_een_fe3mask_pivot_row=True,

@@ -81,6 +81,11 @@ def build_rung0_card(deck_root: Path):
         ),
         zdf_drag_in_matrix=False,
         barotropic_drag_substep=False,
+        # G4's stage-3 heat/Kmm unit is certified on the forced ORCA2 path.
+        # Rung 0 has no heat/runoff/shortwave module, so B90 requires these
+        # forcing-path selectors to stay off here and on OMT-1..4.
+        rk3_stage3_heat_nemo_written=False,
+        rk3_stage3_tracer_nemo_stored_thickness=False,
     )
     root = Path(deck_root)
     temperature, salinity = build_orca2_initial_ts(
