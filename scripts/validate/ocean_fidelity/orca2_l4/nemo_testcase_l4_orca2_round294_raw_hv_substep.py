@@ -284,11 +284,20 @@ def classify(report: dict[str, object], *, plant: str = "none") -> dict[str, obj
     report["first_nonbit_statement"] = {
         "substep": first["substep"],
         "name": first["name"],
-        "nemo_source": (
+        "nemo_source": {
+            "face_depth_v_mid": (
+                "ORCA2_OMIP_L4_R280STAGE1/BLD/ppsrc/nemo/"
+                "dynspg_ts.f90:509-520"),
+            "metric_transport_v": (
+                "ORCA2_OMIP_L4_R280STAGE1/BLD/ppsrc/nemo/"
+                "dynspg_ts.f90:530-536"),
+            "v_exit": (
+                "ORCA2_OMIP_L4_R280STAGE1/BLD/ppsrc/nemo/"
+                "dynspg_ts.f90:666-678"),
+        }.get(
+            first["name"],
             "ORCA2_OMIP_L4_R280STAGE1/BLD/ppsrc/nemo/"
-            "dynspg_ts.f90:509-520" if first["name"] == "face_depth_v_mid"
-            else "ORCA2_OMIP_L4_R280STAGE1/BLD/ppsrc/nemo/"
-                 "dynspg_ts.f90:445-739"),
+            "dynspg_ts.f90:445-739"),
         "status": "HELD_INSIDE_ATOMIC_FOLD_UNIT",
     }
     report["status"] = (

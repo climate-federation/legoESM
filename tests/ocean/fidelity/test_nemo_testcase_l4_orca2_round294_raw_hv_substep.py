@@ -93,6 +93,8 @@ def test_refuted_prediction_is_retained_with_measured_boundary():
     result = gate.classify(report)
     assert result["prediction_ledger"]["R294-P4"].startswith("REFUTED")
     assert result["prediction_ledger"]["R294-P5"] == "NOT_CREDITED"
+    assert result["first_nonbit_statement"]["nemo_source"].endswith(
+        "dynspg_ts.f90:666-678")
 
 
 def test_raw_hv_arm_must_not_move_u_or_the_interior():
