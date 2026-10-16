@@ -4387,6 +4387,8 @@ def _orca2v1_tke_vertical(g5_vm, deck: ORCA2G1Deck):
         tke_langmuir_evaluation="nemo_literal",
         nemo_mxlice=2,                          # nn_mxlice=2, :620-623 (needs hm_i)
         nemo_mxl_terminal_e3t=True,             # e3t_3d(jpk), :690-692
+        nemo_etau_wmask=True,                   # * wmask * tmask(1), :500-501
+        tke_mxl_raw_evaluation="nemo_literal",  # MAX(rmxl_min,SQRT(2*en/zrn2)), :643-645
         etau_mode="below_ml",                   # nn_etau=1, :498-502
         etau_htau_mode="latitude",              # nn_htau=1 (namelist_ref:1252)
         etau_frac=_ORCA2V1_RN_EFR,              # rn_efr
@@ -4406,11 +4408,11 @@ def _orca2v1_tke_selected(vm) -> bool:
                  t.nemo_derived_mxl_min, t.nemo_mxl0_rmxl_min_overwrite, t.lc,
                  t.lc_coeff, t.etau_mode, t.etau_htau_mode, t.etau_frac, t.eice,
                  t.bottom_tke_bc, t.tke_langmuir_evaluation, t.nemo_mxlice,
-                 t.nemo_mxl_terminal_e3t,
-                 t.nemo_mxl0_surface_tmask) == (
+                 t.nemo_mxl_terminal_e3t, t.nemo_etau_wmask,
+                 t.tke_mxl_raw_evaluation, t.nemo_mxl0_surface_tmask) == (
                 3, _ORCA2V1_RN_EMIN, _ORCA2V1_RN_EMIN0, True, True, True,
                 _ORCA2V1_RN_LC, "below_ml", "latitude", _ORCA2V1_RN_EFR, 1, False,
-                "nemo_literal", 2, True, True))
+                "nemo_literal", 2, True, True, "nemo_literal", True))
 
 
 def _orca2v1_tke_initial_state(state, tmask, deck: ORCA2G1Deck):

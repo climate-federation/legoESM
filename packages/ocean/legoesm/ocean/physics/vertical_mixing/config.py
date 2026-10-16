@@ -659,6 +659,10 @@ class TKEConfig(NamedTuple):
     # not carry that extra slot. A record-backed NEMO card may select this arm
     # and supply ``z_coord.nemo_e3t_jpk``; missing data then raises.
     nemo_mxl_terminal_e3t: bool = False
+    # nn_etau=1 penetration masks, zdftke.f90:500-501 (`* wmask(jk) *
+    # tmask(1)`). The historical injection also fills dry W rows, which the
+    # nn_mxl bottom-up sweep then carries into wet cells. Card-selected.
+    nemo_etau_wmask: bool = False
     # Langmuir source evaluation. ``vectorized`` is the historical shared
     # construction. ``nemo_literal`` preserves zdftke.F90:422-463 operation
     # order, including the per-column mbkt+1 no-crossing fallback. Only the

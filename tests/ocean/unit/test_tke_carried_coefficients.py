@@ -369,6 +369,7 @@ def test_literal_raw_mxl_matches_hand_computed_source_order_and_red_control():
             l_surface_anchor=jnp.asarray([floor]))
 
 
+@pytest.mark.skipif(not jax.config.x64_enabled, reason="binary64 receipt")
 def test_literal_mxl_ldown_updates_jpkm1_only_with_true_terminal_e3t():
     e = jnp.asarray([[2.0, 3.0, 1.0e8]])
     n2 = jnp.full_like(e, 1.0e-12)
@@ -376,15 +377,18 @@ def test_literal_mxl_ldown_updates_jpkm1_only_with_true_terminal_e3t():
     cfg = TKEConfig(tke_mxl_choice=3, mxl_min=0.01,
                     tke_mxl_raw_evaluation="nemo_literal")
     floor = tke_mod._mixing_length_floor(cfg)
-    lk, _ = tke_mod.compute_mixing_lengths(
-        e, n2, jnp.ones_like(e), cfg, dz_cell=dz_cell,
-        l_surface_anchor=jnp.asarray([floor]))
+
+    @jax.jit
+    def lengths(e, n2, dz_cell, anchor):
+        return tke_mod.compute_mixing_lengths(
+            e, n2, jnp.ones_like(e), cfg, dz_cell=dz_cell,
+            l_surface_anchor=anchor)
+
+    lk, _ = lengths(e, n2, dz_cell, jnp.asarray([floor]))
     # Legacy shape has no e3t(jpk), so it retains the bounded jpk-pad proxy.
     assert float(lk[0, -1]) == floor
     widened = jnp.concatenate([dz_cell, jnp.asarray([[4.0]])], axis=-1)
-    lk_wide, _ = tke_mod.compute_mixing_lengths(
-        e, n2, jnp.ones_like(e), cfg, dz_cell=widened,
-        l_surface_anchor=jnp.asarray([floor]))
+    lk_wide, _ = lengths(e, n2, widened, jnp.asarray([floor]))
     # zdftke.f90:690-692: jk=jpkm1 is updated from untouched
     # zmxlm(jpk)=rmxl_min plus the true e3t(jpk) terminal thickness.
     assert float(lk_wide[0, -1]) == floor + 4.0
@@ -395,6 +399,77 @@ def test_literal_mxl_ldown_updates_jpkm1_only_with_true_terminal_e3t():
         cfg._replace(tke_mxl_raw_evaluation="factored"),
         dz_cell=dz_cell, l_surface_anchor=jnp.asarray([floor]))
     assert float(legacy[0, -1]) != floor
+
+
+def test_terminal_e3t_flag_reaches_the_closure_lengths_and_refuses_unused_paths(
+        monkeypatch):
+    """The selected e3t(jpk) row must reach every length call; unselected
+    stages refuse the flag instead of silently ignoring it."""
+    cfg = TKEConfig(prognostic=True, n2_mode="nemo_bn2",
+                    tke_n2_evaluation_stage="step_entry",
+                    nemo_mxl_terminal_e3t=True,
+                    kappaM_min=0.0, kappaH_min=0.0,
+                    enable_kappaH_profile=False)
+    bundle = tke_mod.TKEEntryN2Bundle(
+        rn2=jnp.asarray([[2.0, 4.0]]), rn2b=jnp.asarray([[3.0, 5.0]]),
+        gdepw_Kmm=jnp.asarray([[1.5, 4.0]]),
+        e3w_Kmm=jnp.asarray([[1.5, 2.5]]),
+        e3t_Kmm=jnp.asarray([[1.0, 2.0, 3.0]]),
+        e3t_jpk=jnp.asarray([77.0]))
+    seen = []
+
+    def fake_mxl(e, n2, *args, **kwargs):
+        seen.append(np.asarray(kwargs["dz_cell"]))
+        return jnp.ones_like(e), jnp.ones_like(e)
+
+    monkeypatch.setattr(tke_mod, "compute_mixing_lengths", fake_mxl)
+    tke_mod.tke_vertical_mixing(**_column_kwargs(cfg),
+                                precomputed_n2_bundle=bundle)
+    assert len(seen) == 2
+    for dz_cell in seen:
+        np.testing.assert_array_equal(dz_cell, [[1.0, 2.0, 3.0, 77.0]])
+
+    with pytest.raises(ValueError, match="requires the raw NEMO"):
+        tke_mod.tke_vertical_mixing(
+            **_column_kwargs(cfg),
+            precomputed_n2_bundle=bundle._replace(e3t_jpk=None))
+    implicit = cfg._replace(tke_n2_evaluation_stage="implicit_solve_state")
+    with pytest.raises(ValueError, match="requires tke_n2_evaluation_stage"):
+        tke_mod.tke_vertical_mixing(**_column_kwargs(implicit))
+    post = TKEConfig(prognostic=True, veros_dz_slots=True, n2_mode="adiabatic",
+                     positivity="veros_surface_correction",
+                     buoyancy_timing="post_mixing_veros",
+                     nemo_mxl_terminal_e3t=True)
+    with pytest.raises(ValueError, match="nemo_mxl_terminal_e3t=True is not"):
+        tke_mod._validate_post_mixing_cfg(post)
+    tke_mod._validate_post_mixing_cfg(post._replace(nemo_mxl_terminal_e3t=False))
+    with pytest.raises(ValueError, match="nemo_etau_wmask=True is not"):
+        tke_mod._validate_post_mixing_cfg(post._replace(
+            nemo_mxl_terminal_e3t=False, nemo_etau_wmask=True))
+
+
+@pytest.mark.skipif(not jax.config.x64_enabled, reason="binary64 receipt")
+def test_etau_wmask_leaves_dry_rows_and_wet_bits_as_nemo():
+    """zdftke.f90:500-501: the nn_etau increment carries wmask*tmask(1)."""
+    cfg = TKEConfig(etau_mode="below_ml", etau_htau_mode="constant10m",
+                    etau_frac=0.05, nemo_etau_wmask=True)
+    e = jnp.asarray([[1e-6, 2e-6, 3e-6], [4e-6, 5e-6, 6e-6]])
+    depth = jnp.asarray([[1.0, 5.0, 20.0], [1.0, 5.0, 20.0]])
+    taum = jnp.asarray([0.1, 0.2])
+    wmask = jnp.asarray([[1.0, 1.0, 0.0], [1.0, 1.0, 1.0]])
+    tmask1 = jnp.asarray([1.0, 0.0])
+    inject = jax.jit(lambda e, t, d, w, m: tke_mod.nemo_etau_injection(
+        e, t, d, cfg, wmask=w, surface_tmask=m))
+    out = np.asarray(inject(e, taum, depth, wmask, tmask1))
+    legacy = np.asarray(tke_mod.nemo_etau_injection(
+        e, taum, depth, cfg._replace(nemo_etau_wmask=False)))
+    keep = np.asarray(wmask * tmask1[:, None]) == 1.0
+    np.testing.assert_array_equal(out[keep].view(np.uint64),
+                                  legacy[keep].view(np.uint64))
+    np.testing.assert_array_equal(out[~keep], np.asarray(e)[~keep])
+    assert np.all(legacy[~keep] > np.asarray(e)[~keep])   # red control
+    with pytest.raises(ValueError, match="nemo_etau_wmask=True requires"):
+        tke_mod.nemo_etau_injection(e, taum, depth, cfg)
 
 
 @pytest.mark.skipif(not jax.config.x64_enabled, reason="binary64 receipt")

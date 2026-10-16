@@ -2692,6 +2692,8 @@ def nemo_etau_injection(
     rho_0: float = constants.rho_ocean,
     lat_deg: jnp.ndarray | None = None,
     ice_frac: jnp.ndarray | None = None,
+    wmask: jnp.ndarray | None = None,
+    surface_tmask: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     r"""Sub-ML penetration of surface TKE (NEMO nn_etau=1, zdftke.F90:492-496).
 
@@ -2744,6 +2746,13 @@ def nemo_etau_injection(
     inj = cfg.etau_frac * e_sfc[..., None] * profile
     if ice_frac is not None:
         inj = inj * jnp.maximum(0.0, 1.0 - ice_frac[..., None])
+    if getattr(cfg, "nemo_etau_wmask", False):
+        if wmask is None or surface_tmask is None:
+            raise ValueError(
+                "nemo_etau_wmask=True requires wmask and surface_tmask "
+                "(zdftke.f90:500-501).")
+        inj = (inj * jnp.asarray(wmask, dtype=inj.dtype)
+               * jnp.asarray(surface_tmask, dtype=inj.dtype)[..., None])
     return e + inj
 
 
@@ -3056,6 +3065,12 @@ def tke_vertical_mixing(
             "Unknown TKEConfig.tke_n2_evaluation_stage: expected "
             "'implicit_solve_state' or 'step_entry', got "
             f"{_n2_stage!r}.")
+    if (_n2_stage != "step_entry"
+            and getattr(cfg, "nemo_mxl_terminal_e3t", False)):
+        raise ValueError(
+            "nemo_mxl_terminal_e3t=True requires "
+            "tke_n2_evaluation_stage='step_entry' (the e3t(jpk) row rides on "
+            "the step-entry bundle).")
     if _n2_stage == "implicit_solve_state" and precomputed_n2_bundle is not None:
         raise ValueError(
             "precomputed_n2_bundle was supplied while "
@@ -3548,7 +3563,7 @@ def tke_vertical_mixing(
         # review finding #2). Prognostic mode (n_iterations=1) identical.
         tke_curr = nemo_etau_injection(
             tke_curr, taum, _depth_w, cfg, rho_0=rho_0, lat_deg=lat_deg,
-            ice_frac=ice_frac)
+            ice_frac=ice_frac, wmask=w_active, surface_tmask=surface_tmask)
 
     # Final K from converged TKE.
     l_k_final, l_eps_final = compute_mixing_lengths(
@@ -3711,6 +3726,17 @@ def _validate_post_mixing_cfg(cfg: TKEConfig) -> None:
                 "mixing does not accept bottom_dirichlet and would silently "
                 "keep the natural no-flux bottom row. Disable "
                 "bottom_tke_bc or use the standard pre_mixing path.")
+        if getattr(cfg, "nemo_etau_wmask", False):
+            raise ValueError(
+                "TKEConfig.nemo_etau_wmask=True is not supported with "
+                "buoyancy_timing='post_mixing_veros' — that path never runs "
+                "the nn_etau injection, so the mask would silently no-op.")
+        if getattr(cfg, "nemo_mxl_terminal_e3t", False):
+            raise ValueError(
+                "TKEConfig.nemo_mxl_terminal_e3t=True is not supported with "
+                "buoyancy_timing='post_mixing_veros' — tke_set_diffusivities "
+                "takes no step-entry bundle, so the e3t(jpk) row would be "
+                "silently dropped. Use the standard pre_mixing path.")
         if getattr(cfg, "tke_dry_wmask", False):
             raise ValueError(
                 "TKEConfig.tke_dry_wmask=True is not supported with "

@@ -132,7 +132,9 @@ def test_v1_card_is_g5_plus_the_tke_selection(cards):
                      "physics.vertical_mixing.tke.etau_htau_mode",
                      "physics.vertical_mixing.tke.tke_langmuir_evaluation",
                      "physics.vertical_mixing.tke.nemo_mxlice",
-                     "physics.vertical_mixing.tke.nemo_mxl_terminal_e3t"}
+                     "physics.vertical_mixing.tke.nemo_mxl_terminal_e3t",
+                     "physics.vertical_mixing.tke.nemo_etau_wmask",
+                     "physics.vertical_mixing.tke.tke_mxl_raw_evaluation"}
     vm = v1.recipe.model_config.physics.vertical_mixing
     t = vm.tke
     # Rule 10: the numbers the closure will use, as instantiated.
@@ -147,7 +149,11 @@ def test_v1_card_is_g5_plus_the_tke_selection(cards):
             t.nemo_mxl_terminal_e3t, t.nemo_mxl0_surface_tmask) == (
         "nemo_literal", 2, True, True)
     g5_tke = g5.recipe.model_config.physics.vertical_mixing.tke
-    assert (g5_tke.nemo_mxlice, g5_tke.nemo_mxl_terminal_e3t) == (0, False)
+    assert (g5_tke.nemo_mxlice, g5_tke.nemo_mxl_terminal_e3t,
+            g5_tke.nemo_etau_wmask) == (0, False, False)
+    assert t.nemo_etau_wmask is True   # zdftke.f90:500-501
+    assert (t.tke_mxl_raw_evaluation, g5_tke.tke_mxl_raw_evaluation) == (
+        "nemo_literal", "factored")    # zdftke.f90:643-645
     assert g5.recipe.z_coord.nemo_e3t_jpk is None
     dom = recipe._orca2g1_domain(INPUTS / CARD_FILES[0], 31)
     assert np.array_equal(
@@ -187,7 +193,8 @@ def test_v1_selector_check_fires_on_each_planted_tke_line(cards):
     for plant in ({"etau_mode": "none"}, {"eice": 0}, {"bottom_tke_bc": True},
                   {"tke_background": 1e-10}, {"lc": False},
                   {"tke_langmuir_evaluation": "vectorized"}, {"nemo_mxlice": 0},
-                  {"nemo_mxl_terminal_e3t": False}):
+                  {"nemo_mxl_terminal_e3t": False}, {"nemo_etau_wmask": False},
+                  {"tke_mxl_raw_evaluation": "factored"}):
         bad = vm._replace(tke=vm.tke._replace(**plant))
         card = v1._replace(recipe=v1.recipe._replace(model_config=cfg._replace(
             physics=cfg.physics._replace(vertical_mixing=bad))))
