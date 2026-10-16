@@ -89,3 +89,17 @@ def test_nonvacuous_without_exclude_the_overlap_exists(owned):
     collected = {
         f"{k}.{f}" for k, v in p.to_overrides().items() for f in v}
     assert collected & owned, "exclusion is vacuous — nothing would collide"
+
+
+def test_clubb_outer_config_spec_is_collected():
+    """CLUBB carries specs on BOTH CLUBBConfig (pdf_variance_scale) and the
+    nested CLUBBParams; following only ``.params`` dropped the outer one."""
+    from legoesm.training.aimip_params import aimip_scheme_keys_for
+    from legoesm.training.param_collector import build_trainable_params
+
+    keys = aimip_scheme_keys_for(
+        convection="zhang_mcfarlane", turbulence="clubb", gwd="mcfarlane",
+        microphysics="morrison", radiation="rrtmgp", cloud="cam6_clubb")
+    assert {"atm.turb.CLUBBConfig", "atm.turb.CLUBBParams"} <= keys
+    p = build_trainable_params(active_scheme_keys=keys, tier="extended")
+    assert "pdf_variance_scale" in p.to_overrides()["atm.turb.CLUBBConfig"]

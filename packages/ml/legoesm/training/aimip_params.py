@@ -814,14 +814,15 @@ def aimip_active_scheme_keys(physics_config) -> set[str]:
             active = getattr(fam_cfg, part, None)
             if active is None:
                 continue
-            # Descend into a nested ``params`` holder when that is what carries
-            # the spec (CLUBBConfig.params -> CLUBBParams).
-            target = getattr(active, "params", None)
-            if target is None or not hasattr(target, "_fields"):
-                target = active
-            cls = type(target).__name__
+            # The scheme config AND a nested ``params`` holder can both carry
+            # a spec (CLUBBConfig.pdf_variance_scale; CLUBBConfig.params ->
+            # CLUBBParams), so collect both.
+            classes = {type(active).__name__}
+            nested = getattr(active, "params", None)
+            if nested is not None and hasattr(nested, "_fields"):
+                classes.add(type(nested).__name__)
             keys |= {m.scheme_key for m in registry
-                     if m.config_class == cls
+                     if m.config_class in classes
                      and m.scheme_key.startswith(prefixes)}
     return keys
 
