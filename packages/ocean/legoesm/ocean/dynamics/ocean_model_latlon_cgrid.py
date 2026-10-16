@@ -67,6 +67,7 @@ from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
     nemo_qco_kmm_velocity_cycle,
     nemo_qco_wzv_operands,
     nemo_rk3_after_ssh_is_carried,
+    _nemo_c2_kinetic_energy,
     interp_to_v_points,
     interp_to_v_points_multi,
     centered_cell_to_uface,
@@ -83,6 +84,8 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     interp_cell_to_vface,
     min_cell_to_uface,
     min_cell_to_vface,
+    gradient_x_cgrid,
+    gradient_y_cgrid,
 )
 from legoesm.ocean.dynamics.barotropic_common import (
     ascending_level_sum,
@@ -1796,6 +1799,43 @@ def rk3_stage_velocity_update(
     # dynzdf.F90:127-132 and stprk3_stg.F90:373-378, key_qco form.
     return (_rk3_stage_update_written_order(velocity_before, rhs, dt_stage, qco_before, qco_now, qco_after, face_mask) if written_order  # noqa: E501
             else (qco_before * velocity_before + dt_stage * qco_now * rhs) / qco_after)
+
+
+_NEMO_SUBNORMAL_KEG_SCALE = float(2.0 ** 500)
+_NEMO_SUBNORMAL_KEG_SCALE_SQUARED = float(2.0 ** 1000)
+
+
+def _nemo_subnormal_keg_stage_increment(u, v, grid, dt_stage):
+    """Return scaled C2-KEG increments whose unscaled values are subnormal.
+
+    NEMO stores ``zu``, ``zv`` and ``zhke`` before applying the metric and
+    subtracting the KE gradient from ``Krhs`` (``dynkeg.f90:121-130``).  The
+    oracle CPU uses gradual underflow; XLA CPU flushes those results and even
+    subnormal operands to zero.  Scaling velocity by an exact power of two
+    keeps the same C2 statements normal.  The result remains scaled by
+    ``scale**2`` until it can be added to a normal stage-3 residual.
+    """
+    scale = _NEMO_SUBNORMAL_KEG_SCALE
+    scale_squared = _NEMO_SUBNORMAL_KEG_SCALE_SQUARED
+    ke_scaled = _nemo_c2_kinetic_energy(u * scale, v * scale)
+    keg_u = gradient_x_cgrid(ke_scaled, grid)
+    keg_v = gradient_y_cgrid(ke_scaled, grid)
+    tiny_scaled = jnp.finfo(u.dtype).tiny * scale_squared
+
+    def one(keg):
+        active = (keg != 0.0) & (jnp.abs(keg) < tiny_scaled)
+        return -nemo_source_round(dt_stage * keg), active
+
+    return one(keg_u), one(keg_v)
+
+
+def _nemo_add_scaled_subnormal_increment(field, increment_scaled, active):
+    """Add a power-of-two-scaled increment without forming a subnormal."""
+    scale_squared = _NEMO_SUBNORMAL_KEG_SCALE_SQUARED
+    adjusted = nemo_source_round(
+        nemo_source_round(field * scale_squared) + increment_scaled)
+    adjusted = adjusted / scale_squared
+    return jnp.where(active, adjusted, field)
 
 
 def _nemo_ws_qco_stage_faces(
@@ -4148,6 +4188,13 @@ class LatLonCGridOceanModel:
             raise ValueError("rk3_vector_rhs_nemo_order=True requires vector-form "
                              "momentum advection; flux_form has no separate "
                              "dyn_keg Krhs accumulation to order")
+        if (config.rk3_vector_keg_subnormal_preservation
+                and (not config.rk3_vector_rhs_nemo_order
+                     or _mom_adv != "vector_invariant"
+                     or config.ke_gradient_scheme != "c2")):
+            raise ValueError(
+                "rk3_vector_keg_subnormal_preservation=True requires the "
+                "C2 vector form with rk3_vector_rhs_nemo_order=True")
         if config.weno_smoothness not in VALID_WENO_SMOOTHNESS:
             raise ValueError(
                 f"weno_smoothness must be one of "
@@ -7863,6 +7910,7 @@ class LatLonCGridOceanModel:
         # (stprk3_stg.F90:437-446 is BELOW the CALL dyn_zdf at :430).  None on
         # every path that does not run the WS stage ladder.
         _ws_stage3_correction = None
+        _ws_stage3_subnormal_keg = None
         if getattr(_cfg_b, "momentum_time_integrator", "euler") == "rk3_ws":
             # WEIGHTS of the stage depth-mean operator.  NEMO's is REFERENCE
             # weighted and fixed for the whole run:
@@ -8981,6 +9029,19 @@ class LatLonCGridOceanModel:
                 stage_zad_operands=_stage_zad_operands(3, (
                     _momentum_stage_w(_g2), _g2[4], _g2[5])),
                 stage_index=3)
+            if _cfg_b.rk3_vector_keg_subnormal_preservation:
+                if u2_corr.shape[-1] != 1:
+                    raise ValueError(
+                        "rk3_vector_keg_subnormal_preservation is the "
+                        "measured one-level G1b path")
+                _keg_u, _keg_v = _nemo_subnormal_keg_stage_increment(
+                    u2_corr, v2_corr, _grid, dt_mom)
+                _ws_stage3_subnormal_keg = (
+                    _keg_u[0], _keg_v[0],
+                    _keg_u[1] & (p2u_corr == 0.0)
+                    & (_ws_stage_u_mask != 0.0),
+                    _keg_v[1] & (p2v_corr == 0.0)
+                    & (_ws_stage_v_mask != 0.0))
             _expose_stage3_rhs = (
                 self._nemo_ws_test_hooks.expose_stage3_momentum_rhs)
             if _expose_stage3_rhs == "post_ldf":
@@ -10861,6 +10922,21 @@ class LatLonCGridOceanModel:
                 tke=Field(data=tke_new, name="tke",
                           dims=("lat", "lon", "level"), units="m^2/s^2"),
             )
+
+        if _ws_stage3_subnormal_keg is not None:
+            # The one-level G1b solve is the identity.  Apply dyn_keg's
+            # gradual-underflow contribution to dyn_zdf's already-normal
+            # residual (record/full ORCA2 dynkeg.f90:121-130; dynzdf.f90:
+            # 138-160).  This is the first boundary where XLA can carry the
+            # value without flushing it; the ordinary card path is untouched.
+            _ki_u, _ki_v, _ka_u, _ka_v = _ws_stage3_subnormal_keg
+            state_new = state_new._replace(
+                u=state_new.u.replace(
+                    data=_nemo_add_scaled_subnormal_increment(
+                        state_new.u.data, _ki_u, _ka_u)),
+                v=state_new.v.replace(
+                    data=_nemo_add_scaled_subnormal_increment(
+                        state_new.v.data, _ki_v, _ka_v)))
 
         if self._nemo_ws_test_hooks.expose_stage3_raw_momentum:
             # WRITE-only capture at NEMO's raw-Kaa boundary: the implicit

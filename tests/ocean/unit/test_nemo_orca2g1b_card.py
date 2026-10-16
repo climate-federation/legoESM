@@ -119,6 +119,7 @@ def test_g1b_card_differs_from_g1_only_by_nemos_vector_branch(roots):
         "rk3_stage1_rhs_nemo_literal": (True, False),   # flux-form only (state.py)
         "een_nemo_relative_vorticity": (False, True),   # dynvor.f90:744-748
         "rk3_vector_rhs_nemo_order": (False, True),     # stp2d.f90:138, :144, :161
+        "rk3_vector_keg_subnormal_preservation": (False, True), # dynkeg:121-130
     }
     ba, bb = ca.barotropic, cb.barotropic
     moved_bt = {f for f in ba._fields if repr(getattr(ba, f)) != repr(getattr(bb, f))}
@@ -154,6 +155,7 @@ def test_g1b_selector_plants_are_refused(roots):
                        barotropic_flux_update_nemo_literal=True)},
                    {"een_nemo_relative_vorticity": False},
                    {"rk3_vector_rhs_nemo_order": False},
+                   {"rk3_vector_keg_subnormal_preservation": False},
                    {"barotropic": cfg.barotropic._replace(
                        barotropic_literal_fold_unit_vector_form=False)}):
         planted = card._replace(recipe=card.recipe._replace(
@@ -223,7 +225,9 @@ def test_g1b_step_routes_the_vector_rhs_order_into_every_stage(roots, monkeypatc
     for on in (True, False):
         seen.clear()
         m = om.LatLonCGridOceanModel(card.recipe.grid, card.recipe.z_coord,
-                                     cfg._replace(rk3_vector_rhs_nemo_order=on))
+                                     cfg._replace(
+                                         rk3_vector_rhs_nemo_order=on,
+                                         rk3_vector_keg_subnormal_preservation=on))
         m.step(card.recipe.initial_state, dt=card.dt_s)
         assert len(seen) >= 3
         assert all(bool(s) is on for s in seen), seen

@@ -6,6 +6,7 @@ are skipped off this machine; each one has a plant that must turn it red.
 from __future__ import annotations
 
 import importlib.util
+from collections import namedtuple
 from pathlib import Path
 
 import jax.numpy as jnp
@@ -72,6 +73,40 @@ def test_redundant_face_records():
     assert np.array_equal(ladder.pad_u(a)[:, 0], a[:, -1])
     assert ladder.pad_u(a).shape == (3, 5) and ladder.pad_v(a).shape == (4, 4)
     assert not ladder.pad_v(a)[0].any()
+
+
+def test_carried_leaf_diff_checks_every_leaf_and_its_plant():
+    """The carried-state audit must see a change outside the scored fields."""
+    State = namedtuple("State", "eta nested")
+    same = State(jnp.zeros((2, 3)), (jnp.ones(2), jnp.arange(3.0)))
+    changed = State(jnp.zeros((2, 3)), (jnp.ones(2), jnp.arange(3.0).at[1].add(0.5)))
+    clean = ladder.carried_leaf_diff(same, same)
+    planted = ladder.carried_leaf_diff(changed, same)
+    assert set(clean) == {"eta", "nested[0]", "nested[1]"}
+    assert all(row["n_unequal"] == 0 for row in clean.values())
+    assert planted["nested[1]"]["n_unequal"] == 1
+    assert planted["nested[1]"]["cells"] == [[1]]
+
+
+def test_scaled_subnormal_increment_survives_compiled_add_and_is_differentiable():
+    """The G1b repair carries a flushed increment to a normal residual."""
+    import jax
+    from legoesm.ocean.dynamics import ocean_model_latlon_cgrid as M
+
+    field = jnp.asarray([7.767256946156942e-297])
+    physical_increment = -6.7821825463957e-310
+    scaled = jnp.asarray([
+        physical_increment * M._NEMO_SUBNORMAL_KEG_SCALE_SQUARED])
+    active = jnp.asarray([True])
+    compiled = jax.jit(M._nemo_add_scaled_subnormal_increment)
+    got = np.asarray(compiled(field, scaled, active))
+    expected = np.asarray(field) + physical_increment
+    flushed = np.asarray(jax.jit(lambda x, dx: x + dx)(
+        field, jnp.asarray([physical_increment])))
+    assert np.array_equal(got, expected)
+    assert np.array_equal(flushed, np.asarray(field))
+    tangent = jax.grad(lambda x: jnp.sum(compiled(x, scaled, active)))(field)
+    assert np.array_equal(np.asarray(tangent), np.ones(1))
 
 
 class _Fold:
@@ -965,6 +1000,30 @@ def test_g1b_stage1_replay_selects_vector_velocity_statement(monkeypatch):
     replay_off = off["per_kt"][0]["stages"][0]["momentum_replay"]
     assert sum(r["card_raw_vs_written_update_of_card_rhs"]["n_unequal"]
                for r in replay_off["card_operand_rows"]) >= 1
+
+
+@needs_g1b_record
+def test_g1b_kt7_subnormal_keg_path_closes_stage3_and_removal_reopens_it(
+        monkeypatch):
+    """The selected gradual-underflow path owns the first trajectory bit."""
+    monkeypatch.setattr(ladder, "CASE", "ORCA2G1b-vec")
+    landed = ladder.run(G1B_RECORD, arm="stages", kt_min=7, kt_max=7,
+                        allow_dirty=True)
+    stage3 = landed["per_kt"][0]["stages"][2]
+    assert all(row["n_unequal"] == 0 for row in stage3["rows"])
+    replay_u = next(row for row in stage3["stage_replay"]["rows"]
+                    if row["face"] == "u")
+    assert replay_u["control_replay_vs_nemo"]["n_unequal"] == 0
+    assert replay_u["card_raw_vs_replay_raw"]["n_unequal"] == 0
+    assert replay_u["card_keg_vs_replay"]["n_unequal"] >= 1
+
+    removed = ladder.run(G1B_RECORD, arm="stages", kt_min=7, kt_max=7,
+                         allow_dirty=True, without_subnormal_keg=True)
+    stage3_off = removed["per_kt"][0]["stages"][2]
+    u_off = next(row for row in stage3_off["rows"]
+                 if row["name"].endswith(".u"))
+    assert u_off["n_unequal"] == 1
+    assert u_off["first_unequal_cell"] == [130, 113]
 
 
 @needs_record5
