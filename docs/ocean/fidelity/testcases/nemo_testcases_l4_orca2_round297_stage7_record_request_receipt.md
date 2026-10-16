@@ -34,7 +34,7 @@ UNMEASURED-with-spec until this acquisition admits.
 The resolved OMT-4 vector path applies the stage-1 velocity update at
 `ORCA2_OMIP_L4_R280STAGE1/BLD/ppsrc/nemo/stprk3_stg.f90:477-480`, diagnoses
 the barotropic correction at `:521-528`, and adds it at `:547-549`. It then
-builds the active-tracer transports at `:568-592`, zeros and fills the tracer
+builds the active-tracer transports at `:565-592`, zeros and fills the tracer
 RHS through advection at `:617-662`, applies the surface source at `:664-672`,
 and performs the QCO stage update at `:693-720`. The completed U/V/T/S state
 is associated at `:812-820`.
@@ -102,3 +102,9 @@ No `mpirun` was attempted in the sandbox.
    boundary that creates the kt=7 stage-1 growth.
 3. The complete fold unit remains private and atomic. No constituent lands
    until OMT-4 completes under both labels and the standing gates pass.
+
+## Citation correction
+
+The first committed receipt cited the active-tracer transport as `:568-592`.
+The branch begins at line 565; `:565-592` is the exact compiled span. The
+source order and acquisition schema are unchanged.

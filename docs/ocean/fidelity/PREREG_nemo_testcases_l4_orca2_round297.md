@@ -69,3 +69,10 @@ raw vector update. Lines 467-476 are the stage-integration heading and case
 dispatch; the executable vector update is exactly `:477-480`. The frozen
 prediction and source order are unchanged; this correction governs the
 receipt and citation gate.
+
+## Citation correction appended 2026-10-16, second
+
+The frozen compiled-order paragraph cites `stprk3_stg.f90:568-592` for the
+active-tracer transport branch. The branch begins at line 565; lines 568-592
+contain its calls and second dispatch. The mechanically anchored span is
+`:565-592`. No prediction, program order, or record field changes.
