@@ -120,8 +120,13 @@ kt 1–10.  Across A/B/C, restart coverage is every writable step 2 through the
 admitted boundary; step 1 is never requested.  Per-step surface frames must be
 finite, schema-valid, and byte-identical across all three twins.
 
-The corrected read-only preflight result and final commit are recorded below.
-No `makenemo` or `mpirun` was invoked by the author.
+Corrected read-only preflight at `a8d113f38` passed:
+
+`G5_PREFLIGHT_OK source=ORCA2_ORCA1ICE_OMIP_L4_R5FULLENTRY commit=a8d113f38dda1829dca7be6f2233a6fff1d01000 expected_boundary=kt11_after_10_completed`
+
+It would build the fresh writer-free and record targets named above, then run
+the smoke, boundary reference, and twins.  No `makenemo` or `mpirun` was invoked
+by the author.
 
 ## Preregistered prediction and tests
 
