@@ -352,3 +352,69 @@ def test_g6_dyn_zad_v_face_mask_keeps_the_pivot_row(roots, monkeypatch):
         pivot[on] = [float(s.sum()) for s in seen[1:]]
     assert all(p > 0 for p in pivot[True])
     assert not any(pivot[False])
+
+
+def test_g6_pivot_v_ratio_is_nemos_fold_image(roots, monkeypatch):
+    """stprk3_stg.f90:167-169: NEMO passes the stage ratios r3u/r3v through
+    lbc_lnk (sign +1), so the pivot V row is the mirrored row below, and both
+    div_hor (divhor.f90:125-130 -> ww) and dyn_zad's divisor
+    (dynzad.f90:125-126) read that image.  The card's stencil wraps the
+    pivot V row's northern neighbour to row 0.  Under G6's raw V mask the
+    ZAD divisor's pivot row is the fold image and the pivot-row ww moves;
+    fails if either the stage faces or the wzv call drops the exchange."""
+    import jax
+    import numpy as np
+    from legoesm.ocean.dynamics import ocean_model_latlon_cgrid as om
+    from legoesm.ocean.dynamics import ocean_pe_latlon_cgrid as pe
+
+    card = recipe.build_nemo_testcase_card(
+        "ORCA2G1b-vec", deck_root=roots["g1b"])
+    s0 = card.recipe.initial_state
+    tm = np.asarray(card.recipe.z_coord.is_active)[..., 0]
+    eta = np.random.default_rng(0).uniform(-0.05, 0.05, tm.shape) * tm
+    s0 = s0._replace(eta=s0.eta.replace(data=jax.numpy.asarray(eta)))
+    perm = np.asarray(card.recipe.grid.fold.perm_v)
+    seen = []
+    real = pe._bc_vertical_momentum_advection
+
+    def spy(du, dv, up, vp, w, hu, hv, um, vm, *a, **kw):
+        jax.debug.callback(lambda *x: seen.append([np.asarray(y) for y in x]),
+                           hv[-1, :, 0], hv[-2, :, 0], vm[-1, :, 0], w[-1, :, 1],
+                           ordered=True)
+        return real(du, dv, up, vp, w, hu, hv, um, vm, *a, **kw)
+
+    monkeypatch.setattr(pe, "_bc_vertical_momentum_advection", spy)
+    got = {}
+    for on in (True, False):
+        seen.clear()
+        cfg = card.recipe.model_config._replace(rk3_vector_raw_vmask=on)
+        om.LatLonCGridOceanModel(card.recipe.grid, card.recipe.z_coord,
+                                 cfg).step(s0, dt=card.dt_s)
+        assert len(seen) >= 3
+        got[on] = seen[1:]
+    for (top, below, wet, _), (top_off, _, _, _) in zip(got[True], got[False]):
+        wet = wet > 0
+        assert wet.sum() > 0
+        np.testing.assert_array_equal(top[wet], below[perm][wet])
+        assert (top_off[wet] != below[perm][wet]).any()
+    # the wzv call: same operands, only the exchange toggled
+    rng = np.random.default_rng(1)
+    st = card.recipe.initial_state
+    u = jax.numpy.asarray(rng.uniform(-0.1, 0.1, np.shape(st.u.data)))
+    v = jax.numpy.asarray(rng.uniform(-0.1, 0.1, np.shape(st.v.data)))
+    act = jax.numpy.asarray(card.recipe.z_coord.is_active, dtype=u.dtype)
+    out = {}
+    for on in (True, False):
+        out[on] = pe.nemo_qco_wzv_operands(
+            jax.numpy.asarray(eta), jax.numpy.asarray(eta), u, v,
+            card.recipe.grid, card.recipe.z_coord,
+            jax.numpy.asarray(st.u_mask.data)[..., None] * jax.numpy.ones_like(u),
+            jax.numpy.asarray(st.v_mask.data)[..., None] * jax.numpy.ones_like(v),
+            act, card.dt_s, eta_after_override=jax.numpy.asarray(eta) * 1.5,
+            fold_exchange_ratios=on)
+    lv_on, lv_off = np.asarray(out[True][2]), np.asarray(out[False][2])
+    w_on, w_off = np.asarray(out[True][0]), np.asarray(out[False][0])
+    np.testing.assert_array_equal(lv_on[-1][wet], lv_on[-2][perm][wet])
+    assert (lv_off[-1][wet] != lv_on[-1][wet]).any()
+    assert (w_on[-1] != w_off[-1]).any()
+    np.testing.assert_array_equal(w_on[:-1], w_off[:-1])
