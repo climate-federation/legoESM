@@ -317,3 +317,38 @@ def test_g6_stage_state_hands_vor_een_the_folded_pivot_v(roots, monkeypatch):
                 assert wet.any()
                 assert np.array_equal(s[-1][wet], image[wet])
     assert not any(p.any() for p in pivots[False])
+
+
+def test_g6_dyn_zad_v_face_mask_keeps_the_pivot_row(roots, monkeypatch):
+    """dynzad.f90:118-119: dyn_zad updates the pivot V row, whose raw vmask is
+    wet.  Under G6's raw V mask the vector-form vertical momentum advection
+    gets that mask for its V faces; the compact mask is dry there and zeroed
+    the increment.  Fails if the ZAD call goes back to the compact mask."""
+    import jax
+    import numpy as np
+
+    from legoesm.ocean.dynamics import ocean_model_latlon_cgrid as om
+    from legoesm.ocean.dynamics import ocean_pe_latlon_cgrid as pe
+
+    card = recipe.build_nemo_testcase_card(
+        "ORCA2G1b-vec", deck_root=roots["g1b"])
+    seen = []
+    real = pe._bc_vertical_momentum_advection
+
+    def spy(du, dv, up, vp, w, hu, hv, um, vm, *a, **kw):
+        jax.debug.callback(lambda x: seen.append(np.asarray(x)),
+                           vm[-1, :, 0], ordered=True)
+        return real(du, dv, up, vp, w, hu, hv, um, vm, *a, **kw)
+
+    monkeypatch.setattr(pe, "_bc_vertical_momentum_advection", spy)
+    pivot = {}
+    for on in (True, False):
+        seen.clear()
+        cfg = card.recipe.model_config._replace(rk3_vector_raw_vmask=on)
+        om.LatLonCGridOceanModel(card.recipe.grid, card.recipe.z_coord,
+                                 cfg).step(card.recipe.initial_state,
+                                           dt=card.dt_s)
+        assert len(seen) >= 3
+        pivot[on] = [float(s.sum()) for s in seen[1:]]
+    assert all(p > 0 for p in pivot[True])
+    assert not any(pivot[False])
