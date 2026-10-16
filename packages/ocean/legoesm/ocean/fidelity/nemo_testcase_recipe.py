@@ -4023,9 +4023,7 @@ ORCA2G4_UNMEASURED: tuple[str, ...] = (
     "freshwater_budget_nn_fwb2",       # sbcfwb.f90 (zero correction in year 1)
 )
 ORCA2G5_UNMEASURED: tuple[str, ...] = (
-    "g5_record_not_admitted",
-    "nemo_post_si3_surface_records",
-    "kt2_barotropic_continuation_with_ice_drag",
+    "kt9_independent_all_level_u_continuation",
 )
 # G1b = G1 + ORCA2's vector-form momentum advection (user, 2026-10-14).
 ORCA2G1B_UNMEASURED: tuple[str, ...] = (

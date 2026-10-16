@@ -405,10 +405,14 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
         dump: Path | None = None, without_zdf_faces: bool = False,
         without_tracer_rounding: bool = False,
         without_rhs_ascending_sum: bool = False,
-        without_zdf_stage_r3u: bool = False, case: str = CASE) -> dict:
+        without_zdf_stage_r3u: bool = False,
+        without_top_drag_consumer: str | None = None,
+        case: str = CASE) -> dict:
     require(case in CASES, f"unknown case {case!r}")
     require(arm in ARMS, f"unknown arm {arm!r}")
     require(plant in (None, "score", "level"), f"unknown plant {plant!r}")
+    require(without_top_drag_consumer in (None, "residual", "substeps", "dyn_zdf"),
+            f"unknown top-drag consumer {without_top_drag_consumer!r}")
     from legoesm.ocean.fidelity.provenance import allow_dirty_stamps, git_sha
     allow_dirty_stamps(allow_dirty)
     sha = git_sha(allow_dirty=allow_dirty)
@@ -480,7 +484,14 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
             n_stage += 1
     else:
         n_stage = g1.stage_steps(root) if has_frames else 0
-    model = LatLonCGridOceanModel(card.recipe.grid, z, cfg)
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import _NEMOWSRK3TestHooks
+    consumer_hooks = _NEMOWSRK3TestHooks(
+        omit_ice_top_drag_residual=without_top_drag_consumer == "residual",
+        omit_ice_top_drag_substeps=without_top_drag_consumer == "substeps",
+        omit_ice_top_drag_zdf=without_top_drag_consumer == "dyn_zdf",
+    )
+    model = LatLonCGridOceanModel(
+        card.recipe.grid, z, cfg, _nemo_ws_test_hooks=consumer_hooks)
     require(s0.eta_rk3_after is None, "the card carries an after-ssh slot")
     if case == "ORCA2G4-sbc":
         sys.path.insert(0, str(HERE / "nemo_testcase_g4_orca2sbc"))
@@ -513,6 +524,7 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
                cfg.rk3_stage3_heat_nemo_written),
            "rk3_stage3_tracer_nemo_stored_thickness": bool(
                cfg.rk3_stage3_tracer_nemo_stored_thickness),
+           "without_top_drag_consumer": without_top_drag_consumer,
            "forcing": ("NEMO-supplied surface fields at each kt"
                        if case == "ORCA2G4-sbc" else
                        "NEMO's post-SI3 ocean surface input at each kt"
@@ -612,11 +624,20 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
                 _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(**hooks)).step(
                     entry, dt=card.dt_s, **kwargs))
             cand = card_surface(st)
-            # G5's stage frames hold no barotropic velocity: those rows are absent
             rows = [g1.row(f"{name}.kt{kt}.{f}", g[n], cand[f], reg)
                     for f, n in frame.items() if n in g]
+            levels = None
+            if name.startswith("stage"):
+                stage = int(name[-1])
+                card_all = card_levels(st)
+                levels = {}
+                for f, n in (("u", "uu"), ("v", "vv"), ("T", "tn"), ("S", "sn")):
+                    by_level = level_rows(
+                        g[f"{stage}_{n}_all_aa"], card_all[f], cls[POINT[f]])
+                    levels[f] = {"summary": class_summary(by_level), "levels": by_level}
             out["per_kt"].append({"kt": kt, "exposure": name, "rows": rows,
-                                  "first_unequal": g1.first_unequal(rows)})
+                                  "first_unequal": g1.first_unequal(rows),
+                                  "all_levels": levels})
             if dump is not None:
                 np.savez(Path(dump) / f"card_kt{kt}_{name}.npz", **card_levels(st),
                          ssh=np.asarray(st.eta.data))
@@ -942,6 +963,9 @@ def main(argv=None) -> int:
                     help="BEFORE ARM: the card's Ue_rhs depth sum in XLA's order")
     ap.add_argument("--without-zdf-stage-r3u", action="store_true",
                     help="BEFORE ARM: dyn_zdf's r3u(Kmm) as the ratio of the mean ssh")
+    ap.add_argument("--without-top-drag-consumer",
+                    choices=("residual", "substeps", "dyn_zdf"),
+                    help="G5 CONTROL: omit exactly one downstream top-drag consumer")
     ap.add_argument("--case", choices=CASES, default=CASE)
     ap.add_argument("--allow-dirty", action="store_true")
     ap.add_argument("--output", type=Path, required=True)
@@ -955,7 +979,9 @@ def main(argv=None) -> int:
               without_zdf_faces=a.without_zdf_faces,
               without_tracer_rounding=a.without_tracer_rounding,
               without_rhs_ascending_sum=a.without_rhs_ascending_sum,
-              without_zdf_stage_r3u=a.without_zdf_stage_r3u, case=a.case)
+              without_zdf_stage_r3u=a.without_zdf_stage_r3u,
+              without_top_drag_consumer=a.without_top_drag_consumer,
+              case=a.case)
     a.output.write_text(json.dumps(out, indent=1) + "\n")
     if a.arm == "geometry":
         print(f"GEOMETRY {out['n_bit_identical']} of {out['n_rows']} rows bit-identical")

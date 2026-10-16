@@ -120,6 +120,8 @@ def read_step(root: Path, kt: int, roots, nk: int = 30) -> dict[str, np.ndarray]
     for s in (1, 2, 3):
         st = read_stage(root / f"oracle_stage_kt{kt:08d}_s{s}.bin", expect_step=kt, expect_stage=s)
         out[f"{s}_ssh_aa"] = np.asarray(st["ssh"], np.float64)
+        out[f"{s}_uu_b_aa"] = np.asarray(bt["uu_b"], np.float64)
+        out[f"{s}_vv_b_aa"] = np.asarray(bt["vv_b"], np.float64)
         for f, n in (("T", "tn"), ("S", "sn"), ("u", "uu"), ("v", "vv")):
             lev = _lev(st[f], nk)
             out[f"{s}_{n}_k1_aa"] = lev[..., 0]
@@ -297,7 +299,8 @@ def identity(ev: Path, deck_root: Path, plant: bool = False) -> dict:
 
 def top_drag(ev: Path, plant: bool = False) -> dict:
     """kt = 1: NEMO's recorded external-mode drag coefficient against the
-    card's production T-to-U/V coefficient path, including the north fold."""
+    card's jitted production T-to-U/V coefficient path, including the north
+    fold and IEEE signed zeros."""
     root = Path(ev) / "twin_a"
     path = root / "oracle_bt_drag_operands_kt00000001.bin"
     with path.open("rb") as fh:
@@ -316,9 +319,15 @@ def top_drag(ev: Path, plant: bool = False) -> dict:
         nemo_ice_ocean_top_drag_coeff_faces,
     )
     from legoesm.ocean.fidelity import nemo_testcase_recipe as recipe
+    import jax
+    import jax.numpy as jnp
     card = recipe.build_nemo_testcase_card("ORCA2G5-ice", deck_root=root)
-    rep_u, rep_v, _, _, _ = nemo_ice_ocean_top_drag_coeff_faces(
-        rec["rCdU_ice"], card.recipe.grid, dtype=np.float64)
+    # The input is a tracer here, not a closed-over eager constant.  This is
+    # the production compilation mode in which XLA can eliminate ``zeros + x``.
+    rep_u, rep_v, _, _, _ = jax.jit(
+        lambda x: nemo_ice_ocean_top_drag_coeff_faces(
+            x, card.recipe.grid, dtype=np.float64)
+    )(jnp.asarray(rec["rCdU_ice"], dtype=jnp.float64))
     # NEMO stores the east/north native face; lego stores redundant west/south
     # boundaries, hence [:,1:] / [1:,:].  The G5-selected production path
     # carries NEMO's signed (non-positive) pCdU coefficient directly.
@@ -338,12 +347,15 @@ def top_drag(ev: Path, plant: bool = False) -> dict:
                       "card_vs_nemo_on_all_wet_faces": _cmp(rep, nemo, face),
                       "wet_faces_scored": int(face.sum()),
                       "fold_row_nonzero_faces_scored": int(wet[-1].sum()) if name == "zCdU_v" else 0}
+        rows[name]["card_negative_zero_faces"] = int(
+            np.count_nonzero((rep == 0.0) & np.signbit(rep)))
     rows["fr_i>0_cells"] = int(ice.sum())
     bad = [n for n in ("zCdU_u", "zCdU_v")
            if rows[n]["card_vs_nemo_on_all_wet_faces"]["unequal"]
            or rows[n]["nemo_nonzero_faces"] == 0]
     require(not bad, f"{'plant fired' if plant else 'top-drag replay FAILED'}: {bad}")
-    return {"label": "kt 1 external-mode drag coefficient, NEMO record vs replay vs card", **rows}
+    return {"label": "kt 1 jitted external-mode drag coefficient, NEMO record vs replay vs card",
+            "jit_traced_input": True, **rows}
 
 
 def main() -> int:

@@ -1208,6 +1208,12 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # tuple member independently replaces density reciprocal, face stresses,
     # or live inverse depths; None retains the production operand.
     slow_forcing_wind_operand_override: object = None
+    # G5 non-vacuity controls: omit exactly one of the three downstream
+    # consumers of the already-tested ice/ocean face coefficient.  These are
+    # private test arms; no constructible model configuration can select them.
+    omit_ice_top_drag_residual: bool = False
+    omit_ice_top_drag_substeps: bool = False
+    omit_ice_top_drag_zdf: bool = False
     # Substitute NEMO's six raw b/bb arrays at the barotropic loop entry while
     # leaving legoESM's carried state untouched.  This covers both a cold-start
     # ll_init frame and a continuation frame; private fidelity measurement only.
@@ -6651,6 +6657,18 @@ class LatLonCGridOceanModel:
         du_dt_pert = du_dt - F_slow_u[..., jnp.newaxis]
         dv_dt_pert = dv_dt - F_slow_v[..., jnp.newaxis]
 
+        # stp2d.f90:219 calls dyn_drg_init before the wind additions at
+        # stp2d.f90:228-231.  The G5 top residual must therefore start from the
+        # pre-wind depth mean.  Keep the post-wind value above for the 3-D
+        # perturbation split: the wind is withheld from ``du_dt``/``dv_dt`` and
+        # restored by dyn_zdf, whereas dyn_drg_init's residual is barotropic
+        # only.  Other cards retain their established arithmetic path.
+        _ice_drag_before_wind = getattr(
+            _cfg_b, "implicit_ice_ocean_top_drag", False)
+        if _ice_drag_before_wind:
+            F_slow_u = _F_slow_depth_u
+            F_slow_v = _F_slow_depth_v
+
         # NEMO dyn_drg_init baroclinic-residual drag correction (#1226;
         # dynspg_ts.F90:1614-1643, DINO branch ln_isfcav=F/ln_drgice_imp=F):
         #   pCdU_u  = r1_2*(rCdU_bot(ji+1,jj)+rCdU_bot(ji,jj))        (:1616)
@@ -6711,7 +6729,8 @@ class LatLonCGridOceanModel:
                     _dragged_slow_v[1:, :],
                     F_slow_v[1:, :],
                 ))
-        if getattr(_cfg_b, "implicit_ice_ocean_top_drag", False):
+        if (getattr(_cfg_b, "implicit_ice_ocean_top_drag", False)
+                and not self._nemo_ws_test_hooks.omit_ice_top_drag_residual):
             # dyn_drg_init.f90:1468-1488, ln_bt_fw=T: use the NOW top-cell
             # baroclinic residual and the carried NOW barotropic velocity.
             from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
@@ -6775,6 +6794,13 @@ class LatLonCGridOceanModel:
         else:
             _F_slow_drag_u = F_slow_u
             _F_slow_drag_v = F_slow_v
+            if _ice_drag_before_wind:
+                F_slow_u = nemo_source_round(
+                    F_slow_u + _wind_increment_u) * _slow_surface_u_mask
+                F_slow_v = nemo_source_round(
+                    F_slow_v + _wind_increment_v) * _slow_surface_v_mask
+                _F_slow_wind_u = F_slow_u
+                _F_slow_wind_v = F_slow_v
 
         # A2 — depth-mean biharmonic hyperviscosity on (U_bar, V_bar).
         # Damps the barotropic standing mode at deep cells next to steep
@@ -7587,7 +7613,10 @@ class LatLonCGridOceanModel:
                 if getattr(_cfg_b, "implicit_ice_ocean_top_drag", False):
                     _baro_seed = dict(
                         _baro_seed,
-                        ice_ocean_top_drag_rCdu=_top_drag_rCdu)
+                        ice_ocean_top_drag_rCdu=(
+                            jnp.zeros_like(_top_drag_rCdu)
+                            if self._nemo_ws_test_hooks.omit_ice_top_drag_substeps
+                            else _top_drag_rCdu))
                 if _een_pre_shared is not None:
                     _baro_seed = dict(
                         _baro_seed, een_pre_override=_een_pre_shared)
@@ -13507,8 +13536,9 @@ class LatLonCGridOceanModel:
                 v_solve_in = v_solve_in - (
                     dt_mom * _r_eff_v[..., jnp.newaxis]
                     / jnp.maximum(_drg_e3v, 1e-10) * _is_bot_v * _v_bt_mean)
-        if do_momentum and getattr(
-                _cfg_b, "implicit_ice_ocean_top_drag", False):
+        if (do_momentum
+                and getattr(_cfg_b, "implicit_ice_ocean_top_drag", False)
+                and not self._nemo_ws_test_hooks.omit_ice_top_drag_zdf):
             # dynzdf.f90:171-178,308-312,476-480.  With no cavity miku/mikv
             # are the first wet level, and rCdU_top is SI3's recorded field.
             from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (

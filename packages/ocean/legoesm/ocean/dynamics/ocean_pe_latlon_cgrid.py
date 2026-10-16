@@ -4095,6 +4095,10 @@ def nemo_ice_ocean_top_drag_coeff_faces(rCdU_ice, grid, *, dtype=None):
     sum_u = nemo_source_round(r_lon[:, :-1] + r_lon[:, 1:])
     sum_v = interp_to_v_points(r_cdu, grid, nemo_source_sum=True)
     # pCdU = .5*((rCdU_bot pair) + (rCdU_top pair)); rCdU_bot is +0 on G5.
+    # XLA may eliminate ``+ 0`` under jit and retain the top pair's ``-0``.
+    # Materialize NEMO's positive zero explicitly before the final multiply.
+    sum_u = jnp.where(sum_u == 0.0, jnp.abs(sum_u), sum_u)
+    sum_v = jnp.where(sum_v == 0.0, jnp.abs(sum_v), sum_v)
     zero_u, zero_v = jnp.zeros_like(sum_u), jnp.zeros_like(sum_v)
     coeff_u = nemo_source_round(
         0.5 * nemo_source_round(zero_u + sum_u))

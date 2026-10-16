@@ -13,9 +13,14 @@ import pytest
 CASES = Path(__file__).resolve().parents[3] / "scripts/validate/ocean_fidelity/testcases"
 RECORD = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/"
               "round10/oracle_g2_r10/p3_a_100step")
+G5_RECORD = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/"
+                 "round31/oracle_g5_r31")
 needs_record = pytest.mark.skipif(
     not (RECORD / "oracle_g1step_kt00000001.bin").is_file(),
     reason="the operator's G2 record is not on this machine")
+needs_g5_record = pytest.mark.skipif(
+    not (G5_RECORD / "twin_a/oracle_step_entry_kt00000001.bin").is_file(),
+    reason="the operator's G5 record is not on this machine")
 
 
 @pytest.fixture(scope="module")
@@ -404,3 +409,30 @@ def test_the_100_step_record_is_bit_identical_on_every_field(ladder):
                for d in deep for v in d.values() for c in ("full", "partial"))
     assert len(out["history_rows"]) == 60
     assert all(r["n_unequal"] == 0 for r in out["history_rows"])
+
+
+@needs_g5_record
+@pytest.mark.slow
+def test_each_g5_top_drag_consumer_is_required_at_step_two(ladder):
+    """Consumers 2--4 are individually non-vacuous after the kt-2 order fix."""
+    root = G5_RECORD / "twin_a"
+    restarts = (G5_RECORD / "twin_b", G5_RECORD / "twin_c")
+
+    after = ladder.run(root, arm="independent", kt_from=1, kt_to=2,
+                       restart_roots=restarts, allow_dirty=True,
+                       case="ORCA2G5-ice")
+    assert all(r["status"] == "AT-BAR" for p in after["per_kt"] for r in p["rows"])
+    assert all(v["summary"]["status"] == "AT-BAR"
+               for p in after["per_kt"] for v in (p["all_levels"] or {}).values())
+
+    for consumer in ("residual", "substeps", "dyn_zdf"):
+        before = ladder.run(
+            root, arm="independent", kt_from=1, kt_to=2,
+            restart_roots=restarts, allow_dirty=True, case="ORCA2G5-ice",
+            without_top_drag_consumer=consumer)
+        debts = [r for p in before["per_kt"] for r in p["rows"]
+                 if r["status"] == "DEBT"]
+        debts.extend(v["summary"] for p in before["per_kt"]
+                     for v in (p["all_levels"] or {}).values()
+                     if v["summary"]["status"] == "DEBT")
+        assert debts, f"omitting G5 top-drag {consumer} stayed at the bar"

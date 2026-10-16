@@ -126,7 +126,7 @@ def test_g5_card_is_g4_plus_si3_entry_and_record_route(tmp_path):
         "nemo_post_si3_records", "nemo_ocean_surface_input_v1")
     assert g5.unmeasured_features == recipe.ORCA2G5_UNMEASURED
     assert "implicit_ice_ocean_top_drag_rCdU_ice" not in g5.unmeasured_features
-    assert "kt2_barotropic_continuation_with_ice_drag" in g5.unmeasured_features
+    assert g5.unmeasured_features == ("kt9_independent_all_level_u_continuation",)
     assert g5.icebergs_enabled is False and g5.iceberg_inputs == ()
     assert recipe._orca2g1_selector_failures(g5) == []
     with pytest.raises(ValueError, match="not execution-ready"):
@@ -317,10 +317,12 @@ def test_g5_admission_passes_and_its_passivity_plant_fires():
 def test_g5_top_drag_replay_is_exact_and_its_plant_fires():
     g5 = _g5_records()
     res = g5.top_drag(RECORD)
+    assert res["jit_traced_input"] is True
     for face, n in (("zCdU_u", 3519), ("zCdU_v", 3593)):
         assert res[face]["nemo_nonzero_faces"] == n
         assert res[face]["card_vs_nemo_on_nemo_nonzero"]["unequal"] == 0
         assert res[face]["card_vs_nemo_on_all_wet_faces"]["unequal"] == 0
+        assert res[face]["card_negative_zero_faces"] == 0
     assert res["zCdU_v"]["fold_row_nonzero_faces_scored"] == 68
     with pytest.raises(g5.Refuse, match="plant fired"):
         g5.top_drag(RECORD, plant=True)
