@@ -3218,6 +3218,9 @@ class LatLonCGridOceanConfig(NamedTuple):
     # dyn_zdf's surface-stress deposit divides by NEMO's live face thickness
     # e3u_3d(1)*(1+r3u(Kaa)*umask) (dynzdf.f90:334-340).
     zdf_surface_stress_nemo_face_thickness: bool = False
+    # NEMO's stage-1/2 tracer update (stprk3_stg.f90:672-680) rounds each
+    # written product and sum before the final quotient.
+    rk3_stage_tracer_written_order: bool = False
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":
