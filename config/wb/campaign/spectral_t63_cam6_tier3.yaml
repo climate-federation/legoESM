@@ -262,7 +262,7 @@ classical:
   microphysics: morrison
   gwd: mcfarlane
   surface_bulk: constant
-  rad_update_interval_steps: 6
+  rad_update_interval_steps: 2  # AMIP production: hourly radiation
   orbital_insolation: true
   convective_rain_to_surface: true
   rrtmgp_gpoint_batch_size: 8
@@ -275,15 +275,18 @@ classical:
       # outside the trainable spec bounds (1e-6, 1e-3), exactly as production
       # treats it (off, untrained).
       q_c_diagnostic: 0.0
-      cloud_optics_inhomogeneity: two_region
+      cloud_optics_inhomogeneity: constant  # AMIP production
+      cloud_inhomogeneity_factor: 1.0
       cloud_partial_coverage_optics: none
-      cloud_vertical_overlap_optics: max_random
+      cloud_vertical_overlap_optics: mcica  # AMIP production (CAM6 McICA)
+      conv_cloud_condensate: 0.0  # AMIP production; below trainable bounds, so pinned
       cloud_n_subcolumns: 8
       cloud_fsd: 1.0
       convective_cloud: false
     atm.turb.CLUBBConfig:
       prognostic: true
     atm.micro.MorrisonConfig:
+      warm_rain_incloud: true  # AMIP production (CAM6 MG2 in-cloud warm rain)
       # CAM6 clubb_do_liqsupersat = .false.: no condensation step after the
       # physics, and no ice-curve blend of it. Matches the MPAS production
       # deck (config/amip/amip_production.yaml, both rows false).
