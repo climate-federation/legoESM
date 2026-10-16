@@ -663,6 +663,10 @@ class TKEConfig(NamedTuple):
     # tmask(1)`). The historical injection also fills dry W rows, which the
     # nn_mxl bottom-up sweep then carries into wet cells. Card-selected.
     nemo_etau_wmask: bool = False
+    # NEMO's rab_3d_t/bn2_t (eosbn2.F90) with every source operation rounded
+    # before its consumer; the compiled default lets XLA contract them.
+    # Card-selected.
+    nemo_bn2_source_rounded: bool = False
     # Langmuir source evaluation. ``vectorized`` is the historical shared
     # construction. ``nemo_literal`` preserves zdftke.F90:422-463 operation
     # order, including the per-column mbkt+1 no-crossing fallback. Only the

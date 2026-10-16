@@ -11654,6 +11654,12 @@ class LatLonCGridOceanModel:
             tke_cfg = vmix.tke
             stage = getattr(
                 tke_cfg, "tke_n2_evaluation_stage", "implicit_solve_state")
+            if (getattr(tke_cfg, "nemo_bn2_source_rounded", False)
+                    and stage != "step_entry"):
+                raise ValueError(
+                    "nemo_bn2_source_rounded=True needs "
+                    "tke_n2_evaluation_stage='step_entry' (the NEMO bn2 "
+                    f"bundle); got {stage!r}")
             if stage == "implicit_solve_state" and not _gm_carried:
                 return None
             if stage not in ("implicit_solve_state", "step_entry"):
@@ -11731,6 +11737,8 @@ class LatLonCGridOceanModel:
             zrw_gdept_0=gdept_0,
             zrw_gdepw_0=gdepw_0,
             zrw_stretch=zrw_stretch,
+            source_rounded=bool(_tke_active and getattr(
+                tke_cfg, "nemo_bn2_source_rounded", False)),
         )
         _bn2_selector = self._nemo_ws_test_hooks.bn2_intermediate
         _bn2_override = self._nemo_ws_test_hooks.bn2_alpha_beta_override

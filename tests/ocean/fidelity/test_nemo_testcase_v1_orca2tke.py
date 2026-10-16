@@ -134,7 +134,8 @@ def test_v1_card_is_g5_plus_the_tke_selection(cards):
                      "physics.vertical_mixing.tke.nemo_mxlice",
                      "physics.vertical_mixing.tke.nemo_mxl_terminal_e3t",
                      "physics.vertical_mixing.tke.nemo_etau_wmask",
-                     "physics.vertical_mixing.tke.tke_mxl_raw_evaluation"}
+                     "physics.vertical_mixing.tke.tke_mxl_raw_evaluation",
+                     "physics.vertical_mixing.tke.nemo_bn2_source_rounded"}
     vm = v1.recipe.model_config.physics.vertical_mixing
     t = vm.tke
     # Rule 10: the numbers the closure will use, as instantiated.
@@ -152,6 +153,8 @@ def test_v1_card_is_g5_plus_the_tke_selection(cards):
     assert (g5_tke.nemo_mxlice, g5_tke.nemo_mxl_terminal_e3t,
             g5_tke.nemo_etau_wmask) == (0, False, False)
     assert t.nemo_etau_wmask is True   # zdftke.f90:500-501
+    # eosbn2.f90:1281-1333 (rab_3d_t), :1631-1637 (bn2_t), one rounding per operation
+    assert (t.nemo_bn2_source_rounded, g5_tke.nemo_bn2_source_rounded) == (True, False)
     assert (t.tke_mxl_raw_evaluation, g5_tke.tke_mxl_raw_evaluation) == (
         "nemo_literal", "factored")    # zdftke.f90:643-645
     assert g5.recipe.z_coord.nemo_e3t_jpk is None
@@ -194,7 +197,8 @@ def test_v1_selector_check_fires_on_each_planted_tke_line(cards):
                   {"tke_background": 1e-10}, {"lc": False},
                   {"tke_langmuir_evaluation": "vectorized"}, {"nemo_mxlice": 0},
                   {"nemo_mxl_terminal_e3t": False}, {"nemo_etau_wmask": False},
-                  {"tke_mxl_raw_evaluation": "factored"}):
+                  {"tke_mxl_raw_evaluation": "factored"},
+                  {"nemo_bn2_source_rounded": False}):
         bad = vm._replace(tke=vm.tke._replace(**plant))
         card = v1._replace(recipe=v1.recipe._replace(model_config=cfg._replace(
             physics=cfg.physics._replace(vertical_mixing=bad))))
