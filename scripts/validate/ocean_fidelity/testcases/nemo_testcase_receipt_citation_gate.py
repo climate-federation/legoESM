@@ -1726,6 +1726,30 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- GRIDLADDER round 32 (G5 round 2 receipt) ---
+    'ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/dynspg_ts.f90:1431-1432': [
+        'pCdU_u(ji,jj) = r1_2*( ( rCdU_bot(ji+1,jj) + rCdU_bot(ji,jj) ) + ( rCdU_top(ji+1,jj) + rCdU_top(ji,jj) ) )',
+        'pCdU_v(ji,jj) = r1_2*( ( rCdU_bot(ji,jj+1) + rCdU_bot(ji,jj) ) + ( rCdU_top(ji,jj+1) + rCdU_top(ji,jj) ) )', 2],
+    'ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/stp2d.f90:219': 'CALL dyn_drg_init( Kbb, Kbb, uu, vv, uu_b, vv_b, Ue_rhs, Ve_rhs, CdU_u, CdU_v )',
+    'ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/zdfdrg.f90:187': 'rCdU_top(ji,jj) = rCdU_ice(ji,jj)',
+    'ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/iceupdate.f90:403': 'rCdU_ice(ji,jj) = -r1_rho0 * tmod_io(ji,jj) * at_i(ji,jj) * tmask(ji,jj,1)',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynspg_ts.f90:1431-1432': [
+        'pCdU_u(ji,jj) = r1_2*( ( rCdU_bot(ji+1,jj) + rCdU_bot(ji,jj) ) + ( rCdU_top(ji+1,jj) + rCdU_top(ji,jj) ) )',
+        'pCdU_v(ji,jj) = r1_2*( ( rCdU_bot(ji,jj+1) + rCdU_bot(ji,jj) ) + ( rCdU_top(ji,jj+1) + rCdU_top(ji,jj) ) )', 2],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stp2d.f90:219': 'CALL dyn_drg_init( Kbb, Kbb, uu, vv, uu_b, vv_b, Ue_rhs, Ve_rhs, CdU_u, CdU_v )',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfdrg.f90:187': 'rCdU_top(ji,jj) = rCdU_ice(ji,jj)',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/iceupdate.f90:403': 'rCdU_ice(ji,jj) = -r1_rho0 * tmod_io(ji,jj) * at_i(ji,jj) * tmask(ji,jj,1)',
+    'ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/stprk3.f90:183': ('CALL zdf_phy( kstp, Nbb, Nbb, Nrhs )', 1),
+    'ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/stp2d.f90:140-166': [('CALL eos    ( ts, Kbb, rhd )', 1), ('CALL dyn_zad( kt, Kbb, uu, vv, Krhs )', 1), 27],
+    'ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/iceupdate.f90:405': ('zflagi = 0._wp', 1),
+    'ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/iceupdate.f90:417': 'utau(ji,jj) = ( 1._wp - at_i(ji,jj) ) * utau_oce(ji,jj) + at_i(ji,jj) * zutau_ice',
+    'ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/dynspg_ts.f90:1487-1488': [
+        'pu_RHSi(ji,jj) = pu_RHSi(ji,jj) + (r1_hu_0(ji,jj) /(1._wp+r3u(ji,jj,Kmm))) * r1_2*( rCdU_top(ji+1,jj)+rCdU_top(ji,jj) ) * zu_i(ji,jj)',
+        'pv_RHSi(ji,jj) = pv_RHSi(ji,jj) + (r1_hv_0(ji,jj) /(1._wp+r3v(ji,jj,Kmm))) * r1_2*( rCdU_top(ji,jj+1)+rCdU_top(ji,jj) ) * zv_i(ji,jj)', 2],
+    'ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/dynzdf.f90:175-177': [
+        'puu(ji,jj,iku,Kaa) = puu(ji,jj,iku,Kaa) + zDt_2 * ( rCdU_top(ji+1,jj)+rCdU_top(ji,jj) ) * uu_b(ji,jj,Kaa)',
+        'pvv(ji,jj,ikv,Kaa) = pvv(ji,jj,ikv,Kaa) + zDt_2 * ( rCdU_top(ji,jj+1)+rCdU_top(ji,jj) ) * vv_b(ji,jj,Kaa)', 3],
+    'ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/dynzdf.f90:312': 'zwd(ji,iku) = zwd(ji,iku) - zDt_2 *( rCdU_top(ji+1,jj)+rCdU_top(ji,jj) )',
     # --- GRIDLADDER round 29 (G1b round 5 receipt) ---
     'ORCA2G1_OMIP_L1_R4REF/BLD/ppsrc/nemo/dynkeg.f90:128-130': [
         ('DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  0)', 1),

@@ -231,3 +231,77 @@ def test_source_controls_are_real():
         recipe.read_orca2g1_deck(G5)
     # A non-G5 card must refuse an otherwise valid SI3 overlay rather than ignore it.
     assert "namsbc.nn_ice" in recipe.orca2g_ice_failures(G5, "ORCA2G4-sbc")
+
+
+# ---- round 32: the G5 record reader, admission and top-drag replay ---------
+RECORD = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/"
+              "round31/oracle_g5_r31")
+needs_record = pytest.mark.skipif(not (RECORD / "twin_a").is_dir(), reason="no G5 record")
+
+
+def _g5_records():
+    import sys
+    sys.path.insert(0, str(G5))
+    import g5_records
+    return g5_records
+
+
+def _write_surface(path: Path, kt: int, nx: int, ny: int, fill) -> None:
+    from scripts.validate.ocean_fidelity.orca2_l4 import (
+        nemo_testcase_l4_orca2_phase2b_exchange_gate as schema)
+    header = (1, kt, 1 if kt % 2 else 3, nx, ny, 2, 10, 2, 20, 12, 1, 2, 64)
+    chunks = []
+    shapes = {"full": (nx, ny), "reduced": (nx - 4, ny - 4), "halo1": (nx - 2, ny - 2),
+              "reduced3d": (nx - 4, ny - 4, 2)}
+    for name, kind in schema.FIELDS:
+        chunks.append(np.asfortranarray(fill(name, shapes[kind])).ravel(order="F"))
+    with path.open("wb") as fh:
+        fh.write(schema.MAGIC.ljust(16).encode())
+        fh.write(struct.pack("=13i", *header))
+        np.concatenate(chunks).astype(np.float64).tofile(fh)
+
+
+def test_g5_surface_reader_cuts_halos_and_transposes(tmp_path):
+    g5 = _g5_records()
+    nx, ny = 9, 8
+
+    def fill(name, shape):        # value encodes (field, x, y) of the WRITTEN array
+        idx = np.indices(shape[:2])
+        base = 1000.0 * idx[0] + idx[1]
+        return base[..., None].repeat(shape[2], -1) if len(shape) == 3 else base
+
+    _write_surface(tmp_path / "oracle_ocean_surface_input_kt00000001.bin", 1, nx, ny, fill)
+    rec = g5.surface(tmp_path, 1)
+    # full fields lose two halo cells, halo1 one, reduced none; (y, x) order
+    assert rec["utau"].shape == rec["taum"].shape == rec["rCdU_ice"].shape == (ny - 4, nx - 4)
+    assert rec["utau"][0, 0] == 1000.0 * 2 + 2 and rec["utau"][1, 0] == 2 + 1 + 2000.0
+    assert rec["taum"][0, 0] == 0.0 and rec["rCdU_ice"][0, 0] == 1000.0 + 1
+    assert rec["rnf_tsc"].shape == (ny - 4, nx - 4, 2)
+    full = g5.surface(tmp_path, 1, keep_halo=True)
+    assert full["utau"].shape == (ny, nx) and full["rCdU_ice"].shape == (ny - 2, nx - 2)
+    with pytest.raises(g5.Refuse):          # a frame for another step is refused
+        (tmp_path / "oracle_ocean_surface_input_kt00000001.bin").rename(
+            tmp_path / "oracle_ocean_surface_input_kt00000002.bin")
+        g5.surface(tmp_path, 2)
+
+
+@needs_record
+def test_g5_admission_passes_and_its_passivity_plant_fires():
+    g5 = _g5_records()
+    res = g5.admit(RECORD)
+    assert res["passivity"]["step"] == 10 and res["passivity"]["restart_fields"] == {
+        "ORCA2G1_00000010_restart.nc": 38}
+    assert res["twin_identical_files"] == 60
+    with pytest.raises(g5.Refuse, match="PASSIVITY FAILED"):
+        g5.admit(RECORD, "passivity")
+
+
+@needs_record
+def test_g5_top_drag_replay_is_exact_and_its_plant_fires():
+    g5 = _g5_records()
+    res = g5.top_drag(RECORD)
+    for face, n in (("zCdU_u", 3519), ("zCdU_v", 3593)):
+        assert res[face]["nemo_nonzero_faces"] == n
+        assert res[face]["replay_vs_nemo_on_nemo_nonzero"]["unequal"] == 0
+    with pytest.raises(g5.Refuse, match="plant fired"):
+        g5.top_drag(RECORD, plant=True)
