@@ -225,6 +225,10 @@ FILES = {
         _ORCA2_COMPILED / "in_out_manager.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcflx.f90": (
         _ORCA2_COMPILED / "sbcflx.f90"),
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/trasbc.f90": (
+        _ORCA2_COMPILED / "trasbc.f90"),
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/traqsr.f90": (
+        _ORCA2_COMPILED / "traqsr.f90"),
     # ORCA2 round 278 cites the Decision-122 statements in the shipped build.
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynzdf.f90": (
         _ORCA2_COMPILED / "dynzdf.f90"),
@@ -7751,6 +7755,33 @@ CITATION_MAP = {
     'VORTEX_SMT4_VEC_R8_OMIP_L1_P3/BLD/ppsrc/nemo/dynadv.f90:134-138': [
         'SELECT CASE( n_dynadv )    !==  compute advection trend and add it to general trend  ==!',
         'CALL dyn_zad     ( kt                , Kmm, puu, pvv, Krhs )                  !* vertical advection', 5],
+    # --- ORCA2 round 285: G4 ladder-certified statement import -------
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stp2d.f90:225-230': [
+        ('WRITE(l2_slow_unit) r1_rho0', 1),
+        ('Ve_rhs(ji,jj) =  Ve_rhs(ji,jj) + r1_rho0', 1), 6],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcmod.f90:553-569': [
+        ('!       (in addition to snwice_mass)', 1),
+        ('&                      ( 2. - vmask(ji,jj,1) )', 1), 17],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynzdf.f90:336-339': [
+        ('DO ji = ntsi-( 0), ntei+( 0 )                    !==  second recurrence', 1),
+        ('/ ( (e3u_3d(ji,jj,1) *(1._wp+r3u(ji,jj,Kaa)', 2), 4],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:678-680': [
+        ('ts(ji,jj,jk,jn,Kaa) = (', 1),
+        ('/          ( 1._wp + r3t(ji,jj,Kaa) )', 1), 3],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:217-224': [
+        ('ssh (:,:,Kaa) = r1_2 * ( ssh (:,:,Kbb) + ssha(:,:) )', 2),
+        ('r3f(:,:)     = r2_3 * r3fb(:,:) + r1_3 * r3fa(:,:)', 2), 8],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/trasbc.f90:307': (
+        'pts(ji,jj,1,jp_tem,Krhs) = pts(ji,jj,1,jp_tem,Krhs) +  r1_rcp * qns(ji,jj) * z1_rho0_e3t', 1),
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/sbcrnf.f90:279-282': [
+        ('ELSE                       !==   runoff put only at the surface', 1),
+        ('phdivn(ji,jj,1) = phdivn(ji,jj,1) - rnf(ji,jj)', 1), 4],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/traqsr.f90:387-394': [
+        ('!                                      !- fluxes at jk+1 w-level', 1),
+        ('pts(ji,jj,jk,jp_tem,Krhs) = pts(ji,jj,jk,jp_tem,Krhs) + r1_rho0_rcp * ( zeT(ji,jj) - zzeT ) / ze3t', 1), 8],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/trazdf.f90:288-289': [
+        ('zrhs =       (e3t_3d(ji,jj,jk)', 1),
+        ('& + p2dt * (e3t_3d(ji,jj,jk)', 1), 2],
 }
 
 
