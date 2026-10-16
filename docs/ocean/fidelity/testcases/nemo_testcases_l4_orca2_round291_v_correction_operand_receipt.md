@@ -112,8 +112,12 @@ upstream substep leaf that made `va_e` non-bit.
   SHA256 is
   `dd8b9574d4870ced54ab2097bf5bc8ad04f1f5c313caac42f36b10c84fb1472d`.
   The round-291 tests are green in the focused run.
-- Independent review: operator.  No in-sandbox nested review was attempted,
-  per the lane's current operator-review rule.
+- Independent review unavailable in-sandbox: the required read-only
+  `codex exec --sandbox read-only` attempt exited 1 because its in-process
+  app-server client tried to write in the read-only sandbox.  The retained log
+  SHA256 is
+  `eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5`.
+  Independent review remains with the operator under the current lane rule.
 - No package or card file changes exist, so ORCA2 trajectory, GYRE, DINO,
   tank and acquisition gates are off-claim.
 
