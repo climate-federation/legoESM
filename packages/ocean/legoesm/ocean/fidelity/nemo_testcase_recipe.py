@@ -4395,6 +4395,7 @@ def _orca2v1_tke_vertical(g5_vm, deck: ORCA2G1Deck):
         nemo_bn2_source_rounded=True,           # rab_3d_t/bn2_t, eosbn2.f90:1281-1333,1631-1637
         nemo_sh2_step_entry_ssh=True,           # zdf_sh2 r3u(Nbb), zdfsh2.f90:98-108; stprk3.f90:185
         nemo_tke_solve_source_rounded=True,     # zdftke.f90:466,472 without FMA
+        nemo_sh2_fold_top_v=True,               # zdfsh2.f90:98-113 pivot north V face
         tke_htau_evaluation="nemo_scalar_libm",  # SIN(rpi/180*gphit), :864
         tke_etau_exponential_evaluation="nemo_scalar_libm",  # EXP, :500
         etau_mode="below_ml",                   # nn_etau=1, :498-502
@@ -4420,11 +4421,11 @@ def _orca2v1_tke_selected(vm) -> bool:
                  t.tke_mxl_raw_evaluation, t.nemo_mxl0_surface_tmask,
                  t.nemo_bn2_source_rounded, t.nemo_sh2_step_entry_ssh,
                  t.nemo_tke_solve_source_rounded, t.tke_htau_evaluation,
-                 t.tke_etau_exponential_evaluation) == (
+                 t.tke_etau_exponential_evaluation, t.nemo_sh2_fold_top_v) == (
                 3, _ORCA2V1_RN_EMIN, _ORCA2V1_RN_EMIN0, True, True, True,
                 _ORCA2V1_RN_LC, "below_ml", "latitude", _ORCA2V1_RN_EFR, 1, False,
                 "nemo_literal", 2, True, True, "nemo_literal", True, True, True,
-                True, "nemo_scalar_libm", "nemo_scalar_libm"))
+                True, "nemo_scalar_libm", "nemo_scalar_libm", True))
 
 
 def _orca2v1_tke_initial_state(state, tmask, deck: ORCA2G1Deck):

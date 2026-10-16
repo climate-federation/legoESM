@@ -11810,6 +11810,10 @@ class LatLonCGridOceanModel:
         stage = getattr(
             tke_cfg, "tke_shear_evaluation_stage", "implicit_solve_state")
         if stage == "implicit_solve_state":
+            if getattr(tke_cfg, "nemo_sh2_fold_top_v", False):
+                raise ValueError(
+                    "nemo_sh2_fold_top_v=True is read only by the step-entry "
+                    "shear (tke_shear_evaluation_stage='step_entry')")
             return None
         if stage != "step_entry":
             raise ValueError(
@@ -11885,6 +11889,25 @@ class LatLonCGridOceanModel:
         u_mask, v_mask = compute_face_masks_3d(is_active)
         metric_source = getattr(
             tke_cfg, "tke_shear_metric_source", "tpoint_jacobian")
+        fold_top_v = bool(getattr(tke_cfg, "nemo_sh2_fold_top_v", False))
+        kappa_north_v = None
+        if fold_top_v:
+            # T-pivot fold (lbcnfd.f90:584-720): the pivot row's north V face
+            # is wet in NEMO's raw vmask and its north T/W neighbour is the
+            # mirror of the row below the pivot (avm_k 'W' +1,
+            # stprk3_stg.f90:785-793; ssh 'T' +1).
+            _fold = getattr(self.grid if grid is None else grid, "fold", None)
+            _raw = getattr(_zc, "nemo_een_barotropic", None)
+            if (_fold is None or not bool(_fold.is_active)
+                    or metric_source != "nemo_qco_live_face" or _raw is None):
+                raise ValueError(
+                    "nemo_sh2_fold_top_v=True needs an active north fold, "
+                    "tke_shear_metric_source='nemo_qco_live_face' and the "
+                    "card's raw NEMO vmask (z_coord.nemo_een_barotropic)")
+            _perm_t = _fold.perm_T
+            v_mask = v_mask.at[-1].set(
+                jnp.asarray(_raw.vmask[-1], dtype=v_mask.dtype))
+            kappa_north_v = state.tke_avm.data[-2][_perm_t]
         if metric_source not in ("tpoint_jacobian", "nemo_qco_live_face"):
             raise ValueError(
                 "Unknown TKEConfig.tke_shear_metric_source: expected "
@@ -11930,8 +11953,10 @@ class LatLonCGridOceanModel:
             def _qco_r3(eta):
                 num_u = 0.5 * (
                     a_t * eta + jnp.roll(a_t * eta, -1, axis=1))
-                num_v = 0.5 * (
-                    a_t * eta + jnp.roll(a_t * eta, -1, axis=0))
+                _north_t = jnp.roll(a_t * eta, -1, axis=0)
+                if fold_top_v:
+                    _north_t = _north_t.at[-1].set((a_t * eta)[-2][_perm_t])
+                num_v = 0.5 * (a_t * eta + _north_t)
                 wet_u = hu0 > 0.0
                 wet_v = hv0 > 0.0
                 wet_u_f = wet_u.astype(dtype)
@@ -11969,7 +11994,7 @@ class LatLonCGridOceanModel:
         p_sh2 = avm_weighted_shear_production(
             _u_now, _v_now, _u_before, _v_before,
             dz_half, u_mask, v_mask, state.tke_avm.data,
-            face_metrics=face_metrics)
+            face_metrics=face_metrics, kappa_north_v=kappa_north_v)
         return (p_sh2, face_metrics) if return_face_metrics else p_sh2
 
     def _tke_realized_kdiss_active(self) -> bool:

@@ -317,6 +317,7 @@ def avm_weighted_shear_production(
     *,
     face_metrics: tuple[jnp.ndarray, jnp.ndarray,
                         jnp.ndarray, jnp.ndarray] | None = None,
+    kappa_north_v: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     r"""NEMO ``zdf_sh2`` shear-PRODUCTION term ``p_sh2`` with the viscosity
     face-averaged INSIDE the face sum, exactly as ``zdfsh2.F90:80-94``
@@ -364,6 +365,8 @@ def avm_weighted_shear_production(
     ----------
     u_face_now, v_face_now, u_face_before, v_face_before, dz_half, u_mask,
     v_mask : as :func:`vertical_shear_face_native`.
+    kappa_north_v : optional ``(n_lon, nlev-1)`` viscosity north of the top
+        V face (a T-pivot fold image); None keeps the edge-repeat.
     kappaM_T : ``(n_lat, n_lon, nlev-1)`` — T-point (single per-interface)
         viscosity — face-summed here via array rolls, matching NEMO's
         ``avm(ji+1,jj,jk)+avm(ji,jj,jk)`` exactly; NOT new staggered state.
@@ -431,6 +434,9 @@ def avm_weighted_shear_production(
     kM_face_u = kM_left_u + kM_right_u          # (n_lat, n_lon+1, nlev-1)
     kM_left_v = jnp.concatenate([kappaM_T[:1, :, :], kappaM_T], axis=0)
     kM_right_v = jnp.concatenate([kappaM_T, kappaM_T[-1:, :, :]], axis=0)
+    if kappa_north_v is not None:
+        # north-fold top face: NEMO's avm_k(ji,jj+1) is the fold image row
+        kM_right_v = kM_right_v.at[-1].set(kappa_north_v)
     kM_face_v = kM_left_v + kM_right_v          # (n_lat+1, n_lon, nlev-1)
 
     if face_metrics is None:

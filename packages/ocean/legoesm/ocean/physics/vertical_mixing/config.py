@@ -676,6 +676,10 @@ class TKEConfig(NamedTuple):
     # subtraction (NEMO's build has no FMA); the default lets XLA contract.
     # Card-selected.
     nemo_tke_solve_source_rounded: bool = False
+    # zdf_sh2 on the T-pivot row's north V face (zdfsh2.f90:98-113): wet raw
+    # vmask, north avm_k and r3v ssh from the fold images (lbcnfd.f90:584-720)
+    # instead of a wall. Card-selected.
+    nemo_sh2_fold_top_v: bool = False
     # Langmuir source evaluation. ``vectorized`` is the historical shared
     # construction. ``nemo_literal`` preserves zdftke.F90:422-463 operation
     # order, including the per-column mbkt+1 no-crossing fallback. Only the
