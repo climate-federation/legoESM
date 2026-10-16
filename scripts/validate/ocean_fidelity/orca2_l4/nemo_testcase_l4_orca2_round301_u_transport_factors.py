@@ -88,6 +88,13 @@ def read_bt(path: Path, kt: int) -> dict[str, np.ndarray]:
     return dict(zip(("uu_b", "vv_b", "un_adv", "vn_adv"), xy))
 
 
+def nemo_zfu(uu, un_adv, inverse_depth, uu_b, umask, e2u, e3u):
+    """NEMO ``stprk3_stg.f90:284,290`` in its written association (NumPy fp64)."""
+    zub = un_adv * inverse_depth - uu_b
+    corrected = uu + zub[..., None] * umask
+    return corrected, (e2u[..., None] * e3u) * corrected
+
+
 def nemo_factors(record_root: Path, plant: str = "none") -> dict[str, np.ndarray]:
     """NEMO's stage-1 factors in its own association; west half for bt-derived."""
     mesh = read_mesh(record_root)
@@ -111,11 +118,11 @@ def nemo_factors(record_root: Path, plant: str = "none") -> dict[str, np.ndarray
     r3u = 0.5 * (e1e2t_ssh + np.roll(e1e2t_ssh, -1, axis=1)) * r1_hu0 * r1_e1e2u
     e3u_kmm = e3u0 * (1.0 + r3u[..., None] * umask)
     w = np.s_[:, :WEST]
-    zub = bt7["un_adv"] * (r1_hu0[w] / (1.0 + r3u[w])) - bt6["uu_b"]
-    corrected = frame["u"][w] + zub[..., None] * umask[w]
-    zfu = (e2u[w][..., None] * e3u_kmm[w]) * corrected
+    inverse_depth = r1_hu0[w] / (1.0 + r3u[w])
+    corrected, zfu = nemo_zfu(frame["u"][w], bt7["un_adv"], inverse_depth,
+                              bt6["uu_b"], umask[w], e2u[w], e3u_kmm[w])
     return {
-        "_inverse_depth": r1_hu0[w] / (1.0 + r3u[w]),
+        "_inverse_depth": inverse_depth,
         "un_adv": bt7["un_adv"], "ssh_kmm": ssh[w], "uu_b_kmm": bt6["uu_b"],
         "zub": corrected[..., 0] - frame["u"][w][..., 0],
         "e2u": e2u[w], "umask": umask[w], "e3u_kmm": e3u_kmm[w],
@@ -133,6 +140,14 @@ def closure(nemo: dict[str, np.ndarray], record_root: Path) -> dict[str, object]
 
 def statement_replay(nemo: dict[str, np.ndarray], recorded: np.ndarray) -> dict:
     """NEMO's operands through the card's production :284/:290 helpers (jit)."""
+    replay = production_zfu(
+        nemo["uu_kmm"], nemo["un_adv"], nemo["_inverse_depth"],
+        nemo["uu_b_kmm"], nemo["umask"], nemo["e2u"], nemo["e3u_kmm"])
+    return r298._regions(replay, recorded, nemo["umask"] > 0.0)
+
+
+def production_zfu(*operands) -> np.ndarray:
+    """The card's production :284/:290 helpers, jitted, on given operands."""
     import jax
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         _nemo_metric_stage_transport, _nemo_stage_corrected_velocity,
@@ -142,10 +157,7 @@ def statement_replay(nemo: dict[str, np.ndarray], recorded: np.ndarray) -> dict:
         return _nemo_metric_stage_transport(e2u, e3u, _nemo_stage_corrected_velocity(
             u, un_adv, inverse_depth, uu_b, umask))
 
-    replay = np.asarray(jax.jit(program)(
-        nemo["uu_kmm"], nemo["un_adv"], nemo["_inverse_depth"],
-        nemo["uu_b_kmm"], nemo["umask"], nemo["e2u"], nemo["e3u_kmm"]))
-    return r298._regions(replay, recorded, nemo["umask"] > 0.0)
+    return np.asarray(jax.jit(program)(*operands))
 
 
 def entry_history(entries, record_root: Path) -> list[dict]:
