@@ -438,3 +438,26 @@ def test_each_g5_top_drag_consumer_is_required_at_step_two(ladder):
                      for v in (p["all_levels"] or {}).values()
                      if v["summary"]["status"] == "DEBT")
         assert debts, f"omitting G5 top-drag {consumer} stayed at the bar"
+
+
+@needs_g5_record
+@pytest.mark.slow
+def test_g5_stage2_e3t_and_stage3_sfx_statements_are_each_required(ladder):
+    """G5 round 4: from NEMO's kt-5 restart every stage is bit-exact with
+    both statements; deselecting either brings back its own cells."""
+    root = G5_RECORD / "twin_a"
+    kw = dict(arm="stages", kt_from=5, restart_roots=(G5_RECORD / "twin_b",
+              G5_RECORD / "twin_c"), allow_dirty=True, case="ORCA2G5-ice")
+
+    def unequal(out, exposure, field):
+        p = next(p for p in out["per_kt"] if p["exposure"] == exposure)
+        s = p["all_levels"][field]["summary"]
+        return s["full"]["n_unequal"] + s["partial"]["n_unequal"]
+
+    both = ladder.run(root, exposures=("stage2", "stage3"), **kw)
+    assert all(r["n_unequal"] == 0 for p in both["per_kt"] for r in p["rows"])
+    no_s2 = ladder.run(root, exposures=("stage2",),
+                       without_stage2_stored_thickness=True, **kw)
+    assert (unequal(no_s2, "stage2", "T"), unequal(no_s2, "stage2", "S")) == (1, 1)
+    no_salt = ladder.run(root, exposures=("stage3",), without_stage3_salt=True, **kw)
+    assert unequal(no_salt, "stage3", "S") == 1

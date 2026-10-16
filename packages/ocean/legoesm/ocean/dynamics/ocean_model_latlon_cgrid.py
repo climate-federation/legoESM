@@ -8181,6 +8181,12 @@ class LatLonCGridOceanModel:
             # Stage 2's Kmm: NEMO's stored e3t_0*(1+r3t(Kmm)), r3t(Kmm) being
             # stage 1's r3t(Kaa) (stprk3_stg.f90:160-179), in the EMP dilution
             # and runoff divisors (trasbc.f90:284-286, sbcrnf.f90:281).
+            if (_cfg_b.rk3_stage2_tracer_nemo_stored_thickness
+                    and _stage_entry_override is not None
+                    and _stage_entry_override[0] == 2):
+                raise ValueError(
+                    "rk3_stage2_tracer_nemo_stored_thickness does not "
+                    "compose with a stage-2 stage_entry_override")
             _h_s2_kmm = (
                 nemo_source_round(_h_ref_ws * _qt_13[..., None])
                 if _cfg_b.rk3_stage2_tracer_nemo_stored_thickness

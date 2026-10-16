@@ -407,6 +407,8 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
         without_rhs_ascending_sum: bool = False,
         without_zdf_stage_r3u: bool = False,
         without_top_drag_consumer: str | None = None,
+        without_stage2_stored_thickness: bool = False,
+        without_stage3_salt: bool = False,
         case: str = CASE) -> dict:
     require(case in CASES, f"unknown case {case!r}")
     require(arm in ARMS, f"unknown arm {arm!r}")
@@ -459,6 +461,13 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
             "only the G3/G4 cards select NEMO's stored r3u(Kmm) in dyn_zdf")
     if without_zdf_stage_r3u:      # G3 ROUND-3 BEFORE ARM / plant
         cfg = cfg._replace(zdf_momentum_stage_r3u_nemo_literal=False)
+    require(cfg.rk3_stage2_tracer_nemo_stored_thickness is (case == "ORCA2G5-ice")
+            and cfg.rk3_stage3_salt_nemo_written is (case == "ORCA2G5-ice"),
+            "only the G5 card selects the stage-2 e3t(Kmm) and stage-3 sfx options")
+    if without_stage2_stored_thickness:   # G5 ROUND-4 BEFORE ARM
+        cfg = cfg._replace(rk3_stage2_tracer_nemo_stored_thickness=False)
+    if without_stage3_salt:               # G5 ROUND-4 BEFORE ARM
+        cfg = cfg._replace(rk3_stage3_salt_nemo_written=False)
     nk = int(z.n_levels)
     roots = (root, *restart_roots)
     reg = g1.regions(np.asarray(z.is_active)[..., 0])
@@ -525,6 +534,9 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
            "rk3_stage3_tracer_nemo_stored_thickness": bool(
                cfg.rk3_stage3_tracer_nemo_stored_thickness),
            "without_top_drag_consumer": without_top_drag_consumer,
+           "rk3_stage2_tracer_nemo_stored_thickness": bool(
+               cfg.rk3_stage2_tracer_nemo_stored_thickness),
+           "rk3_stage3_salt_nemo_written": bool(cfg.rk3_stage3_salt_nemo_written),
            "forcing": ("NEMO-supplied surface fields at each kt"
                        if case == "ORCA2G4-sbc" else
                        "NEMO's post-SI3 ocean surface input at each kt"
@@ -1006,6 +1018,10 @@ def main(argv=None) -> int:
     ap.add_argument("--without-top-drag-consumer",
                     choices=("residual", "substeps", "dyn_zdf"),
                     help="G5 CONTROL: omit exactly one downstream top-drag consumer")
+    ap.add_argument("--without-stage2-stored-thickness", action="store_true",
+                    help="G5 round-4 before arm: stage-2 thickness interpolant")
+    ap.add_argument("--without-stage3-salt", action="store_true",
+                    help="G5 round-4 before arm: rescaled Kbb salt tendency")
     ap.add_argument("--case", choices=CASES, default=CASE)
     ap.add_argument("--allow-dirty", action="store_true")
     ap.add_argument("--output", type=Path, required=True)
@@ -1021,6 +1037,8 @@ def main(argv=None) -> int:
               without_rhs_ascending_sum=a.without_rhs_ascending_sum,
               without_zdf_stage_r3u=a.without_zdf_stage_r3u,
               without_top_drag_consumer=a.without_top_drag_consumer,
+              without_stage2_stored_thickness=a.without_stage2_stored_thickness,
+              without_stage3_salt=a.without_stage3_salt,
               case=a.case)
     a.output.write_text(json.dumps(out, indent=1) + "\n")
     if a.arm == "geometry":
