@@ -5334,7 +5334,7 @@ CITATION_MAP = {
         '+ dt * h_one_half * stage_source_rates[2][1])', 84],
     'ocean_model_latlon_cgrid.py:8174-8347': [
         '_stage3_T_rate = (',
-        '/ jnp.maximum(_h_live_one_half, 1.0e-10),', 174],
+        '/ jnp.maximum(_h_s3_kmm, 1.0e-10),', 174],
     # Extent 433 -> 434 at the 2026-09-25 merge: main added one line inside
     # this span (``omega=_cfg_b.omega,`` on the isoneutral K33 call), so the
     # two pinned endpoint statements are one line further apart than before.
