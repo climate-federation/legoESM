@@ -264,6 +264,8 @@ FILES = {
         _ORCA2_R210OMT1_COMPILED / "stprk3_stg.f90"),
     "ORCA2_OMIP_L4_R280STAGE1/BLD/ppsrc/nemo/stprk3_stg.f90": (
         _ORCA2_R280STAGE1_COMPILED / "stprk3_stg.f90"),
+    "ORCA2_OMIP_L4_R280STAGE1/BLD/ppsrc/nemo/dynspg_ts.f90": (
+        _ORCA2_R280STAGE1_COMPILED / "dynspg_ts.f90"),
     "ORCA2_OMIP_L4_R280STAGE1/BLD/ppsrc/nemo/dommsk.f90": (
         _ORCA2_R280STAGE1_COMPILED / "dommsk.f90"),
     "ORCA2_OMIP_L4_R280STAGE1/BLD/ppsrc/nemo/lbcnfd.f90": (
@@ -1710,6 +1712,12 @@ CITATION_MAP = {
         '!                 !==  All stages: correct the barotropic component ==!   at Kaa = N+1/3, N+1/2 or N+1',
         ('END DO   ;   END DO', 9),
         8,
+    ],
+    # --- ORCA2 round 291: carried external-mode V target boundary ---
+    'ORCA2_OMIP_L4_R280STAGE1/BLD/ppsrc/nemo/dynspg_ts.f90:857-860': [
+        'IF(.NOT.ll_bt_av ) THEN                          !* Update Kaa barotropic external mode',
+        'pssh (:,:,Kaa) = ssha_e(:,:)',
+        4,
     ],
     # --- ORCA2 round 288: held completed-stage V-fold partner ---
     'ORCA2_OMIP_L4_R280STAGE1/BLD/ppsrc/nemo/stprk3_stg.f90:812-820': [
