@@ -110,8 +110,12 @@ def test_g5_card_is_g4_plus_si3_entry_and_record_route(tmp_path):
     g4 = recipe.build_orca2g4_sbc_card(g4_root)
     g5 = recipe.build_nemo_testcase_card("ORCA2G5-ice", deck_root=g5_root)
     assert g5.recipe.model_config == g4.recipe.model_config._replace(
-        implicit_ice_ocean_top_drag=True)
+        implicit_ice_ocean_top_drag=True,
+        rk3_stage2_tracer_nemo_stored_thickness=True,
+        rk3_stage3_salt_nemo_written=True)
     assert g4.recipe.model_config.implicit_ice_ocean_top_drag is False
+    assert g4.recipe.model_config.rk3_stage2_tracer_nemo_stored_thickness is False
+    assert g4.recipe.model_config.rk3_stage3_salt_nemo_written is False
     for field in ("T", "S", "u", "v", "uu_b", "vv_b"):
         assert np.array_equal(np.asarray(getattr(g5.recipe.initial_state, field).data),
                               np.asarray(getattr(g4.recipe.initial_state, field).data))
@@ -126,7 +130,7 @@ def test_g5_card_is_g4_plus_si3_entry_and_record_route(tmp_path):
         "nemo_post_si3_records", "nemo_ocean_surface_input_v1")
     assert g5.unmeasured_features == recipe.ORCA2G5_UNMEASURED
     assert "implicit_ice_ocean_top_drag_rCdU_ice" not in g5.unmeasured_features
-    assert g5.unmeasured_features == ("kt9_independent_all_level_u_continuation",)
+    assert g5.unmeasured_features == ("nemo_post_si3_surface_records",)
     assert g5.icebergs_enabled is False and g5.iceberg_inputs == ()
     assert recipe._orca2g1_selector_failures(g5) == []
     with pytest.raises(ValueError, match="not execution-ready"):

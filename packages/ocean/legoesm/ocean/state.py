@@ -354,6 +354,10 @@ class OceanSurfaceForcing(NamedTuple):
     # the G5 identity carries it from the post-SI3 record rather than
     # rebuilding it from ice state.  Read only when
     # ``implicit_ice_ocean_top_drag=True``; a selected path refuses None.
+    salt_flux_sfx: object = None
+    # jnp.ndarray | None [g/m^2/s], NEMO ``sfx`` as recorded.  Read only by
+    # ``rk3_stage3_salt_nemo_written`` (trasbc.f90:308 ``sfx*z1_rho0_e3t``);
+    # ``1e3*(1e-3*sfx)`` through ``salt_flux`` is not bitwise ``sfx``.
 
 
 class OceanConfig(NamedTuple):
@@ -3264,6 +3268,16 @@ class LatLonCGridOceanConfig(NamedTuple):
     # silently reassociated.  Appended at the end to preserve every positional
     # constructor.  Default False leaves all earlier cards bit-identical.
     implicit_ice_ocean_top_drag: bool = False
+    # Stage 2's Kmm thickness as NEMO stores it, e3t_0*(1+r3t(Kmm)) with
+    # r3t(Kmm) stage 1's (2/3)r3t(Kbb)+(1/3)r3ta, in the stage-2 EMP dilution
+    # and runoff divisors (trasbc.f90:284-286, sbcrnf.f90:281).  False keeps
+    # the thickness interpolant h(Kbb)+(h(Kaa)-h(Kbb))/3.
+    rk3_stage2_tracer_nemo_stored_thickness: bool = False
+    # NEMO's stage-3 salinity Krhs (trasbc.f90:308, non-linear ssh, then
+    # runoff): ``sfx*z1_rho0_e3t`` on the stored Kmm thickness, from
+    # ``OceanSurfaceForcing.salt_flux_sfx``.  False rescales the Kbb salt-flux
+    # tendency to Kmm.  Needs rk3_stage3_tracer_nemo_stored_thickness.
+    rk3_stage3_salt_nemo_written: bool = False
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":

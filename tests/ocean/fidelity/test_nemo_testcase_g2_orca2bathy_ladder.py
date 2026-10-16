@@ -168,15 +168,17 @@ def test_the_option_is_off_by_default_and_selected_by_g2_only():
            if "zdf_momentum_stage_r3u_nemo_literal=" in line]
     assert [name for name, _ in r3u] == ["nemo_testcase_recipe.py"]
     assert "_ORCA2G_ZDF_STAGE_R3U[case]" in r3u[0][1]
-    assert LatLonCGridOceanConfig._fields[-12:-4] == (
+    assert LatLonCGridOceanConfig._fields[-14:-6] == (
         "zdf_tracer_nemo_rounded_thickness", "barotropic_rhs_ascending_level_sum",
         "zdf_momentum_stage_r3u_nemo_literal", "barotropic_wind_nemo_stored_depth",
         "surface_stress_nemo_fold_vector_sign", "zdf_surface_stress_nemo_face_thickness",
         "een_nemo_relative_vorticity", "rk3_stage_tracer_written_order")
-    assert LatLonCGridOceanConfig._fields[-4:] == (
+    assert LatLonCGridOceanConfig._fields[-6:] == (
         "rk3_vector_rhs_nemo_order", "rk3_stage3_heat_nemo_written",
         "rk3_stage3_tracer_nemo_stored_thickness",
-        "implicit_ice_ocean_top_drag")
+        "implicit_ice_ocean_top_drag",
+        "rk3_stage2_tracer_nemo_stored_thickness",
+        "rk3_stage3_salt_nemo_written")
     assert "_ORCA2G_ZDF_FACES[case]" in (
         CASES.parents[3] / "packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py"
     ).read_text().splitlines()[hits[0][1] - 1]

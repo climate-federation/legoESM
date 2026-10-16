@@ -62,7 +62,7 @@ DEFAULT_ROOT = Path(
     "oracle_g2_r10/p3_a_100step")
 ARMS = ("geometry", "independent", "given_entry", "stages", "barotropic_exit",
         "zdf_replay", "substeps", "trazdf_replay", "rhs_frame",
-        "restart_independent")
+        "restart_independent", "carried")
 # stage exposures of one step: the private hook that returns it, and the
 # level-1 NEMO frame fields (u, v, T, S, ssh) it must equal
 EXPOSURES = {
@@ -436,7 +436,7 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
     cfg, z, s0 = card.recipe.model_config, card.recipe.z_coord, card.recipe.initial_state
     if case in FORCED:
         require(arm in ("independent", "given_entry")
-                or (arm in ("stages", "barotropic_exit")
+                or (arm in ("stages", "barotropic_exit", "carried")
                     and case == "ORCA2G5-ice"),
                 "G4/G5's NEMO-supplied per-step forcing is registered only for "
                 "the independent and given-entry ladders")
@@ -641,6 +641,46 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
             if dump is not None:
                 np.savez(Path(dump) / f"card_kt{kt}_{name}.npz", **card_levels(st),
                          ssh=np.asarray(st.eta.data))
+        return out
+    if arm == "carried":
+        # G5 round 4: every leaf the card carries into step kt against what
+        # NEMO's restart of kt - 1 hands it, then one step from swapped states
+        require(case in FORCED, "the carried arm scores a forced rung's chain")
+        require(state_in is not None, "carried needs --state-in")
+        kt = kt_from
+        saved = pickle.loads(Path(state_in).read_bytes())
+        require(saved["after_kt"] == kt - 1 and saved["packages"] == packages,
+                "--state-in is not this model code's chain after step kt - 1")
+        carried, given = saved["state"], nemo_entry(kt)
+        out["label"] = "INDEPENDENT carried state vs GIVEN-NEMO-ENTRY, swap arms"
+        diff = {}
+        for name in carried._fields:
+            la = jax.tree_util.tree_leaves(getattr(carried, name))
+            lb = jax.tree_util.tree_leaves(getattr(given, name))
+            require(len(la) == len(lb), f"{name}: leaf count differs")
+            for i, (a, b) in enumerate(zip(la, lb)):
+                a, b = np.asarray(a), np.asarray(b)
+                key = f"{name}[{i}]" if len(la) > 1 else name
+                if a.shape != b.shape:
+                    diff[key] = {"shape": [list(a.shape), list(b.shape)]}
+                    continue
+                d = a != b
+                diff[key] = {"n_unequal": int(np.count_nonzero(d)),
+                             "max_abs": float(np.max(np.abs(a - b))) if a.size else 0.0,
+                             "cells": np.argwhere(d)[:8].tolist()}
+        out["carried_vs_restart"] = diff
+        nemo = ("T", "S", "u", "v", "eta", "uu_b", "vv_b", "bt_hist")
+        arms = {"carried": carried, "restart": given,
+                "carried_with_nemo_S": carried._replace(S=given.S),
+                "restart_with_carried_S": given._replace(S=carried.S),
+                "carried_with_nemo_restart_fields": carried._replace(
+                    **{f: getattr(given, f) for f in nemo})}
+        for name, st in arms.items():
+            new, seconds = step(st, kt)
+            rows = surface_rows(f"carried.{name}", kt, new)
+            out["per_kt"].append({"kt": kt, "arm": name, "seconds": seconds,
+                                  "rows": rows, "first_unequal": g1.first_unequal(rows),
+                                  "all_levels": all_level_rows(kt, new)})
         return out
     if arm == "barotropic_exit":
         # G5 round 3 follow-on walk.  The admitted record has a compact

@@ -147,6 +147,7 @@ def nemo_supplied_forcing(card, root: Path, kt: int, *, zero: bool = False):
         q_nonsolar=fields["qns"],
         ice_ocean_top_drag_rCdu=(
             np.zeros_like(rec["rCdU_ice"]) if zero else rec["rCdU_ice"]),
+        salt_flux_sfx=fields["sfx"],
     )
 
 

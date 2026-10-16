@@ -3828,8 +3828,13 @@ def build_orca2g1_flat_card(deck_root: str | Path, case: str = "ORCA2G1-flat") -
     if case == "ORCA2G5-ice":
         # ORCA2 resolves ln_drgice_imp=T.  SI3 supplies rCdU_ice through the
         # post-SI3 record; all other rungs retain the appended default False.
+        # Stage 2's stored e3t(Kmm) divisor (trasbc.f90:284-286) and stage
+        # 3's sfx*z1_rho0_e3t (:308): G5 only; G4 is certified without them
+        # and stays as measured.
         model_config = model_config._replace(
-            implicit_ice_ocean_top_drag=True)
+            implicit_ice_ocean_top_drag=True,
+            rk3_stage2_tracer_nemo_stored_thickness=True,
+            rk3_stage3_salt_nemo_written=True)
     if _ORCA2G_DYNADV_VEC[case]:     # dynspg_ts.f90:533 vector branch; state.py: flux-form only
         model_config = model_config._replace(
             rk3_stage1_rhs_nemo_literal=False,
@@ -3904,6 +3909,10 @@ def _orca2g1_selector_failures(card: NEMOTestcaseCard) -> list[str]:
                        and not cfg.zdf_drag_in_matrix
                        and not cfg.barotropic_drag_substep),
         "ln_drgice_imp": cfg.implicit_ice_ocean_top_drag is (
+            card.case == "ORCA2G5-ice"),
+        "stage-2 Kmm e3t": cfg.rk3_stage2_tracer_nemo_stored_thickness is (
+            card.case == "ORCA2G5-ice"),
+        "stage-3 salt Krhs": cfg.rk3_stage3_salt_nemo_written is (
             card.case == "ORCA2G5-ice"),
         "ln_zdfcst": (vm.scheme == "constant" and not vm.constant.lat_dependent
                       and not vm.iwm.enabled and not vm.ddm.enabled),
@@ -4022,8 +4031,10 @@ ORCA2G4_UNMEASURED: tuple[str, ...] = (
     "sss_restoring",                   # sbcssr.f90 nn_sssr = 2
     "freshwater_budget_nn_fwb2",       # sbcfwb.f90 (zero correction in year 1)
 )
+# G5 round 4: bit-identical under both labels kt 1..10.  The card is fed
+# NEMO's post-SI3 ocean surface input (D123 route); SI3 itself never runs here.
 ORCA2G5_UNMEASURED: tuple[str, ...] = (
-    "kt9_independent_all_level_u_continuation",
+    "nemo_post_si3_surface_records",
 )
 # G1b = G1 + ORCA2's vector-form momentum advection (user, 2026-10-14).
 ORCA2G1B_UNMEASURED: tuple[str, ...] = (

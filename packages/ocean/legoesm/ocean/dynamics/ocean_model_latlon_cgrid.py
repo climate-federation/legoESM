@@ -8178,6 +8178,13 @@ class LatLonCGridOceanModel:
                     state.H_bathy.data, half=True)
                 _h_s3_kmm = nemo_source_round(
                     _h_ref_ws * _stretch_s3_kmm[..., None])
+            # Stage 2's Kmm: NEMO's stored e3t_0*(1+r3t(Kmm)), r3t(Kmm) being
+            # stage 1's r3t(Kaa) (stprk3_stg.f90:160-179), in the EMP dilution
+            # and runoff divisors (trasbc.f90:284-286, sbcrnf.f90:281).
+            _h_s2_kmm = (
+                nemo_source_round(_h_ref_ws * _qt_13[..., None])
+                if _cfg_b.rk3_stage2_tracer_nemo_stored_thickness
+                else _h_live_one_third)
             # trazdf.f90:284-289 reads e3t(Kbb) and e3t(Kmm).
             _stage3_e3t = ((h_k_old, _h_s3_kmm)
                            if _cfg_b.rk3_stage3_heat_nemo_written else None)
@@ -8441,18 +8448,41 @@ class LatLonCGridOceanModel:
                         None if _rnf_content is None else _rnf_content[0],
                         _h_s3_kmm)) + _stage3_qsr_kmm)
 
+            _stage3_S_written = None
+            if _cfg_b.rk3_stage3_salt_nemo_written:
+                # trasbc.f90:306-308 stage 3, non-linear ssh: Krhs(1) =
+                # Krhs(1) + sfx*z1_rho0_e3t(Kmm) on a cleared Krhs (tracer
+                # advection off); then the runoff block.
+                _sfx = (None if surface_forcing is None
+                        else getattr(surface_forcing, "salt_flux_sfx", None))
+                if _sfx is None or not _cfg_b.rk3_stage3_tracer_nemo_stored_thickness:
+                    raise ValueError(
+                        "rk3_stage3_salt_nemo_written needs "
+                        "OceanSurfaceForcing.salt_flux_sfx and "
+                        "rk3_stage3_tracer_nemo_stored_thickness")
+                _z1_rho0_e3t_s = nemo_source_round(
+                    _stage_r1_rho0
+                    / jnp.maximum(_h_s3_kmm[..., 0], 1.0e-10))
+                _salt_top = nemo_source_round(
+                    jnp.asarray(_sfx, dtype=state.S.data.dtype)
+                    * _z1_rho0_e3t_s) * _active_live[..., 0]
+                _stage3_S_written = nemo_source_round(_add_rnf_stage_rate(
+                    _zero_stage_source.at[..., 0].add(_salt_top),
+                    None if _rnf_content is None else _rnf_content[1],
+                    _h_s3_kmm))
+
             _stage12_source_terms = (
                 None
                 if _rnf_content is None
                 else (
                     _stage_tracer_source_terms(h_k_old),
-                    _stage_tracer_source_terms(_h_live_one_third),
+                    _stage_tracer_source_terms(_h_s2_kmm),
                     None,
                 )
             )
             _stage_source_rates = (
                 _stage_tracer_sources(h_k_old),
-                _stage_tracer_sources(_h_live_one_third),
+                _stage_tracer_sources(_h_s2_kmm),
                 # stprk3_stg.F90:565-600 clears Krhs, accumulates advection,
                 # nonlinear-SBC, QSR and LDF, then tra_zdf.F90 combines that
                 # stage-3 rate with Kbb using the Kmm QCO weight.  These rates
@@ -8473,7 +8503,9 @@ class LatLonCGridOceanModel:
                         _stage3_T_rate,
                         None if _rnf_content is None else _rnf_content[0],
                         _h_live_one_half),
-                    _add_rnf_stage_rate(
+                    _stage3_S_written
+                    if _stage3_S_written is not None
+                    else _add_rnf_stage_rate(
                         tend.dS_dt.data * h_k_old
                         / jnp.maximum(_h_s3_kmm, 1.0e-10),
                         None if _rnf_content is None else _rnf_content[1],
