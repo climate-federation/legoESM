@@ -5331,10 +5331,10 @@ CITATION_MAP = {
         ('no explicit diffusion', 1), 'iso-neutral triad operator', 8],
     'ocean_model_latlon_cgrid.py:2537-2620': [
         'h_one_third = h_k_old',
-        '+ dt * h_one_half * stage_source_rates[2][1])', 65],
+        '+ dt * h_one_half * stage_source_rates[2][1])', 84],
     'ocean_model_latlon_cgrid.py:8174-8347': [
         '_stage3_T_rate = (',
-        '/ jnp.maximum(_h_live_one_half, 1.0e-10),', 140],
+        '/ jnp.maximum(_h_live_one_half, 1.0e-10),', 174],
     # Extent 433 -> 434 at the 2026-09-25 merge: main added one line inside
     # this span (``omega=_cfg_b.omega,`` on the isoneutral K33 call), so the
     # two pinned endpoint statements are one line further apart than before.
@@ -5343,7 +5343,7 @@ CITATION_MAP = {
         'S_mid = S_mid + dt * dS_gm * active_3d', 453],
     'ocean_model_latlon_cgrid.py:10045-10089': [
         ('_nemo_ws_rk3_tracer_pair_step(', 3),
-        'return_final_content=True,', 42],
+        'return_final_content=True,', 45],
     # --- round 65: admitted R64 Krhs/FCT/TKE walk ---
     'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stprk3_stg.f90:827-828': [
         ('DO jn = 1, jpts', 1), 'ts(:,:,:,jn,Krhs) = 0._wp', 2],
@@ -5598,7 +5598,7 @@ CITATION_MAP = {
     'ocean_model_latlon_cgrid.py:13925-13940': [
         '# ``step`` is the production-compiled entry point even when a caller',
         ('_nemo_stage1_zad_eta_after_override))', 1), 16],
-    'state.py:597-601': [
+    'state.py:602-606': [
         '# NEMO TKE-closure coefficient memory (avm_k/avt_k). These are the',
         'tke_avt: object = None', 5],
     'tests/ocean/fidelity/test_nemo_testcase_l2_gyre_card_reconciliation.py:193-216': [
@@ -6578,7 +6578,7 @@ CITATION_MAP = {
         '# Argument validation at ENTRY, not inside the drag branch below:', 5],
     'ocean_model_latlon_cgrid.py:12979-12983': [
         'u_new, v_new = state.u.data, state.v.data',
-        'if do_momentum and getattr(_cfg_b, "surface_stress_implicit",', 4],
+        'if do_momentum and getattr(_cfg_b, "surface_stress_implicit",', 5],
     'ocean_model_latlon_cgrid.py:13220-13223': [
         'u_solve_in = u_solve_in - _u_bt_mean',
         'u_solve_in, v_solve_in)', 4],
@@ -6967,7 +6967,7 @@ CITATION_MAP = {
         ('_ws_v_live_mask, _grid, z_coord=_zc)[:2])', 1), 100],
     'ocean_model_latlon_cgrid.py:6513-6576': [
         ('if _sfx is not None:', 1),
-        ('F_slow_v + _wind_increment_v) * _slow_surface_v_mask', 1), 42],
+        ('F_slow_v + _wind_increment_v) * _slow_surface_v_mask', 1), 64],
     # --- round 186: admitted pre-day-180 process stream and qsr promotion ---
     'GYRE_OMIP_L2_P3_SM_R185PREPROC/BLD/ppsrc/nemo/stprk3_stg.f90:818-830': [
         'lr123_write = lwp .AND. .NOT.ln_tile .AND. kstg == 3 .AND.',
