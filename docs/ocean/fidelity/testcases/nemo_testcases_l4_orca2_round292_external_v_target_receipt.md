@@ -89,6 +89,12 @@ this card.
 
 ## Validation
 
+- The round citation gate and the cumulative default-receipt gate pass with
+  zero unmapped citations; shifting the new compiled span makes the planted
+  gate refuse with `SYMBOL-NOT-AT-LINE`.  Artifact SHA256 values are
+  `a6cd90fe3a5ca1d0c7c3112ead749bdb615f85d8437b9c58eda275b8312daadb`,
+  `ee58b40a9adc76a53cc34a7b247225aba80f5523cf4221a40f081b83c394d769`,
+  and `e193217a522c8b08e1edac59be8b5616eb8845316a573ab4c402071b1620a9cf`.
 - Round-290/291/292 direct tests pass 7/7.  Log SHA256:
   `92eda0cec749b4308df18e4c0fc15b79ec5ecb24670263faed0dd5f873a671b5`.
 - The single permitted `tests/ocean/fidelity -n 12` battery reached 90% and
