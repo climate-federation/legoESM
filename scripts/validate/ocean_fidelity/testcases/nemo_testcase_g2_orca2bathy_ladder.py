@@ -1178,6 +1178,11 @@ def main(argv=None) -> int:
                   f"rms {r['rms']:.3e} unequal {r['n_unequal']}")
         lv = p.get("all_levels") or p.get("two_step_all_levels")
         for f, t in (lv or {}).items():
+            if "summary" not in t:      # V1's 2-D surface avm_k row
+                bad |= t["status"] != "AT-BAR"
+                print(f"  levels kt{p.get('two_step_kt', p['kt'])} {f}: {t['status']} "
+                      f"max {t['max_abs']:.3e} unequal {t['n_unequal']}")
+                continue
             s = t["summary"]
             bad |= s["status"] != "AT-BAR"
             print(f"  levels kt{p.get('two_step_kt', p['kt'])} {f}: {s['status']} "
