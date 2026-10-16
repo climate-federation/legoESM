@@ -1832,9 +1832,9 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:678-680': [
         'ts(ji,jj,jk,jn,Kaa) = (        ( 1._wp + r3t(ji,jj,Kbb) )*ts(ji,jj,jk,jn,Kbb )',
         '&                /          ( 1._wp + r3t(ji,jj,Kaa) )', 3],
-    'nemo_testcase_g2_orca2bathy_ladder.py:673-683': [
+    'nemo_testcase_g2_orca2bathy_ladder.py:682-685': [
         'def step(state, kt):',
-        'return new, round(time.time() - t0, 1)', 11],
+        'return new, round(time.time() - t0, 1)', 4],
     # --- GRIDLADDER round 23 (G4 round 6 receipt) ---
     'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/stp2d.f90:198': 'Ue_rhs(ji,jj) =  Ue_rhs(ji,jj) + r1_rho0 * utauU(ji,jj) * (r1_hu_0(ji,jj) /(1._wp+r3u(ji,jj,Kbb)))',
     'ORCA2G1_OMIP_L1_P5/BLD/ppsrc/nemo/sbcmod.f90:548': "CALL lbc_lnk( 'sbcmod', utau, 'T', -1.0_wp, vtau  , 'T', -1.0_wp, emp, 'T', 1.0_wp, &",
