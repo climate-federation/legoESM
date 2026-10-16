@@ -74,7 +74,8 @@ def _stage_mask_route(candidate: bool):
     original = model._nemo_ws_stage_face_masks
     if not candidate:
         def compact_only(z_coord, grid, dtype):
-            wet_u, wet_v = model.compute_face_masks_3d(z_coord, grid)
+            wet_u, wet_v = model.compute_face_masks_3d(
+                z_coord.is_active, grid)
             return wet_u.astype(dtype), wet_v.astype(dtype)
 
         model._nemo_ws_stage_face_masks = compact_only
