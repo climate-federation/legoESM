@@ -180,8 +180,9 @@ not manufacture a record.
   598 rows, 575 AT-BAR and 23 DEBT, first over-bar at kt 81 SSH, with 170
   bit-exact rows, 178 exact-modulo-D127 rows, 3,216,400 normal-difference
   cells and 222 flushed-subnormal cells unchanged.
-- Required receipt-citation + private-import files: 23 passed (CPU fp64),
-  after mechanically re-anchoring 64 gate pins and 20 audited-receipt pins.
+- Required pre-final receipt-citation + private-import files: 23 passed in
+  10.08 s (CPU fp64), after mechanically re-anchoring 64 gate pins and 20
+  audited-receipt pins.
 - independent review: operator (Claude)
 
 ASKED: passivity before admission; both labels kt 1..6; every surface field;
