@@ -50,7 +50,13 @@ claim.
 
 ## Compiled source and executed order
 
-The cited record is the compiled `ORCA2_OMIP_L4_R299W7` configuration.  It
+The cited record is the compiled `ORCA2_OMIP_L4_R299W7` configuration.
+Enclosing subroutines (pinned by the citation gate's routine check):
+`tra_adv_trp_t` for both `traadv.f90` ranges, `div_hor_RK3_t` for
+`divhor.f90`, `wzv_RK3_t` for `sshwzv.f90`, and `stp_RK3_stg` for
+`stprk3_stg.f90`.  The `traadv.f90` W range in this record build contains
+the acquisition's write-only record block around the `wzv` call; the model
+statements in it are the `wzv` call and the final area product.  It
 zeros the bottom U/V/W transports at
 `ORCA2_OMIP_L4_R299W7/BLD/ppsrc/nemo/traadv.f90:248-252`, executes the W
 diagnosis and final `e1e2t*ww` product at
@@ -92,6 +98,41 @@ the preregistered claim that the complete divergence alone closes W is
 **REFUTED**: the first boundary is U, while the W result has an independent
 ratio/clock member.
 
+### Fold band versus interior (added at completion, same raw record)
+
+The table above is domain-wide.  Split into the three fold rows and the
+interior (the round-298 `_regions` split), the debt is concentrated in the
+fold band:
+
+| Row | Fold band unequal / max | Interior unequal / max | Fold / interior max |
+|---|---|---|---:|
+| U difference | 4,149/4,164, 1.47510270990179e8 | 425,493/426,388, 2.569318308591891e7 | 5.7 |
+| V difference | 4,145/4,164, 1.7358593746527478e8 | 425,590/426,388, 6.600581266266088e7 | 2.6 |
+| W recurrence | 4,164/4,164, 1.9152110475369796e-1 | 426,365/426,388, 2.6643902175528533e-3 | 71.9 |
+| U+V substituted, W | 4,164/4,164, 7.441398648953929e-4 | 426,388/426,388, 1.4412554193721734e-4 | 5.2 |
+
+Every domain-wide maximum sits in the fold band.  The interior is non-bit
+too, as expected after six steps of independent trajectory, so "first in
+source order" names the first DIFFERING OPERAND, not an origin.
+
+### What the W-leaf finding is, and is not (added at completion)
+
+- **The W builder's own statements are exact on this record.**  From NEMO's
+  recorded operands, the shared production helpers reproduce NEMO's `ww` and
+  area-scaled `trp_w` with zero difference (both labels).  With every
+  candidate operand replaced by NEMO's, the candidate program's W is exact
+  everywhere.  So `div_hor_RK3_t`'s `np_transport` divergence, the
+  `wzv_RK3_t` QCO recurrence and the `tra_adv_trp_t` area product carry no
+  statement defect: there is **no W statement to land** under D96 or D122.
+- **The fold-band W debt is carried by operands produced upstream:** the
+  stage-1 U and V transports jointly (neither alone), plus the independent
+  Kbb/Kaa ratio + stage-clock pair.  The U difference is the first of these
+  in compiled order; it is held with the numbers above.
+- **The two labels' tables are array-identical** (every row, arm and replay).
+  The card's kt=1 entry equals NEMO's admitted kt=1 entry (phase-2y
+  admission; PLAUSIBLE as the reason, not re-measured here), so the second
+  label confirms the program but is not independent evidence.
+
 ## Prediction ledger
 
 | ID | Verdict | Result |
@@ -117,6 +158,23 @@ the normal one-bit control remains unequal.
 Citation-gate, focused-test, full fidelity-battery, and independent-review
 results are recorded below after execution.
 
+### Completion record (Claude, round 300 continuation)
+
+The codex session stopped at the quota ceiling after the battery reached
+94% and before this section was written.  Completed here:
+
+- Classification re-run from the raw record reproduces
+  `classification.json` byte-for-byte (`HELD_R300_FIRST_W_LEAF_U_DIFFERENCE`).
+- The five round-300 citation-map entries now pin their enclosing
+  SUBROUTINE (they were text-and-line only).
+- Citation gate, focused tests and the fidelity battery: results in the
+  evidence directory (`citation_r300c*.log`, `focused_tests_r300c.log`,
+  `fidelity_battery_r300c*.log`), summarised in the final status below.
+- GYRE ten-step trajectory and 30-day member: **not required** — this round
+  changes no file under `packages/` (no model change).
+- codex review: paused (quota).  The operator runs an independent Claude
+  review before landing.
+
 ## Configuration choices
 
 - **ASKED:** none.
@@ -126,7 +184,9 @@ results are recorded below after execution.
 
 ## OPEN
 
-1. Walk the recorded `pFu(ji)-pFu(ji-1)` boundary one producer upstream:
+1. Walk the recorded `pFu(ji)-pFu(ji-1)` boundary one producer upstream,
+   scored in the fold band first (the interior is non-bit from trajectory
+   divergence alone):
    split NEMO's stage-1 U transport product into metric, live U thickness,
    corrected stage U velocity, external correction, and mask, at matched
    program points under both labels.
