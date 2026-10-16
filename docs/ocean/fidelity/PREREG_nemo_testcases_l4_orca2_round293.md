@@ -64,3 +64,14 @@ shipped runoff setting is unchanged.  Sea ice and the shipped card's
 `unmeasured_features` tuple are unchanged.
 
 Independent review: operator, as required for this lane.
+
+## Instrument clarification — 2026-10-16, before measurement
+
+Prediction R293-P2's phrase "used by production" means the operands used by
+the production-shaped **held literal-fold arm**, not the shipped selector-OFF
+trajectory measured in round 292.  The immutable round-292 result supplies the
+upstream 13-cell boundary; the reused round-245 executable/replay pair
+calibrates the held arm at that same substep.  Three controlled executions are
+frozen here: held arm with current compact masks, held arm with raw V surface
+mask, and held arm with raw V surface mask plus the T-pivot north-neighbour
+association.  This clarification changes no prediction or threshold.
