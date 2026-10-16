@@ -67,7 +67,7 @@ DEFAULT_ROOT = Path(
     "oracle_g2_r10/p3_a_100step")
 ARMS = ("geometry", "independent", "given_entry", "stages", "barotropic_exit",
         "zdf_replay", "substeps", "trazdf_replay", "rhs_frame",
-        "restart_independent", "carried")
+        "restart_independent", "carried", "tke_mixing_length")
 # stage exposures of one step: the private hook that returns it, and the
 # level-1 NEMO frame fields (u, v, T, S, ssh) it must equal
 EXPOSURES = {
@@ -198,6 +198,55 @@ def read_zdf_kt1(path: Path, nk: int) -> dict[str, np.ndarray]:
         out[name] = data[n3 + i * ni3:n3 + (i + 1) * ni3].reshape(
             (nx - 4, ny - 4, nz), order="F")
     return {k: np.ascontiguousarray(np.swapaxes(v, 0, 1)) for k, v in out.items()}
+
+
+def v1_e3t_with_terminal_row(
+    carried: np.ndarray, raw_jpk: np.ndarray, *, plant: bool = False,
+) -> np.ndarray:
+    """Append NEMO's separately carried ``e3t(jpk)`` mixing-length row.
+
+    ``carried`` is the production Kmm bundle through ``jpkm1``. ``raw_jpk``
+    is the mesh record through ``jpk``. The terminal row is dry in NEMO, so
+    key_qco leaves it unstretched before ``zdftke.f90:690-692`` reads it.
+    """
+    carried = np.asarray(carried, dtype=np.float64)
+    raw_jpk = np.asarray(raw_jpk, dtype=np.float64)
+    require(carried.ndim == 3 and raw_jpk.ndim == 3,
+            "V1 e3t arrays must be (y,x,level)")
+    require(raw_jpk.shape == carried.shape[:-1] + (carried.shape[-1] + 1,),
+            "V1 raw e3t must carry exactly one terminal jpk row")
+    require(np.all(np.isfinite(carried)) and np.all(np.isfinite(raw_jpk)),
+            "V1 e3t arrays must be finite")
+    terminal = raw_jpk[..., -1:].copy()
+    if plant:
+        terminal = np.nextafter(terminal, np.inf)
+    return np.concatenate([carried, terminal], axis=-1)
+
+
+def _mxl_array_row(name: str, ref: np.ndarray, cand: np.ndarray,
+                   mask: np.ndarray) -> dict:
+    """Cellwise V1 mixing-length row on the campaign's fixed 1e-15 bar."""
+    ref, cand, mask = (np.asarray(x) for x in (ref, cand, mask))
+    require(ref.shape == cand.shape == mask.shape,
+            f"{name}: mixing-length row shape mismatch")
+    require(np.all(np.isfinite(ref[mask])) and np.all(np.isfinite(cand[mask])),
+            f"{name}: non-finite wet value")
+    delta = np.abs(cand - ref)
+    scale = max(float(np.max(np.abs(ref[mask]))), 1.0)
+    over = mask & (delta > BAR * scale)
+    unequal = mask & (cand != ref)
+    worst = np.unravel_index(
+        int(np.argmax(np.where(mask, delta, -1.0))), delta.shape)
+    return {
+        "name": name,
+        "n_cells": int(mask.sum()),
+        "n_unequal": int(unequal.sum()),
+        "n_over_bar": int(over.sum()),
+        "max_abs": float(delta[worst]),
+        "relative": float(delta[worst] / scale),
+        "max_abs_cell": [int(k) for k in worst],
+        "status": "AT-BAR" if not np.any(over) else "DEBT",
+    }
 
 
 def zdf_kt1_rows(root: Path, state, nk: int, wcls: dict, reg) -> dict:
@@ -467,7 +516,8 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
         case: str = CASE) -> dict:
     require(case in CASES, f"unknown case {case!r}")
     require(arm in ARMS, f"unknown arm {arm!r}")
-    require(plant in (None, "score", "level"), f"unknown plant {plant!r}")
+    require(plant in (None, "score", "level", "tke_e3t"),
+            f"unknown plant {plant!r}")
     require(without_top_drag_consumer in (None, "residual", "substeps", "dyn_zdf"),
             f"unknown top-drag consumer {without_top_drag_consumer!r}")
     from legoesm.ocean.fidelity.provenance import allow_dirty_stamps, git_sha
@@ -494,7 +544,8 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
     if case in FORCED:
         require(arm in ("independent", "given_entry")
                 or (arm in ("stages", "barotropic_exit", "carried")
-                    and case in SI3),
+                    and case in SI3)
+                or (arm == "tke_mixing_length" and case == "ORCA2V1-tke"),
                 "G4/G5's NEMO-supplied per-step forcing is registered only for "
                 "the independent and given-entry ladders")
         require(cfg.rk3_stage_tracer_written_order is True,
@@ -683,6 +734,195 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
         t0 = time.time()
         new = jax.device_get(model.step(state, dt=card.dt_s, **forcing(kt)))
         return new, round(time.time() - t0, 1)
+
+    if arm == "tke_mixing_length":
+        require(case == "ORCA2V1-tke" and kt_from == kt_to == 1,
+                "the V1 mixing-length measurement is registered only at kt 1")
+        from legoesm.ocean.physics.vertical_mixing.tke import (
+            _mxl0_surface_anchor,
+            compute_K_from_tke,
+            compute_mixing_lengths,
+        )
+
+        plain, seconds = step(s0, 1)
+        trace_model = LatLonCGridOceanModel(
+            card.recipe.grid, z, cfg,
+            _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+                expose_live_stage_operands=True))
+        trace = jax.device_get(trace_model.step(
+            s0, dt=card.dt_s, **forcing(1)))
+        plain_leaves = jax.tree_util.tree_leaves(plain)
+        traced_leaves = jax.tree_util.tree_leaves(trace.state_after)
+        require(len(plain_leaves) == len(traced_leaves),
+                "TKE trace changed the state pytree")
+        trace_passive = all(np.array_equal(np.asarray(a), np.asarray(b))
+                            for a, b in zip(plain_leaves, traced_leaves, strict=True))
+        require(trace_passive, "TKE trace moved the production step")
+
+        bundle = model._tke_step_entry_n2_bundle(s0)
+        rn2 = np.asarray(trace.tke_statement_trace.bn2_output, np.float64)
+        bundle_rn2 = np.asarray(bundle.rn2, np.float64)
+        rn2_delta = np.abs(rn2 - bundle_rn2)
+        rn2_bundle_comparison = {
+            "n_unequal": int(np.count_nonzero(rn2 != bundle_rn2)),
+            "max_abs": float(np.max(rn2_delta)),
+            "max_abs_cell": [int(k) for k in np.unravel_index(
+                int(np.argmax(rn2_delta)), rn2_delta.shape)],
+        }
+        zdf = read_zdf_kt1(root / "oracle_zdf_entry_kt00000001.bin", nk)
+        en = zdf["en"][..., 1:nk]
+        avm = zdf["avm"][..., 1:nk]
+        restart_kt1 = restart_path(roots, 1)
+        require(restart_kt1 is not None, "V1 record has no restart after kt 1")
+        with netCDF4.Dataset(restart_kt1) as h:
+            restart_en = levels_last(h.variables["en"][0], nk + 1)[..., 1:nk]
+            restart_avm = levels_last(h.variables["avm_k"][0], nk + 1)[..., 1:nk]
+        require(np.array_equal(en, restart_en),
+                "kt-1 zdf en frame != NEMO restart en")
+        require(np.array_equal(avm, restart_avm),
+                "kt-1 zdf avm frame != NEMO restart avm_k")
+        wet_w = wcls["full"] | wcls["partial"]
+        rec = g5.surface(root, 1)
+        tke_cfg = cfg.physics.vertical_mixing.tke
+        l_surface = _mxl0_surface_anchor(
+            tke_cfg, rec["taum"], cfg.constants.rho_0, cfg.constants.g,
+            np.asarray(z.is_active)[..., 0], rec["fr_i"],
+            g5.read_v1_hm_i(root, 1))
+        carried_e3t = np.asarray(bundle.e3t_Kmm, np.float64)
+        with netCDF4.Dataset(root / "mesh_mask.nc") as h:
+            raw_e3t = np.moveaxis(
+                np.asarray(h.variables["e3t_0"][0], np.float64), 0, -1)
+            raw_tmask = np.moveaxis(
+                np.asarray(h.variables["tmask"][0], np.float64), 0, -1)
+        if raw_e3t.shape[:2] == (
+                carried_e3t.shape[0] + 4, carried_e3t.shape[1] + 4):
+            raw_e3t, raw_tmask = raw_e3t[2:-2, 2:-2], raw_tmask[2:-2, 2:-2]
+        require(raw_e3t.shape == carried_e3t.shape[:-1] + (nk + 1,),
+                "mesh record does not carry jpk e3t")
+        require(not np.any(raw_tmask[..., -1]),
+                "NEMO terminal e3t row is not dry")
+        true_e3t = v1_e3t_with_terminal_row(carried_e3t, raw_e3t)
+        candidate_e3t = v1_e3t_with_terminal_row(
+            carried_e3t, raw_e3t, plant=plant == "tke_e3t")
+
+        def lengths(e3t):
+            return tuple(np.asarray(a) for a in compute_mixing_lengths(
+                jnp.asarray(en), jnp.asarray(rn2), jnp.asarray(bundle.e3w_Kmm),
+                tke_cfg, signed_n2=True, dz_cell=jnp.asarray(e3t),
+                l_surface_anchor=jnp.asarray(l_surface)))
+
+        legacy_lm, legacy_ld = lengths(carried_e3t)
+        nemo_lm, nemo_ld = lengths(true_e3t)
+        candidate_lm, candidate_ld = lengths(candidate_e3t)
+        card_en = np.asarray(plain.tke.data, np.float64)
+
+        def lengths_from_en(energy, e3t):
+            return tuple(np.asarray(a) for a in compute_mixing_lengths(
+                jnp.asarray(energy), jnp.asarray(rn2),
+                jnp.asarray(bundle.e3w_Kmm), tke_cfg, signed_n2=True,
+                dz_cell=jnp.asarray(e3t),
+                l_surface_anchor=jnp.asarray(l_surface)))
+
+        card_en_lm, card_en_ld = lengths_from_en(card_en, true_e3t)
+        planted_output_moved = bool(
+            np.any(candidate_lm != nemo_lm) or np.any(candidate_ld != nemo_ld))
+        if plant == "tke_e3t":
+            require(planted_output_moved,
+                    "one-ULP terminal e3t plant did not reach a mixing length")
+
+        pred_avm, _ = compute_K_from_tke(
+            jnp.asarray(en), jnp.asarray(nemo_lm), tke_cfg,
+            N2=jnp.asarray(rn2), shear_sq=jnp.ones_like(jnp.asarray(rn2)))
+        pred_avm = np.where(wet_w, np.asarray(pred_avm), 0.0)
+        card_en_pred_avm, _ = compute_K_from_tke(
+            jnp.asarray(card_en), jnp.asarray(card_en_lm), tke_cfg,
+            N2=jnp.asarray(rn2), shear_sq=jnp.ones_like(jnp.asarray(rn2)))
+        card_en_pred_avm = np.where(
+            wet_w, np.asarray(card_en_pred_avm), 0.0)
+        active = wet_w & (avm > float(tke_cfg.kappaM_min)) & (en > 0.0)
+        observed_lm = np.zeros_like(en)
+        observed_lm[active] = (avm[active] / float(tke_cfg.c_k)
+                               / np.sqrt(en[active]))
+        dissl = zdf["dissl"][..., 1:nk]
+        active_ld = wet_w & (dissl > 0.0) & (en > 0.0)
+        observed_ld = np.zeros_like(en)
+        observed_ld[active_ld] = np.sqrt(en[active_ld]) / dissl[active_ld]
+
+        rows = {
+            "legacy_zmxlm_vs_nemo_replay": _mxl_array_row(
+                "legacy_zmxlm_vs_nemo_replay", nemo_lm, legacy_lm, wet_w),
+            "legacy_zmxld_vs_nemo_replay": _mxl_array_row(
+                "legacy_zmxld_vs_nemo_replay", nemo_ld, legacy_ld, wet_w),
+            "candidate_zmxlm_vs_nemo_replay": _mxl_array_row(
+                "candidate_zmxlm_vs_nemo_replay", nemo_lm, candidate_lm, wet_w),
+            "candidate_zmxld_vs_nemo_replay": _mxl_array_row(
+                "candidate_zmxld_vs_nemo_replay", nemo_ld, candidate_ld, wet_w),
+            "card_en_zmxlm_vs_nemo_en_replay": _mxl_array_row(
+                "card_en_zmxlm_vs_nemo_en_replay", nemo_lm, card_en_lm, wet_w),
+            "card_en_zmxld_vs_nemo_en_replay": _mxl_array_row(
+                "card_en_zmxld_vs_nemo_en_replay", nemo_ld, card_en_ld, wet_w),
+            "nemo_zmxlm_replay_vs_observable": _mxl_array_row(
+                "nemo_zmxlm_replay_vs_observable", observed_lm, nemo_lm, active),
+            "nemo_zmxld_replay_vs_observable": _mxl_array_row(
+                "nemo_zmxld_replay_vs_observable", observed_ld, nemo_ld, active_ld),
+            "nemo_avm_replay_vs_record": _mxl_array_row(
+                "nemo_avm_replay_vs_record", avm, pred_avm, wet_w),
+            "card_avm_vs_record": _mxl_array_row(
+                "card_avm_vs_record", avm, np.asarray(plain.tke_avm.data), wet_w),
+            "card_en_avm_replay_vs_card": _mxl_array_row(
+                "card_en_avm_replay_vs_card", np.asarray(plain.tke_avm.data),
+                card_en_pred_avm, wet_w),
+            "card_avt_vs_record": _mxl_array_row(
+                "card_avt_vs_record", zdf["avt"][..., 1:nk],
+                np.asarray(plain.tke_avt.data), wet_w),
+        }
+
+        bottom = np.asarray(z.bottom_level, np.int64)
+        wet_col = bottom >= 0
+        jj, ii = np.indices(bottom.shape)
+        at_bottom = raw_e3t[jj, ii, np.clip(bottom, 0, nk - 1)]
+        below_bottom = raw_e3t[jj, ii, np.clip(bottom + 1, 0, nk)]
+        full = wet_col & (bottom == nk - 1)
+        partial = wet_col & (bottom < nk - 1)
+        partial_below_live = carried_e3t[
+            jj[partial], ii[partial], bottom[partial] + 1]
+        thickness = {
+            "wet_columns": int(wet_col.sum()),
+            "full_depth_columns": int(full.sum()),
+            "partial_columns": int(partial.sum()),
+            "at_bottom_min_m": float(at_bottom[wet_col].min()),
+            "at_bottom_max_m": float(at_bottom[wet_col].max()),
+            "below_bottom_min_m": float(below_bottom[wet_col].min()),
+            "below_bottom_max_m": float(below_bottom[wet_col].max()),
+            "partial_below_bottom_exact": int(np.count_nonzero(
+                partial_below_live == below_bottom[partial])),
+            "partial_below_bottom_count": int(partial.sum()),
+            "terminal_e3t_min_m": float(raw_e3t[..., -1][full].min()),
+            "terminal_e3t_max_m": float(raw_e3t[..., -1][full].max()),
+        }
+        gate_pass = (
+            trace_passive
+            and rows["legacy_zmxlm_vs_nemo_replay"]["status"] == "DEBT"
+            and rows["legacy_zmxld_vs_nemo_replay"]["status"] == "DEBT"
+            and rows["candidate_zmxlm_vs_nemo_replay"]["status"] == "AT-BAR"
+            and rows["candidate_zmxld_vs_nemo_replay"]["status"] == "AT-BAR"
+            and thickness["partial_below_bottom_exact"]
+                == thickness["partial_below_bottom_count"]
+            and plant is None)
+        out.update({
+            "label": "V1 kt-1 source-ordered nn_mxl=3 cellwise replay",
+            "seconds": seconds,
+            "trace_passive": trace_passive,
+            "frame_restart_exact": {"en": True, "avm_k": True},
+            "rn2_trace_vs_direct_bundle": rn2_bundle_comparison,
+            "plant_output_moved": planted_output_moved,
+            "preregistered_p2_confirmed": (
+                rows["nemo_avm_replay_vs_record"]["n_over_bar"] == 0),
+            "rows": rows,
+            "thickness": thickness,
+            "gate_pass": bool(gate_pass),
+        })
+        return out
 
     if arm == "stages":
         # one step, each stage exposed by the model's private hook; the entry
@@ -1079,7 +1319,7 @@ def main(argv=None) -> int:
                     "all-level stage arrays (evidence, never git)")
     ap.add_argument("--state-in", type=Path)
     ap.add_argument("--state-out", type=Path)
-    ap.add_argument("--plant", choices=("score", "level"))
+    ap.add_argument("--plant", choices=("score", "level", "tke_e3t"))
     ap.add_argument("--geometry-plant")
     ap.add_argument("--without-zdf-faces", action="store_true",
                     help="BEFORE ARM: the card without NEMO's dyn_zdf divisors")
@@ -1148,6 +1388,13 @@ def main(argv=None) -> int:
                   f"replay all levels: unequal {n} max "
                   f"{max(s2['full']['max_abs'], s2['partial']['max_abs']):.3e}")
         return 1 if bad else 0
+    if a.arm == "tke_mixing_length":
+        for row in out["rows"].values():
+            print(f"{row['name']}: {row['status']} over-bar "
+                  f"{row['n_over_bar']} unequal {row['n_unequal']} "
+                  f"max {row['max_abs']:.3e}")
+        print("THICKNESS", json.dumps(out["thickness"], sort_keys=True))
+        return 0 if out["gate_pass"] else 1
     if a.arm == "rhs_frame":
         bad = False
         for f, r in out["per_kt"][0]["rhs_frame"].items():

@@ -492,6 +492,7 @@ class TKEEntryN2Bundle(NamedTuple):
     # e3w_Kmm field above intentionally has nlev-1 eosbn2 interfaces.
     e3w_surface_Kmm: jnp.ndarray | None = None
     bn2_intermediate: object = None
+    e3t_jpk: jnp.ndarray | None = None
 
 
 class TKECarryOutput(NamedTuple):
@@ -917,9 +918,11 @@ def compute_mixing_lengths(
         n_e3 = e3T_raw.shape[0]
         n_l = lT.shape[0]
         if n_e3 == n_l + 1:
+            has_terminal_e3t = True
             e3T = e3T_raw[:-1]        # (nlev,), UNCHANGED vs the legacy contract
             e3_bottom = e3T_raw[-1]   # true e3t(jpk), the extra row
         elif n_e3 == n_l:
+            has_terminal_e3t = False
             e3T = e3T_raw             # legacy contract, bit-identical to before
             e3_bottom = e3T_raw[-1]   # proxy: e3t(jpkm1) (documented residual gap)
         else:
@@ -960,11 +963,22 @@ def compute_mixing_lengths(
         if raw_evaluation == "nemo_literal":
             # NEMO leaves zmxlm(jpk) at rmxl_min and uses that UNMODIFIED
             # terminal pad as the carry for the first jk=jpkm1 iteration.
-            # Do not apply a fictitious update to jpk itself from raw en(jpk).
-            _, ldn_rest = jax.lax.scan(
-                _down, _seed, (lT[1:-1][::-1], e3T[2:][::-1]))
-            ldn = jnp.concatenate(
-                [lT[:1], ldn_rest[::-1], _seed[None]], axis=0)
+            # zdftke.f90:690-692 nevertheless UPDATES jk=jpkm1 from that pad
+            # plus e3t(jpk).  Execute that statement when the caller carries
+            # the true terminal thickness; the legacy shape cannot represent
+            # it and retains its prior bounded proxy bit-for-bit.
+            if has_terminal_e3t:
+                first_ldn = jnp.minimum(_seed + e3_bottom, lT[-1])
+                _, ldn_rest = jax.lax.scan(
+                    _down, first_ldn,
+                    (lT[1:-1][::-1], e3T[2:][::-1]))
+                ldn = jnp.concatenate(
+                    [lT[:1], ldn_rest[::-1], first_ldn[None]], axis=0)
+            else:
+                _, ldn_rest = jax.lax.scan(
+                    _down, _seed, (lT[1:-1][::-1], e3T[2:][::-1]))
+                ldn = jnp.concatenate(
+                    [lT[:1], ldn_rest[::-1], _seed[None]], axis=0)
         else:
             # Historical shared recurrence, retained bit-for-bit outside the
             # two literal DINO cards.
@@ -3069,6 +3083,19 @@ def tke_vertical_mixing(
         # length scans on the later implicit-solve Jacobian, so every sloping
         # column used the wrong e3t operand at zdftke.F90:800-806.
         dz_cell_mxl = precomputed_n2_bundle.e3t_Kmm
+        if getattr(cfg, "nemo_mxl_terminal_e3t", False):
+            if precomputed_n2_bundle.e3t_jpk is None:
+                raise ValueError(
+                    "nemo_mxl_terminal_e3t=True requires the raw NEMO "
+                    "dummy-bottom e3t(jpk) operand")
+            _terminal = jnp.asarray(precomputed_n2_bundle.e3t_jpk)
+            if _terminal.shape != tke_old.shape[:-1]:
+                raise ValueError(
+                    "precomputed_n2_bundle.e3t_jpk must match the horizontal "
+                    f"TKE shape; got {_terminal.shape} vs "
+                    f"{tke_old.shape[:-1]}.")
+            dz_cell_mxl = jnp.concatenate(
+                (dz_cell_mxl, _terminal[..., jnp.newaxis]), axis=-1)
 
     _shear_stage = getattr(
         cfg, "tke_shear_evaluation_stage", "implicit_solve_state")

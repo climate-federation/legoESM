@@ -981,6 +981,10 @@ class OceanZStarCoordinate(NamedTuple):
     nemo_e2u: jnp.ndarray | None = None
     nemo_e1v: jnp.ndarray | None = None
     nemo_een_barotropic: NemoEENBarotropicOperands | None = None
+    # Raw NEMO dummy-bottom T-cell thickness e3t_0(jpk), shape (...).
+    # It is separate from the n_levels live slots in nemo_e3t_0 and is read
+    # only by a card-selected literal TKE mixing-length sweep.
+    nemo_e3t_jpk: jnp.ndarray | None = None
 
 
 def create_ocean_z_star(
@@ -1477,6 +1481,7 @@ class OceanPartialCellCoordinate(NamedTuple):
     nemo_e2u: jnp.ndarray | None = None
     nemo_e1v: jnp.ndarray | None = None
     nemo_een_barotropic: NemoEENBarotropicOperands | None = None
+    nemo_e3t_jpk: jnp.ndarray | None = None
     # NEMO ldf_dyn_init's READ coefficient (nn_ahm_ijk_t = -30,
     # ldfdyn.f90:348-353): the whole 3-D lateral momentum viscosity, already
     # exchanged and masked as that routine leaves it.  ``nemo_ldf_ahmt`` is on
@@ -1689,6 +1694,7 @@ def create_partial_cell_coordinate(
         nemo_e1v=getattr(z_coord, "nemo_e1v", None),
         nemo_een_barotropic=getattr(
             z_coord, "nemo_een_barotropic", None), nemo_r3t_stored_product=getattr(z_coord, "nemo_r3t_stored_product", False) is True,  # noqa: E501
+        nemo_e3t_jpk=getattr(z_coord, "nemo_e3t_jpk", None),
     )
 
 
@@ -1771,6 +1777,7 @@ def create_full_step_coordinate(
         nemo_e1v=getattr(z_coord, "nemo_e1v", None),
         nemo_een_barotropic=getattr(
             z_coord, "nemo_een_barotropic", None), nemo_r3t_stored_product=getattr(z_coord, "nemo_r3t_stored_product", False) is True,  # noqa: E501
+        nemo_e3t_jpk=getattr(z_coord, "nemo_e3t_jpk", None),
     )
 
 

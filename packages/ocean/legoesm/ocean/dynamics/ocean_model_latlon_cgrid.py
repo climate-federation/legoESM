@@ -11767,10 +11767,23 @@ class LatLonCGridOceanModel:
                 jnp.asarray(tmask, dtype=bool),
                 e3t_0_array * zrw_stretch[..., jnp.newaxis],
                 e3t_0_array)
+        e3t_jpk = None
+        if (_tke_active
+                and getattr(tke_cfg, "nemo_mxl_terminal_e3t", False)):
+            e3t_jpk = getattr(_zc, "nemo_e3t_jpk", None)
+            if e3t_jpk is None:
+                raise ValueError(
+                    "nemo_mxl_terminal_e3t=True requires "
+                    "z_coord.nemo_e3t_jpk from the NEMO mesh record")
+            e3t_jpk = jnp.asarray(e3t_jpk)
+            if e3t_jpk.shape != state.eta.data.shape:
+                raise ValueError(
+                    "z_coord.nemo_e3t_jpk must match the horizontal state; "
+                    f"got {e3t_jpk.shape} vs {state.eta.data.shape}")
         return TKEEntryN2Bundle(
             rn2=rn2, rn2b=rn2b, gdepw_Kmm=gdepw, e3w_Kmm=e3w,
             e3t_Kmm=e3t, e3w_surface_Kmm=e3w_surface,
-            bn2_intermediate=_bn2_intermediate)
+            bn2_intermediate=_bn2_intermediate, e3t_jpk=e3t_jpk)
 
     def _tke_step_entry_p_sh2(
         self, state, *, eta_now=None, u_now=None, v_now=None,

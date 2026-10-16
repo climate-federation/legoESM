@@ -3677,7 +3677,10 @@ def _orca2g1_domain(domain_path: Path, jpk: int = 2) -> dict[str, np.ndarray]:
             f"e3t_1d shape {e3t_1d.shape}")
     if bottom.max() != jpk - 1 or bottom.min() < 0:
         raise ValueError(f"ORCA2G bottom_level must span 0 (land) to {jpk - 1}")
-    # Record level jpk is NEMO's masked dummy bottom; the card carries jpkm1.
+    # Record level jpk is NEMO's masked dummy bottom. The prognostic card
+    # carries jpkm1 live levels, while V1 separately retains e3t(jpk) because
+    # zdftke's bottom-up mixing-length scan reads that dry thickness.
+    out["e3t_jpk"] = raw["e3t_0"][-1]
     out.update(e3t_1d=e3t_1d[:-1], e3w_1d=e3w_1d[:-1], bottom_level=bottom)
     out.update({name: np.moveaxis(value[:-1], 0, -1) for name, value in raw.items()})
     return out
@@ -3757,6 +3760,8 @@ def build_orca2g1_flat_card(deck_root: str | Path, case: str = "ORCA2G1-flat") -
         nemo_e3t_0=jnp.asarray(dom["e3t_0"], dtype=jnp.float64),
         nemo_bbl_e3u_0=jnp.asarray(dom["e3u_0"], dtype=jnp.float64),
         nemo_bbl_e3v_0=jnp.asarray(dom["e3v_0"], dtype=jnp.float64),
+        nemo_e3t_jpk=(jnp.asarray(dom["e3t_jpk"], dtype=jnp.float64)
+                      if case == "ORCA2V1-tke" else None),
     )
 
     surface_wet = tmask[..., 0]
@@ -4381,6 +4386,7 @@ def _orca2v1_tke_vertical(g5_vm, deck: ORCA2G1Deck):
         # (zdftke.f90:354); the inherited compact arm takes the grid's deepest w
         tke_langmuir_evaluation="nemo_literal",
         nemo_mxlice=2,                          # nn_mxlice=2, :620-623 (needs hm_i)
+        nemo_mxl_terminal_e3t=True,             # e3t_3d(jpk), :690-692
         etau_mode="below_ml",                   # nn_etau=1, :498-502
         etau_htau_mode="latitude",              # nn_htau=1 (namelist_ref:1252)
         etau_frac=_ORCA2V1_RN_EFR,              # rn_efr
@@ -4400,10 +4406,11 @@ def _orca2v1_tke_selected(vm) -> bool:
                  t.nemo_derived_mxl_min, t.nemo_mxl0_rmxl_min_overwrite, t.lc,
                  t.lc_coeff, t.etau_mode, t.etau_htau_mode, t.etau_frac, t.eice,
                  t.bottom_tke_bc, t.tke_langmuir_evaluation, t.nemo_mxlice,
+                 t.nemo_mxl_terminal_e3t,
                  t.nemo_mxl0_surface_tmask) == (
                 3, _ORCA2V1_RN_EMIN, _ORCA2V1_RN_EMIN0, True, True, True,
                 _ORCA2V1_RN_LC, "below_ml", "latitude", _ORCA2V1_RN_EFR, 1, False,
-                "nemo_literal", 2, True))
+                "nemo_literal", 2, True, True))
 
 
 def _orca2v1_tke_initial_state(state, tmask, deck: ORCA2G1Deck):

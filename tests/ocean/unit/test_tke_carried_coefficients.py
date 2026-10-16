@@ -369,7 +369,7 @@ def test_literal_raw_mxl_matches_hand_computed_source_order_and_red_control():
             l_surface_anchor=jnp.asarray([floor]))
 
 
-def test_literal_mxl_ldown_keeps_jpk_terminal_seed_unmodified():
+def test_literal_mxl_ldown_updates_jpkm1_only_with_true_terminal_e3t():
     e = jnp.asarray([[2.0, 3.0, 1.0e8]])
     n2 = jnp.full_like(e, 1.0e-12)
     dz_cell = jnp.asarray([[1.0, 2.0, 3.0, 4.0]])
@@ -379,9 +379,17 @@ def test_literal_mxl_ldown_keeps_jpk_terminal_seed_unmodified():
     lk, _ = tke_mod.compute_mixing_lengths(
         e, n2, jnp.ones_like(e), cfg, dz_cell=dz_cell,
         l_surface_anchor=jnp.asarray([floor]))
-    # The final carried slot is NEMO's untouched jpk pad, not another raw
-    # buoyancy-length row.  The old recurrence produced 4.01 here.
+    # Legacy shape has no e3t(jpk), so it retains the bounded jpk-pad proxy.
     assert float(lk[0, -1]) == floor
+    widened = jnp.concatenate([dz_cell, jnp.asarray([[4.0]])], axis=-1)
+    lk_wide, _ = tke_mod.compute_mixing_lengths(
+        e, n2, jnp.ones_like(e), cfg, dz_cell=widened,
+        l_surface_anchor=jnp.asarray([floor]))
+    # zdftke.f90:690-692: jk=jpkm1 is updated from untouched
+    # zmxlm(jpk)=rmxl_min plus the true e3t(jpk) terminal thickness.
+    assert float(lk_wide[0, -1]) == floor + 4.0
+    # Non-vacuity: deleting the terminal row restores the old result.
+    assert float(lk_wide[0, -1]) != float(lk[0, -1])
     legacy, _ = tke_mod.compute_mixing_lengths(
         e, n2, jnp.ones_like(e),
         cfg._replace(tke_mxl_raw_evaluation="factored"),

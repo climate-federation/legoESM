@@ -654,6 +654,11 @@ class TKEConfig(NamedTuple):
     # sqrt(2)*sqrt(e)/sqrt(max(N2,1e-12)) expression. ``nemo_literal`` uses
     # zdftke.F90 source association and NEMO's runtime rsmall.
     tke_mxl_raw_evaluation: str = "factored"
+    # NEMO's nn_mxl bottom-up scan starts at jpkm1 and therefore reads
+    # e3t_3d(jpk), the masked dummy-bottom T-cell thickness. Generic grids do
+    # not carry that extra slot. A record-backed NEMO card may select this arm
+    # and supply ``z_coord.nemo_e3t_jpk``; missing data then raises.
+    nemo_mxl_terminal_e3t: bool = False
     # Langmuir source evaluation. ``vectorized`` is the historical shared
     # construction. ``nemo_literal`` preserves zdftke.F90:422-463 operation
     # order, including the per-column mbkt+1 no-crossing fallback. Only the

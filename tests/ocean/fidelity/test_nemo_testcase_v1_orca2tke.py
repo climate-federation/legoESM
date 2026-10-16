@@ -131,7 +131,8 @@ def test_v1_card_is_g5_plus_the_tke_selection(cards):
                      "physics.vertical_mixing.tke.etau_mode",
                      "physics.vertical_mixing.tke.etau_htau_mode",
                      "physics.vertical_mixing.tke.tke_langmuir_evaluation",
-                     "physics.vertical_mixing.tke.nemo_mxlice"}
+                     "physics.vertical_mixing.tke.nemo_mxlice",
+                     "physics.vertical_mixing.tke.nemo_mxl_terminal_e3t"}
     vm = v1.recipe.model_config.physics.vertical_mixing
     t = vm.tke
     # Rule 10: the numbers the closure will use, as instantiated.
@@ -142,9 +143,15 @@ def test_v1_card_is_g5_plus_the_tke_selection(cards):
     assert (t.lc, t.lc_coeff, t.etau_mode, t.etau_htau_mode, t.etau_frac, t.eice,
             t.bottom_tke_bc) == (True, 0.15, "below_ml", "latitude", 0.05, 1, False)
     # zdftke.f90:354 per-column imlc=mbkt+1; :620-623 nn_mxlice=2 (masked anchor)
-    assert (t.tke_langmuir_evaluation, t.nemo_mxlice, t.nemo_mxl0_surface_tmask) == (
-        "nemo_literal", 2, True)
-    assert g5.recipe.model_config.physics.vertical_mixing.tke.nemo_mxlice == 0
+    assert (t.tke_langmuir_evaluation, t.nemo_mxlice,
+            t.nemo_mxl_terminal_e3t, t.nemo_mxl0_surface_tmask) == (
+        "nemo_literal", 2, True, True)
+    g5_tke = g5.recipe.model_config.physics.vertical_mixing.tke
+    assert (g5_tke.nemo_mxlice, g5_tke.nemo_mxl_terminal_e3t) == (0, False)
+    assert g5.recipe.z_coord.nemo_e3t_jpk is None
+    dom = recipe._orca2g1_domain(INPUTS / CARD_FILES[0], 31)
+    assert np.array_equal(
+        np.asarray(v1.recipe.z_coord.nemo_e3t_jpk), dom["e3t_jpk"])
     assert (t.kappaM_min, t.kappaH_min, t.c_k, t.c_eps) == (1.2e-4, 1.2e-5, 0.1, 0.7)
     assert v1.recipe.model_config.physics.convection.scheme == "none"   # ln_zdfevd=F
     assert v1.unmeasured_features == recipe.ORCA2V1_UNMEASURED
@@ -179,7 +186,8 @@ def test_v1_selector_check_fires_on_each_planted_tke_line(cards):
     vm = cfg.physics.vertical_mixing
     for plant in ({"etau_mode": "none"}, {"eice": 0}, {"bottom_tke_bc": True},
                   {"tke_background": 1e-10}, {"lc": False},
-                  {"tke_langmuir_evaluation": "vectorized"}, {"nemo_mxlice": 0}):
+                  {"tke_langmuir_evaluation": "vectorized"}, {"nemo_mxlice": 0},
+                  {"nemo_mxl_terminal_e3t": False}):
         bad = vm._replace(tke=vm.tke._replace(**plant))
         card = v1._replace(recipe=v1.recipe._replace(model_config=cfg._replace(
             physics=cfg.physics._replace(vertical_mixing=bad))))
@@ -332,3 +340,28 @@ def test_v1_zdf_frame_reader_and_w_classes(tmp_path):
     w = ladder.w_classes({"t": {"full": full, "partial": part}})
     assert w["full"][0, 0].tolist() == [True, False]
     assert w["partial"][0, 0].tolist() == [False, True]
+
+
+def test_v1_terminal_e3t_reader_and_cellwise_gate_refuse_plants():
+    _, ladder = _ladder_modules()
+    carried = np.arange(12, dtype=np.float64).reshape(2, 2, 3) + 1.0
+    raw = np.concatenate([carried, np.full((2, 2, 1), 1000.0)], axis=-1)
+    widened = ladder.v1_e3t_with_terminal_row(carried, raw)
+    assert np.array_equal(widened[..., :-1], carried)
+    assert np.array_equal(widened[..., -1], raw[..., -1])
+    planted = ladder.v1_e3t_with_terminal_row(carried, raw, plant=True)
+    assert np.all(planted[..., -1] == np.nextafter(raw[..., -1], np.inf))
+    with pytest.raises(Exception, match="exactly one terminal"):
+        ladder.v1_e3t_with_terminal_row(carried, raw[..., :-1])
+    bad = raw.copy()
+    bad[0, 0, -1] = np.nan
+    with pytest.raises(Exception, match="finite"):
+        ladder.v1_e3t_with_terminal_row(carried, bad)
+
+    mask = np.ones_like(carried, dtype=bool)
+    good = ladder._mxl_array_row("good", carried, carried, mask)
+    assert good["status"] == "AT-BAR" and good["n_unequal"] == 0
+    changed = carried.copy()
+    changed[0, 0, 0] += 1.0
+    red = ladder._mxl_array_row("red", carried, changed, mask)
+    assert red["status"] == "DEBT" and red["n_over_bar"] == 1
