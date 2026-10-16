@@ -1719,6 +1719,12 @@ CITATION_MAP = {
         'pssh (:,:,Kaa) = ssha_e(:,:)',
         4,
     ],
+    # --- ORCA2 round 292: first valued external-V-target producer ---
+    'ORCA2_OMIP_L4_R280STAGE1/BLD/ppsrc/nemo/dynspg_ts.f90:517-519': [
+        'zhvp2_e(ji,jj) = hv_0(ji,jj) + r1_2 * r1_e1e2v(ji,jj)',
+        '&                                 + e1e2t(ji,jj+1) * zsshp2_e(ji,jj+1)  ) * ssvmask(ji,jj)',
+        3,
+    ],
     # --- ORCA2 round 288: held completed-stage V-fold partner ---
     'ORCA2_OMIP_L4_R280STAGE1/BLD/ppsrc/nemo/stprk3_stg.f90:812-820': [
         ('ELSE', 5),
