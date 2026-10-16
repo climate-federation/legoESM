@@ -5658,9 +5658,13 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # ``u``/``v`` (FULL velocity) are passed as ``u_full``/``v_full`` for the
     # Veros-faithful ``centered_full`` scheme; the default
     # ``upwind_perturbation`` scheme ignores them and advects ``u_prime``.
+    # dyn_zad updates the pivot V row too (dynzad.f90:118-119); the compact
+    # mask is dry there, NEMO's raw vmask is not.
     du_dt, dv_dt, diag_vertadv_u, diag_vertadv_v = _bc_vertical_momentum_advection(
         du_dt, dv_dt, u_prime, v_prime, zad_w, zad_h_u, zad_h_v,
-        u_mask_3d, v_mask_3d,
+        u_mask_3d, (jnp.asarray(nemo_literal_hpg_vmask, dtype=dv_dt.dtype)
+                    if (nemo_literal_hpg_vmask is not None
+                        and bool(config.rk3_vector_raw_vmask)) else v_mask_3d),
         grid, _mom_adv, _weno_order, config, diagnose_momentum,
         u_full=u, v_full=v,
     )
