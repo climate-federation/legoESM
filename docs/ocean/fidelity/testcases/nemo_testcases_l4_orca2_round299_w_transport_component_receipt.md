@@ -108,9 +108,35 @@ this sandbox does not retry `mpirun`.
 
 ## Validation and review
 
-- Focused round-299 classifier and acquisition controls: **6/6 pass**.
-- Citation gate, focused campaign tests, required fidelity battery, and
-  independent read-only review are recorded in the final validation commit.
+- Citation gate: **PASS**, seven citations, zero failures and zero unmapped
+  citations. The rigid shift of the `traadv.f90:267-302` W-diagnosis span
+  refuses. The default cumulative receipt also passes with zero failures and
+  zero unmapped citations. Receipt/default/plant log SHA-256:
+  `742b0fb1a90d1b4707452c9b24017a0a76b741e2e0715c8ff0e880f2b9be22bb`,
+  `9c99931029d9a12652a65b50ac65a74d3c44a880478b141e34164347531363c4`,
+  and `3d65a86e3d43bace53773f09f3fd617f7d3258964aa552f958d6c0e2d5035a4f`.
+- Focused round-298/299 and citation-gate battery: **26/26 pass** in 6.39 s.
+  Log SHA-256:
+  `9695f1aa0b4aca0b42cbd35280c6f3ecf9d2226cfe55b591cb09cbedca442453`.
+- The required single `tests/ocean/fidelity -n 12` battery reached 99% with
+  3,605 pass lines. Eight branch-tip reds reproduce serially: the certified
+  GYRE year-harness stamp, two stale round-33 mutation anchors, OMT-1's added
+  required field, round-228's stale citation key, the allow-dirty scope
+  ratchet, the worktree-stamp ratchet, and SI3 scalar-math provenance. These
+  are the same registered pre-existing classes as round 298. One G1/JAX
+  worker then crashed during compilation and the coordinator hung; its sole
+  printed failed node passes in a fresh serial process (1/1, 100.28 s). Full,
+  known-red serial, and G1-isolation SHA-256:
+  `e57d51280712d7d1104a3bb171006e36cd49b3e55f5fa4704679b6cfcce36a79`,
+  `3a206d7d4b266d3e78d0f9a9390f43289235d66c80ee9c6c07e961157b584d14`,
+  and `345cc172a3fd0a4831266a6c83e63bd46c65ee27e727daefded422a10ae5f9c0`.
+- Acquisition preflight and layout-plant log SHA-256:
+  `8fe46939c214178c1f36c691749074b28abb3de3dd6bce27b6883b696beaefcf`
+  and `55901f749e91de4efc50ac595a01fd27f2a5a3e826cdb540014c4e598190f1e3`.
+- Independent review unavailable in-sandbox. The read-only `codex exec`
+  attempt could not initialize its in-process app-server client on a
+  read-only filesystem; review is handed to the operator. Log SHA-256:
+  `eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5`.
 
 ## Configuration choices
 
