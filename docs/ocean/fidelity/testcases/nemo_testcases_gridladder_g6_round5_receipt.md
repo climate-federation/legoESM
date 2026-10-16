@@ -191,6 +191,11 @@ today, so nothing changes there; not imported by this round.
    moving the slice.  No older field moved.  Slice widened by two, the two
    names appended, and their off defaults asserted.
 5. Calibration figure: the receipt cites the BELOW-SURFACE figure, 2.17e-16.
+6. **Second pre-existing red (G1 card), same class, also stale expectation.**
+   `test_standin_card_builds_and_states_every_selector` (red at `85a13122c`
+   too) planted the deck check `no_ice`; G5 round `888621bd3` renamed it
+   `no_internal_ice_model` with an identical condition.  Plant key updated;
+   no code changed.  UNASKED (test-only), offered for revert.
 
 ## Tests and review
 
@@ -205,8 +210,10 @@ today, so nothing changes there; not imported by this round.
   `tests/ocean/fidelity/test_nemo_testcase_g6_orca2vec.py`: 27 passed (CPU fp64).
 - Receipt-citation gate + private-import ratchet: 23 passed on the clean
   tree (no citation re-anchored; the landing is line-neutral in cited code).
-- Resume: new call-site test + the round's test pass; G2 off-by-default
-  test green after the expectation update (counts in the resume commit).
+- Resume batteries (CPU fp64, clean tree except the receipt/G1-test edit
+  committed with them): G1 card 53 passed; G1b card 20 passed; G1 tools 31
+  passed; G1 ladder 86 passed (16 workers); G2-G6 77 passed, 13 deselected;
+  citation gate + private-import ratchet 23 passed (stamped `5d9aac594819`).
 - codex review: paused (quota).  The operator runs an independent Claude
   review of this diff before landing.
 
