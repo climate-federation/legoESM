@@ -132,3 +132,56 @@ def test_work_density_at_t_sums_to_the_face_work_and_pearson_is_the_correlation(
     assert abs(ss.pearson(x, 3.0 * x + 2.0) - 1.0) <= 1e-14
     assert abs(ss.pearson(x, -x) + 1.0) <= 1e-14
     assert abs(ss.pearson(x, rng.standard_normal(50)) - np.corrcoef(x, x)[0, 1]) < 1.0
+
+
+def test_hourly_eq7_loss_is_the_training_loss_resolved_by_hour():
+    """loss_floor.hourly_eq7_loss: its mean is deterministic_trajectory_loss,
+    and each entry is local to its hour (zeroing one hour's error zeroes
+    that entry only)."""
+    import jax
+    import jax.numpy as jnp
+    from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import SWG_DG50_NAMELIST, build_swg_card
+    from legoesm.training.swg_online import build_closure_geometry, deterministic_trajectory_loss
+
+    lf = _load("loss_floor")
+    old = get_policy()
+    set_policy(PrecisionPolicy.fp64())
+    try:
+        card = build_swg_card(SWG_DG50_NAMELIST._replace(rn_domsiz_m=1.0e6))
+    finally:
+        set_policy(old)
+    geometry = build_closure_geometry(card)
+    kw = {"objective": "template", "beta_m1_s1": 2.0e-11, "basin_length_m": 1.0e6,
+          "wall_ring": "weighted"}
+    shape = (3, 4) + tuple(geometry.tmask.shape)   # windows, hours, y, x
+    keys = jax.random.split(jax.random.PRNGKey(0), 6)
+    predicted = tuple(0.1 * jax.random.normal(k, shape, jnp.float64) for k in keys[:3])
+    target = tuple(0.1 * jax.random.normal(k, shape, jnp.float64) for k in keys[3:])
+    hourly = lf.hourly_eq7_loss(predicted, target, geometry, **kw)
+    assert hourly.shape == shape[:2]
+    total = deterministic_trajectory_loss(predicted, target, geometry, **kw)
+    assert abs(float(hourly.mean()) / float(total) - 1.0) <= 1e-12
+    assert float(hourly.min()) > 0.0
+    matched = tuple(p.at[:, 2].set(t[:, 2]) for p, t in zip(predicted, target))
+    hourly_matched = lf.hourly_eq7_loss(matched, target, geometry, **kw)
+    assert float(jnp.max(jnp.abs(hourly_matched[:, 2]))) == 0.0
+    others = jnp.delete(jnp.arange(4), 2)
+    assert float(jnp.max(jnp.abs(hourly_matched[:, others] - hourly[:, others]))) == 0.0
+
+
+def test_free_run_pretrained_ke_is_the_wet_face_mean_definition():
+    """free_run_pretrained.ke_and_peak: truth_ke_reference's basin KE
+    (0.5 (mean_U u^2 + mean_V v^2) over wet faces) and the wet-face peak
+    speed; dry faces do not count."""
+    fp = _load("free_run_pretrained")
+    _, umask, vmask, _ = _basin()
+    rng = np.random.default_rng(3)
+    u = rng.standard_normal(umask.shape)
+    v = rng.standard_normal(vmask.shape)
+    u[~umask] = 50.0   # dry faces: excluded from both numbers
+    v[~vmask] = 50.0
+    ke, peak = fp.ke_and_peak(u, v, umask, vmask)
+    assert ke == pytest.approx(0.5 * (np.mean(u[umask] ** 2) + np.mean(v[vmask] ** 2)), rel=1e-15)
+    assert peak == max(np.abs(u[umask]).max(), np.abs(v[vmask]).max()) < 50.0
+    assert fp.DAYS == 3 * 365 and fp.REPORT_DAYS == 30
