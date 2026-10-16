@@ -3,7 +3,8 @@
 Covers the exact range projector of residual_decomposition.py (sparse
 operator equals swe_rotated_potential_forcing; in-range fields return with
 zero remainder; cross*grad(p) fields are exactly orthogonal) and the set
-semantics of closure_scaling.lambdas_where_closure_exceeds_abs_drag.
+semantics of closure_scaling.lambdas_where_closure_exceeds_abs_drag, and the
+T-point work density and Pearson helpers of subgrid_snapshots.py.
 """
 from __future__ import annotations
 
@@ -109,3 +110,25 @@ def test_closure_exceeds_abs_drag_is_a_set_not_a_first_hit():
             {"lambda": 1.5, "closure_work": 5.0, "drag_work": -4.0}]
     assert cs.lambdas_where_closure_exceeds_abs_drag(rows) == [0.25, 0.5, 1.5]
     assert cs.lambdas_where_closure_exceeds_abs_drag(rows[2:3]) == []
+
+
+def test_work_density_at_t_sums_to_the_face_work_and_pearson_is_the_correlation():
+    ss = _load("subgrid_snapshots")
+    rng = np.random.default_rng(1)
+    tmask, umask, vmask, _ = _basin()
+    u, v, au, av = (rng.standard_normal(tmask.shape) for _ in range(4))
+    density = ss.work_density_t(u, v, au, av, umask, vmask)
+    face_sum = np.sum(u * au * umask) + np.sum(v * av * vmask)
+    assert abs(density.sum() - face_sum) <= 1e-14 * abs(face_sum)
+    assert np.all(density[~tmask] == 0.0)
+    # A face's work lands half on each of its two adjoining T cells: a single
+    # nonzero U face splits exactly.
+    one_u = np.zeros_like(u)
+    j, i = np.argwhere(umask)[3]
+    one_u[j, i] = 2.0
+    split = ss.work_density_t(one_u, v, np.ones_like(au), np.zeros_like(av), umask, vmask)
+    assert split[j, i] == 1.0 and split[j, i + 1] == 1.0 and split.sum() == 2.0
+    x = rng.standard_normal(50)
+    assert abs(ss.pearson(x, 3.0 * x + 2.0) - 1.0) <= 1e-14
+    assert abs(ss.pearson(x, -x) + 1.0) <= 1e-14
+    assert abs(ss.pearson(x, rng.standard_normal(50)) - np.corrcoef(x, x)[0, 1]) < 1.0
