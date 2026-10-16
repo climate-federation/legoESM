@@ -257,17 +257,32 @@ def classify(control: dict, single: dict, pair: dict,
                          if row["growth_factor"] is not None
                          and row["growth_factor"] > 10.0), None)
     exact_losses = []
+    first_pair_effect = None
     control_rows = {(row["kt"], row["checkpoint"], row["field"]): row
                     for row in control["ladder"]["rows"]}
+    single_boundaries = {
+        (row["kt"], row["stage"]): row for row in single["boundaries"]
+    }
     for boundary in pair["boundaries"]:
         checkpoint = "entry" if boundary["stage"] == 0 else f"stage{boundary['stage']}"
         for field in FIELDS:
             old = control_rows.get((boundary["kt"], checkpoint, field))
             new = boundary["rows"][field]
-            if old and old["bit_identical"] and not new["bit_identical"]:
+            if (boundary["stage"] > 0 and old and old["bit_identical"]
+                    and not new["bit_identical"]):
                 exact_losses.append({"kt": boundary["kt"],
                                      "checkpoint": checkpoint,
                                      "field": field})
+            single_boundary = single_boundaries.get(
+                (boundary["kt"], boundary["stage"]))
+            if single_boundary is not None and first_pair_effect is None:
+                prior = single_boundary["rows"][field]
+                signature = ("unequal", "max_abs", "rms")
+                if any(prior[name] != new[name] for name in signature):
+                    first_pair_effect = {
+                        "kt": boundary["kt"], "checkpoint": checkpoint,
+                        "field": field, "single": prior, "pair": new,
+                    }
     result = {
         "format": "nemo-testcase-l4-orca2-round288-pair-classification-v1",
         "status": ("QUALIFIED_R288_FULL_GATES" if pair_completed and pair_toward
@@ -280,6 +295,7 @@ def classify(control: dict, single: dict, pair: dict,
         "kt1_stage1_v": {"single": single_stage1_v, "pair": pair_stage1_v,
                          "pair_toward": pair_toward},
         "exact_row_losses": exact_losses,
+        "first_pair_effect": first_pair_effect,
         "growth": growth,
         "first_over_10x_growth": first_growth,
         "prediction_ledger": {
