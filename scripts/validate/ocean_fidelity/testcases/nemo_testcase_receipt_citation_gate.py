@@ -1712,7 +1712,7 @@ CITATION_MAP = {
         27,
     ],
     'ocean_model_latlon_cgrid.py:6048-6052': [
-        'if isinstance(_zc, OceanPartialCellCoordinate):',
+        ('if isinstance(_zc, OceanPartialCellCoordinate):', 1),
         '_ws_v_live_mask = _ws_v_live_mask.astype(state.eta.data.dtype)',
         5,
     ],
