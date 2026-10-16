@@ -98,6 +98,8 @@ _ORCA2_R280STAGE1_COMPILED = (
     NEMO / "cfgs/ORCA2_OMIP_L4_R280STAGE1/BLD/ppsrc/nemo")
 _ORCA2_R297STAGE7_COMPILED = (
     NEMO / "cfgs/ORCA2_OMIP_L4_R297STAGE7/BLD/ppsrc/nemo")
+_ORCA2_R299W7_COMPILED = (
+    NEMO / "cfgs/ORCA2_OMIP_L4_R299W7/BLD/ppsrc/nemo")
 _ORCA2_R229FOLDTRP = NEMO / "cfgs/ORCA2_OMIP_L4_R229FOLDTRP/BLD"
 _ORCA2_R230FOLDTRP = NEMO / "cfgs/ORCA2_OMIP_L4_R230FOLDTRP/BLD"
 _ORCA2G1_P3 = NEMO / "cfgs/ORCA2G1_OMIP_L1_P3/BLD"
@@ -280,6 +282,14 @@ FILES = {
         _ORCA2_R297STAGE7_COMPILED / "divhor.f90"),
     "ORCA2_OMIP_L4_R297STAGE7/BLD/ppsrc/nemo/sshwzv.f90": (
         _ORCA2_R297STAGE7_COMPILED / "sshwzv.f90"),
+    "ORCA2_OMIP_L4_R299W7/BLD/ppsrc/nemo/traadv.f90": (
+        _ORCA2_R299W7_COMPILED / "traadv.f90"),
+    "ORCA2_OMIP_L4_R299W7/BLD/ppsrc/nemo/divhor.f90": (
+        _ORCA2_R299W7_COMPILED / "divhor.f90"),
+    "ORCA2_OMIP_L4_R299W7/BLD/ppsrc/nemo/sshwzv.f90": (
+        _ORCA2_R299W7_COMPILED / "sshwzv.f90"),
+    "ORCA2_OMIP_L4_R299W7/BLD/ppsrc/nemo/stprk3_stg.f90": (
+        _ORCA2_R299W7_COMPILED / "stprk3_stg.f90"),
     "ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/traadv.f90": (
         _ORCA2_R210OMT1_COMPILED / "traadv.f90"),
     "ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/traadv_cen.f90": (
