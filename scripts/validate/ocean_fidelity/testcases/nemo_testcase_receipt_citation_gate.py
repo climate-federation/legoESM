@@ -1728,7 +1728,7 @@ CITATION_MAP = {
     # --- ORCA2 round 294: raw-hv continuation to the vector V update ---
     'ORCA2_OMIP_L4_R280STAGE1/BLD/ppsrc/nemo/dynspg_ts.f90:509-520': [
         '!                          ! ocean u- and v-depth at mid-step   (separate DO-loops remove the need of a lbc_lnk)',
-        ('END DO   ;   END DO', 10),
+        ('END DO   ;   END DO', 6),
         12,
     ],
     'ORCA2_OMIP_L4_R280STAGE1/BLD/ppsrc/nemo/dynspg_ts.f90:666-678': [
