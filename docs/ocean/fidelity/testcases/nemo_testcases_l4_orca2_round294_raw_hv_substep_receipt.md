@@ -99,7 +99,7 @@ landing predicate.
   option test; its required serial isolation also disappeared after
   collection without an assertion.  The suite was not rerun.  Battery and
   isolation hashes are `e4255fb64925a1dbd3723049c2bc74f8f0b3a7b78eab4917a84137e8685d7228`
-  and `236f942c56466cd925d01fe1d2bab125896e07a2089f9884440137c9c0b58bbe`.
+  and `1e7a716d2108bcddd14c3887987506e58f707a64783f27557a491d37a3696dd3`.
 - Independent review unavailable in-sandbox: `codex exec --sandbox
   read-only` exited before reading the diff because its app-server client
   attempted a write.  Log SHA256
