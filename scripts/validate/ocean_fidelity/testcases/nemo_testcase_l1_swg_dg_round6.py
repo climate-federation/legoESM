@@ -9,23 +9,17 @@ import json
 import os
 import platform
 import sys
+from collections import Counter
 from pathlib import Path
 
 import numpy as np
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-from nemo_testcase_phase3_trajectory_gate import require  # noqa: E402
+from nemo_testcase_checkout import bootstrap_checkout  # noqa: E402
 
-DG_STAGE_ROOT = Path(
-    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgdg_rounds/"
-    "round1/oracle_swg_dg_r1/instrumented")
-SHIPPED_STAGE_ROOT = Path(
-    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swg_rounds/"
-    "round1/oracle_swg_r1/run")
-RANKCHECK_ROOT = Path(
-    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swg_rounds/"
-    "maddison_deck/rankcheck_kt10")
+CHECKOUT_IMPORT = bootstrap_checkout(__file__, enforce_x64=__name__ == "__main__")
+from nemo_testcase_phase3_trajectory_gate import require  # noqa: E402
 
 RESTART_STATE_FIELDS = (
     "utau_b", "vtau_b", "qns_b", "emp_b", "sfx_b", "sshn", "un",
@@ -61,6 +55,32 @@ def array_sha256(value: np.ndarray) -> str:
     return hashlib.sha256(value.tobytes()).hexdigest()
 
 
+def signed_ulp_histogram(reference, candidate) -> dict[str, int]:
+    """Count signed IEEE word distances, including signed zero."""
+    reference = np.asarray(reference)
+    candidate = np.asarray(candidate)
+    require(reference.shape == candidate.shape, "ULP comparison shapes differ")
+    require(reference.dtype == candidate.dtype
+            and reference.dtype in (np.dtype("float32"), np.dtype("float64")),
+            "ULP comparison requires matching float32 or float64")
+    unsigned = np.dtype(f"u{reference.dtype.itemsize}")
+    ref_bits = np.ascontiguousarray(reference).view(unsigned).ravel()
+    can_bits = np.ascontiguousarray(candidate).view(unsigned).ravel()
+    bits = reference.dtype.itemsize * 8
+    sign = 1 << (bits - 1)
+    mask = (1 << bits) - 1
+
+    def ordered(word) -> int:
+        value = int(word)
+        return (~value & mask) if value & sign else value ^ sign
+
+    counts = Counter(
+        ordered(candidate_word) - ordered(reference_word)
+        for reference_word, candidate_word in zip(
+            ref_bits, can_bits, strict=True))
+    return {str(distance): int(counts[distance]) for distance in sorted(counts)}
+
+
 def bit_summary(reference, candidate) -> dict:
     """Return exact IEEE comparison metadata without treating signed zero equal."""
     reference = np.asarray(reference)
@@ -75,13 +95,19 @@ def bit_summary(reference, candidate) -> dict:
     )
     at = np.argwhere(different)
     delta = np.abs(candidate - reference)
+    signed_zero = (
+        (reference == 0.0) & (candidate == 0.0)
+        & (np.signbit(reference) != np.signbit(candidate)))
     return {
         "shape": list(reference.shape),
         "dtype": str(reference.dtype),
         "bit_identical": not bool(at.size),
         "bit_unequal": int(at.shape[0]),
+        "numeric_unequal": int(np.count_nonzero(reference != candidate)),
+        "signed_zero_only": int(np.count_nonzero(signed_zero)),
         "first_unequal_cell": at[0].tolist() if at.size else None,
         "max_abs": float(np.max(delta)) if delta.size else 0.0,
+        "signed_ulp_histogram": signed_ulp_histogram(reference, candidate),
         "reference_sha256": array_sha256(reference),
         "candidate_sha256": array_sha256(candidate),
     }
@@ -339,7 +365,7 @@ def run_replay(stage_root: Path, deck: str, npz_path: Path, *, plant=False) -> d
     card = build_swg_card(namelist)
     model = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
-    masks = ladder._card_masks(card)  # noqa: SLF001 - exact ladder masks
+    masks = ladder.card_masks(card)
 
     entry = _stage_item(current)
     output = model.replay_swe_rk3_stage(entry, card.dt_s, 1, entry)
@@ -597,7 +623,7 @@ def main(argv=None) -> int:
     compare.add_argument("right", type=Path)
     compare.add_argument("--json", type=Path, required=True)
     rank = sub.add_parser("rank-check")
-    rank.add_argument("--root", type=Path, default=RANKCHECK_ROOT)
+    rank.add_argument("--root", type=Path, required=True)
     rank.add_argument("--json", type=Path, required=True)
     exposure = sub.add_parser("exposure")
     exposure.add_argument("shipped", type=Path)
@@ -606,8 +632,9 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     try:
         if args.command == "replay":
-            root = args.stage_root or (
-                DG_STAGE_ROOT if args.deck == "maddison" else SHIPPED_STAGE_ROOT)
+            require(args.stage_root is not None,
+                    "replay requires an explicit --stage-root")
+            root = args.stage_root
             payload = run_replay(root, args.deck, args.npz, plant=args.plant)
         elif args.command == "compare":
             payload = compare_replays(args.left, args.right)
@@ -633,6 +660,8 @@ def main(argv=None) -> int:
               f"variables={len(payload['rows'])}")
     else:
         print(f"classification={payload['classification']}")
+    if args.command == "rank-check" and not payload["all_bit_identical"]:
+        return 1
     return 0
 
 

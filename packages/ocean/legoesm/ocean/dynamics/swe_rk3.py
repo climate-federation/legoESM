@@ -6,10 +6,13 @@ testcase-specific model.  The three stages transcribe the compiled SWG
 """
 from __future__ import annotations
 
+import functools
+import inspect
 from typing import NamedTuple
 
 import jax.numpy as jnp
 from legoesm.core.source_rounding import nemo_source_round
+from legoesm.grids.halo_latlon import meridional_periodicity
 from legoesm.grids.latlon import ensure_geometry
 from legoesm.grids.operators_latlon_cgrid import compute_vertex_mask
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
@@ -105,6 +108,16 @@ def swe_rotated_potential_forcing(
     force_u = jnp.where(wet_u, transport_u / cross_u, 0.0)
     force_v = jnp.where(wet_v, transport_v / cross_v, 0.0)
     return force_u, force_v
+def _config_periodicity(fn):
+    """Trace ``fn`` inside the y-wrap its ``config`` selects, not the caller's."""
+    signature = inspect.signature(fn)
+
+    @functools.wraps(fn)
+    def wrapped(*args, **kwargs):
+        config = signature.bind(*args, **kwargs).arguments["config"]
+        with meridional_periodicity(config.meridionally_periodic):
+            return fn(*args, **kwargs)
+    return wrapped
 
 
 def _validate_program(config, z_coord, stage):
@@ -123,6 +136,23 @@ def _validate_program(config, z_coord, stage):
             or vor.scheme != "ens_total" or vor.ln_dynvor_msk is not True):
         raise ValueError(
             "SWE RK3 requires total ENS with ln_dynvor_msk=true")
+    if (config.coriolis_scheme != "explicit_ab2"
+            or config.een_e3f_scheme != "nemo_avg4"
+            or config.een_metric_weighting != "nemo"
+            or config.een_q_boundary != "nemo_live"):
+        raise ValueError(
+            "SWE RK3 requires explicit_ab2 with NEMO live ENS operands")
+    if (config.tracer_advection != "none"
+            or config.tracer_time_integrator != "rk3_ws"
+            or config.momentum_time_integrator != "rk3_ws"):
+        raise ValueError(
+            "SWE RK3 requires disabled tracer advection and the coupled "
+            "rk3_ws time selectors")
+    if (config.implicit_vertical_mixing
+            or config.physics.vertical_mixing.scheme != "none"
+            or config.physics.convection.scheme != "none"):
+        raise ValueError(
+            "SWE RK3 requires disabled vertical mixing and convection")
     if int(z_coord.n_levels) != 1:
         raise ValueError("SWE RK3 supports exactly one layer")
     if config.constants.g != config.g:
@@ -137,6 +167,7 @@ def _validate_program(config, z_coord, stage):
             "SWE RK3 requires a computed NEMO viscosity coefficient source")
 
 
+@_config_periodicity
 def swe_rk3_stage(entry, before_entry, dt, stage, grid, z_coord, land_mask,
                   config, potential_f=None):
     """Execute one NEMO SWE RK3 stage from native-A2D stage/before entries.
@@ -350,6 +381,7 @@ def swe_rk3_stage1(entry, dt, grid, z_coord, land_mask, config):
         entry, entry, dt, 1, grid, z_coord, land_mask, config)
 
 
+@_config_periodicity
 def _entry_from_state(state, stress_before, stress_now, grid, z_coord, config):
     """Build the native-A2D stage boundary consumed by the production kernel."""
     dtype = state.eta.data.dtype
@@ -373,6 +405,7 @@ def _entry_from_state(state, stress_before, stress_now, grid, z_coord, config):
         u, v, stress_before[0], stress_before[1], stress_now[0], stress_now[1])
 
 
+@_config_periodicity
 def swe_rk3_step(state, dt, surface_forcing, grid, z_coord, config,
                  stage_runner=None, stage_potential_fn=None):
     """Advance the shared ocean state with the three-stage SWE RK3 program.
@@ -385,6 +418,15 @@ def swe_rk3_step(state, dt, surface_forcing, grid, z_coord, config,
     if surface_forcing is None:
         raise ValueError(
             "SWE RK3 step requires grid-native surface stress forcing")
+    unsupported = [
+        name for name in surface_forcing._fields
+        if name not in ("tau_i_native", "tau_j_native")
+        and getattr(surface_forcing, name) is not None
+    ]
+    if unsupported:
+        raise ValueError(
+            "SWE RK3 does not accept non-native surface forcing fields: "
+            + ", ".join(unsupported))
     tau_u = getattr(surface_forcing, "tau_i_native", None)
     tau_v = getattr(surface_forcing, "tau_j_native", None)
     if tau_u is None or tau_v is None:

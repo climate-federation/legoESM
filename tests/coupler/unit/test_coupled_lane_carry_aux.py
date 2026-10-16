@@ -35,6 +35,7 @@ _FULL_AUX = {
     "held_sw_net_sfc": 1.0,
     "held_lw_net_sfc": 2.0,
     "seg_precip": 3.0,
+    "seg_precip_frozen": 0.5,
 }
 
 
@@ -62,6 +63,20 @@ def test_missing_seg_precip_alone_raises():
             aux, radiation_active=True, precip_active=True, lane="spectral")
 
 
+def test_missing_frozen_precip_raises():
+    """F29 (review 2026-10-10): the surface snowfall is the atmosphere's own
+    segment-mean frozen flux; a lane that publishes precip without it is
+    refused, never re-split by temperature."""
+    aux = {k: v for k, v in _FULL_AUX.items() if k != "seg_precip_frozen"}
+    with pytest.raises(RuntimeError, match="seg_precip_frozen"):
+        require_surface_radiation_aux(
+            aux, radiation_active=True, precip_active=True, lane="compiled")
+    aux["seg_precip_frozen"] = None   # the per-step lane's None entry
+    with pytest.raises(RuntimeError, match="seg_precip_frozen"):
+        require_surface_radiation_aux(
+            aux, radiation_active=True, precip_active=True, lane="per_step")
+
+
 def test_present_but_none_value_is_treated_as_missing():
     """_run_per_step writes the key UNCONDITIONALLY with a None value when its
     source is inactive (model_driver.py:9762).  A key-presence test would pass
@@ -75,7 +90,7 @@ def test_present_but_none_value_is_treated_as_missing():
 
 def test_inactive_sources_tolerate_empty_aux():
     """NO FALSE POSITIVES: zero IS the correct forcing for a dry,
-    radiation='none' run, and _run_mpas legitimately stashes nothing there
+    radiation='none' run, and _run_column legitimately stashes nothing there
     (model_driver.py:5795-5802).  A blanket 'require all three keys' check
     would break this."""
     require_surface_radiation_aux(
@@ -168,7 +183,8 @@ def test_operator_split_spmd_sublane_stashes_the_export_keys():
     from legoesm.driver.model_driver import ModelDriver
 
     src = inspect.getsource(ModelDriver._run_operator_split_spmd)
-    for key in ("held_sw_net_sfc", "held_lw_net_sfc", "seg_precip"):
+    for key in ("held_sw_net_sfc", "held_lw_net_sfc", "seg_precip",
+                "seg_precip_frozen"):
         assert f'self._carry_aux["{key}"]' in src, (
             f"_run_operator_split_spmd no longer stashes {key!r} into "
             "_carry_aux, but the run() dispatch no longer refuses coupled runs "

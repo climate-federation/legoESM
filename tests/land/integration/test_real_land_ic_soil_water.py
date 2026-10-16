@@ -18,7 +18,7 @@ _IC = pathlib.Path(os.environ.get(
     "LEGOESM_LAND_IC_MPAS6", _REPO / "data/lmip_soil_ic/soil_ic_mpas6.npz"))
 _CLM = pathlib.Path(os.environ.get(
     "LEGOESM_CLM_SURFDATA",
-    "/work/bd1083/b309178/diffESM/legoesm_ap/data/clm/"
+    "/work/bb1596/b309178/diffESM/legoesm_ap/data/clm/"
     "surfdata_1.9x2.5_16pfts_CMIP6_simyr2000.nc"))
 
 pytestmark = [

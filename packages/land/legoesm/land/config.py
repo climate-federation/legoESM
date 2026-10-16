@@ -197,7 +197,11 @@ class MultiLayerLandConfig(NamedTuple):
     soil_grid: SoilGridConfig = SoilGridConfig()
     hydraulics: SoilHydraulicsConfig = SoilHydraulicsConfig()
     thermal: SoilThermalConfig = SoilThermalConfig()
-    richards: RichardsConfig = RichardsConfig(fc_drain_saturation=0.5)
+    # The four fields below are pinned explicitly (user-approved 2026-10-05), so
+    # they do not follow later changes to RichardsConfig defaults; the other
+    # RichardsConfig fields still inherit its defaults.
+    richards: RichardsConfig = RichardsConfig(
+        fc_drain_saturation=0.5, max_iter=30, max_dse_per_iter=0.1, theta_tol=1e-6)
     # Carbon cycle
     carbon: CarbonConfig = CarbonConfig()
     # Stomatal conductance / plant physiology
@@ -441,6 +445,12 @@ def apply_biophysics_lmip_two_leaf(config: MultiLayerLandConfig) -> MultiLayerLa
     """Apply the biophysics LMIP calibration, including its albedo scalars."""
     from legoesm.land.clm_surface_map import biophysics_lmip_albedo_scalars
     cfg = config._replace(**biophysics_lmip_two_leaf_setup())
+    # The calibration fixes the SCHEME (two-leaf, BT, Ball-Berry), not the
+    # solver's iteration cap: carry the caller's cap, or a run asking for
+    # another cap silently gets 60 back (codex 2026-10-04).
+    if isinstance(config.surface_scheme, TwoLeafCanopyConfig):
+        cfg = cfg._replace(surface_scheme=cfg.surface_scheme._replace(
+            max_iters=config.surface_scheme.max_iters))
     # SCALARS ONLY on the existing albedo config: it also carries the per-column
     # snow_cover_scale map built from the surfdata, and replacing the whole
     # object would discard it.

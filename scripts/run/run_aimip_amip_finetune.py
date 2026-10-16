@@ -134,13 +134,15 @@ def main():
         open_arco_era5, ozone_vmr_at_date, regrid_monthly_forcing_to_gaussian,
     )
     from legoesm.training.aimip_params import (
-        AIMIPClassicalParams, make_aimip_classical_spectral_physics,
+        AIMIPClassicalParams, aimip_spatial_unread_fields,
+        make_aimip_classical_spectral_physics,
     )
     from legoesm.training.campaign_driver import parse_bool_flag
     from legoesm.training.aimip_spatial import era5_land_fraction, grid_with_zm_land_fraction
     from legoesm.training.era5_to_state import (
         TrainingERA5Config, era5_to_spectral_carry, load_era5_ic,
-    )
+    era5_terrain_product,
+)
     from legoesm.training.neural_gcm_spectral import (
         carry_to_spectral_state, spectral_amip_rollout, spectral_rollout,
         spectral_state_vs_carry_loss,
@@ -216,8 +218,11 @@ def main():
         for k, yr in enumerate(years):
             d0 = _dt.date(int(yr), 1 + (k % 12), 15)  # spread across seasons
             d1 = d0 + _dt.timedelta(days=rollout_days)
-            ic_carry = era5_to_spectral_carry(load_era5_ic(wb2, d0.year, d0.month, d0.day), grid, sigma)
-            tgt_carry = era5_to_spectral_carry(load_era5_ic(wb2, d1.year, d1.month, d1.day), grid, sigma)
+            s0 = load_era5_ic(wb2, d0.year, d0.month, d0.day)
+            s1 = load_era5_ic(wb2, d1.year, d1.month, d1.day)
+            tp = era5_terrain_product(s0, grid)
+            ic_carry = era5_to_spectral_carry(s0, grid, sigma, target_phis=tp)
+            tgt_carry = era5_to_spectral_carry(s1, grid, sigma, target_phis=tp)
             mid = d0 + _dt.timedelta(days=rollout_days // 2)
             t_sfc_col, sic_col = _override_at(mid)
             doy = jnp.asarray(float(d0.timetuple().tm_yday))
@@ -313,7 +318,14 @@ def main():
         _make_nn_physics = make_sfno_spectral_physics
     else:
         params0 = load_checkpoint(
-            AIMIPClassicalParams.from_defaults(spatial_surface=True),
+            AIMIPClassicalParams.from_defaults(
+                spatial_surface=True,
+                # fields the trained schemes never read are not in the
+                # checkpoint (and are not trained here either)
+                spatial_unread=aimip_spatial_unread_fields(
+                    turbulence=str(cfg["aimip_turbulence"]),
+                    surface_bulk_scheme=str(
+                        cfg.get("aimip_surface_bulk_scheme", "constant")))),
             args.init_ckpt,
         )
         _make_nn_physics = None

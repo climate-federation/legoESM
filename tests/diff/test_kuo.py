@@ -168,13 +168,13 @@ def test_kuo_vmap_matches_eager():
 def test_dqsat_dT_is_shared_thermo_derivative():
     """PR A #11: Kuo's ``_dqsat_dT`` was a re-inlined Tetens slope with private
     17.67/243.5 constants; it now delegates to the shared
-    ``thermo.saturation_mixing_ratio_dT``. Pin bit-equality so the dedup cannot
+    ``thermo.saturation_specific_humidity_dT``. Pin bit-equality so the dedup cannot
     silently drift from the model's own e_sat curve."""
     from legoesm.atmosphere.physics.convection.kuo import _dqsat_dT
-    from legoesm.thermo import saturation_mixing_ratio_dT
+    from legoesm.thermo import saturation_specific_humidity_dT
     T = jnp.linspace(230.0, 310.0, 41)
     p = jnp.full_like(T, 850e2)
     np.testing.assert_array_equal(
         np.asarray(_dqsat_dT(T, p)),
-        np.asarray(saturation_mixing_ratio_dT(T, p)),
+        np.asarray(saturation_specific_humidity_dT(T, p)),
     )

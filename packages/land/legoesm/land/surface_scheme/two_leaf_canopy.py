@@ -70,6 +70,13 @@ TwoLeafCanopyConfig = CanopyConfig
 _DEFAULT_N_PICARD = 6
 _DEFAULT_PICARD_OMEGA = 0.15
 
+# Columns per group in the canopy Newton solve.  Under one vmap every column
+# iterates until the slowest column on the rank stops, so one hard column costs
+# the whole rank up to the iteration cap; groups stop independently.  Pure
+# performance: measured on recorded production batches, iteration counts and
+# converged flags identical, state differs only by rounding (<= 5e-13 K).
+_CANOPY_SOLVE_GROUP = 64
+
 # Time constant of the growth-temperature exponential moving average [s].
 # 30 days * 86400 s/day = 2.592e6 s.  At dt = 1800 s, ~76 days reach 95 %
 # of the equilibrium.  Used by the caller (``step_*_land``) to advance
@@ -467,7 +474,7 @@ def compute_two_leaf_canopy_fluxes(
             Vcmax25_C4Sun=sw_rt.Vcmax25_C4Sun, Vcmax25_C4Sh=sw_rt.Vcmax25_C4Sh,
             ASW_Sun=sw_rt.ASW_Sun, ASW_Sh=sw_rt.ASW_Sh, ASW_Soil=sw_rt.ASW_Soil,
             Ts_bc=Ts_bc,
-            Ca=Ca, Ps=Ps, Ta=Ta,
+            Ca=_bcast(Ca), Ps=Ps, Ta=Ta,
             lam=_bcast(lam), Cp=_bcast(Cp), rhoa=rhoa, Tv_atm=Tv_atm, q_atm=q_atm,
             m=m_mix, b0=b0_mix, alf=alf, TgC=TgC,
             fC4=fC4, fStress_soil=fStress_soil,
@@ -515,10 +522,10 @@ def compute_two_leaf_canopy_fluxes(
     # A column with no converged solution yet alternates its seed across passes
     # between the caller's seed and the COLD state, so a warm seed that led the
     # solve astray gets a cold retry inside the same call.  The passes run over
-    # every column anyway (vmap), so this costs nothing; for a column that never
-    # converges, its frozen soil boundary makes later passes repeat passes 0/1.
-    # A pass that did not converge must not move the soil boundary either: its
-    # ground flux is not physics.  Acceptance stays tied to the LAST pass.
+    # every column anyway (vmap), so this costs nothing.  A failed pass still
+    # relaxes the soil boundary with its cold-state fallback flux (the one the
+    # land step accepts if the column ends unsolved); freezing it held desert
+    # columns at their start-of-step soil.  Acceptance stays tied to the LAST pass.
     x_conv = jnp.full_like(initial_state, jnp.nan)
     for _picard_iter in range(n_picard):
         bundles_k = _build_bundle(Ts_bc_k)
@@ -526,7 +533,8 @@ def compute_two_leaf_canopy_fluxes(
         _seed_k = jnp.where(jnp.all(jnp.isfinite(x_conv), axis=-1, keepdims=True),
                             jnp.nan_to_num(x_conv), _fallback)
         (x_final, n_iters, converged, resid_sq, resid_rel, lam_f,
-         hit_cap) = jax.vmap(_solve_one_col)(_seed_k, bundles_k)
+         hit_cap) = jax.lax.map(lambda a: _solve_one_col(*a), (_seed_k, bundles_k),
+                                batch_size=_CANOPY_SOLVE_GROUP)
         x_conv = jnp.where(converged[:, None], x_final, x_conv)
         # A rejected iterate may be non-finite: evaluate the fluxes of a failed
         # column at the (finite) cold state instead, so no NaN enters a
@@ -538,10 +546,8 @@ def compute_two_leaf_canopy_fluxes(
         fluxes_per_col = jax.vmap(_fwd_one_col)(x_final, bundles_k)
 
         G_k = jnp.clip(fluxes_per_col["G"], -500.0, 700.0)  # coeff-ok: physical range clamp on ground heat flux [W m-2]
-        Ts_thermal = soil_thermal_fn(jnp.where(converged, G_k, 0.0), dt)
-        Ts_bc_k = jnp.where(converged,
-                            (1.0 - omega) * Ts_bc_k + omega * Ts_thermal,
-                            Ts_bc_k)
+        Ts_thermal = soil_thermal_fn(G_k, dt)
+        Ts_bc_k = (1.0 - omega) * Ts_bc_k + omega * Ts_thermal
 
     # ---- Converged state ----
     # State vector order: [Tf_Sun, Tf_Sh, Ci_Sun, Ci_Sh, Tc, q_c].

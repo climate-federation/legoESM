@@ -10,7 +10,7 @@ under ``spectral_file``) into the radiation physics.
 Contract pinned here, with the reader monkeypatched (offline, no NetCDF):
 
 1. NEUTRALITY: ``solar_source="file"`` with the file returning EXACTLY the
-   configured ``S_0`` is BIT-IDENTICAL to ``solar_source="constant"`` — the
+   configured ``S_0`` equals ``solar_source="constant"`` (rtol 1e-15) — the
    scaling path adds nothing when the transient value matches the constant.
 2. EFFECT: a halved TSI changes the integrated state — the traced value
    demonstrably reaches the radiative heating (not silently dropped).
@@ -57,7 +57,7 @@ def _patch_solar(monkeypatch, tsi_fn):
                              "solar_fraction_by_gpt": None})
 
 
-def test_file_tsi_equal_to_s0_is_bit_identical(monkeypatch, tmp_path):
+def test_file_tsi_equal_to_s0_matches_constant(monkeypatch, tmp_path):
     d_const = _build_driver(str(tmp_path / "const"), "constant")
     assert d_const.run() == "COMPLETED"
 
@@ -65,9 +65,13 @@ def test_file_tsi_equal_to_s0_is_bit_identical(monkeypatch, tmp_path):
     d_file = _build_driver(str(tmp_path / "file"), "file")
     assert d_file.run() == "COMPLETED"
 
-    np.testing.assert_array_equal(
-        np.asarray(d_const.state.T.data), np.asarray(d_file.state.T.data),
-        err_msg="file-mode TSI == S_0 must be bit-identical to constant mode")
+    # tsi/S_0 == 1.0 is a traced multiply, not constant-folded: exact, but it
+    # changes XLA fusion and moved one cell of 5136 by 2 ulp (1.1e-13 K) on
+    # Ginsburg CPUs (jobs 10254740, 10288139).  Contract: no physical change.
+    np.testing.assert_allclose(
+        np.asarray(d_file.state.T.data), np.asarray(d_const.state.T.data),
+        rtol=1e-15, atol=0.0,
+        err_msg="file-mode TSI == S_0 must equal constant mode (rtol 1e-15)")
 
 
 def test_halved_tsi_changes_the_state(monkeypatch, tmp_path):

@@ -228,3 +228,47 @@ def test_spectral_pe_nondiurnal_forwards_eccf(monkeypatch, orbital, expect_facto
     ref = (float(earth_sun_distance_factor(day, earth_orbit()))
            if orbital else expect_factor)
     assert eccf == pytest.approx(ref, rel=1e-9)
+
+
+class _SpySolver(_FakeSolver):
+    """Records the optical-path cosine the solver was handed."""
+
+    def solve_columns(self, *, T, cos_zenith, **kw):
+        self.cos = np.asarray(cos_zenith)
+        return super().solve_columns(T=T, **kw)
+
+
+def _run_tsi(cos_sza, insol, tsi, f_day=None):
+    T, p_full, p_half, T_sfc, q_v, o3 = _inputs()
+    spy = _SpySolver()
+    out = _call_radiation_backend(
+        radiation_config=_cfg(None), tsi=tsi,
+        T=T, p_full=p_full, p_half=p_half,
+        sfc_temperature=T_sfc, lat=jnp.zeros((NCOL,)), q_v=q_v,
+        insolation=insol, cos_sza=cos_sza, f_day=f_day,
+        o3_vmr_override=o3, rrtmgp_solver=spy,
+    )
+    return out, spy.cos
+
+
+@pytest.mark.parametrize("diurnal", [True, False])
+def test_transient_tsi_scales_rrtmgp_sw_flux_not_cos_zenith(diurnal):
+    """Transient TSI (2026-10-06, codex r2 P1): the wrappers pass insolation
+    already scaled by tsi/S_0, but the RRTMGP solver runs at its configured
+    S_0.  Diurnal: TSI used to be dropped (geometric cos_sza, no flux scale).
+    Daily-mean: TSI used to inflate cos_zenith instead of the flux.  Both
+    branches must now scale the SW flux by tsi/S_0 with an unchanged cosine;
+    tsi=None stays the static-S_0 path."""
+    ratio = 1.01
+    cos = jnp.array([0.8, 0.5]) if diurnal else None
+    f_day = None if diurnal else jnp.array([0.5, 0.5])
+    q = jnp.array([300.0, 200.0]) if cos is None else S0 * cos
+    off, cos_off = _run_tsi(cos, q, None, f_day)
+    on, cos_on = _run_tsi(cos, q * ratio, jnp.asarray(S0 * ratio), f_day)
+    np.testing.assert_allclose(cos_on, cos_off, rtol=1e-12)
+    np.testing.assert_allclose(np.asarray(on.sw_flux_down)
+                               / np.asarray(off.sw_flux_down), ratio, rtol=1e-12)
+    np.testing.assert_allclose(np.asarray(on.sw_heating_rate)
+                               / np.asarray(off.sw_heating_rate), ratio, rtol=1e-12)
+    np.testing.assert_array_equal(np.asarray(on.lw_flux_down),
+                                  np.asarray(off.lw_flux_down))

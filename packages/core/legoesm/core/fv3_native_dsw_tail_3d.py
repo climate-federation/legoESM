@@ -79,6 +79,11 @@ def dsw_tail_phase_3d(ctx: dict, state: list, csw_outs: list,
     n, ng, bd = ctx["n"], ctx["ng"], ctx["bd"]
     npx = n + 1
     m_a = n + 2 * ng
+    # decision B1: per-level additive del-2 sponge coefficient (0 = off)
+    from legoesm.core.fv3_duo_stepper import sponge_d2_profile
+    d2k = sponge_d2_profile(km, c.get("sponge_del2_top_layers", 0),
+                            c.get("sponge_del2_top_factor", 8.0),
+                            c.get("sponge_d2_top", 0.0))
 
     # --- d_sw3 at every level, all faces (needed before barrier 2) --------
     s3 = [[None] * km for _ in range(6)]
@@ -160,7 +165,7 @@ def dsw_tail_phase_3d(ctx: dict, state: list, csw_outs: list,
                            s1["ra_x"], s1["ra_y"], s4["ke"],
                            ctx["gs6"][t], bd, npx, npx, dt=dt,
                            hord_vt=c["hord_vt"], nord=c["nord"],
-                           dddmp=c["dddmp"], d2_bg=c["d2_bg"],
+                           dddmp=c["dddmp"], d2_bg=c["d2_bg"] + d2k[k],
                            d4_bg=c["d4_bg"], d_con=0.0,
                            hydrostatic=hydrostatic,
                            w=(None if hydrostatic
@@ -178,7 +183,7 @@ def dsw_tail_phase_3d(ctx: dict, state: list, csw_outs: list,
                            s5["ke"], s5["wk"], s5["vortfluxx"],
                            s5["vortfluxy"], ctx["gs6"][t], bd, npx, npx,
                            nord_v=c["nord_v"], damp_v=c["damp_v"],
-                           d_con=0.0)
+                           d_con=0.0, d2_sponge=d2k[k])
             acc["u"][:, :, k] = s6["u"]
             acc["v"][:, :, k] = s6["v"]
             if not hydrostatic:

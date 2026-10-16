@@ -419,25 +419,23 @@ class TestCoupledDriverWiring:
         atm = SimpleNamespace(get_sfc_flux_override=None)
         drv = SimpleNamespace(
             coupled_cfg=CoupledConfig(couple_surface_fluxes=True),
-            _atm=atm, _last_sfc_response=None)
+            _atm=atm, _sfc_flux_handback=None)
         CoupledESMDriver._override_sfc_fluxes(drv)
         assert atm.get_sfc_flux_override is not None
 
-        # No response yet -> (None, None) -> atmosphere uses its own bulk flux.
-        assert atm.get_sfc_flux_override(0.0) == (None, None, None)
-        # Once a blended response exists, its SH/LH flow through.
+        # Nothing coupled yet -> five None -> atmosphere uses its own bulk flux.
+        assert atm.get_sfc_flux_override(0.0) == (None,) * 5
+        # Once the segment hook stored the segment-mean handback (F38), the
+        # SH/LH/water flux and the surface STRESS flow through untouched.
         sh = jnp.full((6, 4, 4), 22.0)
         lh = jnp.full((6, 4, 4), 77.0)
         ev = jnp.full((6, 4, 4), 3.1e-5)
-        drv._last_sfc_response = SimpleNamespace(shflx=sh, lhflx=lh, surface_mass_flux=ev)
-        got_sh, got_lh, got_ev = atm.get_sfc_flux_override(0.0)
-        assert jnp.array_equal(got_sh, sh)
-        assert jnp.array_equal(got_lh, lh)          # physical latent heat, untouched
-        assert jnp.array_equal(got_ev, ev)          # the tiles' water flux, untouched
-        # A response without the water flux is refused, never re-derived from lhflx.
-        drv._last_sfc_response = SimpleNamespace(shflx=sh, lhflx=lh)
-        with pytest.raises(ValueError, match="surface_mass_flux"):
-            atm.get_sfc_flux_override(0.0)
+        tx = jnp.full((6, 4, 4), -0.12)
+        ty = jnp.full((6, 4, 4), 0.04)
+        drv._sfc_flux_handback = (sh, lh, ev, tx, ty)
+        got = atm.get_sfc_flux_override(0.0)
+        for g, want in zip(got, (sh, lh, ev, tx, ty)):
+            assert jnp.array_equal(g, want)
 
     def test_hook_closes_water_and_energy_together(self):
         """The atmosphere's moisture source is the tile mass flux, and its heat
@@ -457,9 +455,10 @@ class TestCoupledDriverWiring:
                                surface_mass_flux=evap)
         drv = SimpleNamespace(
             coupled_cfg=CoupledConfig(couple_surface_fluxes=True),
-            _atm=atm, _last_sfc_response=resp)
+            _atm=atm, _sfc_flux_handback=(
+                resp.shflx, resp.lhflx, resp.surface_mass_flux, None, None))
         CoupledESMDriver._override_sfc_fluxes(drv)
-        sh, lh, ev = atm.get_sfc_flux_override(0.0)
+        sh, lh, ev, _, _ = atm.get_sfc_flux_override(0.0)
         np.testing.assert_allclose(ev, evap, rtol=1e-12)
         heat_in = sh + latent_enthalpy_correction(lh, ev) + constants.L_v * ev
         np.testing.assert_allclose(heat_in, resp.shflx + resp.lhflx, rtol=1e-12)

@@ -821,10 +821,10 @@ def test_dg50_free_run_deck_passes_the_scorers_deck_binding():
     resolved = driver.free_run_namelist(card, 7300)
     assert resolved == driver._double_gyre_driver().resolved_daily_namelist(
         7300, deck="dg50")
-    evaluation.climate._require_legoesm_deck(
+    evaluation.climate.require_legoesm_deck(
         json.loads(json.dumps(resolved._asdict())), namelist)
     with pytest.raises(Exception, match="deck differs at nn_write"):
-        evaluation.climate._require_legoesm_deck(
+        evaluation.climate.require_legoesm_deck(
             json.loads(json.dumps(namelist._replace(nn_write=1)._asdict())),
             namelist)
 

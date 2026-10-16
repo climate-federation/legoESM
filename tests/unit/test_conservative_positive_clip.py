@@ -184,7 +184,7 @@ def test_mpas_config_flag_defaults_on_and_is_wired():
     # The floors stage lives in ``_step_jit`` (``step`` delegates to it) — the
     # method actually executed by the MPAS lane.  Asserting against ``step``
     # silently passed nothing, the same wrong-target mistake that once had a
-    # clamp blamed in ``_run_per_step`` while the century ran ``_run_mpas``.
+    # clamp blamed in ``_run_per_step`` while the century ran ``_run_column``.
     src = inspect.getsource(MPASPrimitiveEquationModel._step_jit)
     assert "conservative_tracer_clamp" in src
     # #1354/#1515: the borrow now lives in the shared positivity stage; the
@@ -594,70 +594,6 @@ def test_mpi_floor_iterates_tracers_sorted():
     assert "sorted(tracers)" in inspect.getsource(apply_water_positivity)
 
 
-class TestPerStepDriverConservingFloor:
-    """Owner decision 2026-08-16: conserving form ALWAYS. The per-step
-    lat-lon/cube driver's plain ``max(q, 0)`` species floors move to the
-    column-conserving borrow, weighted by the TRUE layer mass dp
-    (hybrid-correct; reduces to dsigma*p_s on pure sigma)."""
-
-    def test_conserving_floor_conserves_the_dp_integral(self):
-        """REAL execution of the driver method on a minimal fake self: a
-        mixed-sign column keeps its dp-weighted integral (borrow), and a
-        plain clip would inflate it (non-vacuity)."""
-        from types import SimpleNamespace
-
-        from legoesm.driver.model_driver import ModelDriver
-        from legoesm.grids.vertical import create_sigma_coordinate
-
-        sigma = create_sigma_coordinate(4)
-        p_s = jnp.full((2, 3), 1.0e5)
-        fake = SimpleNamespace(
-            sigma=sigma,
-            state=SimpleNamespace(p_s=SimpleNamespace(data=p_s)),
-        )
-        q = jnp.broadcast_to(
-            jnp.asarray([3.0e-4, -1.0e-4, 2.0e-4, 1.0e-4]), (2, 3, 4))
-        out = ModelDriver._conserving_floor(fake, q)
-        _ph = sigma.pressure_at_half(p_s)
-        dp = _ph[..., 1:] - _ph[..., :-1]
-        np.testing.assert_allclose(
-            np.asarray(jnp.sum(out * dp, axis=-1)),
-            np.asarray(jnp.sum(q * dp, axis=-1)), rtol=1e-12)
-        assert float(jnp.min(out)) >= 0.0
-        # non-vacuity: the plain clip changes the integral on this input
-        assert not np.allclose(
-            np.asarray(jnp.sum(jnp.maximum(q, 0.0) * dp, axis=-1)),
-            np.asarray(jnp.sum(q * dp, axis=-1)))
-
-    def test_per_step_lanes_route_through_the_conserving_floor(self):
-        """Source pin on the symbols that RUN (_run_per_step and the
-        double-moment integrator): the conserving floor must be called and
-        the old plain clamp must be gone from the species updates. Fails if
-        either lane's floor is reverted to ``jnp.maximum``."""
-        import inspect
-
-        from legoesm.driver.model_driver import ModelDriver
-
-        src_step = inspect.getsource(ModelDriver._run_per_step)
-        assert src_step.count("self._conserving_floor(_qv_raw)") == 2
-        assert src_step.count(
-            "self._conserving_floor(self.q_c + DT * phys_out.dq_c_dt)") == 2
-        assert src_step.count(
-            "self._conserving_floor(self.q_r + DT * phys_out.dq_r_dt)") == 2
-        assert "jnp.maximum(_qv_raw, 0.0)" not in src_step
-        assert "jnp.maximum(self.q_c" not in src_step
-        assert "jnp.maximum(self.q_r" not in src_step
-
-        src_dm = inspect.getsource(
-            ModelDriver._apply_double_moment_tendencies)
-        assert "self._conserving_floor(" in src_dm
-        assert "jnp.maximum(self.tracers[k]" not in src_dm
-
-        src_floor = inspect.getsource(ModelDriver._conserving_floor)
-        assert "conservative_positive_clip" in src_floor
-        assert "pressure_at_half" in src_floor   # hybrid-correct dp weight
-
-
 def test_mpas_conserving_clamp_is_the_default_now():
     """Owner decision 2026-08-16: conserving form always — the MPAS floors
     default flips ON (the OFF assertions live in the CLI test above, via
@@ -676,73 +612,104 @@ class TestConservingFormAlways:
     the DEFAULT AMIP route (compiled segments, both the single-rank and the
     MPI owned-face bodies) and the per-step hyperdiffusion floors."""
 
-    def test_compiled_segment_floors_are_conserving(self):
-        """Source pin on the compiled single-rank step body: every species
-        floor routes through conservative_positive_clip; the plain clamps
-        are gone."""
+    @staticmethod
+    def _raw_columns():
+        """Two columns x 5 levels; every species has undershoots but a
+        POSITIVE weighted column total (the borrow's conserving regime)."""
+        from legoesm.driver.compiled_segments import MOIST_FIELDS
+        rng = np.random.default_rng(7)
+        raw = {}
+        for i, name in enumerate(MOIST_FIELDS):
+            scale = 1.0e6 if name.startswith("N_") else 1.0e-3
+            base = rng.uniform(0.2, 1.0, size=(2, 5)) * scale
+            base[:, 1 + i % 3] = -0.1 * scale       # one undershoot per column
+            raw[name] = jnp.asarray(base)
+        dsigma = jnp.array([0.05, 0.1, 0.2, 0.3, 0.35])
+        p_s = jnp.array([1.0e5, 9.0e4])
+        T = jnp.full((2, 5), 280.0)
+        return raw, T, p_s, dsigma
+
+    @pytest.mark.parametrize("energy_consistent", [False, True])
+    def test_compiled_segment_floors_are_conserving(self, energy_consistent):
+        """Behavioural pin on the floor block BOTH compiled bodies (single-
+        rank and MPI owned-face) run: every species ends >= 0, each species'
+        column mass sum(q * p_s * dsigma) is unchanged and p_s does not move.
+        A plain max(q, 0) floor fails all three (it creates the clipped
+        water and p_s rises by it)."""
+        from legoesm.driver.compiled_segments import (
+            MOIST_FIELDS, floor_moist_with_mass,
+        )
+        raw, T, p_s, dsigma = self._raw_columns()
+        out, T_out, p_s_out = floor_moist_with_mass(
+            raw, T, p_s, dsigma, 300.0, energy_consistent)
+        np.testing.assert_allclose(p_s_out, p_s, rtol=0, atol=1e-9)
+        for name in MOIST_FIELDS:
+            assert bool((out[name] >= 0.0).all()), name
+            before = jnp.sum(raw[name] * dsigma, axis=-1) * p_s
+            after = jnp.sum(out[name] * dsigma, axis=-1) * p_s_out
+            np.testing.assert_allclose(after, before, rtol=1e-12,
+                                       err_msg=name)
+        from legoesm import constants
+        mse_in = constants.c_pd * T + constants.L_v * raw["q_v"]
+        mse_out = constants.c_pd * T_out + constants.L_v * out["q_v"]
+        if energy_consistent:
+            # per-cell c_pd*T + L_v*q_v unchanged (to roundoff)
+            np.testing.assert_allclose(mse_out, mse_in, rtol=1e-13)
+        else:
+            assert bool((T_out == T).all())
+
+
+    @pytest.mark.parametrize("energy_consistent", [False, True])
+    def test_net_negative_column_mass_goes_to_p_s(self, energy_consistent):
+        """A net-negative vapour column has nothing to borrow from: it is
+        zeroed, the water that creates moves p_s by exactly that mass, and
+        with the opt-in floor every cell's c_pd*T + L_v*q_v still holds."""
+        from legoesm import constants
+        from legoesm.driver.compiled_segments import floor_moist_with_mass
+        raw, T, p_s, dsigma = self._raw_columns()
+        # Mixed-sign, net-negative vapour column; a net-negative NUMBER column
+        # too (numbers are not water: zeroing them must not move p_s).
+        raw = {**raw,
+               "q_v": raw["q_v"].at[0].set(
+                   jnp.array([-2.0e-3, 1.0e-4, -1.0e-3, 2.0e-4, -5.0e-4])),
+               "N_c": raw["N_c"].at[0].set(
+                   jnp.array([-2.0e6, 1.0e5, -1.0e6, 2.0e5, -5.0e5]))}
+        assert float(jnp.sum(raw["q_v"][0] * dsigma)) < 0.0
+        assert float(jnp.sum(raw["N_c"][0] * dsigma)) < 0.0
+        out, T_out, p_s_out = floor_moist_with_mass(
+            raw, T, p_s, dsigma, 300.0, energy_consistent)
+        assert bool((out["q_v"][0] == 0.0).all())
+        assert bool((out["N_c"][0] == 0.0).all())
+        created = -float(jnp.sum(raw["q_v"][0] * dsigma)) * float(p_s[0])
+        # p_s' (1 - sum dsigma*Q') ... dry mass held: p_s rises by the water
+        dry_in = p_s * (1.0 - sum(jnp.sum(raw[k] * dsigma, axis=-1)
+                                  for k in ("q_v", "q_c", "q_r", "q_i",
+                                            "q_s", "q_g")))
+        dry_out = p_s_out * (1.0 - sum(jnp.sum(out[k] * dsigma, axis=-1)
+                                       for k in ("q_v", "q_c", "q_r", "q_i",
+                                                 "q_s", "q_g")))
+        np.testing.assert_allclose(dry_out, dry_in, rtol=1e-12)
+        assert float(p_s_out[0] - p_s[0]) == pytest.approx(created, rel=1e-6)
+        np.testing.assert_allclose(p_s_out[1], p_s[1], rtol=0, atol=1e-9)
+        if energy_consistent:
+            np.testing.assert_allclose(
+                constants.c_pd * T_out + constants.L_v * out["q_v"],
+                constants.c_pd * T + constants.L_v * raw["q_v"], rtol=1e-13)
+
+    def test_both_compiled_bodies_route_through_the_floor_helper(self):
+        """The single-rank body (split_physics_single_rank, also run by the
+        lat-lon band SPMD and tiled cube steps) and the MPI owned-face body
+        (inside build_segment_fn) must both floor through
+        floor_moist_with_mass, which the behavioural tests above pin; an
+        inlined copy in either body would escape them."""
         import inspect
 
         from legoesm.driver import compiled_segments as cs
-
-        src = inspect.getsource(cs)
-        # q_v else-branch, q_c, q_r and the shared _dm_upd all conserving:
-        assert src.count("conservative_positive_clip(") >= 7
-        # The old plain clamps must be gone from the update spellings.
-        assert "jnp.maximum(_qv_raw, 0.0)" not in src
-        assert "jnp.maximum(moist[\"q_c\"]" not in src
-        assert "jnp.maximum(moist[\"q_r\"]" not in src
-        assert "jnp.maximum(fld + statics.dt * tend, 0.0)" not in src
-        assert "jnp.maximum(fld[_ofi] + _dt * tend, 0.0)" not in src
-
-    def test_per_step_hyperdiffusion_floor_is_conserving(self):
-        """The q_v smoothing tail is non-monotone; its floor is the same
-        clamp class. Both per-step sites must route through the conserving
-        floor."""
-        import inspect
-
-        from legoesm.driver.model_driver import ModelDriver
-
-        src = inspect.getsource(ModelDriver._run_per_step)
-        assert "jnp.maximum(\n            self.q_v + DT * hyperdiffusion_3d" \
-            not in src
-        assert src.count(
-            "self._conserving_floor(\n"
-            "            self.q_v + DT * hyperdiffusion_3d") == 1
-        assert src.count(
-            "self._conserving_floor(\n"
-            "                self.q_v + DT * hyperdiffusion_3d") == 1
-
-    def test_conserving_floor_is_hybrid_correct_by_execution(self):
-        """REAL execution with a hybrid coordinate: the dp-weighted column
-        integral is conserved, and the flat-dsigma integral of the same
-        output is NOT (non-vacuity — the two weights genuinely differ)."""
-        from types import SimpleNamespace
-
-        from legoesm.driver.model_driver import ModelDriver
-        from legoesm.grids.vertical import create_hybrid_coordinate
-
-        k = jnp.linspace(0.0, 1.0, 9)
-        hybrid = create_hybrid_coordinate(
-            8, A_half=2.0e4 * (1.0 - k) * k, B_half=k**2)
-        p_s = jnp.asarray([[6.0e4, 1.03e5]])   # strong per-column variation
-        fake = SimpleNamespace(
-            sigma=hybrid,
-            state=SimpleNamespace(p_s=SimpleNamespace(data=p_s)),
-        )
-        q = jnp.broadcast_to(
-            jnp.asarray([3e-4, -1e-4, 2e-4, 1e-4, 5e-5, -2e-5, 4e-5, 6e-5]),
-            (1, 2, 8))
-        out = ModelDriver._conserving_floor(fake, q)
-        _ph = hybrid.pressure_at_half(p_s)
-        dp = jnp.maximum(_ph[..., 1:] - _ph[..., :-1], 0.0)
-        np.testing.assert_allclose(
-            np.asarray(jnp.sum(out * dp, axis=-1)),
-            np.asarray(jnp.sum(q * dp, axis=-1)), rtol=1e-12)
-        assert float(jnp.min(out)) >= 0.0
-        dsig = jnp.asarray(hybrid.dsigma)
-        assert not np.allclose(
-            np.asarray(jnp.sum(out * dsig, axis=-1)),
-            np.asarray(jnp.sum(q * dsig, axis=-1)))
+        for fn in (cs.split_physics_single_rank, cs.build_segment_fn):
+            src = inspect.getsource(fn)
+            assert src.count("floor_moist_with_mass(") == 1, fn.__name__
+            assert "conservative_positive_clip(" not in src, fn.__name__
+            assert "energy_consistent_moisture_floor(" not in src, fn.__name__
 
 
 class TestNonConservingFormsWarn:
@@ -771,7 +738,10 @@ class TestNonConservingFormsWarn:
             MPASPrimitiveEquationModel(mesh, sigma)
         assert not any("NON-CONSERVING" in r.message for r in caplog.records)
 
-    def test_validate_strict_warns_on_both_optouts(self, caplog):
+    def test_validate_strict_warns_on_legacy_clamp_only(self, caplog):
+        """validate_strict announces the legacy plain tracer clamp; the
+        vapour floor flag alone is not announced there (the factory does it
+        where the water-creating hard floor actually runs)."""
         import logging
 
         from legoesm.driver.config import ExperimentConfig
@@ -785,11 +755,100 @@ class TestNonConservingFormsWarn:
             ).validate_strict()
         msgs = [r.message for r in caplog.records
                 if "NON-CONSERVING" in r.message]
-        assert len(msgs) == 2
-        assert any("mpas_conservative_tracer_clamp" in m for m in msgs)
-        assert any("energy_consistent_moisture_clip" in m for m in msgs)
+        assert len(msgs) == 1
+        assert "mpas_conservative_tracer_clamp" in msgs[0]
         caplog.clear()
         with caplog.at_level(logging.WARNING):
+            base._replace(energy_consistent_moisture_clip=True).validate_strict()
             base.validate_strict()
         assert not any("NON-CONSERVING" in r.message
                        for r in caplog.records)
+
+    @pytest.mark.parametrize("flag,clamp,solver,warns", [
+        # production: MPAS, flag on, conserving clamp -> borrow, silent
+        (True, True, "mpas_primitive_equations", False),
+        (True, False, "mpas_primitive_equations", True),
+        (True, False, "cdgrid_primitive_equations", True),
+        (True, False, "latlon_cgrid_primitive_equations", True),
+        # spectral passes energy_consistent=False: the flag's floor never runs
+        (True, False, "spectral_primitive_equations", False),
+        (False, False, "mpas_primitive_equations", False),
+    ])
+    def test_vapour_floor_warning_only_where_hard_floor_runs(
+            self, caplog, flag, clamp, solver, warns):
+        import logging
+
+        from legoesm.driver.component_factory import (
+            warn_if_vapour_floor_creates_water,
+        )
+        from legoesm.driver.config import ExperimentConfig
+
+        base = ExperimentConfig()
+        cfg = base._replace(
+            dycore=base.dycore._replace(mpas_conservative_tracer_clamp=clamp),
+            energy_consistent_moisture_clip=flag)
+        with caplog.at_level(logging.WARNING):
+            warn_if_vapour_floor_creates_water(cfg, solver)
+        msgs = [r.getMessage() for r in caplog.records
+                if "NON-CONSERVING" in r.getMessage()]
+        assert len(msgs) == (1 if warns else 0)
+        if warns:
+            assert "energy_consistent_moisture_clip" in msgs[0]
+            assert solver in msgs[0]
+
+
+def test_area_weight_is_scale_safe_for_fp32_number_tracers():
+    """codex 2026-10-02 P1, re-pinned on the merged ``area=`` API: with x64
+    OFF (the driver default) the global residual's sums are fp32, and an
+    Earth-scale raw ``dp*area`` total on a per-mass number field puts
+    ``total**2`` past fp32's range inside the quotient VJP, silently
+    zeroing the residual's gradient term.  ``area`` enters as a ratio to
+    its mean, so the fp32 gradient matches fp64; ``area_ref=1.0`` (the raw
+    dimensional area) is the control that loses it."""
+    from legoesm.core.conservation import conservative_positive_clip_global
+
+    N = np.asarray([[4e4, 3e4, 2e4, 1e4], [-1e4, -1e4, -1e4, -1e4]])
+    dp = np.full((2, 4), 1e4)
+    area = np.asarray([1e12, 2e12])
+
+    def grad(dtype, area_ref=None):
+        def total(q):
+            return jnp.sum(conservative_positive_clip_global(
+                q, jnp.asarray(dp, dtype), area=jnp.asarray(area, dtype),
+                area_ref=area_ref)[0])
+        return np.asarray(jax.grad(total)(jnp.asarray(N, dtype)),
+                          dtype=np.float64)
+
+    g64 = grad(jnp.float64)
+    with jax.enable_x64(False):
+        g32 = grad(jnp.float32)
+        g_raw = grad(jnp.float32, area_ref=1.0)
+    assert np.isfinite(g32).all()
+    np.testing.assert_allclose(g32, g64, rtol=1e-4, atol=1e-6)
+    assert np.max(np.abs(g_raw - g64)) > 0.05          # raw area loses it
+
+
+def test_area_ref_is_a_pure_scale_and_must_be_partition_independent():
+    """A uniform ``area_ref`` cancels in the redistribution factor (same
+    output for the mean, the raw area and an arbitrary scale), so the only
+    requirement is that every rank use the SAME one: emulating a per-rank
+    local mean (each half of the cells normalised by its own mean inside
+    one global residual) changes the answer."""
+    from legoesm.core.conservation import conservative_positive_clip_global
+
+    rng = np.random.default_rng(3)
+    q = rng.uniform(0.0, 1.0, (40, 8))
+    q[[2, 7, 30], :] = -0.05                     # net-negative columns
+    q, w = jnp.asarray(q), jnp.asarray(rng.uniform(0.5, 1.5, 8))
+    area = jnp.asarray(np.linspace(1.0, 4.0, 40))     # asymmetric halves
+    full = np.asarray(conservative_positive_clip_global(q, w, area=area)[0])
+    for ref in (1.0, 3.7e10, float(area.mean())):
+        np.testing.assert_allclose(
+            np.asarray(conservative_positive_clip_global(
+                q, w, area=area, area_ref=ref)[0]), full, rtol=1e-12)
+    a0, a1 = area[:20], area[20:]
+    assert float(a1.mean()) > 1.5 * float(a0.mean())  # the ranks' means differ
+    per_rank = jnp.concatenate([a0 / a0.mean(), a1 / a1.mean()])
+    wrong = np.asarray(conservative_positive_clip_global(
+        q, w, area=per_rank, area_ref=1.0)[0])
+    assert not np.allclose(wrong, full, rtol=1e-9)

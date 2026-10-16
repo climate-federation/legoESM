@@ -2830,6 +2830,7 @@ def build_vortex_smt_zps_card(
                 slope_metric_evaluation="nemo_reciprocal",
                 slope_face_thickness_evaluation="nemo_qco_live",
                 redi_flux_face_thickness_evaluation="nemo_qco_live",
+                redi_divisor_thickness_evaluation="nemo_qco_live",
                 slope_depth_evaluation="nemo_qco_live_literal",
                 nemo_slope_shapiro=True,
                 kappa_redi_horizontal_evaluation="nemo_metric_literal",
@@ -4184,10 +4185,18 @@ def validate_swg_namelist(namelist: SwgResolvedNamelist) -> None:
         raise ValueError("SWG nn_SWG, nn_itend, and nn_write must be positive integers")
     if type(namelist.nn_stock) is not int or namelist.nn_stock < 0:
         raise ValueError("SWG nn_stock must be a non-negative integer")
+    if type(namelist.ln_meshmask) is not bool:
+        raise ValueError("SWG ln_meshmask must be a boolean")
     positive_floats = (
         "rn_Dt_s", "rn_domsiz_m", "rn_dx_m", "rn_modified_grav_m_s2",
         "rn_Uv_m_s", "rn_Lv_m",
     )
+    real_fields = positive_floats + (
+        "rn_tau_pa", "rn_rfr_s", "rn_beta_m_s", "rn_f0_s")
+    if any(isinstance(getattr(namelist, name), bool)
+           or not isinstance(getattr(namelist, name), (int, float))
+           for name in real_fields):
+        raise ValueError(f"SWG real values required for {real_fields}")
     if any(not math.isfinite(float(getattr(namelist, name)))
            or float(getattr(namelist, name)) <= 0.0 for name in positive_floats):
         raise ValueError(f"SWG positive finite values required for {positive_floats}")
@@ -4488,6 +4497,12 @@ _validate_pre_swg_testcase_card = validate_nemo_testcase_card
 
 def validate_nemo_testcase_card(card: NEMOTestcaseCard) -> None:
     if card.case == "SWG-zco":
+        # The SWG branch returns before the legacy validator, so the
+        # certification-policy precondition every card shares is restated here.
+        if card.transcendentals != "libm":
+            raise ValueError(
+                f"{card.case} requires scalar-libm certification "
+                f"transcendentals, got {card.transcendentals!r}")
         _validate_swg_card(card)
         return
     _validate_pre_swg_testcase_card(card)

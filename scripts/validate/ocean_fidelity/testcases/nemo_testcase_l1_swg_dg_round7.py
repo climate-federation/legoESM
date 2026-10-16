@@ -13,11 +13,18 @@ import numpy as np
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-from nemo_testcase_phase3_trajectory_gate import require  # noqa: E402
+from nemo_testcase_checkout import bootstrap_checkout  # noqa: E402
 
-DG_ROOT = Path(
-    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgdg_rounds/"
-    "round1/oracle_swg_dg_r1/instrumented")
+
+def require(condition: bool, message: str) -> None:
+    """Fail closed without importing legoESM at module import.
+
+    The GPU short ladder loads this module after it has selected the GPU, so
+    a module-level checkout bootstrap (which defaults to CPU) would refuse
+    there; only :func:`main` binds the checkout and platform.
+    """
+    if not condition:
+        raise RuntimeError(message)
 
 ENTRY_RESTART_FIELDS = (
     ("ssh_k", "sshn", "T"),
@@ -37,6 +44,10 @@ OUTPUT_RESTART_FIELDS = (
     ("utau_now", "utau_b", "U"),
     ("vtau_now", "vtau_b", "V"),
 )
+FORCING_SIGNED_ZERO_FIELDS = frozenset({
+    "utau_before", "vtau_before", "utau_now", "vtau_now",
+    "utau_b", "vtau_b", "emp_b", "qns_b", "sfx_b",
+})
 
 
 def _load_sibling(name: str, filename: str):
@@ -144,7 +155,42 @@ def _first_debt(groups):
     return None
 
 
-def run(root: Path = DG_ROOT, *, plant: bool = True) -> dict:
+# Maintainer ruling of 2026-10-13: the bar stays exact for prognostic fields;
+# the sign of zero in forcing fields is the one exception, and this check
+# (with its planted prognostic violation in the tests) is what enforces it.
+SIGNED_ZERO_POLICY = (
+    "maintainer_ruling_2026-10-13: prognostic fields exact; "
+    "sign of zero in forcing fields excepted")
+
+
+def signed_zero_scope(comparisons: dict[str, list[dict]]) -> dict:
+    """Classify signed-zero words; rows keep their exact word-level status."""
+    observed = []
+    violations = []
+    for comparison, groups in comparisons.items():
+        for group in groups:
+            for row in group.get("rows", ()):
+                if row.get("signed_zero_only", 0):
+                    field = row["name"].rsplit(".", 1)[-1]
+                    item = {
+                        "comparison": comparison,
+                        "kt": group["kt"],
+                        "field": field,
+                        "words": row["signed_zero_only"],
+                    }
+                    observed.append(item)
+                    if field not in FORCING_SIGNED_ZERO_FIELDS:
+                        violations.append(item)
+    return {
+        "policy": SIGNED_ZERO_POLICY,
+        "forcing_field_allowlist": sorted(FORCING_SIGNED_ZERO_FIELDS),
+        "observed": observed,
+        "prognostic_or_unknown_violations": violations,
+        "forcing_only_observation": bool(observed) and not violations,
+    }
+
+
+def run(root: Path, *, plant: bool = True) -> dict:
     """Run all four preregistered comparisons on certified CPU arithmetic."""
     import jax
     from legoesm.core.precision import get_policy
@@ -268,12 +314,16 @@ def run(root: Path = DG_ROOT, *, plant: bool = True) -> dict:
             for kt in range(1, 11)
         },
         "coverage": {
-            "record_next_stage1_vs_restart": "N=1..9; kt=11 not acquired",
+            "record_next_stage1_vs_restart": (
+                "N=1..9; u_before/v_before map to restart un/vn after the "
+                "next step's steady forcing update; uu_n/vv_n are not compared; "
+                "kt=11 not acquired"),
             "production_state_vs_restart": "N=1..10; all 10 restart fields",
             "chained_stage3_vs_restart": "N=1..10; seven common fields",
             "production_stage1_vs_record_stage2": "kt=1..10; all 13 fields",
         },
         "comparisons": comparisons,
+        "signed_zero_scope": signed_zero_scope(comparisons),
         "first_debt": {
             name: _first_debt(groups) for name, groups in comparisons.items()
         },
@@ -290,6 +340,10 @@ def run(root: Path = DG_ROOT, *, plant: bool = True) -> dict:
             "restart": (
                 "stprk3.f90:360-376 swaps Naa to Nbb then calls "
                 "rst_write(kstp,Nbb,Nbb)"),
+            "limitation": (
+                "restart uu_n/vv_n are written from uu_b/vv_b and are not the "
+                "stage-1 u_before/v_before capture; the exact 63-row mapping "
+                "therefore does not prove identical capture instants"),
         },
     }
 
@@ -307,8 +361,9 @@ def _write_json(path: Path, payload: dict) -> None:
 
 
 def main(argv=None) -> int:
+    bootstrap_checkout(__file__)
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--root", type=Path, default=DG_ROOT)
+    parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--json", type=Path, required=True)
     parser.add_argument("--no-plant", action="store_true")
     args = parser.parse_args(argv)

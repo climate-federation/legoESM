@@ -418,6 +418,12 @@ class GMRediConfig(NamedTuple):
     # dilated by NOW SSH, matching traldf_iso_scheme.h90:73/90. Only the two
     # DINO NEMO cards opt in.
     redi_flux_face_thickness_evaluation: str = "tpoint_jacobian"
+    # T-point thickness used by traldf_iso's final flux-divergence divisor.
+    # ``reference_jacobian`` preserves the historical reference/Jacobian
+    # thickness. ``nemo_qco_live`` uses NEMO's live e3t(Kmm), independently
+    # of the horizontal face-thickness choice above. NEMO-identity cards state
+    # this field explicitly; the library default preserves pre-round-237 runs.
+    redi_divisor_thickness_evaluation: str = "reference_jacobian"
     # Live depths and U/V-point depth accumulation used by ldfslp's mixed-
     # layer ramp. ``legacy_jacobian_t_surface`` preserves the historical
     # Jacobian and T-column subtraction. ``nemo_qco_live_literal`` uses raw

@@ -29,7 +29,7 @@ sys.path.insert(0, str(_ROOT))
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--level", type=int, required=True)
-    p.add_argument("--lloyd", type=int, default=20)
+    p.add_argument("--lloyd", type=int, default=50)
     p.add_argument("--no-partial-cell", action="store_true")
     p.add_argument("--dt", type=float, default=75.0)
     p.add_argument("--snapshot", default=None,

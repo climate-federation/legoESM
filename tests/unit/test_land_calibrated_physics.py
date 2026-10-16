@@ -301,11 +301,11 @@ def test_mesh_lane_calibrated_run_must_hand_its_fluxes_to_the_atmosphere():
         "--multilayer-soil-depth", str(cal["soil_grid"].total_depth),
     ]
     cfg = build_config_from_args(_postprocess_args(parser.parse_args(argv), parser))
-    assert cfg.mpas_land_beta_soil is True
+    assert cfg.land_beta_soil is True
     cfg.validate_strict()          # complete: no error
 
-    with pytest.raises(ValueError, match="mpas_land_beta_soil"):
-        cfg._replace(mpas_land_beta_soil=False).validate_strict()
+    with pytest.raises(ValueError, match="land_beta_soil"):
+        cfg._replace(land_beta_soil=False).validate_strict()
 
 
 def test_calibrated_physics_is_refused_off_the_mesh_lane():

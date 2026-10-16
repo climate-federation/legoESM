@@ -79,6 +79,12 @@ def main():
         "--output", "-o", type=str, default=None,
         help="Output directory for the rerun (default: a fresh temp dir)",
     )
+    repro_parser.add_argument(
+        "--allow-version-drift", action="store_true",
+        help="Rerun even when the imported legoESM code may differ from the "
+             "code that wrote the manifest (other commit, uncommitted changes, "
+             "or patches). Default: refuse.",
+    )
 
     # --- wizard command ---
     subparsers.add_parser(
@@ -197,9 +203,16 @@ def cmd_reproduce(args):
     try:
         from legoesm.driver.config import experiment_config_from_dict
         from legoesm.driver.restart import (
+            RESOLVED_PHYSICS_KEYS,
+            config_drift_rows,
+            format_drift_rows,
+            manifest_version_drift,
+            physics_config_from_record,
             read_run_manifest,
             recorded_state_digest,
+            resolved_config_record,
             validate_run_manifest,
+            version_drift_allowed,
         )
 
         manifest = read_run_manifest(args.manifest)
@@ -236,7 +249,27 @@ def cmd_reproduce(args):
                 sys.exit(2)
             return
 
-        config = experiment_config_from_dict(manifest["config"]["resolved_config"])
+        stored = manifest["config"]["resolved_config"]
+        config = experiment_config_from_dict(stored)
+
+        rows = config_drift_rows(stored, resolved_config_record(config))
+        drift = manifest_version_drift(manifest)
+        if drift:
+            lines = [f"  {k}: stored={a!r} -> rebuilt={b!r}" for k, a, b in rows]
+            logger.warning(
+                "Version drift: " + "; ".join(drift) + "\n"
+                f"Resolved-config fields that differ after rebuilding with "
+                f"today's code ({len(rows)}):\n" + ("\n".join(lines) or "  (none)")
+                + "\nAn empty table does NOT mean the same science: code that "
+                "is not a config field may have changed."
+            )
+            if not (getattr(args, "allow_version_drift", False)
+                    or version_drift_allowed()):
+                logger.error("Refusing to reproduce across version drift; "
+                             "check out the recorded commit, or pass "
+                             "--allow-version-drift (or set "
+                             "LEGOESM_ALLOW_VERSION_DRIFT=1).")
+                sys.exit(2)
 
         logger.info(f"legoESM v{__version__} | Reproducing run from {args.manifest}")
         logger.info(
@@ -253,20 +286,63 @@ def cmd_reproduce(args):
         reference_dir = (
             resolved_manifest if resolved_manifest.is_dir() else resolved_manifest.parent
         )
-        out_dir = args.output or tempfile.mkdtemp(prefix="legoesm_reproduce_")
-        if Path(out_dir).resolve() == reference_dir:
+        if args.output and Path(args.output).resolve() == reference_dir:
             logger.error(
-                f"--output {out_dir} is the reference run's directory; the rerun "
+                f"--output {args.output} is the reference run's directory; the rerun "
                 f"would overwrite the reference manifest. Use a fresh directory."
             )
+            sys.exit(2)
+
+        # Strict replay: today's code must rebuild the recorded configuration
+        # exactly -- no field dropped, filled from a new default, or rewritten
+        # -- even when version drift is allowed.
+        if rows:
+            logger.error(
+                f"Refusing to reproduce: today's code does not rebuild the "
+                f"recorded configuration exactly ({len(rows)} fields):\n"
+                + format_drift_rows(rows))
+            sys.exit(2)
+        recorded_physics = manifest["config"].get("resolved_physics")
+        if not (isinstance(recorded_physics, dict)
+                and set(recorded_physics) == set(RESOLVED_PHYSICS_KEYS)):
+            logger.error(
+                "Refusing to reproduce: the manifest has no resolved-physics "
+                "record (config.resolved_physics) with the expected entries, "
+                "so the scheme parameters the run used cannot be checked.")
+            sys.exit(2)
+        # The full overrides are not kept in resolved_config; replay them from
+        # the physics record (the closure check then covers them too).
+        try:
+            overrides = {k: recorded_physics[k] for k in
+                         ("turbulence_override", "gravity_wave_drag_override")}
+            for k, v in overrides.items():
+                if not (v is None or (isinstance(v, dict) and "__type__" in v)):
+                    raise ValueError(f"{k} is not a tagged config record")
+            config = config._replace(**{
+                k: physics_config_from_record(v) for k, v in overrides.items()})
+        except (ValueError, TypeError, AttributeError, ImportError) as exc:
+            logger.error(f"Refusing to reproduce: cannot replay a recorded "
+                         f"override: {exc}")
             sys.exit(2)
 
         from legoesm.driver.model_driver import ModelDriver
         from legoesm.driver.run_status import status_to_exit_code
 
-        driver = ModelDriver(config, output_dir=out_dir)
+        out_dir = args.output or tempfile.mkdtemp(prefix="legoesm_reproduce_")
+        driver = ModelDriver(config, output_dir=out_dir,
+                             expected_resolved_physics=recorded_physics)
         driver.setup()
-        status = driver.run()
+        # Pipeline lanes (rollout recorded): rerun in the recorded rollout and
+        # reapply the scheme configs a driver replaced after setup.
+        rollout = recorded_physics["rollout"]
+        if rollout is not None:
+            try:
+                driver.apply_recorded_pipeline_physics(recorded_physics)
+            except (ValueError, TypeError, AttributeError, ImportError) as exc:
+                logger.error(f"Refusing to reproduce: cannot reapply the "
+                             f"recorded pipeline schemes: {exc}")
+                sys.exit(2)
+        status = driver.run(compiled=rollout != "per_step")
         logger.info(f"  Rerun status: {status}")
         rc = status_to_exit_code(status)
         if rc != 0:

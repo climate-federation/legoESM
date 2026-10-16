@@ -92,6 +92,12 @@ class ConvectionOutput(NamedTuple):
     icwmr: jax.Array | None = None
     """Optional deep in-cloud condensate mixing ratio [kg/kg], shape
     (ncol, nlev) (CAM ``dp_icwmr``); companion of ``mass_flux_up``."""
+    precip_frozen_sfc: jax.Array | None = None
+    """Optional FROZEN surface precipitation [kg/m^2/s, +into surface],
+    shape (ncol,), of a scheme that books its own surface precip (CAM ZM's
+    ``zm_conv_evap`` snow flux, whose fusion heat the scheme's heating
+    already carries).  The interactive land takes its snow from it (F29).
+    ``None`` = not published."""
 
 
 def split_convective_rain(dq_c_conv_dt, precip_efficiency):

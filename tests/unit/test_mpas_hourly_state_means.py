@@ -57,7 +57,7 @@ def hourly_case(tmp_path):
     # Execute the production hook and interval call, not a copied scheduler.
     tree = ast.parse(inspect.getsource(inspect.getmodule(ModelDriver)))
     run = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
-               and n.name == '_run_mpas')
+               and n.name == '_run_column')
     loop = next(n for n in ast.walk(run) if isinstance(n, ast.For)
                 and any(isinstance(s, ast.Assign) and any(
                     isinstance(t, ast.Name) and t.id == '_sample_day'

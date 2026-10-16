@@ -230,6 +230,34 @@ leave choice pending.
 NOT COVERED, proceed normally: what user asked in that message; pure additions
 changing no existing behaviour; tests; comments; docs; error text.
 
+**2026-10-16 EXTENSION — NO SIDE IMPLEMENTATION DECISIONS (STRICT).** User:
+*"No side implementation decisions as strict Claude.md rule."* Approving a
+change does NOT approve the decisions made while implementing it.
+
+A SIDE DECISION = any value, behaviour, or method that changes what the code
+computes, accepts, rejects, or reads, and is NOT dictated by the user's answer,
+the oracle being ported, or existing repo code reused unchanged. Each one gets
+ASKED (one line, current -> proposed, batched) before the code embodying it;
+one found mid-implementation → stop and ask then. Classes, not exhaustive:
+- tolerances and acceptance thresholds (incl. checks on input files, and the
+  tolerance an oracle-match test certifies)
+- guards, floors, caps, clamp vs extrapolate, and their fp32-vs-fp64 behaviour
+- edge cases: zero/empty/missing input, absent file, old checkpoint
+- mappings between representations (bands, grids, levels, units)
+- algorithm and order: interpolation, aggregation, update/operation order
+- where data or files live; names and defaults of user-facing switches
+- which lanes/grids get it; error vs warning vs fallback there
+
+PRECEDENCE: this OVERRIDES the "NOT COVERED" line above for pure additions and
+tests whenever they carry a side decision. Still exempt: error MESSAGE wording,
+comments, docs. Ponytail/minimal-diff governs how much code, never licenses
+picking a value. "Formatting only", "minor", "internal", "implementation
+detail", "numerically negligible" are NOT exemptions. Subagent briefs must
+state this rule. Any item on an end-of-task UNASKED list is a violation of this
+rule (target: empty), not a disclosure that discharges it. FAILURE 2026-10-16:
+radiation stage 1 shipped a band-list check tolerance and an fp32 tiny-path
+guard behaviour, both labelled "formatting only", neither asked.
+
 MECHANICAL CHECK, end of every task: print list of choices made, each one line,
 marked ASKED or UNASKED. Empty UNASKED list = target. Anything on UNASKED list
 offered for revert in same message. Worked example, five from 2026-08-21 that
@@ -444,7 +472,7 @@ explicitly that you did not. "I was careful" is not compliance.
   require showing that line run in configuration under test: print ENCLOSING
   FUNCTION (`awk` nearest `def` above it), confirm active lane/driver call it.
   FAILURE: blamed positivity clamps at `model_driver.py:10923` for century's
-  water source; they live in `_run_per_step` while century run `_run_mpas`,
+  water source; they live in `_run_per_step` while century run `_run_column`,
   which contain no moisture clamp at all. Fix nearly written for lane the run
   never touch. Same class as reading entry point instead of full path.
 - **REUSING A REFERENCE IMPL MEANS PORTING ITS EXCLUSIONS, not just its
@@ -493,7 +521,7 @@ explicitly that you did not. "I was careful" is not compliance.
   missing feature MUST be re-verified in CURRENT code at point of use before
   repeated as finding — this repo routinely fix things without updating prose.
   Comment name module imposing guard → OPEN THAT MODULE. FAILURES (2026-07-30,
-  three in one day): quoted `_run_mpas` "turbulent surface fluxes are
+  three in one day): quoted `_run_column` "turbulent surface fluxes are
   intentionally NOT applied" comment and `AMIP.md` Known #3 to claim MPAS has no
   turbulence — MPAS turbulence path exist (`turbulence/integration.py`, Perot
   edge->cell) and run resolve `turbulence=louis` + `surface_bulk_scheme=coare3`;

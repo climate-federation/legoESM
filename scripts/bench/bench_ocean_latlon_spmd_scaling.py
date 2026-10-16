@@ -96,7 +96,7 @@ def build_model_and_state(n_lat, n_lon, nlev, seed=0, *,
                           tripole=False, baro_solver="implicit_cn",
                           force_pcg=False, pcg_variant="standard",
                           pcg_fixed_iters=0, pcg_precond="jacobi",
-                          cheb_degree=0):
+                          cheb_degree=0, record_true_residual=False):
     """Ocean model + gently perturbed rest state (flat 4000 m bottom).
 
     The perturbation (small u/v/eta/T noise on the rest stratification)
@@ -174,6 +174,11 @@ def build_model_and_state(n_lat, n_lon, nlev, seed=0, *,
         if int(cheb_degree) < 1:
             raise SystemExit("--cheb-degree must be >= 1 (0 = scheme default).")
         flat["barotropic_chebyshev_degree"] = int(cheb_degree)
+    if record_true_residual:
+        if baro_solver != "implicit_cn":
+            raise SystemExit(
+                "--record-true-residual needs the implicit_cn solve.")
+        flat["barotropic_implicit_record_true_residual"] = True
     if wide_halo:
         if baro_solver != "explicit_substep":
             raise SystemExit(
@@ -294,6 +299,13 @@ def main() -> int:
                         "batches/iter; single_reduce = Chronopoulos-Gear, "
                         "ONE batched reduction/iter (halves the per-step "
                         "reduction count the census reports).")
+    p.add_argument("--record-true-residual", action="store_true",
+                   help="ACCURACY runs only: after timing, run --steps more "
+                        "untimed steps and log the true global relative "
+                        "residual ||rhs - A eta||/||rhs|| of each implicit-CN "
+                        "solve (same unweighted norm for every PCG variant) "
+                        "into the receipt.  Adds work to the step, so the "
+                        "receipt is flagged timing-perturbed.")
     p.add_argument("--dt", type=float, default=600.0)
     p.add_argument("--single-dev-fused-ms", type=float, default=None,
                    help="fused_step_ms of the nd=1 row at the SAME per-device "
@@ -533,7 +545,8 @@ def main() -> int:
             tripole=args.tripole, baro_solver=args.baro_solver,
             force_pcg=args.force_pcg, pcg_variant=args.pcg_variant,
             pcg_fixed_iters=args.pcg_fixed_iters,
-            pcg_precond=args.pcg_precond, cheb_degree=args.cheb_degree)
+            pcg_precond=args.pcg_precond, cheb_degree=args.cheb_degree,
+            record_true_residual=args.record_true_residual)
         # Prime the build-once vertex-mask cache from the CONCRETE state so
         # the wrapper can build the per-band vertex masks host-side (global
         # 2-D — stays on the host under the nd>1 context).
@@ -611,6 +624,55 @@ def main() -> int:
         s,
         block_steps=_blk, n_blocks=_nblk, probe_steps=_probe,
         sync_label="ocean_latlon_spmd_bench", trace_dir=_trace_dir, aux=_aux)
+
+    true_residual = None
+    if args.record_true_residual:
+        # Separate untimed run of exactly args.steps solves AFTER timing, so
+        # the log holds only these solves and its length is known exactly.
+        from jax.experimental import multihost_utils
+        from legoesm.ocean.dynamics.barotropic_common import TRUE_RESIDUAL_LOG
+        if jax.local_device_count() != 1 or args.steps < 1:
+            # Several local devices interleave their callbacks with no solve
+            # id, so their agreement cannot be checked.
+            raise SystemExit("--record-true-residual needs one device per "
+                             "process and --steps >= 1.")
+        jax.block_until_ready(s)
+        jax.effects_barrier()
+        TRUE_RESIDUAL_LOG.clear()
+        _sr = s
+        for _ in range(args.steps):
+            _sr = step(_sr, args.dt, aux=_aux) if _aux is not None else step(_sr, args.dt)
+        jax.block_until_ready(_sr)
+        del _sr
+        jax.effects_barrier()
+        # Fixed-size gather BEFORE any refusal, so no process exits while
+        # another waits in the collective.  Slot 0 carries the sample count.
+        _vals = np.asarray(TRUE_RESIDUAL_LOG, dtype=np.float64)
+        _buf = np.full(args.steps + 1, np.nan)
+        _buf[0] = _vals.size
+        _buf[1:1 + min(_vals.size, args.steps)] = _vals[:args.steps]
+        _all = np.asarray(multihost_utils.process_allgather(_buf))
+        if _all.shape != (jax.process_count(), args.steps + 1):
+            raise SystemExit(f"--record-true-residual: gather shape {_all.shape}; refusing.")
+        if not np.all(_all[:, 0] == args.steps) or not np.all(np.isfinite(_all)):
+            raise SystemExit(
+                f"--record-true-residual: per-process sample counts "
+                f"{_all[:, 0].tolist()}, expected {args.steps} each, or "
+                "non-finite values; refusing.")
+        # Callback order is the scan order within one process (one device),
+        # and the residual is an allreduced global scalar: every process
+        # must log the identical sequence.
+        if not np.all(_all == _all[0]):
+            raise SystemExit(
+                "--record-true-residual: processes disagree on the global "
+                f"residual (max diff {float(np.max(np.abs(_all - _all[0]))):.3e}).")
+        _r = _all[0, 1:]
+        true_residual = {
+            "norm": "unweighted ||rhs - A eta||/||rhs||, post mass "
+                    "projection and floor clamp, working precision",
+            "n_solves": int(_r.size), "median": float(np.median(_r)),
+            "max": float(np.max(_r)), "min": float(np.min(_r)),
+        }
 
     # Post-run ZERO-FORCING residual probe eligibility (audit item 6):
     # needs the gathered global final state on ONE process; multicontroller
@@ -930,6 +992,9 @@ def main() -> int:
             "zero_forcing_probe_measured": zero_forcing_probe_measured,
         },
     ))
+    if args.record_true_residual:
+        rec["true_residual"] = true_residual
+        rec["timing_perturbed_by_residual_probe"] = True
     # Multi-controller: every process times the same program; process 0 owns
     # the JSONL + stdout (others would duplicate/corrupt the append).
     if jax.process_index() == 0:

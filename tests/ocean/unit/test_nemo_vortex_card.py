@@ -621,10 +621,10 @@ _CERTIFIED_CARD_DIGESTS_ROUND5 = {          # 85607c118588 + rounds 4 and 5
 # against the GYRE lane tip reports added=1 removed=0 changed=0 on GYRE, both
 # tanks and both VORTEX cards, and the companion test below asserts the added
 # field's value on each certified card.
-_CERTIFIED_CARD_DIGESTS = {                 # ORCA2 fold-in, 2026-09-30
-    "GYRE-zco": "5850bbcfcd351c29",
-    "LOCK_EXCHANGE-zco": "4ec82201f0fae7bf",
-    "OVERFLOW-zps": "7f1ec89b3e6578f5",
+_CERTIFIED_CARD_DIGESTS = {                 # re-pinned 2026-10-16 (#2009, #1910 config fields)
+    "GYRE-zco": "56c5171d43504b54",
+    "LOCK_EXCHANGE-zco": "1d457b3a02df1407",
+    "OVERFLOW-zps": "f92bdb57cecb7129",
 }
 
 

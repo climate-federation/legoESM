@@ -10,14 +10,29 @@ import subprocess
 from pathlib import Path
 from typing import NamedTuple
 
+import jax
 import numpy as np
 import pytest
+from legoesm.core.precision import get_policy, set_policy
 
 _PATH = (Path(__file__).resolve().parents[3]
          / "scripts/run/run_swg_double_gyre.py")
 _SPEC = importlib.util.spec_from_file_location("run_swg_double_gyre", _PATH)
 driver = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(driver)
+_LAST_RESTORED = [None, None]
+
+
+@pytest.fixture(autouse=True)
+def _restore_process_precision():
+    previous_policy = get_policy()
+    previous_x64 = bool(jax.config.jax_enable_x64)
+    try:
+        yield
+    finally:
+        set_policy(previous_policy)
+        jax.config.update("jax_enable_x64", previous_x64)
+        _LAST_RESTORED[:] = [previous_policy, previous_x64]
 
 
 class _Field(NamedTuple):
@@ -73,15 +88,27 @@ def test_tiny_cpu_driver_writes_daily_native_state_with_provenance(tmp_path):
         rn_modified_grav_m_s2=1.0e-6, rn_tau_pa=0.0)
     output = tmp_path / "run"
     manifest = driver.run_long(
-        tiny, output, days=1, mode="cpu-certified", commit="a" * 40,
-        physical_gpu=None)
+        tiny, output, days=1, mode="cpu-certified", commit="a" * 40)
     assert manifest["certified_policy"] is True
     assert manifest["deck_certification"] == (
-        "NEMO ladder measured; see fidelity receipts")
+        "reference evidence on pinned 2026-10-13 toolchain: daily scan exact; "
+        "formal per-step program carries last-bit debt")
     assert manifest["status"] == "complete"
     assert manifest["completed_days"] == 1
     assert manifest["transcendentals"] == "libm"
     assert manifest["integration"] == "production-python-step-loop"
+    assert manifest["device_selection"]["requested_physical_gpu"] is None
+    assert manifest["device_selection"]["JAX_PLATFORMS"] == "cpu"
+    assert manifest["device_memory_at_completion"] == {
+        "api": "jax.Device.memory_stats",
+        "available_keys": [],
+        "bytes_in_use": None,
+        "bytes_limit": None,
+        "peak_bytes_in_use": None,
+        "supported": False,
+    }
+    assert manifest["wall_seconds"] > 0.0
+    assert manifest["wall_seconds_per_model_day"] == manifest["wall_seconds"]
     assert manifest["profile"] is None
     assert manifest["scan_vs_python"] is None
     assert manifest["numerical_health"]["all_finite"]
@@ -153,6 +180,11 @@ def test_scanned_program_matches_nontrivial_python_steps_on_tiny_grid():
         data=scan_state.eta.data + 2.0e-15))
     assert not driver.prognostic_differences(
         python_state, planted)["within_atol"]
+
+
+def test_scanned_program_test_restores_precision_policy():
+    assert (get_policy(), bool(jax.config.jax_enable_x64)) == tuple(
+        _LAST_RESTORED)
 
 
 def test_compiled_day_mean_matches_post_step_production_states_on_tiny_grid():
@@ -306,7 +338,7 @@ def test_run_long_dual_hourly_writer_operators_endpoints_and_t0(
     namelist = driver.resolved_daily_namelist(1, deck="maddison")
     output = tmp_path / "hourly"
     driver.run_long(namelist, output, days=1, mode="cpu-scanned",
-                    commit="a" * 40, physical_gpu=None, hourly_targets=True)
+                    commit="a" * 40, hourly_targets=True)
     steps_per_hour = int(driver.SECONDS_PER_HOUR / namelist.rn_Dt_s)
 
     def reference(steps):
@@ -454,20 +486,19 @@ def test_zero_closure_truth_day_scan_matches_flat_training_segments_at_4_and_8d(
                    for name in ("ssh_m", "u_m_s", "v_m_s"))
 
 
-def test_operator_device_is_explicit_and_matches_visibility():
-    driver.validate_operator_device(
-        "gpu-native", 0, environ={"CUDA_VISIBLE_DEVICES": "0"})
-    driver.validate_operator_device(
-        "gpu-native", 1, environ={"CUDA_VISIBLE_DEVICES": "1"})
-    driver.validate_operator_device("cpu-certified", None, environ={})
-    with pytest.raises(ValueError, match="explicit"):
-        driver.validate_operator_device(
-            "gpu-native", None, environ={"CUDA_VISIBLE_DEVICES": "0"})
-    with pytest.raises(RuntimeError, match="does not match"):
-        driver.validate_operator_device(
-            "gpu-native", 0, environ={"CUDA_VISIBLE_DEVICES": "1"})
-    with pytest.raises(ValueError, match="only valid"):
-        driver.validate_operator_device("cpu-scanned", 0, environ={})
+def test_operator_device_is_explicit_for_every_mode():
+    # cpu-scanned is the online lane's CPU scan mode; it must select the CPU
+    # platform like cpu-certified and refuse a GPU index the same way.
+    selected = driver.configure_runtime_device("cpu-scanned", None, {})
+    assert selected == {
+        "requested_physical_gpu": None, "CUDA_VISIBLE_DEVICES": None,
+        "JAX_PLATFORMS": "cpu"}
+    with pytest.raises(ValueError, match="valid only"):
+        driver.configure_runtime_device("cpu-scanned", "0", {})
+    with pytest.raises(ValueError, match="requires --gpu-device"):
+        driver.configure_runtime_device("gpu-native", "x", {})
+    with pytest.raises(ValueError, match="mode must be"):
+        driver.configure_runtime_device("gpu", "0", {})
 
 
 def test_gpu_wrapper_requires_a_physical_device_argument():
@@ -552,6 +583,11 @@ def test_snapshot_admission_and_bitwise_comparison_have_live_plants(tmp_path):
         driver.admit_listed_snapshot(path)
 
 
+def test_compiled_day_mean_test_restores_precision_policy():
+    assert (get_policy(), bool(jax.config.jax_enable_x64)) == tuple(
+        _LAST_RESTORED)
+
+
 def test_daily_mean_output_refuses_certified_cpu_mode(tmp_path):
     from legoesm.ocean.fidelity.nemo_testcase_recipe import SWG_MADDISON_NAMELIST
 
@@ -561,7 +597,7 @@ def test_daily_mean_output_refuses_certified_cpu_mode(tmp_path):
     with pytest.raises(ValueError, match="non-certified gpu-native"):
         driver.run_long(
             tiny, tmp_path / "run", days=1, mode="cpu-certified",
-            commit="a" * 40, physical_gpu=None, daily_means=True)
+            commit="a" * 40, daily_means=True)
 
 
 def test_cpu_profile_records_production_step_cost(tmp_path):
@@ -572,7 +608,7 @@ def test_cpu_profile_records_production_step_cost(tmp_path):
         rn_modified_grav_m_s2=1.0e-6, rn_tau_pa=0.0)
     manifest = driver.run_long(
         tiny, tmp_path / "run", days=1, mode="cpu-certified",
-        commit="a" * 40, physical_gpu=None, profile_steps=2)
+        commit="a" * 40, profile_steps=2)
     assert manifest["profile"]["program"] == "production-python-step-loop"
     assert manifest["profile"]["steps"] == 2
     assert manifest["profile"]["python_ms_per_step"] > 0.0
@@ -586,15 +622,14 @@ def test_profile_only_writes_no_trajectory(tmp_path):
         rn_modified_grav_m_s2=1.0e-6, rn_tau_pa=0.0)
     output = tmp_path / "profile"
     manifest = driver.run_long(
-        tiny, output, days=1, mode="cpu-certified", commit="a" * 40,
-        physical_gpu=None, profile_steps=2, profile_only=True)
+        tiny, output, days=1, mode="cpu-certified", commit="a" * 40, profile_steps=2, profile_only=True)
     assert manifest["profile_only"] is True
     assert manifest["completed_days"] == 0
     assert list(output.iterdir()) == [output / "manifest.json"]
     with pytest.raises(ValueError, match="positive profile_steps"):
         driver.run_long(
             tiny, tmp_path / "invalid", days=1, mode="cpu-certified",
-            commit="a" * 40, physical_gpu=None, profile_only=True)
+            commit="a" * 40, profile_only=True)
 
 
 def test_cpu_scanned_mode_uses_certified_policy_and_day_program(tmp_path):
@@ -605,7 +640,7 @@ def test_cpu_scanned_mode_uses_certified_policy_and_day_program(tmp_path):
         rn_modified_grav_m_s2=1.0e-6, rn_tau_pa=0.0)
     manifest = driver.run_long(
         tiny, tmp_path / "run", days=1, mode="cpu-scanned",
-        commit="a" * 40, physical_gpu=None)
+        commit="a" * 40)
     assert manifest["certified_policy"] is True
     assert manifest["transcendentals"] == "libm"
     assert manifest["integration"] == "one-jitted-scan-per-day"
@@ -692,3 +727,46 @@ def test_balanced_vorticity_perturbation_is_smooth_and_nondivergent():
     planted = transport_divergence(
         native_face_transports(fields, geometry), geometry)
     assert np.max(np.abs(planted[wet])) > 1.0e-15
+
+
+def test_gpu_device_is_explicit_and_not_pinned_to_one(monkeypatch):
+    environ = {}
+    selected = driver.configure_runtime_device("gpu-native", "0", environ)
+    assert selected == {
+        "requested_physical_gpu": "0", "CUDA_VISIBLE_DEVICES": "0",
+        "JAX_PLATFORMS": "cuda"}
+    assert environ == {"CUDA_VISIBLE_DEVICES": "0", "JAX_PLATFORMS": "cuda"}
+    selected = driver.configure_runtime_device("gpu-native", "3", environ)
+    assert selected["requested_physical_gpu"] == "3"
+    with pytest.raises(ValueError, match="requires --gpu-device"):
+        driver.configure_runtime_device("gpu-native", None, {})
+    with pytest.raises(ValueError, match="valid only"):
+        driver.configure_runtime_device("cpu-certified", "0", {})
+
+
+def test_device_memory_statistics_records_supported_peak():
+    class Device:
+        @staticmethod
+        def memory_stats():
+            return {"bytes_in_use": 4, "bytes_limit": 32,
+                    "peak_bytes_in_use": 12, "num_allocs": 2}
+
+    assert driver.device_memory_statistics(Device(), required=True) == {
+        "api": "jax.Device.memory_stats",
+        "supported": True,
+        "peak_bytes_in_use": 12,
+        "bytes_in_use": 4,
+        "bytes_limit": 32,
+        "available_keys": ["bytes_in_use", "bytes_limit", "num_allocs",
+                           "peak_bytes_in_use"],
+    }
+
+
+def test_device_memory_statistics_refuses_missing_gpu_peak():
+    class Device:
+        @staticmethod
+        def memory_stats():
+            return None
+
+    with pytest.raises(RuntimeError, match="peak_bytes_in_use"):
+        driver.device_memory_statistics(Device(), required=True)

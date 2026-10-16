@@ -263,7 +263,8 @@ def load_window_pairs(grid, sigma, windows, *, rollout_hours, forcing_ctx,
     from legoesm.training.era5_to_state import (
         TrainingERA5Config, open_era5_zarr, load_era5_slice,
         era5_to_latlon_carry, era5_to_mpas_carry, regrid_2d_to_gaussian,
-    )
+    era5_terrain_product,
+)
 
     def _to_carry(era5, grid_or_mesh, sigma_, microphysics_, turbulence_):
         """ERA5 slice -> SegmentCarry on whichever horizontal grid is in use.
@@ -291,9 +292,12 @@ def load_window_pairs(grid, sigma, windows, *, rollout_hours, forcing_ctx,
                     "era5_to_mpas_carry first, or run --grid mpas with "
                     "--microphysics none --turbulence none."
                 )
-            return era5_to_mpas_carry(era5, grid_or_mesh, sigma_)
+            return era5_to_mpas_carry(
+                era5, grid_or_mesh, sigma_,
+                target_phis=era5_terrain_product(era5, grid_or_mesh))
         return era5_to_latlon_carry(
             era5, grid_or_mesh, sigma_,
+            target_phis=era5_terrain_product(era5, grid_or_mesh),
             microphysics=microphysics_, turbulence=turbulence_,
         )
 

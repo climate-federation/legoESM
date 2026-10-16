@@ -29,7 +29,7 @@ import numpy as np
 import pytest
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio, saturation_mixing_ratio_ice
+from legoesm.thermo import saturation_specific_humidity, saturation_specific_humidity_ice
 
 jax.config.update("jax_enable_x64", True)
 
@@ -58,7 +58,7 @@ def _column():
     p_full = jnp.broadcast_to((sf * p_s)[None, :], (_NCOL, _NLEV))
     T = jnp.maximum(300.0 * jnp.clip(sf, 0.01, None) ** 0.19, 200.0)
     T = jnp.broadcast_to(T[None, :], (_NCOL, _NLEV))
-    q_sat = saturation_mixing_ratio(T, p_full)
+    q_sat = saturation_specific_humidity(T, p_full)
     q_v = jnp.where(sf[None, :] > 0.7, 0.95, 0.5) * q_sat
     return T, q_v, p_full, p_half
 
@@ -75,7 +75,7 @@ def _aux():
     w = jnp.full((_NCOL, _NLEV), 0.1)
     lat = jnp.full((_NCOL,), 0.5)
     T_sfc = jnp.full((_NCOL,), 301.0)
-    q_sfc = saturation_mixing_ratio(T_sfc, p_half[:, -1])
+    q_sfc = saturation_specific_humidity(T_sfc, p_half[:, -1])
     prog = jnp.zeros((_NCOL, _NLEV))
     return locals()
 
@@ -309,7 +309,7 @@ def _ice_column():
     p_full = jnp.broadcast_to((sf * p_s)[None, :], (_NCOL, _NLEV))
     p_half = jnp.broadcast_to((sh * p_s)[None, :], (_NCOL, _NLEV + 1))
     T = jnp.broadcast_to(jnp.linspace(258.0, 268.0, _NLEV)[None, :], (_NCOL, _NLEV))
-    q_si = saturation_mixing_ratio_ice(T, p_full)
+    q_si = saturation_specific_humidity_ice(T, p_full)
     q_v = 1.05 * q_si
     rho = p_full / (constants.R_d * T)
     dz = jnp.full((_NCOL, _NLEV), 500.0)

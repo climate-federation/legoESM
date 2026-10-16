@@ -4,43 +4,37 @@ swg_select_deck() {
   local mode=$1 deck=$2 here=$3
   MAKENEMO_SOURCE_CASE=SWG
   SOURCE_PATCH=$here/usrdef_zgr_domsiz.patch
-  SOURCE_PATCH_SHA256=5021a71143943a34943497f40b72e86a43073ab7ff089646fdb3418cb029ba9e
+  SOURCE_PATCH_SHA256=c3af0880a1beb44e7ab40027aa8012d11f1e43fc97127d6cc27d50a44fcab08b
   case "$deck:$mode" in
     shipped:stage)
       SOURCE_CASE_NAME=SWG
       RUN_NAME=SWG_OMIP_L1_P3
       DECK_PATCH=$here/namelist_cfg_kt10.patch
-      DEFAULT_EVIDENCE=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swg_rounds/round1/oracle_swg_r1
       ;;
     shipped:month)
       SOURCE_CASE_NAME=SWG
       RUN_NAME=SWG_OMIP_L1_P3D
       DECK_PATCH=$here/namelist_cfg_30d.patch
-      DEFAULT_EVIDENCE=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swg_rounds/round6/oracle_swg_r6_30d
       ;;
     maddison:stage)
       SOURCE_CASE_NAME=SWG_DG
       RUN_NAME=SWG_DG_OMIP_L1_P3
       DECK_PATCH=$here/namelist_cfg_maddison_kt10.patch
-      DEFAULT_EVIDENCE=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgdg_rounds/round1/oracle_swg_dg_r1
       ;;
     maddison:month)
       SOURCE_CASE_NAME=SWG_DG
       RUN_NAME=SWG_DG_OMIP_L1_P3D
       DECK_PATCH=$here/namelist_cfg_maddison_30d.patch
-      DEFAULT_EVIDENCE=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgdg_rounds/round1/oracle_swg_dg_r1_30d
       ;;
     dg50:stage)
       SOURCE_CASE_NAME=SWG_DG
       RUN_NAME=SWG_DG50_OMIP_L1_P3
       DECK_PATCH=$here/namelist_cfg_dg50_kt10.patch
-      DEFAULT_EVIDENCE=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgonl_rounds/round1/oracle_swg_dg50_r1
       ;;
     dg50:month)
       SOURCE_CASE_NAME=SWG_DG
       RUN_NAME=SWG_DG50_OMIP_L1_P3D
       DECK_PATCH=$here/namelist_cfg_dg50_30d.patch
-      DEFAULT_EVIDENCE=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgonl_rounds/round1/oracle_swg_dg50_r1_30d
       ;;
     *)
       printf 'REFUSE_DECK: expected shipped, maddison, or dg50\n' >&2
@@ -149,10 +143,10 @@ swg_verify_source_case() {
 }
 
 swg_require_daily_clock() {
-  local namelist=$1
+  local namelist=$1 python=$2
   local dt_raw clock nint exact ratio itend stock write
   dt_raw=$(swg_namelist_value "$namelist" rn_Dt)
-  clock=$(python3 -I -c '
+  clock=$("$python" -I -c '
 import math
 import sys
 

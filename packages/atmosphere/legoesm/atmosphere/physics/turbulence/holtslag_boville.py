@@ -57,6 +57,7 @@ from legoesm import constants
 from legoesm.atmosphere.physics._shared import (
     exner_function,
     half_to_full,
+    surface_buoyancy_flux,
     virtual_temperature,
 )
 from legoesm.atmosphere.physics.turbulence.config import HoltslagBovilleConfig
@@ -231,8 +232,6 @@ def holtslag_boville_turbulence(
     g = constants.g
     vk = constants.kappa_vk
     cpair = constants.c_pd
-    # zvir = R_v/R_d - 1 = 1/epsilon - 1 (oracle ``zvir`` in calc_obklen).
-    zvir = 1.0 / constants.epsilon - 1.0
 
     # NOTE: the derived oracle parameters (binm/binh = beta{m,h}*sffrac, the
     # countergradient prefactors ccon=fak*sffrac*vk and fakn, the stable beta
@@ -281,7 +280,7 @@ def holtslag_boville_turbulence(
     # Kinematic surface fluxes (oracle calc_obklen).
     khfs = shflx * rrho / cpair                    # [m K/s]
     kqfs = surface_moisture_flux(config.surface, lhflx, T_sfc) * rrho   # qflx*rrho
-    kbfs = khfs + zvir * th_bot * kqfs             # surface buoyancy flux [m^2/s^3]
+    kbfs = surface_buoyancy_flux(khfs, kqfs, th_bot)  # oracle khfs + zvir*th_bot*kqfs
     # Obukhov length: L = -thvs*u*^3 / (g*vk*(kbfs + sign(1e-10,kbfs))).
     kbfs_signed = kbfs + jnp.sign(kbfs) * 1.0e-10 + (kbfs == 0) * 1.0e-10
     obklen = -thv_bot * ustar ** 3 / (g * vk * kbfs_signed)

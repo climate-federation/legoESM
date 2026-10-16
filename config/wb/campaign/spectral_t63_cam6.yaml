@@ -267,6 +267,13 @@ classical:
   rrtmgp_gpoint_batch_size: 8
   param_fixed:
     atm.clouds.CloudConfig:
+      # 0.0 = floor OFF, as in the MPAS production deck (cloud_q_c_diagnostic:
+      # 0.0): the diagnostic condensate floor compensates for the closure
+      # liquid the partition now delivers, so leaving it on would make the
+      # clouds opaque twice. PINNED, not trained (owner 2026-09-27): 0.0 is
+      # outside the trainable spec bounds (1e-6, 1e-3), exactly as production
+      # treats it (off, untrained).
+      q_c_diagnostic: 0.0
       cloud_optics_inhomogeneity: two_region
       cloud_partial_coverage_optics: none
       cloud_vertical_overlap_optics: max_random
@@ -276,9 +283,25 @@ classical:
     atm.turb.CLUBBConfig:
       prognostic: true
     atm.micro.MorrisonConfig:
-      hard_saturation_adjustment: true
+      # CAM6 clubb_do_liqsupersat = .false.: no condensation step after the
+      # physics, and no ice-curve blend of it. Matches the MPAS production
+      # deck (config/amip/amip_production.yaml, both rows false).
+      hard_saturation_adjustment: false
+      # The other half of the partition: Morrison's own condensation branch
+      # is clamped off, since CLUBB now delivers the liquid.
+      liquid_from_closure: true
       homogeneous_ice_nucleation: true
       sed_cfl_substeps: true
       sed_cfl_substeps_max: 256
       sed_cfl_substeps_strict: false
   clubb_top_press_hpa: 150.0
+  # CAM6 clubb_intr: the closure's diagnosed liquid IS the host cloud water
+  # (seeded in, written back out), so the microphysics stops manufacturing
+  # its own. Matches the MPAS production deck's clubb_liquid_partition: true.
+  # (TurbulenceConfig.liquid_partition; it moved off CLUBBConfig on main.)
+  clubb_liquid_partition: true
+  # CAM6 namelist_defaults_cam.xml:1254 (mg2 + clubb_sgs): turbulence and
+  # microphysics run in sequence at dt/3 = 600 s inside each physics step,
+  # which is what lets the closure's liquid reach the microphysics within
+  # the step. Required by the liquid partition.
+  cld_macmic_num_steps: 3

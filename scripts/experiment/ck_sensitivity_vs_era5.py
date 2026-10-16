@@ -362,7 +362,8 @@ def main(argv: list[str] | None = None) -> int:
         TrainingERA5Config,
         era5_to_latlon_carry,
         load_era5_time_mean,
-    )
+    era5_terrain_product,
+)
 
     from scripts.data.load_local_era5 import open_local_era5_dataset
 
@@ -409,7 +410,8 @@ def main(argv: list[str] | None = None) -> int:
             TrainingERA5Config(levels=WB2_PRESSURE_LEVELS,
                                surface_variables=("surface_pressure", "skin_temperature")),
             range(args.era5_n_times), ds=ds)
-        return column_state_from_carry(era5_to_latlon_carry(era5, grid, sigma))
+        return column_state_from_carry(era5_to_latlon_carry(
+            era5, grid, sigma, target_phis=era5_terrain_product(era5, grid)))
 
     def _bl_per_level(m_lo_s, m_hi_s, grid, ref, ocean_mask=None):
         """(sigma, T-bias, C_K-controllable fraction) at the boundary-layer (max-sigma)

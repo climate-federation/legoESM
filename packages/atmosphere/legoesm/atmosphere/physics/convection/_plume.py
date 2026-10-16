@@ -40,7 +40,7 @@ Conventions
   at TOA and ``p_half[:, -1]`` at the surface.
 * All temperatures in Kelvin, pressures in Pa, mass flux in kg/m²/s.
 * Reused upstream — never re-implement: ``legoesm.constants`` for
-  physical constants; ``legoesm.thermo.saturation_mixing_ratio`` and
+  physical constants; ``legoesm.thermo.saturation_specific_humidity`` and
   ``saturation_vapor_pressure`` for thermodynamics; the ``moist_adiabat``
   / ``moist_adiabat_lapse_rate`` / ``compute_cape`` family from
   ``legoesm.atmosphere.physics.thermodynamics``; column geometry
@@ -69,7 +69,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio
+from legoesm.thermo import saturation_specific_humidity
 from legoesm.atmosphere.physics._shared import compute_rho, virtual_temperature
 from legoesm.atmosphere.physics.thermodynamics import (
     bolton_lcl_temperature,
@@ -575,7 +575,7 @@ def entraining_detraining_plume(
     """
     ncol, nlev = T_env.shape
 
-    # Pin everything to the input precision so saturation_mixing_ratio
+    # Pin everything to the input precision so saturation_specific_humidity
     # (which promotes f32 → f64 via its Clausius-Clapeyron literal
     # constants) doesn't break ``jax.lax.scan``'s "carry-in dtype must
     # equal carry-out dtype" invariant.
@@ -726,7 +726,7 @@ def entraining_detraining_plume(
         # diagnostic that resolves the q-budget; the temperature
         # already incorporates the latent heat from condensation via
         # the moist lapse rate.
-        q_sat_new = saturation_mixing_ratio(T_u, p_e).astype(_dtype)
+        q_sat_new = saturation_specific_humidity(T_u, p_e).astype(_dtype)
         condensate = jnp.maximum(q_u_ent - q_sat_new, 0.0).astype(_dtype)
         q_u = (q_u_ent - condensate).astype(_dtype)
         # Dilute plume cloud water by entrainment.  The continuity

@@ -35,6 +35,7 @@ _P_MAX = 2.0e7          # [Pa]
 # full atmosphere.physics package.  Re-exported here for backward compatibility.
 from legoesm.thermo import saturation_mixing_ratio as saturation_mixing_ratio  # noqa: F401
 from legoesm.thermo import saturation_mixing_ratio_ice as saturation_mixing_ratio_ice  # noqa: F401
+from legoesm.thermo import saturation_specific_humidity
 # Bolton (1980) LCL-temperature formula constants (fixed).
 _LCL_T_OFFSET_K = 55.0
 _LCL_BOLTON_DENOM = 2840.0
@@ -245,9 +246,9 @@ def bolton_lcl_temperature(
     p_base : jax.Array
         Parcel launch pressure [Pa].
     q_v_base : jax.Array
-        Parcel water-vapor mixing ratio at the launch level [kg/kg].
+        Parcel specific humidity at the launch level [kg/kg].
     """
-    from legoesm.thermo import saturation_mixing_ratio as _q_sat
+    from legoesm.thermo import saturation_specific_humidity as _q_sat
 
     q_sat_base = _q_sat(T_base, p_base)
     RH = jnp.clip(q_v_base / jnp.maximum(q_sat_base, 1.0e-12), 1.0e-4, 1.0)  # coeff-ok: RH floor
@@ -518,7 +519,7 @@ def parcel_profile_and_cape(
     if q_v is None:
         cape = compute_cape(T, T_moist, p_full, p_half)
     else:
-        q_sat_parcel = saturation_mixing_ratio(T_moist, p_full)
+        q_sat_parcel = saturation_specific_humidity(T_moist, p_full)
         q_v_parcel = jnp.minimum(q_v_base[:, None], q_sat_parcel)
         cape = compute_cape(
             T, T_moist, p_full, p_half,

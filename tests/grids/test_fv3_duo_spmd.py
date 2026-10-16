@@ -448,11 +448,33 @@ def _vec_stack_fixture(tab, grid, seed):
             rng.standard_normal(v2.shape + (K_BATCH,)))
 
 
+# jit-vs-eager FMA contraction on the halo impl: measured max 3.0e-12
+# rel over scalar A/B and vector C/D, old loop AND vmap alike (job
+# 10134586); bound = measured x4.  NOT a batching tolerance: eager
+# stays bitwise.
+_JIT_CLASS_RTOL = 1.2e-11
+
+
+def _assert_jit_class(got, ref):
+    got = np.asarray(got); ref = np.asarray(ref)
+    fill = np.abs(ref) >= 1.0e20
+    assert np.array_equal(got[fill], ref[fill], equal_nan=True)
+    np.testing.assert_allclose(got[~fill], ref[~fill],
+                               rtol=_JIT_CLASS_RTOL, atol=0.0)
+
+
+@pytest.mark.parametrize("jit", [False, True])
 @pytest.mark.parametrize("stag", ["A", "B"])
-def test_allk_certified_path_is_the_relocated_loop(tab, stag):
+def test_allk_certified_path_is_the_relocated_loop(tab, stag, jit):
     """ring_comm=None: ext_scalar_sixface_allk must equal the CALLER's
-    former per-level loop BITWISE -- the loop was relocated verbatim,
-    so any difference is a batching bug, not a tolerance."""
+    former per-level loop BITWISE eager (the vmap over K replaced the
+    loop 2026-09-29; the impl is elementwise in K, so an eager
+    difference is a batching bug, not a tolerance).  Under jit, XLA's
+    FMA contraction already moves the OLD loop off eager by up to
+    3e-12 rel (job 10134586), so the jitted vmap is compared to the
+    same EAGER loop reference at that class (jit-vmap vs eager loop
+    measured 3.0e-12 rel max), not bitwise."""
+    import jax
     import jax.numpy as jnp
 
     from legoesm.grids.fv3_duo_halos import (
@@ -464,13 +486,30 @@ def test_allk_certified_path_is_the_relocated_loop(tab, stag):
     ref = f6k
     for k in range(K_BATCH):
         ref = ref.at[..., k].set(ext_scalar_sixface(ref[..., k], tab, stag))
-    got = ext_scalar_sixface_allk(f6k, tab, stag)
-    assert np.array_equal(np.asarray(got), np.asarray(ref), equal_nan=True)
+    if jit:
+        got = jax.jit(lambda f: ext_scalar_sixface_allk(f, tab, stag))(f6k)
+        _assert_jit_class(got, ref)
+        # and against the OLD loop compiled independently: jit-vmap vs
+        # jit-loop measured 6.5e-13 rel max (job 10134586)
+        def loop(f):
+            for k in range(K_BATCH):
+                f = f.at[..., k].set(ext_scalar_sixface(f[..., k], tab, stag))
+            return f
+        _assert_jit_class(got, jax.jit(loop)(f6k))
+    else:
+        got = ext_scalar_sixface_allk(f6k, tab, stag)
+        assert np.array_equal(np.asarray(got), np.asarray(ref),
+                              equal_nan=True)
 
 
+@pytest.mark.parametrize("jit", [False, True])
 @pytest.mark.parametrize("grid", ["D", "C"])
-def test_allk_certified_vector_path_is_the_relocated_loop(tab, grid):
-    """Same relocation gate for both vector flows."""
+def test_allk_certified_vector_path_is_the_relocated_loop(tab, grid, jit):
+    """Same relocation gate for both vector flows: bitwise eager; the
+    jitted vmap against the same eager loop reference at the jit
+    reassociation class (measured max 2.2e-12 rel, job 10134586, for
+    BOTH the old loop and the vmap against eager)."""
+    import jax
     import jax.numpy as jnp
 
     from legoesm.grids.fv3_duo_halos import (
@@ -488,9 +527,25 @@ def test_allk_certified_vector_path_is_the_relocated_loop(tab, grid):
         uk, vk = per_level(ru[..., k], rv[..., k], tab)
         ru = ru.at[..., k].set(uk)
         rv = rv.at[..., k].set(vk)
-    gu, gv = allk(u6k, v6k, tab)
-    assert np.array_equal(np.asarray(gu), np.asarray(ru), equal_nan=True)
-    assert np.array_equal(np.asarray(gv), np.asarray(rv), equal_nan=True)
+    if jit:
+        gu, gv = jax.jit(lambda u, v: allk(u, v, tab))(u6k, v6k)
+        _assert_jit_class(gu, ru)
+        _assert_jit_class(gv, rv)
+        # and against the OLD loop compiled independently (jit-vmap vs
+        # jit-loop measured 8.9e-13 rel max, job 10134586)
+        def loop(u, v):
+            for k in range(K_BATCH):
+                uk, vk = per_level(u[..., k], v[..., k], tab)
+                u = u.at[..., k].set(uk)
+                v = v.at[..., k].set(vk)
+            return u, v
+        ju, jv = jax.jit(loop)(u6k, v6k)
+        _assert_jit_class(gu, ju)
+        _assert_jit_class(gv, jv)
+    else:
+        gu, gv = allk(u6k, v6k, tab)
+        assert np.array_equal(np.asarray(gu), np.asarray(ru), equal_nan=True)
+        assert np.array_equal(np.asarray(gv), np.asarray(rv), equal_nan=True)
 
 
 @pytest.mark.parametrize("stag", ["A", "B"])

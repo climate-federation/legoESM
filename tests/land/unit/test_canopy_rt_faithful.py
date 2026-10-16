@@ -122,8 +122,17 @@ def _split_oracle(sw_down, cos_z):
     return tuple(out)
 
 
+def _floor_soil_oracle(total, q_sun, q_sh):
+    """Ground share of ``total`` floored at zero; the leaf shares are scaled down
+    so the three still sum to ``total``."""
+    q_can = q_sun + q_sh
+    i_soil = max(total - q_can, 0.0)
+    scale = (total - i_soil) / max(q_can, 1e-30) if q_can > 0.0 else 1.0
+    return i_soil, q_sun * scale, q_sh * scale
+
+
 def _sw_rt_oracle(PAR_dir, PAR_diff, NIR_dir, NIR_diff, UV, SZA, LAI, CI,
-                  ALB_VIS, ALB_NIR, Vc3, Vc4, kn, FNonVeg):
+                  ALB_VIS, ALB_NIR, Vc3, Vc4, kn):
     """Independent Sellers/Ryu two-stream shortwave RT -> dict of the 10 outputs.
 
     Transcribed term-for-term from Bonan/Ryu closed forms with independent
@@ -131,8 +140,9 @@ def _sw_rt_oracle(PAR_dir, PAR_diff, NIR_dir, NIR_diff, UV, SZA, LAI, CI,
     """
     night = SZA > _O_NIGHT_SZA_DEG
     sigma_P, sigma_N = _O_SIGMA_PAR, _O_SIGMA_NIR
-    rho_PSoil = _O_RHO_PAR_SOIL * (1.0 - FNonVeg)
-    rho_NSoil = _O_RHO_NIR_SOIL * (1.0 - FNonVeg)
+    cover = -math.expm1(-_O_KB_BEAM * CI * LAI)   # ground shaded by foliage, 1 - exp(-G CI LAI)
+    rho_PSoil = _O_RHO_PAR_SOIL * cover
+    rho_NSoil = _O_RHO_NIR_SOIL * cover
     cos_sza = math.cos(math.radians(SZA))
     cos_sza_safe = _O_COS_FLOOR if night else cos_sza
     kb = _O_KB_BEAM / cos_sza_safe
@@ -164,8 +174,8 @@ def _sw_rt_oracle(PAR_dir, PAR_diff, NIR_dir, NIR_diff, UV, SZA, LAI, CI,
                     0.0)
     Q_PSunDn = Q_PbSunDn + Q_PdSunDn + Q_PsSunDn
     Q_PShDn = max(Q_PDn - Q_PSunDn, 0.0)
-    I_PSoil = ((1.0 - ALB_VIS) * PAR_dir + (1.0 - ALB_VIS) * PAR_diff
-               - (Q_PSunDn + Q_PShDn))
+    I_PSoil, Q_PSunDn, Q_PShDn = _floor_soil_oracle(
+        (1.0 - ALB_VIS) * PAR_dir + (1.0 - ALB_VIS) * PAR_diff, Q_PSunDn, Q_PShDn)
     APAR_Soil = (1.0 - rho_PSoil) * I_PSoil
     Q_PSunUp = I_PSoil * rho_PSoil * exp_kk_Pd
     Q_PShUp = I_PSoil * rho_PSoil * (1.0 - exp_kk_Pd)
@@ -182,8 +192,8 @@ def _sw_rt_oracle(PAR_dir, PAR_diff, NIR_dir, NIR_diff, UV, SZA, LAI, CI,
                              - (1.0 - sigma_N) * (1.0 - math.exp(-2.0 * kb * L_CI)) / 2.0))
     Q_NShDn = ((1.0 - ALB_NIR) * NIR_dir * (1.0 - math.exp(-kk_Nb * L_CI))
                + (1.0 - ALB_NIR) * NIR_diff * (1.0 - exp_kk_Nd) - Q_NSunDn)
-    I_NSoil = ((1.0 - ALB_NIR) * NIR_dir + (1.0 - ALB_NIR) * NIR_diff
-               - (Q_NSunDn + Q_NShDn))
+    I_NSoil, Q_NSunDn, Q_NShDn = _floor_soil_oracle(
+        (1.0 - ALB_NIR) * NIR_dir + (1.0 - ALB_NIR) * NIR_diff, Q_NSunDn, Q_NShDn)
     ANIR_Soil = (1.0 - rho_NSoil) * I_NSoil
     Q_NSunUp = I_NSoil * rho_NSoil * exp_kk_Nd
     Q_NShUp = I_NSoil * rho_NSoil * (1.0 - exp_kk_Nd)
@@ -279,25 +289,25 @@ def test_split_sw_erbs_branches_are_distinct():
 # --- canopy_shortwave_rt: full two-stream --------------------------------------
 
 _SW_CASES = [
-    # PAR_dir,PAR_diff,NIR_dir,NIR_diff,UV, SZA, LAI, CI, ALB_VIS,ALB_NIR, Vc3,Vc4, kn, FNonVeg
-    (300.0, 90.0, 320.0, 95.0, 12.0, 30.0, 3.0, 0.8, 0.08, 0.25, 60.0, 30.0, 0.30, 0.10),
-    (180.0, 140.0, 190.0, 150.0, 9.0, 55.0, 5.0, 0.7, 0.10, 0.30, 55.0, 25.0, 0.50, 0.20),
-    (400.0, 40.0, 420.0, 45.0, 16.0, 15.0, 1.5, 0.9, 0.06, 0.22, 70.0, 35.0, 0.20, 0.05),
+    # PAR_dir,PAR_diff,NIR_dir,NIR_diff,UV, SZA, LAI, CI, ALB_VIS,ALB_NIR, Vc3,Vc4, kn
+    (300.0, 90.0, 320.0, 95.0, 12.0, 30.0, 3.0, 0.8, 0.08, 0.25, 60.0, 30.0, 0.30),
+    (180.0, 140.0, 190.0, 150.0, 9.0, 55.0, 5.0, 0.7, 0.10, 0.30, 55.0, 25.0, 0.50),
+    (400.0, 40.0, 420.0, 45.0, 16.0, 15.0, 1.5, 0.9, 0.06, 0.22, 70.0, 35.0, 0.20),
     # SZA>89 night sentinel (kb=kk_Pb=50) with NON-zero incident flux -> pins the
     # sentinel-extinction branch, not just a zero-in/zero-out identity.
-    (50.0, 40.0, 55.0, 45.0, 3.0, 95.0, 3.0, 0.8, 0.08, 0.25, 60.0, 30.0, 0.30, 0.10),
+    (50.0, 40.0, 55.0, 45.0, 3.0, 95.0, 3.0, 0.8, 0.08, 0.25, 60.0, 30.0, 0.30),
     # kn -> ~0 engages the max(kn*CI, eps) profile guard (kn+kb*LAI ~ 2.3 here).
-    (300.0, 90.0, 320.0, 95.0, 12.0, 30.0, 4.0, 0.8, 0.08, 0.25, 60.0, 30.0, 1e-8, 0.10),
+    (300.0, 90.0, 320.0, 95.0, 12.0, 30.0, 4.0, 0.8, 0.08, 0.25, 60.0, 30.0, 1e-8),
     # tiny LAI AND tiny kn -> engages BOTH profile denominators
     # max(kn*CI, eps) and max(kn+kb*LAI, eps).
-    (300.0, 90.0, 320.0, 95.0, 12.0, 30.0, 1e-7, 0.8, 0.08, 0.25, 60.0, 30.0, 1e-8, 0.10),
+    (300.0, 90.0, 320.0, 95.0, 12.0, 30.0, 1e-7, 0.8, 0.08, 0.25, 60.0, 30.0, 1e-8),
     # tiny PAR (5e-6, comparable to the 1e-5 eps) with UV present -> the
     # total_PAR += 1e-5 UV-split eps is LOAD-BEARING in UV_dir=UV*PAR_dir/total_PAR
     # (UV/3 with the eps vs UV without it), so the pin actually depends on it.
-    (5e-6, 0.0, 200.0, 60.0, 10.0, 30.0, 3.0, 0.8, 0.08, 0.25, 60.0, 30.0, 0.30, 0.10),
+    (5e-6, 0.0, 200.0, 60.0, 10.0, 30.0, 3.0, 0.8, 0.08, 0.25, 60.0, 30.0, 0.30),
     # dense snow-bright canopy at oblique sun -> drives the scattered-sunlit
     # max(.,0) PAR floor (high ALB_VIS makes the raw scattered term negative).
-    (350.0, 30.0, 360.0, 35.0, 14.0, 75.0, 8.0, 0.95, 0.30, 0.20, 65.0, 32.0, 0.40, 0.05),
+    (350.0, 30.0, 360.0, 35.0, 14.0, 75.0, 8.0, 0.95, 0.30, 0.20, 65.0, 32.0, 0.40),
 ]
 
 
@@ -307,16 +317,18 @@ def test_canopy_shortwave_rt_matches_sellers_ryu_oracle(case):
     reimplementation to round-off — pinning fSun, the PAR/NIR/UV
     sunlit/shaded/soil partition, and the N-profile Vcmax integral."""
     (PAR_dir, PAR_diff, NIR_dir, NIR_diff, UV, SZA, LAI, CI,
-     ALB_VIS, ALB_NIR, Vc3, Vc4, kn, FNonVeg) = case
+     ALB_VIS, ALB_NIR, Vc3, Vc4, kn) = case
     out = canopy_shortwave_rt(
         _arr(PAR_dir), _arr(PAR_diff), _arr(NIR_dir), _arr(NIR_diff), _arr(UV),
         _arr(SZA), _arr(LAI), _arr(CI), _arr(ALB_VIS), _arr(ALB_NIR),
-        _arr(Vc3), _arr(Vc4), _arr(kn), _arr(FNonVeg))
+        _arr(Vc3), _arr(Vc4), _arr(kn))
     exp = _sw_rt_oracle(PAR_dir, PAR_diff, NIR_dir, NIR_diff, UV, SZA, LAI, CI,
-                        ALB_VIS, ALB_NIR, Vc3, Vc4, kn, FNonVeg)
+                        ALB_VIS, ALB_NIR, Vc3, Vc4, kn)
     for field, e in exp.items():
         g = float(getattr(out, field)[0])
-        assert g == pytest.approx(e, rel=1e-9, abs=0.0), (field, g, e)
+        # abs floor: at LAI=1e-7 the leaf terms are ~1e-12 W m-2 and 1 - exp(-x)
+        # cancellation alone moves them 1.5e-8 relative (1.5e-20 absolute).
+        assert g == pytest.approx(e, rel=1e-9, abs=1e-15), (field, g, e)
 
 
 def test_canopy_shortwave_sunlit_fraction_beer_law_and_vcmax_partition():
@@ -330,7 +342,7 @@ def test_canopy_shortwave_sunlit_fraction_beer_law_and_vcmax_partition():
         out = canopy_shortwave_rt(
             _arr(300.0), _arr(90.0), _arr(320.0), _arr(95.0), _arr(12.0),
             _arr(SZA), _arr(LAI), _arr(CI), _arr(0.08), _arr(0.25),
-            _arr(Vc3), _arr(Vc4), _arr(kn), _arr(0.1))
+            _arr(Vc3), _arr(Vc4), _arr(kn))
         # sunlit + shaded == total (partition closes) — total from the N-profile
         # integral with the SAME beam kb the production uses.
         kb = _O_KB_BEAM / math.cos(math.radians(SZA))
@@ -371,7 +383,7 @@ def test_canopy_shortwave_bare_soil_guard():
     bare = canopy_shortwave_rt(
         _arr(300.0), _arr(90.0), _arr(320.0), _arr(95.0), _arr(12.0),
         _arr(30.0), _arr(0.0), _arr(0.8), _arr(0.08), _arr(0.25),
-        _arr(60.0), _arr(30.0), _arr(0.30), _arr(0.1))
+        _arr(60.0), _arr(30.0), _arr(0.30))
     for f in ("APAR_Sun", "APAR_Sh", "ASW_Sun", "ASW_Sh", "fSun",
               "Vcmax25_C3Sun", "Vcmax25_C3Sh", "Vcmax25_C4Sun", "Vcmax25_C4Sh"):
         assert float(getattr(bare, f)[0]) == 0.0, f
@@ -438,7 +450,7 @@ def _fsun_of_beam(beam):
     return canopy_shortwave_rt(
         half, _arr(90.0), half, _arr(95.0), _arr(12.0),
         _arr(30.0), _arr(3.0), _arr(0.8), _arr(0.08), _arr(0.25),
-        _arr(60.0), _arr(30.0), _arr(0.30), _arr(0.1)).fSun[0]
+        _arr(60.0), _arr(30.0), _arr(0.30)).fSun[0]
 
 
 def test_rt_grad_finite_x64_and_float32():
@@ -457,7 +469,7 @@ def test_rt_grad_finite_x64_and_float32():
         # two-stream: grad wrt LAI and SZA (through 1/kb, exp, profile guards).
         args = [_arr(300.0), _arr(90.0), _arr(320.0), _arr(95.0), _arr(12.0),
                 _arr(30.0), _arr(3.0), _arr(0.8), _arr(0.08), _arr(0.25),
-                _arr(60.0), _arr(30.0), _arr(0.30), _arr(0.1)]
+                _arr(60.0), _arr(30.0), _arr(0.30)]
 
         def with_lai(lai):
             a = list(args)

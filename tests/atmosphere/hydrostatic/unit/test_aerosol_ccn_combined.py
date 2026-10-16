@@ -196,7 +196,7 @@ def test_end_to_end_combined_threads_forcing_to_both_modules():
 # ---------------------------------------------------------------------------
 # apply_microphysics_experiment_flags — the ONE shared helper both the coupled
 # (physics_pipeline._resolve_microphysics) and the combined-physics / MPAS
-# (model_driver._run_mpas) paths route through, so the two ExperimentConfig
+# (model_driver._run_column) paths route through, so the two ExperimentConfig
 # warm-rain switches (nc_from_aerosol + subgrid_autoconversion) are threaded
 # identically on every grid (closes the Morrison-only MPAS parity gap).
 # ---------------------------------------------------------------------------

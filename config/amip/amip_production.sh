@@ -45,8 +45,17 @@
 
 # --- Machine-specific paths (Levante defaults; override via the environment) ---
 : "${ICON_ROOT:=/pool/data/ICON/grids/public/mpim}"
-: "${ERA5_IC:=/scratch/b/b309178/era5_ic_1979-01-01.zarr}"
-: "${ETOPO:=/work/bd1083/b309178/diffESM/legoesm_ap/data/bathymetry/etopo_1deg_clean.nc}"
+# ERA5 IC with the analysis's 1..30 hPa levels added (scripts/data/
+# add_era5_upper_levels.py): the plain 13-level file stops at 50 hPa and the
+# L32 top layers start ~40/20 K cold.  SAME product as the Ginsburg twin
+# (review 2026-10-10 F33; stage the Ginsburg-built zarr here before a launch).
+: "${ERA5_IC:=/scratch/b/b309178/era5_ic_1979-01-01_gproxy_L21.zarr}"
+# Topography: 0.25 deg, built with scripts/data/prep_etopo_topography.py (its
+# defaults) from NOAA ETOPO 2022 60 arc-second ice-surface relief.  The 1 deg
+# file is coarser than the MPAS res-6 cells, so the per-grid terrain product
+# (bin_latlon_to_cells) leaves 2193 cells with no source point and refuses to
+# build: every production-resolution run crashed at setup.
+: "${ETOPO:=/work/bb1596/b309178/diffESM/legoesm_ap/data/bathymetry/etopo2022_60s_0p25deg.nc}"
 # SST/SIC: PCMDI CMIP7 AMIP boundary conditions (the protocol-standard tosbcs/
 # siconcbcs mid-month files, 1870-2022) — the dataset every proven MPAS-lane
 # run uses (Pierre's climeval_bech day-247+ and the replica chains).  The file
@@ -62,21 +71,32 @@
 #   SIC=${ICON_ROOT}/0019/sst_and_seaice/r0001/bc_sic_1979_2016.nc
 : "${SOLAR:=${ICON_ROOT}/common/solar_radiation/swflux_14band_cmip6_1850-2299-v3.2.nc}"
 : "${GHG:=${ICON_ROOT}/independent/greenhouse_gases/greenhouse_historical_plus.nc}"
-# Ozone/aerosol/volcanic default to the merged 1979-2014 transient files (432
-# monthly records each, El Chichon + Pinatubo included) so the DEFAULT run is
+# Ozone defaults to the merged 1979-2014 transient file (432 monthly records),
+# aerosol and volcanic to 1850-2014 products (below), so the DEFAULT run is
 # CMIP6-compliant for the full AMIP period. The old single-year (Kinne 1979,
 # volcanic 1979) and 1950-1999 ozone pool files silently freeze/hold forcing
 # past their coverage — only override back to them for deliberate fixed-forcing
 # sensitivity runs.
-: "${FORCING_1979_2014:=/work/bd1083/b309178/diffESM/legoesm_ap/data/forcing/cmip6_1979-2014}"
+: "${FORCING_1979_2014:=/work/bb1596/b309178/diffESM/legoesm_ap/data/forcing/cmip6_1979-2014}"
 : "${OZONE:=${FORCING_1979_2014}/vmro3_input4MIPs_ozone_CMIP_UReading-CCMI-1-0_gn_197901-201412.nc}"
-: "${AEROSOL:=${FORCING_1979_2014}/aeropt_kinne_sw_b14_fin_1979-2014_rast.nc}"
-: "${VOLCANIC:=${FORCING_1979_2014}/bc_aeropt_cmip6_volc_lw_b16_sw_b14_1979-2014.nc}"
+# MACv2-SP anthropogenic plumes on the Kinne MACv1 pre-industrial background,
+# 1850-2014: fine+coarse for radiation, fine mode for the droplet-number (CCN)
+# path (review 2026-10-10 F33/F37).  Same basenames on both machines; build
+# them here with scripts/data/adapt_cmip6_aerosol.py (see the Ginsburg twin).
+: "${AEROSOL:=${FORCING_1979_2014}/aeropt_macv2sp_sw_b14_tot_1850-2014_MACv1bg.nc}"
+: "${AEROSOL_CCN:=${FORCING_1979_2014}/aeropt_macv2sp_sw_b14_fin_1850-2014_MACv1bg.nc}"
+# Volcanic: ETH CMIP6 stratospheric aerosol v4.0.0 (ECHAM6 SW + LW bands),
+# 1850-2014, the SAME product as the Ginsburg twin (review 2026-10-10 F33/F37).
+# Its 1979-2014 records equal the old *_1979-2014.nc file; the loader output
+# differs only by calendar stamps and the first half of January 1979 (#1948).
+# Build it here before a launch: scripts/data/adapt_cesm_forcing.py volcanic
+# --years 1850 2014 on the raw CMIP_ECHAM6_radiation_v4.nc (see the twin).
+: "${VOLCANIC:=${FORCING_1979_2014}/bc_aeropt_cmip6_volc_lw_b16_sw_b14_1850-2014_IACETH-v4.nc}"
 # CLM surfdata for the multilayer Richards land model (use_multilayer_land): the
 # PFT/texture/glacier surface map. Compute nodes have NO internet, so the auto-
 # download in clm_surface_map.download_clm_surfdata() FAILS (SSL) — this file
 # MUST be staged locally and passed via --clm-surfdata-path (staged 2026-07-02).
-: "${CLM_SURFDATA:=/work/bd1083/b309178/diffESM/legoesm_ap/data/clm/surfdata_1.9x2.5_16pfts_CMIP6_simyr2000.nc}"
+: "${CLM_SURFDATA:=/work/bb1596/b309178/diffESM/legoesm_ap/data/clm/surfdata_1.9x2.5_16pfts_CMIP6_simyr2000.nc}"
 # Subgrid-orography stddev (SSO) for the orographic GWD launch (#1514). With
 # gravity_wave_drag=mcfarlane+hines and NO SSO file, McFarlane falls back to
 # the scalar h_topo=500 m on EVERY column — a fictional 500-m mountain over
@@ -91,7 +111,7 @@
 # _seamfix (2026-10-07, #1712): same recipe rebuilt after the regridder seam
 # fix; differs from sso_stdh_2deg_from1deg.nc only in the 358-360E column,
 # where the old file was built with a fake 0-m strip. sha256 of both in #1884.
-: "${AMIP_SSO:=/work/bd1083/b309178/diffESM/legoesm_ap/data/orography/sso_stdh_2deg_from1deg_seamfix.nc}"
+: "${AMIP_SSO:=/work/bb1596/b309178/diffESM/legoesm_ap/data/orography/sso_stdh_2deg_from1deg_seamfix.nc}"
 # Land-sea mask (sftlf, fraction) built from the SAME CLM surfdata by
 # scripts/data/build_sftlf_from_surfdata.py (2026-07-22). Without it f_land is
 # derived from ETOPO elevation>0, and ETOPO's inland-sea BATHYMETRY (Caspian
@@ -101,7 +121,7 @@
 # tiling consistent with the land model's own footprint (Caspian/Aral = land).
 # Opt back to the legacy elevation mask with AMIP_LAND_MASK="" (deliberate
 # reproduction runs only).
-: "${AMIP_LAND_MASK:=/work/bd1083/b309178/diffESM/legoesm_ap/data/clm/sftlf_clm_1.9x2.5.nc}"
+: "${AMIP_LAND_MASK:=/work/bb1596/b309178/diffESM/legoesm_ap/data/clm/sftlf_clm_1.9x2.5.nc}"
 
 # --- The machine-specific PATH flags (everything else is in the YAML) ---------
 # Harmonized surfdata: the CANOPY parameter source (per-PFT canopy height,
@@ -121,6 +141,7 @@ AMIP_PATH_FLAGS=(
   --ozone-file "${OZONE}"
   --ghg-file "${GHG}"
   --aerosol-file "${AEROSOL}"
+  --aerosol-ccn-file "${AEROSOL_CCN}"
   --volcanic-aerosol-file "${VOLCANIC}"
   --topography "${ETOPO}"
   --clm-surfdata-path "${CLM_SURFDATA}"
@@ -149,3 +170,14 @@ fi
 if [[ -n "${AMIP_SSO}" ]]; then
   AMIP_PATH_FLAGS+=( --subgrid-orography-file "${AMIP_SSO}" )
 fi
+
+# Refuse at job start, before any compile or step time is spent, when the
+# aerosol / CCN aerosol / volcanic product is not staged: the run would
+# otherwise die at the first forcing load.  Call it right after sourcing:
+#   amip_require_forcing_files || exit 3
+amip_require_forcing_files() {
+  local _f
+  for _f in "${AEROSOL}" "${AEROSOL_CCN}" "${VOLCANIC}"; do
+    [[ -f "${_f}" ]] || { echo "missing forcing file ${_f}: stage it (see config/amip/amip_production.sh)" >&2; return 3; }
+  done
+}

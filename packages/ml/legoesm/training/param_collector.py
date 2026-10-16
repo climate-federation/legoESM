@@ -371,6 +371,15 @@ def build_trainable_params(
             )
     include_set, exclude_set = set(include), set(exclude)
     tier0_set = set(include_tier0)
+    # Asking to train a parameter the caller also excludes (inactive, pinned,
+    # owned elsewhere) is ill-posed: refuse it here, at setup, rather than
+    # silently dropping the request (owner 2026-10-15).
+    both = sorted((include_set | tier0_set) & exclude_set)
+    if both:
+        raise ValueError(
+            f"parameter(s) {both} are both requested (include / include_tier0) "
+            "and excluded; "
+            "an excluded parameter has no gradient and cannot be trained.")
 
     raw: dict[str, jax.Array] = {}
     constraints: list[ParamConstraint] = []

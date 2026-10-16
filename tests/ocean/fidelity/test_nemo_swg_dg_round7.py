@@ -87,3 +87,29 @@ def test_json_writer_refuses_overwrite(tmp_path):
     assert path.read_text() == '{\n  "answer": 7\n}\n'
     with pytest.raises(RuntimeError, match="refusing to overwrite"):
         round7._write_json(path, {"answer": 8})
+
+
+def test_signed_zero_scope_reports_forcing_debt_but_rejects_prognostic_scope():
+    forcing = {
+        "forcing": [{"kt": 1, "rows": [{
+            "name": "production_boundary.kt1.vtau_before",
+            "signed_zero_only": 640,
+        }]}],
+    }
+    scope = round7.signed_zero_scope(forcing)
+    assert scope["forcing_only_observation"]
+    assert scope["policy"] == (
+        "maintainer_ruling_2026-10-13: prognostic fields exact; "
+        "sign of zero in forcing fields excepted")
+    assert "pending" not in scope["policy"]
+    assert not scope["prognostic_or_unknown_violations"]
+
+    prognostic = {
+        "plant": [{"kt": 1, "rows": [{
+            "name": "production_state_vs_restart.kt1.sshn",
+            "signed_zero_only": 1,
+        }]}],
+    }
+    planted = round7.signed_zero_scope(prognostic)
+    assert not planted["forcing_only_observation"]
+    assert planted["prognostic_or_unknown_violations"][0]["field"] == "sshn"

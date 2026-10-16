@@ -106,6 +106,18 @@ def test_flag_on_emits_the_rain_as_surface_precip_and_conserves_water():
     np.testing.assert_allclose(total_on, total_off, rtol=1e-12, atol=1e-18)
 
 
+def test_surface_rain_carries_its_phase_partition_for_the_land():
+    """F29: the surface precip a convection scheme emits carries its frozen
+    part; Bechtold's heating is L_v-only (its snow is folded), so all of it
+    is liquid -- a published ZERO, not a missing partition the land refuses."""
+    t_on, _ = _run_bridge(True)
+    precip = np.asarray(t_on.precip.data).reshape(NCOL)
+    assert np.all(precip > 0.0)
+    assert t_on.precip_frozen is not None
+    np.testing.assert_array_equal(
+        np.asarray(t_on.precip_frozen.data).reshape(NCOL), 0.0)
+
+
 def test_flag_on_without_a_q_r_tracer_does_not_fold_the_rain_into_cloud():
     t_off, _ = _run_bridge(False, with_qr=False)
     t_on, _ = _run_bridge(True, with_qr=False)

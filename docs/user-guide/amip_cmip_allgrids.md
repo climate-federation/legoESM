@@ -33,7 +33,7 @@ These are the CMIP6 deck wrapper's defaults, not the legoESM 1.0 production
 AMIP configuration — that is the CAM6 suite on MPAS in
 `config/amip/amip_production.yaml` (see [amip.md](amip.md)).
 
-`run_amip_cmip6_deck.py`: radiation rrtmg, clouds sundqvist,
+`run_amip_smoke_deck.py`: radiation rrtmg, clouds sundqvist,
 microphysics **morrison** (M2005/MG, number-aware r_eff), convection
 sbm, turbulence louis, `--aerosol-ccn` + `--dynamic-albedo` default-on
 (pipeline grids). Rationale: scheme-validation survey (2026-06-10) —
@@ -56,7 +56,7 @@ Zhang–McFarlane port has become the production convection scheme
 
 ```bash
 JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 \
-  .venv/bin/python scripts/run/run_amip_cmip6_deck.py \
+  .venv/bin/python scripts/run/run_amip_smoke_deck.py \
   --forcing-dir forcing_amip --auto-generate \
   --start-year 1979 --end-year 2009 \
   --grid-type cubed_sphere --discretization finite_volume \

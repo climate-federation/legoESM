@@ -370,3 +370,37 @@ def test_nearest_regrid_no_op_away_from_seam():
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+def test_canopy_cap_survives_calibration_and_bake(tmp_path):
+    """The driver sets the two-leaf solver cap (land_canopy_max_iters), then
+    applies the biophysics calibration and the CLM bake in that order.  Both
+    rebuild config pieces; neither may put the solver's default 60 back (the
+    calibration did, codex 2026-10-04 -- every cap A/B would have run at 60).
+    """
+    from legoesm.land.clm_surface_map import load_clm_surface, clm_multilayer_setup
+    from legoesm.land.config import (
+        MultiLayerLandConfig, apply_biophysics_lmip_two_leaf,
+    )
+    from legoesm.land.soil_grid import SoilGridConfig
+    from legoesm.land.surface_scheme import TwoLeafCanopyConfig
+
+    f = str(tmp_path / "s.nc")
+    _write_synthetic_surfdata(f)
+    lat = np.linspace(70, -70, 4)
+    lon = np.linspace(20, 300, 5)
+    lon2, lat2 = np.meshgrid(lon, lat)
+    m = load_clm_surface(f, lat2.ravel(), lon2.ravel())
+
+    base = MultiLayerLandConfig(
+        soil_grid=SoilGridConfig(n_layers=6, total_depth=2.5),
+        surface_scheme=TwoLeafCanopyConfig(max_iters=10))
+    base = apply_biophysics_lmip_two_leaf(base)
+    _params, cfg = clm_multilayer_setup(m, base_config=base)
+    assert isinstance(cfg.surface_scheme, TwoLeafCanopyConfig)
+    assert cfg.surface_scheme.max_iters == 10
+    # the default path is untouched: no cap given -> the solver's own 60
+    base60 = apply_biophysics_lmip_two_leaf(MultiLayerLandConfig(
+        soil_grid=SoilGridConfig(n_layers=6, total_depth=2.5),
+        surface_scheme=TwoLeafCanopyConfig()))
+    assert clm_multilayer_setup(m, base_config=base60)[1].surface_scheme.max_iters == 60

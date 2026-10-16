@@ -156,6 +156,28 @@ def test_spectral_lane_threads_the_same_scalars():
                                   ).scheme == "kessler"
 
 
+def test_spectral_lane_threads_the_experiment_switches():
+    """F26 (review 2026-10-10): the spectral lane silently dropped sub-grid
+    autoconversion, cirrus homogeneous nucleation and hard saturation
+    adjustment; they now go through the shared helper the other lanes use."""
+    from legoesm.atmosphere.physics.microphysics.config import MorrisonConfig
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.model_driver import _spectral_micro_config
+    d = MorrisonConfig()
+    assert not (d.subgrid_autoconversion or d.homogeneous_ice_nucleation
+                or d.hard_saturation_adjustment)
+    m = _spectral_micro_config(ExperimentConfig(
+        microphysics="morrison", subgrid_autoconversion=True,
+        homogeneous_ice_nucleation=True, hard_saturation_adjustment=True,
+        hard_sat_adjust_threshold=1.05)).morrison
+    assert m.subgrid_autoconversion and m.homogeneous_ice_nucleation
+    assert m.hard_saturation_adjustment and m.hard_sat_adjust_threshold == 1.05
+    # The aerosol droplet number has no aerosol input on this lane: refused.
+    with pytest.raises(ValueError, match="not wired on the spectral lane"):
+        _spectral_micro_config(ExperimentConfig(
+            microphysics="morrison", nc_from_aerosol=True))
+
+
 def test_validate_strict_refuses_inert_or_foreign_use():
     from legoesm.atmosphere.physics.microphysics.config import MorrisonConfig
     from legoesm.driver.config import ExperimentConfig

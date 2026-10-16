@@ -108,6 +108,7 @@ from legoesm import constants
 from legoesm.atmosphere.physics._shared import (
     exner_function,
     half_to_full,
+    surface_buoyancy_flux,
     virtual_temperature,
 )
 from legoesm.atmosphere.physics.turbulence.config import MYNN25Config
@@ -500,13 +501,10 @@ def mynn25_turbulence(
     theta = T * exner_pref
     theta_v = virtual_temperature(theta, q_v)
 
-    # Buoyancy flux (virtual potential temperature) at surface.  Use
-    # ``θ_v`` perturbation form ≈ w'θ' + (1/ε − 1) θ̄ w'q_v'.  The virtual-T
-    # moisture coefficient is the canonical 1/ε − 1 ≈ 0.6078 (constants.epsilon),
-    # not the rounded 0.61 (CLAUDE.md: no hardcoded physical-constant literals).
+    # Buoyancy flux (virtual potential temperature) at surface,
+    # w'θ' + (1/ε − 1) θ̄ w'q_v'.
     th_low = theta[:, -1]
-    _vT_coef = 1.0 / constants.epsilon - 1.0
-    w_thv_sfc = w_th_s_kin + _vT_coef * th_low * w_qv_s_kin
+    w_thv_sfc = surface_buoyancy_flux(w_th_s_kin, w_qv_s_kin, th_low)
 
     # Reference theta for L_B (per-column lowest virtual-θ — surrogate
     # for ``th_ref`` in jax_scm which is a constant per case).  Kept as

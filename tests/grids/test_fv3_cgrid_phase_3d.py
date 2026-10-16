@@ -86,7 +86,11 @@ import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 
 
-from tests.grids.fv3_gate_helpers import gated_check_grads  # noqa: E402
+from tests.grids.fv3_gate_helpers import (  # noqa: E402
+    assert_program_size_independent_of_km,
+    gated_check_grads,
+    hlo_instruction_count,
+)
 from legoesm.core import fv3_cgrid_phase_3d as jphase  # noqa: E402
 from legoesm.core import fv3_native_cgrid_phase_3d as npphase  # noqa: E402
 from legoesm.core import fv3_native_duo_stepper as npstep  # noqa: E402
@@ -1541,3 +1545,22 @@ def test_batched_common_mode_assert_fires_from_the_phase(jctx, jstate):
         jphase.csw_phase_3d(bad, jstate, DT2, KM, batched=True)
     out = jphase.csw_phase_3d(bad, jstate, DT2, KM)   # control
     assert np.isfinite(np.asarray(_win(out["delpc"]))).all()
+
+
+# ---------------------------------------------------------------------
+# Level batching (2026-09-29, the km=32 compile): the batched arm's
+# traced program must be O(1) in km.
+# ---------------------------------------------------------------------
+
+def test_batched_arm_program_size_is_independent_of_km(jctx):
+    """See :func:`fv3_gate_helpers.assert_program_size_independent_of_km`:
+    the level loop of the batched c_sw arm is a batch axis, the loop
+    arm's unrolling is the non-vacuity control."""
+    s2 = jphase.state_3d_to_jax(_seeded_state(2, seed=5))
+    s4 = jphase.state_3d_to_jax(_seeded_state(4, seed=6))
+    fn = jphase.csw_phase_3d
+    n2b = hlo_instruction_count(fn, (0, 3), jctx, s2, DT2, 2, batched=True)
+    n4b = hlo_instruction_count(fn, (0, 3), jctx, s4, DT2, 4, batched=True)
+    n2l = hlo_instruction_count(fn, (0, 3), jctx, s2, DT2, 2)
+    n4l = hlo_instruction_count(fn, (0, 3), jctx, s4, DT2, 4)
+    assert_program_size_independent_of_km(n2b, n4b, n2l, n4l)

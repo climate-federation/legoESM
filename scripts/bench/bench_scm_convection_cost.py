@@ -144,6 +144,7 @@ def _physics(scheme: str, dt: float, sub_overrides: dict | None = None):
             gravity_wave_drag=GravityWaveDragConfig(scheme="none"),
         ),
         model_type="hydrostatic", dt=dt,
+        surface_bulk_coeffs=None,   # convection-only cost bench
     )
 
 

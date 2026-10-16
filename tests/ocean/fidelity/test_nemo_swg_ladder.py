@@ -5,8 +5,10 @@ import hashlib
 import importlib.util
 from pathlib import Path
 
+import jax
 import numpy as np
 import pytest
+from legoesm.core.precision import get_policy, set_policy
 
 _P = (Path(__file__).resolve().parents[3] / "scripts/validate/ocean_fidelity/"
       "testcases/nemo_testcase_l1_swg_ladder.py")
@@ -17,6 +19,19 @@ ROOT = lad.DEFAULT_ROOT
 MONTH_ROOT = lad.DEFAULT_MONTH_ROOT
 DG50_STAGE_ROOT = lad.DG50_STAGE_ROOT
 DG50_MONTH_ROOT = lad.DG50_MONTH_ROOT
+_LAST_RESTORED = [None, None]
+
+
+@pytest.fixture(autouse=True)
+def _restore_process_precision():
+    previous_policy = get_policy()
+    previous_x64 = bool(jax.config.jax_enable_x64)
+    try:
+        yield
+    finally:
+        set_policy(previous_policy)
+        jax.config.update("jax_enable_x64", previous_x64)
+        _LAST_RESTORED[:] = [previous_policy, previous_x64]
 
 
 def test_maddison_deck_selects_admitted_card_clocks_and_roots():
@@ -140,6 +155,13 @@ def test_maddison_admission_and_restart_reader_use_run_resolution():
                for name in lad.RESTART_FIELDS)
 
 
+@pytest.mark.skipif(not lad.DG_STAGE_ROOT.is_dir(),
+                    reason="admitted SWG_DG stage records not mounted")
+def test_maddison_admission_test_restores_precision_policy():
+    assert (get_policy(), bool(jax.config.jax_enable_x64)) == tuple(
+        _LAST_RESTORED)
+
+
 @pytest.mark.skipif(not ROOT.is_dir(), reason="SWG probe not mounted")
 def test_restart_reader_admits_exactly_ten_after_states():
     out = lad.read_restarts(ROOT)
@@ -228,7 +250,7 @@ def test_recorded_stage3_wind_and_whole_step_inputs_are_discriminating():
     entries = lad.read_stage_entries(lad.DEFAULT_STAGE_ROOT)
     from legoesm.ocean.fidelity.nemo_testcase_recipe import build_swg_card
 
-    audit = lad._stage3_input_audit(entries, lad._card_masks(build_swg_card()))
+    audit = lad._stage3_input_audit(entries, lad.card_masks(build_swg_card()))
     assert all(row["bit_identical"]
                for row in audit["wind_before_vs_now"].values())
     assert all(not row["bit_identical"] and row["n_unequal"] > 0
@@ -255,7 +277,7 @@ def test_recorded_nonzero_stage_entry_one_ulp_plant_leaves_bar():
 def test_rows_use_card_t_u_v_masks_and_distinguish_wet_from_dry():
     from legoesm.ocean.fidelity.nemo_testcase_recipe import build_swg_card
 
-    masks = lad._card_masks(build_swg_card())
+    masks = lad.card_masks(build_swg_card())
     assert {name: mask.shape for name, mask in masks.items()} == {
         "T": (84, 84), "U": (84, 84), "V": (84, 84), "F": (84, 84)}
     assert all(mask.any() and not mask.all() for mask in masks.values())
@@ -273,7 +295,7 @@ def test_rows_use_card_t_u_v_masks_and_distinguish_wet_from_dry():
 def test_before_stress_uses_native_stagger_and_wrong_stagger_plant_fails(field, kind):
     from legoesm.ocean.fidelity.nemo_testcase_recipe import build_swg_card
 
-    masks = lad._card_masks(build_swg_card())
+    masks = lad.card_masks(build_swg_card())
     selected = lad._field_mask(field, masks)
     assert np.array_equal(selected, masks[kind])
     # The reviewer's reproduced defect selected T; 80 cells distinguish it
@@ -405,22 +427,37 @@ def test_stored_row_checks_fp32_bits_but_uses_the_fp64_numerical_gate():
 
 
 def test_shared_shipped_statistics_are_deterministic_for_equal_series():
-    from legoesm.core.precision import PrecisionPolicy, set_policy
+    from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
     from legoesm.ocean.fidelity.nemo_testcase_recipe import build_swg_card
 
-    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
-    card = build_swg_card()
-    shape = (2, 84, 84)
-    zeros = np.zeros(shape, dtype=np.float32)
-    arrays1, summary1 = lad._shared_shipped_statistics(
-        zeros, zeros, zeros, card)
-    arrays2, summary2 = lad._shared_shipped_statistics(
-        zeros.copy(), zeros.copy(), zeros.copy(), card)
-    assert summary1 == summary2
-    assert all(np.array_equal(arrays1[name], arrays2[name])
-               for name in arrays1)
-    assert summary1["transport_streamfunction_sv"]["min"] == 0.0
-    assert summary1["kinetic_energy_m5_s-2"]["time_mean"] == 0.0
+    old = get_policy()
+    try:
+        set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+        card = build_swg_card()
+        shape = (2, 84, 84)
+        zeros = np.zeros(shape, dtype=np.float32)
+        arrays1, summary1 = lad._shared_shipped_statistics(
+            zeros, zeros, zeros, card)
+        arrays2, summary2 = lad._shared_shipped_statistics(
+            zeros.copy(), zeros.copy(), zeros.copy(), card)
+        assert summary1 == summary2
+        assert all(np.array_equal(arrays1[name], arrays2[name])
+                   for name in arrays1)
+        assert summary1["transport_streamfunction_sv"]["min"] == 0.0
+        assert summary1["kinetic_energy_m5_s-2"]["time_mean"] == 0.0
+    finally:
+        set_policy(old)
+
+
+def test_shared_statistics_test_restores_process_precision_policy():
+    from legoesm.core.precision import get_policy, set_policy
+
+    old = get_policy()
+    try:
+        test_shared_shipped_statistics_are_deterministic_for_equal_series()
+        assert get_policy() == old
+    finally:
+        set_policy(old)
 
 
 @pytest.mark.skipif(not MONTH_ROOT.is_dir(),

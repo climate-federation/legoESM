@@ -93,7 +93,7 @@ def test_latlon_mpi_per_column_override(_latlon_band_backend):
     cfg = ExperimentConfig(
         grid=GridConfig(grid_type="latlon", resolution=N_LAT, nlev=20,
                         vertical_coord="hybrid"),
-        dycore=DycoreConfig(discretization="finite_volume", dt=600.0,
+        dycore=DycoreConfig(energy_fixer=False, discretization="finite_volume", dt=600.0,
                             time_integrator="ssp_rk3_scan"),
         output=OutputConfig(output_dir=out_dir, diag_days=1),
         days=1, dataset="analytical", radiation="gray", convection="none",

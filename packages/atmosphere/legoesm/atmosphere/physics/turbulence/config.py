@@ -179,10 +179,9 @@ __param_spec__ = {
             "Pr_t": {"units": "1", "bounds": (0.3, 1.5), "tunable_tier": 2, "transform": "sigmoid", "category": "diffusivity", "reference": "turbulent Prandtl number Kh = Km/Pr_t", "shape": None},
             "a_updraft": {"units": "1", "bounds": (0.01, 0.3), "tunable_tier": 2, "transform": "sigmoid", "category": "mass_flux", "reference": "Siebesma et al. (2007) updraft area fraction", "shape": None},
             "entrainment_rate": {"units": "1/m", "bounds": (1e-04, 1e-02), "tunable_tier": 1, "transform": "sigmoid", "category": "entrainment", "reference": "Siebesma et al. (2007) lateral entrainment rate", "shape": None},
-            # parcel_dT is the LIVE initial plume potential-temperature excess
-            # (theta_u_init = theta + parcel_dT, edmf.py:177) — a buoyancy
-            # calibration knob, not numerics.
-            "parcel_dT": {"units": "K", "bounds": (0.1, 2.0), "tunable_tier": 2, "transform": "sigmoid", "category": "mass_flux", "reference": "Siebesma et al. (2007) EDMF initial updraft thermal excess", "shape": None},
+            # Capped at 2 until the plume carries heat: the MF theta transport
+            # leaks 0.85 % of the surface heat flux at 1, 2.1 % at 2, 5.6 % at 4, 15.4 % at 8.
+            "surface_excess_prefactor": {"units": "1", "bounds": (0.3, 2.0), "tunable_tier": 2, "transform": "sigmoid", "category": "mass_flux", "reference": "Siebesma et al. (2007) Eq. 17 prefactor (LES ~1; Troen & Mahrt 1986 ~8)", "shape": None},
             "l_mix_max": {"units": "m", "bounds": (10.0, 300.0), "tunable_tier": 1, "transform": "sigmoid", "category": "mixing_length", "reference": "Blackadar (1962) asymptotic mixing length", "shape": None},
             # w_updraft_min is LIVE: it floors the initial updraft velocity
             # (edmf.py:173) and sets the velocity scale of the deactivation
@@ -845,12 +844,10 @@ class TurbulentEDMFConfig(NamedTuple):
         Minimum updraft velocity [m/s] (default 0.1).
     entrainment_rate : float
         Lateral entrainment rate [1/m] (default 1e-3).
-    parcel_dT : float
-        Initial updraft potential-temperature perturbation [K]
-        (default 0.5).  Was hardcoded as ``+0.5`` in the scan body
-        prior to the audit-driven config migration; lifting it to a
-        config field lets users tune the initial buoyancy of the
-        plume against scheme calibration data.
+    surface_excess_prefactor : float
+        Prefactor alpha of the updraft surface scalar excess
+        ``alpha * (w'phi')_s / sigma_w`` (SST07 Eq. 17; LES suggests ~1,
+        Troen & Mahrt 1986 used ~8) [-] (default 1.0).
     updraft_deactivation_sharpness : float
         Sigmoid sharpness [s/m] for smoothly deactivating the updraft as
         its vertical velocity falls below ``w_updraft_min`` (default 20.0).
@@ -868,7 +865,7 @@ class TurbulentEDMFConfig(NamedTuple):
     a_updraft: float = 0.1
     w_updraft_min: float = 0.1
     entrainment_rate: float = 1e-3
-    parcel_dT: float = 0.5
+    surface_excess_prefactor: float = 1.0
     updraft_deactivation_sharpness: float = 20.0
     surface: SurfaceLayerConfig = SurfaceLayerConfig()
 

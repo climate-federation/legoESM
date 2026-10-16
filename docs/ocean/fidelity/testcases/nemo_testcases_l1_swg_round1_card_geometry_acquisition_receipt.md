@@ -19,9 +19,13 @@ It freezes the five operator-review repairs and their falsifiers:
    `namdyn_adv`, `namdyn_vor`, and `namdyn_ldf`.  The inventory gate will use a
    frozen literal source inventory rather than derive its expectation from the
    NamedTuple under test.  Removing any one field, planted with `ln_abl`, must
-   report that field missing.  Compiled citations are `sbcmod.f90:157-163`,
-   `dommsk.f90:149`, `domqco.f90:303-306`, `dynadv.f90:162`,
-   `dynvor.f90:813-814`, and `ldfdyn.f90:177-180`.
+   report that field missing.  Compiled citations are
+   `SWG_OMIP_L1/BLD/ppsrc/nemo/sbcmod.f90:157-163`,
+   `SWG_OMIP_L1/BLD/ppsrc/nemo/dommsk.f90:149`,
+   `SWG_OMIP_L1/BLD/ppsrc/nemo/domqco.f90:303-306`,
+   `SWG_OMIP_L1/BLD/ppsrc/nemo/dynadv.f90:162`,
+   `SWG_OMIP_L1/BLD/ppsrc/nemo/dynvor.f90:813-814`, and
+   `SWG_OMIP_L1/BLD/ppsrc/nemo/ldfdyn.f90:177-180`.
 2. Stage-entry admission will reject a NaN or sentinel anywhere in a stored
    array, including a point outside the owned crop.  A halo-NaN plant must
    raise `Refusal`; the clean synthetic record must remain admitted.
@@ -46,7 +50,8 @@ wet-cell perturbation, unmasked dry-cell perturbation, or zero exit with DEBT
 its gates:** item 1's six-group boundary is **REFUTED** by the operator review's
 own compiled-source transcript.  It additionally names `ln_1st_euler`,
 `nn_rstctl`, `nn_stock`, and `ln_mskland` from compiled
-`domain.f90:282-286`, plus `ln_tile` from `domain.f90:288`.  The frozen reader
+`SWG_OMIP_L1/BLD/ppsrc/nemo/domain.f90:282-286`, plus `ln_tile` from
+`SWG_OMIP_L1/BLD/ppsrc/nemo/domain.f90:288`.  The frozen reader
 inventory is therefore expanded to those two groups and five resolved defaults.
 Removing any of those fields must fail the same exact inventory gate.  This
 correction changes no deck choice: the shipped values remain false, zero,
@@ -73,8 +78,10 @@ Two repairs, and only these two, are in scope:
    than 131, duplicate mapping, unmapped compiled read, missing card field, or
    mismatch with the probe's resolved echo **REFUTES** this prediction.
 2. `utau_b` will score with the native U mask and `vtau_b` with the native V
-   mask, as required by compiled `sbc_oce.f90:116-117` and
-   `sbcmod.f90:567-568`.  A plant assigning either field to the T mask must go
+   mask, as required by compiled
+   `SWG_OMIP_L1/BLD/ppsrc/nemo/sbc_oce.f90:116-117` and
+   `SWG_OMIP_L1/BLD/ppsrc/nemo/sbcmod.f90:567-568`.  A plant assigning either
+   field to the T mask must go
    red; clean reader self-check rows must remain at bar and bit-identical.
    A T-mask result for either field, a plant that stays green, or movement of
    any previously certified geometry/card row **REFUTES** this prediction.

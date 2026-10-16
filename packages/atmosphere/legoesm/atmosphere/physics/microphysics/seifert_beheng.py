@@ -273,4 +273,5 @@ def seifert_beheng_microphysics(
         dN_r_dt=dN_r_dt,
         dN_i_dt=z,
         precipitation=precipitation,
+        precip_frozen=jnp.zeros_like(precipitation),   # L_v-only: all liquid
     )

@@ -8,7 +8,7 @@ conductive equilibrium ``T_s = T_f + F_net_down * h / k_i``.
 Covers: the pure helper (equilibrium, sign, surface-melt cap vs basal
 freezing, floor, open-water snap, conduction-implicit stability, per-step
 restart-split invariance, autodiff), validate_strict corners, the CLI
-round-trip, and an end-to-end subprocess run exercising the real _run_mpas
+round-trip, and an end-to-end subprocess run exercising the real _run_column
 per-step advance + per-step T_sfc re-anchor + checkpoint save/load/restart.
 """
 
@@ -198,8 +198,8 @@ def _cdgrid_cfg(**kw):
 
 
 def test_validate_mpas_accepts_ice_skin():
-    _mpas_cfg(mpas_ice_skin_prognostic=True,
-              mpas_ice_thickness_m=1.5).validate_strict()
+    _mpas_cfg(ice_skin_prognostic=True,
+              ice_thickness_m=1.5).validate_strict()
 
 
 def test_validate_default_off():
@@ -208,25 +208,25 @@ def test_validate_default_off():
 
 def test_validate_cdgrid_refuses_ice_skin():
     with pytest.raises(ValueError, match="MPAS-lane"):
-        _cdgrid_cfg(mpas_ice_skin_prognostic=True).validate_strict()
+        _cdgrid_cfg(ice_skin_prognostic=True).validate_strict()
 
 
 def test_validate_refuses_radiation_none():
     with pytest.raises(ValueError, match="radiation"):
-        _mpas_cfg(mpas_ice_skin_prognostic=True,
+        _mpas_cfg(ice_skin_prognostic=True,
                   radiation="none", turbulence="none").validate_strict()
 
 
 def test_validate_refuses_inert_thickness():
-    with pytest.raises(ValueError, match="mpas_ice_thickness_m"):
-        _mpas_cfg(mpas_ice_thickness_m=1.0).validate_strict()
+    with pytest.raises(ValueError, match="ice_thickness_m"):
+        _mpas_cfg(ice_thickness_m=1.0).validate_strict()
 
 
 @pytest.mark.parametrize("bad", [0.05, 11.0, float("nan")])
 def test_validate_thickness_bounds(bad):
-    with pytest.raises(ValueError, match="mpas_ice_thickness_m"):
-        _mpas_cfg(mpas_ice_skin_prognostic=True,
-                  mpas_ice_thickness_m=bad).validate_strict()
+    with pytest.raises(ValueError, match="ice_thickness_m"):
+        _mpas_cfg(ice_skin_prognostic=True,
+                  ice_thickness_m=bad).validate_strict()
 
 
 def test_cli_round_trip():
@@ -236,21 +236,21 @@ def test_cli_round_trip():
     parser = build_arg_parser()
     cfg_default = build_config_from_args(_postprocess_args(
         parser.parse_args(["--dataset", "analytical"]), parser))
-    assert cfg_default.mpas_ice_skin_prognostic is False
-    assert cfg_default.mpas_ice_thickness_m == 2.0
+    assert cfg_default.ice_skin_prognostic is False
+    assert cfg_default.ice_thickness_m == 2.0
 
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
         "--dataset", "analytical",
         "--grid-type", "voronoi", "--discretization", "mpas",
         "--mpas-ice-skin-prognostic", "--mpas-ice-thickness-m", "1.5",
     ]), parser))
-    assert cfg.mpas_ice_skin_prognostic is True
-    assert cfg.mpas_ice_thickness_m == 1.5
+    assert cfg.ice_skin_prognostic is True
+    assert cfg.ice_thickness_m == 1.5
 
 
 # ---------------------------------------------------------------------------
 # End-to-end wiring (subprocess): exercises the FULL per-step advance +
-# per-step T_sfc re-anchor + checkpoint save/load path in the real _run_mpas
+# per-step T_sfc re-anchor + checkpoint save/load path in the real _run_column
 # loop — the parts the pure-helper tests above cannot reach.  ~40 s.
 #
 # Analytical SST/SIC is ice-FREE (sic=0 everywhere, SST > freezing), so this
@@ -320,7 +320,7 @@ def test_end_to_end_mpas_ice_skin_wiring_and_checkpoint(tmp_path):
 def test_restart_refuses_nonfinite_checkpoint_skin(tmp_path):
     """A corrupt (NaN) checkpoint skin must be REFUSED at resume, not adopted:
     a NaN poisons even open-water (sic=0) anchors via 0*NaN in the blend
-    (codex-3).  Verifies the finiteness guard in the _run_mpas seed overlay."""
+    (codex-3).  Verifies the finiteness guard in the _run_column seed overlay."""
     import os
     import subprocess
     import sys

@@ -79,7 +79,7 @@ class TestDriverActuallyExecutesTheInvariant:
 
         atm_config = ExperimentConfig(
             grid=GridConfig(grid_type="cubed_sphere", resolution=8, nlev=5),
-            dycore=DycoreConfig(dt=600.0, model_type="hydrostatic"),
+            dycore=DycoreConfig(energy_fixer=False, dt=600.0, model_type="hydrostatic"),
             output=OutputConfig(diag_days=1),
             radiation="gray",
             days=1,

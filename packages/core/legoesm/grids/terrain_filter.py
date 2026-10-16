@@ -82,7 +82,8 @@ def terrain_filter(
     return q
 
 
-def terrain_filter_duo(hs6, gs6, ectx, *, n_iter: int, cd: float | None = None):
+def terrain_filter_duo(hs6, gs6, ectx, *, n_iter: int, cd: float | None = None,
+                       oro6=None):
     """FV3 ``del2_cubed_sphere`` (tools/fv_surf_map.F90) on the six-face
     duo gridstruct, flux form with the grid's own metrics::
 
@@ -100,7 +101,10 @@ def terrain_filter_duo(hs6, gs6, ectx, *, n_iter: int, cd: float | None = None):
     ``hs6``: ``(6, m, m)`` padded A-grid phis with valid halos; ``gs6``:
     the six gridstructs; ``ectx``: the builder's ext context.  Returns
     ``(6, m, m)``, halo-complete.  The one-ring stencil never reads the
-    corner diagonals.
+    corner diagonals.  ``oro6`` (``(6, m, m)`` padded land fraction, valid
+    halos): fv_surf_map's zero_ocean -- each flux is multiplied by
+    ``max(0, min(oro(i-1,j), oro(i,j)))`` (:896-905), so nothing diffuses
+    into or out of an ocean cell.
     """
     from legoesm.grids.fv3_native_ext_vector import ext_scalar_sixface
     n, ng = int(gs6[0]["n"]), int(gs6[0]["ng"])
@@ -116,11 +120,17 @@ def terrain_filter_duo(hs6, gs6, ectx, *, n_iter: int, cd: float | None = None):
     ci = slice(ng, ng + n)          # compute cells
     ce = slice(ng, ng + n + 1)      # compute-window edges (n+1)
     cm = slice(ng - 1, ng + n)      # cells i-1 .. i
+    if oro6 is not None:
+        oro = jnp.asarray(oro6, dtype=jnp.float64)
+        mx = jnp.maximum(0.0, jnp.minimum(oro[:, cm, ci], oro[:, ce, ci]))
+        my = jnp.maximum(0.0, jnp.minimum(oro[:, ci, ng - 1:ng + n], oro[:, ci, ng:ng + n + 1]))
+    else:
+        mx = my = 1.0
     for _ in range(n_iter):
         fx = (dy[:, ce, ci] * sina_u[:, ce, ci] * rdxc[:, ce, ci]
-              * (q[:, cm, ci] - q[:, ce, ci]))
+              * (q[:, cm, ci] - q[:, ce, ci])) * mx
         fy = (dx[:, ci, ce] * sina_v[:, ci, ce] * rdyc[:, ci, ce]
-              * (q[:, ci, ng - 1:ng + n] - q[:, ci, ng:ng + n + 1]))
+              * (q[:, ci, ng - 1:ng + n] - q[:, ci, ng:ng + n + 1])) * my
         dq = cd * rarea[:, ci, ci] * (fx[:, :-1, :] - fx[:, 1:, :]
                                       + fy[:, :, :-1] - fy[:, :, 1:])
         q = q.at[:, ci, ci].add(dq)

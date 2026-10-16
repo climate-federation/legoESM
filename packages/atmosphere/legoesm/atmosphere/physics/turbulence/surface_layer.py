@@ -280,6 +280,47 @@ def latent_enthalpy_correction(lhflx, evap):
     return lhflx - constants.L_v * evap   # latent-ok: moist-enthalpy reference L_v of the atmosphere
 
 
+# --- constant-coefficient bulk exchange (ExperimentConfig.C_H / C_E defaults) ---
+# The one home of the default neutral transfer coefficients; the experiment
+# config's C_H / C_E defaults reference these.
+C_H_BULK_DEFAULT = 0.0044
+C_E_BULK_DEFAULT = 0.0044
+
+
+def constant_bulk_surface_fluxes(T_low, q_low, u_low, v_low, p_low, p_s,
+                                 T_sfc, C_H, C_E):
+    """Constant-coefficient bulk ``(shflx, lhflx)`` [W/m2, positive up] at the
+    lowest model level: the ONE law every lane without a turbulence scheme
+    applies.  Latent heat is charged with
+    :func:`legoesm.thermo.charged_latent_heat` (``"constant"``) and the
+    surface humidity is saturation at ``(T_sfc, p_s)``; the wind carries a
+    1 m/s gustiness floor.
+    """
+    from legoesm.thermo import charged_latent_heat, saturation_specific_humidity
+    rho_low = p_low / (constants.R_d * T_low)
+    wind_speed = jnp.sqrt(u_low ** 2 + v_low ** 2 + 1.0)
+    shflx = rho_low * constants.c_pd * C_H * wind_speed * (T_sfc - T_low)
+    q_sat_sfc = saturation_specific_humidity(T_sfc, p_s)
+    lhflx = (rho_low * charged_latent_heat("constant", T_sfc) * C_E
+             * wind_speed * (q_sat_sfc - q_low))
+    return shflx, lhflx
+
+
+def bottom_layer_surface_kick(shflx, lhflx, T_sfc, dp_low, evap=None):
+    """Lowest-layer ``(dT/dt [K/s], dq_v/dt [1/s], evap [kg/m2/s])`` from
+    surface fluxes (positive up = into the column).  ``evap`` defaults to the
+    inverse of the SAME latent heat the bulk law charged; the heat kick
+    carries :func:`latent_enthalpy_correction`.
+    """
+    if evap is None:
+        from legoesm.thermo import charged_latent_heat
+        evap = lhflx / charged_latent_heat("constant", T_sfc)
+    dT = (constants.g * (shflx + latent_enthalpy_correction(lhflx, evap))
+          / (constants.c_pd * dp_low))
+    dq = constants.g * evap / dp_low
+    return dT, dq, evap
+
+
 def prescribed_into_surface_flux(surface_flux, rho_sfc, *, shflx=None,
                                  lhflx=None, tau_x=None, tau_y=None):
     """Replace the prescribed components of a ``(tau_x, tau_y, shflx, lhflx,
@@ -443,7 +484,7 @@ def beta_limited_surface_humidity(
 ) -> jax.Array:
     """Soil-moisture-limited effective surface humidity for a BLENDED surface.
 
-    ``beta_land`` may be a scalar (the static ``mpas_land_beta`` knob) or a
+    ``beta_land`` may be a scalar (the static ``land_beta`` knob) or a
     per-column array of shape ``(ncol,)`` (the traced root-zone ``beta_soil``
     from the interactive multilayer land, #1312 phase 2b) — the formula below
     is elementwise either way.

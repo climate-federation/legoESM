@@ -111,19 +111,12 @@ def configure_jax_compilation_cache(cache_dir, min_compile_secs: float = 30.0):
     return str(cache_dir)
 
 
-# Opt-in env override: force-enable the persistent COMPILE cache on the CPU
-# backend for a user who KNOWS every node sharing ``cache_dir`` has the SAME
-# CPU microarchitecture (so a wrong-arch AOT load cannot happen).  Default OFF
-# -> CPU is disabled (cross-microarch SIGILL risk).  GPU/TPU ignore this.
-_CPU_COMPILE_CACHE_OPT_IN_ENV = "LEGOESM_ALLOW_CPU_COMPILE_CACHE"
-
-
-def _cpu_compile_cache_opt_in() -> bool:
-    """Return whether the user opted into the CPU persistent COMPILE cache."""
-    return (
-        os.environ.get(_CPU_COMPILE_CACHE_OPT_IN_ENV, "0").strip().lower()
-        in {"1", "true", "yes", "on"}
-    )
+# The CPU opt-in (env name + reader) is the runtime backend's: ONE policy for
+# every caller of the persistent compile cache.
+from legoesm.runtime.backend import (  # noqa: E402
+    CPU_COMPILE_CACHE_OPT_IN_ENV as _CPU_COMPILE_CACHE_OPT_IN_ENV,
+    cpu_compile_cache_opt_in as _cpu_compile_cache_opt_in,
+)
 
 
 def _active_backend_is_cpu() -> bool:
@@ -466,6 +459,15 @@ def make_train_step(optimizer: optax.GradientTransformation, grid: GaussianGrid)
     return train_step
 
 
+def checkpoint_view(model):
+    """``model`` with each module's on-disk view (AIMIP frozen knobs: see
+    AIMIPClassicalParams.for_checkpoint), so a checkpoint loads into an
+    all-array template as well as into a frozen one."""
+    return jax.tree_util.tree_map(
+        lambda x: x.for_checkpoint() if hasattr(x, "for_checkpoint") else x,
+        model, is_leaf=lambda x: hasattr(x, "for_checkpoint"))
+
+
 def save_checkpoint(
     model,
     path: str | Path,
@@ -492,6 +494,7 @@ def save_checkpoint(
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f"{path.name}.tmp-{os.getpid()}")
+    model = checkpoint_view(model)
     try:
         eqx.tree_serialise_leaves(str(tmp), model)
         os.replace(tmp, path)

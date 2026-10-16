@@ -2633,6 +2633,10 @@ def _bc_pv_flux(
         raise ValueError(
             "ens_total requires explicit boolean ln_dynvor_msk; "
             f"got {ln_dynvor_msk!r}")
+    if vorticity_scheme != "ens_total" and ln_dynvor_msk is not None:
+        raise ValueError(
+            "ln_dynvor_msk is implemented only for ens_total; "
+            f"got vorticity_scheme={vorticity_scheme!r}")
     # Fail-early on an unknown EEN vertex-thickness (e3f) scheme (static
     # config value) — see the h_vtx construction below for the two rules.
     if een_e3f_scheme not in ("min", "nemo_avg", "nemo_avg4"):
@@ -6247,7 +6251,3 @@ def nemo_c2_kinetic_energy(u, v):
     zu = nemo_source_round(u_w_sq + u_e_sq)
     zv = nemo_source_round(v_s_sq + v_n_sq)
     return nemo_source_round(0.25 * nemo_source_round(zv + zu))
-
-
-# Historical private import retained for existing focused tests and callers.
-_nemo_c2_kinetic_energy = nemo_c2_kinetic_energy

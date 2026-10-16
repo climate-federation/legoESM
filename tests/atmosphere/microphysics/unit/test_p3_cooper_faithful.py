@@ -76,14 +76,14 @@ def _column(T_val, rho_val=0.9, q_v_val=None, N_i_val=0.0, supi=0.2):
     staying non-limiting for the tiny seed-mass sink.  Pass an explicit
     ``q_v_val`` to probe the subsaturated (gate-off) branch.
     """
-    from legoesm.thermo import saturation_mixing_ratio_ice
+    from legoesm.thermo import saturation_specific_humidity_ice
 
     ncol, nlev = 1, 3
     z = jnp.zeros((ncol, nlev))
     T = jnp.full((ncol, nlev), T_val)
     p_full = jnp.full((ncol, nlev), 7.0e4)
     if q_v_val is None:
-        q_sat_i = saturation_mixing_ratio_ice(T, p_full)
+        q_sat_i = saturation_specific_humidity_ice(T, p_full)
         q_v = (1.0 + supi) * q_sat_i
     else:
         q_v = jnp.full((ncol, nlev), q_v_val)

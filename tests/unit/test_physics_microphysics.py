@@ -25,7 +25,7 @@ from legoesm.atmosphere.physics.microphysics.config import (
 from legoesm.atmosphere.physics.microphysics.output import (
     HydrometeorState, make_zero_hydrometeors,
 )
-from legoesm.thermo import saturation_mixing_ratio
+from legoesm.thermo import saturation_specific_humidity
 
 
 # ---------------------------------------------------------------------------
@@ -51,7 +51,7 @@ def _make_column(nlev=20, ncol=4, T_sfc=280.0, q_c_val=1e-4, supersaturated=Fals
     dz = constants.R_d * T * dp / (constants.g * jnp.clip(p_mid, 1.0, None))
     dz = jnp.abs(dz)
 
-    q_sat = saturation_mixing_ratio(T, p_full)
+    q_sat = saturation_specific_humidity(T, p_full)
     if supersaturated:
         q_v = 1.2 * q_sat
     else:
@@ -345,7 +345,7 @@ def test_qc_does_not_go_negative_at_long_dt(scheme, call):
     # RH = 1: keep condensation ~ 0 so this test isolates the q_c sinks
     # (autoconv / accretion / Bergeron / riming) from saturation-driven
     # cloud evaporation.
-    q_v = 1.0 * saturation_mixing_ratio(T, p_full)
+    q_v = 1.0 * saturation_specific_humidity(T, p_full)
     dt = 1200.0
     out = call(T, q_v, hydro, p_full, p_half, rho, dz, dt, cfg_class())
     q_c_after = q_c + out.dq_c_dt * dt
@@ -387,7 +387,7 @@ def test_thompson_qi_does_not_go_negative_warm():
         N_r=jnp.zeros_like(q_c),
         N_i=1e4 * jnp.ones_like(q_c),
     )
-    q_v = 0.8 * saturation_mixing_ratio(T, p_full)
+    q_v = 0.8 * saturation_specific_humidity(T, p_full)
     dt = 1200.0
     out = thompson_microphysics(
         T, q_v, hydro, p_full, p_half, rho, dz, dt, ThompsonConfig(),
@@ -449,7 +449,7 @@ def test_subsaturated_clear_air_does_not_create_negative_qc(scheme, call):
     )
     rho = p_full / (constants.R_d * T)
     dz = jnp.full((ncol, nlev), 1000.0)
-    q_sat = saturation_mixing_ratio(T, p_full)
+    q_sat = saturation_specific_humidity(T, p_full)
     q_v = 0.95 * q_sat                           # subsaturated
     q_c = jnp.zeros((ncol, nlev))                # NO cloud water
     hydro = HydrometeorState(
@@ -518,7 +518,7 @@ def test_thompson_rime_to_graupel_donor_split():
         N_r=jnp.zeros_like(q_c),
         N_i=jnp.zeros_like(q_c),
     )
-    q_v = 0.5 * saturation_mixing_ratio(T, p_full)
+    q_v = 0.5 * saturation_specific_humidity(T, p_full)
     dt = 1200.0
     out = thompson_microphysics(
         T, q_v, hydro, p_full, p_half, rho, dz, dt, ThompsonConfig(),
@@ -598,7 +598,7 @@ def test_freezing_releases_latent_heat_of_fusion(scheme, call):
         N_r=jnp.zeros_like(q_c),
         N_i=1e4 * jnp.ones_like(q_c),
     )
-    q_v = 0.85 * saturation_mixing_ratio(T, p_full)
+    q_v = 0.85 * saturation_specific_humidity(T, p_full)
     dt = 60.0
     out = call(T, q_v, hydro, p_full, p_half, rho, dz, dt, cfg_class())
 
@@ -658,7 +658,7 @@ def test_sundqvist_condensation_target_is_qsat_not_rhcrit_qsat():
     )
     rho = p_full / (constants.R_d * T)
     dz = jnp.full((ncol, nlev), 1000.0)
-    q_sat = saturation_mixing_ratio(T, p_full)
+    q_sat = saturation_specific_humidity(T, p_full)
     q_c = jnp.full((ncol, nlev), 1e-4)
     hydro = HydrometeorState(
         q_c=q_c, q_r=jnp.zeros_like(q_c),
@@ -681,7 +681,7 @@ def test_sundqvist_condensation_target_is_qsat_not_rhcrit_qsat():
     )
     # Vapor removed must be at most ``q_v - q_sat`` * f_smooth.
     # At RH=1, q_v - q_sat = 0, so the only allowed removal is
-    # float-roundoff from ``saturation_mixing_ratio``.  Pre-fix this
+    # float-roundoff from ``saturation_specific_humidity``.  Pre-fix this
     # assertion fired with dq_v_dt ≈ -1e-5 → 3e-3 kg/kg per step (RH
     # dropped 1.00 → 0.80); post-fix it's ~1e-9 kg/kg (f32 rounding).
     # The 1e-7 tolerance is six orders of magnitude below the pre-fix
@@ -698,7 +698,7 @@ def test_sundqvist_condensation_target_is_qsat_not_rhcrit_qsat():
     # adjustment + no supersat).  Sundqvist should agree to within
     # rounding — same physical situation, same answer.  Use a 1e-7
     # / dt tendency floor (≡ 3e-10 kg/kg/s at dt=300 s) so f32
-    # roundoff in saturation_mixing_ratio doesn't trip the test
+    # roundoff in saturation_specific_humidity doesn't trip the test
     # while the pre-fix bug (|dq_v_dt|·dt ≈ 3e-3) is caught with
     # six orders of magnitude of margin.
     atol_tend = 1e-7 / dt
@@ -756,7 +756,7 @@ def test_sundqvist_column_water_budget_closes():
         T_sfc=290.0, q_c_val=1e-3,
     )
     # Saturate the column so condensation (and therefore rain) actually fires.
-    q_sat = saturation_mixing_ratio(T, p_full)
+    q_sat = saturation_specific_humidity(T, p_full)
     q_v = q_sat
     out = sundqvist_microphysics(
         T, q_v, hydro, p_full, p_half, rho, dz, 300.0, SundqvistConfig(),
@@ -792,7 +792,7 @@ def test_sundqvist_drains_incoming_qr_to_precipitation():
     )
     # Sub-saturated column with NO q_c so condensation/autoconversion
     # don't generate fresh rain — this isolates the q_r-drain channel.
-    q_v_sub = 0.5 * saturation_mixing_ratio(T, p_full)
+    q_v_sub = 0.5 * saturation_specific_humidity(T, p_full)
     # Inject q_r at a few mid-column levels so dq_r_drain is nontrivial.
     q_r_in = jnp.zeros_like(hydro.q_r).at[..., 8:12].set(5e-4)
     hydro_with_qr = hydro._replace(q_r=q_r_in)
@@ -869,7 +869,7 @@ def test_kessler_grad_finite_at_zero_qr():
     )
 
     def evap_objective(q_r):
-        q_sat = saturation_mixing_ratio(T, p_full)
+        q_sat = saturation_specific_humidity(T, p_full)
         return jnp.sum(rain_evaporation(q_v, q_r, q_sat, evap_coeff=1.0))
 
     g_evap_zero = jax.grad(evap_objective)(q_r_zero)
@@ -924,7 +924,7 @@ def test_kessler_sb_qc_does_not_go_negative_under_joint_sinks(scheme, call):
     )
     rho = p_full / (constants.R_d * T)
     dz = jnp.full((ncol, nlev), 10_000.0)
-    q_sat = saturation_mixing_ratio(T, p_full)
+    q_sat = saturation_specific_humidity(T, p_full)
     q_v = 0.80 * q_sat                            # 20 % subsaturation
     q_c = jnp.full((ncol, nlev), 1e-4)
     q_r = jnp.full((ncol, nlev), 5e-3)
@@ -1017,7 +1017,7 @@ def test_p3_riming_grows_qrim():
         N_r=jnp.zeros_like(q_c),
         N_i=1e4 * jnp.ones_like(q_c),
     )
-    q_v = 0.9 * saturation_mixing_ratio(T, p_full)
+    q_v = 0.9 * saturation_specific_humidity(T, p_full)
     dt  = 300.0
     out = p3_microphysics(T, q_v, hydro, p_full, p_half, rho, dz, dt, P3Config())
     # dq_s_dt carries dq_rim_dt; must be positive (riming adds to q_rim)
@@ -1052,7 +1052,7 @@ def test_p3_melt_drains_qi_and_qrim():
         N_r=jnp.zeros((ncol, nlev)),
         N_i=1e4 * jnp.ones((ncol, nlev)),
     )
-    q_v = 0.8 * saturation_mixing_ratio(T, p_full)
+    q_v = 0.8 * saturation_specific_humidity(T, p_full)
     dt  = 300.0
     out = p3_microphysics(T, q_v, hydro, p_full, p_half, rho, dz, dt, P3Config())
 
@@ -1091,7 +1091,7 @@ def test_p3_no_ice_above_nucleation_temperature():
         N_r=jnp.zeros((ncol, nlev)),
         N_i=jnp.zeros((ncol, nlev)),
     )
-    q_v = 0.9 * saturation_mixing_ratio(T, p_full)
+    q_v = 0.9 * saturation_specific_humidity(T, p_full)
     out = p3_microphysics(T, q_v, hydro, p_full, p_half, rho, dz, 300.0, cfg)
     # Pre-fix: Cooper nucleation in P3 had no f_ice gate (same bug as
     # morrison.py / thompson.py).  dN_i_dt reached ~28 / kg / s at
@@ -1154,7 +1154,7 @@ def test_p3_qc_does_not_go_negative_at_long_dt():
         N_r=jnp.zeros_like(q_c),
         N_i=1e4 * jnp.ones_like(q_c),
     )
-    q_v = 1.0 * saturation_mixing_ratio(T, p_full)
+    q_v = 1.0 * saturation_specific_humidity(T, p_full)
     dt  = 1200.0
     out = p3_microphysics(T, q_v, hydro, p_full, p_half, rho, dz, dt, P3Config())
     q_c_after = q_c + out.dq_c_dt * dt
@@ -1205,7 +1205,7 @@ def test_p3_qr_does_not_go_negative_under_joint_rain_rime_and_sedimentation():
         N_r=jnp.zeros((ncol, nlev)),
         N_i=1e4 * jnp.ones((ncol, nlev)),
     )
-    q_v = 0.99 * saturation_mixing_ratio(T, p_full)
+    q_v = 0.99 * saturation_specific_humidity(T, p_full)
     dt  = 1200.0
     out = p3_microphysics(T, q_v, hydro, p_full, p_half, rho, dz, dt, P3Config())
     q_r_after = q_r + out.dq_r_dt * dt
@@ -1245,7 +1245,7 @@ def test_p3_column_water_budget_closes():
     dp = p_half[:, 1:] - p_half[:, :-1]
     p_mid = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
     dz = jnp.abs(constants.R_d * T * dp / (constants.g * p_mid))
-    q_sat = saturation_mixing_ratio(T, p_full)
+    q_sat = saturation_specific_humidity(T, p_full)
     q_v = 0.9 * q_sat
     q_c = jnp.zeros((ncol, nlev)).at[..., -8:-3].set(5e-4)
     q_r = jnp.zeros((ncol, nlev)).at[..., -3:].set(5e-4)
@@ -1303,7 +1303,7 @@ def test_p3_melting_transfers_number_to_rain():
         N_r=jnp.zeros((ncol, nlev)),
         N_i=1e4 * jnp.ones((ncol, nlev)),   # [1/kg]
     )
-    q_v = 0.8 * saturation_mixing_ratio(T, p_full)
+    q_v = 0.8 * saturation_specific_humidity(T, p_full)
     dt  = 300.0
     out = p3_microphysics(T, q_v, hydro, p_full, p_half, rho, dz, dt, P3Config())
     # Melting is active (mass moves ice -> rain) ...
@@ -1349,7 +1349,7 @@ def test_p3_melt_number_bounded_and_conservative_for_tiny_crystals():
         N_r=jnp.zeros((ncol, nlev)),
         N_i=1e9 * jnp.ones((ncol, nlev)),        # huge N_i, tiny mean mass
     )
-    q_v = 0.8 * saturation_mixing_ratio(T, p_full)
+    q_v = 0.8 * saturation_specific_humidity(T, p_full)
     # Cover a normal step AND a subsecond LES step (dt < 1): the mass<->number
     # cap must key off the PHYSICAL dt, not clip(dt, 1.0), else subsecond steps
     # melt all the mass but transfer only dt*N_i crystals (stale ice number).
@@ -1396,7 +1396,7 @@ def test_p3_rain_riming_sinks_rain_number():
     N_r = jnp.full((ncol, nlev), 5e3)            # [1/kg]
     # At liquid saturation rain evaporation ~ 0, so the rain-mass sink budget is
     # not donor-saturated and rain_rime shows up directly in dq_r_dt.
-    q_v = saturation_mixing_ratio(T, p_full)
+    q_v = saturation_specific_humidity(T, p_full)
     dt = 300.0
     base_kw = dict(
         q_c=jnp.zeros((ncol, nlev)), q_r=q_r, q_s=jnp.zeros((ncol, nlev)),
@@ -1427,7 +1427,7 @@ def test_p3_nucleation_seeds_ice_mass_from_vapor():
     Pre-fix nucleation was number-only: q_i/N_i -> 0 right after nucleation.
     """
     from legoesm.atmosphere.physics.microphysics import p3 as p3_mod
-    from legoesm.thermo import saturation_mixing_ratio_ice
+    from legoesm.thermo import saturation_specific_humidity_ice
 
     cfg = P3Config()
     ncol, nlev = 1, 4
@@ -1441,7 +1441,7 @@ def test_p3_nucleation_seeds_ice_mass_from_vapor():
     # Ice-supersaturated but liquid-subsaturated (e_sw/e_si ~ 1.5 at 230 K),
     # with NO pre-existing ice: deposition needs N_i > 0 so it is exactly 0,
     # leaving nucleation as the only vapour->ice pathway.
-    q_sat_i = saturation_mixing_ratio_ice(T, p_full)
+    q_sat_i = saturation_specific_humidity_ice(T, p_full)
     q_v = 1.2 * q_sat_i
     hydro = HydrometeorState(
         q_c=jnp.zeros((ncol, nlev)), q_r=jnp.zeros((ncol, nlev)),
@@ -1495,7 +1495,7 @@ def test_p3_riming_and_accretion_sink_cloud_number():
         N_c=N_c, N_r=jnp.zeros((ncol, nlev)),
         N_i=1e4 * jnp.ones((ncol, nlev)),
     )
-    q_v = saturation_mixing_ratio(T, p_full)   # saturated: cond ~ 0
+    q_v = saturation_specific_humidity(T, p_full)   # saturated: cond ~ 0
     out = p3_microphysics(T, q_v, hydro, p_full, p_half, rho, dz, 300.0, cfg)
     # Closed form: riming = rime_coeff*q_i*q_c*f_ice, N_c sink = riming*N_c/q_c.
     f_ice = jax.nn.sigmoid(cfg.ice_sigmoid_sharpness * (cfg.cooper_T_act - T_val))
@@ -1547,7 +1547,7 @@ def test_kessler_saturation_adjustment_uses_shared_fp64_helper():
     dz32 = jnp.full((ncol, nlev), 500.0, dtype=jnp.float32)
     # Marginal supersaturation relative to the fp64 q_sat of the STORED
     # fp32 (T, p) — the #618 regime.
-    q_sat64 = saturation_mixing_ratio(
+    q_sat64 = saturation_specific_humidity(
         T32.astype(jnp.float64), p32.astype(jnp.float64),
     )
     q_v32 = (q_sat64 * (1.0 + 5.0e-6)).astype(jnp.float32)
@@ -1596,7 +1596,7 @@ def _sundqvist_two_layer(T_val, q_c_col, q_v_frac=0.5):
     p_half = jnp.broadcast_to(jnp.array([[4e4, 6e4, 8e4]]), (ncol, nlev + 1))
     rho = p_full / (constants.R_d * T)
     dz = jnp.full((ncol, nlev), 1000.0)
-    q_sat = saturation_mixing_ratio(T, p_full)
+    q_sat = saturation_specific_humidity(T, p_full)
     q_v = q_v_frac * q_sat   # below rh_crit: no condensation feeds q_c
     q_c = jnp.asarray(q_c_col)[None, :]
     hydro = HydrometeorState(

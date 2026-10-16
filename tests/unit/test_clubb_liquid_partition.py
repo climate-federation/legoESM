@@ -72,7 +72,8 @@ def _run(config, col, dt=300.0, pass_qc=True, *, on=None):
     return clubb_turbulence_prognostic(
         col["u"], col["v"], col["T"], col["q_v"], moments,
         col["p_full"], col["p_half"], col["z_full"], col["z_half"],
-        col["T_sfc"], col["q_sfc"], col["rho"], dt, config, **kw)
+        col["T_sfc"], col["q_sfc"], col["rho"], dt, config, **kw,
+        lat=jnp.zeros((_NCOL,)))                  # equator [rad]
 
 
 _OFF = CLUBBConfig(prognostic=True)
@@ -92,13 +93,19 @@ def test_default_is_off_and_emits_no_liquid():
     assert out.dq_c_dt is None
 
 
-def test_off_path_is_bit_identical_to_the_historical_bridge():
+def test_off_path_is_bit_identical_to_the_historical_bridge(monkeypatch):
     """Nothing about an existing run changes: the off path is the old formula.
 
     The historical bridge is ``q_v_new = rtm``, ``T_new = thlm*exner``.  Recompute
     it here from the advanced moments and demand bitwise equality, so a future
     edit to the partition branch cannot leak into runs that never asked for it.
+    The wrapper's column energy fixer (CAM clubb_do_energyfix, pinned in
+    test_clubb_column_budget.py) is not part of the bridge and is zeroed.
     """
+    from legoesm.atmosphere.physics.turbulence import clubb as clubb_mod
+    monkeypatch.setattr(clubb_mod, "column_energy_fixer_heating",
+                        lambda r, m, w: jnp.zeros_like(w * r[..., None]))
+    jax.clear_caches()
     col = _column()
     out, packed = _run(_OFF, col)
     from legoesm.atmosphere.physics.turbulence.clubb import (
@@ -110,7 +117,13 @@ def test_off_path_is_bit_identical_to_the_historical_bridge():
     q_ref = (flip_vertical(st.rtm) - col["q_v"]) / dt
     T_ref = (flip_vertical(st.thlm) * exner - col["T"]) / dt
     np.testing.assert_array_equal(np.asarray(out.dq_v_dt), np.asarray(q_ref))
-    np.testing.assert_array_equal(np.asarray(out.dT_dt), np.asarray(T_ref))
+    # plus the KE-dissipation heating of the momentum update (F14), which is
+    # not part of the partition; compared to fp64 round-off (jit fusion)
+    from legoesm.atmosphere.physics._shared import ke_dissipation_heating
+    T_ref = T_ref + ke_dissipation_heating(
+        jnp.asarray(col["u"]), jnp.asarray(col["v"]), out.du_dt, out.dv_dt, dt)
+    np.testing.assert_allclose(np.asarray(out.dT_dt), np.asarray(T_ref),
+                               rtol=1e-12, atol=1e-18)
 
 
 def test_total_water_is_conserved_by_the_partition():
@@ -246,7 +259,7 @@ def test_sub_cycle_carries_the_liquid_between_steps():
     difference must live where the cloud is.
     """
     from legoesm.atmosphere.physics.turbulence.clubb import (
-        clubb_step, flip_vertical, virtual_temperature,
+        clubb_step, flip_vertical,
     )
     col = _column(q_c_amp=2.0e-4)
     dt = 1200.0
@@ -269,12 +282,11 @@ def test_sub_cycle_carries_the_liquid_between_steps():
     from legoesm.atmosphere.physics.turbulence.clubb import unpack_clubb_moments
     m = unpack_clubb_moments(m)
     for _ in range(n_sub):
-        tv = jnp.maximum(virtual_temperature(T_c, q_c_col), cfg_n.T0 * 0.5)
-        rho_c = col["p_full"] / (constants.R_d * tv)
+        # Host density held through the sub-cycle (CAM rho_ds once, before nadv).
         du, dv, dT, dq, m, dg = clubb_step(
             u_c, v_c, T_c, q_c_col, m, col["p_full"], col["p_half"],
             col["z_full"], col["z_half"], col["T_sfc"], col["q_sfc"],
-            rho_c, dts, cfg_n, q_c=ql)
+            col["rho"], dts, cfg_n, q_c=ql)
         u_c = u_c + dts * du
         v_c = v_c + dts * dv
         T_c = T_c + dts * dT
@@ -324,11 +336,14 @@ def test_non_mpas_lanes_refuse_the_lever():
     )
     from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
     tc = TurbulenceConfig(scheme="clubb", clubb=_ON, liquid_partition=True)
-    for lane in ("hydrostatic", "nonhydrostatic", "spectral_pe"):
+    for lane in ("hydrostatic", "nonhydrostatic"):
         with pytest.raises(NotImplementedError, match="liquid_partition"):
             make_turbulence_physics(tc, model_type=lane)
-    # The wired lane builds.
+    # The wired lanes build (spectral_pe routes dq_c_dt too; its
+    # prognostic-closure and tracer requirements are pinned in
+    # test_spectral_macmic_subcycle.py).
     make_turbulence_physics(tc, model_type="mpas")
+    make_turbulence_physics(tc, model_type="spectral_pe")
 
 
 def test_a_non_clubb_scheme_refuses_the_lever():
@@ -967,9 +982,8 @@ def test_host_liquid_above_the_cloud_top_cutoff_is_left_alone():
 
 
 def test_retained_liquid_above_the_cutoff_never_drives_vapour_negative():
-    """The moment mixing is not tapered above the cutoff, so it can take a
-    liquid-laden top layer's total water below the liquid kept there; the
-    retained liquid must then shrink, not leave q_v negative."""
+    """A liquid-laden top layer above the cutoff: the host state there is
+    kept (CAM top_lev), and neither q_v nor q_c may go negative."""
     col = _column()
     q_c = np.zeros((_NCOL, _NLEV))
     q_c[:, 0] = 1.0e-4                       # rt(top) >> rt(below): mixing dries it

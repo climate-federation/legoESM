@@ -300,6 +300,10 @@ class DiagnosticCollector:
         # similarity profile, so it keeps the historical coare3 profile —
         # which also keeps the default byte-identical.
         self.surface_stability_scheme = surface_stability_scheme
+        # surface_bulk_scheme="none": no surface layer exists, so the 2 m
+        # temperature (and its daily extremes) is not produced at all rather
+        # than published from a profile of an exchange that never happens.
+        self.produces_tas = surface_bulk_scheme != "none"
         self.tas_profile_scheme = (
             surface_bulk_scheme
             if surface_bulk_scheme in ("most", "coare3", "large_yeager",
@@ -417,7 +421,7 @@ class DiagnosticCollector:
             # min/max for tas so tasmin/tasmax can be emitted.
             self._spatial_daily = SpatialDailyAccumulator(
                 nlat=_cmip_nlat, nlon=_cmip_nlon,
-                track_extremes={"tas"},
+                track_extremes={"tas"} if self.produces_tas else set(),
             )
             self._cmip_nlat = _cmip_nlat
             self._cmip_nlon = _cmip_nlon
@@ -456,7 +460,8 @@ class DiagnosticCollector:
         """
         self._area_w = None if area is None else jnp.asarray(area)
 
-    def set_cmip_grid_info(self, grid_type: str, grid=None, start_year: int = 1):
+    def set_cmip_grid_info(self, grid_type: str, grid=None, start_year: int = 1,
+                           column_native_latlon=None):
         """Configure CMIP output grid and regridding weights.
 
         Must be called after setup() and before the first collect() when
@@ -470,9 +475,19 @@ class DiagnosticCollector:
             Grid object (needed for regridding weights).
         start_year : int
             Calendar start year for time axis in NetCDF files.
+        column_native_latlon : LatLonGrid, optional
+            The lat-lon COLUMN lane: the fields arrive as row-major columns
+            of this grid; they are reshaped to it and regridded with the
+            structured lat-lon weights (``grid_type`` must be "latlon").
         """
         self._cmip_start_year = start_year
         self._cmip_grid_type = grid_type
+        self._column_native_shape = None
+        if column_native_latlon is not None:
+            if grid_type != "latlon":
+                raise ValueError("column_native_latlon needs grid_type='latlon'")
+            grid = column_native_latlon
+            self._column_native_shape = (int(grid.n_lat), int(grid.n_lon))
 
         if self._spatial_monthly is None:
             return
@@ -590,6 +605,15 @@ class DiagnosticCollector:
                 "regridder's [-180,180) columns onto [0,360) labels.")
         return np.roll(arr, self._cmip_nlon // 2, axis=1)
 
+    def _native_of_columns(self, arr: np.ndarray, ndim: int) -> np.ndarray:
+        """A lat-lon column-lane field ``(nCells[, k])`` as ``(n_lat, n_lon[,
+        k])`` (row-major cells); anything else unchanged."""
+        shp = getattr(self, "_column_native_shape", None)
+        if (shp is not None and arr.ndim == ndim - 1
+                and arr.shape[0] == shp[0] * shp[1]):
+            return arr.reshape(shp + arr.shape[1:])
+        return arr
+
     def _regrid_to_latlon_2d(self, field) -> np.ndarray | None:
         """Regrid a 2-D field to the CMIP lat-lon grid.
 
@@ -606,7 +630,7 @@ class DiagnosticCollector:
                 np.asarray(field).reshape(-1), self._voronoi_regrid_weights,
             ))
         # Structured grids (lat-lon / Gaussian)
-        arr = np.asarray(field)
+        arr = self._native_of_columns(np.asarray(field), 2)
         if arr.ndim == 2:
             regrid = getattr(self, '_structured_regrid', None)
             if regrid is not None:
@@ -638,7 +662,7 @@ class DiagnosticCollector:
             # flattened (nCells*nlev,) inputs are not supported here.
             return self._roll_to_cmip_lon(
                 apply_voronoi_to_latlon_3d(arr, self._voronoi_regrid_weights))
-        arr = np.asarray(field)
+        arr = self._native_of_columns(np.asarray(field), 3)
         if arr.ndim == 3:
             regrid = getattr(self, '_structured_regrid', None)
             if regrid is not None:
@@ -1228,16 +1252,18 @@ class DiagnosticCollector:
             # MOST surface-layer similarity profile to interpolate the lowest
             # level down to 2 m (CMIP tas convention).  Falls back to the
             # lowest level if the surface-layer inputs are unavailable.
-            tas_field = self._tas_2m(state, q_v, sst, sic, T_ice)
-            if t_low_mean is not None:
-                # Segment-mean tas: instantaneous 2 m stability offset on the
-                # segment-mean lowest-level T (see the ``t_low_mean`` doc).
-                tas_field = tas_field + (
-                    np.asarray(t_low_mean) - np.asarray(state.T.data[..., -1])
-                )
-            r = self._regrid_to_latlon_2d(tas_field)
-            if r is not None:
-                fields_2d['tas'] = r
+            if self.produces_tas:
+                tas_field = self._tas_2m(state, q_v, sst, sic, T_ice)
+                if t_low_mean is not None:
+                    # Segment-mean tas: instantaneous 2 m stability offset on
+                    # the segment-mean lowest-level T (``t_low_mean`` doc).
+                    tas_field = tas_field + (
+                        np.asarray(t_low_mean)
+                        - np.asarray(state.T.data[..., -1])
+                    )
+                r = self._regrid_to_latlon_2d(tas_field)
+                if r is not None:
+                    fields_2d['tas'] = r
             r = self._regrid_to_latlon_2d(precip_total)
             if r is not None:
                 fields_2d['pr'] = r
@@ -1582,7 +1608,7 @@ class DiagnosticCollector:
         _v_data = _v_data.data if _v_data is not None else None
         if sw_down_toa is not None and q_v is not None and _v_data is not None:
             # Only the grids that carry a cell-centred v (cube / lat-lon) run
-            # the tracker here; the MPAS edge-wind lane runs it in _run_mpas
+            # the tracker here; the MPAS edge-wind lane runs it in _run_column
             # with a Perot reconstruction (a None v here means edge winds we
             # must not feed the column KE term as if they were cell winds).
             self.energy_tracker.update(
@@ -1613,7 +1639,7 @@ class DiagnosticCollector:
 
     def feed_daily_extremes_native(self, day: float, *, tas) -> None:
         """Regrid an hourly temperature sample without feeding any means."""
-        if self._spatial_daily is None:
+        if self._spatial_daily is None or not self.produces_tas:
             return
         field = self._regrid_to_latlon_2d(np.asarray(tas, dtype=np.float64))
         if field is not None:
@@ -1889,8 +1915,11 @@ class DiagnosticCollector:
                     f"feed_cmip_accumulators_native: {_nm} shape {_arr.shape} "
                     f"!= expected {_shp}")
 
-        # tas is the 2 m MOST temperature when supplied, else the lowest level.
-        if tas_field is None:
+        # tas is the 2 m MOST temperature when supplied, else the lowest level;
+        # never produced without a surface layer.
+        if not self.produces_tas:
+            tas_field = None
+        elif tas_field is None:
             tas_field = T_low
 
         # Sea-level pressure (hypsometric) — shared by the spatial ``psl`` and
@@ -2401,6 +2430,21 @@ class DiagnosticCollector:
             if accum is not None and sub:
                 accum.set_state(sub)
                 restored = True
+        if restored and not self.produces_tas:
+            buckets = [
+                *(self._spatial_monthly._data_2d.values()
+                  if self._spatial_monthly is not None else ()),
+                *(self._spatial_daily._data.values()
+                  if self._spatial_daily is not None else ()),
+            ]
+            if any("tas" in b for b in buckets):
+                raise ValueError(
+                    f"{path}: the restored CMOR accumulators hold 2 m "
+                    "temperature, but this run has surface_bulk_scheme='none' "
+                    "and produces none; resuming would publish a tas written "
+                    "under a different surface setting. Resume with the "
+                    "setting that wrote it, or delete the sidecar to drop the "
+                    "partial month.")
         return restored
 
     def save(self, output_dir: str | Path) -> None:

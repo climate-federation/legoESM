@@ -9,8 +9,10 @@ hardening after codex adversarial review):
     dp-weighted form would divide by it).  Conserves ``sum_c A_c q_c`` per
     level (to fp roundoff), monotone under the CFL bound, coordinate-agnostic.
   - ``legoesm.driver.model_driver._mpas_qv_smooth_step``: the ACTUAL driver
-    code (unweighted del2 + q>=0 floor), unit-tested directly — including on
-    the pathological hybrid coordinate (codex B2 regression) and in fp32.
+    code (unweighted del2/del4, then the floor that restores each level's
+    dp-weighted WATER MASS, review 2026-10-10 F12), unit-tested directly —
+    including on the pathological hybrid coordinate (codex B2 regression) and
+    in fp32.
   - ``scalar_del2_cell_cfl_factor``: the shared geometry monotonicity
     factor, used by BOTH the driver guard and these tests so the two cannot
     drift.
@@ -43,6 +45,18 @@ def mesh():
 def _rand_q(mesh, seed=0, lo=0.0, hi=0.02, nlev=NLEV):
     rng = np.random.default_rng(seed)
     return jnp.asarray(rng.uniform(lo, hi, size=(mesh.nCells, nlev)))
+
+
+def _flat_dp(q):
+    """Uniform layer masses: the dp-weighted restore then targets the plain
+    per-level area integral, which is what the operator-level tests pin."""
+    return jnp.full(q.shape, 1000.0, dtype=q.dtype)
+
+
+def _water(q, dp, area):
+    """Per-level water mass sum_c A_c max(dp,0) q (the floor's invariant)."""
+    return jnp.sum(jnp.asarray(area)[:, None] * jnp.maximum(dp, 0.0) * q,
+                   axis=0)
 
 
 class TestOperator:
@@ -128,9 +142,8 @@ class TestOperator:
         dp-weighted del2 would divide by it (Inf/NaN).  The ACTUAL driver
         code (module-scope ``_mpas_qv_smooth_step``, unweighted del2 + floor)
         must stay finite and >= 0 there.  Guards the confirmed bug AND that
-        the driver never reintroduces dp weighting (the helper takes no dp
-        and the plain operator has no dp parameter — a revert is a
-        TypeError, not a silent NaN)."""
+        the OPERATOR never takes dp weighting (only the floor's restore
+        does, with max(dp, 0) weights, so nothing divides by dp)."""
         from legoesm.driver.model_driver import _mpas_qv_smooth_step
         nlev = 8
         coord = make_hybrid_levels(nlev, p_top_Pa=200.0, stretching=2.0)
@@ -142,12 +155,19 @@ class TestOperator:
         q = jnp.asarray(rng.uniform(0.0, 0.02, size=(mesh.nCells, nlev)))
         dt = 75.0
         nu = 0.5 / (dt * scalar_del2_cell_cfl_factor(mesh))
-        q_new = _mpas_qv_smooth_step(q, mesh, nu, dt)
+        q_new = _mpas_qv_smooth_step(q, mesh, nu, dt, dp)
         assert bool(jnp.all(jnp.isfinite(q_new)))
         assert float(jnp.min(q_new)) >= 0.0
-        # It IS the plain-del2 + floor expression (the driver's exact op).
-        expect = jnp.maximum(q + dt * nu * scalar_del2_cell_3d(q, mesh), 0.0)
-        assert float(jnp.max(jnp.abs(q_new - expect))) == 0.0
+        # The operator is the plain del2 (no dp anywhere in the stencil) ...
+        from legoesm.driver.model_driver import _mpas_qv_smooth_raw
+        expect = q + dt * nu * scalar_del2_cell_3d(q, mesh)
+        assert float(jnp.max(jnp.abs(_mpas_qv_smooth_raw(q, mesh, nu, dt)
+                                     - expect))) == 0.0
+        # ... and the floor restores each level's water mass on the
+        # positive-dp cells (F12), finite even where dp < 0.
+        np.testing.assert_allclose(
+            np.asarray(_water(q_new, dp, mesh.areaCell)),
+            np.asarray(_water(q, dp, mesh.areaCell)), rtol=1e-12, atol=0.0)
 
     def test_driver_helper_fp32_safe(self, mesh):
         """Production may run fp32: the helper preserves q dtype, stays
@@ -158,7 +178,7 @@ class TestOperator:
                         dtype=jnp.float32)
         dt = 75.0
         nu = 0.5 / (dt * scalar_del2_cell_cfl_factor(mesh))
-        q_new = _mpas_qv_smooth_step(q, mesh, nu, dt)
+        q_new = _mpas_qv_smooth_step(q, mesh, nu, dt, _flat_dp(q))
         assert q_new.dtype == jnp.float32
         assert bool(jnp.all(jnp.isfinite(q_new)))
         assert float(jnp.min(q_new)) >= 0.0
@@ -234,15 +254,19 @@ class TestDistributedEquivalence:
 
     Simulated ranks (no MPI needed) — the same wiring the driver applies
     under the distributed Voronoi lane: refresh the q_v CELL halo, run the
-    module-scope ``_mpas_qv_smooth_step`` on the rank-local mesh, keep the
-    owned cells.  Halo inputs are deliberately POISONED first so the test
+    module-scope stencil ``_mpas_qv_smooth_raw`` on the rank-local mesh, keep
+    the owned cells.  (The floor after it is pointwise times ONE per-level
+    factor from owned-masked allreduced sums -- pinned in
+    TestConservingFloor; simulated ranks cannot issue that allreduce.)  Halo inputs are deliberately POISONED first so the test
     fails if the refresh step is dropped (the driver's exact stale-halo
     scenario: physics updated owned q_v after the last in-step exchange).
     """
 
     @pytest.mark.parametrize("n_ranks", [2, 3])
     def test_owned_cells_match_serial(self, mesh, n_ranks):
-        from legoesm.driver.model_driver import _mpas_qv_smooth_step
+        from legoesm.driver.model_driver import (
+            _mpas_qv_smooth_raw as _mpas_qv_smooth_step,
+        )
         from legoesm.parallel.voronoi_partition import (
             partition_voronoi_mesh, build_local_mesh, scatter_to_local,
         )
@@ -284,7 +308,9 @@ class TestDistributedEquivalence:
         """Non-vacuousness: skipping the halo refresh DOES corrupt
         boundary-owned cells — proving the refresh in the driver is
         load-bearing, not decorative."""
-        from legoesm.driver.model_driver import _mpas_qv_smooth_step
+        from legoesm.driver.model_driver import (
+            _mpas_qv_smooth_raw as _mpas_qv_smooth_step,
+        )
         from legoesm.parallel.voronoi_partition import (
             partition_voronoi_mesh, build_local_mesh, scatter_to_local,
         )
@@ -387,17 +413,20 @@ class TestBiharmonic:
         g_max = float(scalar_del2_cell_cfl_factor(mesh))
         nu2 = 0.1 / (dt * g_max)
         nu4 = 0.1 / (dt * g_max ** 2)
-        off = _mpas_qv_smooth_step(q, mesh, 0.0, dt)
-        d2 = _mpas_qv_smooth_step(q, mesh, nu2, dt)
-        d4 = _mpas_qv_smooth_step(q, mesh, 0.0, dt, nu4=nu4)
-        both = _mpas_qv_smooth_step(q, mesh, nu2, dt, nu4=nu4)
+        from legoesm.driver.model_driver import _qv_level_conserving_floor
+        dp = _flat_dp(q)
+        off = _mpas_qv_smooth_step(q, mesh, 0.0, dt, dp)
+        d2 = _mpas_qv_smooth_step(q, mesh, nu2, dt, dp)
+        d4 = _mpas_qv_smooth_step(q, mesh, 0.0, dt, dp, nu4=nu4)
+        both = _mpas_qv_smooth_step(q, mesh, nu2, dt, dp, nu4=nu4)
         np.testing.assert_allclose(np.asarray(off), np.asarray(q))
         assert not np.allclose(np.asarray(d4), np.asarray(q))
         assert not np.allclose(np.asarray(d4), np.asarray(d2))
-        want = np.clip(np.asarray(q + dt * (nu2 * scalar_del2_cell_3d(q, mesh)
-                                            + nu4 * scalar_del4_cell_3d(q, mesh))),
-                       0.0, None)
-        np.testing.assert_allclose(np.asarray(both), want, rtol=1e-12)
+        raw = q + dt * (nu2 * scalar_del2_cell_3d(q, mesh)
+                        + nu4 * scalar_del4_cell_3d(q, mesh))
+        want = _qv_level_conserving_floor(raw, q, mesh.areaCell, dp)
+        np.testing.assert_allclose(np.asarray(both), np.asarray(want),
+                                   rtol=1e-12)
 
     @pytest.mark.parametrize("terms", ["del2", "del4", "both"])
     def test_compiled_smoother_matches_the_eager_step(self, mesh, terms):
@@ -422,12 +451,15 @@ class TestBiharmonic:
         def eager_refresh(x):
             return x * 0.5 + 1.0e-4
 
-        smooth = make_mpas_qv_smooth_fn(mesh, nu2, dt, nu4=nu4,
+        coord = make_hybrid_levels(NLEV, p_top_Pa=200.0, stretching=2.0)
+        p_s = jnp.asarray(np.linspace(80000.0, 101300.0, mesh.nCells))
+        smooth = make_mpas_qv_smooth_fn(mesh, nu2, dt, coord, nu4=nu4,
                                        halo_refresh=jit_refresh)
         for seed in (7, 8):
             q = _rand_q(mesh, seed=seed)
-            got = smooth(q)
+            got = smooth(q, p_s)
             want = _mpas_qv_smooth_step(eager_refresh(q), mesh, nu2, dt,
+                                        coord.layer_thickness_dp(p_s),
                                         nu4=nu4, mid_refresh=eager_refresh)
             assert not np.allclose(np.asarray(got), np.asarray(q))
             np.testing.assert_allclose(np.asarray(got), np.asarray(want),
@@ -457,7 +489,9 @@ class TestBiharmonic:
         are pinned against serial, and the poisoned halo proves the test can
         fail.
         """
-        from legoesm.driver.model_driver import _mpas_qv_smooth_step
+        from legoesm.driver.model_driver import (
+            _mpas_qv_smooth_raw as _mpas_qv_smooth_step,
+        )
         from legoesm.parallel.halo_exchange_voronoi import (
             exchange_local_simulated,
         )
@@ -533,8 +567,9 @@ class TestBiharmonic:
 
 
 class TestConservingFloor:
-    """The biharmonic branch's positivity floor must not create water: clip,
-    then rescale each level's positives so ``sum_c A_c q_c`` is unchanged."""
+    """The smoother's floor must neither create nor destroy water: clip, then
+    rescale each level's positives so the dp-weighted WATER MASS
+    ``sum_c A_c max(dp_c,0) q_c`` equals the pre-smoothing value (F12)."""
 
     def _negative_field(self, mesh):
         # a checkerboard-ish field with a few cells driven well below zero,
@@ -547,7 +582,7 @@ class TestConservingFloor:
         from legoesm.driver.model_driver import _qv_level_conserving_floor
         q = self._negative_field(mesh)
         area = jnp.asarray(mesh.areaCell, dtype=jnp.float64)
-        out = _qv_level_conserving_floor(q, area)
+        out = _qv_level_conserving_floor(q, q, area, _flat_dp(q))
         assert float(jnp.min(out)) >= 0.0
         before = jnp.sum(area[:, None] * q, axis=0)
         after = jnp.sum(area[:, None] * out, axis=0)
@@ -558,15 +593,17 @@ class TestConservingFloor:
         assert bool(jnp.all(created > 0.0))
         # a positive field passes through untouched (factor exactly 1)
         qp = _rand_q(mesh, seed=4, lo=0.001, hi=0.02)
-        np.testing.assert_array_equal(np.asarray(_qv_level_conserving_floor(qp, area)),
-                                      np.asarray(qp))
+        np.testing.assert_array_equal(
+            np.asarray(_qv_level_conserving_floor(qp, qp, area, _flat_dp(qp))),
+            np.asarray(qp))
 
     def test_owned_mask_excludes_halo_from_the_sums(self, mesh):
         from legoesm.driver.model_driver import _qv_level_conserving_floor
         q = self._negative_field(mesh)
         area = jnp.asarray(mesh.areaCell, dtype=jnp.float64)
         owned = jnp.arange(mesh.nCells) < mesh.nCells // 2
-        out = _qv_level_conserving_floor(q, area, owned_mask=owned)
+        out = _qv_level_conserving_floor(q, q, area, _flat_dp(q),
+                                         owned_mask=owned)
         w = jnp.where(owned, area, 0.0)
         np.testing.assert_allclose(
             np.asarray(jnp.sum(w[:, None] * out, axis=0)),
@@ -579,20 +616,17 @@ class TestConservingFloor:
         area = jnp.asarray(mesh.areaCell, dtype=jnp.float64)
         dt = 100.0
         nu4 = 0.45 / (dt * scalar_del2_cell_cfl_factor(mesh) ** 2)
-        out = _mpas_qv_smooth_step(q, mesh, 0.0, dt, nu4=nu4)
+        out = _mpas_qv_smooth_step(q, mesh, 0.0, dt, _flat_dp(q), nu4=nu4)
         assert float(jnp.min(out)) >= 0.0
         # the unfloored step really goes negative here, so the floor binds
         from legoesm.core.operators_voronoi import scalar_del4_cell_3d
         raw = q + dt * (nu4 * scalar_del4_cell_3d(q, mesh)).astype(q.dtype)
         assert float(jnp.min(raw)) < 0.0
-        # the floor conserves the STEP's integral exactly; the fp32 mesh
-        # operator itself conserves the input integral only to ~1e-7
+        # the floor restores the PRE-smoothing integral exactly (it is the
+        # reference now, not the raw step's)
         np.testing.assert_allclose(
             np.asarray(jnp.sum(area[:, None] * out, axis=0)),
-            np.asarray(jnp.sum(area[:, None] * raw, axis=0)), rtol=1e-12, atol=0.0)
-        np.testing.assert_allclose(
-            np.asarray(jnp.sum(area[:, None] * out, axis=0)),
-            np.asarray(jnp.sum(area[:, None] * q, axis=0)), rtol=1e-6, atol=0.0)
+            np.asarray(jnp.sum(area[:, None] * q, axis=0)), rtol=1e-12, atol=0.0)
 
     @pytest.mark.parametrize("dtype", [jnp.float32, jnp.float64])
     def test_built_smoother_matches_eager_composition(self, mesh, dtype):
@@ -621,20 +655,24 @@ class TestConservingFloor:
         dt = 100.0
         g = float(scalar_del2_cell_cfl_factor(lm))
         nu, nu4 = 0.2 / (dt * g), 0.2 / (dt * g ** 2)
-        fn = make_mpas_qv_smooth_fn(lm, nu, dt, nu4=nu4, halo_refresh=refresh,
-                                    owned_mask=owned)
-        got = fn(poisoned)
-        got2 = fn(poisoned * 1.0)
+        coord = make_hybrid_levels(4, p_top_Pa=200.0, stretching=2.0)
+        p_s = jnp.asarray(np.linspace(80000.0, 101300.0, lm.nCells),
+                          dtype=dtype)
+        fn = make_mpas_qv_smooth_fn(lm, nu, dt, coord, nu4=nu4,
+                                    halo_refresh=refresh, owned_mask=owned)
+        got = fn(poisoned, p_s)
+        got2 = fn(poisoned * 1.0, p_s)
         assert n_calls[0] == 2, "pre + mid refresh traced once, no retrace"
-        want = _mpas_qv_smooth_step(refresh(poisoned), lm, nu, dt, nu4=nu4,
+        want = _mpas_qv_smooth_step(refresh(poisoned), lm, nu, dt,
+                                    coord.layer_thickness_dp(p_s), nu4=nu4,
                                     mid_refresh=refresh, owned_mask=owned)
         assert got.dtype == want.dtype
         rtol = 1e-6 if dtype == jnp.float32 else 1e-13
         np.testing.assert_allclose(np.asarray(got), np.asarray(want),
                                    rtol=rtol, atol=rtol * 0.05)
         np.testing.assert_array_equal(np.asarray(got), np.asarray(got2))
-        stale = make_mpas_qv_smooth_fn(lm, nu, dt, nu4=nu4,
-                                       owned_mask=owned)(poisoned)
+        stale = make_mpas_qv_smooth_fn(lm, nu, dt, coord, nu4=nu4,
+                                       owned_mask=owned)(poisoned, p_s)
         assert not np.allclose(np.asarray(stale[:own]), np.asarray(want[:own]),
                                rtol=rtol, atol=rtol * 0.05), (
             "skipping the refresh changed nothing -- the test cannot fail")
@@ -643,5 +681,54 @@ class TestConservingFloor:
         from legoesm.driver.model_driver import _qv_level_conserving_floor
         q = self._negative_field(mesh)
         area = jnp.asarray(mesh.areaCell, dtype=jnp.float64)
-        g = jax.grad(lambda x: jnp.sum(_qv_level_conserving_floor(x, area) ** 2))(q)
+        dp = _flat_dp(q)
+        g = jax.grad(lambda x: jnp.sum(
+            _qv_level_conserving_floor(x, q, area, dp) ** 2))(q)
         assert bool(jnp.all(jnp.isfinite(g))) and float(jnp.max(jnp.abs(g))) > 0.0
+
+    @pytest.mark.parametrize("nu2_frac,nu4_frac", [(0.4, 0.0), (0.0, 0.45)])
+    def test_smoother_conserves_water_mass_over_terrain(self, mesh, nu2_frac,
+                                                        nu4_frac):
+        """F12 (review 2026-10-10): with p_s varying across cells (terrain) the
+        unweighted operator moves water between thin and thick columns; the
+        driver smoother must still leave every level's water mass
+        ``sum A dp q`` unchanged (and so the global dry mass
+        ``sum A p_s - water``, p_s being untouched).  Non-vacuous: the area-only restore it replaced is shown,
+        on the same state, to change the water mass by orders of magnitude
+        more than the tolerance."""
+        from legoesm.core.conservation import restore_level_mass
+        from legoesm.driver.model_driver import (
+            _mpas_qv_smooth_raw, _mpas_qv_smooth_step,
+        )
+        nlev = 6
+        coord = make_hybrid_levels(nlev, p_top_Pa=200.0, stretching=2.0)
+        lat = np.asarray(mesh.latCell)
+        lon = np.asarray(mesh.lonCell)
+        # "mountains": p_s from 700 to 1013 hPa, correlated with humidity the
+        # way sigma-level humidity anticorrelates with orography
+        bump = 0.5 * (1.0 + np.sin(3.0 * lon) * np.cos(2.0 * lat))
+        p_s = jnp.asarray(101300.0 - 31300.0 * bump)
+        dp = coord.layer_thickness_dp(p_s)
+        assert float(jnp.min(dp)) > 0.0
+        rng = np.random.default_rng(31)
+        q = jnp.asarray((0.004 + 0.012 * (1.0 - bump))[:, None]
+                        * np.ones((1, nlev))
+                        + 1e-3 * rng.uniform(size=(mesh.nCells, nlev)))
+        dt = 100.0
+        g = float(scalar_del2_cell_cfl_factor(mesh))
+        nu, nu4 = nu2_frac / (dt * g), nu4_frac / (dt * g ** 2)
+        area = jnp.asarray(mesh.areaCell)
+        out = _mpas_qv_smooth_step(q, mesh, nu, dt, dp, nu4=nu4)
+        before = _water(q, dp, area)
+        np.testing.assert_allclose(np.asarray(_water(out, dp, area)),
+                                   np.asarray(before), rtol=1e-12, atol=0.0)
+        assert float(jnp.min(out)) >= 0.0
+        # the filter still smooths (it is not a no-op)
+        assert float(jnp.max(jnp.abs(out - q))) > 1e-5
+        # NON-VACUITY: the previous floor (area-only restore of the RAW
+        # step) changes the water mass on this state
+        old = restore_level_mass(_mpas_qv_smooth_raw(q, mesh, nu, dt, nu4=nu4),
+                                 _mpas_qv_smooth_raw(q, mesh, nu, dt, nu4=nu4),
+                                 jnp.ones_like(dp), area, clip=True)
+        rel = float(jnp.max(jnp.abs(_water(old, dp, area) - before) / before))
+        assert rel > 1e-6, f"area-only floor changed water by only {rel:.2e}"

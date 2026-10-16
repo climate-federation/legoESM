@@ -24,7 +24,16 @@ _INVENTORY_PATH = (
     "testcases/nemo_testcase_l1_swg_namelist_inventory.py")
 _INV_SPEC = importlib.util.spec_from_file_location("swg_namelist_inventory", _INVENTORY_PATH)
 inventory = importlib.util.module_from_spec(_INV_SPEC); _INV_SPEC.loader.exec_module(inventory)
-_COMPILED_READS = inventory.EXPECTED_CARD_READS
+# The card's 13 frozen groups, re-spelled from the DERIVED compiled-read
+# inventory (committed JSON), so a hand edit on either side is visible here.
+_COMMITTED_READS = inventory.load_reference_inventory()
+_CARD_BY_LOWER = {name.lower(): name for name in SwgResolvedNamelist._fields}
+_COMPILED_READS = {
+    group: tuple(
+        _CARD_BY_LOWER.get(inventory.CARD_ALIASES.get(field, field).lower(), field)
+        for field in _COMMITTED_READS["groups"][group]["fields"])
+    for group in SWG_COMPILED_NAMELIST_READS
+}
 
 _ALL_CARD_FIELDS = (
     "sn_cfctl", "ln_timing", "ln_diacfl", "nn_isplt", "nn_jsplt", "nn_ictls",
@@ -133,6 +142,35 @@ def test_swg_card_requires_the_explicit_constant_ldf_dispatch(card, field, value
         validate_nemo_testcase_card(bad)
 
 
+def test_swg_card_requires_libm_certification_transcendentals(card):
+    validate_nemo_testcase_card(card)
+    bad = card._replace(transcendentals="native")
+    with pytest.raises(ValueError, match="scalar-libm certification"):
+        validate_nemo_testcase_card(bad)
+
+
+@pytest.mark.parametrize("namelist", (
+    pytest.param(SWG_NAMELIST, id="shipped"),
+    pytest.param(SWG_MADDISON_NAMELIST, id="fine-double-gyre"),
+    pytest.param(
+        SWG_NAMELIST._replace(nn_SWG=2, nn_itend=4, nn_write=2, nn_stock=2),
+        id="other-accepted"),
+))
+def test_every_parameterised_swg_deck_keeps_libm_and_selector_validation(
+        namelist):
+    from legoesm.ocean.eos import nemo_r3t_stretch
+
+    card = build_swg_card(namelist)
+    validate_nemo_testcase_card(card)
+    with pytest.raises(ValueError, match="scalar-libm certification"):
+        validate_nemo_testcase_card(card._replace(transcendentals="native"))
+    eta = np.zeros(card.recipe.land_mask.shape, dtype=np.float64)
+    depth = np.ones_like(eta)
+    with pytest.raises(ValueError, match="unknown r3t evaluation"):
+        nemo_r3t_stretch(
+            card.recipe.z_coord, eta, depth, evaluation="unsupported")
+
+
 def test_ens_vorticity_config_has_no_mask_default():
     from legoesm.ocean.state import ENSVorticityConfig
 
@@ -194,7 +232,7 @@ def _card_digest(card):
 
 
 def test_parameterisation_keeps_shipped_card_digest_byte_identical(card):
-    assert _card_digest(card) == "f9d46bfd08f23702"
+    assert _card_digest(card) == "98da41949102ca1b"
 
 
 def test_maddison_geometry_honours_domsiz_and_fixed_wind_period():
@@ -255,6 +293,11 @@ def test_swg_namelist_dispatch_refuses_unsupported_values():
         validate_swg_namelist(SWG_NAMELIST._replace(rn_theta_deg=1.0))
     with pytest.raises(ValueError, match="positive finite"):
         validate_swg_namelist(SWG_NAMELIST._replace(rn_Dt_s=0.0))
+    with pytest.raises(ValueError, match="ln_meshmask must be a boolean"):
+        validate_swg_namelist(SWG_NAMELIST._replace(ln_meshmask="invalid"))
+    for bad in (True, "0.2"):
+        with pytest.raises(ValueError, match="real values required"):
+            validate_swg_namelist(SWG_NAMELIST._replace(rn_tau_pa=bad))
 
 
 def test_resolved_inventory_is_the_frozen_compiled_and_card_inventory():
@@ -285,12 +328,17 @@ def test_inventory_parser_directly_reads_multiline_fortran(tmp_path):
         "first", "second", "third")
 
 
-@pytest.mark.skipif(
-    not inventory.DEFAULT_SOURCE_ROOT.is_dir(), reason="compiled SWG source not mounted")
-def test_source_enumerator_matches_all_131_compiled_reads():
-    parsed = inventory.compiled_card_inventory(inventory.DEFAULT_SOURCE_ROOT)
-    inventory.validate_inventory(parsed)
-    assert parsed == SWG_COMPILED_NAMELIST_READS
+def test_every_derived_read_outside_the_frozen_groups_is_namusr_def_or_pinned():
+    """The 13 frozen groups are not the whole executable: the derivation adds
+    namusr_def (all card fields) and NEMO-only groups the deck guard pins."""
+    extra = set(_COMMITTED_READS["groups"]) - set(SWG_COMPILED_NAMELIST_READS)
+    assert "namusr_def" in extra
+    namusr_def = {
+        _CARD_BY_LOWER.get(inventory.CARD_ALIASES.get(field, field).lower())
+        for field in _COMMITTED_READS["groups"]["namusr_def"]["fields"]}
+    assert None not in namusr_def
+    assert _COMMITTED_READS["group_count"] == 27
+    assert _COMMITTED_READS["field_count"] == 336
 
 
 def test_engine_read_defaults_match_the_resolved_oracle_echo():

@@ -406,6 +406,8 @@ def _make_hydrostatic_microphysics(
                     T=T_col, p=p_full_col,
                     aerosol_number=(
                         None if _aer_num is None else jnp.asarray(_aer_num)),
+                    ccn_aod=(forcing.get("aerosol_ccn_aod")
+                             if forcing is not None else None),
                 ),
             )
 
@@ -513,6 +515,14 @@ def _make_hydrostatic_microphysics(
             precip=Field(
                 data=micro_out.precipitation.reshape(shape_2d).astype(p_s.dtype),
                 name="precip_micro", dims=dims_2d, units="kg/m^2/s"),
+            # its frozen part (ice + snow + graupel) for the land (F29);
+            # None when the scheme does not publish it
+            precip_frozen=(
+                None if micro_out.precip_frozen is None else Field(
+                    data=micro_out.precip_frozen.reshape(shape_2d).astype(
+                        p_s.dtype),
+                    name="precip_frozen_micro", dims=dims_2d,
+                    units="kg/m^2/s")),
             sed_substeps_required=(
                 None if micro_out.sed_substeps_required is None else Field(
                     data=micro_out.sed_substeps_required.reshape(shape_2d),

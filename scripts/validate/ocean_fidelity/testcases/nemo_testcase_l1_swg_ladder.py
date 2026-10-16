@@ -461,7 +461,7 @@ def read_stage_entries(
     return out
 
 
-def _card_masks(card) -> dict[str, np.ndarray]:
+def card_masks(card) -> dict[str, np.ndarray]:
     """Return native NEMO T/U/V/F masks from shared card operands."""
     from legoesm.ocean.dynamics.latlon_cgrid_operators import compute_face_masks
 
@@ -656,7 +656,7 @@ def self_check(root: Path, *, plant: bool = False, allow_dirty: bool = False) ->
     allow_dirty_stamps(allow_dirty)
     sha = git_sha(allow_dirty=allow_dirty)
     from legoesm.ocean.fidelity.nemo_testcase_recipe import build_swg_card
-    masks = _card_masks(build_swg_card())
+    masks = card_masks(build_swg_card())
     records = read_restarts(root)
     per_kt = []
     for kt, fields in records.items():
@@ -694,7 +694,7 @@ def _swg_production_case(label: str, *, namelist=None):
     namelist = SWG_NAMELIST if namelist is None else namelist
     card = build_swg_card(namelist)
     validate_nemo_testcase_card_for_execution(card)
-    masks = _card_masks(card)
+    masks = card_masks(card)
     model = LatLonCGridOceanModel(card.recipe.grid, card.recipe.z_coord,
                                   card.recipe.model_config)
     # Compiled usrdef_sbc.F90:84-91 fixes the cosine divisor at 2000 km.
@@ -838,7 +838,7 @@ def _shared_shipped_statistics(ssh, u_native, v_native, card):
     from legoesm.ocean.diagnostics_streamfunction import barotropic_streamfunction
     from legoesm.ocean.fidelity.nemo_testcase_recipe import swg_horizontal_coordinates
 
-    masks = _card_masks(card)
+    masks = card_masks(card)
     ssh = np.where(masks["T"][None], np.asarray(ssh, dtype=np.float64), 0.0)
     u_native = np.where(
         masks["U"][None], np.asarray(u_native, dtype=np.float64), 0.0)
@@ -1657,7 +1657,7 @@ def swe_rk3_stages(stage_root: Path, *, mode: str = "given",
     require(mode in ("given", "chained"),
             f"unknown stage replay mode {mode!r}")
     entries = read_stage_entries(stage_root)
-    masks = _card_masks(card)
+    masks = card_masks(card)
     model = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
 

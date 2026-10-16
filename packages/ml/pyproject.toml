@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "legoesm-ml"
-version = "1.0.0"
+version = "1.0.1"
 description = "machine-learning layer: SFNO + neural-GCM nets, training modes, data assimilation, parameter tuning."
 readme = "README.md"
 license = { text = "MIT" }

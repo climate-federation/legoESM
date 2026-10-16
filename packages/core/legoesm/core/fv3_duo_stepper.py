@@ -153,6 +153,7 @@ to the state fields only.
 
 from __future__ import annotations
 
+import math
 import os
 from typing import NamedTuple
 
@@ -270,6 +271,28 @@ def _check_diagnostic_env(skip_b_endpoints: bool) -> None:
 # stage configuration
 # ---------------------------------------------------------------------
 
+def sponge_d2_profile(km: int, layers: int, factor: float,
+                      d2_top: float) -> tuple:
+    """Per-level additive del-2 sponge coefficient (decision B1): a tuple
+    of ``km`` Python floats, ``d2_top * factor**(-k/layers)`` for
+    ``k < layers`` and EXACTLY ``0.0`` below -- the same shape as the
+    MPAS lane's ``sponge_del2_profile`` (``factor**((n-k)/n)`` on its
+    viscosity, i.e. ``factor`` at the top and ``factor**(1/2)`` on the
+    second of two layers) expressed relative to the top-layer value.
+    Static Python numbers so the deck stays jit-static; the batched
+    tail turns them into one traced ``(km,)`` operand."""
+    if layers != int(layers) or not (0 <= int(layers) <= km):
+        raise ValueError(
+            f"sponge_del2_top_layers must be an integer in 0..km={km}, got {layers!r}")
+    layers = int(layers)
+    if not (math.isfinite(factor) and factor >= 1.0):
+        raise ValueError(f"sponge_del2_top_factor must be finite and >= 1, got {factor}")
+    if not (math.isfinite(d2_top) and d2_top >= 0.0):
+        raise ValueError(f"sponge_d2_top must be finite and >= 0, got {d2_top}")
+    return tuple(float(d2_top) * float(factor) ** (-k / layers) if k < layers
+                 else 0.0 for k in range(km))
+
+
 class SWConfig(NamedTuple):
     """The stage knobs, hashable BY VALUE so they can be jit-static.
 
@@ -298,6 +321,17 @@ class SWConfig(NamedTuple):
     d2_bg: float = 0.0
     d4_bg: float = 0.12
     nord: int = 1
+    #: Decision B1 (user 2026-10-02, option 2a): ADDITIVE del-2 top
+    #: sponge on divergence AND vorticity, equal coefficients, no mass/w
+    #: damping.  ``sponge_d2_top`` is the FV3-DIMENSIONLESS del-2
+    #: coefficient (multiplied by ``da_min_c`` like ``d2_bg``) at the top
+    #: layer; layer k < layers gets ``sponge_d2_top * factor**(-k/layers)``
+    #: (the MPAS deck's 8 : sqrt(8) ratio for 2 layers), exactly 0 below
+    #: -- see :func:`sponge_d2_profile`.  ``layers = 0`` = OFF, bitwise
+    #: the pre-B1 step (the oracle deck).  NOT MPAS's ``nu_del2`` [m^2/s].
+    sponge_del2_top_layers: int = 0
+    sponge_del2_top_factor: float = 8.0
+    sponge_d2_top: float = 0.0
 
     @classmethod
     def from_mapping(cls, cfg) -> SWConfig:

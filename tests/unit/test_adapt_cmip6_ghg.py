@@ -235,6 +235,62 @@ def test_main_requires_input(tmp_path):
     assert m.main(["--out", str(tmp_path / "x.nc")]) == 2  # no --in-dir/--co2…
 
 
+def test_optional_halogens_reach_rrtmgp_vmr(tmp_path):
+    """CFC-22 / CCl4 / CF4 merged when supplied, read back by the loader and
+    mapped to RRTMGP's own species (fixed global means otherwise); a file
+    without them still loads (they stay optional)."""
+    m = _mod()
+    years = [1979, 1980]
+    per, _, _ = _synthetic_per_gas(years)
+    halo = {"CFC_22": 60.0, "CCl4": 100.0, "CF4": 70.0}
+    for gas, ppt in halo.items():
+        per[gas] = _gas_ds(m.OPTIONAL_GAS_TO_CFVAR[gas], years,
+                           [ppt, ppt + 1.0], units="1e-12")
+    out = tmp_path / "ghg_halo.nc"
+    m.merge_ghg(per).to_netcdf(out)
+
+    from legoesm.forcing.external import GHGConfig, get_ghg_at_time, ghg_concentrations_to_vmr
+    ghg = get_ghg_at_time(GHGConfig(source="annual_file", path=str(out),
+                                    start_year=1979), day=182.0)
+    vmr = ghg_concentrations_to_vmr(ghg)
+    for gas, rr in (("CFC_22", "cfc22"), ("CCl4", "ccl4"), ("CF4", "cf4")):
+        assert np.isclose(vmr[rr], halo[gas] * 1e-12, rtol=1e-3), (gas, vmr[rr])
+
+    base = tmp_path / "ghg_base.nc"
+    m.merge_ghg(_synthetic_per_gas(years)[0]).to_netcdf(base)
+    vmr0 = ghg_concentrations_to_vmr(get_ghg_at_time(
+        GHGConfig(source="annual_file", path=str(base), start_year=1979), day=182.0))
+    assert not {"cfc22", "ccl4", "cf4"} & set(vmr0)
+
+
+def test_open_handles_year_zero_axis(tmp_path):
+    """UoM-CMIP-1-2-0 files use 'days since 0-1-1' (undecodable by cftime):
+    _open falls back to mid-year fractional years from year 0."""
+    m = _mod()
+    t = np.arange(3) * 365.2425 + 182.0
+    ds = xr.Dataset({"x": ("time", np.ones(3))},
+                    coords={"time": ("time", t, {"units": "days since 0-1-1",
+                                                 "calendar": "gregorian"})})
+    p = tmp_path / "y0.nc"
+    ds.to_netcdf(p)
+    out = m._open(p)
+    np.testing.assert_allclose(out["time"].values, [0.5, 1.5, 2.5])
+
+
+def test_compiled_segments_carry_the_halogens():
+    """Compiled cube/lat-lon lanes pack GHGs through GHG_SPECIES_ORDER; a
+    species missing there is dropped before the solver (codex 2026-10-08)."""
+    from legoesm.driver.compiled_segments import (
+        GHG_SPECIES_ORDER, ghg_array_to_dict, ghg_dict_to_array)
+    vmr = {"co2": 4e-4, "ch4": 1.8e-6, "n2o": 3.2e-7, "cfc11": 2.3e-10,
+           "cfc12": 5e-10, "cfc22": 6e-11, "ccl4": 1e-10, "cf4": 7e-11}
+    keys = tuple(k for k in GHG_SPECIES_ORDER if k in vmr)
+    back = ghg_array_to_dict(ghg_dict_to_array(vmr), keys)
+    assert set(back) == set(vmr)
+    for k, v in vmr.items():
+        assert np.isclose(float(back[k]), v, rtol=1e-12), k
+
+
 def _cesm_ghg_ds():
     """Synthetic CESM ``GHG_CMIP-*`` layout: one file, short CAM names, a
     YYYYMMDD ``date`` and a ``days since 0-1-1`` axis that starts at year 0."""

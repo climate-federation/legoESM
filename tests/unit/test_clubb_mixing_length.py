@@ -228,5 +228,42 @@ def test_parity_vs_clubb_jax_reference():
             err_msg=f"committed golden {name} is stale vs the reference")
 
 
+_GRAD_GOLDEN_NPZ = (Path(__file__).resolve().parent / "clubb_fixtures"
+                    / "clubb_lscale_grad_golden.npz")
+
+
+def test_values_and_gradients_match_the_sequential_reference():
+    """Values AND gradients against a reference recorded from the sequential
+    (scan-over-launch-levels) implementation, on inputs where both the upward
+    and the downward smoothing change the answer (deleting either one, or
+    running the downward smoothing bottom-up, fails this test).  Fixture
+    generator: clubb_fixtures/gen_clubb_lscale_grad_golden.py."""
+    ref = np.load(_GRAD_GOLDEN_NPZ)
+    thv = jnp.asarray(ref["thvm"])
+    kw = dict(_golden_inputs(), em=jnp.asarray(ref["em"]), thvm=thv, thlm=thv,
+              thv_ds=thv)
+    w_up, w_dn = jnp.asarray(ref["w_up"]), jnp.asarray(ref["w_dn"])
+    names = ("thvm", "thlm", "rtm", "em", "mu")
+
+    def loss(*xs):
+        L, Lu, Ld = compute_mixing_length(**dict(kw, **dict(zip(names, xs))))
+        return jnp.sum(w_up * Lu) + jnp.sum(w_dn * Ld) + jnp.sum(L)
+
+    vals = compute_mixing_length(**kw)
+    for name, v in zip(("Lscale", "Lscale_up", "Lscale_down"), vals):
+        # Not bit-identical: batching lets XLA fuse/contract the same algebra
+        # differently (measured <= 4.2e-16 relative); atol scales with the
+        # field for smoothed near-cancellation entries.
+        np.testing.assert_allclose(np.asarray(v), ref[name], rtol=1e-13,
+                                   atol=1e-13 * float(np.max(np.abs(ref[name]))),
+                                   err_msg=name)
+    grads = jax.grad(loss, argnums=tuple(range(len(names))))(*(kw[n] for n in names))
+    for n, g in zip(names, grads):
+        r = ref[f"grad_{n}"]
+        np.testing.assert_allclose(np.asarray(g), r, rtol=1e-12,
+                                   atol=1e-12 * float(np.max(np.abs(r))),
+                                   err_msg=f"d loss / d {n}")
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

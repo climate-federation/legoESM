@@ -20,6 +20,8 @@
 
 # --- Grid + dycore: coarse C12/L20 for cheap iteration -----------------------
 grid_type: cubed_sphere
+persistent_dgrid: true       # #1028: carry D-staggered winds between steps; the cc round trip damps eddies (C36 HS jet 13 -> 39-41 m/s). Single-process cube only.
+energy_fixer: true                   # dycore energy fixer, now wired on this lane (review 2026-10-10 F15, vote F15b-V6)
 resolution: 12
 nlev: 20
 dt: 450.0

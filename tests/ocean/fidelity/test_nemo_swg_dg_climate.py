@@ -15,6 +15,23 @@ climate = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(climate)
 
 
+@pytest.mark.parametrize(
+    ("relative", "private_name"),
+    (
+        ("nemo_testcase_l1_swg_dg_climate.py", "_card_masks"),
+        ("nemo_testcase_l1_swg_dg_round6.py", "_card_masks"),
+        ("nemo_testcase_l1_swg_dg_short_ladder.py", "_card_masks"),
+        ("nemo_testcase_l1_swg_dg_restart_identity.py",
+         "_require_legoesm_deck"),
+        ("nemo_testcase_l1_swg_dg_restart_identity.py",
+         "_require_nemo_deck"),
+    ),
+)
+def test_dg_tools_do_not_import_private_sibling_helpers(relative, private_name):
+    source = (SCRIPT.parent / relative).read_text()
+    assert private_name not in source
+
+
 def test_coordinate_assembly_deduplicates_halos_and_refuses_bad_coverage():
     lon = np.tile(np.arange(3, dtype=np.float64), (2, 1))
     lat = np.tile(np.arange(2, dtype=np.float64)[:, None], (1, 3))
@@ -32,6 +49,25 @@ def test_coordinate_assembly_deduplicates_halos_and_refuses_bad_coverage():
     conflicting[1][2][0, 0] += 1.0
     with pytest.raises(Exception, match="conflicting"):
         climate.assemble_coordinate_tiles(conflicting, lon, lat)
+    signed_zero_tiles = [
+        (lon[:, :2], lat[:, :2], np.zeros((2, 2))),
+        (lon[:, 1:], lat[:, 1:], -np.zeros((2, 2))),
+    ]
+    with pytest.raises(Exception, match="conflicting"):
+        climate.assemble_coordinate_tiles(
+            signed_zero_tiles, lon, lat, word_exact=True)
+
+
+def test_climate_assembly_retains_established_fp64_diagnostic_arithmetic():
+    lon = np.asarray([[0.0]], dtype=np.float32)
+    lat = np.asarray([[0.0]], dtype=np.float32)
+    value = np.asarray([[1.0]], dtype=np.float32)
+    climate_value = climate.assemble_coordinate_tiles(
+        ((lon, lat, value),), lon, lat)
+    exact_value = climate.assemble_coordinate_tiles(
+        ((lon, lat, value),), lon, lat, word_exact=True)
+    assert climate_value.dtype == np.dtype("float64")
+    assert exact_value.dtype == np.dtype("float32")
 
 
 def _synthetic_provider(name="synthetic", sampling="daily_mean"):
@@ -355,6 +391,14 @@ def test_nemo_provider_admits_window_and_refuses_shifted_clock_and_deck(
     provider = climate.nemo_ioipsl_provider(tmp_path, 1, start_day=2)
     assert provider.provenance["window_days"] == [2, 2]
     assert [frame.day for frame in provider.iterate()] == [1]
+    executable = tmp_path / "nemo"
+    executable.write_bytes(b"synthetic colleague rebuild")
+    manifest = tmp_path / "manifest.sha256"
+    lines = manifest.read_text().splitlines()
+    lines[0] = f"{climate.sha256(executable)}  nemo"
+    manifest.write_text("\n".join(lines) + "\n")
+    rebuilt = climate.nemo_ioipsl_provider(tmp_path, 1, start_day=2)
+    assert not rebuilt.provenance["deck"]["matches_2026_10_13_reference_build"]
     import netCDF4
     path = tmp_path / "SWG_test_grid_T_0000.nc"
     with netCDF4.Dataset(path, "r+") as ds:
@@ -448,3 +492,35 @@ def test_online_control_namelist_selects_viscosity_and_refuses_unknown():
     assert climate.online_control_namelist("dg50-nu80").rn_Lv_m == 80.0
     with pytest.raises(Exception, match="unsupported online control"):
         climate.online_control_namelist("post-hoc")
+def test_final_line_reports_written_statistics_not_agreement(
+        tmp_path, monkeypatch, capsys):
+    """Two clearly different trajectories must not print a bare PASS."""
+    def shifted(name):
+        base = _synthetic_provider(name)
+
+        def iterate():
+            for frame in base.iterate():
+                yield frame._replace(u=frame.u + 5.0)
+
+        return base._replace(iterate=iterate)
+
+    monkeypatch.setattr(climate, "nemo_ioipsl_provider",
+                        lambda root, days, start_day, **_: _synthetic_provider("NEMO"))
+    monkeypatch.setattr(climate, "legoesm_npz_provider",
+                        lambda root, days, start_day, **_: shifted("legoESM"))
+    monkeypatch.setattr(climate, "compare", lambda providers, days, **_: {
+        provider.name: climate.diagnose(
+            provider, days=days, geometry=_geometry())
+        for provider in providers})
+    output = tmp_path / "climate"
+    assert climate.main([
+        "--nemo-root", str(tmp_path), "--legoesm-root", str(tmp_path),
+        "--start-day", "2", "--days", "2", "--output", str(output)]) == 0
+    line = capsys.readouterr().out.strip().splitlines()[-1]
+    assert line.startswith(
+        "SWG_DG_CLIMATE_REPORT_WRITTEN window=2-3 label='days 2-3' "
+        "agreement_test=none")
+    assert "PASS" not in line
+    report = json.loads((output / "swg_dg_climate_report.json").read_text())
+    assert report["comparison"]["metrics"]["basin_mean_ke_m2_s2"][
+        "max_absolute_difference"] > 0.0

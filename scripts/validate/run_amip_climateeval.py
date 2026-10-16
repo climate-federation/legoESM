@@ -147,6 +147,34 @@ def restrict_suite_def(
     return suite_def
 
 
+def drop_not_produced(suite_def: list[Any], not_produced: list[str]) -> tuple[list[Any], list[str]]:
+    """Remove every variable the run deliberately does not produce (e.g. 2 m
+    ``tas`` without a surface layer) so its suite still scores the rest instead
+    of being skipped whole.  Returns ``(suite_def, removed_variable_ids)``;
+    a diagnostic block left with no variable is dropped.  Mutates in place,
+    so pass the copy ``restrict_suite_def`` returned."""
+    removed: list[str] = []
+    drop = set(not_produced)
+    seen: set[int] = set()
+    emptied: set[int] = set()
+    for block in suite_def:
+        variables = block.get("variables") if isinstance(block, dict) else None
+        if not isinstance(variables, list) or id(variables) in seen:
+            continue
+        seen.add(id(variables))   # anchors share one list between blocks
+        keep = [v for v in variables
+                if not (isinstance(v, dict) and v.get("id") in drop)]
+        removed += [v["id"] for v in variables
+                    if isinstance(v, dict) and v.get("id") in drop]
+        if variables and not keep:
+            emptied.add(id(variables))
+        variables[:] = keep
+    suite_def = [b for b in suite_def
+                 if not (isinstance(b, dict)
+                         and id(b.get("variables")) in emptied)]
+    return suite_def, sorted(set(removed))
+
+
 def suite_db_path(output_dir: Path, suite: str) -> Path:
     """Canonical per-suite DuckDB path under the run's output directory."""
     return output_dir / f"climateeval_{suite}.ddb"
@@ -211,6 +239,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
              "climateeval.data class (e.g. climateeval.data.ERA5Monthly). "
              "Default: keep each variable's suite-declared reference, so the "
              "TOA fluxes score against CERES-EBAF instead of being dropped.")
+    parser.add_argument("--not-produced", nargs="+", default=[], metavar="VAR",
+                        help="Variables the run deliberately does not produce "
+                             "(e.g. tas under surface_bulk_scheme='none'); "
+                             "reported as 'not produced' and left out of "
+                             "scoring instead of failing their suites.")
     parser.add_argument("--fail-on-missing-data", action="store_true", default=False)
     parser.add_argument("--download-missing-data", action="store_true", default=False)
     parser.add_argument("--output-dir", required=True,
@@ -289,6 +322,12 @@ def main(argv: list[str] | None = None) -> int:
                     yaml.safe_load(f), force_reference=args.force_reference
                 )
             suite_def = restrict_suite_def(suite_def, suite, args.diagnostics, args.months)
+            suite_def, gone = drop_not_produced(suite_def, args.not_produced)
+            for var in gone:
+                print(f"NOT PRODUCED: {var} (suite {suite}); not scored")
+            if not suite_def:
+                skipped.append(f"{suite}: every variable not produced")
+                continue
             with tmp_yml.open("w") as f:
                 yaml.dump(suite_def, f)
             Suite(

@@ -77,6 +77,9 @@ _MULTILAYER_OPTIONAL_ARRAY_FIELDS = (
     # Layered snowpack (present iff snow_scheme == "layered"): the pack's water,
     # enthalpy and density, which snow_depth alone cannot rebuild.
     *_SNOW_LAYER_FIELDS,
+    # Snow thermal node temperature (present iff the snow node is enabled);
+    # prognostic, so it must round-trip rather than be re-initialised.
+    "T_snow",
 )
 
 
@@ -538,6 +541,12 @@ def merge_land_restart_into_template(loaded, template):
     for name in _MULTILAYER_OPTIONAL_ARRAY_FIELDS:
         arr = getattr(loaded, name, None)
         ref = getattr(template, name, None)
+        if name == "T_snow" and arr is not None and ref is None:
+            # A prognostic temperature, not a mass reservoir: dropping it would
+            # silently turn a snow-node state into a heat-free bucket.
+            raise ValueError(
+                "land restart carries the snow-node temperature 'T_snow' but "
+                "this run has no snow thermal node; refusing to discard it.")
         if arr is None or ref is None:
             continue  # feature off on one end -> keep template structure, invent no mass
         if hasattr(arr, "shape") and hasattr(ref, "shape") and arr.shape != ref.shape:
@@ -545,7 +554,14 @@ def merge_land_restart_into_template(loaded, template):
                 f"land restart field '{name}' has shape {tuple(arr.shape)}, "
                 f"expected {tuple(ref.shape)} (band-count / resolution skew)")
         fields[name] = arr
-    return template._replace(**fields)
+    merged = template._replace(**fields)
+    if template.T_snow is not None and getattr(loaded, "T_snow", None) is None:
+        # A restart without the snow node into a run with it: start the node
+        # from the RESTORED soil and snow (top soil capped at freezing under
+        # snow, user decision 2026-10-03), never the template's cold-start value.
+        from legoesm.land.multilayer_land import init_snow_temperature
+        merged = init_snow_temperature(merged)
+    return merged
 
 # --- soil-hydraulics stamp ------------------------------------------------
 # Which retention curve and which parameter set a saved soil state was evolved
@@ -562,13 +578,14 @@ HYDRAULICS_SOURCE_SURFDATA_COSBY = "surfdata_cosby"    # build_soil_hydraulics (
 # it, checksums of the file it came from) is provenance and never compared.
 _STAMP_COMPAT_KEYS = ("version", "retention_curve", "parameter_source",
                       "parameter_md5")
+_MD5_CHUNK_BYTES = 1 << 24    # file read size for the md5, not physics
 
 
 def file_md5(path) -> str:
     """md5 of a file's bytes (chunked)."""
     h = hashlib.md5()
     with open(path, "rb") as fh:
-        for chunk in iter(lambda: fh.read(1 << 24), b""):
+        for chunk in iter(lambda: fh.read(_MD5_CHUNK_BYTES), b""):
             h.update(chunk)
     return h.hexdigest()
 
@@ -586,7 +603,9 @@ def soil_hydraulics_stamp(retention_curve: str, parameter_source: str,
                                 HYDRAULICS_SOURCE_SURFDATA_COSBY):
         raise ValueError(f"unknown soil-hydraulics source {parameter_source!r}")
     from legoesm.land.soil_hydraulics import SoilHydraulicsConfig, psi_from_theta
-    psi_from_theta(0.3, SoilHydraulicsConfig(retention_curve=str(retention_curve)))
+    # Rejects an unknown curve name (psi_from_theta raises on it).
+    _cfg = SoilHydraulicsConfig(retention_curve=str(retention_curve))
+    psi_from_theta(_cfg.theta_sat, _cfg)
     return {
         "version": SOIL_HYDRAULICS_STAMP_VERSION,
         "retention_curve": str(retention_curve),

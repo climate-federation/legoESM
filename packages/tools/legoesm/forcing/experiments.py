@@ -517,6 +517,10 @@ def create_experiment_config(
         if gt in _GRID_DEFAULT_MODEL:
             dycore_ov["model_type"] = _GRID_DEFAULT_MODEL[gt]
 
+    # The dycore energy fixer (F15/F15b) runs on every grid among these
+    # templates but the spectral (gaussian) one; there the template records
+    # the open sink explicitly.  A caller may still override it.
+    dycore_ov.setdefault("energy_fixer", grid.grid_type != "gaussian")
     dycore = DycoreConfig(**{**DycoreConfig()._asdict(), **dycore_ov})
     output = OutputConfig(**{**OutputConfig()._asdict(), **output_ov})
 

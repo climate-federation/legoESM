@@ -34,11 +34,17 @@ clouds, L36) is preserved runnable as `config/amip/amip_sundqvist_l36.yaml`.
 
 ## How to run an AMIP CMIP simulation
 
-`scripts/run/run_amip_cmip6_deck.py` is the one entry point for a full
-CMIP6-protocol AMIP run (prescribed SST/SIC + transient GHG, ozone, solar,
-aerosol, volcanic).  It wraps the low-level `run_amip.py`, pins the
-production physics stack, and works on **every grid** (cubed-sphere,
-lat-lon, Gaussian/spectral, MPAS/Voronoi).
+Production AMIP is `scripts/run/run_amip.py --config
+config/amip/amip_production.yaml` plus the machine input paths of
+`config/amip/amip_production.sh` (Levante) or
+`config/amip/amip_production.ginsburg.sh` (Ginsburg).
+
+`scripts/run/run_amip_smoke_deck.py` (formerly `run_amip_cmip6_deck.py`) is
+NOT production: it wraps `run_amip.py` with a historical C16 Sundqvist / SBM /
+Louis smoke stack on flat terrain (no land) and synthetic forcing by default,
+to exercise the transient forcing plumbing (prescribed SST/SIC + GHG, ozone,
+solar, aerosol, volcanic) on **every grid** (cubed-sphere, lat-lon,
+Gaussian/spectral, MPAS/Voronoi).
 
 Pick the level that matches what you want:
 
@@ -56,7 +62,7 @@ python scripts/validate/smoke_test_amip_all_grids.py --days 1
 #   voronoi/mpas   (standard dt; integrator auto-mapped to ssp_rk54_scan)
 
 # Or a single short run on one grid:
-JAX_ENABLE_X64=1 python scripts/run/run_amip_cmip6_deck.py \
+JAX_ENABLE_X64=1 python scripts/run/run_amip_smoke_deck.py \
     --grid-type cubed_sphere --discretization finite_volume \
     --resolution 16 --days 30 --ic default \
     --output results/amip_smoke
@@ -74,7 +80,7 @@ wired on cubed-sphere / lat-lon / Gaussian (MPAS falls back to the uniform
 IC for now).
 
 ```bash
-JAX_ENABLE_X64=1 python scripts/run/run_amip_cmip6_deck.py \
+JAX_ENABLE_X64=1 python scripts/run/run_amip_smoke_deck.py \
     --grid-type cubed_sphere --discretization finite_volume \
     --resolution 36 --days 120 --dt-auto \
     --radiation rrtmg --ic era5 \
@@ -95,7 +101,7 @@ python scripts/data/stage_amip_realdata.py --print-esgf
 python scripts/data/stage_amip_realdata.py --sst-file /data/tosbcs_input4MIPs_*.nc
 
 # 2. One 30-year run with real SST + ERA5 IC:
-JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 python scripts/run/run_amip_cmip6_deck.py \
+JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 python scripts/run/run_amip_smoke_deck.py \
     --grid-type cubed_sphere --discretization finite_volume \
     --resolution 36 --days 10950 --dt-auto \
     --rad-update-steps 18 --diag-days 30 --checkpoint-days 365 \

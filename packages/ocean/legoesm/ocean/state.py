@@ -1521,6 +1521,14 @@ class BarotropicConfig(NamedTuple):
     # the PCG's global dots are plain local sums (``is_multi_process()``
     # gate), so this is safe pre-arming inside an MPI job.
     barotropic_implicit_force_pcg: bool = False
+    # Diagnostic only (default off = hot path unchanged): after every
+    # implicit-CN solve, compute the TRUE global relative residual
+    # ||rhs - A eta|| / ||rhs|| of the returned eta (post mass projection,
+    # unweighted, so every PCG variant is scored in the same norm) and hand
+    # it to the host via barotropic_common.record_true_residual.  Costs one
+    # extra A_op + one reduction + a host callback per step: never time a
+    # run with it on.
+    barotropic_implicit_record_true_residual: bool = False
     # Distributed-PCG body variant (only used on the fixed-M PCG path):
     #   "standard"      — 2 sequentially-dependent reductions/iter.
     #   "single_reduce" — Chronopoulos-Gear recurrences, ONE batched

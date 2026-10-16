@@ -113,9 +113,10 @@ def _run_worker(args) -> int:
     jax.config.update("jax_enable_x64", True)
     from jax.sharding import Mesh
     from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
-        FV3DuoConfig,
-        FV3DuoDynamicsModel,
-    )
+    FV3DuoConfig,
+    FV3DuoDynamicsModel,
+    ORACLE_DAMPING,
+)
     from legoesm.grids.factory import create_fv3_duo_grid
 
     rank = jax.process_index()
@@ -124,7 +125,7 @@ def _run_worker(args) -> int:
             f"expected {args.devices} global devices, got {jax.device_count()}")
     kt, partition = partition_for_devices(args.devices)
     grid = create_fv3_duo_grid(args.n)
-    cfg = FV3DuoConfig(
+    cfg = FV3DuoConfig(**ORACLE_DAMPING, 
         km=args.km, hydrostatic=not args.nh, n_split=args.n_split)
     if args.devices == 1:
         model = FV3DuoDynamicsModel(grid, cfg, step_windows=(kt, args.pad))

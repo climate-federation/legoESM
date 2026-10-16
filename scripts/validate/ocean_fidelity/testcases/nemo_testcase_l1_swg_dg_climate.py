@@ -16,6 +16,9 @@ import numpy as np
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+from nemo_testcase_checkout import bootstrap_checkout  # noqa: E402
+
+CHECKOUT_IMPORT = bootstrap_checkout(__file__, enforce_x64=__name__ == "__main__")
 from nemo_testcase_phase3_trajectory_gate import require  # noqa: E402
 
 NEMO_FIELDS = {"T": "sossheig", "U": "vozocrtx", "V": "vomecrty"}
@@ -54,7 +57,7 @@ def array_digest(value: np.ndarray) -> str:
     return hashlib.sha256(np.ascontiguousarray(value).tobytes()).hexdigest()
 
 
-def _require_legoesm_deck(namelist: dict, expected_namelist=None) -> None:
+def require_legoesm_deck(namelist: dict, expected_namelist=None) -> None:
     """Bind a legoESM manifest to one explicitly selected resolved deck."""
     if expected_namelist is None:
         from legoesm.ocean.fidelity.nemo_testcase_recipe import (
@@ -73,24 +76,20 @@ def _require_legoesm_deck(namelist: dict, expected_namelist=None) -> None:
                 f"legoESM manifest deck differs at {field}")
 
 
-def _require_nemo_deck(root: Path) -> dict:
-    """Bind an IOIPSL directory to the operator's resolved SWG_DG deck."""
+def require_nemo_deck(root: Path) -> dict:
+    """Bind an IOIPSL directory to its manifest and resolved SWG_DG deck."""
     executable = root / "nemo"
     require(executable.is_file(), f"missing NEMO executable {executable}")
-    require(sha256(executable) == NEMO_DG_EXECUTABLE_SHA256,
-            "NEMO executable is not the registered SWG_DG build")
-    pins = {
-        "nemo": NEMO_DG_EXECUTABLE_SHA256,
-        "namelist_cfg": NEMO_DG_NAMELIST_CFG_SHA256,
-        "namelist_ref": NEMO_DG_NAMELIST_REF_SHA256,
-    }
     manifest_path = root / "manifest.sha256"
     require(manifest_path.is_file(), f"missing NEMO manifest {manifest_path}")
     manifest = {}
     for line in manifest_path.read_text().splitlines():
         digest, name = line.split(maxsplit=1)
         manifest[name] = digest
-    require(manifest == pins, "NEMO manifest does not describe the registered deck")
+    required_pins = {"nemo", "namelist_cfg", "namelist_ref"}
+    require(required_pins <= set(manifest),
+            "NEMO manifest does not pin nemo, namelist_cfg, and namelist_ref")
+    pins = {name: manifest[name] for name in required_pins}
     for name, digest in pins.items():
         require((root / name).is_file() and sha256(root / name) == digest,
                 f"NEMO deck digest mismatch: {name}")
@@ -122,10 +121,14 @@ def _require_nemo_deck(root: Path) -> dict:
         actual = float(resolved[field])
         require(actual == value, f"resolved NEMO deck differs at {field}")
     return {
-        "executable_sha256": NEMO_DG_EXECUTABLE_SHA256,
+        "executable_sha256": pins["nemo"],
+        "matches_2026_10_13_reference_build": (
+            pins["nemo"] == NEMO_DG_EXECUTABLE_SHA256
+            and pins["namelist_cfg"] == NEMO_DG_NAMELIST_CFG_SHA256
+            and pins["namelist_ref"] == NEMO_DG_NAMELIST_REF_SHA256),
         "manifest_sha256": sha256(manifest_path),
-        "namelist_cfg_sha256": NEMO_DG_NAMELIST_CFG_SHA256,
-        "namelist_ref_sha256": NEMO_DG_NAMELIST_REF_SHA256,
+        "namelist_cfg_sha256": pins["namelist_cfg"],
+        "namelist_ref_sha256": pins["namelist_ref"],
         "resolved_namelist_sha256": sha256(resolved_path),
         "resolved_values": {field: resolved[field] for field in expected},
     }
@@ -134,6 +137,7 @@ def _require_nemo_deck(root: Path) -> dict:
 def assemble_coordinate_tiles(
         tiles: Iterable[tuple[np.ndarray, np.ndarray, np.ndarray]],
         expected_lon: np.ndarray, expected_lat: np.ndarray,
+        *, word_exact: bool = False,
 ) -> np.ndarray:
     """Assemble overlapping rank tiles by coordinates, refusing conflicts."""
     expected_lon = np.asarray(expected_lon)
@@ -148,12 +152,17 @@ def assemble_coordinate_tiles(
     }
     require(len(keys) == expected_lon.size,
             "expected coordinates are not unique")
-    assembled = np.empty(expected_lon.shape, dtype=np.float64)
+    tiles = list(tiles)
+    require(bool(tiles), "no coordinate tiles supplied")
+    source_dtype = np.asarray(tiles[0][2]).dtype
+    dtype = source_dtype if word_exact else np.dtype("float64")
+    assembled = np.empty(expected_lon.shape, dtype=dtype)
     filled = np.zeros(expected_lon.shape, dtype=bool)
     for lon, lat, values in tiles:
         lon, lat, values = np.asarray(lon), np.asarray(lat), np.asarray(values)
         require(lon.shape == lat.shape == values.shape,
                 "rank tile coordinate/value shapes differ")
+        require(values.dtype == source_dtype, "rank tile dtypes differ")
         require(np.all(np.isfinite(values)), "rank tile has non-finite values")
         for key, value in zip(
                 zip(lon.flat, lat.flat, strict=True), values.flat, strict=True):
@@ -161,7 +170,13 @@ def assemble_coordinate_tiles(
             if at is None:  # NEMO outer or inter-rank halo outside card storage.
                 continue
             if filled[at]:
-                require(assembled[at] == value,
+                equal = assembled[at] == value
+                if word_exact and source_dtype.kind == "f":
+                    word = np.dtype(f"u{dtype.itemsize}")
+                    equal = bool(
+                        np.asarray([assembled[at]], dtype=dtype).view(word)[0]
+                        == np.asarray([value], dtype=dtype).view(word)[0])
+                require(equal,
                         f"conflicting rank overlap at coordinate {key}")
             else:
                 assembled[at] = value
@@ -192,7 +207,7 @@ def nemo_ioipsl_provider(
     import netCDF4
 
     require(start_day > 0 and days > 0, "NEMO window must be positive")
-    deck_provenance = _require_nemo_deck(root)
+    deck_provenance = require_nemo_deck(root)
     coordinates = _expected_coordinates()
     paths = {
         kind: sorted(root.glob(f"SWG_*_grid_{kind}_*.nc"))
@@ -294,7 +309,7 @@ def legoesm_npz_provider(
             SWG_MADDISON_NAMELIST,
         )
         expected_namelist = SWG_MADDISON_NAMELIST
-    _require_legoesm_deck(manifest.get("namelist", {}), expected_namelist)
+    require_legoesm_deck(manifest.get("namelist", {}), expected_namelist)
     complete = [root / f"day{day:04d}.npz"
                 for day in range(1, total_days + 1)]
     require(sorted(root.glob("day????.npz")) == complete,
@@ -373,7 +388,7 @@ def filtered_npz_provider(
             and manifest.get("completed_days") == total_days
             and isinstance(total_days, int) and total_days >= stop_day,
             "filtered manifest does not contain the complete requested window")
-    _require_legoesm_deck(
+    require_legoesm_deck(
         manifest.get("target_namelist", {}), SWG_DG50_NAMELIST)
     sampling = manifest.get("sampling")
     require(sampling in ("daily_snapshot", "daily_mean"),
@@ -571,10 +586,10 @@ def _diagnose_registered(
     if geometry is None:
         if card is None:
             card = build_swg_card(SWG_MADDISON_NAMELIST)
-        from nemo_testcase_l1_swg_ladder import _card_masks
+        from nemo_testcase_l1_swg_ladder import card_masks
         source = swg_horizontal_coordinates(SWG_MADDISON_NAMELIST)
         geometry = {
-            "masks": _card_masks(card),
+            "masks": card_masks(card),
             "area": np.asarray(card.recipe.grid.area),
             "x": np.asarray(source["glamt"]),
             "y": np.asarray(source["gphit"]),
@@ -673,10 +688,10 @@ def _diagnose_online(
     require(card is not None and namelist is not None,
             "online diagnostics require a card and resolved namelist")
     if geometry is None:
-        from nemo_testcase_l1_swg_ladder import _card_masks
+        from nemo_testcase_l1_swg_ladder import card_masks
         source = swg_horizontal_coordinates(namelist)
         geometry = {
-            "masks": _card_masks(card),
+            "masks": card_masks(card),
             "area": np.asarray(card.recipe.grid.area),
             "x": np.asarray(source["glamt"]),
             "y": np.asarray(source["gphit"]),
@@ -1023,7 +1038,12 @@ def main(argv=None) -> int:
     except Exception as exc:  # noqa: BLE001 - fail-closed instrument boundary
         print(f"REFUSE: {exc}", file=sys.stderr)
         return 2
-    print(f"PASS {report['label']} -> {args.output}")
+    # The instrument computes and records statistics for both models; it
+    # applies no agreement test, so its final line must not read as a verdict.
+    first, last = report["window_days"]
+    print(f"SWG_DG_CLIMATE_REPORT_WRITTEN window={first}-{last} "
+          f"label={report['label']!r} agreement_test=none "
+          f"output={args.output}")
     return 0
 
 

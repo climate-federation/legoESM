@@ -17,6 +17,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import NamedTuple
 
+import logging
+
 import jax
 import numpy as np
 
@@ -35,6 +37,8 @@ from legoesm.io.state_digest import compute_state_digest, pytree_state_digest
 # Lazy imports to avoid circular dependency:
 #   io.restart → driver.config → driver.__init__ → model_driver → io.restart
 # We import ExperimentConfig and its serializer at function level instead.
+logger = logging.getLogger(__name__)
+
 _ExperimentConfig = None
 _experiment_config_to_dict = None
 
@@ -135,15 +139,30 @@ def detect_config_kind(config) -> str:
     return "atmosphere"
 
 
+# Kinds serialized with the recursive tagged NamedTuple codec (it lives in
+# ``legoesm.ocean.config`` but is component-agnostic).  "land" and "coupled"
+# records are plain dicts of a runner's resolved config + run controls.
+_TAGGED_CONFIG_KINDS = ("ocean", "land", "coupled")
+
+
+def _check_config_kind(kind: str) -> None:
+    if kind != "atmosphere" and kind not in _TAGGED_CONFIG_KINDS:
+        raise ValueError(
+            f"unknown run-manifest config_kind {kind!r}; expected 'atmosphere' "
+            f"or one of {_TAGGED_CONFIG_KINDS}")
+
+
 def _serialize_config(config, kind: str) -> dict:
-    if kind == "ocean":
+    _check_config_kind(kind)
+    if kind in _TAGGED_CONFIG_KINDS:
         from legoesm.ocean.config import ocean_config_to_dict
         return ocean_config_to_dict(config)
     return _config_to_dict_any(config)
 
 
 def _deserialize_config(resolved: dict, kind: str):
-    if kind == "ocean":
+    _check_config_kind(kind)
+    if kind in _TAGGED_CONFIG_KINDS:
         from legoesm.ocean.config import ocean_config_from_dict
         return ocean_config_from_dict(resolved)
     from legoesm.driver.config import experiment_config_from_dict
@@ -190,16 +209,32 @@ def config_hash_matches(stored_hash: str, stored_resolved: dict, config,
     # False, and bricked every older run directory even with the new flag at
     # its default (codex round 2 on that PR, reproduced).
     try:
-        current = _serialize_config(config, kind)
-        defaults = _serialize_config(type(config)(), kind)
+        # a manifest written before a key rename spells it the old way
+        current = _stored_spelling(_serialize_config(config, kind),
+                                   stored_resolved)
+        if hashlib.sha256(json.dumps(current, sort_keys=True).encode(
+                "utf-8")).hexdigest() == stored_hash:
+            return True
+        defaults = _stored_spelling(_serialize_config(type(config)(), kind),
+                                    stored_resolved)
+        accepted: list[str] = []
         restricted = _restrict_to_stored_shape(current, stored_resolved,
-                                               defaults)
+                                               defaults, accepted)
         if restricted is _REFUSE:
             return False          # a NEW field sits at a NON-default value
         if restricted == current:
             return False          # nothing grew; the hash mismatch is real
         text = json.dumps(restricted, sort_keys=True)
-        return hashlib.sha256(text.encode("utf-8")).hexdigest() == stored_hash
+        ok = hashlib.sha256(text.encode("utf-8")).hexdigest() == stored_hash
+        if ok:
+            # A new field at today's default is NOT proof it matches the old
+            # behaviour (a fix whose default changes the physics passes this
+            # test) -- so name every field accepted this way.
+            logger.warning(
+                "config_hash_matches: accepted stored manifest by schema-growth "
+                "tolerance; fields absent from the manifest and taken at "
+                "today's defaults: %s", ", ".join(sorted(accepted)))
+        return ok
     except Exception:
         return False  # cannot prove schema growth: fail closed (strict)
 
@@ -213,7 +248,24 @@ def config_hash_matches(stored_hash: str, stored_resolved: dict, config,
 _REFUSE = object()
 
 
-def _restrict_to_stored_shape(current, stored, defaults):
+def _stored_spelling(cur, stored):
+    """*cur* with every renamed key (config.RENAMED_CONFIG_KEYS) spelled the
+    old way where *stored* (at the same depth) spells it so."""
+    if not (isinstance(cur, dict) and isinstance(stored, dict)):
+        return cur
+    from legoesm.driver.config import RENAMED_CONFIG_KEYS
+    old_of = {new: old for old, new in RENAMED_CONFIG_KEYS.items()}
+    out = {}
+    for k, v in cur.items():
+        # a manifest spelling the key both ways (equal values) hashes both
+        names = [n for n in (k, old_of.get(k)) if n in stored] or [k]
+        for n in names:
+            out[n] = _stored_spelling(v, stored.get(n))
+    return out
+
+
+def _restrict_to_stored_shape(current, stored, defaults, accepted=None,
+                              _path=""):
     """Project *current* onto the key shape *stored* has, AT ANY DEPTH.
 
     Returns the projection, or :data:`_REFUSE` when a key present in *current*
@@ -231,7 +283,8 @@ def _restrict_to_stored_shape(current, stored, defaults):
     out = {}
     for k, v in current.items():
         if k in stored:
-            sub = _restrict_to_stored_shape(v, stored[k], defaults.get(k))
+            sub = _restrict_to_stored_shape(v, stored[k], defaults.get(k),
+                                            accepted, f"{_path}{k}.")
             if sub is _REFUSE:
                 return _REFUSE
             out[k] = sub
@@ -239,6 +292,8 @@ def _restrict_to_stored_shape(current, stored, defaults):
         # A key the manifest never stored: tolerated ONLY as a schema default.
         if k not in defaults or v != defaults[k]:
             return _REFUSE
+        if accepted is not None:
+            accepted.append(f"{_path}{k}")
     return out
 
 
@@ -343,6 +398,214 @@ def _meta_path(checkpoint_path: Path) -> Path:
 # invalidates resume-into-existing-dir for every older manifest — populating an
 # already-present optional field (e.g. dataset_provenance) is NOT a bump.
 RUN_MANIFEST_SCHEMA_VERSION = 1
+
+#: Environment variable that lets a driver continue a restart chain on code that
+#: may differ from the code that wrote it.  Values "1"/"true"/"yes" enable.
+ALLOW_VERSION_DRIFT_ENV = "LEGOESM_ALLOW_VERSION_DRIFT"
+
+
+def version_drift_allowed(environ=None) -> bool:
+    env = os.environ if environ is None else environ
+    return str(env.get(ALLOW_VERSION_DRIFT_ENV, "")).strip().lower() in (
+        "1", "true", "yes")
+
+
+def version_drift(recorded_commit: str, recorded_dirty: bool = False,
+                  recorded_patches=()) -> list[str]:
+    """Reasons the IMPORTED code may differ from the code that wrote a record.
+
+    Empty list = no drift.  Until the uncommitted diff itself is recorded, a
+    dirty tree or an applied patch on EITHER side counts as drift: the commit
+    alone cannot prove the code matched.  An unknown commit on either side
+    also counts (fail closed).
+    """
+    cur = git_provenance(_package_anchor())
+    reasons = []
+    if not recorded_commit:
+        reasons.append("the recorded legoESM commit is unknown")
+    if not cur.commit:
+        reasons.append("the imported legoESM is not a git checkout "
+                       "(commit unknown)")
+    if recorded_commit and cur.commit and recorded_commit != cur.commit:
+        reasons.append(f"recorded commit {recorded_commit[:12]} != imported "
+                       f"commit {cur.commit[:12]}")
+    if recorded_dirty:
+        reasons.append("the recorded run had uncommitted changes")
+    if cur.dirty:
+        reasons.append(f"the imported tree {cur.root} has uncommitted changes")
+    if recorded_patches:
+        reasons.append(f"the recorded run applied patches "
+                       f"{list(recorded_patches)}")
+    return reasons
+
+
+def refuse_version_drift(reasons: list[str], what: str) -> None:
+    """Raise ``RuntimeError`` when *reasons* is non-empty, unless
+    ``LEGOESM_ALLOW_VERSION_DRIFT`` is set (then only warn)."""
+    if not reasons:
+        return
+    detail = "; ".join(reasons)
+    if version_drift_allowed():
+        # ponytail: logged only -- the override is not written into the new
+        # manifest; record it there once the environment block (P1) lands.
+        logger.warning(f"Continuing from {what} despite version drift "
+                       f"({ALLOW_VERSION_DRIFT_ENV} set): {detail}")
+        return
+    raise RuntimeError(
+        f"Refusing to continue from {what}: the code may differ from the code "
+        f"that wrote it ({detail}). Commit and use the same commit, or set "
+        f"{ALLOW_VERSION_DRIFT_ENV}=1 to continue anyway (see "
+        f"docs/architecture/reproducibility.md).")
+
+
+def manifest_file_version_drift(path) -> list[str]:
+    """:func:`manifest_version_drift` for a manifest FILE; an unreadable or
+    schema-invalid manifest proves nothing about the code, so it is drift."""
+    try:
+        manifest = read_run_manifest(path)
+        validate_run_manifest(manifest)
+    except Exception as exc:  # noqa: BLE001 — becomes a refusal reason
+        return [f"{path} is not a valid run manifest ({exc})"]
+    return manifest_version_drift(manifest)
+
+
+def collective_version_drift_gate(reasons_fn, what: str) -> None:
+    """:func:`collective_root_gate` on the version-drift refusal."""
+    collective_root_gate(
+        lambda: refuse_version_drift(reasons_fn(), what), f"version drift: {what}")
+
+
+def collective_root_gate(fn, what: str) -> None:
+    """Call on EVERY process at the same point, before rank-local work.
+
+    Process 0 runs ``fn()``; whether it raised is broadcast (JAX
+    multi-controller or mpi4py, whichever this run uses) so a refusal or
+    failure raises on every process instead of stranding the others in a
+    collective.
+    """
+    comm = None
+    if jax.process_count() > 1:
+        root = jax.process_index() == 0
+    else:
+        mpi = sys.modules.get("mpi4py.MPI")  # only if this run already uses MPI
+        if (mpi is not None and mpi.Is_initialized()
+                and mpi.COMM_WORLD.Get_size() > 1):
+            comm = mpi.COMM_WORLD
+        root = comm is None or comm.Get_rank() == 0
+    error = None
+    if root:
+        try:
+            fn()
+        except Exception as exc:  # noqa: BLE001 — re-raised after the vote
+            error = exc
+    failed = error is not None
+    if jax.process_count() > 1:
+        from jax.experimental import multihost_utils
+        failed = bool(int(np.asarray(multihost_utils.broadcast_one_to_all(
+            np.asarray(int(failed), dtype=np.int32), is_source=root))))
+    elif comm is not None:
+        failed = comm.bcast(failed, root=0)
+    if error is not None:
+        raise error
+    if failed:
+        raise RuntimeError(f"refused on process 0 ({what})")
+
+
+def resolved_config_record(config, kind: str | None = None) -> dict:
+    """*config* exactly as a manifest's ``config.resolved_config`` stores it."""
+    return _json_safe(_serialize_config(config, kind or detect_config_kind(config)))
+
+
+def manifest_version_drift(manifest: dict) -> list[str]:
+    """:func:`version_drift` against a run manifest's recorded provenance."""
+    repro = manifest.get("reproducibility") or {}
+    dirty, patches = repro.get("git_dirty"), repro.get("patches")
+    reasons = []
+    if not isinstance(dirty, bool):
+        reasons.append(f"the manifest does not record 'git_dirty' ({dirty!r})")
+    if not isinstance(patches, list):
+        reasons.append(f"the manifest does not record 'patches' ({patches!r})")
+    return reasons + version_drift(
+        (manifest.get("legoESM") or {}).get("commit", ""),
+        dirty is True, patches or [])
+_MISSING = "<absent>"
+
+
+def config_drift_rows(stored: dict, rebuilt: dict, prefix: str = "") -> list:
+    """(dotted_field, stored, rebuilt) for every field that differs;
+    ``<absent>`` marks a field present on one side only."""
+    rows = []
+    for k in sorted(set(stored) | set(rebuilt)):
+        a, b = stored.get(k, _MISSING), rebuilt.get(k, _MISSING)
+        if isinstance(a, dict) and isinstance(b, dict):
+            rows += config_drift_rows(a, b, f"{prefix}{k}.")
+        elif json.dumps(a, sort_keys=True) != json.dumps(b, sort_keys=True):
+            rows.append((f"{prefix}{k}", a, b))   # JSON text: NaN equals NaN
+    return rows
+
+
+# Entries every lane writes into ``config.resolved_physics``.
+RESOLVED_PHYSICS_KEYS = ("convection", "microphysics", "turbulence",
+                         "gravity_wave_drag", "radiation", "cloud", "land",
+                         "land_albedo", "solar", "ozone", "aerosol", "ghg",
+                         "rollout", "turbulence_override",
+                         "gravity_wave_drag_override")
+
+
+def resolved_physics_record(configs: dict) -> dict:
+    """``{name: scheme *Config}`` as a manifest's ``config.resolved_physics``
+    stores it: every NamedTuple level tagged with its type, so a scheme swap
+    or a renamed field shows up, not only a changed value."""
+    from legoesm.ocean.config import ocean_config_to_dict
+    return _json_safe({k: ocean_config_to_dict(v) for k, v in configs.items()})
+
+
+def physics_config_from_record(obj):
+    """Rebuild a scheme config from its :func:`resolved_physics_record` entry,
+    strictly: a missing or extra field, a non-``legoesm`` type, or an array
+    stored only as a summary is an error, never filled or dropped."""
+    if isinstance(obj, dict) and "__array_summary__" in obj:
+        raise ValueError("an array-valued config leaf is recorded only as a "
+                         "summary and cannot be replayed")
+    if isinstance(obj, dict) and "__type__" in obj:
+        import importlib
+        module, _, qualname = obj["__type__"].partition(":")
+        if not module.startswith("legoesm."):
+            raise ValueError(f"refusing to rebuild non-legoesm type {obj['__type__']!r}")
+        cls = importlib.import_module(module)
+        for part in qualname.split("."):
+            cls = getattr(cls, part)
+        if not (isinstance(cls, type) and issubclass(cls, tuple)
+                and hasattr(cls, "_fields")
+                and cls.__module__.startswith("legoesm.")):
+            raise ValueError(f"{obj['__type__']!r} is not a legoesm config type")
+        fields = {k: v for k, v in obj.items() if k != "__type__"}
+        if set(fields) != set(cls._fields):
+            raise ValueError(
+                f"{obj['__type__']}: recorded fields differ from today's code "
+                f"(missing {sorted(set(cls._fields) - set(fields))}, "
+                f"extra {sorted(set(fields) - set(cls._fields))})")
+        return cls(**{k: physics_config_from_record(v) for k, v in fields.items()})
+    if isinstance(obj, dict):
+        return {k: physics_config_from_record(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [physics_config_from_record(v) for v in obj]
+    return obj
+
+
+def physics_closure_rows(recorded: dict, current: dict) -> list:
+    """Rows where *current* resolved physics differs from *recorded*; empty
+    when equal.  Equality is on canonical JSON text, so a NaN leaf compares
+    equal to itself."""
+    if json.dumps(recorded, sort_keys=True) == json.dumps(current, sort_keys=True):
+        return []
+    return config_drift_rows(recorded, current) or [("resolved_physics", recorded, current)]
+
+
+def format_drift_rows(rows: list) -> str:
+    return "\n".join(f"  {k}: recorded={a!r} -> now={b!r}" for k, a, b in rows)
+
+
 RUN_MANIFEST_FILENAME = "run_manifest.json"
 
 
@@ -603,6 +866,61 @@ def write_run_manifest(directory, config, *, exclusive: bool = False, **kwargs) 
     return path
 
 
+def write_run_manifest_on_root(directory, config, **kwargs) -> Path | None:
+    """Write the manifest from process 0; raise on EVERY process if it failed.
+
+    Call on every process at the same point, before any rank-local work that
+    can raise.  Single-process runs reduce to :func:`write_run_manifest`.  Under
+    multi-process JAX the outcome is broadcast so a failed write aborts all
+    processes instead of leaving the others to hang in the next collective.
+    An existing manifest (a resume or rerun into the same directory) is moved
+    aside to ``run_manifest.prev-<UTC time>-<pid>.json``, never overwritten, so
+    every invocation's record and final digest survive.  The new manifest is
+    created atomic-exclusively, so two concurrent starts cannot clobber each
+    other: the loser archives the winner's manifest and retries.  This is not
+    a run lock: two runs *active at once* in one directory still collide on
+    every output, including the final digest (see ModelDriver's manifest
+    docstring; an active-run lease is a separate, driver-wide feature).
+    Returns the path on process 0, ``None`` elsewhere.
+    """
+    root = jax.process_index() == 0
+    path = error = None
+    if root:
+        try:
+            old = Path(directory) / RUN_MANIFEST_FILENAME
+            stem = old.name.removesuffix(".json")
+            while path is None:
+                try:
+                    path = write_run_manifest(directory, config,
+                                              exclusive=True, **kwargs)
+                except FileExistsError:
+                    # A resume or rerun into a directory that already holds a
+                    # run's record: same drift rule as ModelDriver's resume.
+                    if not old.exists():
+                        continue  # a concurrent start archived it; retry
+                    refuse_version_drift(manifest_file_version_drift(old),
+                                         f"the run manifest at {old}")
+                    stamp = datetime.now(timezone.utc).strftime(
+                        "%Y%m%dT%H%M%S%fZ")
+                    try:
+                        os.replace(old, old.with_name(
+                            f"{stem}.prev-{stamp}-{os.getpid()}.json"))
+                    except FileNotFoundError:
+                        pass  # a concurrent start archived it first; retry
+        except Exception as exc:  # noqa: BLE001 — re-raised below, after the vote
+            error = exc
+    if jax.process_count() > 1:
+        from jax.experimental import multihost_utils
+        failed = int(np.asarray(multihost_utils.broadcast_one_to_all(
+            np.asarray(int(error is not None), dtype=np.int32),
+            is_source=root)))
+        if failed and error is None:
+            raise RuntimeError("run manifest write failed on process 0")
+    if error is not None:
+        raise RuntimeError(f"run manifest not written to {directory}: {error}") from error
+    return path
+
+
 def read_run_manifest(path) -> dict:
     """Load a run manifest written by :func:`write_run_manifest`."""
     path = Path(path)
@@ -699,6 +1017,52 @@ def record_state_digest(manifest_path, state_digest: str, *,
         json.dump(_json_safe(manifest), f, indent=2, sort_keys=True)
     tmp.replace(manifest_path)
     return manifest_path
+
+
+def record_resolved_physics(manifest_path, record: dict) -> Path:
+    """Store ``config.resolved_physics`` in an existing manifest.
+
+    A manifest that already holds a DIFFERENT record (a resume whose physics
+    resolved differently from the run that wrote it) is refused: one output
+    directory holds one run.  An equal record is left untouched.
+    """
+    manifest_path = Path(manifest_path)
+    if manifest_path.is_dir():
+        manifest_path = manifest_path / RUN_MANIFEST_FILENAME
+    manifest = read_run_manifest(manifest_path)
+    validate_run_manifest(manifest)
+    existing = manifest["config"].get("resolved_physics")
+    if existing is not None:
+        rows = physics_closure_rows(existing, record)
+        if rows:
+            raise RuntimeError(
+                f"{manifest_path} records different resolved physics than this "
+                f"run resolved ({len(rows)} fields); refusing to mix two runs' "
+                f"physics in one directory:\n" + format_drift_rows(rows))
+        return manifest_path
+    manifest["config"]["resolved_physics"] = record
+    tmp = manifest_path.with_name(f"{manifest_path.name}.{os.getpid()}.tmp")
+    with open(tmp, "w") as f:
+        json.dump(_json_safe(manifest), f, indent=2, sort_keys=True)
+    tmp.replace(manifest_path)
+    return manifest_path
+
+
+def record_final_state_digest(manifest_path, *trees) -> str | None:
+    """Best-effort: digest the final state *trees* into an existing manifest.
+
+    The run has already finished, so a digest failure (e.g. a non-addressable
+    sharded leaf) is reported, not raised; ``reproduce --check`` then reports
+    the missing reference honestly.
+    """
+    try:
+        digest = pytree_state_digest(*trees)
+        record_state_digest(manifest_path, digest)
+    except Exception as exc:  # noqa: BLE001 — provenance after a completed run
+        print(f"[warn] state_digest not recorded: {type(exc).__name__}: {exc}")
+        return None
+    print(f"[done] recorded state_digest {digest[:16]}... in {manifest_path}")
+    return digest
 
 
 def recorded_state_digest(manifest: dict) -> str:

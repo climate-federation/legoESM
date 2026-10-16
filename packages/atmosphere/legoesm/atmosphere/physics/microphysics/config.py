@@ -254,8 +254,10 @@ __param_spec__ = {
             "graupel_embryo_mass": {"units": "kg", "bounds": (5e-11, 5e-10), "tunable_tier": 3, "transform": "sigmoid", "category": "riming", "reference": "Morrison et al. (2005)", "shape": None},
             "hard_sat_adjust_threshold": {"units": "1", "bounds": (1.0, 2.0), "tunable_tier": 2, "transform": "sigmoid", "category": "condensation", "reference": "hard saturation-adjustment guard", "shape": None},
             "hard_sat_max_heating_K": {"units": "K", "bounds": (0.5, 50.0), "tunable_tier": 2, "transform": "sigmoid", "category": "condensation", "reference": "hard saturation-adjustment guard", "shape": None},
-            "autocon_fact": {"units": "1", "bounds": (0.1, 20.0), "tunable_tier": 2, "transform": "sigmoid", "category": "autoconversion", "reference": "CAM6 MG2 kk2000 (micro_mg_utils.F90) = 0.01*1350*qc^2.47*Nc^-1.1 vs this port's 1350*qc^2.47*Nc^-1.79: ratio 0.01*Nc^0.69 = 0.10-0.51 over Nc 30-300 cm^-3; lower bound covers that CAM6-equivalent range; upper bound 20 leaves room for enhancement tests", "shape": None},
-            "accre_enhan_fact": {"units": "1", "bounds": (0.1, 10.0), "tunable_tier": 2, "transform": "sigmoid", "category": "accretion", "reference": "CAM6 MG2 accre_enhan multiplier on KK2000 accretion (micro_mg_utils.F90 accrete_cloud_water_rain; micro_mg_cam.F90 sets it to 1); bounds one decade each way. MG2 pairs it with the cloud-number sink npra=pra*nc/qc, which this port lacks (N_c is not evolved when predict_Nc=False)", "shape": None},
+            # tier 1 (user decision 2026-10-14): the only warm-rain knobs the
+            # kk2000 laws read, so the production core set trains warm rain.
+            "autocon_fact": {"units": "1", "bounds": (0.1, 20.0), "tunable_tier": 1, "transform": "sigmoid", "category": "autoconversion", "reference": "CAM6 MG2 kk2000 (micro_mg_utils.F90) = 0.01*1350*qc^2.47*Nc^-1.1 vs this port's 1350*qc^2.47*Nc^-1.79: ratio 0.01*Nc^0.69 = 0.10-0.51 over Nc 30-300 cm^-3; lower bound covers that CAM6-equivalent range; upper bound 20 leaves room for enhancement tests", "shape": None},
+            "accre_enhan_fact": {"units": "1", "bounds": (0.1, 10.0), "tunable_tier": 1, "transform": "sigmoid", "category": "accretion", "reference": "CAM6 MG2 accre_enhan multiplier on KK2000 accretion (micro_mg_utils.F90 accrete_cloud_water_rain; micro_mg_cam.F90 sets it to 1); bounds one decade each way. MG2 pairs it with the cloud-number sink npra=pra*nc/qc, which this port lacks (N_c is not evolved when predict_Nc=False)", "shape": None},
         },
     },
     "P3Config": {
@@ -1299,7 +1301,7 @@ def apply_microphysics_experiment_flags(
     (iterated) saturation-adjustment guard (kessler/seifert_beheng/morrison/
     thompson/p3).  This single helper is shared by the coupled
     (``physics_pipeline._resolve_microphysics``) and the combined-physics /
-    MPAS (``model_driver._run_mpas``) paths so the gating + fail-loud
+    MPAS (``model_driver._run_column``) paths so the gating + fail-loud
     validation is written ONCE — a scheme that would silently ignore the
     flag raises instead, on either path (no duplicated dispatch).
 

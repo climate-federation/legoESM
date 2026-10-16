@@ -1177,13 +1177,16 @@ def main(argv=None):
     import jax.numpy as jnp
 
     from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
-        FV3DuoConfig, FV3DuoDynamicsModel)
+    FV3DuoConfig,
+    FV3DuoDynamicsModel,
+    ORACLE_DAMPING,
+)
     from legoesm.core.fv3_acoustic_3d import acoustic_substep_3d
     from legoesm.grids.factory import create_fv3_duo_grid
     from legoesm.grids.fv3_native_gridstruct import FV3_CP_AIR, FV3_KAPPA
 
     grid = create_fv3_duo_grid(args.n)
-    cfg = FV3DuoConfig(km=args.km, hydrostatic=not args.nh)
+    cfg = FV3DuoConfig(**ORACLE_DAMPING, km=args.km, hydrostatic=not args.nh)
     model = FV3DuoDynamicsModel(grid, cfg)
     ctx = model._ctx_jax
     ng = grid.ng

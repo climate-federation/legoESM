@@ -756,7 +756,8 @@ class TestIntegration:
             microphysics=MicrophysicsConfig(scheme="none"),
             gravity_wave_drag=GravityWaveDragConfig(scheme="rayleigh"),
         )
-        physics_fn = make_physics(config, model_type="hydrostatic", dt=300.0)
+        physics_fn = make_physics(config, model_type="hydrostatic", dt=300.0,
+                                  surface_bulk_coeffs=None)
         tendencies, _ = physics_fn(state, grid, sigma)
 
         assert tendencies.du_dt.data.shape == (6, n, n, nlev)

@@ -752,6 +752,29 @@ def _simple_lw_radiation(*, T, p_half, q_v, q_cloud, q_ice, config):
     )
 
 
+def _column_constraint(column_mesh, ncol: int):
+    """Sharding constraint for arrays whose leading axis is the ``ncol`` columns.
+
+    Every other leaf (scalars, per-band tables, None) passes through unchanged.
+    """
+    from jax.sharding import NamedSharding, PartitionSpec as P
+
+    n_dev = column_mesh.shape["col"]
+    if ncol % n_dev:
+        raise ValueError(
+            f"column_mesh: solver column count {ncol} is not divisible by "
+            f"{n_dev} devices")
+
+    def cons(x):
+        if getattr(x, "ndim", 0) >= 1 and x.shape[0] == ncol:
+            spec = P("col", *((None,) * (x.ndim - 1)))
+            return jax.lax.with_sharding_constraint(
+                x, NamedSharding(column_mesh, spec))
+        return x
+
+    return cons
+
+
 def _call_radiation_backend(
     radiation_config: RadiationConfig,
     T: jnp.ndarray,
@@ -774,15 +797,18 @@ def _call_radiation_backend(
     lon: jnp.ndarray | None = None,
     ml_ozone_coefs=None,
     o3_vmr_override: jnp.ndarray | None = None,
+    o3_top_vmr: jnp.ndarray | None = None,
     aerosol_od: jnp.ndarray | None = None,
     aerosol_lw_od: jnp.ndarray | None = None,
     solar_spectral_fraction: jnp.ndarray | None = None,
     eccf: float | jnp.ndarray = 1.0,
+    tsi: jnp.ndarray | None = None,
     cloud_fraction_override: jnp.ndarray | None = None,
     conv_precip: jnp.ndarray | None = None,
     conv_mass_flux_up: jnp.ndarray | None = None,
     conv_icwmr: jnp.ndarray | None = None,
     clear_sky_toa: bool = False,
+    column_mesh=None,
 ):
     """Call configured radiation backend with a unified integration interface.
 
@@ -809,6 +835,11 @@ def _call_radiation_backend(
         takes precedence over the config-driven ``_compute_ozone_vmr``
         (standard / analytical / ML profiles), matching the precedence
         the coupled ``physics_pipeline`` path applies.
+    o3_top_vmr : jnp.ndarray or None
+        Column-mean ozone VMR above the model top (ncol,) for the RRTMGP
+        overhead layer (``RRTMGPConfig.overhead_layer``); used only together
+        with ``o3_vmr_override`` (same source).  ``None`` => the layer takes
+        the top model layer's ozone.
     aerosol_od : jnp.ndarray or None
         Per-layer aerosol optical depth (ncol, nlev) from the external
         forcing pipeline (Kinne climatology + volcanic), passed to the
@@ -865,8 +896,12 @@ def _call_radiation_backend(
     # orbit flag so the circular-orbit path is bit-for-bit unchanged.
     _orbit_on = getattr(radiation_config, "orbit", None) is not None
     _sw_scale = None
+    # Transient TSI: the caller's ``insolation`` is already scaled by
+    # tsi/S_0, but the solver runs at its configured S_0.  So derive the
+    # optical-path cosine with ``tsi`` (stays geometric) and put tsi/S_0 on
+    # the SW flux below.  ``None`` -> byte-identical to the static-S_0 path.
     if cos_sza is None:
-        S_0 = radiation_config.rrtmgp.S_0
+        S_0 = radiation_config.rrtmgp.S_0 if tsi is None else tsi
         if f_day is not None:
             # Use daytime-effective cos(SZA): insol = (a/r)^2·S_0·f_day·<cos>_day
             # so <cos>_day = insol / (eccf·S_0·f_day).  The solver sees the
@@ -890,6 +925,11 @@ def _call_radiation_backend(
         # Diurnal path: cos_sza is already geometric; apply the distance factor
         # to the SW flux (the solver runs with S_0, not S_0·eccf).
         _sw_scale = jnp.full((cos_sza.shape[0],), eccf, dtype=cos_sza.dtype)
+    if tsi is not None:
+        _tsi_ratio = jnp.broadcast_to(
+            tsi / radiation_config.rrtmgp.S_0, (cos_sza.shape[0],)
+        ).astype(cos_sza.dtype)
+        _sw_scale = _tsi_ratio if _sw_scale is None else _sw_scale * _tsi_ratio
     q_v_safe = q_v if q_v is not None else jnp.zeros_like(T)
 
     # Compute ozone VMR based on config — unless the caller supplied a
@@ -969,6 +1009,8 @@ def _call_radiation_backend(
     )
     if clear_sky_toa:
         _rad_kwargs["clear_sky"] = True
+    if o3_top_vmr is not None and o3_vmr_override is not None:
+        _rad_kwargs["o3_top_vmr"] = o3_top_vmr
     # Maximum-random-overlap SUBCOLUMNS (opt-in).  The default path hands
     # every layer's GRID-MEAN water path to ONE homogeneous column, so cloud
     # spread thinly over many partly cloudy layers is solved as one deep
@@ -1017,12 +1059,29 @@ def _call_radiation_backend(
     # super-linear rrtmgp XLA compile time at higher horizontal resolution.
     # Columns are physically independent, so this is numerically EXACT.
     _col_chunk = getattr(radiation_config.rrtmgp, "column_chunk_size", 0)
+    if column_mesh is not None:
+        if _col_chunk and _col_chunk > 0:
+            raise ValueError(
+                "column_mesh with rrtmgp column_chunk_size > 0 is not "
+                "supported: the chunked solve scans over column blocks, so "
+                "the column axis it would shard is a scan axis.")
+        # Constrain the SOLVER's column axis (after the sub-column expansion):
+        # a partition placed only on the physics inputs does not propagate into
+        # the solver's working arrays, which keep full width on every device.
+        from legoesm.atmosphere.physics.clouds.subcolumns import (
+            PER_COLUMN_SOLVER_KEYS,
+        )
+        _cons = _column_constraint(column_mesh, _rad_kwargs["T"].shape[0])
+        _rad_kwargs = {k: (_cons(v) if k in PER_COLUMN_SOLVER_KEYS else v)
+                       for k, v in _rad_kwargs.items()}
     if _col_chunk and _col_chunk > 0:
         result = rrtmgp_solver.solve_columns_chunked(
             column_chunk_size=_col_chunk, **_rad_kwargs,
         )
     else:
         result = rrtmgp_solver.solve_columns(**_rad_kwargs)
+    if column_mesh is not None:
+        result = jax.tree.map(_cons, result)
 
     if _n_sub > 1:
         from legoesm.atmosphere.physics.clouds import subcolumns as _sub
@@ -1248,6 +1307,7 @@ def make_radiation_physics(
             sfc_albedo_override=sfc_albedo_override,
             sfc_emissivity_override=sfc_emissivity_override,
             use_clubb_cloud_fraction=use_clubb_cloud_fraction,
+            column_mesh=column_mesh,
         )
     elif model_type == "mpas":
         return _make_mpas_radiation(radiation_config, rrtmgp_solver,
@@ -1395,6 +1455,9 @@ def _make_hydrostatic_radiation(
         #   aerosol_od  : (ncol, nlev) per-layer aerosol optical depth
         #   ghg_vmr     : dict[str, scalar] transient GHG VMRs
         _o3_ext = forcing.get("o3_vmr") if forcing is not None else None
+        _o3_top_ext = (
+            forcing.get("o3_top_vmr") if forcing is not None else None
+        )
         _aer_ext = forcing.get("aerosol_od") if forcing is not None else None
         _aer_lw_ext = (
             forcing.get("aerosol_lw_od") if forcing is not None else None
@@ -1538,6 +1601,8 @@ def _make_hydrostatic_radiation(
                 T=T_col, p=p_full_col,
                 aerosol_number=(None if _aer_num is None
                                 else jnp.asarray(_aer_num)),
+                ccn_aod=(forcing.get("aerosol_ccn_aod")
+                         if forcing is not None else None),
             )
 
         f_day_col = f_day.reshape(ncol) if f_day is not None else None
@@ -1623,6 +1688,8 @@ def _make_hydrostatic_radiation(
                 f_day_col = shard_columns(f_day_col, column_mesh)
             if _o3_ext is not None:
                 _o3_ext = shard_columns(_o3_ext, column_mesh)
+            if _o3_top_ext is not None:
+                _o3_top_ext = shard_columns(_o3_top_ext, column_mesh)
             if _aer_ext is not None:
                 _aer_ext = shard_columns(_aer_ext, column_mesh)
             if _aer_lw_ext is not None:
@@ -1654,6 +1721,7 @@ def _make_hydrostatic_radiation(
             lon=lon_col,
             ml_ozone_coefs=ml_ozone_coefs,
             o3_vmr_override=_o3_ext,
+            o3_top_vmr=_o3_top_ext,
             aerosol_od=_aer_ext,
             aerosol_lw_od=_aer_lw_ext,
             ghg_vmr_override=_ghg_ext,
@@ -1662,6 +1730,7 @@ def _make_hydrostatic_radiation(
             conv_mass_flux_up=_conv_mf_col,
             conv_icwmr=_conv_icwmr_col,
             solar_spectral_fraction=_ssf_ext,
+            tsi=_tsi_ext,
             clear_sky_toa=_clr_sky_fused,
         )
 
@@ -1705,12 +1774,14 @@ def _make_hydrostatic_radiation(
                 lon=lon_col,
                 ml_ozone_coefs=ml_ozone_coefs,
                 o3_vmr_override=_o3_ext,
+                o3_top_vmr=_o3_top_ext,
                 aerosol_od=_aer_ext,
                 aerosol_lw_od=_aer_lw_ext,
                 ghg_vmr_override=_ghg_ext,
                 cloud_fraction_override=None,
                 conv_precip=None,
                 solar_spectral_fraction=_ssf_ext,
+                tsi=_tsi_ext,
             )
             sw_up_toa_clr = rad_out_clr.sw_flux_up[:, 0]
             lw_up_toa_clr = rad_out_clr.lw_flux_up[:, 0]
@@ -2524,6 +2595,7 @@ def _make_spectral_pe_radiation(
     sfc_albedo_override: jnp.ndarray | float | None = None,
     sfc_emissivity_override: jnp.ndarray | float | None = None,
     use_clubb_cloud_fraction: bool = False,
+    column_mesh=None,
 ) -> Callable:
     """Create radiation physics_fn for SpectralPEModel.
 
@@ -2605,6 +2677,9 @@ def _make_spectral_pe_radiation(
         # (see _make_hydrostatic_radiation): o3_vmr / aerosol_od are
         # (ncol, nlev) columns, ghg_vmr is a dict of traced scalars.
         _o3_ext = forcing.get("o3_vmr") if forcing is not None else None
+        _o3_top_ext = (
+            forcing.get("o3_top_vmr") if forcing is not None else None
+        )
         _aer_ext = forcing.get("aerosol_od") if forcing is not None else None
         _aer_lw_ext = (
             forcing.get("aerosol_lw_od") if forcing is not None else None
@@ -2669,6 +2744,20 @@ def _make_spectral_pe_radiation(
             insol = jnp.broadcast_to(insol_1d[:, None], (n_lat, n_lon))
             cos_sza = None
             f_day = jnp.broadcast_to(f_day_1d[:, None], (n_lat, n_lon)) if f_day_1d is not None else None
+        # Transient solar from the traced forcing dict, exactly as the
+        # hydrostatic/MPAS wrapper: ``tsi`` rescales the insolation (linear in
+        # S_0 in both branches above) and ``solar_spectral_fraction`` reaches
+        # the rrtmgp solver.  Absent keys -> the configured S_0 and the
+        # solver's default spectrum (byte-identical).  Before 2026-10-06 the
+        # spectral lane never read either, so a real solar file was inert here.
+        _tsi_ext = forcing.get("tsi") if forcing is not None else None
+        _ssf_ext = (forcing.get("solar_spectral_fraction")
+                    if forcing is not None else None)
+        if _tsi_ext is not None:
+            _s0_cfg = (radiation_config.rrtmgp.S_0
+                       if radiation_config.scheme == "rrtmgp"
+                       else radiation_config.gray.S_0)
+            insol = insol * (_tsi_ext / _s0_cfg)
 
         # Reshape to columns: (n_lat, n_lon, ...) -> (ncol, ...)
         ncol = n_lat * n_lon
@@ -2753,12 +2842,16 @@ def _make_spectral_pe_radiation(
             lon=lon_col,
             ml_ozone_coefs=ml_ozone_coefs,
             o3_vmr_override=_o3_ext,
+            o3_top_vmr=_o3_top_ext,
+            solar_spectral_fraction=_ssf_ext,
+            tsi=_tsi_ext,
             aerosol_od=_aer_ext,
             aerosol_lw_od=_aer_lw_ext,
             ghg_vmr_override=_ghg_ext,
             cloud_fraction_override=_cf_ovr,
             conv_mass_flux_up=_conv_mf_col,
             conv_icwmr=_conv_icwmr_col,
+            column_mesh=column_mesh,
         )
 
         # Reshape heating rate back to (n_lat, n_lon, nlev)

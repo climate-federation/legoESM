@@ -62,6 +62,30 @@ _GYRE_GATE_PATH = (
 )
 
 
+def _skip_without_admitted_swg_stage_record() -> None:
+    """The SWG row starts from an external admitted NEMO stage record.
+
+    Its child reads the record through the ladder's own admission check, so
+    the same check decides here: a MISSING record is external evidence this
+    machine does not have (skip with the reason); any other refusal, such as
+    a hash mismatch on a present record, still fails the row.
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "swg_ladder_for_gradient_matrix",
+        _REPO / "scripts/validate/ocean_fidelity/testcases/"
+        "nemo_testcase_l1_swg_ladder.py")
+    ladder = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ladder)
+    try:
+        ladder._pinned_stage_hashes(ladder.DEFAULT_STAGE_ROOT)  # noqa: SLF001
+    except RuntimeError as error:
+        if not str(error).startswith("missing content-pinned record"):
+            raise
+        pytest.skip(f"external SWG stage evidence absent: {error}")
+
+
 def _measure_certified_card_in_subprocess(
         output: Path, card: str, steps: int) -> dict:
     """Compile a certified-card row outside the legacy matrix process."""
@@ -241,6 +265,7 @@ def test_step_gradient_health(name, tmp_path):
         assert row["production_entry"] == "LatLonCGridOceanModel._step_jitted"
         return
     if name == "swg_nemo_card_1step":
+        _skip_without_admitted_swg_stage_record()
         row = _measure_certified_card_in_subprocess(
             tmp_path / "swg_nemo_card_1step.json", "SWG", 1)
         assert row["status"] == "CONFIRMED", (

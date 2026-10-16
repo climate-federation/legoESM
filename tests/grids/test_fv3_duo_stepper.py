@@ -72,6 +72,7 @@ import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (  # noqa: E402
     FV3DuoDynamicsModel,
+    ORACLE_DAMPING,
 )
 from legoesm.core import fv3_duo_stepper as jstep_mod  # noqa: E402
 from legoesm.core import fv3_native_duo_stepper as npstep  # noqa: E402
@@ -611,7 +612,7 @@ def test_dtype_uniformity_and_model_boundary_guards(jctx, jstates0):
     grid24 = create_fv3_duo_grid(24)
     for storage, carry, other in (("float64", uniform_f32, jnp.float64),
                                   ("float32", jstates0, jnp.float32)):
-        m = FV3DuoDynamicsModel(grid24, FV3DuoConfig(km=5, hydrostatic=True,
+        m = FV3DuoDynamicsModel(grid24, FV3DuoConfig(**ORACLE_DAMPING, km=5, hydrostatic=True,
                                                      n_split=1,
                                                      storage_dtype=storage))
         assert m._storage_dtype == np.dtype(other)

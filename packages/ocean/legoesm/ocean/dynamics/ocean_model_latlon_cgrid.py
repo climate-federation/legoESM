@@ -13231,8 +13231,11 @@ class LatLonCGridOceanModel:
             _nemo_stage1_zad_eta_after_override=None):
         """Select the compiled whole-step boundary without a silent fallback."""
         if self.config.outer_integrator == "swe_rk3":
+            if grid is not None or vertex_mask is not None:
+                raise ValueError(
+                    "SWE RK3 does not accept grid overrides")
             if any(value is not None for value in (
-                    freshwater, sponge, external_tracer_rate,
+                    freshwater, sponge, external_tracer_rate, t_seconds,
                     _shortwave_tendency_test_delta,
                     _vertical_K_test_override,
                     _nemo_stage1_zad_eta_after_override)):
@@ -13331,8 +13334,11 @@ class LatLonCGridOceanModel:
                 f"config.outer_integrator must be one of {_valid_oi_jitted}, "
                 f"got {_oi!r}")
         if _oi == "swe_rk3":
+            if grid is not None or vertex_mask is not None:
+                raise ValueError(
+                    "SWE RK3 does not accept grid overrides")
             if any(value is not None for value in (
-                    freshwater, sponge, external_tracer_rate,
+                    freshwater, sponge, external_tracer_rate, t_seconds,
                     _shortwave_tendency_test_delta,
                     _vertical_K_test_override,
                     _nemo_stage1_zad_eta_after_override)):

@@ -9,6 +9,7 @@ from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
 from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
 from legoesm.ocean.dynamics.swe_rk3 import (
     SWERK3StageEntry,
+    swe_rk3_stage,
     swe_rotated_potential_forcing,
 )
 from legoesm.ocean.eos import nemo_qco_r3t_ratio
@@ -122,6 +123,44 @@ def test_absent_potential_is_bit_identical_to_certified_stage(card_and_model):
         potential_f=None))(entry)
     for left, right in zip(direct, absent, strict=True):
         assert np.array_equal(np.asarray(left), np.asarray(right))
+def test_swe_face_masks_follow_the_config_not_the_caller_scope(
+        card_and_model, monkeypatch):
+    import legoesm.ocean.dynamics.swe_rk3 as swe
+    from legoesm.grids.halo_latlon import (
+        get_meridionally_periodic, meridional_periodicity)
+
+    card, _ = card_and_model
+    assert card.recipe.model_config.meridionally_periodic is False
+    seen = []
+    original = swe.compute_face_masks_3d
+
+    def recording(*args, **kwargs):
+        seen.append(get_meridionally_periodic())
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(swe, "compute_face_masks_3d", recording)
+    forcing = OceanSurfaceForcing(
+        tau_i_native=jnp.zeros((84, 84), dtype=jnp.float64),
+        tau_j_native=jnp.zeros((84, 84), dtype=jnp.float64))
+    with meridional_periodicity(True):
+        swe.swe_rk3_stage(
+            _entry(), _entry(), card.dt_s, 1, card.recipe.grid,
+            card.recipe.z_coord, card.recipe.land_mask,
+            card.recipe.model_config)
+        swe.swe_rk3_step(
+            card.recipe.initial_state, card.dt_s, forcing, card.recipe.grid,
+            card.recipe.z_coord, card.recipe.model_config)
+        stress = (forcing.tau_i_native, forcing.tau_j_native)
+        swe._entry_from_state(
+            card.recipe.initial_state, stress, stress, card.recipe.grid,
+            card.recipe.z_coord, card.recipe.model_config)
+        fresh = LatLonCGridOceanModel(
+            card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
+        n_eager = len(seen)
+        fresh.replay_swe_rk3_stage(_entry(), card.dt_s, 1)
+        fresh.step(card.recipe.initial_state, card.dt_s,
+                   surface_forcing=forcing)
+    assert len(seen) > n_eager > 0 and not any(seen)
 
 
 def test_stage1_one_ulp_consumed_input_reaches_production_output(card_and_model):
@@ -184,6 +223,42 @@ def test_later_stage_and_full_step_dispatches_fail_closed(card_and_model):
         model.replay_swe_rk3_stage(_entry(), card.dt_s, 2)
     with pytest.raises(ValueError, match="surface stress"):
         model.step(card.recipe.initial_state, card.dt_s)
+
+
+@pytest.mark.parametrize("override", ("grid", "vertex_mask"))
+def test_swe_step_refuses_grid_overrides(card_and_model, override):
+    card, model = card_and_model
+    forcing = OceanSurfaceForcing(
+        tau_i_native=jnp.zeros((84, 84), dtype=jnp.float64),
+        tau_j_native=jnp.zeros((84, 84), dtype=jnp.float64))
+    kwargs = {override: (card.recipe.grid if override == "grid"
+                         else jnp.ones((84, 84), dtype=jnp.float64))}
+    with pytest.raises(ValueError, match="does not accept grid overrides"):
+        model.step(card.recipe.initial_state, card.dt_s,
+                   surface_forcing=forcing, **kwargs)
+
+
+def test_swe_step_refuses_time_argument(card_and_model):
+    card, model = card_and_model
+    forcing = OceanSurfaceForcing(
+        tau_i_native=jnp.zeros((84, 84), dtype=jnp.float64),
+        tau_j_native=jnp.zeros((84, 84), dtype=jnp.float64))
+    with pytest.raises(ValueError, match="surface stress input"):
+        model.step(card.recipe.initial_state, card.dt_s,
+                   surface_forcing=forcing, t_seconds=0.0)
+    with pytest.raises(ValueError, match="surface stress input"):
+        model._step_jitted(card.recipe.initial_state, card.dt_s, None,
+                           forcing, None, t_seconds=0.0)
+
+
+def test_swe_jitted_step_refuses_grid_override(card_and_model):
+    card, model = card_and_model
+    forcing = OceanSurfaceForcing(
+        tau_i_native=jnp.zeros((84, 84), dtype=jnp.float64),
+        tau_j_native=jnp.zeros((84, 84), dtype=jnp.float64))
+    with pytest.raises(ValueError, match="does not accept grid overrides"):
+        model._step_jitted(card.recipe.initial_state, card.dt_s, None,
+                           forcing, None, grid=card.recipe.grid)
 
 
 def test_normal_step_uses_the_jitted_three_stage_production_program(card_and_model):
@@ -372,6 +447,59 @@ def test_stage_replay_refuses_a_non_swe_selector(card_and_model):
     model = LatLonCGridOceanModel(card.recipe.grid, card.recipe.z_coord, bad)
     with pytest.raises(ValueError, match="requires outer_integrator"):
         model.replay_swe_rk3_stage(_entry(), card.dt_s, 1)
+
+
+@pytest.mark.parametrize("field,value", (
+    ("coriolis_scheme", "matsuno_split"),
+    ("een_e3f_scheme", "min"),
+    ("een_metric_weighting", "off"),
+    ("een_q_boundary", "neumann_fill"),
+    ("tracer_advection", "tvd"),
+))
+def test_stage_replay_refuses_ignored_program_selector(
+        card_and_model, field, value):
+    card, _ = card_and_model
+    bad = card.recipe.model_config._replace(**{field: value})
+    with pytest.raises(ValueError, match="SWE RK3 requires"):
+        swe_rk3_stage(
+            _entry(), _entry(), card.dt_s, 1, card.recipe.grid,
+            card.recipe.z_coord, card.recipe.land_mask, bad)
+
+
+def test_stage_replay_refuses_bypassed_time_and_vertical_physics_selectors(
+        card_and_model):
+    card, _ = card_and_model
+    base = card.recipe.model_config
+    variants = (
+        base._replace(tracer_time_integrator="euler",
+                      momentum_time_integrator="euler"),
+        base._replace(implicit_vertical_mixing=True),
+        base._replace(physics=base.physics._replace(
+            vertical_mixing=base.physics.vertical_mixing._replace(
+                scheme="constant"))),
+        base._replace(physics=base.physics._replace(
+            convection=base.physics.convection._replace(
+                scheme="enhanced_diffusion"))),
+    )
+    for bad in variants:
+        with pytest.raises(ValueError, match="SWE RK3 requires"):
+            swe_rk3_stage(
+                _entry(), _entry(), card.dt_s, 1, card.recipe.grid,
+                card.recipe.z_coord, card.recipe.land_mask, bad)
+
+
+@pytest.mark.parametrize(
+    "field", [name for name in OceanSurfaceForcing._fields
+              if name not in ("tau_i_native", "tau_j_native")])
+def test_swe_step_refuses_each_non_native_surface_field(
+        card_and_model, field):
+    card, model = card_and_model
+    value = jnp.zeros((84, 84), dtype=jnp.float64)
+    forcing = OceanSurfaceForcing(
+        tau_i_native=value, tau_j_native=value)._replace(**{field: value})
+    with pytest.raises(ValueError, match=f"does not accept.*{field}"):
+        model.step(card.recipe.initial_state, card.dt_s,
+                   surface_forcing=forcing)
 
 
 @pytest.mark.parametrize("field,value", (

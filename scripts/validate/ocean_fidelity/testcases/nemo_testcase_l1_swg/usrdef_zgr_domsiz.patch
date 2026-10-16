@@ -1,5 +1,5 @@
---- /data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/tests/SWG/MY_SRC/usrdef_zgr.F90	2026-07-14 12:56:25.681416602 -0400
-+++ /data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/tests/SWG_DG/MY_SRC/usrdef_zgr.F90	2026-10-12 12:17:26.859431371 -0400
+--- tests/SWG/MY_SRC/usrdef_zgr.F90
++++ tests/SWG_DG/MY_SRC/usrdef_zgr.F90
 @@ -193,9 +193,9 @@
        CALL lbc_lnk( 'usrdef_zgr', z2d, 'T', 1._wp )           ! set surrounding land to zero (closed boundaries)
        !

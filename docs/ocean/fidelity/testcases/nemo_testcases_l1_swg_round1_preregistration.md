@@ -10,22 +10,27 @@ program, and stage-3 wind/drag remain named `SWG_UNMEASURED` debt.
 The compiled authority is
 `tests/SWG_OMIP_L1/BLD/ppsrc/nemo/` in NEMO 5.0.2.
 
-1. The mesh is 84 by 84.  `usrdef_nam.f90:154-160` divides 100 km by
+1. The mesh is 84 by 84.
+   `SWG_OMIP_L1/BLD/ppsrc/nemo/usrdef_nam.f90:154-160` divides 100 km by
    `nn_SWG=4`, adds two 25 km ghost cells on each side of the 2000 km basin,
    and takes the ceiling.
 2. Every horizontal scale factor is exactly 25,000 m
-   (`usrdef_hgr.f90:95,150-156`).  T-point coordinates start at -62,500 m;
-   U/V/F coordinates use their source staggerings (`usrdef_hgr.f90:123-146`).
+   (`SWG_OMIP_L1/BLD/ppsrc/nemo/usrdef_hgr.f90:95,150-156`).  T-point
+   coordinates start at -62,500 m; U/V/F coordinates use their source
+   staggerings (`SWG_OMIP_L1/BLD/ppsrc/nemo/usrdef_hgr.f90:123-146`).
 3. The T- and F-point Coriolis arrays are exactly
    `rn_f0 + rn_beta * abs(y)` with `rn_f0=0.7e-4` and `rn_beta=2e-11`
-   (`usrdef_hgr.f90:164-171`).  Removing `abs` is the Coriolis plant.
+   (`SWG_OMIP_L1/BLD/ppsrc/nemo/usrdef_hgr.f90:164-171`).  Removing `abs` is
+   the Coriolis plant.
 4. There are exactly 6,400 wet T cells, a contiguous 80 by 80 block at
    zero-based rows and columns 3 through 82.  The prediction follows the
-   strict U/V-coordinate bounds in `usrdef_zgr.f90:210-228`; the lonely-corner
-   rule at `:229-235` removes none of this rectangle.
+   strict U/V-coordinate bounds in
+   `SWG_OMIP_L1/BLD/ppsrc/nemo/usrdef_zgr.f90:210-228`; the lonely-corner rule
+   at `:229-235` removes none of this rectangle.
 5. There is one wet 500 m layer.  The two-record ladder is W=(0,500) m and
-   T=(250,750) m (`usrdef_zgr.f90:157-168`), while the bottom is `jpkm1=1`
-   (`usrdef_zgr.f90:206-208`).
+   T=(250,750) m (`SWG_OMIP_L1/BLD/ppsrc/nemo/usrdef_zgr.f90:157-168`), while
+   the bottom is `jpkm1=1`
+   (`SWG_OMIP_L1/BLD/ppsrc/nemo/usrdef_zgr.f90:206-208`).
 
 ## Geometry decision rule
 

@@ -14,7 +14,7 @@ import jax.numpy as jnp
 import pytest
 
 from legoesm.atmosphere.physics.thermodynamics import (
-    saturation_mixing_ratio,
+    saturation_specific_humidity,
     temperature_from_theta,
     pressure_from_eos,
     moist_adiabat_lapse_rate,
@@ -72,7 +72,7 @@ def _make_unstable_columns(ncol=4, nlev=10):
     )
 
     # Moisture: near saturation in lower levels, dry aloft
-    q_sat = saturation_mixing_ratio(T, p_full)
+    q_sat = saturation_specific_humidity(T, p_full)
     # 90% RH at surface, decreasing to 10% at top
     rh_profile = jnp.linspace(0.1, 0.9, nlev)[None, :]
     q_v = rh_profile * q_sat
@@ -108,7 +108,7 @@ class TestThermodynamics:
         """Saturation mixing ratio should increase with temperature."""
         p = jnp.full(5, 1.0e5)
         T = jnp.array([250.0, 260.0, 270.0, 280.0, 290.0])
-        q_sat = saturation_mixing_ratio(T, p)
+        q_sat = saturation_specific_humidity(T, p)
         # Each should be larger than the previous
         assert jnp.all(jnp.diff(q_sat) > 0)
 
@@ -116,7 +116,7 @@ class TestThermodynamics:
         """Saturation mixing ratio should always be positive."""
         T = jnp.array([200.0, 250.0, 300.0, 350.0])
         p = jnp.full(4, 5.0e4)
-        q_sat = saturation_mixing_ratio(T, p)
+        q_sat = saturation_specific_humidity(T, p)
         assert jnp.all(q_sat > 0)
 
     def test_temperature_from_theta_identity(self):
@@ -299,9 +299,9 @@ class TestThermodynamics:
         )
 
     def test_qsat_grad_works(self):
-        """jax.grad should work through saturation_mixing_ratio."""
+        """jax.grad should work through saturation_specific_humidity."""
         def loss(T):
-            return jnp.sum(saturation_mixing_ratio(T, jnp.full_like(T, 1e5)))
+            return jnp.sum(saturation_specific_humidity(T, jnp.full_like(T, 1e5)))
         T = jnp.array([280.0, 290.0])
         g = jax.grad(loss)(T)
         assert jnp.all(jnp.isfinite(g))
@@ -658,7 +658,7 @@ class TestDCA:
         cool by ~2.5 K per g/kg condensed.
         """
         from legoesm import constants
-        from legoesm.thermo import saturation_mixing_ratio
+        from legoesm.thermo import saturation_specific_humidity
         from legoesm.atmosphere.physics.convection.dca import (
             _adjust_one_iteration,
         )
@@ -668,7 +668,7 @@ class TestDCA:
         # Saturate the column so removing super-saturation actually
         # condenses water (otherwise q_adj == q_v and the test is
         # vacuous on stable / dry columns).
-        q_v = saturation_mixing_ratio(T, p_full) * 1.05
+        q_v = saturation_specific_humidity(T, p_full) * 1.05
 
         # Bypass CAPE-gating by calling the inner adjustment loop
         # directly: the conservation property we are testing is a
@@ -1215,7 +1215,7 @@ class TestMassFlux:
     def test_precipitation_is_nonzero_for_moist_unstable_columns(self):
         """Moist unstable columns should produce some convective condensate."""
         T, q_v, p_full, p_half = _make_unstable_columns()
-        q_v = saturation_mixing_ratio(T, p_full)
+        q_v = saturation_specific_humidity(T, p_full)
         ncol = T.shape[0]
         config = MassFluxConfig()
         M_c = jnp.full(ncol, config.M_c_init)

@@ -37,10 +37,10 @@ from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
     CGridLatLonPrimitiveEquationModel, CGridLatLonPrimitiveEquationConfig)
 import dataclasses
 
-from legoesm.core.conservation import global_area_sum
 from legoesm.core.operators_latlon_3d import hyperdiffusion_3d
 from legoesm.driver.compiled_segments import (
-    _SplitStepStatics, SegmentCarry, pack_carry, pack_forcing)
+    _SplitStepStatics, SegmentCarry, carry_moist, pack_carry, pack_forcing,
+    segment_dry_mass)
 from legoesm.driver.physics_pipeline import PhysicsOutput
 from legoesm.driver.sharded_operator_split_step import (
     make_sharded_operator_split_step, shard_operator_split_carry,
@@ -89,7 +89,7 @@ def _mock_step_unified_stateful(
     return phys_out, held_new, kwargs.get("T_land")
 
 
-def _build_harness(use_polar_filter=False):
+def _build_harness(use_polar_filter=False, energy_fixer=False):
     """Real lat-lon C-grid model (dynamics-only: config fix_mass=False, the
     operator-split mass fixer is separate) + a column-local mock physics carry.
     ``use_polar_filter`` exercises the band-sliced polar-mask path (else the
@@ -99,7 +99,7 @@ def _build_harness(use_polar_filter=False):
     sigma = create_sigma_coordinate(n_levels=NLEV)
     cfg = CGridLatLonPrimitiveEquationConfig(
         fix_mass=False, use_polar_filter=use_polar_filter, use_ppm_transport=True,
-        time_integrator="ssp_rk3")
+        time_integrator="ssp_rk3", energy_fixer=energy_fixer)
     model = CGridLatLonPrimitiveEquationModel(grid, sigma, cfg)
 
     rng = np.random.default_rng(2027)
@@ -130,7 +130,9 @@ def _build_harness(use_polar_filter=False):
     )
     ncol = N_LAT * N_LON
     tke0 = jnp.full((ncol, NLEV), 1e-4)
-    target_mass = global_area_sum(p_s, grid)
+    # the dry-mass anchor (F13): the fixer holds the DRY integral
+    target_mass = segment_dry_mass(
+        p_s, {"q_v": q_v, "q_c": q_c, "q_r": q_r}, grid, sigma.dsigma)
     z2 = jnp.zeros((N_LAT, N_LON))
     z3 = jnp.zeros((N_LAT, N_LON, NLEV))
     carry = pack_carry(
@@ -163,10 +165,15 @@ def _build_harness(use_polar_filter=False):
     return model, statics, carry, forcing
 
 
-@pytest.mark.parametrize("use_polar_filter", [False, True])
-def test_operator_split_spmd_matches_serial(use_polar_filter):
+@pytest.mark.parametrize("use_polar_filter,energy_fixer", [
+    (False, False), (True, False),
+    # the dycore energy fixer and the segment mass fixer's energy closure
+    # (F15 V8) reduce over the bands like the mass fixer (lat psum)
+    (False, True)])
+def test_operator_split_spmd_matches_serial(use_polar_filter, energy_fixer):
     mesh = _mesh()
-    model, statics, carry, forcing = _build_harness(use_polar_filter)
+    model, statics, carry, forcing = _build_harness(use_polar_filter,
+                                                    energy_fixer)
     n_steps = 3
 
     step_none = make_sharded_operator_split_step(
@@ -201,7 +208,7 @@ def test_operator_split_spmd_matches_serial(use_polar_filter):
     # Truly column-local fields — physics-only, NOT dynamically advected (the
     # C-grid dynamics is dry: moisture + the physics carries ride physics
     # alone). Decomposition-INVARIANT -> essentially bitwise (fp64 roundoff).
-    for f in ("q_v", "q_c", "q_r", "tke", "precip_accum", "held_dT_rad",
+    for f in ("q_v", "q_c", "q_r", "tke", "held_dT_rad",
               "shflx_accum", "conv_prog"):
         a = np.asarray(getattr(c_s, f))
         b = np.asarray(getattr(c_b, f))
@@ -209,6 +216,12 @@ def test_operator_split_spmd_matches_serial(use_polar_filter):
         worst = float(np.max(np.abs(a - b)))
         assert worst < 1e-11, \
             f"column-local field {f}: sharded vs serial {worst:.3e} (not bitwise)"
+
+    # precip_accum now carries the saturation adjustment's rain-out (F13),
+    # p_s/g * sum(dsigma * excess) [kg/m2]: the same q-level roundoff
+    # (<1e-15) scaled by p_s/g ~ 1e4, so the bitwise class is 1e-10 here.
+    np.testing.assert_allclose(np.asarray(c_b.precip_accum),
+                               np.asarray(c_s.precip_accum), rtol=0, atol=1e-10)
 
     # Dynamically-advected fields: FV-PPM cut-truncation bound (the residual is
     # confined to cut-adjacent rows and scales with the field's meridional
@@ -225,6 +238,14 @@ def test_operator_split_spmd_matches_serial(use_polar_filter):
         np.testing.assert_allclose(
             b, a, rtol=rt, atol=at,
             err_msg=f"dynamical {f}: sharded diverged beyond the FV-PPM bound")
+
+    # The dry-mass anchor survives on both layouts (F13; physics water and
+    # the tail move p_s with their mass, so only the fixer touches dry air).
+    for c in (c_s, c_b):
+        d = float(segment_dry_mass(jnp.asarray(c.p_s), carry_moist(c),
+                                   statics.grid, statics.dsigma))
+        assert abs(d - float(carry.target_mass)) / float(carry.target_mass) \
+            < 1e-12, d
 
     # Non-vacuity: the band decomposition GENUINELY ran (T cut truncation is
     # present -> sharding did not collapse to single-device).

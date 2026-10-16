@@ -1357,6 +1357,7 @@ def _make_convective_precip_diagnostic(cfg: PhysicsConfig, dt: float):
         ),
         model_type="hydrostatic",
         dt=dt,
+        surface_bulk_coeffs=None,   # convection-only precip diagnostic
     )
 
     def precip_mm_day(state, phys_state, grid, sigma_coord):
@@ -1548,6 +1549,7 @@ def run_scm_rce(
             _radiation_only_config(cfg),
             model_type="hydrostatic",
             dt=dt,
+            surface_bulk_coeffs=None,   # split sub-physics: no surface exchange
         )
     conv_physics_fn = None
     if use_split_convection:
@@ -1555,6 +1557,7 @@ def run_scm_rce(
             _convection_only_config(cfg),
             model_type="hydrostatic",
             dt=dt / effective_convection_substeps,
+            surface_bulk_coeffs=None,   # split sub-physics: no surface exchange
         )
 
     sst_col = jnp.asarray([sst_K], dtype=jnp.float64)

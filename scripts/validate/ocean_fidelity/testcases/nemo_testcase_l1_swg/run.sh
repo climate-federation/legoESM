@@ -9,24 +9,43 @@ refuse_unhandled() {
 }
 trap refuse_unhandled ERR
 
+usage() {
+  cat <<'EOF'
+Usage: run.sh --nemo-root DIR --evidence DIR --python PYTHON
+              [--reference DIR] [--mpiexec CMD]
+              [--deck shipped|maddison|dg50] [--run]
+
+The shipped deck requires --reference. Default mode is read-only preflight;
+--run builds and executes NEMO and is operator-only.
+EOF
+}
+
 # SWG stage-entry acquisition. Default is read-only preflight; --run is for the
 # operator. --deck selects a committed namelist patch and its source case.
-export PATH=/home/dbalwada/legoESM/.venv/bin:/home/dbalwada/miniconda3/envs/nemo-build/bin:${PATH}
-readonly NEMO_ROOT=${NEMO_ROOT:-/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2}
 readonly REF_NAME=SWG_OMIP_L1
-readonly REFERENCE=${REFERENCE:-/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swg_rounds/round0_probe/kt10}
 
 do_run=0
 deck=shipped
+nemo_root=
+evidence=
+python=
+reference=
+mpiexec=mpirun
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --run) do_run=1 ;;
+    --nemo-root) nemo_root=${2-}; shift ;;
+    --evidence) evidence=${2-}; shift ;;
+    --python) python=${2-}; shift ;;
+    --reference) reference=${2-}; shift ;;
+    --mpiexec) mpiexec=${2-}; shift ;;
     --deck)
       [[ $# -ge 2 ]] || { printf 'REFUSE_USAGE: --deck needs a value\n' >&2; exit 64; }
       deck=$2
       shift
       ;;
-    *) printf 'REFUSE_USAGE: expected [--deck shipped|maddison|dg50] [--run]\n' >&2; exit 64 ;;
+    --help|-h) usage; exit 0 ;;
+    *) printf 'REFUSE_USAGE: unknown argument %s\n' "$1" >&2; exit 64 ;;
   esac
   shift
 done
@@ -34,14 +53,21 @@ done
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 . "$here/deck.sh"
 swg_select_deck stage "$deck" "$here"
-readonly MAKENEMO_SOURCE_CASE SOURCE_CASE_NAME RUN_NAME DECK_PATCH DEFAULT_EVIDENCE SOURCE_PATCH
+readonly MAKENEMO_SOURCE_CASE SOURCE_CASE_NAME RUN_NAME DECK_PATCH SOURCE_PATCH
 readonly SOURCE_PATCH_SHA256
-readonly EVIDENCE=${EVIDENCE:-$DEFAULT_EVIDENCE}
+[[ -n "$nemo_root" && -n "$evidence" && -n "$python" ]] || {
+  printf 'REFUSE_USAGE: --nemo-root, --evidence, and --python are required\n' >&2; exit 64; }
+if [[ "$deck" == shipped && -z "$reference" ]]; then
+  printf 'REFUSE_USAGE: shipped deck requires --reference\n' >&2; exit 64
+fi
 repo_root=$(git -C "$here" rev-parse --show-toplevel 2>/dev/null) || {
   printf 'REFUSE_NOT_WORKTREE: acquisition tool is outside git\n' >&2; exit 66; }
+source "$repo_root/scripts/data/nemo_swg_double_gyre/checkout_env.bash"
+swg_dg_bind_checkout "$python"
 [[ -z "$(git -C "$repo_root" status --porcelain --untracked-files=all)" ]] || {
   printf 'REFUSE_DIRTY_COMMIT: commit the exact acquisition tool first\n' >&2; exit 66; }
 readonly COMMIT=$(git -C "$repo_root" rev-parse HEAD)
+readonly NEMO_ROOT=$nemo_root EVIDENCE=$evidence REFERENCE=$reference
 readonly SRC_CASE=$NEMO_ROOT/tests/$SOURCE_CASE_NAME
 readonly BASE_DECK=$NEMO_ROOT/tests/SWG/EXPREF
 readonly REF_BIN=$NEMO_ROOT/tests/$REF_NAME/BLD/bin/nemo.exe
@@ -128,7 +154,7 @@ if [[ "$deck" != shipped ]]; then
   (
     cd "$reference_dir"
     export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
-    mpirun -np 1 --oversubscribe ./nemo >run.user.log 2>&1
+    "$mpiexec" -np 1 --oversubscribe ./nemo >run.user.log 2>&1
   )
 fi
 cd "$NEMO_ROOT"
@@ -167,7 +193,7 @@ sha256sum "$reference_dir/nemo" "$reference_dir/namelist_cfg" \
 (
   cd "$instrumented_dir"
   export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
-  mpirun -np 1 --oversubscribe ./nemo >run.user.log 2>&1
+  "$mpiexec" -np 1 --oversubscribe ./nemo >run.user.log 2>&1
 )
 if [[ "$deck" != shipped ]]; then
   [[ -s "$reference_dir/run.stat" && -s "$instrumented_dir/run.stat" ]] || {
@@ -175,6 +201,6 @@ if [[ "$deck" != shipped ]]; then
     exit 70
   }
 fi
-python3 -I "$CHECKER" --evidence "$instrumented_dir" --reference "$reference_dir" \
+"$python" -I "$CHECKER" --evidence "$instrumented_dir" --reference "$reference_dir" \
   --json "$admission"
 printf 'ACQUISITION_DONE %s\n' "$EVIDENCE"

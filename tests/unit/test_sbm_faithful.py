@@ -18,8 +18,8 @@ and Their Effect on the Zonally Averaged Tropical Circulation", J. Atmos. Sci. 6
     cond     : dq_c = max(−dq_v_dt,0)·safe_divide(col_net_drying, col_local_cond)
     gate     : ×= (col_net_drying > 0)  (Betts-Miller P>=0: convection only dries)
 
-SCOPE: the moist adiabat, CAPE, ``cape_trigger``, ``saturation_mixing_ratio`` and
-``saturation_mixing_ratio_dT`` are SHARED, separately-tested thermodynamics — the oracle
+SCOPE: the moist adiabat, CAPE, ``cape_trigger``, ``saturation_specific_humidity`` and
+``saturation_specific_humidity_dT`` are SHARED, separately-tested thermodynamics — the oracle
 REUSES them (a legitimate given, like constants).  It INDEPENDENTLY reimplements the
 SBM-SPECIFIC glue (the Newton residual/jacobian, the relaxation, the condensation rescale
 INCLUDING the ``safe_divide`` threshold/mask logic — reproduced as ``ok``/``safe_den``/
@@ -56,7 +56,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio, saturation_mixing_ratio_dT
+from legoesm.thermo import saturation_specific_humidity, saturation_specific_humidity_dT
 from legoesm.atmosphere.physics.thermodynamics import compute_moist_adiabat, compute_cape
 from legoesm.atmosphere.physics.convection._triggers import cape_trigger
 from legoesm.atmosphere.physics.convection.config import SBMConfig
@@ -88,10 +88,10 @@ def _sbm_oracle(T, qv, p_full, p_half, cfg, *, newton_iters=2, shallow=True,
     mask = (T_moist >= T).astype(np.float64)
 
     def qsat(Tt):
-        return _np(saturation_mixing_ratio(jnp.asarray(Tt), jnp.asarray(p_full)))
+        return _np(saturation_specific_humidity(jnp.asarray(Tt), jnp.asarray(p_full)))
 
     def dqsat(Tt):
-        return _np(saturation_mixing_ratio_dT(jnp.asarray(Tt), jnp.asarray(p_full)))
+        return _np(saturation_specific_humidity_dT(jnp.asarray(Tt), jnp.asarray(p_full)))
 
     def newton_step(T_trial):
         q_trial = rh * qsat(T_trial)
@@ -281,7 +281,7 @@ def test_shallow_branch_is_live_in_the_moderate_moistening_regime():
     p_half = np.broadcast_to((sh * p_s)[None, :], (1, nlev + 1)).copy()
     p_full = np.broadcast_to((sf * p_s)[None, :], (1, nlev)).copy()
     T = np.maximum(300.0 * np.clip(sf, 0.01, None) ** 0.19, 200.0)[None, :]
-    qsat = _np(saturation_mixing_ratio(jnp.asarray(T), jnp.asarray(p_full)))
+    qsat = _np(saturation_specific_humidity(jnp.asarray(T), jnp.asarray(p_full)))
     qv = 0.5 * qsat
     dp = p_half[:, 1:] - p_half[:, :-1]
 

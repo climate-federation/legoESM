@@ -705,6 +705,9 @@ _SW_CFG_DEFAULT = {
     "hord_tr": 8, "hord_vt": 6, "hord_tm": 6, "hord_dp": 6,
     "hord_mt": 6, "nord_v": 1, "damp_v": 0.2,
     "dddmp": 0.2, "d2_bg": 0.0, "d4_bg": 0.12, "nord": 1,
+    # decision B1 additive del-2 top sponge (SWConfig twin; 0 layers = off)
+    "sponge_del2_top_layers": 0, "sponge_del2_top_factor": 8.0,
+    "sponge_d2_top": 0.0,
 }
 
 SW_CFG_CASE8 = {
@@ -721,6 +724,9 @@ SW_CFG_CASE8 = {
     "hord_tr": 8, "hord_vt": 8, "hord_tm": 8, "hord_dp": 8,
     "hord_mt": 8, "nord_v": 2, "damp_v": 0.0,
     "dddmp": 0.0, "d2_bg": 0.0, "d4_bg": 0.12, "nord": 2,
+    # the sponge is OFF on the oracle deck (SWConfig twin keys)
+    "sponge_del2_top_layers": 0, "sponge_del2_top_factor": 8.0,
+    "sponge_d2_top": 0.0,
 }
 
 

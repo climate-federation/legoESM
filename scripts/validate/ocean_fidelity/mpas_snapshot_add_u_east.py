@@ -31,7 +31,7 @@ def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--snapshot", required=True)
     p.add_argument("--level", type=int, required=True)
-    p.add_argument("--lloyd", type=int, default=20)
+    p.add_argument("--lloyd", type=int, default=50)
     a = p.parse_args()
     from scripts.run.run_omip_core2 import (
         _MESH, _NEMO_DOMAIN_CFG, _load_nemo_e3t_1d, build_mpas_ocean)

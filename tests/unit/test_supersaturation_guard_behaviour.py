@@ -12,7 +12,7 @@ Protocol (held IDENTICAL across every arm; the ONLY variable is
     single column, 4 levels, dt = 300 s, T0 = 300 K, p = 90000 Pa,
     q_c = q_r = q_i = q_s = q_g = 0, q_v = 1.4 * q_sat(T0, p),
     RH recomputed each step from the MODEL's own
-    ``legoesm.thermo.saturation_mixing_ratio`` at the CURRENT (T, q_v)
+    ``legoesm.thermo.saturation_specific_humidity`` at the CURRENT (T, q_v)
     -- no re-derived saturation curve (CLAUDE.md).
 
 Every threshold below is MEASURED, not guessed: the numbers come from
@@ -83,7 +83,7 @@ from legoesm.atmosphere.physics.microphysics.seifert_beheng import (
 )
 from legoesm.atmosphere.physics.microphysics.sundqvist import sundqvist_microphysics
 from legoesm.atmosphere.physics.microphysics.thompson import thompson_microphysics
-from legoesm.thermo import saturation_mixing_ratio
+from legoesm.thermo import saturation_specific_humidity
 
 from legoesm import constants
 
@@ -119,7 +119,7 @@ def _column():
     T = jnp.full(shape, _T0, dtype=jnp.float64)
     p_full = jnp.full(shape, _P0, dtype=jnp.float64)
     p_half = jnp.full((1, 5), _P0, dtype=jnp.float64)
-    q_v = _RH0 * saturation_mixing_ratio(T, p_full)
+    q_v = _RH0 * saturation_specific_humidity(T, p_full)
     z = jnp.zeros(shape, dtype=jnp.float64)
     hyd = HydrometeorState(q_c=z, q_r=z, q_i=z, q_s=z, q_g=z,
                            N_c=z, N_r=z, N_i=z)
@@ -148,7 +148,7 @@ def _integrate(scheme, hard, nstep):
             q_c=hyd.q_c + out.dq_c_dt * _DT, q_r=hyd.q_r + out.dq_r_dt * _DT,
             q_i=hyd.q_i + out.dq_i_dt * _DT, q_s=hyd.q_s + out.dq_s_dt * _DT,
             q_g=hyd.q_g + out.dq_g_dt * _DT)
-        rh_hist.append(float((q_v / saturation_mixing_ratio(T, p_full))[0, 0]))
+        rh_hist.append(float((q_v / saturation_specific_humidity(T, p_full))[0, 0]))
         tw_hist.append(float(
             (q_v + hyd.q_c + hyd.q_r + hyd.q_i + hyd.q_s + hyd.q_g)[0, 0]))
     return rh_hist, tw_hist
@@ -317,7 +317,7 @@ def test_ml_emulator_guard_gradient_is_finite_through_the_gate():
     p_full = jnp.array([[90000.0, 90000.0, 35000.0, 15000.0]], dtype=jnp.float64)
     p_half = jnp.concatenate([p_full, p_full[:, -1:]], axis=1)
     rh = jnp.array([[1.40, 1.10, 1.60, 2.00]], dtype=jnp.float64)
-    q_v0 = rh * saturation_mixing_ratio(T, p_full)
+    q_v0 = rh * saturation_specific_humidity(T, p_full)
     z = jnp.zeros(shape, dtype=jnp.float64)
     hyd = HydrometeorState(q_c=z, q_r=z, q_i=z, q_s=z, q_g=z,
                            N_c=z, N_r=z, N_i=z)
@@ -415,7 +415,7 @@ def test_guard_positivity_claim_is_exactly_what_the_rate_limit_gives():
     )
     T = jnp.array([[300.0, 300.0, 300.0]], dtype=jnp.float64)
     p = jnp.full((1, 3), 90000.0, dtype=jnp.float64)
-    q_sat = saturation_mixing_ratio(T, p)
+    q_sat = saturation_specific_humidity(T, p)
     # cell 0: strongly super-saturated;  cell 1: exactly zero vapour;
     # cell 2: ALREADY NEGATIVE (an aggressive raw prediction).
     q_v_post = jnp.concatenate([1.4 * q_sat[:, :1],
@@ -450,14 +450,8 @@ def test_guard_positivity_claim_is_exactly_what_the_rate_limit_gives():
 # effect the guard could have (enabling it changes these tendencies by O(1)),
 # so it cannot mask a real perturbation.
 _PREGUARD_RTOL = 1.0e-13
-_SUNDQVIST_PREGUARD_DT_DT = (
-    0.07977905897810188, 0.00425441486969195, -2.686381198312863e-06,
-    0.0012034384086302015, 0.0002189595022671857,
-)
-_SUNDQVIST_PREGUARD_DQ_V_DT = (
-    -3.204687477479419e-05, -1.7089785504547463e-06, 1.0791067601251639e-09,
-    -4.834155789069355e-07, -8.795500773998619e-08,
-)
+_SUNDQVIST_PREGUARD_DT_DT = (0.07790655134982057, 0.0042109453424112216, -2.6370890683278935e-06, 0.00120314759851969, 0.00021895372484426559)  # re-measured 2026-09-29 (specific q_sat inputs, x64 CPU)
+_SUNDQVIST_PREGUARD_DQ_V_DT = (-3.129469722034535e-05, -1.6915170447021228e-06, 1.0593063421051318e-09, -4.832987618459902e-07, -8.79526869762267e-08)
 
 
 def test_sundqvist_default_matches_the_pre_guard_baseline_bit_for_bit():
@@ -471,7 +465,7 @@ def test_sundqvist_default_matches_the_pre_guard_baseline_bit_for_bit():
     p = jnp.array([[95000.0, 85000.0, 60000.0, 35000.0, 15000.0]],
                   dtype=jnp.float64)
     rh = jnp.array([[1.40, 1.05, 0.90, 1.60, 2.00]], dtype=jnp.float64)
-    q_v = rh * saturation_mixing_ratio(T, p)
+    q_v = rh * saturation_specific_humidity(T, p)
     shape = T.shape
     z = jnp.zeros(shape, dtype=jnp.float64)
     hyd = HydrometeorState(

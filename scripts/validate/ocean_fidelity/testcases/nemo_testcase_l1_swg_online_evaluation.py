@@ -283,7 +283,7 @@ def _fine_truth_manifest(root: Path) -> dict:
     manifest = json.loads(path.read_text())
     if manifest.get("status") not in ("complete", "pending"):
         raise ValueError(f"unusable fine truth manifest status in {path}")
-    climate._require_legoesm_deck(
+    climate.require_legoesm_deck(
         manifest.get("namelist", {}), SWG_MADDISON_NAMELIST)
     return manifest
 
@@ -1053,7 +1053,7 @@ def score_free_run(root: Path, *, expected_manifest_sha256: str,
     if _sha256(root / "manifest.json") != expected_manifest_sha256:
         raise ValueError(f"{root}: manifest differs from its bound SHA-256")
     manifest = json.loads((root / "manifest.json").read_text())
-    climate._require_legoesm_deck(manifest.get("namelist", {}), expected_namelist)
+    climate.require_legoesm_deck(manifest.get("namelist", {}), expected_namelist)
     whole_run = manifest.get("numerical_health") or {}
     whole_run_ok = (
         whole_run.get("all_finite") is True
@@ -1091,7 +1091,7 @@ def admit_control_run(root: Path, manifest_sha256: str, *, control: str) -> dict
     execution = admit_free_run_execution(manifest)
     if (execution["device"], execution["math_library"]) != ("cuda", "native"):
         raise ValueError("device-check controls must be CUDA/native free runs")
-    climate._require_legoesm_deck(
+    climate.require_legoesm_deck(
         manifest.get("namelist", {}), CONTROL_NAMELISTS[control])
     if not _day_file_pins(manifest):
         raise ValueError("control manifest pins no day files")

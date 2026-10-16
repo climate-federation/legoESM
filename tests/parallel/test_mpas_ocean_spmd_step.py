@@ -128,7 +128,7 @@ def _run_serial(model, state, forcing, dt, n):
 
 
 def _run_spmd(model, mesh, n_real, state, forcing, dt, n, tracer_advection,
-              n_dev=N_DEV, halo_depth=None, relabel_depth=None):
+              n_dev=N_DEV, halo_depth=None, relabel_depth=None, **step_kw):
     from legoesm.parallel.voronoi_spmd_ocean import (
         build_mpas_ocean_spmd_layout,
         gather_state_mpas_ocean_spmd,
@@ -142,7 +142,7 @@ def _run_spmd(model, mesh, n_real, state, forcing, dt, n, tracer_advection,
         nlev=state.T.data.shape[1], **kw)
     if relabel_depth is not None:   # mutation: claim rings the layout lacks
         layout = layout._replace(halo_depth=relabel_depth)
-    step = make_sharded_mpas_ocean_step(model, layout)
+    step = make_sharded_mpas_ocean_step(model, layout, **step_kw)
     st = shard_state_mpas_ocean_spmd(state, layout)
     fw_s = jax.tree.map(lambda x: jax.device_put(x, layout.cell_sharding), fw)
     sf_s = jax.tree.map(lambda x: jax.device_put(x, layout.cell_sharding), sf)
@@ -625,6 +625,126 @@ def test_deep_halo_pcg_gradient_matches():
         np.max(np.abs(a - b)), np.max(np.abs(a)))
 
 
+# --- deep-halo Jacobi-scaled Chebyshev ("chebyshev_deep") -------------------
+def test_chebyshev_deep_matches_per_iteration_exchange(monkeypatch):
+    """Same Chebyshev iteration: exchanging (res, d) once every certified
+    ring count equals exchanging before every matvec (rings forced to 1)."""
+    _need_devices(N_DEV)
+    ref, _, mesh, n_real = _spmd_pair("chebyshev_deep", rings=1,
+                                      monkeypatch=monkeypatch)
+    monkeypatch.undo()
+    got, lay, _, _ = _spmd_pair("chebyshev_deep")
+    assert lay.complete_cell_rings == 3
+    assert lay.max_lc < mesh.nCells, "halo covers the whole mesh: test vacuous"
+    worst = _owned_gap(ref, got, n_real, mesh)
+    atol = {"T": 1e-11, "S": 1e-11, "eta": 1e-12, "w": 1e-12, "u": 1e-12}
+    bad = {k: v for k, v in worst.items() if v[0] > atol[k]}
+    assert not bad, (bad, worst)
+
+
+@pytest.mark.parametrize("rings", [4, 30])
+def test_chebyshev_deep_overclaimed_rings_break_parity(rings, monkeypatch):
+    """Non-vacuity: a cadence longer than the certified rings must show."""
+    _need_devices(N_DEV)
+    ref, _, mesh, n_real = _spmd_pair("chebyshev_deep", rings=1,
+                                      monkeypatch=monkeypatch)
+    got, _, _, _ = _spmd_pair("chebyshev_deep", rings=rings,
+                              monkeypatch=monkeypatch)
+    worst = _owned_gap(ref, got, n_real, mesh)
+    assert worst["eta"][0] > 1e-9, worst
+
+
+def test_chebyshev_deep_converges_to_cg_solution():
+    """Enough Chebyshev updates reach the converged CG answer."""
+    _need_devices(N_DEV)
+    sols = {}
+    for variant in ("single_reduce", "chebyshev_deep"):
+        sols[variant] = _spmd_pair_iters(variant, 200)
+    ref, mesh, n_real = sols["single_reduce"]
+    got = sols["chebyshev_deep"][0]
+    worst = _owned_gap(ref, got, n_real, mesh)
+    assert worst["eta"][0] <= 1e-9, worst
+
+
+def _spmd_pair_iters(variant, iters):
+    from legoesm.grids.halo import set_halo_backend, set_spmd_mesh
+    mesh, n_real, model, state, forcing = _build(
+        dict(_DEEP_BASE, barotropic_implicit_pcg_variant=variant,
+             barotropic_implicit_pcg_fixed_iters=iters), level=4)
+    try:
+        got, _ = _run_spmd(model, mesh, n_real, state, forcing, _DEEP_DT, 2, "upwind")
+    finally:
+        set_halo_backend("local")
+        set_spmd_mesh(None)
+    return got, mesh, n_real
+
+
+def test_chebyshev_deep_gradient_finite_and_matches_exchange_every_matvec(monkeypatch):
+    """Reverse mode through the sharded step: the deep cadence gives the
+    per-matvec-exchange gradient, and every row is finite."""
+    _need_devices(N_DEV)
+    import legoesm.parallel.voronoi_spmd_ocean as vso
+    from legoesm.grids.halo import set_halo_backend, set_spmd_mesh
+    grads = {}
+    for rings in (1, None):
+        if rings is not None:
+            monkeypatch.setattr(vso, "complete_cell_rings", lambda *a, **k: rings)
+        else:
+            monkeypatch.undo()
+        mesh, n_real, model, state, (fw, sf, sp) = _build(
+            dict(_DEEP_BASE, barotropic_implicit_pcg_variant="chebyshev_deep"), level=4)
+        try:
+            layout = vso.build_mpas_ocean_spmd_layout(
+                mesh, N_DEV, n_cells_real=n_real, nlev=state.T.data.shape[1])
+            step = vso.make_sharded_mpas_ocean_step(model, layout)
+            st = vso.shard_state_mpas_ocean_spmd(state, layout)
+            put = lambda x: jax.device_put(x, layout.cell_sharding)  # noqa: E731
+            fw_s, sf_s = jax.tree.map(put, fw), jax.tree.map(put, sf)
+            sp_s = sp._replace(gamma=put(sp.gamma))
+
+            def loss(eta):
+                out = step(st._replace(eta=st.eta.replace(data=eta)), _DEEP_DT,
+                           freshwater=fw_s, surface_forcing=sf_s, sponge=sp_s)
+                return jnp.sum(out.eta.data ** 2)
+
+            grads[rings] = np.asarray(jax.device_get(jax.jit(jax.grad(loss))(st.eta.data)))
+        finally:
+            set_halo_backend("local")
+            set_spmd_mesh(None)
+    a, b = grads[1], grads[None]
+    assert np.all(np.isfinite(a)) and np.all(np.isfinite(b))
+    assert np.max(np.abs(a)) > 0
+    assert np.max(np.abs(a - b)) <= 1e-9 * np.max(np.abs(a))
+
+
+def test_chebyshev_deep_refusals():
+    from legoesm.ocean.dynamics.barotropic_common import solve_helmholtz_implicit
+    x = jnp.ones(4)
+    kw = dict(distributed=True, fixed_iters=3, residual_tol=1e-10,
+              stock_cg_tol=1e-10, stock_cg_maxiter=10)
+    with pytest.raises(ValueError, match="deep_halo"):
+        solve_helmholtz_implicit(lambda v: v, x, lambda v: v, x,
+                                 pcg_variant="chebyshev_deep", dot_weight=x, **kw)
+    with pytest.raises(ValueError, match="dot_weight"):
+        solve_helmholtz_implicit(lambda v: v, x, lambda v: v, x,
+                                 pcg_variant="chebyshev_deep",
+                                 deep_halo=(lambda *f: f, x, 3), **kw)
+
+
+def test_chebyshev_deep_refuses_poly_preconditioner():
+    _need_devices(N_DEV)
+    from legoesm.grids.halo import set_halo_backend, set_spmd_mesh
+    mesh, n_real, model, state, forcing = _build(dict(
+        _DEEP_BASE, barotropic_implicit_pcg_precond="poly",
+        barotropic_implicit_pcg_variant="chebyshev_deep"))
+    try:
+        with pytest.raises(NotImplementedError, match="pointwise"):
+            _run_spmd(model, mesh, n_real, state, forcing, 300.0, 1, "upwind")
+    finally:
+        set_halo_backend("local")
+        set_spmd_mesh(None)
+
+
 def test_complete_cell_rings_counts_local_stencils():
     """3 rings on the production-shaped layout (halo depth 2 + two closure
     passes); dropping one local edge of a ring-1 cell lowers it to 0."""
@@ -688,3 +808,34 @@ def test_deep_halo_pcg_refuses_poly_preconditioner():
     finally:
         set_halo_backend("local")
         set_spmd_mesh(None)
+
+
+def test_land_fill_band_capacity_is_bit_identical():
+    """The sharded step with the run's land mask (land fill swept over the
+    coastal band only, capacity from the mask) equals the all-cells fill bit
+    for bit, and the capacity is a real restriction (0 < K < local cells)."""
+    _need_devices(N_DEV)
+    from legoesm.grids.halo import set_halo_backend, set_spmd_mesh
+    from legoesm.parallel.voronoi_spmd_ocean import (
+        build_mpas_ocean_spmd_layout, make_sharded_mpas_ocean_step)
+    mesh, n_real, model, state, forcing = _build({})
+    # Widen the land (the default polar caps are too small to hold cells
+    # three edges inland, so a band missing its last pass would go unseen).
+    lat = np.abs(np.degrees(np.asarray(mesh.latCell)))
+    mask = jnp.asarray(np.asarray(state.land_mask.data) * (lat < 45.0))
+    state = state._replace(land_mask=state.land_mask.replace(data=mask))
+    try:
+        full, layout = _run_spmd(model, mesh, n_real, state, forcing, 300.0, 3, "upwind")
+        band, _ = _run_spmd(model, mesh, n_real, state, forcing, 300.0, 3, "upwind",
+                            land_mask=mask)
+        cap = make_sharded_mpas_ocean_step(
+            model, build_mpas_ocean_spmd_layout(mesh, N_DEV, n_cells_real=n_real,
+                                                tracer_advection="upwind", nlev=4),
+            land_mask=mask).land_fill_band_capacity
+    finally:
+        set_halo_backend("local")
+        set_spmd_mesh(None)
+    assert 0 < cap < layout.max_lc, (cap, layout.max_lc)
+    for f in ("u", "T", "S", "eta", "w"):
+        a, b = np.asarray(getattr(full, f).data), np.asarray(getattr(band, f).data)
+        assert np.array_equal(a.view(np.uint64), b.view(np.uint64)), f

@@ -1150,6 +1150,17 @@ def make_voronoi_mpi_step(
         state_new = dispatch_integrator(
             state, _mpi_tendency_fn, dt, config.time_integrator,
         )
+        if getattr(config, "energy_fixer", False):
+            # Dycore energy fixer, mirroring the serial ``_step_jit`` (F15):
+            # owned cells + one allreduce-SUM (AD-safe).  The cell KE reads
+            # every edge of an owned cell, so both states get a fresh halo.
+            from legoesm.core.conservation import voronoi_energy_fixer_dT
+            _dT_fix = voronoi_energy_fixer_dT(
+                _exchange_mpas_state(state), _exchange_mpas_state(state_new),
+                local_mesh, sigma_coord, _owned_area, sum_fn=global_sum_mpi)
+            state_new = state_new._replace(T=state_new.T.replace(
+                data=state_new.T.data
+                + _dT_fix.astype(state_new.T.data.dtype)))
 
         # Operator-split physics: evaluate ONCE on the post-dynamics state and
         # apply forward over dt (state += dt * tendency).  Mirrors the serial
@@ -1233,10 +1244,24 @@ def make_voronoi_mpi_step(
         # (Owned cells + allreduce — correct under the cell partition, unlike
         # the model's internal fixer which would double-count halo cells.)
         if config.fix_mass:
+            _pre_mf = state_new
             state_new = _fix_mass_mpi(
                 state_new, state, _owned_area, _total_area_global,
                 sigma_coord=sigma_coord,
             )
+            if getattr(config, "energy_fixer", False):
+                # The mass fixer sits outside the energy window: return the
+                # energy its p_s shift changed as heat [K, +warming] (serial
+                # ``_step_jit`` mirror, F15 V8).  It leaves u untouched, so one
+                # halo refresh serves both states' cell KE.  (The helper was
+                # imported above under the same static energy_fixer branch.)
+                _pre_x = _exchange_mpas_state(_pre_mf)
+                _dT_mf = voronoi_energy_fixer_dT(
+                    _pre_x, state_new._replace(u=_pre_x.u), local_mesh,
+                    sigma_coord, _owned_area, sum_fn=global_sum_mpi)
+                state_new = state_new._replace(T=state_new.T.replace(
+                    data=state_new.T.data
+                    + _dT_mf.astype(state_new.T.data.dtype)))
 
         # Floors: temperature and tracer non-negativity (advection is not
         # positive-definite; clamp before tracers feed saturation).
@@ -1276,6 +1301,8 @@ def make_voronoi_mpi_step(
                 energy_consistent=getattr(
                     config, "energy_consistent_moisture_clip", False),
                 area=_owned_area,
+                # GLOBAL mean cell area as the (partition-independent) scale
+                area_ref=_total_area_global / layout.partition.nCells_global,
                 sum_fn=_mpi_owned_sum)
             state_new = state_new._replace(
                 tracers=_tr_out, T=state_new.T.replace(data=_T_out))
@@ -1312,7 +1339,7 @@ def make_voronoi_mpi_step(
                 physics_fn, phys_state,
                 where="make_voronoi_mpi_step(return_phys_state=True)")
             _state_out, _phys_out, _sfc = _step(state, dt, forcing, phys_state)
-            # Publish the surface-flux diagnostic on the model so ``_run_mpas``
+            # Publish the surface-flux diagnostic on the model so ``_run_column``
             # stashes it into ``_carry_aux`` for the coupler — the coupled
             # MPI-voronoi path otherwise forced the ocean/land with zero surface
             # flux.  Guard against stashing a Tracer (an outer jit/scan/grad would

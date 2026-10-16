@@ -154,6 +154,11 @@ morrison_sed_cfl_substeps: true  # user decision 2026-09-22: MG2 CFL sub-stepped
                                  # 256 cap; turning the abort on is a user choice, not taken.
 convection: bechtold        # mass-flux (IFS lineage), water-conserving by
                             # construction; C24 screen = revalidation gate
+# Convective momentum transport PINNED OFF (review 2026-10-10 F22, majority
+# vote Claude+GLM): the unset default is now ON on every lane, but it resolved
+# OFF on MPAS when this deck's results were produced; this deck exists so
+# those results reproduce, so it records the behaviour they ran with.
+bechtold_enable_cmt: false
 # NEW BASELINE, 2026-09-13 (owner decision). This moves TWO things at once and
 # is therefore a deliberate re-baselining, not a one-variable arm: the boundary
 # layer changes closure AND gains prognostic sub-grid variance. Nothing here is
@@ -441,6 +446,7 @@ solar_source: spectral_file  # transient TSI + 14-band spectral SSI (2026-07-23
                             # Weights reach rrtmg/rrtmgp only (gray: TSI only).
 solar_tsi_var: TSI
 solar_spectral_var: SSI_frac
+solar_spectral_band_order: rrtmg_sw   # explicit (adapt_cmip6_solar.py writes RRTMG-SW order)
 ozone_forcing: external
 ghg_forcing: external
 aerosol_forcing: external

@@ -464,6 +464,37 @@ class TestLatLonSolverMassAndResidual:
             f"global eta mass drifted {rel_mass:.3e} over one implicit step"
         )
 
+    @pytest.mark.parametrize("variant", ["standard", "single_reduce"])
+    def test_record_true_residual_logs_returned_eta_residual(self, variant):
+        """The opt-in residual log carries exactly the return_residual value
+        (true residual of the returned eta, same norm for every variant),
+        once per solve under jit; off leaves the log untouched."""
+        from legoesm.ocean.dynamics.barotropic_common import TRUE_RESIDUAL_LOG
+        from legoesm.ocean.dynamics.barotropic_implicit_latlon_cgrid import (
+            barotropic_implicit_latlon_cgrid,
+        )
+        state, grid, z_coord, config = self._setup()
+        bt = config.barotropic._replace(
+            barotropic_implicit_force_pcg=True,
+            barotropic_implicit_pcg_variant=variant)
+        dt = 1800.0
+        TRUE_RESIDUAL_LOG.clear()
+        barotropic_implicit_latlon_cgrid(
+            state, dt, grid, z_coord, config._replace(barotropic=bt))
+        jax.effects_barrier()
+        assert TRUE_RESIDUAL_LOG == []
+
+        cfg_on = config._replace(barotropic=bt._replace(
+            barotropic_implicit_record_true_residual=True))
+        f = jax.jit(lambda st: barotropic_implicit_latlon_cgrid(
+            st, dt, grid, z_coord, cfg_on, return_residual=True)[2])
+        rel = float(f(state))
+        rel2 = float(f(state))
+        jax.effects_barrier()
+        assert len(TRUE_RESIDUAL_LOG) == 2
+        np.testing.assert_allclose(TRUE_RESIDUAL_LOG, [rel, rel2], rtol=0)
+        assert 0.0 < rel < 1.0
+
     def test_no_while_loop_in_distributed_pcg(self):
         """Static guard: the distributed PCG must compile with NO ``while``
         primitive (a residual-dependent ``while_loop`` is the deadlock-
@@ -818,14 +849,14 @@ class TestSingleReducePCG:
 
         cfg = MPASOceanConfig()
         # The exact attribute chain the distributed branch dereferences.
-        # Resolved per JAX backend since 2026-10-04 (owner decision; table
+        # Resolved per JAX backend since 2026-10-04 (owner decisions; CPU 2026-10-10; table
         # MPAS_BAROTROPIC_PCG_DEFAULTS in mpas_config).
         from legoesm.ocean.mpas_config import resolve_barotropic_pcg_defaults
         assert cfg.barotropic_implicit_pcg_variant is None
         cpu = resolve_barotropic_pcg_defaults(cfg, "cpu")
         gpu = resolve_barotropic_pcg_defaults(cfg, "gpu")
         assert (cpu.barotropic_implicit_pcg_variant, cpu.barotropic_implicit_pcg_precond,
-                cpu.barotropic_implicit_pcg_fixed_iters) == ("single_reduce_deep", "jacobi", 30)
+                cpu.barotropic_implicit_pcg_fixed_iters) == ("chebyshev_deep", "jacobi", 50)
         assert (gpu.barotropic_implicit_pcg_variant, gpu.barotropic_implicit_pcg_precond,
                 gpu.barotropic_implicit_pcg_fixed_iters) == ("standard", "gpoly", 20)
         assert cfg.barotropic_implicit_pcg_poly_sweeps == 4

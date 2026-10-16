@@ -1413,9 +1413,14 @@ _L2E_FIELDS = ("pe", "peln", "pk", "pkz", "delp", "pt", "u", "v", "ps",
                "omga")
 
 
-def _tracers(face, scales=(1e-3, 4e-4), phases=(1.4, 0.3)):
+def _tracers(face, scales=(1e-3, 4e-4), phases=(1.4, 0.3), ntracer=None):
     n, ng, km = face["n"], face["ng"], face["km"]
     ia, m_a = ng, n + 2 * ng
+    if ntracer is not None and ntracer > len(scales):
+        # distinct amplitude and vertical phase per extra tracer, so a
+        # slot mix-up in the nq > 5 arm cannot hide behind symmetry
+        scales = tuple(scales) + tuple(1e-3 / (2 + i) for i in range(ntracer - len(scales)))
+        phases = tuple(phases) + tuple(0.3 + 0.37 * i for i in range(ntracer - len(phases)))
     out = []
     for scale, phase in zip(scales, phases):
         qq = np.zeros((m_a, m_a, km), dtype=np.float64)
@@ -1436,7 +1441,7 @@ def _run_driver_both(make_face, ntracer=2, **kw):
     for k in _L2E_FIELDS:
         if k in face_n:
             assert np.array_equal(face_n[k], face_j[k]), k
-    q_n = _tracers(face_n)[:ntracer]
+    q_n = _tracers(face_n, ntracer=ntracer)[:ntracer]
     q_j = [np.array(x, copy=True) for x in q_n]
     before = {k: np.array(v, copy=True) for k, v in face_n.items()
               if isinstance(v, np.ndarray)}
@@ -1667,7 +1672,6 @@ def test_driver_jax_rejects_a_float32_tracer():
 
 @pytest.mark.parametrize("override, needle, ntracer", [
     (dict(consv=1.0), "consv", 0),
-    (dict(fill=True), "fillz", 1),
     (dict(kord_tm=9), "kord_tm", 0),
     (dict(do_sat_adj=True), "do_sat_adj", 0),
     (dict(do_inline_mp=True), "do_inline_mp", 0),
@@ -1683,14 +1687,131 @@ def test_driver_jax_refuses_every_unported_lane(override, needle, ntracer):
         l2e_j(**face, q=tr)
 
 
-def test_driver_jax_refuses_more_than_five_tracers():
-    face = _face()[0]
-    m_a = face["n"] + 2 * face["ng"]
-    tr = [np.zeros((m_a, m_a, face["km"]), dtype=np.float64)
-          for _ in range(6)]
-    face["kord_tr"] = [9] * 6            # the fixture already carries one
-    with pytest.raises(NotImplementedError, match="mapn_tracer"):
-        l2e_j(**face, q=tr)
+# ---------------------------------------------------------------------
+# mapn_tracer (nq > 5, fv_mapz.F90:327): the nine-slot ice decks
+# ---------------------------------------------------------------------
+
+def _mapn_args(nq=7):
+    pe1, q1, pe2, dp2, _ = _map_args("map1_q2", km=KMP)
+    qs = [q1 * (1.0 + 0.13 * i) + 3e-4 * i for i in range(nq)]
+    return pe1, qs, pe2, dp2
+
+
+def test_mapn_tracer_jax_matches_numpy_lane():
+    """The JAX twin against the NumPy authority (the literal Fortran
+    transcription), per tracer, at the map1_q2 class.  Mixed kords, so
+    a port reading kords[0] for every tracer is caught."""
+    from legoesm.core.fv3_mapz import mapn_tracer as mapn_j
+    from legoesm.core.fv3_native_mapz import mapn_tracer as mapn_n
+    pe1, qs, pe2, dp2 = _mapn_args()
+    kords = [9, 10, 9, 11, 9, 12, 9][:len(qs)]
+    ref = mapn_n(pe1, [np.array(a, copy=True) for a in qs], pe2, dp2, KMP,
+                 kords, 0.0)
+    got = mapn_j(jnp.asarray(pe1), [jnp.asarray(a) for a in qs],
+                 jnp.asarray(pe2), jnp.asarray(dp2), KMP, kords, 0.0)
+    for iq, (a, b) in enumerate(zip(got, ref)):
+        # same class as map1_q2 (MEASURED 2.2e-16 there; bound x10)
+        gate_scalar(f"mapn_tracer q[{iq}]", _rel(np.asarray(a)[:, 1:],
+                                                 b[:, 1:]), 2.3e-15)
+
+
+def test_mapn_tracer_jax_rejects_mixed_dtype_dp2():
+    """dp2 must share the edges' and tracers' float dtype: an fp32 dp2
+    against fp64 edges would otherwise promote the remap silently (the
+    uniform gate covers all four operands, not dp2 alone)."""
+    from legoesm.core.fv3_mapz import mapn_tracer as mapn_j
+    pe1, qs, pe2, dp2 = _mapn_args(nq=6)
+    kords = [9] * len(qs)
+    with pytest.raises(TypeError, match="MIXED"):
+        mapn_j(jnp.asarray(pe1), [jnp.asarray(a) for a in qs],
+               jnp.asarray(pe2), jnp.asarray(dp2, dtype=jnp.float32), KMP,
+               kords, 0.0)
+    mapn_j(jnp.asarray(pe1), [jnp.asarray(a) for a in qs],
+           jnp.asarray(pe2), jnp.asarray(dp2), KMP, kords, 0.0)  # NON-VACUITY
+
+
+def test_mapn_tracer_agrees_with_map1_q2_per_tracer_at_rounding_level():
+    """mapn_tracer is the per-tracer remap with the products associated
+    as :1808-1824 write them (fac1 = 0.5*(pr+pl) first): equal to
+    map1_q2 in exact arithmetic, so a wrong fac1/fac2 in the mapn branch
+    fails this bound.  Well-posed only because kord = 9 > 7: both
+    routines then take scalar_profile (:1708 dispatches ppm_profile
+    below 8, which this lane refuses), so the limiter is shared and only
+    the integration's association differs.  MEASURED on this fixture:
+    the two associations agree BITWISE (0.0), so no positive lower bound
+    is asserted -- that the mapn arm ran is pinned by the dispatch test
+    below, not here."""
+    from legoesm.core.fv3_native_mapz import mapn_tracer as mapn_n
+    pe1, qs, pe2, dp2 = _mapn_args()
+    got = mapn_n(pe1, [np.array(a, copy=True) for a in qs], pe2, dp2, KMP,
+                 [9] * len(qs), 0.0)
+    worst = 0.0
+    for a, q in zip(got, qs):
+        ref = map1_q2_n(pe1, np.array(q, copy=True), pe2, dp2, KMP, KMP, 0, 9,
+                        0.0)
+        worst = max(worst, _rel(a[:, 1:], ref[:, 1:]))
+    assert worst < 1e-14, worst
+
+
+@pytest.mark.parametrize("nq, bound, cut", [
+    (9, "mapn_tracer", "map1_q2"),
+    (2, "map1_q2", "mapn_tracer"),
+])
+def test_l2e_tracer_arm_binds_on_nq_in_both_lanes(monkeypatch, nq, bound, cut):
+    """:327 dispatch: nq > 5 runs mapn_tracer and NOTHING else; nq <= 5
+    runs map1_q2 and NOTHING else -- on EACH lane, counted per lane.
+    Both arms are wrapped by per-lane spies, so a lane calling the wrong
+    arm, both arms, or neither (a pre-bound alias) fails here, and a
+    raise in one lane cannot mask the other."""
+    import legoesm.core.fv3_mapz as mj
+    import legoesm.core.fv3_native_mapz as mn
+    calls = {}
+
+    def spy(mod, name):
+        real = getattr(mod, name)
+
+        def wrapped(*a, **k):
+            calls[(mod.__name__, name)] = calls.get((mod.__name__, name), 0) + 1
+            return real(*a, **k)
+        monkeypatch.setattr(mod, name, wrapped)
+    for mod in (mn, mj):
+        spy(mod, "map1_q2")
+        spy(mod, "mapn_tracer")
+    ref, out, _ = _run_driver_both(
+        lambda: {**_face()[0], "kord_tr": [9] * nq}, ntracer=nq)
+    assert len(out.q) == nq and len(ref["q"]) == nq
+    # the NumPy lane calls per j-row (:300 loop), the JAX lane once per
+    # face -- so "ran" is > 0, not an exact count
+    for mod in (mn, mj):
+        assert calls.get((mod.__name__, bound), 0) > 0, (mod.__name__, calls)
+        assert calls.get((mod.__name__, cut), 0) == 0, (mod.__name__, calls)
+
+
+def test_mapn_tracer_refuses_a_kord_list_of_the_wrong_length():
+    from legoesm.core.fv3_mapz import mapn_tracer as mapn_j
+    from legoesm.core.fv3_native_mapz import mapn_tracer as mapn_n
+    pe1, qs, pe2, dp2 = _mapn_args()
+    with pytest.raises(ValueError, match="kord entries"):
+        mapn_n(pe1, qs, pe2, dp2, KMP, [9] * (len(qs) - 1), 0.0)
+    with pytest.raises(ValueError, match="kord entries"):
+        mapn_j(jnp.asarray(pe1), [jnp.asarray(a) for a in qs],
+               jnp.asarray(pe2), jnp.asarray(dp2), KMP,
+               [9] * (len(qs) - 1), 0.0)
+
+
+def test_driver_jax_matches_numpy_lane_nine_tracers():
+    """nq = 9 (the six water species + three numbers of an ice deck):
+    JAX vs NumPy at the hydrostatic gate's class, every tracer.  Which
+    arm ran is pinned by test_l2e_tracer_arm_binds_on_nq_in_both_lanes,
+    not by this parity (the arms agree at rounding level)."""
+    ref, out, before = _run_driver_both(
+        lambda: {**_face()[0], "kord_tr": [9] * 9}, ntracer=9)
+    _cmp_l2e(ref, out, _L2E_FIELDS, 8.1e-14, "hydro nq=9")
+    assert len(out.q) == 9 and len(ref["q"]) == 9
+    for iq, qn in enumerate(ref["q"]):
+        gate_scalar(f"l2e nq=9 q[{iq}]", _rel(np.asarray(out.q[iq]), qn),
+                    5.5e-15)
+        assert not np.array_equal(qn, before["q"][iq]), iq   # remapped
 
 
 def test_driver_jax_guards_do_not_over_refuse_a_non_last_step_call():
@@ -1701,7 +1822,7 @@ def test_driver_jax_guards_do_not_over_refuse_a_non_last_step_call():
     b = _face()[0]
     b["r_vir"] = 1.0
     l2e_j(**b, q=_tracers(b), last_step=False)
-    l2e_j(**_face()[0], q=[], fill=True)          # fillz needs nq > 0
+    l2e_j(**_face()[0], q=[], fill=True)          # fillz needs nq > 0 (no-op)
 
 
 def test_driver_jax_requires_q_and_omga_explicitly():
@@ -2367,3 +2488,86 @@ def test_map_jax_degenerate_source_layer_the_walk_never_visits():
             f"thickness in a layer the NumPy loop never visits")
     # NON-VACUITY: the gradient is real, not an all-zero pass.
     assert np.abs(np.asarray(grads[0])).max() > 0.0
+
+
+# ---------------------------------------------------------------------
+# fillz twin (fv_fill.F90:34-141)
+# ---------------------------------------------------------------------
+
+def test_fillz_jax_matches_numpy_lane():
+    """Random columns with planted negatives in every layer position
+    (top, interior, bottom, net-negative columns): the JAX twin agrees
+    with the NumPy authority at the map1_q2 class, on and off jit."""
+    from legoesm.core.fv3_mapz import fillz as fz_j
+    from legoesm.core.fv3_native_mapz import fillz as fz_n
+    rng = np.random.default_rng(11)
+    im, km = 24, 9
+    q = rng.random((im, km + 1)) * 1e-3
+    q[:, 0] = 0.0
+    neg = rng.random((im, km + 1)) < 0.3
+    neg[:, 0] = False
+    q[neg] = -q[neg] * 0.3               # columns stay net-positive ...
+    q[0, 1] = -1.0                       # ... except this one
+    dp = rng.random((im, km + 1)) * 50.0 + 10.0
+    ref = fz_n(q.copy(), dp, km)
+    for jit in (False, True):
+        f = jax.jit(fz_j, static_argnums=2) if jit else fz_j
+        got = np.asarray(f(jnp.asarray(q), jnp.asarray(dp), km))
+        gate_scalar(f"fillz jit={jit}", _rel(got[:, 1:], ref[:, 1:]), 2.3e-15)
+    # the Fortran leaves a bottom-layer negative whose layer above was
+    # zeroed (zfix not set there), so "every column fixed" is NOT the
+    # algorithm's contract: negatives must only DECREASE
+    assert (ref[:, 1:] < 0.0).sum() < (q[:, 1:] < 0.0).sum()
+    assert ref[0, 1:].min() < 0.0          # nothing to borrow: left alone
+    np.testing.assert_allclose(           # column mass kept, every column
+        (ref[:, 1:] * dp[:, 1:]).sum(axis=1),
+        (q[:, 1:] * dp[:, 1:]).sum(axis=1), rtol=1e-13)
+
+
+def test_driver_jax_fill_true_matches_numpy_lane_and_binds():
+    """fill=True through both L2E lanes on the fixture's POSITIVE
+    tracers: lanes agree at the hydrostatic gate class and fill is a
+    bitwise no-op there (the planted-negative binding is the next test)."""
+    def mk():
+        f = _face()[0]
+        f["kord_tr"] = [9] * 2
+        return f
+    ref, out, before = _run_driver_both(mk, ntracer=2, fill=True)
+    _cmp_l2e(ref, out, _L2E_FIELDS, 8.1e-14, "hydro fill")
+    for iq in range(2):
+        gate_scalar(f"l2e fill q[{iq}]", _rel(np.asarray(out.q[iq]), ref["q"][iq]),
+                    5.5e-15)
+    ref0, _, _ = _run_driver_both(mk, ntracer=2, fill=False)
+    # the fixture's tracers are smooth positive fields: fill is a no-op
+    # there (bitwise)
+    assert all(np.array_equal(a, b) for a, b in zip(ref["q"], ref0["q"]))
+
+
+@pytest.mark.parametrize("nq", [2, 9])
+def test_driver_fill_binds_on_both_lanes_and_both_arms(nq):
+    """A planted negative through BOTH L2E lanes, on the per-tracer arm
+    (nq=2) and the mapn_tracer arm (nq=9): fill=True leaves the planted
+    column non-negative on each lane, fill=False leaves the negative,
+    and the two lanes agree at the tracer gate class with fill on."""
+    def mk():
+        f = _face()[0]
+        f["kord_tr"] = [9] * nq
+        return f
+    ia = _face()[0]["ng"]
+    outs = {}
+    for fill in (False, True):
+        face_n, face_j = mk(), mk()
+        q_n = _tracers(face_n, ntracer=nq)[:nq]
+        q_n[0][ia + 2, ia + 2, 1] = -3.0e-3
+        q_j = [np.array(x, copy=True) for x in q_n]
+        l2e_n(**face_n, q=q_n, fill=fill)
+        out = l2e_j(**{k: (jnp.asarray(v) if isinstance(v, np.ndarray) else v)
+                       for k, v in face_j.items()},
+                    q=[jnp.asarray(x) for x in q_j], fill=fill)
+        outs[fill] = (q_n, [np.asarray(a) for a in out.q])
+    for lane in (0, 1):
+        assert outs[False][lane][0][ia + 2, ia + 2, :].min() < 0.0, lane
+        assert outs[True][lane][0][ia + 2, ia + 2, :].min() >= 0.0, lane
+    for iq in range(nq):
+        gate_scalar(f"fill nq={nq} q[{iq}]",
+                    _rel(outs[True][1][iq], outs[True][0][iq]), 5.5e-15)

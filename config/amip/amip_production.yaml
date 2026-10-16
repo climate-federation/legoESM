@@ -79,6 +79,13 @@ mpas_vert_advection_scheme: sb       # conservative Simmons-Burridge flux form
                                      # 6.7e-16 conservative.  USER-APPROVED
                                      # 2026-09-23; the CODE default stays
                                      # 'upwind' and this deck selects it.
+mpas_vert4_flux_form_tracers: []     # vapour takes the log form below instead
+mpas_vert4_log_form_tracers: [q_v]   # vertical del4 filter on ln(q_v + 1e-7), water-weighted
+                                     # mass-conserving flux.  The flux form [q_v] removed 8-10 %/day
+                                     # of UTLS water offline; one 60-day pair vs it (2026-10-14,
+                                     # PLAUSIBLE): Feb ClimateEval median RMSE ratio 0.97, 200 hPa
+                                     # T RMSE -26..-32 %.  USER-APPROVED 2026-10-15; the CODE
+                                     # default moved to this too (same day).
 mpas_div_damp4_scale: 1.0            # CAM6: fv_div24del2flag=4 selects ldiv4,
                                      # 4th-order DIVERGENCE damping at every
                                      # level (cd_core.F90 tau4 = 0.01/dt times
@@ -100,6 +107,15 @@ mpas_div_damp4_scale: 1.0            # CAM6: fv_div24del2flag=4 selects ldiv4,
                                      # transport above the drift REVERSES to
                                      # -1.10 K/h, which is why this deck
                                      # carries both or neither.
+energy_fixer: true                   # CAM6 check_energy_fix analogue (review
+                                     # 2026-10-10 F15, by vote): the energy each
+                                     # dynamics step loses (sponge/del4/div4 KE,
+                                     # numerics) returns as a uniform heating
+                                     # before physics, and the energy the dry-
+                                     # mass fixer moves (outside that window)
+                                     # returns too (2026-10-14 F15 V8: 0.065
+                                     # W/m2 at res6).  Named, not inherited
+                                     # (the code default is also true).
 
 # ---- physics cadence ---------------------------------------------------------
 physics_update_steps: 16    # CAM6: physics every 1800 s (16 x 112.5 s); the
@@ -111,6 +127,8 @@ cld_macmic_num_steps: 3     # CAM6 namelist_defaults_cam.xml:1254 (mg2 + clubb_s
 
 # ---- radiation / clouds / microphysics --------------------------------------
 radiation: rrtmg            # rrtmgp builder (CAM6 uses RRTMG; same k-lineage)
+rrtmgp_overhead_layer: true # CAM RRTMG extra layer above the model top (ozone
+                            # column above p_top absorbs; ~2 W/m2 leaves budget)
 # Saturation curve the cloud-cover diagnosis measures RH against.  NAMED, not
 # inherited: the code default is "mixed_phase" and that is the value this deck
 # wants, but the default moved on 2026-09-17 and a default is not a record.
@@ -199,6 +217,11 @@ cloud_vertical_overlap_optics: mcica  # CAM6 McICA (user 2026-09-25): each
                                      # reference: bias within sampling noise,
                                      # per-column scatter ~1.8x the 8-subcolumn one.
 cloud_n_subcolumns: 8                # read only by max_random; inert under mcica
+rrtmgp_gpoint_batch_size: 0          # CPU: one g-point at a time (code default 16 is
+                                     # for GPU). Measured 2026-10-06, res6 16 ranks x 8
+                                     # cores: radiation step 13.8 s at 16, 7.9 s at 0
+                                     # (~139 s per simulated day); fluxes differ only by
+                                     # summation order (<= 6.1e-4 W/m2).
 hard_sat_ice_curve: false          # the ice-curve blend of that same
                                    # post-step drain; inert once the drain
                                    # is off, set explicitly so no row rests
@@ -309,10 +332,14 @@ land_snow_scheme: bulk
 # Frozen soil impedes water flow, CLM5 form 10**(-e * ice fraction), e = 6
 # (user 2026-09-28).  Active because freeze/thaw is on.
 land_soil_ice_impedance_exponent: 6.0
+# One-layer snow thermal node OFF (record only; A/B switch added 2026-10-03,
+# user decision: off until the Sep-Dec arm verdict).
+land_snow_insulation: false
 land_soil_moisture_init_frac: 0.25
 land_stomatal_beta: false
 land_calibrated_physics: true
 land_surface_scheme: two_leaf
+land_canopy_max_iters: 10   # NEW BASELINE 2026-10-05 (user): A/B vs 60 = 4.2x/2.7x faster, land LH -1.5/-3.4 %; see fv3_duo_gaps/q_review/deck_ledgers.md
 # Pinned at the current values (b0 stressed, no interception) so the deck
 # records them; changing either is a labelled land baseline, not a default flip.
 land_canopy_stress_b0: true
@@ -358,9 +385,18 @@ sic_scale: 0.01
 solar_source: spectral_file
 solar_tsi_var: TSI
 solar_spectral_var: SSI_frac
+solar_spectral_band_order: rrtmg_sw   # explicit: SSI_frac is in RRTMG-SW band order (adapt_cmip6_solar.py); 'auto' only inferred it
 ozone_forcing: external
 ghg_forcing: external
 aerosol_forcing: external
+aerosol_reference_aod: 0.03  # 550 nm background AOD of the built-in reference
+                             # aerosol field, read only when no aerosol file is
+                             # given (the production launchers give one). Written
+                             # out so it rests on no default (user decision
+                             # 2026-10-15); equals the run_amip default.
+# A date outside a multi-year forcing file's years raises (explicit: the
+# end-record hold is an opt-in for deliberate experiments only; F37).
+forcing_hold_outside_file_years: false
 start_year: 1979
 diag_days: 1
 checkpoint_days: 30         # run control, carried from the outgoing production

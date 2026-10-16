@@ -5,17 +5,29 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import struct
 import sys
 from pathlib import Path
 
 import numpy as np
 
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parent))
+from nemo_testcase_checkout import bootstrap_checkout  # noqa: E402
+
+CHECKOUT_IMPORT = bootstrap_checkout(__file__, enforce_x64=__name__ == "__main__")
+
 MAGIC = "NEMO_L1_SWGSTG1"
 NINT = 15
 BOUNDS_AT = 10
 STEPS = 10
 STAGES = (1, 2, 3)
+STAGE_TIME_LEVELS = {
+    1: (1, 1, 3, 3),
+    2: (1, 3, 2, 2),
+    3: (1, 2, 3, 3),
+}
 SENTINEL = 1.0e10
 GROUPS = {
     "ssh_k", "u_k", "v_k", "r3t_k", "r3u_k", "r3v_k", "r3f",
@@ -95,6 +107,36 @@ def compare_outputs(run: Path, reference: Path) -> dict:
     return result
 
 
+def require_completed_step(root: Path, expected: int) -> dict:
+    """Require NEMO's always-written step stamp to reach the requested step."""
+    time_path, stat_path = root / "time.step", root / "run.stat"
+    if not time_path.is_file():
+        raise Refusal(f"{root}: time.step is missing")
+    try:
+        time_step = int(time_path.read_text().strip())
+    except ValueError as exc:
+        raise Refusal(f"{time_path}: invalid completed step") from exc
+    stat_steps = []
+    if stat_path.is_file():
+        stat_steps = [
+            int(match.group(1))
+            for match in re.finditer(
+                r"^\s*it\s*:\s*([0-9]+)\b", stat_path.read_text(), re.MULTILINE)
+        ]
+        if not stat_steps:
+            raise Refusal(f"{stat_path}: no completed-step records")
+    if time_step != expected or (stat_steps and stat_steps[-1] != expected):
+        raise Refusal(
+            f"{root}: completion is time.step={time_step}, "
+            f"run.stat={stat_steps[-1] if stat_steps else 'missing'}, "
+            f"expected {expected}")
+    return {
+        "expected_step": expected,
+        "time_step": time_step,
+        "run_stat_final_step": stat_steps[-1] if stat_steps else None,
+    }
+
+
 def compare_restarts(run: Path, reference: Path, steps: tuple[int, ...]) -> dict:
     """Require each requested daily restart to exist and match field bits."""
     result = {}
@@ -126,6 +168,12 @@ def check(evidence: Path, reference: Path, *,
         head, groups = parse(path)
         kt, stage = head[1], head[2]
         found.append((kt, stage))
+        levels = tuple(head[3:7])
+        expected_levels = STAGE_TIME_LEVELS.get(stage)
+        if levels != expected_levels:
+            raise Refusal(
+                f"{path.name}: stage {stage} time levels "
+                f"{levels} != {expected_levels} (kbb,kmm,kaa,krhs)")
         if path.name != f"oracle_swgstage_kt{kt:08d}_s{stage}.bin":
             raise Refusal(f"{path.name}: filename/header mismatch")
         shapes = {a.shape for a in groups.values()}
@@ -162,19 +210,55 @@ def main(argv=None) -> int:
     p.add_argument("--evidence", type=Path, required=True)
     p.add_argument("--reference", type=Path, required=True)
     p.add_argument("--json", type=Path, required=True)
+    p.add_argument("--outputs-only", action="store_true")
+    p.add_argument("--expected-variable-count", type=int)
+    p.add_argument("--expected-completed-step", type=int)
     p.add_argument("--record-kts", type=_int_csv,
                    default=tuple(range(1, STEPS + 1)))
     p.add_argument("--stages", type=_int_csv, default=STAGES)
     p.add_argument("--restart-kts", type=_int_csv, default=())
     a = p.parse_args(argv)
     try:
-        out = check(a.evidence, a.reference, record_kts=a.record_kts,
-                    stages=a.stages, restart_kts=a.restart_kts)
+        if a.outputs_only:
+            completion = None
+            if a.expected_completed_step is not None:
+                completion = {
+                    "reference": require_completed_step(
+                        a.reference, a.expected_completed_step),
+                    "candidate": require_completed_step(
+                        a.evidence, a.expected_completed_step),
+                }
+            identity = compare_outputs(a.evidence, a.reference)
+            variable_count = sum(len(names) for names in identity.values())
+            if (a.expected_variable_count is not None
+                    and variable_count != a.expected_variable_count):
+                raise Refusal(
+                    f"output variable count {variable_count}, expected "
+                    f"{a.expected_variable_count}")
+            out = {
+                "schema": "swg-dg-nemo-case-identity-v1",
+                "reference": str(a.reference.resolve()),
+                "candidate": str(a.evidence.resolve()),
+                "output_identity": identity,
+                "variables_compared": variable_count,
+                "differing_variables": 0,
+                "bit_identical": True,
+            }
+            if completion is not None:
+                out["completion"] = completion
+        else:
+            out = check(a.evidence, a.reference, record_kts=a.record_kts,
+                        stages=a.stages, restart_kts=a.restart_kts)
     except (Refusal, OSError, ValueError) as exc:
         print(f"REFUSE: {exc}", file=sys.stderr)
         return 1
     a.json.write_text(json.dumps(out, indent=2, sort_keys=True) + "\n")
-    print(f"ADMITTED {len(out['records'])} STAGE-ENTRY RECORDS; PASSIVE OUTPUTS")
+    if a.outputs_only:
+        print(
+            "SWG_DG_IDENTITY BIT_IDENTICAL "
+            f"variables={out['variables_compared']} differing=0")
+    else:
+        print(f"ADMITTED {len(out['records'])} STAGE-ENTRY RECORDS; PASSIVE OUTPUTS")
     return 0
 
 

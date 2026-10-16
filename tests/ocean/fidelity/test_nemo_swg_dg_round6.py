@@ -8,6 +8,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from legoesm.core.precision import get_policy, set_policy
 
 _PATH = (Path(__file__).resolve().parents[3]
          / "scripts/validate/ocean_fidelity/testcases/"
@@ -15,6 +16,19 @@ _PATH = (Path(__file__).resolve().parents[3]
 _SPEC = importlib.util.spec_from_file_location("swg_dg_round6", _PATH)
 round6 = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(round6)
+_LAST_RESTORED = [None, None]
+
+
+@pytest.fixture(autouse=True)
+def _restore_process_precision():
+    previous_policy = get_policy()
+    previous_x64 = bool(jax.config.jax_enable_x64)
+    try:
+        yield
+    finally:
+        set_policy(previous_policy)
+        jax.config.update("jax_enable_x64", previous_x64)
+        _LAST_RESTORED[:] = [previous_policy, previous_x64]
 
 
 def test_bit_summary_is_word_exact_for_signed_zero_and_one_ulp():
@@ -24,6 +38,13 @@ def test_bit_summary_is_word_exact_for_signed_zero_and_one_ulp():
     assert row["bit_unequal"] == 2
     assert row["first_unequal_cell"] == [0]
     assert not row["bit_identical"]
+    assert row["numeric_unequal"] == 1
+    assert row["signed_zero_only"] == 1
+    assert row["signed_ulp_histogram"] == {"-1": 1, "1": 1}
+
+    single = np.array([1.0], dtype=np.float32)
+    moved = np.nextafter(single, np.float32(np.inf))
+    assert round6.bit_summary(single, moved)["signed_ulp_histogram"] == {"1": 1}
 
 
 def test_coordinate_assembly_is_exact_and_rejects_conflicting_overlap():
@@ -47,6 +68,20 @@ def test_json_writer_handles_numpy_scalars_and_refuses_overwrite(tmp_path):
     assert path.read_text() == '{\n  "count": 3\n}\n'
     with pytest.raises(RuntimeError, match="refusing to overwrite"):
         round6._write_json(path, {"count": np.int64(4)})
+
+
+def test_rank_check_cli_returns_nonzero_for_planted_mismatch(tmp_path, monkeypatch):
+    payload = {
+        "label": "synthetic-rank-control",
+        "all_bit_identical": False,
+        "rows": {"sshn": {"bit_identical": False}},
+    }
+    monkeypatch.setattr(round6, "compare_rank_restarts", lambda root: payload)
+    report = tmp_path / "rank.json"
+    status = round6.main([
+        "rank-check", "--root", str(tmp_path), "--json", str(report)])
+    assert status == 1
+    assert report.is_file()
 
 
 def test_exposure_classifier_distinguishes_zero_from_magnitude():
@@ -93,3 +128,8 @@ def test_tiny_statement_bisect_reproduces_production_stage_word_for_word():
         np.asarray(probes["baseline"]), np.asarray(production.ssh_k))
     assert tuple(probes) == round6.PROBE_NAMES
     assert np.any(np.asarray(probes["zonal_difference"]) != 0.0)
+
+
+def test_tiny_statement_bisect_test_restores_precision_policy():
+    assert (get_policy(), bool(jax.config.jax_enable_x64)) == tuple(
+        _LAST_RESTORED)

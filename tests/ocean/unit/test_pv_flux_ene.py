@@ -253,6 +253,20 @@ def test_ens_requires_explicit_boolean_mask_switch_before_array_use():
             )
 
 
+def test_mask_switch_refused_outside_ens():
+    """ln_dynvor_msk is consumed only by ens_total; elsewhere it would be inert."""
+    import pytest
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import _bc_pv_flux
+
+    for scheme in ("al81", "ene", "ene_total", "een_total", "een_planetary"):
+        with pytest.raises(ValueError, match="only for ens_total"):
+            _bc_pv_flux(
+                None, None, None, None, None, None, None, None, None,
+                None, None, None, vorticity_scheme=scheme,
+                ln_dynvor_msk=True,
+            )
+
+
 def test_ens_direct_thickness_division_bypasses_ene_floor():
     """Compiled dynvor.f90:659-660 divides by e3f without a floor."""
     from legoesm.ocean.fidelity.nemo_testcase_recipe import build_swg_card

@@ -12,6 +12,12 @@ from pathlib import Path
 
 import numpy as np
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+CHECKOUT_TOOLS = (
+    REPO_ROOT / "scripts/validate/ocean_fidelity/testcases")
+sys.path.insert(0, str(CHECKOUT_TOOLS))
+from nemo_testcase_checkout import JAX_PLATFORMS_FOR, bootstrap_checkout  # noqa: E402
+
 SECONDS_PER_DAY = 86_400
 SECONDS_PER_HOUR = 3_600
 HOURS_PER_DAY = 24
@@ -31,6 +37,33 @@ def _write_hashes_atomic(path: Path, hashes: dict[str, str]) -> None:
     temporary.write_text(
         "".join(f"{digest}  {name}\n" for name, digest in hashes.items()))
     temporary.replace(path)
+
+
+def configure_runtime_device(
+        mode: str, gpu_device: str | None,
+        environ: dict[str, str] | None = None,
+) -> dict[str, str | None]:
+    """Resolve the explicit physical-device selection before importing JAX."""
+    if mode not in ("gpu-native", "cpu-certified", "cpu-scanned"):
+        raise ValueError(
+            "mode must be 'gpu-native', 'cpu-certified', or 'cpu-scanned'")
+    target = os.environ if environ is None else environ
+    if mode == "gpu-native":
+        if gpu_device is None or not gpu_device.isdigit():
+            raise ValueError(
+                "gpu-native mode requires --gpu-device with one physical "
+                "non-negative GPU index")
+        target["CUDA_VISIBLE_DEVICES"] = gpu_device
+        target["JAX_PLATFORMS"] = JAX_PLATFORMS_FOR["gpu"]
+    elif gpu_device is not None:
+        raise ValueError("--gpu-device is valid only with gpu-native mode")
+    else:
+        target["JAX_PLATFORMS"] = JAX_PLATFORMS_FOR["cpu"]
+    return {
+        "requested_physical_gpu": gpu_device,
+        "CUDA_VISIBLE_DEVICES": target.get("CUDA_VISIBLE_DEVICES"),
+        "JAX_PLATFORMS": target.get("JAX_PLATFORMS"),
+    }
 
 
 def resolved_daily_namelist(days: int, *, deck: str = "maddison"):
@@ -176,6 +209,31 @@ def compare_native_state_bitwise(state, path: Path) -> dict:
             np.max(np.abs(actual[name] - expected[name])))
         result["all_equal"] = bool(result["all_equal"] and unequal == 0)
     return result
+
+
+def build_case(namelist):
+    """Return the driver's card, model and steady wind forcing for a deck.
+
+    The GPU short ladder builds its case here too, so the 1-10 step scorer
+    and the long run integrate the same objects.
+    """
+    import jax
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_swg_card,
+        swg_surface_wind,
+    )
+    from legoesm.ocean.state import OceanSurfaceForcing
+
+    card = build_swg_card(namelist)
+    model = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
+    tau_u, tau_v = swg_surface_wind(namelist)
+    forcing = OceanSurfaceForcing(
+        tau_i_native=jax.numpy.asarray(tau_u, dtype=jax.numpy.float64),
+        tau_j_native=jax.numpy.asarray(tau_v, dtype=jax.numpy.float64),
+    )
+    return card, model, forcing
 
 
 def seed_steady_forcing_carry(state, forcing):
@@ -333,6 +391,33 @@ def prognostic_differences(left, right) -> dict[str, float | int | bool]:
         all_finite
         and all(result[f"{name}_max_abs"] <= SCAN_PARITY_ATOL
                 for name in arrays))
+    return result
+
+
+def device_memory_statistics(device, *, required: bool) -> dict:
+    """Read JAX allocator high-water statistics without guessing support."""
+    raw = device.memory_stats()
+    result = {
+        "api": "jax.Device.memory_stats",
+        "supported": False,
+        "peak_bytes_in_use": None,
+        "bytes_in_use": None,
+        "bytes_limit": None,
+        "available_keys": [],
+    }
+    if isinstance(raw, dict):
+        result["available_keys"] = sorted(str(key) for key in raw)
+        for key in ("peak_bytes_in_use", "bytes_in_use", "bytes_limit"):
+            value = raw.get(key)
+            if isinstance(value, int) and value >= 0:
+                result[key] = value
+        result["supported"] = result["peak_bytes_in_use"] is not None
+    if required and not result["supported"]:
+        raise RuntimeError(
+            "GPU backend does not expose peak_bytes_in_use through "
+            "jax.Device.memory_stats; available keys are "
+            f"{result['available_keys']}"
+        )
     return result
 
 
@@ -508,24 +593,8 @@ def apply_balanced_vorticity_perturbation(state, namelist, amplitude_s_1: float)
     }
 
 
-def validate_operator_device(mode: str, physical_gpu: int | None, *, environ=None):
-    """Require the operator to name the physical GPU selected for GPU mode."""
-    environment = os.environ if environ is None else environ
-    if mode == "gpu-native":
-        if type(physical_gpu) is not int or physical_gpu < 0:
-            raise ValueError("gpu-native mode requires explicit non-negative physical_gpu")
-        visible = environment.get("CUDA_VISIBLE_DEVICES")
-        if visible != str(physical_gpu):
-            raise RuntimeError(
-                "gpu-native physical_gpu does not match CUDA_VISIBLE_DEVICES: "
-                f"{physical_gpu} != {visible!r}")
-    elif physical_gpu is not None:
-        raise ValueError("physical_gpu is only valid in gpu-native mode")
-
-
 def run_long(
         namelist, output: Path, *, days: int, mode: str, commit: str,
-        physical_gpu: int | None,
         profile_steps: int = 0, compare_days: int = 0,
         daily_means: bool = False,
         restart: Path | None = None,
@@ -534,22 +603,15 @@ def run_long(
         profile_only: bool = False,
         hourly_targets: bool = False,
         verify_next: Path | None = None,
+        gpu_device: str | None = None,
 ) -> dict:
     """Integrate one resolved SWG deck and write one native state per day."""
+    device_selection = configure_runtime_device(mode, gpu_device)
     import jax
     from legoesm.core.precision import PrecisionPolicy, set_policy
-    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
-    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
-        build_swg_card,
-        swg_surface_wind,
-        validate_swg_namelist,
-    )
-    from legoesm.ocean.state import OceanSurfaceForcing
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import validate_swg_namelist
 
     validate_swg_namelist(namelist)
-    if mode not in ("gpu-native", "cpu-certified", "cpu-scanned"):
-        raise ValueError(
-            "mode must be 'gpu-native', 'cpu-certified', or 'cpu-scanned'")
     if type(days) is not int or days <= 0:
         raise ValueError("days must be a positive integer")
     if type(profile_steps) is not int or profile_steps < 0:
@@ -582,7 +644,6 @@ def run_long(
     if namelist.nn_itend != days * steps_per_day:
         raise ValueError("resolved nn_itend does not equal days times steps/day")
 
-    validate_operator_device(mode, physical_gpu)
     if mode == "gpu-native":
         set_policy(PrecisionPolicy.fp64(transcendentals="native"))
         certified_policy = False
@@ -597,17 +658,14 @@ def run_long(
         raise RuntimeError(
             f"{mode} requires JAX backend {expected_backend}, got "
             f"{jax.default_backend()}")
+    device = jax.devices()[0]
+    memory_at_start = device_memory_statistics(
+        device, required=mode == "gpu-native")
     if output.exists():
         raise FileExistsError(f"refusing to overwrite output directory {output}")
+    wall_started = time.perf_counter()
 
-    card = build_swg_card(namelist)
-    model = LatLonCGridOceanModel(
-        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
-    tau_u, tau_v = swg_surface_wind(namelist)
-    forcing = OceanSurfaceForcing(
-        tau_i_native=jax.numpy.asarray(tau_u, dtype=jax.numpy.float64),
-        tau_j_native=jax.numpy.asarray(tau_v, dtype=jax.numpy.float64),
-    )
+    card, model, forcing = build_case(namelist)
     state = card.recipe.initial_state
     restart_provenance = None
     if perturb_amplitude_m is not None and restart is None:
@@ -717,9 +775,14 @@ def run_long(
         "legoesm_git_sha": commit,
         "mode": mode,
         "certified_policy": certified_policy,
-        "deck_certification": "NEMO ladder measured; see fidelity receipts",
+        "deck_certification": (
+            "reference evidence on pinned 2026-10-13 toolchain: daily scan "
+            "exact; formal per-step program carries last-bit debt"),
         "backend": jax.default_backend(),
-        "physical_gpu": physical_gpu,
+        "device_selection": device_selection | {
+            "jax_devices": [str(device) for device in jax.devices()],
+        },
+        "device_memory_at_start": memory_at_start,
         "precision_policy": "fp64",
         "transcendentals": "native" if mode == "gpu-native" else "libm",
         "days": days,
@@ -785,6 +848,9 @@ def run_long(
             "status": "complete",
             "completed_days": 0,
             "daily_sha256": {},
+            "wall_seconds": time.perf_counter() - wall_started,
+            "device_memory_at_completion": device_memory_statistics(
+                device, required=mode == "gpu-native"),
         }
         _write_json_atomic(output / "manifest.json", completed)
         return completed
@@ -915,13 +981,22 @@ def run_long(
     completed = manifest | {
         "status": "complete", "completed_days": days,
         "daily_sha256": day_hashes,
+        "wall_seconds": time.perf_counter() - wall_started,
+        "device_memory_at_completion": device_memory_statistics(
+            device, required=mode == "gpu-native"),
     }
+    completed["wall_seconds_per_model_day"] = completed["wall_seconds"] / days
     _write_json_atomic(pending_path, completed)
     pending_path.replace(output / "manifest.json")
     return completed
 
 
 def main(argv=None) -> int:
+    argument_vector = sys.argv[1:] if argv is None else list(argv)
+    if "-h" in argument_vector or "--help" in argument_vector:
+        # Help is itself a tested entry-point path.  Bind it to this checkout
+        # without requiring a GPU merely to display usage.
+        bootstrap_checkout(__file__, jax_platform="cpu")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--days", type=int, required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -938,8 +1013,8 @@ def main(argv=None) -> int:
         "--mode", choices=("gpu-native", "cpu-certified", "cpu-scanned"),
         default="gpu-native")
     parser.add_argument(
-        "--physical-gpu", type=int,
-        help="required physical CUDA device for --mode gpu-native; no default")
+        "--gpu-device",
+        help="required physical GPU index for gpu-native mode")
     parser.add_argument(
         "--profile-steps", type=int, default=0,
         help="warm wall-clock profile of Python and scan programs")
@@ -958,14 +1033,19 @@ def main(argv=None) -> int:
     parser.add_argument(
         "--verify-next", type=Path,
         help="admitted uninterrupted next-day snapshot required to match bitwise")
-    args = parser.parse_args(argv)
+    args = parser.parse_args(argument_vector)
     try:
+        requested_platform = (
+            "gpu" if args.mode == "gpu-native" else "cpu")
+        bootstrap_checkout(
+            __file__, jax_platform=requested_platform,
+            gpu_device=args.gpu_device)
         from legoesm.ocean.fidelity.provenance import git_sha
 
         namelist = resolved_daily_namelist(args.days, deck=args.deck)
         manifest = run_long(
             namelist, args.output, days=args.days, mode=args.mode,
-            commit=git_sha(), physical_gpu=args.physical_gpu,
+            commit=git_sha(), gpu_device=args.gpu_device,
             profile_steps=args.profile_steps,
             compare_days=args.compare_days, daily_means=args.daily_means,
             restart=args.restart, perturb_amplitude_m=args.perturb,
@@ -978,7 +1058,8 @@ def main(argv=None) -> int:
     print(
         f"COMPLETED days={manifest['days']} backend={manifest['backend']} "
         f"certified_policy={manifest['certified_policy']} "
-        f"deck_certification={manifest['deck_certification']} "
+        f"wall_seconds={manifest['wall_seconds']:.3f} "
+        "deck_certification=reference-evidence-composition-dependent "
         f"output={args.output.resolve()}")
     if manifest["profile"] is not None:
         profile = manifest["profile"]

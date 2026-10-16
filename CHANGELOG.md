@@ -5,6 +5,13 @@ All notable changes to legoESM. Format roughly follows
 
 ## Unreleased
 
+### Changed
+
+- **License: MIT.** legoESM is now released under the MIT License, replacing
+  PolyForm Noncommercial 1.0.0; the separate commercial license is withdrawn.
+  The root package metadata now matches the component packages, which already
+  declared MIT. Bundled third-party code keeps its own license.
+
 ### Fixed
 
 - **Hines gravity-wave drag no longer launches at the surface.** The launch

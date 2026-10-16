@@ -63,9 +63,11 @@ from jax import lax, nn
 
 from legoesm.atmosphere.physics.clouds.config import CloudConfig
 from legoesm.thermo import (
+    mixing_ratio_to_specific_humidity,
     saturation_mixing_ratio,
     saturation_mixing_ratio_goff,
     saturation_mixing_ratio_ice,
+    saturation_specific_humidity,
     saturation_vapor_pressure_goff,
     saturation_vapor_pressure_ice_flatau,
 )
@@ -80,6 +82,14 @@ _CAM6_AIST_MAX = 0.999        # cldfrc2m.F90:895 upper clip on aist
 # --- CAM6 analytic tropopause (tropopause.F90:395) tP = 25000 - 15000 cos^2(lat) [Pa] ---
 _CAM6_TROP_P0_PA = 25000.0
 _CAM6_TROP_P1_PA = 15000.0
+# --- CAM chemistry tropopause (tropopause.F90, cam_cesm2_1_rel == cesm2_2_rel):
+#     Reichler (2003) lapse-rate locator ``twmo`` + findChemTrop's polar rule ---
+_CAM_TWMO_GAM_K_PER_M = -0.002  # tropopause.F90:829 gam: lapse-rate threshold -2 K/km
+_CAM_TWMO_PLIMU_PA = 45000.0    # tropopause.F90:830 plimu: lowest allowed tropopause
+_CAM_TWMO_PLIML_PA = 7500.0     # tropopause.F90:831 pliml: highest allowed tropopause
+_CAM_TWMO_DELTAZ_M = 2000.0     # tropopause.F90:726 deltaz: depth of the 2-km test
+_CAM_CHEMTROP_POLAR_LAT_DEG = 50.0  # tropopause.F90:1193 |lat| > 50 deg: polar rule applies
+_CAM_CHEMTROP_POLAR_P_PA = 12500.0  # tropopause.F90:1195 pmid(troplev) <= 125 hPa rejected
 
 # Machine-checked scheme contract (see tests/test_physics_contracts.py). This is
 # a DIAGNOSTIC (state -> cloud fraction + optical properties), not a tendency
@@ -260,10 +270,10 @@ def _ice_fraction(T: jnp.ndarray, config: CloudConfig) -> jnp.ndarray:
     return jnp.clip(frac, 0.0, 1.0)
 
 
-def cover_saturation_mixing_ratio(
+def cover_saturation_specific_humidity(
     T: jnp.ndarray, p_full: jnp.ndarray, config: CloudConfig,
 ) -> jnp.ndarray:
-    """Saturation mixing ratio [kg/kg] the cloud-COVER schemes measure RH
+    """Saturation SPECIFIC humidity [kg/kg] the cloud-COVER schemes measure RH
     against, per ``config.saturation_scheme`` (the single dispatch point; the
     diagnostics that rebuild the cover's RH call this, never a copy).
 
@@ -275,11 +285,12 @@ def cover_saturation_mixing_ratio(
     Unknown scheme raises (dispatch-hardening; never a silent default).
     """
     if config.saturation_scheme == "liquid":
-        return saturation_mixing_ratio(T, p_full)
+        return saturation_specific_humidity(T, p_full)
     if config.saturation_scheme == "mixed_phase":
         f_ice = _ice_fraction(T, config)
-        return ((1.0 - f_ice) * saturation_mixing_ratio(T, p_full)
-                + f_ice * saturation_mixing_ratio_ice(T, p_full))
+        r_blend = ((1.0 - f_ice) * saturation_mixing_ratio(T, p_full)
+                   + f_ice * saturation_mixing_ratio_ice(T, p_full))
+        return mixing_ratio_to_specific_humidity(r_blend)
     raise ValueError(
         f"Unknown cloud saturation_scheme: {config.saturation_scheme!r}. "
         f"Valid schemes: 'liquid' (legacy, liquid saturation at all T), "
@@ -783,12 +794,116 @@ def _partial_coverage_factor_lw(tau_ic: jnp.ndarray, cf: jnp.ndarray) -> jnp.nda
 def cam6_tropopause_analytic(lat_rad: jnp.ndarray) -> jnp.ndarray:
     """CAM6 analytic tropopause pressure [Pa] (tropopause.F90:395).
 
-    ``tP = 25000 - 15000 cos^2(lat)``: the LAST fallback of CAM's
-    ``tropopause_findChemTrop``.  DEPARTURE: CAM tries the twmo lapse-rate
-    locator first and a climatology file second; neither is ported, so the
-    aist stratosphere switch (rhminis/rhmaxis) uses this analytic surface.
+    ``tP = 25000 - 15000 cos^2(lat)``: CAM's ``TROP_ALG_ANALYTIC``.  It is
+    NOT in the chain of ``tropopause_findChemTrop`` (cesm2_1/2_2: twmo, then
+    the polar rule, then the monthly climatology file ``trop_climo``,
+    tropopause.F90:65-66, 1176-1205).  Here it stands in for that
+    climatology (no file is ported) as the fallback of
+    :func:`cam_chem_tropopause_level`; the aist stratosphere switch
+    (rhminis/rhmaxis) uses this surface directly.
     """
     return _CAM6_TROP_P0_PA - _CAM6_TROP_P1_PA * jnp.cos(lat_rad) ** 2
+
+
+def _level_holding(p_trop, p_half):
+    """CAM's level search (tropopause.F90:856-861 / 398-403): ``do k = pver,
+    2, -1; if (tP >= pint(i, k)) troplev = k; exit``.  0-based top-down: the
+    largest layer ``k`` in ``1..nlev-1`` whose TOP interface ``p_half[:, k]``
+    satisfies ``p_trop >= p_half[:, k]``; ``-1`` (CAM NOTFOUND) if none."""
+    k = jnp.arange(p_half.shape[1] - 1)
+    hit = (p_trop[:, None] >= p_half[:, :-1]) & (k >= 1)
+    return jnp.max(jnp.where(hit, k, -1), axis=1)
+
+
+def cam_chem_tropopause_level(T, p_full, p_half, lat_rad):
+    """CAM ``tropopause_findChemTrop`` layer index, 0-based top-down (ncol,).
+
+    Port of tropopause.F90 (cam_cesm2_1_rel; cesm2_2_rel identical) as
+    called by clubb_intr.F90:1611 (``call tropopause_findChemTrop(state,
+    troplev)``, default algorithms):
+
+    1. ``twmo`` (Reichler 2003, 720-812) on the layer temperatures
+       ``T`` [K] and pressures ``p_full`` [Pa], with ``gam`` = -2 K/km,
+       ``plimu`` = 450 hPa, ``pliml`` = 75 hPa (829-831).  Per layer pair
+       ``(j-1, j)`` (751-763): ``pmk = .5 (p(j-1)^kap + p(j)^kap)``, ``pm =
+       pmk^(1/kap)``, ``a = (t(j-1)-t(j)) / (p(j-1)^kap - p(j)^kap)``,
+       ``b = t(j) - a p(j)^kap``, ``tm = a pmk + b``, ``dtdz = faktor a kap
+       pm^(kap-1) pm / tm`` with ``faktor = -g/R`` (141-143).  Pairs are
+       scanned from the surface up (``do j=level-1,2,-1``); a pair with
+       ``dtdz <= gam`` or ``pm > plimu`` is skipped (765-766); the crossing
+       ``ptph`` is interpolated linearly in ``p^kap`` against the pair below
+       when that one has ``dtdz0 < gam``, else ``ptph = pm`` (769-775); it
+       must lie in ``[pliml, plimu]`` (777-778); the 2-km test (781-801):
+       ``p2km = ptph + deltaz (pm/tm) faktor``, and scanning ``jj = j..2``
+       (skip ``pm2 > ptph``, stop at ``pm2 < p2km``) the running mean of the
+       pair lapse rates must stay ``> gam``.  The first pair that survives
+       gives ``tP = ptph``.
+    2. Level = layer holding ``tP`` (tropopause_twmo 856-861, see
+       :func:`_level_holding`).
+    3. Polar rule (findChemTrop 1191-1200): ``|lat| > 50 deg`` and
+       ``pmid(troplev) <= 12500 Pa`` -> not found.
+    4. Fallback for every column not found: CAM uses the monthly climatology
+       file (``default_backup = TROP_ALG_CLIMATE``, l.66).  DEPARTURE (user
+       decision 2026-10-15): the analytic ``25000 - 15000 cos^2(lat)`` Pa
+       surface (:func:`cam6_tropopause_analytic`) stands in for it, located
+       with the same level search.  ``-1`` (CAM NOTFOUND) if even that
+       surface lies above the top interface of layer 1.
+
+    ``p_half`` (ncol, nlev+1) top-down interfaces [Pa]; ``lat_rad`` (ncol,)
+    [rad].  Integer output: no gradient flows through it (inputs are
+    stop-gradient'd); every branch is ``jnp.where``, so it is jit-safe.
+    """
+    T, p_full, p_half, lat_rad = (lax.stop_gradient(x)
+                                  for x in (T, p_full, p_half, lat_rad))
+    nlev = T.shape[1]
+    if nlev < 3:
+        raise ValueError(f"twmo needs >= 3 layers (got {nlev})")
+    kap = constants.kappa
+    faktor = -constants.g / constants.R_d
+    gam = _CAM_TWMO_GAM_K_PER_M
+    # Pair m = layers (m, m+1), 0-based top-down == Fortran pair j = m + 2.
+    pk = p_full ** kap
+    pmk = 0.5 * (pk[:, :-1] + pk[:, 1:])
+    pm = pmk ** (1.0 / kap)
+    a = (T[:, :-1] - T[:, 1:]) / (pk[:, :-1] - pk[:, 1:])
+    tm = a * pmk + (T[:, 1:] - a * pk[:, 1:])
+    dtdz = faktor * (a * kap * pm ** (kap - 1.0)) * pm / tm
+    # Candidates m = 0..nlev-3 (Fortran j = 2..level-1); the pair below
+    # (m+1) supplies dtdz0/pmk0.
+    dz, dz0 = dtdz[:, :-1], dtdz[:, 1:]
+    pk_c, pk0 = pmk[:, :-1], pmk[:, 1:]
+    pm_c, tm_c = pm[:, :-1], tm[:, :-1]
+    ag = (dz - dz0) / (pk_c - pk0)
+    arg = (gam - (dz0 - ag * pk0)) / ag            # (gam - bg) / ag
+    # arg > 0 whenever this branch is taken (dz0 < gam < dz: a convex
+    # combination of pk0 and pk_c); the guard only keeps untaken lanes finite.
+    ptph = jnp.where(dz0 < gam,
+                     jnp.where(arg > 0.0, arg, 1.0) ** (1.0 / kap), pm_c)
+    ok = ((dz > gam) & (pm_c <= _CAM_TWMO_PLIMU_PA)
+          & (ptph >= _CAM_TWMO_PLIML_PA) & (ptph <= _CAM_TWMO_PLIMU_PA))
+    p2km = ptph + _CAM_TWMO_DELTAZ_M * (pm_c / tm_c) * faktor
+    # 2-km test, candidate c x pair m' (c, m' 0-based), in loop order
+    # jj = j..2  <=>  m' = c, c-1, ..., 0: reverse the pair axis so the loop
+    # runs along increasing index i, m' = (nlev-2) - i.
+    pm2 = pm[:, None, ::-1]
+    dtdz2 = dtdz[:, None, ::-1]
+    c = jnp.arange(nlev - 2)[:, None]
+    m2 = (nlev - 2) - jnp.arange(nlev - 1)[None, :]
+    live = (m2 <= c) & (pm2 <= ptph[:, :, None])           # not "cycle in_loop"
+    stop = live & (pm2 < p2km[:, :, None])                  # "exit in_loop"
+    counted = live & (jnp.cumsum(stop, axis=-1) == 0)
+    n = jnp.cumsum(counted, axis=-1)
+    mean = jnp.cumsum(jnp.where(counted, dtdz2, 0.0), axis=-1) / jnp.maximum(n, 1)
+    ok = ok & ~jnp.any(counted & (mean <= gam), axis=-1)
+    # First survivor scanning upward from the surface = largest c.
+    best = jnp.max(jnp.where(ok, jnp.arange(nlev - 2), -1), axis=1)
+    p_tw = jnp.take_along_axis(ptph, jnp.maximum(best, 0)[:, None], axis=1)[:, 0]
+    lev = jnp.where(best >= 0, _level_holding(p_tw, p_half), -1)
+    pmid = jnp.take_along_axis(p_full, jnp.maximum(lev, 0)[:, None], axis=1)[:, 0]
+    polar = jnp.abs(jnp.degrees(lat_rad)) > _CAM_CHEMTROP_POLAR_LAT_DEG
+    lev = jnp.where(polar & (pmid <= _CAM_CHEMTROP_POLAR_P_PA), -1, lev)
+    return jnp.where(
+        lev >= 0, lev, _level_holding(cam6_tropopause_analytic(lat_rad), p_half))
 
 
 def cam6_ice_stratus_fraction(
@@ -825,7 +940,7 @@ def cam6_ice_stratus_fraction(
     inert.  Port it with the CLUBB ``trop_cloud_top_press`` taper if a
     higher-top grid is ever run with this scheme.
     """
-    q_s = saturation_mixing_ratio_goff(T, p_full)
+    q_s = mixing_ratio_to_specific_humidity(saturation_mixing_ratio_goff(T, p_full))
     esl = saturation_vapor_pressure_goff(T)
     esi = saturation_vapor_pressure_ice_flatau(T)
     rhi = (q_v + q_i) / jnp.maximum(q_s, 1.0e-30) * (esl / jnp.maximum(esi, 1.0e-30))
@@ -959,7 +1074,7 @@ def compute_cloud_properties(
     #     blend collapses to ``1.0*q_sat_liq + 0.0*q_sat_ice`` = q_sat_liq
     #     BIT-identically (the ice curve is bounded, never inf/NaN, so the
     #     0.0*x term is exactly 0.0) => warm cloud is unchanged.
-    q_sat = cover_saturation_mixing_ratio(T, p_full, config)
+    q_sat = cover_saturation_specific_humidity(T, p_full, config)
     RH = q_v / jnp.maximum(q_sat, 1.0e-10)
 
     # --- Cloud fraction ---

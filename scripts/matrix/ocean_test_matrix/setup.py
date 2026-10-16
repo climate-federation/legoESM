@@ -129,7 +129,8 @@ def _create_ocean_setup(tc, nlev: int | None = None,
                         weno_d_term: bool | None = None,
                         barotropic_solver: str | None = None,
                         cube_light_diffusion: bool = False,
-                        model_config=None):
+                        model_config=None,
+                        z_coord=None):
     """Create grid, z_coord, and rest-state for any grid type.
 
     Parameters
@@ -165,7 +166,11 @@ def _create_ocean_setup(tc, nlev: int | None = None,
         H_max = config.DEFAULT_H_MAX
     from legoesm.ocean.vertical import create_ocean_z_star
 
-    z_coord = create_ocean_z_star(n_levels=nlev, H_max=H_max)
+    if z_coord is None:
+        # Default stretched z* grid; experiments with their OWN vertical
+        # grid (EXPERIMENT_CONFIG["create_z_coord"], e.g. BENCH's
+        # uniform NEMO-BENCH grid) pass it pre-built via this kwarg.
+        z_coord = create_ocean_z_star(n_levels=nlev, H_max=H_max)
     params = _parse_resolution(tc)
 
     if tc.grid_type == "cubed_sphere":

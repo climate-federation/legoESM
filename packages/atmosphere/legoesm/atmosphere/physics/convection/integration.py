@@ -811,6 +811,7 @@ def _make_hydrostatic_convection(
         # a convective-precip path here is a tracked follow-up).
         tracer_tends = None
         _precip_conv = None
+        _precip_conv_frozen = None
         if conv_fn is not None:
             dq_v_dt = conv_out.dq_v_dt.reshape(shape_3d)
             dq_c_conv_dt = conv_out.dq_c_conv_dt.reshape(shape_3d)
@@ -891,6 +892,15 @@ def _make_hydrostatic_convection(
                         data=_p_conv_diag.reshape(shape_2d).astype(_ps_dtype),
                         name="precip_conv", dims=dims_2d, units="kg/m^2/s",
                     )
+                    # its frozen part, when the scheme books one (ZM snow;
+                    # F29), bounded by the surface flux it belongs to
+                    _snow = getattr(conv_out, "precip_frozen_sfc", None)
+                    if _snow is not None:
+                        _precip_conv_frozen = Field(
+                            data=jnp.clip(_snow.reshape(ncol), 0.0, _p_conv_diag)
+                            .reshape(shape_2d).astype(_ps_dtype),
+                            name="precip_frozen_conv", dims=dims_2d,
+                            units="kg/m^2/s")
                 if isinstance(conv_prog_out, dict):
                     conv_prog_out = {**conv_prog_out,
                                      "conv_precip": _p_conv_diag}
@@ -999,6 +1009,7 @@ def _make_hydrostatic_convection(
             ),
             tracer_tendencies=tracer_tends,
             precip=_precip_conv,
+            precip_frozen=_precip_conv_frozen,
         )
         return tendencies, conv_prog_out
 

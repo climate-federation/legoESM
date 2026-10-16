@@ -6736,6 +6736,50 @@ def run_omip_single(grid_type: str, args) -> dict:
     except Exception as e:
         print(f"  Warning: could not save config: {e}")
 
+    # Run manifest: the resolved runtime config + run controls, hashed and
+    # recorded for `legoesm reproduce`.  Every process calls it; a failed write
+    # aborts the run.  Input paths are the explicit flags (defaulted paths
+    # resolved inside loaders are not recorded here).
+    from legoesm.driver.restart import (
+        dataset_provenance_entry,
+        record_final_state_digest,
+        write_run_manifest_on_root,
+    )
+    manifest_path = write_run_manifest_on_root(
+        config_dir,
+        {
+            "runner": "run_omip",
+            "runtime_config": model.config,
+            "run_config": run_config._asdict(),
+            "grid_type": grid_type,
+            "resolution": resolution,
+            "n_levels": int(z_coord.n_levels),
+            "dt_seconds": float(dt),
+            "days": float(args.days),
+            "forcing_mode": getattr(args, "forcing_mode", "restoring"),
+            "initial_condition": run_config_json["initial_condition"],
+        },
+        config_kind="ocean",
+        runner_tag="run_omip",
+        rng_seeds={"master": int(run_config.seed)},
+        dataset_provenance=[
+            dataset_provenance_entry(pth, dataset_id=did)
+            for did, pth in (
+                ("bathymetry", args.bathymetry),
+                ("woa_t", args.woa_t),
+                ("woa_s", args.woa_s),
+                ("jra55_cache", getattr(args, "jra55_cache", None)),
+                ("runoff_file", getattr(args, "runoff_file", None)),
+                ("sss_target_file", getattr(args, "sss_target_file", None)),
+                ("iwm_forcing_file", getattr(args, "iwm_forcing_file", None)),
+                ("dz_ref_file", getattr(args, "dz_ref_file", None)),
+                ("tripole_mesh", getattr(args, "tripole_mesh", None)),
+                ("ic_from_fesom_mesh", getattr(args, "ic_from_fesom_mesh", None)),
+            )
+            if pth
+        ],
+    )
+
     # Restart cadence — only wired for the JRA55 path for now (the
     # restoring path is fast enough that re-running from scratch is
     # cheaper than maintaining restarts; revisit if needed).
@@ -6946,7 +6990,8 @@ def run_omip_single(grid_type: str, args) -> dict:
                 tracer_advection=str(model.config.tracer_advection),
                 nlev=int(args.nlev),
                 halo_depth=halo_depth_for_config(model.config))
-            spmd_step = make_sharded_mpas_ocean_step(model, _layout)
+            spmd_step = make_sharded_mpas_ocean_step(model, _layout,
+                                                     land_mask=state.land_mask.data)
             spmd_gather = partial(gather_state_mpas_ocean_spmd, layout=_layout)
             spmd_gather_ice = spmd_gather      # generic pytree gather
             spmd_shard_stack = partial(shard_cell_stack_spmd, layout=_layout)
@@ -6966,7 +7011,8 @@ def run_omip_single(grid_type: str, args) -> dict:
                       f"{_nd} devices across {jax.process_count()} process(es) "
                       f"({jax.default_backend()}); cells/device={_layout.cells_per}, "
                       f"local incl. halo={_layout.max_lc}, ppermute rounds="
-                      f"{len(_layout.ppermute_perms)}.")
+                      f"{len(_layout.ppermute_perms)}, land-fill band capacity="
+                      f"{spmd_step.land_fill_band_capacity}.")
         elif jax.process_index() == 0:
             print("  SPMD (mpas): single device visible — flag is a no-op.")
     # Disarm the process-global SPMD backend on EVERY exit of the loop (a
@@ -7091,6 +7137,9 @@ def run_omip_single(grid_type: str, args) -> dict:
         _collective_root_io(write_final_snapshot)
     elif _io_rank:
         write_final_snapshot()
+
+    if manifest_path is not None:
+        record_final_state_digest(manifest_path, state)
 
     ALL_RESULTS.append(results)
     return results
