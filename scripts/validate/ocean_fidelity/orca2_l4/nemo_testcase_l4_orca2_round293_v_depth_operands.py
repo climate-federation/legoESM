@@ -34,7 +34,10 @@ OPERAND_ORDER = (
     "hv_0", "r1_e1e2v", "e1e2t", "eta_mid_owned",
     "north_e1e2t_halo", "north_eta_halo", "ssvmask",
 )
-ARMS = ("baseline", "raw_v_surface_mask", "mask_t_neighbor_pair")
+ARMS = (
+    "baseline", "raw_hv_only", "raw_v_surface_mask",
+    "mask_t_neighbor_pair",
+)
 PLANTS = (
     "none", "passivity", "source-order", "replay-calibration",
     "first-operand", "single-arm", "pair-closure", "locality",
@@ -195,6 +198,7 @@ def measure_offline(deck_root: Path, twin_a: Path, twin_b: Path,
 
     arm_depths = {
         "baseline": production_depth,
+        "raw_hv_only": depth(),
         "raw_v_surface_mask": depth(raw_mask=True),
         "mask_t_neighbor_pair": depth(raw_mask=True, t_neighbor=True),
     }
@@ -346,8 +350,8 @@ def classify(report: dict[str, object], *, plant: str = "none") -> dict[str, obj
     elif plant == "first-operand":
         report["operand_rows"]["hv_0"]["unequal"] = 0
     elif plant == "single-arm":
-        _complete(report["direct_arms"]["raw_v_surface_mask"][
-            "face_depth_v_mid"])["unequal"] = 0
+        _complete(report["direct_arms"]["raw_hv_only"][
+            "face_depth_v_mid"])["unequal"] = 1
     elif plant == "pair-closure":
         _complete(report["direct_arms"]["mask_t_neighbor_pair"][
             "face_depth_v_mid"])["unequal"] = 1
@@ -383,14 +387,18 @@ def classify(report: dict[str, object], *, plant: str = "none") -> dict[str, obj
 
     raw_depth = report["direct_arms"]["raw_v_surface_mask"][
         "face_depth_v_mid"]
+    raw_hv_depth = report["direct_arms"]["raw_hv_only"][
+        "face_depth_v_mid"]
     pair_depth = report["direct_arms"]["mask_t_neighbor_pair"][
         "face_depth_v_mid"]
     pair_transport = report["direct_arms"]["mask_t_neighbor_pair"][
         "metric_transport_v"]
     baseline_transport = report["direct_arms"]["baseline"][
         "metric_transport_v"]
-    require(_complete(raw_depth)["unequal"] > 0,
-            "raw V surface mask alone unexpectedly closes the depth")
+    require(_complete(raw_hv_depth)["unequal"] == 0,
+            "raw hv_0 no longer closes the substep-1 depth boundary")
+    require(_complete(raw_depth)["unequal"] == 0,
+            "raw V surface mask arm moved from its registered null")
     require(_complete(pair_depth)["unequal"] == 0,
             "surface-mask/T-neighbour pair does not close the depth")
     require(_complete(pair_transport)["unequal"] == 0,
@@ -403,7 +411,11 @@ def classify(report: dict[str, object], *, plant: str = "none") -> dict[str, obj
     report["first_direct_operand"] = first
     report["cancelling_partner"] = {
         "held_statement": "raw hv_0 fold-image face depth",
-        "partner": "raw V surface mask plus T-pivot north neighbour",
+        "partner": None,
+        "disposition": (
+            "no partner acts at substep 1: raw hv_0 alone closes; the mask "
+            "and T-neighbour arms are null at this boundary"),
+        "raw_hv_only_depth_unequal": _complete(raw_hv_depth)["unequal"],
         "raw_mask_alone_depth_unequal": _complete(raw_depth)["unequal"],
         "pair_depth_unequal": _complete(pair_depth)["unequal"],
         "pair_transport_unequal": _complete(pair_transport)["unequal"],
@@ -412,11 +424,11 @@ def classify(report: dict[str, object], *, plant: str = "none") -> dict[str, obj
         "R293-P1": "CONFIRMED",
         "R293-P2": "CONFIRMED",
         "R293-P3": "REFUTED_HV_0_IS_FIRST_NONBIT_OPERAND",
-        "R293-P4": "CONFIRMED_MASK_T_NEIGHBOUR_PARTNER",
+        "R293-P4": "REFUTED_RAW_HV_0_ALONE_CLOSES_AT_SUBSTEP1",
         "R293-P5": "REFUTED_CONSUMER_WAS_ALREADY_EXACT_ZERO_V",
         "R293-P6": "CONFIRMED",
     }
-    report["status"] = "HELD_R293_V_DEPTH_CANCELLING_PARTNER_NAMED"
+    report["status"] = "HELD_R293_HV0_SINGLE_STATEMENT_CLOSES_BOUNDARY"
     require(plant == "none", f"{plant} plant stayed green")
     return report
 

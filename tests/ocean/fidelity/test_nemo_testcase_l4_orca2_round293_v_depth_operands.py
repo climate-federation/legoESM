@@ -57,7 +57,8 @@ def _report():
         "cumulative_substitution": {},
         "direct_arms": {
             "baseline": _pair(13, 719.0, transport_unequal=0),
-            "raw_v_surface_mask": _pair(35, 2.0e-3),
+            "raw_hv_only": _pair(0, 0.0),
+            "raw_v_surface_mask": _pair(0, 0.0),
             "mask_t_neighbor_pair": _pair(0, 0.0),
         },
         "one_bit_control": _score(1, 5.0e-324, 1),
@@ -66,18 +67,19 @@ def _report():
 
 def test_classifier_names_pair_and_every_plant_fires():
     result = gate.classify(_report())
-    assert result["status"] == "HELD_R293_V_DEPTH_CANCELLING_PARTNER_NAMED"
+    assert result["status"] == "HELD_R293_HV0_SINGLE_STATEMENT_CLOSES_BOUNDARY"
     assert result["first_direct_operand"] == "hv_0"
+    assert result["cancelling_partner"]["partner"] is None
     assert result["cancelling_partner"]["pair_depth_unequal"] == 0
     for plant in gate.PLANTS[1:]:
         with pytest.raises(gate.GateError):
             gate.classify(_report(), plant=plant)
 
 
-def test_single_arm_must_remain_nonexact():
+def test_raw_hv_arm_must_close_the_boundary():
     report = _report()
-    report["direct_arms"]["raw_v_surface_mask"] = _pair(0, 0.0)
-    with pytest.raises(gate.GateError, match="alone unexpectedly closes"):
+    report["direct_arms"]["raw_hv_only"] = _pair(1, 1.0)
+    with pytest.raises(gate.GateError, match="raw hv_0"):
         gate.classify(report)
 
 
