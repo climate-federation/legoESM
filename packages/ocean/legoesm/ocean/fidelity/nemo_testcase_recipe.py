@@ -4050,11 +4050,10 @@ ORCA2G4_UNMEASURED: tuple[str, ...] = (
 ORCA2G5_UNMEASURED: tuple[str, ...] = (
     "nemo_post_si3_surface_records",
 )
-# G6 = certified G5 + ORCA2's vector-form momentum advection (Decision 128).
-# New against G1b: more than one level, so dyn_zad, the velocity-form wzv and
-# the vector-form dyn_zdf update meet partial cells for the first time.
+# G6 = admitted G5 + ORCA2's vector-form momentum advection (Decision 128).
+# Round 37 localised the first non-bit statement to the vector-vorticity update;
+# the full multilevel step therefore remains measured debt rather than certified.
 ORCA2G6_UNMEASURED: tuple[str, ...] = (
-    "g6_record_not_admitted",
     "nemo_post_si3_surface_records",   # G5's input route, inherited unchanged
     "vector_form_multilevel_step",     # np_CRV EEN + KEG + ZAD on 31 levels
 )
