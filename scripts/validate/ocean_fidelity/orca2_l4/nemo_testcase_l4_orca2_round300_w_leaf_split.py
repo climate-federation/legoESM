@@ -230,7 +230,9 @@ def _support(name: str, oracle: dict[str, np.ndarray]) -> np.ndarray:
     tmask = np.asarray(oracle["w_tmask"], bool)
     if name in {"bottom_zero", "ratio_delta"}:
         return np.asarray(oracle["w_tmask"][..., 0], bool)
-    return tmask
+    if name in {"w_recurrence", "area_product"}:
+        return tmask
+    return tmask[..., :30]
 
 
 def _measure_label(deck_root: Path, frame_root: Path,
@@ -238,7 +240,12 @@ def _measure_label(deck_root: Path, frame_root: Path,
     card, passivity, candidate, native = _candidate_context(
         deck_root, frame_root, label)
     candidate_program = _program(candidate, card.dt_s)
-    oracle_inputs = {name: oracle[name] for name in candidate}
+    oracle_inputs = {
+        name: (oracle[name][..., :30]
+               if name in {"trp_u", "trp_v", "w_e3t0", "w_tmask"}
+               else oracle[name])
+        for name in candidate
+    }
     oracle_program = _program(oracle_inputs, card.dt_s)
     rows = {
         name: r298._regions(candidate_program[name], oracle_program[name],
@@ -247,9 +254,9 @@ def _measure_label(deck_root: Path, frame_root: Path,
     }
     candidate_replay = {
         "ww": r298._regions(candidate_program["w_recurrence"], native["ww"],
-                            np.asarray(candidate["w_tmask"], bool)),
+                            np.asarray(oracle["w_tmask"], bool)),
         "trp_w": r298._regions(candidate_program["area_product"], native["trp_w"],
-                               np.asarray(candidate["w_tmask"], bool)),
+                               np.asarray(oracle["w_tmask"], bool)),
     }
     oracle_replay = {
         "ww": r298._regions(oracle_program["w_recurrence"], oracle["w_ww"],
@@ -260,7 +267,7 @@ def _measure_label(deck_root: Path, frame_root: Path,
     arms = {}
     for names in CUMULATIVE_ARMS:
         inputs = dict(candidate)
-        inputs.update({name: oracle[name] for name in names})
+        inputs.update({name: oracle_inputs[name] for name in names})
         program = _program(inputs, card.dt_s)
         arms["+".join(names)] = r298._regions(
             program["area_product"], oracle["trp_w"],
