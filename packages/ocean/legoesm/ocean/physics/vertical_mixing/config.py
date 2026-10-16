@@ -667,6 +667,9 @@ class TKEConfig(NamedTuple):
     # before its consumer; the compiled default lets XLA contract them.
     # Card-selected.
     nemo_bn2_source_rounded: bool = False
+    # zdf_sh2's r3u/r3v at the whole-step entry level (RK3 zdf_phy(Nbb,Nbb),
+    # zdfsh2.F90 e3w_1d*(1+r3u(Kmm))), not the stage Kmm. Card-selected.
+    nemo_sh2_step_entry_ssh: bool = False
     # Langmuir source evaluation. ``vectorized`` is the historical shared
     # construction. ``nemo_literal`` preserves zdftke.F90:422-463 operation
     # order, including the per-column mbkt+1 no-crossing fallback. Only the

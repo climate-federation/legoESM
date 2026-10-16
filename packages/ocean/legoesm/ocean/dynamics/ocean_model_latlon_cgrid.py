@@ -10806,6 +10806,7 @@ class LatLonCGridOceanModel:
                         if _nemo_ws_zdf_eta_kmm is not None
                         else state.eta.data),
                     nemo_zdf_stage_pair=_nemo_ws_zdf_stage_pair,
+                    eta_step_entry=state.eta.data,
                     u_now=state.u.data, v_now=state.v.data,
                     effective_K_test_override=_vertical_K_test_override,
                     nemo_aimp_tracer_w=_nemo_ws_aimp_tracer_w,
@@ -10837,6 +10838,7 @@ class LatLonCGridOceanModel:
                         if _nemo_ws_zdf_eta_kmm is not None
                         else state.eta.data),
                     nemo_zdf_stage_pair=_nemo_ws_zdf_stage_pair,
+                    eta_step_entry=state.eta.data,
                     u_now=state.u.data, v_now=state.v.data,
                     effective_K_test_override=_vertical_K_test_override,
                     nemo_aimp_tracer_w=_nemo_ws_aimp_tracer_w,
@@ -12487,6 +12489,7 @@ class LatLonCGridOceanModel:
         n2_tracers_before=None,
         tke_n2_bundle=None,
         eta_now=None,
+        eta_step_entry=None,
         nemo_zdf_stage_pair=None,
         u_now=None,
         v_now=None,
@@ -12825,8 +12828,19 @@ class LatLonCGridOceanModel:
             else:
                 _tke_lat_deg = jnp.degrees(_grid.lat_T)
             if _tke_prognostic:
+                # zdf_phy(kstp,Nbb,Nbb,Nrhs) (stprk3.f90:185): zdf_sh2's
+                # r3u/r3v are the whole-step entry level, not the stage
+                # Kmm that dyn_zdf/tra_zdf read through eta_now.
+                _sh2_eta = eta_now
+                if getattr(_tke_cfg, "nemo_sh2_step_entry_ssh", False):
+                    if eta_step_entry is None and eta_now is not None:
+                        raise ValueError(
+                            "nemo_sh2_step_entry_ssh=True needs the "
+                            "whole-step entry eta (eta_step_entry) when a "
+                            "stage eta_now is supplied")
+                    _sh2_eta = eta_step_entry
                 _tke_p_sh2_result = self._tke_step_entry_p_sh2(
-                    state, eta_now=eta_now, u_now=u_now, v_now=v_now,
+                    state, eta_now=_sh2_eta, u_now=u_now, v_now=v_now,
                     z_coord=_zc, config=_cfg_b, grid=_grid,
                     return_face_metrics=return_tke_entry)
                 if return_tke_entry:
