@@ -345,6 +345,11 @@ class OceanSurfaceForcing(NamedTuple):
     # salt helper (``freshwater.runoff_spread_virtual_salt_tendency_3d``).
     # ``None`` -> no runoff tracer source, which is every card that does not
     # supply one.
+    q_nonsolar: object = None
+    # NEMO's non-solar surface heat flux ``qns`` [W/m2, positive into ocean].
+    # This is the stage-3 source operand written by tra_sbc before runoff and
+    # penetrative shortwave are accumulated; it remains separate from q_net
+    # so the NEMO written order can be reproduced without reconstructing it.
 
 
 class OceanConfig(NamedTuple):
@@ -3221,6 +3226,11 @@ class LatLonCGridOceanConfig(NamedTuple):
     # NEMO's stage-1/2 tracer update (stprk3_stg.f90:672-680) rounds each
     # written product and sum before the final quotient.
     rk3_stage_tracer_written_order: bool = False
+    # NEMO's stage-3 temperature RHS writes the non-solar surface source,
+    # then runoff content, then the penetrative shortwave term on Kmm
+    # (trasbc.f90, sbcrnf.f90, traqsr.f90). False retains the prior derived
+    # Kbb-source path.
+    rk3_stage3_heat_nemo_written: bool = False
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":
