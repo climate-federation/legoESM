@@ -15,14 +15,14 @@ References
 from __future__ import annotations
 
 import os
-from typing import NamedTuple
 from pathlib import Path
+from typing import NamedTuple
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
-import equinox as eqx
+import numpy as np
 import optax
-
 from legoesm.grids.gaussian import GaussianGrid
 from legoesm.ml.loss import area_weighted_mse
 
@@ -185,6 +185,20 @@ class TrainingConfig(NamedTuple):
     # (wd 0.1), so an arm that wants the paper's recipe sets this explicitly.
     muon_weight_decay_scale: float = 0.0
     adamw_weight_decay_scale: float = 1.0
+    # Explicit optimizer-shape controls.  Defaults reproduce the historical
+    # warmup/cosine + clipping + Optax epsilon path byte for byte.
+    schedule: str = "warmup_cosine"
+    clip_gradients: bool = True
+    adam_epsilon: float = 1e-8
+    # Adam moment decay rates (defaults are Optax's own, so the historical
+    # update is unchanged) and where epsilon enters the denominator:
+    # "optax" adds it to sqrt of the bias-corrected second moment; Keras's
+    # "keras_epsilon_hat" adds it to sqrt of the UNcorrected moment
+    # (keras/src/optimizers/adam.py ``update_step``, Keras 3.6.0), which is
+    # Optax with epsilon / sqrt(1 - b2**t) at step t.  'adam'/'adamw' only.
+    adam_b1: float = 0.9
+    adam_b2: float = 0.999
+    adam_epsilon_convention: str = "optax"
 
 
 def create_optimizer(config: TrainingConfig) -> optax.GradientTransformation:
@@ -241,20 +255,55 @@ def create_optimizer(config: TrainingConfig) -> optax.GradientTransformation:
     # disables the warmup leg for ``transition_steps <= 0``.
     total_steps = max(1, int(config.total_steps))
     warmup_steps = min(int(config.warmup_steps), max(0, total_steps - 1))
-    schedule = optax.warmup_cosine_decay_schedule(
-        init_value=0.0,
-        peak_value=config.lr,
-        warmup_steps=warmup_steps,
-        decay_steps=total_steps,
-        end_value=0.0,
-    )
+    if config.schedule == "warmup_cosine":
+        schedule = optax.warmup_cosine_decay_schedule(
+            init_value=0.0,
+            peak_value=config.lr,
+            warmup_steps=warmup_steps,
+            decay_steps=total_steps,
+            end_value=0.0,
+        )
+    elif config.schedule == "constant":
+        schedule = config.lr
+    else:
+        raise ValueError(
+            f"Unknown schedule {config.schedule!r}; expected warmup_cosine or constant")
+    if not np.isfinite(config.adam_epsilon) or config.adam_epsilon <= 0.0:
+        raise ValueError("Adam epsilon must be positive finite")
+    if not (0.0 <= config.adam_b1 < 1.0 and 0.0 < config.adam_b2 < 1.0):
+        raise ValueError("Adam b1 must lie in [0, 1) and b2 in (0, 1)")
+    if config.adam_epsilon_convention == "optax":
+        epsilon = config.adam_epsilon
+
+        def wrap(factory):
+            return factory
+    elif config.adam_epsilon_convention == "keras_epsilon_hat":
+        if config.optimizer not in ("adam", "adamw"):
+            raise ValueError("keras_epsilon_hat applies to 'adam' and 'adamw'")
+
+        # Keras: m*lr*sqrt(1-b2^t)/(1-b1^t) / (sqrt(v) + eps), algebraically
+        # Optax's m_hat/(sqrt(v_hat) + eps/sqrt(1-b2^t)).  inject_hyperparams
+        # evaluates this at its pre-increment count, i.e. t - 1.
+        def epsilon(count):
+            return config.adam_epsilon / jnp.sqrt(
+                1.0 - config.adam_b2 ** (count + 1))
+
+        wrap = optax.inject_hyperparams
+    else:
+        raise ValueError(
+            "Unknown adam_epsilon_convention "
+            f"{config.adam_epsilon_convention!r}; expected optax or "
+            "keras_epsilon_hat")
 
     if config.optimizer == "adamw":
-        core = optax.adamw(
-            learning_rate=schedule, weight_decay=config.weight_decay,
+        core = wrap(optax.adamw)(
+            learning_rate=schedule, b1=config.adam_b1, b2=config.adam_b2,
+            eps=epsilon, weight_decay=config.weight_decay,
         )
     elif config.optimizer == "adam":
-        core = optax.adam(learning_rate=schedule)
+        core = wrap(optax.adam)(
+            learning_rate=schedule, b1=config.adam_b1, b2=config.adam_b2,
+            eps=epsilon)
     elif config.optimizer == "muon":
         try:
             from optax.contrib import muon
@@ -273,6 +322,7 @@ def create_optimizer(config: TrainingConfig) -> optax.GradientTransformation:
             adamw_lr_scale=config.adamw_lr_scale,
             muon_wd_scale=config.muon_weight_decay_scale,
             adamw_wd_scale=config.adamw_weight_decay_scale,
+            adam_epsilon=config.adam_epsilon,
         )
     else:
         raise ValueError(
@@ -280,10 +330,10 @@ def create_optimizer(config: TrainingConfig) -> optax.GradientTransformation:
             f"expected one of 'adamw', 'adam', 'muon', 'muon_partitioned'."
         )
 
-    return optax.chain(
-        optax.clip_by_global_norm(config.grad_clip_norm),
-        core,
-    )
+    if config.clip_gradients:
+        return optax.chain(
+            optax.clip_by_global_norm(config.grad_clip_norm), core)
+    return core
 
 
 # Minimum smaller-axis dimension for a parameter leaf to receive the
@@ -298,6 +348,7 @@ def _muon_partitioned_optimizer(
     schedule, weight_decay: float, min_dim: int = _MUON_MIN_DIM_DEFAULT,
     muon_lr_scale: float = 1.0, adamw_lr_scale: float = 1.0,
     muon_wd_scale: float = 1.0, adamw_wd_scale: float = 1.0,
+    adam_epsilon: float = 1e-8,
 ) -> optax.GradientTransformation:
     """Build a multi-transform optimizer routing MUON / AdamW per leaf.
 
@@ -318,8 +369,8 @@ def _muon_partitioned_optimizer(
     the warmup/cosine shape shared, so one ``lr`` field still moves both
     groups coherently.
     """
-    from optax.contrib import muon
     import jax
+    from optax.contrib import muon
 
     def _scaled(sched, factor):
         f = float(factor)
@@ -338,6 +389,7 @@ def _muon_partitioned_optimizer(
     adam_tx = optax.adamw(
         learning_rate=_scaled(schedule, adamw_lr_scale),
         weight_decay=weight_decay * float(adamw_wd_scale),
+        eps=adam_epsilon,
     )
 
     def _label(params):

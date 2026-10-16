@@ -4072,6 +4072,16 @@ SWG_MADDISON_NAMELIST = SWG_NAMELIST._replace(
     rn_modified_grav_m_s2=9.80665,
     rn_Lv_m=10.0,
 )
+# Online-learning coarse deck selected by the user on 2026-10-13.  Only the
+# integer resolution knob and the gravity-wave-Courant-matched clock differ
+# from the fine Maddison namelist; all physical parameters remain identical.
+SWG_DG50_NAMELIST = SWG_MADDISON_NAMELIST._replace(
+    nn_SWG=2,
+    nn_itend=233_280,
+    nn_write=216,
+    nn_stock=233_280,
+    rn_Dt_s=400.0,
+)
 # Frozen transcription of the compiled SWE readers, expressed in card field
 # names.  This is intentionally independent of ``SwgResolvedNamelist._fields``
 # so the inventory test detects a removed field instead of deriving its own
@@ -4520,6 +4530,7 @@ __all__ = (
     "swg_wet_mask",
     "SWG_NAMELIST",
     "SWG_MADDISON_NAMELIST",
+    "SWG_DG50_NAMELIST",
     "validate_swg_namelist",
     "SWG_DEVIATIONS",
     "SWG_UNMEASURED",

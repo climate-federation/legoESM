@@ -1,0 +1,79 @@
+{
+  "schema": "legoesm-swg-online-training-v3",
+  "experiment": "swgonl_pilot_template_ring_weighted",
+  "description": "Second pilot (user decision 2026-10-15): identical to the first pilot except that the first interior wall ring is INCLUDED in the loss with its Eq. 7 weight (candidate template+weighted). Motivation: the data-implied sub-grid forcing is a net energy sink located entirely in that ring. Free runs of twenty years from the stored day-4265 truth state.",
+  "deck": "dg50",
+  "objective": "template",
+  "wall_ring": "weighted",
+  "network": {
+    "hidden_channels": 16,
+    "hidden_layers": 4,
+    "kernel_size": 3,
+    "scales": "maddison_eq6_shallow_water_grid_analogue"
+  },
+  "seeds": [
+    20261013
+  ],
+  "dataset": {
+    "records": [
+      {
+        "root": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgonl_rounds/round6/hourly_dual_12y",
+        "chunk_label": "dual"
+      },
+      {
+        "root": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgonl_rounds/round6/hourly_dual_test_year",
+        "chunk_label": "dual_test"
+      }
+    ],
+    "splits_days": {
+      "train": [
+        731,
+        1461
+      ],
+      "validation": [
+        4265,
+        5111
+      ],
+      "test": [
+        5141,
+        5506
+      ]
+    },
+    "batch_size": 10
+  },
+  "curriculum": {
+    "window_days": [
+      1,
+      2
+    ],
+    "epochs_per_window": 5,
+    "network_between_windows": "carried",
+    "optimiser_between_windows": "reinitialised"
+  },
+  "optimiser": {
+    "optimizer": "adamw",
+    "learning_rate": 0.001,
+    "schedule": "constant",
+    "weight_decay": 0.004,
+    "adam_b1": 0.9,
+    "adam_b2": 0.999,
+    "adam_epsilon": 1e-07,
+    "adam_epsilon_convention": "keras_epsilon_hat",
+    "gradient_clipping": "none"
+  },
+  "free_run": {
+    "days": 7300,
+    "start": {
+      "kind": "record_state",
+      "record": {
+        "root": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/swgonl_rounds/round6/hourly_dual_12y",
+        "chunk_label": "dual"
+      },
+      "day": 4265,
+      "objective": "template"
+    },
+    "sampling": "end_of_day_snapshot_and_daily_mean",
+    "device": "cuda",
+    "math_library": "native"
+  }
+}

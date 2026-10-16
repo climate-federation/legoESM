@@ -13,7 +13,7 @@ usage() {
   cat <<'EOF'
 Usage: run_30d.sh --nemo-root DIR --evidence DIR --python PYTHON
                   [--reference-manifest FILE] [--mpiexec CMD]
-                  [--deck shipped|maddison] [--run]
+                  [--deck shipped|maddison|dg50] [--run]
 
 The shipped deck requires --reference-manifest. Default mode is a read-only
 preflight; --run builds and executes NEMO and is operator-only.
