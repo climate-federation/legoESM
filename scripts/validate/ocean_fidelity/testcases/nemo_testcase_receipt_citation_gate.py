@@ -1709,6 +1709,12 @@ CITATION_MAP = {
         ('ENDIF', 35),
         9,
     ],
+    # --- ORCA2 round 289: completed-stage V association split ---
+    'ORCA2_OMIP_L4_R280STAGE1/BLD/ppsrc/nemo/lbcnfd.f90:684-717': [
+        "CASE ( 'V' )                               ! V-point",
+        'ptab(jf)%pt4d(ii1,ij1,jk,jl) = psgn(jf) * ptab(jf)%pt4d(ii2,ij2,jk,jl)',
+        34,
+    ],
     # --- ORCA2 round 283: stage-1 V-mask operand owner ---
     'ORCA2_OMIP_L4_R280STAGE1/BLD/ppsrc/nemo/stprk3_stg.f90:136':
         'rDt = r1_3 * rn_Dt',
