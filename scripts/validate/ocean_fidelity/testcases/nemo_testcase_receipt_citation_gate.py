@@ -1705,6 +1705,12 @@ CITATION_MAP = {
         'vv(ji,jj,jk,Kaa) = ( vv(ji,jj,jk,Kbb) + rDt * vv(ji,jj,jk,Krhs) ) * vmask(ji,jj,jk)',
         4,
     ],
+    # --- ORCA2 round 290: matched barotropic-correction boundary ---
+    'ORCA2_OMIP_L4_R280STAGE1/BLD/ppsrc/nemo/stprk3_stg.f90:521-528': [
+        '!                 !==  All stages: correct the barotropic component ==!   at Kaa = N+1/3, N+1/2 or N+1',
+        ('END DO   ;   END DO', 9),
+        8,
+    ],
     # --- ORCA2 round 288: held completed-stage V-fold partner ---
     'ORCA2_OMIP_L4_R280STAGE1/BLD/ppsrc/nemo/stprk3_stg.f90:812-820': [
         ('ELSE', 5),
