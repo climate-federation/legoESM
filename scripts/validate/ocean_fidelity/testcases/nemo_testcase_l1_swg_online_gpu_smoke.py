@@ -267,7 +267,7 @@ def _run_worker(args) -> dict:
                 SWGNetworkSpec(
                     hidden_channels=16, hidden_layers=4, kernel_size=3,
                     ssh_scale_m=1.0, velocity_scale_m_s=1.0,
-                    potential_scale_m3_s2=1.0),
+                    potential_scale_m3_s2=1.0, wall_margin_rings=0),
                 key=jax.random.PRNGKey(20261013))
             tau_u, tau_v = swg_surface_wind(SWG_DG50_NAMELIST)
             forcing = OceanSurfaceForcing(

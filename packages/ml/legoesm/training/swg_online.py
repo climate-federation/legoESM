@@ -77,6 +77,7 @@ class SWGNetworkSpec(NamedTuple):
     ssh_scale_m: float
     velocity_scale_m_s: float
     potential_scale_m3_s2: float
+    wall_margin_rings: int
 
 
 class SWGClosureGeometry(eqx.Module):
@@ -292,6 +293,18 @@ def build_closure_geometry(card) -> SWGClosureGeometry:
         wet_bounds=bounds, spacing_m=spacing)
 
 
+def wall_margin_mask(vertex_interior, rings: int):
+    """``vertex_interior`` eroded ``rings`` times with the 4-neighbour
+    stencil; array edges count as 0 and the dtype is the input's."""
+    mask = jnp.asarray(vertex_interior)
+    for _ in range(rings):
+        padded = jnp.pad(mask, 1)
+        mask = jnp.stack((
+            padded[1:-1, 1:-1], padded[:-2, 1:-1], padded[2:, 1:-1],
+            padded[1:-1, :-2], padded[1:-1, 2:])).min(axis=0)
+    return mask
+
+
 class SWGScalarPotentialCNN(eqx.Module):
     """Small residual-free CNN producing one boundary-zero F potential.
 
@@ -316,6 +329,8 @@ class SWGScalarPotentialCNN(eqx.Module):
         if min(spec.ssh_scale_m, spec.velocity_scale_m_s,
                spec.potential_scale_m3_s2) <= 0.0:
             raise ValueError("SWG CNN physical scales must be positive")
+        if spec.wall_margin_rings < 0:
+            raise ValueError("SWG CNN wall_margin_rings must be >= 0")
         keys = jax.random.split(key, spec.hidden_layers + 1)
         padding = spec.kernel_size // 2
         layers = [ShiftedConv2d(
@@ -356,8 +371,12 @@ class SWGScalarPotentialCNN(eqx.Module):
         for layer in self.layers[:-1]:
             value = jax.nn.elu(layer(value))
         potential = self.layers[-1](value)[0]
-        return (self.spec.potential_scale_m3_s2 * potential
-                * geometry.vertex_interior)
+        potential = (self.spec.potential_scale_m3_s2 * potential
+                     * geometry.vertex_interior)
+        if self.spec.wall_margin_rings > 0:
+            potential = potential * wall_margin_mask(
+                geometry.vertex_interior, self.spec.wall_margin_rings)
+        return potential
 
 
 def network_parameter_count(network: SWGScalarPotentialCNN) -> int:

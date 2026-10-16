@@ -240,7 +240,7 @@ def load_config(path: Path) -> dict:
     _require_keys({key: value for key, value in network.items()
                    if key != "initial_checkpoint"},
                   ("hidden_channels", "hidden_layers", "kernel_size",
-                   "scales"), "network")
+                   "wall_margin_rings", "scales"), "network")
     if "initial_checkpoint" in network and (
             not isinstance(network["initial_checkpoint"], str)
             or not Path(network["initial_checkpoint"]).is_absolute()):
@@ -249,6 +249,7 @@ def load_config(path: Path) -> dict:
     _require_int(network["hidden_layers"], "hidden_layers", minimum=1)
     if _require_int(network["kernel_size"], "kernel_size", minimum=1) % 2 != 1:
         raise ValueError("kernel_size must be odd")
+    _require_int(network["wall_margin_rings"], "wall_margin_rings", minimum=0)
     if network["scales"] != SCALE_RULE:
         raise ValueError(f"network scales must be {SCALE_RULE!r}")
 
@@ -430,7 +431,8 @@ def network_spec(config: dict, card, geometry) -> tuple:
         kernel_size=network["kernel_size"],
         ssh_scale_m=scales.ssh_scale_m,
         velocity_scale_m_s=scales.velocity_scale_m_s,
-        potential_scale_m3_s2=scales.potential_scale_m3_s2), scales
+        potential_scale_m3_s2=scales.potential_scale_m3_s2,
+        wall_margin_rings=network["wall_margin_rings"]), scales
 
 
 # --------------------------------------------------------------------- dataset

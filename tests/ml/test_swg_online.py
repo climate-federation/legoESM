@@ -15,7 +15,11 @@ import pytest
 from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
 from legoesm.ml.training import TrainingConfig, create_optimizer
 from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
-from legoesm.ocean.dynamics.swe_rk3 import _entry_from_state, swe_rk3_step
+from legoesm.ocean.dynamics.swe_rk3 import (
+    _entry_from_state,
+    swe_rk3_stage,
+    swe_rk3_step,
+)
 from legoesm.ocean.fidelity.nemo_testcase_recipe import (
     SWG_DG50_NAMELIST,
     SWG_MADDISON_NAMELIST,
@@ -52,6 +56,7 @@ from legoesm.training.swg_online import (
     maddison_eq6_network_scales,
     network_parameter_count,
     swg_online_step,
+    wall_margin_mask,
 )
 
 # A 1,000 km square dg50-physics card (20x20 wet cells) keeps the synthetic
@@ -81,7 +86,7 @@ def online_case():
     spec = SWGNetworkSpec(
         hidden_channels=8, hidden_layers=2, kernel_size=3,
         ssh_scale_m=1.0, velocity_scale_m_s=1.0,
-        potential_scale_m3_s2=1.0)
+        potential_scale_m3_s2=1.0, wall_margin_rings=0)
     network = SWGScalarPotentialCNN(spec, key=jax.random.PRNGKey(8))
     return card, geometry, forcing, entry, network
 
@@ -133,6 +138,99 @@ def test_network_args_are_traced_without_retrace(online_case):
     compiled(changed, zero.at[20, 20].set(1.0e-6),
              jax.random.PRNGKey(1)).block_until_ready()
     assert len(traces) == 1
+
+
+def test_wall_margin_mask_erodes_with_the_four_neighbour_stencil():
+    rectangle = np.zeros((7, 8), dtype=bool)
+    rectangle[1:6, 1:7] = True
+    ring_1 = np.zeros_like(rectangle)
+    ring_1[2:5, 2:6] = True
+    ring_2 = np.zeros_like(rectangle)
+    ring_2[3, 3:5] = True
+    for rings, expected in ((0, rectangle), (1, ring_1), (2, ring_2)):
+        eroded = wall_margin_mask(jnp.asarray(rectangle), rings)
+        assert eroded.dtype == jnp.bool_
+        assert np.array_equal(np.asarray(eroded), expected)
+    assert wall_margin_mask(jnp.asarray(rectangle), 3).sum() == 0
+
+    hole = np.ones((5, 5), dtype=bool)
+    hole[2, 2] = False
+    expected = np.zeros_like(hole)
+    expected[1:4, 1:4] = True
+    expected[1, 2] = expected[3, 2] = expected[2, 1] = expected[2, 3] = False
+    expected[2, 2] = False
+    assert np.array_equal(np.asarray(wall_margin_mask(jnp.asarray(hole), 1)),
+                          expected)
+
+    floats = jnp.asarray(rectangle, dtype=jnp.float64)
+    assert wall_margin_mask(floats, 1).dtype == jnp.float64
+    assert np.array_equal(np.asarray(wall_margin_mask(floats, 2)), ring_2)
+    jitted = jax.jit(wall_margin_mask, static_argnums=1)
+    assert np.array_equal(np.asarray(jitted(jnp.asarray(rectangle), 2)), ring_2)
+
+
+def _margin_networks(online_case, rings):
+    _, _, _, _, network = online_case
+    spec = network.spec._replace(wall_margin_rings=rings)
+    return SWGScalarPotentialCNN(spec, key=jax.random.PRNGKey(8))
+
+
+def _potential(network, entry, geometry):
+    return network(
+        entry, geometry, key=jax.random.PRNGKey(1),
+        noise=jnp.zeros_like(entry.ssh_k), noise_scale=jnp.asarray(0.0))
+
+
+def test_wall_margin_zeroes_the_potential_on_the_first_rings_only(online_case):
+    _, geometry, _, entry, _ = online_case
+    plain = _potential(_margin_networks(online_case, 0), entry, geometry)
+    margin = _potential(_margin_networks(online_case, 2), entry, geometry)
+    interior = np.asarray(geometry.vertex_interior, dtype=bool)
+    keep_1 = np.asarray(wall_margin_mask(geometry.vertex_interior, 1))
+    keep_2 = np.asarray(wall_margin_mask(geometry.vertex_interior, 2))
+    j0, j1, i0, i1 = geometry.wet_bounds
+    assert keep_2.sum() == (j1 - j0 - 4) * (i1 - i0 - 4)
+    plain, margin = np.asarray(plain), np.asarray(margin)
+    assert np.all(margin[~keep_2] == 0.0)
+    assert np.array_equal(margin[keep_2], plain[keep_2])
+    assert np.any(plain[interior & ~keep_1] != 0.0)
+    assert np.any(plain[keep_1 & ~keep_2] != 0.0)
+    with pytest.raises(ValueError, match="wall_margin_rings"):
+        _margin_networks(online_case, -1)
+
+
+def test_wall_margin_closure_acceleration_vanishes_next_to_every_wall(
+        online_case):
+    card, geometry, _, entry, _ = online_case
+    grid, z_coord = card.recipe.grid, card.recipe.z_coord
+    config = card.recipe.model_config
+    mask = card.recipe.initial_state.land_mask.data
+
+    def acceleration(rings):
+        potential = _potential(
+            _margin_networks(online_case, rings), entry, geometry)
+
+        def stage(potential_f):
+            return swe_rk3_stage(entry, entry, card.dt_s, 3, grid, z_coord,
+                                 mask, config, potential_f=potential_f)
+
+        base, closed = stage(None), stage(potential)
+        return (np.asarray(closed.u_k - base.u_k) / card.dt_s,
+                np.asarray(closed.v_k - base.v_k) / card.dt_s)
+
+    j0, j1, i0, i1 = geometry.wet_bounds
+    wall_rows = [j0, j0 + 1, j1 - 1, j1]
+    wall_columns = [i0, i0 + 1, i1 - 1, i1]
+    plain_u, plain_v = acceleration(0)
+    assert np.any(plain_u[wall_rows[:2]] != 0.0)
+    assert np.any(plain_u[wall_rows[2:]] != 0.0)
+    assert np.any(plain_v[:, wall_columns[:2]] != 0.0)
+    assert np.any(plain_v[:, wall_columns[2:]] != 0.0)
+    margin_u, margin_v = acceleration(2)
+    assert np.all(margin_u[wall_rows] == 0.0)
+    assert np.all(margin_v[:, wall_columns] == 0.0)
+    assert np.any(margin_u[j0 + 2:j1 - 1] != 0.0)
+    assert np.any(margin_v[:, i0 + 2:i1 - 1] != 0.0)
 
 
 def test_point_and_energy_losses_share_interface_and_plants_fail(online_case):
@@ -1044,7 +1142,7 @@ def test_shifted_network_matches_previous_equinox_forward_and_gradient_on_real_s
     spec = SWGNetworkSpec(
         hidden_channels=16, hidden_layers=4, kernel_size=3,
         ssh_scale_m=1.0, velocity_scale_m_s=1.0,
-        potential_scale_m3_s2=1.0)
+        potential_scale_m3_s2=1.0, wall_margin_rings=0)
     key = jax.random.PRNGKey(20261013)
     shifted = SWGScalarPotentialCNN(spec, key=key)
     keys = jax.random.split(key, spec.hidden_layers + 1)
@@ -1116,7 +1214,7 @@ def test_shifted_network_preserves_ten_state_initial_acceleration():
         expected_manifest_sha256=(
             "aaec7f829d7530a275c07a263cd96185a4fa6245be411c63626156e35fa65d2c"))
         for day in (731, 771, 811, 851, 891, 931, 971, 1011, 1051, 1091))
-    spec = SWGNetworkSpec(16, 4, 3, 1.0, 1.0, 1.0)
+    spec = SWGNetworkSpec(16, 4, 3, 1.0, 1.0, 1.0, 0)
     network = SWGScalarPotentialCNN(
         spec, key=jax.random.PRNGKey(20261013))
     result = initial_closure_acceleration_ratio(
@@ -1163,7 +1261,7 @@ def test_real_data_one_optimizer_step_has_no_inert_leaf():
     spec = SWGNetworkSpec(
         hidden_channels=16, hidden_layers=4, kernel_size=3,
         ssh_scale_m=1.0, velocity_scale_m_s=1.0,
-        potential_scale_m3_s2=1.0)
+        potential_scale_m3_s2=1.0, wall_margin_rings=0)
     network = SWGScalarPotentialCNN(spec, key=jax.random.PRNGKey(20261013))
     initialization = initial_closure_acceleration_ratio(
         network, (initial,), card, geometry, key=jax.random.PRNGKey(20261013))
@@ -1308,7 +1406,7 @@ def test_eq6_scale_report_measures_what_the_network_reads(online_case):
     scales = maddison_eq6_network_scales(card, geometry)
     spec = SWGNetworkSpec(8, 2, 3, scales.ssh_scale_m,
                           scales.velocity_scale_m_s,
-                          scales.potential_scale_m3_s2)
+                          scales.potential_scale_m3_s2, 0)
     network = SWGScalarPotentialCNN(spec, key=jax.random.PRNGKey(3))
     u, v = _streamfunction_flow(geometry, 3.0e5)
     wet = np.asarray(geometry.tmask, dtype=bool)

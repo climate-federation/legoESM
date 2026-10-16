@@ -55,7 +55,11 @@ records = _load("swg_online_record_writer",
 evaluation = _load(
     "swg_online_evaluation", _ROOT / "scripts/validate/ocean_fidelity/"
     "testcases/nemo_testcase_l1_swg_online_evaluation.py")
-CONFIGS = sorted((_ROOT / "config/swg_online").glob("exp1_*.json"))
+CONFIGS = sorted(path for path in (_ROOT / "config/swg_online").glob("exp1_*.json")
+                 if "_day4265" not in path.name)
+EXP1_WEIGHTED = _ROOT / "config/swg_online/exp1_template_ring_weighted.json"
+EXP2_WALL_MARGIN = _ROOT / "config/swg_online/exp2_wallmargin2_template_ring_weighted.json"
+EXP2_BIGNET = _ROOT / "config/swg_online/exp2_bignet_h6k5_template_ring_weighted.json"
 PILOT = _ROOT / "config/swg_online/pilot_template_ring_excluded.json"
 CONTROL_CONFIGS = {
     name: _ROOT / f"config/swg_online/control_{name}_gpu.json"
@@ -110,7 +114,7 @@ def test_committed_configs_are_the_three_candidates_of_the_template_procedure():
         assert len(config["seeds"]) >= 3
         assert config["network"] == {
             "hidden_channels": 16, "hidden_layers": 4, "kernel_size": 3,
-            "scales": driver.SCALE_RULE}
+            "wall_margin_rings": 0, "scales": driver.SCALE_RULE}
         # Daily means beside the snapshots.  The candidate chosen for the full
         # experiment (template, wall ring weighted) runs its free runs on the
         # GPU with native math (user decision 2026-10-14, after the GPU
@@ -123,6 +127,60 @@ def test_committed_configs_are_the_three_candidates_of_the_template_procedure():
             "device": "cuda" if chosen else "cpu",
             "math_library": "native" if chosen else "libm"}
         assert config["deck"] == "dg50"
+
+
+def test_exp2_arm_configs_differ_from_experiment_one_only_in_their_arm():
+    base = driver.load_config(EXP1_WEIGHTED)
+    wall = driver.load_config(EXP2_WALL_MARGIN)
+    big = driver.load_config(EXP2_BIGNET)
+    assert wall["experiment"] == "swgonl_exp2_wallmargin2_template_ring_weighted"
+    assert big["experiment"] == "swgonl_exp2_bignet_h6k5_template_ring_weighted"
+    for config, arm in ((wall, "Arm A"), (big, "Arm B")):
+        assert config["description"].startswith(
+            f"{arm} of the 2026-10-16 decision (user chose both arms): ")
+        assert config["description"].endswith(base["description"])
+    assert wall == base | {
+        "experiment": wall["experiment"], "description": wall["description"],
+        "network": base["network"] | {"wall_margin_rings": 2}}
+    assert big == base | {
+        "experiment": big["experiment"], "description": big["description"],
+        "network": base["network"] | {"hidden_layers": 6, "kernel_size": 5}}
+    assert wall["network"]["wall_margin_rings"] == 2
+    assert big["network"]["wall_margin_rings"] == 0
+
+
+def test_load_config_refuses_a_missing_or_negative_wall_margin(tmp_path):
+    config = json.loads(EXP1_WEIGHTED.read_text())
+    path = tmp_path / "config.json"
+    del config["network"]["wall_margin_rings"]
+    path.write_text(json.dumps(config))
+    with pytest.raises(ValueError, match="wall_margin_rings"):
+        driver.load_config(path)
+    config["network"]["wall_margin_rings"] = -1
+    path.write_text(json.dumps(config))
+    with pytest.raises(ValueError, match="wall_margin_rings must be an integer >= 0"):
+        driver.load_config(path)
+
+
+def test_wall_margin_reaches_the_spec_and_the_run_manifest(small_card, one_window):
+    config = driver.load_config(EXP2_WALL_MARGIN)
+    spec, _ = driver.network_spec(
+        config, small_card, build_closure_geometry(small_card))
+    assert spec.wall_margin_rings == 2
+    manifest = json.loads(
+        (one_window["folder"] / "run/run_manifest.json").read_text())
+    assert manifest["config"]["network"]["wall_margin_rings"] == 0
+    assert manifest["network"]["spec"]["wall_margin_rings"] == 0
+
+
+def test_free_run_refuses_a_changed_wall_margin(one_window, small_card):
+    config = copy.deepcopy(one_window["config"])
+    config["network"]["wall_margin_rings"] = 1
+    with pytest.raises(ValueError, match="not this configuration"):
+        driver.run_free_run(
+            config, one_window["path"], card=small_card, seed=11,
+            run_dir=one_window["folder"] / "run", window_days=1, device=CPU,
+            commit="0" * 40)
 
 
 def test_pilot_restricts_seeds_windows_and_training_years_by_its_own_keys():
@@ -1248,6 +1306,10 @@ def test_extension_refuses_anything_but_appended_windows(
     run, config = _extension(one_window, tmp_path / "b")
     config["curriculum"]["epochs_per_window"] = 3
     refused(config, _write_config(tmp_path / "b.json", config), "differs in",
+            run)
+    run, config = _extension(one_window, tmp_path / "h")
+    config["network"]["wall_margin_rings"] = 1
+    refused(config, _write_config(tmp_path / "h.json", config), "differs in",
             run)
     # The same windows under a new description: an ordinary changed
     # configuration.  A removed window, a replaced window or a reordered

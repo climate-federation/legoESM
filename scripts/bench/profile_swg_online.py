@@ -37,6 +37,7 @@ PROFILE_NETWORK_SPEC = SWGNetworkSpec(
     ssh_scale_m=1.0,
     velocity_scale_m_s=1.0,
     potential_scale_m3_s2=1.0,
+    wall_margin_rings=0,
 )
 
 
