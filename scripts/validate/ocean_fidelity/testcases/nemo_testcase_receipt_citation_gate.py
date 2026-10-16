@@ -1785,6 +1785,28 @@ CITATION_MAP = {
         '&                               + r1_Dt * e3t_3d(ji,jj,jk) * ( r3t(ji,jj,Kaa) - r3t(ji,jj,Kbb) )  ) * tmask(ji,jj,jk)',
         22,
     ],
+    # --- ORCA2 round 300: admitted kt=7 W leaf record ------------
+    'ORCA2_OMIP_L4_R299W7/BLD/ppsrc/nemo/traadv.f90:248-252': [
+        ('DO jj = ntsj-( nn_hls)', 1), 'pFw(ji,jj,jpk) = 0._wp', 5,
+    ],
+    'ORCA2_OMIP_L4_R299W7/BLD/ppsrc/nemo/traadv.f90:267-315': [
+        'IF( ll_Fw ) THEN',
+        'pFw(ji,jj,jk) = e1e2t(ji,jj) * ww(ji,jj,jk)',
+        49,
+    ],
+    'ORCA2_OMIP_L4_R299W7/BLD/ppsrc/nemo/divhor.f90:132-139': [
+        'CASE ( np_transport )',
+        ('END DO   ;   END DO   ;   END DO', 2),
+        8,
+    ],
+    'ORCA2_OMIP_L4_R299W7/BLD/ppsrc/nemo/sshwzv.f90:271-299': [
+        ('DO jj = ntsj-( 1)', 2),
+        '&                               + r1_Dt * e3t_3d(ji,jj,jk) * ( r3t(ji,jj,Kaa) - r3t(ji,jj,Kbb) )  ) * tmask(ji,jj,jk)',
+        29,
+    ],
+    'ORCA2_OMIP_L4_R299W7/BLD/ppsrc/nemo/stprk3_stg.f90:136-137': [
+        'rDt = r1_3 * rn_Dt', 'r1_Dt = 1._wp / rDt', 2,
+    ],
     # --- ORCA2 round 291: carried external-mode V target boundary ---
     'ORCA2_OMIP_L4_R280STAGE1/BLD/ppsrc/nemo/dynspg_ts.f90:857-860': [
         'IF(.NOT.ll_bt_av ) THEN                          !* Update Kaa barotropic external mode',
