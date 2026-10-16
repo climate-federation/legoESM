@@ -288,6 +288,12 @@ class TKEConfig(NamedTuple):
     # statement, and a missing ``surface_tmask`` is a hard error.  Only the
     # NEMO-literal cards select it.
     nemo_mxl0_surface_tmask: bool = False
+    # NEMO nn_mxlice: the ln_mxl0 anchor under sea ice (zdftke.f90:605-633).
+    # 0 (DEFAULT, main's behaviour) = CASE 0, no scaling.  2 = CASE 2,
+    # ``((1-fr_i)*zraug*taum + fr_i*hm_i*2)*tmask`` with raw ``fr_i`` and SI3's
+    # mean thickness ``hm_i`` (OceanSurfaceForcing.ice_concentration and
+    # .ice_mean_thickness_hm_i, both required); needs the masked anchor.
+    nemo_mxlice: int = 0
     # ----- NEMO rn_mxl0: the ln_mxl0 surface-anchor FLOOR ------------------
     # ``tke_avn`` floors the wind anchor at ``rn_mxl0``
     # (``zmxlm(ji,1) = MAX( rn_mxl0, zmxlm(ji,1) )``, GYRE ppsrc

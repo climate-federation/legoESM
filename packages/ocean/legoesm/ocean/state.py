@@ -355,6 +355,10 @@ class OceanSurfaceForcing(NamedTuple):
     # rebuilding it from ice state.  Read only when
     # ``implicit_ice_ocean_top_drag=True``; a selected path refuses None.
     salt_flux_sfx: object = None
+    ice_mean_thickness_hm_i: object = None
+    # jnp.ndarray | None [m], SI3's mean ice thickness ``hm_i`` at T points.
+    # Read only by ``TKEConfig.nemo_mxlice=2`` (zdftke.f90:620-623); that
+    # selection refuses None.
     # jnp.ndarray | None [g/m^2/s], NEMO ``sfx`` as recorded.  Read only by
     # ``rk3_stage3_salt_nemo_written`` (trasbc.f90:308 ``sfx*z1_rho0_e3t``);
     # ``1e3*(1e-3*sfx)`` through ``salt_flux`` is not bitwise ``sfx``.

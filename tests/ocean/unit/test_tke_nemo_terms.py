@@ -1652,3 +1652,42 @@ class TestNemoBottomTkeVelocityConvention:
             u=state.u.replace(data=u_cc), v=state.v.replace(data=v_cc))
         with pytest.raises(ValueError, match="RAW face-staggered"):
             model._tke_bottom_dirichlet(collapsed)
+
+
+def test_nn_mxlice2_anchor_is_nemos_case2_and_refuses_missing_inputs():
+    """zdftke.f90:620-623 + :635-637: ((1-fr_i)*zraug*taum + fr_i*hm_i*2)*tmask,
+    floored at rn_mxl0; the default (CASE 0) arm is unchanged."""
+    from legoesm import constants
+    from legoesm.ocean.physics.vertical_mixing.tke import (
+        _NEMO_MXL0_LENGTH_SCALE, _NEMO_MXL0_VKARMN, _mixing_length_floor,
+        _mxl0_surface_anchor,
+    )
+
+    base = TKEConfig(
+        tke_mxl_choice=3, mxl_min=0.04, c_k=0.1, tke_background=1.0e-6,
+        mxl0_min_m=0.04, nemo_derived_mxl_min=True,
+        nemo_mxl0_surface_tmask=True, nemo_mxl0_rmxl_min_overwrite=True)
+    cfg = base._replace(nemo_mxlice=2)
+    taum = np.array([0.3, 0.3, 0.0, 0.8])
+    fr = np.array([0.0, 0.6, 1.0, 0.2])
+    hm = np.array([0.0, 1.7, 2.5, 0.9])
+    tm = np.array([1.0, 1.0, 1.0, 0.0])
+    zraug = _NEMO_MXL0_VKARMN * _NEMO_MXL0_LENGTH_SCALE / (_RHO0 * constants.g)
+    want = np.maximum(_mixing_length_floor(cfg),
+                      ((1.0 - fr) * zraug * taum + fr * hm * 2.0) * tm)
+    got = _mxl0_surface_anchor(cfg, jnp.asarray(taum), _RHO0, constants.g,
+                               jnp.asarray(tm), jnp.asarray(fr), jnp.asarray(hm))
+    assert np.asarray(got).view(np.uint64).tolist() == want.view(np.uint64).tolist()
+    case0 = _mxl0_surface_anchor(base, jnp.asarray(taum), _RHO0, constants.g,
+                                 jnp.asarray(tm), jnp.asarray(fr), jnp.asarray(hm))
+    # an ice column moves; the ice-free one is CASE 0's value
+    assert np.asarray(got)[1] != np.asarray(case0)[1]
+    assert np.asarray(got)[0] == np.asarray(case0)[0]
+    for kw in ({"mxlice_hm_i": None}, {"mxlice_fr_i": None}):
+        args = {"mxlice_fr_i": jnp.asarray(fr), "mxlice_hm_i": jnp.asarray(hm), **kw}
+        with pytest.raises(ValueError, match="nemo_mxlice=2"):
+            _mxl0_surface_anchor(cfg, jnp.asarray(taum), _RHO0, constants.g,
+                                 jnp.asarray(tm), **args)
+    with pytest.raises(ValueError, match="nemo_mxlice"):
+        _mxl0_surface_anchor(cfg._replace(nemo_mxlice=1), jnp.asarray(taum),
+                             _RHO0, constants.g, jnp.asarray(tm))

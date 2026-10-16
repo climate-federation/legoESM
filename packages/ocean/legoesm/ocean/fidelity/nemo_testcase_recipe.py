@@ -4351,13 +4351,11 @@ _ORCA2V1_RN_LC = 0.15           # namelist_ref:1246
 # times wmask or dry en=0 at :420/:425 and :711 overwrites it at kt 1, so the
 # shared init's wet-masked seed is kept)
 _ORCA2V1_DISSL0 = 1.0e-12
-# nn_mxlice=2 (zdftke.f90:620-623) scales the surface mixing length under
-# ice by SI3's mean thickness hm_i; the shared TKE has no such arm and the
-# G5 record carries no hm_i, so the card names it rather than dropping it.
+# nn_mxlice=2 (zdftke.f90:620-623) reads SI3's hm_i, which the card takes
+# from NEMO's record (OceanSurfaceForcing.ice_mean_thickness_hm_i); SI3 itself
+# stays unmeasured, as in G5.
 ORCA2V1_UNMEASURED: tuple[str, ...] = (
     "nemo_post_si3_surface_records",
-    "v1_record_not_admitted",
-    "tke_nn_mxlice2_under_ice_mixing_length",
 )
 for _rung_table in (_ORCA2G_JPK, _ORCA2G_ZDF_FACES, _ORCA2G_TRA_ZDF_ROUNDED,
                     _ORCA2G_UE_RHS_ASCENDING, _ORCA2G_ZDF_STAGE_R3U,
@@ -4379,6 +4377,10 @@ def _orca2v1_tke_vertical(g5_vm, deck: ORCA2G1Deck):
         nemo_derived_mxl_min=True,              # rmxl_min=1e-6/(rn_ediff*SQRT(rn_emin)), :840
         nemo_mxl0_rmxl_min_overwrite=True,      # rn_mxl0 = rmxl_min, :853-856
         lc=True, lc_coeff=_ORCA2V1_RN_LC,       # ln_lc, rn_lc
+        # no-crossing LC depth = the column's own bottom, imlc=mbkt+1
+        # (zdftke.f90:354); the inherited compact arm takes the grid's deepest w
+        tke_langmuir_evaluation="nemo_literal",
+        nemo_mxlice=2,                          # nn_mxlice=2, :620-623 (needs hm_i)
         etau_mode="below_ml",                   # nn_etau=1, :498-502
         etau_htau_mode="latitude",              # nn_htau=1 (namelist_ref:1252)
         etau_frac=_ORCA2V1_RN_EFR,              # rn_efr
@@ -4397,9 +4399,11 @@ def _orca2v1_tke_selected(vm) -> bool:
             and (t.tke_mxl_choice, t.tke_background, t.tke_surface_min,
                  t.nemo_derived_mxl_min, t.nemo_mxl0_rmxl_min_overwrite, t.lc,
                  t.lc_coeff, t.etau_mode, t.etau_htau_mode, t.etau_frac, t.eice,
-                 t.bottom_tke_bc) == (
+                 t.bottom_tke_bc, t.tke_langmuir_evaluation, t.nemo_mxlice,
+                 t.nemo_mxl0_surface_tmask) == (
                 3, _ORCA2V1_RN_EMIN, _ORCA2V1_RN_EMIN0, True, True, True,
-                _ORCA2V1_RN_LC, "below_ml", "latitude", _ORCA2V1_RN_EFR, 1, False))
+                _ORCA2V1_RN_LC, "below_ml", "latitude", _ORCA2V1_RN_EFR, 1, False,
+                "nemo_literal", 2, True))
 
 
 def _orca2v1_tke_initial_state(state, tmask, deck: ORCA2G1Deck):

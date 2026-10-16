@@ -55,8 +55,13 @@ import nemo_testcase_g1_orca2grid_ladder as g1  # noqa: E402
 from nemo_testcase_g1_orca2grid_ladder import BAR, require  # noqa: E402
 
 CASE = "ORCA2G2-zps"
-CASES = ("ORCA2G2-zps", "ORCA2G3-ts", "ORCA2G4-sbc", "ORCA2G5-ice")
-FORCED = ("ORCA2G4-sbc", "ORCA2G5-ice")   # NEMO-supplied surface fields each kt (D123)
+CASES = ("ORCA2G2-zps", "ORCA2G3-ts", "ORCA2G4-sbc", "ORCA2G5-ice", "ORCA2V1-tke")
+FORCED = ("ORCA2G4-sbc", "ORCA2G5-ice", "ORCA2V1-tke")   # NEMO-supplied surface fields each kt (D123)
+# G5's record build (ORCA2-lane frames); V1 = that build + one hm_i writer
+SI3 = ("ORCA2G5-ice", "ORCA2V1-tke")
+# V1: NEMO restart TKE fields -> carried card leaves (w levels 2..nk; the
+# card carries no surface en and no bottom w level)
+TKE_RESTART = {"tke": "en", "tke_avm": "avm_k", "tke_avt": "avt_k", "tke_dissl": "dissl"}
 DEFAULT_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/round10/"
     "oracle_g2_r10/p3_a_100step")
@@ -162,6 +167,56 @@ def class_summary(rows: list[dict]) -> dict:
     out["status"] = "AT-BAR" if (max(out["full"]["relative"],
                                      out["partial"]["relative"]) <= BAR
                                  and not out["dry_n_unequal"]) else "DEBT"
+    return out
+
+
+def w_classes(cls: dict) -> dict:
+    """V1: the card's w levels 2..nk (NEMO wmask(k) = tmask(k)*tmask(k-1));
+    PARTIAL = a wet w point beside a partial T cell."""
+    wet_t, part_t = cls["t"]["full"] | cls["t"]["partial"], cls["t"]["partial"]
+    wet = wet_t[..., :-1] & wet_t[..., 1:]
+    part = wet & (part_t[..., :-1] | part_t[..., 1:])
+    return {"full": wet & ~part, "partial": part}
+
+
+def read_zdf_kt1(path: Path, nk: int) -> dict[str, np.ndarray]:
+    """NEMO's avm/avt/avs/en right after zdf_phy at kt 1 (l2_dump_zdf in the
+    record build's stprk3.f90): avm on the haloed domain, the rest interior;
+    returned (y, x, jpk) on the inner domain."""
+    import struct
+    with Path(path).open("rb") as fh:
+        magic = fh.read(16).decode("ascii").rstrip()
+        version, kt, _, nx, ny, nz, bits = struct.unpack("=7i", fh.read(28))
+        data = np.fromfile(fh, dtype=np.float64)
+    require(magic == "NEMO_L4_ZDF___2" and (version, kt, bits) == (2, 1, 64)
+            and nz == nk + 1, f"{path}: header {magic!r} {version} {kt} {nz} {bits}")
+    n3, ni3 = nx * ny * nz, (nx - 4) * (ny - 4) * nz
+    require(data.size == n3 + 3 * ni3, f"{path}: payload {data.size}")
+    require(bool(np.isfinite(data).all()), f"{path}: non-finite payload")
+    out = {"avm": data[:n3].reshape((nx, ny, nz), order="F")[2:-2, 2:-2]}
+    for i, name in enumerate(("avt", "avs", "en")):
+        out[name] = data[n3 + i * ni3:n3 + (i + 1) * ni3].reshape(
+            (nx - 4, ny - 4, nz), order="F")
+    return {k: np.ascontiguousarray(np.swapaxes(v, 0, 1)) for k, v in out.items()}
+
+
+def zdf_kt1_rows(root: Path, state, nk: int, wcls: dict, reg) -> dict:
+    """V1 kt 1: the card's carried closure after step 1 against NEMO's
+    post-zdf_phy frame (ln_rnf_mouth's avt term is inert: socoefr0 == 0)."""
+    z = read_zdf_kt1(Path(root) / "oracle_zdf_entry_kt00000001.bin", nk)
+    out = {}
+    for leaf, name in (("tke", "en"), ("tke_avm", "avm"), ("tke_avt", "avt")):
+        ref = z[name][..., 1:nk]
+        rows = level_rows(ref, np.asarray(getattr(state, leaf).data), wcls)
+        d = (np.asarray(getattr(state, leaf).data) != ref) & (wcls["full"] | wcls["partial"])
+        out[name] = {"summary": class_summary(rows), "levels": rows,
+                     "ref_max_abs": float(np.max(np.abs(ref))),
+                     "card_max_abs": float(np.max(np.abs(np.asarray(
+                         getattr(state, leaf).data)))),
+                     "unequal_columns": int(np.count_nonzero(d.any(-1))),
+                     "first_cells": np.argwhere(d)[:8].tolist()}
+    out["avs_equals_avt"] = bool(np.array_equal(z["avs"], z["avt"]))
+    out["nemo_surface_en_max"] = float(np.max(z["en"][..., 0]))
     return out
 
 
@@ -439,7 +494,7 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
     if case in FORCED:
         require(arm in ("independent", "given_entry")
                 or (arm in ("stages", "barotropic_exit", "carried")
-                    and case == "ORCA2G5-ice"),
+                    and case in SI3),
                 "G4/G5's NEMO-supplied per-step forcing is registered only for "
                 "the independent and given-entry ladders")
         require(cfg.rk3_stage_tracer_written_order is True,
@@ -461,9 +516,9 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
             "only the G3/G4 cards select NEMO's stored r3u(Kmm) in dyn_zdf")
     if without_zdf_stage_r3u:      # G3 ROUND-3 BEFORE ARM / plant
         cfg = cfg._replace(zdf_momentum_stage_r3u_nemo_literal=False)
-    require(cfg.rk3_stage2_tracer_nemo_stored_thickness is (case == "ORCA2G5-ice")
-            and cfg.rk3_stage3_salt_nemo_written is (case == "ORCA2G5-ice"),
-            "only the G5 card selects the stage-2 e3t(Kmm) and stage-3 sfx options")
+    require(cfg.rk3_stage2_tracer_nemo_stored_thickness is (case in SI3)
+            and cfg.rk3_stage3_salt_nemo_written is (case in SI3),
+            "only the G5/V1 cards select the stage-2 e3t(Kmm) and stage-3 sfx options")
     if without_stage2_stored_thickness:   # G5 ROUND-4 BEFORE ARM
         cfg = cfg._replace(rk3_stage2_tracer_nemo_stored_thickness=False)
     if without_stage3_salt:               # G5 ROUND-4 BEFORE ARM
@@ -472,14 +527,15 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
     roots = (root, *restart_roots)
     reg = g1.regions(np.asarray(z.is_active)[..., 0])
     cls = depth_classes(root / "mesh_mask.nc", nk)
+    wcls = w_classes(cls)
     # no step frames (an acquisition that stopped before the record binary
     # ran): only the restart-scored arm can run
     # G5's record build writes the ORCA2 lane's single-rank frames instead
-    has_frames = (root / ("oracle_step_entry_kt00000001.bin" if case == "ORCA2G5-ice"
+    has_frames = (root / ("oracle_step_entry_kt00000001.bin" if case in SI3
                           else "oracle_g1step_kt00000001.bin")).is_file()
     require(has_frames or arm == "restart_independent",
             f"{root} holds no step frames; only restart_independent can run")
-    if has_frames and case == "ORCA2G5-ice":
+    if has_frames and case in SI3:
         n_stage = 0
         while (root / f"oracle_step_entry_kt{n_stage + 1:08d}.bin").is_file():
             n_stage += 1
@@ -510,7 +566,7 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
             header, fields = g4.frames(root, kt)
             return {name: g4.inner(value, header)
                     for name, value in fields.items()}
-    elif case == "ORCA2G5-ice":
+    elif case in SI3:
         sys.path.insert(0, str(HERE / "nemo_testcase_g5_orca2ice"))
         import g5_records as g5  # noqa: E402
         read_step = lambda kt: g5.read_step(root, kt, roots, nk)  # noqa: E731
@@ -540,7 +596,7 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
            "forcing": ("NEMO-supplied surface fields at each kt"
                        if case == "ORCA2G4-sbc" else
                        "NEMO's post-SI3 ocean surface input at each kt"
-                       if case == "ORCA2G5-ice" else "none"),
+                       if case in SI3 else "none"),
            "n_barotropic_substeps": int(cfg.barotropic.n_barotropic_substeps),
            "region_cells": {k: int(m.sum()) for k, m in reg.items()},
            "depth_class_cells": {p: {k: int(m.sum()) for k, m in c.items()}
@@ -579,6 +635,17 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
                 rows[f] = {"summary": class_summary(by_level), "levels": by_level,
                            "ref_max_abs": float(np.max(np.abs(ref))),
                            "restart": str(path)}
+            if case == "ORCA2V1-tke":
+                for leaf, var in TKE_RESTART.items():
+                    ref = levels_last(h.variables[var][0], nk + 1)[..., 1:nk]
+                    by_level = level_rows(ref, np.asarray(getattr(state, leaf).data), wcls)
+                    rows[var] = {"summary": class_summary(by_level), "levels": by_level,
+                                 "ref_max_abs": float(np.max(np.abs(ref))),
+                                 "restart": str(path)}
+                rows["avm_k_surface"] = g1.row(
+                    f"restart.kt{kt}.avm_k_surface",
+                    np.asarray(h.variables["avm_k"][0][0], np.float64),
+                    np.asarray(state.tke_avm_surface.data), reg)
         return rows
 
     def nemo_entry(kt):
@@ -596,7 +663,12 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
                 eta=s0.eta.replace(data=jnp.asarray(var("sshn"))),
                 uu_b=s0.uu_b.replace(data=jnp.asarray(g1.pad_u(var("uu_n")))),
                 vv_b=s0.vv_b.replace(data=jnp.asarray(g1.pad_v(var("vv_n")))),
-                bt_hist=g1.nemo_histories(path.parent, kt))
+                bt_hist=g1.nemo_histories(path.parent, kt),
+                **({leaf: getattr(s0, leaf).replace(data=jnp.asarray(
+                    levels_last(var(n), nk + 1)[..., 1:nk]))
+                    for leaf, n in TKE_RESTART.items()} if case == "ORCA2V1-tke" else {}),
+                **({"tke_avm_surface": s0.tke_avm_surface.replace(
+                    data=jnp.asarray(var("avm_k")[0]))} if case == "ORCA2V1-tke" else {}))
 
     def step(state, kt):
         t0 = time.time()
@@ -604,6 +676,8 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
         if case in FORCED:
             freshwater, surface = (g4 if case == "ORCA2G4-sbc" else g5).nemo_supplied_forcing(
                 card, root, kt)
+            if case == "ORCA2V1-tke":    # nn_mxlice=2 reads SI3's hm_i (D123 route)
+                surface = surface._replace(ice_mean_thickness_hm_i=g5.read_v1_hm_i(root, kt))
             kwargs = {"freshwater": freshwater, "surface_forcing": surface}
         new = jax.device_get(model.step(state, dt=card.dt_s, **kwargs))
         return new, round(time.time() - t0, 1)
@@ -966,6 +1040,8 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
             out["per_kt"].append({"kt": kt, "seconds": seconds, "rows": rows,
                                   "first_unequal": g1.first_unequal(rows),
                                   "all_levels": all_level_rows(kt, state)})
+            if case == "ORCA2V1-tke" and kt == 1:
+                out["per_kt"][-1]["zdf_kt1"] = zdf_kt1_rows(root, state, nk, wcls, reg)
             if kt % 10 == 0:
                 at = restart_path(roots, kt)
                 if at is not None:

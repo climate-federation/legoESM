@@ -227,6 +227,7 @@ def _mxl0_anchor_floor(cfg: "TKEConfig"):
 
 def _mxl0_surface_anchor(
     cfg: "TKEConfig", taum, rho_0: float, g: float, surface_tmask=None,
+    mxlice_fr_i=None, mxlice_hm_i=None,
 ):
     """ln_mxl0 surface anchor (shipped zdftke.F90:575,602,640-642).
 
@@ -241,6 +242,27 @@ def _mxl0_surface_anchor(
     if cfg.tke_mxl_choice not in (3, 4):
         return None
     taum = jnp.asarray(taum)
+    mxlice = int(getattr(cfg, "nemo_mxlice", 0))
+    if mxlice not in (0, 2):
+        raise ValueError(
+            f"Unknown TKEConfig.nemo_mxlice={mxlice!r}; expected 0 (no "
+            "under-ice scaling) or 2 (SI3 mean thickness hm_i).")
+    if mxlice == 2:
+        if (not cfg.nemo_mxl0_surface_tmask or surface_tmask is None
+                or mxlice_fr_i is None or mxlice_hm_i is None):
+            raise ValueError(
+                "TKEConfig.nemo_mxlice=2 requires nemo_mxl0_surface_tmask, "
+                "surface_tmask and the raw ice fraction fr_i and mean ice "
+                "thickness hm_i (zdftke.f90:620-623).")
+        fr_i = jnp.asarray(mxlice_fr_i, dtype=taum.dtype)
+        hm_i = jnp.asarray(mxlice_hm_i, dtype=taum.dtype)
+        zraug = _NEMO_MXL0_VKARMN * _NEMO_MXL0_LENGTH_SCALE / (rho_0 * g)
+        # CASE( 2 ): zmxlm(1) = ((1-fr_i)*zraug*taum + fr_i*hm_i*2)*tmask(1),
+        # then MAX(rn_mxl0, zmxlm(1)) (zdftke.f90:620-623, :635-637)
+        raw = (((1.0 - fr_i) * zraug * taum + fr_i * hm_i * 2.0)
+               * jnp.asarray(surface_tmask, dtype=taum.dtype))
+        return jnp.maximum(
+            jnp.asarray(_mxl0_anchor_floor(cfg), dtype=taum.dtype), raw)
     if not cfg.nemo_mxl0_surface_tmask:
         # Default (main's behaviour): unmasked stress.  Callers with no
         # surface T-mask (FESOM) stay supported; NEMO-literal cards opt into
@@ -2749,6 +2771,8 @@ def tke_vertical_mixing(
     e3w_int: jnp.ndarray | None = None,
     ice_frac: jnp.ndarray | None = None,
     surface_tmask: jnp.ndarray | None = None,
+    mxlice_fr_i: jnp.ndarray | None = None,
+    mxlice_hm_i: jnp.ndarray | None = None,
     bottom_dirichlet: jnp.ndarray | None = None,
     bottom_level: jnp.ndarray | None = None,
     T_n2b: jnp.ndarray | None = None,
@@ -3397,7 +3421,8 @@ def tke_vertical_mixing(
     _statement_shear = None
     _statement_rhs_intermediate = None
     # NEMO ln_mxl0 anchor for nn_mxl=3: l_sfc = max(rn_mxl0, vkarmn*2e5/(rho0*g)*taum)
-    _l_anchor = _mxl0_surface_anchor(cfg, taum, rho_0, g, surface_tmask)
+    _l_anchor = _mxl0_surface_anchor(
+        cfg, taum, rho_0, g, surface_tmask, mxlice_fr_i, mxlice_hm_i)
     # T3-exact: NEMO's TRUE surface-w-level viscosity avm(jk=1)
     # (:func:`nemo_surface_avm`), consulted only by the nemo_z0 face
     # assembly. Requires the ln_mxl0 anchor (tke_mxl_choice=3) and a held
@@ -3707,6 +3732,8 @@ def tke_set_diffusivities(
     e3w_int: jnp.ndarray | None = None,
     ice_frac: jnp.ndarray | None = None,
     surface_tmask: jnp.ndarray | None = None,
+    mxlice_fr_i: jnp.ndarray | None = None,
+    mxlice_hm_i: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray, TKEPostMixingContext]:
     """Veros ``set_tke_diffusivities`` (tke.py:20-113) from the CARRIED TKE.
 
@@ -3782,7 +3809,8 @@ def tke_set_diffusivities(
     else:
         langmuir_source = None
 
-    _l_anchor = _mxl0_surface_anchor(cfg, taum, rho_0, g, surface_tmask)
+    _l_anchor = _mxl0_surface_anchor(
+        cfg, taum, rho_0, g, surface_tmask, mxlice_fr_i, mxlice_hm_i)
     l_k, l_eps = compute_mixing_lengths(
         tke_old, N2, dz_half, cfg, signed_n2=True, dz_cell=dz_cell,
         boundary_cap=boundary_cap, l_surface_anchor=_l_anchor)

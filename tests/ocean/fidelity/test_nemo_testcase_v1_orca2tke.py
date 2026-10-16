@@ -129,7 +129,9 @@ def test_v1_card_is_g5_plus_the_tke_selection(cards):
     assert moved == {"physics.vertical_mixing.scheme",
                      "physics.vertical_mixing.vmix_background_mode",
                      "physics.vertical_mixing.tke.etau_mode",
-                     "physics.vertical_mixing.tke.etau_htau_mode"}
+                     "physics.vertical_mixing.tke.etau_htau_mode",
+                     "physics.vertical_mixing.tke.tke_langmuir_evaluation",
+                     "physics.vertical_mixing.tke.nemo_mxlice"}
     vm = v1.recipe.model_config.physics.vertical_mixing
     t = vm.tke
     # Rule 10: the numbers the closure will use, as instantiated.
@@ -139,10 +141,14 @@ def test_v1_card_is_g5_plus_the_tke_selection(cards):
             t.nemo_mxl0_rmxl_min_overwrite, t.tke_mxl_choice) == (1e-6, 1e-4, True, True, 3)
     assert (t.lc, t.lc_coeff, t.etau_mode, t.etau_htau_mode, t.etau_frac, t.eice,
             t.bottom_tke_bc) == (True, 0.15, "below_ml", "latitude", 0.05, 1, False)
+    # zdftke.f90:354 per-column imlc=mbkt+1; :620-623 nn_mxlice=2 (masked anchor)
+    assert (t.tke_langmuir_evaluation, t.nemo_mxlice, t.nemo_mxl0_surface_tmask) == (
+        "nemo_literal", 2, True)
+    assert g5.recipe.model_config.physics.vertical_mixing.tke.nemo_mxlice == 0
     assert (t.kappaM_min, t.kappaH_min, t.c_k, t.c_eps) == (1.2e-4, 1.2e-5, 0.1, 0.7)
     assert v1.recipe.model_config.physics.convection.scheme == "none"   # ln_zdfevd=F
     assert v1.unmeasured_features == recipe.ORCA2V1_UNMEASURED
-    assert "tke_nn_mxlice2_under_ice_mixing_length" in v1.unmeasured_features
+    assert v1.unmeasured_features == ("nemo_post_si3_surface_records",)
     assert (v1.surface_boundary_condition, v1.surface_input_operator) == (
         g5.surface_boundary_condition, g5.surface_input_operator)
     assert (v1.dt_s, v1.n_steps) == (g5.dt_s, g5.n_steps)
@@ -172,7 +178,8 @@ def test_v1_selector_check_fires_on_each_planted_tke_line(cards):
     cfg = v1.recipe.model_config
     vm = cfg.physics.vertical_mixing
     for plant in ({"etau_mode": "none"}, {"eice": 0}, {"bottom_tke_bc": True},
-                  {"tke_background": 1e-10}, {"lc": False}):
+                  {"tke_background": 1e-10}, {"lc": False},
+                  {"tke_langmuir_evaluation": "vectorized"}, {"nemo_mxlice": 0}):
         bad = vm._replace(tke=vm.tke._replace(**plant))
         card = v1._replace(recipe=v1.recipe._replace(model_config=cfg._replace(
             physics=cfg.physics._replace(vertical_mixing=bad))))
@@ -269,3 +276,59 @@ def test_additive_guard_refuses_a_removed_or_changed_line(tmp_path):
         capture_output=True, text=True).returncode
     assert check("ok") == 0
     assert check("bad") != 0
+
+
+def _ladder_modules():
+    import sys
+    for p in (CASES, G5):
+        if str(p) not in sys.path:
+            sys.path.insert(0, str(p))
+    import g5_records
+    import nemo_testcase_g2_orca2bathy_ladder as ladder
+    return g5_records, ladder
+
+
+def test_v1_hm_i_reader_returns_the_inner_field_and_refuses_plants(tmp_path):
+    g5, _ = _ladder_modules()
+    hm = np.arange(180 * 148, dtype=np.float64).reshape(148, 180) * 1e-4
+
+    def frame(kt, magic=b"NEMO_V1_HMI_1   ", data=hm):
+        (tmp_path / f"oracle_v1_hm_i_kt{kt:08d}.bin").write_bytes(
+            magic + struct.pack("=5i", 1, kt, 180, 148, 64)
+            + np.asarray(data).T.astype("<f8").tobytes(order="F"))
+
+    frame(1)
+    assert np.array_equal(g5.read_v1_hm_i(tmp_path, 1), hm)
+    for kt, kw in ((2, {"magic": b"NEMO_V1_HMI_2   "}), (3, {"data": -hm}),
+                   (4, {"data": hm[:-1]})):
+        frame(kt, **kw)
+        with pytest.raises(g5.Refuse):
+            g5.read_v1_hm_i(tmp_path, kt)
+    frame(5)
+    (tmp_path / "oracle_v1_hm_i_kt00000006.bin").write_bytes(
+        (tmp_path / "oracle_v1_hm_i_kt00000005.bin").read_bytes())
+    with pytest.raises(g5.Refuse):          # a frame stamped with another step
+        g5.read_v1_hm_i(tmp_path, 6)
+
+
+def test_v1_zdf_frame_reader_and_w_classes(tmp_path):
+    _, ladder = _ladder_modules()
+    nx, ny, nz = 8, 7, 4
+    rng = np.random.default_rng(0)
+    avm = rng.random((nx, ny, nz))
+    inner = [rng.random((nx - 4, ny - 4, nz)) for _ in range(3)]
+    path = tmp_path / "oracle_zdf_entry_kt00000001.bin"
+    path.write_bytes(b"NEMO_L4_ZDF___2 " + struct.pack("=7i", 2, 1, 1, nx, ny, nz, 64)
+                     + b"".join(a.tobytes(order="F") for a in (avm, *inner)))
+    z = ladder.read_zdf_kt1(path, nz - 1)
+    assert np.array_equal(z["avm"], np.swapaxes(avm[2:-2, 2:-2], 0, 1))
+    assert np.array_equal(z["en"], np.swapaxes(inner[2], 0, 1))
+    with pytest.raises(Exception):          # card level count does not match jpk-1
+        ladder.read_zdf_kt1(path, nz)
+    full = np.zeros((1, 1, 3), bool)
+    full[..., :2] = True
+    part = np.zeros_like(full)
+    part[..., 2] = True
+    w = ladder.w_classes({"t": {"full": full, "partial": part}})
+    assert w["full"][0, 0].tolist() == [True, False]
+    assert w["partial"][0, 0].tolist() == [False, True]
