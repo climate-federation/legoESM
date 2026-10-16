@@ -1750,10 +1750,10 @@ CITATION_MAP = {
         28,
     ],
     # --- ORCA2 round 299: kt=7 stage-1 W-transport split ----------
-    'ORCA2_OMIP_L4_R297STAGE7/BLD/ppsrc/nemo/stprk3_stg.f90:565-570': [
+    'ORCA2_OMIP_L4_R297STAGE7/BLD/ppsrc/nemo/stprk3_stg.f90:565-569': [
         'IF( .NOT.ln_shuman ) THEN             ! No Shuman averaging- tra_adv_trp can be in tiling loop',
-        'CALL tra_adv_trp( kstp, kstg, nit000, Kbb, Kmm, Kaa, Krhs, zFu, zFv, zFw )',
-        6,
+        ('CALL tra_adv_trp( kstp, kstg, nit000, Kbb, Kmm, Kaa, Krhs, zFu, zFv, zFw )', 1),
+        5,
     ],
     'ORCA2_OMIP_L4_R297STAGE7/BLD/ppsrc/nemo/stprk3_stg.f90:599-601': [
         "CALL r175_put3(kstp, kstg, 'trp_u', zFu)",
@@ -1761,7 +1761,7 @@ CITATION_MAP = {
         3,
     ],
     'ORCA2_OMIP_L4_R297STAGE7/BLD/ppsrc/nemo/traadv.f90:248-252': [
-        'DO jj = ntsj-( nn_hls), ntej+(  nn_hls-1 ) ; DO ji = ntsi-( nn_hls), ntei+(  nn_hls-1)',
+        ('DO jj = ntsj-( nn_hls), ntej+(  nn_hls-1 ) ; DO ji = ntsi-( nn_hls), ntei+(  nn_hls-1)', 2),
         'pFw(ji,jj,jpk) = 0._wp',
         5,
     ],
@@ -1770,20 +1770,20 @@ CITATION_MAP = {
         "IF( lwp .AND. kt == kit000 .AND. kstg == 3 )   WRITE(992) l4_canon_3d(ww,'T')",
         36,
     ],
-    'ORCA2_OMIP_L4_R297STAGE7/BLD/ppsrc/nemo/traadv.f90:314-316': [
+    'ORCA2_OMIP_L4_R297STAGE7/BLD/ppsrc/nemo/traadv.f90:314-315': [
         'DO jk =  1,  jpkm1  ; DO jj = ntsj-(  1), ntej+(   1) ; DO ji = ntsi-( 1), ntei+(   1)',
         'pFw(ji,jj,jk) = e1e2t(ji,jj) * ww(ji,jj,jk)',
-        3,
+        2,
     ],
     'ORCA2_OMIP_L4_R297STAGE7/BLD/ppsrc/nemo/divhor.f90:132-153': [
         'CASE ( np_transport )',
-        'pe3divUh(ji,jj,jk) = hdiv(ji,jj,jk) * (e3t_3d(ji,jj,jk) *(1._wp+r3t(ji,jj,Kmm)*tmask(ji,jj,jk)))',
+        ('pe3divUh(ji,jj,jk) = hdiv(ji,jj,jk) * (e3t_3d(ji,jj,jk) *(1._wp+r3t(ji,jj,Kmm)*tmask(ji,jj,jk)))', 2),
         22,
     ],
-    'ORCA2_OMIP_L4_R297STAGE7/BLD/ppsrc/nemo/sshwzv.f90:277-299': [
+    'ORCA2_OMIP_L4_R297STAGE7/BLD/ppsrc/nemo/sshwzv.f90:277-298': [
         'IF( .NOT. PRESENT( k_ind ) ) THEN',
         '&                               + r1_Dt * e3t_3d(ji,jj,jk) * ( r3t(ji,jj,Kaa) - r3t(ji,jj,Kbb) )  ) * tmask(ji,jj,jk)',
-        23,
+        22,
     ],
     # --- ORCA2 round 291: carried external-mode V target boundary ---
     'ORCA2_OMIP_L4_R280STAGE1/BLD/ppsrc/nemo/dynspg_ts.f90:857-860': [

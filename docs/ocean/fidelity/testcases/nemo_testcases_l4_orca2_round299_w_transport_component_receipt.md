@@ -44,7 +44,7 @@ one-bit handling. The acquisition's layout plant refuses with exit 69.
 
 The admitted record's compiled stage program calls the active-tracer
 transport builder at
-`ORCA2_OMIP_L4_R297STAGE7/BLD/ppsrc/nemo/stprk3_stg.f90:565-570` and records
+`ORCA2_OMIP_L4_R297STAGE7/BLD/ppsrc/nemo/stprk3_stg.f90:565-569` and records
 the returned U, V, and W fields in that order at
 `ORCA2_OMIP_L4_R297STAGE7/BLD/ppsrc/nemo/stprk3_stg.f90:599-601`.
 
@@ -54,11 +54,11 @@ sets the bottom transports to zero at
 diagnosis at
 `ORCA2_OMIP_L4_R297STAGE7/BLD/ppsrc/nemo/traadv.f90:267-302`, and finally
 forms `pFw=e1e2t*ww` at
-`ORCA2_OMIP_L4_R297STAGE7/BLD/ppsrc/nemo/traadv.f90:314-316`.
+`ORCA2_OMIP_L4_R297STAGE7/BLD/ppsrc/nemo/traadv.f90:314-315`.
 Inside that diagnosis, NEMO's transport-form horizontal divergence is written
 at `ORCA2_OMIP_L4_R297STAGE7/BLD/ppsrc/nemo/divhor.f90:132-153`; the QCO
 bottom-up recurrence adds the reference-thickness and before/after ratio term
-at `ORCA2_OMIP_L4_R297STAGE7/BLD/ppsrc/nemo/sshwzv.f90:277-299`.
+at `ORCA2_OMIP_L4_R297STAGE7/BLD/ppsrc/nemo/sshwzv.f90:277-298`.
 
 Thus `trp_w` is the first source-ordered causal component supported by the
 current record. This is a boundary statement, not yet a leaf-statement claim.
