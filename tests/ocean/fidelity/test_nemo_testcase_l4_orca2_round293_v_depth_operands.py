@@ -56,7 +56,7 @@ def _report():
         "baseline_vs_nemo": _score(13, 719.0),
         "cumulative_substitution": {},
         "direct_arms": {
-            "baseline": _pair(13, 719.0),
+            "baseline": _pair(13, 719.0, transport_unequal=0),
             "raw_v_surface_mask": _pair(35, 2.0e-3),
             "mask_t_neighbor_pair": _pair(0, 0.0),
         },
