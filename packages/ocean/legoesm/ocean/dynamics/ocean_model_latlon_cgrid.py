@@ -1121,6 +1121,23 @@ class _NEMOWSFCTInputTrace(NamedTuple):
     w_implicit: object
 
 
+def _nemo_sh2_eta(tke_cfg, *, prognostic, eta_now, eta_step_entry):
+    """Sea level for zdf_sh2's r3u/r3v.  NEMO's RK3 calls
+    zdf_phy(kstp,Nbb,Nbb,Nrhs) once at step entry (stprk3.f90:185), so with
+    ``nemo_sh2_step_entry_ssh`` the shear reads the whole-step entry eta, not
+    the stage Kmm eta that dyn_zdf/tra_zdf read through ``eta_now``."""
+    if not getattr(tke_cfg, "nemo_sh2_step_entry_ssh", False):
+        return eta_now
+    if not prognostic:
+        raise ValueError("nemo_sh2_step_entry_ssh=True requires prognostic "
+                         "TKE (the frozen step-entry p_sh2 path)")
+    if eta_step_entry is None and eta_now is not None:
+        raise ValueError("nemo_sh2_step_entry_ssh=True needs the whole-step "
+                         "entry eta (eta_step_entry) when a stage eta_now is "
+                         "supplied")
+    return eta_step_entry
+
+
 class _NEMOWSRK3TestHooks(NamedTuple):
     """Private causal controls; never part of a constructible model config."""
 
@@ -12827,18 +12844,10 @@ class LatLonCGridOceanModel:
                         "bridge; grid.native_lat_T_deg is None")
             else:
                 _tke_lat_deg = jnp.degrees(_grid.lat_T)
+            _sh2_eta = _nemo_sh2_eta(
+                _tke_cfg, prognostic=_tke_prognostic, eta_now=eta_now,
+                eta_step_entry=eta_step_entry)
             if _tke_prognostic:
-                # zdf_phy(kstp,Nbb,Nbb,Nrhs) (stprk3.f90:185): zdf_sh2's
-                # r3u/r3v are the whole-step entry level, not the stage
-                # Kmm that dyn_zdf/tra_zdf read through eta_now.
-                _sh2_eta = eta_now
-                if getattr(_tke_cfg, "nemo_sh2_step_entry_ssh", False):
-                    if eta_step_entry is None and eta_now is not None:
-                        raise ValueError(
-                            "nemo_sh2_step_entry_ssh=True needs the "
-                            "whole-step entry eta (eta_step_entry) when a "
-                            "stage eta_now is supplied")
-                    _sh2_eta = eta_step_entry
                 _tke_p_sh2_result = self._tke_step_entry_p_sh2(
                     state, eta_now=_sh2_eta, u_now=u_now, v_now=v_now,
                     z_coord=_zc, config=_cfg_b, grid=_grid,
@@ -14057,6 +14066,7 @@ class LatLonCGridOceanModel:
             n2_tracers_before=self._n2_nemo_before_tracers(state),
             tke_n2_bundle=_tke_n2_bundle,
             eta_now=state.eta.data,
+            eta_step_entry=state.eta.data,
             u_now=state.u.data, v_now=state.v.data,
             return_K_profiles=True, grid=_grid,
         )
