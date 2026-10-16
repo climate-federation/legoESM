@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -134,6 +136,17 @@ def test_run_script_reuses_g5_binaries_smoke_first_passive_no_step1_restart():
     assert "g5_records.py\" admit" in text and '--steps "$steps"' in text
     assert "REF_BIN_SHA=e8ebf4ae" in text and "REC_BIN_SHA=41cd9a63" in text
     assert "round36/oracle_g6_r36" in text
+
+
+def test_g2_family_ladder_routes_g6_through_the_ice_record_path():
+    sys.path.insert(0, str(CASES))
+    path = CASES / "nemo_testcase_g2_orca2bathy_ladder.py"
+    spec = importlib.util.spec_from_file_location("g6_g2_ladder", path)
+    ladder = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ladder)
+    assert "ORCA2G6-vec" in ladder.CASES
+    assert "ORCA2G6-vec" in ladder.ICE_CASES
+    assert "ORCA2G6-vec" in ladder.FORCED
 
 
 G5_RECORD = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/"

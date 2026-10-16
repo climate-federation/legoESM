@@ -55,8 +55,10 @@ import nemo_testcase_g1_orca2grid_ladder as g1  # noqa: E402
 from nemo_testcase_g1_orca2grid_ladder import BAR, require  # noqa: E402
 
 CASE = "ORCA2G2-zps"
-CASES = ("ORCA2G2-zps", "ORCA2G3-ts", "ORCA2G4-sbc", "ORCA2G5-ice")
-FORCED = ("ORCA2G4-sbc", "ORCA2G5-ice")   # NEMO-supplied surface fields each kt (D123)
+CASES = ("ORCA2G2-zps", "ORCA2G3-ts", "ORCA2G4-sbc", "ORCA2G5-ice",
+         "ORCA2G6-vec")
+ICE_CASES = ("ORCA2G5-ice", "ORCA2G6-vec")
+FORCED = ("ORCA2G4-sbc", *ICE_CASES)   # NEMO-supplied surface fields each kt (D123)
 DEFAULT_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/round10/"
     "oracle_g2_r10/p3_a_100step")
@@ -439,8 +441,8 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
     if case in FORCED:
         require(arm in ("independent", "given_entry")
                 or (arm in ("stages", "barotropic_exit", "carried")
-                    and case == "ORCA2G5-ice"),
-                "G4/G5's NEMO-supplied per-step forcing is registered only for "
+                    and case in ICE_CASES),
+                "G4/G5/G6 NEMO-supplied per-step forcing is registered only for "
                 "the independent and given-entry ladders")
         require(cfg.rk3_stage_tracer_written_order is True,
                 "the G4 card no longer selects NEMO's tracer update order")
@@ -461,9 +463,9 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
             "only the G3/G4 cards select NEMO's stored r3u(Kmm) in dyn_zdf")
     if without_zdf_stage_r3u:      # G3 ROUND-3 BEFORE ARM / plant
         cfg = cfg._replace(zdf_momentum_stage_r3u_nemo_literal=False)
-    require(cfg.rk3_stage2_tracer_nemo_stored_thickness is (case == "ORCA2G5-ice")
-            and cfg.rk3_stage3_salt_nemo_written is (case == "ORCA2G5-ice"),
-            "only the G5 card selects the stage-2 e3t(Kmm) and stage-3 sfx options")
+    require(cfg.rk3_stage2_tracer_nemo_stored_thickness is (case in ICE_CASES)
+            and cfg.rk3_stage3_salt_nemo_written is (case in ICE_CASES),
+            "only the G5/G6 cards select the stage-2 e3t(Kmm) and stage-3 sfx options")
     if without_stage2_stored_thickness:   # G5 ROUND-4 BEFORE ARM
         cfg = cfg._replace(rk3_stage2_tracer_nemo_stored_thickness=False)
     if without_stage3_salt:               # G5 ROUND-4 BEFORE ARM
@@ -475,11 +477,11 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
     # no step frames (an acquisition that stopped before the record binary
     # ran): only the restart-scored arm can run
     # G5's record build writes the ORCA2 lane's single-rank frames instead
-    has_frames = (root / ("oracle_step_entry_kt00000001.bin" if case == "ORCA2G5-ice"
+    has_frames = (root / ("oracle_step_entry_kt00000001.bin" if case in ICE_CASES
                           else "oracle_g1step_kt00000001.bin")).is_file()
     require(has_frames or arm == "restart_independent",
             f"{root} holds no step frames; only restart_independent can run")
-    if has_frames and case == "ORCA2G5-ice":
+    if has_frames and case in ICE_CASES:
         n_stage = 0
         while (root / f"oracle_step_entry_kt{n_stage + 1:08d}.bin").is_file():
             n_stage += 1
@@ -510,7 +512,7 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
             header, fields = g4.frames(root, kt)
             return {name: g4.inner(value, header)
                     for name, value in fields.items()}
-    elif case == "ORCA2G5-ice":
+    elif case in ICE_CASES:
         sys.path.insert(0, str(HERE / "nemo_testcase_g5_orca2ice"))
         import g5_records as g5  # noqa: E402
         read_step = lambda kt: g5.read_step(root, kt, roots, nk)  # noqa: E731
@@ -540,7 +542,7 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
            "forcing": ("NEMO-supplied surface fields at each kt"
                        if case == "ORCA2G4-sbc" else
                        "NEMO's post-SI3 ocean surface input at each kt"
-                       if case == "ORCA2G5-ice" else "none"),
+                       if case in ICE_CASES else "none"),
            "n_barotropic_substeps": int(cfg.barotropic.n_barotropic_substeps),
            "region_cells": {k: int(m.sum()) for k, m in reg.items()},
            "depth_class_cells": {p: {k: int(m.sum()) for k, m in c.items()}
@@ -700,7 +702,7 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
         # external-mode stream only at kt=1.  Expose the ordinary solver's
         # exit without changing it, so a post-kt1 card chain can locate a
         # later leave on the barotropic side of the stage-1 handoff.
-        require(case == "ORCA2G5-ice", "barotropic_exit is a G5-only arm")
+        require(case in ICE_CASES, "barotropic_exit is a G5/G6-only arm")
         require(state_in is not None, "barotropic_exit needs --state-in")
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import _NEMOWSRK3TestHooks
         from nemo_testcase_l1_vortex_kt2_walk import read_bt_frame
