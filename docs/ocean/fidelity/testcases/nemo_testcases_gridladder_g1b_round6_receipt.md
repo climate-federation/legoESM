@@ -104,6 +104,9 @@ cells, 126 flushed-subnormal cells).  Its first normal-range differences at kt
   ordinary one-unit wet-state plant still leaves the bar.
 - Focused CPU/fp64 tests passed: 11 direct scorer/ladder tests and six G1
   classifier, environment, and 100-step option-plant executions.
+- After substantive commit `1e7ee31e1`, the required receipt-citation and
+  no-private-cross-import gates passed 23/23 on the clean tree; the citation
+  gate's plants fired.  All five final JSON artifacts stamp that commit.
 - The G1-flat 12-step control; G1b independent 100-step, GIVEN 50-step, and
   restart-entry 100-step labels; and the kt-7 stage rescore all ran
   synchronously on CPU in fp64.
@@ -120,15 +123,15 @@ cells, 126 flushed-subnormal cells).  Its first normal-range differences at kt
   restore the DINO citation.  UNASKED: none.
 
 Artifact SHA-256: `g1_flat_independent12_restored_bar.json`
-`f548a821a8ee527cd1a8415aa4459b748786b61c4b62a8e06fd835fef9e818d7`;
+`429702fceccc73540d9d96d5d807aa0b378881e5de92ba992952b21c64b57d4c`;
 `independent100_restored_bar.json`
-`a1f5bcc166d8b28e30075408b031df9b0f98cde7ebf081183092d900efca8e96`;
+`2cd04f520535482a7e75a6ae61c9fd49985dcfba3ae27793e560bc663612f1eb`;
 `given_entry50_restored_bar.json`
-`13d74e78391b396d8da5cfc271174ba376ff192e05b3dc147471a7267c0c9236`;
+`411b5e7500f0429883a839d8d02e76f10c7a03629e0ce488f245e7bb135bb3e9`;
 `restart_entry100_restored_bar.json`
-`e909fa6a0065e50fc935d09dd4b1e9d082fc87082a60030366d32fac0041bdce`;
+`c64c724f7764d6350aa68ea25b99c0f2608a7b7fa97e4b259c3655ee0ad5fd35`;
 `stages_kt7_restored_bar.json`
-`8f92b4925fc65687c98b47ac48999237e56b09c40011bd4478529ac3e9d63a38`.
+`bd45d4b845b6d3beb28a607b3c71e4fff37ca76eff27432c94096f64a23cf376`.
 
 UNVERIFIED:
 - the full ORCA2 card executes the cited statements but was read, not run;
