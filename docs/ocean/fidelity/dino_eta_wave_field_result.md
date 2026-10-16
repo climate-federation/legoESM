@@ -449,7 +449,7 @@ independent counts.** On code, both sides write the UNFILTERED after level:
 NEMO swaps its time indices at `stpmlf.F90:621-624` before `rst_write` at
 `:634`, so the saved `sshn` is the pre-swap AFTER level, and legoESM returns
 `naa.eta` from the leap-frog step with the Asselin result parked separately in
-`eta_before` (`ocean_model_latlon_cgrid.py:8953-8958`). Empirically, no integer
+`eta_before` (`ocean_model_latlon_cgrid.py:9001-8958`). Empirically, no integer
 re-pairing brings the fit anywhere near zero — shifting legoESM against NEMO by
 −1 dump gives α = −0.198, by +1 gives α = +1.240, and pairing against NEMO's
 Asselin-filtered before level gives α = −0.160. An output-convention error is
