@@ -1725,6 +1725,17 @@ CITATION_MAP = {
         '&                                 + e1e2t(ji,jj+1) * zsshp2_e(ji,jj+1)  ) * ssvmask(ji,jj)',
         3,
     ],
+    # --- ORCA2 round 294: raw-hv continuation to the vector V update ---
+    'ORCA2_OMIP_L4_R280STAGE1/BLD/ppsrc/nemo/dynspg_ts.f90:509-520': [
+        '!                          ! ocean u- and v-depth at mid-step   (separate DO-loops remove the need of a lbc_lnk)',
+        ('END DO   ;   END DO', 10),
+        12,
+    ],
+    'ORCA2_OMIP_L4_R280STAGE1/BLD/ppsrc/nemo/dynspg_ts.f90:666-678': [
+        'IF( ln_dynadv_vec .OR. lk_linssh ) THEN      !* Vector form',
+        '&   ) * ssvmask(ji,jj)',
+        13,
+    ],
     # --- ORCA2 round 288: held completed-stage V-fold partner ---
     'ORCA2_OMIP_L4_R280STAGE1/BLD/ppsrc/nemo/stprk3_stg.f90:812-820': [
         ('ELSE', 5),
