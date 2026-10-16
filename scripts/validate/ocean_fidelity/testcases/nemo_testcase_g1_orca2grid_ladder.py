@@ -1119,7 +1119,7 @@ def ratio_fold_rows(root: Path, kt: int, card, reg) -> dict:
         return ratio_stencil(area_ssh, north, a, nemo_order)
 
     def exchange(r3):
-        return tuple(np.asarray(x) for x in bt._nemo_een_ratio_fold_exchange(
+        return tuple(np.asarray(x) for x in bt.nemo_een_ratio_fold_exchange(
             *(jnp.asarray(x) for x in r3), grid, True))
 
     wrap = np.roll(area_ssh, -1, axis=0)
