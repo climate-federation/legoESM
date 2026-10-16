@@ -220,7 +220,8 @@ def measure(deck_root: Path, record_root: Path, baseline_root: Path,
             oracle_trace_target, oracle_live_target, support_v),
         "candidate_vs_oracle": _score(
             candidate_live_target[SOURCE_ROW],
-            oracle_live_target[SOURCE_ROW], support_v[SOURCE_ROW]),
+            oracle_live_target[SOURCE_ROW],
+            np.ones(candidate_live_target.shape[1], dtype=bool)),
     }
     control = _score(
         np.asarray([0.0]), np.asarray([np.nextafter(0.0, 1.0)]),
