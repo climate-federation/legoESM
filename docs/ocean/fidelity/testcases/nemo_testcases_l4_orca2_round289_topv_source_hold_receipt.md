@@ -85,6 +85,10 @@ bit-for-bit; no configuration branch is inferred from prose.
 - Round-289 plus its round-281/288 neighbour tests pass 17/17.  The focused
   log SHA256 is
   `86fb5c197114b621d6e794fe0cf74ba0740e44c761e645d6f019b96acd8d8427`.
+- This receipt's citation gate and the cumulative default-receipt gate pass
+  with zero failures, zero unmapped citations and zero citation-map audit
+  failures.  A rigid two-line shift of the compiled V-fold citation exits 1;
+  the citation-gate tests pass 17/17.
 - The one permitted `tests/ocean/fidelity -n 12` battery reached 96%, then
   stopped progressing after its Python worker processes disappeared and was
   terminated.  It printed the same eight registered branch-tip reds as round
