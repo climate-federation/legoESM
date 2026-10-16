@@ -82,13 +82,28 @@ landing predicate.
 ## Validation
 
 - Accepted measurement and classification are `measurement3.json` and
-  `classification2.json`; their SHA256 values are recorded in the evidence
-  `SHA256SUMS` file.
-- The round-294 direct known-answer controls pass, including retention of a
-  refuted prediction and one-variable arm isolation.
-- Citation, focused-suite, full fidelity-battery, and independent-review
-  dispositions are recorded below after their gates run; no claim relies on
-  an unfinished gate.
+  `classification2.json`; SHA256
+  `bda195eeeaf568169ca6499fc4721744050892028743c3a0095f8e0ba1bb9bd3`
+  and `6c94c5973b99acee9e98250b4c4482ad9fc1d721346e76812cae04de0c2476fa`.
+- The round citation gate passes with zero failures/unmapped citations, its
+  planted V-update shift exits 1, and the cumulative default gate passes with
+  zero failing map entries.  Their JSON hashes are recorded in `SHA256SUMS`.
+- Focused round-291/292/293/294 plus citation tests pass 28/28; log SHA256
+  `ec07fb759be043145e62e429a393b7d55a3d9f3e2711724d1292d06012d68d60`.
+- The one permitted `tests/ocean/fidelity -n 12` battery printed 3,584 passes,
+  seven skips, and nine failures, then lost all pytest processes at 99%
+  without a terminal summary.  Eight failures are the registered branch-tip
+  reds (GYRE round-129 hash; two round-33 plants; OMT-1 module-edge ratchet;
+  round-228 citation map; dirty-escape scope; worktree stamping; SI3 scalar
+  provenance).  The ninth was a fatal JAX worker abort in G1's stage-velocity
+  option test; its required serial isolation also disappeared after
+  collection without an assertion.  The suite was not rerun.  Battery and
+  isolation hashes are `e4255fb64925a1dbd3723049c2bc74f8f0b3a7b78eab4917a84137e8685d7228`
+  and `236f942c56466cd925d01fe1d2bab125896e07a2089f9884440137c9c0b58bbe`.
+- Independent review unavailable in-sandbox: `codex exec --sandbox
+  read-only` exited before reading the diff because its app-server client
+  attempted a write.  Log SHA256
+  `eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5`.
 
 ## Configuration choices
 
