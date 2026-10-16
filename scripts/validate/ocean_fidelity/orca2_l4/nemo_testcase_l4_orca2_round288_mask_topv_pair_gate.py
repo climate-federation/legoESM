@@ -53,6 +53,20 @@ def _score_boundary(card, state, expected, kt: int, stage: int) -> dict:
     return {"kt": kt, "stage": stage, **comparison}
 
 
+def _nonfinite_fields(state) -> dict[str, dict[str, object]]:
+    values = rung0.candidate_fields(state)
+    result = {}
+    for field in FIELDS:
+        finite = np.isfinite(values[field])
+        if not bool(np.all(finite)):
+            first = tuple(int(index) for index in np.argwhere(~finite)[0])
+            result[field] = {
+                "count": int(np.count_nonzero(~finite)),
+                "first_index": list(first),
+            }
+    return result
+
+
 def _arm_card(deck_root: Path, arm: str):
     require(arm in ARMS, f"unknown arm {arm!r}")
     card = rung0.build_rung0_card(deck_root)
@@ -110,10 +124,19 @@ def measure(deck_root: Path, record_root: Path, arm: str,
         candidates = []
         for stage in (1, 2):
             try:
-                candidates.append((stage, jax.device_get(
+                stage_state = jax.device_get(
                     stage_models[stage].step(
                         state, card.dt_s, freshwater=freshwater,
-                        surface_forcing=surface))))
+                        surface_forcing=surface))
+                nonfinite = _nonfinite_fields(stage_state)
+                if nonfinite:
+                    terminal = {
+                        "kt": kt, "stage": stage,
+                        "error": "completed stage contains non-finite values",
+                        "nonfinite_fields": nonfinite,
+                    }
+                    break
+                candidates.append((stage, stage_state))
             except Exception as error:  # the registered fail-closed boundary
                 terminal = {"kt": kt, "stage": stage, "error": str(error)}
                 break
@@ -128,6 +151,12 @@ def measure(deck_root: Path, record_root: Path, arm: str,
                 state_after = None
         else:
             state_after = None
+            try:
+                jax.device_get(final_model.step(
+                    state, card.dt_s, freshwater=freshwater,
+                    surface_forcing=surface))
+            except Exception as error:
+                terminal["ordinary_error"] = str(error)
         for stage, stage_state in candidates:
             boundaries.append(_score_boundary(
                 card, stage_state,
@@ -209,9 +238,14 @@ def classify(control: dict, single: dict, pair: dict,
         require(report["one_bit_control"]["unequal"] == 1,
                 f"{arm}: one-bit control did not fire")
 
+    single_error = " ".join((
+        single["terminal"].get("error", "") if single["terminal"] else "",
+        single["terminal"].get("ordinary_error", "")
+        if single["terminal"] else "",
+    ))
     require(single["terminal"] is not None
             and single["terminal"]["kt"] == 4
-            and EXPECTED_REFUSAL in single["terminal"]["error"],
+            and EXPECTED_REFUSAL in single_error,
             "resolved-mask single-arm refusal moved")
     pair_completed = pair["terminal"] is None and any(
         row["kt"] == 10 and row["stage"] == 3 for row in pair["boundaries"])
