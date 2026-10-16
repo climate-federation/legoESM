@@ -1705,8 +1705,8 @@ CITATION_MAP = {
     ],
     # --- ORCA2 round 288: held completed-stage V-fold partner ---
     'ORCA2_OMIP_L4_R280STAGE1/BLD/ppsrc/nemo/stprk3_stg.f90:812-820': [
-        'ELSE',
-        'ENDIF',
+        ('ELSE', 5),
+        ('ENDIF', 35),
         9,
     ],
     # --- ORCA2 round 283: stage-1 V-mask operand owner ---
