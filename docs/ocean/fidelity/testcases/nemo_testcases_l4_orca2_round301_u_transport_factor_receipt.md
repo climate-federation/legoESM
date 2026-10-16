@@ -143,7 +143,13 @@ domain for U and sea level, western half for `uu_b`:
   `1 failed, 7 passed` (`test_breaks.log`).
 - The refactor of round 300's traced step is behaviour-neutral: round 300's
   tests pass (4 passed).
-- Citation gate, private-import ratchet: recorded below.
+- Citation gate at `0e4827e52`: this receipt PASS (9 citations, each at its
+  pinned subroutine, 0 unmapped, 0 failing map entries); default receipt
+  PASS (274).  A line plant on the `dyn_spg_ts` accumulation fails
+  (`SYMBOL-NOT-AT-LINE`, exit 1), and so does a routine plant on the `zub`
+  statement (`ROUTINE-CONTEXT-MISMATCH`, exit 1).
+- The citation-gate tests, private-import ratchet, round 298-301 tests:
+  `41 passed`.  The landing script's battery (`-n 12`): `144 passed`.
 - GYRE ten-step / 30-day member: not required (no file under `packages/`
   changes).
 - codex review: paused (quota).  The operator runs an independent Claude
