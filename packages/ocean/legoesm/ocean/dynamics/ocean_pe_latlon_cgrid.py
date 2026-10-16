@@ -1675,7 +1675,7 @@ def nemo_qco_wzv_operands(
     mask_3d, dt, freshwater_eta_tendency=None, eta_after_override=None,
     transport_after_override=None, barotropic_velocity_override=None,
     volume_transport_override=None, runoff_mass_flux=None,
-    after_ssh_form="", eta_after_carried=None,
+    after_ssh_form="", eta_after_carried=None, fold_exchange_ratios=False,
 ):
     """Coupled QCO ``ww`` + live Kmm face thickness for either WZV call.
 
@@ -1705,7 +1705,7 @@ def nemo_qco_wzv_operands(
     raw_umask, raw_vmask = ops.umask3, ops.vmask3
     live_u_raw, live_v_raw = nemo_qco_live_face_geometry_from_operands(
         eta_now, ops.e3u_0, ops.e3v_0, raw_umask, raw_vmask,
-        ops.hu_0, ops.hv_0, area_t, ops.area_u, ops.area_v)[:2]
+        ops.hu_0, ops.hv_0, area_t, ops.area_u, ops.area_v, fold_grid=grid if fold_exchange_ratios else None)[:2]
 
     if volume_transport_override is not None:
         if transport_after_override is not None:
@@ -5327,7 +5327,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             # NEMO's 'ssha' slot, carried by the step that wrote it.  Only the
             # carried form reads it; every other form ignores it, so the two
             # existing arms are byte-identical whether or not it is present.
-            eta_after_carried=_carried_rk3_after_ssh(state),
+            eta_after_carried=_carried_rk3_after_ssh(state), fold_exchange_ratios=bool(config.rk3_vector_raw_vmask),
         )
         # The W/H pair is a materialized NEMO stage boundary.  Without these
         # barriers XLA fuses the full tendency graph back through continuity;
