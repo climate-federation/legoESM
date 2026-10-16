@@ -7,7 +7,11 @@ INDEPENDENT and GIVEN-NEMO-ENTRY.
 Preregistration `PREREG_nemo_testcases_gridladder_g4_round9.md` (`4ca40515a`,
 before any measurement). Record `gridladder_rounds/round21/oracle_g4_r21`.
 Landing commit `21bc1881d`. Evidence `gridladder_rounds/round30/`
-(`manifest.sha256`).
+(`manifest.sha256`): `stage3_after.json` dc4fa34429b342af, `stage3_before.json`
+5c440ce6a2044dcb, `g4_independent_kt1_10.json` d2b3b2e5b2c3cb49,
+`g4_given_13579.json` 55ae3709b1dba4ca, `ratio_ladder.log` ac0968f45599d61f
+(probe `probe/ratio_ladder.py` e9c717704602466d), `codex_review.log`
+a11c5684ade3c444.
 
 ## Where the stage-3 tracer solve reads its thicknesses
 
@@ -108,14 +112,37 @@ The full ORCA2 card does not select the option; UNMEASURED there.
 
 - Fast G4 + G2-ladder + private-import + dispatch: 67 passed, 1 failed (the
   known pre-existing slab-land dispatch guard).
-- Slow G4 stage route: 1 passed (289.76 s); asserts every stage-3 value exact
-  with the option and 200 T cells with it deselected (the control).
-- Ratchets touched: config field order test updated (field appended last).
-- REVIEW_PLACEHOLDER
+- Slow G4 stage route: 1 passed (381.08 s, after the review fix); asserts
+  every stage-3 value exact with the option, 200 T cells with it deselected,
+  and round 8's before arm (heat statement off) at 489.
+- Citation gate (from this receipt's first heading): PASS, 16 citations, map
+  audit clean; shifting `stprk3_stg.f90:215` exits 1 (SYMBOL-NOT-AT-LINE).
+  The model-file shift was remapped with the reanchor tool (53 lines); one
+  span's extent grew 172 -> 174 with the same endpoint statements.
+- Citation tests: 193 passed. Config field-order test updated (field appended
+  last).
+- Single review (codex): "DO NOT SHIP" on two test items, no transcription
+  defect ("NEMO signs, levels, RGB ladder, RHS, and e3w(Kmm) agree; momentum
+  uses separate dz_half_u/v"; stage pair is (ssh Kbb, ssha); default False,
+  G4 only). Acted on:
+  1. CONFIRMED: the heat-deselected control now hit the new dependency guard.
+     Fixed: deselecting heat also deselects the Kmm option (round 8's before
+     arm); its 489 assertion is restored and passes.
+  2. CONFIRMED coverage gap: salinity is exact with and without the option.
+     Registered, not fixable on this record: NEMO's stage-3 salt Krhs is zero
+     everywhere at kt 1 (`sfx` 0, runoff salinity 0 on all 3400 runoff
+     cells), so the salt divisor change multiplies zero; S is also exact under
+     both labels kt 1..10.
 
 ASKED: transcribe the stored-ratio thicknesses for the whole stage-3 solve,
 G4-selected; re-score kt 1 stage 3 and both labels kt 1..10; Decision-122
 pointers; tests; one review. UNASKED: none.
 
 UNVERIFIED: the full ORCA2 card's response (pointer only); the guard that
-raises when the option is selected without the heat option has no direct test.
+raises when the option is selected without the heat option has no direct test;
+the salinity half of the option has no failing control on this record.
+
+## OPEN
+
+G4 is certified. Next rung per the ladder plan (sea ice) or the Decision-122
+landing of this statement on the full ORCA2 card (measure there first).
