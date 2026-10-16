@@ -156,7 +156,13 @@ def measure(deck_root: Path, record_root: Path, baseline_root: Path,
         twin_a / "oracle_bt_advmean_operands_kt00000001.bin",
         expected_dims=(94, 152), expected_ncycle=65)
     masks_raw = o1_gate._defined_masks(twin_a)["reduced2"]
-    masks = {name: np.asarray(masks_raw[name], bool) for name in ("T", "V")}
+    # ``mesh_mask`` is read in Fortran (i,j) order while every admitted
+    # canonical stream is returned in model (j,i) order.
+    masks = {
+        name: np.asarray(masks_raw[name], bool).T for name in ("T", "V")
+    }
+    require(all(mask.shape == (148, 90) for mask in masks.values()),
+            "canonical wet-mask orientation moved")
     oracle_stage = r281._assemble_values(record_root)
 
     card = omt4.build_omt4_card(deck_root)
