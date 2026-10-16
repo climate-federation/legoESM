@@ -3065,6 +3065,16 @@ def tke_vertical_mixing(
             "Unknown TKEConfig.tke_n2_evaluation_stage: expected "
             "'implicit_solve_state' or 'step_entry', got "
             f"{_n2_stage!r}.")
+    if (getattr(cfg, "nemo_mxl_terminal_e3t", False)
+            and cfg.tke_mxl_choice not in (3, 4)):
+        raise ValueError(
+            "nemo_mxl_terminal_e3t=True requires tke_mxl_choice 3 or 4 (the "
+            "NEMO nn_mxl sweeps that read e3t(jpk)).")
+    if (getattr(cfg, "nemo_etau_wmask", False)
+            and getattr(cfg, "etau_mode", "none") == "none"):
+        raise ValueError(
+            "nemo_etau_wmask=True requires etau_mode='below_ml' (the mask "
+            "belongs to the nn_etau increment).")
     if (_n2_stage != "step_entry"
             and getattr(cfg, "nemo_mxl_terminal_e3t", False)):
         raise ValueError(

@@ -407,7 +407,7 @@ def test_terminal_e3t_flag_reaches_the_closure_lengths_and_refuses_unused_paths(
     stages refuse the flag instead of silently ignoring it."""
     cfg = TKEConfig(prognostic=True, n2_mode="nemo_bn2",
                     tke_n2_evaluation_stage="step_entry",
-                    nemo_mxl_terminal_e3t=True,
+                    tke_mxl_choice=3, nemo_mxl_terminal_e3t=True,
                     kappaM_min=0.0, kappaH_min=0.0,
                     enable_kappaH_profile=False)
     bundle = tke_mod.TKEEntryN2Bundle(
@@ -423,19 +423,27 @@ def test_terminal_e3t_flag_reaches_the_closure_lengths_and_refuses_unused_paths(
         return jnp.ones_like(e), jnp.ones_like(e)
 
     monkeypatch.setattr(tke_mod, "compute_mixing_lengths", fake_mxl)
-    tke_mod.tke_vertical_mixing(**_column_kwargs(cfg),
-                                precomputed_n2_bundle=bundle)
+    monkeypatch.setattr(tke_mod, "_mxl0_surface_anchor",
+                        lambda *a, **k: jnp.ones((1,)))
+    col = dict(_column_kwargs(cfg), dz_ref=jnp.asarray([1.0, 2.0, 3.0]),
+               jacobian=jnp.ones((1,)))
+    tke_mod.tke_vertical_mixing(**col, precomputed_n2_bundle=bundle)
     assert len(seen) == 2
     for dz_cell in seen:
         np.testing.assert_array_equal(dz_cell, [[1.0, 2.0, 3.0, 77.0]])
 
     with pytest.raises(ValueError, match="requires the raw NEMO"):
         tke_mod.tke_vertical_mixing(
-            **_column_kwargs(cfg),
-            precomputed_n2_bundle=bundle._replace(e3t_jpk=None))
+            **col, precomputed_n2_bundle=bundle._replace(e3t_jpk=None))
+    with pytest.raises(ValueError, match="requires tke_mxl_choice 3 or 4"):
+        tke_mod.tke_vertical_mixing(**dict(col, cfg=cfg._replace(
+            tke_mxl_choice=2)), precomputed_n2_bundle=bundle)
+    with pytest.raises(ValueError, match="requires etau_mode='below_ml'"):
+        tke_mod.tke_vertical_mixing(**dict(col, cfg=cfg._replace(
+            nemo_etau_wmask=True)), precomputed_n2_bundle=bundle)
     implicit = cfg._replace(tke_n2_evaluation_stage="implicit_solve_state")
     with pytest.raises(ValueError, match="requires tke_n2_evaluation_stage"):
-        tke_mod.tke_vertical_mixing(**_column_kwargs(implicit))
+        tke_mod.tke_vertical_mixing(**dict(col, cfg=implicit))
     post = TKEConfig(prognostic=True, veros_dz_slots=True, n2_mode="adiabatic",
                      positivity="veros_surface_correction",
                      buoyancy_timing="post_mixing_veros",
