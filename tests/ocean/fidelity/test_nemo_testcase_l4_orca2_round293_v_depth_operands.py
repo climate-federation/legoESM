@@ -65,7 +65,7 @@ def _report():
     }
 
 
-def test_classifier_names_pair_and_every_plant_fires():
+def test_classifier_retains_refuted_partner_and_every_plant_fires():
     result = gate.classify(_report())
     assert result["status"] == "HELD_R293_HV0_SINGLE_STATEMENT_CLOSES_BOUNDARY"
     assert result["first_direct_operand"] == "hv_0"
