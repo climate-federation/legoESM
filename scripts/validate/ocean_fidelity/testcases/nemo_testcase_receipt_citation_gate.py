@@ -1832,7 +1832,7 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:678-680': [
         'ts(ji,jj,jk,jn,Kaa) = (        ( 1._wp + r3t(ji,jj,Kbb) )*ts(ji,jj,jk,jn,Kbb )',
         '&                /          ( 1._wp + r3t(ji,jj,Kaa) )', 3],
-    'nemo_testcase_g2_orca2bathy_ladder.py:574-582': [
+    'nemo_testcase_g2_orca2bathy_ladder.py:575-583': [
         'def step(state, kt):',
         'return new, round(time.time() - t0, 1)', 9],
     # --- GRIDLADDER round 23 (G4 round 6 receipt) ---
