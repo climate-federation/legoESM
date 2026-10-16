@@ -420,6 +420,41 @@ def test_nemo_hpg_literal_uses_t_fold_ghost_for_north_density():
         np.asarray(folded[3][-1]), np.asarray(pre_fix[3][-1]))
 
 
+def test_nemo_hpg_literal_card_arm_folds_north_geometry_operands():
+    """G6's arm folds the e3w/gdept operands named by the same V statement."""
+    set_policy(PrecisionPolicy.fp64())
+    base = create_beta_plane_cgrid_geometry(
+        3, 4, dx_m=7.0, dy_m=11.0, f0=0.0, beta=0.0,
+        cartesian_pseudo_lat=True)
+    perm = jnp.asarray([3, 2, 1, 0], dtype=jnp.int32)
+    grid = base._replace(fold=FoldDescriptor(
+        is_active=True, fold_j=2, cap_j=2, perm_T=perm, perm_v=perm,
+        vector_sign_u=-1.0, vector_sign_v=-1.0,
+        pivot_row_stored=True))
+    rhd = jnp.asarray(
+        np.arange(1, 25, dtype=np.float64).reshape(3, 4, 2) / 19.0)
+    e3w = jnp.asarray(
+        np.arange(25, 49, dtype=np.float64).reshape(3, 4, 2) / 7.0)
+    gdept = jnp.cumsum(e3w, axis=-1) + jnp.asarray(
+        np.arange(24, dtype=np.float64).reshape(3, 4, 2) / 31.0)
+
+    folded = jax.jit(lambda r, e, d: nemo_hpg_sco_literal_cgrid(
+        r, e, d, grid, 8.0, return_components=True,
+        fold_north_geometry=True))(rhd, e3w, gdept)
+    control = nemo_hpg_sco_literal_cgrid(
+        rhd.at[0].set(rhd[-2][perm]),
+        e3w.at[0].set(e3w[-2][perm]),
+        gdept.at[0].set(gdept[-2][perm]),
+        base, 8.0, return_components=True)
+    density_only = nemo_hpg_sco_literal_cgrid(
+        rhd, e3w, gdept, grid, 8.0, return_components=True)
+
+    np.testing.assert_array_equal(
+        np.asarray(folded[1][-1]), np.asarray(control[1][-1]))
+    assert not np.array_equal(
+        np.asarray(folded[1][-1]), np.asarray(density_only[1][-1]))
+
+
 def test_nemo_hpg_consumer_keeps_direct_acceleration_bits():
     """dynhpg writes acceleration; a rho multiply/divide round trip is forbidden."""
     direct = jnp.asarray([3.812364514570218e-06], dtype=jnp.float64)

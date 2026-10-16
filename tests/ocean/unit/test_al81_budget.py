@@ -867,6 +867,45 @@ def test_al81_triad_flux_pairing_is_energy_antisymmetric():
         f"north-side triad (NEMO dynvor.F90:840)")
 
 
+def test_al81_top_v_update_reads_the_t_pivot_fold_halo():
+    """The owned top V row uses north-cell triads and signed U transports.
+
+    With constant q every triad is 3/12.  The difference between a pole-wall
+    call and the fold call is therefore exactly the two northern U products
+    in ``vor_een``'s V update (dynvor.f90:799-800).
+    """
+    from legoesm.grids.tripole import create_synthetic_tripole_pivot
+
+    grid = create_synthetic_tripole_pivot(6, 8)
+    nlat, nlon, nlev = grid.n_lat, grid.n_lon, 1
+    zeta = jnp.ones((nlat + 1, nlon + 1, nlev))
+    h_vtx = jnp.ones_like(zeta)
+    h_v = jnp.ones((nlat + 1, nlon, nlev))
+    v = jnp.zeros_like(h_v)
+    h_u = jnp.ones((nlat, nlon + 1, nlev))
+    u = jnp.arange(nlat * (nlon + 1), dtype=jnp.float64).reshape(
+        nlat, nlon + 1, nlev)
+    u = u.at[:, -1].set(u[:, 0])
+    um = jnp.ones_like(u)
+    vm = jnp.ones_like(v)
+    fm = jnp.ones((nlat + 1, nlon + 1))
+    args = (zeta, h_vtx, h_v, v, h_u, u, um, vm, fm)
+    du_wall, dv_wall = pv_flux_al81_partial_cell(
+        *args, q_boundary="nemo_live")
+    du_fold, dv_fold = pv_flux_al81_partial_cell(
+        *args, q_boundary="nemo_live", north_fold_grid=grid)
+
+    native = np.asarray(u)[-2, 1:, 0]
+    ghost_native = grid.fold.vector_sign_u * native[np.asarray(grid.fold.perm_u)]
+    ghost = np.concatenate([ghost_native[-1:], ghost_native])
+    expected = -0.25 * (ghost[:-1] + ghost[1:])
+    delta = np.asarray(dv_fold - dv_wall)[..., 0]
+    assert np.array_equal(np.asarray(du_fold), np.asarray(du_wall))
+    assert np.array_equal(delta[:-1], np.zeros_like(delta[:-1]))
+    assert np.array_equal(delta[-1], expected)
+    assert np.any(expected != 0.0)  # planted pole-wall omission must fire
+
+
 def test_al81_pairing_matches_nemo_vor_een_loop_port():
     """Index-for-index port of NEMO ``vor_een``'s trend loop
     (``dynvor.F90:833-846``), run in NEMO's OWN ``(ji,jj)`` indices and

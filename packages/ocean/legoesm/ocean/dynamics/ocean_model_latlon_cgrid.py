@@ -6173,6 +6173,12 @@ class LatLonCGridOceanModel:
                 _ws_literal_hpg_vmask = jnp.zeros_like(_card_v_mask)
                 _ws_literal_hpg_vmask = _ws_literal_hpg_vmask.at[1:].set(
                     _raw_ops.vmask3)
+                if bool(_cfg_b.rk3_vector_raw_vmask):
+                    # stprk3_stg.f90:366-370: vector velocity updates retain
+                    # NEMO's raw V-pivot support.  This is the same resolved
+                    # mesh operand already handed to the literal HPG path,
+                    # never a second mask reconstruction.
+                    _ws_stage_v_mask = _ws_literal_hpg_vmask
             if not self._nemo_ws_test_hooks.legacy_hadv_min_face_thickness:
                 _ws_face_thickness_kbb = _nemo_ws_qco_stage_faces(
                     state.eta.data, _ws_h_ref, _ws_u_live_mask,

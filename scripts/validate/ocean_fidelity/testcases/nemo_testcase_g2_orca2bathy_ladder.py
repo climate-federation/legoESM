@@ -448,6 +448,8 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
         without_top_drag_consumer: str | None = None,
         without_stage2_stored_thickness: bool = False,
         without_stage3_salt: bool = False,
+        without_hpg_fold_geometry: bool = False,
+        without_vector_raw_vmask: bool = False,
         case: str = CASE) -> dict:
     require(case in CASES, f"unknown case {case!r}")
     require(arm in ARMS, f"unknown arm {arm!r}")
@@ -507,6 +509,10 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
         cfg = cfg._replace(rk3_stage2_tracer_nemo_stored_thickness=False)
     if without_stage3_salt:               # G5 ROUND-4 BEFORE ARM
         cfg = cfg._replace(rk3_stage3_salt_nemo_written=False)
+    if without_hpg_fold_geometry:         # G6 ROUND-2 PAIR HALF
+        cfg = cfg._replace(nemo_hpg_sco_fold_geometry=False)
+    if without_vector_raw_vmask:          # G6 ROUND-2 PAIR HALF
+        cfg = cfg._replace(rk3_vector_raw_vmask=False)
     nk = int(z.n_levels)
     roots = (root, *restart_roots)
     reg = g1.regions(np.asarray(z.is_active)[..., 0])
@@ -576,6 +582,8 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
            "rk3_stage2_tracer_nemo_stored_thickness": bool(
                cfg.rk3_stage2_tracer_nemo_stored_thickness),
            "rk3_stage3_salt_nemo_written": bool(cfg.rk3_stage3_salt_nemo_written),
+           "nemo_hpg_sco_fold_geometry": bool(cfg.nemo_hpg_sco_fold_geometry),
+           "rk3_vector_raw_vmask": bool(cfg.rk3_vector_raw_vmask),
            "forcing": ("NEMO-supplied surface fields at each kt"
                        if case == "ORCA2G4-sbc" else
                        "NEMO's post-SI3 ocean surface input at each kt"
@@ -714,6 +722,9 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
             ("after_vor", "after_vorticity"),
             ("after_zad", "after_advection"),
         )
+        selected = set(exposures)
+        if selected & {name for name, _ in boundaries}:
+            boundaries = tuple(pair for pair in boundaries if pair[0] in selected)
         for hook_name, record_name in boundaries:
             exposed = jax.device_get(LatLonCGridOceanModel(
                 card.recipe.grid, z, cfg,
@@ -722,13 +733,29 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
                     expose_momentum_operator_stage=2,
                 )).step(s0, dt=card.dt_s, freshwater=fw, surface_forcing=sf))
             cand = card_levels(exposed)
-            rows, all_levels = [], {}
+            rows, all_levels, differences = [], {}, {}
             for field in ("u", "v"):
                 native = terms[f"{record_name}_{field}"]
                 require(native.shape[-1] == nk + 1 and native.shape[:2] == (
                     cand[field].shape[0] + 4, cand[field].shape[1] + 4),
                     f"{field}: unexpected native stage-2 shape {native.shape}")
                 ref = native[2:-2, 2:-2, :nk]
+                delta = np.abs(cand[field] - ref)
+                unequal = cand[field].view(np.uint64) != ref.view(np.uint64)
+                first = np.argwhere(unequal)
+                argmax = tuple(int(i) for i in np.unravel_index(
+                    int(np.argmax(delta)), delta.shape))
+                first_index = tuple(int(i) for i in first[0]) if first.size else None
+                differences[field] = {
+                    "n_unequal": int(np.count_nonzero(unequal)),
+                    "first_index": first_index,
+                    "first_nemo": (float(ref[first_index]) if first_index else None),
+                    "first_card": (float(cand[field][first_index]) if first_index else None),
+                    "argmax": argmax,
+                    "argmax_nemo": float(ref[argmax]),
+                    "argmax_card": float(cand[field][argmax]),
+                    "max_abs": float(delta[argmax]),
+                }
                 rows.append(g1.row(
                     f"stage2.{hook_name}.{field}", ref[..., 0],
                     cand[field][..., 0], reg,
@@ -746,8 +773,14 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
             out["per_kt"].append({
                 "kt": 1, "boundary": hook_name, "rows": rows,
                 "first_unequal": g1.first_unequal(rows),
-                "all_levels": all_levels,
+                "all_levels": all_levels, "differences": differences,
             })
+            if dump is not None:
+                Path(dump).mkdir(parents=True, exist_ok=True)
+                np.savez(Path(dump) / f"g6_stage2_{hook_name}.npz",
+                         **{f"card_{name}": cand[name] for name in ("u", "v")},
+                         **{f"nemo_{name}": terms[f"{record_name}_{name}"][
+                             2:-2, 2:-2, :nk] for name in ("u", "v")})
         return out
     if arm == "carried":
         # G5 round 4: every leaf the card carries into step kt against what
@@ -1077,13 +1110,19 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
         for kt in entries:
             first, s1 = step(s0 if kt == 1 else nemo_entry(kt), kt)
             rows = surface_rows("given_entry", kt, first)
-            second, s2 = step(first, kt + 1)
-            out["per_kt"].append({
-                "kt": kt, "seconds": [s1, s2], "rows": rows,
-                "first_unequal": g1.first_unequal(rows),
-                "two_step_kt": kt + 1,
-                "two_step_rows": surface_rows("given_entry_two_step", kt + 1, second),
-                "two_step_all_levels": all_level_rows(kt + 1, second)})
+            result = {"kt": kt, "seconds": [s1], "rows": rows,
+                      "first_unequal": g1.first_unequal(rows)}
+            # The G6 acquisition completed kt=7 but its certification record
+            # ends at kt=6 (nn_fsbc=2).  Do not manufacture an unrecorded kt=7
+            # two-step row merely because kt=6 is a requested entry point.
+            if kt < n_stage:
+                second, s2 = step(first, kt + 1)
+                result.update({
+                    "seconds": [s1, s2], "two_step_kt": kt + 1,
+                    "two_step_rows": surface_rows(
+                        "given_entry_two_step", kt + 1, second),
+                    "two_step_all_levels": all_level_rows(kt + 1, second)})
+            out["per_kt"].append(result)
     return out
 
 
@@ -1117,6 +1156,10 @@ def main(argv=None) -> int:
                     help="G5 round-4 before arm: stage-2 thickness interpolant")
     ap.add_argument("--without-stage3-salt", action="store_true",
                     help="G5 round-4 before arm: rescaled Kbb salt tendency")
+    ap.add_argument("--without-hpg-fold-geometry", action="store_true",
+                    help="G6 round-2 pair half: cyclic north HPG geometry")
+    ap.add_argument("--without-vector-raw-vmask", action="store_true",
+                    help="G6 round-2 pair half: compact vector V mask")
     ap.add_argument("--case", choices=CASES, default=CASE)
     ap.add_argument("--allow-dirty", action="store_true")
     ap.add_argument("--output", type=Path, required=True)
@@ -1134,6 +1177,8 @@ def main(argv=None) -> int:
               without_top_drag_consumer=a.without_top_drag_consumer,
               without_stage2_stored_thickness=a.without_stage2_stored_thickness,
               without_stage3_salt=a.without_stage3_salt,
+              without_hpg_fold_geometry=a.without_hpg_fold_geometry,
+              without_vector_raw_vmask=a.without_vector_raw_vmask,
               case=a.case)
     a.output.write_text(json.dumps(out, indent=1) + "\n")
     if a.arm == "geometry":

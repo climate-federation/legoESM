@@ -3825,6 +3825,13 @@ def build_orca2g1_flat_card(deck_root: str | Path, case: str = "ORCA2G1-flat") -
             bottom_drag_bg_velocity=0.0, bottom_drag_bbl_thickness=0.0),
         zdf_drag_in_matrix=False, barotropic_drag_substep=False, zdf_momentum_nemo_face_thickness=_ORCA2G_ZDF_FACES[case], zdf_tracer_nemo_rounded_thickness=_ORCA2G_TRA_ZDF_ROUNDED[case], barotropic_rhs_ascending_level_sum=_ORCA2G_UE_RHS_ASCENDING[case], zdf_momentum_stage_r3u_nemo_literal=_ORCA2G_ZDF_STAGE_R3U[case], barotropic_wind_nemo_stored_depth=_ORCA2G_WIND_STORED_DEPTH[case], surface_stress_nemo_fold_vector_sign=_ORCA2G_WIND_STORED_DEPTH[case], zdf_surface_stress_nemo_face_thickness=_ORCA2G_WIND_STORED_DEPTH[case], rk3_stage_tracer_written_order=_ORCA2G_TRA_STAGE_ORDER[case], rk3_stage3_heat_nemo_written=_ORCA2G_TRA_STAGE_ORDER[case], rk3_stage3_tracer_nemo_stored_thickness=_ORCA2G_TRA_STAGE_ORDER[case],  # noqa: E501
         gm_redi=None)
+    model_config = model_config._replace(
+        # G6 round 2: hpg_sco's V-pivot north e3w/gdept_z0 operands come
+        # from the T fold ghost, alongside the already-folded density.
+        # G1b is one level with flat geometry; the multilevel statement is
+        # selected only on the record that measured it.
+        nemo_hpg_sco_fold_geometry=case == "ORCA2G6-vec",
+        rk3_vector_raw_vmask=case == "ORCA2G6-vec")
     if case in _ORCA2G_ICE:
         # ORCA2 resolves ln_drgice_imp=T.  SI3 supplies rCdU_ice through the
         # post-SI3 record; all other rungs retain the appended default False.
@@ -3892,6 +3899,10 @@ def _orca2g1_selector_failures(card: NEMOTestcaseCard) -> list[str]:
         ) == ("nemo_ssh_avg", "nemo_literal", "nemo_literal", "nemo_ssh_avg",
               "nemo_literal", "nemo_literal", True, 0.0, "velocity_avg"),
         "ln_hpg_sco": cfg.pgf_scheme == "nemo_sco",
+        "hpg_sco fold geometry": cfg.nemo_hpg_sco_fold_geometry is (
+            card.case == "ORCA2G6-vec"),
+        "vector raw vmask": cfg.rk3_vector_raw_vmask is (
+            card.case == "ORCA2G6-vec"),
         "zdf_literal": cfg.zdf_implicit_solver_evaluation == "nemo_literal",
         "wall_fill": bool(cfg.tracer_wall_neumann_fill),
         "ln_eos80": cfg.eos == "nemo_eos80",

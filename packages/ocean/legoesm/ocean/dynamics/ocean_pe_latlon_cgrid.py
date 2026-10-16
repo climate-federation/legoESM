@@ -2208,7 +2208,9 @@ def _bc_ke_and_pressure_gradients(
                         "domain geometry is forbidden")
                 e3w_live = jnp.asarray(e3w0) * stretch
                 hpg_u, hpg_v = nemo_hpg_sco_literal_cgrid(
-                    rhd, e3w_live, gdept_z0, grid, g_val)
+                    rhd, e3w_live, gdept_z0, grid, g_val,
+                    fold_north_geometry=bool(
+                        config.nemo_hpg_sco_fold_geometry))
                 direct_hpg_u, direct_hpg_v = hpg_u, hpg_v
                 # This arm has no pressure-gradient intermediate in NEMO:
                 # dynhpg writes acceleration straight into Krhs.  A synthetic
@@ -2929,6 +2931,7 @@ def _bc_pv_flux(
                 f_vtx=_f_vtx_al,
                 q_boundary=een_q_boundary,
                 metric_widths=_mw,
+                north_fold_grid=(grid if een_fold_image_v else None),
             )
         else:  # "ene"
             # NEMO vor_ene Sadourny 2-point.  f_vtx=None → relative-only
@@ -6073,8 +6076,14 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             raise ValueError(
                 "nemo_literal_hpg_vmask must match the V tendency shape; "
                 f"got {_literal_vmask.shape} versus {dv_dt.shape}")
-        _restore_hpg = (_literal_vmask != 0.0) & (v_mask_3d == 0.0)
-        dv_dt = jnp.where(_restore_hpg, hpg_tendency_v, dv_dt * v_mask_3d)
+        if bool(config.rk3_vector_raw_vmask):
+            # The vector program carries every Krhs term on NEMO's raw
+            # northern V-pivot support, not HPG alone.  The stage update uses
+            # the same mask in the caller.
+            dv_dt = dv_dt * _literal_vmask
+        else:
+            _restore_hpg = (_literal_vmask != 0.0) & (v_mask_3d == 0.0)
+            dv_dt = jnp.where(_restore_hpg, hpg_tendency_v, dv_dt * v_mask_3d)
     dT_dt = dT_dt * mask_3d
     dS_dt = dS_dt * mask_3d
 
@@ -6203,7 +6212,10 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     def _mu(x):
         return Field(data=x * u_mask_3d, name="diag_u", dims=dims_u, units="m/s^2")
     def _mv(x):
-        return Field(data=x * v_mask_3d, name="diag_v", dims=dims_v, units="m/s^2")
+        mask = (_literal_vmask if (
+            nemo_literal_hpg_vmask is not None
+            and bool(config.rk3_vector_raw_vmask)) else v_mask_3d)
+        return Field(data=x * mask, name="diag_v", dims=dims_v, units="m/s^2")
 
     # Under ab2_scope="advective" the dissipative terms were subtracted from
     # du_dt/dv_dt (withheld for the weight-1.0 bucket). For the momentum-budget
