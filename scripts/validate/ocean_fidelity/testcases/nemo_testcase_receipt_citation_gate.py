@@ -1797,7 +1797,7 @@ CITATION_MAP = {
     ],
     # --- ORCA2 round 300: admitted kt=7 W leaf record ------------
     'ORCA2_OMIP_L4_R299W7/BLD/ppsrc/nemo/traadv.f90:248-252': [
-        ('DO jj = ntsj-( nn_hls)', 2), 'pFw(ji,jj,jpk) = 0._wp', 5,
+        ('DO jj = ntsj-( nn_hls)', 2), ('END DO   ;   END DO', 4), 5,
     ],
     'ORCA2_OMIP_L4_R299W7/BLD/ppsrc/nemo/traadv.f90:267-315': [
         'IF( ll_Fw ) THEN',
