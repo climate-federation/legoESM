@@ -4586,6 +4586,36 @@ class LatLonCGridOceanModel:
                     "would apply). Use "
                     'barotropic_solver="explicit_substep" or leave the flag '
                     "False.")
+        # ORCA2 G5's ln_drgice_imp path: the four consumers form one atomic
+        # composition.  This card has no cavity and rCdU_bot=0; fail closed on
+        # the not-yet-transcribed top+bottom association instead of silently
+        # summing two independently rounded face rates.
+        if getattr(config, "implicit_ice_ocean_top_drag", False):
+            if not getattr(config, "implicit_vertical_mixing", False):
+                raise ValueError(
+                    "implicit_ice_ocean_top_drag=True requires "
+                    "implicit_vertical_mixing=True for dyn_zdf's top "
+                    "boundary diagonal")
+            if not getattr(config, "zdf_baroclinic_only", False):
+                raise ValueError(
+                    "implicit_ice_ocean_top_drag=True requires "
+                    "zdf_baroclinic_only=True: dyn_zdf removes uu_b/vv_b "
+                    "before applying the top RHS and diagonal")
+            if config.barotropic.barotropic_solver != "explicit_substep":
+                raise ValueError(
+                    "implicit_ice_ocean_top_drag=True requires "
+                    "barotropic_solver='explicit_substep' for dynspg_ts's "
+                    "frozen top-drag consumer")
+            if getattr(config, "zdf_drag_in_matrix", False) or getattr(
+                    config, "barotropic_drag_substep", False):
+                raise ValueError(
+                    "implicit_ice_ocean_top_drag currently transcribes the "
+                    "ORCA2 G5 no-bottom-drag composition only; bottom and "
+                    "top face pairs must not be independently reassociated")
+            if getattr(config.barotropic, "barotropic_wide_halo", False):
+                raise ValueError(
+                    "implicit_ice_ocean_top_drag is not wired into the "
+                    "wide-halo barotropic path")
         # Loud no-op guard: barotropic_time_filter is consumed ONLY by the split-
         # explicit substep (barotropic_substeps_latlon_cgrid). The implicit_cn /
         # implicit_unsplit / rigid_lid solvers have no barotropic substep to filter
@@ -5934,6 +5964,14 @@ class LatLonCGridOceanModel:
             self._nemo_ws_test_hooks.expose_stage3_fct_inputs)
         if self._nemo_ws_test_hooks.omit_barotropic_substep_drag:
             _cfg_b = _cfg_b._replace(barotropic_drag_substep=False)
+        _top_drag_rCdu = (
+            None if surface_forcing is None else getattr(
+                surface_forcing, "ice_ocean_top_drag_rCdu", None))
+        if (getattr(_cfg_b, "implicit_ice_ocean_top_drag", False)
+                and _top_drag_rCdu is None):
+            raise ValueError(
+                "implicit_ice_ocean_top_drag=True requires the recorded "
+                "OceanSurfaceForcing.ice_ocean_top_drag_rCdu input")
         state = cast_pytree(state, None, "compute")
         # ``_ab2_scope_override`` (private): the leap-frog step (``_leapfrog_step``)
         # drives this method in "advective" scope to WITHHOLD the dissipative
@@ -6668,6 +6706,53 @@ class LatLonCGridOceanModel:
                 # outside the multiply prevents XLA from reassociating its last
                 # rounding step (round 252's first resolved-mask arm left 15
                 # sub-floor bit differences for exactly this reason).
+                F_slow_v = F_slow_v.at[1:, :].set(jnp.where(
+                    _fold_unit_v,
+                    _dragged_slow_v[1:, :],
+                    F_slow_v[1:, :],
+                ))
+        if getattr(_cfg_b, "implicit_ice_ocean_top_drag", False):
+            # dyn_drg_init.f90:1468-1488, ln_bt_fw=T: use the NOW top-cell
+            # baroclinic residual and the carried NOW barotropic velocity.
+            from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+                nemo_ice_ocean_top_drag_coeff_faces,
+            )
+            _top_cdu_u, _top_cdu_v, _ = nemo_ice_ocean_top_drag_coeff_faces(
+                _top_drag_rCdu, _grid, dtype=F_slow_u.dtype)
+            if state.uu_b is None or state.vv_b is None:
+                raise ValueError(
+                    "ice-ocean top drag requires carried uu_b/vv_b for "
+                    "dyn_drg_init's top baroclinic residual")
+            _top_r1_hu = nemo_source_round(1.0 / H_u_pre)
+            _top_r1_hv = nemo_source_round(1.0 / H_v_pre)
+            if getattr(_cfg_b, "barotropic_wind_nemo_stored_depth", False):
+                from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
+                    nemo_een_ratio_fold_exchange,
+                )
+                _r1u, _r1v = _nemo_ws_qco_stage_faces(
+                    state.eta.data, _ws_h_ref, _ws_u_live_mask,
+                    _ws_v_live_mask, _grid, z_coord=_zc,
+                    include_reciprocals=True)[4:]
+                _r1u_n, _r1v_n, _ = nemo_een_ratio_fold_exchange(
+                    _r1u[:, 1:], _r1v[1:], _r1v[1:], _grid,
+                    _cfg_b.barotropic.barotropic_een_ratio_fold_exchange)
+                _top_r1_hu = _r1u.at[:, 1:].set(_r1u_n)
+                _top_r1_hv = _r1v.at[1:].set(_r1v_n)
+            _top_u_resid = nemo_source_round(
+                state.u.data[..., 0] - state.uu_b.data)
+            _top_v_resid = nemo_source_round(
+                state.v.data[..., 0] - state.vv_b.data)
+            _top_inc_u = nemo_source_round(
+                nemo_source_round(_top_r1_hu * _top_cdu_u)
+                * _top_u_resid)
+            _top_inc_v = nemo_source_round(
+                nemo_source_round(_top_r1_hv * _top_cdu_v)
+                * _top_v_resid)
+            _dragged_slow_u = nemo_source_round(F_slow_u + _top_inc_u)
+            _dragged_slow_v = nemo_source_round(F_slow_v + _top_inc_v)
+            F_slow_u = _dragged_slow_u * _slow_surface_u_mask
+            F_slow_v = _dragged_slow_v * _slow_surface_v_mask
+            if _atomic_hpg_unit:
                 F_slow_v = F_slow_v.at[1:, :].set(jnp.where(
                     _fold_unit_v,
                     _dragged_slow_v[1:, :],
@@ -7499,6 +7584,10 @@ class LatLonCGridOceanModel:
                 _baro_seed = dict(
                     _baro_seed, substep_scale=_barotropic_substep_scale,
                     u_now=state.u.data, v_now=state.v.data)
+                if getattr(_cfg_b, "implicit_ice_ocean_top_drag", False):
+                    _baro_seed = dict(
+                        _baro_seed,
+                        ice_ocean_top_drag_rCdu=_top_drag_rCdu)
                 if _een_pre_shared is not None:
                     _baro_seed = dict(
                         _baro_seed, een_pre_override=_een_pre_shared)
@@ -12404,6 +12493,14 @@ class LatLonCGridOceanModel:
         _zc = self.z_coord if z_coord is None else z_coord  # SPMD band override
         _cfg_b = self.config if config is None else config  # SPMD band override
         _iwm = (self._iwm_forcing if iwm_fields is None else iwm_fields)  # SPMD band override
+        _top_drag_rCdu = (
+            None if surface_forcing is None else getattr(
+                surface_forcing, "ice_ocean_top_drag_rCdu", None))
+        if (getattr(_cfg_b, "implicit_ice_ocean_top_drag", False)
+                and _top_drag_rCdu is None):
+            raise ValueError(
+                "implicit_ice_ocean_top_drag=True requires the recorded "
+                "OceanSurfaceForcing.ice_ocean_top_drag_rCdu input")
         _zdf_momentum_observer = self._nemo_ws_test_hooks.zdf_momentum_observer
         # Argument validation at ENTRY, not inside the drag branch below: one
         # component of the now-level velocity without the other would build the
@@ -13410,6 +13507,31 @@ class LatLonCGridOceanModel:
                 v_solve_in = v_solve_in - (
                     dt_mom * _r_eff_v[..., jnp.newaxis]
                     / jnp.maximum(_drg_e3v, 1e-10) * _is_bot_v * _v_bt_mean)
+        if do_momentum and getattr(
+                _cfg_b, "implicit_ice_ocean_top_drag", False):
+            # dynzdf.f90:171-178,308-312,476-480.  With no cavity miku/mikv
+            # are the first wet level, and rCdU_top is SI3's recorded field.
+            from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+                nemo_ice_ocean_top_drag_coeff_faces,
+            )
+            _top_cdu_u, _top_cdu_v, _ = nemo_ice_ocean_top_drag_coeff_faces(
+                _top_drag_rCdu, _grid, dtype=state.u.data.dtype)
+            _top_e3u, _top_e3v = _nemo_dynzdf_drag_face_thickness(
+                state.eta.data, state.H_bathy.data, _zc, _cfg_b, _grid,
+                dz_u_open.dtype)
+            _is_top_u = jnp.zeros_like(u_solve_in).at[..., 0].set(1.0)
+            _is_top_v = jnp.zeros_like(v_solve_in).at[..., 0].set(1.0)
+            _top_diag_u = (
+                -dt_mom * _top_cdu_u[..., jnp.newaxis]
+                / jnp.maximum(_top_e3u, 1e-10) * _is_top_u)
+            _top_diag_v = (
+                -dt_mom * _top_cdu_v[..., jnp.newaxis]
+                / jnp.maximum(_top_e3v, 1e-10) * _is_top_v)
+            extra_diag_u = extra_diag_u + _top_diag_u
+            extra_diag_v = extra_diag_v + _top_diag_v
+            if _zdf_baroclinic_only:
+                u_solve_in = u_solve_in - _top_diag_u * _u_bt_mean
+                v_solve_in = v_solve_in - _top_diag_v * _v_bt_mean
         _zdf_baro_drag_u, _zdf_baro_drag_v = u_solve_in, v_solve_in
         if _zdf_top_stress is not None:
             u_solve_in = u_solve_in.at[..., 0].add(_zdf_top_stress[0])

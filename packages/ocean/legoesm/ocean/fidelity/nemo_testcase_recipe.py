@@ -3825,6 +3825,11 @@ def build_orca2g1_flat_card(deck_root: str | Path, case: str = "ORCA2G1-flat") -
             bottom_drag_bg_velocity=0.0, bottom_drag_bbl_thickness=0.0),
         zdf_drag_in_matrix=False, barotropic_drag_substep=False, zdf_momentum_nemo_face_thickness=_ORCA2G_ZDF_FACES[case], zdf_tracer_nemo_rounded_thickness=_ORCA2G_TRA_ZDF_ROUNDED[case], barotropic_rhs_ascending_level_sum=_ORCA2G_UE_RHS_ASCENDING[case], zdf_momentum_stage_r3u_nemo_literal=_ORCA2G_ZDF_STAGE_R3U[case], barotropic_wind_nemo_stored_depth=_ORCA2G_WIND_STORED_DEPTH[case], surface_stress_nemo_fold_vector_sign=_ORCA2G_WIND_STORED_DEPTH[case], zdf_surface_stress_nemo_face_thickness=_ORCA2G_WIND_STORED_DEPTH[case], rk3_stage_tracer_written_order=_ORCA2G_TRA_STAGE_ORDER[case], rk3_stage3_heat_nemo_written=_ORCA2G_TRA_STAGE_ORDER[case], rk3_stage3_tracer_nemo_stored_thickness=_ORCA2G_TRA_STAGE_ORDER[case],  # noqa: E501
         gm_redi=None)
+    if case == "ORCA2G5-ice":
+        # ORCA2 resolves ln_drgice_imp=T.  SI3 supplies rCdU_ice through the
+        # post-SI3 record; all other rungs retain the appended default False.
+        model_config = model_config._replace(
+            implicit_ice_ocean_top_drag=True)
     if _ORCA2G_DYNADV_VEC[case]:     # dynspg_ts.f90:533 vector branch; state.py: flux-form only
         model_config = model_config._replace(
             rk3_stage1_rhs_nemo_literal=False,
@@ -3898,6 +3903,8 @@ def _orca2g1_selector_failures(card: NEMOTestcaseCard) -> list[str]:
         "ln_drg_OFF": (cfg.bottom_drag.bottom_drag_r == 0.0
                        and not cfg.zdf_drag_in_matrix
                        and not cfg.barotropic_drag_substep),
+        "ln_drgice_imp": cfg.implicit_ice_ocean_top_drag is (
+            card.case == "ORCA2G5-ice"),
         "ln_zdfcst": (vm.scheme == "constant" and not vm.constant.lat_dependent
                       and not vm.iwm.enabled and not vm.ddm.enabled),
         "ln_zad_Aimp=F": not cfg.adaptive_implicit_vertadv,

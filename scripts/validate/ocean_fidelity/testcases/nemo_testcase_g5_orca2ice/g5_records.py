@@ -141,7 +141,11 @@ def nemo_supplied_forcing(card, root: Path, kt: int, *, zero: bool = False):
     if zero:
         fields = {k: np.zeros_like(v) for k, v in fields.items()}
     freshwater, forcing = _surface_forcings(card, root, fields, kt)
-    return freshwater, forcing._replace(q_nonsolar=fields["qns"])
+    return freshwater, forcing._replace(
+        q_nonsolar=fields["qns"],
+        ice_ocean_top_drag_rCdu=(
+            np.zeros_like(rec["rCdU_ice"]) if zero else rec["rCdU_ice"]),
+    )
 
 
 def _cmp(card, nemo, sel) -> dict:
@@ -252,6 +256,7 @@ def identity(ev: Path, deck_root: Path, plant: bool = False) -> dict:
             "fr_i": _cmp(sf.ice_concentration, rec["fr_i"], wet),
             "rnf_tsc T": _cmp(sf.runoff_tracer_content[0], rec["rnf_tsc"][..., 0], wet),
             "rnf_tsc S": _cmp(sf.runoff_tracer_content[1], rec["rnf_tsc"][..., 1], wet),
+            "rCdU_ice": _cmp(sf.ice_ocean_top_drag_rCdu, rec["rCdU_ice"], wet),
             "ice_fw / precip / restoring (card 0)": {
                 "card_nonzero": int(sum(np.count_nonzero(np.asarray(x)) for x in (
                     fw.ice_fw, fw.precip, fw.restoring)))},
@@ -272,7 +277,7 @@ def identity(ev: Path, deck_root: Path, plant: bool = False) -> dict:
             rows[f"{name} (mirror on NEMO T stress; instrument)"] = _cmp(mirror, fullrec[name], sel)
         cd = rec["rCdU_ice"]
         ice = wet & (rec["fr_i"] > 0)
-        rows["rCdU_ice (NO CARD INPUT)"] = {
+        rows["rCdU_ice activity"] = {
             "ice_wet_cells": int(ice.sum()),
             "nonzero_on_ice_wet": int(np.count_nonzero(cd[ice])),
             "range_on_ice_wet": [float(cd[ice].min()), float(cd[ice].max())] if ice.any() else None,
@@ -282,7 +287,7 @@ def identity(ev: Path, deck_root: Path, plant: bool = False) -> dict:
     bad = [(kt, n) for kt, rows in out.items() for n, r in rows.items()
            if isinstance(r, dict) and r.get("unequal", 0)]
     no_drag = [kt for kt, rows in out.items()
-               if rows["rCdU_ice (NO CARD INPUT)"]["nonzero_on_ice_wet"] == 0]
+               if rows["rCdU_ice activity"]["nonzero_on_ice_wet"] == 0]
     # preregistered falsifiers: any field mismatch, or no ice-ocean drag on ice
     require(not bad, f"{'plant fired' if plant else 'forcing identity FAILED'}: {bad[:3]}")
     require(not no_drag, f"rCdU_ice is zero on every ice-covered wet cell at kt {no_drag}")
@@ -291,9 +296,8 @@ def identity(ev: Path, deck_root: Path, plant: bool = False) -> dict:
 
 
 def top_drag(ev: Path, plant: bool = False) -> dict:
-    """kt = 1: NEMO's recorded external-mode drag coefficient (zCdU_u/v,
-    dynspg_ts.f90:1431-1432 with rCdU_bot = 0 and rCdU_top = rCdU_ice,
-    zdfdrg.f90:187) against an offline replay from the recorded rCdU_ice."""
+    """kt = 1: NEMO's recorded external-mode drag coefficient against the
+    card's production T-to-U/V coefficient path, including the north fold."""
     root = Path(ev) / "twin_a"
     path = root / "oracle_bt_drag_operands_kt00000001.bin"
     with path.open("rb") as fh:
@@ -304,47 +308,39 @@ def top_drag(ev: Path, plant: bool = False) -> dict:
     cdu_u, cdu_v = (cdu[k * nx * ny:(k + 1) * nx * ny].reshape((nx, ny), order="F").T
                     for k in (0, 1))
     rec = surface(root, 1)
-    top = np.zeros((ny, nx))
-    # rCdU_ice is recorded on the inner domain plus one halo row/column
-    halo1 = surface(root, 1, keep_halo=True)["rCdU_ice"]
-    require(halo1.shape == (ny - 2, nx - 2), f"rCdU_ice shape {halo1.shape}")
-    top[1:-1, 1:-1] = halo1
-    # the record holds rCdU_ice before NEMO's halo exchange (its halo ring is
-    # 0); NEMO reads the cyclic neighbour, so fill the east-west halo.  The
-    # fold halo row is not replayed: V faces on the last inner row are counted
-    # apart.
-    top[:, nx - 2] = top[:, 2]
     if plant:
-        j, i = np.argwhere(top[2:-3, 2:-3] != 0)[0] + 2   # an inner ice cell
-        top[j, i] += 1e-9
-    rep_u, rep_v = np.zeros_like(top), np.zeros_like(top)
-    rep_u[:, :-1] = 0.5 * ((0.0 + 0.0) + (top[:, 1:] + top[:, :-1]))
-    rep_v[:-1, :] = 0.5 * ((0.0 + 0.0) + (top[1:, :] + top[:-1, :]))
-    import netCDF4
-    with netCDF4.Dataset(root / "mesh_mask.nc") as h:
-        faces = {n: np.pad(np.asarray(h.variables[n][0, 0], np.float64), 2) > 0
-                 for n in ("umask", "vmask")}
+        rec["rCdU_ice"] = rec["rCdU_ice"].copy()
+        j, i = np.argwhere(rec["rCdU_ice"] != 0)[0]
+        rec["rCdU_ice"][j, i] += 1e-9
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+        nemo_ice_ocean_top_drag_coeff_faces,
+    )
+    from legoesm.ocean.fidelity import nemo_testcase_recipe as recipe
+    card = recipe.build_nemo_testcase_card("ORCA2G5-ice", deck_root=root)
+    rep_u, rep_v, _ = nemo_ice_ocean_top_drag_coeff_faces(
+        rec["rCdU_ice"], card.recipe.grid, dtype=np.float64)
+    # NEMO stores the east/north native face; lego stores redundant west/south
+    # boundaries, hence [:,1:] / [1:,:].  Convert the positive-rate card
+    # convention back to NEMO's negative pCdU convention before comparison.
+    card_faces = {"zCdU_u": np.asarray(rep_u)[:, 1:],
+                  "zCdU_v": np.asarray(rep_v)[1:, :]}
+    nemo_faces = {"zCdU_u": cdu_u[2:-2, 2:-2],
+                  "zCdU_v": cdu_v[2:-2, 2:-2]}
+    faces = {"zCdU_u": np.asarray(card.recipe.initial_state.u_mask.data)[:, 1:] > 0.5,
+             "zCdU_v": np.asarray(card.recipe.initial_state.v_mask.data)[1:, :] > 0.5}
     rows, ice = {}, rec["fr_i"] > 0
-    for name, nemo, rep, face in (("zCdU_u", cdu_u, rep_u, faces["umask"]),
-                                  ("zCdU_v", cdu_v, rep_v, faces["vmask"])):
+    for name in ("zCdU_u", "zCdU_v"):
+        nemo, rep, face = nemo_faces[name], card_faces[name], faces[name]
         wet = nemo != 0
-        sel = np.zeros_like(wet)
-        sel[2:-2, 2:-2] = True
-        fold = np.zeros_like(wet)
-        if name == "zCdU_v":
-            fold[ny - 3] = True
-            sel &= ~fold
         rows[name] = {"nemo_nonzero_faces": int(wet.sum()),
                       "nemo_range": [float(nemo[wet].min()), float(nemo[wet].max())] if wet.any() else None,
-                      "replay_vs_nemo_on_nemo_nonzero": _cmp(rep, nemo, wet & sel),
-                      "replay_vs_nemo_on_all_wet_faces": _cmp(rep, nemo, face & sel),
-                      "wet_faces_scored": int((face & sel).sum()),
-                      "fold_row_faces_not_replayed": int((wet & fold).sum()),
-                      "card_coefficient": 0.0,
-                      "card_vs_nemo_unequal": int(wet.sum())}
+                      "card_vs_nemo_on_nemo_nonzero": _cmp(rep, nemo, wet),
+                      "card_vs_nemo_on_all_wet_faces": _cmp(rep, nemo, face),
+                      "wet_faces_scored": int(face.sum()),
+                      "fold_row_nonzero_faces_scored": int(wet[-1].sum()) if name == "zCdU_v" else 0}
     rows["fr_i>0_cells"] = int(ice.sum())
     bad = [n for n in ("zCdU_u", "zCdU_v")
-           if rows[n]["replay_vs_nemo_on_all_wet_faces"]["unequal"]
+           if rows[n]["card_vs_nemo_on_all_wet_faces"]["unequal"]
            or rows[n]["nemo_nonzero_faces"] == 0]
     require(not bad, f"{'plant fired' if plant else 'top-drag replay FAILED'}: {bad}")
     return {"label": "kt 1 external-mode drag coefficient, NEMO record vs replay vs card", **rows}

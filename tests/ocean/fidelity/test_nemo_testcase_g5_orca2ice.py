@@ -109,7 +109,9 @@ def test_g5_card_is_g4_plus_si3_entry_and_record_route(tmp_path):
     g4_root, g5_root = _root(tmp_path, G4), _root(tmp_path, G5)
     g4 = recipe.build_orca2g4_sbc_card(g4_root)
     g5 = recipe.build_nemo_testcase_card("ORCA2G5-ice", deck_root=g5_root)
-    assert g5.recipe.model_config == g4.recipe.model_config
+    assert g5.recipe.model_config == g4.recipe.model_config._replace(
+        implicit_ice_ocean_top_drag=True)
+    assert g4.recipe.model_config.implicit_ice_ocean_top_drag is False
     for field in ("T", "S", "u", "v", "uu_b", "vv_b"):
         assert np.array_equal(np.asarray(getattr(g5.recipe.initial_state, field).data),
                               np.asarray(getattr(g4.recipe.initial_state, field).data))
@@ -128,6 +130,20 @@ def test_g5_card_is_g4_plus_si3_entry_and_record_route(tmp_path):
     assert recipe._orca2g1_selector_failures(g5) == []
     with pytest.raises(ValueError, match="not execution-ready"):
         recipe.validate_orca2g1_flat_card_for_execution(g5, g5_root)
+
+
+@needs_inputs
+def test_g5_selected_top_drag_refuses_missing_record_input(tmp_path):
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+
+    root = _root(tmp_path, G5)
+    card = recipe.build_orca2g5_ice_card(root)
+    model = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
+    with pytest.raises(ValueError, match="ice_ocean_top_drag_rCdu"):
+        model._step_impl(card.recipe.initial_state, card.dt_s)
 
 
 def _writer_is_immediately_after_exact_sbc(source):
@@ -302,7 +318,8 @@ def test_g5_top_drag_replay_is_exact_and_its_plant_fires():
     res = g5.top_drag(RECORD)
     for face, n in (("zCdU_u", 3519), ("zCdU_v", 3593)):
         assert res[face]["nemo_nonzero_faces"] == n
-        assert res[face]["replay_vs_nemo_on_nemo_nonzero"]["unequal"] == 0
-        assert res[face]["replay_vs_nemo_on_all_wet_faces"]["unequal"] == 0
+        assert res[face]["card_vs_nemo_on_nemo_nonzero"]["unequal"] == 0
+        assert res[face]["card_vs_nemo_on_all_wet_faces"]["unequal"] == 0
+    assert res["zCdU_v"]["fold_row_nonzero_faces_scored"] == 68
     with pytest.raises(g5.Refuse, match="plant fired"):
         g5.top_drag(RECORD, plant=True)

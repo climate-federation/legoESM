@@ -4074,6 +4074,32 @@ def _bc_horizontal_viscosity(
             diag_Cl_leith_v, kdiss_h_cell)
 
 
+def nemo_ice_ocean_top_drag_coeff_faces(rCdU_ice, grid, *, dtype=None):
+    """SI3's recorded ``rCdU_ice`` mapped to NEMO U/V coefficients.
+
+    ``rCdU_ice`` is NEMO's non-positive T-point coefficient [m/s].  The
+    returned arrays retain NEMO's non-positive sign and statement boundaries:
+    round the T-point value, round each neighbour sum, add the zero bottom-pair,
+    then multiply by one half (``dynspg_ts.f90:1431-1432``).  That explicit
+    zero-pair addition is load-bearing for NEMO's positive signed zeros.  The V
+    map applies the scalar T-pivot fold exchange before the northern face.
+    """
+    r_cdu = jnp.asarray(rCdU_ice, dtype=dtype)
+    if r_cdu.ndim != 2:
+        raise ValueError(
+            "ice-ocean top drag rCdU_ice must be a 2-D T-point field; got "
+            f"shape {r_cdu.shape}")
+    r_cdu = nemo_source_round(r_cdu)
+    coeff_u = interp_cell_to_uface(r_cdu, source_round=True)
+    (coeff_v,) = interp_to_v_points_multi(
+        (r_cdu,), grid=grid, source_round=True)
+    # pCdU = .5*((rCdU_bot pair) + (rCdU_top pair)); rCdU_bot is +0 on G5.
+    # Re-materialise the addition's +0 result where the top average is zero.
+    coeff_u = jnp.where(coeff_u == 0, jnp.zeros_like(coeff_u), coeff_u)
+    coeff_v = jnp.where(coeff_v == 0, jnp.zeros_like(coeff_v), coeff_v)
+    return coeff_u, coeff_v, r_cdu
+
+
 def nemo_bottom_drag_rate_faces(
     u, v, h_k, z_coord, config, grid, *, return_cell_rate=False,
 ):

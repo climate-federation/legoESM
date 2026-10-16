@@ -348,6 +348,12 @@ class OceanSurfaceForcing(NamedTuple):
     q_nonsolar: object = None          # jnp.ndarray | None [W/m^2], NEMO ``qns``
     # Read only by ``rk3_stage3_heat_nemo_written`` (trasbc.f90 stage-3
     # ``r1_rcp*qns*z1_rho0_e3t``); ``q_net - sw_down`` is not bitwise ``qns``.
+    ice_ocean_top_drag_rCdu: object = None
+    # jnp.ndarray | None [m/s], NEMO ``rCdU_ice`` at T points.  This is the
+    # already-density-normalised, non-positive coefficient produced by SI3;
+    # the G5 identity carries it from the post-SI3 record rather than
+    # rebuilding it from ice state.  Read only when
+    # ``implicit_ice_ocean_top_drag=True``; a selected path refuses None.
 
 
 class OceanConfig(NamedTuple):
@@ -3248,6 +3254,16 @@ class LatLonCGridOceanConfig(NamedTuple):
     # False keeps the thickness mean 0.5*(h(Kbb)+h(Kaa)).  Needs
     # rk3_stage3_heat_nemo_written.
     rk3_stage3_tracer_nemo_stored_thickness: bool = False
+    # NEMO's implicit ice-ocean TOP drag for the ORCA2 G5 identity.  The input
+    # is ``OceanSurfaceForcing.ice_ocean_top_drag_rCdu`` (SI3's negative
+    # ``rCdU_ice``).  The selected path applies all four consumers in source
+    # order: dyn_drg_init's U/V coefficient, its top baroclinic residual,
+    # dynspg_ts's frozen per-substep stress, and dyn_zdf's top RHS + implicit
+    # diagonal.  This deck has no cavity and no bottom drag, so unsupported
+    # top+bottom/cavity compositions are rejected at construction rather than
+    # silently reassociated.  Appended at the end to preserve every positional
+    # constructor.  Default False leaves all earlier cards bit-identical.
+    implicit_ice_ocean_top_drag: bool = False
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":
