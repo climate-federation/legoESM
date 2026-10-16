@@ -6174,7 +6174,7 @@ class LatLonCGridOceanModel:
                 _ws_literal_hpg_vmask = _ws_literal_hpg_vmask.at[1:].set(
                     _raw_ops.vmask3)
                 if bool(_cfg_b.rk3_vector_raw_vmask):
-                    # stprk3_stg.f90:366-370: vector velocity updates retain
+                    # stprk3_stg.f90:467-470: vector velocity updates retain
                     # NEMO's raw V-pivot support.  This is the same resolved
                     # mesh operand already handed to the literal HPG path,
                     # never a second mask reconstruction.
