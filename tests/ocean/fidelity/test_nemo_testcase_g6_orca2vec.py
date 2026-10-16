@@ -135,3 +135,27 @@ def test_run_script_reuses_g5_binaries_smoke_first_passive_no_step1_restart():
     assert "REF_BIN_SHA=e8ebf4ae" in text and "REC_BIN_SHA=41cd9a63" in text
     assert "round36/oracle_g6_r36" in text
 
+
+G5_RECORD = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/"
+                 "round31/oracle_g5_r31")
+
+
+@pytest.mark.skipif(not (G5_RECORD / "twin_a").is_dir(), reason="no G5 record")
+def test_admission_takes_the_record_length_and_names_empty_comparisons():
+    """G6's admission is G5's with the record length.  On G5's 10-step
+    record: passivity compares step 10, twin C (odd steps only) is reported
+    as having no common step rather than as identical, a length with no
+    twin-A restart is refused by name, and the passivity plant fires."""
+    import sys
+    sys.path.insert(0, str(G5))
+    import g5_records
+
+    res = g5_records.admit(G5_RECORD, steps=10)
+    assert res["passivity"]["step"] == 10
+    assert res["reference_vs_twin_b_c"]["twin_c"] == (
+        "no restart step in common with the reference")
+    assert len(res["reference_vs_twin_b_c"]["twin_b"]) == 5      # steps 2..10 even
+    with pytest.raises(g5_records.Refuse, match="no restart step 2..8 common"):
+        g5_records.admit(G5_RECORD, steps=8)     # twin A wrote only step 10
+    with pytest.raises(g5_records.Refuse, match="PASSIVITY FAILED"):
+        g5_records.admit(G5_RECORD, "passivity", steps=10)

@@ -162,9 +162,11 @@ def admit(ev: Path, plant: str | None = None, steps: int = STEPS) -> dict:
     ev = Path(ev)
     ref, a = ev / "ref_100step", ev / "twin_a"
     roots = [ev / t for t in TWINS]
-    common = max(s for s in range(2, steps + 1)
-                 if (ref / f"ORCA2G1_{s:08d}_restart.nc").is_file()
-                 and (a / f"ORCA2G1_{s:08d}_restart.nc").is_file())
+    shared = [s for s in range(2, steps + 1)
+              if (ref / f"ORCA2G1_{s:08d}_restart.nc").is_file()
+              and (a / f"ORCA2G1_{s:08d}_restart.nc").is_file()]
+    require(bool(shared), f"no restart step 2..{steps} common to the reference and twin A")
+    common = max(shared)
     cand = a
     if plant == "passivity":         # one value moved in a copy of twin A's restart
         import shutil
@@ -187,7 +189,10 @@ def admit(ev: Path, plant: str | None = None, steps: int = STEPS) -> dict:
         common_t = [s for s in range(2, steps + 1)
                     if (ref / f"ORCA2G1_{s:08d}_restart.nc").is_file()
                     and (ev / t / f"ORCA2G1_{s:08d}_restart.nc").is_file()]
-        extra[t] = cr.restarts_identical(ref, ev / t, common_t)
+        # Twin C writes odd steps, the reference even ones: say so, never
+        # report an empty comparison as identity.
+        extra[t] = (cr.restarts_identical(ref, ev / t, common_t) if common_t
+                    else "no restart step in common with the reference")
     twin = {}
     for kt in range(1, steps + 1):
         for pat in PER_STEP:

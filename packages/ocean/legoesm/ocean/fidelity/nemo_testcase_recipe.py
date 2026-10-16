@@ -4044,7 +4044,8 @@ ORCA2G5_UNMEASURED: tuple[str, ...] = (
 # the vector-form dyn_zdf update meet partial cells for the first time.
 ORCA2G6_UNMEASURED: tuple[str, ...] = (
     "g6_record_not_admitted",
-    "vector_form_multilevel_step",   # np_CRV EEN + KEG + ZAD on 31 levels with SI3 records
+    "nemo_post_si3_surface_records",   # G5's input route, inherited unchanged
+    "vector_form_multilevel_step",     # np_CRV EEN + KEG + ZAD on 31 levels
 )
 # G1b = G1 + ORCA2's vector-form momentum advection (user, 2026-10-14).
 ORCA2G1B_UNMEASURED: tuple[str, ...] = (
