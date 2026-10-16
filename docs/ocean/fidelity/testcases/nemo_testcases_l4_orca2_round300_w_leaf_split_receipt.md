@@ -11,6 +11,14 @@ difference in NEMO's transport-form horizontal divergence.  It differs on
 stabiliser, sea-ice field, or `unmeasured_features` entry changes in this
 round.  The complete fold unit remains private and atomic.
 
+**Main finding (review response, below):** the card's stage-1 U transport is
+the same quantity as NEMO's and is aligned cell for cell, but in the fold band
+it is wrong by orders of magnitude (card `7.726e7` vs NEMO `1.346e5 m3/s` at
+`[147,47,25]`; band max difference `7.91e7` vs NEMO band max `1.07e6`), which
+carries about 98% of the squared domain difference; the interior differs by
+about 14% RMS.  The earlier "independent ratio/clock pair" row compared two
+different time levels and is corrected below.
+
 ## Provenance and admission
 
 - Lane base: `deee20d23`; frozen preregistration: `31290fd4d`.
@@ -84,7 +92,7 @@ units of each row.
 | transport divergence | 430,552 / 430,552 | 2.6023067008330836e-2 | 1.0794110578633983e-4 | `[147,48,25]` |
 | live thickness | 430,552 / 430,552 | 6.668582857059846e-2 | 1.1693549040022798e-3 | `[147,50,23]` |
 | flux divergence | 430,552 / 430,552 | 2.6023067008330836e-2 | 1.0794110578633983e-4 | `[147,48,25]` |
-| Kaa-Kbb ratio delta | 16,433 / 16,433 | 5.0750835119969487e-2 | 1.3644301289032852e-3 | `[54,35]` |
+| Kaa-Kbb ratio delta, time-matched (corrected) | 16,433 / 16,433 | 9.4070653952792217e-3 | 2.1140007761263205e-4 | interior |
 | stretch rate | 430,552 / 430,552 | 8.836174225055932e-5 | 8.009334080397122e-7 | `[147,48,27]` |
 | W recurrence | 430,529 / 430,552 | 1.9152110475369796e-1 | 1.5744398704267452e-3 | `[147,48,0]` |
 | area product | 430,529 / 430,552 | 1.4843986124373436e9 | 1.222542183061254e7 | `[147,48,0]` |
@@ -93,10 +101,12 @@ Replacing candidate U transport alone leaves W maximum error
 `0.19217452883025382 m/s`; replacing U+V leaves
 `0.0007441398648953929 m/s`.  Area, live Kmm thickness, and mask do not
 close that residual.  The replay becomes exact only when the recorded
-Kbb/Kaa ratios and stage clock are added as their coupled pair.  Therefore
-the preregistered claim that the complete divergence alone closes W is
-**REFUTED**: the first boundary is U, while the W result has an independent
-ratio/clock member.
+Kbb/Kaa ratios and stage clock are added together.  The preregistered claim
+that the complete divergence alone closes W is **REFUTED**, but (corrected
+after review) the remaining member is the step's sea-level change, not the
+clock: see "Correction 2" below.  The ratio row in this table was rebuilt at
+matched time level (r300d re-measurement); the originally committed row
+(`5.0750835119969487e-2` max, `1.3644301289032852e-3` RMS) was mis-built.
 
 ### Fold band versus interior (added at completion, same raw record)
 
@@ -125,8 +135,9 @@ source order" names the first DIFFERING OPERAND, not an origin.
   `wzv_RK3_t` QCO recurrence and the `tra_adv_trp_t` area product carry no
   statement defect: there is **no W statement to land** under D96 or D122.
 - **The fold-band W debt is carried by operands produced upstream:** the
-  stage-1 U and V transports jointly (neither alone), plus the independent
-  Kbb/Kaa ratio + stage-clock pair.  The U difference is the first of these
+  stage-1 U and V transports jointly (neither alone), plus the step's
+  sea-level change entering the stretch term (corrected; the stage clock is
+  a time-level representation, not a member).  The U difference is the first of these
   in compiled order; it is held with the numbers above.
 - **The two labels' tables are array-identical** (every row, arm and replay).
   The card's kt=1 entry equals NEMO's admitted kt=1 entry (phase-2y
@@ -140,7 +151,7 @@ source order" names the first DIFFERING OPERAND, not an origin.
 | R300-P1 | **CONFIRMED** | Admission, provenance, both labels and all controls pass. |
 | R300-P2 | **CONFIRMED** | Candidate and oracle replays pass in W-equivalent units; the raw area-product row remains reported. |
 | R300-P3 | **CONFIRMED** | U difference is the first non-bit boundary on both labels. |
-| R300-P4 | **REFUTED** | Divergence substitution alone does not close W; the Kbb/Kaa/clock pair is independently required. |
+| R300-P4 | **REFUTED** (reason corrected) | Divergence substitution alone leaves `7.44e-4 m/s`; the remaining member is the step's sea-level change (time-matched ratio residual max `9.41e-3`), not the stage clock. The original "ratio/clock pair independently required" wording rested on a row that compared different time levels. |
 | R300-P5 | **CONFIRMED** | Both labels independently produce the same source order and magnitudes. |
 | R300-P6 | **CONFIRMED_MEASUREMENT_ONLY** | No production or private constituent lands. |
 
@@ -187,6 +198,104 @@ The codex session stopped at the quota ceiling after the battery reached
 - codex review: paused (quota).  The operator runs an independent Claude
   review before landing.
 
+## Review response (independent Claude review: HOLD)
+
+Evidence: `orca2_rounds/round300/` — reviewer scratch in `review_scratch/`
+(re-run here, numbers below re-derived from its arrays, not copied), the
+r300d re-measurement at tree `374222def1d9` (`raw_measurement_r300d.json`
+SHA-256 `c8650266b0feb50166338a97c1e2659f2e75920bc1ab787097400b60d7e446f8`,
+`classification_r300d.json` SHA-256
+`6099e505a37196a6e99d2dfc30b50ef032705def24c62bcedd735144a45e3b92`,
+status `HELD_R300_FIRST_W_LEAF_U_DIFFERENCE`), and `test_breaks_r300d.log`.
+The re-measurement's two labels are array-identical (every row, arm and
+replay); every row except the corrected ratio row equals the original table
+to the last printed digit.
+
+### Finding 1 — stage-1 U transport (the round's main finding)
+
+Same quantity on both sides: `e2u*e3u(Kmm)*(uu+zub)` in m3/s at the stage-1
+entry level on the east face.  NEMO builds it at
+`ORCA2_OMIP_L4_R299W7/BLD/ppsrc/nemo/stprk3_stg.f90:290`, records it at `ORCA2_OMIP_L4_R299W7/BLD/ppsrc/nemo/stprk3_stg.f90:599`, and
+differences it in `ORCA2_OMIP_L4_R299W7/BLD/ppsrc/nemo/divhor.f90:132-139`; the card side is the stage
+transport with the halo column dropped.
+
+| Quantity | Value | Label |
+|---|---|---|
+| Alignment: unshifted vs best one-cell shift, interior RMS | `8.44e4` vs `3.50e5 m3/s` (4.1x better) | CONFIRMED |
+| Interior slope / correlation, card on NEMO | 0.996 / 0.990 | CONFIRMED |
+| Fold band, cell `[147,47,25]`: card vs NEMO | `7.726e7` vs `1.346e5 m3/s` | CONFIRMED |
+| Fold band: max / RMS of card-NEMO; NEMO's own max / RMS | `7.91e7` / `6.82e6`; `1.07e6` / `8.21e4 m3/s` | CONFIRMED |
+| Fold band share of the squared domain difference (4,164 of 430,552 cells) | 98.5% | CONFIRMED |
+| Interior RMS difference relative to NEMO's interior RMS | 14.0% | CONFIRMED magnitude; cause (six steps of independent trajectory) PLAUSIBLE |
+
+These numbers are computed on the **independent** label's operands; the
+**given NEMO's entry** label's operands are array-identical in the r300d
+re-measurement, so they hold for both.  So the U-difference row's
+`1.08e6` RMS is a fold-band defect, not a domain-wide one.
+
+### Correction 2 — the ratio row compared two time levels
+
+NEMO's stage-1 W uses r3t(Kaa) = 2/3 r3t(Kbb) + 1/3 r3ta: the np_HYB
+default at `ORCA2_OMIP_L4_R299W7/BLD/ppsrc/nemo/stprk3_stg.f90:51`, applied at
+`ORCA2_OMIP_L4_R299W7/BLD/ppsrc/nemo/stprk3_stg.f90:179`, built from this step's barotropic sea level.  The
+carried after-sea-level slot feeds only stp_2D's first `wzv`
+(`ORCA2_OMIP_L4_R299W7/BLD/ppsrc/nemo/stp2d.f90:150-156`) and `dyn_spg_ts` overwrites it at
+`ORCA2_OMIP_L4_R299W7/BLD/ppsrc/nemo/stp2d.f90:303`.  The record's `w_r3aa` equals `ext_r3t` bit for bit.
+The card side's delta spans the full step to sea level N+1, so the committed
+row compared a full-step delta with a one-third-step delta: the card/NEMO
+delta ratio has median 2.9999 (16,375 cells with |NEMO delta| > 1e-7), and
+the old row's max `5.075e-2` and RMS `1.364e-3` are about twice NEMO's own
+stage-1 signal (max `2.523e-2`, 2xRMS `1.347e-3`).
+
+Rebuilt at matched time level (NEMO delta x 3, the clock ratio), the
+residual is max `9.4070653952792217e-3`, RMS `2.1140007761263205e-4`
+(fold band max `1.92e-3`, interior max `9.41e-3`), against NEMO's own
+full-step signal max `7.57e-2`.  This is its own row in the table above.
+CONFIRMED (re-measured).  Consequences:
+
+- The stretch-rate row was already time-matched (each side uses its own
+  clock) and is unchanged.
+- The cumulative arms are unchanged: with NEMO's U and V substituted, the
+  card's own full-step stretch leaves `7.44e-4 m/s`, which is a matched
+  comparison.  So a second member exists, but it is the **step's sea-level
+  change**, not a "ratio/clock pair": the clock is a time-level
+  representation.  R300-P4 stays REFUTED with that reason; the earlier
+  attribution is withdrawn.
+
+### Finding 3 — the round-300 tests were vacuous; now they bite
+
+The all-zero W test is replaced by a bit-exact NumPy known answer on
+non-zero operands (dry cells, dry bottom level) passed as traced `jit`
+arguments, at NEMO's stage clock; a second test pins the time-matched ratio
+row.  Each planted break fails and was restored (`git status --porcelain`
+empty after each):
+
+| Break | Result |
+|---|---|
+| (i) west neighbour taken from the east | 1 failed, 3 passed |
+| (ii) stretch removed from the W recurrence | 1 failed, 3 passed |
+| (iii) NEMO clock dt instead of dt/3 | 1 failed, 3 passed |
+| (iv) ratio row not time-matched | 1 failed, 3 passed |
+| restored | 4 passed |
+
+### Finding 4 — private-import ratchet
+
+Commit `5073c0601` promotes the EEN ratio fold exchange to a public name (no
+behaviour change; allowlist stays empty).  The ratchet passes (see gates).
+
+### Decision 132 evidence (reviewer-measured scratch, re-analysed here)
+
+Switching the ORCA2 card to the carried after-sea-level slot
+(`rk3_extrapolated_carried`) moves the kt=7 operands (U transport by up to
+`1.254e4 m3/s`, V by `2.541e4`, W by `2.76e-5 m/s`) but changes every
+max and RMS distance to NEMO by at most 0.04% (independent label only).
+The card's selection is not changed.
+
+### Review-response gates
+
+- Citation gate and private-import ratchet: recorded below.
+- codex review: paused (quota).
+
 ## Configuration choices
 
 - **ASKED:** none.
@@ -202,6 +311,7 @@ The codex session stopped at the quota ceiling after the battery reached
    split NEMO's stage-1 U transport product into metric, live U thickness,
    corrected stage U velocity, external correction, and mask, at matched
    program points under both labels.
-2. Keep the Kbb/Kaa/clock pair coupled; its half-states are not causal claims.
+2. The second member is the step's sea-level change (time-matched ratio
+   residual, interior max `9.41e-3`); split it after U, at matched time level.
 3. Keep the complete fold unit private and atomic.  Nothing lands until its
    remaining owner is cited and OMT-4 completes under both labels.

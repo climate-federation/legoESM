@@ -290,6 +290,8 @@ FILES = {
         _ORCA2_R299W7_COMPILED / "sshwzv.f90"),
     "ORCA2_OMIP_L4_R299W7/BLD/ppsrc/nemo/stprk3_stg.f90": (
         _ORCA2_R299W7_COMPILED / "stprk3_stg.f90"),
+    "ORCA2_OMIP_L4_R299W7/BLD/ppsrc/nemo/stp2d.f90": (
+        _ORCA2_R299W7_COMPILED / "stp2d.f90"),
     "ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/traadv.f90": (
         _ORCA2_R210OMT1_COMPILED / "traadv.f90"),
     "ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/traadv_cen.f90": (
@@ -1825,6 +1827,30 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4_R299W7/BLD/ppsrc/nemo/stprk3_stg.f90:136-137': {
         'anchors': ['rDt = r1_3 * rn_Dt', ('r1_Dt = 1._wp / rDt', 1), 2],
         'routine': 'stp_RK3_stg',
+    },
+    # --- ORCA2 round 300 review: stage-1 Kaa ratio and U transport ---
+    'ORCA2_OMIP_L4_R299W7/BLD/ppsrc/nemo/stprk3_stg.f90:51':
+        'INTEGER  :: n_baro_upd =  np_HYB',
+    'ORCA2_OMIP_L4_R299W7/BLD/ppsrc/nemo/stprk3_stg.f90:179': {
+        'anchors': 'r3t(:,:,Kaa) = r2_3 * r3t(:,:,Kbb) + r1_3 * r3ta(:,:)',
+        'routine': 'stp_RK3_stg',
+    },
+    'ORCA2_OMIP_L4_R299W7/BLD/ppsrc/nemo/stprk3_stg.f90:290': {
+        'anchors': 'zFu(ji,jj,jk) = e2u(ji,jj)*(e3u_3d(ji,jj,jk) *(1._wp+r3u(ji,jj,Kmm)',
+        'routine': 'stp_RK3_stg',
+    },
+    'ORCA2_OMIP_L4_R299W7/BLD/ppsrc/nemo/stprk3_stg.f90:599': {
+        'anchors': "CALL r175_put3(kstp, kstg, 'trp_u', zFu)",
+        'routine': 'stp_RK3_stg',
+    },
+    'ORCA2_OMIP_L4_R299W7/BLD/ppsrc/nemo/stp2d.f90:150-156': {
+        'anchors': ['IF( .NOT.lk_linssh ) THEN',
+                    'CALL wzv    ( kt, Kbb, Kbb, Kaa', 7],
+        'routine': 'stp_2D',
+    },
+    'ORCA2_OMIP_L4_R299W7/BLD/ppsrc/nemo/stp2d.f90:303': {
+        'anchors': 'CALL dyn_spg_ts( kt, Kbb, Kbb, Krhs',
+        'routine': 'stp_2D',
     },
     # --- ORCA2 round 291: carried external-mode V target boundary ---
     'ORCA2_OMIP_L4_R280STAGE1/BLD/ppsrc/nemo/dynspg_ts.f90:857-860': [
