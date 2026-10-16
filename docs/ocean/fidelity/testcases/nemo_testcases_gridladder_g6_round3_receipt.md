@@ -1,9 +1,12 @@
 # Grid ladder rung G6 — round 3 receipt (gridladder_r38)
 
 Status: **LANDED; G6 NOT CERTIFIED.**  The kt-1 stage-2 EEN vorticity term
-is now bit-exact in value at every face and depth (was 68 U / 136 V surface
-faces, 1292 U / 2630 V all levels).  The next non-bit statement at kt 1 is
-the KEG+ZAD accumulator on the same fold rows.  kt 2..6 are unchanged and
+is now VALUE-exact at every face and depth (0 unequal values; NOT
+bit-exact: signed zeros differ on zero cells exactly as at the value-exact
+HPG boundary) (was 68 U / 136 V surface
+faces, 1292 U / 2630 V all levels).  The next non-bit RECORDED BOUNDARY at kt 1
+is the combined KEG+ZAD accumulator on the same fold rows (statement inside
+it not yet walked).  kt 2..6 are unchanged and
 remain DEBT under both labels (whole-domain, ~4.5e-3 m sea level at kt 2).
 
 Preregistration: `PREREG_nemo_testcases_gridladder_g6_round3.md` (committed
@@ -58,7 +61,7 @@ Prediction table (preregistered):
 
 | | prediction | measured |
 |---|---|---|
-| P1 VOR kt 1 stage 2 | 0/0 every level | U 0, V 0 (value) every level; AT-BAR, max 0 |
+| P1 VOR kt 1 stage 2 | 0/0 every level | U 0, V 0 unequal VALUES every level (AT-BAR, max 0; value-exact, signed zeros as at HPG) |
 | P2 HPG | stays 0/0 | 0/0 |
 | P3 KEG+ZAD | falls, may not reach 0 | surface U 9.961e-10/84 -> 3.488e-13/84; V 3.578e-09/197 -> 1.214e-09/195; all-level U 1.335e-09 -> 5.225e-12 (full), V 9.696e-09 -> 6.804e-09 (full) |
 | P4 other cards | unchanged | flag selected by G6 only; G1b/G6 focused files pass |
@@ -145,7 +148,13 @@ up to 2.6e-4 on the vorticity increment here).  Not imported by this round.
 - Receipt-citation gate + private-import ratchet: 23 passed, after a
   mechanical +4 re-anchor of 60 `ocean_model_latlon_cgrid.py` pins past the
   inserted lines (gate map and audited receipt section).
-- single review (codex): see the review section appended below.
+- single review (codex), verdict quoted: "HOLD. CONFIRMED 1. Receipt overclaims
+  'bit-exact' ... Use 'value-exact.' 2. 'Next non-bit statement' is unproven
+  ... Say 'next non-bit recorded boundary.' PLAUSIBLE: None. Mask definition,
+  G6-only selection, KEG/ZAD consumers, fold sign/indexing, non-vacuity, and
+  +4 citation shifts are structurally consistent."  Both CONFIRMED findings
+  were wording; fixed in this receipt (value-exact; recorded boundary).  The
+  reviewer could not run tests (read-only sandbox).
 
 ASKED: the vor_een walk at kt 1 in compiled order; first non-bit operand
 with its citation; G6-card-selected landing tied to `rk3_vector_raw_vmask`;
