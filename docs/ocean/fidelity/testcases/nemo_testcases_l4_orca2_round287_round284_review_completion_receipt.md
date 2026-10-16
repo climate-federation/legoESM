@@ -53,8 +53,8 @@ remeasured or changed in this round.
    rather than the stale prose locator 694.  The package docstring now cites
    the live `:762-766` branch.  The executable code is unchanged.
 
-The behavioral and review-gate focused tests pass 10/10.  `git diff --check`
-is clean.
+The behavioral, review-gate, and citation-gate focused tests pass 27/27.
+`git diff --check` is clean.
 
 The cumulative default-receipt citation gate and this receipt's gate both
 pass with no failures, no unmapped citations, and no citation-map audit
