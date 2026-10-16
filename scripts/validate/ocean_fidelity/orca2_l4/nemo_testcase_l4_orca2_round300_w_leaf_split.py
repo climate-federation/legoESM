@@ -164,17 +164,12 @@ def _program(inputs: dict[str, object]) -> dict[str, np.ndarray]:
             for name, value in zip(SOURCE_ORDER, result)}
 
 
-def _candidate_context(deck_root: Path, frame_root: Path, label: str):
+def traced_kt7_stage1(deck_root: Path, frame_root: Path, label: str):
+    """Run the card six steps, then trace kt=7; return (card, state, trace, passivity)."""
     import jax
-    import jax.numpy as jnp
-    from legoesm.core.source_rounding import nemo_source_round as sr
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         LatLonCGridOceanModel, _NEMOWSLiveOperandTrace,
     )
-    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
-        nemo_qco_resolved_mesh_operands,
-    )
-    from legoesm.ocean.dynamics.latlon_cgrid_operators import compute_face_masks_3d
 
     require(label in LABELS, f"unknown label {label}")
     card = omt4.build_omt4_card(deck_root)
@@ -204,6 +199,20 @@ def _candidate_context(deck_root: Path, frame_root: Path, label: str):
     require(isinstance(trace, _NEMOWSLiveOperandTrace),
             "live trace return type moved")
     passivity = passive._ordinary_state_equal(trace.state_after, ordinary)
+    return card, state, trace, passivity
+
+
+def _candidate_context(deck_root: Path, frame_root: Path, label: str):
+    import jax
+    import jax.numpy as jnp
+    from legoesm.core.source_rounding import nemo_source_round as sr
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+        nemo_qco_resolved_mesh_operands,
+    )
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import compute_face_masks_3d
+
+    card, state, trace, passivity = traced_kt7_stage1(
+        deck_root, frame_root, label)
     geometry = trace.stage_geometry[0]
     u_mask, v_mask = compute_face_masks_3d(
         card.recipe.z_coord.is_active, card.recipe.grid)
