@@ -79,6 +79,8 @@ def main() -> int:
     parser.add_argument("--twin-a", type=Path)
     parser.add_argument("--expect-commit")
     parser.add_argument("--classify", nargs=2, type=Path)
+    # arm-vs-arm (one variable): the first arm stands in as the control.
+    parser.add_argument("--classify-arms", nargs=2, type=Path)
     parser.add_argument("--decide", nargs="+", type=Path)
     parser.add_argument("--plant", choices=("none", "exact-loss",
                                              "retained-selector"),
@@ -109,6 +111,14 @@ def main() -> int:
                               if on])
         elif args.classify:
             result = r276.classify(*args.classify, plant=args.plant)
+        elif args.classify_arms:
+            base, cand = (json.loads(p.read_text(encoding="utf-8"))
+                          for p in args.classify_arms)
+            require(base["arm"] != "control" and cand["arm"] != base["arm"],
+                    "--classify-arms compares two non-control arms")
+            result = r276.classify_documents(
+                dict(base, arm="control"), cand, plant=args.plant)
+            result["baseline_arm"] = base["arm"]
         else:
             require(args.decide is not None, "no gate operation selected")
             result = r278.decide(args.decide)
