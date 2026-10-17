@@ -63,6 +63,7 @@ from legoesm.ocean.vertical import (
     compute_layer_thickness,
     compute_ocean_jacobian,
     nemo_qco_live_face_geometry_from_operands,
+    nemo_qco_r1_area_f,
     nemo_qco_resolved_mesh_operands,
 )
 from legoesm.ocean.state import (
@@ -3675,6 +3676,19 @@ def _bc_horizontal_viscosity(
                     "cell-centre layer thickness h_k to be passed to "
                     "_bc_horizontal_viscosity."
                 )
+            _r1_e1e2f = None
+            if config.nemo_ldf_stored_f_area:
+                # domhgr.f90:156 r1_e1e2f, read at dynldf_lev.f90:123.  NEMO's
+                # F(j, i) is vertex [j+1, i+1]; vertex column 0 is F(:, n_lon-1)
+                # and the south vertex row (a wall, ahmf = 0) repeats row 0.
+                _raw = getattr(z_coord, "nemo_een_barotropic", None)
+                if getattr(_raw, "e1f", None) is None or getattr(_raw, "e2f", None) is None:
+                    raise ValueError(
+                        "nemo_ldf_stored_f_area needs the card's raw e1f/e2f "
+                        "(z_coord.nemo_een_barotropic)")
+                _r1f = nemo_qco_r1_area_f(_raw, grid, u.dtype)
+                _r1f = jnp.concatenate([_r1f[:1], _r1f], axis=0)
+                _r1_e1e2f = jnp.concatenate([_r1f[:, -1:], _r1f], axis=1)
             diag_Ah_lap_u, diag_Ah_lap_v = nemo_ldf_lap_viscosity_e3_cgrid(
                 u, v, grid, _ahmt, _ahmf, h_k,
                 mask=mask, u_mask=u_mask, v_mask=v_mask,
@@ -3682,7 +3696,9 @@ def _bc_horizontal_viscosity(
                 thickness_operands=ldf_thickness_operands,
                 metric_reciprocal_operands=ldf_metric_reciprocal_operands,
                 coefficient_fmask_already_applied=(
-                    _ahm_source == "nemo_ahm_3d_file"))
+                    _ahm_source == "nemo_ahm_3d_file"),
+                stored_r1_e1e2f=_r1_e1e2f,
+                nemo_fold_rows=config.nemo_ldf_fold_rows)
         else:
             diag_Ah_lap_u, diag_Ah_lap_v = nemo_ldf_lap_viscosity_cgrid(
                 u, v, grid, _ahmt, _ahmf,

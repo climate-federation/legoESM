@@ -1649,6 +1649,8 @@ def nemo_ldf_lap_viscosity_e3_cgrid(
                                       jnp.ndarray] | None = None,
     coefficient_fmask_already_applied: bool = False,
     return_intermediates: bool = False,
+    stored_r1_e1e2f: jnp.ndarray | None = None,
+    nemo_fold_rows: bool = False,
 ) -> tuple[jnp.ndarray, jnp.ndarray] | tuple[
     jnp.ndarray, jnp.ndarray, dict[str, jnp.ndarray]
 ]:
@@ -1733,6 +1735,13 @@ def nemo_ldf_lap_viscosity_e3_cgrid(
         ``r1_e2u`` and ``r1_e1v`` operands.  The NEMO identity harness passes
         these as dynamic given inputs so XLA cannot replace the compiled
         multiply-then-divide statements with reciprocal multiplication.
+    stored_r1_e1e2f : (n_lat+1, n_lon+1), optional
+        NEMO's stored ``r1_e1e2f`` on the vertex layout, replacing
+        ``1/grid.area_q`` when ``metric_reciprocal_operands`` is not given.
+    nemo_fold_rows : bool, default False
+        T-pivot fold: the divergence reads the V fold row's flux as the
+        fold image of the row below, and the F fold row's curl term is the
+        F image of the row below (NEMO's lbc-complete operands).
     coefficient_fmask_already_applied : bool, default False
         The ``nn_ahm_ijk_t=-30`` read path stores ``ahmf*fmask`` before
         ``dyn_ldf`` runs (``ldfdyn.f90:387-393``).  Do not apply legoESM's
@@ -1796,12 +1805,18 @@ def nemo_ldf_lap_viscosity_e3_cgrid(
         e1v = jnp.asarray(grid.dx_v)[..., jnp.newaxis]
         zu = sbr(sbr(e2u * e3u_kbb) * u_eff)
         zv = sbr(sbr(e1v * e3v_kbb) * v_eff)
+        if nemo_fold_rows:
+            # dynldf_lev.f90:127-129 reads pv on the V fold row, which the
+            # lbc_lnk 'V', -1 exchange holds as the image of the row below.
+            fold = grid.fold
+            zv = zv.at[-1].set(fold.vector_sign_v * zv[-2][fold.perm_v])
         dx = sbr(zu[:, 1:] - zu[:, :-1])
         dy = sbr(zv[1:] - zv[:-1])
         flux_sum = sbr(dx + dy)
         if metric_reciprocal_operands is None:
             r1_area_t = sr(1.0 / jnp.asarray(grid.area_T))[..., jnp.newaxis]
-            r1_area_f = sr(1.0 / jnp.asarray(grid.area_q))[..., jnp.newaxis]
+            r1_area_f = (sr(1.0 / jnp.asarray(grid.area_q)) if stored_r1_e1e2f is None
+                         else jnp.asarray(stored_r1_e1e2f))[..., jnp.newaxis]
             r1_e1u = sr(1.0 / jnp.asarray(grid.dx_u))[..., jnp.newaxis]
             r1_e2v = sr(
                 1.0 / jnp.maximum(jnp.asarray(grid.dy_v), 1.0e-30)
@@ -1831,6 +1846,13 @@ def nemo_ldf_lap_viscosity_e3_cgrid(
             ahmf_live = sr(ahmf_live * _bm(fmask))
         zcur_scale = sbr(sbr(ahmf_live * e3f_live) * r1_area_f)
         zcur = sbr(zcur_scale * curl_bracket)
+        if nemo_fold_rows:
+            # dynldf_lev.f90:123 computes zwf on the F fold row from halo
+            # operands; it equals the F image of the row below.  Vertex
+            # [j+1, i+1] is NEMO's F(j, i); vertex column 0 is F(:, n_lon-1).
+            from legoesm.ocean.vertical import nemo_t_fold_f_owned
+            top = nemo_t_fold_f_owned(zcur[1:, 1:], grid)[-1]
+            zcur = zcur.at[-1].set(jnp.concatenate([top[-1:], top], axis=0))
 
         zdiv_pad_x = pad_lon_cgrid(zdiv, halo=1)
         div_dx = sbr(zdiv_pad_x[:, 1:] - zdiv_pad_x[:, :-1])

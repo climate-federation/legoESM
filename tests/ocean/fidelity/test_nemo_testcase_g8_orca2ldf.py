@@ -33,6 +33,8 @@ SWITCH = {"namdyn_ldf.ln_dynldf_off": (True, False),
           "namdyn_ldf.ln_dynldf_lap": (False, True),
           "namdyn_ldf.ln_dynldf_lev": (None, True),
           "namdyn_ldf.nn_ahm_ijk_t": (None, -30)}
+G8_LDF_STATEMENTS = ("nemo_ldf_stored_f_area", "nemo_ldf_fold_rows",
+                     "rk3_stage1_ldf_source_order")
 
 
 @pytest.fixture(autouse=True, scope="module")
@@ -108,8 +110,10 @@ def test_g8_card_is_g5_plus_the_read_coefficient_laplacian(tmp_path):
     g5 = recipe.build_orca2g5_ice_card(g5_root)
     g8 = recipe.build_nemo_testcase_card("ORCA2G8-ldf", deck_root=g8_root)
     c5, c8 = g5.recipe.model_config, g8.recipe.model_config
-    # exactly one config field moves, and in it exactly A_h (OMT-3's edge)
-    assert [f for f in c5._fields if getattr(c5, f) != getattr(c8, f)] == ["lateral_viscosity"]
+    # A_h (OMT-3's edge) plus the three dyn_ldf statements of round 1
+    assert [f for f in c5._fields if getattr(c5, f) != getattr(c8, f)] == [
+        "lateral_viscosity", *G8_LDF_STATEMENTS]
+    assert all(getattr(c8, f) is True and getattr(c5, f) is False for f in G8_LDF_STATEMENTS)
     assert c8.lateral_viscosity == c5.lateral_viscosity._replace(A_h=1.0e5)
     assert c5.lateral_viscosity.A_h == 0.0
     assert (c8.lateral_viscosity_operator, c8.lateral_viscosity_e3_weighting,
@@ -142,6 +146,10 @@ def test_g8_card_is_g5_plus_the_read_coefficient_laplacian(tmp_path):
     planted = g8._replace(recipe=g8.recipe._replace(model_config=c8._replace(
         lateral_viscosity=c5.lateral_viscosity)))
     assert recipe._orca2g1_selector_failures(planted) == ["ln_dynldf_lap"]
+    for field, row in zip(G8_LDF_STATEMENTS, ("ldf stored F area", "ldf fold rows",
+                                              "stage-1 ldf source order")):
+        planted = g8._replace(recipe=g8.recipe._replace(model_config=c8._replace(**{field: False})))
+        assert recipe._orca2g1_selector_failures(planted) == [row]
 
 
 @needs_inputs
@@ -205,3 +213,92 @@ def test_g2_family_ladder_routes_g8_through_the_ice_record_path():
     spec.loader.exec_module(ladder)
     assert "ORCA2G8-ldf" in ladder.CASES
     assert "ORCA2G8-ldf" in ladder.ICE_CASES and "ORCA2G8-ldf" in ladder.FORCED
+
+
+def _ldf_literal(raw, e3t, tm, ahmt_n, ahmf_n, u, v):
+    """dynldf_lev.f90:121-140 at Kbb = Kmm with r3 = 0, on arrays extended by
+    one T-pivot ghost row (lbcnfd T-fold images; U/V velocity sign -1)."""
+    n = u.shape[1]
+    pt, pf = (n - np.arange(n)) % n, (n - np.arange(n) - 1) % n
+    gT = lambda a: np.concatenate([a, a[-2:-1][:, pt]], 0)          # noqa: E731
+    gU = lambda a, s=1: np.concatenate([a, s * a[-2:-1][:, pf]], 0)  # noqa: E731
+    gV = lambda a, s=1: np.concatenate([a, s * a[-3:-2][:, pt]], 0)  # noqa: E731
+    gF = lambda a: np.concatenate([a, a[-3:-2][:, pf]], 0)          # noqa: E731
+    X = lambda a: np.asarray(a, np.float64)[..., None]               # noqa: E731
+    um, vm = gU(np.asarray(raw.umask)), gV(np.asarray(raw.vmask))
+    e3u, e3v, e3f = gU(np.asarray(raw.e3u_0)), gV(np.asarray(raw.e3v_0)), gF(np.asarray(raw.e3f_0))
+    e1u, e2u = gU(X(raw.e1u)), gU(X(raw.e2u))
+    e1v, e2v = gV(X(raw.e1v)), gV(X(raw.e2v))
+    e1f, e2f, e1t, e2t = gF(X(raw.e1f)), gF(X(raw.e2f)), gT(X(raw.e1t)), gT(X(raw.e2t))
+    e3t, ahmt, ahmf = gT(e3t), gT(ahmt_n), gF(ahmf_n)
+    u, v = gU(u, -1), gV(v, -1)
+    E = lambda a: np.roll(a, -1, 1)   # noqa: E731
+    W = lambda a: np.roll(a, 1, 1)    # noqa: E731
+    N = lambda a: np.roll(a, -1, 0)   # noqa: E731
+    S = lambda a: np.roll(a, 1, 0)    # noqa: E731
+    safe = lambda h: np.where(h > 0, h, 1.0)  # noqa: E731
+    zwf = ahmf * e3f / (e1f * e2f) * ((E(e2v * v) - e2v * v) - (N(e1u * u) - e1u * u))
+    fu, fv = e2u * e3u * u, e1v * e3v * v
+    zwt = ahmt / (e1t * e2t) / safe(e3t) * ((fu - W(fu)) + (fv - S(fv)))
+    lu = um * (-(zwf - S(zwf)) / e2u / safe(e3u) + (E(zwt) - zwt) / e1u)
+    lv = vm * ((zwf - W(zwf)) / e1v / safe(e3v) + (N(zwt) - zwt) / e2v)
+    return lu[:-1], lv[:-1]
+
+
+@needs_inputs
+def test_g8_dyn_ldf_lev_matches_nemo_statement_with_stored_f_area_and_fold_rows(tmp_path):
+    """The card's operator against dynldf_lev.f90:121-140 on the T-pivot fold.
+
+    Fails with the grid's own F area (its area_q holds the next F point's
+    area on the vertex layout, ~13% here) and without the fold rows (the
+    zeroed V fold row and missing F fold row, ~1-4% on rows 146/147)."""
+    import jax.numpy as jnp
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+        nemo_ldf_lap_viscosity_e3_cgrid as op)
+    from legoesm.ocean.vertical import nemo_qco_r1_area_f
+    card = recipe.build_nemo_testcase_card("ORCA2G8-ldf", deck_root=_root(tmp_path, G8))
+    grid, z = card.recipe.grid, card.recipe.z_coord
+    raw = z.nemo_een_barotropic
+    tm = np.asarray(z.is_active, np.float64)
+    e3t = np.asarray(z.nemo_e3t_0, np.float64) * tm
+    um, vm = np.asarray(raw.umask), np.asarray(raw.vmask)
+    rng = np.random.default_rng(8)
+    n = tm.shape[1]
+    u = rng.normal(0.0, 0.1, um.shape) * um
+    v = rng.normal(0.0, 0.1, vm.shape) * vm
+    v[-1] = -v[-2][(n - np.arange(n)) % n]          # the lbc_lnk 'V', -1 fold row
+    pf = (n - np.arange(n) - 1) % n                 # and the self-imaged U pivot row
+    u[-1] = 0.5 * (u[-1] - u[-1][pf]) * um[-1] * um[-1][pf]
+    pu = lambda a: np.concatenate([a[:, -1:], a], 1)                       # noqa: E731
+    pv = lambda a: np.concatenate([np.zeros_like(a[:1]), a], 0)            # noqa: E731
+    def pfv(a):
+        s = np.concatenate([a[:1], a], 0)
+        return np.concatenate([s[:, -1:], s], 1)
+    th = tuple(jnp.asarray(x) for x in (e3t, pu(np.asarray(raw.e3u_0)), pv(np.asarray(raw.e3v_0)),
+                                        pfv(np.asarray(raw.e3f_0)), pu(np.asarray(raw.e3u_0)),
+                                        pv(np.asarray(raw.e3v_0))))
+    r1f = pfv(np.asarray(nemo_qco_r1_area_f(raw, grid, jnp.float64)))
+    vmask_compact = np.asarray(raw.vmask).copy()
+    vmask_compact[-1] = 0.0                          # legoESM's compact V mask: fold row dry
+
+    def run(stored, fold):
+        f = jax.jit(lambda uu, vv: op(
+            uu, vv, grid, z.nemo_ldf_ahmt, z.nemo_ldf_ahmf, th[0], mask=jnp.asarray(tm[..., 0]),
+            u_mask=jnp.asarray(pu(um)), v_mask=jnp.asarray(pv(vmask_compact)),
+            thickness_operands=th, coefficient_fmask_already_applied=True,
+            stored_r1_e1e2f=jnp.asarray(r1f) if stored else None, nemo_fold_rows=fold))
+        a, b = f(jnp.asarray(pu(u)), jnp.asarray(pv(v)))
+        return np.asarray(a)[:, 1:], np.asarray(b)[1:]
+
+    ahmf_n = np.asarray(z.nemo_ldf_ahmf)[1:, 1:]
+    lu, lv = _ldf_literal(raw, e3t, tm, np.asarray(z.nemo_ldf_ahmt), ahmf_n, u, v)
+    def err(stored, fold):
+        cu, cv = run(stored, fold)
+        # row 0 is Antarctica; V row 147 is replaced by the stage's fold exchange
+        return (np.abs(cu - lu)[1:].max() / np.abs(lu).max(),
+                np.abs(cv - lv)[1:-1].max() / np.abs(lv).max())
+    eu, ev = err(True, True)
+    assert eu < 1e-14 and ev < 1e-14, (eu, ev)
+    assert min(err(False, True)) > 1e-3           # grid area_q: the next F point's area
+    eu, ev = err(True, False)
+    assert eu > 1e-3 and ev > 1e-3                # fold rows: u row 147, v row 146

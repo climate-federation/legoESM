@@ -3315,6 +3315,23 @@ class LatLonCGridOceanConfig(NamedTuple):
     # the stage sea level.  Equal only algebraically.  False preserves
     # previously measured cards.
     nemo_stage_momentum_wzv_stored_kmm_ratios: bool = False
+    # NEMO's dyn_ldf_lev curl term multiplies by the stored F reciprocal
+    # r1_e1e2f = 1/(e1f*e2f) (domhgr.f90:156, read at dynldf_lev.f90:123).
+    # The tripole grid's area_q is padded at its far end, so on the vertex
+    # layout it holds the next F point's area.  True supplies NEMO's array
+    # on the vertex layout; False preserves previously measured cards.
+    nemo_ldf_stored_f_area: bool = False
+    # NEMO's dyn_ldf_lev reads lbc-complete operands on a T-pivot fold: the
+    # V fold row's flux (the image of the row below, dynldf_lev.f90:127-129)
+    # and the F fold row's curl term (dynldf_lev.f90:123).  The compact V
+    # mask zeroes the first, and the zero north pad the second.  False
+    # preserves previously measured cards.
+    nemo_ldf_fold_rows: bool = False
+    # stp_2D accumulates the stage-1 Krhs as dyn_hpg -> dyn_ldf -> dyn_vor
+    # -> dyn_keg/dyn_zad (stp2d.f90:141-147); the card's default sum adds
+    # the vorticity term before the lateral diffusion.  True selects NEMO's
+    # order for the step-entry RHS; False preserves previously measured cards.
+    rk3_stage1_ldf_source_order: bool = False
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":
