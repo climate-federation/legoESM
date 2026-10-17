@@ -568,6 +568,10 @@ FILES = {
     # cites the switch each card resolves rather than describing it.
     "ORCA2_OMIP_L4/EXP00/namelist_cfg": (
         NEMO / "cfgs/ORCA2_OMIP_L4/EXP00/namelist_cfg"),
+    "ORCA2_OMIP_L4/EXP00/namelist_ref": (
+        NEMO / "cfgs/ORCA2_OMIP_L4/EXP00/namelist_ref"),
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/dom_oce.f90": (
+        _ORCA2_COMPILED / "dom_oce.f90"),
     "OVERFLOW_OMIP_L1/EXP00/namelist_cfg": (
         NEMO / "tests/OVERFLOW_OMIP_L1/EXP00/namelist_cfg"),
     # The namelist the CERTIFIED OVERFLOW reference run actually used, which
@@ -8075,6 +8079,38 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/trazdf.f90:288-289': [
         ('zrhs =       (e3t_3d(ji,jj,jk)', 1),
         ('& + p2dt * (e3t_3d(ji,jj,jk)', 1), 2],
+    # --- ORCA2 round 304: G5 tracer-surface statements (Decision 122) ---
+    # Both run because key_linssh is absent from the build (lk_linssh=.FALSE.);
+    # sfx at :308 is SI3's (nn_ice = 2).
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/trasbc.f90:220': 'SUBROUTINE tra_sbc_RK3 (',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/trasbc.f90:282': {
+        'anchors': 'IF( .NOT.lk_linssh ) THEN           !* only heat and salt fluxes',
+        'routine': 'tra_sbc_RK3',
+    },
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/trasbc.f90:284-286': {
+        'anchors': [
+            ('z1_rho0_e3t = r1_rho0 / (e3t_3d(ji,jj,1) *(1._wp+r3t(ji,jj,Kmm)*tmask(ji,jj,1)))', 1),
+            '- emp(ji,jj)*pts(ji,jj,1,jp_sal,Kbb) * z1_rho0_e3t', 3],
+        'routine': 'tra_sbc_RK3',
+    },
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/trasbc.f90:292': {
+        'anchors': ('IF( lk_linssh ) THEN                !* linear free surface', 2),
+        'routine': 'tra_sbc_RK3',
+    },
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/trasbc.f90:308': {
+        'anchors': '+           sfx(ji,jj) * z1_rho0_e3t',
+        'routine': 'tra_sbc_RK3',
+    },
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:49': 'INTEGER  :: n_baro_upd =  np_HYB',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:78': 'SUBROUTINE stp_RK3_stg(',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:177': {
+        'anchors': 'r3t(:,:,Kaa) = r2_3 * r3t(:,:,Kbb) + r1_3 * r3ta(:,:)   ! at N+1/3 (Kaa)',
+        'routine': 'stp_RK3_stg',
+    },
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dom_oce.f90:137': 'lk_linssh = .FALSE.',
+    'ORCA2_OMIP_L4/EXP00/namelist_cfg:85': 'nn_ice      = 2',
+    'ORCA2_OMIP_L4/EXP00/namelist_cfg:251': 'ln_lin = .true.',
+    'ORCA2_OMIP_L4/EXP00/namelist_ref:817': 'ln_drgimp   = .true.',
 }
 
 

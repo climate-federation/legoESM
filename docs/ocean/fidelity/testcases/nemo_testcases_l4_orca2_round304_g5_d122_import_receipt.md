@@ -13,8 +13,8 @@ Codex review: paused (quota). Independent review: operator (Claude).
 
 | G5 statement | (a) G5 certification | (b) ORCA2_OMIP_L4 line, SUBROUTINE, switches | (c)+(d) on 7 pairs | verdict |
 |---|---|---|---|---|
-| B. stage-1/2 Kmm divisor + EMP dilution, with stage-1 `r3t(Kaa)` | `nemo_testcases_gridladder_g5_round4` §3 item 1 and §5 rows 1, 2, 5 | `ORCA2_OMIP_L4/BLD/ppsrc/nemo/trasbc.f90:284-286` (`tra_sbc_RK3`, :220); `ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:177` (`stp_RK3_stg`, :78; `n_baro_upd = np_HYB` at :49); runs because `ln_linssh` is unset (non-linear ssh, `CASE(1,2)` `.NOT.lk_linssh`) | pass | **ON** (all cards) |
-| C. stage-3 salt flux `sfx*z1_rho0_e3t` | `nemo_testcases_gridladder_g5_round4` §3 item 2 and §5 row 3 | `ORCA2_OMIP_L4/BLD/ppsrc/nemo/trasbc.f90:308` (`tra_sbc_RK3`, `CASE(3)` non-linear branch); `sfx` comes from SI3 (`nn_ice = 2`, `ORCA2_OMIP_L4/EXP00/namelist_cfg:85`) | pass | **ON** (rung 10 only) |
+| B. stage-1/2 Kmm divisor + EMP dilution, with stage-1 `r3t(Kaa)` | `nemo_testcases_gridladder_g5_round4` §3 item 1 and §5 rows 1, 2, 5 | `ORCA2_OMIP_L4/BLD/ppsrc/nemo/trasbc.f90:284-286` (`tra_sbc_RK3`, `:220`); `ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:177` (`stp_RK3_stg`, `:78`; `n_baro_upd = np_HYB` at `:49`); runs because the build defines no linear-free-surface key (`cfgs/ORCA2_OMIP_L4/cpp_ORCA2_OMIP_L4.fcm:1`), so `lk_linssh = .FALSE.` (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/dom_oce.f90:137`) and the stage-1/2 guard `ORCA2_OMIP_L4/BLD/ppsrc/nemo/trasbc.f90:282` is true. No namelist switch is involved | pass | **ON** (all cards) |
+| C. stage-3 salt flux `sfx*z1_rho0_e3t` | `nemo_testcases_gridladder_g5_round4` §3 item 2 and §5 row 3 | `ORCA2_OMIP_L4/BLD/ppsrc/nemo/trasbc.f90:308` (`tra_sbc_RK3`, the `ELSE` of `:292`, taken because `lk_linssh = .FALSE.`); `sfx` comes from SI3 (`nn_ice = 2`, `ORCA2_OMIP_L4/EXP00/namelist_cfg:85`) | pass | **ON** (rung 10 only) |
 | A. implicit ice-ocean top drag (`rCdU_top`, residual before wind, substep, `dyn_zdf`, barotropic) | `nemo_testcases_gridladder_g5_round3` "Decision 122" table; certified at round 4 | same lines run (G5 round 3 table) | not measured | **OFF** |
 
 Why A stays off: ORCA2 runs linear bottom drag (`ln_lin = .true.`,
@@ -61,8 +61,9 @@ Predictions:
   not a field-level diff.
 - R304-P4 **CONFIRMED**: GYRE is byte-identical.
 
-B and C were measured as one set, as G5 certified them. Their separate
-contributions on rung 10 were not measured.
+B and C were measured as one set, as G5 certified them. C acts only on
+rung 10 (the only card with surface forcing), and there B and C were measured
+together and never apart: C's own effect is unmeasured on every card.
 
 Plants: an exact-row loss exits 2 with `STATUS PLANT-FIRED: previously exact
 rows left the bar: [(1, 'entry', 'T')]`. A control that keeps a selector on
@@ -75,7 +76,9 @@ exits 2 with `STATUS PLANT-FIRED: rung10: control retains a G5 selector`.
   30/30 byte-identical. The gate script exits 1 on both base and tip; that exit
   predates this round (round 302's base also exits 1).
 - Citation gate + private-import ratchet + the round-304/285 import tests:
-  28 passed. One mechanical re-anchor was needed (`reanchor_default_receipt.py`
+  28 passed. The gate run on THIS receipt first failed (six cited lines had
+  no map entry); after the review the entries were added and the gate passes
+  on this receipt (see the answer commit). One mechanical re-anchor was needed (`reanchor_default_receipt.py`
   in the evidence directory). One span grew 174 -> 199 lines; its pinned
   endpoint statements are unchanged, the same growth G5 round 4 recorded.
 - Rest of the push battery (TKE, recipe, freshwater, stage face mask,
@@ -95,8 +98,12 @@ UNASKED, offered for revert:
 
 ## OPEN
 
-1. The ice-ocean top drag on ORCA2 needs a ladder rung with ORCA2's linear
-   bottom drag plus SI3 (the combined top+bottom coefficient) before a D122
-   import.
+1. Next round, not this one: ORCA2 runs G5's ice-ocean top drag (A)
+   TOGETHER with ORCA2's linear bottom drag. The ladder rung G7 (G5 plus
+   ORCA2's linear bottom drag, in byte-identical compiled files) was certified
+   on 2026-10-16 (gridladder receipt `nemo_testcases_gridladder_g7_round1`;
+   brief addendum 100). Importing A together with G7's two bottom-drag
+   statements (bottom residual and bottom coefficient) under D122 is the next
+   round's work.
 2. Unchanged: promote fold unit + transport mask + top-V atomically (round
    303); D126 and D132 pending unchanged.
