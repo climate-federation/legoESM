@@ -184,7 +184,7 @@ All CPU fp64, `JAX_ENABLE_X64=1`, PYTHONPATH as in `claude_rounds/land.sh`.
 - Card constructibility, opt-in defaults, after-SSH carry: 57 passed.
 - Receipt citation gate on THIS receipt (from its title): 21 citations,
   failures 0, unmapped 0, map audit 0; a planted shift of the
-  `dynzad.f90:119` citation FAILS it (`SYMBOL-NOT-AT-LINE`).  Round-43
+  G5-build dyn_zad zzWdzU citation (line 119) FAILS it (`SYMBOL-NOT-AT-LINE`).  Round-43
   entries added to the gate's maps; 78 pins and 21 lines of the GYRE
   phase-3 round-8 receipt re-anchored by the repo's re-anchor tool
   (mechanical, from `6f01650a57`); three spans the landing lengthened
