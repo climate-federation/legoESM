@@ -825,6 +825,7 @@ def _surface_forcings(
             jnp.asarray(fields["rnf_tsc"][..., 1]),
         ),
         q_nonsolar=jnp.asarray(fields["qns"]),
+        salt_flux_sfx=jnp.asarray(fields["sfx"]),
     )
     return freshwater, surface
 

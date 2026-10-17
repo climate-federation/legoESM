@@ -350,6 +350,10 @@ class OceanSurfaceForcing(NamedTuple):
     # This is the stage-3 source operand written by tra_sbc before runoff and
     # penetrative shortwave are accumulated; it remains separate from q_net
     # so the NEMO written order can be reproduced without reconstructing it.
+    salt_flux_sfx: object = None
+    # jnp.ndarray | None [g/m^2/s], NEMO ``sfx`` as recorded.  Read only by
+    # ``rk3_stage3_salt_nemo_written`` (trasbc.f90:308 ``sfx*z1_rho0_e3t``);
+    # ``1e3*(1e-3*sfx)`` through ``salt_flux`` is not bitwise ``sfx``.
 
 
 class OceanConfig(NamedTuple):
@@ -3237,6 +3241,16 @@ class LatLonCGridOceanConfig(NamedTuple):
     # False keeps the thickness mean 0.5*(h(Kbb)+h(Kaa)).  Needs
     # rk3_stage3_heat_nemo_written.
     rk3_stage3_tracer_nemo_stored_thickness: bool = False
+    # Stage 2's Kmm thickness as NEMO stores it, e3t_0*(1+r3t(Kmm)) with
+    # r3t(Kmm) stage 1's (2/3)r3t(Kbb)+(1/3)r3ta, in the stage-2 EMP dilution
+    # and runoff divisors (trasbc.f90:284-286, sbcrnf.f90:281).  False keeps
+    # the thickness interpolant h(Kbb)+(h(Kaa)-h(Kbb))/3.
+    rk3_stage2_tracer_nemo_stored_thickness: bool = False
+    # NEMO's stage-3 salinity Krhs (trasbc.f90:308, non-linear ssh, then
+    # runoff): ``sfx*z1_rho0_e3t`` on the stored Kmm thickness, from
+    # ``OceanSurfaceForcing.salt_flux_sfx``.  False rescales the Kbb salt-flux
+    # tendency to Kmm.  Needs rk3_stage3_tracer_nemo_stored_thickness.
+    rk3_stage3_salt_nemo_written: bool = False
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":

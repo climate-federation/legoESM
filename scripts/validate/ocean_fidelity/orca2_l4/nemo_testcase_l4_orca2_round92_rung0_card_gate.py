@@ -86,6 +86,8 @@ def build_rung0_card(deck_root: Path):
         # forcing-path selectors to stay off here and on OMT-1..4.
         rk3_stage3_heat_nemo_written=False,
         rk3_stage3_tracer_nemo_stored_thickness=False,
+        # G5's stage-3 salt statement reads the recorded sfx (round 304).
+        rk3_stage3_salt_nemo_written=False,
     )
     root = Path(deck_root)
     temperature, salinity = build_orca2_initial_ts(

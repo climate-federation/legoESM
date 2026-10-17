@@ -1771,6 +1771,12 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
         rk3_stage_tracer_written_order=True,
         rk3_stage3_heat_nemo_written=True,
         rk3_stage3_tracer_nemo_stored_thickness=True,
+        # G5 round 4 / ORCA2 round 304: stage-1/2 stored Kmm divisor and EMP
+        # dilution (trasbc.f90:284-286; r3t(Kaa) stprk3_stg.f90:177) and the
+        # stage-3 recorded-sfx salt Krhs (trasbc.f90:308).  G5's ice-ocean
+        # top drag stays off: ORCA2 runs ln_lin bottom drag in the same pCdU.
+        rk3_stage2_tracer_nemo_stored_thickness=True,
+        rk3_stage3_salt_nemo_written=True,
         barotropic=model_config.barotropic._replace(
             barotropic_een_ratio_fold_exchange=True,
             barotropic_een_fe3mask_pivot_row=True,
