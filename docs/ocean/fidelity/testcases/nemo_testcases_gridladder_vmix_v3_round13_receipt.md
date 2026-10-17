@@ -1,7 +1,9 @@
-# Vertical-mixing lane — round 13 (vmix_r13): V3 = V2 + ORCA2's double diffusion, built, awaiting record
+# Vertical-mixing lane — round 13 (vmix_r13): V3 = V2 + ORCA2's double diffusion CERTIFIED
 
-Status: **STOPPED_FOR_RECORD.** V3 = certified V2 + ORCA2's double-diffusive mixing (`ln_zdfddm` T, `rn_avts` 1e-4,
-`rn_hsbfr` 1.6; `ORCA2_OMIP_L4/EXP00/namelist_cfg:393-395`). Card and acquisition built; nothing scored (no record).
+Status: **V3 CERTIFIED** (resume, 2026-10-17). V3 = certified V2 + ORCA2's double-diffusive mixing (`ln_zdfddm` T,
+`rn_avts` 1e-4, `rn_hsbfr` 1.6; `ORCA2_OMIP_L4/EXP00/namelist_cfg:393-395`). After two association fixes, every field,
+every level, kt 1..10, bit-for-bit with NEMO's admitted record under both labels; worst row under each label: 0 (exact).
+Sections 1-4 are the pre-record half; section 5 scores V3.
 
 Decisions in force: D128-D130. Codex review: paused (quota). Evidence: `gridladder_vmix_rounds/round13/`.
 Preregistration: `PREREG_nemo_testcases_gridladder_vmix_v3_round13.md`, committed `5ce2a0cb9` before any V3 code.
@@ -116,9 +118,100 @@ checkout (default is read-only preflight, `V3_PREFLIGHT_OK`).
 
 `jaxpr_all_final.log`'s hash equals round 12's: both logs read "orca2 IDENTICAL / dino IDENTICAL"; the jaxprs differ.
 
+## 5. V3 scored (resume after the record)
+
+Record: `gridladder_vmix_rounds/round13/oracle_v3_r13` (operator: `V3_PREFLIGHT_OK` at `8fedda974`, nothing built;
+`V3_ACQUISITION_PASS steps=1..10 restarts=2..10`; `V3_DDM_FRAME unequal_avs_avt=412297 of 825840`). CPU, x64, `land.sh`
+PYTHONPATH. Commits: `568c70c42` ladder; `5e5c3c645` DDM division fix; `cae45eeee` EVD trigger fix; `dd00283a6` map
+entries and two comment line numbers; this update.
+
+Own error, stated first: my round-13 statement test ran only eagerly; the jitted statement was never compared, and it
+differed.
+
+**First score, V3 as built (`8fedda974`): not at the bar.**
+- kt 1: the avt/avs/avm the solves consume vs NEMO's post-`zdf_phy` frame: 9,735 / 15,105 / 5,113 wet W cells
+  unequal (max 1.7e-18 / 8.7e-19 / 6.9e-18 absolute); T and S unequal in 2 cells.
+- First over-bar row: kt 2, both labels (T max 2.7e-13, S 1.7e-12; all-level T 1.41e-13 normalised).
+
+**Walk 1, kt 1, `zdf_ddm` first.**
+- NEMO's statements (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfddm.f90:59`) in scalar doubles with glibc `exp`, on the card's
+  own operands: equal to NEMO's frame in **every** wet W cell, avt, avs and avm (0 unequal). The operands and
+  source order are NEMO's.
+- The card's statement run eagerly equals that too (0). Run under jit alone, it differs in exactly the card's cells,
+  all of them salt-fingering.
+- Optimized HLO: `zrau / rn_hsbfr` is lowered as `zrau * 0.625`. NEMO divides by a runtime namelist value
+  (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfddm.f90:161`, the same line in
+  `ORCA2V1_OMIP_L4_R1FULLENTRY/BLD/ppsrc/nemo/zdfddm.f90:161`, inside `zdf_ddm` at
+  `ORCA2V1_OMIP_L4_R1FULLENTRY/BLD/ppsrc/nemo/zdfddm.f90:59`).
+- Fix: the divisor passes through the existing source-rounding guard, keeping a true division (isolated: 0 vs
+  70,442 unequal of 200,000). After it: kt-1 avt/avs/avm 0 unequal; kt 1 and 2 every row exact.
+
+**Walk 2, the next over-bar row: kt 3, all-level T and S, one column.**
+- Grid point (j, i) = (118, 34) (0-based), levels 7-16, max 0.434 °C at level 12. The card's kt-2 state equals NEMO's
+  kt-2 restart bit for bit.
+- NEMO's step-entry N² at W level 13 there is −1.873e-9, so `zdf_evd` fires
+  (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfevd.f90:108-109`, in `zdf_evd` at `ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfevd.f90:56`).
+  Those rn2/rn2b are built once on Nbb (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3.f90:171`, `:174`) before `zdf_phy`
+  (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3.f90:179`, in `stp_RK3` at `ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3.f90:62`).
+- The card's EVD trigger rebuilt N² on the ssh of the RK3 stage-3 solve (−0.431 m there vs −0.133 m at step
+  entry): +8.4e-10, so it did not fire. NEMO's T is mixed over levels 12-16, the card's over 13-16.
+- That is the only trigger disagreement in the domain (NEMO's test fires on 4,810 interfaces, the card on 4,809). On
+  step-entry geometry the same trigger gives −1.873e-9 and 0 disagreements.
+- Fix (V3-selected): a new EVD switch, default off, makes the trigger read the step-entry bn2 arrays the card
+  already builds for TKE and DDM. Only V3's card selects it; its selector check pins it on V3 and off on V2.
+
+**Final score (`cae45eeee` model code; packages tree `c8bd07a6`, later changed by two comments only).**
+- **INDEPENDENT kt 1-10:** 149 rows (surface sea level, barotropic transports, u, v, T, S each kt; all-level u, v, T,
+  S, en, avm_k, avt_k, dissl and surface avm at kt 2-10): every row max 0, unequal 0.
+- **GIVEN-NEMO-ENTRY (entries kt 1/3/5/7/9, one- and two-step):** 113 rows, every row max 0, unequal 0.
+- **kt-1 frame, consumed coefficients:** avt, avs, avm each 0 unequal of 414,119 wet W cells, 0 dry.
+- No flushed-subnormal cells (D127 census empty: no unequal cell). Bar 1e-15 normalised; nothing needed it.
+
+**Double diffusion is active.**
+- NEMO's kt-1 frame: avs > avt (salt fingering) at 145,986 wet W cells, avs < avt (diffusive convection) at 266,311.
+  The card: the same two counts.
+- Card branches at kt 1, of 412,734 stable wet interfaces: fingering (R > 1) 146,423; diffusive (R < 1) 266,311
+  (0.5 < R < 1: 8,602; R < 0.5: 257,709, of which 209,643 single-signed at the 1e-20 floor).
+- NEMO's V3 vs V2 restarts, unequal cells kt 2-10: T 430,552; S 430,551 (kt 2), then 430,552; u 413,030; en 115,092 →
+  285,302; avt_k 172,498 → 196,022.
+
+Preregistration:
+- **P1 CONFIRMED** (acquisition passed; DDM lines and banner in every log, per the acquisition).
+- **P2 CONFIRMED**: (a) 412,297 kt-1 cells with avs ≠ avt; (b) 430,552 T cells differ from V2's record at kt 2.
+- **P3 CONFIRMED for the first owner** (`zdfddm.f90:161`, inside the predicted :159-172; not the EXP). Not
+  predicted: the second owner, the EVD trigger's geometry, outside `zdf_ddm`.
+- **P4 CONFIRMED**: full ORCA2 (138,748 lines) and DINO (123,236) one-step jaxprs identical to base `e1b56d6004c6`;
+  V2's one step (178,423 lines) identical too.
+
+Tests (CPU, x64):
+- Statement test now also runs under jit: 4 passed. Division fix removed: **1 failed** (jit), 3 passed.
+- New record test (V3 kt 1-3 every field, kt-1 avt/avs/avm, branch census, DDM-moves-kt-2-T control): **1 passed**
+  (493 s). Plant A (division fix removed): **1 failed**, kt-1 avt. Plant B (EVD switch ignored): **1 failed**, kt-3
+  T and S. Tree verified clean after each.
+- V3 card/selector tests: 11 passed (the card diff now includes the EVD switch; planted switch flips give
+  `["ln_zdfevd"]` on V3 and V2).
+
+**Decision 122.** `zdfddm.f90` and `zdfevd.f90` are byte-identical in V1's build and ORCA2_OMIP_L4 (sha prefixes
+`6b0be5e4ab056501`, `eebb8a658810c104`).
+
+| statement | ORCA2_OMIP_L4 line | V1 build line | SUBROUTINE |
+|---|---|---|---|
+| zrr = zrau / rn_hsbfr | `ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfddm.f90:161` | `ORCA2V1_OMIP_L4_R1FULLENTRY/BLD/ppsrc/nemo/zdfddm.f90:161` | `zdf_ddm` (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfddm.f90:59`) |
+| avt = rn_evd where MIN(rn2,rn2b) <= -1e-12 | `ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfevd.f90:108-109` | `ORCA2V1_OMIP_L4_R1FULLENTRY/BLD/ppsrc/nemo/zdfevd.f90:108-109` | `zdf_evd` (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfevd.f90:56`) |
+| bn2 on Nbb, then rn2 = rn2b | `ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3.f90:171`, `:174` | `ORCA2V1_OMIP_L4_R1FULLENTRY/BLD/ppsrc/nemo/stprk3.f90:177`, `:180` | `stp_RK3` (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3.f90:62`) |
+| `CALL zdf_phy( kstp, Nbb, Nbb, Nrhs )` | `ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3.f90:179` | `ORCA2V1_OMIP_L4_R1FULLENTRY/BLD/ppsrc/nemo/stprk3.f90:185` | `stp_RK3` |
+| `CALL zdf_evd`, then `CALL zdf_ddm` | `ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:359`, `:363` | `ORCA2V1_OMIP_L4_R1FULLENTRY/BLD/ppsrc/nemo/zdfphy.f90:359`, `ORCA2V1_OMIP_L4_R1FULLENTRY/BLD/ppsrc/nemo/zdfphy.f90:363` | `zdf_phy` (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:296`) |
+
+**Finding (not fixed; a default question, RULE 3).** V2's card and the full ORCA2 card build the EVD trigger the same
+way as V3 did before this fix. In V2's ten certified steps no interface flipped, so V2's numbers stand; the trigger is
+still not NEMO's statement there.
+
+GATES_PLACEHOLDER
+
 ## Choices made
 
 ASKED: survey; V3 = next missing switch (DDM) exactly as ORCA2 sets it; card; acquisition; off on other cards (D130).
+ASKED (resume): score V3 both labels; walk the first over-bar row; land V3-selected association fixes.
 UNASKED, offered for revert:
 - the literal form requires the scalar-libm policy (raises under native);
 - the salt diffusivity leaves through a new opt-in return value rather than a carried field;
@@ -126,14 +219,20 @@ UNASKED, offered for revert:
 - the acquisition adds the kt-1 avs ≠ avt check as an admission condition;
 - the default (gyre round 8) receipt's 9 model citations were re-anchored to keep its gate green.
 
+- resume: the divisor guard in the literal DDM (the only way found to keep XLA's true division);
+- resume: the new EVD switch is a separate boolean, default off, selected by V3 alone (D130), rather than a new value
+  of the existing time-level switch;
+- resume: the ladder's new kt-1 frame arm and the private trace's salt-diffusivity field;
+- resume: the new V3 record test (about 8 minutes, record-gated).
+
 UNVERIFIED:
-- the card's double diffusion on real ORCA2 fields: no V3 step was run (no record); wiring shown only by the trace;
-- `rn2` the card feeds DDM lacks NEMO's trailing wmask; inert by construction (DDM multiplies by wmask), not measured;
-- beyond kt 1, avs is not in NEMO's records; it is checked only through T and S.
+- beyond kt 1, avs is not in NEMO's records; it is certified through T and S (bit-for-bit kt 1-10, where DDM moves
+  430,552 T cells);
+- beyond kt 10: nothing scored.
 
 ## Machine lines
 
 COMMITS_IN: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/claude_rounds/vmix_r13/repo
-ACQUISITION_NEEDED: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/claude_rounds/vmix_r13/repo/scripts/validate/ocean_fidelity/testcases/nemo_testcase_v3_orca2ddm/run.sh
-DECISION_NEEDED: NONE
-ROUND_STATUS: STOPPED_FOR_RECORD — V3 (V2 + ORCA2's double diffusion) card and acquisition built, V3-selected, flag-off jaxprs identical; codex review: paused (quota).
+ACQUISITION_NEEDED: NONE
+DECISION_NEEDED: V2 and the full ORCA2 card still rebuild EVD's trigger N2 on the stage-3 ssh (latent; no flip in V2's 10 steps). 1 = leave both; 2 = move V2 to the step-entry trigger and re-score it on its existing record (ORCA2 card stays lane A's, D122); 3 = move both. Pick: 2.
+ROUND_STATUS: V3_CERTIFIED — V2 + ORCA2's double diffusion (ln_zdfddm T, rn_avts 1e-4, rn_hsbfr 1.6) bit-for-bit with NEMO kt 1..10 under both labels, every field incl. kt-1 avt/avs/avm and en/avm_k/avt_k/dissl (worst row 0 under each), after two V3-selected association fixes (DDM divisor under jit; EVD trigger on step-entry rn2/rn2b); codex review: paused (quota).
