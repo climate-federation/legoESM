@@ -17,6 +17,12 @@ above 0 (max abs 0.0, flushed subnormals 0, Decision 127 count 0 in every row).
   `8f49ccfd18ec767b`).
 - codex review: paused (quota).  The operator runs an independent Claude
   review of this diff before landing.
+- Independent Claude review (operator): arithmetic and statements CONFIRMED
+  (kt 1..10 independent, given-entry 1,3,5,7,9: 0 unequal, 0 flushed).  HOLD on
+  tests only: (C) dropping the residual increment's outer rounding and (D)
+  using the live depth for the bottom residual's `r1_h` both left every test
+  green.  Second resume (`9355a5e82`, tests only, no model code) closes both;
+  see section 6.
 
 ## 1. First scoring at the round-1 build (`2691093f8`)
 
@@ -161,7 +167,12 @@ New tests in `test_nemo_testcase_g7_orca2drg.py`:
 - the residual increment equals NEMO's statement;
 - G7's bottom residual reads the carried `uu_b`/`vv_b`;
 - the dyn_zdf drag RHS equals NEMO's statement;
-- G7's dyn_zdf bottom term runs it.
+- G7's dyn_zdf bottom term runs it;
+- (resume 2) `round(F + increment)` under jit with traced inputs equals
+  NEMO's per-statement rounding (XLA would otherwise contract it to an FMA);
+- (resume 2) with the stored depth selected and sea level off rest, the
+  bottom residual's `r1_h` equals the certified top residual's stored
+  `r1_hu_0/(1+r3u)` (dynspg_ts.f90:1462, :1487).
 
 Plants, all red, each followed by a `cmp`-verified restore:
 
@@ -170,6 +181,11 @@ Plants, all red, each followed by a `cmp`-verified restore:
 2. the bottom residual fed `0.5*uu_b` → FAILS (`plant_halfub.log`);
 3. model file reverted to `cba2e91be` → the dyn_zdf test FAILS
    (`plant_zdf_revert.log`).
+4. (C) outer rounding removed → the jit test FAILS, 781/4096 cells;
+5. (D) live `1/H` for the bottom `r1_h` → the stored-depth test FAILS,
+   4032/4032 cells (both on scratch copies under
+   `round41/review_scratch/plant{C,D}`, `r41fix_plants.log`; the clone was
+   never edited, both tests pass at HEAD).
 
 | battery | result |
 |---|---|
@@ -178,6 +194,8 @@ Plants, all red, each followed by a `cmp`-verified restore:
 | G1 ladder + G1 card + G1b card + G7 (16 workers) | 177 passed |
 | citation gate + private-import ratchet (clean, `e6dd6d1b6`) | 23 passed |
 | G5 certified record, independent kt 1..3, final tree | 21/21 rows exact |
+| (resume 2) citation gate + private-import ratchet, clean `9355a5e82` | 23 passed |
+| (resume 2) G1-G7 card tests, 16 workers + 4 long G1 replays | 215 + 4 passed (13 slow deselected by default) |
 
 G1-G6, SMT-2 and OMT-2 are unchanged.  Both new branches need
 `implicit_ice_ocean_top_drag` together with bottom drag in the matrix and in
