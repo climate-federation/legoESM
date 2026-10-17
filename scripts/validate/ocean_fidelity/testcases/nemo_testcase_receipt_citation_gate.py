@@ -8106,9 +8106,6 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:336': 'CASE( np_TKE )   ;   CALL zdf_tke( kt, Kbb, Kmm, sh2, avm_k, avt_k )',
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:266': 'nzdf_phy = np_TKE   ;   CALL zdf_tke_init',
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90:732': ('SUBROUTINE zdf_tke_init', 1),
-    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:359': 'IF( ln_zdfevd )   CALL zdf_evd( kt, Kmm, Krhs, avm, avt )',
-    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:363': 'CALL zdf_ddm( kt, Kmm,  avm, avt, avs )',
-    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:372': 'IF( ln_zdfiwm )   CALL zdf_iwm( kt, Kmm, avm, avt, avs )',
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:371': 'IF( ln_zdfswm )   CALL zdf_swm( kt, Kmm, avm, avt, avs )',
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:217': 'IF( nn_havtb == 1 ) THEN',
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:206': 'IF( nn_avb == 0 ) THEN',
@@ -8116,7 +8113,6 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:126': 'SUBROUTINE zdf_phy_init( Kmm )',
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:762': 'IF( ln_zdfnpc  )   CALL tra_npc( kstp,      Kmm, Krhs, ts    , Kaa  )',
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfevd.f90:56': 'SUBROUTINE zdf_evd( kt, Kmm, Krhs, p_avm, p_avt )',
-    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfevd.f90:108-109': [('IF(  MIN( rn2(ji,jj,jk), rn2b(ji,jj,jk) ) <= -1.e-12 )', 1), '&  p_avt(ji,jj,jk) = rn_evd * wmask(ji,jj,jk)', 2],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfevd.f90:121': 'IF( nn_evdm == 1 ) THEN',
 }
 
