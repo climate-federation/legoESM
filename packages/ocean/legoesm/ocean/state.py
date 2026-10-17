@@ -360,6 +360,10 @@ class OceanSurfaceForcing(NamedTuple):
     # the G5 identity carries it from the post-SI3 record rather than
     # rebuilding it from ice state.  Read only when
     # ``implicit_ice_ocean_top_drag=True``; a selected path refuses None.
+    ice_mean_thickness_hm_i: object = None
+    # jnp.ndarray | None [m], SI3's mean ice thickness ``hm_i`` at T points.
+    # Read only by ``TKEConfig.nemo_mxlice=2`` (zdftke.f90:620-623); that
+    # selection refuses None.
 
 
 class OceanConfig(NamedTuple):

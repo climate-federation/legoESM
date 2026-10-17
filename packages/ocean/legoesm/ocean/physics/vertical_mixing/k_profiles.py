@@ -943,6 +943,12 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                 "attenuation), 1 (1-tanh(10fi)), 2 (1-fi), or 3 "
                 "(max(0,1-4fi), NEMO nn_eice=3) "
                 "on the lc/etau TKE sources.")
+        # nn_mxlice=2 reads the RAW fr_i (not the nn_eice-effective one) and
+        # SI3's hm_i; None unless the card selects it (static config value)
+        _mxlice_fr_i = _mxlice_hm_i = None
+        if int(getattr(tke_cfg, "nemo_mxlice", 0)) == 2 and surface_forcing is not None:
+            _mxlice_fr_i = getattr(surface_forcing, "ice_concentration", None)
+            _mxlice_hm_i = getattr(surface_forcing, "ice_mean_thickness_hm_i", None)
         _tke_ice_fr = None
         if _eice != 0 and surface_forcing is not None:
             _fi = getattr(surface_forcing, "ice_concentration", None)
@@ -1000,6 +1006,7 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                     e3w_int=_bn2_e3w,
                     ice_frac=_tke_ice_fr,
                     surface_tmask=_surface_tmask,
+                    mxlice_fr_i=_mxlice_fr_i, mxlice_hm_i=_mxlice_hm_i,
                 )
                 return K_H_old, K_M_old, _tke_ctx
             tke_out = tke_vertical_mixing(
@@ -1020,6 +1027,7 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                 e3w_int=_bn2_e3w,
                 ice_frac=_tke_ice_fr,
                 surface_tmask=_surface_tmask,
+                mxlice_fr_i=_mxlice_fr_i, mxlice_hm_i=_mxlice_hm_i,
                 bottom_dirichlet=tke_bottom_dirichlet,
                 bottom_level=tke_bottom_level,
                 T_n2b=T_n2b, S_n2b=S_n2b,
@@ -1095,6 +1103,7 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
             e3w_int=_bn2_e3w,
             ice_frac=_tke_ice_fr,
             surface_tmask=_surface_tmask,
+            mxlice_fr_i=_mxlice_fr_i, mxlice_hm_i=_mxlice_hm_i,
             # T8/T13 (tke_n2_time_level="nemo_before") + T4
             # (tke_shear_production="nemo_burchard"): Mode A (prognostic)
             # already threads these; Mode B (this diagnostic/quasi-steady

@@ -10836,6 +10836,7 @@ class LatLonCGridOceanModel:
                         if _nemo_ws_zdf_eta_kmm is not None
                         else state.eta.data),
                     nemo_zdf_stage_pair=_nemo_ws_zdf_stage_pair,
+                    eta_step_entry=state.eta.data,
                     u_now=state.u.data, v_now=state.v.data,
                     effective_K_test_override=_vertical_K_test_override,
                     nemo_aimp_tracer_w=_nemo_ws_aimp_tracer_w,
@@ -10867,6 +10868,7 @@ class LatLonCGridOceanModel:
                         if _nemo_ws_zdf_eta_kmm is not None
                         else state.eta.data),
                     nemo_zdf_stage_pair=_nemo_ws_zdf_stage_pair,
+                    eta_step_entry=state.eta.data,
                     u_now=state.u.data, v_now=state.v.data,
                     effective_K_test_override=_vertical_K_test_override,
                     nemo_aimp_tracer_w=_nemo_ws_aimp_tracer_w,
@@ -11684,6 +11686,12 @@ class LatLonCGridOceanModel:
             tke_cfg = vmix.tke
             stage = getattr(
                 tke_cfg, "tke_n2_evaluation_stage", "implicit_solve_state")
+            if (getattr(tke_cfg, "nemo_bn2_source_rounded", False)
+                    and stage != "step_entry"):
+                raise ValueError(
+                    "nemo_bn2_source_rounded=True needs "
+                    "tke_n2_evaluation_stage='step_entry' (the NEMO bn2 "
+                    f"bundle); got {stage!r}")
             if stage == "implicit_solve_state" and not _gm_carried:
                 return None
             if stage not in ("implicit_solve_state", "step_entry"):
@@ -11761,6 +11769,8 @@ class LatLonCGridOceanModel:
             zrw_gdept_0=gdept_0,
             zrw_gdepw_0=gdepw_0,
             zrw_stretch=zrw_stretch,
+            source_rounded=bool(_tke_active and getattr(
+                tke_cfg, "nemo_bn2_source_rounded", False)),
         )
         _bn2_selector = self._nemo_ws_test_hooks.bn2_intermediate
         _bn2_override = self._nemo_ws_test_hooks.bn2_alpha_beta_override
@@ -11797,10 +11807,23 @@ class LatLonCGridOceanModel:
                 jnp.asarray(tmask, dtype=bool),
                 e3t_0_array * zrw_stretch[..., jnp.newaxis],
                 e3t_0_array)
+        e3t_jpk = None
+        if (_tke_active
+                and getattr(tke_cfg, "nemo_mxl_terminal_e3t", False)):
+            e3t_jpk = getattr(_zc, "nemo_e3t_jpk", None)
+            if e3t_jpk is None:
+                raise ValueError(
+                    "nemo_mxl_terminal_e3t=True requires "
+                    "z_coord.nemo_e3t_jpk from the NEMO mesh record")
+            e3t_jpk = jnp.asarray(e3t_jpk)
+            if e3t_jpk.shape != state.eta.data.shape:
+                raise ValueError(
+                    "z_coord.nemo_e3t_jpk must match the horizontal state; "
+                    f"got {e3t_jpk.shape} vs {state.eta.data.shape}")
         return TKEEntryN2Bundle(
             rn2=rn2, rn2b=rn2b, gdepw_Kmm=gdepw, e3w_Kmm=e3w,
             e3t_Kmm=e3t, e3w_surface_Kmm=e3w_surface,
-            bn2_intermediate=_bn2_intermediate)
+            bn2_intermediate=_bn2_intermediate, e3t_jpk=e3t_jpk)
 
     def _tke_step_entry_p_sh2(
         self, state, *, eta_now=None, u_now=None, v_now=None,
@@ -11817,6 +11840,12 @@ class LatLonCGridOceanModel:
         stage = getattr(
             tke_cfg, "tke_shear_evaluation_stage", "implicit_solve_state")
         if stage == "implicit_solve_state":
+            for _flag in ("nemo_sh2_fold_top_v", "nemo_sh2_r3_source_rounded",
+                          "nemo_sh2_r3_stored_reciprocal"):
+                if getattr(tke_cfg, _flag, False):
+                    raise ValueError(
+                        f"{_flag}=True is read only by the step-entry "
+                        "shear (tke_shear_evaluation_stage='step_entry')")
             return None
         if stage != "step_entry":
             raise ValueError(
@@ -11892,11 +11921,45 @@ class LatLonCGridOceanModel:
         u_mask, v_mask = compute_face_masks_3d(is_active)
         metric_source = getattr(
             tke_cfg, "tke_shear_metric_source", "tpoint_jacobian")
+        fold_top_v = bool(getattr(tke_cfg, "nemo_sh2_fold_top_v", False))
+        kappa_north_v = None
+        if fold_top_v:
+            # T-pivot fold (lbcnfd.f90:584-720): the pivot row's north V face
+            # is wet in NEMO's raw vmask and its north T/W neighbour is the
+            # mirror of the row below the pivot (avm_k 'W' +1,
+            # stprk3_stg.f90:785-793; ssh 'T' +1, sshwzv.f90:140 ssh_nxt).
+            _fold = getattr(self.grid if grid is None else grid, "fold", None)
+            _raw = getattr(_zc, "nemo_een_barotropic", None)
+            if (_fold is None or not bool(_fold.is_active)
+                    or metric_source != "nemo_qco_live_face" or _raw is None):
+                raise ValueError(
+                    "nemo_sh2_fold_top_v=True needs an active north fold, "
+                    "tke_shear_metric_source='nemo_qco_live_face' and the "
+                    "card's raw NEMO vmask (z_coord.nemo_een_barotropic)")
+            _perm_t = _fold.perm_T
+            v_mask = v_mask.at[-1].set(
+                jnp.asarray(_raw.vmask[-1], dtype=v_mask.dtype))
+            kappa_north_v = state.tke_avm.data[-2][_perm_t]
         if metric_source not in ("tpoint_jacobian", "nemo_qco_live_face"):
             raise ValueError(
                 "Unknown TKEConfig.tke_shear_metric_source: expected "
                 "'tpoint_jacobian' or 'nemo_qco_live_face', got "
                 f"{metric_source!r}.")
+        r3_rounded = bool(getattr(tke_cfg, "nemo_sh2_r3_source_rounded", False))
+        r3_recip = bool(getattr(tke_cfg, "nemo_sh2_r3_stored_reciprocal", False))
+        for _flag, _on in (("nemo_sh2_r3_source_rounded", r3_rounded),
+                           ("nemo_sh2_r3_stored_reciprocal", r3_recip)):
+            if _on and metric_source != "nemo_qco_live_face":
+                raise ValueError(
+                    f"{_flag}=True requires "
+                    "tke_shear_metric_source='nemo_qco_live_face'")
+        # NEMO's r3 sequence (domqco.f90:266-269 stored, then zdfsh2.f90:104
+        # "1 +") needs both statements; either alone is neither form.
+        if r3_rounded != r3_recip:
+            raise ValueError(
+                "nemo_sh2_r3_source_rounded and "
+                "nemo_sh2_r3_stored_reciprocal must be selected together "
+                f"(got {r3_rounded} and {r3_recip})")
         face_metrics = None
         if metric_source == "nemo_qco_live_face":
             if shear_disc == "nemo_face_native_now2":
@@ -11935,10 +11998,26 @@ class LatLonCGridOceanModel:
             a_v = jnp.asarray(a_v, dtype=dtype)
 
             def _qco_r3(eta):
-                num_u = 0.5 * (
-                    a_t * eta + jnp.roll(a_t * eta, -1, axis=1))
-                num_v = 0.5 * (
-                    a_t * eta + jnp.roll(a_t * eta, -1, axis=0))
+                if r3_recip:
+                    # Each e1e2t*ssh product rounded before the face sum
+                    # (no FMA, as NEMO's build).
+                    _ae = nemo_source_round(a_t * eta)
+                    num_u = 0.5 * (_ae + jnp.roll(_ae, -1, axis=1))
+                    _north_t = jnp.roll(_ae, -1, axis=0)
+                    if fold_top_v:
+                        _north_t = _north_t.at[-1].set(_ae[-2][_perm_t])
+                    num_v = 0.5 * (_ae + _north_t)
+                else:
+                    num_u = 0.5 * (
+                        a_t * eta + jnp.roll(a_t * eta, -1, axis=1))
+                    if fold_top_v:
+                        _north_t = jnp.roll(a_t * eta, -1, axis=0)
+                        _north_t = _north_t.at[-1].set(
+                            (a_t * eta)[-2][_perm_t])
+                        num_v = 0.5 * (a_t * eta + _north_t)
+                    else:
+                        num_v = 0.5 * (
+                            a_t * eta + jnp.roll(a_t * eta, -1, axis=0))
                 wet_u = hu0 > 0.0
                 wet_v = hv0 > 0.0
                 wet_u_f = wet_u.astype(dtype)
@@ -11949,8 +12028,18 @@ class LatLonCGridOceanModel:
                 # divisors changes the last bits and fails the 1e-15 bar.
                 r1_hu0 = wet_u_f / (hu0 + 1.0 - wet_u_f)
                 r1_hv0 = wet_v_f / (hv0 + 1.0 - wet_v_f)
-                r3u_nemo = num_u * r1_hu0 / a_u
-                r3v_nemo = num_v * r1_hv0 / a_v
+                if r3_recip:
+                    # domqco.f90:266-269: (num * r1_hu_0) * r1_e1e2u, with
+                    # r1_e1e2u = 1/e1e2u stored (domhgr.f90:170).  Without
+                    # the boundary XLA folds the two constant factors.
+                    r3u_nemo = nemo_source_round(num_u * r1_hu0) * (1.0 / a_u)
+                    r3v_nemo = nemo_source_round(num_v * r1_hv0) * (1.0 / a_v)
+                else:
+                    r3u_nemo = num_u * r1_hu0 / a_u
+                    r3v_nemo = num_v * r1_hv0 / a_v
+                if r3_rounded:
+                    r3u_nemo = nemo_source_round(r3u_nemo)
+                    r3v_nemo = nemo_source_round(r3v_nemo)
                 # NEMO arrays name the east/north face of T(i,j); legoESM
                 # arrays name the west/south face.  Prefix the periodic/wall
                 # face to convert without changing arithmetic in r3 itself.
@@ -11976,7 +12065,7 @@ class LatLonCGridOceanModel:
         p_sh2 = avm_weighted_shear_production(
             _u_now, _v_now, _u_before, _v_before,
             dz_half, u_mask, v_mask, state.tke_avm.data,
-            face_metrics=face_metrics)
+            face_metrics=face_metrics, kappa_north_v=kappa_north_v)
         return (p_sh2, face_metrics) if return_face_metrics else p_sh2
 
     def _tke_realized_kdiss_active(self) -> bool:
@@ -12496,6 +12585,7 @@ class LatLonCGridOceanModel:
         n2_tracers_before=None,
         tke_n2_bundle=None,
         eta_now=None,
+        eta_step_entry=None,
         nemo_zdf_stage_pair=None,
         u_now=None,
         v_now=None,
@@ -12824,7 +12914,7 @@ class LatLonCGridOceanModel:
             )
             _tke_cfg = _vmix_cfg.tke
             if (getattr(_tke_cfg, "tke_htau_evaluation", "jax_expression")
-                    == "nemo_literal"):
+                    in ("nemo_literal", "nemo_scalar_libm")):
                 _tke_lat_deg = getattr(_grid, "native_lat_T_deg", None)
                 if _tke_lat_deg is None:
                     raise ValueError(
@@ -12833,9 +12923,12 @@ class LatLonCGridOceanModel:
                         "bridge; grid.native_lat_T_deg is None")
             else:
                 _tke_lat_deg = jnp.degrees(_grid.lat_T)
+            _sh2_eta = _nemo_sh2_eta(
+                _tke_cfg, prognostic=_tke_prognostic, eta_now=eta_now,
+                eta_step_entry=eta_step_entry)
             if _tke_prognostic:
                 _tke_p_sh2_result = self._tke_step_entry_p_sh2(
-                    state, eta_now=eta_now, u_now=u_now, v_now=v_now,
+                    state, eta_now=_sh2_eta, u_now=u_now, v_now=v_now,
                     z_coord=_zc, config=_cfg_b, grid=_grid,
                     return_face_metrics=return_tke_entry)
                 if return_tke_entry:
@@ -14071,6 +14164,7 @@ class LatLonCGridOceanModel:
             n2_tracers_before=self._n2_nemo_before_tracers(state),
             tke_n2_bundle=_tke_n2_bundle,
             eta_now=state.eta.data,
+            eta_step_entry=state.eta.data,
             u_now=state.u.data, v_now=state.v.data,
             return_K_profiles=True, grid=_grid,
         )
@@ -17202,3 +17296,20 @@ def _nemo_ws_stage_r3uv(stage_pair, ops, dtype):
         for eta in (before, after))
     return (_nemo_stage_ratio(kmm, gb.r3u, ga.r3u),
             _nemo_stage_ratio(kmm, gb.r3v, ga.r3v))
+
+
+def _nemo_sh2_eta(tke_cfg, *, prognostic, eta_now, eta_step_entry):
+    """Sea level for zdf_sh2's r3u/r3v.  NEMO's RK3 calls
+    zdf_phy(kstp,Nbb,Nbb,Nrhs) once at step entry (stprk3.f90:185), so with
+    ``nemo_sh2_step_entry_ssh`` the shear reads the whole-step entry eta, not
+    the stage Kmm eta that dyn_zdf/tra_zdf read through ``eta_now``."""
+    if not getattr(tke_cfg, "nemo_sh2_step_entry_ssh", False):
+        return eta_now
+    if not prognostic:
+        raise ValueError("nemo_sh2_step_entry_ssh=True requires prognostic "
+                         "TKE (the frozen step-entry p_sh2 path)")
+    if eta_step_entry is None and eta_now is not None:
+        raise ValueError("nemo_sh2_step_entry_ssh=True needs the whole-step "
+                         "entry eta (eta_step_entry) when a stage eta_now is "
+                         "supplied")
+    return eta_step_entry

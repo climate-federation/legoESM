@@ -288,6 +288,12 @@ class TKEConfig(NamedTuple):
     # statement, and a missing ``surface_tmask`` is a hard error.  Only the
     # NEMO-literal cards select it.
     nemo_mxl0_surface_tmask: bool = False
+    # NEMO nn_mxlice: the ln_mxl0 anchor under sea ice (zdftke.f90:605-633).
+    # 0 (DEFAULT, main's behaviour) = CASE 0, no scaling.  2 = CASE 2,
+    # ``((1-fr_i)*zraug*taum + fr_i*hm_i*2)*tmask`` with raw ``fr_i`` and SI3's
+    # mean thickness ``hm_i`` (OceanSurfaceForcing.ice_concentration and
+    # .ice_mean_thickness_hm_i, both required); needs the masked anchor.
+    nemo_mxlice: int = 0
     # ----- NEMO rn_mxl0: the ln_mxl0 surface-anchor FLOOR ------------------
     # ``tke_avn`` floors the wind anchor at ``rn_mxl0``
     # (``zmxlm(ji,1) = MAX( rn_mxl0, zmxlm(ji,1) )``, GYRE ppsrc
@@ -637,17 +643,54 @@ class TKEConfig(NamedTuple):
     # Arithmetic used by the nn_etau penetration profile. ``jax_expression``
     # is the historical single jnp.exp call. ``nemo_literal`` reproduces the
     # ordinary-range glibc-2.34 vector EXP linked into the DINO oracle; only
-    # the two complete DINO oracle cards select it.
+    # the two complete DINO oracle cards select it. ``nemo_scalar_libm`` calls
+    # the precision policy's scalar exp (NEMO builds without libmvec, V1).
     tke_etau_exponential_evaluation: str = "jax_expression"
     # Latitude-profile arithmetic for nn_htau=1. ``jax_expression`` is the
     # historical jnp.deg2rad+jnp.sin path. ``nemo_literal`` consumes native
     # mesh degrees and transcribes glibc-2.34's two-lane vector SIN arithmetic.
-    # Only complete DINO oracle cards select it.
+    # Only complete DINO oracle cards select it. ``nemo_scalar_libm`` takes the
+    # same native-degree phase through the precision policy's scalar sin.
     tke_htau_evaluation: str = "jax_expression"
     # Raw nn_mxl buoyancy length. ``factored`` preserves the historical
     # sqrt(2)*sqrt(e)/sqrt(max(N2,1e-12)) expression. ``nemo_literal`` uses
     # zdftke.F90 source association and NEMO's runtime rsmall.
     tke_mxl_raw_evaluation: str = "factored"
+    # NEMO's nn_mxl bottom-up scan starts at jpkm1 and therefore reads
+    # e3t_3d(jpk), the masked dummy-bottom T-cell thickness. Generic grids do
+    # not carry that extra slot. A record-backed NEMO card may select this arm
+    # and supply ``z_coord.nemo_e3t_jpk``; missing data then raises.
+    nemo_mxl_terminal_e3t: bool = False
+    # nn_etau=1 penetration masks, zdftke.f90:500-501 (`* wmask(jk) *
+    # tmask(1)`). The historical injection also fills dry W rows, which the
+    # nn_mxl bottom-up sweep then carries into wet cells. Card-selected.
+    nemo_etau_wmask: bool = False
+    # NEMO's rab_3d_t/bn2_t (eosbn2.F90) with every source operation rounded
+    # before its consumer; the compiled default lets XLA contract them.
+    # Card-selected.
+    nemo_bn2_source_rounded: bool = False
+    # zdf_sh2's r3u/r3v at the whole-step entry level (RK3 zdf_phy(Nbb,Nbb),
+    # zdfsh2.F90 e3w_1d*(1+r3u(Kmm))), not the stage Kmm. Card-selected.
+    nemo_sh2_step_entry_ssh: bool = False
+    # zdftke.f90:466,472 recurrences with each product rounded before its
+    # subtraction (NEMO's build has no FMA); the default lets XLA contract.
+    # Card-selected.
+    nemo_tke_solve_source_rounded: bool = False
+    # zdf_sh2 on the T-pivot row's north V face (zdfsh2.f90:98-113): wet raw
+    # vmask, north avm_k and r3v ssh from the fold images (lbcnfd.f90:584-720)
+    # instead of a wall. Card-selected.
+    nemo_sh2_fold_top_v: bool = False
+    # zdftke.f90:420 zdiag and :423-426 RHS with every operation rounded in
+    # written order (NEMO's build has no FMA). Card-selected.
+    nemo_tke_matrix_rhs_source_rounded: bool = False
+    # zdf_sh2's step-entry r3u/r3v rounded before zdfsh2.f90:104-108 adds 1
+    # (NEMO stores pr3u/pr3v, domqco.f90:266-269); the default lets XLA fuse
+    # the quotient into an FMA with the "1 +". Card-selected.
+    nemo_sh2_r3_source_rounded: bool = False
+    # zdf_sh2's step-entry r3u/r3v as NEMO forms them, (num * r1_hu_0) times
+    # the stored 1/e1e2u (domqco.f90:266-269); the default divides, which
+    # XLA folds with r1_hu_0 into one constant. Card-selected.
+    nemo_sh2_r3_stored_reciprocal: bool = False
     # Langmuir source evaluation. ``vectorized`` is the historical shared
     # construction. ``nemo_literal`` preserves zdftke.F90:422-463 operation
     # order, including the per-column mbkt+1 no-crossing fallback. Only the
