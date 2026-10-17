@@ -1674,13 +1674,28 @@ def _carried_rk3_after_ssh(state):
     return getattr(slot, "data", slot)
 
 
+def nemo_stage_ratio(kmm, before, after):
+    """NEMO's stored thickness ratio at N+1/3 (``kmm`` 1) or N+1/2 (2).
+
+    ``r2_3 * r3(Kbb) + r1_3 * r3a`` (stprk3_stg.f90:171-173, :218) and
+    ``r1_2 * ( r3(Kbb) + r3a )`` (:215-217, :239): each product and sum
+    rounded once, in the written order.
+    """
+    sr = nemo_source_round
+    if kmm == 1:
+        return sr(sr((2.0 / 3.0) * before) + sr((1.0 / 3.0) * after))
+    if kmm == 2:
+        return sr(0.5 * sr(before + after))
+    raise ValueError(f"stage ratio level must be 1 or 2, got {kmm!r}")
+
+
 def nemo_qco_wzv_operands(
     eta_now, eta_before, u, v, grid, z_coord, u_mask_3d, v_mask_3d,
     mask_3d, dt, freshwater_eta_tendency=None, eta_after_override=None,
     transport_after_override=None, barotropic_velocity_override=None,
     volume_transport_override=None, runoff_mass_flux=None,
     after_ssh_form="", eta_after_carried=None, fold_exchange_ratios=False,
-    stored_r3_ratios=False, half_step_after_ratio=False,
+    stored_r3_ratios=False, half_step_after_ratio=False, stored_kmm_level=0,
 ):
     """Coupled QCO ``ww`` + live Kmm face thickness for either WZV call.
 
@@ -1708,9 +1723,28 @@ def nemo_qco_wzv_operands(
         z_coord, grid, u_mask_3d, v_mask_3d, eta_now.dtype, nlev)
     e3t0, area_t = ops.e3t_0, ops.area_t
     raw_umask, raw_vmask = ops.umask3, ops.vmask3
+    _fold = grid if fold_exchange_ratios else None
+    _r3uv_kmm = None
+    if stored_kmm_level:
+        # RK3 stages 2/3: Kmm's r3u/r3v are the ratios STORED by the previous
+        # stage, r2_3*r3u(Kbb) + r1_3*r3ua (N+1/3) or r1_2*(r3u(Kbb) + r3ua)
+        # (N+1/2), stprk3_stg.f90:172-173 / :216-217 -- not the ratio of the
+        # interpolated stage sea level (last place on rare faces).
+        if eta_after_override is None or not stored_r3_ratios:
+            raise ValueError("stored_kmm_level needs eta_after_override and "
+                             "stored_r3_ratios")
+        _t0 = jnp.asarray(mask_3d, dtype=eta_now.dtype)[..., 0]
+        _gb, _ga = (nemo_qco_live_face_geometry_from_operands(
+            jnp.asarray(e, dtype=eta_now.dtype), ops.e3u_0, ops.e3v_0,
+            raw_umask, raw_vmask, ops.hu_0, ops.hv_0, area_t, ops.area_u,
+            ops.area_v, fold_grid=_fold)
+            for e in (eta_before, jnp.asarray(eta_after_override, dtype=eta_now.dtype) * _t0))
+        _r3uv_kmm = (nemo_stage_ratio(stored_kmm_level, _gb.r3u, _ga.r3u),
+                     nemo_stage_ratio(stored_kmm_level, _gb.r3v, _ga.r3v))
     live_u_raw, live_v_raw = nemo_qco_live_face_geometry_from_operands(
         eta_now, ops.e3u_0, ops.e3v_0, raw_umask, raw_vmask,
-        ops.hu_0, ops.hv_0, area_t, ops.area_u, ops.area_v, fold_grid=grid if fold_exchange_ratios else None)[:2]
+        ops.hu_0, ops.hv_0, area_t, ops.area_u, ops.area_v,
+        r3_native=_r3uv_kmm, fold_grid=_fold)[:2]
 
     if volume_transport_override is not None:
         if transport_after_override is not None:
@@ -1749,6 +1783,12 @@ def nemo_qco_wzv_operands(
     h0_safe = jnp.where(h0 > 0.0, h0, 1.0)
     r1_h0 = jax.lax.optimization_barrier(1.0 / h0_safe)
     r3_now = jax.lax.optimization_barrier(eta_now * r1_h0)
+    if stored_kmm_level:
+        # r3t(Kmm), the same stored blend (stprk3_stg.f90:171 / :215)
+        _eta_a = jnp.asarray(eta_after_override, dtype=eta_now.dtype) * tmask[..., 0]
+        r3_now = nemo_stage_ratio(stored_kmm_level,
+                                  nemo_source_round(eta_before * r1_h0),
+                                  nemo_source_round(_eta_a * r1_h0))
     live_t = e3t0 * (1.0 + r3_now[..., None] * tmask) * tmask
     e2u, e1v = ops.e2u, ops.e1v
     r1_area_t = jax.lax.optimization_barrier(1.0 / area_t)
@@ -5388,13 +5428,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         zad_w = jax.lax.optimization_barrier(zad_w)
         zad_h_u = jax.lax.optimization_barrier(zad_h_u)
         zad_h_v = jax.lax.optimization_barrier(zad_h_v)
-    if callable(nemo_stage_zad_operand_observer):
-        # WRITE-only operands dyn_zad is about to consume, before substitution;
-        # the callback cannot feed a value back into the compiled computation.
-        jax.debug.callback(nemo_stage_zad_operand_observer,
-                           {"w": zad_w, "h_u": zad_h_u, "h_v": zad_h_v,
-                            "u": u, "v": v},
-                           ordered=False)
+    _zad_pre = {"w": zad_w, "h_u": zad_h_u, "h_v": zad_h_v}
     if nemo_stage_zad_operands is not None:
         # None preserves a live operand; Round 121 substitutes W alone.
         _ow, _ohu, _ohv = nemo_stage_zad_operands
@@ -5402,6 +5436,14 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         zad_h_u = zad_h_u if _ohu is None else jnp.asarray(_ohu, dtype=zad_h_u.dtype)
         zad_h_v = zad_h_v if _ohv is None else jnp.asarray(_ohv, dtype=zad_h_v.dtype)
         zad_w, zad_h_u, zad_h_v = jax.tree.map(jax.lax.optimization_barrier, (zad_w, zad_h_u, zad_h_v))
+    if callable(nemo_stage_zad_operand_observer):
+        # WRITE-only.  "w"/"h_u"/"h_v" are the operands before substitution;
+        # the *_consumed triple is what dyn_zad actually reads.  The callback
+        # cannot feed a value back into the compiled computation.
+        jax.debug.callback(nemo_stage_zad_operand_observer,
+                           {**_zad_pre, "u": u, "v": v, "w_consumed": zad_w,
+                            "h_u_consumed": zad_h_u, "h_v_consumed": zad_h_v},
+                           ordered=False)
 
     # --- 5. Coriolis ---
     # Coriolis is NOT included in the returned momentum tendencies.

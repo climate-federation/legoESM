@@ -3848,7 +3848,9 @@ def build_orca2g1_flat_card(deck_root: str | Path, case: str = "ORCA2G1-flat") -
         # ... and dyn_zad's written association (dynzad.f90:112-126).
         nemo_zad_written_association=case == "ORCA2G6-vec",
         # G6 round 8: the stage-2 momentum wzv's clock pair (stprk3_stg.f90:188-189, :221).
-        nemo_stage2_momentum_wzv_half_step=case == "ORCA2G6-vec")
+        nemo_stage2_momentum_wzv_half_step=case == "ORCA2G6-vec",
+        # G6 round 8 resume: its stored Kmm ratios (stprk3_stg.f90:171-173, :215-217).
+        nemo_stage_momentum_wzv_stored_kmm_ratios=case == "ORCA2G6-vec")
     if case == "ORCA2G6-vec":
         # Decision 132: the first vector-form wzv (stp2d.f90:152/:156) reads
         # NEMO's carried slot ssh(Naa) = 2*ssh(Nbb) - ssh(Naa) (stprk3.f90:241,
@@ -3935,6 +3937,8 @@ def _orca2g1_selector_failures(card: NEMOTestcaseCard) -> list[str]:
         "zad written association": cfg.nemo_zad_written_association is (
             card.case == "ORCA2G6-vec"),
         "stage-2 momentum wzv half step": cfg.nemo_stage2_momentum_wzv_half_step is (
+            card.case == "ORCA2G6-vec"),
+        "stage momentum wzv stored Kmm ratios": cfg.nemo_stage_momentum_wzv_stored_kmm_ratios is (
             card.case == "ORCA2G6-vec"),
         "zdf_literal": cfg.zdf_implicit_solver_evaluation == "nemo_literal",
         "wall_fill": bool(cfg.tracer_wall_neumann_fill),

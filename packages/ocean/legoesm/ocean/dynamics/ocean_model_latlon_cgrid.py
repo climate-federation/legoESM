@@ -61,6 +61,7 @@ from legoesm.ocean.state import (
     LatLonCGridOceanConfig,
     constants_equal,
 )
+from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import nemo_stage_ratio as _nemo_stage_ratio  # noqa: E501
 from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
     latlon_cgrid_ocean_baroclinic_tendencies,
     compute_frozen_geom_density,
@@ -2168,7 +2169,11 @@ def _nemo_ws_stage_transport(
                 volume_transport_override=None,
                 fold_exchange_ratios=bool(config.rk3_vector_raw_vmask), runoff_mass_flux=runoff_mass_flux,
                 stored_r3_ratios=bool(config.nemo_wzv_stored_r3_ratios),
-                half_step_after_ratio=_w_half)
+                half_step_after_ratio=_w_half,
+                stored_kmm_level=(
+                    stage_index if (momentum_wzv_clock is None and stage_index in (1, 2)
+                                    and bool(config.nemo_stage_momentum_wzv_stored_kmm_ratios))
+                    else 0))
     else:
         w_stage = diagnose_w_from_flux_div(
             stage_div, z_coord, thickness_weighted=True)
@@ -17174,21 +17179,6 @@ def _nemo_ws_stage_r3t_stretch(cfg, stage_index, eta_pair, z_coord, H_bathy):
     from legoesm.ocean.eos import nemo_r3t_rk3_stage1_stretch
     return nemo_r3t_rk3_stage1_stretch(
         z_coord, *eta_pair(), H_bathy, half=stage_index == 3)
-
-
-def _nemo_stage_ratio(kmm, before, after):
-    """NEMO's stored thickness ratio at N+1/3 (``kmm`` 1) or N+1/2 (2).
-
-    ``r2_3 * r3(Kbb) + r1_3 * r3a`` (stprk3_stg.f90:171-173, :218) and
-    ``r1_2 * ( r3(Kbb) + r3a )`` (:215-217, :239): each product and sum
-    rounded once, in the written order.
-    """
-    sr = nemo_source_round
-    if kmm == 1:
-        return sr(sr((2.0 / 3.0) * before) + sr((1.0 / 3.0) * after))
-    if kmm == 2:
-        return sr(0.5 * sr(before + after))
-    raise ValueError(f"stage ratio level must be 1 or 2, got {kmm!r}")
 
 
 def _nemo_ws_stage_pair(cfg, kmm, eta_pair):

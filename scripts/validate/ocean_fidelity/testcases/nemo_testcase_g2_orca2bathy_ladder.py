@@ -147,6 +147,38 @@ def read_stage2_terms(path: Path) -> dict[str, np.ndarray]:
     return out
 
 
+G6_STGTRM_3D = ("ww",)
+G6_STGTRM_2D = ("r3t_bb", "r3t_mm", "r3t_aa", "r3u_mm", "r3v_mm",
+                "ssh_bb", "ssh_mm", "ssh_aa")
+G6_STGTRM_KRHS = ("before_hpg", "after_hpg", "after_vor", "after_keg", "after_zad")
+
+
+def read_g6_stage_terms(path: Path, kt: int, stage: int) -> dict:
+    """NEMO's write-only stage-term dump (run_r44_stage_terms.sh): the stage
+    momentum wzv's ww and its ratio / sea-level slots, then the 3-D Krhs at
+    five source-ordered boundaries.  Native (y, x, z) with the halo."""
+    with path.open("rb") as handle:
+        magic = handle.read(16).decode("ascii")
+        head = struct.unpack("=12i", handle.read(48))
+        values = np.fromfile(handle, dtype=np.float64)
+    ver, k, s, kbb, kmm, kaa, krhs, nx, ny, nz, hls, bits = head
+    n3, n2 = nx * ny * nz, nx * ny
+    require((magic, ver, k, s, hls, bits) == ("NEMO_G6_STGTRM_1", 1, kt, stage, 2, 64)
+            and values.size == (1 + 2 * len(G6_STGTRM_KRHS)) * n3 + 8 * n2,
+            f"{path}: bad stage-term header {magic!r} {head} {values.size}")
+    require(bool(np.isfinite(values).all()), f"{path}: non-finite payload")
+    names = (*G6_STGTRM_3D, *G6_STGTRM_2D,
+             *(f"{b}_{f}" for b in G6_STGTRM_KRHS for f in "uv"))
+    out, at = {"levels": (kbb, kmm, kaa, krhs)}, 0
+    for name in names:
+        n = n2 if name in G6_STGTRM_2D else n3
+        raw = values[at:at + n]
+        at += n
+        out[name] = (raw.reshape((nx, ny), order="F").T.copy() if n == n2 else
+                     raw.reshape((nx, ny, nz), order="F").transpose(1, 0, 2).copy())
+    return out
+
+
 def depth_classes(mesh_path: Path, nk: int) -> dict:
     """{point: {"full": mask, "partial": mask}} on (y, x, nk), from NEMO's
     mesh file alone."""
@@ -899,6 +931,26 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
             ("after_vor", "after_vorticity"),
             ("after_zad", "after_advection"),
         )
+        # Round-44 record: KEG split from ZAD, and the stage momentum ww.
+        # Its three shared boundaries must equal the older record bit for bit.
+        stg_path = root / "oracle_g6_stage_terms_kt00000001_s2.bin"
+        stg = read_g6_stage_terms(stg_path, 1, 2) if stg_path.is_file() else None
+        if stg is not None:
+            require(stg["levels"] == (1, 3, 2, 2),
+                    f"stage-2 slots {stg['levels']} are not NEMO's (Nbb, Nnn, Naa)")
+            # the raw dump keeps NEMO's dry-point and halo values; the older
+            # record is l4_canon_3d (inner domain, wet umask/vmask only)
+            for f in "uv":
+                wet_f = np.zeros(stg[f"after_hpg_{f}"].shape, bool)
+                wet_f[2:-2, 2:-2, :nk] = cls[f]["full"] | cls[f]["partial"]
+                for b in G6_STGTRM_KRHS:
+                    stg[f"{b}_{f}"] = np.where(wet_f, stg[f"{b}_{f}"], 0.0)
+                for b, rec in boundaries:
+                    require(np.array_equal(stg[f"{b}_{f}"], terms[f"{rec}_{f}"]),
+                            f"{b}.{f}: the two NEMO stage-2 records disagree")
+                terms[f"after_keg_{f}"] = stg[f"after_keg_{f}"]
+            boundaries = boundaries[:2] + (("after_keg", "after_keg"),) + boundaries[2:]
+        ww_seen = {}
         selected = set(exposures)
         if selected & {name for name, _ in boundaries}:
             boundaries = tuple(pair for pair in boundaries if pair[0] in selected)
@@ -908,7 +960,11 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
                 _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
                     expose_momentum_operator=hook_name,
                     expose_momentum_operator_stage=2,
+                    stage2_zad_operand_observer=(
+                        (lambda d: ww_seen.update(w=np.asarray(d["w_consumed"]), u=np.asarray(d["u"]), h_u=np.asarray(d["h_u_consumed"])))
+                        if stg is not None and hook_name == "after_zad" else None),
                 )).step(s0, dt=card.dt_s, freshwater=fw, surface_forcing=sf))
+            jax.effects_barrier()
             cand = card_levels(exposed)
             rows, all_levels, differences = [], {}, {}
             for field in ("u", "v"):
@@ -958,6 +1014,17 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
                          **{f"card_{name}": cand[name] for name in ("u", "v")},
                          **{f"nemo_{name}": terms[f"{record_name}_{name}"][
                              2:-2, 2:-2, :nk] for name in ("u", "v")})
+        if stg is not None:
+            require("w" in ww_seen, "the stage-2 dyn_zad observer never fired")
+            wet_t = cls["t"]["full"] | cls["t"]["partial"]
+            # level k of both is the top face of cell k
+            out["stage2_ww"] = bit_rows("stage2_momentum_wzv.ww",
+                                        stg["ww"][2:-2, 2:-2, :nk],
+                                        ww_seen["w"][..., :nk], wet_t)
+            if dump is not None:
+                np.savez(Path(dump) / "g6_stage2_ww.npz", card_w=ww_seen["w"],
+                         card_u=ww_seen["u"], card_h_u=ww_seen["h_u"],
+                         **{f"nemo_{k}": v for k, v in stg.items() if k != "levels"})
         return out
     if arm == "stp2d_terms":
         return stp2d_terms(out, root, kt_from, kt_to, card=card, cfg=cfg, z=z,
@@ -1428,6 +1495,10 @@ def main(argv=None) -> int:
                   f"ordinary handoff vs NEMO unequal {v['ordinary_vs_nemo_unequal']}")
         return 0
     bad = False
+    if "stage2_ww" in out:
+        r = out["stage2_ww"]
+        print(f"{r['name']:34s} unequal {r['n_unequal']}/{r['n_wet']} max {r['max_abs']:.3e} "
+              f"norm {r['normalised']:.2e} ulps {r['max_ulps']} first {r['first_cell']}")
     for p in out["per_kt"]:
         for r in p["rows"] + p.get("two_step_rows", []) + p.get("history_rows", []):
             bad |= r["status"] != "AT-BAR"
