@@ -3292,6 +3292,18 @@ class LatLonCGridOceanConfig(NamedTuple):
     # row dry.  G6 selects the raw mask for the vector RHS and stage update;
     # False preserves the certified flux/linear cards.
     rk3_vector_raw_vmask: bool = False
+    # NEMO stores r3t(Kaa) (stp2d.f90:152) and r3t(Kbb) (domqco.f90:257) as
+    # arrays and wzv differences the stored values (sshwzv.f90:297-298).
+    # XLA strips optimization_barrier and can factor the two ssh*r1_ht_0
+    # products into one, which moves the last bit of ww.  True materialises
+    # both ratios; False preserves previously measured cards.
+    nemo_wzv_stored_r3_ratios: bool = False
+    # NEMO dyn_zad's written association (dynzad.f90:112-126, :134-136):
+    # e1e2t*ww materialised, the two interface terms summed, then
+    # (0.25*r1_e1e2u)/e3u times that sum subtracted from Krhs.  XLA strips
+    # optimization_barrier and contracts these products into the adds.
+    # False preserves previously measured cards.
+    nemo_zad_written_association: bool = False
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":

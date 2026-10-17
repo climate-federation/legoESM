@@ -97,6 +97,8 @@ def test_g6_card_is_g5_plus_g1b_vector_selectors(tmp_path):
         nemo_hpg_sco_fold_geometry=True,
         rk3_vector_raw_vmask=True,
         nemo_first_wzv_after_ssh="rk3_extrapolated_carried",   # Decision 132
+        nemo_wzv_stored_r3_ratios=True,          # round 7: wzv reads stored r3t
+        nemo_zad_written_association=True,       # round 7: dyn_zad association
         barotropic=c5.barotropic._replace(
             barotropic_flux_update_nemo_literal=False,
             barotropic_entry_depth_nemo_literal=False,
@@ -202,3 +204,63 @@ def test_admission_takes_the_record_length_and_names_empty_comparisons():
         g5_records.admit(G5_RECORD, steps=8)     # twin A wrote only step 10
     with pytest.raises(g5_records.Refuse, match="PASSIVITY FAILED"):
         g5_records.admit(G5_RECORD, "passivity", steps=10)
+
+
+R42 = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/"
+           "round42/oracle_g6_r42/twin_s")
+needs_r42 = pytest.mark.skipif(
+    not (R42 / "oracle_stp2d_terms_kt00000003.bin").is_file(),
+    reason="the operator's G6 r42 stp_2D record is not on this machine")
+
+
+@needs_r42
+def test_first_wzv_is_nemos_under_jit_only_with_stored_ratios():
+    """Traced jit, kt 3 from NEMO's restart 2: the first wzv's ww on levels
+    2..30 equals NEMO's recorded ww (sshwzv.f90:297-298) bit for bit only when
+    r3t(Kaa)/r3t(Kbb) are materialised (stp2d.f90:152, domqco.f90:257)."""
+    import jax
+    import jax.numpy as jnp
+    import netCDF4
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import compute_face_masks_3d
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import nemo_qco_wzv_operands
+    sys.path.insert(0, str(CASES))
+    import nemo_testcase_g1_orca2grid_ladder as g1
+    import nemo_testcase_g2_orca2bathy_ladder as g2
+    card = recipe.build_nemo_testcase_card("ORCA2G6-vec", deck_root=R42)
+    cfg, z, grid = card.recipe.model_config, card.recipe.z_coord, card.recipe.grid
+    nk = int(z.n_levels)
+    nemo = g2.read_stp2d_terms(R42 / "oracle_stp2d_terms_kt00000003.bin", 3, nk)["ww"]
+    with netCDF4.Dataset(R42 / "ORCA2G1_00000002_restart.nc") as h:
+        lev = lambda n: g2.levels_last(h.variables[n][0], nk)  # noqa: E731
+        u, v = jnp.asarray(g1.pad_u(lev("un"))), jnp.asarray(g1.pad_v(lev("vn")))
+        ssh = {n: jnp.asarray(np.asarray(h.variables[n][0], np.float64))
+               for n in ("sshn", "ssha")}
+    um3, vm3 = compute_face_masks_3d(z.is_active, grid)
+    tmask = jnp.asarray(z.is_active, jnp.float64)
+    wet = np.asarray(tmask) > 0
+    wet[0] = wet[-1] = False                 # rows reading the halo
+    wet[..., 0] = False                      # ww(1) carries NEMO's runoff term
+
+    def unequal(stored):
+        f = jax.jit(lambda e, ea, uu, vv: nemo_qco_wzv_operands(
+            e, e, uu, vv, grid, z, um3, vm3, tmask, card.dt_s,
+            after_ssh_form="rk3_extrapolated_carried", eta_after_carried=ea,
+            fold_exchange_ratios=bool(cfg.rk3_vector_raw_vmask),
+            stored_r3_ratios=stored)[0])
+        ww = np.asarray(f(ssh["sshn"], ssh["ssha"], u, v))[..., :nk]
+        return int(np.count_nonzero((ww != nemo) & wet))
+
+    assert cfg.nemo_wzv_stored_r3_ratios is True
+    assert unequal(True) == 0
+    assert unequal(False) > 1000             # round 7 measured 90,611
+
+
+@needs_r42
+def test_slow_forcing_reader_takes_the_records_time_levels():
+    sys.path.insert(0, str(CASES))
+    from nemo_testcase_l2_gyre_round16_slow_forcing import read_slow_forcing
+    path = R42 / "oracle_slow_forcing_kt00000002.bin"
+    rec = read_slow_forcing(path, dims=(184, 152, 31), levels=(2, 3, 1))
+    assert (rec["header"]["kt"], rec["header"]["Kbb"], rec["header"]["Krhs"]) == (2, 3, 1)
+    with pytest.raises(Exception, match="bad header"):
+        read_slow_forcing(path, dims=(184, 152, 31))      # default (1, 1, 3)

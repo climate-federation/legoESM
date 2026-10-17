@@ -469,3 +469,52 @@ def test_g5_stage2_e3t_and_stage3_sfx_statements_are_each_required(ladder):
     assert (unequal(no_s2, "stage2", "T"), unequal(no_s2, "stage2", "S")) == (1, 1)
     no_salt = ladder.run(root, exposures=("stage3",), without_stage3_salt=True, **kw)
     assert unequal(no_salt, "stage3", "S") == 1
+
+
+def _stp2d_record(path, kt=3, nx=8, ny=7, nz=4):
+    import struct
+    rng = np.random.default_rng(kt)
+    n3, n2 = nx * ny * nz, nx * ny
+    fields = []
+    for i in range(15):
+        if 5 <= i <= 10:
+            fields.append(rng.normal(size=n2))
+        else:
+            a = rng.normal(size=(nx, ny, nz))
+            if i != 4:
+                a[..., nz - 1] = 0.0          # the dummy level holds nothing
+            fields.append(a.ravel(order="F"))
+    with path.open("wb") as h:
+        h.write(b"NEMO_G6_STP2D_1 ")
+        h.write(struct.pack("=9i", 1, kt, 1, 3, 3, nx, ny, nz, 64))
+        for f in fields:
+            h.write(np.asarray(f, np.float64).tobytes())
+    return fields
+
+
+def test_stp2d_term_record_is_cut_to_the_inner_domain_in_order(ladder, tmp_path):
+    path = tmp_path / "oracle_stp2d_terms_kt00000003.bin"
+    fields = _stp2d_record(path)
+    out = ladder.read_stp2d_terms(path, 3, 3)
+    names = (*ladder.STP2D_3D, *ladder.STP2D_2D, *ladder.STP2D_3D_LATE)
+    for name, raw in zip(names, fields):
+        if name in ladder.STP2D_2D:
+            want = raw.reshape((8, 7), order="F").T[2:-2, 2:-2]
+        else:
+            want = raw.reshape((8, 7, 4), order="F").transpose(1, 0, 2)[2:-2, 2:-2, :3]
+        assert np.array_equal(out[name], want), name
+    assert out["ww"].shape == (3, 4, 3) and out["levels"] == (3, 1, 3)
+    with pytest.raises(Exception, match="bad stp_2D term record"):
+        ladder.read_stp2d_terms(path, 2, 3)          # header says kt 3
+
+
+def test_bit_rows_count_wet_points_and_the_plant_fires(ladder):
+    ref = np.arange(1.0, 13.0).reshape(3, 4)
+    wet = np.ones_like(ref, bool)
+    wet[0, 0] = False
+    cand = ref.copy()
+    cand[0, 0] = 99.0                                  # dry: reported apart
+    r = ladder.bit_rows("x", ref, cand, wet)
+    assert (r["n_unequal"], r["dry_card_nonzero"], r["max_ulps"]) == (0, 1, 0)
+    p = ladder.bit_rows("x", ref, ref, wet, plant=True)
+    assert p["n_unequal"] == 1 and p["max_ulps"] == 1

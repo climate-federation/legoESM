@@ -2143,7 +2143,8 @@ def _nemo_ws_stage_transport(
                 # indicator) differences the already corrected zFu/zFv.
                 None if (legacy_wzv_rederived_transport or velocity_form_wzv)
                 else (zfu_stage, zfv_stage)),
-            fold_exchange_ratios=bool(config.rk3_vector_raw_vmask), runoff_mass_flux=runoff_mass_flux)
+            fold_exchange_ratios=bool(config.rk3_vector_raw_vmask), runoff_mass_flux=runoff_mass_flux,
+            stored_r3_ratios=bool(config.nemo_wzv_stored_r3_ratios))
         if momentum_velocity_form_w:
             # THE SECOND SOLVE.  stprk3_stg.f90:360 hands wzv the raw stage
             # velocity under the velocity indicator and the momentum vertical
@@ -2163,7 +2164,8 @@ def _nemo_ws_stage_transport(
                 u_mask_3d, v_mask_3d, _tmask3, _w_dt,
                 eta_after_override=_w_eta_after,
                 volume_transport_override=None,
-                fold_exchange_ratios=bool(config.rk3_vector_raw_vmask), runoff_mass_flux=runoff_mass_flux)
+                fold_exchange_ratios=bool(config.rk3_vector_raw_vmask), runoff_mass_flux=runoff_mass_flux,
+            stored_r3_ratios=bool(config.nemo_wzv_stored_r3_ratios))
     else:
         w_stage = diagnose_w_from_flux_div(
             stage_div, z_coord, thickness_weighted=True)

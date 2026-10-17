@@ -3841,7 +3841,12 @@ def build_orca2g1_flat_card(deck_root: str | Path, case: str = "ORCA2G1-flat") -
         # G1b is one level with flat geometry; the multilevel statement is
         # selected only on the record that measured it.
         nemo_hpg_sco_fold_geometry=case == "ORCA2G6-vec",
-        rk3_vector_raw_vmask=case == "ORCA2G6-vec")
+        rk3_vector_raw_vmask=case == "ORCA2G6-vec",
+        # G6 round 7: the first wzv's ww reads NEMO's STORED r3t(Kaa) and
+        # r3t(Kbb) (stp2d.f90:152, domqco.f90:257 -> sshwzv.f90:297-298).
+        nemo_wzv_stored_r3_ratios=case == "ORCA2G6-vec",
+        # ... and dyn_zad's written association (dynzad.f90:112-126).
+        nemo_zad_written_association=case == "ORCA2G6-vec")
     if case == "ORCA2G6-vec":
         # Decision 132: the first vector-form wzv (stp2d.f90:152/:156) reads
         # NEMO's carried slot ssh(Naa) = 2*ssh(Nbb) - ssh(Naa) (stprk3.f90:241,
@@ -3922,6 +3927,10 @@ def _orca2g1_selector_failures(card: NEMOTestcaseCard) -> list[str]:
         "hpg_sco fold geometry": cfg.nemo_hpg_sco_fold_geometry is (
             card.case == "ORCA2G6-vec"),
         "vector raw vmask": cfg.rk3_vector_raw_vmask is (
+            card.case == "ORCA2G6-vec"),
+        "wzv stored r3 ratios": cfg.nemo_wzv_stored_r3_ratios is (
+            card.case == "ORCA2G6-vec"),
+        "zad written association": cfg.nemo_zad_written_association is (
             card.case == "ORCA2G6-vec"),
         "zdf_literal": cfg.zdf_implicit_solver_evaluation == "nemo_literal",
         "wall_fill": bool(cfg.tracer_wall_neumann_fill),

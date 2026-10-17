@@ -2410,6 +2410,7 @@ def nemo_advective_vertical_momentum_advection(
     face_area: jnp.ndarray,
     face_active: jnp.ndarray | None = None,
     bottom_face_mask_mode: str = "min_rule",
+    nemo_written_association: bool = False,
 ) -> jnp.ndarray:
     """NEMO-faithful ADVECTIVE-form vertical momentum advection (dynzad.F90).
 
@@ -2517,6 +2518,8 @@ def nemo_advective_vertical_momentum_advection(
     w_interior = w_area_half[..., 1:nlev]           # (..., nlev-1)
     du_interior = u[..., :-1] - u[..., 1:]           # u[k-1] - u[k], k=1..nlev-1
     G_interior = 2.0 * w_interior * du_interior
+    if nemo_written_association:
+        G_interior = nemo_source_round(G_interior)        # zzWdzU (dynzad.f90:119)
 
     if bottom_face_mask_mode == "min_rule" and face_active is not None:
         active_above = face_active[..., :-1]    # cell k-1 for k=1..nlev-1
@@ -2542,7 +2545,14 @@ def nemo_advective_vertical_momentum_advection(
     # tendency is zero — but 0 (masked G) * inf (1/0 area) is nan, not 0,
     # without the floor.
     face_area_safe = jnp.maximum(face_area, 1.0e-10)
-    tend = -0.25 / (face_area_safe * h_u_safe) * (G_top + G_bot)
+    if nemo_written_association:
+        # dynzad.f90:123-124: Krhs - 0.25*r1_e1e2u/e3u * (zWdzU + zzWdzU),
+        # r1_e1e2u = 1/e1e2u stored (domhgr.f90:170); every product rounded.
+        coef = nemo_source_round(
+            nemo_source_round(0.25 * (1.0 / face_area_safe)) / h_u_safe)
+        tend = -nemo_source_round(coef * nemo_source_round(G_top + G_bot))
+    else:
+        tend = -0.25 / (face_area_safe * h_u_safe) * (G_top + G_bot)
     if bottom_face_mask_mode == "nemo_faithful" and face_active is not None:
         # dynzdf.F90:121 -- ``puu(Kaa) = (puu(Kbb) + rDt*Krhs) * umask(ji,jj,jk)``:
         # the ONLY masking NEMO applies to this term, keyed on the cell's

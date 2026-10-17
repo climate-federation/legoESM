@@ -1676,6 +1676,7 @@ def nemo_qco_wzv_operands(
     transport_after_override=None, barotropic_velocity_override=None,
     volume_transport_override=None, runoff_mass_flux=None,
     after_ssh_form="", eta_after_carried=None, fold_exchange_ratios=False,
+    stored_r3_ratios=False,
 ):
     """Coupled QCO ``ww`` + live Kmm face thickness for either WZV call.
 
@@ -1841,6 +1842,11 @@ def nemo_qco_wzv_operands(
             jnp.asarray(eta_after_override, dtype=eta_now.dtype)) * tmask[..., 0]
     r3_after = jax.lax.optimization_barrier(eta_after * r1_h0)
     r3_before = jax.lax.optimization_barrier(eta_before * r1_h0)
+    if stored_r3_ratios:
+        # r3t(Kaa)/r3t(Kbb) are stored arrays (stp2d.f90:152, domqco.f90:257);
+        # without this XLA computes (eta_after - eta_before)*r1_h0 instead.
+        r3_after = nemo_source_round(r3_after)
+        r3_before = nemo_source_round(r3_before)
     ww = nemo_qco_wzv_recurrence(
         flux_div, e3t0, r3_before, r3_after, tmask, dt)
     return ww, live_u, live_v
@@ -3275,8 +3281,13 @@ def _bc_vertical_momentum_advection(
                         "u_full and v_full to be passed to "
                         "_bc_vertical_momentum_advection.",
                     )
+                _zad_written = bool(getattr(
+                    config, "nemo_zad_written_association", False))
                 area_w = jax.lax.optimization_barrier(
                     grid.area_T[..., jnp.newaxis] * w)
+                if _zad_written:
+                    # zWf = e1e2t*ww is a rounded product (dynzad.f90:112-114)
+                    area_w = nemo_source_round(area_w)
                 w_area_u = jax.lax.optimization_barrier(
                     interp_cell_to_uface(area_w))
                 w_area_v = jax.lax.optimization_barrier(
@@ -3294,11 +3305,13 @@ def _bc_vertical_momentum_advection(
                 diag_vertadv_u = _nemo_advective_vertical_momentum_advection(
                     u_full, w_area_u, h_u_old, face_area_u[..., jnp.newaxis],
                     face_active=u_face_active,
-                    bottom_face_mask_mode=_zad_mask_mode)
+                    bottom_face_mask_mode=_zad_mask_mode,
+                    nemo_written_association=_zad_written)
                 diag_vertadv_v = _nemo_advective_vertical_momentum_advection(
                     v_full, w_area_v, h_v_old, face_area_v[..., jnp.newaxis],
                     face_active=v_face_active,
-                    bottom_face_mask_mode=_zad_mask_mode)
+                    bottom_face_mask_mode=_zad_mask_mode,
+                    nemo_written_association=_zad_written)
                 if getattr(config, "zad_qco_evaluation", "generic") == "nemo_literal":
                     diag_vertadv_u = jax.lax.optimization_barrier(diag_vertadv_u)
                     diag_vertadv_v = jax.lax.optimization_barrier(diag_vertadv_v)
@@ -5355,6 +5368,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             # carried form reads it; every other form ignores it, so the two
             # existing arms are byte-identical whether or not it is present.
             eta_after_carried=_carried_rk3_after_ssh(state), fold_exchange_ratios=bool(config.rk3_vector_raw_vmask),
+            stored_r3_ratios=bool(config.nemo_wzv_stored_r3_ratios),
         )
         # The W/H pair is a materialized NEMO stage boundary.  Without these
         # barriers XLA fuses the full tendency graph back through continuity;

@@ -24,6 +24,12 @@ level; this script reuses its readers, regions and row scorer and adds what
                against NEMO's frame after stp_2D (wet and dry faces apart),
                and an OFFLINE replay of its depth mean (stp2d.f90:178-179,
                ascending k) against the card's.
+  stp2d_terms  G6, kt 1..3: stp_2D in compiled order -- the 3-D RHS after
+               dyn_hpg, dyn_vor, dyn_keg, dyn_zad (r42 record), its depth mean,
+               after drag, after wind (slow-forcing record) and dyn_spg_ts's
+               exit -- against the card's write-only observers.  kt 1 from
+               the initial state, kt 2 the card's own chain (INDEPENDENT),
+               kt >= 3 NEMO's restart of kt - 1 (GIVEN-NEMO-ENTRY).
   trazdf_replay  step 1, OFFLINE numpy replay of NEMO's implicit vertical
                tracer solve (trazdf.f90:231-233, :269-272, :284-298) from
                NEMO's recorded thickness ratios and the mesh file: level 1
@@ -66,7 +72,7 @@ DEFAULT_ROOT = Path(
 ARMS = ("geometry", "independent", "given_entry", "stages", "operators",
         "barotropic_exit",
         "zdf_replay", "substeps", "trazdf_replay", "rhs_frame",
-        "restart_independent", "carried")
+        "restart_independent", "carried", "stp2d_terms")
 # stage exposures of one step: the private hook that returns it, and the
 # level-1 NEMO frame fields (u, v, T, S, ssh) it must equal
 EXPOSURES = {
@@ -201,6 +207,157 @@ def class_summary(rows: list[dict]) -> dict:
     out["status"] = "AT-BAR" if (max(out["full"]["relative"],
                                      out["partial"]["relative"]) <= BAR
                                  and not out["dry_n_unequal"]) else "DEBT"
+    return out
+
+
+STP2D_3D = ("after_hpg_u", "after_hpg_v", "after_vor_u", "after_vor_v", "ww")
+STP2D_2D = ("ssh_aa", "ssh_bb", "r3t_aa", "r3t_bb", "r3u_bb", "r3v_bb")
+STP2D_3D_LATE = ("after_keg_u", "after_keg_v", "after_zad_u", "after_zad_v")
+
+
+def read_stp2d_terms(path: Path, kt: int, nk: int) -> dict[str, np.ndarray]:
+    """NEMO's write-only stp_2D term dump (run_r42_stp2d.sh): the 3-D Krhs
+    after dyn_hpg, dyn_vor, the first wzv's ww with its sea-level operands,
+    after dyn_keg and after dyn_zad, cut to the inner domain and nk levels."""
+    with path.open("rb") as handle:
+        magic = handle.read(16).decode("ascii").rstrip()
+        version, k, kbb, kaa, krhs, nx, ny, nz, bits = struct.unpack(
+            "=9i", handle.read(36))
+        values = np.fromfile(handle, dtype=np.float64)
+    names = (*STP2D_3D, *STP2D_2D, *STP2D_3D_LATE)
+    n3, n2 = nx * ny * nz, nx * ny
+    require((magic, version, k, bits) == ("NEMO_G6_STP2D_1", 1, kt, 64)
+            and values.size == 9 * n3 + 6 * n2,
+            f"{path}: bad stp_2D term record {(magic, version, k, bits, values.size)}")
+    require(bool(np.isfinite(values).all()), f"{path}: non-finite payload")
+    require(nz == nk + 1, f"{path}: {nz} levels, the card has {nk}")
+    out, at = {}, 0
+    for name in names:
+        n = n2 if name in STP2D_2D else n3
+        raw = values[at:at + n]
+        at += n
+        if name in STP2D_2D:
+            out[name] = raw.reshape((nx, ny), order="F").T[2:-2, 2:-2].copy()
+        else:
+            a = raw.reshape((nx, ny, nz), order="F").transpose(1, 0, 2)
+            require(not np.any(a[..., nk:]) or name == "ww",
+                    f"{name}: NEMO holds a value on the dummy level")
+            out[name] = a[2:-2, 2:-2, :nk].copy()
+    out["levels"] = (kt, kbb, krhs)
+    return out
+
+
+def bit_rows(name: str, ref, cand, wet, *, plant=False) -> dict:
+    """Bitwise census on NEMO's wet points (dry points reported apart):
+    unequal count, max |difference|, max ulps, worst level and cell."""
+    from nemo_testcase_state_ulp_probe import ulp_distance
+    ref, cand = np.asarray(ref, np.float64), np.array(cand, np.float64)
+    wet = np.asarray(wet, bool)
+    require(ref.shape == cand.shape == wet.shape, f"{name}: shape mismatch "
+            f"{ref.shape} {cand.shape} {wet.shape}")
+    if plant:
+        cand[tuple(np.argwhere(wet & (ref != 0))[0])] = np.nextafter(
+            cand[tuple(np.argwhere(wet & (ref != 0))[0])], np.inf)
+    unequal = (cand.view(np.uint64) != ref.view(np.uint64)) & wet
+    d = np.where(wet, np.abs(cand - ref), 0.0)
+    scale = float(np.max(np.abs(ref[wet]), initial=0.0))
+    worst = tuple(int(i) for i in np.unravel_index(int(np.argmax(d)), d.shape))
+    first = np.argwhere(unequal)
+    return {"name": name, "n_wet": int(wet.sum()), "n_unequal": int(unequal.sum()),
+            "max_abs": float(d.max()), "ref_max_abs": scale,
+            "normalised": float(d.max()) / scale if scale else 0.0,
+            "max_ulps": int(np.max(ulp_distance(cand[wet], ref[wet]), initial=0)),
+            "worst_cell": worst, "first_cell": first[0].tolist() if first.size else None,
+            "levels_touched": (sorted({int(i) + 1 for i in first[:, -1]})
+                               if first.size and ref.ndim == 3 else None),
+            "dry_card_nonzero": int(np.count_nonzero(cand[~wet])),
+            "dry_nemo_nonzero": int(np.count_nonzero(ref[~wet]))}
+
+
+def stp2d_terms(out, root, kt_from, kt_to, *, card, cfg, z, s0, nk, cls, reg,
+                nemo_entry, plant=None, dump=None) -> dict:
+    """stp_2D boundaries in compiled order (stp2d.f90 of the r42 build) at
+    kt_from..kt_to; every card value comes from a write-only observer of the
+    ordinary step, no operator is re-implemented here."""
+    import jax
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel, _NEMOWSRK3TestHooks)
+    from nemo_testcase_l1_vortex_kt2_walk import read_bt_frame
+    from nemo_testcase_l2_gyre_round16_slow_forcing import read_slow_forcing
+    sys.path.insert(0, str(HERE / "nemo_testcase_g5_orca2ice"))
+    import g5_records as g5  # noqa: E402
+    require(out["case"] == "ORCA2G6-vec", "stp2d_terms is registered for G6")
+    seen, zad = {}, {}
+    observed = LatLonCGridOceanModel(
+        card.recipe.grid, z, cfg, _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+            expose_barotropic_substeps=True,
+            slow_forcing_rhs_term_observer=lambda d: seen.update(
+                {k: np.asarray(v) for k, v in d.items()}),
+            stage1_zad_operand_observer=lambda d: zad.update(
+                {k: np.asarray(v) for k, v in d.items()})))
+    plain = LatLonCGridOceanModel(card.recipe.grid, z, cfg)
+    wet = {f: cls[f]["full"] | cls[f]["partial"] for f in "uv"}
+    wet["t"] = cls["t"]["full"] | cls["t"]["partial"]
+    cut = {"u": lambda a: np.asarray(a)[:, 1:], "v": lambda a: np.asarray(a)[1:]}
+    out["label"] = ("kt 1: INDEPENDENT = GIVEN-NEMO-ENTRY; kt 2: INDEPENDENT "
+                    "(card chain); kt >= 3: GIVEN-NEMO-ENTRY (NEMO restart kt-1)")
+    chain = s0
+    for kt in range(kt_from, kt_to + 1):
+        fw, sf = g5.nemo_supplied_forcing(card, root, kt)
+        if kt <= 2:
+            entry, label = chain, ("INDEPENDENT = GIVEN" if kt == 1 else "INDEPENDENT")
+        else:
+            entry, label = nemo_entry(kt), "GIVEN-NEMO-ENTRY"
+        seen.clear()
+        zad.clear()
+        res = jax.device_get(observed.step(entry, dt=card.dt_s, freshwater=fw,
+                                           surface_forcing=sf))
+        jax.effects_barrier()           # the observer is an async callback
+        require(bool(seen) and bool(zad), "a stp_2D observer never fired")
+        terms = read_stp2d_terms(root / f"oracle_stp2d_terms_kt{kt:08d}.bin", kt, nk)
+        kbb, krhs = terms["levels"][1], terms["levels"][2]
+        slow = read_slow_forcing(root / f"oracle_slow_forcing_kt{kt:08d}.bin",
+                                 dims=(184, 152, nk + 1), levels=(kt, kbb, krhs))
+        ops = {k: np.asarray(v) for k, v in res.slow_forcing_operands.items()}
+        bt = read_bt_frame(root / f"oracle_bt_frames_kt{kt:08d}.bin", expect_step=kt)
+        rows = []
+        w = zad["w"]
+        require(w.shape[:2] == terms["ww"].shape[:2] and w.shape[-1] >= nk,
+                f"card w {w.shape} vs NEMO ww {terms['ww'].shape}")
+        # ww(:,:,1) is the surface face; level k of both is the top of cell k
+        rows.append(bit_rows("first_wzv.ww", terms["ww"], w[..., :nk], wet["t"]))
+        for f in "uv":
+            for b, card_key in (("after_hpg", "after_hpg"), ("after_vor", "after_vor"),
+                                ("after_keg", "after_keg"), ("after_zad", "after_adv")):
+                rows.append(bit_rows(f"{b}.{f}", terms[f"{b}_{f}"],
+                                     cut[f](seen[f"{card_key}_{f}"]), wet[f],
+                                     plant=plant == "score" and b == "after_hpg"
+                                     and f == "u"))
+            rows.append(bit_rows(f"krhs_into_mean.{f}", slow[f"krhs_{f}"],
+                                 cut[f](ops[f"d{f}_dt"]), wet[f]))
+        for f in "uv":
+            w2 = wet[f][..., 0]
+            for b, k in (("Ue_rhs_mean", "depth"), ("Ue_rhs_post_drag", "post_drag"),
+                         ("Ue_rhs_post_wind", "post_wind")):
+                rows.append(bit_rows(f"{b}.{f}", slow[f"{k}_{f}"],
+                                     cut[f](ops[f"{k}_{f}"]), w2))
+        for f, key in (("uu_b", "u"), ("vv_b", "v")):
+            rows.append(bit_rows(f"spg_ts_exit.{f}", bt[f],
+                                 cut[key](getattr(res.state_after_barotropic, f).data),
+                                 wet[key][..., 0]))
+        if dump is not None:
+            Path(dump).mkdir(parents=True, exist_ok=True)
+            np.savez(Path(dump) / f"stp2d_kt{kt}.npz",
+                     **{f"nemo_{k}": v for k, v in terms.items() if k != "levels"},
+                     **{f"card_zad_{k}": v for k, v in zad.items()},
+                     **{f"card_{k}": v for k, v in seen.items()
+                        if k.startswith("after_")})
+        first = next((r for r in rows if r["n_unequal"]), None)
+        out["per_kt"].append({"kt": kt, "label": label, "stp2d_rows": rows,
+                              "first_unequal": first and first["name"]})
+        if kt < kt_to and kt <= 1:
+            chain = jax.device_get(plain.step(chain, dt=card.dt_s, freshwater=fw,
+                                              surface_forcing=sf))
     return out
 
 
@@ -479,7 +636,8 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
     cfg, z, s0 = card.recipe.model_config, card.recipe.z_coord, card.recipe.initial_state
     if case in FORCED:
         require(arm in ("independent", "given_entry")
-                or (arm in ("stages", "operators", "barotropic_exit", "carried")
+                or (arm in ("stages", "operators", "barotropic_exit", "carried",
+                            "stp2d_terms")
                     and case in ICE_CASES),
                 "G4/G5/G6 NEMO-supplied per-step forcing is registered only for "
                 "the independent and given-entry ladders")
@@ -798,6 +956,10 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
                          **{f"nemo_{name}": terms[f"{record_name}_{name}"][
                              2:-2, 2:-2, :nk] for name in ("u", "v")})
         return out
+    if arm == "stp2d_terms":
+        return stp2d_terms(out, root, kt_from, kt_to, card=card, cfg=cfg, z=z,
+                           s0=s0, nk=nk, cls=cls, reg=reg, nemo_entry=nemo_entry,
+                           plant=plant, dump=dump)
     if arm == "carried":
         # G5 round 4: every leaf the card carries into step kt against what
         # NEMO's restart of kt - 1 hands it, then one step from swapped states
@@ -1244,6 +1406,15 @@ def main(argv=None) -> int:
                   f"replay unequal {r['ascending_replay_vs_card_unequal']}, 4-lane "
                   f"{r['lane4_replay_vs_card_unequal']}")
         return 1 if bad else 0
+    if a.arm == "stp2d_terms":
+        for p in out["per_kt"]:
+            print(f"kt {p['kt']} ({p['label']}): first unequal {p['first_unequal']}")
+            for r in p["stp2d_rows"]:
+                print(f"  {r['name']:24s} unequal {r['n_unequal']:6d}/{r['n_wet']:6d} "
+                      f"max {r['max_abs']:.3e} norm {r['normalised']:.2e} "
+                      f"ulps {r['max_ulps']} first {r['first_cell']} "
+                      f"dry card/nemo {r['dry_card_nonzero']}/{r['dry_nemo_nonzero']}")
+        return 0
     if a.arm == "substeps":
         f = out["first_unequal"]
         print("SUBSTEPS first unequal operand:", f and (f["name"], f["n_unequal"]))
