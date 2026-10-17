@@ -214,3 +214,13 @@ evidence names.  UNASKED: none.
 UNVERIFIED: the patched Fortran is not compiled here (the operator's
 build is the check); the logical's visibility in `stprk3_stg` follows the
 same module chain that already exposed the unit in attempt 1.
+
+Gates (resume, at `b8436bb464`): receipt citation gate on this receipt
+6 citations, failures 0, unmapped 0; citation-gate test + private
+imports 23 passed; patch test 1 passed (fails with the old guard
+planted); preflight `G6R44_PREFLIGHT_OK` target
+`ORCA2G6_OMIP_L4_R44STGTRM2`.  NOT RE-RUN to completion: the model-step
+gate files (TKE terms, freshwater closure, stage face-mask rank,
+barotropic state, NEMO recipe) each exceeded 10 minutes inside XLA
+compilation under machine load 35-55; this resume changes no model code
+(a shell script, one test, this receipt), and they passed at `180f88919`.
