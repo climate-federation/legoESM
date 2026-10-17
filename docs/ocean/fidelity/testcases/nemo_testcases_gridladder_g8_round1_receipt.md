@@ -7,8 +7,8 @@ NEMO, because no G8 NEMO record exists yet.
 - Preregistration: `PREREG_nemo_testcases_gridladder_g8_round1.md`,
   committed `2fcbad6c0` before any card change.
 - Build commit `f3d177511`.  Citation re-anchor and rung-list expectations
-  `ac07c3de4`.
-- Evidence: `gridladder_rounds/round45/` (`manifest.sha256` `d2ef9451221e4717`).
+  `ac07c3de4`.  Receipt citation-map entries `a3a45055a`.
+- Evidence: `gridladder_rounds/round45/` (`manifest.sha256` `ce99b173c661c72b`).
 - codex review: paused (quota).  The operator runs an independent Claude
   review of this diff before landing.
 
@@ -125,6 +125,14 @@ with `git status` (5/5 red, `plants.log`):
 
 Re-anchor: 7 code citations in the gate map shifted mechanically.  None fell
 inside a changed hunk.
+
+Gates before the final commit (`JAX_ENABLE_X64=1`, `land.sh` PYTHONPATH):
+
+| gate | result |
+|---|---|
+| this receipt's citation gate | `PASS`: 9 citations, 0 failures, 0 unmapped (`receipt_citation_gate.json`) |
+| its shift plant on `stp2d.f90:144` | exits 1, `FAIL` |
+| default citation-gate test + private-import ratchet + G8 file | 35 passed (`final_gates.log`) |
 
 ## 6. Acquisition (ACQUISITION_NEEDED)
 
