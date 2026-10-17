@@ -379,6 +379,8 @@ def test_kt1_stage2_momentum_wzv_reads_stored_kmm_ratios():
     out = ladder.run(R44B, arm="operators", kt_from=1, exposures=("after_zad",),
                      allow_dirty=True, case="ORCA2G6-vec")
     assert out["stage2_ww"]["n_unequal"] == 0                # without: 137
+    # stage 3 reads the half blends (stprk3_stg.f90:221-223) as its Kmm
+    assert out["stage3_ww"]["n_unequal"] == 0                # without: 121
     (zad,) = out["per_kt"]
     assert zad["boundary"] == "after_zad"
     for field, t in zad["all_levels"].items():               # without: u 3

@@ -935,6 +935,11 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
         # Its three shared boundaries must equal the older record bit for bit.
         stg_path = root / "oracle_g6_stage_terms_kt00000001_s2.bin"
         stg = read_g6_stage_terms(stg_path, 1, 2) if stg_path.is_file() else None
+        stg3_path = root / "oracle_g6_stage_terms_kt00000001_s3.bin"
+        stg3 = read_g6_stage_terms(stg3_path, 1, 3) if stg3_path.is_file() else None
+        if stg3 is not None:
+            require(stg3["levels"][:3] == (1, 2, 3),
+                    f"stage-3 slots {stg3['levels']} are not NEMO's (Nbb, Nnn, Naa)")
         if stg is not None:
             require(stg["levels"] == (1, 3, 2, 2),
                     f"stage-2 slots {stg['levels']} are not NEMO's (Nbb, Nnn, Naa)")
@@ -950,7 +955,7 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
                             f"{b}.{f}: the two NEMO stage-2 records disagree")
                 terms[f"after_keg_{f}"] = stg[f"after_keg_{f}"]
             boundaries = boundaries[:2] + (("after_keg", "after_keg"),) + boundaries[2:]
-        ww_seen = {}
+        ww_seen, ww3_seen = {}, {}
         selected = set(exposures)
         if selected & {name for name, _ in boundaries}:
             boundaries = tuple(pair for pair in boundaries if pair[0] in selected)
@@ -963,6 +968,9 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
                     stage2_zad_operand_observer=(
                         (lambda d: ww_seen.update(w=np.asarray(d["w_consumed"]), u=np.asarray(d["u"]), h_u=np.asarray(d["h_u_consumed"])))
                         if stg is not None and hook_name == "after_zad" else None),
+                    stage3_zad_operand_observer=(
+                        (lambda d: ww3_seen.update(w=np.asarray(d["w_consumed"])))
+                        if stg3 is not None and hook_name == "after_zad" else None),
                 )).step(s0, dt=card.dt_s, freshwater=fw, surface_forcing=sf))
             jax.effects_barrier()
             cand = card_levels(exposed)
@@ -1025,6 +1033,12 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
                 np.savez(Path(dump) / "g6_stage2_ww.npz", card_w=ww_seen["w"],
                          card_u=ww_seen["u"], card_h_u=ww_seen["h_u"],
                          **{f"nemo_{k}": v for k, v in stg.items() if k != "levels"})
+        if stg3 is not None and "after_zad" in {h for h, _ in boundaries}:
+            require("w" in ww3_seen, "the stage-3 dyn_zad observer never fired")
+            out["stage3_ww"] = bit_rows("stage3_momentum_wzv.ww",
+                                        stg3["ww"][2:-2, 2:-2, :nk],
+                                        ww3_seen["w"][..., :nk],
+                                        cls["t"]["full"] | cls["t"]["partial"])
         return out
     if arm == "stp2d_terms":
         return stp2d_terms(out, root, kt_from, kt_to, card=card, cfg=cfg, z=z,

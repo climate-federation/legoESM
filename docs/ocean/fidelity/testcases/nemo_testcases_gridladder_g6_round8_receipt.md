@@ -400,3 +400,36 @@ form, not separately measured); the mechanical citation re-anchor.
 UNVERIFIED: the stage-3 arm has no stage-3 term row of its own; the numpy
 replay of NEMO's `ww` is not validated; XLA's HLO at the changed call was not
 read (the defect is an association choice, fixed by transcription).
+
+## Resume 3: a test for the stage-3 stored-Kmm selection alone
+
+Status: **LANDED (test only); G6 stays CERTIFIED.**  The independent
+Claude review reproduced the certification and held one item: removing
+ONLY the stage-3 selection failed no test (17 passed) while moving
+independent kt-6 ssh (0 -> 864 cells, at the bar).
+
+Added: the operators arm also reads NEMO's kt-1 stage-3 term record
+(`oracle_g6_stage_terms_kt00000001_s3.bin`, slots checked = (1, 2, 3))
+and captures the stage-3 momentum `ww` through the existing stage-3
+`dyn_zad` operand observer.  The existing kt-1 r44b test (ordinary jitted
+step, x64, traced inputs) now also asserts the stage-3 `ww` has 0 differing
+wet cells against NEMO.  The stage-3 Kmm is the half blend NEMO stores,
+`ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/stprk3_stg.f90:221-223` /
+`ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:221-223`.
+
+- With the selection: 1 passed (`round44/resume3/stage3_ww_with.log`).
+- Stage-3 selection alone removed (stage set `(1, 2)` -> `(1,)`): FAILS
+  `121 == 0` (`round44/resume3/nonvacuity_stage3_selection.log`); restored
+  with `git checkout --`, `git status --porcelain` shows only this resume's
+  two files.
+
+Search: grepped `stage3_zad_operand_observer`, `read_g6_stage_terms`,
+`stage2_ww` in the ladder script and model; reused the observer, reader
+and `bit_rows`.  No model code changed.
+
+codex review: paused (quota).  The operator runs an independent Claude
+review of this diff before landing.
+
+ASKED: the stage-3 test, shown failing and restored, gates.  UNASKED: none.
+
+UNVERIFIED: none beyond Resume 2.
