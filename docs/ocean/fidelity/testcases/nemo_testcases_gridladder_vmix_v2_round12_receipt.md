@@ -108,7 +108,7 @@ D122 this is the ORCA2 lane's to fix; V2 will certify the nn_evdm = 0 form.
 ## 7. V2 scored (resume after the record)
 
 Record: `gridladder_vmix_rounds/round12/oracle_v2_r12` (operator: `V2_PREFLIGHT_OK` at `d19bf5efb`, nothing built;
-`V2_ACQUISITION_PASS steps=1..10 restarts=2..10`). Scored at `e1dd4c29f` (model code tree `025199c33f5b`, unchanged
+`V2_ACQUISITION_PASS steps=1..10 restarts=2..10`). Scored with the ladder of `e1dd4c29f` (model code tree `025199c33f5b`, unchanged
 since `d19bf5efb`); CPU, x64.
 
 - **P1 CONFIRMED.** Acquisition passed; each run's log shows `ln_zdfevd = T`, `nn_evdm = 0`, the `zdf_evd` banner.
@@ -155,6 +155,18 @@ So under RK3 both trigger arms are the same before-N²; the card's "now/before" 
 | `score_v2.sh` / `v2test.sh` | babdff714eba01b6 / 927f751331166901 |
 | `v2test_real.log` / `v2test_plant.log` / `v2test_plant2.log` | bea3dbeef365e0ef / 49de19cc4f19d582 / 0290afc46227d6c8 |
 | `acquisition_v2.log` (operator) | 79d3aa5035835c04 |
+
+Resume gates (synchronous, CPU, fp64, `land.sh` PYTHONPATH, clean tree at `bf60a14c4`):
+- `land.sh` list without the face-mask file, plus the V1, V2, r3-guard and ladder test files: **172 passed,
+  9 deselected** (the repo's default `not slow`) — includes the citation-gate tests and the private-import ratchet.
+- Face-mask file, two processes: **1 passed** (478 s), **1 passed** (54 s).
+- Per-receipt citation gate on this receipt (`--from-heading` this title): **PASS, failures 0**, 29 citations,
+  unmapped 0, map entries failing audit 0. One map pin re-anchored +3 (the ladder's step function; no receipt
+  cites it).
+
+| gate log (`round12/`) | sha256 prefix |
+|---|---|
+| `gate_resume.log` / `gate_resume_fm1.log` / `gate_resume_fm2.log` / `receipt_gate_resume.log` | 768cc79c803d6ff9 / 3d7a4e6684ca0e0e / a0c34272e8c4ba6e / 530506c9dafdf9b0 |
 
 `given_all.log`'s hash equals round 11's V1 log: its row names carry no case and every row is 0; the JSONs differ.
 
