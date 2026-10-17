@@ -28,8 +28,8 @@ the C-grid model's shear/N2 wiring and the `hm_i` forcing field were applied
 as its diff. (b): every cited routine is byte-identical between the V1 build
 (`ORCA2V1_OMIP_L4_R1FULLENTRY`) and `ORCA2_OMIP_L4` (zdftke, zdfsh2, eosbn2,
 domqco, zdfphy, lbcnfd, zdfevd); `stprk3.f90` differs only in instrumentation.
-Rung 10 runs TKE because its deck sets `ln_zdftke` (`zdfphy.f90:266`), which
-calls the shear at `zdfphy.f90:318` and the closure at `zdfphy.f90:336`.
+Rung 10 runs TKE because its deck sets `ln_zdftke` (`ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:266`), which
+calls the shear at `ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:318` and the closure at `ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:336`.
 
 | statement | (a) V1 receipt | (b) ORCA2_OMIP_L4 line |
 |---|---|---|

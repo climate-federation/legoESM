@@ -1698,6 +1698,18 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ORCA2 round 307: V1 vertical-mixing statements on rung 10 ---
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:266': 'IF( ln_zdftke ) THEN   ;   ioptio = ioptio + 1   ;    nzdf_phy = np_TKE   ;   CALL zdf_tke_init          ;   ENDIF',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:318': 'CALL zdf_sh2( Kbb, Kmm, avm_k,   &     ! <<== in',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:336': 'CASE( np_TKE )   ;   CALL zdf_tke( kt, Kbb, Kmm, sh2, avm_k, avt_k )    ! TKE closure scheme for Kz',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/eosbn2.f90:1281-1285': [('CASE( np_teos10, np_eos80 )                !==  polynomial TEOS-10 / EOS-80 ==!', 7), ('zh  = ((gdept_1d(jk) ) *(1._wp+r3t(ji,jj,Kmm))) * r1_Z0                                ! depth', 1), 5],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/eosbn2.f90:1631-1637': ['DO jk =  2,  jpkm1  ; DO jj = ntsj-(  kbnd), ntej+(   kbnd) ; DO ji = ntsi-( kbnd), ntei+(   kbnd)      ! interior points only (2=< jk =< jpkm1 ); surface and bottom value set to zero one for all in istate.F90', ('!', 780), 7],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3.f90:179': 'CALL zdf_phy( kstp, Nbb, Nbb, Nrhs )   ! vertical physics update (top/bot drag, avt, avs, avm + MLD)',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90:466-472': ['zd_lw(ji,jk) = en(ji,jj,jk) - zd_lw(ji,jk) / zdiag(ji,jk-1) * zd_lw(ji,jk-1)', 'en(ji,jj,jk) = ( zd_lw(ji,jk) - zd_up(ji,jk) * en(ji,jj,jk+1) ) / zdiag(ji,jk)', 7],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfsh2.f90:98-108': ['DO jj = ntsj-( 1), ntej+(  0 ) ; DO ji = ntsi-( 1), ntei+(  0)     !* 2 x shear production at uw- and vw-points (energy conserving form)', '&         * wvmask(ji,jj,jk)', 11],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90:420-426': ['zdiag(ji,jk) = 1._wp - zzd_lw - zzd_up + zfact2 * dissl(ji,jj,jk) * wmask(ji,jj,jk)', '&                                  ) * wmask(ji,jj,jk)', 7],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90:498-500': ['IF( nn_etau == 1 ) THEN           !* penetration below the mixed layer (rn_efr fraction)', ('en(ji,jj,jk) = en(ji,jj,jk) + rn_efr * en(ji,jj,1) * EXP( -((gdepw_1d(jk) ) *(1._wp+r3t(ji,jj,Kmm))) / htau(ji,jj) )   &', 1), 3],
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90:864': 'htau(:,:) = MAX(  0.5_wp, MIN( 30._wp, 45._wp* ABS( SIN( rpi/180._wp * gphit(Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0)) ) ) )   )',
     # --- ORCA2 round 282: G1b statements measured on ORCA2 --------
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynvor.f90:648-651': {
         'anchors': [
