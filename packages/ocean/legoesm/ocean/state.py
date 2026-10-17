@@ -3269,7 +3269,7 @@ class LatLonCGridOceanConfig(NamedTuple):
     implicit_ice_ocean_top_drag: bool = False
     # G7's two bottom-drag statements without the ice top drag, as NEMO runs
     # them when nn_ice=0 forces ln_drgice_imp=F (zdfdrg.f90:380): the
-    # dyn_drg_init bottom residual (dynspg_ts.f90:1446-1447, :1462-1463) and
+    # dyn_drg_init bottom residual (dynspg_ts.f90:1447-1448, :1462-1463) and
     # the dyn_zdf bottom RHS (dynzdf.f90:166-169).  implicit_ice_ocean_top_drag
     # already selects both.  Needs the linear bundle.  Default False.
     nemo_bottom_drag_written_statements: bool = False

@@ -248,6 +248,9 @@ FILES = {
         _ORCA2_COMPILED / "stprk3.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/stp2d.f90": (
         _ORCA2_COMPILED / "stp2d.f90"),
+    # ORCA2 round 305 cites the G5/G7 drag statements in the shipped build.
+    "ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynspg_ts.f90": (
+        _ORCA2_COMPILED / "dynspg_ts.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/stpctl.f90": (
         _ORCA2_COMPILED / "stpctl.f90"),
     "ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/stpctl.f90": (
@@ -8111,6 +8114,60 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4/EXP00/namelist_cfg:85': 'nn_ice      = 2',
     'ORCA2_OMIP_L4/EXP00/namelist_cfg:251': 'ln_lin = .true.',
     'ORCA2_OMIP_L4/EXP00/namelist_ref:817': 'ln_drgimp   = .true.',
+    # --- ORCA2 round 305: G5 top drag + G7 bottom drag (Decision 122) ---
+    'ORCA2_OMIP_L4/EXP00/namelist_ref:818': 'ln_drgice_imp = .true. ! implicit ice-ocean drag',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynspg_ts.f90:1404': 'SUBROUTINE dyn_drg_init(',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynspg_ts.f90:1431-1432': {
+        'anchors': ['pCdU_u(ji,jj) = r1_2*( ( rCdU_bot(ji+1,jj) + rCdU_bot(ji,jj) ) + ( rCdU_top(ji+1,jj) + rCdU_top(ji,jj) ) )', 'pCdU_v(ji,jj) = r1_2*( ( rCdU_bot(ji,jj+1) + rCdU_bot(ji,jj) ) + ( rCdU_top(ji,jj+1) + rCdU_top(ji,jj) ) )'],
+        'routine': 'dyn_drg_init',
+    },
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynspg_ts.f90:1447-1448': {
+        'anchors': ['zu_i(ji,jj) = puu(ji,jj,ikbu,Kmm) - puu_b(ji,jj,Kmm)', 'zv_i(ji,jj) = pvv(ji,jj,ikbv,Kmm) - pvv_b(ji,jj,Kmm)'],
+        'routine': 'dyn_drg_init',
+    },
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynspg_ts.f90:1462-1463': {
+        'anchors': ['* r1_2*( rCdU_bot(ji+1,jj)+rCdU_bot(ji,jj) ) * zu_i(ji,jj)', '* r1_2*( rCdU_bot(ji,jj+1)+rCdU_bot(ji,jj) ) * zv_i(ji,jj)'],
+        'routine': 'dyn_drg_init',
+    },
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynspg_ts.f90:1487-1488': {
+        'anchors': ['* r1_2*( rCdU_top(ji+1,jj)+rCdU_top(ji,jj) ) * zu_i(ji,jj)', '* r1_2*( rCdU_top(ji,jj+1)+rCdU_top(ji,jj) ) * zv_i(ji,jj)'],
+        'routine': 'dyn_drg_init',
+    },
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stp2d.f90:63': 'SUBROUTINE stp_2D(',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stp2d.f90:219': {
+        'anchors': 'CALL dyn_drg_init( Kbb, Kbb, uu, vv, uu_b, vv_b, Ue_rhs, Ve_rhs, CdU_u, CdU_v )',
+        'routine': 'stp_2D',
+    },
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynzdf.f90:67': 'SUBROUTINE dyn_zdf(',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynzdf.f90:166-169': {
+        'anchors': ['puu(ji,jj,iku,Kaa) = puu(ji,jj,iku,Kaa) + zDt_2 * ( rCdU_bot(ji+1,jj)+rCdU_bot(ji,jj) ) * uu_b(ji,jj,Kaa)', 'pvv(ji,jj,ikv,Kaa) = pvv(ji,jj,ikv,Kaa) + zDt_2 * ( rCdU_bot(ji,jj+1)+rCdU_bot(ji,jj) ) * vv_b(ji,jj,Kaa)'],
+        'routine': 'dyn_zdf',
+    },
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynzdf.f90:175-178': {
+        'anchors': ['puu(ji,jj,iku,Kaa) = puu(ji,jj,iku,Kaa) + zDt_2 * ( rCdU_top(ji+1,jj)+rCdU_top(ji,jj) ) * uu_b(ji,jj,Kaa)', 'pvv(ji,jj,ikv,Kaa) = pvv(ji,jj,ikv,Kaa) + zDt_2 * ( rCdU_top(ji,jj+1)+rCdU_top(ji,jj) ) * vv_b(ji,jj,Kaa)'],
+        'routine': 'dyn_zdf',
+    },
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfdrg.f90:187': {
+        'anchors': 'rCdU_top(ji,jj) = rCdU_ice(ji,jj)',
+        'routine': 'zdf_drg',
+    },
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfdrg.f90:258': 'SUBROUTINE zdf_drg_lin(',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfdrg.f90:276': {
+        'anchors': 'pCdU(ji,jj) = - pCd0(ji,jj) * rn_Uc0   ! linear friction',
+        'routine': 'zdf_drg_lin',
+    },
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfdrg.f90:380': {
+        'anchors': 'IF ( ln_drgice_imp .AND.   nn_ice /= 2  )   ln_drgice_imp = .FALSE.',
+        'routine': 'zdf_drg_init',
+    },
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfdrg.f90:525': {
+        'anchors': 'IF(ll_bot)   zmsk_boost(:,:) = zmsk_boost(:,:) * ssmask(:,:)',
+        'routine': 'drg_init',
+    },
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfdrg.f90:546': {
+        'anchors': ('pCd0(:,:) = rn_Cd0 * zmsk_boost(:,:)', 1),
+        'routine': 'drg_init',
+    },
 }
 
 

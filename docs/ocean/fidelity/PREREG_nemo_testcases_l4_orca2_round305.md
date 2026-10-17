@@ -41,3 +41,9 @@ That is a scheme selection: it is measured here, and it is asked, not landed.
 
 D122 (c)+(d) on every applicable pair. Only selections that need no unasked
 choice may land. The rung-0 / rung-10 law change is a DECISION_NEEDED.
+
+## Correction (appended 2026-10-17, after measurement; text above unchanged)
+
+The bottom residual's `zu_i`/`zv_i` statements are `dynspg_ts.f90:1447-1448`
+in the ORCA2_OMIP_L4 build, not `:1446-1447` (`:1446` is `ikbv = mbkv(ji,jj)`).
+Found by the receipt citation gate's anchor check. No prediction depends on it.
