@@ -152,13 +152,32 @@ Import waits for G6 certification.
 ## Tests and review
 
 All CPU fp64, `JAX_ENABLE_X64=1`, PYTHONPATH as in `claude_rounds/land.sh`.
-GATES_PLACEHOLDER
+- Default gate (land.sh list): private imports, TKE terms, freshwater
+  closure, stage face-mask rank, barotropic state, NEMO recipe 125 passed
+  (run at `180f88919`; later commits touch one comment line and the gate
+  map only); citation-gate test + private imports 23 passed (final tree).
+- G2-G5, G5 top drag, G7 cards: 85 passed.  G6 card + G2/G6 ladder
+  (incl. the four rewritten kt-3 tests and the acquisition patch test):
+  27 passed.  G1/G1b cards, G1 tools, G1 ladder: 117 passed.  Card
+  constructibility + `dyn_zad` association unit: 24 passed.
+- Removal checks: five pieces, each removed alone, kt-3 tests FAIL (§1);
+  logs `round44/nonvacuity_*.log`.  Acquisition patch test FAILS with the
+  after-VOR write planted out.
+- Receipt citation gate on THIS receipt (from its title): 6 citations,
+  failures 0, unmapped 0, map audit 0; a planted shift of the G5-build
+  `stprk3_stg.f90:221` citation FAILS it (`SYMBOL-NOT-AT-LINE`).  Five
+  round-44 map entries added; 73 gate pins and 21 lines of the GYRE
+  phase-3 round-8 receipt re-anchored by the repo's tool (mechanical, from
+  `eab4efd114`); one round-160 span the landing lengthened widened by hand.
+- codex review: paused (quota).  The operator runs an independent Claude
+  review of this diff before landing.
 
 ASKED: test hygiene, the walk, land the cited statement G6-selected,
 revert-failing tests, both labels kt 1..6, the acquisition.
 
 UNASKED, offered for revert: the acquisition's patch test (a new test for
-a new script); the field-order pins moved by one for the appended field.
+a new script); the field-order pins moved by one for the appended field;
+the mechanical citation re-anchor; one stale code comment reworded.
 
 UNVERIFIED: XLA's rewrite at the stage-2 momentum wzv is not read from
 HLO (the statement is an algebraic-only difference, fixed by transcription);
