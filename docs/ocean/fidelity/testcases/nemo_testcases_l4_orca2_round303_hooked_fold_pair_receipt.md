@@ -139,8 +139,15 @@ the 35 added fields is inert on LOCK_EXCHANGE and OVERFLOW is not measured
 ## Gates
 
 - No `packages/` change: GYRE trajectory and day-30 gates not required.
-- Citation gate: see the final commit's log in `orca2_rounds/round303/`.
-- Tests: see the final commit's log in `orca2_rounds/round303/`.
+- Citation gate (receipt commit `d59cc819c`): this receipt PASS (8
+  citations, each pinned to its subroutine, 0 unmapped); default receipt
+  PASS (274).  Line plant on
+  `ORCA2_OMIP_L4_R299W7/BLD/ppsrc/nemo/stprk3_stg.f90:584` fails
+  (`SYMBOL-NOT-AT-LINE`, exit 1); routine plant on
+  `ORCA2_OMIP_L4/BLD/ppsrc/nemo/dommsk.f90:211` fails
+  (`ROUTINE-CONTEXT-MISMATCH`, exit 1).
+- Tests: citation-gate tests, private-import ratchet, round-302 probe test:
+  `26 passed`.
 - codex review: paused (quota).  The operator runs an independent Claude
   review before landing.
 
