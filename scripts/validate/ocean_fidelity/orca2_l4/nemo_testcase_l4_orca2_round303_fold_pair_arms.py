@@ -37,11 +37,8 @@ for package in (REPO_ROOT, REPO_ROOT / "packages/core",
         sys.path.insert(0, str(package))
 
 from legoesm.ocean.fidelity.provenance import worktree_stamp  # noqa: E402
-
-from scripts.validate.ocean_fidelity.orca2_l4 import (  # noqa: E402
+from scripts.validate.ocean_fidelity.orca2_l4 import (  # noqa: E402, I001
     nemo_testcase_l4_orca2_round258_v_transport_pivot_gate as r258,
-)
-from scripts.validate.ocean_fidelity.orca2_l4 import (
     nemo_testcase_l4_orca2_round302_region_history as r302,
 )
 
