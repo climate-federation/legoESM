@@ -135,8 +135,18 @@ or OMT-0..4 (`config_import_vs_selected.txt`).
 - Two independent-label arms aborted once (`Fatal Python error:
   PyThreadState_Get`, exit 134, interpreter crash under 21 parallel runs);
   rerun clean, kept in `arms/aborted/`.
-- Citation gate, default gate, ratchet, battery: see the commit that adds
-  this receipt's gate numbers.
+- This receipt's citation gate: PASS (12 citations, 0 failures, 0 unmapped);
+  a planted 2-line shift of the zdfsh2 citation exits 1. Eleven map entries
+  added; the zdfsh2 build file registered.
+- Default citation gate + private-import ratchet: 23 passed. The import
+  shifted 140 map/receipt citations of our model files: re-anchored
+  mechanically (round-306 tool, base `64b28e144`); three spans the import
+  grew were re-pinned by count (122->124, 74->100, 71->74).
+- Battery A (landing set, ported vmix tests, round-305/307 selection tests):
+  224 passed. Battery B (OMT-0..4 and ORCA2 round-9x/30x card tests): 112
+  passed, 1 failed — the OMT-1 "only the vector module moved" test trips on a
+  barotropic flag, pre-existing (round 305 recorded it; OMT-1's config is
+  unchanged in every row this round).
 
 ## Choices
 
