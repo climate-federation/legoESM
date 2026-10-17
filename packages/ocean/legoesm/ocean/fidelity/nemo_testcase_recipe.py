@@ -4396,7 +4396,7 @@ def _orca2v1_tke_vertical(g5_vm, deck: ORCA2G1Deck):
         nemo_sh2_step_entry_ssh=True,           # zdf_sh2 r3u(Nbb), zdfsh2.f90:98-108; stprk3.f90:185
         nemo_tke_solve_source_rounded=True,     # zdftke.f90:466,472 without FMA
         nemo_sh2_fold_top_v=True,               # zdfsh2.f90:98-113 pivot north V face
-        nemo_tke_matrix_rhs_source_rounded=True,  # zdftke.f90:419,423-426 without FMA
+        nemo_tke_matrix_rhs_source_rounded=True,  # zdftke.f90:420,423-426 without FMA
         tke_htau_evaluation="nemo_scalar_libm",  # SIN(rpi/180*gphit), :864
         tke_etau_exponential_evaluation="nemo_scalar_libm",  # EXP, :500
         etau_mode="below_ml",                   # nn_etau=1, :498-502

@@ -2,8 +2,8 @@
 
 Status: **HELD. V1 is not certified.** Round 9 landed one fix: the TKE matrix diagonal and right-hand side now use NEMO's
 `-O0` arithmetic. kt-2 TKE energy misses fall from 47,358 cells to 2. kt-2 surface u misses fall from 5,048 cells to 0.
-Every kt-2 field is now AT-BAR under both labels. The first over-bar row is now kt 3: sea level (189 cells, normalised
-2.39e-15), T (13 cells) and diffusivity (12 cells).
+Every kt-2 field is now AT-BAR under both labels. The first over-bar row is now kt 3: sea level (189 cells, max 2.39e-15 m
+absolute, 1.29e-15 normalised), T (13 cells) and diffusivity (12 cells).
 
 Decisions in force: D129 = 1, D130 = 1. Codex review: paused (quota).
 
@@ -69,7 +69,7 @@ Instrument: the card's kt-2 `tke_tke` trace, written out passively (the step is 
 is replayed in numpy in NEMO's written order with one rounding per operation. The V1 build is gfortran `-O0`
 (`arch_nemo.fcm`), so it has no FMA.
 - **Control:** at kt 1 the replay reproduces the card's RHS and diagonal in every cell (`tke_local_kt1.json`).
-- kt 2: the replay differs from the card's diagonal (`zdftke.f90:419`) in 354,867 cells and from the card's RHS
+- kt 2: the replay differs from the card's diagonal (`zdftke.f90:420`) in 354,867 cells and from the card's RHS
   (`:423-426`) in 109,781 cells.
 - Re-solving with round 7's literal solver, keeping the card's post-solve increment (`solve_arms.py`), kt-2 en
   unequal vs NEMO:
@@ -96,7 +96,7 @@ term is about 1e-12, which is why the kt-1 control could not see it.
 kt 1, both labels: 0 unequal on every row (P2b CONFIRMED).
 
 INDEPENDENT. Columns en to T give unequal cells / full-depth normalised max. The ssh column gives unequal cells / the
-ladder's printed max.
+ladder's printed max, which is ABSOLUTE (m), not normalised.
 
 | kt | en | avm_k | avt_k | dissl | T | ssh |
 |---:|---|---|---|---|---|---|
@@ -127,7 +127,11 @@ remain, not 16,649, because the zfact2 constant was the larger part.
 
 ## 5. Next owner (registered, PLAUSIBLE, not landed)
 
-- kt-2 residue: en 2 cells, avm 1 cell, avt 3 cells. These seed kt 3.
+- kt-2 residue: en 2 cells, avm 1 cell, avt 3 cells, T 5 cells, S 4 cells.
+- kt-3 sea level (189 cells) comes from the kt-2 T/S residue. MEASURED by the independent review (scratch, not
+  committed): swapping in NEMO's kt-2 T/S makes kt-3 sea level exact; swapping in NEMO's kt-2 TKE fields leaves all 189
+  cells; full substitution gives an exact kt 3 (control).
+- That the T/S residue itself comes from the 3-cell kt-2 `avt` residue is PLAUSIBLE, not measured.
 - kt-3 `avt_k` (12 cells, 8.4e-14) is amplified through the Prandtl-number update (`zdftke.f90:717`). That is a
   consequence of the residue, not a new owner.
 - Next round: a cell-level replay of the 2 kt-2 en cells, through the Langmuir source, the penetration increment and
@@ -141,7 +145,7 @@ byte-identical between the V1 build and `ORCA2_OMIP_L4`.
 | statement | ORCA2_OMIP_L4 line | SUBROUTINE |
 |---|---|---|
 | `zfact2 = 1.5_wp * rn_Dt * rn_ediss` | `ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90:247` | `tke_tke` (:199) |
-| `zdiag = 1 - zzd_lw - zzd_up + zfact2*dissl*wmask` | `ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90:419` | `tke_tke` (:199) |
+| `zdiag = 1 - zzd_lw - zzd_up + zfact2*dissl*wmask` | `ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90:420` | `tke_tke` (:199) |
 | `en = en + rn_Dt*( p_sh2 - p_avt*rn2 + zfact3*dissl*en )*wmask` | `ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90:423-426` | `tke_tke` (:199) |
 | `p_avm = MAX( zav, avmb ) * wmask` (handed to the momentum solve) | `ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90:709` | `tke_avn` (:531) |
 | `zzwi/zzws = -zDt_2*(avm+avm)/..`; `puu(1) += rDt*utauU` | `ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynzdf.f90:192-201,338` | `dyn_zdf` (:67) |
@@ -179,13 +183,25 @@ All runs synchronous, CPU, fp64:
 | citation gate + private imports, clean tree at `4e4f794d7` | 23 passed |
 | recipe, freshwater, face-mask rank, prognostic barotropic | **NOT RUN**: killed at the 580 s timeout twice, with the machine at load 25-43 from other lanes; left to the push gate |
 
-Review: **codex review: paused (quota)**. GLM unavailable. The diff is **UNREVIEWED** until the operator's
-independent Claude review.
+Review: **codex review: paused (quota)**. GLM unavailable. Independent Claude review: **HOLD** on three mechanical
+items, physics CONFIRMED. All three fixed in the review-fix commit (section 8).
+
+## 8. Independent-review fixes
+
+- **Guard.** The flag on the factored matrix ran and changed nothing. It now raises unless the literal matrix is
+  selected; a test asserts the raise and fails with the guard reverted (`DID NOT RAISE`).
+- **Citation.** The diagonal statement is `zdftke.f90:420` in both builds (`:419` is `zd_lw`). Fixed here and in the
+  code comments; the fix commit `4e4f794d7`'s message still says `:419`. The citation gate's default receipt is the GYRE
+  one, so no pinned anchor moved.
+- **Label.** kt-3 sea-level max 2.39e-15 m is absolute; normalised it is 1.29e-15 (status line and section 4 header).
+- **kt-3 attribution** (reviewer's measurement): recorded in section 5.
 
 ## Choices made
 
 ASKED (this round's brief): the walk from surface u into TKE; landing the transcription defect V1-selected; re-scoring
 both labels.
+
+ASKED (review fixes): the factored-matrix flag becomes a hard error.
 
 UNASKED, offered for revert:
 - one flag covers both statements (diagonal and RHS) instead of one flag per statement;

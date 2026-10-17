@@ -680,7 +680,7 @@ class TKEConfig(NamedTuple):
     # vmask, north avm_k and r3v ssh from the fold images (lbcnfd.f90:584-720)
     # instead of a wall. Card-selected.
     nemo_sh2_fold_top_v: bool = False
-    # zdftke.f90:419 zdiag and :423-426 RHS with every operation rounded in
+    # zdftke.f90:420 zdiag and :423-426 RHS with every operation rounded in
     # written order (NEMO's build has no FMA). Card-selected.
     nemo_tke_matrix_rhs_source_rounded: bool = False
     # Langmuir source evaluation. ``vectorized`` is the historical shared

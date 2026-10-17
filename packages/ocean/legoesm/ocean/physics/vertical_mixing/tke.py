@@ -1412,6 +1412,11 @@ def _solve_tke_backward_euler(
         raise ValueError(
             "tke_solver_evaluation='nemo_literal' requires "
             "tke_matrix_evaluation='nemo_literal'.")
+    if (getattr(cfg, "nemo_tke_matrix_rhs_source_rounded", False)
+            and not literal_matrix):
+        raise ValueError(
+            "nemo_tke_matrix_rhs_source_rounded requires "
+            "tke_matrix_evaluation='nemo_literal'.")
     if return_statement_trace and (
             not literal_solver or surface_bc_level != "nemo_z0"):
         raise ValueError(
@@ -1731,7 +1736,7 @@ def _solve_tke_backward_euler(
                 "dissipation_discretization='nemo_1p5_split'.")
         dissl = jnp.asarray(dissl_old, dtype=e_old.dtype)
     if literal_matrix and getattr(cfg, "nemo_tke_matrix_rhs_source_rounded", False):
-        # zdftke.f90:419 one rounding per operation (no FMA in NEMO's build).
+        # zdftke.f90:420 one rounding per operation (no FMA in NEMO's build).
         r = nemo_source_round
         # zfact2 = 1.5*rn_Dt*rn_ediss (:247) = 11340 on V1; unrounded, XLA
         # reassociates it to dt*(1.5*0.7) = 11339.999999999998.

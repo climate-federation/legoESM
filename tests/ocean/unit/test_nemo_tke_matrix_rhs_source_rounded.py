@@ -62,7 +62,7 @@ def test_selected_diag_and_rhs_are_nemo_written_order_under_jit():
     k_h, n2, p_s = (np.asarray(x[k]) for k in ("K_H_old", "N2", "P_s"))
     zfact2 = (1.5 * DT) * 0.7                       # zdftke.f90:247
     assert zfact2 == 11340.0
-    nemo_diag = ((1.0 - lw) - up) + (zfact2 * d) * 1.0          # :419
+    nemo_diag = ((1.0 - lw) - up) + (zfact2 * d) * 1.0          # :420
     nemo_rhs = en + DT * ((p_s - k_h * n2) + ((0.5 * 0.7) * d) * en) * 1.0
     assert np.array_equal(diag, nemo_diag)
     assert np.array_equal(rhs_ext[..., 1:], nemo_rhs)
@@ -70,3 +70,15 @@ def test_selected_diag_and_rhs_are_nemo_written_order_under_jit():
 
 def test_flag_defaults_off():
     assert tke_mod.TKEConfig().nemo_tke_matrix_rhs_source_rounded is False
+
+
+def test_flag_without_the_literal_matrix_raises():
+    # On the factored matrix the flag would otherwise run and change nothing.
+    x = _inputs()
+    for k in ("nemo_e3t", "dissl_old", "dz_face_surface", "K_M_surface"):
+        x.pop(k)
+    cfg = tke_mod.TKEConfig(nemo_tke_matrix_rhs_source_rounded=True)
+    with pytest.raises(ValueError, match="requires tke_matrix_evaluation"):
+        tke_mod._solve_tke_backward_euler(
+            surface_flux=jnp.zeros(SHAPE[:-1]), dt=DT, cfg=cfg,
+            w_active=jnp.ones(SHAPE), **x)
