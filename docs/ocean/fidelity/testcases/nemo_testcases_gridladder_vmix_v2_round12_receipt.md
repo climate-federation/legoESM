@@ -8,7 +8,8 @@ Decisions in force: D128-D130. Codex review: paused (quota). Evidence: `gridladd
 Preregistration: `PREREG_nemo_testcases_gridladder_vmix_v2_round12.md`, committed `c833a83bd` before the card.
 
 Commits: `9264d1b1c` pairing guard; `c833a83bd` V2 prereg; `d8523c5bc` V2 card, deck, acquisition, tests;
-this receipt with its citation map entries.
+`96847a5a9` receipt, citation re-anchors and map entries; two follow-ups pinning/deduplicating map keys; this
+update (test numbers).
 
 ## 1. V1 hardening: the two r3 statements must be selected together
 
@@ -89,8 +90,19 @@ D122 this is the ORCA2 lane's to fix; V2 will certify the nn_evdm = 0 form.
 ## 6. Tests (synchronous, CPU, fp64, `land.sh` PYTHONPATH)
 
 - `land.sh` list without the face-mask file, plus the r3 unit test, V1 and V2 card tests and V1's kt 1-2
-  record test: see `gate1.log` (result quoted in the final message).
-- Per-receipt citation gate on this receipt: see final message.
+  record test (`gate1.log`): **165 passed, 3 failed** — all three in the citation gate, from map pins this
+  round's edits shifted. Re-anchored (23 pins, mechanical offsets +1..+7, no anchor text changed).
+- Citation gate tests + private-import ratchet after the fix (`gate2.log`): **23 passed**.
+- Face-mask file, two processes: **1 passed** (472 s), **1 passed** (54 s).
+- Per-receipt citation gate on this receipt (`--from-heading` this title): **PASS, failures 0**, 17 citations,
+  unmapped 0, map entries failing audit 0 (`receipt_gate.log`).
+- V1's kt 1-2 every-field bit-for-bit record test is in `gate1.log`'s 165 passed (V1 unchanged by the guard).
+
+| evidence (`round12/`) | sha256 prefix |
+|---|---|
+| `jaxpr_all_final.log` / `jaxpr_orca2_fix.txt` / `jaxpr_dino_fix.txt` | 2af5627e14ac2473 / 8e7e8817080fbadc / 760bf60d3c5c7226 |
+| `v2_trace.py` / `v2_trace.log` | 6e6b5e22150215bb / 8ca4cb988ec55e34 |
+| `gate1.log` / `gate2.log` / `gate_fm1.log` / `gate_fm2.log` / `receipt_gate.log` | fabe909a80a01b89 / 7b9dfb51c5bc942b / 23057066ed7d085a / 1edcd6042ff68eb4 / 0d1f982ade5bdc10 |
 
 ## Choices made
 
