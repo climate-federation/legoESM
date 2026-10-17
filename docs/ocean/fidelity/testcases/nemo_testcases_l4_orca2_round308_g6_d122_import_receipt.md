@@ -156,8 +156,11 @@ it completes only with the uncertified transport mask.
 
 - New `tests/ocean/fidelity/test_orca2_round308_g6_selection.py` (14 tests):
   reverting the selection fails 6 (tree restored, `git status` clean).
-- Receipt citation gate, default gate, private-import ratchet: see the
-  commit that adds this receipt.
+- Receipt citation gate on this receipt: PASS, 13 citations, failures 0.
+- Default gate (land.sh battery, JAX_ENABLE_X64=1): 159 passed (citation
+  gate + private-import ratchet + selection 37; recipe 25; TKE/freshwater/
+  face-mask/barotropic 95; ORCA2 parallel receipt 2).  The import's line
+  shifts were re-anchored in the citation map and the default receipt.
 - codex review: paused (quota).  The operator runs an independent Claude
   review before landing.
 
