@@ -4519,7 +4519,7 @@ CITATION_MAP = {
         ('return bool(config_split)', 1), 38],
     'ocean_model_latlon_cgrid.py:2162-2168': [
         ('w_momentum, _, _ = nemo_qco_wzv_operands(', 1),
-        ('runoff_mass_flux=runoff_mass_flux)', 2), 6],
+        ('stored_r3_ratios=bool(config.nemo_wzv_stored_r3_ratios))', 2), 7],
     'ocean_model_latlon_cgrid.py:8614-8620': [
         ('def _momentum_stage_w(geom):', 1),
         ('return geom[2] if geom[11] is None else geom[11]', 1), 7],
@@ -6248,10 +6248,10 @@ CITATION_MAP = {
         'elif config.ke_gradient_scheme == "c2":', 'dp_dy = _dKp_dy[..., 1]', 35],
     'ocean_pe_latlon_cgrid.py:3286-3317': [
         'area_w = jax.lax.optimization_barrier(',
-        'diag_vertadv_v = jax.lax.optimization_barrier(diag_vertadv_v)', 27],
+        'diag_vertadv_v = jax.lax.optimization_barrier(diag_vertadv_v)', 32],
     'ocean_pe_latlon_cgrid.py:5340-5379': [
         'zad_w, zad_h_u, zad_h_v = w, h_u, h_v',
-        ('zad_h_v = jax.lax.optimization_barrier(zad_h_v)', 1), 39],
+        ('zad_h_v = jax.lax.optimization_barrier(zad_h_v)', 1), 40],
     'ocean_model_latlon_cgrid.py:8059-8069': [
         '_freeze_hpg = self._nemo_ws_test_hooks.freeze_stage_hpg_operands',
         ('getattr(_cfg_b, "adaptive_implicit_vertadv", False)', 1), 11],

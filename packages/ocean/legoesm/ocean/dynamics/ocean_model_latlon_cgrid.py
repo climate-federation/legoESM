@@ -2165,7 +2165,7 @@ def _nemo_ws_stage_transport(
                 eta_after_override=_w_eta_after,
                 volume_transport_override=None,
                 fold_exchange_ratios=bool(config.rk3_vector_raw_vmask), runoff_mass_flux=runoff_mass_flux,
-            stored_r3_ratios=bool(config.nemo_wzv_stored_r3_ratios))
+                stored_r3_ratios=bool(config.nemo_wzv_stored_r3_ratios))
     else:
         w_stage = diagnose_w_from_flux_div(
             stage_div, z_coord, thickness_weighted=True)
