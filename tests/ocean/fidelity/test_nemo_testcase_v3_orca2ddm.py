@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import importlib.util
 import subprocess
+import sys
 from pathlib import Path
 
+import jax
 import pytest
 
 from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
@@ -83,7 +86,10 @@ def test_v3_card_is_v2_plus_the_ddm_selection_only(cards):
     a, b = _flat(v2.recipe.model_config), _flat(v3.recipe.model_config)
     moved = {k for k in set(a) | set(b) if _differs(a.get(k), b.get(k))}
     assert moved == {"physics.vertical_mixing.ddm.enabled",
-                     "physics.vertical_mixing.ddm.form"}
+                     "physics.vertical_mixing.ddm.form",
+                     "physics.convection.enhanced_diffusion.trigger_step_entry_bn2"}
+    assert v3.recipe.model_config.physics.convection.enhanced_diffusion.trigger_step_entry_bn2
+    assert not v2.recipe.model_config.physics.convection.enhanced_diffusion.trigger_step_entry_bn2
     ddm = v3.recipe.model_config.physics.vertical_mixing.ddm
     assert (ddm.enabled, ddm.form, ddm.rn_avts, ddm.rn_hsbfr) == (
         True, "nemo_literal", 1.0e-4, 1.6)
@@ -111,6 +117,14 @@ def test_v3_selector_fires_on_each_planted_ddm_field(cards):
             physics=cfg.physics._replace(vertical_mixing=vm._replace(
                 ddm=vm.ddm._replace(**plant))))))
         assert recipe._orca2g1_selector_failures(bad) == [row], plant
+    for card, flag in ((v3, False), (v2, True)):
+        cfg = card.recipe.model_config
+        conv = cfg.physics.convection
+        bad = card._replace(recipe=card.recipe._replace(model_config=cfg._replace(
+            physics=cfg.physics._replace(convection=conv._replace(
+                enhanced_diffusion=conv.enhanced_diffusion._replace(
+                    trigger_step_entry_bn2=flag))))))
+        assert recipe._orca2g1_selector_failures(bad) == ["ln_zdfevd"], flag
 
 
 def test_run_script_reuses_v1_binaries_unbuilt_and_is_fail_closed():
@@ -132,3 +146,50 @@ def test_ddm_frame_check_refuses_v2s_record():
                          capture_output=True, text=True)
     assert out.returncode == 66, out
     assert "V3_DDM_FRAME unequal_avs_avt=0 of 825840" in out.stdout
+
+
+V3_RECORD = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
+                 "gridladder_vmix_rounds/round13/oracle_v3_r13")
+V3_TWINS = [V3_RECORD / t for t in ("twin_a", "twin_b", "twin_c")]
+
+
+@pytest.mark.skipif(not jax.config.x64_enabled, reason="binary64 receipt")
+@pytest.mark.skipif(not all(t.is_dir() for t in V3_TWINS)
+                    or not (V2_FRAME.parent / "twin_b").is_dir(),
+                    reason="the operator's V2/V3 records are not on this machine")
+def test_v3_kt1_3_every_field_and_kt1_avt_avs_avm_bit_for_bit():
+    """kt 2 needs zdf_ddm's true division by rn_hsbfr under jit; kt 3 (one
+    column) needs EVD's trigger on the step-entry rn2/rn2b."""
+    import netCDF4
+    import numpy as np
+
+    # control: DDM moves NEMO's kt-2 T, so matching V3's record is not matching V2's
+    kt2 = "ORCA2G1_00000002_restart.nc"
+    with netCDF4.Dataset(V2_FRAME.parent / "twin_b" / kt2) as a, \
+            netCDF4.Dataset(V3_RECORD / "twin_b" / kt2) as b:
+        assert np.count_nonzero(np.asarray(a["tn"][:]) != np.asarray(b["tn"][:]))
+    sys.path.insert(0, str(CASES))
+    spec = importlib.util.spec_from_file_location(
+        "v3_ladder", CASES / "nemo_testcase_g2_orca2bathy_ladder.py")
+    ladder = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ladder)
+    frame = ladder.run(V3_TWINS[0], arm="ddm_kt1", kt_from=1, kt_to=1,
+                       restart_roots=V3_TWINS, allow_dirty=True, case="ORCA2V3-ddm")
+    for f in ("avt", "avs", "avm"):
+        assert frame["rows"][f]["n_unequal_wet"] == 0, f
+        assert frame["rows"][f]["summary"]["dry_n_unequal"] == 0, f
+    census = frame["census"]
+    assert census["nemo"] == census["card"]
+    assert census["nemo"]["avs_gt_avt"] > 0 and census["nemo"]["avs_lt_avt"] > 0
+    out = ladder.run(V3_TWINS[0], arm="independent", kt_from=1, kt_to=3,
+                     restart_roots=V3_TWINS, allow_dirty=True, case="ORCA2V3-ddm")
+    assert [k["kt"] for k in out["per_kt"]] == [1, 2, 3]
+    for k in out["per_kt"]:
+        bad = [r["name"] for r in k["rows"] if r["n_unequal"]]
+        for name, lv in (k["all_levels"] or {}).items():
+            s = lv.get("summary")
+            if (lv["n_unequal"] if s is None else
+                    s["full"]["n_unequal"] or s["partial"]["n_unequal"]
+                    or s["dry_n_unequal"]):
+                bad.append(name)
+        assert not bad, f"kt {k['kt']} unequal: {bad}"

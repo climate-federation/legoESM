@@ -425,11 +425,23 @@ def compute_vertical_K_profiles(
             _evd_before = (_T_bb, _S_bb)
         else:
             _evd_state, _evd_before = state, n2_tracers
-        K_conv, A_conv = _enhanced_diffusion_K(_evd_state, z_coord, conv,
-                                               eos_fn=eos_fn,
-                                               before_tracers=_evd_before,
-                                               cc=physics_config.constants,
-                                               seos_cfg=seos_cfg)
+        if getattr(_ed, "trigger_step_entry_bn2", False):
+            # zdfevd.f90:107-108 on the step-entry rn2/rn2b (stprk3.f90:171-174)
+            if (_evd_tl != "nemo_now_before" or _ed.smooth_transition
+                    or tke_n2_bundle is None or _wet_if is None):
+                raise ValueError(
+                    "EnhancedDiffusionConfig.trigger_step_entry_bn2 needs "
+                    "evd_n2_time_level='nemo_now_before', the hard threshold, "
+                    "the step-entry bn2 bundle and the wet W mask")
+            _fire = (jnp.minimum(tke_n2_bundle.rn2, tke_n2_bundle.rn2b)
+                     <= _ed.n2_threshold) & (_wet_if > 0)
+            K_conv = jnp.where(_fire, _ed.K_conv, _ed.K_bg).astype(dtype)
+            A_conv = jnp.where(_fire, _ed.nu_conv, _ed.nu_bg).astype(dtype)
+        else:
+            K_conv, A_conv = _enhanced_diffusion_K(
+                _evd_state, z_coord, conv, eos_fn=eos_fn,
+                before_tracers=_evd_before, cc=physics_config.constants,
+                seos_cfg=seos_cfg)
         # NEMO zdfevd REPLACES the assembled coefficient where the trigger
         # fires (zdfevd.f90:107-110, called at zdfphy.f90:359 AFTER the
         # background/closure copy at :348-351); legoESM's historical

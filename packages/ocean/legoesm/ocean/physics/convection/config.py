@@ -161,6 +161,11 @@ class EnhancedDiffusionConfig(NamedTuple):
     #   k_profiles.compute_vertical_K_profiles raises if any is missing rather
     #   than silently falling back to the solver state.
     evd_n2_time_level: str = "solver_state"
+    # True: under "nemo_now_before", the trigger reads the step-entry bn2
+    # bundle's rn2/rn2b -- the arrays zdf_evd tests (zdfevd.f90:107-108,
+    # MIN(rn2,rn2b) <= -1e-12) after bn2 on Nbb (stprk3.f90:171-174) --
+    # instead of rebuilding N2 on the caller's eta (WS-RK3 stage 3's Kmm).
+    trigger_step_entry_bn2: bool = False
     # ----- How the EVD coefficient COMPOSES with everything else -----
     # NEMO's zdf_evd REPLACES the already-assembled coefficient where the
     # trigger fires -- ``p_avt(ji,jj,jk) = rn_evd * wmask(ji,jj,jk)`` inside
