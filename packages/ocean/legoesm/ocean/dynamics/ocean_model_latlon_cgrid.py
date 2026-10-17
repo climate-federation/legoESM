@@ -13867,6 +13867,8 @@ class LatLonCGridOceanModel:
                             forward_T=_trace_forward,
                             solved_T=T_new,
                             viscosity_K=A_v_cell,
+                            salt_K=(None if K_s_literal is None
+                                    else K_s_cell),
                         )
                     else:
                         T_new, S_new = _tracer_result
@@ -17090,6 +17092,8 @@ class _NEMOWSTracerSolveTrace(NamedTuple):
     forward_T: object
     solved_T: object
     viscosity_K: object
+    # zdf_ddm's avs as the salt solve consumes it; None unless literal DDM.
+    salt_K: object = None
 
 
 class _NEMOWSTracerZDFTrace(NamedTuple):

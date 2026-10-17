@@ -56,12 +56,13 @@ from nemo_testcase_g1_orca2grid_ladder import BAR, require  # noqa: E402
 
 CASE = "ORCA2G2-zps"
 CASES = ("ORCA2G2-zps", "ORCA2G3-ts", "ORCA2G4-sbc", "ORCA2G5-ice", "ORCA2V1-tke",
-         "ORCA2V2-evd")
-FORCED = ("ORCA2G4-sbc", "ORCA2G5-ice", "ORCA2V1-tke", "ORCA2V2-evd")   # NEMO-supplied surface fields each kt (D123)
+         "ORCA2V2-evd", "ORCA2V3-ddm")
+FORCED = ("ORCA2G4-sbc", "ORCA2G5-ice", "ORCA2V1-tke", "ORCA2V2-evd",
+          "ORCA2V3-ddm")   # NEMO-supplied surface fields each kt (D123)
 # G5's record build (ORCA2-lane frames); V1 = that build + one hm_i writer;
-# V2 = V1's record binary with ORCA2's three EVD namelist lines
-SI3 = ("ORCA2G5-ice", "ORCA2V1-tke", "ORCA2V2-evd")
-TKE_CASES = ("ORCA2V1-tke", "ORCA2V2-evd")
+# V2/V3 = V1's record binary with ORCA2's EVD (+ DDM) namelist lines
+SI3 = ("ORCA2G5-ice", "ORCA2V1-tke", "ORCA2V2-evd", "ORCA2V3-ddm")
+TKE_CASES = ("ORCA2V1-tke", "ORCA2V2-evd", "ORCA2V3-ddm")
 # V1: NEMO restart TKE fields -> carried card leaves (w levels 2..nk; the
 # card carries no surface en and no bottom w level)
 TKE_RESTART = {"tke": "en", "tke_avm": "avm_k", "tke_avt": "avt_k", "tke_dissl": "dissl"}
@@ -70,7 +71,7 @@ DEFAULT_ROOT = Path(
     "oracle_g2_r10/p3_a_100step")
 ARMS = ("geometry", "independent", "given_entry", "stages", "barotropic_exit",
         "zdf_replay", "substeps", "trazdf_replay", "rhs_frame",
-        "restart_independent", "carried", "tke_mixing_length")
+        "restart_independent", "carried", "tke_mixing_length", "ddm_kt1")
 # stage exposures of one step: the private hook that returns it, and the
 # level-1 NEMO frame fields (u, v, T, S, ssh) it must equal
 EXPOSURES = {
@@ -269,6 +270,62 @@ def zdf_kt1_rows(root: Path, state, nk: int, wcls: dict, reg) -> dict:
                      "first_cells": np.argwhere(d)[:8].tolist()}
     out["avs_equals_avt"] = bool(np.array_equal(z["avs"], z["avt"]))
     out["nemo_surface_en_max"] = float(np.max(z["en"][..., 0]))
+    return out
+
+
+def ddm_kt1_rows(root: Path, model, grid, z_coord, cfg, s0, dt, forcing1, nk: int, wcls: dict,
+                 *, case: str, kt_from: int, kt_to: int) -> dict:
+    """V3 kt 1: the avt/avs/avm the step's tracer and momentum solves consume
+    (after TKE, EVD, DDM) against NEMO's post-zdf_phy frame, plus where each
+    zdf_ddm branch fires on both sides."""
+    import jax
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel, _NEMOWSRK3TestHooks)
+    require(case == "ORCA2V3-ddm" and kt_from == kt_to == 1,
+            "the kt-1 double-diffusion frame is registered only for V3 at kt 1")
+    traced = jax.device_get(LatLonCGridOceanModel(
+        grid, z_coord, cfg,
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(tracer_zdf_trace=True)).step(
+            s0, dt, **forcing1))
+    solve = traced.solve
+    require(solve.salt_K is not None, "the V3 trace exposes no salt diffusivity")
+    z = read_zdf_kt1(Path(root) / "oracle_zdf_entry_kt00000001.bin", nk)
+    wet = wcls["full"] | wcls["partial"]
+    card = {"avt": solve.heat_K, "avs": solve.salt_K, "avm": solve.viscosity_K}
+    out = {"label": "kt-1 post-zdf_phy frame (consumed K)", "rows": {}}
+    for name, cand in card.items():
+        cand = np.asarray(cand, np.float64)
+        ref = z[name][..., 1:nk]
+        rows = level_rows(ref, cand, wcls)
+        out["rows"][name] = {"summary": class_summary(rows), "levels": rows,
+                             "ref_max_abs": float(np.max(np.abs(ref))),
+                             "n_unequal_wet": int(np.count_nonzero((cand != ref) & wet))}
+    # branch census: NEMO from its own record (sign of avs - avt: fingering
+    # raises avs above avt, diffusive convection lowers it), the card from its
+    # own consumed K and, by branch, from its zdf_ddm operands
+    def signs(avt, avs):
+        d = np.asarray(avs, np.float64) - np.asarray(avt, np.float64)
+        return {"avs_gt_avt": int(np.count_nonzero((d > 0) & wet)),
+                "avs_lt_avt": int(np.count_nonzero((d < 0) & wet)),
+                "wet_w": int(wet.sum())}
+    bundle = model._tke_step_entry_n2_bundle(s0)
+    zdt, zds = (np.asarray(x, np.float64) for x in bundle.ddm_operands)
+    rn2 = np.asarray(bundle.rn2, np.float64)
+    zds = np.where(np.abs(zds) <= 1e-20, 1e-20, zds)
+    zrau = np.maximum(1e-20, zdt / zds)
+    on = wet & (rn2 + 1e-12 > 0.0)
+    out["census"] = {
+        "nemo": signs(z["avt"][..., 1:nk], z["avs"][..., 1:nk]),
+        "card": signs(card["avt"], card["avs"]),
+        "card_branches": {
+            "stable_wet": int(on.sum()),
+            "fingering_zrau_gt_1": int(np.count_nonzero(on & (zrau > 1.0))),
+            "diffusive_zrau_lt_1": int(np.count_nonzero(on & (zrau < 1.0))),
+            "diffusive_0p5_lt_zrau_lt_1": int(np.count_nonzero(
+                on & (zrau > 0.5) & (zrau < 1.0))),
+            "diffusive_zrau_lt_0p5": int(np.count_nonzero(on & (zrau < 0.5))),
+            "single_signed_floor_zrau_1e-20": int(np.count_nonzero(
+                on & (zrau == 1e-20)))}}
     return out
 
 
@@ -548,7 +605,8 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
         require(arm in ("independent", "given_entry")
                 or (arm in ("stages", "barotropic_exit", "carried")
                     and case in SI3)
-                or (arm == "tke_mixing_length" and case == "ORCA2V1-tke"),
+                or (arm == "tke_mixing_length" and case == "ORCA2V1-tke")
+                or (arm == "ddm_kt1" and case == "ORCA2V3-ddm"),
                 "G4/G5's NEMO-supplied per-step forcing is registered only for "
                 "the independent and given-entry ladders")
         require(cfg.rk3_stage_tracer_written_order is True,
@@ -737,6 +795,11 @@ def run(root: Path, *, arm: str, kt_from: int = 1, kt_to: int = 10,
         t0 = time.time()
         new = jax.device_get(model.step(state, dt=card.dt_s, **forcing(kt)))
         return new, round(time.time() - t0, 1)
+
+    if arm == "ddm_kt1":
+        return {**ddm_kt1_rows(root, model, card.recipe.grid, z, cfg, s0, card.dt_s, forcing(1), nk,
+                               wcls, case=case, kt_from=kt_from, kt_to=kt_to),
+                "legoesm_git_sha": sha, "packages": packages}
 
     if arm == "tke_mixing_length":
         require(case == "ORCA2V1-tke" and kt_from == kt_to == 1,
@@ -1406,6 +1469,16 @@ def main(argv=None) -> int:
                   f"level 1: unequal {c['n_unequal']} max {c['max_abs']:.3e} | card vs "
                   f"replay all levels: unequal {n} max "
                   f"{max(s2['full']['max_abs'], s2['partial']['max_abs']):.3e}")
+        return 1 if bad else 0
+    if a.arm == "ddm_kt1":
+        bad = False
+        for f, t in out["rows"].items():
+            s = t["summary"]
+            bad |= s["status"] != "AT-BAR"
+            print(f"kt1 frame {f}: {s['status']} full {s['full']['relative']:.2e} "
+                  f"({s['full']['n_unequal']}) partial {s['partial']['relative']:.2e} "
+                  f"({s['partial']['n_unequal']}) dry unequal {s['dry_n_unequal']}")
+        print("CENSUS", json.dumps(out["census"], sort_keys=True))
         return 1 if bad else 0
     if a.arm == "tke_mixing_length":
         for row in out["rows"].values():
