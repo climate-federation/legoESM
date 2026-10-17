@@ -296,6 +296,8 @@ FILES = {
         _ORCA2_R299W7_COMPILED / "dynspg_ts.f90"),
     "ORCA2_OMIP_L4_R299W7/BLD/ppsrc/nemo/stprk3.f90": (
         _ORCA2_R299W7_COMPILED / "stprk3.f90"),
+    "ORCA2_OMIP_L4_R299W7/BLD/ppsrc/nemo/zdfevd.f90": (
+        _ORCA2_R299W7_COMPILED / "zdfevd.f90"),
     "ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/traadv.f90": (
         _ORCA2_R210OMT1_COMPILED / "traadv.f90"),
     "ORCA2_OMIP_L4_R210OMT1_P3/BLD/ppsrc/nemo/traadv_cen.f90": (
@@ -1855,6 +1857,23 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4_R299W7/BLD/ppsrc/nemo/stp2d.f90:303': {
         'anchors': 'CALL dyn_spg_ts( kt, Kbb, Kbb, Krhs',
         'routine': 'stp_2D',
+    },
+    # --- ORCA2 round 302: tracer-only EVD (nn_evdm = 0) ---
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfevd.f90:121': {
+        'anchors': 'IF( nn_evdm == 1 ) THEN',
+        'routine': 'zdf_evd',
+    },
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfevd.f90:135': {
+        'anchors': 'p_avm(ji,jj,jk) = rn_evd * wmask(ji,jj,jk)',
+        'routine': 'zdf_evd',
+    },
+    'ORCA2_OMIP_L4_R299W7/BLD/ppsrc/nemo/zdfevd.f90:121': {
+        'anchors': 'IF( nn_evdm == 1 ) THEN',
+        'routine': 'zdf_evd',
+    },
+    'ORCA2_OMIP_L4_R299W7/BLD/ppsrc/nemo/zdfevd.f90:135': {
+        'anchors': 'p_avm(ji,jj,jk) = rn_evd * wmask(ji,jj,jk)',
+        'routine': 'zdf_evd',
     },
     # --- ORCA2 round 301: stage-1 U-transport factors and un_adv ---
     'ORCA2_OMIP_L4_R299W7/BLD/ppsrc/nemo/stprk3_stg.f90:284': {
