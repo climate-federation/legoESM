@@ -100,6 +100,7 @@ def test_g6_card_is_g5_plus_g1b_vector_selectors(tmp_path):
         nemo_wzv_stored_r3_ratios=True,          # round 7: wzv reads stored r3t
         nemo_zad_written_association=True,       # round 7: dyn_zad association
         nemo_stage2_momentum_wzv_half_step=True,  # round 8: stage-2 wzv clock pair
+        nemo_stage_momentum_wzv_stored_kmm_ratios=True,  # round 8 resume: stored Kmm ratios
         barotropic=c5.barotropic._replace(
             barotropic_flux_update_nemo_literal=False,
             barotropic_entry_depth_nemo_literal=False,
@@ -357,6 +358,32 @@ def test_kt3_zad_rounds_e1e2t_ww(kt3_rows):
 def test_kt3_zad_written_association_on_u(kt3_rows):
     assert kt3_rows["after_zad.u"] == 0                  # without: 2,399
     assert kt3_rows["given_entry.kt3.uu_b"] == 0         # without: 216
+
+
+R44B = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gridladder_rounds/"
+            "round44/oracle_g6_r44b/twin_s")
+
+
+@pytest.mark.skipif(not (R44B / "oracle_g6_stage_terms_kt00000001_s2.bin").is_file(),
+                    reason="the operator's G6 r44b stage-term record is not on this machine")
+def test_kt1_stage2_momentum_wzv_reads_stored_kmm_ratios():
+    """kt 1 from rest through the ordinary jitted step: the stage-2 momentum
+    wzv's ww (stprk3_stg.f90:327) and the dyn_zad that reads it are
+    BIT-EXACT against NEMO's r44b stage-term record, because the Kmm ratios
+    are the stage-1 stored blends (:171-173), not ratios of the stage ssh."""
+    sys.path.insert(0, str(CASES))
+    spec = importlib.util.spec_from_file_location(
+        "g2_ladder_g6_r44", CASES / "nemo_testcase_g2_orca2bathy_ladder.py")
+    ladder = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ladder)
+    out = ladder.run(R44B, arm="operators", kt_from=1, exposures=("after_zad",),
+                     allow_dirty=True, case="ORCA2G6-vec")
+    assert out["stage2_ww"]["n_unequal"] == 0                # without: 137
+    (zad,) = out["per_kt"]
+    assert zad["boundary"] == "after_zad"
+    for field, t in zad["all_levels"].items():               # without: u 3
+        s = t["summary"]
+        assert s["full"]["n_unequal"] + s["partial"]["n_unequal"] == 0, field
 
 
 NEMO_ROOT = Path("/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2")
