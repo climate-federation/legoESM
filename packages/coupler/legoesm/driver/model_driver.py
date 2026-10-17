@@ -8355,21 +8355,12 @@ class ModelDriver:
         there means the writing code is unknown, which counts as drift.
         """
         from legoesm.driver.restart import (
-            RUN_MANIFEST_FILENAME,
             collective_version_drift_gate,
-            manifest_file_version_drift,
+            restart_version_drift,
         )
-        manifest_file = path.parent / RUN_MANIFEST_FILENAME
-
-        def reasons():
-            if not path.exists():
-                return []  # the loader reports the missing checkpoint itself
-            if manifest_file.is_file():
-                return manifest_file_version_drift(manifest_file)
-            return [f"no {RUN_MANIFEST_FILENAME} beside the checkpoint, so the "
-                    f"code that wrote it is unknown (copy the writing run's "
-                    f"{RUN_MANIFEST_FILENAME} next to it)"]
-        collective_version_drift_gate(reasons, f"checkpoint {path}")
+        collective_version_drift_gate(
+            lambda: restart_version_drift(path, [path.parent]),
+            f"checkpoint {path}")
 
     def load_checkpoint(self, path: str | Path) -> tuple[int, float]:
         """Load state from a checkpoint using unified restart API.

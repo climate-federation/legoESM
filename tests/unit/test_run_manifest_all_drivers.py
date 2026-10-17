@@ -135,14 +135,13 @@ def test_record_final_state_digest_fills_result(tmp_path):
 
 def test_rerun_into_same_dir_archives_previous_manifest(tmp_path):
     restart.write_run_manifest_on_root(tmp_path, {"runner": "a"},
-                                       config_kind="land")
-    restart.write_run_manifest_on_root(tmp_path, {"runner": "b"},
-                                       config_kind="land")
+                                       config_kind="land", rng_seeds={"m": 1})
+    restart.write_run_manifest_on_root(tmp_path, {"runner": "a"},
+                                       config_kind="land", rng_seeds={"m": 2})
     prev = list(tmp_path.glob("run_manifest.prev-*.json"))
     assert len(prev) == 1
-    assert json.loads(prev[0].read_text())["config"]["resolved_config"] == {
-        "runner": "a"}
-    assert _manifest(tmp_path)["config"]["resolved_config"] == {"runner": "b"}
+    assert json.loads(prev[0].read_text())["result"]["rng_seeds"] == {"m": 1}
+    assert _manifest(tmp_path)["result"]["rng_seeds"] == {"m": 2}
 
 
 @pytest.mark.parametrize("root_failed", [True, False])

@@ -321,6 +321,18 @@ def _get_platform_tag() -> str:
     return f"{platform.system().lower()}-{platform.machine()}"
 
 
+def file_sha256(path) -> str | None:
+    """SHA-256 of the file at *path* (relative paths against the current
+    directory), or ``None`` when it is not a readable file."""
+    try:
+        p = Path(path)
+        if not p.is_file():
+            return None
+        return hashlib.sha256(p.read_bytes()).hexdigest()
+    except (OSError, TypeError, ValueError):
+        return None
+
+
 def _package_anchor() -> Path:
     """File of the IMPORTED module doing the stamping (this one).
 
@@ -475,6 +487,43 @@ def collective_version_drift_gate(reasons_fn, what: str) -> None:
         lambda: refuse_version_drift(reasons_fn(), what), f"version drift: {what}")
 
 
+def _mpi_world():
+    """mpi4py COMM_WORLD when this run already uses MPI with >1 rank, else None."""
+    mpi = sys.modules.get("mpi4py.MPI")  # only if this run already uses MPI
+    if (mpi is not None and mpi.Is_initialized()
+            and mpi.COMM_WORLD.Get_size() > 1):
+        return mpi.COMM_WORLD
+    return None
+
+
+def world_size() -> int:
+    """Processes in this run: JAX multi-controller or mpi4py, whichever is larger."""
+    comm = _mpi_world()
+    return max(int(jax.process_count()), comm.Get_size() if comm is not None else 1)
+
+
+def restart_version_drift(path, manifest_dirs) -> list[str]:
+    """Version-drift reasons for continuing from the restart file *path*.
+
+    The run that wrote it left its ``run_manifest.json`` in one of
+    *manifest_dirs* (the first one holding a manifest is used).  No manifest
+    there means the writing code is unknown, which counts as drift.  A missing
+    restart is left to the loader to report.
+    """
+    path = Path(path)
+    if not path.exists():
+        return []
+    dirs = [Path(d) for d in manifest_dirs]
+    for d in dirs:
+        if (d / RUN_MANIFEST_FILENAME).is_file():
+            return manifest_file_version_drift(d / RUN_MANIFEST_FILENAME)
+    where = ("beside the checkpoint" if dirs == [path.parent]
+             else f"in {', '.join(str(d) for d in dirs)}")
+    return [f"no {RUN_MANIFEST_FILENAME} {where}, so the code that wrote it "
+            f"is unknown ({path}; copy the writing run's "
+            f"{RUN_MANIFEST_FILENAME} there)"]
+
+
 def collective_root_gate(fn, what: str) -> None:
     """Call on EVERY process at the same point, before rank-local work.
 
@@ -487,10 +536,7 @@ def collective_root_gate(fn, what: str) -> None:
     if jax.process_count() > 1:
         root = jax.process_index() == 0
     else:
-        mpi = sys.modules.get("mpi4py.MPI")  # only if this run already uses MPI
-        if (mpi is not None and mpi.Is_initialized()
-                and mpi.COMM_WORLD.Get_size() > 1):
-            comm = mpi.COMM_WORLD
+        comm = _mpi_world()
         root = comm is None or comm.Get_rank() == 0
     error = None
     if root:
@@ -604,6 +650,233 @@ def physics_closure_rows(recorded: dict, current: dict) -> list:
 
 def format_drift_rows(rows: list) -> str:
     return "\n".join(f"  {k}: recorded={a!r} -> now={b!r}" for k, a, b in rows)
+
+
+# ---------------------------------------------------------------------------
+# Replay of component-runner manifests (ocean / land / DINO / coupled).
+# A runner builds its configuration through script code (forcing, IC, grids),
+# so ``legoesm reproduce`` reruns the recording script with its recorded
+# command line and VERIFIES that the rerun resolves to the same record; it never
+# injects values (docs/architecture/reproducibility.md).
+# ---------------------------------------------------------------------------
+
+#: Set by ``legoesm reproduce`` in the rerun's environment: the reference
+#: run manifest the rerun must resolve to, and the rerun's output root.
+REPRODUCE_REFERENCE_ENV = "LEGOESM_REPRODUCE_REFERENCE"
+REPRODUCE_OUTPUT_ENV = "LEGOESM_REPRODUCE_OUTPUT"
+
+
+class RunnerReplaySpec(NamedTuple):
+    """How ``legoesm reproduce`` reruns one component runner.
+
+    ``output_flags``: spellings of the runner's output-directory flag (the
+    first is appended when the recorded command line has none).
+    ``manifest_depth``: directory levels from the run's output root down to
+    the directory holding its manifest.
+    ``rewritten_keys``: dotted ``resolved_config`` keys that reproduce rewrites
+    (the first is the output directory), ignored when comparing a rerun with
+    its reference.
+    ``continuation_keys``: dotted ``resolved_config`` keys a continuation into
+    the same directory may change (resume/restart flags, run length, output
+    and checkpoint frequency, wallclock budget, output path); any other
+    difference is refused.
+    ``restart_input_ids``: ``dataset_provenance`` ids of restart inputs, which
+    a continuation legitimately changes.
+    """
+    script: str
+    output_flags: tuple
+    manifest_depth: int
+    rewritten_keys: tuple
+    continuation_keys: tuple
+    restart_input_ids: tuple = ()
+
+
+RUNNER_REPLAY_SPECS = {
+    "run_lmip": RunnerReplaySpec(
+        script="run_lmip.py",
+        output_flags=("--output",),
+        manifest_depth=0,
+        rewritten_keys=("cli_args.output",),
+        continuation_keys=(
+            "cli_args.output", "cli_args.days", "cli_args.restart_from",
+            "cli_args.checkpoint_days", "cli_args.diag_interval",
+            "cli_args.max_wallclock_seconds", "cli_args.restart_buffer_seconds",
+            "run_config.max_wallclock_seconds",
+            "run_config.restart_buffer_seconds"),
+        restart_input_ids=("restart_from",)),
+}
+
+
+def rewrite_flag_argv(argv, flags, value) -> list:
+    """*argv* with every occurrence of the flag *flags* (``--flag v`` or
+    ``--flag=v``) set to *value*; the first spelling is appended when absent.
+    Raises ``ValueError`` on a form it cannot rewrite safely (a flag without a
+    value, an abbreviated long flag, an attached short-flag value, ``-o=v``)."""
+    out, found, i = [], False, 0
+    longs = [f for f in flags if f.startswith("--")]
+    shorts = [f for f in flags if not f.startswith("--")]
+    rest: list = []
+    while i < len(argv):
+        tok = str(argv[i])
+        if tok == "--":                       # positionals only from here on
+            rest = [str(a) for a in argv[i:]]
+            break
+        name, eq, _ = tok.partition("=")
+        if name in flags:
+            if eq and name in shorts:   # argparse keeps the "=" for -o=v
+                raise ValueError(f"short flag with '=' {tok!r} in the recorded "
+                                 f"command line; cannot rewrite {flags[0]} "
+                                 f"safely")
+            if eq:
+                out.append(f"{name}={value}")
+            elif i + 1 < len(argv):
+                out += [tok, str(value)]
+                i += 1
+            else:
+                raise ValueError(f"{tok} has no value in the recorded command line")
+            found = True
+        elif name.startswith("--") and len(name) > 2 and any(
+                f.startswith(name) for f in longs):
+            raise ValueError(f"abbreviated flag {tok!r} in the recorded command "
+                             f"line; cannot rewrite {flags[0]} safely")
+        elif any(tok.startswith(f) and tok != f for f in shorts):
+            raise ValueError(f"attached short flag {tok!r} in the recorded "
+                             f"command line; cannot rewrite {flags[0]} safely")
+        else:
+            out.append(tok)
+        i += 1
+    if not found:
+        out += [flags[0], str(value)]
+    return out + rest
+
+
+def runner_script_path(script: str) -> Path:
+    """``scripts/run/<script>`` of the IMPORTED legoESM checkout."""
+    for parent in _package_anchor().resolve().parents:
+        cand = parent / "scripts" / "run" / script
+        if cand.is_file():
+            return cand
+    raise FileNotFoundError(f"scripts/run/{script} not found above "
+                            f"{_package_anchor()}")
+
+
+def _without_keys(tree, dotted_keys) -> dict:
+    """Deep copy of the dict *tree* with each dotted key removed (if present)."""
+    out = json.loads(json.dumps(tree))
+    for key in dotted_keys:
+        node, parts = out, key.split(".")
+        for part in parts[:-1]:
+            node = node.get(part) if isinstance(node, dict) else None
+        if isinstance(node, dict):
+            node.pop(parts[-1], None)
+    return out
+
+
+def manifest_closure_rows(recorded: dict, current: dict, *, ignore_keys=(),
+                          ignore_dataset_ids=()) -> list:
+    """Rows where manifest *current* differs from *recorded* in what defines
+    the run: the resolved configuration (minus *ignore_keys*), the applied
+    ``--params`` values, the resolved physics record, and each input's path
+    and size.  Empty when they agree."""
+    def view(m):
+        cfg, res = m.get("config") or {}, m.get("result") or {}
+        return {
+            "resolved_config": _without_keys(cfg.get("resolved_config") or {},
+                                             ignore_keys),
+            "params_applied": cfg.get("params_applied") or {},
+            "resolved_physics": cfg.get("resolved_physics"),
+            "inputs": inputs(res.get("dataset_provenance") or []),
+        }
+
+    def inputs(entries):
+        out: dict = {}
+        for d in entries:
+            if d.get("id") not in ignore_dataset_ids:
+                out.setdefault(str(d.get("id")), []).append(
+                    {"path": d.get("path"), "size_bytes": d.get("size_bytes")})
+        return {k: v[0] if len(v) == 1 else
+                sorted(v, key=lambda e: json.dumps(e, sort_keys=True))
+                for k, v in out.items()}
+    return physics_closure_rows(_json_safe(view(recorded)), _json_safe(view(current)))
+
+
+def _runner_tag(manifest: dict) -> str:
+    return (manifest.get("reproducibility") or {}).get("runner_tag", "")
+
+
+def _check_reproduce_reference(manifest: dict, directory: Path) -> None:
+    """Under ``legoesm reproduce`` (env set): refuse unless *manifest* -- built,
+    not yet written -- resolves to the reference run's record, including its
+    runner and config kind."""
+    ref_path = os.environ.get(REPRODUCE_REFERENCE_ENV)
+    out_root = os.environ.get(REPRODUCE_OUTPUT_ENV)
+    if not ref_path and not out_root:
+        return
+    if not (ref_path and out_root):
+        raise RuntimeError(f"reproduce: set both {REPRODUCE_REFERENCE_ENV} and "
+                           f"{REPRODUCE_OUTPUT_ENV}, or neither; refusing")
+    root, here = Path(out_root).resolve(), Path(directory).resolve()
+    if here != root and root not in here.parents:
+        raise RuntimeError(
+            f"reproduce: this rerun writes into {here}, outside the rerun "
+            f"output {root}; the output flag was not rewritten, refusing")
+    try:
+        reference = read_run_manifest(ref_path)
+        validate_run_manifest(reference)
+    except Exception as exc:  # noqa: BLE001 — fail closed
+        raise RuntimeError(f"reproduce: reference manifest {ref_path} is "
+                           f"unreadable or invalid ({exc}); refusing") from exc
+    for what, a, b in (
+            ("runner", _runner_tag(reference), _runner_tag(manifest)),
+            ("config kind", reference["config"].get("config_kind"),
+             manifest["config"].get("config_kind"))):
+        if a != b:
+            raise RuntimeError(f"reproduce: the reference {ref_path} is a "
+                               f"{a!r} {what}, this run is {b!r}; refusing")
+    refuse_version_drift(manifest_version_drift(reference),
+                         f"the reference manifest {ref_path}")
+    spec = RUNNER_REPLAY_SPECS.get(_runner_tag(manifest))
+    rows = manifest_closure_rows(
+        reference, manifest,
+        ignore_keys=spec.rewritten_keys if spec else ())
+    if rows:
+        raise RuntimeError(
+            f"reproduce: this rerun does not resolve to the reference run's "
+            f"record {ref_path} ({len(rows)} fields); refusing to run:\n"
+            + format_drift_rows(rows))
+
+
+def _check_continuation(old: dict, manifest: dict, old_path: Path) -> None:
+    """A run into a directory that already holds a run's manifest continues
+    THAT run: refuse when anything but the continuation controls differs.
+    Execution facts outside the configuration (process and device count,
+    host) are not compared: a continuation may run on other hardware.
+    Manifests written before command lines were recorded (no ``run.argv``)
+    get only the version-drift gate; so does a directory where neither run's
+    continuation controls are classified in :data:`RUNNER_REPLAY_SPECS`.  A
+    classified run on either side refuses a change of runner or config kind."""
+    if not isinstance((old.get("run") or {}).get("argv"), list):
+        return
+    spec = RUNNER_REPLAY_SPECS.get(_runner_tag(manifest))
+    if spec is None and _runner_tag(old) not in RUNNER_REPLAY_SPECS:
+        return
+    for what, a, b in (
+            ("runner", _runner_tag(old), _runner_tag(manifest)),
+            ("config kind", (old.get("config") or {}).get("config_kind"),
+             manifest["config"].get("config_kind"))):
+        if a != b:
+            raise RuntimeError(f"{old_path} records a {a!r} {what}, this run "
+                               f"is {b!r}; one output directory holds one run")
+    if spec is None:
+        return
+    rows = manifest_closure_rows(
+        old, manifest, ignore_keys=spec.continuation_keys,
+        ignore_dataset_ids=spec.restart_input_ids)
+    if rows:
+        raise RuntimeError(
+            f"{old_path} records a different run than this one ({len(rows)} "
+            f"fields); one output directory holds one run. Use a new output "
+            f"directory:\n" + format_drift_rows(rows))
 
 
 RUN_MANIFEST_FILENAME = "run_manifest.json"
@@ -803,6 +1076,7 @@ def build_run_manifest(
             "platform": _get_platform_tag(),
             "git_dirty": prov.dirty,  # imported package's repo, not the CWD
             "patches": list(patches) if patches else [],
+            "n_processes": world_size(),
         },
         "config": {
             "config_kind": kind,
@@ -825,6 +1099,14 @@ def build_run_manifest(
             "command_line": (
                 command_line if command_line is not None else " ".join(sys.argv)
             ),
+            # The exact command line and launch directory, so `legoesm
+            # reproduce` can rerun a component runner (relative paths in argv
+            # resolve against cwd).
+            "argv": list(sys.argv),
+            "cwd": os.getcwd(),
+            # The launched script's content, so a replay can prove it reruns
+            # the same script (None when argv[0] is not a file).
+            "script_sha256": file_sha256(sys.argv[0]),
             "creation_time": datetime.now(timezone.utc).isoformat(),
         },
     }
@@ -833,12 +1115,15 @@ def build_run_manifest(
     return _json_safe(raw)
 
 
-def write_run_manifest(directory, config, *, exclusive: bool = False, **kwargs) -> Path:
+def write_run_manifest(directory, config, *, exclusive: bool = False,
+                       manifest: dict | None = None, **kwargs) -> Path:
     """Write ``run_manifest.json`` into *directory* and return its path.
 
     Call this at every run start (driver ``setup()`` / ``cmd_run``), not only at
     checkpoint time, so an interrupted or crashed run is still reconstructible.
-    Extra keyword arguments are forwarded to :func:`build_run_manifest`.
+    Extra keyword arguments are forwarded to :func:`build_run_manifest`;
+    *manifest* writes an already-built manifest instead (*config* is then
+    unused).
 
     The content is always written atomically (temp file then link/rename), so a
     reader never observes a half-written manifest.  With ``exclusive=True`` the
@@ -849,7 +1134,11 @@ def write_run_manifest(directory, config, *, exclusive: bool = False, **kwargs) 
     """
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
-    manifest = build_run_manifest(config, **kwargs)  # already JSON-normalised
+    if manifest is not None and kwargs:
+        raise TypeError(f"write_run_manifest: manifest= given, so "
+                        f"{sorted(kwargs)} would be ignored")
+    if manifest is None:
+        manifest = build_run_manifest(config, **kwargs)  # already JSON-normalised
     path = directory / RUN_MANIFEST_FILENAME
     # PID-unique temp so concurrent writers never clobber each other's scratch.
     tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
@@ -869,56 +1158,110 @@ def write_run_manifest(directory, config, *, exclusive: bool = False, **kwargs) 
 def write_run_manifest_on_root(directory, config, **kwargs) -> Path | None:
     """Write the manifest from process 0; raise on EVERY process if it failed.
 
-    Call on every process at the same point, before any rank-local work that
+    Call on every process at the same point (with mpi4py imported on all of
+    them or on none), before any rank-local work that
     can raise.  Single-process runs reduce to :func:`write_run_manifest`.  Under
-    multi-process JAX the outcome is broadcast so a failed write aborts all
+    multi-process JAX or mpi4py the outcome is broadcast
+    (:func:`collective_root_gate`) so a failed write or a refusal aborts all
     processes instead of leaving the others to hang in the next collective.
-    An existing manifest (a resume or rerun into the same directory) is moved
-    aside to ``run_manifest.prev-<UTC time>-<pid>.json``, never overwritten, so
-    every invocation's record and final digest survive.  The new manifest is
-    created atomic-exclusively, so two concurrent starts cannot clobber each
-    other: the loser archives the winner's manifest and retries.  This is not
-    a run lock: two runs *active at once* in one directory still collide on
+
+    Before writing, under ``legoesm reproduce`` the built manifest must resolve
+    to the reference run's record (:func:`_check_reproduce_reference`).
+    An existing manifest (a resume or rerun into the same directory) must come
+    from the same code (version-drift rule) and record the same run apart from
+    its continuation controls (:func:`_check_continuation`); it is then
+    archived by a hard link to ``run_manifest.prev-<UTC time>-<pid>.json``
+    while it stays live, and the new manifest replaces it atomically.  A fresh
+    directory's manifest is created atomic-exclusively, so of two concurrent
+    starts one creates it and the other checks it.  This is not a run lock:
+    two starts that both pass the check of one record may both proceed, and
+    the second's record can replace the first's unarchived (both are legal
+    continuations of the checked record); two runs *active at once* in one
+    directory still collide on
     every output, including the final digest (see ModelDriver's manifest
     docstring; an active-run lease is a separate, driver-wide feature).
     Returns the path on process 0, ``None`` elsewhere.
     """
-    root = jax.process_index() == 0
-    path = error = None
-    if root:
+    written: list[Path] = []
+    manifest: dict = {}
+
+    def _refuse_unless_continuation(checked: bytes, old: Path) -> None:
+        """Version-drift rule (as ModelDriver's resume) and continuation rule
+        for the existing record *checked* (its bytes)."""
         try:
+            old_m = json.loads(checked)
+            validate_run_manifest(old_m)
+        except Exception as exc:  # noqa: BLE001 — becomes a refusal reason
+            refuse_version_drift(
+                [f"{old} is not a valid run manifest ({exc})"],
+                f"the run manifest at {old}")
+            return
+        refuse_version_drift(manifest_version_drift(old_m),
+                             f"the run manifest at {old}")
+        _check_continuation(old_m, manifest, old)
+
+    def root_work():
+        nonlocal manifest
+        try:
+            manifest = build_run_manifest(config, **kwargs)
+            try:
+                _check_reproduce_reference(manifest, Path(directory))
+            except RuntimeError as exc:
+                raise RuntimeError(
+                    f"{exc}\n(this run is checked as a `legoesm reproduce` "
+                    f"rerun because {REPRODUCE_REFERENCE_ENV} / "
+                    f"{REPRODUCE_OUTPUT_ENV} are set; unset them if it is "
+                    f"not one)") from exc
             old = Path(directory) / RUN_MANIFEST_FILENAME
             stem = old.name.removesuffix(".json")
-            while path is None:
+            for _attempt in range(100):
+                if written:
+                    break
                 try:
-                    path = write_run_manifest(directory, config,
-                                              exclusive=True, **kwargs)
+                    written.append(write_run_manifest(
+                        directory, config, exclusive=True, manifest=manifest))
+                    break
                 except FileExistsError:
-                    # A resume or rerun into a directory that already holds a
-                    # run's record: same drift rule as ModelDriver's resume.
-                    if not old.exists():
-                        continue  # a concurrent start archived it; retry
-                    refuse_version_drift(manifest_file_version_drift(old),
-                                         f"the run manifest at {old}")
-                    stamp = datetime.now(timezone.utc).strftime(
-                        "%Y%m%dT%H%M%S%fZ")
-                    try:
-                        os.replace(old, old.with_name(
-                            f"{stem}.prev-{stamp}-{os.getpid()}.json"))
-                    except FileNotFoundError:
-                        pass  # a concurrent start archived it first; retry
-        except Exception as exc:  # noqa: BLE001 — re-raised below, after the vote
-            error = exc
-    if jax.process_count() > 1:
-        from jax.experimental import multihost_utils
-        failed = int(np.asarray(multihost_utils.broadcast_one_to_all(
-            np.asarray(int(error is not None), dtype=np.int32),
-            is_source=root)))
-        if failed and error is None:
-            raise RuntimeError("run manifest write failed on process 0")
-    if error is not None:
-        raise RuntimeError(f"run manifest not written to {directory}: {error}") from error
-    return path
+                    pass
+                # A resume or rerun into a directory that already holds a
+                # run's record: check it in place, archive it by a hard link
+                # (the record stays live, so the slot is never empty and a
+                # concurrent start always meets a record to check), confirm
+                # the archived bytes are the checked ones, then replace the
+                # record atomically.  A record that changed since the check
+                # is checked again on the next pass.  Not a run lock: two
+                # starts that each pass the check may both proceed (each is a
+                # legal continuation of the same record).
+                try:
+                    checked = old.read_bytes()
+                except FileNotFoundError:
+                    continue  # gone meanwhile; retry the exclusive create
+                _refuse_unless_continuation(checked, old)
+                stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+                prev = old.with_name(f"{stem}.prev-{stamp}-{os.getpid()}.json")
+                try:
+                    os.link(old, prev)
+                except FileNotFoundError:
+                    continue
+                try:
+                    if prev.read_bytes() != checked:
+                        prev.unlink()     # changed since the check: recheck
+                        continue
+                    written.append(write_run_manifest(
+                        directory, config, manifest=manifest))
+                except BaseException:
+                    prev.unlink(missing_ok=True)   # the record is still live
+                    raise
+            if not written:
+                raise RuntimeError(f"{old} kept reappearing; gave up after "
+                                   f"100 attempts")
+        except Exception as exc:  # noqa: BLE001 — re-raised on every process
+            raise RuntimeError(
+                f"run manifest not written to {directory}: {exc}") from exc
+
+    collective_root_gate(root_work,
+                         f"run manifest write failed on process 0 for {directory}")
+    return written[0] if written else None
 
 
 def read_run_manifest(path) -> dict:
