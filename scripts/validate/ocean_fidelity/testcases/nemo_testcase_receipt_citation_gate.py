@@ -1732,7 +1732,8 @@ FILES = {
         "zdftke.f90", "zdfsh2.f90", "lbcnfd.f90", "sshwzv.f90", "dynzdf.f90",
         "domqco.f90", "domhgr.f90")},
     **{f"ORCA2V1_OMIP_L4_R1FULLENTRY/BLD/ppsrc/nemo/{f}": _ORCA2V1 / f
-       for f in ("trazdf.f90", "stprk3_stg.f90")},
+       for f in ("trazdf.f90", "stprk3_stg.f90", "zdfevd.f90", "zdfphy.f90",
+                 "stprk3.f90")},
     **{f"ORCA2_OMIP_L4/BLD/ppsrc/nemo/{f}": _ORCA2_COMPILED / f for f in (
         "zdfsh2.f90", "lbcnfd.f90", "sshwzv.f90", "domhgr.f90")},
     "tke.py": REPO / "packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py",
@@ -8114,6 +8115,22 @@ CITATION_MAP = {
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:762': 'IF( ln_zdfnpc  )   CALL tra_npc( kstp,      Kmm, Krhs, ts    , Kaa  )',
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfevd.f90:56': 'SUBROUTINE zdf_evd( kt, Kmm, Krhs, p_avm, p_avt )',
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfevd.f90:121': 'IF( nn_evdm == 1 ) THEN',
+    # --- GRIDLADDER-VMIX round 12 resume (V2 scored; D122 in both builds) ---
+    'zdftke.f90:924': "CALL iom_rstput( kt, nitrst, numrow, 'avt_k', avt_k )",
+    'ORCA2V1_OMIP_L4_R1FULLENTRY/BLD/ppsrc/nemo/zdfevd.f90:108-109': [
+        ('MIN( rn2(ji,jj,jk), rn2b(ji,jj,jk) ) <= -1.e-12', 1),
+        ('p_avt(ji,jj,jk) = rn_evd * wmask(ji,jj,jk)', 1),
+        2,
+    ],
+    'ORCA2V1_OMIP_L4_R1FULLENTRY/BLD/ppsrc/nemo/zdfevd.f90:121': ('IF( nn_evdm == 1 ) THEN', 1),
+    'ORCA2V1_OMIP_L4_R1FULLENTRY/BLD/ppsrc/nemo/zdfphy.f90:359': 'IF( ln_zdfevd )   CALL zdf_evd( kt, Kmm, Krhs, avm, avt )',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfphy.f90:296': 'SUBROUTINE zdf_phy( kt, Kbb, Kmm, Krhs )',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3.f90:171': 'CALL bn2    ( ts(:,:,:,:,Nbb), rab_b, rn2b, Nbb )',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3.f90:174': 'rn2   = rn2b',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3.f90:62': 'SUBROUTINE stp_RK3( kstp )',
+    'ORCA2V1_OMIP_L4_R1FULLENTRY/BLD/ppsrc/nemo/stprk3.f90:177': 'CALL bn2    ( ts(:,:,:,:,Nbb), rab_b, rn2b, Nbb )',
+    'ORCA2V1_OMIP_L4_R1FULLENTRY/BLD/ppsrc/nemo/stprk3.f90:180': 'rn2   = rn2b',
+    'ORCA2V1_OMIP_L4_R1FULLENTRY/BLD/ppsrc/nemo/stprk3.f90:185': ('CALL zdf_phy( kstp, Nbb, Nbb, Nrhs )', 1),
 }
 
 
