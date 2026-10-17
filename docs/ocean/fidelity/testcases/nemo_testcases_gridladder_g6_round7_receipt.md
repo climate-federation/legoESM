@@ -203,3 +203,50 @@ the second statement (`dyn_zad`) landed in the same round as the first.
 UNVERIFIED: the XLA rewrite named in §1 is inferred from which guard
 fixes it, not read from dumped HLO; "other cards' programs unchanged" is
 by construction (default False), not a jaxpr diff.
+
+## Resume after the independent review (HOLD), commit `bac05518a`
+
+Status unchanged: **G6 NOT CERTIFIED.**  The three review items are closed;
+the kt 1..6 rows of both labels are byte-identical to §4.
+
+1. **ww guard completed.**  The stretch product
+   `r1_Dt*e3t_3d*(r3t(Kaa)-r3t(Kbb))`
+   (`ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/sshwzv.f90:297-298`)
+   is now rounded too, under the same G6-only flag.  Traced-jit probe of
+   the recurrence (every input traced, 148x180x30) vs a numpy transcription:
+   1,425 of 799,200 values off with round 7's guard (ratios only) and
+   with no guard; 0 with the stretch product rounded.  Rounding the bracket and the running
+   sum as well changed nothing, so it was not kept.  In the production
+   step those inputs are compile-time constants, so no G6 row moves (the
+   reviewer's 83,468 came from a different probe; not reproduced).
+2. **One test per piece** (kt 3 from NEMO's restart 2 through the jitted
+   step; x64).  Each piece removed, its test run, then restored:
+
+   | piece removed | kt-3 row that moves (with -> without) | its test |
+   |---|---|---|
+   | step-entry wzv flag | `stp_2D` exit 0 -> 1,337 / 1,334 | FAILS |
+   | momentum-call wzv flag | step-end u 38 -> 91, v 46 -> 93 | FAILS |
+   | `e1e2t*ww` rounding | after-ZAD v 2 -> 1,349; ssh 0 -> 568 | FAILS |
+   | u-call `dyn_zad` flag | after-ZAD u 0 -> 2,399; uu_b 0 -> 216 | FAILS |
+   | stretch rounding (item 1) | traced recurrence 0 -> 1,425 | FAILS |
+
+   The stage tracer-call wzv flag moves no kt-3 row; it has no test.
+3. **kt-1 after-SSH slot, corrected.**  NEMO's kt-1 slot is zero except on
+   201 cells, so it differs from the entry height wherever that is nonzero
+   (16,433 wet cells).  Feeding NEMO's slot to the card leaves all 19 state
+   leaves bit-identical after kt 1 and kt 2: it matters at no later step.
+
+Re-score (stamp `bac05518aa2c`, clean tree): independent first over the
+bar kt 4 ssh (7,529 cells, 2.25e-15 normalised, interior), worst kt 6 ssh
+1.48e-14; given-entry only kt-6 two-step v (2,183 cells, 1.023e-15).
+
+Evidence `gridladder_rounds/round43/resume/`, SHA-256 prefixes: given kt
+3-6 `17973b3c5341a5e7`, independent kt 1-3 `bd369e12a5b6e21b`, kt 4-6
+`b0893e37e25b4b1f`, kt-3 walk `899ab8d9de5e0361`; removal logs
+`nonvacuity_*.log`.
+
+Next: unchanged (walk the given-entry kt-3 stages after `stp_2D`).
+
+ASKED: items 1-3, re-score, gates.  UNASKED, offered for revert: the
+walk's new level-2+ ww row (needed to read item 1 inside the step).
+codex review: paused (quota).
