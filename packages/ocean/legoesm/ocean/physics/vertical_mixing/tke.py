@@ -495,6 +495,9 @@ class TKEEntryN2Bundle(NamedTuple):
     e3w_surface_Kmm: jnp.ndarray | None = None
     bn2_intermediate: object = None
     e3t_jpk: jnp.ndarray | None = None
+    # (zdt, zds) for zdf_ddm (zdfddm.f90:127-128) when the card selects the
+    # NEMO-literal double diffusion; None otherwise.
+    ddm_operands: object = None
 
 
 class TKECarryOutput(NamedTuple):

@@ -481,8 +481,15 @@ def implicit_vertical_diffusion_nemo_tracer_pair(
     *,
     return_matrix_trace: bool = False,
     rounded_thickness: bool = False,
+    K_2: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array]:
-    """Literal NEMO ``trazdf`` content matrix and paired ordered solves."""
+    """Literal NEMO ``trazdf`` content matrix and paired ordered solves.
+
+    ``K_2`` (salt's avs under ln_zdfddm, trazdf.f90:175,198-213) builds the
+    second tracer's own matrix; None shares the first's (avs = avt).
+    """
+    if K_2 is not None and K_2.shape != K.shape:
+        raise ValueError("K_2 must match K")
     if content_rhs_1.shape != content_rhs_2.shape:
         raise ValueError("tracer content RHS arrays must share shape")
     if content_rhs_1.shape != e3t_after.shape or wet.shape != e3t_after.shape:
@@ -512,6 +519,10 @@ def implicit_vertical_diffusion_nemo_tracer_pair(
     else:
         out_1 = nemo_ordered_tridiagonal_solve(
             lower, diagonal, upper, content_rhs_1) * wet_f
+    if K_2 is not None:
+        lower, diagonal, upper = nemo_tracer_tridiagonal(
+            K_2, e3t_after, e3w_now, dt, wet, implicit_w=implicit_w,
+            dtype=content_rhs_1.dtype, rounded_thickness=rounded_thickness)
     out_2 = nemo_ordered_tridiagonal_solve(
         lower, diagonal, upper, content_rhs_2) * wet_f
     if return_matrix_trace:
@@ -667,8 +678,11 @@ def implicit_vertical_diffusion_ocean_tracer_pair_dispatch(
     implicit_w: jax.Array | None = None,
     return_matrix_trace: bool = False,
     rounded_thickness: bool = False,
+    K_2: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array]:
     """Static production dispatch for the paired tracer ZDF application."""
+    if evaluation == "shared_thomas" and K_2 is not None:
+        raise ValueError("K_2 requires evaluation='nemo_literal'")
     if evaluation == "shared_thomas" and implicit_w is not None:
         raise ValueError("implicit_w requires evaluation='nemo_literal'")
     if evaluation == "shared_thomas" and rounded_thickness:
@@ -684,7 +698,7 @@ def implicit_vertical_diffusion_ocean_tracer_pair_dispatch(
             content_rhs_1, content_rhs_2, K, dz_after, e3w_now, dt, wet,
             implicit_w=implicit_w,
             return_matrix_trace=return_matrix_trace,
-            rounded_thickness=rounded_thickness)
+            rounded_thickness=rounded_thickness, K_2=K_2)
     raise ValueError(
         "unknown ZDF tracer solver evaluation "
         f"{evaluation!r}; expected 'shared_thomas' or 'nemo_literal'")
