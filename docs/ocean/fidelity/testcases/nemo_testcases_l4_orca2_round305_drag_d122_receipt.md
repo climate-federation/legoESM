@@ -2,10 +2,11 @@
 
 Date: 2026-10-17
 
-Status: **STOPPED_FOR_DECISION.** The drag code is imported, default off. No
-card selects it. The shipped card does not run NEMO's linear drag law, so the
-certified statements cannot run on it without a scheme change, and that change
-is the user's to make.
+Status: **LANDED (Decision 133, resumed).** The user took option 2: the
+ORCA2 cards now run NEMO's linear implicit drag with G7's certified bottom
+statements; the ice-ocean top drag stays off. All seven Decision-122 pairs
+pass on the final tree. The first part of this receipt (below, up to the
+"Decision 133 selection" section) is the stopped-for-decision record.
 
 Preregistration `PREREG_nemo_testcases_l4_orca2_round305.md` (frozen before
 measurement). Import commit `398e217ae` (measured clean). Evidence:
@@ -132,9 +133,76 @@ UNASKED, offered for revert:
 1. The bottom-only selector for no-ice decks (default off).
 2. The rung-10 forcing passes the recorded ice coefficient (inert unless selected).
 
+## Decision 133 selection (resume)
+
+Decision 133 (user, 2026-10-17, option 2): rung 0 and rung 10 switch to
+`&namdrg ln_lin = T` with `ln_drgimp`
+(`ORCA2_OMIP_L4/EXP00/namelist_cfg:251`) and select G7's bottom statements;
+OMT-2..4 select the bottom statements; the top drag stays off (the card must
+not read NEMO's recorded ice-drag coefficient). Selection commit `c3652abfb`.
+Evidence: `round305/d133/`.
+
+Resolved-config rows that change (dumped from every card's built config by
+the round-305 driver, before = `a6c925444`; every other row equal, OMT-0
+and OMT-1 equal in every row):
+
+| row | rung 10 before | rung 0 before | after (rung 0, rung 10) |
+|---|---|---|---|
+| drag scheme | GYRE quadratic | legacy explicit | NEMO linear |
+| coefficient | 2.5e-4 | 4e-4 m/s | 0 (law uses rn_Cd0 1e-3, rn_Uc0 0.4) |
+| drag layer | 100 m | 100 m | 0 (bottom cell only) |
+| background velocity | 0.1 m/s | 0 | 0 |
+| implicit drag in the solve | on | off | on |
+| drag in barotropic substeps | on | off | on |
+| bottom statements | off | off | on |
+
+OMT-2, OMT-3, OMT-4: bottom statements off -> on (only row). The cards'
+"linear drag unmeasured" label is left as it was (see OPEN).
+
+Seven pairs, control = the pre-decision card rebuilt on the final tree
+(resolved config identical to `a6c925444` in every row). Counts are RMS
+toward / away / equal:
+
+| card | label | all | early kt1-3 | exact lost | first over-bar | kt-10 stage-3 ssh max (m) |
+|---|---|---:|---:|---:|---|---|
+| rung 0 | independent | 194/1/0 | 54/1/0 | 0 | kt1 stage1 T, toward | 0.38835166609370336 -> 0.3942956150650081 |
+| OMT-1 | independent | 0/0/0 | 0/0/0 | 0 | none moved | unchanged |
+| OMT-2 | independent | 105/70/4 | 20/15/4 | 0 | kt1 stage1 T, equal | 0.34887168162722165 -> 0.3488772734711646 |
+| OMT-3 | independent | 101/74/4 | 21/14/4 | 0 | kt1 stage1 T, equal | 0.363396286656436 -> 0.363401237319785 |
+| OMT-4 | independent | 82/93/4 | 22/13/4 | 0 | kt1 stage1 T, equal | 0.3941246940211905 -> 0.3941268969551739 |
+| rung 10 | independent | 188/7/0 | 48/7/0 | 0 | kt1 entry ssh, equal | 0.2933479046003188 -> 0.27722250001091014 |
+| rung 10 | given NEMO's entry | 194/1/0 | 54/1/0 | 0 | kt1 stage1 T, toward | 0.2855333068505171 -> 0.26170334350008734 |
+
+Decision 122 (c)+(d): PASS over all seven (`decide.json`, commit
+`c3652abfb`).
+
+- Instrument check: every new control equals last round's control row for
+  row, and every selected arm equals last round's LB (rung 0, rung 10) or B
+  (OMT-2..4) arm row for row (12 of 12 ladders, 200 rows each).
+- Census, registered not a veto (independent review): the bottom
+  statements alone are near-neutral by cell count. OMT-4 is 82 toward /
+  93 away, and the bottom statements on top of the linear law lean away in
+  kt 1-3 on rung 0 (13/22) and rung 10 (15/20, given entry 18/17). The
+  rung-0 and rung-10 gains come from the drag law.
+- GYRE: ten-step residual archive sha256 `3b3d865cf5c82d38…` equal to the
+  base; 30/30 day-30 snapshots byte-identical. The ladder gate exits 1 as
+  at the base.
+- Test: `test_orca2_round305_d133_selection.py` (8 tests) fails 6 of 8 when
+  the recipe and OMT-2 selection are reverted to `a6c925444` (tree restored).
+  The import test now asserts the shipped card selects bottom only.
+
+Choices, resume: ASKED (round prompt) the selection above. UNASKED, offered
+for revert: OMT-0/OMT-1 now state the legacy scheme and the bottom selector
+off explicitly (needed to keep them drag-off once rung 0 inherits the linear
+law; config unchanged).
+
+codex review: paused (quota). Independent review: operator (Claude).
+
 ## OPEN
 
-1. DECISION: move rung 0 and rung 10 to NEMO's linear drag law and select the
-   imported drag set (rung 10: L+B+T; rung 0: L+B; OMT-2..4: B)? Pick: yes.
+1. DECISION: rung 0 and rung 10 still carry the "linear implicit drag
+   unmeasured" label, which blocks their execution path and is asserted by
+   about 15 earlier gates. Drop it (rung 0 becomes execution-ready) or
+   keep it? Pick: drop, in its own round.
 2. Unchanged: fold unit + transport mask + top-V atomic promotion (round 303);
-   D126 and D132 pending.
+   D126 and D132 pending; V1 vertical-mixing import (addendum 101) next.
