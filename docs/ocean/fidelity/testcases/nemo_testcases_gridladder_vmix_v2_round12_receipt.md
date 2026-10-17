@@ -53,7 +53,7 @@ physics, not a vertical-mixing switch.
   NEMO-literal EVD (GYRE, SMT and full ORCA2 cards already use it). V2 keeps the ORCA2 identity's own EVD arm,
   which the G-ladder had switched off, and states `nu_conv = 0` for nn_evdm = 0.
 - NEMO: `ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfevd.f90:56` `zdf_evd`; avt replaced by rn_evd where
-  `ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfevd.f90:107-110` fires; momentum only under
+  `ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfevd.f90:108-109` fires; momentum only under
   `ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfevd.f90:121`.
 - Deck: V1's deck plus ORCA2's three lines (only diff). The reader requires them on V2 and refuses them on V1.
 - Card vs V1, every config leaf: moved = {convection scheme, convective viscosity}. Initial state: identical.
