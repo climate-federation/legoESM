@@ -13608,19 +13608,42 @@ class LatLonCGridOceanModel:
                 # for the same reason (zDt_2*sum == rDt*average, #1455), and
                 # the SAME divisor: ``dynzdf.f90:166``/``:168`` write the same
                 # ``e3u_3d(iku)*(1+r3u(Kaa)*umask(iku))`` the diagonal uses.
-                u_solve_in = u_solve_in - (
-                    dt_mom * _r_eff_u[..., jnp.newaxis]
-                    / jnp.maximum(_drg_e3u, 1e-10) * _is_bot_u * _u_bt_mean)
-                v_solve_in = v_solve_in - (
-                    dt_mom * _r_eff_v[..., jnp.newaxis]
-                    / jnp.maximum(_drg_e3v, 1e-10) * _is_bot_v * _v_bt_mean)
+                if getattr(_cfg_b, "implicit_ice_ocean_top_drag", False):
+                    # G7: dynzdf.f90:166-169 as written, the same statement
+                    # form as the top term below: ((zDt_2*pair)*uu_b)/e3u,
+                    # pair = rCdU_bot(ji+1)+rCdU_bot(ji), rCdU_bot <= 0.
+                    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+                        nemo_dynzdf_drag_rhs, nemo_ice_ocean_top_drag_coeff_faces,
+                    )
+                    _r_t_bot = nemo_bottom_drag_rate_faces(
+                        _u_drg, _v_drg, dz_cell, _zc, _cfg_b, _grid,
+                        return_cell_rate=True)[4]
+                    _, _, _bot_sum_u, _bot_sum_v, _ = (
+                        nemo_ice_ocean_top_drag_coeff_faces(
+                            jnp.where(_zc.bottom_level >= 0, -_r_t_bot, -0.0),
+                            _grid, dtype=state.u.data.dtype))
+                    _bot_zdt_2 = nemo_source_round(
+                        jnp.asarray(dt_mom, dtype=state.u.data.dtype) * 0.5)
+                    u_solve_in = nemo_source_round(u_solve_in + nemo_dynzdf_drag_rhs(
+                        _bot_zdt_2, _bot_sum_u, _u_bt_mean,
+                        jnp.maximum(_drg_e3u, 1e-10)) * _is_bot_u)
+                    v_solve_in = nemo_source_round(v_solve_in + nemo_dynzdf_drag_rhs(
+                        _bot_zdt_2, _bot_sum_v, _v_bt_mean,
+                        jnp.maximum(_drg_e3v, 1e-10)) * _is_bot_v)
+                else:
+                    u_solve_in = u_solve_in - (
+                        dt_mom * _r_eff_u[..., jnp.newaxis]
+                        / jnp.maximum(_drg_e3u, 1e-10) * _is_bot_u * _u_bt_mean)
+                    v_solve_in = v_solve_in - (
+                        dt_mom * _r_eff_v[..., jnp.newaxis]
+                        / jnp.maximum(_drg_e3v, 1e-10) * _is_bot_v * _v_bt_mean)
         if (do_momentum
                 and getattr(_cfg_b, "implicit_ice_ocean_top_drag", False)
                 and not self._nemo_ws_test_hooks.omit_ice_top_drag_zdf):
             # dynzdf.f90:171-178,308-312,476-480.  With no cavity miku/mikv
             # are the first wet level, and rCdU_top is SI3's recorded field.
             from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
-                nemo_ice_ocean_top_drag_coeff_faces,
+                nemo_dynzdf_drag_rhs, nemo_ice_ocean_top_drag_coeff_faces,
             )
             _, _, _top_sum_u, _top_sum_v, _ = nemo_ice_ocean_top_drag_coeff_faces(
                 _top_drag_rCdu, _grid, dtype=state.u.data.dtype)
@@ -13642,12 +13665,12 @@ class LatLonCGridOceanModel:
             extra_diag_u = extra_diag_u + _top_diag_u
             extra_diag_v = extra_diag_v + _top_diag_v
             if _zdf_baroclinic_only:
-                _top_rhs_u = nemo_source_round(
-                    nemo_source_round(_top_prod_u * _u_bt_mean)
-                    / jnp.maximum(_top_e3u, 1e-10)) * _is_top_u
-                _top_rhs_v = nemo_source_round(
-                    nemo_source_round(_top_prod_v * _v_bt_mean)
-                    / jnp.maximum(_top_e3v, 1e-10)) * _is_top_v
+                _top_rhs_u = nemo_dynzdf_drag_rhs(
+                    _zdt_2, _top_sum_u, _u_bt_mean,
+                    jnp.maximum(_top_e3u, 1e-10)) * _is_top_u
+                _top_rhs_v = nemo_dynzdf_drag_rhs(
+                    _zdt_2, _top_sum_v, _v_bt_mean,
+                    jnp.maximum(_top_e3v, 1e-10)) * _is_top_v
                 u_solve_in = nemo_source_round(u_solve_in + _top_rhs_u)
                 v_solve_in = nemo_source_round(v_solve_in + _top_rhs_v)
         _zdf_baro_drag_u, _zdf_baro_drag_v = u_solve_in, v_solve_in

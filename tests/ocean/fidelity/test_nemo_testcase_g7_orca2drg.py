@@ -269,3 +269,38 @@ def test_bottom_residual_reads_carried_barotropic_velocity(vortex, monkeypatch):
     by_shape = {b.shape: b for _, b in bottom}
     np.testing.assert_array_equal(by_shape[ub.shape], np.asarray(ub))
     np.testing.assert_array_equal(by_shape[vb.shape], np.asarray(vb))
+
+
+def test_dynzdf_drag_rhs_is_nemos_statement():
+    # dynzdf.f90:166: zDt_2 * (rCdU_bot(ji+1)+rCdU_bot(ji)) * uu_b / e3u(iku)
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import nemo_dynzdf_drag_rhs
+    rng = np.random.default_rng(5)
+    pair, ub, e3 = -8e-4 * rng.random((4, 6)), rng.random((4, 6, 3)), 1 + rng.random((4, 6, 3))
+    got = np.asarray(nemo_dynzdf_drag_rhs(5400.0, jnp.asarray(pair), jnp.asarray(ub),
+                                          jnp.asarray(e3)))
+    np.testing.assert_array_equal(got, ((5400.0 * pair)[..., None] * ub) / e3)
+
+
+def test_dynzdf_bottom_rhs_runs_nemos_statement(vortex, monkeypatch):
+    # G7's dyn_zdf bottom term goes through the written statement with the
+    # bottom pair rCdU_bot(ji+1)+rCdU_bot(ji) = 2 * -(rn_Cd0*rn_Uc0) on wet faces.
+    from legoesm.ocean.dynamics import ocean_pe_latlon_cgrid as pe
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
+    from legoesm.ocean.state import OceanSurfaceForcing
+    real, seen = pe.nemo_dynzdf_drag_rhs, []
+
+    def spy(zdt_2, pair_sum, u_b, e3):
+        jax.debug.callback(lambda p: seen.append(np.asarray(p)), pair_sum)
+        return real(zdt_2, pair_sum, u_b, e3)
+
+    monkeypatch.setattr(pe, "nemo_dynzdf_drag_rhs", spy)
+    cfg = recipe._nemo_linear_bottom_drag(vortex.recipe.model_config)._replace(
+        implicit_ice_ocean_top_drag=True)
+    model = LatLonCGridOceanModel(vortex.recipe.grid, vortex.recipe.z_coord, cfg)
+    s0 = vortex.recipe.initial_state
+    zero = jnp.zeros_like(s0.eta.data)
+    model.step(s0, dt=vortex.dt_s, surface_forcing=OceanSurfaceForcing(
+        tau_x=zero, tau_y=zero, ice_ocean_top_drag_rCdu=zero))
+    pair = 2 * -(recipe._SMT2_RN_CD0 * recipe._SMT2_RN_UC0)
+    assert sum(np.any(p == pair) for p in seen) >= 2, \
+        "dyn_zdf's bottom drag RHS did not run NEMO's statement"

@@ -4130,6 +4130,14 @@ def nemo_drg_residual_increment(r1_h, cdu, u_k, u_b):
         nemo_source_round(r1_h * cdu) * nemo_source_round(u_k - u_b))
 
 
+def nemo_dynzdf_drag_rhs(zdt_2, pair_sum, u_b, e3):
+    """dyn_zdf's barotropic drag RHS term as written (dynzdf.f90:166-169,
+    :175-178): ``zDt_2 * (rCdU(ji+1)+rCdU(ji)) * uu_b(Kaa) / e3u(iku)``;
+    ``pair_sum`` is 2-D, ``u_b`` and ``e3`` carry the level axis."""
+    return nemo_source_round(nemo_source_round(
+        nemo_source_round(zdt_2 * pair_sum)[..., None] * u_b) / e3)
+
+
 def nemo_bottom_drag_rate_faces(
     u, v, h_k, z_coord, config, grid, *, return_cell_rate=False,
 ):
