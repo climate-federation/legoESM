@@ -2,8 +2,8 @@
 
 Date: 2026-10-16 (Claude round; codex review: paused (quota)).
 
-Status: **CENSUS PENDING** (this section is replaced when the Decision-96
-census returns).
+Status: **LANDED** (one cited card statement: ORCA2's EVD mixes tracers
+only).  Decision 96 passes on all seven card/label pairs; GYRE byte-identical.
 
 ## Headline
 
@@ -115,7 +115,57 @@ The card's ORCA2 identity now states `nu_conv = 0.0` next to the citation;
 GYRE's identity is untouched.  `test_orca2_evd_mixes_tracers_only_while_gyre_mixes_momentum_too`
 passes, and fails with the fix reverted (file restored, checked).
 
-Census: PENDING.
+Decision-96 census, same tree `4d9529317`; control restores `nu_conv = 100`
+and nothing else (gate `nemo_testcase_l4_orca2_round302_evd_momentum_gate.py`).
+RMS rows toward / away / equal:
+
+| card, label | all | kt 1-3 | kt 4+ | exact rows lost | first over-bar | kt-10 SSH max before -> after (m) |
+|---|---|---|---|---:|---|---|
+| rung 0, independent | 166 / 13 / 0 | 37 / 2 / 0 | 129 / 11 / 0 | 0 | kt1 stage1 T, equal | 0.38308 -> 0.38835 |
+| OMT-1, independent (kt 1-8) | 121 / 18 / 0 | 31 / 8 / 0 | 90 / 10 / 0 | 0 | kt1 stage1 T, equal | 0.74697 -> 0.74715 (kt 8) |
+| OMT-2, independent | 165 / 14 / 0 | 35 / 4 / 0 | 130 / 10 / 0 | 0 | kt1 stage1 T, equal | 0.34651 -> 0.34887 |
+| OMT-3, independent | 167 / 12 / 0 | 37 / 2 / 0 | 130 / 10 / 0 | 0 | kt1 stage1 T, equal | 0.36359 -> 0.36340 |
+| OMT-4, independent | 171 / 8 / 0 | 38 / 1 / 0 | 133 / 7 / 0 | 0 | kt1 stage1 T, equal | 0.39357 -> 0.39412 |
+| rung 10, given NEMO entry | 175 / 4 / 0 | 37 / 2 / 0 | 138 / 2 / 0 | 0 | kt1 stage1 T, equal | 0.28696 -> 0.28553 |
+| rung 10, independent | 170 / 9 / 0 | 31 / 8 / 0 | 139 / 1 / 0 | 0 | kt1 entry ssh, equal | 0.29356 -> 0.29335 |
+
+The classifier marks every pair Decision-96 eligible.  The kt-10 SSH
+maximum is a registered diagnostic (round 270), not a predicate: it moves
+away on rung 0 (+1.4%) and slightly on OMT-1/2/4, toward on OMT-3 and both
+rung-10 labels.  Plants: classifier exact-loss plant fires (exit 2,
+"previously exact rows left the bar"); control-arm plant fires (exit 2,
+"candidate is not the landed card").
+
+## Gates
+
+- GYRE (base `08d30232a` clone vs tip): ten-step ladder status DEBT at both,
+  first over-bar kt 3 unchanged, residual archives byte-identical (SHA-256
+  `3b3d865cf5c82d38e15b24356492572a85546e51e35f70c2e7c89e5b9cb9df5b`, the
+  same as round 285); day 30: 30/30 daily snapshots byte-identical
+  (manifest SHA-256 `974a9df96e9d26a52a4c4d6f89cda96d2f1012046017b0194bcbdac445f13088`).
+- Citation gate: this receipt PASS (4 citations, each pinned to `zdf_evd`,
+  0 unmapped, 0 failing map entries); default receipt PASS (274) after a
+  rigid +4 re-anchor of 15 `nemo_testcase_recipe.py` map keys and 1 round-8
+  receipt citation.  Line plant on the R299W7 `:121` key fails
+  (`SYMBOL-NOT-AT-LINE`, exit 1); routine plant on the production `:135` key
+  fails (`ROUTINE-CONTEXT-MISMATCH`, exit 1).
+- Tests: citation-gate tests, private-import ratchet, round 301/302 probe
+  tests, recipe and TKE unit tests: `133 passed`.  Landing-script battery
+  (`-n 12`): `144 passed`.
+- Not run here: the DINO month gate (GPU; the landing script runs it because
+  a `packages/` file changed).
+- codex review: paused (quota).  The operator runs an independent Claude
+  review before landing.
+
+## Prediction ledger
+
+| ID | Verdict | Result |
+|---|---|---|
+| R302-P1 | **CONFIRMED** | unit run: U fold 12.3 / 58.7 / 281%, interior 1.72 / 2.74 / 4.81% at kt 2 / 3 / 6. |
+| R302-P2 | **CONFIRMED** | card run kt 2: U fold 105% vs interior 5.12%. |
+| R302-P3 | **CONFIRMED** | card: all fields exact at kt-1 stage 0; U over the bar at kt-1 stage 1 in both regions. |
+| R302-P4 | **CONFIRMED** | carried slot: kt 1 identical; kt 2-3 moves <= 0.036%. |
+| R302-P5 | **REFUTED** | a single cited statement (`zdf_evd` momentum branch skipped under `nn_evdm = 0`) makes the unit run's kt-1 stage-3 interior exact to 1.6e-16 m/s and passes Decision 96; it lands. |
 
 ## Configuration choices
 
