@@ -1773,16 +1773,22 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
         rk3_stage3_tracer_nemo_stored_thickness=True,
         # G5 round 4 / ORCA2 round 304: stage-1/2 stored Kmm divisor and EMP
         # dilution (trasbc.f90:284-286; r3t(Kaa) stprk3_stg.f90:177) and the
-        # stage-3 recorded-sfx salt Krhs (trasbc.f90:308).  G5's ice-ocean
-        # top drag stays off: ORCA2 runs ln_lin bottom drag in the same pCdU.
+        # stage-3 recorded-sfx salt Krhs (trasbc.f90:308).
         rk3_stage2_tracer_nemo_stored_thickness=True,
         rk3_stage3_salt_nemo_written=True,
+        # Decision 133 / round 305: G7's bottom residual and dyn_zdf bottom
+        # RHS on the ln_lin bundle applied below.  G5's ice-ocean top drag
+        # stays off until the card computes rCdU_ice itself.
+        nemo_bottom_drag_written_statements=True,
         barotropic=model_config.barotropic._replace(
             barotropic_een_ratio_fold_exchange=True,
             barotropic_een_fe3mask_pivot_row=True,
             barotropic_een_ratio_written_order=True,
         ),
     )
+    # Decision 133: namelist_cfg's &namdrg ln_lin = T with ln_drgimp = T
+    # replaces the quadratic law inherited from the GYRE base.
+    model_config = _nemo_linear_bottom_drag(model_config)
     # zdfphy.F90:146-173 initializes the pre-closure coefficient memory
     # before zdf_tke_init.  This deck resolves nn_avb=0, nn_havtb=1, so avm_k
     # is constant rn_avm0=1.2e-4 while avt_k is rn_avt0=1.2e-5 times the

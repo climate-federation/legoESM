@@ -20,7 +20,7 @@ DECK = Path("/data/abyssal/dbalwada/nemo-testcases-l4/inputs/ORCA2_ICE_v5.0.0")
 SELECTORS = ("implicit_ice_ocean_top_drag", "nemo_bottom_drag_written_statements")
 
 
-def test_defaults_are_off_and_no_orca2_card_selects_them():
+def test_defaults_are_off_and_orca2_card_selects_bottom_only():
     from legoesm.ocean.state import LatLonCGridOceanConfig, OceanSurfaceForcing
 
     assert all(LatLonCGridOceanConfig._field_defaults[n] is False for n in SELECTORS)
@@ -29,7 +29,8 @@ def test_defaults_are_off_and_no_orca2_card_selects_them():
         pytest.skip("ORCA2 input deck is absent")
     pytest.importorskip("netCDF4")
     cfg = recipe.build_orca2_zps_card(DECK).recipe.model_config
-    assert not any(getattr(cfg, n) for n in SELECTORS)
+    # Decision 133: bottom statements on, the ice-ocean top drag off.
+    assert [getattr(cfg, n) for n in SELECTORS] == [False, True]
 
 
 

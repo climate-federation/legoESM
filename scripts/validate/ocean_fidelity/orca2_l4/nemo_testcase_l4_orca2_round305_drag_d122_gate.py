@@ -1,15 +1,11 @@
 #!/usr/bin/env python3
-"""Round 305: Decision-122 arms for the G5 top drag + G7 bottom-drag statements.
+"""Round 305: Decision-133 drag selection measured under Decision 122.
 
 Arms (same tree, one card per arm):
-  control  the card as shipped.
-  B        G7's bottom residual + dyn_zdf bottom RHS without the ice top drag
-           (NEMO's nn_ice=0 program, zdfdrg.f90:380); needs the linear bundle.
-  L        NEMO's ln_lin linear implicit bundle (the card's drag LAW changes).
-  LB       L + B.
-  LBT      L + G5's ice-ocean top drag, which also selects B (G7's composition).
-OMT-2..4 already run the linear bundle; rung 0 and rung 10 do not, so every
-rung-0 / rung-10 arm except control changes the drag law.  OMT-1 is ln_drg_OFF.
+  control  the card with its pre-Decision-133 drag rows rebuilt.
+  D133     the card as shipped: rung 0 and rung 10 on NEMO's ln_lin implicit
+           bundle + G7's bottom statements; OMT-2..4 the bottom statements;
+           OMT-1 (ln_drg_OFF) unchanged.  G5's top drag stays off.
 """
 
 from __future__ import annotations
@@ -36,43 +32,83 @@ require = r276.require
 BOTTOM = "nemo_bottom_drag_written_statements"
 TOP = "implicit_ice_ocean_top_drag"
 CARDS = r278.CARDS
-ARMS = {
-    "omt2": ("control", "B"), "omt3": ("control", "B"), "omt4": ("control", "B"),
-    "omt1": ("control",),
-    "rung0": ("control", "L", "LB"),
-    "rung10": ("control", "L", "LB", "LBT"),
+# Decision 133 (user, 2026-10-17): the shipped cards select the drag set.
+ARMS = {rung: ("control", "D133") for rung in
+        ("rung0", "omt1", "omt2", "omt3", "omt4", "rung10")}
+D133_BOTTOM = {"rung0", "omt2", "omt3", "omt4", "rung10"}
+# The pre-Decision-133 drag rows each card carried (resolved config at
+# a6c925444); control rebuilds them so the pair differs in drag only.
+PRE_D133_DRAG = {
+    "rung10": dict(bottom_drag_scheme="nemo_quadratic", bottom_drag_r=2.5e-4,
+                   bottom_drag_bbl_thickness=100.0, bottom_drag_bg_velocity=0.1),
+    "rung0": dict(bottom_drag_scheme="legacy", bottom_drag_r=4.0e-4,
+                  bottom_drag_bbl_thickness=100.0, bottom_drag_bg_velocity=0.0),
 }
-
-
-def _linear(cfg):
-    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
-        _nemo_linear_bottom_drag,
-    )
-    return _nemo_linear_bottom_drag(cfg)
 
 
 def selected_card(card, *, arm: str, rung: str, plant: str = "none"):
     require(arm in ARMS[rung], f"{rung}: arm {arm} is not defined")
     cfg = card.recipe.model_config
-    require(not getattr(cfg, BOTTOM) and not getattr(cfg, TOP),
-            f"{rung}: shipped card already selects a round-305 statement")
-    if "L" in arm:
-        cfg = _linear(cfg)
-    if "B" in arm:
-        cfg = cfg._replace(**{BOTTOM: True})
-    if "T" in arm:
-        cfg = cfg._replace(**{TOP: True})
-    if plant == "retained-selector" and arm == "control":
-        cfg = cfg._replace(**{BOTTOM: True})
+    require(bool(getattr(cfg, BOTTOM)) == (rung in D133_BOTTOM)
+            and not getattr(cfg, TOP),
+            f"{rung}: shipped card does not carry Decision 133's selection")
     if arm == "control":
+        cfg = cfg._replace(**{BOTTOM: False})
+        if rung in PRE_D133_DRAG:
+            cfg = cfg._replace(bottom_drag=cfg.bottom_drag._replace(
+                **PRE_D133_DRAG[rung]))
+        if rung == "rung0":
+            cfg = cfg._replace(zdf_drag_in_matrix=False,
+                               barotropic_drag_substep=False)
+        if plant == "retained-selector":
+            cfg = cfg._replace(**{BOTTOM: True})
         require(not getattr(cfg, BOTTOM) and not getattr(cfg, TOP),
                 f"{rung}: control retains a round-305 selector")
     return card._replace(recipe=card.recipe._replace(model_config=cfg))
 
 
+def _leaves(value, prefix=""):
+    """Flatten a card config to {dotted name: repr}; arrays by shape+sha256."""
+    import hashlib
+
+    import numpy as np
+    if hasattr(value, "_fields"):
+        out = {}
+        for name in value._fields:
+            out.update(_leaves(getattr(value, name), f"{prefix}{name}."))
+        return out
+    if hasattr(value, "shape") and hasattr(value, "dtype"):
+        arr = np.ascontiguousarray(np.asarray(value))
+        return {prefix[:-1]: f"array{arr.shape}:{hashlib.sha256(arr.tobytes()).hexdigest()}"}
+    return {prefix[:-1]: repr(value)}
+
+
+def resolved_configs(roots: dict[str, Path], arm: str = "D133") -> dict:
+    """Every ORCA2 card's resolved model config + unmeasured tuple."""
+    from scripts.validate.ocean_fidelity.orca2_l4 import (
+        nemo_testcase_l4_orca2_round1_ladder_gate as rung10,
+    )
+    from scripts.validate.ocean_fidelity.orca2_l4 import (
+        nemo_testcase_l4_orca2_round204_omt0_ladder_gate as omt0,
+    )
+    from scripts.validate.ocean_fidelity.orca2_l4 import (
+        nemo_testcase_l4_orca2_round269_g1_decision96_gate as prior,
+    )
+    cards = {"rung10": rung10.card_fields(roots["rung10"])[1],
+             "omt0": omt0.build_omt0_card(roots["rung0"])}
+    for rung in ("rung0", "omt1", "omt2", "omt3", "omt4"):
+        cards[rung] = prior._selected_card(rung, roots[rung])
+    cards = {rung: (card if rung == "omt0" else
+                    selected_card(card, arm=arm, rung=rung))
+             for rung, card in cards.items()}
+    return {rung: dict(_leaves(card.recipe.model_config),
+                       unmeasured_features=repr(tuple(card.unmeasured_features)))
+            for rung, card in cards.items()}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--measure", choices=("control", "B", "L", "LB", "LBT"))
+    parser.add_argument("--measure", choices=("control", "D133"))
     parser.add_argument("--rung", choices=tuple(sorted(ARMS)))
     parser.add_argument("--label", choices=("independent", "given_nemo_entry"))
     parser.add_argument("--deck-root", type=Path)
@@ -86,9 +122,17 @@ def main() -> int:
                                              "retained-selector"),
                         default="none")
     parser.add_argument("--output", type=Path)
+    # --resolved-config RUNG=ROOT ...: dump every card's resolved config.
+    parser.add_argument("--resolved-config", nargs="+")
     args = parser.parse_args()
     try:
-        if args.measure:
+        if args.resolved_config:
+            result = dict(resolved_configs(
+                {k: Path(v) for k, v in
+                 (item.split("=", 1) for item in args.resolved_config)},
+                arm=args.measure or "D133"),
+                status="RESOLVED_CONFIG")
+        elif args.measure:
             require(all((args.rung, args.label, args.deck_root, args.twin_a,
                          args.expect_commit)), "measurement arguments incomplete")
 
@@ -105,17 +149,17 @@ def main() -> int:
                 r285.selected_card = original
             result.update(format="nemo-testcase-l4-orca2-round305-drag-v1",
                           arm=args.measure, selected_statements=[
-                              n for n, on in ((BOTTOM, "B" in args.measure),
-                                              (TOP, "T" in args.measure),
-                                              ("ln_lin bundle", "L" in args.measure))
-                              if on])
+                              n for n, on in (
+                                  (BOTTOM, args.rung in D133_BOTTOM),
+                                  ("ln_lin bundle", args.rung in PRE_D133_DRAG))
+                              if on and args.measure == "D133"])
         elif args.classify:
             result = r276.classify(*args.classify, plant=args.plant)
         elif args.classify_arms:
             base, cand = (json.loads(p.read_text(encoding="utf-8"))
                           for p in args.classify_arms)
-            require(base["arm"] != "control" and cand["arm"] != base["arm"],
-                    "--classify-arms compares two non-control arms")
+            require(cand["arm"] != base["arm"],
+                    "--classify-arms compares two different arms")
             result = r276.classify_documents(
                 dict(base, arm="control"), cand, plant=args.plant)
             result["baseline_arm"] = base["arm"]

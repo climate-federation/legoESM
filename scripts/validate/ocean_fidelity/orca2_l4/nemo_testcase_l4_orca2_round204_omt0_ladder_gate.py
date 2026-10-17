@@ -65,9 +65,11 @@ def build_omt0_card(deck_root: Path, *, plant: str = "none"):
         gm_redi=None,
         # ln_drg_OFF.  A zero legacy rate is the exact no-op dispatcher arm.
         bottom_drag=cfg.bottom_drag._replace(
+            bottom_drag_scheme="legacy",
             bottom_drag_r=0.0, bottom_drag_bbl_thickness=0.0),
         zdf_drag_in_matrix=False,
         barotropic_drag_substep=False,
+        nemo_bottom_drag_written_statements=False,
         barotropic=cfg.barotropic._replace(
             barotropic_flux_update_nemo_literal=True,
             barotropic_entry_depth_nemo_literal=True,

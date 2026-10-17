@@ -79,6 +79,8 @@ def build_omt2_card(deck_root: Path, *, plant: str = "none"):
         zdf_drag_in_matrix=shared.zdf_drag_in_matrix,
         zdf_baroclinic_only=shared.zdf_baroclinic_only,
         barotropic_drag_substep=shared.barotropic_drag_substep,
+        # Decision 133: G7's bottom residual + dyn_zdf bottom RHS.
+        nemo_bottom_drag_written_statements=True,
     )
     return card._replace(
         case="ORCA2-OMT2-vector-linear-drag-zps",
@@ -96,7 +98,7 @@ def validate_omt2_card(deck_root: Path, card) -> dict[str, object]:
     # Compare every untouched field structurally, including array leaves.
     allowed = {
         "bottom_drag", "zdf_drag_in_matrix", "zdf_baroclinic_only",
-        "barotropic_drag_substep",
+        "barotropic_drag_substep", "nemo_bottom_drag_written_statements",
     }
     for name in before._fields:
         if name not in allowed:
@@ -124,6 +126,9 @@ def validate_omt2_card(deck_root: Path, card) -> dict[str, object]:
         "zdf_drag_in_matrix": {"before": False, "after": True},
         "barotropic_drag_substep": {"before": False, "after": True},
     }, f"OMT-2 composition edge moved: {top_changes}")
+    require(after.nemo_bottom_drag_written_statements is True
+            and not after.implicit_ice_ocean_top_drag,
+            "OMT-2 bottom-drag statement selection moved (Decision 133)")
     require(after.zdf_baroclinic_only is True,
             "OMT-2 lost the inherited NEMO baroclinic-only split")
     require(after.bottom_drag.bottom_drag_cd0 == 1.0e-3,

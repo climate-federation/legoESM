@@ -72,15 +72,8 @@ def build_rung0_card(deck_root: Path):
         bbl_aht_m2_s=0.0,
         runoff_depth_spread_m=0.0,
         runoff_depth_spread_map=None,
-        # zdfdrg.f90:274-277,540-547 resolves rn_Cd0*rn_Uc0=4e-4.
-        # The exact implicit composition is declared below, never guessed.
-        bottom_drag=model.bottom_drag._replace(
-            bottom_drag_scheme="legacy",
-            bottom_drag_r=4.0e-4,
-            bottom_drag_bg_velocity=0.0,
-        ),
-        zdf_drag_in_matrix=False,
-        barotropic_drag_substep=False,
+        # Decision 133: the shipped card's ln_lin implicit bundle and G7's
+        # bottom statements are inherited unchanged (zdfdrg.f90:276).
         # G4's stage-3 heat/Kmm unit is certified on the forced ORCA2 path.
         # Rung 0 has no heat/runoff/shortwave module, so B90 requires these
         # forcing-path selectors to stay off here and on OMT-1..4.
@@ -163,10 +156,15 @@ def validate_rung0_card(card, *, execution: bool = False) -> None:
         card.surface_boundary_condition == "nemo_flx_zero",
         card.surface_input_operator == "nemo_fld_read_no_tsd_dmp",
         card.unmeasured_features == ("linear_implicit_bottom_drag",),
-        cfg.bottom_drag.bottom_drag_scheme == "legacy",
-        cfg.bottom_drag.bottom_drag_r == 4.0e-4,
-        not cfg.zdf_drag_in_matrix,
-        not cfg.barotropic_drag_substep,
+        cfg.bottom_drag.bottom_drag_scheme == "nemo_linear",
+        (cfg.bottom_drag.bottom_drag_cd0, cfg.bottom_drag.bottom_drag_uc0)
+        == (1.0e-3, 0.4),
+        (cfg.bottom_drag.bottom_drag_r, cfg.bottom_drag.bottom_drag_bbl_thickness,
+         cfg.bottom_drag.bottom_drag_bg_velocity) == (0.0, 0.0, 0.0),
+        cfg.zdf_drag_in_matrix,
+        cfg.barotropic_drag_substep,
+        cfg.nemo_bottom_drag_written_statements,
+        not cfg.implicit_ice_ocean_top_drag,
     )
     require(all(selectors), "rung-0 card module exclusion or selector moved")
     require(all(getattr(card.recipe.initial_state, name) is None
