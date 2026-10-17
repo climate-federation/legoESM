@@ -4398,6 +4398,7 @@ def _orca2v1_tke_vertical(g5_vm, deck: ORCA2G1Deck):
         nemo_sh2_fold_top_v=True,               # zdfsh2.f90:98-113 pivot north V face
         nemo_tke_matrix_rhs_source_rounded=True,  # zdftke.f90:420,423-426 without FMA
         nemo_sh2_r3_source_rounded=True,        # domqco.f90:266-269 r3u/r3v stored
+        nemo_sh2_r3_stored_reciprocal=True,     # domqco.f90:266-269 * r1_e1e2u
         tke_htau_evaluation="nemo_scalar_libm",  # SIN(rpi/180*gphit), :864
         tke_etau_exponential_evaluation="nemo_scalar_libm",  # EXP, :500
         etau_mode="below_ml",                   # nn_etau=1, :498-502
@@ -4425,11 +4426,12 @@ def _orca2v1_tke_selected(vm) -> bool:
                  t.nemo_tke_solve_source_rounded, t.tke_htau_evaluation,
                  t.tke_etau_exponential_evaluation, t.nemo_sh2_fold_top_v,
                  t.nemo_tke_matrix_rhs_source_rounded,
-                 t.nemo_sh2_r3_source_rounded) == (
+                 t.nemo_sh2_r3_source_rounded,
+                 t.nemo_sh2_r3_stored_reciprocal) == (
                 3, _ORCA2V1_RN_EMIN, _ORCA2V1_RN_EMIN0, True, True, True,
                 _ORCA2V1_RN_LC, "below_ml", "latitude", _ORCA2V1_RN_EFR, 1, False,
                 "nemo_literal", 2, True, True, "nemo_literal", True, True, True,
-                True, "nemo_scalar_libm", "nemo_scalar_libm", True, True, True))
+                True, "nemo_scalar_libm", "nemo_scalar_libm", True, True, True, True))
 
 
 def _orca2v1_tke_initial_state(state, tmask, deck: ORCA2G1Deck):

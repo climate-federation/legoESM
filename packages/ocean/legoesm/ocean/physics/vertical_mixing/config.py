@@ -687,6 +687,10 @@ class TKEConfig(NamedTuple):
     # (NEMO stores pr3u/pr3v, domqco.f90:266-269); the default lets XLA fuse
     # the quotient into an FMA with the "1 +". Card-selected.
     nemo_sh2_r3_source_rounded: bool = False
+    # zdf_sh2's step-entry r3u/r3v as NEMO forms them, (num * r1_hu_0) times
+    # the stored 1/e1e2u (domqco.f90:266-269); the default divides, which
+    # XLA folds with r1_hu_0 into one constant. Card-selected.
+    nemo_sh2_r3_stored_reciprocal: bool = False
     # Langmuir source evaluation. ``vectorized`` is the historical shared
     # construction. ``nemo_literal`` preserves zdftke.F90:422-463 operation
     # order, including the per-column mbkt+1 no-crossing fallback. Only the

@@ -11810,7 +11810,8 @@ class LatLonCGridOceanModel:
         stage = getattr(
             tke_cfg, "tke_shear_evaluation_stage", "implicit_solve_state")
         if stage == "implicit_solve_state":
-            for _flag in ("nemo_sh2_fold_top_v", "nemo_sh2_r3_source_rounded"):
+            for _flag in ("nemo_sh2_fold_top_v", "nemo_sh2_r3_source_rounded",
+                          "nemo_sh2_r3_stored_reciprocal"):
                 if getattr(tke_cfg, _flag, False):
                     raise ValueError(
                         f"{_flag}=True is read only by the step-entry "
@@ -11915,10 +11916,13 @@ class LatLonCGridOceanModel:
                 "'tpoint_jacobian' or 'nemo_qco_live_face', got "
                 f"{metric_source!r}.")
         r3_rounded = bool(getattr(tke_cfg, "nemo_sh2_r3_source_rounded", False))
-        if r3_rounded and metric_source != "nemo_qco_live_face":
-            raise ValueError(
-                "nemo_sh2_r3_source_rounded=True requires "
-                "tke_shear_metric_source='nemo_qco_live_face'")
+        r3_recip = bool(getattr(tke_cfg, "nemo_sh2_r3_stored_reciprocal", False))
+        for _flag, _on in (("nemo_sh2_r3_source_rounded", r3_rounded),
+                           ("nemo_sh2_r3_stored_reciprocal", r3_recip)):
+            if _on and metric_source != "nemo_qco_live_face":
+                raise ValueError(
+                    f"{_flag}=True requires "
+                    "tke_shear_metric_source='nemo_qco_live_face'")
         face_metrics = None
         if metric_source == "nemo_qco_live_face":
             if shear_disc == "nemo_face_native_now2":
@@ -11957,15 +11961,26 @@ class LatLonCGridOceanModel:
             a_v = jnp.asarray(a_v, dtype=dtype)
 
             def _qco_r3(eta):
-                num_u = 0.5 * (
-                    a_t * eta + jnp.roll(a_t * eta, -1, axis=1))
-                if fold_top_v:
-                    _north_t = jnp.roll(a_t * eta, -1, axis=0)
-                    _north_t = _north_t.at[-1].set((a_t * eta)[-2][_perm_t])
-                    num_v = 0.5 * (a_t * eta + _north_t)
+                if r3_recip:
+                    # Each e1e2t*ssh product rounded before the face sum
+                    # (no FMA, as NEMO's build).
+                    _ae = nemo_source_round(a_t * eta)
+                    num_u = 0.5 * (_ae + jnp.roll(_ae, -1, axis=1))
+                    _north_t = jnp.roll(_ae, -1, axis=0)
+                    if fold_top_v:
+                        _north_t = _north_t.at[-1].set(_ae[-2][_perm_t])
+                    num_v = 0.5 * (_ae + _north_t)
                 else:
-                    num_v = 0.5 * (
-                        a_t * eta + jnp.roll(a_t * eta, -1, axis=0))
+                    num_u = 0.5 * (
+                        a_t * eta + jnp.roll(a_t * eta, -1, axis=1))
+                    if fold_top_v:
+                        _north_t = jnp.roll(a_t * eta, -1, axis=0)
+                        _north_t = _north_t.at[-1].set(
+                            (a_t * eta)[-2][_perm_t])
+                        num_v = 0.5 * (a_t * eta + _north_t)
+                    else:
+                        num_v = 0.5 * (
+                            a_t * eta + jnp.roll(a_t * eta, -1, axis=0))
                 wet_u = hu0 > 0.0
                 wet_v = hv0 > 0.0
                 wet_u_f = wet_u.astype(dtype)
@@ -11976,8 +11991,15 @@ class LatLonCGridOceanModel:
                 # divisors changes the last bits and fails the 1e-15 bar.
                 r1_hu0 = wet_u_f / (hu0 + 1.0 - wet_u_f)
                 r1_hv0 = wet_v_f / (hv0 + 1.0 - wet_v_f)
-                r3u_nemo = num_u * r1_hu0 / a_u
-                r3v_nemo = num_v * r1_hv0 / a_v
+                if r3_recip:
+                    # domqco.f90:266-269: (num * r1_hu_0) * r1_e1e2u, with
+                    # r1_e1e2u = 1/e1e2u stored (domhgr.f90:170).  Without
+                    # the boundary XLA folds the two constant factors.
+                    r3u_nemo = nemo_source_round(num_u * r1_hu0) * (1.0 / a_u)
+                    r3v_nemo = nemo_source_round(num_v * r1_hv0) * (1.0 / a_v)
+                else:
+                    r3u_nemo = num_u * r1_hu0 / a_u
+                    r3v_nemo = num_v * r1_hv0 / a_v
                 if r3_rounded:
                     r3u_nemo = nemo_source_round(r3u_nemo)
                     r3v_nemo = nemo_source_round(r3v_nemo)
