@@ -1840,6 +1840,15 @@ CITATION_MAP = {
         ('+ ( zwt(ji,jj+1) - zwt(ji  ,jj) ) * r1_e2v(ji,jj)', 1), 20],
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stp2d.f90:144': 'CALL dyn_ldf( kt, Kbb, Kbb, uu, vv, Krhs )',
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:493': 'CALL dyn_ldf( kstp, Kbb, Kmm, uu, vv, Krhs )',
+    # Round 45 resume: stage 3's F ratio read by dyn_ldf_lev.
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:245': 'r3f(:,:    ) = r1_2 * ( r3fb(:,:) + r3fa(:,:) )',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3_stg.f90:78': 'SUBROUTINE stp_RK3_stg( kstg, kstp, Kbb, Kmm, Krhs, Kaa )',
+    'ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/stprk3_stg.f90:245': 'r3f(:,:    ) = r1_2 * ( r3fb(:,:) + r3fa(:,:) )',
+    'ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/stprk3_stg.f90:78': 'SUBROUTINE stp_RK3_stg( kstg, kstp, Kbb, Kmm, Krhs, Kaa )',
+    'ORCA2G5_OMIP_L4_R31FULLENTRY_FIX1/BLD/ppsrc/nemo/stprk3_stg.f90:493': 'CALL dyn_ldf( kstp, Kbb, Kmm, uu, vv, Krhs )',
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynldf_lev.f90:123':
+        ('zwf(ji-1,jj-1) = ahmf(ji-1,jj-1,jk) * (e3f_3d(ji-1,jj-1,jk)', 1),
+    'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynldf_lev.f90:64': 'SUBROUTINE dynldf_lev_lap( kt, Kbb, Kmm, pu, pv, Krhs )',
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stp2d.f90:152': 'r3t(ji,jj,Kaa) =  ssh(ji,jj,Kaa) * r1_ht_0(ji,jj)',
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/stp2d.f90:156': 'CALL wzv    ( kt, Kbb, Kbb, Kaa , uu(:,:,:,Kbb), vv(:,:,:,Kbb), ww, np_velocity )',
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/restart.f90:367': "CALL iom_get( numror, jpdom_auto, 'ssha'   , ssh(:,:,Kaa) )",
