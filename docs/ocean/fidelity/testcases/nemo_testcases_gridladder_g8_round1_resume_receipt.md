@@ -194,3 +194,9 @@ r3f `4dd4352c301e39eb`, area `57c721f8d91de17f`, fold `fec1e7b46ca0218b`.
 Cost: ~100 s per run on CPU; skipped when the round-45 record is absent.
 
 codex review: paused (quota).
+
+Gates at `aa66c0393` (CPU, fp64, `land.sh` PYTHONPATH): G8 file + citation-gate
+test + private-import ratchet + TKE + recipe + freshwater 144 passed (the 2
+dirty-tree stamp refusals re-run clean: 23 passed); face-mask rank +
+prognostic barotropic state 10 passed; this receipt's citation gate PASS,
+0 failures (`plants_r2/gates_*.log`, `receipt_gate.log`).
