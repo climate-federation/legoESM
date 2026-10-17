@@ -420,7 +420,9 @@ def nemo_zdf_iwm(avt, avs, avm, forcing: IWMForcing, rn2, stretch, ht_0,
     r1_rho0 = 1.0 / rho_0                                   # phycst r1_rho0
     nu = cfg.nu_molecular                                   # rnu
     hcri = forcing.hcri_inv
-    hbot = forcing.hbot
+    # hbot_iwm is a runtime field in NEMO; in the step it is a constant, and
+    # XLA would turn "/ hbot" into a reciprocal multiply (an ulp off).
+    hbot = r(forcing.hbot)
     gdept_1d = jnp.asarray(gdept_1d, dtype)
     e3w_1d = jnp.asarray(e3w_1d, dtype)
     nif = rn2.shape[-1]

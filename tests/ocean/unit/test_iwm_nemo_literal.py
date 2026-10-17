@@ -115,12 +115,21 @@ def _reference(case, tsdiff=True):
     return out
 
 
-@pytest.mark.parametrize("jit", [False, True])
+def _jit_with_constant_maps(avt, avs, avm, forcing, rn2, s, ht0, gd, e3, wm, *, cfg, rho_0):
+    """The step's form: the maps are closure constants of the jitted code."""
+    return jax.jit(lambda a, b, c, n, t, h, w: nemo_zdf_iwm(
+        a, b, c, forcing, n, t, h, gd, e3, w, cfg=cfg, rho_0=rho_0))(
+            avt, avs, avm, rn2, s, ht0, wm)
+
+
+@pytest.mark.parametrize("jit", ["eager", "jit", "jit_constant_maps"])
 def test_literal_iwm_is_bit_for_bit_with_the_scalar_transcription(jit):
     case = _cases()
-    fn = nemo_zdf_iwm
-    if jit:
-        fn = jax.jit(nemo_zdf_iwm, static_argnames=("cfg", "rho_0"))
+    fn = {"eager": nemo_zdf_iwm,
+          "jit": jax.jit(nemo_zdf_iwm, static_argnames=("cfg", "rho_0")),
+          # V4 kt 1: XLA folded "/ hbot" into a reciprocal multiply here
+          # (41,546 avt cells an ulp off) until hbot was source-rounded
+          "jit_constant_maps": _jit_with_constant_maps}[jit]
     got, want = _card(case, fn), _reference(case)
     for name, g, w in zip(("avt", "avs", "avm"), got, want):
         assert np.array_equal(g, w), (name, int(np.sum(g != w)))
