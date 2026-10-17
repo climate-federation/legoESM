@@ -146,8 +146,8 @@ rung-10 labels.  Plants: classifier exact-loss plant fires (exit 2,
 - Citation gate: this receipt PASS (4 citations, each pinned to `zdf_evd`,
   0 unmapped, 0 failing map entries); default receipt PASS (274) after a
   rigid +4 re-anchor of 15 `nemo_testcase_recipe.py` map keys and 1 round-8
-  receipt citation.  Line plant on the R299W7 `:121` key fails
-  (`SYMBOL-NOT-AT-LINE`, exit 1); routine plant on the production `:135` key
+  receipt citation.  A line plant on `ORCA2_OMIP_L4_R299W7/BLD/ppsrc/nemo/zdfevd.f90:121` fails
+  (`SYMBOL-NOT-AT-LINE`, exit 1); a routine plant on `ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfevd.f90:135`
   fails (`ROUTINE-CONTEXT-MISMATCH`, exit 1).
 - Tests: citation-gate tests, private-import ratchet, round 301/302 probe
   tests, recipe and TKE unit tests: `133 passed`.  Landing-script battery
