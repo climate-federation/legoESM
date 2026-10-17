@@ -656,3 +656,22 @@ def test_nemo_tpoint_requires_explicit_t_depth_on_stretched_grid():
         pinned, depth, bottom_index_rule="nemo_tpoint"
     )
     assert int(nemo.bottom_level[0, 0]) == 0
+
+
+def test_orca2_evd_mixes_tracers_only_while_gyre_mixes_momentum_too():
+    """ORCA2 nn_evdm = 0 vs GYRE nn_evdm = 1 (zdfevd.f90:121-135)."""
+    kwargs = dict(
+        barotropic_time_filter="nemo_ab3am4", nemo_barotropic_filter_alpha=0.09,
+        n_barotropic_substeps=65, bbl_adv_option=0, bbl_gamma_s=0.0,
+        bbl_diffusive_option=1, bbl_aht_m2_s=1000.0,
+        tke_langmuir_evaluation="vectorized",
+    )
+    orca2 = testcase_recipe._model_config(
+        whole_step_identity="orca2_vector_een_c2", **kwargs)
+    gyre = testcase_recipe._model_config(
+        whole_step_identity="gyre_vector_ene_c2", **kwargs)
+    orca2_evd = orca2.physics.convection.enhanced_diffusion
+    gyre_evd = gyre.physics.convection.enhanced_diffusion
+    assert (orca2_evd.K_conv, orca2_evd.nu_conv) == (100.0, 0.0)
+    assert (gyre_evd.K_conv, gyre_evd.nu_conv) == (100.0, 100.0)
+    assert orca2_evd._replace(nu_conv=100.0, n2_eos_form="teos10") == gyre_evd

@@ -312,7 +312,11 @@ def _model_config(
         )
         convection = base.physics.convection._replace(
             enhanced_diffusion=base.physics.convection.enhanced_diffusion._replace(
-                n2_eos_form="eos80"
+                n2_eos_form="eos80",
+                # ORCA2 namelist_cfg:391 nn_evdm = 0 (GYRE's deck sets 1):
+                # zdf_evd touches avm only under IF( nn_evdm == 1 )
+                # (zdfevd.f90:121-135), so EVD mixes tracers, never momentum.
+                nu_conv=0.0,
             )
         )
         physics = base.physics._replace(
