@@ -427,6 +427,16 @@ Search: grepped `stage3_zad_operand_observer`, `read_g6_stage_terms`,
 `stage2_ww` in the ladder script and model; reused the observer, reader
 and `bit_rows`.  No model code changed.
 
+Gates (at `d16ac66b87`, CPU fp64, `JAX_ENABLE_X64=1`, PYTHONPATH as in
+`claude_rounds/land.sh`; logs `round44/resume3/`):
+- G6 card + G2/G6 ladder: 28 passed.
+- Receipt citation gate on this receipt (from its title): 18 citations,
+  failures 0, unmapped 0.
+- Default gate, in chunks under machine load: citation-gate test +
+  private-import ratchet 23 passed; NEMO recipe 25 passed; stage face-mask
+  rank 1 + 1 passed (run singly); barotropic state 8 passed; TKE terms +
+  freshwater closure 84 passed.
+
 codex review: paused (quota).  The operator runs an independent Claude
 review of this diff before landing.
 
