@@ -354,6 +354,12 @@ class OceanSurfaceForcing(NamedTuple):
     # jnp.ndarray | None [g/m^2/s], NEMO ``sfx`` as recorded.  Read only by
     # ``rk3_stage3_salt_nemo_written`` (trasbc.f90:308 ``sfx*z1_rho0_e3t``);
     # ``1e3*(1e-3*sfx)`` through ``salt_flux`` is not bitwise ``sfx``.
+    ice_ocean_top_drag_rCdu: object = None
+    # jnp.ndarray | None [m/s], NEMO ``rCdU_ice`` at T points.  This is the
+    # already-density-normalised, non-positive coefficient produced by SI3;
+    # the G5 identity carries it from the post-SI3 record rather than
+    # rebuilding it from ice state.  Read only when
+    # ``implicit_ice_ocean_top_drag=True``; a selected path refuses None.
 
 
 class OceanConfig(NamedTuple):
@@ -3251,6 +3257,22 @@ class LatLonCGridOceanConfig(NamedTuple):
     # ``OceanSurfaceForcing.salt_flux_sfx``.  False rescales the Kbb salt-flux
     # tendency to Kmm.  Needs rk3_stage3_tracer_nemo_stored_thickness.
     rk3_stage3_salt_nemo_written: bool = False
+    # NEMO's implicit ice-ocean TOP drag for the ORCA2 G5 identity.  The input
+    # is ``OceanSurfaceForcing.ice_ocean_top_drag_rCdu`` (SI3's negative
+    # ``rCdU_ice``).  The selected path applies all four consumers in source
+    # order: dyn_drg_init's U/V coefficient, its top baroclinic residual,
+    # dynspg_ts's frozen per-substep stress, and dyn_zdf's top RHS + implicit
+    # diagonal.  This deck has no cavity and no bottom drag, so unsupported
+    # top+bottom/cavity compositions are rejected at construction rather than
+    # silently reassociated.  Appended at the end to preserve every positional
+    # constructor.  Default False leaves all earlier cards bit-identical.
+    implicit_ice_ocean_top_drag: bool = False
+    # G7's two bottom-drag statements without the ice top drag, as NEMO runs
+    # them when nn_ice=0 forces ln_drgice_imp=F (zdfdrg.f90:380): the
+    # dyn_drg_init bottom residual (dynspg_ts.f90:1446-1447, :1462-1463) and
+    # the dyn_zdf bottom RHS (dynzdf.f90:166-169).  implicit_ice_ocean_top_drag
+    # already selects both.  Needs the linear bundle.  Default False.
+    nemo_bottom_drag_written_statements: bool = False
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":

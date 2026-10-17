@@ -826,6 +826,9 @@ def _surface_forcings(
         ),
         q_nonsolar=jnp.asarray(fields["qns"]),
         salt_flux_sfx=jnp.asarray(fields["sfx"]),
+        # SI3's recorded rCdU_ice; rCdU_top = rCdU_ice with no cavity
+        # (zdfdrg.f90:187).  Read only by implicit_ice_ocean_top_drag.
+        ice_ocean_top_drag_rCdu=jnp.asarray(fields["rCdU_ice"]),
     )
     return freshwater, surface
 

@@ -1751,6 +1751,7 @@ def _run_substep_loop(
     ab3_raw_hist=None,
     een_pre=None,
     drag_r_u=None, drag_r_v=None, drag_r_t=None,
+    drag_coeff_u=None, drag_coeff_v=None, drag_coeff_t=None,
     tide_basis=None, tide_cos=None, tide_sin=None,
     transport_sum_init=None,
     primary_transport_average=False,
@@ -2215,7 +2216,14 @@ def _run_substep_loop(
         # U_bar — strictly reduces |U_bar| (drag can never accelerate).
         # Static Python gate (drag_r_u is a closure capture) — no traced
         # control flow, carry unchanged, off ⇒ byte-identical.
-        if drag_r_u is not None:
+        if drag_coeff_u is not None:
+            if _continuity_evaluation == "nemo_literal":
+                _drag_u = nemo_source_round(
+                    nemo_source_round(drag_coeff_u * U_bar_c) * r1_H_u)
+            else:
+                _drag_u = (drag_coeff_u * U_bar_c
+                           / jnp.maximum(H_u, min_water_col))
+        elif drag_r_u is not None:
             if _continuity_evaluation == "nemo_literal":
                 _drag_u = nemo_source_round(
                     nemo_source_round(-drag_r_u * U_bar_c) * r1_H_u)
@@ -2274,7 +2282,14 @@ def _run_substep_loop(
                 nemo_substep_coriolis_override[1], dtype=dtype)[substep_index]
         # NEMO dynspg_ts.F90:704: zv_trd += zCdU_v * vn_e * hvr_e — same
         # substep-START velocity + carry-eta face depth as the u-drag above.
-        if drag_r_v is not None:
+        if drag_coeff_v is not None:
+            if _continuity_evaluation == "nemo_literal":
+                _drag_v = nemo_source_round(
+                    nemo_source_round(drag_coeff_v * V_bar_c) * r1_H_v)
+            else:
+                _drag_v = (drag_coeff_v * V_bar_c
+                           / jnp.maximum(H_v, min_water_col))
+        elif drag_r_v is not None:
             if _continuity_evaluation == "nemo_literal":
                 _drag_v = nemo_source_round(
                     nemo_source_round(-drag_r_v * V_bar_c) * r1_H_v)
@@ -2572,12 +2587,15 @@ def _run_substep_loop(
                 "cor_u": jnp.asarray(_cor_u) * jnp.ones_like(U_bar_c),
                 "cor_v": jnp.asarray(_cor_v) * jnp.ones_like(V_bar_c),
                 "drag_coefficient_u": (
+                    drag_coeff_u if drag_coeff_u is not None else
                     -drag_r_u if drag_r_u is not None
                     else jnp.zeros_like(U_bar_c)),
                 "drag_coefficient_v": (
+                    drag_coeff_v if drag_coeff_v is not None else
                     -drag_r_v if drag_r_v is not None
                     else jnp.zeros_like(V_bar_c)),
                 "drag_coefficient_t": (
+                    drag_coeff_t if drag_coeff_t is not None else
                     -drag_r_t if drag_r_t is not None
                     else jnp.zeros_like(eta)),
                 # Preserve associated halo operands in the private trace.
@@ -2948,6 +2966,7 @@ def barotropic_substeps_latlon_cgrid(
     v_init=None,
     u_now=None,
     v_now=None,
+    ice_ocean_top_drag_rCdu=None,
     substep_scale: int = 1,
     een_pre_override=None,
     _nemo_primary_transport_average_test_override=None,
@@ -3276,6 +3295,7 @@ def barotropic_substeps_latlon_cgrid(
     # Static config gate: flag off ⇒ None ⇒ the substep loop's drag branch
     # is not built ⇒ byte-identical.
     _drag_r_u = _drag_r_v = _drag_r_t = None
+    _drag_coeff_u = _drag_coeff_v = _drag_coeff_t = None
     if _nemo_drag_rate_test_override is not None:
         if not getattr(config, "barotropic_drag_substep", False):
             raise ValueError(
@@ -3309,14 +3329,46 @@ def barotropic_substeps_latlon_cgrid(
         # the POST-momentum u* -- see the ``u_now`` docstring paragraph.
         _u_drg = u_corr if u_now is None else u_now.astype(_dt)
         _v_drg = v_corr if v_now is None else v_now.astype(_dt)
+        _with_top = getattr(config, "implicit_ice_ocean_top_drag", False)
         _drag_values = nemo_bottom_drag_rate_faces(
             _u_drg, _v_drg, _hk_now, z_coord, config, grid,
-            return_cell_rate=_nemo_substep_trace_test_hook)
+            return_cell_rate=_nemo_substep_trace_test_hook or _with_top)
         _r_u_bt, _r_v_bt = _drag_values[:2]
         if _nemo_substep_trace_test_hook:
             _drag_r_t = _drag_values[4]
+        if _with_top:
+            # zdfdrg.f90:276: rCdU_bot = -rCd0_bot*rn_Uc0, rCd0_bot masked by
+            # ssmask (:525, :546), so dry columns hold -0.
+            _bot_rcdu_t = jnp.where(
+                z_coord.bottom_level >= 0, -_drag_values[4], -0.0)
         _drag_r_u = _r_u_bt.astype(_dt)
         _drag_r_v = _r_v_bt.astype(_dt)
+    if getattr(config, "implicit_ice_ocean_top_drag", False):
+        if ice_ocean_top_drag_rCdu is None:
+            raise ValueError(
+                "implicit_ice_ocean_top_drag=True requires the recorded "
+                "OceanSurfaceForcing.ice_ocean_top_drag_rCdu input")
+        from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+            nemo_ice_ocean_top_drag_coeff_faces,
+        )
+        # dynspg_ts.f90:1431-1432: ONE statement sums the bottom pair and
+        # the top pair, so the substeps consume that coefficient alone.
+        _bot_rcdu = None
+        if _drag_r_u is not None:
+            if _nemo_drag_rate_test_override is not None:
+                raise ValueError(
+                    "barotropic drag-rate substitution is not defined for the "
+                    "combined top+bottom drag coefficient")
+            _bot_rcdu = _bot_rcdu_t
+            _drag_r_u = _drag_r_v = None
+        _top_cdu_u, _top_cdu_v, _, _, _top_cdu_t = (
+            nemo_ice_ocean_top_drag_coeff_faces(
+                ice_ocean_top_drag_rCdu, grid, dtype=_dt,
+                rCdU_bot=_bot_rcdu))
+        _drag_coeff_u = _top_cdu_u
+        _drag_coeff_v = _top_cdu_v
+        if _nemo_substep_trace_test_hook:
+            _drag_coeff_t = _top_cdu_t
     w_filter, w_total, w_transport, n_loop = _compute_weights(
         config, n_substeps, eta.dtype, substep_scale=substep_scale)
     w_transport, _transport_divisor = _transport_accumulator_weights(
@@ -3490,6 +3542,8 @@ def barotropic_substeps_latlon_cgrid(
         tide_basis=_tide_basis, tide_cos=_tide_cos, tide_sin=_tide_sin,
         een_pre=_een_pre,
         drag_r_u=_drag_r_u, drag_r_v=_drag_r_v, drag_r_t=_drag_r_t,
+        drag_coeff_u=_drag_coeff_u, drag_coeff_v=_drag_coeff_v,
+        drag_coeff_t=_drag_coeff_t,
         primary_transport_average=_primary_transport_average,
         return_trace=_nemo_substep_trace_test_hook,
         nemo_flux_form_update_test_override=(

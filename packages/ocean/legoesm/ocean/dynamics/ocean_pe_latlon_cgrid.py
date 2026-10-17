@@ -4089,6 +4089,66 @@ def _bc_horizontal_viscosity(
             diag_Cl_leith_v, kdiss_h_cell)
 
 
+def nemo_ice_ocean_top_drag_coeff_faces(rCdU_ice, grid, *, dtype=None,
+                                        rCdU_bot=None):
+    """SI3's recorded ``rCdU_ice`` mapped to NEMO U/V coefficients.
+
+    ``rCdU_ice`` is NEMO's non-positive T-point coefficient [m/s].  The
+    returned arrays retain NEMO's non-positive sign and statement boundaries:
+    round the T-point value, round each neighbour sum, add the bottom pair,
+    then multiply by one half (``dynspg_ts.f90:1431-1432``).  Without
+    ``rCdU_bot`` (G5: ln_drg_OFF) the bottom pair is an explicit zero, which
+    is load-bearing for NEMO's positive signed zeros.  With it (NEMO's
+    non-positive T-point ``rCdU_bot``, G7) the bottom pair is formed by the
+    same maps.  The V map applies the scalar T-pivot fold exchange before the
+    northern face.  ``sum_u``/``sum_v`` and ``r_cdu`` stay the top pair alone.
+    """
+    from legoesm.grids.operators_latlon_cgrid import pad_lon_cgrid
+
+    def pairs(field):
+        field = nemo_source_round(jnp.asarray(field, dtype=dtype))
+        if field.ndim != 2:
+            raise ValueError(
+                "top/bottom drag coefficients must be 2-D T-point fields; "
+                f"got shape {field.shape}")
+        lon = pad_lon_cgrid(field, halo=1)
+        return (field, nemo_source_round(lon[:, :-1] + lon[:, 1:]),
+                interp_to_v_points(field, grid, nemo_source_sum=True))
+
+    r_cdu, sum_u, sum_v = pairs(rCdU_ice)
+    if rCdU_bot is None:
+        # pCdU = .5*((rCdU_bot pair) + (rCdU_top pair)); rCdU_bot is +0 on G5.
+        # XLA may eliminate ``+ 0`` under jit and retain the top pair's ``-0``.
+        # Materialize NEMO's positive zero explicitly before the final multiply.
+        sum_u = jnp.where(sum_u == 0.0, jnp.abs(sum_u), sum_u)
+        sum_v = jnp.where(sum_v == 0.0, jnp.abs(sum_v), sum_v)
+        bot_u, bot_v = jnp.zeros_like(sum_u), jnp.zeros_like(sum_v)
+    else:
+        _, bot_u, bot_v = pairs(rCdU_bot)
+    coeff_u = nemo_source_round(
+        0.5 * nemo_source_round(bot_u + sum_u))
+    coeff_v = nemo_source_round(
+        0.5 * nemo_source_round(bot_v + sum_v))
+    return coeff_u, coeff_v, sum_u, sum_v, r_cdu
+
+
+def nemo_drg_residual_increment(r1_h, cdu, u_k, u_b):
+    """dyn_drg_init's increment (dynspg_ts.f90:1462-1463, :1487-1488):
+    ``(r1_hu_0/(1+r3u)) * r1_2*(pair) * (puu(k,Kmm) - puu_b(Kmm))`` with
+    NEMO's statement roundings; ``cdu`` is the halved pair, ``u_b`` the
+    carried barotropic velocity."""
+    return nemo_source_round(
+        nemo_source_round(r1_h * cdu) * nemo_source_round(u_k - u_b))
+
+
+def nemo_dynzdf_drag_rhs(zdt_2, pair_sum, u_b, e3):
+    """dyn_zdf's barotropic drag RHS term as written (dynzdf.f90:166-169,
+    :175-178): ``zDt_2 * (rCdU(ji+1)+rCdU(ji)) * uu_b(Kaa) / e3u(iku)``;
+    ``pair_sum`` is 2-D, ``u_b`` and ``e3`` carry the level axis."""
+    return nemo_source_round(nemo_source_round(
+        nemo_source_round(zdt_2 * pair_sum)[..., None] * u_b) / e3)
+
+
 def nemo_bottom_drag_rate_faces(
     u, v, h_k, z_coord, config, grid, *, return_cell_rate=False,
 ):

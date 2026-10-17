@@ -2481,6 +2481,34 @@ _SMT1_RN_EVD = 100.0             # enhanced vertical diffusion     [m2/s]
 _SMT2_RN_CD0 = 1.0e-3            # linear drag coefficient         [-]
 _SMT2_RN_UC0 = 0.4               # linear-law reference velocity   [m/s]
 
+
+def _nemo_linear_bottom_drag(model_config):
+    """namdrg ln_lin with namelist_ref's &namdrg_bot and ln_drgimp = T, as ONE
+    composition (SMT-2; grid-ladder G7): see the SMT-2 block's derivation."""
+
+    return model_config._replace(
+        bottom_drag=model_config.bottom_drag._replace(
+            bottom_drag_scheme="nemo_linear",
+            bottom_drag_cd0=_SMT2_RN_CD0,
+            bottom_drag_uc0=_SMT2_RN_UC0,
+            # np_lin reads neither of these; they are stated so the card
+            # records what the namelist resolved rather than leaving the
+            # library default to speak for the run.
+            bottom_drag_cdmax=0.1,
+            bottom_drag_z0=3.0e-3,
+            bottom_drag_ke0=2.5e-3,
+            # ln_boost = .false.: no regional boost, and NEMO applies the
+            # drag to the bottom cell alone, never over a K&E99 band.
+            bottom_drag_bbl_thickness=0.0,
+            bottom_drag_bg_velocity=0.0,
+            bottom_drag_r=0.0,
+        ),
+        zdf_drag_in_matrix=True,
+        zdf_baroclinic_only=True,
+        barotropic_drag_substep=True,
+    )
+
+
 # --- rung SMT-3 (decision 93): ORCA2 rung 0's namtra_ldf ------------
 _SMT3_RN_UD = 0.018              # lateral diffusive velocity       [m/s]
 _SMT3_RN_LD = 200.0e3            # lateral diffusive length         [m]
@@ -2847,27 +2875,7 @@ def build_vortex_smt_zps_card(
         # correction (dynzdf.f90:160-169), and the bottom-cell implicit
         # diagonal over PARTIAL cells (dynzdf.f90:306, :473 -- divisor
         # e3u_3d(iku)*(1+r3u(Kaa)*umask(iku)) at iku = mbku).
-        model_config = model_config._replace(
-            bottom_drag=model_config.bottom_drag._replace(
-                bottom_drag_scheme="nemo_linear",
-                bottom_drag_cd0=_SMT2_RN_CD0,
-                bottom_drag_uc0=_SMT2_RN_UC0,
-                # np_lin reads neither of these; they are stated so the card
-                # records what the namelist resolved rather than leaving the
-                # library default to speak for the run.
-                bottom_drag_cdmax=0.1,
-                bottom_drag_z0=3.0e-3,
-                bottom_drag_ke0=2.5e-3,
-                # ln_boost = .false.: no regional boost, and NEMO applies the
-                # drag to the bottom cell alone, never over a K&E99 band.
-                bottom_drag_bbl_thickness=0.0,
-                bottom_drag_bg_velocity=0.0,
-                bottom_drag_r=0.0,
-            ),
-            zdf_drag_in_matrix=True,
-            zdf_baroclinic_only=True,
-            barotropic_drag_substep=True,
-        )
+        model_config = _nemo_linear_bottom_drag(model_config)
     if rung in ("smt3", "smt4"):
         # DECISION 93 (user), rung SMT-3: ORCA2 rung 0's namtra_ldf block.
         # The deck selects laplacian standard isoneutral diffusion with MSC,
