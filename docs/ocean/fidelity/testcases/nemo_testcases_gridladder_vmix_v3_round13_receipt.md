@@ -8,7 +8,7 @@ Preregistration: `PREREG_nemo_testcases_gridladder_vmix_v3_round13.md`, committe
 
 Commits: `5ce2a0cb9` prereg; `71b40a158` V3 statement, card, deck, acquisition, tests; `790eb4501` dispatch-baseline
 entry; `1e7b7a6eb` this receipt; `d25a1a24d`, `85bbcb75c`, `397489eea`, `ffe02e136` citation map (7 new entries;
-72 pins re-anchored by mechanical offsets, no anchor text changed); `35ee4f626` the default receipt's 9 model
+71 pins re-anchored by mechanical offsets, one range also +1 at its end; no anchor text changed); `35ee4f626` the default receipt's 9 model
 citations re-anchored (+14); this update (final numbers).
 
 Own error, stated first: a plant loop restored the double-diffusion module with `git checkout --` while it was
