@@ -6854,7 +6854,7 @@ CITATION_MAP = {
         'if self._nemo_ws_test_hooks.expose_pre_implicit_state else None)',
         3],
     'ocean_model_latlon_cgrid.py:13427': ('u_solve_in = u_solve_in - _u_bt_mean', 1),
-    'ocean_model_latlon_cgrid.py:13655': ('u_solve_in = u_solve_in - (', 1),
+    'ocean_model_latlon_cgrid.py:13619': ('u_solve_in = u_solve_in - (', 1),
     # ORCA2 round 61: private post-dyn_zdf/pre-barotropic raw-Kaa observer.
     'ocean_model_latlon_cgrid.py:1510': (
         'expose_stage3_raw_momentum: bool = False', 1),
@@ -6879,16 +6879,17 @@ CITATION_MAP = {
         'raise ValueError("zdf_momentum_observer must be callable or None")', 5],
     'ocean_model_latlon_cgrid.py:12590-12602': [
         ('_zc = self.z_coord if z_coord is None else z_coord', 11),
-        '# Argument validation at ENTRY, not inside the drag branch below:', 5],
+        '# Argument validation at ENTRY, not inside the drag branch below:', 13],
     'ocean_model_latlon_cgrid.py:13186-13190': [
         'u_new, v_new = state.u.data, state.v.data',
         'if do_momentum and getattr(_cfg_b, "surface_stress_implicit",', 5],
     'ocean_model_latlon_cgrid.py:13427-13430': [
         'u_solve_in = u_solve_in - _u_bt_mean',
         'u_solve_in, v_solve_in)', 4],
-    'ocean_model_latlon_cgrid.py:13655-13661': [
+    # Round 305: the G7 dyn_zdf bottom statement now sits inside this span.
+    'ocean_model_latlon_cgrid.py:13619-13661': [
         'u_solve_in = u_solve_in - (',
-        '_zdf_baro_drag_u, _zdf_baro_drag_v = u_solve_in, v_solve_in', 7],
+        '_zdf_baro_drag_u, _zdf_baro_drag_v = u_solve_in, v_solve_in', 43],
     'ocean_model_latlon_cgrid.py:13850-13857': [
         'if _zdf_momentum_observer is not None:',
         'ordered=True,', 8],
@@ -8140,11 +8141,11 @@ CITATION_MAP = {
     },
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynzdf.f90:67': 'SUBROUTINE dyn_zdf(',
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynzdf.f90:166-169': {
-        'anchors': ['puu(ji,jj,iku,Kaa) = puu(ji,jj,iku,Kaa) + zDt_2 * ( rCdU_bot(ji+1,jj)+rCdU_bot(ji,jj) ) * uu_b(ji,jj,Kaa)', 'pvv(ji,jj,ikv,Kaa) = pvv(ji,jj,ikv,Kaa) + zDt_2 * ( rCdU_bot(ji,jj+1)+rCdU_bot(ji,jj) ) * vv_b(ji,jj,Kaa)', ('&                                            / (e3v_3d(ji,jj,ikv) *(1._wp+r3v(ji,jj,Kaa)*vmask(ji,jj,ikv)))', 1), 4],
+        'anchors': ['puu(ji,jj,iku,Kaa) = puu(ji,jj,iku,Kaa) + zDt_2 * ( rCdU_bot(ji+1,jj)+rCdU_bot(ji,jj) ) * uu_b(ji,jj,Kaa)', ('&                                            / (e3v_3d(ji,jj,ikv) *(1._wp+r3v(ji,jj,Kaa)*vmask(ji,jj,ikv)))', 1), 4],
         'routine': 'dyn_zdf',
     },
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/dynzdf.f90:175-178': {
-        'anchors': ['puu(ji,jj,iku,Kaa) = puu(ji,jj,iku,Kaa) + zDt_2 * ( rCdU_top(ji+1,jj)+rCdU_top(ji,jj) ) * uu_b(ji,jj,Kaa)', 'pvv(ji,jj,ikv,Kaa) = pvv(ji,jj,ikv,Kaa) + zDt_2 * ( rCdU_top(ji,jj+1)+rCdU_top(ji,jj) ) * vv_b(ji,jj,Kaa)', ('&                                            / (e3v_3d(ji,jj,ikv) *(1._wp+r3v(ji,jj,Kaa)*vmask(ji,jj,ikv)))', 2), 4],
+        'anchors': ['puu(ji,jj,iku,Kaa) = puu(ji,jj,iku,Kaa) + zDt_2 * ( rCdU_top(ji+1,jj)+rCdU_top(ji,jj) ) * uu_b(ji,jj,Kaa)', ('&                                            / (e3v_3d(ji,jj,ikv) *(1._wp+r3v(ji,jj,Kaa)*vmask(ji,jj,ikv)))', 2), 4],
         'routine': 'dyn_zdf',
     },
     'ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdfdrg.f90:187': {
