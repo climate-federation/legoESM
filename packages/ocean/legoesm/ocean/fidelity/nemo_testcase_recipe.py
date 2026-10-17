@@ -1739,9 +1739,8 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
     # Decision 122 (ORCA2 round 278): geometry-ladder-certified statements
     # whose cited line the ORCA2 build executes, each meeting no-exact-loss and
     # first-over-bar-not-away on rung 0, OMT-1..4 and rung 10 (both labels).
-    # Left off: G1's EEN vorticity order (certified on the np_COR line, ORCA2
-    # runs np_CRV) and the completed-stage top-V fold exchange (held: rung-0
-    # ten-step SSH maximum 0.38 -> 8.39 m).
+    # Left off: the completed-stage top-V fold exchange (held, Decision 125:
+    # rung-0 ten-step SSH maximum 0.38 -> 8.39 m).
     model_config = model_config._replace(
         # G1b round 2 / ORCA2 round 282: np_CRV divides its relative
         # circulation by NEMO's F-cell area e1f*e2f (vor_een,
@@ -1780,12 +1779,35 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
         # RHS on the ln_lin bundle applied below.  G5's ice-ocean top drag
         # stays off until the card computes rCdU_ice itself.
         nemo_bottom_drag_written_statements=True,
+        # G6 rounds 1-8 / ORCA2 round 308 (Decision 122): the vector Krhs
+        # order HPG -> VOR -> KEG with the KEG product rounded
+        # (stp2d.f90:141/:147/:164), vor_een's written order and np_CRV's
+        # top-F U fold halo (dynvor.f90:762-766), and the momentum wzv/zad
+        # forms: stored r3 ratios (sshwzv.f90:297-298), the stage-2 clock
+        # pair rn_Dt/2 with r3t(Kaa) = r1_2*(r3t(Kbb)+r3ta) and the stored
+        # Kmm ratios (stprk3_stg.f90:188-189, :221, :327), dyn_zad's written
+        # association (dynzad.f90:112-126).  Lines: ORCA2_OMIP_L4 ppsrc.
+        # Left off: G6's fold statements (raw pivot V mask, fold unit, HPG
+        # fold geometry, top-V exchange); they need the stage-1 transport
+        # V mask (stprk3_stg.f90:283), which no rung certifies.
+        rk3_vector_rhs_nemo_order=True,
+        een_vorticity_written_order=True,
+        een_nemo_top_f_u_halo=True,
+        nemo_wzv_stored_r3_ratios=True,
+        nemo_zad_written_association=True,
+        nemo_stage2_momentum_wzv_half_step=True,
+        nemo_stage_momentum_wzv_stored_kmm_ratios=True,
         barotropic=model_config.barotropic._replace(
             barotropic_een_ratio_fold_exchange=True,
             barotropic_een_fe3mask_pivot_row=True,
             barotropic_een_ratio_written_order=True,
         ),
     )
+    # Decision 132 via Decision 122 (round 308): the first vector-form wzv
+    # (stp2d.f90:152/:156) reads NEMO's carried slot ssh(Naa) =
+    # 2*ssh(Nbb) - ssh(Naa) (stprk3.f90:237 in ORCA2_OMIP_L4).
+    model_config = with_first_wzv_after_ssh(
+        model_config, "rk3_extrapolated_carried")
     # Decision 133: namelist_cfg's &namdrg ln_lin = T with ln_drgimp = T
     # replaces the quadratic law inherited from the GYRE base.
     model_config = _nemo_linear_bottom_drag(model_config)

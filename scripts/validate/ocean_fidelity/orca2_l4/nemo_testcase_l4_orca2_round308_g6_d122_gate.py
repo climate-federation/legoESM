@@ -74,8 +74,9 @@ STATEMENTS["SEL"] = {**{"rk3_vector_rhs_nemo_order": True},
                      **STATEMENTS["ZADA"], **STATEMENTS["CARRY"]}
 RUNGS = ("rung0", "omt1", "omt2", "omt3", "omt4", "rung10")
 ARMS = ("control", "D122", *STATEMENTS)
-# This round's selection; filled from the measurement before it is applied.
-D122_SELECTED: dict[str, dict] = {rung: {} for rung in RUNGS}
+# This round's selection (SEL passed (c)+(d) on all seven pairs), every card.
+D122_SELECTED: dict[str, dict] = {rung: dict(STATEMENTS["SEL"])
+                                  for rung in RUNGS}
 
 
 def _get(cfg, path):
