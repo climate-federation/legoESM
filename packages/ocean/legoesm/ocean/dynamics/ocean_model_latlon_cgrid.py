@@ -11923,6 +11923,13 @@ class LatLonCGridOceanModel:
                 raise ValueError(
                     f"{_flag}=True requires "
                     "tke_shear_metric_source='nemo_qco_live_face'")
+        # NEMO's r3 sequence (domqco.f90:266-269 stored, then zdfsh2.f90:104
+        # "1 +") needs both statements; either alone is neither form.
+        if r3_rounded != r3_recip:
+            raise ValueError(
+                "nemo_sh2_r3_source_rounded and "
+                "nemo_sh2_r3_stored_reciprocal must be selected together "
+                f"(got {r3_rounded} and {r3_recip})")
         face_metrics = None
         if metric_source == "nemo_qco_live_face":
             if shear_disc == "nemo_face_native_now2":

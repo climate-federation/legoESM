@@ -95,7 +95,7 @@ def test_stored_reciprocal_is_nemo_bits_under_jit():
 
 
 def test_divide_form_is_not_nemo_bits_under_jit():
-    got, d = _case(True, recip=False, inputs=True)
+    got, d = _case(False, recip=False, inputs=True)
     assert np.count_nonzero(np.asarray(got[0]) != _nemo_e3u_now(d)) > 0
 
 
@@ -113,3 +113,9 @@ def test_flag_refuses_paths_that_would_ignore_it():
         _case(False, stage="implicit_solve_state", recip=True)
     with pytest.raises(ValueError, match="stored_reciprocal=True requires"):
         _case(False, metric="tpoint_jacobian", recip=True)
+
+
+@pytest.mark.parametrize("flag, recip", [(True, False), (False, True)])
+def test_r3_statements_refuse_to_be_selected_alone(flag, recip):
+    with pytest.raises(ValueError, match="must be selected together"):
+        _case(flag, recip=recip)
