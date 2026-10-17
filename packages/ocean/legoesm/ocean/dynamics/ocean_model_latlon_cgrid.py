@@ -2155,7 +2155,7 @@ def _nemo_ws_stage_transport(
             # byte for byte as it was; this is the first one.
             # The private clock arm replaces NEMO's (rDt, r3t(Kaa)) PAIR at
             # once; production passes the step clock with the barotropic
-            # after level, which is the same product algebraically.
+            # after level (algebraically equal; G6 takes NEMO's stage-2 pair).
             _w_dt, _w_eta_after = (
                 (dt, eta_after) if momentum_wzv_clock is None
                 else momentum_wzv_clock)

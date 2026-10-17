@@ -4525,7 +4525,7 @@ CITATION_MAP = {
         ('return bool(config_split)', 1), 38],
     'ocean_model_latlon_cgrid.py:2164-2171': [
         ('w_momentum, _, _ = nemo_qco_wzv_operands(', 1),
-        ('stored_r3_ratios=bool(config.nemo_wzv_stored_r3_ratios))', 2), 7],
+        ('half_step_after_ratio=_w_half)', 1), 8],
     'ocean_model_latlon_cgrid.py:8617-8623': [
         ('def _momentum_stage_w(geom):', 1),
         ('return geom[2] if geom[11] is None else geom[11]', 1), 7],
